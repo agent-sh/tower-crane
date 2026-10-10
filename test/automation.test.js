@@ -839,7 +839,7 @@ test('concurrent event consumers execute each submission gate only once', async 
 
 // A slow stub suite records each run's start and end, so the log shows how
 // many gate executors ran at once across every consumer process.
-function slowSuite(h, { executors, crash = false } = {}) {
+function slowSuite(h, { executors, crash = false, release = null } = {}) {
   const runs = path.join(h.base, 'suite-runs.log');
   const suite = path.join(h.base, 'tools', 'slow-suite.js');
   fs.writeFileSync(suite, `const fs = require('node:fs');
@@ -850,7 +850,16 @@ if (crash && !fs.existsSync(crash)) {
   const events = fs.readFileSync(${JSON.stringify(path.join(h.state, 'events.jsonl'))}, 'utf8').trim().split('\\n').map(JSON.parse);
   process.kill(events.findLast((e) => e.cmd === 'automation' && e.detail.phase === 'running').detail.pid, 'SIGKILL');
 }
-setTimeout(() => fs.appendFileSync(${JSON.stringify(runs)}, '-\\n'), 2500);
+const finish = () => fs.appendFileSync(${JSON.stringify(runs)}, '-\\n');
+const release = ${JSON.stringify(release)};
+if (release) {
+  const starts = fs.readFileSync(${JSON.stringify(runs)}, 'utf8').split('\\n').filter((m) => m === '+').length;
+  fs.writeFileSync(${JSON.stringify(path.join(h.base, 'suite-started-'))} + starts, '');
+  const poll = () => (fs.existsSync(release) ? finish() : setTimeout(poll, 50));
+  poll();
+} else {
+  setTimeout(finish, 2500);
+}
 `);
   h.ok(['project', 'set', '--tests-cmd', `node ${JSON.stringify(suite)}`, '--tests-mode', 'run-only',
     ...(executors ? ['--executors', String(executors)] : []), '--agent', 'orchestrator']);
@@ -870,14 +879,24 @@ setTimeout(() => fs.appendFileSync(${JSON.stringify(runs)}, '-\\n'), 2500);
 
 test('gate executors across several watchers stay within gates.executors and queue the rest in order', async (t) => {
   const h = setup(t);
-  const runs = slowSuite(h);
+  const release = path.join(h.base, 'release-suite');
+  const runs = slowSuite(h, { release });
   assert.match(h.ok(['project', 'show']), /gates\.executors: 2/);
-  const results = await Promise.all([0, 1, 2].map(() =>
-    h.runAsync(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator'])));
+  const watchers = [0, 1, 2].map(() =>
+    h.runAsync(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']));
+  try {
+    assert.notEqual(await waitFor(path.join(h.base, 'suite-started-2'), { ms: 60000 }), null, 'two executors start');
+    // Keep both slots occupied until a watcher has queued the third submission.
+    assert.equal(h.consume().code, 2);
+    const queued = h.logs().filter((e) => e.cmd === 'automation queued' && e.detail.executors === 2);
+    assert.ok(queued.some((e) => e.task === 'T3'), JSON.stringify(queued));
+  } finally {
+    fs.writeFileSync(release, '');
+  }
+  assert.notEqual(await waitFor(path.join(h.base, 'suite-started-3'), { ms: 60000 }), null, 'the third executor starts');
+  const results = await Promise.all(watchers);
   assert.ok(results.every((r) => r.code === 2), JSON.stringify(results));
   assert.deepEqual(runs(), { starts: 3, peak: 2 });
-  const queued = h.logs().filter((e) => e.cmd === 'automation queued' && e.detail.executors === 2);
-  assert.ok(queued.some((e) => e.task === 'T3'), JSON.stringify(queued));
   const started = h.logs().filter((e) => e.cmd === 'automation' && e.detail.phase === 'running').map((e) => e.task);
   assert.equal(started.at(-1), 'T3', 'the queued submission runs after a slot frees');
   for (const task of h.readState('tasks.json').tasks) {
