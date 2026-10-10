@@ -4,7 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { makeRepo, BIN } = require('./helpers');
+const { makeRepo, cachedFixture, BIN } = require('./helpers');
 const { gateFixture, gateEvidence } = require('./gate-helpers');
 const { waitFor } = require('./canary');
 const { shellQuote } = require('../lib/gates/common');
@@ -12,8 +12,8 @@ const { shellQuote } = require('../lib/gates/common');
 const ghStub = path.join(__dirname, 'fixtures', 'automation-gh.js');
 const harness = path.join(__dirname, 'fixtures', 'automation-harness.js');
 
-function setup(t, { kind = 'code', ci = 'success' } = {}) {
-  const h = makeRepo(t);
+function setup(t, { kind = 'code', ci = 'success', repo } = {}) {
+  const h = repo || makeRepo(t);
   h.sha = gateFixture(h);
   h.init(['--repo', 'acme/demo', '--base', 'main']);
   const tools = path.join(h.base, 'tools');
@@ -48,6 +48,7 @@ cp.spawnSync=(cmd,args,opts)=>{
   h.saveGithub = (state) => fs.writeFileSync(h.env.AUTOMATION_GITHUB, JSON.stringify(state));
   h.saveGithub({ root: h.repo, prs: { 7: {
     state: 'OPEN', headRefOid: h.sha, headRefName: 'fixture-change',
+    headRepository: { nameWithOwner: 'acme/demo' }, url: 'https://github.com/acme/demo/pull/7',
     mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN', baseRefName: 'main',
   } }, ci: { [h.sha]: ci } });
   h.ok(['task', 'add', '--title', 'Change', '--acceptance', 'it works', '--kind', kind]);
@@ -60,6 +61,476 @@ cp.spawnSync=(cmd,args,opts)=>{
   h.logs = () => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
   return h;
 }
+
+function generatedSetup(t) {
+  const h = cachedFixture(t, 'generated-conflicts', (repo) => {
+    const h = setup(null, { repo });
+    h.git(['switch', 'main']);
+    fs.mkdirSync(path.join(h.repo, 'docs'));
+    fs.writeFileSync(path.join(h.repo, 'left.txt'), 'base\n');
+    fs.writeFileSync(path.join(h.repo, 'right.txt'), 'base\n');
+    fs.writeFileSync(path.join(h.repo, 'package.json'), JSON.stringify({
+      scripts: { 'docs:generate': 'node generate.js' },
+      'tower-crane': { generated: {
+        'docs/cli.md': { script: 'docs:generate', blocks: ['commands:Run'] },
+        'generated.txt': 'docs:generate',
+      } },
+    }));
+    fs.writeFileSync(path.join(h.repo, 'generate.js'), `const fs = require('node:fs');
+const rows = fs.readFileSync('left.txt', 'utf8').trim() + ' / ' + fs.readFileSync('right.txt', 'utf8').trim();
+const file = 'docs/cli.md';
+const text = fs.readFileSync(file, 'utf8');
+fs.writeFileSync(file, text.replace(/(<!-- commands:Run:start -->)[\\s\\S]*?(<!-- commands:Run:end -->)/, '$1\\n' + rows + '\\n$2'));
+fs.writeFileSync('generated.txt', rows + '\\n');
+`);
+    const doc = (rows, intro = 'Hand-written intro.') => `${intro}\n\n<!-- commands:Run:start -->\n${rows}\n<!-- commands:Run:end -->\n`;
+    fs.writeFileSync(path.join(h.repo, 'docs', 'cli.md'), doc('base / base'));
+    fs.writeFileSync(path.join(h.repo, 'generated.txt'), 'base / base\n');
+    h.git(['add', '.']);
+    h.git(['commit', '-qm', 'declare generated outputs']);
+    const declared = h.git(['rev-parse', 'HEAD']);
+    h.git(['switch', 'fixture-change']);
+    h.git(['merge', '--no-edit', declared]);
+    fs.writeFileSync(path.join(h.repo, 'left.txt'), 'branch\n');
+    fs.writeFileSync(path.join(h.repo, 'docs', 'cli.md'), doc('branch / base'));
+    fs.writeFileSync(path.join(h.repo, 'generated.txt'), 'branch / base\n');
+    h.git(['add', '.']);
+    h.git(['commit', '-qm', 'branch generated rows']);
+    const sha = h.git(['rev-parse', 'HEAD']);
+    h.git(['switch', 'main']);
+    fs.writeFileSync(path.join(h.repo, 'right.txt'), 'main\n');
+    fs.writeFileSync(path.join(h.repo, 'docs', 'cli.md'), doc('base / main'));
+    fs.writeFileSync(path.join(h.repo, 'generated.txt'), 'base / main\n');
+    h.git(['add', '.']);
+    h.git(['commit', '-qm', 'main generated rows']);
+    const baseTip = h.git(['rev-parse', 'HEAD']);
+    const remote = path.join(h.base, 'origin.git');
+    h.git(['init', '--bare', remote]);
+    h.git(['remote', 'add', 'origin', remote]);
+    h.git(['push', 'origin', 'main', 'fixture-change']);
+    h.git(['switch', 'fixture-change']);
+    const state = h.github();
+    state.remote = remote;
+    state.ci = { [sha]: 'pending' };
+    Object.assign(state.prs['7'], { headRefOid: sha, mergeable: 'CONFLICTING', mergeStateStatus: 'DIRTY' });
+    h.saveGithub(state);
+    return { sha, baseTip, remote };
+  });
+  h.github = () => JSON.parse(fs.readFileSync(h.env.AUTOMATION_GITHUB, 'utf8'));
+  h.saveGithub = (state) => fs.writeFileSync(h.env.AUTOMATION_GITHUB, JSON.stringify(state));
+  h.logs = () => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  h.consume = () => h.run(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
+  h.submit = () => {
+    h.ok(['claim', 'T1', '--agent', 'worker']);
+    h.ok(['submit', 'T1', '--sha', h.sha, '--branch', 'fixture-change', '--pr', '7', '--agent', 'worker']);
+  };
+  return h;
+}
+
+test('generated mappings recognize only declared paths, including names shared with object properties', async () => {
+  const G = require('../lib/generated-conflicts');
+  for (const [pkg, names] of [
+    [{}, []],
+    [{ scripts: { generate: 'node generate.js' }, 'tower-crane': { generated: { 'docs/cli.md': 'generate' } } }, ['docs/cli.md']],
+    [{ scripts: { generate: 'node generate.js' }, 'tower-crane': { generated: { constructor: 'generate', toString: 'generate' } } }, ['constructor', 'toString']],
+  ]) {
+    const config = await G.configuration({ exec: () => ({ status: 0, stdout: JSON.stringify(pkg) }) }, 'repo', 'base');
+    assert.deepEqual(Object.keys(config), names);
+    assert.equal(config.__proto__, undefined);
+    for (const name of ['constructor', 'toString']) if (!names.includes(name)) assert.equal(config[name], undefined);
+  }
+});
+
+test('generated-only conflicts merge, regenerate and push without rework or a worker', (t) => {
+  const h = generatedSetup(t);
+  h.submit();
+  h.ok(['check', 'tests', 'T1', '--agent', 'orchestrator']);
+  h.consume();
+  const task = h.readState('tasks.json').tasks[0];
+  assert.equal(task.status, 'submitted');
+  assert.notEqual(task.sha, h.sha, JSON.stringify(h.logs().filter((e) => e.cmd === 'automation')));
+  assert.equal(h.git(['rev-parse', 'fixture-change']), task.sha);
+  assert.equal(h.git(['--git-dir', h.remote, 'rev-parse', 'fixture-change']), task.sha);
+  assert.equal(h.git(['rev-parse', `${task.sha}^1`]), h.sha);
+  assert.equal(h.git(['rev-parse', `${task.sha}^2`]), h.baseTip);
+  assert.match(fs.readFileSync(path.join(h.repo, 'docs', 'cli.md'), 'utf8'), /branch \/ main/);
+  assert.equal(fs.readFileSync(path.join(h.repo, 'generated.txt'), 'utf8'), 'branch / main\n');
+  assert.equal(h.git(['status', '--porcelain']), '');
+  assert.equal(h.logs().filter((e) => e.cmd === 'rework' || e.cmd === 'spawn').length, 0);
+  assert.ok(task.evidence.some((e) => e.type === 'tests' && e.ok && e.sha === h.sha), 'old evidence remains historical');
+  assert.ok(task.evidence.some((e) => e.type === 'tests' && e.ok && e.sha === task.sha), 'gates rerun on the repaired head');
+  assert.ok(h.logs().some((e) => e.cmd === 'generated merge' && e.detail.phase === 'pushed'));
+});
+
+test('a sole docs conflict regenerates every declared output of its script', (t) => {
+  const h = generatedSetup(t);
+  h.git(['switch', 'main']);
+  fs.writeFileSync(path.join(h.repo, 'generated.txt'), 'branch / base\n');
+  h.git(['add', '.']);
+  h.git(['commit', '-qm', 'align other generated output']);
+  h.git(['push', 'origin', 'main']);
+  h.git(['switch', 'fixture-change']);
+  h.submit();
+  h.consume();
+  const task = h.readState('tasks.json').tasks[0];
+  assert.equal(task.status, 'submitted');
+  assert.notEqual(task.sha, h.sha);
+  assert.equal(h.git(['--git-dir', h.remote, 'rev-parse', 'fixture-change']), task.sha);
+  assert.equal(fs.readFileSync(path.join(h.repo, 'generated.txt'), 'utf8'), 'branch / main\n');
+  const receipt = h.logs().find((e) => e.cmd === 'generated merge' && e.detail.phase === 'prepared');
+  assert.deepEqual(receipt.detail.generated, ['docs/cli.md']);
+  assert.equal(h.logs().some((e) => e.cmd === 'rework' || e.cmd === 'spawn'), false);
+});
+
+for (const partial of [false, true]) {
+  test(`an add/add conflict in a declared ${partial ? 'partially' : 'wholly'} generated file ${partial ? 'keeps its hand-written conflict' : 'repairs without rework'}`, (t) => {
+    const h = generatedSetup(t);
+    const file = partial ? 'new-doc.md' : 'new-generated.txt';
+    const content = (side) => partial
+      ? `${side} intro.\n<!-- commands:Run:start -->\n${side} rows\n<!-- commands:Run:end -->\n`
+      : `${side} output\n`;
+    h.git(['switch', 'main']);
+    const manifest = path.join(h.repo, 'package.json');
+    const pkg = JSON.parse(fs.readFileSync(manifest, 'utf8'));
+    pkg['tower-crane'].generated[file] = partial
+      ? { script: 'docs:generate', blocks: ['commands:Run'] } : 'docs:generate';
+    fs.writeFileSync(manifest, JSON.stringify(pkg));
+    if (!partial) {
+      fs.appendFileSync(path.join(h.repo, 'generate.js'), "fs.writeFileSync('new-generated.txt', rows + '\\n');\n");
+      fs.writeFileSync(path.join(h.repo, 'docs', 'cli.md'),
+        fs.readFileSync(path.join(h.repo, 'docs', 'cli.md'), 'utf8').replace('base / main', 'branch / base'));
+      fs.writeFileSync(path.join(h.repo, 'generated.txt'), 'branch / base\n');
+    }
+    fs.writeFileSync(path.join(h.repo, file), content('main'));
+    h.git(['add', '.']);
+    h.git(['commit', '-qm', 'main introduces generated output']);
+    h.git(['push', 'origin', 'main']);
+    h.git(['switch', 'fixture-change']);
+    fs.writeFileSync(path.join(h.repo, file), content('branch'));
+    h.git(['add', '.']);
+    h.git(['commit', '-qm', 'branch introduces generated output']);
+    h.git(['push', 'origin', 'fixture-change']);
+    h.sha = h.git(['rev-parse', 'HEAD']);
+    const ancestor = h.git(['merge-base', 'main', 'fixture-change']);
+    assert.equal(h.git(['ls-tree', ancestor, '--', file]), '', 'the conflict has no ancestor blob');
+    const github = h.github();
+    github.prs['7'].headRefOid = h.sha;
+    h.saveGithub(github);
+    h.submit();
+    h.consume();
+    const task = h.readState('tasks.json').tasks[0];
+    if (partial) {
+      assert.equal(task.status, 'rework');
+      assert.equal(task.sha, h.sha);
+      assert.equal(h.git(['diff', '--name-only', '--diff-filter=U']), file);
+      const text = fs.readFileSync(path.join(h.repo, file), 'utf8');
+      assert.match(text, /branch intro\./);
+      assert.match(text, /main intro\./);
+    } else {
+      assert.equal(task.status, 'submitted');
+      assert.notEqual(task.sha, h.sha);
+      assert.equal(h.git(['--git-dir', h.remote, 'rev-parse', 'fixture-change']), task.sha);
+      assert.equal(h.git(['rev-parse', `${task.sha}^1`]), h.sha);
+      assert.equal(h.git(['rev-parse', `${task.sha}^2`]), h.git(['rev-parse', 'main']));
+      assert.equal(fs.readFileSync(path.join(h.repo, file), 'utf8'), 'branch / main\n');
+      assert.equal(h.git(['status', '--porcelain']), '');
+      assert.equal(h.logs().some((e) => e.cmd === 'rework' || e.cmd === 'spawn'), false);
+      const receipt = h.logs().find((e) => e.cmd === 'generated merge' && e.detail.phase === 'pushed');
+      assert.deepEqual(receipt.detail.generated, [file]);
+    }
+  });
+}
+
+test('an accepted generated-only conflict returns to submitted with old review kept historical', (t) => {
+  const h = generatedSetup(t);
+  const github = h.github();
+  Object.assign(github.prs['7'], { mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' });
+  github.ci[h.sha] = 'success';
+  h.saveGithub(github);
+  h.submit();
+  for (const type of ['tests', 'clean', 'ci']) gateEvidence(h, type, 'orchestrator');
+  h.reviewer('T1', 'reviewer');
+  h.ok(['evidence', 'T1', '--type', 'review', '--sha', h.sha, '--ok', '--agent', 'reviewer']);
+  h.ok(['accept', 'T1', '--agent', 'orchestrator']);
+  const accepted = h.readState('tasks.json').tasks[0];
+  assert.equal(accepted.status, 'accepted');
+  const conflicting = h.github();
+  Object.assign(conflicting.prs['7'], { mergeable: 'CONFLICTING', mergeStateStatus: 'DIRTY' });
+  h.saveGithub(conflicting);
+  h.consume();
+  const repaired = h.readState('tasks.json').tasks[0];
+  assert.equal(repaired.status, 'submitted');
+  assert.notEqual(repaired.sha, h.sha);
+  assert.equal(repaired.revision, accepted.revision);
+  assert.equal(repaired.submitted_by, 'worker');
+  assert.ok(repaired.evidence.some((e) => e.type === 'review' && e.sha === h.sha));
+  assert.equal(repaired.evidence.some((e) => e.type === 'review' && e.sha === repaired.sha), false);
+  assert.equal(h.logs().some((e) => e.cmd === 'rework'), false);
+});
+
+test('the queue defers real generated conflicts while GitHub still reports the accepted head clean', (t) => {
+  const h = generatedSetup(t);
+  const github = h.github();
+  Object.assign(github.prs['7'], { mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' });
+  github.ci[h.sha] = 'success';
+  h.saveGithub(github);
+  h.submit();
+  for (const type of ['tests', 'clean', 'ci']) gateEvidence(h, type, 'orchestrator');
+  h.reviewer('T1', 'reviewer');
+  h.ok(['evidence', 'T1', '--type', 'review', '--sha', h.sha, '--ok', '--agent', 'reviewer']);
+  h.ok(['accept', 'T1', '--agent', 'orchestrator']);
+  h.consume();
+  const deferred = h.readState('tasks.json').tasks[0];
+  assert.equal(deferred.status, 'accepted');
+  assert.equal(deferred.sha, h.sha);
+  assert.equal(h.git(['rev-parse', 'HEAD']), h.sha);
+  assert.equal(h.git(['status', '--porcelain']), '');
+  assert.equal(h.logs().some((e) => e.cmd === 'rework' || e.cmd === 'generated merge' || e.cmd === 'head check'), false);
+  assert.equal(h.github().calls.some((args) => args[0] === 'pr' && args[1] === 'merge'), false);
+  const confirmed = h.github();
+  Object.assign(confirmed.prs['7'], { mergeable: 'CONFLICTING', mergeStateStatus: 'DIRTY' });
+  h.saveGithub(confirmed);
+  h.consume();
+  const repaired = h.readState('tasks.json').tasks[0];
+  assert.equal(repaired.status, 'submitted');
+  assert.notEqual(repaired.sha, h.sha);
+  assert.equal(h.git(['--git-dir', h.remote, 'rev-parse', 'fixture-change']), repaired.sha);
+  assert.equal(h.logs().some((e) => e.cmd === 'rework'), false);
+});
+
+for (const mergeable of ['MERGEABLE', 'UNKNOWN']) {
+  test(`a post-merge sweep defers mixed generated conflicts with ${mergeable} mergeability until GitHub confirms them`, (t) => {
+    const h = generatedSetup(t);
+    h.git(['switch', 'main']);
+    fs.writeFileSync(path.join(h.repo, 'value.js'), 'module.exports = 3;\n');
+    h.git(['add', '.']);
+    h.git(['commit', '-qm', 'main changes hand-written source']);
+    h.git(['push', 'origin', 'main']);
+    h.git(['switch', '-qc', 'independent-change']);
+    fs.writeFileSync(path.join(h.repo, 'other.txt'), 'Independent change.\n');
+    h.git(['add', '.']);
+    h.git(['commit', '-qm', 'independent submitted change']);
+    h.git(['push', 'origin', 'independent-change']);
+    const other = h.git(['rev-parse', 'HEAD']);
+    const github = h.github();
+    Object.assign(github.prs['7'], { mergeable, mergeStateStatus: mergeable === 'UNKNOWN' ? 'UNKNOWN' : 'CLEAN' });
+    github.prs['8'] = { ...github.prs['7'], headRefOid: other, headRefName: 'independent-change',
+      mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN', url: 'https://github.com/acme/demo/pull/8' };
+    github.ci[other] = 'success';
+    github.advanceBase = true;
+    h.saveGithub(github);
+    h.submit();
+    h.ok(['task', 'add', '--title', 'Independent', '--acceptance', 'works', '--kind', 'docs']);
+    h.ok(['claim', 'T2', '--agent', 'other-worker']);
+    h.ok(['submit', 'T2', '--sha', other, '--branch', 'independent-change', '--pr', '8', '--agent', 'other-worker']);
+    for (const type of ['clean', 'ci']) h.ok(['check', type, 'T2', '--agent', 'orchestrator']);
+    h.reviewer('T2', 'other-reviewer');
+    h.ok(['evidence', 'T2', '--type', 'review', '--sha', other, '--ok', '--agent', 'other-reviewer']);
+    h.ok(['accept', 'T2', '--agent', 'orchestrator']);
+    h.consume();
+    assert.equal(h.github().prs['8'].state, 'MERGED', 'the confirmed merge triggers the sweep');
+    const deferred = h.readState('tasks.json').tasks[0];
+    assert.equal(deferred.status, 'submitted');
+    assert.equal(deferred.sha, h.sha);
+    assert.equal(h.git(['rev-parse', 'fixture-change']), h.sha);
+    assert.equal(h.git(['status', '--porcelain']), '');
+    assert.equal(h.logs().some((e) => e.task === 'T1' && ['rework', 'generated merge'].includes(e.cmd)), false);
+    const confirmed = h.github();
+    Object.assign(confirmed.prs['7'], { mergeable: 'CONFLICTING', mergeStateStatus: 'DIRTY' });
+    h.saveGithub(confirmed);
+    h.consume();
+    assert.equal(h.readState('tasks.json').tasks[0].status, 'rework');
+    const receipt = h.logs().find((e) => e.task === 'T1' && e.cmd === 'generated merge' && e.detail.phase === 'mixed');
+    assert.ok(receipt, 'confirmation prepares the mixed merge');
+    assert.deepEqual(receipt.detail.remaining, ['value.js']);
+    assert.equal(h.git(['diff', '--name-only', '--diff-filter=U'], receipt.detail.path), 'value.js');
+    assert.equal(fs.readFileSync(path.join(receipt.detail.path, 'generated.txt'), 'utf8'), 'branch / main\n');
+  });
+}
+
+test('mixed conflicts keep a prepared merge with generated files staged and only hand-written files unresolved', (t) => {
+  const h = generatedSetup(t);
+  h.git(['switch', 'main']);
+  fs.writeFileSync(path.join(h.repo, 'value.js'), 'module.exports = 3;\n');
+  h.git(['add', '.']);
+  h.git(['commit', '-qm', 'hand-written conflict']);
+  h.git(['push', 'origin', 'main']);
+  h.git(['switch', 'fixture-change']);
+  h.submit();
+  h.consume();
+  const task = h.readState('tasks.json').tasks[0];
+  assert.equal(task.status, 'rework');
+  assert.equal(task.sha, h.sha);
+  assert.equal(h.git(['diff', '--name-only', '--diff-filter=U']), 'value.js');
+  assert.equal(h.git(['rev-parse', 'MERGE_HEAD']), h.git(['rev-parse', 'main']));
+  assert.equal(fs.readFileSync(path.join(h.repo, 'generated.txt'), 'utf8'), 'branch / main\n');
+  assert.match(task.notes.at(-1).text, /conflicts with main: value\.js\./);
+  assert.match(task.notes.at(-1).text, /generated files are pre-resolved: docs\/cli\.md, generated\.txt/);
+});
+
+test('mixed binary outputs preserve the branch bytes when generation must wait for source resolution', (t) => {
+  const h = generatedSetup(t);
+  for (const [branch, bytes] of [['main', [0, 254, 67]], ['fixture-change', [0, 255, 66]]]) {
+    h.git(['switch', branch]);
+    fs.writeFileSync(path.join(h.repo, 'generated.txt'), Buffer.from(bytes));
+    if (branch === 'main') {
+      fs.writeFileSync(path.join(h.repo, 'value.js'), 'module.exports = 3;\n');
+      fs.writeFileSync(path.join(h.repo, 'generate.js'), 'process.exit(1);\n');
+    }
+    h.git(['add', '.']);
+    h.git(['commit', '-qm', `binary output on ${branch}`]);
+    h.git(['push', 'origin', branch]);
+  }
+  h.sha = h.git(['rev-parse', 'HEAD']);
+  const github = h.github();
+  github.prs['7'].headRefOid = h.sha;
+  h.saveGithub(github);
+  h.submit();
+  h.consume();
+  assert.equal(h.readState('tasks.json').tasks[0].status, 'rework');
+  assert.equal(h.git(['diff', '--name-only', '--diff-filter=U']), 'value.js');
+  assert.equal(h.git(['rev-parse', ':generated.txt']), h.git(['rev-parse', `${h.sha}:generated.txt`]));
+  assert.deepEqual(fs.readFileSync(path.join(h.repo, 'generated.txt')), Buffer.from([0, 255, 66]));
+});
+
+test('a hand-written conflict within a generated document still needs rework', (t) => {
+  const h = generatedSetup(t);
+  for (const [branch, intro] of [['main', 'Main intro.'], ['fixture-change', 'Branch intro.']]) {
+    h.git(['switch', branch]);
+    const file = path.join(h.repo, 'docs', 'cli.md');
+    fs.writeFileSync(file, fs.readFileSync(file, 'utf8').replace('Hand-written intro.', intro));
+    h.git(['add', '.']);
+    h.git(['commit', '-qm', `change intro on ${branch}`]);
+    h.git(['push', 'origin', branch]);
+  }
+  h.sha = h.git(['rev-parse', 'HEAD']);
+  const state = h.github();
+  state.prs['7'].headRefOid = h.sha;
+  h.saveGithub(state);
+  h.submit();
+  h.consume();
+  assert.equal(h.readState('tasks.json').tasks[0].status, 'rework');
+  assert.equal(h.git(['diff', '--name-only', '--diff-filter=U']), 'docs/cli.md');
+  const text = fs.readFileSync(path.join(h.repo, 'docs', 'cli.md'), 'utf8');
+  assert.match(text, /<<<<<<< ours[\s\S]*Branch intro\.[\s\S]*Main intro\./);
+  assert.match(text, /<!-- commands:Run:start -->\nbranch \/ main\n<!-- commands:Run:end -->/);
+  assert.equal(fs.readFileSync(path.join(h.repo, 'generated.txt'), 'utf8'), 'branch / main\n');
+});
+
+test('dirty worktrees defer generated-file repair without losing work or requesting rework', (t) => {
+  const h = generatedSetup(t);
+  h.submit();
+  fs.appendFileSync(path.join(h.repo, 'README.md'), 'Unsaved work.\n');
+  const before = h.git(['status', '--porcelain']);
+  h.consume();
+  const task = h.readState('tasks.json').tasks[0];
+  assert.equal(task.status, 'submitted');
+  assert.equal(task.sha, h.sha);
+  assert.equal(h.git(['rev-parse', 'HEAD']), h.sha);
+  assert.equal(h.git(['status', '--porcelain']), before);
+  assert.ok(h.logs().some((e) => e.cmd === 'automation' && /dirty worktree/.test(e.detail.error)));
+});
+
+test('a failing generator aborts a generated-only merge and retains the submission for retry', (t) => {
+  const h = generatedSetup(t);
+  h.git(['switch', 'main']);
+  const file = path.join(h.repo, 'package.json');
+  const pkg = JSON.parse(fs.readFileSync(file, 'utf8'));
+  pkg.scripts['docs:generate'] = 'node -e "process.exit(1)"';
+  fs.writeFileSync(file, JSON.stringify(pkg));
+  h.git(['add', '.']);
+  h.git(['commit', '-qm', 'generator fails']);
+  h.git(['push', 'origin', 'main']);
+  h.git(['switch', 'fixture-change']);
+  h.submit();
+  h.consume();
+  assert.equal(h.readState('tasks.json').tasks[0].status, 'submitted');
+  assert.equal(h.git(['rev-parse', 'HEAD']), h.sha);
+  assert.equal(h.git(['status', '--porcelain']), '');
+  assert.ok(h.logs().some((e) => e.cmd === 'automation' && /generation failed/.test(e.detail.error)));
+  assert.equal(h.logs().some((e) => e.cmd === 'rework'), false);
+});
+
+test('failed generation restores modified source files and removes new files before retry', (t) => {
+  const h = generatedSetup(t);
+  h.git(['switch', 'main']);
+  const script = path.join(h.repo, 'generate.js');
+  fs.writeFileSync(script, "const fs=require('node:fs'); fs.writeFileSync('README.md','changed'); fs.writeFileSync('leftover.txt','new'); process.exit(1);\n");
+  h.git(['add', '.']);
+  h.git(['commit', '-qm', 'generator writes before failing']);
+  h.git(['push', 'origin', 'main']);
+  h.git(['switch', 'fixture-change']);
+  h.submit();
+  const before = fs.readFileSync(path.join(h.repo, 'README.md'), 'utf8');
+  h.consume();
+  assert.equal(h.readState('tasks.json').tasks[0].status, 'submitted');
+  assert.equal(h.git(['rev-parse', 'HEAD']), h.sha);
+  assert.equal(h.git(['status', '--porcelain']), '');
+  assert.equal(fs.readFileSync(path.join(h.repo, 'README.md'), 'utf8'), before);
+  assert.equal(fs.existsSync(path.join(h.repo, 'leftover.txt')), false);
+  h.consume();
+  assert.ok(h.logs().filter((e) => e.cmd === 'automation' && /generation failed/.test(e.detail.error)).length >= 2);
+});
+
+test('generation cannot commit edits to hand-written text outside declared blocks', (t) => {
+  const h = generatedSetup(t);
+  h.git(['switch', 'main']);
+  fs.appendFileSync(path.join(h.repo, 'generate.js'), "fs.appendFileSync('docs/cli.md', 'Unexpected hand-written text.\\n');\n");
+  h.git(['add', '.']);
+  h.git(['commit', '-qm', 'generator changes hand-written text']);
+  h.git(['push', 'origin', 'main']);
+  h.git(['switch', 'fixture-change']);
+  h.submit();
+  const before = fs.readFileSync(path.join(h.repo, 'docs', 'cli.md'), 'utf8');
+  h.consume();
+  assert.equal(h.readState('tasks.json').tasks[0].status, 'submitted');
+  assert.equal(h.git(['rev-parse', 'HEAD']), h.sha);
+  assert.equal(h.git(['--git-dir', h.remote, 'rev-parse', 'fixture-change']), h.sha);
+  assert.equal(fs.readFileSync(path.join(h.repo, 'docs', 'cli.md'), 'utf8'), before);
+  assert.equal(h.git(['status', '--porcelain']), '');
+  assert.ok(h.logs().some((e) => e.cmd === 'automation' && /outside declared blocks/.test(e.detail.error)));
+});
+
+for (const mismatch of ['fork head', 'origin repository']) {
+  test(`generated-file repair defers a mismatched ${mismatch} before changing or pushing the branch`, (t) => {
+    const h = generatedSetup(t);
+    const state = h.github();
+    if (mismatch === 'fork head') state.prs['7'].headRepository.nameWithOwner = 'someone/fork';
+    else state.pushRepository = 'other/repository';
+    h.saveGithub(state);
+    h.submit();
+    h.consume();
+    assert.equal(h.readState('tasks.json').tasks[0].status, 'submitted');
+    assert.equal(h.git(['rev-parse', 'HEAD']), h.sha);
+    assert.equal(h.git(['--git-dir', h.remote, 'rev-parse', 'fixture-change']), h.sha);
+    assert.equal(h.git(['status', '--porcelain']), '');
+    assert.ok(h.logs().some((e) => e.cmd === 'automation' && /repository/.test(e.detail.error)));
+    assert.equal(h.logs().some((e) => e.cmd === 'generated merge' || e.cmd === 'rework'), false);
+  });
+}
+
+test('a failed generated-file push retries the prepared merge without a worker or another generation', (t) => {
+  const h = generatedSetup(t);
+  const hook = path.join(h.remote, 'hooks', 'pre-receive');
+  fs.writeFileSync(hook, '#!/bin/sh\nexit 1\n');
+  fs.chmodSync(hook, 0o755);
+  h.submit();
+  h.consume();
+  const before = h.readState('tasks.json').tasks[0];
+  assert.equal(before.status, 'submitted');
+  assert.equal(before.sha, h.sha);
+  const prepared = h.logs().filter((e) => e.cmd === 'generated merge' && e.detail.phase === 'prepared');
+  assert.equal(prepared.length, 1);
+  assert.equal(h.git(['--git-dir', h.remote, 'rev-parse', 'fixture-change']), h.sha);
+  fs.rmSync(hook);
+  h.consume();
+  const after = h.readState('tasks.json').tasks[0];
+  assert.equal(after.status, 'submitted');
+  assert.equal(after.sha, prepared[0].detail.sha);
+  assert.equal(h.git(['--git-dir', h.remote, 'rev-parse', 'fixture-change']), after.sha);
+  assert.equal(h.logs().filter((e) => e.cmd === 'generated merge' && e.detail.phase === 'prepared').length, 1);
+  assert.equal(h.logs().some((e) => e.cmd === 'rework' || e.cmd === 'spawn'), false);
+});
 
 test('submission runs real software gates once through the existing waiter', (t) => {
   const h = setup(t, { ci: 'pending' });
@@ -534,6 +1005,11 @@ test('gates prioritize runs the last queued task first; status and inbox show th
   assert.equal((await holder).code, 2, 'the held executor finishes and drains the queue');
   const started = h.logs().filter((e) => e.cmd === 'automation' && e.detail.phase === 'running').map((e) => e.task);
   assert.deepEqual(started, ['T1', 'T4', 'T2', 'T3'], 'the prioritized T4 runs before T2 and T3, which keep their order');
+  const changes = h.logs().filter(e => e.cmd === 'setting' && e.detail.settings['gates.priority']);
+  assert.deepEqual(changes.map(e => e.detail), [{
+    command: 'gates prioritize', actor: 'orchestrator', mode: 'cli',
+    settings: { 'gates.priority': 'operational' },
+  }], 'only the successful priority change writes a setting audit');
 });
 
 // Each gate run stalls until the test writes its `release-N` file, so the test

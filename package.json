@@ -13,5 +13,13 @@
     "docs:generate": "node scripts/cli-docs.js",
     "check:shared": "node scripts/check-shared-files.js",
     "changelog": "node scripts/changelog.js"
+  },
+  "tower-crane": {
+    "generated": {
+      "docs/cli.md": {
+        "script": "docs:generate",
+        "blocks": ["commands:Plan", "commands:Stack", "commands:Run", "commands:Decisions", "commands:Views", "commands:Agents and worktrees", "commands:Gates"]
+      }
+    }
   }
 }

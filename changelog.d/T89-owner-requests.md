@@ -1,0 +1,2 @@
+- Retire matching setting requests when the owner makes the change directly, including successful acceptance and orchestrator dispatch. Failed writes keep approvals available; a later orchestrator retry needs a new decision.
+- Enforce and audit `task.tier` when the board removes a task's tier range without changing its current rung, matching the CLI.
