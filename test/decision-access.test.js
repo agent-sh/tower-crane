@@ -308,3 +308,36 @@ test('without the setting, the orchestrator answers a worker technical decision;
   assert.equal(kept.code, 1, kept.stderr);
   assert.match(kept.stderr, /only the owner/);
 });
+
+test('spend and credential questions stay with the owner without a marker', (t) => {
+  const h = makeRepo(t);
+  h.init();
+  h.ok(['task', 'add', '--title', 'Rent a GPU box', '--acceptance', 'the owner decides spend and credentials']);
+  const worker = { env: { TOWER_CRANE_AGENT: 'worker-T1-1', TOWER_CRANE_TASK: 'T1' } };
+
+  h.ok(['ask', '--question', 'May we spend $200 to rent a GPU?', '--option', 'yes', '--option', 'no', '--blocks', 'T1'], worker);
+  h.ok(['ask', '--question', 'Will the owner provide the production API credentials?', '--option', 'yes', '--option', 'no', '--blocks', 'T1'], worker);
+  const [spend, credentials] = h.readState('decisions.json').decisions;
+  assert.deepEqual([spend.technical, spend.owner_required], [false, 'asks for spend']);
+  assert.deepEqual([credentials.technical, credentials.owner_required], [false, 'asks for credentials']);
+
+  const before = events(h);
+  for (const [id, reason] of [['D1', 'asks for spend'], ['D2', 'asks for credentials']]) {
+    const refused = h.run(['answer', id, '--choice', 'yes', '--agent', 'orchestrator']);
+    assert.equal(refused.code, 1, refused.stderr);
+    assert.match(refused.stderr, new RegExp(`${id} is owner-required \\(${reason}\\); only the owner answers it`));
+  }
+  assert.deepEqual(events(h), before, 'refused owner-only answers write no event');
+
+  // A decision opened before topics were stored has no owner_required, so its text still keeps it with the owner.
+  h.ok(['ask', '--question', 'Which store?', '--option', 'redis', '--option', 'postgres', '--blocks', 'T1'], worker);
+  const legacy = h.readState('decisions.json');
+  legacy.decisions[2].question = 'Pay for the Redis plan?';
+  h.writeState('decisions.json', legacy);
+  const legacyRefused = h.run(['answer', 'D3', '--choice', 'redis', '--agent', 'orchestrator']);
+  assert.equal(legacyRefused.code, 1, legacyRefused.stderr);
+  assert.match(legacyRefused.stderr, /D3 is owner-required \(asks for spend\); only the owner answers it/);
+
+  h.ok(['answer', 'D1', '--choice', 'yes', '--agent', 'owner']);
+  assert.equal(h.readState('decisions.json').decisions[0].answer_rule, 'owner');
+});
