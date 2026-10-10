@@ -216,6 +216,19 @@ test('a PR GitHub refuses as an unrecorded stack member squashes through the asy
   assert.ok(evidence.commands.some((c) => c.command === 'gh' && c.args.includes('POST') && c.status === 0));
 });
 
+test('the asynchronous fallback encodes each segment of a head branch name it deletes', (t) => {
+  const { h } = acceptedTask(t);
+  h.env.FIXTURE_GH_STACK_REFUSAL = '1';
+  h.env.FIXTURE_PR_HEAD = 'feature/fixture#change';
+  const evidence = h.json(['merge', 'T1', '--agent', 'orchestrator']);
+  assert.equal(evidence.ok, true, evidence.summary);
+  const calls = fs.readFileSync(h.env.FIXTURE_GH_LOG, 'utf8').trim().split('\n').map(JSON.parse);
+  // A raw '#' would start a fragment and delete a different ref; the slash stays a path separator.
+  assert.deepEqual(calls.filter((args) => args.includes('DELETE')), [
+    ['api', 'repos/acme/demo/git/refs/heads/feature/fixture%23change', '--method', 'DELETE'],
+  ]);
+});
+
 test('the asynchronous fallback keeps the head branch when merge.keep_branch is set', (t) => {
   const { h } = acceptedTask(t);
   h.env.FIXTURE_GH_STACK_REFUSAL = '1';
