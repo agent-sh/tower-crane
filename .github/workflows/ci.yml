@@ -18,8 +18,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Each shard runs its share of test/run.js's file list. Windows is slower,
-        # so it gets more shards to keep every job well under the timeout.
+        # Each shard runs its share of test/run.js's file list.
         include:
           - { os: ubuntu-latest, node: 26, shard: '1/3' }
           - { os: ubuntu-latest, node: 26, shard: '2/3' }
@@ -27,10 +26,9 @@ jobs:
           - { os: ubuntu-latest, node: 24, shard: '1/3' }
           - { os: ubuntu-latest, node: 24, shard: '2/3' }
           - { os: ubuntu-latest, node: 24, shard: '3/3' }
-          - { os: windows-latest, node: 26, shard: '1/4' }
-          - { os: windows-latest, node: 26, shard: '2/4' }
-          - { os: windows-latest, node: 26, shard: '3/4' }
-          - { os: windows-latest, node: 26, shard: '4/4' }
+          - { os: windows-latest, node: 26, shard: '1/3' }
+          - { os: windows-latest, node: 26, shard: '2/3' }
+          - { os: windows-latest, node: 26, shard: '3/3' }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
