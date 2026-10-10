@@ -51,9 +51,13 @@ if (shard) args.push(`--test-shard=${shard}`);
 // A sandboxed run skips tests.host_only files; the tests gate runs them on the host. Only a sandbox
 // loads the helper, so an ordinary run needs no lib/ modules.
 const selected = files.length ? files : testFiles();
-const { run, skipped } = process.env.TOWER_CRANE_SANDBOX === '1'
+const { run, skipped, refused } = process.env.TOWER_CRANE_SANDBOX === '1'
   ? require('../lib/tests-host-only').split(selected, process.env)
-  : { run: selected, skipped: [] };
+  : { run: selected, skipped: [], refused: [] };
+if (refused.length) {
+  console.error(`tower-crane: a sandboxed run with tests.host_only names test files, not directories or globs: ${refused.join(' ')}`);
+  process.exit(1);
+}
 if (skipped.length) console.error(`tower-crane: skipped host-only tests in this sandbox, the tests gate runs them on the host: ${skipped.join(' ')}`);
 args.push(...run);
 

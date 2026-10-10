@@ -58,6 +58,18 @@ test('a host_only test is skipped in a sandboxed run and executed by check tests
   assert.equal(absolute.status, 0, absolute.stdout + absolute.stderr);
   assert.deepEqual(fs.readdirSync(marks), ['plain'], 'an absolute path to the host-only file is skipped as well');
 
+  // Node expands a directory or a glob after the skip, so a sandboxed run refuses those selections.
+  fs.rmSync(path.join(marks, 'plain'));
+  for (const selection of ['test', 'test/*.test.js']) {
+    const refused = cp.spawnSync(process.execPath, [RUNNER, selection], {
+      cwd: h.repo, encoding: 'utf8', env: { ...h.env, ...sandbox },
+    });
+    assert.equal(refused.status, 1, refused.stdout + refused.stderr);
+    assert.match(refused.stderr, /names test files, not directories or globs/);
+    assert.ok(refused.stderr.includes(selection), refused.stderr);
+  }
+  assert.deepEqual(fs.readdirSync(marks), [], 'a refused selection runs no test');
+
   // The gate runs in the same sandboxed environment but still runs every test on the host.
   const gate = h.run(['check', 'tests', 'T1', '--agent', 'checker'], { env: sandbox });
   assert.equal(gate.code, 0, gate.stdout + gate.stderr);
