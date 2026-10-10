@@ -56,8 +56,7 @@ test('the first write moves settled evidence out, keeps current evidence inline 
   assert.ok(T.eligibleGateEvidence(task, raw[2], [audit(current)]));
   assert.ok(fs.statSync(stateFile(h, 'tasks.json')).size < before * 0.6);
   assert.ok(fs.readFileSync(stateFile(h, 'events.jsonl')).subarray(0, log.length).equals(log), 'the event log is never rewritten');
-  const shown = h.json(['task', 'show', 'T1']).evidence[0];
-  for (const key of Object.keys(old)) assert.deepEqual(shown[key], old[key], key);
+  assert.deepEqual(h.json(['task', 'show', 'T1']).evidence[0], old, 'readers see the entry as recorded');
   const st = S.loadState(h.state);
   assert.equal(T.eligibleGateEvidence(st.tasks.tasks[0], st.tasks.tasks[0].evidence[0], st.events), true);
   const file = artifact(h, 'T1', raw[0].evidence_refs.commands);
