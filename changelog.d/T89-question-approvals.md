@@ -1,0 +1,1 @@
+- Keep setting-tagged questions separate from one-use setting approvals. `ask --question ... --setting KEY` routes a question using the authority table; `ask --setting S` without a question requests an applicable approval. Only generated requests marked `approval_request` can be reused or applied, so answering a question cannot authorize a command.

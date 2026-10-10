@@ -14,6 +14,8 @@ const events = (h) => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8'
 function setup(t, workers = 1, tasks = 3) {
   return cachedFixture(t, `${workers}:${tasks}`, (h) => {
     h.init(['--workers', String(workers)]);
+    // Slot checks use this known state; metadata writes need no Git discovery.
+    h.env.TOWER_CRANE_STATE = h.state;
     for (let i = 1; i <= tasks; i++) {
       h.ok(['task', 'add', '--title', `Slot ${i}`, '--tier', 'easy', '--acceptance', 'slot is held']);
       h.ok(['brief', 'set', `T${i}`, '-'], { input: 'Work in this task.\n' });

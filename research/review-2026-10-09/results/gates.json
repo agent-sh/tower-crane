@@ -1,0 +1,186 @@
+{
+  "revision": "392b971b7fa42016d9a2c6d437e465671c1c804f",
+  "node": "v26.10.0",
+  "platform": "linux",
+  "scratch": "/home/avifenesh/.cache/tower-crane/agents/22cd04e4ddaf/worker-T144-1/T144-probes",
+  "probes": [
+    {
+      "id": "G01",
+      "surface": "gates",
+      "command": "nice -n 19 node research/review-2026-10-09/run.js G01",
+      "expected": "Changing the pinned tests command invalidates its previous successful evidence.",
+      "observed": {
+        "type": "tests",
+        "ok": false,
+        "reason": "tests evidence command policy is missing or no longer matches the pinned commands; run tower-crane check tests T1 again"
+      },
+      "verdict": "held"
+    },
+    {
+      "id": "G02",
+      "surface": "gates",
+      "command": "nice -n 19 node research/review-2026-10-09/run.js G02",
+      "expected": "Changing tests mode invalidates evidence under the old mode.",
+      "observed": {
+        "type": "tests",
+        "ok": false,
+        "reason": "tests evidence mode prove no longer matches run-only; run tower-crane check tests T1 again"
+      },
+      "verdict": "held"
+    },
+    {
+      "id": "G03",
+      "surface": "gates",
+      "command": "nice -n 19 node research/review-2026-10-09/run.js G03",
+      "expected": "Changing tests.paths to exclude the regression invalidates its previous proof.",
+      "observed": {
+        "beforeRerun": {
+          "type": "tests",
+          "ok": true,
+          "waived": false,
+          "agent": "orchestrator",
+          "reason": "ok by orchestrator"
+        },
+        "rerun": {
+          "code": 1,
+          "stdout": "T1: tests FAIL at d0fcb42: no test covers this change: d0fcb42b49 changes test/value.test.js, value.js against main (merge base 5513db294b) and adds or changes no test file (by project.json tests.paths). Add a test that fails without the change, commit it, and submit the new sha. If the project keeps its tests elsewhere, set their globs with tower-crane project set --tests-paths '[\"src/test/**\",\"**/*Test.java\"]'.",
+          "stderr": ""
+        }
+      },
+      "verdict": "CONFIRMED"
+    },
+    {
+      "id": "G04",
+      "surface": "gates",
+      "command": "nice -n 19 node research/review-2026-10-09/run.js G04",
+      "expected": "Removing a kept build file invalidates proof that passed with that file kept.",
+      "observed": {
+        "beforeRerun": {
+          "type": "tests",
+          "ok": true,
+          "waived": false,
+          "agent": "orchestrator",
+          "reason": "ok by orchestrator"
+        },
+        "currentKeep": []
+      },
+      "verdict": "CONFIRMED"
+    },
+    {
+      "id": "G05",
+      "surface": "gates",
+      "command": "nice -n 19 node research/review-2026-10-09/run.js G05",
+      "expected": "Enabling scoped expensive proof invalidates evidence that never ran that proof.",
+      "observed": {
+        "beforeRerun": {
+          "type": "tests",
+          "ok": true,
+          "waived": false,
+          "agent": "orchestrator",
+          "reason": "ok by orchestrator"
+        },
+        "rerun": {
+          "code": 1,
+          "stdout": "T1: tests FAIL at d0fcb42: tests.expensive in prove mode requires pinned gates.tests_proof_cmd containing {tests}; the owner sets it with project set --tests-proof-cmd CMD",
+          "stderr": ""
+        }
+      },
+      "verdict": "CONFIRMED"
+    },
+    {
+      "id": "G06",
+      "surface": "gates",
+      "command": "nice -n 19 node research/review-2026-10-09/run.js G06",
+      "expected": "Changing the cleanup command invalidates the old cleanup pass.",
+      "observed": {
+        "type": "clean",
+        "ok": false,
+        "reason": "clean evidence command policy is missing or no longer matches the pinned commands; run tower-crane check clean T1 again"
+      },
+      "verdict": "held"
+    },
+    {
+      "id": "G07",
+      "surface": "gates",
+      "command": "nice -n 19 node research/review-2026-10-09/run.js G07",
+      "expected": "Changing hosted CI requirements invalidates the old CI pass.",
+      "observed": {
+        "type": "ci",
+        "ok": false,
+        "reason": "hosted CI evidence policy is missing or no longer matches the current project; run tower-crane check ci T1 again"
+      },
+      "verdict": "held"
+    },
+    {
+      "id": "G08",
+      "surface": "gates",
+      "command": "nice -n 19 node research/review-2026-10-09/run.js G08",
+      "expected": "A real short gate timeout reports infrastructure failure without naming cut-off tests as failures (T140).",
+      "observed": {
+        "ok": false,
+        "summary": "`/home/avifenesh/.nvm/versions/node/v26.10.0/bin/node /home/avifenesh/.cache/tower-crane/agents/22cd04e4ddaf/worker-T144-1/T144-probes/tower-crane-gjHvWi/timeout.js` at d0fcb42b49: timed out after 0.05 min (infrastructure failure).\nFiles still running (reported by runner): not reported.\nAdjust the project gate timeout or resolve the stalled command, then rerun the gate.",
+        "confirmedFailure": false
+      },
+      "verdict": "held"
+    },
+    {
+      "id": "G09",
+      "surface": "gates",
+      "command": "nice -n 19 node research/review-2026-10-09/run.js G09",
+      "expected": "The default tests gate budget is 20 minutes in this checkout (T140).",
+      "observed": {
+        "ok": true,
+        "timeoutMilliseconds": [
+          1200000
+        ]
+      },
+      "verdict": "by design"
+    },
+    {
+      "id": "G10",
+      "surface": "gates",
+      "command": "nice -n 19 node research/review-2026-10-09/run.js G10",
+      "expected": "A timeout during the merged-head check keeps the task accepted and reports infrastructure failure (T140).",
+      "observed": {
+        "result": {
+          "status": "infrastructure",
+          "summary": "`node test/value.test.js` on d0fcb42b49 merged with main at 27608aafae: timed out after 20 min (infrastructure failure).\nFiles still running (reported by runner): not reported.\nAdjust the project gate timeout or resolve the stalled command, then rerun the gate."
+        },
+        "taskStatus": "accepted",
+        "reworks": [],
+        "budgets": [
+          1200000
+        ]
+      },
+      "verdict": "held"
+    },
+    {
+      "id": "G11",
+      "surface": "gates",
+      "command": "nice -n 19 node research/review-2026-10-09/run.js G11",
+      "expected": "Increasing executor capacity leaves tests evidence valid because it does not change the test contract.",
+      "observed": {
+        "type": "tests",
+        "ok": true,
+        "waived": false,
+        "agent": "orchestrator",
+        "reason": "ok by orchestrator"
+      },
+      "verdict": "held"
+    },
+    {
+      "id": "G12",
+      "surface": "gates",
+      "command": "nice -n 19 node research/review-2026-10-09/run.js G12",
+      "expected": "Unchanged command and mode keep evidence valid.",
+      "observed": {
+        "type": "tests",
+        "ok": true,
+        "waived": false,
+        "agent": "orchestrator",
+        "reason": "ok by orchestrator"
+      },
+      "verdict": "held"
+    }
+  ]
+}
