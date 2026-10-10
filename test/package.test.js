@@ -7,6 +7,21 @@ const path = require('node:path');
 const cp = require('node:child_process');
 const { makeRepo, ROOT } = require('./helpers');
 
+// npm 11 prints an array of artifacts; npm 12 prints an object keyed by package name.
+function packedArtifact(stdout) {
+  const packed = JSON.parse(stdout);
+  return Array.isArray(packed) ? packed[0] : Object.values(packed)[0];
+}
+
+test('pack output parses from the npm 11 array and npm 12 object shapes', () => {
+  for (const shape of ['npm-11', 'npm-12']) {
+    const stdout = fs.readFileSync(path.join(ROOT, 'test/fixtures/npm-pack', `${shape}.json`), 'utf8');
+    const artifact = packedArtifact(stdout);
+    assert.equal(artifact.name, '@agentsys/tower-crane', shape);
+    assert.ok(artifact.files.some((file) => file.path === 'skills/tower-crane/SKILL.md'), shape);
+  }
+});
+
 test('the npm package ships the plugin and loads pi skills through its CLI', (t) => {
   const h = makeRepo(t);
   const args = ['pack', '--dry-run', '--json', '--cache', path.join(h.base, 'npm-cache')];
@@ -14,7 +29,7 @@ test('the npm package ships the plugin and loads pi skills through its CLI', (t)
     process.env.npm_execpath ? [process.env.npm_execpath, ...args] : args,
     { cwd: ROOT, env: h.env, encoding: 'utf8', timeout: 60000, shell: !process.env.npm_execpath && process.platform === 'win32' });
   assert.equal(packed.status, 0, packed.stderr);
-  const artifact = JSON.parse(packed.stdout)[0];
+  const artifact = packedArtifact(packed.stdout);
   assert.equal(artifact.name, '@agentsys/tower-crane');
   const metadata = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
   assert.deepEqual(metadata.bin, { 'tower-crane': 'bin/tower-crane.js' });
@@ -29,6 +44,15 @@ test('the npm package ships the plugin and loads pi skills through its CLI', (t)
     '.claude-plugin/plugin.json',
     '.claude-plugin/marketplace.json',
     'components.json',
+    '.mcp.json',
+    'lib/mcp.js',
+    'commands/tower-crane-inbox.md',
+    'commands/tower-crane-spawn-ready.md',
+    'commands/tower-crane-merge-accepted.md',
+    'commands/tower-crane-rework-from-review.md',
+    'commands/tower-crane-release-dead.md',
+    'hooks/hooks.json',
+    'hooks/tower-crane.mjs',
   ]) assert.ok(files.includes(file), `npm package is missing ${file}`);
   assert.ok(!files.includes('commands/tower-crane.md'), 'the skill must be the only tower-crane entry point');
   const components = JSON.parse(fs.readFileSync(path.join(ROOT, 'components.json'), 'utf8'));

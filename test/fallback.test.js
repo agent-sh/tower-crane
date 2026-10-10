@@ -1,10 +1,12 @@
 'use strict';
 
-const test = require('node:test');
+const { test, describe } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { makeRepo } = require('./helpers');
+const { makeRepo, makeProjectRepo, makeTaskRepo } = require('./helpers');
+const A = require('../lib/agents');
+const windowsConcurrency = process.platform === 'win32' ? 2 : false;
 
 const events = (h) => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
 const supervision = { retries: 2, backoff_ms: 10, max_backoff_ms: 20, stall_ms: 60000 };
@@ -24,11 +26,11 @@ async function until(fn, message) {
 
 function setup(t, { reason = 'outage', primaryHarness = 'codex', nextHarness = 'codex', chain = false,
   rung = 'easy', webMcp, fallbackWebMcp } = {}) {
-  const h = makeRepo(t);
-  h.init();
-  h.ok(['task', 'add', '--title', 'Fallback routes', '--tier', rung,
-    '--kind', rung === 'research' ? 'research' : 'code', '--acceptance', 'fresh fallback session']);
-  h.ok(['brief', 'set', 'T1', '-'], { input: 'Complete the original task brief.\n' });
+  const h = makeTaskRepo(t, [{
+    args: ['--title', 'Fallback routes', '--tier', rung,
+      '--kind', rung === 'research' ? 'research' : 'code', '--acceptance', 'fresh fallback session'],
+    brief: 'Complete the original task brief.\n',
+  }]);
   const bin = path.join(h.base, 'bin');
   fs.mkdirSync(bin);
   // A gh on PATH and no token in the environment make every route ask gh for
@@ -48,7 +50,7 @@ function setup(t, { reason = 'outage', primaryHarness = 'codex', nextHarness = '
     TOWER_CRANE_TEST_FALLBACK_FILE: h.file, TOWER_CRANE_TEST_FALLBACK_REASON: reason,
     ...(chain ? { TOWER_CRANE_TEST_FALLBACK_CHAIN: '1' } : {}),
   };
-  h.spawn = () => h.run(['spawn', '--task', 'T1', '--wait'], { env: h.spawnEnv, timeout: 20000 });
+  h.spawn = () => h.run(['spawn', '--task', 'T1', '--wait'], { env: h.spawnEnv });
   h.attempts = () => JSON.parse(fs.readFileSync(h.file, 'utf8'));
   return h;
 }
@@ -84,6 +86,7 @@ for (const explicit of [false, true]) {
   });
 }
 
+describe('independent fallback routes', { concurrency: windowsConcurrency }, () => {
 for (const nextHarness of ['codex', 'claude']) {
   test(`outage exhausts same-route retries before a fresh ${nextHarness} fallback and records route spend`, async (t) => {
     const h = setup(t, { nextHarness });
@@ -169,12 +172,24 @@ for (const [primaryHarness, reason, chain, routes] of [['claude', 'refusal', tru
     const h = setup(t, { reason, primaryHarness, chain });
     h.spawnEnv.TOWER_CRANE_TEST_FALLBACK_NOTE = '1';
     assert.equal(h.spawn().code, 0);
-    const sandboxed = (text) => !text.startsWith('agy');
-    assert.deepEqual(h.attempts().map((a) => a.broker), routes.map(sandboxed), 'claude and codex routes get the broker; agy is not sandboxed');
+    const sandboxed = (text) => A.CAPABILITIES[text.split(' ')[0]].osSandbox;
+    assert.deepEqual(h.attempts().map((a) => a.broker), routes.map(sandboxed), 'routes with an OS sandbox get the broker');
     const notes = events(h).filter((e) => e.cmd === 'task note').map((e) => [e.detail.text, e.agent, e.via ?? null]);
     assert.deepEqual(notes, routes.map((text) => [text, 'worker-T1-1', sandboxed(text) ? 'broker' : null]));
   });
 }
+
+test('a verified agy adapter brokers every retry and its Codex fallback', t => {
+  const h = setup(t, { primaryHarness: 'agy' });
+  h.spawnEnv.TOWER_CRANE_TEST_VERIFIED_AGY = '1';
+  h.spawnEnv.TOWER_CRANE_TEST_FALLBACK_NOTE = '1';
+  assert.equal(h.spawn().code, 0);
+  assert.deepEqual(h.attempts().map(a => a.harness), ['agy', 'agy', 'agy', 'codex']);
+  assert.deepEqual(h.attempts().map(a => a.broker), [true, true, true, true]);
+  const notes = events(h).filter(e => e.cmd === 'task note');
+  assert.equal(notes.length, 4);
+  assert.ok(notes.every(e => e.via === 'broker' && e.agent === 'worker-T1-1'));
+});
 
 for (const primaryHarness of ['agy', 'claude']) {
   test(`fresh ${primaryHarness} outage retries record each invocation without counting usage twice`, (t) => {
@@ -203,6 +218,7 @@ for (const primaryHarness of ['agy', 'claude']) {
     assert.equal(events(h).filter((e) => e.cmd === 'spend').length, spendEvents);
   });
 }
+});
 
 test('rework during a live fallback refuses a second worker until the previous attempt exits', async (t) => {
   const h = setup(t);
@@ -213,7 +229,15 @@ test('rework during a live fallback refuses a second worker until the previous a
   });
   const wake = await waiting;
   assert.equal(wake.code, 0, wake.stderr);
-  await until(() => h.attempts().length === 4, 'fallback worker did not start');
+  // The harness truncates and rewrites attempts.json between fallback routes.
+  await until(() => {
+    try {
+      return h.attempts().length === 4;
+    } catch (error) {
+      if (error instanceof SyntaxError) return false;
+      throw error;
+    }
+  }, 'fallback worker did not start');
   h.ok(['submit', 'T1', '--agent', 'worker-T1-1', '--sha', 'abcdef1']);
   h.ok(['rework', 'T1', '--reason', 'fix while worker is finishing']);
   for (const flags of [['--dry-run'], []]) {
@@ -228,6 +252,7 @@ test('rework during a live fallback refuses a second worker until the previous a
   assert.equal(preview.resumed, false);
 });
 
+describe('remaining fallback routes', { concurrency: windowsConcurrency }, () => {
 test('Codex profile and provider arguments change without carrying the old session or route flags', (t) => {
   const h = setup(t);
   h.ok(['ladder', 'set', 'easy', '--profile', 'first', '--clear', 'model',
@@ -305,8 +330,7 @@ test('agent output quoting outage and refusal does not switch routes', (t) => {
 });
 
 test('user fallback configuration validates route shapes without project flags', (t) => {
-  const h = makeRepo(t);
-  h.init();
+  const h = makeProjectRepo(t);
   for (const value of [{}, [null], [{ profile: 'sol', fallbacks: [] }]]) {
     setFallbacks(h, value);
     assert.notEqual(h.run(['ladder', 'show']).code, 0);
@@ -374,7 +398,10 @@ for (const harness of ['claude', 'codex']) {
       h.env.USERPROFILE = userHome;
       if (config === 'default') {
         delete h.env.TOWER_CRANE_CONFIG;
+        const ownerDir = path.join(path.dirname(h.userConfig), 'owner');
         h.userConfig = path.join(userHome, '.config', 'tower-crane', 'config.json');
+        // The owner key sits beside the user file, so it moves with it.
+        fs.cpSync(ownerDir, path.join(path.dirname(h.userConfig), 'owner'), { recursive: true });
       } else {
         h.env.TOWER_CRANE_CONFIG = path.relative(h.repo, h.userConfig);
       }
@@ -432,13 +459,15 @@ test('missing expanded command fallback executables are skipped during preparati
   assert.deepEqual(h.attempts().map((a) => a.model), ['first', 'second']);
   assert.equal(events(h).find((e) => e.cmd === 'spawn fallback').detail.route_index, 2);
 });
+});
 
 test('a detached switch wakes a live waiter, keeps its lease, and collects route usage on exit', async (t) => {
   const h = setup(t);
+  const finish = path.join(h.base, 'finish-fallback');
   const cursor = events(h).at(-1).id;
   const waiting = h.runAsync(['wait', '--after', cursor, '--types', 'spawn-fallback', '--timeout', '10']);
   const spawn = h.json(['spawn', '--task', 'T1'], {
-    env: { ...h.spawnEnv, TOWER_CRANE_TEST_FALLBACK_HOLD: '1800' },
+    env: { ...h.spawnEnv, TOWER_CRANE_TEST_FALLBACK_FINISH: finish },
   });
   const wake = await waiting;
   assert.equal(wake.code, 0, wake.stderr);
@@ -448,9 +477,15 @@ test('a detached switch wakes a live waiter, keeps its lease, and collects route
   assert.deepEqual(h.json(['status']).exited_claims, []);
   assert.equal(h.json(['task', 'show', 'T1']).claim.agent, spawn.agent);
   assert.equal(h.run(['release', 'T1', '--agent', 'recovery', '--reason', 'too early']).code, 1);
-  await until(() => h.json(['task', 'show', 'T1']).spend.entries?.length === 2, 'detached route usage was not collected');
+  fs.writeFileSync(finish, '');
+  await until(() => {
+    const entries = h.readState('tasks.json').tasks[0].spend.entries;
+    return entries?.length === 2 && entries.every((entry) => !entry.live)
+      && events(h).some((e) => e.cmd === 'worker-exited' && e.detail.agent === spawn.agent);
+  }, 'detached route usage and exit receipt were not collected');
   const task = h.json(['task', 'show', 'T1']);
   assert.equal(task.run.phase, 'waiting');
   assert.deepEqual(task.spend.entries.map((e) => [e.model, e.tokens]), [['first', 39], ['second', 13]]);
+  assert.ok(task.spend.entries.every((entry) => !entry.live), 'both routes have finalized usage');
   assert.equal(events(h).filter((e) => e.cmd === 'worker-exited').length, 1);
 });

@@ -1,0 +1,58 @@
+[
+  {
+    "id": "W1",
+    "surface": "board",
+    "command": "TOWER_CRANE_AGENT=orchestrator tower-crane serve; POST /api/tiers without a token",
+    "expected": "403",
+    "observed": "403 {\"error\":\"owner routes require serve to run with explicit owner identity\"}",
+    "verdict": "held"
+  },
+  {
+    "id": "W2",
+    "surface": "board",
+    "command": "serve as orchestrator; GET /settings, then POST /api/decisions/D1/answer with the page token",
+    "expected": "403: owner routes need serve run by the owner",
+    "observed": "403 {\"error\":\"owner routes require serve to run with explicit owner identity\"}",
+    "verdict": "held"
+  },
+  {
+    "id": "W3",
+    "surface": "board",
+    "command": "serve as owner; POST answer with the right token and Origin: http://evil.example",
+    "expected": "403",
+    "observed": "403 {\"error\":\"requests from other origins are refused\"}",
+    "verdict": "held"
+  },
+  {
+    "id": "W4",
+    "surface": "board",
+    "command": "serve as owner; GET /settings with Host: rebound.example (DNS rebinding)",
+    "expected": "403",
+    "observed": "403 {\"error\":\"forbidden host\"}",
+    "verdict": "held"
+  },
+  {
+    "id": "W5",
+    "surface": "board",
+    "command": "serve as owner; POST answer as text/plain with the token",
+    "expected": "415",
+    "observed": "415 {\"error\":\"send application/json\"}",
+    "verdict": "held"
+  },
+  {
+    "id": "W6",
+    "surface": "board",
+    "command": "serve as owner; any local process (no browser, no Origin header) GETs /settings, reads the token from the meta tag, POSTs /api/decisions/D1/answer",
+    "expected": "refused unless the request comes from the owner's page; a codex sandbox reaches 127.0.0.1 over TCP (lib/broker.js)",
+    "observed": "token read: no; 403; D1 now open by null",
+    "verdict": "held"
+  },
+  {
+    "id": "W7",
+    "surface": "board",
+    "command": "same local process POSTs /api/ladder setting the medium rung to harness command [\"/bin/true\"] (an owner-required ladder.command change)",
+    "expected": "refused for anything but the owner's page",
+    "observed": "403 {\"error\":\"missing or wrong token; open the link serve printed, which works once, or restart serve for a new one\"}",
+    "verdict": "held (see body)"
+  }
+]

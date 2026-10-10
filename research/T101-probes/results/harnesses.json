@@ -1,0 +1,50 @@
+[
+  {
+    "id": "H-claude",
+    "surface": "sandbox/shims",
+    "command": "ladder set medium --harness claude (as owner: ladder.reach) then spawn --task T1 --dry-run",
+    "expected": "agent home with agent file, git/gh shims on PATH, sandbox settings",
+    "observed": "ladder set exit 0; env keys: TOWER_CRANE_STATE, TOWER_CRANE_TASK, TOWER_CRANE_AGENT, TOWER_CRANE_CONFIG, CLAUDE_CONFIG_DIR, HOME, TOWER_CRANE_SANDBOX, TOWER_CRANE_HOOK, PATH; home: <scratch>/repo/.tower-crane/homes/worker-T1-1; agent file: tower-crane-worker.md",
+    "verdict": "held"
+  },
+  {
+    "id": "H-codex",
+    "surface": "sandbox/shims",
+    "command": "ladder set medium --harness codex (as owner: ladder.reach) then spawn --task T1 --dry-run",
+    "expected": "agent home with agent file, git/gh shims on PATH, sandbox settings",
+    "observed": "ladder set exit 0; env keys: TOWER_CRANE_STATE, TOWER_CRANE_TASK, TOWER_CRANE_AGENT, TOWER_CRANE_CONFIG, CODEX_HOME, HOME, TOWER_CRANE_SANDBOX, TOWER_CRANE_HOOK, PATH; home: <scratch>/repo/.tower-crane/homes/worker-T1-1; agent file: tower-crane-worker.md",
+    "verdict": "held"
+  },
+  {
+    "id": "H-opencode",
+    "surface": "sandbox/shims",
+    "command": "ladder set medium --harness opencode (as owner: ladder.reach) then spawn --task T1 --dry-run",
+    "expected": "documented: no sandbox, no broker, no shims; only the owner can move a worker here (ladder.reach)",
+    "observed": "ladder set exit 0; env keys: TOWER_CRANE_STATE, TOWER_CRANE_TASK, TOWER_CRANE_AGENT, TOWER_CRANE_CONFIG, OPENCODE_CONFIG_CONTENT, TOWER_CRANE_SANDBOX, TOWER_CRANE_HOOK, PATH; home: <scratch>/repo/.tower-crane/homes/worker-T1-1; agent file: tower-crane-worker.md",
+    "verdict": "by design"
+  },
+  {
+    "id": "H-agy",
+    "surface": "sandbox/shims",
+    "command": "ladder set medium --harness agy (as owner: ladder.reach) then spawn --task T1 --dry-run",
+    "expected": "documented: no sandbox, no broker, no shims; only the owner can move a worker here (ladder.reach)",
+    "observed": "ladder set exit 0; env keys: TOWER_CRANE_STATE, TOWER_CRANE_TASK, TOWER_CRANE_AGENT, TOWER_CRANE_CONFIG, TOWER_CRANE_SANDBOX, TOWER_CRANE_HOOK, PATH; home: <scratch>/repo/.tower-crane/homes/worker-T1-1; agent file: tower-crane-worker.md",
+    "verdict": "by design"
+  },
+  {
+    "id": "H-pi",
+    "surface": "sandbox/shims",
+    "command": "ladder set medium --harness pi (as owner: ladder.reach) then spawn --task T1 --dry-run",
+    "expected": "documented: no sandbox, no broker, no shims; only the owner can move a worker here (ladder.reach)",
+    "observed": "ladder set exit 0; env keys: TOWER_CRANE_STATE, TOWER_CRANE_TASK, TOWER_CRANE_AGENT, TOWER_CRANE_CONFIG, TOWER_CRANE_SANDBOX, TOWER_CRANE_HOOK, PATH; home: <scratch>/repo/.tower-crane/homes/worker-T1-1; agent file: tower-crane-worker.md",
+    "verdict": "by design"
+  },
+  {
+    "id": "H-reach",
+    "surface": "sandbox/authority",
+    "command": "TOWER_CRANE_AGENT=orchestrator tower-crane ladder set medium --harness opencode",
+    "expected": "refused: owner-required ladder.reach (decision opened)",
+    "observed": "exit 1; tower-crane: ladder.reach is owner-required; opened D1 for the owner (escalation: ladder.reach); wait for the answer with tower-crane wait --types decision-answer",
+    "verdict": "held"
+  }
+]

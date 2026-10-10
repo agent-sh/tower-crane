@@ -1,0 +1,22 @@
+{
+  "revision": "0a41ea5262f66b3d9d2be7f8d54485c789ceacc7",
+  "node": "v26.10.0",
+  "platform": "linux",
+  "scratch": "/home/avifenesh/.cache/tower-crane/agents/22cd04e4ddaf/worker-T144-1/T144-probes",
+  "probes": [
+    {
+      "id": "A21",
+      "surface": "automation",
+      "command": "nice -n 19 node research/review-2026-10-09/run.js A21",
+      "expected": "A known conflicting PR returns to rework before a tests or cleanup command runs (T143 control).",
+      "observed": {
+        "result": "done",
+        "gates": [],
+        "reworks": [
+          "PR #7 conflicts with main: conflict.txt. Merge the base, resolve these files and submit a new head."
+        ]
+      },
+      "verdict": "held"
+    }
+  ]
+}

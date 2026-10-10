@@ -1,0 +1,179 @@
+{
+  "runs": 3,
+  "jobs": 2,
+  "rows": [
+    {
+      "file": "test/board.test.js",
+      "before": {
+        "wall": 95.551236071,
+        "cpu": 73.01,
+        "failed": 0,
+        "cpu_range": [
+          71.46,
+          73.38
+        ],
+        "wall_range": [
+          93.202043786,
+          100.959677823
+        ]
+      },
+      "after": {
+        "wall": 65.874985685,
+        "cpu": 47.9,
+        "failed": 0,
+        "cpu_range": [
+          46.4,
+          48.71
+        ],
+        "wall_range": [
+          65.541753064,
+          69.613666532
+        ]
+      }
+    },
+    {
+      "file": "test/settings.test.js",
+      "before": {
+        "wall": 7.108318725,
+        "cpu": 4.91,
+        "failed": 0,
+        "cpu_range": [
+          4.66,
+          5.01
+        ],
+        "wall_range": [
+          7.031566652,
+          7.48386465
+        ]
+      },
+      "after": {
+        "wall": 6.801935395,
+        "cpu": 4.33,
+        "failed": 0,
+        "cpu_range": [
+          4.14,
+          4.36
+        ],
+        "wall_range": [
+          6.362844177,
+          7.30842281
+        ]
+      }
+    }
+  ],
+  "totals": {
+    "before": {
+      "cpu": 77.92,
+      "wall": 102.65955479600001
+    },
+    "after": {
+      "cpu": 52.23,
+      "wall": 72.67692108
+    }
+  },
+  "node": "v26.10.0",
+  "before": "e2f5277",
+  "after": "e681590 with awaited shared Chrome teardown",
+  "overlays": [
+    "The before helper assigns a private HOME to each temporary repository.",
+    "Both Plan scroll probes wait for the load animation frame before setting scroll offsets."
+  ],
+  "samples": [
+    {
+      "key": "after test/board.test.js",
+      "sample": {
+        "wall": 65.874985685,
+        "cpu": 46.4,
+        "status": 0
+      }
+    },
+    {
+      "key": "before test/settings.test.js",
+      "sample": {
+        "wall": 7.108318725,
+        "cpu": 4.91,
+        "status": 0
+      }
+    },
+    {
+      "key": "after test/settings.test.js",
+      "sample": {
+        "wall": 6.362844177,
+        "cpu": 4.36,
+        "status": 0
+      }
+    },
+    {
+      "key": "before test/board.test.js",
+      "sample": {
+        "wall": 93.202043786,
+        "cpu": 71.46,
+        "status": 0
+      }
+    },
+    {
+      "key": "after test/board.test.js",
+      "sample": {
+        "wall": 65.541753064,
+        "cpu": 48.71,
+        "status": 0
+      }
+    },
+    {
+      "key": "before test/settings.test.js",
+      "sample": {
+        "wall": 7.031566652,
+        "cpu": 4.66,
+        "status": 0
+      }
+    },
+    {
+      "key": "after test/settings.test.js",
+      "sample": {
+        "wall": 7.30842281,
+        "cpu": 4.14,
+        "status": 0
+      }
+    },
+    {
+      "key": "before test/board.test.js",
+      "sample": {
+        "wall": 95.551236071,
+        "cpu": 73.38,
+        "status": 0
+      }
+    },
+    {
+      "key": "after test/board.test.js",
+      "sample": {
+        "wall": 69.613666532,
+        "cpu": 47.9,
+        "status": 0
+      }
+    },
+    {
+      "key": "before test/settings.test.js",
+      "sample": {
+        "wall": 7.48386465,
+        "cpu": 5.01,
+        "status": 0
+      }
+    },
+    {
+      "key": "after test/settings.test.js",
+      "sample": {
+        "wall": 6.801935395,
+        "cpu": 4.33,
+        "status": 0
+      }
+    },
+    {
+      "key": "before test/board.test.js",
+      "sample": {
+        "wall": 100.959677823,
+        "cpu": 73.01,
+        "status": 0
+      }
+    }
+  ]
+}

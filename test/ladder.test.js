@@ -154,6 +154,25 @@ test('ladder save-user makes the project ladder the default for new projects', (
   assert.equal(fs.readFileSync(h.userConfig, 'utf8'), saved1);
 });
 
+test('ladder save-user writes only what the project defines and keeps the rest of the user file', (t) => {
+  const h = makeRepo(t);
+  h.init();
+  writeUser(h, { browser_kit: ['playwright'], note: 'kept', ladder: { medium: { fallbacks: [{ harness: 'claude', model: 'fable', effort: 'high' }] } } });
+  const p = h.readState('project.json');
+  delete p.harness;
+  delete p.ladder.easy;
+  h.writeState('project.json', p);
+  h.ok(['ladder', 'save-user']);
+  const saved = JSON.parse(fs.readFileSync(h.userConfig, 'utf8'));
+  // Neither the default harness nor easy is in the project, so the user file gets neither: the built-in applies to them.
+  assert.equal(saved.harness, undefined);
+  assert.equal(saved.ladder.easy, undefined);
+  assert.deepEqual(saved.ladder.hard, BUILTIN.hard);
+  assert.deepEqual(saved.ladder.medium, { ...BUILTIN.medium, fallbacks: [{ harness: 'claude', model: 'fable', effort: 'high' }] });
+  assert.equal(saved.note, 'kept');
+  assert.deepEqual(saved.browser_kit, ['playwright']);
+});
+
 test('personal hard fallbacks overlay project rungs and stay out of project writes', (t) => {
   const h = makeRepo(t);
   h.init();
@@ -178,11 +197,11 @@ test('personal hard fallbacks overlay project rungs and stay out of project writ
   assert.equal(h.readState('project.json').ladder.hard.fallbacks, undefined);
 });
 
-test('projects reject fallback configuration through flags and state', (t) => {
+test('projects reject fallback configuration through project flags and state', (t) => {
   const h = makeRepo(t);
   h.init();
-  assert.equal(h.run(['ladder', 'set', 'hard', '--fallbacks', '[]']).code, 2);
-  assert.equal(h.run(['ladder', 'set', 'hard', '--clear', 'fallbacks']).code, 2);
+  assert.equal(h.run(['project', 'set', '--fallbacks', '[]']).code, 2);
+  assert.equal(h.run(['init', '--fallbacks', '[]']).code, 2);
   const project = h.readState('project.json');
   project.ladder.hard.fallbacks = [];
   h.writeState('project.json', project);
@@ -209,7 +228,12 @@ test('ladder harness moves every rung without its own harness, and spawn runs ea
   fs.mkdirSync(empty);
   const spawn = (id, role) => h.json(['spawn', '--task', id, ...(role ? ['--role', role] : []), '--dry-run'], { env: { TOWER_CRANE_PLUGIN_ROOT: empty } });
   const flags = (argv) => argv.filter((a) => !a.includes('## Task'));
-  const piExtension = (agent) => ['--extension', path.join(h.state, 'homes', agent, 'hook.mjs')];
+  const piExtension = (agent) => [
+    '--no-approve', '--no-extensions', '--no-skills', '--no-prompt-templates', '--no-themes', '--no-context-files',
+    '--tools', agent.startsWith('worker') ? 'bash,read,edit,write,grep,find' : 'bash,read,grep,find',
+    '--append-system-prompt', path.join(h.state, 'homes', agent, 'AGENTS.md'),
+    '--extension', path.join(h.state, 'homes', agent, 'hook.mjs'),
+  ];
 
   h.ok(['ladder', 'harness', 'pi']);
   const show = h.json(['ladder', 'show']);
@@ -236,6 +260,29 @@ test('ladder harness moves every rung without its own harness, and spawn runs ea
   assert.deepEqual(flags(spawn('T3').argv).slice(0, 1), ['claude']);
   const harnessEvents = events(h).filter((e) => e.cmd === 'ladder harness').map((e) => e.detail.harness);
   assert.deepEqual(harnessEvents, ['pi', 'codex']);
+});
+
+test('Claude providers and pi tool opt-ins validate independently', (t) => {
+  const h = makeRepo(t);
+  h.init();
+  for (const provider of ['bedrock', 'anthropic']) {
+    h.ok(['ladder', 'set', 'hard', '--provider', provider]);
+    assert.equal(h.readState('project.json').ladder.hard.provider, provider);
+  }
+  h.ok(['ladder', 'set', 'medium', '--harness', 'pi', '--model', 'stub-model', '--provider', 'custom-pi-provider',
+    '--tools', '["ls"]', '--clear', 'profile']);
+  assert.deepEqual(h.readState('project.json').ladder.medium.tools, ['ls']);
+  const before = projectText(h);
+  for (const [args, message] of [
+    [['hard', '--provider', 'openai'], /claude provider must be anthropic or bedrock/],
+    [['medium', '--mcp', '["planted"]'], /MCP opt-ins are unsupported on pi/],
+    [['medium', '--tools', '["WebSearch"]'], /pi tools must be built-ins/],
+  ]) {
+    const result = h.run(['ladder', 'set', ...args]);
+    assert.equal(result.code, 1);
+    assert.match(result.stderr, message);
+    assert.equal(projectText(h), before);
+  }
 });
 
 test('ladder writes are validated, and a refused one leaves project.json as it was', (t) => {
@@ -393,4 +440,18 @@ test('validate allows identical Codex profile and explicit model identities', (t
   h.ok(['ladder', 'set', 'review', '--clear', 'model', '--profile', 'author-profile']);
   for (const tier of ['medium', 'hard', 'research']) h.ok(['ladder', 'set', tier, '--harness', 'codex', '--profile', 'author-profile', '--clear', 'model']);
   assert.deepEqual(h.json(['validate']).warnings, [], 'shared profiles are allowed');
+});
+
+test('switching from Codex to agy refuses inherited Codex flags until explicitly cleared', t => {
+  const h = makeRepo(t);
+  h.init();
+  h.ok(['ladder', 'set', 'hard', '--harness', 'codex', '--model', 'fixture',
+    '--clear', 'profile', '--args', '["--skip-git-repo-check"]']);
+  const before = h.readState('project.json');
+  const refused = h.run(['ladder', 'set', 'hard', '--harness', 'agy', '--model', 'gemini-3-pro']);
+  assert.notEqual(refused.code, 0);
+  assert.match(refused.stderr, /args may only use.*refused --skip-git-repo-check/);
+  assert.deepEqual(h.readState('project.json'), before);
+  h.ok(['ladder', 'set', 'hard', '--harness', 'agy', '--model', 'gemini-3-pro', '--clear', 'args']);
+  assert.equal(h.json(['ladder', 'show']).ladder.hard.harness, 'agy');
 });

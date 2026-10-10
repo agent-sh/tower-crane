@@ -5,6 +5,13 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 if (path.resolve(process.argv[1] || '') !== __filename) {
+  if (process.env.TOWER_CRANE_TEST_VERIFIED_AGY === '1') {
+    const agentsFile = path.join(path.dirname(path.dirname(process.argv[1])), 'lib', 'agents.js');
+    if (fs.existsSync(agentsFile)) {
+      const agents = require(agentsFile);
+      agents.CAPABILITIES = { ...agents.CAPABILITIES, agy: { sandbox: true, osSandbox: true } };
+    }
+  }
   const spawn = cp.spawn;
   cp.spawn = function offlineHarness(file, args, options) {
     const harness = /[\\/]scripts[\\/]fallback(?:\.exe)?$/.test(file) ? 'command' : file;
@@ -37,6 +44,12 @@ if (path.resolve(process.argv[1] || '') !== __filename) {
   }
   const modelFlag = args.includes('-m') ? '-m' : harness === 'codex' ? '-p' : '--model';
   const model = args[args.indexOf(modelFlag) + 1];
+  const providerTest = process.env.TOWER_CRANE_TEST_CLAUDE_PROVIDER;
+  const providerEnv = providerTest ? {
+    ...process.env,
+    ...JSON.parse(fs.readFileSync(path.join(process.env.CLAUDE_CONFIG_DIR, 'settings.json'), 'utf8')).env,
+  } : {};
+  const provider = providerTest ? providerEnv.CLAUDE_CODE_USE_BEDROCK === '1' ? 'bedrock' : 'anthropic' : null;
   if (!attempts.length) cli(['claim', process.env.TOWER_CRANE_TASK]);
   const claudeHome = process.env.CLAUDE_CONFIG_DIR;
   const claude = harness === 'claude' ? {
@@ -50,6 +63,10 @@ if (path.resolve(process.argv[1] || '') !== __filename) {
     env: process.env.ROUTE_ENV || null, broker: Boolean(process.env.TOWER_CRANE_BROKER),
     ...claude,
     node_test: Object.keys(process.env).filter((key) => /^NODE_TEST_/i.test(key)),
+    ...(providerTest ? { provider, provider_env: Object.fromEntries([
+      'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY',
+      'ANTHROPIC_MODEL', 'AWS_PROFILE', 'AWS_REGION', 'AWS_CONFIG_FILE', 'AWS_SHARED_CREDENTIALS_FILE',
+    ].map((key) => [key, providerEnv[key] || null])) } : {}),
   });
   if (process.env.TOWER_CRANE_TEST_FALLBACK_NOTE) cli(['task', 'note', process.env.TOWER_CRANE_TASK, `${harness} ${model} ${process.env.TOWER_CRANE_RETRY}`]);
   fs.writeFileSync(file, JSON.stringify(attempts));
@@ -66,7 +83,8 @@ if (path.resolve(process.argv[1] || '') !== __filename) {
     console.log(JSON.stringify({ type: 'result', is_error: false, model,
       usage: { input_tokens: 20, output_tokens: 4 } }));
   }
-  if (model === 'first' || model === 'second' && process.env.TOWER_CRANE_TEST_FALLBACK_CHAIN) {
+  if (model === 'first' || model === 'second' && process.env.TOWER_CRANE_TEST_FALLBACK_CHAIN
+    || providerTest && provider === process.env.TOWER_CRANE_TEST_FAIL_PROVIDER) {
     if (process.env.TOWER_CRANE_TEST_FALLBACK_REASON === 'refusal') {
       console.log(JSON.stringify(harness === 'codex'
         ? { type: 'item.completed', item: { type: 'refusal', text: 'Request refused by policy' } }
@@ -83,5 +101,9 @@ if (path.resolve(process.argv[1] || '') !== __filename) {
           : { type: 'turn.failed', error: { message } }));
     process.exit(type === 'permanent' ? 2 : type === 'signal' ? 75 : 1);
   }
-  if (process.env.TOWER_CRANE_TEST_FALLBACK_HOLD) setTimeout(() => {}, Number(process.env.TOWER_CRANE_TEST_FALLBACK_HOLD));
+  if (process.env.TOWER_CRANE_TEST_FALLBACK_FINISH) {
+    const timer = setInterval(() => {
+      if (fs.existsSync(process.env.TOWER_CRANE_TEST_FALLBACK_FINISH)) clearInterval(timer);
+    }, 25);
+  } else if (process.env.TOWER_CRANE_TEST_FALLBACK_HOLD) setTimeout(() => {}, Number(process.env.TOWER_CRANE_TEST_FALLBACK_HOLD));
 }

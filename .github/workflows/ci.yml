@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   test:
-    name: test (${{ matrix.os }}, node ${{ matrix.node }})
+    name: test (${{ matrix.os }}, node ${{ matrix.node }}${{ matrix.shard != '' && format(', shard {0}', matrix.shard) || '' }})
     runs-on: ${{ matrix.os }}
     # A test that hangs fails the run here instead of holding a runner for hours.
     timeout-minutes: 15
@@ -18,14 +18,22 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: ubuntu-latest, node: 26 }
-          - { os: ubuntu-latest, node: 24 }
-          - { os: windows-latest, node: 26 }
+          - { os: ubuntu-latest, node: 26, shard: '' }
+          - { os: ubuntu-latest, node: 24, shard: '' }
+          - { os: windows-latest, node: 26, shard: '1/3' }
+          - { os: windows-latest, node: 26, shard: '2/3' }
+          - { os: windows-latest, node: 26, shard: '3/3' }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ matrix.node }}
+      - run: npm run check:shared
+        env:
+          TOWER_CRANE_CHANGE_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
       - run: npm test
         env:
           TOWER_CRANE_TEST_TMP: ${{ runner.temp }}/tower-crane-tests
+          TC_TEST_SHARD: ${{ matrix.shard }}

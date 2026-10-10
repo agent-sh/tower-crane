@@ -1,0 +1,1 @@
+- Make the provider availability fixture recover through a command route that receives the task context, without requiring AWS credentials.

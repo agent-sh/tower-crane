@@ -1,0 +1,1 @@
+- Check terminal descriptors without initializing the stdin stream. Identity checks no longer make delayed hook payload reads fail with `EAGAIN`.

@@ -31,7 +31,7 @@ fs.writeFileSync(file, JSON.stringify(data));
 process.stdout.write(cli(['submit', task, '--sha', sha, '--pr', '12']));
 `);
   f.h.ok(['ladder', 'set', 'medium', '--harness', 'command', '--clear', 'model', '--clear', 'profile', '--clear', 'effort',
-    '--command', JSON.stringify([process.execPath, script])]);
+    '--command', JSON.stringify([process.execPath, script, '{prompt}'])]);
 }
 
 // Each test gets its own copy of a repository built once per file, since

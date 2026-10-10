@@ -1,0 +1,1 @@
+- Escalation tests record reviewer spawns so valid review failures remain covered under the review provenance rule.

@@ -6,6 +6,24 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { makeRepo } = require('./helpers');
 
+test('the owner config binding is preserved by project settings and must be an absolute path', (t) => {
+  const h = makeRepo(t);
+  h.init();
+  const original = h.readState('project.json');
+  h.ok(['project', 'set', '--name', 'renamed']);
+  assert.equal(h.readState('project.json').owner_config_dir, original.owner_config_dir);
+  const redirected = h.run(['project', 'set', '--owner-config-dir', h.base]);
+  assert.equal(redirected.code, 2);
+  assert.match(redirected.stderr, /unknown option --owner-config-dir/);
+  assert.equal(h.readState('project.json').owner_config_dir, original.owner_config_dir);
+  for (const invalid of [null, 4, {}, '', 'relative', `${h.base}\0suffix`]) {
+    h.writeState('project.json', { ...original, owner_config_dir: invalid });
+    const result = h.run(['project', 'show'], { env: { TOWER_CRANE_AGENT: 'orchestrator' } });
+    assert.equal(result.code, 1, result.stderr);
+    assert.match(result.stderr, /owner_config_dir must be an absolute path/);
+  }
+});
+
 test('project set stores, replaces and clears test paths and ignored CI apps', (t) => {
   const h = makeRepo(t);
   h.init();
@@ -94,6 +112,7 @@ test('project set and init help document the JSON settings and clearing value', 
     assert.match(help, /--tests-expensive JSON.*null/);
     assert.match(help, /--ci-ignore-apps JSON.*null/);
     assert.match(help, /--ci-required JSON.*null/);
+    assert.match(help, /--decision-delegation JSON.*owner only/);
   }
 });
 
@@ -172,17 +191,42 @@ test('project set and show text print configured lists and their defaults alongs
   const defaults = h.ok(['project', 'show']);
   assert.match(defaults, /tests\.paths: default layouts/);
   assert.match(defaults, /ci\.ignore_apps: \[\]/);
+  assert.match(defaults, /decision_delegation\.orchestrator_technical: false/);
   assert.match(defaults, /ladder \(default harness /);
 
   const set = h.ok(['project', 'set', '--tests-paths', '["qa/"]', '--ci-ignore-apps', '["claude","cursor"]']);
   assert.match(set, /tests\.paths: \["qa\/"\]/);
   assert.match(set, /ci\.ignore_apps: \["claude","cursor"\]/);
   assert.equal(h.ok(['project', 'show']), set);
+  const delegated = h.json([
+    'project', 'set', '--decision-delegation', '{"orchestrator_technical":true}', '--agent', 'owner',
+  ]);
+  assert.deepEqual(delegated.decision_delegation, { orchestrator_technical: true });
+  assert.match(h.ok(['project', 'show']), /decision_delegation\.orchestrator_technical: true/);
+  assert.match(h.ok(['project', 'set', '--decision-delegation', 'null', '--agent', 'owner']), /decision_delegation\.orchestrator_technical: false/);
+  assert.equal(h.ok(['project', 'show']), set);
 
   const empty = h.ok(['project', 'set', '--ci-ignore-apps', '[]']);
   assert.match(empty, /ci\.ignore_apps: \[\]/);
   const cleared = h.ok(['project', 'set', '--tests-paths', 'null', '--ci-ignore-apps', 'null']);
   assert.equal(cleared, defaults);
+});
+
+test('decision delegation accepts only its supported project rule', (t) => {
+  const initialized = makeRepo(t);
+  initialized.init(['--decision-delegation', '{"orchestrator_technical":true}', '--agent', 'owner']);
+  assert.deepEqual(initialized.json(['project', 'show']).decision_delegation, { orchestrator_technical: true });
+
+  const h = makeRepo(t);
+  h.init();
+  const files = ['project.json', 'events.jsonl'];
+  const before = files.map((file) => fs.readFileSync(path.join(h.state, file), 'utf8'));
+  for (const value of ['[', '[]', 'true', '{"orchestrator_technical":1}', '{"unexpected":true}']) {
+    const result = h.run(['project', 'set', '--name', 'must not persist', '--decision-delegation', value, '--agent', 'owner']);
+    assert.equal(result.code, 2, `${value}: ${result.stderr}`);
+    assert.match(result.stderr, /--decision-delegation/);
+    assert.deepEqual(files.map((file) => fs.readFileSync(path.join(h.state, file), 'utf8')), before);
+  }
 });
 
 test('test modes, kind overrides and expensive suites can be set, replaced and cleared', (t) => {
@@ -214,12 +258,15 @@ for (const [flag, value] of [
   ['--tests-mode', 'none'], ['--tests-by-kind', '{"code":"run-only"}'],
   ['--tests-expensive', 'true'], ['--tests-paths', '["src/**"]'], ['--tests-keep', '["lib/**"]'],
   ['--ci-local', JSON.stringify({ command: [process.execPath, '-e', ''], timeout: 5 })],
+  ['--decision-delegation', '{"orchestrator_technical":true}'],
 ]) {
-  test(`${flag} requires the orchestrator or explicit owner on init and project set without writing state`, (t) => {
+  const ownerRequired = flag === '--decision-delegation';
+  const allowed = ownerRequired ? /only the owner with an explicit identity/ : /only the orchestrator or the owner/;
+  test(`${flag} requires ${ownerRequired ? 'explicit owner identity' : 'the orchestrator or explicit owner'} on init and project set without writing state`, (t) => {
     const h = makeRepo(t);
     const init = h.run(['init', '--name', 'demo', '--goal', 'owner policy', flag, value, '--agent', 'worker-T9-1']);
     assert.equal(init.code, 1, init.stderr);
-    assert.match(init.stderr, /only the orchestrator or the owner/);
+    assert.match(init.stderr, allowed);
     assert.ok(!fs.existsSync(h.state), 'refused init creates no state directory');
     h.init();
     const files = ['project.json', 'tasks.json', 'decisions.json', 'events.jsonl', 'sketch.md', 'sketch.html'];
@@ -228,7 +275,7 @@ for (const [flag, value] of [
     for (const input of [value, 'null']) {
       const denied = h.run(['project', 'set', '--name', 'must not persist', flag, input, '--agent', 'worker-T9-1']);
       assert.equal(denied.code, 1, denied.stderr);
-      assert.match(denied.stderr, /only the orchestrator or the owner/);
+      assert.match(denied.stderr, allowed);
       assert.deepEqual(snapshot(), before);
     }
     assert.equal(h.run(['project', 'set', flag, value]).code, 0, 'explicit owner from env may set policy');

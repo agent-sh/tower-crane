@@ -4,21 +4,24 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { makeRepo } = require('./helpers');
+const { cachedFixture, makeRepo } = require('./helpers');
 
+// A task, a bare origin and a clone of it standing in for another machine;
+// built once per process for each base and copied for each test.
 function setup(t, base = 'main') {
-  const h = makeRepo(t);
-  if (base !== 'main') h.git(['branch', base]);
-  h.init(['--base', base]);
-  h.ok(['task', 'add', '--title', 'Fresh base', '--acceptance', 'starts from the freshest base']);
-  const origin = path.join(h.base, 'origin.git');
-  h.git(['init', '--bare', '-q', origin]);
-  h.git(['remote', 'add', 'origin', origin]);
-  h.git(['push', 'origin', base]);
-  h.git(['branch', `--set-upstream-to=origin/${base}`, base]);
-  const upstream = path.join(h.base, 'upstream');
-  h.git(['clone', '-q', '--branch', base, origin, upstream]);
-  return { ...h, origin, upstream, baseBranch: base };
+  return cachedFixture(t, base, (h) => {
+    if (base !== 'main') h.git(['branch', base]);
+    h.init(['--base', base]);
+    h.ok(['task', 'add', '--title', 'Fresh base', '--acceptance', 'starts from the freshest base']);
+    const origin = path.join(h.base, 'origin.git');
+    h.git(['init', '--bare', '-q', origin]);
+    h.git(['remote', 'add', 'origin', origin]);
+    h.git(['push', 'origin', base]);
+    h.git(['branch', `--set-upstream-to=origin/${base}`, base]);
+    const upstream = path.join(h.base, 'upstream');
+    h.git(['clone', '-q', '--branch', base, origin, upstream]);
+    return { origin, upstream, baseBranch: base };
+  });
 }
 
 function advance(h, cwd, file) {
@@ -274,7 +277,7 @@ for (const command of ['worktree', 'spawn']) {
     }
     if (command === 'spawn') {
       h.ok(['ladder', 'set', 'medium', '--harness', 'command', '--command',
-        JSON.stringify([process.execPath, '-e', 'process.exit(0)']), '--clear', 'profile', '--clear', 'effort']);
+        JSON.stringify([process.execPath, '-e', 'process.exit(0)', '{prompt}']), '--clear', 'profile', '--clear', 'effort']);
       for (const id of ids) h.ok(['brief', 'set', id, '-'], { input: 'Use the fresh base.\n' });
     }
     const attempts = guardUploadPack(h, 15000);
@@ -393,4 +396,146 @@ test('a registration interrupted before HEAD exists is refused without deleting 
   }
   assert.ok(fs.existsSync(path.join(admin, 'locked')));
   assert.equal(fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8'), before);
+});
+
+test('a rework recreated after a newer submission from another checkout starts from that submission, not a stale tracking ref', (t) => {
+  const h = setup(t);
+  h.ok(['claim', 'T1', '--agent', 'w-1']);
+  const wt = h.json(['worktree', 'T1']);
+  fs.writeFileSync(path.join(wt.path, 'first.txt'), 'first\n');
+  h.git(['add', 'first.txt'], wt.path);
+  h.git(['commit', '-qm', 'first'], wt.path);
+  h.git(['push', 'origin', wt.branch], wt.path);
+  h.ok(['submit', 'T1', '--sha', h.git(['rev-parse', 'HEAD'], wt.path), '--agent', 'w-1']);
+  h.ok(['rework', 'T1', '--reason', 'revise the first head', '--agent', 'owner']);
+  h.ok(['claim', 'T1', '--agent', 'w-2']);
+
+  // Another checkout pushes and submits a newer head; this checkout's tracking ref still names the first.
+  h.git(['fetch', '-q', 'origin', wt.branch], h.upstream);
+  h.git(['checkout', '-q', '-B', wt.branch, `origin/${wt.branch}`], h.upstream);
+  fs.writeFileSync(path.join(h.upstream, 'second.txt'), 'second\n');
+  h.git(['add', 'second.txt'], h.upstream);
+  h.git(['commit', '-qm', 'second'], h.upstream);
+  const second = h.git(['rev-parse', 'HEAD'], h.upstream);
+  h.git(['push', 'origin', wt.branch], h.upstream);
+  h.ok(['submit', 'T1', '--sha', second, '--agent', 'w-2']);
+  h.ok(['rework', 'T1', '--reason', 'revise the second head', '--agent', 'owner']);
+
+  h.git(['worktree', 'remove', '--force', wt.path]);
+  h.git(['branch', '-D', wt.branch]);
+  const again = h.json(['worktree', 'T1']);
+  assert.equal(again.created, true);
+  assert.equal(h.git(['rev-parse', 'HEAD'], again.path), second);
+});
+
+test('cancelling a task removes its worktree; a dirty one stays and says why', (t) => {
+  const h = makeRepo(t);
+  h.init();
+  for (const title of ['Clean', 'Dirty', 'Gone']) h.ok(['task', 'add', '--title', title, '--acceptance', 'not needed']);
+  const clean = h.json(['worktree', 'T1']);
+  const dirty = h.json(['worktree', 'T2']);
+  const gone = h.json(['worktree', 'T3']);
+  fs.writeFileSync(path.join(dirty.path, 'notes.txt'), 'unfinished\n');
+  fs.rmSync(gone.path, { recursive: true, force: true });
+
+  for (const id of ['T1', 'T2', 'T3']) h.ok(['task', 'update', id, '--status', 'cancelled']);
+
+  assert.ok(!fs.existsSync(clean.path), 'the clean worktree is removed');
+  assert.ok(fs.existsSync(dirty.path), 'the dirty worktree stays');
+  assert.ok(h.registers(dirty.path), 'git still registers the dirty worktree');
+  assert.ok(!h.registers(clean.path), 'git forgets the removed worktree');
+  assert.ok(!h.registers(gone.path), 'prune clears the registration of a missing directory');
+  const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  const kept = events.find((e) => e.cmd === 'worktree kept');
+  assert.equal(kept.task, 'T2');
+  assert.equal(kept.detail.reason, 'uncommitted changes');
+});
+
+test('cancelling keeps a worktree that git still has locked', (t) => {
+  const h = makeRepo(t);
+  h.init();
+  h.ok(['task', 'add', '--title', 'Locked', '--acceptance', 'not needed']);
+  const wt = h.json(['worktree', 'T1']);
+  h.git(['worktree', 'lock', '--reason', 'tower-crane: creating worktree', wt.path]);
+
+  h.ok(['task', 'update', 'T1', '--status', 'cancelled']);
+
+  assert.ok(fs.existsSync(wt.path), 'the locked worktree stays');
+  assert.ok(h.registers(wt.path), 'git still registers it');
+  const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  const kept = events.find((e) => e.cmd === 'worktree kept');
+  assert.equal(kept.task, 'T1');
+  assert.equal(kept.detail.reason, 'worktree is locked');
+});
+
+test('cancelling keeps a worktree while its worker process is still running', (t) => {
+  const h = makeRepo(t);
+  h.init();
+  for (const title of ['Live', 'Exited']) h.ok(['task', 'add', '--title', title, '--acceptance', 'not needed']);
+  const live = h.json(['worktree', 'T1']);
+  const exited = h.json(['worktree', 'T2']);
+  // This test process is alive; 999999 is a pid that has exited.
+  for (const [task, pid] of [['T1', process.pid], ['T2', 999999]]) {
+    fs.appendFileSync(path.join(h.state, 'events.jsonl'), `${JSON.stringify({
+      at: new Date().toISOString(), agent: 'orchestrator', cmd: 'spawn', task,
+      detail: { agent: 'w-1', role: 'worker', rung: 'easy', pid, attempt: 1 },
+    })}\n`);
+  }
+
+  for (const id of ['T1', 'T2']) h.ok(['task', 'update', id, '--status', 'cancelled']);
+
+  assert.ok(fs.existsSync(live.path), 'the worktree of a running worker stays');
+  assert.ok(!fs.existsSync(exited.path), 'the worktree of an exited worker is removed');
+  const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  const kept = events.find((e) => e.cmd === 'worktree kept');
+  assert.equal(kept.task, 'T1');
+  assert.equal(kept.detail.reason, 'an agent is still running on the task');
+});
+
+test('cancelling keeps a worktree while the monitor of an exited reviewer still runs', (t) => {
+  const h = makeRepo(t);
+  h.init();
+  h.ok(['task', 'add', '--title', 'Reviewed', '--acceptance', 'not needed']);
+  const wt = h.json(['worktree', 'T1']);
+  const at = new Date().toISOString();
+  // The reviewer process has exited; its monitor, this test's parent, is alive and runs in the worktree.
+  const detail = { agent: 'r-1', role: 'reviewer', rung: 'review', pid: 999999, attempt: 1 };
+  fs.appendFileSync(path.join(h.state, 'events.jsonl'), [
+    { at, agent: 'orchestrator', cmd: 'spawn', task: 'T1', detail },
+    { at, agent: 'orchestrator', cmd: 'spawn phase', task: 'T1', detail: { ...detail, phase: 'running', monitor_pid: process.ppid, active: true } },
+  ].map((e) => `${JSON.stringify(e)}\n`).join(''));
+
+  h.ok(['task', 'update', 'T1', '--status', 'cancelled']);
+
+  assert.ok(fs.existsSync(wt.path), 'the worktree stays while its monitor runs');
+  const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  const kept = events.find((e) => e.cmd === 'worktree kept');
+  assert.equal(kept.task, 'T1');
+  assert.equal(kept.detail.reason, 'an agent is still running on the task');
+});
+
+test('cancelling does not remove a checkout that a symlink moves outside the worktrees root', (t) => {
+  const h = makeRepo(t);
+  h.init();
+  h.ok(['task', 'add', '--title', 'Linked', '--acceptance', 'not needed']);
+  const wt = h.json(['worktree', 'T1']);
+  // The registered path still reads as inside the root, but its parent is a
+  // link to a directory elsewhere, so the checkout really lives outside.
+  const pool = path.join(h.base, 'repo-worktrees', 'pool');
+  const outside = path.join(h.base, 'outside');
+  fs.mkdirSync(pool, { recursive: true });
+  h.git(['worktree', 'move', wt.path, path.join(pool, path.basename(wt.path))]);
+  fs.mkdirSync(outside);
+  fs.renameSync(pool, path.join(outside, 'pool'));
+  // A junction needs no privilege on Windows; POSIX ignores the type.
+  fs.symlinkSync(path.join(outside, 'pool'), pool, 'junction');
+
+  h.ok(['task', 'update', 'T1', '--status', 'cancelled']);
+
+  const checkout = path.join(outside, 'pool', path.basename(wt.path));
+  assert.ok(fs.existsSync(checkout), 'the checkout outside the worktrees root stays');
+  const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  const kept = events.find((e) => e.cmd === 'worktree kept');
+  assert.equal(kept.task, 'T1');
+  assert.equal(kept.detail.reason, 'its real location is not under the worktrees root');
 });

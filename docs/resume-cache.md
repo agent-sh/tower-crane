@@ -28,6 +28,9 @@ Fresh cache read was 544 tokens and cache creation was 20,710; resumed cache
 read was 2,171 and cache creation was 19,185. This single validation pair
 agrees with the three-pair measurement. Claude resume stays disabled until
 a measurement shows it is cheaper for the configured route.
+[prompt-cache.md](prompt-cache.md) traces the rewrite to the breakpoint Claude
+Code puts on its trailing system message, and measures a proxy lever that makes
+the resumed turn read the conversation from cache.
 
 The task brief also reports a separate 2026-10-06 Codex observation: about
 19.6k cached input tokens with `codex exec resume`, and 0 with `codex exec fork`.

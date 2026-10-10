@@ -1,0 +1,178 @@
+[
+  {
+    "id": "B1",
+    "surface": "broker",
+    "command": "broker.authorize(worker-T2-1 on T2, [\"accept\",\"T2\"])",
+    "expected": "refused",
+    "observed": "refused: worker-T2-1 is a sandboxed worker; it changes state only with claim, renew, release, submit, spend, task note, msg, ask, hook, not accept",
+    "verdict": "held"
+  },
+  {
+    "id": "B2",
+    "surface": "broker",
+    "command": "broker.authorize(worker-T2-1 on T2, [\"claim\",\"T1\"])",
+    "expected": "refused",
+    "observed": "refused: worker-T2-1 works on T2 only, not T1",
+    "verdict": "held"
+  },
+  {
+    "id": "B3",
+    "surface": "broker",
+    "command": "broker.authorize(worker-T2-1 on T2, [\"task\",\"note\",\"T2\",\"x\",\"--agent=orchestrator\"])",
+    "expected": "refused",
+    "observed": "refused: worker-T2-1 cannot act as orchestrator",
+    "verdict": "held"
+  },
+  {
+    "id": "B4",
+    "surface": "broker",
+    "command": "broker.authorize(worker-T2-1 on T2, [\"msg\",\"--to\",\"orchestrator\",\"--task\",\"T1\",\"x\"])",
+    "expected": "refused",
+    "observed": "refused: worker-T2-1 works on T2 only, not T1",
+    "verdict": "held"
+  },
+  {
+    "id": "B6",
+    "surface": "broker",
+    "command": "broker.authorize(worker-T2-1 on T2, [\"ask\",\"--question\",\"q\",\"--option\",\"a\",\"--blocks\",\"T1\"])",
+    "expected": "refused",
+    "observed": "refused: worker-T2-1 works on T2 only, not T1",
+    "verdict": "held"
+  },
+  {
+    "id": "B7",
+    "surface": "broker",
+    "command": "broker.authorize(worker-T2-1 on T2, [\"spend\",\"T2\",\"--from-spawn\",\"worker-T1-1\"])",
+    "expected": "refused",
+    "observed": "refused: worker-T2-1 collects its own spawn only, not worker-T1-1",
+    "verdict": "held"
+  },
+  {
+    "id": "B8",
+    "surface": "broker",
+    "command": "broker.authorize(worker-T2-1 on T2, [\"hook\",\"stop\",\"--binding\",\"/home/avifenesh/.cache/t101-review/tmp/tower-crane-z38Ld8/repo/.tower-crane/homes/worker-T1-1/hook.json\"])",
+    "expected": "refused",
+    "observed": "refused: worker-T2-1 uses its own hook binding only, not /home/avifenesh/.cache/t101-review/tmp/tower-crane-z38Ld8/repo/.tower-crane/homes/worker-T1-1/hook.json",
+    "verdict": "held"
+  },
+  {
+    "id": "B9",
+    "surface": "broker",
+    "command": "broker.authorize(worker-T2-1 on T2, [\"submit\",\"T1\",\"--sha\",\"50b732a15be40ccb2065cb2ba0e7b366d511b736\",\"--\",\"T2\"])",
+    "expected": "refused",
+    "observed": "refused: worker-T2-1 works on T2 only, not T1",
+    "verdict": "held"
+  },
+  {
+    "id": "B10",
+    "surface": "broker",
+    "command": "broker.authorize(worker-T2-1, submit T2 --sha 50b732a --state /elsewhere --agent worker-T2-1)",
+    "expected": "allowed, with the job's --agent and --state and the request's dropped",
+    "observed": "allowed: submit --agent worker-T2-1 --state /home/avifenesh/.cache/t101-review/tmp/tower-crane-z38Ld8/repo/.tower-crane T2 --sha 50b732a15be40ccb2065cb2ba0e7b366d511b736",
+    "verdict": "held"
+  },
+  {
+    "id": "B11",
+    "surface": "broker",
+    "command": "broker.authorize(reviewer-T2-1 on T2, evidence T2 --type tests --ok)",
+    "expected": "refused",
+    "observed": "refused: reviewer-T2-1 records review evidence, not tests",
+    "verdict": "held"
+  },
+  {
+    "id": "B12",
+    "surface": "broker/reactions",
+    "command": "broker.authorize(worker-T2-1 on T2, msg --to worker-T1-1 \"note from T2\"), no --task",
+    "expected": "refused: a worker reports to the orchestrator, not to another task's agent",
+    "observed": "allowed: msg --agent worker-T2-1 --state /home/avifenesh/.cache/t101-review/tmp/tower-crane-z38Ld8/repo/.tower-crane --to worker-T1-1 note from T2",
+    "verdict": "CONFIRMED"
+  },
+  {
+    "id": "B13",
+    "surface": "reactions",
+    "command": "TOWER_CRANE_AGENT=worker-T2-1 TOWER_CRANE_TASK=T2 tower-crane msg --to worker-T1-1 \"note from T2\"; then harness-hooks.unread(events, worker-T1-1)",
+    "expected": "not delivered to another task's agent",
+    "observed": "exit 0; message sent to worker-T1-1; inbox of worker-T1-1: [{\"from\":\"worker-T2-1\",\"task\":\"T2\",\"text\":\"note from T2\"}]",
+    "verdict": "CONFIRMED"
+  },
+  {
+    "id": "B14",
+    "surface": "broker",
+    "command": "TCP request to the live broker on 127.0.0.1 with a wrong token",
+    "expected": "refused",
+    "observed": "{\"code\":1,\"stdout\":\"\",\"stderr\":\"tower-crane: the broker refused a request without its token\\n\"}",
+    "verdict": "held"
+  },
+  {
+    "id": "B15",
+    "surface": "broker",
+    "command": "TCP request with the token read from brokers/worker-T2-1/broker.json (mode 600)",
+    "expected": "accepted: any unsandboxed same-uid process that reads the file acts as the worker",
+    "observed": "{\"code\":0,\"stdout\":\"noted on T2\\n\",\"stderr\":\"\"}",
+    "verdict": "by design"
+  },
+  {
+    "id": "X1",
+    "surface": "shim",
+    "command": "git shim gitDenied([\"push\",\"origin\",\"HEAD:main\"]), gitPush=branch, origin https://example.invalid/acme/app.git",
+    "expected": "refused: a worker publishes its task branch, not the base",
+    "observed": "allowed",
+    "verdict": "CONFIRMED"
+  },
+  {
+    "id": "X2",
+    "surface": "shim",
+    "command": "git shim gitDenied([\"push\",\"origin\",\"HEAD:refs/tags/v9.9.9\"]), gitPush=branch, origin https://example.invalid/acme/app.git",
+    "expected": "refused: a worker publishes no tags",
+    "observed": "allowed",
+    "verdict": "CONFIRMED"
+  },
+  {
+    "id": "X3",
+    "surface": "shim",
+    "command": "git shim gitDenied([\"-c\",\"core.fsmonitor=true\",\"status\"]), gitPush=branch, origin https://example.invalid/acme/app.git",
+    "expected": "refused",
+    "observed": "denied: git -c core.fsmonitor",
+    "verdict": "held"
+  },
+  {
+    "id": "X4",
+    "surface": "shim",
+    "command": "git shim gitDenied([\"push\",\"--force\",\"origin\",\"HEAD\"]), gitPush=branch, origin https://example.invalid/acme/app.git",
+    "expected": "refused",
+    "observed": "denied: git push --force",
+    "verdict": "held"
+  },
+  {
+    "id": "X5",
+    "surface": "shim",
+    "command": "git shim gitDenied([\"push\",\"origin\",\"+HEAD:feature\"]), gitPush=branch, origin https://example.invalid/acme/app.git",
+    "expected": "refused",
+    "observed": "denied: git push +refspec or :refspec",
+    "verdict": "held"
+  },
+  {
+    "id": "X6",
+    "surface": "shim",
+    "command": "git shim gitDenied([\"config\",\"core.fsmonitor\",\"cmd\"]), gitPush=branch, origin https://example.invalid/acme/app.git",
+    "expected": "allowed by the shim (config is a git command); where it lands is the sandbox's call",
+    "observed": "allowed",
+    "verdict": "held"
+  },
+  {
+    "id": "X7",
+    "surface": "shim/merge",
+    "command": "gh shim ghDenied([\"pr\",\"edit\",\"7\",\"--base\",\"release\"]) under the worker policy",
+    "expected": "allowed (pr edit is a worker write); M1 shows what follows",
+    "observed": "allowed",
+    "verdict": "held"
+  },
+  {
+    "id": "X8",
+    "surface": "sandbox",
+    "command": "git config core.fsmonitor <script> in the repository's shared .git/config (the worker sandbox may write it), then the orchestrator runs tower-crane worktree T3",
+    "expected": "the orchestrator's git ignores repository-supplied commands",
+    "observed": "exit 0; /home/avifenesh/.cache/t101-review/tmp/tower-crane-z38Ld8/repo-worktrees/T3-three; marker written: 2 run(s) from 749 /home/avifenesh/.cache/t101-review/tmp/tower-crane-z38Ld8/repo-worktrees/T3-three",
+    "verdict": "CONFIRMED"
+  }
+]

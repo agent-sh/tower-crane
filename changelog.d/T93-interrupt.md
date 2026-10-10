@@ -1,0 +1,1 @@
+- Preserve live spend when a dispatch is interrupted: stop the harness, reconcile its usage once, and retain the stopped phase without changing the task revision.

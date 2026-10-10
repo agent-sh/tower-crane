@@ -1,0 +1,1 @@
+- Preserve reviewer provenance in cached gate fixtures and interrupt feedback tests. Update the audit and review mutations for the shared reviewer eligibility check.

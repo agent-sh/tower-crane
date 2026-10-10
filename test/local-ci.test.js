@@ -5,11 +5,15 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const { makeRepo } = require('./helpers');
-const { gateFixture } = require('./gate-helpers');
+const { makeRepo, cachedFixture } = require('./helpers');
+const { gateFixture, changeKind } = require('./gate-helpers');
 
+// Each fixture is built once per process and copied for each test.
 function fixture(t, script) {
-  const h = makeRepo(t);
+  return cachedFixture(t, `local:${script || ''}`, (h) => build(h, script));
+}
+
+function build(h, script) {
   h.env.TOWER_CRANE_TMP = path.join(h.base, 'gate-tmp');
   h.log = path.join(h.base, 'check.json');
   h.command = [process.execPath, 'ci.js', h.log, 'literal argument; $(exit 1)'];
@@ -40,16 +44,19 @@ fs.writeFileSync(process.argv[2], JSON.stringify({
   h.ok(['task', 'add', '--title', 'local check', '--kind', 'docs', '--acceptance', 'checked']);
   h.ok(['claim', 'T1', '--agent', 'worker']);
   h.ok(['submit', 'T1', '--agent', 'worker', '--sha', h.sha, '--branch', 'local-change', '--pr', '1']);
+  h.reviewer('T1', 'reviewer', h.sha);
   h.ok(['evidence', 'T1', '--type', 'review', '--ok', '--sha', h.sha, '--agent', 'reviewer']);
-  return h;
+  return { log: h.log, command: h.command, sha: h.sha, baseSha: h.baseSha };
 }
 
-function mergeFixture(t) {
-  const h = fixture(t);
-  h.ok(['project', 'set', '--repo', 'acme/demo']);
-  h.merged = path.join(h.base, 'merged');
-  const preload = path.join(h.base, 'github.js');
-  fs.writeFileSync(preload, `
+// A fake gh on a preload, and with origin a bare remote and a clone of it.
+function mergeFixture(t, { origin = false } = {}) {
+  return cachedFixture(t, `merge:${origin}`, (h) => {
+    const fields = build(h);
+    h.ok(['project', 'set', '--repo', 'acme/demo']);
+    h.merged = path.join(h.base, 'merged');
+    const preload = path.join(h.base, 'github.js');
+    fs.writeFileSync(preload, `
 const cp = require('node:child_process');
 const fs = require('node:fs');
 const original = cp.spawnSync;
@@ -68,12 +75,15 @@ cp.spawnSync = function(command, args, opts) {
   if (args[0] === 'pr' && args[1] === 'merge') fs.writeFileSync(merged, '');
   return {status: 0, stderr: '', stdout: JSON.stringify({
     headRefOid: ${JSON.stringify(h.sha)}, state: fs.existsSync(merged) ? 'MERGED' : 'OPEN',
+    baseRefName: ${JSON.stringify(h.json(['project', 'show']).base)}, isCrossRepository: false,
     mergeCommit: {oid: ${JSON.stringify(h.sha)}}
   })};
 };
 `);
-  h.env.NODE_OPTIONS = `${h.env.NODE_OPTIONS || ''} --require=${JSON.stringify(preload)}`;
-  return h;
+    h.env.NODE_OPTIONS = `${h.env.NODE_OPTIONS || ''} --require=${JSON.stringify(preload)}`;
+    if (origin) originFixture(h);
+    return { ...fields, merged: h.merged, origin: h.origin, upstream: h.upstream };
+  });
 }
 
 function originFixture(h) {
@@ -122,6 +132,7 @@ test('accept reruns local CI when the submitted head has no receipt', (t) => {
   h.git(['commit', '--allow-empty', '-qm', 'another head with the same tree']);
   const next = h.git(['rev-parse', 'HEAD']);
   h.ok(['submit', 'T1', '--agent', 'worker', '--sha', next]);
+  h.reviewer('T1', 'reviewer', next);
   h.ok(['evidence', 'T1', '--type', 'review', '--ok', '--sha', next, '--agent', 'reviewer']);
   assert.equal(h.json(['task', 'show', 'T1']).gates.gates.find((g) => g.type === 'ci').ok, false);
   h.ok(['accept', 'T1']);
@@ -153,8 +164,7 @@ test('local CI receipt for an older merged tree cannot satisfy acceptance or mer
 
 for (const changedTree of [true, false]) {
   test(`merge refreshes a remote-only base advance with ${changedTree ? 'a changed' : 'the same'} tree`, (t) => {
-    const h = mergeFixture(t);
-    originFixture(h);
+    const h = mergeFixture(t, { origin: true });
     h.ok(['check', 'ci', 'T1']);
     h.ok(['accept', 'T1']);
     if (changedTree) fs.writeFileSync(path.join(h.upstream, 'remote.txt'), 'remote\n');
@@ -180,13 +190,13 @@ for (const changedTree of [true, false]) {
     assert.equal(receipt.base_sha, remote);
     const merged = h.json(['merge', 'T1']);
     assert.equal(merged.ok, true);
+    assert.match(merged.summary, /into main/);
     assert.ok(merged.commands.some((c) => c.command === 'git' && c.args.includes('fetch') && c.status === 0));
   });
 }
 
 test('merge refuses an unreachable or timed out local CI base fetch', (t) => {
-  const h = mergeFixture(t);
-  originFixture(h);
+  const h = mergeFixture(t, { origin: true });
   h.ok(['check', 'ci', 'T1']);
   h.ok(['accept', 'T1']);
   const timedOut = h.run(['merge', 'T1'], { env: { LOCAL_FETCH_TIMEOUT: '1' } });
@@ -201,8 +211,7 @@ test('merge refuses an unreachable or timed out local CI base fetch', (t) => {
 });
 
 test('a divergent local base cannot hide a remote advance from merge', (t) => {
-  const h = mergeFixture(t);
-  originFixture(h);
+  const h = mergeFixture(t, { origin: true });
   fs.writeFileSync(path.join(h.repo, 'local.txt'), 'local\n');
   h.git(['add', '.']);
   h.git(['commit', '-qm', 'local base advances']);
@@ -227,6 +236,7 @@ test('hosted CI merges without fetching an unavailable origin when ci.local is a
   h.ok(['task', 'add', '--title', 'hosted check', '--kind', 'docs', '--acceptance', 'checked']);
   h.ok(['claim', 'T1', '--agent', 'worker']);
   h.ok(['submit', 'T1', '--agent', 'worker', '--sha', sha, '--branch', 'fixture-change', '--pr', '1']);
+  h.reviewer('T1', 'reviewer', sha);
   h.ok(['evidence', 'T1', '--type', 'review', '--ok', '--sha', sha, '--agent', 'reviewer']);
   h.ok(['check', 'ci', 'T1']);
   h.ok(['accept', 'T1']);
@@ -237,11 +247,12 @@ test('hosted CI merges without fetching an unavailable origin when ci.local is a
 });
 
 test('completed local CI tasks keep their audited result without reading current trees', (t) => {
-  const h = mergeFixture(t);
-  originFixture(h);
+  const h = mergeFixture(t, { origin: true });
   h.ok(['check', 'ci', 'T1']);
   h.ok(['accept', 'T1']);
-  h.ok(['merge', 'T1']);
+  const merged = h.json(['merge', 'T1']);
+  assert.equal(merged.ok, true);
+  assert.match(merged.summary, /into main/);
   fs.writeFileSync(path.join(h.repo, 'later.txt'), 'later\n');
   h.git(['add', '.']);
   h.git(['commit', '-qm', 'base moves after merge']);
@@ -283,6 +294,7 @@ test('matching audit copies cannot bind a receipt to another head or tree', (t) 
   h.git(['commit', '--allow-empty', '-qm', 'new head for receipt validation']);
   const next = h.git(['rev-parse', 'HEAD']);
   h.ok(['submit', 'T1', '--agent', 'worker', '--sha', next]);
+  h.reviewer('T1', 'reviewer', next);
   h.ok(['evidence', 'T1', '--type', 'review', '--ok', '--sha', next, '--agent', 'reviewer']);
   const doc = h.readState('tasks.json');
   const evidence = doc.tasks[0].evidence.findLast((e) => e.type === 'ci');
@@ -358,7 +370,7 @@ test('local CI selects kind args, replacement commands and the default with audi
     ['ops', 'kind:ops', local.by_kind.ops.command, 10],
     ['research', 'default', h.command, 5],
   ]) {
-    h.ok(['task', 'update', 'T1', '--kind', kind]);
+    changeKind(h, kind);
     const e = h.json(['check', 'ci', 'T1']);
     assert.equal(e.receipt.variant, variant);
     assert.deepEqual(e.receipt.command, command);
@@ -380,6 +392,8 @@ test('changing kind, which can select a different local CI variant, is the orche
     by_kind: { docs: { args: ['--lab'] }, ops: { args: ['--s3'] } },
   };
   h.ok(['project', 'set', '--ci-local', JSON.stringify(local)]);
+  // A submitted task refuses any kind change, so the kind moves while it waits for rework.
+  h.ok(['rework', 'T1', '--reason', 'retier the local check', '--agent', 'owner']);
   const tasks = h.readState('tasks.json');
   const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8');
   const denied = h.run(['task', 'update', 'T1', '--kind', 'ops', '--agent', 'worker']);
@@ -392,6 +406,8 @@ test('changing kind, which can select a different local CI variant, is the orche
   h.ok(['task', 'update', 'T1', '--ci-local', JSON.stringify(override)]);
   const allowed = h.run(['task', 'update', 'T1', '--kind', 'ops', '--agent', 'orchestrator']);
   assert.equal(allowed.code, 0, allowed.stderr);
+  h.ok(['claim', 'T1', '--agent', 'worker']);
+  h.ok(['submit', 'T1', '--agent', 'worker', '--sha', h.sha]);
   const e = h.json(['check', 'ci', 'T1']);
   assert.equal(e.receipt.variant, 'task:T1');
   assert.deepEqual(e.receipt.command, [...h.command, ...override.args]);
@@ -439,7 +455,7 @@ test('kind variants with identical argv cannot reuse receipts or merge under a d
   const local = { command: h.command, timeout: 5, by_kind: { docs: { args: [] }, ops: { args: [] } } };
   h.ok(['project', 'set', '--ci-local', JSON.stringify(local)]);
   h.ok(['check', 'ci', 'T1']);
-  h.ok(['task', 'update', 'T1', '--kind', 'ops']);
+  changeKind(h, 'ops');
   assert.match(h.run(['accept', 'T1']).stderr, /receipt.*variant/);
   h.ok(['check', 'ci', 'T1']);
   h.ok(['accept', 'T1']);

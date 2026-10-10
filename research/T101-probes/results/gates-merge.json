@@ -1,0 +1,82 @@
+[
+  {
+    "id": "G1",
+    "surface": "gates",
+    "command": "review ok at 50b732a by r1, then the worker resubmits T1 at 48a5bd4; task show T1",
+    "expected": "review missing at the new head",
+    "observed": "gates: review missing",
+    "verdict": "held"
+  },
+  {
+    "id": "G2",
+    "surface": "gates",
+    "command": "the worker resubmits T1 back at 50b732a (the reviewed head); task show T1",
+    "expected": "review counts again: it was made at this sha and revision (expected binding)",
+    "observed": "gates: review ok",
+    "verdict": "held"
+  },
+  {
+    "id": "G3",
+    "surface": "gates",
+    "command": "rework T1 --reason \"...\", then the worker claims and resubmits the same sha 50b732a with no change; accept T1",
+    "expected": "refused: the review that rework rejected should not carry over",
+    "observed": "gates: review ok; exit 0; accepted T1 at 50b732a (review ok by r1)",
+    "verdict": "CONFIRMED"
+  },
+  {
+    "id": "G4",
+    "surface": "gates",
+    "command": "review ok on T2, then brief set T2 with a new requirement; task show T2",
+    "expected": "the brief is part of what was reviewed; a changed brief needs a new review",
+    "observed": "gates: review ok",
+    "verdict": "CONFIRMED"
+  },
+  {
+    "id": "G5",
+    "surface": "gates",
+    "command": "task update T2 --acceptance x --acceptance y (acceptance change); task show T2",
+    "expected": "review no longer counts (revision bump)",
+    "observed": "gates: review missing",
+    "verdict": "held"
+  },
+  {
+    "id": "G6",
+    "surface": "gates",
+    "command": "append tests and clean evidence to tasks.json by hand (no check event in events.jsonl); task show T3",
+    "expected": "not counted: no audit receipt",
+    "observed": "gates: tests missing, clean missing, review missing",
+    "verdict": "held"
+  },
+  {
+    "id": "M1",
+    "surface": "merge",
+    "command": "merge gate on accepted T4 whose PR #42 base is \"release\" while project.base is \"main\" (fake gh)",
+    "expected": "refused: the gates ran against main",
+    "observed": "ok=true; merged PR #42 into main in acme/app (squash) at cccccccccc; merge commit eeeeeeeeee; gh calls: pr view, pr merge, pr view",
+    "verdict": "CONFIRMED"
+  },
+  {
+    "id": "M2",
+    "surface": "merge",
+    "command": "merge gate on T4 whose PR #42 is from a fork (isCrossRepository true)",
+    "expected": "refused like the stack path, or the same-repo assumption documented",
+    "observed": "ok=true; merged PR #42 into main in acme/app (squash) at cccccccccc; merge commit eeeeeeeeee",
+    "verdict": "CONFIRMED"
+  },
+  {
+    "id": "M3",
+    "surface": "merge",
+    "command": "merge gate on T4 whose PR head moved to an unaccepted commit",
+    "expected": "refused",
+    "observed": "ok=false; PR head moved: PR #42 head is dddddddddd, the accepted sha is cccccccccc. Push cccccccccc back, or submit the new head and take it through the gates again.",
+    "verdict": "held"
+  },
+  {
+    "id": "M4",
+    "surface": "stack/merge",
+    "command": "stack merge of T4: the PR head moves after the last pr view and before gh stack merge --squash (fake gh)",
+    "expected": "nothing unaccepted lands",
+    "observed": "ok=false; landed head ddddddd; stack merge not confirmed: T4: PR #42 is MERGED or its head moved",
+    "verdict": "CONFIRMED"
+  }
+]

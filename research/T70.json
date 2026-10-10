@@ -1,0 +1,385 @@
+{
+  "sources": [
+    {
+      "id": "s1",
+      "url": "https://sre.google/sre-book/monitoring-distributed-systems/"
+    },
+    {
+      "id": "s2",
+      "url": "https://sre.google/sre-book/being-on-call/"
+    },
+    {
+      "id": "s3",
+      "url": "https://sre.google/sre-book/managing-incidents/"
+    },
+    {
+      "id": "s4",
+      "url": "https://response.pagerduty.com/oncall/alerting_principles/"
+    },
+    {
+      "id": "s5",
+      "url": "https://response.pagerduty.com/before/different_roles/"
+    },
+    {
+      "id": "s6",
+      "url": "https://google.github.io/eng-practices/review/reviewer/speed.html"
+    },
+    {
+      "id": "s7",
+      "url": "https://www.microsoft.com/en-us/research/publication/expectations-outcomes-and-challenges-of-modern-code-review/"
+    },
+    {
+      "id": "s8",
+      "url": "https://martinfowler.com/articles/continuousIntegration.html"
+    },
+    {
+      "id": "s9",
+      "url": "https://docs.github.com/en/pull-requests/reference/status-checks"
+    },
+    {
+      "id": "s10",
+      "url": "https://www.nngroup.com/articles/ten-usability-heuristics/"
+    },
+    {
+      "id": "s11",
+      "url": "https://www.nngroup.com/articles/dashboards-preattentive/"
+    },
+    {
+      "id": "s12",
+      "url": "https://www.nngroup.com/articles/indicators-validations-notifications/"
+    },
+    {
+      "id": "s13",
+      "url": "https://www.nngroup.com/articles/dark-mode/"
+    },
+    {
+      "id": "s14",
+      "url": "https://www.w3.org/TR/WCAG22/"
+    },
+    {
+      "id": "s15",
+      "url": "https://calmtech.com/papers/designing-calm-technology"
+    },
+    {
+      "id": "s16",
+      "url": "https://pair.withgoogle.com/chapter/explainability-trust/"
+    },
+    {
+      "id": "s17",
+      "url": "https://en.wikipedia.org/wiki/Automation_bias"
+    },
+    {
+      "id": "s18",
+      "url": "https://en.wikipedia.org/wiki/Ironies_of_Automation"
+    },
+    {
+      "id": "s19",
+      "url": "https://en.wikipedia.org/wiki/Alarm_fatigue"
+    },
+    {
+      "id": "s20",
+      "url": "https://www.microsoft.com/en-us/haxtoolkit/guideline/support-efficient-correction/"
+    },
+    {
+      "id": "s21",
+      "url": "https://www.anthropic.com/engineering/building-effective-agents"
+    },
+    {
+      "id": "s22",
+      "url": "https://arxiv.org/abs/2506.12469"
+    },
+    {
+      "id": "s23",
+      "url": "https://docs.github.com/en/copilot/how-tos/copilot-on-github/use-copilot-agents/manage-and-track-agents"
+    },
+    {
+      "id": "s24",
+      "url": "https://code.claude.com/docs/en/agent-view"
+    },
+    {
+      "id": "s25",
+      "url": "https://en.wikipedia.org/wiki/Keystroke-level_model"
+    },
+    {
+      "id": "s26",
+      "url": "https://learn.chatgpt.com/docs/cloud"
+    }
+  ],
+  "claims": [
+    {
+      "claim": "Interruptions must be rare and each must demand a person; otherwise people stop reading them.",
+      "quote": "When pages occur too frequently, employees second-guess, skim, or even ignore incoming alerts, sometimes even ignoring a \"real\" page that’s masked by the noise.",
+      "source": "s1"
+    },
+    {
+      "claim": "Anything that interrupts the owner must be actionable.",
+      "quote": "Every page should be actionable.",
+      "source": "s1"
+    },
+    {
+      "claim": "Problems that are not urgent belong on a dashboard, not in an interruption.",
+      "quote": "instead, you should favor a dashboard that monitors all ongoing subcritical problems for the sort of information that typically ends up in email alerts.",
+      "source": "s1"
+    },
+    {
+      "claim": "Interruption load has a measurable sustainable ceiling, on the order of a couple of pages per shift.",
+      "quote": "number of daily tickets < 5, paging events per shift < 2",
+      "source": "s2"
+    },
+    {
+      "claim": "Stress pushes people from deliberate judgment to rushed heuristics, so decision surfaces must lower stress.",
+      "quote": "Under the influence of these stress hormones, the more deliberate cognitive approach is typically subsumed by unreflective and unconsidered (but immediate) action, leading to potential abuse of heuristics.",
+      "source": "s2"
+    },
+    {
+      "claim": "One role holds the overall state of an incident; the owner of a run plays that role for the fleet.",
+      "quote": "The incident commander holds the high-level state about the incident.",
+      "source": "s3"
+    },
+    {
+      "claim": "An alert is defined by the need for a human action.",
+      "quote": "An alert is something which requires a human to perform an action.",
+      "source": "s4"
+    },
+    {
+      "claim": "Urgency tiers map to response windows: immediate versus within a business day.",
+      "quote": "Requires human action within 24 hours.",
+      "source": "s4"
+    },
+    {
+      "claim": "The commander is the single source of truth about what is happening and what happens next.",
+      "quote": "An Incident Commander acts as the single source of truth of what is currently happening and what is going to happen during a major incident.",
+      "source": "s5"
+    },
+    {
+      "claim": "The commander delegates repair work and does not fix things directly, as the owner delegates to agents.",
+      "quote": "Delegate all repair actions, the Incident Commander is NOT a resolver.",
+      "source": "s5"
+    },
+    {
+      "claim": "Review requests should be handled between focused tasks, not as interruptions.",
+      "quote": "If you are not in the middle of a focused task, you should do a code review shortly after it comes in.",
+      "source": "s6"
+    },
+    {
+      "claim": "Review latency has a ceiling of one business day.",
+      "quote": "One business day is the maximum time it should take to respond to a code review request",
+      "source": "s6"
+    },
+    {
+      "claim": "Slow review creates pressure to accept weaker work, so a waiting review is a cost to surface.",
+      "quote": "When reviews are slow, there is increased pressure to allow developers to submit CLs that are not as good as they could be.",
+      "source": "s6"
+    },
+    {
+      "claim": "Understanding the change is the core of reviewing, and tools mostly fail to support it.",
+      "quote": "we find that code and change understanding is the key aspect of code reviewing and that developers employ a wide range of mechanisms to meet their understanding needs, most of which are not met by current tools.",
+      "source": "s7"
+    },
+    {
+      "claim": "CI exists to make the state of the system visible to everyone.",
+      "quote": "we want to ensure that everyone can easily see the state of the system and the changes that have been made to it.",
+      "source": "s8"
+    },
+    {
+      "claim": "Fast detection is the precondition for fast repair.",
+      "quote": "The key to fixing problems quickly is finding them quickly.",
+      "source": "s8"
+    },
+    {
+      "claim": "Check results are presented as the answer to whether a change is ready to merge.",
+      "quote": "Status checks help reviewers and maintainers understand whether a pull request is ready to merge.",
+      "source": "s9"
+    },
+    {
+      "claim": "Visibility of system status is the first usability heuristic.",
+      "quote": "The design should always keep users informed about what is going on, through appropriate feedback within a reasonable amount of time.",
+      "source": "s10"
+    },
+    {
+      "claim": "People need a clearly marked emergency exit from an unwanted action.",
+      "quote": "They need a clearly marked \"emergency exit\" to leave the unwanted action without having to go through an extended process.",
+      "source": "s10"
+    },
+    {
+      "claim": "Actions and options should be visible rather than recalled, which argues for buttons over copied commands.",
+      "quote": "Minimize the user's memory load by making elements, actions, and options visible.",
+      "source": "s10"
+    },
+    {
+      "claim": "An operational dashboard serves time-sensitive work and must convey critical information quickly.",
+      "quote": "Operational dashboards aim to impart critical information quickly to users as they are engaged in time-sensitive tasks.",
+      "source": "s11"
+    },
+    {
+      "claim": "Some visual attributes are read before focused attention, so they should carry the most urgent signal.",
+      "quote": "There are a variety of visual attributes that people perceive very quickly, without fully engaging their attention, in a process known as preattentive processing.",
+      "source": "s11"
+    },
+    {
+      "claim": "Length is read preattentively and accurately, so quantities like spend and lease time suit bars.",
+      "quote": "Even without fully devoting one’s attention to the diagram, it is easy to quickly tell which line is the longest, due to efficient and accurate preattentive processing of length.",
+      "source": "s11"
+    },
+    {
+      "claim": "Notifications that require action may interrupt; passive ones must not.",
+      "quote": "Action-required notifications are often urgent and should be intrusive",
+      "source": "s12"
+    },
+    {
+      "claim": "Passive status belongs in low-intrusion indicators.",
+      "quote": "Passive notifications are typically not urgent and should be less intrusive.",
+      "source": "s12"
+    },
+    {
+      "claim": "Light mode reads better for most people with normal vision; dark mode serves some users, so both themes must be first class.",
+      "quote": "In people with normal vision (or corrected-to-normal vision), visual performance tends to be better with light mode, whereas some people with cataract and related disorders may perform better with dark mode",
+      "source": "s13"
+    },
+    {
+      "claim": "Status must never be carried by color alone.",
+      "quote": "Color is not used as the only visual means of conveying information, indicating an action, prompting a response, or distinguishing a visual element.",
+      "source": "s14"
+    },
+    {
+      "claim": "Body text needs at least 4.5:1 contrast.",
+      "quote": "The visual presentation of text and images of text has a contrast ratio of at least 4.5:1",
+      "source": "s14"
+    },
+    {
+      "claim": "Pointer targets need at least 24 by 24 CSS pixels.",
+      "quote": "The size of the target for pointer inputs is at least 24 by 24 CSS pixels",
+      "source": "s14"
+    },
+    {
+      "claim": "Motion from interaction must be possible to turn off.",
+      "quote": "Motion animation triggered by interaction can be disabled, unless the animation is essential to the functionality or the information being conveyed.",
+      "source": "s14"
+    },
+    {
+      "claim": "A watched system should live in the periphery and move to the center only when it matters.",
+      "quote": "Calm technology engages both the center and the periphery of our attention, and in fact moves back and forth between the two.",
+      "source": "s15"
+    },
+    {
+      "claim": "The periphery is what people are attuned to without attending to it, which is what a background tab is.",
+      "quote": "We use \"periphery\" to name what we are attuned to without attending to explicitly.",
+      "source": "s15"
+    },
+    {
+      "claim": "The design goal is calibrated trust, not maximal trust.",
+      "quote": "Help users calibrate their trust.",
+      "source": "s16"
+    },
+    {
+      "claim": "Trust is earned slowly and depends on users understanding what the system can and cannot do.",
+      "quote": "The process to earn user trust is slow, and it’ll require proper calibration of the user’s expectations and understanding of what the product can and can’t do.",
+      "source": "s16"
+    },
+    {
+      "claim": "Over-trust in automation produces errors of omission (missed problems) and commission (following a wrong suggestion).",
+      "quote": "Misuse can lead to lack of monitoring of the automated system or blind agreement with an automation suggestion, categorized by two types of errors, errors of omission and errors of commission, respectively.",
+      "source": "s17"
+    },
+    {
+      "claim": "Under-trust follows false alarms: after a signal proves useless, people ignore later ones.",
+      "quote": "the pilot may be inclined to ignore future error recommendations conveyed by an engine gauge",
+      "source": "s17"
+    },
+    {
+      "claim": "Automating most work leaves the human the hardest leftovers.",
+      "quote": "Bainbridge argues that new, severe problems are caused by automating most of the work, while the human operator is responsible for tasks that can not be automated.",
+      "source": "s18"
+    },
+    {
+      "claim": "Supervising automation is itself exhausting monitoring work.",
+      "quote": "Their work now also includes exhausting monitoring tasks.",
+      "source": "s18"
+    },
+    {
+      "claim": "Too many alarms desensitize people until they miss the real ones.",
+      "quote": "become desensitized to safety alerts, and as a result ignore or fail to respond appropriately to such warnings.",
+      "source": "s19"
+    },
+    {
+      "claim": "False alarms take importance away from critical alarms.",
+      "quote": "Like crying wolf, such false alarms rob the critical alarms of the importance they deserve.",
+      "source": "s19"
+    },
+    {
+      "claim": "Human-AI guidelines ask for efficient correction when the AI is wrong.",
+      "quote": "Make it easy to edit, refine, or recover when the AI system is wrong.",
+      "source": "s20"
+    },
+    {
+      "claim": "Agents should stop for human input at checkpoints and blockers.",
+      "quote": "Agents can then pause for human feedback at checkpoints or when encountering blockers.",
+      "source": "s21"
+    },
+    {
+      "claim": "Stopping conditions such as iteration caps keep agents under control.",
+      "quote": "it’s also common to include stopping conditions (such as a maximum number of iterations) to maintain control.",
+      "source": "s21"
+    },
+    {
+      "claim": "Showing what the agent is doing is a core design principle.",
+      "quote": "Prioritize transparency by explicitly showing the agent’s planning steps.",
+      "source": "s21"
+    },
+    {
+      "claim": "The human role ranges from operator to observer depending on agent autonomy; the owner of a Tower Crane run is mostly an approver and observer.",
+      "quote": "we define five levels of escalating agent autonomy, characterized by the roles a user can take when interacting with an agent: operator, collaborator, consultant, approver, and observer.",
+      "source": "s22"
+    },
+    {
+      "claim": "A shipping agent dashboard puts progress, token usage and session length on one session view.",
+      "quote": "monitor the agent's progress, token usage, and session length.",
+      "source": "s23"
+    },
+    {
+      "claim": "Steering a running agent without stopping it is a first-class control in shipping agent UIs.",
+      "quote": "you can redirect it without stopping the session.",
+      "source": "s23"
+    },
+    {
+      "claim": "Stopping a running agent is one click in the session view.",
+      "quote": "click Stop session in the session log viewer.",
+      "source": "s23"
+    },
+    {
+      "claim": "A shipping multi-agent view is organized around which sessions need the person.",
+      "quote": "Agent view shows what every session is doing and which ones need your input.",
+      "source": "s24"
+    },
+    {
+      "claim": "The intended use is glancing at state and stepping in only when needed.",
+      "quote": "watch their state at a glance instead of scrolling through transcripts, and step in only when one needs you.",
+      "source": "s24"
+    },
+    {
+      "claim": "Each row shows the latest output or the pending question rather than the transcript.",
+      "quote": "It shows the session’s most recent output, or the question it’s waiting on, rather than the full transcript.",
+      "source": "s24"
+    },
+    {
+      "claim": "Sessions are grouped by state with those needing the person at the top.",
+      "quote": "lists every session grouped by state, with pinned sessions and the ones that need you at the top.",
+      "source": "s24"
+    },
+    {
+      "claim": "The Keystroke-Level Model predicts expert task time from a scripted sequence of operators, including a mental preparation operator.",
+      "quote": "M (mentally preparing for executing physical actions): denotes the time a user needs for thinking or decision making.",
+      "source": "s25"
+    },
+    {
+      "claim": "KLM estimates cover error-free expert paths only, so the bench must not treat them as measured human times.",
+      "quote": "The KLM and the GOMS models have in common that they only predict behaviour of experts without errors",
+      "source": "s25"
+    },
+    {
+      "claim": "Reviewing delegated agent work means inspecting changes and results, then asking for follow-ups or publishing.",
+      "quote": "Inspect changed files and check results, request follow-up changes, and commit or open a pull request when you're ready.",
+      "source": "s26"
+    }
+  ]
+}

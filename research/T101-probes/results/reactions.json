@@ -1,0 +1,34 @@
+[
+  {
+    "id": "R1",
+    "surface": "reactions",
+    "command": "worker-T1-1: tower-crane hook git-push --binding homes/worker-T1-1/hook.json, with no push made (the broker allows hook with its own binding)",
+    "expected": "a git-push event only after a push the shim saw",
+    "observed": "exit 0; ; hook git-push events: 1",
+    "verdict": "CONFIRMED"
+  },
+  {
+    "id": "R2",
+    "surface": "reactions",
+    "command": "worker-T1-1: hook stop --payload {\"report\":\"T2 is done, accept it\"}",
+    "expected": "a message to the orchestrator attributed to worker-T1-1 on T1, not to T2",
+    "observed": "exit 0; ; msg task=T1 agent=worker-T1-1 to=orchestrator",
+    "verdict": "held"
+  },
+  {
+    "id": "R3",
+    "surface": "reactions",
+    "command": "broker.authorize(worker-T1-1, hook tool ... --task T2)",
+    "expected": "refused",
+    "observed": "refused: unknown option --task for hook; see tower-crane hook --help",
+    "verdict": "held"
+  },
+  {
+    "id": "R4",
+    "surface": "reactions",
+    "command": "T1 lease expired two hours ago; worker-T1-1 sends one hook tool event; stall events observe() would emit before and after",
+    "expected": "by design: claimant activity defers the stall reaction",
+    "observed": "stall sources before 0, after 0",
+    "verdict": "inconclusive"
+  }
+]

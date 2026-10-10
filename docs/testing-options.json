@@ -1,0 +1,435 @@
+{
+  "node": "v26.10.0",
+  "runs": 3,
+  "workers": 2,
+  "commands": {
+    "files": {
+      "argv": [
+        "test/run.js",
+        "--test-concurrency=2",
+        "test/browser-startup.test.js",
+        "test/gates/tests.test.js",
+        "test/test-tools.test.js"
+      ]
+    },
+    "shards": {
+      "argv": [
+        "test/run.js",
+        "--test-concurrency=1",
+        "--test-shard=N/3",
+        "test/browser-startup.test.js",
+        "test/gates/tests.test.js",
+        "test/test-tools.test.js"
+      ]
+    },
+    "real timers": {
+      "argv": [
+        "--test",
+        "--test-concurrency=1",
+        "<probe>/options.test.cjs"
+      ],
+      "env": {
+        "OPTION_PROBE": "real-timers",
+        "OPTION_COUNT": "<probe>/count"
+      }
+    },
+    "mock timers": {
+      "argv": [
+        "--test",
+        "--test-concurrency=1",
+        "<probe>/options.test.cjs"
+      ],
+      "env": {
+        "OPTION_PROBE": "mock-timers",
+        "OPTION_COUNT": "<probe>/count"
+      }
+    },
+    "manual stub": {
+      "argv": [
+        "--test",
+        "--test-concurrency=1",
+        "<probe>/options.test.cjs"
+      ],
+      "env": {
+        "OPTION_PROBE": "manual",
+        "OPTION_COUNT": "<probe>/count"
+      }
+    },
+    "t.mock.method": {
+      "argv": [
+        "--test",
+        "--test-concurrency=1",
+        "<probe>/options.test.cjs"
+      ],
+      "env": {
+        "OPTION_PROBE": "method",
+        "OPTION_COUNT": "<probe>/count"
+      }
+    },
+    "t.mock.module": {
+      "argv": [
+        "--test",
+        "--test-concurrency=1",
+        "--experimental-test-module-mocks",
+        "<probe>/options.test.cjs"
+      ],
+      "env": {
+        "OPTION_PROBE": "module",
+        "OPTION_COUNT": "<probe>/count"
+      }
+    },
+    "all cases": {
+      "argv": [
+        "--test",
+        "--test-concurrency=1",
+        "<probe>/options.test.cjs"
+      ],
+      "env": {
+        "OPTION_PROBE": "filter",
+        "OPTION_COUNT": "<probe>/count"
+      }
+    },
+    "name filter": {
+      "argv": [
+        "--test",
+        "--test-concurrency=1",
+        "--test-name-pattern=^selected$",
+        "<probe>/options.test.cjs"
+      ],
+      "env": {
+        "OPTION_PROBE": "filter",
+        "OPTION_COUNT": "<probe>/count"
+      }
+    },
+    "tag filter": {
+      "argv": [
+        "--test",
+        "--test-concurrency=1",
+        "--experimental-test-tag-filter=focus",
+        "<probe>/options.test.cjs"
+      ],
+      "env": {
+        "OPTION_PROBE": "filter",
+        "OPTION_COUNT": "<probe>/count"
+      }
+    }
+  },
+  "samples": {
+    "files": [
+      {
+        "wall": 7.496206377,
+        "cpu": 6.05,
+        "status": 0
+      },
+      {
+        "wall": 8.217310014,
+        "cpu": 5.83,
+        "status": 0
+      },
+      {
+        "wall": 7.72360318,
+        "cpu": 5.82,
+        "status": 0
+      }
+    ],
+    "shards": [
+      {
+        "wall": 11.067464617999999,
+        "cpu": 6.17,
+        "status": 0
+      },
+      {
+        "wall": 9.863166717,
+        "cpu": 5.84,
+        "status": 0
+      },
+      {
+        "wall": 11.090102938,
+        "cpu": 6.39,
+        "status": 0
+      }
+    ],
+    "real timers": [
+      {
+        "wall": 1.316083675,
+        "cpu": 0.09,
+        "status": 0,
+        "assertions": 24
+      },
+      {
+        "wall": 1.406192954,
+        "cpu": 0.09,
+        "status": 0,
+        "assertions": 24
+      },
+      {
+        "wall": 1.310910022,
+        "cpu": 0.08,
+        "status": 0,
+        "assertions": 24
+      }
+    ],
+    "mock timers": [
+      {
+        "wall": 0.103691127,
+        "cpu": 0.08,
+        "status": 0,
+        "assertions": 24
+      },
+      {
+        "wall": 0.105072126,
+        "cpu": 0.08,
+        "status": 0,
+        "assertions": 24
+      },
+      {
+        "wall": 0.087106042,
+        "cpu": 0.08,
+        "status": 0,
+        "assertions": 24
+      }
+    ],
+    "manual stub": [
+      {
+        "wall": 0.144981189,
+        "cpu": 0.08,
+        "status": 0,
+        "assertions": 24
+      },
+      {
+        "wall": 0.105672504,
+        "cpu": 0.08,
+        "status": 0,
+        "assertions": 24
+      },
+      {
+        "wall": 0.100748097,
+        "cpu": 0.09,
+        "status": 0,
+        "assertions": 24
+      }
+    ],
+    "t.mock.method": [
+      {
+        "wall": 0.099205973,
+        "cpu": 0.08,
+        "status": 0,
+        "assertions": 24
+      },
+      {
+        "wall": 0.093578707,
+        "cpu": 0.08,
+        "status": 0,
+        "assertions": 24
+      },
+      {
+        "wall": 0.086598169,
+        "cpu": 0.08,
+        "status": 0,
+        "assertions": 24
+      }
+    ],
+    "t.mock.module": [
+      {
+        "wall": 0.113584717,
+        "cpu": 0.08,
+        "status": 0,
+        "assertions": 24
+      },
+      {
+        "wall": 0.096945374,
+        "cpu": 0.08,
+        "status": 0,
+        "assertions": 24
+      },
+      {
+        "wall": 0.093258178,
+        "cpu": 0.09,
+        "status": 0,
+        "assertions": 24
+      }
+    ],
+    "all cases": [
+      {
+        "wall": 0.626526995,
+        "cpu": 0.11,
+        "status": 0,
+        "assertions": 20
+      },
+      {
+        "wall": 0.598319974,
+        "cpu": 0.11,
+        "status": 0,
+        "assertions": 20
+      },
+      {
+        "wall": 0.632163503,
+        "cpu": 0.12,
+        "status": 0,
+        "assertions": 20
+      }
+    ],
+    "name filter": [
+      {
+        "wall": 0.154857955,
+        "cpu": 0.09,
+        "status": 0,
+        "assertions": 1
+      },
+      {
+        "wall": 0.105158767,
+        "cpu": 0.08,
+        "status": 0,
+        "assertions": 1
+      },
+      {
+        "wall": 0.118870185,
+        "cpu": 0.09,
+        "status": 0,
+        "assertions": 1
+      }
+    ],
+    "tag filter": [
+      {
+        "wall": 0.197690867,
+        "cpu": 0.09,
+        "status": 0,
+        "assertions": 1
+      },
+      {
+        "wall": 0.140305682,
+        "cpu": 0.09,
+        "status": 0,
+        "assertions": 1
+      },
+      {
+        "wall": 0.12703887,
+        "cpu": 0.1,
+        "status": 0,
+        "assertions": 1
+      }
+    ]
+  },
+  "rows": {
+    "files": {
+      "cpu": 5.83,
+      "wall": 7.72360318,
+      "cpu_range": [
+        5.82,
+        6.05
+      ],
+      "wall_range": [
+        7.496206377,
+        8.217310014
+      ]
+    },
+    "shards": {
+      "cpu": 6.17,
+      "wall": 11.067464617999999,
+      "cpu_range": [
+        5.84,
+        6.39
+      ],
+      "wall_range": [
+        9.863166717,
+        11.090102938
+      ]
+    },
+    "real timers": {
+      "cpu": 0.09,
+      "wall": 1.316083675,
+      "cpu_range": [
+        0.08,
+        0.09
+      ],
+      "wall_range": [
+        1.310910022,
+        1.406192954
+      ]
+    },
+    "mock timers": {
+      "cpu": 0.08,
+      "wall": 0.103691127,
+      "cpu_range": [
+        0.08,
+        0.08
+      ],
+      "wall_range": [
+        0.087106042,
+        0.105072126
+      ]
+    },
+    "manual stub": {
+      "cpu": 0.08,
+      "wall": 0.105672504,
+      "cpu_range": [
+        0.08,
+        0.09
+      ],
+      "wall_range": [
+        0.100748097,
+        0.144981189
+      ]
+    },
+    "t.mock.method": {
+      "cpu": 0.08,
+      "wall": 0.093578707,
+      "cpu_range": [
+        0.08,
+        0.08
+      ],
+      "wall_range": [
+        0.086598169,
+        0.099205973
+      ]
+    },
+    "t.mock.module": {
+      "cpu": 0.08,
+      "wall": 0.096945374,
+      "cpu_range": [
+        0.08,
+        0.09
+      ],
+      "wall_range": [
+        0.093258178,
+        0.113584717
+      ]
+    },
+    "all cases": {
+      "cpu": 0.11,
+      "wall": 0.626526995,
+      "cpu_range": [
+        0.11,
+        0.12
+      ],
+      "wall_range": [
+        0.598319974,
+        0.632163503
+      ]
+    },
+    "name filter": {
+      "cpu": 0.09,
+      "wall": 0.118870185,
+      "cpu_range": [
+        0.08,
+        0.09
+      ],
+      "wall_range": [
+        0.105158767,
+        0.154857955
+      ]
+    },
+    "tag filter": {
+      "cpu": 0.09,
+      "wall": 0.140305682,
+      "cpu_range": [
+        0.09,
+        0.1
+      ],
+      "wall_range": [
+        0.12703887,
+        0.197690867
+      ]
+    }
+  }
+}

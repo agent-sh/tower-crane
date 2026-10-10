@@ -4,18 +4,20 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { makeRepo, BIN } = require('./helpers');
+const { cachedFixture, BIN } = require('./helpers');
 
 const events = (h) => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
 
 function setup(t, workers = 1, tasks = 3) {
-  const h = makeRepo(t);
-  h.init(['--workers', String(workers)]);
-  for (let i = 1; i <= tasks; i++) {
-    h.ok(['task', 'add', '--title', `Slot ${i}`, '--tier', 'easy', '--acceptance', 'slot is held']);
-    h.ok(['brief', 'set', `T${i}`, '-'], { input: 'Work in this task.\n' });
-  }
-  return h;
+  return cachedFixture(t, `${workers}:${tasks}`, (h) => {
+    h.init(['--workers', String(workers)]);
+    // Slot checks use this known state; metadata writes need no Git discovery.
+    h.env.TOWER_CRANE_STATE = h.state;
+    for (let i = 1; i <= tasks; i++) {
+      h.ok(['task', 'add', '--title', `Slot ${i}`, '--tier', 'easy', '--acceptance', 'slot is held']);
+      h.ok(['brief', 'set', `T${i}`, '-'], { input: 'Work in this task.\n' });
+    }
+  });
 }
 
 async function until(fn, message) {
@@ -49,7 +51,7 @@ const timer = setInterval(() => {
 }, 25);
 `);
   h.ok(['ladder', 'set', 'easy', '--harness', 'command',
-    '--command', JSON.stringify([process.execPath, script, BIN, h.base]), '--clear', 'profile', '--clear', 'effort']);
+    '--command', JSON.stringify([process.execPath, script, BIN, h.base, '{prompt}']), '--clear', 'profile', '--clear', 'effort']);
 }
 
 test('five held worker slots refuse dispatch before process, home or spend', (t) => {
@@ -312,7 +314,7 @@ test('sandboxed claims and expired renewals cannot discard hidden live reservati
 test('a reservation ends at its monitor exit or lease horizon, the same for every observer', (t) => {
   const h = setup(t, 1);
   h.ok(['ladder', 'set', 'easy', '--harness', 'command',
-    '--command', JSON.stringify([process.execPath, '-e', 'process.exit(0)']), '--clear', 'profile', '--clear', 'effort']);
+    '--command', JSON.stringify([process.execPath, '-e', 'process.exit(0)', '{prompt}']), '--clear', 'profile', '--clear', 'effort']);
   const spawned = h.json(['spawn', '--task', 'T1', '--wait']);
   assert.ok(events(h).some((e) => e.cmd === 'spawn phase' && e.detail.agent === spawned.agent && e.detail.active === false));
   // No exit receipt was recorded; MONITOR_SILENT also drops the monitor's

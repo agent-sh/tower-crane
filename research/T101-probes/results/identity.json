@@ -1,0 +1,74 @@
+[
+  {
+    "id": "I1",
+    "surface": "identity",
+    "command": "TOWER_CRANE_AGENT=orchestrator tower-crane project set --merge-admin true --agent owner (no TTY, no TOWER_CRANE_TASK)",
+    "expected": "refused or a decision opened: merge.admin is owner-required and the process was started as the orchestrator",
+    "observed": "exit 0; demo: prove the engine\nrepo: acme/app  base: main  standards: default\nlimits: 6 workers, 60 min lease  budget: none\ntests.paths: default layouts\ntests.keep: []\ntests.mode: prove\ntests.by_kind: {}\ntests.expensive: false\ngates.tests_cmd: null\ngates.clean_cmd: null\ngates.tests_proof_cmd: null\nci.ignore_apps: []\nci.required: []\nci.capped_review: []\nci.local: hosted\nmerge.keep_branch: false\nmerge.admin: true\nreview: tier and diff defaults\nresearch.min_sources: 10\nladder (default harness codex):\n  orchestrator  claude           model opus, effort high      from project\n  easy          codex (default)  profile luna, effort medium  from project\n  medium        codex (default)  profile sol, e",
+    "verdict": "CONFIRMED"
+  },
+  {
+    "id": "I1b",
+    "surface": "identity",
+    "command": "TOWER_CRANE_AGENT=orchestrator tower-crane project set --merge-admin false --agent orchestrator (control)",
+    "expected": "refused with a decision opened for the owner",
+    "observed": "exit 1; tower-crane: merge.admin is owner-required; opened D1 for the owner (escalation: merge.admin); wait for the answer with tower-crane wait --types decision-answer",
+    "verdict": "held"
+  },
+  {
+    "id": "I2",
+    "surface": "identity",
+    "command": "TOWER_CRANE_AGENT=worker-T1-1 TOWER_CRANE_TASK=T1 tower-crane project set --workers 3 --agent owner",
+    "expected": "refused",
+    "observed": "exit 1; tower-crane: owner acts from an interactive terminal; task processes cannot use owner identity",
+    "verdict": "held"
+  },
+  {
+    "id": "I3",
+    "surface": "identity",
+    "command": "env -u TOWER_CRANE_TASK TOWER_CRANE_AGENT=worker-T1-1 tower-crane project set --workers 4 --agent owner",
+    "expected": "refused: TOWER_CRANE_AGENT names a worker",
+    "observed": "exit 0; demo: prove the engine\nrepo: acme/app  base: main  standards: default\nlimits: 4 workers, 60 min lease  budget: none\ntests.paths: default layouts\ntests.keep: []\ntests.mode: prove\ntests.by_kind: {}\ntests.expensive: false\ngates.tests_cmd: null\ngates.clean_cmd: null\ngates.tests_proof_cmd: null\nci.ignore_apps: []\nci.required: []\nci.capped_review: []\nci.local: hosted\nmerge.keep_branch: false\nmerge.admin: true\nreview: tier and diff defaults\nresearch.min_sources: 10\nladder (default harness codex):\n  orchestrator  claude           model opus, effort high      from project\n  easy          codex (default)  profile luna, effort medium  from project\n  medium        codex (default)  profile sol, e",
+    "verdict": "CONFIRMED"
+  },
+  {
+    "id": "I4",
+    "surface": "identity",
+    "command": "TOWER_CRANE_AGENT=worker-T1-1 tower-crane project set --workers 5 --agent orchestrator",
+    "expected": "refused",
+    "observed": "exit 1; tower-crane: limits.workers is operational: only the orchestrator or the owner changes it; a worker or reviewer asks the orchestrator with tower-crane msg --to orchestrator or a task note",
+    "verdict": "held"
+  },
+  {
+    "id": "I5",
+    "surface": "identity",
+    "command": "tower-crane project set --workers 6 --agent orchestrator from a process with no TOWER_CRANE_AGENT",
+    "expected": "accepted (documented: an unspawned name orchestrator is the orchestrator)",
+    "observed": "exit 0; demo: prove the engine\nrepo: acme/app  base: main  standards: default\nlimits: 6 workers, 60 min lease  budget: none\ntests.paths: default layouts\ntests.keep: []\ntests.mode: prove\ntests.by_kind: {}\ntests.expensive: false\ngates.tests_cmd: null\ngates.clean_cmd: null\ngates.tests_proof_cmd: null\nci.ignore_apps: []\nci.required: []\nci.capped_review: []\nci.local: hosted\nmerge.keep_branch: false\nmerge.admin: true\nreview: tier and diff defaults\nresearch.min_sources: 10\nladder (default harness codex):\n  orchestrator  claude           model opus, effort high      from project\n  easy          codex (default)  profile luna, effort medium  from project\n  medium        codex (default)  profile sol, e",
+    "verdict": "by design"
+  },
+  {
+    "id": "I6",
+    "surface": "identity/gates",
+    "command": "tower-crane evidence T1 --type review --ok --sha 50b732a --agent made-up-reviewer (a name no spawn started)",
+    "expected": "not counted: review evidence should come from a reviewer spawned for that sha",
+    "observed": "exit 0; T1: review ok at 50b732a by made-up-reviewer; gates: review ok",
+    "verdict": "CONFIRMED"
+  },
+  {
+    "id": "I7",
+    "surface": "identity/gates",
+    "command": "tower-crane accept T1 --agent orchestrator after I6 (docs task, review is its only gate)",
+    "expected": "refused: no independent review happened",
+    "observed": "exit 0; accepted T1 at 50b732a (review ok by made-up-reviewer); status accepted",
+    "verdict": "CONFIRMED"
+  },
+  {
+    "id": "I8",
+    "surface": "gates",
+    "command": "tower-crane evidence T2 --type tests --ok --agent orchestrator",
+    "expected": "refused: only check tests records tests evidence",
+    "observed": "exit 1; tower-crane: only tower-crane check tests records tests evidence; run that command for T2",
+    "verdict": "held"
+  }
+]

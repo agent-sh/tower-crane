@@ -7,22 +7,24 @@ const path = require('node:path');
 const http = require('node:http');
 const cp = require('node:child_process');
 const { makeRepo, BIN } = require('./helpers');
-const { CHROME, openBrowser } = require('./browser');
+const { CHROME, openBrowser, closeBrowser } = require('./browser');
+test.after(closeBrowser);
 
 async function startServe(h) {
   const server = cp.spawn(process.execPath, [BIN, 'serve', '--port', '0', '--json', '--agent', 'owner'], { cwd: h.repo, env: h.env });
   const exited = new Promise((resolve) => server.on('exit', resolve));
-  const url = await new Promise((resolve, reject) => {
+  const printed = await new Promise((resolve, reject) => {
     let out = '';
     server.stdout.on('data', (d) => {
       out += d;
-      if (out.includes('\n')) resolve(JSON.parse(out.split('\n')[0]).url);
+      if (out.includes('\n')) resolve(JSON.parse(out.split('\n')[0]));
     });
     server.on('exit', (code) => reject(new Error(`serve exited ${code}`)));
   });
+  // keyed(path) is that page through the one-time link serve printed.
   // Windows cannot delete a directory a live process runs in, so the server
   // must be gone before makeRepo's cleanup removes the repo.
-  return { url, stop: async () => { server.kill(); await exited; } };
+  return { url: printed.url, open: printed.open, keyed: (p = '') => `${printed.url}${p}${new URL(printed.open).search}`, stop: async () => { server.kill(); await exited; } };
 }
 
 function request(url, { method = 'GET', body, headers = {} } = {}) {
@@ -46,6 +48,7 @@ function request(url, { method = 'GET', body, headers = {} } = {}) {
   });
 }
 
+const tokenOf = (page) => /<meta name="tower-crane-token" content="([0-9a-f]{48})?">/.exec(page)[1] || '';
 const read = (h, f) => fs.readFileSync(path.join(h.state, f), 'utf8');
 
 // What the Settings page was drawn from, as its script reads it.
@@ -68,9 +71,9 @@ test('the Settings view edits the ladder and task tiers only with the page token
   h.ok(['task', 'add', '--title', 'Webhook retries', '--acceptance', 'a']);
   const s = await startServe(h);
   try {
-    const page = await request(`${s.url}settings`);
+    const page = await request(s.keyed('settings'));
     assert.equal(page.status, 200);
-    const token = /<meta name="tower-crane-token" content="([0-9a-f]{48})">/.exec(page.text)[1];
+    const token = tokenOf(page.text);
     assert.match(page.text, /<label for="harness">Default harness<\/label>/);
     assert.match(page.text, /<input name="model" value="opus" data-initial="opus" aria-labelledby="r-hard c-model"/);
     assert.match(page.text, /<select name="tier" aria-labelledby="t-T1 c-tier" data-initial="medium"(?: data-preserve="[0-9a-f]{64}")?>/);
@@ -111,7 +114,7 @@ test('the Settings view edits the ladder and task tiers only with the page token
     assert.match(read(h, 'sketch.html'), /<tr data-rung="easy"><th scope="row">easy<\/th><td>codex \(default\)<\/td><td>gpt-x<\/td>/, 'the write re-rendered the sketch');
 
     loaded = await loadedOf(s.url);
-    const harness = await request(ladder, { method: 'POST', headers: { 'x-tower-crane-token': token }, body: ladderBody(loaded, { harness: 'agy', rungs: { medium: { model: 'gemini-3-pro', profile: '' }, review: { model: 'gemini-3-pro', profile: '' }, small: { model: 'gemini-3-flash', profile: '' }, easy: { model: 'gemini-3-flash' } } }) });
+    const harness = await request(ladder, { method: 'POST', headers: { 'x-tower-crane-token': token }, body: ladderBody(loaded, { harness: 'agy', rungs: { medium: { model: 'gemini-3-pro', profile: '' }, review: { model: 'gemini-3-pro', profile: '' }, small: { model: 'gemini-3-flash', profile: '' }, easy: { model: 'gemini-3-flash', args: '' } } }) });
     assert.equal(harness.status, 200, harness.text);
     assert.equal(h.json(['ladder', 'show']).ladder.medium.harness, 'agy', 'the default harness and rungs change in one write');
 
@@ -135,13 +138,58 @@ test('the Settings view edits the ladder and task tiers only with the page token
   }
 });
 
+// Review finding F4: a local client read the token from a page and answered
+// the owner's decisions. Only the one-time link serve printed carries it.
+test('a local process without the one-time link gets no token serve accepts, with or without an Origin header', async (t) => {
+  const h = makeRepo(t);
+  h.init();
+  h.ok(['task', 'add', '--title', 'Webhook retries', '--acceptance', 'a']);
+  h.ok(['ask', '--question', 'ship it?', '--option', 'yes', '--option', 'no', '--agent', 'orchestrator']);
+  const s = await startServe(h);
+  try {
+    const files = ['tasks.json', 'decisions.json', 'project.json', 'events.jsonl'];
+    const before = files.map((f) => read(h, f));
+    const loaded = await loadedOf(s.url);
+    const writes = [
+      ['decisions/D1/answer', { choice: 'yes' }],
+      ['ladder', ladderBody(loaded, { rungs: { medium: { harness: 'command', command: '["/bin/true"]', model: '', profile: '', effort: '', args: '' } } })],
+      ['tiers', tierBody(loaded, { T1: 'hard' })],
+    ];
+    for (const headers of [{}, { origin: new URL(s.url).origin }]) {
+      const pages = ['', 'settings', `settings?key=${'f'.repeat(48)}`];
+      const tokens = [];
+      for (const p of pages) {
+        const page = await request(`${s.url}${p}`, { headers });
+        assert.equal(page.status, 200);
+        tokens.push(tokenOf(page.text));
+      }
+      assert.deepEqual(tokens, pages.map(() => ''), `no page without the key carries the token (${JSON.stringify(headers)})`);
+      for (const [api, body] of writes) {
+        const r = await request(`${s.url}api/${api}`, { method: 'POST', headers: { ...headers, 'x-tower-crane-token': '' }, body });
+        assert.equal(r.status, 403, `${api} ${JSON.stringify(headers)}`);
+        assert.match(r.text, /missing or wrong token/);
+      }
+    }
+    assert.deepEqual(files.map((f) => read(h, f)), before, 'nothing was written');
+
+    const owner = tokenOf((await request(s.open)).text);
+    assert.match(owner, /^[0-9a-f]{48}$/, 'the printed link carries the token');
+    assert.equal(tokenOf((await request(s.open)).text), '', 'the link works once');
+    const r = await request(`${s.url}api/decisions/D1/answer`, { method: 'POST', headers: { 'x-tower-crane-token': owner }, body: { choice: 'yes' } });
+    assert.equal(r.status, 200, r.text);
+    assert.equal(h.readState('decisions.json').decisions[0].answered_by, 'owner');
+  } finally {
+    await s.stop();
+  }
+});
+
 test('a save made against a rung, default harness or tier that changed since the page loaded is refused and writes nothing', async (t) => {
   const h = makeRepo(t);
   h.init();
   h.ok(['task', 'add', '--title', 'Webhook retries', '--acceptance', 'a']);
   const s = await startServe(h);
   try {
-    const token = /<meta name="tower-crane-token" content="([0-9a-f]{48})">/.exec((await request(`${s.url}settings`)).text)[1];
+    const token = tokenOf((await request(s.keyed('settings'))).text);
     const post = (api, body) => request(`${s.url}api/${api}`, { method: 'POST', headers: { 'x-tower-crane-token': token }, body });
     const loaded = await loadedOf(s.url);
     // The page loaded easy as luna; the form sends every field of the rung,
@@ -192,7 +240,7 @@ test("in a browser, saving one form keeps the other form's unsaved edits, and a 
   const s = await startServe(h);
   t.after(() => s.stop());
   const b = await openBrowser(t);
-  await b.goto(`${s.url}settings`);
+  await b.goto(s.keyed('settings'));
   const easyEffort = `document.querySelector('tr[data-rung="easy"] input[name="effort"]')`;
   const tierSelect = `document.querySelector('tr[data-task="T1"] select')`;
   const set = (el, value, event) => b.inPage(`(function (el) { el.value = ${JSON.stringify(value)}; el.dispatchEvent(new Event(${JSON.stringify(event)}, { bubbles: true })); })(${el})`);
@@ -250,7 +298,7 @@ test('in a browser, a form is read-only while its save waits, so typing then los
   // otherDirty: with an unsaved tier the saved form is updated in place,
   // without one the page reloads; both must keep what the person typed.
   for (const [round, otherDirty] of [[1, false], [2, true]]) {
-    await b.goto(`${s.url}settings`);
+    await b.goto(round === 1 ? s.keyed('settings') : `${s.url}settings`);
     if (otherDirty) await set(tierSelect, 'hard', 'change');
     await set(easyEffort, round === 1 ? 'high' : 'low', 'input');
     await b.inPage(`${easyModel}.focus()`);
@@ -278,8 +326,7 @@ test('in a browser, a form is read-only while its save waits, so typing then los
 async function startAgain(h) {
   const s = await startServe(h);
   try {
-    const page = await request(`${s.url}settings`);
-    return { token: /<meta name="tower-crane-token" content="([0-9a-f]{48})">/.exec(page.text)[1] };
+    return { token: tokenOf((await request(s.keyed('settings'))).text) };
   } finally {
     await s.stop();
   }

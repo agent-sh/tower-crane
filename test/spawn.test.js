@@ -5,15 +5,18 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');
-const { makeRepo, real, BIN, PTY_AVAILABLE } = require('./helpers');
+const { cachedFixture, real, BIN, PTY_AVAILABLE } = require('./helpers');
+const stack = require('./stack-fixture');
 const A = require('../lib/agents');
+const S = require('../lib/state');
+const SHORT_WAIT = path.join(__dirname, 'fixtures', 'lock-wait.js');
 
 function setup(t) {
-  const h = makeRepo(t);
-  h.init();
-  h.ok(['task', 'add', '--title', 'Idempotency key on retries', '--acceptance', 'processed once', '--acceptance', 'test proves it']);
-  h.ok(['brief', 'set', 'T1', '-'], { input: '- start from the webhook handler\n' });
-  return h;
+  return cachedFixture(t, 'task', (h) => {
+    h.init();
+    h.ok(['task', 'add', '--title', 'Idempotency key on retries', '--acceptance', 'processed once', '--acceptance', 'test proves it']);
+    h.ok(['brief', 'set', 'T1', '-'], { input: '- start from the webhook handler\n' });
+  });
 }
 
 const dry = (h, rung, env) => h.json(['spawn', ...(rung ? ['--role', rung] : []), '--task', 'T1', '--dry-run'], { env });
@@ -26,7 +29,10 @@ function setRung(h, rung, flags) {
   h.ok(['ladder', 'set', rung, ...flags, ...FIELDS.filter((k) => !given.includes(k)).flatMap((k) => ['--clear', k])]);
 }
 
-const commandRung = (h, rung, argv) => setRung(h, rung, ['--harness', 'command', '--command', JSON.stringify(argv)]);
+const commandRung = (h, rung, argv) => {
+  const command = argv.some((arg) => /\{(prompt|brief)\}/.test(arg)) ? argv : [...argv, '{prompt}'];
+  setRung(h, rung, ['--harness', 'command', '--command', JSON.stringify(command)]);
+};
 
 test('design tasks dispatch without a kit on unsupported worker, review and small harnesses and report the omission', (t) => {
   const h = setup(t);
@@ -34,7 +40,7 @@ test('design tasks dispatch without a kit on unsupported worker, review and smal
   for (const harness of ['pi', 'opencode', 'command']) {
     for (const role of ['medium', 'review', 'small']) {
       setRung(h, role, harness === 'command'
-        ? ['--harness', harness, '--command', JSON.stringify([process.execPath, '-e', 'process.exit(0)'])]
+        ? ['--harness', harness, '--command', JSON.stringify([process.execPath, '-e', 'process.exit(0)', '{prompt}'])]
         : ['--harness', harness, '--model', 'fixture']);
       const seen = dry(h, role);
       assert.deepEqual(seen.home.mcp, []);
@@ -55,7 +61,7 @@ test('design tasks dispatch without a kit on unsupported worker, review and smal
 test('explicit browser needs refuse only when no route can provide the kit', (t) => {
   const h = setup(t);
   h.ok(['task', 'update', 'T1', '--needs', '["browser"]']);
-  commandRung(h, 'medium', [process.execPath, '-e', 'process.exit(0)']);
+  commandRung(h, 'medium', [process.execPath, '-e', 'process.exit(0)', '{prompt}']);
   const missing = h.run(['spawn', '--task', 'T1', '--dry-run']);
   assert.notEqual(missing.code, 0);
   assert.match(missing.stderr, /browser/);
@@ -129,6 +135,11 @@ test('spawn --dry-run builds each harness command', (t) => {
     '-c', 'default_permissions="tower-crane"', '-c', 'approval_policy="never"', '-c', 'bypass_hook_trust=true', '-c', 'web_search="disabled"',
     ...small.codexDisable.flatMap((f) => ['--disable', f]),
   ];
+  const piOwn = (state) => [
+    '--no-approve', '--no-extensions', '--no-skills', '--no-prompt-templates', '--no-themes', '--no-context-files',
+    '--tools', 'bash,read,grep,find', '--append-system-prompt', path.join(state, 'homes', 'small-T1-1', 'AGENTS.md'),
+    '--extension', path.join(state, 'homes', 'small-T1-1', 'hook.mjs'),
+  ];
   const cases = [
     [['--harness', 'claude', '--model', 'claude-opus-5-5'], (p, s) => ['claude', '-p', p, '--model', 'claude-opus-5-5', '--output-format', 'json', ...claudeOwn(s)]],
     [['--harness', 'claude', '--model', 'opus', '--effort', 'high'], (p, s) => ['claude', '-p', p, '--model', 'opus', '--effort', 'high', '--output-format', 'json', ...claudeOwn(s)]],
@@ -136,10 +147,10 @@ test('spawn --dry-run builds each harness command', (t) => {
     [['--harness', 'codex', '--model', 'gpt-x', '--effort', 'high', '--args', '["--skip-git-repo-check"]'], (p, s) => ['codex', 'exec', '--json', '-m', 'gpt-x', '-c', 'model_reasoning_effort=high', ...codexOwn(s), p, '--skip-git-repo-check']],
     [['--harness', 'opencode', '--model', 'anthropic/claude'], (p) => ['opencode', 'run', '--format', 'json', '-m', 'anthropic/claude', p]],
     [['--harness', 'opencode', '--model', 'openai/gpt-x', '--effort', 'high'], (p) => ['opencode', 'run', '--format', 'json', '-m', 'openai/gpt-x', '--variant', 'high', p]],
-    [['--harness', 'agy', '--model', 'gemini-3-pro'], (p) => ['agy', '-p', p, '--mode', 'accept-edits', '--output-format', 'json', '--model', 'gemini-3-pro']],
-    [['--harness', 'agy', '--model', 'gemini-3-pro', '--effort', 'max', '--args', '["--output-format","json"]'], (p) => ['agy', '-p', p, '--mode', 'accept-edits', '--output-format', 'json', '--model', 'gemini-3-pro', '--effort', 'max', '--output-format', 'json']],
-    [['--harness', 'pi', '--model', 'openai/gpt-5.5'], (p, s) => ['pi', '-p', p, '--mode', 'json', '--model', 'openai/gpt-5.5', '--extension', path.join(s, 'homes', 'small-T1-1', 'hook.mjs')]],
-    [['--harness', 'pi', '--model', 'openai/gpt-5.5', '--provider', 'openai', '--effort', 'xhigh', '--args', '["--no-session"]'], (p, s) => ['pi', '-p', p, '--mode', 'json', '--model', 'openai/gpt-5.5', '--provider', 'openai', '--thinking', 'xhigh', '--extension', path.join(s, 'homes', 'small-T1-1', 'hook.mjs'), '--no-session']],
+    [['--harness', 'agy', '--model', 'gemini-3-pro'], (p) => ['agy', '-p', p, '--mode', 'accept-edits', '--output-format', 'json', '--model', 'gemini-3-pro', '--agent', 'gishra-small', '--disable-slash-commands', '--sandbox']],
+    [['--harness', 'agy', '--model', 'gemini-3-pro', '--effort', 'max', '--args', '["--print-timeout","60s"]'], (p) => ['agy', '-p', p, '--mode', 'accept-edits', '--output-format', 'json', '--model', 'gemini-3-pro', '--effort', 'max', '--agent', 'gishra-small', '--disable-slash-commands', '--sandbox', '--print-timeout', '60s']],
+    [['--harness', 'pi', '--model', 'openai/gpt-5.5'], (p, s) => ['pi', '-p', p, '--mode', 'json', '--model', 'openai/gpt-5.5', ...piOwn(s)]],
+    [['--harness', 'pi', '--model', 'openai/gpt-5.5', '--provider', 'openai', '--effort', 'xhigh', '--args', '["--no-session"]'], (p, s) => ['pi', '-p', p, '--mode', 'json', '--model', 'openai/gpt-5.5', '--provider', 'openai', '--thinking', 'xhigh', ...piOwn(s), '--no-session']],
   ];
   const empty = path.join(h.base, 'no-plugin');
   fs.mkdirSync(empty);
@@ -182,7 +193,7 @@ test('opencode inline config keeps caller fields and plugins when adding the hom
   assert.deepEqual(config, { ...original, plugin: [...original.plugin, generated] });
 });
 
-test('spawn embeds the role skill before the brief for claude, codex, opencode and agy', (t) => {
+test('spawn embeds the role skill in the system context for isolated reviewers and before the brief for other jobs', (t) => {
   const h = setup(t);
   h.ok(['task', 'update', 'T1', '--tier', 'easy']);
   reviewable(h);
@@ -207,13 +218,22 @@ test('spawn embeds the role skill before the brief for claude, codex, opencode a
       ['review', 'reviewer', 'worker'],
     ]) {
       setRung(h, rung, ['--harness', harness, '--model', model]);
-      const prompt = dry(h, rung, env).argv.find((arg) => arg.includes('## Task'));
+      const out = dry(h, rung, env);
+      const user = out.argv.find((arg) => arg.includes('## Task'));
+      if (job === 'reviewer' && harness === 'codex') {
+        assert.ok(!user.includes(bodies[job]));
+        assert.ok(out.startup.system_bytes > bodies[job].length);
+        continue;
+      }
+      const prompt = job === 'reviewer' && harness === 'claude'
+        ? out.system : user;
       assert.ok(prompt.includes(bodies[job]), `${harness} ${job} has its skill body`);
       assert.ok(!prompt.includes(bodies[other]), `${harness} ${job} excludes the other role's skill`);
       assert.ok(!prompt.includes(`name: tower-crane-${job === 'worker' ? 'work' : 'review'}`));
       assert.ok(!prompt.includes('description: fixture frontmatter'), 'skill frontmatter is omitted');
       const context = job === 'worker' ? 'start from the webhook handler' : 'Review T1 at';
-      assert.ok(prompt.indexOf(bodies[job]) < prompt.indexOf(context), 'the role skill comes before the task context');
+      if (prompt === user) assert.ok(prompt.indexOf(bodies[job]) < prompt.indexOf(context), 'the role skill comes before the task context');
+      else assert.ok(!user.includes(bodies[job]), 'the user message holds only task context');
     }
   }
 });
@@ -285,7 +305,7 @@ test('the prompt is the role skill, brief, task, then how to use tower-crane', (
   const iUse = p.indexOf('Use the tower-crane CLI for every state change');
   assert.ok(iSkill < iBrief && iBrief < iTask && iTask < iUse, 'role skill, brief, task JSON, instruction in order');
   const json = JSON.parse(p.slice(p.indexOf('```json\n') + 8, p.indexOf('\n```', p.indexOf('```json'))));
-  assert.deepEqual(json, { id: 'T1', title: 'Idempotency key on retries', acceptance: ['processed once', 'test proves it'], kind: 'code', locks: ['lab/rdma'], environment: 'lab' });
+  assert.deepEqual(json, { id: 'T1', title: 'Idempotency key on retries', acceptance: ['processed once', 'test proves it'], kind: 'code', needs: [], locks: ['lab/rdma'], environment: 'lab' });
   assert.match(p, /TOWER_CRANE_STATE, TOWER_CRANE_TASK and TOWER_CRANE_AGENT are set/);
   assert.ok(p.includes('you are not the owner; never pass --agent owner'));
   assert.ok(p.endsWith('run tower-crane with --agent worker-T1-1 if TOWER_CRANE_AGENT is missing.'));
@@ -424,6 +444,17 @@ test('spawn --wait runs the command rung in the task worktree with the tower-cra
   assert.equal(events.find((e) => e.cmd === 'spawn exit').detail.code, 7);
 });
 
+test('a spawned agent never inherits the owner key that admitted its spawn', (t) => {
+  const h = setup(t);
+  const out = path.join(h.base, 'agent-env.json');
+  commandRung(h, 'medium', [process.execPath, '-e', `require('node:fs').writeFileSync(${JSON.stringify(out)}, JSON.stringify(Object.keys(process.env)))`]);
+  assert.ok(h.env.TOWER_CRANE_OWNER_KEY);
+  h.ok(['spawn', '--task', 'T1', '--wait']);
+  const seen = JSON.parse(fs.readFileSync(out, 'utf8'));
+  assert.ok(seen.includes('TOWER_CRANE_AGENT'));
+  assert.ok(!seen.includes('TOWER_CRANE_OWNER_KEY'));
+});
+
 test('spawn removes outer Node test runner variables so an agent can run its own test suite', (t) => {
   const h = setup(t);
   const out = path.join(h.base, 'nested-run.json');
@@ -476,17 +507,37 @@ test('command brief placeholders point to role-filtered temporary copies', async
   fs.mkdirSync(tempRoot);
   const workerOut = path.join(h.base, 'worker-brief.json');
   const reviewerOut = path.join(h.base, 'reviewer-brief.json');
-  const script = 'const fs = require("node:fs"); fs.writeFileSync(process.argv[1], JSON.stringify({ path: process.argv[2], text: fs.readFileSync(process.argv[2], "utf8") }));';
+  const cleanupOut = path.join(h.base, 'brief-cleanup.jsonl');
+  const hook = path.join(h.base, 'brief-cleanup.js');
+  fs.writeFileSync(hook, `
+// Record the unlink boundary before the supervisor finishes its exit path.
+const fs = require('node:fs');
+const rm = fs.rmSync;
+fs.rmSync = function(file, ...args) {
+  const result = rm.call(this, file, ...args);
+  if (String(file).startsWith(${JSON.stringify(tempRoot + path.sep)} + 'tower-crane-brief-') && String(file).endsWith('brief.md')) {
+    fs.appendFileSync(${JSON.stringify(cleanupOut)}, JSON.stringify(fs.readdirSync(${JSON.stringify(tempRoot)})) + '\\n');
+  }
+  return result;
+};
+`);
+  const env = { TOWER_CRANE_TMP: tempRoot, NODE_OPTIONS: `--require "${hook.replace(/\\/g, '/')}"` };
+  const script = `
+const fs = require('node:fs');
+fs.writeFileSync(process.argv[1], JSON.stringify({ path: process.argv[2], text: fs.readFileSync(process.argv[2], 'utf8') }));
+process.once('SIGTERM', () => process.exit(0));
+setImmediate(() => process.platform === 'win32' ? process.exit(0) : process.kill(process.pid, 'SIGTERM'));
+`;
   commandRung(h, 'medium', [process.execPath, '-e', script, workerOut, '{brief}']);
   commandRung(h, 'review', [process.execPath, '-e', script, reviewerOut, '{brief}']);
 
   const planned = dry(h, 'medium', { TOWER_CRANE_TMP: tempRoot });
-  const dryCopy = planned.argv.find((arg) => arg.endsWith(`${path.sep}brief.md`));
+  const dryCopy = planned.argv.find((arg) => arg.startsWith(tempRoot + path.sep) && arg.endsWith('brief.md'));
   assert.ok(dryCopy);
   assert.ok(dryCopy.startsWith(tempRoot + path.sep));
   assert.ok(!fs.existsSync(dryCopy), 'dry-run only prints the copy path');
 
-  const worker = h.run(['spawn', '--role', 'medium', '--task', 'T1', '--wait'], { env: { TOWER_CRANE_TMP: tempRoot } });
+  const worker = h.run(['spawn', '--role', 'medium', '--task', 'T1', '--wait'], { env });
   assert.equal(worker.code, 0, worker.stderr);
   const workerCopy = JSON.parse(fs.readFileSync(workerOut, 'utf8'));
   assert.match(workerCopy.text, /SHARED_FOR_COMMANDS/);
@@ -497,23 +548,82 @@ test('command brief placeholders point to role-filtered temporary copies', async
 
   reviewable(h);
   commandRung(h, 'medium', [process.execPath, '-e', script, reviewerOut, '{brief}']);
-  const reviewer = h.json(['spawn', '--role', 'review', '--task', 'T1'], { env: { TOWER_CRANE_TMP: tempRoot } });
+  fs.writeFileSync(cleanupOut, '');
+  const cleaned = new Promise((resolve, reject) => {
+    const watcher = fs.watch(cleanupOut, () => {
+      watcher.close();
+      clearTimeout(timeout);
+      resolve();
+    });
+    const timeout = setTimeout(() => {
+      watcher.close();
+      reject(new Error('the reviewer did not remove its brief copy'));
+    }, 10000);
+    t.after(() => { watcher.close(); clearTimeout(timeout); });
+  });
+  const reviewer = h.json(['spawn', '--role', 'review', '--task', 'T1'], { env });
   assert.equal(reviewer.agent, 'reviewer-T1-1');
-  const deadline = Date.now() + 10000;
-  while (!fs.existsSync(reviewerOut)) {
-    if (Date.now() > deadline) throw new Error('the reviewer did not read its brief copy');
-    await new Promise((resolve) => setTimeout(resolve, 50));
-  }
+  await cleaned;
   const reviewerCopy = JSON.parse(fs.readFileSync(reviewerOut, 'utf8'));
   assert.ok(!reviewerCopy.text.includes('SHARED_FOR_COMMANDS'));
   assert.match(reviewerCopy.text, /REVIEWER_ONLY_COMMAND/);
   assert.ok(!reviewerCopy.text.includes('REWORK_SHARED_COMMAND'));
   assert.ok(!reviewerCopy.text.includes('WORKER_ONLY_COMMAND'));
-  while (fs.existsSync(reviewerCopy.path)) {
-    if (Date.now() > deadline) throw new Error('the monitor did not remove the reviewer brief copy');
-    await new Promise((resolve) => setTimeout(resolve, 50));
-  }
   assert.ok(!fs.existsSync(reviewerCopy.path));
+  assert.deepEqual(fs.readdirSync(tempRoot), []);
+  const snapshots = fs.readFileSync(cleanupOut, 'utf8').trim().split('\n').map(JSON.parse);
+  assert.ok(snapshots.length > 0, 'cleanup reached the unlink boundary');
+  for (const snapshot of snapshots) assert.deepEqual(snapshot, []);
+});
+
+test('temporary brief copies are removed before normal and signalled foreground exits return', (t) => {
+  const h = setup(t);
+  const tempRoot = path.join(h.base, 'tower-crane-tmp');
+  const out = path.join(h.base, 'brief-path');
+  fs.mkdirSync(tempRoot);
+  h.ok(['ladder', 'set', 'medium', '--supervision', '{"retries":0}']);
+  for (const [exit, code] of [
+    ['process.exit(0)', 0],
+    ['process.exit(7)', 7],
+    ['setImmediate(() => process.kill(process.pid, "SIGTERM"))', 1],
+  ]) {
+    const script = `require('node:fs').writeFileSync(process.argv[1], process.argv[2]); ${exit};`;
+    commandRung(h, 'medium', [process.execPath, '-e', script, out, '{brief}']);
+    const result = h.run(['spawn', '--task', 'T1', '--wait'], { env: { TOWER_CRANE_TMP: tempRoot } });
+    assert.equal(result.code, code, result.stderr);
+    assert.ok(!fs.existsSync(fs.readFileSync(out, 'utf8')));
+    assert.deepEqual(fs.readdirSync(tempRoot), []);
+  }
+});
+
+test('temporary brief copies are removed before spawn startup failure returns', (t) => {
+  const h = setup(t);
+  const tempRoot = path.join(h.base, 'tower-crane-tmp');
+  const hook = path.join(h.base, 'brief-launch-failure.js');
+  fs.mkdirSync(tempRoot);
+  fs.writeFileSync(hook, `
+if (process.argv[1].endsWith('spawn-monitor.js')) {
+  const cp = require('node:child_process');
+  const spawn = cp.spawn;
+  cp.spawn = function(file, args, opts) {
+    return spawn.call(this, ${JSON.stringify(path.join(h.base, 'missing-harness'))}, args, opts);
+  };
+}
+`);
+  commandRung(h, 'medium', [process.execPath, '-e', 'process.exit(0)', '{brief}']);
+  for (const flags of [[], ['--wait']]) {
+    const result = h.run(['spawn', '--task', 'T1', ...flags], {
+      env: { TOWER_CRANE_TMP: tempRoot, NODE_OPTIONS: `--require "${hook.replace(/\\/g, '/')}"` },
+    });
+    assert.notEqual(result.code, 0);
+    assert.match(result.stderr, /could not start.*ENOENT/);
+    assert.deepEqual(fs.readdirSync(tempRoot), []);
+  }
+  const dispatch = h.run(['spawn', '--task', 'T1'], {
+    env: { TOWER_CRANE_TMP: tempRoot }, hooks: { HOOK_SPAWN_FAIL: '1' },
+  });
+  assert.notEqual(dispatch.code, 0);
+  assert.match(dispatch.stderr, /supervisor startup failed/);
   assert.deepEqual(fs.readdirSync(tempRoot), []);
 });
 
@@ -608,7 +718,7 @@ const leftover = (h) => path.join(h.base, 'repo-worktrees', 'T1-idempotency-key-
 
 test('a spawn whose program fails to start records nothing and leaves its worktree for the next spawn', (t) => {
   const h = setup(t);
-  commandRung(h, 'small', [process.execPath, '-e', 'process.exit(0)']);
+  commandRung(h, 'small', [process.execPath, '-e', 'process.exit(0)', '{prompt}']);
   const { tasks, events } = footprint(h);
   for (const mode of [[], ['--wait']]) {
     const r = h.run(['spawn', '--role', 'small', '--task', 'T1', ...mode], { hooks: { HOOK_SPAWN_FAIL: '1' } });
@@ -626,23 +736,24 @@ test('a spawn whose program fails to start records nothing and leaves its worktr
   assert.equal(h.readState('tasks.json').tasks[0].branch, 'tower-crane/T1-idempotency-key-on-retries');
 });
 
-test('a spawn that cannot take the lock leaves its worktree, names it and exits 3', async (t) => {
+test('a spawn that cannot take the lock leaves its worktree, names it and exits 3', (t) => {
   const h = setup(t);
-  commandRung(h, 'small', [process.execPath, '-e', 'process.exit(0)']);
+  commandRung(h, 'small', [process.execPath, '-e', 'process.exit(0)', '{prompt}']);
   const { tasks } = footprint(h);
-  const paused = path.join(h.base, 'holder');
-  const holder = h.runAsync(['task', 'note', 'T1', 'holding the lock'], { hooks: { HOOK_PAUSE_ON: 'tasks.json', HOOK_PAUSED: paused } });
-  await waitForFile(paused);
+  // The test process keeps the lock until the spawn exhausts its short budget.
+  const lock = S.acquireLock(h.state);
   try {
-    const r = h.run(['spawn', '--role', 'small', '--task', 'T1']);
+    const r = h.run(['spawn', '--role', 'small', '--task', 'T1'], {
+      env: { NODE_OPTIONS: `--require=${JSON.stringify(SHORT_WAIT)}` },
+    });
     assert.equal(r.code, 3, r.stderr);
     assert.match(r.stderr, /state is locked by .*; its worktree stays at .*T1-idempotency-key-on-retries for the next spawn/);
+    assert.ok(fs.existsSync(lock.file), 'the holder keeps its lock through the refusal');
     assert.equal(footprint(h).tasks, tasks);
     assert.ok(fs.existsSync(leftover(h)));
   } finally {
-    fs.writeFileSync(`${paused}.go`, '');
+    S.releaseLock(lock);
   }
-  assert.equal((await holder).code, 0);
   assert.equal(real(h.json(['spawn', '--role', 'small', '--task', 'T1', '--wait']).cwd), real(leftover(h)));
 });
 
@@ -729,7 +840,7 @@ test('spawn runs the rung of the tier and ladder it finds under the lock, not th
   h.git(['worktree', 'remove', '--force', ev.detail.cwd]);
   const b = h.runAsync(['spawn', '--task', 'T1', '--wait'], { hooks: { HOOK_STOP_WORKTREE_ADD: stopped2 } });
   await waitForFile(stopped2);
-  setRung(h, 'hard', ['--harness', 'command', '--command', JSON.stringify([path.join(h.base, 'no-such-program')])]);
+  setRung(h, 'hard', ['--harness', 'command', '--command', JSON.stringify([path.join(h.base, 'no-such-program'), '{prompt}'])]);
   fs.writeFileSync(`${stopped2}.go`, '');
   const rb = await b;
   assert.equal(rb.code, 1);
@@ -737,4 +848,25 @@ test('spawn runs the rung of the tier and ladder it finds under the lock, not th
   assert.ok(!fs.existsSync(out));
   const spawns = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l)).filter((e) => e.cmd === 'spawn');
   assert.equal(spawns.length, 1);
+});
+
+test('spawn refuses a stacked rework with claim\'s reason when its dependency went back to in_progress, before its worktree work', (t) => {
+  const f = stack.stacked(t);
+  stack.worker(f);
+  // T2's worktree is prepared on T1's head. T1 then takes a new head and goes back to in_progress.
+  f.h.ok(['rework', 'T2', '--reason', 'more upper work']);
+  stack.resubmit(f, false);
+  f.h.ok(['rework', 'T1', '--reason', 'more lower work']);
+  f.h.ok(['claim', 'T1', '--agent', 'worker-T1']);
+  // The stack is not linked on GitHub, so T2's worktree is stale and must be revalidated at dispatch.
+  const state = f.h.readState('tasks.json');
+  state.tasks.find((item) => item.id === 'T2').stack.linked = false;
+  f.h.writeState('tasks.json', state);
+  f.write((d) => { d.linked = false; });
+
+  const r = f.h.run(['spawn', '--task', 'T2']);
+  assert.equal(r.code, 1, r.stdout + r.stderr);
+  assert.match(r.stderr, /T2 is blocked: depends on T1 \(in_progress\)/);
+  assert.doesNotMatch(r.stderr, /prepared on T1|before dispatch/);
+  assert.equal(f.h.json(['task', 'show', 'T2']).status, 'rework');
 });

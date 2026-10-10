@@ -1,0 +1,235 @@
+{
+  "sources": [
+    { "id": "anthropic-caching", "url": "https://platform.claude.com/docs/en/build-with-claude/prompt-caching" },
+    { "id": "anthropic-diagnostics", "url": "https://platform.claude.com/docs/en/build-with-claude/cache-diagnostics" },
+    { "id": "anthropic-mid-system", "url": "https://platform.claude.com/docs/en/build-with-claude/mid-conversation-system-messages" },
+    { "id": "openai-caching", "url": "https://developers.openai.com/api/docs/guides/prompt-caching" },
+    { "id": "openai-pricing", "url": "https://developers.openai.com/api/docs/pricing" },
+    { "id": "bedrock-caching", "url": "https://docs.aws.amazon.com/bedrock/latest/userguide/prompt-caching.html" },
+    { "id": "bedrock-cross-region", "url": "https://docs.aws.amazon.com/bedrock/latest/userguide/cross-region-inference.html" },
+    { "id": "bedrock-api-keys", "url": "https://docs.aws.amazon.com/bedrock/latest/userguide/api-keys.html" },
+    { "id": "bedrock-responses", "url": "https://docs.aws.amazon.com/bedrock/latest/userguide/inference-responses-api.html" },
+    { "id": "claude-code-bedrock", "url": "https://code.claude.com/docs/en/amazon-bedrock" },
+    { "id": "claude-code-cli", "url": "https://code.claude.com/docs/en/cli-reference" },
+    { "id": "vllm-prefix", "url": "https://docs.vllm.ai/en/latest/design/prefix_caching/" },
+    { "id": "lmcache", "url": "https://docs.lmcache.ai/" },
+    { "id": "sglang-hicache", "url": "https://docs.sglang.io/docs/advanced_features/hicache_design" }
+  ],
+  "claims": [
+    {
+      "claim": "Anthropic accepts 1-hour and 5-minute breakpoints in one request only when every 1-hour entry comes before every 5-minute one.",
+      "quote": "Cache entries with longer TTL must appear before shorter TTLs (that is, a 1-hour cache entry must appear before any 5-minute cache entries).",
+      "source": "anthropic-caching"
+    },
+    {
+      "claim": "With mixed TTLs, Anthropic places the 1-hour billing boundary at the highest 1-hour breakpoint and the 5-minute boundary at the last breakpoint.",
+      "quote": "Position B: The token count at the highest 1-hour cache_control block after A (or equals A if none exist). Position C: The token count at the last cache_control block.",
+      "source": "anthropic-caching"
+    },
+    {
+      "claim": "Anthropic charges 1-hour writes from the cache hit to the highest 1-hour breakpoint and 5-minute writes after it, so the TTL of a breakpoint before the last 1-hour one does not change the bill.",
+      "quote": "You'll be charged for: Cache read tokens for A. 1-hour cache write tokens for (B - A). 5-minute cache write tokens for (C - B).",
+      "source": "anthropic-caching"
+    },
+    {
+      "claim": "Anthropic builds the cached prefix from tools, then system, then messages, up to the block with cache_control.",
+      "quote": "Prompt caching references the entire prompt: tools, system, and messages (in that order), up to and including the block designated with cache_control.",
+      "source": "anthropic-caching"
+    },
+    {
+      "claim": "An Anthropic cache hit needs the prompt identical up to the breakpoint.",
+      "quote": "Exact matching: Cache hits require 100% identical prompt segments, including all text and images up to and including the block marked with cache control.",
+      "source": "anthropic-caching"
+    },
+    {
+      "claim": "Anthropic's lookback reads only prefixes an earlier request wrote, checking up to 20 block positions per breakpoint.",
+      "quote": "It is looking for prior writes, not for stable content. The lookback window is 20 blocks.",
+      "source": "anthropic-caching"
+    },
+    {
+      "claim": "A request can carry at most four Anthropic cache breakpoints.",
+      "quote": "You can define up to 4 cache breakpoints (using cache_control parameters) in your prompt.",
+      "source": "anthropic-caching"
+    },
+    {
+      "claim": "Anthropic bills a 5-minute cache write at 1.25x input and a 1-hour write at 2x.",
+      "quote": "5-minute cache write tokens are 1.25 times the base input tokens price 1-hour cache write tokens are 2 times the base input tokens price",
+      "source": "anthropic-caching"
+    },
+    {
+      "claim": "Claude Opus 5.5 lists at $4 input, $20 output, $5 per 5-minute write, $8 per 1-hour write and $0.20 per cache hit, per million tokens.",
+      "quote": "Claude Opus 5.5For long-running agentic coding and knowledge work $4 / MTok $20 / MTok $5 / MTok $8 / MTok $0.20 / MTok",
+      "source": "anthropic-caching"
+    },
+    {
+      "claim": "Cache hits on Opus 5.5 and Sonnet 5.5 cost 0.05x base input.",
+      "quote": "Cache hits and refreshes on Claude Opus 5.5 and Claude Sonnet 5.5 are priced at 0.05x the base input price.",
+      "source": "anthropic-caching"
+    },
+    {
+      "claim": "On Bedrock the Anthropic cache is isolated per organization.",
+      "quote": "Bedrock and Google Cloud maintain organization-level cache isolation.",
+      "source": "anthropic-caching"
+    },
+    {
+      "claim": "Anthropic cache entries live at least 5 minutes or 1 hour.",
+      "quote": "Cached entries have a minimum lifetime of 5 minutes (standard) or 1 hour (extended)",
+      "source": "anthropic-caching"
+    },
+    {
+      "claim": "A cache entry is readable only after the request that wrote it starts responding, so parallel reviewers do not share one.",
+      "quote": "For concurrent requests, note that a cache entry only becomes available after the first response begins.",
+      "source": "anthropic-caching"
+    },
+    {
+      "claim": "Anthropic's server-side divergence report is not available on Bedrock, so on Bedrock a client-side comparison is the only way to find where a prefix diverged.",
+      "quote": "Claude API only: Not available on Amazon Bedrock or Google Cloud.",
+      "source": "anthropic-diagnostics"
+    },
+    {
+      "claim": "Anthropic's cache diagnostics compares two requests and reports where they diverged.",
+      "quote": "Pass the id of your previous response, and the API compares the two requests and tells you where they diverged",
+      "source": "anthropic-diagnostics"
+    },
+    {
+      "claim": "Mid-conversation role system messages, which Claude Code sends, are supported on Bedrock.",
+      "quote": "Mid-conversation system messages are available on the Claude API, Claude in Amazon Bedrock, and Google Cloud.",
+      "source": "anthropic-mid-system"
+    },
+    {
+      "claim": "Anthropic documents a mid-conversation system message as cacheable once it is part of the history.",
+      "quote": "A mid-conversation system message is itself cacheable. Once it is in the conversation, it becomes part of the stable history.",
+      "source": "anthropic-mid-system"
+    },
+    {
+      "claim": "For a system message that does not stay in the cache key, Anthropic places the breakpoint on the preceding user turn, the placement the turn-breakpoint lever uses.",
+      "quote": "Put the breakpoint on the last block of the preceding user turn instead, as the example does.",
+      "source": "anthropic-mid-system"
+    },
+    {
+      "claim": "OpenAI's prompt_cache_key separates cache reuse between groups of requests.",
+      "quote": "A supplied prompt_cache_key, which separates cache reuse between groups of requests and helps optimize cache routing on models before GPT-5.6.",
+      "source": "openai-caching"
+    },
+    {
+      "claim": "In implicit mode OpenAI writes at the end of the latest eligible message.",
+      "quote": "When prompt_cache_options.mode is implicit, OpenAI places a breakpoint at the end of the latest eligible message.",
+      "source": "openai-caching"
+    },
+    {
+      "claim": "Explicit OpenAI breakpoints can be added while the implicit one stays on.",
+      "quote": "You can add explicit breakpoints without turning off the implicit breakpoint",
+      "source": "openai-caching"
+    },
+    {
+      "claim": "Top-level instructions cannot hold an explicit OpenAI breakpoint.",
+      "quote": "Top-level instructions cannot contain an explicit breakpoint.",
+      "source": "openai-caching"
+    },
+    {
+      "claim": "On GPT-5.6 and later OpenAI bills cache writes at 1.25x input and GPT-6.1 Sol reads at 0.05x.",
+      "quote": "For GPT-5.6 and later, cache writes cost 1.25× the standard, uncached input-token rate. Subsequent reads cost 0.1× that rate on most of these models and 0.05× on GPT-6.1 Sol.",
+      "source": "openai-caching"
+    },
+    {
+      "claim": "OpenAI keeps a GPT-5.6+ prefix for 30 minutes after its last write or reuse.",
+      "quote": "A cached prefix remains eligible for reuse for 30 minutes after its most recent write or reuse",
+      "source": "openai-caching"
+    },
+    {
+      "claim": "OpenAI's prompt cache is key/value tensors held in the provider's GPU-local storage, which no client can export.",
+      "quote": "Prompt caching may store encrypted key/value tensors in GPU-local storage as application state.",
+      "source": "openai-caching"
+    },
+    {
+      "claim": "OpenAI's standard tier lists gpt-6.1-sol at $2.00 input, $0.10 cached input, $2.50 cache writes and $10.00 output per million tokens.",
+      "quote": "gpt-6.1-sol $2.00 $0.10 $2.50 $10.00",
+      "source": "openai-pricing"
+    },
+    {
+      "claim": "Bedrock prompt caching works with cross-region inference but routing can add cache writes.",
+      "quote": "Prompt caching can be used in conjunction with cross region inference. Cross-region inference automatically selects the optimal AWS Region within your geography to serve your inference request, thereby maximizing available resources and model availability. At times of high demand, these optimizations may lead to increased cache writes.",
+      "source": "bedrock-caching"
+    },
+    {
+      "claim": "A Bedrock cache entry's TTL resets on every hit.",
+      "quote": "The cache has a Time To Live (TTL), which resets with each successful cache hit.",
+      "source": "bedrock-caching"
+    },
+    {
+      "claim": "Bedrock supports four checkpoints with 5-minute and 1-hour TTLs on Claude Opus 5.5.",
+      "quote": "Claude Opus 5.5 anthropic.claude-opus-5-5 Generally Available 512 4 5 minutes, 1 hour",
+      "source": "bedrock-caching"
+    },
+    {
+      "claim": "Bedrock reports OpenAI-model cache writes in cache_write_tokens, billed at 1.25x input.",
+      "quote": "cache_write_tokens — Number of input tokens written to cache (billed at 1.25× the uncached input token rate).",
+      "source": "bedrock-caching"
+    },
+    {
+      "claim": "A global inference profile lets Bedrock pick the serving Region per request.",
+      "quote": "With global inference profiles, Amazon Bedrock automatically selects a commercial AWS Region to process the request.",
+      "source": "bedrock-cross-region"
+    },
+    {
+      "claim": "Bedrock API keys are bearer tokens, so a forwarding proxy passes them through without signing anything.",
+      "quote": "Amazon Bedrock API keys let you authenticate API requests using a bearer token instead of AWS credentials.",
+      "source": "bedrock-api-keys"
+    },
+    {
+      "claim": "Bedrock serves the OpenAI Responses API on both bedrock-runtime and bedrock-mantle.",
+      "quote": "Amazon Bedrock provides the OpenAI Responses API on both the bedrock-runtime and bedrock-mantle endpoints.",
+      "source": "bedrock-responses"
+    },
+    {
+      "claim": "Claude Code can send its Bedrock traffic to a custom endpoint such as a local proxy.",
+      "quote": "Override the Bedrock endpoint URL for custom endpoints or gateways",
+      "source": "claude-code-bedrock"
+    },
+    {
+      "claim": "Claude Code authenticates to Bedrock with an API key in AWS_BEARER_TOKEN_BEDROCK.",
+      "quote": "export AWS_BEARER_TOKEN_BEDROCK=your-bedrock-api-key",
+      "source": "claude-code-bedrock"
+    },
+    {
+      "claim": "Claude Code's --exclude-dynamic-system-prompt-sections moves the auto memory location out of the system prompt.",
+      "quote": "Move per-user context, such as the auto memory location, out of the system prompt and into the first user message.",
+      "source": "claude-code-cli"
+    },
+    {
+      "claim": "--append-system-prompt adds text at the end of Claude Code's default system prompt.",
+      "quote": "--append-system-prompt Append custom text to the end of the default system prompt",
+      "source": "claude-code-cli"
+    },
+    {
+      "claim": "vLLM keys each KV block by its tokens and every token before it, the same exact-prefix rule as hosted caches.",
+      "quote": "we hash each kv-cache block by the tokens in the block and the tokens in the prefix before the block",
+      "source": "vllm-prefix"
+    },
+    {
+      "claim": "vLLM offers a reproducible block hash, which persisted KV needs to match across restarts.",
+      "quote": "sha256_cbor: Uses cbor2 for serialization, providing a reproducible, cross-language compatible hash.",
+      "source": "vllm-prefix"
+    },
+    {
+      "claim": "LMCache persists KV outside GPU memory and reuses it across sessions and engine instances.",
+      "quote": "Move KV caches out of GPU memory into a tiered storage hierarchy spanning CPU memory, local storage, and remote backends, enabling reuse across requests, sessions, and engine instances",
+      "source": "lmcache"
+    },
+    {
+      "claim": "LMCache stores KV on local disk, Redis, S3-compatible object storage and other backends.",
+      "quote": "LMCache supports storage backends including CPU RAM, local disk (SSD), Redis/Valkey, Mooncake, InfiniStore, S3-compatible object storage, NIXL, and GDS.",
+      "source": "lmcache"
+    },
+    {
+      "claim": "SGLang HiCache tiers prefix KV across GPU, host memory and storage.",
+      "quote": "HiCache organizes GPU memory as L1, host memory as L2, and distributed storage as L3.",
+      "source": "sglang-hicache"
+    },
+    {
+      "claim": "SGLang shares KV across instances only through a configured storage backend.",
+      "quote": "Cross-instance reuse is the job of L3, so it needs --hicache-storage-backend.",
+      "source": "sglang-hicache"
+    }
+  ]
+}

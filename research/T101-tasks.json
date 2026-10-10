@@ -1,0 +1,120 @@
+[
+  {
+    "title": "T101 F1: sandboxes write only an agent cache of their own, never the user cache root",
+    "kind": "code", "size": "M", "tier": "hard",
+    "acceptance": [
+      "evidence: docs/review-2026-10-08.md F1; probes S1 (allowWrite holds <home>/.cache) and L1 (the installed tower-crane CLI, lib/broker.js, gates.clean_cmd, ~/.cache/tower-crane and ~/.cache/go-build writable from a worker sandbox)",
+      "writeOutside cache grants a per-agent cache directory (and the tool cache variables point there) for claude and codex, for workers, reviewers and researchers; the user cache root and every path outside it stay read-only",
+      "an integration test renders a worker and a reviewer spawn and fails if any allowWrite or codex write rule contains the user cache root, the tower-crane install, the CLI on PATH or the program of gates.tests_cmd or gates.clean_cmd; research/T101-probes/secrets.js S1 turns from CONFIRMED to held"
+    ]
+  },
+  {
+    "title": "T101 F2: Tower Crane's own git ignores repository config a worker can write",
+    "kind": "code", "size": "M", "tier": "hard",
+    "acceptance": [
+      "evidence: docs/review-2026-10-08.md F2; probe X8: core.fsmonitor set in the shared .git/config ran twice when the orchestrator ran tower-crane worktree",
+      "every git call the CLI and gates make outside the broker neutralizes repository-supplied commands (core.fsmonitor, core.hooksPath, external diff and textconv, filter and merge drivers, core.sshCommand, credential helpers), or the sandbox keeps .git/config and config.worktree read-only while commits still work",
+      "an integration test plants each of those settings in a scratch repository's config and runs worktree, spawn preparation, check tests, check clean and submit scope; no planted command runs; research/T101-probes/broker-shim.js X8 turns to held",
+      "docs/state.md says the tests and clean gates run worker-authored code outside any sandbox, and which environment they get"
+    ]
+  },
+  {
+    "title": "T101 F3: --agent owner cannot override a non-owner TOWER_CRANE_AGENT, and owner needs a terminal",
+    "kind": "code", "size": "S", "tier": "medium",
+    "acceptance": [
+      "evidence: docs/review-2026-10-08.md F3; probes I1 (TOWER_CRANE_AGENT=orchestrator --agent owner set merge.admin) and I3 (an unsandboxed worker without TOWER_CRANE_TASK acted as owner)",
+      "resolving owner is refused when TOWER_CRANE_AGENT names anyone else, and when stdin or stdout is not a terminal unless the owner's own credential (outside every sandbox) is presented; the refusal names the rule",
+      "integration tests reproduce I1 and I3 and fail before the change; docs/state.md#authority and docs/cli.md describe the rule"
+    ]
+  },
+  {
+    "title": "T101 F4: the board's write token reaches only the owner's browser",
+    "kind": "code", "size": "M", "tier": "hard",
+    "acceptance": [
+      "evidence: docs/review-2026-10-08.md F4; probes W6 (a plain local HTTP client read the token from /settings and answered D1 as owner) and W7 (the same client set ladder.command)",
+      "a local process without the owner's one-time secret cannot obtain a token that serve accepts on POST, whether it sends an Origin header or not; the owner's page keeps working",
+      "an integration test runs serve as owner, GETs /settings and / without the secret and POSTs answer, ladder and tiers: all refused with no state change; research/T101-probes/board.js W6 and W7 turn to held"
+    ]
+  },
+  {
+    "title": "T101 F5: sandboxes deny reads of the user's credential stores",
+    "kind": "code", "size": "S", "tier": "medium",
+    "acceptance": [
+      "evidence: docs/review-2026-10-08.md F5; probes S2 (rendered denyRead leaves gh, claude, codex, docker, npm, netrc and git-credentials readable) and L2 (the owner's gh hosts.yml, claude and codex credentials readable from a worker sandbox, network open to every domain)",
+      "the claude and codex sandboxes deny reads of the user's credential stores (at least gh, claude, codex, docker, npm, pypi, cargo, netrc, git-credentials, kube, gcloud, azure) while the agent's own home and the gh token it is handed keep working",
+      "an integration test checks the rendered claude denyRead and codex permissions for each path; research/T101-probes/secrets.js S2 turns to held"
+    ]
+  },
+  {
+    "title": "T101 F6: the review gate counts only a reviewer spawned for that task, sha and revision, or the owner",
+    "kind": "code", "size": "S", "tier": "medium",
+    "acceptance": [
+      "evidence: docs/review-2026-10-08.md F6; probes I6 (review evidence by a never-spawned name counted) and I7 (accept passed on it)",
+      "review evidence counts toward the gate only when its agent has a spawn event with role reviewer for the task at that sha and revision, or is the owner; other review evidence is kept but reported as not counting",
+      "integration tests reproduce I6 and I7 and fail before the change; docs/state.md states the rule"
+    ]
+  },
+  {
+    "title": "T101 F7: the merge gate refuses a PR whose base is not the task's target base",
+    "kind": "code", "size": "S", "tier": "medium",
+    "acceptance": [
+      "evidence: docs/review-2026-10-08.md F7; probe M1 (an accepted PR retargeted to release merged, reported as into main) and X7 (gh pr edit --base is a worker write)",
+      "merge refuses when the PR's baseRefName differs from the task's target base, and on the plain path when the PR is cross-repository; the summary names the real base",
+      "a test in test/gates/merge.test.js reproduces M1 and fails before the change"
+    ]
+  },
+  {
+    "title": "T101 F8: rework and a brief change invalidate earlier review evidence",
+    "kind": "code", "size": "S", "tier": "medium",
+    "acceptance": [
+      "evidence: docs/review-2026-10-08.md F8; probes G3 (rework then resubmitting the same sha accepted on the rejected review) and G4 (brief set after review left review ok)",
+      "after rework, evidence recorded before it no longer counts; a brief change on a submitted task does the same; docs/state.md says which changes start a new revision",
+      "integration tests reproduce G3 and G4 and fail before the change"
+    ]
+  },
+  {
+    "title": "T101 F9: a stack merge cannot land a head pushed after its last check",
+    "kind": "code", "size": "M", "tier": "hard",
+    "acceptance": [
+      "evidence: docs/review-2026-10-08.md F9; probe M4 (with a fake gh, a head moved between the last pr view and gh stack merge landed and was only detected after)",
+      "the stack merge pins each member's accepted head before merging (or merges members bottom up with --match-head-commit when it cannot), so a moved head stops the merge before anything lands",
+      "a test in test/gates/merge.test.js or test/stack-merge.test.js reproduces M4 and fails before the change"
+    ]
+  },
+  {
+    "title": "T101 F10: codex config copies keep only allowlisted provider fields",
+    "kind": "code", "size": "S", "tier": "medium",
+    "acceptance": [
+      "evidence: docs/review-2026-10-08.md F10; probe S6 (provider keys apikey, key and bearer copied in plain text into homes/<agent>/config.toml)",
+      "agent homes keep only named, non-credential fields of model_providers and MCP servers; no credential value of any key name is copied",
+      "test/isolation.test.js plants apikey, key and bearer and fails before the change"
+    ]
+  },
+  {
+    "title": "T101 F11: the git shim pushes only to the task's own branch",
+    "kind": "code", "size": "S", "tier": "medium",
+    "acceptance": [
+      "evidence: docs/review-2026-10-08.md F11; probes X1 (git push origin HEAD:main allowed) and X2 (git push origin HEAD:refs/tags/v9.9.9 allowed)",
+      "with gitPush branch, a push to another machine is allowed only when every destination resolves to refs/heads/<the task's branch>; tags, the base and other branches are refused",
+      "a test reproduces X1 and X2 and fails before the change; the shim's header comment says what it checks"
+    ]
+  },
+  {
+    "title": "T101 F12: a brokered worker messages only the orchestrator",
+    "kind": "code", "size": "S", "tier": "easy",
+    "acceptance": [
+      "evidence: docs/review-2026-10-08.md F12; probes B12 (broker authorized msg --to worker-T1-1 from worker-T2-1) and B13 (delivered into worker-T1-1's context)",
+      "the broker refuses msg from a worker or reviewer to any recipient other than the orchestrator or the owner; docs/cli.md says so",
+      "test/broker.test.js reproduces B12 and fails before the change"
+    ]
+  },
+  {
+    "title": "T101 F13: hook git-push and pr-created come only from the shim",
+    "kind": "code", "size": "S", "tier": "easy",
+    "acceptance": [
+      "evidence: docs/review-2026-10-08.md F13; probe R1 (a worker recorded hook git-push with no push)",
+      "an agent cannot record hook git-push or hook pr-created except through the shim after a successful command, or the events are documented as unverified hints and every consumer checks GitHub or the repository",
+      "a test reproduces R1 and fails before the change"
+    ]
+  }
+]

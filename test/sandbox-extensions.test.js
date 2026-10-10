@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
-const { makeRepo } = require('./helpers');
+const { makeRepo, cachedFixture } = require('./helpers');
 const TOML = require('../lib/toml');
 
 const NO_STUBS = process.platform === 'win32' && 'harness stubs are shebang scripts';
@@ -13,14 +13,14 @@ const SECRET_KEY = 'TC_PRIVATE_ENV_FILE_KEY';
 const SECRET = 'private-file-value $literal `literal`';
 
 function setup(t, harness = 'codex') {
-  const h = makeRepo(t);
-  h.init();
-  h.ok(['task', 'add', '--title', 'Toolchain probe', '--acceptance', 'lock written']);
-  h.ok(['brief', 'set', 'T1', '-'], { input: 'probe' });
-  h.ok(['ladder', 'set', 'medium', '--harness', harness,
-    ...(harness === 'codex' ? ['--profile', 'sol', '--clear', 'model'] : ['--model', 'opus', '--clear', 'profile']),
-    '--clear', 'effort', '--clear', 'args']);
-  return h;
+  return cachedFixture(t, harness, (h) => {
+    h.init();
+    h.ok(['task', 'add', '--title', 'Toolchain probe', '--acceptance', 'lock written']);
+    h.ok(['brief', 'set', 'T1', '-'], { input: 'probe' });
+    h.ok(['ladder', 'set', 'medium', '--harness', harness,
+      ...(harness === 'codex' ? ['--profile', 'sol', '--clear', 'model'] : ['--model', 'opus', '--clear', 'profile']),
+      '--clear', 'effort', '--clear', 'args']);
+  });
 }
 
 function noFileSecrets(dir) {
@@ -222,7 +222,7 @@ test('scoped arguments keep literal env references and old systemd refuses to la
   fs.writeFileSync(script, `
 const fs = require('node:fs');
 if (process.env.TC_ARG_ENV !== 'configured-value' || process.env.TC_ARG_FILE !== ${JSON.stringify(SECRET)}) throw new Error('agent env missing');
-const args = process.argv.slice(2);
+const args = process.argv.slice(2, -1);
 if (JSON.stringify(args) !== ${JSON.stringify(JSON.stringify(literals))}) throw new Error('scope expanded literal argv');
 fs.writeFileSync(${JSON.stringify(out)}, JSON.stringify(args));
 console.log('literal args passed');
@@ -241,7 +241,7 @@ if (!args.includes('--expand-environment=no')) {
 const r = cp.spawnSync(command[0], command.slice(1), {stdio: 'inherit'});
 process.exit(r.status ?? 1);
 `, { mode: 0o755 });
-  h.ok(['ladder', 'set', 'medium', '--harness', 'command', '--command', JSON.stringify([process.execPath, script, ...literals]),
+  h.ok(['ladder', 'set', 'medium', '--harness', 'command', '--command', JSON.stringify([process.execPath, script, ...literals, '{prompt}']),
     '--clear', 'profile', '--supervision', '{"retries":0}']);
   h.ok(['project', 'set', '--scope', '{"CPUQuota":"200%"}', '--env', '{"TC_ARG_ENV":"configured-value"}', '--env_file', file]);
   const env = { PATH: `${bin}${path.delimiter}${process.env.PATH}` };
@@ -271,7 +271,7 @@ fs.statSync = function(file, ...args) {
 `);
   const harness = path.join(bin, 'agent');
   fs.writeFileSync(harness, `#!${process.execPath}\nprocess.exit(0);\n`, { mode: 0o755 });
-  h.ok(['ladder', 'set', 'medium', '--harness', 'command', '--command', JSON.stringify([process.execPath, harness]), '--clear', 'profile']);
+  h.ok(['ladder', 'set', 'medium', '--harness', 'command', '--command', JSON.stringify([process.execPath, harness, '{prompt}']), '--clear', 'profile']);
   h.ok(['project', 'set', '--scope', '{"CPUQuota":"200%"}']);
   const before = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8');
   const result = h.run(['spawn', '--task', 'T1', '--wait'], { env: { NODE_OPTIONS: `--require ${JSON.stringify(missing)}` } });
