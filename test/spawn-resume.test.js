@@ -59,7 +59,7 @@ if (enabled === 'true') {
 }
 if (process.env.RESUME_EXIT_DELAY) setTimeout(() => {}, Number(process.env.RESUME_EXIT_DELAY));
 `);
-  h.ok(['ladder', 'set', 'medium', '--harness', 'command', '--clear', 'profile', '--clear', 'effort',
+  h.ok(['ladder', 'set', 'medium', '--harness', 'command', '--clear', 'profile', '--clear', 'model', '--clear', 'effort',
     '--command', JSON.stringify([process.execPath, script, BIN, seen, '{session}', '{prompt}', format, String(session)])]);
   return { h, seen, script };
 }
@@ -242,7 +242,9 @@ test('no session record or a changed rung starts a fresh worker', (t) => {
     const next = h.json(['spawn', '--task', 'T1', '--dry-run']);
     assert.equal(next.resumed, false, change);
     assert.equal(next.agent, 'worker-T1-2', change);
-    assert.equal(next.session_id, null, change);
+    // A claude rung mints a session for a fresh worker; a codex one has none until it runs.
+    if (change === 'rung') assert.notEqual(next.session_id, 'worker-session-1', change);
+    else assert.equal(next.session_id, null, change);
     if (change !== 'rung') {
       const started = h.json(['spawn', '--task', 'T1', '--wait']);
       assert.equal(started.resumed, false);

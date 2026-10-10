@@ -624,7 +624,7 @@ The owner talks to the orchestrator the way a phone client talks to an agent: a 
   "rungs": {
     "easy": { "harness": "", "model": "openai/gpt-5.5", "profile": "", "effort": "low", "args": "[\"--no-session\"]" }
   },
-  "base": { "harness": "codex", "rungs": { "easy": { "profile": "luna", "effort": "medium" } } }
+  "base": { "harness": "codex", "rungs": { "easy": { "harness": "claude", "model": "claude-haiku-5-5", "effort": "high" } } }
 }
 ```
 

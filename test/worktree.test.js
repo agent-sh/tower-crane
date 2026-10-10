@@ -277,7 +277,7 @@ for (const command of ['worktree', 'spawn']) {
     }
     if (command === 'spawn') {
       h.ok(['ladder', 'set', 'medium', '--harness', 'command', '--command',
-        JSON.stringify([process.execPath, '-e', 'process.exit(0)', '{prompt}']), '--clear', 'profile', '--clear', 'effort']);
+        JSON.stringify([process.execPath, '-e', 'process.exit(0)', '{prompt}']), '--clear', 'model', '--clear', 'profile', '--clear', 'effort']);
       for (const id of ids) h.ok(['brief', 'set', id, '-'], { input: 'Use the fresh base.\n' });
     }
     const attempts = guardUploadPack(h, 15000);

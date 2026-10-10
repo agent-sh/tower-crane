@@ -125,7 +125,7 @@ test('one fixture exposes every inbox kind and resolving commands clear their co
   assert.equal(merges[0][merges[0].indexOf('--match-head-commit') + 1], h.sha);
   const worker = path.join(h.base, 'worker.js');
   fs.writeFileSync(worker, 'setTimeout(() => {}, 60000);\n');
-  h.ok(['ladder', 'set', 'medium', '--harness', 'command', '--command', JSON.stringify([process.execPath, worker, '{prompt}']), '--clear', 'profile', '--clear', 'effort']);
+  h.ok(['ladder', 'set', 'medium', '--harness', 'command', '--command', JSON.stringify([process.execPath, worker, '{prompt}']), '--clear', 'model', '--clear', 'profile', '--clear', 'effort']);
   const dispatch = h.run(['spawn', '--ready', '--agent', 'orchestrator', '--json']);
   assert.equal(dispatch.code, 0, dispatch.stdout + dispatch.stderr);
   const spawned = JSON.parse(dispatch.stdout);
@@ -180,7 +180,7 @@ test('ready dispatch respects worker slots and unobservable processes cannot be 
   assert.deepEqual(h.readState('tasks.json'), before);
   const worker = path.join(h.base, 'worker.js');
   fs.writeFileSync(worker, 'setTimeout(() => {}, 60000);\n');
-  h.ok(['ladder', 'set', 'medium', '--harness', 'command', '--command', JSON.stringify([process.execPath, worker, '{prompt}']), '--clear', 'profile', '--clear', 'effort']);
+  h.ok(['ladder', 'set', 'medium', '--harness', 'command', '--command', JSON.stringify([process.execPath, worker, '{prompt}']), '--clear', 'model', '--clear', 'profile', '--clear', 'effort']);
   const dispatch = h.run(['spawn', '--ready', '--agent', 'orchestrator', '--json']);
   assert.equal(dispatch.code, 0, dispatch.stdout + dispatch.stderr);
   const spawned = JSON.parse(dispatch.stdout);

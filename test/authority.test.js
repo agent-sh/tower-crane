@@ -354,9 +354,12 @@ for (const harness of L.HARNESSES.filter((name) => name !== 'command')) {
   test(`${harness}: primary, following fallback and default harness moves follow its sandbox capability`, (t) => {
     const h = setup(t);
     // Valid model-only rungs keep profile and effort incompatibilities from
-    // hiding the authority result when the default harness changes.
-    for (const rung of L.RUNGS) h.ok(['ladder', 'set', rung, '--model', 'fixture',
-      '--clear', 'profile', '--clear', 'effort', '--clear', 'args', '--clear', 'provider']);
+    // hiding the authority result when the default harness changes. Every rung
+    // names its harness except medium, which follows the default under test, so
+    // a built-in route change cannot move these cases.
+    for (const rung of L.RUNGS) h.ok(['ladder', 'set', rung,
+      ...(rung === 'medium' ? ['--clear', 'harness'] : ['--harness', 'claude']),
+      '--model', 'fixture', '--clear', 'profile', '--clear', 'effort', '--clear', 'args', '--clear', 'provider']);
     h.ok(['ladder', 'harness', 'claude']);
     const sandbox = A.CAPABILITIES[harness].sandbox;
     const unconfined = { unconfined: [{ harness }] };
@@ -366,8 +369,7 @@ for (const harness of L.HARNESSES.filter((name) => name !== 'command')) {
       [['ladder', 'set', 'hard', '--harness', harness, '--model', 'fixture'], { ladder: { hard: unconfined } }],
       [['ladder', 'set', 'research', '--harness', harness, '--model', 'fixture'],
         { ladder: { research: { unconfined: [{ harness }, { harness }] } } }],
-      [['ladder', 'harness', harness], { harness, ladder: Object.fromEntries(
-        ['easy', 'medium', 'review', 'small'].map((rung) => [rung, unconfined])) }],
+      [['ladder', 'harness', harness], { harness, ladder: { medium: unconfined } }],
     ]) {
       const before = h.readState('project.json');
       const result = h.run(args, as('orchestrator'));

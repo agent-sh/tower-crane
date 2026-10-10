@@ -86,7 +86,7 @@ else { const timer = setInterval(() => {
 }, 25); }` : `setTimeout(finish, ${hold});`}
 `;
   h.ok(['ladder', 'set', 'easy', '--harness', 'command', '--command', JSON.stringify([process.execPath, '-e', script, BIN, h.attempts, '{prompt}']),
-    '--clear', 'profile', '--clear', 'effort', '--supervision',
+    '--clear', 'model', '--clear', 'profile', '--clear', 'effort', '--supervision',
     JSON.stringify({ retries: 2, backoff_ms: 150, max_backoff_ms: 1000, stall_ms: 60000, ...config })]);
   h.spawn = (role, timeout = 15000) => h.run(['spawn', '--task', 'T1', ...(role ? ['--role', role] : []), '--wait', '--json'], { env, timeout });
   h.readAttempts = () => fs.existsSync(h.attempts) ? JSON.parse(fs.readFileSync(h.attempts, 'utf8')) : [];
@@ -116,7 +116,7 @@ setInterval(() => {
 }, 25);
 `;
   h.ok(['ladder', 'set', 'easy', '--harness', 'command', '--command', JSON.stringify([process.execPath, '-e', script, '{prompt}']),
-    '--clear', 'profile', '--clear', 'effort', '--supervision', JSON.stringify({ retries: 0, stall_ms: 60000 })]);
+    '--clear', 'model', '--clear', 'profile', '--clear', 'effort', '--supervision', JSON.stringify({ retries: 0, stall_ms: 60000 })]);
   h.ok(['msg', '--to', 'worker-T1-1', '--task', 'T1', 'startup context']);
   const fixture = path.join(__dirname, 'fixtures', 'supervisor-hook-lock.js');
   const completed = h.runAsync(['spawn', '--task', 'T1', '--wait', '--json'], { env: {
@@ -362,7 +362,7 @@ if (task === 'T1' && retry === 0) {
 }
 `;
   h.ok(['ladder', 'set', 'easy', '--harness', 'command', '--command', JSON.stringify([process.execPath, '-e', script, BIN, '{prompt}']),
-    '--clear', 'profile', '--clear', 'effort', '--supervision', JSON.stringify({ retries: 1, backoff_ms: 3500, max_backoff_ms: 3500 })]);
+    '--clear', 'model', '--clear', 'profile', '--clear', 'effort', '--supervision', JSON.stringify({ retries: 1, backoff_ms: 3500, max_backoff_ms: 3500 })]);
 
   const backoff = controlledBackoff(h);
   const started = h.json(['spawn', '--task', 'T1'], { env: backoff.env });
@@ -488,7 +488,7 @@ test('submitted-task reviewers resume transient exits and show their phase', (t)
   h.ok(['project', 'set', '--ci-local', JSON.stringify({ command: [process.execPath, 'test/value.test.js'], timeout: 30 })]);
   const rung = h.json(['ladder', 'show']).ladder.easy;
   h.ok(['ladder', 'set', 'review', '--harness', 'command', '--command', JSON.stringify(rung.command),
-    '--supervision', JSON.stringify(rung.supervision), '--clear', 'profile', '--clear', 'effort']);
+    '--supervision', JSON.stringify(rung.supervision), '--clear', 'model', '--clear', 'profile', '--clear', 'effort']);
   h.ok(['claim', 'T1', '--agent', 'original-worker']);
   h.ok(['submit', 'T1', '--agent', 'original-worker', '--sha', sha]);
   for (const type of ['tests', 'clean', 'ci']) gateEvidence(h, type, 'fixture-gates');
@@ -586,7 +586,7 @@ for (const harness of ['claude', 'codex']) {
     fs.mkdirSync(bin);
     fs.writeFileSync(path.join(bin, harness + (process.platform === 'win32' ? '.exe' : '')), '', { mode: 0o755 });
     h.ok(['ladder', 'set', 'easy', '--harness', harness, '--clear', 'command',
-      ...(harness === 'codex' ? ['--profile', 'chosen-profile'] : ['--model', 'chosen-model'])]);
+      ...(harness === 'codex' ? ['--clear', 'model', '--profile', 'chosen-profile'] : ['--model', 'chosen-model'])]);
     const stub = path.join(__dirname, 'fixtures', 'supervision-harness.js').replace(/\\/g, '/');
     const attemptsFile = path.join(h.base, 'harness-attempts.json');
     const result = h.run(['spawn', '--task', 'T1', '--wait'], {

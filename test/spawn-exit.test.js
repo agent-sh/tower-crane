@@ -57,7 +57,7 @@ ${wait ? 'process.exit(7);' : 'setInterval(() => {}, 1000);'}
 `;
   fs.writeFileSync(worker, script);
   h.ok(['ladder', 'set', 'easy', '--harness', 'command', '--command', JSON.stringify([process.execPath, worker, BIN, marker, '{prompt}']),
-    '--clear', 'profile', '--clear', 'effort']);
+    '--clear', 'model', '--clear', 'profile', '--clear', 'effort']);
   if (wait) return h.run(['spawn', '--role', 'easy', '--task', 'T1', '--wait']);
   const spawned = h.json(['spawn', '--task', 'T1'], { env });
   let killed = false;

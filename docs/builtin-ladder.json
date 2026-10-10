@@ -1,0 +1,12 @@
+{
+  "harness": "codex",
+  "ladder": {
+    "orchestrator": { "harness": "claude", "model": "opus", "effort": "high" },
+    "easy": { "harness": "claude", "model": "claude-haiku-5-5", "effort": "high" },
+    "medium": { "profile": "sol", "effort": "high" },
+    "hard": { "harness": "claude", "model": "opus", "effort": "medium" },
+    "research": { "harness": "claude", "model": "opus", "effort": "high" },
+    "review": { "harness": "claude", "model": "claude-haiku-5-5", "effort": "high" },
+    "small": { "harness": "claude", "model": "claude-haiku-5-5", "effort": "high" }
+  }
+}

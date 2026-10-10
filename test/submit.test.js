@@ -205,7 +205,7 @@ test('after closing the old PR, a new PR supplies or verifies the submitted bran
 test('review evidence must pin the reviewed sha when a worker resubmits during review', (t) => {
   const h = makeRepo(t);
   h.init();
-  h.ok(['ladder', 'set', 'medium', '--harness', 'command', '--clear', 'profile', '--clear', 'effort',
+  h.ok(['ladder', 'set', 'medium', '--harness', 'command', '--clear', 'model', '--clear', 'profile', '--clear', 'effort',
     '--command', '["tower-crane-no-such-reviewer","{prompt}"]']);
   h.ok(['task', 'add', '--title', 'Docs', '--acceptance', 'reads well', '--kind', 'docs']);
   h.ok(['claim', 'T1', '--agent', 'w-1']);

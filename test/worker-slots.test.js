@@ -51,23 +51,19 @@ const timer = setInterval(() => {
 }, 25);
 `);
   h.ok(['ladder', 'set', 'easy', '--harness', 'command',
-    '--command', JSON.stringify([process.execPath, script, BIN, h.base, '{prompt}']), '--clear', 'profile', '--clear', 'effort']);
+    '--command', JSON.stringify([process.execPath, script, BIN, h.base, '{prompt}']), '--clear', 'model', '--clear', 'profile', '--clear', 'effort']);
 }
 
 test('five held worker slots refuse dispatch before process, home or spend', (t) => {
   const h = setup(t, 5, 6);
   for (let i = 1; i <= 5; i++) h.ok(['claim', `T${i}`, '--agent', `held-${i}`]);
-  const bin = path.join(h.base, 'bin');
-  fs.mkdirSync(bin);
-  fs.writeFileSync(path.join(bin, 'codex' + (process.platform === 'win32' ? '.exe' : '')), '', { mode: 0o755 });
-  const opts = {
-    env: { PATH: bin + path.delimiter + (h.env.PATH || h.env.Path || ''), CODEX_HOME: path.join(h.base, 'codex') },
-    hooks: { HOOK_USAGE_HARNESS: 'codex', HOOK_USAGE_FILE: path.join(__dirname, 'fixtures', 'usage', 'codex-stream.jsonl') },
-  };
+  // Pin easy so the slot check is what refuses, whether or not a claude binary is installed.
+  h.ok(['ladder', 'set', 'easy', '--harness', 'command',
+    '--command', JSON.stringify([process.execPath, '-e', 'process.exit(0)', '{prompt}']), '--clear', 'model', '--clear', 'profile', '--clear', 'effort']);
   const beforeTasks = fs.readFileSync(path.join(h.state, 'tasks.json'), 'utf8');
   const beforeEvents = events(h);
   for (const role of [[], ['--role', 'easy']]) {
-    const r = h.run(['spawn', '--task', 'T6', ...role, '--wait'], opts);
+    const r = h.run(['spawn', '--task', 'T6', ...role, '--wait']);
     assert.equal(r.code, 1, r.stderr);
     assert.match(r.stderr, /workers limit is reached/);
     for (let i = 1; i <= 5; i++) assert.match(r.stderr, new RegExp(`T${i}.*held-${i}`));
@@ -314,7 +310,7 @@ test('sandboxed claims and expired renewals cannot discard hidden live reservati
 test('a reservation ends at its monitor exit or lease horizon, the same for every observer', (t) => {
   const h = setup(t, 1);
   h.ok(['ladder', 'set', 'easy', '--harness', 'command',
-    '--command', JSON.stringify([process.execPath, '-e', 'process.exit(0)', '{prompt}']), '--clear', 'profile', '--clear', 'effort']);
+    '--command', JSON.stringify([process.execPath, '-e', 'process.exit(0)', '{prompt}']), '--clear', 'model', '--clear', 'profile', '--clear', 'effort']);
   const spawned = h.json(['spawn', '--task', 'T1', '--wait']);
   assert.ok(events(h).some((e) => e.cmd === 'spawn phase' && e.detail.agent === spawned.agent && e.detail.active === false));
   // No exit receipt was recorded; MONITOR_SILENT also drops the monitor's

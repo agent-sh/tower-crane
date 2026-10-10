@@ -242,7 +242,7 @@ const r = cp.spawnSync(command[0], command.slice(1), {stdio: 'inherit'});
 process.exit(r.status ?? 1);
 `, { mode: 0o755 });
   h.ok(['ladder', 'set', 'medium', '--harness', 'command', '--command', JSON.stringify([process.execPath, script, ...literals, '{prompt}']),
-    '--clear', 'profile', '--supervision', '{"retries":0}']);
+    '--clear', 'model', '--clear', 'profile', '--supervision', '{"retries":0}']);
   h.ok(['project', 'set', '--scope', '{"CPUQuota":"200%"}', '--env', '{"TC_ARG_ENV":"configured-value"}', '--env_file', file]);
   const env = { PATH: `${bin}${path.delimiter}${process.env.PATH}` };
   h.ok(['spawn', '--task', 'T1', '--wait'], { env });
@@ -271,7 +271,7 @@ fs.statSync = function(file, ...args) {
 `);
   const harness = path.join(bin, 'agent');
   fs.writeFileSync(harness, `#!${process.execPath}\nprocess.exit(0);\n`, { mode: 0o755 });
-  h.ok(['ladder', 'set', 'medium', '--harness', 'command', '--command', JSON.stringify([process.execPath, harness, '{prompt}']), '--clear', 'profile']);
+  h.ok(['ladder', 'set', 'medium', '--harness', 'command', '--command', JSON.stringify([process.execPath, harness, '{prompt}']), '--clear', 'model', '--clear', 'profile']);
   h.ok(['project', 'set', '--scope', '{"CPUQuota":"200%"}']);
   const before = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8');
   const result = h.run(['spawn', '--task', 'T1', '--wait'], { env: { NODE_OPTIONS: `--require ${JSON.stringify(missing)}` } });

@@ -50,7 +50,7 @@ const timer = setInterval(() => {
 `);
   h.ok(['ladder', 'set', 'easy', '--harness', 'command',
     '--command', JSON.stringify([process.execPath, script, h.base, '{prompt}']),
-    '--clear', 'profile', '--clear', 'effort']);
+    '--clear', 'model', '--clear', 'profile', '--clear', 'effort']);
 }
 
 test('task add, update and old state expose locks and an environment label', (t) => {

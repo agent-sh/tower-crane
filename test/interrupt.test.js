@@ -52,7 +52,7 @@ if (!session) {
   }, 25);
 }
 `);
-  h.ok(['ladder', 'set', 'medium', '--harness', 'command', '--clear', 'profile', '--clear', 'effort',
+  h.ok(['ladder', 'set', 'medium', '--harness', 'command', '--clear', 'model', '--clear', 'profile', '--clear', 'effort',
     '--command', JSON.stringify([process.execPath, script, BIN, seen, '{session}', '{prompt}']),
     '--supervision', JSON.stringify({ retries: 1, backoff_ms: 30000, max_backoff_ms: 30000 })]);
   h.seen = () => fs.existsSync(seen) ? JSON.parse(fs.readFileSync(seen)) : [];
