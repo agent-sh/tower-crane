@@ -55,6 +55,9 @@ cp.spawnSync = function (command, args, options) {
     { cwd: options.cwd, env: options.env, encoding: 'utf8' });
   if (lint.status !== 0) throw new Error('probe model lint failed: ' + lint.stdout + lint.stderr);
   fs.writeSync(options.stdio[1], 'not ok 1 - BUILTIN matches the documented defaults and init fallback\\n# tests 1\\n# fail 1\\n');
+  if (options.env.PROBE_UNEXPECTED_FAILURE) {
+    fs.writeSync(options.stdio[1], '# Subtest: unexpected fixture failure\\nnot ok 2 - unexpected fixture failure\\n  ---\\n  error: fixture assertion details\\n  ...\\n');
+  }
   const log = path.join(${JSON.stringify(cache)}, 'model-swap-probe.tap');
   fs.renameSync(log, log + '.replaced');
   fs.writeFileSync(log, 'not ok 1 - replaced log\\n');
@@ -67,6 +70,11 @@ cp.spawnSync = function (command, args, options) {
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /Model swap probe passed/);
   assert.equal(fs.readFileSync(path.join(cache, 'model-swap-probe.tap'), 'utf8'), 'not ok 1 - replaced log\n');
+  const failed = cp.spawnSync(process.execPath, ['--require', hook, path.join(ROOT, 'scripts', 'probe-model-swap.js')],
+    { cwd: ROOT, env: { ...h.env, TOWER_CRANE_TEST_TMP: cache, PROBE_UNEXPECTED_FAILURE: '1' },
+      encoding: 'utf8', timeout: 60000 });
+  assert.equal(failed.status, 1);
+  assert.match(failed.stderr, /error: fixture assertion details/);
 });
 
 test('literal lexer distinguishes comments, regexes, escapes and nested templates', () => {

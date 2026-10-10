@@ -69,6 +69,11 @@ try {
     throw new Error(`the suite did not finish within the 45-minute software-gate deadline (log: ${log})`);
   }
   if (result.error || result.status !== 1 || failures.length !== 1 || failures[0] !== expected) {
+    // The log tail can omit an early failure, so retain its complete assertion block.
+    for (const block of output.split(/(?=^# Subtest: )/m)) {
+      const failed = /^not ok \d+ - (.*)$/m.exec(block);
+      if (failed && failed[1] !== expected) console.error(block.trimEnd());
+    }
     throw new Error(`expected only "${expected}" to fail: ${JSON.stringify(failures)}; ${result.error || ''}`);
   }
   console.log('Model swap probe passed: only the documented defaults assertion failed.');
