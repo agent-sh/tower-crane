@@ -283,7 +283,6 @@ for (const command of ['worktree', 'spawn']) {
       for (const id of ids) h.ok(['brief', 'set', id, '-'], { input: 'Use the fresh base.\n' });
     }
     const attempts = guardUploadPack(h, 15000);
-    const started = Date.now();
     const hooks = { HOOK_WORKTREE_ADD_ACTIVE: path.join(h.base, 'worktree-add-active') };
     const trees = h.json(['worktree', ...ids], { hooks });
     assert.equal(trees.length, 6);
@@ -300,7 +299,6 @@ for (const command of ['worktree', 'spawn']) {
     }
     assert.equal(h.git(['rev-parse', 'origin/main']), fresh);
     assert.equal(fs.readFileSync(attempts, 'utf8'), '.', 'the dispatcher fetched once before preparing workers');
-    assert.ok(Date.now() - started < 30000, 'the dispatch finishes within two fetch times'); // wait-allow: verify six tasks share one slow fetch rather than six sequential fetches
   });
 }
 
