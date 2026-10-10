@@ -16,7 +16,7 @@ test('gates.tmp_root holds the worktrees of check tests, ci and clean; TOWER_CRA
   fs.writeFileSync(recorder, `
 const fs = require('node:fs');
 const [gate, file] = process.argv.slice(2);
-fs.appendFileSync(file, JSON.stringify({ gate, cwd: process.cwd() }) + '\\n');
+fs.appendFileSync(file, JSON.stringify({ gate, cwd: fs.realpathSync.native(process.cwd()) }) + '\\n');
 if (gate === 'clean') console.log(JSON.stringify({ items: [] }));
 `);
   const shellCommand = (gate) => `${shellQuote(process.execPath)} ${shellQuote(recorder)} ${gate} ${shellQuote(log)}`;
