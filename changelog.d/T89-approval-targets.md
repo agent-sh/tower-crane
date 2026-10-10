@@ -1,0 +1,2 @@
+- Bind release approvals to the task, holder and claim start time. A replacement claim needs fresh approval; renewing the same claim preserves its identity.
+- Bind browser-kit approvals to the resolved personal-config file and server list. Changing the target file or retrying an old approval without a target requires a new decision.

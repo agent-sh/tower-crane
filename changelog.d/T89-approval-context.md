@@ -1,0 +1,3 @@
+- Retire fulfilled primary-ladder and task-kind approvals independently of the current authority class, including unchanged writes. Match the reach grants actually written and preserve current authorization and audit classes.
+- Retire matching cancellation and review-waiver requests when their owner-only condition has cleared.
+- Bind waiver requests and their evidence to the task revision as well as the task and commit. Changed requirements and legacy approvals without a revision need fresh approval.

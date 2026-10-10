@@ -560,7 +560,7 @@ test('review dispatch refuses a submitted head or configured base changed after 
   }
 });
 
-test('accept runs tests, clean and CI before dispatch, and records review pending until a later accept', async (t) => {
+test('accept runs tests, clean and CI before dispatch, then automation accepts after review', async (t) => {
   const h = setup(t);
   const out = path.join(h.base, 'review-context.txt');
   commandReviewer(h, out);
@@ -569,16 +569,17 @@ test('accept runs tests, clean and CI before dispatch, and records review pendin
   assert.equal(result.status, 'submitted');
   assert.equal(result.review_pending, true);
   const deadline = Date.now() + 10000;
-  while (!h.readState('tasks.json').tasks[0].evidence.some((e) => e.type === 'review')) {
-    assert.ok(Date.now() < deadline, 'reviewer did not finish');
+  while (h.readState('tasks.json').tasks[0].status !== 'accepted') {
+    assert.ok(Date.now() < deadline, 'review did not reach automatic acceptance');
     await new Promise((resolve) => setTimeout(resolve, 30));
   }
   const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
   const dispatch = events.findIndex((e) => e.cmd === 'spawn' && e.detail.role === 'reviewer');
   for (const type of ['tests', 'clean', 'ci']) assert.ok(events.findIndex((e) => e.cmd === `check ${type}` && e.detail.ok) < dispatch);
   assert.match(fs.readFileSync(out, 'utf8'), /Gate results/);
-  h.ok(['accept', 'T1']);
-  assert.equal(h.readState('tasks.json').tasks[0].status, 'accepted');
+  const accepted = h.readState('tasks.json').tasks[0];
+  assert.equal(accepted.status, 'accepted');
+  assert.ok(accepted.evidence.some((e) => e.type === 'review' && e.ok));
 });
 
 describe('remaining reviewer integration cases', { concurrency: windowsConcurrency }, () => {

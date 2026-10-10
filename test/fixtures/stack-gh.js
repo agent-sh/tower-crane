@@ -143,6 +143,22 @@ cp.spawnSync = function stackGh(command, args, opts) {
   if (args[0] === 'pr' && args[1] === 'view') {
     const pr = data.prs[args[2]];
     if (!pr) return finish('', 1, 'missing PR');
+    if (data.generatedProbe) {
+      pr.headRepository = { nameWithOwner: 'acme/app' };
+      pr.url = `https://github.com/acme/app/pull/${pr.number}`;
+      pr.mergeable ||= 'MERGEABLE';
+      pr.mergeStateStatus ||= 'CLEAN';
+      if (pr.number === data.generatedProbe.upper && data.prs[data.generatedProbe.lower].state === 'MERGED') {
+        if (!data.generatedProbe.unmergedParent) pr.baseRefName = 'main';
+        const head = git(['ls-remote', 'origin', `refs/heads/${pr.headRefName}`]).split(/\s/)[0];
+        if (head !== pr.headRefOid) {
+          pr.headRefOid = head;
+          data.generatedProbe.repaired = true;
+        }
+        pr.mergeable = data.generatedProbe.repaired ? 'MERGEABLE' : data.generatedProbe.mergeable;
+        pr.mergeStateStatus = pr.mergeable === 'CONFLICTING' ? 'DIRTY' : pr.mergeable === 'UNKNOWN' ? 'UNKNOWN' : 'CLEAN';
+      }
+    }
     const replies = data.asyncResponses?.[pr.number];
     const reply = replies?.started && replies.views?.shift();
     if (reply?.merge) land(pr, 2, `Merge pull request #${pr.number}`, false);

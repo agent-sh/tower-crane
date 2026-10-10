@@ -1,0 +1,3 @@
+- Generated orchestrators consume spawn approvals once and audit their verified role. Mixed waiver requests retain operational review eligibility alongside owner-approved software waivers.
+- Interruptions and per-decision delegation use the shared setting audit. The orchestrator can request and apply owner-approved answerer or technical delegation changes.
+- `ladder set --fallbacks` and `--clear fallbacks` edit personal fallback lists without changing project primaries or unrelated user settings. Route fields, reach, tools and MCP opt-ins use the same authority checks as primary routes; owner approvals bind the personal file, rung and requested list.

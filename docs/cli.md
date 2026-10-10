@@ -14,9 +14,25 @@ Resolving either identity source to `owner` (the terminal fallback included) is 
 
 The credential location for an initialized project comes only from `project.json`, never from the command's `TOWER_CRANE_CONFIG`, `HOME` or `USERPROFILE`. Changing those variables does not redirect authentication or a pinned sandbox denial. An absent, invalid or missing recorded credential refuses headless owner access. For a project without `owner_config_dir`, only an explicit owner at a terminal can record it with `owner-key`; an existing binding is never replaced. Until it is recorded, spawning still works and hides `owner/` under the spawning environment's resolved Tower Crane config directory, where a terminal `owner-key` would create the key. This denial does not establish a binding or allow owner authentication.
 
-Guarded settings and commands are operational or owner-required, per the one table in [state.md: Authority](state.md#authority). The orchestrator or the owner makes operational changes; the orchestrator's owner-required change opens a decision for the owner (exit 1, naming the decision) and changes nothing. The owner is the resolved name `owner`, supplied explicitly by `--agent owner` or `TOWER_CRANE_AGENT=owner`; the terminal fallback never grants authority. Workers and reviewers ask the orchestrator for operational changes with `tower-crane msg --to orchestrator` or a task note. Any agent may release a spawned claim verified exited under the lock.
+Guarded settings and commands are operational or owner-required, per the one table in [state.md: Authority](state.md#authority). The orchestrator or the owner makes operational changes; the orchestrator's owner-required change opens a decision for the owner (exit 1, naming the decision) and changes nothing until the owner answers `approve`; the orchestrator then runs the same command again, which applies that approval once. Every allowed change of a guarded setting, from the CLI or the board, appends one `setting` audit event ([state.md: Authority](state.md#authority)). `tower-crane authority` lists the table. The owner is the resolved name `owner`, supplied explicitly by `--agent owner` or `TOWER_CRANE_AGENT=owner`; the terminal fallback never grants authority. Workers and reviewers ask the orchestrator for operational changes with `tower-crane msg --to orchestrator` or a task note. Any agent may release a spawned claim verified exited under the lock.
 
-Decision delegation (`decision delegate` and `project set --decision-delegation`), waiving tests, clean or CI, waiving review when no reviewer is capped or down at the submitted head, and releasing another agent's live or unverified claim require explicit owner identity. The terminal fallback never grants owner authority. Clearing or replacing an existing `needs_owner` reason and `owner-done` are operational; waiving a capped or down review is operational. An agent requests owner-required action with `tower-crane ask --setting KEY` or a task note.
+Decision delegation (`decision delegate` and `project set --decision-delegation`), waiving tests, clean or CI, waiving review when no reviewer is capped or down at the submitted head, and releasing another agent's live or unverified claim are owner-required. The owner acts with explicit identity; the orchestrator can apply the identical request after the owner's one-use approval. The terminal fallback never grants owner authority. Clearing or replacing an existing `needs_owner` reason and `owner-done` are operational; waiving a capped or down review is operational. An agent requests owner-required action with `tower-crane ask --question Q --setting KEY` or a task note.
+
+If the owner's successful write satisfies a request's fields, it retires the matching open or approved request even when the same command also writes additional settings. Targets and replacement field values must match; JSON formatting and object key order do not change the value. A subsequent orchestrator attempt opens a new decision; it cannot use that old approval to overwrite a later owner choice. Failed writes, including acceptance or spawn failures, leave the approval available.
+
+For budgets, retirement matches the requested hours and tokens even if writing them now lowers or repeats the current limit. The owner setting 20, then the approved amount 10, then 5 leaves no approval the orchestrator can reuse to restore 10. Authorization and audit still use the current raise/lower classification.
+
+Use `project set --budget-hours null` or `--budget-tokens null` to remove a project limit; use `task update ID` with the same flags for a task limit. Removing a finite limit is owner-required: the orchestrator's command opens a decision and must be rerun after approval. Task and project budget requests have distinct targets. The same flags accept `null` during `init`.
+
+For personal fallbacks, the owner writes the whole replacement list. A write of the requested list retires its approval even if only an operational field differs or the list is unchanged; the audit still describes the actual field changes. A different file, rung or replacement list does not satisfy the request.
+
+Personal fallback grants are compared only with the previous personal routes, never a project's primary. Routes that inherit their harness are checked across compatible harnesses; switching between inherited and explicit harness selection needs any new reach grants approved. An explicit sandboxed harness avoids dependence on another project's primary. Once a personal grant exists, model tuning remains operational.
+
+Owner primary-ladder writes settle matching reach requests for the tools, harness and arguments they write, including grants already present. Owner task-kind writes likewise settle a pending downgrade request after the kind has changed, including a repeated kind value. This retirement does not change which edits are operational or owner-required.
+
+Waiver approvals are bound to the task, SHA and revision. After an acceptance, dependency or capability change, rerunning the same `accept --waive` command opens a new decision even at the same commit. Old approvals without a revision cannot authorize acceptance or back orchestrator waiver evidence.
+
+Release approvals identify the task, holder and claim start time. A lease renewal preserves that identity; a replacement claim requires fresh approval even for the same holder. Browser-kit approvals identify the resolved personal-config file as well as the server list, so a retry with a different `TOWER_CRANE_CONFIG` cannot reuse the approval. Legacy requests without these target bindings require new decisions.
 
 In a sandboxed claude or codex agent (`TOWER_CRANE_BROKER` set by its spawn), commands that only read, and `worktree` for the worktree spawn made, run as usual, and every other command on the spawn's state directory is sent to the [state broker](ladder.md#state-broker), which runs it as the spawned agent if its role allows it on its own task, and prints its output and exits with its code. A refused command exits 1 and writes nothing, except a refused `msg` (below). The broker refuses `check`: it runs outside the sandbox and never runs the agent's code, so a worker runs its tests directly and the orchestrator runs the gates.
 
@@ -33,6 +49,8 @@ Lock attempts use private staging directories named with the process pid and a f
 <!-- commands:Plan:start -->
 | Command | Does |
 |---|---|
+| `authority` | list every guarded setting with its class (`operational`, `owner-required` or `refused`) and the command that changes it; `--json` gives `[{ setting, class, how }]`, the list the board reads |
+| | |
 | `brief get ID [--role worker\|reviewer]` | write or read the task's brief; `brief get` filters for the caller's worker or reviewer role, and `brief set` warns about a reviewer section without a worker section |
 | | |
 | `brief set ID (--file F \| -)` | write or read the task's brief; `brief get` filters for the caller's worker or reviewer role, and `brief set` warns about a reviewer section without a worker section |
@@ -47,13 +65,13 @@ Lock attempts use private staging directories named with the process pid and a f
 | | |
 | `ladder save-user` | write the project's default harness and primary rungs to the user file (`TOWER_CRANE_CONFIG`, else `~/.config/tower-crane/config.json`), preserving personal fallbacks and other keys; only what the project defines is written. Operational: the orchestrator or the owner, and the event records the orchestrator as `authority`. Refused while a primary rung cannot run. A user file that is not valid JSON or has the wrong shape refuses every command that has to resolve the ladder, including `ladder`, `spawn` and `init`, even when the project supplies every rung; the error names the file to fix or remove |
 | | |
-| `ladder set RUNG [--harness H] [--model M] [--profile P] [--provider P] [--effort E] [--args JSON] [--command JSON] [--supervision JSON] [--tools JSON] [--mcp JSON] [--web-mcp JSON] [--sandbox JSON] [--env JSON] [--env_file FILE] [--scope JSON] [--clear FIELD]...` | change the named primary fields of one rung and keep the rest; personal fallbacks belong only in the user file, and `--fallbacks` and `--clear fallbacks` are refused. `--tools` (claude, codex, agy and pi) and `--mcp` (claude, codex and agy) opt the rung back in to tools and MCP servers its agent file leaves out. Pi refuses MCP opt-ins. Changes are operational, except `--command`, `--web-mcp`, `--sandbox`, `--env`, `--env_file` and `--scope`, which are owner-required ([Authority](state.md#authority)); so is moving a worker, reviewer or small rung off claude and codex, or `--args` on another harness, including agy (`ladder.reach`). The orchestrator's `--tools` and `--mcp` take only harness built-ins that keep the sandbox and MCP servers the owner's harness config defines; `--args` on a claude, codex, agy or pi rung may hold only a short list of safe flags; `--web-mcp` sets the research Claude server as `{name, command, args}` without secrets; it cannot combine with `--mcp`. `--clear web_mcp` removes it. `--clear` removes a field (a cleared harness follows the default). A rung the project left out starts from the primary it fell back to. Refused if it leaves a primary unable to run that could run before (state.md lists the checks); rungs already broken do not block it |
+| `ladder set RUNG [--harness H] [--model M] [--profile P] [--provider P] [--effort E] [--args JSON] [--command JSON] [--supervision JSON] [--tools JSON] [--mcp JSON] [--web-mcp JSON] [--fallbacks JSON] [--sandbox JSON] [--env JSON] [--env_file FILE] [--scope JSON] [--clear FIELD]...` | change the named primary fields of one rung and keep the rest. `--fallbacks JSON` replaces its ordered personal routes in the user file; `[]` empties the list and `--clear fallbacks` removes the override. Edit fallbacks separately from project primary fields. Other personal settings and project primaries are preserved. Fallback edits use the same field, reach, tool and MCP authority checks as primary edits; owner approvals bind the user file, rung and full requested list. `--tools` (claude, codex, agy and pi) and `--mcp` (claude, codex and agy) opt the rung back in to tools and MCP servers its agent file leaves out. Pi refuses MCP opt-ins. Changes are operational, except `--command`, `--web-mcp`, `--sandbox`, `--env`, `--env_file` and `--scope`, which are owner-required ([Authority](state.md#authority)); so is moving a worker, reviewer or small rung off claude and codex, or `--args` on another harness, including agy (`ladder.reach`). The orchestrator's `--tools` and `--mcp` take only harness built-ins that keep the sandbox and MCP servers the owner's harness config defines; `--args` on a claude, codex, agy or pi rung may hold only a short list of safe flags; `--web-mcp` sets the research Claude server as `{name, command, args}` without secrets; it cannot combine with `--mcp`. `--clear web_mcp` removes it. `--clear` removes a field (a cleared harness follows the default). A rung the project left out starts from the primary it fell back to. Refused if it leaves a primary unable to run that could run before (state.md lists the checks); rungs already broken do not block it |
 | | |
 | `ladder show` | print each rung as it resolves: harness (and whether it is the default), model, profile, provider, effort, args, and where the primary comes from (project, user file or built-in); print personal fallbacks and their user-file source (`fallbacks_from: "user"` under `--json`); also the default harness, its source, the user file path, and every rung or fallback that cannot run (`problems` under `--json`); unavailable fallbacks are marked skipped |
 | | |
 | `plan import FILE` | add tasks from a JSON array of task objects (ids may be local names, resolved in order; `-` reads stdin). Fields: `id`, `title`, `acceptance`, `kind`, `needs`, `size`, `tier`, `depends_on`, `needs_owner`, `locks`, `environment`; `needs_owner` is trimmed and blank values store null. A dependency names an earlier entry or an existing task. Any bad entry refuses the whole file |
 | | |
-| `project set [--name N] [--goal G] [--repo O/R] [--base B] [--workers N] [--lease-minutes MIN] [--budget-hours H] [--budget-tokens N] [--standards S] [--tests-cmd CMD] [--clean-cmd CMD] [--tests-proof-cmd CMD] [--executors N] [--tests-timeout-min MIN] [--clean-timeout-min MIN] [--tests-paths JSON] [--tests-keep JSON] [--tests-mode MODE] [--tests-by-kind JSON] [--tests-expensive JSON] [--tests-map JSON] [--ci-ignore-apps JSON] [--ci-required JSON] [--ci-capped-review JSON] [--ci-local JSON] [--merge-keep-branch JSON] [--merge-admin JSON] [--review-policy JSON] [--research-min-sources N] [--sandbox JSON] [--env JSON] [--env_file FILE] [--scope JSON]` | change settings, limits and budget |
+| `project set [--name N] [--goal G] [--repo O/R] [--base B] [--workers N] [--lease-minutes MIN] [--budget-hours H\|null] [--budget-tokens N\|null] [--standards S] [--tests-cmd CMD] [--clean-cmd CMD] [--tests-proof-cmd CMD] [--executors N] [--tests-timeout-min MIN] [--clean-timeout-min MIN] [--tests-paths JSON] [--tests-keep JSON] [--tests-mode MODE] [--tests-by-kind JSON] [--tests-expensive JSON] [--tests-map JSON] [--ci-ignore-apps JSON] [--ci-required JSON] [--ci-capped-review JSON] [--ci-local JSON] [--merge-keep-branch JSON] [--merge-admin JSON] [--review-policy JSON] [--research-min-sources N] [--sandbox JSON] [--env JSON] [--env_file FILE] [--scope JSON]` | change settings, limits and budget; `--budget-hours null` and `--budget-tokens null` remove a limit through the owner-required budget-raise path |
 | | |
 | `project show` | print settings, including `gates.tests_cmd`, `gates.clean_cmd`, `gates.tests_proof_cmd`, `gates.executors`, `gates.tests_timeout_min`, `gates.clean_timeout_min`, `tests.paths`, `tests.keep`, `tests.mode`, `tests.by_kind`, `tests.expensive`, `tests.map`, `ci.ignore_apps`, `ci.required`, `ci.local`, `merge.keep_branch`, `merge.admin` and `decision_delegation.orchestrator_technical`, and the resolved ladder |
 | | |
@@ -65,7 +83,7 @@ Lock attempts use private staging directories named with the process pid and a f
 | | |
 | `task show ID` | read; `S` is a status, `ready` or `blocked` |
 | | |
-| `task update ID [--title T] [--acceptance A]... [--dep ID]... [--lock NAME]... [--environment LABEL] [--size S] [--kind K] [--needs JSON] [--tier T] [--needs-owner REASON] [--ci-local JSON] [--budget-hours H] [--budget-tokens N] [--interrupt] [--status cancelled]` | change a task; acceptance, dependency or capability changes bump `revision`. A live claim refuses changes to acceptance, dependencies, `--needs`, kind or the local CI override unless `--interrupt` stops it first (see `interrupt`); notes, title, size, tier and priority never stop a run. `--needs '[]'` clears capabilities, `--dep ''` clears dependencies, `--needs-owner ''` clears the owner ask. `--lock` replaces all resource locks; `--lock ''` clears them. Lock changes require no live lease or dispatch reservation. `--environment ''` clears the label. Changing `--tier`, and clearing or replacing an existing owner ask, are operational (the orchestrator or the owner); any agent may set a new ask or keep the same reason. Changing `--kind` is operational, except that leaving `code` is owner-required and a submitted or accepted task refuses any kind change until `rework` ([Authority](state.md#authority)). Cancelling a task that has an owner ask is owner-required. `--ci-local` sets or clears an operational local CI override. Refused if it would form a cycle. An accepted task cannot be cancelled, and its acceptance, dependencies, capabilities, kind and local CI override change only after `rework`. `--budget-hours`, `--budget-tokens` set the task's budget, enforced on live usage like the project budget; lowering is operational, raising is owner-required. Cancelling removes the task's worktree as `merge` does, keeping it when it has uncommitted changes, a worker or reviewer still running, or `merge.keep_branch` is set |
+| `task update ID [--title T] [--acceptance A]... [--dep ID]... [--lock NAME]... [--environment LABEL] [--size S] [--kind K] [--needs JSON] [--tier T] [--needs-owner REASON] [--ci-local JSON] [--budget-hours H\|null] [--budget-tokens N\|null] [--interrupt] [--status cancelled]` | change a task; acceptance, dependency or capability changes bump `revision`. A live claim refuses changes to acceptance, dependencies, `--needs`, kind or the local CI override unless `--interrupt` stops it first (see `interrupt`); notes, title, size, tier and priority never stop a run. `--needs '[]'` clears capabilities, `--dep ''` clears dependencies, `--needs-owner ''` clears the owner ask. `--lock` replaces all resource locks; `--lock ''` clears them. Lock changes require no live lease or dispatch reservation. `--environment ''` clears the label. Changing `--tier`, and clearing or replacing an existing owner ask, are operational (the orchestrator or the owner); any agent may set a new ask or keep the same reason. Changing `--kind` is operational, except that leaving `code` is owner-required and a submitted or accepted task refuses any kind change until `rework` ([Authority](state.md#authority)). Cancelling a task that has an owner ask is owner-required. `--ci-local` sets or clears an operational local CI override. Refused if it would form a cycle. An accepted task cannot be cancelled, and its acceptance, dependencies, capabilities, kind and local CI override change only after `rework`. `--budget-hours`, `--budget-tokens` set the task's budget, enforced on live usage like the project budget; `null` removes the limit. Lowering is operational; raising or removing a finite limit is owner-required. Cancelling removes the task's worktree as `merge` does, keeping it when it has uncommitted changes, a worker or reviewer still running, or `merge.keep_branch` is set |
 | | |
 | `validate` | report cycles, unknown dependencies, tasks without acceptance, `L` tasks without a `split:` note, oversize budgets (planned hours at S=1, M=4, L=8 over `budget.hours`, or spend over either budget); exit 1 if anything is reported. It reconciles tasks.json with `events.jsonl` and reports drift: tasks or task notes the log records that tasks.json lacks, and a `next` the log has already used. It also reports every ladder rung that cannot run, and warns per open task when no reviewer rung can run |
 <!-- commands:Plan:end -->
@@ -135,7 +153,7 @@ The list settings also work with `init`. Omitted options leave their fields unch
 
 ## Run
 
-Dependent tasks can start while a single dependency chain is submitted or accepted but unmerged. `worktree` and `spawn` check the GitHub stacks endpoint, verify the dependency PR's current head and repository, fetch its branch, and create the upper branch at that head. The worker prompt names the dependency branch as the PR base. `ready` and `claim` allow submitted dependencies when they form one chain with a PR, branch and sha; dispatch still verifies availability. Claim readiness checks task status, dependencies, stack state, decisions, locks and worker slots. Worker spawn runs the same check before any worktree work and refuses with the claim reason. When an existing stacked PR affects readiness, claim and spawn re-read its membership from `gh api repos/OWNER/REPO/stacks`; transient API errors require retry and do not mark stacks disabled. Independent dependency chains and forks wait for the ordinary accepted-dependency flow. A worktree made before its dependency was submitted is revalidated at dispatch: a clean branch with no commits of its own moves onto the dependency head, and one holding its own work is refused until the worktree is removed or the dependency merges. A branch that already contains the dependency head is used as it is. A rework whose branch is gone starts from its own pushed head, never from its dependency. Two siblings prepared at once on the same dependency cannot both record it as their stack parent; the second dispatch is refused under the lock and waits as a fork.
+Dependent tasks can start while a single dependency chain is submitted or accepted but unmerged. `worktree` and `spawn` check the GitHub stacks endpoint, verify the dependency PR's current head and repository, fetch its branch, and create the upper branch at that head. The worker prompt names the dependency branch as the PR base. `ready` and `claim` allow submitted dependencies when they form one chain with a PR, branch and sha; dispatch still verifies availability. Claim readiness checks task status, dependencies, stack state, decisions, locks and worker slots. Worker spawn runs the same check before any worktree work and refuses with the claim reason. When an existing stacked PR affects readiness, spawn re-reads its membership from `gh api repos/OWNER/REPO/stacks` before dispatch. A claim of the task a spawn dispatched, by the agent it dispatched, reads that recorded result; any other claim re-reads it. A chain with fewer than two unmerged PRs is not read. Transient API errors require retry and do not mark stacks disabled. Independent dependency chains and forks wait for the ordinary accepted-dependency flow. A worktree made before its dependency was submitted is revalidated at dispatch: a clean branch with no commits of its own moves onto the dependency head, and one holding its own work is refused until the worktree is removed or the dependency merges. A branch that already contains the dependency head is used as it is. A rework whose branch is gone starts from its own pushed head, never from its dependency. Two siblings prepared at once on the same dependency cannot both record it as their stack parent; the second dispatch is refused under the lock and waits as a fork.
 
 The dispatch supervisor links submitted PRs with `gh stack link <lower-pr> <upper-pr>` in bottom-to-top order. Native dispatches use `stack link ID` after recording the PR with `submit`. Linking verifies every member's submitted head, PR base and same-repository origin. Auto-merge must be disabled. Workers retain their existing gh permissions; linking and synchronization run under the dispatcher's policy.
 
@@ -164,6 +182,16 @@ Before each asynchronous request, the gate checks the PR again and retargets onl
 Retries also require the project base when an earlier audited merge event contains an asynchronous POST for the same repository, PR and accepted head. Receipts from higher stack tasks count when confirming a lower member alone. A failed stack sync cannot make the rejected dependency-base merge eligible for successful confirmation.
 
 After a lower merge, or when a later `worktree` or `spawn` observes main or a dependency moving, Tower Crane refreshes upper worktrees through `gh stack sync`. A dependent prepared before its PR is linked is revalidated at each `worktree` and `spawn`: when its dependency was resubmitted, a branch with no work of its own moves onto the new dependency head, and a branch with its own commits is refused until it contains that head (merge it in, or remove the worktree and branch). Every worktree in that stack must be idle and clean; otherwise refresh is deferred and an event names the blocker. Unknown remote PRs must be recorded before sync. Sync snapshots the project, stack members and their events under a short state lock, runs gh and Git unlocked, then re-takes the lock to compare and apply. Changes to the project or affected tasks refuse application and preserve current claims; unrelated task writes are retained. Git may already have moved branches when application is refused, so inspect their heads before retrying. The allowed gh-stack extension owns its rebases and atomic lease-protected pushes under the dispatcher's policy. An explicit conflict report sends outstanding tasks to rework with the failure in their briefs. A changed branch also goes to rework and needs a new submission and gates, even if sync then fails to push; evidence for the old head remains historical. Tooling and transport errors, including failures listing worktrees or an unavailable extension, record the parsed abort reason and preserve unchanged submissions and gates. The next refresh retries the linked stack. A failed sync exits 1 and reports whether work needs rework or a later retry.
+
+Before every automatic synchronization, including after a confirmed merge
+and from `worktree` or `spawn`, submitted or accepted upper heads are checked
+against the fetched project base. Stacks
+with declared generated conflicts defer synchronization. When all lower
+dependencies have merged, the completed dependency is retired with the normal PR head, branch,
+repository and base checks. Its PR is retargeted to main and the generated
+repair path runs first. Generated-only repairs keep the upper task submitted;
+mixed repairs prepare its merge before rework. Unknown mergeability defers
+repair without invoking stack sync. Unaffected stacks still synchronize.
 
 Stacks require the GitHub repository setting and the gh-stack extension (v0.2.0 or newer). A missing extension (gh exits non-zero pointing at the gh-stack extension), a disabled stacks endpoint, or `gh stack` exit 9 falls back to ordinary dispatch for accepted dependencies. Submitted dependencies wait for acceptance when stacks are unavailable. Generic 404s are reported as errors without disabling stacks; 5xx responses and network errors require retry and do not mark stacks disabled. If linking or merging becomes unavailable after dispatch, the branch is retained and the task is marked for ordinary merging: lower tasks must land before its PR can target main. A refused stack merge reports that fallback and the next merge uses the ordinary gate. Authentication and other unexpected failures are reported rather than treated as disabled stacks.
 
@@ -261,17 +289,69 @@ or existing fallback tick retries it within the wait's timeout.
 Filters apply to the returned event, not to the software reactions.
 
 After a confirmed merge, outstanding submitted or accepted PRs are checked
-against their fetched base in temporary detached worktrees. Conflicts send
-the task to rework with Git's filenames in its note and brief. Trial merges
-do not resolve conflicts or update worker branches. Unknown PR heads,
+against their fetched base in temporary detached worktrees. Hand-written
+conflicts send the task to rework with Git's filenames in its note and brief.
+Generated conflicts follow the repair path below. Unknown PR heads,
 unknown mergeability and failed GitHub transport cannot authorize merging.
+
+Repositories declare generated outputs in `package.json`:
+
+```json
+{
+  "scripts": { "docs:generate": "node scripts/cli-docs.js" },
+  "tower-crane": {
+    "generated": {
+      "generated.txt": "docs:generate",
+      "docs/cli.md": { "script": "docs:generate", "blocks": ["commands:Run"] }
+    }
+  }
+}
+```
+
+The mapping uses exact repository-relative file paths and existing npm script
+names. A string declares an entire generated file, including add/add outputs
+with no ancestor blob. `blocks` declares only the
+bodies between `<!-- NAME:start -->` and `<!-- NAME:end -->`; text outside
+those markers remains hand-written. Every declared marker must occur exactly
+once in all three merge versions. Tower Crane's own mapping lists every
+command-table block in `docs/cli.md`. Deletions, renames, symlinks and missing
+markers remain worker conflicts.
+
+Only the fetched base's mapping authorizes repair. When GitHub reports an
+open PR `CONFLICTING` or `DIRTY` at the submitted head, automation merges the
+fetched base into its idle, clean task worktree outside the worker sandbox.
+It pre-resolves declared outputs, runs their npm scripts, stages every
+declared output of those scripts, commits and pushes normally. A generated-only
+merge keeps the task submitted, preserves its submitter and revision, and
+runs gates again at the new sha. An accepted task returns to submitted for
+fresh gates and review. There is no rework or worker dispatch for that repair.
+If a queue head check or post-merge sweep finds generated conflicts before
+GitHub confirms them at the submitted head, the task keeps its status, sha
+and checkout. The queue waits and later reactions retry. Mixed conflicts also
+wait, so their generated resolutions can be prepared before worker rework.
+Dirty or moved branches and live workers defer it. Generator failures abort
+generated-only merges and restore the clean checkout, including removing new
+untracked files from that attempt; push failures retain a prepared merge for
+retry. Generation must preserve text outside declared blocks. Before changing
+the branch and again before pushing, automation verifies the PR head repository
+and the single origin push destination against the project and PR. Fork heads
+and mismatched or changed push destinations defer repair.
+
+For mixed conflicts, the task goes to rework with its merge already prepared.
+Generated files are staged; only hand-written conflicts remain unresolved,
+including text outside generated blocks in the same file. The note and brief
+name the worktree, remaining files and scripts to rerun before committing.
+If a generator cannot run until source conflicts are resolved, the merge
+keeps the branch's generated bodies staged and the worker reruns the scripts
+after resolving the hand-written files.
 
 Accepted PRs merge through a merge queue in the order of their `accept`
 events. A stack is one entry, ordered by its lowest unmerged task: it holds
 that task and the accepted, linked tasks directly above it, and an upper
 task whose lower task is not accepted waits outside the line. Only the head
 of the line runs anything. A head GitHub reports `CONFLICTING` or `DIRTY`
-goes to rework with its files and leaves the line. Unknown mergeability
+uses generated-file repair or goes to rework with its hand-written files
+and leaves the line. Unknown mergeability
 stops the line until a later reaction. A head the queue cannot advance (a
 closed or unreadable PR, a moved or differently merged head, failing gates, a refused
 merge or head check) is reported once in a `queue skipped` event and passed
@@ -317,8 +397,9 @@ again and checks again if it moved; `gh pr merge --match-head-commit` pins the h
 but nothing pins the base, so a push to the base in the seconds between
 that fetch and the merge call is not checked. A branch protection rule that
 requires up-to-date branches closes that window. Hosted CI evidence comes
-from GitHub's `pull_request` run, which already tests the merge ref; never
-merge the base into a PR to refresh evidence or pick up a workflow change.
+from GitHub's `pull_request` run, which already tests the merge ref. Merge
+the base into a PR only for conflict repair, never to refresh evidence or
+pick up a workflow change.
 One executor drains the queue; a reaction that finds it busy records a
 request, and the executor makes another pass before releasing. Manual
 `merge ID` bypasses the queue and its head check: it keeps only the merge
@@ -381,11 +462,11 @@ Failure at the range top opens one blocking owner decision. Answer it and apply 
 <!-- commands:Decisions:start -->
 | Command | Does |
 |---|---|
-| `answer DID --choice C [--note T]` | answer it as the owner with explicit identity, as an agent the owner named on the decision (`decision delegate --answerers`), or as the orchestrator for a technical decision when the project's `decision-delegation` setting allows it. Anyone else exits 1 naming who can answer. A decision that escalates an owner-required setting is answered by the owner only. The answer event records `answered_by` and `answer_rule` (`owner`, `owner-named-agent` or `owner-technical-delegation`). `C` must be one of the options when there are any; an answered decision stays answered |
+| `answer DID --choice C [--note T]` | answer it as the owner with explicit identity, as an agent the owner named on the decision (`decision delegate --answerers`), or as the orchestrator for a technical decision when the project's `decision-delegation` setting allows it. Anyone else exits 1 naming who can answer. A decision that escalates an owner-required setting is answered by the owner only. One-use setting approvals offer `approve` and `decline`. The answer event records `answered_by` and `answer_rule` (`owner`, `owner-named-agent` or `owner-technical-delegation`). `C` must be one of the options when there are any; an answered decision stays answered |
 | | |
-| `ask --question Q --option A --option B [--recommend A] [--why W] [--blocks ID]... [--setting KEY]...` | open a decision; prints its id. A question from a worker or reviewer is technical, so the orchestrator can answer it when the project's decision-delegation setting allows. `--setting KEY` names a setting from lib/authority.js; naming an owner-required one makes the decision an escalation that only the owner answers |
+| `ask (--question Q --option A --option B [--recommend A] [--why W] [--blocks ID]... [--setting KEY]... \| --setting S [--change JSON])` | with `--question`, open a decision; prints its id. A worker or reviewer question is technical, so the orchestrator can answer when the project's decision-delegation setting allows. `--setting KEY` tags the question; an owner-required tag makes it owner-only. Answering a tagged question never authorizes a setting command. Without `--question`, `--setting S [--change JSON]` requests a one-use approval for an owner-required change no command makes, such as `publish`: exit 1 opens or reuses its decision; after owner approval, the identical request applies it once, records the setting audit and exits 0. Command-changed settings must be requested through their command; operational settings need no approval. `--change` cannot be combined with `--question` |
 | | |
-| `decision delegate DID [--answerers JSON] [--technical JSON]` | owner-only: set the agents that may answer the decision (`--answerers`, a JSON array; `[]` clears it) or mark it technical (`--technical true\|false`), which lets the orchestrator answer it when the project's `decision-delegation` setting allows. At least one field is required; an answered decision cannot be delegated again |
+| `decision delegate DID [--answerers JSON] [--technical JSON]` | owner-required: set the agents that may answer the decision (`--answerers`, a JSON array; `[]` clears it) or mark it technical (`--technical true\|false`), which lets the orchestrator answer it when the project's `decision-delegation` setting allows. The orchestrator's request opens a one-use owner approval for that decision and those values; rerun after approval. Owner and approved orchestrator writes use the shared setting audit. At least one field is required; a closed decision cannot be delegated again |
 | | |
 | `decision note DID TEXT` | append a comment; an explicit owner comment wakes the orchestrator and tasks blocked by the decision |
 | | |
@@ -396,7 +477,7 @@ Failure at the range top opens one blocking owner decision. Answer it and apply 
 
 `decision withdraw DID --reason R` closes an open decision that no longer needs an answer. Only the agent that opened it (verified identity, matching `asked_by`) or the owner can withdraw it; anyone else is refused. A decision already answered or withdrawn is refused too. Withdrawing needs no owner answer and does not make the requested change; the event records the reason, and each task the decision blocked gets the reason in its notes.
 
-`decision delegate DID --answerers '["worker-1"]'` replaces the decision's named answerers; `[]` clears them. `--technical true` marks it technical and `false` removes that mark. Both settings require explicit owner identity. `project set --decision-delegation '{"orchestrator_technical":true}' --agent owner` enables orchestrator answers for technical decisions: a worker's or reviewer's `ask` that names no owner-required setting, and any decision the owner marked technical. It does not allow the orchestrator to answer other decisions. `null` clears the project rule. The answer event records the actor and its rule: `owner`, `owner-named-agent` or `owner-technical-delegation`.
+`decision delegate DID --answerers '["worker-1"]'` replaces the decision's named answerers; `[]` clears them. `--technical true` marks it technical and `false` removes that mark. Both settings are owner-required. An orchestrator request opens an approval bound to the decision and supplied fields; rerun it after the owner answers `approve`. Both paths emit the shared setting audit. `project set --decision-delegation '{"orchestrator_technical":true}' --agent owner` enables orchestrator answers for technical decisions: a worker's or reviewer's `ask` that names no owner-required setting, and any decision the owner marked technical. It does not allow the orchestrator to answer other decisions. `null` clears the project rule. The answer event records the actor and its rule: `owner`, `owner-named-agent` or `owner-technical-delegation`.
 
 Technical delegation recognizes the literal `orchestrator` identity and generated agents whose spawn events all record `role: orchestrator`. A name starting with `orchestrator-` alone grants no permission. The owner answers with `answer DID --choice C --agent owner` or through the local board. The orchestrator answers under its own identity only a technical decision, and only when delegation allows it. A worker's or reviewer's `ask` is technical unless it names an owner-required setting with `--setting`.
 
@@ -689,7 +770,7 @@ For the `check tests` run without the code change in `prove` mode, changed decla
 
 The gate itself lives in `lib/gates/<name>.js` and exports `async run(ctx)` returning `{ ok, summary, ref?, sha?, receipt? }`, where `ctx` is `{ root, worktree, task, project, args, log, exec }`. Gates run commands through the shared helpers in `lib/gates/common.js`, which use the CLI's `exec` to capture receipts. The CLI runs the gate without holding the lock, then records the result as evidence of the gate's type by `--agent`, at the returned `sha` or the submitted one, against the revision the gate started on. A local CI `receipt` is copied into evidence and its audit event. Hosted CI records `ci_policy` from the project settings when the check starts, in both evidence and the audit event. A gate that reports `ok: false` exits 1 after recording. A missing gate module exits 1 with "gate not installed".
 
-Acceptance counts software evidence only when events.jsonl has a matching gate event: `cmd === source`, the same task and agent, and matching type, source, exact evidence sha, verdict, revision and command receipts. It ignores entries without that event and ok entries with no commands. Writes separate an unterminated audit-log tail from new events so a torn line cannot hide a gate receipt. Existing entries stay readable; run the gates again for the submitted sha to replace their proof. Merge and the task views use the same check. Waivers for review and software gates count only when their agent is `owner`.
+Acceptance counts software evidence only when events.jsonl has a matching gate event: `cmd === source`, the same task and agent, and matching type, source, exact evidence sha, verdict, revision and command receipts. It ignores entries without that event and ok entries with no commands. Writes separate an unterminated audit-log tail from new events so a torn line cannot hide a gate receipt. Existing entries stay readable; run the gates again for the submitted sha to replace their proof. Merge and the task views use the same check. A waiver counts when its agent is `owner`; when the orchestrator recorded an operational waiver (`waive.review` for a capped or down reviewer); or when the orchestrator recorded it with `approved_by` naming an escalation the owner approved ([Authority](state.md#authority)).
 
 Review evidence counts only from the owner or a reviewer spawned for the task at that sha and revision, never the submitter. Other review evidence stays visible as not counting. Its pass or fail verdict does not set the board's review gate indicator.
 
