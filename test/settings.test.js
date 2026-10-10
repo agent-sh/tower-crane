@@ -77,7 +77,7 @@ test('the Settings view edits the ladder and task tiers only with the page token
     assert.match(page.text, /<label for="harness">Default harness<\/label>/);
     assert.match(page.text, /<input name="model" value="opus" data-initial="opus" aria-labelledby="r-hard c-model"/);
     assert.match(page.text, /<select name="tier" aria-labelledby="t-T1 c-tier" data-initial="medium"(?: data-preserve="[0-9a-f]{64}")?>/);
-    assert.match((await request(s.url)).text, /<a href="settings" data-view="settings"(?: data-preserve="[0-9a-f]{64}")?>Settings<\/a>/, 'the board links to Settings');
+    assert.match((await request(s.url)).text, /<a href="\/settings" data-room="settings"(?: data-preserve="[0-9a-f]{64}")?>Settings<\/a>/, 'the board links to Settings');
     assert.notEqual((await startAgain(h)).token, token, 'each run has its own token');
 
     const ladder = `${s.url}api/ladder`;

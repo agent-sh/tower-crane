@@ -1,0 +1,70 @@
+'use strict';
+
+// Where each scenario's targets are on each build. The bench drives each board
+// on its own shortest path, so a build is measured by what it offers, not by
+// how closely it resembles the other.
+
+const before = {
+  name: 'before',
+  rooms: ['board', 'plan', 'history', 'spend'],
+  front: 'board',
+  room: (r) => `#${r}`,
+  roomSelector: '.view',
+  nav: (r) => `.views a[data-view="${r}"]`,
+  roomUrl: (url, r) => (r === 'board' ? url : `${url}#${r}`),
+  sheetUrl: (url, id) => `${url}#${id}`,
+  item: (key) => `.col-need article[data-key="${key}"]`,
+  items: '.col-need article',
+  option: (d, o) => `form[data-api="/api/decisions/${d}/answer"] button[value="${o}"]`,
+  noteOpen: (d) => `form[data-api="/api/decisions/${d}/answer"] details.more > summary`,
+  note: (d) => `form[data-api="/api/decisions/${d}/answer"] input[name="note"]`,
+  agentRow: (id) => `.col-work .card[data-key="${id}"]`,
+  agentTokens: (id) => `.col-work .card[data-key="${id}"] .cost`,
+  reviewEntry: (id) => `.col-need [data-key^="stuck-${id}"] a[href="#${id}"]`,
+  finding: (id) => `#${id} .ledger details[open] .entry .sum`,
+  rework: (id) => `#${id} form[data-api="/api/tasks/${id}/rework"] textarea`,
+  reworkSend: (id) => `#${id} form[data-api="/api/tasks/${id}/rework"] button[type="submit"]`,
+  glyphs: 'svg.g',
+  attention: ['--signal', '--signal-edge', '--fault', '--fault-wash'],
+  wrappers: '.board, .col, .view, .cards, .next-split, .rows, .feed, main > div',
+  spend: { used: '.topbar .spendmini' },
+  digest: '.col-since',
+  sentence: null,
+};
+
+const after = {
+  name: 'after',
+  rooms: ['now', 'review', 'plan', 'spend', 'history'],
+  front: 'now',
+  room: (r) => `#${r}`,
+  roomSelector: '.room',
+  nav: (r) => `nav.rooms a[data-room="${r}"]`,
+  roomUrl: (url, r) => (r === 'now' ? url : `${url}${r}`),
+  sheetUrl: (url, id) => `${url}#${id}`,
+  item: (key) => `#now .queue [data-key="${key}"]`,
+  items: '#now .queue .qi',
+  option: (d, o) => `form[data-api="/api/decisions/${d}/answer"] button[value="${o}"]`,
+  noteOpen: null,
+  note: (d) => `form[data-api="/api/decisions/${d}/answer"] input[name="note"]`,
+  agentRow: (id) => `#now .floor [data-key="agent-${id}"]`,
+  agentTokens: (id) => `#now .floor [data-key="agent-${id}"] [data-usage]`,
+  messageOpen: (id) => `#now .floor [data-key="agent-${id}"] details.act-message > summary`,
+  message: (id) => `[data-key="agent-${id}"] form[data-api="/api/tasks/${id}/message"] input[name="text"]`,
+  messageSend: (id) => `[data-key="agent-${id}"] form[data-api="/api/tasks/${id}/message"] button[type="submit"]`,
+  stopOpen: (id) => `[data-key="agent-${id}"] details.act-stop > summary`,
+  stopSend: (id) => `[data-key="agent-${id}"] form[data-api="/api/tasks/${id}/budget"] button[type="submit"]`,
+  runaway: (id) => `#now .queue [data-key^="runaway-${id}"]`,
+  reviewNav: 'nav.rooms a[data-room="review"]',
+  reviewRow: (id) => `#review [data-key="review-${id}"]`,
+  finding: (id) => `#review [data-key="review-${id}"] .finding`,
+  rework: (id) => `#review form[data-api="/api/tasks/${id}/rework"] textarea`,
+  reworkSend: (id) => `#review form[data-api="/api/tasks/${id}/rework"] button[type="submit"]`,
+  glyphs: 'svg.g',
+  attention: ['--attn', '--attn-ink', '--attn-wash', '--alarm', '--alarm-wash'],
+  wrappers: '.room, .now-grid, .band, .floor-list, .queue-list, .tabs, main > div',
+  spend: { used: '.lead [data-spend="used"]', rate: '.lead [data-spend="rate"]', projection: '.lead [data-spend="projection"]', top: '.lead [data-spend="top"]' },
+  digest: '#now .recent',
+  sentence: 'h1[data-status]',
+};
+
+module.exports = { before, after };

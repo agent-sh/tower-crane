@@ -6,11 +6,12 @@ const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
 const { pathToFileURL } = require('node:url');
-const { makeRepo, cachedFixture, BIN } = require('./helpers');
+const { makeRepo, BIN } = require('./helpers');
 const { CHROME, openBrowser, closeBrowser } = require('./browser');
 test.after(closeBrowser);
 const { gateFixture, gateEvidence } = require('./gate-helpers');
 const { preserve } = require('../lib/board/identity');
+const checks = require('./bench/checks');
 const { POSITION } = require('../lib/board/position');
 const B = require('../lib/broker');
 
@@ -30,9 +31,6 @@ function populate(h) {
   h.ok(['submit', 'T5', '--sha', sha, '--agent', 'w-2']);
   h.ok(['evidence', 'T5', '--type', 'review', '--ok', '--sha', sha, '--ref', 'https://example.com/acme/demo/pull/1#review', '--summary', 'reads well', '--agent', 'rev-1']);
 }
-
-// The populated project, built once per process and copied for each test.
-const populated = (t) => cachedFixture(t, 'populated', (h) => { h.init(); populate(h); });
 
 // serve runs in the repository, and Windows cannot delete a directory a live
 // process runs in, so every server stops before makeRepo's cleanup: each
@@ -141,7 +139,7 @@ test('Settings signals restoration only after a delayed animation frame restores
           window.testStream.dispatchEvent(new MessageEvent('reload', { data: ${JSON.stringify(JSON.stringify({ version }))} }));
           return sessionStorage.getItem('tower-crane:position:' + location.href);
         })()`), null, 'the displayed version does not start another reload');
-        const control = agent === 'owner' ? `document.querySelector('tr[data-rung="easy"] input[name="model"]')` : `document.querySelector('.views a[data-view="settings"]')`;
+        const control = agent === 'owner' ? `document.querySelector('tr[data-rung="easy"] input[name="model"]')` : `document.querySelector('.rooms a[data-room="settings"]')`;
         const table = `document.querySelector('main .panel')`;
         await b.inPage(`(() => { window.firstLoad = true; ${control}.focus({ preventScroll: true }); ${table}.scrollLeft = 100; })()`);
         const left = await b.inPage(`${table}.scrollLeft`);
@@ -162,7 +160,9 @@ test('Settings signals restoration only after a delayed animation frame restores
 });
 
 test('the snapshot names no network resource and carries no token or owner forms', (t) => {
-  const h = populated(t);
+  const h = makeRepo(t);
+  h.init();
+  populate(h);
   const page = fs.readFileSync(path.join(h.state, 'sketch.html'), 'utf8');
   // Allowed: the SVG namespace inside the data: icon, which is a name, not a
   // request, and evidence links, which open only when clicked.
@@ -178,7 +178,9 @@ test('the snapshot names no network resource and carries no token or owner forms
 });
 
 test('the board escapes every text the state holds', (t) => {
-  const h = populated(t);
+  const h = makeRepo(t);
+  h.init();
+  populate(h);
   const sha = h.git(['rev-parse', 'HEAD']).trim();
   h.ok(['ask', '--question', 'Pick <script>alert(1)</script>?', '--option', '<b>a</b>', '--option', 'b', '--why', 'why <i>', '--blocks', 'T2']);
   h.ok(['msg', '--to', 'owner', '--task', 'T1', 'look <img src=x onerror=alert(1)>', '--agent', 'w-1']);
@@ -203,17 +205,17 @@ test('review gate pips and ledger ignore unspawned and self-review verdicts', (t
     for (const verdict of ['--ok', '--fail']) {
       h.ok(['evidence', 'T1', '--type', 'review', verdict, '--sha', sha, '--agent', agent]);
       const page = sheet();
-      assert.match(page, /class="pip missing">review<\/span>/, `${agent} ${verdict} leaves review missing`);
-      assert.doesNotMatch(page, /class="pip (?:pass|fail)">review<\/span>/);
+      assert.match(page, /class="pip missing">review not yet run<\/span>/, `${agent} ${verdict} leaves review missing`);
+      assert.doesNotMatch(page, /class="pip (?:pass|fail)">review/);
       assert.match(page, /class="nocount">\(does not count: (?:not a spawned reviewer|self-review)\)/);
       assert.equal(h.json(['task', 'show', 'T1']).gates.gates.find((g) => g.type === 'review').ok, false);
     }
   }
 
   h.reviewer('T1', 'reviewer', sha);
-  for (const [verdict, state] of [['--fail', 'fail'], ['--ok', 'pass']]) {
+  for (const [verdict, state, word] of [['--fail', 'fail', 'failed'], ['--ok', 'pass', 'passed']]) {
     h.ok(['evidence', 'T1', '--type', 'review', verdict, '--sha', sha, '--agent', 'reviewer']);
-    assert.match(sheet(), new RegExp(`class="pip ${state}">review</span>`));
+    assert.match(sheet(), new RegExp(`class="pip ${state}">review ${word}</span>`));
   }
 });
 
@@ -231,7 +233,7 @@ test('accepted task gate pips and ledger stop counting tests after the owner cha
   h.ok(['evidence', 'T1', '--type', 'review', '--ok', '--sha', sha, '--agent', 'reviewer']);
   h.ok(['accept', 'T1']);
   const sheet = () => fs.readFileSync(path.join(h.state, 'sketch.html'), 'utf8').match(/<article id="T1"[\s\S]*?<\/article>/)[0];
-  assert.match(sheet(), /class="pip pass">tests<\/span>/);
+  assert.match(sheet(), /class="pip pass">tests passed<\/span>/);
   assert.doesNotMatch(sheet(), /does not count:/);
 
   h.ok(['project', 'set', '--tests-mode', 'prove']);
@@ -239,18 +241,20 @@ test('accepted task gate pips and ledger stop counting tests after the owner cha
   assert.equal(shown.status, 'accepted');
   assert.equal(shown.gates.gates.find((g) => g.type === 'tests').ok, false);
   const stale = sheet();
-  assert.match(stale, /class="pip missing">tests<\/span>/);
-  assert.doesNotMatch(stale, /class="pip pass">tests<\/span>/);
+  assert.match(stale, /class="pip missing">tests not yet run<\/span>/);
+  assert.doesNotMatch(stale, /class="pip pass">tests passed<\/span>/);
   assert.match(stale, /class="nocount">\(does not count: tests evidence mode run-only no longer matches prove/);
 
   gateEvidence(h, 'tests', 'checker');
   const checked = sheet();
-  assert.match(checked, /class="pip pass">tests<\/span>/);
+  assert.match(checked, /class="pip pass">tests passed<\/span>/);
   assert.equal((checked.match(/does not count: tests evidence mode run-only/g) || []).length, 1, 'older mode stays uncounted after a new matching pass');
 });
 
 test('the snapshot opens offline in a browser, with and without scripts, and requests nothing but itself', { skip: !CHROME && 'no Chrome to drive' }, async (t) => {
-  const h = populated(t);
+  const h = makeRepo(t);
+  h.init();
+  populate(h);
   const file = pathToFileURL(path.join(h.state, 'sketch.html')).href;
   const b = await openBrowser(t);
   await b.send('Network.enable');
@@ -259,11 +263,11 @@ test('the snapshot opens offline in a browser, with and without scripts, and req
     await b.send('Emulation.setScriptExecutionDisabled', { value: !scripts });
     // A new document each round, so the script setting applies to a fresh load.
     await b.goto('about:blank');
-    await b.goto(`${file}#board`);
-    assert.deepEqual(await b.inPage(`[${shown('#board')}, ${shown('#plan')}, document.documentElement.classList.contains('js')]`), [true, false, scripts]);
-    for (const view of ['plan', 'history', 'spend']) {
+    await b.goto(`${file}#now`);
+    assert.deepEqual(await b.inPage(`[${shown('#now')}, ${shown('#plan')}, document.documentElement.classList.contains('js')]`), [true, false, scripts]);
+    for (const view of ['review', 'plan', 'history', 'spend']) {
       await b.goto(`${file}#${view}`);
-      assert.deepEqual(await b.inPage(`[${shown(`#${view}`)}, ${shown('#board')}]`), [true, false], `${view} opens by its link (scripts ${scripts})`);
+      assert.deepEqual(await b.inPage(`[${shown(`#${view}`)}, ${shown('#now')}]`), [true, false], `${view} opens by its link (scripts ${scripts})`);
     }
     await b.goto(`${file}#T1`);
     assert.equal(await b.inPage(shown('#T1')), true, `a task sheet opens by its link (scripts ${scripts})`);
@@ -274,21 +278,75 @@ test('the snapshot opens offline in a browser, with and without scripts, and req
   assert.deepEqual(urls.filter((u) => !u.startsWith(file.split('#')[0]) && !u.startsWith('data:')), [], 'nothing but the file itself and data: icons');
 });
 
+test('the snapshot page timer runs without errors when there is no live source', { skip: !CHROME && 'no Chrome to drive' }, async (t) => {
+  const h = makeRepo(t);
+  h.init();
+  populate(h);
+  const b = await openBrowser(t);
+  await b.send('Runtime.enable');
+  await b.goto(`${pathToFileURL(path.join(h.state, 'sketch.html')).href}#now`);
+  await b.until(`document.documentElement.classList.contains('js')`, 'the snapshot script');
+  // Virtual time runs the page's 5 s refresh timer twice without a real wait.
+  const expired = b.seen.length;
+  await b.send('Emulation.setVirtualTimePolicy', { policy: 'advance', budget: 11000 });
+  for (const end = Date.now() + 15000; !b.seen.slice(expired).some((m) => m.method === 'Emulation.virtualTimeBudgetExpired');) {
+    assert.ok(Date.now() < end, 'virtual time passed');
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  const thrown = b.seen.filter((m) => m.method === 'Runtime.exceptionThrown').map((m) => m.params.exceptionDetails.exception?.description || m.params.exceptionDetails.text);
+  assert.deepEqual(thrown, [], 'no uncaught page errors');
+});
+
+test('a delayed initial room frame keeps the reader position in the snapshot', { skip: !CHROME && 'no Chrome to drive' }, async (t) => {
+  const h = makeRepo(t);
+  h.init();
+  populate(h);
+  for (let i = 6; i <= 24; i++) h.ok(['task', 'add', '--title', `Task ${i}`, '--acceptance', 'verified']);
+  for (let i = 1; i <= 24; i++) h.ok(['spend', `T${i}`, '--tokens', String(i * 100), '--rung', 'easy']);
+  const b = await openBrowser(t);
+  await b.send('Page.enable');
+  await b.send('Page.addScriptToEvaluateOnNewDocument', { source: `
+    window.initialFrames = [];
+    window.requestAnimationFrame = (callback) => window.initialFrames.push(callback);
+  ` });
+  const file = pathToFileURL(path.join(h.state, 'sketch.html')).href;
+  const run = `window.initialFrames.splice(0).forEach((callback) => callback(performance.now()))`;
+  for (const [room, width] of [['plan', 390], ['spend', 390], ['spend', 1280]]) {
+    await b.send('Emulation.setDeviceMetricsOverride', { width, height: 844, deviceScaleFactor: 1, mobile: false });
+    for (const phase of ['initial', 'scrolled']) {
+      await b.goto('about:blank');
+      await b.goto(`${file}#${room}`);
+      await b.until(`document.readyState === 'complete' && window.initialFrames.length > 0`, 'the initial frame pending');
+      if (phase === 'initial') {
+        await b.inPage(run);
+        assert.equal(await b.inPage('scrollY'), 0, `an untouched ${room} at ${width} starts at the top`);
+        continue;
+      }
+      // Away from wherever the fragment jump landed, so the frame can tell.
+      const jump = await b.inPage('scrollY');
+      const read = await b.inPage('window.scrollTo(0, scrollY + 120), scrollY');
+      assert.notEqual(read, jump, 'the reader has scrolled before the initial frame runs');
+      await b.inPage(run);
+      assert.equal(await b.inPage('scrollY'), read, `the delayed initial frame keeps the reader position in ${room} at ${width}`);
+    }
+  }
+});
+
 test('in a browser, JS displays only the routed view by nav and direct hash at desktop and mobile sizes', { skip: !CHROME && 'no Chrome to drive' }, async (t) => {
   const h = makeRepo(t);
   h.init();
   const file = pathToFileURL(path.join(h.state, 'sketch.html')).href;
   const b = await openBrowser(t);
-  const views = ['board', 'plan', 'history', 'spend'];
-  const displayedViews = () => b.inPage(`[...document.querySelectorAll('.view')].filter((el) => getComputedStyle(el).display !== 'none').map((el) => el.id)`);
+  const views = ['now', 'review', 'plan', 'history', 'spend'];
+  const displayedViews = () => b.inPage(`[...document.querySelectorAll('.room')].filter((el) => getComputedStyle(el).display !== 'none').map((el) => el.id)`);
   const assertView = async (view, route, width) => {
     assert.deepEqual(await displayedViews(), [view], `${view} via ${route} at ${width}px`);
   };
   const assertViewWithoutTarget = async (view, route, width) => {
     // Keep the JS route while clearing :target to exercise the fallback's no-target case.
     await b.inPage(`location.hash = ''`);
-    await b.until(`location.hash === '' && document.documentElement.dataset.view === ${JSON.stringify(view)}`, `${view} to stay routed after clearing the fragment`);
-    const state = await b.inPage(`[location.hash, document.querySelector('.view:target')?.id || null, document.documentElement.dataset.view]`);
+    await b.until(`location.hash === '' && document.documentElement.dataset.room === ${JSON.stringify(view)}`, `${view} to stay routed after clearing the fragment`);
+    const state = await b.inPage(`[location.hash, document.querySelector('.room:target')?.id || null, document.documentElement.dataset.room]`);
     assert.deepEqual(state, ['', null, view], `${view} keeps its JS route after clearing the fragment`);
     await assertView(view, `${route} without :target`, width);
   };
@@ -297,15 +355,15 @@ test('in a browser, JS displays only the routed view by nav and direct hash at d
     await b.send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: false });
     for (const view of views) {
       await b.goto(`${file}#${view}`);
-      await b.until(`document.documentElement.classList.contains('js') && document.documentElement.dataset.view === ${JSON.stringify(view)}`, `${view} to load with JS`);
+      await b.until(`document.documentElement.classList.contains('js') && document.documentElement.dataset.room === ${JSON.stringify(view)}`, `${view} to load with JS`);
       await assertView(view, 'direct hash', width);
       await assertViewWithoutTarget(view, 'direct hash', width);
     }
 
     // Start on Spend, so every nav click changes the selected route.
     for (const view of views) {
-      await b.inPage(`document.querySelector('.views a[data-view="${view}"]').click()`);
-      await b.until(`document.documentElement.dataset.view === ${JSON.stringify(view)}`, `${view} via nav`);
+      await b.inPage(`document.querySelector('.rooms a[data-room="${view}"]').click()`);
+      await b.until(`document.documentElement.dataset.room === ${JSON.stringify(view)}`, `${view} via nav`);
       await assertView(view, 'nav', width);
       await assertViewWithoutTarget(view, 'nav', width);
     }
@@ -313,7 +371,9 @@ test('in a browser, JS displays only the routed view by nav and direct hash at d
 });
 
 test('serve sends a submitted or accepted task back for rework only as the owner, through the CLI rework', async (t) => {
-  const h = populated(t);
+  const h = makeRepo(t);
+  h.init();
+  populate(h);
   await withServers(async (servers) => {
     const viewer = await startServe(servers, h, 'viewer');
     const viewerPage = await (await fetch(viewer)).text();
@@ -342,11 +402,13 @@ test('serve sends a submitted or accepted task back for rework only as the owner
 });
 
 test('in a browser, every board write goes through its form: answer, comments, owner-done, rework and tier', { skip: !CHROME && 'no Chrome to drive' }, async (t) => {
-  const h = populated(t);
+  const h = makeRepo(t);
+  h.init();
+  populate(h);
   await withServers(async (servers) => {
     const url = await startServe(servers, h);
     const b = await openBrowser(t);
-    await b.goto(`${keyed(url)}#board`);
+    await b.goto(keyed(url));
     await b.until(`document.querySelector('.conn').dataset.conn === 'live'`, 'the live stream');
     assert.equal(await b.inPage('location.search'), '', 'the page drops the one-time key from the address bar');
     const events = () => log(h).length;
@@ -358,6 +420,7 @@ test('in a browser, every board write goes through its form: answer, comments, o
     const d1 = h.readState('decisions.json').decisions[0];
     assert.deepEqual([d1.status, d1.answer, d1.answered_by], ['answered', 'redis', 'owner']);
     assert.equal(events(), n + 1);
+    assert.equal(await b.inPage(`!!document.activeElement.closest('#queue .qi')`), true, 'focus lands on the next queue item');
 
     // A comment on a task, from its sheet.
     await b.goto(`${url}#T1`);
@@ -366,8 +429,8 @@ test('in a browser, every board write goes through its form: answer, comments, o
     const t1 = h.readState('tasks.json').tasks[0];
     assert.deepEqual([t1.notes.at(-1).agent, t1.notes.at(-1).text], ['owner', 'please split the API part']);
 
-    // Owner-done from the board plate.
-    await b.goto(`${url}#board`);
+    // Owner-done from the queue item.
+    await b.goto(url);
     await b.inPage(`document.querySelector('form[data-api="/api/tasks/T3/owner-done"] button[type="submit"]').click()`);
     await b.restored(`!document.querySelector('form[data-api="/api/tasks/T3/owner-done"]')`, 'the owner task to clear');
     assert.equal(h.readState('tasks.json').tasks[2].needs_owner, null);
@@ -397,41 +460,46 @@ test('in a browser, every board write goes through its form: answer, comments, o
 });
 
 test('in a browser, a change elsewhere updates the board in place and waits while the owner is typing', { skip: !CHROME && 'no Chrome to drive' }, async (t) => {
-  const h = populated(t);
+  const h = makeRepo(t);
+  h.init();
+  populate(h);
   await withServers(async (servers) => {
     const url = await startServe(servers, h);
     const b = await openBrowser(t);
-    await b.goto(`${url}#board`);
+    await b.goto(url);
     await b.until(`document.querySelector('.conn').dataset.conn === 'live'`, 'the live stream');
     await b.inPage('window.firstLoad = true');
 
     h.ok(['msg', '--to', 'orchestrator', '--task', 'T1', 'rebased, CI running', '--agent', 'w-1']);
-    await b.restored(`document.querySelector('.card[data-key="T1"] .last p').textContent === 'rebased, CI running'`, 'the card to show the new message');
-    assert.equal(await b.inPage('window.firstLoad === true && document.querySelector(\'.card[data-key="T1"]\').classList.contains(\'changed\')'), true, 'updated in place, and the card marks the change');
+    await b.restored(`document.querySelector('.agent[data-key="agent-T1"] .last').textContent.startsWith('rebased, CI running')`, 'the row to show the new message');
+    assert.equal(await b.inPage('window.firstLoad === true && document.querySelector(\'.agent[data-key="agent-T1"]\').classList.contains(\'changed\')'), true, 'updated in place, and the row marks the change');
 
     // History keeps its filters across an update.
     await b.inPage(`(() => { location.hash = 'history'; document.getElementById('hf-messages').click(); const q = document.getElementById('hf-task'); q.value = 'T1'; q.dispatchEvent(new Event('input', { bubbles: true })); q.blur(); })()`);
     h.ok(['msg', '--to', 'orchestrator', '--task', 'T1', 'CI green', '--agent', 'w-1']);
     await b.restored(`document.querySelector('#history').textContent.includes('CI green')`, 'History to show the new message');
     assert.deepEqual(await b.inPage(`[document.getElementById('hf-messages').checked, document.getElementById('hf-task').value, [...document.querySelectorAll('#history .ev')].filter((li) => getComputedStyle(li).display !== 'none' && !li.hidden).every((li) => li.dataset.kind === 'messages' && li.dataset.task === 'T1')]`), [true, 'T1', true]);
-    await b.inPage(`location.hash = 'board'`);
+    await b.inPage(`location.hash = 'now'`);
+    await b.until(`location.pathname === '/' && document.documentElement.dataset.room === 'now'`, 'the fragment to become the path');
 
-    // Typed text holds its column: the owner's draft is never replaced.
-    await b.inPage(`(() => { const d = document.querySelector('.col-need article[data-key="D1"] > details.more'); d.open = true; const ta = d.querySelector('textarea'); ta.focus(); })()`);
+    // Typed text holds its band: the owner's draft is never replaced.
+    await b.inPage(`(() => { const d = document.querySelector('#queue [data-key="D1"] details.more'); d.open = true; const ta = d.querySelector('textarea'); ta.focus(); })()`);
     await b.type('my draft');
     h.ok(['ask', '--question', 'Ship on Friday?', '--option', 'yes', '--option', 'no']);
     await b.restored(`document.querySelector('[data-notice]').classList.contains('on')`, 'the waiting notice');
-    assert.equal(await b.inPage(`document.querySelector('.col-need textarea').value`), 'my draft');
-    await b.restored(`document.querySelector('.col-since').textContent.includes('Ship on Friday?')`, 'the other columns to update');
-    assert.equal(await b.inPage(`document.querySelector('.col-need').textContent.includes('Ship on Friday?')`), false, 'the held column has not changed yet');
-    await b.inPage(`(() => { const ta = document.querySelector('.col-need textarea'); ta.value = ''; ta.dispatchEvent(new Event('input', { bubbles: true })); ta.blur(); })()`);
-    await b.restored(`document.querySelector('.col-need').textContent.includes('Ship on Friday?')`, 'the held update to apply');
+    assert.equal(await b.inPage(`document.querySelector('#queue textarea').value`), 'my draft');
+    await b.restored(`document.querySelector('.recent').textContent.includes('Ship on Friday?')`, 'the other bands to update');
+    assert.equal(await b.inPage(`document.querySelector('#queue').textContent.includes('Ship on Friday?')`), false, 'the held band has not changed yet');
+    await b.inPage(`(() => { const ta = document.querySelector('#queue textarea'); ta.value = ''; ta.dispatchEvent(new Event('input', { bubbles: true })); ta.blur(); })()`);
+    await b.restored(`document.querySelector('#queue').textContent.includes('Ship on Friday?')`, 'the held update to apply');
     assert.equal(await b.inPage('window.firstLoad === true'), true, 'still the same page');
   });
 });
 
 test('live CLI writes keep Plan, its task sheet, scroll and the focused control on desktop and phone', { skip: !CHROME && 'no Chrome to drive' }, async (t) => {
-  const h = populated(t);
+  const h = makeRepo(t);
+  h.init();
+  populate(h);
   for (let i = 0; i < 8; i++) h.ok(['task', 'add', '--title', `Plan task ${i}`, '--acceptance', 'verified']);
   let dep = 'T2';
   for (let i = 0; i < 4; i++) {
@@ -444,10 +512,8 @@ test('live CLI writes keep Plan, its task sheet, scroll and the focused control 
     for (const [width, height] of [[1280, 800], [390, 844]]) {
       const link = JSON.stringify(width >= 720 ? '#plan .node[data-id="T1"]' : '#plan .layers [href="#T1"]');
       await b.send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: false });
-      await b.goto(`${url}#plan`);
+      await b.goto(`${url}plan`);
       await b.until(`document.querySelector('.conn').dataset.conn === 'live'`, 'the live stream');
-      // The load handler resets the fragment scroll on its next frame.
-      await b.inPage(`new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))`);
       await b.inPage(`(() => {
         window.firstLoad = true;
         document.querySelector(${link}).focus({ preventScroll: true });
@@ -461,7 +527,7 @@ test('live CLI writes keep Plan, its task sheet, scroll and the focused control 
       const update = `place kept at ${width}`;
       h.ok(['task', 'note', 'T1', update, '--agent', 'orchestrator']);
       await b.restored(`document.querySelector('#T1 .thread').textContent.includes(${JSON.stringify(update)})`, 'the live state change');
-      assert.deepEqual(await b.inPage(`[location.hash, document.documentElement.dataset.view, getComputedStyle(document.querySelector('#plan')).display !== 'none', !!document.querySelector('.sheet.open'), window.firstLoad]`), ['#plan', 'plan', true, false, true]);
+      assert.deepEqual(await b.inPage(`[location.pathname, document.documentElement.dataset.room, [...document.querySelectorAll('.room')].filter((el) => getComputedStyle(el).display !== 'none').map((el) => el.id), !!document.querySelector('.sheet.open'), window.firstLoad]`), ['/plan', 'plan', ['plan'], false, true]);
       assert.deepEqual(await b.inPage(position), plan, `Plan keeps both scroll axes at ${width}`);
       assert.equal(await b.inPage(`document.activeElement === document.querySelector(${link})`), true, 'the same Plan link keeps focus');
 
@@ -479,13 +545,13 @@ test('live CLI writes keep Plan, its task sheet, scroll and the focused control 
       assert.ok(sheetScroll > 0, 'the task sheet is scrolled');
       h.ok(['task', 'note', 'T1', `${update} with sheet`, '--agent', 'orchestrator']);
       await b.restored(`document.querySelector('#T1 .thread').textContent.includes(${JSON.stringify(`${update} with sheet`)})`, 'the task sheet update');
-      assert.deepEqual(await b.inPage(`[location.hash, document.documentElement.dataset.view, document.querySelector('.sheet.open').id, document.querySelector('main').inert, document.querySelector('.topbar').inert]`), ['#T1', 'plan', 'T1', true, true]);
+      assert.deepEqual(await b.inPage(`[location.hash, document.documentElement.dataset.room, document.querySelector('.sheet.open').id, document.querySelector('main').inert, document.querySelector('.bar').inert, [...document.querySelectorAll('.room')].filter((el) => getComputedStyle(el).display !== 'none').map((el) => el.id)]`), ['#T1', 'plan', 'T1', true, true, ['plan']]);
       assert.equal(await b.inPage(`document.activeElement.getAttribute('data-copy')`), copy, 'the same sheet button keeps focus');
       assert.equal(await b.inPage(`document.querySelector('#T1 .sbody').scrollTop`), sheetScroll, 'the sheet keeps its scroll');
       assert.deepEqual(await b.inPage(position), background, 'the background keeps its scroll');
       await b.inPage(`document.querySelector('#T1 [data-close]').click()`);
       await b.until(`!document.querySelector('.sheet.open')`, 'the sheet to close');
-      assert.deepEqual(await b.inPage(`[location.hash, document.documentElement.dataset.view, document.activeElement === document.querySelector(${link})]`), ['#plan', 'plan', true]);
+      assert.deepEqual(await b.inPage(`[location.pathname + location.hash, document.documentElement.dataset.room, document.activeElement === document.querySelector(${link})]`), ['/plan', 'plan', true]);
       assert.deepEqual(await b.inPage(position), background, 'closing the sheet returns to the same place in Plan');
     }
   });
@@ -502,17 +568,16 @@ test('live CLI writes keep Settings and Spend focus and table scroll at 390px', 
       h.ok(['spend', 'T1', '--tokens', '200', '--minutes', '12', '--rung', 'easy', '--model', 'provider/a-model-with-a-long-name-for-the-model-usage-table']);
       await withServers(async (servers) => {
         const url = await startServe(servers, h, agent);
-        const page = view === 'settings' ? `${url}settings` : `${url}#spend`;
+        const page = `${url}${view}`;
         await b.goto(page);
         await b.until(`document.querySelector('.conn').dataset.conn === 'live'`, 'the live stream');
         const selector = JSON.stringify(view === 'settings' ? 'main .panel' : '#spend .tbl-wrap');
-        const focused = JSON.stringify(view === 'spend' ? '#spend [href="#T1"]' : agent === 'owner' ? 'tr[data-rung="easy"] input[name="model"]' : '.views a[data-view="settings"]');
-        const position = `({ page: [scrollX, scrollY], main: [document.querySelector('main').scrollLeft, document.querySelector('main').scrollTop], navigation: [document.querySelector('.views').scrollLeft, document.querySelector('.views').scrollTop], tables: [...document.querySelectorAll(${selector})].map((el) => [el.scrollLeft, el.scrollTop]) })`;
+        const focused = JSON.stringify(view === 'spend' ? '#spend .tbl [href="#T1"]' : agent === 'owner' ? 'tr[data-rung="easy"] input[name="model"]' : '.rooms a[data-room="settings"]');
+        const position = `({ page: [scrollX, scrollY], main: [document.querySelector('main').scrollLeft, document.querySelector('main').scrollTop], tables: [...document.querySelectorAll(${selector})].map((el) => [el.scrollLeft, el.scrollTop]) })`;
         await b.inPage(`(() => {
           window.firstLoad = true;
           document.querySelector(${focused}).focus({ preventScroll: true });
           [...document.querySelectorAll(${selector})].forEach((el, i) => { el.scrollLeft = 100 + i * 25; });
-          document.querySelector('.views').scrollLeft = 40;
           window.scrollTo(0, 200);
         })()`);
         const before = await b.inPage(position);
@@ -528,54 +593,10 @@ test('live CLI writes keep Settings and Spend focus and table scroll at 390px', 
   }
 });
 
-test('a delayed initial view frame preserves reader scroll before and after live CLI updates', { skip: !CHROME && 'no Chrome to drive' }, async (t) => {
-  const h = populated(t);
-  for (let i = 6; i <= 24; i++) h.ok(['task', 'add', '--title', `Task ${i}`, '--acceptance', 'verified']);
-  for (let i = 1; i <= 24; i++) h.ok(['spend', `T${i}`, '--tokens', String(i * 100), '--rung', 'easy']);
-  await withServers(async (servers) => {
-    const url = await startServe(servers, h, 'viewer');
-    const b = await openBrowser(t);
-    await b.send('Page.enable');
-    await b.send('Page.addScriptToEvaluateOnNewDocument', { source: `
-      window.initialFrames = [];
-      window.requestAnimationFrame = (callback) => window.initialFrames.push(callback);
-    ` });
-    const scroll = `[scrollY, document.querySelector('main').scrollTop]`;
-    for (const [view, width] of [['board', 390], ['spend', 390], ['spend', 1280]]) {
-      await b.send('Emulation.setDeviceMetricsOverride', { width, height: 844, deviceScaleFactor: 1, mobile: false });
-      for (const phase of ['initial', 'before', 'after']) {
-        await t.test(`${view} at ${width}px, initial frame ${phase}`, async () => {
-          await b.goto('about:blank');
-          await b.goto(`${url}#${view}`);
-          await b.until(`document.querySelector('.conn').dataset.conn === 'live' && window.initialFrames.length > 0`, 'the live stream with its initial frame pending');
-          if (phase === 'initial') {
-            await b.inPage(`window.initialFrames.splice(0).forEach((callback) => callback(performance.now()))`);
-            assert.deepEqual(await b.inPage(scroll), [0, 0], 'an untouched initial view starts at the top');
-            return;
-          }
-          await b.inPage(`window.scrollTo(0, 120); document.querySelector('main').scrollTop = 120`);
-          const before = await b.inPage(scroll);
-          assert.equal(before[width === 390 ? 0 : 1], 120, 'the reader has scrolled before the initial frame runs');
-          if (phase === 'before') {
-            await b.inPage(`window.initialFrames.splice(0).forEach((callback) => callback(performance.now()))`);
-            assert.deepEqual(await b.inPage(scroll), before, 'the delayed initial frame keeps the reader position');
-          }
-          const update = `late frame ${view} ${width} ${phase}`;
-          h.ok(['task', 'note', 'T1', update]);
-          await b.restored(`document.querySelector('#T1 .thread').textContent.includes(${JSON.stringify(update)})`, 'the live CLI update');
-          assert.deepEqual(await b.inPage(scroll), before, 'the live update restores the reader position');
-          if (phase === 'after') {
-            await b.inPage(`window.initialFrames.splice(0).forEach((callback) => callback(performance.now()))`);
-            assert.deepEqual(await b.inPage(scroll), before, 'the delayed initial frame cannot undo live restoration');
-          }
-        });
-      }
-    }
-  });
-});
-
 test('every view keeps disclosures, event identity, focus and scroll through live CLI updates', { skip: !CHROME && 'no Chrome to drive' }, async (t) => {
-  const h = populated(t);
+  const h = makeRepo(t);
+  h.init();
+  populate(h);
   for (let i = 6; i <= 24; i++) h.ok(['task', 'add', '--title', `Task ${i}`, '--acceptance', 'verified']);
   for (let i = 1; i <= 24; i++) h.ok(['spend', `T${i}`, '--tokens', String((25 - i) * 100), '--rung', 'easy']);
   await withServers(async (servers) => {
@@ -591,35 +612,38 @@ test('every view keeps disclosures, event identity, focus and scroll through liv
     ` });
     for (const width of [1280, 390]) {
       await b.send('Emulation.setDeviceMetricsOverride', { width, height: 844, deviceScaleFactor: 1, mobile: false });
-      for (const view of ['board', 'plan', 'history', 'spend', 'sheet', 'settings', 'settings-viewer']) {
+      for (const view of ['now', 'review', 'plan', 'history', 'spend', 'sheet', 'settings', 'settings-viewer']) {
         await t.test(`${view} at ${width}px`, async () => {
           await b.goto('about:blank');
           const settings = view.startsWith('settings');
-          const eventView = view === 'board' || view === 'history';
+          const eventView = view === 'now' || view === 'history';
           const seed = `original event for ${view} at ${width}`;
           h.ok(['task', 'note', 'T1', seed]);
-          const url = view === 'settings-viewer' ? `${viewer}settings` : settings ? `${owner}settings` : `${owner}#${view === 'sheet' ? 'T5' : view}`;
+          const url = view === 'settings-viewer' ? `${viewer}settings` : settings ? `${owner}settings` : view === 'sheet' ? `${owner}#T5` : view === 'now' ? owner : `${owner}${view}`;
           await b.goto(url);
           await b.until(`document.querySelector('.conn').dataset.conn === 'live'`, 'the live stream');
           if (!settings) await b.until(`document.querySelector('#T1 .thread').textContent.includes(${JSON.stringify(seed)})`, 'the initial note');
           const scope = settings ? 'main.settings' : view === 'sheet' ? '#T5' : `#${view}`;
           const spendTask = width === 1280 ? 'T24' : 'T23';
-          const focus = view === 'board' ? '.col-since .ev a[href="#T1"]'
+          const focus = view === 'now' ? '.recent .ev a[href="#T1"]'
+            : view === 'review' ? '#review [href="#T5"]'
             : view === 'history' ? '#history .ev a[href="#T1"]'
             : view === 'plan' ? width === 1280 ? '#plan .node[data-id="T1"]' : '#plan .layers a[href="#T1"]'
             : view === 'spend' ? `#spend details a[href="#${spendTask}"]`
             : view === 'sheet' ? '#T5 .ledger details > summary'
             : view === 'settings' ? 'tr[data-rung="easy"] input[name="model"]'
-            : '.views a[data-view="settings"]';
+            : '.rooms a[data-room="settings"]';
           const selector = JSON.stringify(focus);
           await b.inPage(`(() => {
             window.firstLoad = true;
+            // At tab widths, Recent sits behind its tab under the floor.
+            if (${JSON.stringify(view)} === 'now') document.querySelector('#tab-recent')?.click();
             const scope = document.querySelector(${JSON.stringify(scope)});
             [...scope.querySelectorAll('details')].forEach((el, i) => { el.open = i % 2 === 0; });
             if (${JSON.stringify(view)} === 'sheet') scope.querySelector('.ledger details').open = false;
             if (${JSON.stringify(view)} === 'spend') scope.querySelector('details').open = true;
             document.querySelector(${selector}).focus({ preventScroll: true });
-            [scope, ...scope.querySelectorAll('*'), document.querySelector('.views'), document.querySelector('main')].forEach((el) => {
+            [scope, ...scope.querySelectorAll('*'), document.querySelector('.rooms'), document.querySelector('main')].forEach((el) => {
               if (/auto|scroll/.test(getComputedStyle(el).overflow)) { el.scrollLeft = 70; el.scrollTop = 90; }
             });
             window.scrollTo(0, 120);
@@ -628,7 +652,7 @@ test('every view keeps disclosures, event identity, focus and scroll through liv
             const scope = document.querySelector(${JSON.stringify(scope)});
             return {
               disclosures: [...scope.querySelectorAll('details')].map((el) => [el.querySelector('summary').textContent, el.open]),
-              scroll: [scope, ...scope.querySelectorAll('*'), document.querySelector('.views'), document.querySelector('main')].filter((el) => /auto|scroll/.test(getComputedStyle(el).overflow)).map((el) => [el.scrollLeft, el.scrollTop]),
+              scroll: [scope, ...scope.querySelectorAll('*'), document.querySelector('.rooms'), document.querySelector('main')].filter((el) => /auto|scroll/.test(getComputedStyle(el).overflow)).map((el) => [el.scrollLeft, el.scrollTop]),
               page: [scrollX, scrollY]
             };
           })()`;
@@ -646,7 +670,7 @@ test('every view keeps disclosures, event identity, focus and scroll through liv
           assert.deepEqual(await b.inPage(snapshot), before, 'open and closed disclosures and every scroll offset stay');
           assert.deepEqual(await b.inPage(`(() => {
             const scope = document.querySelector(${JSON.stringify(scope)});
-            const elements = [scope, ...scope.querySelectorAll('*'), document.querySelector('.views'), document.querySelector('main')];
+            const elements = [scope, ...scope.querySelectorAll('*'), document.querySelector('.rooms'), document.querySelector('main')];
             const restored = [...new Set(elements)].filter((el) => el.matches('a, button, input, textarea, select, summary, details, [tabindex]') || /auto|scroll/.test(getComputedStyle(el).overflow));
             const keys = restored.map((el) => el.dataset.preserve);
             return [keys.every((key) => /^[0-9a-f]{64}$/.test(key)), new Set(keys).size === keys.length];
@@ -656,12 +680,12 @@ test('every view keeps disclosures, event identity, focus and scroll through liv
             await b.restored(`document.querySelector('#spend a[href="#${spendTask}"]') && !document.querySelector('#spend details a[href="#${spendTask}"]')`, 'the focused task to move out of the disclosure');
             assert.deepEqual(await b.inPage(`[document.activeElement.getAttribute('href'), document.querySelector('#spend details').open]`), [`#${spendTask}`, true], 'the same task action keeps focus after its row changes rank');
           }
-          if (view === 'board') {
+          if (view === 'now') {
             const task = width === 1280 ? 'T6' : 'T7';
-            await b.inPage(`document.querySelector('.col-next a[href="#${task}"]').focus({ preventScroll: true })`);
+            await b.inPage(`(() => { document.querySelector('#tab-next')?.click(); document.querySelector('#p-next a[href="#${task}"]').focus({ preventScroll: true }); })()`);
             h.ok(['claim', task, '--agent', `moving-${width}`]);
-            await b.restored(`document.querySelector('.col-work .card[data-key="${task}"]')`, 'the task to move to Working now');
-            assert.equal(await b.inPage(`document.activeElement === document.querySelector('.col-work a[href="#${task}"]')`), true, 'the same task action keeps focus after moving between columns');
+            await b.restored(`document.querySelector('.floor [data-key="agent-${task}"]')`, 'the task to move to the floor');
+            assert.equal(await b.inPage(`document.activeElement === document.querySelector('.floor a[href="#${task}"]')`), true, 'the same task action keeps focus after moving between bands');
           }
         });
       }
@@ -682,13 +706,13 @@ test('Spend keeps focus when a task drops into its closed more-tasks disclosure'
       await withServers(async (servers) => {
         const url = await startServe(servers, h, 'viewer');
         await b.send('Emulation.setDeviceMetricsOverride', { width, height: 844, deviceScaleFactor: 1, mobile: false });
-        await b.goto(`${url}#spend`);
+        await b.goto(`${url}spend`);
         await b.until(`document.querySelector('.conn').dataset.conn === 'live'`, 'the live stream');
-        await b.inPage(`document.querySelector('#spend a[href="#T20"]').focus({ preventScroll: true })`);
+        await b.inPage(`document.querySelector('#spend .tbl a[href="#T20"]').focus({ preventScroll: true })`);
         assert.deepEqual(await b.inPage(`[document.activeElement.getAttribute('href'), !!document.activeElement.closest('details'), document.querySelector('#spend details').open]`), ['#T20', false, false], 'T20 starts focused in a visible row with more tasks closed');
         h.ok(['spend', 'T21', '--tokens', '1000', '--rung', 'easy']);
         await b.restored(`document.querySelector('#spend details a[href="#T20"]')`, 'T20 to drop below the cutoff');
-        assert.deepEqual(await b.inPage(`[location.hash, document.activeElement.getAttribute('href'), document.querySelector('#spend details').open]`), ['#spend', '#T20', true], 'restoration reveals the surviving focused task');
+        assert.deepEqual(await b.inPage(`[location.pathname, document.activeElement.getAttribute('href'), document.querySelector('#spend details').open]`), ['/spend', '#T20', true], 'restoration reveals the surviving focused task');
         h.ok(['task', 'note', 'T20', `focus stays reachable at ${width}`]);
         await b.restored(`document.querySelector('#T20 .thread').textContent.includes('focus stays reachable at ${width}')`, 'the following live update');
         assert.deepEqual(await b.inPage(`[document.activeElement.getAttribute('href'), document.querySelector('#spend details').open]`), ['#T20', true], 'the opened disclosure remains preserved on the next update');
@@ -755,7 +779,9 @@ test('live updates match task sheet buttons by form and fall back when the focus
 });
 
 test('a viewer cannot edit tiers or the ladder from a sheet, Settings or a forged POST', async (t) => {
-  const h = populated(t);
+  const h = makeRepo(t);
+  h.init();
+  populate(h);
   await withServers(async (servers) => {
     const url = await startServe(servers, h, 'viewer');
     const page = await (await fetch(url)).text();
@@ -782,9 +808,12 @@ test('a viewer cannot edit tiers or the ladder from a sheet, Settings or a forge
   });
 });
 
-test('Working now uses only the current claimant and claim, then the submitter context', (t) => {
-  const h = populated(t);
-  const card = () => fs.readFileSync(path.join(h.state, 'sketch.html'), 'utf8').match(/<article class="card[^"]*" data-key="T1"[\s\S]*?<\/article>/)[0];
+test('the floor uses only the current claimant and claim, then Review shows the submitter context', (t) => {
+  const h = makeRepo(t);
+  h.init();
+  populate(h);
+  const page = () => fs.readFileSync(path.join(h.state, 'sketch.html'), 'utf8');
+  const card = () => (page().match(/<article class="agent[^"]*" data-key="agent-T1"[\s\S]*?<\/article>/) || page().match(/<article class="rv[^"]*" data-key="review-T1"[\s\S]*?<\/article>/))[0];
   h.ok(['task', 'note', 'T1', 'orchestrator planning note', '--agent', 'orchestrator']);
   assert.match(card(), /tests green, waiting on CI/);
   assert.doesNotMatch(card(), /orchestrator planning note/);
@@ -801,21 +830,20 @@ test('Working now uses only the current claimant and claim, then the submitter c
   assert.doesNotMatch(card(), /review in progress/);
 });
 
-test('budget plates show minutes and leave the Budget label to the group heading', (t) => {
+test('a budget at 90% is a Now item in words, with minutes for hours', (t) => {
   const h = makeRepo(t);
   h.init();
   h.ok(['task', 'add', '--title', 'Usage', '--acceptance', 'usage is reported']);
   h.ok(['project', 'set', '--budget-tokens', '100', '--budget-hours', '1']);
   h.ok(['spend', 'T1', '--tokens', '95', '--minutes', '57', '--agent', 'w-1']);
   const page = () => fs.readFileSync(path.join(h.state, 'sketch.html'), 'utf8');
-  const plates = page().match(/<article class="plate signal" data-key="budget-[\s\S]*?<\/article>/g);
-  assert.equal(plates.length, 2);
-  assert.match(page(), /<h3 class="grouph">Budget<\/h3>/);
-  assert.match(plates[0], /<p class="q">Tokens at 95%<\/p>/);
-  assert.match(plates[0], /95 used of 100/);
-  assert.match(plates[1], /<p class="q">Agent time at 95%<\/p>/);
-  assert.match(plates[1], /57 min used of 1 h/);
-  for (const plate of plates) assert.doesNotMatch(plate, /class="kind">Budget|of the budget/);
+  const items = page().match(/<li class="qi" data-tier="now" data-kind="budget" data-key="budget-[\s\S]*?<\/li>/g);
+  assert.equal(items.length, 2);
+  assert.match(items[0], /<h3 class="q">Token budget at 95%<\/h3>/);
+  assert.match(items[0], /95 used of 100/);
+  assert.match(items[1], /<h3 class="q">Hours budget at 95%<\/h3>/);
+  assert.match(items[1], /57 min used of 1 h/);
+  for (const item of items) assert.match(item, /<span class="tier">.*Now<\/span>/, 'the tier is a word, not only a hue');
   h.ok(['project', 'set', '--budget-hours', '2']);
   h.ok(['spend', 'T1', '--minutes', '57', '--agent', 'w-1']);
   assert.match(page(), /1 h 54 min used of 2 h/);
@@ -829,22 +857,23 @@ test('budget-only attention agrees across the queue, navigation, title and icon,
   await withServers(async (servers) => {
     const url = await startServe(servers, h, 'viewer');
     const b = await openBrowser(t);
-    await b.goto(`${url}#board`);
+    await b.goto(url);
     await b.until(`document.querySelector('.conn').dataset.conn === 'live'`, 'the live stream');
     const originalIcon = await b.inPage(`document.querySelector('link[rel="icon"]').href`);
     h.ok(['spend', 'T1', '--tokens', '95', '--minutes', '57', '--agent', 'w-1']);
-    await b.restored(`document.querySelector('.col-need').textContent.includes('Tokens at 95%')`, 'budget alerts');
-    const counts = await b.inPage(`[document.querySelector('#h-need .n').textContent, document.querySelector('.views a[data-view="board"] .n').textContent, document.title.split(' ')[0], JSON.parse(document.getElementById('boot').textContent).attention]`);
-    assert.deepEqual(counts.slice(0, 3), ['2', '2', '(2)']);
+    await b.restored(`document.querySelector('#queue').textContent.includes('Token budget at 95%')`, 'budget alerts');
+    const counts = await b.inPage(`[document.querySelector('#h-queue .count').textContent, document.querySelector('.rooms a[data-room="now"] .count').textContent, document.title.split(' ')[0], document.querySelector('h1[data-status]').textContent]`);
+    assert.deepEqual(counts.slice(0, 3), ['2', '2', '2']);
+    assert.match(counts[3], /2 need you \(2 now\)/, 'the status sentence leads with the same count');
     assert.notEqual(await b.inPage(`document.querySelector('link[rel="icon"]').href`), originalIcon);
     const snapshot = fs.readFileSync(path.join(h.state, 'sketch.html'), 'utf8');
-    assert.match(snapshot, /<title>\(2\)/);
+    assert.match(snapshot, /<title>2 need you · 0 working/);
     assert.match(snapshot, /"attention":2/);
     assert.match(snapshot, /aria-label="2 need you">2/);
   });
 });
 
-test('desktop columns keep headings visible, reach the last items and keep their scroll on live updates', { skip: !CHROME && 'no Chrome to drive' }, async (t) => {
+test('the front room scrolls as one page at every size, with no nested scroll area, and keeps it on live updates', { skip: !CHROME && 'no Chrome to drive' }, async (t) => {
   const h = makeRepo(t);
   h.init(['--workers', '12']);
   populate(h);
@@ -857,51 +886,37 @@ test('desktop columns keep headings visible, reach the last items and keep their
   await withServers(async (servers) => {
     const url = await startServe(servers, h, 'viewer');
     const b = await openBrowser(t);
-    for (const [width, height] of [[3840, 1080], [1920, 1080], [1280, 800]]) {
+    for (const [width, height] of [[3840, 1080], [1920, 1080], [1280, 800], [390, 844]]) {
       await b.send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: false });
-      await b.goto(`${url}#board`);
+      await b.goto(url);
       await b.until(`document.querySelector('.conn').dataset.conn === 'live'`, 'the live stream');
-      const metrics = await b.inPage(`['need','work'].map((name) => { const c = document.querySelector('[data-region="' + name + '"]'); c.scrollTop = c.scrollHeight; const last = c.querySelector(name === 'need' ? 'article:last-child' : '.card:last-child'); return [c.clientHeight, c.scrollHeight, c.scrollTop, c.getBoundingClientRect().bottom <= innerHeight, last.getBoundingClientRect().bottom <= c.getBoundingClientRect().bottom + 1]; })`);
-      for (const [client, scroll, top, fits, reachable] of metrics) {
-        assert.ok(fits && client < height, `column fits at ${width}`);
-        assert.ok(scroll > client && top > 0 && reachable, `the last item is reachable at ${width}`);
-      }
-      for (const theme of ['light', 'dark']) {
-        await b.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: theme }] });
-        const headings = await b.inPage(`['need','work','next','since'].map((name) => {
-          const c = document.querySelector('[data-region="' + name + '"]');
-          c.scrollTop = c.scrollHeight;
-          const head = c.querySelector(':scope > .colh, :scope > .since-head');
-          const rect = head.getBoundingClientRect();
-          const column = c.getBoundingClientRect();
-          const hit = document.elementFromPoint(rect.left + 10, rect.top + 5);
-          return [name, getComputedStyle(head).position, Math.abs(rect.top - column.top) < 1, rect.bottom <= column.bottom, head.contains(hit)];
-        })`);
-        for (const [name, position, top, fits, visible] of headings) {
-          assert.equal(position, 'sticky', `${name} heading sticks at ${width} in ${theme}`);
-          assert.ok(top && fits && visible, `${name} heading stays visible at the queue end at ${width} in ${theme}`);
-        }
-      }
-      const expected = await b.inPage(`['need','work'].map((name) => { const c = document.querySelector('[data-region="' + name + '"]'); c.scrollTop = 160; return c.scrollTop; })`);
+      const nested = await b.inPage(`[...document.querySelectorAll('#now *')].filter((el) => /auto|scroll/.test(getComputedStyle(el).overflowY) && el.scrollHeight > el.clientHeight + 1).length`);
+      assert.equal(nested, 0, `no nested vertical scroll area at ${width}`);
+      assert.equal(await b.inPage(`document.documentElement.scrollWidth <= innerWidth`), true, `no horizontal page scroll at ${width}`);
+      await b.inPage(`window.scrollTo(0, 400)`);
+      const y = await b.inPage('scrollY');
+      assert.ok(y > 0, `the page scrolls at ${width}`);
       h.ok(['task', 'note', 'T2', `update at ${width}`, '--agent', 'orchestrator']);
-      await b.restored(`document.querySelector('.col-since').textContent.includes('update at ${width}')`, 'the live update');
-      assert.deepEqual(await b.inPage(`['need','work'].map((name) => document.querySelector('[data-region="' + name + '"]').scrollTop)`), expected, `column roots retain their scroll at ${width}`);
+      await b.restored(`document.querySelector('.recent').textContent.includes('update at ${width}')`, 'the live update');
+      assert.equal(await b.inPage('scrollY'), y, `the page keeps its scroll at ${width}`);
     }
   });
 });
 
 test('task sheets contain keyboard focus, restore the invoking link and keep modal state through refresh', { skip: !CHROME && 'no Chrome to drive' }, async (t) => {
-  const h = populated(t);
+  const h = makeRepo(t);
+  h.init();
+  populate(h);
   await withServers(async (servers) => {
     const url = await startServe(servers, h, 'viewer');
     const b = await openBrowser(t);
-    await b.goto(`${url}#board`);
+    await b.goto(url);
     await b.until(`document.querySelector('.conn').dataset.conn === 'live'`, 'the live stream');
-    // Use the link in Working now, not the first T1 link in another column.
-    await b.inPage(`(() => { const a = document.querySelector('.col-work [href="#T1"]'); a.focus(); a.click(); })()`);
+    // Use the link on the floor, not the first T1 link in another band.
+    await b.inPage(`(() => { const a = document.querySelector('.floor [href="#T1"]'); a.focus(); a.click(); })()`);
     await b.until(`document.querySelector('#T1').classList.contains('open')`, 'the sheet');
     assert.equal(await b.inPage(`document.querySelector('#T1 .panel').getAttribute('aria-modal')`), 'true');
-    assert.equal(await b.inPage(`document.querySelector('main').inert && document.querySelector('.topbar').inert`), true);
+    assert.equal(await b.inPage(`document.querySelector('main').inert && document.querySelector('.bar').inert`), true);
     const tab = async (shift = false) => {
       await b.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9, modifiers: shift ? 8 : 0 });
       await b.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9, modifiers: shift ? 8 : 0 });
@@ -912,35 +927,251 @@ test('task sheets contain keyboard focus, restore the invoking link and keep mod
     }
     h.ok(['msg', '--task', 'T1', '--to', 'orchestrator', 'modal refresh', '--agent', 'w-1']);
     await b.restored(`document.querySelector('#T1 .thread').textContent.includes('modal refresh')`, 'the sheet refresh');
-    assert.equal(await b.inPage(`document.querySelector('main').inert && document.querySelector('.topbar').inert && document.querySelector('#T1 .panel').contains(document.activeElement)`), true);
+    assert.equal(await b.inPage(`document.querySelector('main').inert && document.querySelector('.bar').inert && document.querySelector('#T1 .panel').contains(document.activeElement)`), true);
     await b.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
     await b.until(`!document.querySelector('.sheet.open')`, 'sheet close');
-    assert.equal(await b.inPage(`document.activeElement === document.querySelector('.col-work [href="#T1"]') && !document.querySelector('main').inert && !document.querySelector('.topbar').inert`), true, 'focus returns to the same invoking card, even when refreshed');
+    assert.equal(await b.inPage(`document.activeElement === document.querySelector('.floor [href="#T1"]') && !document.querySelector('main').inert && !document.querySelector('.bar').inert`), true, 'focus returns to the same invoking row, even when refreshed');
 
     h.ok(['ask', '--question', 'Another decision for Metrics?', '--option', 'yes', '--option', 'no', '--blocks', 'T4']);
-    await b.restored(`document.querySelector('.col-need [data-key="D2"]')`, 'the second decision');
-    await b.inPage(`(() => { const a = document.querySelector('.col-need [data-key="D2"] [href="#T4"]'); a.focus(); a.click(); })()`);
+    await b.restored(`document.querySelector('#queue [data-key="D2"]')`, 'the second decision');
+    await b.inPage(`(() => { const a = document.querySelector('#queue [data-key="D2"] [href="#T4"]'); a.focus(); a.click(); })()`);
     await b.until(`document.querySelector('#T4').classList.contains('open')`, 'the Metrics sheet');
     h.ok(['task', 'note', 'T4', 'receipt available', '--agent', 'reviewer']);
     await b.restored(`document.querySelector('#T4 .thread').textContent.includes('receipt available')`, 'the sheet refresh');
     await b.inPage(`document.querySelector('#T4 [data-close]').click()`);
     await b.until(`!document.querySelector('.sheet.open')`, 'sheet close');
-    assert.equal(await b.inPage(`document.activeElement === document.querySelector('.col-need [data-key="D2"] [href="#T4"]')`), true, 'duplicate task links in one column return to the invoking decision, not its first neighbor');
+    assert.equal(await b.inPage(`document.activeElement === document.querySelector('#queue [data-key="D2"] [href="#T4"]')`), true, 'duplicate task links in one band return to the invoking decision, not its first neighbor');
   });
 });
 
 test('phone gates keep whole names and states in both themes without horizontal overflow', { skip: !CHROME && 'no Chrome to drive' }, async (t) => {
-  const h = populated(t);
+  const h = makeRepo(t);
+  h.init();
+  populate(h);
   h.ok(['submit', 'T1', '--sha', h.git(['rev-parse', 'HEAD']), '--agent', 'w-1']);
   const b = await openBrowser(t);
   await b.send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 2, mobile: false });
   for (const theme of ['light', 'dark']) {
     await b.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: theme }] });
     await b.goto(`${pathToFileURL(path.join(h.state, 'sketch.html')).href}#T1`);
-    const gates = await b.inPage(`(() => { const table = document.querySelector('#T1 .gates-tbl'); return { fits: table.getBoundingClientRect().right <= innerWidth && table.scrollWidth <= table.clientWidth, cells: [...table.querySelectorAll('th, td:nth-child(2)')].map((c) => { const range = document.createRange(); range.selectNodeContents(c.querySelector('.pip') || c); return [c.textContent, range.getClientRects().length]; }) }; })()`);
+    const gates = await b.inPage(`(() => { const list = document.querySelector('#T1 .receipts'); return { fits: list.getBoundingClientRect().right <= innerWidth && list.scrollWidth <= list.clientWidth, cells: [...list.querySelectorAll('.pip')].map((c) => { const range = document.createRange(); range.selectNodeContents(c); return [c.textContent, range.getClientRects().length]; }) }; })()`);
     assert.equal(gates.fits, true, `gates fit in ${theme}`);
     for (const [label, lines] of gates.cells) assert.equal(lines, 1, `${label} stays whole in ${theme}`);
   }
+});
+
+test('each room has its own path, and the URL decides the room over anything remembered', { skip: !CHROME && 'no Chrome to drive' }, async (t) => {
+  const h = makeRepo(t);
+  h.init();
+  populate(h);
+  await withServers(async (servers) => {
+    const url = await startServe(servers, h);
+    for (const room of ['review', 'plan', 'spend', 'history']) assert.equal((await fetch(`${url}${room}`)).status, 200, `/${room} is served`);
+    assert.equal((await fetch(`${url}nowhere`)).status, 404);
+    const b = await openBrowser(t);
+    const shown = () => b.inPage(`[location.pathname, [...document.querySelectorAll('.room')].filter((el) => getComputedStyle(el).display !== 'none').map((el) => el.id), document.querySelector('.rooms a[aria-current="page"]').dataset.room]`);
+    await b.goto(`${url}plan`);
+    assert.deepEqual(await shown(), ['/plan', ['plan'], 'plan'], 'a path opens its room');
+    // An old fragment link names a room too, and becomes its path.
+    await b.send('Page.navigate', { url: `${url}#review` });
+    await b.until(`location.pathname === '/review' && document.readyState === 'complete'`, 'the fragment to become a path');
+    assert.deepEqual(await shown(), ['/review', ['review'], 'review']);
+    await b.goto(`${url}history#T1`);
+    assert.deepEqual(await shown(), ['/history', ['history'], 'history'], 'a sheet opens over the room its path names');
+    assert.equal(await b.inPage(`document.querySelector('.sheet.open').id`), 'T1');
+    // From Settings, a separate page, the nav link goes to the room it names.
+    await b.goto(`${url}settings`);
+    await b.inPage(`document.querySelector('.rooms a[data-room="plan"]').click()`);
+    await b.until(`location.pathname === '/plan' && document.readyState === 'complete' && document.documentElement.classList.contains('js')`, 'Plan from Settings');
+    assert.deepEqual(await shown(), ['/plan', ['plan'], 'plan']);
+    // Back and forward follow the path.
+    await b.inPage(`document.querySelector('.rooms a[data-room="spend"]').click()`);
+    await b.until(`location.pathname === '/spend'`, 'Spend by nav');
+    await b.inPage('history.back()');
+    await b.until(`location.pathname === '/plan' && document.documentElement.dataset.room === 'plan'`, 'back to Plan');
+    assert.deepEqual(await shown(), ['/plan', ['plan'], 'plan']);
+  });
+});
+
+test('only the routed room is displayed after a sheet opens inside it and after a live update', { skip: !CHROME && 'no Chrome to drive' }, async (t) => {
+  const h = makeRepo(t);
+  h.init();
+  populate(h);
+  await withServers(async (servers) => {
+    const url = await startServe(servers, h, 'viewer');
+    const b = await openBrowser(t);
+    const shown = () => b.inPage(`[...document.querySelectorAll('.room')].filter((el) => getComputedStyle(el).display !== 'none').map((el) => el.id)`);
+    for (const [width, height] of [[1280, 800], [390, 844]]) {
+      await b.send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: false });
+      for (const room of ['now', 'review', 'plan', 'spend', 'history']) {
+        await b.goto(room === 'now' ? url : `${url}${room}`);
+        await b.until(`document.querySelector('.conn').dataset.conn === 'live'`, 'the live stream');
+        const link = await b.inPage(`(() => { const a = [...document.querySelectorAll('#${room} a[href^="#T"]')].find((x) => x.getClientRects().length); if (a) location.hash = a.getAttribute('href'); return !!a; })()`);
+        if (link) {
+          await b.until(`!!document.querySelector('.sheet.open')`, 'a sheet from inside the room');
+          assert.deepEqual(await shown(), [room], `${room} under its sheet at ${width}`);
+          await b.inPage(`document.querySelector('.sheet.open [data-close]').click()`);
+          await b.until(`!document.querySelector('.sheet.open')`, 'the sheet to close');
+        }
+        h.ok(['task', 'note', 'T1', `live in ${room} at ${width}`, '--agent', 'orchestrator']);
+        await b.restored(`document.querySelector('#T1 .thread').textContent.includes(${JSON.stringify(`live in ${room} at ${width}`)})`, 'the live update');
+        assert.deepEqual(await shown(), [room], `${room} after a live update at ${width}`);
+        assert.equal(await b.inPage(`document.querySelector('#${room}').getBoundingClientRect().top < innerHeight`), true, `${room} starts in the first viewport`);
+      }
+    }
+  });
+});
+
+test('serve messages the claimant and caps a task budget only as the owner, through msg and task update', async (t) => {
+  const h = makeRepo(t);
+  h.init();
+  populate(h);
+  await withServers(async (servers) => {
+    const viewer = await startServe(servers, h, 'viewer');
+    const viewerPage = await (await fetch(viewer)).text();
+    assert.doesNotMatch(viewerPage, /data-api="\/api\/tasks\/T1\/(message|budget)"/, 'no message or stop form without the owner');
+    assert.equal((await post(`${viewer}api/tasks/T1/message`, tokenOf(viewerPage), { text: 'forged' })).status, 403);
+    const url = await startServe(servers, h);
+    const before = log(h).length;
+    const unkeyed = tokenOf(await (await fetch(url)).text());
+    assert.equal(unkeyed, '', 'a page opened without the one-time link carries no token');
+    assert.equal((await post(`${url}api/tasks/T1/message`, unkeyed, { text: 'forged' })).status, 403);
+    assert.equal((await post(`${url}api/tasks/T1/budget`, unkeyed, { tokens: '1' })).status, 403);
+    const page = await (await fetch(keyed(url))).text();
+    assert.match(page, /data-api="\/api\/tasks\/T1\/message"/, 'the claimed task offers a message on its row');
+    const token = tokenOf(page);
+    assert.equal((await post(`${url}api/tasks/T4/message`, token, { text: 'nobody holds T4' })).status, 400, 'an unclaimed task has nobody to message');
+    assert.equal((await post(`${url}api/tasks/T1/budget`, token, { tokens: 'lots' })).status, 400);
+    assert.equal(log(h).length, before, 'refused writes record nothing');
+    const r = await post(`${url}api/tasks/T1/message`, token, { text: 'split the API part first' });
+    assert.equal(r.status, 200, await r.clone().text());
+    const msg = log(h).pop();
+    assert.deepEqual([msg.cmd, msg.agent, msg.task, msg.detail.to, msg.detail.text], ['msg', 'owner', 'T1', 'w-1', 'split the API part first']);
+    const cap = await post(`${url}api/tasks/T1/budget`, token, { tokens: '1200' });
+    assert.equal(cap.status, 200, await cap.clone().text());
+    assert.deepEqual(h.readState('tasks.json').tasks[0].budget, { hours: null, tokens: 1200 });
+    const update = log(h).pop();
+    assert.deepEqual([update.cmd, update.agent, update.task], ['task update', 'owner', 'T1']);
+  });
+});
+
+test('runaway rules: status and the board flag the same claim, from the project\'s own history', (t) => {
+  const h = makeRepo(t);
+  h.init();
+  // Ten accepted docs tasks: the median is 2M and the 90th percentile 10.9M.
+  const spent = [1, 1.5, 1.8, 2, 2, 2, 2.2, 3, 10.8, 12];
+  for (const [i, m] of spent.entries()) {
+    const id = h.ok(['task', 'add', '--title', `Done ${i}`, '--acceptance', 'done', '--kind', 'docs', '--tier', 'easy']).match(/T\d+/)[0];
+    h.ok(['claim', id, '--agent', `w-${i}`]);
+    h.ok(['submit', id, '--sha', h.git(['rev-parse', 'HEAD']), '--agent', `w-${i}`]);
+    h.ok(['spend', id, '--tokens', String(m * 1e6), '--minutes', '20', '--agent', `w-${i}`]);
+    h.reviewer(id, `r-${i}`, h.git(['rev-parse', 'HEAD']));
+    h.ok(['evidence', id, '--type', 'review', '--ok', '--sha', h.git(['rev-parse', 'HEAD']), '--agent', `r-${i}`]);
+    h.ok(['accept', id]);
+  }
+  h.ok(['task', 'add', '--title', 'Retry jitter', '--acceptance', 'jitter', '--tier', 'easy']);
+  h.ok(['claim', 'T11', '--agent', 'w-x']);
+  h.ok(['spend', 'T11', '--tokens', '9000000', '--agent', 'w-x']);
+  const status = () => h.json(['status']);
+  assert.equal(status().runaway_norms.from, 'project');
+  assert.deepEqual(status().runaways, [], 'below the multiple, nothing is flagged');
+  const page = () => fs.readFileSync(path.join(h.state, 'sketch.html'), 'utf8');
+  assert.doesNotMatch(page(), /data-key="runaway-T11/);
+  h.ok(['spend', 'T11', '--tokens', '3000000', '--agent', 'w-x']);
+  const flags = status().runaways;
+  assert.deepEqual(flags.map((f) => [f.task, f.agent, f.rule]), [['T11', 'w-x', 'spend']]);
+  assert.match(h.ok(['status']), /runaway: T11 w-x: spent 12M tokens, 6 times the easy median of 2M \(the rule is 5\.\d times\)/);
+  const item = page().match(/<li class="qi" data-tier="now" data-kind="runaway" data-key="runaway-T11-spend">[\s\S]*?<\/li>/);
+  assert.ok(item, 'the board shows the same flag as a Now item');
+  assert.match(item[0], /spent 12M tokens/);
+  assert.match(page(), /data-key="agent-T11"[\s\S]*?in the queue: spend/, 'the row keeps a marker');
+});
+
+test('the queue orders Now before Your turn, and an approval reads as a sentence', (t) => {
+  const h = makeRepo(t);
+  h.init();
+  populate(h);
+  h.ok(['task', 'add', '--title', 'Later', '--acceptance', 'later', '--dep', 'T2']);
+  h.ok(['ask', '--question', 'Defer the export?', '--option', 'yes', '--option', 'no', '--blocks', 'T6']);
+  assert.notEqual(h.run(['project', 'set', '--merge-admin', 'true', '--agent', 'orchestrator']).code, 0, 'the orchestrator cannot make an owner-required change');
+  const page = fs.readFileSync(path.join(h.state, 'sketch.html'), 'utf8');
+  const items = [...page.matchAll(/<li class="qi" data-tier="(\w+)" data-kind="(\w+)" data-key="([^"]+)"/g)].map((m) => [m[1], m[2], m[3]]);
+  assert.deepEqual(items.slice(0, 1), [['now', 'decision', 'D1']], 'a decision that blocks ready work is Now');
+  assert.ok(items.some(([tier, kind, key]) => tier === 'turn' && kind === 'decision' && key === 'D2'), 'a decision whose task still waits on others is Your turn');
+  assert.ok(items.findIndex(([tier]) => tier === 'turn') > items.findLastIndex(([tier]) => tier === 'now'), 'Now items come first');
+  const approval = page.match(/<li class="qi" data-tier="turn" data-kind="approval" data-key="D3"[\s\S]*?<\/li>/)[0];
+  assert.match(approval, /orchestrator asks to change admin merges: off to on/);
+  assert.match(approval, /merge\.admin<\/b> is <span class="class-word">yours<\/span>/);
+  assert.match(approval, /project set --merge-admin true --agent owner/, 'the change to make, as a command');
+  assert.match(page, /<title>4 need you · 1 working/);
+});
+
+// The deterministic bars of the human bench (docs/human-bench.md), kept as
+// assertions so a later change cannot regress them silently.
+test('the board meets contrast, target, name and readability bars at the owner\'s sizes in both themes', { skip: !CHROME && 'no Chrome to drive' }, async (t) => {
+  const h = makeRepo(t);
+  h.init();
+  populate(h);
+  h.ok(['msg', '--to', 'owner', '--task', 'T1', 'which header name?', '--agent', 'w-1']);
+  await withServers(async (servers) => {
+    const url = await startServe(servers, h);
+    const b = await openBrowser(t);
+    await b.send('Accessibility.enable');
+    for (const [width, height] of [[3840, 1080], [1920, 1080], [1280, 800], [390, 844]]) {
+      await b.send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: false });
+      for (const theme of ['light', 'dark']) {
+        await b.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: theme }] });
+        for (const room of ['', 'review', 'plan', 'spend', 'history', 'settings']) {
+          await b.goto(`${url}${room}`);
+          await b.until(`document.querySelector('.conn').dataset.conn === 'live'`, 'the live stream');
+          const where = `${room || 'now'} at ${width} in ${theme}`;
+          const c = await b.inPage(checks.contrast);
+          assert.equal(c.failures, 0, `contrast ${where}: ${JSON.stringify(c.samples)}`);
+          const tg = await b.inPage(checks.targets);
+          assert.ok(tg.pass, `targets ${where}: ${JSON.stringify([tg.samples, tg.short_samples])}`);
+          const rd = await b.inPage(checks.readability);
+          assert.ok(rd.min_px >= 12 && rd.sizes <= 6 && rd.body_px >= 15 && !rd.horizontal_scroll && !rd.clipped, `readability ${where}: ${JSON.stringify(rd)}`);
+          const nm = await checks.names(b);
+          assert.ok(nm.pass, `names ${where}: ${JSON.stringify(nm)}`);
+        }
+      }
+    }
+  });
+});
+
+test('an open board draws a live reading stale once it stops arriving, with no state change to trigger it', { skip: !CHROME && 'no Chrome to drive' }, async (t) => {
+  const h = makeRepo(t);
+  h.init();
+  h.ok(['task', 'add', '--title', 'Spend live', '--tier', 'easy', '--acceptance', 'usage shows']);
+  h.ok(['brief', 'set', 'T1', '-'], { input: 'Work on T1.\n' });
+  const bin = path.join(h.base, 'bin');
+  fs.mkdirSync(bin);
+  fs.writeFileSync(path.join(bin, 'claude'), '', { mode: 0o755 });
+  h.ok(['ladder', 'set', 'easy', '--harness', 'claude', '--model', 'live-model', '--clear', 'profile', '--clear', 'effort', '--supervision', JSON.stringify({ usage_ms: 200, stall_ms: 60000 })]);
+  const stub = path.join(__dirname, 'fixtures', 'live-usage-harness.js').replace(/\\/g, '/');
+  // Spawn caches under HOME; this one keeps them in the scratch directory.
+  const home = path.join(h.base, 'home');
+  fs.mkdirSync(path.join(home, '.cache'), { recursive: true });
+  h.json(['spawn', '--task', 'T1'], { env: { HOME: home, XDG_CACHE_HOME: path.join(home, '.cache'), PATH: bin + path.delimiter + h.env.PATH, NODE_OPTIONS: `--require "${stub}"`, LIVE_STEPS: '2', LIVE_STEP_TOKENS: '700', LIVE_HOLD: '60000', LIVE_DONE: path.join(h.base, 'done') } });
+  const end = Date.now() + 20000;
+  while (!h.json(['status']).spend.live.some((l) => l.tokens === 1400)) {
+    assert.ok(Date.now() < end, 'live usage was not read');
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  await withServers(async (servers) => {
+    const url = await startServe(servers, h, 'viewer');
+    const b = await openBrowser(t);
+    await b.goto(url);
+    await b.until(`document.querySelector('.conn').dataset.conn === 'live' && !!document.querySelector('[data-key="agent-T1"] [data-live-state="live"]')`, 'the live reading on the row');
+    // The supervisor goes away and the agent keeps running: no reading, no write.
+    const monitor = log(h).find((e) => e.cmd === 'spawn' && e.task === 'T1').detail.monitor_pid;
+    process.kill(monitor, 'SIGKILL');
+    const events = log(h).length;
+    await b.until(`!!document.querySelector('[data-key="agent-T1"] [data-live-state="stale"]') && !!document.querySelector('#queue [data-key="runaway-T1-stale"]')`, 'the stale reading and its Now item', 30000);
+    assert.equal(log(h).length, events, 'nothing was written: the page aged the reading itself');
+    assert.match(await b.inPage(`document.querySelector('h1[data-status]').textContent`), /1 not counted/);
+    assert.doesNotMatch(await b.inPage(`document.querySelector('[data-key="agent-T1"] [data-usage]').textContent`), /(^|\s)0 tokens/, 'never drawn as zero');
+  });
 });
 
 test('the board shows a refused brokered message as trouble, without its text', async (t) => {

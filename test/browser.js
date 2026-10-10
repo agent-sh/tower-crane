@@ -160,10 +160,20 @@ async function openBrowser(t) {
     if (r.exceptionDetails) throw new Error(`page threw: ${r.exceptionDetails.exception ? r.exceptionDetails.exception.description : r.exceptionDetails.text}`);
     return r.result.value;
   };
+  // Calls a page function (a function or its source) with values passed as
+  // protocol arguments, so no value is ever spliced into page code.
+  const call = async (fn, ...args) => {
+    const { result } = await send('Runtime.evaluate', { expression: 'globalThis' });
+    const r = await send('Runtime.callFunctionOn', { functionDeclaration: String(fn), objectId: result.objectId, arguments: args.map((value) => ({ value })), awaitPromise: true, returnByValue: true });
+    await send('Runtime.releaseObject', { objectId: result.objectId }).catch(() => {});
+    if (r.exceptionDetails) throw new Error(`page threw: ${r.exceptionDetails.exception ? r.exceptionDetails.exception.description : r.exceptionDetails.text}`);
+    return r.result.value;
+  };
   return {
     send,
     seen,
     inPage,
+    call,
     // Types into whatever has focus, as a keyboard would: a disabled field
     // cannot hold focus, so nothing lands there.
     type: (text) => send('Input.insertText', { text }),

@@ -501,21 +501,23 @@ test('an open board ages live telemetry without state writes or a page reload', 
   try {
     await until(t, h, () => output.includes('\n'), 'serve did not start', server.stdout);
     const { url } = JSON.parse(output.split('\n')[0]);
-    await b.goto(`${url}#spend`);
+    await b.goto(`${url}spend`);
     await b.until(`document.querySelector('.conn').dataset.conn === 'live'`, 'the live stream');
-    assert.equal(await b.inPage(`document.querySelector('[data-live-state]').dataset.liveState`), 'live');
+    assert.equal(await b.inPage(`document.querySelector('#spend tr[data-live-state]').dataset.liveState`), 'live');
+    assert.equal(await b.inPage(`document.querySelector('[data-key="agent-T1"] [data-usage]').dataset.liveState`), 'live');
     const log = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8');
     await b.inPage(`window.boardNow += 60000; window.boardTimers.forEach((callback) => callback());`);
+    // The server's clock stays at the reading, so only the page can age it.
+    await b.until(`document.querySelector('#spend tr[data-live-state]').dataset.liveState === 'stale'`, 'the page to age the reading');
     const shown = await b.inPage(`(() => {
-      const row = document.querySelector('[data-live-state]');
-      return { state: row.dataset.liveState, freshness: row.cells[3].textContent, age: row.cells[4].textContent,
-        summary: document.querySelector('.spendmini').textContent, running: document.querySelector('.total[data-live]').textContent };
+      const row = document.querySelector('#spend tr[data-live-state]');
+      const floor = document.querySelector('[data-key="agent-T1"] [data-usage]');
+      return { freshness: row.cells[3].textContent, age: row.cells[4].textContent, floor: floor.dataset.liveState, words: floor.textContent };
     })()`);
-    assert.equal(shown.state, 'stale');
     assert.equal(shown.freshness, 'stale');
-    assert.equal(shown.age, '61s ago');
-    assert.match(shown.summary, /stale/);
-    assert.match(shown.running, /stale/);
+    assert.equal(shown.age, '61 s ago');
+    assert.equal(shown.floor, 'stale');
+    assert.match(shown.words, /stale, 61 s old/);
     assert.equal(fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8'), log, 'time passing wrote no state');
   } finally {
     server.kill();
