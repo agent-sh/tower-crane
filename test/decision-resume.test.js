@@ -79,3 +79,46 @@ fs.writeFileSync(out, JSON.stringify({ prompt, agent: process.env.TOWER_CRANE_AG
   h.ok(['claim', 'T2', '--agent', 'w-5']);
   assert.equal(task(h, 'T2').pr, 8);
 });
+
+test('a refused release by the orchestrator links no PR while its owner decision is open', (t) => {
+  const h = makeRepo(t);
+  gateFixture(h);
+  h.init(['--repo', 'acme/demo', '--base', 'main']);
+  h.ok(['task', 'add', '--title', 'Pick a store', '--acceptance', 'the store is chosen']);
+  h.env.FIXTURE_PR_HEAD_7 = 'tower-crane/T1';
+  h.env.FIXTURE_PR_STATE_7 = 'OPEN';
+  h.ok(['claim', 'T1', '--agent', 'w-1']);
+
+  // Releasing another agent's live claim is owner-required, so the attempt opens D1 and then refuses; the refusal writes no PR link.
+  const refused = h.run(['release', 'T1', '--reason', 'taking over', '--pr', '7', '--agent', 'orchestrator']);
+  assert.equal(refused.code, 1, refused.stdout);
+  assert.match(refused.stderr, /opened D1 for the owner/);
+  assert.equal(h.readState('decisions.json').decisions.length, 1);
+  assert.deepEqual([task(h, 'T1').status, task(h, 'T1').claim.agent, task(h, 'T1').pr, task(h, 'T1').branch], ['in_progress', 'w-1', null, null]);
+  assert.doesNotMatch(JSON.stringify(task(h, 'T1')), /linked PR/);
+});
+
+test('a task linked to a closed PR moves to a new PR when its claim is released', (t) => {
+  const h = makeRepo(t);
+  gateFixture(h);
+  h.init(['--repo', 'acme/demo', '--base', 'main']);
+  h.ok(['task', 'add', '--title', 'Pick a store', '--acceptance', 'the store is chosen']);
+  h.env.FIXTURE_PR_HEAD_7 = 'tower-crane/T1';
+  h.env.FIXTURE_PR_STATE_7 = 'OPEN';
+  h.env.FIXTURE_PR_HEAD_9 = 'tower-crane/T1-retry';
+  h.env.FIXTURE_PR_STATE_9 = 'OPEN';
+  h.ok(['claim', 'T1', '--agent', 'w-1']);
+  h.ok(['release', 'T1', '--reason', 'stopped', '--pr', '7', '--agent', 'w-1']);
+
+  // While PR 7 is open, a release cannot link another PR in its place.
+  h.ok(['claim', 'T1', '--agent', 'w-2']);
+  const blocked = h.run(['release', 'T1', '--reason', 'retry', '--pr', '9', '--agent', 'w-2']);
+  assert.equal(blocked.code, 1, blocked.stdout);
+  assert.match(blocked.stderr, /already linked to open PR #7/);
+  assert.deepEqual([task(h, 'T1').status, task(h, 'T1').pr, task(h, 'T1').branch], ['in_progress', 7, 'tower-crane/T1']);
+
+  // Once PR 7 is closed, the release links PR 9 and takes its head branch, as submit does.
+  h.env.FIXTURE_PR_STATE_7 = 'CLOSED';
+  h.ok(['release', 'T1', '--reason', 'retry on a new PR', '--pr', '9', '--agent', 'w-2']);
+  assert.deepEqual([task(h, 'T1').status, task(h, 'T1').pr, task(h, 'T1').branch], ['todo', 9, 'tower-crane/T1-retry']);
+});
