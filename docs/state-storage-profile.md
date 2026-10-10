@@ -1,43 +1,44 @@
 # State storage profile
 
-T182, 2026-10-10, Node 26.10.0 on Linux. The shared host had load averages
-around 50 and 37 GiB available memory. Measurements used a private copy of
-project, tasks, decisions and events from the live project. No production state
-was migrated by this measurement.
+T182, measured 2026-10-11 around 00:45 Jerusalem time with Node 26.10.0 on Linux, on the shared host at load averages between 17 and 40. Each side ran on its own private copy of this project's live `project.json`, `tasks.json`, `decisions.json` and `events.jsonl`. "Before" is the T182 merge base, "after" is the T182 branch. Each figure is the median of three runs. The one exception is the locked prompt before the change, which ran once because it always takes the full 60 s lock bound.
 
-The initial inspection found 65,108 audit rows, including 34,510 hook-progress
-rows. Evidence held 11.45 MB of compact gate policies, 3.83 MB of command
-receipts and 1.65 MB of summaries, before tasks.json indentation.
+## Where a write spends its time
 
-Each timed transaction used `state.mutate` to append one task note and its
-event, with broker provenance to exclude rendering. It includes lock
-acquisition, state reads, validation, serialization, atomic writes and sync.
-Wrappers around `JSON.parse`, `JSON.stringify`, `fs.readFileSync` and
-`fs.fsyncSync` accumulated wall time for each operation. CLI startup, broker
-transport and rendering are excluded. The baseline was commit `b311105`.
-After measurements ran after the one-time evidence migration.
+A timed write is one `state.mutate` that adds a task note and its event, with broker provenance so that rendering is left out. It includes taking the lock, reading and validating all state, serializing, the atomic writes and fsync. Wrappers around `JSON.parse`, `JSON.stringify`, `fs.readFileSync` and `fs.fsyncSync` added up the time in each.
 
-| Measurement | Before | After |
+| Write | Before | After |
 | --- | ---: | ---: |
-| tasks.json bytes | 32,613,309 | 12,499,401 |
-| events.jsonl bytes | 42,688,704 | 43,419,120 |
-| Write median, ms | 1,646.9 | 1,231.2 |
-| Write min to max, ms | 1,076.4 to 1,914.9 | 949.1 to 2,418.3 |
-| JSON parse median, ms | 679.3 | 324.2 |
-| JSON stringify median, ms | 344.5 | 146.5 |
-| File read median, ms | 179.5 | 193.5 |
-| File sync median, ms | 20.3 | 307.3 |
+| Total, ms | 1,027.7 | 415.1 |
+| `JSON.stringify`, ms | 261.7 | 88.9 |
+| `JSON.parse`, ms | 203.2 | 133.6 |
+| File reads, ms | 112.5 | 90.4 |
+| fsync, ms | 318.6 | 2.7 |
+| Runs, ms | 951.3, 1,027.7, 1,158.3 | 619.7, 391.7, 415.1 |
 
-The three baseline write samples were 1646.9, 1076.4 and 1914.9 ms; the three
-after samples were 2418.3, 1231.2 and 949.1 ms. Disk sync varied under shared
-host load, so the overlapping wall-time ranges do not establish a fixed
-speedup. The task file shrank 61.7%, and JSON serialization time fell 57.5%.
-The audit log grew by compact migration receipts and measurement notes.
-Its historical bytes were retained to preserve pinned readers' event cursors.
+Before the change, every write serialized and rewrote the full 33 MB `tasks.json`. The serialization and the sync of that file were half the cost, and parsing it and the event log was most of the rest.
 
-New progress writes touch only progress.jsonl and never load those files.
-Integration coverage holds the state lock while invoking the real
-UserPromptSubmit bridge and tool hook, and asserts both complete before the
-lock is released. Evidence tests check migration, complete output retrieval,
-missing and corrupt artifacts, pinned-reader failure verdicts, and preservation
-of unknown fields.
+## Sizes
+
+| File | Before | After |
+| --- | ---: | ---: |
+| `tasks.json`, bytes | 33,269,730 | 9,421,220 |
+| `events.jsonl`, bytes | 44,019,845 | unchanged |
+| `events.jsonl`, rows | 67,613, of which 35,719 `hook progress` | unchanged; no new progress rows |
+| `evidence/`, files and bytes | none | 1,766 files in 144 task folders, 8,283,544 bytes |
+
+The first write after the upgrade moved settled evidence out in 6,951.5 ms, 5,764.1 ms of it fsyncing the 1,766 new files. That happens once. Later writes copy only receipts that have just settled. History is never rewritten, so the event log keeps its size and its byte cursors.
+
+## Commands
+
+| Command, wall time in ms | Before | After |
+| --- | ---: | ---: |
+| `status --json` | 1,230 | 886 |
+| `hook tool` (progress) | 958 | 55 |
+| `hook inbox` with nothing pending | 842 | 324 |
+| `UserPromptSubmit` bridge while another process holds the lock | 60,098, exit 2 | 352, exit 0 |
+
+Before the change, a prompt under a held lock waited the full 60 s lock bound and then failed the hook. That is the failure that stopped starting workers. Now a tool hook appends to the agent's own progress file without the lock. A prompt with nothing pending reads only the event log, and a prompt with messages pending tries the lock once and leaves the messages for the next hook.
+
+## What still grows
+
+Each settled receipt leaves a bounded entry in `tasks.json`: its references and fields under 1 KiB, whatever the size of its output. Task notes and spend rows grow with history, and so does the event log, which every write still parses. The event log is now the largest part of a write's read cost.
