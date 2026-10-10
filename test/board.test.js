@@ -322,10 +322,12 @@ test('a delayed initial room frame keeps the reader position in the snapshot', {
         assert.equal(await b.inPage('scrollY'), 0, `an untouched ${room} at ${width} starts at the top`);
         continue;
       }
-      await b.inPage('window.scrollTo(0, 120)');
-      assert.equal(await b.inPage('scrollY'), 120, 'the reader has scrolled before the initial frame runs');
+      // Away from wherever the fragment jump landed, so the frame can tell.
+      const jump = await b.inPage('scrollY');
+      const read = await b.inPage('window.scrollTo(0, scrollY + 120), scrollY');
+      assert.notEqual(read, jump, 'the reader has scrolled before the initial frame runs');
       await b.inPage(run);
-      assert.equal(await b.inPage('scrollY'), 120, `the delayed initial frame keeps the reader position in ${room} at ${width}`);
+      assert.equal(await b.inPage('scrollY'), read, `the delayed initial frame keeps the reader position in ${room} at ${width}`);
     }
   }
 });
@@ -1063,6 +1065,7 @@ test('runaway rules: status and the board flag the same claim, from the project\
     h.ok(['claim', id, '--agent', `w-${i}`]);
     h.ok(['submit', id, '--sha', h.git(['rev-parse', 'HEAD']), '--agent', `w-${i}`]);
     h.ok(['spend', id, '--tokens', String(m * 1e6), '--minutes', '20', '--agent', `w-${i}`]);
+    h.reviewer(id, `r-${i}`, h.git(['rev-parse', 'HEAD']));
     h.ok(['evidence', id, '--type', 'review', '--ok', '--sha', h.git(['rev-parse', 'HEAD']), '--agent', `r-${i}`]);
     h.ok(['accept', id]);
   }

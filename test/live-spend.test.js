@@ -501,7 +501,7 @@ test('an open board ages live telemetry without state writes or a page reload', 
   try {
     await until(t, h, () => output.includes('\n'), 'serve did not start', server.stdout);
     const { url } = JSON.parse(output.split('\n')[0]);
-    await b.goto(`${url}#spend`);
+    await b.goto(`${url}spend`);
     await b.until(`document.querySelector('.conn').dataset.conn === 'live'`, 'the live stream');
     assert.equal(await b.inPage(`document.querySelector('#spend tr[data-live-state]').dataset.liveState`), 'live');
     assert.equal(await b.inPage(`document.querySelector('[data-key="agent-T1"] [data-usage]').dataset.liveState`), 'live');

@@ -442,7 +442,7 @@ A live entry can exist before exit collection finishes. Wait for its `live` fiel
 
 Readers preserve future live-spend state and error-class strings. If supervision stops for incompatible state, it also skips the final live sample after the worker exits.
 
-Submitting ends lease renewal and retries; live usage collection and budget enforcement continue until the harness closes. Missing telemetry or a smaller cumulative reading retains known spend and its age, and marks it stale. Only an explicit invocation result may lower that total. A fresh reading restores live status. The open board updates telemetry age, freshness and spend summaries each second, even when no state change arrives.
+Submitting ends lease renewal and retries; live usage collection and budget enforcement continue until the harness closes. Missing telemetry or a smaller cumulative reading retains known spend and its age, and marks it stale. Only an explicit invocation result may lower that total. A fresh reading restores live status. The open board ages each reading every five seconds, even when no state change arrives: past its stale limit the page draws the agent row and the Spend row stale itself, then asks serve to redraw the queue and status sentence.
 
 A budget stop keeps a ranged task on its current rung and asks the owner about the budget. Live and final spend use configured model prices in the task's per-rung cost breakdown.
 
