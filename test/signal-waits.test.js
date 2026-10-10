@@ -89,6 +89,11 @@ test('shared checks reject readiness budgets and require a reason on allowed tim
     'test("worker", { timeout: 1000 }, async () => {});', // wait-allow: rejected lint fixture
     'const elapsed = Date.now() - started;\nassert.ok(elapsed < 1000);', // wait-allow: rejected lint fixture
     'await h.cleanup({ monitorGraceMs: 1000 });', // wait-allow: rejected lint fixture
+    'await h.runAsync(["wait", "--timeout=1"]);', // wait-allow: rejected lint fixture
+    'cp.spawn("node", ["--test-timeout=1000", "worker.test.js"]);', // wait-allow: rejected lint fixture
+    'cp.spawn("node", ["--test-timeout", "1000", "worker.test.js"]);', // wait-allow: rejected lint fixture
+    'describe("workers", { timeout: 1000 }, () => {});', // wait-allow: rejected lint fixture
+    'test.after(() => {}, { timeout: 1000 });', // wait-allow: rejected lint fixture
   ]) {
     assert.ok(waitFindings(source).length, source);
     const annotated = source.split('\n').map((line) => line + ' // wait-allow: verifies the production timer contract').join('\n');

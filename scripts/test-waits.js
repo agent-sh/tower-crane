@@ -66,10 +66,15 @@ function waitFindings(text) {
     if (/\b(?:Date|performance)\.now\(\)\s*-\s*\w+\s*[<>]=?\s*\d+/.test(line)) {
       report(index, 'elapsed wall time is a pass condition');
     }
-    for (const match of line.matchAll(/(['"])--timeout\1\s*,\s*(['"])([\d.]+)\2/g)) {
-      if (Number(match[3]) > 0 && Number(match[3]) * 1000 < HUNG_TEST_MS) {
+    for (const match of line.matchAll(/(['"])--(timeout|test-timeout)\1\s*,\s*(['"])([\d.]+)\3/g)) {
+      const budget = Number(match[4]) * (match[2] === 'timeout' ? 1000 : 1);
+      if (budget > 0 && budget < HUNG_TEST_MS) {
         report(index, 'CLI wait has a readiness budget below the hung-test timeout');
       }
+    }
+    for (const match of line.matchAll(/(['"])--(timeout|test-timeout)=([\d.]+)\1/g)) {
+      const budget = Number(match[3]) * (match[2] === 'timeout' ? 1000 : 1);
+      if (budget > 0 && budget < HUNG_TEST_MS) report(index, 'CLI wait has a readiness budget below the hung-test timeout');
     }
   }
   // Deadline arithmetic also appears inside generated child scripts.
@@ -107,10 +112,10 @@ function waitFindings(text) {
       }
     }
   }
-  for (const match of text.matchAll(/\b(spawn|spawnSync|execFile|execFileSync|exec|execSync|test)\s*\(/g)) {
+  for (const match of text.matchAll(/\b(spawn|spawnSync|execFile|execFileSync|exec|execSync|test|describe|before|after|beforeEach|afterEach)\s*\(/g)) {
     const start = match.index + match[0].lastIndexOf('(');
     const args = callArguments(text, start);
-    const options = match[1] === 'test' ? args.slice(1, 2) : args;
+    const options = ['test', 'describe'].includes(match[1]) ? args.slice(1, 2) : args;
     for (const arg of options.filter((value) => value.startsWith('{'))) {
       const from = text.indexOf(arg, start);
       for (const budget of arg.matchAll(/\btimeout\s*:\s*(\d[\d_]*)/g)) {
