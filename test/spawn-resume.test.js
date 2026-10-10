@@ -150,8 +150,9 @@ for (const harness of ['codex', 'claude']) {
     fs.writeFileSync(path.join(first.cwd, 'README.md'), '# native unfinished work\n');
     fs.writeFileSync(path.join(first.cwd, 'unfinished.txt'), 'keep native edits\n');
     h.ok(['interrupt', 'T1', '--agent', 'orchestrator']);
+    const stopped = Date.now() + 15000;
     while (detachedAlive({ pid: first.monitor_pid })) {
-      assert.ok(Date.now() < deadline, 'supervisor did not stop');
+      assert.ok(Date.now() < stopped, 'supervisor did not stop');
       await new Promise((resolve) => setTimeout(resolve, 25));
     }
     assert.equal(h.json(['task', 'show', 'T1']).spend.entries.length, 1);
