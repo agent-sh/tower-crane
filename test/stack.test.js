@@ -265,6 +265,64 @@ test('a transient stack API failure refuses a stacked rework claim without disab
   assert.equal(task.stack.linked, true);
 });
 
+const DENIED_API = { status: 1, stderr: "gh api repos/acme/app/stacks is not allowed by this agent's agent file" };
+const apiCalls = (f) => f.read().calls.filter((c) => c.args[0] === 'api');
+
+test('a spawned worker claims a task whose dependency merged while gh api is denied to it', (t) => {
+  const f = setup(t);
+  const { wt } = upper(f);
+  f.accept('T1');
+  f.h.ok(['merge', 'T1']);
+  f.h.ok(['rework', 'T2', '--reason', 'the lower change merged']);
+  const state = f.h.readState('tasks.json');
+  const upperTask = state.tasks.find((item) => item.id === 'T2');
+  upperTask.stack.linked = false;
+  upperTask.stack_disabled = true;
+  f.h.writeState('tasks.json', state);
+  // The worker's commit must differ from the branch it was dispatched on.
+  fs.writeFileSync(path.join(wt.path, 'T2.txt'), 'T2 rework\n');
+  f.h.git(['commit', '-qam', 'T2 rework'], wt.path);
+  worker(f);
+  const before = apiCalls(f).length;
+  f.write((d) => { d.apiFailure = DENIED_API; });
+  const spawned = f.h.run(['spawn', '--task', 'T2', '--wait']);
+  assert.equal(spawned.code, 0, spawned.stderr);
+  assert.equal(f.h.json(['task', 'show', 'T2']).status, 'submitted');
+  assert.equal(apiCalls(f).length, before);
+});
+
+test('a spawned worker claim reads the recorded stack and makes no gh api call while its dependency is submitted', (t) => {
+  const f = setup(t);
+  upper(f);
+  f.h.ok(['rework', 'T2', '--reason', 'revise the stacked change']);
+  const before = apiCalls(f).length;
+  f.write((d) => { d.apiFailure = DENIED_API; });
+  const dispatch = { TOWER_CRANE_HOOK: path.join(f.h.base, 'hook.json'), TOWER_CRANE_TASK: 'T2', TOWER_CRANE_AGENT: 'worker-T2' };
+  const claim = f.h.run(['claim', 'T2', '--agent', 'worker-T2'], { env: dispatch });
+  assert.equal(claim.code, 0, claim.stderr);
+  assert.equal(f.h.json(['task', 'show', 'T2']).status, 'in_progress');
+  assert.equal(apiCalls(f).length, before);
+});
+
+test('a hooked claim on a task spawn did not dispatch reads GitHub and clears its stale stack record', (t) => {
+  const f = setup(t);
+  upper(f);
+  f.h.ok(['rework', 'T2', '--reason', 'revise the stacked change']);
+  const state = f.h.readState('tasks.json');
+  const upperTask = state.tasks.find((item) => item.id === 'T2');
+  upperTask.stack.linked = false;
+  upperTask.stack_disabled = true;
+  f.h.writeState('tasks.json', state);
+  const before = apiCalls(f).length;
+  const claim = f.h.run(['claim', 'T2', '--agent', 'worker-T2'], { env: { TOWER_CRANE_HOOK: path.join(f.h.base, 'hook.json') } });
+  assert.equal(claim.code, 0, claim.stderr);
+  assert.ok(apiCalls(f).length > before);
+  const task = f.h.json(['task', 'show', 'T2']);
+  assert.equal(task.status, 'in_progress');
+  assert.equal(task.stack.linked, true);
+  assert.equal(task.stack_disabled, undefined);
+});
+
 test('an outage leaves a dependent without a stack record unflagged, and recovery claims it once GitHub confirms its dependency', (t) => {
   const f = setup(t);
   upper(f);
