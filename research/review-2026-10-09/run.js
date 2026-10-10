@@ -1,7 +1,7 @@
 'use strict';
 
 const { ROOT, scratch, fs, path, cp, assert } = require('./harness');
-const groups = ['automation', 'merge', 'lifecycle', 'gates'];
+const groups = ['automation', 'merge', 'lifecycle', 'gates', 'processes'];
 const selector = process.argv[2];
 const rows = [];
 
@@ -10,7 +10,8 @@ const rows = [];
     const probes = require(`./${group}`);
     for (const p of probes) {
       if (selector && selector !== group && selector !== p.id) continue;
-      const command = `nice -n 19 node research/review-2026-10-09/run.js ${p.id}`;
+      const prefix = process.env.T144_PROBE_COMMAND_PREFIX || 'nice -n 19 node research/review-2026-10-09/run.js';
+      const command = `${prefix} ${p.id}`;
       let observed;
       let verdict;
       try {
@@ -32,7 +33,7 @@ const rows = [];
   fs.mkdirSync(output, { recursive: true });
   const revision = cp.execFileSync('git', ['rev-parse', 'HEAD'], { cwd: ROOT, encoding: 'utf8' }).trim();
   fs.writeFileSync(path.join(output, `${selector || 'all'}.json`), JSON.stringify({
-    revision, node: process.version, platform: process.platform,
+    revision, engine_root: ROOT, node: process.version, platform: process.platform,
     scratch, probes: rows,
   }, null, 2) + '\n');
   // Helpers remove their private seed on exit. All per-probe repos are removed in finally.

@@ -7,7 +7,8 @@ const cp = require('node:child_process');
 const Module = require('node:module');
 const assert = require('node:assert/strict');
 
-const ROOT = path.resolve(__dirname, '../..');
+const CHECKOUT_ROOT = path.resolve(__dirname, '../..');
+const ROOT = process.env.T144_ENGINE_ROOT ? path.resolve(process.env.T144_ENGINE_ROOT) : CHECKOUT_ROOT;
 const cache = process.env.XDG_CACHE_HOME || path.join(os.homedir(), '.cache');
 assert.ok(path.resolve(cache).startsWith('/home/') && /\/\.cache(?:\/|$)/.test(path.resolve(cache)),
   'Set XDG_CACHE_HOME to a writable agent directory under ~/.cache');
@@ -102,4 +103,4 @@ function out(r) {
   return { code: r.code, stdout: r.stdout.trim(), stderr: r.stderr.trim() };
 }
 
-module.exports = { ROOT, scratch, H, S, P, fs, path, cp, assert, repo, task, submit, load, replay, event, receipt, out };
+module.exports = { ROOT, CHECKOUT_ROOT, scratch, H, S, P, fs, path, cp, assert, repo, task, submit, load, replay, event, receipt, out };
