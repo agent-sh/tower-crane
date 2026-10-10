@@ -62,7 +62,8 @@ attempts.push({ agent: process.env.TOWER_CRANE_AGENT, session: process.env.TOWER
   cwd: process.cwd(), claim: task.claim });
 fs.writeFileSync(file, JSON.stringify(attempts));
 ${sessionReceipt ? "console.log(JSON.stringify({ type: 'thread.started', thread_id: 'supervised-session' }));" : ''}
-${busy ? "cp.spawn(process.execPath, ['-e', 'const end = Date.now() + 3500; while (Date.now() < end) {}'], { stdio: 'ignore' });" : ''} // wait-allow: exercise CPU activity sampling using a deliberately busy child
+${busy ? `cp.spawn(process.execPath, ['-e', ${JSON.stringify("const fs = require('node:fs'); fs.writeFileSync(process.argv[1], 'ready'); while (!fs.existsSync(process.argv[2])) { Math.sqrt(Math.random()); }")},
+  file + '.busy', file + '.finish'], { stdio: 'ignore' });` : ''}
 const finish = () => {
   if (attempts.length <= ${failures}) {
     ${records ? `for (const record of ${JSON.stringify(records)}) console.log(JSON.stringify(record)); process.exit(1);`
@@ -76,9 +77,9 @@ const finish = () => {
   } else process.exit(0);
 };
 ${waitForFinish ? `if (attempts.length <= ${failures}) finish();
-else { const timer = setInterval(() => {
-  if (fs.existsSync(file + '.finish')) { clearInterval(timer); finish(); }
-}, 25); }` : `setTimeout(finish, ${hold});`} // wait-allow: fixture injects route duration for retry and stall scenarios
+else { const check = () => {
+  if (fs.existsSync(file + '.finish')) { watcher.close(); finish(); }
+}; const watcher = fs.watch(require('node:path').dirname(file), check); check(); }` : `setTimeout(finish, ${hold});`} // wait-allow: fixture injects route duration for retry and stall scenarios
 `;
   h.ok(['ladder', 'set', 'easy', '--harness', 'command', '--command', JSON.stringify([process.execPath, '-e', script, BIN, h.attempts, '{prompt}']),
     '--clear', 'profile', '--clear', 'effort', '--supervision',
@@ -457,18 +458,25 @@ test('progress paths and CPU detect a stalled process without dropping its live 
   const h = setup(t, { failures: 0, waitForFinish: true, config: { stall_ms: 250, progress_paths: ['progress.txt'] } });
   const spawned = h.json(['spawn', '--task', 'T1'], { hooks: { HOOK_RENDER_DELAY_MS: '500' } });
   try {
-    await waitOnRepo(h, () => h.json(['task', 'show', 'T1']).run?.phase === 'blocked', 'idle process did not stall');
-    assert.match(h.ok(['task', 'show', 'T1']), /blocked: no progress paths or CPU activity/);
-    await waitOnRepo(h, () => sketches(h).every(({ text }) => text.includes('blocked: no progress paths or CPU activity')),
-      'saved sketches did not show stall');
-    for (const { file, text } of sketches(h)) {
+    await waitOnRepo(h, () => h.readAttempts().length === 1, 'idle worker did not finish startup');
+    const blocked = await waitOnRepo(h, () => {
+      const shown = h.ok(['task', 'show', 'T1']);
+      const views = sketches(h);
+      return shown.includes('blocked: no progress paths or CPU activity')
+        && views.every(({ text }) => text.includes('blocked: no progress paths or CPU activity')) && { shown, views };
+    }, 'idle process and saved sketches did not show stall');
+    assert.match(blocked.shown, /blocked: no progress paths or CPU activity/);
+    for (const { file, text } of blocked.views) {
       assert.match(text, /blocked: no progress paths or CPU activity/, `${file} shows the stalled phase`);
     }
     fs.writeFileSync(path.join(spawned.cwd, 'progress.txt'), 'progress\n');
-    await waitOnRepo(h, () => h.json(['task', 'show', 'T1']).run?.phase === 'running', 'path progress did not clear stall');
-    await waitOnRepo(h, () => sketches(h).every(({ text }) => !text.includes('blocked: no progress paths or CPU activity')),
-      'saved sketches did not clear stall');
-    for (const { file, text } of sketches(h)) {
+    const cleared = await waitOnRepo(h, () => {
+      const phase = log(h).findLast((e) => e.cmd === 'spawn phase');
+      const views = sketches(h);
+      return phase?.detail.phase === 'running'
+        && views.every(({ text }) => !text.includes('blocked: no progress paths or CPU activity')) && views;
+    }, 'path progress and saved sketches did not clear stall');
+    for (const { file, text } of cleared) {
       assert.doesNotMatch(text, /blocked: no progress paths or CPU activity/, `${file} clears the stalled phase`);
     }
     assert.equal(h.json(['task', 'show', 'T1']).claim.agent, spawned.agent);
@@ -535,14 +543,27 @@ test('rung supervision settings validate and clear through the CLI', (t) => {
 });
 
 test('descendant CPU activity postpones stall while paths remain quiet', { skip: process.platform !== 'linux' }, async (t) => {
-  const h = setup(t, { failures: 0, hold: 3800, busy: true, config: { stall_ms: 300 } });
-  h.json(['spawn', '--task', 'T1']);
-  await waitOnRepo(h, () => h.readAttempts().length === 1, 'CPU stub did not start');
-  // The supervisor samples once a second; two and a half seconds of busy
-  // child cover at least two samples even on a loaded machine.
-  await new Promise((resolve) => setTimeout(resolve, 2500)); // wait-allow: sample an intentionally busy child over multiple supervisor ticks
-  assert.equal(log(h).filter((e) => e.cmd === 'stall').length, 0);
-  assert.equal(h.json(['task', 'show', 'T1']).run.phase, 'running');
+  const h = setup(t, { failures: 0, waitForFinish: true, busy: true, config: { stall_ms: 300 } });
+  const audit = path.join(h.base, 'samples.jsonl');
+  const hook = path.join(__dirname, 'fixtures', 'supervision-samples.js').replace(/\\/g, '/');
+  h.json(['spawn', '--task', 'T1'], { env: { NODE_OPTIONS: `--require "${hook}"`, TOWER_CRANE_TEST_SAMPLES: audit } });
+  const phase = () => log(h).findLast((e) => ['spawn', 'spawn phase'].includes(e.cmd))?.detail.phase;
+  try {
+    await waitOnRepo(h, () => fs.existsSync(h.attempts + '.busy')
+      && phase() === 'running', 'CPU stub did not start');
+    const stalls = log(h).filter((e) => e.cmd === 'stall').length;
+    const samples = () => fs.existsSync(audit)
+      ? fs.readFileSync(audit, 'utf8').split('\n').slice(0, -1).map(JSON.parse).filter((s) => s.kind === 'cpu') : [];
+    const count = samples().length;
+    await waitOnRepo(h, () => {
+      const active = samples().slice(count);
+      return active.length >= 3 && active.at(-1).ticks > active[0].ticks;
+    }, 'supervisor did not sample descendant CPU activity');
+    assert.equal(log(h).filter((e) => e.cmd === 'stall').length, stalls);
+    assert.equal(phase(), 'running');
+  } finally {
+    fs.writeFileSync(h.attempts + '.finish', '');
+  }
   await waitOnRepo(h, () => h.json(['task', 'show', 'T1']).run?.phase === 'waiting', 'CPU stub did not finish');
 });
 
