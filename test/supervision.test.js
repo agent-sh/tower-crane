@@ -523,6 +523,25 @@ test('a worker whose lease is refused never starts, reports why and frees its sl
   h.ok(['claim', 'T1', '--agent', 'manual']);
 });
 
+test('a worker whose spawn is not recorded within its startup window never starts and says why', { skip: GATE_SKIP }, async (t) => {
+  const h = setup(t, { claim: false, failures: 0 });
+  const started = path.join(h.base, 'started-paused');
+  const completed = h.runAsync(['spawn', '--task', 'T1', '--wait', '--json'], { hooks: { HOOK_STOP_STARTED: started } });
+  let result;
+  try {
+    await until(() => fs.existsSync(started), 'dispatch did not pause before committing its spawn');
+    // The supervisor's startup window closes while the paused dispatch holds the state lock.
+    await new Promise((resolve) => setTimeout(resolve, 11000));
+    assert.equal(h.readAttempts().length, 0, 'the harness waits behind its gate');
+  } finally {
+    fs.writeFileSync(`${started}.go`, '');
+    result = await completed;
+  }
+  assert.notEqual(result.code, 0, result.stderr);
+  assert.match(result.stderr, /no lease: its spawn was not recorded within 10 s/);
+  assert.equal(h.readAttempts().length, 0, 'the worker never started');
+});
+
 test('a worker spawned behind a live lease held by another agent never starts and says why', (t) => {
   const h = setup(t, { claim: false, failures: 0 });
   h.ok(['claim', 'T1', '--agent', 'holder']);

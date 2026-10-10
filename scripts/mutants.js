@@ -139,6 +139,8 @@ const MUTANTS = [
     from: 'const stopped = !!stopReason || !!budgetStop || stalled || harnessRefusal || exit.code !== 0;', to: 'const stopped = harnessRefusal || exit.code !== 0;', tests: ['test/supervision.test.js'] },
   { id: 'group-probe-clears-live-group', area: 'spawn/supervisor', file: 'lib/processes.js',
     from: "try { process.kill(-pgid, 0); return 'unknown'; }", to: "try { process.kill(-pgid, 0); return 'exited'; }", tests: ['test/worker-slots.test.js'] },
+  { id: 'startup-window-silent', area: 'spawn/supervisor', file: 'lib/spawn-monitor.js',
+    from: "stopReason = `${awaitingLease ? 'no lease: ' : ''}its spawn was not recorded", to: 'stopReason = `its spawn was not recorded', tests: ['test/supervision.test.js'] },
   { id: 'claim-hook-skips-undispatched-refresh', area: 'spawn/supervisor', file: 'lib/tasks.js',
     from: 'const dispatched = !!ctx.env.TOWER_CRANE_HOOK && ctx.env.TOWER_CRANE_TASK === ctx.pos[0] && ctx.env.TOWER_CRANE_AGENT === ctx.agent;',
     to: 'const dispatched = !!ctx.env.TOWER_CRANE_HOOK;', tests: ['test/stack.test.js'] },
