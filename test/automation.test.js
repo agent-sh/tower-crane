@@ -1435,12 +1435,12 @@ test('revuto replies require an explicit resolution and later discussion reopens
     finding(306), reply(316, 306, '> [resolved]\nThis is a quote, not a resolution.'),
   ];
   h.saveGithub(state);
-  assert.equal((await h.runAsync(['spawn', '--task', 'T1', '--wait', '--agent', 'orchestrator'])).code, 0);
-  const deadline = Date.now() + 60000;
-  while (!h.logs().some((e) => e.cmd === 'spawn exit' && e.detail.role === 'reviewer' && e.detail.active === false)) {
-    if (Date.now() > deadline) throw new Error(JSON.stringify(h.logs().slice(-10)));
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
+  // A tracked worker lets automatic reactions dispatch another reviewer after
+  // a refused verdict; this test controls both snapshots with native submission.
+  h.submit();
+  for (const type of ['tests', 'clean', 'ci']) gateEvidence(h, type, 'orchestrator');
+  const first = await h.runAsync(['spawn', '--role', 'review', '--task', 'T1', '--wait', '--agent', 'orchestrator']);
+  assert.equal(first.code, 1, first.stdout + first.stderr);
   const review = h.logs().find((e) => e.cmd === 'spawn' && e.detail.role === 'reviewer');
   const broker = { env: { ...h.env, TOWER_CRANE_VIA: 'broker' } };
   const refused = h.run(['evidence', 'T1', '--type', 'review', '--sha', h.sha, '--ok',
@@ -1460,6 +1460,8 @@ test('revuto replies require an explicit resolution and later discussion reopens
   h.saveGithub(updated);
   const rerun = await h.runAsync(['spawn', '--role', 'review', '--task', 'T1', '--wait', '--agent', 'orchestrator']);
   assert.equal(rerun.code, 0, rerun.stdout + rerun.stderr);
+  assert.equal(h.logs().filter((e) => e.cmd === 'spawn' && e.detail.role === 'worker').length, 0);
+  assert.equal(h.logs().filter((e) => e.cmd === 'spawn' && e.detail.role === 'reviewer').length, 2);
   assert.ok(h.readState('tasks.json').tasks[0].evidence.some((e) => e.type === 'review' && e.ok));
 });
 
