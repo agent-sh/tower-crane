@@ -115,6 +115,8 @@ const MUTANTS = [
     from: 'for (const id of ids) if (id !== job.task) throw', to: 'for (const id of ids) if (false) throw', tests: ['test/broker.test.js'] },
   { id: 'broker-no-token', area: 'broker', file: 'lib/broker.js',
     from: 'if (!req || !sameToken(req.token, token))', to: 'if (!req)', tests: ['test/broker.test.js'] },
+  { id: 'sandboxed-worktree-takes-lock', area: 'broker', file: 'lib/worktree.js',
+    from: 'const sandboxed = !!ctx.env?.TOWER_CRANE_BROKER;', to: 'const sandboxed = false;', tests: ['test/broker.test.js'] },
   // spawn and supervisor
   { id: 'supervisor-writes-after-incompatible-state', area: 'spawn/supervisor', file: 'lib/spawn-monitor.js',
     from: "if (committed && !incompatible && fs.existsSync(path.join(spawn.state, 'project.json'))) sampleUsage(true);",
