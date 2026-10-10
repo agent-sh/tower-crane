@@ -233,6 +233,24 @@ test("the board approves an orchestrator's escalations for its repeat, applies t
   assert.equal((await viewer.post(request('project set', { workers: '9' }))).status, 403);
 });
 
+test("an orchestrator asking for the owner's pending Controls request makes the approval its own repeat's", async (t) => {
+  const h = fixture(t);
+  h.init();
+  const { post } = await serve(t, h);
+  const asked = await post(request('project set', { 'merge-admin': 'true' }));
+  assert.equal(asked.data.decision, 'D1');
+  assert.equal(h.run(['project', 'set', '--merge-admin', 'true'], as('orchestrator')).code, 1);
+  assert.equal(decisions(h).length, 1, 'the orchestrator waits on the same decision');
+  assert.equal(decisions(h)[0].repeat_by, 'orchestrator');
+  const approved = await post({ decision: 'D1', choice: 'approve' }, 'api/controls/answer');
+  assert.equal(approved.status, 200, JSON.stringify(approved));
+  assert.equal(h.readState('project.json').merge?.admin, undefined);
+  h.ok(['project', 'set', '--merge-admin', 'true'], as('orchestrator'));
+  assert.equal(h.readState('project.json').merge.admin, true);
+  assert.equal(decisions(h).length, 1, 'the repeat opened no new decision');
+  assert.equal(decisions(h)[0].applied.by, 'orchestrator');
+});
+
 test("releasing another agent's live claim from the board opens the owner's decision and applies it once approved", async (t) => {
   const h = fixture(t);
   h.init();
