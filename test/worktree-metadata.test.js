@@ -18,6 +18,25 @@ function orphan(h, name = 'orphan') {
   return dir;
 }
 
+// A process table listing only the given processes, for a test that removes a
+// placeholder: a process elsewhere on the host with unreadable descriptors would
+// otherwise keep the placeholder the test plants.
+function procTable(h, pids = []) {
+  const dir = fs.mkdtempSync(path.join(h.base, 'proc-'));
+  for (const pid of pids) fs.symlinkSync(`/proc/${pid}`, path.join(dir, String(pid)));
+  return dir;
+}
+
+// Points the holder check at a process table for the rest of the test.
+function onlyProcesses(t, h, pids = []) {
+  const previous = process.env.TOWER_CRANE_PROC;
+  process.env.TOWER_CRANE_PROC = procTable(h, pids);
+  t.after(() => {
+    if (previous === undefined) delete process.env.TOWER_CRANE_PROC;
+    else process.env.TOWER_CRANE_PROC = previous;
+  });
+}
+
 function gateTask(h, script) {
   const command = `${shellQuote(process.execPath)} ${shellQuote(script)}`;
   h.init(['--tests-cmd', command, '--tests-mode', 'run-only']);
@@ -134,8 +153,7 @@ while (!fs.existsSync(${JSON.stringify(addRelease)})) {
   }
 });
 
-// Removal needs /proc to show that no process holds the lock; without it the placeholder is kept.
-test('a sandboxed git push clears an empty read-only lock placeholder that would block its upstream config', { skip: !fs.existsSync('/proc/self/fd') && 'needs /proc to see which process holds the lock' }, (t) => {
+test('a sandboxed git push clears an empty read-only lock placeholder that would block its upstream config', (t) => {
   const h = makeRepo(t);
   h.init();
   h.git(['checkout', '-q', '-b', 'task-T1']);
@@ -148,8 +166,9 @@ test('a sandboxed git push clears an empty read-only lock placeholder that would
   fs.writeFileSync(policy, JSON.stringify({ gitPush: 'branch', branch: 'task-T1', repo: null, gh: [] }));
   const shimDir = path.join(h.base, 'shim');
   fs.mkdirSync(shimDir);
+  const env = { ...h.env, TOWER_CRANE_PROC: procTable(h) };
   const push = cp.spawnSync(process.execPath, [path.join(ROOT, 'lib', 'shim.js'), policy, shimDir, 'git', 'push', '-u', remote, 'HEAD:refs/heads/task-T1'],
-    { cwd: h.repo, env: h.env, encoding: 'utf8', timeout: 30000 });
+    { cwd: h.repo, env, encoding: 'utf8', timeout: 30000 });
   assert.equal(push.status, 0, push.stderr);
   // Git reports a blocked upstream write without a failing status.
   assert.doesNotMatch(push.stderr, /could not lock config/);
@@ -203,6 +222,7 @@ test('a cleanup removes the directory a dead cleanup left behind, then the place
   const old = new Date(Date.now() - REAP_STALE_MS - 1000);
   fs.utimesSync(dir, old, old);
   t.mock.method(process.stderr, 'write', () => true);
+  onlyProcesses(t, h);
   assert.deepEqual(clearPlaceholders(commonDir).map((file) => path.basename(file)), ['index.lock']);
   assert.equal(fs.existsSync(lock), false);
   assert.equal(fs.existsSync(dir), false);
@@ -258,6 +278,7 @@ test('a zombie of this user holds nothing, so it keeps no placeholder', { skip: 
   try {
     const pid = await new Promise((resolve) => parent.stdout.once('data', (data) => resolve(String(data).trim())));
     assert.match(fs.readFileSync(`/proc/${pid}/status`, 'utf8'), /^State:\s+Z\b/m);
+    onlyProcesses(t, h, [pid]);
     assert.deepEqual(clearPlaceholders(path.join(h.repo, '.git')).map((file) => path.basename(file)), ['config.lock']);
   } finally {
     parent.kill();
