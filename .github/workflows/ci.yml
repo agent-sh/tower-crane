@@ -12,9 +12,9 @@ jobs:
   test:
     name: test (${{ matrix.os }}, node ${{ matrix.node }}${{ matrix.shard != '' && format(', shard {0}', matrix.shard) || '' }})
     runs-on: ${{ matrix.os }}
-    # The full suite needs more than fifteen minutes on Windows; individual
-    # tests keep their five-minute deadline in test/run.js.
-    timeout-minutes: 45
+    # Windows process startup can exceed the old job budget while tests pass;
+    # the runner still bounds each test independently.
+    timeout-minutes: ${{ matrix.os == 'windows-latest' && 45 || 15 }}
     strategy:
       fail-fast: false
       matrix:
