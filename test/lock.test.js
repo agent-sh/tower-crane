@@ -6,8 +6,57 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
 const { makeRepo, HOOKS } = require('./helpers');
+const SHORT_WAIT = path.join(__dirname, 'fixtures', 'lock-wait.js');
+const S = require('../lib/state');
+const B = require('../lib/broker');
 
 const events = (h) => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+
+for (const kind of ['stale', 'empty']) {
+  test(`continuous ${kind} lock reclaims respect the deadline and backoff`, (t) => {
+    const h = makeRepo(t);
+    h.init();
+    const attempts = path.join(h.base, 'reclaim-attempts');
+    const fixture = path.join(__dirname, 'fixtures', 'lock-reclaim-race.js');
+    const result = h.run(['task', 'add', '--title', 'must remain unwritten', '--acceptance', 'bounded'], {
+      env: {
+        NODE_OPTIONS: `--require=${JSON.stringify(SHORT_WAIT)} --require=${JSON.stringify(fixture)}`,
+        HOOK_STATE: h.state, LOCK_RECLAIM_KIND: kind, LOCK_RECLAIM_ATTEMPTS: attempts,
+      },
+      timeout: 5000,
+    });
+    assert.equal(result.code, 3, result.stderr);
+    const count = fs.readFileSync(attempts, 'utf8').length;
+    assert.ok(count >= 5 && count <= 50, `${count} attempts must back off within the one-second budget`);
+    assert.equal(h.readState('tasks.json').tasks.length, 0);
+  });
+}
+
+test('20 concurrent CLI writers survive a lock held beyond 10 seconds', { timeout: 90000 }, async (t) => {
+  const h = makeRepo(t);
+  h.init();
+  h.ok(['task', 'add', '--title', 'Concurrent startup', '--acceptance', 'all writes survive']);
+  const lock = S.acquireLock(h.state);
+  const signals = Array.from({ length: 20 }, (_, i) => path.join(h.base, `writer-${i}`));
+  const writers = signals.map((signal, i) => h.runAsync(['task', 'note', 'T1', `writer ${i}`], {
+    hooks: { HOOK_STOP_LOCK_READ: signal },
+  }));
+  try {
+    await Promise.all(signals.map((signal) => waitForFile(signal)));
+    // All writers have encountered the same live holder before its release.
+    await new Promise((resolve) => setTimeout(resolve, 11000));
+  } finally {
+    S.releaseLock(lock);
+    for (const signal of signals) fs.writeFileSync(`${signal}.go`, '');
+  }
+  const results = await Promise.all(writers);
+  for (const result of results) assert.equal(result.code, 0, result.stderr);
+  const notes = h.readState('tasks.json').tasks[0].notes;
+  assert.equal(notes.length, 20);
+  assert.equal(new Set(notes.map((note) => note.text)).size, 20);
+  assert.equal(events(h).filter((event) => event.cmd === 'task note').length, 20);
+  assert.deepEqual(fs.readdirSync(h.state).filter((name) => name.startsWith('lock')), []);
+});
 
 async function waitForFile(file, ms = 20000) {
   const end = Date.now() + ms;
@@ -24,7 +73,147 @@ function killHolder(h) {
   assert.ok(fs.existsSync(path.join(h.state, 'lock')), 'the dead holder left its lock');
 }
 
-test('a held lock makes a write wait 10 s, then exit 3 without writing', async (t) => {
+for (const field of ['start_ticks', 'boot_id']) {
+  test(`a reused PID with mismatched ${field} is reclaimed`, { skip: process.platform !== 'linux' }, (t) => {
+    const h = makeRepo(t);
+    h.init();
+    const lock = S.acquireLock(h.state);
+    try {
+      const marker = JSON.parse(fs.readFileSync(lock.file, 'utf8'));
+      marker[field] = field === 'start_ticks' ? '0' : '00000000-0000-0000-0000-000000000000';
+      if (field === 'boot_id') marker.pidns = 'pid:[0]';
+      fs.writeFileSync(lock.file, JSON.stringify(marker));
+      const result = h.run(['task', 'add', '--title', 'reclaimed PID', '--acceptance', 'write survives'], {
+        env: { NODE_OPTIONS: `--require=${JSON.stringify(SHORT_WAIT)}` },
+      });
+      assert.equal(result.code, 0, result.stderr);
+      assert.deepEqual(h.readState('tasks.json').tasks.map((task) => task.title), ['reclaimed PID']);
+      assert.deepEqual(fs.readdirSync(h.state).filter((name) => name.startsWith('lock')), []);
+    } finally {
+      S.releaseLock(lock);
+    }
+  });
+}
+
+test('an old marker without process identity cannot be kept alive by a reused PID', (t) => {
+  const h = makeRepo(t);
+  h.init();
+  const lock = S.acquireLock(h.state);
+  try {
+    const marker = JSON.parse(fs.readFileSync(lock.file, 'utf8'));
+    delete marker.start_ticks;
+    delete marker.boot_id;
+    fs.writeFileSync(lock.file, JSON.stringify(marker));
+    const old = new Date(Date.now() - 120000);
+    fs.utimesSync(lock.file, old, old);
+    const result = h.run(['task', 'add', '--title', 'legacy reclaim', '--acceptance', 'age fallback'], {
+      env: { NODE_OPTIONS: `--require=${JSON.stringify(SHORT_WAIT)}` },
+    });
+    assert.equal(result.code, 0, result.stderr);
+    assert.deepEqual(h.readState('tasks.json').tasks.map((task) => task.title), ['legacy reclaim']);
+  } finally {
+    S.releaseLock(lock);
+  }
+});
+
+test('a known live holder keeps an old marker until the waiter times out', { skip: process.platform !== 'linux' }, (t) => {
+  const h = makeRepo(t);
+  h.init();
+  const lock = S.acquireLock(h.state);
+  try {
+    const marker = JSON.parse(fs.readFileSync(lock.file, 'utf8'));
+    assert.equal(marker.start_ticks, require('../lib/processes').identity(process.pid).start_ticks);
+    assert.equal(marker.boot_id, fs.readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim());
+    const old = new Date(Date.now() - 120000);
+    fs.utimesSync(lock.file, old, old);
+    const result = h.run(['task', 'add', '--title', 'must wait', '--acceptance', 'holder protected'], {
+      env: { NODE_OPTIONS: `--require=${JSON.stringify(SHORT_WAIT)}` },
+    });
+    assert.equal(result.code, 3, result.stderr);
+    assert.ok(fs.existsSync(lock.file), 'a live holder is never reclaimed by age');
+    assert.equal(h.readState('tasks.json').tasks.length, 0);
+  } finally {
+    S.releaseLock(lock);
+  }
+});
+
+test('a dead holder reclaimed at the deadline permits the waiting write', async (t) => {
+  const h = makeRepo(t);
+  h.init();
+  killHolder(h);
+  const signal = path.join(h.base, 'reclaimed');
+  const writer = h.runAsync(['task', 'add', '--title', 'after reclaim', '--acceptance', 'write succeeds'], {
+    env: { NODE_OPTIONS: `--require=${JSON.stringify(SHORT_WAIT)}` },
+    hooks: { HOOK_STOP_LOCK_CHANGE: signal },
+  });
+  try {
+    await waitForFile(signal);
+    await new Promise((resolve) => setTimeout(resolve, 1100));
+  } finally {
+    fs.writeFileSync(`${signal}.go`, '');
+  }
+  const result = await writer;
+  assert.equal(result.code, 0, result.stderr);
+  assert.deepEqual(h.readState('tasks.json').tasks.map((task) => task.title), ['after reclaim']);
+});
+
+test('prompt hook bridge and broker writes survive contention beyond the old bridge timeout', { timeout: 90000 }, async (t) => {
+  const h = makeRepo(t);
+  h.init();
+  h.ok(['task', 'add', '--title', 'Starting agent', '--acceptance', 'prompt and note survive']);
+  const agent = 'worker-T1-1';
+  const home = path.join(h.state, 'homes', agent);
+  fs.mkdirSync(home, { recursive: true });
+  fs.writeFileSync(path.join(home, 'hook.json'), JSON.stringify({ agent, task: 'T1', state: h.state, harness: 'claude', attempt: 0 }));
+  h.ok(['msg', '--to', agent, '--task', 'T1', 'startup context']);
+  const job = { state: h.state, task: 'T1', agent, role: 'worker', cwd: h.repo,
+    harness: 'codex', broker: path.join(h.base, 'brokers', agent, B.FILE) };
+  const broker = await B.start(job);
+  t.after(() => broker.close());
+  const brokerSignal = path.join(h.base, 'broker-waits');
+  const bridgeSignal = path.join(h.base, 'bridge-waits');
+  const env = { NODE_OPTIONS: `--require=${JSON.stringify(HOOKS)}`, HOOK_STATE: h.state, HOOK_STOP_LOCK_READ: brokerSignal };
+  const saved = Object.fromEntries(Object.keys(env).map((key) => [key, process.env[key]]));
+  Object.assign(process.env, env);
+  const lock = S.acquireLock(h.state);
+  const brokered = B.forward(job.broker, ['task', 'note', 'T1', 'broker waited'], h.state);
+  const bridge = spawn(process.execPath, [path.join(__dirname, '..', 'lib', 'hook-bridge.js'), 'hook'], {
+    cwd: h.repo, timeout: 80000,
+    env: { ...h.env, NODE_OPTIONS: env.NODE_OPTIONS, TOWER_CRANE_AGENT: agent, TOWER_CRANE_STATE: h.state,
+      HOOK_STATE: h.state, HOOK_STOP_LOCK_READ: bridgeSignal },
+  });
+  bridge.stdin.end(JSON.stringify({ hook_event_name: 'UserPromptSubmit' }));
+  let stdout = '';
+  let stderr = '';
+  bridge.stdout.on('data', (data) => { stdout += data; });
+  bridge.stderr.on('data', (data) => { stderr += data; });
+  const done = new Promise((resolve, reject) => {
+    bridge.on('error', reject);
+    bridge.on('close', (code) => resolve({ code, stdout, stderr }));
+  });
+  try {
+    await Promise.all([waitForFile(brokerSignal), waitForFile(bridgeSignal)]);
+    await new Promise((resolve) => setTimeout(resolve, 16000));
+  } finally {
+    S.releaseLock(lock);
+    for (const signal of [brokerSignal, bridgeSignal]) fs.writeFileSync(`${signal}.go`, '');
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+  const [prompt, note] = await Promise.all([done, brokered]);
+  assert.equal(prompt.code, 0, prompt.stderr);
+  assert.equal(note.code, 0, note.stderr);
+  const output = JSON.parse(prompt.stdout);
+  assert.equal(output.decision, undefined);
+  assert.match(output.hookSpecificOutput.additionalContext, /startup context/);
+  assert.deepEqual(h.readState('tasks.json').tasks[0].notes.map((entry) => entry.text), ['broker waited']);
+  assert.ok(events(h).some((event) => event.cmd === 'hook inbox' && event.agent === agent));
+  assert.ok(events(h).some((event) => event.cmd === 'task note' && event.via === 'broker'));
+});
+
+test('a held lock makes a write wait its bound, then exit 3 without writing', async (t) => {
   const h = makeRepo(t);
   h.init();
   const pausedFile = path.join(h.base, 'paused');
@@ -36,11 +225,13 @@ test('a held lock makes a write wait 10 s, then exit 3 without writing', async (
   const holderPid = fs.readFileSync(pausedFile, 'utf8');
   try {
     const started = Date.now();
-    const r = h.run(['task', 'add', '--title', 'waiter', '--acceptance', 'a']);
+    const r = h.run(['task', 'add', '--title', 'waiter', '--acceptance', 'a'], {
+      env: { NODE_OPTIONS: `--require=${JSON.stringify(SHORT_WAIT)}` },
+    });
     const waited = Date.now() - started;
     assert.equal(r.code, 3, r.stderr);
     assert.match(r.stderr, new RegExp(`locked by pid ${holderPid} `));
-    assert.ok(waited >= 9500, `waited ${waited} ms`);
+    assert.ok(waited >= 950 && waited < 5000, `waited ${waited} ms`);
     assert.equal(h.readState('tasks.json').tasks.length, 0);
     assert.deepEqual(h.json(['task', 'list']), [], 'reads do not need the lock');
   } finally {
@@ -229,6 +420,7 @@ for (const aged of [false, true]) {
         cwd: h.repo,
         env: {
           ...h.env, HOOK_STATE: h.state, HOOK_JITTER_MS: '2',
+          TOWER_CRANE_AGENT: 'worker-lock-stress', TOWER_CRANE_OWNER_KEY: '',
           LOCK_STRESS_BARRIER: barrier, LOCK_STRESS_AGE_STAGING: aged ? '1' : '',
         },
         timeout: 30000,
@@ -262,6 +454,7 @@ for (const aged of [false, true]) {
     }
     const notes = h.readState('tasks.json').tasks[0].notes;
     assert.equal(notes.length, writes, 'every successful CLI write survived');
+    assert.ok(notes.every((note) => note.agent === 'worker-lock-stress'), 'task notes need no owner authority');
     assert.equal(new Set(notes.map((note) => note.text)).size, writes, 'no note was written twice');
     assert.equal(h.run(['validate']).code, 0);
     assert.deepEqual(fs.readdirSync(h.state).filter((name) => name.startsWith('lock')), [], 'no lock or staging directory was left');
@@ -293,14 +486,14 @@ test('continuous staging cleanup times out with exit 3 and bounded backoff', (t)
   const started = Date.now();
   const result = h.run(['task', 'add', '--title', 'Never staged', '--acceptance', 'bounded'], {
     env: {
-      NODE_OPTIONS: `--require=${JSON.stringify(hook)}`,
+      NODE_OPTIONS: `--require=${JSON.stringify(SHORT_WAIT)} --require=${JSON.stringify(hook)}`,
       LOCK_RACE_POINT: 'write', LOCK_RACE_ATTEMPTS: attempts, LOCK_RACE_ALWAYS: '1',
     },
     timeout: 25000,
   });
   const waited = Date.now() - started;
   assert.equal(result.code, 3, result.stderr);
-  assert.ok(waited >= 9500 && waited < 20000, `waited ${waited} ms`);
+  assert.ok(waited >= 950 && waited < 5000, `waited ${waited} ms`);
   assert.doesNotMatch(result.stderr, /ENOENT/);
   const names = fs.readFileSync(attempts, 'utf8').trim().split('\n');
   assert.ok(names.length >= 5 && names.length <= 400, `${names.length} attempts: cleanup retries back off`);
@@ -314,20 +507,21 @@ test('a stale lock that cannot be removed still times out with exit 3', (t) => {
   const h = makeRepo(t);
   h.init();
   killHolder(h);
-  // Windows can reuse the killed holder's PID during the 10 s removal wait.
+  // Windows can reuse the killed holder's PID during the removal wait.
   const lock = path.join(h.state, 'lock');
   const marker = JSON.parse(fs.readFileSync(path.join(lock, fs.readdirSync(lock)[0]), 'utf8'));
   const attempts = path.join(h.base, 'attempts');
   fs.writeFileSync(attempts, '');
   const started = Date.now();
   const r = h.run(['task', 'add', '--title', 'A', '--acceptance', 'a'], {
+    env: { NODE_OPTIONS: `--require=${JSON.stringify(SHORT_WAIT)}` },
     hooks: { HOOK_FAIL_LOCK: attempts, HOOK_DEAD_PID: String(marker.pid) }, timeout: 25000,
   });
   const waited = Date.now() - started;
   assert.equal(r.code, 3, `exit ${r.code} (signal ${r.signal}) after ${waited} ms: ${r.stderr}`);
-  assert.ok(waited >= 9500 && waited < 20000, `waited ${waited} ms`);
+  assert.ok(waited >= 950 && waited < 5000, `waited ${waited} ms`);
   assert.match(r.stderr, /locked by pid \d+ .*which is gone, but its lock could not be removed \(EPERM\); remove .*lock by hand/);
   const tries = fs.readFileSync(attempts, 'utf8').length;
-  assert.ok(tries >= 5 && tries <= 400, `${tries} removal attempts in 10 s: it backs off between them`);
+  assert.ok(tries >= 5 && tries <= 400, `${tries} removal attempts: it backs off between them`);
   assert.equal(h.readState('tasks.json').tasks.length, 0);
 });

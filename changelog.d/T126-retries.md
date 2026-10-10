@@ -1,0 +1,1 @@
+- Reclaim retries share the lock deadline and jittered backoff, with at most one final attempt after cleanup at the deadline. Supervisor hook writers allow the full lock wait plus command overhead, and CLI help reports the 60-second acquisition bound.

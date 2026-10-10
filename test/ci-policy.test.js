@@ -4,20 +4,23 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { makeRepo } = require('./helpers');
+const { cachedFixture } = require('./helpers');
 const { gateFixture, gateEvidence } = require('./gate-helpers');
 
+// Built once per process and copied for each test.
 function fixture(t) {
-  const h = makeRepo(t);
-  h.init(['--repo', 'acme/app']);
-  h.sha = gateFixture(h);
-  h.ok(['task', 'add', '--title', 'Change', '--acceptance', 'works']);
-  h.ok(['claim', 'T1', '--agent', 'worker']);
-  h.ok(['submit', 'T1', '--agent', 'worker', '--sha', h.sha, '--pr', '7']);
-  gateEvidence(h, 'tests', 'checker');
-  gateEvidence(h, 'clean', 'checker');
-  h.ok(['evidence', 'T1', '--type', 'review', '--ok', '--sha', h.sha, '--agent', 'reviewer']);
-  return h;
+  return cachedFixture(t, 'reviewed', (h) => {
+    h.init(['--repo', 'acme/app']);
+    h.sha = gateFixture(h);
+    h.ok(['task', 'add', '--title', 'Change', '--acceptance', 'works']);
+    h.ok(['claim', 'T1', '--agent', 'worker']);
+    h.ok(['submit', 'T1', '--agent', 'worker', '--sha', h.sha, '--pr', '7']);
+    gateEvidence(h, 'tests', 'checker');
+    gateEvidence(h, 'clean', 'checker');
+    h.reviewer('T1', 'reviewer', h.sha);
+    h.ok(['evidence', 'T1', '--type', 'review', '--ok', '--sha', h.sha, '--agent', 'reviewer']);
+    return { sha: h.sha };
+  });
 }
 
 const latest = (h) => h.readState('tasks.json').tasks[0].evidence.findLast((e) => e.type === 'ci');

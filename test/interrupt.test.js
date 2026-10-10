@@ -6,7 +6,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { makeRepo, BIN, detachedAlive } = require('./helpers');
 
-const events = (h) => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+// Pollers can read while a writer is appending the final record.
+const events = (h) => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').split('\n').slice(0, -1).filter(Boolean).map(JSON.parse);
 
 async function until(fn, message) {
   const deadline = Date.now() + 15000;
@@ -156,6 +157,7 @@ for (const fresh of [false, true]) {
     h.ok(['claim', 'T1', '--agent', first.agent]);
     const claim = h.json(['task', 'show', 'T1']).claim;
     h.ok(['submit', 'T1', '--sha', 'abcdef1', '--agent', first.agent]);
+    h.reviewer('T1', 'reviewer-T1-1');
     h.ok(['evidence', 'T1', '--type', 'review', '--fail', '--sha', 'abcdef1', '--agent', 'reviewer-T1-1',
       '--summary', 'Add the missing regression', '--ref', 'current-review']);
     h.ok(['rework', 'T1', '--reason', 'Fix the current review feedback']);
@@ -184,6 +186,7 @@ test('interrupting a rework run keeps its failed review feedback for the next di
   await until(() => !detachedAlive({ pid: first.monitor_pid }), 'interrupted monitor did not finish');
   h.ok(['claim', 'T1', '--agent', first.agent]);
   h.ok(['submit', 'T1', '--sha', 'abcdef1', '--agent', first.agent]);
+  h.reviewer('T1', 'reviewer-T1-1');
   h.ok(['evidence', 'T1', '--type', 'review', '--fail', '--sha', 'abcdef1', '--agent', 'reviewer-T1-1',
     '--summary', 'Add the missing regression', '--ref', 'current-review']);
   h.ok(['rework', 'T1', '--reason', 'Fix the current review feedback']);
@@ -216,6 +219,8 @@ test('interrupt stops supervision, preserves dirty work and resumes the original
   const h = setup(t);
   const first = h.json(['spawn', '--task', 'T1']);
   await until(() => events(h).some((e) => e.cmd === 'spawn session'), 'worker did not record its session');
+  const workerTracked = () => h.detached().some((child) => child.kind === 'worker' && child.pid === first.pid);
+  assert.equal(workerTracked(), true);
   const before = h.json(['task', 'show', 'T1']);
   const claim = before.claim;
   h.ok(['claim', 'T1', '--agent', first.agent]);
@@ -225,8 +230,11 @@ test('interrupt stops supervision, preserves dirty work and resumes the original
   assert.equal(stopped.claim, null);
   assert.equal(stopped.revision, 1);
   assert.equal(stopped.branch, before.branch);
-  await until(() => !detachedAlive({ pid: first.monitor_pid }), 'supervisor did not stop');
-  assert.equal(detachedAlive({ pid: first.pid }), false);
+  // Windows can reuse a reaped PID before this assertion; the parent tracks
+  // the original child's exit and removes only that child's record.
+  await until(() => h.detached().some((child) => child.kind === 'monitor'
+    && child.pid === first.monitor_pid && child.exited), 'supervisor did not stop');
+  assert.equal(workerTracked(), false);
   assert.equal(fs.readFileSync(path.join(first.cwd, 'README.md'), 'utf8'), '# unfinished tracked work\n');
   assert.equal(fs.readFileSync(path.join(first.cwd, 'unfinished.txt'), 'utf8'), 'keep this untracked work\n');
   assert.equal(events(h).filter((e) => e.cmd === 'spawn exit').length, 1);

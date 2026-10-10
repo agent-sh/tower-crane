@@ -90,6 +90,8 @@ if (args[0] === 'pr' && args[1] === 'merge') {
     mergeable: 'MERGEABLE',
     mergeStateStatus: 'CLEAN',
     headRefName: process.env['FIXTURE_PR_HEAD_' + pr] || process.env.FIXTURE_PR_HEAD || 'fixture-change',
+    baseRefName: process.env.FIXTURE_PR_BASE || 'main',
+    isCrossRepository: false,
     state: process.env['FIXTURE_PR_STATE_' + pr] || process.env.FIXTURE_PR_STATE || (fs.existsSync(merged) ? 'MERGED' : 'OPEN'),
     mergeCommit: {oid: process.env.FIXTURE_SHA},
   }));

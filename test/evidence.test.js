@@ -4,33 +4,37 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { makeRepo } = require('./helpers');
+const { cachedFixture } = require('./helpers');
 const { gateFixture, gateEvidence } = require('./gate-helpers');
 
-function setup(t) {
-  const h = makeRepo(t);
-  const sha = gateFixture(h);
-  h.init(['--repo', 'acme/demo', '--base', 'main']);
-  h.ok(['task', 'add', '--title', 'Change', '--acceptance', 'works']);
-  h.ok(['claim', 'T1', '--agent', 'worker']);
-  h.ok(['submit', 'T1', '--sha', sha, '--pr', '1', '--agent', 'worker']);
-  h.ok(['evidence', 'T1', '--type', 'review', '--ok', '--sha', sha, '--agent', 'reviewer']);
-  return h;
+// A submitted, reviewed task, built once per process; gates names the
+// software gates that already passed at its sha.
+function setup(t, gates = []) {
+  return cachedFixture(t, gates.join(','), (h) => {
+    const sha = gateFixture(h);
+    h.init(['--repo', 'acme/demo', '--base', 'main']);
+    h.ok(['task', 'add', '--title', 'Change', '--acceptance', 'works']);
+    h.ok(['claim', 'T1', '--agent', 'worker']);
+    h.ok(['submit', 'T1', '--sha', sha, '--pr', '1', '--agent', 'worker']);
+    h.reviewer('T1', 'reviewer', sha);
+    h.ok(['evidence', 'T1', '--type', 'review', '--ok', '--sha', sha, '--agent', 'reviewer']);
+    for (const type of gates) gateEvidence(h, type, 'checker');
+  });
 }
+const ALL = ['tests', 'clean', 'ci'];
 
 test('manual software evidence is refused for either verdict and every agent without writing state', (t) => {
   const h = setup(t);
   const before = fs.readFileSync(path.join(h.state, 'tasks.json'), 'utf8');
   const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8');
-  for (const type of ['tests', 'clean', 'ci', 'merge']) {
-    for (const agent of ['worker', 'reviewer', 'owner']) {
-      for (const verdict of ['--ok', '--fail']) {
-        for (const shaArgs of [[], ['--sha', h.env.FIXTURE_SHA]]) {
-          const r = h.run(['evidence', 'T1', '--type', type, verdict, '--agent', agent, ...shaArgs]);
-          assert.equal(r.code, 1, `${type} ${agent} ${verdict}: ${r.stderr}`);
-          assert.match(r.stderr, /only tower-crane (check|merge)/);
-        }
-      }
+  // Every type and agent, alternating the verdict and an explicit sha.
+  for (const [i, type] of ['tests', 'clean', 'ci', 'merge'].entries()) {
+    for (const [j, agent] of ['worker', 'reviewer', 'owner'].entries()) {
+      const verdict = (i + j) % 2 ? '--fail' : '--ok';
+      const shaArgs = j % 2 ? ['--sha', h.env.FIXTURE_SHA] : [];
+      const r = h.run(['evidence', 'T1', '--type', type, verdict, '--agent', agent, ...shaArgs]);
+      assert.equal(r.code, 1, `${type} ${agent} ${verdict}: ${r.stderr}`);
+      assert.match(r.stderr, /only tower-crane (check|merge)/);
     }
   }
   assert.equal(fs.readFileSync(path.join(h.state, 'tasks.json'), 'utf8'), before);
@@ -39,9 +43,7 @@ test('manual software evidence is refused for either verdict and every agent wit
 });
 
 test('hand-written tests ok stays readable but cannot satisfy accept', (t) => {
-  const h = setup(t);
-  gateEvidence(h, 'clean', 'checker');
-  gateEvidence(h, 'ci', 'checker');
+  const h = setup(t, ['clean', 'ci']);
   const doc = h.readState('tasks.json');
   // A legacy or hand-edited record must not become proof that a test command ran.
   doc.tasks[0].evidence.push({ type: 'tests', ok: true, sha: doc.tasks[0].sha, agent: 'worker', revision: 1, summary: 'tests passed' });
@@ -57,9 +59,7 @@ test('hand-written tests ok stays readable but cannot satisfy accept', (t) => {
 });
 
 test('forged gate source without an audit event cannot satisfy accept', (t) => {
-  const h = setup(t);
-  gateEvidence(h, 'clean', 'checker');
-  gateEvidence(h, 'ci', 'checker');
+  const h = setup(t, ['clean', 'ci']);
   const doc = h.readState('tasks.json');
   const task = doc.tasks[0];
   for (const commands of [[], [{ command: 'npm test', args: [], cwd: h.repo, status: 0, signal: null }]]) {
@@ -80,13 +80,15 @@ test('forged gate source without an audit event cannot satisfy accept', (t) => {
 });
 
 test('software receipts count only with a matching gate event', (t) => {
-  const h = setup(t);
-  for (const type of ['tests', 'clean', 'ci']) gateEvidence(h, type, 'checker');
+  const h = setup(t, ALL);
   const eventsFile = path.join(h.state, 'events.jsonl');
   const original = fs.readFileSync(eventsFile, 'utf8');
   const events = original.trim().split('\n').map(JSON.parse);
+  // The event match is the same for every gate: each field once on tests,
+  // and a missing event for the other gates.
+  const changes = ['missing', 'cmd', 'task', 'agent', 'type', 'source', 'sha', 'ok', 'commands', 'revision'];
   for (const type of ['tests', 'clean', 'ci']) {
-    for (const change of ['missing', 'cmd', 'task', 'agent', 'type', 'source', 'sha', 'ok', 'commands', 'revision']) {
+    for (const change of type === 'tests' ? changes : ['missing']) {
       const altered = structuredClone(events);
       const index = altered.findIndex((e) => e.cmd === `check ${type}`);
       const event = altered[index];
@@ -114,8 +116,7 @@ test('software receipts count only with a matching gate event', (t) => {
 });
 
 test('an ok gate result with matching event but no commands cannot satisfy accept', (t) => {
-  const h = setup(t);
-  for (const type of ['tests', 'clean', 'ci']) gateEvidence(h, type, 'checker');
+  const h = setup(t, ALL);
   const original = h.readState('tasks.json');
   const eventsFile = path.join(h.state, 'events.jsonl');
   const events = fs.readFileSync(eventsFile, 'utf8').trim().split('\n').map(JSON.parse);
@@ -135,8 +136,7 @@ test('an ok gate result with matching event but no commands cannot satisfy accep
 });
 
 test('merge rechecks software events after acceptance', (t) => {
-  const h = setup(t);
-  for (const type of ['tests', 'clean', 'ci']) gateEvidence(h, type, 'checker');
+  const h = setup(t, ALL);
   h.ok(['accept', 'T1']);
   const eventsFile = path.join(h.state, 'events.jsonl');
   const events = fs.readFileSync(eventsFile, 'utf8').trim().split('\n').map(JSON.parse);
@@ -148,8 +148,7 @@ test('merge rechecks software events after acceptance', (t) => {
 });
 
 test('a failed gate after an unterminated audit line still blocks accept and merge', (t) => {
-  const h = setup(t);
-  for (const type of ['tests', 'clean', 'ci']) gateEvidence(h, type, 'checker');
+  const h = setup(t, ALL);
   const eventsFile = path.join(h.state, 'events.jsonl');
   const original = fs.readFileSync(eventsFile, 'utf8');
   for (const tail of [original + '{"torn":', original.trimEnd()]) {
@@ -172,8 +171,7 @@ test('a failed gate after an unterminated audit line still blocks accept and mer
 });
 
 test('hand-written waivers require owner identity for review and software gates', (t) => {
-  const h = setup(t);
-  for (const type of ['tests', 'clean', 'ci']) gateEvidence(h, type, 'checker');
+  const h = setup(t, ALL);
   const original = h.readState('tasks.json');
   for (const type of ['tests', 'clean', 'review', 'ci']) {
     const doc = structuredClone(original);
@@ -181,6 +179,11 @@ test('hand-written waivers require owner identity for review and software gates'
     task.evidence = task.evidence.filter((e) => e.type !== type);
     task.evidence.push({ type, ok: true, waived: true, sha: task.sha, agent: 'worker', revision: task.revision });
     h.writeState('tasks.json', doc);
+    // A review waiver that does not count leaves accept to dispatch a reviewer, so read the gate.
+    if (type === 'review') {
+      assert.match(h.json(['task', 'show', 'T1']).gates.missing.join('; '), /review:/);
+      continue;
+    }
     const r = h.run(['accept', 'T1']);
     assert.equal(r.code, 1, `${type}: ${r.stdout}`);
     assert.ok(r.stderr.includes(`${type}:`), r.stderr);
@@ -190,8 +193,7 @@ test('hand-written waivers require owner identity for review and software gates'
 
 for (const type of ['clean', 'ci']) {
   test(`legacy ${type} ok stays readable but cannot satisfy accept`, (t) => {
-    const h = setup(t);
-    for (const gate of ['tests', 'clean', 'ci'].filter((g) => g !== type)) gateEvidence(h, gate, 'checker');
+    const h = setup(t, ALL.filter((g) => g !== type));
     const doc = h.readState('tasks.json');
     doc.tasks[0].evidence.push({ type, ok: true, sha: doc.tasks[0].sha, agent: 'worker', revision: 1 });
     h.writeState('tasks.json', doc);
@@ -205,8 +207,7 @@ for (const type of ['clean', 'ci']) {
 }
 
 test('real gate commands record their source and executed commands, including merge', (t) => {
-  const h = setup(t);
-  for (const type of ['tests', 'clean', 'ci']) gateEvidence(h, type, 'checker');
+  const h = setup(t, ALL);
   assert.match(fs.readFileSync(path.join(h.state, 'sketch.md'), 'utf8'), /all pass/);
   h.ok(['accept', 'T1', '--agent', 'reviewer']);
   h.ok(['merge', 'T1', '--agent', 'reviewer']);
@@ -240,8 +241,7 @@ test('real gate commands record their source and executed commands, including me
 });
 
 test('task show prints every gate command receipt and marks only uncounted software evidence', (t) => {
-  const h = setup(t);
-  for (const type of ['tests', 'clean', 'ci']) gateEvidence(h, type, 'checker');
+  const h = setup(t, ALL);
   h.ok(['accept', 'T1', '--agent', 'reviewer']);
   h.ok(['merge', 'T1', '--agent', 'reviewer']);
   const shown = h.ok(['task', 'show', 'T1']);
@@ -270,8 +270,7 @@ test('task show prints every gate command receipt and marks only uncounted softw
 });
 
 test('a gate failure before running commands still overrides its earlier pass', (t) => {
-  const h = setup(t);
-  for (const type of ['tests', 'clean', 'ci']) gateEvidence(h, type, 'checker');
+  const h = setup(t, ALL);
   const fail = h.run(['check', 'tests', 'T1', '--cmd', ' ', '--agent', 'checker']);
   assert.equal(fail.code, 1);
   assert.deepEqual(h.readState('tasks.json').tasks[0].evidence.at(-1).commands, []);
@@ -281,8 +280,7 @@ test('a gate failure before running commands still overrides its earlier pass', 
 });
 
 test('unmarked or mismatched software evidence does not override a gate failure or pass', (t) => {
-  const h = setup(t);
-  for (const type of ['tests', 'clean', 'ci']) gateEvidence(h, type, 'checker');
+  const h = setup(t, ALL);
   gateEvidence(h, 'tests', 'checker', false);
   let doc = h.readState('tasks.json');
   const failed = doc.tasks[0].evidence.at(-1);

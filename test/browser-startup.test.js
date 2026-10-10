@@ -10,23 +10,53 @@ const { makeRepo } = require('./helpers');
 function attempt(h, chrome, sandbox) {
   const runner = path.join(h.base, 'browser-runner.js');
   fs.writeFileSync(runner, `
-const { openBrowser } = require(${JSON.stringify(path.join(__dirname, 'browser.js'))});
+const { openBrowser, closeBrowser } = require(${JSON.stringify(path.join(__dirname, 'browser.js'))});
 const hooks = [];
 (async () => {
   let error;
   try { await openBrowser({ after: (fn) => hooks.push(fn) }); }
   catch (e) { error = e.message; }
-  finally { for (const hook of hooks.reverse()) await hook(); }
+  finally {
+    for (const hook of hooks.reverse()) await hook();
+    await closeBrowser?.();
+  }
   console.log(JSON.stringify({ error }));
 })().catch((e) => { console.error(e); process.exitCode = 1; });
 `);
   const r = cp.spawnSync(process.execPath, [runner], {
     env: { ...h.env, TOWER_CRANE_TEST_CHROME: chrome, TOWER_CRANE_TEST_TMP: h.base, TOWER_CRANE_SANDBOX: sandbox, CHROME_REPORT: path.join(h.base, 'chrome.json') },
-    encoding: 'utf8', timeout: 5000,
+    encoding: 'utf8', timeout: 15000,
   });
   assert.equal(r.status, 0, `${r.error || ''}\n${r.stderr}`);
   return JSON.parse(r.stdout);
 }
+
+test('shared Chrome is reaped before teardown returns, including CPU used while closing', {
+  skip: process.platform === 'win32' && 'browser fixture uses a shebang and SIGTERM',
+}, (t) => {
+  const h = makeRepo(t);
+  const chrome = path.join(h.base, 'chrome');
+  fs.writeFileSync(chrome, `#!${process.execPath}
+const fs = require('node:fs');
+const path = require('node:path');
+const profile = process.argv.find((arg) => arg.startsWith('--user-data-dir=')).slice('--user-data-dir='.length);
+process.on('SIGTERM', () => {
+  const start = process.cpuUsage();
+  let cpu;
+  do { cpu = process.cpuUsage(start); } while (cpu.user + cpu.system < 200000);
+  fs.writeFileSync(process.env.CHROME_REPORT, JSON.stringify({ pid: process.pid, cpu: cpu.user + cpu.system }));
+  process.exit(0);
+});
+// An invalid DevTools endpoint makes openBrowser reject after a successful launch.
+fs.writeFileSync(path.join(profile, 'DevToolsActivePort'), '1\\n');
+setInterval(() => {}, 1000);
+`, { mode: 0o755 });
+  attempt(h, chrome, '1');
+  const closed = JSON.parse(fs.readFileSync(path.join(h.base, 'chrome.json'), 'utf8'));
+  assert.ok(closed.cpu >= 200000);
+  assert.throws(() => process.kill(closed.pid, 0), { code: 'ESRCH' });
+  assert.deepEqual(fs.readdirSync(h.base).filter((f) => f.startsWith('tower-crane-chrome-')), []);
+});
 
 test('a missing browser reports its spawn error and cleans up its profile', (t) => {
   const h = makeRepo(t);

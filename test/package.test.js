@@ -44,6 +44,13 @@ test('the npm package ships the plugin and loads pi skills through its CLI', (t)
     '.claude-plugin/plugin.json',
     '.claude-plugin/marketplace.json',
     'components.json',
+    '.mcp.json',
+    'lib/mcp.js',
+    'commands/tower-crane-inbox.md',
+    'commands/tower-crane-spawn-ready.md',
+    'commands/tower-crane-merge-accepted.md',
+    'commands/tower-crane-rework-from-review.md',
+    'commands/tower-crane-release-dead.md',
     'hooks/hooks.json',
     'hooks/tower-crane.mjs',
   ]) assert.ok(files.includes(file), `npm package is missing ${file}`);

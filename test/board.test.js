@@ -6,11 +6,13 @@ const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
 const { pathToFileURL } = require('node:url');
-const { makeRepo, BIN } = require('./helpers');
-const { CHROME, openBrowser } = require('./browser');
+const { makeRepo, cachedFixture, BIN } = require('./helpers');
+const { CHROME, openBrowser, closeBrowser } = require('./browser');
+test.after(closeBrowser);
 const { gateFixture, gateEvidence } = require('./gate-helpers');
 const { preserve } = require('../lib/board/identity');
 const { POSITION } = require('../lib/board/position');
+const B = require('../lib/broker');
 
 // A project with something in every column: a decision, an owner task, a
 // claimed task with a message, a submitted task, and work ready and blocked.
@@ -28,6 +30,9 @@ function populate(h) {
   h.ok(['submit', 'T5', '--sha', sha, '--agent', 'w-2']);
   h.ok(['evidence', 'T5', '--type', 'review', '--ok', '--sha', sha, '--ref', 'https://example.com/acme/demo/pull/1#review', '--summary', 'reads well', '--agent', 'rev-1']);
 }
+
+// The populated project, built once per process and copied for each test.
+const populated = (t) => cachedFixture(t, 'populated', (h) => { h.init(); populate(h); });
 
 // serve runs in the repository, and Windows cannot delete a directory a live
 // process runs in, so every server stops before makeRepo's cleanup: each
@@ -157,9 +162,7 @@ test('Settings signals restoration only after a delayed animation frame restores
 });
 
 test('the snapshot names no network resource and carries no token or owner forms', (t) => {
-  const h = makeRepo(t);
-  h.init();
-  populate(h);
+  const h = populated(t);
   const page = fs.readFileSync(path.join(h.state, 'sketch.html'), 'utf8');
   // Allowed: the SVG namespace inside the data: icon, which is a name, not a
   // request, and evidence links, which open only when clicked.
@@ -175,9 +178,7 @@ test('the snapshot names no network resource and carries no token or owner forms
 });
 
 test('the board escapes every text the state holds', (t) => {
-  const h = makeRepo(t);
-  h.init();
-  populate(h);
+  const h = populated(t);
   const sha = h.git(['rev-parse', 'HEAD']).trim();
   h.ok(['ask', '--question', 'Pick <script>alert(1)</script>?', '--option', '<b>a</b>', '--option', 'b', '--why', 'why <i>', '--blocks', 'T2']);
   h.ok(['msg', '--to', 'owner', '--task', 'T1', 'look <img src=x onerror=alert(1)>', '--agent', 'w-1']);
@@ -187,6 +188,33 @@ test('the board escapes every text the state holds', (t) => {
   assert.match(page, /Pick &lt;script&gt;alert\(1\)&lt;\/script&gt;\?/);
   assert.match(page, /look &lt;img src=x onerror=alert\(1\)&gt;/);
   assert.match(page, /href="https:\/\/example\.com\/x&quot;onmouseover=&quot;alert\(1\)"/);
+});
+
+test('review gate pips and ledger ignore unspawned and self-review verdicts', (t) => {
+  const h = makeRepo(t);
+  h.init();
+  h.ok(['task', 'add', '--title', 'Docs', '--acceptance', 'reads well', '--kind', 'docs']);
+  h.ok(['claim', 'T1', '--agent', 'worker']);
+  const sha = h.git(['rev-parse', 'HEAD']);
+  h.ok(['submit', 'T1', '--sha', sha, '--agent', 'worker']);
+  const sheet = () => fs.readFileSync(path.join(h.state, 'sketch.html'), 'utf8').match(/<article id="T1"[\s\S]*?<\/article>/)[0];
+
+  for (const agent of ['made-up-reviewer', 'worker']) {
+    for (const verdict of ['--ok', '--fail']) {
+      h.ok(['evidence', 'T1', '--type', 'review', verdict, '--sha', sha, '--agent', agent]);
+      const page = sheet();
+      assert.match(page, /class="pip missing">review<\/span>/, `${agent} ${verdict} leaves review missing`);
+      assert.doesNotMatch(page, /class="pip (?:pass|fail)">review<\/span>/);
+      assert.match(page, /class="nocount">\(does not count: (?:not a spawned reviewer|self-review)\)/);
+      assert.equal(h.json(['task', 'show', 'T1']).gates.gates.find((g) => g.type === 'review').ok, false);
+    }
+  }
+
+  h.reviewer('T1', 'reviewer', sha);
+  for (const [verdict, state] of [['--fail', 'fail'], ['--ok', 'pass']]) {
+    h.ok(['evidence', 'T1', '--type', 'review', verdict, '--sha', sha, '--agent', 'reviewer']);
+    assert.match(sheet(), new RegExp(`class="pip ${state}">review</span>`));
+  }
 });
 
 test('accepted task gate pips and ledger stop counting tests after the owner changes mode', (t) => {
@@ -199,6 +227,7 @@ test('accepted task gate pips and ledger stop counting tests after the owner cha
   h.ok(['project', 'set', '--tests-mode', 'run-only']);
   gateEvidence(h, 'tests', 'checker');
   gateEvidence(h, 'clean', 'checker');
+  h.reviewer('T1', 'reviewer', sha);
   h.ok(['evidence', 'T1', '--type', 'review', '--ok', '--sha', sha, '--agent', 'reviewer']);
   h.ok(['accept', 'T1']);
   const sheet = () => fs.readFileSync(path.join(h.state, 'sketch.html'), 'utf8').match(/<article id="T1"[\s\S]*?<\/article>/)[0];
@@ -221,9 +250,7 @@ test('accepted task gate pips and ledger stop counting tests after the owner cha
 });
 
 test('the snapshot opens offline in a browser, with and without scripts, and requests nothing but itself', { skip: !CHROME && 'no Chrome to drive' }, async (t) => {
-  const h = makeRepo(t);
-  h.init();
-  populate(h);
+  const h = populated(t);
   const file = pathToFileURL(path.join(h.state, 'sketch.html')).href;
   const b = await openBrowser(t);
   await b.send('Network.enable');
@@ -286,9 +313,7 @@ test('in a browser, JS displays only the routed view by nav and direct hash at d
 });
 
 test('serve sends a submitted or accepted task back for rework only as the owner, through the CLI rework', async (t) => {
-  const h = makeRepo(t);
-  h.init();
-  populate(h);
+  const h = populated(t);
   await withServers(async (servers) => {
     const viewer = await startServe(servers, h, 'viewer');
     const viewerPage = await (await fetch(viewer)).text();
@@ -317,9 +342,7 @@ test('serve sends a submitted or accepted task back for rework only as the owner
 });
 
 test('in a browser, every board write goes through its form: answer, comments, owner-done, rework and tier', { skip: !CHROME && 'no Chrome to drive' }, async (t) => {
-  const h = makeRepo(t);
-  h.init();
-  populate(h);
+  const h = populated(t);
   await withServers(async (servers) => {
     const url = await startServe(servers, h);
     const b = await openBrowser(t);
@@ -374,9 +397,7 @@ test('in a browser, every board write goes through its form: answer, comments, o
 });
 
 test('in a browser, a change elsewhere updates the board in place and waits while the owner is typing', { skip: !CHROME && 'no Chrome to drive' }, async (t) => {
-  const h = makeRepo(t);
-  h.init();
-  populate(h);
+  const h = populated(t);
   await withServers(async (servers) => {
     const url = await startServe(servers, h);
     const b = await openBrowser(t);
@@ -410,9 +431,7 @@ test('in a browser, a change elsewhere updates the board in place and waits whil
 });
 
 test('live CLI writes keep Plan, its task sheet, scroll and the focused control on desktop and phone', { skip: !CHROME && 'no Chrome to drive' }, async (t) => {
-  const h = makeRepo(t);
-  h.init();
-  populate(h);
+  const h = populated(t);
   for (let i = 0; i < 8; i++) h.ok(['task', 'add', '--title', `Plan task ${i}`, '--acceptance', 'verified']);
   let dep = 'T2';
   for (let i = 0; i < 4; i++) {
@@ -427,6 +446,8 @@ test('live CLI writes keep Plan, its task sheet, scroll and the focused control 
       await b.send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: false });
       await b.goto(`${url}#plan`);
       await b.until(`document.querySelector('.conn').dataset.conn === 'live'`, 'the live stream');
+      // The load handler resets the fragment scroll on its next frame.
+      await b.inPage(`new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))`);
       await b.inPage(`(() => {
         window.firstLoad = true;
         document.querySelector(${link}).focus({ preventScroll: true });
@@ -507,10 +528,54 @@ test('live CLI writes keep Settings and Spend focus and table scroll at 390px', 
   }
 });
 
+test('a delayed initial view frame preserves reader scroll before and after live CLI updates', { skip: !CHROME && 'no Chrome to drive' }, async (t) => {
+  const h = populated(t);
+  for (let i = 6; i <= 24; i++) h.ok(['task', 'add', '--title', `Task ${i}`, '--acceptance', 'verified']);
+  for (let i = 1; i <= 24; i++) h.ok(['spend', `T${i}`, '--tokens', String(i * 100), '--rung', 'easy']);
+  await withServers(async (servers) => {
+    const url = await startServe(servers, h, 'viewer');
+    const b = await openBrowser(t);
+    await b.send('Page.enable');
+    await b.send('Page.addScriptToEvaluateOnNewDocument', { source: `
+      window.initialFrames = [];
+      window.requestAnimationFrame = (callback) => window.initialFrames.push(callback);
+    ` });
+    const scroll = `[scrollY, document.querySelector('main').scrollTop]`;
+    for (const [view, width] of [['board', 390], ['spend', 390], ['spend', 1280]]) {
+      await b.send('Emulation.setDeviceMetricsOverride', { width, height: 844, deviceScaleFactor: 1, mobile: false });
+      for (const phase of ['initial', 'before', 'after']) {
+        await t.test(`${view} at ${width}px, initial frame ${phase}`, async () => {
+          await b.goto('about:blank');
+          await b.goto(`${url}#${view}`);
+          await b.until(`document.querySelector('.conn').dataset.conn === 'live' && window.initialFrames.length > 0`, 'the live stream with its initial frame pending');
+          if (phase === 'initial') {
+            await b.inPage(`window.initialFrames.splice(0).forEach((callback) => callback(performance.now()))`);
+            assert.deepEqual(await b.inPage(scroll), [0, 0], 'an untouched initial view starts at the top');
+            return;
+          }
+          await b.inPage(`window.scrollTo(0, 120); document.querySelector('main').scrollTop = 120`);
+          const before = await b.inPage(scroll);
+          assert.equal(before[width === 390 ? 0 : 1], 120, 'the reader has scrolled before the initial frame runs');
+          if (phase === 'before') {
+            await b.inPage(`window.initialFrames.splice(0).forEach((callback) => callback(performance.now()))`);
+            assert.deepEqual(await b.inPage(scroll), before, 'the delayed initial frame keeps the reader position');
+          }
+          const update = `late frame ${view} ${width} ${phase}`;
+          h.ok(['task', 'note', 'T1', update]);
+          await b.restored(`document.querySelector('#T1 .thread').textContent.includes(${JSON.stringify(update)})`, 'the live CLI update');
+          assert.deepEqual(await b.inPage(scroll), before, 'the live update restores the reader position');
+          if (phase === 'after') {
+            await b.inPage(`window.initialFrames.splice(0).forEach((callback) => callback(performance.now()))`);
+            assert.deepEqual(await b.inPage(scroll), before, 'the delayed initial frame cannot undo live restoration');
+          }
+        });
+      }
+    }
+  });
+});
+
 test('every view keeps disclosures, event identity, focus and scroll through live CLI updates', { skip: !CHROME && 'no Chrome to drive' }, async (t) => {
-  const h = makeRepo(t);
-  h.init();
-  populate(h);
+  const h = populated(t);
   for (let i = 6; i <= 24; i++) h.ok(['task', 'add', '--title', `Task ${i}`, '--acceptance', 'verified']);
   for (let i = 1; i <= 24; i++) h.ok(['spend', `T${i}`, '--tokens', String((25 - i) * 100), '--rung', 'easy']);
   await withServers(async (servers) => {
@@ -690,9 +755,7 @@ test('live updates match task sheet buttons by form and fall back when the focus
 });
 
 test('a viewer cannot edit tiers or the ladder from a sheet, Settings or a forged POST', async (t) => {
-  const h = makeRepo(t);
-  h.init();
-  populate(h);
+  const h = populated(t);
   await withServers(async (servers) => {
     const url = await startServe(servers, h, 'viewer');
     const page = await (await fetch(url)).text();
@@ -720,9 +783,7 @@ test('a viewer cannot edit tiers or the ladder from a sheet, Settings or a forge
 });
 
 test('Working now uses only the current claimant and claim, then the submitter context', (t) => {
-  const h = makeRepo(t);
-  h.init();
-  populate(h);
+  const h = populated(t);
   const card = () => fs.readFileSync(path.join(h.state, 'sketch.html'), 'utf8').match(/<article class="card[^"]*" data-key="T1"[\s\S]*?<\/article>/)[0];
   h.ok(['task', 'note', 'T1', 'orchestrator planning note', '--agent', 'orchestrator']);
   assert.match(card(), /tests green, waiting on CI/);
@@ -830,9 +891,7 @@ test('desktop columns keep headings visible, reach the last items and keep their
 });
 
 test('task sheets contain keyboard focus, restore the invoking link and keep modal state through refresh', { skip: !CHROME && 'no Chrome to drive' }, async (t) => {
-  const h = makeRepo(t);
-  h.init();
-  populate(h);
+  const h = populated(t);
   await withServers(async (servers) => {
     const url = await startServe(servers, h, 'viewer');
     const b = await openBrowser(t);
@@ -871,9 +930,7 @@ test('task sheets contain keyboard focus, restore the invoking link and keep mod
 });
 
 test('phone gates keep whole names and states in both themes without horizontal overflow', { skip: !CHROME && 'no Chrome to drive' }, async (t) => {
-  const h = makeRepo(t);
-  h.init();
-  populate(h);
+  const h = populated(t);
   h.ok(['submit', 'T1', '--sha', h.git(['rev-parse', 'HEAD']), '--agent', 'w-1']);
   const b = await openBrowser(t);
   await b.send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 2, mobile: false });
@@ -884,4 +941,21 @@ test('phone gates keep whole names and states in both themes without horizontal 
     assert.equal(gates.fits, true, `gates fit in ${theme}`);
     for (const [label, lines] of gates.cells) assert.equal(lines, 1, `${label} stays whole in ${theme}`);
   }
+});
+
+test('the board shows a refused brokered message as trouble, without its text', async (t) => {
+  const h = makeRepo(t);
+  h.init();
+  h.ok(['task', 'add', '--title', 'one', '--acceptance', 'noted']);
+  h.ok(['task', 'add', '--title', 'two', '--acceptance', 'noted']);
+  const job = { state: h.state, task: 'T2', agent: 'worker-T2-1', role: 'worker', cwd: h.repo, broker: path.join(h.base, 'brokers', 'worker-T2-1', B.FILE) };
+  const broker = await B.start(job);
+  t.after(() => broker.close());
+  const refused = await B.forward(job.broker, ['msg', '--to', 'worker-T1-1', 'text the board must not show'], h.state);
+  assert.equal(refused.code, 1, refused.stderr);
+  const board = require('../lib/board/model').build(require('../lib/state').loadState(h.state));
+  const item = board.history.find((e) => e.cmd === 'msg refused');
+  assert.deepEqual([item.kind, item.tone], ['trouble', 'fault']);
+  assert.match(item.text, /worker-T2-1 tried to message worker-T1-1; the broker refused it/);
+  assert.ok(!JSON.stringify(board).includes('text the board must not show'), 'the board never shows the refused text');
 });

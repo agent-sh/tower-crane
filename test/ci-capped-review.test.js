@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
-const { makeRepo, BIN } = require('./helpers');
+const { BIN, cachedFixture } = require('./helpers');
 
 const APP = 'revuto-review';
 const CAP = { title: 'Revuto did not review this pull request', summary: 'reached the 2-round review limit', text: null };
@@ -21,12 +21,15 @@ function suite(app, id, conclusion = 'success', status = 'completed', runs = 1) 
 }
 
 function fixture(t) {
-  const h = makeRepo(t);
-  h.init(['--repo', 'acme/app']);
-  h.ok(['task', 'add', '--title', 'Change', '--acceptance', 'works']);
-  h.ok(['claim', 'T1', '--agent', 'worker']);
-  const sha = h.git(['rev-parse', 'HEAD']);
-  h.ok(['submit', 'T1', '--agent', 'worker', '--sha', sha, '--pr', '9']);
+  const h = cachedFixture(t, 'submitted', (h) => {
+    h.init(['--repo', 'acme/app']);
+    h.ok(['task', 'add', '--title', 'Change', '--acceptance', 'works']);
+    h.ok(['claim', 'T1', '--agent', 'worker']);
+    const sha = h.git(['rev-parse', 'HEAD']);
+    h.ok(['submit', 'T1', '--agent', 'worker', '--sha', sha, '--pr', '9']);
+    return { sha };
+  });
+  const { sha } = h;
   return {
     check({ policy = POLICY, runs = [run('Revuto', APP, 2, CAP, 'failure')], suites = [suite(APP, 2, 'failure')], ci = {}, build = true } = {}) {
       const project = h.readState('project.json');

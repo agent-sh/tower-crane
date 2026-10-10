@@ -7,11 +7,19 @@
   "repository": { "type": "git", "url": "https://github.com/agent-sh/tower-crane.git" },
   "bin": { "tower-crane": "bin/tower-crane.js" },
   "engines": { "node": ">=24" },
-  "files": ["bin/", "lib/", "hooks/", "skills/", "agents/", "standards/", "docs/", ".claude-plugin/", "components.json"],
+  "files": ["bin/", "lib/", "hooks/", "skills/", "agents/", "commands/", "standards/", "docs/", ".claude-plugin/", ".mcp.json", "components.json"],
   "scripts": {
-    "test": "node test/run.js",
+    "test": "node test/run.js --test-concurrency=4",
     "docs:generate": "node scripts/cli-docs.js",
     "check:shared": "node scripts/check-shared-files.js",
     "changelog": "node scripts/changelog.js"
+  },
+  "tower-crane": {
+    "generated": {
+      "docs/cli.md": {
+        "script": "docs:generate",
+        "blocks": ["commands:Plan", "commands:Stack", "commands:Run", "commands:Decisions", "commands:Views", "commands:Agents and worktrees", "commands:Gates"]
+      }
+    }
   }
 }

@@ -5,11 +5,15 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const { makeRepo } = require('./helpers');
+const { makeRepo, cachedFixture } = require('./helpers');
 const { gateFixture, changeKind } = require('./gate-helpers');
 
+// Each fixture is built once per process and copied for each test.
 function fixture(t, script) {
-  const h = makeRepo(t);
+  return cachedFixture(t, `local:${script || ''}`, (h) => build(h, script));
+}
+
+function build(h, script) {
   h.env.TOWER_CRANE_TMP = path.join(h.base, 'gate-tmp');
   h.log = path.join(h.base, 'check.json');
   h.command = [process.execPath, 'ci.js', h.log, 'literal argument; $(exit 1)'];
@@ -40,16 +44,19 @@ fs.writeFileSync(process.argv[2], JSON.stringify({
   h.ok(['task', 'add', '--title', 'local check', '--kind', 'docs', '--acceptance', 'checked']);
   h.ok(['claim', 'T1', '--agent', 'worker']);
   h.ok(['submit', 'T1', '--agent', 'worker', '--sha', h.sha, '--branch', 'local-change', '--pr', '1']);
+  h.reviewer('T1', 'reviewer', h.sha);
   h.ok(['evidence', 'T1', '--type', 'review', '--ok', '--sha', h.sha, '--agent', 'reviewer']);
-  return h;
+  return { log: h.log, command: h.command, sha: h.sha, baseSha: h.baseSha };
 }
 
-function mergeFixture(t) {
-  const h = fixture(t);
-  h.ok(['project', 'set', '--repo', 'acme/demo']);
-  h.merged = path.join(h.base, 'merged');
-  const preload = path.join(h.base, 'github.js');
-  fs.writeFileSync(preload, `
+// A fake gh on a preload, and with origin a bare remote and a clone of it.
+function mergeFixture(t, { origin = false } = {}) {
+  return cachedFixture(t, `merge:${origin}`, (h) => {
+    const fields = build(h);
+    h.ok(['project', 'set', '--repo', 'acme/demo']);
+    h.merged = path.join(h.base, 'merged');
+    const preload = path.join(h.base, 'github.js');
+    fs.writeFileSync(preload, `
 const cp = require('node:child_process');
 const fs = require('node:fs');
 const original = cp.spawnSync;
@@ -68,12 +75,15 @@ cp.spawnSync = function(command, args, opts) {
   if (args[0] === 'pr' && args[1] === 'merge') fs.writeFileSync(merged, '');
   return {status: 0, stderr: '', stdout: JSON.stringify({
     headRefOid: ${JSON.stringify(h.sha)}, state: fs.existsSync(merged) ? 'MERGED' : 'OPEN',
+    baseRefName: ${JSON.stringify(h.json(['project', 'show']).base)}, isCrossRepository: false,
     mergeCommit: {oid: ${JSON.stringify(h.sha)}}
   })};
 };
 `);
-  h.env.NODE_OPTIONS = `${h.env.NODE_OPTIONS || ''} --require=${JSON.stringify(preload)}`;
-  return h;
+    h.env.NODE_OPTIONS = `${h.env.NODE_OPTIONS || ''} --require=${JSON.stringify(preload)}`;
+    if (origin) originFixture(h);
+    return { ...fields, merged: h.merged, origin: h.origin, upstream: h.upstream };
+  });
 }
 
 function originFixture(h) {
@@ -122,6 +132,7 @@ test('accept reruns local CI when the submitted head has no receipt', (t) => {
   h.git(['commit', '--allow-empty', '-qm', 'another head with the same tree']);
   const next = h.git(['rev-parse', 'HEAD']);
   h.ok(['submit', 'T1', '--agent', 'worker', '--sha', next]);
+  h.reviewer('T1', 'reviewer', next);
   h.ok(['evidence', 'T1', '--type', 'review', '--ok', '--sha', next, '--agent', 'reviewer']);
   assert.equal(h.json(['task', 'show', 'T1']).gates.gates.find((g) => g.type === 'ci').ok, false);
   h.ok(['accept', 'T1']);
@@ -153,8 +164,7 @@ test('local CI receipt for an older merged tree cannot satisfy acceptance or mer
 
 for (const changedTree of [true, false]) {
   test(`merge refreshes a remote-only base advance with ${changedTree ? 'a changed' : 'the same'} tree`, (t) => {
-    const h = mergeFixture(t);
-    originFixture(h);
+    const h = mergeFixture(t, { origin: true });
     h.ok(['check', 'ci', 'T1']);
     h.ok(['accept', 'T1']);
     if (changedTree) fs.writeFileSync(path.join(h.upstream, 'remote.txt'), 'remote\n');
@@ -180,13 +190,13 @@ for (const changedTree of [true, false]) {
     assert.equal(receipt.base_sha, remote);
     const merged = h.json(['merge', 'T1']);
     assert.equal(merged.ok, true);
+    assert.match(merged.summary, /into main/);
     assert.ok(merged.commands.some((c) => c.command === 'git' && c.args.includes('fetch') && c.status === 0));
   });
 }
 
 test('merge refuses an unreachable or timed out local CI base fetch', (t) => {
-  const h = mergeFixture(t);
-  originFixture(h);
+  const h = mergeFixture(t, { origin: true });
   h.ok(['check', 'ci', 'T1']);
   h.ok(['accept', 'T1']);
   const timedOut = h.run(['merge', 'T1'], { env: { LOCAL_FETCH_TIMEOUT: '1' } });
@@ -201,8 +211,7 @@ test('merge refuses an unreachable or timed out local CI base fetch', (t) => {
 });
 
 test('a divergent local base cannot hide a remote advance from merge', (t) => {
-  const h = mergeFixture(t);
-  originFixture(h);
+  const h = mergeFixture(t, { origin: true });
   fs.writeFileSync(path.join(h.repo, 'local.txt'), 'local\n');
   h.git(['add', '.']);
   h.git(['commit', '-qm', 'local base advances']);
@@ -227,6 +236,7 @@ test('hosted CI merges without fetching an unavailable origin when ci.local is a
   h.ok(['task', 'add', '--title', 'hosted check', '--kind', 'docs', '--acceptance', 'checked']);
   h.ok(['claim', 'T1', '--agent', 'worker']);
   h.ok(['submit', 'T1', '--agent', 'worker', '--sha', sha, '--branch', 'fixture-change', '--pr', '1']);
+  h.reviewer('T1', 'reviewer', sha);
   h.ok(['evidence', 'T1', '--type', 'review', '--ok', '--sha', sha, '--agent', 'reviewer']);
   h.ok(['check', 'ci', 'T1']);
   h.ok(['accept', 'T1']);
@@ -237,11 +247,12 @@ test('hosted CI merges without fetching an unavailable origin when ci.local is a
 });
 
 test('completed local CI tasks keep their audited result without reading current trees', (t) => {
-  const h = mergeFixture(t);
-  originFixture(h);
+  const h = mergeFixture(t, { origin: true });
   h.ok(['check', 'ci', 'T1']);
   h.ok(['accept', 'T1']);
-  h.ok(['merge', 'T1']);
+  const merged = h.json(['merge', 'T1']);
+  assert.equal(merged.ok, true);
+  assert.match(merged.summary, /into main/);
   fs.writeFileSync(path.join(h.repo, 'later.txt'), 'later\n');
   h.git(['add', '.']);
   h.git(['commit', '-qm', 'base moves after merge']);
@@ -283,6 +294,7 @@ test('matching audit copies cannot bind a receipt to another head or tree', (t) 
   h.git(['commit', '--allow-empty', '-qm', 'new head for receipt validation']);
   const next = h.git(['rev-parse', 'HEAD']);
   h.ok(['submit', 'T1', '--agent', 'worker', '--sha', next]);
+  h.reviewer('T1', 'reviewer', next);
   h.ok(['evidence', 'T1', '--type', 'review', '--ok', '--sha', next, '--agent', 'reviewer']);
   const doc = h.readState('tasks.json');
   const evidence = doc.tasks[0].evidence.findLast((e) => e.type === 'ci');

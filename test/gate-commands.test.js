@@ -4,18 +4,21 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { makeRepo, runPty, PTY_AVAILABLE } = require('./helpers');
+const { makeRepo, cachedFixture, runPty, PTY_AVAILABLE } = require('./helpers');
 const { gateFixture } = require('./gate-helpers');
 const { shellQuote } = require('../lib/gates/common');
 
+// Built once per process and copied for each test.
 function fixture(t) {
-  const h = makeRepo(t);
-  h.init();
-  const sha = gateFixture(h);
-  h.ok(['task', 'add', '--title', 'Change', '--acceptance', 'works']);
-  h.ok(['claim', 'T1', '--agent', 'worker']);
-  h.ok(['submit', 'T1', '--sha', sha, '--agent', 'worker']);
-  return { h, sha };
+  const h = cachedFixture(t, 'submitted', (h) => {
+    h.init();
+    const sha = gateFixture(h);
+    h.ok(['task', 'add', '--title', 'Change', '--acceptance', 'works']);
+    h.ok(['claim', 'T1', '--agent', 'worker']);
+    h.ok(['submit', 'T1', '--sha', sha, '--agent', 'worker']);
+    return { sha };
+  });
+  return { h, sha: h.sha };
 }
 
 function pin(h) {
@@ -116,6 +119,7 @@ for (const type of ['tests', 'clean']) {
     pin(h);
     h.ok(['check', 'tests', 'T1']);
     h.ok(['check', 'clean', 'T1']);
+    h.reviewer('T1', 'reviewer', sha);
     h.ok(['evidence', 'T1', '--type', 'review', '--ok', '--sha', sha, '--agent', 'reviewer']);
     const previous = h.readState('project.json').gates[`${type}_cmd`];
     const changed = `${previous} `;
@@ -193,6 +197,7 @@ for (const type of ['tests', 'clean']) {
     pin(h);
     h.ok(['check', 'tests', 'T1']);
     h.ok(['check', 'clean', 'T1']);
+    h.reviewer('T1', 'reviewer', sha);
     h.ok(['evidence', 'T1', '--type', 'review', '--ok', '--sha', sha, '--agent', 'reviewer']);
     h.ok(['accept', 'T1']);
     const entries = () => h.ok(['task', 'show', 'T1']).split('\n').filter((line) => line.startsWith(`  - ${type} ok at`));
@@ -227,8 +232,8 @@ test('changing only an evidence policy cannot reuse an audited pass for the new 
   assert.equal(shown(h, 'tests').ok, false);
 });
 
-test('a pin changed while a gate runs cannot relabel its old command receipt', async (t) => {
-  const { h } = fixture(t);
+// Starts a run-only tests check whose command waits until the test releases it.
+async function holdTestsCheck(h, t) {
   const ready = path.join(h.base, 'ready');
   const release = path.join(h.base, 'release');
   const script = path.join(h.base, 'wait.js');
@@ -249,12 +254,66 @@ const timer = setInterval(() => {
     assert.ok(Date.now() < deadline, 'gate did not start');
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
-  h.ok(['project', 'set', '--tests-cmd', `${cmd} changed`]);
-  fs.writeFileSync(release, 'release');
-  const r = await pending;
+  return { cmd, pending, release: () => fs.writeFileSync(release, 'release') };
+}
+
+test('a pin changed while a gate runs cannot relabel its old command receipt', async (t) => {
+  const { h } = fixture(t);
+  const held = await holdTestsCheck(h, t);
+  h.ok(['project', 'set', '--tests-cmd', `${held.cmd} changed`]);
+  held.release();
+  const r = await held.pending;
   assert.equal(r.code, 0, r.stderr);
   const evidence = JSON.parse(r.stdout);
-  assert.equal(evidence.gate_policy.tests_cmd, cmd);
+  assert.equal(evidence.gate_policy.tests_cmd, held.cmd);
   assert.deepEqual(events(h).at(-1).detail.gate_policy, evidence.gate_policy);
   assert.equal(shown(h, 'tests').ok, false);
+});
+
+test('a tests.paths change while a gate runs cannot relabel its old receipt', async (t) => {
+  const { h } = fixture(t);
+  const held = await holdTestsCheck(h, t);
+  h.ok(['project', 'set', '--tests-paths', '["elsewhere/**"]']);
+  held.release();
+  const r = await held.pending;
+  assert.equal(r.code, 0, r.stderr);
+  const evidence = JSON.parse(r.stdout);
+  assert.equal(evidence.ok, true);
+  assert.equal(evidence.gate_policy.paths, null);
+  assert.deepEqual(events(h).at(-1).detail.gate_policy, evidence.gate_policy);
+  assert.equal(shown(h, 'tests').ok, false);
+});
+
+// Each setting decides which tests prove the change, so a pass under the previous setting does not count.
+for (const [name, before, change] of [
+  ['tests.paths', [], ['--tests-paths', '["elsewhere/**"]']],
+  ['tests.keep', ['--tests-keep', '["value.js"]'], ['--tests-keep', 'null']],
+  ['tests.keep from unset to an empty list', [], ['--tests-keep', '[]']],
+  ['tests.expensive', [], ['--tests-expensive', 'true']],
+]) {
+  test(`changing ${name} makes a passing tests proof stale at acceptance and merge`, (t) => {
+    const { h, sha } = fixture(t);
+    pin(h);
+    if (before.length) h.ok(['project', 'set', ...before]);
+    h.ok(['check', 'tests', 'T1']);
+    h.ok(['check', 'clean', 'T1']);
+    h.reviewer('T1', 'reviewer', sha);
+    h.ok(['evidence', 'T1', '--type', 'review', '--ok', '--sha', sha, '--agent', 'reviewer']);
+    h.ok(['accept', 'T1']);
+    assert.equal(h.readState('tasks.json').tasks[0].status, 'accepted');
+    h.ok(['project', 'set', ...change]);
+    assert.equal(shown(h, 'tests').ok, false);
+    assert.match(shown(h, 'tests').reason, /tests paths, keep, expensive, map or required CI setting/);
+    const merge = h.run(['merge', 'T1']);
+    assert.equal(merge.code, 1);
+    assert.match(merge.stderr, /its gates no longer pass.*tests paths, keep, expensive, map or required CI setting/);
+  });
+}
+
+test('an unrelated executor setting keeps a passing tests proof valid', (t) => {
+  const { h } = fixture(t);
+  pin(h);
+  h.ok(['check', 'tests', 'T1']);
+  h.ok(['project', 'set', '--executors', '3']);
+  assert.equal(shown(h, 'tests').ok, true);
 });

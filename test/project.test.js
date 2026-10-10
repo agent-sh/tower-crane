@@ -6,6 +6,24 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { makeRepo } = require('./helpers');
 
+test('the owner config binding is preserved by project settings and must be an absolute path', (t) => {
+  const h = makeRepo(t);
+  h.init();
+  const original = h.readState('project.json');
+  h.ok(['project', 'set', '--name', 'renamed']);
+  assert.equal(h.readState('project.json').owner_config_dir, original.owner_config_dir);
+  const redirected = h.run(['project', 'set', '--owner-config-dir', h.base]);
+  assert.equal(redirected.code, 2);
+  assert.match(redirected.stderr, /unknown option --owner-config-dir/);
+  assert.equal(h.readState('project.json').owner_config_dir, original.owner_config_dir);
+  for (const invalid of [null, 4, {}, '', 'relative', `${h.base}\0suffix`]) {
+    h.writeState('project.json', { ...original, owner_config_dir: invalid });
+    const result = h.run(['project', 'show'], { env: { TOWER_CRANE_AGENT: 'orchestrator' } });
+    assert.equal(result.code, 1, result.stderr);
+    assert.match(result.stderr, /owner_config_dir must be an absolute path/);
+  }
+});
+
 test('project set stores, replaces and clears test paths and ignored CI apps', (t) => {
   const h = makeRepo(t);
   h.init();

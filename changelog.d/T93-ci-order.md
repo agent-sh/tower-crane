@@ -1,0 +1,1 @@
+- Gate-escalation tests wait for the worker supervisor to finish its exit reactions before issuing the next manual gate check, preventing unrelated automation receipts from ending the wait early.

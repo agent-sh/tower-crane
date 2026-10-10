@@ -1,0 +1,1 @@
+- The board's review gate indicator ignores failed reviews that do not count, including reviews from never-spawned names and the submitter. Their evidence stays in the ledger with its does-not-count reason.

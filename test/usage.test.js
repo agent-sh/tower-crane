@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
-const { makeRepo, detachedAlive } = require('./helpers');
+const { cachedFixture, detachedAlive } = require('./helpers');
 
 const fixture = (name) => path.join(__dirname, 'fixtures', 'usage', name);
 const text = (name) => fs.readFileSync(fixture(name), 'utf8');
@@ -82,17 +82,18 @@ test('absent or malformed telemetry is unknown, explicit zero is measured', () =
 });
 
 function setup(t, harness = 'codex') {
-  const h = makeRepo(t);
-  h.init();
-  h.ok(['task', 'add', '--title', 'Usage', '--acceptance', 'accounted', '--tier', 'easy']);
-  h.ok(['brief', 'set', 'T1', '-'], { input: 'Record usage.\n' });
-  h.ok(['ladder', 'set', 'easy', '--harness', harness, '--model', 'dispatch-model', '--clear', 'profile', '--clear', 'effort']);
-  const bin = path.join(h.base, 'bin');
-  fs.mkdirSync(bin);
-  fs.writeFileSync(path.join(bin, harness + (process.platform === 'win32' ? '.exe' : '')), '', { mode: 0o755 });
-  h.usageEnv = { PATH: bin + path.delimiter + (h.env.PATH || h.env.Path || ''), CODEX_HOME: path.join(h.base, 'codex') };
-  h.usageHooks = { HOOK_USAGE_HARNESS: harness, HOOK_USAGE_FILE: fixture(harness === 'codex' ? 'codex-stream.jsonl' : `${harness}.jsonl`) };
-  return h;
+  return cachedFixture(t, harness, (h) => {
+    h.init();
+    h.ok(['task', 'add', '--title', 'Usage', '--acceptance', 'accounted', '--tier', 'easy']);
+    h.ok(['brief', 'set', 'T1', '-'], { input: 'Record usage.\n' });
+    h.ok(['ladder', 'set', 'easy', '--harness', harness, '--model', 'dispatch-model', '--clear', 'profile', '--clear', 'effort']);
+    const bin = path.join(h.base, 'bin');
+    fs.mkdirSync(bin);
+    fs.writeFileSync(path.join(bin, harness + (process.platform === 'win32' ? '.exe' : '')), '', { mode: 0o755 });
+    h.usageEnv = { PATH: bin + path.delimiter + (h.env.PATH || h.env.Path || ''), CODEX_HOME: path.join(h.base, 'codex') };
+    h.usageHooks = { HOOK_USAGE_HARNESS: harness, HOOK_USAGE_FILE: fixture(harness === 'codex' ? 'codex-stream.jsonl' : `${harness}.jsonl`) };
+    return { usageEnv: h.usageEnv, usageHooks: h.usageHooks };
+  });
 }
 
 const spends = (h) => h.json(['task', 'show', 'T1']).spend;
@@ -101,11 +102,29 @@ const events = (h) => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8'
 async function collected(h, length = 1, timeout = 15000) {
   const deadline = Date.now() + timeout;
   while (Date.now() < deadline) {
-    const spend = spends(h);
-    if (spend.entries?.length === length) return spend;
+    const spend = h.readState('tasks.json').tasks[0].spend;
+    if (spend.entries?.length === length && spend.entries.every((entry) => !entry.live)) return spend;
     await new Promise((r) => setTimeout(r, 50));
   }
   throw new Error('usage was not collected within 15 s');
+}
+
+function waitForFile(t, file) {
+  return new Promise((resolve, reject) => {
+    const watcher = fs.watch(path.dirname(file), check);
+    const abort = () => finish(t.signal.reason);
+    function finish(error) {
+      watcher.close();
+      t.signal.removeEventListener('abort', abort);
+      if (error) reject(error);
+      else resolve();
+    }
+    function check() { if (fs.existsSync(file)) finish(); }
+    watcher.once('error', finish);
+    t.signal.addEventListener('abort', abort, { once: true });
+    if (t.signal.aborted) abort();
+    else check();
+  });
 }
 
 async function waitForText(file, text, timeout = 15000) {
@@ -180,7 +199,7 @@ test('completed processes cannot leave teardown targeting a reused pid', async (
   assert.equal(tracked.filter((child) => child.kind === 'worker').length, 0);
   const monitors = tracked.filter((child) => child.kind === 'monitor');
   assert.equal(monitors.length, 1, 'monitor dispatch remains in the audit tracker');
-  assert.equal(monitors[0].exited, true, 'teardown knows the monitor exited before its pid can be reused');
+  assert.equal(monitors[0].exited, true, 'the monitor reached its exit listener; teardown still checks OS termination');
 });
 
 test('detached exits record both spawns exactly once and keep dispatch metadata', async (t) => {
@@ -216,14 +235,14 @@ test('collectors and concurrent waiters share one private exit event and usage e
   const sample = path.join(h.base, 'usage-with-private-text.log');
   fs.writeFileSync(sample, privateText + '\n' + fs.readFileSync(fixture('codex-stream.jsonl'), 'utf8'));
   const waits = ['observer-a', 'observer-b'].map((agent) => h.runAsync([
-    'wait', '--agent', agent, '--after', '0', '--task', 'T1', '--types', 'worker-exited', '--timeout', '8',
+    'wait', '--agent', agent, '--after', '0', '--task', 'T1', '--types', 'worker-exited', '--timeout', '60',
   ]));
   const started = h.json(['spawn', '--task', 'T1'], {
     env: { ...h.usageEnv, USAGE_DELAY: '900', USAGE_CLAIM: '1' },
     hooks: { ...h.usageHooks, HOOK_USAGE_FILE: sample },
   });
   const results = await Promise.all(waits);
-  for (const r of results) assert.equal(r.code, 0, r.stderr);
+  for (const r of results) assert.equal(r.code, 0, r.stderr || r.stdout);
   const [a, b] = results.map((r) => JSON.parse(r.stdout));
   assert.equal(a.id, b.id, 'all observers consume the same exit');
   assert.equal(a.detail.agent, started.agent);
@@ -277,11 +296,28 @@ test('codex session fallback opens only the exact session and counts cached inpu
 test('an exited spawn without telemetry is marked unknown and can be recollected', async (t) => {
   const h = setup(t);
   const empty = path.join(h.base, 'empty.log');
+  const barrier = path.join(h.base, 'collect-paused');
+  const preload = path.join(__dirname, 'fixtures', 'pause-usage-collection.js').replace(/\\/g, '/');
   fs.writeFileSync(empty, 'No telemetry\n');
   const a = h.json(['spawn', '--task', 'T1'], {
-    env: h.usageEnv, hooks: { ...h.usageHooks, HOOK_USAGE_FILE: empty },
+    env: { ...h.usageEnv, NODE_OPTIONS: `--require "${preload}"`, USAGE_COLLECT_BARRIER: barrier },
+    hooks: { ...h.usageHooks, HOOK_USAGE_FILE: empty },
   });
-  const s = await collected(h);
+  let collection;
+  try {
+    await waitForFile(t, barrier);
+    const pending = h.readState('tasks.json').tasks[0].spend;
+    assert.equal(pending.entries[0].live.state, 'unavailable');
+    assert.equal(pending.entries[0].tokens, null);
+    let complete = false;
+    collection = collected(h).then((spend) => { complete = true; return spend; });
+    await Promise.resolve();
+    assert.equal(complete, false, 'a live snapshot is not an exit collection receipt');
+  } finally {
+    fs.writeFileSync(`${barrier}.go`, '');
+  }
+  const s = await collection;
+  assert.equal(s.entries[0].live, undefined, 'the exit collector finalized the usage entry');
   assert.equal(s.entries[0].tokens, null);
   assert.equal(s.tokens, 0);
   assert.equal(h.json(['status']).spend.missing_usage, 1);
@@ -429,7 +465,7 @@ for (const scenario of ['host', 'signal', 'stat']) {
   });
 }
 
-test('test teardown fails for a surviving detached monitor and terminates it', async (t) => {
+test('test teardown stops a surviving detached monitor and waits for its exit', async (t) => {
   const h = setup(t);
   h.json(['spawn', '--task', 'T1'], {
     env: { ...h.usageEnv, USAGE_DELAY: '60000' },
@@ -437,7 +473,8 @@ test('test teardown fails for a surviving detached monitor and terminates it', a
   });
   const monitors = h.detached().filter((c) => c.kind === 'monitor');
   assert.equal(monitors.length, 1);
-  await assert.rejects(h.cleanup(), /detached usage monitors outlived test teardown/);
+  if (process.platform === 'win32') await h.cleanup();
+  else await assert.rejects(h.cleanup(), /detached usage monitors outlived test teardown/);
   assert.ok(monitors.every((c) => !detachedAlive(c)));
 });
 

@@ -171,6 +171,37 @@ test('the shared file check enforces sorted single-line command entries with spa
   assert.match(adjacent.stderr, /blank line/);
 });
 
+test('the shared file check rejects bare stdin reads in lib and bin, and points to readStdin', (t) => {
+  const f = fixture(t);
+  f.change();
+  assert.equal(f.check().status, 0);
+  f.write('lib/probe.js', "module.exports = require('node:fs').readFileSync(0, 'utf8');\n");
+  const bare = f.check();
+  assert.equal(bare.status, 1);
+  assert.match(bare.stderr, /lib\/probe\.js:1 reads stdin with readFileSync\(0\); use readStdin\(\) from lib\/util\.js/);
+  f.write('lib/probe.js', "module.exports = require('./util').readStdin();\n");
+  assert.equal(f.check().status, 0);
+  f.write('bin/probe.js', "require('node:fs').readFileSync('/dev/stdin');\n");
+  const device = f.check();
+  assert.equal(device.status, 1);
+  assert.match(device.stderr, /bin\/probe\.js:1 reads stdin/);
+  f.write('bin/probe.js', "require('../lib/util').readStdin();\n");
+  assert.equal(f.check().status, 0);
+  f.write('lib/probe.js', "const fs = require('node:fs');\nmodule.exports = fs.readFileSync(\n  0,\n  'utf8'\n);\n");
+  const wrapped = f.check();
+  assert.equal(wrapped.status, 1, 'a call split across lines is still a bare read');
+  assert.match(wrapped.stderr, /lib\/probe\.js:2 reads stdin with readFileSync\(0\); use readStdin\(\) from lib\/util\.js/);
+  f.write('lib/probe.js', "require('./util').readStdin();\n");
+  f.write('bin/probe.js', "require('node:fs').readFileSync(\n  '/dev/stdin',\n  'utf8'\n);\n");
+  const wrappedDevice = f.check();
+  assert.equal(wrappedDevice.status, 1, 'a /dev/stdin call split across lines is still a bare read');
+  assert.match(wrappedDevice.stderr, /bin\/probe\.js:1 reads stdin/);
+  f.write('bin/probe.js', "require('../lib/util').readStdin();\n");
+  assert.equal(f.check().status, 0);
+  f.write('lib/util.js', f.read('lib/util.js') + "\nconst raw = require('node:fs').readFileSync(0, 'utf8');\n");
+  assert.equal(f.check().status, 0, 'lib/util.js is where readStdin reads fd 0');
+});
+
 test('tasks add fragments instead of editing the archive or an existing change', (t) => {
   const f = fixture(t, { crlfProtected: true });
   f.write('README.md', '# changed\n');
@@ -277,7 +308,7 @@ test('generated table cells escape every backslash and pipe in one pass', (t) =>
 
 test('release fragments follow landing history rather than task or PR filename order', (t) => {
   const f = fixture(t);
-  f.h.git(['rm', 'changelog.d/T86.md']);
+  f.h.git(['rm', 'changelog.d/T86.md', 'changelog.d/T100.md']);
   f.h.git(['commit', '-qm', 'prepare release history']);
   const oldest = ['T9.md', 'T86.md', 'T100.md', '123.md'];
   for (const name of oldest) {

@@ -1,0 +1,1 @@
+- Live-spend tests wait for recorded events under the runner deadline, keep stub harnesses alive until stopped, and control freshness clocks. They retain budget-stop, unavailable-telemetry and reconciliation checks on loaded machines.

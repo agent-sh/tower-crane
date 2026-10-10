@@ -4,7 +4,8 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { makeRepo, BIN, runPty, PTY_AVAILABLE } = require('./helpers');
+const cp = require('node:child_process');
+const { cachedFixture, BIN, HOOKS, runPty, PTY_AVAILABLE, detachedAlive } = require('./helpers');
 
 const PRIVATE_LOG = 'prompt: synthetic private instruction\ncredential: synthetic-secret-for-recovery-test';
 
@@ -17,16 +18,17 @@ function assertNoLogText(h) {
 }
 
 function setup(t) {
-  const h = makeRepo();
+  const h = cachedFixture(null, 'task', (h) => {
+    h.init();
+    h.ok(['task', 'add', '--title', 'Recover a worker', '--tier', 'easy', '--acceptance', 'exit is reported']);
+    h.ok(['brief', 'set', 'T1', '-'], { input: 'Work on T1.\n' });
+  });
   h.stopWorkers = [];
   // Windows holds directories open while a worker still uses them.
   t.after(async () => {
     for (const stop of h.stopWorkers) stop();
     await h.cleanup();
   });
-  h.init();
-  h.ok(['task', 'add', '--title', 'Recover a worker', '--tier', 'easy', '--acceptance', 'exit is reported']);
-  h.ok(['brief', 'set', 'T1', '-'], { input: 'Work on T1.\n' });
   return h;
 }
 
@@ -131,6 +133,73 @@ test('a killed spawned claimant is reported with its log tail and released for r
   const replacement = await start(t, h);
   assert.notEqual(replacement.agent, spawned.agent);
   assert.deepEqual(h.json(['ready']).exited_claims, [], 'the replacement is alive');
+});
+
+test('teardown observes a monitor exit recorded after its PID snapshot', {
+  skip: !['linux', 'win32'].includes(process.platform),
+}, async (t) => {
+  const h = setup(t);
+  const child = cp.spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+    detached: true, stdio: 'ignore',
+  });
+  const closed = new Promise((resolve) => child.once('close', resolve));
+  t.after(async () => { child.kill(); await closed; });
+  const dir = path.join(h.base, 'detached');
+  fs.mkdirSync(dir);
+  const file = path.join(dir, `${child.pid}.json`);
+  const record = { pid: child.pid, kind: 'monitor', startTicks: '0', startTime: '0' };
+  fs.writeFileSync(file, JSON.stringify(record));
+  const snapshot = h.detached();
+  assert.equal(snapshot[0].exited, undefined);
+  // The stand-in stays alive to represent an unrelated process reusing the PID.
+  fs.writeFileSync(file, JSON.stringify({ ...record, exited: true }));
+  h.detached = () => snapshot;
+  await h.cleanup();
+  assert.equal(process.kill(child.pid, 0), true, 'teardown killed a reused PID');
+});
+
+test('teardown waits for OS termination after a monitor marks its exit', async (t) => {
+  const h = setup(t);
+  const dir = path.join(h.base, 'detached');
+  fs.mkdirSync(dir);
+  const start = path.join(h.base, 'exit-start');
+  const marked = path.join(h.base, 'exit-marked');
+  const monitor = path.join(h.base, 'spawn-monitor.js');
+  fs.writeFileSync(monitor, `
+const fs = require('node:fs');
+const sleep = () => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+process.once('exit', () => {
+  fs.writeFileSync(${JSON.stringify(marked)}, '');
+  const deadline = Date.now() + 30000;
+  while (Date.now() < deadline) sleep();
+});
+const deadline = Date.now() + 30000;
+while (!fs.existsSync(${JSON.stringify(start)}) && Date.now() < deadline) sleep();
+process.exit(0);
+`);
+  const child = cp.spawn(process.execPath, ['--require', HOOKS, monitor], {
+    detached: true, stdio: 'ignore', env: { ...h.env, HOOK_PROCESSES_DIR: dir },
+  });
+  const closed = new Promise((resolve) => child.once('close', resolve));
+  t.after(async () => { child.kill('SIGKILL'); await closed; });
+  const record = { pid: child.pid, kind: 'monitor' };
+  if (process.platform === 'win32') record.startTime = require('./windows-process').startTime(child.pid);
+  if (process.platform === 'linux') {
+    const stat = fs.readFileSync(`/proc/${child.pid}/stat`, 'utf8');
+    record.startTicks = stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\s+/)[19];
+  }
+  fs.writeFileSync(path.join(dir, `${child.pid}.json`), JSON.stringify(record));
+  fs.writeFileSync(start, '');
+  await until(() => fs.existsSync(marked), 'monitor did not reach its exit listener');
+  assert.equal(h.detached()[0].exited, true);
+  assert.equal(child.kill(0), true, 'monitor must still be running inside the exit listener');
+  if (process.platform === 'win32') await h.cleanup();
+  else {
+    await assert.rejects(h.cleanup(), /detached usage monitors outlived test teardown/);
+    await closed;
+  }
+  assert.equal(child.kill(0), false, 'cleanup returned before the original monitor terminated');
+  assert.equal(detachedAlive(record), false, 'a terminated monitor must be observable as stopped');
 });
 
 test('submitted workers and claims without a matching spawn are not reported', async (t) => {

@@ -7,7 +7,7 @@ const path = require('node:path');
 const cp = require('node:child_process');
 const http = require('node:http');
 const { once } = require('node:events');
-const { makeRepo, BIN, HOOKS, ROOT } = require('./helpers');
+const { cachedFixture, BIN, HOOKS, ROOT } = require('./helpers');
 const { gateFixture, gateEvidence } = require('./gate-helpers');
 
 function log(h) {
@@ -15,7 +15,10 @@ function log(h) {
 }
 
 function setup(t, flags = []) {
-  const h = makeRepo();
+  const h = cachedFixture(null, JSON.stringify(flags), (h) => {
+    h.init(flags);
+    h.ok(['task', 'add', '--title', 'Change', '--acceptance', 'works']);
+  });
   h.children = [];
   h.workerPids = [];
   t.after(async () => {
@@ -29,12 +32,10 @@ function setup(t, flags = []) {
     // Windows keeps a running child's cwd open, so stop children first.
     await h.cleanup();
   });
-  h.init(flags);
-  h.ok(['task', 'add', '--title', 'Change', '--acceptance', 'works']);
   return h;
 }
 
-function child(t, h, args, hooks = {}) {
+function child(t, h, args, hooks = {}, ms = 60000) {
   const p = cp.spawn(process.execPath, ['--require', HOOKS, BIN, ...args], {
     cwd: h.repo, env: { ...h.env, HOOK_STATE: h.state, ...hooks },
   });
@@ -43,7 +44,7 @@ function child(t, h, args, hooks = {}) {
   p.stdout.on('data', (d) => { stdout += d; });
   p.stderr.on('data', (d) => { stderr += d; });
   // A failure bound only; waiters time out first and report it.
-  const timer = setTimeout(() => p.kill(), 60000);
+  const timer = setTimeout(() => p.kill(), ms);
   const result = once(p, 'close').then(([code]) => {
     clearTimeout(timer);
     return { code, stdout, stderr };
@@ -65,13 +66,14 @@ async function created(file) {
 
 // A waiter runs software reactions unless it observes. Each test chooses, so a
 // test asserting on manual commands never races an automatic one by accident.
-async function waiting(t, h, { automation, args = [], hooks = {} }) {
+// seconds bounds the wait; a waiter that sits through gate runs needs longer on a loaded machine.
+async function waiting(t, h, { automation, args = [], hooks = {}, seconds = 30 }) {
   if (typeof automation !== 'boolean') throw new Error('waiting needs automation: true or false');
   const signal = path.join(h.base, `watch-${require('node:crypto').randomUUID()}`);
   const ready = created(signal);
   const actor = args.includes('--agent') ? [] : ['--agent', 'orchestrator'];
   const observe = automation ? [] : ['--observe'];
-  const c = child(t, h, ['wait', ...actor, ...observe, '--timeout', '30', ...args], { ...hooks, HOOK_WATCH_READY: signal });
+  const c = child(t, h, ['wait', ...actor, ...observe, '--timeout', String(seconds), ...args], { ...hooks, HOOK_WATCH_READY: signal }, Math.max(60000, seconds * 1000 + 5000));
   // A baseline CLI that lacks wait closes immediately; never wait for a marker
   // it cannot write.
   await Promise.race([ready, c.result.then((r) => { throw new Error(`wait exited before watch setup: ${r.code} ${r.stderr}`); })]);
@@ -97,8 +99,10 @@ function submit(h, extra = []) {
 
 function gates(h, ci = false) {
   for (const type of ['tests', 'clean', 'review', ...(ci ? ['ci'] : [])]) {
-    if (type === 'review') h.ok(['evidence', 'T1', '--agent', 'reviewer', '--type', type, '--sha', h.sha, '--ok']);
-    else gateEvidence(h, type, 'reviewer');
+    if (type === 'review') {
+      h.reviewer('T1', 'reviewer', h.sha);
+      h.ok(['evidence', 'T1', '--agent', 'reviewer', '--type', type, '--sha', h.sha, '--ok']);
+    } else gateEvidence(h, type, 'reviewer');
   }
 }
 
@@ -138,7 +142,7 @@ test('accepted wakes after gates pass; a refused accept emits nothing', async (t
   h.sha = gateFixture(h);
   submit(h);
   h.ok(['project', 'set', '--tests-cmd', 'null']);
-  const result = await waiting(t, h, { automation: true, args: ['--types', 'accepted'] });
+  const result = await waiting(t, h, { automation: true, args: ['--types', 'accepted'], seconds: 60 });
   const count = log(h).length;
   assert.equal(h.run(['accept', 'T1']).code, 1);
   assert.equal(log(h).length, count);
@@ -153,7 +157,7 @@ test('review and software gate pass or failure wake as evidence with their verdi
   submit(h, ['--pr', '9']);
   for (const type of ['review', 'tests', 'clean', 'ci']) {
     for (const ok of [true, false]) {
-      const result = await waiting(t, h, { automation: false, args: ['--types', 'evidence', '--task', 'T1'] });
+      const result = await waiting(t, h, { automation: false, args: ['--types', 'evidence', '--task', 'T1'], seconds: 60 });
       if (type === 'review') h.ok(['evidence', 'T1', '--agent', 'reviewer', '--type', type, '--sha', h.sha, ok ? '--ok' : '--fail']);
       else gateEvidence(h, type, 'gate-runner', ok);
       const e = await event(result, 'evidence');

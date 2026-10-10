@@ -1,0 +1,1 @@
+- Account for each completed harness attempt before any retry or fallback and check budgets again under the launch lock. Clamp usage polling to at least one second, omit unchanged usage writes, and record unavailable telemetry with a safe error class when the initial read fails.

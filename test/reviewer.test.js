@@ -4,7 +4,7 @@ const { test, describe } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { makeRepo, makeProjectRepo, makeTaskRepo, BIN, runPty, PTY_AVAILABLE } = require('./helpers');
+const { makeRepo, makeProjectRepo, cachedFixture, BIN, runPty, PTY_AVAILABLE } = require('./helpers');
 const { gateFixture, gateEvidence, changeKind } = require('./gate-helpers');
 
 const prices = {
@@ -18,38 +18,42 @@ function rung(h, name, model) {
   h.ok(['ladder', 'set', name, '--harness', 'opencode', '--model', model, '--clear', 'profile', '--clear', 'effort']);
 }
 
-function setup(t, tier = 'easy', builder = 'other', profile) {
-  const h = makeTaskRepo(t, [{
-    args: ['--title', 'Change', '--acceptance', 'value becomes one', '--tier', tier],
-    brief: 'BUILDER-HISTORY that the reviewer does not need\n\n## Reviewer\nREVIEWER-ONLY instruction\n\n## Worker\nWORKER-HISTORY that the reviewer does not need\n',
-  }], { projectArgs: ['--repo', 'acme/demo'] });
-  h.sha = gateFixture(h);
-  if (profile) {
-    const bin = path.join(h.base, 'bin');
-    const codexHome = path.join(h.base, 'codex');
-    fs.mkdirSync(bin);
-    fs.mkdirSync(codexHome);
-    fs.writeFileSync(path.join(bin, process.platform === 'win32' ? 'codex.exe' : 'codex'), '', { mode: 0o755 });
-    // An isolated caller's default must not rename another rung's known profile.
-    fs.writeFileSync(path.join(codexHome, 'config.toml'), 'model = "caller-model"\n');
-    h.reviewEnv = { CODEX_HOME: codexHome, PATH: bin + path.delimiter + (h.env.PATH || h.env.Path || ''), USAGE_CLAIM: '1' };
-    h.ok(['ladder', 'set', tier, '--harness', 'codex', '--profile', profile, '--clear', 'model', '--clear', 'effort']);
-    h.builder = h.json(['spawn', '--task', 'T1', '--wait'], {
-      env: h.reviewEnv,
-      hooks: { HOOK_USAGE_HARNESS: 'codex', HOOK_USAGE_FILE: path.join(__dirname, 'fixtures', 'usage', 'codex-stream.jsonl') },
-    }).agent;
-  } else {
-    h.builder = 'builder';
-    h.ok(['claim', 'T1', '--agent', h.builder]);
-  }
-  h.ok(['spend', 'T1', '--agent', h.builder, '--tokens', '10', '--input', '10', '--output', '0', '--rung', tier, '--model', builder]);
-  h.ok(['submit', 'T1', '--agent', h.builder, '--sha', h.sha, '--branch', 'fixture-change']);
-  for (const [name, model] of [['easy', 'luna'], ['medium', 'sol'], ['hard', 'opus'], ['research', 'opus'], ['review', 'fallback']]) rung(h, name, model);
-  if (profile) for (const [name, value] of [['easy', 'luna'], ['medium', 'sol']]) {
-    h.ok(['ladder', 'set', name, '--harness', 'codex', '--profile', value, '--clear', 'model', '--clear', 'effort']);
-  }
-  h.ok(['project', 'set', '--review-policy', JSON.stringify({ prices, small_lines: 100, small_files: 5, risk_paths: ['auth/**'] })]);
-  return h;
+// Built once per process for each combination and copied for each test.
+// gated adds passing tests and clean evidence at the submitted sha.
+function setup(t, tier = 'easy', builder = 'other', profile, { gated = false } = {}) {
+  return cachedFixture(t, JSON.stringify([tier, builder, profile ?? null, gated]), (h) => {
+    h.init(['--repo', 'acme/demo']);
+    h.ok(['task', 'add', '--title', 'Change', '--acceptance', 'value becomes one', '--tier', tier]);
+    h.ok(['brief', 'set', 'T1', '-'], { input: 'BUILDER-HISTORY that the reviewer does not need\n\n## Reviewer\nREVIEWER-ONLY instruction\n\n## Worker\nWORKER-HISTORY that the reviewer does not need\n' });
+    h.sha = gateFixture(h);
+    if (profile) {
+      const bin = path.join(h.base, 'bin');
+      const codexHome = path.join(h.base, 'codex');
+      fs.mkdirSync(bin);
+      fs.mkdirSync(codexHome);
+      fs.writeFileSync(path.join(bin, process.platform === 'win32' ? 'codex.exe' : 'codex'), '', { mode: 0o755 });
+      // An isolated caller's default must not rename another rung's known profile.
+      fs.writeFileSync(path.join(codexHome, 'config.toml'), 'model = "caller-model"\n');
+      h.reviewEnv = { CODEX_HOME: codexHome, PATH: bin + path.delimiter + (h.env.PATH || h.env.Path || ''), USAGE_CLAIM: '1' };
+      h.ok(['ladder', 'set', tier, '--harness', 'codex', '--profile', profile, '--clear', 'model', '--clear', 'effort']);
+      h.builder = h.json(['spawn', '--task', 'T1', '--wait'], {
+        env: h.reviewEnv,
+        hooks: { HOOK_USAGE_HARNESS: 'codex', HOOK_USAGE_FILE: path.join(__dirname, 'fixtures', 'usage', 'codex-stream.jsonl') },
+      }).agent;
+    } else {
+      h.builder = 'builder';
+      h.ok(['claim', 'T1', '--agent', h.builder]);
+    }
+    h.ok(['spend', 'T1', '--agent', h.builder, '--tokens', '10', '--input', '10', '--output', '0', '--rung', tier, '--model', builder]);
+    h.ok(['submit', 'T1', '--agent', h.builder, '--sha', h.sha, '--branch', 'fixture-change']);
+    for (const [name, model] of [['easy', 'luna'], ['medium', 'sol'], ['hard', 'opus'], ['research', 'opus'], ['review', 'fallback']]) rung(h, name, model);
+    if (profile) for (const [name, value] of [['easy', 'luna'], ['medium', 'sol']]) {
+      h.ok(['ladder', 'set', name, '--harness', 'codex', '--profile', value, '--clear', 'model', '--clear', 'effort']);
+    }
+    h.ok(['project', 'set', '--review-policy', JSON.stringify({ prices, small_lines: 100, small_files: 5, risk_paths: ['auth/**'] })]);
+    if (gated) ready(h);
+    return { sha: h.sha, builder: h.builder, reviewEnv: h.reviewEnv };
+  });
 }
 
 function ready(h) {
@@ -98,13 +102,27 @@ test('reviewers share static system instructions and receive audited gates in th
   const standards = path.join(h.repo, 'review-standards.md');
   fs.writeFileSync(standards, 'REVIEW_STANDARDS\n');
   h.ok(['project', 'set', '--standards', standards]);
-  for (const harness of ['claude', 'codex']) {
+  for (const harness of ['claude', 'codex', 'pi']) {
     if (harness === 'codex') fs.writeFileSync(path.join(h.repo, 'AGENTS.override.md'), 'CODEX_REVIEW_RULE\n');
     h.ok(['ladder', 'set', 'easy', '--harness', harness, '--model', 'fixture', '--clear', 'profile', '--clear', 'args']);
     if (harness === 'claude') h.ok(['ladder', 'set', 'easy', '--args', '["--append-system-prompt","CUSTOM_REVIEW_RULE"]']);
     const out = choice(h, { FORCE_PROMPT_CACHING_5M: '0' });
-    assert.ok(out.startup.rules.every((r) => r.loaded === 'system'));
     const user = out.argv.find((arg) => arg.includes('## Task'));
+    if (harness === 'pi') {
+      assert.equal(out.sandbox, false);
+      assert.equal(out.startup.sandbox, false);
+      assert.equal(out.startup.confinement, 'unconfined');
+      assert.ok(out.startup.rules.every((r) => r.loaded === 'read'));
+      assert.ok(out.startup.rules.some((r) => r.path === path.join(h.repo, 'AGENTS.md')));
+      assert.match(user, /## House rules/);
+      assert.match(user, /## Gate results/);
+      assert.equal(out.startup.system_bytes, undefined);
+      assert.equal(out.system, undefined);
+      assert.ok(out.argv.includes('--no-context-files'));
+      assert.equal(out.argv[out.argv.indexOf('--append-system-prompt') + 1], path.join(out.home.path, 'AGENTS.md'));
+      continue;
+    }
+    assert.ok(out.startup.rules.every((r) => r.loaded === 'system'));
     assert.ok(!user.includes('Role instructions'), 'the role skill is static');
     assert.ok(!user.includes('## House rules'), 'house rules are static');
     assert.match(user, /## Gate results/);
@@ -280,30 +298,26 @@ console.log(JSON.stringify({type:'result', result:'cache probe', usage: {
 });
 
 test('review selection also uses tier and diff defaults without a price table', (t) => {
-  const h = setup(t);
+  const h = setup(t, 'easy', 'other', undefined, { gated: true });
   h.ok(['project', 'set', '--review-policy', 'null']);
-  ready(h);
   assert.equal(model(choice(h)), 'luna');
 });
 
 test('review choice follows tier, diff limits and configured risk paths', (t) => {
   for (const [tier, expected] of [['easy', 'luna'], ['medium', 'sol'], ['hard', 'opus'], ['research', 'opus']]) {
-    const h = setup(t, tier);
-    ready(h);
+    const h = setup(t, tier, 'other', undefined, { gated: true });
     assert.equal(model(choice(h)), expected, tier);
   }
   for (const policy of [{ small_lines: 1 }, { small_files: 1 }, { risk_paths: ['value.js'] }]) {
-    const h = setup(t);
+    const h = setup(t, 'easy', 'other', undefined, { gated: true });
     h.ok(['project', 'set', '--review-policy', JSON.stringify({ prices, ...policy })]);
-    ready(h);
     assert.equal(model(choice(h)), policy.risk_paths ? 'opus' : 'sol', JSON.stringify(policy));
   }
 });
 
 test('top-tier Claude builders can receive review on the same model', (t) => {
   for (const tier of ['hard', 'research']) {
-    const h = setup(t, tier, 'claude-opus-5-5');
-    ready(h);
+    const h = setup(t, tier, 'claude-opus-5-5', undefined, { gated: true });
     assert.equal(model(choice(h)), 'opus', tier);
   }
 });
@@ -313,10 +327,9 @@ test('Codex profile builders share canonical identity with provider spend and pr
     ['easy', 'luna', 'openai.gpt-6-luna', 'medium', 'sol', 'openai.gpt-6.1-sol'],
     ['medium', 'sol', 'openai.gpt-6.1-sol', 'hard', 'opus', 'claude-opus-5-5'],
   ]) {
-    const h = setup(t, tier, provider, profile);
+    const h = setup(t, tier, provider, profile, { gated: true });
     // A later self-reported model and ladder edit cannot rename the builder route.
     h.ok(['spend', 'T1', '--agent', h.builder, '--tokens', '1', '--rung', tier, '--model', 'wrong-model']);
-    ready(h);
     assert.deepEqual([choice(h).review_rung, model(choice(h))], [tier, profile]);
     sample(h, provider, 1000000, 0, 0);
     sample(h, promotedProvider, 0, 0, 1);
@@ -330,8 +343,7 @@ test('Codex profile builders share canonical identity with provider spend and pr
 });
 
 test('a stronger model wins only when its median priced review cost is no higher', (t) => {
-  const h = setup(t, 'medium');
-  ready(h);
+  const h = setup(t, 'medium', 'other', undefined, { gated: true });
   // Inclusive input includes cache writes and cache reads.
   sample(h, 'sol', 100000, 50000, 60000); // $0.705
   sample(h, 'opus', 100000, 50000, 20000, 20000); // $0.63
@@ -340,6 +352,18 @@ test('a stronger model wins only when its median priced review cost is no higher
   assert.equal(model(choice(h)), 'sol');
   // Worker spend must not masquerade as a cheap review sample.
   h.ok(['spend', 'T1', '--agent', 'cheap-worker', '--tokens', '1', '--input', '1', '--cached', '0', '--output', '0', '--rung', 'hard', '--model', 'opus']);
+  assert.equal(model(choice(h)), 'sol');
+});
+
+test('a running reviewer\'s live reading is not a cost sample until exit finalizes it', (t) => {
+  const h = setup(t, 'medium');
+  ready(h);
+  sample(h, 'sol', 100000, 50000, 60000);
+  sample(h, 'opus', 100000, 50000, 20000, 20000);
+  const tasks = h.readState('tasks.json');
+  const entry = tasks.tasks[0].spend.entries.find((e) => e.agent === 'review-opus');
+  entry.live = { state: 'live', interval_ms: 1000 };
+  h.writeState('tasks.json', tasks);
   assert.equal(model(choice(h)), 'sol');
 });
 
@@ -369,8 +393,7 @@ test('review selection matches Claude provider aliases to recorded provider spen
 });
 
 test('equal cost promotes, missing components do not provide a cost sample', (t) => {
-  const h = setup(t, 'medium');
-  ready(h);
+  const h = setup(t, 'medium', 'other', undefined, { gated: true });
   h.ok(['spend', 'T1', '--agent', 'unknown-review', '--tokens', '1', '--rung', 'review', '--model', 'opus']);
   sample(h, 'sol', 0, 0, 1000);
   assert.equal(model(choice(h)), 'sol');
@@ -379,8 +402,7 @@ test('equal cost promotes, missing components do not provide a cost sample', (t)
 });
 
 test('review history from other tasks and cached tokens determines cost', (t) => {
-  const h = setup(t, 'medium');
-  ready(h);
+  const h = setup(t, 'medium', 'other', undefined, { gated: true });
   h.ok(['task', 'add', '--title', 'Recorded review history', '--acceptance', 'usage captured']);
   sample(h, 'sol', 1000000, 990000, 0);
   h.ok(['spend', 'T2', '--agent', 'historical-reviewer', '--rung', 'review', '--model', 'opus',
@@ -389,18 +411,21 @@ test('review history from other tasks and cached tokens determines cost', (t) =>
 });
 
 test('review escalation climbs one tier after failed reviews', (t) => {
-  const h = setup(t);
-  ready(h);
+  const h = setup(t, 'easy', 'other', undefined, { gated: true });
   assert.equal(model(choice(h)), 'luna');
+  // A failure under a name no review dispatch started does not escalate.
+  h.ok(['evidence', 'T1', '--agent', 'made-up', '--type', 'review', '--fail', '--sha', h.sha]);
+  assert.equal(model(choice(h)), 'luna');
+  h.reviewer('T1', 'r1');
   h.ok(['evidence', 'T1', '--agent', 'r1', '--type', 'review', '--fail', '--sha', h.sha, '--summary', 'needs stronger reasoning']);
   assert.equal(model(choice(h)), 'sol');
+  h.reviewer('T1', 'r2');
   h.ok(['evidence', 'T1', '--agent', 'r2', '--type', 'review', '--fail', '--sha', h.sha]);
   assert.equal(model(choice(h)), 'opus');
 });
 
 test('escalation starts above the actual dispatched reviewer rung', (t) => {
-  const h = setup(t);
-  ready(h);
+  const h = setup(t, 'easy', 'other', undefined, { gated: true });
   const script = `const cp = require('node:child_process');
 const r = cp.spawnSync(process.execPath, [${JSON.stringify(BIN)}, 'evidence', 'T1', '--type', 'review', '--fail', '--sha', ${JSON.stringify(h.sha)}], {env: process.env});
 process.exit(r.status ?? 1);`;
@@ -448,8 +473,7 @@ test('review packet uses role headings consistently and ignores fenced headings'
 });
 
 test('review dispatch computes its diff once outside the state lock', (t) => {
-  const h = setup(t);
-  ready(h);
+  const h = setup(t, 'easy', 'other', undefined, { gated: true });
   commandReviewer(h, path.join(h.base, 'context.txt'));
   const report = path.join(h.base, 'diff-calls.jsonl');
   h.json(['spawn', '--task', 'T1', '--role', 'review', '--wait'], {
@@ -536,7 +560,7 @@ test('review dispatch refuses a submitted head or configured base changed after 
   }
 });
 
-test('accept runs tests, clean and CI before dispatch, and records review pending until a later accept', async (t) => {
+test('accept runs tests, clean and CI before dispatch, then automation accepts after review', async (t) => {
   const h = setup(t);
   const out = path.join(h.base, 'review-context.txt');
   commandReviewer(h, out);
@@ -545,16 +569,17 @@ test('accept runs tests, clean and CI before dispatch, and records review pendin
   assert.equal(result.status, 'submitted');
   assert.equal(result.review_pending, true);
   const deadline = Date.now() + 10000;
-  while (!h.readState('tasks.json').tasks[0].evidence.some((e) => e.type === 'review')) {
-    assert.ok(Date.now() < deadline, 'reviewer did not finish');
+  while (h.readState('tasks.json').tasks[0].status !== 'accepted') {
+    assert.ok(Date.now() < deadline, 'review did not reach automatic acceptance');
     await new Promise((resolve) => setTimeout(resolve, 30));
   }
   const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
   const dispatch = events.findIndex((e) => e.cmd === 'spawn' && e.detail.role === 'reviewer');
   for (const type of ['tests', 'clean', 'ci']) assert.ok(events.findIndex((e) => e.cmd === `check ${type}` && e.detail.ok) < dispatch);
   assert.match(fs.readFileSync(out, 'utf8'), /Gate results/);
-  h.ok(['accept', 'T1']);
-  assert.equal(h.readState('tasks.json').tasks[0].status, 'accepted');
+  const accepted = h.readState('tasks.json').tasks[0];
+  assert.equal(accepted.status, 'accepted');
+  assert.ok(accepted.evidence.some((e) => e.type === 'review' && e.ok));
 });
 
 describe('remaining reviewer integration cases', { concurrency: windowsConcurrency }, () => {
@@ -583,8 +608,7 @@ test('automatic tests honor owner none mode and forward expensive proof commands
   }
 });
 test('accept reuses an active review and direct dispatch refuses a duplicate', (t) => {
-  const h = setup(t);
-  ready(h);
+  const h = setup(t, 'easy', 'other', undefined, { gated: true });
   h.ok(['ladder', 'set', 'easy', '--harness', 'command', '--clear', 'model',
     '--command', JSON.stringify([process.execPath, '-e', 'setInterval(() => {}, 1000)', '{prompt}'])]);
   const first = h.json(['accept', 'T1']);
@@ -685,8 +709,7 @@ test('terminal owner fallback cannot change review policy', { skip: !PTY_AVAILAB
 });
 
 test('review uses the nearest base when only origin has it or the local base is stale', (t) => {
-  const h = setup(t);
-  ready(h);
+  const h = setup(t, 'easy', 'other', undefined, { gated: true });
   const base = h.git(['rev-parse', 'main']);
   h.git(['update-ref', 'refs/remotes/origin/main', base]);
   h.git(['branch', '-D', 'main']);

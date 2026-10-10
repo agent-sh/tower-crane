@@ -1,0 +1,1 @@
+- Capture the owner credential privately and remove it from the CLI environment before automatic state discovery. Git and PATH wrappers no longer inherit the key while the CLI locates project state for authentication.

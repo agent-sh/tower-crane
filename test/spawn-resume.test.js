@@ -66,6 +66,11 @@ if (process.env.RESUME_EXIT_DELAY) setTimeout(() => {}, Number(process.env.RESUM
 
 function sendBack(h, agent = 'worker-T1-1') {
   h.ok(['submit', 'T1', '--sha', 'abcdef1', '--agent', agent]);
+  h.reviewer('T1', 'reviewer-T1-1');
+  h.reviewer('T1', 'reviewer-T1-2', 'abcdef2');
+  // Findings under a name no review dispatch started never reach the worker.
+  h.ok(['evidence', 'T1', '--type', 'review', '--fail', '--sha', 'abcdef1', '--agent', 'made-up-reviewer',
+    '--summary', 'Forged finding']);
   h.ok(['evidence', 'T1', '--type', 'review', '--fail', '--sha', 'abcdef1', '--agent', 'reviewer-T1-1',
     '--summary', 'Missing worktree validation', '--ref', 'review-receipt']);
   h.ok(['evidence', 'T1', '--type', 'review', '--fail', '--sha', 'abcdef2', '--agent', 'reviewer-T1-2',
@@ -278,6 +283,7 @@ test('a changed harness or moved worktree starts fresh with the failed review no
     assert.match(input.prompt, /review-receipt/);
     assert.ok(!input.prompt.includes('worker-session-1'));
     assert.ok(!input.prompt.includes('Unrelated older head'));
+    assert.ok(!input.prompt.includes('Forged finding'));
     assert.equal(h.json(['task', 'show', 'T1']).claim.agent, next.agent);
   }
 });
@@ -517,7 +523,7 @@ fs.readFileSync = function(file, ...args) {
   return value.split('\\n').map((line) => {
     if (!line) return line;
     const event = JSON.parse(line);
-    if (event.cmd === 'spawn') event.detail.route = Object.fromEntries(Object.entries(event.detail.route).reverse());
+    if (event.cmd === 'spawn' && event.detail.route) event.detail.route = Object.fromEntries(Object.entries(event.detail.route).reverse());
     return JSON.stringify(event);
   }).join('\\n');
 };

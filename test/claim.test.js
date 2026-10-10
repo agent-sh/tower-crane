@@ -96,6 +96,45 @@ test('renewing an expired lease takes a worker slot like a claim', (t) => {
   h.ok(['submit', 'T1', '--sha', 'abcdef2', '--agent', 'w-1']);
 });
 
+test('renewing an expired claim passes the readiness checks a claim does', (t) => {
+  const h = makeRepo(t);
+  h.init();
+  h.ok(['task', 'add', '--title', 'A', '--acceptance', 'a']);
+  h.ok(['task', 'add', '--title', 'B', '--acceptance', 'b']);
+  h.ok(['claim', 'T1', '--agent', 'w-1']);
+  h.ok(['renew', 'T1', '--agent', 'w-1']);
+  // The lease expires before each blocker lands: a live claim cannot change its dependencies without --interrupt.
+  const expire = () => {
+    const doc = h.readState('tasks.json');
+    doc.tasks[0].claim.until = new Date(Date.now() - 1000).toISOString();
+    h.writeState('tasks.json', doc);
+  };
+  const refuseRenewal = (refusal) => {
+    const claim = structuredClone(h.readState('tasks.json').tasks[0].claim);
+    const renew = h.run(['renew', 'T1', '--agent', 'w-1']);
+    assert.equal(renew.code, 1, renew.stdout);
+    assert.match(renew.stderr, refusal);
+    assert.deepEqual(h.readState('tasks.json').tasks[0].claim, claim, 'a refused renewal leaves the expired claim unchanged');
+  };
+  // Clearing each blocker after its refusal shows the same expired claim renews once it is ready.
+  const cases = [
+    { add: ['task', 'update', 'T1', '--dep', 'T2'], clear: ['task', 'update', 'T1', '--dep', ''], refusal: /T1 is blocked: depends on T2 \(todo\)/ },
+    { add: ['task', 'update', 'T1', '--needs-owner', 'await prerequisite'], clear: ['task', 'update', 'T1', '--needs-owner', ''], refusal: /T1 is blocked: needs owner: await prerequisite/ },
+  ];
+  for (const c of cases) {
+    expire();
+    h.ok(c.add);
+    refuseRenewal(c.refusal);
+    h.ok(c.clear);
+    h.ok(['renew', 'T1', '--agent', 'w-1']);
+    assert.ok(Date.parse(h.readState('tasks.json').tasks[0].claim.until) > Date.now(), 'once the blocker is gone, the renewal stands');
+  }
+
+  expire();
+  h.ok(['ask', '--question', 'Ship on Friday?', '--option', 'yes', '--option', 'no', '--blocks', 'T1']);
+  refuseRenewal(/T1 is blocked: waits for decision D1: Ship on Friday\?/);
+});
+
 test('only the claimant submits, renews or releases', (t) => {
   const h = makeRepo(t);
   h.init();
