@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
-const { makeRepo } = require('./helpers');
+const { makeRepo, cachedFixture } = require('./helpers');
 const TOML = require('../lib/toml');
 
 const NO_STUBS = process.platform === 'win32' && 'harness stubs are shebang scripts';
@@ -13,14 +13,14 @@ const SECRET_KEY = 'TC_PRIVATE_ENV_FILE_KEY';
 const SECRET = 'private-file-value $literal `literal`';
 
 function setup(t, harness = 'codex') {
-  const h = makeRepo(t);
-  h.init();
-  h.ok(['task', 'add', '--title', 'Toolchain probe', '--acceptance', 'lock written']);
-  h.ok(['brief', 'set', 'T1', '-'], { input: 'probe' });
-  h.ok(['ladder', 'set', 'medium', '--harness', harness,
-    ...(harness === 'codex' ? ['--profile', 'sol', '--clear', 'model'] : ['--model', 'opus', '--clear', 'profile']),
-    '--clear', 'effort', '--clear', 'args']);
-  return h;
+  return cachedFixture(t, harness, (h) => {
+    h.init();
+    h.ok(['task', 'add', '--title', 'Toolchain probe', '--acceptance', 'lock written']);
+    h.ok(['brief', 'set', 'T1', '-'], { input: 'probe' });
+    h.ok(['ladder', 'set', 'medium', '--harness', harness,
+      ...(harness === 'codex' ? ['--profile', 'sol', '--clear', 'model'] : ['--model', 'opus', '--clear', 'profile']),
+      '--clear', 'effort', '--clear', 'args']);
+  });
 }
 
 function noFileSecrets(dir) {

@@ -1,0 +1,1 @@
+- Canary supervisor tests wait for the readiness marker's PID instead of treating a newly created empty file as ready. Both harness tests exercise the gap between file creation and the agent's write.

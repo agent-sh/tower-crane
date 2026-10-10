@@ -1,0 +1,2 @@
+- The Plan scroll test waits for the page's load frame before setting scroll offsets, so the initial fragment reset cannot race its live-update assertions.
+- The mutation sample targets the current identity, provider-config and page-token checks, preserving the same planted bugs after those checks moved.

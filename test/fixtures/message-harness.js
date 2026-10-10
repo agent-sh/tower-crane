@@ -50,6 +50,30 @@ async function main() {
     if (Date.now() >= deadline) throw new Error('message test never released harness');
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
+  if (harness === 'claude' && process.env.MESSAGE_HEADLESS) {
+    // Stop is asked twice, so the test shows the hold is taken once. A resumed
+    // turn reports, then ends with an empty final message.
+    const mode = process.env.MESSAGE_HEADLESS;
+    const settings = JSON.parse(fs.readFileSync(path.join(process.env.CLAUDE_CONFIG_DIR, 'settings.json')));
+    const hookWith = (name, body) => {
+      const command = settings.hooks[name][0].hooks[0].command;
+      const text = cp.execSync(command, {
+        input: JSON.stringify({ hook_event_name: name, ...body }), encoding: 'utf8', timeout: 15000,
+      }).trim();
+      return text ? JSON.parse(text) : {};
+    };
+    const background = ['background', 'submitted'].includes(mode);
+    const report = mode === 'silent' ? '' : 'last report from claude';
+    const reports = mode === 'resumed' ? ['last report from claude', ''] : [report, report];
+    if (background) out.turns.push(hookWith('PostToolUse', {
+      tool_name: 'Bash', tool_input: { command: 'gh pr checks 1 --watch', run_in_background: true },
+    }));
+    if (mode === 'submitted') cli('submit', 'T1', '--sha', 'abcdef1');
+    out.stops = reports.map((last) => hookWith('Stop', { last_assistant_message: last }));
+    out.blocked = out.stops.some((stop) => stop.decision === 'block');
+    fs.writeFileSync(process.env.MESSAGE_OUT, JSON.stringify(out));
+    return;
+  }
   if (harness === 'claude' || harness === 'codex' && process.env.MESSAGE_NOTIFY_ONLY !== '1') {
     const settings = harness === 'claude'
       ? JSON.parse(fs.readFileSync(path.join(process.env.CLAUDE_CONFIG_DIR, 'settings.json')))
@@ -73,7 +97,8 @@ async function main() {
     out.blocked = held.decision === 'block';
     out.turns.push(held);
     out.turns.push(hook('UserPromptSubmit'));
-    hook('Stop');
+    // An orchestrator's Stop holds while tasks are open; the test ends it.
+    if (process.env.MESSAGE_ORCHESTRATOR !== '1') hook('Stop');
   } else if (harness === 'pi') {
     const handlers = {};
     const pi = { on: (name, fn) => { handlers[name] = fn; }, sendMessage: (m, options) => {

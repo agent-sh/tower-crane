@@ -4,25 +4,58 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { makeRepo } = require('./helpers');
+const { makeRepo, cachedFixture } = require('./helpers');
 const { gateFixture, gateEvidence } = require('./gate-helpers');
 
-function submitted(h, extra = [], kind = 'code') {
-  h.sha = gateFixture(h);
-  h.ok(['project', 'set', '--repo', 'acme/demo']);
-  h.ok(['task', 'add', '--title', 'Change', '--acceptance', 'it works', '--kind', kind]);
-  h.ok(['claim', 'T1', '--agent', 'w-1']);
-  h.ok(['submit', 'T1', '--sha', h.sha.slice(0, 10), '--agent', 'w-1', ...extra]);
+// A submitted task, built once per process for each submit shape and kind.
+function submitted(t, extra = [], kind = 'code') {
+  return cachedFixture(t, JSON.stringify([extra, kind]), (h) => {
+    h.init();
+    h.sha = gateFixture(h);
+    h.ok(['project', 'set', '--repo', 'acme/demo']);
+    h.ok(['task', 'add', '--title', 'Change', '--acceptance', 'it works', '--kind', kind]);
+    h.ok(['claim', 'T1', '--agent', 'w-1']);
+    h.ok(['submit', 'T1', '--sha', h.sha.slice(0, 10), '--agent', 'w-1', ...extra]);
+    return { sha: h.sha };
+  });
 }
 
 const ev = (h, type, agent, ok = true) => ['tests', 'clean', 'ci'].includes(type)
   ? gateEvidence(h, type, agent, ok)
-  : h.ok(['evidence', 'T1', '--type', type, ok ? '--ok' : '--fail', '--sha', h.sha, '--agent', agent]);
+  : (type === 'review' && agent !== 'w-1' && h.reviewer('T1', agent),
+    h.ok(['evidence', 'T1', '--type', type, ok ? '--ok' : '--fail', '--sha', h.sha, '--agent', agent]));
 
-test('accept refuses a code task without gates, and a review by the submitter does not count', (t) => {
-  const h = makeRepo(t);
-  h.init();
-  submitted(h);
+// A reviewer that exits without recording anything, so a test sees whether
+// accept dispatched one without a real harness running.
+function silentReviewer(h) {
+  const command = JSON.stringify([process.execPath, '-e', '0', '{prompt}']);
+  for (const name of ['easy', 'medium', 'hard', 'research', 'review']) {
+    h.ok(['ladder', 'set', name, '--harness', 'command', '--clear', 'model', '--clear', 'profile', '--clear', 'effort', '--command', command]);
+  }
+}
+
+const events = (h) => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+const reviewerSpawns = (h) => events(h).filter((e) => e.cmd === 'spawn' && e.task === 'T1' && e.detail.role === 'reviewer');
+
+// The dispatched reviewer runs detached; the test must outlive it and its monitor.
+async function reviewerExited(h) {
+  const deadline = Date.now() + 20000;
+  const agents = reviewerSpawns(h).map((e) => e.detail.agent);
+  while (!agents.every((a) => events(h).some((e) => e.cmd === 'spawn exit' && e.detail.agent === a))) {
+    assert.ok(Date.now() < deadline, 'reviewer did not exit');
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+}
+
+// After a reviewer exits its monitor advances the task too, so either accept may win.
+function acceptAfterReview(h, ...args) {
+  const r = h.run(['accept', 'T1', ...args]);
+  if (r.code !== 0) assert.match(r.stderr, /T1 is accepted/);
+  assert.equal(h.readState('tasks.json').tasks[0].status, 'accepted');
+}
+
+test('accept refuses a code task without gates, and a review by the submitter does not count', async (t) => {
+  const h = submitted(t);
   h.ok(['project', 'set', '--tests-cmd', 'null']);
   const none = h.run(['accept', 'T1']);
   assert.equal(none.code, 1);
@@ -34,20 +67,20 @@ test('accept refuses a code task without gates, and a review by the submitter do
   ev(h, 'tests', 'w-1');
   ev(h, 'clean', 'w-1');
   ev(h, 'review', 'w-1');
-  const self = h.run(['accept', 'T1']);
-  assert.equal(self.code, 1);
-  assert.match(self.stderr, /only the submitter \(w-1\) reviewed/);
+  assert.match(h.json(['task', 'show', 'T1']).gates.missing.join('; '), /only the submitter \(w-1\) reviewed/);
+  // The submitter's own review stands in for no one, so accept dispatches the reviewer.
+  silentReviewer(h);
+  assert.equal(h.json(['accept', 'T1']).review_pending, true);
+  assert.equal(reviewerSpawns(h).length, 1);
   assert.equal(h.readState('tasks.json').tasks[0].status, 'submitted');
+  await reviewerExited(h);
 
   ev(h, 'review', 'r-1');
-  h.ok(['accept', 'T1']);
-  assert.equal(h.readState('tasks.json').tasks[0].status, 'accepted');
+  acceptAfterReview(h);
 });
 
 test('the latest evidence at the submitted sha decides, and other shas do not count', (t) => {
-  const h = makeRepo(t);
-  h.init();
-  submitted(h, ['--pr', '7']);
+  const h = submitted(t, ['--pr', '7']);
   ev(h, 'tests', 'w-1');
   ev(h, 'clean', 'w-1');
   ev(h, 'review', 'r-1');
@@ -71,9 +104,7 @@ test('the latest evidence at the submitted sha decides, and other shas do not co
 });
 
 test('a revision bump invalidates earlier evidence', (t) => {
-  const h = makeRepo(t);
-  h.init();
-  submitted(h);
+  const h = submitted(t);
   ev(h, 'tests', 'w-1');
   ev(h, 'clean', 'w-1');
   ev(h, 'review', 'r-1');
@@ -90,9 +121,7 @@ test('a revision bump invalidates earlier evidence', (t) => {
 });
 
 test('an accepted task keeps its acceptance, dependencies and kind until it is sent back', (t) => {
-  const h = makeRepo(t);
-  h.init();
-  submitted(h);
+  const h = submitted(t);
   ev(h, 'tests', 'w-1');
   ev(h, 'clean', 'w-1');
   ev(h, 'review', 'r-1');
@@ -126,29 +155,65 @@ test('an accepted task keeps its acceptance, dependencies and kind until it is s
   assert.deepEqual(h.json(['ready']).ready.map((x) => x.id), ['T1', 'T3'], 'T2 waits for T1 again');
 });
 
-test('other kinds need only a review from another agent', (t) => {
-  const h = makeRepo(t);
-  h.init();
-  submitted(h, [], 'docs');
+test('other kinds need only a review from another agent', async (t) => {
+  const h = submitted(t, [], 'docs');
   ev(h, 'review', 'w-1');
-  assert.equal(h.run(['accept', 'T1']).code, 1);
+  silentReviewer(h);
+  assert.equal(h.json(['accept', 'T1']).review_pending, true);
+  await reviewerExited(h);
   ev(h, 'review', 'r-1');
-  h.ok(['accept', 'T1']);
+  acceptAfterReview(h);
+});
+
+test('review evidence counts only from a reviewer spawned for that head and revision, or the owner', async (t) => {
+  const h = submitted(t, [], 'docs');
+  // I6: a name no spawn started records an ok review; it is kept but does not count.
+  h.ok(['evidence', 'T1', '--type', 'review', '--ok', '--sha', h.sha, '--agent', 'made-up-reviewer']);
+  const show = h.ok(['task', 'show', 'T1']);
+  assert.match(show, /gates: review missing/);
+  assert.match(show, /review ok at \w+ by made-up-reviewer .*\(does not count\)/);
+  const reason = /review by made-up-reviewer does not count: not a reviewer spawned for T1 at \w+ revision 1, nor the owner/;
+  assert.match(h.json(['task', 'show', 'T1']).gates.missing.join('; '), reason);
+  // I7: the orchestrator cannot accept on it, and it does not hold back the real reviewer.
+  silentReviewer(h);
+  const forged = h.json(['accept', 'T1', '--agent', 'orchestrator']);
+  assert.equal(forged.review_pending, true);
+  assert.equal(reviewerSpawns(h).length, 1);
+  assert.equal(h.readState('tasks.json').tasks[0].status, 'submitted');
+  await reviewerExited(h);
+  // The board ledger, the owner's view of what counts, agrees with the gate.
+  const sheet = fs.readFileSync(path.join(h.state, 'sketch.html'), 'utf8').match(/<article id="T1"[\s\S]*?<\/article>/)[0];
+  assert.match(sheet, /made-up-reviewer[\s\S]*?class="nocount">\(does not count: not a spawned reviewer\)/);
+
+  // A reviewer spawn for another head, revision or task, or as a worker, does not vouch for it.
+  h.reviewer('T1', 'r-other-sha', 'fffffff');
+  h.ok(['evidence', 'T1', '--type', 'review', '--ok', '--sha', h.sha, '--agent', 'r-other-sha']);
+  const worker = { at: new Date().toISOString(), agent: 'orchestrator', cmd: 'spawn', task: 'T1',
+    detail: { agent: 'worker-T1-9', role: 'worker', sha: h.sha, revision: 1, pid: 999999, attempt: 1 } };
+  fs.appendFileSync(path.join(h.state, 'events.jsonl'), `${JSON.stringify(worker)}\n`);
+  h.ok(['evidence', 'T1', '--type', 'review', '--ok', '--sha', h.sha, '--agent', 'worker-T1-9']);
+  assert.match(h.json(['task', 'show', 'T1']).gates.missing.join('; '), /review by made-up-reviewer, r-other-sha, worker-T1-9 does not count/);
+
+  h.reviewer('T1', 'reviewer-T1-7');
+  h.ok(['evidence', 'T1', '--type', 'review', '--ok', '--sha', h.sha, '--agent', 'reviewer-T1-7']);
+  acceptAfterReview(h, '--agent', 'orchestrator');
+});
+
+test('the owner review counts without a reviewer spawn', (t) => {
+  const h = submitted(t, [], 'docs');
+  h.ok(['evidence', 'T1', '--type', 'review', '--ok', '--sha', h.sha, '--agent', 'owner']);
+  h.ok(['accept', 'T1', '--agent', 'orchestrator']);
 });
 
 test('accept runs missing CI for a non-code task with a PR', (t) => {
-  const h = makeRepo(t);
-  h.init();
-  submitted(h, ['--pr', '7'], 'docs');
+  const h = submitted(t, ['--pr', '7'], 'docs');
   ev(h, 'review', 'r-1');
   h.ok(['accept', 'T1']);
   assert.equal(h.readState('tasks.json').tasks[0].evidence.at(-1).type, 'ci');
 });
 
 test('only the owner can waive tests or clean, the orchestrator escalates, and a refused accept records no waiver', (t) => {
-  const h = makeRepo(t);
-  h.init();
-  submitted(h);
+  const h = submitted(t);
   ev(h, 'review', 'r-1');
   const notOwner = h.run(['accept', 'T1', '--waive', 'tests', '--reason', 'no test harness', '--agent', 'orchestrator']);
   assert.equal(notOwner.code, 1);
@@ -190,9 +255,7 @@ function reviewerCapped(h) {
 
 for (const [state, makeOut] of [['capped', reviewerCapped], ['down', reviewerDown]]) {
   test(`the orchestrator waives review only for a ${state} reviewer and the waiver counts`, (t) => {
-    const h = makeRepo(t);
-    h.init();
-    submitted(h);
+    const h = submitted(t);
     ev(h, 'tests', 'orchestrator');
     ev(h, 'clean', 'orchestrator');
     const waive = ['accept', 'T1', '--waive', 'review', '--reason', `reviewer ${state}`];
@@ -215,9 +278,7 @@ for (const [state, makeOut] of [['capped', reviewerCapped], ['down', reviewerDow
 }
 
 test('rework sends the task back with the reason in the brief, and it can be claimed again', (t) => {
-  const h = makeRepo(t);
-  h.init();
-  submitted(h);
+  const h = submitted(t);
   h.ok(['brief', 'set', 'T1', '-'], { input: '# Brief\n\nDo the change.\n' });
   assert.equal(h.run(['rework', 'T1']).code, 2);
   h.ok(['rework', 'T1', '--reason', 'handle the empty key case', '--agent', 'r-1']);

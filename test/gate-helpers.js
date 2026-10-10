@@ -79,7 +79,8 @@ function gateFixture(h) {
 const fs = require('node:fs');
 const args = process.argv.slice(2);
 if (process.env.FIXTURE_GH_LOG) fs.appendFileSync(process.env.FIXTURE_GH_LOG, JSON.stringify(args) + '\\n');
-const merged = process.env.FIXTURE_MERGED;
+// FIXTURE_MERGED_PER_PR gives each PR its own merge marker.
+const merged = process.env.FIXTURE_MERGED && process.env.FIXTURE_MERGED + (process.env.FIXTURE_MERGED_PER_PR ? '-' + args[2] : '');
 if (args[0] === 'pr' && args[1] === 'merge') {
   fs.writeFileSync(merged, 'merged');
 } else if (args[0] === 'pr') {
@@ -89,6 +90,8 @@ if (args[0] === 'pr' && args[1] === 'merge') {
     mergeable: 'MERGEABLE',
     mergeStateStatus: 'CLEAN',
     headRefName: process.env['FIXTURE_PR_HEAD_' + pr] || process.env.FIXTURE_PR_HEAD || 'fixture-change',
+    baseRefName: process.env.FIXTURE_PR_BASE || 'main',
+    isCrossRepository: false,
     state: process.env['FIXTURE_PR_STATE_' + pr] || process.env.FIXTURE_PR_STATE || (fs.existsSync(merged) ? 'MERGED' : 'OPEN'),
     mergeCommit: {oid: process.env.FIXTURE_SHA},
   }));

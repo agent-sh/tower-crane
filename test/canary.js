@@ -80,11 +80,14 @@ function processListing() {
   return parts.join('\n');
 }
 
-// The file's text once it exists, or null after ms; read, not checked first.
-async function waitFor(file, ms = 20000) {
+// Empty files signal events; PID markers need content after file creation.
+async function waitFor(file, { ms = 20000, nonempty = false } = {}) {
   const deadline = Date.now() + ms;
   for (;;) {
-    try { return fs.readFileSync(file, 'utf8'); } catch (e) {
+    try {
+      const text = fs.readFileSync(file, 'utf8');
+      if (!nonempty || text) return text;
+    } catch (e) {
       if (e.code !== 'ENOENT') throw e;
     }
     if (Date.now() >= deadline) return null;

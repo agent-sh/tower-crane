@@ -5,7 +5,8 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
-const { makeRepo, BIN } = require('./helpers');
+const { once } = require('node:events');
+const { cachedFixture, BIN } = require('./helpers');
 
 const STUB = path.join(__dirname, 'fixtures', 'message-harness.js');
 const events = (h) => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
@@ -18,32 +19,35 @@ async function until(file) {
   }
 }
 
+// Built once per process for each harness and copied for each test.
 function setup(t, harness) {
-  const h = makeRepo(t);
-  h.init();
-  h.ok(['task', 'add', '--title', 'Hook messages', '--acceptance', 'message arrives', '--tier', 'easy']);
-  h.ok(['brief', 'set', 'T1', '-'], { input: 'exercise hooks\n' });
-  const ready = path.join(h.base, 'ready');
-  const out = path.join(h.base, 'report.json');
-  const bin = path.join(h.base, 'bin');
-  fs.mkdirSync(bin);
-  const program = path.join(bin, harness + (process.platform === 'win32' ? '.exe' : ''));
-  fs.writeFileSync(program, `#!${process.execPath}\nrequire(${JSON.stringify(STUB)});\n`, { mode: 0o755 });
-  const preload = path.join(h.base, 'native.js');
-  fs.writeFileSync(preload, `const cp = require('node:child_process');\nconst spawn = cp.spawn;\ncp.spawn = function(cmd, args, opts) { return cmd === ${JSON.stringify(harness)} ? spawn.call(this, process.execPath, [${JSON.stringify(program)}, ...args], opts) : spawn.call(this, cmd, args, opts); };\n`);
-  const pathKey = Object.keys(h.env).find((key) => key.toUpperCase() === 'PATH') || 'PATH';
-  Object.assign(h.env, {
-    MESSAGE_HARNESS: harness, MESSAGE_READY: ready, MESSAGE_OUT: out,
-    [pathKey]: bin + path.delimiter + (h.env[pathKey] || ''),
-    CODEX_HOME: path.join(h.base, 'codex'), CLAUDE_CONFIG_DIR: path.join(h.base, 'claude'),
-    ...(process.platform === 'win32' ? { NODE_OPTIONS: `--require "${preload.replace(/\\/g, '/')}"` } : {}),
+  const h = cachedFixture(t, harness, (h) => {
+    h.init();
+    h.ok(['task', 'add', '--title', 'Hook messages', '--acceptance', 'message arrives', '--tier', 'easy']);
+    h.ok(['brief', 'set', 'T1', '-'], { input: 'exercise hooks\n' });
+    const ready = path.join(h.base, 'ready');
+    const out = path.join(h.base, 'report.json');
+    const bin = path.join(h.base, 'bin');
+    fs.mkdirSync(bin);
+    const program = path.join(bin, harness + (process.platform === 'win32' ? '.exe' : ''));
+    fs.writeFileSync(program, `#!${process.execPath}\nrequire(${JSON.stringify(STUB)});\n`, { mode: 0o755 });
+    const preload = path.join(h.base, 'native.js');
+    fs.writeFileSync(preload, `const cp = require('node:child_process');\nconst spawn = cp.spawn;\ncp.spawn = function(cmd, args, opts) { return cmd === ${JSON.stringify(harness)} ? spawn.call(this, process.execPath, [${JSON.stringify(program)}, ...args], opts) : spawn.call(this, cmd, args, opts); };\n`);
+    const pathKey = Object.keys(h.env).find((key) => key.toUpperCase() === 'PATH') || 'PATH';
+    Object.assign(h.env, {
+      MESSAGE_HARNESS: harness, MESSAGE_READY: ready, MESSAGE_OUT: out,
+      [pathKey]: bin + path.delimiter + (h.env[pathKey] || ''),
+      CODEX_HOME: path.join(h.base, 'codex'), CLAUDE_CONFIG_DIR: path.join(h.base, 'claude'),
+      ...(process.platform === 'win32' ? { NODE_OPTIONS: `--require "${preload.replace(/\\/g, '/')}"` } : {}),
+    });
+    const flags = ['ladder', 'set', 'easy', '--harness', harness, '--clear', 'profile', '--clear', 'effort'];
+    if (harness !== 'command') flags.push('--model', 'stub-model');
+    else flags.push('--clear', 'model');
+    if (harness === 'command') flags.push('--command', JSON.stringify([process.execPath, STUB, '{session}', '{prompt}']));
+    h.ok(flags);
+    return { ready, out, bin };
   });
-  const flags = ['ladder', 'set', 'easy', '--harness', harness, '--clear', 'profile', '--clear', 'effort'];
-  if (harness !== 'command') flags.push('--model', 'stub-model');
-  else flags.push('--clear', 'model');
-  if (harness === 'command') flags.push('--command', JSON.stringify([process.execPath, STUB, '{session}', '{prompt}']));
-  h.ok(flags);
-  return { h, ready, out, bin };
+  return { h, ready: h.ready, out: h.out, bin: h.bin };
 }
 
 for (const route of ['claude', 'codex', 'codex-notify', 'pi', 'opencode', 'agy', 'command']) {
@@ -53,6 +57,12 @@ for (const route of ['claude', 'codex', 'codex-notify', 'pi', 'opencode', 'agy',
     if (route === 'codex-notify') h.env.MESSAGE_NOTIFY_ONLY = '1';
     const run = h.runAsync(['spawn', '--task', 'T1', '--wait', '--json']);
     await until(ready);
+    if (harness === 'claude') {
+      const settings = JSON.parse(fs.readFileSync(path.join(h.state, 'homes', 'worker-T1-1', 'settings.json')));
+      for (const event of ['UserPromptSubmit', 'PostToolUse', 'Stop']) {
+        assert.ok(settings.hooks[event][0].hooks[0].timeout >= 135, 'generated timeout covers both bridge calls');
+      }
+    }
     h.ok(['msg', '--to', 'worker-T1-1', '--task', 'T1', 'mid-run coordination', '--agent', 'orchestrator']);
     fs.writeFileSync(ready + '.go', '');
     const live = ['claude', 'codex', 'pi', 'opencode'].includes(harness) && route !== 'codex-notify';
@@ -136,6 +146,21 @@ test('successful push and PR creation publish events, and submitted stops retain
   assert.match(reports[0].detail.text, /last report from command/);
 });
 
+test('R1: a push or PR event recorded with no command is marked as an unverified hint', async (t) => {
+  const { h, ready } = setup(t, 'command');
+  const run = h.runAsync(['spawn', '--task', 'T1', '--wait', '--json']);
+  await until(ready);
+  fs.writeFileSync(ready + '.go', '');
+  assert.equal((await run).code, 0);
+  // The worker's own binding, and no push or PR made: the shim never ran.
+  const binding = path.join(h.state, 'homes', 'worker-T1-1', 'hook.json');
+  for (const action of ['git-push', 'pr-created']) {
+    h.ok(['hook', action, '--binding', binding, '--agent', 'worker-T1-1', '--state', h.state]);
+    const e = events(h).findLast((row) => row.cmd === `hook ${action}`);
+    assert.equal(e?.detail.unverified, true, `hook ${action} must not read as a verified push or PR`);
+  }
+});
+
 test('the bridge refuses path-selected bindings and another dispatch identity', async (t) => {
   const { h, ready } = setup(t, 'command');
   const run = h.runAsync(['spawn', '--task', 'T1', '--wait', '--json']);
@@ -163,6 +188,46 @@ test('the bridge refuses path-selected bindings and another dispatch identity', 
   });
   assert.notEqual(mismatch.status, 0);
   assert.equal(fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8'), before);
+});
+
+test('the hook bridge reads hook input from a non-blocking stdin pipe', { skip: process.platform === 'win32' && 'needs a FIFO' }, async (t) => {
+  const { h, ready } = setup(t, 'command');
+  const run = h.runAsync(['spawn', '--task', 'T1', '--wait', '--json']);
+  await until(ready);
+  fs.writeFileSync(ready + '.go', '');
+  assert.equal((await run).code, 0);
+  h.ok(['msg', '--to', 'worker-T1-1', 'pipe delivered message', '--agent', 'orchestrator']);
+  const bridge = path.join(__dirname, '..', 'lib', 'hook-bridge.js');
+  const preload = path.join(__dirname, 'fixtures', 'stdin-marker.js');
+  const binding = path.join(h.state, 'homes', 'worker-T1-1', 'hook.json');
+  const marker = path.join(h.base, 'stdin-read');
+  // libuv resets fds 0-2 of each child to blocking, so the preload reopens the
+  // FIFO on fd 0 with O_NONBLOCK, as a hook runner's stdin is: an empty read
+  // gives EAGAIN. The parent opens the FIFO once, read-write, so it holds the
+  // writer without blocking and closes it to send EOF.
+  const fifo = path.join(h.base, 'stdin.fifo');
+  cp.execFileSync('mkfifo', [fifo]);
+  const writer = fs.openSync(fifo, fs.constants.O_RDWR);
+  const env = { ...h.env, TOWER_CRANE_AGENT: 'worker-T1-1', TOWER_CRANE_STATE: h.state, TOWER_CRANE_HOOK: binding, STDIN_MARKER: marker, STDIN_FIFO: fifo };
+  const child = cp.spawn(process.execPath, ['--require', preload, bridge, 'hook'], {
+    env, stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  t.after(() => child.kill());
+  // Listen before the bridge can exit: a failing bridge may exit inside the wait below.
+  const closed = once(child, 'close');
+  let out = '';
+  let err = '';
+  child.stdout.setEncoding('utf8').on('data', (chunk) => { out += chunk; });
+  child.stderr.setEncoding('utf8').on('data', (chunk) => { err += chunk; });
+  // Deliver input only once the bridge is reading, so an empty read is seen.
+  await until(marker);
+  fs.writeSync(writer, JSON.stringify({ hook_event_name: 'UserPromptSubmit' }));
+  fs.closeSync(writer);
+  const [code] = await closed;
+  assert.equal(code, 0, err);
+  const { hookSpecificOutput } = JSON.parse(out);
+  assert.equal(hookSpecificOutput.hookEventName, 'UserPromptSubmit');
+  assert.match(hookSpecificOutput.additionalContext, /pipe delivered message/);
 });
 
 for (const probe of ['sessions', 'reject', 'error']) {
@@ -218,3 +283,54 @@ test('refused commands without a context placeholder retain messages', (t) => {
   assert.equal(fs.existsSync(ready), false);
   assert.ok(!events(h).some((e) => e.cmd === 'hook inbox' && e.detail.messages.length));
 });
+
+// Stop holds a worker that still holds its task when the turn ends with a background
+// job or an empty final message, once. The stop index is the held one (-1 for none).
+// A pending job sends the orchestrator no note.
+const HEADLESS = [
+  ['background', 0, null],
+  ['silent', 0, /stopped without submit/],
+  ['resumed', 1, /stopped without submit/],
+  ['submitted', -1, /stopped after submit/],
+  ['reported', -1, /stopped without submit/],
+];
+for (const [mode, heldAt, note] of HEADLESS) {
+  const expected = heldAt >= 0 ? 'holds the unsubmitted worker once, in the foreground' : 'does not hold';
+  test(`headless claude ${mode}: Stop ${expected}`, async (t) => {
+    const { h, ready, out } = setup(t, 'claude');
+    const run = h.runAsync(['spawn', '--task', 'T1', '--wait', '--json'], { env: { MESSAGE_HEADLESS: mode } });
+    await until(ready);
+    fs.writeFileSync(ready + '.go', '');
+    const result = await run;
+    assert.equal(result.code, 0, result.stderr);
+    JSON.parse(fs.readFileSync(out)).stops.forEach((stop, i) => {
+      if (i !== heldAt) {
+        assert.equal(stop.decision, undefined, `stop ${i} is not held`);
+        return;
+      }
+      assert.equal(stop.decision, 'block');
+      assert.match(stop.reason, /tower-crane wait --task T1 --timeout SEC/);
+      assert.match(stop.reason, /foreground/);
+    });
+    const audit = events(h);
+    const waits = audit.filter((e) => e.cmd === 'hook wait');
+    assert.equal(waits.length, heldAt >= 0 ? 1 : 0, 'the hold is taken once');
+    if (mode === 'background' || mode === 'submitted') {
+      assert.ok(audit.some((e) => e.cmd === 'hook background' && e.agent === 'worker-T1-1'), 'background start missing');
+    }
+    const notes = audit.filter((e) => e.cmd === 'msg' && e.detail.to === 'orchestrator' && /stopped/.test(e.detail.text));
+    if (note) {
+      assert.equal(notes.length, 1, 'the orchestrator hears one stop note');
+      assert.match(notes[0].detail.text, note);
+      if (mode === 'resumed') {
+        // The earlier turn's report still reaches the orchestrator, and the empty stop holds after it.
+        assert.match(notes[0].detail.text, /last report from claude/);
+        assert.ok(audit.indexOf(notes[0]) < audit.indexOf(waits[0]), 'the first stop note precedes the hold');
+      } else if (heldAt >= 0) {
+        assert.ok(audit.indexOf(waits[0]) < audit.indexOf(notes[0]), 'the hold must come before the note');
+      }
+    } else {
+      assert.equal(notes.length, 0, 'a pending job sends no stop note');
+    }
+  });
+}

@@ -127,16 +127,11 @@ test('a command harness is told to read global rules and the repository chain', 
   assert.ok(prompt.includes('"the agent knows the goal"'), 'the acceptance travels with the brief');
 });
 
-for (const harness of ['opencode', 'agy', 'pi']) {
+for (const harness of ['opencode', 'pi']) {
   test(`${harness} names the user's global rules in the prompt and receipt`, { skip: NO_STUBS }, (t) => {
     const { h, home, env, report } = setup(t);
     const globals = {
       opencode: [path.join(home, '.config', 'opencode', 'AGENTS.md')],
-      agy: [
-        path.join(home, '.gemini', 'GEMINI.md'),
-        path.join(home, '.gemini', 'config', 'AGENTS.md'),
-        path.join(home, '.gemini', 'config', 'rules', 'house.md'),
-      ],
       pi: [path.join(home, '.pi', 'agent', 'AGENTS.md')],
     }[harness];
     for (const file of globals) {
@@ -159,6 +154,32 @@ for (const harness of ['opencode', 'agy', 'pi']) {
   });
 }
 
+test('agy keeps project instructions but excludes user memory and imported modular rules', { skip: NO_STUBS }, t => {
+  const { h, home, env } = setup(t);
+  const gemini = path.join(home, '.gemini');
+  const memory = path.join(gemini, 'GEMINI.md');
+  const modular = path.join(gemini, 'config', 'rules', 'private.md');
+  fs.mkdirSync(path.dirname(modular), { recursive: true });
+  fs.writeFileSync(memory, 'PLANTED-AGY-MEMORY\n');
+  fs.writeFileSync(modular, 'PLANTED-AGY-RULE\n');
+  const linkedRule = path.join(home, 'private-rule.md');
+  fs.writeFileSync(linkedRule, 'PLANTED-AGY-LINKED-RULE\n');
+  fs.symlinkSync(linkedRule, path.join(gemini, 'config', 'rules', 'linked.md'));
+  const project = path.join(h.repo, 'AGENTS.md');
+  fs.writeFileSync(project, `PROJECT-RULES\n@${memory}\n@${modular}\n@${linkedRule}\n`);
+  h.git(['add', 'AGENTS.md']);
+  h.git(['commit', '-qm', 'Plant imported memory paths']);
+  h.ok(['ladder', 'set', 'small', '--harness', 'agy', '--model', 'stub',
+    '--clear', 'profile', '--clear', 'effort', '--clear', 'args']);
+  const dry = h.json(['spawn', '--role', 'small', '--task', 'T1', '--dry-run'], { env });
+  assert.ok(dry.startup.rules.some(rule => path.basename(rule.path) === 'AGENTS.md' && rule.scope === 'project'));
+  assert.ok(dry.startup.rules.every(rule => rule.scope !== 'global' && !rule.path.startsWith(gemini) && rule.path !== linkedRule));
+  const prompt = dry.argv.find(arg => arg.includes('## House rules'));
+  assert.ok(!prompt.includes(memory));
+  assert.ok(!prompt.includes(modular));
+  assert.ok(!prompt.includes(linkedRule));
+});
+
 test('opencode and pi global discovery follows their configured directories and fallback files', { skip: NO_STUBS }, (t) => {
   const { h, env } = setup(t);
   for (const [harness, key, name] of [['opencode', 'XDG_CONFIG_HOME', 'AGENTS.md'], ['pi', 'PI_CODING_AGENT_DIR', 'CLAUDE.md']]) {
@@ -169,6 +190,14 @@ test('opencode and pi global discovery follows their configured directories and 
     h.ok(['ladder', 'set', 'small', '--harness', harness, '--model', 'stub', '--clear', 'profile', '--clear', 'effort', '--clear', 'args']);
     const dry = h.json(['spawn', '--role', 'small', '--task', 'T1', '--dry-run'], { env: { ...env, [key]: dir } });
     assert.ok(dry.startup.rules.some((f) => f.path === file && f.scope === 'global' && f.loaded === 'read'));
+    if (harness === 'pi') {
+      h.json(['spawn', '--role', 'small', '--task', 'T1', '--wait'], { env: { ...env, [key]: dir } });
+      const nested = h.json(['spawn', '--role', 'small', '--task', 'T1', '--dry-run'], {
+        env: { ...env, HOME: dry.env.HOME, USERPROFILE: dry.env.HOME, [key]: dry.env.PI_CODING_AGENT_DIR },
+      });
+      assert.ok(nested.startup.rules.some((f) => f.path === file && f.scope === 'global' && f.loaded === 'read'));
+      assert.ok(!nested.startup.rules.some((f) => f.path.startsWith(dry.home.path + path.sep)));
+    }
   }
 });
 

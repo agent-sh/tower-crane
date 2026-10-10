@@ -1,0 +1,2 @@
+- Retire every approval satisfied by an owner write, including commands that write additional settings or ladder fields. Keep targets and replacement values exact, compare project JSON values independently of formatting, and preserve strict orchestrator approval matching.
+- Retire matching personal-fallback approvals when the owner writes the requested full list, including operational-only and unchanged writes. Audit and authorization still use the fields that actually changed.

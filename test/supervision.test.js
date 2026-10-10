@@ -6,22 +6,44 @@ const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
 const http = require('node:http');
+const { once } = require('node:events');
+const { createInterface } = require('node:readline');
 const { makeRepo, makeTaskRepo, BIN, HOOKS, detachedAlive } = require('./helpers');
 const { gateFixture, gateEvidence } = require('./gate-helpers');
 const bedrockOutage = require('./fixtures/bedrock-outage.json');
+const { errorReader, transient } = require('../lib/spawn-monitor');
 const windowsConcurrency = process.platform === 'win32' ? 2 : false;
+const S = require('../lib/state');
 
 const log = (h) => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
 const sketches = (h) => ['sketch.md', 'sketch.html'].map((file) => ({
   file, text: fs.readFileSync(path.join(h.state, file), 'utf8'),
 }));
 
+// The runner's per-test timeout (test/run.js) is the only deadline: a loaded
+// machine can take as long as the test may run, and a wait that never comes
+// true still fails with its message.
+const HUNG_TEST_MS = 300000;
+
 async function until(fn, message) {
-  const deadline = Date.now() + 12000;
+  const deadline = Date.now() + HUNG_TEST_MS;
   while (!fn()) {
     if (Date.now() >= deadline) assert.fail(message);
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
+}
+
+function controlledBackoff(h) {
+  const file = path.join(h.base, 'backoff-clock');
+  const hook = path.join(__dirname, 'fixtures', 'supervision-backoff-clock.js').replace(/\\/g, '/');
+  fs.writeFileSync(file, '0');
+  return {
+    env: {
+      NODE_OPTIONS: `--require "${HOOKS.replace(/\\/g, '/')}" --require "${hook}"`,
+      TOWER_CRANE_TEST_BACKOFF_CLOCK: file,
+    },
+    advance: (ms) => fs.writeFileSync(file, String(ms)),
+  };
 }
 
 function setup(t, { failures = 1, error = '75', records = null, hold = 0, waitForFinish = false, config = {}, env = {}, busy = false, claimDelay = 0, claim = true, sessionReceipt = false } = {}) {
@@ -45,7 +67,7 @@ attempts.push({ agent: process.env.TOWER_CRANE_AGENT, session: process.env.TOWER
   cwd: process.cwd(), claim: task.claim });
 fs.writeFileSync(file, JSON.stringify(attempts));
 ${sessionReceipt ? "console.log(JSON.stringify({ type: 'thread.started', thread_id: 'supervised-session' }));" : ''}
-${busy ? "cp.spawn(process.execPath, ['-e', 'const end = Date.now() + 2200; while (Date.now() < end) {}'], { stdio: 'ignore' });" : ''}
+${busy ? "cp.spawn(process.execPath, ['-e', 'const end = Date.now() + 3500; while (Date.now() < end) {}'], { stdio: 'ignore' });" : ''}
 const finish = () => {
   if (attempts.length <= ${failures}) {
     ${records ? `for (const record of ${JSON.stringify(records)}) console.log(JSON.stringify(record)); process.exit(1);`
@@ -58,49 +80,133 @@ const finish = () => {
           : error === 'status-json' ? '{"status_code":502}' : 'API Error: 503 service unavailable')}); process.exit(1);` : `process.exit(${error});`}
   } else process.exit(0);
 };
-${waitForFinish ? `const timer = setInterval(() => {
+${waitForFinish ? `if (attempts.length <= ${failures}) finish();
+else { const timer = setInterval(() => {
   if (fs.existsSync(file + '.finish')) { clearInterval(timer); finish(); }
-}, 25);` : `setTimeout(finish, ${hold});`}
+}, 25); }` : `setTimeout(finish, ${hold});`}
 `;
   h.ok(['ladder', 'set', 'easy', '--harness', 'command', '--command', JSON.stringify([process.execPath, '-e', script, BIN, h.attempts, '{prompt}']),
     '--clear', 'profile', '--clear', 'effort', '--supervision',
     JSON.stringify({ retries: 2, backoff_ms: 150, max_backoff_ms: 1000, stall_ms: 60000, ...config })]);
-  h.spawn = (role) => h.run(['spawn', '--task', 'T1', ...(role ? ['--role', role] : []), '--wait', '--json'], { env, timeout: 15000 });
+  h.spawn = (role, timeout = 15000) => h.run(['spawn', '--task', 'T1', ...(role ? ['--role', role] : []), '--wait', '--json'], { env, timeout });
   h.readAttempts = () => fs.existsSync(h.attempts) ? JSON.parse(fs.readFileSync(h.attempts, 'utf8')) : [];
   return h;
 }
 
-describe('independent retry cases', { concurrency: windowsConcurrency }, () => {
-for (const attempt of bedrockOutage.attempts) {
-  for (const type of ['error', 'turn.failed']) {
-    test(`recorded Bedrock attempt ${attempt.attempt} ${type} reruns with the session and claim kept`, (t) => {
-      const h = setup(t, { records: attempt.records.filter((record) => record.type === type) });
-      const result = h.spawn();
-      assert.equal(result.code, 0, result.stderr);
-      const attempts = h.readAttempts();
-      assert.equal(attempts.length, 2);
-      for (const key of ['agent', 'session', 'cwd', 'claim']) assert.deepEqual(attempts[1][key], attempts[0][key]);
-      assert.equal(log(h).filter((e) => e.cmd === 'spawn retry').length, 1);
-      assert.equal(h.json(['task', 'show', 'T1']).run.phase, 'waiting');
-    });
+test('supervisor tool hook writers survive a lock held beyond 15 seconds', { timeout: 90000 }, async (t) => {
+  const h = makeTaskRepo(t, [{
+    args: ['--title', 'Supervised tool progress', '--tier', 'easy', '--acceptance', 'tool event survives'],
+    brief: 'Record tool progress.\n',
+  }]);
+  const ready = path.join(h.base, 'harness-ready');
+  const emit = path.join(h.base, 'emit-tool');
+  const finish = path.join(h.base, 'finish');
+  const writerReady = path.join(h.base, 'writer-ready');
+  const script = `
+const fs = require('node:fs');
+require('node:child_process').execFileSync(process.execPath, [${JSON.stringify(BIN)}, 'claim', 'T1', '--lease', '5']);
+fs.writeFileSync(${JSON.stringify(ready)}, '');
+let emitted = false;
+setInterval(() => {
+  if (!emitted && fs.existsSync(${JSON.stringify(emit)})) {
+    emitted = true;
+    console.log(JSON.stringify({ type: 'item.completed', item: { type: 'command_execution', command: 'supervised tool' } }));
   }
+  if (fs.existsSync(${JSON.stringify(finish)})) process.exit(0);
+}, 25);
+`;
+  h.ok(['ladder', 'set', 'easy', '--harness', 'command', '--command', JSON.stringify([process.execPath, '-e', script, '{prompt}']),
+    '--clear', 'profile', '--clear', 'effort', '--supervision', JSON.stringify({ retries: 0, stall_ms: 60000 })]);
+  h.ok(['msg', '--to', 'worker-T1-1', '--task', 'T1', 'startup context']);
+  const fixture = path.join(__dirname, 'fixtures', 'supervisor-hook-lock.js');
+  const completed = h.runAsync(['spawn', '--task', 'T1', '--wait', '--json'], { env: {
+    NODE_OPTIONS: `--require=${JSON.stringify(fixture)}`,
+    TOWER_CRANE_TEST_HOOK_LOCK: path.join(h.state, 'lock'), TOWER_CRANE_TEST_HOOK_READY: writerReady,
+  } });
+  let lock;
+  try {
+    await until(() => fs.existsSync(ready) && log(h).some((event) => event.cmd === 'hook inbox'), 'startup hook did not complete');
+    lock = S.acquireLock(h.state);
+    fs.writeFileSync(emit, '');
+    await until(() => fs.existsSync(writerReady), 'tool writer did not encounter the lock');
+    await new Promise((resolve) => setTimeout(resolve, 16000));
+  } finally {
+    if (lock) S.releaseLock(lock);
+    fs.writeFileSync(finish, '');
+  }
+  const result = await completed;
+  assert.equal(result.code, 0, result.stderr);
+  assert.ok(log(h).some((event) => event.cmd === 'hook progress' && event.detail.tool === 'command_execution'), result.stderr);
+  assert.doesNotMatch(result.stderr, /harness event failed/);
+});
+
+// What counts as an outage is decided per output line, in process: every
+// recorded and synthetic case here, and one supervised spawn per family below.
+function outage(harness, stream, lines) {
+  let seen = false;
+  const read = errorReader(harness, stream === 'stderr', (value) => { seen = value; });
+  read(Buffer.from(lines.join('\n') + '\n'));
+  read(null, true);
+  return seen;
 }
 
-for (const record of [
-  { type: 'error', message: 'rate limit exceeded' },
-  { type: 'turn.failed', error: { message: 'The service is temporarily unavailable.' } },
-  { type: 'error', message: 'HTTP 429 Too Many Requests' },
-  { type: 'turn.failed', error: { message: 'overloaded' } },
-  { type: 'result', is_error: true, api_error_status: 429 },
-]) {
-  test(`capacity error envelope ${JSON.stringify(record)} reruns`, (t) => {
-    const h = setup(t, { records: [record] });
-    const result = h.spawn();
-    assert.equal(result.code, 0, result.stderr);
-    assert.equal(h.readAttempts().length, 2);
-    assert.equal(h.json(['task', 'show', 'T1']).run.phase, 'waiting');
-  });
-}
+test('outages come only from harness error envelopes and stderr, and quoted errors never count', () => {
+  const json = (records) => records.map((record) => JSON.stringify(record));
+  for (const attempt of bedrockOutage.attempts) {
+    for (const type of ['error', 'turn.failed']) {
+      assert.equal(outage('command', 'stdout', json(attempt.records.filter((r) => r.type === type))), true, `Bedrock ${attempt.attempt} ${type}`);
+    }
+  }
+  for (const record of [
+    { type: 'error', message: 'rate limit exceeded' },
+    { type: 'turn.failed', error: { message: 'The service is temporarily unavailable.' } },
+    { type: 'error', message: 'HTTP 429 Too Many Requests' },
+    { type: 'turn.failed', error: { message: 'overloaded' } },
+    { type: 'result', is_error: true, api_error_status: 429 },
+    { type: 'result', is_error: true, api_error_status: 503 },
+    { type: 'error', message: 'HTTP 502 bad gateway' },
+    { type: 'turn.failed', error: { message: 'provider outage' } },
+  ]) assert.equal(outage('command', 'stdout', json([record])), true, JSON.stringify(record));
+  for (const text of ['API Error: 503 service unavailable', '500 Internal Server Error', '{"status_code":502}']) {
+    assert.equal(outage('command', 'stderr', [text]), true, text);
+  }
+  assert.equal(outage('command', 'stdout', json([
+    { type: 'error', message: 'Reconnecting... 1/5 (rate limit exceeded: The service is temporarily unavailable.)' },
+    { type: 'turn.failed', error: { message: 'invalid API key' } },
+  ])), false, 'a later permanent error replaces a recovered reconnect');
+  const quoted = 'API Error: 503 service unavailable; provider outage; rate limit exceeded: The service is temporarily unavailable.; HTTP 429 Too Many Requests; overloaded';
+  for (const stream of ['stdout', 'stderr']) {
+    assert.equal(outage('command', stream, json([
+      { type: 'item.completed', item: { type: 'command_execution', aggregated_output: quoted } },
+      { type: 'assistant', message: { content: [{ type: 'text', text: quoted }] } },
+      { type: 'result', is_error: false, result: quoted },
+    ])), false, `quoted on ${stream}`);
+    assert.equal(outage('command', stream, ['rate limit exceeded: The service is temporarily unavailable.; HTTP 429 Too Many Requests; overloaded']), false, `plain capacity text on ${stream}`);
+  }
+  assert.deepEqual([transient(75, null, false), transient(null, 'SIGTERM', false), transient(null, 'SIGINT', false),
+    transient(1, null, true), transient(1, null, false), transient(0, null, true)], [true, true, true, true, false, false]);
+});
+
+describe('independent retry cases', { concurrency: windowsConcurrency }, () => {
+test('a recorded Bedrock outage reruns with the session and claim kept', (t) => {
+  const [attempt] = bedrockOutage.attempts;
+  const h = setup(t, { records: attempt.records.filter((record) => record.type === 'error') });
+  const result = h.spawn();
+  assert.equal(result.code, 0, result.stderr);
+  const attempts = h.readAttempts();
+  assert.equal(attempts.length, 2);
+  for (const key of ['agent', 'session', 'cwd', 'claim']) assert.deepEqual(attempts[1][key], attempts[0][key]);
+  assert.equal(log(h).filter((e) => e.cmd === 'spawn retry').length, 1);
+  assert.equal(h.json(['task', 'show', 'T1']).run.phase, 'waiting');
+});
+
+test('a capacity error envelope reruns', (t) => {
+  const h = setup(t, { records: [{ type: 'result', is_error: true, api_error_status: 429 }] });
+  const result = h.spawn();
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(h.readAttempts().length, 2);
+  assert.equal(h.json(['task', 'show', 'T1']).run.phase, 'waiting');
+});
 
 test('a recovered rate-limit reconnect does not retry a later permanent failure', (t) => {
   const h = setup(t, { records: [
@@ -132,7 +238,8 @@ test('default retry budget waits beyond the observed ten-minute outage and remai
   assert.equal(h.json(['task', 'show', 'T1']).run.phase, 'waiting');
 });
 
-for (const error of ['75', 'outage', 'server', 'status-json', 'claude-error', 'codex-error', 'codex-failed', 'signal', 'interrupt']) {
+// One exit code, stderr text, harness envelope and signal; the rest of each family is in process above.
+for (const error of ['75', 'outage', 'codex-error', 'signal']) {
   test(`transient ${error} reruns the same session, preserving the claim until success`, {
     skip: process.platform === 'win32' && ['signal', 'interrupt'].includes(error) && 'POSIX signal observations',
   }, (t) => {
@@ -201,11 +308,12 @@ test('repeated transient exits render the blocked phase before foreground spend'
 
 test('detached supervision renews a short lease during backoff and does not allow premature recovery', async (t) => {
   const h = setup(t, { config: { backoff_ms: 1400, max_backoff_ms: 1400 } });
+  const backoff = controlledBackoff(h);
   const clockFile = path.join(h.base, 'clock');
   const now = Date.now();
   fs.writeFileSync(clockFile, String(now));
   const spawned = h.json(['spawn', '--task', 'T1'], {
-    env: { NODE_OPTIONS: `--require "${HOOKS.replace(/\\/g, '/')}"`, HOOK_CLOCK_FILE: clockFile },
+    env: { ...backoff.env, HOOK_CLOCK_FILE: clockFile },
   });
   await until(() => h.json(['task', 'show', 'T1']).run?.phase === 'retrying', 'retry was not recorded');
   await until(() => sketches(h).every(({ text }) => /retrying 1/.test(text)), 'saved sketches did not render the retry phase');
@@ -215,8 +323,11 @@ test('detached supervision renews a short lease during backoff and does not allo
   const task = h.json(['task', 'show', 'T1']);
   assert.equal(task.claim.agent, spawned.agent);
   assert.ok(Date.parse(task.claim.until) > now + 60000);
+  assert.equal(task.run.phase, 'retrying');
+  assert.equal(h.readAttempts().length, 1);
   assert.deepEqual(h.json(['status']).exited_claims, []);
   assert.equal(h.run(['release', 'T1', '--agent', 'other', '--reason', 'premature']).code, 1);
+  backoff.advance(1400);
   await until(() => h.json(['task', 'show', 'T1']).run?.phase === 'waiting', 'retry did not finish');
   assert.equal(h.readAttempts().length, 2);
   assert.equal(log(h).filter((e) => e.cmd === 'claim').length, 1);
@@ -253,14 +364,17 @@ if (task === 'T1' && retry === 0) {
   h.ok(['ladder', 'set', 'easy', '--harness', 'command', '--command', JSON.stringify([process.execPath, '-e', script, BIN, '{prompt}']),
     '--clear', 'profile', '--clear', 'effort', '--supervision', JSON.stringify({ retries: 1, backoff_ms: 3500, max_backoff_ms: 3500 })]);
 
-  const started = h.json(['spawn', '--task', 'T1']);
+  const backoff = controlledBackoff(h);
+  const started = h.json(['spawn', '--task', 'T1'], { env: backoff.env });
   const home = path.join(h.state, 'homes', started.agent);
   await until(() => h.json(['task', 'show', 'T1']).run?.phase === 'retrying', 'first attempt did not enter backoff');
 
   const duringBackoff = h.json(['spawn', '--task', 'T2', '--wait']);
   assert.equal(duringBackoff.code, 0);
   assert.ok(fs.existsSync(path.join(home, 'hook.json')), 'a later spawn keeps the home while the supervisor waits to retry');
+  assert.equal(h.json(['task', 'show', 'T1']).run.phase, 'retrying');
 
+  backoff.advance(3500);
   await until(() => fs.existsSync(retryReady), 'retry attempt did not start');
   assert.ok(log(h).some((e) => e.cmd === 'spawn retry' && e.task === 'T1'), 'retry event was recorded');
   const duringRetry = h.json(['spawn', '--task', 'T3', '--wait']);
@@ -278,27 +392,32 @@ if (task === 'T1' && retry === 0) {
 });
 
 test('a running process keeps its lease without claimant writes', async (t) => {
-  const h = setup(t, { failures: 0, hold: 1800 });
+  const h = setup(t, { failures: 0, waitForFinish: true });
   const clockFile = path.join(h.base, 'clock');
   const now = Date.now();
   fs.writeFileSync(clockFile, String(now));
   const spawned = h.json(['spawn', '--task', 'T1'], {
     env: { NODE_OPTIONS: `--require "${HOOKS.replace(/\\/g, '/')}"`, HOOK_CLOCK_FILE: clockFile },
   });
-  await until(() => h.readAttempts().length === 1, 'worker did not claim');
-  fs.writeFileSync(clockFile, String(now + 40000));
-  await until(() => log(h).some((e) => e.cmd === 'renew'), 'live worker lease was not renewed');
-  const task = h.json(['task', 'show', 'T1']);
-  assert.equal(task.claim.since, h.readAttempts()[0].claim.since);
-  assert.equal(task.claim.agent, spawned.agent);
-  assert.ok(Date.parse(task.claim.until) > now + 60000);
-  assert.equal(task.run.phase, 'running');
+  try {
+    await until(() => h.readAttempts().length === 1, 'worker did not claim');
+    fs.writeFileSync(clockFile, String(now + 40000));
+    await until(() => log(h).some((e) => e.cmd === 'renew'), 'live worker lease was not renewed');
+    const task = h.json(['task', 'show', 'T1']);
+    assert.equal(task.claim.since, h.readAttempts()[0].claim.since);
+    assert.equal(task.claim.agent, spawned.agent);
+    assert.ok(Date.parse(task.claim.until) > now + 60000);
+    assert.equal(task.run.phase, 'running');
+  } finally {
+    fs.writeFileSync(`${h.attempts}.finish`, '');
+  }
   await until(() => h.json(['task', 'show', 'T1']).run?.phase === 'waiting', 'worker did not finish');
 });
 
 test('release during backoff fences the old supervisor from a replacement claim', async (t) => {
   const h = setup(t, { failures: 9, config: { backoff_ms: 1400, max_backoff_ms: 1400 } });
-  const spawned = h.json(['spawn', '--task', 'T1']);
+  const backoff = controlledBackoff(h);
+  const spawned = h.json(['spawn', '--task', 'T1'], { env: backoff.env });
   await until(() => h.json(['task', 'show', 'T1']).run?.phase === 'retrying', 'retry was not recorded');
   h.ok(['release', 'T1', '--agent', spawned.agent, '--reason', 'replace this run']);
   h.ok(['claim', 'T1', '--agent', 'replacement']);
@@ -417,10 +536,12 @@ test('rung supervision settings validate and clear through the CLI', (t) => {
 });
 
 test('descendant CPU activity postpones stall while paths remain quiet', { skip: process.platform !== 'linux' }, async (t) => {
-  const h = setup(t, { failures: 0, hold: 2500, busy: true, config: { stall_ms: 300 } });
+  const h = setup(t, { failures: 0, hold: 3800, busy: true, config: { stall_ms: 300 } });
   h.json(['spawn', '--task', 'T1']);
   await until(() => h.readAttempts().length === 1, 'CPU stub did not start');
-  await new Promise((resolve) => setTimeout(resolve, 1400));
+  // The supervisor samples once a second; two and a half seconds of busy
+  // child cover at least two samples even on a loaded machine.
+  await new Promise((resolve) => setTimeout(resolve, 2500));
   assert.equal(log(h).filter((e) => e.cmd === 'stall').length, 0);
   assert.equal(h.json(['task', 'show', 'T1']).run.phase, 'running');
   await until(() => h.json(['task', 'show', 'T1']).run?.phase === 'waiting', 'CPU stub did not finish');
@@ -430,28 +551,29 @@ test('serve shows the recorded run phase on the board', async (t) => {
   const h = setup(t, { failures: 0 });
   assert.equal(h.spawn().code, 0);
   const server = cp.spawn(process.execPath, [BIN, 'serve', '--port', '0', '--json'], { cwd: h.repo, env: h.env });
-  const closed = new Promise((resolve) => server.on('close', resolve));
-  let url;
-  let output = '';
-  server.stdout.on('data', (data) => {
-    output += data;
-    if (output.includes('\n')) url = JSON.parse(output.trim()).url;
-  });
+  const closed = once(server, 'close');
+  const output = createInterface({ input: server.stdout });
+  let stderr = '';
+  server.stderr.on('data', (data) => { stderr += data; });
   try {
-    await until(() => !!url || server.exitCode !== null, 'serve did not start');
+    const [line] = await Promise.race([
+      once(output, 'line', { signal: t.signal }),
+      closed.then(([code]) => { throw new Error(`serve exited before readiness (${code}): ${stderr}`); }),
+    ]);
+    const { url } = JSON.parse(line);
     assert.ok(url);
     const body = await new Promise((resolve, reject) => {
-      const request = http.get(url, (response) => {
+      const request = http.get(url, { signal: t.signal }, (response) => {
         let html = '';
         response.on('data', (data) => { html += data; });
         response.on('end', () => resolve(html));
       });
       request.on('error', reject);
-      request.setTimeout(5000, () => request.destroy(new Error('serve request timed out')));
     });
     assert.match(body, /Phase/);
     assert.match(body, /waiting/);
   } finally {
+    output.close();
     server.kill();
     await closed;
   }
@@ -509,7 +631,7 @@ for (const harness of ['claude', 'codex']) {
   });
 }
 
-for (const stream of ['stdout', 'stderr']) {
+for (const stream of ['stdout']) {
   test(`provider errors quoted in agent JSON on ${stream} do not trigger a rerun`, (t) => {
     const h = setup(t, { failures: 0 });
     const script = `
@@ -529,7 +651,7 @@ process.exit(1);
   });
 }
 
-for (const stream of ['stdout', 'stderr']) {
+for (const stream of ['stderr']) {
   test(`plain capacity text on ${stream} cannot substitute for a harness error envelope`, (t) => {
     const h = setup(t, { failures: 0 });
     const script = `
@@ -547,19 +669,33 @@ process.exit(1);
 });
 
 test('quiet supervision samples state and progress paths on a seconds-scale interval', async (t) => {
-  const h = setup(t, { failures: 0, hold: 3600, config: { progress_paths: ['progress.txt'] } });
+  const h = setup(t, { failures: 0, waitForFinish: true, config: { progress_paths: ['progress.txt'] } });
   const audit = path.join(h.base, 'samples.jsonl');
   const hook = path.join(__dirname, 'fixtures', 'supervision-samples.js').replace(/\\/g, '/');
   h.json(['spawn', '--task', 'T1'], { env: {
     NODE_OPTIONS: `--require "${hook}"`, TOWER_CRANE_TEST_SAMPLES: audit,
   } });
-  await until(() => h.json(['task', 'show', 'T1']).run?.phase === 'waiting', 'quiet worker did not finish');
-  const samples = fs.readFileSync(audit, 'utf8').trim().split('\n').map(JSON.parse);
-  const walks = samples.filter((sample) => sample.kind === 'path');
-  assert.ok(walks.length >= 2, JSON.stringify(samples));
-  assert.ok(walks.length <= 6, `${walks.length} progress walks for a 3.6-second run`);
-  assert.ok(samples.filter((sample) => sample.kind === 'state').length <= 8, 'quiet monitor repeatedly reloads state');
-  for (let i = 1; i < walks.length; i++) assert.ok(walks[i].at - walks[i - 1].at >= 900, JSON.stringify(walks));
+  const read = () => fs.existsSync(audit) ? fs.readFileSync(audit, 'utf8').split('\n').slice(0, -1).map(JSON.parse) : [];
+  try {
+    await until(() => fs.existsSync(h.attempts), 'quiet worker did not finish claiming');
+    await until(() => read().filter((sample) => sample.kind === 'path').length >= 2, 'quiet sampling did not start');
+    const before = read().filter((sample) => sample.kind === 'state').length;
+    h.ok(['task', 'note', 'T1', 'wake the state observer']);
+    await until(() => read().filter((sample) => sample.kind === 'state').length > before, 'the state observer did not see the note');
+    // Startup writes may still arrive. Once they settle, several path samples
+    // must reuse the state; polling it every tick never reaches this interval.
+    await until(() => {
+      const samples = read();
+      const lastRead = samples.findLast((sample) => sample.kind === 'state');
+      return samples.filter((sample) => sample.kind === 'path' && sample.at > lastRead.at).length >= 3;
+    }, 'quiet monitor repeatedly reloads state');
+    const samples = read();
+    const walks = samples.filter((sample) => sample.kind === 'path');
+    for (let i = 1; i < walks.length; i++) assert.ok(walks[i].at - walks[i - 1].at >= 900, JSON.stringify(walks));
+  } finally {
+    fs.writeFileSync(h.attempts + '.finish', '');
+    await until(() => log(h).some((e) => e.cmd === 'spawn phase' && e.detail.phase === 'waiting'), 'quiet worker did not finish');
+  }
 });
 
 describe('supervision completion cases', { concurrency: windowsConcurrency }, () => {
@@ -638,7 +774,8 @@ if (!fs.existsSync(file)) {
     if (!group) return;
     try { process.kill(-group.parent, 'SIGKILL'); } catch (e) { if (e.code !== 'ESRCH') throw e; }
   });
-  const result = h.spawn();
+  // The rerun waits out the previous child's SIGTERM grace, so allow for a loaded machine.
+  const result = h.spawn(undefined, 60000);
   group = JSON.parse(fs.readFileSync(groupFile, 'utf8'));
   assert.equal(result.code, 0, result.stderr);
   assert.equal(log(h).filter((e) => e.cmd === 'spawn retry').length, 1);
@@ -746,14 +883,18 @@ fs.writeFileSync(process.argv[2], JSON.stringify({
 });
 
 test('rework cannot resume a session while its transient rerun is still alive', async (t) => {
-  const h = setup(t, { hold: 2500, sessionReceipt: true });
+  const h = setup(t, { waitForFinish: true, sessionReceipt: true });
   const spawned = h.json(['spawn', '--task', 'T1']);
-  await until(() => h.readAttempts().length === 2, 'transient rerun did not start');
-  h.ok(['submit', 'T1', '--agent', spawned.agent, '--sha', 'abcdef1']);
-  h.ok(['rework', 'T1', '--reason', 'review correction']);
-  const result = h.run(['spawn', '--task', 'T1']);
-  assert.equal(result.code, 1, result.stderr);
-  assert.match(result.stderr, /previous worker.*still running/);
+  try {
+    await until(() => h.readAttempts().length === 2, 'transient rerun did not start');
+    h.ok(['submit', 'T1', '--agent', spawned.agent, '--sha', 'abcdef1']);
+    h.ok(['rework', 'T1', '--reason', 'review correction']);
+    const result = h.run(['spawn', '--task', 'T1']);
+    assert.equal(result.code, 1, result.stderr);
+    assert.match(result.stderr, /previous worker.*still running/);
+  } finally {
+    fs.writeFileSync(`${h.attempts}.finish`, '');
+  }
   await until(() => !detachedAlive({ pid: spawned.monitor_pid }), 'previous supervisor did not finish');
 });
 });

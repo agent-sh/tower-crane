@@ -1,0 +1,511 @@
+{
+  "@agentsys/tower-crane": {
+    "id": "@agentsys/tower-crane@0.1.0",
+    "name": "@agentsys/tower-crane",
+    "version": "0.1.0",
+    "size": 1853418,
+    "unpackedSize": 2822282,
+    "shasum": "ec704c16ad6a54f120a97b59c9f6ed8014e587ea",
+    "integrity": "sha512-TBLxv+BgRsPF/ZN3tUQBX0ze1wk3pdaPW1PYZbf4Yblrq5f2wdVpkmBDoYKumKC1bReD7ciOyYYLhTJSdkiRNw==",
+    "filename": "agentsys-tower-crane-0.1.0.tgz",
+    "files": [
+      {
+        "path": ".claude-plugin/marketplace.json",
+        "size": 660,
+        "mode": 420
+      },
+      {
+        "path": ".claude-plugin/plugin.json",
+        "size": 535,
+        "mode": 420
+      },
+      {
+        "path": "LICENSE",
+        "size": 1067,
+        "mode": 420
+      },
+      {
+        "path": "README.md",
+        "size": 2133,
+        "mode": 420
+      },
+      {
+        "path": "agents/tower-crane-orchestrator.md",
+        "size": 1571,
+        "mode": 420
+      },
+      {
+        "path": "agents/tower-crane-researcher.md",
+        "size": 2787,
+        "mode": 420
+      },
+      {
+        "path": "agents/tower-crane-reviewer.md",
+        "size": 2307,
+        "mode": 420
+      },
+      {
+        "path": "agents/tower-crane-small.md",
+        "size": 1770,
+        "mode": 420
+      },
+      {
+        "path": "agents/tower-crane-worker.md",
+        "size": 2238,
+        "mode": 420
+      },
+      {
+        "path": "bin/tower-crane.js",
+        "size": 52012,
+        "mode": 420
+      },
+      {
+        "path": "components.json",
+        "size": 227,
+        "mode": 420
+      },
+      {
+        "path": "docs/automation.md",
+        "size": 8139,
+        "mode": 420
+      },
+      {
+        "path": "docs/cli.md",
+        "size": 133553,
+        "mode": 420
+      },
+      {
+        "path": "docs/design.md",
+        "size": 26440,
+        "mode": 420
+      },
+      {
+        "path": "docs/human-experience.md",
+        "size": 71064,
+        "mode": 420
+      },
+      {
+        "path": "docs/human-experience/before/board-390x844-dark.webp",
+        "size": 46750,
+        "mode": 420
+      },
+      {
+        "path": "docs/human-experience/before/board-390x844-light.webp",
+        "size": 47162,
+        "mode": 420
+      },
+      {
+        "path": "docs/human-experience/before/board-1280x800-dark.webp",
+        "size": 92110,
+        "mode": 420
+      },
+      {
+        "path": "docs/human-experience/before/board-1280x800-light.webp",
+        "size": 96256,
+        "mode": 420
+      },
+      {
+        "path": "docs/human-experience/before/board-1920x1080-dark.webp",
+        "size": 181700,
+        "mode": 420
+      },
+      {
+        "path": "docs/human-experience/before/board-1920x1080-light.webp",
+        "size": 187768,
+        "mode": 420
+      },
+      {
+        "path": "docs/human-experience/before/board-3840x1080-dark.webp",
+        "size": 209994,
+        "mode": 420
+      },
+      {
+        "path": "docs/human-experience/before/board-3840x1080-light.webp",
+        "size": 214930,
+        "mode": 420
+      },
+      {
+        "path": "docs/human-experience/before/T16-1920x1080-light.webp",
+        "size": 114080,
+        "mode": 420
+      },
+      {
+        "path": "docs/human-experience/probe/plan-after-live-update-390x844-dark-before-T77.webp",
+        "size": 42292,
+        "mode": 420
+      },
+      {
+        "path": "docs/human-experience/probe/plan-after-live-update-390x844-dark-today.webp",
+        "size": 34442,
+        "mode": 420
+      },
+      {
+        "path": "docs/human-experience/probe/plan-after-live-update-1280x800-light-before-T77.webp",
+        "size": 97748,
+        "mode": 420
+      },
+      {
+        "path": "docs/human-experience/probe/plan-after-live-update-1280x800-light-today.webp",
+        "size": 61740,
+        "mode": 420
+      },
+      {
+        "path": "docs/ladder.md",
+        "size": 45770,
+        "mode": 420
+      },
+      {
+        "path": "docs/prompt-cache.md",
+        "size": 14770,
+        "mode": 420
+      },
+      {
+        "path": "docs/resume-cache.md",
+        "size": 4532,
+        "mode": 420
+      },
+      {
+        "path": "docs/review-2026-10-08.md",
+        "size": 38083,
+        "mode": 420
+      },
+      {
+        "path": "docs/state.md",
+        "size": 149053,
+        "mode": 420
+      },
+      {
+        "path": "hooks/hooks.json",
+        "size": 47,
+        "mode": 420
+      },
+      {
+        "path": "hooks/tower-crane.mjs",
+        "size": 6175,
+        "mode": 420
+      },
+      {
+        "path": "lib/agents.js",
+        "size": 40997,
+        "mode": 420
+      },
+      {
+        "path": "lib/auth-helper.js",
+        "size": 901,
+        "mode": 420
+      },
+      {
+        "path": "lib/authority.js",
+        "size": 12328,
+        "mode": 420
+      },
+      {
+        "path": "lib/automation.js",
+        "size": 32806,
+        "mode": 420
+      },
+      {
+        "path": "lib/board/client.js",
+        "size": 18292,
+        "mode": 420
+      },
+      {
+        "path": "lib/board/identity.js",
+        "size": 2894,
+        "mode": 420
+      },
+      {
+        "path": "lib/board/model.js",
+        "size": 22908,
+        "mode": 420
+      },
+      {
+        "path": "lib/board/position.js",
+        "size": 3838,
+        "mode": 420
+      },
+      {
+        "path": "lib/board/style.js",
+        "size": 32128,
+        "mode": 420
+      },
+      {
+        "path": "lib/board/token.js",
+        "size": 921,
+        "mode": 420
+      },
+      {
+        "path": "lib/board/view.js",
+        "size": 45014,
+        "mode": 420
+      },
+      {
+        "path": "lib/brief.js",
+        "size": 2119,
+        "mode": 420
+      },
+      {
+        "path": "lib/broker.js",
+        "size": 15165,
+        "mode": 420
+      },
+      {
+        "path": "lib/browser-kit.js",
+        "size": 3736,
+        "mode": 420
+      },
+      {
+        "path": "lib/check.js",
+        "size": 10276,
+        "mode": 420
+      },
+      {
+        "path": "lib/ci-hosted.js",
+        "size": 2100,
+        "mode": 420
+      },
+      {
+        "path": "lib/ci-local.js",
+        "size": 5263,
+        "mode": 420
+      },
+      {
+        "path": "lib/claude-provider.js",
+        "size": 5896,
+        "mode": 420
+      },
+      {
+        "path": "lib/commands.js",
+        "size": 859,
+        "mode": 420
+      },
+      {
+        "path": "lib/decisions.js",
+        "size": 8040,
+        "mode": 420
+      },
+      {
+        "path": "lib/escalation.js",
+        "size": 9274,
+        "mode": 420
+      },
+      {
+        "path": "lib/events.js",
+        "size": 14872,
+        "mode": 420
+      },
+      {
+        "path": "lib/gate-commands.js",
+        "size": 7639,
+        "mode": 420
+      },
+      {
+        "path": "lib/gates/ci.js",
+        "size": 9205,
+        "mode": 420
+      },
+      {
+        "path": "lib/gates/clean.js",
+        "size": 5138,
+        "mode": 420
+      },
+      {
+        "path": "lib/gates/common.js",
+        "size": 13317,
+        "mode": 420
+      },
+      {
+        "path": "lib/gates/local-ci.js",
+        "size": 2530,
+        "mode": 420
+      },
+      {
+        "path": "lib/gates/merge.js",
+        "size": 10735,
+        "mode": 420
+      },
+      {
+        "path": "lib/gates/sources.js",
+        "size": 8237,
+        "mode": 420
+      },
+      {
+        "path": "lib/gates/tests.js",
+        "size": 19879,
+        "mode": 420
+      },
+      {
+        "path": "lib/harness-hooks.js",
+        "size": 5864,
+        "mode": 420
+      },
+      {
+        "path": "lib/hook-bridge.js",
+        "size": 3235,
+        "mode": 420
+      },
+      {
+        "path": "lib/hook-stream.js",
+        "size": 1898,
+        "mode": 420
+      },
+      {
+        "path": "lib/ladder.js",
+        "size": 17966,
+        "mode": 420
+      },
+      {
+        "path": "lib/processes.js",
+        "size": 11703,
+        "mode": 420
+      },
+      {
+        "path": "lib/project.js",
+        "size": 34215,
+        "mode": 420
+      },
+      {
+        "path": "lib/public-http.js",
+        "size": 5601,
+        "mode": 420
+      },
+      {
+        "path": "lib/render.js",
+        "size": 13183,
+        "mode": 420
+      },
+      {
+        "path": "lib/research.js",
+        "size": 797,
+        "mode": 420
+      },
+      {
+        "path": "lib/reviewer.js",
+        "size": 15516,
+        "mode": 420
+      },
+      {
+        "path": "lib/rules.js",
+        "size": 8072,
+        "mode": 420
+      },
+      {
+        "path": "lib/scope.js",
+        "size": 5480,
+        "mode": 420
+      },
+      {
+        "path": "lib/secrets.js",
+        "size": 3441,
+        "mode": 420
+      },
+      {
+        "path": "lib/serve.js",
+        "size": 15337,
+        "mode": 420
+      },
+      {
+        "path": "lib/settings.js",
+        "size": 23471,
+        "mode": 420
+      },
+      {
+        "path": "lib/shim.js",
+        "size": 15026,
+        "mode": 420
+      },
+      {
+        "path": "lib/spawn-monitor.js",
+        "size": 35912,
+        "mode": 420
+      },
+      {
+        "path": "lib/spawn-session.js",
+        "size": 7295,
+        "mode": 420
+      },
+      {
+        "path": "lib/spawn-settings.js",
+        "size": 5431,
+        "mode": 420
+      },
+      {
+        "path": "lib/spawn.js",
+        "size": 43163,
+        "mode": 420
+      },
+      {
+        "path": "lib/stack.js",
+        "size": 21893,
+        "mode": 420
+      },
+      {
+        "path": "lib/state.js",
+        "size": 30610,
+        "mode": 420
+      },
+      {
+        "path": "lib/tasks.js",
+        "size": 72464,
+        "mode": 420
+      },
+      {
+        "path": "lib/tests-policy.js",
+        "size": 1340,
+        "mode": 420
+      },
+      {
+        "path": "lib/toml.js",
+        "size": 8640,
+        "mode": 420
+      },
+      {
+        "path": "lib/usage-files.js",
+        "size": 1880,
+        "mode": 420
+      },
+      {
+        "path": "lib/usage.js",
+        "size": 5074,
+        "mode": 420
+      },
+      {
+        "path": "lib/util.js",
+        "size": 2752,
+        "mode": 420
+      },
+      {
+        "path": "lib/worktree.js",
+        "size": 13761,
+        "mode": 420
+      },
+      {
+        "path": "package.json",
+        "size": 802,
+        "mode": 420
+      },
+      {
+        "path": "skills/tower-crane-review/SKILL.md",
+        "size": 3652,
+        "mode": 420
+      },
+      {
+        "path": "skills/tower-crane-work/SKILL.md",
+        "size": 4805,
+        "mode": 420
+      },
+      {
+        "path": "skills/tower-crane/SKILL.md",
+        "size": 17941,
+        "mode": 420
+      },
+      {
+        "path": "standards/default.md",
+        "size": 4850,
+        "mode": 420
+      }
+    ],
+    "entryCount": 99,
+    "bundled": []
+  }
+}

@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
-const { makeRepo, BIN } = require('./helpers');
+const { BIN, cachedFixture } = require('./helpers');
 
 const APP = 'revuto-review';
 const CAP = { title: 'Revuto did not review this pull request', summary: 'reached the 2-round review limit', text: null };
@@ -21,12 +21,15 @@ function suite(app, id, conclusion = 'success', status = 'completed', runs = 1) 
 }
 
 function fixture(t) {
-  const h = makeRepo(t);
-  h.init(['--repo', 'acme/app']);
-  h.ok(['task', 'add', '--title', 'Change', '--acceptance', 'works']);
-  h.ok(['claim', 'T1', '--agent', 'worker']);
-  const sha = h.git(['rev-parse', 'HEAD']);
-  h.ok(['submit', 'T1', '--agent', 'worker', '--sha', sha, '--pr', '9']);
+  const h = cachedFixture(t, 'submitted', (h) => {
+    h.init(['--repo', 'acme/app']);
+    h.ok(['task', 'add', '--title', 'Change', '--acceptance', 'works']);
+    h.ok(['claim', 'T1', '--agent', 'worker']);
+    const sha = h.git(['rev-parse', 'HEAD']);
+    h.ok(['submit', 'T1', '--agent', 'worker', '--sha', sha, '--pr', '9']);
+    return { sha };
+  });
+  const { sha } = h;
   return {
     check({ policy = POLICY, runs = [run('Revuto', APP, 2, CAP, 'failure')], suites = [suite(APP, 2, 'failure')], ci = {}, build = true } = {}) {
       const project = h.readState('project.json');
@@ -50,6 +53,7 @@ function fixture(t) {
         at: evidence.at, summary: evidence.summary, ref: evidence.ref, revision: evidence.revision,
         source: 'check ci', commands: evidence.commands, ci_policy: evidence.ci_policy,
         ...(evidence.capped_review ? { capped_review: evidence.capped_review } : {}),
+        ...(evidence.confirmed_failure !== undefined ? { confirmed_failure: evidence.confirmed_failure } : {}),
       });
       assert.equal(evidence.source, 'check ci');
       assert.ok(Array.isArray(evidence.commands));
@@ -66,6 +70,7 @@ test('configured review cap passes the real CLI gate and is named in recorded ev
     assert.equal(r.ok, true);
     assert.match(r.summary, /ci\.capped_review: Revuto \(revuto-review\)/);
     assert.deepEqual(r.capped_review, ['Revuto (revuto-review)']);
+    assert.equal(r.confirmed_failure, undefined, 'a cap is not a confirmed failure');
   }
 });
 
@@ -77,6 +82,7 @@ test('a capped review cannot satisfy the requirement for a CI run', (t) => {
     assert.equal(r.ok, false);
     assert.match(r.summary, /no check runs/);
     assert.match(r.summary, /ci\.capped_review: Revuto \(revuto-review\)/);
+    assert.equal(r.confirmed_failure, undefined, 'missing runs do not confirm a failed attempt');
   }
 });
 
@@ -135,12 +141,15 @@ test('a capped run never hides other failed or pending runs in its suite', (t) =
     assert.match(r.summary, /other review \(/);
     assert.match(r.summary, /check suites not green: revuto-review/);
     assert.match(r.summary, /ci\.capped_review: Revuto \(revuto-review\)/);
+    assert.equal(r.confirmed_failure, conclusion === 'failure' ? true : undefined,
+      'only a completed failing sibling confirms a failed attempt');
   }
   const greenSibling = h.check({
     runs: [run('Revuto', APP, 2, CAP, 'failure'), run('other review', APP, 2)],
     suites: [suite(APP, 2, 'failure', 'completed', 2)],
   });
   assert.equal(greenSibling.code, 0, greenSibling.summary);
+  assert.equal(greenSibling.confirmed_failure, undefined);
 });
 
 test('only the completed failure suite linked to the capped run can pass', (t) => {

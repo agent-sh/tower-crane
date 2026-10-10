@@ -1,0 +1,1 @@
+- Live-spend readers preserve future state and error-class strings while validating their shapes. A supervisor that detects incompatible state skips the final live sample after its worker exits.

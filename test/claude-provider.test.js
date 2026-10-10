@@ -102,6 +102,14 @@ for (const [provider, other, model, plain] of [
     assert.equal(generated.includes('us.anthropic.'), false);
     assert.equal(generated.includes('stub credentials'), false);
     assert.equal(generated.includes('stub-secret'), false);
+    const home = path.join(h.state, 'homes', 'worker-T1-1');
+    const pinned = JSON.parse(fs.readFileSync(path.join(home, 'tool.json'), 'utf8'));
+    const events = stateText.trim().split('\n').map(JSON.parse);
+    assert.deepEqual(pinned, events.find((e) => e.cmd === 'spawn').detail.tool, 'provider fallback keeps the original runtime');
+    assert.ok(fs.existsSync(path.join(pinned.path, 'lib', 'claude-provider.js')));
+    for (const event of Object.values(JSON.parse(generated).hooks)) {
+      assert.ok(event[0].hooks[0].command.includes(path.join(pinned.path, 'lib', 'hook-bridge.js')));
+    }
   });
 }
 

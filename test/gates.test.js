@@ -3,18 +3,25 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const cp = require('node:child_process');
-const { makeRepo, ROOT, real } = require('./helpers');
-const { gateFixture, gateEvidence, changeKind } = require('./gate-helpers');
+const { makeRepo, ROOT, real, HOOKS } = require('./helpers');
+const { waitFor } = require('./canary');
+const { gateFixture, gateEvidence } = require('./gate-helpers');
 const { shellQuote } = require('../lib/gates/common');
 
-// Gate internals live in lib/gates/ and ship separately, so these tests run a
-// copy of the CLI whose lib/gates/ holds only what each test puts there.
+// The gate variants run in process in test/gates/tests.test.js; these tests
+// cover what the CLI adds: audited evidence, policy at accept and merge, and
+// gate loading. Gate internals live in lib/gates/ and ship separately, so
+// some tests run a copy of the CLI whose lib/gates/ holds only what each test
+// puts there.
 function cliCopy(h) {
   const dir = path.join(h.base, 'cli');
   const gatesDir = path.join(ROOT, 'lib', 'gates');
   fs.cpSync(path.join(ROOT, 'bin'), path.join(dir, 'bin'), { recursive: true });
+  // The board view reads the package bin name from package.json when it renders the sketch.
+  fs.copyFileSync(path.join(ROOT, 'package.json'), path.join(dir, 'package.json'));
   fs.cpSync(path.join(ROOT, 'lib'), path.join(dir, 'lib'), {
     recursive: true,
     filter: (src) => src !== gatesDir && !src.startsWith(gatesDir + path.sep),
@@ -27,6 +34,15 @@ function cliCopy(h) {
     run: (args, env = {}) => {
       const r = cp.spawnSync(process.execPath, [bin, ...args], { cwd: h.repo, env: { ...h.env, ...env }, encoding: 'utf8' });
       return { code: r.status, stdout: r.stdout, stderr: r.stderr };
+    },
+    // Starts without waiting, so a test can pause the command with a hook.
+    start: (args, env = {}) => {
+      const p = cp.spawn(process.execPath, ['--require', HOOKS, bin, ...args], {
+        cwd: h.repo, env: { ...h.env, HOOK_STATE: h.state, ...env }, stdio: ['ignore', 'ignore', 'pipe'],
+      });
+      let stderr = '';
+      p.stderr.on('data', (d) => { stderr += d; });
+      return { result: new Promise((resolve) => p.on('close', (code) => resolve({ code, stderr }))) };
     },
   };
 }
@@ -48,36 +64,6 @@ function submittedTask(h) {
   h.ok(['claim', 'T1', '--agent', 'w-1']);
   h.ok(['submit', 'T1', '--sha', 'abcdef1', '--agent', 'w-1']);
 }
-
-const BUILD_MANIFEST_FIXTURES = [
-  ['npm', {
-    base: {
-      'package.json': '{"name":"fixture-base","version":"0.1.0","private":true}\n',
-      'package-lock.json': '{"name":"fixture-base","version":"0.1.0","lockfileVersion":3,"requires":true,"packages":{"":{"name":"fixture-base","version":"0.1.0"}}}\n',
-    },
-    submitted: {
-      'package.json': '{"name":"fixture-task-head","version":"1.0.0","private":true}\n',
-      'package-lock.json': '{"name":"fixture-task-head","version":"1.0.0","lockfileVersion":3,"requires":true,"packages":{"":{"name":"fixture-task-head","version":"1.0.0"}}}\n',
-    },
-  }],
-  ['cargo', { submitted: {
-    'Cargo.toml': '[package]\nname = "fixture-task-head"\nversion = "0.1.0"\nedition = "2021"\n',
-    'Cargo.lock': 'version = 3\n\n[[package]]\nname = "fixture-task-head"\nversion = "0.1.0"\n',
-  } }],
-  ['go', { submitted: {
-    'go.mod': 'module example.com/fixture-task-head\n\ngo 1.20\n',
-    'go.sum': 'example.com/fixture-task-head v0.1.0/go.mod h1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=\n',
-  } }],
-  ['python', { submitted: {
-    'pyproject.toml': '[project]\nname = "fixture-task-head"\nversion = "0.1.0"\n',
-    'requirements-dev.txt': '# fixture-task-head requirements\n',
-    'uv.lock': '# fixture-task-head\nversion = 1\n',
-  } }],
-  ['Make with tests.keep', { keep: ['Makefile', 'tools/**/*.gradle'], submitted: {
-    Makefile: '# fixture-task-head\n.PHONY: test\ntest:\n\t@true\n',
-    'tools/build.gradle': '// fixture-task-head\n',
-  } }],
-];
 
 const VERIFY_BUILD = `const fs = require('node:fs');
 const path = require('node:path');
@@ -130,15 +116,8 @@ function manifestTask(h, { base = {}, submitted, codeChange = true }) {
   return sha;
 }
 
-function installTestsGate(cli) {
-  fs.mkdirSync(cli.gates, { recursive: true });
-  for (const name of ['common.js', 'tests.js']) {
-    fs.copyFileSync(path.join(ROOT, 'lib', 'gates', name), path.join(cli.gates, name));
-  }
-}
-
-function submitTestsFixture(h, sha, keep) {
-  h.init(['--repo', 'acme/demo', '--base', 'main', '--tests-cmd', `${shellQuote(process.execPath)} verify-build.js`]);
+function submitTestsFixture(h, sha, keep, settings = []) {
+  h.init(['--repo', 'acme/demo', '--base', 'main', '--tests-cmd', `${shellQuote(process.execPath)} verify-build.js`, ...settings]);
   if (keep) h.ok(['project', 'set', '--tests-keep', JSON.stringify(keep)]);
   h.ok(['task', 'add', '--title', 'Change', '--acceptance', 'test the behavior']);
   h.ok(['claim', 'T1', '--agent', 'w-1']);
@@ -146,247 +125,238 @@ function submitTestsFixture(h, sha, keep) {
   h.env.TOWER_CRANE_TMP = path.join(h.base, 'gate-tmp');
 }
 
-for (const [ecosystem, manifests] of BUILD_MANIFEST_FIXTURES) {
-  test(`check tests keeps ${ecosystem} build files and fails on the reverted code`, (t) => {
-    const h = makeRepo(t);
-    const sha = manifestTask(h, manifests);
-    submitTestsFixture(h, sha, manifests.keep);
-    const cli = cliCopy(h);
-    installTestsGate(cli);
-    const required = Object.keys(manifests.submitted).map(shellQuote).join(' ');
-    const cmd = `${shellQuote(process.execPath)} verify-build.js ${required}`;
-    h.ok(['project', 'set', '--tests-cmd', cmd]);
-    const result = cli.run(['check', 'tests', 'T1', '--cmd', cmd, '--agent', 'checker']);
-    const output = `${result.stdout}\n${result.stderr}`;
-
-    assert.equal(result.code, 0, output);
-    assert.match(output, /tests pass with the change and fail without it/);
-    assert.match(output, /with \d+ non-test files? reverted .*value\.js.*build files kept at submitted sha .*: exit 1/i);
-    assert.doesNotMatch(output, /missing build file:|stale build file:/);
-    assert.match(output, /build files kept at submitted sha/i);
-    for (const file of Object.keys(manifests.submitted)) assert.ok(output.includes(file), `summary omitted kept build file ${file}`);
-  });
-}
-
-for (const [ecosystem, manifests] of BUILD_MANIFEST_FIXTURES) {
-  test(`check tests accepts only tests and ${ecosystem} build files without a revert run`, (t) => {
-    const h = makeRepo(t);
-    const sha = manifestTask(h, { ...manifests, codeChange: false });
-    submitTestsFixture(h, sha, manifests.keep);
-    const required = Object.keys(manifests.submitted).map(shellQuote).join(' ');
-    const cmd = `${shellQuote(process.execPath)} verify-build.js ${required}`;
-    h.ok(['project', 'set', '--tests-cmd', cmd]);
-    const output = h.ok(['check', 'tests', 'T1', '--cmd', cmd, '--agent', 'checker']);
-    assert.match(output, /Tests: test\/value\.test\.js/);
-    assert.match(output, /only tests and kept build files/);
-    assert.match(output, /no non-test files to revert/);
-    assert.doesNotMatch(output, /2\. .*: exit/);
-    for (const file of Object.keys(manifests.submitted)) {
-      assert.ok(output.includes(file), `summary omitted kept build file ${file}`);
-    }
-    assert.deepEqual(fs.readdirSync(h.env.TOWER_CRANE_TMP), []);
-    assert.equal(h.git(['worktree', 'list', '--porcelain']).split('\n').filter((l) => l.startsWith('worktree ')).length, 1);
-  });
-}
-
-for (const file of ['Makefile', 'setup.py', 'build.bzl', 'build.gradle', 'vite.config.js', 'flake.nix', 'app.csproj', 'value.lock']) {
-  test(`check tests reverts code-like file ${file} by default`, (t) => {
-    const h = makeRepo(t);
-    const sha = manifestTask(h, {
-      base: { [file]: 'base build code\n' },
-      submitted: {
-        [file]: 'fixture-task-head build code\n',
-        'test/value.test.js': `require('node:assert/strict').match(require('node:fs').readFileSync(${JSON.stringify(file)}, 'utf8'), /fixture-task-head/);\n`,
-      },
-      codeChange: false,
-    });
-    submitTestsFixture(h, sha);
-    const cmd = `${shellQuote(process.execPath)} verify-build.js`;
-    h.ok(['project', 'set', '--tests-cmd', cmd]);
-    const output = h.ok(['check', 'tests', 'T1', '--cmd', cmd, '--agent', 'checker']);
-    assert.match(output, /1 non-test file reverted .*: exit 1/);
-    assert.ok(output.includes(file), output);
-    assert.doesNotMatch(output, /Build files kept/);
-  });
-}
-
-test('check tests keeps manifest-like test paths as tests, not build files', (t) => {
+test('failed tests evidence records TAP and spec names with a bounded output tail', (t) => {
   const h = makeRepo(t);
   const sha = manifestTask(h, { submitted: {
-    'package.json': '{"name":"fixture-task-head","private":true}\n',
-    'test/package.json': '{"name":"fixture-task-head","private":true}\n',
-  } });
-  submitTestsFixture(h, sha, ['test/**']);
-  const cmd = `${shellQuote(process.execPath)} verify-build.js package.json test/package.json`;
-  h.ok(['project', 'set', '--tests-cmd', cmd]);
-  const output = h.ok(['check', 'tests', 'T1', '--cmd', cmd, '--agent', 'checker']);
-  assert.match(output, /Tests: test\/package\.json, test\/value\.test\.js/);
-  assert.match(output, /Build files kept at submitted sha [a-f0-9]+: package\.json/);
-  const kept = [...output.matchAll(/Build files kept at submitted sha [a-f0-9]+: ([^\n]+)/g)];
-  assert.ok(kept.length, output);
-  for (const [, files] of kept) assert.ok(!files.includes('test/package.json'), files);
+    'test/failure.test.js': `const test = require('node:test');
+const assert = require('node:assert/strict');
+test('named regression failure', () => {
+  console.log('${'noise line '.repeat(1500)} tail marker');
+  assert.equal('actual', 'expected');
 });
-
-test('check tests accepts a Cargo.lock bump and tests without reverting', (t) => {
-  const h = makeRepo(t);
-  const sha = manifestTask(h, {
-    base: { 'Cargo.lock': '# old dependencies\nversion = 3\n' },
-    submitted: { 'Cargo.lock': '# fixture-task-head dependencies\nversion = 3\n' },
-    codeChange: false,
-  });
-  submitTestsFixture(h, sha);
-  h.ok(['project', 'set', '--tests-cmd', `${shellQuote(process.execPath)} verify-build.js Cargo.lock`]);
-  const output = h.ok(['check', 'tests', 'T1', '--cmd', `${shellQuote(process.execPath)} verify-build.js Cargo.lock`, '--agent', 'checker']);
-  assert.match(output, /Build files kept at submitted sha [a-f0-9]+: Cargo\.lock/);
-  assert.match(output, /only tests and kept build files/);
-  assert.doesNotMatch(output, /2\. .*: exit/);
-});
-
-test('check tests still rejects a failing head when only tests and build files changed', (t) => {
-  const h = makeRepo(t);
-  const sha = manifestTask(h, { codeChange: false, submitted: {
-    'Cargo.lock': '# fixture-task-head\n',
-    'test/value.test.js': "require('node:assert/strict').equal(require('../value'), 1);\n",
+`,
   } });
   submitTestsFixture(h, sha);
-  h.ok(['project', 'set', '--tests-cmd', `${shellQuote(process.execPath)} verify-build.js Cargo.lock`]);
-  const r = h.run(['check', 'tests', 'T1', '--cmd', `${shellQuote(process.execPath)} verify-build.js Cargo.lock`, '--agent', 'checker']);
-  assert.equal(r.code, 1, r.stdout + r.stderr);
-  assert.match(r.stdout + r.stderr, /at [a-f0-9]+: exit 1/);
+  for (const key of Object.keys(h.env)) {
+    if (key.startsWith('NODE_TEST_')) delete h.env[key];
+  }
+
+  for (const reporter of ['tap', 'spec']) {
+    const cmd = `${shellQuote(process.execPath)} --test --test-reporter=${reporter} test/failure.test.js`;
+    h.ok(['project', 'set', '--tests-mode', 'run-only', '--tests-cmd', cmd]);
+    const result = h.run(['check', 'tests', 'T1', '--agent', 'checker']);
+    assert.equal(result.code, 1, result.stdout + result.stderr);
+
+    const evidence = h.readState('tasks.json').tasks[0].evidence.at(-1);
+    assert.equal(evidence.ok, false);
+    assert.ok(evidence.test_failure.names.some((name) => name.includes('named regression failure')));
+    assert.ok(evidence.test_failure.output_tail.includes('tail marker'));
+    assert.ok(evidence.test_failure.output_tail.length <= 8192);
+    assert.ok(evidence.test_failure.output_tail.length > 8000);
+    assert.match(evidence.summary, /Failing tests:/);
+    assert.match(evidence.summary, /Output tail \(last 40 lines, max 8192 characters\):/);
+    assert.match(result.stdout, /named regression failure/);
+    assert.match(result.stdout, /tail marker/);
+
+    const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8')
+      .trim().split('\n').map(JSON.parse);
+    assert.deepEqual(events.at(-1).detail.test_failure, evidence.test_failure);
+  }
 });
 
-for (const [name, settings, runs] of [
-  ['default prove', [], 2],
-  ['project run-only', ['--tests-mode', 'run-only'], 1],
-  ['kind run-only overrides project none', ['--tests-mode', 'none', '--tests-by-kind', '{"code":"run-only"}'], 1],
-  ['kind prove overrides project run-only', ['--tests-mode', 'run-only', '--tests-by-kind', '{"code":"prove"}'], 2],
-  ['expensive prove', ['--tests-expensive', 'true'], 1],
-  ['non-expensive prove', ['--tests-expensive', 'false'], 2],
-  ['expensive kind prove', ['--tests-mode', 'none', '--tests-by-kind', '{"code":"prove"}', '--tests-expensive', 'true'], 1],
-  ['project none', ['--tests-mode', 'none'], 0],
-  ['kind none overrides project prove', ['--tests-by-kind', '{"code":"none"}', '--tests-expensive', 'true'], 0],
-]) {
-  test(`check tests runs the suite ${runs} times for ${name}`, (t) => {
-    const h = makeRepo(t);
-    const sha = manifestTask(h, { base: {
-      'count-runs.js': "require('node:fs').appendFileSync(process.argv[2], 'run\\n');\nprocess.argv.length = 2;\nrequire('./verify-build.js');\n",
-    }, submitted: {} });
-    submitTestsFixture(h, sha);
-    if (settings.length) h.ok(['project', 'set', ...settings]);
-    const marker = path.join(h.base, 'suite-runs');
-    const cmd = `${shellQuote(process.execPath)} count-runs.js ${shellQuote(marker)}`;
-    const scoped = `${shellQuote(process.execPath)} {tests}`;
-    const expensive = settings.includes('true') && runs === 1;
-    h.ok(['project', 'set', '--tests-cmd', cmd, '--tests-proof-cmd', scoped]);
-    const evidence = h.json(['check', 'tests', 'T1', '--cmd', cmd, ...(expensive ? ['--proof-cmd', scoped] : []), '--agent', 'checker']);
-    assert.equal(evidence.ok, true, evidence.summary);
-    assert.equal(evidence.sha, sha);
-    assert.equal(fs.existsSync(marker) ? fs.readFileSync(marker, 'utf8').trim().split('\n').length : 0, runs);
-    assert.equal(evidence.commands.filter((c) => c.command === cmd).length, runs);
-    assert.ok(evidence.commands.length > 0, 'even none mode verifies the submitted commit');
-    const shown = h.json(['task', 'show', 'T1']);
-    assert.equal(shown.gates.gates.find((g) => g.type === 'tests').ok, true, 'audited tests evidence counts for acceptance');
-    if (runs === 0) {
-      assert.match(evidence.summary, /mode none/);
-      assert.ok(!fs.existsSync(h.env.TOWER_CRANE_TMP));
-    } else {
-      assert.deepEqual(fs.readdirSync(h.env.TOWER_CRANE_TMP), []);
-    }
-    if (expensive) {
-      assert.match(evidence.summary, /scoped proof/);
-      assert.equal(evidence.tests_mode, 'prove');
-      assert.equal(evidence.commands.filter((c) => c.command === `${shellQuote(process.execPath)} ${shellQuote('test/value.test.js')}`).length, 2);
-    }
-    assert.equal(h.git(['worktree', 'list', '--porcelain']).split('\n').filter((l) => l.startsWith('worktree ')).length, 1);
-  });
-}
-
-test('run-only accepts Rust inline tests in source files without a changed test path', (t) => {
-  const h = makeRepo(t);
-  writeFiles(h.repo, {
-    'src/lib.rs': 'pub fn value() -> i32 { 0 }\n',
-    'check-inline.js': "require('node:assert/strict').match(require('node:fs').readFileSync('src/lib.rs', 'utf8'), /value\\(\\) -> i32 \\{ 1 \\}/);\n",
-  });
-  h.git(['add', '-A']);
-  h.git(['commit', '-qm', 'inline fixture base']);
-  h.git(['switch', '-qc', 'fixture-change']);
-  writeFiles(h.repo, {
-    'src/lib.rs': 'pub fn value() -> i32 { 1 }\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn returns_one() { assert_eq!(super::value(), 1); }\n}\n',
-  });
-  h.git(['add', '-A']);
-  h.git(['commit', '-qm', 'inline fixture change']);
-  const sha = h.git(['rev-parse', 'HEAD']);
-  h.git(['switch', '-q', 'main']);
-  submitTestsFixture(h, sha);
-  const cmd = `${shellQuote(process.execPath)} check-inline.js`;
-  h.ok(['project', 'set', '--tests-cmd', cmd]);
-  const prove = h.run(['check', 'tests', 'T1', '--cmd', cmd]);
-  assert.equal(prove.code, 1);
-  assert.match(prove.stdout, /no test covers this change/);
-  h.ok(['project', 'set', '--tests-mode', 'run-only']);
-  h.ok(['project', 'set', '--tests-cmd', cmd]);
-  const evidence = h.json(['check', 'tests', 'T1', '--cmd', cmd]);
-  assert.match(evidence.summary, /mode run-only/);
-  assert.equal(evidence.commands.filter((c) => c.command === cmd).length, 1);
-  assert.deepEqual(fs.readdirSync(h.env.TOWER_CRANE_TMP), []);
-});
-
-test('run-only still fails when the suite fails at the submitted head', (t) => {
+test('failed tests evidence names the failing tests when the spec reporter is colored', (t) => {
   const h = makeRepo(t);
   const sha = manifestTask(h, { submitted: {
-    'test/value.test.js': "require('node:assert/strict').equal(require('../value'), 2);\n",
+    'test/failure.test.js': `const test = require('node:test');
+const assert = require('node:assert/strict');
+test('colored regression failure', () => {
+  assert.equal('actual', 'expected');
+});
+`,
   } });
   submitTestsFixture(h, sha);
-  h.ok(['project', 'set', '--tests-mode', 'run-only']);
-  const cmd = `${shellQuote(process.execPath)} verify-build.js`;
-  h.ok(['project', 'set', '--tests-cmd', cmd]);
-  const result = h.run(['check', 'tests', 'T1', '--cmd', cmd, '--json']);
-  assert.equal(result.code, 1, result.stderr);
-  const evidence = JSON.parse(result.stdout);
-  assert.equal(evidence.ok, false);
-  assert.match(evidence.summary, /at [a-f0-9]+: exit 1/);
-  assert.equal(evidence.commands.filter((c) => c.command === cmd).length, 1);
-  assert.deepEqual(fs.readdirSync(h.env.TOWER_CRANE_TMP), []);
+  for (const key of Object.keys(h.env)) {
+    if (key.startsWith('NODE_TEST_')) delete h.env[key];
+  }
+  const cmd = `${shellQuote(process.execPath)} --test --test-reporter=spec test/failure.test.js`;
+  h.ok(['project', 'set', '--tests-mode', 'run-only', '--tests-cmd', cmd]);
+  const result = h.run(['check', 'tests', 'T1', '--agent', 'checker'], { env: { FORCE_COLOR: '1' } });
+  assert.equal(result.code, 1, result.stdout + result.stderr);
+
+  const evidence = h.readState('tasks.json').tasks[0].evidence.at(-1);
+  assert.equal(evidence.test_failure.names.length, 1);
+  assert.match(evidence.test_failure.names[0], /^colored regression failure \(/);
+  assert.match(evidence.summary, /Failing tests:\n- colored regression failure \(/);
+  assert.equal(evidence.test_failure.output_tail.includes('\u001b'), false);
+  assert.match(result.stdout, /colored regression failure/);
 });
 
-test('none mode for docs and ops needs no command but still verifies the submitted sha', (t) => {
+test('failed test diagnostics redact process, project, rung and env_file secrets everywhere', (t) => {
   const h = makeRepo(t);
-  const sha = manifestTask(h, { submitted: {} });
-  submitTestsFixture(h, sha);
-  h.ok(['project', 'set', '--tests-by-kind', '{"docs":"none","ops":"none"}']);
-  for (const kind of ['docs', 'ops']) {
-    changeKind(h, kind);
-    const evidence = h.json(['check', 'tests', 'T1']);
-    assert.match(evidence.summary, new RegExp(`mode none.*tests.by_kind.${kind}`));
-    assert.equal(evidence.commands.some((c) => c.command !== 'git'), false);
+  const token = (...parts) => parts.join('');
+  const chars = (...codes) => String.fromCharCode(...codes);
+  const canaries = {
+    process: token(chars(103, 104, 112, 95), 'T83ProcessCanary0123456789abcdef123456'),
+    project: token(chars(115, 107, 45, 112, 114, 111, 106, 45), 'T83ProjectCanary0123456789abcdef123456'),
+    projectFile: token(chars(120, 111, 120, 98, 45), 'T83ProjectFileCanary-0123456789abcdef'),
+    rung: token(chars(65, 75, 73, 65), '1234567890ABCDEF'),
+    rungFile: '0123456789abcdef0123456789abcdef0123456789abcdef',
+  };
+  const commonTokens = [
+    token(chars(103, 104, 111, 95), 'T83GenericCanary0123456789abcdef'),
+    token(chars(115, 107, 45), 'T83GenericSecret0123456789abcdef'),
+    token(chars(65, 75, 73, 65), 'ABCDEFGHIJKLMNOP'),
+    token(chars(120, 111, 120, 112, 45), 'T83GenericSlack-0123456789abcdef'),
+    token('Authorization: Bearer ', 'T83GenericAuth0123456789abcdef'),
+  ];
+  const projectEnvFile = path.join(h.base, 'project.env');
+  const rungEnvFile = path.join(h.base, 'rung.env');
+  fs.writeFileSync(projectEnvFile, `T83_PROJECT_FILE_CANARY=${canaries.projectFile}\n`);
+  fs.writeFileSync(rungEnvFile, `T83_RUNG_FILE_TOKEN=${canaries.rungFile}\n`);
+  fs.mkdirSync(path.dirname(h.userConfig), { recursive: true });
+  const defaultEasy = require('../lib/ladder').resolve({}, h.env).ladder.easy.own;
+  fs.writeFileSync(h.userConfig, JSON.stringify({
+    ladder: { easy: {
+      ...defaultEasy,
+      env: { T83_RUNG_CANARY: canaries.rung },
+      env_file: rungEnvFile,
+    } },
+  }));
+
+  const literals = [canaries.project, canaries.projectFile, canaries.rung, canaries.rungFile, ...commonTokens];
+  const testFile = `const test = require('node:test');
+const assert = require('node:assert/strict');
+const report = [process.env.T83_PROCESS_TOKEN, ${literals.map((value) => JSON.stringify(value)).join(', ')}].join(' ');
+test('failure ' + process.env.T83_PROCESS_TOKEN, () => {
+  console.log(report);
+  assert.fail('fixture failure');
+});
+`;
+  const sha = manifestTask(h, { submitted: { 'test/failure.test.js': testFile } });
+  submitTestsFixture(h, sha, null, [
+    '--env', JSON.stringify({ T83_PROJECT_CANARY: canaries.project }),
+    '--env_file', projectEnvFile,
+  ]);
+  for (const key of Object.keys(h.env)) {
+    if (key.startsWith('NODE_TEST_')) delete h.env[key];
   }
-  h.ok(['submit', 'T1', '--sha', '0123456789abcdef0123456789abcdef01234567', '--agent', 'w-1']);
-  const missing = h.run(['check', 'tests', 'T1']);
-  assert.equal(missing.code, 1);
-  assert.match(missing.stdout, /is not in/);
+
+  const cmd = `${shellQuote(process.execPath)} --test --test-reporter=tap test/failure.test.js`;
+  h.ok(['project', 'set', '--tests-mode', 'run-only', '--tests-cmd', cmd]);
+  const result = h.run(['check', 'tests', 'T1', '--agent', 'checker', '--json'], {
+    env: { T83_PROCESS_TOKEN: canaries.process },
+  });
+  assert.equal(result.code, 1, result.stderr + result.stdout);
+
+  const evidence = h.readState('tasks.json').tasks[0].evidence.at(-1);
+  assert.ok(evidence.test_failure.names.some((name) => name.includes('[redacted:T83_PROCESS_TOKEN]')));
+  assert.ok(evidence.test_failure.output_tail.includes('[redacted:T83_PROCESS_TOKEN]'));
+  assert.ok(evidence.summary.includes('[redacted:T83_PROCESS_TOKEN]'));
+  assert.match(evidence.test_failure.output_tail, /\[redacted:T83_PROJECT_CANARY\]/);
+  assert.match(evidence.test_failure.output_tail, /\[redacted:T83_PROJECT_FILE_CANARY\]/);
+  assert.match(evidence.test_failure.output_tail, /\[redacted:T83_RUNG_CANARY\]/);
+  assert.match(evidence.test_failure.output_tail, /\[redacted:T83_RUNG_FILE_TOKEN\]/);
+  for (const label of ['GITHUB_TOKEN', 'API_KEY', 'AWS_ACCESS_KEY_ID', 'SLACK_TOKEN', 'AUTHORIZATION']) {
+    assert.ok(evidence.test_failure.output_tail.includes(`[redacted:${label}]`), label);
+  }
+
+  const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8');
+  const taskText = h.ok(['task', 'show', 'T1']);
+  const taskJson = JSON.stringify(h.json(['task', 'show', 'T1']));
+  const output = [result.stdout, result.stderr, JSON.stringify(evidence), events, taskText, taskJson].join('\n');
+  for (const secret of [...Object.values(canaries), ...commonTokens]) {
+    assert.equal(output.includes(secret), false, `raw canary leaked: ${secret}`);
+  }
 });
 
-test('prove and run-only require a command, and malformed policy fails before running it', (t) => {
+test('paths, long file names, commit SHAs and ordinary env values survive a failed test run', (t) => {
   const h = makeRepo(t);
-  const sha = manifestTask(h, { submitted: {} });
+  const file = 'test/T83-long-file-name-kept-intact-for-diagnostics.test.js';
+  const fullSha = 'a1b2c3d4e5f60718293a4b5c6d7e8f9012345678';
+  const worktree = '/home/builder/worktrees/T83-gate-command-errors-name-the-real-cause/checkout';
+  const literals = [file, fullSha, worktree].map((value) => JSON.stringify(value)).join(', ');
+  const testFile = `const test = require('node:test');
+const assert = require('node:assert/strict');
+test('NODE_ENV is ' + process.env.NODE_ENV, () => {
+  console.log([${literals}, process.env.NODE_ENV, process.env.CI, process.env.LOG_LEVEL].join(' '));
+  assert.fail('fixture failure');
+});
+`;
+  const sha = manifestTask(h, { submitted: { [file]: testFile } });
+  submitTestsFixture(h, sha, null, ['--env', JSON.stringify({ NODE_ENV: 'test' })]);
+  for (const key of Object.keys(h.env)) {
+    if (key.startsWith('NODE_TEST_')) delete h.env[key];
+  }
+
+  const cmd = `${shellQuote(process.execPath)} --test --test-reporter=tap ${shellQuote(file)}`;
+  h.ok(['project', 'set', '--tests-mode', 'run-only', '--tests-cmd', cmd]);
+  const result = h.run(['check', 'tests', 'T1', '--agent', 'checker'], {
+    env: { NODE_ENV: 'test', CI: 'true', LOG_LEVEL: 'debug' },
+  });
+  assert.equal(result.code, 1, result.stdout + result.stderr);
+
+  const evidence = h.readState('tasks.json').tasks[0].evidence.at(-1);
+  assert.equal(evidence.test_failure.names.length, 1);
+  assert.match(evidence.test_failure.names[0], /^NODE_ENV is test\b/);
+  const output = evidence.test_failure.output_tail;
+  assert.ok(output.includes(file), 'the test file name stays whole');
+  assert.ok(output.includes(fullSha), 'the commit SHA stays whole');
+  assert.ok(output.includes(worktree), 'the worktree path stays whole');
+  assert.match(output, / test true debug/);
+  assert.equal(output.includes('[redacted:'), false, output);
+});
+
+test('credential-named variables with numeric, boolean or short values leave the output intact', (t) => {
+  const h = makeRepo(t);
+  const testFile = `const test = require('node:test');
+const assert = require('node:assert/strict');
+test('budget ' + process.env.MAX_THINKING_TOKENS, () => {
+  console.log(['test/a.test.js:12:3', 'ok: true', process.env.MAX_THINKING_TOKENS, process.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS, process.env.X_COOKIE_ENABLED].join(' '));
+  assert.fail('fixture failure');
+});
+`;
+  const sha = manifestTask(h, { submitted: { 'test/a.test.js': testFile } });
   submitTestsFixture(h, sha);
-  h.ok(['project', 'set', '--tests-cmd', 'null']);
-  for (const mode of ['prove', 'run-only']) {
-    h.ok(['project', 'set', '--tests-mode', mode]);
-    const missing = h.run(['check', 'tests', 'T1']);
-    assert.equal(missing.code, 1);
-    assert.match(missing.stdout, /no test command pinned/);
+  for (const key of Object.keys(h.env)) {
+    if (key.startsWith('NODE_TEST_')) delete h.env[key];
   }
-  const project = h.readState('project.json');
-  for (const [key, value] of [['mode', 'skip'], ['by_kind', { docs: null }], ['by_kind', { tooling: 'none' }], ['expensive', 'true']]) {
-    h.writeState('project.json', { ...project, tests: { mode: 'none', [key]: value } });
-    const bad = h.run(['check', 'tests', 'T1', '--cmd', `${shellQuote(process.execPath)} verify-build.js`, '--json']);
-    assert.equal(bad.code, 1, bad.stderr);
-    const evidence = JSON.parse(bad.stdout);
-    assert.ok(evidence.summary.includes(`project.json tests.${key}`), evidence.summary);
-    assert.deepEqual(evidence.commands, []);
-  }
-  assert.ok(!fs.existsSync(h.env.TOWER_CRANE_TMP));
+
+  const cmd = `${shellQuote(process.execPath)} --test --test-reporter=tap test/a.test.js`;
+  h.ok(['project', 'set', '--tests-mode', 'run-only', '--tests-cmd', cmd]);
+  const result = h.run(['check', 'tests', 'T1', '--agent', 'checker'], {
+    env: { MAX_THINKING_TOKENS: '1', CLAUDE_CODE_MAX_OUTPUT_TOKENS: '32000', X_COOKIE_ENABLED: 'true' },
+  });
+  assert.equal(result.code, 1, result.stdout + result.stderr);
+
+  const evidence = h.readState('tasks.json').tasks[0].evidence.at(-1);
+  assert.deepEqual(evidence.test_failure.names, ['budget 1']);
+  assert.match(evidence.test_failure.output_tail, /not ok 1 - budget 1/);
+  assert.match(evidence.test_failure.output_tail, /test\/a\.test\.js:12:3 ok: true 1 32000 true/);
+  assert.equal(evidence.test_failure.output_tail.includes('[redacted:'), false, evidence.test_failure.output_tail);
+  assert.match(result.stdout, /budget 1/);
+  assert.equal(result.stdout.includes('[redacted:'), false, result.stdout);
+});
+
+test('a token that straddles the output tail cut is redacted, not kept as a fragment', (t) => {
+  const h = makeRepo(t);
+  const body = 'T83BoundaryBody0123456789';
+  // After the marker the tail keeps 8167 characters of this one line, so the cut falls right after
+  // the "sk-" prefix. Spaces keep the body out of any longer run.
+  const line = `${' '.repeat(100)}sk-${body}${' '.repeat(8166 - body.length)}!`;
+  const sha = manifestTask(h, { submitted: {
+    'print-leak.js': `process.stdout.write(${JSON.stringify(line)});\nprocess.exit(1);\n`,
+  } });
+  submitTestsFixture(h, sha);
+  h.ok(['project', 'set', '--tests-mode', 'run-only', '--tests-cmd', `${shellQuote(process.execPath)} print-leak.js`]);
+  const result = h.run(['check', 'tests', 'T1', '--agent', 'checker']);
+  assert.equal(result.code, 1, result.stdout + result.stderr);
+
+  const evidence = h.readState('tasks.json').tasks[0].evidence.at(-1);
+  assert.match(evidence.test_failure.output_tail, /\[redacted:API_KEY\]/);
+  assert.ok(evidence.test_failure.output_tail.length <= 8192);
+  const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8');
+  const output = [result.stdout, result.stderr, JSON.stringify(evidence), events, h.ok(['task', 'show', 'T1'])].join('\n');
+  assert.equal(output.includes(body), false, 'the token body leaked past the output tail cut');
 });
 
 test('tests evidence stores its mode in the audit event and stops counting when the policy changes', (t) => {
@@ -437,6 +407,7 @@ test('acceptance and merge refuse a mode change after an audited tests pass', (t
   h.ok(['project', 'set', '--tests-mode', 'none']);
   h.ok(['check', 'tests', 'T1', '--agent', 'checker']);
   gateEvidence(h, 'clean', 'checker');
+  h.reviewer('T1', 'r-1', sha);
   h.ok(['evidence', 'T1', '--type', 'review', '--ok', '--sha', sha, '--agent', 'r-1']);
   h.ok(['project', 'set', '--tests-mode', 'prove']);
   const accept = h.run(['accept', 'T1']);
@@ -453,52 +424,6 @@ test('acceptance and merge refuse a mode change after an audited tests pass', (t
   assert.equal(merge.code, 1);
   assert.match(merge.stderr, /its gates no longer pass: tests:.*mode none.*prove/);
   assert.ok(!fs.existsSync(out), 'the merge gate did not run');
-});
-
-test('expensive prove requires a scoped command before running the full suite', (t) => {
-  const h = makeRepo(t);
-  const sha = manifestTask(h, { submitted: {} });
-  submitTestsFixture(h, sha);
-  h.ok(['project', 'set', '--tests-expensive', 'true']);
-  for (const extra of [[], ['--proof-cmd', 'node test/value.test.js']]) {
-    h.ok(['project', 'set', '--tests-proof-cmd', extra.length ? extra[1] : 'null']);
-    const r = h.run(['check', 'tests', 'T1', '--cmd', `${shellQuote(process.execPath)} verify-build.js`, ...extra, '--json']);
-    assert.equal(r.code, 1, r.stderr);
-    const evidence = JSON.parse(r.stdout);
-    assert.match(evidence.summary, /tests_proof_cmd.*\{tests\}/);
-    assert.equal(evidence.commands.some((c) => c.command.includes('verify-build')), false);
-  }
-});
-
-test('expensive prove rejects a scoped command that fails at head or passes after reverting', (t) => {
-  const h = makeRepo(t);
-  const sha = manifestTask(h, { submitted: {} });
-  submitTestsFixture(h, sha);
-  h.ok(['project', 'set', '--tests-expensive', 'true']);
-  for (const [cmd, message] of [
-    [`${shellQuote(process.execPath)} -e "process.exit(1)" {tests}`, /scoped proof.*at.*exit 1/],
-    [`${shellQuote(process.execPath)} -e "process.exit(0)" {tests}`, /tests pass without the change/],
-  ]) {
-    h.ok(['project', 'set', '--tests-proof-cmd', cmd]);
-    const r = h.run(['check', 'tests', 'T1', '--cmd', `${shellQuote(process.execPath)} verify-build.js`, '--proof-cmd', cmd, '--json']);
-    assert.equal(r.code, 1, r.stderr);
-    assert.match(JSON.parse(r.stdout).summary, message);
-  }
-  assert.deepEqual(fs.readdirSync(h.env.TOWER_CRANE_TMP), []);
-});
-
-test('scoped proof receives only changed test paths and quotes spaces', (t) => {
-  const h = makeRepo(t);
-  const sha = manifestTask(h, {
-    base: { 'proof.js': "require('node:assert/strict').deepEqual(process.argv.slice(2), ['test/new value.test.js', 'test/value.test.js']);\nfor (const file of process.argv.slice(2)) require('./' + file);\n" },
-    submitted: { 'test/new value.test.js': "require('node:assert/strict').equal(require('../value'), 1);\n" },
-  });
-  submitTestsFixture(h, sha);
-  h.ok(['project', 'set', '--tests-expensive', 'true']);
-  h.ok(['project', 'set', '--tests-proof-cmd', `${shellQuote(process.execPath)} proof.js {tests}`]);
-  const evidence = h.json(['check', 'tests', 'T1', '--cmd', `${shellQuote(process.execPath)} verify-build.js`, '--proof-cmd', `${shellQuote(process.execPath)} proof.js {tests}`]);
-  assert.match(evidence.summary, /kept a scoped proof/);
-  assert.equal(evidence.commands.filter((c) => c.command.includes('proof.js')).length, 2);
 });
 
 test('gate commands exit 1 when the gate module is not installed', (t) => {
@@ -552,6 +477,7 @@ test('merge refuses a task of any kind whose PR has no passing ci at the submitt
   h.ok(['task', 'add', '--title', 'Docs', '--acceptance', 'reads well', '--kind', 'docs']);
   h.ok(['claim', 'T1', '--agent', 'w-1']);
   h.ok(['submit', 'T1', '--sha', sha, '--pr', '9', '--agent', 'w-1']);
+  h.reviewer('T1', 'r-1', sha);
   h.ok(['evidence', 'T1', '--type', 'review', '--ok', '--sha', sha, '--agent', 'r-1']);
   gateEvidence(h, 'ci', 'ci');
   h.ok(['accept', 'T1']);
@@ -576,6 +502,7 @@ test('merge checks the gates as they stand, not only the accepted status', (t) =
   h.ok(['claim', 'T1', '--agent', 'w-1']);
   h.ok(['submit', 'T1', '--sha', sha, '--agent', 'w-1']);
   for (const type of ['tests', 'clean']) gateEvidence(h, type, 'checker');
+  h.reviewer('T1', 'r-1', sha);
   h.ok(['evidence', 'T1', '--type', 'review', '--ok', '--sha', sha, '--agent', 'r-1']);
   h.ok(['accept', 'T1']);
   const cli = cliCopy(h);
@@ -595,4 +522,181 @@ test('merge checks the gates as they stand, not only the accepted status', (t) =
   const merged = cli.run(['merge', 'T1'], { GATE_OUT: out, GATE_OK: '1' });
   assert.equal(merged.code, 0, merged.stderr);
   assert.ok(fs.existsSync(out), 'with the gates passing again, the merge gate runs');
+});
+
+function readEvents(h) {
+  return fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+}
+
+// An accepted task whose worktree the CLI made; merge is the only step left.
+function acceptedWithWorktree(h) {
+  const sha = gateFixture(h);
+  h.ok(['task', 'add', '--title', 'Change', '--acceptance', 'works']);
+  h.ok(['claim', 'T1', '--agent', 'w-1']);
+  const wt = h.json(['worktree', 'T1']);
+  h.ok(['submit', 'T1', '--sha', sha, '--agent', 'w-1']);
+  for (const type of ['tests', 'clean']) gateEvidence(h, type, 'checker');
+  h.reviewer('T1', 'r-1', sha);
+  h.ok(['evidence', 'T1', '--type', 'review', '--ok', '--sha', sha, '--agent', 'r-1']);
+  h.ok(['accept', 'T1']);
+  return wt;
+}
+
+test('merge removes the merged task worktree and records it', (t) => {
+  const h = makeRepo(t);
+  h.init();
+  const wt = acceptedWithWorktree(h);
+  const cli = cliCopy(h);
+  fs.mkdirSync(cli.gates, { recursive: true });
+  fs.writeFileSync(path.join(cli.gates, 'merge.js'), FAKE_GATE);
+
+  const merged = cli.run(['merge', 'T1'], { GATE_OUT: path.join(h.base, 'gate.json'), GATE_OK: '1' });
+  assert.equal(merged.code, 0, merged.stderr);
+  assert.ok(!fs.existsSync(wt.path), 'the worktree directory is gone');
+  assert.ok(!h.registers(wt.path), 'git no longer registers it');
+  const removed = readEvents(h).find((e) => e.cmd === 'worktree removed');
+  assert.equal(removed.task, 'T1');
+  assert.equal(removed.detail.removed, true);
+});
+
+test('merge keeps a worktree with uncommitted changes and says why', (t) => {
+  const h = makeRepo(t);
+  h.init();
+  const wt = acceptedWithWorktree(h);
+  fs.writeFileSync(path.join(wt.path, 'notes.txt'), 'unfinished\n');
+  const cli = cliCopy(h);
+  fs.mkdirSync(cli.gates, { recursive: true });
+  fs.writeFileSync(path.join(cli.gates, 'merge.js'), FAKE_GATE);
+
+  const merged = cli.run(['merge', 'T1'], { GATE_OUT: path.join(h.base, 'gate.json'), GATE_OK: '1' });
+  assert.equal(merged.code, 0, merged.stderr);
+  assert.equal(fs.readFileSync(path.join(wt.path, 'notes.txt'), 'utf8'), 'unfinished\n');
+  assert.ok(h.registers(wt.path), 'git still registers it');
+  const kept = readEvents(h).find((e) => e.cmd === 'worktree kept');
+  assert.equal(kept.task, 'T1');
+  assert.equal(kept.detail.reason, 'uncommitted changes');
+});
+
+test('merge keeps the worktree while merge.keep_branch is set', (t) => {
+  const h = makeRepo(t);
+  h.init(['--merge-keep-branch', 'true']);
+  const wt = acceptedWithWorktree(h);
+  const cli = cliCopy(h);
+  fs.mkdirSync(cli.gates, { recursive: true });
+  fs.writeFileSync(path.join(cli.gates, 'merge.js'), FAKE_GATE);
+
+  const merged = cli.run(['merge', 'T1'], { GATE_OUT: path.join(h.base, 'gate.json'), GATE_OK: '1' });
+  assert.equal(merged.code, 0, merged.stderr);
+  assert.ok(fs.existsSync(wt.path), 'the worktree stays for its branch');
+  const kept = readEvents(h).find((e) => e.cmd === 'worktree kept');
+  assert.equal(kept.detail.reason, 'merge.keep_branch is set');
+});
+
+test('a task sent back and claimed after merge looked at its worktree keeps the worktree', async (t) => {
+  const h = makeRepo(t);
+  h.init();
+  const wt = acceptedWithWorktree(h);
+  const cli = cliCopy(h);
+  fs.mkdirSync(cli.gates, { recursive: true });
+  fs.writeFileSync(path.join(cli.gates, 'merge.js'), FAKE_GATE);
+
+  // Merge pauses after its first look at the worktree and before it removes anything.
+  const paused = path.join(h.base, 'paused');
+  const merge = cli.start(['merge', 'T1'], {
+    GATE_OUT: path.join(h.base, 'gate.json'), GATE_OK: '1', HOOK_STOP_WORKTREE_STATUS: paused,
+  });
+  assert.ok(await waitFor(paused), 'merge reached its first look at the worktree');
+  const sent = await h.runAsync(['rework', 'T1', '--reason', 'racing the merge']);
+  const claimed = await h.runAsync(['claim', 'T1', '--agent', 'w-2']);
+  fs.writeFileSync(`${paused}.go`, '');
+  const merged = await merge.result;
+
+  assert.equal(sent.code, 0, sent.stderr);
+  assert.equal(claimed.code, 0, claimed.stderr);
+  assert.equal(merged.code, 0, merged.stderr);
+  assert.ok(fs.existsSync(wt.path), 'the worktree of the claimed task stays');
+  assert.equal(h.readState('tasks.json').tasks[0].status, 'in_progress');
+  const kept = readEvents(h).find((e) => e.cmd === 'worktree kept');
+  assert.equal(kept.task, 'T1');
+  assert.equal(kept.detail.reason, 'the task changed before its worktree was removed');
+});
+
+test('a merge of an older head keeps the worktree of a newer accepted head', async (t) => {
+  const h = makeRepo(t);
+  h.init();
+  const wt = acceptedWithWorktree(h);
+  const merged = h.readState('tasks.json').tasks[0].sha;
+  // The worktree starts from the submitted head, so a commit on top of it passes the same gates.
+  h.git(['merge', '--ff-only', '-q', merged], wt.path);
+  const cli = cliCopy(h);
+  fs.mkdirSync(cli.gates, { recursive: true });
+  fs.writeFileSync(path.join(cli.gates, 'merge.js'), FAKE_GATE);
+
+  // The merge of the first head pauses before its first look at the worktree.
+  const paused = path.join(h.base, 'paused');
+  const merge = cli.start(['merge', 'T1'], {
+    GATE_OUT: path.join(h.base, 'gate.json'), GATE_OK: '1', HOOK_STOP_WORKTREE_STATUS: paused,
+  });
+  assert.ok(await waitFor(paused), 'merge reached its first look at the worktree');
+  h.ok(['rework', 'T1', '--reason', 'newer head']);
+  h.ok(['claim', 'T1', '--agent', 'w-2']);
+  h.git(['commit', '-q', '--allow-empty', '-m', 'newer head'], wt.path);
+  const newer = h.git(['rev-parse', 'HEAD'], wt.path);
+  h.ok(['submit', 'T1', '--sha', newer, '--agent', 'w-2']);
+  for (const type of ['tests', 'clean']) gateEvidence(h, type, 'checker');
+  h.reviewer('T1', 'r-1', newer);
+  h.ok(['evidence', 'T1', '--type', 'review', '--ok', '--sha', newer, '--agent', 'r-1']);
+  h.ok(['accept', 'T1']);
+  fs.writeFileSync(`${paused}.go`, '');
+  const result = await merge.result;
+
+  assert.equal(result.code, 0, result.stderr);
+  assert.ok(fs.existsSync(wt.path), 'the worktree of the newer head stays');
+  assert.ok(h.registers(wt.path), 'git still registers it');
+  const task = h.readState('tasks.json').tasks[0];
+  assert.equal(task.status, 'accepted');
+  assert.equal(task.sha, newer);
+  assert.equal(task.retiring, undefined, 'the marker is cleared once the merge ends');
+  const events = readEvents(h);
+  assert.ok(!events.some((e) => e.cmd === 'worktree removed'), 'nothing was removed');
+  const kept = events.find((e) => e.cmd === 'worktree kept');
+  assert.equal(kept.task, 'T1');
+  assert.equal(kept.detail.reason, 'the task changed before its worktree was removed');
+});
+
+test('merge refuses rework and claim while it removes the task worktree', async (t) => {
+  const h = makeRepo(t);
+  h.init();
+  const wt = acceptedWithWorktree(h);
+  const cli = cliCopy(h);
+  fs.mkdirSync(cli.gates, { recursive: true });
+  fs.writeFileSync(path.join(cli.gates, 'merge.js'), FAKE_GATE);
+
+  // Merge pauses after its locked check of the worktree, with the lock released and before git removes it.
+  const paused = path.join(h.base, 'paused');
+  const merge = cli.start(['merge', 'T1'], {
+    GATE_OUT: path.join(h.base, 'gate.json'), GATE_OK: '1', HOOK_STOP_WORKTREE_REMOVE: paused,
+  });
+  assert.ok(await waitFor(paused), 'merge reached git worktree remove');
+  const sent = await h.runAsync(['rework', 'T1', '--reason', 'racing the removal']);
+  const claimed = await h.runAsync(['claim', 'T1', '--agent', 'w-2']);
+  fs.writeFileSync(`${paused}.go`, '');
+  const merged = await merge.result;
+
+  assert.equal(sent.code, 1, 'rework refuses a worktree being removed');
+  assert.match(sent.stderr, /being removed/);
+  assert.equal(claimed.code, 1, 'claim refuses it too');
+  assert.match(claimed.stderr, /being removed/);
+  assert.equal(merged.code, 0, merged.stderr);
+  assert.ok(!fs.existsSync(wt.path), 'the removal finishes for the accepted task');
+  const task = h.readState('tasks.json').tasks[0];
+  assert.equal(task.status, 'accepted');
+  assert.equal(task.retiring, undefined, 'the marker is cleared once the removal ends');
+  assert.equal(readEvents(h).find((e) => e.cmd === 'worktree removed').task, 'T1');
+
+  // A marker whose process has exited is what a crash leaves; it holds nothing.
+  const state = h.readState('tasks.json');
+  state.tasks[0].retiring = { since: new Date().toISOString(), pid: 999999, host: os.hostname() };
+  h.writeState('tasks.json', state);
+  h.ok(['rework', 'T1', '--reason', 'after a crash']);
 });

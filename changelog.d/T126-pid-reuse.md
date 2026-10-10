@@ -1,0 +1,1 @@
+- Lock markers record Linux process start ticks and boot identity. A reused PID or marker from a previous boot is reclaimed immediately; markers without a readable start identity retain age-based reclaim.

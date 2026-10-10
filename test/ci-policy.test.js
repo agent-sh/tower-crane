@@ -4,20 +4,23 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { makeRepo } = require('./helpers');
+const { cachedFixture } = require('./helpers');
 const { gateFixture, gateEvidence } = require('./gate-helpers');
 
+// Built once per process and copied for each test.
 function fixture(t) {
-  const h = makeRepo(t);
-  h.init(['--repo', 'acme/app']);
-  h.sha = gateFixture(h);
-  h.ok(['task', 'add', '--title', 'Change', '--acceptance', 'works']);
-  h.ok(['claim', 'T1', '--agent', 'worker']);
-  h.ok(['submit', 'T1', '--agent', 'worker', '--sha', h.sha, '--pr', '7']);
-  gateEvidence(h, 'tests', 'checker');
-  gateEvidence(h, 'clean', 'checker');
-  h.ok(['evidence', 'T1', '--type', 'review', '--ok', '--sha', h.sha, '--agent', 'reviewer']);
-  return h;
+  return cachedFixture(t, 'reviewed', (h) => {
+    h.init(['--repo', 'acme/app']);
+    h.sha = gateFixture(h);
+    h.ok(['task', 'add', '--title', 'Change', '--acceptance', 'works']);
+    h.ok(['claim', 'T1', '--agent', 'worker']);
+    h.ok(['submit', 'T1', '--agent', 'worker', '--sha', h.sha, '--pr', '7']);
+    gateEvidence(h, 'tests', 'checker');
+    gateEvidence(h, 'clean', 'checker');
+    h.reviewer('T1', 'reviewer', h.sha);
+    h.ok(['evidence', 'T1', '--type', 'review', '--ok', '--sha', h.sha, '--agent', 'reviewer']);
+    return { sha: h.sha };
+  });
 }
 
 const latest = (h) => h.readState('tasks.json').tasks[0].evidence.findLast((e) => e.type === 'ci');
@@ -42,7 +45,7 @@ test('setting required jobs invalidates a hosted pass until CI is checked again'
   assert.deepEqual(latest(h).ci_policy, { ...EMPTY, required: ['fixture'] });
 });
 
-test('a changed required policy blocks the merge recheck before any GitHub merge query', (t) => {
+test('a changed required policy permits a confirmation lookup but blocks an open PR merge', (t) => {
   const h = fixture(t);
   gateEvidence(h, 'ci', 'checker');
   h.ok(['accept', 'T1']);
@@ -53,7 +56,8 @@ test('a changed required policy blocks the merge recheck before any GitHub merge
   assert.equal(refused.code, 1, refused.stdout);
   assert.match(refused.stderr, /hosted CI.*policy.*(changed|matches)/);
   assert.match(refused.stderr, /tower-crane check ci T1/);
-  assert.equal(fs.existsSync(log), false, 'stale policy refuses before talking to GitHub');
+  const calls = fs.readFileSync(log, 'utf8').trim().split('\n').map(JSON.parse);
+  assert.deepEqual(calls.map((args) => args.slice(0, 2)), [['pr', 'view']], 'stale policy allows only the confirmation lookup');
   gateEvidence(h, 'ci', 'checker');
   assert.equal(ciGate(h).ok, true);
 });

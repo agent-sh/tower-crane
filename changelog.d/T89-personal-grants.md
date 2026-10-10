@@ -1,0 +1,2 @@
+- Authorize personal fallback grants against previous personal routes, so project-local grants cannot widen permissions in other projects. Distinguish inherited and explicit harness bindings, and check inherited routes across compatible harnesses.
+- Accept `null` for both budget limits in `init` and `project set`. Removing a finite limit uses the existing owner-required budget-raise approval path; other numeric validation is preserved.

@@ -1,0 +1,1 @@
+- Codex homes validate scalar model and auth-store settings in base configs and both profile layouts. Claude MCP definitions validate string fields and string argument arrays, excluding credentials nested inside malformed fields.

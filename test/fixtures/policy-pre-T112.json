@@ -1,0 +1,27 @@
+{
+  "gitPush": "branch",
+  "gh": [
+    "pr view",
+    "pr diff",
+    "pr checks",
+    "pr list",
+    "pr status",
+    "issue view",
+    "issue list",
+    "repo view",
+    "run view",
+    "run list",
+    "run watch",
+    "release view",
+    "release list",
+    "workflow view",
+    "workflow list",
+    "label list",
+    "search",
+    "auth status",
+    "status",
+    "pr create",
+    "pr edit"
+  ],
+  "hook": "@HOME@/hook.json"
+}
