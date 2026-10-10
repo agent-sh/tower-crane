@@ -2,6 +2,7 @@ name: CI
 
 on:
   pull_request:
+    # No base filter: a stacked task's PR targets its lower task's branch, whatever its name.
   push:
     branches: [main]
 

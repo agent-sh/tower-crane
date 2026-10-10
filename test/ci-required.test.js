@@ -17,12 +17,17 @@ const REQUIRED = [
 const CAP_POLICY = [{ app: 'revuto-review', pattern: 'reached the \\d+-round review limit' }];
 const github = path.join(__dirname, 'fixtures', 'github.js');
 
+function readWorkflow(root) {
+  // Windows checkouts can write CRLF line endings; the patterns below expect LF.
+  return fs.readFileSync(path.join(root, '.github', 'workflows', 'ci.yml'), 'utf8').replace(/\r\n/g, '\n');
+}
+
 test('package support, CI matrix, and required jobs target Node 24 and 26', () => {
   const root = path.resolve(__dirname, '..');
   const metadata = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
   assert.equal(metadata.engines.node, '>=24');
 
-  const workflow = fs.readFileSync(path.join(root, '.github', 'workflows', 'ci.yml'), 'utf8');
+  const workflow = readWorkflow(root);
   const matrix = [...workflow.matchAll(/^\s+- \{ os: ([^,]+), node: (\d+), shard: '([^']*)' \}$/gm)]
     .map(([, os, node, shard]) => ({ os, node: Number(node), shard }));
   assert.deepEqual(matrix, [
@@ -41,6 +46,13 @@ test('package support, CI matrix, and required jobs target Node 24 and 26', () =
   }
   const agents = fs.readFileSync(path.join(root, 'AGENTS.md'), 'utf8');
   assert.match(agents, /\bNode 24 or newer\b/);
+});
+
+test('pull requests run CI for every base, and pushes run it for main', () => {
+  const root = path.resolve(__dirname, '..');
+  const workflow = readWorkflow(root);
+  // A base filter would drop CI from stacks on custom task branches, which submission accepts.
+  assert.match(workflow, /^on:\n {2}pull_request:\n(?: {4}#.*\n)* {2}push:\n {4}branches: \[main\]\n/m);
 });
 
 function run(name, conclusion = 'success', status = 'completed', app = 'github-actions', id = 1) {

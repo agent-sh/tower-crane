@@ -29,6 +29,8 @@ Linking, completed-chain retirement and unstacking use the same snapshot, unlock
 
 The shared command runner rejects Git and gh calls inside state mutation transactions. Spawn prepares repository directories and credentials before its write; acceptance and review dispatch prepare local CI inputs and snapshots before their writes and reject changed inputs. View rendering starts after the mutation releases its lock and reads current state.
 
+Hosted CI runs on every stack member at its own base. `ci.yml` has no base filter on pull requests, so a stacked task's PR runs the `ci.yml` jobs on any task branch, and its required runs report before its base merges; pushes to `main` run them too.
+
 Tests, cleanup, review diffs and local CI use the dependency branch as the base for stacked tasks. A successful sync changes that base to main when the lower task has merge evidence. Old head evidence cannot count after the worker resubmits a refreshed head. Stack merge checks all lower heads first, then pins each member's accepted full head with an ordinary PR merge because GitHub's stack merge command has no head-match option; see cli.md for partial completion and the ordinary admin fallback.
 
 Tower Crane keeps a project's plan and progress in plain files. People and dashboards read them; the `tower-crane` CLI and serve's owner forms write through the same locked, validated functions. An agent that needs to change state runs a command.
