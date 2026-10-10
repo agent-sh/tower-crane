@@ -83,7 +83,8 @@ for (const route of ['claude', 'codex', 'codex-notify', 'pi', 'opencode', 'agy',
       assert.ok(!events(h).some((e) => e.cmd === 'hook inbox' && e.detail.messages.length));
     }
     const audit = events(h);
-    assert.ok(audit.some((e) => e.cmd === 'hook progress'), 'automatic tool progress missing');
+    assert.ok(fs.readFileSync(path.join(h.state, 'progress.jsonl'), 'utf8').trim().split('\n')
+      .map(JSON.parse).some((e) => e.cmd === 'hook progress'), 'automatic tool progress missing');
     const report = audit.find((e) => e.cmd === 'msg' && e.agent === 'worker-T1-1' && e.detail.to === 'orchestrator');
     assert.match(report.detail.text, /without submit/);
     assert.match(report.detail.text, new RegExp(`last report from ${harness}`));

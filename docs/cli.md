@@ -38,6 +38,21 @@ In a sandboxed claude or codex agent (`TOWER_CRANE_BROKER` set by its spawn), co
 
 Writes take the lock, re-read the files, validate, write atomically and append to `events.jsonl`. The Git/gh runner refuses commands inside mutation transactions. Rendering follows after the mutation releases its lock and reads current state under its own lock. A refused command writes nothing, except a refused brokered `msg`, which appends a `msg refused` event.
 
+`hook tool` appends best-effort activity to `progress.jsonl` without the state
+lock or a task read. Inbox hooks skip a busy lock and retry delivery on the next
+hook; the prompt bridge returns empty context after a one-second inbox timeout.
+Background-job and Stop decisions still use locked audit events. `wait --types
+all` includes historical progress in `events.jsonl`; new tool progress is read
+from `progress.jsonl` and does not wake state watchers.
+
+Successful writes automatically move evidence fields over 4096 bytes into
+`evidence/<task>/<sha256>.json`, with additive references in `tasks.json` and
+new gate events. `task show` and gate checks return the full checked values;
+ordinary writes preserve references without loading historical output. Copy
+the evidence directory with state. Older tools preserve references but cannot
+expand them for gate checks. See [state.md](state.md#tasksjson) for migration
+and compatibility details.
+
 State readers preserve additive fields and enum values from newer tools. Commands still reject unsupported input values; dispatch refuses a task whose routing fields it cannot interpret. `init` records `project.json.schema_version: 1`, with absent values in older projects treated as `1`. A higher schema refuses reads, writes and new spawns with exit `1` and an upgrade message. An active supervisor stops state activity and retries but lets its worker finish, then exits `1`; recover the lease and usage with an upgraded tool. See [state.md: Schema compatibility](state.md#schema-compatibility) for the migration ordering and rollout rule.
 
 An unfamiliar task status keeps an unexpired claim counted for locks and worker capacity. `recover` reports `waiting` when routing values require an upgrade, preserving failed review evidence without selecting a tier or sending the task back. `rework` refuses those values before changing state or the brief.
