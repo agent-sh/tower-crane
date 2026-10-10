@@ -141,7 +141,7 @@ test('a fallback never revisits a harness that its own login failure paused', (t
   assert.equal(owner(h).length, 2);
 });
 
-test('a paused fallback takes its probe interval only when it runs, not when its primary is dispatched', (t) => {
+test('a paused fallback takes its probe interval only when it runs, not when its primary is dispatched', { skip: process.platform === 'win32' && 'the login check stub is a POSIX script' }, (t) => {
   const h = setup(t, { tasks: ['T1', 'T2'], fallbacks: [{ harness: 'command', command: ['{cwd}/scripts/fallback', '--model', 'second', '{prompt}'] }] });
   commandFallback(h);
   h.spawnEnv.TOWER_CRANE_TEST_FALLBACK_CHAIN = '1';
