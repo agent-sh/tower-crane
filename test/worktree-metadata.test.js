@@ -4,8 +4,10 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { makeRepo } = require('./helpers');
+const cp = require('node:child_process');
+const { makeRepo, ROOT } = require('./helpers');
 const { shellQuote } = require('../lib/gates/common');
+const { clearPlaceholders, REAP_DIR, REAP_STALE_MS } = require('../lib/git-placeholders');
 
 function orphan(h, name = 'orphan') {
   const dir = path.join(h.repo, '.git', 'worktrees', name);
@@ -14,6 +16,25 @@ function orphan(h, name = 'orphan') {
     fs.writeFileSync(path.join(dir, file), '', { mode: 0o444 });
   }
   return dir;
+}
+
+// A process table listing only the given processes, for a test that removes a
+// placeholder: a process elsewhere on the host with unreadable descriptors would
+// otherwise keep the placeholder the test plants.
+function procTable(h, pids = []) {
+  const dir = fs.mkdtempSync(path.join(h.base, 'proc-'));
+  for (const pid of pids) fs.symlinkSync(`/proc/${pid}`, path.join(dir, String(pid)));
+  return dir;
+}
+
+// Points the holder check at a process table for the rest of the test.
+function onlyProcesses(t, h, pids = []) {
+  const previous = process.env.TOWER_CRANE_PROC;
+  process.env.TOWER_CRANE_PROC = procTable(h, pids);
+  t.after(() => {
+    if (previous === undefined) delete process.env.TOWER_CRANE_PROC;
+    else process.env.TOWER_CRANE_PROC = previous;
+  });
 }
 
 function gateTask(h, script) {
@@ -130,4 +151,137 @@ while (!fs.existsSync(${JSON.stringify(addRelease)})) {
     fs.writeFileSync(addRelease, '');
     await Promise.all([gate, ...additions]);
   }
+});
+
+test('a sandboxed git push clears an empty read-only lock placeholder that would block its upstream config', (t) => {
+  const h = makeRepo(t);
+  h.init();
+  h.git(['checkout', '-q', '-b', 'task-T1']);
+  const remote = path.join(h.base, 'origin.git');
+  h.git(['init', '-q', '--bare', remote]);
+  // What a sandbox mask leaves behind in the main checkout's git directory.
+  const lock = path.join(h.repo, '.git', 'config.lock');
+  fs.writeFileSync(lock, '', { mode: 0o444 });
+  const policy = path.join(h.base, 'policy.json');
+  fs.writeFileSync(policy, JSON.stringify({ gitPush: 'branch', branch: 'task-T1', repo: null, gh: [] }));
+  const shimDir = path.join(h.base, 'shim');
+  fs.mkdirSync(shimDir);
+  const env = { ...h.env, TOWER_CRANE_PROC: procTable(h) };
+  const push = cp.spawnSync(process.execPath, [path.join(ROOT, 'lib', 'shim.js'), policy, shimDir, 'git', 'push', '-u', remote, 'HEAD:refs/heads/task-T1'],
+    { cwd: h.repo, env, encoding: 'utf8', timeout: 30000 });
+  assert.equal(push.status, 0, push.stderr);
+  // Git reports a blocked upstream write without a failing status.
+  assert.doesNotMatch(push.stderr, /could not lock config/);
+  assert.match(push.stderr, /removed empty read-only placeholder .*config\.lock/);
+  assert.equal(fs.existsSync(lock), false);
+  assert.equal(h.git(['config', '--get', 'branch.task-T1.remote']), remote);
+});
+
+test('a lock that a process holds is kept when the git directory is reached through a symlink', { skip: !fs.existsSync('/proc/self/fd') && 'needs /proc to see which process holds the lock' }, async (t) => {
+  const h = makeRepo(t);
+  h.init();
+  const lock = path.join(h.repo, '.git', 'index.lock');
+  fs.writeFileSync(lock, '', { mode: 0o444 });
+  const link = path.join(h.base, 'git-link');
+  fs.symlinkSync(path.join(h.repo, '.git'), link);
+  const holder = cp.spawn(process.execPath, ['-e', `require('node:fs').openSync(${JSON.stringify(lock)}, 'r'); console.log('open'); setInterval(() => {}, 1000);`], { stdio: ['ignore', 'pipe', 'ignore'] });
+  try {
+    await new Promise((resolve) => holder.stdout.once('data', resolve));
+    assert.deepEqual(clearPlaceholders(link), []);
+  } finally {
+    holder.kill();
+  }
+  assert.equal(fs.existsSync(lock), true);
+});
+
+test('a cleanup keeps placeholders while another cleanup holds the git directory', { timeout: 30000 }, (t) => {
+  const h = makeRepo(t);
+  h.init();
+  const commonDir = path.join(h.repo, '.git');
+  const lock = path.join(commonDir, 'config.lock');
+  fs.writeFileSync(lock, '', { mode: 0o444 });
+  fs.mkdirSync(path.join(commonDir, REAP_DIR));
+  const messages = [];
+  t.mock.method(process.stderr, 'write', (chunk) => {
+    messages.push(String(chunk));
+    return true;
+  });
+  assert.deepEqual(clearPlaceholders(commonDir), []);
+  assert.equal(fs.existsSync(lock), true);
+  assert.match(messages.join(''), /another cleanup holds/);
+});
+
+test('a cleanup removes the directory a dead cleanup left behind, then the placeholder', (t) => {
+  const h = makeRepo(t);
+  h.init();
+  const commonDir = path.join(h.repo, '.git');
+  const lock = path.join(commonDir, 'index.lock');
+  fs.writeFileSync(lock, '', { mode: 0o444 });
+  const dir = path.join(commonDir, REAP_DIR);
+  fs.mkdirSync(dir);
+  const old = new Date(Date.now() - REAP_STALE_MS - 1000);
+  fs.utimesSync(dir, old, old);
+  t.mock.method(process.stderr, 'write', () => true);
+  onlyProcesses(t, h);
+  assert.deepEqual(clearPlaceholders(commonDir).map((file) => path.basename(file)), ['index.lock']);
+  assert.equal(fs.existsSync(lock), false);
+  assert.equal(fs.existsSync(dir), false);
+});
+
+// Python makes this process non-dumpable, so its descriptors are unreadable to
+// a same-user cleanup while its status still shows its uid.
+const PY_HOLDER = `
+import ctypes, sys, time
+ctypes.CDLL(None).prctl(4, 0, 0, 0, 0)
+f = open(sys.argv[1])
+print('open', flush=True)
+time.sleep(60)
+`;
+const PYTHON = cp.spawnSync('python3', ['-I', '-c', 'pass']).status === 0;
+const HOLDER_SKIP = !fs.existsSync('/proc/self/fd') ? 'needs /proc to see which process holds the lock'
+  : process.getuid?.() === 0 ? 'root reads every descriptor table'
+    : !PYTHON && 'needs python3 to make a process non-dumpable';
+
+test('a lock held by a same-user process whose descriptors are unreadable is kept', { skip: HOLDER_SKIP, timeout: 30000 }, async (t) => {
+  const h = makeRepo(t);
+  h.init();
+  const lock = path.join(h.repo, '.git', 'config.lock');
+  fs.writeFileSync(lock, '', { mode: 0o444 });
+  const holder = cp.spawn('python3', ['-I', '-c', PY_HOLDER, lock], { stdio: ['ignore', 'pipe', 'ignore'] });
+  try {
+    await new Promise((resolve) => holder.stdout.once('data', resolve));
+    assert.throws(() => fs.readdirSync(`/proc/${holder.pid}/fd`), { code: 'EACCES' });
+    assert.deepEqual(clearPlaceholders(path.join(h.repo, '.git')), []);
+  } finally {
+    holder.kill();
+  }
+  assert.equal(fs.existsSync(lock), true);
+});
+
+// The forked child exits at once and its parent never waits, so it stays a zombie.
+const PY_ZOMBIE = `
+import os, time
+pid = os.fork()
+if pid == 0:
+    os._exit(0)
+time.sleep(0.5)
+print(pid, flush=True)
+time.sleep(60)
+`;
+
+test('a zombie of this user holds nothing, so it keeps no placeholder', { skip: HOLDER_SKIP, timeout: 30000 }, async (t) => {
+  const h = makeRepo(t);
+  h.init();
+  const lock = path.join(h.repo, '.git', 'config.lock');
+  fs.writeFileSync(lock, '', { mode: 0o444 });
+  const parent = cp.spawn('python3', ['-I', '-c', PY_ZOMBIE], { stdio: ['ignore', 'pipe', 'ignore'] });
+  try {
+    const pid = await new Promise((resolve) => parent.stdout.once('data', (data) => resolve(String(data).trim())));
+    assert.match(fs.readFileSync(`/proc/${pid}/status`, 'utf8'), /^State:\s+Z\b/m);
+    onlyProcesses(t, h, [pid]);
+    assert.deepEqual(clearPlaceholders(path.join(h.repo, '.git')).map((file) => path.basename(file)), ['config.lock']);
+  } finally {
+    parent.kill();
+  }
+  assert.equal(fs.existsSync(lock), false);
 });
