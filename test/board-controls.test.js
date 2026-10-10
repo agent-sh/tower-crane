@@ -213,6 +213,13 @@ test('the board applies CLI escalations it can send, leaves the rest to the orch
   assert.match(failed.data.error, /only submitted/);
   assert.equal(decisions(h)[2].applied, undefined);
   assert.match(await (await fetch(url + 'controls')).text(), /Apply approved change/);
+  // A tagged question is answered with its own options on the board, not here.
+  h.ok(['ask', '--question', 'Which release channel?', '--option', 'beta', '--option', 'stable', '--setting', 'publish'], as('orchestrator'));
+  const tagged = decisions(h).at(-1);
+  assert.ok(tagged.escalation && tagged.approval_request !== true);
+  assert.doesNotMatch(await (await fetch(url + 'controls')).text(), new RegExp(`data-decision="${tagged.id}"`));
+  assert.equal((await post({ decision: tagged.id, choice: 'approve' }, 'api/controls/answer')).status, 400);
+  assert.equal(decisions(h).at(-1).status, 'open');
   const viewer = await serve(t, h, 'viewer', { fetchToken: false });
   const view = await (await fetch(viewer.url + 'controls')).text();
   assert.doesNotMatch(view, /<form|<input|<select/);
