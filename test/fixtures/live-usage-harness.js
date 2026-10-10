@@ -43,7 +43,11 @@ if (path.resolve(process.argv[1] || '') !== __filename) {
   }
   const spawn = cp.spawn;
   cp.spawn = function liveHarness(file, args, options) {
-    if (['codex', 'claude', 'opencode', 'pi', 'agy'].includes(file) && process.env.LIVE_STEPS) {
+    // The supervisor's lease gate starts its harness after `tower-crane-gate`.
+    const gated = file === '/bin/sh' && args[2] === 'tower-crane-gate';
+    const harness = gated ? args[3] : file;
+    if (['codex', 'claude', 'opencode', 'pi', 'agy'].includes(harness) && process.env.LIVE_STEPS) {
+      if (gated) return spawn.call(this, file, [...args.slice(0, 3), process.execPath, __filename, ...args.slice(3)], options);
       return spawn.call(this, process.execPath, [__filename, file, ...args], options);
     }
     return spawn.call(this, file, args, options);
