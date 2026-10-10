@@ -1,0 +1,1 @@
+- Windows CI jobs use the project's 45-minute tests budget after a passing shard exceeded the old 15-minute job cap. Per-test timeout checks remain active.
