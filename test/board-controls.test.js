@@ -184,7 +184,7 @@ test('the board approves a publish request without using it, so the orchestrator
   assert.deepEqual(audits(h).filter((e) => e.detail.settings.publish).map((e) => [e.detail.actor, e.detail.approved_by]), [['orchestrator', 'D1']]);
 });
 
-test('the board applies CLI escalations it can send, leaves the rest to the orchestrator, and rejects viewer writes', async (t) => {
+test("the board approves an orchestrator's escalations for its repeat, applies the owner's own, and rejects viewer writes", async (t) => {
   const h = fixture(t);
   h.init();
   h.ok(['task', 'add', '--title', 'Delegation target', '--acceptance', 'runs']);
@@ -193,18 +193,25 @@ test('the board applies CLI escalations it can send, leaves the rest to the orch
   assert.equal(h.run(['spawn', '--task', 'T1', '--role', 'orchestrator', '--wait'], as('orchestrator')).code, 1);
   assert.deepEqual(decisions(h)[1].request, { command: 'spawn', flags: { task: 'T1', role: 'orchestrator', wait: true }, pos: [] });
   const { post, url } = await serve(t, h);
-  assert.equal((await post({ decision: 'D1', choice: 'approve' }, 'api/controls/answer')).status, 200);
+  // Approving answers the orchestrator; its refusal told it to run the command again.
+  const approved = await post({ decision: 'D1', choice: 'approve' }, 'api/controls/answer');
+  assert.equal(approved.status, 200, JSON.stringify(approved));
+  assert.match(approved.data.message, /orchestrator uses this approval/);
+  assert.equal(h.readState('project.json').merge?.admin, undefined);
+  assert.equal(decisions(h)[0].applied, undefined);
+  h.ok(['project', 'set', '--merge-admin', 'true'], as('orchestrator'));
   assert.equal(h.readState('project.json').merge.admin, true);
-  // The board sends no --wait, so it approves this one and the orchestrator runs it.
+  assert.equal(decisions(h)[0].applied.by, 'orchestrator');
+  assert.equal(decisions(h).filter((d) => d.escalation?.settings.includes('merge.admin')).length, 1, 'the repeat opened no new decision');
   const waited = await post({ decision: 'D2', choice: 'approve' }, 'api/controls/answer');
   assert.equal(waited.status, 200, JSON.stringify(waited));
-  assert.match(waited.data.message, /orchestrator uses this approval/);
   assert.equal(decisions(h)[1].answer, 'approve');
   assert.equal(decisions(h)[1].applied, undefined);
   assert.equal(events(h).filter((e) => e.cmd === 'spawn' && e.detail.role === 'orchestrator').length, 0);
   const page = await (await fetch(url + 'controls')).text();
   assert.doesNotMatch(page, /data-decision="D2"/);
   assert.match(page, /Waiting for the orchestrator to apply this request/);
+  assert.equal((await post({ decision: 'D2', choice: 'approve' }, 'api/controls/answer')).status, 400);
   assert.equal(Authority.approval(require('../lib/state').loadState(h.state), ['delegation'], { spawn: 'T1', role: 'orchestrator' }).id, 'D2');
   const r = await post(request('accept', { waive: ['tests', 'clean', 'review', 'ci'], reason: 'Fixture only' }, ['T1']));
   assert.equal(r.data.decision, 'D3');
