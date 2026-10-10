@@ -5,6 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { TMP_ROOT, detachedAlive, makeRepo } = require('./helpers');
+const { stacked } = require('./stack-fixture');
 const B = require('../lib/broker');
 const harnessHooks = require('../lib/harness-hooks');
 const { resolveCommand, parseOptions, GLOBAL } = require('../bin/tower-crane');
@@ -406,4 +407,30 @@ test('a brokered worker or reviewer messages only the orchestrator or the owner'
     assert.equal(r.code, 0, r.stderr);
   }
   assert.deepEqual(events().filter((e) => e.cmd === 'msg').map((e) => [e.task, e.detail.to]), [['T2', 'orchestrator'], ['T2', 'owner']]);
+});
+
+test('a sandboxed worker prints its worktree without the state lock, though a stack sync would write', async (t) => {
+  const f = stacked(t);
+  const { wt } = f.upper;
+  // origin's main moves, so the linked stack is due a sync that writes state.
+  f.h.git(['commit', '--allow-empty', '-qm', 'main moves']);
+  const remote = path.join(f.h.base, 'remote.git');
+  f.h.git(['--git-dir', remote, 'fetch', '-q', f.h.repo, 'HEAD:refs/heads/main']);
+  const job = { state: f.h.state, task: 'T2', agent: 'worker-T2-1', role: 'worker', cwd: wt.path, broker: path.join(f.h.base, 'brokers', 'worker-T2-1', B.FILE) };
+  const broker = await B.start(job);
+  t.after(() => broker.close());
+  const tasks = path.join(f.h.state, 'tasks.json');
+  const before = fs.readFileSync(tasks, 'utf8');
+  // The sandbox leaves the state directory read-only, so the lock cannot be created.
+  fs.chmodSync(f.h.state, 0o555);
+  let r;
+  try {
+    r = f.h.run(['worktree', 'T2'], { cwd: wt.path, env: { ...broker.env, TOWER_CRANE_AGENT: job.agent, TOWER_CRANE_TASK: job.task } });
+  } finally {
+    fs.chmodSync(f.h.state, 0o755);
+  }
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(r.stdout.trim(), wt.path);
+  assert.equal(fs.readFileSync(tasks, 'utf8'), before, 'the sandboxed worktree wrote no state');
+  assert.equal(fs.existsSync(path.join(f.h.state, 'lock')), false, 'no state lock was taken');
 });
