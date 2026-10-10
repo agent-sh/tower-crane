@@ -511,6 +511,28 @@ fs.mkdtempSync(path.join(os.tmpdir(), 'tower-crane-leftover-'));
   }
 });
 
+test('a post-checkout hook makes no scratch in the caller temp root when the gate adds its worktree and restores files', async () => {
+  // Git runs this hook for the gate's worktree add and its checkout, so it writes wherever their TMPDIR points.
+  const inherited = path.join(tmp, 'inherited-hook');
+  fs.mkdirSync(inherited);
+  const hook = path.join(root, '.git', 'hooks', 'post-checkout');
+  const saved = process.env.TMPDIR;
+  process.env.TMPDIR = inherited;
+  try {
+    const sha = task({ 'lib/add.js': FIX, 'test/add.test.js': ADD_TEST });
+    // Written after task(), whose own checkouts would otherwise fill the caller temp root.
+    fs.writeFileSync(hook, `#!/bin/sh\n${NODE} -e "require('fs').mkdtempSync(require('path').join(process.env.TMPDIR || require('os').tmpdir(), 'tower-crane-hook-'))"\n`, { mode: 0o755 });
+    const r = await gate.run(ctx(sha));
+    assert.equal(r.ok, true, r.summary);
+    assert.deepEqual(fs.readdirSync(inherited), []);
+    assertCleanedUp();
+  } finally {
+    if (saved === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = saved;
+    fs.rmSync(hook, { force: true });
+  }
+});
+
 test('a gate whose scratch directory cannot be made removes the temp parent it already created', async () => {
   const sha = task({ 'lib/add.js': FIX, 'test/add.test.js': ADD_TEST });
   // Fails the scratch directory inside the gate's parent, as a full disk would, after the parent exists.
