@@ -470,16 +470,16 @@ if (args.some((arg) => arg.includes('/check-runs'))) {
 `);
       }
     });
-    // The monitor runs automated gates after spawn exit; check only once each reaction has ended.
-    const settled = (agent) => {
-      const log = events(h);
-      const exit = log.findIndex((e) => e.cmd === 'spawn exit' && e.detail.agent === agent);
-      const runs = log.filter((e) => e.cmd === 'automation' && e.detail.phase === 'running');
-      return exit >= 0 && log.slice(exit).some((e) => runs.includes(e))
-        && runs.every((r) => log.some((e) => e.cmd === 'automation' && e.detail.source === r.detail.source && e.detail.phase !== 'running'));
+    // A submit or reviewer reaction can finish before this worker's monitor
+    // drains its own exit reactions. Its socket closure observes completion.
+    const settled = async (agent) => {
+      const worker = events(h).findLast((e) => e.cmd === 'spawn' && e.detail.agent === agent);
+      assert.ok(worker, `no dispatch for ${agent}`);
+      const { exited } = await h.exitSignal({ pid: worker.detail.monitor_pid });
+      await exited;
     };
     h.ok(['spawn', '--task', 'T1']);
-    await h.until(() => settled('worker-T1-1'));
+    await settled('worker-T1-1');
     for (const rung of ['medium', null]) {
       const result = h.run(['check', type, 'T1', '--json'], { env: { FIXTURE_GATE_OK: '0' } });
       assert.equal(result.code, 1, result.stderr);
@@ -487,7 +487,7 @@ if (args.some((arg) => arg.includes('/check-runs'))) {
       if (rung) {
         await h.until(() => h.readAttempts().length === 2 && h.task().status === 'submitted');
         assert.equal(h.json(['task', 'show', 'T1']).tier, rung);
-        await h.until(() => settled('worker-T1-2'));
+        await settled('worker-T1-2');
       } else {
         await h.until(() => h.openDecisions().length === 1);
       }

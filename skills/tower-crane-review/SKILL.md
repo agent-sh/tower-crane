@@ -23,4 +23,6 @@ Arguments: `$ARGUMENTS`. Use `TOWER_CRANE_TASK` and `TOWER_CRANE_AGENT` when set
 4. Post one review on the PR as a comment, first line `Review (Tower Crane, clean context)`, followed by `SHA: <full submitted sha>` before the findings. Write findings as `file:line - what is wrong - why it matters`, most severe first, and plainly whether anything blocks. On a repository the project does not own, do not post; put the review in the evidence summary only.
 5. Record it: `tower-crane evidence <id> --agent <name> --type review --ok|--fail --sha <sha> --summary "<blocking count and the top finding>"`, adding `--ref <comment URL>` when posted. `--ok` only when nothing blocks.
 
+Run any probe, test run or PR check in the foreground with a bounded wait, `tower-crane wait --task <id> --agent <name> --timeout SEC` (exits 2 at the deadline), not in a background job: a headless run is not guaranteed to resume for a background job's notification.
+
 Do not fix the code, push, or merge. Your last message is the review text.

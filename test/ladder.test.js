@@ -224,11 +224,11 @@ test('personal hard fallbacks overlay project rungs and stay out of project writ
   assert.equal(h.readState('project.json').ladder.hard.fallbacks, undefined);
 });
 
-test('projects reject fallback configuration through flags and state', (t) => {
+test('projects reject fallback configuration through project flags and state', (t) => {
   const h = makeRepo(t);
   h.init();
-  assert.equal(h.run(['ladder', 'set', 'hard', '--fallbacks', '[]']).code, 2);
-  assert.equal(h.run(['ladder', 'set', 'hard', '--clear', 'fallbacks']).code, 2);
+  assert.equal(h.run(['project', 'set', '--fallbacks', '[]']).code, 2);
+  assert.equal(h.run(['init', '--fallbacks', '[]']).code, 2);
   const project = h.readState('project.json');
   project.ladder.hard.fallbacks = [];
   h.writeState('project.json', project);

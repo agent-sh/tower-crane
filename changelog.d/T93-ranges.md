@@ -1,0 +1,1 @@
+- Keep budget stops out of tier-range quality escalation. Live spend now carries configured per-rung cost and reconciles that cost once at exit, including Claude exits without a result.

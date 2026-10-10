@@ -142,6 +142,10 @@ function spawn(h, u, role, env = {}, opts = {}) {
     h.ok(['claim', 'T1', '--agent', 'builder']);
     h.ok(['submit', 'T1', '--sha', h.git(['rev-parse', 'HEAD']), '--agent', 'builder']);
   }
+  // A worker needs a task it can claim; an earlier review spawn leaves T1 submitted.
+  if (['easy', 'medium', 'hard', 'research'].includes(role) && h.readState('tasks.json').tasks[0].status === 'submitted') {
+    h.ok(['rework', 'T1', '--reason', `probe the ${role} rung`]);
+  }
   const r = h.run(['spawn', '--role', role, '--task', 'T1', '--wait', '--json'], { ...opts, env: { ...u.env, ...env } });
   assert.equal(r.code, 0, r.stderr);
   return JSON.parse(r.stdout);
@@ -739,6 +743,8 @@ test('a codex agent writes only where its agent file says; a worker writes its g
     assert.ok(!visible(path.join(h.state, 'brokers', 'worker-T9-1', 'broker.json')), `${rung}: another agent's token is hidden`);
     assert.equal(config.permissions['tower-crane'].network.enabled, true);
   }
+  // The codex loop left T1 submitted; a worker needs a task it can claim.
+  h.ok(['rework', 'T1', '--reason', 'probe the claude rungs']);
   for (const [rung, writes] of [['hard', true], ['small', false]]) {
     isolated(h, rung, 'claude');
     spawn(h, u, rung);

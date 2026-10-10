@@ -288,11 +288,89 @@ test('accepted batch confirms a landed head with stale gates before merging the 
   assert.deepEqual(h.github().calls.filter((a) => a[1] === 'merge').map((a) => a[2]), ['8']);
 });
 
+test('accepted batch waits for the queue, merges capped and crashed revuto checks in acceptance order and reports each outcome', async (t) => {
+  const h = setup(t);
+  h.ok(['project', 'set', '--ci-capped-review', JSON.stringify([
+    { app: 'revuto-review', pattern: 'Daily review limit reached|Revuto could not complete this review' },
+  ])]);
+  const tasks = [7, 8].map((pr) => {
+    const id = h.add(`PR ${pr}`);
+    h.submit(id, pr);
+    h.reviewer(id, 'reviewer', h.sha);
+    h.ok(['evidence', id, '--type', 'review', '--ok', '--sha', h.sha, '--agent', 'reviewer']);
+    const github = h.github();
+    github.prs[pr].mergeStateStatus = 'UNSTABLE';
+    github.revuto = { name: 'revuto', app: 'revuto-review', status: 'completed', conclusion: 'failure',
+      output: { summary: pr === 7 ? 'Daily review limit reached' : 'Revuto could not complete this review' } };
+    h.save(github);
+    h.ok(['check', 'ci', id]);
+    return id;
+  });
+  for (const id of tasks.toReversed()) h.ok(['accept', id]);
+  event(h, null, 'merge queue', { phase: 'running', pid: process.pid, ...require('../lib/processes').identity(process.pid) });
+  let settled = false;
+  const merging = h.runAsync(['merge', '--accepted', '--agent', 'orchestrator', '--json']).then((result) => {
+    settled = true;
+    return result;
+  });
+  try {
+    const deadline = Date.now() + 10000;
+    while (!h.logs().some((e) => e.cmd === 'merge queue' && e.detail.phase === 'requested')) {
+      assert.ok(Date.now() < deadline, 'batch requested the busy queue');
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    assert.equal(settled, false, 'batch waits until the queue is released');
+    assert.equal(h.github().calls.filter((a) => a[1] === 'merge').length, 0);
+  } finally {
+    event(h, null, 'merge queue', { phase: 'done' });
+  }
+  const result = await merging;
+  assert.equal(result.code, 0, result.stdout + result.stderr);
+  assert.deepEqual(h.github().calls.filter((a) => a[1] === 'merge').map((a) => a[2]), ['8', '7']);
+  const data = JSON.parse(result.stdout);
+  assert.deepEqual(data.remaining, []);
+  for (const id of tasks) {
+    assert.equal(data.results.find((r) => r.task === id).ok, true);
+    assert.match(data.results.find((r) => r.task === id).summary, /merged PR/);
+    assert.equal(h.json(['task', 'show', id]).evidence.findLast((e) => e.type === 'merge').ok, true);
+  }
+});
+
+test('accepted batch reports an unobservable queue holder and bounds an observable wait', (t) => {
+  const h = setup(t);
+  const id = h.add('Accepted PR');
+  h.submit(id, 7);
+  h.reviewer(id, 'reviewer', h.sha);
+  h.ok(['evidence', id, '--type', 'review', '--ok', '--sha', h.sha, '--agent', 'reviewer']);
+  h.ok(['check', 'ci', id]);
+  h.ok(['accept', id]);
+  event(h, null, 'merge queue', { phase: 'running', pid: process.pid, host: 'unobservable-fixture-host' });
+  const result = h.run(['merge', '--accepted', '--agent', 'orchestrator']);
+  assert.equal(result.code, 1);
+  assert.match(result.stderr + result.stdout, /queue.*cannot be observed/);
+  assert.doesNotMatch(result.stderr + result.stdout, /accepted PR has not merged/);
+  assert.equal(h.github().prs[7].state, 'OPEN');
+  h.ok(['project', 'set', '--tests-timeout-min', '0.001']);
+  event(h, null, 'merge queue', { phase: 'running', pid: process.pid, ...require('../lib/processes').identity(process.pid) });
+  const timeout = h.run(['merge', '--accepted', '--agent', 'orchestrator']);
+  assert.equal(timeout.code, 1);
+  assert.match(timeout.stderr, /merge queue remained busy for 0\.001 min/);
+  assert.equal(h.github().calls.filter((a) => a[1] === 'merge').length, 0);
+});
+
 test('accepted batch routes linked members through pinned stack merges', (t) => {
   const f = require('./stack-fixture').stacked(t);
   f.accept('T1');
   f.accept('T2');
   f.write((d) => { for (const pr of Object.values(d.prs)) Object.assign(pr, { mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }); });
+  f.write((d) => { d.prs[11].state = 'CLOSED'; });
+  const refused = f.h.run(['merge', '--accepted', '--agent', 'orchestrator', '--json']);
+  assert.equal(refused.code, 1, refused.stdout + refused.stderr);
+  const remaining = JSON.parse(refused.stdout).remaining;
+  assert.deepEqual(remaining.map((r) => r.task), ['T1', 'T2']);
+  for (const entry of remaining) assert.match(entry.reason, /T1: PR #11 is CLOSED/);
+  assert.equal(f.read().calls.filter((c) => c.args.includes('POST') && c.args[1].endsWith('/merge-async')).length, 0);
+  f.write((d) => { d.prs[11].state = 'OPEN'; });
   const result = f.h.run(['merge', '--accepted', '--agent', 'orchestrator']);
   assert.equal(result.code, 0, result.stdout + result.stderr);
   const merges = f.read().calls.filter((c) => c.args[0] === 'api' && c.args.includes('POST') && c.args[1].endsWith('/merge-async'));

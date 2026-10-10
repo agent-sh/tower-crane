@@ -6,6 +6,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
 const http = require('node:http');
+const { once } = require('node:events');
+const { createInterface } = require('node:readline');
 const { makeRepo, makeTaskRepo, BIN, HOOKS, detachedAlive } = require('./helpers');
 const { gateFixture, gateEvidence } = require('./gate-helpers');
 const bedrockOutage = require('./fixtures/bedrock-outage.json');
@@ -18,8 +20,13 @@ const sketches = (h) => ['sketch.md', 'sketch.html'].map((file) => ({
   file, text: fs.readFileSync(path.join(h.state, file), 'utf8'),
 }));
 
+// The runner's per-test timeout (test/run.js) is the only deadline: a loaded
+// machine can take as long as the test may run, and a wait that never comes
+// true still fails with its message.
+const HUNG_TEST_MS = 300000;
+
 async function until(fn, message) {
-  const deadline = Date.now() + 12000;
+  const deadline = Date.now() + HUNG_TEST_MS;
   while (!fn()) {
     if (Date.now() >= deadline) assert.fail(message);
     await new Promise((resolve) => setTimeout(resolve, 25));
@@ -544,28 +551,29 @@ test('serve shows the recorded run phase on the board', async (t) => {
   const h = setup(t, { failures: 0 });
   assert.equal(h.spawn().code, 0);
   const server = cp.spawn(process.execPath, [BIN, 'serve', '--port', '0', '--json'], { cwd: h.repo, env: h.env });
-  const closed = new Promise((resolve) => server.on('close', resolve));
-  let url;
-  let output = '';
-  server.stdout.on('data', (data) => {
-    output += data;
-    if (output.includes('\n')) url = JSON.parse(output.trim()).url;
-  });
+  const closed = once(server, 'close');
+  const output = createInterface({ input: server.stdout });
+  let stderr = '';
+  server.stderr.on('data', (data) => { stderr += data; });
   try {
-    await until(() => !!url || server.exitCode !== null, 'serve did not start');
+    const [line] = await Promise.race([
+      once(output, 'line', { signal: t.signal }),
+      closed.then(([code]) => { throw new Error(`serve exited before readiness (${code}): ${stderr}`); }),
+    ]);
+    const { url } = JSON.parse(line);
     assert.ok(url);
     const body = await new Promise((resolve, reject) => {
-      const request = http.get(url, (response) => {
+      const request = http.get(url, { signal: t.signal }, (response) => {
         let html = '';
         response.on('data', (data) => { html += data; });
         response.on('end', () => resolve(html));
       });
       request.on('error', reject);
-      request.setTimeout(5000, () => request.destroy(new Error('serve request timed out')));
     });
     assert.match(body, /Phase/);
     assert.match(body, /waiting/);
   } finally {
+    output.close();
     server.kill();
     await closed;
   }
