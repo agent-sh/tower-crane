@@ -8,6 +8,7 @@ The suite proves behavior through the real CLI on temporary git repositories. It
 - `npm test -- test/claim.test.js test/gates/tests.test.js` runs only those files. Pass node:test flags the same way: `npm test -- test/events.test.js --test-name-pattern="decision answer"`.
 - Run only the files a change touches. The tests gate runs the full suite once at the submitted head, and CI runs it on Linux (Node 24 and 26) and on Windows in three shards.
 - Set `TOWER_CRANE_TEST_TMP` to keep temporary repositories off `/tmp`.
+- CI jobs have a 45-minute budget for the full suite or a Windows shard; each test still has its own 300-second deadline.
 
 For projects Tower Crane manages, expensive proof is the default: the orchestrator pins `--tests-cmd "npm test" --tests-expensive true --tests-proof-cmd "node --test {tests}"`. A submission then runs the full suite once and proves the change with its own test files.
 
