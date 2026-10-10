@@ -24,7 +24,7 @@ async function until(fn, message) {
   }
 }
 
-function setup(t, { failures = 1, error = '75', records = null, hold = 0, waitForFinish = false, config = {}, env = {}, busy = false, claimDelay = 0, claim = true, sessionReceipt = false } = {}) {
+function setup(t, { failures = 1, error = '75', records = null, hold = 0, waitForFinish = false, holdRetry = false, config = {}, env = {}, busy = false, claimDelay = 0, claim = true, sessionReceipt = false } = {}) {
   const h = makeTaskRepo(t, [{
     args: ['--title', 'Supervise an outage', '--tier', 'easy', '--acceptance', 'same session reruns'],
     brief: 'Finish the task.\n',
@@ -56,7 +56,11 @@ const finish = () => {
             : { type: 'turn.failed', error: { message: 'provider outage' } }))}); process.exit(1);`
         : ['outage', 'server', 'status-json'].includes(error) ? `console.error(${JSON.stringify(error === 'server' ? '500 Internal Server Error'
           : error === 'status-json' ? '{"status_code":502}' : 'API Error: 503 service unavailable')}); process.exit(1);` : `process.exit(${error});`}
-  } else process.exit(0);
+  } else ${holdRetry ? `{
+    const timer = setInterval(() => {
+      if (fs.existsSync(file + '.go')) { clearInterval(timer); process.exit(0); }
+    }, 25);
+  }` : 'process.exit(0);'}
 };
 ${waitForFinish ? `const timer = setInterval(() => {
   if (fs.existsSync(file + '.finish')) { clearInterval(timer); finish(); }
@@ -200,7 +204,8 @@ test('repeated transient exits render the blocked phase before foreground spend'
 });
 
 test('detached supervision renews a short lease during backoff and does not allow premature recovery', async (t) => {
-  const h = setup(t, { config: { backoff_ms: 1400, max_backoff_ms: 1400 } });
+  // The retry stays alive until the test releases it, so the claim is live for the premature-release check.
+  const h = setup(t, { config: { backoff_ms: 1400, max_backoff_ms: 1400 }, holdRetry: true });
   const clockFile = path.join(h.base, 'clock');
   const now = Date.now();
   fs.writeFileSync(clockFile, String(now));
@@ -217,6 +222,7 @@ test('detached supervision renews a short lease during backoff and does not allo
   assert.ok(Date.parse(task.claim.until) > now + 60000);
   assert.deepEqual(h.json(['status']).exited_claims, []);
   assert.equal(h.run(['release', 'T1', '--agent', 'other', '--reason', 'premature']).code, 1);
+  fs.writeFileSync(`${h.attempts}.go`, '');
   await until(() => h.json(['task', 'show', 'T1']).run?.phase === 'waiting', 'retry did not finish');
   assert.equal(h.readAttempts().length, 2);
   assert.equal(log(h).filter((e) => e.cmd === 'claim').length, 1);
