@@ -341,3 +341,37 @@ test('spend and credential questions stay with the owner without a marker', (t) 
   h.ok(['answer', 'D1', '--choice', 'yes', '--agent', 'owner']);
   assert.equal(h.readState('decisions.json').decisions[0].answer_rule, 'owner');
 });
+
+test('credential and spend asks stay with the owner however they are phrased, options included', (t) => {
+  const h = makeRepo(t);
+  h.init();
+  h.ok(['task', 'add', '--title', 'Wire the proxy', '--acceptance', 'the proxy runs with the owner decision']);
+  const worker = { env: { TOWER_CRANE_AGENT: 'worker-T1-1', TOWER_CRANE_TASK: 'T1' } };
+  const asks = [
+    ['Which HF_TOKEN should the worker use?', ['yes', 'no'], 'asks for credentials'],
+    ['Use MY_API_KEY for the proxy?', ['yes', 'no'], 'asks for credentials'],
+    ['Subscribe to the paid plan?', ['yes', 'no'], 'asks for spend'],
+    ['Where should the worker run?', ['rent an H100', 'use the local GPU'], 'asks for spend'],
+    ['Which cache key layout should the worker use?', ['prefix', 'hash'], null],
+  ];
+  for (const [question, options] of asks) {
+    h.ok(['ask', '--question', question, ...options.flatMap((o) => ['--option', o]), '--blocks', 'T1'], worker);
+  }
+  const decisions = h.readState('decisions.json').decisions;
+  assert.deepEqual(
+    decisions.map((d) => [d.technical, d.owner_required ?? null]),
+    asks.map(([, , reason]) => [reason === null, reason]),
+  );
+
+  const before = events(h);
+  for (const [i, [, options, reason]] of asks.entries()) {
+    if (!reason) continue;
+    const refused = h.run(['answer', `D${i + 1}`, '--choice', options[0], '--agent', 'orchestrator']);
+    assert.equal(refused.code, 1, refused.stderr);
+    assert.match(refused.stderr, new RegExp(`D${i + 1} is owner-required \\(${reason}\\); only the owner answers it`));
+  }
+  assert.deepEqual(events(h), before, 'refused owner-only answers write no event');
+
+  h.ok(['answer', 'D5', '--choice', 'prefix', '--agent', 'orchestrator']);
+  assert.equal(h.readState('decisions.json').decisions[4].answer_rule, 'owner-technical-delegation');
+});
