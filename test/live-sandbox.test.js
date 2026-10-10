@@ -91,6 +91,9 @@ test('in a real claude sandbox with sandbox.session_bus, a command connects to t
   const runtime = path.join(h.base, 'runtime');
   fs.mkdirSync(runtime);
   const sock = path.join(runtime, 'bus');
+  // The grant also needs the user manager's socket; this probe never connects to it.
+  fs.mkdirSync(path.join(runtime, 'systemd'));
+  fs.writeFileSync(path.join(runtime, 'systemd', 'private'), '');
   const probe = path.join(results(h), 'bus-probe');
   let connections = 0;
   const server = net.createServer((c) => {
@@ -113,6 +116,28 @@ test('in a real claude sandbox with sandbox.session_bus, a command connects to t
   assert.ok(fs.existsSync(probe), `the command ran\n${agentLog(h)}`);
   assert.equal(fs.readFileSync(probe, 'utf8'), 'CONNECTED', `the command reached the bus socket\n${agentLog(h)}`);
   assert.equal(connections, 1, 'the socket accepted the command');
+});
+
+// systemd-run --user --scope connects to the user manager's socket, not the
+// bus, so this is the transport a scope needs. It runs against the owner's
+// real user manager, so the scope is a real transient unit of the owner's session.
+test('in a real claude sandbox with sandbox.session_bus, systemd-run --user --scope starts a scope', { skip: skip || (!(runDir && fs.existsSync(path.join(runDir, 'systemd', 'private'))) && 'the user manager socket does not exist here'), timeout: 300000 }, async (t) => {
+  const h = makeRepo(t);
+  h.init();
+  h.ok(['task', 'add', '--title', 'Scope probe', '--acceptance', 'scope started']);
+  const probe = path.join(results(h), 'scope-probe');
+  const script = `const f=require("fs");f.writeFileSync(${JSON.stringify(probe)},"SCOPE "+f.readFileSync("/proc/self/cgroup","utf8"))`;
+  h.ok(['project', 'set', '--session-bus', 'true']);
+  h.ok(['brief', 'set', 'T1', '-'], {
+    input: `Sandbox probe set up by the owner. Run exactly this one command with the Bash tool, then reply with its exit code. Do not use tower-crane.\n\nsystemd-run --user --scope --quiet -- ${node} -e '${script}'\n`,
+  });
+  h.ok(['ladder', 'set', 'small', '--harness', 'claude', '--model', process.env.TOWER_CRANE_LIVE_MODEL || 'opus', '--clear', 'profile', '--clear', 'effort']);
+  const r = await h.runAsync(['spawn', '--role', 'small', '--task', 'T1', '--wait'], {
+    env: { ...h.env, XDG_RUNTIME_DIR: runDir, DBUS_SESSION_BUS_ADDRESS: `unix:path=${path.join(runDir, 'bus')}` },
+  });
+  assert.equal(r.code, 0, `${r.stderr}\n${agentLog(h)}`);
+  assert.ok(fs.existsSync(probe), `the scoped command ran\n${agentLog(h)}`);
+  assert.match(fs.readFileSync(probe, 'utf8'), /^SCOPE .*\.scope$/m, 'the command ran inside a systemd scope');
 });
 
 test('in a real claude sandbox a forged state edit fails and the CLI writes through the broker', { skip: process.env.TOWER_CRANE_LIVE_CLAUDE !== '1' && 'set TOWER_CRANE_LIVE_CLAUDE=1 to run against the real claude CLI', timeout: 300000 }, async (t) => {

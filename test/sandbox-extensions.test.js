@@ -384,14 +384,18 @@ test('real Codex worker writes the toolchain lock, receives a private env file, 
   assert.ok(!result.stdout.includes(SECRET_KEY) && !result.stderr.includes(SECRET));
 });
 
-test('claude: sandbox.session_bus grants the bus socket alone, read and write, and off it grants nothing', { skip: NO_STUBS }, (t) => {
+test('claude: sandbox.session_bus grants the bus and the user manager sockets, read and write, and off it grants nothing', { skip: NO_STUBS }, (t) => {
   const h = setup(t, 'claude');
   const bin = path.join(h.base, 'bin');
   fs.mkdirSync(bin);
   // The runtime directory is the test's own, so the host's session bus never matters.
+  // The stub never connects, so empty files stand in for the two sockets.
   const runtime = path.join(h.base, 'runtime');
-  fs.mkdirSync(runtime);
+  fs.mkdirSync(path.join(runtime, 'systemd'), { recursive: true });
   const bus = path.join(fs.realpathSync(runtime), 'bus');
+  const manager = path.join(fs.realpathSync(runtime), 'systemd', 'private');
+  fs.writeFileSync(bus, '');
+  fs.writeFileSync(manager, '');
   const out = path.join(h.base, 'result.json');
   const stub = [
     `#!${process.execPath}`, "'use strict';",
@@ -414,11 +418,18 @@ test('claude: sandbox.session_bus grants the bus socket alone, read and write, a
 
   assert.equal(h.run(['project', 'set', '--session-bus', 'maybe']).code, 2);
   h.ok(['project', 'set', '--session-bus', 'true']);
+  fs.rmSync(manager);
+  const refused = h.run(['spawn', '--task', 'T1', '--wait'], { env });
+  assert.notEqual(refused.code, 0, 'a missing user manager socket refuses the spawn');
+  assert.match(refused.stderr, /systemd\/private/);
+  fs.writeFileSync(manager, '');
   const on = spawnSeen();
   assert.ok(on.sandbox.filesystem.allowRead.includes(bus), 'the sandbox reads the bus socket');
   assert.ok(on.sandbox.filesystem.allowWrite.includes(bus), 'the sandbox writes the bus socket');
+  assert.ok(on.sandbox.filesystem.allowRead.includes(manager), 'the sandbox reads the user manager socket');
+  assert.ok(on.sandbox.filesystem.allowWrite.includes(manager), 'the sandbox writes the user manager socket, which systemd-run connects to');
   assert.ok(on.sandbox.filesystem.denyRead.includes(fs.realpathSync(runtime)), 'the rest of the runtime directory stays denied');
-  assert.deepEqual(on.sandbox.filesystem.allowWrite.filter((p) => p.startsWith(fs.realpathSync(runtime))), [bus], 'only the socket is writable under the runtime directory');
+  assert.deepEqual(on.sandbox.filesystem.allowWrite.filter((p) => p.startsWith(fs.realpathSync(runtime))), [bus, manager], 'only the two sockets are writable under the runtime directory');
   assert.deepEqual(on.env, { XDG_RUNTIME_DIR: runtime, DBUS_SESSION_BUS_ADDRESS: `unix:path=${bus}` });
 
   h.ok(['project', 'set', '--session-bus', 'false']);
