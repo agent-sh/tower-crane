@@ -401,3 +401,72 @@ test('bench tokens excludes unknown categories from medians while retaining know
   const onlyUnknown = h.json(['bench', 'tokens']);
   assert.deepEqual([onlyUnknown.overall.median_fresh, onlyUnknown.overall.median_cached, onlyUnknown.overall.median_output], [null, null, null]);
 });
+
+test('token completeness requires finalized usage even for measured or stale live entries', () => {
+  const measured = { source: 'spawn:worker-T1', tokens: 100, input: 90, cached: 0, output: 10 };
+  for (const [entry, expected] of [
+    [{ ...measured, live: { state: 'live', interval_ms: 1000 } }, [100, 1]],
+    [{ ...measured, live: { state: 'stale', interval_ms: 1000 } }, [100, 1]],
+    [{ ...measured, tokens: 0, input: 0, output: 0, live: { state: 'live', interval_ms: 1000 } }, [0, 1]],
+    [{ ...measured, tokens: null, input: null, cached: null, output: null, live: { state: 'unavailable', interval_ms: 1000 } }, [0, 1]],
+    [measured, [100, 0]],
+    [{ ...measured, tokens: null, input: null, cached: null, output: null }, [0, 1]],
+    [{ source: 'manual', tokens: null, input: null }, [0, 0]],
+  ]) {
+    const result = taskSpend({ spend: { entries: [entry] } }, new Map());
+    assert.deepEqual([result.tokens, result.unknown], expected, JSON.stringify(entry));
+  }
+});
+
+test('bench tokens excludes live worker and reviewer usage from every median until collection finalizes it', (t) => {
+  const h = makeRepo(t);
+  t.after(h.cleanup);
+  h.init();
+  h.ok(['task', 'add', '--title', 'accepted before collection', '--acceptance', 'done']);
+  const dispatches = ['worker', 'reviewer'].map((role) => ({
+    at: '2026-10-07T00:00:00Z', cmd: 'spawn', task: 'T1',
+    detail: { agent: `${role}-T1`, role, rung: role === 'worker' ? 'medium' : 'review' },
+  }));
+  fs.appendFileSync(path.join(h.state, 'events.jsonl'), dispatches.map((e) => JSON.stringify(e)).join('\n') + '\n');
+  const doc = h.readState('tasks.json');
+  const task = doc.tasks[0];
+  task.status = 'accepted';
+  task.spend.entries = ['worker', 'reviewer'].map((role) => ({
+    at: '2026-10-07T00:00:30Z', agent: `${role}-T1`, source: `spawn:${role}-T1`, minutes: 0,
+    tokens: role === 'worker' ? 1000 : 100, input: role === 'worker' ? 900 : 90, cached: 0,
+    output: role === 'worker' ? 100 : 10, cost_usd: role === 'worker' ? 0.001 : 0.0001,
+    rung: role === 'worker' ? 'medium' : 'review', harness: null, model: null, profile: null,
+  }));
+  const [worker, reviewer] = task.spend.entries;
+  reviewer.live = { state: 'live', interval_ms: 1000 };
+  const incomplete = (tokens, unknown) => {
+    h.writeState('tasks.json', doc);
+    const result = h.json(['bench', 'tokens']);
+    assert.deepEqual([result.accepted, result.complete, result.overall.tasks, result.overall.priced_tasks], [1, 0, 0, 0]);
+    assert.deepEqual([result.overall.median_tokens, result.overall.mean_tokens, result.overall.median_usd], [null, null, null]);
+    assert.deepEqual(result.by_path, {});
+    assert.deepEqual(result.by_rung, {});
+    assert.deepEqual([result.all_tasks_tokens, result.tokens_per_accepted], [tokens, tokens], 'live usage stays in recorded-spend totals');
+    assert.equal(result.tasks[0].unknown, unknown);
+    assert.deepEqual(result.tasks[0].missing_spawns, [], 'recorded live usage is incomplete, not absent');
+  };
+  incomplete(1100, 1);
+  worker.live = { state: 'stale', interval_ms: 1000 };
+  incomplete(1100, 2);
+  delete reviewer.live;
+  Object.assign(reviewer, { tokens: 10000, input: 9000, output: 1000, cost_usd: 0.01 });
+  incomplete(11000, 1);
+  // Collection can finalize a source without changing its last measured counters.
+  delete worker.live;
+  h.writeState('tasks.json', doc);
+  const result = h.json(['bench', 'tokens']);
+  assert.deepEqual([result.accepted, result.complete, result.all_tasks_tokens], [1, 1, 11000]);
+  for (const group of [result.overall, result.by_path.medium]) {
+    assert.deepEqual([group.tasks, group.priced_tasks, group.median_tokens, group.mean_tokens], [1, 1, 11000, 11000]);
+    assert.ok(Math.abs(group.median_usd - 0.011) < 1e-12);
+    assert.deepEqual([group.median_fresh, group.median_cached, group.median_output], [9900, 0, 1100]);
+  }
+  assert.deepEqual([result.by_rung.medium.median_tokens, result.by_rung.review.median_tokens], [1000, 10000]);
+  assert.deepEqual([result.by_rung.medium.median_usd, result.by_rung.review.median_usd], [0.001, 0.01]);
+  assert.equal(result.tasks[0].unknown, 0);
+});
