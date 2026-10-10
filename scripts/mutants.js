@@ -157,6 +157,10 @@ const MUTANTS = [
     from: 'out.model_providers = keepTables(doc.model_providers, PROVIDER_FIELDS);', to: 'out.model_providers = doc.model_providers;', tests: ['test/isolation.test.js'] },
   { id: 'env-file-error-echoes', area: 'secrets', file: 'lib/spawn-settings.js',
     from: 'throw refuse(`invalid env_file ${file} at line ${assignmentLine}`);', to: 'throw refuse(`invalid env_file ${file} at line ${assignmentLine}: ${text}`);', tests: ['test/sandbox-extensions.test.js'] },
+  { id: 'session-bus-drops-manager-socket', area: 'sandbox', file: 'lib/agents.js',
+    from: 'return { sockets: [bus, manager],', to: 'return { sockets: [bus],', tests: ['test/sandbox-extensions.test.js'] },
+  { id: 'session-bus-missing-socket-spawns', area: 'sandbox', file: 'lib/agents.js',
+    from: 'if (!fs.existsSync(socket)) throw refuse(', to: 'if (false) throw refuse(', tests: ['test/sandbox-extensions.test.js'] },
   // board
   { id: 'board-unescaped-lt', area: 'board', file: 'lib/board/view.js',
     from: ".replace(/</g, '&lt;')", to: '', tests: ['test/board.test.js'] },
