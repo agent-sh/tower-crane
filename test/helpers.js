@@ -317,7 +317,7 @@ function withHooks(ctx, opts) {
 // A command shares the runner's hung-test backstop so CLI wait readiness is
 // not cut short by a separate subprocess budget.
 function run(args, { cwd, env, input, pre = [], timeout = HUNG_TEST_MS } = {}) {
-  const r = cp.spawnSync(process.execPath, [...pre, BIN, ...args], { cwd, env, input, encoding: 'utf8', timeout: Math.max(timeout, HUNG_TEST_MS) });
+  const r = cp.spawnSync(process.execPath, [...pre, BIN, ...args], { cwd, env, input, encoding: 'utf8', timeout: timeout === 0 ? 0 : Math.max(timeout, HUNG_TEST_MS) }); // wait-allow: explicit zero delegates to the runner; positive command watchdogs retain the hung minimum
   return { code: r.status, stdout: r.stdout || '', stderr: r.stderr || '', signal: r.signal };
 }
 
