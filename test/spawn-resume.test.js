@@ -147,14 +147,32 @@ for (const harness of ['codex', 'claude']) {
       assert.ok(Date.now() < logged, 'usage not logged');
       await new Promise((resolve) => setTimeout(resolve, 25));
     }
+    // Model Windows startup consuming the session deadline before interruption.
+    // The shutdown wait must use completion receipts independently of that clock.
+    const startupClock = t.mock.method(Date, 'now', () => deadline + 1);
     fs.writeFileSync(path.join(first.cwd, 'README.md'), '# native unfinished work\n');
     fs.writeFileSync(path.join(first.cwd, 'unfinished.txt'), 'keep native edits\n');
+    const after = String(fs.statSync(path.join(h.state, 'events.jsonl')).size);
     h.ok(['interrupt', 'T1', '--agent', 'orchestrator']);
-    while (detachedAlive({ pid: first.monitor_pid })) {
-      assert.ok(Date.now() < deadline, 'supervisor did not stop');
-      await new Promise((resolve) => setTimeout(resolve, 25));
-    }
-    assert.equal(h.json(['task', 'show', 'T1']).spend.entries.length, 1);
+    // Final spend follows pipe closure, process cleanup and the stopped phase.
+    // Capture the cursor before interrupt so a fast exit cannot be missed.
+    const spent = h.json(['wait', '--after', after, '--task', 'T1', '--types', 'spend',
+      '--observe', '--timeout', '15', '--agent', 'orchestrator']);
+    startupClock.mock.restore();
+    assert.equal(spent.detail.source, `spawn:${first.agent}`);
+    assert.equal(spent.detail.tokens, harness === 'codex' ? 110 : 65);
+    assert.equal(spent.detail.live, undefined);
+    const receipts = events(h);
+    const stopped = receipts.findLast((e) => e.cmd === 'spawn phase'
+      && e.detail.agent === first.agent);
+    assert.equal(stopped.detail.phase, 'stopped');
+    assert.equal(stopped.detail.active, false);
+    assert.equal(stopped.detail.monitor_pid, first.monitor_pid);
+    assert.ok(receipts.some((e) => e.cmd === 'spawn exit'
+      && e.detail.agent === first.agent && e.detail.pid === first.pid));
+    const interrupted = h.json(['task', 'show', 'T1']);
+    assert.equal(interrupted.spend.entries.length, 1);
+    assert.equal(interrupted.spend.entries[0].live, undefined);
     h.env.RESUME_EXIT_DELAY = '0';
     const second = h.json(['spawn', '--task', 'T1', '--wait']);
     assert.equal(second.resumed, harness === 'codex');
