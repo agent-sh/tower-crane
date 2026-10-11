@@ -15,6 +15,104 @@ const merges = (f) => f.read().calls.flatMap((c) => {
 });
 const routes = (f) => merges(f).map((m) => m.route);
 
+function confirmLower(f) {
+  f.accept('T1');
+  const main = f.h.git(['rev-parse', 'origin/main']);
+  const tree = f.h.git(['rev-parse', `${f.sha}^{tree}`]);
+  const landed = f.h.git(['commit-tree', tree, '-p', main, '-p', f.sha, '-m', 'lower merged externally']);
+  f.h.git(['push', 'origin', `${landed}:main`]);
+  f.write((d) => {
+    d.prs[11].state = 'MERGED';
+    d.prs[11].mergeCommit = { oid: landed };
+    d.calls = [];
+  });
+  // Confirmation records merge evidence without running automatic refresh.
+  f.h.ok(['merge', 'T1']);
+}
+
+test('a linked upper submits and merges as an ordinary PR after its lower member merged', (t) => {
+  const f = stacked(t);
+  f.accept('T1');
+  f.write((d) => { d.conflict = true; d.calls = []; });
+  f.h.ok(['merge', 'T1']);
+  assert.equal(f.h.json(['task', 'show', 'T2']).status, 'submitted');
+  assert.equal(f.h.json(['task', 'show', 'T2']).stack, undefined);
+  assert.doesNotMatch(f.h.ok(['task', 'show', 'T2']), /stack: after T1/);
+  assert.doesNotMatch(fs.readFileSync(path.join(f.h.state, 'sketch.html'), 'utf8'), /stack after T1/);
+  f.h.ok(['submit', 'T2', '--sha', f.upper.sha, '--pr', '12', '--branch', f.upper.wt.branch, '--agent', 'worker-T2']);
+  f.accept('T2');
+  f.h.ok(['merge', 'T2']);
+  assert.deepEqual(routes(f), ['async 11', 'pr 12', 'async 12']);
+  const upper = merges(f).at(-1).args;
+  assert.ok(upper.includes('merge_method=squash'));
+  assert.ok(upper.includes(`expected_head_sha=${f.upper.sha}`));
+  assert.equal(f.read().prs[12].baseRefName, 'main');
+  assert.equal(f.read().calls.some((c) => c.args[0] === 'stack' && c.args[1] === 'sync'), false);
+});
+
+for (const command of ['sync', 'unstack']) {
+  test(`stack ${command} retires a linked upper with only merged lower members`, (t) => {
+    const f = stacked(t);
+    confirmLower(f);
+    f.write((d) => {
+      d.unstackError = 'PR #11 is merged and cannot be unstacked';
+      d.conflict = true;
+    });
+    if (command === 'unstack') f.h.ok(['rework', 'T2', '--reason', 'retire a stale stack during rework']);
+    f.h.ok(['stack', command, 'T2']);
+    assert.equal(f.h.json(['task', 'show', 'T2']).stack, undefined);
+    assert.doesNotMatch(f.h.ok(['task', 'show', 'T2']), /stack: after T1/);
+    assert.doesNotMatch(fs.readFileSync(path.join(f.h.state, 'sketch.html'), 'utf8'), /stack after T1/);
+    assert.equal(f.h.json(['task', 'show', 'T2']).status, command === 'unstack' ? 'rework' : 'submitted');
+    assert.equal(f.read().prs[12].baseRefName, 'main');
+    assert.equal(f.read().calls.some((c) => c.args[0] === 'stack'), false);
+  });
+}
+
+test('a stale local stack uses the single PR merge path after confirming its lower merge', (t) => {
+  const f = stacked(t);
+  confirmLower(f);
+  assert.equal(f.h.json(['task', 'show', 'T2']).stack, undefined);
+  assert.equal(f.h.json(['task', 'list']).find((t) => t.id === 'T2').stack, undefined);
+  assert.match(f.h.ok(['status']), /submitted: T2/);
+  assert.doesNotMatch(f.h.ok(['task', 'show', 'T2']), /stack: after T1/);
+  assert.doesNotMatch(fs.readFileSync(path.join(f.h.state, 'sketch.html'), 'utf8'), /stack after T1/);
+  f.h.git(['update-ref', '-d', `refs/heads/${f.lower.branch}`]);
+  f.h.git(['update-ref', '-d', `refs/remotes/origin/${f.lower.branch}`]);
+  const submission = f.h.json(['submit', 'T2', '--sha', f.upper.sha, '--agent', 'worker-T2']);
+  assert.equal(submission.scope.error, undefined, 'submission reads its diff against main after the lower branch disappears');
+  f.write((d) => { Object.assign(d.prs[12], { mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }); });
+  f.h.ok(['check', 'ci', 'T2']);
+  f.h.json(['spawn', '--task', 'T2', '--role', 'review', '--dry-run']);
+  f.accept('T2');
+  f.h.ok(['merge', 'T2']);
+  assert.deepEqual(routes(f), ['pr 12', 'async 12']);
+  assert.ok(merges(f).at(-1).args.includes('merge_method=squash'));
+  assert.equal(f.read().prs[12].baseRefName, 'main');
+  assert.equal(f.read().calls.some((c) => c.args[0] === 'stack'), false);
+});
+
+test('a merged bottom member stays tracked while a middle task still has an open task above it', (t) => {
+  const f = stacked(t);
+  const top = f.add('top', 'T2');
+  const wt = f.h.json(['worktree', top]);
+  f.submit(top, 13, wt);
+  f.h.ok(['stack', 'link', top]);
+  f.accept('T1');
+  f.h.ok(['merge', 'T1']);
+  assert.equal(f.h.json(['task', 'show', 'T2']).stack.parent, 'T1');
+  f.write((d) => { d.prs[12].baseRefName = 'main'; });
+  f.h.ok(['stack', 'sync', 'T2']);
+  f.h.ok(['stack', 'sync', top]);
+  assert.equal(f.h.json(['task', 'show', 'T2']).stack.parent, 'T1');
+  f.accept('T2');
+  f.accept(top);
+  const merged = f.h.run(['merge', top]);
+  assert.equal(merged.code, 0, merged.stdout + merged.stderr);
+  assert.deepEqual(routes(f), ['async 11', 'async 12', 'async 13']);
+  for (const pr of [11, 12, 13]) assert.equal(f.read().prs[pr].state, 'MERGED');
+});
+
 test('a stack that adds then modifies the same file merges without changing accepted heads', (t) => {
   const f = setup(t);
   const wt = f.h.json(['worktree', 'T2']);
@@ -105,7 +203,7 @@ test('an unlinked dependent targets main and merges normally when its lower PR m
   assert.equal(f.h.git(['show', '-s', '--format=%P', squash]).split(' ').length, 1);
   assert.notEqual(f.h.git(['merge-base', f.sha, squash]), f.sha);
   assert.equal(f.h.git(['ls-remote', '--heads', 'origin', f.lower.branch]), '');
-  assert.equal(f.h.json(['task', 'show', 'T2']).stack.linked, false);
+  assert.equal(f.h.json(['task', 'show', 'T2']).stack, undefined);
   f.h.ok(['submit', 'T2', '--sha', sha, '--branch', wt.branch, '--pr', '12', '--agent', 'worker-T2']);
   f.h.ok(['stack', 'link', 'T2']);
   const task = f.h.json(['task', 'show', 'T2']);
@@ -341,7 +439,7 @@ test('a refused upper merge retains lower evidence and retries without merging t
   assert.equal(f.read().prs[12].state, 'OPEN');
   f.write((d) => { delete d.refuseMergePr; });
   f.h.ok(['merge', 'T2']);
-  assert.deepEqual(routes(f), ['async 11', 'async 12', 'async 12']);
+  assert.deepEqual(routes(f), ['async 11', 'async 12', 'pr 12', 'async 12']);
   assert.equal(f.h.json(['task', 'show', 'T2']).evidence.findLast((e) => e.type === 'merge').ok, true);
 });
 
@@ -371,7 +469,8 @@ test('a task changed during the lower merge stops before the upper merge', (t) =
   assert.deepEqual(routes(f), ['async 11']);
   const task = f.h.json(['task', 'show', 'T2']);
   assert.equal(task.claim.agent, 'worker-new');
-  assert.equal(task.stack.linked, true);
+  assert.equal(task.stack, undefined);
+  assert.equal(f.h.readState('tasks.json').tasks.find((t) => t.id === 'T2').stack.linked, true);
   assert.equal(task.stack_disabled, undefined);
   assert.equal(f.h.json(['task', 'show', 'T1']).stack_disabled, undefined);
 });
@@ -763,12 +862,13 @@ test('a stack is one queue entry: its upper task waits for the lower one and the
 test('after the lower task merges alone, the upper head check runs against main, not the deleted lower branch', (t) => {
   const f = queued(t);
   const scratch = path.join(f.upper.wt.path, 'scratch.txt');
-  // A dirty upper worktree defers stack sync, so T2 still names the lower branch.
+  // Retiring the completed chain must preserve uncommitted upper work.
   fs.writeFileSync(scratch, 'local edit\n');
   f.acceptCode('T1');
   f.consume();
   assert.deepEqual(f.merges(), ['async 11']);
-  assert.equal(f.h.json(['task', 'show', 'T2']).stack.base, f.lower.branch);
+  assert.equal(f.h.json(['task', 'show', 'T2']).stack, undefined);
+  assert.equal(fs.readFileSync(scratch, 'utf8'), 'local edit\n');
   f.h.git(['push', 'origin', `:${f.lower.branch}`]);
   f.h.git(['update-ref', '-d', `refs/remotes/origin/${f.lower.branch}`]);
   f.write((d) => { d.prs[12].baseRefName = 'main'; });
@@ -777,6 +877,6 @@ test('after the lower task merges alone, the upper head check runs against main,
   f.consume();
   assert.deepEqual(f.checks().map((e) => [e.task, e.detail.members, e.detail.base_sha]),
     [['T1', ['T1'], f.main], ['T2', ['T2'], main]]);
-  assert.deepEqual(f.merges(), ['async 11', 'async 12']);
+  assert.deepEqual(f.merges(), ['async 11', 'pr 12', 'async 12']);
   assert.equal(f.suites().length, 2, 'the upper task runs one check, against main');
 });

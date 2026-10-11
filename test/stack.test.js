@@ -266,12 +266,13 @@ const apiCalls = (f) => f.read().calls.filter((c) => c.args[0] === 'api');
 test('a spawned worker claims a task whose dependency merged while gh api is denied to it', (t) => {
   const f = setup(t);
   const { wt } = upper(f);
+  const previousStack = f.h.json(['task', 'show', 'T2']).stack;
   f.accept('T1');
   f.h.ok(['merge', 'T1']);
   f.h.ok(['rework', 'T2', '--reason', 'the lower change merged']);
   const state = f.h.readState('tasks.json');
   const upperTask = state.tasks.find((item) => item.id === 'T2');
-  upperTask.stack.linked = false;
+  upperTask.stack = { ...previousStack, linked: false };
   upperTask.stack_disabled = true;
   f.h.writeState('tasks.json', state);
   // The worker's commit must differ from the branch it was dispatched on.

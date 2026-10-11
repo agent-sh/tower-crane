@@ -211,7 +211,11 @@ cp.spawnSync = function stackGh(command, args, opts) {
     if (data.checkoutError) return finish('', 1, data.checkoutError);
     return finish(opts.cwd);
   }
-  if (args[1] === 'unstack') { data.linked = false; return finish(); }
+  if (args[1] === 'unstack') {
+    if (data.unstackError) return finish('', 1, data.unstackError);
+    data.linked = false;
+    return finish();
+  }
   if (args[1] === 'merge') {
     if (data.queued) return finish('queued');
     if (data.mergeUnavailable) return finish('', 9, 'Stacked pull requests are not enabled');
