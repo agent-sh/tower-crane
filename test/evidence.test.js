@@ -17,7 +17,7 @@ function setup(t, gates = []) {
     h.ok(['claim', 'T1', '--agent', 'worker']);
     h.ok(['submit', 'T1', '--sha', sha, '--pr', '1', '--agent', 'worker']);
     h.reviewer('T1', 'reviewer', sha);
-    h.ok(['evidence', 'T1', '--type', 'review', '--ok', '--sha', sha, '--agent', 'reviewer']);
+    h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--ok', '--sha', sha, '--agent', 'reviewer']);
     for (const type of gates) gateEvidence(h, type, 'checker');
   });
 }
@@ -39,7 +39,7 @@ test('manual software evidence is refused for either verdict and every agent wit
   }
   assert.equal(fs.readFileSync(path.join(h.state, 'tasks.json'), 'utf8'), before);
   assert.equal(fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8'), events);
-  h.ok(['evidence', 'T1', '--type', 'note', '--ok', '--agent', 'worker']);
+  h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'note', '--ok', '--agent', 'worker']);
 });
 
 test('hand-written tests ok stays readable but cannot satisfy accept', (t) => {
@@ -211,7 +211,8 @@ test('real gate commands record their source and executed commands, including me
   assert.match(fs.readFileSync(path.join(h.state, 'sketch.md'), 'utf8'), /all pass/);
   h.ok(['accept', 'T1', '--agent', 'reviewer']);
   h.ok(['merge', 'T1', '--agent', 'reviewer']);
-  const evidence = h.readState('tasks.json').tasks[0].evidence;
+  // A merged task's earlier receipts settle into evidence files; the CLI reads them back.
+  const evidence = h.json(['task', 'show', 'T1']).evidence;
   for (const type of ['tests', 'clean', 'ci', 'merge']) {
     const e = evidence.find((x) => x.type === type);
     assert.equal(e.source, type === 'merge' ? 'merge' : `check ${type}`);

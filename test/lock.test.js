@@ -6,7 +6,8 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { spawn } = require('node:child_process');
+const cp = require('node:child_process');
+const { spawn } = cp;
 const { makeRepo, HOOKS } = require('./helpers');
 const SHORT_WAIT = path.join(__dirname, 'fixtures', 'lock-wait.js');
 const S = require('../lib/state');
@@ -153,7 +154,7 @@ test('a dead holder reclaimed at the deadline permits the waiting write', async 
   assert.deepEqual(h.readState('tasks.json').tasks.map((task) => task.title), ['after reclaim']);
 });
 
-test('prompt hook bridge and broker writes survive contention beyond the old bridge timeout', { timeout: 300000 }, async (t) => {
+test('a prompt hook returns at once and broker writes survive contention beyond the old bridge timeout', { timeout: 300000 }, async (t) => {
   const h = makeRepo(t);
   h.init();
   h.ok(['task', 'add', '--title', 'Starting agent', '--acceptance', 'prompt and note survive']);
@@ -167,41 +168,36 @@ test('prompt hook bridge and broker writes survive contention beyond the old bri
   const broker = await B.start(job);
   t.after(() => broker.close());
   const brokerSignal = path.join(h.base, 'broker-waits');
-  const bridgeSignal = path.join(h.base, 'bridge-waits');
   const env = { NODE_OPTIONS: `--require=${JSON.stringify(HOOKS)}`, HOOK_STATE: h.state, HOOK_STOP_LOCK_READ: brokerSignal };
   const saved = Object.fromEntries(Object.keys(env).map((key) => [key, process.env[key]]));
   Object.assign(process.env, env);
+  const prompt = () => cp.spawnSync(process.execPath, [path.join(__dirname, '..', 'lib', 'hook-bridge.js'), 'hook'], {
+    cwd: h.repo, timeout: 300000, encoding: 'utf8', input: JSON.stringify({ hook_event_name: 'UserPromptSubmit' }),
+    env: { ...h.env, TOWER_CRANE_AGENT: agent, TOWER_CRANE_STATE: h.state },
+  });
   const lock = S.acquireLock(h.state);
   const brokered = B.forward(job.broker, ['task', 'note', 'T1', 'broker waited'], h.state);
-  const bridge = spawn(process.execPath, [path.join(__dirname, '..', 'lib', 'hook-bridge.js'), 'hook'], {
-    cwd: h.repo, timeout: 300000,
-    env: { ...h.env, NODE_OPTIONS: env.NODE_OPTIONS, TOWER_CRANE_AGENT: agent, TOWER_CRANE_STATE: h.state,
-      HOOK_STATE: h.state, HOOK_STOP_LOCK_READ: bridgeSignal },
-  });
-  bridge.stdin.end(JSON.stringify({ hook_event_name: 'UserPromptSubmit' }));
-  let stdout = '';
-  let stderr = '';
-  bridge.stdout.on('data', (data) => { stdout += data; });
-  bridge.stderr.on('data', (data) => { stderr += data; });
-  const done = new Promise((resolve, reject) => {
-    bridge.on('error', reject);
-    bridge.on('close', (code) => resolve({ code, stdout, stderr }));
-  });
+  let held;
   try {
-    await Promise.all([waitForFile(brokerSignal), waitForFile(bridgeSignal)]);
-    await new Promise((resolve) => setTimeout(resolve, 16000)); // wait-allow: hold lock contention beyond the former production lock timeout
+    await waitForFile(brokerSignal);
+    // The prompt leaves its message unread rather than wait for the writer.
+    held = prompt();
+    await new Promise((resolve) => setTimeout(resolve, 16000)); // wait-allow: hold contention beyond the former production lock timeout
   } finally {
     S.releaseLock(lock);
-    for (const signal of [brokerSignal, bridgeSignal]) fs.writeFileSync(`${signal}.go`, '');
+    fs.writeFileSync(`${brokerSignal}.go`, '');
     for (const [key, value] of Object.entries(saved)) {
       if (value === undefined) delete process.env[key];
       else process.env[key] = value;
     }
   }
-  const [prompt, note] = await Promise.all([done, brokered]);
-  assert.equal(prompt.code, 0, prompt.stderr);
+  assert.equal(held.status, 0, held.stderr);
+  assert.equal(held.stdout, '');
+  const note = await brokered;
   assert.equal(note.code, 0, note.stderr);
-  const output = JSON.parse(prompt.stdout);
+  const next = prompt();
+  assert.equal(next.status, 0, next.stderr);
+  const output = JSON.parse(next.stdout);
   assert.equal(output.decision, undefined);
   assert.match(output.hookSpecificOutput.additionalContext, /startup context/);
   assert.deepEqual(h.readState('tasks.json').tasks[0].notes.map((entry) => entry.text), ['broker waited']);

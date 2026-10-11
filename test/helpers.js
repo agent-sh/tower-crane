@@ -222,6 +222,8 @@ function context(t, base) {
       return r.stdout.trim();
     },
     readState: (file) => JSON.parse(fs.readFileSync(path.join(ctx.state, file), 'utf8')),
+    // The current revision of a task, for review evidence a test records as a reviewer spawn did not start.
+    revision: (id = 'T1') => String(ctx.readState('tasks.json').tasks.find((t) => t.id === id).revision),
     writeState: (file, data) => fs.writeFileSync(path.join(ctx.state, file), JSON.stringify(data, null, 2) + '\n'),
     // Record an exited reviewer dispatch of `agent` for the task's current head
     // and revision, so that agent's review evidence counts.

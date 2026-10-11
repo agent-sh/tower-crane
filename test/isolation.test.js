@@ -9,6 +9,7 @@ const path = require('node:path');
 const cp = require('node:child_process');
 const { makeRepo, ROOT, BIN, detachedAlive } = require('./helpers');
 const A = require('../lib/agents');
+const S = require('../lib/state');
 const TOML = require('../lib/toml');
 
 const STUB = path.join(__dirname, 'fixtures', 'harness-stub.js');
@@ -903,9 +904,10 @@ for (const [command, args, opts] of calls) {
   assert.equal(policy.repo, 'acme/app');
   const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
   assert.equal(events.find((e) => e.cmd === 'spawn').detail.tool.sha, toolSha);
-  for (const cmd of ['hook git-push', 'hook pr-created', 'hook report', 'hook progress']) {
+  for (const cmd of ['hook git-push', 'hook pr-created', 'hook report']) {
     assert.ok(events.some((e) => e.cmd === cmd && e.agent === started.agent), cmd);
   }
+  assert.match(fs.readFileSync(S.progressFile(h.state, started.agent), 'utf8'), /"cmd":"hook progress"/);
 });
 
 test('the shim migrates a pre-T112 policy using recorded state and refuses unbound migrations', { skip: NO_STUBS }, (t) => {
@@ -1239,7 +1241,7 @@ test('an isolated reviewer posts through gh, records evidence in a symlinked sta
   const fixture = path.join(h.base, 'fixture');
   const run = [
     ['gh', 'pr', 'comment', '1', '--body', 'Review (tower-crane, clean context)'],
-    [process.execPath, BIN, 'evidence', 'T1', '--type', 'review', '--ok', '--sha', 'abcdef1', '--summary', 'nothing blocks'],
+    [process.execPath, BIN, 'evidence', 'T1', '--type', 'review', '--ok', '--sha', 'abcdef1', '--revision', '1', '--summary', 'nothing blocks'],
     ['git', 'init', '-q', fixture],
     ['git', '-C', fixture, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '--allow-empty', '-m', 'fixture'],
     ['git', 'init', '-q', '--bare', `${fixture}.git`],
@@ -1438,7 +1440,7 @@ test('a codex rework resumes in a fresh isolated home and finds its first sessio
   fs.writeFileSync(path.join(home, 'AGENTS.md'), 'PLANTED-BY-AGENT\n');
   h.ok(['claim', 'T1', '--agent', first.agent]);
   h.ok(['submit', 'T1', '--sha', 'abcdef1', '--agent', first.agent]);
-  h.ok(['evidence', 'T1', '--type', 'review', '--fail', '--sha', 'abcdef1', '--agent', 'reviewer-T1-1', '--summary', 'redo']);
+  h.ok(['evidence', 'T1', '--type', 'review', '--fail', '--sha', 'abcdef1', '--revision', h.revision('T1'), '--agent', 'reviewer-T1-1', '--summary', 'redo']);
   h.ok(['rework', 'T1', '--reason', 'redo']);
   const next = spawn(h, u, 'medium');
   assert.equal(next.resumed, true);

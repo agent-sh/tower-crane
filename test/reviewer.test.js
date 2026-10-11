@@ -263,7 +263,7 @@ console.log(JSON.stringify({type:'result', result:'cache probe', usage: {
   fs.writeFileSync(path.join(caller, '.claude', 'CLAUDE.md'), 'STUB_GLOBAL_RULE\n');
   fs.writeFileSync(path.join(caller, '.codex', 'AGENTS.md'), 'STUB_GLOBAL_RULE\n');
   const env = { HOME: caller, CLAUDE_CONFIG_DIR: path.join(caller, '.claude'), CODEX_HOME: path.join(caller, '.codex'),
-    XDG_CACHE_HOME: path.join(caller, 'cache'),
+    XDG_CACHE_HOME: path.join(caller, '.cache'),
     PATH: bin + path.delimiter + (h.env.PATH || ''), FORCE_PROMPT_CACHING_5M: '0' };
   for (const harness of ['claude', 'codex']) {
     h.ok(['ladder', 'set', 'easy', '--harness', harness, '--model', 'fixture', '--clear', 'profile']);
@@ -286,7 +286,7 @@ console.log(JSON.stringify({type:'result', result:'cache probe', usage: {
       assert.equal(row.repo, 'acme/demo', 'reviewer shims retain the recorded repository');
       assert.match(row.system, /Role instructions: tower-crane-review/);
       assert.ok(!row.system.includes('## Task'));
-      assert.ok(row.cache.startsWith(path.join(caller, 'cache') + path.sep));
+      assert.ok(row.cache.startsWith(path.join(caller, '.cache') + path.sep));
       assert.deepEqual(row.tool_caches, ['go-build', 'go-mod', 'npm'].map((dir) => path.join(row.cache, dir)));
       assert.ok(!row.system.includes(row.cache), 'per-agent filesystem paths stay out of the shared prefix');
       if (harness === 'claude') {
@@ -416,13 +416,13 @@ test('review escalation climbs one tier after failed reviews', (t) => {
   const h = setup(t, 'easy', 'other', undefined, { gated: true });
   assert.equal(model(choice(h)), 'luna');
   // A failure under a name no review dispatch started does not escalate.
-  h.ok(['evidence', 'T1', '--agent', 'made-up', '--type', 'review', '--fail', '--sha', h.sha]);
+  h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--agent', 'made-up', '--type', 'review', '--fail', '--sha', h.sha]);
   assert.equal(model(choice(h)), 'luna');
   h.reviewer('T1', 'r1');
-  h.ok(['evidence', 'T1', '--agent', 'r1', '--type', 'review', '--fail', '--sha', h.sha, '--summary', 'needs stronger reasoning']);
+  h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--agent', 'r1', '--type', 'review', '--fail', '--sha', h.sha, '--summary', 'needs stronger reasoning']);
   assert.equal(model(choice(h)), 'sol');
   h.reviewer('T1', 'r2');
-  h.ok(['evidence', 'T1', '--agent', 'r2', '--type', 'review', '--fail', '--sha', h.sha]);
+  h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--agent', 'r2', '--type', 'review', '--fail', '--sha', h.sha]);
   assert.equal(model(choice(h)), 'opus');
 });
 
