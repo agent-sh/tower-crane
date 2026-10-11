@@ -165,7 +165,7 @@ test('an unaccepted lower task, unknown remote lower PR, or auto-merge prevents 
   const ci = f.h.run(['check', 'ci', 'T1']);
   assert.equal(ci.code, 0, ci.stdout + ci.stderr);
   f.h.reviewer('T1', 'independent-reviewer', f.sha);
-  f.h.ok(['evidence', 'T1', '--type', 'review', '--ok', '--sha', f.sha, '--agent', 'independent-reviewer', '--summary', 'checked']);
+  f.h.ok(['evidence', 'T1', '--revision', f.h.revision('T1'), '--type', 'review', '--ok', '--sha', f.sha, '--agent', 'independent-reviewer', '--summary', 'checked']);
   const lower = f.h.json(['task', 'show', 'T1']);
   assert.equal(lower.status, 'submitted');
   assert.equal(lower.gates.ok, true, 'passing receipts still need an acceptance');
@@ -542,7 +542,7 @@ test('lower acceptance cannot hide failing current gate evidence', (t) => {
   f.accept('T1');
   f.accept('T2');
   f.h.reviewer('T1', 'reviewer-independent', f.sha);
-  f.h.ok(['evidence', 'T1', '--type', 'review', '--fail', '--sha', f.sha, '--agent', 'reviewer-independent']);
+  f.h.ok(['evidence', 'T1', '--revision', f.h.revision('T1'), '--type', 'review', '--fail', '--sha', f.sha, '--agent', 'reviewer-independent']);
   assert.match(f.h.run(['merge', 'T2']).stdout, /T1.*passing gates/);
   assert.deepEqual(routes(f), []);
 });
@@ -551,7 +551,9 @@ test('a stack member merged at its accepted head is confirmed without current ga
   const f = stacked(t);
   f.accept('T1');
   f.accept('T2');
-  f.h.ok(['evidence', 'T1', '--type', 'review', '--fail', '--sha', f.sha, '--agent', 'reviewer-independent']);
+  f.h.reviewer('T1', 'reviewer-independent', f.sha);
+  f.h.ok(['evidence', 'T1', '--type', 'review', '--fail', '--sha', f.sha, '--revision', f.h.revision('T1'), '--agent', 'reviewer-independent']);
+  assert.equal(f.h.json(['task', 'show', 'T1']).gates.gates.find((gate) => gate.type === 'review').ok, false);
   const upperBase = f.read().prs[12].baseRefName;
   const landed = (head) => f.write((d) => {
     Object.assign(d.prs[11], { state: 'MERGED', headRefOid: head, mergeCommit: { oid: 'c'.repeat(40) } });
@@ -612,7 +614,10 @@ test('a merged stack member with passing gates is confirmed even while a lower t
   const f = stacked(t);
   f.accept('T1');
   f.accept('T2');
-  f.h.ok(['evidence', 'T1', '--type', 'review', '--fail', '--sha', f.sha, '--agent', 'reviewer-independent']);
+  f.h.reviewer('T1', 'reviewer-independent', f.sha);
+  f.h.ok(['evidence', 'T1', '--type', 'review', '--fail', '--sha', f.sha, '--revision', f.h.revision('T1'), '--agent', 'reviewer-independent']);
+  assert.equal(f.h.json(['task', 'show', 'T1']).gates.gates.find((gate) => gate.type === 'review').ok, false);
+  assert.equal(f.h.json(['task', 'show', 'T2']).gates.ok, true);
   f.write((d) => {
     Object.assign(d.prs[12], { state: 'MERGED', mergeCommit: { oid: 'd'.repeat(40) } });
     d.calls = [];
