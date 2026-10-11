@@ -10,6 +10,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const net = require('node:net');
+const os = require('node:os');
 const path = require('node:path');
 const cp = require('node:child_process');
 const { makeRepo, BIN, ROOT } = require('./helpers');
@@ -18,6 +19,14 @@ const uid = typeof process.getuid === 'function' ? process.getuid() : null;
 const runDir = uid === null ? null : `/run/user/${uid}`;
 const skip = process.env.TOWER_CRANE_LIVE_CLAUDE !== '1' ? 'set TOWER_CRANE_LIVE_CLAUDE=1 to run against the real claude CLI'
   : !runDir || !fs.existsSync(runDir) ? `${runDir || '/run/user/<uid>'} does not exist here` : false;
+
+// The owner's claude login. spawn links its credentials into each agent's home,
+// so a live agent starts logged in only when its repository's user config is this dir.
+const claudeConfig = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
+function login(h) {
+  h.env.CLAUDE_CONFIG_DIR = claudeConfig;
+  return h;
+}
 
 // The agent's commands write nothing outside the worktree, and the state
 // directory is read-only, so a probe writes its result to a directory the
@@ -58,7 +67,7 @@ if (process.env.TOWER_CRANE_LIVE_CLAUDE === '1' || process.env.TOWER_CRANE_LIVE_
 }
 
 test('a sandboxed claude command cannot connect to a unix socket in a denied directory', { skip, timeout: 300000 }, async (t) => {
-  const h = makeRepo(t);
+  const h = login(makeRepo(t));
   h.init();
   h.ok(['task', 'add', '--title', 'Socket probe', '--acceptance', 'no connection']);
   const sock = path.join(runDir, `tower-crane-probe-${process.pid}.sock`);
@@ -84,7 +93,7 @@ test('a sandboxed claude command cannot connect to a unix socket in a denied dir
 });
 
 test('in a real claude sandbox with sandbox.session_bus, a command connects to the bus socket', { skip: process.env.TOWER_CRANE_LIVE_CLAUDE !== '1' && 'set TOWER_CRANE_LIVE_CLAUDE=1 to run against the real claude CLI', timeout: 300000 }, async (t) => {
-  const h = makeRepo(t);
+  const h = login(makeRepo(t));
   h.init();
   h.ok(['task', 'add', '--title', 'Bus probe', '--acceptance', 'bus reachable']);
   // The bus is a socket in a runtime directory of the test's own, so the probe never touches the user's session.
@@ -122,7 +131,7 @@ test('in a real claude sandbox with sandbox.session_bus, a command connects to t
 // bus, so this is the transport a scope needs. It runs against the owner's
 // real user manager, so the scope is a real transient unit of the owner's session.
 test('in a real claude sandbox with sandbox.session_bus, systemd-run --user --scope starts a scope', { skip: skip || (!(runDir && fs.existsSync(path.join(runDir, 'systemd', 'private'))) && 'the user manager socket does not exist here'), timeout: 300000 }, async (t) => {
-  const h = makeRepo(t);
+  const h = login(makeRepo(t));
   h.init();
   h.ok(['task', 'add', '--title', 'Scope probe', '--acceptance', 'scope started']);
   const probe = path.join(results(h), 'scope-probe');
@@ -141,7 +150,7 @@ test('in a real claude sandbox with sandbox.session_bus, systemd-run --user --sc
 });
 
 test('in a real claude sandbox a forged state edit fails and the CLI writes through the broker', { skip: process.env.TOWER_CRANE_LIVE_CLAUDE !== '1' && 'set TOWER_CRANE_LIVE_CLAUDE=1 to run against the real claude CLI', timeout: 300000 }, async (t) => {
-  const h = makeRepo(t);
+  const h = login(makeRepo(t));
   h.init();
   h.ok(['task', 'add', '--title', 'Forge probe', '--acceptance', 'only the broker writes']);
   const events = path.join(h.state, 'events.jsonl');
