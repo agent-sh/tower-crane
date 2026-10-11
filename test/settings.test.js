@@ -144,7 +144,7 @@ test('a local process without the one-time link gets no token serve accepts, wit
   const h = makeRepo(t);
   h.init();
   h.ok(['task', 'add', '--title', 'Webhook retries', '--acceptance', 'a']);
-  h.ok(['ask', '--question', 'ship it?', '--option', 'yes', '--option', 'no', '--agent', 'orchestrator']);
+  h.ok(['ask', '--kind', 'technical', '--question', 'ship it?', '--option', 'yes', '--option', 'no', '--agent', 'orchestrator']);
   const s = await startServe(h);
   try {
     const files = ['tasks.json', 'decisions.json', 'project.json', 'events.jsonl'];

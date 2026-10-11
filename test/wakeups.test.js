@@ -58,7 +58,7 @@ test('the default wait wakes on every owner event and skips bookkeeping', async 
 
 test('wait --follow streams id-only lines and event prints the content', async (t) => {
   const h = setup(t);
-  h.ok(['ask', '--question', 'which way?', '--option', 'left', '--option', 'right', '--blocks', 'T1', '--agent', 'worker']);
+  h.ok(['ask', '--kind', 'technical', '--question', 'which way?', '--option', 'left', '--option', 'right', '--blocks', 'T1', '--agent', 'worker']);
   const p = cp.spawn(process.execPath, [BIN, 'wait', '--follow', '--agent', 'orchestrator'], { cwd: h.repo, env: h.env });
   t.after(() => p.kill());
   let out = '';
@@ -98,7 +98,7 @@ for (const harness of ['claude', 'codex']) {
       ...(process.platform === 'win32' ? { NODE_OPTIONS: `--require "${preload.replace(/\\/g, '/')}"` } : {}),
     });
     h.ok(['ladder', 'set', 'orchestrator', '--harness', harness, '--model', 'stub-model', '--clear', 'profile', '--clear', 'effort']);
-    h.ok(['ask', '--question', 'ship it?', '--option', 'yes', '--option', 'no', '--agent', 'worker']);
+    h.ok(['ask', '--kind', 'technical', '--question', 'ship it?', '--option', 'yes', '--option', 'no', '--agent', 'worker']);
     const run = h.runAsync(['spawn', '--task', 'T1', '--role', 'orchestrator', '--wait', '--json']);
     let early = null;
     run.then((r) => { early = r; });
@@ -192,7 +192,7 @@ function engine(t, h) {
 
 test('the Claude Code mod pushes a decision answer and a worker message into the session', async (t) => {
   const h = setup(t);
-  h.ok(['ask', '--question', 'merge now?', '--option', 'yes', '--option', 'later', '--agent', 'worker']);
+  h.ok(['ask', '--kind', 'technical', '--question', 'merge now?', '--option', 'yes', '--option', 'later', '--agent', 'worker']);
   const { register } = await import(pathToFileURL(MOD).href);
   const cc = engine(t, h);
   register(cc.on);

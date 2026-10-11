@@ -62,7 +62,7 @@ test('the asker or the owner withdraws an open decision with a reason; it leaves
   assert.match(again.stderr, /already withdrawn/);
 
   // The owner can withdraw a worker's decision that blocks a task; the task reads the reason and becomes ready.
-  h.ok(['ask', '--question', 'Which store?', '--option', 'redis', '--option', 'postgres', '--blocks', 'T1', '--agent', 'worker-ask']);
+  h.ok(['ask', '--kind', 'technical', '--question', 'Which store?', '--option', 'redis', '--option', 'postgres', '--blocks', 'T1', '--agent', 'worker-ask']);
   assert.doesNotMatch(h.ok(['ready']), /T1/);
   h.ok(['decision', 'withdraw', 'D2', '--reason', 'the store is out of scope', '--agent', 'owner']);
   const owned = h.readState('decisions.json').decisions[1];
@@ -71,7 +71,7 @@ test('the asker or the owner withdraws an open decision with a reason; it leaves
   assert.match(h.ok(['ready']), /T1/);
 
   // An answered decision is not withdrawn; the owner's answer stands.
-  h.ok(['ask', '--question', 'Keep the cache?', '--option', 'yes', '--option', 'no', '--agent', 'worker-ask']);
+  h.ok(['ask', '--kind', 'technical', '--question', 'Keep the cache?', '--option', 'yes', '--option', 'no', '--agent', 'worker-ask']);
   h.ok(['answer', 'D3', '--choice', 'yes', '--agent', 'owner']);
   const late = h.run(
     ['decision', 'withdraw', 'D3', '--reason', 'moot', '--agent', 'worker-ask'],

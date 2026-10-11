@@ -91,7 +91,7 @@ test('a worker broker refuses unscoped dead-claim recovery and preserves peer cl
 
 test('the broker answers no request without its token and acts on its own task only', async (t) => {
   const { job } = scratch(t);
-  for (const argv of [['task', 'note', 'T2', 'x'], ['claim', 'T2'], ['ask', '--question', 'q', '--option', 'a', '--option', 'b', '--blocks', 'T2']]) {
+  for (const argv of [['task', 'note', 'T2', 'x'], ['claim', 'T2'], ['ask', '--kind', 'technical', '--question', 'q', '--option', 'a', '--option', 'b', '--blocks', 'T2']]) {
     assert.throws(() => B.authorize(job, argv), /works on T1 only, not T2/, argv.join(' '));
   }
   const broker = await B.start(job);
@@ -112,7 +112,7 @@ for (const role of ['worker', 'reviewer', 'small']) test(`a sandboxed ${role} an
   const h = makeRepo(t);
   h.init();
   h.ok(['task', 'add', '--title', 'Choose a store', '--acceptance', 'answer is authorized']);
-  h.ok(['ask', '--question', 'Which store?', '--option', 'redis', '--blocks', 'T1']);
+  h.ok(['ask', '--kind', 'technical', '--question', 'Which store?', '--option', 'redis', '--blocks', 'T1']);
   const job = {
     state: h.state, task: 'T1', agent: `${role}-T1-1`, role, harness: 'codex',
     cwd: h.repo, broker: path.join(h.base, 'brokers', `${role}-T1-1`, B.FILE),
@@ -151,7 +151,7 @@ test('a sandboxed worker withdraws its own question through the broker; a review
   const h = makeRepo(t);
   h.init();
   h.ok(['task', 'add', '--title', 'Waits on a question', '--acceptance', 'the withdrawal frees it']);
-  h.ok(['ask', '--question', 'Which store?', '--option', 'redis', '--option', 'postgres', '--blocks', 'T1', '--agent', 'worker-T1-1']);
+  h.ok(['ask', '--kind', 'technical', '--question', 'Which store?', '--option', 'redis', '--option', 'postgres', '--blocks', 'T1', '--agent', 'worker-T1-1']);
   const brokerEnv = async (role) => {
     const job = {
       state: h.state, task: 'T1', agent: `${role}-T1-1`, role, harness: 'codex',
@@ -204,14 +204,14 @@ test('a sandboxed reviewer asks through the broker: a technical question reaches
   t.after(() => broker.close());
   const env = { ...broker.env, TOWER_CRANE_AGENT: job.agent, TOWER_CRANE_TASK: job.task };
 
-  const asked = await h.runAsync(['ask', '--question', 'Which store?', '--option', 'redis', '--option', 'postgres', '--blocks', 'T1'], { env });
+  const asked = await h.runAsync(['ask', '--kind', 'technical', '--question', 'Which store?', '--option', 'redis', '--option', 'postgres', '--blocks', 'T1'], { env });
   assert.equal(asked.code, 0, asked.stderr);
   const technical = h.readState('decisions.json').decisions[0];
   assert.deepEqual([technical.asked_by, technical.technical, technical.escalation], [job.agent, true, undefined]);
   h.ok(['answer', 'D1', '--choice', 'redis', '--agent', 'orchestrator']);
   assert.equal(h.readState('decisions.json').decisions[0].answer_rule, 'owner-technical-delegation');
 
-  const escalated = await h.runAsync(['ask', '--question', 'Raise the budget?', '--option', 'yes', '--option', 'no', '--setting', 'budget.raise', '--blocks', 'T1'], { env });
+  const escalated = await h.runAsync(['ask', '--kind', 'technical', '--question', 'Raise the budget?', '--option', 'yes', '--option', 'no', '--setting', 'budget.raise', '--blocks', 'T1'], { env });
   assert.equal(escalated.code, 0, escalated.stderr);
   assert.deepEqual(h.readState('decisions.json').decisions[1].escalation, { settings: ['budget.raise'], change: null });
   const refused = h.run(['answer', 'D2', '--choice', 'yes', '--agent', 'orchestrator']);

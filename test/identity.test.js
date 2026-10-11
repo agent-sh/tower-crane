@@ -218,7 +218,7 @@ test('terminal fallback cannot set owner policies on init or project set', { ski
 test('terminal fallback cannot answer or delegate a decision as the owner', { skip: !PTY_AVAILABLE }, (t) => {
   const h = makeRepo(t);
   h.init();
-  h.ok(['ask', '--question', 'Which?', '--option', 'a', '--option', 'b']);
+  h.ok(['ask', '--kind', 'technical', '--question', 'Which?', '--option', 'a', '--option', 'b']);
   const before = events(h);
   for (const args of [
     ['answer', 'D1', '--choice', 'a'],
