@@ -48,6 +48,9 @@ function setup(t) {
     PATH: `${bin}${path.delimiter}${process.env.PATH}`, PI_STUB_OUT: out,
   };
   const run = () => {
+    // An exited worker keeps its lease until the orchestrator releases it.
+    const held = h.json(['task', 'show', 'T1']).claim;
+    if (held) h.ok(['release', 'T1', '--agent', held.agent, '--reason', 'worker exited']);
     const spawned = h.json(['spawn', '--task', 'T1', '--wait'], { env });
     assert.equal(spawned.sandbox, false);
     return JSON.parse(fs.readFileSync(out, 'utf8'));
