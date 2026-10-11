@@ -376,6 +376,8 @@ test('the board pauses dispatch, interrupts a real supervised fixture and delega
   assert.equal(started.status, 200, JSON.stringify(started));
   assert.equal(events(h).filter((e) => e.cmd === 'spawn' && e.detail.role === 'orchestrator').length, 1);
   assert.equal(audits(h).filter((e) => e.detail.mode === 'board' && e.detail.settings.delegation).length, 1);
+  assert.deepEqual(audits(h).filter((e) => e.detail.settings.delegation).map((e) => e.detail.approved_by), [delegation.data.decision]);
+  assert.equal(decisions(h).find((d) => d.id === delegation.data.decision).applied.by, 'owner');
 });
 
 test('approved board waivers accept once and retain one settings audit', async (t) => {
