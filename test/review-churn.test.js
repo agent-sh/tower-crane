@@ -76,6 +76,60 @@ test('acceptance revision resets churn but retains the review evidence', (t) => 
   assert.equal(h.json(['task', 'show', 'T1']).evidence.filter((e) => e.type === 'review' && !e.ok).length, 3);
 });
 
+test('stack sync rework cannot restore reviews across an acceptance reset', (t) => {
+  const { stacked } = require('./stack-fixture');
+  const f = stacked(t);
+  const h = f.h;
+  const sha = f.upper.sha;
+  const taskChurn = () => h.json(['status']).review_churn.find((r) => r.id === 'T2').count;
+  const item = () => h.json(['inbox', '--agent', 'orchestrator']).items
+    .find((i) => i.kind === 'review_churn' && i.task === 'T2');
+  for (let round = 1; round <= 3; round++) {
+    if (round > 1) {
+      h.ok(['rework', 'T2', '--reason', 'fix review']);
+      h.ok(['claim', 'T2', '--agent', 'worker-T2']);
+      h.ok(['submit', 'T2', '--sha', sha, '--agent', 'worker-T2']);
+    }
+    const agent = `churn-reviewer-${round}`;
+    h.reviewer('T2', agent, sha);
+    h.ok(['evidence', 'T2', '--type', 'review', '--fail', '--sha', sha,
+      '--agent', agent, '--summary', 'Acceptance item 1: old scope finding']);
+  }
+  assert.equal(taskChurn(), 3);
+  assert.equal(item().count, 3);
+  h.ok(['rework', 'T2', '--reason', 'fix the rejected head']);
+  assert.equal(taskChurn(), 3);
+  h.ok(['task', 'update', 'T2', '--acceptance', 'new acceptance scope']);
+  assert.equal(taskChurn(), 0);
+  f.write((d) => { d.conflict = true; });
+  for (const revision of [6, 7]) {
+    const result = h.run(['stack', 'sync', 'T2']);
+    assert.equal(result.code, 1);
+    assert.match(result.stdout + result.stderr, /conflict/i);
+    const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+    const rework = events.findLast((e) => e.cmd === 'rework' && e.task === 'T2');
+    assert.equal(rework.detail.previous_revision, 3, 'stack sync keeps rejected-review context');
+    assert.equal(rework.detail.revision, revision);
+    assert.equal(taskChurn(), 0, 'stack retries must retain the acceptance reset');
+    assert.equal(item(), undefined);
+    const page = fs.readFileSync(path.join(h.state, 'sketch.html'), 'utf8');
+    assert.doesNotMatch(page, /review churn: 3/);
+    assert.match(page, /review churn: 0/);
+  }
+  assert.equal(h.json(['task', 'show', 'T2']).evidence.filter((e) => e.type === 'review' && !e.ok).length, 3);
+  // The conflict sent the parent back too; resubmit it before claiming the child.
+  f.write((d) => { d.conflict = false; });
+  h.ok(['claim', 'T1', '--agent', 'worker-T1']);
+  h.ok(['submit', 'T1', '--sha', f.sha, '--agent', 'worker-T1']);
+  h.ok(['claim', 'T2', '--agent', 'worker-T2']);
+  h.ok(['submit', 'T2', '--sha', sha, '--agent', 'worker-T2']);
+  h.reviewer('T2', 'new-scope-reviewer', sha);
+  h.ok(['evidence', 'T2', '--type', 'review', '--fail', '--sha', sha,
+    '--agent', 'new-scope-reviewer', '--summary', 'Acceptance item 1: new scope finding']);
+  assert.equal(taskChurn(), 1, 'reviews of the new scope still count');
+  assert.equal(item(), undefined);
+});
+
 test('changing the builder preserves independent reviews of earlier submissions', (t) => {
   const h = setup(t);
   h.ok(['rework', 'T1', '--reason', 'new builder takes the fix']);
