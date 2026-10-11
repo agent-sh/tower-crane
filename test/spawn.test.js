@@ -360,7 +360,7 @@ const agent = env.TOWER_CRANE_AGENT;
 const task = env.TOWER_CRANE_TASK;
 const state = env.TOWER_CRANE_STATE;
 for (const key of Object.keys(env)) if (key.startsWith('TOWER_CRANE_')) delete env[key];
-const r = cp.spawnSync(process.execPath, [process.argv[1], 'evidence', 'T1', '--type', 'review', '--ok', '--sha', 'abcdef1', '--state', state], {
+const r = cp.spawnSync(process.execPath, [process.argv[1], 'evidence', 'T1', '--type', 'review', '--ok', '--sha', '50b732a15be40ccb2065cb2ba0e7b366d511b736', '--state', state], {
   env, encoding: 'utf8', timeout: 300000,
 });
 fs.writeFileSync(process.argv[2], JSON.stringify({ agent, task, remaining: Object.keys(env).filter((key) => key.startsWith('TOWER_CRANE_')), code: r.status, stderr: r.stderr }));
@@ -462,7 +462,10 @@ test('spawn --wait runs the command rung in the task worktree with the tower-cra
   assert.equal(real(seen.cwdArg), real(wt));
   assert.equal(seen.task, 'T1');
   assert.notEqual(path.resolve(seen.brief), path.resolve(path.join(h.state, 'briefs', 'T1.md')));
-  assert.match(seen.briefText, /^## Goal\n[\s\S]*\n- start from the webhook handler\n\n## Task\n/);
+  assert.match(seen.briefText, /^## Goal\n[\s\S]*\n- start from the webhook handler\n\nTask scratch: [^\n]+\n\n## Task\n/);
+  const scratch = h.json(['task', 'show', 'T1']).scratch;
+  assert.ok(seen.briefText.includes(scratch));
+  assert.ok(seen.prompt.includes(scratch));
   assert.ok(!fs.existsSync(seen.brief), 'the temporary brief copy is removed after exit');
   assert.match(seen.prompt, /^P:## Goal\n[\s\S]*\n- start from the webhook handler/);
   assert.deepEqual([real(seen.env.s), seen.env.t, seen.env.a], [real(h.state), 'T1', 'worker-T1-1']);
@@ -806,7 +809,7 @@ fs.writeFileSync(${JSON.stringify(output)}, "work in progress");`;
   h.ok(['task', 'add', '--title', 'Second', '--acceptance', 'b']);
   h.ok(['brief', 'set', 'T2', '-'], { input: 'second brief\n' });
   h.ok(['claim', 'T2', '--agent', 'w-1']);
-  h.ok(['submit', 'T2', '--sha', 'abcdef1', '--branch', 'feature/second', '--agent', 'w-1']);
+  h.ok(['submit', 'T2', '--sha', '50b732a15be40ccb2065cb2ba0e7b366d511b736', '--branch', 'feature/second', '--agent', 'w-1']);
   h.ok(['rework', 'T2', '--reason', 'again']);
   const a2Created = path.join(h.base, 'a2-created');
   const a2 = h.runAsync(['spawn', '--role', 'small', '--task', 'T2'], { hooks: { HOOK_STOP_WORKTREE_ADD: a2Created, HOOK_SPAWN_FAIL: '1' } });
