@@ -6,6 +6,113 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { setup, stacked } = require('./stack-fixture');
 
+// Every merge request the stub received, as 'pr N' for gh pr merge, 'async N' for
+// GitHub's asynchronous merge API and 'stack N' for gh stack merge.
+const merges = (f) => f.read().calls.flatMap((c) => {
+  if (['pr', 'stack'].includes(c.args[0]) && c.args[1] === 'merge') return [{ route: `${c.args[0]} ${c.args[2]}`, args: c.args }];
+  const post = c.args[0] === 'api' && c.args.includes('POST') && /pulls\/(\d+)\/merge-async$/.exec(c.args[1]);
+  return post ? [{ route: `async ${post[1]}`, args: c.args }] : [];
+});
+const routes = (f) => merges(f).map((m) => m.route);
+
+function confirmLower(f) {
+  f.accept('T1');
+  const main = f.h.git(['rev-parse', 'origin/main']);
+  const tree = f.h.git(['rev-parse', `${f.sha}^{tree}`]);
+  const landed = f.h.git(['commit-tree', tree, '-p', main, '-p', f.sha, '-m', 'lower merged externally']);
+  f.h.git(['push', 'origin', `${landed}:main`]);
+  f.write((d) => {
+    d.prs[11].state = 'MERGED';
+    d.prs[11].mergeCommit = { oid: landed };
+    d.calls = [];
+  });
+  // Confirmation records merge evidence without running automatic refresh.
+  f.h.ok(['merge', 'T1']);
+}
+
+test('a linked upper submits and merges as an ordinary PR after its lower member merged', (t) => {
+  const f = stacked(t);
+  f.accept('T1');
+  f.write((d) => { d.conflict = true; d.calls = []; });
+  f.h.ok(['merge', 'T1']);
+  assert.equal(f.h.json(['task', 'show', 'T2']).status, 'submitted');
+  assert.equal(f.h.json(['task', 'show', 'T2']).stack, undefined);
+  assert.doesNotMatch(f.h.ok(['task', 'show', 'T2']), /stack: after T1/);
+  assert.doesNotMatch(fs.readFileSync(path.join(f.h.state, 'sketch.html'), 'utf8'), /stack after T1/);
+  f.h.ok(['submit', 'T2', '--sha', f.upper.sha, '--pr', '12', '--branch', f.upper.wt.branch, '--agent', 'worker-T2']);
+  f.accept('T2');
+  f.h.ok(['merge', 'T2']);
+  assert.deepEqual(routes(f), ['async 11', 'pr 12', 'async 12']);
+  const upper = merges(f).at(-1).args;
+  assert.ok(upper.includes('merge_method=squash'));
+  assert.ok(upper.includes(`expected_head_sha=${f.upper.sha}`));
+  assert.equal(f.read().prs[12].baseRefName, 'main');
+  assert.equal(f.read().calls.some((c) => c.args[0] === 'stack' && c.args[1] === 'sync'), false);
+});
+
+for (const command of ['sync', 'unstack']) {
+  test(`stack ${command} retires a linked upper with only merged lower members`, (t) => {
+    const f = stacked(t);
+    confirmLower(f);
+    f.write((d) => {
+      d.unstackError = 'PR #11 is merged and cannot be unstacked';
+      d.conflict = true;
+    });
+    if (command === 'unstack') f.h.ok(['rework', 'T2', '--reason', 'retire a stale stack during rework']);
+    f.h.ok(['stack', command, 'T2']);
+    assert.equal(f.h.json(['task', 'show', 'T2']).stack, undefined);
+    assert.doesNotMatch(f.h.ok(['task', 'show', 'T2']), /stack: after T1/);
+    assert.doesNotMatch(fs.readFileSync(path.join(f.h.state, 'sketch.html'), 'utf8'), /stack after T1/);
+    assert.equal(f.h.json(['task', 'show', 'T2']).status, command === 'unstack' ? 'rework' : 'submitted');
+    assert.equal(f.read().prs[12].baseRefName, 'main');
+    assert.equal(f.read().calls.some((c) => c.args[0] === 'stack'), false);
+  });
+}
+
+test('a stale local stack uses the single PR merge path after confirming its lower merge', (t) => {
+  const f = stacked(t);
+  confirmLower(f);
+  assert.equal(f.h.json(['task', 'show', 'T2']).stack, undefined);
+  assert.equal(f.h.json(['task', 'list']).find((t) => t.id === 'T2').stack, undefined);
+  assert.match(f.h.ok(['status']), /submitted: T2/);
+  assert.doesNotMatch(f.h.ok(['task', 'show', 'T2']), /stack: after T1/);
+  assert.doesNotMatch(fs.readFileSync(path.join(f.h.state, 'sketch.html'), 'utf8'), /stack after T1/);
+  f.h.git(['update-ref', '-d', `refs/heads/${f.lower.branch}`]);
+  f.h.git(['update-ref', '-d', `refs/remotes/origin/${f.lower.branch}`]);
+  const submission = f.h.json(['submit', 'T2', '--sha', f.upper.sha, '--agent', 'worker-T2']);
+  assert.equal(submission.scope.error, undefined, 'submission reads its diff against main after the lower branch disappears');
+  f.write((d) => { Object.assign(d.prs[12], { mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }); });
+  f.h.ok(['check', 'ci', 'T2']);
+  f.h.json(['spawn', '--task', 'T2', '--role', 'review', '--dry-run']);
+  f.accept('T2');
+  f.h.ok(['merge', 'T2']);
+  assert.deepEqual(routes(f), ['pr 12', 'async 12']);
+  assert.ok(merges(f).at(-1).args.includes('merge_method=squash'));
+  assert.equal(f.read().prs[12].baseRefName, 'main');
+  assert.equal(f.read().calls.some((c) => c.args[0] === 'stack'), false);
+});
+
+test('a merged bottom member stays tracked while a middle task still has an open task above it', (t) => {
+  const f = stacked(t);
+  const top = f.add('top', 'T2');
+  const wt = f.h.json(['worktree', top]);
+  f.submit(top, 13, wt);
+  f.h.ok(['stack', 'link', top]);
+  f.accept('T1');
+  f.h.ok(['merge', 'T1']);
+  assert.equal(f.h.json(['task', 'show', 'T2']).stack.parent, 'T1');
+  f.write((d) => { d.prs[12].baseRefName = 'main'; });
+  f.h.ok(['stack', 'sync', 'T2']);
+  f.h.ok(['stack', 'sync', top]);
+  assert.equal(f.h.json(['task', 'show', 'T2']).stack.parent, 'T1');
+  f.accept('T2');
+  f.accept(top);
+  const merged = f.h.run(['merge', top]);
+  assert.equal(merged.code, 0, merged.stdout + merged.stderr);
+  assert.deepEqual(routes(f), ['async 11', 'async 12', 'async 13']);
+  for (const pr of [11, 12, 13]) assert.equal(f.read().prs[pr].state, 'MERGED');
+});
+
 test('a stack that adds then modifies the same file merges without changing accepted heads', (t) => {
   const f = setup(t);
   const wt = f.h.json(['worktree', 'T2']);
@@ -25,7 +132,8 @@ test('a stack that adds then modifies the same file merges without changing acce
     assert.equal(f.h.git(['merge-base', head, 'origin/main']), head);
   }
   assert.equal(f.h.git(['show', 'origin/main:T1.txt']), 'T2 modified T1');
-  assert.equal(f.h.git(['rev-parse', 'HEAD'], wt.path), upper);
+  assert.equal(f.h.git(['rev-parse', wt.branch]), upper);
+  assert.ok(!fs.existsSync(wt.path), 'the merged task worktree is removed');
   for (const id of ['T1', 'T2']) assert.equal(f.h.json(['task', 'show', id]).evidence.findLast((e) => e.type === 'merge').ok, true);
 });
 
@@ -64,7 +172,7 @@ test('a later head race stops the chain and records only the accepted lower merg
   f.write((d) => { d.moveOnMerge = { pr: 12, head: moved, onPr: 12 }; });
   const r = f.h.run(['merge', 'T2']);
   assert.equal(r.code, 1);
-  assert.match(r.stdout, /head commit does not match/);
+  assert.match(r.stdout, /Head branch was modified/);
   const data = f.read();
   assert.equal(data.prs[11].state, 'MERGED');
   assert.equal(data.prs[11].headRefOid, f.sha);
@@ -96,7 +204,7 @@ test('an unlinked dependent targets main and merges normally when its lower PR m
   assert.equal(f.h.git(['show', '-s', '--format=%P', squash]).split(' ').length, 1);
   assert.notEqual(f.h.git(['merge-base', f.sha, squash]), f.sha);
   assert.equal(f.h.git(['ls-remote', '--heads', 'origin', f.lower.branch]), '');
-  assert.equal(f.h.json(['task', 'show', 'T2']).stack.linked, false);
+  assert.equal(f.h.json(['task', 'show', 'T2']).stack, undefined);
   f.h.ok(['submit', 'T2', '--sha', sha, '--branch', wt.branch, '--pr', '12', '--agent', 'worker-T2']);
   f.h.ok(['stack', 'link', 'T2']);
   const task = f.h.json(['task', 'show', 'T2']);
@@ -120,22 +228,23 @@ test('stack merge rechecks every accepted head and records evidence for all merg
   const moved = f.h.run(['merge', 'T2']);
   assert.equal(moved.code, 1);
   assert.match(moved.stdout, /T1: PR head moved/);
-  assert.equal(f.read().calls.some((c) => c.args[1] === 'merge'), false);
+  assert.deepEqual(routes(f), []);
   f.write((d) => { d.prs[11].headRefOid = f.sha; });
   f.h.ok(['merge', 'T2', '--method', 'merge']);
-  const merges = f.read().calls.filter((c) => c.args[1] === 'merge');
-  assert.deepEqual(merges.map((c) => c.args.slice(0, 3)), [['pr', 'merge', '11'], ['pr', 'merge', '12']]);
+  assert.deepEqual(routes(f), ['async 11', 'async 12']);
   for (const [index, head] of [f.sha, f.upper.sha].entries()) {
-    assert.equal(merges[index].args[merges[index].args.indexOf('--match-head-commit') + 1], head);
-    assert.ok(merges[index].args.includes('--merge'));
-    assert.ok(!merges[index].args.includes('--delete-branch'));
+    const { args } = merges(f)[index];
+    assert.ok(args.includes(`expected_head_sha=${head}`));
+    assert.ok(args.includes('merge_method=merge'));
   }
+  const polls = f.read().calls.filter((c) => c.args[0] === 'api' && /merge-async\/m\d+$/.test(c.args[1]));
+  assert.deepEqual(polls.map((c) => c.args[1].match(/pulls\/(\d+)/)[1]), ['11', '12']);
   assert.equal(f.read().prs[12].baseRefName, 'main');
-  for (const id of ['T1', 'T2']) {
+  for (const [id, head] of [['T1', f.sha], ['T2', f.upper.sha]]) {
     const task = f.h.json(['task', 'show', id]);
     const evidence = task.evidence.findLast((e) => e.type === 'merge');
     assert.equal(evidence.ok, true);
-    assert.ok(evidence.commands.some((c) => c.args[0] === 'pr' && c.args[1] === 'merge' && c.args.includes('--match-head-commit')));
+    assert.ok(evidence.commands.some((c) => c.args[0] === 'api' && c.args.includes(`expected_head_sha=${head}`)));
     assert.match(task.phase?.label || f.h.ok(['task', 'show', id]), /merged/);
   }
   const upper = f.h.git(['rev-parse', 'HEAD'], f.h.json(['worktree', 'T2']).path);
@@ -144,7 +253,7 @@ test('stack merge rechecks every accepted head and records evidence for all merg
   f.write((d) => { d.linked = false; });
   f.h.ok(['merge', 'T1']);
   f.h.ok(['merge', 'T2']);
-  assert.equal(f.read().calls.filter((c) => c.args[1] === 'merge').length, 2);
+  assert.equal(routes(f).length, 2);
 });
 
 test('an unaccepted lower task, unknown remote lower PR, or auto-merge prevents stack merge', (t) => {
@@ -154,13 +263,15 @@ test('an unaccepted lower task, unknown remote lower PR, or auto-merge prevents 
   f.write((d) => { Object.assign(d.prs[11], { mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }); });
   const ci = f.h.run(['check', 'ci', 'T1']);
   assert.equal(ci.code, 0, ci.stdout + ci.stderr);
-  f.h.ok(['evidence', 'T1', '--type', 'review', '--ok', '--sha', f.sha, '--agent', 'independent-reviewer', '--summary', 'checked']);
+  f.h.reviewer('T1', 'independent-reviewer', f.sha);
+  f.h.ok(['evidence', 'T1', '--revision', f.h.revision('T1'), '--type', 'review', '--ok', '--sha', f.sha, '--agent', 'independent-reviewer', '--summary', 'checked']);
   const lower = f.h.json(['task', 'show', 'T1']);
   assert.equal(lower.status, 'submitted');
   assert.equal(lower.gates.ok, true, 'passing receipts still need an acceptance');
-  const calls = f.read().calls.length;
+  f.write((d) => { d.calls = []; });
   assert.match(f.h.run(['merge', 'T2']).stdout, /T1: every lower task must be accepted with passing gates/);
-  assert.equal(f.read().calls.length, calls, 'an unaccepted member stops the merge before contacting GitHub');
+  assert.ok(f.read().calls.every((c) => c.args[0] === 'pr' && c.args[1] === 'view'),
+    'an unaccepted member stops the merge after reading the target, which may already have landed; nothing merges or retargets');
   f.accept('T1');
   f.write((d) => { d.order.unshift(99); });
   assert.match(f.h.run(['merge', 'T2']).stdout, /untracked lower PR/);
@@ -168,7 +279,7 @@ test('an unaccepted lower task, unknown remote lower PR, or auto-merge prevents 
   assert.equal(f.read().calls.some((c) => c.args[1] === 'sync'), false);
   f.write((d) => { d.order.shift(); d.prs[11].autoMergeRequest = {}; });
   assert.match(f.h.run(['merge', 'T2']).stdout, /without auto-merge/);
-  assert.equal(f.read().calls.some((c) => c.args[1] === 'merge'), false);
+  assert.deepEqual(routes(f), []);
 });
 
 test('queued stack merges are not evidence of a merge', (t) => {
@@ -190,9 +301,118 @@ test('queued stack merges are not evidence of a merge', (t) => {
   });
   f.h.git(['push', 'origin', `${base}:main`]);
   f.h.ok(['merge', 'T2']);
+  assert.equal(f.h.json(['task', 'show', 'T2']).evidence.findLast((e) => e.type === 'merge').ok, true);
+  assert.equal(f.h.json(['task', 'show', 'T1']).evidence.some((e) => e.type === 'merge'), false, 'confirming the upper task records nothing for the lower one');
+  f.h.ok(['merge', 'T1']);
+  assert.equal(f.h.json(['task', 'show', 'T1']).evidence.findLast((e) => e.type === 'merge').ok, true);
+  assert.deepEqual(routes(f), ['async 11']);
+});
+
+test('an asynchronous merge that GitHub reports failed stops the chain after the confirmed lower merge', (t) => {
+  const f = stacked(t);
+  f.accept('T1');
+  f.accept('T2');
+  f.write((d) => { d.asyncFail = 12; });
+  const r = f.h.run(['merge', 'T2']);
+  assert.equal(r.code, 1);
+  assert.match(r.stdout, /asynchronous merge of PR #12 ended failed: Merge conflict in T2\.txt/);
+  assert.equal(f.read().prs[11].state, 'MERGED');
+  assert.equal(f.read().prs[12].state, 'OPEN');
+  assert.equal(f.h.json(['task', 'show', 'T1']).evidence.findLast((e) => e.type === 'merge').ok, true);
+  assert.equal(f.h.json(['task', 'show', 'T2']).evidence.some((e) => e.type === 'merge' && e.ok), false);
+});
+
+test('a failed asynchronous POST without a job id reports the refusal after checking the PR', (t) => {
+  const f = stacked(t);
+  f.accept('T1');
+  f.accept('T2');
+  f.write((d) => {
+    d.asyncResponses = { 11: {
+      post: { body: { status: 'failed', error: 'Required review is missing' } },
+      views: [{ advanceMs: 10 * 60 * 1000 + 1 }],
+    } };
+  });
+  const r = f.h.run(['merge', 'T2']);
+  assert.equal(r.code, 1);
+  assert.match(r.stdout, /asynchronous merge of PR #11 ended failed: Required review is missing/);
+  assert.doesNotMatch(r.stdout, /may be in a merge queue/);
+  assert.deepEqual(routes(f), ['async 11']);
+  const data = f.read();
+  assert.equal(data.asyncResponses[11].views.length, 0, 'the PR was read before reporting the refusal');
+  assert.equal(data.calls.some((c) => c.args[0] === 'api' && /merge-async\//.test(c.args[1])), false);
+  for (const id of ['T1', 'T2']) {
+    assert.equal(f.h.json(['task', 'show', id]).evidence.some((e) => e.type === 'merge' && e.ok), false);
+  }
+});
+
+for (const unread of [false, true]) {
+  test(`a failed job survives a PR read error and a retired status endpoint${unread ? ' while confirmation stays unavailable' : ''}`, (t) => {
+    const f = stacked(t);
+    f.accept('T1');
+    f.accept('T2');
+    const readError = { code: 1, error: 'gh: Server Error (HTTP 502)' };
+    f.write((d) => {
+      d.asyncResponses = { 12: {
+        polls: [
+          { body: { status: 'failed', error: 'Merge conflict in T2.txt' } },
+          { code: 1, error: 'gh: Not Found (HTTP 404)', advanceMs: 10 * 60 * 1000 + 1 },
+        ],
+        views: unread ? [readError, readError] : [readError],
+      } };
+    });
+    const r = f.h.run(['merge', 'T2']);
+    assert.equal(r.code, 1);
+    assert.match(r.stdout, /asynchronous merge of PR #12 ended failed: Merge conflict in T2\.txt/);
+    assert.doesNotMatch(r.stdout, /may be in a merge queue/);
+    assert.deepEqual(routes(f), ['async 11', 'async 12']);
+    const data = f.read();
+    assert.equal(data.asyncResponses[12].polls.length, 0);
+    assert.equal(data.asyncResponses[12].views.length, 0);
+    assert.equal(data.prs[12].state, 'OPEN');
+    assert.equal(f.h.json(['task', 'show', 'T1']).evidence.findLast((e) => e.type === 'merge').ok, true);
+    assert.equal(f.h.json(['task', 'show', 'T2']).evidence.some((e) => e.type === 'merge' && e.ok), false);
+  });
+}
+
+test('a confirmed accepted merge takes precedence over a retained terminal failure', (t) => {
+  const f = stacked(t);
+  f.accept('T1');
+  f.accept('T2');
+  f.write((d) => {
+    d.asyncResponses = { 11: {
+      post: { body: { status: 'failed', message: 'Merge was cancelled' } },
+      views: [{ code: 1, error: 'gh: Server Error (HTTP 502)' }, { merge: true }],
+    } };
+  });
+  const r = f.h.run(['merge', 'T2']);
+  assert.equal(r.code, 0, `${r.stdout}\n${r.stderr}`);
+  assert.deepEqual(routes(f), ['async 11', 'async 12']);
   for (const id of ['T1', 'T2']) assert.equal(f.h.json(['task', 'show', id]).evidence.findLast((e) => e.type === 'merge').ok, true);
-  const merges = f.read().calls.filter((c) => c.args[1] === 'merge');
-  assert.deepEqual(merges.map((c) => c.args.slice(0, 3)), [['pr', 'merge', '11']]);
+});
+
+test('failed status polls defer to the PR state: a 5xx waits, a 404 after the merge landed confirms it', (t) => {
+  const f = stacked(t);
+  f.accept('T1');
+  f.accept('T2');
+  f.write((d) => { d.pollFailures = { 11: ['gh: Server Error (HTTP 502)'], 12: ['gh: Not Found (HTTP 404)'] }; });
+  const r = f.h.run(['merge', 'T2']);
+  assert.equal(r.code, 0, `${r.stdout}\n${r.stderr}`);
+  assert.deepEqual(routes(f), ['async 11', 'async 12']);
+  const data = f.read();
+  for (const pr of [11, 12]) assert.equal(data.prs[pr].state, 'MERGED');
+  for (const id of ['T1', 'T2']) assert.equal(f.h.json(['task', 'show', id]).evidence.findLast((e) => e.type === 'merge').ok, true);
+});
+
+test('a PR still open after the bounded wait fails with the last poll error', (t) => {
+  const f = stacked(t);
+  f.accept('T1');
+  f.accept('T2');
+  f.write((d) => { d.queued = true; d.pollFailures = { 11: ['gh: Server Error (HTTP 502)'] }; });
+  const r = f.h.run(['merge', 'T2']);
+  assert.equal(r.code, 1);
+  assert.match(r.stdout, /PR #11 is not merged 10 minutes after .*last status poll failed: gh: Server Error \(HTTP 502\)/);
+  assert.equal(f.read().prs[11].state, 'OPEN');
+  assert.equal(f.h.json(['task', 'show', 'T1']).evidence.some((e) => e.type === 'merge' && e.ok), false);
 });
 
 test('linked stacks refuse squash and rebase to preserve accepted dependency ancestry', (t) => {
@@ -204,7 +424,7 @@ test('linked stacks refuse squash and rebase to preserve accepted dependency anc
     assert.equal(r.code, 1);
     assert.match(r.stdout, /stack merges use merge commits/);
   }
-  assert.equal(f.read().calls.some((c) => c.args[1] === 'merge'), false);
+  assert.deepEqual(routes(f), []);
 });
 
 test('a refused upper merge retains lower evidence and retries without merging the lower PR again', (t) => {
@@ -220,9 +440,7 @@ test('a refused upper merge retains lower evidence and retries without merging t
   assert.equal(f.read().prs[12].state, 'OPEN');
   f.write((d) => { delete d.refuseMergePr; });
   f.h.ok(['merge', 'T2']);
-  const merges = f.read().calls.filter((c) => c.args[1] === 'merge');
-  assert.deepEqual(merges.map((c) => c.args.slice(0, 3)),
-    [['pr', 'merge', '11'], ['pr', 'merge', '12'], ['pr', 'merge', '12']]);
+  assert.deepEqual(routes(f), ['async 11', 'async 12', 'pr 12', 'async 12']);
   assert.equal(f.h.json(['task', 'show', 'T2']).evidence.findLast((e) => e.type === 'merge').ok, true);
 });
 
@@ -244,17 +462,132 @@ test('a task changed during the lower merge stops before the upper merge', (t) =
   f.accept('T1');
   f.accept('T2');
   f.write((d) => {
-    d.during = { 'pr merge': [['rework', 'T2', '--reason', 'another worker takes over'], ['claim', 'T2', '--agent', 'worker-new']] };
+    d.during = { 'merge-async': [['rework', 'T2', '--reason', 'another worker takes over'], ['claim', 'T2', '--agent', 'worker-new']] };
   });
   const r = f.h.run(['merge', 'T2']);
   assert.equal(r.code, 1);
   assert.match(r.stdout, /changed during stack head checks/);
-  assert.deepEqual(f.read().calls.filter((c) => c.args[1] === 'merge').map((c) => c.args.slice(0, 3)), [['pr', 'merge', '11']]);
+  assert.deepEqual(routes(f), ['async 11']);
   const task = f.h.json(['task', 'show', 'T2']);
   assert.equal(task.claim.agent, 'worker-new');
-  assert.equal(task.stack.linked, true);
+  assert.equal(task.stack, undefined);
+  assert.equal(f.h.readState('tasks.json').tasks.find((t) => t.id === 'T2').stack.linked, true);
   assert.equal(task.stack_disabled, undefined);
   assert.equal(f.h.json(['task', 'show', 'T1']).stack_disabled, undefined);
+});
+
+test('a bottom PR with a stale local link to its dependent merges through the asynchronous merge API pinned to its head', (t) => {
+  const f = stacked(t);
+  f.accept('T1');
+  const state = f.h.readState('tasks.json');
+  state.tasks.find((item) => item.id === 'T2').stack.linked = false;
+  f.h.writeState('tasks.json', state);
+
+  const r = f.h.run(['merge', 'T1']);
+  assert.equal(r.code, 0, r.stdout + r.stderr);
+  assert.equal(f.read().prs[11].state, 'MERGED');
+  const merge = f.read().calls.find((c) => c.args[0] === 'api' && c.args.includes('POST') && /pulls\/11\/merge-async$/.test(c.args[1]));
+  assert.ok(merge, 'the bottom PR merges through the asynchronous merge API');
+  assert.ok(merge.args.includes(`expected_head_sha=${f.sha}`), 'the merge pins the accepted head');
+  assert.equal(f.read().calls.some((c) => c.args[0] === 'stack' && c.args[1] === 'merge'), false);
+});
+
+test('after a lower stack merge, a dependent whose head GitHub moved takes the new head and needs its gates again', (t) => {
+  const f = stacked(t);
+  f.accept('T1');
+  const wt = f.upper.wt;
+  f.h.git(['commit', '--allow-empty', '-qm', 'T2 rebased onto main'], wt.path);
+  f.h.git(['push', 'origin', wt.branch], wt.path);
+  const rebased = f.h.git(['rev-parse', 'HEAD'], wt.path);
+  f.write((d) => { d.rebased = { 12: rebased }; });
+
+  const r = f.h.run(['merge', 'T1']);
+  assert.equal(r.code, 0, r.stdout + r.stderr);
+  const task = f.h.json(['task', 'show', 'T2']);
+  assert.equal(task.sha, rebased);
+  assert.equal(task.status, 'submitted');
+});
+
+test('merging a stacked task whose head GitHub rebases after its lower PR merges returns it to submitted at the new head', (t) => {
+  const f = stacked(t);
+  f.accept('T1');
+  f.accept('T2');
+  const wt = f.upper.wt;
+  f.h.git(['commit', '--allow-empty', '-qm', 'T2 rebased onto main'], wt.path);
+  f.h.git(['push', 'origin', wt.branch], wt.path);
+  const rebased = f.h.git(['rev-parse', 'HEAD'], wt.path);
+  f.write((d) => { d.rebased = { 12: rebased }; });
+
+  const r = f.h.run(['merge', 'T2']);
+  assert.notEqual(r.code, 0, r.stdout + r.stderr);
+  assert.equal(f.read().prs[11].state, 'MERGED');
+  const task = f.h.json(['task', 'show', 'T2']);
+  assert.equal(task.sha, rebased);
+  assert.equal(task.status, 'submitted');
+});
+
+// The hook binding a spawned worker writes into its own agent home.
+function hookCall(f, id, action = 'tool') {
+  const home = path.join(f.h.state, 'homes', `worker-${id}`);
+  fs.mkdirSync(home, { recursive: true });
+  const binding = path.join(home, 'hook.json');
+  fs.writeFileSync(binding, JSON.stringify({ agent: `worker-${id}`, task: id, state: f.h.state, harness: 'codex', attempt: 1 }) + '\n');
+  return ['hook', action, '--binding', binding, '--agent', `worker-${id}`];
+}
+
+test('unrelated workers logging hook progress and notes during the final head checks do not stop the stack merge', (t) => {
+  const f = stacked(t);
+  f.accept('T1');
+  f.accept('T2');
+  f.add('unrelated');
+  f.write((d) => { d.during = { 'pr view': [hookCall(f, 'T3'), ['task', 'note', 'T3', 'progress', '--agent', 'worker-T3']] }; });
+  f.h.ok(['merge', 'T2']);
+  assert.deepEqual(routes(f), ['async 11', 'async 12']);
+  for (const id of ['T1', 'T2']) assert.equal(f.h.json(['task', 'show', id]).evidence.findLast((e) => e.type === 'merge').ok, true);
+});
+
+test('stack members logging hook progress during the final head checks do not stop the stack merge', (t) => {
+  const f = stacked(t);
+  f.accept('T1');
+  f.accept('T2');
+  f.write((d) => { d.during = { 'pr view': [hookCall(f, 'T2')] }; });
+  f.h.ok(['merge', 'T2']);
+  assert.deepEqual(routes(f), ['async 11', 'async 12']);
+});
+
+test('a stack member stopping during the final head checks does not stop the stack merge', (t) => {
+  const f = stacked(t);
+  f.accept('T1');
+  f.accept('T2');
+  f.write((d) => { d.during = { 'pr view': [hookCall(f, 'T2', 'stop')] }; });
+  f.h.ok(['merge', 'T2']);
+  assert.deepEqual(routes(f), ['async 11', 'async 12']);
+  // The stop emits its own orchestrator notice; the merge passed with that notice in the log.
+  const log = fs.readFileSync(path.join(f.h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  assert.ok(log.some((e) => e.cmd === 'hook stop' && e.agent === 'worker-T2'));
+  assert.ok(log.some((e) => e.cmd === 'msg' && e.agent === 'worker-T2' && e.detail.to === 'orchestrator'));
+});
+
+test('an ordinary message from a stack member during the final head checks still stops the stack merge', (t) => {
+  const f = stacked(t);
+  f.accept('T1');
+  f.accept('T2');
+  f.write((d) => { d.during = { 'pr view': [['msg', '--to', 'orchestrator', 'still working', '--task', 'T1', '--agent', 'worker-T1']] } });
+  const r = f.h.run(['merge', 'T2']);
+  assert.equal(r.code, 1);
+  assert.match(r.stdout, /changed during stack head checks/);
+  assert.deepEqual(routes(f), []);
+});
+
+test('a member event during the final head checks still stops the stack merge', (t) => {
+  const f = stacked(t);
+  f.accept('T1');
+  f.accept('T2');
+  f.write((d) => { d.during = { 'pr view': [['task', 'note', 'T1', 'progress', '--agent', 'worker-T1']] }; });
+  const r = f.h.run(['merge', 'T2']);
+  assert.equal(r.code, 1);
+  assert.match(r.stdout, /changed during stack head checks/);
+  assert.deepEqual(routes(f), []);
 });
 
 test('three dependent PRs form one stack and all accepted lower tasks get merge evidence', (t) => {
@@ -278,14 +611,13 @@ test('admin merge requires unstacking, then lower tasks land before upper PRs ta
   f.accept('T2');
   f.h.ok(['project', 'set', '--merge-admin', 'true']);
   assert.match(f.h.run(['merge', 'T2']).stdout, /cannot use --admin/);
-  assert.equal(f.read().calls.some((c) => c.args[1] === 'merge'), false);
+  assert.deepEqual(routes(f), []);
   f.h.ok(['stack', 'unstack', 'T2']);
   assert.match(f.h.run(['merge', 'T2']).stdout, /waits for every lower task/);
   f.h.ok(['merge', 'T1']);
   f.h.ok(['merge', 'T2']);
-  const merges = f.read().calls.filter((c) => c.args[1] === 'merge');
-  assert.deepEqual(merges.map((c) => c.args.slice(0, 3)), [['pr', 'merge', '11'], ['pr', 'merge', '12']]);
-  assert.ok(merges.every((c) => c.args.includes('--admin') && c.args.includes('--match-head-commit')));
+  assert.deepEqual(routes(f), ['pr 11', 'pr 12']);
+  assert.ok(merges(f).every((m) => m.args.includes('--admin') && m.args.includes('--match-head-commit')));
   assert.equal(f.read().prs[12].baseRefName, 'main');
 });
 
@@ -309,9 +641,130 @@ test('lower acceptance cannot hide failing current gate evidence', (t) => {
   const f = stacked(t);
   f.accept('T1');
   f.accept('T2');
-  f.h.ok(['evidence', 'T1', '--type', 'review', '--fail', '--sha', f.sha, '--agent', 'reviewer-independent']);
+  f.h.reviewer('T1', 'reviewer-independent', f.sha);
+  f.h.ok(['evidence', 'T1', '--revision', f.h.revision('T1'), '--type', 'review', '--fail', '--sha', f.sha, '--agent', 'reviewer-independent']);
   assert.match(f.h.run(['merge', 'T2']).stdout, /T1.*passing gates/);
-  assert.equal(f.read().calls.some((c) => c.args[1] === 'merge'), false);
+  assert.deepEqual(routes(f), []);
+});
+
+test('a stack member merged at its accepted head is confirmed without current gates, and nothing above it moves', (t) => {
+  const f = stacked(t);
+  f.accept('T1');
+  f.accept('T2');
+  f.h.reviewer('T1', 'reviewer-independent', f.sha);
+  f.h.ok(['evidence', 'T1', '--type', 'review', '--fail', '--sha', f.sha, '--revision', f.h.revision('T1'), '--agent', 'reviewer-independent']);
+  assert.equal(f.h.json(['task', 'show', 'T1']).gates.gates.find((gate) => gate.type === 'review').ok, false);
+  const upperBase = f.read().prs[12].baseRefName;
+  const landed = (head) => f.write((d) => {
+    Object.assign(d.prs[11], { state: 'MERGED', headRefOid: head, mergeCommit: { oid: 'c'.repeat(40) } });
+    d.calls = [];
+  });
+  landed('b'.repeat(40));
+  const rejected = f.h.run(['merge', 'T1']);
+  assert.equal(rejected.code, 1, rejected.stderr);
+  assert.match(rejected.stdout, /merged with head b+, not the accepted/);
+  assert.equal(f.read().calls.some((c) => c.args[1] === 'merge'), false, 'a different landed head is refused without a merge');
+  landed(f.sha);
+  const confirmed = f.h.json(['merge', 'T1']);
+  assert.equal(confirmed.ok, true, confirmed.summary);
+  assert.match(confirmed.summary, /was already merged/);
+  assert.deepEqual(f.read().calls.map((c) => c.args.slice(0, 2)), [['pr', 'view']],
+    'confirmation reads the PR and runs no merge, retarget or stack command');
+  const lower = f.h.json(['task', 'show', 'T1']).evidence.filter((e) => e.type === 'merge');
+  assert.deepEqual(lower.map((e) => e.ok), [false, true], 'the refused landing stays on record beside the confirmation');
+  assert.equal(f.h.json(['task', 'show', 'T2']).evidence.some((e) => e.type === 'merge'), false, 'the upper task keeps no merge evidence');
+  assert.deepEqual([f.read().prs[12].state, f.read().prs[12].baseRefName], ['OPEN', upperBase]);
+});
+
+test('a stack member merged at its accepted head with passing gates is confirmed without a stack sync', (t) => {
+  const f = stacked(t);
+  f.accept('T1');
+  f.accept('T2');
+  const upperBase = f.read().prs[12].baseRefName;
+  f.write((d) => {
+    Object.assign(d.prs[11], { state: 'MERGED', mergeCommit: { oid: 'c'.repeat(40) } });
+    d.calls = [];
+  });
+  const confirmed = f.h.json(['merge', 'T1']);
+  assert.equal(confirmed.ok, true, confirmed.summary);
+  assert.match(confirmed.summary, /was already merged/);
+  assert.ok(f.read().calls.every((c) => c.args[0] === 'pr' && c.args[1] === 'view'),
+    'confirmation with passing gates reads the PR and runs no merge, retarget or stack sync');
+  assert.equal(f.h.json(['task', 'show', 'T1']).evidence.findLast((e) => e.type === 'merge').ok, true);
+  assert.equal(f.h.json(['task', 'show', 'T2']).evidence.some((e) => e.type === 'merge'), false, 'the upper task keeps no merge evidence');
+  assert.deepEqual([f.read().prs[12].state, f.read().prs[12].baseRefName], ['OPEN', upperBase]);
+});
+
+test('a merged stack member is confirmed while its lower PR is still open, and the lower PR is left alone', (t) => {
+  const f = stacked(t);
+  f.accept('T1');
+  f.accept('T2');
+  f.write((d) => {
+    Object.assign(d.prs[12], { state: 'MERGED', mergeCommit: { oid: 'd'.repeat(40) } });
+    d.calls = [];
+  });
+  const confirmed = f.h.json(['merge', 'T2']);
+  assert.equal(confirmed.ok, true, confirmed.summary);
+  assert.equal(f.h.json(['task', 'show', 'T2']).evidence.findLast((e) => e.type === 'merge').ok, true);
+  assert.ok(f.read().calls.every((c) => c.args[0] === 'pr' && c.args[1] === 'view'), 'an open lower PR is not merged, retargeted or synced');
+  assert.deepEqual([f.read().prs[11].state, f.read().prs[11].baseRefName], ['OPEN', 'main']);
+});
+
+test('a merged stack member with passing gates is confirmed even while a lower task fails review', (t) => {
+  const f = stacked(t);
+  f.accept('T1');
+  f.accept('T2');
+  f.h.reviewer('T1', 'reviewer-independent', f.sha);
+  f.h.ok(['evidence', 'T1', '--type', 'review', '--fail', '--sha', f.sha, '--revision', f.h.revision('T1'), '--agent', 'reviewer-independent']);
+  assert.equal(f.h.json(['task', 'show', 'T1']).gates.gates.find((gate) => gate.type === 'review').ok, false);
+  assert.equal(f.h.json(['task', 'show', 'T2']).gates.ok, true);
+  f.write((d) => {
+    Object.assign(d.prs[12], { state: 'MERGED', mergeCommit: { oid: 'd'.repeat(40) } });
+    d.calls = [];
+  });
+  const confirmed = f.h.json(['merge', 'T2']);
+  assert.equal(confirmed.ok, true, confirmed.summary);
+  assert.match(confirmed.summary, /was already merged/);
+  assert.ok(f.read().calls.every((c) => c.args[0] === 'pr' && c.args[1] === 'view'),
+    'confirmation with a failing lower review reads the PR and runs no merge or stack sync');
+  assert.equal(f.h.json(['task', 'show', 'T2']).evidence.findLast((e) => e.type === 'merge').ok, true);
+  assert.equal(f.h.json(['task', 'show', 'T1']).evidence.some((e) => e.type === 'merge'), false, 'the failing lower task gets no merge evidence');
+});
+
+test('a merged stack member with passing gates is confirmed without re-checking a stale lower CI receipt', (t) => {
+  const f = stacked(t);
+  f.h.ok(['project', 'set', '--ci-local', JSON.stringify({ command: [process.execPath, '-e', 'process.exit(0)'], timeout: 30 })]);
+  f.h.ok(['check', 'ci', 'T1']);
+  f.h.ok(['accept', 'T1', '--waive', 'review', '--reason', 'offline fixture']);
+  f.accept('T2');
+  f.h.git(['commit', '--allow-empty', '-qm', 'main moved']);
+  f.h.git(['push', 'origin', 'main']);
+  f.write((d) => {
+    Object.assign(d.prs[12], { state: 'MERGED', mergeCommit: { oid: 'd'.repeat(40) } });
+    d.calls = [];
+  });
+  const confirmed = f.h.json(['merge', 'T2']);
+  assert.equal(confirmed.ok, true, confirmed.summary);
+  assert.match(confirmed.summary, /was already merged/);
+  assert.ok(f.read().calls.every((c) => c.args[0] === 'pr' && c.args[1] === 'view'),
+    'confirmation reads only the PR, so the lower receipt base is not compared');
+  assert.equal(f.h.json(['task', 'show', 'T1']).evidence.some((e) => e.type === 'merge'), false, 'the lower task gets no merge evidence');
+});
+
+test('confirming a merged stack member records evidence for it alone, not for merged lower members', (t) => {
+  const f = stacked(t);
+  f.accept('T1');
+  f.accept('T2');
+  f.write((d) => {
+    Object.assign(d.prs[11], { state: 'MERGED', mergeCommit: { oid: 'c'.repeat(40) } });
+    Object.assign(d.prs[12], { state: 'MERGED', mergeCommit: { oid: 'd'.repeat(40) } });
+    d.calls = [];
+  });
+  const confirmed = f.h.json(['merge', 'T2']);
+  assert.equal(confirmed.ok, true, confirmed.summary);
+  assert.equal(f.h.json(['task', 'show', 'T1']).evidence.some((e) => e.type === 'merge'), false, 'the merged lower task gets no receipt from the upper confirmation');
+  assert.equal(f.h.json(['task', 'show', 'T2']).evidence.findLast((e) => e.type === 'merge').ok, true);
+  assert.ok(f.read().calls.every((c) => c.args[0] === 'pr' && c.args[1] === 'view'));
 });
 
 test('local CI covers each dependency base and merge rechecks lower receipts', (t) => {
@@ -328,7 +781,7 @@ test('local CI covers each dependency base and merge rechecks lower receipts', (
   const r = f.h.run(['merge', 'T2']);
   assert.equal(r.code, 1);
   assert.match(r.stderr, /check ci T1 before merging/);
-  assert.equal(f.read().calls.some((c) => c.args[1] === 'merge'), false);
+  assert.deepEqual(routes(f), []);
 });
 
 test('stacks disabled after acceptance select ordinary merge gates and keep dependency ordering', (t) => {
@@ -356,7 +809,7 @@ test('relinking after capability recovery restores the stack gate and refuses ad
   assert.equal(f.h.json(['task', 'show', 'T2']).stack_disabled, undefined);
   f.h.ok(['project', 'set', '--merge-admin', 'true']);
   assert.match(f.h.run(['merge', 'T2']).stdout, /cannot use --admin/);
-  assert.equal(f.read().calls.some((c) => c.args[0] === 'pr' && c.args[1] === 'merge'), false);
+  assert.deepEqual(routes(f), []);
   f.h.ok(['project', 'set', '--merge-admin', 'false']);
   f.h.ok(['merge', 'T2']);
 });
@@ -388,7 +841,7 @@ function queued(t) {
   f.suites = () => (fs.existsSync(log) ? fs.readFileSync(log, 'utf8').trim().split('\n').map(JSON.parse) : []);
   f.checks = () => fs.readFileSync(path.join(f.h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse)
     .filter((e) => e.cmd === 'head check');
-  f.merges = () => f.read().calls.filter((c) => c.args[1] === 'merge').map((c) => c.args.slice(0, 3).join(' '));
+  f.merges = () => routes(f);
   return f;
 }
 
@@ -403,19 +856,20 @@ test('a stack is one queue entry: its upper task waits for the lower one and the
   assert.deepEqual(f.checks().map((e) => [e.task, e.detail.members, e.detail.base_sha, e.detail.ok]),
     [['T2', ['T1', 'T2'], f.main, true]], 'one check at the top of the chain merged with main');
   assert.deepEqual(f.suites(), [['T1.txt', 'T2.txt', 'moved.txt']]);
-  assert.deepEqual(f.merges(), ['pr merge 11', 'pr merge 12']);
+  assert.deepEqual(f.merges(), ['async 11', 'async 12']);
   for (const id of ['T1', 'T2']) assert.equal(f.h.json(['task', 'show', id]).evidence.findLast((e) => e.type === 'merge').ok, true);
 });
 
 test('after the lower task merges alone, the upper head check runs against main, not the deleted lower branch', (t) => {
   const f = queued(t);
   const scratch = path.join(f.upper.wt.path, 'scratch.txt');
-  // A dirty upper worktree defers stack sync, so T2 still names the lower branch.
+  // Retiring the completed chain must preserve uncommitted upper work.
   fs.writeFileSync(scratch, 'local edit\n');
   f.acceptCode('T1');
   f.consume();
-  assert.deepEqual(f.merges(), ['pr merge 11']);
-  assert.equal(f.h.json(['task', 'show', 'T2']).stack.base, f.lower.branch);
+  assert.deepEqual(f.merges(), ['async 11']);
+  assert.equal(f.h.json(['task', 'show', 'T2']).stack, undefined);
+  assert.equal(fs.readFileSync(scratch, 'utf8'), 'local edit\n');
   f.h.git(['push', 'origin', `:${f.lower.branch}`]);
   f.h.git(['update-ref', '-d', `refs/remotes/origin/${f.lower.branch}`]);
   f.write((d) => { d.prs[12].baseRefName = 'main'; });
@@ -424,6 +878,6 @@ test('after the lower task merges alone, the upper head check runs against main,
   f.consume();
   assert.deepEqual(f.checks().map((e) => [e.task, e.detail.members, e.detail.base_sha]),
     [['T1', ['T1'], f.main], ['T2', ['T2'], main]]);
-  assert.deepEqual(f.merges(), ['pr merge 11', 'pr merge 12']);
+  assert.deepEqual(f.merges(), ['async 11', 'pr 12', 'async 12']);
   assert.equal(f.suites().length, 2, 'the upper task runs one check, against main');
 });

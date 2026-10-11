@@ -28,6 +28,7 @@ cp.spawnSync = function github(file, args, ...rest) {
     const endpoint = args[1];
     if (endpoint === `repos/acme/app/commits/${data.sha}/check-runs?per_page=100`) return lines(data.runs);
     if (endpoint === `repos/acme/app/commits/${data.sha}/check-suites?per_page=100`) return lines(data.suites);
+    if (endpoint === `repos/acme/app/actions/runs?head_sha=${data.sha}&per_page=100`) return lines(data.workflows || []);
     if (endpoint === 'repos/acme/app/pulls/7/comments?per_page=100') return lines(data.comments || []);
   }
   throw new Error(`unexpected gh call: ${args.join(' ')}`);

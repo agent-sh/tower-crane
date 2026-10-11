@@ -26,7 +26,7 @@ const sha = git(['rev-parse', 'HEAD']);
 const file = process.env.TEST_STACK_DATA;
 const data = JSON.parse(fs.readFileSync(file, 'utf8'));
 data.prs[12] = {number: 12, state: 'OPEN', headRefOid: sha, headRefName: state.branch,
-  baseRefName: state.stack.base, isCrossRepository: false, autoMergeRequest: null,
+  baseRefName: state.stack?.base || 'main', isCrossRepository: false, autoMergeRequest: null,
   mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN'};
 fs.writeFileSync(file, JSON.stringify(data));
 process.stdout.write(cli(['submit', task, '--sha', sha, '--pr', '12']));

@@ -17,7 +17,8 @@ function fixture(t) {
     h.ok(['submit', 'T1', '--agent', 'worker', '--sha', h.sha, '--pr', '7']);
     gateEvidence(h, 'tests', 'checker');
     gateEvidence(h, 'clean', 'checker');
-    h.ok(['evidence', 'T1', '--type', 'review', '--ok', '--sha', h.sha, '--agent', 'reviewer']);
+    h.reviewer('T1', 'reviewer', h.sha);
+    h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--ok', '--sha', h.sha, '--agent', 'reviewer']);
     return { sha: h.sha };
   });
 }

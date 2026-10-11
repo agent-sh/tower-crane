@@ -1,0 +1,2 @@
+- Record the shared setting audit when the owner or orchestrator prioritizes queued gate work. Refused requests record no setting change.
+- Reject stateful authority checks that omit the audit emitter unless they explicitly select quiet mode for a separately audited write.
