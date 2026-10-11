@@ -46,6 +46,7 @@ const after = {
   option: (d, o) => `form[data-api="/api/decisions/${d}/answer"] button[value="${o}"]`,
   noteOpen: null,
   note: (d) => `form[data-api="/api/decisions/${d}/answer"] input[name="note"]`,
+  enterAnswers: true,
   agentRow: (id) => `#now .floor [data-key="agent-${id}"]`,
   agentTokens: (id) => `#now .floor [data-key="agent-${id}"] [data-usage]`,
   messageOpen: (id) => `#now .floor [data-key="agent-${id}"] details.act-message > summary`,

@@ -30,7 +30,7 @@ function path1(x, extra = '') {
   if (!x) return '-';
   if (x.error) return `error: ${x.error.split('\n')[0].slice(0, 80)}`;
   if (x.note && x.clicks === undefined && !('flagged' in x) && !('shown' in x) && !('sentence' in x)) return `no path: ${x.note}, fail`;
-  return `${x.clicks} clicks, ${x.scrolls} scrolls, KLM ${x.klm_without_typing_s ?? x.klm_s} s without typing${extra}, ${mark(x.pass)}`;
+  return `${x.clicks} clicks${x.keys ? `, ${x.keys} key${x.keys === 1 ? '' : 's'}` : ''}, ${x.scrolls} scrolls, KLM ${x.klm_without_typing_s ?? x.klm_s} s without typing${extra}, ${mark(x.pass)}`;
 }
 
 const rows = [

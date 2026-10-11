@@ -401,6 +401,52 @@ test('serve sends a submitted or accepted task back for rework only as the owner
   });
 });
 
+test('in a browser, Enter in a decision note answers the recommended option and never the first one, and a refusal stays shown', { skip: !CHROME && 'no Chrome to drive' }, async (t) => {
+  const h = makeRepo(t);
+  h.init();
+  h.ok(['task', 'add', '--title', 'Store', '--acceptance', 'stored']);
+  h.ok(['ask', '--question', 'Which store?', '--option', 'redis', '--option', 'postgres', '--recommend', 'postgres', '--blocks', 'T1']);
+  h.ok(['ask', '--question', 'Which day?', '--option', 'monday', '--option', 'friday', '--blocks', 'T1']);
+  await withServers(async (servers) => {
+    const url = await startServe(servers, h);
+    const b = await openBrowser(t);
+    await b.goto(keyed(url));
+    await b.until(`document.querySelector('.conn').dataset.conn === 'live'`, 'the live stream');
+    const enter = async (id, text) => {
+      await b.inPage(`document.querySelector('form[data-api="/api/decisions/${id}/answer"] input[name="note"]').focus()`);
+      await b.send('Input.insertText', { text });
+      const key = { key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 };
+      await b.send('Input.dispatchKeyEvent', { type: 'rawKeyDown', ...key, text: '\r' });
+      await b.send('Input.dispatchKeyEvent', { type: 'keyUp', ...key });
+    };
+    const before = log(h).length;
+    await enter('D2', 'after the load test');
+    await new Promise((resolve) => setTimeout(resolve, 800));
+    assert.equal(h.readState('decisions.json').decisions[1].status, 'open', 'without a recommendation Enter answers nothing');
+    assert.equal(log(h).length, before);
+    await enter('D1', 'history must survive restarts');
+    // D2's typed note holds the queue's redraw, so read the state, not the page.
+    for (let i = 0; i < 100 && h.readState('decisions.json').decisions[0].status === 'open'; i++) await new Promise((resolve) => setTimeout(resolve, 100));
+    const d1 = h.readState('decisions.json').decisions[0];
+    assert.deepEqual([d1.status, d1.answer, d1.note], ['answered', 'postgres', 'history must survive restarts']);
+    await new Promise((resolve) => setTimeout(resolve, 800));
+    assert.equal(await b.inPage(`(document.querySelector('form[data-api="/api/decisions/D1/answer"] output') || {}).textContent || ''`), '', 'the form sends once: no second, empty post is refused');
+
+    // A refused write keeps its message through the redraw that follows it,
+    // until the form is edited.
+    await b.goto(url);
+    await b.until(`document.querySelector('.conn').dataset.conn === 'live'`, 'the live stream');
+    const out = `document.querySelector('form[data-api="/api/decisions/D2/answer"] output').textContent`;
+    await b.inPage(`(() => { const x = document.querySelector('form[data-api="/api/decisions/D2/answer"] button[value="friday"]'); x.value = 'sunday'; x.click(); })()`);
+    await b.until(`/must be one of/.test(${out})`, 'the refusal');
+    await new Promise((resolve) => setTimeout(resolve, 2500));
+    assert.match(await b.inPage(out), /must be one of/, 'the refusal is still shown after the redraw');
+    await b.inPage(`document.querySelector('form[data-api="/api/decisions/D2/answer"] input[name="note"]').focus()`);
+    await b.send('Input.insertText', { text: 'x' });
+    assert.equal(await b.inPage(out), '', 'editing the form clears it');
+  });
+});
+
 test('in a browser, every board write goes through its form: answer, comments, owner-done, rework and tier', { skip: !CHROME && 'no Chrome to drive' }, async (t) => {
   const h = makeRepo(t);
   h.init();

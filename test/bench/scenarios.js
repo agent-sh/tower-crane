@@ -94,7 +94,8 @@ async function h2(ctx) {
   if (T.noteOpen) await p.click(T.noteOpen('D1'));
   await p.click(T.note('D1'));
   await p.type('history must survive restarts');
-  await p.click(T.option('D1', 'postgres'));
+  // Where Enter commits the recommended option, that is the shortest path.
+  if (T.enterAnswers) { p.think(); await p.key('Enter'); } else await p.click(T.option('D1', 'postgres'));
   const d = await waitFor(() => { const x = s.read('decisions.json').decisions.find((y) => y.id === 'D1'); return x.status === 'answered' && x; });
   await wait(600);
   const focus = await b.inPage(`(() => { const a = document.activeElement; const item = a && a.closest('[data-key]'); return item ? item.getAttribute('data-key') : a ? a.tagName : null; })()`);
@@ -102,7 +103,7 @@ async function h2(ctx) {
   const r = p.result();
   const ok = !!d && d.answer === 'postgres' && d.note === 'history must survive restarts' && d.answered_by === 'owner';
   const nextItem = focus && /^(D\d|owner-|msg-|stuck-|runaway-|budget-)/.test(focus) && focus !== 'D1';
-  const pass = ok && r.clicks <= 2 && r.scrolls === 0 && nextItem && r.klm_without_typing_s <= 6;
+  const pass = ok && r.clicks + r.keys <= 2 && r.scrolls === 0 && nextItem && r.klm_without_typing_s <= 6;
   return { ...r, answered: ok, focus_after: focus, pass, delta: d && { status: d.status, answer: d.answer, note: d.note, answered_by: d.answered_by, event: strip(s.events().findLast((e) => e.cmd === 'answer')) } };
 }
 
