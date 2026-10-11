@@ -245,6 +245,7 @@ test('task add --brief writes the brief in the same command and refuses an unrea
   assert.equal(h.ok(['task', 'add', '--title', 'Briefed', '--acceptance', 'brief lands', '--brief', file]), 'T1');
   assert.equal(fs.readFileSync(path.join(h.state, 'briefs', 'T1.md'), 'utf8'), '# Context\n\nFrom the add.\n');
   assert.equal(h.ok(['brief', 'get', 'T1']), '# Context\n\nFrom the add.');
+  assert.doesNotMatch(fs.readFileSync(path.join(h.state, 'sketch.md'), 'utf8'), /no brief/, 'the sketch renders the brief the add wrote');
 
   const missing = h.run(['task', 'add', '--title', 'Lost', '--acceptance', 'never added', '--brief', path.join(h.base, 'absent.md')]);
   assert.equal(missing.code, 1);
