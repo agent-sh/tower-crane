@@ -545,14 +545,14 @@ test('submission runs real software gates once through the existing waiter', (t)
   assert.equal(h.logs().filter((e) => e.cmd === 'spawn').length, 0, 'pending CI starts no model');
 });
 
-test('CI completion refreshes a pending or failed receipt at the exact head and merges after review', (t) => {
+test('CI completion refreshes a pending receipt at the exact head and merges after review', (t) => {
   const h = setup(t, { ci: 'pending' });
   h.submit();
   h.consume();
   h.reviewer('T1', 'reviewer');
   h.ok(['evidence', 'T1', '--type', 'review', '--sha', h.sha, '--ok', '--agent', 'reviewer']);
   const bad = h.github();
-  bad.ci[h.sha] = 'failure';
+  bad.ci[h.sha] = 'pending';
   h.saveGithub(bad);
   h.ok(['ci', 'completed', 'T1', '--sha', h.sha, '--agent', 'orchestrator']);
   assert.equal(h.readState('tasks.json').tasks[0].status, 'submitted');
@@ -598,32 +598,107 @@ test('a passing gate reruns in the next reaction after its tests mode changes', 
   assert.equal(latest.tests_mode, 'none');
 });
 
-test('a failed gate at unchanged inputs waits for gates retry, which reruns it', (t) => {
+test('a deterministic test failure reworks with its failing test names and output tail', (t) => {
   const h = setup(t, { ci: 'pending' });
-  const marker = path.join(h.base, 'infra-failed-once');
-  const script = path.join(h.base, 'flaky-tests.js');
-  fs.writeFileSync(script, `const fs = require('node:fs');\nif (fs.existsSync(${JSON.stringify(marker)})) process.exit(0);\nfs.writeFileSync(${JSON.stringify(marker)}, '');\nprocess.exit(1);\n`);
+  const script = path.join(h.base, 'failing-tests.js');
+  fs.writeFileSync(script, "console.log('# Subtest: test/sum.test.js');\nconsole.log('not ok 1 - sums two numbers');\nconsole.log('  expected 3 got 4');\nprocess.exit(1);\n");
   h.ok(['project', 'set', '--tests-cmd', `node ${shellQuote(script)}`, '--tests-mode', 'run-only']);
   h.submit();
-  const runs = () => h.logs().filter((e) => e.cmd === 'check tests').length;
-  const latest = () => h.readState('tasks.json').tasks[0].evidence.filter((e) => e.type === 'tests').at(-1);
   h.consume();
-  assert.equal(runs(), 1);
-  assert.equal(latest().ok, false, 'the first run fails as infrastructure would');
+  const runs = h.logs().filter((e) => e.cmd === 'check tests');
+  assert.equal(runs.length, 1, 'a failure that is not infrastructure is not retried');
+  const task = h.readState('tasks.json').tasks[0];
+  assert.equal(task.status, 'rework');
+  const latest = task.evidence.filter((e) => e.type === 'tests').at(-1);
+  assert.equal(latest.ok, false);
+  assert.deepEqual(latest.test_failure.names, ['sums two numbers']);
+  const reason = h.logs().findLast((e) => e.cmd === 'rework').detail.reason;
+  assert.match(reason, /^tests failed at [0-9a-f]{7,}: /);
+  assert.match(reason, /Failing tests:\n- sums two numbers/);
+  assert.match(reason, /expected 3 got 4/);
+});
+
+test('a timed-out test run retries once at its head and the passing retry keeps the task submitted', (t) => {
+  const h = setup(t, { ci: 'pending' });
+  const marker = path.join(h.base, 'timed-out-once');
+  const script = path.join(h.base, 'slow-once.js');
+  fs.writeFileSync(script, `const fs = require('node:fs');\nif (fs.existsSync(${JSON.stringify(marker)})) process.exit(0);\nfs.writeFileSync(${JSON.stringify(marker)}, '');\nsetTimeout(() => {}, 10000);\n`);
+  h.ok(['project', 'set', '--tests-cmd', `node ${shellQuote(script)}`, '--tests-mode', 'run-only', '--tests-timeout-min', '0.05']);
+  h.submit();
   h.consume();
-  assert.equal(runs(), 1, 'a failure at unchanged inputs is not retried without an explicit retry');
-  assert.equal(h.run(['gates', 'retry', 'T1', '--agent', 'worker']).code, 1);
-  assert.equal(runs(), 1);
-  h.ok(['gates', 'retry', 'T1', '--agent', 'orchestrator']);
-  assert.equal(runs(), 2);
-  assert.equal(latest().ok, true, 'the retry at the same inputs passes');
+  assert.equal(h.logs().filter((e) => e.cmd === 'check tests').length, 2, 'the timeout runs once more, and no third time');
+  const task = h.readState('tasks.json').tasks[0];
+  assert.deepEqual(task.evidence.filter((e) => e.type === 'tests').map((e) => [e.ok, e.infrastructure_failure === true]),
+    [[false, true], [true, false]]);
+  assert.equal(task.status, 'submitted');
+});
+
+test('a timeout that repeats at its head reworks after the retry', (t) => {
+  const h = setup(t, { ci: 'pending' });
+  const script = path.join(h.base, 'hang.js');
+  fs.writeFileSync(script, 'setTimeout(() => {}, 10000);\n');
+  h.ok(['project', 'set', '--tests-cmd', `node ${shellQuote(script)}`, '--tests-mode', 'run-only', '--tests-timeout-min', '0.05']);
+  h.submit();
+  h.consume();
+  assert.equal(h.logs().filter((e) => e.cmd === 'check tests').length, 2);
+  const task = h.readState('tasks.json').tasks[0];
+  assert.equal(task.status, 'rework');
+  assert.match(h.logs().findLast((e) => e.cmd === 'rework').detail.reason, /timed out after 0\.05 min/);
+});
+
+test('a test run killed by a signal retries once and reworks when the retry is also killed', { skip: process.platform === 'win32' }, (t) => {
+  const h = setup(t, { ci: 'pending' });
+  const script = path.join(h.base, 'killed.js');
+  fs.writeFileSync(script, 'process.kill(process.pid, \'SIGKILL\');\n');
+  h.ok(['project', 'set', '--tests-cmd', `node ${shellQuote(script)}`, '--tests-mode', 'run-only']);
+  h.submit();
+  h.consume();
+  assert.equal(h.logs().filter((e) => e.cmd === 'check tests').length, 2);
+  const task = h.readState('tasks.json').tasks[0];
+  assert.deepEqual(task.evidence.filter((e) => e.type === 'tests').map((e) => e.runner_crash === true), [true, true]);
+  assert.equal(task.status, 'rework');
+});
+
+test('a test command that cannot run stays submitted for the owner, with no rework', (t) => {
+  const h = setup(t, { ci: 'pending' });
+  h.ok(['project', 'set', '--tests-cmd', 'tower-crane-no-such-tool', '--tests-mode', 'run-only']);
+  h.submit();
+  h.consume();
+  assert.equal(h.logs().filter((e) => e.cmd === 'check tests').length, 1, 'a missing command is not retried');
+  const task = h.readState('tasks.json').tasks[0];
+  assert.equal(task.status, 'submitted');
+  assert.equal(task.evidence.filter((e) => e.type === 'tests').at(-1).ok, false);
+  assert.equal(h.logs().filter((e) => e.cmd === 'rework').length, 0);
+});
+
+test('a CI run that times out retries once and reworks when it times out again', (t) => {
+  const h = setup(t, { ci: 'timed_out' });
+  h.submit();
+  h.consume();
+  const checks = h.github().calls.filter((a) => a[0] === 'api' && a[1].includes('check-runs'));
+  assert.equal(checks.length, 2, 'the CI gate reads GitHub once more and no third time');
+  const task = h.readState('tasks.json').tasks[0];
+  assert.deepEqual(task.evidence.filter((e) => e.type === 'ci').map((e) => [e.ok, e.infrastructure_failure === true]),
+    [[false, true], [false, true]]);
+  assert.equal(task.status, 'rework');
+});
+
+test('a failed CI run sends a submitted task to rework with the failing run', (t) => {
+  const h = setup(t, { ci: 'failure' });
+  h.submit();
+  h.consume();
+  assert.equal(h.github().calls.filter((a) => a[0] === 'api' && a[1].includes('check-runs')).length, 1, 'a code failure is not retried');
+  const task = h.readState('tasks.json').tasks[0];
+  assert.equal(task.status, 'rework');
+  assert.equal(task.evidence.filter((e) => e.type === 'ci').at(-1).confirmed_failure, true);
+  assert.match(h.logs().findLast((e) => e.cmd === 'rework').detail.reason, /^ci failed at [0-9a-f]+: .*failing: test \(failure\)/s);
 });
 
 test('gates retry exits nonzero while a retried gate still fails', (t) => {
   const h = setup(t, { ci: 'pending' });
   h.ok(['project', 'set', '--tests-cmd', 'node -e "process.exit(1)"', '--tests-mode', 'run-only']);
   h.submit();
-  h.consume();
+  h.run(['check', 'tests', 'T1']);
   const latest = () => h.readState('tasks.json').tasks[0].evidence.filter((e) => e.type === 'tests').at(-1);
   assert.equal(latest().ok, false);
   const retry = h.run(['gates', 'retry', 'T1', '--agent', 'orchestrator']);
@@ -803,7 +878,7 @@ test('stale or unknown PR heads and missing review never merge', (t) => {
 });
 
 test('a completion webhook is only a hint, rejects another repository and ignores stale heads', (t) => {
-  const h = setup(t, { kind: 'docs', ci: 'failure' });
+  const h = setup(t, { kind: 'docs', ci: 'pending' });
   h.submit();
   h.reviewer('T1', 'reviewer');
   h.ok(['evidence', 'T1', '--type', 'review', '--sha', h.sha, '--ok', '--agent', 'reviewer']);
@@ -811,7 +886,7 @@ test('a completion webhook is only a hint, rejects another repository and ignore
     check_suite: { head_sha: h.sha, status: 'completed', conclusion: 'success' } };
   const deliver = () => h.run(['ci', 'webhook', '-', '--agent', 'orchestrator'], { input: JSON.stringify(payload) });
   assert.equal(deliver().code, 0);
-  assert.equal(h.readState('tasks.json').tasks[0].evidence.at(-1).ok, false, 'GitHub failure wins over payload success');
+  assert.equal(h.readState('tasks.json').tasks[0].evidence.at(-1).ok, false, 'GitHub pending wins over payload success');
   payload.repository.full_name = 'acme/other';
   assert.equal(deliver().code, 1);
   payload.repository.full_name = 'acme/demo';
