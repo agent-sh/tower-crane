@@ -28,13 +28,20 @@ test('BUILTIN matches the documented defaults and init fallback', (t) => {
   assert.equal(show.harness_from, 'project');
   assert.equal(show.user_file, h.userConfig);
   assert.equal(show.user_file_exists, false);
+  const printed = h.ok(['ladder', 'show']);
+  assert.match(printed, /^ {2}orchestrator +claude +model opus, effort high +from project$/m);
+  assert.match(printed, /^ {2}easy +claude +model claude-haiku-5-5, effort high +from project$/m);
+  assert.match(printed, /^ {2}medium +codex \(default\) +profile sol, effort high +from project$/m);
+  assert.match(printed, /^ {2}hard +claude +model opus, effort medium +from project$/m);
+  assert.match(printed, /^ {2}research +claude +model opus, effort high +from project$/m);
+  assert.match(printed, /^ {2}review +claude +model claude-haiku-5-5, effort high +from project$/m);
+  assert.match(printed, /^ {2}small +claude +model claude-haiku-5-5, effort high +from project$/m);
   delete p.ladder.easy;
   delete p.harness;
   h.writeState('project.json', p);
   const back = h.json(['ladder', 'show']);
   assert.deepEqual([back.harness, back.harness_from], [expected.harness, 'built-in']);
-  assert.deepEqual(back.ladder.easy, { ...expected.ladder.easy, harness: expected.harness,
-    harness_from: 'default', from: 'built-in' });
+  assert.deepEqual(back.ladder.easy, { ...expected.ladder.easy, harness_from: 'rung', from: 'built-in' });
 });
 
 test('the user file supplies the defaults a new project copies, and the project file then wins', (t) => {
