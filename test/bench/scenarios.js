@@ -208,7 +208,7 @@ async function h4(ctx) {
     if (ctx.shots) await D.shot(b, ctx.shots('H4-confirm'));
     // Opening Stop focuses its reason field, so the confirm is Enter there;
     // a build without that focus confirms with its button.
-    if (await b.call((sel) => { const f = document.querySelector(sel)?.form; return !!f && document.activeElement?.form === f; }, T.stopSend(id))) { p.think(); await p.key('Enter'); }
+    if (await waitFor(() => b.call((sel) => { const f = document.querySelector(sel)?.form; return !!f && document.activeElement?.form === f; }, T.stopSend(id)), 500, 50)) { p.think(); await p.key('Enter'); }
     else await p.click(T.stopSend(id));
     r = p.result();
     stopped = await waitFor(() => { const e = s.events(); return e.some((x) => x.cmd === (T.stopEvent || 'budget stop') && x.task === id) && e.some((x) => x.cmd === 'spawn exit' && x.task === id) && e; }, 30000);
@@ -283,7 +283,7 @@ async function h6(ctx) {
   await p.click(T.messageOpen(id));
   // Opening Message focuses its field; a build without that focus needs a
   // click into it, which the count keeps.
-  if (!(await b.call((sel) => !!document.activeElement && document.activeElement === document.querySelector(sel), T.message(id)))) await p.click(T.message(id), { think: false });
+  if (!(await waitFor(() => b.call((sel) => !!document.activeElement && document.activeElement === document.querySelector(sel), T.message(id)), 500, 50))) await p.click(T.message(id), { think: false });
   await p.type('drain on SIGTERM first, then the tests');
   p.think();
   await p.key('Enter');

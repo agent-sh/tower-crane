@@ -103,6 +103,14 @@ class Scratch {
     if (this.revisioned === undefined) { const r = this.run(['evidence', '--help'], { clock: false }); this.revisioned = /--revision/.test(r.stdout + r.stderr); }
     return this.revisioned ? ['--revision', String(this.read('tasks.json').tasks.find((t) => t.id === id).revision)] : [];
   }
+
+  // On main a technical ask is the orchestrator's unless it is marked
+  // owner-required; the before build has neither flag and every ask is the
+  // owner's.
+  forOwner(reason) {
+    if (this.kinded === undefined) { const r = this.run(['ask', '--help'], { clock: false }); this.kinded = /--kind/.test(r.stdout + r.stderr); }
+    return this.kinded ? ['--kind', 'technical', '--owner-required', reason] : [];
+  }
   events() { return fs.readFileSync(path.join(this.state, 'events.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l)); }
 }
 
@@ -230,9 +238,9 @@ function busy(root, bin) {
   // Decisions: one blocks ready work, one does not; the orchestrator's request
   // for an owner-required setting becomes an approval.
   s.at(48 * MIN);
-  s.ok(['ask', '--kind', 'technical', '--owner-required', 'the owner picks the store for customer data', '--question', 'Which store backs the delivery dashboard?', '--option', 'redis', '--option', 'postgres', '--recommend', 'postgres', '--why', 'delivery history must survive a flush; postgres is already in the stack', '--blocks', store], { agent: 'orchestrator' });
+  s.ok(['ask', ...s.forOwner('the owner picks the store for customer data'), '--question', 'Which store backs the delivery dashboard?', '--option', 'redis', '--option', 'postgres', '--recommend', 'postgres', '--why', 'delivery history must survive a flush; postgres is already in the stack', '--blocks', store], { agent: 'orchestrator' });
   s.at(31 * MIN);
-  s.ok(['ask', '--kind', 'technical', '--owner-required', 'a customer rollout date is the owner\'s call', '--question', 'Ship v2 to the first tenant on Friday?', '--option', 'yes', '--option', 'wait a week', '--why', 'load test is still running', '--blocks', flag], { agent: 'orchestrator' });
+  s.ok(['ask', ...s.forOwner('a customer rollout date is the owner\'s call'), '--question', 'Ship v2 to the first tenant on Friday?', '--option', 'yes', '--option', 'wait a week', '--why', 'load test is still running', '--blocks', flag], { agent: 'orchestrator' });
   s.at(12 * MIN);
   s.run(['project', 'set', '--merge-admin', 'true'], { agent: 'orchestrator' });
   s.at(9 * MIN);

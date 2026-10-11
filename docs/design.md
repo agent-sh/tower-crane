@@ -97,7 +97,7 @@ Built for this board (human-experience.md 5.4); every value has a reason there.
 
 ## Keyboard
 
-`n`, `r`, `p`, `s`, `h` open the rooms; Tab reaches every action in reading order with a visible ring; arrow keys move between the Next and Recent tabs; Escape closes an open Message or Stop panel and returns to its button, and closes a task sheet and returns focus to the link that opened it. A sheet holds focus and makes the page behind it inert.
+`n`, `r`, `p`, `s`, `h` open the rooms; Tab reaches every action in reading order with a visible ring; arrow keys move between the Next and Recent tabs; opening Message or Stop puts the cursor in its field, where Enter sends the message or confirms the stop; Escape closes an open Message or Stop panel and returns to its button, and closes a task sheet and returns focus to the link that opened it. A sheet holds focus and makes the page behind it inert.
 
 ## Live behavior
 
