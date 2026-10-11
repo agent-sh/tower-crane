@@ -9,6 +9,7 @@ const http = require('node:http');
 const { promisify } = require('node:util');
 const { makeRepo } = require('./helpers');
 const A = require('../lib/agents');
+const S = require('../lib/state');
 
 const STUB = path.join(__dirname, 'fixtures', 'opencode-stub.js');
 const NO_STUBS = process.platform === 'win32' && 'harness stub is a shebang script';
@@ -124,6 +125,35 @@ test('opencode launch replaces the caller PWD with its task worktree', { skip: N
   assert.equal(f.report().cwd, preview.cwd);
 });
 
+for (const [input, selected] of [
+  ['file', { type: 'api', key: 'SELECTED-API-CANARY' }],
+  ['inline', { type: 'oauth', access: 'SELECTED-ACCESS-CANARY', refresh: 'SELECTED-REFRESH-CANARY', expires: 9999999999999 }],
+]) {
+  test(`opencode ${input} auth copy contains only the rung provider and excludes a raw source link`, { skip: NO_STUBS }, (t) => {
+    const f = setup(t);
+    const auth = {
+      fixture: selected,
+      unrelated: { type: 'api', key: 'UNRELATED-API-CANARY' },
+      oauth: { type: 'oauth', access: 'UNRELATED-ACCESS-CANARY', refresh: 'UNRELATED-REFRESH-CANARY', expires: 9999999999999 },
+      'http://127.0.0.1:1': { type: 'wellknown', key: 'REMOTE_TOKEN', token: 'REMOTE-CANARY' },
+    };
+    const source = path.join(f.home, '.local', 'share', 'opencode', 'auth.json');
+    if (input === 'file') fs.writeFileSync(source, JSON.stringify(auth));
+    const original = fs.readFileSync(source, 'utf8');
+    // A global default from another provider must not widen the rung's auth.
+    f.env.OPENCODE_CONFIG_CONTENT = JSON.stringify({ model: 'unrelated/model' });
+    spawn(f, input === 'inline' ? { OPENCODE_AUTH_CONTENT: JSON.stringify(auth) } : {});
+    const report = f.report();
+    assert.deepEqual(JSON.parse(fs.readFileSync(report.authPath, 'utf8')), { fixture: selected });
+    assert.deepEqual(report.authKinds, { fixture: selected.type });
+    assert.deepEqual(report.remoteContacts, []);
+    assert.ok(!fs.existsSync(path.join(report.data, 'auth-source.json')));
+    assert.equal(fs.readFileSync(source, 'utf8'), original);
+    if (process.platform !== 'win32') assert.equal(fs.statSync(report.authPath).mode & 0o777, 0o600);
+    assert.equal(dry(f).env.TOWER_CRANE_SANDBOX, '0');
+  });
+}
+
 test('opencode auth refresh reads the private replacement instead of the launch snapshot', { skip: NO_STUBS }, (t) => {
   const f = setup(t);
   const source = path.join(f.home, '.local', 'share', 'opencode', 'auth.json');
@@ -212,7 +242,7 @@ test('opencode isolates config, memory, skills, MCP, approved rules and credenti
     assert.equal(report.config.plugin.length, 1);
     assert.ok(report.config.plugin[0].endsWith('/hook.mjs'));
     assert.ok(!JSON.stringify(report).includes('PLANTED-'));
-    assert.equal(fs.statSync(report.authSource).ino, fs.statSync(path.join(f.home, '.local', 'share', 'opencode', 'auth.json')).ino);
+    assert.ok(!fs.existsSync(path.join(report.data, 'auth-source.json')));
     assert.deepEqual(report.authKinds, { fixture: 'api' });
     assert.ok(!fs.existsSync(path.join(own, 'rules', 'approved.json')));
     after.push(report.context_bytes);
@@ -259,22 +289,14 @@ test('opencode excludes credential-triggered remote instructions, plugins and MC
   const report = f.report();
   assert.equal(requests, 1, 'isolated dispatch must not contact the remote configuration endpoint');
   assert.deepEqual(report.remoteContacts, []);
-  assert.deepEqual(report.authKinds, { fixture: 'api', oauth: 'oauth' });
-  assert.deepEqual(JSON.parse(fs.readFileSync(report.authPath, 'utf8')), {
-    fixture: auth.fixture, oauth: auth.oauth,
-  });
+  assert.deepEqual(report.authKinds, { fixture: 'api' });
+  assert.deepEqual(JSON.parse(fs.readFileSync(report.authPath, 'utf8')), { fixture: auth.fixture });
   assert.ok(!report.memory.some((text) => text.includes('REMOTE-INSTRUCTION-CANARY')));
   assert.ok(!report.config.plugin.includes('remote-plugin-canary'));
   assert.deepEqual(report.mcp, {});
   const source = fs.openSync(authPath, 'r');
   try {
-    const linked = fs.openSync(report.authSource, 'r');
-    try {
-      assert.equal(fs.fstatSync(linked).ino, fs.fstatSync(source).ino);
-    } finally {
-      fs.closeSync(linked);
-    }
-    fs.writeFileSync(report.authPath, '{"oauth":{"type":"oauth","access":"refreshed"}}');
+    fs.writeFileSync(report.authPath, '{"fixture":{"type":"oauth","access":"refreshed"}}');
     assert.deepEqual(JSON.parse(fs.readFileSync(source, 'utf8')), auth, 'agent auth writes must not alter the source credential store');
   } finally {
     fs.closeSync(source);
@@ -288,7 +310,7 @@ test('opencode excludes credential-triggered remote instructions, plugins and MC
   });
   assert.equal(inherited.code, 0, inherited.stderr);
   assert.equal(requests, 1, 'an inherited auth override must exclude remote discovery too');
-  assert.deepEqual(f.report().authKinds, { fixture: 'api', oauth: 'oauth' });
+  assert.deepEqual(f.report().authKinds, { fixture: 'api' });
   assert.ok(!JSON.stringify(dry(f)).includes('SECRET-CANARY'));
 });
 
@@ -346,7 +368,7 @@ for (const change of ['tier', 'ladder']) {
     const report = f.report();
     assert.equal(requests, 0, 'final launch must not fetch unselected remote config');
     assert.deepEqual(report.remoteContacts, []);
-    assert.deepEqual(report.authKinds, { fixture: 'api', oauth: 'oauth' });
+    assert.deepEqual(report.authKinds, { fixture: 'api' });
     assert.ok(!report.memory.join('').includes('RACE-REMOTE-INSTRUCTION'));
     assert.ok(!report.config.plugin.includes('race-remote-plugin'));
     assert.deepEqual(report.mcp, {});
@@ -535,7 +557,8 @@ process.exit(result.status ?? 1);
   assert.match(tools[4].output, /headless workspace/);
   assert.match(tools[5].output, /headless workspace/);
   assert.ok(audit.some((event) => event.cmd === 'hook inbox'), 'production plugin acknowledges the queued inbox');
-  assert.ok(audit.some((event) => event.cmd === 'hook progress'), 'production tool hook runs');
+  const progress = fs.readFileSync(S.progressFile(f.h.state, 'worker-T1-1'), 'utf8').trim().split('\n').map(JSON.parse);
+  assert.ok(progress.some((event) => event.cmd === 'hook progress'), 'production tool hook runs');
   assert.ok(tools.some((tool) => tool.output?.includes('NATIVE-INBOX-CANARY')), 'production plugin delivers the queued inbox');
   assert.equal(f.h.readState('tasks.json').tasks[0].claim.agent, 'worker-T1-1');
 });

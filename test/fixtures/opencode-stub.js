@@ -91,7 +91,7 @@ async function main() {
   const report = {
     home, global, data, dirs, cwd: process.cwd(), pwd: process.env.PWD, config, agent, name, permission, memory: memory.filter(Boolean),
     skills: visibleSkills.map((file) => path.basename(path.dirname(file))), mcp,
-    authPath, authSource: path.join(data, 'auth-source.json'), remoteContacts,
+    authPath, remoteContacts,
     authKinds: Object.fromEntries(Object.entries(auth).map(([name, value]) => [name, value.type])),
     context_bytes: Buffer.byteLength(context),
     probes: JSON.parse(process.env.STUB_PROBES || '[]').map(([tool, input]) => decision(permission, tool,
