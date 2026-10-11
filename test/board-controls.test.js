@@ -398,6 +398,27 @@ test('approved board waivers accept once and retain one settings audit', async (
   assert.equal((await post({ decision: 'D1', choice: 'approve' }, 'api/controls/answer')).status, 400);
 });
 
+test('board waivers accept on the owner\'s own approval, not an orchestrator\'s', async (t) => {
+  const h = fixture(t);
+  h.init();
+  h.ok(['task', 'add', '--title', 'Waiver fixture', '--acceptance', 'accepted']);
+  h.ok(['claim', 'T1', '--agent', 'worker']);
+  h.ok(['submit', 'T1', '--sha', h.git(['rev-parse', 'HEAD']), '--agent', 'worker']);
+  const waive = ['tests', 'clean', 'review', 'ci'];
+  assert.equal(h.run(['accept', 'T1', ...waive.flatMap((w) => ['--waive', w]), '--reason', 'Fixture only'], as('orchestrator')).code, 1);
+  const { post } = await serve(t, h);
+  assert.equal((await post({ decision: 'D1', choice: 'approve' }, 'api/controls/answer')).status, 200);
+  assert.equal(h.readState('tasks.json').tasks[0].status, 'submitted');
+  const asked = await post(request('accept', { waive, reason: 'Fixture only' }, ['T1']));
+  assert.equal(asked.data.decision, 'D2');
+  const applied = await post({ decision: 'D2', choice: 'approve' }, 'api/controls/answer');
+  assert.equal(applied.status, 200, JSON.stringify(applied));
+  const task = h.readState('tasks.json').tasks[0];
+  assert.equal(task.status, 'accepted');
+  assert.deepEqual([...new Set(task.evidence.filter((e) => e.waived && e.approved_by).map((e) => e.approved_by))], ['D2']);
+  assert.deepEqual(audits(h).filter((e) => e.detail.command === 'accept').map((e) => e.detail.approved_by), ['D2']);
+});
+
 test('browser controls save limits, approve and decline requests, keep saved values under unsaved input, in both themes', { skip: !CHROME && 'no Chrome to drive' }, async (t) => {
   const h = fixture(t);
   h.init();
