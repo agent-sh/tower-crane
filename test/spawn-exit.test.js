@@ -52,7 +52,8 @@ fs.writeSync(1, Array.from({ length: 30 }, (_, i) => 'progress ' + i).join('\\n'
 fs.writeSync(2, 'last diagnostic before exit\\n');
 fs.writeSync(2, ${JSON.stringify(PRIVATE_LOG + '\n')});
 ${submit ? "cp.execFileSync(process.execPath, [process.argv[2], 'submit', task, '--sha', 'abcdef1']);" : ''}
-fs.writeFileSync(process.argv[3], JSON.stringify({ agent: process.env.TOWER_CRANE_AGENT, pid: process.pid }));
+fs.writeFileSync(process.argv[3] + '.tmp', JSON.stringify({ agent: process.env.TOWER_CRANE_AGENT, pid: process.pid }));
+fs.renameSync(process.argv[3] + '.tmp', process.argv[3]);
 ${wait ? 'process.exit(7);' : 'setInterval(() => {}, 1000);'}
 `;
   fs.writeFileSync(worker, script);
