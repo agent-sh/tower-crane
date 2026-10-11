@@ -51,7 +51,6 @@ const after = {
   agentTokens: (id) => `#now .floor [data-key="agent-${id}"] [data-usage]`,
   messageOpen: (id) => `#now .floor [data-key="agent-${id}"] details.act-message > summary`,
   message: (id) => `[data-key="agent-${id}"] form[data-api="/api/tasks/${id}/message"] input[name="text"]`,
-  messageSend: (id) => `[data-key="agent-${id}"] form[data-api="/api/tasks/${id}/message"] button[type="submit"]`,
   stopOpen: (id) => `[data-key="agent-${id}"] details.act-stop > summary`,
   stopSend: (id) => `[data-key="agent-${id}"] form[data-api="/api/tasks/${id}/stop"] button[type="submit"]`,
   stopEvent: 'interrupt',

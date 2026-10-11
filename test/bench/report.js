@@ -39,19 +39,26 @@ const rows = [
   ['H1', 'Find what needs me, 1280x800', h1(before, '1280x800'), h1(after, '1280x800')],
   ['H1', 'Find what needs me, 390x844 (count and first item)', h1(before, '390x844'), h1(after, '390x844')],
   ['H2', 'Answer a decision with a note', path1(before.scenarios.H2, before.scenarios.H2 ? `, focus after: ${before.scenarios.H2.focus_after}` : ''), path1(after.scenarios.H2, after.scenarios.H2 ? `, focus after: ${after.scenarios.H2.focus_after}` : '')],
+  ...SIZES.filter((size) => size !== '390x844').map((size) => ['H2', `Decision controls in the first viewport, ${size}`, reach(before, size), reach(after, size)]),
   ['H2a', 'Approve a change', h2a(before.scenarios.H2a), h2a(after.scenarios.H2a)],
   ['H3', 'Judge a review and send it back', path1(before.scenarios.H3, before.scenarios.H3 ? `, ${before.scenarios.H3.scroll_px} px scrolled` : ''), path1(after.scenarios.H3, after.scenarios.H3 ? `, ${after.scenarios.H3.scroll_px} px scrolled` : '')],
   ['H4', 'Stop a runaway', h4(before.scenarios.H4), h4(after.scenarios.H4)],
   ['H4s', 'Lost telemetry: stale', h4s(before.scenarios['H4s stale']), h4s(after.scenarios['H4s stale'])],
   ['H4s', 'Lost telemetry: unavailable', h4s(before.scenarios['H4s unavailable']), h4s(after.scenarios['H4s unavailable'])],
   ['H4p', 'Pause dispatch', 'no command on this base', 'no command on main, skipped'],
-  ['H5', 'See spend, 1920x1080', h5(before.scenarios['H5 1920x1080']), h5(after.scenarios['H5 1920x1080'])],
-  ['H5', 'See spend, 1280x800', h5(before.scenarios['H5 1280x800']), h5(after.scenarios['H5 1280x800'])],
+  ...SIZES.map((size) => ['H5', `See spend, ${size}${size === '390x844' ? ' (in the Now room)' : ''}`, h5(before.scenarios[`H5 ${size}`]), h5(after.scenarios[`H5 ${size}`])]),
   ['H6', 'Steer an agent', path1(before.scenarios.H6), path1(after.scenarios.H6)],
   ['H7', 'Return after absence', h7(before.scenarios.H7), h7(after.scenarios.H7)],
   ['H8', 'Calm run, light and dark', h8(before.scenarios), h8(after.scenarios)],
   ['H9', 'Mode parity (H2, H3, H6)', h9(before.scenarios.H9), h9(after.scenarios.H9)],
 ];
+
+// H2's bar asks for no scroll at the three desktop sizes, in both themes.
+function reach(r, size) {
+  const x = ['light', 'dark'].map((theme) => r.scenarios[`H2 reach ${size}-${theme}`]).filter(Boolean);
+  if (!x.length) return '-';
+  return `${x.filter((v) => v.pass).length} of ${x.length} themes without a scroll, ${mark(x.every((v) => v.pass))}`;
+}
 
 function h2a(x) {
   if (!x) return '-';
@@ -64,7 +71,7 @@ function h2a(x) {
 function h4(x) {
   if (!x) return '-';
   if (x.error) return `error: ${x.error.split('\n')[0].slice(0, 80)}`;
-  return `spend rose before exit: ${x.rose_before_exit ? 'yes' : 'no'}; flagged: ${x.flagged ? `yes, ${x.flag_latency_ms} ms after the rule's threshold` : 'no'}; stop: ${x.path ? `${x.path.clicks} clicks, KLM ${x.path.klm_s} s, stopped ${x.stopped ? 'with no retry' : 'no'}; recorded ${x.recorded_tokens} of the stub's ${x.stub_tokens}` : 'no path'}, ${mark(x.pass)}`;
+  return `spend rose before exit: ${x.rose_before_exit ? 'yes' : 'no'}; flagged: ${x.flagged ? `yes, ${x.flag_latency_ms} ms after the rule's threshold` : 'no'}; stop: ${x.path ? `${x.path.clicks} click${x.path.clicks === 1 ? '' : 's'}${x.path.keys ? `, ${x.path.keys} key${x.path.keys === 1 ? '' : 's'}` : ''}, KLM ${x.path.klm_s} s, stopped ${x.stopped ? 'with no retry' : 'no'}; recorded ${x.recorded_tokens} of the stub's ${x.stub_tokens}` : 'no path'}, ${mark(x.pass)}`;
 }
 function h4s(x) {
   if (!x) return '-';
@@ -74,7 +81,9 @@ function h4s(x) {
 function h5(x) {
   if (!x) return '-';
   if (x.error) return `error: ${x.error.split('\n')[0].slice(0, 80)}`;
-  return `${Object.entries(x.parts).map(([k, v]) => `${k} ${v.shown ? 'shown' : 'not shown'}`).join(', ')}; freshness ${x.freshness_shown ? 'shown' : 'not shown'}, ${mark(x.pass)}`;
+  // On a phone the bar is the room, not the first viewport.
+  const where = (v) => (v.shown ? 'shown' : v.text ? 'in the room' : 'not shown');
+  return `${Object.entries(x.parts).map(([k, v]) => `${k} ${where(v)}`).join(', ')}; freshness ${x.freshness_shown ? 'shown' : 'not shown'}, ${mark(x.pass)}`;
 }
 function h7(x) {
   if (!x) return '-';
@@ -152,7 +161,7 @@ fs.writeFileSync(opt.doc, `${doc.slice(0, start)}<!-- results -->\n\n${md}\n${do
 // The screenshot matrix: every room, a sheet and Settings at every size and
 // theme, and the end state of each scenario.
 if (opt.shots) {
-  const keep = (f) => /^(front|review|plan|spend|history|sheet|settings)-/.test(f) || /^H(2|3|4|5|6|7|8)/.test(f) && !/^H5-(3840|1280|390)/.test(f);
+  const keep = (f) => /^(front|review|plan|spend|history|sheet|settings|H[2-8])/.test(f);
   for (const b of ['before', 'after']) {
     const from = path.join(opt.results, b);
     const to = path.join(opt.shots, b);

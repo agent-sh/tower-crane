@@ -131,7 +131,9 @@ class Path {
     const codes = { Tab: 9, Enter: 13, Escape: 27, Space: 32 };
     if (this.hand !== 'keys') { this.op('H'); this.hand = 'keys'; }
     const base = { key: key === 'Space' ? ' ' : key, code: key, windowsVirtualKeyCode: codes[key], modifiers: shift ? 8 : 0 };
-    await this.b.send('Input.dispatchKeyEvent', { type: key === 'Space' ? 'keyDown' : 'rawKeyDown', ...base, ...(key === 'Enter' ? { text: '\r' } : key === 'Space' ? { text: ' ' } : {}) });
+    // A key with text goes down as keyDown, which also sends its keypress, so
+    // Enter submits a form the way a keyboard's does.
+    await this.b.send('Input.dispatchKeyEvent', { type: key === 'Space' || key === 'Enter' ? 'keyDown' : 'rawKeyDown', ...base, ...(key === 'Enter' ? { text: '\r' } : key === 'Space' ? { text: ' ' } : {}) });
     await this.b.send('Input.dispatchKeyEvent', { type: 'keyUp', ...base });
     this.inputs.push({ type: 'key', key });
     this.op('K');

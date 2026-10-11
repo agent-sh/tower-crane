@@ -206,7 +206,10 @@ async function h4(ctx) {
     const p = new D.Path(b);
     await p.click(T.stopOpen(id));
     if (ctx.shots) await D.shot(b, ctx.shots('H4-confirm'));
-    await p.click(T.stopSend(id));
+    // Opening Stop focuses its reason field, so the confirm is Enter there;
+    // a build without that focus confirms with its button.
+    if (await b.call((sel) => { const f = document.querySelector(sel)?.form; return !!f && document.activeElement?.form === f; }, T.stopSend(id))) { p.think(); await p.key('Enter'); }
+    else await p.click(T.stopSend(id));
     r = p.result();
     stopped = await waitFor(() => { const e = s.events(); return e.some((x) => x.cmd === (T.stopEvent || 'budget stop') && x.task === id) && e.some((x) => x.cmd === 'spawn exit' && x.task === id) && e; }, 30000);
     // The row's own words for each state it passes through.
@@ -220,7 +223,7 @@ async function h4(ctx) {
   const recorded = reconciled ? reconciled.spend.tokens : null;
   const stubCount = reconciled ? stubTokens(s) : null;
   const latency = crossedAt && flaggedAt ? flaggedAt - crossedAt : null;
-  const pass = rose && !!flaggedAt && latency !== null && latency <= 2500 && !!r && r.clicks <= 2 && !!stopped && !!words && retries === 0 && recorded !== null && recorded === stubCount;
+  const pass = rose && !!flaggedAt && latency !== null && latency <= 2500 && !!r && r.actions <= 2 && r.klm_s <= 5 && !!stopped && !!words && retries === 0 && recorded !== null && recorded === stubCount;
   killTree(spawned.pid);
   return { rose_before_exit: rose, readings: distinct.slice(0, 6), flagged: !!flaggedAt, flag_latency_ms: latency, path: r, stopped: !!stopped, retries, recorded_tokens: recorded, stub_tokens: stubCount, row_words: rowWords, pass,
     delta: stopped && { needs_owner: s.read('tasks.json').tasks.find((x) => x.id === id).needs_owner, event: strip(ev.findLast((e) => e.cmd === (T.stopEvent || 'task update') && e.task === id) || {}) } };
@@ -278,14 +281,17 @@ async function h6(ctx) {
   if (!T.messageOpen) return { pass: false, note: 'no path: the board reaches the orchestrator only (task comment); msg --to the agent is CLI-only' };
   const p = new D.Path(b);
   await p.click(T.messageOpen(id));
-  await p.click(T.message(id), { think: false });
+  // Opening Message focuses its field; a build without that focus needs a
+  // click into it, which the count keeps.
+  if (!(await b.call((sel) => !!document.activeElement && document.activeElement === document.querySelector(sel), T.message(id)))) await p.click(T.message(id), { think: false });
   await p.type('drain on SIGTERM first, then the tests');
-  await p.click(T.messageSend(id));
+  p.think();
+  await p.key('Enter');
   const e = await waitFor(() => s.events().findLast((x) => x.cmd === 'msg' && x.task === id && x.agent === 'owner'));
   if (ctx.shots) await D.shot(b, ctx.shots('H6'));
   const r = p.result();
   const ok = !!e && e.detail.to === `worker-${id}-1`;
-  return { ...r, delivered_to: e && e.detail.to, pass: ok && r.clicks <= 3, delta: e && { event: strip(e) } };
+  return { ...r, delivered_to: e && e.detail.to, pass: ok && r.actions <= 2, delta: e && { event: strip(e) } };
 }
 
 async function h7(ctx) {

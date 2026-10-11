@@ -1071,6 +1071,34 @@ test('only the routed room is displayed after a sheet opens inside it and after 
   });
 });
 
+test('in a browser, opening Message on an agent row puts the cursor in its field and Enter sends it', { skip: !CHROME && 'no Chrome to drive' }, async (t) => {
+  const h = makeRepo(t);
+  h.init();
+  populate(h);
+  await withServers(async (servers) => {
+    const url = await startServe(servers, h);
+    const b = await openBrowser(t);
+    await b.goto(keyed(url));
+    await b.until(`document.querySelector('.conn').dataset.conn === 'live'`, 'the live stream');
+    const { x, y } = await b.call((sel) => { const r = document.querySelector(sel).getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; }, '[data-key="agent-T1"] details.act-message > summary');
+    for (const type of ['mouseMoved', 'mousePressed', 'mouseReleased']) await b.send('Input.dispatchMouseEvent', { type, x, y, button: 'left', clickCount: 1 });
+    await b.until(`document.activeElement && document.activeElement.matches('[data-key="agent-T1"] form[data-api="/api/tasks/T1/message"] input[name="text"]')`, 'the message field to take focus');
+    await b.type('split the API part first');
+    // keyDown with text is a real Enter: its keypress submits the form the way
+    // the browser does, with no page handler of the board's own.
+    const key = { key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 };
+    await b.send('Input.dispatchKeyEvent', { type: 'keyDown', ...key, text: '\r' });
+    await b.send('Input.dispatchKeyEvent', { type: 'keyUp', ...key });
+    let msg = null;
+    for (let i = 0; i < 100 && !msg; i++) {
+      msg = log(h).find((e) => e.cmd === 'msg' && e.agent === 'owner');
+      if (!msg) await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    assert.ok(msg, 'Enter sent the message');
+    assert.deepEqual([msg.task, msg.detail.to, msg.detail.text], ['T1', 'w-1', 'split the API part first']);
+  });
+});
+
 test('serve messages the claimant and stops a task only as the owner, through msg and interrupt', async (t) => {
   const h = makeRepo(t);
   h.init();
