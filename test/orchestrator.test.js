@@ -7,6 +7,29 @@ const path = require('node:path');
 const cp = require('node:child_process');
 const { makeProjectRepo, BIN } = require('./helpers');
 
+test('authority and benchmark readers neither compete with a holder nor acquire a vacant lease', (t) => {
+  const h = makeProjectRepo(t);
+  const holder = { env: { TOWER_CRANE_AGENT: 'orchestrator', CLAUDE_SESSION_ID: 'holder' } };
+  const reader = { env: { TOWER_CRANE_AGENT: 'orchestrator', CLAUDE_SESSION_ID: 'reader' } };
+  const reads = [['authority'], ['bench', 'gates'], ['bench', 'tokens']];
+  const inspect = () => {
+    const before = h.readState('tasks.json');
+    for (const command of reads) {
+      const result = h.run([...command, '--json'], reader);
+      assert.equal(result.code, 0, `${command.join(' ')}: ${result.stderr}`);
+      assert.deepEqual(h.readState('tasks.json'), before, `${command.join(' ')} cannot change the lease`);
+    }
+  };
+  inspect();
+  h.ok(['task', 'add', '--title', 'Native writer', '--acceptance', 'keeps its lease'], holder);
+  assert.ok(h.readState('tasks.json').orchestrator_lease);
+  inspect();
+  h.ok(['orchestrator', 'release'], holder);
+  assert.equal(h.readState('tasks.json').orchestrator_lease, null);
+  inspect();
+  h.ok(['task', 'note', 'T1', 'writer resumes after inspection'], holder);
+});
+
 test('one orchestrator session holds writes while reads, release, expiry and owner takeover work', (t) => {
   const h = makeProjectRepo(t);
   const first = { env: { TOWER_CRANE_AGENT: 'orchestrator', CLAUDE_SESSION_ID: 'first' } };
