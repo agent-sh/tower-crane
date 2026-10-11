@@ -24,6 +24,7 @@ const [dir, ...rest] = process.argv.slice(2);
 const head = spawnSync('git', ['-C', dir, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim();
 fs.writeFileSync(process.env.FAKE_CLEAN_LOG, JSON.stringify({ dir, rest, head, via: process.env.FAKE_CLEAN_VIA || 'env' }));
 if (process.env.FAKE_CLEAN_MODE === 'crash') { console.error('cannot read the repository'); process.exit(1); }
+if (process.env.FAKE_CLEAN_MODE === 'kill') process.kill(process.pid, 'SIGKILL');
 if (process.env.FAKE_CLEAN_MODE === 'text') { console.log('deslop: 2 findings'); process.exit(0); }
 process.stdout.write(fs.readFileSync(process.env.FAKE_CLEAN_REPORT, 'utf8'));
 `);
@@ -128,6 +129,16 @@ test('an installed cleanup tool is not inferred when the owner has not pinned it
   assert.equal(r.ok, false);
   assert.match(r.summary, /pinned/);
   assert.equal(fs.existsSync(logFile), false);
+});
+
+test('a tool killed by a signal: not ok, recorded as a runner crash rather than a finding', { skip: process.platform === 'win32' }, async () => {
+  process.env.TOWER_CRANE_CLEAN_CMD = fakeCmd;
+  process.env.FAKE_CLEAN_MODE = 'kill';
+  const killed = await gate.run(ctx());
+  assert.equal(killed.ok, false);
+  assert.equal(killed.runner_crash, true);
+  assert.equal(killed.confirmed_failure, undefined);
+  assertCleanedUp();
 });
 
 test('a tool that fails or prints no JSON: not ok', async () => {

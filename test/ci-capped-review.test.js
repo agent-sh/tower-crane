@@ -54,6 +54,7 @@ function fixture(t) {
         source: 'check ci', commands: evidence.commands, ci_policy: evidence.ci_policy,
         ...(evidence.capped_review ? { capped_review: evidence.capped_review } : {}),
         ...(evidence.confirmed_failure !== undefined ? { confirmed_failure: evidence.confirmed_failure } : {}),
+        ...(evidence.infrastructure_failure ? { infrastructure_failure: true } : {}),
       });
       assert.equal(evidence.source, 'check ci');
       assert.ok(Array.isArray(evidence.commands));
