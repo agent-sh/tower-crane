@@ -475,10 +475,10 @@ test('progress paths and CPU detect a stalled process without dropping its live 
       assert.doesNotMatch(text, /blocked: no progress paths or CPU activity/, `${file} clears the stalled phase`);
     }
     // Tool hooks write outside the event log; the agent's progress file counts too.
-    await until(() => h.json(['task', 'show', 'T1']).run?.phase === 'blocked', 'idle process did not stall again');
+    await waitOnRepo(h, () => h.json(['task', 'show', 'T1']).run?.phase === 'blocked', 'idle process did not stall again');
     fs.mkdirSync(path.dirname(S.progressFile(h.state, spawned.agent)), { recursive: true });
     fs.appendFileSync(S.progressFile(h.state, spawned.agent), '{}\n');
-    await until(() => h.json(['task', 'show', 'T1']).run?.phase === 'running', 'tool progress did not clear stall');
+    await waitOnRepo(h, () => h.json(['task', 'show', 'T1']).run?.phase === 'running', 'tool progress did not clear stall');
     assert.equal(h.json(['task', 'show', 'T1']).claim.agent, spawned.agent);
     assert.deepEqual(h.json(['status']).exited_claims, []);
   } finally {
