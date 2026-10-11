@@ -97,6 +97,9 @@ test('shared checks reject readiness budgets and require a reason on allowed tim
     'const budget = 1000; await until(check, "ready", budget);', // wait-allow: rejected lint fixture
     'async function until(check, what, budget = 1000) {}', // wait-allow: rejected lint fixture
     'cp.spawnSync("node", ["worker.js"], { timeout: budget });', // wait-allow: rejected lint fixture
+    'assert.ok((Date.now() - started) < 1000);', // wait-allow: rejected lint fixture
+    'const elapsed = Date.now() - started; assert.ok(elapsed <= 1000);', // wait-allow: rejected lint fixture
+    'assert.ok(1000 > performance.now() - started);', // wait-allow: rejected lint fixture
   ]) {
     assert.ok(waitFindings(source).length, source);
     const annotated = source.split('\n').map((line) => line + ' // wait-allow: verifies the production timer contract').join('\n');

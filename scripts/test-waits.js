@@ -68,7 +68,8 @@ function waitFindings(text) {
     if (/^\s*\/\//.test(line)) continue;
     const guard = /\b(?:const|let)\s+HUNG_TEST_MS\s*=\s*([^;]+)/.exec(line);
     if (guard && !hungBudget(guard[1].trim())) report(index, 'hung-test backstop was shortened');
-    if (/\b(?:Date|performance)\.now\(\)\s*-\s*\w+\s*[<>]=?\s*\d+/.test(line)) {
+    if (/\b(?:Date|performance)\.now\(\)\s*-\s*\w+\s*\)*\s*[<>]=?\s*\d+/.test(line)
+      || /\b\d[\d_]*\s*[<>]=?\s*\(*\s*(?:Date|performance)\.now\(\)\s*-\s*\w+/.test(line)) {
       report(index, 'elapsed wall time is a pass condition');
     }
     for (const match of line.matchAll(/(['"])--(timeout|test-timeout)\1\s*,\s*(['"])([\d.]+)\3/g)) {
@@ -95,7 +96,7 @@ function waitFindings(text) {
     }
   }
   for (const elapsed of text.matchAll(/\b(?:const|let)\s+(\w+)\s*=\s*(?:Date|performance)\.now\(\)\s*-\s*\w+/g)) {
-    const comparisons = new RegExp(`\\b${elapsed[1]}\\s*<\\s*(\\d[\\d_]*)`, 'g');
+    const comparisons = new RegExp(`\\b${elapsed[1]}\\s*<=?\\s*(\\d[\\d_]*)`, 'g');
     for (const match of text.matchAll(comparisons)) {
       if (!hungBudget(match[1])) report(text.slice(0, match.index).split('\n').length - 1, 'elapsed wall time is a pass condition');
     }
