@@ -8,6 +8,7 @@ const cp = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { HUNG_TEST_MS } = require('./signals');
 
 function testFiles() {
   return [
@@ -43,7 +44,7 @@ const args = [
   `--test-global-setup=${path.join(__dirname, 'global-setup.js')}`,
   // A hung test fails after five minutes, about three times the slowest test
   // measured on a loaded machine, instead of holding CI to its job timeout.
-  '--test-timeout=300000', '--test-force-exit',
+  `--test-timeout=${HUNG_TEST_MS}`, '--test-force-exit',
   ...flags,
 ];
 const shard = process.env.TC_TEST_SHARD;

@@ -37,7 +37,7 @@ function fixture(t, { crlfProtected = false, windowsCheckout = false } = {}) {
   const base = h.git(['rev-parse', 'HEAD']);
   const script = (name, args = []) => cp.spawnSync(process.execPath,
     [path.join(h.repo, 'scripts', name), ...args],
-    { cwd: h.repo, env: h.env, encoding: 'utf8', timeout: 30000 });
+    { cwd: h.repo, env: h.env, encoding: 'utf8', timeout: 300000 });
   const check = () => script('check-shared-files.js', ['--base', base]);
   const write = (name, text) => fs.writeFileSync(path.join(h.repo, name), text);
   const read = (name) => readText(path.join(h.repo, name));
@@ -55,7 +55,7 @@ test('generated command rows match real CLI help, preserve details and reject dr
   const docs = f.read('docs/cli.md');
   for (const command of COMMANDS) {
     const help = cp.spawnSync(process.execPath, [bin, ...command.name.split(' '), '--help'],
-      { cwd: f.h.repo, env: f.h.env, encoding: 'utf8', timeout: 30000 });
+      { cwd: f.h.repo, env: f.h.env, encoding: 'utf8', timeout: 300000 });
     assert.equal(help.status, 0, help.stderr);
     const usage = command.name + (command.usage ? ` ${command.usage}` : '');
     assert.ok(help.stdout.startsWith(`usage: tower-crane ${usage}\n`));
@@ -95,7 +95,7 @@ test('long command descriptions are generated from metadata while CLI help keeps
   assert.ok(f.read('docs/cli.md').includes(`| ${description} |`));
   const bin = path.join(f.h.repo, 'bin', 'tower-crane.js');
   const help = cp.spawnSync(process.execPath, [bin, 'task', 'note', '--help'],
-    { cwd: f.h.repo, env: f.h.env, encoding: 'utf8', timeout: 30000 });
+    { cwd: f.h.repo, env: f.h.env, encoding: 'utf8', timeout: 300000 });
   assert.equal(help.status, 0, help.stderr);
   assert.match(help.stdout, /\nappend a note\n/);
   assert.ok(!help.stdout.includes(description));
@@ -137,7 +137,7 @@ for (const windowsCheckout of [false, true]) {
     f.h.git(['checkout', '-qb', 'task-note-flag', base]);
     addFlag('task note', 'note-label', 'T902');
     const merge = cp.spawnSync('git', ['merge', '--no-ff', '-m', 'combine independent command flags', 'task-list-flag'],
-      { cwd: f.h.repo, env: f.h.env, encoding: 'utf8', timeout: 30000 });
+      { cwd: f.h.repo, env: f.h.env, encoding: 'utf8', timeout: 300000 });
     assert.equal(merge.status, 0, merge.stdout + merge.stderr);
     assert.equal(f.h.git(['diff', '--name-only', '--diff-filter=U']), '', 'no file has a merge conflict');
     const check = f.check();
@@ -263,7 +263,7 @@ test('release assembly is deterministic and leaves the archive and fragments unc
 
 test('this repository keeps generated rows and its fragment instructions local', () => {
   const r = cp.spawnSync(process.execPath, [path.join(ROOT, 'scripts', 'check-shared-files.js')],
-    { cwd: ROOT, encoding: 'utf8', env: { ...process.env, TOWER_CRANE_CHANGE_BASE: '' }, timeout: 30000 });
+    { cwd: ROOT, encoding: 'utf8', env: { ...process.env, TOWER_CRANE_CHANGE_BASE: '' }, timeout: 300000 });
   assert.equal(r.status, 0, r.stderr);
   const skill = fs.readFileSync(path.join(ROOT, 'skills', 'tower-crane-work', 'SKILL.md'), 'utf8');
   assert.match(skill, /update the changelog the repository's way/);

@@ -36,7 +36,7 @@ async function main() {
   }
   const prompt = at('-p');
   const probe = (command, argv) => {
-    const result = cp.spawnSync(command, argv, { encoding: 'utf8', timeout: 10000 });
+    const result = cp.spawnSync(command, argv, { encoding: 'utf8', timeout: 300000 });
     return { code: result.status, stderr: result.stderr };
   };
   const report = {

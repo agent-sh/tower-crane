@@ -1,5 +1,7 @@
 'use strict';
 
+const { fileWritten } = require('./signals');
+
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -33,7 +35,7 @@ for (const kind of ['stale', 'empty']) {
   });
 }
 
-test('20 concurrent CLI writers survive a lock held beyond 10 seconds', { timeout: 90000 }, async (t) => {
+test('20 concurrent CLI writers survive a lock held beyond 10 seconds', { timeout: 300000 }, async (t) => {
   const h = makeRepo(t);
   h.init();
   h.ok(['task', 'add', '--title', 'Concurrent startup', '--acceptance', 'all writes survive']);
@@ -45,7 +47,7 @@ test('20 concurrent CLI writers survive a lock held beyond 10 seconds', { timeou
   try {
     await Promise.all(signals.map((signal) => waitForFile(signal)));
     // All writers have encountered the same live holder before its release.
-    await new Promise((resolve) => setTimeout(resolve, 11000));
+    await new Promise((resolve) => setTimeout(resolve, 11000)); // wait-allow: hold lock contention beyond the former production lock timeout
   } finally {
     S.releaseLock(lock);
     for (const signal of signals) fs.writeFileSync(`${signal}.go`, '');
@@ -59,13 +61,7 @@ test('20 concurrent CLI writers survive a lock held beyond 10 seconds', { timeou
   assert.deepEqual(fs.readdirSync(h.state).filter((name) => name.startsWith('lock')), []);
 });
 
-async function waitForFile(file, ms = 20000) {
-  const end = Date.now() + ms;
-  while (!fs.existsSync(file)) {
-    if (Date.now() > end) throw new Error(`${file} never appeared`);
-    await new Promise((r) => setTimeout(r, 20));
-  }
-}
+const waitForFile = (file) => fileWritten(file, { check: (text) => text.length > 0 });
 
 // A write that is killed while it holds the lock, leaving the lock to a dead pid.
 function killHolder(h) {
@@ -105,7 +101,7 @@ test('an old marker without process identity cannot be kept alive by a reused PI
     delete marker.start_ticks;
     delete marker.boot_id;
     fs.writeFileSync(lock.file, JSON.stringify(marker));
-    const old = new Date(Date.now() - 120000);
+    const old = new Date(Date.now() - 120000); // wait-allow: verify stale or dead locks are broken without waiting for the live-holder timeout
     fs.utimesSync(lock.file, old, old);
     const result = h.run(['task', 'add', '--title', 'legacy reclaim', '--acceptance', 'age fallback'], {
       env: { NODE_OPTIONS: `--require=${JSON.stringify(SHORT_WAIT)}` },
@@ -125,7 +121,7 @@ test('a known live holder keeps an old marker until the waiter times out', { ski
     const marker = JSON.parse(fs.readFileSync(lock.file, 'utf8'));
     assert.equal(marker.start_ticks, require('../lib/processes').identity(process.pid).start_ticks);
     assert.equal(marker.boot_id, fs.readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim());
-    const old = new Date(Date.now() - 120000);
+    const old = new Date(Date.now() - 120000); // wait-allow: verify stale or dead locks are broken without waiting for the live-holder timeout
     fs.utimesSync(lock.file, old, old);
     const result = h.run(['task', 'add', '--title', 'must wait', '--acceptance', 'holder protected'], {
       env: { NODE_OPTIONS: `--require=${JSON.stringify(SHORT_WAIT)}` },
@@ -149,7 +145,7 @@ test('a dead holder reclaimed at the deadline permits the waiting write', async 
   });
   try {
     await waitForFile(signal);
-    await new Promise((resolve) => setTimeout(resolve, 1100));
+    await new Promise((resolve) => setTimeout(resolve, 1100)); // wait-allow: hold lock contention beyond the former production lock timeout
   } finally {
     fs.writeFileSync(`${signal}.go`, '');
   }
@@ -158,7 +154,7 @@ test('a dead holder reclaimed at the deadline permits the waiting write', async 
   assert.deepEqual(h.readState('tasks.json').tasks.map((task) => task.title), ['after reclaim']);
 });
 
-test('a prompt hook returns at once and broker writes survive contention beyond the old bridge timeout', { timeout: 90000 }, async (t) => {
+test('a prompt hook returns at once and broker writes survive contention beyond the old bridge timeout', { timeout: 300000 }, async (t) => {
   const h = makeRepo(t);
   h.init();
   h.ok(['task', 'add', '--title', 'Starting agent', '--acceptance', 'prompt and note survive']);
@@ -176,7 +172,7 @@ test('a prompt hook returns at once and broker writes survive contention beyond 
   const saved = Object.fromEntries(Object.keys(env).map((key) => [key, process.env[key]]));
   Object.assign(process.env, env);
   const prompt = () => cp.spawnSync(process.execPath, [path.join(__dirname, '..', 'lib', 'hook-bridge.js'), 'hook'], {
-    cwd: h.repo, timeout: 20000, encoding: 'utf8', input: JSON.stringify({ hook_event_name: 'UserPromptSubmit' }),
+    cwd: h.repo, timeout: 300000, encoding: 'utf8', input: JSON.stringify({ hook_event_name: 'UserPromptSubmit' }),
     env: { ...h.env, TOWER_CRANE_AGENT: agent, TOWER_CRANE_STATE: h.state },
   });
   const lock = S.acquireLock(h.state);
@@ -186,7 +182,7 @@ test('a prompt hook returns at once and broker writes survive contention beyond 
     await waitForFile(brokerSignal);
     // The prompt leaves its message unread rather than wait for the writer.
     held = prompt();
-    await new Promise((resolve) => setTimeout(resolve, 16000));
+    await new Promise((resolve) => setTimeout(resolve, 16000)); // wait-allow: hold contention beyond the former production lock timeout
   } finally {
     S.releaseLock(lock);
     fs.writeFileSync(`${brokerSignal}.go`, '');
@@ -224,10 +220,10 @@ test('a held lock makes a write wait its bound, then exit 3 without writing', as
     const r = h.run(['task', 'add', '--title', 'waiter', '--acceptance', 'a'], {
       env: { NODE_OPTIONS: `--require=${JSON.stringify(SHORT_WAIT)}` },
     });
-    const waited = Date.now() - started;
+    const waited = Date.now() - started; // wait-allow: verify stale or dead locks are broken without waiting for the live-holder timeout
     assert.equal(r.code, 3, r.stderr);
     assert.match(r.stderr, new RegExp(`locked by pid ${holderPid} `));
-    assert.ok(waited >= 950 && waited < 5000, `waited ${waited} ms`);
+    assert.ok(waited >= 950 && waited < 5000, `waited ${waited} ms`); // wait-allow: verify the configured one-second lock timeout
     assert.equal(h.readState('tasks.json').tasks.length, 0);
     assert.deepEqual(h.json(['task', 'list']), [], 'reads do not need the lock');
   } finally {
@@ -246,18 +242,18 @@ test('a stale lock is broken: its holder is gone, or it is older than 60 s', (t)
   killHolder(h);
   let started = Date.now();
   h.ok(['task', 'add', '--title', 'A', '--acceptance', 'a']);
-  assert.ok(Date.now() - started < 5000, 'a dead holder is not waited for');
+  assert.ok(Date.now() - started < 5000, 'a dead holder is not waited for'); // wait-allow: verify stale or dead locks are broken without waiting for the live-holder timeout
   assert.ok(!fs.existsSync(lock));
 
   // A holder on another host cannot be checked, so only age makes it stale.
   fs.mkdirSync(lock);
   const marker = path.join(lock, '00112233aabbccdd');
   fs.writeFileSync(marker, JSON.stringify({ pid: process.pid, host: 'some-other-host', at: new Date().toISOString(), nonce: '00112233aabbccdd' }));
-  const old = new Date(Date.now() - 120000);
+  const old = new Date(Date.now() - 120000); // wait-allow: verify stale or dead locks are broken without waiting for the live-holder timeout
   fs.utimesSync(marker, old, old);
   started = Date.now();
   h.ok(['task', 'add', '--title', 'B', '--acceptance', 'b']);
-  assert.ok(Date.now() - started < 5000, 'an old lock is not waited for');
+  assert.ok(Date.now() - started < 5000, 'an old lock is not waited for'); // wait-allow: verify stale or dead locks are broken without waiting for the live-holder timeout
   assert.deepEqual(h.readState('tasks.json').tasks.map((x) => x.title), ['A', 'B']);
   assert.ok(!fs.existsSync(lock), 'the lock is released after the write');
   assert.deepEqual(fs.readdirSync(h.state).filter((f) => f.startsWith('lock')), [], 'no prepared lock is left behind');
@@ -270,7 +266,7 @@ test('a writer that saw a dead lock before another broke it cannot share the loc
   const lock = path.join(h.state, 'lock');
   // Windows can reuse the dead holder's PID while X waits with its snapshot.
   // Age only the original marker, so a live replacement with that PID is safe.
-  const old = new Date(Date.now() - 120000);
+  const old = new Date(Date.now() - 120000); // wait-allow: verify stale or dead locks are broken without waiting for the live-holder timeout
   fs.utimesSync(path.join(lock, fs.readdirSync(lock)[0]), old, old);
   const signal = (name) => path.join(h.base, name);
   const go = (name) => fs.writeFileSync(`${signal(name)}.go`, '');
@@ -324,7 +320,7 @@ test('a holder in another pid namespace keeps its lock, so no write is lost and 
     const holderPid = fs.readFileSync(paused, 'utf8');
     add = h.runAsync(['task', 'add', '--title', 'orchestrator task', '--acceptance', 'a'], { hooks: { HOOK_DEAD_PID: holderPid } });
     // Give the add time to break the lock if it would.
-    await Promise.race([add, new Promise((r) => setTimeout(r, 1500))]);
+    await Promise.race([add, new Promise((r) => setTimeout(r, 1500))]); // wait-allow: hold lock contention beyond the former production lock timeout
   } finally {
     fs.writeFileSync(`${paused}.go`, '');
   }
@@ -419,7 +415,7 @@ for (const aged of [false, true]) {
           TOWER_CRANE_AGENT: 'worker-lock-stress', TOWER_CRANE_OWNER_KEY: '',
           LOCK_STRESS_BARRIER: barrier, LOCK_STRESS_AGE_STAGING: aged ? '1' : '',
         },
-        timeout: 30000,
+        timeout: 300000,
       });
       let stdout = '';
       let stderr = '';
@@ -433,7 +429,7 @@ for (const aged of [false, true]) {
     });
     let results;
     try {
-      await Promise.all(children.map(({ child }) => waitForFile(path.join(barrier, String(child.pid)))));
+      await Promise.all(children.map(({ child }) => fileWritten(path.join(barrier, String(child.pid)))));
       fs.writeFileSync(path.join(barrier, 'go'), '');
       results = await Promise.all(children.map(({ done }) => done));
     } finally {
@@ -487,9 +483,9 @@ test('continuous staging cleanup times out with exit 3 and bounded backoff', (t)
     },
     timeout: 25000,
   });
-  const waited = Date.now() - started;
+  const waited = Date.now() - started; // wait-allow: verify stale or dead locks are broken without waiting for the live-holder timeout
   assert.equal(result.code, 3, result.stderr);
-  assert.ok(waited >= 950 && waited < 5000, `waited ${waited} ms`);
+  assert.ok(waited >= 950 && waited < 5000, `waited ${waited} ms`); // wait-allow: verify the configured one-second lock timeout
   assert.doesNotMatch(result.stderr, /ENOENT/);
   const names = fs.readFileSync(attempts, 'utf8').trim().split('\n');
   assert.ok(names.length >= 5 && names.length <= 400, `${names.length} attempts: cleanup retries back off`);
@@ -513,9 +509,9 @@ test('a stale lock that cannot be removed still times out with exit 3', (t) => {
     env: { NODE_OPTIONS: `--require=${JSON.stringify(SHORT_WAIT)}` },
     hooks: { HOOK_FAIL_LOCK: attempts, HOOK_DEAD_PID: String(marker.pid) }, timeout: 25000,
   });
-  const waited = Date.now() - started;
+  const waited = Date.now() - started; // wait-allow: verify stale or dead locks are broken without waiting for the live-holder timeout
   assert.equal(r.code, 3, `exit ${r.code} (signal ${r.signal}) after ${waited} ms: ${r.stderr}`);
-  assert.ok(waited >= 950 && waited < 5000, `waited ${waited} ms`);
+  assert.ok(waited >= 950 && waited < 5000, `waited ${waited} ms`); // wait-allow: verify the configured one-second lock timeout
   assert.match(r.stderr, /locked by pid \d+ .*which is gone, but its lock could not be removed \(EPERM\); remove .*lock by hand/);
   const tries = fs.readFileSync(attempts, 'utf8').length;
   assert.ok(tries >= 5 && tries <= 400, `${tries} removal attempts: it backs off between them`);

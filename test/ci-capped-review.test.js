@@ -41,7 +41,7 @@ function fixture(t) {
         suites: [...(build ? [suite('github-actions', 1)] : []), ...suites],
       }));
       const r = cp.spawnSync(process.execPath, ['--require', github, BIN, 'check', 'ci', 'T1', '--agent', 'checker', '--json'], {
-        cwd: h.repo, env: { ...h.env, TEST_GITHUB: file }, encoding: 'utf8', timeout: 60000,
+        cwd: h.repo, env: { ...h.env, TEST_GITHUB: file }, encoding: 'utf8', timeout: 300000,
       });
       const evidence = JSON.parse(r.stdout);
       assert.equal(evidence.sha, sha);

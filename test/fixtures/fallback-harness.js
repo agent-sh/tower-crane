@@ -25,7 +25,7 @@ if (path.resolve(process.argv[1] || '') !== __filename) {
   const args = process.argv.slice(3);
   const file = process.env.TOWER_CRANE_TEST_FALLBACK_FILE;
   const cli = (argv) => cp.execFileSync(process.execPath, [path.join(__dirname, '..', '..', 'bin', 'tower-crane.js'), ...argv], {
-    encoding: 'utf8', timeout: 15000, stdio: ['pipe', 'pipe', 'pipe'],
+    encoding: 'utf8', timeout: 300000, stdio: ['pipe', 'pipe', 'pipe'],
   });
   if (process.env.TOWER_CRANE_TEST_NESTED_DISPATCH && process.env.TOWER_CRANE_AGENT.startsWith('orchestrator-')) {
     const ladder = JSON.parse(cli(['ladder', 'show', '--json']));
@@ -105,5 +105,5 @@ if (path.resolve(process.argv[1] || '') !== __filename) {
     const timer = setInterval(() => {
       if (fs.existsSync(process.env.TOWER_CRANE_TEST_FALLBACK_FINISH)) clearInterval(timer);
     }, 25);
-  } else if (process.env.TOWER_CRANE_TEST_FALLBACK_HOLD) setTimeout(() => {}, Number(process.env.TOWER_CRANE_TEST_FALLBACK_HOLD));
+  } else if (process.env.TOWER_CRANE_TEST_FALLBACK_HOLD) setTimeout(() => {}, Number(process.env.TOWER_CRANE_TEST_FALLBACK_HOLD)); // wait-allow: fixture simulates route duration for fallback and slot contention
 }

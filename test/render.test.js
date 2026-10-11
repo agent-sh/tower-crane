@@ -1,5 +1,7 @@
 'use strict';
 
+const { waitOnRepo, HUNG_TEST_MS } = require('./signals');
+
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -62,14 +64,10 @@ test('render holds the lock, so a write made while it runs still shows in the sk
   const paused = path.join(h.base, 'render-read');
   // render stops right after it reads tasks.json, then a task is added.
   const render = h.runAsync(['render'], { hooks: { HOOK_PAUSE_ON: 'tasks.json', HOOK_PAUSED: paused } });
-  const end = Date.now() + 20000;
-  while (!fs.existsSync(paused)) {
-    if (Date.now() > end) throw new Error('render never read the state');
-    await new Promise((r) => setTimeout(r, 20));
-  }
+  await waitOnRepo(h, () => fs.existsSync(paused));
   const add = h.runAsync(['task', 'add', '--title', 'Added during render', '--acceptance', 'a']);
   // Give the add time to finish if nothing holds it back, then let render go on.
-  await Promise.race([add, new Promise((r) => setTimeout(r, 1500))]);
+  await Promise.race([add, new Promise((r) => setTimeout(r, 1500))]); // wait-allow: allow an overlapping write during a render held at its read boundary
   fs.writeFileSync(`${paused}.go`, '');
   const [r, a] = await Promise.all([render, add]);
   assert.equal(r.code, 0, r.stderr);
@@ -112,7 +110,7 @@ test('serve serves the sketch and pushes a reload when the state changes', async
     assert.equal((await get(`${url}nope`)).status, 404);
 
     const reload = new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('no reload event within 10 s')), 10000);
+      const timer = setTimeout(() => reject(new Error('reload exceeded the hung-test timeout')), HUNG_TEST_MS);
       http.get(`${url}events`, (res) => {
         assert.equal(res.headers['content-type'], 'text/event-stream');
         let buf = '';

@@ -1,12 +1,14 @@
 'use strict';
 
+const { fileWritten, eventAppended, HUNG_TEST_MS } = require('./signals');
+
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
 const http = require('node:http');
-const { once } = require('node:events');
+const { once, EventEmitter } = require('node:events');
 const { cachedFixture, BIN, HOOKS, ROOT } = require('./helpers');
 const { gateFixture, gateEvidence } = require('./gate-helpers');
 
@@ -35,7 +37,7 @@ function setup(t, flags = []) {
   return h;
 }
 
-function child(t, h, args, hooks = {}, ms = 60000) {
+function child(t, h, args, hooks = {}) {
   const p = cp.spawn(process.execPath, ['--require', HOOKS, BIN, ...args], {
     cwd: h.repo, env: { ...h.env, HOOK_STATE: h.state, ...hooks },
   });
@@ -43,8 +45,8 @@ function child(t, h, args, hooks = {}, ms = 60000) {
   let stderr = '';
   p.stdout.on('data', (d) => { stdout += d; });
   p.stderr.on('data', (d) => { stderr += d; });
-  // A failure bound only; waiters time out first and report it.
-  const timer = setTimeout(() => p.kill(), ms);
+  // A hung child cannot hold teardown beyond the suite backstop.
+  const timer = setTimeout(() => p.kill(), HUNG_TEST_MS); // wait-allow: stagger concurrent operations to exercise both race orderings
   const result = once(p, 'close').then(([code]) => {
     clearTimeout(timer);
     return { code, stdout, stderr };
@@ -54,26 +56,18 @@ function child(t, h, args, hooks = {}, ms = 60000) {
   return c;
 }
 
-async function created(file) {
-  const deadline = Date.now() + 5000;
-  // Notifications can be queued behind synchronous CLI setup on Windows.
-  // Readiness is the file itself, including when the event arrives late.
-  while (!fs.existsSync(file)) {
-    if (Date.now() >= deadline) throw new Error(`file not created: ${file}`);
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
-}
+const created = (file) => fileWritten(file);
 
 // A waiter runs software reactions unless it observes. Each test chooses, so a
 // test asserting on manual commands never races an automatic one by accident.
-// seconds bounds the wait; a waiter that sits through gate runs needs longer on a loaded machine.
-async function waiting(t, h, { automation, args = [], hooks = {}, seconds = 30 }) {
+// The suite hung-test timeout also bounds the waiter while gates run.
+async function waiting(t, h, { automation, args = [], hooks = {}, seconds = HUNG_TEST_MS / 1000 }) {
   if (typeof automation !== 'boolean') throw new Error('waiting needs automation: true or false');
   const signal = path.join(h.base, `watch-${require('node:crypto').randomUUID()}`);
   const ready = created(signal);
   const actor = args.includes('--agent') ? [] : ['--agent', 'orchestrator'];
   const observe = automation ? [] : ['--observe'];
-  const c = child(t, h, ['wait', ...actor, ...observe, '--timeout', String(seconds), ...args], { ...hooks, HOOK_WATCH_READY: signal }, Math.max(60000, seconds * 1000 + 5000));
+  const c = child(t, h, ['wait', ...actor, ...observe, '--timeout', String(seconds), ...args], { ...hooks, HOOK_WATCH_READY: signal });
   // A baseline CLI that lacks wait closes immediately; never wait for a marker
   // it cannot write.
   await Promise.race([ready, c.result.then((r) => { throw new Error(`wait exited before watch setup: ${r.code} ${r.stderr}`); })]);
@@ -114,7 +108,7 @@ function commandWorker(h, argv) {
 test('readiness observes a CLI marker without directory watch notifications', async (t) => {
   const h = setup(t);
   const signal = path.join(h.base, 'paused');
-  t.mock.method(fs, 'watch', () => ({ close() {} }));
+  t.mock.method(fs, 'watch', () => Object.assign(new EventEmitter(), { close() {} }));
   const ready = created(signal);
   const writer = h.runAsync(['task', 'note', 'T1', 'ready'], {
     hooks: { HOOK_PAUSE_ON: 'tasks.json', HOOK_PAUSED: signal },
@@ -142,7 +136,7 @@ test('accepted wakes after gates pass; a refused accept emits nothing', async (t
   h.sha = gateFixture(h);
   submit(h);
   h.ok(['project', 'set', '--tests-cmd', 'null']);
-  const result = await waiting(t, h, { automation: true, args: ['--types', 'accepted'], seconds: 60 });
+  const result = await waiting(t, h, { automation: true, args: ['--types', 'accepted'], seconds: 300 });
   const count = log(h).length;
   assert.equal(h.run(['accept', 'T1']).code, 1);
   assert.equal(log(h).length, count);
@@ -157,7 +151,7 @@ test('review and software gate pass or failure wake as evidence with their verdi
   submit(h, ['--pr', '9']);
   for (const type of ['review', 'tests', 'clean', 'ci']) {
     for (const ok of [true, false]) {
-      const result = await waiting(t, h, { automation: false, args: ['--types', 'evidence', '--task', 'T1'], seconds: 60 });
+      const result = await waiting(t, h, { automation: false, args: ['--types', 'evidence', '--task', 'T1'], seconds: 300 });
       if (type === 'review') h.ok(['evidence', 'T1', '--agent', 'reviewer', '--type', type, '--sha', h.sha, '--revision', h.revision(), ok ? '--ok' : '--fail']);
       else gateEvidence(h, type, 'gate-runner', ok);
       const e = await event(result, 'evidence');
@@ -194,7 +188,7 @@ test('confirmed merge gate wakes; a failed gate never produces merged', async (t
   fs.cpSync(path.join(ROOT, 'lib'), path.join(dir, 'lib'), { recursive: true });
   fs.writeFileSync(path.join(dir, 'lib', 'gates', 'merge.js'), 'exports.run = async () => ({ ok: false, summary: "refused merge" });\n');
   const result = await waiting(t, h, { automation: false, args: ['--types', 'merged'] });
-  const r = cp.spawnSync(process.execPath, [path.join(dir, 'bin', 'tower-crane.js'), 'merge', 'T1'], { cwd: h.repo, env: h.env, encoding: 'utf8', timeout: 10000 });
+  const r = cp.spawnSync(process.execPath, [path.join(dir, 'bin', 'tower-crane.js'), 'merge', 'T1'], { cwd: h.repo, env: h.env, encoding: 'utf8', timeout: 300000 });
   assert.equal(r.status, 1, r.stderr);
   assert.ok(!log(h).some((e) => e.type === 'merged'));
   h.ok(['merge', 'T1']);
@@ -222,13 +216,10 @@ test('a manual merge racing the merge queue under another task\'s reaction: one 
     const after = String(fs.statSync(path.join(h.state, 'events.jsonl')).size);
     // State call jitter spreads the two merges over each other's checks.
     const jitter = { HOOK_JITTER_MS: '15' };
-    const automatic = child(t, h, ['wait', '--agent', 'orchestrator', '--after', after, '--task', upper, '--types', 'merged', '--timeout', '30'], jitter);
+    const automatic = child(t, h, ['wait', '--agent', 'orchestrator', '--after', after, '--task', upper, '--types', 'merged', '--timeout', '300'], jitter);
     // Start near the queue's move from the lower task to the upper one.
-    const deadline = Date.now() + 20000;
-    while (!log(h).some((e) => e.type === 'merged' && e.task === lower) && Date.now() < deadline) {
-      await new Promise((resolve) => setTimeout(resolve, 10));
-    }
-    await new Promise((resolve) => setTimeout(resolve, (i % 5) * 120));
+    await eventAppended(path.join(h.state, 'events.jsonl'), (event) => event.type === 'merged' && event.task === lower, { signal: t.signal });
+    await new Promise((resolve) => setTimeout(resolve, (i % 5) * 120)); // wait-allow: stagger concurrent operations to exercise both race orderings
     const manual = await h.runAsync(['merge', upper], { hooks: jitter });
     assert.equal(manual.code, 0, `${upper}: ${manual.stderr}`);
     await event(automatic, 'merged', upper);
@@ -277,8 +268,8 @@ test('a manual merge racing an automatic merge of the same task: one merges, the
     // Odd rounds start together; even rounds stagger the manual merge, so
     // either side reaches GitHub first.
     const after = String(fs.statSync(path.join(h.state, 'events.jsonl')).size);
-    const automatic = child(t, h, ['wait', '--agent', 'orchestrator', '--after', after, '--task', id, '--types', 'merged', '--timeout', '30']);
-    await new Promise((resolve) => setTimeout(resolve, i % 2 ? 0 : (i % 10) * 20));
+    const automatic = child(t, h, ['wait', '--agent', 'orchestrator', '--after', after, '--task', id, '--types', 'merged', '--timeout', '300']);
+    await new Promise((resolve) => setTimeout(resolve, i % 2 ? 0 : (i % 10) * 20)); // wait-allow: stagger concurrent operations to exercise both race orderings
     const manual = await h.runAsync(['merge', id]);
     assert.equal(manual.code, 0, `${id}: ${manual.stderr}`);
     const woke = await event(automatic, 'merged', id);
@@ -307,11 +298,11 @@ test('worker messages use recipient and task filters, and can resume by id or of
   assert.equal(first.detail.text, 'need input\nnext line');
   h.ok(['msg', '--to', 'orchestrator', '--task', 'T1', 'during handling']);
   for (const after of [first.id, String(first.offset)]) {
-    const replay = h.run(['wait', '--agent', 'orchestrator', '--after', after, '--types', 'worker-message', '--timeout', '0.1']);
+    const replay = h.run(['wait', '--agent', 'orchestrator', '--after', after, '--types', 'worker-message', '--timeout', '0.1']); // wait-allow: verify the CLI observation, filtering or timeout contract with already-published state
     const e = await event(Promise.resolve(replay), 'worker-message');
     assert.equal(e.detail.text, 'during handling');
   }
-  const direct = h.run(['wait', '--agent', 'orchestrator', '--after', '0', '--for', 'another-agent', '--timeout', '0.1']);
+  const direct = h.run(['wait', '--agent', 'orchestrator', '--after', '0', '--for', 'another-agent', '--timeout', '0.1']); // wait-allow: verify the CLI observation, filtering or timeout contract with already-published state
   assert.equal(JSON.parse(direct.stdout).detail.text, 'other recipient');
 });
 
@@ -393,13 +384,13 @@ setInterval(() => {}, 1000);\n`);
   assert.match(h.json(['status']).exited_claims[0].tail, /worker alive/);
   assert.equal(log(h).filter((e) => e.type === 'worker-exited').length, 1);
   assert.equal(h.readState('tasks.json').tasks[0].status, 'in_progress');
-  assert.equal(h.run(['wait', '--agent', 'orchestrator', '--types', 'worker-exited', '--timeout', '0.1']).code, 2);
+  assert.equal(h.run(['wait', '--agent', 'orchestrator', '--types', 'worker-exited', '--timeout', '0.1']).code, 2); // wait-allow: verify the CLI observation, filtering or timeout contract with already-published state
   const recovery = await waiting(t, h, { automation: false, args: ['--types', 'released', '--agent', 'observer'] });
   h.ok(['release', 'T1', '--reason', 'spawned worker exited', '--agent', 'orchestrator']);
   assert.equal((await event(recovery, 'released')).detail.exited_spawn.pid, spawned.pid);
   assert.equal(h.readState('tasks.json').tasks[0].status, 'todo');
   h.ok(['claim', 'T1', '--agent', 'replacement']);
-  assert.equal(h.run(['wait', '--agent', 'orchestrator', '--types', 'worker-exited', '--timeout', '0.1']).code, 2, 'recovery does not report the old spawn against a replacement');
+  assert.equal(h.run(['wait', '--agent', 'orchestrator', '--types', 'worker-exited', '--timeout', '0.1']).code, 2, 'recovery does not report the old spawn against a replacement'); // wait-allow: verify the CLI observation, filtering or timeout contract with already-published state
 });
 
 test('submitted spawned workers never emit worker-exited', async (t) => {
@@ -412,7 +403,7 @@ const r = cp.spawnSync(process.execPath, [${JSON.stringify(BIN)}, ...args], { en
   h.ok(['brief', 'set', 'T1', '-'], { input: 'stand-in\n' });
   commandWorker(h, [process.execPath, script]);
   h.ok(['spawn', '--task', 'T1', '--wait']);
-  const r = h.run(['wait', '--agent', 'orchestrator', '--types', 'worker-exited', '--timeout', '0.1']);
+  const r = h.run(['wait', '--agent', 'orchestrator', '--types', 'worker-exited', '--timeout', '0.1']); // wait-allow: verify the CLI observation, filtering or timeout contract with already-published state
   assert.equal(r.code, 2);
   assert.deepEqual(JSON.parse(r.stdout), { type: 'timeout', offset: fs.statSync(path.join(h.state, 'events.jsonl')).size });
 });
@@ -437,7 +428,7 @@ setInterval(() => {}, 1000);\n`);
     commandWorker(h, [process.execPath, '-e', 'process.exit(0)', '{prompt}']);
     const exited = h.json(['spawn', '--task', 'T2', '--wait']);
     const args = command === 'wait'
-      ? ['wait', '--task', 'T1', '--after', '0', '--types', 'worker-exited', '--timeout', '0.1']
+      ? ['wait', '--task', 'T1', '--after', '0', '--types', 'worker-exited', '--timeout', '0.1'] // wait-allow: verify the CLI observation, filtering or timeout contract with already-published state
       : ['spend', 'T2', '--from-spawn', exited.agent];
     const result = h.run([...args, '--agent', exited.agent], {
       env: { TOWER_CRANE_TASK: 'T2', TOWER_CRANE_AGENT: exited.agent },
@@ -461,7 +452,7 @@ test('a spawned worker that exits before claiming wakes without waiting for a le
   assert.equal(e.detail.agent, started.agent);
   assert.equal(e.detail.attempt, started.attempt);
   assert.equal(h.readState('tasks.json').tasks[0].claim, null);
-  assert.equal(h.run(['wait', '--agent', 'orchestrator', '--types', 'worker-exited', '--timeout', '0.1']).code, 2);
+  assert.equal(h.run(['wait', '--agent', 'orchestrator', '--types', 'worker-exited', '--timeout', '0.1']).code, 2); // wait-allow: verify the CLI observation, filtering or timeout contract with already-published state
 });
 
 test('exit observers include attempts for spawns recorded without an attempt field', (t) => {
@@ -487,7 +478,7 @@ fs.readFileSync = function(file, ...args) {
 `);
   const opts = { env: { NODE_OPTIONS: `--require "${hook.replace(/\\/g, '/')}"` } };
   const started = h.json(['spawn', '--task', 'T1', '--wait'], opts);
-  const observed = h.json(['wait', '--agent', 'orchestrator', '--after', String(cursor), '--types', 'worker-exited', '--timeout', '1'], opts);
+  const observed = h.json(['wait', '--agent', 'orchestrator', '--after', String(cursor), '--types', 'worker-exited', '--timeout', '300'], opts);
   assert.equal(observed.detail.pid, started.pid);
   assert.equal(observed.detail.attempt, 2);
   assert.equal(observed.detail.attempt, started.attempt);
@@ -504,7 +495,7 @@ test('a lease stale without progress emits stall only once across waiters', asyn
   const e = await event(result, 'stall');
   assert.equal(e.detail.agent, 'worker');
   fs.writeFileSync(clock, String(start + 120002));
-  const r = h.run(['wait', '--types', 'stall', '--timeout', '0.1', '--agent', 'worker'], { hooks: { HOOK_CLOCK_FILE: clock } });
+  const r = h.run(['wait', '--types', 'stall', '--timeout', '0.1', '--agent', 'worker'], { hooks: { HOOK_CLOCK_FILE: clock } }); // wait-allow: verify the CLI observation, filtering or timeout contract with already-published state
   assert.equal(r.code, 2);
   assert.equal(log(h).filter((x) => x.type === 'stall').length, 1);
 });
@@ -517,7 +508,7 @@ test('workers consume stall observations without detecting stale leases themselv
   fs.writeFileSync(clock, String(start));
   h.ok(['claim', 'T1', '--lease', '1', '--agent', 'worker'], { hooks });
   fs.writeFileSync(clock, String(start + 60001));
-  const args = ['wait', '--types', 'stall', '--after', '0', '--timeout', '0.1'];
+  const args = ['wait', '--types', 'stall', '--after', '0', '--timeout', '0.1']; // wait-allow: verify the CLI observation, filtering or timeout contract with already-published state
   assert.equal(h.run([...args, '--agent', 'worker'], { hooks }).code, 2);
   assert.equal(log(h).filter((e) => e.type === 'stall').length, 0);
   const observed = await event(Promise.resolve(h.run([...args, '--agent', 'orchestrator'], { hooks })), 'stall');
@@ -538,7 +529,7 @@ test('a spawned orchestrator observes stale leases under its generated identity'
   fs.writeFileSync(clock, String(start));
   h.ok(['claim', 'T1', '--lease', '1', '--agent', 'worker'], { hooks });
   fs.writeFileSync(clock, String(start + 60001));
-  const result = h.run(['wait', '--agent', observer.agent, '--types', 'stall', '--timeout', '0.1'], {
+  const result = h.run(['wait', '--agent', observer.agent, '--types', 'stall', '--timeout', '0.1'], { // wait-allow: verify the CLI observation, filtering or timeout contract with already-published state
     env: { TOWER_CRANE_TASK: 'T1', TOWER_CRANE_AGENT: observer.agent }, hooks,
   });
   assert.equal((await event(Promise.resolve(result), 'stall')).agent, observer.agent);
@@ -553,10 +544,10 @@ test('worker progress after lease expiry postpones stall until progress is stale
   h.ok(['claim', 'T1', '--lease', '1', '--agent', 'worker'], { hooks });
   fs.writeFileSync(clock, String(start + 60001));
   h.ok(['task', 'note', 'T1', 'making progress', '--agent', 'worker'], { hooks });
-  const r = h.run(['wait', '--agent', 'orchestrator', '--types', 'stall', '--timeout', '0.1'], { hooks });
+  const r = h.run(['wait', '--agent', 'orchestrator', '--types', 'stall', '--timeout', '0.1'], { hooks }); // wait-allow: verify the CLI observation, filtering or timeout contract with already-published state
   assert.equal(r.code, 2, r.stderr || r.stdout);
   fs.writeFileSync(clock, String(start + 120002));
-  const e = h.run(['wait', '--agent', 'orchestrator', '--types', 'stall', '--timeout', '0.1'], { hooks });
+  const e = h.run(['wait', '--agent', 'orchestrator', '--types', 'stall', '--timeout', '0.1'], { hooks }); // wait-allow: verify the CLI observation, filtering or timeout contract with already-published state
   await event(Promise.resolve(e), 'stall');
 });
 
@@ -573,10 +564,10 @@ test('an observer waiting for the state lock does not block its timeout', async 
   await ready;
   fs.writeFileSync(clock, String(start + 60001));
   const before = performance.now();
-  const r = h.run(['wait', '--agent', 'orchestrator', '--types', 'stall', '--timeout', '0.1'], { hooks });
+  const r = h.run(['wait', '--agent', 'orchestrator', '--types', 'stall', '--timeout', '0.1'], { hooks }); // wait-allow: verify the CLI observation, filtering or timeout contract with already-published state
   assert.equal(r.code, 2, r.stderr);
   assert.deepEqual(JSON.parse(r.stdout), { type: 'timeout', offset: fs.statSync(path.join(h.state, 'events.jsonl')).size });
-  assert.ok(performance.now() - before < 2000, 'timeout is not held by the lock retry deadline');
+  assert.ok(performance.now() - before < 2000, 'timeout is not held by the lock retry deadline'); // wait-allow: verify the CLI timeout is independent of state-lock contention
   fs.writeFileSync(`${paused}.go`, '');
   assert.equal((await writer.result).code, 0);
 });
@@ -592,10 +583,10 @@ test('startup reconciliation with an active PR does not hold a timeout behind th
   await ready;
   try {
     const before = performance.now();
-    const result = h.run(['wait', '--agent', 'orchestrator', '--types', 'never', '--timeout', '0.1']);
+    const result = h.run(['wait', '--agent', 'orchestrator', '--types', 'never', '--timeout', '0.1']); // wait-allow: verify the CLI observation, filtering or timeout contract with already-published state
     assert.equal(result.code, 2, result.stderr);
     assert.equal(JSON.parse(result.stdout).type, 'timeout');
-    assert.ok(performance.now() - before < 2000, 'reconciliation waits for another notification rather than blocking');
+    assert.ok(performance.now() - before < 2000, 'reconciliation waits for another notification rather than blocking'); // wait-allow: verify reconciliation does not block the CLI timeout
     assert.equal(log(h).filter((e) => e.cmd === 'automation reconcile').length, 0);
   } finally {
     fs.writeFileSync(`${paused}.go`, '');
@@ -606,7 +597,7 @@ test('startup reconciliation with an active PR does not hold a timeout behind th
 test('timeout and invalid cursors have bounded exits and default now ignores history', async (t) => {
   const h = setup(t);
   h.ok(['msg', '--to', 'orchestrator', 'already handled']);
-  const r = h.run(['wait', '--agent', 'orchestrator', '--timeout', '0.05', '--json']);
+  const r = h.run(['wait', '--agent', 'orchestrator', '--timeout', '0.05', '--json']); // wait-allow: verify the CLI observation, filtering or timeout contract with already-published state
   assert.equal(r.code, 2);
   assert.deepEqual(JSON.parse(r.stdout), { type: 'timeout', offset: fs.statSync(path.join(h.state, 'events.jsonl')).size });
   assert.equal(r.stderr, '');
@@ -625,7 +616,7 @@ test('startup takes a current cursor before reading state and retains events dur
   assert.equal(cursor.offset, fs.statSync(path.join(h.state, 'events.jsonl')).size);
   h.json(['status']);
   h.ok(['task', 'note', 'T1', 'during state reconciliation']);
-  const r = h.run(['wait', '--agent', 'orchestrator', '--after', String(cursor.offset), '--timeout', '0.1']);
+  const r = h.run(['wait', '--agent', 'orchestrator', '--after', String(cursor.offset), '--timeout', '0.1']); // wait-allow: verify the CLI observation, filtering or timeout contract with already-published state
   assert.equal((await event(Promise.resolve(r), 'owner-comment')).detail.text, 'during state reconciliation');
 });
 
@@ -643,7 +634,7 @@ test('startup snapshots leave stale leases for the subsequent blocking wait to o
   const cursor = JSON.parse(snapshot.stdout);
   assert.equal(cursor.type, 'timeout');
   assert.equal(fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8'), before);
-  const r = h.run(['wait', '--agent', 'orchestrator', '--after', String(cursor.offset), '--types', 'stall', '--timeout', '0.1'], { hooks });
+  const r = h.run(['wait', '--agent', 'orchestrator', '--after', String(cursor.offset), '--types', 'stall', '--timeout', '0.1'], { hooks }); // wait-allow: verify the CLI observation, filtering or timeout contract with already-published state
   assert.equal((await event(Promise.resolve(r), 'stall')).agent, 'orchestrator');
 });
 
@@ -653,13 +644,13 @@ test('wait skips its own writes and advances timeout cursors past filtered event
   h.ok(['task', 'note', 'T1', 'own progress', '--agent', 'orchestrator']);
   h.ok(['msg', '--to', 'orchestrator', 'own message', '--agent', 'orchestrator']);
   h.ok(['msg', '--to', 'someone-else', 'other recipient', '--agent', 'worker']);
-  const r = h.run(['wait', '--agent', 'orchestrator', '--after', String(after), '--timeout', '0.05']);
+  const r = h.run(['wait', '--agent', 'orchestrator', '--after', String(after), '--timeout', '0.05']); // wait-allow: verify the CLI observation, filtering or timeout contract with already-published state
   assert.equal(r.code, 2, r.stdout || r.stderr);
   const cursor = JSON.parse(r.stdout);
   assert.equal(cursor.type, 'timeout');
   assert.equal(cursor.offset, fs.statSync(path.join(h.state, 'events.jsonl')).size);
   h.ok(['msg', '--to', 'orchestrator', '--task', 'T1', 'worker result', '--agent', 'worker']);
-  const result = h.run(['wait', '--agent', 'orchestrator', '--after', String(cursor.offset), '--timeout', '0.1']);
+  const result = h.run(['wait', '--agent', 'orchestrator', '--after', String(cursor.offset), '--timeout', '0.1']); // wait-allow: verify the CLI observation, filtering or timeout contract with already-published state
   assert.equal((await event(Promise.resolve(result), 'worker-message')).detail.text, 'worker result');
 });
 
@@ -678,7 +669,7 @@ test('owner identity waits retain owner comments, answers, owner-done and messag
     [['msg', '--to', 'orchestrator', '--task', 'T1', 'owner message'], 'worker-message', 'T1'],
   ]) {
     h.ok([...args, '--agent', 'owner']);
-    const r = h.run(['wait', '--agent', 'owner', '--after', String(after), '--task', 'T1', '--types', type, '--timeout', '0.1']);
+    const r = h.run(['wait', '--agent', 'owner', '--after', String(after), '--task', 'T1', '--types', type, '--timeout', '0.1']); // wait-allow: verify the CLI observation, filtering or timeout contract with already-published state
     const e = await event(Promise.resolve(r), type, task);
     assert.equal(e.agent, 'owner');
     after = e.offset;
@@ -788,7 +779,7 @@ test('serve preserves an owner comment fragmented inside UTF-8 bytes', async (t)
     req.on('error', reject);
     req.write(body.subarray(0, split));
     // Deliver the continuation as another network chunk, splitting the emoji.
-    setTimeout(() => req.end(body.subarray(split)), 25);
+    setTimeout(() => req.end(body.subarray(split)), 25); // wait-allow: stagger concurrent operations to exercise both race orderings
   });
   assert.equal(reply.status, 200);
   assert.equal(reply.body.text, text);

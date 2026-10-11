@@ -1,5 +1,7 @@
 'use strict';
 
+const { waitOnRepo } = require('./signals');
+
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -124,7 +126,7 @@ test('one fixture exposes every inbox kind and resolving commands clear their co
   assert.equal(merges.length, 1);
   assert.equal(merges[0][merges[0].indexOf('--match-head-commit') + 1], h.sha);
   const worker = path.join(h.base, 'worker.js');
-  fs.writeFileSync(worker, 'setTimeout(() => {}, 60000);\n');
+  fs.writeFileSync(worker, 'setInterval(() => {}, 1000);\n');
   h.ok(['ladder', 'set', 'medium', '--harness', 'command', '--command', JSON.stringify([process.execPath, worker, '{prompt}']), '--clear', 'profile', '--clear', 'effort']);
   const dispatch = h.run(['spawn', '--ready', '--agent', 'orchestrator', '--json']);
   assert.equal(dispatch.code, 0, dispatch.stdout + dispatch.stderr);
@@ -179,7 +181,7 @@ test('ready dispatch respects worker slots and unobservable processes cannot be 
   assert.deepEqual(h.json(['release', '--dead', '--agent', 'orchestrator']).results, []);
   assert.deepEqual(h.readState('tasks.json'), before);
   const worker = path.join(h.base, 'worker.js');
-  fs.writeFileSync(worker, 'setTimeout(() => {}, 60000);\n');
+  fs.writeFileSync(worker, 'setInterval(() => {}, 1000);\n');
   h.ok(['ladder', 'set', 'medium', '--harness', 'command', '--command', JSON.stringify([process.execPath, worker, '{prompt}']), '--clear', 'profile', '--clear', 'effort']);
   const dispatch = h.run(['spawn', '--ready', '--agent', 'orchestrator', '--json']);
   assert.equal(dispatch.code, 0, dispatch.stdout + dispatch.stderr);
@@ -223,7 +225,7 @@ test('new inbox items wake through wait and unchanged snapshots do not wake twic
   const h = setup(t);
   h.add('Ready');
   const before = fs.statSync(path.join(h.state, 'events.jsonl')).size;
-  const args = ['wait', '--inbox', '--observe', '--after', String(before), '--types', 'inbox item', '--timeout', '0.2', '--agent', 'orchestrator'];
+  const args = ['wait', '--inbox', '--observe', '--after', String(before), '--types', 'inbox item', '--timeout', '0.2', '--agent', 'orchestrator']; // wait-allow: verify the CLI observation, filtering or timeout contract with already-published state
   const wake = h.run(args);
   assert.equal(wake.code, 0, wake.stderr);
   assert.equal(JSON.parse(wake.stdout).detail.item, 'ready:T1');
@@ -314,11 +316,7 @@ test('accepted batch waits for the queue, merges capped and crashed revuto check
     return result;
   });
   try {
-    const deadline = Date.now() + 10000;
-    while (!h.logs().some((e) => e.cmd === 'merge queue' && e.detail.phase === 'requested')) {
-      assert.ok(Date.now() < deadline, 'batch requested the busy queue');
-      await new Promise((resolve) => setTimeout(resolve, 20));
-    }
+    await waitOnRepo(h, () => h.logs().some((e) => e.cmd === 'merge queue' && e.detail.phase === 'requested'));
     assert.equal(settled, false, 'batch waits until the queue is released');
     assert.equal(h.github().calls.filter((a) => a[1] === 'merge').length, 0);
   } finally {
@@ -387,7 +385,7 @@ test('GitHub-only findings wake the watcher and endpoint failures retain other f
   const id = h.add('Remote review');
   h.submit(id, 8);
   const after = () => String(fs.statSync(path.join(h.state, 'events.jsonl')).size);
-  const wait = () => h.run(['wait', '--inbox', '--observe', '--after', after(), '--types', 'inbox item', '--timeout', '0.1', '--agent', 'orchestrator']);
+  const wait = () => h.run(['wait', '--inbox', '--observe', '--after', after(), '--types', 'inbox item', '--timeout', '0.1', '--agent', 'orchestrator']); // wait-allow: verify the CLI observation, filtering or timeout contract with already-published state
   assert.equal(wait().code, 2);
   const github = h.github();
   github.revuto = { name: 'review', app: { slug: 'revuto-review' }, status: 'completed', conclusion: 'failure', output: { summary: 'Bounds check missing' } };
@@ -435,7 +433,7 @@ test('verified workers cannot use orchestrator inbox or batch tools', (t) => {
   assert.equal(result.code, 0, result.stderr);
   assert.equal(JSON.parse(result.stdout).result.isError, true);
   assert.deepEqual(h.logs(), before);
-  const wait = h.run(['wait', '--inbox', '--observe', '--after', 'now', '--timeout', '0.01', '--agent', env.TOWER_CRANE_AGENT], { env });
+  const wait = h.run(['wait', '--inbox', '--observe', '--after', 'now', '--timeout', '0.01', '--agent', env.TOWER_CRANE_AGENT], { env }); // wait-allow: verify the CLI observation, filtering or timeout contract with already-published state
   assert.equal(wait.code, 2, wait.stderr);
   assert.deepEqual(h.logs(), before, 'a worker observer emits no inbox notifications');
 });
@@ -511,7 +509,8 @@ test('MCP discovery works before project initialization and tool errors remain J
     { id: 4, method: 'ping' },
   ].map((r) => JSON.stringify({ jsonrpc: '2.0', ...r })).join('\n') + '\n';
   for (const cwd of [h.repo, h.base]) {
-    const result = h.run(['mcp', '--agent', 'orchestrator'], { cwd, input });
+    // A temp root inside another checkout must not discover that project's state.
+    const result = h.run(['mcp', '--agent', 'orchestrator'], { cwd, input, env: { TOWER_CRANE_STATE: h.state } });
     assert.equal(result.code, 0, result.stderr);
     const replies = result.stdout.trim().split('\n').map(JSON.parse);
     assert.deepEqual(replies.map((r) => r.id), [1, 2, 3, 4]);

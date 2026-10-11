@@ -25,7 +25,7 @@ const hooks = [];
 `);
   const r = cp.spawnSync(process.execPath, [runner], {
     env: { ...h.env, TOWER_CRANE_TEST_CHROME: chrome, TOWER_CRANE_TEST_TMP: h.base, TOWER_CRANE_SANDBOX: sandbox, CHROME_REPORT: path.join(h.base, 'chrome.json') },
-    encoding: 'utf8', timeout: 15000,
+    encoding: 'utf8', timeout: 300000,
   });
   assert.equal(r.status, 0, `${r.error || ''}\n${r.stderr}`);
   return JSON.parse(r.stdout);

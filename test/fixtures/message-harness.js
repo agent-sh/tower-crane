@@ -13,7 +13,7 @@ async function main() {
   const prompt = args.find((a) => a.includes('## Task') || a.includes('## Rework') || a.includes('Previous attempt')) || '';
   const out = { prompt, turns: [], blocked: false };
   const cli = (...argv) => {
-    const r = cp.spawnSync(process.execPath, [BIN, ...argv, '--agent', process.env.TOWER_CRANE_AGENT], { encoding: 'utf8', timeout: 15000 });
+    const r = cp.spawnSync(process.execPath, [BIN, ...argv, '--agent', process.env.TOWER_CRANE_AGENT], { encoding: 'utf8', timeout: 300000 });
     if (r.status) throw new Error(r.stderr);
   };
   const event = (value) => console.log(JSON.stringify(value));
@@ -45,10 +45,10 @@ async function main() {
     return;
   }
   fs.writeFileSync(process.env.MESSAGE_READY, '');
-  const deadline = Date.now() + 15000;
+  const deadline = Date.now() + 300000;
   while (!fs.existsSync(process.env.MESSAGE_READY + '.go')) {
     if (Date.now() >= deadline) throw new Error('message test never released harness');
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    await new Promise((resolve) => setTimeout(resolve, 10)); // wait-allow: probe cadence only; the release signal and hung-test timeout bound this fixture
   }
   if (harness === 'claude' && process.env.MESSAGE_HEADLESS) {
     // Stop is asked twice, so the test shows the hold is taken once. A resumed
@@ -58,7 +58,7 @@ async function main() {
     const hookWith = (name, body) => {
       const command = settings.hooks[name][0].hooks[0].command;
       const text = cp.execSync(command, {
-        input: JSON.stringify({ hook_event_name: name, ...body }), encoding: 'utf8', timeout: 15000,
+        input: JSON.stringify({ hook_event_name: name, ...body }), encoding: 'utf8', timeout: 300000,
       }).trim();
       return text ? JSON.parse(text) : {};
     };
@@ -82,7 +82,7 @@ async function main() {
       const command = settings.hooks[name][0].hooks[0].command;
       const text = cp.execSync(command, {
         input: JSON.stringify({ hook_event_name: name, tool_name: 'Bash', agent: 'owner', task: 'T999', last_assistant_message: `last report from ${harness}` }),
-        encoding: 'utf8', timeout: 15000,
+        encoding: 'utf8', timeout: 300000,
       }).trim();
       return text ? JSON.parse(text) : {};
     };
@@ -91,7 +91,7 @@ async function main() {
     fs.writeFileSync(process.env.MESSAGE_READY + '.stop', '');
     while (!fs.existsSync(process.env.MESSAGE_READY + '.stop.go')) {
       if (Date.now() >= deadline) throw new Error('stop test never released harness');
-      await new Promise((resolve) => setTimeout(resolve, 10));
+      await new Promise((resolve) => setTimeout(resolve, 10)); // wait-allow: probe cadence only; the release signal and hung-test timeout bound this fixture
     }
     const held = hook('Stop');
     out.blocked = held.decision === 'block';
@@ -111,7 +111,7 @@ async function main() {
     fs.writeFileSync(process.env.MESSAGE_READY + '.stop', '');
     while (!fs.existsSync(process.env.MESSAGE_READY + '.stop.go')) {
       if (Date.now() >= deadline) throw new Error('stop test never released harness');
-      await new Promise((resolve) => setTimeout(resolve, 10));
+      await new Promise((resolve) => setTimeout(resolve, 10)); // wait-allow: probe cadence only; the release signal and hung-test timeout bound this fixture
     }
     await handlers.agent_end({ messages: [{ role: 'assistant', content: [{ type: 'text', text: 'last report from pi' }] }] });
     await handlers.agent_end({ messages: [{ role: 'assistant', content: [{ type: 'text', text: 'last report from pi' }] }] });
@@ -143,7 +143,7 @@ async function main() {
     fs.writeFileSync(process.env.MESSAGE_READY + '.stop', '');
     while (!fs.existsSync(process.env.MESSAGE_READY + '.stop.go')) {
       if (Date.now() >= deadline) throw new Error('stop test never released harness');
-      await new Promise((resolve) => setTimeout(resolve, 10));
+      await new Promise((resolve) => setTimeout(resolve, 10)); // wait-allow: probe cadence only; the release signal and hung-test timeout bound this fixture
     }
     await idle('parent');
     event({ type: 'text', part: { text: 'last report from opencode' } });
@@ -161,7 +161,7 @@ async function main() {
   }
   if (process.env.MESSAGE_COMMANDS === '1') {
     const run = (tool, argv) => {
-      const r = cp.spawnSync(tool, argv, { encoding: 'utf8', timeout: 15000, shell: process.platform === 'win32' });
+      const r = cp.spawnSync(tool, argv, { encoding: 'utf8', timeout: 300000, shell: process.platform === 'win32' });
       if (r.status !== 0) throw new Error(r.stderr || r.error?.message);
     };
     run('git', ['push', process.env.MESSAGE_REMOTE, 'HEAD:refs/heads/probe']);

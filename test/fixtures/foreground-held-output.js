@@ -11,7 +11,7 @@ const fs = require('node:fs');
 const ready = process.argv[1];
 const release = process.argv[2];
 fs.writeFileSync(ready, String(process.pid));
-const deadline = Date.now() + 30000;
+const deadline = Date.now() + 300000;
 while (!fs.existsSync(release) && Date.now() < deadline) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
 }

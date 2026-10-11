@@ -1,5 +1,7 @@
 'use strict';
 
+const { waitOnRepo } = require('./signals');
+
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -20,13 +22,7 @@ function setup(t, workers = 1, tasks = 3) {
   });
 }
 
-async function until(fn, message) {
-  const deadline = Date.now() + 10000;
-  while (!fn()) {
-    if (Date.now() >= deadline) assert.fail(message);
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
-}
+
 
 function controlledHarness(h) {
   const script = path.join(h.base, 'worker.js');
@@ -41,7 +37,7 @@ if (process.env.SLOT_RETRY && process.env.TOWER_CRANE_RETRY === '0') process.exi
 const timer = setInterval(() => {
   if (fs.existsSync(path.join(base, task + '.claim'))) {
     fs.unlinkSync(path.join(base, task + '.claim'));
-    const r = cp.spawnSync(process.execPath, [process.argv[2], 'claim', task], { encoding: 'utf8', timeout: 10000 });
+    const r = cp.spawnSync(process.execPath, [process.argv[2], 'claim', task], { encoding: 'utf8', timeout: 300000 });
     fs.writeFileSync(path.join(base, task + '.claimed'), JSON.stringify({ code: r.status, stderr: r.stderr }));
   }
   if (fs.existsSync(path.join(base, task + '.exit'))) {
@@ -89,7 +85,7 @@ test('concurrent dispatch reserves the last slot until claim and does not double
   const task = winner.agent.includes('T1') ? 'T1' : 'T2';
   const loser = task === 'T1' ? 'T2' : 'T1';
   assert.match(results.find((r) => r.code !== 0).stderr, new RegExp(`${task}.*${winner.agent}`));
-  await until(() => fs.existsSync(path.join(h.base, `${task}.started`)), 'worker did not start');
+  await waitOnRepo(h, () => fs.existsSync(path.join(h.base, `${task}.started`)), 'worker did not start');
   assert.ok(!fs.existsSync(path.join(h.base, `${loser}.started`)));
   assert.equal(events(h).filter((e) => e.cmd === 'spawn').length, 1);
   const claim = h.run(['claim', 'T3', '--agent', 'manual']);
@@ -108,12 +104,12 @@ test('a delayed child claim consumes its reservation when every slot is held', a
   controlledHarness(h);
   h.ok(['claim', 'T3', '--agent', 'manual']);
   const spawned = h.json(['spawn', '--task', 'T1']);
-  await until(() => fs.existsSync(path.join(h.base, 'T1.started')), 'worker did not start');
+  await waitOnRepo(h, () => fs.existsSync(path.join(h.base, 'T1.started')), 'worker did not start');
   const stranger = h.run(['claim', 'T1', '--agent', 'stranger']);
   assert.equal(stranger.code, 1, stranger.stderr);
   assert.match(stranger.stderr, /T1.*worker-T1-1.*reservation/);
   fs.writeFileSync(path.join(h.base, 'T1.claim'), '');
-  await until(() => fs.existsSync(path.join(h.base, 'T1.claimed')), 'worker did not claim');
+  await waitOnRepo(h, () => fs.existsSync(path.join(h.base, 'T1.claimed')), 'worker did not claim');
   const claim = JSON.parse(fs.readFileSync(path.join(h.base, 'T1.claimed'), 'utf8'));
   assert.equal(claim.code, 0, claim.stderr);
   assert.equal(h.readState('tasks.json').tasks[0].claim.agent, spawned.agent);
@@ -129,10 +125,10 @@ test('an unclaimed exit and a failed launch both free the reserved slot', async 
   assert.equal(events(h).filter((e) => e.cmd === 'spawn').length, 0);
   const spawned = h.json(['spawn', '--task', 'T1']);
   assert.equal(spawned.agent, 'worker-T1-1');
-  await until(() => fs.existsSync(path.join(h.base, 'T1.started')), 'worker did not start');
+  await waitOnRepo(h, () => fs.existsSync(path.join(h.base, 'T1.started')), 'worker did not start');
   assert.equal(h.run(['claim', 'T2', '--agent', 'manual']).code, 1);
   fs.writeFileSync(path.join(h.base, 'T1.exit'), '');
-  await until(() => events(h).some((e) => e.cmd === 'spawn exit' && e.detail.agent === spawned.agent), 'exit was not recorded');
+  await waitOnRepo(h, () => events(h).some((e) => e.cmd === 'spawn exit' && e.detail.agent === spawned.agent), 'exit was not recorded');
   h.ok(['claim', 'T2', '--agent', 'manual']);
 });
 
@@ -143,7 +139,7 @@ test('reviewer dispatch is unaffected when worker reservations fill the limit', 
   h.ok(['submit', 'T2', '--sha', h.git(['rev-parse', 'HEAD']), '--agent', 'builder']);
   controlledHarness(h);
   h.json(['spawn', '--task', 'T1']);
-  await until(() => fs.existsSync(path.join(h.base, 'T1.started')), 'worker did not start');
+  await waitOnRepo(h, () => fs.existsSync(path.join(h.base, 'T1.started')), 'worker did not start');
   fs.writeFileSync(path.join(h.base, 'T2.exit'), '');
   const reviewer = h.json(['spawn', '--task', 'T2', '--role', 'review', '--wait']);
   assert.equal(reviewer.role, 'reviewer');
@@ -158,7 +154,7 @@ test('dispatch rechecks slots under the lock after worktree preparation', async 
   const paused = path.join(h.base, 'prepared');
   const spawning = h.runAsync(['spawn', '--task', 'T1'], { hooks: { HOOK_STOP_WORKTREE_ADD: paused } });
   try {
-    await until(() => fs.existsSync(paused), 'spawn did not prepare its worktree');
+    await waitOnRepo(h, () => fs.existsSync(paused), 'spawn did not prepare its worktree');
     h.ok(['claim', 'T2', '--agent', 'late-holder']);
   } finally {
     fs.writeFileSync(`${paused}.go`, '');
@@ -180,14 +176,14 @@ test('an unclaimed retry holds its slot through backoff and expired-lease renewa
   controlledHarness(h);
   h.ok(['ladder', 'set', 'easy', '--supervision', JSON.stringify({ retries: 1, backoff_ms: 3000, max_backoff_ms: 3000 })]);
   const spawned = h.json(['spawn', '--task', 'T1'], { env: { SLOT_RETRY: '1' } });
-  await until(() => events(h).some((e) => e.cmd === 'spawn phase' && e.detail.phase === 'retrying'), 'worker did not enter backoff');
+  await waitOnRepo(h, () => events(h).some((e) => e.cmd === 'spawn phase' && e.detail.phase === 'retrying'), 'worker did not enter backoff');
   const renew = h.run(['renew', 'T3', '--agent', 'expired']);
   assert.equal(renew.code, 1, renew.stderr);
   assert.match(renew.stderr, /T1.*worker-T1-1.*reservation/);
   const refused = h.run(['spawn', '--task', 'T2']);
   assert.equal(refused.code, 1, refused.stderr);
   assert.match(refused.stderr, /T1.*worker-T1-1.*reservation/);
-  await until(() => events(h).some((e) => e.cmd === 'spawn retry'), 'worker did not retry');
+  await waitOnRepo(h, () => events(h).some((e) => e.cmd === 'spawn retry'), 'worker did not retry');
   h.ok(['claim', 'T1', '--agent', spawned.agent]);
   assert.equal(h.run(['claim', 'T2', '--agent', 'manual']).code, 1);
   h.ok(['release', 'T1', '--agent', spawned.agent, '--reason', 'slot returned']);
@@ -214,7 +210,7 @@ test('an expired pre-claim holds the only slot before supervision can renew', as
     const spawned = h.json(['spawn', '--task', 'T1'], {
       hooks: { HOOK_PAUSE_ON: 'tasks.json', HOOK_PAUSE_PROCESS: 'spawn-monitor.js', HOOK_PAUSED: paused },
     });
-    await until(() => fs.existsSync(paused), 'supervisor did not pause before renewal');
+    await waitOnRepo(h, () => fs.existsSync(paused), 'supervisor did not pause before renewal');
     const rivals = await Promise.all([
       h.runAsync(['claim', 'T2', '--agent', 'rival']),
       h.runAsync(['spawn', '--task', 'T3']),
@@ -244,7 +240,7 @@ for (const cmd of ['spawn exit', 'worker-exited']) {
     const h = setup(t, 1);
     controlledHarness(h);
     const spawned = h.json(['spawn', '--task', 'T1']);
-    await until(() => fs.existsSync(path.join(h.base, 'T1.started')), 'worker did not start');
+    await waitOnRepo(h, () => fs.existsSync(path.join(h.base, 'T1.started')), 'worker did not start');
     const receipt = path.join(h.base, 'exit-receipt.json');
     const hook = path.join(h.base, 'exit-receipt.js');
     fs.writeFileSync(hook, `
@@ -291,7 +287,7 @@ test('sandboxed claims and expired renewals cannot discard hidden live reservati
   doc.tasks[2].claim.until = new Date(Date.now() - 1000).toISOString();
   h.writeState('tasks.json', doc);
   const spawned = h.json(['spawn', '--task', 'T1']);
-  await until(() => fs.existsSync(path.join(h.base, 'T1.started')), 'worker did not start');
+  await waitOnRepo(h, () => fs.existsSync(path.join(h.base, 'T1.started')), 'worker did not start');
   const hidden = { hooks: { HOOK_HIDDEN_PIDS: JSON.stringify([spawned.pid, spawned.monitor_pid]) } };
   try {
     for (const args of [

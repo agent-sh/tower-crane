@@ -37,7 +37,7 @@ process.on('SIGTERM', () => {
   console.log("not ok 1 - test/slow.test.js\\n  ---\\n  error: 'Promise resolution is still pending but the event loop has already resolved'\\n  ...");
   process.exit(1);
 });
-setTimeout(() => process.exit(0), 10000);
+setTimeout(() => process.exit(0), 10000); // wait-allow: the gate must time out before this deliberately slow runner completes
 `);
   const command = `${shellQuote(process.execPath)} ${shellQuote(script)}`;
   h.init(['--tests-mode', 'run-only', '--tests-cmd', command, '--clean-cmd', command,

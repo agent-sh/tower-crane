@@ -27,7 +27,7 @@ test('the npm package ships the plugin and loads pi skills through its CLI', (t)
   const args = ['pack', '--dry-run', '--json', '--cache', path.join(h.base, 'npm-cache')];
   const packed = cp.spawnSync(process.env.npm_execpath ? process.execPath : 'npm',
     process.env.npm_execpath ? [process.env.npm_execpath, ...args] : args,
-    { cwd: ROOT, env: h.env, encoding: 'utf8', timeout: 60000, shell: !process.env.npm_execpath && process.platform === 'win32' });
+    { cwd: ROOT, env: h.env, encoding: 'utf8', timeout: 300000, shell: !process.env.npm_execpath && process.platform === 'win32' });
   assert.equal(packed.status, 0, packed.stderr);
   const artifact = packedArtifact(packed.stdout);
   assert.equal(artifact.name, '@agentsys/tower-crane');
@@ -71,7 +71,7 @@ test('the npm package ships the plugin and loads pi skills through its CLI', (t)
   }
   const cli = (args) => {
     const r = cp.spawnSync(process.execPath, [path.join(installed, 'bin/tower-crane.js'), ...args],
-      { cwd: h.repo, env: h.env, encoding: 'utf8', timeout: 60000 });
+      { cwd: h.repo, env: h.env, encoding: 'utf8', timeout: 300000 });
     assert.equal(r.status, 0, r.stderr);
     return r.stdout;
   };

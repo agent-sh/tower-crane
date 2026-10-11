@@ -17,13 +17,23 @@ if (path.resolve(process.argv[1] || '') !== __filename) {
   if (path.basename(process.argv[1] || '') === 'spawn-monitor.js' && process.env.LIVE_PAUSE_FINAL) {
     const usage = require(path.join(path.dirname(process.argv[1]), 'usage-files.js'));
     const readResult = usage.readResult;
+    const readLive = usage.readLive;
     let paused = false;
+    let runningReading;
+    usage.readLive = function (...args) {
+      // Keep the final session record for reconciliation rather than a
+      // periodic sample racing the child's stream closure.
+      if (!paused && fs.existsSync(process.env.LIVE_DONE)) return runningReading;
+      const reading = readLive.apply(this, args);
+      if (!paused) runningReading = reading;
+      return reading;
+    };
     usage.readResult = function (...args) {
       if (!paused) {
         paused = true;
         const marker = process.env.LIVE_PAUSE_FINAL;
         fs.writeFileSync(marker, '');
-        const deadline = Date.now() + 60000;
+        const deadline = Date.now() + 300000;
         while (!fs.existsSync(`${marker}.go`)) {
           if (Date.now() >= deadline) throw new Error('final sample was not released');
           Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
@@ -35,7 +45,8 @@ if (path.resolve(process.argv[1] || '') !== __filename) {
   if (path.basename(process.argv[1] || '') === 'spawn-monitor.js' && process.env.LIVE_READS) {
     const read = fs.readFileSync;
     fs.readFileSync = function (file, ...args) {
-      if (typeof file === 'string' && /[\\/]projects[\\/].+\.jsonl$/.test(file)) {
+      const sessions = path.join(process.env.CLAUDE_CONFIG_DIR, 'projects') + path.sep;
+      if (typeof file === 'string' && file.startsWith(sessions) && file.endsWith('.jsonl')) {
         fs.appendFileSync(process.env.LIVE_READS, `${Date.now()}\n`);
       }
       return read.call(this, file, ...args);
@@ -102,7 +113,7 @@ if (path.resolve(process.argv[1] || '') !== __filename) {
         clearInterval(resume);
         write();
       }, 25);
-    } else if (step < steps) setTimeout(write, Number(env.LIVE_EVERY || 100));
+    } else if (step < steps) setTimeout(write, Number(env.LIVE_EVERY || 100)); // wait-allow: model periodic telemetry samples while the harness is live
     else {
       const finish = () => {
         if (env.LIVE_RESULT && harness === 'claude') console.log(JSON.stringify({
@@ -115,7 +126,7 @@ if (path.resolve(process.argv[1] || '') !== __filename) {
       if (env.LIVE_COMPLETE) {
         setInterval(() => { if (fs.existsSync(env.LIVE_COMPLETE)) finish(); }, 25);
       } else if (env.LIVE_HOLD === 'until-stop') setInterval(() => {}, 1000);
-      else setTimeout(finish, Number(env.LIVE_HOLD || 0));
+      else setTimeout(finish, Number(env.LIVE_HOLD || 0)); // wait-allow: fixture simulates harness exit after emitting its usage
     }
   };
   if (env.LIVE_UNREADABLE) {

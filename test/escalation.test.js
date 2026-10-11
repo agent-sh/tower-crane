@@ -379,7 +379,7 @@ test('lost-supervisor recovery waits for redirected orphan descendants to stop',
     await Promise.all(signals.map(({ exited }) => exited));
     h.ok(['spend', 'T1', '--from-spawn', spawn.agent]);
     assert.equal(P.processState(child), 'running');
-    const result = h.run(['wait', '--types', 'submitted', '--task', 'T1', '--agent', 'orchestrator', '--timeout', '2']);
+    const result = h.run(['wait', '--types', 'submitted', '--task', 'T1', '--agent', 'orchestrator', '--timeout', '2']); // wait-allow: observe that recovery stays blocked while the orphan is deliberately held alive
     assert.equal(result.code, 2, 'a parent exit must not dispatch while its orphan descendant is alive');
     const waiting = h.json(['recover', 'T1', '--agent', 'orchestrator']);
     assert.match(waiting.waiting, /process group.*still running/i);

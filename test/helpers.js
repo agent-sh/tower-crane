@@ -1,5 +1,7 @@
 'use strict';
 
+const { waitUntil, HUNG_TEST_MS } = require('./signals');
+
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -203,8 +205,8 @@ function context(t, base) {
         catch (e) { if (e.code === 'ENOENT') return []; throw e; }
       }) : [];
     },
-    cleanup: async () => {
-      try { await stopDetached(ctx.detached()); }
+    cleanup: async ({ monitorGraceMs } = {}) => {
+      try { await stopDetached(ctx.detached(), monitorGraceMs); }
       finally { fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); }
     },
     run: (args, opts = {}) => run(args, withHooks(ctx, opts)),
@@ -253,25 +255,24 @@ function withHooks(ctx, opts) {
   return { cwd: ctx.repo, ...opts, env, pre };
 }
 
-// A timeout here only guards against a hung CLI; the runner's per-test timeout
-// is the backstop. Spawns that waited 15 to 23 s on a machine at load 50 to 80
-// set the 60 s floor, so a slow machine does not read as a failure.
-function run(args, { cwd, env, input, pre = [], timeout = 60000 } = {}) {
-  const r = cp.spawnSync(process.execPath, [...pre, BIN, ...args], { cwd, env, input, encoding: 'utf8', timeout: Math.max(timeout, 60000) });
+// A command shares the runner's hung-test backstop so CLI wait readiness is
+// not cut short by a separate subprocess budget.
+function run(args, { cwd, env, input, pre = [], timeout = HUNG_TEST_MS } = {}) {
+  const r = cp.spawnSync(process.execPath, [...pre, BIN, ...args], { cwd, env, input, encoding: 'utf8', timeout: Math.max(timeout, HUNG_TEST_MS) });
   return { code: r.status, stdout: r.stdout || '', stderr: r.stderr || '', signal: r.signal };
 }
 
 const PTY_AVAILABLE = process.platform === 'linux'
-  && cp.spawnSync('script', ['--version'], { timeout: 10000 }).status === 0;
+  && cp.spawnSync('script', ['--version'], { timeout: 300000 }).status === 0;
 
-function runPty(args, { cwd, env, timeout = 10000 } = {}) {
+function runPty(args, { cwd, env, timeout = HUNG_TEST_MS } = {}) {
   // script uses a shell, so quote each argument to preserve names and paths.
   const command = [process.execPath, BIN, ...args].map((s) => `'${s.replace(/'/g, "'\\''")}'`).join(' ');
-  const r = cp.spawnSync('script', ['-qec', command, '/dev/null'], { cwd, env, encoding: 'utf8', timeout });
+  const r = cp.spawnSync('script', ['-qec', command, '/dev/null'], { cwd, env, encoding: 'utf8', timeout: Math.max(timeout, HUNG_TEST_MS) });
   return { code: r.status, stdout: r.stdout || '', stderr: r.stderr || '', signal: r.signal };
 }
 
-function runAsync(args, { cwd, env, pre = [] } = {}) {
+function runAsync(args, { cwd, env, pre = [], onSpawn } = {}) {
   return new Promise((resolve) => {
     const child = cp.spawn(process.execPath, [...pre, BIN, ...args], { cwd, env });
     let stdout = '';
@@ -279,6 +280,7 @@ function runAsync(args, { cwd, env, pre = [] } = {}) {
     child.stdout.on('data', (d) => (stdout += d));
     child.stderr.on('data', (d) => (stderr += d));
     child.on('close', (code) => resolve({ code, stdout, stderr }));
+    onSpawn?.(child);
   });
 }
 
@@ -303,13 +305,13 @@ function detachedAlive(child) {
 function killDetached(child) {
   if (!detachedAlive(child)) return;
   if (process.platform === 'win32') {
-    cp.spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore', timeout: 10000 });
+    cp.spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore', timeout: 300000 });
   } else {
     try { process.kill(-child.pid, 'SIGKILL'); } catch (e) { if (e.code !== 'ESRCH') throw e; }
   }
 }
 
-async function stopDetached(children) {
+async function stopDetached(children, monitorGraceMs) {
   const monitors = children.filter((c) => c.kind === 'monitor');
   if (process.platform === 'win32' && monitors.length) {
     // Retain native handles before stopping workers. A PID can be reused
@@ -338,7 +340,7 @@ try {
   $clock = [System.Diagnostics.Stopwatch]::StartNew()
   $survivors = @()
   foreach ($monitor in $monitors) {
-    if (!$monitor.WaitForExit([int][Math]::Max(0, 10000 - $clock.ElapsedMilliseconds))) {
+    if (!$monitor.WaitForExit([int][Math]::Max(0, 300000 - $clock.ElapsedMilliseconds))) {
       $survivors += $monitor.Id
     }
   }
@@ -360,7 +362,7 @@ try {
         stopped = true;
         for (const worker of children.filter((c) => c.kind === 'worker')) killDetached(worker);
         for (const pid of JSON.parse(ready.slice(6).trim())) {
-          cp.spawnSync('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore', timeout: 10000 });
+          cp.spawnSync('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore', timeout: 300000 });
         }
         child.stdin.end('\n');
       }
@@ -375,19 +377,20 @@ try {
     assert.deepEqual(JSON.parse(stdout.trim().split('\n').at(-1)), [], 'detached usage monitors outlived test teardown');
     return;
   }
+  let grace;
+  const controller = new AbortController();
   try {
     for (const child of children.filter((c) => c.kind === 'worker')) killDetached(child);
-    const deadline = Date.now() + 10000;
-    while (monitors.some(detachedAlive) && Date.now() < deadline) {
-      await new Promise((resolve) => setTimeout(resolve, 50));
+    if (monitorGraceMs !== undefined) {
+      grace = setTimeout(() => controller.abort(new Error('detached usage monitors outlived test teardown')), monitorGraceMs); // wait-allow: deliberate teardown-failure tests supply their observation grace
     }
-    assert.deepEqual(monitors.filter(detachedAlive).map((c) => c.pid), [], 'detached usage monitors outlived test teardown');
+    await waitUntil(() => monitors.every((child) => !detachedAlive(child)), {
+      signal: controller.signal, what: 'detached usage monitors outlived test teardown',
+    });
   } finally {
+    clearTimeout(grace);
     for (const monitor of monitors) killDetached(monitor);
-    const deadline = Date.now() + 10000;
-    while (monitors.some(detachedAlive) && Date.now() < deadline) {
-      await new Promise((resolve) => setTimeout(resolve, 50));
-    }
+    await waitUntil(() => monitors.every((child) => !detachedAlive(child)));
     assert.ok(monitors.every((c) => !detachedAlive(c)), 'usage monitors survived forced cleanup');
   }
 }

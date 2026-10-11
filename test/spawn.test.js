@@ -1,5 +1,7 @@
 'use strict';
 
+const { fileWritten, waitOnRepo } = require('./signals');
+
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -331,7 +333,7 @@ const task = env.TOWER_CRANE_TASK;
 const state = env.TOWER_CRANE_STATE;
 for (const key of Object.keys(env)) if (key.startsWith('TOWER_CRANE_')) delete env[key];
 const r = cp.spawnSync(process.execPath, [process.argv[1], 'evidence', 'T1', '--type', 'review', '--ok', '--sha', 'abcdef1', '--state', state], {
-  env, encoding: 'utf8', timeout: 10000,
+  env, encoding: 'utf8', timeout: 300000,
 });
 fs.writeFileSync(process.argv[2], JSON.stringify({ agent, task, remaining: Object.keys(env).filter((key) => key.startsWith('TOWER_CRANE_')), code: r.status, stderr: r.stderr }));
 process.exit(r.status === null ? 1 : r.status);
@@ -471,7 +473,7 @@ test('the agent runs a real nested test', () => {
   h.git(['commit', '-qm', 'nested runner fixture']);
   const script = `
 const cp = require('node:child_process');
-const result = cp.spawnSync(process.execPath, ['--test', '--test-reporter=tap', ${JSON.stringify(file)}], { encoding: 'utf8', timeout: 10000 });
+const result = cp.spawnSync(process.execPath, ['--test', '--test-reporter=tap', ${JSON.stringify(file)}], { encoding: 'utf8', timeout: 300000 });
 require('node:fs').writeFileSync(${JSON.stringify(out)}, JSON.stringify({
   runnerEnv: Object.keys(process.env).filter((key) => /^NODE_TEST_/i.test(key)),
   code: result.status, stdout: result.stdout, stderr: result.stderr,
@@ -549,18 +551,7 @@ setImmediate(() => process.platform === 'win32' ? process.exit(0) : process.kill
   reviewable(h);
   commandRung(h, 'medium', [process.execPath, '-e', script, reviewerOut, '{brief}']);
   fs.writeFileSync(cleanupOut, '');
-  const cleaned = new Promise((resolve, reject) => {
-    const watcher = fs.watch(cleanupOut, () => {
-      watcher.close();
-      clearTimeout(timeout);
-      resolve();
-    });
-    const timeout = setTimeout(() => {
-      watcher.close();
-      reject(new Error('the reviewer did not remove its brief copy'));
-    }, 10000);
-    t.after(() => { watcher.close(); clearTimeout(timeout); });
-  });
+  const cleaned = fileWritten(cleanupOut, { signal: t.signal, check: (text) => text.includes('\n') });
   const reviewer = h.json(['spawn', '--role', 'review', '--task', 'T1'], { env });
   assert.equal(reviewer.agent, 'reviewer-T1-1');
   await cleaned;
@@ -667,11 +658,7 @@ test('spawn in the background detaches, logs output and numbers agents', async (
   assert.equal(real(path.dirname(started.log)), real(path.join(h.state, 'logs')));
   assert.equal(path.basename(started.log), 'T1-small-T1-1.log');
   if (process.platform !== 'win32') assert.equal(fs.statSync(started.log).mode & 0o777, 0o600);
-  const deadline = Date.now() + 10000;
-  while (!(fs.existsSync(started.log) && fs.readFileSync(started.log, 'utf8').includes('hello'))) {
-    if (Date.now() > deadline) throw new Error('the background agent wrote nothing to its log');
-    await new Promise((r) => setTimeout(r, 50));
-  }
+  await waitOnRepo(h, () => (fs.existsSync(started.log) && fs.readFileSync(started.log, 'utf8').includes('hello')));
   assert.match(fs.readFileSync(started.log, 'utf8'), /hello from small-T1-1/);
   assert.equal(h.json(['spawn', '--role', 'small', '--task', 'T1', '--dry-run']).agent, 'small-T1-2');
 
@@ -757,13 +744,7 @@ test('a spawn that cannot take the lock leaves its worktree, names it and exits 
   assert.equal(real(h.json(['spawn', '--role', 'small', '--task', 'T1', '--wait']).cwd), real(leftover(h)));
 });
 
-async function waitForFile(file, ms = 20000) {
-  const end = Date.now() + ms;
-  while (!fs.existsSync(file)) {
-    if (Date.now() > end) throw new Error(`${file} never appeared`);
-    await new Promise((r) => setTimeout(r, 20));
-  }
-}
+const waitForFile = (file) => fileWritten(file);
 
 test('a failed spawn never deletes a worktree another command took up', async (t) => {
   const h = setup(t);
@@ -771,7 +752,7 @@ test('a failed spawn never deletes a worktree another command took up', async (t
   const release = path.join(h.base, 'worker-may-write');
   // The worker stays alive with nothing written until the test releases it,
   // then writes into its working directory.
-  const worker = `const fs = require("fs"); const end = Date.now() + 20000;
+  const worker = `const fs = require("fs"); const end = Date.now() + 300000;
 while (!fs.existsSync(process.argv[1]) && Date.now() < end) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
 fs.writeFileSync(${JSON.stringify(output)}, "work in progress");`;
   commandRung(h, 'small', [process.execPath, '-e', worker, release]);

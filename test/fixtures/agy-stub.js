@@ -37,4 +37,4 @@ fs.writeFileSync(process.env.STUB_OUT, JSON.stringify({
   sandboxMarker: process.env.TOWER_CRANE_SANDBOX,
   brokered: Boolean(process.env.TOWER_CRANE_BROKER),
 }));
-if (process.env.STUB_HOLD) setTimeout(() => {}, Number(process.env.STUB_HOLD));
+if (process.env.STUB_HOLD) setTimeout(() => {}, Number(process.env.STUB_HOLD)); // wait-allow: fixture simulates route duration for resume and stall scenarios

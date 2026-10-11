@@ -29,6 +29,7 @@ test('the test runner emits one capped concurrency value, including repeated and
     assert.equal(r.status, 0, r.stderr);
     const args = JSON.parse(r.stdout);
     assert.deepEqual(args.filter((arg) => arg.startsWith('--test-concurrency')), [`--test-concurrency=${expected}`]);
+    assert.ok(args.includes('--test-timeout=300000'), 'runner and signal waits share the hung-test backstop');
     assert.deepEqual(args.filter((arg) => !arg.startsWith('--')), ['test/claim.test.js']);
   }
 });
@@ -40,7 +41,7 @@ test('mutation fallback requires a green baseline in a copy containing all test 
     fs.mkdirSync(path.dirname(target), { recursive: true });
     fs.writeFileSync(target, text);
   };
-  for (const file of ['test/run.js', 'test/global-setup.js', 'test/repo-seed.js']) {
+  for (const file of ['test/run.js', 'test/signals.js', 'test/global-setup.js', 'test/repo-seed.js']) {
     write(file, fs.readFileSync(path.join(ROOT, file), 'utf8'));
   }
   write('test/gates/.keep', '');
@@ -60,7 +61,7 @@ test('mutation fallback requires a green baseline in a copy containing all test 
   `;
   const run = () => cp.spawnSync(process.execPath, [
     path.join(ROOT, 'scripts/mutants.js'), '--root', h.repo, '--jobs', '1', '--only', 'stack-merge-unaccepted-lower',
-  ], { env: { ...h.env, TOWER_CRANE_TEST_TMP: h.base }, encoding: 'utf8', timeout: 60000 });
+  ], { env: { ...h.env, TOWER_CRANE_TEST_TMP: h.base }, encoding: 'utf8', timeout: 300000 });
 
   write('test/fallback.test.js', baseline + `
     test('unaccepted lower', () => {

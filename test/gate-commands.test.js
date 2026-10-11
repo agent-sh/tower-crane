@@ -1,5 +1,7 @@
 'use strict';
 
+const { waitOnRepo } = require('./signals');
+
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -242,18 +244,14 @@ fs.writeFileSync(${JSON.stringify(ready)}, 'ready');
 const started = Date.now();
 const timer = setInterval(() => {
   if (fs.existsSync(${JSON.stringify(release)})) { clearInterval(timer); }
-  else if (Date.now() - started > 10000) { process.exit(1); }
+  else if (Date.now() - started > 10000) { process.exit(1); } // wait-allow: synchronous gate fixture must stop if the test never releases it
 }, 10);
 `);
   const cmd = `${shellQuote(process.execPath)} ${shellQuote(script)}`;
   h.ok(['project', 'set', '--tests-mode', 'run-only', '--tests-cmd', cmd]);
   const pending = h.runAsync(['check', 'tests', 'T1', '--json']);
   t.after(() => { if (fs.existsSync(h.base)) fs.writeFileSync(release, 'release'); });
-  const deadline = Date.now() + 10000;
-  while (!fs.existsSync(ready)) {
-    assert.ok(Date.now() < deadline, 'gate did not start');
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
+  await waitOnRepo(h, () => fs.existsSync(ready));
   return { cmd, pending, release: () => fs.writeFileSync(release, 'release') };
 }
 

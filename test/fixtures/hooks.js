@@ -123,7 +123,7 @@ function ownsLock() {
 function stop(signal) {
   real.writeFileSync(signal, String(process.pid));
   const go = `${signal}.go`;
-  const end = Date.now() + 30000;
+  const end = Date.now() + 300000;
   while (!real.existsSync(go) && Date.now() < end) sleep(10);
 }
 
@@ -135,7 +135,7 @@ function barrier() {
   if (barrierDone) return;
   barrierDone = true;
   real.writeFileSync(path.join(env.HOOK_BARRIER, String(process.pid)), '');
-  const end = Date.now() + 20000;
+  const end = Date.now() + 300000;
   while (real.readdirSync(env.HOOK_BARRIER).length < Number(env.HOOK_BARRIER_N) && Date.now() < end) sleep(5);
 }
 

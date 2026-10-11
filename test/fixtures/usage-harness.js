@@ -17,7 +17,7 @@ if (process.env.USAGE_SESSION) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.copyFileSync(process.env.USAGE_SESSION_FIXTURE, file);
 }
-setTimeout(() => {
+setTimeout(() => { // wait-allow: fixture simulates delayed harness exit and telemetry emission
   process.stdout.write(fs.readFileSync(process.argv[2]));
   process.exitCode = Number(process.env.USAGE_EXIT || 0);
 }, Number(process.env.USAGE_DELAY || 0));

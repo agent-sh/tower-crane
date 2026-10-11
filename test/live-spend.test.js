@@ -7,6 +7,7 @@ const path = require('node:path');
 const cp = require('node:child_process');
 const { cachedFixture, BIN, HOOKS } = require('./helpers');
 const { CHROME, openBrowser, closeBrowser } = require('./browser');
+const { waitOnRepo } = require('./signals');
 
 test.after(closeBrowser);
 
@@ -16,29 +17,12 @@ const recordedSpend = (h) => h.readState('tasks.json').tasks[0].spend;
 const liveEntries = (h) => (recordedSpend(h).entries || []).filter((e) => e.live);
 
 function until(t, h, fn, message, stream) {
-  return new Promise((resolve, reject) => {
-    let done = false;
-    const watchers = [h.state, h.base].map((dir) => fs.watch(dir, check));
-    const abort = () => finish(new Error(message, { cause: t.signal.reason }));
-    function finish(error) {
-      if (done) return;
-      done = true;
-      for (const watcher of watchers) watcher.close();
-      stream?.off('data', check);
-      t.signal.removeEventListener('abort', abort);
-      if (error) reject(error);
-      else resolve();
-    }
-    function check() {
-      if (done) return;
-      try { if (fn()) finish(); }
-      catch (error) { finish(error); }
-    }
-    for (const watcher of watchers) watcher.once('error', finish);
-    stream?.on('data', check);
-    t.signal.addEventListener('abort', abort, { once: true });
-    if (t.signal.aborted) abort();
-    else check();
+  return waitOnRepo(h, fn, message, {
+    signal: t.signal,
+    subscribe: stream && ((probe) => {
+      stream.on('data', probe);
+      return () => stream.off('data', probe);
+    }),
   });
 }
 
@@ -101,7 +85,8 @@ test('sub-second usage requests obey the sampling floor and unchanged readings w
   const h = setup(t, 'claude', { usage_ms: 1 });
   const reads = path.join(h.base, 'reads');
   h.json(['spawn', '--task', 'T1'], { env: h.liveEnv({ LIVE_STEPS: '1', LIVE_HOLD: 'until-stop', LIVE_READS: reads, LIVE_NO_CLAIM: '1' }) });
-  await until(t, h, () => h.readState('tasks.json').tasks[0].spend.tokens === 1000, 'initial usage was not recorded');
+  await until(t, h, () => events(h).some((e) => e.cmd === 'spend live' && e.detail.tokens === 1000),
+    'initial usage was not recorded');
   const readTimes = () => fs.readFileSync(reads, 'utf8').trim().split('\n').map(Number);
   await until(t, h, () => readTimes().length >= 3, 'the supervisor did not keep sampling');
   const samples = events(h).filter((e) => e.cmd === 'spend live' && e.detail.tokens === 1000);
@@ -113,7 +98,7 @@ test('sub-second usage requests obey the sampling floor and unchanged readings w
   assert.equal(events(h).filter((e) => e.cmd === 'spend live' && e.detail.tokens === 1000).length, 1);
   const times = readTimes();
   assert.ok(times.length >= 2, 'the supervisor still samples an unchanged file');
-  for (let i = 1; i < times.length; i++) assert.ok(times[i] - times[i - 1] >= 950, `reads were ${times[i] - times[i - 1]}ms apart`);
+  for (let i = 1; i < times.length; i++) assert.ok(times[i] - times[i - 1] >= 950, `reads were ${times[i] - times[i - 1]}ms apart`); // wait-allow: verify the production sampling floor
 });
 
 test('an initial read error records unavailable telemetry with only its error class', async (t) => {

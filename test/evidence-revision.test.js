@@ -5,6 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { makeRepo, BIN } = require('./helpers');
+const { waitOnRepo } = require('./signals');
 const { gateFixture, gateEvidence } = require('./gate-helpers');
 
 function reviewedTask(t, kind = 'docs') {
@@ -33,14 +34,11 @@ function reviewedTask(t, kind = 'docs') {
 // automation reaction, which accepts on its own once review evidence exists,
 // so the test records the fresh review only after that reaction finished.
 async function reviewSettled(h) {
-  const deadline = Date.now() + 30000;
-  for (;;) {
-    const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  return waitOnRepo(h, () => {
+    const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').split('\n').slice(0, -1).filter(Boolean).map(JSON.parse);
     const exit = events.findLast((e) => e.cmd === 'spawn exit' && e.detail.role === 'reviewer');
-    if (exit && events.some((e) => e.cmd === 'automation' && e.detail.source === exit.id && e.detail.phase === 'done')) return;
-    assert.ok(Date.now() < deadline, 'dispatched reviewer did not settle');
-    await new Promise((resolve) => setTimeout(resolve, 50));
-  }
+    return exit && events.some((e) => e.cmd === 'automation' && e.detail.source === exit.id && e.detail.phase === 'done');
+  }, 'dispatched reviewer did not settle');
 }
 
 for (const status of ['submitted', 'accepted']) {
@@ -180,7 +178,7 @@ const timer = setInterval(() => {
   const result = cp.spawnSync(process.execPath, ${JSON.stringify([BIN, 'evidence', 'T1', '--type', 'review', '--ok', '--sha', sha])}, { env: process.env });
   process.exit(result.status ?? 1);
 }, 30);
-setTimeout(() => process.exit(2), 60000).unref();
+setTimeout(() => process.exit(2), 300000).unref();
 `;
     for (const rung of ['easy', 'medium', 'hard', 'research', 'review']) {
       h.ok(['ladder', 'set', rung, '--command', JSON.stringify([process.execPath, '-e', script, '{prompt}'])]);
@@ -190,7 +188,7 @@ setTimeout(() => process.exit(2), 60000).unref();
     let dispatched;
     let completion;
     try {
-      dispatched = h.json(['wait', '--after', String(after), '--task', 'T1', '--types', 'spawn', '--timeout', '30']);
+      dispatched = h.json(['wait', '--after', String(after), '--task', 'T1', '--types', 'spawn', '--timeout', '300']);
       if (change === 'brief') {
         h.ok(['brief', 'set', 'T1', '-'], { input: 'Check the link and another requirement.\n' });
       } else if (change === 'rework') {

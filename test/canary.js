@@ -1,5 +1,7 @@
 'use strict';
 
+const { fileWritten } = require('./signals');
+
 // Secret canaries: unique random values placed where an owner keeps secrets
 // (rung and project env, an env_file, a harness credential), then searched
 // for in every file, event, output and process listing a run leaves. A hit
@@ -74,26 +76,14 @@ function processListing() {
     }
   }
   if (process.platform !== 'win32') {
-    const r = cp.spawnSync('ps', ['-eww', '-o', 'args='], { encoding: 'utf8', timeout: 10000 });
+    const r = cp.spawnSync('ps', ['-eww', '-o', 'args='], { encoding: 'utf8', timeout: 300000 });
     if (r.status === 0) parts.push(r.stdout);
   }
   return parts.join('\n');
 }
 
 // Empty files signal events; PID markers need content after file creation.
-async function waitFor(file, { ms = 20000, nonempty = false } = {}) {
-  const deadline = Date.now() + ms;
-  for (;;) {
-    try {
-      const text = fs.readFileSync(file, 'utf8');
-      if (!nonempty || text) return text;
-    } catch (e) {
-      if (e.code !== 'ENOENT') throw e;
-    }
-    if (Date.now() >= deadline) return null;
-    await new Promise((resolve) => setTimeout(resolve, 50));
-  }
-}
+const waitFor = (file, { nonempty = false } = {}) => fileWritten(file, { check: (text) => !nonempty || text });
 
 function assertNoHits(hits, what) {
   assert.deepEqual(hits.map((h) => `${h.label} in ${h.where}`), [], `secret canaries leaked into ${what}`);

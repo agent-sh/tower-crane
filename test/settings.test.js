@@ -1,5 +1,7 @@
 'use strict';
 
+const { fileWritten } = require('./signals');
+
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -246,7 +248,7 @@ test("in a browser, saving one form keeps the other form's unsaved edits, and a 
   const set = (el, value, event) => b.inPage(`(function (el) { el.value = ${JSON.stringify(value)}; el.dispatchEvent(new Event(${JSON.stringify(event)}, { bubbles: true })); })(${el})`);
   const click = (form) => b.inPage(`document.querySelector('#${form} button[type="submit"]').click()`);
   const saved = (form) => `document.querySelector('#${form} .msg').textContent.startsWith('Saved.') || (!window.firstLoad && document.documentElement.hasAttribute('data-position-restored'))`;
-  const settle = () => new Promise((r) => setTimeout(r, 800));
+  const settle = () => new Promise((r) => setTimeout(r, 800)); // wait-allow: observe delayed SSE and restoration frames after save before checking retained edits
   await b.inPage('window.firstLoad = true');
 
   await set(easyEffort, 'high', 'input');
@@ -287,13 +289,7 @@ test('in a browser, a form is read-only while its save waits, so typing then los
   const easyEffort = `document.querySelector('tr[data-rung="easy"] input[name="effort"]')`;
   const tierSelect = `document.querySelector('tr[data-task="T1"] select')`;
   const set = (el, value, event) => b.inPage(`(function (el) { el.value = ${JSON.stringify(value)}; el.dispatchEvent(new Event(${JSON.stringify(event)}, { bubbles: true })); })(${el})`);
-  const appeared = async (file) => {
-    const end = Date.now() + 15000;
-    while (!fs.existsSync(file)) {
-      if (Date.now() > end) throw new Error(`${file} never appeared`);
-      await new Promise((r) => setTimeout(r, 20));
-    }
-  };
+  const appeared = (file) => fileWritten(file, { check: () => true });
 
   // otherDirty: with an unsaved tier the saved form is updated in place,
   // without one the page reloads; both must keep what the person typed.
@@ -314,7 +310,7 @@ test('in a browser, a form is read-only while its save waits, so typing then los
     fs.writeFileSync(`${paused}.go`, '');
     assert.equal((await holder).code, 0);
     await b.until(`document.readyState === 'complete' && !document.querySelector('#ladder-form[aria-busy]') && ${easyModel} && !${easyModel}.disabled && (${otherDirty} || document.documentElement.hasAttribute('data-position-restored'))`, 'the save to finish');
-    await new Promise((r) => setTimeout(r, 300));
+    await new Promise((r) => setTimeout(r, 300)); // wait-allow: observe delayed SSE and restoration frames after save before checking retained edits
     assert.equal(h.readState('project.json').ladder.easy.effort, round === 1 ? 'high' : 'low');
     assert.equal(await b.inPage(`${easyModel}.value`), typed, `round ${round}: what was typed during the save is still there`);
     assert.equal(typed, '', 'the read-only field took no input');

@@ -1,5 +1,7 @@
 'use strict';
 
+const { waitOnRepo } = require('./signals');
+
 const { test, describe } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -540,11 +542,7 @@ test('review dispatch refuses a submitted head or configured base changed after 
       hooks: { HOOK_STOP_REVIEW_DIFF: paused },
     });
     try {
-      const deadline = Date.now() + 10000;
-      while (!fs.existsSync(paused)) {
-        assert.ok(Date.now() < deadline, 'diff preparation did not finish');
-        await new Promise((resolve) => setTimeout(resolve, 20));
-      }
+      await waitOnRepo(h, () => fs.existsSync(paused));
       assert.ok(!fs.existsSync(path.join(h.state, 'lock')), 'diff preparation leaves state writable');
       if (change === 'head') h.ok(['submit', 'T1', '--agent', 'builder', '--sha', next]);
       else h.ok(['project', 'set', '--base', 'fixture-change']);
@@ -568,11 +566,7 @@ test('accept runs tests, clean and CI before dispatch, then automation accepts a
   const result = h.json(['accept', 'T1']);
   assert.equal(result.status, 'submitted');
   assert.equal(result.review_pending, true);
-  const deadline = Date.now() + 10000;
-  while (h.readState('tasks.json').tasks[0].status !== 'accepted') {
-    assert.ok(Date.now() < deadline, 'review did not reach automatic acceptance');
-    await new Promise((resolve) => setTimeout(resolve, 30));
-  }
+  await waitOnRepo(h, () => h.readState('tasks.json').tasks[0].status === 'accepted');
   const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
   const dispatch = events.findIndex((e) => e.cmd === 'spawn' && e.detail.role === 'reviewer');
   for (const type of ['tests', 'clean', 'ci']) assert.ok(events.findIndex((e) => e.cmd === `check ${type}` && e.detail.ok) < dispatch);

@@ -1,11 +1,13 @@
 'use strict';
 
+const { waitOnRepo } = require('./signals');
+
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
-const { cachedFixture, BIN, HOOKS, runPty, PTY_AVAILABLE, detachedAlive } = require('./helpers');
+const { makeRepo, cachedFixture, BIN, HOOKS, runPty, PTY_AVAILABLE, detachedAlive } = require('./helpers');
 
 const PRIVATE_LOG = 'prompt: synthetic private instruction\ncredential: synthetic-secret-for-recovery-test';
 
@@ -32,13 +34,7 @@ function setup(t) {
   return h;
 }
 
-async function until(fn, message) {
-  const deadline = Date.now() + 10000;
-  while (!fn()) {
-    if (Date.now() >= deadline) assert.fail(message);
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
-}
+
 
 async function start(t, h, { claim = true, submit = false, wait = false, env = {} } = {}) {
   const marker = path.join(h.base, `started-${Date.now()}.json`);
@@ -67,8 +63,9 @@ ${wait ? 'process.exit(7);' : 'setInterval(() => {}, 1000);'}
     try { process.kill(spawned.pid, 'SIGKILL'); } catch (e) { if (e.code !== 'ESRCH') throw e; }
   };
   h.stopWorkers.push(kill);
-  await until(() => fs.existsSync(marker), 'stand-in did not claim the task');
-  assert.deepEqual(JSON.parse(fs.readFileSync(marker, 'utf8')), { agent: spawned.agent, pid: spawned.pid });
+  const started = await waitOnRepo(h, () => fs.existsSync(marker) && JSON.parse(fs.readFileSync(marker, 'utf8')),
+    'stand-in did not claim the task');
+  assert.deepEqual(started, { agent: spawned.agent, pid: spawned.pid });
   return { ...spawned, kill };
 }
 
@@ -87,8 +84,8 @@ test('a killed spawned claimant is reported with its log tail and released for r
   assert.equal(h.run(['release', 'T1', '--reason', 'recover live worker', '--agent', 'another-worker']).code, 1);
 
   spawned.kill();
-  await until(() => (h.json(['status']).exited_claims || []).length === 1, 'killed spawned claimant was not reported');
-  await until(() => events().some((e) => e.cmd === 'spend' && e.detail.source === `spawn:${spawned.agent}`), 'exit usage was not collected');
+  await waitOnRepo(h, () => (h.json(['status']).exited_claims || []).length === 1, 'killed spawned claimant was not reported');
+  await waitOnRepo(h, () => events().some((e) => e.cmd === 'spend' && e.detail.source === `spawn:${spawned.agent}`), 'exit usage was not collected');
   const before = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8');
   for (const args of [['status'], ['ready'], ['ready', '--all']]) {
     const data = h.json(args);
@@ -158,6 +155,38 @@ test('teardown observes a monitor exit recorded after its PID snapshot', {
   assert.equal(process.kill(child.pid, 0), true, 'teardown killed a reused PID');
 });
 
+test('ordinary teardown waits for a monitor exit even when the wall clock jumps', {
+  skip: process.platform === 'win32' && 'Windows teardown waits on native process handles',
+}, async (t) => {
+  const h = makeRepo(t);
+  const ready = path.join(h.base, 'ready');
+  const release = path.join(h.base, 'release');
+  const child = cp.spawn(process.execPath, ['-e', `
+    const fs = require('node:fs');
+    const watcher = fs.watch(${JSON.stringify(h.base)}, () => {
+      if (fs.existsSync(${JSON.stringify(release)})) process.exit(0);
+    });
+    fs.writeFileSync(${JSON.stringify(ready)}, '');
+  `], { detached: true, stdio: 'ignore' });
+  const closed = new Promise((resolve) => child.once('close', resolve));
+  t.after(async () => { child.kill('SIGKILL'); await closed; });
+  await waitOnRepo(h, () => fs.existsSync(ready), 'monitor did not start');
+  const dir = path.join(h.base, 'detached');
+  fs.mkdirSync(dir);
+  fs.writeFileSync(path.join(dir, `${child.pid}.json`), JSON.stringify({ pid: child.pid, kind: 'monitor' }));
+  let clock = 0;
+  const now = t.mock.method(Date, 'now', () => (clock += 20000));
+  try {
+    const cleaned = h.cleanup();
+    queueMicrotask(() => fs.writeFileSync(release, ''));
+    await cleaned;
+    await closed;
+    assert.equal(child.exitCode, 0, 'ordinary teardown observes natural completion');
+  } finally {
+    now.mock.restore();
+  }
+});
+
 test('teardown waits for OS termination after a monitor marks its exit', async (t) => {
   const h = setup(t);
   const dir = path.join(h.base, 'detached');
@@ -170,10 +199,10 @@ const fs = require('node:fs');
 const sleep = () => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
 process.once('exit', () => {
   fs.writeFileSync(${JSON.stringify(marked)}, '');
-  const deadline = Date.now() + 30000;
+  const deadline = Date.now() + 30000; // wait-allow: hold an exit listener alive to exercise native-process teardown
   while (Date.now() < deadline) sleep();
 });
-const deadline = Date.now() + 30000;
+const deadline = Date.now() + 300000;
 while (!fs.existsSync(${JSON.stringify(start)}) && Date.now() < deadline) sleep();
 process.exit(0);
 `);
@@ -190,12 +219,12 @@ process.exit(0);
   }
   fs.writeFileSync(path.join(dir, `${child.pid}.json`), JSON.stringify(record));
   fs.writeFileSync(start, '');
-  await until(() => fs.existsSync(marked), 'monitor did not reach its exit listener');
+  await waitOnRepo(h, () => fs.existsSync(marked), 'monitor did not reach its exit listener');
   assert.equal(h.detached()[0].exited, true);
   assert.equal(child.kill(0), true, 'monitor must still be running inside the exit listener');
   if (process.platform === 'win32') await h.cleanup();
   else {
-    await assert.rejects(h.cleanup(), /detached usage monitors outlived test teardown/);
+    await assert.rejects(h.cleanup({ monitorGraceMs: 10000 }), /detached usage monitors outlived test teardown/); // wait-allow: the held exit listener must exceed teardown's observation grace
     await closed;
   }
   assert.equal(child.kill(0), false, 'cleanup returned before the original monitor terminated');
@@ -246,7 +275,7 @@ test('a missing log does not hide an exited claimant', async (t) => {
   const spawned = await start(t, h);
   spawned.kill();
   fs.rmSync(spawned.log);
-  await until(() => (h.json(['ready']).exited_claims || []).length === 1, 'exit was hidden by its missing log');
+  await waitOnRepo(h, () => (h.json(['ready']).exited_claims || []).length === 1, 'exit was hidden by its missing log');
   const exit = h.json(['status']).exited_claims[0];
   assert.equal(exit.log, spawned.log);
   assert.match(exit.tail, /log unavailable.*ENOENT/);
@@ -269,7 +298,7 @@ test('a spawn on another host is not inferred dead from a local PID', async (t) 
   assert.deepEqual(h.json(['status']).exited_claims, []);
   assert.deepEqual(h.json(['ready']).exited_claims, []);
   spawned.kill();
-  await until(() => (h.json(['status']).exited_claims || []).length === 1, 'supervised exit was not recorded');
+  await waitOnRepo(h, () => (h.json(['status']).exited_claims || []).length === 1, 'supervised exit was not recorded');
 });
 
 test('terminal fallback cannot release another live claim', { skip: !PTY_AVAILABLE }, async (t) => {
@@ -317,7 +346,7 @@ test('reclaiming an expired lease under the same identity does not inherit its o
   const spawned = await start(t, h, { claim: false });
   assert.equal(spawned.agent, agent);
   spawned.kill();
-  await until(() => (h.json(['status']).exited_claims || []).length === 1, 'old claim exit was not reported');
+  await waitOnRepo(h, () => (h.json(['status']).exited_claims || []).length === 1, 'old claim exit was not reported');
   const hook = path.join(__dirname, 'fixtures', 'clock.js').replace(/\\/g, '/');
   h.ok(['claim', 'T1', '--agent', agent], {
     env: { NODE_OPTIONS: `--require "${hook}"`, TOWER_CRANE_TEST_NOW: String(Date.parse(oldClaim.until) + 1) },
@@ -344,6 +373,6 @@ test('a spawned replacement can claim after another worker lease expires', async
   assert.equal(h.readState('tasks.json').tasks[0].claim.agent, spawned.agent);
   assert.deepEqual(h.json(['status']).exited_claims, []);
   spawned.kill();
-  await until(() => (h.json(['status']).exited_claims || []).length === 1, 'replacement exit was not reported');
+  await waitOnRepo(h, () => (h.json(['status']).exited_claims || []).length === 1, 'replacement exit was not reported');
   assert.equal(h.json(['ready']).exited_claims[0].pid, spawned.pid);
 });

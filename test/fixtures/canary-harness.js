@@ -25,7 +25,7 @@ module.exports = function canaryHarness(harness) {
   }
   if (mode === 'hold') {
     fs.writeFileSync(`${process.env.CANARY_OUT}.ready`, String(process.pid));
-    setTimeout(() => {}, 30000);
+    setInterval(() => {}, 1000);
     return;
   }
   console.log(JSON.stringify(harness === 'claude'

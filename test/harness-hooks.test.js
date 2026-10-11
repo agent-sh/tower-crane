@@ -1,5 +1,7 @@
 'use strict';
 
+const { fileWritten } = require('./signals');
+
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -12,13 +14,7 @@ const S = require('../lib/state');
 const STUB = path.join(__dirname, 'fixtures', 'message-harness.js');
 const events = (h) => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
 
-async function until(file) {
-  const deadline = Date.now() + 15000;
-  while (!fs.existsSync(file)) {
-    if (Date.now() >= deadline) throw new Error(`harness did not reach ${file}`);
-    await new Promise((resolve) => setTimeout(resolve, 20));
-  }
-}
+const until = (file) => fileWritten(file);
 
 // Built once per process for each harness and copied for each test.
 function setup(t, harness) {

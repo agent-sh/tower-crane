@@ -1,5 +1,7 @@
 'use strict';
 
+const { waitOnRepo } = require('./signals');
+
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -24,13 +26,10 @@ test('detached spawn links the PR after its worker submits and exits', async (t)
   const f = setup(t);
   worker(f);
   f.h.ok(['spawn', '--task', 'T2']);
-  const until = Date.now() + 15000;
-  let task;
-  do {
-    task = f.h.json(['task', 'show', 'T2']);
-    if (task.stack?.linked) break;
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  } while (Date.now() < until);
+  const task = await waitOnRepo(f.h, () => {
+    const task = f.h.json(['task', 'show', 'T2']);
+    return task.stack?.linked && task;
+  });
   assert.equal(task.stack.linked, true);
   assert.equal(task.status, 'submitted');
   assert.deepEqual(f.read().order, [11, 12]);
@@ -118,11 +117,7 @@ test('concurrent sibling dispatch on one submitted dependency records a single s
     env: { TEST_STACK_PAUSE_VIEW: '11', TEST_STACK_PAUSE_READY: ready, TEST_STACK_PAUSE_RELEASE: release },
   });
   try {
-    const deadline = performance.now() + 15000;
-    while (!fs.existsSync(ready)) {
-      if (performance.now() > deadline) throw new Error('T3 preparation never read the dependency PR');
-      await new Promise((resolve) => setTimeout(resolve, 20));
-    }
+    await waitOnRepo(f.h, () => fs.existsSync(ready));
     f.h.json(['worktree', 'T2']);
   } finally {
     fs.writeFileSync(release, 'release');

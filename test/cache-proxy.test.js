@@ -1,5 +1,7 @@
 'use strict';
 
+const { fileWritten } = require('./signals');
+
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const cp = require('node:child_process');
@@ -90,12 +92,9 @@ async function start(t, args = []) {
     return Buffer.from(await response.arrayBuffer());
   };
   const entries = async n => {
-    for (let i = 0; i < 100; i++) {
-      const lines = fs.existsSync(log) ? fs.readFileSync(log, 'utf8').split('\n').filter(Boolean) : [];
-      if (lines.length >= n) return { lines: lines.map(l => JSON.parse(l)), text: lines.join('\n') };
-      await new Promise(r => setTimeout(r, 20));
-    }
-    throw new Error(`log has fewer than ${n} entries`);
+    await fileWritten(log, { check: text => text.trim().split('\n').filter(Boolean).length >= n });
+    const lines = fs.readFileSync(log, 'utf8').split('\n').filter(Boolean);
+    return { lines: lines.map(l => JSON.parse(l)), text: lines.join('\n') };
   };
   return { send, entries, received };
 }

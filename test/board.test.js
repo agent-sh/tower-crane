@@ -586,7 +586,7 @@ test('every view keeps disclosures, event identity, focus and scroll through liv
     await b.send('Page.addScriptToEvaluateOnNewDocument', { source: `
       if (location.pathname.endsWith('/settings')) {
         const frame = window.requestAnimationFrame.bind(window);
-        window.requestAnimationFrame = (callback) => setTimeout(() => frame(callback), 300);
+        window.requestAnimationFrame = (callback) => setTimeout(() => frame(callback), 300); // wait-allow: delay the injected animation frame to exercise restoration before paint
       }
     ` });
     for (const width of [1280, 390]) {

@@ -1,5 +1,7 @@
 'use strict';
 
+const { waitUntil, HUNG_TEST_MS } = require('./signals');
+
 // Drives a page in headless Chrome over the DevTools protocol, for the tests
 // that check what the serve pages do in a browser. Node's own fetch and
 // WebSocket are enough, so it adds no dependency; tests skip when no Chrome
@@ -31,15 +33,7 @@ function findChrome() {
 
 const CHROME = findChrome();
 
-async function until(fn, what, ms = 15000) {
-  const end = Date.now() + ms;
-  for (;;) {
-    const v = await fn();
-    if (v) return v;
-    if (Date.now() > end) throw new Error(`timed out waiting for ${what}`);
-    await new Promise((r) => setTimeout(r, 50));
-  }
-}
+const until = (fn) => waitUntil(fn);
 
 // One Chrome per test process: a start costs seconds of CPU, a tab almost
 // nothing. Each openBrowser call gets its own tab, closed after its test, so
@@ -96,10 +90,10 @@ async function launch() {
   // next start cold too.
   let port;
   try {
-    port = await until(() => {
+    port = await waitUntil(() => {
       if (failure) throw new Error(failure);
       return fs.existsSync(portFile) && fs.readFileSync(portFile, 'utf8').split('\n')[0];
-    }, 'Chrome to start', 60000);
+    }, { paths: [portFile] });
   } catch (error) {
     proc.kill();
     await closed;
@@ -115,7 +109,7 @@ async function launch() {
     proc.ref();
     proc.stderr?.ref?.();
     proc.kill();
-    const deadline = setTimeout(() => proc.kill('SIGKILL'), 5000);
+    const deadline = setTimeout(() => proc.kill('SIGKILL'), HUNG_TEST_MS);
     try {
       await closed;
       remove();
@@ -167,8 +161,8 @@ async function openBrowser(t) {
     // Types into whatever has focus, as a keyboard would: a disabled field
     // cannot hold focus, so nothing lands there.
     type: (text) => send('Input.insertText', { text }),
-    until: (expression, what, ms) => until(() => inPage(expression).catch(() => false), what, ms),
-    restored: (expression, what, ms) => until(() => inPage(`document.documentElement.hasAttribute('data-position-restored') && (${expression})`).catch(() => false), what, ms),
+    until: (expression) => until(() => inPage(expression).catch(() => false)),
+    restored: (expression) => until(() => inPage(`document.documentElement.hasAttribute('data-position-restored') && (${expression})`).catch(() => false)),
     // A served page drops serve's one-time key from the address bar.
     goto: async (url) => {
       await send('Page.navigate', { url });

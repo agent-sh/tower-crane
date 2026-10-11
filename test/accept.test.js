@@ -1,5 +1,7 @@
 'use strict';
 
+const { waitOnRepo } = require('./signals');
+
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -39,12 +41,8 @@ const reviewerSpawns = (h) => events(h).filter((e) => e.cmd === 'spawn' && e.tas
 
 // The dispatched reviewer runs detached; the test must outlive it and its monitor.
 async function reviewerExited(h) {
-  const deadline = Date.now() + 20000;
   const agents = reviewerSpawns(h).map((e) => e.detail.agent);
-  while (!agents.every((a) => events(h).some((e) => e.cmd === 'spawn exit' && e.detail.agent === a))) {
-    assert.ok(Date.now() < deadline, 'reviewer did not exit');
-    await new Promise((resolve) => setTimeout(resolve, 50));
-  }
+  await waitOnRepo(h, () => agents.every((a) => events(h).some((e) => e.cmd === 'spawn exit' && e.detail.agent === a)));
 }
 
 // After a reviewer exits its monitor advances the task too, so either accept may win.

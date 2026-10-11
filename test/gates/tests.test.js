@@ -169,13 +169,13 @@ test('a timeout stops the command and everything it started', { skip: process.pl
   const sha = task({ 'lib/add.js': FIX, 'test/add.test.js': ADD_TEST });
   const marker = path.join(tmp, 'late-write');
   // `; true` keeps the shell alive, so the writer is a grandchild, not the shell itself.
-  const cmd = `${NODE} -e "setTimeout(() => require('fs').writeFileSync(process.argv[1], 'x'), 3000)" ${quote(marker)}; true`;
+  const cmd = `${NODE} -e "setTimeout(() => require('fs').writeFileSync(process.argv[1], 'x'), 3000)" ${quote(marker)}; true`; // wait-allow: verify timed-out commands cannot write a delayed marker
   const started = Date.now();
   const r = await gate.run(ctx(sha, { args: { cmd, timeout: 0.01 } }));
   assert.equal(r.ok, false);
   assert.match(r.summary, /timed out/);
-  assert.ok(Date.now() - started < 3000, 'the gate waited for the command instead of stopping it');
-  await new Promise((resolve) => setTimeout(resolve, 4000 - (Date.now() - started)));
+  assert.ok(Date.now() - started < 3000, 'the gate waited for the command instead of stopping it'); // wait-allow: verify the gate terminates the command before its delayed marker write
+  await new Promise((resolve) => setTimeout(resolve, 4000 - (Date.now() - started))); // wait-allow: verify timed-out commands cannot write a delayed marker
   assert.equal(fs.existsSync(marker), false, 'a process the command started outlived the timeout');
   assertCleanedUp();
 });

@@ -31,7 +31,7 @@ if (entry === 'tower-crane.js'
       && text.includes('"cmd":"spawn exit"')) {
       held = true;
       originalWriteFileSync.call(this, process.env.TOWER_CRANE_TEST_HOLD_SPAWN_SPEND, String(process.pid));
-      const deadline = Date.now() + 30000;
+      const deadline = Date.now() + 300000;
       while (!originalExistsSync.call(this, process.env.TOWER_CRANE_TEST_RELEASE_SPAWN_SPEND)
         && Date.now() < deadline) {
         Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);

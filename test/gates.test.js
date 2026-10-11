@@ -605,7 +605,7 @@ test('a task sent back and claimed after merge looked at its worktree keeps the 
   const merge = cli.start(['merge', 'T1'], {
     GATE_OUT: path.join(h.base, 'gate.json'), GATE_OK: '1', HOOK_STOP_WORKTREE_STATUS: paused,
   });
-  assert.ok(await waitFor(paused), 'merge reached its first look at the worktree');
+  assert.ok(await waitFor(paused, { nonempty: true }), 'merge reached its first look at the worktree');
   const sent = await h.runAsync(['rework', 'T1', '--reason', 'racing the merge']);
   const claimed = await h.runAsync(['claim', 'T1', '--agent', 'w-2']);
   fs.writeFileSync(`${paused}.go`, '');
@@ -637,7 +637,7 @@ test('a merge of an older head keeps the worktree of a newer accepted head', asy
   const merge = cli.start(['merge', 'T1'], {
     GATE_OUT: path.join(h.base, 'gate.json'), GATE_OK: '1', HOOK_STOP_WORKTREE_STATUS: paused,
   });
-  assert.ok(await waitFor(paused), 'merge reached its first look at the worktree');
+  assert.ok(await waitFor(paused, { nonempty: true }), 'merge reached its first look at the worktree');
   h.ok(['rework', 'T1', '--reason', 'newer head']);
   h.ok(['claim', 'T1', '--agent', 'w-2']);
   h.git(['commit', '-q', '--allow-empty', '-m', 'newer head'], wt.path);
@@ -677,7 +677,7 @@ test('merge refuses rework and claim while it removes the task worktree', async 
   const merge = cli.start(['merge', 'T1'], {
     GATE_OUT: path.join(h.base, 'gate.json'), GATE_OK: '1', HOOK_STOP_WORKTREE_REMOVE: paused,
   });
-  assert.ok(await waitFor(paused), 'merge reached git worktree remove');
+  assert.ok(await waitFor(paused, { nonempty: true }), 'merge reached git worktree remove');
   const sent = await h.runAsync(['rework', 'T1', '--reason', 'racing the removal']);
   const claimed = await h.runAsync(['claim', 'T1', '--agent', 'w-2']);
   fs.writeFileSync(`${paused}.go`, '');

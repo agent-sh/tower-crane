@@ -187,7 +187,7 @@ process.on('SIGTERM', () => {
   console.log('not ok 1 - ' + file + "\\n  error: 'Promise resolution is still pending but the event loop has already resolved'");
   process.exit(1);
 });
-setTimeout(() => process.exit(0), 10000);
+setTimeout(() => process.exit(0), 10000); // wait-allow: mapping diagnostics must survive a deliberately timed-out test runner
 `);
   h.ok(['project', 'set', '--tests-timeout-min', '0.05',
     '--tests-proof-cmd', `node ${shellQuote(script)} {tests}`]);

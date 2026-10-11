@@ -38,7 +38,7 @@ const result = cp.spawnSync(process.execPath, [
   '--test', '--test-reporter=tap',
   '--test-name-pattern=^shared restoration reveals nested disclosures',
   path.join(__dirname, 'test', 'board.test.js'),
-], { encoding: 'utf8', timeout: 120000 });
+], { encoding: 'utf8', timeout: 300000 });
 const receipt = {
   code: result.status, stdout: result.stdout, stderr: result.stderr, error: result.error?.message,
 };

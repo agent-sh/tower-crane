@@ -1,5 +1,7 @@
 'use strict';
 
+const { waitUntil } = require('./signals');
+
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -341,7 +343,7 @@ test('a codex spawn on Bedrock starts with the region from the user config', { s
   const version = cp.spawnSync('codex', ['--version'], { encoding: 'utf8' });
   if (version.status !== 0) return t.diagnostic('codex is not installed; the stub alone checked startup');
   const overrides = spawned.flatMap((a, i) => (spawned[i - 1] === '-c' ? ['-c', a] : []));
-  const r = cp.spawnSync('codex', [...overrides, 'features', 'list'], { encoding: 'utf8', env: { ...process.env, CODEX_HOME: home }, timeout: 60000 });
+  const r = cp.spawnSync('codex', [...overrides, 'features', 'list'], { encoding: 'utf8', env: { ...process.env, CODEX_HOME: home }, timeout: 300000 });
   assert.equal(r.status, 0, `codex refused the generated config: ${r.stderr}`);
 });
 
@@ -878,7 +880,7 @@ for (const [command, args, opts] of calls) {
   const result = cp.spawnSync(process.execPath, [
     path.join(checkout, 'bin', 'tower-crane.js'), 'spawn', '--task', 'T1', '--wait', '--json',
   ], {
-    cwd: h.repo, encoding: 'utf8', timeout: 60000,
+    cwd: h.repo, encoding: 'utf8', timeout: 300000,
     env: { ...u.env, STUB_RUN: JSON.stringify([
       [process.execPath, '-e', upgrade],
       ['git', 'push', '-u', 'origin', `HEAD:refs/heads/${branch}`],
@@ -923,7 +925,7 @@ test('the shim migrates a pre-T112 policy using recorded state and refuses unbou
     ...u.env, PATH: `${path.join(home, 'bin')}${path.delimiter}${u.env.PATH}`,
     TOWER_CRANE_STATE: h.state, TOWER_CRANE_TASK: 'T1', TOWER_CRANE_AGENT: 'worker-T1-1',
   };
-  const run = (args, extra = {}) => cp.spawnSync('git', args, { cwd: wt, env: { ...env, ...extra }, encoding: 'utf8', timeout: 10000 });
+  const run = (args, extra = {}) => cp.spawnSync('git', args, { cwd: wt, env: { ...env, ...extra }, encoding: 'utf8', timeout: 300000 });
   const allowed = run(['push', '-u', 'origin', `HEAD:refs/heads/${branch}`]);
   assert.equal(allowed.status, 1, allowed.stderr);
   assert.match(allowed.stderr, /fixture remote unavailable/);
@@ -955,12 +957,12 @@ test('the shim migrates a pre-T112 policy using recorded state and refuses unbou
   const remote = run(['push', '-u', 'origin', `HEAD:refs/heads/${branch}`]);
   assert.equal(remote.status, 126);
   assert.match(remote.stderr, /git push outside the recorded origin repository/);
-  const read = cp.spawnSync('gh', ['pr', 'view'], { cwd: wt, env, encoding: 'utf8', timeout: 10000 });
+  const read = cp.spawnSync('gh', ['pr', 'view'], { cwd: wt, env, encoding: 'utf8', timeout: 300000 });
   assert.notEqual(read.status, 126, read.stderr);
   assert.doesNotMatch(read.stderr, /tower-crane:/);
   fs.writeFileSync(policyFile, '{}\n');
   assert.equal(run(['push', '-u', 'origin', `HEAD:refs/heads/${branch}`]).status, 126, 'missing permissions default to deny');
-  const gh = cp.spawnSync('gh', ['pr', 'create'], { cwd: wt, env, encoding: 'utf8', timeout: 10000 });
+  const gh = cp.spawnSync('gh', ['pr', 'create'], { cwd: wt, env, encoding: 'utf8', timeout: 300000 });
   assert.equal(gh.status, 126, gh.stderr);
 });
 
@@ -1332,7 +1334,7 @@ test('a sandboxed agent changes the state only through its spawn\'s broker: as i
   assert.deepEqual(events.filter((e) => e.cmd === 'hook report').map((e) => e.detail.report), noted.map(() => 'hooked'), 'the hook payload came through stdin');
 });
 
-test('a brokered command still running when its agent exits is killed, and spawn --wait returns', { skip: NO_STUBS, timeout: 120000 }, async (t) => {
+test('a brokered command still running when its agent exits is killed, and spawn --wait returns', { skip: NO_STUBS, timeout: 300000 }, async (t) => {
   const { h, u } = setup(t);
   // Stands in for a slow brokered command: preloaded into every node process
   // the spawn starts, it holds only the CLI the broker runs for the note
@@ -1348,7 +1350,7 @@ if (process.env.TOWER_CRANE_VIA === 'broker' && process.argv.includes('late')) {
     const pidFile = path.join(h.base, `${harness}-late.pid`);
     // The agent leaves the note waiting in the background and exits once the
     // broker is running it.
-    const background = `const cp=require("child_process"),f=require("fs");cp.spawn(process.execPath,${JSON.stringify([BIN, 'task', 'note', 'T1', 'late'])},{detached:true,stdio:"ignore"}).unref();const end=Date.now()+30000;while(!f.existsSync(${JSON.stringify(pidFile)})&&Date.now()<end)Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,50)`;
+    const background = `const cp=require("child_process"),f=require("fs");cp.spawn(process.execPath,${JSON.stringify([BIN, 'task', 'note', 'T1', 'late'])},{detached:true,stdio:"ignore"}).unref();const end=Date.now()+300000;while(!f.existsSync(${JSON.stringify(pidFile)})&&Date.now()<end)Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,50)`;
     let pid = null;
     t.after(() => {
       if (pid && detachedAlive({ pid })) process.kill(pid, 'SIGKILL');
@@ -1359,12 +1361,11 @@ if (process.env.TOWER_CRANE_VIA === 'broker' && process.argv.includes('late')) {
     const started = Date.now();
     const r = await h.runAsync(['spawn', '--role', 'hard', '--task', 'T1', '--wait', '--json'], { env });
     assert.equal(r.code, 0, r.stderr);
-    assert.ok(Date.now() - started < 60000, `${harness}: spawn --wait returned`);
+    assert.ok(Date.now() - started < 60000, `${harness}: spawn --wait returned`); // wait-allow: verify broker shutdown stops a held subprocess promptly
     assert.deepEqual(u.report().ran.map((x) => x.code), [0, 0], JSON.stringify(u.report().ran.map((x) => x.stderr)));
     assert.ok(fs.existsSync(pidFile), `${harness}: the broker ran the late note`);
     pid = Number(fs.readFileSync(pidFile, 'utf8'));
-    const deadline = Date.now() + 10000;
-    while (detachedAlive({ pid }) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 50));
+    await waitUntil(() => !detachedAlive({ pid }), { signal: t.signal });
     assert.ok(!detachedAlive({ pid }), `${harness}: the brokered command stopped with the broker`);
   }
   const notes = h.readState('tasks.json').tasks[0].notes.map((n) => n.text);

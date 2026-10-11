@@ -1,5 +1,7 @@
 'use strict';
 
+const { waitOnRepo } = require('./signals');
+
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -297,11 +299,7 @@ for (const related of [false, true]) {
       hooks: { HOOK_CLOCK_FILE: clock },
     });
     try {
-      const deadline = performance.now() + 15000;
-      while (!fs.existsSync(ready)) {
-        if (performance.now() > deadline) throw new Error('gh sync never started');
-        await new Promise((resolve) => setTimeout(resolve, 20));
-      }
+      await waitOnRepo(f.h, () => fs.existsSync(ready));
       fs.writeFileSync(clock, String(now + 120000));
       const claimed = f.h.json(['claim', id, '--agent', 'worker-concurrent'], { hooks: { HOOK_CLOCK_FILE: clock } });
       fs.writeFileSync(release, 'release');
@@ -342,11 +340,7 @@ for (const related of [false, true]) {
       hooks: { HOOK_CLOCK_FILE: clock },
     });
     try {
-      const deadline = performance.now() + 15000;
-      while (!fs.existsSync(ready)) {
-        if (performance.now() > deadline) throw new Error('gh link never started');
-        await new Promise((resolve) => setTimeout(resolve, 20));
-      }
+      await waitOnRepo(f.h, () => fs.existsSync(ready));
       fs.writeFileSync(clock, String(now + 120000));
       const opts = { hooks: { HOOK_CLOCK_FILE: clock } };
       if (related) f.h.ok(['rework', id, '--reason', 'another worker takes over'], opts);

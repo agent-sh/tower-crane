@@ -1,5 +1,7 @@
 'use strict';
 
+const { waitOnRepo } = require('./signals');
+
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -48,13 +50,7 @@ function futureState(h) {
   return { task: tasks.tasks[1], event };
 }
 
-async function until(fn, message) {
-  const deadline = Date.now() + 30000;
-  while (!fn()) {
-    if (Date.now() >= deadline) assert.fail(typeof message === 'function' ? message() : message);
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
-}
+
 
 function heldWorker(h) {
   const ready = path.join(h.base, 'ready');
@@ -111,11 +107,11 @@ test('a supervised worker survives additive state from a newer tool', async (t) 
   const worker = heldWorker(h);
   const running = h.runAsync(['spawn', '--task', 'T1', '--wait', '--json']);
   try {
-    await until(() => fs.existsSync(worker.ready), 'worker did not start');
+    await waitOnRepo(h, () => fs.existsSync(worker.ready), 'worker did not start');
     h.ok(['claim', 'T1', '--agent', 'worker-T1-1', '--lease', '1']);
     S.withLock(h.state, () => futureState(h));
     // The shortened lease and future event force a state read and renewal.
-    await until(() => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8')
+    await waitOnRepo(h, () => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8')
       .split('\n').some((line) => line && JSON.parse(line).cmd === 'renew'), 'supervisor did not renew through the new state');
   } finally {
     fs.writeFileSync(worker.finish, '');
@@ -264,7 +260,7 @@ test(`${change} drains the supervisor without killing an edit`, async (t) => {
   const running = new Promise((resolve) => child.on('close', (code) => resolve({ code, stderr: output })));
   let liveBeforeExit;
   try {
-    await until(() => fs.existsSync(worker.ready), 'worker did not start');
+    await waitOnRepo(h, () => fs.existsSync(worker.ready), 'worker did not start');
     // The harness can report ready before dispatch commits. Future writers
     // must wait for that lock and publish complete files, as the CLI does.
     S.withLock(h.state, () => {
@@ -287,7 +283,7 @@ test(`${change} drains the supervisor without killing an edit`, async (t) => {
         }) + '\n');
       }
     });
-    await until(() => /supervision stopped.*worker.*finish/i.test(output),
+    await waitOnRepo(h, () => /supervision stopped.*worker.*finish/i.test(output),
       () => `supervisor did not report a clean schema stop:\n${output}`);
     process.kill(Number(fs.readFileSync(worker.ready, 'utf8')), 0);
     liveBeforeExit = S.readEvents(h.state).filter((e) => e.cmd === 'spend live');

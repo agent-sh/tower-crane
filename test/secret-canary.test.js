@@ -1,5 +1,7 @@
 'use strict';
 
+const { waitUntil } = require('./signals');
+
 // A spawn with a unique secret in the rung env, the project env, an env_file
 // and the harness credentials leaves that secret nowhere but the files the
 // owner configured it in: not in the state directory, homes, logs, events,
@@ -128,8 +130,7 @@ for (const harness of ['claude', 'codex']) {
       .trim().split('\n').map((l) => JSON.parse(l)).findLast((e) => e.cmd === 'spawn').detail;
     const monitor = { pid: started.monitor_pid, startTicks: started.monitor_start_ticks };
     process.kill(monitor.pid, 'SIGTERM');
-    const stopped = Date.now() + 30000;
-    while (detachedAlive(monitor) && Date.now() < stopped) await new Promise((resolve) => setTimeout(resolve, 50));
+    await waitUntil(() => !detachedAlive(monitor), { signal: t.signal });
     assert.equal(detachedAlive(monitor), false, 'the supervisor stopped');
     assert.deepEqual(s.reports().map((x) => x.listed), [[]]);
     s.noLeaks(r.stdout, r.stderr);
@@ -197,8 +198,7 @@ for (const harness of ['claude', 'codex']) {
     const monitor = { pid: holderSpawn.monitor_pid, startTicks: holderSpawn.monitor_start_ticks };
     t.after(async () => {
       try { process.kill(monitor.pid, 'SIGTERM'); } catch { /* already gone */ }
-      const stop = Date.now() + 30000;
-      while (detachedAlive(monitor) && Date.now() < stop) await new Promise((resolve) => setTimeout(resolve, 50));
+        await waitUntil(() => !detachedAlive(monitor), { signal: t.signal });
     });
     const holderHome = path.join(h.state, 'homes', holderSpawn.agent);
     assert.ok(fs.existsSync(holderHome), 'the holder has a home');

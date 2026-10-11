@@ -1,5 +1,7 @@
 'use strict';
 
+const { waitOnRepo, fileWritten } = require('./signals');
+
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -642,7 +644,7 @@ test('an accepted task with green gates merges in the event reaction without an 
   const spawns = () => h.logs().filter((e) => e.cmd === 'spawn').length;
   const recorded = spawns();
   h.ok(['accept', 'T1', '--agent', 'orchestrator']);
-  const notification = JSON.parse(h.ok(['wait', '--types', 'merged', '--timeout', '5', '--agent', 'orchestrator']));
+  const notification = JSON.parse(h.ok(['wait', '--types', 'merged', '--timeout', '300', '--agent', 'orchestrator']));
   assert.equal(notification.type, 'merged', 'startup catches up accepted PRs and retains its automatic merge event');
   assert.equal(h.github().prs['7'].state, 'MERGED');
   assert.equal(spawns(), recorded);
@@ -710,7 +712,7 @@ test('startup reconciles a newly conflicting PR after a merge happened without a
   conflicting.prs['8'].mergeStateStatus = 'DIRTY';
   h.saveGithub(conflicting);
   const before = h.git(['rev-parse', 'HEAD']);
-  const event = JSON.parse(h.ok(['wait', '--types', 'rework', '--timeout', '5', '--agent', 'orchestrator']));
+  const event = JSON.parse(h.ok(['wait', '--types', 'rework', '--timeout', '300', '--agent', 'orchestrator']));
   assert.equal(event.task, 'T2');
   const task = h.readState('tasks.json').tasks[1];
   assert.equal(task.status, 'rework');
@@ -725,7 +727,7 @@ test('a matching UNKNOWN head runs submission gates during the same wait', async
   state.prs['7'].mergeable = state.prs['7'].mergeStateStatus = 'UNKNOWN';
   state.becomeMergeableAfterView = true;
   h.saveGithub(state);
-  const result = await h.runAsync(['wait', '--after', '0', '--types', 'never', '--timeout', '0.2', '--agent', 'orchestrator']);
+  const result = await h.runAsync(['wait', '--after', '0', '--types', 'never', '--timeout', '0.2', '--agent', 'orchestrator']); // wait-allow: verify the CLI observation, filtering or timeout contract with already-published state
   assert.equal(result.code, 2, result.stderr);
   const task = h.readState('tasks.json').tasks[0];
   assert.deepEqual(task.evidence.filter((e) => ['tests', 'clean'].includes(e.type)).map((e) => [e.type, e.ok]),
@@ -855,10 +857,11 @@ const release = ${JSON.stringify(release)};
 if (release) {
   const starts = fs.readFileSync(${JSON.stringify(runs)}, 'utf8').split('\\n').filter((m) => m === '+').length;
   fs.writeFileSync(${JSON.stringify(path.join(h.base, 'suite-started-'))} + starts, '');
-  const poll = () => (fs.existsSync(release) ? finish() : setTimeout(poll, 50));
-  poll();
+  const watcher = fs.watch(require('node:path').dirname(release), check);
+  function check() { if (fs.existsSync(release)) { watcher.close(); finish(); } }
+  check();
 } else {
-  setTimeout(finish, 2500);
+  setTimeout(finish, 2500); // wait-allow: exercise overlapping gate completions with staggered commands
 }
 `);
   h.ok(['project', 'set', '--tests-cmd', `node ${JSON.stringify(suite)}`, '--tests-mode', 'run-only',
@@ -885,7 +888,7 @@ test('gate executors across several watchers stay within gates.executors and que
   const watchers = [0, 1, 2].map(() =>
     h.runAsync(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']));
   try {
-    assert.notEqual(await waitFor(path.join(h.base, 'suite-started-2'), { ms: 60000 }), null, 'two executors start');
+    assert.notEqual(await fileWritten(path.join(h.base, 'suite-started-2')), null, 'two executors start');
     // Keep both slots occupied until a watcher has queued the third submission.
     assert.equal(h.consume().code, 2);
     const queued = h.logs().filter((e) => e.cmd === 'automation queued' && e.detail.executors === 2);
@@ -893,7 +896,7 @@ test('gate executors across several watchers stay within gates.executors and que
   } finally {
     fs.writeFileSync(release, '');
   }
-  assert.notEqual(await waitFor(path.join(h.base, 'suite-started-3'), { ms: 60000 }), null, 'the third executor starts');
+  assert.notEqual(await fileWritten(path.join(h.base, 'suite-started-3')), null, 'the third executor starts');
   const results = await Promise.all(watchers);
   assert.ok(results.every((r) => r.code === 2), JSON.stringify(results));
   assert.deepEqual(runs(), { starts: 3, peak: 2 });
@@ -926,14 +929,14 @@ const flag = ${JSON.stringify(path.join(h.base, 'stalled'))};
 if (fs.existsSync(flag)) process.exit(0);
 fs.writeFileSync(flag, '');
 const read = () => fs.readFileSync(${JSON.stringify(events)}, 'utf8').trim().split('\\n').map(JSON.parse);
-const until = Date.now() + 20000;
+const until = Date.now() + 300000;
 const poll = () => {
   const log = read();
   if (log.some((e) => e.cmd === 'automation queued' && e.task === 'T2') || Date.now() > until) {
     process.kill(log.findLast((e) => e.cmd === 'automation' && e.detail.phase === 'running').detail.pid, 'SIGKILL');
     process.exit(1);
   }
-  setTimeout(poll, 50);
+  setTimeout(poll, 50); // wait-allow: probe cadence only; the release signal and hung-test timeout bound this fixture
 };
 poll();
 `);
@@ -970,7 +973,7 @@ function holdSuite(h) {
   fs.writeFileSync(suite, `const fs = require('node:fs');
 if (fs.existsSync(${JSON.stringify(stalled)})) process.exit(0);
 fs.writeFileSync(${JSON.stringify(stalled)}, '');
-const poll = () => (fs.existsSync(${JSON.stringify(release)}) ? process.exit(0) : setTimeout(poll, 50));
+const poll = () => (fs.existsSync(${JSON.stringify(release)}) ? process.exit(0) : setTimeout(poll, 50)); // wait-allow: probe cadence only; the release signal and hung-test timeout bound this fixture
 poll();
 `);
   h.ok(['project', 'set', '--tests-cmd', `node ${JSON.stringify(suite)}`, '--tests-mode', 'run-only',
@@ -1043,7 +1046,7 @@ const n = (fs.existsSync(counter) ? Number(fs.readFileSync(counter, 'utf8')) : 0
 fs.writeFileSync(counter, String(n));
 fs.writeFileSync(path.join(base, 'stalled-' + n), '');
 const release = path.join(base, 'release-' + n);
-const poll = () => (fs.existsSync(release) ? process.exit(0) : setTimeout(poll, 50));
+const poll = () => (fs.existsSync(release) ? process.exit(0) : setTimeout(poll, 50)); // wait-allow: probe cadence only; the release signal and hung-test timeout bound this fixture
 poll();
 `);
   h.ok(['project', 'set', '--tests-cmd', `node ${JSON.stringify(suite)}`, '--tests-mode', 'run-only',
@@ -1212,7 +1215,7 @@ for (const reason of ['unknown mergeability', 'transport error']) {
     recovered.prs['7'].mergeable = 'MERGEABLE';
     recovered.prs['7'].mergeStateStatus = 'CLEAN';
     h.saveGithub(recovered);
-    h.ok(['wait', '--types', 'merged', '--timeout', '5', '--agent', 'orchestrator']);
+    h.ok(['wait', '--types', 'merged', '--timeout', '300', '--agent', 'orchestrator']);
     assert.equal(h.readState('tasks.json').tasks[0].evidence.at(-1).type, 'merge');
     assert.equal(h.github().prs['7'].state, 'MERGED');
   });
@@ -1231,7 +1234,7 @@ test('startup confirms the accepted head after the executor dies between remote 
   assert.equal(h.github().prs['7'].state, 'MERGED');
   assert.equal(h.readState('tasks.json').tasks[0].evidence.some((e) => e.type === 'merge'), false);
   assert.equal(h.logs().findLast((e) => e.cmd === 'automation').detail.phase, 'running');
-  h.ok(['wait', '--types', 'merged', '--timeout', '5', '--agent', 'orchestrator']);
+  h.ok(['wait', '--types', 'merged', '--timeout', '300', '--agent', 'orchestrator']);
   const receipt = h.readState('tasks.json').tasks[0].evidence.at(-1);
   assert.equal(receipt.type, 'merge');
   assert.equal(receipt.ok, true);
@@ -1293,14 +1296,16 @@ function startupContexts(h, withRules) {
     assert.equal(detail.receives_prompt, true);
     assert.equal(detail.prompt_bytes, Buffer.byteLength(report.prompt));
     assert.equal(detail.prompt_tokens, Math.ceil(detail.prompt_bytes / 4));
-    assert.equal(report.prompt.includes('## House rules'), withRules);
+    assert.equal(report.prompt.includes('## House rules'), detail.rules.length > 0);
     if (withRules) {
       assert.ok(detail.rules.some((r) => r.path === path.join(h.base, 'AGENTS.md') && r.loaded === 'read'));
       for (const rule of detail.rules) assert.ok(report.prompt.includes(rule.path));
     } else {
-      assert.deepEqual(detail.rules, []);
-      assert.equal(detail.rules_bytes, 0);
-      assert.equal(detail.rules_tokens, 0);
+      // A temp root beneath another checkout can inherit that checkout's rules.
+      assert.equal(detail.rules.some((rule) => rule.path === path.join(h.base, 'AGENTS.md')), false);
+      for (const rule of detail.rules) assert.ok(report.prompt.includes(rule.path));
+      assert.equal(detail.rules_bytes, detail.rules.reduce((bytes, rule) => bytes + rule.bytes, 0));
+      assert.equal(detail.rules_tokens, Math.ceil(detail.rules_bytes / 4));
     }
   }
 }
@@ -1343,11 +1348,7 @@ test('supervisor reactions pin unconfigured gates and bypass the real restrictiv
   configureHarness(h);
   h.env.AUTOMATION_POLICY_PROBE = path.join(h.base, 'policy-probe.jsonl');
   h.ok(['spawn', '--task', 'T1', '--wait', '--agent', 'orchestrator']);
-  const deadline = Date.now() + 60000;
-  while (!h.readState('tasks.json').tasks[0].evidence.some((e) => e.type === 'merge' && e.ok)) {
-    if (Date.now() > deadline) throw new Error(JSON.stringify(h.logs().slice(-10)));
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
+  await waitOnRepo(h, () => h.readState('tasks.json').tasks[0].evidence.some((e) => e.type === 'merge' && e.ok));
   const pins = h.logs().filter((e) => e.cmd === 'gates pin');
   assert.deepEqual(pins.map((e) => e.detail.key), ['tests_cmd', 'clean_cmd']);
   assert.ok(pins.every((e) => e.agent === 'orchestrator' && e.detail.authority === 'orchestrator'));
@@ -1364,12 +1365,8 @@ test('a supervised worker submission runs gates and dispatches the offline revie
   const hold = path.join(h.base, 'worker-hold');
   const spawned = h.runAsync(['spawn', '--task', 'T1', '--wait', '--agent', 'orchestrator'],
     { env: { AUTOMATION_WORKER_HOLD: hold } });
-  const deadline = Date.now() + 60000;
   try {
-    while (!fs.existsSync(hold)) {
-      if (Date.now() > deadline) throw new Error('worker did not submit');
-      await new Promise((resolve) => setTimeout(resolve, 25));
-    }
+    await waitOnRepo(h, () => fs.existsSync(hold));
     h.consume();
     assert.equal(h.logs().filter((e) => e.cmd === 'spawn' && e.detail.role === 'reviewer').length, 0,
       'a worker still running after submit blocks review dispatch');
@@ -1378,11 +1375,7 @@ test('a supervised worker submission runs gates and dispatches the offline revie
     assert.equal((await spawned).code, 0);
   }
   // Reviewer completion has its own CLI command deadline after worker exit.
-  const reviewDeadline = Date.now() + 60000;
-  while (!h.readState('tasks.json').tasks[0].evidence.some((e) => e.type === 'merge' && e.ok)) {
-    if (Date.now() > reviewDeadline) throw new Error(JSON.stringify(h.logs().slice(-10)));
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
+  await waitOnRepo(h, () => h.readState('tasks.json').tasks[0].evidence.some((e) => e.type === 'merge' && e.ok));
   const events = h.logs();
   const review = events.findIndex((e) => e.cmd === 'spawn' && e.detail.role === 'reviewer');
   const exit = events.findIndex((e) => e.cmd === 'spawn exit' && e.detail.role === 'worker');
@@ -1530,7 +1523,7 @@ test('two queued PRs run exactly one full suite each at their turn and none befo
   h.saveGithub(ready);
   // The wait runs both suites in this process: 55s alone and 119s with the
   // whole file running in parallel, so a shorter timeout fails under load.
-  h.ok(['wait', '--types', 'merged', '--task', 'T2', '--timeout', '120', '--agent', 'orchestrator']);
+  h.ok(['wait', '--types', 'merged', '--task', 'T2', '--timeout', '300', '--agent', 'orchestrator']);
   assert.deepEqual(h.github().calls.filter((a) => a[1] === 'merge').map((a) => a[2]), ['7', '8']);
   assert.deepEqual(h.suites().slice(suites), [{ pr7: 'OPEN' }, { pr7: 'MERGED' }],
     'T1 runs its suite before merging; T2 runs its suite only after T1 merged');
@@ -1626,7 +1619,7 @@ test('a merged-head suite timeout stops the queue without reworking an accepted 
   h.ok(['project', 'set', '--tests-timeout-min', '0.05', '--agent', 'orchestrator']);
   fs.appendFileSync(path.join(h.base, 'suite.js'), `
 console.log('# Subtest: test/slow.test.js');
-setTimeout(() => {}, 10000);
+setInterval(() => {}, 1000);
 `);
   h.reviewer('T1', 'reviewer');
   h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--sha', h.sha, '--ok', '--agent', 'reviewer']);
@@ -1760,11 +1753,11 @@ test('a concurrent CI completion retries a skipped head in the next drain pass',
   // records T1's passing CI and requests another queue pass.
   fs.writeFileSync(path.join(h.base, 'during-check.js'), `const fs = require('node:fs');
 fs.writeFileSync(${JSON.stringify(paused)}, '');
-const until = Date.now() + 20000;
+const until = Date.now() + 300000;
 const poll = () => {
   if (fs.existsSync(${JSON.stringify(resume)})) return;
   if (Date.now() > until) throw new Error('queue was not resumed');
-  setTimeout(poll, 25);
+  setTimeout(poll, 25); // wait-allow: probe cadence only; the release signal and hung-test timeout bound this fixture
 };
 poll();
 `);

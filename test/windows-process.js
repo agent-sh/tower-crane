@@ -23,7 +23,7 @@ exit 0
   // A cold PowerShell query on a busy runner needs the same budget as a test CLI call.
   const value = cp.execFileSync('powershell.exe', [
     '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64'),
-  ], { encoding: 'utf8', windowsHide: true, timeout: 60000 }).trim();
+  ], { encoding: 'utf8', windowsHide: true, timeout: 300000 }).trim();
   if (value && !/^\d+$/.test(value)) throw new Error('invalid Windows process creation time');
   return value || null;
 }

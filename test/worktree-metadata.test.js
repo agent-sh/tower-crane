@@ -1,5 +1,7 @@
 'use strict';
 
+const { fileWritten } = require('./signals');
+
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -59,15 +61,9 @@ process.exit(${code});
   });
 }
 
-async function waitFor(file) {
-  const deadline = performance.now() + 15000;
-  while (!fs.existsSync(file)) {
-    assert.ok(performance.now() < deadline, `waiting for ${file}`);
-    await new Promise((resolve) => setTimeout(resolve, 20));
-  }
-}
+const waitFor = (file) => fileWritten(file);
 
-test('two preparations overlap a gate removal without pruning their initializing registrations', { timeout: 30000 }, async (t) => {
+test('two preparations overlap a gate removal without pruning their initializing registrations', { timeout: 300000 }, async (t) => {
   const h = makeRepo(t);
   const script = path.join(h.base, 'gate.js');
   const ready = path.join(h.base, 'gate-ready');
@@ -77,7 +73,7 @@ test('two preparations overlap a gate removal without pruning their initializing
   fs.writeFileSync(script, `
 const fs = require('node:fs');
 fs.writeFileSync(${JSON.stringify(ready)}, '');
-const deadline = performance.now() + 20000;
+const deadline = performance.now() + 300000;
 while (!fs.existsSync(${JSON.stringify(release)})) {
   if (performance.now() > deadline) process.exit(1);
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
@@ -91,7 +87,7 @@ const fs = require('node:fs'), path = require('node:path');
 const name = path.basename(process.cwd());
 if (name === 'wt') process.exit(0);
 fs.writeFileSync(path.join(${JSON.stringify(h.base)}, name + '-ready'), '');
-const deadline = performance.now() + 20000;
+const deadline = performance.now() + 300000;
 while (!fs.existsSync(${JSON.stringify(addRelease)})) {
   if (performance.now() > deadline) process.exit(1);
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);

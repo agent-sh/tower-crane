@@ -1,5 +1,7 @@
 'use strict';
 
+const { waitUntil } = require('./signals');
+
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -249,13 +251,7 @@ Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0);
 
   const broker = await B.start(job);
   const answer = B.forward(job.broker, ['task', 'note', 'T1', 'slow'], state).then((r) => ({ r }), (e) => ({ e }));
-  const until = async (ok, what) => {
-    const deadline = Date.now() + 15000;
-    while (!ok()) {
-      assert.ok(Date.now() < deadline, what);
-      await new Promise((resolve) => setTimeout(resolve, 50));
-    }
-  };
+  const until = (check) => waitUntil(check, { paths: [base], signal: t.signal });
   await until(() => fs.existsSync(pids) && fs.readFileSync(pids, 'utf8').length > 0, 'the brokered command started');
   started = JSON.parse(fs.readFileSync(pids, 'utf8'));
   broker.close();
