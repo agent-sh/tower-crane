@@ -1,0 +1,1 @@
+- Escalation fixtures use fictional model IDs and pin the native rung through the shared helper.

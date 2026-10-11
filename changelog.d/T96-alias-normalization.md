@@ -1,0 +1,1 @@
+- Reviewer pricing trims and case-folds Claude aliases before resolving their shared release identity, so uppercase and padded aliases retain cost-based promotion.

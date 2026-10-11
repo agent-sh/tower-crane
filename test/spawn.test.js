@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');
-const { cachedFixture, real, BIN, PTY_AVAILABLE } = require('./helpers');
+const { cachedFixture, pinRung, real, BIN, PTY_AVAILABLE } = require('./helpers');
 const stack = require('./stack-fixture');
 const A = require('../lib/agents');
 const S = require('../lib/state');
@@ -21,18 +21,46 @@ function setup(t) {
 
 const dry = (h, rung, env) => h.json(['spawn', ...(rung ? ['--role', rung] : []), '--task', 'T1', '--dry-run'], { env });
 
-const FIELDS = ['harness', 'model', 'profile', 'provider', 'effort', 'args', 'command'];
-
 // Sets a rung to exactly these flags: every field they leave out is cleared.
 function setRung(h, rung, flags) {
-  const given = flags.filter((f) => f.startsWith('--')).map((f) => f.slice(2));
-  h.ok(['ladder', 'set', rung, ...flags, ...FIELDS.filter((k) => !given.includes(k)).flatMap((k) => ['--clear', k])]);
+  const fields = {};
+  for (let i = 0; i < flags.length; i += 2) {
+    const key = flags[i].slice(2);
+    fields[key] = ['args', 'command'].includes(key) ? JSON.parse(flags[i + 1]) : flags[i + 1];
+  }
+  pinRung(h, rung, fields);
 }
 
 const commandRung = (h, rung, argv) => {
   const command = argv.some((arg) => /\{(prompt|brief)\}/.test(arg)) ? argv : [...argv, '{prompt}'];
   setRung(h, rung, ['--harness', 'command', '--command', JSON.stringify(command)]);
 };
+
+for (const harness of ['claude', 'codex', 'opencode', 'agy', 'pi']) {
+  test(`a ${harness} rung spawns with an arbitrary model ID`, (t) => {
+    const h = setup(t);
+    const model = `provider/new-model-${harness}-2099`;
+    pinRung(h, 'medium', { harness, model, effort: 'high' });
+    const bin = path.join(h.base, 'bin');
+    fs.mkdirSync(bin);
+    fs.writeFileSync(path.join(bin, harness + (process.platform === 'win32' ? '.exe' : '')), '', { mode: 0o755 });
+    const env = { PATH: bin + path.delimiter + (h.env.PATH || h.env.Path || ''), USAGE_CLAIM: '1' };
+    const captured = path.join(h.base, 'argv.json');
+    const out = h.json(['spawn', '--task', 'T1', '--wait'], {
+      env,
+      hooks: { HOOK_USAGE_HARNESS: harness, HOOK_USAGE_ARGV: captured,
+        HOOK_USAGE_FILE: path.join(__dirname, 'fixtures', 'usage', 'codex-stream.jsonl') },
+    });
+    assert.equal(out.code, 0);
+    const event = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n')
+      .map(JSON.parse).find(e => e.cmd === 'spawn');
+    assert.equal(event.detail.harness, harness);
+    assert.equal(event.detail.route.model, model);
+    const flag = ['codex', 'opencode'].includes(harness) ? '-m' : '--model';
+    const argv = JSON.parse(fs.readFileSync(captured, 'utf8'));
+    assert.equal(argv[argv.indexOf(flag) + 1], model);
+  });
+}
 
 test('design tasks dispatch without a kit on unsupported worker, review and small harnesses and report the omission', (t) => {
   const h = setup(t);
@@ -141,16 +169,16 @@ test('spawn --dry-run builds each harness command', (t) => {
     '--extension', path.join(state, 'homes', 'small-T1-1', 'hook.mjs'),
   ];
   const cases = [
-    [['--harness', 'claude', '--model', 'claude-opus-5-5'], (p, s) => ['claude', '-p', p, '--model', 'claude-opus-5-5', '--output-format', 'json', ...claudeOwn(s)]],
-    [['--harness', 'claude', '--model', 'opus', '--effort', 'high'], (p, s) => ['claude', '-p', p, '--model', 'opus', '--effort', 'high', '--output-format', 'json', ...claudeOwn(s)]],
-    [['--harness', 'codex', '--profile', 'sol'], (p, s) => ['codex', 'exec', '--json', '-p', 'sol', ...codexOwn(s), p]],
-    [['--harness', 'codex', '--model', 'gpt-x', '--effort', 'high', '--args', '["--skip-git-repo-check"]'], (p, s) => ['codex', 'exec', '--json', '-m', 'gpt-x', '-c', 'model_reasoning_effort=high', ...codexOwn(s), p, '--skip-git-repo-check']],
-    [['--harness', 'opencode', '--model', 'anthropic/claude'], (p) => ['opencode', 'run', '--format', 'json', '-m', 'anthropic/claude', p]],
-    [['--harness', 'opencode', '--model', 'openai/gpt-x', '--effort', 'high'], (p) => ['opencode', 'run', '--format', 'json', '-m', 'openai/gpt-x', '--variant', 'high', p]],
-    [['--harness', 'agy', '--model', 'gemini-3-pro'], (p) => ['agy', '-p', p, '--mode', 'accept-edits', '--output-format', 'json', '--model', 'gemini-3-pro', '--agent', 'gishra-small', '--disable-slash-commands', '--sandbox']],
-    [['--harness', 'agy', '--model', 'gemini-3-pro', '--effort', 'max', '--args', '["--print-timeout","60s"]'], (p) => ['agy', '-p', p, '--mode', 'accept-edits', '--output-format', 'json', '--model', 'gemini-3-pro', '--effort', 'max', '--agent', 'gishra-small', '--disable-slash-commands', '--sandbox', '--print-timeout', '60s']],
-    [['--harness', 'pi', '--model', 'openai/gpt-5.5'], (p, s) => ['pi', '-p', p, '--mode', 'json', '--model', 'openai/gpt-5.5', ...piOwn(s)]],
-    [['--harness', 'pi', '--model', 'openai/gpt-5.5', '--provider', 'openai', '--effort', 'xhigh', '--args', '["--no-session"]'], (p, s) => ['pi', '-p', p, '--mode', 'json', '--model', 'openai/gpt-5.5', '--provider', 'openai', '--thinking', 'xhigh', ...piOwn(s), '--no-session']],
+    [['--harness', 'claude', '--model', 'fixture-large'], (p, s) => ['claude', '-p', p, '--model', 'fixture-large', '--output-format', 'json', ...claudeOwn(s)]],
+    [['--harness', 'claude', '--model', 'fixture-large', '--effort', 'high'], (p, s) => ['claude', '-p', p, '--model', 'fixture-large', '--effort', 'high', '--output-format', 'json', ...claudeOwn(s)]],
+    [['--harness', 'codex', '--profile', 'fixture-main'], (p, s) => ['codex', 'exec', '--json', '-p', 'fixture-main', ...codexOwn(s), p]],
+    [['--harness', 'codex', '--model', 'fixture-model', '--effort', 'high', '--args', '["--skip-git-repo-check"]'], (p, s) => ['codex', 'exec', '--json', '-m', 'fixture-model', '-c', 'model_reasoning_effort=high', ...codexOwn(s), p, '--skip-git-repo-check']],
+    [['--harness', 'opencode', '--model', 'provider/fixture-model'], (p) => ['opencode', 'run', '--format', 'json', '-m', 'provider/fixture-model', p]],
+    [['--harness', 'opencode', '--model', 'openai/fixture-model', '--effort', 'high'], (p) => ['opencode', 'run', '--format', 'json', '-m', 'openai/fixture-model', '--variant', 'high', p]],
+    [['--harness', 'agy', '--model', 'fixture-large'], (p) => ['agy', '-p', p, '--mode', 'accept-edits', '--output-format', 'json', '--model', 'fixture-large', '--agent', 'gishra-small', '--disable-slash-commands', '--sandbox']],
+    [['--harness', 'agy', '--model', 'fixture-large', '--effort', 'max', '--args', '["--print-timeout","60s"]'], (p) => ['agy', '-p', p, '--mode', 'accept-edits', '--output-format', 'json', '--model', 'fixture-large', '--effort', 'max', '--agent', 'gishra-small', '--disable-slash-commands', '--sandbox', '--print-timeout', '60s']],
+    [['--harness', 'pi', '--model', 'provider/fixture-model'], (p, s) => ['pi', '-p', p, '--mode', 'json', '--model', 'provider/fixture-model', ...piOwn(s)]],
+    [['--harness', 'pi', '--model', 'provider/fixture-model', '--provider', 'openai', '--effort', 'xhigh', '--args', '["--no-session"]'], (p, s) => ['pi', '-p', p, '--mode', 'json', '--model', 'provider/fixture-model', '--provider', 'openai', '--thinking', 'xhigh', ...piOwn(s), '--no-session']],
   ];
   const empty = path.join(h.base, 'no-plugin');
   fs.mkdirSync(empty);
@@ -180,9 +208,9 @@ test('spawn --dry-run builds each harness command', (t) => {
 
 test('opencode inline config keeps caller fields and plugins when adding the home plugin', (t) => {
   const h = setup(t);
-  setRung(h, 'small', ['--harness', 'opencode', '--model', 'anthropic/claude']);
+  setRung(h, 'small', ['--harness', 'opencode', '--model', 'provider/fixture-model']);
   const original = {
-    model: 'anthropic/claude',
+    model: 'provider/fixture-model',
     theme: 'tower-crane-test',
     agent: { build: { temperature: 0.2 } },
     plugin: ['file:///existing/plugin.mjs'],
@@ -205,10 +233,10 @@ test('spawn embeds the role skill in the system context for isolated reviewers a
   writeSkill(plugin, 'tower-crane-work', bodies.worker);
   writeSkill(plugin, 'tower-crane-review', bodies.reviewer);
   const cases = [
-    ['claude', 'opus'],
-    ['codex', 'gpt-x'],
-    ['opencode', 'anthropic/claude'],
-    ['agy', 'gemini-3-pro'],
+    ['claude', 'fixture-large'],
+    ['codex', 'fixture-model'],
+    ['opencode', 'provider/fixture-model'],
+    ['agy', 'fixture-large'],
   ];
   const env = { TOWER_CRANE_PLUGIN_ROOT: plugin };
 

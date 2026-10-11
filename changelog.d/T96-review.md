@@ -1,0 +1,1 @@
+- Reviewer cost samples resolve native Claude aliases through the same table as candidates while keeping provider identities. The model swap probe creates a seed commit so history-based shared checks can run.
