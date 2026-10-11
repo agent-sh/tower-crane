@@ -113,6 +113,7 @@ test('a scan with checks that did not run: not ok, naming them', async () => {
     report([], extra);
     const r = await gate.run(ctx());
     assert.equal(r.ok, false, JSON.stringify(extra));
+    assert.equal(r.infrastructure_failure, true, 'a scan that did not complete is retried once, not reworked');
     assert.match(r.summary, /The scan is incomplete/);
     assert.match(r.summary, named);
   }

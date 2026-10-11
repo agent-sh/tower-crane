@@ -55,6 +55,8 @@ function fixture(t) {
         ...(evidence.capped_review ? { capped_review: evidence.capped_review } : {}),
         ...(evidence.confirmed_failure !== undefined ? { confirmed_failure: evidence.confirmed_failure } : {}),
         ...(evidence.infrastructure_failure ? { infrastructure_failure: true } : {}),
+        ...(evidence.worker_failure ? { worker_failure: true } : {}),
+        ...(evidence.pending ? { pending: true } : {}),
       });
       assert.equal(evidence.source, 'check ci');
       assert.ok(Array.isArray(evidence.commands));

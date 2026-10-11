@@ -640,7 +640,8 @@ test('a passing gate reruns in the next reaction after its tests mode changes', 
 test('a deterministic test failure reworks with its failing test names and output tail', (t) => {
   const h = setup(t, { ci: 'pending' });
   const script = path.join(h.base, 'failing-tests.js');
-  fs.writeFileSync(script, "console.log('# Subtest: test/sum.test.js');\nconsole.log('not ok 1 - sums two numbers');\nconsole.log('  expected 3 got 4');\nprocess.exit(1);\n");
+  // Fails only at the submitted head: the base holds value.js at 0, so the same test passes there.
+  fs.writeFileSync(script, "const fs = require('node:fs');\nif (!fs.readFileSync('value.js', 'utf8').includes('1')) process.exit(0);\nconsole.log('# Subtest: test/sum.test.js');\nconsole.log('not ok 1 - sums two numbers');\nconsole.log('  expected 3 got 4');\nprocess.exit(1);\n");
   h.ok(['project', 'set', '--tests-cmd', `node ${shellQuote(script)}`, '--tests-mode', 'run-only']);
   h.submit();
   h.consume();
@@ -655,6 +656,7 @@ test('a deterministic test failure reworks with its failing test names and outpu
   assert.match(reason, /^tests failed at [0-9a-f]{7,}: /);
   assert.match(reason, /Failing tests:\n- sums two numbers/);
   assert.match(reason, /expected 3 got 4/);
+  assert.equal(latest.main_failure, undefined, 'a failure that passes on main is the change\'s');
 });
 
 test('a timed-out test run retries once at its head and the passing retry keeps the task submitted', (t) => {
@@ -747,6 +749,29 @@ test('a change that adds no test reworks with the reason, and the worker adds a 
   assert.match(h.logs().findLast((e) => e.cmd === 'rework').detail.reason, /^tests failed at [0-9a-f]{7,}: no test covers this change: .*adds or changes no test file/);
 });
 
+test('a CI run that was cancelled retries once and reworks when it is cancelled again', (t) => {
+  const h = setup(t, { ci: 'cancelled' });
+  h.submit();
+  h.consume();
+  const checks = h.github().calls.filter((a) => a[0] === 'api' && a[1].includes('check-runs'));
+  assert.equal(checks.length, 2, 'a cancelled run is read once more and no third time');
+  const task = h.readState('tasks.json').tasks[0];
+  assert.deepEqual(task.evidence.filter((e) => e.type === 'ci').map((e) => [e.ok, e.infrastructure_failure === true]),
+    [[false, true], [false, true]]);
+  assert.equal(task.status, 'rework');
+});
+
+test('a CI run that needs action sends a submitted task to rework at once, with its conclusion', (t) => {
+  const h = setup(t, { ci: 'action_required' });
+  h.submit();
+  h.consume();
+  assert.equal(h.github().calls.filter((a) => a[0] === 'api' && a[1].includes('check-runs')).length, 1, 'a verdict on the change is not retried');
+  const task = h.readState('tasks.json').tasks[0];
+  assert.equal(task.status, 'rework');
+  assert.equal(task.evidence.filter((e) => e.type === 'ci').at(-1).worker_failure, true);
+  assert.match(h.logs().findLast((e) => e.cmd === 'rework').detail.reason, /^ci failed at [0-9a-f]+: .*action_required/s);
+});
+
 test('a CI run that times out retries once and reworks when it times out again', (t) => {
   const h = setup(t, { ci: 'timed_out' });
   h.submit();
@@ -813,6 +838,20 @@ test('a local CI command that times out retries once and reworks when the retry 
   assert.deepEqual(task.evidence.filter((e) => e.type === 'ci').map((e) => e.infrastructure_failure === true), [true, true]);
   assert.equal(task.status, 'rework');
   assert.match(h.logs().findLast((e) => e.cmd === 'rework').detail.reason, /^ci failed at [0-9a-f]+: local CI timed out/);
+});
+
+test('a test that also fails on main retries once, then reworks with the main failure to link', (t) => {
+  const h = setup(t, { ci: 'pending' });
+  const script = path.join(h.base, 'known-failure.js');
+  fs.writeFileSync(script, "console.log('# Subtest: test/known.test.js');\nconsole.log('not ok 1 - known base failure');\nprocess.exit(1);\n");
+  h.ok(['project', 'set', '--tests-cmd', `node ${shellQuote(script)}`, '--tests-mode', 'run-only']);
+  h.submit();
+  h.consume();
+  assert.equal(h.logs().filter((e) => e.cmd === 'check tests').length, 2, 'the failure that also fails on main runs once more, and no third time');
+  const task = h.readState('tasks.json').tasks[0];
+  assert.deepEqual(task.evidence.filter((e) => e.type === 'tests').map((e) => e.main_failure?.names), [['known base failure'], ['known base failure']]);
+  assert.equal(task.status, 'rework');
+  assert.match(h.logs().findLast((e) => e.cmd === 'rework').detail.reason, /^tests failed at [0-9a-f]+: .*Also fails on main at [0-9a-f]+: known base failure/s);
 });
 
 test('gates retry exits nonzero while a retried gate still fails', (t) => {

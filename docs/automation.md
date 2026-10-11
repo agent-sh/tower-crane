@@ -64,16 +64,26 @@ is recovered through the merge gate's accepted-head confirmation.
 
 Software gates run again when their passing evidence no longer matches its
 inputs, such as the pinned command or tests policy. A failed `tests`, `clean`
-or `ci` gate at a submitted head does not wait. A timeout, a runner killed by a
-signal, or a CI run or local CI command that timed out runs the gate once more
-at the same head. Any other failure of a gate that ran, and a retry that fails
-too, sends the task to rework with the gate's summary, which names the failing
-tests and their output tail. A failure of a confirmed quality check on a task with a tier range is
-escalation's: it sends the task back with a climb, as before. A change with no
-test, or with no changes against the base, reworks with the gate's reason. A
-missing or uninstalled pinned command is project configuration: the task stays
-submitted, and the inbox shows a `gate_config` item addressed to the
-orchestrator, not the owner, that names the setting. Nothing waits on the owner.
+or `ci` gate at a submitted head does not wait for an operator. Each failure
+is classified by what it says about the change:
+
+- Infrastructure runs once more at the same head, and a second failure reworks.
+  That covers a timeout, a runner killed by a signal, a CI run that timed out,
+  was cancelled or never started, a cleanup scan with checks that did not run,
+  and a test that also fails on the base branch (`main` in the project).
+- A change the worker must fix reworks at once: no test covers the change, it
+  has no changes against the base, a test or cleanup command fails, or a
+  required CI run is not successful.
+- A missing or uninstalled pinned command is project configuration. The task
+  stays submitted, and the inbox shows a `gate_config` item addressed to the
+  orchestrator, not the owner, that names the setting. Nothing waits on the owner.
+- A pending CI run waits for CI.
+
+A rework names the failing tests and their output tail. When the failing tests
+also fail on the base branch, the rework says so with their names, so the worker
+can link the existing failure instead of fixing unrelated code. A failure of a
+confirmed quality check on a task with a tier range is escalation's: it sends
+the task back with a climb, as before.
 
 Failures remain visible in gate receipts and task notes. Conflicting PRs
 return to rework with a file list. Unknown mergeability, failed transport,
