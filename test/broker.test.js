@@ -491,3 +491,19 @@ test('a sandboxed worker prints its worktree without the state lock, though a st
   assert.equal(fs.readFileSync(tasks, 'utf8'), before, 'the sandboxed worktree wrote no state');
   assert.equal(fs.existsSync(path.join(f.h.state, 'lock')), false, 'no state lock was taken');
 });
+
+test('a test fixture with an inherited broker variable creates its own worktree; the broker serves only its state', async (t) => {
+  const sandbox = makeRepo(t);
+  sandbox.init();
+  const job = { state: sandbox.state, task: 'T1', agent: 'worker-T1-1', role: 'worker', cwd: sandbox.base, broker: path.join(sandbox.base, 'brokers', 'worker-T1-1', B.FILE) };
+  const broker = await B.start(job);
+  t.after(() => broker.close());
+  // The fixture is writable, so it is not the sandboxed worker's state.
+  const fixture = makeRepo(t);
+  fixture.init();
+  fixture.ok(['task', 'add', '--title', 'Change', '--acceptance', 'it works']);
+  const r = fixture.run(['worktree', 'T1'], { env: { TOWER_CRANE_BROKER: broker.env.TOWER_CRANE_BROKER } });
+  assert.equal(r.code, 0, r.stderr);
+  assert.ok(fixture.registers(r.stdout.trim()), 'the worktree was created');
+  assert.ok(fixture.readState('tasks.json').tasks.find((x) => x.id === 'T1').branch, 'the fixture recorded its branch');
+});
