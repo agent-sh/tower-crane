@@ -1,1 +1,1 @@
-- Model lint recognizes increment and decrement as whole tokens, so division after a postfix update cannot hide later model literals.
+- Model lint detects model IDs after postfix updates and division.

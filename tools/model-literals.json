@@ -1,177 +1,142 @@
 [
   {
     "path": "lib/agents.js",
-    "literal": "./claude-provider",
+    "text": "claude-provider",
     "reason": "Relative import of the Claude provider routing module"
   },
   {
     "path": "lib/project.js",
-    "literal": "./claude-provider",
+    "text": "claude-provider",
     "reason": "Relative import of the Claude provider routing module"
   },
   {
     "path": "lib/reviewer.js",
-    "literal": "./claude-provider",
+    "text": "claude-provider",
     "reason": "Relative import of the Claude provider routing module"
   },
   {
     "path": "lib/spawn.js",
-    "literal": "./claude-provider",
+    "text": "claude-provider",
     "reason": "Relative import of the Claude provider routing module"
   },
   {
     "path": "lib/spawn-monitor.js",
-    "literal": "./claude-provider",
+    "text": "claude-provider",
     "reason": "Relative import of the Claude provider routing module"
   },
   {
     "path": "lib/tasks.js",
-    "literal": "./claude-provider",
+    "text": "claude-provider",
     "reason": "Relative import of the Claude provider routing module"
   },
   {
     "path": "package.json",
-    "literal": ".claude-plugin/",
+    "text": "claude-plugin",
     "reason": "Published plugin directory in the npm package manifest"
   },
   {
     "path": "research/T101-probes/results/identity.json",
-    "literal": "exit 0; demo: prove the engine\nrepo: acme/app  base: main  standards: default\nlimits: 6 workers, 60 min lease  budget: none\ntests.paths: default layouts\ntests.keep: []\ntests.mode: prove\ntests.by_kind: {}\ntests.expensive: false\ngates.tests_cmd: null\ngates.clean_cmd: null\ngates.tests_proof_cmd: null\nci.ignore_apps: []\nci.required: []\nci.capped_review: []\nci.local: hosted\nmerge.keep_branch: false\nmerge.admin: true\nreview: tier and diff defaults\nresearch.min_sources: 10\nladder (default harness codex):\n  orchestrator  claude           model opus, effort high      from project\n  easy          codex (default)  profile luna, effort medium  from project\n  medium        codex (default)  profile sol, e",
+    "text": "opus",
     "reason": "Historical research citation or recorded probe output; not a runtime model selection"
   },
   {
     "path": "research/T101-probes/results/identity.json",
-    "literal": "exit 0; demo: prove the engine\nrepo: acme/app  base: main  standards: default\nlimits: 4 workers, 60 min lease  budget: none\ntests.paths: default layouts\ntests.keep: []\ntests.mode: prove\ntests.by_kind: {}\ntests.expensive: false\ngates.tests_cmd: null\ngates.clean_cmd: null\ngates.tests_proof_cmd: null\nci.ignore_apps: []\nci.required: []\nci.capped_review: []\nci.local: hosted\nmerge.keep_branch: false\nmerge.admin: true\nreview: tier and diff defaults\nresearch.min_sources: 10\nladder (default harness codex):\n  orchestrator  claude           model opus, effort high      from project\n  easy          codex (default)  profile luna, effort medium  from project\n  medium        codex (default)  profile sol, e",
+    "text": "luna",
+    "reason": "Historical research citation or recorded probe output; not a runtime model selection"
+  },
+  {
+    "path": "research/T101-probes/results/identity.json",
+    "text": "sol",
     "reason": "Historical research citation or recorded probe output; not a runtime model selection"
   },
   {
     "path": "research/T101-probes/results/secrets.json",
-    "literal": "exit 0; {; allowWrite: [\"/tmp/claude-1000/tower-crane-HCy1mX/repo/.git\",\"/tmp/claude-1000/tower-crane-HCy1mX/repo/.git/worktrees/T1-probe\",\"/tmp/claude-1000/tower-crane-HCy1mX/home/.cache/tower-crane/agents/76a14410e0c4/worker-T1-1\"]",
-    "reason": "Historical research citation or recorded probe output; not a runtime model selection"
-  },
-  {
-    "path": "research/T101-probes/results/secrets.json",
-    "literal": "denyRead: [\"/tmp/claude-1000/tower-crane-HCy1mX/repo/.tower-crane/homes\",\"/var/run/docker.sock\",\"/run/docker.sock\",\"/run/user/1000\",\"/tmp/claude-1000/tower-crane-HCy1mX/home/.ssh\",\"/tmp/claude-1000/tower-crane-HCy1mX/home/.aws\",\"/tmp/claude-1000/tower-crane-HCy1mX/repo/.tower-crane/brokers\"]; network.allowedDomains: [\"*\"]; readable: .config/gh, .claude, .codex, .docker, .npmrc, .netrc, .git-credentials",
+    "text": "claude-1000",
     "reason": "Historical research citation or recorded probe output; not a runtime model selection"
   },
   {
     "path": "research/T38.json",
-    "literal": "claude-code-bedrock",
+    "text": "claude-code-bedrock",
     "reason": "Historical research citation or recorded probe output; not a runtime model selection"
   },
   {
     "path": "research/T38.json",
-    "literal": "claude-code-cli",
+    "text": "claude-code-cli",
     "reason": "Historical research citation or recorded probe output; not a runtime model selection"
   },
   {
     "path": "research/T38.json",
-    "literal": "Claude Opus 5.5 lists at $4 input, $20 output, $5 per 5-minute write, $8 per 1-hour write and $0.20 per cache hit, per million tokens.",
+    "text": "Opus",
     "reason": "Historical research citation or recorded probe output; not a runtime model selection"
   },
   {
     "path": "research/T38.json",
-    "literal": "Claude Opus 5.5For long-running agentic coding and knowledge work $4 / MTok $20 / MTok $5 / MTok $8 / MTok $0.20 / MTok",
+    "text": "Sonnet",
     "reason": "Historical research citation or recorded probe output; not a runtime model selection"
   },
   {
     "path": "research/T38.json",
-    "literal": "Cache hits on Opus 5.5 and Sonnet 5.5 cost 0.05x base input.",
+    "text": "GPT-5.6",
     "reason": "Historical research citation or recorded probe output; not a runtime model selection"
   },
   {
     "path": "research/T38.json",
-    "literal": "Cache hits and refreshes on Claude Opus 5.5 and Claude Sonnet 5.5 are priced at 0.05x the base input price.",
+    "text": "GPT-6.1",
     "reason": "Historical research citation or recorded probe output; not a runtime model selection"
   },
   {
     "path": "research/T38.json",
-    "literal": "A supplied prompt_cache_key, which separates cache reuse between groups of requests and helps optimize cache routing on models before GPT-5.6.",
+    "text": "Sol",
     "reason": "Historical research citation or recorded probe output; not a runtime model selection"
   },
   {
     "path": "research/T38.json",
-    "literal": "On GPT-5.6 and later OpenAI bills cache writes at 1.25x input and GPT-6.1 Sol reads at 0.05x.",
+    "text": "gpt-6.1-sol",
     "reason": "Historical research citation or recorded probe output; not a runtime model selection"
   },
   {
     "path": "research/T38.json",
-    "literal": "For GPT-5.6 and later, cache writes cost 1.25× the standard, uncached input-token rate. Subsequent reads cost 0.1× that rate on most of these models and 0.05× on GPT-6.1 Sol.",
-    "reason": "Historical research citation or recorded probe output; not a runtime model selection"
-  },
-  {
-    "path": "research/T38.json",
-    "literal": "OpenAI keeps a GPT-5.6+ prefix for 30 minutes after its last write or reuse.",
-    "reason": "Historical research citation or recorded probe output; not a runtime model selection"
-  },
-  {
-    "path": "research/T38.json",
-    "literal": "OpenAI's standard tier lists gpt-6.1-sol at $2.00 input, $0.10 cached input, $2.50 cache writes and $10.00 output per million tokens.",
-    "reason": "Historical research citation or recorded probe output; not a runtime model selection"
-  },
-  {
-    "path": "research/T38.json",
-    "literal": "gpt-6.1-sol $2.00 $0.10 $2.50 $10.00",
-    "reason": "Historical research citation or recorded probe output; not a runtime model selection"
-  },
-  {
-    "path": "research/T38.json",
-    "literal": "Bedrock supports four checkpoints with 5-minute and 1-hour TTLs on Claude Opus 5.5.",
-    "reason": "Historical research citation or recorded probe output; not a runtime model selection"
-  },
-  {
-    "path": "research/T38.json",
-    "literal": "Claude Opus 5.5 anthropic.claude-opus-5-5 Generally Available 512 4 5 minutes, 1 hour",
+    "text": "claude-opus-5-5",
     "reason": "Historical research citation or recorded probe output; not a runtime model selection"
   },
   {
     "path": "test/fixtures/npm-pack/npm-11.json",
-    "literal": ".claude-plugin/marketplace.json",
+    "text": "claude-plugin",
     "reason": "Captured npm package file listing"
   },
   {
     "path": "test/fixtures/npm-pack/npm-11.json",
-    "literal": ".claude-plugin/plugin.json",
-    "reason": "Captured npm package file listing"
-  },
-  {
-    "path": "test/fixtures/npm-pack/npm-11.json",
-    "literal": "lib/claude-provider.js",
+    "text": "claude-provider.js",
     "reason": "Captured npm package file listing"
   },
   {
     "path": "test/fixtures/npm-pack/npm-12.json",
-    "literal": ".claude-plugin/marketplace.json",
+    "text": "claude-plugin",
     "reason": "Captured npm package file listing"
   },
   {
     "path": "test/fixtures/npm-pack/npm-12.json",
-    "literal": ".claude-plugin/plugin.json",
-    "reason": "Captured npm package file listing"
-  },
-  {
-    "path": "test/fixtures/npm-pack/npm-12.json",
-    "literal": "lib/claude-provider.js",
+    "text": "claude-provider.js",
     "reason": "Captured npm package file listing"
   },
   {
     "path": "tools/tests-map.json",
-    "literal": "test/claude-provider.test.js",
+    "text": "claude-provider.test.js",
     "reason": "Module or fixture filename in the test coverage map"
   },
   {
     "path": "tools/tests-map.json",
-    "literal": "lib/claude-provider.js",
+    "text": "claude-provider.js",
     "reason": "Module or fixture filename in the test coverage map"
   },
   {
     "path": "tools/tests-map.json",
-    "literal": "test/fixtures/usage/claude-print-result.json",
+    "text": "claude-print-result.json",
     "reason": "Module or fixture filename in the test coverage map"
   },
   {
     "path": "tools/tests-map.json",
-    "literal": "test/fixtures/usage/claude-result.json",
+    "text": "claude-result.json",
     "reason": "Module or fixture filename in the test coverage map"
   }
 ]

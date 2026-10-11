@@ -7,7 +7,7 @@ const path = require('node:path');
 const cp = require('node:child_process');
 const { ROOT, makeRepo, makeProjectRepo, makeTaskRepo, cachedFixture, fixtureLadder } = require('./helpers');
 
-const { modelSelections, literals } = require('../scripts/check-model-config');
+const { modelSelections } = require('../scripts/check-model-config');
 
 test('cached fixtures pin their ladder and keep copies independent', (t) => {
   const tasks = [{ args: ['--title', 'Cached task', '--acceptance', 'pinned model'], brief: 'cached brief\n' }];
@@ -77,11 +77,18 @@ cp.spawnSync = function (command, args, options) {
   assert.match(failed.stderr, /error: fixture assertion details/);
 });
 
-test('literal lexer distinguishes comments, regexes, escapes and nested templates', () => {
-  const source = '// "ignored"\nconst pattern = /["\']/; const escaped = "\\x67pt-example";\n'
-    + 'const message = `outer ${condition ? `nested ${"inside"}` : "otherwise"}`; const after = "after";';
-  assert.deepEqual([...literals(source)].map(token => token.raw),
-    ['"\\x67pt-example"', '"inside"', '"otherwise"', '"after"']);
+test('raw model scan covers comments, regexes, strings and template text', (t) => {
+  const h = makeRepo(t);
+  fs.mkdirSync(path.join(h.repo, 'lib'));
+  const file = path.join(h.repo, 'lib', 'selection.js');
+  const id = ['gpt', 'probe-2099'].join('-');
+  for (const source of [
+    `// ${id}`, `/* ${id} */`, `const pattern = /${id}/;`,
+    `const text = "${id}";`, 'const text = `' + id + ' ${suffix}`;',
+  ]) {
+    fs.writeFileSync(file, source);
+    assert.deepEqual(modelSelections(h.repo, h.env), [`lib/selection.js:1: ${id}`], source);
+  }
 });
 
 test('postfix updates before division cannot hide later model literals', (t) => {
@@ -98,6 +105,20 @@ test('postfix updates before division cannot hide later model literals', (t) => 
     fs.writeFileSync(file, source);
     assert.deepEqual(modelSelections(h.repo, h.env), [`lib/selection.js:1: ${id}`], update);
   }
+});
+
+test('object literal division cannot hide a later model literal', (t) => {
+  const h = makeRepo(t);
+  fs.mkdirSync(path.join(h.repo, 'lib'));
+  const file = path.join(h.repo, 'lib', 'selection.js');
+  const id = ['gpt', 'probe-2099'].join('-');
+  const source = `const ratio = { valueOf() { return 4; } } / 2; module.exports = { model: ${JSON.stringify(id)}, ratio };`;
+  const context = { module: { exports: {} } };
+  require('node:vm').runInNewContext(source, context);
+  assert.equal(context.module.exports.model, id);
+  assert.equal(context.module.exports.ratio, 2);
+  fs.writeFileSync(file, source);
+  assert.deepEqual(modelSelections(h.repo, h.env), [`lib/selection.js:1: ${id}`]);
 });
 
 test('literal lint has no syntax-based reference exemptions', (t) => {
@@ -122,23 +143,23 @@ test('literal lint has no syntax-based reference exemptions', (t) => {
     assert.ok(violations.some(value => value === `lib/selection.js:1: ${id}`), form);
   }
   fs.writeFileSync(file, '// ' + id + '\nconst words = "unrelated"; /* ' + id + ' */');
-  assert.deepEqual(modelSelections(h.repo, h.env), []);
+  assert.deepEqual(modelSelections(h.repo, h.env), [`lib/selection.js:1: ${id}`, `lib/selection.js:2: ${id}`]);
 });
 
-test('literal lint requires exact path and whole literal allowlist entries with reasons', (t) => {
+test('raw model scan requires exact path and matched text allowlist entries with reasons', (t) => {
   const h = makeRepo(t);
   fs.mkdirSync(path.join(h.repo, 'lib'));
   fs.mkdirSync(path.join(h.repo, 'tools'));
   const id = ['claude', 'provider'].join('-');
   const literal = './' + id;
   const allowlist = path.join(h.repo, 'tools', 'model-literals.json');
-  const entry = { path: 'lib/selection.js', literal, reason: 'Harness module import' };
+  const entry = { path: 'lib/selection.js', text: id, reason: 'Harness module import' };
   fs.writeFileSync(allowlist, JSON.stringify([entry]));
   const file = path.join(h.repo, entry.path);
   fs.writeFileSync(file, 'require(' + JSON.stringify(literal) + ');');
   assert.deepEqual(modelSelections(h.repo, h.env), []);
-  fs.writeFileSync(file, 'module.exports = ' + JSON.stringify({ model: id }) + ';');
-  assert.deepEqual(modelSelections(h.repo, h.env), [`lib/selection.js:1: ${id}`]);
+  fs.writeFileSync(file, 'module.exports = ' + JSON.stringify({ model: id + '-other' }) + ';');
+  assert.deepEqual(modelSelections(h.repo, h.env), [`lib/selection.js:1: ${id}-other`]);
   fs.writeFileSync(file, 'module.exports = ' + JSON.stringify({ model: literal }) + ';');
   fs.renameSync(file, path.join(h.repo, 'lib', 'another.js'));
   assert.deepEqual(modelSelections(h.repo, h.env), [`lib/another.js:1: ${id}`]);
