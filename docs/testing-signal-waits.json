@@ -14733,7 +14733,9 @@
     "import concurrent.futures,json,os,pathlib,subprocess,time,sys\nroot=pathlib.Path.cwd()\ncache=pathlib.Path(os.environ['T166_RECEIPTS'])\nfiles=json.loads((cache/'files.json').read_text())\nenv={**os.environ,'TOWER_CRANE_TEST_TMP':os.environ['TOWER_CRANE_TEST_TMP']}\nburners=[subprocess.Popen(['nice','-n','15','node','-e','for (;;) Math.sqrt(Math.random());']) for _ in range(2)]\ndef measure(file):\n for label,tree in [('before',cache/'before'),('after',root)]:\n  if not (tree/file).exists():continue\n  sha=subprocess.check_output(['git','rev-parse','HEAD' if label=='after' else 'origin/main'],cwd=root,text=True).strip()\n  for i in range(1,6):\n   log=cache/(label+'-'+file.replace('/','_')+'-'+str(i)+'.log')\n   receipt=log.with_suffix('.json')\n   if receipt.exists():continue\n   start=time.monotonic();load=os.getloadavg()\n   with log.open('w') as out:\n    result=subprocess.run(['node',str(tree/'test/run.js'),'--test-concurrency=1','--test-skip-pattern=publish its task branch',file],cwd=tree,env=env,stdout=out,stderr=subprocess.STDOUT,timeout=1800)\n   row={'file':file,'label':label,'run':i,'sha':sha,'status':result.returncode,'wall_s':time.monotonic()-start,'load_before':load,'load_after':os.getloadavg(),'cpu_load_processes':2}\n   receipt.write_text(json.dumps(row))\n   print(label,file,i,result.returncode,flush=True)\ntry:\n with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:\n  for result in pool.map(measure,files):pass\nfinally:\n for p in burners:p.terminate()\n for p in burners:p.wait()\n",
     "import concurrent.futures,json,os,pathlib,subprocess,time,sys\nroot=pathlib.Path.cwd()\ncache=pathlib.Path(os.environ['T166_RECEIPTS'])\nfiles=['test/sources.test.js', 'test/agy-isolation.test.js', 'test/claude-provider.test.js', 'test/pi-isolation.test.js']\nenv={**os.environ,'TOWER_CRANE_TEST_TMP':os.environ['TOWER_CRANE_TEST_TMP']}\nburners=[]\ndef measure(file):\n for label,tree in [('before',cache/'before'),('after',root)]:\n  if not (tree/file).exists():continue\n  sha=subprocess.check_output(['git','rev-parse','HEAD' if label=='after' else 'origin/main'],cwd=root,text=True).strip()\n  for i in range(1,6):\n   log=cache/(label+'-'+file.replace('/','_')+'-'+str(i)+'.log')\n   receipt=log.with_suffix('.json')\n   if receipt.exists():continue\n   start=time.monotonic();load=os.getloadavg()\n   with log.open('w') as out:\n    result=subprocess.run(['node',str(tree/'test/run.js'),'--test-concurrency=1','--test-skip-pattern=publish its task branch',file],cwd=tree,env=env,stdout=out,stderr=subprocess.STDOUT,timeout=1800)\n   row={'file':file,'label':label,'run':i,'sha':sha,'status':result.returncode,'wall_s':time.monotonic()-start,'load_before':load,'load_after':os.getloadavg(),'cpu_load_processes':2}\n   receipt.write_text(json.dumps(row))\n   print(label,file,i,result.returncode,flush=True)\ntry:\n with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:\n  for result in pool.map(measure,files):pass\nfinally:\n for p in burners:p.terminate()\n for p in burners:p.wait()\n",
     "import concurrent.futures,json,os,pathlib,subprocess,time,sys\nroot=pathlib.Path.cwd()\ncache=pathlib.Path(os.environ['T166_RECEIPTS'])\nfiles=['test/accept.test.js', 'test/board.test.js', 'test/broker.test.js', 'test/browser-startup.test.js', 'test/cache-proxy.test.js', 'test/ci-capped-review.test.js', 'test/ci-required.test.js', 'test/epipe.test.js', 'test/escalation.test.js', 'test/events.test.js', 'test/evidence-revision.test.js', 'test/sources.test.js', 'test/agy-isolation.test.js', 'test/claude-provider.test.js', 'test/pi-isolation.test.js']\nenv={**os.environ,'TOWER_CRANE_TEST_TMP':os.environ['TOWER_CRANE_TEST_TMP']}\nburners=[subprocess.Popen(['nice','-n','15','node','-e','for (;;) Math.sqrt(Math.random());']) for _ in range(2)]\ndef measure(file):\n for label,tree in [('after',root)]:\n  if not (tree/file).exists():continue\n  sha=subprocess.check_output(['git','rev-parse','HEAD' if label=='after' else 'origin/main'],cwd=root,text=True).strip()\n  for i in range(1,6):\n   log=cache/(label+'-'+file.replace('/','_')+'-'+str(i)+'.log')\n   receipt=log.with_suffix('.json')\n   if receipt.exists():continue\n   start=time.monotonic();load=os.getloadavg()\n   with log.open('w') as out:\n    result=subprocess.run(['node',str(tree/'test/run.js'),'--test-concurrency=1','--test-skip-pattern=publish its task branch',file],cwd=tree,env=env,stdout=out,stderr=subprocess.STDOUT,timeout=1800)\n   row={'file':file,'label':label,'run':i,'sha':sha,'status':result.returncode,'wall_s':time.monotonic()-start,'load_before':load,'load_after':os.getloadavg(),'cpu_load_processes':2}\n   receipt.write_text(json.dumps(row))\n   print(label,file,i,result.returncode,flush=True)\ntry:\n with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:\n  for result in pool.map(measure,files):pass\nfinally:\n for p in burners:p.terminate()\n for p in burners:p.wait()\n",
-    "import concurrent.futures,json,os,pathlib,subprocess,time,sys\nroot=pathlib.Path.cwd()\ncache=pathlib.Path(os.environ['T166_RECEIPTS'])\nfiles=['test/automation.test.js']\nenv={**os.environ,'TOWER_CRANE_TEST_TMP':os.environ['TOWER_CRANE_TEST_TMP']}\nburners=[subprocess.Popen(['nice','-n','15','node','-e','for (;;) Math.sqrt(Math.random());']) for _ in range(2)]\ndef measure(file):\n for label,tree in [('after',root)]:\n  if not (tree/file).exists():continue\n  sha=subprocess.check_output(['git','rev-parse','HEAD' if label=='after' else 'origin/main'],cwd=root,text=True).strip()\n  for i in range(1,6):\n   log=cache/(label+'-'+file.replace('/','_')+'-'+str(i)+'.log')\n   receipt=log.with_suffix('.json')\n   if receipt.exists():continue\n   start=time.monotonic();load=os.getloadavg()\n   with log.open('w') as out:\n    result=subprocess.run(['node',str(tree/'test/run.js'),'--test-concurrency=1','--test-skip-pattern=publish its task branch',file],cwd=tree,env=env,stdout=out,stderr=subprocess.STDOUT,timeout=1800)\n   row={'file':file,'label':label,'run':i,'sha':sha,'status':result.returncode,'wall_s':time.monotonic()-start,'load_before':load,'load_after':os.getloadavg(),'cpu_load_processes':2}\n   receipt.write_text(json.dumps(row))\n   print(label,file,i,result.returncode,flush=True)\ntry:\n with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:\n  for result in pool.map(measure,files):pass\nfinally:\n for p in burners:p.terminate()\n for p in burners:p.wait()\n"
+    "import concurrent.futures,json,os,pathlib,subprocess,time,sys\nroot=pathlib.Path.cwd()\ncache=pathlib.Path(os.environ['T166_RECEIPTS'])\nfiles=['test/automation.test.js']\nenv={**os.environ,'TOWER_CRANE_TEST_TMP':os.environ['TOWER_CRANE_TEST_TMP']}\nburners=[subprocess.Popen(['nice','-n','15','node','-e','for (;;) Math.sqrt(Math.random());']) for _ in range(2)]\ndef measure(file):\n for label,tree in [('after',root)]:\n  if not (tree/file).exists():continue\n  sha=subprocess.check_output(['git','rev-parse','HEAD' if label=='after' else 'origin/main'],cwd=root,text=True).strip()\n  for i in range(1,6):\n   log=cache/(label+'-'+file.replace('/','_')+'-'+str(i)+'.log')\n   receipt=log.with_suffix('.json')\n   if receipt.exists():continue\n   start=time.monotonic();load=os.getloadavg()\n   with log.open('w') as out:\n    result=subprocess.run(['node',str(tree/'test/run.js'),'--test-concurrency=1','--test-skip-pattern=publish its task branch',file],cwd=tree,env=env,stdout=out,stderr=subprocess.STDOUT,timeout=1800)\n   row={'file':file,'label':label,'run':i,'sha':sha,'status':result.returncode,'wall_s':time.monotonic()-start,'load_before':load,'load_after':os.getloadavg(),'cpu_load_processes':2}\n   receipt.write_text(json.dumps(row))\n   print(label,file,i,result.returncode,flush=True)\ntry:\n with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:\n  for result in pool.map(measure,files):pass\nfinally:\n for p in burners:p.terminate()\n for p in burners:p.wait()\n",
+    "import concurrent.futures,json,os,pathlib,subprocess,time,sys\nroot=pathlib.Path.cwd()\ncache=pathlib.Path(os.environ['T166_RECEIPTS'])\nfiles=['test/model-config.test.js', 'test/usage.test.js']\nenv={**os.environ,'TOWER_CRANE_TEST_TMP':os.environ['TOWER_CRANE_TEST_TMP']}\nburners=[subprocess.Popen(['nice','-n','15','node','-e','for (;;) Math.sqrt(Math.random());']) for _ in range(2)]\ndef measure(file):\n for label,tree in [('after-main-refresh',root)]:\n  if not (tree/file).exists():continue\n  sha=subprocess.check_output(['git','rev-parse','HEAD'],cwd=root,text=True).strip()\n  for i in range(1,6):\n   log=cache/(label+'-'+file.replace('/','_')+'-'+str(i)+'.log')\n   receipt=log.with_suffix('.json')\n   if receipt.exists():continue\n   start=time.monotonic();load=os.getloadavg()\n   with log.open('w') as out:\n    result=subprocess.run(['node',str(tree/'test/run.js'),'--test-concurrency=1','--test-skip-pattern=publish its task branch',file],cwd=tree,env=env,stdout=out,stderr=subprocess.STDOUT,timeout=1800)\n   row={'file':file,'label':label,'run':i,'sha':sha,'status':result.returncode,'wall_s':time.monotonic()-start,'load_before':load,'load_after':os.getloadavg(),'cpu_load_processes':2}\n   receipt.write_text(json.dumps(row))\n   print(label,file,i,result.returncode,flush=True)\ntry:\n with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:\n  for result in pool.map(measure,files):pass\nfinally:\n for p in burners:p.terminate()\n for p in burners:p.wait()\n",
+    "import concurrent.futures,json,os,pathlib,subprocess,time,sys\nroot=pathlib.Path.cwd()\ncache=pathlib.Path(os.environ['T166_RECEIPTS'])\nfiles=['test/model-config.test.js', 'test/usage.test.js']\nenv={**os.environ,'TOWER_CRANE_TEST_TMP':os.environ['TOWER_CRANE_TEST_TMP']}\nburners=[subprocess.Popen(['nice','-n','15','node','-e','for (;;) Math.sqrt(Math.random());']) for _ in range(2)]\ndef measure(file):\n for label,tree in [('before-main-refresh',cache/'before-main-refresh')]:\n  if not (tree/file).exists():continue\n  sha=subprocess.check_output(['git','rev-parse','origin/main'],cwd=root,text=True).strip()\n  for i in range(1,6):\n   log=cache/(label+'-'+file.replace('/','_')+'-'+str(i)+'.log')\n   receipt=log.with_suffix('.json')\n   if receipt.exists():continue\n   start=time.monotonic();load=os.getloadavg()\n   with log.open('w') as out:\n    result=subprocess.run(['node',str(tree/'test/run.js'),'--test-concurrency=1','--test-skip-pattern=publish its task branch',file],cwd=tree,env=env,stdout=out,stderr=subprocess.STDOUT,timeout=1800)\n   row={'file':file,'label':label,'run':i,'sha':sha,'status':result.returncode,'wall_s':time.monotonic()-start,'load_before':load,'load_after':os.getloadavg(),'cpu_load_processes':2}\n   receipt.write_text(json.dumps(row))\n   print(label,file,i,result.returncode,flush=True)\ntry:\n with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:\n  for result in pool.map(measure,files):pass\nfinally:\n for p in burners:p.terminate()\n for p in burners:p.wait()\n"
   ],
   "scope": {
     "changed_test_files": 50,
@@ -14743,5 +14745,581 @@
       "test/pi-isolation.test.js"
     ]
   },
-  "cpu_load_note": "Primary measurement jobs each started two CPU burners. Supplemental fixture runs shared the first job burners. Overlapping repeats kept up to four burners active."
+  "cpu_load_note": "Primary measurement jobs each started two CPU burners. Supplemental fixture runs shared the first job burners. Overlapping repeats kept up to four burners active.",
+  "main_refresh": {
+    "base": "f14f703bca6a2eac157d76905184952f6f1ff3e1",
+    "reason": "main merge added Claude model aliases and model-probe watchdogs",
+    "rows": [
+      {
+        "file": "test/model-config.test.js",
+        "before-main-refresh": {
+          "runs": [
+            {
+              "run": 1,
+              "sha": "f14f703bca6a2eac157d76905184952f6f1ff3e1",
+              "status": 0,
+              "wall_s": 1.8165473620028934,
+              "load_before": [
+                16.79736328125,
+                11.578125,
+                11.39306640625
+              ],
+              "load_after": [
+                16.89404296875,
+                11.68505859375,
+                11.4287109375
+              ],
+              "cpu_load_processes": 2,
+              "tests": {
+                "tests": 10,
+                "pass": 10,
+                "fail": 0,
+                "cancelled": 0,
+                "skipped": 0
+              },
+              "log_sha256": "7452932c8c61c81ae9ef7f520c320e3d99a03a944820b1f248bed38863857923"
+            },
+            {
+              "run": 2,
+              "sha": "f14f703bca6a2eac157d76905184952f6f1ff3e1",
+              "status": 0,
+              "wall_s": 1.8680251960031455,
+              "load_before": [
+                16.89404296875,
+                11.68505859375,
+                11.4287109375
+              ],
+              "load_after": [
+                16.89404296875,
+                11.68505859375,
+                11.4287109375
+              ],
+              "cpu_load_processes": 2,
+              "tests": {
+                "tests": 10,
+                "pass": 10,
+                "fail": 0,
+                "cancelled": 0,
+                "skipped": 0
+              },
+              "log_sha256": "01cde0a73abcbdee51af067e5bf7c65802beb35f2d8a9bd57db59336f32c70c6"
+            },
+            {
+              "run": 3,
+              "sha": "f14f703bca6a2eac157d76905184952f6f1ff3e1",
+              "status": 0,
+              "wall_s": 1.8670129510064726,
+              "load_before": [
+                16.89404296875,
+                11.68505859375,
+                11.4287109375
+              ],
+              "load_after": [
+                16.89404296875,
+                11.68505859375,
+                11.4287109375
+              ],
+              "cpu_load_processes": 2,
+              "tests": {
+                "tests": 10,
+                "pass": 10,
+                "fail": 0,
+                "cancelled": 0,
+                "skipped": 0
+              },
+              "log_sha256": "903a22e0ef2d960cb0c7ee4d52901ad9f9502858a15d24ce8219db7c3b18ecb8"
+            },
+            {
+              "run": 4,
+              "sha": "f14f703bca6a2eac157d76905184952f6f1ff3e1",
+              "status": 0,
+              "wall_s": 1.972146571999474,
+              "load_before": [
+                16.89404296875,
+                11.68505859375,
+                11.4287109375
+              ],
+              "load_after": [
+                17.06298828125,
+                11.806640625,
+                11.4697265625
+              ],
+              "cpu_load_processes": 2,
+              "tests": {
+                "tests": 10,
+                "pass": 10,
+                "fail": 0,
+                "cancelled": 0,
+                "skipped": 0
+              },
+              "log_sha256": "5e18ef7814c2161777c3d81577a3dfc6b2dc8abd5af7f0da166006255f8a0dc4"
+            },
+            {
+              "run": 5,
+              "sha": "f14f703bca6a2eac157d76905184952f6f1ff3e1",
+              "status": 0,
+              "wall_s": 2.2286786480035516,
+              "load_before": [
+                17.06298828125,
+                11.806640625,
+                11.4697265625
+              ],
+              "load_after": [
+                17.06298828125,
+                11.806640625,
+                11.4697265625
+              ],
+              "cpu_load_processes": 2,
+              "tests": {
+                "tests": 10,
+                "pass": 10,
+                "fail": 0,
+                "cancelled": 0,
+                "skipped": 0
+              },
+              "log_sha256": "9a0f14fea48dc7fd1ef686500f951daaa8eec02b570f3059015acdabc39d2594"
+            }
+          ],
+          "passed_runs": 5,
+          "wall_s": {
+            "median": 1.8680251960031455,
+            "min": 1.8165473620028934,
+            "max": 2.2286786480035516
+          }
+        },
+        "after-main-refresh": {
+          "runs": [
+            {
+              "run": 1,
+              "sha": "613f0eb8aa273e0d6fa844f5f6598d78e6b35a80",
+              "status": 0,
+              "wall_s": 1.8673804600002768,
+              "load_before": [
+                10.07177734375,
+                9.70361328125,
+                10.845703125
+              ],
+              "load_after": [
+                10.07177734375,
+                9.70361328125,
+                10.845703125
+              ],
+              "cpu_load_processes": 2,
+              "tests": {
+                "tests": 10,
+                "pass": 10,
+                "fail": 0,
+                "cancelled": 0,
+                "skipped": 0
+              },
+              "log_sha256": "3a236528c1f32e28e0b480443bf6969130a81da7c45f81d735a9bc2255fe0f00"
+            },
+            {
+              "run": 2,
+              "sha": "613f0eb8aa273e0d6fa844f5f6598d78e6b35a80",
+              "status": 0,
+              "wall_s": 1.867346788996656,
+              "load_before": [
+                10.07177734375,
+                9.70361328125,
+                10.845703125
+              ],
+              "load_after": [
+                10.07177734375,
+                9.70361328125,
+                10.845703125
+              ],
+              "cpu_load_processes": 2,
+              "tests": {
+                "tests": 10,
+                "pass": 10,
+                "fail": 0,
+                "cancelled": 0,
+                "skipped": 0
+              },
+              "log_sha256": "da563e85f6306b21efc0f8cb2c1c971f93f02963ed9c6f81117d0f3768110d30"
+            },
+            {
+              "run": 3,
+              "sha": "613f0eb8aa273e0d6fa844f5f6598d78e6b35a80",
+              "status": 0,
+              "wall_s": 2.118796892998944,
+              "load_before": [
+                10.07177734375,
+                9.70361328125,
+                10.845703125
+              ],
+              "load_after": [
+                10.787109375,
+                9.8583984375,
+                10.8896484375
+              ],
+              "cpu_load_processes": 2,
+              "tests": {
+                "tests": 10,
+                "pass": 10,
+                "fail": 0,
+                "cancelled": 0,
+                "skipped": 0
+              },
+              "log_sha256": "97edc96c2b51696b04b970b342473367dabe0822f34a8028762e312af5fcd99a"
+            },
+            {
+              "run": 4,
+              "sha": "613f0eb8aa273e0d6fa844f5f6598d78e6b35a80",
+              "status": 0,
+              "wall_s": 1.867171922000125,
+              "load_before": [
+                10.787109375,
+                9.8583984375,
+                10.8896484375
+              ],
+              "load_after": [
+                10.787109375,
+                9.8583984375,
+                10.8896484375
+              ],
+              "cpu_load_processes": 2,
+              "tests": {
+                "tests": 10,
+                "pass": 10,
+                "fail": 0,
+                "cancelled": 0,
+                "skipped": 0
+              },
+              "log_sha256": "4066b7ec1803d3342709b196372115c66e7a540d66850acd3727cad831c965b5"
+            },
+            {
+              "run": 5,
+              "sha": "613f0eb8aa273e0d6fa844f5f6598d78e6b35a80",
+              "status": 0,
+              "wall_s": 1.919625967999309,
+              "load_before": [
+                10.787109375,
+                9.8583984375,
+                10.8896484375
+              ],
+              "load_after": [
+                10.88427734375,
+                9.89404296875,
+                10.89599609375
+              ],
+              "cpu_load_processes": 2,
+              "tests": {
+                "tests": 10,
+                "pass": 10,
+                "fail": 0,
+                "cancelled": 0,
+                "skipped": 0
+              },
+              "log_sha256": "f03ef90f5750fa58f39d9276c1a0d9326cc404249c8d1f1a5bd64fa54f037d57"
+            }
+          ],
+          "passed_runs": 5,
+          "wall_s": {
+            "median": 1.8673804600002768,
+            "min": 1.867171922000125,
+            "max": 2.118796892998944
+          }
+        }
+      },
+      {
+        "file": "test/usage.test.js",
+        "before-main-refresh": {
+          "runs": [
+            {
+              "run": 1,
+              "sha": "f14f703bca6a2eac157d76905184952f6f1ff3e1",
+              "status": 0,
+              "wall_s": 90.03027455299889,
+              "load_before": [
+                17.06298828125,
+                11.806640625,
+                11.4697265625
+              ],
+              "load_after": [
+                22.44921875,
+                14.8818359375,
+                12.58837890625
+              ],
+              "cpu_load_processes": 2,
+              "tests": {
+                "tests": 25,
+                "pass": 25,
+                "fail": 0,
+                "cancelled": 0,
+                "skipped": 0
+              },
+              "log_sha256": "c0c0790600dcdccb582a820ae5743f6b6148c44e3d1c953ffd63de785f6915cc"
+            },
+            {
+              "run": 2,
+              "sha": "f14f703bca6a2eac157d76905184952f6f1ff3e1",
+              "status": 0,
+              "wall_s": 90.97556638099923,
+              "load_before": [
+                22.44921875,
+                14.8818359375,
+                12.58837890625
+              ],
+              "load_after": [
+                25.04931640625,
+                17.79541015625,
+                13.84375
+              ],
+              "cpu_load_processes": 2,
+              "tests": {
+                "tests": 25,
+                "pass": 25,
+                "fail": 0,
+                "cancelled": 0,
+                "skipped": 0
+              },
+              "log_sha256": "0c3bae8e807b1c9515272da3cb6211a1506fd9d595d9b5918c9ae494891dda84"
+            },
+            {
+              "run": 3,
+              "sha": "f14f703bca6a2eac157d76905184952f6f1ff3e1",
+              "status": 0,
+              "wall_s": 89.60340736999933,
+              "load_before": [
+                25.04931640625,
+                17.79541015625,
+                13.84375
+              ],
+              "load_after": [
+                22.486328125,
+                18.69140625,
+                14.5185546875
+              ],
+              "cpu_load_processes": 2,
+              "tests": {
+                "tests": 25,
+                "pass": 25,
+                "fail": 0,
+                "cancelled": 0,
+                "skipped": 0
+              },
+              "log_sha256": "c616f3ec1f8a077f73e80beaeda1c792d7b0214f00f16ab4c3e8f131cdc4b449"
+            },
+            {
+              "run": 4,
+              "sha": "f14f703bca6a2eac157d76905184952f6f1ff3e1",
+              "status": 0,
+              "wall_s": 88.86866817799455,
+              "load_before": [
+                22.486328125,
+                18.69140625,
+                14.5185546875
+              ],
+              "load_after": [
+                15.52685546875,
+                17.32275390625,
+                14.416015625
+              ],
+              "cpu_load_processes": 2,
+              "tests": {
+                "tests": 25,
+                "pass": 25,
+                "fail": 0,
+                "cancelled": 0,
+                "skipped": 0
+              },
+              "log_sha256": "6fc7a7ff6a3ebfad16788d987d3133199818f79dd8795bad48a2926d3b9b9202"
+            },
+            {
+              "run": 5,
+              "sha": "f14f703bca6a2eac157d76905184952f6f1ff3e1",
+              "status": 0,
+              "wall_s": 91.71546723500069,
+              "load_before": [
+                15.52685546875,
+                17.32275390625,
+                14.416015625
+              ],
+              "load_after": [
+                17.7001953125,
+                17.27099609375,
+                14.64892578125
+              ],
+              "cpu_load_processes": 2,
+              "tests": {
+                "tests": 25,
+                "pass": 25,
+                "fail": 0,
+                "cancelled": 0,
+                "skipped": 0
+              },
+              "log_sha256": "abfbc6f2732c630adee2af2639993a5c322acc48d992d74f291fa54f3b175ca7"
+            }
+          ],
+          "passed_runs": 5,
+          "wall_s": {
+            "median": 90.03027455299889,
+            "min": 88.86866817799455,
+            "max": 91.71546723500069
+          }
+        },
+        "after-main-refresh": {
+          "runs": [
+            {
+              "run": 1,
+              "sha": "613f0eb8aa273e0d6fa844f5f6598d78e6b35a80",
+              "status": 0,
+              "wall_s": 88.57770859399898,
+              "load_before": [
+                10.07177734375,
+                9.70361328125,
+                10.845703125
+              ],
+              "load_after": [
+                16.89404296875,
+                11.68505859375,
+                11.4287109375
+              ],
+              "cpu_load_processes": 2,
+              "tests": {
+                "tests": 25,
+                "pass": 25,
+                "fail": 0,
+                "cancelled": 0,
+                "skipped": 0
+              },
+              "log_sha256": "8a055f0cbfe87873affd446146d6179ea56d50152ce6edb639d1e47f03b081f4"
+            },
+            {
+              "run": 2,
+              "sha": "613f0eb8aa273e0d6fa844f5f6598d78e6b35a80",
+              "status": 0,
+              "wall_s": 90.05976493899652,
+              "load_before": [
+                16.89404296875,
+                11.68505859375,
+                11.4287109375
+              ],
+              "load_after": [
+                21.87890625,
+                14.64306640625,
+                12.49951171875
+              ],
+              "cpu_load_processes": 2,
+              "tests": {
+                "tests": 25,
+                "pass": 25,
+                "fail": 0,
+                "cancelled": 0,
+                "skipped": 0
+              },
+              "log_sha256": "98e3ef353bd99a1326c56debe33a9d6063d717398e83f27c608d77dd9520753e"
+            },
+            {
+              "run": 3,
+              "sha": "613f0eb8aa273e0d6fa844f5f6598d78e6b35a80",
+              "status": 0,
+              "wall_s": 90.65597039600107,
+              "load_before": [
+                21.87890625,
+                14.64306640625,
+                12.49951171875
+              ],
+              "load_after": [
+                25.04931640625,
+                17.79541015625,
+                13.84375
+              ],
+              "cpu_load_processes": 2,
+              "tests": {
+                "tests": 25,
+                "pass": 25,
+                "fail": 0,
+                "cancelled": 0,
+                "skipped": 0
+              },
+              "log_sha256": "4927582c02f6ea9a3c660159f803a70bce4879104659e97bc5c82596aae3f25b"
+            },
+            {
+              "run": 4,
+              "sha": "613f0eb8aa273e0d6fa844f5f6598d78e6b35a80",
+              "status": 0,
+              "wall_s": 90.14577629999985,
+              "load_before": [
+                25.04931640625,
+                17.79541015625,
+                13.84375
+              ],
+              "load_after": [
+                22.486328125,
+                18.69140625,
+                14.5185546875
+              ],
+              "cpu_load_processes": 2,
+              "tests": {
+                "tests": 25,
+                "pass": 25,
+                "fail": 0,
+                "cancelled": 0,
+                "skipped": 0
+              },
+              "log_sha256": "5849ca078a9f069079a049a38ef5d144930756afacd22e02e77cf80f704b36c2"
+            },
+            {
+              "run": 5,
+              "sha": "613f0eb8aa273e0d6fa844f5f6598d78e6b35a80",
+              "status": 0,
+              "wall_s": 89.20228677999694,
+              "load_before": [
+                22.486328125,
+                18.69140625,
+                14.5185546875
+              ],
+              "load_after": [
+                16.09521484375,
+                17.46337890625,
+                14.4453125
+              ],
+              "cpu_load_processes": 2,
+              "tests": {
+                "tests": 25,
+                "pass": 25,
+                "fail": 0,
+                "cancelled": 0,
+                "skipped": 0
+              },
+              "log_sha256": "348ff7d1681154f449972572f50787e08b2eba3d131c10593d6d003308c83be5"
+            }
+          ],
+          "passed_runs": 5,
+          "wall_s": {
+            "median": 90.05976493899652,
+            "min": 88.57770859399898,
+            "max": 90.65597039600107
+          }
+        }
+      }
+    ],
+    "checks": {
+      "merge-tests-final": {
+        "tests": {
+          "tests": 361,
+          "pass": 357,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 4
+        },
+        "sha": "dad9972adac15213e92fce65ea9854f5c9d330ff",
+        "log_sha256": "7272f45d67f4dd9632c41bf51d82d0eb77c8bc23840cbf70c09fd7e1270c8ead"
+      },
+      "final-regressions": {
+        "tests": {
+          "tests": 22,
+          "pass": 22,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 0
+        },
+        "sha": "dad9972adac15213e92fce65ea9854f5c9d330ff",
+        "log_sha256": "32fed1ba00e19a43254fc2142c84ec8353f7e2435bcb8e1e470a55fa9514c941"
+      }
+    }
+  }
 }
