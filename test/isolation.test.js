@@ -779,7 +779,7 @@ test('a sandboxed harness\'s own git runs no command the shared config or hooks 
   // What a worker could have planted in the shared git directory.
   const common = h.git(['rev-parse', '--path-format=absolute', '--git-common-dir'], wt);
   // Each marks only a run under the spawned harness, whose environment alone
-  // has TOWER_CRANE_SESSION: this test's git and Tower Crane's own are T103's.
+  // has TOWER_CRANE_SESSION: Tower Crane's own git and this test's are out of scope here.
   const mark = (name) => path.join(h.base, `ran-${name}`);
   const touch = (name) => `[ -z "$TOWER_CRANE_SESSION" ] || touch '${mark(name)}'`;
   h.git(['config', 'core.fsmonitor', `${touch('fsmonitor')}; false`], wt);
