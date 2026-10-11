@@ -146,7 +146,7 @@ async function main() {
       log('H9');
       results.scenarios.H9 = await step('H9', () => H.h9({ s: F.busy(scratch, bin) }, results.scenarios));
     }
-    results.scenarios.H4p = { pass: false, skipped: true, note: 'no pause command on this base: project set --paused arrives with T91 (PR #77)' };
+    results.scenarios.H4p = { pass: false, skipped: true, note: 'no pause command: project set --paused is not on main' };
 
     if (want('H4')) {
       log('H4');

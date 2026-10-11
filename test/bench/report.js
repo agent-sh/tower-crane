@@ -30,7 +30,7 @@ function path1(x, extra = '') {
   if (!x) return '-';
   if (x.error) return `error: ${x.error.split('\n')[0].slice(0, 80)}`;
   if (x.note && x.clicks === undefined && !('flagged' in x) && !('shown' in x) && !('sentence' in x)) return `no path: ${x.note}, fail`;
-  return `${x.clicks} clicks${x.keys ? `, ${x.keys} key${x.keys === 1 ? '' : 's'}` : ''}, ${x.scrolls} scrolls, KLM ${x.klm_without_typing_s ?? x.klm_s} s without typing${extra}, ${mark(x.pass)}`;
+  return `${x.clicks} click${x.clicks === 1 ? '' : 's'}${x.keys ? `, ${x.keys} key${x.keys === 1 ? '' : 's'}` : ''}, ${x.scrolls} scrolls, KLM ${x.klm_without_typing_s ?? x.klm_s} s without typing${extra}, ${mark(x.pass)}`;
 }
 
 const rows = [
@@ -44,7 +44,7 @@ const rows = [
   ['H4', 'Stop a runaway', h4(before.scenarios.H4), h4(after.scenarios.H4)],
   ['H4s', 'Lost telemetry: stale', h4s(before.scenarios['H4s stale']), h4s(after.scenarios['H4s stale'])],
   ['H4s', 'Lost telemetry: unavailable', h4s(before.scenarios['H4s unavailable']), h4s(after.scenarios['H4s unavailable'])],
-  ['H4p', 'Pause dispatch', 'no command on this base', 'no command on this base (T91), skipped'],
+  ['H4p', 'Pause dispatch', 'no command on this base', 'no command on main, skipped'],
   ['H5', 'See spend, 1920x1080', h5(before.scenarios['H5 1920x1080']), h5(after.scenarios['H5 1920x1080'])],
   ['H5', 'See spend, 1280x800', h5(before.scenarios['H5 1280x800']), h5(after.scenarios['H5 1280x800'])],
   ['H6', 'Steer an agent', path1(before.scenarios.H6), path1(after.scenarios.H6)],
@@ -58,7 +58,7 @@ function h2a(x) {
   if (x.error) return `error: ${x.error.split('\n')[0].slice(0, 80)}`;
   const words = `sentence ${mark(x.sentence)}, raw JSON ${x.raw_json ? 'shown' : 'behind a disclosure'}`;
   if (x.clicks === undefined) return `${words}; approve: no path, ${mark(x.pass)}`;
-  return `${words}; ${x.clicks} click, answer ${x.answer} (${x.answer_mode || 'cli'}); applied ${x.applied ? 'yes' : 'no'} by the orchestrator's retry (setting event ${x.setting_mode}, approved_by ${x.approved_by}), ${mark(x.pass)}`;
+  return `${words}; ${x.clicks} click${x.clicks === 1 ? '' : 's'}, answer ${x.answer} from the board; applied ${x.applied ? 'yes' : 'no'} by the orchestrator's retry (setting event ${x.setting_mode}, approved_by ${x.approved_by}), ${mark(x.pass)}`;
 }
 
 function h4(x) {
