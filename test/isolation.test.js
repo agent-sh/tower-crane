@@ -939,10 +939,18 @@ test('parent-relative credential stores stay hidden on initial and fallback laun
   fs.mkdirSync(caller);
   const files = [caller, wt].flatMap(root => ['relative-gh/hosts.yml', 'relative-docker/config.json', 'relative-aws', 'kube-a', 'kube-b']
     .map(file => path.join(root, file)));
+  // Relative harness homes name the caller's stores, and so do the
+  // credential paths their settings.json and .env select.
+  const harnessFiles = ['custom-claude/.credentials.json', 'custom-codex/auth.json'].map(file => path.join(caller, file));
+  const selectedFiles = ['claude-settings-docker/config.json', 'codex-env-aws'].map(file => path.join(h.base, file));
+  files.push(...harnessFiles, ...selectedFiles);
   for (const file of files) {
     fs.mkdirSync(path.dirname(file), { recursive: true });
     fs.writeFileSync(file, 'SYNTHETIC-PARENT-STORE\n');
   }
+  fs.writeFileSync(path.join(caller, 'custom-claude', 'settings.json'),
+    JSON.stringify({ env: { DOCKER_CONFIG: path.dirname(selectedFiles[0]) } }));
+  fs.writeFileSync(path.join(caller, 'custom-codex', '.env'), `AWS_SHARED_CREDENTIALS_FILE=${selectedFiles[1]}\n`);
   fs.writeFileSync(path.join(h.base, 'bin', 'gh'), `#!${process.execPath}
 const fs = require('node:fs'), path = require('node:path');
 if (process.argv[2] === 'auth') {
@@ -970,6 +978,7 @@ if (process.env.STUB_FAIL_HARNESS === ${JSON.stringify(harness)}) {
     spawn(h, u, 'hard', {
       GH_CONFIG_DIR: 'relative-gh', DOCKER_CONFIG: 'relative-docker', AWS_SHARED_CREDENTIALS_FILE: 'relative-aws',
       KUBECONFIG: ['kube-a', 'kube-b'].join(path.delimiter), STUB_FAIL_HARNESS: primary,
+      CLAUDE_CONFIG_DIR: 'custom-claude', CODEX_HOME: 'custom-codex',
       STUB_RUN: JSON.stringify([['gh', 'pr', 'view', '1']]),
     }, { cwd: caller });
     const seen = fs.readFileSync(reports, 'utf8').trim().split('\n').map(JSON.parse);
