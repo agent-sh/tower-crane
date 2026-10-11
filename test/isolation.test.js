@@ -832,6 +832,8 @@ test('a second worker spawn reads and writes the first attempt scratch for the s
   const cache = u.report().settings.sandbox.filesystem.allowWrite.find((w) => /[\\/]tower-crane[\\/](?:agents|tasks)[\\/][0-9a-f]{12}[\\/][^\\/]+$/.test(w));
   const file = path.join(cache, 'receipt.txt');
   assert.equal(fs.readFileSync(file, 'utf8'), 'first attempt\n');
+  // A finished worker keeps its lease until released, so the builder claims after that.
+  h.ok(['release', 'T1', '--agent', first.agent, '--reason', 'first attempt exited']);
   h.ok(['claim', 'T1', '--agent', 'builder']);
   h.ok(['submit', 'T1', '--agent', 'builder', '--sha', h.git(['rev-parse', 'HEAD'], wt)]);
   const probe = [process.execPath, '-e', `const fs = require('node:fs'); const path = require('node:path'); const file = path.join(process.env.XDG_CACHE_HOME, 'receipt.txt'); process.stderr.write(fs.readFileSync(file, 'utf8')); fs.appendFileSync(file, 'second attempt\\n');`];
