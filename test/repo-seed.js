@@ -2,9 +2,9 @@
 
 const fs = require('node:fs');
 const crypto = require('node:crypto');
-const os = require('node:os');
 const path = require('node:path');
 const zlib = require('node:zlib');
+const { tempRoot } = require('./tmp-root');
 
 function writeObject(repo, type, content) {
   const body = Buffer.concat([Buffer.from(`${type} ${content.length}\0`), content]);
@@ -33,7 +33,7 @@ function writeIndex(repo, oid, file, size) {
   fs.writeFileSync(path.join(repo, '.git', 'index'), Buffer.concat([body, checksum]));
 }
 
-function createRepoSeed(tmpRoot = process.env.TOWER_CRANE_TEST_TMP || os.tmpdir()) {
+function createRepoSeed(tmpRoot = tempRoot()) {
   fs.mkdirSync(tmpRoot, { recursive: true });
   const base = fs.realpathSync.native(fs.mkdtempSync(path.join(tmpRoot, 'tower-crane-seed-')));
   const repo = path.join(base, 'repo');
