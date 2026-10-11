@@ -38,6 +38,11 @@ for (const action of ['merge', 'cancel', 'supersede']) {
     if (action === 'merge') h.ok(['merge', 'T1', '--agent', 'orchestrator']);
     else h.ok(['task', 'update', 'T1', ...(action === 'cancel' ? ['--status', 'cancelled'] : ['--superseded-by', 'T2'])]);
     gone(h, wt);
+    if (action === 'supersede') {
+      assert.equal(h.json(['task', 'show', 'T1']).superseded_by, 'T2');
+      assert.match(h.ok(['task', 'show', 'T1']), /superseded by: T2/);
+      assert.match(fs.readFileSync(path.join(h.state, 'sketch.html'), 'utf8'), /superseded by.*href="#T2"/);
+    }
     assert.equal(h.json(['task', 'show', 'T1']).worktree.state, 'removed');
   });
 }
