@@ -2,6 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
 const { makeProjectRepo, BIN } = require('./helpers');
@@ -114,4 +115,18 @@ test('mutation lease checks preserve the command heartbeat and refuse a released
   st.tasks.orchestrator_lease = null;
   assert.throws(() => O.guard(ctx, st, true, false), /lease changed during command/);
   assert.equal(st.tasks.orchestrator_lease, null, 'an old waiter cannot undo release');
+});
+
+test('native lease heartbeats preserve archived evidence references', (t) => {
+  const h = makeProjectRepo(t);
+  h.ok(['task', 'add', '--title', 'Archived note', '--acceptance', 'preserve its payload', '--kind', 'docs']);
+  h.ok(['evidence', 'T1', '--type', 'note', '--ok', '--sha', h.git(['rev-parse', 'HEAD']), '--summary', 'x'.repeat(2048)]);
+  const entry = () => h.readState('tasks.json').tasks[0].evidence[0];
+  const before = entry();
+  assert.ok(before.evidence_refs?.summary, 'the fixture must contain an archived payload');
+  h.ok(['task', 'note', 'T1', 'take the lease', '--agent', 'orchestrator']);
+  h.ok(['status', '--agent', 'orchestrator']);
+  assert.deepEqual(entry(), before);
+  const payload = path.join(h.state, 'evidence', 'T1', before.evidence_refs.summary.sha256 + '.json');
+  assert.equal(JSON.parse(fs.readFileSync(payload, 'utf8')), 'x'.repeat(2048));
 });
