@@ -95,6 +95,8 @@ test('project, ladder, personal and task controls persist through shared handler
   const h = fixture(t);
   h.init();
   h.ok(['task', 'add', '--title', 'A ready task', '--acceptance', 'runs']);
+  h.ok(['task', 'add', '--title', 'A running task', '--acceptance', 'runs']);
+  h.ok(['claim', 'T2', '--agent', 'worker']);
   const { post, url } = await serve(t, h);
   async function change(command, flags, pos = []) {
     const before = audits(h).length;
@@ -127,7 +129,10 @@ test('project, ladder, personal and task controls persist through shared handler
   await change('project set', { paused: 'Owner is inspecting the run' });
   assert.match(h.ok(['project', 'show']), /paused: Owner is inspecting the run/);
   assert.match(h.run(['claim', 'T1', '--agent', 'worker']).stderr, /project paused/);
-  assert.ok((await (await fetch(url + 'api/controls')).json()).tasks[0].blocked.includes('project paused: Owner is inspecting the run'));
+  const paused = (await (await fetch(url + 'api/controls')).json()).tasks;
+  assert.ok(paused[0].blocked.includes('project paused: Owner is inspecting the run'));
+  assert.deepEqual(paused[1].blocked, [], 'running work is not blocked work');
+  assert.doesNotMatch(await (await fetch(url + 'controls')).text(), /T2 A running task/);
   await change('project set', { paused: '' });
   await change('ladder set', { model: 'test-model', supervision: '{"retries":1}' }, ['hard']);
   await change('ladder set', { sandbox: '{"write":[]}', env: '{"BOARD_RUNG":"yes"}', scope: '{}' }, ['hard']);
@@ -186,6 +191,55 @@ test('the board approves a publish request without using it, so the orchestrator
   assert.deepEqual(audits(h).filter((e) => e.detail.settings.publish).map((e) => [e.detail.actor, e.detail.approved_by]), [['orchestrator', 'D1']]);
 });
 
+test("saving publish again on the board reports an approval without using it, whether the owner or the orchestrator asked", async (t) => {
+  const h = fixture(t);
+  h.init();
+  const { post } = await serve(t, h);
+  const publish = (release) => request('ask', { setting: ['publish'], change: JSON.stringify({ release }) });
+  const repeat = (release) => h.run(['ask', '--setting', 'publish', '--change', JSON.stringify({ release })], as('orchestrator'));
+  // The orchestrator asked; the owner approves on Controls, then saves the same publication.
+  assert.equal(repeat('v0.1.0').code, 1);
+  assert.equal((await post({ decision: 'D1', choice: 'approve' }, 'api/controls/answer')).status, 200);
+  let again = await post(publish('v0.1.0'));
+  assert.equal(again.status, 200, JSON.stringify(again));
+  assert.match(again.data.message, /you approved D1; the orchestrator uses it/);
+  assert.doesNotMatch(again.data.message, /go ahead/);
+  assert.equal(decisions(h)[0].applied, undefined);
+  assert.equal(audits(h).filter((e) => e.detail.settings.publish).length, 0);
+  let repeated = repeat('v0.1.0');
+  assert.equal(repeated.code, 0, repeated.stderr);
+  assert.match(repeated.stdout, /approved D1; go ahead/);
+  assert.equal(decisions(h).length, 1, 'the repeat opened no new escalation');
+  assert.equal(decisions(h)[0].applied.by, 'orchestrator');
+  // The owner asked, approved, and saved the form a second time.
+  assert.equal((await post(publish('v0.2.0'))).data.decision, 'D2');
+  assert.equal((await post({ decision: 'D2', choice: 'approve' }, 'api/controls/answer')).status, 200);
+  again = await post(publish('v0.2.0'));
+  assert.match(again.data.message, /you approved D2/);
+  assert.equal(decisions(h)[1].applied, undefined);
+  repeated = repeat('v0.2.0');
+  assert.equal(repeated.code, 0, repeated.stderr);
+  assert.equal(decisions(h).length, 2, 'the repeat opened no new escalation');
+  assert.equal(decisions(h)[1].applied.by, 'orchestrator');
+  assert.deepEqual(audits(h).filter((e) => e.detail.settings.publish).map((e) => [e.detail.actor, e.detail.approved_by]), [['orchestrator', 'D1'], ['orchestrator', 'D2']]);
+});
+
+test("the owner's board save of a change an orchestrator has approved leaves that approval for its repeat", async (t) => {
+  const h = fixture(t);
+  h.init();
+  const { post } = await serve(t, h);
+  assert.equal(h.run(['project', 'set', '--merge-admin', 'true'], as('orchestrator')).code, 1);
+  assert.equal((await post({ decision: 'D1', choice: 'approve' }, 'api/controls/answer')).status, 200);
+  const saved = await post(request('project set', { 'merge-admin': 'true' }));
+  assert.equal(saved.status, 200, JSON.stringify(saved));
+  assert.equal(saved.data.decision, 'D2', 'the owner confirms their own change');
+  assert.equal(decisions(h)[0].applied, undefined);
+  h.ok(['project', 'set', '--merge-admin', 'true'], as('orchestrator'));
+  assert.equal(h.readState('project.json').merge.admin, true);
+  assert.equal(decisions(h)[0].applied.by, 'orchestrator');
+  assert.equal(decisions(h).length, 2, 'the repeat opened no new decision');
+});
+
 test("the board approves an orchestrator's escalations for its repeat, applies the owner's own, and rejects viewer writes", async (t) => {
   const h = fixture(t);
   h.init();
@@ -238,7 +292,7 @@ test("the board approves an orchestrator's escalations for its repeat, applies t
 test("an orchestrator asking for the owner's pending Controls request makes the approval its own repeat's", async (t) => {
   const h = fixture(t);
   h.init();
-  const { post } = await serve(t, h);
+  const { post, url } = await serve(t, h);
   const asked = await post(request('project set', { 'merge-admin': 'true' }));
   assert.equal(asked.data.decision, 'D1');
   assert.equal(h.run(['project', 'set', '--merge-admin', 'true'], as('orchestrator')).code, 1);
@@ -251,6 +305,15 @@ test("an orchestrator asking for the owner's pending Controls request makes the 
   assert.equal(h.readState('project.json').merge.admin, true);
   assert.equal(decisions(h).length, 1, 'the repeat opened no new decision');
   assert.equal(decisions(h)[0].applied.by, 'orchestrator');
+  // Its repeat carries only the owner-required change; the owner hears which values did not apply.
+  const both = await post(request('project set', { 'merge-admin': 'false', workers: '3' }));
+  assert.equal(both.data.decision, 'D2');
+  assert.equal(h.run(['project', 'set', '--merge-admin', 'false'], as('orchestrator')).code, 1);
+  const told = await post({ decision: 'D2', choice: 'approve' }, 'api/controls/answer');
+  assert.match(told.data.message, /makes only merge\.admin; workers from your request did not apply/);
+  assert.match(await (await fetch(url + 'controls')).text(), /workers from your request did not apply/);
+  h.ok(['project', 'set', '--merge-admin', 'false'], as('orchestrator'));
+  assert.equal(h.readState('project.json').limits.workers, 6);
 });
 
 test("releasing another agent's live claim from the board opens the owner's decision and applies it once approved", async (t) => {
@@ -321,7 +384,10 @@ test('approved board waivers accept once and retain one settings audit', async (
   h.ok(['task', 'add', '--title', 'Waiver fixture', '--acceptance', 'accepted']);
   h.ok(['claim', 'T1', '--agent', 'worker']);
   h.ok(['submit', 'T1', '--sha', h.git(['rev-parse', 'HEAD']), '--agent', 'worker']);
-  const { post } = await serve(t, h);
+  const { post, url } = await serve(t, h);
+  const sheet = await (await fetch(url)).text();
+  assert.match(sheet, /href="controls#waivers"/);
+  assert.doesNotMatch(sheet, /board cannot waive/);
   const asked = await post(request('accept', { waive: ['tests', 'clean', 'review', 'ci'], reason: 'Fixture has no software gates' }, ['T1']));
   assert.equal(asked.data.decision, 'D1');
   const applied = await post({ decision: 'D1', choice: 'approve' }, 'api/controls/answer');
@@ -365,6 +431,10 @@ test('browser controls save limits, approve and decline requests, keep saved val
       await b.inPage('scrollTo(0,0)');
       const shot = await b.send('Page.captureScreenshot', { format: 'png' });
       fs.writeFileSync(path.join(process.env.TOWER_CRANE_BOARD_ARTIFACTS, `controls-${theme}.png`), Buffer.from(shot.data, 'base64'));
+      // The whole page at the same 1920px width, so every form is in the record.
+      const { cssContentSize: size } = await b.send('Page.getLayoutMetrics');
+      const full = await b.send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: true, clip: { x: 0, y: 0, width: 1920, height: Math.ceil(size.height), scale: 1 } });
+      fs.writeFileSync(path.join(process.env.TOWER_CRANE_BOARD_ARTIFACTS, `controls-${theme}-full.png`), Buffer.from(full.data, 'base64'));
     }
   }
   await b.inPage(`document.querySelector('[data-decision="D2"] [value="approve"]').click()`);
