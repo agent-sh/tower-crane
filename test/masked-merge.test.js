@@ -25,7 +25,7 @@ function commit(dir, files, env, message) {
 // A source repository where origin/main is ahead of the task branch B: the
 // files in `main` change on main, the files in `task` on the branch. The
 // worktree is a clone with B checked out from origin/feat.
-function fixture(t, { base, task, main }) {
+function fixture(t, { base, task, main }, { masks = true } = {}) {
   const root = fs.mkdtempSync(path.join(TMP_ROOT, 'masked-merge-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const gitconfig = path.join(root, 'gitconfig');
@@ -47,7 +47,7 @@ function fixture(t, { base, task, main }) {
 
   // The shim as a worker runs it: the agent's policy, then git's real merge.
   const policy = path.join(root, 'policy.json');
-  fs.writeFileSync(policy, JSON.stringify({ gitPush: 'none', gh: [] }));
+  fs.writeFileSync(policy, JSON.stringify({ gitPush: 'none', gh: [], masks }));
   const shimDir = path.join(root, 'bin');
   fs.mkdirSync(shimDir);
   const merge = (...args) => cp.spawnSync(process.execPath, [SHIM, policy, shimDir, 'git', 'merge', ...args],
@@ -119,12 +119,34 @@ test('a masked merge that conflicts is refused with its reason, and the branch d
   assert.equal(f.head(), before);
 });
 
+test('outside the sandbox a merge that brings in a masked path runs as git merge', (t) => {
+  const f = fixture(t, { base: { '.mcp.json': '{"v":1}\n' }, task: { 'b.txt': 'b\n' }, main: { '.mcp.json': '{"v":2}\n' } }, { masks: false });
+  const r = f.merge('--no-edit', 'origin/main');
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(fs.readFileSync(path.join(f.wt, '.mcp.json'), 'utf8'), '{"v":2}\n');
+  assert.equal(f.show('HEAD:.mcp.json'), '{"v":2}');
+  assert.equal(f.git(['status', '--porcelain']), '');
+});
+
+test('a masked merge with staged changes to a masked path is refused with its reason, and the branch does not move', (t) => {
+  const f = fixture(t, { base: { '.mcp.json': '{"v":1}\n' }, task: { 'b.txt': 'b\n' }, main: { '.mcp.json': '{"v":2}\n' } });
+  fs.writeFileSync(path.join(f.wt, '.mcp.json'), '{"v":"local"}\n');
+  f.git(['add', '.mcp.json']);
+  const before = f.head();
+  const r = f.merge('--no-edit', 'origin/main');
+  assert.equal(r.status, 1, r.stderr);
+  assert.match(r.stderr, /\.mcp\.json has staged changes; commit or unstage them before merging origin\/main/);
+  assert.equal(f.head(), before);
+});
+
 test('a masked merge with an option the plumbing does not honour is refused with its reason', (t) => {
   const f = fixture(t, { base: { 'a.txt': 'a\n' }, task: { 'b.txt': 'b\n' }, main: { '.mcp.json': '{}\n' } });
   const before = f.head();
-  const r = f.merge('--squash', 'origin/main');
-  assert.equal(r.status, 1, r.stderr);
-  assert.match(r.stderr, /merge option --squash is not supported when the merge brings in \.mcp\.json/);
+  for (const [args, option] of [[['--squash'], '--squash'], [['-s', 'ort'], '-s ort'], [['-X', 'ours'], '-X ours']]) {
+    const r = f.merge(...args, 'origin/main');
+    assert.equal(r.status, 1, r.stderr);
+    assert.ok(r.stderr.includes(`merge option ${option} is not supported when the merge brings in .mcp.json`), r.stderr);
+  }
   assert.equal(f.head(), before);
 });
 

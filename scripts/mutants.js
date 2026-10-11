@@ -209,6 +209,8 @@ const MUTANTS = [
     from: "'--skip-worktree', '--stdin'], { input: [...after.keys()]", to: "'--skip-worktree', '--stdin'], { input: []", tests: ['test/masked-merge.test.js'] },
   { id: 'masked-merge-never-plumbs', area: 'git', file: 'lib/masked-merge.js',
     from: 'if (!touched.length) return null;', to: 'if (true) return null;', tests: ['test/masked-merge.test.js'] },
+  { id: 'masked-merge-ignores-policy', area: 'git', file: 'lib/shim.js',
+    from: "tool === 'git' && policy.masks && args[sub] === 'merge'", to: "tool === 'git' && args[sub] === 'merge'", tests: ['test/masked-merge.test.js'] },
   // board
   { id: 'board-unescaped-lt', area: 'board', file: 'lib/board/view.js',
     from: ".replace(/</g, '&lt;')", to: '', tests: ['test/board.test.js'] },
