@@ -70,6 +70,7 @@ test('submission runs real software gates once through the existing waiter', (t)
   h.submit();
   assert.equal(h.consume().code, 2);
   assert.equal(h.readState('tasks.json').orchestrator_lease.session_id, holder.session_id, 'automation inherits the holder');
+  assert.deepEqual(h.readState('tasks.json').orchestrator_lease, holder, 'background gates do not extend the session idle window');
   const task = h.readState('tasks.json').tasks[0];
   assert.deepEqual(task.evidence.map((e) => [e.type, e.ok]), [['tests', true], ['clean', true], ['ci', false]]);
   assert.ok(task.evidence.every((e) => e.commands.length && e.source === `check ${e.type}`));
@@ -77,6 +78,39 @@ test('submission runs real software gates once through the existing waiter', (t)
   h.consume();
   assert.equal(h.readState('tasks.json').tasks[0].evidence.length, 3, 'duplicate event delivery runs no gate twice');
   assert.equal(h.logs().filter((e) => e.cmd === 'spawn').length, 0, 'pending CI starts no model');
+});
+
+test('background reactions leave vacant, released, taken-over and expired leases available for handoff', (t) => {
+  const h = setup(t, { ci: 'pending' });
+  const lease = () => h.readState('tasks.json').orchestrator_lease ?? null;
+  const holder = { env: { CLAUDE_SESSION_ID: 'holder' } };
+  const acquire = () => h.ok(['task', 'note', 'T1', 'native session', '--agent', 'orchestrator'], holder);
+  const react = (opts) => h.ok(['ci', 'completed', 'T1', '--sha', h.sha, '--agent', 'owner'], opts);
+  h.submit();
+  react();
+  assert.equal(lease(), null, 'a monitor cannot become the first orchestrator');
+  acquire();
+  const live = lease();
+  react();
+  assert.deepEqual(lease(), live, 'background work cannot renew the holder');
+  h.ok(['orchestrator', 'release', '--agent', 'orchestrator'], holder);
+  react();
+  assert.equal(lease(), null, 'background work cannot undo release');
+  acquire();
+  h.ok(['orchestrator', 'takeover', '--agent', 'owner']);
+  react();
+  assert.equal(lease(), null, 'background work cannot undo takeover');
+  acquire();
+  const expired = lease();
+  const env = {
+    TOWER_CRANE_TEST_NOW: String(Date.parse(expired.heartbeat) + h.readState('project.json').limits.lease_minutes * 60000 + 1),
+    NODE_OPTIONS: `--require=${JSON.stringify(path.join(__dirname, 'fixtures', 'clock.js'))}`,
+  };
+  react({ env });
+  assert.deepEqual(lease(), expired, 'background work cannot revive an idle session');
+  h.ok(['task', 'note', 'T1', 'replacement session', '--agent', 'orchestrator'],
+    { env: { ...env, CLAUDE_SESSION_ID: 'replacement' } });
+  assert.notEqual(lease().session_id, expired.session_id);
 });
 
 test('CI completion refreshes a pending or failed receipt at the exact head and merges after review', (t) => {

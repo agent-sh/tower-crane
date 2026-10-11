@@ -23,6 +23,7 @@ test('one orchestrator session holds writes while reads, release, expiry and own
   assert.match(denied.stderr, /orchestrator lease.*first.*pid.*owner.*orchestrator takeover/);
   assert.deepEqual(h.readState('tasks.json'), before);
   h.ok(['task', 'show', 'T1'], second);
+  h.ok(['inbox'], second);
   assert.deepEqual(lease(), held, 'another reader cannot renew the holder');
   h.ok(['status'], first);
   assert.ok(Date.parse(lease().heartbeat) > Date.parse(held.heartbeat));
@@ -75,4 +76,42 @@ test('two live copies of the same harness session cannot both drive the queue', 
   assert.equal(h.readState('tasks.json').orchestrator_lease.session_id, lease.session_id);
   assert.equal((await run(clients[0], ['orchestrator', 'release'])).code, 0);
   assert.equal((await run(clients[1], ['task', 'note', 'T1', 'released process replaced'])).code, 0);
+});
+
+test('engine lease bindings reject stale work without extending the idle window', () => {
+  const O = require('../lib/orchestrator');
+  const old = { session_id: 'old', heartbeat: new Date().toISOString() };
+  const replacement = { ...old, session_id: 'new' };
+  const expired = { ...old, heartbeat: '2000-01-01T00:00:00.000Z' };
+  for (const [label, lease, bound, ok] of [
+    ['vacant', null, null, true],
+    ['idle', expired, null, true],
+    ['holder', old, old, true],
+    ['released', null, old, false],
+    ['taken over', replacement, old, false],
+    ['expired during work', expired, old, false],
+    ['native writer arrived', old, null, false],
+  ]) {
+    const st = { events: [], project: { limits: { lease_minutes: 60 } }, tasks: { orchestrator_lease: lease } };
+    const before = structuredClone(st);
+    const ctx = { agent: 'orchestrator', agentExplicit: true, orchestratorSession: bound,
+      env: { TOWER_CRANE_AGENT: 'orchestrator', TOWER_CRANE_VIA: 'automation' } };
+    if (ok) assert.doesNotThrow(() => O.guard(ctx, st, true), label);
+    else assert.throws(() => O.guard(ctx, st, true), /lease changed during automation/, label);
+    assert.deepEqual(st, before, label);
+  }
+});
+
+test('mutation lease checks preserve the command heartbeat and refuse a released binding', () => {
+  const O = require('../lib/orchestrator');
+  const session = { session_id: 'caller', heartbeat: '2000-01-01T00:00:00.000Z' };
+  const ctx = { agent: 'orchestrator', agentExplicit: true, orchestratorSession: session,
+    orchestratorLeaseSession: session.session_id, env: { TOWER_CRANE_AGENT: 'orchestrator' } };
+  const st = { events: [], project: { limits: { lease_minutes: 60 } }, tasks: { orchestrator_lease: session } };
+  const before = structuredClone(st);
+  O.guard(ctx, st, true, false);
+  assert.deepEqual(st, before, 'rechecking a mutation cannot wake its own filesystem watcher');
+  st.tasks.orchestrator_lease = null;
+  assert.throws(() => O.guard(ctx, st, true, false), /lease changed during command/);
+  assert.equal(st.tasks.orchestrator_lease, null, 'an old waiter cannot undo release');
 });
