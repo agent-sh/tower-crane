@@ -7,6 +7,7 @@
 const before = {
   name: 'before',
   rooms: ['board', 'plan', 'history', 'spend'],
+  pages: ['settings'],
   front: 'board',
   room: (r) => `#${r}`,
   roomSelector: '.view',
@@ -35,6 +36,7 @@ const before = {
 const after = {
   name: 'after',
   rooms: ['now', 'review', 'plan', 'spend', 'history'],
+  pages: ['settings', 'controls'],
   front: 'now',
   room: (r) => `#${r}`,
   roomSelector: '.room',
@@ -54,6 +56,11 @@ const after = {
   stopOpen: (id) => `[data-key="agent-${id}"] details.act-stop > summary`,
   stopSend: (id) => `[data-key="agent-${id}"] form[data-api="/api/tasks/${id}/stop"] button[type="submit"]`,
   stopEvent: 'interrupt',
+  pauseOpen: '.lead details.act-pause > summary',
+  pauseField: '.lead form[data-kind="control"] input[name="paused"]',
+  paused: '.lead [data-pause="paused"]',
+  resume: '.lead [data-pause="paused"] button[type="submit"]',
+  floorRows: '#now .floor [data-key^="agent-"]',
   approve: (d) => `form[data-api="/api/decisions/${d}/answer"] button[value="approve"]`,
   runaway: (id) => `#now .queue [data-key^="runaway-${id}"]`,
   reviewNav: 'nav.rooms a[data-room="review"]',

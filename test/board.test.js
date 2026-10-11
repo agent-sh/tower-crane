@@ -1099,6 +1099,39 @@ test('in a browser, opening Message on an agent row puts the cursor in its field
   });
 });
 
+test('in a browser, Pause in the header pauses dispatch through the controls API, the sentence leads with it, and Resume clears it', { skip: !CHROME && 'no Chrome to drive' }, async (t) => {
+  const h = makeRepo(t);
+  h.init();
+  populate(h);
+  await withServers(async (servers) => {
+    const url = await startServe(servers, h);
+    const b = await openBrowser(t);
+    await b.goto(keyed(url));
+    await b.until(`document.querySelector('.conn').dataset.conn === 'live'`, 'the live stream');
+    const { x, y } = await b.call((sel) => { const r = document.querySelector(sel).getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; }, '.lead details.act-pause > summary');
+    for (const type of ['mouseMoved', 'mousePressed', 'mouseReleased']) await b.send('Input.dispatchMouseEvent', { type, x, y, button: 'left', clickCount: 1 });
+    await b.until(`document.activeElement && document.activeElement.matches('.lead form[data-kind="control"] input[name="paused"]')`, 'the reason field to take focus');
+    await b.type('owner is inspecting the run');
+    const key = { key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 };
+    await b.send('Input.dispatchKeyEvent', { type: 'keyDown', ...key, text: '\r' });
+    await b.send('Input.dispatchKeyEvent', { type: 'keyUp', ...key });
+    await b.until(`/^Paused: owner is inspecting the run/.test(document.title) && !!document.querySelector('.lead [data-pause="paused"]')`, 'the paused sentence');
+    assert.equal(h.readState('project.json').limits.paused, 'owner is inspecting the run');
+    const audit = log(h).findLast((e) => e.cmd === 'setting');
+    assert.deepEqual([audit.detail.command, audit.detail.actor, audit.detail.mode, Object.keys(audit.detail.settings)], ['project set', 'owner', 'board', ['limits.paused']]);
+    assert.match(await b.inPage(`document.querySelector('h1.sentence').textContent`), /^.*Paused: owner is inspecting the run.*still working/);
+    assert.match(await b.inPage(`document.querySelector('.lead [data-pause]').textContent`), /Paused by owner, (now|\d+ \w+ ago)\. New work waits/);
+    await b.inPage(`document.querySelector('.lead [data-pause] button[type="submit"]').click()`);
+    await b.until(`!document.querySelector('.lead [data-pause="paused"]') && !/^Paused/.test(document.title)`, 'dispatch resumed');
+    assert.equal(h.readState('project.json').limits.paused, undefined);
+  });
+  // The snapshot says it too, with the command that resumes.
+  h.ok(['project', 'set', '--paused', 'release freeze']);
+  const html = fs.readFileSync(path.join(h.state, 'sketch.html'), 'utf8');
+  assert.match(html, /<title>Paused: release freeze · /);
+  assert.match(html, /data-pause="paused"[\s\S]*?project set --paused &#39;&#39; --agent owner/);
+});
+
 test('serve messages the claimant and stops a task only as the owner, through msg and interrupt', async (t) => {
   const h = makeRepo(t);
   h.init();
@@ -1259,7 +1292,7 @@ test('the board meets contrast, target, name and readability bars at the owner\'
       await b.send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: false });
       for (const theme of ['light', 'dark']) {
         await b.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: theme }] });
-        for (const room of ['', 'review', 'plan', 'spend', 'history', 'settings']) {
+        for (const room of ['', 'review', 'plan', 'spend', 'history', 'settings', 'controls']) {
           await b.goto(`${url}${room}`);
           await b.until(`document.querySelector('.conn').dataset.conn === 'live'`, 'the live stream');
           const where = `${room || 'now'} at ${width} in ${theme}`;

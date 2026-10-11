@@ -45,12 +45,12 @@ const rows = [
   ['H4', 'Stop a runaway', h4(before.scenarios.H4), h4(after.scenarios.H4)],
   ['H4s', 'Lost telemetry: stale', h4s(before.scenarios['H4s stale']), h4s(after.scenarios['H4s stale'])],
   ['H4s', 'Lost telemetry: unavailable', h4s(before.scenarios['H4s unavailable']), h4s(after.scenarios['H4s unavailable'])],
-  ['H4p', 'Pause dispatch', 'no command on this base', 'no command on main, skipped'],
+  ['H4p', 'Pause dispatch', h4p(before.scenarios.H4p), h4p(after.scenarios.H4p)],
   ...SIZES.map((size) => ['H5', `See spend, ${size}${size === '390x844' ? ' (in the Now room)' : ''}`, h5(before.scenarios[`H5 ${size}`]), h5(after.scenarios[`H5 ${size}`])]),
   ['H6', 'Steer an agent', path1(before.scenarios.H6), path1(after.scenarios.H6)],
   ['H7', 'Return after absence', h7(before.scenarios.H7), h7(after.scenarios.H7)],
   ['H8', 'Calm run, light and dark', h8(before.scenarios), h8(after.scenarios)],
-  ['H9', 'Mode parity (H2, H3, H6)', h9(before.scenarios.H9), h9(after.scenarios.H9)],
+  ['H9', 'Mode parity (H2, H3, H4p, H6)', h9(before.scenarios.H9), h9(after.scenarios.H9)],
 ];
 
 // H2's bar asks for no scroll at the three desktop sizes, in both themes.
@@ -72,6 +72,12 @@ function h4(x) {
   if (!x) return '-';
   if (x.error) return `error: ${x.error.split('\n')[0].slice(0, 80)}`;
   return `spend rose before exit: ${x.rose_before_exit ? 'yes' : 'no'}; flagged: ${x.flagged ? `yes, ${x.flag_latency_ms} ms after the rule's threshold` : 'no'}; stop: ${x.path ? `${x.path.clicks} click${x.path.clicks === 1 ? '' : 's'}${x.path.keys ? `, ${x.path.keys} key${x.path.keys === 1 ? '' : 's'}` : ''}, KLM ${x.path.klm_s} s, stopped ${x.stopped ? 'with no retry' : 'no'}; recorded ${x.recorded_tokens} of the stub's ${x.stub_tokens}` : 'no path'}, ${mark(x.pass)}`;
+}
+function h4p(x) {
+  if (!x) return '-';
+  if (x.error) return `error: ${x.error.split('\n')[0].slice(0, 80)}`;
+  if (x.note) return `${x.note}, fail`;
+  return `${x.clicks} click${x.clicks === 1 ? '' : 's'}${x.keys ? `, ${x.keys} key${x.keys === 1 ? '' : 's'}` : ''}, KLM ${x.klm_without_typing_s} s without typing; sentence leads: ${x.sentence_leads ? 'yes' : 'no'}; project show: ${x.project_show ? 'yes' : 'no'}; claim refused: ${x.claim_refused ? 'yes' : 'no'}; floor kept: ${x.floor_kept ? 'yes' : 'no'}; resumed: ${x.resumed ? 'yes' : 'no'}, ${mark(x.pass)}`;
 }
 function h4s(x) {
   if (!x) return '-';
@@ -96,7 +102,7 @@ function h8(sc) {
 }
 function h9(x) {
   if (!x) return '-';
-  return `compared ${x.compared.join(', ') || 'nothing'}; mismatches ${x.mismatches.length}${x.compared.length < 3 ? '; H6 has no board path' : ''}, ${mark(x.pass)}`;
+  return `compared ${x.compared.join(', ') || 'nothing'}; mismatches ${x.mismatches.length}${['H2', 'H3', 'H4p', 'H6'].some((n) => !x.compared.includes(n)) ? `; no board path: ${['H2', 'H3', 'H4p', 'H6'].filter((n) => !x.compared.includes(n)).join(', ')}` : ''}, ${mark(x.pass)}`;
 }
 
 function checkRow(r, key) {
@@ -136,10 +142,10 @@ for (const [name, r] of [['before', before], ['after', after]]) {
     if (row) md += `| ${name} | ${size} ${theme} | ${row.map(cell).join(' | ')} |\n`;
   }
 }
-md += '\nThe other rooms, a task sheet and Settings, at all four sizes in both themes (checks passed of run):\n\n| Room | Before | After |\n|---|---|---|\n';
+md += '\nThe other rooms, a task sheet, Settings and Controls, at all four sizes in both themes (checks passed of run):\n\n| Room | Before | After |\n|---|---|---|\n';
 const rb = roomRow(before); const ra = roomRow(after);
-const roomName = { board: 'Board (before) / Now', now: 'Now', review: 'Review', plan: 'Plan', spend: 'Spend', history: 'History', sheet: 'Task sheet', settings: 'Settings' };
-for (const room of ['plan', 'spend', 'history', 'sheet', 'settings', 'review']) {
+const roomName = { board: 'Board (before) / Now', now: 'Now', review: 'Review', plan: 'Plan', spend: 'Spend', history: 'History', sheet: 'Task sheet', settings: 'Settings', controls: 'Controls' };
+for (const room of ['plan', 'spend', 'history', 'sheet', 'settings', 'review', 'controls']) {
   const f = (x) => (x ? `${x.pass} of ${x.n}${x.fails.size ? ` (fails: ${[...x.fails].join(', ')})` : ''}` : 'no such room');
   md += `| ${roomName[room]} | ${f(rb[room])} | ${f(ra[room])} |\n`;
 }
@@ -161,7 +167,7 @@ fs.writeFileSync(opt.doc, `${doc.slice(0, start)}<!-- results -->\n\n${md}\n${do
 // The screenshot matrix: every room, a sheet and Settings at every size and
 // theme, and the end state of each scenario.
 if (opt.shots) {
-  const keep = (f) => /^(front|review|plan|spend|history|sheet|settings|H[2-8])/.test(f);
+  const keep = (f) => /^(front|review|plan|spend|history|sheet|settings|controls|H[2-8])/.test(f);
   for (const b of ['before', 'after']) {
     const from = path.join(opt.results, b);
     const to = path.join(opt.shots, b);

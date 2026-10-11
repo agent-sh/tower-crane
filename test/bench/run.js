@@ -97,8 +97,9 @@ async function main() {
         }
       }
       if (want('rooms')) {
-        // Every room, Settings and a task sheet, at every size in both themes.
-        const pages = [...T.rooms.filter((r) => r !== T.front).map((r) => [r, r, T.roomUrl(url, r)]), ['settings', 'settings', `${url}settings`], ['sheet', `sheet-${busy.ids.retry}`, T.sheetUrl(url, busy.ids.retry)]];
+        // Every room, Settings, Controls where the build has it, and a task
+        // sheet, at every size in both themes.
+        const pages = [...T.rooms.filter((r) => r !== T.front).map((r) => [r, r, T.roomUrl(url, r)]), ...T.pages.map((p) => [p, p, `${url}${p}`]), ['sheet', `sheet-${busy.ids.retry}`, T.sheetUrl(url, busy.ids.retry)]];
         for (const size of D.SIZES) {
           await D.setSize(b, size);
           for (const theme of D.THEMES) {
@@ -137,7 +138,7 @@ async function main() {
     // Paths that change the state, each on its own fresh busy run.
     await D.setSize(b, [1920, 1080]);
     await D.setMedia(b, { theme: 'light' });
-    for (const [name, fn] of [['H2', H.h2], ['H2a', H.h2a], ['H3', H.h3], ['H6', H.h6]]) {
+    for (const [name, fn] of [['H2', H.h2], ['H2a', H.h2a], ['H3', H.h3], ['H4p', H.h4p], ['H6', H.h6]]) {
       if (!want(name)) continue;
       log(name);
       results.scenarios[name] = await step(name, async () => { const s = F.busy(scratch, bin); return withServe(b, s, (url) => fn(ctxFor(s, url, [1920, 1080], 'light'))); });
@@ -146,7 +147,6 @@ async function main() {
       log('H9');
       results.scenarios.H9 = await step('H9', () => H.h9({ s: F.busy(scratch, bin) }, results.scenarios));
     }
-    results.scenarios.H4p = { pass: false, skipped: true, note: 'no pause command: project set --paused is not on main' };
 
     if (want('H4')) {
       log('H4');

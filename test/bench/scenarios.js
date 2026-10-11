@@ -294,6 +294,38 @@ async function h6(ctx) {
   return { ...r, delivered_to: e && e.detail.to, pass: ok && r.actions <= 2, delta: e && { event: strip(e) } };
 }
 
+// Pause stops new dispatch for the whole run and leaves running agents be.
+async function h4p(ctx) {
+  const { b, T, url, s } = ctx;
+  if (!T.pauseOpen) return { pass: false, note: 'no path: the board has no pause control' };
+  const reason = 'owner is inspecting the run';
+  const probe = s.json(['ready']).ready[0];
+  await D.load(b, url);
+  const rows = () => b.call((sel) => document.querySelectorAll(sel).length, T.floorRows);
+  const before = await rows();
+  const p = new D.Path(b);
+  await p.click(T.pauseOpen);
+  // Opening Pause focuses its reason field; a build without that focus needs a
+  // click into it, which the count keeps.
+  if (!(await waitFor(() => b.call((sel) => !!document.activeElement && document.activeElement === document.querySelector(sel), T.pauseField), 500, 50))) await p.click(T.pauseField, { think: false });
+  await p.type(reason);
+  p.think();
+  await p.key('Enter');
+  const e = await waitFor(() => s.events().findLast((x) => x.cmd === 'setting' && x.detail.settings && 'limits.paused' in x.detail.settings));
+  await waitFor(() => b.call(exists, T.paused));
+  const r = p.result();
+  if (ctx.shots) await D.shot(b, ctx.shots('H4p-paused'));
+  const leads = new RegExp(`^Paused: ${reason}`).test(await b.call(() => document.title));
+  const shown = /paused: owner is inspecting the run/.test(s.ok(['project', 'show']));
+  const claim = probe ? s.run(['claim', probe.id, '--agent', 'bench-probe']) : null;
+  const refused = !!claim && claim.code !== 0 && /paused/.test(claim.stderr);
+  const kept = (await rows()) === before && before > 0;
+  const delta = e && { paused: s.read('project.json').limits.paused, event: strip(e) };
+  await b.call((sel) => document.querySelector(sel).click(), T.resume);
+  const resumed = !!(await waitFor(() => !s.read('project.json').limits.paused && b.call((sel) => !document.querySelector(sel) && !/^Paused/.test(document.title), T.paused)));
+  return { ...r, sentence_leads: leads, project_show: shown, claim_refused: refused, floor_kept: kept, resumed, pass: !!e && r.actions <= 2 && leads && shown && refused && kept && resumed, delta };
+}
+
 async function h7(ctx) {
   const { b, T, url, s } = ctx;
   const events = s.events();
@@ -375,6 +407,10 @@ async function h9(ctx, board) {
     const id = s.ids.worker;
     s.ok(['msg', '--to', `worker-${id}-1`, '--task', id, 'drain on SIGTERM first, then the tests']);
     out.H6 = same(board.H6.delta, { event: strip(s.events().findLast((e) => e.cmd === 'msg' && e.agent === 'owner')) });
+  }
+  if (board.H4p?.delta) {
+    s.ok(['project', 'set', '--paused', 'owner is inspecting the run']);
+    out.H4p = same(board.H4p.delta, { paused: s.read('project.json').limits.paused, event: strip(s.events().findLast((e) => e.cmd === 'setting')) });
   }
   const results = Object.values(out);
   return { compared: Object.keys(out), mismatches: Object.entries(out).filter(([, v]) => !v.same).map(([k, v]) => ({ scenario: k, diff: v.diff })), pass: results.length > 0 && results.every((v) => v.same) };
@@ -475,4 +511,4 @@ async function checks(ctx) {
   };
 }
 
-module.exports = { h1, h2, h2a, h3, h4, h4s, h5, h6, h7, h8, h9, oneRoom, keyboard, checks, needs, waitFor, wait, killTree };
+module.exports = { h1, h2, h2a, h3, h4, h4p, h4s, h5, h6, h7, h8, h9, oneRoom, keyboard, checks, needs, waitFor, wait, killTree };
