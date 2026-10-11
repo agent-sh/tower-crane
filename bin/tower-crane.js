@@ -55,6 +55,7 @@ const SETTINGS = {
   base: str('B', 'base branch for task branches (default: the current branch)'),
   workers: int('N', 'worker slots held by live leases, unclaimed spawns or interrupted supervisors still stopping (default 6)'),
   'lease-minutes': int('MIN', 'default claim lease (default 60)'),
+  paused: str('REASON', 'pause new claims and dispatches with a reason; empty resumes'),
   'budget-hours': { ...num('H|null', 'hours budget; null removes the limit'), nullable: true },
   'budget-tokens': { ...int('N|null', 'token budget; null removes the limit'), nullable: true },
   standards: str('S', '"default" or a path to a standards Markdown file'),
@@ -194,7 +195,7 @@ const COMMANDS = [
 
   { section: 'Plan', name: 'plan import', pos: ['FILE'], usage: 'FILE', summary: 'add tasks from a JSON array (ids may be local names, resolved in order; - reads stdin)', description: "add tasks from a JSON array of task objects (ids may be local names, resolved in order; `-` reads stdin). Fields: `id`, `title`, `acceptance`, `kind`, `needs`, `size`, `tier`, `depends_on`, `needs_owner`, `locks`, `environment`; `needs_owner` is trimmed and blank values store null. A dependency names an earlier entry or an existing task. Any bad entry refuses the whole file", run: T.planImport },
 
-  { section: 'Plan', name: 'project set', usage: '[--name N] [--goal G] [--repo O/R] [--base B] [--workers N] [--lease-minutes MIN] [--budget-hours H|null] [--budget-tokens N|null] [--standards S] [--tests-cmd CMD] [--clean-cmd CMD] [--tests-proof-cmd CMD] [--executors N] [--tests-timeout-min MIN] [--clean-timeout-min MIN] [--tests-paths JSON] [--tests-keep JSON] [--tests-host-only JSON] [--tests-mode MODE] [--tests-by-kind JSON] [--tests-expensive JSON] [--tests-map JSON] [--ci-ignore-apps JSON] [--ci-required JSON] [--ci-capped-review JSON] [--ci-local JSON] [--merge-keep-branch JSON] [--merge-admin JSON] [--review-policy JSON] [--research-min-sources N] [--sandbox JSON] [--env JSON] [--env_file FILE] [--scope JSON]', summary: 'change project settings, limits and budget', flags: SETTINGS, description: "change settings, limits and budget; `--budget-hours null` and `--budget-tokens null` remove a limit through the owner-required budget-raise path", run: P.projectSet },
+  { section: 'Plan', name: 'project set', usage: '[--name N] [--goal G] [--repo O/R] [--base B] [--workers N] [--lease-minutes MIN] [--paused REASON] [--budget-hours H|null] [--budget-tokens N|null] [--standards S] [--tests-cmd CMD] [--clean-cmd CMD] [--tests-proof-cmd CMD] [--executors N] [--tests-timeout-min MIN] [--clean-timeout-min MIN] [--tests-paths JSON] [--tests-keep JSON] [--tests-host-only JSON] [--tests-mode MODE] [--tests-by-kind JSON] [--tests-expensive JSON] [--tests-map JSON] [--ci-ignore-apps JSON] [--ci-required JSON] [--ci-capped-review JSON] [--ci-local JSON] [--merge-keep-branch JSON] [--merge-admin JSON] [--review-policy JSON] [--research-min-sources N] [--sandbox JSON] [--env JSON] [--env_file FILE] [--scope JSON]', summary: 'change project settings, limits and budget', flags: SETTINGS, description: "change settings, limits and budget; `--budget-hours null` and `--budget-tokens null` remove a limit through the owner-required budget-raise path", run: P.projectSet },
 
   { section: 'Plan', name: 'project show', summary: 'print project settings and the ladder', description: "print settings, including `gates.tests_cmd`, `gates.clean_cmd`, `gates.tests_proof_cmd`, `gates.executors`, `gates.tests_timeout_min`, `gates.clean_timeout_min`, `tests.paths`, `tests.keep`, `tests.host_only`, `tests.mode`, `tests.by_kind`, `tests.expensive`, `tests.map`, `ci.ignore_apps`, `ci.required`, `ci.local`, `merge.keep_branch`, `merge.admin` and `decision_delegation.orchestrator_technical`, and the resolved ladder", run: P.projectShow },
 
@@ -480,6 +481,7 @@ async function main(argv) {
       json: !!globals.json,
       flags: own,
       pos: parsed.pos,
+      request: { command: cmd.name, flags: own, pos: parsed.pos },
       stateDir: cmd.name === 'mcp' ? undefined : locate(),
       ...(cmd.name === 'mcp' ? { resolveStateDir: locate } : {}),
     };
