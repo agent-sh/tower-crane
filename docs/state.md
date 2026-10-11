@@ -536,6 +536,8 @@ A sandboxed worker may write the repository's git directory (`writeOutside: git`
 - The credential helper list is cleared, then refilled with the trusted `credential.helper` and `credential.<url>.helper` entries in their order.
 - Each filter (`clean`, `smudge`, `process`), diff driver (`command`, `textconv`), merge driver, `remote.<name>.uploadpack` or `receivepack` and `gpg.program` key the repository's own config files set takes the trusted value, or is emptied so git refuses to run it; such a filter is not `required`. Those files are the shared `config`, the `config.worktree` of the worktree git runs in and every file they include through `include.path` or `includeIf`, whatever its condition, so a `gitdir:`, `onbranch:` or `hasconfig:` include that matches only in a task or gate worktree is covered too.
 
+A `git rev-parse` that asks only where the repository is (`--git-dir`, `--git-common-dir`, `--absolute-git-dir`, `--show-toplevel`, `--is-inside-work-tree`, `--is-bare-repository`, `--path-format`) reads no object, index or hook, so it runs without the scan.
+
 The config scan must complete successfully before git or gh starts. An error, timeout or output buffer overflow refuses the command rather than using a partial driver list, and so does a repository include whose path starts with `~user/` or `%(prefix)/`, which the scan does not resolve. Named driver keys are read from the config just before each command, so a key the worker adds between that read and git's own can still run. The fixed keys above have no such gap. The worker's own git and gh, through their shims, keep the repository's config.
 
 ## decisions.json
