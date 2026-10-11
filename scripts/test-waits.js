@@ -62,7 +62,7 @@ function waitFindings(text) {
   const numericBindings = new Map([...text.matchAll(/\b(?:const|let)\s+(\w+)\s*=\s*(\d[\d_]*)(?=\s*[;,])/g)]
     .map((match) => [match[1], match[2]]));
   const report = (index, reason) => {
-    if (!allowed(lines[index])) findings.push({ line: index + 1, reason });
+    if (!/^\s*\/\//.test(lines[index]) && !allowed(lines[index])) findings.push({ line: index + 1, reason });
   };
   for (const [index, line] of lines.entries()) {
     if (/^\s*\/\//.test(line)) continue;
@@ -72,15 +72,15 @@ function waitFindings(text) {
       || /\b\d[\d_]*\s*[<>]=?\s*\(*\s*(?:Date|performance)\.now\(\)\s*-\s*\w+/.test(line)) {
       report(index, 'elapsed wall time is a pass condition');
     }
-    for (const match of line.matchAll(/(['"])--(timeout|test-timeout)\1\s*,\s*(['"])([\d.]+)\3/g)) {
-      const budget = Number(match[4]) * (match[2] === 'timeout' ? 1000 : 1);
-      if (budget > 0 && budget < HUNG_TEST_MS) {
-        report(index, 'CLI wait has a readiness budget below the hung-test timeout');
-      }
-    }
     for (const match of line.matchAll(/(['"])--(timeout|test-timeout)=([\d.]+)\1/g)) {
       const budget = Number(match[3]) * (match[2] === 'timeout' ? 1000 : 1);
       if (budget > 0 && budget < HUNG_TEST_MS) report(index, 'CLI wait has a readiness budget below the hung-test timeout');
+    }
+  }
+  for (const match of text.matchAll(/(['"])--(timeout|test-timeout)\1\s*,\s*(['"])([\d.]+)\3/g)) {
+    const budget = Number(match[4]) * (match[2] === 'timeout' ? 1000 : 1);
+    if (budget > 0 && budget < HUNG_TEST_MS) {
+      report(text.slice(0, match.index).split('\n').length - 1, 'CLI wait has a readiness budget below the hung-test timeout');
     }
   }
   // Deadline arithmetic also appears inside generated child scripts.
@@ -93,6 +93,12 @@ function waitFindings(text) {
   for (const match of text.matchAll(/\bmonitorGraceMs\s*:\s*([^,}]+)/g)) {
     if (!hungBudget(match[1].trim())) {
       report(text.slice(0, match.index).split('\n').length - 1, 'teardown has a fixed observation budget');
+    }
+  }
+  for (const match of text.matchAll(/\bAbortSignal\.timeout\s*\(/g)) {
+    const args = callArguments(text, match.index + match[0].lastIndexOf('('));
+    if (!hungBudget(args[0] || '')) {
+      report(text.slice(0, match.index).split('\n').length - 1, 'abort signal has a fixed readiness budget');
     }
   }
   for (const elapsed of text.matchAll(/\b(?:const|let)\s+(\w+)\s*=\s*(?:Date|performance)\.now\(\)\s*-\s*\w+/g)) {

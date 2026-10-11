@@ -100,6 +100,8 @@ test('shared checks reject readiness budgets and require a reason on allowed tim
     'assert.ok((Date.now() - started) < 1000);', // wait-allow: rejected lint fixture
     'const elapsed = Date.now() - started; assert.ok(elapsed <= 1000);', // wait-allow: rejected lint fixture
     'assert.ok(1000 > performance.now() - started);', // wait-allow: rejected lint fixture
+    'await h.runAsync(["wait", "--timeout",\n "10"]);', // wait-allow: rejected lint fixture
+    'await fileWritten(file, { signal: AbortSignal.timeout(1000) });', // wait-allow: rejected lint fixture
   ]) {
     assert.ok(waitFindings(source).length, source);
     const annotated = source.split('\n').map((line) => line + ' // wait-allow: verifies the production timer contract').join('\n');
