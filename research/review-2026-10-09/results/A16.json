@@ -1,0 +1,24 @@
+{
+  "revision": "392b971b7fa42016d9a2c6d437e465671c1c804f",
+  "node": "v26.10.0",
+  "platform": "linux",
+  "scratch": "/home/avifenesh/.cache/tower-crane/agents/22cd04e4ddaf/worker-T144-1/T144-probes",
+  "probes": [
+    {
+      "id": "A16",
+      "surface": "automation",
+      "command": "nice -n 19 node research/review-2026-10-09/run.js A16",
+      "expected": "Automation reruns a tests gate whose successful audited receipt became stale under a new command policy.",
+      "observed": {
+        "testsRunsBefore": 1,
+        "testsRunsAfter": 1,
+        "gate": {
+          "type": "tests",
+          "ok": false,
+          "reason": "tests evidence command policy is missing or no longer matches the pinned commands; run tower-crane check tests T1 again"
+        }
+      },
+      "verdict": "CONFIRMED"
+    }
+  ]
+}

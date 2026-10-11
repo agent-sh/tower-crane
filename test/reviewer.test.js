@@ -524,13 +524,13 @@ test('review escalation climbs one tier after failed reviews', (t) => {
   const h = setup(t, 'easy', 'other', undefined, { gated: true });
   assert.equal(model(choice(h)), 'fixture-light');
   // A failure under a name no review dispatch started does not escalate.
-  h.ok(['evidence', 'T1', '--agent', 'made-up', '--type', 'review', '--fail', '--sha', h.sha]);
+  h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--agent', 'made-up', '--type', 'review', '--fail', '--sha', h.sha]);
   assert.equal(model(choice(h)), 'fixture-light');
   h.reviewer('T1', 'r1');
-  h.ok(['evidence', 'T1', '--agent', 'r1', '--type', 'review', '--fail', '--sha', h.sha, '--summary', 'needs stronger reasoning']);
+  h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--agent', 'r1', '--type', 'review', '--fail', '--sha', h.sha, '--summary', 'needs stronger reasoning']);
   assert.equal(model(choice(h)), 'fixture-main');
   h.reviewer('T1', 'r2');
-  h.ok(['evidence', 'T1', '--agent', 'r2', '--type', 'review', '--fail', '--sha', h.sha]);
+  h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--agent', 'r2', '--type', 'review', '--fail', '--sha', h.sha]);
   assert.equal(model(choice(h)), 'fixture-large');
 });
 

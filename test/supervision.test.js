@@ -93,7 +93,7 @@ else { const timer = setInterval(() => {
   return h;
 }
 
-test('supervisor tool hook writers survive a lock held beyond 15 seconds', { timeout: 90000 }, async (t) => {
+test('supervisor tool progress arrives while the state lock is held', { timeout: 90000 }, async (t) => {
   const h = makeTaskRepo(t, [{
     args: ['--title', 'Supervised tool progress', '--tier', 'easy', '--acceptance', 'tool event survives'],
     brief: 'Record tool progress.\n',
@@ -101,7 +101,6 @@ test('supervisor tool hook writers survive a lock held beyond 15 seconds', { tim
   const ready = path.join(h.base, 'harness-ready');
   const emit = path.join(h.base, 'emit-tool');
   const finish = path.join(h.base, 'finish');
-  const writerReady = path.join(h.base, 'writer-ready');
   const script = `
 const fs = require('node:fs');
 require('node:child_process').execFileSync(process.execPath, [${JSON.stringify(BIN)}, 'claim', 'T1', '--lease', '5']);
@@ -118,25 +117,21 @@ setInterval(() => {
   h.ok(['ladder', 'set', 'easy', '--harness', 'command', '--command', JSON.stringify([process.execPath, '-e', script, '{prompt}']),
     '--clear', 'profile', '--clear', 'effort', '--supervision', JSON.stringify({ retries: 0, stall_ms: 60000 })]);
   h.ok(['msg', '--to', 'worker-T1-1', '--task', 'T1', 'startup context']);
-  const fixture = path.join(__dirname, 'fixtures', 'supervisor-hook-lock.js');
-  const completed = h.runAsync(['spawn', '--task', 'T1', '--wait', '--json'], { env: {
-    NODE_OPTIONS: `--require=${JSON.stringify(fixture)}`,
-    TOWER_CRANE_TEST_HOOK_LOCK: path.join(h.state, 'lock'), TOWER_CRANE_TEST_HOOK_READY: writerReady,
-  } });
+  const completed = h.runAsync(['spawn', '--task', 'T1', '--wait', '--json']);
   let lock;
   try {
     await until(() => fs.existsSync(ready) && log(h).some((event) => event.cmd === 'hook inbox'), 'startup hook did not complete');
     lock = S.acquireLock(h.state);
     fs.writeFileSync(emit, '');
-    await until(() => fs.existsSync(writerReady), 'tool writer did not encounter the lock');
-    await new Promise((resolve) => setTimeout(resolve, 16000));
+    await until(() => fs.existsSync(S.progressFile(h.state, 'worker-T1-1')), 'tool progress waited for the lock');
   } finally {
     if (lock) S.releaseLock(lock);
     fs.writeFileSync(finish, '');
   }
   const result = await completed;
   assert.equal(result.code, 0, result.stderr);
-  assert.ok(log(h).some((event) => event.cmd === 'hook progress' && event.detail.tool === 'command_execution'), result.stderr);
+  assert.match(fs.readFileSync(S.progressFile(h.state, 'worker-T1-1'), 'utf8'), /command_execution/);
+  assert.equal(log(h).some((event) => event.cmd === 'hook progress'), false);
   assert.doesNotMatch(result.stderr, /harness event failed/);
 });
 
@@ -385,7 +380,7 @@ if (task === 'T1' && retry === 0) {
   await until(() => h.json(['task', 'show', 'T1']).run?.phase === 'waiting', 'retry attempt did not finish');
   await until(() => !detachedAlive({ pid: started.monitor_pid }), 'supervisor did not finish queued hook writes');
   const audit = log(h).filter((e) => e.task === 'T1' && e.agent === started.agent);
-  assert.ok(audit.some((e) => e.cmd === 'hook progress'), 'tool activity reached state');
+  assert.match(fs.readFileSync(S.progressFile(h.state, started.agent), 'utf8'), /hook progress/, 'tool activity reached the progress log');
   assert.equal(audit.findLast((e) => e.cmd === 'hook report')?.detail.report, `last report from ${started.agent}`);
   assert.equal(audit.findLast((e) => e.cmd === 'hook stop')?.detail.report, `last report from ${started.agent}`);
   assert.match(audit.find((e) => e.cmd === 'msg' && e.detail.to === 'orchestrator')?.detail.text || '', /without submit/);
@@ -472,6 +467,11 @@ test('progress paths and CPU detect a stalled process without dropping its live 
     for (const { file, text } of sketches(h)) {
       assert.doesNotMatch(text, /blocked: no progress paths or CPU activity/, `${file} clears the stalled phase`);
     }
+    // Tool hooks write outside the event log; the agent's progress file counts too.
+    await until(() => h.json(['task', 'show', 'T1']).run?.phase === 'blocked', 'idle process did not stall again');
+    fs.mkdirSync(path.dirname(S.progressFile(h.state, spawned.agent)), { recursive: true });
+    fs.appendFileSync(S.progressFile(h.state, spawned.agent), '{}\n');
+    await until(() => h.json(['task', 'show', 'T1']).run?.phase === 'running', 'tool progress did not clear stall');
     assert.equal(h.json(['task', 'show', 'T1']).claim.agent, spawned.agent);
     assert.deepEqual(h.json(['status']).exited_claims, []);
   } finally {

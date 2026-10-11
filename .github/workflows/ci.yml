@@ -12,8 +12,9 @@ jobs:
   test:
     name: test (${{ matrix.os }}, node ${{ matrix.node }}${{ matrix.shard != '' && format(', shard {0}', matrix.shard) || '' }})
     runs-on: ${{ matrix.os }}
-    # A test that hangs fails the run here instead of holding a runner for hours.
-    timeout-minutes: 15
+    # Windows process startup can exceed the old job budget while tests pass;
+    # the runner still bounds each test independently.
+    timeout-minutes: ${{ matrix.os == 'windows-latest' && 45 || 15 }}
     strategy:
       fail-fast: false
       matrix:

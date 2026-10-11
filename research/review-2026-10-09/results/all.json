@@ -1,0 +1,762 @@
+{
+  "revision": "0a41ea5262f66b3d9d2be7f8d54485c789ceacc7",
+  "node": "v26.10.0",
+  "platform": "linux",
+  "scratch": "/home/avifenesh/.cache/tower-crane/agents/22cd04e4ddaf/worker-T144-1/T144-probes",
+  "probes": [
+    {
+      "id": "A01",
+      "surface": "automation",
+      "command": "nice -n 19 node research/review-2026-10-09/run.js A01",
+      "expected": "A live local executor at cap 1 queues another task.",
+      "observed": {
+        "reserved": false,
+        "executors": 1
+      },
+      "verdict": "held"
+    },
+    {
+      "id": "A02",
+      "surface": "automation",
+      "command": "nice -n 19 node research/review-2026-10-09/run.js A02",
+      "expected": "A dead executor does not consume a slot and its source can be retried.",
+      "observed": {
+        "before": 0,
+        "reserved": true
+      },
+      "verdict": "held"
+    },
+    {
+      "id": "A03",
+      "surface": "automation",
+      "command": "nice -n 19 node research/review-2026-10-09/run.js A03",
+      "expected": "A foreign host executor holds its task but does not consume a local host slot.",
+      "observed": {
+        "sameTask": false,
+        "otherTask": true
+      },
+      "verdict": "held"
+    },
+    {
+      "id": "A04",
+      "surface": "automation",
+      "command": "nice -n 19 node research/review-2026-10-09/run.js A04",
+      "expected": "An older queued eligible source takes a free slot before a newer source.",
+      "observed": {
+        "reserved": "behind"
+      },
+      "verdict": "held"
+    },
+    {
+      "id": "A05",
+      "surface": "automation",
+      "command": "nice -n 19 node research/review-2026-10-09/run.js A05",
+      "expected": "A cancelled task never reserves an executor or blocks the next queued task.",
+      "observed": {
+        "cancelled": false,
+        "next": true
+      },
+      "verdict": "held"
+    },
+    {
+      "id": "A06",
+      "surface": "automation",
+      "command": "nice -n 19 node research/review-2026-10-09/run.js A06",
+      "expected": "A queued source for an old head does not block a current source.",
+      "observed": {
+        "pending": [],
+        "reserved": true
+      },
+      "verdict": "held"
+    },
+    {
+      "id": "A07",
+      "surface": "automation",
+      "command": "nice -n 19 node research/review-2026-10-09/run.js A07",
+      "expected": "A completed source is deduplicated.",
+      "observed": {
+        "reserved": false
+      },
+      "verdict": "held"
+    },
+    {
+      "id": "A08",
+      "surface": "automation",
+      "command": "nice -n 19 node research/review-2026-10-09/run.js A08",
+      "expected": "A queued error source is retryable through explicit consume but omitted from automatic queue draining.",
+      "observed": {
+        "waiting": 0,
+        "explicitRetryReserved": true
+      },
+      "verdict": "by design"
+    },
+    {
+      "id": "A09",
+      "surface": "automation",
+      "command": "nice -n 19 node research/review-2026-10-09/run.js A09",
+      "expected": "Startup reconciliation covers active PRs only; an errored no-PR task needs explicit replay.",
+      "observed": {
+        "backlog": 0,
+        "waiting": 0,
+        "pr": null
+      },
+      "verdict": "by design"
+    },
+    {
+      "id": "A10",
+      "surface": "automation",
+      "command": "nice -n 19 node research/review-2026-10-09/run.js A10",
+      "expected": "Restart creates fresh reconciliation for an accepted, unmerged PR after a deferred receipt.",
+      "observed": {
+        "tasks": [
+          "T1"
+        ]
+      },
+      "verdict": "held"
+    },
+    {
+      "id": "A11",
+      "surface": "automation",
+      "command": "nice -n 19 node research/review-2026-10-09/run.js A11",
+      "expected": "104 queued sources for a now-cancelled task are historical receipts, not runnable work.",
+      "observed": {
+        "queuedWithoutDone": 104,
+        "runnable": 0
+      },
+      "verdict": "by design"
+    },
+    {
+      "id": "A12",
+      "surface": "automation",
+      "command": "nice -n 19 node research/review-2026-10-09/run.js A12",
+      "expected": "104 eligible queued sources become runnable after a dead holder; receipt count does not strand them.",
+      "observed": {
+        "runnable": 104
+      },
+      "verdict": "held"
+    },
+    {
+      "id": "A13",
+      "surface": "automation",
+      "command": "nice -n 19 node research/review-2026-10-09/run.js A13",
+      "expected": "A live holder suppresses all 104 queued sources for its task without blocking a free slot for another.",
+      "observed": {
+        "runnable": 0,
+        "next": true
+      },
+      "verdict": "held"
+    },
+    {
+      "id": "A14",
+      "surface": "automation",
+      "command": "nice -n 19 node research/review-2026-10-09/run.js A14",
+      "expected": "An accepted unmerged task remains eligible; cancellation makes the same event ineligible.",
+      "observed": {
+        "accepted": true,
+        "cancelled": false
+      },
+      "verdict": "held"
+    },
+    {
+      "id": "A15",
+      "surface": "automation",
+      "command": "nice -n 19 node research/review-2026-10-09/run.js A15",
+      "expected": "A successful merge receipt triggers one sweep even after the task is recorded merged.",
+      "observed": {
+        "mergedEvent": true,
+        "oldSubmit": false
+      },
+      "verdict": "held"
+    },
+    {
+      "id": "A16",
+      "surface": "automation",
+      "command": "nice -n 19 node research/review-2026-10-09/run.js A16",
+      "expected": "Automation reruns a tests gate whose successful audited receipt became stale under a new command policy.",
+      "observed": {
+        "testsRunsBefore": 1,
+        "testsRunsAfter": 1,
+        "gate": {
+          "type": "tests",
+          "ok": false,
+          "reason": "tests evidence command policy is missing or no longer matches the pinned commands; run tower-crane check tests T1 again"
+        }
+      },
+      "verdict": "CONFIRMED"
+    },
+    {
+      "id": "A17",
+      "surface": "automation",
+      "command": "nice -n 19 node research/review-2026-10-09/run.js A17",
+      "expected": "A repeated failed gate waits for an explicit retry at unchanged settings.",
+      "observed": {
+        "gateCalls": []
+      },
+      "verdict": "by design"
+    },
+    {
+      "id": "A18",
+      "surface": "automation",
+      "command": "nice -n 19 node research/review-2026-10-09/run.js A18",
+      "expected": "An accepted stack is ordered by its lower member even when its upper member was accepted first.",
+      "observed": {
+        "order": [
+          [
+            "T3"
+          ],
+          [
+            "T1",
+            "T2"
+          ]
+        ]
+      },
+      "verdict": "held"
+    },
+    {
+      "id": "A19",
+      "surface": "automation",
+      "command": "nice -n 19 node research/review-2026-10-09/run.js A19",
+      "expected": "A non-observable local executor remains busy rather than being treated as dead.",
+      "observed": {
+        "reserved": false,
+        "executors": 1
+      },
+      "verdict": "held"
+    },
+    {
+      "id": "A20",
+      "surface": "automation",
+      "command": "nice -n 19 node research/review-2026-10-09/run.js A20",
+      "expected": "All 104 eligible queued notifications drain after the holder dies; each gets a done receipt.",
+      "observed": {
+        "done": 104,
+        "pending": 0
+      },
+      "verdict": "held"
+    },
+    {
+      "id": "M01",
+      "surface": "merge",
+      "command": "nice -n 19 node research/review-2026-10-09/run.js M01",
+      "expected": "A stack member uses the asynchronous API that GitHub accepts (T120).",
+      "observed": {
+        "ok": false,
+        "summary": "stack merge not confirmed: T1: PR #1 is OPEN or its head moved; gh pr merge refused PR #1: GraphQL: This pull request is part of a stack and must be merged using the asynchronous merge REST API (mergePullRequest)\nNothing was retried. Fix what gh names (required checks, reviews, conflicts, a moved head), then run tower-crane merge T1 again.",
+        "commands": [
+          "pr view",
+          "api repos/acme/probe/stacks?pull_request=1",
+          "pr view",
+          "pr view",
+          "pr merge",
+          "pr view",
+          "pr view"
+        ]
+      },
+      "verdict": "CONFIRMED"
+    },
+    {
+      "id": "M02",
+      "surface": "merge",
+      "command": "nice -n 19 node research/review-2026-10-09/run.js M02",
+      "expected": "A push between the final PR read and merge cannot land an unaccepted head.",
+      "observed": {
+        "ok": false,
+        "landed": false,
+        "summary": "gh pr merge refused PR #1: head changed\nNothing was retried. Fix what gh names (required checks, reviews, conflicts, a moved head), then run tower-crane merge T1 again."
+      },
+      "verdict": "held"
+    },
+    {
+      "id": "M03",
+      "surface": "merge",
+      "command": "nice -n 19 node research/review-2026-10-09/run.js M03",
+      "expected": "An ordinary PR targeting release instead of main is refused (T108).",
+      "observed": {
+        "ok": true,
+        "actualBase": "release",
+        "summary": "merged PR #1 into main in acme/probe (squash) at 50b732a15b; merge commit 50b732a15b"
+      },
+      "verdict": "CONFIRMED"
+    },
+    {
+      "id": "M04",
+      "surface": "merge",
+      "command": "nice -n 19 node research/review-2026-10-09/run.js M04",
+      "expected": "A successful merge followed by branch-deletion failure still confirms the matching head.",
+      "observed": {
+        "ok": true,
+        "summary": "merged PR #1 into main in acme/probe (squash) at 50b732a15b; merge commit 50b732a15b\ngh reported after merging: cannot delete branch",
+        "sha": "50b732a15be40ccb2065cb2ba0e7b366d511b736",
+        "ref": "50b732a15be40ccb2065cb2ba0e7b366d511b736"
+      },
+      "verdict": "held"
+    },
+    {
+      "id": "M05",
+      "surface": "merge",
+      "command": "nice -n 19 node research/review-2026-10-09/run.js M05",
+      "expected": "A merge command exiting zero with the PR still OPEN records failure, not success.",
+      "observed": {
+        "ok": false,
+        "summary": "gh pr merge exited 0, but PR #1 is OPEN; it may be in a merge queue or set to auto-merge. Run tower-crane merge T1 again once it has merged.",
+        "sha": "50b732a15be40ccb2065cb2ba0e7b366d511b736"
+      },
+      "verdict": "held"
+    },
+    {
+      "id": "M06",
+      "surface": "merge",
+      "command": "nice -n 19 node research/review-2026-10-09/run.js M06",
+      "expected": "A remotely merged different head fails confirmation without a second merge.",
+      "observed": {
+        "ok": false,
+        "summary": "PR #1 in acme/probe was merged with head ffffffffff, not the accepted 50b732a15b; the merged code was not the accepted code, so review what landed",
+        "sha": "50b732a15be40ccb2065cb2ba0e7b366d511b736",
+        "calls": 1
+      },
+      "verdict": "held"
+    },
+    {
+      "id": "M07",
+      "surface": "merge",
+      "command": "nice -n 19 node research/review-2026-10-09/run.js M07",
+      "expected": "Unrelated task events do not invalidate a merge snapshot (T135 control).",
+      "observed": {
+        "unchanged": true
+      },
+      "verdict": "held"
+    },
+    {
+      "id": "M08",
+      "surface": "merge",
+      "command": "nice -n 19 node research/review-2026-10-09/run.js M08",
+      "expected": "A member hook progress event does not invalidate a merge snapshot (T135).",
+      "observed": {
+        "unchanged": false
+      },
+      "verdict": "CONFIRMED"
+    },
+    {
+      "id": "M09",
+      "surface": "merge",
+      "command": "nice -n 19 node research/review-2026-10-09/run.js M09",
+      "expected": "Changed member evidence still invalidates the snapshot.",
+      "observed": {
+        "unchanged": false
+      },
+      "verdict": "held"
+    },
+    {
+      "id": "M10",
+      "surface": "merge",
+      "command": "nice -n 19 node research/review-2026-10-09/run.js M10",
+      "expected": "Already-merged ordinary PR with matching head can be confirmed without current gates (T125).",
+      "observed": {
+        "ok": true,
+        "summary": "PR #1 in acme/probe was already merged at 50b732a15b; merge commit 50b732a15b",
+        "ghCalls": [
+          [
+            "pr",
+            "view",
+            "1"
+          ]
+        ]
+      },
+      "verdict": "held"
+    },
+    {
+      "id": "M11",
+      "surface": "merge",
+      "command": "nice -n 19 node research/review-2026-10-09/run.js M11",
+      "expected": "Already-merged stack member with matching head can be confirmed without current gates (T125).",
+      "observed": {
+        "ok": false,
+        "summary": "T1 is accepted, but its gates no longer pass: review: no review evidence at 50b732a for revision 1; ci: no ci evidence at 50b732a for revision 1; send it back with tower-crane rework T1 --reason R",
+        "ghCalls": []
+      },
+      "verdict": "CONFIRMED"
+    },
+    {
+      "id": "M12",
+      "surface": "merge",
+      "command": "nice -n 19 node research/review-2026-10-09/run.js M12",
+      "expected": "A stack with an untracked lower PR refuses before any merge.",
+      "observed": {
+        "ok": false,
+        "summary": "remote stack has an untracked lower PR; record and accept every lower task before merging",
+        "merges": 0
+      },
+      "verdict": "held"
+    },
+    {
+      "id": "L01",
+      "surface": "lifecycle",
+      "command": "nice -n 19 node research/review-2026-10-09/run.js L01",
+      "expected": "Concurrent CLI claims have exactly one winner.",
+      "observed": {
+        "winners": 1,
+        "codes": [
+          1,
+          1,
+          0
+        ]
+      },
+      "verdict": "held"
+    },
+    {
+      "id": "L02",
+      "surface": "lifecycle",
+      "command": "nice -n 19 node research/review-2026-10-09/run.js L02",
+      "expected": "An expired lease can be taken over and the old claimant cannot submit.",
+      "observed": {
+        "code": 1,
+        "stdout": "",
+        "stderr": "tower-crane: only the claimant (two) can submit T1; you are one"
+      },
+      "verdict": "held"
+    },
+    {
+      "id": "L03",
+      "surface": "lifecycle",
+      "command": "nice -n 19 node research/review-2026-10-09/run.js L03",
+      "expected": "Expired renewal refuses when another task took the only worker slot.",
+      "observed": {
+        "code": 1,
+        "stdout": "",
+        "stderr": "tower-crane: T1's lease expired and the workers limit is reached (1 worker slots held, limit 1); holders: T2 (two, lease); wait for one to finish or raise it with tower-crane project set --workers N"
+      },
+      "verdict": "held"
+    },
+    {
+      "id": "L04",
+      "surface": "lifecycle",
+      "command": "nice -n 19 node research/review-2026-10-09/run.js L04",
+      "expected": "Submission by the last claimant after expiry is allowed until takeover, as requireClaimant is identity-based.",
+      "observed": {
+        "code": 0,
+        "stdout": "submitted T1 at 50b732a\nscope: the brief and acceptance name no repository path; the whole repository is in scope",
+        "stderr": ""
+      },
+      "verdict": "by design"
+    },
+    {
+      "id": "L05",
+      "surface": "lifecycle",
+      "command": "nice -n 19 node research/review-2026-10-09/run.js L05",
+      "expected": "Renewing an expired claim rechecks a newly added unmet dependency.",
+      "observed": {
+        "claim": {
+          "code": 1,
+          "stdout": "",
+          "stderr": "tower-crane: T1 is blocked: depends on T2 (todo)"
+        },
+        "renew": {
+          "code": 0,
+          "stdout": "T1 held by one until 2026-10-09 00:30Z",
+          "stderr": ""
+        }
+      },
+      "verdict": "CONFIRMED"
+    },
+    {
+      "id": "L06",
+      "surface": "lifecycle",
+      "command": "nice -n 19 node research/review-2026-10-09/run.js L06",
+      "expected": "Renewing an expired claim respects a newly set needs-owner blocker.",
+      "observed": {
+        "claim": {
+          "code": 1,
+          "stdout": "",
+          "stderr": "tower-crane: T1 is blocked: needs owner: await prerequisite"
+        },
+        "renew": {
+          "code": 0,
+          "stdout": "T1 held by one until 2026-10-09 00:30Z",
+          "stderr": ""
+        }
+      },
+      "verdict": "CONFIRMED"
+    },
+    {
+      "id": "L07",
+      "surface": "lifecycle",
+      "command": "nice -n 19 node research/review-2026-10-09/run.js L07",
+      "expected": "Renewing an expired lease rechecks resource locks held by another task.",
+      "observed": {
+        "code": 1,
+        "stdout": "",
+        "stderr": "tower-crane: T1 is blocked: lock probe-resource held by T2 (two, lease)"
+      },
+      "verdict": "held"
+    },
+    {
+      "id": "L08",
+      "surface": "lifecycle",
+      "command": "nice -n 19 node research/review-2026-10-09/run.js L08",
+      "expected": "A cancelled task refuses submit and renewal by its old claimant.",
+      "observed": {
+        "submit": {
+          "code": 1,
+          "stdout": "",
+          "stderr": "tower-crane: T1 is cancelled, not in progress; claim it with tower-crane claim T1"
+        },
+        "renew": {
+          "code": 1,
+          "stdout": "",
+          "stderr": "tower-crane: T1 is cancelled, not in progress; claim it with tower-crane claim T1"
+        }
+      },
+      "verdict": "held"
+    },
+    {
+      "id": "L09",
+      "surface": "lifecycle",
+      "command": "nice -n 19 node research/review-2026-10-09/run.js L09",
+      "expected": "A live reservation for one worker prevents another worker claiming the same task (T136).",
+      "observed": {
+        "accepted": true,
+        "holders": [
+          {
+            "task": "T1",
+            "agent": "second",
+            "kind": "lease"
+          },
+          {
+            "task": "T1",
+            "agent": "first",
+            "kind": "reservation"
+          }
+        ]
+      },
+      "verdict": "CONFIRMED"
+    },
+    {
+      "id": "L10",
+      "surface": "lifecycle",
+      "command": "nice -n 19 node research/review-2026-10-09/run.js L10",
+      "expected": "A dead reservation no longer consumes a worker slot (T136).",
+      "observed": {
+        "processState": "exited",
+        "holders": [
+          {
+            "task": "T1",
+            "agent": "first",
+            "kind": "reservation"
+          }
+        ]
+      },
+      "verdict": "CONFIRMED"
+    },
+    {
+      "id": "L11",
+      "surface": "lifecycle",
+      "command": "nice -n 19 node research/review-2026-10-09/run.js L11",
+      "expected": "A matching exit receipt releases an unclaimed reservation.",
+      "observed": {
+        "holders": []
+      },
+      "verdict": "held"
+    },
+    {
+      "id": "L12",
+      "surface": "lifecycle",
+      "command": "nice -n 19 node research/review-2026-10-09/run.js L12",
+      "expected": "An old attempt exit cannot release a new reservation with the same PID.",
+      "observed": {
+        "holders": [
+          {
+            "task": "T1",
+            "agent": "first",
+            "kind": "reservation"
+          }
+        ]
+      },
+      "verdict": "held"
+    },
+    {
+      "id": "G01",
+      "surface": "gates",
+      "command": "nice -n 19 node research/review-2026-10-09/run.js G01",
+      "expected": "Changing the pinned tests command invalidates its previous successful evidence.",
+      "observed": {
+        "type": "tests",
+        "ok": false,
+        "reason": "tests evidence command policy is missing or no longer matches the pinned commands; run tower-crane check tests T1 again"
+      },
+      "verdict": "held"
+    },
+    {
+      "id": "G02",
+      "surface": "gates",
+      "command": "nice -n 19 node research/review-2026-10-09/run.js G02",
+      "expected": "Changing tests mode invalidates evidence under the old mode.",
+      "observed": {
+        "type": "tests",
+        "ok": false,
+        "reason": "tests evidence mode prove no longer matches run-only; run tower-crane check tests T1 again"
+      },
+      "verdict": "held"
+    },
+    {
+      "id": "G03",
+      "surface": "gates",
+      "command": "nice -n 19 node research/review-2026-10-09/run.js G03",
+      "expected": "Changing tests.paths to exclude the regression invalidates its previous proof.",
+      "observed": {
+        "beforeRerun": {
+          "type": "tests",
+          "ok": true,
+          "waived": false,
+          "agent": "orchestrator",
+          "reason": "ok by orchestrator"
+        },
+        "rerun": {
+          "code": 1,
+          "stdout": "T1: tests FAIL at d5c2094: no test covers this change: d5c2094be1 changes test/value.test.js, value.js against main (merge base f8a034a3f9) and adds or changes no test file (by project.json tests.paths). Add a test that fails without the change, commit it, and submit the new sha. If the project keeps its tests elsewhere, set their globs with tower-crane project set --tests-paths '[\"src/test/**\",\"**/*Test.java\"]'.",
+          "stderr": ""
+        }
+      },
+      "verdict": "CONFIRMED"
+    },
+    {
+      "id": "G04",
+      "surface": "gates",
+      "command": "nice -n 19 node research/review-2026-10-09/run.js G04",
+      "expected": "Removing a kept build file invalidates proof that passed with that file kept.",
+      "observed": {
+        "beforeRerun": {
+          "type": "tests",
+          "ok": true,
+          "waived": false,
+          "agent": "orchestrator",
+          "reason": "ok by orchestrator"
+        },
+        "currentKeep": []
+      },
+      "verdict": "CONFIRMED"
+    },
+    {
+      "id": "G05",
+      "surface": "gates",
+      "command": "nice -n 19 node research/review-2026-10-09/run.js G05",
+      "expected": "Enabling scoped expensive proof invalidates evidence that never ran that proof.",
+      "observed": {
+        "beforeRerun": {
+          "type": "tests",
+          "ok": true,
+          "waived": false,
+          "agent": "orchestrator",
+          "reason": "ok by orchestrator"
+        },
+        "rerun": {
+          "code": 1,
+          "stdout": "T1: tests FAIL at d5c2094: tests.expensive in prove mode requires pinned gates.tests_proof_cmd containing {tests}; the owner sets it with project set --tests-proof-cmd CMD",
+          "stderr": ""
+        }
+      },
+      "verdict": "CONFIRMED"
+    },
+    {
+      "id": "G06",
+      "surface": "gates",
+      "command": "nice -n 19 node research/review-2026-10-09/run.js G06",
+      "expected": "Changing the cleanup command invalidates the old cleanup pass.",
+      "observed": {
+        "type": "clean",
+        "ok": false,
+        "reason": "clean evidence command policy is missing or no longer matches the pinned commands; run tower-crane check clean T1 again"
+      },
+      "verdict": "held"
+    },
+    {
+      "id": "G07",
+      "surface": "gates",
+      "command": "nice -n 19 node research/review-2026-10-09/run.js G07",
+      "expected": "Changing hosted CI requirements invalidates the old CI pass.",
+      "observed": {
+        "type": "ci",
+        "ok": false,
+        "reason": "hosted CI evidence policy is missing or no longer matches the current project; run tower-crane check ci T1 again"
+      },
+      "verdict": "held"
+    },
+    {
+      "id": "G08",
+      "surface": "gates",
+      "command": "nice -n 19 node research/review-2026-10-09/run.js G08",
+      "expected": "A real short gate timeout reports infrastructure failure without naming cut-off tests as failures (T140).",
+      "observed": {
+        "ok": false,
+        "summary": "`/home/avifenesh/.nvm/versions/node/v26.10.0/bin/node /home/avifenesh/.cache/tower-crane/agents/22cd04e4ddaf/worker-T144-1/T144-probes/tower-crane-gZSM1a/timeout.js` at d5c2094be1: timed out.\nFailing tests:\n- still-running-at-cutoff\nOutput tail (last 40 lines, max 8192 characters):\nnot ok 1 - still-running-at-cutoff\nMake the tests pass at the submitted commit, then submit the new sha.",
+        "testFailure": {
+          "names": [
+            "still-running-at-cutoff"
+          ],
+          "output_tail": "not ok 1 - still-running-at-cutoff"
+        },
+        "confirmedFailure": false
+      },
+      "verdict": "CONFIRMED"
+    },
+    {
+      "id": "G09",
+      "surface": "gates",
+      "command": "nice -n 19 node research/review-2026-10-09/run.js G09",
+      "expected": "The default tests gate budget is 20 minutes in this checkout (T140).",
+      "observed": {
+        "ok": true,
+        "timeoutMilliseconds": [
+          1200000
+        ]
+      },
+      "verdict": "by design"
+    },
+    {
+      "id": "G10",
+      "surface": "gates",
+      "command": "nice -n 19 node research/review-2026-10-09/run.js G10",
+      "expected": "A timeout during the merged-head check keeps the task accepted and reports infrastructure failure (T140).",
+      "observed": {
+        "result": {
+          "status": "rework"
+        },
+        "taskStatus": "rework",
+        "reworks": [
+          "full suite fails on PR #7 merged with main. `node test/value.test.js` on d5c2094be1 merged with main at a790d5acaa: timed out. Last 40 lines:\n"
+        ],
+        "budgets": [
+          1200000
+        ]
+      },
+      "verdict": "CONFIRMED"
+    },
+    {
+      "id": "G11",
+      "surface": "gates",
+      "command": "nice -n 19 node research/review-2026-10-09/run.js G11",
+      "expected": "Increasing executor capacity leaves tests evidence valid because it does not change the test contract.",
+      "observed": {
+        "type": "tests",
+        "ok": true,
+        "waived": false,
+        "agent": "orchestrator",
+        "reason": "ok by orchestrator"
+      },
+      "verdict": "held"
+    },
+    {
+      "id": "G12",
+      "surface": "gates",
+      "command": "nice -n 19 node research/review-2026-10-09/run.js G12",
+      "expected": "Unchanged command and mode keep evidence valid.",
+      "observed": {
+        "type": "tests",
+        "ok": true,
+        "waived": false,
+        "agent": "orchestrator",
+        "reason": "ok by orchestrator"
+      },
+      "verdict": "held"
+    }
+  ]
+}
