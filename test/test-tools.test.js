@@ -29,6 +29,7 @@ test('repository seeds, test helpers and gate scratch share the cache default an
   const probe = `
     const fs = require('node:fs');
     const { TMP_ROOT } = require('./test/helpers');
+    if (!fs.existsSync(TMP_ROOT)) throw new Error('the helper root must exist without global setup');
     const { createRepoSeed, cleanupRepoSeed } = require('./test/repo-seed');
     const { scratch } = require('./test/gates/helpers');
     const seed = createRepoSeed();

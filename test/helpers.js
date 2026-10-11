@@ -14,6 +14,8 @@ const TMP_ROOT = tempRoot();
 const SHARED_REPO_SEED = process.env.TC_TEST_REPO_SEED;
 const OWNER_KEY = 'fixture-owner-key';
 delete process.env.TC_TEST_REPO_SEED;
+// Scratch consumers can run directly without the runner's global setup.
+fs.mkdirSync(TMP_ROOT, { recursive: true });
 
 // Tests must not see the developer's git config (hooks, signing), an
 // agent's TOWER_CRANE_* variables or the developer's own ladder defaults, so every
