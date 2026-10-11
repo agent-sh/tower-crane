@@ -8,8 +8,12 @@ const cp = require('node:child_process');
 const { BIN, cachedFixture } = require('./helpers');
 
 const REQUIRED = [
-  'test (ubuntu-latest, node 26)',
-  'test (ubuntu-latest, node 24)',
+  'test (ubuntu-latest, node 26, shard 1/3)',
+  'test (ubuntu-latest, node 26, shard 2/3)',
+  'test (ubuntu-latest, node 26, shard 3/3)',
+  'test (ubuntu-latest, node 24, shard 1/3)',
+  'test (ubuntu-latest, node 24, shard 2/3)',
+  'test (ubuntu-latest, node 24, shard 3/3)',
   'test (windows-latest, node 26, shard 1/3)',
   'test (windows-latest, node 26, shard 2/3)',
   'test (windows-latest, node 26, shard 3/3)',
@@ -23,16 +27,19 @@ test('package support, CI matrix, and required jobs target Node 24 and 26', () =
   assert.equal(metadata.engines.node, '>=24');
 
   const workflow = fs.readFileSync(path.join(root, '.github', 'workflows', 'ci.yml'), 'utf8');
-  const matrix = [...workflow.matchAll(/^\s+- \{ os: ([^,]+), node: (\d+), shard: '([^']*)' \}$/gm)]
-    .map(([, os, node, shard]) => ({ os, node: Number(node), shard }));
-  assert.deepEqual(matrix, [
-    { os: 'ubuntu-latest', node: 26, shard: '' },
-    { os: 'ubuntu-latest', node: 24, shard: '' },
-    { os: 'windows-latest', node: 26, shard: '1/3' },
-    { os: 'windows-latest', node: 26, shard: '2/3' },
-    { os: 'windows-latest', node: 26, shard: '3/3' },
-  ]);
-  assert.deepEqual(matrix.map(({ os, node, shard }) => `test (${os}, node ${node}${shard ? `, shard ${shard}` : ''})`), REQUIRED);
+  const matrix = [...workflow.matchAll(/^\s+- \{ os: ([^,]+), node: (\d+), shard: '(\d+)\/(\d+)' \}$/gm)]
+    .map(([, os, node, index, total]) => ({ os, node: Number(node), index: Number(index), total: Number(total) }));
+  // Each OS and Node pair must run every shard of its split once, and no other shard.
+  const jobs = new Map();
+  for (const entry of matrix) {
+    const job = `${entry.os} node ${entry.node}`;
+    jobs.set(job, [...(jobs.get(job) || []), entry]);
+  }
+  for (const [job, shards] of jobs) {
+    const { total } = shards[0];
+    assert.deepEqual(shards.map(({ index, total }) => `${index}/${total}`), Array.from({ length: total }, (_, i) => `${i + 1}/${total}`), `${job} shards`);
+  }
+  assert.deepEqual(matrix.map(({ os, node, index, total }) => `test (${os}, node ${node}, shard ${index}/${total})`), REQUIRED);
 
   const requiredJson = JSON.stringify(REQUIRED);
   for (const file of ['docs/state.md', 'docs/cli.md']) {
