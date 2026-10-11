@@ -38,7 +38,7 @@ test('a worker asks and releases with its PR linked; answering resumes that PR, 
   h.env.FIXTURE_PR_HEAD_7 = 'tower-crane/T1';
   h.env.FIXTURE_PR_STATE_7 = 'OPEN';
   h.ok(['claim', 'T1', '--agent', 'w-1']);
-  h.ok(['ask', '--question', 'Which store?', '--option', 'redis', '--option', 'postgres', '--blocks', 'T1', '--agent', 'w-1']);
+  h.ok(['ask', '--kind', 'technical', '--question', 'Which store?', '--option', 'redis', '--option', 'postgres', '--blocks', 'T1', '--agent', 'w-1']);
   h.ok(['release', 'T1', '--reason', 'waiting on D1', '--pr', '7', '--agent', 'w-1']);
   assert.deepEqual([task(h, 'T1').status, task(h, 'T1').pr, task(h, 'T1').branch], ['todo', 7, 'tower-crane/T1']);
   assert.equal(events(h).findLast((e) => e.cmd === 'release').detail.decisions[0], 'D1');
@@ -48,7 +48,7 @@ test('a worker asks and releases with its PR linked; answering resumes that PR, 
   h.env.FIXTURE_PR_HEAD_8 = 'tower-crane/T2';
   h.env.FIXTURE_PR_STATE_8 = 'OPEN';
   h.ok(['claim', 'T2', '--agent', 'w-2']);
-  h.ok(['ask', '--question', 'Which cache?', '--option', 'lru', '--option', 'none', '--blocks', 'T2', '--agent', 'w-2']);
+  h.ok(['ask', '--kind', 'technical', '--question', 'Which cache?', '--option', 'lru', '--option', 'none', '--blocks', 'T2', '--agent', 'w-2']);
   h.ok(['release', 'T2', '--reason', 'waiting on D2', '--pr', '8', '--agent', 'w-2']);
   h.ok(['claim', 'T3', '--agent', 'w-3']);
   h.ok(['release', 'T3', '--reason', 'stopped for now', '--agent', 'w-3']);
@@ -150,7 +150,7 @@ test('a worker released with a PR whose branch exists only on origin resumes tha
   h.env.FIXTURE_PR_HEAD_7 = 'tower-crane/T1';
   h.env.FIXTURE_PR_STATE_7 = 'OPEN';
   h.ok(['claim', 'T1', '--agent', 'w-1']);
-  h.ok(['ask', '--question', 'Which store?', '--option', 'redis', '--option', 'postgres', '--blocks', 'T1', '--agent', 'w-1']);
+  h.ok(['ask', '--kind', 'technical', '--question', 'Which store?', '--option', 'redis', '--option', 'postgres', '--blocks', 'T1', '--agent', 'w-1']);
   h.ok(['release', 'T1', '--reason', 'waiting on D1', '--pr', '7', '--agent', 'w-1']);
   h.ok(['answer', 'D1', '--choice', 'redis', '--agent', 'owner']);
 

@@ -571,7 +571,7 @@ Ready tasks come in priority order: most outstanding dependents (direct or trans
 
 ### Release for a decision
 
-`release ID --reason R --pr N` gives back a claim whose work waits on a decision and links PR `N` to the task. `N` must be open and is checked as `submit` checks it: its head branch becomes the task's `branch` when the task has none, and must equal it otherwise. A task linked to another open PR keeps that PR and refuses the release; once that PR is closed or merged, `N` replaces it and sets the branch. The `pr` and `branch` values stay when the claim is released. The link is written after the owner check, so a release that opens an owner decision and refuses writes no link. The release note records `linked PR #N on branch B`.
+`release ID --reason R --pr N` gives back a claim whose work waits on a decision and links PR `N` to the task. `N` must be open and is checked as `submit` checks it. Its head branch must equal the task's `branch`, except when the task has none or moves from a closed or merged PR to `N`: then it becomes the task's `branch`. A task linked to another open PR keeps that PR and refuses the release; once that PR is closed or merged, `N` replaces it. The `pr` and `branch` values stay when the claim is released. The link is written after the owner check, so a release that opens an owner decision and refuses writes no link. The release note records `linked PR #N on branch B`.
 
 The release event's `detail.decisions` lists the ids of the open decisions that blocked the task when it was released. A todo task whose latest release has them can be sent back with `rework`, answered or not: its status becomes `rework` and `revision` advances as for any rework. A todo task released without decisions still refuses `rework`.
 
