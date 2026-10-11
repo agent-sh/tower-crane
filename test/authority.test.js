@@ -198,6 +198,7 @@ test('owner-required changes by the orchestrator open one decision and change no
     [['project', 'set', '--merge-admin', 'true'], ['merge.admin']],
     [['project', 'set', '--decision-delegation', '{"orchestrator_technical":true}'], ['decision_delegation']],
     [['project', 'set', '--sandbox', '{"write":["/tmp/x"]}'], ['sandbox']],
+    [['project', 'set', '--session-bus', 'true'], ['sandbox.session_bus']],
     [['project', 'set', '--env', '{"A":"1"}'], ['env']],
     [['project', 'set', '--budget-hours', '5'], null],
     [['ladder', 'set', 'easy', '--scope', '{}'], ['scope']],

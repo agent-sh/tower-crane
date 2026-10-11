@@ -384,3 +384,99 @@ test('real Codex worker writes the toolchain lock, receives a private env file, 
   noFileSecrets(h.state);
   assert.ok(!result.stdout.includes(SECRET_KEY) && !result.stderr.includes(SECRET));
 });
+
+// A claude stub that writes the sandbox settings and the env its spawn gave it to out.
+function writeClaudeStub(bin, out) {
+  const stub = [
+    `#!${process.execPath}`, "'use strict';",
+    'const fs = require("node:fs"), path = require("node:path");',
+    'const settings = JSON.parse(fs.readFileSync(path.join(process.env.CLAUDE_CONFIG_DIR, "settings.json"), "utf8"));',
+    `fs.writeFileSync(${JSON.stringify(out)}, JSON.stringify({ sandbox: settings.sandbox, env: { XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR, DBUS_SESSION_BUS_ADDRESS: process.env.DBUS_SESSION_BUS_ADDRESS } }));`,
+    'console.log("bus probe passed");', '',
+  ].join('\n');
+  fs.writeFileSync(path.join(bin, 'claude'), stub, { mode: 0o755 });
+}
+
+test('claude: sandbox.session_bus grants the bus and the user manager sockets, read and write, and off it grants nothing', { skip: NO_STUBS }, (t) => {
+  const h = setup(t, 'claude');
+  const bin = path.join(h.base, 'bin');
+  fs.mkdirSync(bin);
+  // The runtime directory is the test's own, so the host's session bus never matters.
+  // The stub never connects, so empty files stand in for the two sockets.
+  const runtime = path.join(h.base, 'runtime');
+  fs.mkdirSync(path.join(runtime, 'systemd'), { recursive: true });
+  const bus = path.join(fs.realpathSync(runtime), 'bus');
+  const manager = path.join(fs.realpathSync(runtime), 'systemd', 'private');
+  fs.writeFileSync(bus, '');
+  fs.writeFileSync(manager, '');
+  const out = path.join(h.base, 'result.json');
+  writeClaudeStub(bin, out);
+  const env = { ...h.env, XDG_RUNTIME_DIR: runtime, DBUS_SESSION_BUS_ADDRESS: `unix:path=${bus}`,
+    PATH: `${bin}${path.delimiter}${process.env.PATH}`, CLAUDE_CONFIG_DIR: '' };
+  const spawnSeen = () => {
+    h.ok(['spawn', '--task', 'T1', '--wait'], { env });
+    return JSON.parse(fs.readFileSync(out, 'utf8'));
+  };
+
+  const off = spawnSeen();
+  assert.ok(!off.sandbox.filesystem.allowRead.includes(bus), 'off by default: no read grant');
+  assert.ok(!off.sandbox.filesystem.allowWrite.includes(bus), 'off by default: no write grant');
+
+  assert.equal(h.run(['project', 'set', '--session-bus', 'maybe']).code, 2);
+  h.ok(['project', 'set', '--session-bus', 'true']);
+  fs.rmSync(manager);
+  const refused = h.run(['spawn', '--task', 'T1', '--wait'], { env });
+  assert.notEqual(refused.code, 0, 'a missing user manager socket refuses the spawn');
+  assert.match(refused.stderr, /systemd\/private/);
+  fs.writeFileSync(manager, '');
+  const on = spawnSeen();
+  assert.ok(on.sandbox.filesystem.allowRead.includes(bus), 'the sandbox reads the bus socket');
+  assert.ok(on.sandbox.filesystem.allowWrite.includes(bus), 'the sandbox writes the bus socket');
+  assert.ok(on.sandbox.filesystem.allowRead.includes(manager), 'the sandbox reads the user manager socket');
+  assert.ok(on.sandbox.filesystem.allowWrite.includes(manager), 'the sandbox writes the user manager socket, which systemd-run connects to');
+  assert.ok(on.sandbox.filesystem.denyRead.includes(fs.realpathSync(runtime)), 'the rest of the runtime directory stays denied');
+  assert.deepEqual(on.sandbox.filesystem.allowWrite.filter((p) => p.startsWith(fs.realpathSync(runtime))), [bus, manager], 'only the two sockets are writable under the runtime directory');
+  assert.deepEqual(on.env, { XDG_RUNTIME_DIR: runtime, DBUS_SESSION_BUS_ADDRESS: `unix:path=${bus}` });
+
+  h.ok(['project', 'set', '--session-bus', 'false']);
+  assert.ok(!spawnSeen().sandbox.filesystem.allowRead.includes(bus), 'false turns the grant off again');
+  assert.equal(JSON.parse(fs.readFileSync(path.join(h.state, 'project.json'), 'utf8')).sandbox, undefined);
+});
+
+test('claude: sandbox.session_bus grants the sockets the worker env names, even when the spawning env names none', { skip: NO_STUBS }, (t) => {
+  const h = setup(t, 'claude');
+  const bin = path.join(h.base, 'bin');
+  fs.mkdirSync(bin);
+  const out = path.join(h.base, 'result.json');
+  writeClaudeStub(bin, out);
+  // The spawning environment names a runtime directory with no bus; the project's env names one that has both sockets.
+  const absent = path.join(h.base, 'absent');
+  const runtime = path.join(h.base, 'runtime');
+  fs.mkdirSync(path.join(runtime, 'systemd'), { recursive: true });
+  const bus = path.join(fs.realpathSync(runtime), 'bus');
+  const manager = path.join(fs.realpathSync(runtime), 'systemd', 'private');
+  fs.writeFileSync(bus, '');
+  fs.writeFileSync(manager, '');
+  const env = { ...h.env, XDG_RUNTIME_DIR: absent, DBUS_SESSION_BUS_ADDRESS: `unix:path=${path.join(absent, 'bus')}`,
+    PATH: `${bin}${path.delimiter}${process.env.PATH}`, CLAUDE_CONFIG_DIR: '' };
+  h.ok(['project', 'set', '--session-bus', 'true', '--env', JSON.stringify({ XDG_RUNTIME_DIR: runtime, DBUS_SESSION_BUS_ADDRESS: `unix:path=${bus}` })]);
+  h.ok(['spawn', '--task', 'T1', '--wait'], { env });
+  const seen = JSON.parse(fs.readFileSync(out, 'utf8'));
+  assert.deepEqual(seen.env, { XDG_RUNTIME_DIR: runtime, DBUS_SESSION_BUS_ADDRESS: `unix:path=${bus}` });
+  assert.ok(seen.sandbox.filesystem.allowRead.includes(bus), 'the bus the worker env names is granted');
+  assert.ok(seen.sandbox.filesystem.allowWrite.includes(manager), 'the manager socket in that runtime is granted');
+  assert.ok(seen.sandbox.filesystem.denyRead.includes(fs.realpathSync(runtime)), 'that runtime is denied');
+});
+
+test('claude: dry-run never reads env_file, and a real spawn that cannot read it refuses', { skip: NO_STUBS }, (t) => {
+  const h = setup(t, 'claude');
+  const bin = path.join(h.base, 'bin');
+  fs.mkdirSync(bin);
+  writeClaudeStub(bin, path.join(h.base, 'result.json'));
+  const env = { ...h.env, PATH: `${bin}${path.delimiter}${process.env.PATH}`, CLAUDE_CONFIG_DIR: '' };
+  h.ok(['project', 'set', '--session-bus', 'true', '--env_file', path.join(h.base, 'missing.env')]);
+  h.ok(['spawn', '--task', 'T1', '--dry-run'], { env });
+  const real = h.run(['spawn', '--task', 'T1', '--wait'], { env });
+  assert.notEqual(real.code, 0, 'the real spawn refuses');
+  assert.match(real.stderr, /cannot read env_file/);
+});

@@ -10,6 +10,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const net = require('node:net');
+const os = require('node:os');
 const path = require('node:path');
 const cp = require('node:child_process');
 const { pinLiveRung, makeRepo, BIN, ROOT } = require('./helpers');
@@ -18,6 +19,14 @@ const uid = typeof process.getuid === 'function' ? process.getuid() : null;
 const runDir = uid === null ? null : `/run/user/${uid}`;
 const skip = process.env.TOWER_CRANE_LIVE_CLAUDE !== '1' ? 'set TOWER_CRANE_LIVE_CLAUDE=1 to run against the real claude CLI'
   : !runDir || !fs.existsSync(runDir) ? `${runDir || '/run/user/<uid>'} does not exist here` : false;
+
+// The owner's claude login. spawn links its credentials into each agent's home,
+// so a live agent starts logged in only when its repository's user config is this dir.
+const claudeConfig = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
+function login(h) {
+  h.env.CLAUDE_CONFIG_DIR = claudeConfig;
+  return h;
+}
 
 // The agent's commands write nothing outside the worktree, and the state
 // directory is read-only, so a probe writes its result to a directory the
@@ -58,7 +67,7 @@ if (process.env.TOWER_CRANE_LIVE_CLAUDE === '1' || process.env.TOWER_CRANE_LIVE_
 }
 
 test('a sandboxed claude command cannot connect to a unix socket in a denied directory', { skip, timeout: 300000 }, async (t) => {
-  const h = makeRepo(t);
+  const h = login(makeRepo(t));
   h.init();
   h.ok(['task', 'add', '--title', 'Socket probe', '--acceptance', 'no connection']);
   const sock = path.join(runDir, `tower-crane-probe-${process.pid}.sock`);
@@ -83,8 +92,65 @@ test('a sandboxed claude command cannot connect to a unix socket in a denied dir
   assert.equal(connections, 0, 'nothing reached the socket');
 });
 
+test('in a real claude sandbox with sandbox.session_bus, a command connects to the bus socket', { skip: process.env.TOWER_CRANE_LIVE_CLAUDE !== '1' && 'set TOWER_CRANE_LIVE_CLAUDE=1 to run against the real claude CLI', timeout: 300000 }, async (t) => {
+  const h = login(makeRepo(t));
+  h.init();
+  h.ok(['task', 'add', '--title', 'Bus probe', '--acceptance', 'bus reachable']);
+  // The bus is a socket in a runtime directory of the test's own, so the probe never touches the user's session.
+  const runtime = path.join(h.base, 'runtime');
+  fs.mkdirSync(runtime);
+  const sock = path.join(runtime, 'bus');
+  // The grant also needs the user manager's socket; this probe never connects to it.
+  fs.mkdirSync(path.join(runtime, 'systemd'));
+  fs.writeFileSync(path.join(runtime, 'systemd', 'private'), '');
+  const probe = path.join(results(h), 'bus-probe');
+  let connections = 0;
+  const server = net.createServer((c) => {
+    connections++;
+    c.on('error', () => {});
+    c.end();
+  });
+  await new Promise((resolve) => server.listen(sock, resolve));
+  t.after(() => server.close());
+  const script = `const n=require("net"),f=require("fs");n.connect(${JSON.stringify(sock)}).on("connect",()=>{f.writeFileSync(${JSON.stringify(probe)},"CONNECTED");process.exit(0)}).on("error",e=>{f.writeFileSync(${JSON.stringify(probe)},"ERR "+e.code);process.exit(1)})`;
+  h.ok(['project', 'set', '--session-bus', 'true']);
+  h.ok(['brief', 'set', 'T1', '-'], {
+    input: `Sandbox probe set up by the owner. Run exactly this one command with the Bash tool, then reply with its exit code. Do not use tower-crane.\n\n${node} -e '${script}'\n`,
+  });
+  pinLiveRung(h, 'claude');
+  const r = await h.runAsync(['spawn', '--role', 'small', '--task', 'T1', '--wait'], {
+    env: { ...h.env, XDG_RUNTIME_DIR: runtime, DBUS_SESSION_BUS_ADDRESS: `unix:path=${sock}` },
+  });
+  assert.equal(r.code, 0, `${r.stderr}\n${agentLog(h)}`);
+  assert.ok(fs.existsSync(probe), `the command ran\n${agentLog(h)}`);
+  assert.equal(fs.readFileSync(probe, 'utf8'), 'CONNECTED', `the command reached the bus socket\n${agentLog(h)}`);
+  assert.equal(connections, 1, 'the socket accepted the command');
+});
+
+// systemd-run --user --scope connects to the user manager's socket, not the
+// bus, so this is the transport a scope needs. It runs against the owner's
+// real user manager, so the scope is a real transient unit of the owner's session.
+test('in a real claude sandbox with sandbox.session_bus, systemd-run --user --scope starts a scope', { skip: skip || (!(runDir && fs.existsSync(path.join(runDir, 'systemd', 'private'))) && 'the user manager socket does not exist here'), timeout: 300000 }, async (t) => {
+  const h = login(makeRepo(t));
+  h.init();
+  h.ok(['task', 'add', '--title', 'Scope probe', '--acceptance', 'scope started']);
+  const probe = path.join(results(h), 'scope-probe');
+  const script = `const f=require("fs");f.writeFileSync(${JSON.stringify(probe)},"SCOPE "+f.readFileSync("/proc/self/cgroup","utf8"))`;
+  h.ok(['project', 'set', '--session-bus', 'true']);
+  h.ok(['brief', 'set', 'T1', '-'], {
+    input: `Sandbox probe set up by the owner. Run exactly this one command with the Bash tool, then reply with its exit code. Do not use tower-crane.\n\nsystemd-run --user --scope --quiet -- ${node} -e '${script}'\n`,
+  });
+  pinLiveRung(h, 'claude');
+  const r = await h.runAsync(['spawn', '--role', 'small', '--task', 'T1', '--wait'], {
+    env: { ...h.env, XDG_RUNTIME_DIR: runDir, DBUS_SESSION_BUS_ADDRESS: `unix:path=${path.join(runDir, 'bus')}` },
+  });
+  assert.equal(r.code, 0, `${r.stderr}\n${agentLog(h)}`);
+  assert.ok(fs.existsSync(probe), `the scoped command ran\n${agentLog(h)}`);
+  assert.match(fs.readFileSync(probe, 'utf8'), /^SCOPE .*\.scope$/m, 'the command ran inside a systemd scope');
+});
+
 test('in a real claude sandbox a forged state edit fails and the CLI writes through the broker', { skip: process.env.TOWER_CRANE_LIVE_CLAUDE !== '1' && 'set TOWER_CRANE_LIVE_CLAUDE=1 to run against the real claude CLI', timeout: 300000 }, async (t) => {
-  const h = makeRepo(t);
+  const h = login(makeRepo(t));
   h.init();
   h.ok(['task', 'add', '--title', 'Forge probe', '--acceptance', 'only the broker writes']);
   const events = path.join(h.state, 'events.jsonl');
