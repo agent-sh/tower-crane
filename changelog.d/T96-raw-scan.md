@@ -1,0 +1,1 @@
+- Model lint uses a plain regex scan of raw code and JSON, including comments and strings. Exact path/text/reason entries are its only exceptions outside BUILTIN, so division after object literals cannot hide later matches.

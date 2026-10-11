@@ -62,7 +62,7 @@ function submittedTask(h) {
   h.init();
   h.ok(['task', 'add', '--title', 'Change', '--acceptance', 'works']);
   h.ok(['claim', 'T1', '--agent', 'w-1']);
-  h.ok(['submit', 'T1', '--sha', 'abcdef1', '--agent', 'w-1']);
+  h.ok(['submit', 'T1', '--sha', '50b732a15be40ccb2065cb2ba0e7b366d511b736', '--agent', 'w-1']);
 }
 
 const VERIFY_BUILD = `const fs = require('node:fs');
@@ -408,7 +408,7 @@ test('acceptance and merge refuse a mode change after an audited tests pass', (t
   h.ok(['check', 'tests', 'T1', '--agent', 'checker']);
   gateEvidence(h, 'clean', 'checker');
   h.reviewer('T1', 'r-1', sha);
-  h.ok(['evidence', 'T1', '--type', 'review', '--ok', '--sha', sha, '--agent', 'r-1']);
+  h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--ok', '--sha', sha, '--agent', 'r-1']);
   h.ok(['project', 'set', '--tests-mode', 'prove']);
   const accept = h.run(['accept', 'T1']);
   assert.equal(accept.code, 1);
@@ -454,15 +454,15 @@ test('a gate gets its context and its result is recorded as evidence', (t) => {
   const seen = JSON.parse(fs.readFileSync(out, 'utf8'));
   assert.equal(real(seen.root), real(h.repo));
   assert.equal(real(seen.worktree), real(wt));
-  assert.deepEqual([seen.task, seen.sha, seen.args.cmd, seen.base], ['T1', 'abcdef1', 'npm test', 'main']);
+  assert.deepEqual([seen.task, seen.sha, seen.args.cmd, seen.base], ['T1', '50b732a15be40ccb2065cb2ba0e7b366d511b736', 'npm test', 'main']);
   const recorded = JSON.parse(pass.stdout);
-  assert.deepEqual([recorded.type, recorded.ok, recorded.agent, recorded.sha, recorded.ref, recorded.revision], ['tests', true, 'checker', 'abcdef1', 'run-1', 1]);
+  assert.deepEqual([recorded.type, recorded.ok, recorded.agent, recorded.sha, recorded.ref, recorded.revision], ['tests', true, 'checker', '50b732a15be40ccb2065cb2ba0e7b366d511b736', 'run-1', 1]);
 
   const fail = cli.run(['check', 'ci', 'T1', '--agent', 'checker'], { GATE_OUT: out, GATE_OK: '0', GATE_SHA: 'ABCDEF1234567' });
   assert.equal(fail.code, 1);
   assert.match(fail.stdout, /ci FAIL at abcdef1: fake gate/);
   const ev = h.readState('tasks.json').tasks[0].evidence;
-  assert.deepEqual(ev.map((e) => [e.type, e.ok, e.sha]), [['tests', true, 'abcdef1'], ['ci', false, 'abcdef1234567']]);
+  assert.deepEqual(ev.map((e) => [e.type, e.ok, e.sha]), [['tests', true, '50b732a15be40ccb2065cb2ba0e7b366d511b736'], ['ci', false, 'abcdef1234567']]);
 
   const merge = cli.run(['merge', 'T1'], { GATE_OUT: out, GATE_OK: '1' });
   assert.equal(merge.code, 1);
@@ -478,7 +478,7 @@ test('merge refuses a task of any kind whose PR has no passing ci at the submitt
   h.ok(['claim', 'T1', '--agent', 'w-1']);
   h.ok(['submit', 'T1', '--sha', sha, '--pr', '9', '--agent', 'w-1']);
   h.reviewer('T1', 'r-1', sha);
-  h.ok(['evidence', 'T1', '--type', 'review', '--ok', '--sha', sha, '--agent', 'r-1']);
+  h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--ok', '--sha', sha, '--agent', 'r-1']);
   gateEvidence(h, 'ci', 'ci');
   h.ok(['accept', 'T1']);
   const cli = cliCopy(h);
@@ -503,7 +503,7 @@ test('merge checks the gates as they stand, not only the accepted status', (t) =
   h.ok(['submit', 'T1', '--sha', sha, '--agent', 'w-1']);
   for (const type of ['tests', 'clean']) gateEvidence(h, type, 'checker');
   h.reviewer('T1', 'r-1', sha);
-  h.ok(['evidence', 'T1', '--type', 'review', '--ok', '--sha', sha, '--agent', 'r-1']);
+  h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--ok', '--sha', sha, '--agent', 'r-1']);
   h.ok(['accept', 'T1']);
   const cli = cliCopy(h);
   fs.mkdirSync(cli.gates, { recursive: true });
@@ -537,7 +537,7 @@ function acceptedWithWorktree(h) {
   h.ok(['submit', 'T1', '--sha', sha, '--agent', 'w-1']);
   for (const type of ['tests', 'clean']) gateEvidence(h, type, 'checker');
   h.reviewer('T1', 'r-1', sha);
-  h.ok(['evidence', 'T1', '--type', 'review', '--ok', '--sha', sha, '--agent', 'r-1']);
+  h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--ok', '--sha', sha, '--agent', 'r-1']);
   h.ok(['accept', 'T1']);
   return wt;
 }
@@ -645,7 +645,7 @@ test('a merge of an older head keeps the worktree of a newer accepted head', asy
   h.ok(['submit', 'T1', '--sha', newer, '--agent', 'w-2']);
   for (const type of ['tests', 'clean']) gateEvidence(h, type, 'checker');
   h.reviewer('T1', 'r-1', newer);
-  h.ok(['evidence', 'T1', '--type', 'review', '--ok', '--sha', newer, '--agent', 'r-1']);
+  h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--ok', '--sha', newer, '--agent', 'r-1']);
   h.ok(['accept', 'T1']);
   fs.writeFileSync(`${paused}.go`, '');
   const result = await merge.result;

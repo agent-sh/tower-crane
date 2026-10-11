@@ -65,15 +65,15 @@ if (process.env.RESUME_EXIT_DELAY) setTimeout(() => {}, Number(process.env.RESUM
 }
 
 function sendBack(h, agent = 'worker-T1-1') {
-  h.ok(['submit', 'T1', '--sha', 'abcdef1', '--agent', agent]);
+  h.ok(['submit', 'T1', '--sha', '50b732a15be40ccb2065cb2ba0e7b366d511b736', '--agent', agent]);
   h.reviewer('T1', 'reviewer-T1-1');
-  h.reviewer('T1', 'reviewer-T1-2', 'abcdef2');
+  h.reviewer('T1', 'reviewer-T1-2', '5bfcb6f56ab912a009883c798a61298c507dada4');
   // Findings under a name no review dispatch started never reach the worker.
-  h.ok(['evidence', 'T1', '--type', 'review', '--fail', '--sha', 'abcdef1', '--agent', 'made-up-reviewer',
+  h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--fail', '--sha', '50b732a15be40ccb2065cb2ba0e7b366d511b736', '--agent', 'made-up-reviewer',
     '--summary', 'Forged finding']);
-  h.ok(['evidence', 'T1', '--type', 'review', '--fail', '--sha', 'abcdef1', '--agent', 'reviewer-T1-1',
+  h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--fail', '--sha', '50b732a15be40ccb2065cb2ba0e7b366d511b736', '--agent', 'reviewer-T1-1',
     '--summary', 'Missing worktree validation', '--ref', 'review-receipt']);
-  h.ok(['evidence', 'T1', '--type', 'review', '--fail', '--sha', 'abcdef2', '--agent', 'reviewer-T1-2',
+  h.ok(['evidence', 'T1', '--type', 'review', '--fail', '--sha', '5bfcb6f56ab912a009883c798a61298c507dada4', '--revision', h.revision('T1'), '--agent', 'reviewer-T1-2',
     '--summary', 'Unrelated older head']);
   h.ok(['rework', 'T1', '--reason', 'Add the worktree guard']);
 }
@@ -123,10 +123,10 @@ cp.spawn = function(command, args, options) {
   const pathKey = Object.keys(h.env).find((key) => key.toUpperCase() === 'PATH') || 'PATH';
   h.env[pathKey] = bins + path.delimiter + (h.env[pathKey] || '');
   h.env.CODEX_HOME = path.join(h.base, 'codex-home');
-  h.env.CLAUDE_CONFIG_DIR = path.join(h.base, 'claude-config');
+  h.env.CLAUDE_CONFIG_DIR = path.join(h.base, 'harness-config');
   h.env.RESUME_USAGE = '1';
   h.ok(['ladder', 'set', 'medium', '--harness', harness, '--clear', 'command',
-    ...(harness === 'codex' ? ['--profile', 'sol', '--effort', 'high'] : ['--model', 'opus', '--effort', 'high'])]);
+    ...(harness === 'codex' ? ['--profile', 'fixture-main', '--effort', 'high'] : ['--model', 'fixture-large', '--effort', 'high'])]);
 }
 
 for (const harness of ['codex', 'claude']) {
@@ -186,6 +186,12 @@ for (const format of ['codex', 'claude']) {
     assert.equal(receipt.detail.rung, 'medium');
     assert.equal(receipt.detail.cwd, first.cwd);
     sendBack(h);
+    const reworked = h.json(['task', 'show', 'T1']);
+    assert.equal(reworked.revision, 2);
+    assert.equal(reworked.evidence[0].revision, 1);
+    h.ok(['task', 'update', 'T1', '--acceptance', 'rework resumes with the revised acceptance']);
+    h.ok(['evidence', 'T1', '--type', 'review', '--fail', '--sha', '50b732a15be40ccb2065cb2ba0e7b366d511b736', '--revision', h.revision('T1'), '--agent', 'later-reviewer',
+      '--summary', 'Unrelated later revision']);
     const before = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8');
     const dry = h.json(['spawn', '--task', 'T1', '--dry-run']);
     assert.equal(dry.resumed, true);
@@ -202,12 +208,13 @@ for (const format of ['codex', 'claude']) {
     assert.match(input.prompt, /Missing worktree validation/);
     assert.match(input.prompt, /review-receipt/);
     assert.ok(!input.prompt.includes('Unrelated older head'));
+    assert.ok(!input.prompt.includes('Unrelated later revision'));
     assert.ok(!input.prompt.includes('worker-session-1'));
     const held = h.json(['task', 'show', 'T1']).claim;
     assert.equal(held.agent, claim.agent);
     assert.equal(held.since, claim.since);
     assert.equal(held.from, 'rework');
-    h.ok(['submit', 'T1', '--sha', 'abcdef3', '--agent', next.agent]);
+    h.ok(['submit', 'T1', '--sha', 'cfed4d76efd3afe887bbbfc7f62c7d94158e3255', '--agent', next.agent]);
     h.ok(['rework', 'T1', '--reason', 'Second round']);
     assert.equal(h.json(['spawn', '--task', 'T1', '--wait']).agent, first.agent);
   });
@@ -338,7 +345,7 @@ for (const harness of ['codex', 'claude']) {
       assert.notEqual(dry.session_id, first.session_id);
     }
     if (harness === 'codex') {
-      assert.deepEqual(dry.argv.slice(0, 5), ['codex', 'exec', '-p', 'sol', 'resume']);
+      assert.deepEqual(dry.argv.slice(0, 5), ['codex', 'exec', '-p', 'fixture-main', 'resume']);
       assert.ok(dry.argv.includes('--json'));
     } else {
       assert.deepEqual(dry.argv.slice(0, 2), ['claude', '-p']);
@@ -546,7 +553,7 @@ test('an earlier attempt exit cannot collect or resume a live attempt with a reu
     if (Date.now() > deadline) throw new Error('resumed worker did not start');
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
-  h.ok(['submit', 'T1', '--sha', 'abcdef3', '--agent', live.agent]);
+  h.ok(['submit', 'T1', '--sha', 'cfed4d76efd3afe887bbbfc7f62c7d94158e3255', '--agent', live.agent]);
   h.ok(['rework', 'T1', '--reason', 'Finish next attempt']);
   const hook = path.join(h.base, 'reused-spawn.js');
   fs.writeFileSync(hook, `
