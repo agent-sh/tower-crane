@@ -107,6 +107,14 @@ if (path.resolve(process.argv[1] || '') !== __filename) {
     const message = auth ? 'Failed to authenticate: OAuth session expired and could not be refreshed'
       : 'rate limit exceeded: The service is temporarily unavailable.';
     if (harness === 'agy' && !auth) console.error('HTTP 503 service unavailable');
+    // An assistant record that quotes a login failure on stderr, from a run that succeeds.
+    if (type === 'quoted-stderr') {
+      const text = 'The task log says: Failed to authenticate: OAuth session expired and could not be refreshed';
+      console.error(JSON.stringify(harness === 'codex'
+        ? { type: 'item.completed', item: { type: 'agent_message', text } }
+        : { type: 'assistant', message: { content: [{ type: 'text', text }] } }));
+      process.exit(0);
+    }
     // A typed record on stderr is the case the supervisor must still read.
     if (type === 'auth-stderr') {
       console.error(JSON.stringify({ type: 'error', message }));

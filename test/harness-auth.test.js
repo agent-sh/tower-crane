@@ -221,7 +221,25 @@ for (const [harness, reason, message, again] of shapes) {
   });
 }
 
-test('a codex login failure pauses codex, and its login check clears the pause once the login works', { skip: process.platform === 'win32' && 'the login check stub is a POSIX script' }, (t) => {
+// A run that succeeds may quote a login failure on stderr while doing its work. Only harness error records count.
+for (const harness of ['codex', 'claude']) {
+  test(`a ${harness} run that quotes a login failure on stderr and exits zero is not a login failure`, (t) => {
+    const h = setup(t, { tasks: ['T1', 'T2'] });
+    h.ok(['ladder', 'set', 'easy', '--harness', harness, '--model', 'first']);
+    h.spawnEnv.TOWER_CRANE_TEST_FALLBACK_REASON = 'quoted-stderr';
+    const result = h.spawnTask('T1');
+    assert.equal(result.code, 0, result.stderr);
+    assert.deepEqual(h.attempts().map((a) => [a.harness, a.retry]), [[harness, '0']]);
+    assert.deepEqual(health(h), [], 'a quoted record pauses nothing');
+    assert.equal(owner(h).length, 0);
+    // The harness stays in dispatch, so the next task runs on it.
+    const next = h.spawnTask('T2');
+    assert.equal(next.code, 0, next.stderr);
+    assert.equal(h.attempts().length, 2);
+  });
+}
+
+test('a codex login failure pauses codex, and its login check clears the pause once the login works',{ skip: process.platform === 'win32' && 'the login check stub is a POSIX script' }, (t) => {
   const h = setup(t, { tasks: ['T1', 'T2'] });
   h.ok(['ladder', 'set', 'easy', '--harness', 'codex', '--model', 'first']);
   assert.notEqual(h.spawnTask('T1').code, 0);
