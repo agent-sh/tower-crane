@@ -165,8 +165,7 @@ test('conditional includes cannot add a driver the config scan misses', (t) => {
   fs.writeFileSync(script, `require('node:fs').appendFileSync(${JSON.stringify(marker)}, process.argv[2] + '\\n');\nprocess.stdin.pipe(process.stdout);\n`);
   const gitDir = path.join(h.repo, '.git');
   for (const [name, condition] of [['gitdir', 'gitdir:**/worktrees/**'], ['branch', 'onbranch:tower-crane/**']]) {
-    const file = path.join(gitDir, `${name}.inc`);
-    fs.writeFileSync(file, `[filter "${name}"]\n\tsmudge = ${shellQuote(process.execPath)} ${shellQuote(script)} ${name}\n`);
+    h.git(['config', '--file', path.join(gitDir, `${name}.inc`), `filter.${name}.smudge`, `${shellQuote(process.execPath)} ${shellQuote(script)} ${name}`]);
     h.git(['config', `includeIf.${condition}.path`, `${name}.inc`]);
   }
   fs.writeFileSync(path.join(gitDir, 'info', 'attributes'), '*.js filter=gitdir\n*.json filter=branch\nvalue.js filter=branch\n');
