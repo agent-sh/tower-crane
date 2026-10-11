@@ -380,6 +380,30 @@ cp.spawnSync = function (command, args, opts) {
   assert.equal(h.readState('tasks.json').tasks[0].sha, '5bfcb6f56ab912a009883c798a61298c507dada4');
 });
 
+test('SHA-256 repositories submit full commits through the CLI and worker broker', async (t) => {
+  const h = makeRepo(t);
+  fs.rmSync(h.repo, { recursive: true, force: true });
+  fs.mkdirSync(h.repo);
+  h.git(['init', '-q', '--object-format=sha256', '-b', 'main']);
+  fs.writeFileSync(path.join(h.repo, 'README.md'), '# SHA-256\n');
+  h.git(['add', 'README.md']);
+  h.git(['commit', '-q', '-m', 'init']);
+  const sha = h.git(['rev-parse', 'HEAD']);
+  assert.equal(sha.length, 64);
+  h.init();
+  h.ok(['task', 'add', '--title', 'Docs', '--acceptance', 'reads well', '--kind', 'docs']);
+  h.ok(['claim', 'T1', '--agent', 'worker-T1-1']);
+  assert.equal(h.json(['submit', 'T1', '--sha', sha.slice(0, 8), '--agent', 'worker-T1-1']).sha, sha);
+  const job = { state: h.state, task: 'T1', agent: 'worker-T1-1', role: 'worker', cwd: h.repo,
+    broker: path.join(h.base, 'brokers', 'worker-T1-1', B.FILE) };
+  const broker = await B.start(job);
+  t.after(() => broker.close());
+  const resubmitted = await h.runAsync(['submit', 'T1', '--sha', sha.slice(0, 8).toUpperCase(),
+    '--agent', job.agent, '--json'], { env: { TOWER_CRANE_BROKER: job.broker } });
+  assert.equal(resubmitted.code, 0, resubmitted.stderr);
+  assert.equal(JSON.parse(resubmitted.stdout).sha, sha);
+});
+
 test('a brokered worker or reviewer messages only the orchestrator or the owner', async (t) => {
   const h = makeRepo(t);
   h.init();
