@@ -293,3 +293,33 @@ test('prune and repeated cancellation preserve a live task that reuses a retired
   assert.equal(h.json(['worktree', 'list']).worktrees[0].task, 'T2');
   assert.ok(h.git(['branch', '--list', live.branch]));
 });
+
+test('cancel saves a dirty initialized submodule before removing its worktree', (t) => {
+  const h = setup(t);
+  const source = path.join(h.base, 'module-source');
+  fs.mkdirSync(source);
+  h.git(['init', '-q', '-b', 'main'], source);
+  fs.writeFileSync(path.join(source, 'value.txt'), 'base\n');
+  h.git(['add', '.'], source);
+  h.git(['commit', '-qm', 'module base'], source);
+  h.git(['-c', 'protocol.file.allow=always', 'submodule', 'add', '-q', source, 'module']);
+  h.git(['commit', '-qm', 'add module']);
+  const wt = h.json(['worktree', 'T1']);
+  h.git(['-c', 'protocol.file.allow=always', 'submodule', 'update', '--init', '-q'], wt.path);
+  const child = path.join(wt.path, 'module');
+  fs.writeFileSync(path.join(child, 'value.txt'), 'module commit\n');
+  h.git(['add', '.'], child);
+  h.git(['commit', '-qm', 'local module commit'], child);
+  const head = h.git(['rev-parse', 'HEAD'], child);
+  fs.writeFileSync(path.join(child, 'value.txt'), 'dirty module\n');
+  fs.writeFileSync(path.join(child, 'notes.txt'), 'module notes\n');
+  h.ok(['task', 'update', 'T1', '--status', 'cancelled']);
+  const saved = h.json(['task', 'show', 'T1']).worktree.saved;
+  const manifest = JSON.parse(fs.readFileSync(path.join(saved, 'manifest.json'), 'utf8'));
+  assert.equal(manifest.submodules.length, 1);
+  const recovered = manifest.submodules[0].saved;
+  assert.equal(fs.readFileSync(path.join(recovered, 'files', 'notes.txt'), 'utf8'), 'module notes\n');
+  assert.match(fs.readFileSync(path.join(recovered, 'tracked.patch'), 'utf8'), /dirty module/);
+  assert.ok(h.git(['bundle', 'list-heads', path.join(recovered, 'commits.bundle')]).includes(head));
+  gone(h, wt);
+});
