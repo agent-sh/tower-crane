@@ -145,10 +145,11 @@ test('a Claude run on several models names its primary model and keeps each mode
   const split = parse('claude', log);
   assert.equal(split.model, 'fixture-large');
   assert.deepEqual(split.models.map((r) => [r.model, r.tokens]), [['fixture-large', 77], ['fixture-small', 4]]);
-  // Usage that names no model counts toward the primary model and does not make a second model.
+  // Usage that names no model counts toward the primary model, and zero-token placeholders, named or not, make no second model.
   const unnamed = [
     message('d', 'fixture-large', { input_tokens: 50, cache_read_input_tokens: 0, output_tokens: 5 }),
     JSON.stringify({ type: 'assistant', message: { id: 'e', usage: { input_tokens: 0, output_tokens: 0 } } }),
+    message('f', '<synthetic>', { input_tokens: 0, cache_read_input_tokens: 0, output_tokens: 0 }),
   ].join('\n');
   const single = parse('claude', unnamed);
   assert.equal(single.model, 'fixture-large');
