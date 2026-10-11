@@ -356,9 +356,10 @@ test('research Claude gets native or explicit web MCP tools with worker file and
     const ownHome = path.dirname(report.home);
     assert.deepEqual(allowRead, [ownHome, path.join(h.state, 'brokers', path.basename(ownHome))]);
     assert.ok(shared.denyWrite.includes(h.state));
-    // Each agent writes a cache of its own.
-    const cache = path.join(u.home, '.cache', 'tower-crane', 'agents');
-    shared.allowWrite = shared.allowWrite.map((w) => (path.dirname(path.dirname(w)) === cache && path.basename(w) === path.basename(ownHome) ? '<agent cache>' : w));
+    const cache = path.join(u.home, '.cache', 'tower-crane', 'tasks');
+    const writes = shared.allowWrite.filter((w) => path.dirname(path.dirname(w)) === cache);
+    assert.equal(writes.length, 1);
+    assert.equal(path.basename(writes[0]), 'T1');
     return shared;
   };
   isolated(h, 'research', 'claude');
