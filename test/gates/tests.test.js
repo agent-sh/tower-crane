@@ -218,8 +218,11 @@ test('a worktree add that fails after registering leaves no registration behind'
   const hooks = path.join(tmp, 'hooks');
   fs.mkdirSync(hooks, { recursive: true });
   fs.writeFileSync(path.join(hooks, 'post-checkout'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
-  git(hooked, 'config', 'core.hooksPath', hooks);
-  const r = await gate.run({ ...ctx(sha), root: hooked });
+  // The gate's git runs only hooks from the user's own config.
+  git(hooked, 'config', '--global', 'core.hooksPath', hooks);
+  let r;
+  try { r = await gate.run({ ...ctx(sha), root: hooked }); }
+  finally { git(hooked, 'config', '--global', '--unset', 'core.hooksPath'); }
   assert.equal(r.ok, false);
   assert.match(r.summary, /could not create a worktree/);
   assert.equal(worktrees(hooked), 1);

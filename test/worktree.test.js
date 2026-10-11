@@ -183,7 +183,8 @@ const r = cp.spawnSync('git-upload-pack', process.argv.slice(2), { stdio: 'inher
 process.exit(r.status === null ? 1 : r.status);
 `);
     const quote = (s) => `'${s.replace(/'/g, "'\\''")}'`;
-    h.git(['config', 'remote.origin.uploadpack', `${quote(process.execPath)} ${quote(uploadPack)}`]);
+    // The CLI's git takes upload-pack only from the user's own config.
+    h.git(['config', '--global', 'remote.origin.uploadpack', `${quote(process.execPath)} ${quote(uploadPack)}`]);
     const before = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8');
     const result = h.run(['worktree', 'T1', '--json']);
     if (recovered) {
@@ -262,7 +263,8 @@ try {
 }
 `);
   const quote = (s) => `'${s.replace(/'/g, "'\\''")}'`;
-  h.git(['config', 'remote.origin.uploadpack', `${quote(process.execPath)} ${quote(uploadPack)}`]);
+  // The CLI's git takes upload-pack only from the user's own config.
+  h.git(['config', '--global', 'remote.origin.uploadpack', `${quote(process.execPath)} ${quote(uploadPack)}`]);
   return attempts;
 }
 
@@ -357,7 +359,11 @@ fs.writeFileSync('orphan.txt', 'original Git child');
 fs.writeFileSync(${JSON.stringify(done)}, '');
 `);
   const quote = (value) => `'${value.replace(/'/g, "'\\''")}'`;
-  const script = path.join(h.repo, '.git', 'hooks', 'post-checkout');
+  // The CLI's git runs only hooks from the user's own config.
+  const hooks = path.join(h.base, 'hooks');
+  fs.mkdirSync(hooks);
+  fs.appendFileSync(h.env.GIT_CONFIG_GLOBAL, `[core]\n\thooksPath = ${JSON.stringify(hooks)}\n`);
+  const script = path.join(hooks, 'post-checkout');
   fs.writeFileSync(script, `#!/bin/sh\nexec ${quote(process.execPath)} ${quote(hook)}\n`, { mode: 0o755 });
   const first = h.runAsync(['worktree', 'T1'], { hooks: { HOOK_ADD_PID: cliPid } });
   try {

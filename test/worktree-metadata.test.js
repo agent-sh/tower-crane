@@ -97,7 +97,11 @@ while (!fs.existsSync(${JSON.stringify(addRelease)})) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
 }
 `);
-  fs.writeFileSync(path.join(h.repo, '.git', 'hooks', 'post-checkout'),
+  // CLI checkouts run hooks only from trusted config, including this synchronization hook.
+  const hooks = path.join(h.base, 'hooks');
+  fs.mkdirSync(hooks);
+  h.git(['config', '--global', 'core.hooksPath', hooks]);
+  fs.writeFileSync(path.join(hooks, 'post-checkout'),
     `#!/bin/sh\nexec ${shellQuote(process.execPath)} ${shellQuote(hook)}\n`, { mode: 0o755 });
   const gate = h.runAsync(['check', 'tests', 'T1']);
   const additions = [];

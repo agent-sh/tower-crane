@@ -1,0 +1,1 @@
+- Configure the worktree metadata race test's synchronization hook through its isolated global Git config so the test runs with repository hooks disabled.

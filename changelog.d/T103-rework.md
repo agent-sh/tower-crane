@@ -1,0 +1,1 @@
+- Neutralize repository Git proxies through `GIT_PROXY_COMMAND` and refuse git or gh when the config scan fails or exceeds its output buffer.

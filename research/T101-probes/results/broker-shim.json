@@ -50,9 +50,9 @@
   {
     "id": "B8",
     "surface": "broker",
-    "command": "broker.authorize(worker-T2-1 on T2, [\"hook\",\"stop\",\"--binding\",\"/home/avifenesh/.cache/t101-review/tmp/tower-crane-z38Ld8/repo/.tower-crane/homes/worker-T1-1/hook.json\"])",
+    "command": "broker.authorize(worker-T2-1 on T2, [\"hook\",\"stop\",\"--binding\",\"<tmp>/tower-crane-Rs6X6H/repo/.tower-crane/homes/worker-T1-1/hook.json\"])",
     "expected": "refused",
-    "observed": "refused: worker-T2-1 uses its own hook binding only, not /home/avifenesh/.cache/t101-review/tmp/tower-crane-z38Ld8/repo/.tower-crane/homes/worker-T1-1/hook.json",
+    "observed": "refused: worker-T2-1 uses its own hook binding only, not <tmp>/tower-crane-Rs6X6H/repo/.tower-crane/homes/worker-T1-1/hook.json",
     "verdict": "held"
   },
   {
@@ -68,7 +68,7 @@
     "surface": "broker",
     "command": "broker.authorize(worker-T2-1, submit T2 --sha 50b732a --state /elsewhere --agent worker-T2-1)",
     "expected": "allowed, with the job's --agent and --state and the request's dropped",
-    "observed": "allowed: submit --agent worker-T2-1 --state /home/avifenesh/.cache/t101-review/tmp/tower-crane-z38Ld8/repo/.tower-crane T2 --sha 50b732a15be40ccb2065cb2ba0e7b366d511b736",
+    "observed": "allowed: submit --agent worker-T2-1 --state <tmp>/tower-crane-Rs6X6H/repo/.tower-crane T2 --sha 50b732a15be40ccb2065cb2ba0e7b366d511b736",
     "verdict": "held"
   },
   {
@@ -84,7 +84,7 @@
     "surface": "broker/reactions",
     "command": "broker.authorize(worker-T2-1 on T2, msg --to worker-T1-1 \"note from T2\"), no --task",
     "expected": "refused: a worker reports to the orchestrator, not to another task's agent",
-    "observed": "allowed: msg --agent worker-T2-1 --state /home/avifenesh/.cache/t101-review/tmp/tower-crane-z38Ld8/repo/.tower-crane --to worker-T1-1 note from T2",
+    "observed": "allowed: msg --agent worker-T2-1 --state <tmp>/tower-crane-Rs6X6H/repo/.tower-crane --to worker-T1-1 note from T2",
     "verdict": "CONFIRMED"
   },
   {
@@ -172,7 +172,7 @@
     "surface": "sandbox",
     "command": "git config core.fsmonitor <script> in the repository's shared .git/config (the worker sandbox may write it), then the orchestrator runs tower-crane worktree T3",
     "expected": "the orchestrator's git ignores repository-supplied commands",
-    "observed": "exit 0; /home/avifenesh/.cache/t101-review/tmp/tower-crane-z38Ld8/repo-worktrees/T3-three; marker written: 2 run(s) from 749 /home/avifenesh/.cache/t101-review/tmp/tower-crane-z38Ld8/repo-worktrees/T3-three",
-    "verdict": "CONFIRMED"
+    "observed": "exit 0; <tmp>/tower-crane-Rs6X6H/repo-worktrees/T3-three; marker absent",
+    "verdict": "held"
   }
 ]
