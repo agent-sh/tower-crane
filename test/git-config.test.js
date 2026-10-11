@@ -148,3 +148,37 @@ test('an incomplete config scan refuses the CLI command before a hidden driver r
   assert.equal(fs.existsSync(marker), false);
   assert.equal(fs.existsSync(path.join(h.base, 'repo-worktrees', 'T1-oversized-config')), false);
 });
+
+// The scan runs in the source checkout, where these conditions do not match;
+// git reads them in the worktrees it creates for the task and the gates.
+test('conditional includes cannot add a driver the config scan misses', (t) => {
+  const h = makeRepo(t);
+  h.init();
+  const sha = gateFixture(h);
+  h.ok(['project', 'set', '--tests-cmd', 'node test/value.test.js', '--clean-cmd', h.env.TOWER_CRANE_CLEAN_CMD]);
+  for (const title of ['Change', 'Other', 'Tilde']) h.ok(['task', 'add', '--title', title, '--acceptance', 'works']);
+  h.ok(['claim', 'T1', '--agent', 'worker']);
+  h.ok(['submit', 'T1', '--sha', sha, '--agent', 'worker']);
+  h.git(['switch', '-q', 'main']);
+  const marker = path.join(h.base, 'planted');
+  const script = path.join(h.base, 'planted.js');
+  fs.writeFileSync(script, `require('node:fs').appendFileSync(${JSON.stringify(marker)}, process.argv[2] + '\\n');\nprocess.stdin.pipe(process.stdout);\n`);
+  const gitDir = path.join(h.repo, '.git');
+  for (const [name, condition] of [['gitdir', 'gitdir:**/worktrees/**'], ['branch', 'onbranch:tower-crane/**']]) {
+    const file = path.join(gitDir, `${name}.inc`);
+    fs.writeFileSync(file, `[filter "${name}"]\n\tsmudge = ${shellQuote(process.execPath)} ${shellQuote(script)} ${name}\n`);
+    h.git(['config', `includeIf.${condition}.path`, `${name}.inc`]);
+  }
+  fs.writeFileSync(path.join(gitDir, 'info', 'attributes'), '*.js filter=gitdir\n*.json filter=branch\nvalue.js filter=branch\n');
+  const ran = () => (fs.existsSync(marker) ? fs.readFileSync(marker, 'utf8').trim().split('\n') : []);
+
+  h.ok(['worktree', 'T2', '--agent', 'orchestrator']);
+  for (const type of ['tests', 'clean']) {
+    h.json(['check', type, 'T1', '--agent', 'checker'], { env: { TOWER_CRANE_CLEAN_CMD: '' } });
+  }
+  assert.deepEqual(ran(), []);
+
+  h.git(['config', 'includeIf.onbranch:tower-crane/**.path', '~nobody-here/branch.inc']);
+  assert.match(h.run(['worktree', 'T3', '--agent', 'orchestrator']).stderr, /cannot read git configuration safely/);
+  assert.deepEqual(ran(), []);
+});

@@ -1,0 +1,1 @@
+- Git the CLI and gates start no longer runs a filter, diff or merge driver from a repository config file included through `includeIf`, whatever its condition. A `gitdir:` or `onbranch:` include that matched only in a task or gate worktree used to pass the config scan unseen.
