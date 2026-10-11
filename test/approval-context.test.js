@@ -141,7 +141,7 @@ test('owner cancellation retires approval after the owner blocker is cleared', t
 
 test('ordinary owner-required writes still retire approvals without supplemental metadata', t => {
   const h = setup(t);
-  h.ok(['ask', '--question', 'Which implementation?', '--option', 'a', '--option', 'b']);
+  h.ok(['ask', '--kind', 'technical', '--question', 'Which implementation?', '--option', 'a', '--option', 'b']);
   const args = ['decision', 'delegate', 'D1', '--answerers', '["named-worker"]'];
   assert.match(h.run(args, as('orchestrator')).stderr, /opened D2/);
   h.ok(['answer', 'D2', '--choice', 'approve']);

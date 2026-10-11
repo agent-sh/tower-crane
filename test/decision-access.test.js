@@ -14,7 +14,7 @@ test('only the owner or a named agent can answer, and the answer event records i
   const h = makeRepo(t);
   h.init();
   h.ok(['task', 'add', '--title', 'Named answerer task', '--acceptance', 'the named answerer can unblock it']);
-  h.ok(['ask', '--question', 'Which store?', '--option', 'redis', '--option', 'postgres', '--agent', 'worker-ask']);
+  h.ok(['ask', '--kind', 'technical', '--question', 'Which store?', '--option', 'redis', '--option', 'postgres', '--agent', 'worker-ask']);
 
   const before = events(h);
   const denied = h.run(['answer', 'D1', '--choice', 'redis', '--agent', 'worker-other']);
@@ -64,7 +64,7 @@ test('only the owner or a named agent can answer, and the answer event records i
 test('the orchestrator answers technical decisions unless project policy turns that off', (t) => {
   const h = makeRepo(t);
   h.init();
-  h.ok(['ask', '--question', 'Which store?', '--option', 'redis', '--option', 'postgres']);
+  h.ok(['ask', '--kind', 'technical', '--question', 'Which store?', '--option', 'redis', '--option', 'postgres']);
 
   h.ok(['project', 'set', '--decision-delegation', '{"orchestrator_technical":false}', '--agent', 'owner']);
   const off = h.run(['answer', 'D1', '--choice', 'redis', '--agent', 'orchestrator']);
@@ -87,7 +87,7 @@ test('the orchestrator answers technical decisions unless project policy turns t
 test('owner commands reject another process identity with or without a task binding', (t) => {
   const h = makeRepo(t);
   h.init();
-  h.ok(['ask', '--question', 'Which store?', '--option', 'redis', '--option', 'postgres']);
+  h.ok(['ask', '--kind', 'technical', '--question', 'Which store?', '--option', 'redis', '--option', 'postgres']);
 
   const shell = { env: { TOWER_CRANE_AGENT: 'worker-T1-1' } };
   const originalProject = h.readState('project.json');
@@ -109,7 +109,7 @@ test('owner commands reject another process identity with or without a task bind
   const decision = h.readState('decisions.json').decisions[0];
   assert.deepEqual([decision.answered_by, decision.answer_rule], ['owner', 'owner']);
 
-  h.ok(['ask', '--question', 'Which cache?', '--option', 'memory', '--option', 'disk']);
+  h.ok(['ask', '--kind', 'technical', '--question', 'Which cache?', '--option', 'memory', '--option', 'disk']);
   const before = events(h);
   const task = { env: { TOWER_CRANE_AGENT: 'worker-T1-1', TOWER_CRANE_TASK: 'T1' } };
   const refused = h.run(['answer', 'D2', '--choice', 'memory', '--agent', 'owner'], task);
@@ -123,7 +123,7 @@ test('a worker cannot answer under a forged orchestrator identity', (t) => {
   const h = makeRepo(t);
   h.init();
   h.ok(['task', 'add', '--title', 'Answer a technical decision', '--acceptance', 'answer is authorized']);
-  h.ok(['ask', '--question', 'Which store?', '--option', 'redis', '--option', 'postgres']);
+  h.ok(['ask', '--kind', 'technical', '--question', 'Which store?', '--option', 'redis', '--option', 'postgres']);
   h.ok(['project', 'set', '--decision-delegation', '{"orchestrator_technical":true}', '--agent', 'owner']);
   h.ok(['decision', 'delegate', 'D1', '--technical', 'true', '--agent', 'owner']);
 
@@ -141,7 +141,7 @@ test('a worker cannot answer under a forged orchestrator identity', (t) => {
 test('a worker cannot delegate by passing the owner identity', (t) => {
   const h = makeRepo(t);
   h.init();
-  h.ok(['ask', '--question', 'Which store?', '--option', 'redis', '--option', 'postgres']);
+  h.ok(['ask', '--kind', 'technical', '--question', 'Which store?', '--option', 'redis', '--option', 'postgres']);
 
   const before = events(h);
   const forged = h.run(
@@ -157,7 +157,7 @@ test('a worker cannot delegate by passing the owner identity', (t) => {
 test('the owner can always answer explicitly, and a false delegation policy keeps technical decisions with the owner', (t) => {
   const h = makeRepo(t);
   h.init();
-  h.ok(['ask', '--question', 'Which store?', '--option', 'redis', '--option', 'postgres']);
+  h.ok(['ask', '--kind', 'technical', '--question', 'Which store?', '--option', 'redis', '--option', 'postgres']);
   h.ok(['project', 'set', '--decision-delegation', '{"orchestrator_technical":false}', '--agent', 'owner']);
   h.ok(['decision', 'delegate', 'D1', '--technical', 'true', '--agent', 'owner']);
 
@@ -190,7 +190,7 @@ test('technical delegation recognizes generated orchestrators by their recorded 
   assert.match(spawned.orchestrator, /^orchestrator-T1-\d+$/);
   assert.equal(events(h).findLast((event) => event.cmd === 'spawn'
     && event.detail.agent === spawned.orchestrator).detail.role, 'orchestrator');
-  h.ok(['ask', '--question', 'Which store?', '--option', 'redis', '--option', 'postgres']);
+  h.ok(['ask', '--kind', 'technical', '--question', 'Which store?', '--option', 'redis', '--option', 'postgres']);
   h.ok(['decision', 'delegate', 'D1', '--answerers', JSON.stringify([spawned.orchestrator]), '--agent', 'owner']);
   const beforeNamed = events(h);
   const namedOnly = h.run(['answer', 'D1', '--choice', 'redis', '--agent', spawned.orchestrator]);
@@ -235,7 +235,7 @@ test('a terminal owner question is technical unless it names an owner-required s
   h.init();
   const env = Object.fromEntries(Object.entries(h.env).filter(([key]) => !key.startsWith('TOWER_CRANE_')));
   const asked = runPty(
-    ['ask', '--question', 'Which store?', '--option', 'redis', '--option', 'postgres', '--state', h.state],
+    ['ask', '--kind', 'technical', '--question', 'Which store?', '--option', 'redis', '--option', 'postgres', '--state', h.state],
     { cwd: h.repo, env },
   );
   assert.equal(asked.code, 0, asked.stderr);
@@ -250,7 +250,7 @@ test('a worker ask is answerable by the orchestrator; an owner-required escalati
   h.ok(['project', 'set', '--decision-delegation', '{"orchestrator_technical":true}', '--agent', 'owner']);
   const worker = { env: { TOWER_CRANE_AGENT: 'worker-T1-1', TOWER_CRANE_TASK: 'T1' } };
 
-  h.ok(['ask', '--question', 'Which store?', '--option', 'redis', '--option', 'postgres', '--blocks', 'T1'], worker);
+  h.ok(['ask', '--kind', 'technical', '--question', 'Which store?', '--option', 'redis', '--option', 'postgres', '--blocks', 'T1'], worker);
   const technical = h.readState('decisions.json').decisions[0];
   assert.deepEqual([technical.asked_by, technical.technical], ['worker-T1-1', true]);
   assert.equal(technical.escalation, undefined, 'a worker question with no owner-required setting does not escalate');
@@ -258,7 +258,7 @@ test('a worker ask is answerable by the orchestrator; an owner-required escalati
   const answered = h.readState('decisions.json').decisions[0];
   assert.deepEqual([answered.answered_by, answered.answer_rule], ['orchestrator', 'owner-technical-delegation']);
 
-  h.ok(['ask', '--question', 'Raise the budget?', '--option', 'yes', '--option', 'no', '--setting', 'budget.raise', '--blocks', 'T1'], worker);
+  h.ok(['ask', '--kind', 'technical', '--question', 'Raise the budget?', '--option', 'yes', '--option', 'no', '--setting', 'budget.raise', '--blocks', 'T1'], worker);
   const escalated = h.readState('decisions.json').decisions[1];
   assert.equal(escalated.technical, false);
   assert.deepEqual(escalated.escalation, { settings: ['budget.raise'], change: null });
@@ -279,7 +279,7 @@ test('without the setting, the orchestrator answers a worker technical decision;
   assert.equal(h.readState('project.json').decision_delegation, undefined);
   const worker = { env: { TOWER_CRANE_AGENT: 'worker-T1-1', TOWER_CRANE_TASK: 'T1' } };
 
-  h.ok(['ask', '--question', 'Which store?', '--option', 'redis', '--option', 'postgres', '--blocks', 'T1'], worker);
+  h.ok(['ask', '--kind', 'technical', '--question', 'Which store?', '--option', 'redis', '--option', 'postgres', '--blocks', 'T1'], worker);
   const technical = h.readState('decisions.json').decisions[0];
   assert.deepEqual([technical.asked_by, technical.technical, technical.escalation, technical.owner_required], [
     'worker-T1-1', true, undefined, null,
@@ -288,8 +288,8 @@ test('without the setting, the orchestrator answers a worker technical decision;
   const answered = h.readState('decisions.json').decisions[0];
   assert.deepEqual([answered.answered_by, answered.answer_rule], ['orchestrator', 'owner-technical-delegation']);
 
-  h.ok(['ask', '--question', 'Rent a GPU box?', '--option', 'yes', '--option', 'no', '--owner-required', 'spend needs the owner'], worker);
-  h.ok(['ask', '--question', 'Raise the budget?', '--option', 'yes', '--option', 'no', '--setting', 'budget.raise'], worker);
+  h.ok(['ask', '--kind', 'technical', '--question', 'Rent a GPU box?', '--option', 'yes', '--option', 'no', '--owner-required', 'spend needs the owner'], worker);
+  h.ok(['ask', '--kind', 'technical', '--question', 'Raise the budget?', '--option', 'yes', '--option', 'no', '--setting', 'budget.raise'], worker);
   const decisions = h.readState('decisions.json').decisions;
   assert.deepEqual([decisions[1].technical, decisions[1].owner_required], [false, 'spend needs the owner']);
   assert.deepEqual([decisions[2].technical, decisions[2].escalation], [false, { settings: ['budget.raise'], change: null }]);
@@ -303,65 +303,104 @@ test('without the setting, the orchestrator answers a worker technical decision;
   assert.deepEqual(events(h), before, 'refused owner-only answers write no event');
 
   h.ok(['project', 'set', '--decision-delegation', '{"orchestrator_technical":false}', '--agent', 'owner']);
-  h.ok(['ask', '--question', 'Cache in memory or disk?', '--option', 'memory', '--option', 'disk'], worker);
+  h.ok(['ask', '--kind', 'technical', '--question', 'Cache in memory or disk?', '--option', 'memory', '--option', 'disk'], worker);
   const kept = h.run(['answer', 'D4', '--choice', 'memory', '--agent', 'orchestrator']);
   assert.equal(kept.code, 1, kept.stderr);
   assert.match(kept.stderr, /only the owner/);
 });
 
-test('spend and credential questions stay with the owner without a marker', (t) => {
+test('spend and credential questions stay with the owner without a marker, whatever their wording', (t) => {
   const h = makeRepo(t);
   h.init();
   h.ok(['task', 'add', '--title', 'Rent a GPU box', '--acceptance', 'the owner decides spend and credentials']);
   const worker = { env: { TOWER_CRANE_AGENT: 'worker-T1-1', TOWER_CRANE_TASK: 'T1' } };
 
-  h.ok(['ask', '--question', 'May we spend $200 to rent a GPU?', '--option', 'yes', '--option', 'no', '--blocks', 'T1'], worker);
-  h.ok(['ask', '--question', 'Will the owner provide the production API credentials?', '--option', 'yes', '--option', 'no', '--blocks', 'T1'], worker);
+  h.ok(['ask', '--kind', 'spend', '--question', 'May we allocate 200 EUR for an H100 instance?', '--option', 'yes', '--option', 'no', '--blocks', 'T1'], worker);
+  h.ok(['ask', '--kind', 'credential', '--question', 'Can you provide NPM_TOKEN for the release?', '--option', 'yes', '--option', 'no', '--blocks', 'T1'], worker);
   const [spend, credentials] = h.readState('decisions.json').decisions;
-  assert.deepEqual([spend.technical, spend.owner_required], [false, 'asks for spend']);
-  assert.deepEqual([credentials.technical, credentials.owner_required], [false, 'asks for credentials']);
+  assert.deepEqual([spend.kind, spend.technical, spend.owner_required], ['spend', false, null]);
+  assert.deepEqual([credentials.kind, credentials.technical, credentials.owner_required], ['credential', false, null]);
 
   const before = events(h);
-  for (const [id, reason] of [['D1', 'asks for spend'], ['D2', 'asks for credentials']]) {
+  for (const [id, kind] of [['D1', 'spend'], ['D2', 'credential']]) {
     const refused = h.run(['answer', id, '--choice', 'yes', '--agent', 'orchestrator']);
     assert.equal(refused.code, 1, refused.stderr);
-    assert.match(refused.stderr, new RegExp(`${id} is owner-required \\(${reason}\\); only the owner answers it`));
+    assert.match(refused.stderr, new RegExp(`${id} is a ${kind} decision; only the owner answers it`));
   }
   assert.deepEqual(events(h), before, 'refused owner-only answers write no event');
 
-  // A decision opened before topics were stored has no owner_required key, so its text still keeps it with the owner.
-  h.ok(['ask', '--question', 'Which store?', '--option', 'redis', '--option', 'postgres', '--blocks', 'T1'], worker);
-  const legacy = h.readState('decisions.json');
-  legacy.decisions[2].question = 'Pay for the Redis plan?';
-  delete legacy.decisions[2].owner_required;
-  h.writeState('decisions.json', legacy);
-  const legacyRefused = h.run(['answer', 'D3', '--choice', 'redis', '--agent', 'orchestrator']);
-  assert.equal(legacyRefused.code, 1, legacyRefused.stderr);
-  assert.match(legacyRefused.stderr, /D3 is owner-required \(asks for spend\); only the owner answers it/);
+  const named = h.run(['decision', 'delegate', 'D1', '--answerers', '["worker-T1-1"]', '--agent', 'owner']);
+  assert.equal(named.code, 1, named.stderr);
+  assert.match(named.stderr, /D1 is a spend decision; only the owner answers it, so it cannot name answerers/);
 
   h.ok(['answer', 'D1', '--choice', 'yes', '--agent', 'owner']);
   assert.equal(h.readState('decisions.json').decisions[0].answer_rule, 'owner');
 });
 
-test('the owner lifts a text or asker reason with --technical true, names no answerers on an owner-only decision, and never lifts an escalation', (t) => {
+test('technical questions that mention a spend or credential topic stay with the orchestrator', (t) => {
   const h = makeRepo(t);
   h.init();
-  h.ok(['task', 'add', '--title', 'Order the retries', '--acceptance', 'the owner can clear a false match']);
+  h.ok(['task', 'add', '--title', 'Wire the cache', '--acceptance', 'the orchestrator answers the implementation questions']);
   const worker = { env: { TOWER_CRANE_AGENT: 'worker-T1-1', TOWER_CRANE_TASK: 'T1' } };
-  h.ok(['ask', '--question', 'Pay attention to the retry order?', '--option', 'before', '--option', 'after', '--blocks', 'T1'], worker);
-  h.ok(['ask', '--question', 'Rent a GPU box?', '--option', 'yes', '--option', 'no', '--owner-required', 'spend needs the owner', '--blocks', 'T1'], worker);
-  h.ok(['ask', '--question', 'Raise the budget?', '--option', 'yes', '--option', 'no', '--setting', 'budget.raise', '--blocks', 'T1'], worker);
+
+  h.ok(['ask', '--kind', 'technical', '--question', 'Should we subscribe to Redis keyspace notifications?', '--option', 'yes', '--option', 'no', '--blocks', 'T1'], worker);
+  h.ok(['ask', '--kind', 'technical', '--question', 'Which secrets manager client should we use?', '--option', 'vault', '--option', 'sops', '--blocks', 'T1'], worker);
+  const decisions = h.readState('decisions.json').decisions;
+  assert.deepEqual(decisions.map((d) => [d.kind, d.technical, d.owner_required]), [
+    ['technical', true, null], ['technical', true, null],
+  ]);
+
+  h.ok(['answer', 'D1', '--choice', 'yes', '--agent', 'orchestrator']);
+  h.ok(['answer', 'D2', '--choice', 'vault', '--agent', 'orchestrator']);
+  assert.deepEqual(
+    h.readState('decisions.json').decisions.map((d) => d.answer_rule),
+    ['owner-technical-delegation', 'owner-technical-delegation'],
+  );
+});
+
+test('ask needs a kind from the list, and a setting question stays with the owner', (t) => {
+  const h = makeRepo(t);
+  h.init();
+  h.ok(['task', 'add', '--title', 'Pick a store', '--acceptance', 'the kind decides who answers']);
+  const worker = { env: { TOWER_CRANE_AGENT: 'worker-T1-1', TOWER_CRANE_TASK: 'T1' } };
+
+  const missing = h.run(['ask', '--question', 'Which store?', '--option', 'redis', '--option', 'postgres', '--blocks', 'T1'], worker);
+  assert.equal(missing.code, 2, missing.stderr);
+  assert.match(missing.stderr, /ask needs --kind technical, spend, credential, setting/);
+  const unknown = h.run(['ask', '--kind', 'irreversible', '--question', 'Delete the branch?', '--option', 'yes', '--option', 'no', '--blocks', 'T1'], worker);
+  assert.equal(unknown.code, 2, unknown.stderr);
+  assert.equal(h.readState('decisions.json').decisions.length, 0, 'a refused ask opens no decision');
+  const requested = h.run(['ask', '--setting', 'publish', '--kind', 'setting'], worker);
+  assert.equal(requested.code, 2, requested.stderr);
+  assert.match(requested.stderr, /ask --setting writes its own decision; drop --kind/);
+
+  h.ok(['ask', '--kind', 'setting', '--question', 'Should the budget go up?', '--option', 'yes', '--option', 'no', '--blocks', 'T1'], worker);
+  const decision = h.readState('decisions.json').decisions[0];
+  assert.deepEqual([decision.kind, decision.technical, decision.escalation], ['setting', false, undefined]);
+  const refused = h.run(['answer', 'D1', '--choice', 'yes', '--agent', 'orchestrator']);
+  assert.equal(refused.code, 1, refused.stderr);
+  assert.match(refused.stderr, /D1 is a setting decision; only the owner answers it/);
+});
+
+test('the owner lifts a spend kind or an asker reason with --technical true, names no answerers on an owner-only decision, and never lifts an escalation', (t) => {
+  const h = makeRepo(t);
+  h.init();
+  h.ok(['task', 'add', '--title', 'Order the workers', '--acceptance', 'the owner can lift a kind']);
+  const worker = { env: { TOWER_CRANE_AGENT: 'worker-T1-1', TOWER_CRANE_TASK: 'T1' } };
+  h.ok(['ask', '--kind', 'spend', '--question', 'Which paid tier should the worker use?', '--option', 'basic', '--option', 'pro', '--blocks', 'T1'], worker);
+  h.ok(['ask', '--kind', 'technical', '--question', 'Rent a GPU box?', '--option', 'yes', '--option', 'no', '--owner-required', 'spend needs the owner', '--blocks', 'T1'], worker);
+  h.ok(['ask', '--kind', 'technical', '--question', 'Raise the budget?', '--option', 'yes', '--option', 'no', '--setting', 'budget.raise', '--blocks', 'T1'], worker);
 
   const before = events(h);
   const named = h.run(['decision', 'delegate', 'D1', '--answerers', '["worker-T1-1"]', '--agent', 'owner']);
   assert.equal(named.code, 1, named.stderr);
-  assert.match(named.stderr, /D1 is owner-required \(asks for spend\); only the owner answers it, so it cannot name answerers/);
+  assert.match(named.stderr, /D1 is a spend decision; only the owner answers it, so it cannot name answerers/);
   assert.deepEqual(events(h), before, 'a refused delegation writes no event');
 
   h.ok(['decision', 'delegate', 'D1', '--technical', 'true', '--agent', 'owner']);
-  h.ok(['answer', 'D1', '--choice', 'before', '--agent', 'orchestrator']);
+  h.ok(['answer', 'D1', '--choice', 'basic', '--agent', 'orchestrator']);
   const lifted = h.readState('decisions.json').decisions[0];
-  assert.deepEqual([lifted.owner_required, lifted.answer_rule], [null, 'owner-technical-delegation']);
+  assert.deepEqual([lifted.kind, lifted.owner_required, lifted.answer_rule], ['spend', null, 'owner-technical-delegation']);
 
   const refused = h.run(['answer', 'D2', '--choice', 'yes', '--agent', 'orchestrator']);
   assert.equal(refused.code, 1, refused.stderr);
@@ -373,36 +412,21 @@ test('the owner lifts a text or asker reason with --technical true, names no ans
   assert.match(escalated.stderr, /D3 escalates budget\.raise to the owner/);
 });
 
-test('credential and spend asks stay with the owner however they are phrased, options included', (t) => {
+test('a decision opened before kinds keeps its stored technical flag', (t) => {
   const h = makeRepo(t);
   h.init();
-  h.ok(['task', 'add', '--title', 'Wire the proxy', '--acceptance', 'the proxy runs with the owner decision']);
+  h.ok(['task', 'add', '--title', 'Choose a store', '--acceptance', 'answer is authorized']);
   const worker = { env: { TOWER_CRANE_AGENT: 'worker-T1-1', TOWER_CRANE_TASK: 'T1' } };
-  const asks = [
-    ['Which HF_TOKEN should the worker use?', ['yes', 'no'], 'asks for credentials'],
-    ['Use MY_API_KEY for the proxy?', ['yes', 'no'], 'asks for credentials'],
-    ['Subscribe to the paid plan?', ['yes', 'no'], 'asks for spend'],
-    ['Where should the worker run?', ['rent an H100', 'use the local GPU'], 'asks for spend'],
-    ['Which cache key layout should the worker use?', ['prefix', 'hash'], null],
-  ];
-  for (const [question, options] of asks) {
-    h.ok(['ask', '--question', question, ...options.flatMap((o) => ['--option', o]), '--blocks', 'T1'], worker);
-  }
-  const decisions = h.readState('decisions.json').decisions;
-  assert.deepEqual(
-    decisions.map((d) => [d.technical, d.owner_required ?? null]),
-    asks.map(([, , reason]) => [reason === null, reason]),
-  );
+  h.ok(['ask', '--kind', 'technical', '--question', 'Which store?', '--option', 'redis', '--option', 'postgres', '--blocks', 'T1'], worker);
+  h.ok(['ask', '--kind', 'technical', '--question', 'Which cache?', '--option', 'memory', '--option', 'disk', '--blocks', 'T1'], worker);
+  const legacy = h.readState('decisions.json');
+  for (const d of legacy.decisions) delete d.kind;
+  legacy.decisions[1].technical = false;
+  h.writeState('decisions.json', legacy);
 
-  const before = events(h);
-  for (const [i, [, options, reason]] of asks.entries()) {
-    if (!reason) continue;
-    const refused = h.run(['answer', `D${i + 1}`, '--choice', options[0], '--agent', 'orchestrator']);
-    assert.equal(refused.code, 1, refused.stderr);
-    assert.match(refused.stderr, new RegExp(`D${i + 1} is owner-required \\(${reason}\\); only the owner answers it`));
-  }
-  assert.deepEqual(events(h), before, 'refused owner-only answers write no event');
-
-  h.ok(['answer', 'D5', '--choice', 'prefix', '--agent', 'orchestrator']);
-  assert.equal(h.readState('decisions.json').decisions[4].answer_rule, 'owner-technical-delegation');
+  h.ok(['answer', 'D1', '--choice', 'redis', '--agent', 'orchestrator']);
+  assert.equal(h.readState('decisions.json').decisions[0].answer_rule, 'owner-technical-delegation');
+  const refused = h.run(['answer', 'D2', '--choice', 'memory', '--agent', 'orchestrator']);
+  assert.equal(refused.code, 1, refused.stderr);
+  assert.match(refused.stderr, /only the owner/);
 });

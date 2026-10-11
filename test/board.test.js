@@ -22,7 +22,7 @@ function populate(h) {
   h.ok(['task', 'add', '--title', 'Pick a dashboard', '--acceptance', 'c', '--needs-owner', 'grant dashboard access']);
   h.ok(['task', 'add', '--title', 'Metrics', '--acceptance', 'd']);
   h.ok(['task', 'add', '--title', 'Docs', '--acceptance', 'e', '--kind', 'docs']);
-  h.ok(['ask', '--question', 'Which store?', '--option', 'redis', '--option', 'postgres', '--recommend', 'postgres', '--why', 'keys must survive a flush', '--blocks', 'T4']);
+  h.ok(['ask', '--kind', 'technical', '--question', 'Which store?', '--option', 'redis', '--option', 'postgres', '--recommend', 'postgres', '--why', 'keys must survive a flush', '--blocks', 'T4']);
   h.ok(['claim', 'T1', '--agent', 'w-1']);
   h.ok(['msg', '--to', 'orchestrator', '--task', 'T1', 'tests green, waiting on CI', '--agent', 'w-1']);
   h.ok(['claim', 'T5', '--agent', 'w-2']);
@@ -77,7 +77,7 @@ test('blocker rows and repeated mentions have distinct identities without breaki
   h.init();
   h.ok(['task', 'add', '--title', 'Rollout', '--acceptance', 'verified']);
   h.ok(['task', 'add', '--title', 'Approve rollout', '--acceptance', 'verified', '--dep', 'T1', '--needs-owner', 'approve T1 rollout']);
-  h.ok(['ask', '--question', 'Check T1 then T1?', '--option', 'yes', '--option', 'no', '--blocks', 'T2']);
+  h.ok(['ask', '--kind', 'technical', '--question', 'Check T1 then T1?', '--option', 'yes', '--option', 'no', '--blocks', 'T2']);
   const identities = (page) => {
     assert.doesNotThrow(() => preserve(page, { strict: true }), 'valid markup passes strict identity checking');
     const blockers = page.match(/<article id="T2"[\s\S]*?<ul class="blockers box">([\s\S]*?)<\/ul>/)[1];
@@ -180,7 +180,7 @@ test('the snapshot names no network resource and carries no token or owner forms
 test('the board escapes every text the state holds', (t) => {
   const h = populated(t);
   const sha = h.git(['rev-parse', 'HEAD']).trim();
-  h.ok(['ask', '--question', 'Pick <script>alert(1)</script>?', '--option', '<b>a</b>', '--option', 'b', '--why', 'why <i>', '--blocks', 'T2']);
+  h.ok(['ask', '--kind', 'technical', '--question', 'Pick <script>alert(1)</script>?', '--option', '<b>a</b>', '--option', 'b', '--why', 'why <i>', '--blocks', 'T2']);
   h.ok(['msg', '--to', 'owner', '--task', 'T1', 'look <img src=x onerror=alert(1)>', '--agent', 'w-1']);
   h.ok(['evidence', 'T5', '--type', 'note', '--ok', '--sha', sha, '--summary', 'note <svg onload=alert(1)>', '--ref', 'https://example.com/x"onmouseover="alert(1)', '--agent', 'rev-2']);
   const page = fs.readFileSync(path.join(h.state, 'sketch.html'), 'utf8');
@@ -419,7 +419,7 @@ test('in a browser, a change elsewhere updates the board in place and waits whil
     // Typed text holds its column: the owner's draft is never replaced.
     await b.inPage(`(() => { const d = document.querySelector('.col-need article[data-key="D1"] > details.more'); d.open = true; const ta = d.querySelector('textarea'); ta.focus(); })()`);
     await b.type('my draft');
-    h.ok(['ask', '--question', 'Ship on Friday?', '--option', 'yes', '--option', 'no']);
+    h.ok(['ask', '--kind', 'technical', '--question', 'Ship on Friday?', '--option', 'yes', '--option', 'no']);
     await b.restored(`document.querySelector('[data-notice]').classList.contains('on')`, 'the waiting notice');
     assert.equal(await b.inPage(`document.querySelector('.col-need textarea').value`), 'my draft');
     await b.restored(`document.querySelector('.col-since').textContent.includes('Ship on Friday?')`, 'the other columns to update');
@@ -849,7 +849,7 @@ test('desktop columns keep headings visible, reach the last items and keep their
   h.init(['--workers', '12']);
   populate(h);
   for (let i = 0; i < 8; i++) {
-    h.ok(['ask', '--question', `Owner decision ${i}`, '--option', 'yes', '--option', 'no']);
+    h.ok(['ask', '--kind', 'technical', '--question', `Owner decision ${i}`, '--option', 'yes', '--option', 'no']);
     const id = h.ok(['task', 'add', '--title', `Worker task ${i}`, '--acceptance', 'verified']).match(/T\d+/)[0];
     h.ok(['claim', id, '--agent', `worker-${i}`]);
     h.ok(['msg', '--task', id, '--to', 'orchestrator', 'checking the retry contract and integration paths', '--agent', `worker-${i}`]);
@@ -917,7 +917,7 @@ test('task sheets contain keyboard focus, restore the invoking link and keep mod
     await b.until(`!document.querySelector('.sheet.open')`, 'sheet close');
     assert.equal(await b.inPage(`document.activeElement === document.querySelector('.col-work [href="#T1"]') && !document.querySelector('main').inert && !document.querySelector('.topbar').inert`), true, 'focus returns to the same invoking card, even when refreshed');
 
-    h.ok(['ask', '--question', 'Another decision for Metrics?', '--option', 'yes', '--option', 'no', '--blocks', 'T4']);
+    h.ok(['ask', '--kind', 'technical', '--question', 'Another decision for Metrics?', '--option', 'yes', '--option', 'no', '--blocks', 'T4']);
     await b.restored(`document.querySelector('.col-need [data-key="D2"]')`, 'the second decision');
     await b.inPage(`(() => { const a = document.querySelector('.col-need [data-key="D2"] [href="#T4"]'); a.focus(); a.click(); })()`);
     await b.until(`document.querySelector('#T4').classList.contains('open')`, 'the Metrics sheet');
