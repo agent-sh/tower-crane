@@ -70,6 +70,8 @@ test('board controls cover the authority table and use the CLI authority and aud
   const before = audits(h).length;
   result = await post(request('project set', { 'merge-admin': 'true' }));
   assert.equal(result.data.decision, 'D1');
+  assert.equal(decisions(h)[0].question, 'Confirm your change to merge.admin: {"merge-admin":"true"}');
+  assert.match(decisions(h)[0].why, /approve makes this change once/);
   assert.equal(h.readState('project.json').merge?.admin, undefined);
   assert.equal(audits(h).length, before);
   result = await post({ decision: 'D1', choice: 'approve' }, 'api/controls/answer');
