@@ -1,0 +1,1 @@
+- Model selection lint accepts the Claude provider module filename while still rejecting model IDs and profiles. Bedrock fixtures use fictional IDs, and the live reviewer cache probe requires an explicit model. Reviewer pricing respects standalone Codex profiles that inherit their model from the base config.
