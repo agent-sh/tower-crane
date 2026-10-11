@@ -13,7 +13,9 @@ const supervision = { retries: 2, backoff_ms: 10, max_backoff_ms: 20, stall_ms: 
 const owner = (h) => events(h).filter((e) => e.cmd === 'msg' && e.detail.to === 'owner');
 const health = (h, source) => events(h).filter((e) => e.cmd === 'harness health' && (!source || e.detail.source === source));
 
-// The claude login check is a real command on PATH. It reports the login flag file's presence.
+// The login checks are real commands on PATH. Like the real CLIs, the status
+// commands report stored credentials as logged in, and a request passes only
+// once the login flag file exists. On Windows they are placeholders that cannot run.
 function setup(t, { tier = 'easy', tasks = ['T1'], fallbacks = [] } = {}) {
   const h = makeTaskRepo(t, tasks.map((id) => ({
     args: ['--title', `Task ${id}`, '--tier', tier, '--kind', 'code', '--acceptance', 'a login failure is not a task attempt'],
@@ -22,11 +24,14 @@ function setup(t, { tier = 'easy', tasks = ['T1'], fallbacks = [] } = {}) {
   const bin = path.join(h.base, 'bin');
   const exe = (name) => name + (process.platform === 'win32' ? '.exe' : '');
   fs.mkdirSync(bin);
-  for (const harness of ['codex', 'agy', 'gh']) fs.writeFileSync(path.join(bin, exe(harness)), '', { mode: 0o755 });
+  for (const harness of ['agy', 'opencode', 'pi', 'gh']) fs.writeFileSync(path.join(bin, exe(harness)), '', { mode: 0o755 });
   h.loginFlag = path.join(h.base, 'relogged');
-  // The login check runs this script; on Windows the stub is only a placeholder that cannot run.
+  const logged = 'require(\'node:fs\').existsSync(process.env.TOWER_CRANE_TEST_LOGIN_FLAG)';
+  const expired = 'Failed to authenticate: OAuth session expired and could not be refreshed';
   fs.writeFileSync(path.join(bin, exe('claude')), process.platform === 'win32' ? ''
-    : `#!${process.execPath}\nconsole.log(JSON.stringify({ loggedIn: require('node:fs').existsSync(process.env.TOWER_CRANE_TEST_LOGIN_FLAG) }));\n`, { mode: 0o755 });
+    : `#!${process.execPath}\nconst ok = ${logged};\nif (process.argv[2] === 'auth') { console.log(JSON.stringify({ loggedIn: true })); process.exit(0); }\nconsole.log(JSON.stringify(ok ? { type: 'result', subtype: 'success', is_error: false, result: 'OK' }\n  : { type: 'result', subtype: 'error', is_error: true, result: '${expired}' }));\nprocess.exitCode = ok ? 0 : 1;\n`, { mode: 0o755 });
+  fs.writeFileSync(path.join(bin, exe('codex')), process.platform === 'win32' ? ''
+    : `#!${process.execPath}\nconst ok = ${logged};\nif (process.argv[2] === 'login') { console.log('Logged in using ChatGPT'); process.exit(0); }\nif (ok) console.log(JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1 } }));\nelse console.error('Failed to refresh token: Your access token could not be refreshed. Please log out and sign in again.');\nprocess.exitCode = ok ? 0 : 1;\n`, { mode: 0o755 });
   h.ok(['ladder', 'set', 'easy', '--harness', 'claude', '--model', 'first', '--clear', 'profile', '--clear', 'effort', '--supervision', JSON.stringify(supervision)]);
   h.fallbacks = (routes) => {
     fs.mkdirSync(path.dirname(h.userConfig), { recursive: true });
@@ -181,4 +186,58 @@ test('a harness without a login check takes one spawn per interval as its probe,
   assert.deepEqual(health(h).filter((e) => e.detail.harness === 'command').map((e) => [e.detail.status, e.detail.source]),
     [['unavailable', 'exit'], ['unavailable', 'probe'], ['unavailable', 'exit'], ['unavailable', 'probe'], ['available', 'spawn']]);
   assert.equal(owner(h).length, 2, 'clearing a pause raises no notice');
+});
+
+// Each harness records its own login failure in its own shape; each one pauses that harness.
+const expiredMessage = 'Failed to authenticate: OAuth session expired and could not be refreshed';
+const codexMessage = 'Failed to refresh token: Your access token could not be refreshed. Please log out and sign in again';
+const shapes = [
+  ['agy', 'auth', expiredMessage, 'sign in to agy again'],
+  ['opencode', 'auth', expiredMessage, 'sign in to opencode again'],
+  ['pi', 'auth', expiredMessage, 'sign in to pi again'],
+  ['agy', 'auth-stderr', expiredMessage, 'sign in to agy again'],
+  ['codex', 'auth-text', codexMessage, '`codex login`'],
+];
+for (const [harness, reason, message, again] of shapes) {
+  test(`${harness} login failure (${reason}) pauses ${harness} with one owner notice and no retry`, (t) => {
+    const h = setup(t, { tasks: ['T1', 'T2'] });
+    h.ok(['ladder', 'set', 'easy', '--harness', harness, '--model', 'first']);
+    h.spawnEnv.TOWER_CRANE_TEST_FALLBACK_REASON = reason;
+    h.spawnTask('T1');
+    assert.deepEqual(h.attempts().map((a) => [a.harness, a.retry]), [[harness, '0']]);
+    assert.deepEqual(health(h).map((e) => [e.detail.harness, e.detail.status, e.detail.source]), [[harness, 'unavailable', 'exit']]);
+    assert.equal(health(h)[0].detail.reason, message);
+    assert.equal(owner(h).length, 1);
+    assert.match(owner(h)[0].detail.text, new RegExp(`${harness} login failed.*${again}`));
+    // Pi exits zero after its failed turn, so the exit code alone would call this a success.
+    const phase = events(h).findLast((e) => e.cmd === 'spawn phase');
+    assert.equal(phase.detail.phase, 'blocked');
+    // The next task never reaches the paused harness, and no attempt is spent on it.
+    const next = h.run(['spawn', '--task', 'T2'], { env: h.spawnEnv });
+    assert.notEqual(next.code, 0);
+    assert.match(next.stderr, new RegExp(`${harness} is paused after a login failure`));
+    assert.equal(h.attempts().length, 1);
+    assert.equal(owner(h).length, 1);
+  });
+}
+
+test('a codex login failure pauses codex, and its login check clears the pause once the login works', { skip: process.platform === 'win32' && 'the login check stub is a POSIX script' }, (t) => {
+  const h = setup(t, { tasks: ['T1', 'T2'] });
+  h.ok(['ladder', 'set', 'easy', '--harness', 'codex', '--model', 'first']);
+  assert.notEqual(h.spawnTask('T1').code, 0);
+  assert.deepEqual(health(h).map((e) => [e.detail.harness, e.detail.status]), [['codex', 'unavailable']]);
+  assert.match(health(h)[0].detail.reason, /Failed to authenticate: OAuth session expired/);
+  // Due and still logged out: the codex check runs a real request, fails, and dispatch keeps refusing.
+  const stillOut = h.run(['spawn', '--task', 'T2'], { env: h.later(6) });
+  assert.notEqual(stillOut.code, 0);
+  assert.match(stillOut.stderr, /codex is paused/);
+  assert.deepEqual(health(h, 'probe').map((e) => e.detail.status), ['unavailable', 'unavailable']);
+  assert.equal(h.attempts().length, 1);
+  // Logged in again: the next check passes, clears the pause, and codex runs.
+  fs.writeFileSync(h.loginFlag, '');
+  const relogged = h.run(['spawn', '--task', 'T2', '--wait'], { env: h.later(12) });
+  assert.equal(relogged.code, 0, relogged.stderr);
+  assert.deepEqual(h.attempts().map((a) => [a.harness, a.model]), [['codex', 'first'], ['codex', 'first']]);
+  assert.deepEqual(health(h, 'probe').map((e) => e.detail.status), ['unavailable', 'unavailable', 'unavailable', 'available']);
+  assert.equal(owner(h).length, 1, 'clearing a pause raises no notice');
 });

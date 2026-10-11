@@ -4,6 +4,15 @@ const cp = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 
+// Each harness's own record for an expired login, in the shape its CLI prints.
+function authRecord(harness, message) {
+  if (harness === 'agy') return { status: 'ERROR', error: message };
+  if (harness === 'opencode') return { type: 'error', error: { name: 'APIError', data: { message } } };
+  if (harness === 'pi') return { type: 'message_end', message: { role: 'assistant', stopReason: 'error', errorMessage: message } };
+  if (harness === 'claude') return { type: 'result', is_error: true, result: message };
+  return { type: 'turn.failed', error: { message } };
+}
+
 if (path.resolve(process.argv[1] || '') !== __filename) {
   if (process.env.TOWER_CRANE_TEST_VERIFIED_AGY === '1') {
     const agentsFile = path.join(path.dirname(path.dirname(process.argv[1])), 'lib', 'agents.js');
@@ -15,7 +24,7 @@ if (path.resolve(process.argv[1] || '') !== __filename) {
   const spawn = cp.spawn;
   cp.spawn = function offlineHarness(file, args, options) {
     const harness = /[\\/]scripts[\\/]fallback(?:\.exe)?$/.test(file) ? 'command' : file;
-    if (['codex', 'claude', 'agy', 'command'].includes(harness) && process.env.TOWER_CRANE_TEST_FALLBACK_FILE) {
+    if (['codex', 'claude', 'agy', 'opencode', 'pi', 'command'].includes(harness) && process.env.TOWER_CRANE_TEST_FALLBACK_FILE) {
       return spawn.call(this, process.execPath, [__filename, harness, ...args], options);
     }
     return spawn.call(this, file, args, options);
@@ -94,15 +103,28 @@ if (path.resolve(process.argv[1] || '') !== __filename) {
       process.exit(0);
     }
     const type = process.env.TOWER_CRANE_TEST_FALLBACK_REASON;
-    const message = type === 'auth' ? 'Failed to authenticate: OAuth session expired and could not be refreshed'
+    const auth = type === 'auth' || type === 'auth-stderr';
+    const message = auth ? 'Failed to authenticate: OAuth session expired and could not be refreshed'
       : 'rate limit exceeded: The service is temporarily unavailable.';
-    if (harness === 'agy') console.error('HTTP 503 service unavailable');
+    if (harness === 'agy' && !auth) console.error('HTTP 503 service unavailable');
+    // A typed record on stderr is the case the supervisor must still read.
+    if (type === 'auth-stderr') {
+      console.error(JSON.stringify({ type: 'error', message }));
+      process.exit(1);
+    }
+    // Codex's own plain-text wording for an expired login, as its CLI printed it.
+    if (type === 'auth-text') {
+      console.error('Failed to refresh token: Your access token could not be refreshed. Please log out and sign in again.');
+      process.exit(1);
+    }
     console.log(JSON.stringify(type === 'quoted'
       ? { type: 'item.completed', item: { type: 'agent_message', text: message + ' Request refused by policy' } }
       : ['signal', 'permanent'].includes(type) ? { type: 'error', message: 'invalid configuration' }
-        : harness === 'claude' ? { type: 'result', is_error: true, result: message }
-          : { type: 'turn.failed', error: { message } }));
-    process.exit(type === 'permanent' ? 2 : type === 'signal' ? 75 : 1);
+        : auth ? authRecord(harness, message)
+          : harness === 'claude' ? { type: 'result', is_error: true, result: message }
+            : { type: 'turn.failed', error: { message } }));
+    // Pi records its failed turn and exits zero, as the real CLI does.
+    process.exit(type === 'permanent' ? 2 : type === 'signal' ? 75 : auth && harness === 'pi' ? 0 : 1);
   }
   if (process.env.TOWER_CRANE_TEST_FALLBACK_FINISH) {
     const timer = setInterval(() => {
