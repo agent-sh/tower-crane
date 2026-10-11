@@ -165,7 +165,19 @@ function noSecretsCopied(h) {
   for (const f of walk(h.state)) assert.ok(!fs.readFileSync(f, 'utf8').includes(SECRET), `${f} holds a copied credential`);
 }
 
+// An exited worker keeps its lease until the orchestrator releases it, so each dispatch releases the last one.
+function releaseExited(h) {
+  // Read the state directly: an unbound project refuses `task show` from the owner's identity.
+  const claim = h.readState('tasks.json').tasks[0].claim;
+  if (claim) h.ok(['release', 'T1', '--agent', claim.agent, '--reason', 'worker exited']);
+}
+
 function spawn(h, u, role, env = {}, opts = {}) {
+  releaseExited(h);
+  // A submitted task goes back for rework before its next worker is dispatched.
+  if (['easy', 'medium', 'hard', 'research'].includes(role) && h.readState('tasks.json').tasks[0].status === 'submitted') {
+    h.ok(['rework', 'T1', '--reason', 'dispatch the next worker']);
+  }
   if (role === 'review' && h.readState('tasks.json').tasks[0].status !== 'submitted') {
     h.ok(['task', 'update', 'T1', '--kind', 'docs']);
     h.ok(['claim', 'T1', '--agent', 'builder']);
@@ -384,6 +396,8 @@ test('research Claude gets native or explicit web MCP tools with worker file and
     const ownHome = path.dirname(report.home);
     assert.deepEqual(allowRead, [ownHome, path.join(h.state, 'brokers', path.basename(ownHome))]);
     assert.ok(shared.denyWrite.includes(h.state));
+    // A mask on a path the host lacks leaves a placeholder there, so only existing paths are masked.
+    for (const p of [...shared.denyRead, ...shared.denyWrite]) assert.ok(fs.existsSync(p), `${p} is masked but missing`);
     const cache = path.join(u.home, '.cache', 'tower-crane', 'tasks');
     const writes = shared.allowWrite.filter((w) => path.dirname(path.dirname(w)) === cache);
     assert.equal(writes.length, 1);
@@ -441,6 +455,7 @@ test('research Codex explicitly enables live search with worker file and git con
     assert.equal(rules[path.join(h.state, 'brokers')], 'none');
     assert.equal(rules[broker], 'write');
     assert.equal(rules[path.join(path.dirname(h.userConfig), 'owner')], 'none', 'no agent reads the owner key');
+    for (const [p, mode] of Object.entries(rules)) if (mode === 'none') assert.ok(fs.existsSync(p), `${p} is masked but missing`);
     const cache = Object.keys(rules).filter((k) => path.dirname(path.dirname(k)) === path.join(u.home, '.cache', 'tower-crane', 'tasks'));
     assert.deepEqual(cache.map((k) => [path.basename(k), rules[k]]), [['T1', 'write']]);
     delete rules[cache[0]];
@@ -456,6 +471,8 @@ test('research Codex explicitly enables live search with worker file and git con
 
 test('a spawned claude agent imports the user\'s global rules by path, loads none of the user settings hooks, MCP servers or rules, and reaches auth through a link', { skip: NO_STUBS }, (t) => {
   const { h, u, wt } = setup(t);
+  // Present on the host, so masked; ~/.aws is absent, so it is not.
+  fs.mkdirSync(path.join(u.home, '.ssh'));
   isolated(h, 'small', 'claude');
   const dry = h.json(['spawn', '--role', 'small', '--task', 'T1', '--dry-run'], { env: u.env });
   assert.ok(!JSON.stringify(dry).includes(SECRET), 'no credential in the command or its env');
@@ -494,7 +511,7 @@ test('a spawned claude agent imports the user\'s global rules by path, loads non
   assert.ok(box.filesystem.denyRead.includes(path.join(h.state, 'brokers')), 'no agent reads another agent\'s broker token');
   assert.ok(box.filesystem.denyRead.includes(path.join(path.dirname(h.userConfig), 'owner')), 'no agent reads the owner key');
   assert.deepEqual(box.filesystem.allowRead, [home, path.join(h.state, 'brokers', started.agent)], 'only this dispatch home and its own broker directory are readable');
-  for (const p of ['/var/run/docker.sock', '/run/docker.sock', path.join(u.home, '.ssh'), path.join(u.home, '.aws')]) assert.ok(box.filesystem.denyRead.includes(p), p);
+  for (const p of ['/var/run/docker.sock', '/run/docker.sock', path.join(u.home, '.ssh'), path.join(u.home, '.aws')]) assert.equal(box.filesystem.denyRead.includes(p), fs.existsSync(p), p);
   assert.match(fs.readFileSync(path.join(h.repo, '.git', 'info', 'exclude'), 'utf8'), /^\.claude\/\.cc-writes\/$/m, 'the sandbox marker is never committed');
   assert.equal(fs.readFileSync(path.join(h.state, 'homes', '.gitignore'), 'utf8'), '*\n');
   noSecretsCopied(h);
@@ -667,6 +684,7 @@ test('unbound projects spawn workers and reviewers with owner-key denials but st
     for (const role of ['hard', 'review']) {
       if (role === 'review') {
         const opts = { env: { TOWER_CRANE_AGENT: 'builder' } };
+        releaseExited(h);
         h.ok(['claim', 'T1', '--agent', 'builder'], opts);
         h.ok(['submit', 'T1', '--sha', h.git(['rev-parse', 'HEAD']), '--agent', 'builder'], opts);
       }
@@ -783,6 +801,7 @@ test('browser tasks attach the user kit on every rung with approved tools and no
       [['--kind', 'design', '--needs', '[]'], ['easy', 'medium', 'hard', 'research', 'review', 'small', 'orchestrator']],
       [['--kind', 'code', '--needs', '["browser"]'], ['hard', 'review']],
     ]) {
+      releaseExited(h);
       h.ok(['task', 'update', 'T1', ...declaration]);
       for (const role of roles) {
         isolated(h, role, harness);
@@ -815,6 +834,7 @@ test('browser tasks attach the user kit on every rung with approved tools and no
     h.ok(['browser-kit', 'set', '--servers', '["visual","playwright"]']);
     const custom = h.json(['spawn', '--role', 'small', '--task', 'T1', '--dry-run'], { env: u.env });
     assert.deepEqual(custom.home.mcp, ['visual', 'playwright']);
+    releaseExited(h);
     h.ok(['task', 'update', 'T1', '--needs', '[]']);
     const plain = h.json(['spawn', '--role', 'small', '--task', 'T1', '--dry-run'], { env: u.env });
     assert.deepEqual(plain.home.mcp, [], 'a plain code task gets no kit');
@@ -829,6 +849,7 @@ test('browser spawns use the original user kit through a nested isolated home an
   const userFile = path.join(u.home, '.config', 'tower-crane', 'config.json');
   fs.mkdirSync(path.dirname(userFile), { recursive: true });
   fs.writeFileSync(userFile, JSON.stringify({ browser_kit: ['planted'] }));
+  releaseExited(h);
   h.ok(['task', 'update', 'T1', '--needs', '["browser"]']);
   isolated(h, 'hard', 'codex');
   const parent = spawn(h, u, 'hard', { TOWER_CRANE_CONFIG: '', ...orchestrator });
@@ -842,6 +863,7 @@ test('browser spawns use the original user kit through a nested isolated home an
     assert.notEqual(result.code, 0);
     assert.match(result.stderr, /missing-browser.*(?:mcp\.json|config\.toml)/);
   }
+  releaseExited(h);
   h.ok(['task', 'update', 'T1', '--needs', '[]']);
   assert.deepEqual(h.json(['spawn', '--role', 'small', '--task', 'T1', '--dry-run'], { env: { ...u.env, TOWER_CRANE_CONFIG: '', ...orchestrator } }).home.mcp, []);
 });
@@ -955,6 +977,8 @@ test('a second worker spawn reads and writes the first attempt scratch for the s
   const cache = u.report().settings.sandbox.filesystem.allowWrite.find((w) => /[\\/]tower-crane[\\/](?:agents|tasks)[\\/][0-9a-f]{12}[\\/][^\\/]+$/.test(w));
   const file = path.join(cache, 'receipt.txt');
   assert.equal(fs.readFileSync(file, 'utf8'), 'first attempt\n');
+  // A finished worker keeps its lease until released, so the builder claims after that.
+  h.ok(['release', 'T1', '--agent', first.agent, '--reason', 'first attempt exited']);
   h.ok(['claim', 'T1', '--agent', 'builder']);
   h.ok(['submit', 'T1', '--agent', 'builder', '--sha', h.git(['rev-parse', 'HEAD'], wt)]);
   const probe = [process.execPath, '-e', `const fs = require('node:fs'); const path = require('node:path'); const file = path.join(process.env.XDG_CACHE_HOME, 'receipt.txt'); process.stderr.write(fs.readFileSync(file, 'utf8')); fs.appendFileSync(file, 'second attempt\\n');`];
@@ -1409,6 +1433,7 @@ test('an isolated reviewer posts through gh, records evidence in a symlinked sta
   const realState = path.join(h.base, 'real-state');
   fs.renameSync(h.state, realState);
   fs.symlinkSync(realState, h.state);
+  releaseExited(h);
   h.ok(['task', 'update', 'T1', '--kind', 'docs']);
   for (const name of ['easy', 'medium', 'hard', 'research']) {
     h.ok(['ladder', 'set', name, '--model', 'builder', '--clear', 'profile']);
@@ -1539,6 +1564,7 @@ if (process.env.TOWER_CRANE_VIA === 'broker' && process.argv.includes('late')) {
     const run = [[process.execPath, BIN, 'task', 'note', 'T1', 'early'], [process.execPath, '-e', background]];
     const env = { ...u.env, STUB_RUN: JSON.stringify(run), NODE_OPTIONS: `--require ${JSON.stringify(preload)}`, SLOW_BROKER_PID: pidFile };
     const started = Date.now();
+    releaseExited(h);
     const r = await h.runAsync(['spawn', '--role', 'hard', '--task', 'T1', '--wait', '--json'], { env });
     assert.equal(r.code, 0, r.stderr);
     assert.ok(Date.now() - started < 60000, `${harness}: spawn --wait returned`);
@@ -1549,7 +1575,7 @@ if (process.env.TOWER_CRANE_VIA === 'broker' && process.argv.includes('late')) {
     while (detachedAlive({ pid }) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 50));
     assert.ok(!detachedAlive({ pid }), `${harness}: the brokered command stopped with the broker`);
   }
-  const notes = h.readState('tasks.json').tasks[0].notes.map((n) => n.text);
+  const notes = h.readState('tasks.json').tasks[0].notes.map((n) => n.text).filter((text) => ['early', 'late'].includes(text));
   assert.deepEqual(notes, ['early', 'early'], 'nothing the broker was still running wrote after its spawn ended');
 });
 

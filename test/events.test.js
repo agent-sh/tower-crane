@@ -450,7 +450,7 @@ setInterval(() => {}, 1000);\n`);
   });
 }
 
-test('a spawned worker that exits before claiming wakes without waiting for a lease', async (t) => {
+test('a spawned worker that exits before submitting wakes without waiting for its lease', async (t) => {
   const h = setup(t);
   h.ok(['brief', 'set', 'T1', '-'], { input: 'stand-in\n' });
   commandWorker(h, [process.execPath, '-e', 'process.exit(0)', '{prompt}']);
@@ -460,7 +460,7 @@ test('a spawned worker that exits before claiming wakes without waiting for a le
   assert.equal(e.detail.pid, started.pid);
   assert.equal(e.detail.agent, started.agent);
   assert.equal(e.detail.attempt, started.attempt);
-  assert.equal(h.readState('tasks.json').tasks[0].claim, null);
+  assert.equal(h.readState('tasks.json').tasks[0].claim.agent, started.agent, 'the exited worker keeps its lease until released');
   assert.equal(h.run(['wait', '--agent', 'orchestrator', '--types', 'worker-exited', '--timeout', '0.1']).code, 2);
 });
 
@@ -486,6 +486,7 @@ fs.readFileSync = function(file, ...args) {
 };
 `);
   const opts = { env: { NODE_OPTIONS: `--require "${hook.replace(/\\/g, '/')}"` } };
+  h.ok(['release', 'T1', '--agent', h.json(['task', 'show', 'T1']).claim.agent, '--reason', 'worker exited']);
   const started = h.json(['spawn', '--task', 'T1', '--wait'], opts);
   const observed = h.json(['wait', '--agent', 'orchestrator', '--after', String(cursor), '--types', 'worker-exited', '--timeout', '1'], opts);
   assert.equal(observed.detail.pid, started.pid);
