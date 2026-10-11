@@ -1,0 +1,1 @@
+- Automatic quality escalation starts a new task revision when sending work back. Earlier gate evidence stops counting, and rejected review context remains available to the replacement worker.

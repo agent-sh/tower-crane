@@ -17,7 +17,7 @@ function acceptedTask(t) {
   h.ok(['submit', 'T1', '--sha', sha, '--pr', '9', '--branch', 'fixture-change', '--agent', 'w-1']);
   for (const type of ['tests', 'clean', 'ci']) gateEvidence(h, type, 'checker');
   h.reviewer('T1', 'r-1', sha);
-  h.ok(['evidence', 'T1', '--type', 'review', '--ok', '--sha', sha, '--agent', 'r-1']);
+  h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--ok', '--sha', sha, '--agent', 'r-1']);
   h.ok(['accept', 'T1']);
   const log = path.join(h.base, 'gh-args.jsonl');
   h.env.FIXTURE_GH_LOG = log;
@@ -184,4 +184,71 @@ test('merge settings support init, clearing and atomic rejection of invalid or u
     assert.equal(invalid.code, 1, invalid.stderr);
     assert.match(invalid.stderr, /merge.*must be/);
   }
+});
+
+test('a PR GitHub refuses as an unrecorded stack member squashes through the asynchronous API with the same text at the accepted head', (t) => {
+  const { h, sha } = acceptedTask(t);
+  h.env.FIXTURE_GH_STACK_REFUSAL = '1';
+  const calls = () => fs.readFileSync(h.env.FIXTURE_GH_LOG, 'utf8').trim().split('\n').map(JSON.parse);
+  // The asynchronous API cannot rebase, so a rebase keeps GitHub's refusal and posts nothing.
+  const rebase = h.run(['merge', 'T1', '--method', 'rebase', '--agent', 'orchestrator']);
+  assert.equal(rebase.code, 1, rebase.stdout);
+  assert.match(`${rebase.stdout}${rebase.stderr}`, /gh pr merge refused PR #9: GraphQL: This pull request is part of a stack/);
+  assert.equal(calls().some((args) => args.includes('POST')), false);
+  const evidence = h.json(['merge', 'T1', '--agent', 'orchestrator']);
+  assert.equal(evidence.ok, true, evidence.summary);
+  assert.match(evidence.summary, /merged PR #9 into main in acme\/demo through the asynchronous merge API at /);
+  assert.ok(evidence.ref);
+  const refused = calls().find((args) => args[1] === 'merge' && args.includes('--squash'));
+  const subject = refused[refused.indexOf('--subject') + 1];
+  const body = refused[refused.indexOf('--body') + 1];
+  assert.deepEqual(calls().filter((args) => args.includes('POST')), [
+    ['api', 'repos/acme/demo/pulls/9/merge-async', '--method', 'POST', '-f', 'merge_method=squash', '-f', `expected_head_sha=${sha}`, '-f', `commit_title=${subject}`, '-f', `commit_message=${body}`],
+  ]);
+  assert.equal(subject, 'Keep task worktrees');
+  assert.equal(body, 'Preserve the branch\nPin the accepted head');
+  // The API never deletes the head branch, so the fallback deletes it once the merge is confirmed, as --delete-branch would.
+  assert.deepEqual(calls().filter((args) => args.includes('DELETE')), [
+    ['api', 'repos/acme/demo/git/refs/heads/fixture-change', '--method', 'DELETE'],
+  ]);
+  assert.match(evidence.summary, /; deleted branch fixture-change$/);
+  assert.ok(evidence.commands.some((c) => c.command === 'gh' && c.args[1] === 'merge' && c.status === 1));
+  assert.ok(evidence.commands.some((c) => c.command === 'gh' && c.args.includes('POST') && c.status === 0));
+});
+
+test('the asynchronous fallback encodes each segment of a head branch name it deletes', (t) => {
+  const { h } = acceptedTask(t);
+  h.env.FIXTURE_GH_STACK_REFUSAL = '1';
+  h.env.FIXTURE_PR_HEAD = 'feature/fixture#change';
+  const evidence = h.json(['merge', 'T1', '--agent', 'orchestrator']);
+  assert.equal(evidence.ok, true, evidence.summary);
+  const calls = fs.readFileSync(h.env.FIXTURE_GH_LOG, 'utf8').trim().split('\n').map(JSON.parse);
+  // A raw '#' would start a fragment and delete a different ref; the slash stays a path separator.
+  assert.deepEqual(calls.filter((args) => args.includes('DELETE')), [
+    ['api', 'repos/acme/demo/git/refs/heads/feature/fixture%23change', '--method', 'DELETE'],
+  ]);
+});
+
+test('the asynchronous fallback keeps the head branch when merge.keep_branch is set', (t) => {
+  const { h } = acceptedTask(t);
+  h.env.FIXTURE_GH_STACK_REFUSAL = '1';
+  h.ok(['project', 'set', '--merge-keep-branch', 'true']);
+  const evidence = h.json(['merge', 'T1', '--agent', 'orchestrator']);
+  assert.equal(evidence.ok, true, evidence.summary);
+  assert.doesNotMatch(evidence.summary, /branch/);
+  const calls = fs.readFileSync(h.env.FIXTURE_GH_LOG, 'utf8').trim().split('\n').map(JSON.parse);
+  assert.equal(calls.some((args) => args.includes('DELETE')), false);
+  assert.equal(calls.filter((args) => args.includes('POST')).length, 1);
+});
+
+test('the asynchronous fallback refuses under merge.admin instead of dropping the admin option', (t) => {
+  const { h } = acceptedTask(t);
+  h.env.FIXTURE_GH_STACK_REFUSAL = '1';
+  h.ok(['project', 'set', '--merge-admin', 'true']);
+  const refused = h.run(['merge', 'T1', '--agent', 'orchestrator']);
+  assert.equal(refused.code, 1, refused.stdout);
+  assert.match(`${refused.stdout}${refused.stderr}`, /no admin option while merge\.admin is set/);
+  const calls = fs.readFileSync(h.env.FIXTURE_GH_LOG, 'utf8').trim().split('\n').map(JSON.parse);
+  assert.equal(calls.some((args) => args.includes('POST') || args.includes('DELETE')), false);
+  assert.ok(calls.some((args) => args[1] === 'merge' && args.includes('--admin')));
 });

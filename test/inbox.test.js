@@ -53,7 +53,7 @@ test('one fixture exposes every inbox kind and resolving commands clear their co
   const review = h.add('Failed review');
   h.submit(review);
   h.reviewer(review, 'reviewer', h.sha);
-  h.ok(['evidence', review, '--type', 'review', '--fail', '--sha', h.sha,
+  h.ok(['evidence', review, '--revision', h.revision(review), '--type', 'review', '--fail', '--sha', h.sha,
     '--summary', 'Check null before dereferencing.', '--ref', 'https://github.com/acme/demo/pull/1#issuecomment-1', '--agent', 'reviewer']);
   const rework = h.add('Rework without a worker');
   h.submit(rework);
@@ -64,7 +64,7 @@ test('one fixture exposes every inbox kind and resolving commands clear their co
   const accepted = h.add('Accepted but not merged');
   h.submit(accepted, 7);
   h.reviewer(accepted, 'reviewer', h.sha);
-  h.ok(['evidence', accepted, '--type', 'review', '--ok', '--sha', h.sha, '--agent', 'reviewer']);
+  h.ok(['evidence', accepted, '--revision', h.revision(accepted), '--type', 'review', '--ok', '--sha', h.sha, '--agent', 'reviewer']);
   h.ok(['check', 'ci', accepted]);
   h.ok(['accept', accepted]);
   const revuto = h.add('Revuto finding');
@@ -75,7 +75,7 @@ test('one fixture exposes every inbox kind and resolving commands clear their co
   h.ok(['claim', stall, '--agent', 'stalled']);
   const claim = h.json(['task', 'show', stall]).claim;
   event(h, stall, 'stall', { agent: 'stalled', until: claim.until, progress_at: claim.since });
-  h.ok(['ask', '--question', 'Which API?', '--option', 'A', '--option', 'B', '--blocks', stall]);
+  h.ok(['ask', '--kind', 'technical', '--question', 'Which API?', '--option', 'A', '--option', 'B', '--blocks', stall]);
   h.ok(['msg', '--to', 'orchestrator', '--task', stall, 'Need API guidance', '--agent', 'messenger']);
   event(h, accepted, 'automation', { phase: 'running', pid: process.pid, ...require('../lib/processes').identity(process.pid) });
   const github = h.github();
@@ -140,9 +140,9 @@ test('review replacement, capped revuto, old CodeQL heads and unavailable GitHub
   const id = h.add('Current findings');
   h.submit(id, 8);
   h.reviewer(id, 'reviewer', h.sha);
-  h.ok(['evidence', id, '--type', 'review', '--fail', '--sha', h.sha, '--summary', 'old fail', '--agent', 'reviewer']);
+  h.ok(['evidence', id, '--revision', h.revision(id), '--type', 'review', '--fail', '--sha', h.sha, '--summary', 'old fail', '--agent', 'reviewer']);
   h.reviewer(id, 'reviewer', h.sha);
-  h.ok(['evidence', id, '--type', 'review', '--ok', '--sha', h.sha, '--agent', 'reviewer']);
+  h.ok(['evidence', id, '--revision', h.revision(id), '--type', 'review', '--ok', '--sha', h.sha, '--agent', 'reviewer']);
   assert.equal(h.run(['rework', '--from-review', id]).code, 1);
   h.ok(['project', 'set', '--ci-capped-review', '[{"app":"revuto-review","pattern":"Daily review limit reached"}]']);
   const github = h.github();
@@ -177,7 +177,10 @@ test('ready dispatch respects worker slots and unobservable processes cannot be 
   h.ok(['project', 'set', '--workers', '3']);
   const before = h.readState('tasks.json');
   assert.deepEqual(h.json(['release', '--dead', '--agent', 'orchestrator']).results, []);
-  assert.deepEqual(h.readState('tasks.json'), before);
+  const after = h.readState('tasks.json');
+  delete after.orchestrator_lease;
+  delete before.orchestrator_lease;
+  assert.deepEqual(after, before);
   const worker = path.join(h.base, 'worker.js');
   fs.writeFileSync(worker, 'setTimeout(() => {}, 60000);\n');
   h.ok(['ladder', 'set', 'medium', '--harness', 'command', '--command', JSON.stringify([process.execPath, worker, '{prompt}']), '--clear', 'profile', '--clear', 'effort']);
@@ -193,7 +196,7 @@ test('MCP tools retain identity, expose actions and reject argument overrides', 
   const id = h.add('Review');
   h.submit(id);
   h.reviewer(id, 'reviewer', h.sha);
-  h.ok(['evidence', id, '--type', 'review', '--fail', '--sha', h.sha, '--summary', 'fix bounds', '--agent', 'reviewer']);
+  h.ok(['evidence', id, '--revision', h.revision(id), '--type', 'review', '--fail', '--sha', h.sha, '--summary', 'fix bounds', '--agent', 'reviewer']);
   const requests = [
     { method: 'initialize', params: { protocolVersion: '2024-11-05' } },
     { method: 'tools/list' },
@@ -238,7 +241,7 @@ test('accepted batch skips unknown PRs and merges independent ready PRs with the
     const id = h.add(`PR ${pr}`);
     h.submit(id, pr);
     h.reviewer(id, 'reviewer', h.sha);
-    h.ok(['evidence', id, '--type', 'review', '--ok', '--sha', h.sha, '--agent', 'reviewer']);
+    h.ok(['evidence', id, '--revision', h.revision(id), '--type', 'review', '--ok', '--sha', h.sha, '--agent', 'reviewer']);
     h.ok(['check', 'ci', id]);
     h.ok(['accept', id]);
   }
@@ -269,7 +272,7 @@ test('accepted batch confirms a landed head with stale gates before merging the 
     const id = h.add(`PR ${pr}`);
     h.submit(id, pr);
     h.reviewer(id, 'reviewer', h.sha);
-    h.ok(['evidence', id, '--type', 'review', '--ok', '--sha', h.sha, '--agent', 'reviewer']);
+    h.ok(['evidence', id, '--revision', h.revision(id), '--type', 'review', '--ok', '--sha', h.sha, '--agent', 'reviewer']);
     h.ok(['check', 'ci', id]);
     h.ok(['accept', id]);
   }
@@ -477,7 +480,7 @@ test('CodeQL merge-ref alerts match the current merge commit and submitted paren
 test('decision answers and owner comments remain in the inbox until explicitly acknowledged', (t) => {
   const h = setup(t);
   const id = h.add('Owner input');
-  h.ok(['ask', '--question', 'Which API?', '--option', 'A', '--option', 'B', '--blocks', id]);
+  h.ok(['ask', '--kind', 'technical', '--question', 'Which API?', '--option', 'A', '--option', 'B', '--blocks', id]);
   h.ok(['decision', 'note', 'D1', 'Use the stable contract']);
   h.ok(['task', 'note', id, 'Preserve compatibility']);
   h.ok(['answer', 'D1', '--choice', 'B', '--note', 'Approved for this release']);
@@ -567,11 +570,13 @@ test('current failed software gates expose diagnostics and commands that clear t
   h.ok([...failedTests.action.argv, '--agent', 'orchestrator']);
   assert.match(fs.readFileSync(path.join(h.state, 'briefs', `${id}.md`), 'utf8'), /rejects invalid gate inputs/);
   assert.deepEqual(failures(), []);
+  const reworkedRevision = Number(h.revision(id));
+  assert.equal(reworkedRevision, 2);
   h.ok(['task', 'update', id, '--acceptance', 'updated acceptance']);
   h.submit(id, 7);
   assert.deepEqual(failures(), [], 'old revision failures are not current findings');
   assert.equal(h.run(['check', 'tests', id], { env: { INBOX_TEST_OK: '0' } }).code, 1);
-  assert.equal(failures()[0].revision, 2);
+  assert.equal(failures()[0].revision, reworkedRevision + 1);
   h.ok(['check', 'tests', id], { env: { INBOX_TEST_OK: '1' } });
   assert.deepEqual(failures(), []);
 });
@@ -583,7 +588,7 @@ test('an accepted PR with stale gate policy resolves through gate reruns before 
   h.submit(id, 7);
   for (const type of ['tests', 'clean', 'ci']) h.ok(['check', type, id]);
   h.reviewer(id, 'reviewer', h.sha);
-  h.ok(['evidence', id, '--type', 'review', '--ok', '--sha', h.sha, '--agent', 'reviewer']);
+  h.ok(['evidence', id, '--revision', h.revision(id), '--type', 'review', '--ok', '--sha', h.sha, '--agent', 'reviewer']);
   h.ok(['accept', id, '--agent', 'orchestrator']);
   const clean = path.join(h.base, 'new-clean.js');
   fs.writeFileSync(clean, 'console.log(JSON.stringify({items: []}));\n');
@@ -644,7 +649,7 @@ test('a remotely merged accepted PR remains actionable until its audited merge r
   h.submit(id, 7);
   h.ok(['check', 'ci', id]);
   h.reviewer(id, 'reviewer', h.sha);
-  h.ok(['evidence', id, '--type', 'review', '--ok', '--sha', h.sha, '--agent', 'reviewer']);
+  h.ok(['evidence', id, '--revision', h.revision(id), '--type', 'review', '--ok', '--sha', h.sha, '--agent', 'reviewer']);
   h.ok(['accept', id, '--agent', 'orchestrator']);
   const github = h.github();
   github.prs[7].state = 'MERGED';
@@ -678,7 +683,7 @@ function reviewComments(h, id) {
     + '- [P2] lib/cache.js:31 - Second finding: invalidate deleted entries - Prevent stale reads.\n';
   h.submit(id, 7);
   h.reviewer(id, 'reviewer', h.sha);
-  h.ok(['evidence', id, '--type', 'review', '--fail', '--sha', h.sha, '--agent', 'reviewer',
+  h.ok(['evidence', id, '--revision', h.revision(id), '--type', 'review', '--fail', '--sha', h.sha, '--agent', 'reviewer',
     '--summary', '2 blocking findings: reject duplicate writes', '--ref', ref]);
   const github = h.github();
   github.review_comments = { 7: [
@@ -708,11 +713,23 @@ test('failed review inbox and rework preserve every finding from the latest comm
     && args[1].includes('/issues/7/comments') && args.includes('--paginate')));
   const task = h.json(['task', 'show', id]);
   assert.equal(task.status, 'rework');
+  assert.equal(task.revision, 2);
+  assert.ok(task.evidence.every((entry) => entry.revision === 1));
+  const rework = h.logs().findLast((entry) => entry.cmd === 'rework' && entry.task === id);
+  assert.equal(rework.detail.previous_revision, 1);
+  assert.equal(rework.detail.revision, 2);
   assert.ok(task.notes.at(-1).text.includes(body));
   const brief = fs.readFileSync(path.join(h.state, 'briefs', `${id}.md`), 'utf8');
   assert.ok(brief.includes(body));
   assert.ok(brief.includes(ref));
   assert.doesNotMatch(brief, /Older finding/);
+  h.submit(id, 7);
+  h.ok(['evidence', id, '--type', 'review', '--ok', '--sha', h.sha,
+    '--revision', '1', '--agent', 'owner']);
+  assert.equal(h.json(['task', 'show', id]).gates.gates.find((gate) => gate.type === 'review').ok, false);
+  h.ok(['evidence', id, '--type', 'review', '--ok', '--sha', h.sha,
+    '--revision', '2', '--agent', 'owner']);
+  assert.equal(h.json(['task', 'show', id]).gates.gates.find((gate) => gate.type === 'review').ok, true);
 });
 
 test('review comment failures refuse rework without replacing full findings with a summary', (t) => {
@@ -749,7 +766,7 @@ test('review rework rechecks the verdict after fetching comments outside the sta
   reviewComments(h, id);
   h.reviewer(id, 'replacement-reviewer', h.sha);
   const github = h.github();
-  github.reviewDuringFetch = { task: id, sha: h.sha };
+  github.reviewDuringFetch = { task: id, sha: h.sha, revision: h.revision(id) };
   h.save(github);
   const original = fs.readFileSync(path.join(h.state, 'briefs', `${id}.md`), 'utf8');
   const result = h.run(['rework', '--from-review', id, '--agent', 'orchestrator']);

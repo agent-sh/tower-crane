@@ -1,0 +1,1 @@
+- Model lint checks raw text in path constructors, indirect variables and commented model assignments. File checks derive their module paths from real imports, and a temporary harness-config folder uses a neutral name.

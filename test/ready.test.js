@@ -7,10 +7,11 @@ const { makeRepo } = require('./helpers');
 // A docs task needs only a review from a reviewer spawn, which keeps
 // "get this dependency accepted" short in tests about readiness.
 function acceptDocs(h, id) {
+  const sha = h.git(['rev-parse', 'HEAD']);
   h.ok(['claim', id, '--agent', 'w-1']);
-  h.ok(['submit', id, '--sha', 'aaaaaaa', '--agent', 'w-1']);
+  h.ok(['submit', id, '--sha', sha, '--agent', 'w-1']);
   h.reviewer(id, 'r-1');
-  h.ok(['evidence', id, '--type', 'review', '--ok', '--sha', 'aaaaaaa', '--agent', 'r-1']);
+  h.ok(['evidence', id, '--revision', h.revision(id), '--type', 'review', '--ok', '--sha', sha, '--agent', 'r-1']);
   h.ok(['accept', id]);
 }
 
@@ -21,7 +22,7 @@ test('ready lists only unblocked tasks and --all says why the rest wait', (t) =>
   h.ok(['task', 'add', '--title', 'Needs base', '--acceptance', 'b', '--dep', 'T1']);
   h.ok(['task', 'add', '--title', 'Needs owner', '--acceptance', 'c', '--needs-owner', 'add the staging credential']);
   h.ok(['task', 'add', '--title', 'Waits for decision', '--acceptance', 'd']);
-  assert.equal(h.ok(['ask', '--question', 'Redis or Postgres?', '--option', 'redis', '--option', 'postgres', '--recommend', 'postgres', '--blocks', 'T4']), 'D1');
+  assert.equal(h.ok(['ask', '--kind', 'technical', '--question', 'Redis or Postgres?', '--option', 'redis', '--option', 'postgres', '--recommend', 'postgres', '--blocks', 'T4']), 'D1');
 
   const r = h.json(['ready', '--all']);
   assert.deepEqual(r.ready.map((x) => x.id), ['T1']);
@@ -76,7 +77,7 @@ test('status summarizes counts, decisions, owner tasks, spend and expired leases
   h.ok(['task', 'add', '--title', 'A', '--acceptance', 'a']);
   h.ok(['task', 'add', '--title', 'B', '--acceptance', 'b', '--needs-owner', 'buy the domain']);
   h.ok(['task', 'add', '--title', 'C', '--acceptance', 'c']);
-  h.ok(['ask', '--question', 'Which region?', '--option', 'eu', '--option', 'us', '--blocks', 'T3']);
+  h.ok(['ask', '--kind', 'technical', '--question', 'Which region?', '--option', 'eu', '--option', 'us', '--blocks', 'T3']);
   h.ok(['claim', 'T1', '--agent', 'w-1']);
   h.ok(['spend', 'T1', '--minutes', '90', '--tokens', '600']);
   const doc = h.readState('tasks.json');

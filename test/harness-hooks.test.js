@@ -7,6 +7,7 @@ const path = require('node:path');
 const cp = require('node:child_process');
 const { once } = require('node:events');
 const { cachedFixture, BIN } = require('./helpers');
+const S = require('../lib/state');
 
 const STUB = path.join(__dirname, 'fixtures', 'message-harness.js');
 const events = (h) => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
@@ -83,7 +84,8 @@ for (const route of ['claude', 'codex', 'codex-notify', 'pi', 'opencode', 'agy',
       assert.ok(!events(h).some((e) => e.cmd === 'hook inbox' && e.detail.messages.length));
     }
     const audit = events(h);
-    assert.ok(audit.some((e) => e.cmd === 'hook progress'), 'automatic tool progress missing');
+    assert.ok(fs.readFileSync(S.progressFile(h.state, 'worker-T1-1'), 'utf8').trim().split('\n')
+      .map(JSON.parse).some((e) => e.cmd === 'hook progress'), 'automatic tool progress missing');
     const report = audit.find((e) => e.cmd === 'msg' && e.agent === 'worker-T1-1' && e.detail.to === 'orchestrator');
     assert.match(report.detail.text, /without submit/);
     assert.match(report.detail.text, new RegExp(`last report from ${harness}`));
@@ -107,7 +109,7 @@ for (const route of ['claude', 'codex', 'codex-notify', 'pi', 'opencode', 'agy',
     assert.equal(notification.task, 'T1');
     if (['codex', 'command'].includes(harness)) {
       h.ok(['msg', '--to', 'worker-T1-1', 'queued resume coordination', '--agent', 'orchestrator']);
-      h.ok(['submit', 'T1', '--sha', 'abcdef1', '--agent', 'worker-T1-1']);
+      h.ok(['submit', 'T1', '--sha', '50b732a15be40ccb2065cb2ba0e7b366d511b736', '--agent', 'worker-T1-1']);
       h.ok(['rework', 'T1', '--reason', 'resume correction']);
       const next = h.json(['spawn', '--task', 'T1', '--wait'], { env: { MESSAGE_RESUME: '1' } });
       assert.equal(next.agent, 'worker-T1-1');
