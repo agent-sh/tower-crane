@@ -20,6 +20,7 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const http = require('node:http');
 const https = require('node:https');
+const path = require('node:path');
 const zlib = require('node:zlib');
 
 const HOP_BY_HOP = new Set(['connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization', 'te',
@@ -28,13 +29,11 @@ const RETAINED = 64;
 const ANTHROPIC_MAX_BREAKPOINTS = 4;
 
 // USD per million tokens, list prices: input, output, 5-minute and 1-hour cache
-// writes, cache reads. Only the two measured models have defaults, each from a
-// cited price page; unknown models log no cost; --prices FILE adds or overrides
-// entries keyed by model id with the same fields.
-const PRICES = [
-  { match: /claude-opus-5-5/, input: 4, output: 20, write_5m: 5, write_1h: 8, read: 0.2 },
-  { match: /gpt-6\.1-sol/, input: 2, output: 10, write_5m: 2.5, write_1h: 2.5, read: 0.1 },
-];
+// writes, cache reads. Only the measured models have defaults, each from a cited
+// price page, kept in docs so a model swap edits data rather than code; unknown
+// models log no cost; --prices FILE adds or overrides entries keyed by model id
+// with the same fields.
+const PRICES = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'docs', 'cache-proxy-prices.json'), 'utf8'));
 
 function parseArgs(argv) {
   const opts = {
@@ -444,7 +443,7 @@ function normalizeOpenAI(body) {
   return moved ? ['normalize:environment_after_prompt'] : [];
 }
 
-// GPT-5.6 and later accept explicit breakpoints next to the implicit one. The
+// Recent OpenAI models accept explicit breakpoints next to the implicit one. The
 // input_text part holding the marker is split right after it and the head marked.
 function insertOpenAIBreakpoint(body, marker) {
   for (const item of Array.isArray(body.input) ? body.input : []) {
@@ -571,7 +570,7 @@ function usageCollector(kind) {
 
 function price(model, prices) {
   if (prices && prices[model]) return prices[model];
-  return PRICES.find(p => p.match.test(model || '')) || null;
+  return PRICES.find(p => String(model || '').includes(p.match)) || null;
 }
 
 function cost(model, usage, prices) {
