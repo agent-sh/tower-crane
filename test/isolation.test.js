@@ -732,11 +732,12 @@ test('a codex agent writes only where its agent file says; a worker writes its g
   // ~/.config/git is a directory of links the agent cannot add to or swap.
   fs.mkdirSync(path.join(u.home, '.config', 'git'), { recursive: true });
   fs.writeFileSync(path.join(u.home, '.config', 'git', 'ignore'), '*.swp\n');
+  const globalSeen = [process.execPath, '-e', 'process.stderr.write(String(process.env.GIT_CONFIG_GLOBAL))'];
   for (const [rung, worktree] of [['hard', 'write'], ['review', 'read'], ['small', 'read']]) {
     isolated(h, rung, 'codex');
-    const started = spawn(h, u, rung);
+    const started = spawn(h, u, rung, { STUB_RUN: JSON.stringify([globalSeen]) });
     const home = path.join(h.state, 'homes', started.agent);
-    const { config } = u.report();
+    const { config, ran } = u.report();
     const rules = config.permissions['tower-crane'].filesystem;
     for (const d of [common, own]) assert.equal(rules[d], worktree === 'write' ? 'write' : undefined, `${rung}: ${d}`);
     for (const p of guarded) assert.equal(rules[p], worktree === 'write' ? 'read' : undefined, `${rung}: ${p}`);
@@ -746,7 +747,12 @@ test('a codex agent writes only where its agent file says; a worker writes its g
     assert.ok(!fs.lstatSync(xdg).isSymbolicLink(), rung);
     assert.equal(fs.readlinkSync(path.join(xdg, 'ignore')), path.join(u.home, '.config', 'git', 'ignore'), rung);
     assert.equal(fs.readFileSync(path.join(xdg, 'extra'), 'utf8'), '', `${rung}: a missing include exists, empty`);
-    assert.equal(fs.readFileSync(path.join(home, 'gitconfig'), 'utf8'), `[include]\n\tpath = ${JSON.stringify(u.env.GIT_CONFIG_GLOBAL)}\n`, rung);
+    // The global config git reads, in the sandbox too: codex hides a
+    // readable path under the hidden homes/, so it lives in the state
+    // directory, which the agent reads and never writes.
+    const global = path.join(h.state, 'gitconfig', started.agent);
+    assert.equal(ran[0].stderr, global, `${rung}: GIT_CONFIG_GLOBAL`);
+    assert.equal(fs.readFileSync(global, 'utf8'), `[include]\n\tpath = ${JSON.stringify(u.env.GIT_CONFIG_GLOBAL)}\n`, rung);
     assert.equal(rules[path.join(common, 'worktrees')], worktree === 'write' ? 'read' : undefined, `${rung}: other worktrees' admin directories`);
     assert.deepEqual(rules[':workspace_roots'], { '.': worktree }, rung);
     assert.equal(rules[':root'], 'read', rung);
