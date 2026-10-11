@@ -1,0 +1,1 @@
+- Token benchmark fixtures use the shared pinned model names and explicit matching prices, retaining the separate price requirement for extended-context IDs.
