@@ -50,12 +50,17 @@ function callArguments(text, start) {
 }
 
 function hungBudget(value) {
+  if (/^Math\.max\(/.test(value)) {
+    return callArguments(value, value.indexOf('(')).some(hungBudget);
+  }
   return value === 'HUNG_TEST_MS' || Number(value.replaceAll('_', '')) >= HUNG_TEST_MS;
 }
 
 function waitFindings(text) {
   const findings = [];
   const lines = text.replace(/\r\n/g, '\n').split('\n');
+  const numericBindings = new Map([...text.matchAll(/\b(?:const|let)\s+(\w+)\s*=\s*(\d[\d_]*)(?=\s*[;,])/g)]
+    .map((match) => [match[1], match[2]]));
   const report = (index, reason) => {
     if (!allowed(lines[index])) findings.push({ line: index + 1, reason });
   };
@@ -103,7 +108,8 @@ function waitFindings(text) {
       if (!hungBudget(args[1] || '')) report(index, 'timer wait needs a signal or a wait-allow reason');
     } else {
       for (const arg of args.slice(1)) {
-        const budget = /^(?:(?:ms|timeout)\s*=\s*)?(\d[\d_]*|ms|timeout)$/.exec(arg)?.[1];
+        const budget = /^(?:\w+\s*=\s*)?(\d[\d_]*|ms|timeout)$/.exec(arg)?.[1]
+          || numericBindings.get(arg);
         if (budget && !hungBudget(budget)) report(index, 'wait supplies a fixed readiness budget');
         if (/^\d/.test(arg) && !hungBudget(arg)) report(index, 'wait supplies a fixed readiness budget');
         for (const option of arg.matchAll(/\b(?:ms|timeout|timeoutMs)\s*:\s*([^,}]+)/g)) {
@@ -118,8 +124,8 @@ function waitFindings(text) {
     const options = ['test', 'describe'].includes(match[1]) ? args.slice(1, 2) : args;
     for (const arg of options.filter((value) => value.startsWith('{'))) {
       const from = text.indexOf(arg, start);
-      for (const budget of arg.matchAll(/\btimeout\s*:\s*(\d[\d_]*)/g)) {
-        if (!hungBudget(budget[1])) {
+      for (const budget of arg.matchAll(/\btimeout\s*:\s*(Math\.max\([^)]*\)|[^,}]+)/g)) {
+        if (!hungBudget(budget[1].trim())) {
           const index = text.slice(0, from + budget.index).split('\n').length - 1;
           report(index, 'subprocess or test watchdog below the hung-test timeout');
         }

@@ -94,6 +94,9 @@ test('shared checks reject readiness budgets and require a reason on allowed tim
     'cp.spawn("node", ["--test-timeout", "1000", "worker.test.js"]);', // wait-allow: rejected lint fixture
     'describe("workers", { timeout: 1000 }, () => {});', // wait-allow: rejected lint fixture
     'test.after(() => {}, { timeout: 1000 });', // wait-allow: rejected lint fixture
+    'const budget = 1000; await until(check, "ready", budget);', // wait-allow: rejected lint fixture
+    'async function until(check, what, budget = 1000) {}', // wait-allow: rejected lint fixture
+    'cp.spawnSync("node", ["worker.js"], { timeout: budget });', // wait-allow: rejected lint fixture
   ]) {
     assert.ok(waitFindings(source).length, source);
     const annotated = source.split('\n').map((line) => line + ' // wait-allow: verifies the production timer contract').join('\n');
@@ -102,6 +105,7 @@ test('shared checks reject readiness budgets and require a reason on allowed tim
   }
   assert.deepEqual(waitFindings('const deadline = Date.now() + HUNG_TEST_MS;'), []);
   assert.deepEqual(waitFindings('const deadline = Date.now() + 300000;'), []);
+  assert.deepEqual(waitFindings('cp.spawnSync("node", [], { timeout: Math.max(budget, HUNG_TEST_MS) });'), []);
   assert.ok(waitFindings('await until(check, "// wait-allow: fake reason", 1000);').length); // wait-allow: rejected lint fixture
   const h = makeRepo(t);
   for (const dir of ['scripts', 'bin', 'lib', 'docs', 'changelog.d']) {

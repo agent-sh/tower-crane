@@ -1,6 +1,6 @@
 'use strict';
 
-const { waitOnRepo } = require('./signals');
+const { waitOnRepo, fileWritten } = require('./signals');
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
