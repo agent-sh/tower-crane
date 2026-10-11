@@ -173,6 +173,44 @@ test('the caller\'s GIT_SSH and SSH_ASKPASS still run under the command-scope de
   assert.ok(ran().includes('my-askpass'), 'SSH_ASKPASS runs');
 });
 
+// A scan is a git process of its own, so one per call doubled the cost of
+// every git call; the reuse must still see a worker's edit to any file the
+// scan read, including one only an include names.
+test('a config scan is reused until a file it read changes', (t) => {
+  const h = makeRepo(t);
+  h.init();
+  fs.writeFileSync(path.join(h.repo, 'value.txt'), 'one\n');
+  h.git(['add', 'value.txt']);
+  h.git(['commit', '-qm', 'value']);
+  const wt = path.join(h.base, 'wt');
+  h.git(['worktree', 'add', '-q', '--detach', wt]);
+  const trace = path.join(h.base, 'trace');
+  const env = { ...h.env, GIT_TRACE: trace };
+  const scans = () => (fs.existsSync(trace) ? fs.readFileSync(trace, 'utf8').split('\n').filter((l) => l.includes('config --list --show-scope')).length : 0);
+  const { spawnSync } = require('../lib/commands');
+  const git = (dir, args) => spawnSync('git', ['-C', dir, ...args], { env, encoding: 'utf8' });
+
+  for (const dir of [h.repo, h.repo, wt, wt]) git(dir, ['status', '--porcelain']);
+  assert.equal(scans(), 2, 'one scan per checkout');
+
+  const marker = path.join(h.base, 'planted');
+  const script = path.join(h.base, 'planted.js');
+  fs.writeFileSync(script, `require('node:fs').appendFileSync(${JSON.stringify(marker)}, 'textconv\\n');\nprocess.stdout.write(require('node:fs').readFileSync(process.argv[2]));\n`);
+  fs.writeFileSync(path.join(h.repo, '.git', 'info', 'attributes'), '* diff=tc\n');
+  const extra = path.join(h.repo, '.git', 'extra');
+  fs.writeFileSync(extra, '');
+  h.git(['config', 'include.path', 'extra']);
+  git(h.repo, ['status', '--porcelain']);
+  assert.equal(scans(), 3, 'the config changed');
+  fs.writeFileSync(extra, `[diff "tc"]\n\ttextconv = ${shellQuote(process.execPath)} ${shellQuote(script)}\n`);
+  for (const dir of [h.repo, wt]) {
+    fs.writeFileSync(path.join(dir, 'value.txt'), 'two\n');
+    git(dir, ['diff']);
+  }
+  assert.equal(scans(), 5, 'the included file changed');
+  assert.equal(fs.existsSync(marker), false, 'no planted textconv ran');
+});
+
 test('repository git proxies cannot run before command-scope overrides', (t) => {
   const h = makeRepo(t);
   h.init();
