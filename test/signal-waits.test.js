@@ -130,6 +130,12 @@ test('shared checks reject readiness budgets and require a reason on allowed tim
     'const window = getBudget() + 1000; until(check, "ready", window);', // wait-allow: rejected lint fixture
     'const label = "ready", delay = 1000; until(check, label, delay);', // wait-allow: rejected lint fixture
     'const label = "ready", delay = 10 * 1000, alias = delay; until(check, label, alias);', // wait-allow: rejected lint fixture
+    'const { unused } = settings, window = 1000; until(check, "ready", window);', // wait-allow: rejected lint fixture
+    'const [unused] = settings, window = 1000; until(check, "ready", window);', // wait-allow: rejected lint fixture
+    'function short() { const delay = 1000; const pattern = /[},]/; until(check, "ready", delay); }', // wait-allow: rejected lint fixture
+    'const unused = 0, HUNG_TEST_MS = 1000; until(check, "ready", HUNG_TEST_MS);', // wait-allow: rejected lint fixture
+    'const delay = 1000, window = delay; function ready() { const delay = 300000; until(check, "ready", window); }', // wait-allow: rejected lint fixture
+    'const delay = 1000; { const window = delay; { const delay = window; until(check, "ready", delay); } }', // wait-allow: rejected lint fixture
     'function short() { const delay = 1000; until(check, "ready", delay); } function long() { const delay = 300000; until(check, "ready", delay); }', // wait-allow: rejected lint fixture
     'function long() { const delay = 300000; until(check, "ready", delay); } function short() { const delay = 1000; until(check, "ready", delay); }', // wait-allow: rejected lint fixture
     'assert.ok(Date.now() - started\n < S.LOCK_WAIT_MS / 4);', // wait-allow: rejected lint fixture
@@ -145,6 +151,9 @@ test('shared checks reject readiness budgets and require a reason on allowed tim
   assert.deepEqual(waitFindings('async function until(check, what, budget = Math.max(HUNG_TEST_MS, other)) {}'), []);
   assert.deepEqual(waitFindings('const budget = 300000; const guard = budget; until(check, "ready", guard);'), []);
   assert.deepEqual(waitFindings('const window = Math.max(HUNG_TEST_MS, other); until(check, "ready", window);'), []);
+  assert.deepEqual(waitFindings('const { unused } = settings, window = 300000; until(check, "ready", window);'), []);
+  assert.deepEqual(waitFindings('const delay = 300000, window = delay; function ready() { const delay = 1000; until(check, "ready", window); }'), []);
+  assert.deepEqual(waitFindings('const delay = 300000; { const window = delay; { const delay = window; until(check, "ready", delay); } }'), []);
   assert.deepEqual(waitFindings('async function waitFor(check, what = "ready", options = {}) {}'), []);
   assert.deepEqual(waitFindings('const h = setup(t, "codex", { cpu_ms: 1000 }); until(t, h, check);'), []);
   assert.deepEqual(waitFindings('const h = setup(t, "codex", { cpu_ms: 10 * 1000 }); until(t, h, check);'), []);

@@ -51,10 +51,11 @@ function callArguments(text, start) {
 
 function hungBudget(value, bindings = new Map(), seen = new Set()) {
   value = value.trim();
-  if (value === 'HUNG_TEST_MS') return true;
-  if (bindings.has(value) && !seen.has(value)) {
-    return bindings.get(value).every((bound) => hungBudget(bound, bindings, new Set([...seen, value])));
+  if (bindings.has(value)) {
+    return bindings.get(value).every((bound) => !seen.has(bound)
+      && hungBudget(bound.value, bound.bindings(), new Set([...seen, bound])));
   }
+  if (value === 'HUNG_TEST_MS') return true;
   if (/^Math\.max\(/.test(value)) {
     return callArguments(value, value.indexOf('(')).some((arg) => hungBudget(arg, bindings, seen));
   }
@@ -69,10 +70,11 @@ function budgetExpression(value, bindings, seen = new Set()) {
       || (/^(?:ms|timeout(?:Ms)?|budget|duration)$/i.test(defaultValue[1])
         && !/^['"`{[]/.test(defaultValue[2].trim()));
   }
-  if (bindings.has(value) && !seen.has(value)) {
-    return bindings.get(value).some((bound) => budgetExpression(bound, bindings, new Set([...seen, value]))
-      || (/^(?:ms|timeout(?:Ms)?|budget|duration)$/i.test(value)
-        && !/^['"`{[]|\bfunction\b|=>/.test(bound)));
+  if (bindings.has(value)) {
+    return bindings.get(value).some((bound) => !seen.has(bound)
+      && (budgetExpression(bound.value, bound.bindings(), new Set([...seen, bound]))
+        || (/^(?:ms|timeout(?:Ms)?|budget|duration)$/i.test(value)
+          && !/^['"`{[]|\bfunction\b|=>/.test(bound.value))));
   }
   if (/^['"`{[]/.test(value) || /\bfunction\b|=>/.test(value)) return false;
   // Computed numbers are budgets too. Unknown expressions need an explicit
@@ -106,9 +108,25 @@ function bindingScopes(text) {
   const templates = [];
   const tokens = [];
   const lex = /\/\/[^\n]*|\/\*[\s\S]*?\*\/|"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'|[\w$]+|[^\s]/g;
-  for (const match of text.matchAll(lex)) {
-    const value = match[0];
+  for (let match; (match = lex.exec(text));) {
+    let value = match[0];
     if (/^\/[/*]/.test(value)) continue;
+    // Regex bodies must not close a scope or split a declaration.
+    if (value === '/' && (!tokens.length
+      || /^(?:[=([{,;:?!<>+*%&|^~-]|return|throw|case)$/.test(tokens.at(-1).value))) {
+      let inClass = false;
+      for (let end = match.index + 1; end < text.length && !/[\r\n]/.test(text[end]); end++) {
+        if (text[end] === '\\') end++;
+        else if (text[end] === '[') inClass = true;
+        else if (text[end] === ']') inClass = false;
+        else if (text[end] === '/' && !inClass) {
+          while (/[a-z]/i.test(text[end + 1] || '')) end++;
+          value = text.slice(match.index, end + 1);
+          lex.lastIndex = end + 1;
+          break;
+        }
+      }
+    }
     const token = { value, start: match.index, end: match.index + value.length, scope: stack.at(-1) };
     tokens.push(token);
     if (/^['"]/.test(value)) continue;
@@ -134,8 +152,19 @@ function bindingScopes(text) {
     const declaration = tokens[i];
     if (!['const', 'let', 'var'].includes(declaration.value)) continue;
     let j = i + 1;
-    while (/^[$A-Z_a-z][$\w]*$/.test(tokens[j]?.value || '')) {
-      const name = tokens[j++].value;
+    while (j < tokens.length) {
+      let name = null;
+      if (/^[$A-Z_a-z][$\w]*$/.test(tokens[j]?.value || '')) name = tokens[j++].value;
+      else if (['[', '{'].includes(tokens[j]?.value)) {
+        // Imported/destructured values have no scalar initializer here, but
+        // later scalar declarators still belong to this declaration.
+        let depth = 0;
+        do {
+          if (['[', '{'].includes(tokens[j]?.value)) depth++;
+          else if ([']', '}'].includes(tokens[j]?.value)) depth--;
+          j++;
+        } while (j < tokens.length && depth);
+      } else break;
       let from = tokens[j - 1].end;
       if (tokens[j]?.value === '=') from = tokens[j++].end;
       const nested = [];
@@ -150,25 +179,38 @@ function bindingScopes(text) {
         j++;
       }
       const end = tokens[j]?.start ?? text.length;
-      const values = declaration.scope.values.get(name) || [];
-      values.push(text.slice(from, end).trim());
-      declaration.scope.values.set(name, values);
+      if (name) {
+        const values = declaration.scope.values.get(name) || [];
+        values.push(text.slice(from, end).trim());
+        declaration.scope.values.set(name, values);
+      }
       if (tokens[j]?.value !== ',') break;
       j++;
     }
   }
-  // Each use sees its enclosing bindings, not a later same-named constant
-  // in another function. Keep all initializers in one scope conservatively.
+  // Initializers resolve where declared, so a caller's shadowing cannot
+  // change an outer alias. Cache maps to preserve identity when detecting cycles.
+  const cache = new Map();
+  const scopedBindings = (initial) => {
+    if (cache.has(initial)) return cache.get(initial);
+    const values = new Map();
+    cache.set(initial, values);
+    for (let scope = initial; scope; scope = scope.parent) {
+      const declarationScope = scope;
+      for (const [name, initializers] of scope.values) {
+        if (!values.has(name)) values.set(name, initializers.map((value) => ({
+          value, bindings: () => scopedBindings(declarationScope),
+        })));
+      }
+    }
+    return values;
+  };
   return (position) => {
     let scope = root;
     for (const candidate of scopes) {
       if (candidate.start <= position && position <= candidate.end && candidate.start >= scope.start) scope = candidate;
     }
-    const values = new Map();
-    for (; scope; scope = scope.parent) {
-      for (const [name, initializers] of scope.values) if (!values.has(name)) values.set(name, initializers);
-    }
-    return values;
+    return scopedBindings(scope);
   };
 }
 
