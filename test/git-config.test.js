@@ -202,7 +202,7 @@ test('a config scan is reused until a file it read changes', (t) => {
   h.git(['config', 'include.path', 'extra']);
   git(h.repo, ['status', '--porcelain']);
   assert.equal(scans(), 3, 'the config changed');
-  fs.writeFileSync(extra, `[diff "tc"]\n\ttextconv = ${shellQuote(process.execPath)} ${shellQuote(script)}\n`);
+  h.git(['config', '--file', extra, 'diff.tc.textconv', `${shellQuote(process.execPath)} ${shellQuote(script)}`]);
   for (const dir of [h.repo, wt]) {
     fs.writeFileSync(path.join(dir, 'value.txt'), 'two\n');
     git(dir, ['diff']);
