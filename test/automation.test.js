@@ -1397,6 +1397,182 @@ test('supervisor reactions pin unconfigured gates and bypass the real restrictiv
   startupContexts(h, false);
 });
 
+test('large review dispatch hands revuto findings to the reviewer and an ok that ignores a P1 is refused', async (t) => {
+  const h = setup(t);
+  fs.writeFileSync(path.join(h.repo, 'large.md'), 'A focused review reads this diff. '.repeat(1000) + '\n');
+  h.git(['add', 'large.md']);
+  h.git(['commit', '-qm', 'large review diff']);
+  h.sha = h.git(['rev-parse', 'HEAD']);
+  configureHarness(h);
+  const state = h.github();
+  state.prs['7'].headRefOid = h.sha;
+  state.ci[h.sha] = 'success';
+  const comment = (id, body, extra = {}) => ({ id, in_reply_to_id: null, path: 'src.js', line: 3, original_line: 3, body,
+    user: 'revuto-review[bot]', original_commit_id: h.sha, html_url: `https://github.com/acme/demo/pull/7#discussion_r${id}`, ...extra });
+  state.comments = [
+    comment(101, '[P1] The loop never terminates on empty input.'),
+    comment(102, '[P2] Missing null check.'),
+    { ...comment(103, '[resolved]\nFixed by the guard above.'), in_reply_to_id: 102, user: 'worker' },
+    comment(104, 'Nit: rename this.'),
+    comment(105, '[P1] Outdated finding.', { line: null }),
+    comment(106, '[P1] Not from revuto.', { user: 'someone' }),
+  ];
+  h.saveGithub(state);
+  assert.equal((await h.runAsync(['spawn', '--task', 'T1', '--wait', '--agent', 'orchestrator'])).code, 0);
+  const deadline = Date.now() + 60000;
+  while (!h.logs().some((e) => e.cmd === 'spawn exit' && e.detail.role === 'reviewer')) {
+    if (Date.now() > deadline) throw new Error(JSON.stringify(h.logs().slice(-10)));
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  const review = h.logs().find((e) => e.cmd === 'spawn' && e.detail.role === 'reviewer');
+  assert.deepEqual(review.detail.revuto.map((f) => [f.id, f.severity, f.reply]), [[101, 'P1', null], [102, 'P2', 103], [104, null, null]]);
+  const brief = fs.readFileSync(path.join(h.state, 'reviews', `T1-${h.sha}.md`), 'utf8');
+  assert.match(brief, /## Revuto findings/);
+  assert.match(brief, /### \[P1\] src\.js:3 \(comment 101\)\n\n\[P1\] The loop never terminates on empty input\./);
+  assert.match(brief, /### \[P2\] src\.js:3 \(comment 102, resolved in reply 103\)/);
+  assert.match(brief, /### src\.js:3 \(comment 104\)/);
+  assert.doesNotMatch(brief, /Outdated finding|Not from revuto/);
+  const contextFile = path.join(h.env.AUTOMATION_CONTEXT_DIR, `${review.detail.agent}.json`);
+  assert.ok(fs.existsSync(contextFile), fs.readFileSync(review.detail.log, 'utf8'));
+  const { prompt } = JSON.parse(fs.readFileSync(contextFile, 'utf8'));
+  assert.match(prompt, /Read .*reviews.* for the diff at/);
+  assert.match(prompt, /## Revuto findings/);
+  assert.match(prompt, /### \[P1\] src\.js:3 \(comment 101\)\n\n\[P1\] The loop never terminates on empty input\./);
+  assert.match(prompt, /## Gate results/);
+  assert.doesNotMatch(prompt, /diff --git a\/large.md/);
+  const task = h.readState('tasks.json').tasks[0];
+  assert.equal(task.evidence.some((e) => e.type === 'review'), false, 'the reviewer ok was refused');
+  assert.equal(task.status, 'submitted');
+  const refused = h.run(['evidence', 'T1', '--type', 'review', '--sha', h.sha, '--ok', '--agent', review.detail.agent]);
+  assert.equal(refused.code, 1, refused.stdout + refused.stderr);
+  assert.match(refused.stderr, /review ok refused; revuto \[P1\] comment 101 at src\.js:3 \(https:\/\/github\.com\/acme\/demo\/pull\/7#discussion_r101\)/);
+  assert.doesNotMatch(refused.stderr, /comment 10[2-6]/);
+  h.ok(['evidence', 'T1', '--type', 'review', '--sha', h.sha, '--fail', '--agent', review.detail.agent]);
+  assert.equal(h.github().calls.some((a) => a[1] === 'merge'), false);
+});
+
+test('brokered review evidence clears a revuto finding whose file changed since the comment', async (t) => {
+  const h = setup(t);
+  configureHarness(h);
+  const state = h.github();
+  const before = h.git(['rev-parse', `${h.sha}^`]);
+  const comment = (id, commit) => ({ id, in_reply_to_id: null, path: 'value.js', line: 1, original_line: 1, body: `[P1] finding ${id}`,
+    user: 'revuto-review[bot]', original_commit_id: commit, html_url: null });
+  // value.js changed between before and the head; nothing changed after the head.
+  state.comments = [comment(201, before), comment(202, h.sha)];
+  h.saveGithub(state);
+  assert.equal((await h.runAsync(['spawn', '--task', 'T1', '--wait', '--agent', 'orchestrator'])).code, 0);
+  const deadline = Date.now() + 60000;
+  while (!h.logs().some((e) => e.cmd === 'spawn exit' && e.detail.role === 'reviewer')) {
+    if (Date.now() > deadline) throw new Error(JSON.stringify(h.logs().slice(-10)));
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  const review = h.logs().find((e) => e.cmd === 'spawn' && e.detail.role === 'reviewer');
+  assert.deepEqual(review.detail.revuto.map((f) => [f.id, f.changed]), [[201, true], [202, false]]);
+  // The state broker runs evidence with TOWER_CRANE_VIA=broker, where tower-crane reads no repository.
+  const broker = { env: { ...h.env, TOWER_CRANE_VIA: 'broker' } };
+  const refused = h.run(['evidence', 'T1', '--type', 'review', '--sha', h.sha, '--ok', '--agent', review.detail.agent, '--state', h.state], broker);
+  assert.equal(refused.code, 1, refused.stdout + refused.stderr);
+  assert.match(refused.stderr, /review ok refused; revuto \[P1\] comment 202 at value\.js:1 has no code change/);
+  assert.doesNotMatch(refused.stderr, /comment 201/);
+});
+
+test('revuto findings on bracketed paths require a change to the literal file', async (t) => {
+  const h = setup(t);
+  configureHarness(h);
+  fs.mkdirSync(path.join(h.repo, 'routes'));
+  fs.writeFileSync(path.join(h.repo, 'routes', '[id].js'), 'module.exports = 1;\n');
+  fs.writeFileSync(path.join(h.repo, 'routes', 'i.js'), 'module.exports = 1;\n');
+  h.git(['add', 'routes']);
+  h.git(['commit', '-qm', 'add route fixtures']);
+  const commented = h.git(['rev-parse', 'HEAD']);
+  fs.writeFileSync(path.join(h.repo, 'routes', 'i.js'), 'module.exports = 2;\n');
+  h.git(['add', 'routes']);
+  h.git(['commit', '-qm', 'change sibling route']);
+  h.sha = h.git(['rev-parse', 'HEAD']);
+  const state = h.github();
+  state.prs['7'].headRefOid = h.sha;
+  state.ci[h.sha] = 'success';
+  state.comments = [{ id: 401, in_reply_to_id: null, path: 'routes/[id].js', line: 1,
+    body: '[P1] The dynamic route is still broken.', user: 'revuto-review[bot]', original_commit_id: commented }];
+  h.saveGithub(state);
+  h.submit();
+  for (const type of ['tests', 'clean', 'ci']) gateEvidence(h, type, 'orchestrator');
+  const first = await h.runAsync(['spawn', '--role', 'review', '--task', 'T1', '--wait', '--agent', 'orchestrator']);
+  assert.equal(first.code, 1, first.stdout + first.stderr);
+  const review = h.logs().find((e) => e.cmd === 'spawn' && e.detail.role === 'reviewer');
+  assert.equal(review.detail.revuto[0].changed, false);
+  const broker = { env: { ...h.env, TOWER_CRANE_VIA: 'broker' } };
+  const refused = h.run(['evidence', 'T1', '--type', 'review', '--sha', h.sha, '--ok',
+    '--agent', review.detail.agent, '--state', h.state], broker);
+  assert.equal(refused.code, 1, refused.stdout + refused.stderr);
+  assert.match(refused.stderr, /review ok refused; revuto \[P1\] comment 401 at routes\/\[id\]\.js:1/);
+  assert.equal(h.readState('tasks.json').tasks[0].evidence.some((e) => e.type === 'review' && e.ok), false);
+
+  fs.writeFileSync(path.join(h.repo, 'routes', '[id].js'), 'module.exports = 2;\n');
+  h.git(['add', 'routes']);
+  h.git(['commit', '-qm', 'fix dynamic route']);
+  h.sha = h.git(['rev-parse', 'HEAD']);
+  const updated = h.github();
+  updated.prs['7'].headRefOid = h.sha;
+  updated.ci[h.sha] = 'success';
+  h.saveGithub(updated);
+  h.ok(['submit', 'T1', '--sha', h.sha, '--pr', '7', '--agent', 'worker']);
+  for (const type of ['tests', 'clean', 'ci']) gateEvidence(h, type, 'orchestrator');
+  const fixed = await h.runAsync(['spawn', '--role', 'review', '--task', 'T1', '--wait', '--agent', 'orchestrator']);
+  assert.equal(fixed.code, 0, fixed.stdout + fixed.stderr);
+  const latest = h.logs().findLast((e) => e.cmd === 'spawn' && e.detail.role === 'reviewer');
+  assert.equal(latest.detail.revuto[0].changed, true);
+  assert.ok(h.readState('tasks.json').tasks[0].evidence.some((e) => e.type === 'review' && e.ok && e.sha === h.sha));
+});
+
+test('revuto replies require an explicit resolution and later discussion reopens the finding', async (t) => {
+  const h = setup(t);
+  configureHarness(h);
+  const state = h.github();
+  const before = h.git(['rev-parse', `${h.sha}^`]);
+  const finding = (id, commit = h.sha) => ({ id, in_reply_to_id: null, path: 'value.js', line: 1,
+    body: `[P1] finding ${id}`, user: 'revuto-review[bot]', original_commit_id: commit });
+  const reply = (id, thread, body) => ({ id, in_reply_to_id: thread, user: 'worker', body });
+  state.comments = [
+    finding(301), reply(311, 301, 'I can still reproduce this. This is not fixed.'),
+    finding(302), reply(312, 302, '[resolved]\nFixed by the guard above.'),
+    finding(303, before), reply(313, 303, 'Please explain this change.'),
+    finding(304), reply(314, 304, 'Not fixed yet.'), reply(324, 304, '[RESOLVED]'),
+    finding(305), reply(315, 305, '[resolved]'), reply(325, 305, 'I can still reproduce this.'),
+    finding(306), reply(316, 306, '> [resolved]\nThis is a quote, not a resolution.'),
+  ];
+  h.saveGithub(state);
+  // A tracked worker lets automatic reactions dispatch another reviewer after
+  // a refused verdict; this test controls both snapshots with native submission.
+  h.submit();
+  for (const type of ['tests', 'clean', 'ci']) gateEvidence(h, type, 'orchestrator');
+  const first = await h.runAsync(['spawn', '--role', 'review', '--task', 'T1', '--wait', '--agent', 'orchestrator']);
+  assert.equal(first.code, 1, first.stdout + first.stderr);
+  const review = h.logs().find((e) => e.cmd === 'spawn' && e.detail.role === 'reviewer');
+  const broker = { env: { ...h.env, TOWER_CRANE_VIA: 'broker' } };
+  const refused = h.run(['evidence', 'T1', '--type', 'review', '--sha', h.sha, '--ok',
+    '--agent', review.detail.agent, '--state', h.state], broker);
+  assert.equal(refused.code, 1, refused.stdout + refused.stderr);
+  for (const id of [301, 305, 306]) assert.match(refused.stderr, new RegExp(`comment ${id} at value\\.js:1`));
+  assert.doesNotMatch(refused.stderr, /comment 30[234]/);
+  assert.deepEqual(review.detail.revuto.map((f) => [f.id, f.reply, f.resolved, f.changed]), [
+    [301, 311, false, false], [302, 312, true, false], [303, 313, false, true],
+    [304, 324, true, false], [305, 325, false, false], [306, 316, false, false],
+  ]);
+  assert.equal(h.readState('tasks.json').tasks[0].evidence.some((e) => e.type === 'review'), false);
+  assert.equal(h.github().calls.some((a) => a[1] === 'merge'), false);
+
+  const updated = h.github();
+  for (const id of [301, 305, 306]) updated.comments.push(reply(id + 100, id, '[resolved]\nVerified at this head.'));
+  h.saveGithub(updated);
+  const rerun = await h.runAsync(['spawn', '--role', 'review', '--task', 'T1', '--wait', '--agent', 'orchestrator']);
+  assert.equal(rerun.code, 0, rerun.stdout + rerun.stderr);
+  assert.equal(h.logs().filter((e) => e.cmd === 'spawn' && e.detail.role === 'worker').length, 0);
+  assert.equal(h.logs().filter((e) => e.cmd === 'spawn' && e.detail.role === 'reviewer').length, 2);
+  assert.ok(h.readState('tasks.json').tasks[0].evidence.some((e) => e.type === 'review' && e.ok));
+});
+
 test('a supervised worker submission runs gates and dispatches the offline reviewer after exit', async (t) => {
   const h = setup(t);
   configureHarness(h, { rules: true });
