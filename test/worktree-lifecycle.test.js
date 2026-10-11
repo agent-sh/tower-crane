@@ -323,3 +323,96 @@ test('cancel saves a dirty initialized submodule before removing its worktree', 
   assert.ok(h.git(['bundle', 'list-heads', path.join(recovered, 'commits.bundle')]).includes(head));
   gone(h, wt);
 });
+
+for (const priorBundle of [false, true]) {
+  test(`prune saves the current retained branch head after an earlier save (bundle: ${priorBundle})`, (t) => {
+    const h = setup(t);
+    const wt = h.json(['worktree', 'T1']);
+    if (priorBundle) {
+      fs.writeFileSync(path.join(wt.path, 'original.txt'), 'original commit\n');
+      h.git(['add', 'original.txt'], wt.path);
+      h.git(['commit', '-qm', 'original work'], wt.path);
+    }
+    fs.writeFileSync(path.join(wt.path, 'notes.txt'), 'original dirty notes\n');
+    const preload = path.join(h.base, 'fail-delete.js');
+    fs.writeFileSync(preload, `
+const cp = require('node:child_process');
+const original = cp.execFileSync;
+cp.execFileSync = function(command, args, ...rest) {
+  if (command === 'git' && args[0] === 'branch' && args[1] === '-D') {
+    const error = new Error('temporary branch deletion failure');
+    error.stderr = error.message;
+    throw error;
+  }
+  return original.call(this, command, args, ...rest);
+};
+`);
+    h.ok(['task', 'update', 'T1', '--status', 'cancelled'], { env: { NODE_OPTIONS: `--require=${JSON.stringify(preload)}` } });
+    const earlier = h.json(['task', 'show', 'T1']).worktree.saved;
+    const previous = JSON.parse(fs.readFileSync(path.join(earlier, 'manifest.json'), 'utf8'));
+    assert.equal(!!previous.bundle, priorBundle);
+    const scratch = path.join(h.base, 'later-checkout');
+    h.git(['worktree', 'add', scratch, wt.branch]);
+    fs.writeFileSync(path.join(scratch, 'newer.txt'), 'newer local commit\n');
+    h.git(['add', 'newer.txt'], scratch);
+    h.git(['commit', '-qm', 'newer local work'], scratch);
+    const head = h.git(['rev-parse', 'HEAD'], scratch);
+    h.git(['worktree', 'remove', scratch]);
+    h.ok(['worktree', 'prune']);
+    const record = h.json(['task', 'show', 'T1']).worktree;
+    const manifest = JSON.parse(fs.readFileSync(path.join(record.saved, 'manifest.json'), 'utf8'));
+    assert.ok(manifest.bundle, 'the current recovery contains a bundle');
+    h.git(['fetch', path.join(record.saved, manifest.bundle), `refs/heads/${wt.branch}:refs/heads/recovered-newer`]);
+    assert.equal(h.git(['rev-parse', 'recovered-newer']), head);
+    assert.equal(h.git(['show', 'recovered-newer:newer.txt']), 'newer local commit');
+    assert.equal(fs.readFileSync(path.join(earlier, 'files', 'notes.txt'), 'utf8'), 'original dirty notes\n');
+    assert.equal(manifest.previous, earlier, 'the previous dirty save remains discoverable');
+    gone(h, wt);
+  });
+}
+
+test('cancellation rechecks a replacement owner while reserving removal', { timeout: 60000 }, async (t) => {
+  const h = setup(t);
+  const wt = h.json(['worktree', 'T1']);
+  const paused = path.join(h.base, 'cancel-paused');
+  const cancel = h.runAsync(['task', 'update', 'T1', '--status', 'cancelled'], { hooks: { HOOK_STOP_WORKTREE_STATUS: paused } });
+  try {
+    assert.ok(await require('./canary').waitFor(paused));
+    h.ok(['claim', 'T2', '--agent', 'replacement']);
+    h.ok(['submit', 'T2', '--sha', h.git(['rev-parse', 'HEAD']), '--branch', wt.branch, '--agent', 'replacement']);
+    h.ok(['rework', 'T2', '--reason', 'continue in the existing branch']);
+    const live = h.json(['worktree', 'T2']);
+    fs.writeFileSync(path.join(live.path, 'replacement.txt'), 'live replacement work\n');
+    assert.equal(h.json(['worktree', 'list']).worktrees[0].task, 'T2');
+    fs.writeFileSync(`${paused}.go`, '');
+    const result = await cancel;
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(fs.readFileSync(path.join(live.path, 'replacement.txt'), 'utf8'), 'live replacement work\n');
+    assert.ok(h.git(['branch', '--list', wt.branch]));
+    assert.equal(h.json(['worktree', 'list']).worktrees[0].state, 'live');
+    h.ok(['worktree', 'prune']);
+    assert.ok(fs.existsSync(live.path));
+  } finally {
+    fs.writeFileSync(`${paused}.go`, '');
+    await cancel;
+  }
+});
+
+test('a removal reservation blocks assigning its branch to another task', { timeout: 60000 }, async (t) => {
+  const h = setup(t);
+  const wt = h.json(['worktree', 'T1']);
+  h.ok(['claim', 'T2', '--agent', 'replacement']);
+  const paused = path.join(h.base, 'remove-paused');
+  const cancel = h.runAsync(['task', 'update', 'T1', '--status', 'cancelled'], { hooks: { HOOK_STOP_WORKTREE_REMOVE: paused } });
+  try {
+    assert.ok(await require('./canary').waitFor(paused));
+    const assigned = h.run(['submit', 'T2', '--sha', h.git(['rev-parse', 'HEAD']), '--branch', wt.branch, '--agent', 'replacement']);
+    assert.equal(assigned.code, 1, 'a retiring branch cannot become a live replacement');
+    assert.match(assigned.stderr, /being removed|retiring/);
+    assert.equal(h.json(['task', 'show', 'T2']).status, 'in_progress');
+  } finally {
+    fs.writeFileSync(`${paused}.go`, '');
+    await cancel;
+  }
+  gone(h, wt);
+});

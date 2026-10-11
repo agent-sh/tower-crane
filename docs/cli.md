@@ -845,3 +845,5 @@ Use `inbox --json` for typed findings with `action.command` and `action.argv`; u
 `task update ID --superseded-by TARGET` cancels ID and records its replacement. TARGET must exist, differ from ID and be uncancelled. Task show and board task details show the replacement; worktree retirement follows the same saved-work and failure rules as cancel.
 
 Recovery saves include `commits.bundle` when the task head is not already reachable from the local base. The bundle retains local commits after branch deletion, including when the checkout is missing. Git patches stream directly to files; large patches and ignored-file lists do not hit a child-process output cap.
+
+Worktree recovery retries compare the retained branch head with actual saved bundle heads. New commits get a new recovery directory linked to the earlier save by `previous` in its manifest. Ownership is checked under the lock that reserves removal; a reservation blocks other tasks from assigning or preparing that path or branch. A partial stack merge retires confirmed merged members after the merge attempt finishes and preserves every still-open upper branch and worktree.

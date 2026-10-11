@@ -341,6 +341,12 @@ test('a refused upper merge retains lower evidence and retries without merging t
   assert.equal(f.h.json(['task', 'show', 'T1']).evidence.findLast((e) => e.type === 'merge').ok, true);
   assert.equal(f.read().prs[12].baseRefName, 'main');
   assert.equal(f.read().prs[12].state, 'OPEN');
+  assert.ok(fs.existsSync(f.upper.wt.path), 'a partial merge keeps the open upper checkout');
+  assert.equal(f.h.git(['rev-parse', f.upper.wt.branch]), f.upper.sha, 'a partial merge keeps the upper branch');
+  assert.equal(f.h.json(['worktree', 'list']).worktrees.find((w) => w.task === 'T2').state, 'live');
+  f.h.ok(['worktree', 'prune']);
+  assert.ok(fs.existsSync(f.upper.wt.path), 'prune keeps the still-open upper task');
+  assert.equal(f.h.git(['rev-parse', f.upper.wt.branch]), f.upper.sha);
   f.write((d) => { delete d.refuseMergePr; });
   f.h.ok(['merge', 'T2']);
   assert.deepEqual(routes(f), ['async 11', 'async 12', 'async 12']);
