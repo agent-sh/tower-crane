@@ -119,6 +119,60 @@ console.log(JSON.stringify({ state: 'OPEN', headRefName: 'feature' }));\n`);
   assert.deepEqual(ran(), []);
 });
 
+// The pinned cleanup tool is the owner's, but the git it runs in the gate
+// worktree reads the same repository config. deslop runs these two.
+test('git run by the pinned clean command takes no command from repository config', (t) => {
+  const h = makeRepo(t);
+  h.init();
+  const sha = gateFixture(h);
+  const tool = path.join(h.base, 'clean-tool.js');
+  fs.writeFileSync(tool, `const cp = require('node:child_process');
+const base = process.argv[3].slice('--base='.length);
+cp.spawnSync('git', ['diff', '-M', base + '..HEAD'], { stdio: 'ignore' });
+cp.spawnSync('git', ['ls-files', '--others', '--exclude-standard'], { stdio: 'ignore' });
+console.log(JSON.stringify({ items: [] }));\n`);
+  h.ok(['project', 'set', '--clean-cmd', `${shellQuote(process.execPath)} ${shellQuote(tool)}`]);
+  h.ok(['task', 'add', '--title', 'Change', '--acceptance', 'works']);
+  h.ok(['claim', 'T1', '--agent', 'worker']);
+  h.ok(['submit', 'T1', '--sha', sha, '--agent', 'worker']);
+  h.git(['switch', '-q', 'main']);
+  const { ran } = plant(h);
+
+  const receipt = h.json(['check', 'clean', 'T1', '--agent', 'checker'], { env: { GIT_TERMINAL_PROMPT: '0', TOWER_CRANE_CLEAN_CMD: '' } });
+  assert.equal(receipt.ok, true, receipt.summary);
+  assert.deepEqual(ran(), []);
+});
+
+// Git reads GIT_SSH and SSH_ASKPASS only when core.sshCommand and
+// core.askPass are unset, so the command-scope defaults must carry them.
+test('the caller\'s GIT_SSH and SSH_ASKPASS still run under the command-scope defaults', async (t) => {
+  const h = makeRepo(t);
+  h.init();
+  const marker = path.join(h.base, 'caller-ran');
+  const script = path.join(h.base, 'caller.js');
+  fs.writeFileSync(script, `require('node:fs').appendFileSync(${JSON.stringify(marker)}, process.argv[2] + '\\n');\nconsole.log('x');\n`);
+  const ran = () => (fs.existsSync(marker) ? fs.readFileSync(marker, 'utf8').trim().split('\n') : []);
+  const bin = path.join(h.base, 'caller bin');
+  fs.mkdirSync(bin);
+  const program = (name) => {
+    const file = path.join(bin, name);
+    fs.writeFileSync(file, `#!/bin/sh\nexec ${shellQuote(process.execPath)} ${shellQuote(script)} ${name}\n`, { mode: 0o755 });
+    return file;
+  };
+  h.git(['remote', 'add', 'origin', 'ssh://git@127.0.0.1:9/acme/demo.git']);
+  const { spawnSync } = require('../lib/commands');
+  // h.env carries no GIT_ variable of the caller's.
+  const base = h.env;
+
+  spawnSync('git', ['-C', h.repo, 'fetch', 'origin', 'main'], { env: { ...base, GIT_SSH: program('my-ssh') }, stdio: 'ignore' });
+  assert.ok(ran().includes('my-ssh'), 'GIT_SSH runs');
+
+  const port = await unauthorizedServer(t);
+  h.git(['remote', 'set-url', 'origin', `http://127.0.0.1:${port}/acme/demo.git`]);
+  spawnSync('git', ['-C', h.repo, 'fetch', 'origin', 'main'], { env: { ...base, SSH_ASKPASS: program('my-askpass'), GIT_TERMINAL_PROMPT: '0' }, stdio: 'ignore' });
+  assert.ok(ran().includes('my-askpass'), 'SSH_ASKPASS runs');
+});
+
 test('repository git proxies cannot run before command-scope overrides', (t) => {
   const h = makeRepo(t);
   h.init();
