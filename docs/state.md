@@ -547,6 +547,14 @@ A task is ready when its status is `todo` or `rework`, every dependency is `acce
 
 Ready tasks come in priority order: most outstanding dependents (direct or transitive, not yet accepted or cancelled) first, then by id.
 
+### Release for a decision
+
+`release ID --reason R --pr N` gives back a claim whose work waits on a decision and links PR `N` to the task. `N` must be open and is checked as `submit` checks it: its head branch becomes the task's `branch` when the task has none, and must equal it otherwise. A task linked to another open PR keeps that PR and refuses the release; once that PR is closed or merged, `N` replaces it and sets the branch. The `pr` and `branch` values stay when the claim is released. The link is written after the owner check, so a release that opens an owner decision and refuses writes no link. The release note records `linked PR #N on branch B`.
+
+The release event's `detail.decisions` lists the ids of the open decisions that blocked the task when it was released. A todo task whose latest release has them can be sent back with `rework`, answered or not: its status becomes `rework` and `revision` advances as for any rework. A todo task released without decisions still refuses `rework`.
+
+Answering the decision removes its block, so the task is ready as `todo` with its PR linked. Its next dispatch continues that PR: when the task's branch is not local, the worktree starts from the branch head on origin, even before any submission, and the worker prompt names the PR. A branch that origin no longer has starts from the base a new task would use.
+
 ### Spawned process exits
 
 On Windows, an npm `.cmd` harness runs as a direct Node process with the shim's script and the original arguments. Spawn events retain the configured harness and route; the recorded pid belongs to the Node process. The supervisor uses the same resolution for retries and fallback routes.

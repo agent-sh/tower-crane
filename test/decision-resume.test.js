@@ -11,16 +11,8 @@ const events = (h) => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8'
 const task = (h, id) => h.readState('tasks.json').tasks.find((t) => t.id === id);
 const ready = (h) => h.json(['ready']).ready.map((t) => [t.id, t.status]);
 
-test('a worker asks and releases with its PR linked; answering resumes that PR, and rework sends back a task released for a decision', (t) => {
-  const h = makeRepo(t);
-  const sha = gateFixture(h);
-  h.init(['--repo', 'acme/demo', '--base', 'main']);
-  h.ok(['task', 'add', '--title', 'Pick a store', '--acceptance', 'the store is chosen']);
-  h.ok(['task', 'add', '--title', 'Pick a cache', '--acceptance', 'the cache is chosen']);
-  h.ok(['task', 'add', '--title', 'Plain release', '--acceptance', 'no decision is involved']);
-  h.ok(['brief', 'set', 'T1', '-'], { input: 'Implement the store.\n' });
-
-  // The spawned worker only records the prompt it was given, so the test can read the PR note.
+// The spawned worker only records the prompt it was given, so the test can read the PR note.
+function recordWorker(h) {
   const seen = path.join(h.base, 'seen.json');
   const script = path.join(h.base, 'worker.js');
   fs.writeFileSync(script, `const fs = require('node:fs');
@@ -29,6 +21,18 @@ fs.writeFileSync(out, JSON.stringify({ prompt, agent: process.env.TOWER_CRANE_AG
 `);
   h.ok(['ladder', 'set', 'medium', '--harness', 'command', '--clear', 'profile', '--clear', 'effort',
     '--command', JSON.stringify([process.execPath, script, seen, '{prompt}'])]);
+  return seen;
+}
+
+test('a worker asks and releases with its PR linked; answering resumes that PR, and rework sends back a task released for a decision', (t) => {
+  const h = makeRepo(t);
+  const sha = gateFixture(h);
+  h.init(['--repo', 'acme/demo', '--base', 'main']);
+  h.ok(['task', 'add', '--title', 'Pick a store', '--acceptance', 'the store is chosen']);
+  h.ok(['task', 'add', '--title', 'Pick a cache', '--acceptance', 'the cache is chosen']);
+  h.ok(['task', 'add', '--title', 'Plain release', '--acceptance', 'no decision is involved']);
+  h.ok(['brief', 'set', 'T1', '-'], { input: 'Implement the store.\n' });
+  const seen = recordWorker(h);
 
   // T1: the worker opens PR 7 on its branch, asks, and releases with the PR linked.
   h.env.FIXTURE_PR_HEAD_7 = 'tower-crane/T1';
@@ -121,4 +125,38 @@ test('a task linked to a closed PR moves to a new PR when its claim is released'
   h.env.FIXTURE_PR_STATE_7 = 'CLOSED';
   h.ok(['release', 'T1', '--reason', 'retry on a new PR', '--pr', '9', '--agent', 'w-2']);
   assert.deepEqual([task(h, 'T1').status, task(h, 'T1').pr, task(h, 'T1').branch], ['todo', 9, 'tower-crane/T1-retry']);
+});
+
+test('a worker released with a PR whose branch exists only on origin resumes that PR with its commits', (t) => {
+  const h = makeRepo(t);
+  gateFixture(h);
+  h.init(['--repo', 'acme/demo', '--base', 'main']);
+  h.ok(['task', 'add', '--title', 'Pick a store', '--acceptance', 'the store is chosen']);
+  h.ok(['brief', 'set', 'T1', '-'], { input: 'Implement the store.\n' });
+  const seen = recordWorker(h);
+
+  // The worker's PR 7 head is a commit on a branch of origin only: the bare clone is origin, and the local branch goes.
+  h.git(['switch', '-qc', 'tower-crane/T1', 'main']);
+  fs.writeFileSync(path.join(h.repo, 'store.js'), 'module.exports = "redis";\n');
+  h.git(['add', 'store.js']);
+  h.git(['commit', '-qm', 'store on PR 7']);
+  const prSha = h.git(['rev-parse', 'HEAD']);
+  const origin = path.join(h.base, 'origin.git');
+  h.git(['clone', '-q', '--bare', h.repo, origin]);
+  h.git(['switch', '-q', 'main']);
+  h.git(['branch', '-D', 'tower-crane/T1']);
+  h.git(['remote', 'add', 'origin', origin]);
+
+  h.env.FIXTURE_PR_HEAD_7 = 'tower-crane/T1';
+  h.env.FIXTURE_PR_STATE_7 = 'OPEN';
+  h.ok(['claim', 'T1', '--agent', 'w-1']);
+  h.ok(['ask', '--question', 'Which store?', '--option', 'redis', '--option', 'postgres', '--blocks', 'T1', '--agent', 'w-1']);
+  h.ok(['release', 'T1', '--reason', 'waiting on D1', '--pr', '7', '--agent', 'w-1']);
+  h.ok(['answer', 'D1', '--choice', 'redis', '--agent', 'owner']);
+
+  // The next dispatch starts from PR 7's head on origin, so its commits are in the worktree.
+  const dispatched = h.json(['spawn', '--task', 'T1', '--wait']);
+  assert.equal(h.git(['rev-parse', 'HEAD'], dispatched.cwd), prSha);
+  assert.equal(fs.readFileSync(path.join(dispatched.cwd, 'store.js'), 'utf8'), 'module.exports = "redis";\n');
+  assert.match(fs.readFileSync(seen, 'utf8'), /This task's pull request is #7 on branch tower-crane\/T1\./);
 });
