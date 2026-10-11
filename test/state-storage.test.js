@@ -76,7 +76,7 @@ test('evidence settles when the head moves, its file is written once and an olde
   const summary = 'full report\n'.repeat(600);
   h.ok(['evidence', 'T1', '--type', 'note', '--ok', '--summary', summary]);
   assert.equal(h.readState('tasks.json').tasks[0].evidence[0].summary, summary, 'evidence at the head stays inline');
-  h.ok(['submit', 'T1', '--agent', 'worker', '--sha', '50b732a15be40ccb2065cb2ba0e7b366d511b736']);
+  h.ok(['submit', 'T1', '--agent', 'worker', '--sha', '5bfcb6f56ab912a009883c798a61298c507dada4']);
   const settled = h.readState('tasks.json').tasks[0].evidence[0];
   const file = artifact(h, 'T1', settled.evidence_refs.summary);
   assert.equal(JSON.parse(fs.readFileSync(file)), summary);
