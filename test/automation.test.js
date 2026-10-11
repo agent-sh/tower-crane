@@ -1419,6 +1419,55 @@ test('brokered review evidence clears a revuto finding whose file changed since 
   assert.doesNotMatch(refused.stderr, /comment 201/);
 });
 
+test('revuto findings on bracketed paths require a change to the literal file', async (t) => {
+  const h = setup(t);
+  configureHarness(h);
+  fs.mkdirSync(path.join(h.repo, 'routes'));
+  fs.writeFileSync(path.join(h.repo, 'routes', '[id].js'), 'module.exports = 1;\n');
+  fs.writeFileSync(path.join(h.repo, 'routes', 'i.js'), 'module.exports = 1;\n');
+  h.git(['add', 'routes']);
+  h.git(['commit', '-qm', 'add route fixtures']);
+  const commented = h.git(['rev-parse', 'HEAD']);
+  fs.writeFileSync(path.join(h.repo, 'routes', 'i.js'), 'module.exports = 2;\n');
+  h.git(['add', 'routes']);
+  h.git(['commit', '-qm', 'change sibling route']);
+  h.sha = h.git(['rev-parse', 'HEAD']);
+  const state = h.github();
+  state.prs['7'].headRefOid = h.sha;
+  state.ci[h.sha] = 'success';
+  state.comments = [{ id: 401, in_reply_to_id: null, path: 'routes/[id].js', line: 1,
+    body: '[P1] The dynamic route is still broken.', user: 'revuto-review[bot]', original_commit_id: commented }];
+  h.saveGithub(state);
+  h.submit();
+  for (const type of ['tests', 'clean', 'ci']) gateEvidence(h, type, 'orchestrator');
+  const first = await h.runAsync(['spawn', '--role', 'review', '--task', 'T1', '--wait', '--agent', 'orchestrator']);
+  assert.equal(first.code, 1, first.stdout + first.stderr);
+  const review = h.logs().find((e) => e.cmd === 'spawn' && e.detail.role === 'reviewer');
+  assert.equal(review.detail.revuto[0].changed, false);
+  const broker = { env: { ...h.env, TOWER_CRANE_VIA: 'broker' } };
+  const refused = h.run(['evidence', 'T1', '--type', 'review', '--sha', h.sha, '--ok',
+    '--agent', review.detail.agent, '--state', h.state], broker);
+  assert.equal(refused.code, 1, refused.stdout + refused.stderr);
+  assert.match(refused.stderr, /review ok refused; revuto \[P1\] comment 401 at routes\/\[id\]\.js:1/);
+  assert.equal(h.readState('tasks.json').tasks[0].evidence.some((e) => e.type === 'review' && e.ok), false);
+
+  fs.writeFileSync(path.join(h.repo, 'routes', '[id].js'), 'module.exports = 2;\n');
+  h.git(['add', 'routes']);
+  h.git(['commit', '-qm', 'fix dynamic route']);
+  h.sha = h.git(['rev-parse', 'HEAD']);
+  const updated = h.github();
+  updated.prs['7'].headRefOid = h.sha;
+  updated.ci[h.sha] = 'success';
+  h.saveGithub(updated);
+  h.ok(['submit', 'T1', '--sha', h.sha, '--pr', '7', '--agent', 'worker']);
+  for (const type of ['tests', 'clean', 'ci']) gateEvidence(h, type, 'orchestrator');
+  const fixed = await h.runAsync(['spawn', '--role', 'review', '--task', 'T1', '--wait', '--agent', 'orchestrator']);
+  assert.equal(fixed.code, 0, fixed.stdout + fixed.stderr);
+  const latest = h.logs().findLast((e) => e.cmd === 'spawn' && e.detail.role === 'reviewer');
+  assert.equal(latest.detail.revuto[0].changed, true);
+  assert.ok(h.readState('tasks.json').tasks[0].evidence.some((e) => e.type === 'review' && e.ok && e.sha === h.sha));
+});
+
 test('revuto replies require an explicit resolution and later discussion reopens the finding', async (t) => {
   const h = setup(t);
   configureHarness(h);
