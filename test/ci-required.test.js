@@ -55,6 +55,12 @@ test('pull requests run CI for every base, and pushes run it for main', () => {
   assert.match(workflow, /^on:\n {2}pull_request:\n(?: {4}#.*\n)* {2}push:\n {4}branches: \[main\]\n/m);
 });
 
+test('the stack section says hosted CI runs on every stack member at its own base', () => {
+  const root = path.resolve(__dirname, '..');
+  const state = fs.readFileSync(path.join(root, 'docs', 'state.md'), 'utf8');
+  assert.match(state, /Hosted CI runs on every stack member at its own base\. `ci\.yml` has no base filter on pull requests\b/);
+});
+
 function run(name, conclusion = 'success', status = 'completed', app = 'github-actions', id = 1) {
   return { name, conclusion, status, app: { slug: app }, check_suite: { id } };
 }
