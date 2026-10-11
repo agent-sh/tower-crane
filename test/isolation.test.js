@@ -4,6 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const os = require('node:os');
 const cp = require('node:child_process');
 const { makeRepo, ROOT, BIN, detachedAlive } = require('./helpers');
 const A = require('../lib/agents');
@@ -817,6 +818,47 @@ test('codex never names a hidden path inside another hidden directory', { skip: 
   assert.ok(hidden.includes(fs.realpathSync(path.join(u.home, '.claude'))), 'the store itself stays hidden');
   const nested = hidden.filter(p => hidden.some(dir => p !== dir && p.startsWith(dir + path.sep)));
   assert.deepEqual(nested, [], 'no hidden path is named inside a hidden directory');
+});
+
+test('a hidden store link to the harness program leaves it runnable; other programs stay hidden', { skip: NO_STUBS }, t => {
+  // Seen 2026-10-12: ~/.codex/tmp/arg0/*/codex-linux-sandbox links to the codex
+  // binary, and hiding that target stopped every Codex worker from starting.
+  const { h, u, wt } = setup(t);
+  const codex = require(path.join(ROOT, 'lib', 'spawn')).findExecutable('codex', wt, true, u.env);
+  assert.ok(codex, 'the codex stub is on PATH');
+  const helper = path.join(h.base, 'dotfiles', 'api-key-helper');
+  fs.mkdirSync(path.dirname(helper), { recursive: true });
+  fs.writeFileSync(helper, '#!/bin/sh\necho LINKED-SECRET\n', { mode: 0o755 });
+  const arg0 = path.join(u.home, '.codex', 'tmp', 'arg0', 'codex-arg0X');
+  fs.mkdirSync(arg0, { recursive: true });
+  fs.symlinkSync(codex, path.join(arg0, 'codex-linux-sandbox'));
+  fs.symlinkSync(helper, path.join(arg0, 'helper'));
+  // A wrapper on PATH can hide the install; the codex package's binary still counts.
+  const vendored = path.join(h.base, 'npm', 'node_modules', '@openai', 'codex', 'node_modules', '@openai', 'codex-linux-x64', 'vendor', 'codex');
+  fs.mkdirSync(path.dirname(vendored), { recursive: true });
+  fs.writeFileSync(vendored, '#!/bin/sh\n', { mode: 0o755 });
+  fs.symlinkSync(vendored, path.join(arg0, 'codex-execve-wrapper'));
+  isolated(h, 'medium', 'codex');
+  const started = spawn(h, u, 'medium');
+  const config = TOML.parse(fs.readFileSync(path.join(h.state, 'homes', started.agent, 'config.toml'), 'utf8'));
+  const rules = config.permissions['tower-crane'].filesystem;
+  assert.notEqual(rules[fs.realpathSync(codex)], 'none', 'the harness program stays runnable');
+  assert.notEqual(rules[fs.realpathSync(vendored)], 'none', 'the codex package binary stays runnable');
+  assert.equal(rules[fs.realpathSync(helper)], 'none', 'a script that prints a secret stays hidden');
+});
+
+test('harness roots cover an npm package, never a whole bin directory', { skip: process.platform === 'win32' && 'shebang bins' }, t => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'tc-roots-'));
+  t.after(() => fs.rmSync(base, { recursive: true, force: true }));
+  const pkg = path.join(base, 'lib', 'node_modules', '@openai', 'codex');
+  fs.mkdirSync(path.join(pkg, 'bin'), { recursive: true });
+  fs.writeFileSync(path.join(pkg, 'bin', 'codex.js'), '#!/usr/bin/env node\n', { mode: 0o755 });
+  const bin = path.join(base, 'bin');
+  fs.mkdirSync(bin);
+  fs.symlinkSync(path.join(pkg, 'bin', 'codex.js'), path.join(bin, 'codex'));
+  fs.writeFileSync(path.join(bin, 'claude'), '#!/bin/sh\n', { mode: 0o755 });
+  const roots = require(path.join(ROOT, 'lib', 'agents')).harnessRoots({ cwd: base, env: { PATH: bin } });
+  assert.deepEqual(roots.sort(), [fs.realpathSync(path.join(bin, 'claude')), fs.realpathSync(pkg)].sort());
 });
 
 test('credential symlinks hide their targets and cannot import them into startup', { skip: NO_STUBS }, t => {
