@@ -302,9 +302,20 @@ test('without the setting, the orchestrator answers a worker technical decision;
   assert.match(escalated.stderr, /D3 escalates budget\.raise to the owner/);
   assert.deepEqual(events(h), before, 'refused owner-only answers write no event');
 
+  // The owner's --technical false on a technical decision keeps it with the owner, and the inbox says so.
+  h.ok(['ask', '--kind', 'technical', '--question', 'Index by name or id?', '--option', 'name', '--option', 'id'], worker);
+  h.ok(['ask', '--kind', 'technical', '--question', 'Cache layout?', '--option', 'flat', '--option', 'nested'], worker);
+  h.ok(['decision', 'delegate', 'D5', '--technical', 'false', '--agent', 'owner']);
+  const unmarked = h.run(['answer', 'D5', '--choice', 'flat', '--agent', 'orchestrator']);
+  assert.equal(unmarked.code, 1, unmarked.stderr);
+  assert.match(unmarked.stderr, /only the owner with explicit identity can answer D5/);
+  const actions = Object.fromEntries(h.json(['inbox', '--agent', 'orchestrator']).items
+    .filter((i) => i.kind === 'decision').map((i) => [i.decision.id, i.action.argv.at(-1)]));
+  assert.deepEqual(actions, { D2: '<owner answer>', D3: '<owner answer>', D4: '<answer>', D5: '<owner answer>' });
+
   h.ok(['project', 'set', '--decision-delegation', '{"orchestrator_technical":false}', '--agent', 'owner']);
   h.ok(['ask', '--kind', 'technical', '--question', 'Cache in memory or disk?', '--option', 'memory', '--option', 'disk'], worker);
-  const kept = h.run(['answer', 'D4', '--choice', 'memory', '--agent', 'orchestrator']);
+  const kept = h.run(['answer', 'D6', '--choice', 'memory', '--agent', 'orchestrator']);
   assert.equal(kept.code, 1, kept.stderr);
   assert.match(kept.stderr, /only the owner/);
 });
