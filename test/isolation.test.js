@@ -801,6 +801,24 @@ function assertCredentialsHidden(seen, files) {
     `${seen.harness}: credential paths must be denied by the sandbox and file tools`);
 }
 
+test('codex never names a hidden path inside another hidden directory', { skip: NO_STUBS }, t => {
+  // Seen 2026-10-12: ~/.claude/debug/latest links to a file in the same hidden
+  // store, and Codex's bwrap could not mount over it inside the masked parent.
+  const { h, u } = setup(t);
+  const debug = path.join(u.home, '.claude', 'debug');
+  fs.mkdirSync(debug, { recursive: true });
+  fs.writeFileSync(path.join(debug, 'session.txt'), 'log\n');
+  fs.symlinkSync(path.join(debug, 'session.txt'), path.join(debug, 'latest'));
+  isolated(h, 'medium', 'codex');
+  const started = spawn(h, u, 'medium');
+  const config = TOML.parse(fs.readFileSync(path.join(h.state, 'homes', started.agent, 'config.toml'), 'utf8'));
+  const rules = config.permissions['tower-crane'].filesystem;
+  const hidden = Object.keys(rules).filter(p => rules[p] === 'none');
+  assert.ok(hidden.includes(fs.realpathSync(path.join(u.home, '.claude'))), 'the store itself stays hidden');
+  const nested = hidden.filter(p => hidden.some(dir => p !== dir && p.startsWith(dir + path.sep)));
+  assert.deepEqual(nested, [], 'no hidden path is named inside a hidden directory');
+});
+
 test('credential symlinks hide their targets and cannot import them into startup', { skip: NO_STUBS }, t => {
   const { h, u, wt } = setup(t);
   const outside = path.join(h.base, 'outside-credentials');
