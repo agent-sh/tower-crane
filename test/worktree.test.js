@@ -398,6 +398,36 @@ test('a registration interrupted before HEAD exists is refused without deleting 
   assert.equal(fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8'), before);
 });
 
+test('a rework recreated after a newer submission from another checkout starts from that submission, not a stale tracking ref', (t) => {
+  const h = setup(t);
+  h.ok(['claim', 'T1', '--agent', 'w-1']);
+  const wt = h.json(['worktree', 'T1']);
+  fs.writeFileSync(path.join(wt.path, 'first.txt'), 'first\n');
+  h.git(['add', 'first.txt'], wt.path);
+  h.git(['commit', '-qm', 'first'], wt.path);
+  h.git(['push', 'origin', wt.branch], wt.path);
+  h.ok(['submit', 'T1', '--sha', h.git(['rev-parse', 'HEAD'], wt.path), '--agent', 'w-1']);
+  h.ok(['rework', 'T1', '--reason', 'revise the first head', '--agent', 'owner']);
+  h.ok(['claim', 'T1', '--agent', 'w-2']);
+
+  // Another checkout pushes and submits a newer head; this checkout's tracking ref still names the first.
+  h.git(['fetch', '-q', 'origin', wt.branch], h.upstream);
+  h.git(['checkout', '-q', '-B', wt.branch, `origin/${wt.branch}`], h.upstream);
+  fs.writeFileSync(path.join(h.upstream, 'second.txt'), 'second\n');
+  h.git(['add', 'second.txt'], h.upstream);
+  h.git(['commit', '-qm', 'second'], h.upstream);
+  const second = h.git(['rev-parse', 'HEAD'], h.upstream);
+  h.git(['push', 'origin', wt.branch], h.upstream);
+  h.ok(['submit', 'T1', '--sha', second, '--agent', 'w-2']);
+  h.ok(['rework', 'T1', '--reason', 'revise the second head', '--agent', 'owner']);
+
+  h.git(['worktree', 'remove', '--force', wt.path]);
+  h.git(['branch', '-D', wt.branch]);
+  const again = h.json(['worktree', 'T1']);
+  assert.equal(again.created, true);
+  assert.equal(h.git(['rev-parse', 'HEAD'], again.path), second);
+});
+
 test('cancelling a task removes its worktree; a dirty one stays and says why', (t) => {
   const h = makeRepo(t);
   h.init();

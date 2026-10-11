@@ -6,6 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');
 const { cachedFixture, real, BIN, PTY_AVAILABLE } = require('./helpers');
+const stack = require('./stack-fixture');
 const A = require('../lib/agents');
 const S = require('../lib/state');
 const SHORT_WAIT = path.join(__dirname, 'fixtures', 'lock-wait.js');
@@ -847,4 +848,25 @@ test('spawn runs the rung of the tier and ladder it finds under the lock, not th
   assert.ok(!fs.existsSync(out));
   const spawns = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l)).filter((e) => e.cmd === 'spawn');
   assert.equal(spawns.length, 1);
+});
+
+test('spawn refuses a stacked rework with claim\'s reason when its dependency went back to in_progress, before its worktree work', (t) => {
+  const f = stack.stacked(t);
+  stack.worker(f);
+  // T2's worktree is prepared on T1's head. T1 then takes a new head and goes back to in_progress.
+  f.h.ok(['rework', 'T2', '--reason', 'more upper work']);
+  stack.resubmit(f, false);
+  f.h.ok(['rework', 'T1', '--reason', 'more lower work']);
+  f.h.ok(['claim', 'T1', '--agent', 'worker-T1']);
+  // The stack is not linked on GitHub, so T2's worktree is stale and must be revalidated at dispatch.
+  const state = f.h.readState('tasks.json');
+  state.tasks.find((item) => item.id === 'T2').stack.linked = false;
+  f.h.writeState('tasks.json', state);
+  f.write((d) => { d.linked = false; });
+
+  const r = f.h.run(['spawn', '--task', 'T2']);
+  assert.equal(r.code, 1, r.stdout + r.stderr);
+  assert.match(r.stderr, /T2 is blocked: depends on T1 \(in_progress\)/);
+  assert.doesNotMatch(r.stderr, /prepared on T1|before dispatch/);
+  assert.equal(f.h.json(['task', 'show', 'T2']).status, 'rework');
 });

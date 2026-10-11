@@ -463,10 +463,11 @@ test('missing expanded command fallback executables are skipped during preparati
 
 test('a detached switch wakes a live waiter, keeps its lease, and collects route usage on exit', async (t) => {
   const h = setup(t);
+  const finish = path.join(h.base, 'finish-fallback');
   const cursor = events(h).at(-1).id;
   const waiting = h.runAsync(['wait', '--after', cursor, '--types', 'spawn-fallback', '--timeout', '10']);
   const spawn = h.json(['spawn', '--task', 'T1'], {
-    env: { ...h.spawnEnv, TOWER_CRANE_TEST_FALLBACK_HOLD: '1800' },
+    env: { ...h.spawnEnv, TOWER_CRANE_TEST_FALLBACK_FINISH: finish },
   });
   const wake = await waiting;
   assert.equal(wake.code, 0, wake.stderr);
@@ -476,9 +477,15 @@ test('a detached switch wakes a live waiter, keeps its lease, and collects route
   assert.deepEqual(h.json(['status']).exited_claims, []);
   assert.equal(h.json(['task', 'show', 'T1']).claim.agent, spawn.agent);
   assert.equal(h.run(['release', 'T1', '--agent', 'recovery', '--reason', 'too early']).code, 1);
-  await until(() => h.json(['task', 'show', 'T1']).spend.entries?.length === 2, 'detached route usage was not collected');
+  fs.writeFileSync(finish, '');
+  await until(() => {
+    const entries = h.readState('tasks.json').tasks[0].spend.entries;
+    return entries?.length === 2 && entries.every((entry) => !entry.live)
+      && events(h).some((e) => e.cmd === 'worker-exited' && e.detail.agent === spawn.agent);
+  }, 'detached route usage and exit receipt were not collected');
   const task = h.json(['task', 'show', 'T1']);
   assert.equal(task.run.phase, 'waiting');
   assert.deepEqual(task.spend.entries.map((e) => [e.model, e.tokens]), [['first', 39], ['second', 13]]);
+  assert.ok(task.spend.entries.every((entry) => !entry.live), 'both routes have finalized usage');
   assert.equal(events(h).filter((e) => e.cmd === 'worker-exited').length, 1);
 });
