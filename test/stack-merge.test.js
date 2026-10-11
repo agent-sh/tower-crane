@@ -77,6 +77,13 @@ test('a stale local stack uses the single PR merge path after confirming its low
   assert.match(f.h.ok(['status']), /submitted: T2/);
   assert.doesNotMatch(f.h.ok(['task', 'show', 'T2']), /stack: after T1/);
   assert.doesNotMatch(fs.readFileSync(path.join(f.h.state, 'sketch.html'), 'utf8'), /stack after T1/);
+  f.h.git(['update-ref', '-d', `refs/heads/${f.lower.branch}`]);
+  f.h.git(['update-ref', '-d', `refs/remotes/origin/${f.lower.branch}`]);
+  const submission = f.h.json(['submit', 'T2', '--sha', f.upper.sha, '--agent', 'worker-T2']);
+  assert.equal(submission.scope.error, undefined, 'submission reads its diff against main after the lower branch disappears');
+  f.write((d) => { Object.assign(d.prs[12], { mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }); });
+  f.h.ok(['check', 'ci', 'T2']);
+  f.h.json(['spawn', '--task', 'T2', '--role', 'review', '--dry-run']);
   f.accept('T2');
   f.h.ok(['merge', 'T2']);
   assert.deepEqual(routes(f), ['pr 12', 'async 12']);
