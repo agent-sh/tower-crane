@@ -16666,5 +16666,970 @@
       },
       "log_sha256": "523a6598c8c2dc3b99f89f5031593a4b3fff18f0f6da9f1ed426d1c74e72367c"
     }
+  },
+  "expression_review_fix": {
+    "reviewed_head": "402ecf858305e9d16504d72b5157b29c033139c4",
+    "baseline": "c8a5ed2423497f89105a03fa12eb6cbb055cc100",
+    "measured_code_head": "196cca99103dd30cf15c42b9aa19f529c880a943",
+    "baseline_note": "Automation baseline is 1/3: two gate-executor ordering cases hit the 300-second hung guard; the focused corrected-head case and all five after files pass. Other baseline files have two passing samples.",
+    "rows": [
+      {
+        "file": "test/signal-waits.test.js",
+        "before": {
+          "runs": [
+            {
+              "file": "test/signal-waits.test.js",
+              "label": "before",
+              "run": 1,
+              "sha": "c8a5ed2423497f89105a03fa12eb6cbb055cc100",
+              "status": 0,
+              "wall_s": 0.4650430229958147,
+              "load_before": [
+                11.3603515625,
+                9.47900390625,
+                10.388671875
+              ],
+              "load_after": [
+                11.3603515625,
+                9.47900390625,
+                10.388671875
+              ],
+              "cpu_load_processes": 2,
+              "tests": {
+                "tests": 4,
+                "pass": 4,
+                "fail": 0,
+                "cancelled": 0,
+                "skipped": 0
+              },
+              "log_sha256": "d36ee75ae937e94397a72e93afbd1a19b2e7faf0373e92e9604be339cdd1f63d"
+            },
+            {
+              "file": "test/signal-waits.test.js",
+              "label": "before",
+              "run": 2,
+              "sha": "c8a5ed2423497f89105a03fa12eb6cbb055cc100",
+              "status": 0,
+              "wall_s": 0.46558473000186495,
+              "load_before": [
+                11.3603515625,
+                9.47900390625,
+                10.388671875
+              ],
+              "load_after": [
+                11.89208984375,
+                9.62060546875,
+                10.4296875
+              ],
+              "cpu_load_processes": 2,
+              "tests": {
+                "tests": 4,
+                "pass": 4,
+                "fail": 0,
+                "cancelled": 0,
+                "skipped": 0
+              },
+              "log_sha256": "027b74d8b0beca4bf2131f371651b392e0bfb76b88ea1a2b13157c86a79031c8"
+            }
+          ],
+          "passed_runs": 2,
+          "wall_s": {
+            "median": 0.4653138764988398,
+            "min": 0.4650430229958147,
+            "max": 0.46558473000186495
+          }
+        },
+        "after": {
+          "runs": [
+            {
+              "file": "test/signal-waits.test.js",
+              "label": "after",
+              "run": 1,
+              "sha": "196cca99103dd30cf15c42b9aa19f529c880a943",
+              "status": 0,
+              "wall_s": 0.514953145000618,
+              "load_before": [
+                11.89208984375,
+                9.62060546875,
+                10.4296875
+              ],
+              "load_after": [
+                11.89208984375,
+                9.62060546875,
+                10.4296875
+              ],
+              "cpu_load_processes": 2,
+              "tests": {
+                "tests": 4,
+                "pass": 4,
+                "fail": 0,
+                "cancelled": 0,
+                "skipped": 0
+              },
+              "log_sha256": "f85504ca981f87fca7fbaddcf578e4480b000d34e8b445c6dd2f05ec42d93597"
+            },
+            {
+              "file": "test/signal-waits.test.js",
+              "label": "after",
+              "run": 2,
+              "sha": "196cca99103dd30cf15c42b9aa19f529c880a943",
+              "status": 0,
+              "wall_s": 0.5150865800096653,
+              "load_before": [
+                11.89208984375,
+                9.62060546875,
+                10.4296875
+              ],
+              "load_after": [
+                11.89208984375,
+                9.62060546875,
+                10.4296875
+              ],
+              "cpu_load_processes": 2,
+              "tests": {
+                "tests": 4,
+                "pass": 4,
+                "fail": 0,
+                "cancelled": 0,
+                "skipped": 0
+              },
+              "log_sha256": "3e1578b480b479e945b46fc6482037d11d81a9faf788c63017a3af651cc66436"
+            },
+            {
+              "file": "test/signal-waits.test.js",
+              "label": "after",
+              "run": 3,
+              "sha": "196cca99103dd30cf15c42b9aa19f529c880a943",
+              "status": 0,
+              "wall_s": 0.5652558379952097,
+              "load_before": [
+                11.89208984375,
+                9.62060546875,
+                10.4296875
+              ],
+              "load_after": [
+                11.89208984375,
+                9.62060546875,
+                10.4296875
+              ],
+              "cpu_load_processes": 2,
+              "tests": {
+                "tests": 4,
+                "pass": 4,
+                "fail": 0,
+                "cancelled": 0,
+                "skipped": 0
+              },
+              "log_sha256": "a9efff5047b1e6af2571ee3f30db825aa983c65ab8bbed43043140dc09b77ca0"
+            },
+            {
+              "file": "test/signal-waits.test.js",
+              "label": "after",
+              "run": 4,
+              "sha": "196cca99103dd30cf15c42b9aa19f529c880a943",
+              "status": 0,
+              "wall_s": 0.565039834997151,
+              "load_before": [
+                11.89208984375,
+                9.62060546875,
+                10.4296875
+              ],
+              "load_after": [
+                11.89208984375,
+                9.62060546875,
+                10.4296875
+              ],
+              "cpu_load_processes": 2,
+              "tests": {
+                "tests": 4,
+                "pass": 4,
+                "fail": 0,
+                "cancelled": 0,
+                "skipped": 0
+              },
+              "log_sha256": "080c3441d124c097b524f72b0c2ec402999ef13385665b78db7192e587441b18"
+            },
+            {
+              "file": "test/signal-waits.test.js",
+              "label": "after",
+              "run": 5,
+              "sha": "196cca99103dd30cf15c42b9aa19f529c880a943",
+              "status": 0,
+              "wall_s": 0.5657440250070067,
+              "load_before": [
+                11.89208984375,
+                9.62060546875,
+                10.4296875
+              ],
+              "load_after": [
+                11.89208984375,
+                9.62060546875,
+                10.4296875
+              ],
+              "cpu_load_processes": 2,
+              "tests": {
+                "tests": 4,
+                "pass": 4,
+                "fail": 0,
+                "cancelled": 0,
+                "skipped": 0
+              },
+              "log_sha256": "3296f2291b29cced8baacb68804cd773c19106850f6044f32a6ae1e7df692fbd"
+            }
+          ],
+          "passed_runs": 5,
+          "wall_s": {
+            "median": 0.565039834997151,
+            "min": 0.514953145000618,
+            "max": 0.5657440250070067
+          }
+        }
+      },
+      {
+        "file": "test/state-storage.test.js",
+        "before": {
+          "runs": [
+            {
+              "file": "test/state-storage.test.js",
+              "label": "before",
+              "run": 1,
+              "sha": "c8a5ed2423497f89105a03fa12eb6cbb055cc100",
+              "status": 0,
+              "wall_s": 2.5184680000093067,
+              "load_before": [
+                11.3603515625,
+                9.47900390625,
+                10.388671875
+              ],
+              "load_after": [
+                11.89208984375,
+                9.62060546875,
+                10.4296875
+              ],
+              "cpu_load_processes": 2,
+              "tests": {
+                "tests": 5,
+                "pass": 5,
+                "fail": 0,
+                "cancelled": 0,
+                "skipped": 0
+              },
+              "log_sha256": "e1cd0a0d3100d54989823553812cefc5890b78f06e52ea2633f65359d4dde31c"
+            },
+            {
+              "file": "test/state-storage.test.js",
+              "label": "before",
+              "run": 2,
+              "sha": "c8a5ed2423497f89105a03fa12eb6cbb055cc100",
+              "status": 0,
+              "wall_s": 2.469371498998953,
+              "load_before": [
+                11.89208984375,
+                9.62060546875,
+                10.4296875
+              ],
+              "load_after": [
+                11.89208984375,
+                9.62060546875,
+                10.4296875
+              ],
+              "cpu_load_processes": 2,
+              "tests": {
+                "tests": 5,
+                "pass": 5,
+                "fail": 0,
+                "cancelled": 0,
+                "skipped": 0
+              },
+              "log_sha256": "d0f87a9ba67f7afc3b48fb8cb443e1f42927c0d708b50081afbf3e7e0bdd6a9a"
+            }
+          ],
+          "passed_runs": 2,
+          "wall_s": {
+            "median": 2.49391974950413,
+            "min": 2.469371498998953,
+            "max": 2.5184680000093067
+          }
+        },
+        "after": {
+          "runs": [
+            {
+              "file": "test/state-storage.test.js",
+              "label": "after",
+              "run": 1,
+              "sha": "196cca99103dd30cf15c42b9aa19f529c880a943",
+              "status": 0,
+              "wall_s": 2.4685593800095376,
+              "load_before": [
+                11.89208984375,
+                9.62060546875,
+                10.4296875
+              ],
+              "load_after": [
+                12.14111328125,
+                9.7099609375,
+                10.45458984375
+              ],
+              "cpu_load_processes": 2,
+              "tests": {
+                "tests": 5,
+                "pass": 5,
+                "fail": 0,
+                "cancelled": 0,
+                "skipped": 0
+              },
+              "log_sha256": "c5a3d47b0c8bae756af7b5cb9c28ad8bdcc6af74273623dbe1ff3649e144902c"
+            },
+            {
+              "file": "test/state-storage.test.js",
+              "label": "after",
+              "run": 2,
+              "sha": "196cca99103dd30cf15c42b9aa19f529c880a943",
+              "status": 0,
+              "wall_s": 2.51831116899848,
+              "load_before": [
+                12.14111328125,
+                9.7099609375,
+                10.45458984375
+              ],
+              "load_after": [
+                12.14111328125,
+                9.7099609375,
+                10.45458984375
+              ],
+              "cpu_load_processes": 2,
+              "tests": {
+                "tests": 5,
+                "pass": 5,
+                "fail": 0,
+                "cancelled": 0,
+                "skipped": 0
+              },
+              "log_sha256": "ffab0ff09eda78ea474d867c6d32da7d258b005c950932366ba1dd5b6aea468c"
+            },
+            {
+              "file": "test/state-storage.test.js",
+              "label": "after",
+              "run": 3,
+              "sha": "196cca99103dd30cf15c42b9aa19f529c880a943",
+              "status": 0,
+              "wall_s": 2.4183349079976324,
+              "load_before": [
+                12.14111328125,
+                9.7099609375,
+                10.45458984375
+              ],
+              "load_after": [
+                12.3701171875,
+                9.7978515625,
+                10.47900390625
+              ],
+              "cpu_load_processes": 2,
+              "tests": {
+                "tests": 5,
+                "pass": 5,
+                "fail": 0,
+                "cancelled": 0,
+                "skipped": 0
+              },
+              "log_sha256": "50a8ab7fc879a49c995824dee43821246bf726b79b5aea0504eedbc83bb1ea63"
+            },
+            {
+              "file": "test/state-storage.test.js",
+              "label": "after",
+              "run": 4,
+              "sha": "196cca99103dd30cf15c42b9aa19f529c880a943",
+              "status": 0,
+              "wall_s": 2.4684653779986547,
+              "load_before": [
+                12.3701171875,
+                9.7978515625,
+                10.47900390625
+              ],
+              "load_after": [
+                12.3701171875,
+                9.7978515625,
+                10.47900390625
+              ],
+              "cpu_load_processes": 2,
+              "tests": {
+                "tests": 5,
+                "pass": 5,
+                "fail": 0,
+                "cancelled": 0,
+                "skipped": 0
+              },
+              "log_sha256": "f19a0b748a6d7e7eac51571a5eff6b7a4e1d2d82edd3e09c7da57310e4171326"
+            },
+            {
+              "file": "test/state-storage.test.js",
+              "label": "after",
+              "run": 5,
+              "sha": "196cca99103dd30cf15c42b9aa19f529c880a943",
+              "status": 0,
+              "wall_s": 2.4683280839963118,
+              "load_before": [
+                12.3701171875,
+                9.7978515625,
+                10.47900390625
+              ],
+              "load_after": [
+                12.34033203125,
+                9.83447265625,
+                10.4873046875
+              ],
+              "cpu_load_processes": 2,
+              "tests": {
+                "tests": 5,
+                "pass": 5,
+                "fail": 0,
+                "cancelled": 0,
+                "skipped": 0
+              },
+              "log_sha256": "b009df134f1c1b7e8f1e657980844a683ffe15eb9fddde0f58714255f155c528"
+            }
+          ],
+          "passed_runs": 5,
+          "wall_s": {
+            "median": 2.4684653779986547,
+            "min": 2.4183349079976324,
+            "max": 2.51831116899848
+          }
+        }
+      },
+      {
+        "file": "test/orchestrator.test.js",
+        "before": {
+          "runs": [
+            {
+              "file": "test/orchestrator.test.js",
+              "label": "before",
+              "run": 1,
+              "sha": "c8a5ed2423497f89105a03fa12eb6cbb055cc100",
+              "status": 0,
+              "wall_s": 3.069710016003228,
+              "load_before": [
+                11.89208984375,
+                9.62060546875,
+                10.4296875
+              ],
+              "load_after": [
+                12.14111328125,
+                9.7099609375,
+                10.45458984375
+              ],
+              "cpu_load_processes": 2,
+              "tests": {
+                "tests": 7,
+                "pass": 7,
+                "fail": 0,
+                "cancelled": 0,
+                "skipped": 0
+              },
+              "log_sha256": "39e97f9082b6b2af1367d6a29bd58b7ac79f731c43cf2f67f4eeed3fc0af9c7a"
+            },
+            {
+              "file": "test/orchestrator.test.js",
+              "label": "before",
+              "run": 2,
+              "sha": "c8a5ed2423497f89105a03fa12eb6cbb055cc100",
+              "status": 0,
+              "wall_s": 3.120070664997911,
+              "load_before": [
+                12.14111328125,
+                9.7099609375,
+                10.45458984375
+              ],
+              "load_after": [
+                12.14111328125,
+                9.7099609375,
+                10.45458984375
+              ],
+              "cpu_load_processes": 2,
+              "tests": {
+                "tests": 7,
+                "pass": 7,
+                "fail": 0,
+                "cancelled": 0,
+                "skipped": 0
+              },
+              "log_sha256": "1c445486dffea569dd6114e68a14794824e9cda85c2f712c68b23ac4fff53322"
+            }
+          ],
+          "passed_runs": 2,
+          "wall_s": {
+            "median": 3.0948903405005694,
+            "min": 3.069710016003228,
+            "max": 3.120070664997911
+          }
+        },
+        "after": {
+          "runs": [
+            {
+              "file": "test/orchestrator.test.js",
+              "label": "after",
+              "run": 1,
+              "sha": "196cca99103dd30cf15c42b9aa19f529c880a943",
+              "status": 0,
+              "wall_s": 3.019525226991391,
+              "load_before": [
+                12.14111328125,
+                9.7099609375,
+                10.45458984375
+              ],
+              "load_after": [
+                12.3701171875,
+                9.7978515625,
+                10.47900390625
+              ],
+              "cpu_load_processes": 2,
+              "tests": {
+                "tests": 7,
+                "pass": 7,
+                "fail": 0,
+                "cancelled": 0,
+                "skipped": 0
+              },
+              "log_sha256": "652a80bacf8f1f166f3f97c48b05727f232313b38913eae2cd55de21a4ce2da6"
+            },
+            {
+              "file": "test/orchestrator.test.js",
+              "label": "after",
+              "run": 2,
+              "sha": "196cca99103dd30cf15c42b9aa19f529c880a943",
+              "status": 0,
+              "wall_s": 3.0691832680022344,
+              "load_before": [
+                12.3701171875,
+                9.7978515625,
+                10.47900390625
+              ],
+              "load_after": [
+                12.34033203125,
+                9.83447265625,
+                10.4873046875
+              ],
+              "cpu_load_processes": 2,
+              "tests": {
+                "tests": 7,
+                "pass": 7,
+                "fail": 0,
+                "cancelled": 0,
+                "skipped": 0
+              },
+              "log_sha256": "65409444d3ad1db37a00c51fecea46b5f94f7adb1e17c1ef38fa123e40e42340"
+            },
+            {
+              "file": "test/orchestrator.test.js",
+              "label": "after",
+              "run": 3,
+              "sha": "196cca99103dd30cf15c42b9aa19f529c880a943",
+              "status": 0,
+              "wall_s": 3.0695746499986853,
+              "load_before": [
+                12.34033203125,
+                9.83447265625,
+                10.4873046875
+              ],
+              "load_after": [
+                12.34033203125,
+                9.83447265625,
+                10.4873046875
+              ],
+              "cpu_load_processes": 2,
+              "tests": {
+                "tests": 7,
+                "pass": 7,
+                "fail": 0,
+                "cancelled": 0,
+                "skipped": 0
+              },
+              "log_sha256": "cde1f256359aaa8c2462d69800fe782ca49a00473761dcb85789fcde657f6541"
+            },
+            {
+              "file": "test/orchestrator.test.js",
+              "label": "after",
+              "run": 4,
+              "sha": "196cca99103dd30cf15c42b9aa19f529c880a943",
+              "status": 0,
+              "wall_s": 3.019084521001787,
+              "load_before": [
+                12.34033203125,
+                9.83447265625,
+                10.4873046875
+              ],
+              "load_after": [
+                12.3935546875,
+                9.88720703125,
+                10.5009765625
+              ],
+              "cpu_load_processes": 2,
+              "tests": {
+                "tests": 7,
+                "pass": 7,
+                "fail": 0,
+                "cancelled": 0,
+                "skipped": 0
+              },
+              "log_sha256": "1e01d93710f06deb7142b2dbd4abdf04696b1071df19ba57b2e0b048284fc6ad"
+            },
+            {
+              "file": "test/orchestrator.test.js",
+              "label": "after",
+              "run": 5,
+              "sha": "196cca99103dd30cf15c42b9aa19f529c880a943",
+              "status": 0,
+              "wall_s": 3.01929492400086,
+              "load_before": [
+                12.3935546875,
+                9.88720703125,
+                10.5009765625
+              ],
+              "load_after": [
+                12.3935546875,
+                9.88720703125,
+                10.5009765625
+              ],
+              "cpu_load_processes": 2,
+              "tests": {
+                "tests": 7,
+                "pass": 7,
+                "fail": 0,
+                "cancelled": 0,
+                "skipped": 0
+              },
+              "log_sha256": "82c6be2d7d3a68ed48bc162b1aeee2359c62e0ec2173130db37c61f3c1823572"
+            }
+          ],
+          "passed_runs": 5,
+          "wall_s": {
+            "median": 3.019525226991391,
+            "min": 3.019084521001787,
+            "max": 3.0695746499986853
+          }
+        }
+      },
+      {
+        "file": "test/automation.test.js",
+        "before": {
+          "runs": [
+            {
+              "file": "test/automation.test.js",
+              "label": "before",
+              "run": 1,
+              "sha": "c8a5ed2423497f89105a03fa12eb6cbb055cc100",
+              "status": 1,
+              "wall_s": 575.5518116989988,
+              "load_before": [
+                12.34033203125,
+                9.83447265625,
+                10.4873046875
+              ],
+              "load_after": [
+                14.73193359375,
+                13.28759765625,
+                11.8291015625
+              ],
+              "cpu_load_processes": 2,
+              "tests": {
+                "tests": 68,
+                "pass": 67,
+                "fail": 0,
+                "cancelled": 1,
+                "skipped": 0
+              },
+              "log_sha256": "392b8d4fbd57d577b306f554e128c9df1ba38225ace345cba4cde888f9bc29c0"
+            },
+            {
+              "file": "test/automation.test.js",
+              "label": "before",
+              "run": 2,
+              "sha": "c8a5ed2423497f89105a03fa12eb6cbb055cc100",
+              "status": 0,
+              "wall_s": 266.20590454299236,
+              "load_before": [
+                14.73193359375,
+                13.28759765625,
+                11.8291015625
+              ],
+              "load_after": [
+                14.5107421875,
+                14.01953125,
+                12.5
+              ],
+              "cpu_load_processes": 2,
+              "tests": {
+                "tests": 68,
+                "pass": 68,
+                "fail": 0,
+                "cancelled": 0,
+                "skipped": 0
+              },
+              "log_sha256": "600c3a05f7d0957a5984e47aa0cdf7b70edb80c9532d49a9201d6a9ec7cae26a"
+            },
+            {
+              "file": "test/automation.test.js",
+              "label": "before",
+              "run": 3,
+              "sha": "c8a5ed2423497f89105a03fa12eb6cbb055cc100",
+              "status": 1,
+              "wall_s": 579.4982529929985,
+              "load_before": [
+                12.62890625,
+                13.4462890625,
+                12.59375
+              ],
+              "load_after": [
+                13.87548828125,
+                14.6123046875,
+                13.58203125
+              ],
+              "cpu_load_processes": 2,
+              "tests": {
+                "tests": 68,
+                "pass": 67,
+                "fail": 0,
+                "cancelled": 1,
+                "skipped": 0
+              },
+              "log_sha256": "140cd3a0ee2d3a00974798cc3a8f0df8ce7b9ef35fe5de3f1f8f8da496d941f0"
+            }
+          ],
+          "passed_runs": 1,
+          "wall_s": {
+            "median": 575.5518116989988,
+            "min": 266.20590454299236,
+            "max": 579.4982529929985
+          }
+        },
+        "after": {
+          "runs": [
+            {
+              "file": "test/automation.test.js",
+              "label": "after",
+              "run": 1,
+              "sha": "196cca99103dd30cf15c42b9aa19f529c880a943",
+              "status": 0,
+              "wall_s": 278.63926979800453,
+              "load_before": [
+                14.5107421875,
+                14.01953125,
+                12.5
+              ],
+              "load_after": [
+                13.61083984375,
+                13.6337890625,
+                12.71044921875
+              ],
+              "cpu_load_processes": 2,
+              "tests": {
+                "tests": 68,
+                "pass": 68,
+                "fail": 0,
+                "cancelled": 0,
+                "skipped": 0
+              },
+              "log_sha256": "aa55a369f6f3f612037d485b9e4e612c8795053a862ae45ad7d9cf3aa157abf1"
+            },
+            {
+              "file": "test/automation.test.js",
+              "label": "after",
+              "run": 2,
+              "sha": "196cca99103dd30cf15c42b9aa19f529c880a943",
+              "status": 0,
+              "wall_s": 283.30590216600103,
+              "load_before": [
+                13.61083984375,
+                13.6337890625,
+                12.71044921875
+              ],
+              "load_after": [
+                16.15234375,
+                14.3505859375,
+                13.15673828125
+              ],
+              "cpu_load_processes": 2,
+              "tests": {
+                "tests": 68,
+                "pass": 68,
+                "fail": 0,
+                "cancelled": 0,
+                "skipped": 0
+              },
+              "log_sha256": "81dbdb400af832f60421f974f61542f802b5ac65b2d808e51e0b38a1268c89a8"
+            },
+            {
+              "file": "test/automation.test.js",
+              "label": "after",
+              "run": 3,
+              "sha": "196cca99103dd30cf15c42b9aa19f529c880a943",
+              "status": 0,
+              "wall_s": 278.7926402039884,
+              "load_before": [
+                16.15234375,
+                14.3505859375,
+                13.15673828125
+              ],
+              "load_after": [
+                14.77001953125,
+                14.82470703125,
+                13.6953125
+              ],
+              "cpu_load_processes": 2,
+              "tests": {
+                "tests": 68,
+                "pass": 68,
+                "fail": 0,
+                "cancelled": 0,
+                "skipped": 0
+              },
+              "log_sha256": "5fd2d00e4a1d8c7f13fcfd048785aa6a899fda9a7929b7f6c8b8648a1b1093e9"
+            },
+            {
+              "file": "test/automation.test.js",
+              "label": "after",
+              "run": 4,
+              "sha": "196cca99103dd30cf15c42b9aa19f529c880a943",
+              "status": 0,
+              "wall_s": 275.5827231879957,
+              "load_before": [
+                14.77001953125,
+                14.82470703125,
+                13.6953125
+              ],
+              "load_after": [
+                12.7548828125,
+                13.52001953125,
+                13.44189453125
+              ],
+              "cpu_load_processes": 2,
+              "tests": {
+                "tests": 68,
+                "pass": 68,
+                "fail": 0,
+                "cancelled": 0,
+                "skipped": 0
+              },
+              "log_sha256": "61bbdcbd978bb8b631a7857cdce62635e19391b30fed8c31c318c146635ba6cc"
+            },
+            {
+              "file": "test/automation.test.js",
+              "label": "after",
+              "run": 5,
+              "sha": "196cca99103dd30cf15c42b9aa19f529c880a943",
+              "status": 0,
+              "wall_s": 280.022954236003,
+              "load_before": [
+                12.7548828125,
+                13.52001953125,
+                13.44189453125
+              ],
+              "load_after": [
+                15.62548828125,
+                15.1845703125,
+                14.2421875
+              ],
+              "cpu_load_processes": 2,
+              "tests": {
+                "tests": 68,
+                "pass": 68,
+                "fail": 0,
+                "cancelled": 0,
+                "skipped": 0
+              },
+              "log_sha256": "802f7cc257b43796851b7069018595660dc4b6a62fcee84a8538382ba997db44"
+            }
+          ],
+          "passed_runs": 5,
+          "wall_s": {
+            "median": 278.7926402039884,
+            "min": 275.5827231879957,
+            "max": 283.30590216600103
+          }
+        }
+      }
+    ],
+    "checks": {
+      "red": {
+        "tests": {
+          "tests": 1,
+          "pass": 0,
+          "fail": 1,
+          "cancelled": 0,
+          "skipped": 0
+        },
+        "log_sha256": "22c0a646daeb89fbbb96cd2baeec609c3bb723e16602b92fcc6169a3b143f300"
+      },
+      "green": {
+        "tests": {
+          "tests": 1,
+          "pass": 1,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 0
+        },
+        "log_sha256": "bc2c4aad81a6d12e94efa2bc9d9ba832a693dc8b1ff91048d1ff0da91ccf3819"
+      },
+      "focused-green": {
+        "tests": {
+          "tests": 16,
+          "pass": 16,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 0
+        },
+        "log_sha256": "099b615bb2b7cefb2111286d5dc597f035c90812e30517d878085738c229af72"
+      },
+      "merge-probes": {
+        "tests": {
+          "tests": 5,
+          "pass": 5,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 0
+        },
+        "log_sha256": "c465dfe73919ccebd7b47f719aa8c367be847dac291dc5a941c59622e4fc905b"
+      },
+      "executor-probe": {
+        "tests": {
+          "tests": 1,
+          "pass": 1,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 0
+        },
+        "log_sha256": "8319d322ad9c3d9590b8c2b5ca293a2f7e87bcb04962743e3beaea4de858f58a"
+      },
+      "live-spend-green": {
+        "tests": {
+          "tests": 33,
+          "pass": 33,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 0
+        },
+        "log_sha256": "d19349ebca37cd2487a24cb361b882c4fc5b695aaa87bdf7e87d899ece67fd5f"
+      },
+      "browser-retry": {
+        "tests": {
+          "tests": 1,
+          "pass": 1,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 0
+        },
+        "log_sha256": "2c553695de5938af70cf1b3f327294ac25a0e7e653cb8b4a2cd3e00604be0b03"
+      }
+    },
+    "review_probes": {
+      "before": [
+        "arithmetic default: zero findings",
+        "computed binding: zero findings",
+        "storage expression comparison: zero findings"
+      ],
+      "after": "all are rejected; the storage timing assertion is retained with a nonblocking-lock contract reason"
+    },
+    "reproduction_script": "import concurrent.futures,json,os,pathlib,subprocess,time,hashlib,re\nroot=pathlib.Path.cwd()\ncache=pathlib.Path(os.environ['T166_RECEIPTS'])\nfiles=['test/signal-waits.test.js','test/state-storage.test.js','test/orchestrator.test.js','test/automation.test.js']\nhead=subprocess.check_output(['git','rev-parse','HEAD'],cwd=root,text=True).strip()\nbase=subprocess.check_output(['git','rev-parse','c8a5ed24'],cwd=root,text=True).strip()\nenv={**os.environ,'TOWER_CRANE_TEST_TMP':os.environ['TOWER_CRANE_TEST_TMP']}\nburners=[subprocess.Popen(['nice','-n','15','node','-e','for (;;) Math.sqrt(Math.random());']) for _ in range(2)]\ndef measure(file):\n for label,tree,sha in [('before',cache/'before',base),('after',root,head)]:\n  for i in range(1, 3 if label == 'before' else 6):\n   log=cache/(label+'-'+file.replace('/','_')+'-'+str(i)+'.log')\n   receipt=log.with_suffix('.json')\n   if receipt.exists():continue\n   start=time.monotonic();load=os.getloadavg()\n   with log.open('w') as out:\n    result=subprocess.run(['node',str(tree/'test/run.js'),'--test-concurrency=1',file],cwd=tree,env=env,stdout=out,stderr=subprocess.STDOUT,timeout=1800)\n   text=log.read_text()\n   row={'file':file,'label':label,'run':i,'sha':sha,'status':result.returncode,'wall_s':time.monotonic()-start,'load_before':load,'load_after':os.getloadavg(),'cpu_load_processes':2,'tests':{k:int(re.findall('\u2139 '+k+r' (\\d+)',text)[-1]) for k in ['tests','pass','fail','cancelled','skipped'] if re.findall('\u2139 '+k+r' (\\d+)',text)},'log_sha256':hashlib.sha256(log.read_bytes()).hexdigest()}\n   receipt.write_text(json.dumps(row));print(label,file,i,result.returncode,flush=True)\ntry:\n with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:\n  for result in pool.map(measure,files):pass\nfinally:\n for p in burners:p.terminate()\n for p in burners:p.wait()\n",
+    "extra_baseline_command": "node before/test/run.js --test-concurrency=1 test/automation.test.js (third baseline after differing results)"
   }
 }
