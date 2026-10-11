@@ -102,6 +102,39 @@ test('two live copies of the same harness session cannot both drive the queue', 
   assert.equal((await run(clients[1], ['task', 'note', 'T1', 'released process replaced'])).code, 0);
 });
 
+test('a lease whose holder process exited is released at once, including a reused pid', async (t) => {
+  const h = makeProjectRepo(t);
+  const env = { ...h.env, TOWER_CRANE_AGENT: 'orchestrator', CLAUDE_SESSION_ID: 'restarted-session' };
+  const fork = () => cp.fork(path.join(__dirname, 'fixtures', 'orchestrator-session.js'),
+    [BIN, h.repo], { env, stdio: ['ignore', 'ignore', 'pipe', 'ipc'] });
+  const clients = [fork(), fork()];
+  t.after(() => clients.forEach((client) => client.kill()));
+  const run = (client, args) => new Promise((resolve, reject) => {
+    client.once('error', reject);
+    client.once('message', resolve);
+    client.send(args);
+  });
+  assert.equal((await run(clients[0], ['task', 'add', '--title', 'held', '--acceptance', 'dead holder'])).code, 0);
+  const held = h.readState('tasks.json').orchestrator_lease;
+  assert.equal(held.pid, clients[0].pid);
+  assert.equal((await run(clients[1], ['task', 'note', 'T1', 'refused'])).code, 1, 'a live holder keeps the lease');
+  if (process.platform === 'linux') {
+    // A pid reused by another process does not keep a dead holder's lease.
+    h.writeState('tasks.json', { ...h.readState('tasks.json'), orchestrator_lease: { ...held, start_ticks: '1' } });
+    const reused = await run(clients[1], ['task', 'note', 'T1', 'pid was reused']);
+    assert.equal(reused.code, 0, reused.stderr);
+    assert.equal(h.readState('tasks.json').orchestrator_lease.pid, clients[1].pid);
+    assert.equal((await run(clients[1], ['orchestrator', 'release'])).code, 0);
+    assert.equal((await run(clients[0], ['task', 'note', 'T1', 'holder again'])).code, 0);
+  }
+  const exited = new Promise((resolve) => clients[0].once('exit', resolve));
+  clients[0].kill();
+  await exited;
+  const taken = await run(clients[1], ['task', 'note', 'T1', 'dead holder replaced']);
+  assert.equal(taken.code, 0, taken.stderr);
+  assert.equal(h.readState('tasks.json').orchestrator_lease.pid, clients[1].pid);
+});
+
 test('engine lease bindings reject stale work without extending the idle window', () => {
   const O = require('../lib/orchestrator');
   const old = { session_id: 'old', heartbeat: new Date().toISOString() };
