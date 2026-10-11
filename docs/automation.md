@@ -69,9 +69,11 @@ signal, or a CI run or local CI command that timed out runs the gate once more
 at the same head. Any other failure of a gate that ran, and a retry that fails
 too, sends the task to rework with the gate's summary, which names the failing
 tests and their output tail. A failure of a confirmed quality check on a task with a tier range is
-escalation's: it sends the task back with a climb, as before. A gate that could
-not run, such as a missing pinned command or a change with no test, stays
-submitted for the owner to fix or waive.
+escalation's: it sends the task back with a climb, as before. A change with no
+test, or with no changes against the base, reworks with the gate's reason. A
+missing or uninstalled pinned command is project configuration: the task stays
+submitted, and the inbox shows a `gate_config` item addressed to the
+orchestrator, not the owner, that names the setting. Nothing waits on the owner.
 
 Failures remain visible in gate receipts and task notes. Conflicting PRs
 return to rework with a file list. Unknown mergeability, failed transport,

@@ -659,7 +659,7 @@ test('a test run killed by a signal retries once and reworks when the retry is a
   assert.equal(task.status, 'rework');
 });
 
-test('a test command that cannot run stays submitted for the owner, with no rework', (t) => {
+test('a test command that is not installed stays submitted, and the inbox asks the orchestrator to pin one', (t) => {
   const h = setup(t, { ci: 'pending' });
   h.ok(['project', 'set', '--tests-cmd', 'tower-crane-no-such-tool', '--tests-mode', 'run-only']);
   h.submit();
@@ -669,6 +669,43 @@ test('a test command that cannot run stays submitted for the owner, with no rewo
   assert.equal(task.status, 'submitted');
   assert.equal(task.evidence.filter((e) => e.type === 'tests').at(-1).ok, false);
   assert.equal(h.logs().filter((e) => e.cmd === 'rework').length, 0);
+  const items = h.json(['inbox', '--agent', 'orchestrator']).items.filter((i) => i.kind === 'gate_config');
+  assert.deepEqual(items.map((i) => [i.task, i.gate, i.setting, i.addressed_to]), [['T1', 'tests', 'gates.tests_cmd', 'orchestrator']]);
+  assert.deepEqual(items[0].action.argv.slice(0, 3), ['project', 'set', '--tests-cmd']);
+  assert.equal(h.json(['inbox', '--agent', 'orchestrator']).items.some((i) => i.kind === 'gate_failed'), false, 'no failed-gate item for configuration');
+});
+
+test('a missing pinned test command stays submitted with a gate_config item for the orchestrator, not a rework', (t) => {
+  const h = setup(t, { ci: 'pending' });
+  h.ok(['project', 'set', '--tests-cmd', 'null']);
+  h.submit();
+  h.consume();
+  assert.equal(h.logs().filter((e) => e.cmd === 'check tests').length, 1);
+  const task = h.readState('tasks.json').tasks[0];
+  assert.equal(task.status, 'submitted');
+  assert.deepEqual(task.evidence.filter((e) => e.type === 'tests').at(-1).config_failure, { key: 'tests_cmd' });
+  assert.equal(h.logs().filter((e) => e.cmd === 'rework').length, 0);
+  const item = h.json(['inbox', '--agent', 'orchestrator']).items.find((i) => i.kind === 'gate_config');
+  assert.equal(item.then, 'gates retry T1');
+  assert.match(item.summary, /no test command pinned in project\.json gates\.tests_cmd/);
+});
+
+test('a change that adds no test reworks with the reason, and the worker adds a test', (t) => {
+  const h = setup(t, { ci: 'pending' });
+  h.git(['switch', '-qc', 'no-test-change', 'main']);
+  fs.writeFileSync(path.join(h.repo, 'value.js'), 'module.exports = 2;\n');
+  h.git(['commit', '-qam', 'change without a test']);
+  const sha = h.git(['rev-parse', 'HEAD']);
+  const github = h.github();
+  Object.assign(github.prs['7'], { headRefOid: sha, headRefName: 'no-test-change' });
+  h.saveGithub(github);
+  h.submit('T1', sha);
+  h.consume();
+  assert.equal(h.logs().filter((e) => e.cmd === 'check tests').length, 1, 'a change with no test is not retried');
+  const task = h.readState('tasks.json').tasks[0];
+  assert.equal(task.status, 'rework');
+  assert.equal(task.evidence.filter((e) => e.type === 'tests').at(-1).worker_failure, true);
+  assert.match(h.logs().findLast((e) => e.cmd === 'rework').detail.reason, /^tests failed at [0-9a-f]{7,}: no test covers this change: .*adds or changes no test file/);
 });
 
 test('a CI run that times out retries once and reworks when it times out again', (t) => {

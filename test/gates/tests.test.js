@@ -249,6 +249,7 @@ test('a helper or fixture edited under test/ is not a test for the change', asyn
   const r = await gate.run(ctx(sha));
   assert.equal(r.ok, false, r.summary);
   assert.match(r.summary, /no test covers this change: .*adds or changes no test file/);
+  assert.equal(r.worker_failure, true, 'the worker fixes it, so the gate says so');
   assertCleanedUp();
 });
 
@@ -456,6 +457,7 @@ test('none mode needs no command but still verifies the submitted sha; prove and
     const r = await gate.run(ctx(sha, { args: { cmd: undefined }, project: { tests: { mode }, gates: {} } }));
     assert.equal(r.ok, false);
     assert.match(r.summary, /no test command pinned/);
+    assert.deepEqual(r.config_failure, { key: 'tests_cmd' });
   }
   for (const [key, value] of [['mode', 'skip'], ['by_kind', { docs: null }], ['by_kind', { tooling: 'none' }], ['expensive', 'true']]) {
     const r = await gate.run(ctx(sha, { project: { tests: { mode: 'none', [key]: value } } }));
