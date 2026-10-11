@@ -19453,6 +19453,172 @@
     },
     "reproduction_script": "import concurrent.futures,json,os,pathlib,subprocess,time,hashlib,re\nroot=pathlib.Path.cwd()\ncache=pathlib.Path(os.environ['T166_RECEIPTS'])\nfiles=['test/signal-waits.test.js','test/events.test.js','test/fallback.test.js','test/supervision.test.js','test/task-locks.test.js','test/usage.test.js','test/worker-slots.test.js','test/board-controls.test.js','test/worktree-metadata.test.js','test/isolation.test.js']\nhead=subprocess.check_output(['git','rev-parse','HEAD'],cwd=root,text=True).strip()\nenv={**os.environ,'TOWER_CRANE_TEST_TMP':os.environ['TOWER_CRANE_TEST_TMP']}\nburners=[subprocess.Popen(['nice','-n','15','node','-e','for (;;) Math.sqrt(Math.random());']) for _ in range(2)]\ndef measure(file):\n for label,tree,sha in [('after',root,head)]:\n  for i in range(1, 3 if label == 'before' else 6):\n   log=cache/(label+'-'+file.replace('/','_')+'-'+str(i)+'.log')\n   receipt=log.with_suffix('.json')\n   if receipt.exists():continue\n   start=time.monotonic();load=os.getloadavg()\n   with log.open('w') as out:\n    result=subprocess.run(['node',str(tree/'test/run.js'),'--test-concurrency=1',file],cwd=tree,env=env,stdout=out,stderr=subprocess.STDOUT,timeout=1800)\n   text=log.read_text()\n   row={'file':file,'label':label,'run':i,'sha':sha,'status':result.returncode,'wall_s':time.monotonic()-start,'load_before':load,'load_after':os.getloadavg(),'cpu_load_processes':2,'tests':{k:int(re.findall('\u2139 '+k+r' (\\d+)',text)[-1]) for k in ['tests','pass','fail','cancelled','skipped'] if re.findall('\u2139 '+k+r' (\\d+)',text)},'log_sha256':hashlib.sha256(log.read_bytes()).hexdigest()}\n   receipt.write_text(json.dumps(row));print(label,file,i,result.returncode,flush=True)\ntry:\n with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:\n  for result in pool.map(measure,files):pass\nfinally:\n for p in burners:p.terminate()\n for p in burners:p.wait()\n",
     "refined_reproduction": "At refined_code_head, use the reproduction script with files=[\"test/signal-waits.test.js\"] and label=\"refined\". Run from the checkout with T166_RECEIPTS and TOWER_CRANE_TEST_TMP set to writable scratch directories.",
-    "follow_up": "Math.max prefix followed by arithmetic remains the separately classified call-derived-expression follow-up from reviewer-T166-2."
+    "follow_up": "Math.max prefix followed by arithmetic remains the separately classified call-derived-expression follow-up from reviewer-T166-2.",
+    "var_refinement": {
+      "head": "bf5dc66384b08f32a4dc79582b411dd222619fcf",
+      "before": "36f349684d31109aaaf8655ea8856c66cefc9d7a",
+      "runs": [
+        {
+          "file": "test/signal-waits.test.js",
+          "label": "var",
+          "run": 1,
+          "sha": "bf5dc66384b08f32a4dc79582b411dd222619fcf",
+          "status": 0,
+          "wall_s": 0.5649832659983076,
+          "load_before": [
+            11.45068359375,
+            11.9599609375,
+            13.78662109375
+          ],
+          "load_after": [
+            11.45068359375,
+            11.9599609375,
+            13.78662109375
+          ],
+          "cpu_load_processes": 2,
+          "tests": {
+            "tests": 4,
+            "pass": 4,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          },
+          "log_sha256": "da067ee538b781c25b3351f33bc3c674eddd8516631d498dfb6a5e6f140a1a04"
+        },
+        {
+          "file": "test/signal-waits.test.js",
+          "label": "var",
+          "run": 2,
+          "sha": "bf5dc66384b08f32a4dc79582b411dd222619fcf",
+          "status": 0,
+          "wall_s": 0.5651670599909266,
+          "load_before": [
+            11.45068359375,
+            11.9599609375,
+            13.78662109375
+          ],
+          "load_after": [
+            11.45068359375,
+            11.9599609375,
+            13.78662109375
+          ],
+          "cpu_load_processes": 2,
+          "tests": {
+            "tests": 4,
+            "pass": 4,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          },
+          "log_sha256": "e29d25680dec9f19aa039f2a2b6b59461318ed39e41278c1ac1982abe01c563d"
+        },
+        {
+          "file": "test/signal-waits.test.js",
+          "label": "var",
+          "run": 3,
+          "sha": "bf5dc66384b08f32a4dc79582b411dd222619fcf",
+          "status": 0,
+          "wall_s": 0.5652486229955684,
+          "load_before": [
+            11.45068359375,
+            11.9599609375,
+            13.78662109375
+          ],
+          "load_after": [
+            11.45068359375,
+            11.9599609375,
+            13.78662109375
+          ],
+          "cpu_load_processes": 2,
+          "tests": {
+            "tests": 4,
+            "pass": 4,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          },
+          "log_sha256": "7e8f2a19f9a658426df2af51bc55cf6e41bc33dbc481a48a3600a05eaa8a8db5"
+        },
+        {
+          "file": "test/signal-waits.test.js",
+          "label": "var",
+          "run": 4,
+          "sha": "bf5dc66384b08f32a4dc79582b411dd222619fcf",
+          "status": 0,
+          "wall_s": 0.5650517149915686,
+          "load_before": [
+            11.45068359375,
+            11.9599609375,
+            13.78662109375
+          ],
+          "load_after": [
+            11.45068359375,
+            11.9599609375,
+            13.78662109375
+          ],
+          "cpu_load_processes": 2,
+          "tests": {
+            "tests": 4,
+            "pass": 4,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          },
+          "log_sha256": "883bf42abb8eaaff2d778ad347067f9e4de05a29ee07b94f354eedb7bea67bee"
+        },
+        {
+          "file": "test/signal-waits.test.js",
+          "label": "var",
+          "run": 5,
+          "sha": "bf5dc66384b08f32a4dc79582b411dd222619fcf",
+          "status": 0,
+          "wall_s": 0.5649229970003944,
+          "load_before": [
+            11.45068359375,
+            11.9599609375,
+            13.78662109375
+          ],
+          "load_after": [
+            11.45068359375,
+            11.9599609375,
+            13.78662109375
+          ],
+          "cpu_load_processes": 2,
+          "tests": {
+            "tests": 4,
+            "pass": 4,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          },
+          "log_sha256": "3fdd378881ac1c0043ca7ada27c036041ecd88051359515e22db34c7a8e9ef96"
+        }
+      ],
+      "passed_runs": 5,
+      "red": {
+        "status": 1,
+        "log_sha256": "00afa48305ce1a21fe29b3cf518ad9453557013dae6a3ba9af35d85967b036ae",
+        "tests": {
+          "tests": 1,
+          "pass": 0,
+          "fail": 1,
+          "cancelled": 0,
+          "skipped": 0
+        }
+      },
+      "green": {
+        "status": 0,
+        "log_sha256": "df8800af24e50dd7fa09070d4db1ab58b405656d554ca777dd75137699cf60e2",
+        "tests": {
+          "tests": 4,
+          "pass": 4,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 0
+        }
+      },
+      "reason": "A var initializer in a nested block can supply a short budget after that block. Possible var values are collected conservatively, and aliases retain each initializer's original scope.",
+      "reproduction": "Use the refined helper/lint reproduction at this head with label=\"var\"."
+    }
   }
 }
