@@ -97,35 +97,20 @@ async function main() {
         }
       }
       if (want('rooms')) {
-        for (const room of T.rooms) {
-          for (const [size, theme] of [[[1920, 1080], 'light'], [[1920, 1080], 'dark'], [[390, 844], 'light'], [[1280, 800], 'dark']]) {
-            await D.setSize(b, size);
+        // Every room, Settings and a task sheet, at every size in both themes.
+        const pages = [...T.rooms.filter((r) => r !== T.front).map((r) => [r, r, T.roomUrl(url, r)]), ['settings', 'settings', `${url}settings`], ['sheet', `sheet-${busy.ids.retry}`, T.sheetUrl(url, busy.ids.retry)]];
+        for (const size of D.SIZES) {
+          await D.setSize(b, size);
+          for (const theme of D.THEMES) {
             await D.setMedia(b, { theme });
-            await D.load(b, T.roomUrl(url, room));
-            const key = `${room} ${sizeName(size)}-${theme}`;
-            await D.shot(b, path.join(shotsDir, `${room}-${sizeName(size)}-${theme}.webp`));
-            results.rooms[key] = await step(key, () => H.checks(ctxFor(busy, url, size, theme)));
+            for (const [room, file, href] of pages) {
+              const key = `${room} ${sizeName(size)}-${theme}`;
+              log('room', key);
+              await D.load(b, href);
+              await D.shot(b, path.join(shotsDir, `${file}-${sizeName(size)}-${theme}.webp`));
+              results.rooms[key] = await step(key, () => H.checks(ctxFor(busy, url, size, theme)));
+            }
           }
-        }
-        await D.setSize(b, [1920, 1080]);
-        await D.setMedia(b, { theme: 'light' });
-        await D.load(b, T.sheetUrl(url, busy.ids.retry));
-        await D.shot(b, path.join(shotsDir, `sheet-${busy.ids.retry}-1920x1080-light.webp`));
-        results.rooms[`sheet 1920x1080-light`] = await H.checks(ctxFor(busy, url, [1920, 1080], 'light'));
-        await D.setMedia(b, { theme: 'dark' });
-        await D.load(b, T.sheetUrl(url, busy.ids.retry));
-        await D.shot(b, path.join(shotsDir, `sheet-${busy.ids.retry}-1920x1080-dark.webp`));
-        await D.setSize(b, [390, 844]);
-        await D.load(b, T.sheetUrl(url, busy.ids.retry));
-        await D.shot(b, path.join(shotsDir, `sheet-${busy.ids.retry}-390x844-dark.webp`));
-        await D.load(b, `${url}settings`);
-        await D.shot(b, path.join(shotsDir, 'settings-390x844-dark.webp'));
-        await D.setSize(b, [1920, 1080]);
-        for (const theme of D.THEMES) {
-          await D.setMedia(b, { theme });
-          await D.load(b, `${url}settings`);
-          await D.shot(b, path.join(shotsDir, `settings-1920x1080-${theme}.webp`));
-          results.rooms[`settings 1920x1080-${theme}`] = await H.checks(ctxFor(busy, url, [1920, 1080], theme));
         }
       }
       await D.setSize(b, [1920, 1080]);
@@ -147,13 +132,12 @@ async function main() {
         }
         await D.setSize(b, [1920, 1080]);
       }
-      if (want('H2a')) results.scenarios.H2a = await step('H2a', () => H.h2a(ctxFor(busy, url, [1920, 1080], 'light')));
     });
 
     // Paths that change the state, each on its own fresh busy run.
     await D.setSize(b, [1920, 1080]);
     await D.setMedia(b, { theme: 'light' });
-    for (const [name, fn] of [['H2', H.h2], ['H3', H.h3], ['H6', H.h6]]) {
+    for (const [name, fn] of [['H2', H.h2], ['H2a', H.h2a], ['H3', H.h3], ['H6', H.h6]]) {
       if (!want(name)) continue;
       log(name);
       results.scenarios[name] = await step(name, async () => { const s = F.busy(scratch, bin); return withServe(b, s, (url) => fn(ctxFor(s, url, [1920, 1080], 'light'))); });

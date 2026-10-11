@@ -1022,37 +1022,72 @@ test('only the routed room is displayed after a sheet opens inside it and after 
   });
 });
 
-test('serve messages the claimant and caps a task budget only as the owner, through msg and task update', async (t) => {
+test('serve messages the claimant and stops a task only as the owner, through msg and interrupt', async (t) => {
   const h = makeRepo(t);
   h.init();
   populate(h);
+  assert.notEqual(h.run(['interrupt', 'T1', '--needs-owner', ' ']).code, 0, 'a hold needs a reason');
   await withServers(async (servers) => {
     const viewer = await startServe(servers, h, 'viewer');
     const viewerPage = await (await fetch(viewer)).text();
-    assert.doesNotMatch(viewerPage, /data-api="\/api\/tasks\/T1\/(message|budget)"/, 'no message or stop form without the owner');
+    assert.doesNotMatch(viewerPage, /data-api="\/api\/tasks\/T1\/(message|stop)"/, 'no message or stop form without the owner');
     assert.equal((await post(`${viewer}api/tasks/T1/message`, tokenOf(viewerPage), { text: 'forged' })).status, 403);
+    assert.equal((await post(`${viewer}api/tasks/T1/stop`, tokenOf(viewerPage), {})).status, 403);
     const url = await startServe(servers, h);
     const before = log(h).length;
     const unkeyed = tokenOf(await (await fetch(url)).text());
     assert.equal(unkeyed, '', 'a page opened without the one-time link carries no token');
     assert.equal((await post(`${url}api/tasks/T1/message`, unkeyed, { text: 'forged' })).status, 403);
-    assert.equal((await post(`${url}api/tasks/T1/budget`, unkeyed, { tokens: '1' })).status, 403);
+    assert.equal((await post(`${url}api/tasks/T1/stop`, unkeyed, {})).status, 403);
     const page = await (await fetch(keyed(url))).text();
     assert.match(page, /data-api="\/api\/tasks\/T1\/message"/, 'the claimed task offers a message on its row');
     const token = tokenOf(page);
     assert.equal((await post(`${url}api/tasks/T4/message`, token, { text: 'nobody holds T4' })).status, 400, 'an unclaimed task has nobody to message');
-    assert.equal((await post(`${url}api/tasks/T1/budget`, token, { tokens: 'lots' })).status, 400);
+    assert.equal((await post(`${url}api/tasks/T4/stop`, token, {})).status, 400, 'an unclaimed task has nothing to stop');
     assert.equal(log(h).length, before, 'refused writes record nothing');
     const r = await post(`${url}api/tasks/T1/message`, token, { text: 'split the API part first' });
     assert.equal(r.status, 200, await r.clone().text());
     const msg = log(h).pop();
     assert.deepEqual([msg.cmd, msg.agent, msg.task, msg.detail.to, msg.detail.text], ['msg', 'owner', 'T1', 'w-1', 'split the API part first']);
-    const cap = await post(`${url}api/tasks/T1/budget`, token, { tokens: '1200' });
-    assert.equal(cap.status, 200, await cap.clone().text());
-    assert.deepEqual(h.readState('tasks.json').tasks[0].budget, { hours: null, tokens: 1200 });
-    const update = log(h).pop();
-    assert.deepEqual([update.cmd, update.agent, update.task], ['task update', 'owner', 'T1']);
+    const stop = await post(`${url}api/tasks/T1/stop`, token, { reason: 'too costly' });
+    assert.equal(stop.status, 200, await stop.clone().text());
+    const task = h.readState('tasks.json').tasks.find((x) => x.id === 'T1');
+    assert.deepEqual([task.status, task.claim, task.needs_owner], ['todo', null, 'stopped from the board: too costly; mark done to resume']);
+    const e = log(h).findLast((x) => x.cmd === 'interrupt');
+    assert.deepEqual([e.agent, e.task, e.detail.holder, e.detail.needs_owner], ['owner', 'T1', 'w-1', task.needs_owner]);
+    assert.ok(!h.json(['ready']).ready.some((x) => x.id === 'T1'), 'a stopped task is not dispatched again');
+    const held = await (await fetch(url)).text();
+    const row = held.match(/<article class="agent stopped" data-key="stopped-T1"[\s\S]*?<\/article>/);
+    assert.ok(row, 'the floor keeps the stopped task');
+    assert.match(row[0], /stopped, waiting on you/);
+    assert.match(row[0], /data-api="\/api\/tasks\/T1\/owner-done"[\s\S]*>Resume T1</, 'Resume is owner-done');
+    assert.match(held, /data-key="owner-T1"[\s\S]*?>Resume T1<\/button>/, 'the queue names the same action');
+    const resume = await post(`${url}api/tasks/T1/owner-done`, token, { note: 'resumed from the board' });
+    assert.equal(resume.status, 200, await resume.clone().text());
+    assert.equal(h.readState('tasks.json').tasks.find((x) => x.id === 'T1').needs_owner, null);
+    assert.ok(h.json(['ready']).ready.some((x) => x.id === 'T1'), 'Resume lets dispatch pick it up');
   });
+});
+
+test('an approval on the board answers approve or decline, and approve lets the orchestrator apply it once', async (t) => {
+  const h = makeRepo(t);
+  h.init();
+  h.ok(['task', 'add', '--title', 'Ship', '--acceptance', 'shipped']);
+  assert.notEqual(h.run(['project', 'set', '--merge-admin', 'true', '--agent', 'orchestrator']).code, 0);
+  await withServers(async (servers) => {
+    const url = await startServe(servers, h);
+    const page = await (await fetch(keyed(url))).text();
+    const item = page.match(/<li class="qi"[^>]*data-kind="approval" data-key="D1"[\s\S]*?<\/li>/)[0];
+    const values = [...item.matchAll(/name="choice" value="([^"]+)"/g)].map((m) => m[1]);
+    assert.deepEqual(values, h.readState('decisions.json').decisions[0].options, 'the buttons post the decision\'s own options');
+    const r = await post(`${url}api/decisions/D1/answer`, tokenOf(page), { choice: values[0] });
+    assert.equal(r.status, 200, await r.clone().text());
+  });
+  const d = h.readState('decisions.json').decisions[0];
+  assert.deepEqual([d.status, d.answer, d.answered_by], ['answered', 'approve', 'owner']);
+  h.ok(['project', 'set', '--merge-admin', 'true', '--agent', 'orchestrator']);
+  assert.ok(h.readState('decisions.json').decisions[0].applied, 'the approved change applied once');
+  assert.equal(h.readState('project.json').merge.admin, true);
 });
 
 test('runaway rules: status and the board flag the same claim, from the project\'s own history', (t) => {
@@ -1085,6 +1120,18 @@ test('runaway rules: status and the board flag the same claim, from the project\
   assert.ok(item, 'the board shows the same flag as a Now item');
   assert.match(item[0], /spent 12M tokens/);
   assert.match(page(), /data-key="agent-T11"[\s\S]*?in the queue: spend/, 'the row keeps a marker');
+  // Once the agent has exited, the queue says stuck, not runaway, and the row agrees.
+  const at = new Date().toISOString();
+  fs.appendFileSync(path.join(h.state, 'events.jsonl'), [
+    { at, agent: 'orchestrator', cmd: 'spawn', task: 'T11', detail: { agent: 'w-x', role: 'worker', rung: 'easy', pid: 999999, attempt: 1 } },
+    { at, agent: 'orchestrator', cmd: 'spawn exit', task: 'T11', detail: { agent: 'w-x', pid: 999999, attempt: 1, code: 1 } },
+  ].map((e) => `${JSON.stringify(e)}\n`).join(''));
+  h.ok(['task', 'note', 'T11', 're-render', '--agent', 'orchestrator']);
+  assert.match(page(), /data-key="stuck-T11-exited"/);
+  assert.doesNotMatch(page(), /data-key="runaway-T11/);
+  assert.match(page(), /<title>[^<]* · 0 working, 1 stuck · /, 'the sentence names the claim the floor still shows');
+  assert.match(page(), /<h1 class="sentence" data-status>[\s\S]*?0 working, 1 stuck<\/a>/);
+  assert.doesNotMatch(page().match(/<article class="agent[^"]*" data-key="agent-T11"[\s\S]*?<\/article>/)[0], /in the queue:/, 'an exited claim keeps no runaway marker');
 });
 
 test('the queue orders Now before Your turn, and an approval reads as a sentence', (t) => {
@@ -1133,6 +1180,10 @@ test('the board meets contrast, target, name and readability bars at the owner\'
           assert.ok(rd.min_px >= 12 && rd.sizes <= 6 && rd.body_px >= 15 && !rd.horizontal_scroll && !rd.clipped, `readability ${where}: ${JSON.stringify(rd)}`);
           const nm = await checks.names(b);
           assert.ok(nm.pass, `names ${where}: ${JSON.stringify(nm)}`);
+          assert.ok(await b.inPage(`(() => { const t = document.querySelector('.bar [data-theme-toggle]'); return !!t && t.getClientRects().length > 0; })()`), `the theme switch is in the bar on ${where}`);
+          // A status line with nothing to say draws nothing, not an empty box.
+          const boxes = await b.inPage(`[...document.querySelectorAll('main *')].filter((el) => el.getClientRects().length && !el.textContent.trim() && !el.children.length && !el.matches('input, select, textarea, button, svg *, img, hr') && parseFloat(getComputedStyle(el).borderTopWidth) > 0 && el.getBoundingClientRect().width > 8 && el.getBoundingClientRect().height > 8).map((el) => el.className || el.tagName)`);
+          assert.deepEqual(boxes, [], `no empty bordered box on ${where}`);
         }
       }
     }

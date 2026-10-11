@@ -125,6 +125,17 @@ const readability = `(() => { ${LIB}
       }
     }
   }
+  // A control draws its value or placeholder inside its own box, where no
+  // overflow shows: measure the text against the box.
+  for (const el of document.querySelectorAll('input, select')) {
+    if (!vis(el) || !inView(el.getBoundingClientRect()) || /^(hidden|checkbox|radio|range|color|file)$/.test(el.type)) continue;
+    const text = el.matches('select') ? (el.selectedOptions[0] || {}).textContent || '' : el.value || el.placeholder || '';
+    if (!text.trim()) continue;
+    const s = getComputedStyle(el);
+    ctx2d.font = s.fontWeight + ' ' + s.fontSize + ' ' + (el.value || el.matches('select') ? s.fontFamily : getComputedStyle(el, '::placeholder').fontFamily);
+    const box = el.clientWidth - parseFloat(s.paddingLeft) - parseFloat(s.paddingRight);
+    if (ctx2d.measureText(text).width > box + 1) clipped.push('control: ' + text.slice(0, 40));
+  }
   const list = [...sizes.entries()].sort((a, b) => b[1] - a[1]);
   const min = Math.min(...sizes.keys());
   const body = parseFloat(getComputedStyle(document.body).fontSize);

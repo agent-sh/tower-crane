@@ -106,13 +106,29 @@ async function h2(ctx) {
   return { ...r, answered: ok, focus_after: focus, pass, delta: d && { status: d.status, answer: d.answer, note: d.note, answered_by: d.answered_by, event: strip(s.events().findLast((e) => e.cmd === 'answer')) } };
 }
 
+// T70's bar asks for a setting event with mode: board. Under main's authority
+// model the owner's approve lets the orchestrator apply the request once, so
+// the apply is the orchestrator's CLI write; the bench records the mode it got.
 async function h2a(ctx) {
-  const { b, T, url } = ctx;
+  const { b, T, url, s } = ctx;
   await D.load(b, url);
   const text = await b.call(textOf, T.item('D3'));
   const sentence = /admin merges/i.test(text) && /\boff\b/i.test(text) && /\bon\b/i.test(text);
   const raw = /\{"merge-admin"/.test(text) && !sentence;
-  return { sentence, raw_json: raw, applied: null, pass: false, note: 'approving applies the recorded request only with T89/T91 (not on this base): the owner makes the change and answers' };
+  if (!T.approve) return { sentence, raw_json: raw, applied: null, pass: false, note: 'no board path: the approval offers no approve button' };
+  const p = new D.Path(b);
+  await p.click(T.approve('D3'));
+  const answered = await waitFor(() => { const x = s.read('decisions.json').decisions.find((y) => y.id === 'D3'); return x.status === 'answered' && x; });
+  const r = p.result();
+  if (ctx.shots) await D.shot(b, ctx.shots('H2a'));
+  // The orchestrator retries the command the request recorded.
+  const retry = s.run(['project', 'set', '--merge-admin', 'true', '--agent', 'orchestrator']);
+  const d = s.read('decisions.json').decisions.find((y) => y.id === 'D3');
+  const setting = s.events().findLast((e) => e.cmd === 'setting' && e.detail.approved_by === 'D3');
+  const answer = s.events().findLast((e) => e.cmd === 'answer' && e.detail.decision === 'D3');
+  const ok = !!answered && d.answer === 'approve' && d.answered_by === 'owner' && !!d.applied && retry.code === 0 && !!setting;
+  return { ...r, sentence, raw_json: raw, answer: d.answer, answer_mode: answer && answer.detail.mode || null, applied: !!d.applied, setting_mode: setting ? setting.detail.mode : null, approved_by: setting ? setting.detail.approved_by : null,
+    pass: sentence && !raw && ok && r.clicks + r.keys <= 2 };
 }
 
 async function h3(ctx) {
@@ -191,7 +207,7 @@ async function h4(ctx) {
     if (ctx.shots) await D.shot(b, ctx.shots('H4-confirm'));
     await p.click(T.stopSend(id));
     r = p.result();
-    stopped = await waitFor(() => { const e = s.events(); return e.some((x) => x.cmd === 'budget stop' && x.task === id) && e.some((x) => x.cmd === 'spawn exit' && x.task === id) && e; }, 30000);
+    stopped = await waitFor(() => { const e = s.events(); return e.some((x) => x.cmd === (T.stopEvent || 'budget stop') && x.task === id) && e.some((x) => x.cmd === 'spawn exit' && x.task === id) && e; }, 30000);
     // The row's own words for each state it passes through.
     words = await waitFor(async () => { const t = await b.call((row, stopped) => ((document.querySelector(row) || document.querySelector(stopped) || {}).querySelector?.('.stopstate') || {}).textContent || '', T.agentRow(id), `[data-key="stopped-${id}"]`); if (t && !rowWords.includes(t.trim())) rowWords.push(t.trim()); return /stopped/i.test(t) && t; }, 30000);
     if (ctx.shots) await D.shot(b, ctx.shots('H4-stopped'));
@@ -206,7 +222,7 @@ async function h4(ctx) {
   const pass = rose && !!flaggedAt && latency !== null && latency <= 2500 && !!r && r.clicks <= 2 && !!stopped && !!words && retries === 0 && recorded !== null && recorded === stubCount;
   killTree(spawned.pid);
   return { rose_before_exit: rose, readings: distinct.slice(0, 6), flagged: !!flaggedAt, flag_latency_ms: latency, path: r, stopped: !!stopped, retries, recorded_tokens: recorded, stub_tokens: stubCount, row_words: rowWords, pass,
-    delta: stopped && { budget: s.read('tasks.json').tasks.find((x) => x.id === id).budget, event: strip(ev.findLast((e) => e.cmd === 'task update' && e.task === id) || {}) } };
+    delta: stopped && { needs_owner: s.read('tasks.json').tasks.find((x) => x.id === id).needs_owner, event: strip(ev.findLast((e) => e.cmd === (T.stopEvent || 'task update') && e.task === id) || {}) } };
 }
 
 async function h4s(ctx) {

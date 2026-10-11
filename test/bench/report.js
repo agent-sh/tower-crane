@@ -39,7 +39,7 @@ const rows = [
   ['H1', 'Find what needs me, 1280x800', h1(before, '1280x800'), h1(after, '1280x800')],
   ['H1', 'Find what needs me, 390x844 (count and first item)', h1(before, '390x844'), h1(after, '390x844')],
   ['H2', 'Answer a decision with a note', path1(before.scenarios.H2, before.scenarios.H2 ? `, focus after: ${before.scenarios.H2.focus_after}` : ''), path1(after.scenarios.H2, after.scenarios.H2 ? `, focus after: ${after.scenarios.H2.focus_after}` : '')],
-  ['H2a', 'Approve a change', `sentence ${mark(before.scenarios.H2a?.sentence)}, raw JSON ${before.scenarios.H2a?.raw_json ? 'shown' : 'no'}; apply: no path`, `sentence ${mark(after.scenarios.H2a?.sentence)}, raw JSON ${after.scenarios.H2a?.raw_json ? 'shown' : 'behind a disclosure'}; apply: no path (T89/T91)`],
+  ['H2a', 'Approve a change', h2a(before.scenarios.H2a), h2a(after.scenarios.H2a)],
   ['H3', 'Judge a review and send it back', path1(before.scenarios.H3, before.scenarios.H3 ? `, ${before.scenarios.H3.scroll_px} px scrolled` : ''), path1(after.scenarios.H3, after.scenarios.H3 ? `, ${after.scenarios.H3.scroll_px} px scrolled` : '')],
   ['H4', 'Stop a runaway', h4(before.scenarios.H4), h4(after.scenarios.H4)],
   ['H4s', 'Lost telemetry: stale', h4s(before.scenarios['H4s stale']), h4s(after.scenarios['H4s stale'])],
@@ -52,6 +52,14 @@ const rows = [
   ['H8', 'Calm run, light and dark', h8(before.scenarios), h8(after.scenarios)],
   ['H9', 'Mode parity (H2, H3, H6)', h9(before.scenarios.H9), h9(after.scenarios.H9)],
 ];
+
+function h2a(x) {
+  if (!x) return '-';
+  if (x.error) return `error: ${x.error.split('\n')[0].slice(0, 80)}`;
+  const words = `sentence ${mark(x.sentence)}, raw JSON ${x.raw_json ? 'shown' : 'behind a disclosure'}`;
+  if (x.clicks === undefined) return `${words}; approve: no path, ${mark(x.pass)}`;
+  return `${words}; ${x.clicks} click, answer ${x.answer} (${x.answer_mode || 'cli'}); applied ${x.applied ? 'yes' : 'no'} by the orchestrator's retry (setting event ${x.setting_mode}, approved_by ${x.approved_by}), ${mark(x.pass)}`;
+}
 
 function h4(x) {
   if (!x) return '-';
@@ -119,7 +127,7 @@ for (const [name, r] of [['before', before], ['after', after]]) {
     if (row) md += `| ${name} | ${size} ${theme} | ${row.map(cell).join(' | ')} |\n`;
   }
 }
-md += '\nThe other rooms, at 1920x1080 in both themes, 1280x800 dark and 390x844 light (checks passed of run):\n\n| Room | Before | After |\n|---|---|---|\n';
+md += '\nThe other rooms, a task sheet and Settings, at all four sizes in both themes (checks passed of run):\n\n| Room | Before | After |\n|---|---|---|\n';
 const rb = roomRow(before); const ra = roomRow(after);
 const roomName = { board: 'Board (before) / Now', now: 'Now', review: 'Review', plan: 'Plan', spend: 'Spend', history: 'History', sheet: 'Task sheet', settings: 'Settings' };
 for (const room of ['plan', 'spend', 'history', 'sheet', 'settings', 'review']) {
@@ -141,10 +149,10 @@ const end = doc.indexOf('<!-- /results -->');
 if (start < 0 || end < 0) throw new Error('the doc needs <!-- results --> and <!-- /results --> markers');
 fs.writeFileSync(opt.doc, `${doc.slice(0, start)}<!-- results -->\n\n${md}\n${doc.slice(end)}`);
 
-// The screenshot matrix: the front room at every size and theme, every other
-// room at three, and the end state of each scenario on the after build.
+// The screenshot matrix: every room, a sheet and Settings at every size and
+// theme, and the end state of each scenario.
 if (opt.shots) {
-  const keep = (f) => /^front-/.test(f) || /^(review|plan|spend|history)-(1920x1080-(light|dark)|390x844-light)\.webp$/.test(f) || /^(sheet|settings)-/.test(f) || /^H(2|3|4|5|6|7|8)/.test(f) && !/^H5-(3840|1280|390)/.test(f);
+  const keep = (f) => /^(front|review|plan|spend|history|sheet|settings)-/.test(f) || /^H(2|3|4|5|6|7|8)/.test(f) && !/^H5-(3840|1280|390)/.test(f);
   for (const b of ['before', 'after']) {
     const from = path.join(opt.results, b);
     const to = path.join(opt.shots, b);
