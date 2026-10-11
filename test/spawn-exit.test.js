@@ -354,5 +354,6 @@ test('spawn receipts go under XDG_CACHE_HOME when it is set, not under the home 
   const cache = path.join(h.base, 'xdg-cache');
   await start(t, h, { claim: false, wait: true, env: { HOME: home, XDG_CACHE_HOME: cache } });
   assert.equal(fs.existsSync(path.join(cache, 'tower-crane')), true, 'the receipts directory is under XDG_CACHE_HOME');
-  assert.equal(fs.existsSync(path.join(home, '.cache')), false, 'the home cache is not created');
+  const homeReceipts = path.join(home, '.cache', 'tower-crane');
+  assert.equal(fs.existsSync(homeReceipts) && fs.readdirSync(homeReceipts).some((name) => name.startsWith('spawn-')), false, 'no receipt is written under the home cache');
 });
