@@ -463,6 +463,7 @@ test('pricing identity drops the Claude provider prefix and the 1M context suffi
     ['anthropic.claude-haiku-5-5', 'claude-haiku-5-5'],
     [' Global.Anthropic.Claude-Opus-5-5[1M] ', 'claude-opus-5-5'],
     ['claude-opus-5-5', 'claude-opus-5-5'],
+    ['global.anthropic.fixture-release', 'fixture-release'],
     ['openai.gpt-fixture', 'openai.gpt-fixture'],
     ['a/easy', 'a/easy'],
   ]) assert.equal(L.modelIdentity(id), identity, id);
