@@ -1,0 +1,142 @@
+[
+  {
+    "path": "lib/agents.js",
+    "text": "claude-provider",
+    "reason": "Relative import of the Claude provider routing module"
+  },
+  {
+    "path": "lib/project.js",
+    "text": "claude-provider",
+    "reason": "Relative import of the Claude provider routing module"
+  },
+  {
+    "path": "lib/reviewer.js",
+    "text": "claude-provider",
+    "reason": "Relative import of the Claude provider routing module"
+  },
+  {
+    "path": "lib/spawn.js",
+    "text": "claude-provider",
+    "reason": "Relative import of the Claude provider routing module"
+  },
+  {
+    "path": "lib/spawn-monitor.js",
+    "text": "claude-provider",
+    "reason": "Relative import of the Claude provider routing module"
+  },
+  {
+    "path": "lib/tasks.js",
+    "text": "claude-provider",
+    "reason": "Relative import of the Claude provider routing module"
+  },
+  {
+    "path": "package.json",
+    "text": "claude-plugin",
+    "reason": "Published plugin directory in the npm package manifest"
+  },
+  {
+    "path": "research/T101-probes/results/identity.json",
+    "text": "opus",
+    "reason": "Historical research citation or recorded probe output; not a runtime model selection"
+  },
+  {
+    "path": "research/T101-probes/results/identity.json",
+    "text": "luna",
+    "reason": "Historical research citation or recorded probe output; not a runtime model selection"
+  },
+  {
+    "path": "research/T101-probes/results/identity.json",
+    "text": "sol",
+    "reason": "Historical research citation or recorded probe output; not a runtime model selection"
+  },
+  {
+    "path": "research/T101-probes/results/secrets.json",
+    "text": "claude-1000",
+    "reason": "Historical research citation or recorded probe output; not a runtime model selection"
+  },
+  {
+    "path": "research/T38.json",
+    "text": "claude-code-bedrock",
+    "reason": "Historical research citation or recorded probe output; not a runtime model selection"
+  },
+  {
+    "path": "research/T38.json",
+    "text": "claude-code-cli",
+    "reason": "Historical research citation or recorded probe output; not a runtime model selection"
+  },
+  {
+    "path": "research/T38.json",
+    "text": "Opus",
+    "reason": "Historical research citation or recorded probe output; not a runtime model selection"
+  },
+  {
+    "path": "research/T38.json",
+    "text": "Sonnet",
+    "reason": "Historical research citation or recorded probe output; not a runtime model selection"
+  },
+  {
+    "path": "research/T38.json",
+    "text": "GPT-5.6",
+    "reason": "Historical research citation or recorded probe output; not a runtime model selection"
+  },
+  {
+    "path": "research/T38.json",
+    "text": "GPT-6.1",
+    "reason": "Historical research citation or recorded probe output; not a runtime model selection"
+  },
+  {
+    "path": "research/T38.json",
+    "text": "Sol",
+    "reason": "Historical research citation or recorded probe output; not a runtime model selection"
+  },
+  {
+    "path": "research/T38.json",
+    "text": "gpt-6.1-sol",
+    "reason": "Historical research citation or recorded probe output; not a runtime model selection"
+  },
+  {
+    "path": "research/T38.json",
+    "text": "claude-opus-5-5",
+    "reason": "Historical research citation or recorded probe output; not a runtime model selection"
+  },
+  {
+    "path": "test/fixtures/npm-pack/npm-11.json",
+    "text": "claude-plugin",
+    "reason": "Captured npm package file listing"
+  },
+  {
+    "path": "test/fixtures/npm-pack/npm-11.json",
+    "text": "claude-provider.js",
+    "reason": "Captured npm package file listing"
+  },
+  {
+    "path": "test/fixtures/npm-pack/npm-12.json",
+    "text": "claude-plugin",
+    "reason": "Captured npm package file listing"
+  },
+  {
+    "path": "test/fixtures/npm-pack/npm-12.json",
+    "text": "claude-provider.js",
+    "reason": "Captured npm package file listing"
+  },
+  {
+    "path": "tools/tests-map.json",
+    "text": "claude-provider.test.js",
+    "reason": "Module or fixture filename in the test coverage map"
+  },
+  {
+    "path": "tools/tests-map.json",
+    "text": "claude-provider.js",
+    "reason": "Module or fixture filename in the test coverage map"
+  },
+  {
+    "path": "tools/tests-map.json",
+    "text": "claude-print-result.json",
+    "reason": "Module or fixture filename in the test coverage map"
+  },
+  {
+    "path": "tools/tests-map.json",
+    "text": "claude-result.json",
+    "reason": "Module or fixture filename in the test coverage map"
+  }
+]

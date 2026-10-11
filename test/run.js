@@ -66,13 +66,24 @@ if (!list.length) {
   console.log(`TC_TEST_SHARD ${shard} has no test files`);
   return;
 }
-args.push(...list);
+// A sandboxed run skips tests.host_only files; the tests gate runs them on the host. Only a sandbox
+// loads the helper, so an ordinary run needs no lib/ modules.
+const { run, skipped, refused } = process.env.TOWER_CRANE_SANDBOX === '1'
+  ? require('../lib/tests-host-only').split(list, process.env)
+  : { run: list, skipped: [], refused: [] };
+if (refused.length) {
+  console.error(`tower-crane: a sandboxed run with tests.host_only names test files, not directories or globs: ${refused.join(' ')}`);
+  process.exit(1);
+}
+if (skipped.length) console.error(`tower-crane: skipped host-only tests in this sandbox, the tests gate runs them on the host: ${skipped.join(' ')}`);
+args.push(...run);
 
 const env = { ...process.env };
 delete env.TC_TEST_SHARD;
 // A runner invoked from a test must launch a new run, not Node's recursive no-op.
 delete env.NODE_TEST_CONTEXT;
-const result = cp.spawnSync(process.execPath, args, { stdio: 'inherit', env });
+// With every file skipped there is nothing to run; node --test with no file would search the directory.
+const result = run.length ? cp.spawnSync(process.execPath, args, { stdio: 'inherit', env }) : { status: 0 };
 if (result.error) {
   console.error(result.error.message);
   process.exitCode = 1;
