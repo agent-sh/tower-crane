@@ -66,7 +66,7 @@ To let an agent do all of this, install the Claude Code plugin and hand the `tow
 | Channel | Command | State |
 |---|---|---|
 | From source | `git clone https://github.com/agent-sh/tower-crane.git` then `npm install -g ./tower-crane` | works |
-| Claude Code plugin | `/plugin install tower-crane --marketplace agent-sh/tower-crane` (Claude Code 2.1.275 or later), or `/plugin marketplace add agent-sh/tower-crane` then `/plugin install tower-crane@tower-crane` | works; the plugin still needs the CLI on `PATH` |
+| Claude Code plugin | `/plugin marketplace add agent-sh/tower-crane` then `/plugin install tower-crane@tower-crane` | works; the plugin still needs the CLI on `PATH` |
 | npm | `npm install -g @agentsys/tower-crane` | not published yet |
 
 The CLI has no npm dependencies. The plugin adds the orchestrator, work and review skills, five agent files, five commands (`/tower-crane-inbox`, `/tower-crane-spawn-ready`, `/tower-crane-merge-accepted`, `/tower-crane-rework-from-review`, `/tower-crane-release-dead`), the `tower-crane` MCP server with inbox and batch tools, and a Claude Code mod (`hooks/tower-crane.mjs`) that wakes the orchestrator on new events.
