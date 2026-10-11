@@ -62,7 +62,7 @@ function submittedTask(h) {
   h.init();
   h.ok(['task', 'add', '--title', 'Change', '--acceptance', 'works']);
   h.ok(['claim', 'T1', '--agent', 'w-1']);
-  h.ok(['submit', 'T1', '--sha', 'abcdef1', '--agent', 'w-1']);
+  h.ok(['submit', 'T1', '--sha', '50b732a15be40ccb2065cb2ba0e7b366d511b736', '--agent', 'w-1']);
 }
 
 const VERIFY_BUILD = `const fs = require('node:fs');
@@ -454,15 +454,15 @@ test('a gate gets its context and its result is recorded as evidence', (t) => {
   const seen = JSON.parse(fs.readFileSync(out, 'utf8'));
   assert.equal(real(seen.root), real(h.repo));
   assert.equal(real(seen.worktree), real(wt));
-  assert.deepEqual([seen.task, seen.sha, seen.args.cmd, seen.base], ['T1', 'abcdef1', 'npm test', 'main']);
+  assert.deepEqual([seen.task, seen.sha, seen.args.cmd, seen.base], ['T1', '50b732a15be40ccb2065cb2ba0e7b366d511b736', 'npm test', 'main']);
   const recorded = JSON.parse(pass.stdout);
-  assert.deepEqual([recorded.type, recorded.ok, recorded.agent, recorded.sha, recorded.ref, recorded.revision], ['tests', true, 'checker', 'abcdef1', 'run-1', 1]);
+  assert.deepEqual([recorded.type, recorded.ok, recorded.agent, recorded.sha, recorded.ref, recorded.revision], ['tests', true, 'checker', '50b732a15be40ccb2065cb2ba0e7b366d511b736', 'run-1', 1]);
 
   const fail = cli.run(['check', 'ci', 'T1', '--agent', 'checker'], { GATE_OUT: out, GATE_OK: '0', GATE_SHA: 'ABCDEF1234567' });
   assert.equal(fail.code, 1);
   assert.match(fail.stdout, /ci FAIL at abcdef1: fake gate/);
   const ev = h.readState('tasks.json').tasks[0].evidence;
-  assert.deepEqual(ev.map((e) => [e.type, e.ok, e.sha]), [['tests', true, 'abcdef1'], ['ci', false, 'abcdef1234567']]);
+  assert.deepEqual(ev.map((e) => [e.type, e.ok, e.sha]), [['tests', true, '50b732a15be40ccb2065cb2ba0e7b366d511b736'], ['ci', false, 'abcdef1234567']]);
 
   const merge = cli.run(['merge', 'T1'], { GATE_OUT: out, GATE_OK: '1' });
   assert.equal(merge.code, 1);
