@@ -216,3 +216,60 @@ cp.execFileSync = function(command, args, ...rest) {
     assert.equal(h.json(['worktree', 'list']).counts.stale, 0);
   });
 }
+
+for (const action of ['cancel', 'supersede']) {
+  test(`${action} saves committed local work in a restorable bundle before deleting the branch`, (t) => {
+    const h = setup(t);
+    const wt = h.json(['worktree', 'T1']);
+    fs.writeFileSync(path.join(wt.path, 'committed.txt'), 'local commit without a remote\n');
+    h.git(['add', 'committed.txt'], wt.path);
+    h.git(['commit', '-qm', 'local work'], wt.path);
+    const sha = h.git(['rev-parse', 'HEAD'], wt.path);
+    h.ok(['task', 'update', 'T1', ...(action === 'cancel' ? ['--status', 'cancelled'] : ['--superseded-by', 'T2'])]);
+    gone(h, wt);
+    const saved = h.json(['task', 'show', 'T1']).worktree.saved;
+    const bundle = path.join(saved, 'commits.bundle');
+    h.git(['fetch', bundle, `HEAD:refs/heads/recovered-${action}`]);
+    assert.equal(h.git(['rev-parse', `recovered-${action}`]), sha);
+    assert.equal(h.git(['show', `recovered-${action}:committed.txt`]), 'local commit without a remote');
+  });
+}
+
+test('retirement saves an ignored-file list and a binary patch larger than Git child output limits', { timeout: 120000 }, (t) => {
+  const h = setup(t);
+  fs.writeFileSync(path.join(h.repo, '.gitignore'), 'node_modules/\n');
+  fs.writeFileSync(path.join(h.repo, 'payload.bin'), Buffer.alloc(1));
+  h.git(['add', '.gitignore', 'payload.bin']);
+  h.git(['commit', '-qm', 'binary baseline']);
+  const wt = h.json(['worktree', 'T1']);
+  const payload = require('node:crypto').randomBytes(2 * 1024 * 1024);
+  fs.writeFileSync(path.join(wt.path, 'payload.bin'), payload);
+  const ignored = path.join(wt.path, 'node_modules');
+  fs.mkdirSync(ignored);
+  const name = (i) => 'x'.repeat(135) + String(i).padStart(5, '0') + '.bin';
+  for (let i = 0; i < 8000; i++) fs.writeFileSync(path.join(ignored, name(i)), `artifact ${i}`);
+  assert.ok(8000 * ('node_modules/'.length + name(0).length + 1) > 1024 * 1024);
+  h.ok(['task', 'update', 'T1', '--status', 'cancelled']);
+  gone(h, wt);
+  const saved = h.json(['task', 'show', 'T1']).worktree.saved;
+  assert.ok(fs.statSync(path.join(saved, 'tracked.patch')).size > 1024 * 1024);
+  const copies = path.join(saved, 'files', 'node_modules');
+  assert.equal(fs.readdirSync(copies).length, 8000);
+  assert.equal(fs.readFileSync(path.join(copies, name(7999)), 'utf8'), 'artifact 7999');
+  h.git(['apply', '--binary', path.join(saved, 'tracked.patch')]);
+  assert.deepEqual(fs.readFileSync(path.join(h.repo, 'payload.bin')), payload);
+});
+
+test('cancel preserves local commits even when the checkout was already removed', (t) => {
+  const h = setup(t);
+  const wt = h.json(['worktree', 'T1']);
+  fs.writeFileSync(path.join(wt.path, 'committed.txt'), 'recover a missing checkout\n');
+  h.git(['add', 'committed.txt'], wt.path);
+  h.git(['commit', '-qm', 'local work'], wt.path);
+  h.git(['worktree', 'remove', wt.path]);
+  h.ok(['task', 'update', 'T1', '--status', 'cancelled']);
+  const saved = h.json(['task', 'show', 'T1']).worktree.saved;
+  h.git(['fetch', path.join(saved, 'commits.bundle'), `refs/heads/${wt.branch}:refs/heads/recovered`]);
+  assert.equal(h.git(['show', 'recovered:committed.txt']), 'recover a missing checkout');
+  gone(h, wt);
+});
