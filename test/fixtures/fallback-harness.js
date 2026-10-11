@@ -101,5 +101,9 @@ if (path.resolve(process.argv[1] || '') !== __filename) {
           : { type: 'turn.failed', error: { message } }));
     process.exit(type === 'permanent' ? 2 : type === 'signal' ? 75 : 1);
   }
-  if (process.env.TOWER_CRANE_TEST_FALLBACK_HOLD) setTimeout(() => {}, Number(process.env.TOWER_CRANE_TEST_FALLBACK_HOLD));
+  if (process.env.TOWER_CRANE_TEST_FALLBACK_FINISH) {
+    const timer = setInterval(() => {
+      if (fs.existsSync(process.env.TOWER_CRANE_TEST_FALLBACK_FINISH)) clearInterval(timer);
+    }, 25);
+  } else if (process.env.TOWER_CRANE_TEST_FALLBACK_HOLD) setTimeout(() => {}, Number(process.env.TOWER_CRANE_TEST_FALLBACK_HOLD));
 }

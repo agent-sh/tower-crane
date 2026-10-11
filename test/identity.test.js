@@ -152,7 +152,7 @@ test('terminal fallback cannot waive gates without explicit owner identity', { s
     const h = setup(t);
     h.ok(['owner-done', 'T1']);
     h.ok(['claim', 'T1', '--agent', 'worker']);
-    h.ok(['submit', 'T1', '--sha', 'abcdef1', '--pr', '1', '--agent', 'worker']);
+    h.ok(['submit', 'T1', '--sha', '50b732a15be40ccb2065cb2ba0e7b366d511b736', '--pr', '1', '--agent', 'worker']);
     const waive = ['accept', 'T1', '--waive', 'tests', '--waive', 'clean', '--waive', 'review', '--waive', 'ci', '--reason', 'approved'];
     const before = events(h);
     const blocked = terminal(h, waive);
@@ -218,7 +218,7 @@ test('terminal fallback cannot set owner policies on init or project set', { ski
 test('terminal fallback cannot answer or delegate a decision as the owner', { skip: !PTY_AVAILABLE }, (t) => {
   const h = makeRepo(t);
   h.init();
-  h.ok(['ask', '--question', 'Which?', '--option', 'a', '--option', 'b']);
+  h.ok(['ask', '--kind', 'technical', '--question', 'Which?', '--option', 'a', '--option', 'b']);
   const before = events(h);
   for (const args of [
     ['answer', 'D1', '--choice', 'a'],
@@ -479,7 +479,7 @@ test('owner-done and waivers require the resolved name owner exactly', (t) => {
   }
   h.ok(['owner-done', 'T1', '--agent', 'owner']);
   h.ok(['claim', 'T1', '--agent', 'worker']);
-  h.ok(['submit', 'T1', '--sha', 'abcdef1', '--agent', 'worker']);
+  h.ok(['submit', 'T1', '--sha', '50b732a15be40ccb2065cb2ba0e7b366d511b736', '--agent', 'worker']);
   const waive = ['accept', 'T1', '--waive', 'tests', '--waive', 'clean', '--waive', 'review', '--reason', 'owner approved'];
   for (const agent of ['reviewer', 'Owner']) {
     const r = h.run([...waive, '--agent', agent]);

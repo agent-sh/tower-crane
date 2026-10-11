@@ -1,0 +1,1 @@
+- Exit-collection checks wait for finalized usage and the worker exit receipt instead of mistaking live snapshots for completion. A controlled collector pause covers unknown telemetry and recollection. Fallback home rebuilds keep their prepared cache origin and writable grant.
