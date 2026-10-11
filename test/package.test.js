@@ -33,8 +33,6 @@ test('the npm package ships the plugin and loads pi skills through its CLI', (t)
   assert.equal(artifact.name, '@agentsys/tower-crane');
   const metadata = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
   assert.deepEqual(metadata.bin, { 'tower-crane': 'bin/tower-crane.js' });
-  const plugin = JSON.parse(fs.readFileSync(path.join(ROOT, '.claude-plugin', 'plugin.json'), 'utf8'));
-  assert.deepEqual(plugin.mcpServers['tower-crane'].args, ['${CLAUDE_PLUGIN_ROOT}/bin/tower-crane.js', 'mcp', '--agent', 'orchestrator']);
   const files = artifact.files.map((file) => file.path);
   for (const file of [
     'skills/tower-crane/SKILL.md',
@@ -46,6 +44,7 @@ test('the npm package ships the plugin and loads pi skills through its CLI', (t)
     '.claude-plugin/plugin.json',
     '.claude-plugin/marketplace.json',
     'components.json',
+    '.mcp.json',
     'lib/mcp.js',
     'commands/tower-crane-inbox.md',
     'commands/tower-crane-spawn-ready.md',

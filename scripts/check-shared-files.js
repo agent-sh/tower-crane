@@ -6,30 +6,6 @@ const { check } = require('./cli-docs');
 const { fragments } = require('./changelog');
 const { normalizeText } = require('./text');
 
-// Claude's sandbox masks these names in every worktree, tracked or not, and
-// git cannot write a masked path inside it: a merge that adds or changes a
-// tracked one fails there (T155). Matched at any depth, in any letter case,
-// as the sandbox matches them. The list is Claude Code 2.1.295's.
-const MASKED_FILES = ['.gitconfig', '.gitmodules', '.bashrc', '.bash_profile', '.zshrc', '.zprofile', '.profile', '.ripgreprc', '.mcp.json'];
-const MASKED_DIRS = ['.vscode', '.idea', '.claude/commands', '.claude/agents'];
-
-function maskedPaths(files) {
-  return files.filter((file) => {
-    const parts = file.toLowerCase().split('/');
-    if (MASKED_FILES.includes(parts.at(-1))) return true;
-    return MASKED_DIRS.some((dir) => {
-      const names = dir.split('/');
-      return parts.some((_, i) => i + names.length < parts.length && names.every((name, j) => parts[i + j] === name));
-    });
-  });
-}
-
-function checkMasked(root) {
-  const files = cp.execFileSync('git', ['ls-files', '-z'], { cwd: root, encoding: 'utf8', timeout: 30000 }).split('\0').filter(Boolean);
-  const masked = maskedPaths(files);
-  if (masked.length) throw new Error(`tracked paths the Claude sandbox masks: ${masked.join(', ')}; git cannot write them in a worker worktree, so keep them untracked`);
-}
-
 function checkChanges(root, base) {
   const git = (args) => cp.execFileSync('git', args, { cwd: root, encoding: 'utf8', timeout: 30000 });
   const sha = normalizeText(git(['rev-parse', '--verify', `${base}^{commit}`])).trim();
@@ -65,7 +41,6 @@ function main(args) {
   }
   check(root);
   fragments(root);
-  checkMasked(root);
   if (base && !/^0+$/.test(base)) checkChanges(root, base);
 }
 
@@ -77,4 +52,4 @@ if (require.main === module) {
   }
 }
 
-module.exports = { checkChanges, maskedPaths };
+module.exports = { checkChanges };

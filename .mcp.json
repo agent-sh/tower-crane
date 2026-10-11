@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "tower-crane": {
+      "command": "node",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/bin/tower-crane.js", "mcp", "--agent", "orchestrator"]
+    }
+  }
+}

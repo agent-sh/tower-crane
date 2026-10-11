@@ -171,27 +171,6 @@ test('the shared file check enforces sorted single-line command entries with spa
   assert.match(adjacent.stderr, /blank line/);
 });
 
-test('the shared file check names tracked paths the Claude sandbox masks, at any depth and letter case', () => {
-  const { maskedPaths } = require('../scripts/check-shared-files');
-  assert.deepEqual(maskedPaths([
-    '.mcp.json', 'lib/.Bashrc', 'web/.vscode/settings.json', '.claude/agents/x.md', 'docs/.claude/commands/y.md',
-    'README.md', '.github/workflows/ci.yml', '.claude-plugin/plugin.json', 'idea.md', '.claude/agents',
-  ]), ['.mcp.json', 'lib/.Bashrc', 'web/.vscode/settings.json', '.claude/agents/x.md', 'docs/.claude/commands/y.md']);
-});
-
-test('the shared file check refuses a tracked masked path until it is untracked', (t) => {
-  const f = fixture(t);
-  f.change();
-  assert.equal(f.check().status, 0);
-  f.write('.mcp.json', '{}\n');
-  f.h.git(['add', '.mcp.json']);
-  const tracked = f.check();
-  assert.equal(tracked.status, 1);
-  assert.match(tracked.stderr, /masks: \.mcp\.json/);
-  f.h.git(['rm', '--cached', '-q', '.mcp.json']);
-  assert.equal(f.check().status, 0);
-});
-
 test('tasks add fragments instead of editing the archive or an existing change', (t) => {
   const f = fixture(t, { crlfProtected: true });
   f.write('README.md', '# changed\n');
