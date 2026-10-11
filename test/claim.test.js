@@ -131,7 +131,7 @@ test('renewing an expired claim passes the readiness checks a claim does', (t) =
   }
 
   expire();
-  h.ok(['ask', '--question', 'Ship on Friday?', '--option', 'yes', '--option', 'no', '--blocks', 'T1']);
+  h.ok(['ask', '--kind', 'technical', '--question', 'Ship on Friday?', '--option', 'yes', '--option', 'no', '--blocks', 'T1']);
   refuseRenewal(/T1 is blocked: waits for decision D1: Ship on Friday\?/);
 });
 

@@ -354,10 +354,13 @@ for (const harness of ['codex', 'claude']) {
     const { h, script, seen } = setup(t, harness);
     nativeHarness(h, script, seen, harness);
     const first = h.json(['spawn', '--task', 'T1', '--wait']);
+    const scratch = h.json(['task', 'show', 'T1']).scratch;
+    fs.writeFileSync(path.join(scratch, 'receipt.txt'), 'earlier measurement\n');
     const receipt = events(h).find((e) => e.cmd === 'spawn session');
     assert.equal(receipt.detail.session_id, harness === 'codex' ? 'worker-session-1' : first.session_id);
     assert.equal(receipt.detail.harness, harness);
     sendBack(h);
+    h.env.XDG_CACHE_HOME = path.join(h.base, 'another-cache');
     const dry = h.json(['spawn', '--task', 'T1', '--dry-run']);
     assert.equal(dry.harness, harness);
     assert.equal(dry.resumed, harness === 'codex');
@@ -378,6 +381,9 @@ for (const harness of ['codex', 'claude']) {
     assert.equal(next.resumed, harness === 'codex');
     assert.equal(next.agent, harness === 'codex' ? 'worker-T1-1' : 'worker-T1-2');
     const input = JSON.parse(fs.readFileSync(seen, 'utf8'));
+    assert.ok(input.prompt.includes(scratch), 'fresh and resumed workers are told where earlier scratch lives');
+    assert.equal(h.json(['task', 'show', 'T1']).scratch, scratch);
+    assert.equal(fs.readFileSync(path.join(scratch, 'receipt.txt'), 'utf8'), 'earlier measurement\n');
     assert.equal(input.prior, harness === 'codex' ? 'worker-session-1' : '');
     if (harness === 'codex') {
       assert.ok(!input.prompt.includes('## Role instructions: tower-crane-work'));
