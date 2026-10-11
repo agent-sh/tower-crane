@@ -716,7 +716,8 @@ test('browser spawns use the original user kit through a nested isolated home an
 test('claude and codex sandboxes hide the user\'s credential stores and keep the agent\'s home, house rules and gh token', { skip: NO_STUBS }, (t) => {
   const { h, u } = setup(t);
   const stores = ['.config/gh/hosts.yml', '.claude/.credentials.json', '.claude/settings.json', '.claude.json', '.codex/auth.json',
-    '.codex/.env', '.codex/config.toml', '.docker/config.json', '.npmrc', '.pypirc', '.cargo/credentials.toml', '.netrc',
+    '.codex/.env', '.codex/config.toml', '.docker/config.json', '.npmrc', '.pypirc', '.config/pip/pip.conf', '.pip/pip.conf',
+    '.cargo/credentials', '.cargo/credentials.toml', '.netrc',
     '.git-credentials', '.config/git/credentials', '.kube/config', '.config/gcloud/credentials.db', '.azure/msal_token_cache.json',
     '.ssh/id_ed25519', '.aws/credentials'].map((p) => path.join(u.home, p));
   for (const f of stores.filter((f) => !fs.existsSync(f))) {
@@ -1032,6 +1033,42 @@ if (process.env.STUB_FAIL_HARNESS === ${JSON.stringify(harness)}) {
       assert.equal(report.ran[0].code, 0, 'the handed token works');
       assertCredentialsHidden(report, files);
     }
+  }
+});
+
+test('every configured env_file keeps its credential paths hidden on initial and fallback launches', { skip: NO_STUBS }, t => {
+  const { h, u } = setup(t);
+  const reports = path.join(h.base, 'route-env-files.jsonl');
+  // The rung and the fallback route each override the project file, so
+  // no launch selects it; it still names a store the user configured.
+  const files = ['project', 'primary', 'route'].map(label => path.join(h.base, `${label}-aws-creds`));
+  for (const [index, file] of files.entries()) {
+    fs.writeFileSync(file, '[default]\naws_access_key_id = synthetic\n');
+    fs.writeFileSync(path.join(h.base, `${['project', 'primary', 'route'][index]}.env`), `AWS_SHARED_CREDENTIALS_FILE=${JSON.stringify(file)}\n`);
+  }
+  for (const harness of ['claude', 'codex']) fs.writeFileSync(path.join(h.base, 'bin', harness), `#!${process.execPath}
+const fs = require('node:fs');
+require(${JSON.stringify(STUB)})(${JSON.stringify(harness)});
+fs.appendFileSync(${JSON.stringify(reports)}, fs.readFileSync(process.env.STUB_OUT, 'utf8') + '\\n');
+if (process.env.STUB_FAIL_HARNESS === ${JSON.stringify(harness)}) {
+  console.error('HTTP 503 service unavailable'); process.exit(1);
+}
+`);
+  h.ok(['project', 'set', '--env_file', path.join(h.base, 'project.env')]);
+  for (const primary of ['claude', 'codex']) {
+    const fallback = primary === 'claude' ? 'codex' : 'claude';
+    isolated(h, 'hard', primary);
+    h.ok(['ladder', 'set', 'hard', '--env_file', path.join(h.base, 'primary.env'),
+      '--supervision', '{"retries":0,"backoff_ms":10,"max_backoff_ms":10}']);
+    fs.mkdirSync(path.dirname(h.userConfig), { recursive: true });
+    fs.writeFileSync(h.userConfig, JSON.stringify({ ladder: { hard: { fallbacks: [{
+      harness: fallback, model: 'second', env_file: path.join(h.base, 'route.env'),
+    }] } } }));
+    fs.rmSync(reports, { force: true });
+    spawn(h, u, 'hard', { STUB_FAIL_HARNESS: primary });
+    const seen = fs.readFileSync(reports, 'utf8').trim().split('\n').map(JSON.parse);
+    assert.deepEqual(seen.map(report => report.harness), [primary, fallback]);
+    for (const report of seen) assertCredentialsHidden(report, files);
   }
 });
 
