@@ -136,6 +136,7 @@ const variants = [
   ['powershell.exe', 'powershell.exe -NoProfile', true],
   ['powershell.exe', 'powershell.exe -NoProfile -File loop.ps1', false],
   ['node.exe', 'node.exe /tools/script.js codex', false],
+  ['node', 'node /tools/codex/loop.js', false],
 ];
 for (const [Name, CommandLine, isHarness] of variants) {
   const caller = { ProcessId: process.ppid, ParentProcessId: 444444, Name: 'helper.exe',
