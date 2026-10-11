@@ -788,6 +788,23 @@ test('a codex agent writes only where its agent file says; a worker writes its g
   assert.ok(fs.statSync(path.join(common, 'info')).isDirectory());
 });
 
+test('a link planted at a protected git path refuses the spawn and leaves its target untouched', { skip: NO_STUBS || (process.platform === 'win32' && 'symlinks need privileges on Windows') }, (t) => {
+  const { h, u, wt } = setup(t);
+  const common = h.git(['rev-parse', '--path-format=absolute', '--git-common-dir'], wt);
+  // A sandbox would protect the target and leave the link to be swapped.
+  const target = path.join(h.base, 'elsewhere');
+  fs.writeFileSync(target, 'untouched\n');
+  fs.symlinkSync(target, path.join(common, 'config.worktree'));
+  for (const harness of ['claude', 'codex']) {
+    isolated(h, 'hard', harness);
+    const r = h.run(['spawn', '--role', 'hard', '--task', 'T1', '--wait', '--json'], { env: u.env });
+    assert.notEqual(r.code, 0, harness);
+    assert.match(r.stderr, /config\.worktree is a link; a sandbox cannot keep it read-only/, harness);
+    assert.equal(fs.readFileSync(target, 'utf8'), 'untouched\n', harness);
+    assert.ok(fs.lstatSync(path.join(common, 'config.worktree')).isSymbolicLink(), harness);
+  }
+});
+
 test('a sandboxed harness\'s own git runs no command the shared config, hooks or the agent\'s HOME name; the agent\'s sandboxed git still runs hooks', { skip: NO_STUBS }, (t) => {
   const { h, u, wt } = setup(t);
   fs.writeFileSync(path.join(wt, 'f.txt'), 'one\n');
