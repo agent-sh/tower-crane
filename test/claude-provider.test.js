@@ -173,6 +173,19 @@ test('provider checks accept only local auth presence and use global model ids',
   assert.match(bad.stderr, /anthropic.*bedrock/);
 });
 
+test('a Claude alias on a Bedrock rung resolves to its global id and keeps the user pin', (t) => {
+  const h = setup(t);
+  h.aws();
+  const releases = { opus: 'claude-opus-5-5', fable: 'claude-fable-5-1', sonnet: 'claude-sonnet-5-5', haiku: 'claude-haiku-5-5' };
+  for (const [alias, release] of Object.entries(releases)) {
+    h.primary('bedrock', alias);
+    const preview = h.json(['spawn', '--task', 'T1', '--dry-run']);
+    assert.equal(preview.argv[preview.argv.indexOf('--model') + 1], `global.anthropic.${release}`, alias);
+  }
+  // The shipped table fills only the pins the user did not set.
+  assert.equal(h.json(['spawn', '--task', 'T1', '--dry-run']).env.ANTHROPIC_DEFAULT_HAIKU_MODEL, 'global.anthropic.fixture-stub');
+});
+
 test('Claude helper commands and AWS SSO config can satisfy local auth checks', (t) => {
   const h = setup(t);
   fs.writeFileSync(path.join(h.claude, 'settings.json'), JSON.stringify({ apiKeyHelper: 'unused stub helper' }));
