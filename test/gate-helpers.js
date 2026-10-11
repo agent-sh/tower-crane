@@ -82,7 +82,22 @@ if (process.env.FIXTURE_GH_LOG) fs.appendFileSync(process.env.FIXTURE_GH_LOG, JS
 // FIXTURE_MERGED_PER_PR gives each PR its own merge marker.
 const merged = process.env.FIXTURE_MERGED && process.env.FIXTURE_MERGED + (process.env.FIXTURE_MERGED_PER_PR ? '-' + args[2] : '');
 if (args[0] === 'pr' && args[1] === 'merge') {
+  // FIXTURE_GH_STACK_REFUSAL: GitHub refuses gh pr merge for a stack member the task never recorded.
+  if (process.env.FIXTURE_GH_STACK_REFUSAL) {
+    console.error('GraphQL: This pull request is part of a stack and must be merged using the asynchronous merge REST API (mergePullRequest)');
+    process.exit(1);
+  }
   fs.writeFileSync(merged, 'merged');
+} else if (args[0] === 'api' && args.includes('POST') && /\\/merge-async$/.test(args[1])) {
+  // The asynchronous merge pins the head it is given and lands before the request returns.
+  if (!args.includes(\`expected_head_sha=\${process.env.FIXTURE_SHA}\`)) {
+    console.error('gh: Head branch was modified. Review and try the merge again. (HTTP 409)');
+    process.exit(1);
+  }
+  fs.writeFileSync(merged, 'merged');
+  console.log(JSON.stringify({id: 1, status: 'completed'}));
+} else if (args[0] === 'api' && /\\/merge-async\\/\\d+$/.test(args[1])) {
+  console.log(JSON.stringify({id: 1, status: 'completed'}));
 } else if (args[0] === 'pr') {
   const pr = args[2];
   console.log(JSON.stringify({

@@ -115,6 +115,9 @@ const MUTANTS = [
     from: 'for (const id of ids) if (id !== job.task) throw', to: 'for (const id of ids) if (false) throw', tests: ['test/broker.test.js'] },
   { id: 'broker-no-token', area: 'broker', file: 'lib/broker.js',
     from: 'if (!req || !sameToken(req.token, token))', to: 'if (!req)', tests: ['test/broker.test.js'] },
+  // host-only tests
+  { id: 'sandbox-runs-directory-selection', area: 'host-only tests', file: 'lib/tests-host-only.js',
+    from: 'const refused = files.filter((file) => !isFile(path.resolve(root, file)));', to: 'const refused = [];', tests: ['test/host-only.test.js'] },
   // spawn and supervisor
   { id: 'supervisor-writes-after-incompatible-state', area: 'spawn/supervisor', file: 'lib/spawn-monitor.js',
     from: "if (committed && !incompatible && fs.existsSync(path.join(spawn.state, 'project.json'))) sampleUsage(true);",
@@ -142,6 +145,14 @@ const MUTANTS = [
   // merge and stacks
   { id: 'merge-moved-head', area: 'merge/stacks', file: 'lib/gates/merge.js',
     from: "  if (!sameSha(head, sha)) {\n    return res(false, `PR head moved", to: "  if (false) {\n    return res(false, `PR head moved", tests: ['test/gates/merge.test.js'] },
+  { id: 'merge-stack-refusal-no-fallback', area: 'merge/stacks', file: 'lib/gates/merge.js',
+    from: "if (!m.ok && method !== 'rebase' && ASYNC_ONLY.test(", to: "if (!m.ok && method !== 'rebase' && false && ASYNC_ONLY.test(", tests: ['test/merge-options.test.js'] },
+  { id: 'merge-async-fallback-rebase', area: 'merge/stacks', file: 'lib/gates/merge.js',
+    from: "if (!m.ok && method !== 'rebase' && ASYNC_ONLY.test(", to: "if (!m.ok && ASYNC_ONLY.test(", tests: ['test/merge-options.test.js'] },
+  { id: 'merge-async-fallback-no-delete', area: 'merge/stacks', file: 'lib/gates/merge.js',
+    from: "const deleted = project.merge?.keep_branch ? '' : await deleteBranch(", to: "const deleted = '' && await deleteBranch(", tests: ['test/merge-options.test.js'] },
+  { id: 'merge-async-fallback-admin-dropped', area: 'merge/stacks', file: 'lib/gates/merge.js',
+    from: "if (project.merge?.admin === true) return res(false, `gh pr merge refused PR #${pr}: it is part", to: "if (false) return res(false, `gh pr merge refused PR #${pr}: it is part", tests: ['test/merge-options.test.js'] },
   { id: 'stack-merge-unaccepted-lower', area: 'merge/stacks', file: 'lib/gates/merge.js',
     from: "if (t.status !== 'accepted' || (!ctx.mergedIds", to: 'if ((!ctx.mergedIds', tests: ['test/stack-merge.test.js'] },
   { id: 'stack-merge-untracked-lower', area: 'merge/stacks', file: 'lib/gates/merge.js',

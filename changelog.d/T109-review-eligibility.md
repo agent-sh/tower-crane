@@ -1,0 +1,1 @@
+- Rework handoffs retain the originating rejected revision while accepting feedback only from a matching reviewer dispatch or the owner. Revision regressions cover owner reviews and dispatched reviewers.
