@@ -509,11 +509,17 @@ test('a worker starts only after its supervisor takes the lease, so its first ed
 test('a worker whose lease is refused never starts, reports why and frees its slot', { skip: GATE_SKIP }, async (t) => {
   const h = setup(t, { claim: false, failures: 0 });
   const { paused, hooks } = pausedSupervisor(h);
-  const spawned = h.json(['spawn', '--task', 'T1'], { hooks });
-  await until(() => fs.existsSync(paused), 'supervisor did not pause');
-  h.ok(['task', 'update', 'T1', '--needs-owner', 'waiting for a decision']);
-  fs.writeFileSync(`${paused}.go`, '');
-  await until(() => log(h).some((e) => e.cmd === 'spawn exit' && e.detail.agent === spawned.agent), 'supervisor did not stop');
+  const completed = h.runAsync(['spawn', '--task', 'T1', '--wait', '--json'], { hooks });
+  let result;
+  try {
+    await until(() => fs.existsSync(paused), 'supervisor did not pause');
+    h.ok(['task', 'update', 'T1', '--needs-owner', 'waiting for a decision']);
+  } finally {
+    fs.writeFileSync(`${paused}.go`, '');
+    result = await completed;
+  }
+  assert.notEqual(result.code, 0, result.stderr);
+  assert.match(result.stderr, /tower-crane: no lease: T1 is blocked: needs owner: waiting for a decision/);
   const blocked = log(h).findLast((e) => e.cmd === 'spawn phase' && e.detail.phase === 'blocked');
   assert.match(blocked.detail.reason, /^no lease: T1 is blocked: needs owner: waiting for a decision/);
   assert.equal(h.readAttempts().length, 0, 'the refused worker never ran');
