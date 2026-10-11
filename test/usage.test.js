@@ -105,14 +105,13 @@ test('native Claude alias spend records release-priced cost without rewriting it
   for (const [harness, provider, stored, cost] of [
     ['claude', undefined, alias, 0.02],
     ['claude', 'anthropic', release, 0.02],
-    ['claude', 'bedrock', bedrock, 0.03],
+    ['claude', 'bedrock', bedrock, 0.02],
     ['codex', undefined, alias, null],
   ]) {
     const h = setup(t, harness);
     pinRung(h, 'review', { harness, provider, model: alias, effort: 'high' });
     h.ok(['project', 'set', '--review-policy', JSON.stringify({ prices: {
       [release]: { input: 1, cache_write: 1, cache_read: 1, output: 20 },
-      [bedrock]: { input: 1, cache_write: 1, cache_read: 1, output: 30 },
     } })]);
     h.ok(['spend', 'T1', '--rung', 'review', '--tokens', '1000', '--input', '0', '--cached', '0', '--output', '1000']);
     const task = h.json(['task', 'show', 'T1']);
@@ -122,6 +121,87 @@ test('native Claude alias spend records release-priced cost without rewriting it
     assert.deepEqual(task.spend_by_rung.review, { tokens: 1000, cost_usd: cost });
     assert.equal(events(h).findLast(e => e.cmd === 'spend').detail.cost_usd, cost);
   }
+});
+
+test('a Claude run on several models names its primary model and keeps each model\'s counts', () => {
+  const result = { type: 'result', usage: { input_tokens: 100, cache_read_input_tokens: 900, output_tokens: 50 },
+    modelUsage: {
+      'global.anthropic.claude-opus-5-5[1m]': { inputTokens: 90, cacheReadInputTokens: 800, cacheCreationInputTokens: 0, outputTokens: 40 },
+      'anthropic.claude-haiku-5-5': { inputTokens: 10, cacheReadInputTokens: 100, cacheCreationInputTokens: 0, outputTokens: 10 },
+    } };
+  assert.deepEqual(parse('claude', JSON.stringify(result)), {
+    tokens: 1050, input: 1000, cached: 900, output: 50, model: 'global.anthropic.claude-opus-5-5[1m]',
+    models: [
+      { model: 'global.anthropic.claude-opus-5-5[1m]', tokens: 930, input: 890, cached: 800, output: 40 },
+      { model: 'anthropic.claude-haiku-5-5', tokens: 120, input: 110, cached: 100, output: 10 },
+    ],
+  });
+  const message = (id, model, u) => JSON.stringify({ type: 'assistant', message: { id, model, usage: u } });
+  const log = [
+    message('a', 'fixture-large', { input_tokens: 50, cache_read_input_tokens: 0, output_tokens: 5 }),
+    message('b', 'fixture-small', { input_tokens: 3, cache_read_input_tokens: 0, output_tokens: 1 }),
+    message('c', 'fixture-large', { input_tokens: 20, cache_read_input_tokens: 0, output_tokens: 2 }),
+  ].join('\n');
+  const split = parse('claude', log);
+  assert.equal(split.model, 'fixture-large');
+  assert.deepEqual(split.models.map((r) => [r.model, r.tokens]), [['fixture-large', 77], ['fixture-small', 4]]);
+});
+
+test('review prices for one model agree across Bedrock and plain ids', (t) => {
+  const h = setup(t, 'claude');
+  const row = (output) => ({ input: 1, cache_write: 1, cache_read: 1, output });
+  const conflict = h.run(['project', 'set', '--review-policy', JSON.stringify({ prices: {
+    'claude-x': row(20), 'global.anthropic.claude-x[1m]': row(30),
+  } })]);
+  assert.equal(conflict.code, 2);
+  assert.match(conflict.stderr, /more than one rate for model claude-x/);
+  h.ok(['project', 'set', '--review-policy', JSON.stringify({ prices: {
+    'claude-x': row(20), 'global.anthropic.claude-x[1m]': row(20),
+  } })]);
+});
+
+test('bench prices Bedrock and 1M-context ids and a two-model run from canonical rates, split by billing', (t) => {
+  const h = setup(t, 'claude');
+  h.ok(['task', 'add', '--title', 'Second', '--acceptance', 'done', '--tier', 'easy']);
+  h.ok(['brief', 'set', 'T2', '-'], { input: 'Record usage.\n' });
+  const run = (task, env, modelUsage, usage) => {
+    const file = path.join(h.base, `${task}.json`);
+    fs.writeFileSync(file, JSON.stringify({ type: 'result', usage, modelUsage }));
+    const r = h.run(['spawn', '--task', task, '--wait', '--json'], {
+      env: { ...h.usageEnv, ANTHROPIC_API_KEY: env },
+      hooks: { HOOK_USAGE_HARNESS: 'claude', HOOK_USAGE_FILE: file },
+    });
+    assert.equal(r.code, 0, r.stderr);
+  };
+  // Two models, one with an 1M-context Bedrock id and one plain Bedrock Haiku id.
+  run('T1', 'fixture-key', {
+    'global.anthropic.claude-opus-5-5[1m]': { inputTokens: 90, cacheReadInputTokens: 800, cacheCreationInputTokens: 0, outputTokens: 40 },
+    'global.anthropic.claude-haiku-4-5-20251001-v1:0': { inputTokens: 10, cacheReadInputTokens: 100, cacheCreationInputTokens: 0, outputTokens: 10 },
+  }, { input_tokens: 100, cache_read_input_tokens: 900, output_tokens: 50 });
+  // A login run on a plain Bedrock Haiku id with no API key in its environment.
+  run('T2', '', { 'global.anthropic.claude-haiku-5-5': { inputTokens: 40, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, outputTokens: 4 } },
+    { input_tokens: 40, cache_read_input_tokens: 0, output_tokens: 4 });
+  const doc = h.readState('tasks.json');
+  for (const task of doc.tasks) task.status = 'accepted';
+  h.writeState('tasks.json', doc);
+  const [first, second] = h.json(['task', 'show', 'T1']).spend.entries.concat(h.json(['task', 'show', 'T2']).spend.entries);
+  assert.equal(first.model, 'global.anthropic.claude-opus-5-5[1m]', 'the primary model names the entry');
+  assert.deepEqual(first.models.map((r) => r.model), ['global.anthropic.claude-opus-5-5[1m]', 'global.anthropic.claude-haiku-4-5-20251001-v1:0']);
+  assert.equal(first.billing, 'api');
+  assert.equal(second.billing, 'subscription');
+  // Prices name only canonical ids; the entries above were recorded before any price existed.
+  const prices = path.join(h.base, 'prices.json');
+  fs.writeFileSync(prices, JSON.stringify({
+    'claude-opus-5-5': { input: 2, cache_write: 2.5, cache_read: 0.2, output: 10 },
+    'claude-haiku-5-5': { input: 1, cache_write: 1, cache_read: 0.1, output: 5 },
+    'claude-haiku-4-5-20251001-v1:0': { input: 1, cache_write: 1, cache_read: 0.1, output: 5 },
+  }));
+  const r = h.json(['bench', 'tokens', '--prices', prices]);
+  assert.deepEqual(r.unpriced_models, {}, 'canonical rates price every id form');
+  const usd = (90 * 2.5 + 800 * 0.2 + 40 * 10) / 1e6 + (10 + 100 * 0.1 + 10 * 5) / 1e6;
+  assert.ok(Math.abs(r.metered_usd - usd) < 1e-12, `${r.metered_usd} vs ${usd}`);
+  assert.ok(Math.abs(r.list_usd - (usd + (40 + 4 * 5) / 1e6)) < 1e-12, `${r.list_usd}`);
+  assert.match(h.ok(['bench', 'tokens', '--prices', prices]), /^metered USD \(api billing\): \$0\.00; list-price equivalent of all priced spend: \$0\.00$/m);
 });
 
 async function collected(h, length = 1, timeout = 15000) {

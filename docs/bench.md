@@ -54,7 +54,8 @@ A known token total without a breakdown still contributes to token medians. If a
 - The escalation path is the task's worker rungs from its `spawn` events in order, repeats collapsed: `easy>medium` started on easy and moved once. Native work without spawn receipts uses the rungs its spend entries name. A path that goes down (`medium>easy`) is a re-tier, not a quality climb.
 - By rung, each task contributes the tokens it spent on that rung, so `review` is the review cost per accepted task.
 - `all recorded task tokens / accepted tasks` divides every task's spend, cancelled and unfinished ones included, by the accepted count: the full cost of getting work accepted.
-- USD uses the entry's recorded `cost_usd`, else `--prices`, else the project `review.prices`, with the review pricing rules (inclusive input, conservative cache-write pricing). Rates match on the model id: a 1M-context id such as `global.anthropic.claude-opus-5-5[1m]` is its own row and does not fall back to base Opus. An entry whose model has no rate is unpriced, the output lists unpriced entries by model, and a task with any unpriced entry is left out of the USD median; the `priced` column counts the tasks that median covers.
+- USD uses the entry's recorded `cost_usd`, else `--prices`, else the project `review.prices`, with the review pricing rules (inclusive input, conservative cache-write pricing). Rates match on the model identity: the Claude provider prefix and the `[1m]` suffix are dropped, so `global.anthropic.claude-opus-5-5[1m]` prices at the `claude-opus-5-5` row. A run on several models prices each model's own counts. An entry whose model has no rate is unpriced, the output lists unpriced entries by model, and a task with any unpriced entry is left out of the USD median; the `priced` column counts the tasks that median covers.
+- `metered USD (api billing)` sums the priced entries whose `billing` is `api` (Bedrock, or a run whose environment names an API key). `list-price equivalent` prices every entry, including login runs (`subscription`), which a per-token bill does not charge. Metered is the per-token charge; list price is the same tokens at review rates.
 
 ## Results
 
@@ -65,11 +66,10 @@ Prices, per million tokens (input / cache write / cache read / output), Bedrock 
 | Model id | Input | Cache write | Cache read | Output |
 |---|---|---|---|---|
 | `claude-opus-5-5` | 4 | 5 | 0.20 | 20 |
-| `global.anthropic.claude-opus-5-5[1m]` | 4 | 5 | 0.20 | 20 |
 | `openai.gpt-6.1-sol` | 2 | 2.50 | 0.10 | 10 |
 | `openai.gpt-6-luna` | 0.10 | 0.125 | 0.01 | 0.50 |
 
-The 1M-context Opus id has its own row at the base Opus rates, since no long-context premium for it is recorded. The snapshot has 24 unpriced Haiku entries, 6 unpriced Astra entries and one entry whose model field combines two IDs. Eight otherwise complete tasks have unpriced usage and are excluded from the USD median.
+The 1M-context Opus id, `global.anthropic.claude-opus-5-5[1m]`, prices at the base Opus row, since no long-context premium for it is recorded. The unpriced counts below predate that identity rule: 24 unpriced Haiku entries, 6 unpriced Astra entries and one entry whose model field combines two IDs. Eight otherwise complete tasks have unpriced usage and are excluded from the USD median.
 
 Both benches read recorded data and are deterministic: three runs of each on the same frozen snapshot gave byte-identical output (text and `--json`), so each figure is the value of every run. The deslop eval run is a detector run over git history and is deterministic as well. Three gate runs after the SHA identity correction reproduced the same text and JSON; the published gate figures below are unchanged.
 

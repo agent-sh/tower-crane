@@ -449,3 +449,20 @@ test('switching from Codex to agy refuses inherited Codex flags until explicitly
   h.ok(['ladder', 'set', 'hard', '--harness', 'agy', '--model', 'fixture-large', '--clear', 'args']);
   assert.equal(h.json(['ladder', 'show']).ladder.hard.harness, 'agy');
 });
+
+test('pricing identity drops the Claude provider prefix and the 1M context suffix and nothing else', () => {
+  for (const [id, identity] of [
+    ['global.anthropic.claude-opus-5-5[1m]', 'claude-opus-5-5'],
+    ['anthropic.claude-haiku-5-5', 'claude-haiku-5-5'],
+    [' Global.Anthropic.Claude-Opus-5-5[1M] ', 'claude-opus-5-5'],
+    ['claude-opus-5-5', 'claude-opus-5-5'],
+    ['openai.gpt-fixture', 'openai.gpt-fixture'],
+    ['a/easy', 'a/easy'],
+  ]) assert.equal(L.modelIdentity(id), identity, id);
+  assert.equal(L.billing({ harness: 'claude', provider: 'bedrock' }, {}), 'api');
+  assert.equal(L.billing({ harness: 'claude' }, { ANTHROPIC_API_KEY: 'x' }), 'api');
+  assert.equal(L.billing({ harness: 'claude' }, { ANTHROPIC_API_KEY: '' }), 'subscription');
+  assert.equal(L.billing({ harness: 'codex' }, {}), 'subscription');
+  assert.equal(L.billing({ harness: 'codex' }, { OPENAI_API_KEY: 'x' }), 'api');
+  assert.equal(L.billing({ harness: 'pi' }, {}), null);
+});

@@ -776,7 +776,7 @@ test('the review packet flags changed files outside the paths the brief names', 
 test('review policy validates price and diff settings through the CLI', (t) => {
   const h = makeProjectRepo(t);
   for (const bad of [{ prices: { 'fixture-main': { input: -1 } } },
-    { prices: { 'FIXTURE-MAIN': prices['fixture-main'], 'fixture-main': prices['fixture-main'] } },
+    { prices: { 'FIXTURE-MAIN': prices['fixture-main'], 'fixture-main': { ...prices['fixture-main'], output: prices['fixture-main'].output + 1 } } },
     { small_lines: -1 }, { risk_paths: [3] }, { surprise: true }]) {
     assert.equal(h.run(['project', 'set', '--review-policy', JSON.stringify(bad)]).code, 2);
   }
