@@ -181,7 +181,8 @@ test('bench prices Bedrock and 1M-context ids and a two-model run from canonical
     const file = path.join(h.base, `${task}.json`);
     fs.writeFileSync(file, JSON.stringify({ type: 'result', usage, modelUsage }));
     const r = h.run(['spawn', '--task', task, '--wait', '--json'], {
-      env: { ...h.usageEnv, ANTHROPIC_API_KEY: env },
+      // Pinned off, so a shell on Bedrock does not turn the login run into an API run.
+      env: { ...h.usageEnv, CLAUDE_CODE_USE_BEDROCK: '0', ANTHROPIC_API_KEY: env },
       hooks: { HOOK_USAGE_HARNESS: 'claude', HOOK_USAGE_FILE: file },
     });
     assert.equal(r.code, 0, r.stderr);
@@ -222,6 +223,26 @@ test('bench prices Bedrock and 1M-context ids and a two-model run from canonical
   assert.ok(Math.abs(r.metered_usd - usd) < 1e-12, `${r.metered_usd} vs ${usd}`);
   assert.ok(Math.abs(r.list_usd - (usd + (40 + 4 * 5) / 1e6)) < 1e-12, `${r.list_usd}`);
   assert.match(h.ok(['bench', 'tokens', '--prices', prices]), /^metered USD \(api billing\): \$0\.00; list-price equivalent of all priced spend: \$0\.00$/m);
+});
+
+test('a resumed Claude run prices only what it ran, with the baseline off each model', () => {
+  const { usageSince } = require('../lib/tasks');
+  const { rateTable, entryCost } = require('../lib/reviewer');
+  const message = (id, model, output) => JSON.stringify({ type: 'assistant', message: { id, model, usage: { input_tokens: 0, cache_read_input_tokens: 0, output_tokens: output } } });
+  const rates = rateTable({
+    'claude-opus-5-5': { input: 1, cache_write: 1, cache_read: 1, output: 20 },
+    'claude-haiku-5-5': { input: 1, cache_write: 1, cache_read: 1, output: 5 },
+  });
+  const earlier = message('a', 'claude-opus-5-5', 1000);
+  const one = usageSince(parse('claude', [earlier, message('b', 'claude-haiku-5-5', 100)].join('\n')), parse('claude', earlier));
+  assert.equal(one.model, 'claude-haiku-5-5', 'the primary model is one this invocation ran');
+  assert.equal(one.models, undefined);
+  assert.ok(Math.abs(entryCost(one, rates) - 100 * 5 / 1e6) < 1e-12, 'the earlier Opus tokens are not priced again');
+  // Two models in this invocation: the primary is picked from what it ran, not from the whole session.
+  const two = usageSince(parse('claude', [earlier, message('b', 'claude-haiku-5-5', 100), message('c', 'claude-opus-5-5', 50)].join('\n')), parse('claude', earlier));
+  assert.equal(two.model, 'claude-haiku-5-5');
+  assert.deepEqual(two.models.map((r) => [r.model, r.tokens]), [['claude-opus-5-5', 50], ['claude-haiku-5-5', 100]]);
+  assert.ok(Math.abs(entryCost(two, rates) - (50 * 20 + 100 * 5) / 1e6) < 1e-12);
 });
 
 async function collected(h, length = 1, timeout = 15000) {

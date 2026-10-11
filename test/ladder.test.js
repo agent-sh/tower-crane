@@ -473,4 +473,8 @@ test('pricing identity drops the Claude provider prefix and the 1M context suffi
   assert.equal(L.billing({ harness: 'codex' }, {}), 'subscription');
   assert.equal(L.billing({ harness: 'codex' }, { OPENAI_API_KEY: 'x' }), 'api');
   assert.equal(L.billing({ harness: 'pi' }, {}), null);
+  // A rung that names no provider runs on the Bedrock route its environment inherits; a pinned provider decides alone.
+  assert.equal(L.billing({ harness: 'claude' }, { CLAUDE_CODE_USE_BEDROCK: '1', AWS_PROFILE: 'fixture', AWS_REGION: 'eu-west-1' }), 'api');
+  assert.equal(L.billing({ harness: 'claude' }, { CLAUDE_CODE_USE_BEDROCK: '0' }), 'subscription');
+  assert.equal(L.billing({ harness: 'claude', provider: 'anthropic' }, { CLAUDE_CODE_USE_BEDROCK: '1' }), 'subscription');
 });

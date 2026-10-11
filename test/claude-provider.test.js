@@ -6,6 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { makeRepo, ROOT } = require('./helpers');
 const L = require('../lib/ladder');
+const P = require('../lib/claude-provider');
 
 // Read the alias table rather than naming a release, so a swap of the shipped
 // table changes no test.
@@ -269,3 +270,12 @@ for (const source of ['project env', 'rung env', 'env_file']) {
     assert.equal(h.attempts()[2].provider_env.AWS_REGION, 'eu-west-1');
   });
 }
+
+test('a Bedrock switch in the user settings file bills a rung that names no provider as api', (t) => {
+  const h = makeRepo(t);
+  const from = { claude: { dir: path.join(h.base, 'claude') } };
+  fs.mkdirSync(from.claude.dir, { recursive: true });
+  fs.writeFileSync(path.join(from.claude.dir, 'settings.json'), JSON.stringify({ env: { CLAUDE_CODE_USE_BEDROCK: '1' } }));
+  assert.equal(L.billing({ harness: 'claude' }, {}), 'subscription', 'the launch environment alone does not show the route');
+  assert.equal(L.billing({ harness: 'claude' }, P.routedEnv({}, from)), 'api');
+});
