@@ -12,8 +12,9 @@ jobs:
   test:
     name: test (${{ matrix.os }}, node ${{ matrix.node }}${{ matrix.shard != '' && format(', shard {0}', matrix.shard) || '' }})
     runs-on: ${{ matrix.os }}
-    # A test that hangs fails the run here instead of holding a runner for hours.
-    timeout-minutes: 15
+    # Windows process startup can exceed the old job budget while tests pass;
+    # the runner still bounds each test independently.
+    timeout-minutes: ${{ matrix.os == 'windows-latest' && 45 || 15 }}
     strategy:
       fail-fast: false
       matrix:
@@ -37,3 +38,23 @@ jobs:
         env:
           TOWER_CRANE_TEST_TMP: ${{ runner.temp }}/tower-crane-tests
           TC_TEST_SHARD: ${{ matrix.shard }}
+
+  model-swap:
+    name: complete model swap proof
+    runs-on: ubuntu-latest
+    # Leave setup time outside the probe's 45-minute software-gate deadline.
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 26
+      - run: node scripts/probe-model-swap.js
+        env:
+          TOWER_CRANE_TEST_TMP: ${{ runner.temp }}/tower-crane-model-swap
+      - name: Show probe failures
+        if: failure()
+        run: tail -n 300 "$RUNNER_TEMP/tower-crane-model-swap/model-swap-probe.tap"

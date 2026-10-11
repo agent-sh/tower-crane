@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
-const { makeRepo, ROOT } = require('./helpers');
+const { makeRepo, fixtureLadder, ROOT } = require('./helpers');
 
 // npm 11 prints an array of artifacts; npm 12 prints an object keyed by package name.
 function packedArtifact(stdout) {
@@ -41,8 +41,8 @@ test('the npm package ships the plugin and loads pi skills through its CLI', (t)
     'agents/tower-crane-worker.md',
     'agents/tower-crane-reviewer.md',
     'standards/default.md',
-    '.claude-plugin/plugin.json',
-    '.claude-plugin/marketplace.json',
+    path.relative(ROOT, require.resolve('../.claude-plugin/plugin.json')).replace(/\\/g, '/'),
+    path.relative(ROOT, require.resolve('../.claude-plugin/marketplace.json')).replace(/\\/g, '/'),
     'components.json',
     '.mcp.json',
     'lib/mcp.js',
@@ -75,11 +75,13 @@ test('the npm package ships the plugin and loads pi skills through its CLI', (t)
     assert.equal(r.status, 0, r.stderr);
     return r.stdout;
   };
+  fs.mkdirSync(path.dirname(h.userConfig), { recursive: true });
+  fs.writeFileSync(h.userConfig, JSON.stringify(fixtureLadder()));
   cli(['init', '--name', 'packaged', '--goal', 'load shipped skills']);
   cli(['task', 'add', '--title', 'Packaged task', '--acceptance', 'skills load']);
   cli(['brief', 'set', 'T1', '--file', path.join(installed, 'skills/tower-crane-work/SKILL.md')]);
   for (const [rung, skill] of [['medium', 'tower-crane-work'], ['review', 'tower-crane-review']]) {
-    cli(['ladder', 'set', rung, '--harness', 'pi', '--model', 'openai/gpt-5.5', '--clear', 'profile', '--clear', 'effort']);
+    cli(['ladder', 'set', rung, '--harness', 'pi', '--model', 'provider/fixture-model', '--clear', 'profile', '--clear', 'effort']);
     const out = JSON.parse(cli(['spawn', '--role', rung, '--task', 'T1', '--dry-run', '--json']));
     assert.equal(out.argv[out.argv.indexOf('--skill') + 1], path.join(installed, 'skills', skill));
   }

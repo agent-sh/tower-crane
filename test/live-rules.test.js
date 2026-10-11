@@ -14,7 +14,7 @@ const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
-const { makeRepo } = require('./helpers');
+const { pinLiveRung, makeRepo } = require('./helpers');
 const A = require('../lib/agents');
 
 const LINKS = {
@@ -81,9 +81,7 @@ for (const harness of ['claude', 'codex']) {
     h.ok(['brief', 'set', 'T1', '-'], {
       input: 'Rules check set up by the owner. Name every house token your rules give (global, shared, parent and repo), one per line as label: token. Change no file, do not use tower-crane, and stop after that one answer.\n',
     });
-    const model = harness === 'claude' ? ['--model', process.env.TOWER_CRANE_LIVE_MODEL || 'opus', '--clear', 'profile']
-      : ['--profile', process.env.TOWER_CRANE_LIVE_PROFILE || 'sol', '--clear', 'model'];
-    h.ok(['ladder', 'set', 'small', '--harness', harness, ...model, '--clear', 'effort', '--clear', 'args']);
+    pinLiveRung(h, harness);
     const env = { ...h.env, [harness === 'claude' ? 'CLAUDE_CONFIG_DIR' : 'CODEX_HOME']: global };
     const r = await h.runAsync(['spawn', '--role', 'small', '--task', 'T1', '--wait', '--json'], { env });
     const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
