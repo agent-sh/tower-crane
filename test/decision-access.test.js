@@ -412,21 +412,42 @@ test('the owner lifts a spend kind or an asker reason with --technical true, nam
   assert.match(escalated.stderr, /D3 escalates budget\.raise to the owner/);
 });
 
-test('a decision opened before kinds keeps its stored technical flag', (t) => {
+test('an open decision opened before kinds is technical unless an escalation or reason keeps it with the owner', (t) => {
   const h = makeRepo(t);
   h.init();
   h.ok(['task', 'add', '--title', 'Choose a store', '--acceptance', 'answer is authorized']);
   const worker = { env: { TOWER_CRANE_AGENT: 'worker-T1-1', TOWER_CRANE_TASK: 'T1' } };
-  h.ok(['ask', '--kind', 'technical', '--question', 'Which store?', '--option', 'redis', '--option', 'postgres', '--blocks', 'T1'], worker);
-  h.ok(['ask', '--kind', 'technical', '--question', 'Which cache?', '--option', 'memory', '--option', 'disk', '--blocks', 'T1'], worker);
+  for (const question of ['Which store?', 'Which cache?', 'Which queue?', 'Which region?']) {
+    h.ok(['ask', '--kind', 'technical', '--question', question, '--option', 'a', '--option', 'b', '--blocks', 'T1'], worker);
+  }
+  // Stored as main stored them: no kind, and a technical flag that main set from the asker.
   const legacy = h.readState('decisions.json');
   for (const d of legacy.decisions) delete d.kind;
-  legacy.decisions[1].technical = false;
+  legacy.decisions[0].technical = false;
+  legacy.decisions[2].escalation = { settings: ['budget.raise'], change: null };
+  legacy.decisions[2].technical = false;
+  legacy.decisions[3].owner_required = 'spend needs the owner';
+  legacy.decisions[3].technical = false;
   h.writeState('decisions.json', legacy);
 
-  h.ok(['answer', 'D1', '--choice', 'redis', '--agent', 'orchestrator']);
+  h.ok(['answer', 'D1', '--choice', 'a', '--agent', 'orchestrator']);
   assert.equal(h.readState('decisions.json').decisions[0].answer_rule, 'owner-technical-delegation');
-  const refused = h.run(['answer', 'D2', '--choice', 'memory', '--agent', 'orchestrator']);
-  assert.equal(refused.code, 1, refused.stderr);
-  assert.match(refused.stderr, /only the owner/);
+  const before = events(h);
+  const escalated = h.run(['answer', 'D3', '--choice', 'a', '--agent', 'orchestrator']);
+  assert.equal(escalated.code, 1, escalated.stderr);
+  assert.match(escalated.stderr, /D3 escalates budget\.raise to the owner/);
+  const reasoned = h.run(['answer', 'D4', '--choice', 'a', '--agent', 'orchestrator']);
+  assert.equal(reasoned.code, 1, reasoned.stderr);
+  assert.match(reasoned.stderr, /D4 is owner-required \(spend needs the owner\); only the owner answers it/);
+  assert.deepEqual(events(h), before, 'refused owner-only answers write no event');
+
+  h.ok(['decision', 'delegate', 'D2', '--technical', 'false', '--agent', 'owner']);
+  const kept = h.readState('decisions.json').decisions[1];
+  assert.equal(kept.owner_required, 'the owner keeps it with the owner');
+  const keptRefused = h.run(['answer', 'D2', '--choice', 'a', '--agent', 'orchestrator']);
+  assert.equal(keptRefused.code, 1, keptRefused.stderr);
+  assert.match(keptRefused.stderr, /D2 is owner-required \(the owner keeps it with the owner\); only the owner answers it/);
+  h.ok(['decision', 'delegate', 'D2', '--technical', 'true', '--agent', 'owner']);
+  h.ok(['answer', 'D2', '--choice', 'a', '--agent', 'orchestrator']);
+  assert.equal(h.readState('decisions.json').decisions[1].answer_rule, 'owner-technical-delegation');
 });

@@ -110,6 +110,8 @@ const MUTANTS = [
     from: "if (decision.kind && decision.kind !== 'technical' && decision.technical !== true) return", to: 'if (false) return', tests: ['test/decision-access.test.js'] },
   { id: 'kind-ignored-for-technical-default', area: 'authority', file: 'lib/decisions.js',
     from: "technical: fields.technical ?? (kind === 'technical' && !(fields.escalation || ownerReason)),", to: 'technical: fields.technical ?? true,', tests: ['test/decision-access.test.js'] },
+  { id: 'legacy-open-decision-owner-only', area: 'authority', file: 'lib/decisions.js',
+    from: 'return decision.kind ? decision.technical === true : true;', to: 'return decision.technical === true;', tests: ['test/decision-access.test.js'] },
   { id: 'owner-only-decision-names-answerers', area: 'authority', file: 'lib/decisions.js',
     from: 'if (answerers !== undefined && answerers.length && ownerOnlyWhy(d)) {', to: 'if (false) {', tests: ['test/decision-access.test.js'] },
   { id: 'owner-lift-clears-escalation', area: 'authority', file: 'lib/decisions.js',
