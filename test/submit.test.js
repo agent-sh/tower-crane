@@ -40,7 +40,7 @@ function t68Rework(t) {
   return { h, oldBranch, newBranch, newSha };
 }
 
-test('submit resolves an abbreviated commit and refuses unknown hashes without changing state', (t) => {
+test('submit resolves an abbreviated commit and refuses unknown prefixes without changing state', (t) => {
   const h = makeRepo(t);
   h.init();
   h.ok(['task', 'add', '--title', 'Docs', '--acceptance', 'reads well', '--kind', 'docs']);
@@ -51,11 +51,23 @@ test('submit resolves an abbreviated commit and refuses unknown hashes without c
   assert.equal(events(h).findLast((e) => e.cmd === 'submit').detail.sha, sha);
   const before = h.json(['task', 'show', 'T1']);
   const beforeEvents = events(h);
-  const refused = h.run(['submit', 'T1', '--sha', 'f'.repeat(40), '--agent', 'w-1']);
+  const refused = h.run(['submit', 'T1', '--sha', 'f'.repeat(8), '--agent', 'w-1']);
   assert.equal(refused.code, 1, refused.stdout);
   assert.match(refused.stderr, /cannot resolve.*commit/i);
   assert.deepEqual(h.json(['task', 'show', 'T1']), before);
   assert.deepEqual(events(h), beforeEvents);
+});
+
+test('submit preserves full SHA-1 and SHA-256 IDs without requiring their objects locally', (t) => {
+  const h = makeRepo(t);
+  h.init();
+  h.ok(['task', 'add', '--title', 'Docs', '--acceptance', 'reads well', '--kind', 'docs']);
+  h.ok(['claim', 'T1', '--agent', 'w-1']);
+  for (const sha of ['A'.repeat(40), 'B'.repeat(64)]) {
+    const submitted = h.json(['submit', 'T1', '--sha', sha, '--agent', 'w-1']);
+    assert.equal(submitted.sha, sha.toLowerCase());
+    assert.equal(events(h).findLast((e) => e.cmd === 'submit').detail.sha, sha.toLowerCase());
+  }
 });
 
 test('a legacy short submitted sha reuses its full-sha reviewer and recognizes its failed review', (t) => {
@@ -119,7 +131,7 @@ test('submit refuses an ambiguous prefix and a non-commit object', (t) => {
     ['hash-object', '-t', 'commit', '-w', '--stdin'], { cwd: h.repo, env: h.env, input });
   const before = h.json(['task', 'show', 'T1']);
   const beforeEvents = events(h);
-  for (const sha of [collision.prefix, h.git(['rev-parse', 'HEAD:README.md'])]) {
+  for (const sha of [collision.prefix, h.git(['rev-parse', 'HEAD:README.md']).slice(0, 8)]) {
     const refused = h.run(['submit', 'T1', '--sha', sha, '--agent', 'w-1']);
     assert.equal(refused.code, 1, refused.stdout);
     assert.match(refused.stderr, /cannot resolve.*commit/i);

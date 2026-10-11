@@ -404,6 +404,35 @@ test('SHA-256 repositories submit full commits through the CLI and worker broker
   assert.equal(JSON.parse(resubmitted.stdout).sha, sha);
 });
 
+test('a worker resolves a remote-only abbreviation before forwarding it to the broker', async (t) => {
+  const h = makeRepo(t);
+  h.init();
+  h.ok(['task', 'add', '--title', 'Docs', '--acceptance', 'reads well', '--kind', 'docs']);
+  h.ok(['claim', 'T1', '--agent', 'worker-T1-1']);
+  const origin = path.join(h.base, 'origin.git');
+  const upstream = path.join(h.base, 'upstream');
+  h.git(['init', '--bare', '-q', origin]);
+  h.git(['remote', 'add', 'origin', origin]);
+  h.git(['push', 'origin', 'main']);
+  h.git(['clone', '-q', '--branch', 'main', origin, upstream]);
+  h.git(['checkout', '-q', '-b', 'remote-change'], upstream);
+  fs.appendFileSync(path.join(upstream, 'README.md'), 'remote change\n');
+  h.git(['add', 'README.md'], upstream);
+  h.git(['commit', '-q', '-m', 'remote change'], upstream);
+  const sha = h.git(['rev-parse', 'HEAD'], upstream);
+  h.git(['push', 'origin', 'remote-change'], upstream);
+  assert.throws(() => h.git(['cat-file', '-e', `${sha}^{commit}`]));
+  const job = { state: h.state, task: 'T1', agent: 'worker-T1-1', role: 'worker', cwd: h.repo,
+    broker: path.join(h.base, 'brokers', 'worker-T1-1', B.FILE) };
+  const broker = await B.start(job);
+  t.after(() => broker.close());
+  const result = await h.runAsync(['submit', 'T1', '--sha', sha.slice(0, 8), '--branch', 'remote-change',
+    '--agent', job.agent, '--json'], { env: { TOWER_CRANE_BROKER: job.broker } });
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(JSON.parse(result.stdout).sha, sha);
+  assert.equal(h.git(['rev-parse', 'origin/remote-change']), sha);
+});
+
 test('a brokered worker or reviewer messages only the orchestrator or the owner', async (t) => {
   const h = makeRepo(t);
   h.init();

@@ -465,7 +465,8 @@ async function main(argv) {
       const input = argv.includes('-') ? readStdin() : undefined;
       let forwarded = argv;
       if (cmd.name === 'submit') {
-        const sha = T.resolveSubmitSha({ cwd: process.cwd(), env: process.env, stateDir: locate() }, own.sha);
+        const sha = T.resolveSubmitSha({ cwd: process.cwd(), env: process.env, stateDir: locate(),
+          pos: parsed.pos, flags: own }, own.sha);
         const tokens = [...resolved.lead, ...resolved.rest];
         const span = parsed.spans.find((s) => s.name === 'sha');
         tokens.splice(span.from, span.to - span.from + 1, '--sha', sha);
