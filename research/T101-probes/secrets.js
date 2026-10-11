@@ -50,7 +50,7 @@ try {
   h.ok(['project', 'set', '--env_file', path.join(home, 'private.env')], { env });
 
   // Claude worker.
-  h.ok(['ladder', 'set', 'medium', '--harness', 'claude', '--model', 'opus', '--clear', 'profile', '--clear', 'effort', '--clear', 'args']);
+  h.ok(['ladder', 'set', 'medium', '--harness', 'claude', '--model', 'fixture-large', '--clear', 'profile', '--clear', 'effort', '--clear', 'args']);
   let r = h.run(['spawn', '--task', 'T1', '--wait', '--json'], { env });
   const report = JSON.parse(fs.readFileSync(stubOut, 'utf8'));
   const sfs = report.settings?.sandbox?.filesystem || {};
@@ -79,8 +79,8 @@ try {
   // Codex worker: provider keys the scrub may miss.
   h.ok(['task', 'add', '--title', 'Probe codex', '--acceptance', 'nothing leaks']);
   h.ok(['brief', 'set', 'T2', '-'], { input: 'probe\n' });
-  h.ok(['ladder', 'set', 'medium', '--harness', 'codex', '--profile', 'sol', '--clear', 'model', '--clear', 'effort', '--clear', 'args']);
-  put('.codex/sol.config.toml', 'model = "s"\n');
+  h.ok(['ladder', 'set', 'medium', '--harness', 'codex', '--profile', 'fixture-main', '--clear', 'model', '--clear', 'effort', '--clear', 'args']);
+  put('.codex/fixture-main.config.toml', 'model = "s"\n');
   r = h.run(['spawn', '--task', 'T2', '--wait', '--json'], { env });
   const leaked = holding(h.state, SECRET).filter((f) => !f.startsWith('logs'));
   const which = ['APIKEY', 'KEY"', 'BEARER', 'API_KEY'].filter((k) => walk(h.state).some((f) => fs.readFileSync(f, 'utf8').includes(`${SECRET}-${k}`)));
