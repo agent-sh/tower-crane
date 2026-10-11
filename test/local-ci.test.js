@@ -45,7 +45,7 @@ fs.writeFileSync(process.argv[2], JSON.stringify({
   h.ok(['claim', 'T1', '--agent', 'worker']);
   h.ok(['submit', 'T1', '--agent', 'worker', '--sha', h.sha, '--branch', 'local-change', '--pr', '1']);
   h.reviewer('T1', 'reviewer', h.sha);
-  h.ok(['evidence', 'T1', '--type', 'review', '--ok', '--sha', h.sha, '--agent', 'reviewer']);
+  h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--ok', '--sha', h.sha, '--agent', 'reviewer']);
   return { log: h.log, command: h.command, sha: h.sha, baseSha: h.baseSha };
 }
 
@@ -133,7 +133,7 @@ test('accept reruns local CI when the submitted head has no receipt', (t) => {
   const next = h.git(['rev-parse', 'HEAD']);
   h.ok(['submit', 'T1', '--agent', 'worker', '--sha', next]);
   h.reviewer('T1', 'reviewer', next);
-  h.ok(['evidence', 'T1', '--type', 'review', '--ok', '--sha', next, '--agent', 'reviewer']);
+  h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--ok', '--sha', next, '--agent', 'reviewer']);
   assert.equal(h.json(['task', 'show', 'T1']).gates.gates.find((g) => g.type === 'ci').ok, false);
   h.ok(['accept', 'T1']);
   const evidence = h.json(['task', 'show', 'T1']).evidence.filter((e) => e.type === 'ci');
@@ -237,7 +237,7 @@ test('hosted CI merges without fetching an unavailable origin when ci.local is a
   h.ok(['claim', 'T1', '--agent', 'worker']);
   h.ok(['submit', 'T1', '--agent', 'worker', '--sha', sha, '--branch', 'fixture-change', '--pr', '1']);
   h.reviewer('T1', 'reviewer', sha);
-  h.ok(['evidence', 'T1', '--type', 'review', '--ok', '--sha', sha, '--agent', 'reviewer']);
+  h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--ok', '--sha', sha, '--agent', 'reviewer']);
   h.ok(['check', 'ci', 'T1']);
   h.ok(['accept', 'T1']);
   fs.renameSync(h.origin, `${h.origin}.offline`);
@@ -295,7 +295,7 @@ test('matching audit copies cannot bind a receipt to another head or tree', (t) 
   const next = h.git(['rev-parse', 'HEAD']);
   h.ok(['submit', 'T1', '--agent', 'worker', '--sha', next]);
   h.reviewer('T1', 'reviewer', next);
-  h.ok(['evidence', 'T1', '--type', 'review', '--ok', '--sha', next, '--agent', 'reviewer']);
+  h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--ok', '--sha', next, '--agent', 'reviewer']);
   const doc = h.readState('tasks.json');
   const evidence = doc.tasks[0].evidence.findLast((e) => e.type === 'ci');
   const log = path.join(h.state, 'events.jsonl');
@@ -370,8 +370,16 @@ test('local CI selects kind args, replacement commands and the default with audi
     ['ops', 'kind:ops', local.by_kind.ops.command, 10],
     ['research', 'default', h.command, 5],
   ]) {
+    const before = h.json(['task', 'show', 'T1']);
     changeKind(h, kind);
+    const reworked = h.json(['task', 'show', 'T1']);
+    assert.equal(reworked.revision, before.revision + 1);
+    assert.equal(reworked.gates.gates.find(g => g.type === 'review').ok, false);
+    assert.deepEqual(reworked.evidence, before.evidence);
+    h.reviewer('T1', 'reviewer', h.sha);
+    h.ok(['evidence', 'T1', '--type', 'review', '--ok', '--sha', h.sha, '--revision', h.revision('T1'), '--agent', 'reviewer']);
     const e = h.json(['check', 'ci', 'T1']);
+    assert.equal(e.revision, reworked.revision);
     assert.equal(e.receipt.variant, variant);
     assert.deepEqual(e.receipt.command, command);
     assert.equal(e.receipt.timeout, timeout);
@@ -454,10 +462,20 @@ test('kind variants with identical argv cannot reuse receipts or merge under a d
   const h = mergeFixture(t);
   const local = { command: h.command, timeout: 5, by_kind: { docs: { args: [] }, ops: { args: [] } } };
   h.ok(['project', 'set', '--ci-local', JSON.stringify(local)]);
-  h.ok(['check', 'ci', 'T1']);
+  const previousCI = h.json(['check', 'ci', 'T1']);
   changeKind(h, 'ops');
-  assert.match(h.run(['accept', 'T1']).stderr, /receipt.*variant/);
+  const reworked = h.json(['task', 'show', 'T1']);
+  assert.equal(reworked.revision, previousCI.revision + 1);
+  assert.equal(reworked.gates.gates.find(g => g.type === 'ci').ok, false);
+  assert.deepEqual({ task: reworked.id, ...reworked.evidence.find(e => e.type === 'ci') }, previousCI);
+  h.reviewer('T1', 'reviewer', h.sha);
+  h.ok(['evidence', 'T1', '--type', 'review', '--ok', '--sha', h.sha, '--revision', h.revision('T1'), '--agent', 'reviewer']);
   h.ok(['check', 'ci', 'T1']);
+  delete local.by_kind.ops;
+  h.ok(['project', 'set', '--ci-local', JSON.stringify(local)]);
+  assert.match(h.run(['accept', 'T1']).stderr, /receipt.*variant/);
+  local.by_kind.ops = { args: [] };
+  h.ok(['project', 'set', '--ci-local', JSON.stringify(local)]);
   h.ok(['accept', 'T1']);
   delete local.by_kind.ops;
   h.ok(['project', 'set', '--ci-local', JSON.stringify(local)]);

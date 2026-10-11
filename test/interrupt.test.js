@@ -158,7 +158,7 @@ for (const fresh of [false, true]) {
     const claim = h.json(['task', 'show', 'T1']).claim;
     h.ok(['submit', 'T1', '--sha', 'abcdef1', '--agent', first.agent]);
     h.reviewer('T1', 'reviewer-T1-1');
-    h.ok(['evidence', 'T1', '--type', 'review', '--fail', '--sha', 'abcdef1', '--agent', 'reviewer-T1-1',
+    h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--fail', '--sha', 'abcdef1', '--agent', 'reviewer-T1-1',
       '--summary', 'Add the missing regression', '--ref', 'current-review']);
     h.ok(['rework', 'T1', '--reason', 'Fix the current review feedback']);
     if (fresh) h.ok(['ladder', 'set', 'medium', '--args', '["new-route"]']);
@@ -187,7 +187,7 @@ test('interrupting a rework run keeps its failed review feedback for the next di
   h.ok(['claim', 'T1', '--agent', first.agent]);
   h.ok(['submit', 'T1', '--sha', 'abcdef1', '--agent', first.agent]);
   h.reviewer('T1', 'reviewer-T1-1');
-  h.ok(['evidence', 'T1', '--type', 'review', '--fail', '--sha', 'abcdef1', '--agent', 'reviewer-T1-1',
+  h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--fail', '--sha', 'abcdef1', '--agent', 'reviewer-T1-1',
     '--summary', 'Add the missing regression', '--ref', 'current-review']);
   h.ok(['rework', 'T1', '--reason', 'Fix the current review feedback']);
   // A new route starts the rework run fresh, so it stays alive until it is interrupted.

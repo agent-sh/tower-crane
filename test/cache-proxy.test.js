@@ -10,7 +10,13 @@ const zlib = require('node:zlib');
 const { ROOT, TMP_ROOT } = require('./helpers');
 
 const SCRIPT = path.join(ROOT, 'scripts', 'cache-proxy.js');
-const OPUS = '/model/global.anthropic.claude-opus-5-5/invoke-with-response-stream';
+const CLAUDE = '/model/global.anthropic.fixture-claude/invoke-with-response-stream';
+const OPENAI = 'openai.fixture-main';
+// Fixture models carry their own list prices, so a default price change breaks no test.
+const PRICES = {
+  'global.anthropic.fixture-claude': { input: 4, output: 20, write_5m: 5, write_1h: 8, read: 0.2 },
+  [OPENAI]: { input: 2, output: 10, write_5m: 2.5, write_1h: 2.5, read: 0.1 },
+};
 
 // One AWS event-stream message carrying an Anthropic streaming event, as Bedrock
 // InvokeModelWithResponseStream sends it.
@@ -67,8 +73,10 @@ async function start(t, args = []) {
   await new Promise(resolve => upstream.listen(0, '127.0.0.1', resolve));
   const dir = fs.mkdtempSync(path.join(TMP_ROOT, 'tc-cache-proxy-'));
   const log = path.join(dir, 'log.jsonl');
+  const prices = path.join(dir, 'prices.json');
+  fs.writeFileSync(prices, JSON.stringify(PRICES));
   const base = `http://127.0.0.1:${upstream.address().port}`;
-  const child = cp.spawn(process.execPath, [SCRIPT, '--port', '0', '--log', log, '--runtime', base, '--mantle', base, ...args], { stdio: ['ignore', 'ignore', 'pipe'] });
+  const child = cp.spawn(process.execPath, [SCRIPT, '--port', '0', '--log', log, '--runtime', base, '--mantle', base, '--prices', prices, ...args], { stdio: ['ignore', 'ignore', 'pipe'] });
   t.after(() => {
     child.kill();
     upstream.close();
@@ -106,14 +114,14 @@ test('logs prefix hashes, cache usage, cost and where a request diverges, never 
   const proxy = await start(t);
   const auth = { authorization: 'Bearer secret-token-value' };
   const first = { system: [{ type: 'text', text: SYSTEM, cache_control: { type: 'ephemeral' } }], messages: [{ role: 'user', content: 'SENTINEL prompt one' }] };
-  const reply = await proxy.send(OPUS, first, auth);
+  const reply = await proxy.send(CLAUDE, first, auth);
   assert.deepEqual(reply, ANTHROPIC_STREAM);
-  await proxy.send(OPUS, { ...first, messages: [...first.messages, { role: 'assistant', content: 'READY' }, { role: 'user', content: 'SENTINEL two' }] }, auth);
-  await proxy.send(OPUS, { ...first, system: [{ type: 'text', text: `${SYSTEM.slice(0, 10)}X${SYSTEM.slice(11)}` }] }, auth);
+  await proxy.send(CLAUDE, { ...first, messages: [...first.messages, { role: 'assistant', content: 'READY' }, { role: 'user', content: 'SENTINEL two' }] }, auth);
+  await proxy.send(CLAUDE, { ...first, system: [{ type: 'text', text: `${SYSTEM.slice(0, 10)}X${SYSTEM.slice(11)}` }] }, auth);
   const { lines, text } = await proxy.entries(3);
 
   assert.equal(proxy.received[0].headers.authorization, 'Bearer secret-token-value');
-  assert.equal(lines[0].model, 'global.anthropic.claude-opus-5-5');
+  assert.equal(lines[0].model, 'global.anthropic.fixture-claude');
   assert.deepEqual(lines[0].usage, { input: 3, cache_read: 1000, cache_write: 200, cache_write_5m: 200, cache_write_1h: 0, output: 7 });
   assert.equal(lines[0].cost_usd, (3 * 4 + 200 * 5 + 1000 * 0.2 + 7 * 20) / 1e6);
   assert.match(lines[0].hash.static, /^[0-9a-f]{12}$/);
@@ -130,7 +138,7 @@ test('logs prefix hashes, cache usage, cost and where a request diverges, never 
 
 test('request settings are logged from an allowlist and every other field as a hash', async (t) => {
   const proxy = await start(t);
-  await proxy.send(OPUS, { max_tokens: 64, mcp_servers: [{ name: 'x', authorization_token: 'SENTINEL-token' }], messages: [{ role: 'user', content: 'hi' }] });
+  await proxy.send(CLAUDE, { max_tokens: 64, mcp_servers: [{ name: 'x', authorization_token: 'SENTINEL-token' }], messages: [{ role: 'user', content: 'hi' }] });
   const { lines, text } = await proxy.entries(1);
   assert.equal(lines[0].params.max_tokens, 64);
   assert.match(lines[0].params.mcp_servers, /^sha:[0-9a-f]{12}$/);
@@ -140,8 +148,8 @@ test('request settings are logged from an allowlist and every other field as a h
 test('a body the proxy cannot analyze is forwarded unchanged and the proxy keeps serving', async (t) => {
   const proxy = await start(t, ['--normalize', '--breakpoint', 'END']);
   const odd = { system: { text: 'x' }, messages: 'not a list' };
-  await proxy.send(OPUS, odd);
-  await proxy.send(OPUS, { messages: [{ role: 'user', content: 'hi' }] });
+  await proxy.send(CLAUDE, odd);
+  await proxy.send(CLAUDE, { messages: [{ role: 'user', content: 'hi' }] });
   const { lines } = await proxy.entries(2);
   assert.deepEqual(proxy.received[0].body, odd);
   assert.match(lines[0].analysis_error, /\S/);
@@ -150,7 +158,7 @@ test('a body the proxy cannot analyze is forwarded unchanged and the proxy keeps
 
 test('a codex fork takes the prompt_cache_key of the request it extends', async (t) => {
   const proxy = await start(t, ['--inherit-cache-key']);
-  const parent = { model: 'openai.gpt-6.1-sol', instructions: SYSTEM, input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'task' }] }], prompt_cache_key: 'parent-thread' };
+  const parent = { model: OPENAI, instructions: SYSTEM, input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'task' }] }], prompt_cache_key: 'parent-thread' };
   await proxy.send('/openai/v1/responses', parent);
   await proxy.send('/openai/v1/responses', { ...parent, prompt_cache_key: 'fork-thread', input: [...parent.input, { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'rework' }] }] });
   await proxy.send('/openai/v1/responses', { ...parent, prompt_cache_key: 'other-thread', input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'different task' }] }] });
@@ -165,7 +173,7 @@ test('a codex fork takes the prompt_cache_key of the request it extends', async 
 test('only a request that extends an earlier one inherits its key, not one that shares the developer messages', async (t) => {
   const proxy = await start(t, ['--inherit-cache-key']);
   const message = (role, text) => ({ type: 'message', role, content: [{ type: 'input_text', text }] });
-  const session = (key, ...input) => ({ model: 'openai.gpt-6.1-sol', instructions: SYSTEM, prompt_cache_key: key,
+  const session = (key, ...input) => ({ model: OPENAI, instructions: SYSTEM, prompt_cache_key: key,
     input: [message('developer', 'skills'), message('developer', 'permissions'), ...input] });
   const parent = session('thread-A', message('user', 'Review T1'));
   await proxy.send('/openai/v1/responses', parent);
@@ -181,7 +189,7 @@ test('only a request that extends an earlier one inherits its key, not one that 
 test('the turn breakpoint marks the user turn before trailing system messages', async (t) => {
   const proxy = await start(t, ['--turn-breakpoint']);
   const marked = { type: 'ephemeral' };
-  await proxy.send(OPUS, {
+  await proxy.send(CLAUDE, {
     system: [{ type: 'text', text: 'a', cache_control: marked }, { type: 'text', text: 'b', cache_control: marked }, { type: 'text', text: 'c', cache_control: marked }],
     messages: [{ role: 'user', content: 'review this' }, { role: 'system', content: [{ type: 'text', text: 'env', cache_control: marked }] }],
   });
@@ -196,15 +204,15 @@ test('an added 1-hour breakpoint raises the 5-minute ones before it, and an adde
   const short = { type: 'ephemeral' };
   const long = { type: 'ephemeral', ttl: '1h' };
   const turn = await start(t, ['--turn-breakpoint', '--breakpoint-ttl', '1h']);
-  await turn.send(OPUS, {
+  await turn.send(CLAUDE, {
     tools: [{ name: 't', input_schema: {}, cache_control: short }],
     system: [{ type: 'text', text: 'a', cache_control: short }, { type: 'text', text: 'b', cache_control: short }],
     messages: [{ role: 'user', content: 'review this' }, { role: 'system', content: 'env' }],
   });
   const marker = await start(t, ['--breakpoint', 'END', '--breakpoint-ttl', '1h']);
-  await marker.send(OPUS, { system: [{ type: 'text', text: 'a', cache_control: short }], messages: [{ role: 'user', content: 'skill END' }] });
+  await marker.send(CLAUDE, { system: [{ type: 'text', text: 'a', cache_control: short }], messages: [{ role: 'user', content: 'skill END' }] });
   const before = await start(t, ['--breakpoint', 'END']);
-  await before.send(OPUS, { system: [{ type: 'text', text: 'skill END' }], messages: [{ role: 'user', content: [{ type: 'text', text: 'x', cache_control: long }] }] });
+  await before.send(CLAUDE, { system: [{ type: 'text', text: 'skill END' }], messages: [{ role: 'user', content: [{ type: 'text', text: 'x', cache_control: long }] }] });
   const [turnLog, markerLog, beforeLog] = await Promise.all([turn.entries(1), marker.entries(1), before.entries(1)]);
 
   const body = turn.received[0].body;
@@ -225,8 +233,8 @@ test('normalize keeps tools and system identical across working directories and 
       { role: 'system', content: [{ type: 'text', text: `# Environment\n - Primary working directory: ${cwd}\n` }] },
     ],
   });
-  await proxy.send(OPUS, request('/w/a'));
-  await proxy.send(OPUS, request('/w/b'));
+  await proxy.send(CLAUDE, request('/w/a'));
+  await proxy.send(CLAUDE, request('/w/b'));
   const { lines } = await proxy.entries(2);
 
   const [a, b] = proxy.received.map(r => r.body);
@@ -243,8 +251,8 @@ test('normalize replaces the working directory only as a whole path', async (t) 
     system: [{ type: 'text', text: `Use /usr/bin and ${cwd}/src, not ${cwd}-worktrees/x or ${cwd}.git. Run in ${cwd}.` }],
     messages: [{ role: 'system', content: [{ type: 'text', text: `Primary working directory: ${cwd}` }] }],
   });
-  await proxy.send(OPUS, request('/'));
-  await proxy.send(OPUS, request('/w/repo'));
+  await proxy.send(CLAUDE, request('/'));
+  await proxy.send(CLAUDE, request('/w/repo'));
   await proxy.entries(2);
   const [root, repo] = proxy.received.map(r => r.body.system[0].text);
   assert.equal(root, 'Use /usr/bin and //src, not /-worktrees/x or /.git. Run in /.');
@@ -255,7 +263,7 @@ test('normalize moves the codex environment message after the prompt', async (t)
   const proxy = await start(t, ['--normalize']);
   const message = (role, text) => ({ type: 'message', role, content: [{ type: 'input_text', text }] });
   await proxy.send('/openai/v1/responses', {
-    model: 'openai.gpt-6.1-sol', instructions: 'base',
+    model: OPENAI, instructions: 'base',
     input: [message('developer', 'rules'), message('user', '<environment_context>\n<cwd>/w/a</cwd>'), message('user', 'Review T1')],
   });
   await proxy.entries(1);
@@ -264,9 +272,9 @@ test('normalize moves the codex environment message after the prompt', async (t)
 
 test('a breakpoint goes right after the shared prefix marker on both providers', async (t) => {
   const proxy = await start(t, ['--breakpoint', 'END OF PREFIX.']);
-  await proxy.send(OPUS, { messages: [{ role: 'user', content: 'skill text END OF PREFIX.\nReview T1' }] });
+  await proxy.send(CLAUDE, { messages: [{ role: 'user', content: 'skill text END OF PREFIX.\nReview T1' }] });
   await proxy.send('/openai/v1/responses', {
-    model: 'openai.gpt-6.1-sol', input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'skill text END OF PREFIX.\nReview T1' }] }],
+    model: OPENAI, input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'skill text END OF PREFIX.\nReview T1' }] }],
   });
   const { lines } = await proxy.entries(2);
 
@@ -288,7 +296,7 @@ test('a breakpoint that would exceed the provider maximum is not added', async (
     system: [{ type: 'text', text: 'END of prefix' }],
     messages: [{ role: 'user', content: ['a', 'b', 'c', 'd'].map(text => ({ type: 'text', text, cache_control: marked })) }],
   };
-  await proxy.send(OPUS, request);
+  await proxy.send(CLAUDE, request);
   const { lines } = await proxy.entries(1);
   assert.deepEqual(proxy.received[0].body, request);
   assert.deepEqual(lines[0].rewrites, ['breakpoint:over_limit']);
@@ -298,7 +306,7 @@ test('the developer breakpoint marks the end of the leading codex developer mess
   const proxy = await start(t, ['--developer-breakpoint']);
   const message = (role, ...texts) => ({ type: 'message', role, content: texts.map(text => ({ type: 'input_text', text })) });
   await proxy.send('/openai/v1/responses', {
-    model: 'openai.gpt-6.1-sol', instructions: 'base',
+    model: OPENAI, instructions: 'base',
     input: [message('developer', 'skills'), message('developer', 'permissions', 'mode'), message('user', '<environment_context>'), message('user', 'Review T1')],
   });
   const { lines } = await proxy.entries(1);

@@ -29,7 +29,7 @@ function populate(h) {
   h.ok(['claim', 'T5', '--agent', 'w-2']);
   const sha = h.git(['rev-parse', 'HEAD']).trim();
   h.ok(['submit', 'T5', '--sha', sha, '--agent', 'w-2']);
-  h.ok(['evidence', 'T5', '--type', 'review', '--ok', '--sha', sha, '--ref', 'https://example.com/acme/demo/pull/1#review', '--summary', 'reads well', '--agent', 'rev-1']);
+  h.ok(['evidence', 'T5', '--type', 'review', '--ok', '--sha', sha, '--revision', h.revision('T5'), '--ref', 'https://example.com/acme/demo/pull/1#review', '--summary', 'reads well', '--agent', 'rev-1']);
 }
 
 // serve runs in the repository, and Windows cannot delete a directory a live
@@ -184,7 +184,7 @@ test('the board escapes every text the state holds', (t) => {
   const sha = h.git(['rev-parse', 'HEAD']).trim();
   h.ok(['ask', '--question', 'Pick <script>alert(1)</script>?', '--option', '<b>a</b>', '--option', 'b', '--why', 'why <i>', '--blocks', 'T2']);
   h.ok(['msg', '--to', 'owner', '--task', 'T1', 'look <img src=x onerror=alert(1)>', '--agent', 'w-1']);
-  h.ok(['evidence', 'T5', '--type', 'note', '--ok', '--sha', sha, '--summary', 'note <svg onload=alert(1)>', '--ref', 'https://example.com/x"onmouseover="alert(1)', '--agent', 'rev-2']);
+  h.ok(['evidence', 'T5', '--revision', h.revision('T5'), '--type', 'note', '--ok', '--sha', sha, '--summary', 'note <svg onload=alert(1)>', '--ref', 'https://example.com/x"onmouseover="alert(1)', '--agent', 'rev-2']);
   const page = fs.readFileSync(path.join(h.state, 'sketch.html'), 'utf8');
   for (const raw of ['<script>alert(1)', '<b>a</b>', 'why <i>', '<img src=x', '<svg onload', '"onmouseover="']) assert.ok(!page.includes(raw), `${raw} is escaped`);
   assert.match(page, /Pick &lt;script&gt;alert\(1\)&lt;\/script&gt;\?/);
@@ -203,7 +203,7 @@ test('review gate pips and ledger ignore unspawned and self-review verdicts', (t
 
   for (const agent of ['made-up-reviewer', 'worker']) {
     for (const verdict of ['--ok', '--fail']) {
-      h.ok(['evidence', 'T1', '--type', 'review', verdict, '--sha', sha, '--agent', agent]);
+      h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', verdict, '--sha', sha, '--agent', agent]);
       const page = sheet();
       assert.match(page, /class="pip missing">review not yet run<\/span>/, `${agent} ${verdict} leaves review missing`);
       assert.doesNotMatch(page, /class="pip (?:pass|fail)">review/);
@@ -214,7 +214,7 @@ test('review gate pips and ledger ignore unspawned and self-review verdicts', (t
 
   h.reviewer('T1', 'reviewer', sha);
   for (const [verdict, state, word] of [['--fail', 'fail', 'failed'], ['--ok', 'pass', 'passed']]) {
-    h.ok(['evidence', 'T1', '--type', 'review', verdict, '--sha', sha, '--agent', 'reviewer']);
+    h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', verdict, '--sha', sha, '--agent', 'reviewer']);
     assert.match(sheet(), new RegExp(`class="pip ${state}">review ${word}</span>`));
   }
 });
@@ -230,7 +230,7 @@ test('accepted task gate pips and ledger stop counting tests after the owner cha
   gateEvidence(h, 'tests', 'checker');
   gateEvidence(h, 'clean', 'checker');
   h.reviewer('T1', 'reviewer', sha);
-  h.ok(['evidence', 'T1', '--type', 'review', '--ok', '--sha', sha, '--agent', 'reviewer']);
+  h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--ok', '--sha', sha, '--agent', 'reviewer']);
   h.ok(['accept', 'T1']);
   const sheet = () => fs.readFileSync(path.join(h.state, 'sketch.html'), 'utf8').match(/<article id="T1"[\s\S]*?<\/article>/)[0];
   assert.match(sheet(), /class="pip pass">tests passed<\/span>/);
@@ -1066,7 +1066,7 @@ test('runaway rules: status and the board flag the same claim, from the project\
     h.ok(['submit', id, '--sha', h.git(['rev-parse', 'HEAD']), '--agent', `w-${i}`]);
     h.ok(['spend', id, '--tokens', String(m * 1e6), '--minutes', '20', '--agent', `w-${i}`]);
     h.reviewer(id, `r-${i}`, h.git(['rev-parse', 'HEAD']));
-    h.ok(['evidence', id, '--type', 'review', '--ok', '--sha', h.git(['rev-parse', 'HEAD']), '--agent', `r-${i}`]);
+    h.ok(['evidence', id, '--revision', h.revision(id), '--type', 'review', '--ok', '--sha', h.git(['rev-parse', 'HEAD']), '--agent', `r-${i}`]);
     h.ok(['accept', id]);
   }
   h.ok(['task', 'add', '--title', 'Retry jitter', '--acceptance', 'jitter', '--tier', 'easy']);

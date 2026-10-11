@@ -78,6 +78,9 @@ class Scratch {
   }
 
   read(file) { return JSON.parse(fs.readFileSync(path.join(this.state, file), 'utf8')); }
+
+  // The current revision of a task, which review evidence from a reviewer that was never spawned must name.
+  revision(id) { return String(this.read('tasks.json').tasks.find((t) => t.id === id).revision); }
   events() { return fs.readFileSync(path.join(this.state, 'events.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l)); }
 }
 
@@ -105,7 +108,7 @@ function history(s, start, list = HISTORY) {
     const sha = s.commit(`${id} ${title}`);
     s.ok(['submit', id, '--sha', sha, '--summary', `${title}: done, tests added`, '--agent', agent]);
     s.ok(['spend', id, '--tokens', String(Math.round(tokens * 1e6)), '--minutes', String(minutes), '--rung', tier, '--agent', agent]);
-    s.ok(['evidence', id, '--type', 'review', '--ok', '--sha', sha, '--summary', 'checked each acceptance line; tests fail without the change', '--agent', `reviewer-${id}`]);
+    s.ok(['evidence', id, '--revision', s.revision(id), '--type', 'review', '--ok', '--sha', sha, '--summary', 'checked each acceptance line; tests fail without the change', '--agent', `reviewer-${id}`]);
     s.ok(['accept', id]);
     ids.push(id);
   });
@@ -165,7 +168,7 @@ function busy(root, bin) {
   s.at(3 * HOUR);
   let sha = s.commit(`${retry} first try`);
   s.ok(['submit', retry, '--sha', sha, '--summary', 'budgets per endpoint, reset hourly', '--agent', `worker-${retry}-1`]);
-  s.ok(['evidence', retry, '--type', 'review', '--fail', '--sha', sha, '--summary', 'the hourly reset is not tested', '--agent', `reviewer-${retry}-1`]);
+  s.ok(['evidence', retry, '--revision', s.revision(retry), '--type', 'review', '--fail', '--sha', sha, '--summary', 'the hourly reset is not tested', '--agent', `reviewer-${retry}-1`]);
   s.ok(['rework', retry, '--reason', 'add a test for the hourly budget reset']);
   s.at(2 * HOUR);
   s.ok(['claim', retry, '--agent', `worker-${retry}-2`]);
@@ -173,7 +176,7 @@ function busy(root, bin) {
   sha = s.commit(`${retry} second try`);
   s.ok(['submit', retry, '--sha', sha, '--summary', 'hourly reset tested; 429 path consumes the budget', '--agent', `worker-${retry}-2`]);
   s.at(52 * MIN);
-  s.ok(['evidence', retry, '--type', 'review', '--fail', '--sha', sha, '--summary', 'a 429 from a paused endpoint still consumes budget; acceptance line 1 says it should not when the endpoint is paused. Retry-After is ignored.', '--ref', 'https://example.com/acme/webhooks/pull/41#review', '--agent', `reviewer-${retry}-2`]);
+  s.ok(['evidence', retry, '--revision', s.revision(retry), '--type', 'review', '--fail', '--sha', sha, '--summary', 'a 429 from a paused endpoint still consumes budget; acceptance line 1 says it should not when the endpoint is paused. Retry-After is ignored.', '--ref', 'https://example.com/acme/webhooks/pull/41#review', '--agent', `reviewer-${retry}-2`]);
 
   // An accepted task with a waiver the owner recorded.
   s.at(3 * HOUR);
@@ -181,7 +184,7 @@ function busy(root, bin) {
   s.at(2 * HOUR + 20 * MIN);
   sha = s.commit(`${limiter} limiter`);
   s.ok(['submit', limiter, '--sha', sha, '--summary', 'token bucket per tenant', '--agent', `worker-${limiter}-1`]);
-  s.ok(['evidence', limiter, '--type', 'review', '--ok', '--sha', sha, '--summary', 'delays, never drops; covered by the soak test', '--agent', `reviewer-${limiter}-1`]);
+  s.ok(['evidence', limiter, '--revision', s.revision(limiter), '--type', 'review', '--ok', '--sha', sha, '--summary', 'delays, never drops; covered by the soak test', '--agent', `reviewer-${limiter}-1`]);
   s.ok(['accept', limiter, '--waive', 'tests', '--waive', 'clean', '--waive', 'ci', '--reason', 'CI runner down; soak test run by hand on the staging box']);
 
   // Five agents at work, one near the end of its lease, and a stuck one.

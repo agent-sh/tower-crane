@@ -331,15 +331,15 @@ test('agent output quoting outage and refusal does not switch routes', (t) => {
 
 test('user fallback configuration validates route shapes without project flags', (t) => {
   const h = makeProjectRepo(t);
-  for (const value of [{}, [null], [{ profile: 'sol', fallbacks: [] }]]) {
+  for (const value of [{}, [null], [{ profile: 'fixture-main', fallbacks: [] }]]) {
     setFallbacks(h, value);
     assert.notEqual(h.run(['ladder', 'show']).code, 0);
   }
-  setFallbacks(h, [{ profile: 'sol' }]);
+  setFallbacks(h, [{ profile: 'fixture-main' }]);
   assert.match(h.ok(['ladder', 'show']), /fallback 1.*from user file/);
-  assert.deepEqual(h.json(['ladder', 'show']).ladder.easy.fallbacks, [{ profile: 'sol' }]);
+  assert.deepEqual(h.json(['ladder', 'show']).ladder.easy.fallbacks, [{ profile: 'fixture-main' }]);
   h.ok(['ladder', 'save-user']);
-  assert.deepEqual(JSON.parse(fs.readFileSync(h.userConfig, 'utf8')).ladder.easy.fallbacks, [{ profile: 'sol' }]);
+  assert.deepEqual(JSON.parse(fs.readFileSync(h.userConfig, 'utf8')).ladder.easy.fallbacks, [{ profile: 'fixture-main' }]);
   setFallbacks(h, []);
   assert.deepEqual(h.json(['ladder', 'show']).ladder.easy.fallbacks, []);
 });
@@ -357,7 +357,7 @@ test('a project hard rung uses personal fallbacks and skips unavailable routes',
     { harness: 'command', command: [unavailable] },
     { harness: 'codex', profile: 'missing' },
     { harness: 'claude' },
-    { harness: 'pi', profile: 'sol' },
+    { harness: 'pi', profile: 'fixture-main' },
     { harness: 'claude', model: 'second' },
   ], 'hard');
   const shown = h.json(['ladder', 'show'], { env: h.spawnEnv });
