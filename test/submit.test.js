@@ -240,6 +240,23 @@ test('review evidence must pin the reviewed sha when a worker resubmits during r
   assert.equal(h.json(['task', 'show', 'T1']).sha, newerSha);
 });
 
+test('submit records the pre-submit result on its event and never gates on it', (t) => {
+  const h = makeRepo(t);
+  const sha = gateFixture(h);
+  h.init(['--repo', 'acme/demo', '--base', 'main']);
+  h.ok(['task', 'add', '--title', 'Change', '--acceptance', 'it works', '--kind', 'docs']);
+  h.ok(['claim', 'T1', '--agent', 'w-1']);
+  const before = h.json(['task', 'show', 'T1']);
+  const refused = h.run(['submit', 'T1', '--sha', sha, '--precheck', 'maybe', '--agent', 'w-1']);
+  assert.equal(refused.code, 2);
+  assert.match(refused.stderr, /--precheck must be pass, fail or skipped, got "maybe"/);
+  assert.deepEqual(h.json(['task', 'show', 'T1']), before);
+
+  const submitted = h.json(['submit', 'T1', '--sha', sha, '--precheck', 'fail', '--agent', 'w-1']);
+  assert.equal(submitted.status, 'submitted');
+  assert.equal(events(h).find((event) => event.cmd === 'submit').detail.precheck, 'fail');
+});
+
 test('only note evidence can default to the submitted sha', (t) => {
   const h = makeRepo(t);
   h.init();
