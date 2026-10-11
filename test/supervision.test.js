@@ -72,8 +72,8 @@ const finish = () => {
   if (attempts.length <= ${failures}) {
     ${records ? `for (const record of ${JSON.stringify(records)}) console.log(JSON.stringify(record)); process.exit(1);`
       : ['signal', 'interrupt'].includes(error) ? `process.kill(process.pid, '${error === 'signal' ? 'SIGTERM' : 'SIGINT'}');`
-      : ['claude-error', 'codex-error', 'codex-failed'].includes(error)
-        ? `console.log(${JSON.stringify(JSON.stringify(error === 'claude-error' ? { type: 'result', is_error: true, api_error_status: 503 }
+      : ['harness-error', 'codex-error', 'codex-failed'].includes(error)
+        ? `console.log(${JSON.stringify(JSON.stringify(error === 'harness-error' ? { type: 'result', is_error: true, api_error_status: 503 }
           : error === 'codex-error' ? { type: 'error', message: 'HTTP 502 bad gateway' }
             : { type: 'turn.failed', error: { message: 'provider outage' } }))}); process.exit(1);`
         : ['outage', 'server', 'status-json'].includes(error) ? `console.error(${JSON.stringify(error === 'server' ? '500 Internal Server Error'
@@ -445,7 +445,7 @@ test('a permanent exit is blocked without retrying and submit clears its phase',
   assert.equal(h.spawn().code, 2);
   assert.equal(h.readAttempts().length, 1);
   assert.equal(h.json(['task', 'show', 'T1']).run.reason, 'exit 2');
-  h.ok(['submit', 'T1', '--agent', 'worker-T1-1', '--sha', 'abcdef1']);
+  h.ok(['submit', 'T1', '--agent', 'worker-T1-1', '--sha', '50b732a15be40ccb2065cb2ba0e7b366d511b736']);
   assert.equal(h.json(['task', 'show', 'T1']).run, null);
 });
 
@@ -887,7 +887,7 @@ test('rework cannot resume a session while its transient rerun is still alive', 
   const spawned = h.json(['spawn', '--task', 'T1']);
   try {
     await until(() => h.readAttempts().length === 2, 'transient rerun did not start');
-    h.ok(['submit', 'T1', '--agent', spawned.agent, '--sha', 'abcdef1']);
+    h.ok(['submit', 'T1', '--agent', spawned.agent, '--sha', '50b732a15be40ccb2065cb2ba0e7b366d511b736']);
     h.ok(['rework', 'T1', '--reason', 'review correction']);
     const result = h.run(['spawn', '--task', 'T1']);
     assert.equal(result.code, 1, result.stderr);
