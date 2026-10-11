@@ -839,7 +839,7 @@ test('concurrent event consumers execute each submission gate only once', async 
 
 // A slow stub suite records each run's start and end, so the log shows how
 // many gate executors ran at once across every consumer process.
-function slowSuite(h, { executors, crash = false, release = null } = {}) {
+function slowSuite(h, { executors, crash = false, release = null, hold = 1 } = {}) {
   const runs = path.join(h.base, 'suite-runs.log');
   const suite = path.join(h.base, 'tools', 'slow-suite.js');
   fs.writeFileSync(suite, `const fs = require('node:fs');
@@ -854,8 +854,8 @@ const finish = () => fs.appendFileSync(${JSON.stringify(runs)}, '-\\n');
 const release = ${JSON.stringify(release)};
 if (release) {
   const starts = fs.readFileSync(${JSON.stringify(runs)}, 'utf8').split('\\n').filter((m) => m === '+').length;
-  fs.writeFileSync(${JSON.stringify(path.join(h.base, 'suite-started-'))} + starts, '');
-  const poll = () => (fs.existsSync(release) ? finish() : setTimeout(poll, 50));
+  fs.writeFileSync(${JSON.stringify(path.join(h.base, 'suite-started-'))} + starts, String(process.pid));
+  const poll = () => (starts < ${hold} || fs.existsSync(release) ? finish() : setTimeout(poll, 50));
   poll();
 } else {
   setTimeout(finish, 2500);
@@ -876,6 +876,105 @@ if (release) {
     return { starts: marks.filter((m) => m === '+').length, peak };
   };
 }
+
+test('wait drains on either signal without starting another gate, and a second signal stops the gate', {
+  skip: process.platform === 'win32' ? 'Windows child.kill does not deliver POSIX signals' : false,
+}, async (t) => {
+  for (const [signal, forced, stage] of [['SIGTERM', false], ['SIGINT', false], ['SIGTERM', true], ['SIGTERM', true, 'proof'], ['SIGTERM', true, 'sources']]) {
+    const proof = stage === 'proof';
+    const sources = stage === 'sources';
+    await t.test(`${signal}${forced ? ' twice' : ''}${stage ? ` during ${stage}` : ''}`, async (t) => {
+      const h = cachedFixture(null, `wait-drain-${sources ? 'research' : 'code'}`, (repo) => {
+        const h = setup(null, { repo, kind: sources ? 'research' : 'code' });
+        if (sources) {
+          fs.mkdirSync(path.join(h.repo, 'research'));
+          fs.writeFileSync(path.join(h.repo, 'research', 'T1.json'), JSON.stringify({
+            sources: Array.from({ length: 10 }, (_, i) => ({ id: `s${i}`, url: `https://source.example/${i}` })),
+            claims: Array.from({ length: 10 }, (_, i) => ({ claim: `Claim ${i}`, quote: `Quote ${i}`, source: `s${i}` })),
+          }));
+          h.git(['add', 'research']);
+          h.git(['commit', '-qm', 'research sources']);
+          h.sha = h.git(['rev-parse', 'HEAD']);
+          const github = h.github();
+          github.prs['7'].headRefOid = h.sha;
+          github.ci[h.sha] = 'pending';
+          h.saveGithub(github);
+        }
+        return { sha: h.sha };
+      });
+      h.logs = () => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+      const release = path.join(h.base, 'release-suite');
+      const heldRun = proof ? 2 : 1;
+      const runs = slowSuite(h, { executors: 1, release, hold: heldRun });
+      if (proof) h.ok(['project', 'set', '--tests-mode', 'prove', '--agent', 'orchestrator']);
+      const observed = path.join(h.base, 'signal-observed');
+      const preload = path.join(h.base, 'signal-observer.js');
+      // A receipt synchronizes the test with signal delivery before it releases the gate.
+      fs.writeFileSync(preload, `const fs = require('node:fs');
+for (const signal of ['SIGTERM', 'SIGINT']) process.on(signal, () => fs.appendFileSync(${JSON.stringify(observed)}, signal + '\\n'));
+`);
+      if (sources) {
+        fs.appendFileSync(preload, `
+require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'public-http'))}).fetchPublic = (url, opts) => new Promise((resolve, reject) => {
+  fs.appendFileSync(${JSON.stringify(path.join(h.base, 'suite-runs.log'))}, '+\\n');
+  fs.writeFileSync(${JSON.stringify(path.join(h.base, 'suite-started-1'))}, String(process.pid));
+  const pending = setInterval(() => {}, 1000);
+  opts.signal.addEventListener('abort', () => {
+    fs.writeFileSync(${JSON.stringify(path.join(h.base, 'fetch-aborted'))}, opts.signal.reason.name);
+    clearInterval(pending);
+    reject(opts.signal.reason);
+  }, { once: true });
+});
+`);
+      }
+      const child = require('node:child_process').spawn(process.execPath,
+        ['--require', preload, BIN, 'wait', '--after', '0', '--types', 'never', '--timeout', '60', '--agent', 'orchestrator'],
+        { cwd: h.repo, env: h.env });
+      let stderr = '';
+      child.stdout.resume();
+      child.stderr.on('data', (chunk) => { stderr += chunk; });
+      const result = new Promise((resolve, reject) => {
+        child.on('error', reject);
+        child.on('close', (code, signal) => resolve({ code, signal, stderr }));
+      });
+      const timer = setTimeout(() => child.kill('SIGKILL'), 60000);
+      t.after(async () => {
+        clearTimeout(timer);
+        fs.writeFileSync(release, '');
+        if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+        await result;
+        await h.cleanup();
+      });
+      assert.notEqual(await waitFor(path.join(h.base, `suite-started-${heldRun}`), { ms: 60000 }), null, 'the gate starts');
+      child.kill(signal);
+      assert.notEqual(await waitFor(observed), null, 'the wait process receives the signal');
+      assert.equal(child.exitCode, null, 'the running gate still holds wait open');
+      if (forced) {
+        child.kill(signal);
+      } else {
+        fs.writeFileSync(release, '');
+      }
+      const exit = await result;
+      assert.deepEqual(runs(), { starts: heldRun, peak: 1 }, 'no queued gate starts during shutdown');
+      assert.equal(exit.code, 0, JSON.stringify(exit));
+      const receipts = h.logs().filter((e) => e.cmd === 'automation');
+      assert.deepEqual(receipts.filter((e) => e.detail.phase === 'running').map((e) => e.task), ['T1']);
+      assert.equal(receipts.at(-1).detail.phase, 'deferred', 'the executor lease is released for a retry');
+      const tasks = h.readState('tasks.json').tasks;
+      assert.deepEqual(tasks[0].evidence.map((e) => [e.type, e.ok]), [[sources ? 'sources' : 'tests', !forced]],
+        'the active gate is recorded, and the next gate is left for a retry');
+      assert.ok(tasks.slice(1).every((task) => !task.evidence.length), 'other tasks keep their pending gates');
+      if (forced) {
+        assert.equal(fs.existsSync(release), false, 'the second signal finishes without releasing the gate');
+        if (sources) assert.equal(fs.readFileSync(path.join(h.base, 'fetch-aborted'), 'utf8'), 'AbortError', 'the signal cancels the fetch before its timeout');
+        const gatePid = Number(fs.readFileSync(path.join(h.base, `suite-started-${heldRun}`), 'utf8'));
+        assert.equal(require('../lib/processes').processState({ pid: gatePid }), 'exited', 'the gate process was stopped');
+        if (!sources) assert.ok(tasks[0].evidence[0].commands.some((c) => c.signal === 'SIGKILL'), 'the command tree was killed');
+        assert.equal(tasks[0].evidence[0].confirmed_failure, undefined, 'interruption is not a confirmed test failure');
+      }
+    });
+  }
+});
 
 test('gate executors across several watchers stay within gates.executors and queue the rest in order', async (t) => {
   const h = setup(t);

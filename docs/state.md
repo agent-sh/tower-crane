@@ -747,6 +747,14 @@ every watcher and supervisor. The running receipt in the event log is the
 executor's lease: its terminal receipt releases it on exit, and its PID
 identity releases it when the process dies. Running receipts from other
 hosts do not count against this host's cap.
+SIGTERM or SIGINT to `wait` stops new reservations and gates while its active
+gate finishes and records evidence. The interrupted reaction records
+`phase: "deferred"` with an interruption reason, releasing its executor lease
+before `wait` exits 0. The next startup reconciles the remaining work.
+A second signal kills the active command tree immediately or cancels its
+source-page fetch. An interrupted software gate records a failure without
+`confirmed_failure`, so it does not trigger a quality climb. `gates retry`
+can rerun that gate.
 `automation queued` records a blocked notification's source, with
 `executors` set to the cap when the cap blocked it rather than another
 executor of the same task. Queued notifications run in drain order: submission
