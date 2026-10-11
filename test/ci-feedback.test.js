@@ -92,7 +92,7 @@ test('ci log writes the clean log under the task scratch and names both failing 
   const r = h.run(['ci', 'log', '42', '--failed-tests', '--task', 'T1']);
   assert.equal(r.code, 0, r.stderr);
   const [file, ...lines] = r.stdout.trimEnd().split('\n');
-  const log = path.join(h.scratch, 'ci', 'job-42.log');
+  const log = path.join(h.scratch, 'ci-job-42.log');
   assert.equal(file, log);
   assert.equal(fs.readFileSync(log, 'utf8'), PLAIN, 'the written log has no escape sequences');
   assert.deepEqual(lines, [
@@ -109,28 +109,20 @@ test('ci log refuses a job from another PR and writes nothing', (t) => {
   const r = h.run(['ci', 'log', '43', '--task', 'T1']);
   assert.equal(r.code, 1);
   assert.match(r.stderr, /job 43 is not in a check run on T1's PR head: it runs on tower-crane\/T2-other/);
-  assert.equal(fs.existsSync(path.join(h.scratch, 'ci', 'job-43.log')), false);
+  assert.equal(fs.existsSync(path.join(h.scratch, 'ci-job-43.log')), false);
 });
 
-test('ci log writes nothing through a link the worker planted in its scratch', { skip: process.platform === 'win32' && 'creating a link needs a privilege on Windows' }, (t) => {
+test('ci log replaces a link the worker planted at its log name and writes nothing through it', { skip: process.platform === 'win32' && 'creating a link needs a privilege on Windows' }, (t) => {
   const h = fixture(t);
   const outside = path.join(h.base, 'outside');
   fs.mkdirSync(outside);
-  fs.symlinkSync(outside, path.join(h.scratch, 'ci'));
-  const dirLink = h.run(['ci', 'log', '42', '--task', 'T1']);
-  assert.equal(dirLink.code, 1);
-  assert.match(dirLink.stderr, /is not a directory/);
-  assert.deepEqual(fs.readdirSync(outside), []);
-  // A log file that is a link out of the scratch is replaced, and its target is left alone.
-  fs.rmSync(path.join(h.scratch, 'ci'));
-  fs.mkdirSync(path.join(h.scratch, 'ci'));
   const target = path.join(outside, 'target.txt');
   fs.writeFileSync(target, 'keep\n');
-  fs.symlinkSync(target, path.join(h.scratch, 'ci', 'job-42.log'));
-  const leaf = h.run(['ci', 'log', '42', '--task', 'T1']);
-  assert.equal(leaf.code, 0, leaf.stderr);
-  assert.equal(fs.readFileSync(target, 'utf8'), 'keep\n');
-  assert.equal(fs.lstatSync(path.join(h.scratch, 'ci', 'job-42.log')).isFile(), true);
+  fs.symlinkSync(target, path.join(h.scratch, 'ci-job-42.log'));
+  const r = h.run(['ci', 'log', '42', '--task', 'T1']);
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(fs.readFileSync(target, 'utf8'), 'keep\n', 'the link target is untouched');
+  assert.equal(fs.lstatSync(path.join(h.scratch, 'ci-job-42.log')).isFile(), true);
 });
 
 test('ci log reads the branch head before the task is submitted, and alerts wait for its PR', (t) => {
