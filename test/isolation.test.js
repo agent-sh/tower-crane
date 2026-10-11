@@ -7,6 +7,7 @@ const path = require('node:path');
 const cp = require('node:child_process');
 const { makeRepo, ROOT, BIN, detachedAlive } = require('./helpers');
 const A = require('../lib/agents');
+const S = require('../lib/state');
 const TOML = require('../lib/toml');
 
 const STUB = path.join(__dirname, 'fixtures', 'harness-stub.js');
@@ -901,9 +902,10 @@ for (const [command, args, opts] of calls) {
   assert.equal(policy.repo, 'acme/app');
   const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
   assert.equal(events.find((e) => e.cmd === 'spawn').detail.tool.sha, toolSha);
-  for (const cmd of ['hook git-push', 'hook pr-created', 'hook report', 'hook progress']) {
+  for (const cmd of ['hook git-push', 'hook pr-created', 'hook report']) {
     assert.ok(events.some((e) => e.cmd === cmd && e.agent === started.agent), cmd);
   }
+  assert.match(fs.readFileSync(S.progressFile(h.state, started.agent), 'utf8'), /"cmd":"hook progress"/);
 });
 
 test('the shim migrates a pre-T112 policy using recorded state and refuses unbound migrations', { skip: NO_STUBS }, (t) => {

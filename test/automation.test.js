@@ -1457,7 +1457,8 @@ for (const f of fs.readdirSync('test')) if (f.endsWith('.test.js')) require(path
 }
 
 const headChecks = (h) => h.logs().filter((e) => e.cmd === 'head check');
-const softwareEvidence = (h, id) => h.readState('tasks.json').tasks.find((x) => x.id === id).evidence
+// A merge settles earlier receipts into evidence files; the CLI reads them back.
+const softwareEvidence = (h, id) => h.json(['task', 'show', id]).evidence
   .filter((e) => ['tests', 'clean', 'ci'].includes(e.type));
 
 function acceptBoth(h) {

@@ -211,7 +211,8 @@ test('real gate commands record their source and executed commands, including me
   assert.match(fs.readFileSync(path.join(h.state, 'sketch.md'), 'utf8'), /all pass/);
   h.ok(['accept', 'T1', '--agent', 'reviewer']);
   h.ok(['merge', 'T1', '--agent', 'reviewer']);
-  const evidence = h.readState('tasks.json').tasks[0].evidence;
+  // A merged task's earlier receipts settle into evidence files; the CLI reads them back.
+  const evidence = h.json(['task', 'show', 'T1']).evidence;
   for (const type of ['tests', 'clean', 'ci', 'merge']) {
     const e = evidence.find((x) => x.type === type);
     assert.equal(e.source, type === 'merge' ? 'merge' : `check ${type}`);
