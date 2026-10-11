@@ -4,7 +4,6 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const os = require('node:os');
 const cp = require('node:child_process');
 const { makeRepo, ROOT, BIN, detachedAlive } = require('./helpers');
 const A = require('../lib/agents');
@@ -838,6 +837,9 @@ test('a hidden store link to the harness program leaves it runnable; other progr
   fs.mkdirSync(path.dirname(vendored), { recursive: true });
   fs.writeFileSync(vendored, '#!/bin/sh\n', { mode: 0o755 });
   fs.symlinkSync(vendored, path.join(arg0, 'codex-execve-wrapper'));
+  // A store split by a kept rule file hides its children one by one.
+  const direct = path.join(u.home, '.claude', 'codex-link');
+  fs.symlinkSync(codex, direct);
   isolated(h, 'medium', 'codex');
   const started = spawn(h, u, 'medium');
   const config = TOML.parse(fs.readFileSync(path.join(h.state, 'homes', started.agent, 'config.toml'), 'utf8'));
@@ -845,11 +847,11 @@ test('a hidden store link to the harness program leaves it runnable; other progr
   assert.notEqual(rules[fs.realpathSync(codex)], 'none', 'the harness program stays runnable');
   assert.notEqual(rules[fs.realpathSync(vendored)], 'none', 'the codex package binary stays runnable');
   assert.equal(rules[fs.realpathSync(helper)], 'none', 'a script that prints a secret stays hidden');
+  assert.equal(rules[direct], undefined, 'a harness link directly in a store is not masked');
 });
 
 test('harness roots cover an npm package, never a whole bin directory', { skip: process.platform === 'win32' && 'shebang bins' }, t => {
-  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'tc-roots-'));
-  t.after(() => fs.rmSync(base, { recursive: true, force: true }));
+  const base = makeRepo(t).base;
   const pkg = path.join(base, 'lib', 'node_modules', '@openai', 'codex');
   fs.mkdirSync(path.join(pkg, 'bin'), { recursive: true });
   fs.writeFileSync(path.join(pkg, 'bin', 'codex.js'), '#!/usr/bin/env node\n', { mode: 0o755 });
