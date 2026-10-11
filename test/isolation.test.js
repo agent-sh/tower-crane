@@ -418,6 +418,8 @@ test('research Codex explicitly enables live search with worker file and git con
     delete rules[ownHome];
     delete rules[sessions];
     delete rules[report.home];
+    assert.equal(rules[path.join(report.home, '.gitconfig')], 'read', 'git config in HOME stays read-only');
+    delete rules[path.join(report.home, '.gitconfig')];
     delete rules[broker];
   }
   assert.deepEqual(researchFs, workerFs);
@@ -576,7 +578,9 @@ test('a spawned codex agent is pointed at the user\'s global rules, loads none o
   assert.equal(fs.statSync(path.join(home, 'config.toml')).mode & 0o777, 0o600);
   assert.equal(seen.home, path.join(home, 'home'), 'HOME is the agent\'s own');
   assert.deepEqual(seen.skills, [], 'no user skill from ~/.agents/skills, and the small role has none of its own');
-  assert.equal(fs.readlinkSync(path.join(home, 'home', '.gitconfig')), path.join(u.home, '.gitconfig'), 'git config is linked into its HOME');
+  // A link the agent could swap; the file in its place stays read-only.
+  assert.equal(fs.readFileSync(path.join(home, 'home', '.gitconfig'), 'utf8'), `[include]\n\tpath = ${JSON.stringify(path.join(u.home, '.gitconfig'))}\n`, 'git config is included in its HOME');
+  assert.equal(seen.config.permissions['tower-crane'].filesystem[path.join(home, 'home', '.gitconfig')], 'read');
   spawn(h, u, 'review');
   assert.deepEqual(u.report().skills, ['tower-crane-review'], 'the reviewer gets its own skill only');
   noSecretsCopied(h);
@@ -711,6 +715,23 @@ test('a codex agent writes only where its agent file says; a worker writes its g
   // git directory and its worktree's admin directory inside it.
   const common = fs.realpathSync(h.git(['rev-parse', '--path-format=absolute', '--git-common-dir'], wt));
   const own = fs.realpathSync(h.git(['rev-parse', '--path-format=absolute', '--git-dir'], wt));
+  // A submodule named lib/a keeps its git directory in modules/lib/a.
+  const mod = path.join(common, 'modules', 'lib', 'a');
+  fs.mkdirSync(mod, { recursive: true });
+  fs.writeFileSync(path.join(mod, 'HEAD'), 'ref: refs/heads/main\n');
+  fs.writeFileSync(path.join(mod, 'config'), '');
+  fs.rmSync(path.join(common, 'info'), { recursive: true, force: true });
+  // What makes git outside the sandbox run commands, or read another config,
+  // stays read-only though the git directory around it is writable.
+  const guarded = [path.join(common, 'config'), path.join(common, 'config.worktree'), path.join(common, 'hooks'), path.join(common, 'info'),
+    path.join(mod, 'config'), path.join(mod, 'hooks'), path.join(own, 'config.worktree'), path.join(own, 'commondir'), path.join(own, 'gitdir'),
+    path.join(fs.realpathSync(wt), '.git')];
+  // git resolves ~/ in the user's global config in the agent's HOME, which
+  // a codex agent writes: what it includes there exists and is read-only.
+  fs.appendFileSync(u.env.GIT_CONFIG_GLOBAL, '[include]\n\tpath = ~/.gitconfig.local\n\tpath = ~/.config/git/extra\n');
+  // ~/.config/git is a directory of links the agent cannot add to or swap.
+  fs.mkdirSync(path.join(u.home, '.config', 'git'), { recursive: true });
+  fs.writeFileSync(path.join(u.home, '.config', 'git', 'ignore'), '*.swp\n');
   for (const [rung, worktree] of [['hard', 'write'], ['review', 'read'], ['small', 'read']]) {
     isolated(h, rung, 'codex');
     const started = spawn(h, u, rung);
@@ -718,6 +739,15 @@ test('a codex agent writes only where its agent file says; a worker writes its g
     const { config } = u.report();
     const rules = config.permissions['tower-crane'].filesystem;
     for (const d of [common, own]) assert.equal(rules[d], worktree === 'write' ? 'write' : undefined, `${rung}: ${d}`);
+    for (const p of guarded) assert.equal(rules[p], worktree === 'write' ? 'read' : undefined, `${rung}: ${p}`);
+    assert.equal(rules[path.join(home, 'home', '.gitconfig.local')], 'read', `${rung}: an included ~/ file`);
+    const xdg = path.join(home, 'home', '.config', 'git');
+    assert.equal(rules[xdg], 'read', rung);
+    assert.ok(!fs.lstatSync(xdg).isSymbolicLink(), rung);
+    assert.equal(fs.readlinkSync(path.join(xdg, 'ignore')), path.join(u.home, '.config', 'git', 'ignore'), rung);
+    assert.equal(fs.readFileSync(path.join(xdg, 'extra'), 'utf8'), '', `${rung}: a missing include exists, empty`);
+    assert.equal(fs.readFileSync(path.join(home, 'gitconfig'), 'utf8'), `[include]\n\tpath = ${JSON.stringify(u.env.GIT_CONFIG_GLOBAL)}\n`, rung);
+    assert.equal(rules[path.join(common, 'worktrees')], worktree === 'write' ? 'read' : undefined, `${rung}: other worktrees' admin directories`);
     assert.deepEqual(rules[':workspace_roots'], { '.': worktree }, rung);
     assert.equal(rules[':root'], 'read', rung);
     assert.equal(rules[h.state], 'read', `${rung}: the state is read-only; the broker writes it`);
@@ -749,8 +779,62 @@ test('a codex agent writes only where its agent file says; a worker writes its g
   for (const [rung, writes] of [['hard', true], ['small', false]]) {
     isolated(h, rung, 'claude');
     spawn(h, u, rung);
-    const allow = u.report().settings.sandbox.filesystem.allowWrite;
+    const { allowWrite: allow, denyWrite: deny } = u.report().settings.sandbox.filesystem;
     for (const d of [common, own]) assert.equal(allow.includes(d), writes, `claude ${rung}: ${d}`);
+    for (const p of guarded) assert.equal(deny.includes(p), writes, `claude ${rung}: ${p}`);
+  }
+  // Each guarded path exists, so no sandbox masks it with a placeholder.
+  for (const p of guarded) assert.ok(fs.existsSync(p), p);
+  assert.ok(fs.statSync(path.join(common, 'info')).isDirectory());
+});
+
+test('a sandboxed harness\'s own git runs no command the shared config, hooks or the agent\'s HOME name; the agent\'s sandboxed git still runs hooks', { skip: NO_STUBS }, (t) => {
+  const { h, u, wt } = setup(t);
+  fs.writeFileSync(path.join(wt, 'f.txt'), 'one\n');
+  fs.writeFileSync(path.join(wt, 'g.txt'), 'one\n');
+  h.git(['add', 'f.txt', 'g.txt'], wt);
+  h.git(['commit', '-qm', 'f'], wt);
+  // What a worker could have planted in the shared git directory.
+  const common = h.git(['rev-parse', '--path-format=absolute', '--git-common-dir'], wt);
+  // Each marks only a run under the spawned harness, whose environment alone
+  // has TOWER_CRANE_SESSION: Tower Crane's own git and this test's are out of scope here.
+  const mark = (name) => path.join(h.base, `ran-${name}`);
+  const touch = (name) => `[ -z "$TOWER_CRANE_SESSION" ] || touch '${mark(name)}'`;
+  h.git(['config', 'core.fsmonitor', `${touch('fsmonitor')}; false`], wt);
+  h.git(['config', 'filter.planted.clean', `${touch('filter')}; cat`], wt);
+  fs.writeFileSync(path.join(common, 'info', 'attributes'), 'f.txt filter=planted\ng.txt filter=home\n');
+  fs.writeFileSync(path.join(common, 'hooks', 'post-checkout'), `#!/bin/sh\n${touch('hook')}\n`, { mode: 0o755 });
+  const marks = ['fsmonitor', 'filter', 'hook', 'home'];
+  // A codex agent writes its HOME, so after launch it can swap the linked
+  // ~/.gitconfig for one that names a driver the scan never saw.
+  const homeConfig = `const fs = require('node:fs'); const f = require('node:path').join(require('node:os').homedir(), '.gitconfig');
+fs.rmSync(f, { force: true }); fs.writeFileSync(f, ${JSON.stringify(`[filter "home"]
+	clean = ${touch('home')}; cat
+`)});`;
+  // A command the agent runs, as its sandbox marks it: the repository's hooks
+  // run there, and background gc stays off.
+  const agent = path.join(h.base, 'agent.json');
+  const inSandbox = `const cp = require('node:child_process'); const fs = require('node:fs');
+const env = { ...process.env, SANDBOX_RUNTIME: '1' };
+cp.execFileSync('git', ['checkout', '-q', '-b', 'probe-agent'], { env });
+const gc = cp.execFileSync('git', ['config', 'gc.auto'], { env, encoding: 'utf8' }).trim();
+fs.writeFileSync(${JSON.stringify(agent)}, JSON.stringify({ hook: fs.existsSync(${JSON.stringify(mark('hook'))}), gc }));`;
+  for (const harness of ['claude', 'codex']) {
+    for (const m of marks) fs.rmSync(mark(m), { force: true });
+    // Same size, so status must hash the content through the clean filter.
+    for (const f of ['f.txt', 'g.txt']) fs.writeFileSync(path.join(wt, f), harness === 'claude' ? 'two\n' : 'six\n');
+    isolated(h, 'hard', harness);
+    const run = [[process.execPath, '-e', homeConfig], ['git', 'status', '--porcelain'], ['git', 'checkout', '-q', '-b', `probe-${harness}`], ['git', 'checkout', '-q', '-']];
+    // Like the owner's own session, with no GIT_CONFIG_GLOBAL of its own.
+    spawn(h, u, 'hard', { STUB_RUN: JSON.stringify(run), GIT_CONFIG_GLOBAL: undefined });
+    const seen = u.report();
+    for (const r of seen.ran) assert.equal(r.code, 0, `${harness}: ${r.argv.join(' ')}: ${r.stderr}`);
+    assert.deepEqual(marks.filter((m) => fs.existsSync(mark(m))), [], `${harness}: the harness's git ran a planted command`);
+    spawn(h, u, 'hard', { STUB_RUN: JSON.stringify([[process.execPath, '-e', inSandbox]]) });
+    assert.equal(u.report().ran[0].code, 0, u.report().ran[0].stderr);
+    assert.deepEqual(JSON.parse(fs.readFileSync(agent, 'utf8')), { hook: true, gc: '0' }, harness);
+    h.git(['checkout', '-q', '-'], wt);
+    for (const b of [`probe-${harness}`, 'probe-agent']) h.git(['branch', '-D', b], wt);
   }
 });
 
@@ -1459,7 +1543,7 @@ test('a spawn started inside another agent links to the user\'s own files, so re
   const inside = { CLAUDE_CONFIG_DIR: parent, HOME: path.join(parent, 'home'), USERPROFILE: path.join(parent, 'home') };
   const child = path.join(h.state, 'homes', spawn(h, u, 'small', inside).agent);
   for (const f of ['.credentials.json']) assert.equal(fs.readlinkSync(path.join(child, f)), path.join(u.home, '.claude', f), f);
-  assert.equal(fs.readlinkSync(path.join(child, 'home', '.gitconfig')), path.join(u.home, '.gitconfig'));
+  assert.equal(fs.readFileSync(path.join(child, 'home', '.gitconfig'), 'utf8'), `[include]\n\tpath = ${JSON.stringify(path.join(u.home, '.gitconfig'))}\n`);
   const helper = JSON.parse(fs.readFileSync(path.join(child, 'settings.json'), 'utf8')).apiKeyHelper;
   assert.ok(helper.includes(path.join(u.home, '.claude', 'settings.json')), 'the helper reads the user\'s settings');
   fs.rmSync(parent, { recursive: true, force: true });

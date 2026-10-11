@@ -43,7 +43,9 @@ for (const base of ['main', 'release/next']) {
     assert.equal(h.git(['rev-parse', 'HEAD'], wt.path), fresh);
     assert.equal(h.git(['rev-parse', `origin/${base}`]), fresh);
     assert.equal(h.git(['rev-parse', base]), stale);
-    assert.equal(h.git(['for-each-ref', '--format=%(upstream)', `refs/heads/${wt.branch}`]), '');
+    // The branch tracks its namesake on origin, never the base: a sandboxed
+    // worker cannot write the config `git push -u` would change.
+    assert.equal(h.git(['for-each-ref', '--format=%(upstream)', `refs/heads/${wt.branch}`]), `refs/remotes/origin/${wt.branch}`);
     assert.equal(fs.readFileSync(path.join(wt.path, 'remote.txt'), 'utf8'), 'new base commit\n');
     assert.equal(h.json(['task', 'show', 'T1']).branch, wt.branch);
 
