@@ -137,7 +137,19 @@ function noSecretsCopied(h) {
   for (const f of walk(h.state)) assert.ok(!fs.readFileSync(f, 'utf8').includes(SECRET), `${f} holds a copied credential`);
 }
 
+// An exited worker keeps its lease until the orchestrator releases it, so each dispatch releases the last one.
+function releaseExited(h) {
+  // Read the state directly: an unbound project refuses `task show` from the owner's identity.
+  const claim = h.readState('tasks.json').tasks[0].claim;
+  if (claim) h.ok(['release', 'T1', '--agent', claim.agent, '--reason', 'worker exited']);
+}
+
 function spawn(h, u, role, env = {}, opts = {}) {
+  releaseExited(h);
+  // A submitted task goes back for rework before its next worker is dispatched.
+  if (['easy', 'medium', 'hard', 'research'].includes(role) && h.readState('tasks.json').tasks[0].status === 'submitted') {
+    h.ok(['rework', 'T1', '--reason', 'dispatch the next worker']);
+  }
   if (role === 'review' && h.readState('tasks.json').tasks[0].status !== 'submitted') {
     h.ok(['task', 'update', 'T1', '--kind', 'docs']);
     h.ok(['claim', 'T1', '--agent', 'builder']);
@@ -526,6 +538,7 @@ test('unbound projects spawn workers and reviewers with owner-key denials but st
     for (const role of ['hard', 'review']) {
       if (role === 'review') {
         const opts = { env: { TOWER_CRANE_AGENT: 'builder' } };
+        releaseExited(h);
         h.ok(['claim', 'T1', '--agent', 'builder'], opts);
         h.ok(['submit', 'T1', '--sha', h.git(['rev-parse', 'HEAD']), '--agent', 'builder'], opts);
       }
@@ -642,6 +655,7 @@ test('browser tasks attach the user kit on every rung with approved tools and no
       [['--kind', 'design', '--needs', '[]'], ['easy', 'medium', 'hard', 'research', 'review', 'small', 'orchestrator']],
       [['--kind', 'code', '--needs', '["browser"]'], ['hard', 'review']],
     ]) {
+      releaseExited(h);
       h.ok(['task', 'update', 'T1', ...declaration]);
       for (const role of roles) {
         isolated(h, role, harness);
@@ -674,6 +688,7 @@ test('browser tasks attach the user kit on every rung with approved tools and no
     h.ok(['browser-kit', 'set', '--servers', '["visual","playwright"]']);
     const custom = h.json(['spawn', '--role', 'small', '--task', 'T1', '--dry-run'], { env: u.env });
     assert.deepEqual(custom.home.mcp, ['visual', 'playwright']);
+    releaseExited(h);
     h.ok(['task', 'update', 'T1', '--needs', '[]']);
     const plain = h.json(['spawn', '--role', 'small', '--task', 'T1', '--dry-run'], { env: u.env });
     assert.deepEqual(plain.home.mcp, [], 'a plain code task gets no kit');
@@ -688,6 +703,7 @@ test('browser spawns use the original user kit through a nested isolated home an
   const userFile = path.join(u.home, '.config', 'tower-crane', 'config.json');
   fs.mkdirSync(path.dirname(userFile), { recursive: true });
   fs.writeFileSync(userFile, JSON.stringify({ browser_kit: ['planted'] }));
+  releaseExited(h);
   h.ok(['task', 'update', 'T1', '--needs', '["browser"]']);
   isolated(h, 'hard', 'codex');
   const parent = spawn(h, u, 'hard', { TOWER_CRANE_CONFIG: '', ...orchestrator });
@@ -701,6 +717,7 @@ test('browser spawns use the original user kit through a nested isolated home an
     assert.notEqual(result.code, 0);
     assert.match(result.stderr, /missing-browser.*(?:mcp\.json|config\.toml)/);
   }
+  releaseExited(h);
   h.ok(['task', 'update', 'T1', '--needs', '[]']);
   assert.deepEqual(h.json(['spawn', '--role', 'small', '--task', 'T1', '--dry-run'], { env: { ...u.env, TOWER_CRANE_CONFIG: '', ...orchestrator } }).home.mcp, []);
 });
@@ -1230,6 +1247,7 @@ test('an isolated reviewer posts through gh, records evidence in a symlinked sta
   const realState = path.join(h.base, 'real-state');
   fs.renameSync(h.state, realState);
   fs.symlinkSync(realState, h.state);
+  releaseExited(h);
   h.ok(['task', 'update', 'T1', '--kind', 'docs']);
   for (const name of ['easy', 'medium', 'hard', 'research']) {
     h.ok(['ladder', 'set', name, '--model', 'builder', '--clear', 'profile']);
@@ -1357,6 +1375,7 @@ if (process.env.TOWER_CRANE_VIA === 'broker' && process.argv.includes('late')) {
     const run = [[process.execPath, BIN, 'task', 'note', 'T1', 'early'], [process.execPath, '-e', background]];
     const env = { ...u.env, STUB_RUN: JSON.stringify(run), NODE_OPTIONS: `--require ${JSON.stringify(preload)}`, SLOW_BROKER_PID: pidFile };
     const started = Date.now();
+    releaseExited(h);
     const r = await h.runAsync(['spawn', '--role', 'hard', '--task', 'T1', '--wait', '--json'], { env });
     assert.equal(r.code, 0, r.stderr);
     assert.ok(Date.now() - started < 60000, `${harness}: spawn --wait returned`);
@@ -1367,7 +1386,7 @@ if (process.env.TOWER_CRANE_VIA === 'broker' && process.argv.includes('late')) {
     while (detachedAlive({ pid }) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 50));
     assert.ok(!detachedAlive({ pid }), `${harness}: the brokered command stopped with the broker`);
   }
-  const notes = h.readState('tasks.json').tasks[0].notes.map((n) => n.text);
+  const notes = h.readState('tasks.json').tasks[0].notes.map((n) => n.text).filter((text) => ['early', 'late'].includes(text));
   assert.deepEqual(notes, ['early', 'early'], 'nothing the broker was still running wrote after its spawn ended');
 });
 

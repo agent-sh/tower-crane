@@ -180,6 +180,10 @@ function after(name, args, rawArgs = args) {
   const target = args[0];
   if (env.HOOK_STOP_RENDER && name === 'renameSync' && args[1] === path.join(STATE, 'sketch.md')
     && path.basename(process.argv[1]) === 'tower-crane.js' && process.argv.includes('spawn') && first('render')) stop(env.HOOK_STOP_RENDER);
+  // HOOK_STOP_STARTED=FILE stops the dispatch after it reads its supervisor's startup receipt,
+  // before its spawn is committed, so the supervisor's startup window can close first.
+  if (env.HOOK_STOP_STARTED && name === 'rmSync' && path.basename(target) === 'started.json'
+    && path.basename(process.argv[1]) === 'tower-crane.js' && first('started')) stop(env.HOOK_STOP_STARTED);
   // HOOK_PAUSE_ON=FILE stops at HOOK_PAUSED after its first read; HOOK_PAUSE_PROCESS
   // optionally limits the pause to one executable's basename.
   if (env.HOOK_PAUSE_ON && name === 'readFileSync' && inState(target) && path.basename(target) === env.HOOK_PAUSE_ON
@@ -367,10 +371,11 @@ if (env.HOOK_SPAWN_FAIL) {
 if (env.HOOK_USAGE_HARNESS) {
   const original = cp.spawn;
   cp.spawn = function usageHarness(file, args, options) {
-    if (file === env.HOOK_USAGE_HARNESS) {
-      return original.call(this, process.execPath, [
-        require('node:path').join(__dirname, 'usage-harness.js'), env.HOOK_USAGE_FILE,
-      ], options);
+    // The supervisor's lease gate starts its harness after `tower-crane-gate`.
+    const gated = file === '/bin/sh' && args[2] === 'tower-crane-gate' && args[3] === env.HOOK_USAGE_HARNESS;
+    if (file === env.HOOK_USAGE_HARNESS || gated) {
+      const stub = [require('node:path').join(__dirname, 'usage-harness.js'), env.HOOK_USAGE_FILE];
+      return original.call(this, gated ? file : process.execPath, gated ? [...args.slice(0, 3), process.execPath, ...stub] : stub, options);
     }
     return original.call(this, file, args, options);
   };

@@ -2,9 +2,12 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const cp = require('node:child_process');
 const fs = require('node:fs');
+const { once } = require('node:events');
 const path = require('node:path');
 const { cachedFixture, BIN } = require('./helpers');
+const P = require('../lib/processes');
 
 const events = (h) => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
 
@@ -26,6 +29,28 @@ async function until(fn, message) {
     if (Date.now() >= deadline) assert.fail(message);
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
+}
+
+// The supervisor pauses before taking the lease, so the spawn's reservation
+// holds the slot until release() lets the supervisor claim.
+async function pausedSpawn(h, task) {
+  const paused = path.join(h.base, `paused-${task}`);
+  const spawned = h.json(['spawn', '--task', task], { hooks: { HOOK_PAUSE_ON: 'events.jsonl', HOOK_PAUSE_PROCESS: 'spawn-monitor.js', HOOK_PAUSED: paused } });
+  await until(() => fs.existsSync(paused), 'supervisor did not pause');
+  return { spawned, release: () => fs.writeFileSync(`${paused}.go`, '') };
+}
+
+// The monitor dies first so it cannot record the exit, then the worker's processes.
+// Windows has no group to signal; the harness's tree goes with taskkill.
+function killWorker(spawned) {
+  process.kill(spawned.monitor_pid, 'SIGKILL');
+  if (process.platform === 'win32') cp.spawnSync('taskkill', ['/PID', String(spawned.pid), '/T', '/F'], { stdio: 'ignore' });
+  else process.kill(-spawned.pid, 'SIGKILL');
+}
+
+function workerGone(spawned) {
+  return P.processState({ host: spawned.host, pid: spawned.monitor_pid }) === 'exited'
+    && P.processGroupState({ host: spawned.host, pid: spawned.pid }) === 'exited';
 }
 
 function controlledHarness(h) {
@@ -103,7 +128,7 @@ test('concurrent dispatch reserves the last slot until claim and does not double
   fs.writeFileSync(path.join(h.base, `${task}.exit`), '');
 });
 
-test('a delayed child claim consumes its reservation when every slot is held', async (t) => {
+test('a started worker holds its lease against strangers until its own claim renews it', async (t) => {
   const h = setup(t, 2, 3);
   controlledHarness(h);
   h.ok(['claim', 'T3', '--agent', 'manual']);
@@ -111,7 +136,7 @@ test('a delayed child claim consumes its reservation when every slot is held', a
   await until(() => fs.existsSync(path.join(h.base, 'T1.started')), 'worker did not start');
   const stranger = h.run(['claim', 'T1', '--agent', 'stranger']);
   assert.equal(stranger.code, 1, stranger.stderr);
-  assert.match(stranger.stderr, /T1.*worker-T1-1.*reservation/);
+  assert.match(stranger.stderr, /T1.*worker-T1-1/);
   fs.writeFileSync(path.join(h.base, 'T1.claim'), '');
   await until(() => fs.existsSync(path.join(h.base, 'T1.claimed')), 'worker did not claim');
   const claim = JSON.parse(fs.readFileSync(path.join(h.base, 'T1.claimed'), 'utf8'));
@@ -121,7 +146,7 @@ test('a delayed child claim consumes its reservation when every slot is held', a
   fs.writeFileSync(path.join(h.base, 'T1.exit'), '');
 });
 
-test('an unclaimed exit and a failed launch both free the reserved slot', async (t) => {
+test('a failed launch holds no slot, and an exited worker frees its slot once released', async (t) => {
   const h = setup(t);
   controlledHarness(h);
   const failed = h.run(['spawn', '--task', 'T1'], { hooks: { HOOK_SPAWN_FAIL: '1' } });
@@ -133,7 +158,56 @@ test('an unclaimed exit and a failed launch both free the reserved slot', async 
   assert.equal(h.run(['claim', 'T2', '--agent', 'manual']).code, 1);
   fs.writeFileSync(path.join(h.base, 'T1.exit'), '');
   await until(() => events(h).some((e) => e.cmd === 'spawn exit' && e.detail.agent === spawned.agent), 'exit was not recorded');
+  assert.equal(h.run(['claim', 'T2', '--agent', 'manual']).code, 1, 'an exited worker keeps its lease until released');
+  h.ok(['release', 'T1', '--agent', spawned.agent, '--reason', 'worker exited']);
   h.ok(['claim', 'T2', '--agent', 'manual']);
+});
+
+test('spawn refuses a task with a live reservation and clears one whose processes are gone', async (t) => {
+  const h = setup(t, 2, 2);
+  controlledHarness(h);
+  const { spawned } = await pausedSpawn(h, 'T1');
+  const refused = h.run(['spawn', '--task', 'T1']);
+  assert.equal(refused.code, 1, refused.stderr);
+  assert.match(refused.stderr, /T1.*worker-T1-1.*reservation/);
+  assert.equal(events(h).filter((e) => e.cmd === 'spawn').length, 1, 'the refused spawn records nothing');
+  killWorker(spawned);
+  await until(() => workerGone(spawned), 'worker processes did not exit');
+  const replacement = h.json(['spawn', '--task', 'T1']);
+  assert.equal(replacement.agent, 'worker-T1-2');
+  assert.ok(events(h).some((e) => e.cmd === 'reservation clear' && e.detail.agent === spawned.agent && e.detail.attempt === spawned.attempt),
+    'the cleared reservation is recorded');
+  fs.writeFileSync(path.join(h.base, 'T1.exit'), '');
+});
+
+// macOS has no /proc, so its group probe is the signal to an empty group. CI has no macOS
+// runner: this runs the same probe on POSIX with the platform overridden.
+test('a group probe without /proc proves exit only once the group is empty', { skip: process.platform === 'win32' && 'Windows has no process groups to probe' }, async (t) => {
+  const exited = cp.spawn(process.execPath, ['-e', ''], { detached: true, stdio: 'ignore' });
+  await once(exited, 'exit');
+  const live = cp.spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { detached: true, stdio: 'ignore' });
+  t.after(() => { try { process.kill(-live.pid, 'SIGKILL'); } catch { /* already gone */ } });
+  const real = Object.getOwnPropertyDescriptor(process, 'platform');
+  Object.defineProperty(process, 'platform', { value: 'darwin' });
+  try {
+    assert.equal(P.processGroupState({ pid: exited.pid }), 'exited');
+    assert.equal(P.processGroupState({ pid: live.pid }), 'unknown');
+  } finally {
+    Object.defineProperty(process, 'platform', real);
+  }
+});
+
+test('a dead reservation frees the only worker slot before the first capacity check', async (t) => {
+  const h = setup(t, 1, 2);
+  controlledHarness(h);
+  const { spawned } = await pausedSpawn(h, 'T1');
+  killWorker(spawned);
+  await until(() => workerGone(spawned), 'worker processes did not exit');
+  const replacement = h.json(['spawn', '--task', 'T2']);
+  assert.equal(replacement.agent, 'worker-T2-1');
+  assert.ok(events(h).some((e) => e.cmd === 'reservation clear' && e.detail.agent === spawned.agent),
+    'the dead reservation is cleared under the lock before the slot is counted');
+  fs.writeFileSync(path.join(h.base, 'T2.exit'), '');
 });
 
 test('reviewer dispatch is unaffected when worker reservations fill the limit', async (t) => {
@@ -171,7 +245,9 @@ test('dispatch rechecks slots under the lock after worktree preparation', async 
   assert.equal(events(h).filter((e) => e.cmd === 'spawn').length, 0);
 });
 
-test('an unclaimed retry holds its slot through backoff and expired-lease renewal', async (t) => {
+test('a retrying worker keeps its slot through backoff and expired-lease renewal', async (t) => {
+  // Windows starts the harness before its claim lands, so the slot may still be a reservation there.
+  const HOLD_KIND = process.platform === 'win32' ? 'lease|reservation' : 'lease';
   const h = setup(t, 1);
   h.ok(['claim', 'T3', '--agent', 'expired']);
   const doc = h.readState('tasks.json');
@@ -183,10 +259,10 @@ test('an unclaimed retry holds its slot through backoff and expired-lease renewa
   await until(() => events(h).some((e) => e.cmd === 'spawn phase' && e.detail.phase === 'retrying'), 'worker did not enter backoff');
   const renew = h.run(['renew', 'T3', '--agent', 'expired']);
   assert.equal(renew.code, 1, renew.stderr);
-  assert.match(renew.stderr, /T1.*worker-T1-1.*reservation/);
+  assert.match(renew.stderr, new RegExp(`T1.*worker-T1-1.*(${HOLD_KIND})`));
   const refused = h.run(['spawn', '--task', 'T2']);
   assert.equal(refused.code, 1, refused.stderr);
-  assert.match(refused.stderr, /T1.*worker-T1-1.*reservation/);
+  assert.match(refused.stderr, new RegExp(`T1.*worker-T1-1.*(${HOLD_KIND})`));
   await until(() => events(h).some((e) => e.cmd === 'spawn retry'), 'worker did not retry');
   h.ok(['claim', 'T1', '--agent', spawned.agent]);
   assert.equal(h.run(['claim', 'T2', '--agent', 'manual']).code, 1);
@@ -243,8 +319,7 @@ for (const cmd of ['spawn exit', 'worker-exited']) {
   test(`${cmd} without attempt releases its matching spawn reservation`, async (t) => {
     const h = setup(t, 1);
     controlledHarness(h);
-    const spawned = h.json(['spawn', '--task', 'T1']);
-    await until(() => fs.existsSync(path.join(h.base, 'T1.started')), 'worker did not start');
+    const { spawned, release } = await pausedSpawn(h, 'T1');
     const receipt = path.join(h.base, 'exit-receipt.json');
     const hook = path.join(h.base, 'exit-receipt.js');
     fs.writeFileSync(hook, `
@@ -278,7 +353,7 @@ fs.readFileSync = function(file, ...args) {
       assert.equal(released.code, 0, released.stderr);
       assert.equal(h.readState('tasks.json').tasks[1].claim.agent, 'replacement');
     } finally {
-      fs.writeFileSync(path.join(h.base, 'T1.exit'), '');
+      release();
     }
   });
 }
@@ -290,8 +365,7 @@ test('sandboxed claims and expired renewals cannot discard hidden live reservati
   const doc = h.readState('tasks.json');
   doc.tasks[2].claim.until = new Date(Date.now() - 1000).toISOString();
   h.writeState('tasks.json', doc);
-  const spawned = h.json(['spawn', '--task', 'T1']);
-  await until(() => fs.existsSync(path.join(h.base, 'T1.started')), 'worker did not start');
+  const { spawned, release } = await pausedSpawn(h, 'T1');
   const hidden = { hooks: { HOOK_HIDDEN_PIDS: JSON.stringify([spawned.pid, spawned.monitor_pid]) } };
   try {
     for (const args of [
@@ -307,49 +381,24 @@ test('sandboxed claims and expired renewals cannot discard hidden live reservati
     assert.equal(h.readState('tasks.json').tasks[0].claim.agent, spawned.agent);
     assert.equal(events(h).filter((e) => e.cmd === 'spawn').length, 1);
   } finally {
+    release();
     fs.writeFileSync(path.join(h.base, 'T1.exit'), '');
   }
 });
 
-test('a reservation ends at its monitor exit or lease horizon, the same for every observer', (t) => {
+test('a finished worker keeps its lease for every observer until it is released', (t) => {
   const h = setup(t, 1);
   h.ok(['ladder', 'set', 'easy', '--harness', 'command',
     '--command', JSON.stringify([process.execPath, '-e', 'process.exit(0)', '{prompt}']), '--clear', 'profile', '--clear', 'effort']);
   const spawned = h.json(['spawn', '--task', 'T1', '--wait']);
   assert.ok(events(h).some((e) => e.cmd === 'spawn phase' && e.detail.agent === spawned.agent && e.detail.active === false));
-  // No exit receipt was recorded; MONITOR_SILENT also drops the monitor's
-  // closing phase, and AGED moves the attempt's records past one lease.
-  const hook = path.join(h.base, 'missing-exit-receipts.js');
-  fs.writeFileSync(hook, `
-const fs = require('node:fs');
-const read = fs.readFileSync;
-fs.readFileSync = function(file, ...args) {
-  const value = read.call(this, file, ...args);
-  if (!String(file).endsWith('events.jsonl') || typeof value !== 'string') return value;
-  return value.split('\\n').flatMap((line) => {
-    if (!line) return [line];
-    const e = JSON.parse(line);
-    if (['spawn exit', 'worker-exited'].includes(e.cmd)) return [];
-    if (process.env.MONITOR_SILENT && e.cmd === 'spawn phase' && e.detail.active === false) return [];
-    if (process.env.AGED && e.task === 'T1') e.at = new Date(Date.parse(e.at) - 61 * 60000).toISOString();
-    return [JSON.stringify(e)];
-  }).join('\\n');
-};
-`);
-  const run = (agent, extra) => h.run(['claim', 'T2', '--agent', agent], {
-    env: { NODE_OPTIONS: `--require "${hook.replace(/\\/g, '/')}"`, ...extra },
-    hooks: { HOOK_HIDDEN_PIDS: agent === 'orchestrator' ? '[]' : JSON.stringify([spawned.pid, spawned.monitor_pid]) },
-  });
   for (const agent of ['worker-T2-1', 'orchestrator']) {
-    const held = run(agent, { MONITOR_SILENT: '1' });
+    const held = h.run(['claim', 'T2', '--agent', agent]);
     assert.equal(held.code, 1, held.stderr);
-    assert.match(held.stderr, /T1.*worker-T1-1.*reservation/);
-    for (const extra of [{}, { MONITOR_SILENT: '1', AGED: '1' }]) {
-      const r = run(agent, extra);
-      assert.equal(r.code, 0, `${agent} ${JSON.stringify(extra)}: ${r.stderr}`);
-      h.ok(['release', 'T2', '--agent', agent, '--reason', 'slot checked']);
-    }
+    assert.match(held.stderr, /T1.*worker-T1-1.*lease/);
   }
+  h.ok(['release', 'T1', '--agent', spawned.agent, '--reason', 'finished']);
+  h.ok(['claim', 'T2', '--agent', 'worker-T2-1']);
 });
 
 test('historical worker spawns from the 2026-10-07 log hold no slot for a sandboxed claim', (t) => {

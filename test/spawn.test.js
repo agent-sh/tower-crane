@@ -546,6 +546,8 @@ setImmediate(() => process.platform === 'win32' ? process.exit(0) : process.kill
   assert.ok(!workerCopy.text.includes('REVIEWER_ONLY_COMMAND'));
   assert.ok(!fs.existsSync(workerCopy.path));
 
+  // The supervised worker claimed the task, and its exit leaves that lease until released.
+  h.ok(['release', 'T1', '--agent', 'worker-T1-1', '--reason', 'worker finished']);
   reviewable(h);
   commandRung(h, 'medium', [process.execPath, '-e', script, reviewerOut, '{brief}']);
   fs.writeFileSync(cleanupOut, '');
@@ -593,6 +595,9 @@ test('temporary brief copies are removed before normal and signalled foreground 
     assert.equal(result.code, code, result.stderr);
     assert.ok(!fs.existsSync(fs.readFileSync(out, 'utf8')));
     assert.deepEqual(fs.readdirSync(tempRoot), []);
+    // The supervised worker's lease outlives its exit until it is released.
+    const claim = h.json(['task', 'show', 'T1']).claim;
+    if (claim) h.ok(['release', 'T1', '--agent', claim.agent, '--reason', 'worker finished']);
   }
 });
 
@@ -834,7 +839,8 @@ test('spawn runs the rung of the tier and ladder it finds under the lock, not th
   assert.deepEqual([ev.detail.rung, ev.detail.agent], ['hard', 'worker-T1-1']);
 
   // A rung that broke in the meantime is refused under the lock, and nothing
-  // is recorded.
+  // is recorded. The first worker's lease outlives its exit until it is released.
+  h.ok(['release', 'T1', '--agent', 'worker-T1-1', '--reason', 'first worker finished']);
   fs.rmSync(out);
   const stopped2 = path.join(h.base, 'stopped2');
   h.git(['worktree', 'remove', '--force', ev.detail.cwd]);

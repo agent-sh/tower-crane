@@ -14,8 +14,12 @@ if (path.resolve(process.argv[1] || '') !== __filename) {
   }
   const spawn = cp.spawn;
   cp.spawn = function offlineHarness(file, args, options) {
-    const harness = /[\\/]scripts[\\/]fallback(?:\.exe)?$/.test(file) ? 'command' : file;
+    // The supervisor's lease gate starts its harness after `tower-crane-gate`.
+    const gated = file === '/bin/sh' && args[2] === 'tower-crane-gate';
+    const target = gated ? args[3] : file;
+    const harness = /[\\/]scripts[\\/]fallback(?:\.exe)?$/.test(target) ? 'command' : target;
     if (['codex', 'claude', 'agy', 'command'].includes(harness) && process.env.TOWER_CRANE_TEST_FALLBACK_FILE) {
+      if (gated) return spawn.call(this, file, [...args.slice(0, 3), process.execPath, __filename, harness, ...args.slice(4)], options);
       return spawn.call(this, process.execPath, [__filename, harness, ...args], options);
     }
     return spawn.call(this, file, args, options);

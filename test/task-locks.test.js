@@ -193,7 +193,7 @@ test('expired leases free hardware and cannot renew or dispatch over a new holde
   h.ok(['renew', 'T1', '--agent', 'worker-T1-1']);
 });
 
-test('concurrent dispatch reserves hardware before a delayed claim, then exit frees it', async (t) => {
+test('concurrent dispatch reserves hardware until the lease, then release frees it', async (t) => {
   const h = setup(t);
   controlledHarness(h);
   h.ok(['worktree', 'T1', 'T2']);
@@ -220,6 +220,8 @@ test('concurrent dispatch reserves hardware before a delayed claim, then exit fr
   }
   fs.writeFileSync(path.join(h.base, `${id}.exit`), '');
   await until(() => events(h).some((e) => e.cmd === 'spawn exit' && e.detail.agent === winner.agent), 'exit was not recorded');
+  assert.equal(h.run(['claim', loser, '--agent', 'rival']).code, 1, 'an exited worker keeps its lock until released');
+  h.ok(['release', id, '--agent', winner.agent, '--reason', 'worker exited']);
   h.ok(['claim', loser, '--agent', 'rival']);
 });
 

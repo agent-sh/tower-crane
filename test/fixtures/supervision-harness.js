@@ -7,7 +7,11 @@ const path = require('node:path');
 if (path.resolve(process.argv[1] || '') !== __filename) {
   const spawn = cp.spawn;
   cp.spawn = function offlineHarness(file, args, options) {
-    if (['codex', 'claude'].includes(file) && process.env.TOWER_CRANE_TEST_SUPERVISION_FILE) {
+    // The supervisor's lease gate starts its harness after `tower-crane-gate`.
+    const gated = file === '/bin/sh' && args[2] === 'tower-crane-gate';
+    const harness = gated ? args[3] : file;
+    if (['codex', 'claude'].includes(harness) && process.env.TOWER_CRANE_TEST_SUPERVISION_FILE) {
+      if (gated) return spawn.call(this, file, [...args.slice(0, 3), process.execPath, __filename, ...args.slice(3)], options);
       return spawn.call(this, process.execPath, [__filename, file, ...args], options);
     }
     return spawn.call(this, file, args, options);

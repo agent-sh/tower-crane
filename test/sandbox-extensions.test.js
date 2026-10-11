@@ -35,6 +35,12 @@ function noFileSecrets(dir) {
   }
 }
 
+// An exited worker keeps its lease until the orchestrator releases it, so each dispatch releases the last one.
+function releaseExited(h) {
+  const claim = h.json(['task', 'show', 'T1']).claim;
+  if (claim) h.ok(['release', 'T1', '--agent', claim.agent, '--reason', 'worker exited']);
+}
+
 test('project and rung spawn settings require explicit owner identity, including unchanged and cleared fields', (t) => {
   const h = setup(t);
   const changes = [['--sandbox', '{"write":["~/.cargo"]}'], ['--env', '{"CARGO_HOME":"/toolchain"}'], ['--env_file', '/private.env'], ['--scope', '{"CPUQuota":"200%","MemoryMax":"8G"}']];
@@ -123,8 +129,11 @@ for (const harness of ['codex', 'claude']) {
     fs.renameSync(file, `${file}.saved`);
     h.ok(['spawn', '--task', 'T1', '--dry-run'], { env });
     fs.renameSync(`${file}.saved`, file);
+    releaseExited(h);
     const result = h.run(['spawn', '--task', 'T1', '--wait'], { env });
     assert.equal(result.code, 0, result.stderr);
+    // The exited worker's lease holds the task until it is released.
+    h.ok(['release', 'T1', '--agent', h.json(['task', 'show', 'T1']).claim.agent, '--reason', 'worker finished']);
     assert.equal(fs.existsSync(path.join(cargo, '.package-cache')), true);
     const seen = JSON.parse(fs.readFileSync(out, 'utf8'));
     assert.deepEqual(seen.values, {
@@ -143,6 +152,7 @@ for (const harness of ['codex', 'claude']) {
     h.ok(['ladder', 'set', 'medium', '--env_file', '~/other.env']);
     fs.rmSync(file);
     fs.rmSync(path.join(cargo, '.package-cache'));
+    releaseExited(h);
     h.ok(['spawn', '--task', 'T1', '--wait'], { env });
     assert.equal(JSON.parse(fs.readFileSync(out, 'utf8')).values.FROM_FILE, 'replacement');
     noFileSecrets(h.state);
@@ -185,6 +195,7 @@ process.exit(process.env.TOWER_CRANE_RETRY === '0' ? 75 : 0);
     const dry = h.json(['spawn', '--task', 'T1', '--dry-run'], { env });
     assert.deepEqual(dry.argv.slice(0, 10), ['systemd-run', '--user', '--scope', '--quiet', '--expand-environment=no', '-p', 'CPUQuota=200%', '-p', 'MemoryMax=8G', '--']);
     assert.ok(!JSON.stringify(dry).includes(SECRET_KEY) && !JSON.stringify(dry).includes(SECRET));
+    releaseExited(h);
     h.ok(['spawn', '--task', 'T1', '--wait'], { env });
     let attempts = fs.readFileSync(out, 'utf8').trim().split('\n').map(JSON.parse);
     assert.deepEqual(attempts.slice(-2), [{ scoped: '1', retry: '0' }, { scoped: '1', retry: '1' }]);
@@ -193,11 +204,13 @@ process.exit(process.env.TOWER_CRANE_RETRY === '0' ? 75 : 0);
     h.ok(['ladder', 'set', 'medium', '--scope', '{"MemoryMax":"4G"}']);
     const overridden = h.json(['spawn', '--task', 'T1', '--dry-run'], { env });
     assert.deepEqual(overridden.argv.slice(0, 8), ['systemd-run', '--user', '--scope', '--quiet', '--expand-environment=no', '-p', 'MemoryMax=4G', '--']);
+    releaseExited(h);
     h.ok(['spawn', '--task', 'T1', '--wait'], { env });
     wrappers = fs.readFileSync(wrapped, 'utf8').trim().split('\n').map(JSON.parse);
     assert.deepEqual(wrappers.at(-1).slice(0, 7), overridden.argv.slice(1, 8));
     h.ok(['ladder', 'set', 'medium', '--scope', '{}']);
     const wrapperCount = wrappers.length;
+    releaseExited(h);
     h.ok(['spawn', '--task', 'T1', '--wait'], { env });
     attempts = fs.readFileSync(out, 'utf8').trim().split('\n').map(JSON.parse);
     assert.deepEqual(attempts.slice(-2), [{ scoped: null, retry: '0' }, { scoped: null, retry: '1' }]);
@@ -245,10 +258,12 @@ process.exit(r.status ?? 1);
     '--clear', 'profile', '--supervision', '{"retries":0}']);
   h.ok(['project', 'set', '--scope', '{"CPUQuota":"200%"}', '--env', '{"TC_ARG_ENV":"configured-value"}', '--env_file', file]);
   const env = { PATH: `${bin}${path.delimiter}${process.env.PATH}` };
+  releaseExited(h);
   h.ok(['spawn', '--task', 'T1', '--wait'], { env });
   assert.deepEqual(JSON.parse(fs.readFileSync(out, 'utf8')), literals);
   noFileSecrets(h.state);
   fs.rmSync(out);
+  releaseExited(h);
   const refused = h.run(['spawn', '--task', 'T1', '--wait'], { env: { ...env, SIMULATE_OLD_SYSTEMD: '1' } });
   assert.equal(refused.code, 1, refused.stderr);
   assert.match(refused.stderr, /unrecognized option.*--expand-environment=no/);
@@ -274,6 +289,7 @@ fs.statSync = function(file, ...args) {
   h.ok(['ladder', 'set', 'medium', '--harness', 'command', '--command', JSON.stringify([process.execPath, harness, '{prompt}']), '--clear', 'profile']);
   h.ok(['project', 'set', '--scope', '{"CPUQuota":"200%"}']);
   const before = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8');
+  releaseExited(h);
   const result = h.run(['spawn', '--task', 'T1', '--wait'], { env: { NODE_OPTIONS: `--require ${JSON.stringify(missing)}` } });
   assert.equal(result.code, 1, result.stderr);
   assert.match(result.stderr, /scope requires.*systemd-run|scope requires Linux/);
@@ -290,6 +306,7 @@ test('invalid or unreadable env files fail without echoing their contents', { sk
   h.ok(['project', 'set', '--env_file', file]);
   for (const text of [null, `${SECRET_KEY}="${SECRET}`, `${SECRET_KEY}='${SECRET}' trailing`, `HOME='${SECRET}'`]) {
     if (text !== null) fs.writeFileSync(file, text);
+    releaseExited(h);
     const r = h.run(['spawn', '--task', 'T1', '--wait'], { env: { PATH: `${bin}${path.delimiter}${process.env.PATH}` } });
     assert.equal(r.code, 1, r.stderr);
     assert.ok(!r.stderr.includes(SECRET_KEY) && !r.stderr.includes(SECRET));
@@ -375,6 +392,7 @@ test('real Codex worker writes the toolchain lock, receives a private env file, 
   });
   const dry = h.ok(['spawn', '--task', 'T1', '--dry-run']);
   assert.ok(!dry.includes(SECRET_KEY) && !dry.includes(SECRET));
+  releaseExited(h);
   const result = await h.runAsync(['spawn', '--task', 'T1', '--wait'], { env: { TMPDIR: privateTmp } });
   assert.equal(result.code, 0, result.stderr);
   assert.equal(fs.existsSync(out), true, result.stdout);

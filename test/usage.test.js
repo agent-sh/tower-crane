@@ -96,13 +96,13 @@ function setup(t, harness = 'codex') {
   });
 }
 
-const spends = (h) => h.json(['task', 'show', 'T1']).spend;
+const spends = (h, task = 'T1') => h.json(['task', 'show', task]).spend;
 const events = (h) => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
 
-async function collected(h, length = 1, timeout = 15000) {
+async function collected(h, length = 1, timeout = 15000, task = 'T1') {
   const deadline = Date.now() + timeout;
   while (Date.now() < deadline) {
-    const spend = h.readState('tasks.json').tasks[0].spend;
+    const spend = spends(h, task);
     if (spend.entries?.length === length && spend.entries.every((entry) => !entry.live)) return spend;
     await new Promise((r) => setTimeout(r, 50));
   }
@@ -204,21 +204,27 @@ test('completed processes cannot leave teardown targeting a reused pid', async (
 
 test('detached exits record both spawns exactly once and keep dispatch metadata', async (t) => {
   const h = setup(t);
+  // A live unclaimed worker holds its task's reservation, so the second spawn takes a second task.
+  h.ok(['task', 'add', '--title', 'Usage again', '--acceptance', 'accounted', '--tier', 'easy']);
+  h.ok(['brief', 'set', 'T2', '-'], { input: 'Record usage.\n' });
   const options = { env: { ...h.usageEnv, USAGE_DELAY: '900' }, hooks: h.usageHooks };
   const a = h.json(['spawn', '--task', 'T1'], options);
-  const b = h.json(['spawn', '--task', 'T1'], options);
+  const b = h.json(['spawn', '--task', 'T2'], options);
   h.ok(['ladder', 'set', 'easy', '--model', 'replacement']);
-  const s = await collected(h, 2);
-  assert.equal(s.tokens, 49632);
-  assert.deepEqual(s.entries.map((e) => e.source).sort(), [`spawn:${a.agent}`, `spawn:${b.agent}`]);
-  for (const e of s.entries) {
+  const [first, second] = await Promise.all([collected(h, 1, 15000, 'T1'), collected(h, 1, 15000, 'T2')]);
+  assert.equal(first.tokens, 24816);
+  assert.equal(second.tokens, 24816);
+  assert.equal(first.entries[0].source, `spawn:${a.agent}`);
+  assert.equal(second.entries[0].source, `spawn:${b.agent}`);
+  for (const e of [...first.entries, ...second.entries]) {
     assert.equal(e.rung, 'easy');
     assert.equal(e.harness, 'codex');
     assert.equal(e.model, 'dispatch-model');
   }
   h.ok(['spend', 'T1', '--from-spawn', a.agent]);
-  h.ok(['spend', 'T1', '--from-spawn', b.agent]);
-  assert.equal(spends(h).tokens, 49632);
+  h.ok(['spend', 'T2', '--from-spawn', b.agent]);
+  assert.equal(spends(h, 'T1').tokens, 24816);
+  assert.equal(spends(h, 'T2').tokens, 24816);
   assert.equal(events(h).filter((e) => e.cmd === 'spend').length, 2);
   const monitors = h.detached().filter((c) => c.kind === 'monitor');
   assert.equal(monitors.length, 2, 'both collectors are tracked for teardown');
@@ -373,6 +379,12 @@ test('late session detail enriches a partial total without counting it twice', (
 test('detached accounting retries a lock held across the first collection attempt', async (t) => {
   const h = setup(t);
   h.json(['spawn', '--task', 'T1'], { env: { ...h.usageEnv, USAGE_DELAY: '1000' }, hooks: h.usageHooks });
+  // The worker takes its lease before the lock is held; the lock then delays only its collection.
+  const claimed = Date.now() + 10000;
+  while (!events(h).some((e) => e.cmd === 'claim')) {
+    assert.ok(Date.now() < claimed, 'worker did not take its lease');
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
   const S = require('../lib/state');
   const lock = S.acquireLock(h.state);
   const timer = setTimeout(() => S.releaseLock(lock), S.LOCK_WAIT_MS + 3000);
