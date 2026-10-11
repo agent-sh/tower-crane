@@ -153,6 +153,10 @@ function before(name, args) {
   if (env.HOOK_STDIN_READY && (name === 'readFileSync' || name === 'readSync') && target === 0) {
     real.writeFileSync(env.HOOK_STDIN_READY, '');
   }
+  // HOOK_STOP_GO=FILE stops the dispatch after it records a worker's lease,
+  // before it lets the supervisor launch the harness (the Windows handshake).
+  if (env.HOOK_STOP_GO && name === 'writeFileSync' && typeof target === 'string' && path.basename(target) === 'go'
+    && path.basename(process.argv[1]) === 'tower-crane.js' && first('go')) stop(env.HOOK_STOP_GO);
   // HOOK_JITTER_MS=MS: a random pause of up to MS before each call on the state.
   if (env.HOOK_JITTER_MS && (inState(target) || inState(args[1]))) sleep(Math.floor(Math.random() * Number(env.HOOK_JITTER_MS)));
   // State commits precede board replacement; expose that interval to readers.

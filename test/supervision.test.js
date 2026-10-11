@@ -13,8 +13,9 @@ const { gateFixture, gateEvidence } = require('./gate-helpers');
 const bedrockOutage = require('./fixtures/bedrock-outage.json');
 const { errorReader, transient } = require('../lib/spawn-monitor');
 
-// The lease gate is POSIX-only: on Windows a worker can start before its claim.
+// The lease gate is POSIX-only; on Windows the dispatch records the lease before launch.
 const GATE_SKIP = process.platform === 'win32' && 'the lease gate is POSIX-only';
+const HANDSHAKE_SKIP = process.platform !== 'win32' && 'POSIX holds the harness behind its lease gate instead';
 const windowsConcurrency = process.platform === 'win32' ? 2 : false;
 const S = require('../lib/state');
 
@@ -67,7 +68,7 @@ if (!attempts.length && ${claim}) {
 }
 const task = JSON.parse(cli(['task', 'show', 'T1', '--json']));
 attempts.push({ agent: process.env.TOWER_CRANE_AGENT, session: process.env.TOWER_CRANE_SESSION, retry: process.env.TOWER_CRANE_RETRY,
-  cwd: process.cwd(), claim: task.claim });
+  cwd: process.cwd(), claim: task.claim, pid: process.pid });
 fs.writeFileSync(file, JSON.stringify(attempts));
 ${sessionReceipt ? "console.log(JSON.stringify({ type: 'thread.started', thread_id: 'supervised-session' }));" : ''}
 ${busy ? "cp.spawn(process.execPath, ['-e', 'const end = Date.now() + 3500; while (Date.now() < end) {}'], { stdio: 'ignore' });" : ''}
@@ -565,6 +566,58 @@ test('a schema bump before the supervisor first reads state stops its worker beh
   assert.equal(h.readAttempts().length, 0, 'the worker never started');
   const tasks = JSON.parse(fs.readFileSync(path.join(h.state, 'tasks.json'), 'utf8')).tasks;
   assert.equal(tasks.find((task) => task.id === 'T1').claim, null, 'no lease was taken');
+});
+
+test('a Windows worker first runs on its own lease while its dispatch still holds the lock, and spawn reports its pid', { skip: HANDSHAKE_SKIP }, async (t) => {
+  const h = setup(t, { claim: false, failures: 0 });
+  const paused = path.join(h.base, 'render-paused');
+  const completed = h.runAsync(['spawn', '--task', 'T1', '--wait', '--json'], { hooks: { HOOK_STOP_RENDER: paused } });
+  let result;
+  try {
+    await until(() => fs.existsSync(paused), 'dispatch did not pause after committing its spawn');
+    // The paused render holds the state lock, so no supervisor can claim now:
+    // the harness can only see a lease recorded before it started.
+    await until(() => h.readAttempts().length === 1, 'worker did not start');
+  } finally {
+    fs.writeFileSync(`${paused}.go`, '');
+    result = await completed;
+  }
+  assert.equal(result.code, 0, result.stderr);
+  const spawned = JSON.parse(result.stdout);
+  const [attempt] = h.readAttempts();
+  assert.equal(attempt.claim?.agent, spawned.agent, 'the harness first saw its own lease');
+  assert.equal(attempt.pid, spawned.pid, 'spawn reports the harness process, not a wrapper');
+  const events = log(h);
+  const claim = events.findIndex((e) => e.cmd === 'claim' && e.agent === spawned.agent);
+  assert.ok(claim >= 0 && claim < events.findIndex((e) => e.cmd === 'spawn'), 'the lease is recorded before the spawn');
+  assert.equal(events.filter((e) => e.cmd === 'claim' && !e.detail.renewed).length, 1, 'the supervisor takes no second lease');
+});
+
+test('a Windows worker whose supervisor stops waiting for its lease never starts, and its lease is rolled back', { skip: HANDSHAKE_SKIP }, async (t) => {
+  const h = setup(t, { claim: false, failures: 0 });
+  const paused = path.join(h.base, 'go-paused');
+  const completed = h.runAsync(['spawn', '--task', 'T1', '--wait', '--json'], { hooks: { HOOK_STOP_GO: paused } });
+  let result;
+  try {
+    await until(() => fs.existsSync(paused), 'dispatch did not pause before launching its worker');
+    const claim = JSON.parse(fs.readFileSync(path.join(h.state, 'tasks.json'), 'utf8')).tasks.find((task) => task.id === 'T1').claim;
+    assert.match(claim?.agent || '', /^worker-T1-/, 'the lease is on disk while the supervisor waits');
+    assert.equal(h.readAttempts().length, 0, 'no harness runs before go');
+    // The supervisor's wait for go closes while the paused dispatch holds the state lock.
+    await new Promise((resolve) => setTimeout(resolve, 11000));
+  } finally {
+    fs.writeFileSync(`${paused}.go`, '');
+    result = await completed;
+  }
+  assert.notEqual(result.code, 0, result.stderr);
+  assert.match(result.stderr, /did not start: no lease: it was not recorded within 10 s/);
+  assert.equal(h.readAttempts().length, 0, 'the worker never started');
+  const task = JSON.parse(fs.readFileSync(path.join(h.state, 'tasks.json'), 'utf8')).tasks.find((x) => x.id === 'T1');
+  assert.equal(task.claim, null, 'the lease is rolled back');
+  assert.equal(task.status, 'todo');
+  assert.ok(log(h).some((e) => e.cmd === 'release' && e.detail.rollback), 'the rollback is recorded');
+  assert.ok(!log(h).some((e) => e.cmd === 'spawn'), 'no spawn is recorded');
+  h.ok(['claim', 'T1', '--agent', 'manual']);
 });
 
 test('a worker spawned behind a live lease held by another agent never starts and says why', (t) => {
