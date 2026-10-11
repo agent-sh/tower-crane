@@ -239,7 +239,7 @@ for (const harness of ['codex', 'claude']) {
   });
 }
 
-test('a codex login failure pauses codex, and its login check clears the pause once the login works',{ skip: process.platform === 'win32' && 'the login check stub is a POSIX script' }, (t) => {
+test('a codex login failure pauses codex, and its login check clears the pause once the login works', { skip: process.platform === 'win32' && 'the login check stub is a POSIX script' }, (t) => {
   const h = setup(t, { tasks: ['T1', 'T2'] });
   h.ok(['ladder', 'set', 'easy', '--harness', 'codex', '--model', 'first']);
   assert.notEqual(h.spawnTask('T1').code, 0);
