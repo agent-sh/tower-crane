@@ -203,15 +203,16 @@ for (const [harness, reason, message, again] of shapes) {
     const h = setup(t, { tasks: ['T1', 'T2'] });
     h.ok(['ladder', 'set', 'easy', '--harness', harness, '--model', 'first']);
     h.spawnEnv.TOWER_CRANE_TEST_FALLBACK_REASON = reason;
-    h.spawnTask('T1');
+    const result = h.spawnTask('T1');
     assert.deepEqual(h.attempts().map((a) => [a.harness, a.retry]), [[harness, '0']]);
     assert.deepEqual(health(h).map((e) => [e.detail.harness, e.detail.status, e.detail.source]), [[harness, 'unavailable', 'exit']]);
     assert.equal(health(h)[0].detail.reason, message);
     assert.equal(owner(h).length, 1);
     assert.match(owner(h)[0].detail.text, new RegExp(`${harness} login failed.*${again}`));
-    // Pi exits zero after its failed turn, so the exit code alone would call this a success.
+    // Pi exits zero after its failed turn, so the exit code alone would call this a success: no usable agent completed the dispatch.
     const phase = events(h).findLast((e) => e.cmd === 'spawn phase');
     assert.equal(phase.detail.phase, 'blocked');
+    assert.notEqual(result.code, 0, result.stderr);
     // The next task never reaches the paused harness, and no attempt is spent on it.
     const next = h.run(['spawn', '--task', 'T2'], { env: h.spawnEnv });
     assert.notEqual(next.code, 0);
@@ -222,8 +223,8 @@ for (const [harness, reason, message, again] of shapes) {
 }
 
 // A run that succeeds may quote a login failure on stderr while doing its work. Only harness error records count.
-for (const harness of ['codex', 'claude']) {
-  test(`a ${harness} run that quotes a login failure on stderr and exits zero is not a login failure`, (t) => {
+for (const harness of ['codex', 'claude', 'agy']) {
+  test(`${harness} run that quotes a login failure on stderr and exits zero is not a login failure`, (t) => {
     const h = setup(t, { tasks: ['T1', 'T2'] });
     h.ok(['ladder', 'set', 'easy', '--harness', harness, '--model', 'first']);
     h.spawnEnv.TOWER_CRANE_TEST_FALLBACK_REASON = 'quoted-stderr';
