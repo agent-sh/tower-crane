@@ -418,6 +418,8 @@ test('research Codex explicitly enables live search with worker file and git con
     delete rules[ownHome];
     delete rules[sessions];
     delete rules[report.home];
+    assert.equal(rules[path.join(report.home, '.gitconfig')], 'read', 'git config in HOME stays read-only');
+    delete rules[path.join(report.home, '.gitconfig')];
     delete rules[broker];
   }
   assert.deepEqual(researchFs, workerFs);
@@ -576,7 +578,9 @@ test('a spawned codex agent is pointed at the user\'s global rules, loads none o
   assert.equal(fs.statSync(path.join(home, 'config.toml')).mode & 0o777, 0o600);
   assert.equal(seen.home, path.join(home, 'home'), 'HOME is the agent\'s own');
   assert.deepEqual(seen.skills, [], 'no user skill from ~/.agents/skills, and the small role has none of its own');
-  assert.equal(fs.readlinkSync(path.join(home, 'home', '.gitconfig')), path.join(u.home, '.gitconfig'), 'git config is linked into its HOME');
+  // A link the agent could swap; the file in its place stays read-only.
+  assert.equal(fs.readFileSync(path.join(home, 'home', '.gitconfig'), 'utf8'), `[include]\n\tpath = ${JSON.stringify(path.join(u.home, '.gitconfig'))}\n`, 'git config is included in its HOME');
+  assert.equal(seen.config.permissions['tower-crane'].filesystem[path.join(home, 'home', '.gitconfig')], 'read');
   spawn(h, u, 'review');
   assert.deepEqual(u.report().skills, ['tower-crane-review'], 'the reviewer gets its own skill only');
   noSecretsCopied(h);
@@ -724,7 +728,10 @@ test('a codex agent writes only where its agent file says; a worker writes its g
     path.join(fs.realpathSync(wt), '.git')];
   // git resolves ~/ in the user's global config in the agent's HOME, which
   // a codex agent writes: what it includes there exists and is read-only.
-  fs.appendFileSync(u.env.GIT_CONFIG_GLOBAL, '[include]\n\tpath = ~/.gitconfig.local\n');
+  fs.appendFileSync(u.env.GIT_CONFIG_GLOBAL, '[include]\n\tpath = ~/.gitconfig.local\n\tpath = ~/.config/git/extra\n');
+  // ~/.config/git is a directory of links the agent cannot add to or swap.
+  fs.mkdirSync(path.join(u.home, '.config', 'git'), { recursive: true });
+  fs.writeFileSync(path.join(u.home, '.config', 'git', 'ignore'), '*.swp\n');
   for (const [rung, worktree] of [['hard', 'write'], ['review', 'read'], ['small', 'read']]) {
     isolated(h, rung, 'codex');
     const started = spawn(h, u, rung);
@@ -734,6 +741,11 @@ test('a codex agent writes only where its agent file says; a worker writes its g
     for (const d of [common, own]) assert.equal(rules[d], worktree === 'write' ? 'write' : undefined, `${rung}: ${d}`);
     for (const p of guarded) assert.equal(rules[p], worktree === 'write' ? 'read' : undefined, `${rung}: ${p}`);
     assert.equal(rules[path.join(home, 'home', '.gitconfig.local')], 'read', `${rung}: an included ~/ file`);
+    const xdg = path.join(home, 'home', '.config', 'git');
+    assert.equal(rules[xdg], 'read', rung);
+    assert.ok(!fs.lstatSync(xdg).isSymbolicLink(), rung);
+    assert.equal(fs.readlinkSync(path.join(xdg, 'ignore')), path.join(u.home, '.config', 'git', 'ignore'), rung);
+    assert.equal(fs.readFileSync(path.join(xdg, 'extra'), 'utf8'), '', `${rung}: a missing include exists, empty`);
     assert.equal(fs.readFileSync(path.join(home, 'gitconfig'), 'utf8'), `[include]\n\tpath = ${JSON.stringify(u.env.GIT_CONFIG_GLOBAL)}\n`, rung);
     assert.equal(rules[path.join(common, 'worktrees')], worktree === 'write' ? 'read' : undefined, `${rung}: other worktrees' admin directories`);
     assert.deepEqual(rules[':workspace_roots'], { '.': worktree }, rung);
@@ -1531,7 +1543,7 @@ test('a spawn started inside another agent links to the user\'s own files, so re
   const inside = { CLAUDE_CONFIG_DIR: parent, HOME: path.join(parent, 'home'), USERPROFILE: path.join(parent, 'home') };
   const child = path.join(h.state, 'homes', spawn(h, u, 'small', inside).agent);
   for (const f of ['.credentials.json']) assert.equal(fs.readlinkSync(path.join(child, f)), path.join(u.home, '.claude', f), f);
-  assert.equal(fs.readlinkSync(path.join(child, 'home', '.gitconfig')), path.join(u.home, '.gitconfig'));
+  assert.equal(fs.readFileSync(path.join(child, 'home', '.gitconfig'), 'utf8'), `[include]\n\tpath = ${JSON.stringify(path.join(u.home, '.gitconfig'))}\n`);
   const helper = JSON.parse(fs.readFileSync(path.join(child, 'settings.json'), 'utf8')).apiKeyHelper;
   assert.ok(helper.includes(path.join(u.home, '.claude', 'settings.json')), 'the helper reads the user\'s settings');
   fs.rmSync(parent, { recursive: true, force: true });
