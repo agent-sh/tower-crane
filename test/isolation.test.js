@@ -722,6 +722,9 @@ test('a codex agent writes only where its agent file says; a worker writes its g
   const guarded = [path.join(common, 'config'), path.join(common, 'config.worktree'), path.join(common, 'hooks'), path.join(common, 'info'),
     path.join(mod, 'config'), path.join(mod, 'hooks'), path.join(own, 'config.worktree'), path.join(own, 'commondir'), path.join(own, 'gitdir'),
     path.join(fs.realpathSync(wt), '.git')];
+  // git resolves ~/ in the user's global config in the agent's HOME, which
+  // a codex agent writes: what it includes there exists and is read-only.
+  fs.appendFileSync(u.env.GIT_CONFIG_GLOBAL, '[include]\n\tpath = ~/.gitconfig.local\n');
   for (const [rung, worktree] of [['hard', 'write'], ['review', 'read'], ['small', 'read']]) {
     isolated(h, rung, 'codex');
     const started = spawn(h, u, rung);
@@ -730,6 +733,8 @@ test('a codex agent writes only where its agent file says; a worker writes its g
     const rules = config.permissions['tower-crane'].filesystem;
     for (const d of [common, own]) assert.equal(rules[d], worktree === 'write' ? 'write' : undefined, `${rung}: ${d}`);
     for (const p of guarded) assert.equal(rules[p], worktree === 'write' ? 'read' : undefined, `${rung}: ${p}`);
+    assert.equal(rules[path.join(home, 'home', '.gitconfig.local')], 'read', `${rung}: an included ~/ file`);
+    assert.equal(fs.readFileSync(path.join(home, 'gitconfig'), 'utf8'), `[include]\n\tpath = ${JSON.stringify(u.env.GIT_CONFIG_GLOBAL)}\n`, rung);
     assert.equal(rules[path.join(common, 'worktrees')], worktree === 'write' ? 'read' : undefined, `${rung}: other worktrees' admin directories`);
     assert.deepEqual(rules[':workspace_roots'], { '.': worktree }, rung);
     assert.equal(rules[':root'], 'read', rung);
