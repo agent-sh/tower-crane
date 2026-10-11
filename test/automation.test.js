@@ -694,6 +694,51 @@ test('a failed CI run sends a submitted task to rework with the failing run', (t
   assert.match(h.logs().findLast((e) => e.cmd === 'rework').detail.reason, /^ci failed at [0-9a-f]+: .*failing: test \(failure\)/s);
 });
 
+test('a CI timeout after a pending check retries once: the pending receipt is not a failure', (t) => {
+  const h = setup(t, { ci: 'pending' });
+  h.submit();
+  h.consume();
+  const checkRuns = () => h.github().calls.filter((a) => a[0] === 'api' && a[1].includes('check-runs')).length;
+  const before = checkRuns();
+  const timedOut = h.github();
+  timedOut.ci[h.sha] = 'timed_out';
+  h.saveGithub(timedOut);
+  h.ok(['ci', 'completed', 'T1', '--sha', h.sha, '--agent', 'orchestrator']);
+  assert.equal(checkRuns() - before, 2, 'the first timeout reads CI once more before it reworks');
+  const task = h.readState('tasks.json').tasks[0];
+  assert.deepEqual(task.evidence.filter((e) => e.type === 'ci').map((e) => [e.ok, e.infrastructure_failure === true]),
+    [[false, false], [false, true], [false, true]]);
+  assert.equal(task.status, 'rework');
+});
+
+test('a local CI command killed by a signal retries once and reworks when the retry is killed too', { skip: process.platform === 'win32' }, (t) => {
+  const h = setup(t, { ci: 'pending' });
+  const script = path.join(h.base, 'local-killed.js');
+  fs.writeFileSync(script, 'process.kill(process.pid, \'SIGKILL\');\n');
+  h.ok(['project', 'set', '--ci-local', JSON.stringify({ command: [process.execPath, script], timeout: 5 })]);
+  h.submit();
+  h.consume();
+  assert.equal(h.logs().filter((e) => e.cmd === 'check ci').length, 2, 'the killed run runs once more, and no third time');
+  const task = h.readState('tasks.json').tasks[0];
+  assert.deepEqual(task.evidence.filter((e) => e.type === 'ci').map((e) => e.runner_crash === true), [true, true]);
+  assert.equal(task.status, 'rework');
+  assert.match(h.logs().findLast((e) => e.cmd === 'rework').detail.reason, /^ci failed at [0-9a-f]+: local CI killed by SIGKILL/);
+});
+
+test('a local CI command that times out retries once and reworks when the retry times out too', (t) => {
+  const h = setup(t, { ci: 'pending' });
+  const script = path.join(h.base, 'local-hang.js');
+  fs.writeFileSync(script, 'setTimeout(() => {}, 10000);\n');
+  h.ok(['project', 'set', '--ci-local', JSON.stringify({ command: [process.execPath, script], timeout: 0.05 })]);
+  h.submit();
+  h.consume();
+  assert.equal(h.logs().filter((e) => e.cmd === 'check ci').length, 2, 'the timeout runs once more, and no third time');
+  const task = h.readState('tasks.json').tasks[0];
+  assert.deepEqual(task.evidence.filter((e) => e.type === 'ci').map((e) => e.infrastructure_failure === true), [true, true]);
+  assert.equal(task.status, 'rework');
+  assert.match(h.logs().findLast((e) => e.cmd === 'rework').detail.reason, /^ci failed at [0-9a-f]+: local CI timed out/);
+});
+
 test('gates retry exits nonzero while a retried gate still fails', (t) => {
   const h = setup(t, { ci: 'pending' });
   h.ok(['project', 'set', '--tests-cmd', 'node -e "process.exit(1)"', '--tests-mode', 'run-only']);

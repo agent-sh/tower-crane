@@ -65,10 +65,10 @@ is recovered through the merge gate's accepted-head confirmation.
 Software gates run again when their passing evidence no longer matches its
 inputs, such as the pinned command or tests policy. A failed `tests`, `clean`
 or `ci` gate at a submitted head does not wait. A timeout, a runner killed by a
-signal or a CI run that timed out runs the gate once more at the same head. Any
-other failure of a gate that ran, and a retry that fails too, sends the task to
-rework with the gate's summary, which names the failing tests and their output
-tail. A failure of a confirmed quality check on a task with a tier range is
+signal, or a CI run or local CI command that timed out runs the gate once more
+at the same head. Any other failure of a gate that ran, and a retry that fails
+too, sends the task to rework with the gate's summary, which names the failing
+tests and their output tail. A failure of a confirmed quality check on a task with a tier range is
 escalation's: it sends the task back with a climb, as before. A gate that could
 not run, such as a missing pinned command or a change with no test, stays
 submitted for the owner to fix or waive.
