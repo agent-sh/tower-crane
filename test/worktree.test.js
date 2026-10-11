@@ -418,7 +418,9 @@ test('a rework recreated after a newer submission from another checkout starts f
   h.git(['commit', '-qm', 'second'], h.upstream);
   const second = h.git(['rev-parse', 'HEAD'], h.upstream);
   h.git(['push', 'origin', wt.branch], h.upstream);
-  h.ok(['submit', 'T1', '--sha', second, '--agent', 'w-2']);
+  const submitted = h.json(['submit', 'T1', '--sha', second.slice(0, 8), '--state', h.state, '--agent', 'w-2'],
+    { cwd: h.upstream });
+  assert.equal(submitted.sha, second);
   h.ok(['rework', 'T1', '--reason', 'revise the second head', '--agent', 'owner']);
 
   h.git(['worktree', 'remove', '--force', wt.path]);
