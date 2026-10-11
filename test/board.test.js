@@ -1177,7 +1177,7 @@ test('the board meets contrast, target, name and readability bars at the owner\'
           const tg = await b.inPage(checks.targets);
           assert.ok(tg.pass, `targets ${where}: ${JSON.stringify([tg.samples, tg.short_samples])}`);
           const rd = await b.inPage(checks.readability);
-          assert.ok(rd.min_px >= 12 && rd.sizes <= 6 && rd.body_px >= 15 && !rd.horizontal_scroll && !rd.clipped, `readability ${where}: ${JSON.stringify(rd)}`);
+          assert.ok(rd.min_px >= 12 && rd.sizes <= 6 && rd.body_px >= 15 && !rd.horizontal_scroll && !rd.clipped && !rd.long_lines, `readability ${where}: ${JSON.stringify(rd)}`);
           const nm = await checks.names(b);
           assert.ok(nm.pass, `names ${where}: ${JSON.stringify(nm)}`);
           assert.ok(await b.inPage(`(() => { const t = document.querySelector('.bar [data-theme-toggle]'); return !!t && t.getClientRects().length > 0; })()`), `the theme switch is in the bar on ${where}`);

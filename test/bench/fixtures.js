@@ -16,7 +16,8 @@ const MIN = 60e3;
 const HOUR = 60 * MIN;
 
 // A clean env, as test/helpers.js builds it: no agent identity or task from
-// the caller, the owner as the acting identity, and no user git or ladder files.
+// the caller, the owner as the acting identity with its key, and no user git
+// or ladder files.
 function cleanEnv(base) {
   const env = { ...process.env };
   for (const k of Object.keys(env)) if (k.startsWith('TOWER_CRANE_') || k.startsWith('GIT_') || k.startsWith('NODE_TEST')) delete env[k];
@@ -24,6 +25,10 @@ function cleanEnv(base) {
   env.GIT_CONFIG_GLOBAL = path.join(base, 'gitconfig');
   env.GIT_CONFIG_NOSYSTEM = '1';
   env.TOWER_CRANE_CONFIG = path.join(base, 'user-config', 'config.json');
+  // Owner writes without a terminal present the owner key, as the tests do.
+  fs.mkdirSync(path.join(base, 'user-config', 'owner'), { recursive: true });
+  fs.writeFileSync(path.join(base, 'user-config', 'owner', 'key'), 'bench-owner-key\n');
+  env.TOWER_CRANE_OWNER_KEY = 'bench-owner-key';
   // Spawns keep caches under HOME; the scratch state gets one of its own.
   env.HOME = path.join(base, 'home');
   env.XDG_CACHE_HOME = path.join(base, 'home', '.cache');
@@ -79,6 +84,19 @@ class Scratch {
 
   read(file) { return JSON.parse(fs.readFileSync(path.join(this.state, file), 'utf8')); }
 
+  // A reviewer dispatch that ran and exited, as test/helpers.js records it, so
+  // the reviewer's verdict counts and accept dispatches no real reviewer.
+  reviewer(id, agent, sha) {
+    const t = this.read('tasks.json').tasks.find((x) => x.id === id);
+    const at = new Date(this.now - this.ago).toISOString();
+    const detail = { agent, role: 'reviewer', rung: 'review', sha, revision: t.revision, pid: 999999, attempt: 1 };
+    fs.appendFileSync(path.join(this.state, 'events.jsonl'), [
+      { at, agent: 'orchestrator', cmd: 'spawn', task: id, detail },
+      { at, agent: 'orchestrator', cmd: 'spawn exit', task: id, detail: { agent, pid: 999999, attempt: 1, code: 0 } },
+    ].map((e) => `${JSON.stringify(e)}\n`).join(''));
+    return this;
+  }
+
   // Review evidence from a reviewer that was never spawned names the task's
   // revision where the CLI under test takes one; older builds have no flag.
   revision(id) {
@@ -112,6 +130,7 @@ function history(s, start, list = HISTORY) {
     const sha = s.commit(`${id} ${title}`);
     s.ok(['submit', id, '--sha', sha, '--summary', `${title}: done, tests added`, '--agent', agent]);
     s.ok(['spend', id, '--tokens', String(Math.round(tokens * 1e6)), '--minutes', String(minutes), '--rung', tier, '--agent', agent]);
+    s.reviewer(id, `reviewer-${id}`, sha);
     s.ok(['evidence', id, ...s.revision(id), '--type', 'review', '--ok', '--sha', sha, '--summary', 'checked each acceptance line; tests fail without the change', '--agent', `reviewer-${id}`]);
     s.ok(['accept', id]);
     ids.push(id);
@@ -172,6 +191,7 @@ function busy(root, bin) {
   s.at(3 * HOUR);
   let sha = s.commit(`${retry} first try`);
   s.ok(['submit', retry, '--sha', sha, '--summary', 'budgets per endpoint, reset hourly', '--agent', `worker-${retry}-1`]);
+  s.reviewer(retry, `reviewer-${retry}-1`, sha);
   s.ok(['evidence', retry, ...s.revision(retry), '--type', 'review', '--fail', '--sha', sha, '--summary', 'the hourly reset is not tested', '--agent', `reviewer-${retry}-1`]);
   s.ok(['rework', retry, '--reason', 'add a test for the hourly budget reset']);
   s.at(2 * HOUR);
@@ -180,6 +200,7 @@ function busy(root, bin) {
   sha = s.commit(`${retry} second try`);
   s.ok(['submit', retry, '--sha', sha, '--summary', 'hourly reset tested; 429 path consumes the budget', '--agent', `worker-${retry}-2`]);
   s.at(52 * MIN);
+  s.reviewer(retry, `reviewer-${retry}-2`, sha);
   s.ok(['evidence', retry, ...s.revision(retry), '--type', 'review', '--fail', '--sha', sha, '--summary', 'a 429 from a paused endpoint still consumes budget; acceptance line 1 says it should not when the endpoint is paused. Retry-After is ignored.', '--ref', 'https://example.com/acme/webhooks/pull/41#review', '--agent', `reviewer-${retry}-2`]);
 
   // An accepted task with a waiver the owner recorded.
@@ -188,6 +209,7 @@ function busy(root, bin) {
   s.at(2 * HOUR + 20 * MIN);
   sha = s.commit(`${limiter} limiter`);
   s.ok(['submit', limiter, '--sha', sha, '--summary', 'token bucket per tenant', '--agent', `worker-${limiter}-1`]);
+  s.reviewer(limiter, `reviewer-${limiter}-1`, sha);
   s.ok(['evidence', limiter, ...s.revision(limiter), '--type', 'review', '--ok', '--sha', sha, '--summary', 'delays, never drops; covered by the soak test', '--agent', `reviewer-${limiter}-1`]);
   s.ok(['accept', limiter, '--waive', 'tests', '--waive', 'clean', '--waive', 'ci', '--reason', 'CI runner down; soak test run by hand on the staging box']);
 
