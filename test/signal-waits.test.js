@@ -127,6 +127,7 @@ test('shared checks reject readiness budgets and require a reason on allowed tim
     'const elapsed = Date.now() - started; assert.ok(budget > elapsed);', // wait-allow: rejected lint fixture
     'const window = ready ? 10000 : 20000; until(check, "ready", window);', // wait-allow: rejected lint fixture
     'const budget = getBudget(); until(check, "ready", budget);', // wait-allow: rejected lint fixture
+    'const window = getBudget() + 1000; until(check, "ready", window);', // wait-allow: rejected lint fixture
     'assert.ok(Date.now() - started\n < S.LOCK_WAIT_MS / 4);', // wait-allow: rejected lint fixture
   ]) {
     assert.ok(waitFindings(source).length, source);
@@ -142,6 +143,7 @@ test('shared checks reject readiness budgets and require a reason on allowed tim
   assert.deepEqual(waitFindings('const window = Math.max(HUNG_TEST_MS, other); until(check, "ready", window);'), []);
   assert.deepEqual(waitFindings('async function waitFor(check, what = "ready", options = {}) {}'), []);
   assert.deepEqual(waitFindings('const h = setup(t, "codex", { cpu_ms: 1000 }); until(t, h, check);'), []);
+  assert.deepEqual(waitFindings('const h = setup(t, "codex", { cpu_ms: 10 * 1000 }); until(t, h, check);'), []);
   assert.ok(waitFindings('await until(check, "// wait-allow: fake reason", 1000);').length); // wait-allow: rejected lint fixture
   const h = makeRepo(t);
   for (const dir of ['scripts', 'bin', 'lib', 'docs', 'changelog.d']) {

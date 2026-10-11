@@ -78,9 +78,20 @@ function budgetExpression(value, bindings, seen = new Set()) {
   if (/^['"`{[]/.test(value) || /\bfunction\b|=>/.test(value)) return false;
   // Computed numbers are budgets too. Unknown expressions need an explicit
   // hung-guard minimum or a reason rather than being treated as nonnumeric.
-  const expression = value.replace(/(['"`])(?:\\[\s\S]|(?!\1)[\s\S])*?\1/g, '');
+  let expression = value.replace(/(['"`])(?:\\[\s\S]|(?!\1)[\s\S])*?\1/g, '');
   if (/^[\w$.]+\s*\(/.test(expression)
-    && !/^(?:Math\.\w+|Number|parseInt|parseFloat)\s*\(/.test(expression)) return false;
+    && !/^(?:Math\.\w+|Number|parseInt|parseFloat)\s*\(/.test(expression)) {
+    // Arguments of an unknown call do not describe its return type. Keep
+    // arithmetic outside that call, which can turn its result into a budget.
+    let depth = 0;
+    for (let i = expression.indexOf('('); i < expression.length; i++) {
+      if (expression[i] === '(') depth++;
+      if (expression[i] === ')' && --depth === 0) {
+        expression = `result${expression.slice(i + 1)}`;
+        break;
+      }
+    }
+  }
   return /^[\s(]*[+-]?\s*\d/.test(expression)
     || /\b\d[\d_]*(?:e[+-]?\d+)?\b/i.test(expression)
     || /^(?:Math\.\w+|Number|parseInt|parseFloat)\s*\(/.test(expression)
