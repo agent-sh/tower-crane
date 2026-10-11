@@ -771,10 +771,11 @@ test('a codex agent writes only where its agent file says; a worker writes its g
   assert.ok(fs.statSync(path.join(common, 'info')).isDirectory());
 });
 
-test('a sandboxed harness\'s own git runs no command the shared config or hooks name; the agent\'s sandboxed git still does', { skip: NO_STUBS }, (t) => {
+test('a sandboxed harness\'s own git runs no command the shared config, hooks or the agent\'s HOME name; the agent\'s sandboxed git still runs hooks', { skip: NO_STUBS }, (t) => {
   const { h, u, wt } = setup(t);
   fs.writeFileSync(path.join(wt, 'f.txt'), 'one\n');
-  h.git(['add', 'f.txt'], wt);
+  fs.writeFileSync(path.join(wt, 'g.txt'), 'one\n');
+  h.git(['add', 'f.txt', 'g.txt'], wt);
   h.git(['commit', '-qm', 'f'], wt);
   // What a worker could have planted in the shared git directory.
   const common = h.git(['rev-parse', '--path-format=absolute', '--git-common-dir'], wt);
@@ -784,9 +785,15 @@ test('a sandboxed harness\'s own git runs no command the shared config or hooks 
   const touch = (name) => `[ -z "$TOWER_CRANE_SESSION" ] || touch '${mark(name)}'`;
   h.git(['config', 'core.fsmonitor', `${touch('fsmonitor')}; false`], wt);
   h.git(['config', 'filter.planted.clean', `${touch('filter')}; cat`], wt);
-  fs.writeFileSync(path.join(common, 'info', 'attributes'), '*.txt filter=planted\n');
+  fs.writeFileSync(path.join(common, 'info', 'attributes'), 'f.txt filter=planted\ng.txt filter=home\n');
   fs.writeFileSync(path.join(common, 'hooks', 'post-checkout'), `#!/bin/sh\n${touch('hook')}\n`, { mode: 0o755 });
-  const marks = ['fsmonitor', 'filter', 'hook'];
+  const marks = ['fsmonitor', 'filter', 'hook', 'home'];
+  // A codex agent writes its HOME, so after launch it can swap the linked
+  // ~/.gitconfig for one that names a driver the scan never saw.
+  const homeConfig = `const fs = require('node:fs'); const f = require('node:path').join(require('node:os').homedir(), '.gitconfig');
+fs.rmSync(f, { force: true }); fs.writeFileSync(f, ${JSON.stringify(`[filter "home"]
+	clean = ${touch('home')}; cat
+`)});`;
   // A command the agent runs, as its sandbox marks it: the repository's hooks
   // run there, and background gc stays off.
   const agent = path.join(h.base, 'agent.json');
@@ -797,10 +804,12 @@ const gc = cp.execFileSync('git', ['config', 'gc.auto'], { env, encoding: 'utf8'
 fs.writeFileSync(${JSON.stringify(agent)}, JSON.stringify({ hook: fs.existsSync(${JSON.stringify(mark('hook'))}), gc }));`;
   for (const harness of ['claude', 'codex']) {
     for (const m of marks) fs.rmSync(mark(m), { force: true });
-    fs.writeFileSync(path.join(wt, 'f.txt'), `${harness}\n`);
+    // Same size, so status must hash the content through the clean filter.
+    for (const f of ['f.txt', 'g.txt']) fs.writeFileSync(path.join(wt, f), harness === 'claude' ? 'two\n' : 'six\n');
     isolated(h, 'hard', harness);
-    const run = [['git', 'status', '--porcelain'], ['git', 'checkout', '-q', '-b', `probe-${harness}`], ['git', 'checkout', '-q', '-']];
-    spawn(h, u, 'hard', { STUB_RUN: JSON.stringify(run) });
+    const run = [[process.execPath, '-e', homeConfig], ['git', 'status', '--porcelain'], ['git', 'checkout', '-q', '-b', `probe-${harness}`], ['git', 'checkout', '-q', '-']];
+    // Like the owner's own session, with no GIT_CONFIG_GLOBAL of its own.
+    spawn(h, u, 'hard', { STUB_RUN: JSON.stringify(run), GIT_CONFIG_GLOBAL: undefined });
     const seen = u.report();
     for (const r of seen.ran) assert.equal(r.code, 0, `${harness}: ${r.argv.join(' ')}: ${r.stderr}`);
     assert.deepEqual(marks.filter((m) => fs.existsSync(mark(m))), [], `${harness}: the harness's git ran a planted command`);

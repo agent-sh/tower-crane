@@ -11,7 +11,7 @@
 // generated permission profile. It runs wherever codex is on PATH and its
 // sandbox starts. The claude probe runs a real claude agent, so it costs a
 // model call: set TOWER_CRANE_LIVE_CLAUDE=1 (TOWER_CRANE_LIVE_MODEL picks the
-// model, opus by default).
+// model, claude-haiku-5-5 by default: a full id resolves on every provider).
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -46,7 +46,8 @@ step('commit', () => {
 step('fetch', () => git('fetch', '-q', 'origin'));
 step('rebase', () => git('rebase', '-q', 'origin/main'));
 step('push', () => git('push', '-q'));
-fs.writeFileSync(out, JSON.stringify({ steps, marked: { SANDBOX_RUNTIME: process.env.SANDBOX_RUNTIME || null, CODEX_SANDBOX: process.env.CODEX_SANDBOX || null } }));
+const marked = Object.fromEntries(Object.entries(process.env).filter(([k]) => /SANDBOX|^CODEX_/.test(k) && k !== 'CODEX_HOME'));
+fs.writeFileSync(out, JSON.stringify({ steps, marked, gc: git('config', 'gc.auto').stdout.trim() }));
 `;
 
 // A task worktree whose origin moved on, with a planted fsmonitor and
@@ -68,7 +69,9 @@ function fixture(t) {
   h.git(['push', 'origin', 'main'], upstream);
   const results = path.join(h.base, 'results');
   fs.mkdirSync(results);
-  h.ok(['project', 'set', '--sandbox', JSON.stringify({ write: [results] })]);
+  // A real push goes to GitHub over https; the fixture's origin is a local
+  // bare repository, which receive-pack writes from inside the sandbox.
+  h.ok(['project', 'set', '--sandbox', JSON.stringify({ write: [results, origin] })]);
   const common = fs.realpathSync(path.join(h.repo, '.git'));
   const marker = path.join(h.base, 'harness-ran');
   const touch = `[ -z "$TOWER_CRANE_SESSION" ] || [ -n "$SANDBOX_RUNTIME$CODEX_SANDBOX" ] || touch '${marker}'`;
@@ -81,8 +84,9 @@ function fixture(t) {
 
 function check(f, label) {
   assert.ok(fs.existsSync(f.out), `${label}: the probe ran`);
-  const { steps, marked } = JSON.parse(fs.readFileSync(f.out, 'utf8'));
-  process.stdout.write(`# ${label} probe: ${JSON.stringify({ steps, marked })}\n`);
+  const { steps, marked, gc } = JSON.parse(fs.readFileSync(f.out, 'utf8'));
+  process.stdout.write(`# ${label} probe: ${JSON.stringify({ steps, marked, gc })}\n`);
+  assert.equal(gc, '0', `${label}: background gc is off in the sandbox`);
   for (const s of ['config', 'hook', 'info']) assert.equal(steps[s].ok, false, `${label}: writing the shared ${s} failed`);
   for (const s of ['commit', 'fetch', 'rebase', 'push']) assert.equal(steps[s].ok, true, `${label}: ${s}: ${steps[s].detail}`);
   assert.doesNotMatch(f.h.git(['config', '--get-all', 'core.fsmonitor']), /touch planted/);
@@ -134,7 +138,7 @@ test('from a real claude sandbox a worker cannot write the shared git config or 
   f.h.ok(['brief', 'set', 'T1', '-'], {
     input: `Sandbox probe set up by the owner. Run exactly this one command with the Bash tool, then reply with its exit code and stop. Do not use tower-crane.\n\n${JSON.stringify(process.execPath)} ${JSON.stringify(f.probe)} ${JSON.stringify(f.common)} ${JSON.stringify(f.out)}\n`,
   });
-  f.h.ok(['ladder', 'set', 'hard', '--harness', 'claude', '--model', process.env.TOWER_CRANE_LIVE_MODEL || 'opus', '--clear', 'profile', '--clear', 'effort', '--clear', 'args']);
+  f.h.ok(['ladder', 'set', 'hard', '--harness', 'claude', '--model', process.env.TOWER_CRANE_LIVE_MODEL || 'claude-haiku-5-5', '--clear', 'profile', '--clear', 'effort', '--clear', 'args']);
   const r = await f.h.runAsync(['spawn', '--role', 'hard', '--task', 'T1', '--wait']);
   assert.equal(r.code, 0, r.stderr);
   check(f, 'claude');
