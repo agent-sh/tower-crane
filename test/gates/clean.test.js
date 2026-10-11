@@ -131,7 +131,7 @@ test('an installed cleanup tool is not inferred when the owner has not pinned it
   assert.equal(fs.existsSync(logFile), false);
 });
 
-test('a tool killed by a signal: not ok, recorded as a runner crash rather than a finding', async () => {
+test('a tool killed by a signal: not ok, recorded as a runner crash rather than a finding', { skip: process.platform === 'win32' }, async () => {
   process.env.TOWER_CRANE_CLEAN_CMD = fakeCmd;
   process.env.FAKE_CLEAN_MODE = 'kill';
   const killed = await gate.run(ctx());
