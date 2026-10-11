@@ -13,11 +13,11 @@ function waitUntil(check, { paths = [], signal, subscribe, poll = true, what = '
     let finished = false;
     let checking = false;
     let again = false;
-    const finish = (error, value) => {
+    const finish = (error, value, failed = true) => {
       if (finished) return;
       finished = true;
       for (const cleanup of cleanups.reverse()) cleanup();
-      if (error) reject(error);
+      if (failed) reject(error);
       else resolve(value);
     };
     const probe = async () => {
@@ -26,7 +26,7 @@ function waitUntil(check, { paths = [], signal, subscribe, poll = true, what = '
       checking = true;
       try {
         const value = await check();
-        if (value) finish(null, value);
+        if (value) finish(null, value, false);
       } catch (error) {
         finish(error);
       } finally {

@@ -45,6 +45,15 @@ test('signal waits observe existing state, atomic writes, complete events, child
   const aborted = fileWritten(path.join(h.base, 'missing'), { signal: controller.signal });
   controller.abort(new Error('test cancellation'));
   await assert.rejects(aborted, /test cancellation/);
+  for (const reason of [0, null, false]) {
+    for (const alreadyAborted of [true, false]) {
+      const cancellation = new AbortController();
+      if (alreadyAborted) cancellation.abort(reason);
+      const pending = waitUntil(() => false, { signal: cancellation.signal });
+      if (!alreadyAborted) cancellation.abort(reason);
+      await assert.rejects(pending, (error) => error === reason);
+    }
+  }
   await assert.rejects(waitUntil(() => { throw new Error('probe failed'); }), /probe failed/);
 });
 
