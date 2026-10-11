@@ -8,6 +8,7 @@ The suite proves behavior through the real CLI on temporary git repositories. It
 - `npm test -- test/claim.test.js test/gates/tests.test.js` runs only those files. Pass node:test flags the same way: `npm test -- test/events.test.js --test-name-pattern="decision answer"`.
 - Run only the files a change touches. The tests gate runs the full suite once at the submitted head, and CI runs it on Linux (Node 24 and 26) and on Windows, each in three shards. `TC_TEST_SHARD=INDEX/TOTAL` selects one shard of the file list, and `test/shard.test.js` checks that the shards cover every file once.
 - Set `TOWER_CRANE_TEST_TMP` to keep temporary repositories off `/tmp`.
+- Windows CI jobs have a 45-minute budget and Linux jobs have a 15-minute budget; each test still has its own 300-second deadline.
 
 Windows shard 1/3 also runs the Claude interrupted native worker case ten consecutive times, stopping on the first failure. The case waits for final usage through `wait --types spend --observe` and checks the supervisor's stopped phase and exit receipt before redispatch. Its parent clock models startup consuming the session deadline, so shutdown completion must be independent of that deadline.
 

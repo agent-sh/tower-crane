@@ -277,7 +277,7 @@ test("the board approves an orchestrator's escalations for its repeat, applies t
   assert.equal(decisions(h)[2].applied, undefined);
   assert.match(await (await fetch(url + 'controls')).text(), /Apply approved change/);
   // A tagged question is answered with its own options on the board, not here.
-  h.ok(['ask', '--question', 'Which release channel?', '--option', 'beta', '--option', 'stable', '--setting', 'publish'], as('orchestrator'));
+  h.ok(['ask', '--question', 'Which release channel?', '--option', 'beta', '--option', 'stable', '--kind', 'setting', '--setting', 'publish'], as('orchestrator'));
   const tagged = decisions(h).at(-1);
   assert.ok(tagged.escalation && tagged.approval_request !== true);
   assert.doesNotMatch(await (await fetch(url + 'controls')).text(), new RegExp(`data-decision="${tagged.id}"`));
@@ -424,7 +424,7 @@ test('browser controls save limits, approve and decline requests, keep saved val
   h.init();
   h.ok(['project', 'set', '--name', 'Tower Crane board controls', '--goal', 'Run the project from the board']);
   h.ok(['task', 'add', '--title', 'Ship the board controls', '--acceptance', 'Every authority setting is reachable', '--needs-owner', 'Approve the release plan']);
-  h.ok(['ask', '--question', 'Publish the release today?', '--option', 'yes', '--option', 'no']);
+  h.ok(['ask', '--question', 'Publish the release today?', '--option', 'yes', '--option', 'no', '--kind', 'setting']);
   const { url, keyed } = await serve(t, h, 'owner', { fetchToken: false });
   const b = await openBrowser(t);
   await b.send('Emulation.setDeviceMetricsOverride', { width: 1920, height: 1080, deviceScaleFactor: 1, mobile: false });

@@ -33,6 +33,8 @@ cp.spawnSync = function github(file, args, ...rest) {
         app: s.app.slug, status: s.status, conclusion: s.conclusion, runs: s.latest_check_runs_count,
         ...(/[{,]\s*id\s*[,}]/.test(filter) ? { id: s.id } : {}),
       }));
+    } else if (args[1].endsWith(`/actions/runs?head_sha=${data.sha}&per_page=100`)) {
+      items = (data.workflows ?? []).map((w) => ({ head_sha: data.sha, ...w }));
     }
   }
   if (!items) throw new Error(`unexpected gh call: ${args.join(' ')}`);
