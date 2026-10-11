@@ -20,7 +20,7 @@ function setup(t, brief = 'probe\n') {
     fs.mkdirSync(path.dirname(file), { recursive: true });
     fs.writeFileSync(file, text);
   };
-  put(path.join(home, '.claude', 'CLAUDE.md'), '@~/.config/agents/SHARED.md\n\nCLAUDE-GLOBAL\n');
+  put(path.join(home, '.claude', 'CLAUDE.md'), '@~/.config/agents/SHARED.md\n\nGLOBAL-INSTRUCTIONS\n');
   put(path.join(home, '.config', 'agents', 'SHARED.md'), 'SHARED-RULES\n');
   put(path.join(home, '.codex', 'AGENTS.md'), 'CODEX-GLOBAL\n');
   put(path.join(h.base, 'AGENTS.md'), 'ANCESTOR-RULES\n');
@@ -45,7 +45,7 @@ function setup(t, brief = 'probe\n') {
 }
 
 const rung = (h, harness) => {
-  const model = harness === 'claude' ? ['--model', 'opus', '--clear', 'profile'] : ['--profile', 'sol', '--clear', 'model'];
+  const model = harness === 'claude' ? ['--model', 'fixture-large', '--clear', 'profile'] : ['--profile', 'fixture-main', '--clear', 'model'];
   h.ok(['ladder', 'set', 'small', '--harness', harness, ...model, '--clear', 'effort', '--clear', 'args']);
 };
 
@@ -77,7 +77,7 @@ test('a claude spawn imports the user rules and the repository chain by path, an
   assert.equal(startup[0].detail.rules_tokens, Math.ceil(startup[0].detail.rules_bytes / 4));
   assert.ok(startup[0].detail.prompt_bytes > 0);
   const memory = seen.memory.join('\n');
-  for (const text of ['CLAUDE-GLOBAL', 'SHARED-RULES', 'ANCESTOR-RULES', 'REPO-RULES', 'EXTRA-RULES']) assert.ok(memory.includes(text), `claude loads ${text}`);
+  for (const text of ['GLOBAL-INSTRUCTIONS', 'SHARED-RULES', 'ANCESTOR-RULES', 'REPO-RULES', 'EXTRA-RULES']) assert.ok(memory.includes(text), `claude loads ${text}`);
   const instructions = fs.readFileSync(path.join(h.state, 'homes', JSON.parse(r.stdout).agent, 'CLAUDE.md'), 'utf8');
   assert.ok(!/RULES|GLOBAL/.test(instructions), 'the home names the files, never copies them');
   assert.deepEqual(seen.mcp, {}, 'no MCP server it did not opt into');

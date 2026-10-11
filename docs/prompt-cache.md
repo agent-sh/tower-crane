@@ -115,7 +115,8 @@ Levers:
 | `--developer-breakpoint` | OpenAI | marks the end of the leading developer messages |
 | `--breakpoint-ttl 5m\|1h` | Anthropic | TTL of the breakpoints `--breakpoint` and `--turn-breakpoint` add. Anthropic rejects a 1-hour breakpoint that comes after a 5-minute one, so after an insertion every breakpoint before a 1-hour one becomes 1-hour (`ttl:promoted PATH`). Billing stays the same: 1-hour write tokens run up to the last 1-hour breakpoint |
 
-Default prices, per million tokens: Opus 5.5 is $4 input, $20 output, $5 for a
+Default prices live in `docs/cache-proxy-prices.json`, matched as a substring of
+the model id. Per million tokens: Opus 5.5 is $4 input, $20 output, $5 for a
 5-minute write, $8 for a 1-hour write and $0.20 for a read. GPT-6.1 Sol is $2
 input, $10 output, $2.50 for a write and $0.10 for a read (OpenAI's standard
 short-context price; the Bedrock page renders its numbers client side and was not

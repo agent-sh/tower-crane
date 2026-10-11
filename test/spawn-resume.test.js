@@ -123,10 +123,10 @@ cp.spawn = function(command, args, options) {
   const pathKey = Object.keys(h.env).find((key) => key.toUpperCase() === 'PATH') || 'PATH';
   h.env[pathKey] = bins + path.delimiter + (h.env[pathKey] || '');
   h.env.CODEX_HOME = path.join(h.base, 'codex-home');
-  h.env.CLAUDE_CONFIG_DIR = path.join(h.base, 'claude-config');
+  h.env.CLAUDE_CONFIG_DIR = path.join(h.base, 'harness-config');
   h.env.RESUME_USAGE = '1';
   h.ok(['ladder', 'set', 'medium', '--harness', harness, '--clear', 'command',
-    ...(harness === 'codex' ? ['--profile', 'sol', '--effort', 'high'] : ['--model', 'opus', '--effort', 'high'])]);
+    ...(harness === 'codex' ? ['--profile', 'fixture-main', '--effort', 'high'] : ['--model', 'fixture-large', '--effort', 'high'])]);
 }
 
 for (const harness of ['codex', 'claude']) {
@@ -345,7 +345,7 @@ for (const harness of ['codex', 'claude']) {
       assert.notEqual(dry.session_id, first.session_id);
     }
     if (harness === 'codex') {
-      assert.deepEqual(dry.argv.slice(0, 5), ['codex', 'exec', '-p', 'sol', 'resume']);
+      assert.deepEqual(dry.argv.slice(0, 5), ['codex', 'exec', '-p', 'fixture-main', 'resume']);
       assert.ok(dry.argv.includes('--json'));
     } else {
       assert.deepEqual(dry.argv.slice(0, 2), ['claude', '-p']);

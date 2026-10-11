@@ -2,7 +2,7 @@
 
 // Runs the real claude CLI, so it costs a model call and needs a logged-in
 // claude: set TOWER_CRANE_LIVE_CLAUDE=1 to run it (TOWER_CRANE_LIVE_MODEL picks the
-// model, opus by default). It proves what a stub cannot: a command in a
+// model explicitly). It proves what a stub cannot: a command in a
 // spawned agent's sandbox cannot reach a unix socket in a directory the
 // sandbox denies, even with the socket filter off.
 
@@ -13,7 +13,7 @@ const net = require('node:net');
 const os = require('node:os');
 const path = require('node:path');
 const cp = require('node:child_process');
-const { makeRepo, BIN, ROOT } = require('./helpers');
+const { pinLiveRung, makeRepo, BIN, ROOT } = require('./helpers');
 
 const uid = typeof process.getuid === 'function' ? process.getuid() : null;
 const runDir = uid === null ? null : `/run/user/${uid}`;
@@ -84,7 +84,7 @@ test('a sandboxed claude command cannot connect to a unix socket in a denied dir
   h.ok(['brief', 'set', 'T1', '-'], {
     input: `Sandbox probe set up by the owner. Run exactly this one command with the Bash tool, then reply with its exit code. Do not use tower-crane.\n\n${node} -e '${script}'\n`,
   });
-  h.ok(['ladder', 'set', 'small', '--harness', 'claude', '--model', process.env.TOWER_CRANE_LIVE_MODEL || 'opus', '--clear', 'profile', '--clear', 'effort']);
+  pinLiveRung(h, 'claude');
   const r = await h.runAsync(['spawn', '--role', 'small', '--task', 'T1', '--wait']);
   assert.equal(r.code, 0, `${r.stderr}\n${agentLog(h)}`);
   assert.ok(fs.existsSync(probe), `the command ran\n${agentLog(h)}`);
@@ -160,7 +160,7 @@ test('in a real claude sandbox a forged state edit fails and the CLI writes thro
   h.ok(['brief', 'set', 'T1', '-'], {
     input: `Sandbox probe set up by the owner. Run exactly these two commands with the Bash tool, one after the other, then reply with their exit codes.\n\n${node} -e '${forge}'\n\n${node} ${JSON.stringify(BIN)} task note T1 through-the-broker\n`,
   });
-  h.ok(['ladder', 'set', 'small', '--harness', 'claude', '--model', process.env.TOWER_CRANE_LIVE_MODEL || 'opus', '--clear', 'profile', '--clear', 'effort']);
+  pinLiveRung(h, 'claude');
   const r = await h.runAsync(['spawn', '--role', 'small', '--task', 'T1', '--wait']);
   assert.equal(r.code, 0, `${r.stderr}\n${agentLog(h)}`);
   assert.ok(fs.existsSync(probe), `the forge command ran\n${agentLog(h)}`);
@@ -172,7 +172,7 @@ test('in a real claude sandbox a forged state edit fails and the CLI writes thro
 
 // Codex's sandbox refuses connect() on a Unix socket, so its broker listens
 // on TCP loopback. Runs the real codex CLI: set TOWER_CRANE_LIVE_CODEX=1
-// (TOWER_CRANE_LIVE_PROFILE picks the profile, sol by default).
+// (TOWER_CRANE_LIVE_PROFILE picks the profile explicitly).
 test('in a real codex sandbox forged state edits fail and the CLI writes through the broker over loopback', { skip: process.env.TOWER_CRANE_LIVE_CODEX !== '1' && 'set TOWER_CRANE_LIVE_CODEX=1 to run against the real codex CLI', timeout: 300000 }, async (t) => {
   const h = makeRepo(t);
   h.init();
@@ -183,7 +183,7 @@ test('in a real codex sandbox forged state edits fail and the CLI writes through
   h.ok(['brief', 'set', 'T1', '-'], {
     input: `Sandbox probe set up by the owner. Run exactly these two commands with your command tool, one after the other, then reply with their exit codes and stop.\n\n${node} -e '${forge}'\n\n${node} ${JSON.stringify(BIN)} task note T1 through-the-broker\n`,
   });
-  h.ok(['ladder', 'set', 'small', '--harness', 'codex', '--profile', process.env.TOWER_CRANE_LIVE_PROFILE || 'sol', '--clear', 'model', '--clear', 'effort']);
+  pinLiveRung(h, 'codex');
   const r = await h.runAsync(['spawn', '--role', 'small', '--task', 'T1', '--wait']);
   assert.equal(r.code, 0, `${r.stderr}\n${agentLog(h)}`);
   assert.ok(fs.existsSync(probe), `the forge command ran\n${agentLog(h)}`);

@@ -4,17 +4,10 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { makeRepo } = require('./helpers');
+const { makeRepo, fixtureLadder, ROOT } = require('./helpers');
+const L = require('../lib/ladder');
 
-const BUILTIN = {
-  orchestrator: { harness: 'claude', model: 'opus', effort: 'high' },
-  easy: { profile: 'luna', effort: 'medium' },
-  medium: { profile: 'sol', effort: 'high' },
-  hard: { harness: 'claude', model: 'opus', effort: 'high' },
-  research: { harness: 'claude', model: 'opus', effort: 'max' },
-  review: { profile: 'sol', effort: 'high' },
-  small: { profile: 'luna', effort: 'low' },
-};
+const PINNED = fixtureLadder().ladder;
 
 function writeUser(h, doc) {
   fs.mkdirSync(path.dirname(h.userConfig), { recursive: true });
@@ -24,26 +17,24 @@ function writeUser(h, doc) {
 const projectText = (h) => fs.readFileSync(path.join(h.state, 'project.json'), 'utf8');
 const events = (h) => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
 
-test('init copies the built-in ladder, and a rung the project leaves out falls back to it', (t) => {
-  const h = makeRepo(t);
+test('BUILTIN matches the documented defaults and init fallback', (t) => {
+  const h = makeRepo(t, { builtin: true });
   h.init();
+  const expected = JSON.parse(fs.readFileSync(path.join(ROOT, 'docs', 'builtin-ladder.json'), 'utf8'));
   const p = h.readState('project.json');
-  assert.equal(p.harness, 'codex');
-  assert.deepEqual(p.ladder, BUILTIN);
+  assert.deepEqual({ harness: p.harness, ladder: p.ladder }, { harness: expected.harness, ladder: expected.ladder });
+  assert.deepEqual(L.BUILTIN.claude_aliases, expected.claude_aliases);
   const show = h.json(['ladder', 'show']);
   assert.equal(show.harness_from, 'project');
   assert.equal(show.user_file, h.userConfig);
   assert.equal(show.user_file_exists, false);
-  assert.deepEqual(show.ladder.easy, { profile: 'luna', effort: 'medium', harness: 'codex', harness_from: 'default', from: 'project' });
-  assert.deepEqual(show.ladder.hard, { harness: 'claude', model: 'opus', effort: 'high', harness_from: 'rung', from: 'project' });
-
   delete p.ladder.easy;
   delete p.harness;
   h.writeState('project.json', p);
   const back = h.json(['ladder', 'show']);
-  assert.deepEqual([back.harness, back.harness_from], ['codex', 'built-in']);
-  assert.deepEqual([back.ladder.easy.profile, back.ladder.easy.from], ['luna', 'built-in']);
-  assert.match(h.ok(['ladder', 'show']), /^ {2}easy +codex \(default\) +profile luna, effort medium +from built-in$/m);
+  assert.deepEqual([back.harness, back.harness_from], [expected.harness, 'built-in']);
+  assert.deepEqual(back.ladder.easy, { ...expected.ladder.easy, harness: expected.harness,
+    harness_from: 'default', from: 'built-in' });
 });
 
 test('the user file supplies the defaults a new project copies, and the project file then wins', (t) => {
@@ -57,7 +48,7 @@ test('the user file supplies the defaults a new project copies, and the project 
   assert.equal(p.harness, 'opencode');
   assert.deepEqual(p.ladder.easy, { model: 'a/easy' });
   assert.deepEqual(p.ladder.medium, { model: 'a/medium', effort: 'high' });
-  assert.deepEqual(p.ladder.hard, BUILTIN.hard, 'a rung the user file leaves out comes from the built-in ladder');
+  assert.deepEqual(p.ladder.hard, PINNED.hard, 'a rung the user file leaves out keeps the fixture pin');
 
   writeUser(h, { harness: 'pi', ladder: { easy: { model: 'p/easy' } } });
   const show = h.json(['ladder', 'show']);
@@ -111,7 +102,7 @@ test('research web MCP stays owner guarded alongside personal provider fallbacks
   assert.deepEqual(h.json(['ladder', 'show']).ladder.research.fallbacks, fallbacks);
 });
 
-test('research web MCP inheritance remains Claude-only and refuses additional MCP servers', (t) => {
+test('research web MCP inheritance requires Claude and refuses additional MCP servers', (t) => {
   const h = makeRepo(t);
   h.init();
   const server = { name: 'harness-web', command: 'node', args: ['/web/server.mjs'] };
@@ -132,18 +123,18 @@ test('research web MCP inheritance remains Claude-only and refuses additional MC
 test('ladder save-user makes the project ladder the default for new projects', (t) => {
   const h = makeRepo(t);
   h.init();
-  h.ok(['ladder', 'set', 'hard', '--model', 'fable']);
+  h.ok(['ladder', 'set', 'hard', '--model', 'fixture-secondary']);
   const out = h.json(['ladder', 'save-user']);
   assert.equal(out.file, h.userConfig);
   const saved = JSON.parse(fs.readFileSync(h.userConfig, 'utf8'));
   assert.equal(saved.harness, 'codex');
-  assert.deepEqual(saved.ladder.hard, { harness: 'claude', model: 'fable', effort: 'high' });
-  assert.deepEqual(saved.ladder.easy, BUILTIN.easy);
+  assert.deepEqual(saved.ladder.hard, { harness: 'claude', model: 'fixture-secondary', effort: 'high' });
+  assert.deepEqual(saved.ladder.easy, PINNED.easy);
   assert.equal(events(h).filter((e) => e.cmd === 'ladder save-user').length, 1);
 
   const other = path.join(h.base, 'second-state');
   h.ok(['init', '--name', 'second', '--goal', 'g', '--state', other]);
-  assert.equal(JSON.parse(fs.readFileSync(path.join(other, 'project.json'), 'utf8')).ladder.hard.model, 'fable');
+  assert.equal(JSON.parse(fs.readFileSync(path.join(other, 'project.json'), 'utf8')).ladder.hard.model, 'fixture-secondary');
 
   // A ladder that cannot run is not saved over the user file.
   const saved1 = fs.readFileSync(h.userConfig, 'utf8');
@@ -157,18 +148,21 @@ test('ladder save-user makes the project ladder the default for new projects', (
 test('ladder save-user writes only what the project defines and keeps the rest of the user file', (t) => {
   const h = makeRepo(t);
   h.init();
-  writeUser(h, { browser_kit: ['playwright'], note: 'kept', ladder: { medium: { fallbacks: [{ harness: 'claude', model: 'fable', effort: 'high' }] } } });
+  writeUser(h, { browser_kit: ['playwright'], note: 'kept', ladder: { medium: { fallbacks: [{ harness: 'claude', model: 'fixture-secondary', effort: 'high' }] } } });
   const p = h.readState('project.json');
+  // Remaining rungs need their own harness when the project omits its default.
+  for (const rung of Object.values(p.ladder)) rung.harness ||= p.harness;
   delete p.harness;
   delete p.ladder.easy;
   h.writeState('project.json', p);
   h.ok(['ladder', 'save-user']);
   const saved = JSON.parse(fs.readFileSync(h.userConfig, 'utf8'));
-  // Neither the default harness nor easy is in the project, so the user file gets neither: the built-in applies to them.
+  // Saving omits inherited fields and preserves unrelated personal settings.
   assert.equal(saved.harness, undefined);
   assert.equal(saved.ladder.easy, undefined);
-  assert.deepEqual(saved.ladder.hard, BUILTIN.hard);
-  assert.deepEqual(saved.ladder.medium, { ...BUILTIN.medium, fallbacks: [{ harness: 'claude', model: 'fable', effort: 'high' }] });
+  assert.deepEqual(saved.ladder.hard, PINNED.hard);
+  assert.deepEqual(saved.ladder.medium, { ...PINNED.medium, harness: fixtureLadder().harness,
+    fallbacks: [{ harness: 'claude', model: 'fixture-secondary', effort: 'high' }] });
   assert.equal(saved.note, 'kept');
   assert.deepEqual(saved.browser_kit, ['playwright']);
 });
@@ -176,10 +170,10 @@ test('ladder save-user writes only what the project defines and keeps the rest o
 test('personal hard fallbacks overlay project rungs and stay out of project writes', (t) => {
   const h = makeRepo(t);
   h.init();
-  const fallbacks = [{ harness: 'codex', profile: 'astra', effort: 'high' }, { harness: 'claude', model: 'fable', effort: 'high' }];
+  const fallbacks = [{ harness: 'codex', profile: 'fixture-backup', effort: 'high' }, { harness: 'claude', model: 'fixture-secondary', effort: 'high' }];
   writeUser(h, { ladder: { hard: { fallbacks } } });
   const hard = h.json(['ladder', 'show']).ladder.hard;
-  assert.equal(hard.model, 'opus');
+  assert.equal(hard.model, 'fixture-large');
   assert.equal(hard.from, 'project');
   assert.deepEqual(hard.fallbacks, fallbacks);
   assert.equal(hard.fallbacks_from, 'user');
@@ -208,11 +202,11 @@ test('projects reject fallback configuration through project flags and state', (
   assert.match(h.run(['status']).stderr, /fallbacks.*user file/);
 });
 
-test('fallback-only user rungs keep the built-in primary when projects omit them', (t) => {
+test('fallback-only user rungs keep the pinned primary during init', (t) => {
   const h = makeRepo(t);
-  writeUser(h, { ladder: { hard: { fallbacks: [{ harness: 'claude', model: 'fable' }] } } });
+  writeUser(h, { ladder: { hard: { fallbacks: [{ harness: 'claude', model: 'fixture-secondary' }] } } });
   h.init();
-  assert.deepEqual(h.readState('project.json').ladder.hard, BUILTIN.hard);
+  assert.deepEqual(h.readState('project.json').ladder.hard, PINNED.hard);
 });
 
 test('ladder harness moves every rung without its own harness, and spawn runs each tier there', (t) => {
@@ -247,8 +241,8 @@ test('ladder harness moves every rung without its own harness, and spawn runs ea
   assert.deepEqual(flags(medium.argv), ['pi', '-p', '--mode', 'json', '--model', 'm-medium', '--thinking', 'high', ...piExtension(medium.agent)]);
   const hard = spawn('T3');
   const research = spawn('T4');
-  assert.deepEqual(flags(hard.argv).slice(0, 8), ['claude', '-p', '--model', 'opus', '--effort', 'high', '--output-format', 'json']);
-  assert.deepEqual(flags(research.argv).slice(0, 8), ['claude', '-p', '--model', 'opus', '--effort', 'max', '--output-format', 'json']);
+  assert.deepEqual(flags(hard.argv).slice(0, 8), ['claude', '-p', '--model', 'fixture-large', '--effort', 'high', '--output-format', 'json']);
+  assert.deepEqual(flags(research.argv).slice(0, 8), ['claude', '-p', '--model', 'fixture-large', '--effort', 'max', '--output-format', 'json']);
   assert.equal(hard.argv[hard.argv.indexOf('--session-id') + 1], hard.session_id);
   assert.equal(research.argv[research.argv.indexOf('--session-id') + 1], research.session_id);
   const review = spawn('T2', 'review');
@@ -317,10 +311,10 @@ test('ladder writes are validated, and a refused one leaves project.json as it w
   const hand = h.run(['status']);
   assert.equal(hand.code, 1);
   assert.match(hand.stderr, /ladder medium: harness must be one of claude, codex, opencode, agy, pi, command/);
-  h.writeState('project.json', { ...p, roles: { worker: { harness: 'codex', profile: 'sol' } } });
+  h.writeState('project.json', { ...p, roles: { worker: { harness: 'codex', profile: 'fixture-main' } } });
   assert.match(h.run(['status']).stderr, /roles was replaced by harness and ladder/, 'a pre-ladder roles block is refused, not ignored');
 
-  writeUser(h, { ladder: { easy: { harness: 'pi', profile: 'luna' } } });
+  writeUser(h, { ladder: { easy: { harness: 'pi', profile: 'fixture-light' } } });
   const fresh = h.run(['init', '--name', 'n', '--goal', 'g', '--state', path.join(h.base, 'fresh')]);
   assert.equal(fresh.code, 1);
   assert.ok(fresh.stderr.includes(`the default ladder is invalid: ladder easy (pi, from the user file ${h.userConfig}): profile applies only to codex, needs a model`), fresh.stderr);
@@ -340,7 +334,7 @@ test('a ladder broken by a changed user file still loads, and ladder set repairs
   const p = h.readState('project.json');
   h.writeState('project.json', { ...p, ladder: { orchestrator: p.ladder.orchestrator } });
   // Another project saves a codex ladder over the user file.
-  writeUser(h, { harness: 'codex', ladder: { easy: { profile: 'luna' }, medium: { profile: 'sol' }, review: { profile: 'sol' }, small: { profile: 'luna' } } });
+  writeUser(h, { harness: 'codex', ladder: { easy: { profile: 'fixture-light' }, medium: { profile: 'fixture-main' }, review: { profile: 'fixture-main' }, small: { profile: 'fixture-light' } } });
 
   assert.equal(h.run(['status']).code, 0, 'the project still loads');
   assert.equal(h.ok(['task', 'add', '--title', 'y', '--acceptance', 'a']), 'T2', 'other writes still work');
@@ -363,16 +357,16 @@ test('a ladder write is evented and re-renders the sketch with the ladder and ea
   const h = makeRepo(t);
   h.init();
   h.ok(['task', 'add', '--title', 'Small fix', '--acceptance', 'a', '--size', 'S']);
-  h.ok(['ladder', 'set', 'easy', '--model', 'gpt-x', '--clear', 'profile', '--agent', 'orchestrator']);
+  h.ok(['ladder', 'set', 'easy', '--model', 'fixture-model', '--clear', 'profile', '--agent', 'orchestrator']);
   const ev = events(h).find((e) => e.cmd === 'ladder set');
-  assert.deepEqual([ev.agent, ev.detail], ['orchestrator', { rung: 'easy', model: 'gpt-x', effort: 'medium', authority: 'orchestrator' }]);
-  assert.deepEqual(h.readState('project.json').ladder.easy, { model: 'gpt-x', effort: 'medium' });
+  assert.deepEqual([ev.agent, ev.detail], ['orchestrator', { rung: 'easy', model: 'fixture-model', effort: 'medium', authority: 'orchestrator' }]);
+  assert.deepEqual(h.readState('project.json').ladder.easy, { model: 'fixture-model', effort: 'medium' });
   const html = fs.readFileSync(path.join(h.state, 'sketch.html'), 'utf8');
-  assert.match(html, /<tr data-rung="easy"><th scope="row">easy<\/th><td>codex \(default\)<\/td><td>gpt-x<\/td><td>medium<\/td>/);
-  assert.match(html, /<tr data-rung="research"><th scope="row">research<\/th><td>claude<\/td><td>opus<\/td><td>max<\/td>/);
+  assert.match(html, /<tr data-rung="easy"><th scope="row">easy<\/th><td>codex \(default\)<\/td><td>fixture-model<\/td><td>medium<\/td>/);
+  assert.match(html, /<tr data-rung="research"><th scope="row">research<\/th><td>claude<\/td><td>fixture-large<\/td><td>max<\/td>/);
   assert.match(html, /<a href="#T1" class="node s-ready"[^>]*aria-label="T1 Small fix, ready, tier easy"/, 'the graph shows the task tier');
   const md = fs.readFileSync(path.join(h.state, 'sketch.md'), 'utf8');
-  assert.match(md, /^\| easy \| codex \(default\) \| gpt-x \| medium \|$/m);
+  assert.match(md, /^\| easy \| codex \(default\) \| fixture-model \| medium \|$/m);
   assert.match(md, /^\| T1 \| Small fix \| code \| S \| easy \| 0 \|$/m, 'the ready table shows the tier');
 });
 
@@ -412,14 +406,14 @@ test('validate does not warn when review uses the task tier model', (t) => {
   const h = makeRepo(t);
   h.init();
   h.ok(['task', 'add', '--title', 'x', '--acceptance', 'a', '--size', 'S']);
-  assert.deepEqual(h.json(['validate']).warnings, [], 'easy runs luna and review runs sol');
+  assert.deepEqual(h.json(['validate']).warnings, [], 'easy runs fixture-light and review runs fixture-main');
   h.ok(['task', 'add', '--title', 'y', '--acceptance', 'a']);
   const r = h.run(['validate']);
   assert.equal(r.code, 0, r.stderr);
   assert.match(r.stdout, /^plan ok: 2 tasks/);
   const data = h.json(['validate']);
   assert.deepEqual([data.ok, data.warnings], [true, []]);
-  h.ok(['ladder', 'set', 'review', '--harness', 'claude', '--model', 'opus', '--clear', 'profile']);
+  h.ok(['ladder', 'set', 'review', '--harness', 'claude', '--model', 'fixture-large', '--clear', 'profile']);
   assert.deepEqual(h.json(['validate']).warnings, []);
   h.ok(['task', 'update', 'T1', '--tier', 'hard']);
   assert.deepEqual(h.json(['validate']).warnings, [], 'a clean-context reviewer may use the builder model');
@@ -448,10 +442,10 @@ test('switching from Codex to agy refuses inherited Codex flags until explicitly
   h.ok(['ladder', 'set', 'hard', '--harness', 'codex', '--model', 'fixture',
     '--clear', 'profile', '--args', '["--skip-git-repo-check"]']);
   const before = h.readState('project.json');
-  const refused = h.run(['ladder', 'set', 'hard', '--harness', 'agy', '--model', 'gemini-3-pro']);
+  const refused = h.run(['ladder', 'set', 'hard', '--harness', 'agy', '--model', 'fixture-large']);
   assert.notEqual(refused.code, 0);
   assert.match(refused.stderr, /args may only use.*refused --skip-git-repo-check/);
   assert.deepEqual(h.readState('project.json'), before);
-  h.ok(['ladder', 'set', 'hard', '--harness', 'agy', '--model', 'gemini-3-pro', '--clear', 'args']);
+  h.ok(['ladder', 'set', 'hard', '--harness', 'agy', '--model', 'fixture-large', '--clear', 'args']);
   assert.equal(h.json(['ladder', 'show']).ladder.hard.harness, 'agy');
 });
