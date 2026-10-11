@@ -130,3 +130,28 @@ test('native lease heartbeats preserve archived evidence references', (t) => {
   const payload = path.join(h.state, 'evidence', 'T1', before.evidence_refs.summary.sha256 + '.json');
   assert.equal(JSON.parse(fs.readFileSync(payload, 'utf8')), 'x'.repeat(2048));
 });
+
+test('Windows parent discovery stays stable when whole-machine command lines exceed the buffer', () => {
+  const script = `
+const C = require(${JSON.stringify(path.join(__dirname, '../lib/commands'))});
+Object.defineProperty(process, 'platform', { value: 'win32' });
+C.execFileSync = (command, args) => {
+  if (command !== 'powershell.exe') throw new Error('unexpected command');
+  if (process.env.PARENT_QUERY_CASE === 'large' && !args[2].includes('-Filter')) {
+    throw Object.assign(new Error('process listing exceeds maxBuffer'), { code: 'ENOBUFS' });
+  }
+  return JSON.stringify([{ ProcessId: process.ppid, ParentProcessId: 1, Name: 'node.exe',
+    CreationDate: 'stable-start', CommandLine: 'node harness' }]);
+};
+const O = require(${JSON.stringify(path.join(__dirname, '../lib/orchestrator'))});
+console.log(JSON.stringify(O.identity({ env: { CLAUDE_SESSION_ID: 'same-session' }, agent: 'orchestrator' })));
+`;
+  const identities = ['large', 'small'].map((value) => {
+    const result = cp.spawnSync(process.execPath, ['-e', script], {
+      env: { ...process.env, PARENT_QUERY_CASE: value }, encoding: 'utf8', timeout: 10000,
+    });
+    assert.equal(result.status, 0, result.stderr);
+    return JSON.parse(result.stdout);
+  });
+  assert.deepEqual(identities[0], identities[1], 'changing process-list size cannot change the session key');
+});
