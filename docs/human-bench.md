@@ -4,7 +4,7 @@ Tower Crane benches what agents do. This page benches what the owner does on the
 
 ## Method
 
-**Builds.** *Before* is the board T79 started from: `76d484d`, T93's live-spend head with main merged (T70's research included), extracted with `git archive`. *After* is this branch with main merged (T89's approvals, `interrupt`, T93 and the owner key all on main). Both serve the same fixtures; each build builds its own fixtures with its own CLI.
+**Builds.** *Before* is the board T79 started from: `76d484d`, T93's live-spend head with main merged (T70's research included), extracted with `git archive`. *After* is this branch with main merged (T89's approvals, `interrupt`, T91's Controls and `project set --paused`, T93 and the owner key all on main). The before build has no Controls page and no pause command, so Controls and H4p have no before result. Both serve the same fixtures; each build builds its own fixtures with its own CLI.
 
 **Fixtures** (`test/bench/fixtures.js`). Scratch states built through the CLI, so they stay valid as the state format changes. Commands run on a moved clock (`test/fixtures/hooks.js`), which gives events, leases and decisions the ages a real run has. The owner presents a fixture owner key, as the tests do. Each review verdict follows a recorded reviewer dispatch that ran and exited, the one event the CLI cannot write (`h.reviewer` in the tests), so the verdict counts and `accept` dispatches no real reviewer; review evidence names the task's revision where the CLI takes `--revision`. No fixture touches a live state directory.
 
@@ -48,10 +48,10 @@ Tower Crane benches what agents do. This page benches what the owner does on the
 | H2 | Decision controls in the first viewport, 1280x800 | 2 of 2 themes without a scroll, pass | 2 of 2 themes without a scroll, pass |
 | H2a | Approve a change | sentence fail, raw JSON shown; approve: no path, fail | sentence pass, raw JSON behind a disclosure; 1 click, answer approve from the board; applied yes by the orchestrator's retry (setting event cli, approved_by D3), pass |
 | H3 | Judge a review and send it back | 3 clicks, 3 scrolls, KLM 14.99 s without typing, 711 px scrolled, fail | 3 clicks, 0 scrolls, KLM 10.1 s without typing, 0 px scrolled, pass |
-| H4 | Stop a runaway | spend rose before exit: yes; flagged: no; stop: no path, fail | spend rose before exit: yes; flagged: yes, 157 ms after the rule's threshold; stop: 1 click, 1 key, KLM 4.68 s, stopped with no retry; recorded 10000000 of the stub's 10000000, pass |
+| H4 | Stop a runaway | spend rose before exit: yes; flagged: no; stop: no path, fail | spend rose before exit: yes; flagged: yes, 155 ms after the rule's threshold; stop: 1 click, 1 key, KLM 4.68 s, stopped with no retry; recorded 10000000 of the stub's 10000000, pass |
 | H4s | Lost telemetry: stale | state in words: no; drawn as zero: no; Now item: no; sentence says not counted: no, fail | state in words: yes; drawn as zero: no; Now item: yes; sentence says not counted: yes, pass |
 | H4s | Lost telemetry: unavailable | state in words: no; drawn as zero: no; Now item: no; sentence says not counted: no, fail | state in words: yes; drawn as zero: no; Now item: no; sentence says not counted: yes, pass |
-| H4p | Pause dispatch | no command on this base | no command on main, skipped |
+| H4p | Pause dispatch | no path: the board has no pause control, fail | 1 click, 1 key, KLM 4.68 s without typing; sentence leads: yes; project show: yes; claim refused: yes; floor kept: yes; resumed: yes, pass |
 | H5 | See spend, 3840x1080 | used shown, rate not shown, projection not shown, top not shown; freshness shown, fail | used shown, rate shown, projection shown, top shown; freshness shown, pass |
 | H5 | See spend, 1920x1080 | used shown, rate not shown, projection not shown, top not shown; freshness shown, fail | used shown, rate shown, projection shown, top shown; freshness shown, pass |
 | H5 | See spend, 1280x800 | used shown, rate not shown, projection not shown, top not shown; freshness shown, fail | used shown, rate shown, projection shown, top shown; freshness shown, pass |
@@ -59,7 +59,7 @@ Tower Crane benches what agents do. This page benches what the owner does on the
 | H6 | Steer an agent | no path: the board reaches the orchestrator only (task comment); msg --to the agent is CLI-only, fail | 1 click, 1 key, 0 scrolls, KLM 4.68 s without typing, pass |
 | H7 | Return after absence | named 6 of 6; grouped by meaning: no; heading contradicts: no, fail | named 6 of 6; grouped by meaning: yes; heading contradicts: no, pass |
 | H8 | Calm run, light and dark | alarm or attention hue: 0/0; motion after load: 1/1 (breathe on conn); says nothing needs you: yes, fail | alarm or attention hue: 0/0; motion after load: 0/0; says nothing needs you: yes, pass |
-| H9 | Mode parity (H2, H3, H6) | compared H2, H3; mismatches 0; H6 has no board path, pass | compared H2, H3, H6; mismatches 0, pass |
+| H9 | Mode parity (H2, H3, H4p, H6) | compared H2, H3; mismatches 0; no board path: H4p, H6, pass | compared H2, H3, H6, H4p; mismatches 0, pass |
 
 Checks on the front room with the busy run, per size and theme (failures of checked):
 
@@ -73,16 +73,16 @@ Checks on the front room with the busy run, per size and theme (failures of chec
 | before | 1280x800 dark | 0 of 198 | 7 of 20 | 1 of 43, 0 short buttons | 0 unnamed, 1 h1 | 6 sizes (11, 12, 13, 14, 16, 20), min 11, 5% under 12 px, 0 clipped, 0 long lines | - |
 | before | 390x844 light | 0 of 58 | 7 of 20 | 0 of 20, 0 short buttons | 0 unnamed, 1 h1 | 6 sizes (11, 12, 13, 14, 16, 20), min 11, 0.8% under 12 px, 0 clipped, 0 long lines | - |
 | before | 390x844 dark | 0 of 58 | 7 of 20 | 0 of 20, 0 short buttons | 0 unnamed, 1 h1 | 6 sizes (11, 12, 13, 14, 16, 20), min 11, 0.8% under 12 px, 0 clipped, 0 long lines | - |
-| after | 3840x1080 light | 0 of 194 | 0 of 20 | 0 of 73, 0 short buttons | 0 unnamed, 1 h1 | 5 sizes (12, 13, 15, 17, 28), min 12, 0% under 12 px, 0 clipped, 0 long lines | 78.8% |
-| after | 3840x1080 dark | 0 of 194 | 0 of 20 | 0 of 73, 0 short buttons | 0 unnamed, 1 h1 | 5 sizes (12, 13, 15, 17, 28), min 12, 0% under 12 px, 0 clipped, 0 long lines | 78.8% |
-| after | 1920x1080 light | 0 of 194 | 0 of 20 | 0 of 73, 0 short buttons | 0 unnamed, 1 h1 | 5 sizes (12, 13, 15, 17, 28), min 12, 0% under 12 px, 0 clipped, 0 long lines | - |
-| after | 1920x1080 dark | 0 of 194 | 0 of 20 | 0 of 73, 0 short buttons | 0 unnamed, 1 h1 | 5 sizes (12, 13, 15, 17, 28), min 12, 0% under 12 px, 0 clipped, 0 long lines | - |
-| after | 1280x800 light | 0 of 119 | 0 of 20 | 0 of 46, 0 short buttons | 0 unnamed, 1 h1 | 5 sizes (12, 13, 15, 17, 28), min 12, 0% under 12 px, 0 clipped, 0 long lines | - |
-| after | 1280x800 dark | 0 of 119 | 0 of 20 | 0 of 46, 0 short buttons | 0 unnamed, 1 h1 | 5 sizes (12, 13, 15, 17, 28), min 12, 0% under 12 px, 0 clipped, 0 long lines | - |
-| after | 390x844 light | 0 of 54 | 0 of 20 | 0 of 20, 0 short buttons | 0 unnamed, 1 h1 | 5 sizes (12, 13, 15, 17, 21), min 12, 0% under 12 px, 0 clipped, 0 long lines | - |
-| after | 390x844 dark | 0 of 54 | 0 of 20 | 0 of 20, 0 short buttons | 0 unnamed, 1 h1 | 5 sizes (12, 13, 15, 17, 21), min 12, 0% under 12 px, 0 clipped, 0 long lines | - |
+| after | 3840x1080 light | 0 of 200 | 0 of 20 | 0 of 78, 0 short buttons | 0 unnamed, 1 h1 | 5 sizes (12, 13, 15, 17, 28), min 12, 0% under 12 px, 0 clipped, 0 long lines | 77.1% |
+| after | 3840x1080 dark | 0 of 200 | 0 of 20 | 0 of 78, 0 short buttons | 0 unnamed, 1 h1 | 5 sizes (12, 13, 15, 17, 28), min 12, 0% under 12 px, 0 clipped, 0 long lines | 77.1% |
+| after | 1920x1080 light | 0 of 200 | 0 of 20 | 0 of 78, 0 short buttons | 0 unnamed, 1 h1 | 5 sizes (12, 13, 15, 17, 28), min 12, 0% under 12 px, 0 clipped, 0 long lines | - |
+| after | 1920x1080 dark | 0 of 200 | 0 of 20 | 0 of 78, 0 short buttons | 0 unnamed, 1 h1 | 5 sizes (12, 13, 15, 17, 28), min 12, 0% under 12 px, 0 clipped, 0 long lines | - |
+| after | 1280x800 light | 0 of 125 | 0 of 20 | 0 of 51, 0 short buttons | 0 unnamed, 1 h1 | 5 sizes (12, 13, 15, 17, 28), min 12, 0% under 12 px, 0 clipped, 0 long lines | - |
+| after | 1280x800 dark | 0 of 125 | 0 of 20 | 0 of 51, 0 short buttons | 0 unnamed, 1 h1 | 5 sizes (12, 13, 15, 17, 28), min 12, 0% under 12 px, 0 clipped, 0 long lines | - |
+| after | 390x844 light | 0 of 59 | 0 of 20 | 0 of 24, 0 short buttons | 0 unnamed, 1 h1 | 5 sizes (12, 13, 15, 17, 21), min 12, 0% under 12 px, 0 clipped, 0 long lines | - |
+| after | 390x844 dark | 0 of 59 | 0 of 20 | 0 of 24, 0 short buttons | 0 unnamed, 1 h1 | 5 sizes (12, 13, 15, 17, 21), min 12, 0% under 12 px, 0 clipped, 0 long lines | - |
 
-The other rooms, a task sheet and Settings, at all four sizes in both themes (checks passed of run):
+The other rooms, a task sheet, Settings and Controls, at all four sizes in both themes (checks passed of run):
 
 | Room | Before | After |
 |---|---|---|
@@ -92,15 +92,16 @@ The other rooms, a task sheet and Settings, at all four sizes in both themes (ch
 | Task sheet | 24 of 40 (fails: color alone, readability) | 40 of 40 |
 | Settings | 32 of 40 (fails: readability) | 40 of 40 |
 | Review | no such room | 40 of 40 |
+| Controls | no such room | 40 of 40 |
 
 | Check | Before | After |
 |---|---|---|
-| Keyboard: H2 and H6 actions reached by Tab with a ring; Escape closes a sheet and returns focus | 1 of 2 (missing: form[data-api='/api/decisions/D1/answer'] input[name='note']); sheet ok, fail | 3 of 3 in 46 tabs; sheet ok, pass |
+| Keyboard: H2 and H6 actions reached by Tab with a ring; Escape closes a sheet and returns focus | 1 of 2 (missing: form[data-api='/api/decisions/D1/answer'] input[name='note']); sheet ok, fail | 3 of 3 in 48 tabs; sheet ok, pass |
 | One room at a time, 1920x1080: nav, direct link, sheet inside, cleared fragment, live update | 20 of 20, pass | 25 of 25, pass |
 | One room at a time, 390x844: nav, direct link, sheet inside, cleared fragment, live update | 20 of 20, pass | 25 of 25, pass |
 | Reduced motion: running animations after load | 0, pass | 0, pass |
 
-Runs: before 2026-10-11 20:05Z on `before-tree`, after 2026-10-11 20:01Z. Errors recorded: before 0, after 0.
+Runs: before 2026-10-11 21:49Z on `before-tree`, after 2026-10-11 21:44Z. Errors recorded: before 0, after 0.
 
 <!-- /results -->
 
@@ -111,21 +112,22 @@ Runs: before 2026-10-11 20:05Z on `before-tree`, after 2026-10-11 20:01Z. Errors
 - **Judge a review.** The finding, the gate receipts and the send-back field are on one Review row: no scrolling, against 711 px and three scrolls before.
 - **Approve a change.** Before, the request was raw JSON and approving it meant making the change at the terminal. After, it reads as a sentence, and Approve is one click: the owner's `approve` from the board, then the orchestrator's retry of its command applies the recorded change once, with a `setting` event that names the decision in `approved_by`. T70's bar asked for that setting event in `mode: board`; under main's authority model the orchestrator makes the change after the owner approves, so it is `mode: cli`. The owner can still make the change themselves from the item's command, which answers the request too.
 - **Stop a runaway.** Before, the live spend rose on the card but nothing flagged it and the board had no way to stop it. After, the spend rule (`lib/runaway.js`, the same flags `status` prints) puts it in the queue as a Now item well under a second after the live total crosses the rule. Stop on its row opens the confirmation with the cursor in its reason field, and Enter there confirms: one click and one key (M P B B, M H K), 4.68 s against the 5 s bar, through `interrupt`, with no retry. The same write sets an owner ask, so dispatch does not restart the task; the row reads *stopped, waiting on you* with Resume (`owner-done`). After exit the recorded spend matches the stub's own total (10M of 10M).
+- **Pause dispatch.** Before, the board had no pause. After, `Pause dispatch` sits beside the status sentence; opening it puts the cursor in its reason field and Enter pauses: one click and one key plus typing, 4.68 s without typing, against T70's bar of two actions plus typing. The sentence and the tab title then lead with `Paused: owner is inspecting the run`, `project show` reports the reason, a new `claim` is refused, every agent row stays on the floor, and `Resume dispatch` clears it. The same command from the CLI gives the same state and `setting` event, apart from `mode` (H9). Ready work stays listed as ready, held by the pause, so the pause is named once and not as every blocked task's reason.
 - **Lost telemetry and spend.** A stale reading and an unavailable one are drawn in words, never as zero, and the status sentence counts the agents it cannot count. The bench found that an open page never aged a reading that stopped arriving, because nothing changed on disk; the page now ages live readings and asks for a fresh render once one passes its stale limit, which raises the Now item. Budget used, burn rate, projection and the top spender are on every page's spend line, with how fresh the live number is, in the first viewport at all four sizes; on a phone that is the Now room, where T70's bar allows one tab. Before, only the used total was on the primary screen, and on a phone it was below the first viewport.
 - **Steer.** The agent row's Message reaches the claimant through `msg`; before there was no board path to an agent. Opening Message puts the cursor in its field, so the path is one click, the text, then Enter: two actions plus typing, the bar, at 4.68 s without typing.
-- **Readability and calm.** Before, the front room used six sizes from 11 px, with 5 to 7% of its text under 12 px, and every other room failed a readability check. After, every room, the task sheet and Settings pass at all four sizes in both themes: five sizes from 12 px (12, 13, 15, 17 and 28, with 21 for room titles), body text 15 px, no line over 80 characters, no clipped text. The clipping check now also measures the text inside inputs and selects against their own box, which found Settings' effort, harness and placeholder values cut off and a decision note's placeholder cut off on a phone; both fit now. Status glyphs that relied on color alone went from 7 of 20 to none. The calm run shows no alarm or attention hue and no motion; the old breathing dot is gone.
+- **Readability and calm.** Before, the front room used six sizes from 11 px, with 5 to 7% of its text under 12 px, and every other room failed a readability check. After, every room, the task sheet, Settings and Controls pass at all four sizes in both themes: five sizes from 12 px (12, 13, 15, 17 and 28, with 21 for room titles), body text 15 px, no line over 80 characters, no clipped text. The clipping check now also measures the text inside inputs and selects against their own box, which found Settings' effort, harness and placeholder values cut off and a decision note's placeholder cut off on a phone; both fit now. Status glyphs that relied on color alone went from 7 of 20 to none. The calm run shows no alarm or attention hue and no motion; the old breathing dot is gone.
 
 ## Limits
 
-- **Pause has no command.** `project set --paused` is not on main, so H4p is recorded as no command on both builds.
+- **Controls keeps T91's groups.** Controls is drawn in the board's system, but its forms keep T91's grouping (project, agents, tasks) and Settings stays its own page; T70's grouping by intent (human-experience.md 5.1) is not built, so no scenario measures it.
 - **No measured human time.** The owner runs each scenario on the after build, cold, three times; the bench does not stand in for that.
 - **No large-plan fixture.** The 200-task, 20,000-event fixture of the plan was not run: every CLI write re-renders the board under the lock, so building it through the CLI takes most of an hour. Plan rendering at that size is not measured here.
 - **Machine load.** Both runs shared the machine with other sessions (load 15 to 25). Wall times are not compared between builds; counts and predictions are.
-- **One run per build.** Each scenario ran once per build at the sizes shown, both builds on 2026-10-11 between 19:52Z and 20:10Z. Each build ran in two `--only` parts: the read-only steps on the busy run (H1, the checks, every room, motion, keyboard, H7 and one room at a time), then the steps that write (H2 with its reach check, H2a, H3, H6, H9, H4, H4s, H5 and H8). The after build's second part ran beside the before build's first. The deterministic bars are also assertions in `test/board.test.js` (contrast, targets, names, readability with control clipping and line length, the theme switch and no empty boxes, at the four sizes in both themes on every room; one room at a time; the queue order; routing; Enter and refused writes).
+- **One run per build.** Each scenario ran once per build at the sizes shown. The before build ran on 2026-10-11 between 19:52Z and 20:10Z, and its H4p, the one step whose code changed since, at 21:50Z. The after build ran in full at `cfebe49` between 21:42Z and 21:49Z, in three `--only` parts: the read-only steps on the busy run (H1, the checks, motion, keyboard, H7 and one room at a time), every room, then the steps that write (H2 with its reach check, H2a, H3, H4p, H6, H9, H4, H4s, H5 and H8). The deterministic bars are also assertions in `test/board.test.js` (contrast, targets, names, readability with control clipping and line length, the theme switch and no empty boxes, at the four sizes in both themes on every room; one room at a time; the queue order; routing; Enter and refused writes).
 
 ## Screenshots
 
-Every room, a task sheet and Settings at every size and theme, and the end state of each scenario: [before/](human-bench/before/), [after/](human-bench/after/). File names are `ROOM-SIZE-THEME.webp`, with the front room as `front-`.
+Every room, a task sheet, Settings and Controls at every size and theme, and the end state of each scenario: [before/](human-bench/before/), [after/](human-bench/after/). File names are `ROOM-SIZE-THEME.webp`, with the front room as `front-`.
 
 | Before, 1920x1080 light | After, 1920x1080 light |
 |---|---|
