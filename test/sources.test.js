@@ -194,7 +194,8 @@ test('the source fetch refuses non-public addresses and redirects before connect
 test('research kind requires sources and citation review on every tier, including after a tier move', async (t) => {
   const { h, submit } = await fixture(t, 'easy');
   const sha = submit();
-  h.ok(['evidence', 'T1', '--agent', 'reviewer', '--type', 'review', '--ok', '--sha', sha]);
+  h.reviewer('T1', 'reviewer', sha);
+  h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--agent', 'reviewer', '--type', 'review', '--ok', '--sha', sha]);
   const tiers = ['easy', 'medium', 'hard', 'research'];
   for (const tier of tiers) {
     h.ok(['task', 'update', 'T1', '--tier', tier]);
@@ -227,12 +228,20 @@ test('sources gate follows research kind when kind changes without moving the ta
   h.ok(['claim', 'T1', '--agent', 'worker']);
   const sha = h.git(['rev-parse', 'HEAD']);
   h.ok(['submit', 'T1', '--agent', 'worker', '--sha', sha]);
-  h.ok(['evidence', 'T1', '--agent', 'reviewer', '--type', 'review', '--ok', '--sha', sha]);
+  h.reviewer('T1', 'reviewer', sha);
+  h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--agent', 'reviewer', '--type', 'review', '--ok', '--sha', sha]);
   assert.equal(h.json(['task', 'show', 'T1']).tier, 'medium');
   assert.equal(h.json(['task', 'show', 'T1']).gates.ok, false);
   h.ok(['task', 'update', 'T1', '--tier', 'research']);
   assert.equal(h.json(['task', 'show', 'T1']).gates.gates.find(g => g.type === 'sources').ok, false);
   changeKind(h, 'docs');
+  const reworked = h.json(['task', 'show', 'T1']);
+  assert.equal(reworked.revision, 2);
+  assert.equal(reworked.evidence[0].revision, 1);
+  assert.equal(reworked.gates.ok, false, 'the review from before rework remains stale');
+  assert.ok(!reworked.gates.gates.some(g => g.type === 'sources'));
+  h.reviewer('T1', 'reviewer', sha);
+  h.ok(['evidence', 'T1', '--agent', 'reviewer', '--type', 'review', '--ok', '--sha', sha, '--revision', h.revision('T1')]);
   assert.equal(h.json(['task', 'show', 'T1']).gates.ok, true);
 });
 

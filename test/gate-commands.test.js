@@ -119,7 +119,8 @@ for (const type of ['tests', 'clean']) {
     pin(h);
     h.ok(['check', 'tests', 'T1']);
     h.ok(['check', 'clean', 'T1']);
-    h.ok(['evidence', 'T1', '--type', 'review', '--ok', '--sha', sha, '--agent', 'reviewer']);
+    h.reviewer('T1', 'reviewer', sha);
+    h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--ok', '--sha', sha, '--agent', 'reviewer']);
     const previous = h.readState('project.json').gates[`${type}_cmd`];
     const changed = `${previous} `;
     // A semantic change to the shell command, preserving fixture behavior.
@@ -196,7 +197,8 @@ for (const type of ['tests', 'clean']) {
     pin(h);
     h.ok(['check', 'tests', 'T1']);
     h.ok(['check', 'clean', 'T1']);
-    h.ok(['evidence', 'T1', '--type', 'review', '--ok', '--sha', sha, '--agent', 'reviewer']);
+    h.reviewer('T1', 'reviewer', sha);
+    h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--ok', '--sha', sha, '--agent', 'reviewer']);
     h.ok(['accept', 'T1']);
     const entries = () => h.ok(['task', 'show', 'T1']).split('\n').filter((line) => line.startsWith(`  - ${type} ok at`));
     const sheet = () => fs.readFileSync(path.join(h.state, 'sketch.html'), 'utf8').match(/<article id="T1"[\s\S]*?<\/article>/)[0];
@@ -295,8 +297,10 @@ for (const [name, before, change] of [
     if (before.length) h.ok(['project', 'set', ...before]);
     h.ok(['check', 'tests', 'T1']);
     h.ok(['check', 'clean', 'T1']);
-    h.ok(['evidence', 'T1', '--type', 'review', '--ok', '--sha', sha, '--agent', 'reviewer']);
+    h.reviewer('T1', 'reviewer', sha);
+    h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--ok', '--sha', sha, '--agent', 'reviewer']);
     h.ok(['accept', 'T1']);
+    assert.equal(h.readState('tasks.json').tasks[0].status, 'accepted');
     h.ok(['project', 'set', ...change]);
     assert.equal(shown(h, 'tests').ok, false);
     assert.match(shown(h, 'tests').reason, /tests paths, keep, expensive, map or required CI setting/);

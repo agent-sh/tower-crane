@@ -7,6 +7,7 @@ const path = require('node:path');
 const cp = require('node:child_process');
 const { makeRepo, ROOT, BIN, detachedAlive } = require('./helpers');
 const A = require('../lib/agents');
+const S = require('../lib/state');
 const TOML = require('../lib/toml');
 
 const STUB = path.join(__dirname, 'fixtures', 'harness-stub.js');
@@ -42,7 +43,7 @@ function plant(h) {
     '[mcp_servers.planted]', 'command = "planted-mcp"', '',
     '[mcp_servers.planted.env]', `TOKEN = "${SECRET}-MCP"`, '',
   ].join('\n'));
-  put('.codex/sol.config.toml', [
+  put('.codex/fixture-main.config.toml', [
     'model = "s"', `experimental_bearer_token = "${SECRET}-PROFILE"`,
     `model_instructions_file = ${JSON.stringify(path.join(home, 'instructions.md'))}`,
     `model_providers = { r = { name = "R", experimental_bearer_token = "${SECRET}-PROFILE-INLINE" } }`, '',
@@ -150,6 +151,10 @@ function spawn(h, u, role, env = {}, opts = {}) {
     h.ok(['claim', 'T1', '--agent', 'builder']);
     h.ok(['submit', 'T1', '--sha', h.git(['rev-parse', 'HEAD']), '--agent', 'builder']);
   }
+  // A worker needs a task it can claim; an earlier review spawn leaves T1 submitted.
+  if (['easy', 'medium', 'hard', 'research'].includes(role) && h.readState('tasks.json').tasks[0].status === 'submitted') {
+    h.ok(['rework', 'T1', '--reason', `probe the ${role} rung`]);
+  }
   const r = h.run(['spawn', '--role', role, '--task', 'T1', '--wait', '--json'], { ...opts, env: { ...u.env, ...env } });
   assert.equal(r.code, 0, r.stderr);
   return JSON.parse(r.stdout);
@@ -189,7 +194,7 @@ function decide(h, cwd, jobs, branch, cases) {
 }
 
 const isolated = (h, rung, harness) => {
-  const model = harness === 'claude' ? ['--model', 'opus', '--clear', 'profile'] : ['--profile', 'sol', '--clear', 'model'];
+  const model = harness === 'claude' ? ['--model', 'fixture-large', '--clear', 'profile'] : ['--profile', 'fixture-main', '--clear', 'model'];
   h.ok(['ladder', 'set', rung, '--harness', harness, ...model, '--clear', 'effort', '--clear', 'args']);
 };
 
@@ -222,14 +227,14 @@ test('codex worker configs keep named provider and MCP fields without copying cr
       malformed: { args: [{ opaque_value: SECRET }], env_vars: [{ opaque_value: SECRET }] },
     },
   };
-  for (const file of ['config.toml', 'sol.config.toml']) {
+  for (const file of ['config.toml', 'fixture-main.config.toml']) {
     fs.writeFileSync(path.join(u.home, '.codex', file), TOML.stringify(doc));
   }
   isolated(h, 'medium', 'codex');
   h.ok(['ladder', 'set', 'medium', '--mcp', '["planted","malformed"]']);
   const started = spawn(h, u, 'medium');
   noSecretsCopied(h);
-  for (const file of ['config.toml', 'sol.config.toml']) {
+  for (const file of ['config.toml', 'fixture-main.config.toml']) {
     const config = JSON.parse(JSON.stringify(TOML.parse(fs.readFileSync(path.join(h.state, 'homes', started.agent, file), 'utf8'))));
     assert.deepEqual(config.model_providers, { p: provider, malformed: {} }, file);
     assert.deepEqual(config.mcp_servers, { planted: server, malformed: {} }, file);
@@ -245,13 +250,13 @@ test('codex spawns reject credential tables in scalar settings in base and every
   };
   const malformed = { model: [credentials], model_reasoning_effort: 7, model_verbosity: true };
   const doc = { ...safe, ...malformed, profiles: { safe: { model: 'legacy', ...safe }, malformed } };
-  for (const file of ['config.toml', 'sol.config.toml']) {
+  for (const file of ['config.toml', 'fixture-main.config.toml']) {
     fs.writeFileSync(path.join(u.home, '.codex', file), TOML.stringify(doc));
   }
   isolated(h, 'medium', 'codex');
   const started = spawn(h, u, 'medium');
   noSecretsCopied(h);
-  for (const file of ['config.toml', 'sol.config.toml']) {
+  for (const file of ['config.toml', 'fixture-main.config.toml']) {
     const config = JSON.parse(JSON.stringify(TOML.parse(fs.readFileSync(path.join(h.state, 'homes', started.agent, file), 'utf8'))));
     for (const [key, value] of Object.entries(safe)) assert.equal(config[key], value, `${file}: ${key}`);
     for (const key of Object.keys(malformed)) assert.equal(config[key], undefined, `${file}: ${key}`);
@@ -316,7 +321,7 @@ const PROVIDERS_KEPT = {
   'amazon-bedrock': { aws: { region: 'us-east-1', profile: 'work' } },
   azure: { ...PROVIDERS.azure, query_params: { 'api-version': '2025-04-01-preview' } },
 };
-const BEDROCK_CONFIG = { model: 'openai.gpt-oss-120b', model_provider: 'amazon-bedrock', model_providers: PROVIDERS };
+const BEDROCK_CONFIG = { model: 'openai.fixture-model', model_provider: 'amazon-bedrock', model_providers: PROVIDERS };
 
 test('codex provider sub-tables keep their named non-credential fields', () => {
   const filtered = A.codexConfig(TOML.parse(TOML.stringify(BEDROCK_CONFIG)), []).doc;
@@ -326,7 +331,7 @@ test('codex provider sub-tables keep their named non-credential fields', () => {
 
 test('a codex spawn on Bedrock starts with the region from the user config', { skip: NO_STUBS }, (t) => {
   const { h, u } = setup(t);
-  for (const file of ['config.toml', 'sol.config.toml']) {
+  for (const file of ['config.toml', 'fixture-main.config.toml']) {
     fs.writeFileSync(path.join(u.home, '.codex', file), TOML.stringify(BEDROCK_CONFIG));
   }
   isolated(h, 'medium', 'codex');
@@ -337,7 +342,7 @@ test('a codex spawn on Bedrock starts with the region from the user config', { s
   const home = path.join(h.state, 'homes', started.agent);
   const { args: spawned, config } = u.report();
   assert.deepEqual(config.model_providers, PROVIDERS_KEPT);
-  const profile = TOML.parse(fs.readFileSync(path.join(home, 'sol.config.toml'), 'utf8'));
+  const profile = TOML.parse(fs.readFileSync(path.join(home, 'fixture-main.config.toml'), 'utf8'));
   assert.deepEqual(JSON.parse(JSON.stringify(profile.model_providers)), PROVIDERS_KEPT);
   // An installed codex also loads the generated home with the spawn's -c
   // overrides, so a field it refuses fails here instead of at dispatch.
@@ -513,6 +518,45 @@ test('sandbox owner-key denials use the project binding after the caller changes
   }
 });
 
+test('unbound projects spawn workers and reviewers with owner-key denials but still refuse headless owner access', { skip: NO_STUBS }, (t) => {
+  for (const harness of ['claude', 'codex']) {
+    const { h, u } = setup(t);
+    for (const rung of ['easy', 'medium', 'hard', 'review']) isolated(h, rung, harness);
+    h.ok(['task', 'update', 'T1', '--kind', 'docs']);
+    const project = h.readState('project.json');
+    delete project.owner_config_dir;
+    h.writeState('project.json', project);
+    const callerConfig = harness === 'claude' ? path.join(h.base, 'caller-config', 'config.json') : '';
+    const env = { TOWER_CRANE_AGENT: 'orchestrator', TOWER_CRANE_CONFIG: callerConfig };
+    const configDir = callerConfig ? path.dirname(callerConfig) : path.join(u.home, '.config', 'tower-crane');
+    const ownerDir = path.join(configDir, 'owner');
+    assert.equal(fs.existsSync(ownerDir), false);
+    for (const role of ['hard', 'review']) {
+      if (role === 'review') {
+        const opts = { env: { TOWER_CRANE_AGENT: 'builder' } };
+        h.ok(['claim', 'T1', '--agent', 'builder'], opts);
+        h.ok(['submit', 'T1', '--sha', h.git(['rev-parse', 'HEAD']), '--agent', 'builder'], opts);
+      }
+      spawn(h, u, role, env);
+      assert.ok(fs.statSync(ownerDir).isDirectory());
+      const seen = u.report();
+      if (harness === 'claude') {
+        assert.ok(seen.settings.sandbox.filesystem.denyRead.includes(ownerDir));
+        const posix = ownerDir.split(path.sep).join('/');
+        for (const tool of ['Read', 'Grep', 'Glob']) {
+          assert.ok(seen.settings.permissions.deny.includes(`${tool}(/${posix}/**)`));
+        }
+      } else {
+        assert.equal(seen.config.permissions['tower-crane'].filesystem[ownerDir], 'none');
+      }
+      assert.equal(h.readState('project.json').owner_config_dir, undefined);
+    }
+    const denied = h.run(['project', 'show']);
+    assert.equal(denied.code, 1, denied.stderr);
+    assert.match(denied.stderr, /project.json has no valid owner_config_dir/);
+  }
+});
+
 test('a spawned codex agent is pointed at the user\'s global rules, loads none of the user memory, instructions, MCP servers or rules, and reaches auth through a link', { skip: NO_STUBS }, (t) => {
   const { h, u } = setup(t);
   isolated(h, 'small', 'codex');
@@ -536,7 +580,7 @@ test('a spawned codex agent is pointed at the user\'s global rules, loads none o
   assert.deepEqual(Object.keys(seen.config.hooks).sort(), ['PostToolUse', 'Stop', 'UserPromptSubmit']);
   const home = path.join(h.state, 'homes', started.agent);
   for (const f of ['auth.json', '.env']) assert.ok(fs.lstatSync(path.join(home, f)).isSymbolicLink(), `${f} is linked`);
-  assert.equal(fs.readFileSync(path.join(home, 'sol.config.toml'), 'utf8'), 'model = "s"\n\n[model_providers.r]\nname = "R"\n', 'the profile without its tokens or instructions');
+  assert.equal(fs.readFileSync(path.join(home, 'fixture-main.config.toml'), 'utf8'), 'model = "s"\n\n[model_providers.r]\nname = "R"\n', 'the profile without its tokens or instructions');
   assert.equal(fs.statSync(path.join(home, 'config.toml')).mode & 0o777, 0o600);
   assert.equal(seen.home, path.join(home, 'home'), 'HOME is the agent\'s own');
   assert.deepEqual(seen.skills, [], 'no user skill from ~/.agents/skills, and the small role has none of its own');
@@ -593,7 +637,7 @@ test('browser tasks attach the user kit on every rung with approved tools and no
   fs.writeFileSync(path.join(u.home, '.claude', 'mcp.json'), JSON.stringify({ mcpServers: definitions }));
   const config = path.join(u.home, '.codex', 'config.toml');
   fs.appendFileSync(config, '\n' + TOML.stringify({ mcp_servers: definitions }));
-  fs.appendFileSync(path.join(u.home, '.codex', 'sol.config.toml'), '\n' + TOML.stringify({
+  fs.appendFileSync(path.join(u.home, '.codex', 'fixture-main.config.toml'), '\n' + TOML.stringify({
     mcp_servers: { playwright: {
       command: 'profile-browser-mcp', enabled: false, default_tools_approval_mode: 'prompt',
       env_vars: [SECRET], env_http_headers: { Authorization: SECRET },
@@ -627,7 +671,7 @@ test('browser tasks attach the user kit on every rung with approved tools and no
       assert.deepEqual(seen.config.mcp_servers.playwright, {
         command: 'browser-mcp', args: ['--headless'], enabled: true, default_tools_approval_mode: 'approve',
       });
-      const profile = TOML.parse(fs.readFileSync(path.join(h.state, 'homes', started.agent, 'sol.config.toml'), 'utf8')).mcp_servers.playwright;
+      const profile = TOML.parse(fs.readFileSync(path.join(h.state, 'homes', started.agent, 'fixture-main.config.toml'), 'utf8')).mcp_servers.playwright;
       assert.equal(profile.enabled, true);
       assert.equal(profile.default_tools_approval_mode, 'approve');
       assert.equal(profile.tools.browser_navigate.approval_mode, 'approve');
@@ -1375,6 +1419,8 @@ test('a codex agent writes only where its agent file says; a worker writes its g
     assert.ok(!visible(path.join(h.state, 'brokers', 'worker-T9-1', 'broker.json')), `${rung}: another agent's token is hidden`);
     assert.equal(config.permissions['tower-crane'].network.enabled, true);
   }
+  // The codex loop left T1 submitted; a worker needs a task it can claim.
+  h.ok(['rework', 'T1', '--reason', 'probe the claude rungs']);
   for (const [rung, writes] of [['hard', true], ['small', false]]) {
     isolated(h, rung, 'claude');
     spawn(h, u, rung);
@@ -1531,9 +1577,10 @@ for (const [command, args, opts] of calls) {
   assert.equal(policy.repo, 'acme/app');
   const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
   assert.equal(events.find((e) => e.cmd === 'spawn').detail.tool.sha, toolSha);
-  for (const cmd of ['hook git-push', 'hook pr-created', 'hook report', 'hook progress']) {
+  for (const cmd of ['hook git-push', 'hook pr-created', 'hook report']) {
     assert.ok(events.some((e) => e.cmd === cmd && e.agent === started.agent), cmd);
   }
+  assert.match(fs.readFileSync(S.progressFile(h.state, started.agent), 'utf8'), /"cmd":"hook progress"/);
 });
 
 test('the shim migrates a pre-T112 policy using recorded state and refuses unbound migrations', { skip: NO_STUBS }, (t) => {
@@ -1867,7 +1914,7 @@ test('an isolated reviewer posts through gh, records evidence in a symlinked sta
   const fixture = path.join(h.base, 'fixture');
   const run = [
     ['gh', 'pr', 'comment', '1', '--body', 'Review (tower-crane, clean context)'],
-    [process.execPath, BIN, 'evidence', 'T1', '--type', 'review', '--ok', '--sha', 'abcdef1', '--summary', 'nothing blocks'],
+    [process.execPath, BIN, 'evidence', 'T1', '--type', 'review', '--ok', '--sha', '50b732a15be40ccb2065cb2ba0e7b366d511b736', '--revision', '1', '--summary', 'nothing blocks'],
     ['git', 'init', '-q', fixture],
     ['git', '-C', fixture, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '--allow-empty', '-m', 'fixture'],
     ['git', 'init', '-q', '--bare', `${fixture}.git`],
@@ -1946,7 +1993,7 @@ test('a sandboxed agent changes the state only through its spawn\'s broker: as i
     fs.rmSync(fixture, { recursive: true, force: true });
   }
   isolated(h, 'hard', 'claude');
-  const worker = spawn(h, u, 'hard', { STUB_RUN: JSON.stringify([cli('claim', 'T1'), cli('evidence', 'T1', '--type', 'review', '--ok', '--sha', 'abcdef1')]) }).agent;
+  const worker = spawn(h, u, 'hard', { STUB_RUN: JSON.stringify([cli('claim', 'T1'), cli('evidence', 'T1', '--type', 'review', '--ok', '--sha', '50b732a15be40ccb2065cb2ba0e7b366d511b736')]) }).agent;
   assert.deepEqual(u.report().ran.map((r) => r.code), [0, 1], JSON.stringify(u.report().ran.map((r) => r.stderr)));
   const [t1, t2] = h.readState('tasks.json').tasks;
   assert.equal(t1.claim.agent, worker, 'the worker claimed as itself');
@@ -2100,8 +2147,8 @@ test('a codex rework resumes in a fresh isolated home and finds its first sessio
   const home = path.join(h.state, 'homes', first.agent);
   fs.writeFileSync(path.join(home, 'AGENTS.md'), 'PLANTED-BY-AGENT\n');
   h.ok(['claim', 'T1', '--agent', first.agent]);
-  h.ok(['submit', 'T1', '--sha', 'abcdef1', '--agent', first.agent]);
-  h.ok(['evidence', 'T1', '--type', 'review', '--fail', '--sha', 'abcdef1', '--agent', 'reviewer-T1-1', '--summary', 'redo']);
+  h.ok(['submit', 'T1', '--sha', '50b732a15be40ccb2065cb2ba0e7b366d511b736', '--agent', first.agent]);
+  h.ok(['evidence', 'T1', '--type', 'review', '--fail', '--sha', '50b732a15be40ccb2065cb2ba0e7b366d511b736', '--revision', h.revision('T1'), '--agent', 'reviewer-T1-1', '--summary', 'redo']);
   h.ok(['rework', 'T1', '--reason', 'redo']);
   const next = spawn(h, u, 'medium');
   assert.equal(next.resumed, true);
@@ -2131,7 +2178,7 @@ test('a spawn started inside another agent links to the user\'s own files, so re
 
 test('a rung opts back in to a named tool and MCP server, shown by spawn --dry-run', (t) => {
   const { h, u } = setup(t);
-  h.ok(['ladder', 'set', 'small', '--harness', 'claude', '--model', 'opus', '--clear', 'profile', '--clear', 'effort', '--tools', '["WebFetch"]', '--mcp', '["planted"]']);
+  h.ok(['ladder', 'set', 'small', '--harness', 'claude', '--model', 'fixture-large', '--clear', 'profile', '--clear', 'effort', '--tools', '["WebFetch"]', '--mcp', '["planted"]']);
   let dry = h.json(['spawn', '--role', 'small', '--task', 'T1', '--dry-run'], { env: u.env });
   assert.equal(dry.argv[dry.argv.indexOf('--tools') + 1], 'Bash,Read,Grep,Glob,WebFetch');
   assert.ok(!dry.argv.includes('WebFetch'), 'no longer denied');
@@ -2144,7 +2191,7 @@ test('a rung opts back in to a named tool and MCP server, shown by spawn --dry-r
     assert.deepEqual(u.report().mcp, { planted: { command: 'planted-mcp', args: ['x'] } }, 'the server, without its env');
   }
 
-  h.ok(['ladder', 'set', 'small', '--harness', 'codex', '--profile', 'sol', '--clear', 'model', '--tools', '["web_search","multi_agent"]', '--mcp', '["planted"]']);
+  h.ok(['ladder', 'set', 'small', '--harness', 'codex', '--profile', 'fixture-main', '--clear', 'model', '--tools', '["web_search","multi_agent"]', '--mcp', '["planted"]']);
   dry = h.json(['spawn', '--role', 'small', '--task', 'T1', '--dry-run'], { env: u.env });
   assert.ok(!dry.argv.includes('web_search="disabled"'));
   assert.ok(!dry.argv.join(' ').includes('--disable multi_agent'));
@@ -2180,7 +2227,7 @@ test('only the orchestrator or the owner widens a rung, a command needs the owne
   const command = as('orchestrator', ['--harness', 'command', '--command', '["sh"]', '--clear', 'model']);
   assert.equal(command.code, 1);
   assert.match(command.stderr, /ladder\.command, ladder\.reach are owner-required; opened D1/);
-  h.ok(['ladder', 'set', 'small', '--model', 'sonnet', '--agent', 'orchestrator']);
+  h.ok(['ladder', 'set', 'small', '--model', 'fixture-other', '--agent', 'orchestrator']);
   assert.equal(as('orchestrator', ['--tools', '["Agent"]']).code, 0);
   assert.equal(as('owner', ['--args', '["--verbose","--max-turns","40"]']).code, 0);
   const refused = [

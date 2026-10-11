@@ -31,7 +31,8 @@ if (data.fail || data.failEndpoint && args[1]?.includes(data.failEndpoint)) {
     delete data.reviewDuringFetch;
     require('node:child_process').execFileSync(process.execPath, [
       require('node:path').join(__dirname, '..', '..', 'bin', 'tower-crane.js'),
-      'evidence', review.task, '--type', 'review', '--ok', '--sha', review.sha, '--agent', 'replacement-reviewer',
+      'evidence', review.task, '--type', 'review', '--ok', '--sha', review.sha,
+      '--revision', String(review.revision), '--agent', 'replacement-reviewer',
     ], { stdio: 'pipe' });
   }
 } else if (args[1].includes('/comments')) {

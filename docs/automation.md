@@ -55,11 +55,17 @@ use explicit `accept` for review dispatch. `ci completed ID --sha SHA` and
 `ci webhook FILE` receive host completion notifications. A host integration
 must deliver those notifications; Tower Crane does not install a webhook
 listener. Concurrent consumers serialize reactions per task using audited
-event receipts and drain queued notifications.
+event receipts and drain queued notifications. The orchestrator can move a
+task's queued gate work to the front with `gates prioritize` ([state](state.md#eventsjsonl)).
 Supervisors use the dispatcher's command PATH and an explicit trusted
 authorization context. Unknown mergeability and transport errors remain
 retryable at startup. A remote merge completed before its local receipt
 is recovered through the merge gate's accepted-head confirmation.
+
+Software gates run again when their passing evidence no longer matches its
+inputs, such as the pinned command or tests policy. A failed gate waits for `gates retry ID` at
+unchanged inputs; an infrastructure failure a later fix removed is the case
+it serves.
 
 Failures remain visible in gate receipts and task notes. Conflicting PRs
 return to rework with a file list. Unknown mergeability, failed transport,

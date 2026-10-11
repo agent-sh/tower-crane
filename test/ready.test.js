@@ -4,12 +4,14 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { makeRepo } = require('./helpers');
 
-// A docs task needs only a review from another agent, which keeps
+// A docs task needs only a review from a reviewer spawn, which keeps
 // "get this dependency accepted" short in tests about readiness.
 function acceptDocs(h, id) {
+  const sha = h.git(['rev-parse', 'HEAD']);
   h.ok(['claim', id, '--agent', 'w-1']);
-  h.ok(['submit', id, '--sha', 'aaaaaaa', '--agent', 'w-1']);
-  h.ok(['evidence', id, '--type', 'review', '--ok', '--sha', 'aaaaaaa', '--agent', 'r-1']);
+  h.ok(['submit', id, '--sha', sha, '--agent', 'w-1']);
+  h.reviewer(id, 'r-1');
+  h.ok(['evidence', id, '--revision', h.revision(id), '--type', 'review', '--ok', '--sha', sha, '--agent', 'r-1']);
   h.ok(['accept', id]);
 }
 

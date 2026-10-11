@@ -20,6 +20,8 @@ for (const harness of ['claude', 'codex']) {
         : process.platform !== 'linux' && 'probe requires the Linux command sandbox',
     timeout: 300000,
   }, async (t) => {
+    const variable = harness === 'claude' ? 'TOWER_CRANE_LIVE_MODEL' : 'TOWER_CRANE_LIVE_PROFILE';
+    assert.ok(process.env[variable], `set ${variable} to run a live ${harness} probe`);
     assert.ok(CHROME, 'install Chrome or set TOWER_CRANE_TEST_CHROME; the live probe must not skip the browser test');
     const h = makeRepo(t);
     for (const dir of ['bin', 'lib', 'agents', 'skills', 'standards', 'test']) fs.cpSync(path.join(ROOT, dir), path.join(h.repo, dir), { recursive: true });
@@ -59,8 +61,8 @@ assert.match(receipt.stdout || '', /# fail 0\\b/, 'board browser test did not re
     assert.ok(kit.length, 'configure a browser kit server before running the live probe');
     h.ok(['browser-kit', 'set', '--servers', JSON.stringify(kit)]);
     h.ok(['task', 'add', '--title', 'Headless Chrome probe', '--kind', 'design', '--acceptance', 'MCP screenshot and one board browser test pass']);
-    const model = harness === 'claude' ? ['--model', process.env.TOWER_CRANE_LIVE_MODEL || 'opus', '--clear', 'profile']
-      : ['--profile', process.env.TOWER_CRANE_LIVE_PROFILE || 'sol', '--clear', 'model'];
+    const model = harness === 'claude' ? ['--model', process.env[variable], '--clear', 'profile']
+      : ['--profile', process.env[variable], '--clear', 'model'];
     h.ok(['ladder', 'set', 'medium', '--harness', harness, ...model, '--clear', 'effort', '--clear', 'args', '--supervision', '{"retries":0}']);
     const wt = h.json(['worktree', 'T1']).path;
     const command = [process.execPath, path.join(wt, 'browser-probe.js')].map(shellQuote).join(' ');

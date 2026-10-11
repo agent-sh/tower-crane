@@ -4,7 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { makeRepo } = require('./helpers');
+const { makeRepo, runPty, PTY_AVAILABLE } = require('./helpers');
 
 function events(h) {
   return fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
@@ -226,4 +226,46 @@ test('technical delegation recognizes generated orchestrators by their recorded 
     [answerEvent.agent, answerEvent.detail.answered_by, answerEvent.detail.answer_rule],
     [spawned.orchestrator, spawned.orchestrator, 'owner-technical-delegation'],
   );
+});
+
+test('a terminal owner question stays with the owner', { skip: !PTY_AVAILABLE }, (t) => {
+  const h = makeRepo(t);
+  h.init();
+  const env = Object.fromEntries(Object.entries(h.env).filter(([key]) => !key.startsWith('TOWER_CRANE_')));
+  const asked = runPty(
+    ['ask', '--question', 'Which store?', '--option', 'redis', '--option', 'postgres', '--state', h.state],
+    { cwd: h.repo, env },
+  );
+  assert.equal(asked.code, 0, asked.stderr);
+  const decision = h.readState('decisions.json').decisions[0];
+  assert.deepEqual([decision.asked_by, decision.technical], ['owner', false]);
+});
+
+test('a worker ask is answerable by the orchestrator; an owner-required escalation is not', (t) => {
+  const h = makeRepo(t);
+  h.init();
+  h.ok(['task', 'add', '--title', 'Choose a store', '--acceptance', 'answer is authorized']);
+  h.ok(['project', 'set', '--decision-delegation', '{"orchestrator_technical":true}', '--agent', 'owner']);
+  const worker = { env: { TOWER_CRANE_AGENT: 'worker-T1-1', TOWER_CRANE_TASK: 'T1' } };
+
+  h.ok(['ask', '--question', 'Which store?', '--option', 'redis', '--option', 'postgres', '--blocks', 'T1'], worker);
+  const technical = h.readState('decisions.json').decisions[0];
+  assert.deepEqual([technical.asked_by, technical.technical], ['worker-T1-1', true]);
+  assert.equal(technical.escalation, undefined, 'a worker question with no owner-required setting does not escalate');
+  h.ok(['answer', 'D1', '--choice', 'redis', '--agent', 'orchestrator']);
+  const answered = h.readState('decisions.json').decisions[0];
+  assert.deepEqual([answered.answered_by, answered.answer_rule], ['orchestrator', 'owner-technical-delegation']);
+
+  h.ok(['ask', '--question', 'Raise the budget?', '--option', 'yes', '--option', 'no', '--setting', 'budget.raise', '--blocks', 'T1'], worker);
+  const escalated = h.readState('decisions.json').decisions[1];
+  assert.equal(escalated.technical, false);
+  assert.deepEqual(escalated.escalation, { settings: ['budget.raise'], change: null });
+  h.ok(['decision', 'delegate', 'D2', '--technical', 'true', '--agent', 'owner']);
+  const before = events(h);
+  const refused = h.run(['answer', 'D2', '--choice', 'yes', '--agent', 'orchestrator']);
+  assert.equal(refused.code, 1, refused.stderr);
+  assert.match(refused.stderr, /D2 escalates budget\.raise to the owner/);
+  assert.deepEqual(events(h), before, 'a refused escalation answer writes no event');
+  h.ok(['answer', 'D2', '--choice', 'yes', '--agent', 'owner']);
+  assert.equal(h.readState('decisions.json').decisions[1].answer_rule, 'owner');
 });
