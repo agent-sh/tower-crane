@@ -56,6 +56,12 @@ function createRepoSeed(tmpRoot = process.env.TOWER_CRANE_TEST_TMP || os.tmpdir(
     const commit = writeObject(repo, 'commit', Buffer.from(
       `tree ${tree}\nauthor tower-crane test <test@example.invalid> 1700000000 +0000\ncommitter tower-crane test <test@example.invalid> 1700000000 +0000\n\ninit\n`,
     ));
+    // Lifecycle fixtures need distinct, resolvable heads without changing the checkout.
+    for (const n of [2, 3]) {
+      writeObject(repo, 'commit', Buffer.from(
+        `tree ${tree}\nparent ${commit}\nauthor tower-crane test <test@example.invalid> 170000000${n} +0000\ncommitter tower-crane test <test@example.invalid> 170000000${n} +0000\n\nfixture ${n}\n`,
+      ));
+    }
     fs.writeFileSync(path.join(gitDir, 'refs', 'heads', 'main'), `${commit}\n`);
     const identity = 'tower-crane test <test@example.invalid>';
     const reflog = `${'0'.repeat(40)} ${commit} ${identity} 1700000000 +0000\tcommit (initial): init\n`;

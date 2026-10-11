@@ -40,6 +40,106 @@ function t68Rework(t) {
   return { h, oldBranch, newBranch, newSha };
 }
 
+test('submit resolves an abbreviated commit and refuses unknown prefixes without changing state', (t) => {
+  const h = makeRepo(t);
+  h.init();
+  h.ok(['task', 'add', '--title', 'Docs', '--acceptance', 'reads well', '--kind', 'docs']);
+  h.ok(['claim', 'T1', '--agent', 'w-1']);
+  const sha = h.git(['rev-parse', 'HEAD']);
+  const submitted = h.json(['submit', 'T1', '--sha', sha.slice(0, 8).toUpperCase(), '--agent', 'w-1']);
+  assert.equal(submitted.sha, sha);
+  assert.equal(events(h).findLast((e) => e.cmd === 'submit').detail.sha, sha);
+  const before = h.json(['task', 'show', 'T1']);
+  const beforeEvents = events(h);
+  const refused = h.run(['submit', 'T1', '--sha', 'f'.repeat(8), '--agent', 'w-1']);
+  assert.equal(refused.code, 1, refused.stdout);
+  assert.match(refused.stderr, /cannot resolve.*commit/i);
+  assert.deepEqual(h.json(['task', 'show', 'T1']), before);
+  assert.deepEqual(events(h), beforeEvents);
+});
+
+test('submit preserves full SHA-1 and SHA-256 IDs without requiring their objects locally', (t) => {
+  const h = makeRepo(t);
+  h.init();
+  h.ok(['task', 'add', '--title', 'Docs', '--acceptance', 'reads well', '--kind', 'docs']);
+  h.ok(['claim', 'T1', '--agent', 'w-1']);
+  for (const sha of ['A'.repeat(40), 'B'.repeat(64)]) {
+    const submitted = h.json(['submit', 'T1', '--sha', sha, '--agent', 'w-1']);
+    assert.equal(submitted.sha, sha.toLowerCase());
+    assert.equal(events(h).findLast((e) => e.cmd === 'submit').detail.sha, sha.toLowerCase());
+  }
+});
+
+test('a legacy short submitted sha reuses its full-sha reviewer and recognizes its failed review', (t) => {
+  const h = makeRepo(t);
+  h.init();
+  h.ok(['ladder', 'set', 'medium', '--harness', 'command', '--clear', 'profile', '--clear', 'effort',
+    '--command', '["tower-crane-no-such-reviewer","{prompt}"]']);
+  h.ok(['task', 'add', '--title', 'Docs', '--acceptance', 'reads well', '--kind', 'docs']);
+  h.ok(['claim', 'T1', '--agent', 'w-1']);
+  const sha = h.git(['rev-parse', 'HEAD']);
+  h.ok(['submit', 'T1', '--sha', sha, '--agent', 'w-1']);
+  const legacy = h.readState('tasks.json');
+  legacy.tasks[0].sha = sha.slice(0, 8);
+  h.writeState('tasks.json', legacy);
+  const revision = Number(h.revision('T1'));
+  const spawn = { at: new Date().toISOString(), agent: 'orchestrator', cmd: 'spawn', task: 'T1',
+    detail: { agent: 'r-1', role: 'reviewer', rung: 'review', sha, revision, pid: process.pid, attempt: 1,
+      ...require('../lib/processes').identity(process.pid) } };
+  const log = path.join(h.state, 'events.jsonl');
+  fs.appendFileSync(log, `${JSON.stringify(spawn)}\n`);
+  const pending = h.json(['accept', 'T1']);
+  assert.equal(pending.review_pending, true);
+  assert.equal(pending.reviewer, 'r-1');
+  const duplicate = h.run(['spawn', '--task', 'T1', '--role', 'review']);
+  assert.equal(duplicate.code, 1);
+  assert.match(duplicate.stderr, /reviewer is still running/);
+  fs.appendFileSync(log, `${JSON.stringify({ at: spawn.at, agent: 'orchestrator', cmd: 'spawn exit', task: 'T1',
+    detail: { agent: 'r-1', pid: process.pid, attempt: 1, code: 0 } })}\n`);
+  h.ok(['evidence', 'T1', '--type', 'review', '--fail', '--sha', sha, '--agent', 'r-1',
+    '--summary', 'lib/value.js:1 - Check null before dereferencing']);
+  const failed = h.json(['task', 'show', 'T1']).gates.gates.find((g) => g.type === 'review');
+  assert.equal(failed.ok, false);
+  assert.match(failed.reason, /Check null/);
+  const denied = h.run(['accept', 'T1']);
+  assert.equal(denied.code, 1);
+  assert.match(denied.stderr, /Check null/);
+  assert.equal(events(h).filter((e) => e.cmd === 'spawn' && e.detail.role === 'reviewer').length, 1);
+  assert.equal(h.readState('tasks.json').tasks[0].sha, sha.slice(0, 8));
+  const reworked = h.json(['rework', '--from-review', 'T1', '--agent', 'orchestrator']);
+  assert.equal(reworked.status, 'rework');
+  assert.match(reworked.notes.at(-1).text, /Check null/);
+});
+
+test('submit refuses an ambiguous prefix and a non-commit object', (t) => {
+  const h = makeRepo(t);
+  h.init();
+  h.ok(['task', 'add', '--title', 'Docs', '--acceptance', 'reads well', '--kind', 'docs']);
+  h.ok(['claim', 'T1', '--agent', 'w-1']);
+  const tree = h.git(['rev-parse', 'HEAD^{tree}']);
+  const crypto = require('node:crypto');
+  const prefixes = new Map();
+  let collision;
+  for (let n = 0; !collision; n++) {
+    const body = `tree ${tree}\nauthor test <test@example.invalid> 1700000000 +0000\ncommitter test <test@example.invalid> 1700000000 +0000\n\ncollision ${n}\n`;
+    const sha = crypto.createHash('sha1').update(`commit ${Buffer.byteLength(body)}\0${body}`).digest('hex');
+    const prefix = sha.slice(0, 7);
+    if (prefixes.has(prefix)) collision = { prefix, bodies: [prefixes.get(prefix), body] };
+    else prefixes.set(prefix, body);
+  }
+  for (const input of collision.bodies) require('node:child_process').execFileSync('git',
+    ['hash-object', '-t', 'commit', '-w', '--stdin'], { cwd: h.repo, env: h.env, input });
+  const before = h.json(['task', 'show', 'T1']);
+  const beforeEvents = events(h);
+  for (const sha of [collision.prefix, h.git(['rev-parse', 'HEAD:README.md']).slice(0, 8)]) {
+    const refused = h.run(['submit', 'T1', '--sha', sha, '--agent', 'w-1']);
+    assert.equal(refused.code, 1, refused.stdout);
+    assert.match(refused.stderr, /cannot resolve.*commit/i);
+  }
+  assert.deepEqual(h.json(['task', 'show', 'T1']), before);
+  assert.deepEqual(events(h), beforeEvents);
+});
+
 test('the claimant resubmits a newer head and its gates need evidence at that head', (t) => {
   const h = makeRepo(t);
   const oldSha = gateFixture(h);
@@ -105,7 +205,7 @@ test('resubmission belongs to the current submitter and stops after acceptance o
   const before = h.json(['task', 'show', 'T1']);
   const beforeEvents = events(h);
   for (const agent of ['w-2', 'owner']) {
-    const denied = h.run(['submit', 'T1', '--sha', 'abcdef2', '--agent', agent]);
+    const denied = h.run(['submit', 'T1', '--sha', '5bfcb6f56ab912a009883c798a61298c507dada4', '--agent', agent]);
     assert.equal(denied.code, 1);
     assert.match(denied.stderr, /only the submitter \(w-1\) can resubmit T1/);
   }
@@ -122,19 +222,19 @@ test('resubmission belongs to the current submitter and stops after acceptance o
   h.ok(['accept', 'T1']);
   const accepted = h.json(['task', 'show', 'T1']);
   const acceptedEvents = events(h);
-  assert.equal(h.run(['submit', 'T1', '--sha', 'abcdef2', '--agent', 'w-1']).code, 1);
+  assert.equal(h.run(['submit', 'T1', '--sha', '5bfcb6f56ab912a009883c798a61298c507dada4', '--agent', 'w-1']).code, 1);
   assert.deepEqual(h.json(['task', 'show', 'T1']), accepted);
   assert.deepEqual(events(h), acceptedEvents);
 
   h.ok(['rework', 'T1', '--reason', 'another change', '--agent', 'r-1']);
-  assert.equal(h.run(['submit', 'T1', '--sha', 'abcdef2', '--agent', 'w-1']).code, 1);
+  assert.equal(h.run(['submit', 'T1', '--sha', '5bfcb6f56ab912a009883c798a61298c507dada4', '--agent', 'w-1']).code, 1);
   h.ok(['claim', 'T1', '--agent', 'w-2']);
-  assert.equal(h.run(['submit', 'T1', '--sha', 'abcdef2', '--agent', 'w-1']).code, 1);
-  h.ok(['submit', 'T1', '--sha', 'abcdef2', '--agent', 'w-2']);
+  assert.equal(h.run(['submit', 'T1', '--sha', '5bfcb6f56ab912a009883c798a61298c507dada4', '--agent', 'w-1']).code, 1);
+  h.ok(['submit', 'T1', '--sha', '5bfcb6f56ab912a009883c798a61298c507dada4', '--agent', 'w-2']);
   const afterRework = events(h).filter((event) => event.cmd === 'submit').at(-1);
-  assert.deepEqual([afterRework.detail.previous_sha, afterRework.detail.sha], [sha, 'abcdef2']);
-  assert.equal(h.run(['submit', 'T1', '--sha', 'abcdef3', '--agent', 'w-1']).code, 1);
-  assert.equal(h.json(['submit', 'T1', '--sha', 'abcdef3', '--agent', 'w-2']).submitted_by, 'w-2');
+  assert.deepEqual([afterRework.detail.previous_sha, afterRework.detail.sha], [sha, '5bfcb6f56ab912a009883c798a61298c507dada4']);
+  assert.equal(h.run(['submit', 'T1', '--sha', 'cfed4d76efd3afe887bbbfc7f62c7d94158e3255', '--agent', 'w-1']).code, 1);
+  assert.equal(h.json(['submit', 'T1', '--sha', 'cfed4d76efd3afe887bbbfc7f62c7d94158e3255', '--agent', 'w-2']).submitted_by, 'w-2');
 });
 
 test('submit refuses changing only the PR while its old PR is open', (t) => {
@@ -248,7 +348,7 @@ test('only note evidence can default to the submitted sha', (t) => {
   assert.equal(noHead.code, 1);
   assert.match(noHead.stderr, /no submitted sha yet; pass --sha/);
   h.ok(['claim', 'T1', '--agent', 'w-1']);
-  h.ok(['submit', 'T1', '--sha', 'abcdef1', '--agent', 'w-1']);
+  h.ok(['submit', 'T1', '--sha', '50b732a15be40ccb2065cb2ba0e7b366d511b736', '--agent', 'w-1']);
   const before = h.json(['task', 'show', 'T1']);
   const beforeEvents = events(h);
   for (const type of ['tests', 'clean', 'review', 'ci', 'merge']) {
@@ -264,7 +364,7 @@ test('only note evidence can default to the submitted sha', (t) => {
   assert.deepEqual(h.json(['task', 'show', 'T1']), before);
   assert.deepEqual(events(h), beforeEvents);
   const note = h.json(['evidence', 'T1', '--type', 'note', '--ok', '--agent', 'r-1']);
-  assert.deepEqual([note.type, note.sha], ['note', 'abcdef1']);
-  const pinned = h.json(['evidence', 'T1', '--type', 'note', '--ok', '--sha', 'ABCDEF2', '--agent', 'r-1']);
-  assert.equal(pinned.sha, 'abcdef2');
+  assert.deepEqual([note.type, note.sha], ['note', '50b732a15be40ccb2065cb2ba0e7b366d511b736']);
+  const pinned = h.json(['evidence', 'T1', '--type', 'note', '--ok', '--sha', '5BFCB6F56AB912A009883C798A61298C507DADA4', '--agent', 'r-1']);
+  assert.equal(pinned.sha, '5bfcb6f56ab912a009883c798a61298c507dada4');
 });
