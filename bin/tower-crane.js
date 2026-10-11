@@ -78,7 +78,7 @@ const SETTINGS = {
   'merge-keep-branch': str('JSON', 'true keeps merged task branches for retained worktrees; false or null restores deletion'),
   'merge-admin': str('JSON', 'owner-required: true uses gh --admin for solely owned repos; false or null disables it'),
   'decision-delegation': str('JSON', 'owner only: allow the orchestrator to answer technical decisions; null clears'),
-  'review-policy': str('JSON', 'operational (orchestrator or owner): review diff limits and canonical model prices; null clears the policy'),
+  'review-policy': str('JSON', 'operational (orchestrator or owner): review diff limits, churn threshold and canonical model prices; null clears the policy'),
   'research-min-sources': int('N', 'owner-required: minimum distinct cited pages for research (default 10)'),
 };
 

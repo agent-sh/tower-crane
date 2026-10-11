@@ -839,3 +839,9 @@ Agy spawn selects the generated `gishra-<job>` agent in its private HOME. `--too
 `tower-crane mcp --agent orchestrator` serves the inbox and batch actions as MCP tools over stdio. Pass `--state DIR` outside the project. The plugin registers it for Claude Code, and spawned Claude and Codex orchestrators receive it in their generated homes. The Codex plugin command surface exposes `/tower-crane-inbox`, `/tower-crane-spawn-ready`, `/tower-crane-merge-accepted`, `/tower-crane-rework-from-review ID` and `/tower-crane-release-dead`.
 
 Use `inbox --json` for typed findings with `action.command` and `action.argv`; use the returned command to resolve each item. Messages, stalls, decision answers and owner comments can be acknowledged after handling with `inbox --ack ITEM`. Decisions require the owner's answer. GitHub observation failures remain visible as `github_error` items. Batch merge refusals remain in the inbox while independent mergeable entries continue through the existing current-base and stack checks.
+
+## Review churn
+
+`project set --review-policy '{"churn_after":3}'` sets the failed-review threshold; it defaults to 3 and must be a positive safe integer. The orchestrator or owner can change it. `--review-policy null` restores the review defaults.
+
+`inbox` surfaces `review_churn` for active tasks at the threshold with each failed review's one-line findings, explicit acceptance-line and finding-location comparisons, and recorded spend. It asks the orchestrator to bound scope, split the task or change tier, while rework proceeds. Findings without comparable scope references are marked `unknown`. Counts span heads and rework revision bumps, and reset on an acceptance revision change. `status`, the board and both sketches show the count per task. See [Orchestrator inbox](state.md#orchestrator-inbox) for the fields and revision rules.
