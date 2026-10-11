@@ -119,6 +119,11 @@ test('a lease whose holder process exited is released at once, including a reuse
   assert.equal(held.pid, clients[0].pid);
   assert.equal((await run(clients[1], ['task', 'note', 'T1', 'refused'])).code, 1, 'a live holder keeps the lease');
   if (process.platform === 'linux') {
+    // A fallback or legacy lease without persistent identity waits out the idle window.
+    const { persistent, ...legacy } = held;
+    assert.equal(persistent, true);
+    h.writeState('tasks.json', { ...h.readState('tasks.json'), orchestrator_lease: { ...legacy, start_ticks: '1' } });
+    assert.equal((await run(clients[1], ['task', 'note', 'T1', 'refused'])).code, 1, 'a legacy lease is not released early');
     // A pid reused by another process does not keep a dead holder's lease.
     h.writeState('tasks.json', { ...h.readState('tasks.json'), orchestrator_lease: { ...held, start_ticks: '1' } });
     const reused = await run(clients[1], ['task', 'note', 'T1', 'pid was reused']);
