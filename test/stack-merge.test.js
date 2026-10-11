@@ -92,6 +92,27 @@ test('a stale local stack uses the single PR merge path after confirming its low
   assert.equal(f.read().calls.some((c) => c.args[0] === 'stack'), false);
 });
 
+test('a merged bottom member stays tracked while a middle task still has an open task above it', (t) => {
+  const f = stacked(t);
+  const top = f.add('top', 'T2');
+  const wt = f.h.json(['worktree', top]);
+  f.submit(top, 13, wt);
+  f.h.ok(['stack', 'link', top]);
+  f.accept('T1');
+  f.h.ok(['merge', 'T1']);
+  assert.equal(f.h.json(['task', 'show', 'T2']).stack.parent, 'T1');
+  f.write((d) => { d.prs[12].baseRefName = 'main'; });
+  f.h.ok(['stack', 'sync', 'T2']);
+  f.h.ok(['stack', 'sync', top]);
+  assert.equal(f.h.json(['task', 'show', 'T2']).stack.parent, 'T1');
+  f.accept('T2');
+  f.accept(top);
+  const merged = f.h.run(['merge', top]);
+  assert.equal(merged.code, 0, merged.stdout + merged.stderr);
+  assert.deepEqual(routes(f), ['async 11', 'async 12', 'async 13']);
+  for (const pr of [11, 12, 13]) assert.equal(f.read().prs[pr].state, 'MERGED');
+});
+
 test('a stack that adds then modifies the same file merges without changing accepted heads', (t) => {
   const f = setup(t);
   const wt = f.h.json(['worktree', 'T2']);
