@@ -127,6 +127,9 @@ const MUTANTS = [
     from: 'for (const id of ids) if (id !== job.task) throw', to: 'for (const id of ids) if (false) throw', tests: ['test/broker.test.js'] },
   { id: 'broker-no-token', area: 'broker', file: 'lib/broker.js',
     from: 'if (!req || !sameToken(req.token, token))', to: 'if (!req)', tests: ['test/broker.test.js'] },
+  // host-only tests
+  { id: 'sandbox-runs-directory-selection', area: 'host-only tests', file: 'lib/tests-host-only.js',
+    from: 'const refused = files.filter((file) => !isFile(path.resolve(root, file)));', to: 'const refused = [];', tests: ['test/host-only.test.js'] },
   // spawn and supervisor
   { id: 'supervisor-writes-after-incompatible-state', area: 'spawn/supervisor', file: 'lib/spawn-monitor.js',
     from: "if (committed && !incompatible && fs.existsSync(path.join(spawn.state, 'project.json'))) sampleUsage(true);",

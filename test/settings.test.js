@@ -75,7 +75,7 @@ test('the Settings view edits the ladder and task tiers only with the page token
     assert.equal(page.status, 200);
     const token = tokenOf(page.text);
     assert.match(page.text, /<label for="harness">Default harness<\/label>/);
-    assert.match(page.text, /<input name="model" value="opus" data-initial="opus" aria-labelledby="r-hard c-model"/);
+    assert.match(page.text, /<input name="model" value="fixture-large" data-initial="fixture-large" aria-labelledby="r-hard c-model"/);
     assert.match(page.text, /<select name="tier" aria-labelledby="t-T1 c-tier" data-initial="medium"(?: data-preserve="[0-9a-f]{64}")?>/);
     assert.match((await request(s.url)).text, /<a href="settings" data-view="settings"(?: data-preserve="[0-9a-f]{64}")?>Settings<\/a>/, 'the board links to Settings');
     assert.notEqual((await startAgain(h)).token, token, 'each run has its own token');
@@ -83,7 +83,7 @@ test('the Settings view edits the ladder and task tiers only with the page token
     const ladder = `${s.url}api/ladder`;
     const project = read(h, 'project.json');
     let loaded = await loadedOf(s.url);
-    const change = ladderBody(loaded, { rungs: { easy: { harness: '', model: 'gpt-x', profile: '', provider: '', effort: 'low', args: '["--skip-git-repo-check"]', command: '' } } });
+    const change = ladderBody(loaded, { rungs: { easy: { harness: '', model: 'fixture-model', profile: '', provider: '', effort: 'low', args: '["--skip-git-repo-check"]', command: '' } } });
     const refused = [
       [{}, 403, /missing or wrong token/],
       [{ 'x-tower-crane-token': 'f'.repeat(48) }, 403, /missing or wrong token/],
@@ -97,7 +97,7 @@ test('the Settings view edits the ladder and task tiers only with the page token
     }
     assert.equal(read(h, 'project.json'), project, 'a POST without the token writes nothing');
 
-    const invalid = await request(ladder, { method: 'POST', headers: { 'x-tower-crane-token': token }, body: ladderBody(loaded, { rungs: { easy: { harness: 'pi', model: '', profile: 'luna', effort: 'medium' } } }) });
+    const invalid = await request(ladder, { method: 'POST', headers: { 'x-tower-crane-token': token }, body: ladderBody(loaded, { rungs: { easy: { harness: 'pi', model: '', profile: 'fixture-light', effort: 'medium' } } }) });
     assert.equal(invalid.status, 400);
     assert.match(invalid.json.error, /^ladder easy \(pi\): profile applies only to codex, needs a model$/);
     const badArgs = await request(ladder, { method: 'POST', headers: { 'x-tower-crane-token': token }, body: ladderBody(loaded, { rungs: { small: { args: 'not json' } } }) });
@@ -107,14 +107,14 @@ test('the Settings view edits the ladder and task tiers only with the page token
 
     const saved = await request(ladder, { method: 'POST', headers: { 'x-tower-crane-token': token }, body: change });
     assert.equal(saved.status, 200, saved.text);
-    assert.deepEqual([saved.json.ok, saved.json.harness, saved.json.ladder.easy.model, saved.json.ladder.easy.from], [true, 'codex', 'gpt-x', 'project'], 'the reply is the ladder as ladder show prints it');
-    assert.deepEqual(h.readState('project.json').ladder.easy, { model: 'gpt-x', effort: 'low', args: ['--skip-git-repo-check'] });
+    assert.deepEqual([saved.json.ok, saved.json.harness, saved.json.ladder.easy.model, saved.json.ladder.easy.from], [true, 'codex', 'fixture-model', 'project'], 'the reply is the ladder as ladder show prints it');
+    assert.deepEqual(h.readState('project.json').ladder.easy, { model: 'fixture-model', effort: 'low', args: ['--skip-git-repo-check'] });
     const ev = events(h).find((e) => e.cmd === 'ladder set');
     assert.deepEqual([ev.agent, ev.detail.rung, ev.detail.via], ['owner', 'easy', 'serve']);
-    assert.match(read(h, 'sketch.html'), /<tr data-rung="easy"><th scope="row">easy<\/th><td>codex \(default\)<\/td><td>gpt-x<\/td>/, 'the write re-rendered the sketch');
+    assert.match(read(h, 'sketch.html'), /<tr data-rung="easy"><th scope="row">easy<\/th><td>codex \(default\)<\/td><td>fixture-model<\/td>/, 'the write re-rendered the sketch');
 
     loaded = await loadedOf(s.url);
-    const harness = await request(ladder, { method: 'POST', headers: { 'x-tower-crane-token': token }, body: ladderBody(loaded, { harness: 'agy', rungs: { medium: { model: 'gemini-3-pro', profile: '' }, review: { model: 'gemini-3-pro', profile: '' }, small: { model: 'gemini-3-flash', profile: '' }, easy: { model: 'gemini-3-flash', args: '' } } }) });
+    const harness = await request(ladder, { method: 'POST', headers: { 'x-tower-crane-token': token }, body: ladderBody(loaded, { harness: 'agy', rungs: { medium: { model: 'fixture-large', profile: '' }, review: { model: 'fixture-large', profile: '' }, small: { model: 'fixture-light', profile: '' }, easy: { model: 'fixture-light', args: '' } } }) });
     assert.equal(harness.status, 200, harness.text);
     assert.equal(h.json(['ladder', 'show']).ladder.medium.harness, 'agy', 'the default harness and rungs change in one write');
 
@@ -192,11 +192,11 @@ test('a save made against a rung, default harness or tier that changed since the
     const token = tokenOf((await request(s.keyed('settings'))).text);
     const post = (api, body) => request(`${s.url}api/${api}`, { method: 'POST', headers: { 'x-tower-crane-token': token }, body });
     const loaded = await loadedOf(s.url);
-    // The page loaded easy as luna; the form sends every field of the rung,
+    // The page loaded easy as fixture-light; the form sends every field of the rung,
     // so its stale profile would undo a model chosen through the CLI.
     h.ok(['ladder', 'set', 'easy', '--model', 'chosen-by-cli', '--clear', 'profile']);
     const project = read(h, 'project.json');
-    const edit = { rungs: { easy: { harness: '', model: '', profile: 'luna', provider: '', effort: 'high', args: '', command: '' } } };
+    const edit = { rungs: { easy: { harness: '', model: '', profile: 'fixture-light', provider: '', effort: 'high', args: '', command: '' } } };
     const r = await post('ladder', ladderBody(loaded, edit));
     assert.equal(r.status, 409, r.text);
     assert.equal(r.json.error, 'the ladder changed since this page loaded: ladder easy is now model chosen-by-cli, effort medium; reload the page and make the edit again');

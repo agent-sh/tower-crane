@@ -408,7 +408,7 @@ test('acceptance and merge refuse a mode change after an audited tests pass', (t
   h.ok(['check', 'tests', 'T1', '--agent', 'checker']);
   gateEvidence(h, 'clean', 'checker');
   h.reviewer('T1', 'r-1', sha);
-  h.ok(['evidence', 'T1', '--type', 'review', '--ok', '--sha', sha, '--agent', 'r-1']);
+  h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--ok', '--sha', sha, '--agent', 'r-1']);
   h.ok(['project', 'set', '--tests-mode', 'prove']);
   const accept = h.run(['accept', 'T1']);
   assert.equal(accept.code, 1);
@@ -478,7 +478,7 @@ test('merge refuses a task of any kind whose PR has no passing ci at the submitt
   h.ok(['claim', 'T1', '--agent', 'w-1']);
   h.ok(['submit', 'T1', '--sha', sha, '--pr', '9', '--agent', 'w-1']);
   h.reviewer('T1', 'r-1', sha);
-  h.ok(['evidence', 'T1', '--type', 'review', '--ok', '--sha', sha, '--agent', 'r-1']);
+  h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--ok', '--sha', sha, '--agent', 'r-1']);
   gateEvidence(h, 'ci', 'ci');
   h.ok(['accept', 'T1']);
   const cli = cliCopy(h);
@@ -503,7 +503,7 @@ test('merge checks the gates as they stand, not only the accepted status', (t) =
   h.ok(['submit', 'T1', '--sha', sha, '--agent', 'w-1']);
   for (const type of ['tests', 'clean']) gateEvidence(h, type, 'checker');
   h.reviewer('T1', 'r-1', sha);
-  h.ok(['evidence', 'T1', '--type', 'review', '--ok', '--sha', sha, '--agent', 'r-1']);
+  h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--ok', '--sha', sha, '--agent', 'r-1']);
   h.ok(['accept', 'T1']);
   const cli = cliCopy(h);
   fs.mkdirSync(cli.gates, { recursive: true });
@@ -537,7 +537,7 @@ function acceptedWithWorktree(h) {
   h.ok(['submit', 'T1', '--sha', sha, '--agent', 'w-1']);
   for (const type of ['tests', 'clean']) gateEvidence(h, type, 'checker');
   h.reviewer('T1', 'r-1', sha);
-  h.ok(['evidence', 'T1', '--type', 'review', '--ok', '--sha', sha, '--agent', 'r-1']);
+  h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--ok', '--sha', sha, '--agent', 'r-1']);
   h.ok(['accept', 'T1']);
   return wt;
 }
@@ -645,7 +645,7 @@ test('a merge of an older head keeps the worktree of a newer accepted head', asy
   h.ok(['submit', 'T1', '--sha', newer, '--agent', 'w-2']);
   for (const type of ['tests', 'clean']) gateEvidence(h, type, 'checker');
   h.reviewer('T1', 'r-1', newer);
-  h.ok(['evidence', 'T1', '--type', 'review', '--ok', '--sha', newer, '--agent', 'r-1']);
+  h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--ok', '--sha', newer, '--agent', 'r-1']);
   h.ok(['accept', 'T1']);
   fs.writeFileSync(`${paused}.go`, '');
   const result = await merge.result;

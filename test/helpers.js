@@ -18,7 +18,7 @@ delete process.env.TC_TEST_REPO_SEED;
 // Tests must not see the developer's git config (hooks, signing), an
 // agent's TOWER_CRANE_* variables or the developer's own ladder defaults, so every
 // child gets a clean, explicit env. The user file path is in the temp dir and
-// absent until a test writes it.
+// absent between calls unless a test writes it.
 function baseEnv(home) {
   const env = { ...process.env };
   for (const k of Object.keys(env)) {
@@ -42,6 +42,63 @@ function git(args, cwd, env) {
   return cp.execFileSync('git', args, { cwd, env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 }
 
+function fixtureLadder() {
+  return {
+    harness: 'codex',
+    ladder: {
+      orchestrator: { harness: 'claude', model: 'fixture-large', effort: 'high' },
+      easy: { profile: 'fixture-light', effort: 'medium' },
+      medium: { profile: 'fixture-main', effort: 'high' },
+      hard: { harness: 'claude', model: 'fixture-large', effort: 'high' },
+      research: { harness: 'claude', model: 'fixture-large', effort: 'max' },
+      review: { profile: 'fixture-main', effort: 'high' },
+      small: { profile: 'fixture-light', effort: 'low' },
+    },
+  };
+}
+
+function pinRung(h, name, rung) {
+  const args = ['ladder', 'set', name];
+  for (const key of ['harness', 'model', 'profile', 'provider', 'effort', 'args', 'command']) {
+    args.push(...(rung[key] === undefined ? ['--clear', key]
+      : [`--${key}`, Array.isArray(rung[key]) ? JSON.stringify(rung[key]) : rung[key]]));
+  }
+  h.ok(args);
+}
+
+function pinLiveRung(h, harness) {
+  const field = harness === 'codex' ? 'profile' : 'model';
+  const variable = `TOWER_CRANE_LIVE_${field.toUpperCase()}`;
+  assert.ok(process.env[variable], `set ${variable} to run a live ${harness} probe`);
+  pinRung(h, 'small', { harness, [field]: process.env[variable] });
+}
+
+// Init copies defaults from the user layer. Seed that layer only for the call,
+// so fixtures keep testing absent user files and later personal overrides.
+function fixtureInit(ctx, args, opts, call) {
+  if (args[0] !== 'init' || ctx.builtin) return call(args, opts);
+  let original;
+  try { original = fs.readFileSync(ctx.userConfig, 'utf8'); }
+  catch (e) { if (e.code !== 'ENOENT') throw e; }
+  let user;
+  try { user = original === undefined ? {} : JSON.parse(original); }
+  catch { return call(args, opts); }
+  if (!user || typeof user !== 'object' || Array.isArray(user)) return call(args, opts);
+  if (user.ladder !== undefined && (!user.ladder || typeof user.ladder !== 'object' || Array.isArray(user.ladder))) return call(args, opts);
+  const pinned = fixtureLadder();
+  for (const [name, rung] of Object.entries(user.ladder || {})) {
+    pinned.ladder[name] = rung && Object.keys(rung).every(k => k === 'fallbacks')
+      ? { ...pinned.ladder[name], ...rung } : rung;
+  }
+  fs.mkdirSync(path.dirname(ctx.userConfig), { recursive: true });
+  fs.writeFileSync(ctx.userConfig, JSON.stringify({ ...pinned, ...user, ladder: pinned.ladder }));
+  try { return call(args, opts); }
+  finally {
+    if (original === undefined) fs.rmSync(ctx.userConfig);
+    else fs.writeFileSync(ctx.userConfig, original);
+  }
+}
+
 // The test runner shares its clean Git seed with all isolated file workers.
 let repoSeed;
 function getRepoSeed() {
@@ -55,12 +112,12 @@ function getRepoSeed() {
   return repoSeed;
 }
 
-function makeRepo(t) {
+function makeRepo(t, options = {}) {
   fs.mkdirSync(TMP_ROOT, { recursive: true });
-  return makeRepoFromSeed(t, getRepoSeed().repo);
+  return makeRepoFromSeed(t, getRepoSeed().repo, options);
 }
 
-function makeRepoFromSeed(t, seedRepo) {
+function makeRepoFromSeed(t, seedRepo, options = {}) {
   fs.mkdirSync(TMP_ROOT, { recursive: true });
   const base = fs.realpathSync.native(fs.mkdtempSync(path.join(TMP_ROOT, 'tower-crane-')));
   fs.writeFileSync(
@@ -76,12 +133,13 @@ function makeRepoFromSeed(t, seedRepo) {
     fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     throw error;
   }
-  return context(t, base);
+  return context(t, base, options);
 }
 
 const repoTemplates = new Map();
 function getRepoTemplate(key, prepare) {
   if (repoTemplates.has(key)) return repoTemplates.get(key);
+  // Cached state must use the same pinned init path as fresh repositories.
   const ctx = makeRepo();
   try {
     prepare(ctx);
@@ -185,7 +243,7 @@ function cachedFixture(t, key, build) {
   return Object.assign(h, JSON.parse(rewrite(JSON.stringify(template.fields))));
 }
 
-function context(t, base) {
+function context(t, base, options = {}) {
   const env = baseEnv(base);
   fs.mkdirSync(env.HOME, { recursive: true });
   const repo = path.join(base, 'repo');
@@ -193,6 +251,7 @@ function context(t, base) {
     base,
     repo,
     env,
+    builtin: options.builtin,
     userConfig: env.TOWER_CRANE_CONFIG,
     state: path.join(repo, '.tower-crane'),
     detached: () => {
@@ -207,7 +266,7 @@ function context(t, base) {
       try { await stopDetached(ctx.detached()); }
       finally { fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); }
     },
-    run: (args, opts = {}) => run(args, withHooks(ctx, opts)),
+    run: (args, opts = {}) => fixtureInit(ctx, args, opts, (a, o) => run(a, withHooks(ctx, o))),
     runAsync: (args, opts = {}) => runAsync(args, withHooks(ctx, opts)),
     json: (args, opts) => {
       const r = ctx.run([...args, '--json'], opts);
@@ -220,6 +279,8 @@ function context(t, base) {
       return r.stdout.trim();
     },
     readState: (file) => JSON.parse(fs.readFileSync(path.join(ctx.state, file), 'utf8')),
+    // The current revision of a task, for review evidence a test records as a reviewer spawn did not start.
+    revision: (id = 'T1') => String(ctx.readState('tasks.json').tasks.find((t) => t.id === id).revision),
     writeState: (file, data) => fs.writeFileSync(path.join(ctx.state, file), JSON.stringify(data, null, 2) + '\n'),
     // Record an exited reviewer dispatch of `agent` for the task's current head
     // and revision, so that agent's review evidence counts.
@@ -390,4 +451,4 @@ try {
   }
 }
 
-module.exports = { makeRepo, makeProjectRepo, makeTaskRepo, copyRepo, cachedFixture, run, runPty, PTY_AVAILABLE, runAsync, BIN, ROOT, HOOKS, real, TMP_ROOT, detachedAlive };
+module.exports = { makeRepo, makeProjectRepo, makeTaskRepo, copyRepo, cachedFixture, fixtureLadder, pinRung, pinLiveRung, run, runPty, PTY_AVAILABLE, runAsync, BIN, ROOT, HOOKS, real, TMP_ROOT, detachedAlive };

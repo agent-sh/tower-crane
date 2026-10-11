@@ -1,4 +1,4 @@
-model: openai.gpt-6.1-sol
+model: fixture-main
 session id: 01a11284-12da-7953-94fb-07a97b081e94
 tokens used
 24,675

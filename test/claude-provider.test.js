@@ -4,7 +4,13 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { makeRepo } = require('./helpers');
+const { makeRepo, ROOT } = require('./helpers');
+const L = require('../lib/ladder');
+
+// Read the alias table rather than naming a release, so a swap of the shipped
+// table changes no test.
+const [ALIAS, RELEASE] = Object.entries(L.BUILTIN.claude_aliases)[0];
+const MODEL = 'fixture-claude';
 
 function setup(t) {
   const h = makeRepo(t);
@@ -27,7 +33,7 @@ function setup(t) {
   h.init();
   h.ok(['task', 'add', '--title', 'Claude provider switch', '--tier', 'hard', '--acceptance', 'fresh provider session']);
   h.ok(['brief', 'set', 'T1', '-'], { input: 'Build with the original brief.\n' });
-  h.primary = (provider, model = 'opus') => h.ok([
+  h.primary = (provider, model = MODEL) => h.ok([
     'ladder', 'set', 'hard', '--provider', provider, '--model', model,
     '--supervision', '{"retries":1,"backoff_ms":10,"max_backoff_ms":10,"stall_ms":60000}',
   ]);
@@ -41,8 +47,8 @@ function setup(t) {
     fs.writeFileSync(path.join(aws, 'credentials'), 'stub credentials, never parsed\n');
     fs.writeFileSync(path.join(claude, 'settings.json'), JSON.stringify({
       env: { CLAUDE_CODE_USE_BEDROCK: '1', AWS_PROFILE: 'personal', ANTHROPIC_MODEL: 'us.anthropic.old-model',
-        ANTHROPIC_SMALL_FAST_MODEL: 'us.anthropic.claude-sonnet-5-5',
-        ANTHROPIC_DEFAULT_HAIKU_MODEL: 'us.anthropic.claude-haiku-stub',
+        ANTHROPIC_SMALL_FAST_MODEL: 'us.anthropic.fixture-small',
+        ANTHROPIC_DEFAULT_HAIKU_MODEL: 'us.anthropic.fixture-stub',
         ANTHROPIC_API_KEY: 'stub-secret-config-value' },
     }));
   };
@@ -53,8 +59,8 @@ function setup(t) {
 }
 
 for (const [provider, other, model, plain] of [
-  ['anthropic', 'bedrock', 'opus', 'claude-opus-5-5'],
-  ['bedrock', 'anthropic', 'sonnet', 'claude-sonnet-5-5'],
+  ['anthropic', 'bedrock', ALIAS, RELEASE],
+  ['bedrock', 'anthropic', MODEL, MODEL],
 ]) {
   test(`${provider} outage exhausts retries then runs the same Claude model on ${other}`, (t) => {
     const h = setup(t);
@@ -106,7 +112,8 @@ for (const [provider, other, model, plain] of [
     const pinned = JSON.parse(fs.readFileSync(path.join(home, 'tool.json'), 'utf8'));
     const events = stateText.trim().split('\n').map(JSON.parse);
     assert.deepEqual(pinned, events.find((e) => e.cmd === 'spawn').detail.tool, 'provider fallback keeps the original runtime');
-    assert.ok(fs.existsSync(path.join(pinned.path, 'lib', 'claude-provider.js')));
+    const providerFile = path.relative(ROOT, require.resolve('../lib/claude-provider'));
+    assert.ok(fs.existsSync(path.join(pinned.path, providerFile)));
     for (const event of Object.values(JSON.parse(generated).hooks)) {
       assert.ok(event[0].hooks[0].command.includes(path.join(pinned.path, 'lib', 'hook-bridge.js')));
     }
@@ -118,7 +125,7 @@ test('ladder show marks missing Claude provider config and the supervisor skips 
   h.login();
   h.primary('anthropic');
   h.env.TOWER_CRANE_TEST_FAIL_PROVIDER = 'anthropic';
-  h.fallbacks([{ provider: 'bedrock', model: 'opus' }, { harness: 'command', command: [process.execPath, '-e', 'process.exit(0)', '{prompt}'] }]);
+  h.fallbacks([{ provider: 'bedrock', model: MODEL }, { harness: 'command', command: [process.execPath, '-e', 'process.exit(0)', '{prompt}'] }]);
   const shown = h.json(['ladder', 'show']);
   assert.match(shown.problems.join('\n'), /hard fallback 1.*bedrock.*region.*skipped/);
   assert.match(shown.problems.join('\n'), /credentials/);
@@ -134,7 +141,7 @@ test('missing first-party credentials are reported for primaries and skipped as 
   const h = setup(t);
   h.aws();
   h.primary('bedrock');
-  h.fallbacks([{ provider: 'anthropic', model: 'opus' }]);
+  h.fallbacks([{ provider: 'anthropic', model: MODEL }]);
   assert.match(h.ok(['ladder', 'show']), /cannot run: hard fallback 1.*anthropic.*credentials.*skipped/);
   h.env.TOWER_CRANE_TEST_FAIL_PROVIDER = 'bedrock';
   const result = h.run(['spawn', '--task', 'T1', '--wait'], { timeout: 20000 });
@@ -149,17 +156,17 @@ test('missing first-party credentials are reported for primaries and skipped as 
 
 test('provider checks accept only local auth presence and use global model ids', (t) => {
   const h = setup(t);
-  h.primary('bedrock', 'us.anthropic.claude-fable-5-1');
+  h.primary('bedrock', 'us.anthropic.fixture-claude');
   h.env.AWS_REGION = 'eu-west-1';
   h.env.AWS_BEARER_TOKEN_BEDROCK = 'stub-secret-value';
   assert.deepEqual(h.json(['ladder', 'show']).problems, []);
   let preview = h.json(['spawn', '--task', 'T1', '--dry-run']);
-  assert.equal(preview.argv[preview.argv.indexOf('--model') + 1], 'global.anthropic.claude-fable-5-1');
+  assert.equal(preview.argv[preview.argv.indexOf('--model') + 1], 'global.anthropic.fixture-claude');
   assert.equal(JSON.stringify(preview).includes('stub-secret-value'), false);
-  h.primary('anthropic', 'global.anthropic.claude-fable-5-1');
+  h.primary('anthropic', 'global.anthropic.fixture-claude');
   h.env.ANTHROPIC_API_KEY = 'stub-secret-value';
   preview = h.json(['spawn', '--task', 'T1', '--dry-run']);
-  assert.equal(preview.argv[preview.argv.indexOf('--model') + 1], 'claude-fable-5-1');
+  assert.equal(preview.argv[preview.argv.indexOf('--model') + 1], 'fixture-claude');
   assert.equal(JSON.stringify(preview).includes('stub-secret-value'), false);
   const bad = h.run(['ladder', 'set', 'hard', '--provider', 'unknown']);
   assert.equal(bad.code, 1);
@@ -222,7 +229,7 @@ for (const source of ['project env', 'rung env', 'env_file']) {
     h.primary('anthropic');
     h.env.TOWER_CRANE_TEST_FAIL_PROVIDER = 'anthropic';
     const env = { AWS_REGION: 'eu-west-1', AWS_BEARER_TOKEN_BEDROCK: 'stub-secret-fallback-value' };
-    let route = { provider: 'bedrock', model: 'opus' };
+    let route = { provider: 'bedrock', model: MODEL };
     if (source === 'project env') h.ok(['project', 'set', '--env', JSON.stringify(env)]);
     else if (source === 'rung env') route.env = env;
     else {

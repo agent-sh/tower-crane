@@ -4,8 +4,9 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { makeRepo } = require('./helpers');
+const { makeRepo, fixtureLadder } = require('./helpers');
 const { score, ciChecks } = require('../lib/bench-gates');
+const { taskSpend } = require('../lib/bench-tokens');
 
 const A = 'a'.repeat(40);
 const B = 'b'.repeat(40);
@@ -255,4 +256,224 @@ test('bench gates scores deslop checks from hand verdicts, a reviewer eval and a
   const refused = h.run(['bench', 'gates', '--deslop-runs', runs]);
   assert.equal(refused.code, 1);
   assert.match(refused.stderr, /--deslop-runs needs --deslop-findings/);
+});
+
+test('bench tokens reports accepted-task tokens and cost by rung and escalation path', (t) => {
+  const h = makeRepo(t);
+  t.after(h.cleanup);
+  h.init();
+  const pinned = fixtureLadder().ladder;
+  const light = pinned.easy.model || pinned.easy.profile;
+  const main = pinned.medium.model || pinned.medium.profile;
+  const extended = `${main}[1m]`;
+  for (const title of ['climbed', 'direct', 'open']) h.ok(['task', 'add', '--title', title, '--acceptance', 'done']);
+  const spend = (task, rung, model, tokens, cached) => h.ok(['spend', task, '--tokens', String(tokens), '--input', String(tokens - 10),
+    '--cached', String(cached), '--output', '10', '--rung', rung, '--model', model, '--harness', 'codex', '--agent', `${rung}-${task}`]);
+  const spawn = (task, rung) => JSON.stringify({ at: '2026-10-07T00:00:00Z', agent: 'orchestrator', cmd: 'spawn', task, detail: { role: 'worker', rung, agent: `${rung}-${task}` } });
+  fs.appendFileSync(path.join(h.state, 'events.jsonl'), [spawn('T1', 'easy'), spawn('T1', 'easy'), spawn('T1', 'medium'), spawn('T2', 'medium')].join('\n') + '\n');
+  spend('T1', 'easy', light, 1000010, 0);
+  spend('T1', 'medium', main, 3000010, 2000000);
+  spend('T1', 'review', main, 500010, 0);
+  spend('T2', 'medium', main, 2000010, 0);
+  spend('T2', 'review', extended, 100010, 0);
+  spend('T3', 'easy', light, 7000010, 0);
+  // Minute-only manual records are not missing telemetry.
+  h.ok(['spend', 'T2', '--minutes', '5']);
+  const doc = h.readState('tasks.json');
+  doc.tasks[0].status = 'accepted';
+  doc.tasks[1].status = 'accepted';
+  h.writeState('tasks.json', doc);
+  const prices = path.join(h.base, 'prices.json');
+  const rates = { [light]: { input: 0.1, cache_write: 0.1, cache_read: 0.01, output: 0.5 },
+    [main]: { input: 2, cache_write: 2, cache_read: 0.1, output: 10 } };
+  fs.writeFileSync(prices, JSON.stringify(rates));
+  const r = h.json(['bench', 'tokens', '--prices', prices]);
+  assert.deepEqual([r.accepted, r.complete], [2, 2]);
+  assert.equal(r.all_tasks_tokens, 13600060, 'spend on unaccepted tasks counts toward the cost of accepted ones');
+  assert.equal(r.tokens_per_accepted, 6800030);
+  assert.deepEqual(r.unpriced_models, { [extended]: 1 }, 'the 1M-context id needs its own price row');
+  assert.equal(r.by_path.medium.priced_tasks, 0);
+  assert.deepEqual(Object.keys(r.by_path), ['easy>medium', 'medium']);
+  assert.equal(r.by_path['easy>medium'].median_tokens, 4500030);
+  assert.equal(r.by_rung.medium.median_tokens, 2500010);
+  assert.equal(r.by_rung.medium.tasks, 2);
+  const t1 = r.tasks.find((x) => x.id === 'T1');
+  assert.deepEqual([t1.fresh, t1.cached, t1.output], [2500000, 2000000, 30]);
+  // The path includes fresh easy tokens, cached medium tokens and fresh review tokens.
+  const usd = 1 * 0.1 + 10e-6 * 0.5 + (1 * 2 + 2 * 0.1 + 10e-6 * 10) + (0.5 * 2 + 10e-6 * 10);
+  assert.ok(Math.abs(r.by_path['easy>medium'].median_usd - usd) < 1e-9);
+  h.ok(['project', 'set', '--review-policy', JSON.stringify({ prices: rates })]);
+  const text = h.ok(['bench', 'tokens']);
+  assert.match(text, /accepted tasks: 2, with complete token records: 2/);
+  assert.match(text, /easy>medium\s+1\s+4\.50M/);
+  assert.ok(text.includes(`unpriced entries by model: ${extended} 1`), text);
+});
+
+test('bench excludes accepted tasks missing worker, reviewer or resumed-session usage from medians', (t) => {
+  const h = makeRepo(t);
+  t.after(h.cleanup);
+  h.init();
+  for (const title of ['missing review', 'missing worker', 'complete', 'missing resumed usage']) {
+    h.ok(['task', 'add', '--title', title, '--acceptance', 'done']);
+  }
+  const events = [];
+  for (const task of ['T1', 'T2', 'T3', 'T4']) {
+    for (const role of ['worker', 'reviewer']) {
+      events.push({ at: '2026-10-07T00:00:00Z', cmd: 'spawn', task, detail: { agent: `${role}-${task}`, role, rung: role === 'worker' ? 'easy' : 'review' } });
+    }
+  }
+  events.push({ at: '2026-10-07T00:01:00Z', cmd: 'spawn', task: 'T4',
+    detail: { agent: 'worker-T4', role: 'worker', rung: 'easy', resumed: true, attempt: 2 } });
+  fs.appendFileSync(path.join(h.state, 'events.jsonl'), events.map((e) => JSON.stringify(e)).join('\n') + '\n');
+  const doc = h.readState('tasks.json');
+  for (const task of doc.tasks) {
+    task.status = 'accepted';
+    task.spend.entries = ['worker', 'reviewer'].filter((role) => !(task.id === 'T1' && role === 'reviewer') && !(task.id === 'T2' && role === 'worker'))
+      .map((role) => ({ at: '2026-10-07T00:00:30Z', minutes: 0, agent: `${role}-${task.id}`, source: `spawn:${role}-${task.id}`, tokens: 100, input: 90, cached: 0,
+        output: 10, cost_usd: 1, harness: null, model: null, profile: null, rung: role === 'worker' ? 'easy' : 'review' }));
+  }
+  h.writeState('tasks.json', doc);
+  h.ok(['spend', 'T1', '--minutes', '2', '--agent', 'reviewer-T1']);
+  let result = h.json(['bench', 'tokens']);
+  assert.deepEqual([result.accepted, result.complete, result.overall.priced_tasks], [4, 1, 1]);
+  assert.equal(result.by_rung.easy.tasks, 1);
+  assert.equal(result.by_path.easy.tasks, 1);
+  assert.equal(result.all_tasks_tokens, 600, 'partial recorded spend still contributes to total cost');
+  assert.deepEqual(result.tasks.map((row) => row.missing_spawns), [
+    ['spawn:reviewer-T1'], ['spawn:worker-T2'], [], ['spawn:worker-T4:attempt:2'],
+  ]);
+  // A matching native token report completes the reviewer; minute-only spend did not.
+  h.ok(['spend', 'T1', '--tokens', '0', '--agent', 'reviewer-T1']);
+  result = h.json(['bench', 'tokens']);
+  assert.equal(result.complete, 2);
+  const routes = [
+    ['spawn fallback', { route_index: 1 }],
+    ['spawn retry', { route_index: 1, retry: 1, fresh: true }],
+    ['spawn retry', { route_index: 1, retry: 2, fresh: false }],
+  ].map(([cmd, detail]) => ({ cmd, task: 'T3', at: '2026-10-07T00:00:20Z', detail: { agent: 'worker-T3', ...detail } }));
+  fs.appendFileSync(path.join(h.state, 'events.jsonl'), routes.map((e) => JSON.stringify(e)).join('\n') + '\n');
+  result = h.json(['bench', 'tokens']);
+  const missing = result.tasks.find((row) => row.id === 'T3').missing_spawns;
+  assert.deepEqual(missing, ['spawn:worker-T3:route:1', 'spawn:worker-T3:route:1:retry:1']);
+  assert.equal(result.complete, 1, 'resumable retries share usage; fresh routes need their own records');
+  const updated = h.readState('tasks.json');
+  for (const source of missing) updated.tasks[2].spend.entries.push({
+    ...updated.tasks[2].spend.entries[0], source, tokens: 0, input: 0, cached: 0, output: 0, cost_usd: 0,
+  });
+  h.writeState('tasks.json', updated);
+  result = h.json(['bench', 'tokens']);
+  assert.equal(result.complete, 2);
+});
+
+test('token categories preserve unknown breakdowns across spend entries', () => {
+  const measured = { tokens: 100, input: 70, cached: 20, output: 30 };
+  const unknown = { tokens: 200, input: null, cached: null, output: null };
+  for (const [entries, expected] of [
+    [[unknown], [null, null, null]],
+    [[measured, unknown], [null, null, null]],
+    [[unknown, measured], [null, null, null]],
+    [[{ ...unknown, cached: 10, output: 20 }], [null, 10, 20]],
+    [[{ ...measured, output: null }], [50, 20, null]],
+    [[{ tokens: 0, input: 0, cached: 0, output: 0 }], [0, 0, 0]],
+  ]) {
+    const row = taskSpend({ spend: { entries } }, new Map());
+    assert.deepEqual([row.fresh, row.cached, row.output], expected, JSON.stringify(entries));
+  }
+});
+
+test('bench tokens excludes unknown categories from medians while retaining known totals and measured zeros', (t) => {
+  const h = makeRepo(t);
+  t.after(h.cleanup);
+  h.init();
+  for (const title of ['measured', 'total only', 'measured zeros']) {
+    h.ok(['task', 'add', '--title', title, '--acceptance', 'done']);
+  }
+  h.ok(['spend', 'T1', '--tokens', '100', '--input', '70', '--cached', '20', '--output', '30', '--rung', 'medium']);
+  h.ok(['spend', 'T2', '--tokens', '200', '--rung', 'medium']);
+  h.ok(['spend', 'T3', '--tokens', '100', '--input', '100', '--cached', '0', '--output', '0', '--rung', 'medium']);
+  const doc = h.readState('tasks.json');
+  for (const task of doc.tasks) task.status = 'accepted';
+  h.writeState('tasks.json', doc);
+  const result = h.json(['bench', 'tokens']);
+  assert.deepEqual([result.accepted, result.complete, result.all_tasks_tokens], [3, 3, 400]);
+  assert.equal(result.overall.median_tokens, 100);
+  for (const group of [result.overall, result.by_path.medium]) {
+    assert.deepEqual([group.median_fresh, group.median_cached, group.median_output], [75, 10, 15]);
+  }
+  const unknown = result.tasks.find((row) => row.id === 'T2');
+  assert.deepEqual([unknown.fresh, unknown.cached, unknown.output], [null, null, null]);
+  // With no measured breakdown left, category medians stay unknown.
+  for (const task of doc.tasks) if (task.id !== 'T2') task.status = 'todo';
+  h.writeState('tasks.json', doc);
+  const onlyUnknown = h.json(['bench', 'tokens']);
+  assert.deepEqual([onlyUnknown.overall.median_fresh, onlyUnknown.overall.median_cached, onlyUnknown.overall.median_output], [null, null, null]);
+});
+
+test('token completeness requires finalized usage even for measured or stale live entries', () => {
+  const measured = { source: 'spawn:worker-T1', tokens: 100, input: 90, cached: 0, output: 10 };
+  for (const [entry, expected] of [
+    [{ ...measured, live: { state: 'live', interval_ms: 1000 } }, [100, 1]],
+    [{ ...measured, live: { state: 'stale', interval_ms: 1000 } }, [100, 1]],
+    [{ ...measured, tokens: 0, input: 0, output: 0, live: { state: 'live', interval_ms: 1000 } }, [0, 1]],
+    [{ ...measured, tokens: null, input: null, cached: null, output: null, live: { state: 'unavailable', interval_ms: 1000 } }, [0, 1]],
+    [measured, [100, 0]],
+    [{ ...measured, tokens: null, input: null, cached: null, output: null }, [0, 1]],
+    [{ source: 'manual', tokens: null, input: null }, [0, 0]],
+  ]) {
+    const result = taskSpend({ spend: { entries: [entry] } }, new Map());
+    assert.deepEqual([result.tokens, result.unknown], expected, JSON.stringify(entry));
+  }
+});
+
+test('bench tokens excludes live worker and reviewer usage from every median until collection finalizes it', (t) => {
+  const h = makeRepo(t);
+  t.after(h.cleanup);
+  h.init();
+  h.ok(['task', 'add', '--title', 'accepted before collection', '--acceptance', 'done']);
+  const dispatches = ['worker', 'reviewer'].map((role) => ({
+    at: '2026-10-07T00:00:00Z', cmd: 'spawn', task: 'T1',
+    detail: { agent: `${role}-T1`, role, rung: role === 'worker' ? 'medium' : 'review' },
+  }));
+  fs.appendFileSync(path.join(h.state, 'events.jsonl'), dispatches.map((e) => JSON.stringify(e)).join('\n') + '\n');
+  const doc = h.readState('tasks.json');
+  const task = doc.tasks[0];
+  task.status = 'accepted';
+  task.spend.entries = ['worker', 'reviewer'].map((role) => ({
+    at: '2026-10-07T00:00:30Z', agent: `${role}-T1`, source: `spawn:${role}-T1`, minutes: 0,
+    tokens: role === 'worker' ? 1000 : 100, input: role === 'worker' ? 900 : 90, cached: 0,
+    output: role === 'worker' ? 100 : 10, cost_usd: role === 'worker' ? 0.001 : 0.0001,
+    rung: role === 'worker' ? 'medium' : 'review', harness: null, model: null, profile: null,
+  }));
+  const [worker, reviewer] = task.spend.entries;
+  reviewer.live = { state: 'live', interval_ms: 1000 };
+  const incomplete = (tokens, unknown) => {
+    h.writeState('tasks.json', doc);
+    const result = h.json(['bench', 'tokens']);
+    assert.deepEqual([result.accepted, result.complete, result.overall.tasks, result.overall.priced_tasks], [1, 0, 0, 0]);
+    assert.deepEqual([result.overall.median_tokens, result.overall.mean_tokens, result.overall.median_usd], [null, null, null]);
+    assert.deepEqual(result.by_path, {});
+    assert.deepEqual(result.by_rung, {});
+    assert.deepEqual([result.all_tasks_tokens, result.tokens_per_accepted], [tokens, tokens], 'live usage stays in recorded-spend totals');
+    assert.equal(result.tasks[0].unknown, unknown);
+    assert.deepEqual(result.tasks[0].missing_spawns, [], 'recorded live usage is incomplete, not absent');
+  };
+  incomplete(1100, 1);
+  worker.live = { state: 'stale', interval_ms: 1000 };
+  incomplete(1100, 2);
+  delete reviewer.live;
+  Object.assign(reviewer, { tokens: 10000, input: 9000, output: 1000, cost_usd: 0.01 });
+  incomplete(11000, 1);
+  // Collection can finalize a source without changing its last measured counters.
+  delete worker.live;
+  h.writeState('tasks.json', doc);
+  const result = h.json(['bench', 'tokens']);
+  assert.deepEqual([result.accepted, result.complete, result.all_tasks_tokens], [1, 1, 11000]);
+  for (const group of [result.overall, result.by_path.medium]) {
+    assert.deepEqual([group.tasks, group.priced_tasks, group.median_tokens, group.mean_tokens], [1, 1, 11000, 11000]);
+    assert.ok(Math.abs(group.median_usd - 0.011) < 1e-12);
+    assert.deepEqual([group.median_fresh, group.median_cached, group.median_output], [9900, 0, 1100]);
+  }
+  assert.deepEqual([result.by_rung.medium.median_tokens, result.by_rung.review.median_tokens], [1000, 10000]);
+  assert.deepEqual([result.by_rung.medium.median_usd, result.by_rung.review.median_usd], [0.001, 0.01]);
+  assert.equal(result.tasks[0].unknown, 0);
 });
