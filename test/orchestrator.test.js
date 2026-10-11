@@ -78,6 +78,13 @@ test('one orchestrator session holds writes while reads, release, expiry and own
 });
 
 test('harness scripts share the lease while rival sessions and resumed live copies refuse writes', async (t) => {
+  const clients = [];
+  const closed = [];
+  // Windows cannot remove the copied harness executable while a client runs.
+  t.after(async () => {
+    clients.forEach((client) => client.kill());
+    await Promise.all(closed);
+  });
   const h = makeProjectRepo(t);
   const env = { ...h.env, TOWER_CRANE_AGENT: 'orchestrator', CLAUDE_SESSION_ID: 'resumed-session' };
   const script = path.join(h.repo, process.platform === 'win32' ? 'loop.ps1' : 'loop.sh');
@@ -87,10 +94,10 @@ test('harness scripts share the lease while rival sessions and resumed live copi
   // Windows retains the executable name when Node changes its process title.
   const execPath = process.platform === 'win32' ? path.join(h.repo, 'claude.exe') : process.execPath;
   if (process.platform === 'win32') fs.copyFileSync(process.execPath, execPath);
-  const clients = ['resumed-session', 'resumed-session', 'different-session'].map((session) =>
+  clients.push(...['resumed-session', 'resumed-session', 'different-session'].map((session) =>
     cp.fork(path.join(__dirname, 'fixtures', 'orchestrator-session.js'), [BIN, h.repo],
-      { execPath, env: { ...env, CLAUDE_SESSION_ID: session }, stdio: ['ignore', 'ignore', 'pipe', 'ipc'] }));
-  t.after(() => clients.forEach((client) => client.kill()));
+      { execPath, env: { ...env, CLAUDE_SESSION_ID: session }, stdio: ['ignore', 'ignore', 'pipe', 'ipc'] })));
+  closed.push(...clients.map((client) => new Promise((resolve) => client.once('close', resolve))));
   const run = (client, args, fromScript = false) => new Promise((resolve, reject) => {
     client.once('error', reject);
     client.once('message', resolve);
