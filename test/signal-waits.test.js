@@ -128,6 +128,10 @@ test('shared checks reject readiness budgets and require a reason on allowed tim
     'const window = ready ? 10000 : 20000; until(check, "ready", window);', // wait-allow: rejected lint fixture
     'const budget = getBudget(); until(check, "ready", budget);', // wait-allow: rejected lint fixture
     'const window = getBudget() + 1000; until(check, "ready", window);', // wait-allow: rejected lint fixture
+    'const label = "ready", delay = 1000; until(check, label, delay);', // wait-allow: rejected lint fixture
+    'const label = "ready", delay = 10 * 1000, alias = delay; until(check, label, alias);', // wait-allow: rejected lint fixture
+    'function short() { const delay = 1000; until(check, "ready", delay); } function long() { const delay = 300000; until(check, "ready", delay); }', // wait-allow: rejected lint fixture
+    'function long() { const delay = 300000; until(check, "ready", delay); } function short() { const delay = 1000; until(check, "ready", delay); }', // wait-allow: rejected lint fixture
     'assert.ok(Date.now() - started\n < S.LOCK_WAIT_MS / 4);', // wait-allow: rejected lint fixture
   ]) {
     assert.ok(waitFindings(source).length, source);
@@ -144,6 +148,10 @@ test('shared checks reject readiness budgets and require a reason on allowed tim
   assert.deepEqual(waitFindings('async function waitFor(check, what = "ready", options = {}) {}'), []);
   assert.deepEqual(waitFindings('const h = setup(t, "codex", { cpu_ms: 1000 }); until(t, h, check);'), []);
   assert.deepEqual(waitFindings('const h = setup(t, "codex", { cpu_ms: 10 * 1000 }); until(t, h, check);'), []);
+  assert.deepEqual(waitFindings('const label = "ready", delay = 300000; until(check, label, delay);'), []);
+  assert.deepEqual(waitFindings('function other() { const delay = 1000; } function long() { const delay = 300000; until(check, "ready", delay); }'), []);
+  const scoped = waitFindings('function short() {\nconst delay = 1000;\nuntil(check, "ready", delay);\n}\nfunction long() {\nconst delay = 300000;\nuntil(check, "ready", delay);\n}');
+  assert.deepEqual(scoped.map((finding) => finding.line), [3]);
   assert.ok(waitFindings('await until(check, "// wait-allow: fake reason", 1000);').length); // wait-allow: rejected lint fixture
   const h = makeRepo(t);
   for (const dir of ['scripts', 'bin', 'lib', 'docs', 'changelog.d']) {
@@ -170,6 +178,10 @@ test('shared checks reject readiness budgets and require a reason on allowed tim
   const expression = run();
   assert.equal(expression.status, 1, expression.stdout + expression.stderr);
   assert.match(expression.stderr, /test\/wait.test.js:1 wait supplies/);
+  fs.writeFileSync(bad, 'const label = "ready", delay = 1000; until(check, label, delay);\n'); // wait-allow: rejected lint fixture
+  const declarations = run();
+  assert.equal(declarations.status, 1, declarations.stdout + declarations.stderr);
+  assert.match(declarations.stderr, /test\/wait.test.js:1 wait supplies/);
   fs.writeFileSync(bad, 'const deadline = Date.now() + 1000; // wait-allow: tests a production timeout\n'); // wait-allow: allowed lint fixture
   assert.equal(run().status, 0);
 });

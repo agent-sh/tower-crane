@@ -53,7 +53,7 @@ function hungBudget(value, bindings = new Map(), seen = new Set()) {
   value = value.trim();
   if (value === 'HUNG_TEST_MS') return true;
   if (bindings.has(value) && !seen.has(value)) {
-    return hungBudget(bindings.get(value), bindings, new Set([...seen, value]));
+    return bindings.get(value).every((bound) => hungBudget(bound, bindings, new Set([...seen, value])));
   }
   if (/^Math\.max\(/.test(value)) {
     return callArguments(value, value.indexOf('(')).some((arg) => hungBudget(arg, bindings, seen));
@@ -70,10 +70,9 @@ function budgetExpression(value, bindings, seen = new Set()) {
         && !/^['"`{[]/.test(defaultValue[2].trim()));
   }
   if (bindings.has(value) && !seen.has(value)) {
-    const bound = bindings.get(value);
-    return budgetExpression(bound, bindings, new Set([...seen, value]))
+    return bindings.get(value).some((bound) => budgetExpression(bound, bindings, new Set([...seen, value]))
       || (/^(?:ms|timeout(?:Ms)?|budget|duration)$/i.test(value)
-        && !/^['"`{[]|\bfunction\b|=>/.test(bound));
+        && !/^['"`{[]|\bfunction\b|=>/.test(bound)));
   }
   if (/^['"`{[]/.test(value) || /\bfunction\b|=>/.test(value)) return false;
   // Computed numbers are budgets too. Unknown expressions need an explicit
@@ -100,11 +99,83 @@ function budgetExpression(value, bindings, seen = new Set()) {
     || /\b[\w$.]+_(?:MS|TIMEOUT|BUDGET|DURATION)\b/.test(expression);
 }
 
+function bindingScopes(text) {
+  const root = { start: 0, end: text.length, parent: null, values: new Map() };
+  const scopes = [root];
+  const stack = [root];
+  const templates = [];
+  const tokens = [];
+  const lex = /\/\/[^\n]*|\/\*[\s\S]*?\*\/|"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'|[\w$]+|[^\s]/g;
+  for (const match of text.matchAll(lex)) {
+    const value = match[0];
+    if (/^\/[/*]/.test(value)) continue;
+    const token = { value, start: match.index, end: match.index + value.length, scope: stack.at(-1) };
+    tokens.push(token);
+    if (/^['"]/.test(value)) continue;
+    if (value === '`' && text[match.index - 1] !== '\\') {
+      if (templates.length && templates.at(-1).scope === stack.at(-1)) {
+        stack.pop().end = match.index;
+        templates.pop();
+      } else {
+        const scope = { start: token.end, end: text.length, parent: stack.at(-1), values: new Map() };
+        scopes.push(scope);
+        stack.push(scope);
+        templates.push({ scope });
+      }
+    } else if (value === '{') {
+      const scope = { start: token.end, end: text.length, parent: stack.at(-1), values: new Map() };
+      scopes.push(scope);
+      stack.push(scope);
+    } else if (value === '}' && stack.length > 1 && stack.at(-1) !== templates.at(-1)?.scope) {
+      stack.pop().end = match.index;
+    }
+  }
+  for (let i = 0; i < tokens.length; i++) {
+    const declaration = tokens[i];
+    if (!['const', 'let', 'var'].includes(declaration.value)) continue;
+    let j = i + 1;
+    while (/^[$A-Z_a-z][$\w]*$/.test(tokens[j]?.value || '')) {
+      const name = tokens[j++].value;
+      let from = tokens[j - 1].end;
+      if (tokens[j]?.value === '=') from = tokens[j++].end;
+      const nested = [];
+      while (j < tokens.length) {
+        const token = tokens[j];
+        if (!nested.length && [',', ';', '}'].includes(token.value)) break;
+        if (['(', '[', '{'].includes(token.value)) nested.push(token.value);
+        else if ([')', ']', '}'].includes(token.value)) {
+          if (!nested.length) break;
+          nested.pop();
+        }
+        j++;
+      }
+      const end = tokens[j]?.start ?? text.length;
+      const values = declaration.scope.values.get(name) || [];
+      values.push(text.slice(from, end).trim());
+      declaration.scope.values.set(name, values);
+      if (tokens[j]?.value !== ',') break;
+      j++;
+    }
+  }
+  // Each use sees its enclosing bindings, not a later same-named constant
+  // in another function. Keep all initializers in one scope conservatively.
+  return (position) => {
+    let scope = root;
+    for (const candidate of scopes) {
+      if (candidate.start <= position && position <= candidate.end && candidate.start >= scope.start) scope = candidate;
+    }
+    const values = new Map();
+    for (; scope; scope = scope.parent) {
+      for (const [name, initializers] of scope.values) if (!values.has(name)) values.set(name, initializers);
+    }
+    return values;
+  };
+}
+
 function waitFindings(text) {
   const findings = [];
   const lines = text.replace(/\r\n/g, '\n').split('\n');
-  const bindings = new Map([...text.matchAll(/\b(?:const|let)\s+(\w+)\s*=\s*([^;]+)/g)]
-    .map((match) => [match[1], match[2].trim()]));
+  const bindingsAt = bindingScopes(text);
   const report = (index, reason) => {
     if (!/^\s*\/\//.test(lines[index]) && !allowed(lines[index])) findings.push({ line: index + 1, reason });
   };
@@ -151,6 +222,7 @@ function waitFindings(text) {
     }
   }
   for (const match of text.matchAll(/\b(setTimeout|until|waitFor\w*|waitUntil)\s*\(/g)) {
+    const bindings = bindingsAt(match.index);
     const index = text.slice(0, match.index).split('\n').length - 1;
     if (/^\s*\/\//.test(lines[index])) continue;
     const args = callArguments(text, match.index + match[0].lastIndexOf('('));
