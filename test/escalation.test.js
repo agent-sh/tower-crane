@@ -39,13 +39,14 @@ function configure(h, trigger) {
     const script = `
 const fs = require('node:fs');
 const cp = require('node:child_process');
+const path = require('node:path');
+const { writeAtomic } = require(path.join(path.dirname(process.argv[1]), '..', 'lib', 'state.js'));
 const cli = (args) => cp.execFileSync(process.execPath, [process.argv[1], ...args], { encoding: 'utf8' });
 ${index === 0 && trigger === 'preclaim' ? '' : "cli(['claim', 'T1']);"}
 const attempts = fs.existsSync(process.argv[2]) ? JSON.parse(fs.readFileSync(process.argv[2])) : [];
 attempts.push({ rung: '${rung}', agent: process.env.TOWER_CRANE_AGENT, session: process.env.TOWER_CRANE_SESSION,
   previous: process.argv[3], cwd: process.cwd() });
-fs.writeFileSync(process.argv[2] + '.tmp', JSON.stringify(attempts));
-fs.renameSync(process.argv[2] + '.tmp', process.argv[2]);
+writeAtomic(process.argv[2], JSON.stringify(attempts));
 console.log(JSON.stringify({ type: 'thread.started', thread_id: '${rung}-thread' }));
 console.log(JSON.stringify({ type: 'result', modelUsage: { luna: {} },
   usage: { input_tokens: 100, cache_read_input_tokens: 0, output_tokens: 20 } }));
@@ -387,14 +388,33 @@ test('rework records the review climb before pending worker cleanup finishes', {
   assert.equal(events(h).filter((e) => e.cmd === 'escalate').length, 1);
 });
 
-for (const { route, required } of [
+for (const { route, required, busyAttempt } of [
   { route: 'tests' }, { route: 'clean' }, { route: 'ci' }, { route: 'local-ci' },
   { route: 'ci', required: 'missing' }, { route: 'ci', required: 'pending' },
+  { route: 'clean', busyAttempt: true },
 ]) {
   const type = route === 'local-ci' ? 'ci' : route;
-  test(`a confirmed ${route} gate failure${required ? ` while a required check is ${required}` : ''} climbs and reaches the owner at the range ceiling`, async (t) => {
+  test(`a confirmed ${route} gate failure${required ? ` while a required check is ${required}` : ''}${busyAttempt ? ' with a busy attempt record' : ''} climbs and reaches the owner at the range ceiling`, async (t) => {
     const h = await setup(t, 'review', 'easy..medium', (repo) => {
       gateFixture(repo);
+      if (busyAttempt) {
+        const hook = path.join(repo.base, 'busy-attempt.cjs');
+        // A Windows reader or fs.watch can briefly block replacing this record.
+        fs.writeFileSync(hook, `
+const fs = require('node:fs');
+const rename = fs.renameSync;
+let busy = true;
+fs.renameSync = function(from, to) {
+  if (busy && process.execArgv.includes('-e') && to === process.argv[2] && fs.existsSync(to)) {
+    busy = false;
+    fs.writeFileSync(to + '.busy', 'blocked');
+    throw Object.assign(new Error('attempt record is busy'), { code: 'EBUSY' });
+  }
+  return rename.apply(this, arguments);
+};
+`);
+        repo.env.NODE_OPTIONS += ` ${preloadOption(hook)}`;
+      }
       // Spawn exit runs every software gate, so each fails only where the check asks it to.
       const exit = "process.exit(process.env.FIXTURE_GATE_OK === '0' ? 1 : 0)";
       repo.ok(['project', 'set', '--repo', 'acme/demo', '--tests-mode', 'run-only',
@@ -430,7 +450,12 @@ if (args.some((arg) => arg.includes('/check-runs'))) {
       assert.equal(result.code, 1, result.stderr);
       assert.equal(JSON.parse(result.stdout).confirmed_failure, true, result.stdout);
       if (rung) {
-        await h.until(() => h.readAttempts().length === 2 && h.task().status === 'submitted');
+        await h.until(() => {
+          const failed = events(h).find((e) => e.cmd === 'spawn exit'
+            && e.detail.agent === 'worker-T1-2' && e.detail.code !== 0);
+          assert.equal(failed, undefined, failed && fs.readFileSync(failed.detail.log, 'utf8'));
+          return h.readAttempts().length === 2 && h.task().status === 'submitted';
+        });
         assert.equal(h.json(['task', 'show', 'T1']).tier, rung);
         await h.until(() => settled('worker-T1-2'));
       } else {
@@ -443,6 +468,7 @@ if (args.some((arg) => arg.includes('/check-runs'))) {
     assert.ok(task.evidence.filter((e) => e.type === type && !e.ok).every((e) => e.confirmed_failure === true));
     assert.equal(task.evidence.filter((e) => e.type === type && !e.ok).length, 2);
     assert.equal(h.readAttempts().length, 2);
+    if (busyAttempt) assert.ok(fs.existsSync(h.attempts + '.busy'), 'the rename collision was exercised');
   });
 }
 
