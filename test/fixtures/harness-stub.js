@@ -53,6 +53,19 @@ const walkUp = (dir, names, stop = null) => {
     if (d === stop || path.dirname(d) === d) return out;
   }
 };
+// A claude permission rule such as Read(//abs/dir/**): a bare tool name
+// covers every path; // starts an absolute path in which ** spans
+// directories and * stays within one.
+const toolRuleMatches = (rule, tool, file) => {
+  const m = /^(\w+)(?:\((.*)\))?$/.exec(rule);
+  if (!m || m[1] !== tool) return false;
+  if (m[2] === undefined) return true;
+  if (!m[2].startsWith('//')) return false;
+  const glob = m[2].slice(1).replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*\*|\*/g, (s) => (s === '**' ? '.*' : '[^/]*'));
+  let target = path.resolve(file);
+  try { target = fs.realpathSync(target); } catch { /* a missing file matches by its name */ }
+  return new RegExp(`^${glob}$`).test(target);
+};
 const hookCommands = (settings) => Object.values(settings.hooks || {}).flat().flatMap((h) => (h.hooks || []).map((x) => x.command));
 
 module.exports = function stub(harness) {
@@ -83,6 +96,18 @@ module.exports = function stub(harness) {
     if (!args.includes('--strict-mcp-config')) Object.assign(report.mcp, json(global).mcpServers || {});
     if (after('--mcp-config')) Object.assign(report.mcp, json(after('--mcp-config')).mcpServers || {});
     report.auth = read(path.join(dir, '.credentials.json'));
+    // claude's Read, Grep and Glob tools answer to permission rules, not to
+    // the sandbox: STUB_READ files are read the way those tools would, after
+    // the deny rules from settings and --disallowedTools. A relative file is
+    // in the agent's own home.
+    const from = args.indexOf('--disallowedTools') + 1;
+    const end = args.findIndex((a, i) => i >= from && a.startsWith('--'));
+    const disallowed = from ? args.slice(from, end === -1 ? undefined : end) : [];
+    const denyRules = [...((settings.permissions && settings.permissions.deny) || []), ...disallowed];
+    report.reads = JSON.parse(process.env.STUB_READ || '[]').map((f) => path.resolve(dir, f)).flatMap((file) => ['Read', 'Grep', 'Glob'].map((tool) => {
+      const denied = denyRules.some((r) => toolRuleMatches(r, tool, file));
+      return { file, tool, denied, text: denied ? null : read(file) };
+    }));
   } else if (harness === 'codex') {
     const dir = process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
     const disabled = args.filter((a, i) => args[i - 1] === '--disable');

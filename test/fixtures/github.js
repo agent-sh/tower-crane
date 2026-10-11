@@ -26,12 +26,15 @@ cp.spawnSync = function github(file, args, ...rest) {
         name: c.name, status: c.status, conclusion: c.conclusion, app: c.app.slug,
         ...(filter.includes('output') ? { output: c.output } : {}),
         ...(filter.includes('suite:') ? { suite: c.check_suite.id } : {}),
+        ...(filter.includes('started_at') ? { id: c.id, started_at: c.started_at } : {}),
       }));
     } else if (args[1].endsWith(`/commits/${data.sha}/check-suites?per_page=100`)) {
       items = data.suites.map((s) => ({
         app: s.app.slug, status: s.status, conclusion: s.conclusion, runs: s.latest_check_runs_count,
         ...(/[{,]\s*id\s*[,}]/.test(filter) ? { id: s.id } : {}),
       }));
+    } else if (args[1].endsWith(`/actions/runs?head_sha=${data.sha}&per_page=100`)) {
+      items = (data.workflows ?? []).map((w) => ({ head_sha: data.sha, ...w }));
     }
   }
   if (!items) throw new Error(`unexpected gh call: ${args.join(' ')}`);

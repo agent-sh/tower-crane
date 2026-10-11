@@ -1,0 +1,1 @@
+- Restore empty-file signals in the shared test wait helper. Only PID readiness waits require nonempty content, so automation queue tests and canary startup checks both retain their intended synchronization.

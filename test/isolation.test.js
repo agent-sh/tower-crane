@@ -7,6 +7,7 @@ const path = require('node:path');
 const cp = require('node:child_process');
 const { makeRepo, ROOT, BIN, detachedAlive } = require('./helpers');
 const A = require('../lib/agents');
+const S = require('../lib/state');
 const TOML = require('../lib/toml');
 
 const STUB = path.join(__dirname, 'fixtures', 'harness-stub.js');
@@ -42,7 +43,7 @@ function plant(h) {
     '[mcp_servers.planted]', 'command = "planted-mcp"', '',
     '[mcp_servers.planted.env]', `TOKEN = "${SECRET}-MCP"`, '',
   ].join('\n'));
-  put('.codex/sol.config.toml', [
+  put('.codex/fixture-main.config.toml', [
     'model = "s"', `experimental_bearer_token = "${SECRET}-PROFILE"`,
     `model_instructions_file = ${JSON.stringify(path.join(home, 'instructions.md'))}`,
     `model_providers = { r = { name = "R", experimental_bearer_token = "${SECRET}-PROFILE-INLINE" } }`, '',
@@ -72,9 +73,11 @@ function plant(h) {
     'echo fake gh', '',
   ].join('\n'), { mode: 0o755 });
   // A test nested inside an agent must not cycle through the parent and
-  // child git shims. Delegate local work through the parent's guarded PATH;
-  // network pushes return a fixture error without contacting a remote.
-  const parentPath = process.env.PATH;
+  // child git shims, and the parent's guard refuses the options a shim adds to
+  // a push, so the fixture delegates past every agent shim to the real git.
+  // Network pushes return a fixture error without contacting a remote.
+  const parentPath = String(process.env.PATH || '').split(path.delimiter)
+    .filter((dir) => !fs.existsSync(path.join(dir, '..', '.tower-crane-origin.json'))).join(path.delimiter);
   fs.writeFileSync(path.join(bin, 'git'), `#!${process.execPath}
 const cp = require('node:child_process');
 const args = process.argv.slice(2);
@@ -100,6 +103,7 @@ process.exit(result.status ?? 1);
   for (const k of ['GH_TOKEN', 'GITHUB_TOKEN']) runEnv[k] = '';
   runEnv.CLAUDE_CONFIG_DIR = '';
   runEnv.CODEX_HOME = '';
+  // Agent caches belong under the fixture's home, not the runner's cache.
   runEnv.XDG_CACHE_HOME = '';
   return { home, out, env: runEnv, report: () => JSON.parse(fs.readFileSync(out, 'utf8')) };
 }
@@ -138,6 +142,10 @@ function spawn(h, u, role, env = {}, opts = {}) {
     h.ok(['task', 'update', 'T1', '--kind', 'docs']);
     h.ok(['claim', 'T1', '--agent', 'builder']);
     h.ok(['submit', 'T1', '--sha', h.git(['rev-parse', 'HEAD']), '--agent', 'builder']);
+  }
+  // A worker needs a task it can claim; an earlier review spawn leaves T1 submitted.
+  if (['easy', 'medium', 'hard', 'research'].includes(role) && h.readState('tasks.json').tasks[0].status === 'submitted') {
+    h.ok(['rework', 'T1', '--reason', `probe the ${role} rung`]);
   }
   const r = h.run(['spawn', '--role', role, '--task', 'T1', '--wait', '--json'], { ...opts, env: { ...u.env, ...env } });
   assert.equal(r.code, 0, r.stderr);
@@ -178,7 +186,7 @@ function decide(h, cwd, jobs, branch, cases) {
 }
 
 const isolated = (h, rung, harness) => {
-  const model = harness === 'claude' ? ['--model', 'opus', '--clear', 'profile'] : ['--profile', 'sol', '--clear', 'model'];
+  const model = harness === 'claude' ? ['--model', 'fixture-large', '--clear', 'profile'] : ['--profile', 'fixture-main', '--clear', 'model'];
   h.ok(['ladder', 'set', rung, '--harness', harness, ...model, '--clear', 'effort', '--clear', 'args']);
 };
 
@@ -211,14 +219,14 @@ test('codex worker configs keep named provider and MCP fields without copying cr
       malformed: { args: [{ opaque_value: SECRET }], env_vars: [{ opaque_value: SECRET }] },
     },
   };
-  for (const file of ['config.toml', 'sol.config.toml']) {
+  for (const file of ['config.toml', 'fixture-main.config.toml']) {
     fs.writeFileSync(path.join(u.home, '.codex', file), TOML.stringify(doc));
   }
   isolated(h, 'medium', 'codex');
   h.ok(['ladder', 'set', 'medium', '--mcp', '["planted","malformed"]']);
   const started = spawn(h, u, 'medium');
   noSecretsCopied(h);
-  for (const file of ['config.toml', 'sol.config.toml']) {
+  for (const file of ['config.toml', 'fixture-main.config.toml']) {
     const config = JSON.parse(JSON.stringify(TOML.parse(fs.readFileSync(path.join(h.state, 'homes', started.agent, file), 'utf8'))));
     assert.deepEqual(config.model_providers, { p: provider, malformed: {} }, file);
     assert.deepEqual(config.mcp_servers, { planted: server, malformed: {} }, file);
@@ -234,13 +242,13 @@ test('codex spawns reject credential tables in scalar settings in base and every
   };
   const malformed = { model: [credentials], model_reasoning_effort: 7, model_verbosity: true };
   const doc = { ...safe, ...malformed, profiles: { safe: { model: 'legacy', ...safe }, malformed } };
-  for (const file of ['config.toml', 'sol.config.toml']) {
+  for (const file of ['config.toml', 'fixture-main.config.toml']) {
     fs.writeFileSync(path.join(u.home, '.codex', file), TOML.stringify(doc));
   }
   isolated(h, 'medium', 'codex');
   const started = spawn(h, u, 'medium');
   noSecretsCopied(h);
-  for (const file of ['config.toml', 'sol.config.toml']) {
+  for (const file of ['config.toml', 'fixture-main.config.toml']) {
     const config = JSON.parse(JSON.stringify(TOML.parse(fs.readFileSync(path.join(h.state, 'homes', started.agent, file), 'utf8'))));
     for (const [key, value] of Object.entries(safe)) assert.equal(config[key], value, `${file}: ${key}`);
     for (const key of Object.keys(malformed)) assert.equal(config[key], undefined, `${file}: ${key}`);
@@ -305,7 +313,7 @@ const PROVIDERS_KEPT = {
   'amazon-bedrock': { aws: { region: 'us-east-1', profile: 'work' } },
   azure: { ...PROVIDERS.azure, query_params: { 'api-version': '2025-04-01-preview' } },
 };
-const BEDROCK_CONFIG = { model: 'openai.gpt-oss-120b', model_provider: 'amazon-bedrock', model_providers: PROVIDERS };
+const BEDROCK_CONFIG = { model: 'openai.fixture-model', model_provider: 'amazon-bedrock', model_providers: PROVIDERS };
 
 test('codex provider sub-tables keep their named non-credential fields', () => {
   const filtered = A.codexConfig(TOML.parse(TOML.stringify(BEDROCK_CONFIG)), []).doc;
@@ -315,7 +323,7 @@ test('codex provider sub-tables keep their named non-credential fields', () => {
 
 test('a codex spawn on Bedrock starts with the region from the user config', { skip: NO_STUBS }, (t) => {
   const { h, u } = setup(t);
-  for (const file of ['config.toml', 'sol.config.toml']) {
+  for (const file of ['config.toml', 'fixture-main.config.toml']) {
     fs.writeFileSync(path.join(u.home, '.codex', file), TOML.stringify(BEDROCK_CONFIG));
   }
   isolated(h, 'medium', 'codex');
@@ -326,7 +334,7 @@ test('a codex spawn on Bedrock starts with the region from the user config', { s
   const home = path.join(h.state, 'homes', started.agent);
   const { args: spawned, config } = u.report();
   assert.deepEqual(config.model_providers, PROVIDERS_KEPT);
-  const profile = TOML.parse(fs.readFileSync(path.join(home, 'sol.config.toml'), 'utf8'));
+  const profile = TOML.parse(fs.readFileSync(path.join(home, 'fixture-main.config.toml'), 'utf8'));
   assert.deepEqual(JSON.parse(JSON.stringify(profile.model_providers)), PROVIDERS_KEPT);
   // An installed codex also loads the generated home with the spawn's -c
   // overrides, so a field it refuses fails here instead of at dispatch.
@@ -348,9 +356,10 @@ test('research Claude gets native or explicit web MCP tools with worker file and
     const ownHome = path.dirname(report.home);
     assert.deepEqual(allowRead, [ownHome, path.join(h.state, 'brokers', path.basename(ownHome))]);
     assert.ok(shared.denyWrite.includes(h.state));
-    // Each agent writes a cache of its own.
-    const cache = path.join(u.home, '.cache', 'tower-crane', 'agents');
-    shared.allowWrite = shared.allowWrite.map((w) => (path.dirname(path.dirname(w)) === cache && path.basename(w) === path.basename(ownHome) ? '<agent cache>' : w));
+    const cache = path.join(u.home, '.cache', 'tower-crane', 'tasks');
+    const writes = shared.allowWrite.filter((w) => path.dirname(path.dirname(w)) === cache);
+    assert.equal(writes.length, 1);
+    assert.equal(path.basename(writes[0]), 'T1');
     return shared;
   };
   isolated(h, 'research', 'claude');
@@ -403,8 +412,9 @@ test('research Codex explicitly enables live search with worker file and git con
     assert.equal(rules[h.state], 'read');
     assert.equal(rules[path.join(h.state, 'brokers')], 'none');
     assert.equal(rules[broker], 'write');
-    const cache = Object.keys(rules).filter((k) => path.dirname(path.dirname(k)) === path.join(u.home, '.cache', 'tower-crane', 'agents'));
-    assert.deepEqual(cache.map((k) => [path.basename(k), rules[k]]), [[path.basename(ownHome), 'write']]);
+    assert.equal(rules[path.join(path.dirname(h.userConfig), 'owner')], 'none', 'no agent reads the owner key');
+    const cache = Object.keys(rules).filter((k) => path.dirname(path.dirname(k)) === path.join(u.home, '.cache', 'tower-crane', 'tasks'));
+    assert.deepEqual(cache.map((k) => [path.basename(k), rules[k]]), [['T1', 'write']]);
     delete rules[cache[0]];
     delete rules[ownHome];
     delete rules[sessions];
@@ -454,11 +464,90 @@ test('a spawned claude agent imports the user\'s global rules by path, loads non
   assert.deepEqual(box.filesystem.denyWrite, [h.state, wt], 'the state is read-only');
   assert.ok(box.filesystem.denyRead.includes(path.join(h.state, 'homes')), 'other agent homes are hidden, including future spawns');
   assert.ok(box.filesystem.denyRead.includes(path.join(h.state, 'brokers')), 'no agent reads another agent\'s broker token');
+  assert.ok(box.filesystem.denyRead.includes(path.join(path.dirname(h.userConfig), 'owner')), 'no agent reads the owner key');
   assert.deepEqual(box.filesystem.allowRead, [home, path.join(h.state, 'brokers', started.agent)], 'only this dispatch home and its own broker directory are readable');
   for (const p of ['/var/run/docker.sock', '/run/docker.sock', path.join(u.home, '.ssh'), path.join(u.home, '.aws')]) assert.ok(box.filesystem.denyRead.includes(p), p);
   assert.match(fs.readFileSync(path.join(h.repo, '.git', 'info', 'exclude'), 'utf8'), /^\.claude\/\.cc-writes\/$/m, 'the sandbox marker is never committed');
   assert.equal(fs.readFileSync(path.join(h.state, 'homes', '.gitignore'), 'utf8'), '*\n');
   noSecretsCopied(h);
+});
+
+test('claude\'s own Read, Grep and Glob tools are denied every path its sandbox hides', { skip: NO_STUBS }, (t) => {
+  const { h, u, wt } = setup(t);
+  isolated(h, 'small', 'claude');
+  const ssh = path.join(u.home, '.ssh', 'id_probe');
+  fs.mkdirSync(path.dirname(ssh), { recursive: true });
+  fs.writeFileSync(ssh, 'ssh key\n');
+  // The owner key, and a home and broker token of an agent spawned after this one.
+  const hidden = [path.join(path.dirname(h.userConfig), 'owner', 'key'), ssh,
+    path.join(h.state, 'homes', 'worker-later', 'settings.json'), path.join(h.state, 'brokers', 'worker-later', 'token')];
+  const open = path.join(wt, '.claude', 'settings.local.json');
+  spawn(h, u, 'small', { STUB_READ: JSON.stringify([...hidden, open]) });
+  const reads = u.report().reads;
+  assert.equal(reads.length, 15);
+  for (const r of reads) {
+    if (r.file === open) assert.match(r.text, /planted-local-hook/, `${r.tool} reads the worktree`);
+    else assert.equal(r.denied, true, `${r.tool} ${r.file}`);
+  }
+});
+
+test('sandbox owner-key denials use the project binding after the caller changes config', { skip: NO_STUBS }, (t) => {
+  const { h, u } = setup(t);
+  const ownerDir = path.join(h.readState('project.json').owner_config_dir, 'owner');
+  const callerConfig = path.join(h.base, 'caller-config', 'config.json');
+  for (const harness of ['claude', 'codex']) {
+    isolated(h, 'small', harness);
+    spawn(h, u, 'small', { TOWER_CRANE_AGENT: 'orchestrator', TOWER_CRANE_CONFIG: callerConfig });
+    const seen = u.report();
+    if (harness === 'claude') {
+      assert.ok(seen.settings.sandbox.filesystem.denyRead.includes(ownerDir));
+      const posix = ownerDir.replace(/^([A-Za-z]):/, (_, drive) => `/${drive.toLowerCase()}`).split(path.sep).join('/');
+      for (const tool of ['Read', 'Grep', 'Glob']) {
+        assert.ok(seen.settings.permissions.deny.includes(`${tool}(/${posix}/**)`));
+      }
+    } else {
+      assert.equal(seen.config.permissions['tower-crane'].filesystem[ownerDir], 'none');
+    }
+  }
+});
+
+test('unbound projects spawn workers and reviewers with owner-key denials but still refuse headless owner access', { skip: NO_STUBS }, (t) => {
+  for (const harness of ['claude', 'codex']) {
+    const { h, u } = setup(t);
+    for (const rung of ['easy', 'medium', 'hard', 'review']) isolated(h, rung, harness);
+    h.ok(['task', 'update', 'T1', '--kind', 'docs']);
+    const project = h.readState('project.json');
+    delete project.owner_config_dir;
+    h.writeState('project.json', project);
+    const callerConfig = harness === 'claude' ? path.join(h.base, 'caller-config', 'config.json') : '';
+    const env = { TOWER_CRANE_AGENT: 'orchestrator', TOWER_CRANE_CONFIG: callerConfig };
+    const configDir = callerConfig ? path.dirname(callerConfig) : path.join(u.home, '.config', 'tower-crane');
+    const ownerDir = path.join(configDir, 'owner');
+    assert.equal(fs.existsSync(ownerDir), false);
+    for (const role of ['hard', 'review']) {
+      if (role === 'review') {
+        const opts = { env: { TOWER_CRANE_AGENT: 'builder' } };
+        h.ok(['claim', 'T1', '--agent', 'builder'], opts);
+        h.ok(['submit', 'T1', '--sha', h.git(['rev-parse', 'HEAD']), '--agent', 'builder'], opts);
+      }
+      spawn(h, u, role, env);
+      assert.ok(fs.statSync(ownerDir).isDirectory());
+      const seen = u.report();
+      if (harness === 'claude') {
+        assert.ok(seen.settings.sandbox.filesystem.denyRead.includes(ownerDir));
+        const posix = ownerDir.split(path.sep).join('/');
+        for (const tool of ['Read', 'Grep', 'Glob']) {
+          assert.ok(seen.settings.permissions.deny.includes(`${tool}(/${posix}/**)`));
+        }
+      } else {
+        assert.equal(seen.config.permissions['tower-crane'].filesystem[ownerDir], 'none');
+      }
+      assert.equal(h.readState('project.json').owner_config_dir, undefined);
+    }
+    const denied = h.run(['project', 'show']);
+    assert.equal(denied.code, 1, denied.stderr);
+    assert.match(denied.stderr, /project.json has no valid owner_config_dir/);
+  }
 });
 
 test('a spawned codex agent is pointed at the user\'s global rules, loads none of the user memory, instructions, MCP servers or rules, and reaches auth through a link', { skip: NO_STUBS }, (t) => {
@@ -484,7 +573,7 @@ test('a spawned codex agent is pointed at the user\'s global rules, loads none o
   assert.deepEqual(Object.keys(seen.config.hooks).sort(), ['PostToolUse', 'Stop', 'UserPromptSubmit']);
   const home = path.join(h.state, 'homes', started.agent);
   for (const f of ['auth.json', '.env']) assert.ok(fs.lstatSync(path.join(home, f)).isSymbolicLink(), `${f} is linked`);
-  assert.equal(fs.readFileSync(path.join(home, 'sol.config.toml'), 'utf8'), 'model = "s"\n\n[model_providers.r]\nname = "R"\n', 'the profile without its tokens or instructions');
+  assert.equal(fs.readFileSync(path.join(home, 'fixture-main.config.toml'), 'utf8'), 'model = "s"\n\n[model_providers.r]\nname = "R"\n', 'the profile without its tokens or instructions');
   assert.equal(fs.statSync(path.join(home, 'config.toml')).mode & 0o777, 0o600);
   assert.equal(seen.home, path.join(home, 'home'), 'HOME is the agent\'s own');
   assert.deepEqual(seen.skills, [], 'no user skill from ~/.agents/skills, and the small role has none of its own');
@@ -541,7 +630,7 @@ test('browser tasks attach the user kit on every rung with approved tools and no
   fs.writeFileSync(path.join(u.home, '.claude', 'mcp.json'), JSON.stringify({ mcpServers: definitions }));
   const config = path.join(u.home, '.codex', 'config.toml');
   fs.appendFileSync(config, '\n' + TOML.stringify({ mcp_servers: definitions }));
-  fs.appendFileSync(path.join(u.home, '.codex', 'sol.config.toml'), '\n' + TOML.stringify({
+  fs.appendFileSync(path.join(u.home, '.codex', 'fixture-main.config.toml'), '\n' + TOML.stringify({
     mcp_servers: { playwright: {
       command: 'profile-browser-mcp', enabled: false, default_tools_approval_mode: 'prompt',
       env_vars: [SECRET], env_http_headers: { Authorization: SECRET },
@@ -558,8 +647,13 @@ test('browser tasks attach the user kit on every rung with approved tools and no
       for (const role of roles) {
         isolated(h, role, harness);
         const dry = h.json(['spawn', '--role', role, '--task', 'T1', '--dry-run'], { env: u.env });
-        assert.deepEqual(dry.home.mcp, ['playwright'], `${harness} ${role} ${declaration}`);
-        if (harness === 'claude') assert.match(dry.argv[dry.argv.indexOf('--allowedTools') + 1], /mcp__playwright/);
+        const servers = role === 'orchestrator' ? ['playwright', 'tower-crane'] : ['playwright'];
+        assert.deepEqual(dry.home.mcp, servers, `${harness} ${role} ${declaration}`);
+        if (harness === 'claude') {
+          const allowed = dry.argv[dry.argv.indexOf('--allowedTools') + 1];
+          assert.match(allowed, /mcp__playwright/);
+          assert.equal(allowed.includes('mcp__tower-crane'), role === 'orchestrator');
+        }
       }
     }
     const started = spawn(h, u, 'hard');
@@ -570,7 +664,7 @@ test('browser tasks attach the user kit on every rung with approved tools and no
       assert.deepEqual(seen.config.mcp_servers.playwright, {
         command: 'browser-mcp', args: ['--headless'], enabled: true, default_tools_approval_mode: 'approve',
       });
-      const profile = TOML.parse(fs.readFileSync(path.join(h.state, 'homes', started.agent, 'sol.config.toml'), 'utf8')).mcp_servers.playwright;
+      const profile = TOML.parse(fs.readFileSync(path.join(h.state, 'homes', started.agent, 'fixture-main.config.toml'), 'utf8')).mcp_servers.playwright;
       assert.equal(profile.enabled, true);
       assert.equal(profile.default_tools_approval_mode, 'approve');
       assert.equal(profile.tools.browser_navigate.approval_mode, 'approve');
@@ -590,24 +684,26 @@ test('browser tasks attach the user kit on every rung with approved tools and no
 
 test('browser spawns use the original user kit through a nested isolated home and refuse missing servers', { skip: NO_STUBS }, (t) => {
   const { h, u } = setup(t);
+  // An operational spawn follows the user's browser settings across homes.
+  const orchestrator = { TOWER_CRANE_AGENT: 'orchestrator' };
   const userFile = path.join(u.home, '.config', 'tower-crane', 'config.json');
   fs.mkdirSync(path.dirname(userFile), { recursive: true });
   fs.writeFileSync(userFile, JSON.stringify({ browser_kit: ['planted'] }));
   h.ok(['task', 'update', 'T1', '--needs', '["browser"]']);
   isolated(h, 'hard', 'codex');
-  const parent = spawn(h, u, 'hard', { TOWER_CRANE_CONFIG: '' });
+  const parent = spawn(h, u, 'hard', { TOWER_CRANE_CONFIG: '', ...orchestrator });
   const generated = path.join(h.state, 'homes', parent.agent);
-  const nestedEnv = { ...u.env, HOME: path.join(generated, 'home'), CODEX_HOME: generated, TOWER_CRANE_CONFIG: '' };
+  const nestedEnv = { ...u.env, HOME: path.join(generated, 'home'), CODEX_HOME: generated, TOWER_CRANE_CONFIG: '', ...orchestrator };
   assert.deepEqual(h.json(['spawn', '--role', 'hard', '--task', 'T1', '--dry-run'], { env: nestedEnv }).home.mcp, ['planted']);
   fs.writeFileSync(userFile, JSON.stringify({ browser_kit: ['missing-browser'] }));
   for (const harness of ['claude', 'codex']) {
     isolated(h, 'small', harness);
-    const result = h.run(['spawn', '--role', 'small', '--task', 'T1', '--dry-run'], { env: { ...u.env, TOWER_CRANE_CONFIG: '' } });
+    const result = h.run(['spawn', '--role', 'small', '--task', 'T1', '--dry-run'], { env: { ...u.env, TOWER_CRANE_CONFIG: '', ...orchestrator } });
     assert.notEqual(result.code, 0);
     assert.match(result.stderr, /missing-browser.*(?:mcp\.json|config\.toml)/);
   }
   h.ok(['task', 'update', 'T1', '--needs', '[]']);
-  assert.deepEqual(h.json(['spawn', '--role', 'small', '--task', 'T1', '--dry-run'], { env: { ...u.env, TOWER_CRANE_CONFIG: '' } }).home.mcp, []);
+  assert.deepEqual(h.json(['spawn', '--role', 'small', '--task', 'T1', '--dry-run'], { env: { ...u.env, TOWER_CRANE_CONFIG: '', ...orchestrator } }).home.mcp, []);
 });
 
 test('a codex agent writes only where its agent file says; a worker writes its git metadata, reviewer and small checks cannot write the worktree', { skip: NO_STUBS }, (t) => {
@@ -649,6 +745,8 @@ test('a codex agent writes only where its agent file says; a worker writes its g
     assert.ok(!visible(path.join(h.state, 'brokers', 'worker-T9-1', 'broker.json')), `${rung}: another agent's token is hidden`);
     assert.equal(config.permissions['tower-crane'].network.enabled, true);
   }
+  // The codex loop left T1 submitted; a worker needs a task it can claim.
+  h.ok(['rework', 'T1', '--reason', 'probe the claude rungs']);
   for (const [rung, writes] of [['hard', true], ['small', false]]) {
     isolated(h, rung, 'claude');
     spawn(h, u, rung);
@@ -684,7 +782,7 @@ test('worker and reviewer sandboxes write a cache of their own, never the user c
       }
       const own = writes.filter((w) => contains(root, w));
       assert.equal(own.length, 1, `${seen.harness} ${rung}: one directory under the cache root: ${JSON.stringify(own)}`);
-      assert.ok(contains(path.join(fs.realpathSync(root), 'tower-crane', 'agents'), own[0]) && path.basename(own[0]) === started.agent, own[0]);
+      assert.ok(contains(path.join(fs.realpathSync(root), 'tower-crane', rung === 'review' ? 'agents' : 'tasks'), own[0]) && path.basename(own[0]) === (rung === 'review' ? started.agent : 'T1'), own[0]);
       assert.ok(fs.statSync(own[0]).isDirectory(), 'the granted cache exists');
       assert.deepEqual(JSON.parse(seen.ran[0].stderr), [own[0], ...['go-build', 'go-mod', 'npm'].map((d) => path.join(own[0], d))], `${seen.harness} ${rung}: tool caches point at the agent cache`);
     }
@@ -692,13 +790,61 @@ test('worker and reviewer sandboxes write a cache of their own, never the user c
   assert.deepEqual([...covered].sort(), ['claude hard', 'claude review', 'codex hard', 'codex review']);
 });
 
-test('the next spawn removes an exited agent\'s cache even when it holds read-only module trees', { skip: NO_STUBS }, (t) => {
+test('a spawn from a supervisor running in another agent\'s env gets a cache of its own under the user cache root, never nested in the inherited one', { skip: NO_STUBS }, (t) => {
   const { h, u } = setup(t);
   isolated(h, 'hard', 'claude');
+  // The supervisor's XDG_CACHE_HOME is the cache of a worker, as an automation started from that worker's env has it.
+  const root = path.join(u.home, '.cache');
+  const inherited = path.join(root, 'tower-crane', 'agents', '22cd04e4ddaf', 'worker-T93-6');
+  spawn(h, u, 'hard', { XDG_CACHE_HOME: inherited });
+  const real = fs.realpathSync(root);
+  const own = u.report().settings.sandbox.filesystem.allowWrite.filter((w) => w === real || w.startsWith(real + path.sep));
+  assert.equal(own.length, 1, `one directory under the cache root: ${JSON.stringify(own)}`);
+  // Worker scratch is keyed by task, whatever the inherited agent cache was.
+  assert.equal(path.dirname(path.dirname(own[0])), path.join(real, 'tower-crane', 'tasks'), own[0]);
+  assert.equal(path.basename(own[0]), 'T1');
+  assert.ok(fs.statSync(own[0]).isDirectory(), 'the granted cache exists');
+});
+
+test('a second worker spawn reads and writes the first attempt scratch for the same task', { skip: NO_STUBS }, (t) => {
+  const { h, u, wt } = setup(t);
+  isolated(h, 'hard', 'claude');
   const env = { XDG_CACHE_HOME: '' };
-  const first = spawn(h, u, 'hard', env);
-  const cache = u.report().settings.sandbox.filesystem.allowWrite.find((w) => path.basename(w) === first.agent);
-  // The layout Go leaves in GOMODCACHE: read-only files in read-only directories.
+  const write = [process.execPath, '-e', `require('node:fs').writeFileSync(require('node:path').join(process.env.XDG_CACHE_HOME, 'receipt.txt'), 'first attempt\\n')`];
+  const first = spawn(h, u, 'hard', { ...env, STUB_RUN: JSON.stringify([write]) });
+  const cache = u.report().settings.sandbox.filesystem.allowWrite.find((w) => /[\\/]tower-crane[\\/](?:agents|tasks)[\\/][0-9a-f]{12}[\\/][^\\/]+$/.test(w));
+  const file = path.join(cache, 'receipt.txt');
+  assert.equal(fs.readFileSync(file, 'utf8'), 'first attempt\n');
+  h.ok(['claim', 'T1', '--agent', 'builder']);
+  h.ok(['submit', 'T1', '--agent', 'builder', '--sha', h.git(['rev-parse', 'HEAD'], wt)]);
+  const probe = [process.execPath, '-e', `const fs = require('node:fs'); const path = require('node:path'); const file = path.join(process.env.XDG_CACHE_HOME, 'receipt.txt'); process.stderr.write(fs.readFileSync(file, 'utf8')); fs.appendFileSync(file, 'second attempt\\n');`];
+  const second = spawn(h, u, 'hard', { ...env, STUB_RUN: JSON.stringify([probe]) });
+  assert.notEqual(second.agent, first.agent);
+  const seen = u.report();
+  assert.equal(seen.ran[0].code, 0, seen.ran[0].stderr);
+  assert.equal(seen.ran[0].stderr, 'first attempt\n');
+  assert.equal(fs.readFileSync(file, 'utf8'), 'first attempt\nsecond attempt\n');
+  assert.ok(seen.settings.sandbox.filesystem.allowWrite.includes(cache));
+  assert.ok(seen.prompt.includes(cache), 'the worker brief names the shared scratch');
+  assert.equal(h.json(['task', 'show', 'T1']).scratch, cache);
+  h.ok(['task', 'add', '--title', 'Another task', '--acceptance', 'separate scratch']);
+  h.ok(['brief', 'set', 'T2', '-'], { input: 'another task\n' });
+  const other = h.json(['spawn', '--role', 'hard', '--task', 'T2', '--wait'], { env: { ...u.env, XDG_CACHE_HOME: cache } });
+  assert.notEqual(other.agent, second.agent);
+  const otherCache = h.json(['task', 'show', 'T2']).scratch;
+  assert.notEqual(otherCache, cache);
+  assert.equal(path.dirname(otherCache), path.dirname(cache), 'an inherited task cache never nests the next task');
+  assert.ok(!fs.existsSync(path.join(otherCache, 'receipt.txt')));
+  assert.equal(fs.readFileSync(file, 'utf8'), 'first attempt\nsecond attempt\n');
+});
+
+test('cancel removes worker task scratch with read-only module trees alongside the worktree', { skip: NO_STUBS }, (t) => {
+  const { h, u, wt } = setup(t);
+  isolated(h, 'medium', 'codex');
+  const first = spawn(h, u, 'medium');
+  const config = u.report().config;
+  const cache = Object.entries(config.permissions['tower-crane'].filesystem)
+    .find(([w, v]) => v === 'write' && /[\\/]tower-crane[\\/](?:agents|tasks)[\\/][0-9a-f]{12}[\\/][^\\/]+$/.test(w))[0];
   const mod = path.join(cache, 'go-mod', 'example.com', 'm@v1.0.0');
   fs.mkdirSync(mod, { recursive: true });
   fs.writeFileSync(path.join(mod, 'go.mod'), 'module example.com/m\n');
@@ -706,9 +852,15 @@ test('the next spawn removes an exited agent\'s cache even when it holds read-on
   t.after(() => {
     for (const p of [path.dirname(mod), mod]) try { fs.chmodSync(p, 0o700); } catch {}
   });
-  const second = spawn(h, u, 'hard', env);
-  assert.notEqual(second.agent, first.agent);
-  assert.ok(!fs.existsSync(cache), `${cache} is removed`);
+  // setup plants an untracked local settings file; retirement must keep dirty worktrees and their scratch.
+  h.ok(['task', 'update', 'T1', '--status', 'cancelled'], { env: u.env });
+  assert.ok(fs.existsSync(wt));
+  assert.ok(fs.existsSync(cache));
+  fs.rmSync(path.join(wt, '.claude', 'settings.local.json'));
+  h.ok(['task', 'update', 'T1', '--status', 'cancelled'], { env: u.env });
+  assert.ok(!fs.existsSync(wt));
+  assert.ok(!fs.existsSync(cache), `${first.agent}'s task scratch is removed`);
+  assert.equal(h.json(['task', 'show', 'T1']).scratch, undefined);
 });
 
 test('a live spawn keeps its git, gh, hooks and policy on its recorded tool after a checkout upgrade', { skip: NO_STUBS }, (t) => {
@@ -789,9 +941,10 @@ for (const [command, args, opts] of calls) {
   assert.equal(policy.repo, 'acme/app');
   const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
   assert.equal(events.find((e) => e.cmd === 'spawn').detail.tool.sha, toolSha);
-  for (const cmd of ['hook git-push', 'hook pr-created', 'hook report', 'hook progress']) {
+  for (const cmd of ['hook git-push', 'hook pr-created', 'hook report']) {
     assert.ok(events.some((e) => e.cmd === cmd && e.agent === started.agent), cmd);
   }
+  assert.match(fs.readFileSync(S.progressFile(h.state, started.agent), 'utf8'), /"cmd":"hook progress"/);
 });
 
 test('the shim migrates a pre-T112 policy using recorded state and refuses unbound migrations', { skip: NO_STUBS }, (t) => {
@@ -1125,7 +1278,7 @@ test('an isolated reviewer posts through gh, records evidence in a symlinked sta
   const fixture = path.join(h.base, 'fixture');
   const run = [
     ['gh', 'pr', 'comment', '1', '--body', 'Review (tower-crane, clean context)'],
-    [process.execPath, BIN, 'evidence', 'T1', '--type', 'review', '--ok', '--sha', 'abcdef1', '--summary', 'nothing blocks'],
+    [process.execPath, BIN, 'evidence', 'T1', '--type', 'review', '--ok', '--sha', '50b732a15be40ccb2065cb2ba0e7b366d511b736', '--revision', '1', '--summary', 'nothing blocks'],
     ['git', 'init', '-q', fixture],
     ['git', '-C', fixture, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '--allow-empty', '-m', 'fixture'],
     ['git', 'init', '-q', '--bare', `${fixture}.git`],
@@ -1188,12 +1341,12 @@ test('a sandboxed agent changes the state only through its spawn\'s broker: as i
     noted.push(agent);
     const ran = u.report().ran;
     assert.deepEqual(ran.map((r) => r.code), [...cases, named].map((c) => c[1]), `${harness}: ${JSON.stringify(ran.map((r) => r.stderr))}`);
-    assert.match(ran[1].stderr, /owner acts from an interactive terminal/);
+    assert.match(ran[1].stderr, /a task process never acts as owner/);
     assert.match(ran[2].stderr, /works on T1 only, not T2/);
     assert.match(ran[3].stderr, /sandboxed small; it changes state only with task note, answer, hook, not task add/);
     assert.match(ran[11].stderr, /uses its own hook binding only/);
     assert.match(ran[7].stderr, /without its token/);
-    assert.match(ran[12].stderr, /owner acts from an interactive terminal/);
+    assert.match(ran[12].stderr, /a task process never acts as owner/);
     // Codex's sandbox refuses connecting to a Unix socket; claude's has no
     // host loopback.
     const address = JSON.parse(ran[9].stderr);
@@ -1204,7 +1357,7 @@ test('a sandboxed agent changes the state only through its spawn\'s broker: as i
     fs.rmSync(fixture, { recursive: true, force: true });
   }
   isolated(h, 'hard', 'claude');
-  const worker = spawn(h, u, 'hard', { STUB_RUN: JSON.stringify([cli('claim', 'T1'), cli('evidence', 'T1', '--type', 'review', '--ok', '--sha', 'abcdef1')]) }).agent;
+  const worker = spawn(h, u, 'hard', { STUB_RUN: JSON.stringify([cli('claim', 'T1'), cli('evidence', 'T1', '--type', 'review', '--ok', '--sha', '50b732a15be40ccb2065cb2ba0e7b366d511b736')]) }).agent;
   assert.deepEqual(u.report().ran.map((r) => r.code), [0, 1], JSON.stringify(u.report().ran.map((r) => r.stderr)));
   const [t1, t2] = h.readState('tasks.json').tasks;
   assert.equal(t1.claim.agent, worker, 'the worker claimed as itself');
@@ -1213,8 +1366,11 @@ test('a sandboxed agent changes the state only through its spawn\'s broker: as i
   assert.deepEqual(t2.notes, []);
   assert.deepEqual(h.readState('project.json').tests, tests);
   const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
-  assert.deepEqual(events.filter((e) => e.via).map((e) => [e.cmd, e.agent, e.task]),
+  assert.deepEqual(events.filter((e) => e.via === 'broker').map((e) => [e.cmd, e.agent, e.task]),
     [...noted.flatMap((a) => [['task note', a, 'T1'], ['hook report', a, 'T1'], ['task note', a, 'T1']]), ['claim', worker, 'T1']], 'only brokered changes, each as its agent');
+  assert.deepEqual(events.filter((e) => e.via === 'automation' && ['hook stop', 'msg'].includes(e.cmd))
+    .map((e) => [e.cmd, e.agent, e.task]), [...noted, worker].flatMap((agent) =>
+      [['hook stop', agent, 'T1'], ['msg', agent, 'T1']]), 'supervisor notifications retain their engine provenance and agent');
   assert.deepEqual(events.filter((e) => e.cmd === 'hook report').map((e) => e.detail.report), noted.map(() => 'hooked'), 'the hook payload came through stdin');
 });
 
@@ -1324,8 +1480,8 @@ test('a codex rework resumes in a fresh isolated home and finds its first sessio
   const home = path.join(h.state, 'homes', first.agent);
   fs.writeFileSync(path.join(home, 'AGENTS.md'), 'PLANTED-BY-AGENT\n');
   h.ok(['claim', 'T1', '--agent', first.agent]);
-  h.ok(['submit', 'T1', '--sha', 'abcdef1', '--agent', first.agent]);
-  h.ok(['evidence', 'T1', '--type', 'review', '--fail', '--sha', 'abcdef1', '--agent', 'reviewer-T1-1', '--summary', 'redo']);
+  h.ok(['submit', 'T1', '--sha', '50b732a15be40ccb2065cb2ba0e7b366d511b736', '--agent', first.agent]);
+  h.ok(['evidence', 'T1', '--type', 'review', '--fail', '--sha', '50b732a15be40ccb2065cb2ba0e7b366d511b736', '--revision', h.revision('T1'), '--agent', 'reviewer-T1-1', '--summary', 'redo']);
   h.ok(['rework', 'T1', '--reason', 'redo']);
   const next = spawn(h, u, 'medium');
   assert.equal(next.resumed, true);
@@ -1355,7 +1511,7 @@ test('a spawn started inside another agent links to the user\'s own files, so re
 
 test('a rung opts back in to a named tool and MCP server, shown by spawn --dry-run', (t) => {
   const { h, u } = setup(t);
-  h.ok(['ladder', 'set', 'small', '--harness', 'claude', '--model', 'opus', '--clear', 'profile', '--clear', 'effort', '--tools', '["WebFetch"]', '--mcp', '["planted"]']);
+  h.ok(['ladder', 'set', 'small', '--harness', 'claude', '--model', 'fixture-large', '--clear', 'profile', '--clear', 'effort', '--tools', '["WebFetch"]', '--mcp', '["planted"]']);
   let dry = h.json(['spawn', '--role', 'small', '--task', 'T1', '--dry-run'], { env: u.env });
   assert.equal(dry.argv[dry.argv.indexOf('--tools') + 1], 'Bash,Read,Grep,Glob,WebFetch');
   assert.ok(!dry.argv.includes('WebFetch'), 'no longer denied');
@@ -1368,7 +1524,7 @@ test('a rung opts back in to a named tool and MCP server, shown by spawn --dry-r
     assert.deepEqual(u.report().mcp, { planted: { command: 'planted-mcp', args: ['x'] } }, 'the server, without its env');
   }
 
-  h.ok(['ladder', 'set', 'small', '--harness', 'codex', '--profile', 'sol', '--clear', 'model', '--tools', '["web_search","multi_agent"]', '--mcp', '["planted"]']);
+  h.ok(['ladder', 'set', 'small', '--harness', 'codex', '--profile', 'fixture-main', '--clear', 'model', '--tools', '["web_search","multi_agent"]', '--mcp', '["planted"]']);
   dry = h.json(['spawn', '--role', 'small', '--task', 'T1', '--dry-run'], { env: u.env });
   assert.ok(!dry.argv.includes('web_search="disabled"'));
   assert.ok(!dry.argv.join(' ').includes('--disable multi_agent'));
@@ -1404,7 +1560,7 @@ test('only the orchestrator or the owner widens a rung, a command needs the owne
   const command = as('orchestrator', ['--harness', 'command', '--command', '["sh"]', '--clear', 'model']);
   assert.equal(command.code, 1);
   assert.match(command.stderr, /ladder\.command, ladder\.reach are owner-required; opened D1/);
-  h.ok(['ladder', 'set', 'small', '--model', 'sonnet', '--agent', 'orchestrator']);
+  h.ok(['ladder', 'set', 'small', '--model', 'fixture-other', '--agent', 'orchestrator']);
   assert.equal(as('orchestrator', ['--tools', '["Agent"]']).code, 0);
   assert.equal(as('owner', ['--args', '["--verbose","--max-turns","40"]']).code, 0);
   const refused = [

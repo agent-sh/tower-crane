@@ -58,7 +58,7 @@ test('the default wait wakes on every owner event and skips bookkeeping', async 
 
 test('wait --follow streams id-only lines and event prints the content', async (t) => {
   const h = setup(t);
-  h.ok(['ask', '--question', 'which way?', '--option', 'left', '--option', 'right', '--blocks', 'T1', '--agent', 'worker']);
+  h.ok(['ask', '--kind', 'technical', '--question', 'which way?', '--option', 'left', '--option', 'right', '--blocks', 'T1', '--agent', 'worker']);
   const p = cp.spawn(process.execPath, [BIN, 'wait', '--follow', '--agent', 'orchestrator'], { cwd: h.repo, env: h.env });
   t.after(() => p.kill());
   let out = '';
@@ -98,7 +98,7 @@ for (const harness of ['claude', 'codex']) {
       ...(process.platform === 'win32' ? { NODE_OPTIONS: `--require "${preload.replace(/\\/g, '/')}"` } : {}),
     });
     h.ok(['ladder', 'set', 'orchestrator', '--harness', harness, '--model', 'stub-model', '--clear', 'profile', '--clear', 'effort']);
-    h.ok(['ask', '--question', 'ship it?', '--option', 'yes', '--option', 'no', '--agent', 'worker']);
+    h.ok(['ask', '--kind', 'technical', '--question', 'ship it?', '--option', 'yes', '--option', 'no', '--agent', 'worker']);
     const run = h.runAsync(['spawn', '--task', 'T1', '--role', 'orchestrator', '--wait', '--json']);
     let early = null;
     run.then((r) => { early = r; });
@@ -109,9 +109,15 @@ for (const harness of ['claude', 'codex']) {
     const settings = harness === 'claude'
       ? JSON.parse(fs.readFileSync(path.join(home, 'settings.json'), 'utf8')).hooks
       : require('../lib/toml').parse(fs.readFileSync(path.join(home, 'config.toml'), 'utf8')).hooks;
+    const servers = harness === 'claude'
+      ? JSON.parse(fs.readFileSync(path.join(home, 'mcp.json'), 'utf8')).mcpServers
+      : require('../lib/toml').parse(fs.readFileSync(path.join(home, 'config.toml'), 'utf8')).mcp_servers;
+    assert.ok(servers['tower-crane'].args.includes('mcp'));
+    assert.ok(servers['tower-crane'].args.includes('orchestrator-T1-1'));
     assert.equal(settings.Stop[0].hooks[0].timeout, 86400, 'an orchestrator Stop outlives a long idle');
     h.ok(['msg', '--to', 'orchestrator', '--task', 'T1', 'private worker report', '--agent', 'worker']);
     const message = log(h).findLast((e) => e.cmd === 'msg').id;
+    assert.equal(h.run(['wait', '--inbox', '--observe', '--after', '0', '--types', 'never', '--timeout', '0.01', '--agent', 'orchestrator']).code, 2);
     fs.writeFileSync(ready + '.go', '');
     await until(() => fs.existsSync(ready + '.stop'), 'the Stop hook');
     fs.writeFileSync(ready + '.stop.go', '');
@@ -186,32 +192,33 @@ function engine(t, h) {
 
 test('the Claude Code mod pushes a decision answer and a worker message into the session', async (t) => {
   const h = setup(t);
-  h.ok(['ask', '--question', 'merge now?', '--option', 'yes', '--option', 'later', '--agent', 'worker']);
+  h.ok(['ask', '--kind', 'technical', '--question', 'merge now?', '--option', 'yes', '--option', 'later', '--agent', 'worker']);
   const { register } = await import(pathToFileURL(MOD).href);
   const cc = engine(t, h);
   register(cc.on);
   await cc.fire('session.start', { cwd: h.repo, isInteractive: true });
   assert.deepEqual(cc.seen.tools.map((x) => x.name), ['watch']);
   const armed = await cc.fire('tool.call', { tool: 'mcp__tower-crane__watch', tool_use_id: 'u1', after: String(size(h)), agent: 'orchestrator' });
-  assert.match(armed.result, /Do not run tower-crane wait/);
+  assert.match(armed.result, /tower-crane inbox/);
   // The follower takes its cursor from the call, so writes from here on count.
   h.ok(['answer', 'D1', '--choice', 'later', '--note', 'private owner note', '--agent', 'owner']);
   h.ok(['msg', '--to', 'orchestrator', '--task', 'T1', 'private worker text', '--agent', 'worker']);
-  const [answer, message] = log(h).slice(-2).map((e) => e.id);
+  const answer = log(h).findLast((e) => e.cmd === 'answer').id;
+  const message = log(h).findLast((e) => e.cmd === 'msg').id;
   const pushed = await until(() => {
     const text = cc.seen.prompts.join('\n');
     return text.includes(answer) && text.includes(message) && text;
   }, 'both pushes');
   assert.match(pushed, new RegExp(`${answer}: decision-answer D1 from owner`));
   assert.match(pushed, new RegExp(`${message}: worker-message T1 from worker`));
-  assert.match(pushed, /tower-crane event <id>/);
+  assert.match(pushed, /tower-crane inbox/);
   idOnly(pushed, ['private owner note', 'private worker text', 'later']);
 
   // A steer joins a running turn; one the turn never read is pushed after it.
   await cc.fire('turn.start', { turnId: 't1', text: '' });
   const before = cc.seen.prompts.length;
   h.ok(['msg', '--to', 'orchestrator', '--steer', 'private steer text', '--agent', 'owner']);
-  const steer = log(h).at(-1).id;
+  const steer = log(h).findLast((e) => e.cmd === 'msg').id;
   await until(() => cc.seen.appended.some((x) => x.includes(steer)), 'the steer append');
   assert.equal(cc.seen.prompts.length, before, 'a steer during a turn is not a new prompt');
   await cc.fire('turn.complete', { turnId: 't1' });

@@ -1,7 +1,7 @@
 // Tower Crane for Claude Code: pushes orchestrator wake-ups into the session.
 // One child, tower-crane wait --follow, prints a line of ids per event; this
 // module turns those lines into prompts, so the session never polls. A push
-// names events only: the session reads each with tower-crane event ID.
+// names events only: the session reads current findings with tower-crane inbox.
 
 const TOOL = 'mcp__tower-crane__watch'
 const COMMAND = 'tower-crane-watch'
@@ -13,7 +13,7 @@ function notice(rows, agent) {
   return [
     `Tower Crane: ${rows.length} new event${rows.length === 1 ? '' : 's'} for ${agent}.`,
     ...lines,
-    `Read each with \`tower-crane event <id>\`.${last?.offset ? ` Cursor: ${last.offset}.` : ''}`,
+    `Run \`tower-crane inbox\` for findings and resolving commands.${last?.offset ? ` Cursor: ${last.offset}.` : ''}`,
   ].join('\n')
 }
 
@@ -87,12 +87,12 @@ async function arm($, input = {}) {
   const agent = input.agent || (await $.env.get('TOWER_CRANE_AGENT')) || 'orchestrator'
   const state = input.state || (await $.env.get('TOWER_CRANE_STATE')) || ''
   const after = input.after !== undefined && input.after !== '' ? String(input.after) : live.watch?.cursor || 'now'
-  const argv = ['node', `${$.plugin.root}/bin/tower-crane.js`, 'wait', '--follow', '--after', after, '--agent', agent, ...(state ? ['--state', state] : [])]
+  const argv = ['node', `${$.plugin.root}/bin/tower-crane.js`, 'wait', '--follow', '--inbox', '--after', after, '--agent', agent, ...(state ? ['--state', state] : [])]
   const current = { agent, cursor: after }
   live.watch = current
   void follow($, current, $.process.spawn({ argv }))
   $.ui.status(`tower-crane: watching for ${agent}`)
-  return `Tower Crane pushes events for ${agent} after ${after} into this session as they arrive. Do not run tower-crane wait; read each pushed id with \`tower-crane event <id>\`.`
+  return `Tower Crane pushes events for ${agent} after ${after} into this session as they arrive. Run \`tower-crane inbox\` on each wake for findings and resolving commands.`
 }
 
 export function register(on) {

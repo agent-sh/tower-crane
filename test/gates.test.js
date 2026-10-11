@@ -3,9 +3,11 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const cp = require('node:child_process');
-const { makeRepo, ROOT, real } = require('./helpers');
+const { makeRepo, cachedFixture, ROOT, real, HOOKS } = require('./helpers');
+const { waitFor } = require('./canary');
 const { gateFixture, gateEvidence } = require('./gate-helpers');
 const { shellQuote } = require('../lib/gates/common');
 
@@ -33,6 +35,15 @@ function cliCopy(h) {
       const r = cp.spawnSync(process.execPath, [bin, ...args], { cwd: h.repo, env: { ...h.env, ...env }, encoding: 'utf8' });
       return { code: r.status, stdout: r.stdout, stderr: r.stderr };
     },
+    // Starts without waiting, so a test can pause the command with a hook.
+    start: (args, env = {}) => {
+      const p = cp.spawn(process.execPath, ['--require', HOOKS, bin, ...args], {
+        cwd: h.repo, env: { ...h.env, HOOK_STATE: h.state, ...env }, stdio: ['ignore', 'ignore', 'pipe'],
+      });
+      let stderr = '';
+      p.stderr.on('data', (d) => { stderr += d; });
+      return { result: new Promise((resolve) => p.on('close', (code) => resolve({ code, stderr }))) };
+    },
   };
 }
 
@@ -51,7 +62,7 @@ function submittedTask(h) {
   h.init();
   h.ok(['task', 'add', '--title', 'Change', '--acceptance', 'works']);
   h.ok(['claim', 'T1', '--agent', 'w-1']);
-  h.ok(['submit', 'T1', '--sha', 'abcdef1', '--agent', 'w-1']);
+  h.ok(['submit', 'T1', '--sha', '50b732a15be40ccb2065cb2ba0e7b366d511b736', '--agent', 'w-1']);
 }
 
 const VERIFY_BUILD = `const fs = require('node:fs');
@@ -113,6 +124,73 @@ function submitTestsFixture(h, sha, keep, settings = []) {
   h.ok(['submit', 'T1', '--sha', sha, '--branch', 'fixture-change', '--agent', 'w-1']);
   h.env.TOWER_CRANE_TMP = path.join(h.base, 'gate-tmp');
 }
+
+function testOnlyFixture(t, mixed = false) {
+  const h = cachedFixture(t, 'test-only diff', (seed) => {
+    writeFiles(seed.repo, {
+      'lib/unused.js': 'module.exports = 0;\n',
+      'test/fixtures/value.json': '{"value":0}\n',
+      'test/value.test.js': "require('node:assert/strict').equal(require('./fixtures/value.json').value, 1);\n",
+    });
+    seed.git(['add', '-A']);
+    seed.git(['commit', '-qm', 'base fixture']);
+    seed.init(['--repo', 'acme/demo', '--base', 'main',
+      '--tests-cmd', `${shellQuote(process.execPath)} test/value.test.js`,
+      '--tests-paths', '["test/*.test.js"]',
+      '--tests-keep', '["test/fixtures/**","changelog.d/**"]',
+      '--tests-expensive', 'true']);
+    seed.ok(['task', 'add', '--title', 'Fix fixture', '--acceptance', 'tests pass']);
+    seed.ok(['claim', 'T1', '--agent', 'w-1']);
+  });
+  h.git(['switch', '-qc', 'fixture-change']);
+  writeFiles(h.repo, {
+    'test/fixtures/value.json': '{"value":1}\n',
+    'changelog.d/fix.md': 'Fix the test fixture.\n',
+    ...(mixed ? {
+      'lib/unused.js': 'module.exports = 1;\n',
+      'test/value.test.js': "const assert = require('node:assert/strict');\nassert.equal(require('./fixtures/value.json').value, 1);\n",
+    } : {}),
+  });
+  h.git(['add', '-A']);
+  h.git(['commit', '-qm', 'fix fixture']);
+  const sha = h.git(['rev-parse', 'HEAD']);
+  h.git(['switch', '-q', 'main']);
+  h.ok(['submit', 'T1', '--sha', sha, '--branch', 'fixture-change', '--agent', 'w-1']);
+  h.env.TOWER_CRANE_TMP = path.join(h.base, 'gate-tmp');
+  return h;
+}
+
+test('a fixture-only diff runs the pinned head suite once and audits its run-only receipt', (t) => {
+  const h = testOnlyFixture(t);
+  const result = h.run(['check', 'tests', 'T1', '--agent', 'checker', '--json']);
+  assert.equal(result.code, 0, result.stdout + result.stderr);
+  const evidence = JSON.parse(result.stdout);
+  assert.equal(evidence.tests_mode, 'prove');
+  assert.equal(evidence.receipt.mode, 'run-only (test-only diff)');
+  assert.deepEqual(evidence.receipt.changed_files, ['changelog.d/fix.md', 'test/fixtures/value.json']);
+  assert.match(evidence.summary, /run-only \(test-only diff\)/);
+  assert.equal(evidence.commands.filter((command) => command.command !== 'git').length, 1);
+  assert.deepEqual(h.readState('tasks.json').tasks[0].evidence.at(-1).receipt, evidence.receipt);
+  const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  assert.deepEqual(events.at(-1).detail.receipt, evidence.receipt);
+  assert.equal(h.json(['task', 'show', 'T1']).gates.gates.find((gate) => gate.type === 'tests').ok, true);
+});
+
+test('one lib change retains prove mode and rejects tests that pass after reversion', (t) => {
+  const h = testOnlyFixture(t, true);
+  h.ok(['project', 'set', '--tests-proof-cmd', `${shellQuote(process.execPath)} {tests}`]);
+  const result = h.run(['check', 'tests', 'T1', '--agent', 'checker', '--json']);
+  assert.equal(result.code, 1, result.stdout + result.stderr);
+  const evidence = JSON.parse(result.stdout);
+  assert.match(evidence.summary, /tests pass without the change; they do not prove it/);
+  assert.equal(evidence.receipt.mode, 'prove');
+  assert.deepEqual(evidence.receipt.changed_files, [
+    'changelog.d/fix.md', 'lib/unused.js', 'test/fixtures/value.json', 'test/value.test.js',
+  ]);
+  assert.deepEqual(evidence.receipt.proof_tests, ['test/value.test.js']);
+  assert.equal(evidence.commands.filter((command) => command.command !== 'git').length, 3);
+  assert.ok(evidence.commands.some((command) => command.command === 'git' && command.args.includes('checkout')));
+});
 
 test('failed tests evidence records TAP and spec names with a bounded output tail', (t) => {
   const h = makeRepo(t);
@@ -396,7 +474,8 @@ test('acceptance and merge refuse a mode change after an audited tests pass', (t
   h.ok(['project', 'set', '--tests-mode', 'none']);
   h.ok(['check', 'tests', 'T1', '--agent', 'checker']);
   gateEvidence(h, 'clean', 'checker');
-  h.ok(['evidence', 'T1', '--type', 'review', '--ok', '--sha', sha, '--agent', 'r-1']);
+  h.reviewer('T1', 'r-1', sha);
+  h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--ok', '--sha', sha, '--agent', 'r-1']);
   h.ok(['project', 'set', '--tests-mode', 'prove']);
   const accept = h.run(['accept', 'T1']);
   assert.equal(accept.code, 1);
@@ -442,15 +521,15 @@ test('a gate gets its context and its result is recorded as evidence', (t) => {
   const seen = JSON.parse(fs.readFileSync(out, 'utf8'));
   assert.equal(real(seen.root), real(h.repo));
   assert.equal(real(seen.worktree), real(wt));
-  assert.deepEqual([seen.task, seen.sha, seen.args.cmd, seen.base], ['T1', 'abcdef1', 'npm test', 'main']);
+  assert.deepEqual([seen.task, seen.sha, seen.args.cmd, seen.base], ['T1', '50b732a15be40ccb2065cb2ba0e7b366d511b736', 'npm test', 'main']);
   const recorded = JSON.parse(pass.stdout);
-  assert.deepEqual([recorded.type, recorded.ok, recorded.agent, recorded.sha, recorded.ref, recorded.revision], ['tests', true, 'checker', 'abcdef1', 'run-1', 1]);
+  assert.deepEqual([recorded.type, recorded.ok, recorded.agent, recorded.sha, recorded.ref, recorded.revision], ['tests', true, 'checker', '50b732a15be40ccb2065cb2ba0e7b366d511b736', 'run-1', 1]);
 
   const fail = cli.run(['check', 'ci', 'T1', '--agent', 'checker'], { GATE_OUT: out, GATE_OK: '0', GATE_SHA: 'ABCDEF1234567' });
   assert.equal(fail.code, 1);
   assert.match(fail.stdout, /ci FAIL at abcdef1: fake gate/);
   const ev = h.readState('tasks.json').tasks[0].evidence;
-  assert.deepEqual(ev.map((e) => [e.type, e.ok, e.sha]), [['tests', true, 'abcdef1'], ['ci', false, 'abcdef1234567']]);
+  assert.deepEqual(ev.map((e) => [e.type, e.ok, e.sha]), [['tests', true, '50b732a15be40ccb2065cb2ba0e7b366d511b736'], ['ci', false, 'abcdef1234567']]);
 
   const merge = cli.run(['merge', 'T1'], { GATE_OUT: out, GATE_OK: '1' });
   assert.equal(merge.code, 1);
@@ -465,7 +544,8 @@ test('merge refuses a task of any kind whose PR has no passing ci at the submitt
   h.ok(['task', 'add', '--title', 'Docs', '--acceptance', 'reads well', '--kind', 'docs']);
   h.ok(['claim', 'T1', '--agent', 'w-1']);
   h.ok(['submit', 'T1', '--sha', sha, '--pr', '9', '--agent', 'w-1']);
-  h.ok(['evidence', 'T1', '--type', 'review', '--ok', '--sha', sha, '--agent', 'r-1']);
+  h.reviewer('T1', 'r-1', sha);
+  h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--ok', '--sha', sha, '--agent', 'r-1']);
   gateEvidence(h, 'ci', 'ci');
   h.ok(['accept', 'T1']);
   const cli = cliCopy(h);
@@ -489,7 +569,8 @@ test('merge checks the gates as they stand, not only the accepted status', (t) =
   h.ok(['claim', 'T1', '--agent', 'w-1']);
   h.ok(['submit', 'T1', '--sha', sha, '--agent', 'w-1']);
   for (const type of ['tests', 'clean']) gateEvidence(h, type, 'checker');
-  h.ok(['evidence', 'T1', '--type', 'review', '--ok', '--sha', sha, '--agent', 'r-1']);
+  h.reviewer('T1', 'r-1', sha);
+  h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--ok', '--sha', sha, '--agent', 'r-1']);
   h.ok(['accept', 'T1']);
   const cli = cliCopy(h);
   fs.mkdirSync(cli.gates, { recursive: true });
@@ -508,4 +589,181 @@ test('merge checks the gates as they stand, not only the accepted status', (t) =
   const merged = cli.run(['merge', 'T1'], { GATE_OUT: out, GATE_OK: '1' });
   assert.equal(merged.code, 0, merged.stderr);
   assert.ok(fs.existsSync(out), 'with the gates passing again, the merge gate runs');
+});
+
+function readEvents(h) {
+  return fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+}
+
+// An accepted task whose worktree the CLI made; merge is the only step left.
+function acceptedWithWorktree(h) {
+  const sha = gateFixture(h);
+  h.ok(['task', 'add', '--title', 'Change', '--acceptance', 'works']);
+  h.ok(['claim', 'T1', '--agent', 'w-1']);
+  const wt = h.json(['worktree', 'T1']);
+  h.ok(['submit', 'T1', '--sha', sha, '--agent', 'w-1']);
+  for (const type of ['tests', 'clean']) gateEvidence(h, type, 'checker');
+  h.reviewer('T1', 'r-1', sha);
+  h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--ok', '--sha', sha, '--agent', 'r-1']);
+  h.ok(['accept', 'T1']);
+  return wt;
+}
+
+test('merge removes the merged task worktree and records it', (t) => {
+  const h = makeRepo(t);
+  h.init();
+  const wt = acceptedWithWorktree(h);
+  const cli = cliCopy(h);
+  fs.mkdirSync(cli.gates, { recursive: true });
+  fs.writeFileSync(path.join(cli.gates, 'merge.js'), FAKE_GATE);
+
+  const merged = cli.run(['merge', 'T1'], { GATE_OUT: path.join(h.base, 'gate.json'), GATE_OK: '1' });
+  assert.equal(merged.code, 0, merged.stderr);
+  assert.ok(!fs.existsSync(wt.path), 'the worktree directory is gone');
+  assert.ok(!h.registers(wt.path), 'git no longer registers it');
+  const removed = readEvents(h).find((e) => e.cmd === 'worktree removed');
+  assert.equal(removed.task, 'T1');
+  assert.equal(removed.detail.removed, true);
+});
+
+test('merge keeps a worktree with uncommitted changes and says why', (t) => {
+  const h = makeRepo(t);
+  h.init();
+  const wt = acceptedWithWorktree(h);
+  fs.writeFileSync(path.join(wt.path, 'notes.txt'), 'unfinished\n');
+  const cli = cliCopy(h);
+  fs.mkdirSync(cli.gates, { recursive: true });
+  fs.writeFileSync(path.join(cli.gates, 'merge.js'), FAKE_GATE);
+
+  const merged = cli.run(['merge', 'T1'], { GATE_OUT: path.join(h.base, 'gate.json'), GATE_OK: '1' });
+  assert.equal(merged.code, 0, merged.stderr);
+  assert.equal(fs.readFileSync(path.join(wt.path, 'notes.txt'), 'utf8'), 'unfinished\n');
+  assert.ok(h.registers(wt.path), 'git still registers it');
+  const kept = readEvents(h).find((e) => e.cmd === 'worktree kept');
+  assert.equal(kept.task, 'T1');
+  assert.equal(kept.detail.reason, 'uncommitted changes');
+});
+
+test('merge keeps the worktree while merge.keep_branch is set', (t) => {
+  const h = makeRepo(t);
+  h.init(['--merge-keep-branch', 'true']);
+  const wt = acceptedWithWorktree(h);
+  const cli = cliCopy(h);
+  fs.mkdirSync(cli.gates, { recursive: true });
+  fs.writeFileSync(path.join(cli.gates, 'merge.js'), FAKE_GATE);
+
+  const merged = cli.run(['merge', 'T1'], { GATE_OUT: path.join(h.base, 'gate.json'), GATE_OK: '1' });
+  assert.equal(merged.code, 0, merged.stderr);
+  assert.ok(fs.existsSync(wt.path), 'the worktree stays for its branch');
+  const kept = readEvents(h).find((e) => e.cmd === 'worktree kept');
+  assert.equal(kept.detail.reason, 'merge.keep_branch is set');
+});
+
+test('a task sent back and claimed after merge looked at its worktree keeps the worktree', async (t) => {
+  const h = makeRepo(t);
+  h.init();
+  const wt = acceptedWithWorktree(h);
+  const cli = cliCopy(h);
+  fs.mkdirSync(cli.gates, { recursive: true });
+  fs.writeFileSync(path.join(cli.gates, 'merge.js'), FAKE_GATE);
+
+  // Merge pauses after its first look at the worktree and before it removes anything.
+  const paused = path.join(h.base, 'paused');
+  const merge = cli.start(['merge', 'T1'], {
+    GATE_OUT: path.join(h.base, 'gate.json'), GATE_OK: '1', HOOK_STOP_WORKTREE_STATUS: paused,
+  });
+  assert.ok(await waitFor(paused), 'merge reached its first look at the worktree');
+  const sent = await h.runAsync(['rework', 'T1', '--reason', 'racing the merge']);
+  const claimed = await h.runAsync(['claim', 'T1', '--agent', 'w-2']);
+  fs.writeFileSync(`${paused}.go`, '');
+  const merged = await merge.result;
+
+  assert.equal(sent.code, 0, sent.stderr);
+  assert.equal(claimed.code, 0, claimed.stderr);
+  assert.equal(merged.code, 0, merged.stderr);
+  assert.ok(fs.existsSync(wt.path), 'the worktree of the claimed task stays');
+  assert.equal(h.readState('tasks.json').tasks[0].status, 'in_progress');
+  const kept = readEvents(h).find((e) => e.cmd === 'worktree kept');
+  assert.equal(kept.task, 'T1');
+  assert.equal(kept.detail.reason, 'the task changed before its worktree was removed');
+});
+
+test('a merge of an older head keeps the worktree of a newer accepted head', async (t) => {
+  const h = makeRepo(t);
+  h.init();
+  const wt = acceptedWithWorktree(h);
+  const merged = h.readState('tasks.json').tasks[0].sha;
+  // The worktree starts from the submitted head, so a commit on top of it passes the same gates.
+  h.git(['merge', '--ff-only', '-q', merged], wt.path);
+  const cli = cliCopy(h);
+  fs.mkdirSync(cli.gates, { recursive: true });
+  fs.writeFileSync(path.join(cli.gates, 'merge.js'), FAKE_GATE);
+
+  // The merge of the first head pauses before its first look at the worktree.
+  const paused = path.join(h.base, 'paused');
+  const merge = cli.start(['merge', 'T1'], {
+    GATE_OUT: path.join(h.base, 'gate.json'), GATE_OK: '1', HOOK_STOP_WORKTREE_STATUS: paused,
+  });
+  assert.ok(await waitFor(paused), 'merge reached its first look at the worktree');
+  h.ok(['rework', 'T1', '--reason', 'newer head']);
+  h.ok(['claim', 'T1', '--agent', 'w-2']);
+  h.git(['commit', '-q', '--allow-empty', '-m', 'newer head'], wt.path);
+  const newer = h.git(['rev-parse', 'HEAD'], wt.path);
+  h.ok(['submit', 'T1', '--sha', newer, '--agent', 'w-2']);
+  for (const type of ['tests', 'clean']) gateEvidence(h, type, 'checker');
+  h.reviewer('T1', 'r-1', newer);
+  h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--ok', '--sha', newer, '--agent', 'r-1']);
+  h.ok(['accept', 'T1']);
+  fs.writeFileSync(`${paused}.go`, '');
+  const result = await merge.result;
+
+  assert.equal(result.code, 0, result.stderr);
+  assert.ok(fs.existsSync(wt.path), 'the worktree of the newer head stays');
+  assert.ok(h.registers(wt.path), 'git still registers it');
+  const task = h.readState('tasks.json').tasks[0];
+  assert.equal(task.status, 'accepted');
+  assert.equal(task.sha, newer);
+  assert.equal(task.retiring, undefined, 'the marker is cleared once the merge ends');
+  const events = readEvents(h);
+  assert.ok(!events.some((e) => e.cmd === 'worktree removed'), 'nothing was removed');
+  const kept = events.find((e) => e.cmd === 'worktree kept');
+  assert.equal(kept.task, 'T1');
+  assert.equal(kept.detail.reason, 'the task changed before its worktree was removed');
+});
+
+test('merge refuses rework and claim while it removes the task worktree', async (t) => {
+  const h = makeRepo(t);
+  h.init();
+  const wt = acceptedWithWorktree(h);
+  const cli = cliCopy(h);
+  fs.mkdirSync(cli.gates, { recursive: true });
+  fs.writeFileSync(path.join(cli.gates, 'merge.js'), FAKE_GATE);
+
+  // Merge pauses after its locked check of the worktree, with the lock released and before git removes it.
+  const paused = path.join(h.base, 'paused');
+  const merge = cli.start(['merge', 'T1'], {
+    GATE_OUT: path.join(h.base, 'gate.json'), GATE_OK: '1', HOOK_STOP_WORKTREE_REMOVE: paused,
+  });
+  assert.ok(await waitFor(paused), 'merge reached git worktree remove');
+  const sent = await h.runAsync(['rework', 'T1', '--reason', 'racing the removal']);
+  const claimed = await h.runAsync(['claim', 'T1', '--agent', 'w-2']);
+  fs.writeFileSync(`${paused}.go`, '');
+  const merged = await merge.result;
+
+  assert.equal(sent.code, 1, 'rework refuses a worktree being removed');
+  assert.match(sent.stderr, /being removed/);
+  assert.equal(claimed.code, 1, 'claim refuses it too');
+  assert.match(claimed.stderr, /being removed/);
+  assert.equal(merged.code, 0, merged.stderr);
+  assert.ok(!fs.existsSync(wt.path), 'the removal finishes for the accepted task');
+  const task = h.readState('tasks.json').tasks[0];
+  assert.equal(task.status, 'accepted');
+  assert.equal(task.retiring, undefined, 'the marker is cleared once the removal ends');
+  assert.equal(readEvents(h).find((e) => e.cmd === 'worktree removed').task, 'T1');
+
+  // A marker whose process has exited is what a crash leaves; it holds nothing.
+  const state = h.readState('tasks.json');
+  state.tasks[0].retiring = { since: new Date().toISOString(), pid: 999999, host: os.hostname() };
+  h.writeState('tasks.json', state);
+  h.ok(['rework', 'T1', '--reason', 'after a crash']);
 });

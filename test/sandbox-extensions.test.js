@@ -18,7 +18,7 @@ function setup(t, harness = 'codex') {
     h.ok(['task', 'add', '--title', 'Toolchain probe', '--acceptance', 'lock written']);
     h.ok(['brief', 'set', 'T1', '-'], { input: 'probe' });
     h.ok(['ladder', 'set', 'medium', '--harness', harness,
-      ...(harness === 'codex' ? ['--profile', 'sol', '--clear', 'model'] : ['--model', 'opus', '--clear', 'profile']),
+      ...(harness === 'codex' ? ['--profile', 'fixture-main', '--clear', 'model'] : ['--model', 'fixture-large', '--clear', 'profile']),
       '--clear', 'effort', '--clear', 'args']);
   });
 }
@@ -179,7 +179,7 @@ ${harness === 'codex' ? 'console.log(JSON.stringify({type: "thread.started", thr
 process.exit(process.env.TOWER_CRANE_RETRY === '0' ? 75 : 0);
 `, { mode: 0o755 });
     h.ok(['ladder', 'set', 'medium', '--harness', harness,
-      ...(harness === 'codex' ? ['--profile', 'sol', '--clear', 'model'] : ['--model', 'opus', '--clear', 'profile']),
+      ...(harness === 'codex' ? ['--profile', 'fixture-main', '--clear', 'model'] : ['--model', 'fixture-large', '--clear', 'profile']),
       '--supervision', '{"retries":1,"backoff_ms":1}']);
     h.ok(['project', 'set', '--scope', '{"CPUQuota":"200%","MemoryMax":"8G"}', '--env_file', file]);
     const dry = h.json(['spawn', '--task', 'T1', '--dry-run'], { env });
@@ -301,6 +301,7 @@ test('real Codex worker writes the toolchain lock, receives a private env file, 
   skip: process.env.TOWER_CRANE_LIVE_CODEX !== '1' && 'set TOWER_CRANE_LIVE_CODEX=1 to run a real Codex worker',
   timeout: 240000,
 }, async (t) => {
+  assert.ok(process.env.TOWER_CRANE_LIVE_PROFILE, 'set TOWER_CRANE_LIVE_PROFILE to run a live codex probe');
   const fixtureRoot = process.env.TOWER_CRANE_TEST_TMP;
   const inside = (dir, target) => {
     const rel = path.relative(path.resolve(dir), path.resolve(target));
@@ -368,7 +369,7 @@ test('real Codex worker writes the toolchain lock, receives a private env file, 
   ].join('\n'));
   h.ok(['project', 'set', '--sandbox', JSON.stringify({ write: [cargo, results] }), '--scope', '{"CPUQuota":"200%","MemoryMax":"8G"}',
     '--env', JSON.stringify({ CARGO_HOME: cargo, RUSTUP_HOME: rustup }), '--env_file', file]);
-  h.ok(['ladder', 'set', 'medium', '--harness', 'codex', '--profile', process.env.TOWER_CRANE_LIVE_PROFILE || 'sol',
+  h.ok(['ladder', 'set', 'medium', '--harness', 'codex', '--profile', process.env.TOWER_CRANE_LIVE_PROFILE,
     '--clear', 'model', '--clear', 'effort', '--supervision', '{"retries":0}']);
   h.ok(['brief', 'set', 'T1', '-'], {
     input: `This task is a live sandbox verification fixture. Run exactly this command with your command tool, then report its exit code and stop. Do not read the script or private environment file, print environment variables, change files, use tower-crane, open a PR or delegate work.\n\n${JSON.stringify(process.execPath)} ${JSON.stringify(script)}\n`,
