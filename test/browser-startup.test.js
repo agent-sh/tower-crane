@@ -93,8 +93,8 @@ test('a temp root too deep for Chrome\'s socket still starts Chrome, from a shal
 const fs = require('node:fs');
 const path = require('node:path');
 const profile = process.argv.find((arg) => arg.startsWith('--user-data-dir=')).slice('--user-data-dir='.length);
-// Chrome's singleton socket must fit a Unix socket address (107 bytes).
-if (Buffer.byteLength(path.join(profile, 'SingletonSocket')) > 107) {
+// Chrome keeps its singleton socket in the profile only up to 78 bytes (see browser.js).
+if (Buffer.byteLength(path.join(profile, 'SingletonSocket')) > 78) {
   console.error('Socket path too long');
   process.exit(1);
 }
