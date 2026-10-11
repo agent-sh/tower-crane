@@ -356,9 +356,10 @@ test('research Claude gets native or explicit web MCP tools with worker file and
     const ownHome = path.dirname(report.home);
     assert.deepEqual(allowRead, [ownHome, path.join(h.state, 'brokers', path.basename(ownHome))]);
     assert.ok(shared.denyWrite.includes(h.state));
-    // Each agent writes a cache of its own.
-    const cache = path.join(u.home, '.cache', 'tower-crane', 'agents');
-    shared.allowWrite = shared.allowWrite.map((w) => (path.dirname(path.dirname(w)) === cache && path.basename(w) === path.basename(ownHome) ? '<agent cache>' : w));
+    const cache = path.join(u.home, '.cache', 'tower-crane', 'tasks');
+    const writes = shared.allowWrite.filter((w) => path.dirname(path.dirname(w)) === cache);
+    assert.equal(writes.length, 1);
+    assert.equal(path.basename(writes[0]), 'T1');
     return shared;
   };
   isolated(h, 'research', 'claude');
@@ -412,8 +413,8 @@ test('research Codex explicitly enables live search with worker file and git con
     assert.equal(rules[path.join(h.state, 'brokers')], 'none');
     assert.equal(rules[broker], 'write');
     assert.equal(rules[path.join(path.dirname(h.userConfig), 'owner')], 'none', 'no agent reads the owner key');
-    const cache = Object.keys(rules).filter((k) => path.dirname(path.dirname(k)) === path.join(u.home, '.cache', 'tower-crane', 'agents'));
-    assert.deepEqual(cache.map((k) => [path.basename(k), rules[k]]), [[path.basename(ownHome), 'write']]);
+    const cache = Object.keys(rules).filter((k) => path.dirname(path.dirname(k)) === path.join(u.home, '.cache', 'tower-crane', 'tasks'));
+    assert.deepEqual(cache.map((k) => [path.basename(k), rules[k]]), [['T1', 'write']]);
     delete rules[cache[0]];
     delete rules[ownHome];
     delete rules[sessions];
@@ -781,7 +782,7 @@ test('worker and reviewer sandboxes write a cache of their own, never the user c
       }
       const own = writes.filter((w) => contains(root, w));
       assert.equal(own.length, 1, `${seen.harness} ${rung}: one directory under the cache root: ${JSON.stringify(own)}`);
-      assert.ok(contains(path.join(fs.realpathSync(root), 'tower-crane', 'agents'), own[0]) && path.basename(own[0]) === started.agent, own[0]);
+      assert.ok(contains(path.join(fs.realpathSync(root), 'tower-crane', rung === 'review' ? 'agents' : 'tasks'), own[0]) && path.basename(own[0]) === (rung === 'review' ? started.agent : 'T1'), own[0]);
       assert.ok(fs.statSync(own[0]).isDirectory(), 'the granted cache exists');
       assert.deepEqual(JSON.parse(seen.ran[0].stderr), [own[0], ...['go-build', 'go-mod', 'npm'].map((d) => path.join(own[0], d))], `${seen.harness} ${rung}: tool caches point at the agent cache`);
     }
@@ -795,23 +796,55 @@ test('a spawn from a supervisor running in another agent\'s env gets a cache of 
   // The supervisor's XDG_CACHE_HOME is the cache of a worker, as an automation started from that worker's env has it.
   const root = path.join(u.home, '.cache');
   const inherited = path.join(root, 'tower-crane', 'agents', '22cd04e4ddaf', 'worker-T93-6');
-  const started = spawn(h, u, 'hard', { XDG_CACHE_HOME: inherited });
+  spawn(h, u, 'hard', { XDG_CACHE_HOME: inherited });
   const real = fs.realpathSync(root);
   const own = u.report().settings.sandbox.filesystem.allowWrite.filter((w) => w === real || w.startsWith(real + path.sep));
   assert.equal(own.length, 1, `one directory under the cache root: ${JSON.stringify(own)}`);
-  // <cache root>/tower-crane/agents/<state hash>/<agent>, whatever the inherited cache was.
-  assert.equal(path.dirname(path.dirname(own[0])), path.join(real, 'tower-crane', 'agents'), own[0]);
-  assert.equal(path.basename(own[0]), started.agent);
+  // Worker scratch is keyed by task, whatever the inherited agent cache was.
+  assert.equal(path.dirname(path.dirname(own[0])), path.join(real, 'tower-crane', 'tasks'), own[0]);
+  assert.equal(path.basename(own[0]), 'T1');
   assert.ok(fs.statSync(own[0]).isDirectory(), 'the granted cache exists');
 });
 
-test('the next spawn removes an exited agent\'s cache even when it holds read-only module trees', { skip: NO_STUBS }, (t) => {
-  const { h, u } = setup(t);
+test('a second worker spawn reads and writes the first attempt scratch for the same task', { skip: NO_STUBS }, (t) => {
+  const { h, u, wt } = setup(t);
   isolated(h, 'hard', 'claude');
   const env = { XDG_CACHE_HOME: '' };
-  const first = spawn(h, u, 'hard', env);
-  const cache = u.report().settings.sandbox.filesystem.allowWrite.find((w) => path.basename(w) === first.agent);
-  // The layout Go leaves in GOMODCACHE: read-only files in read-only directories.
+  const write = [process.execPath, '-e', `require('node:fs').writeFileSync(require('node:path').join(process.env.XDG_CACHE_HOME, 'receipt.txt'), 'first attempt\\n')`];
+  const first = spawn(h, u, 'hard', { ...env, STUB_RUN: JSON.stringify([write]) });
+  const cache = u.report().settings.sandbox.filesystem.allowWrite.find((w) => /[\\/]tower-crane[\\/](?:agents|tasks)[\\/][0-9a-f]{12}[\\/][^\\/]+$/.test(w));
+  const file = path.join(cache, 'receipt.txt');
+  assert.equal(fs.readFileSync(file, 'utf8'), 'first attempt\n');
+  h.ok(['claim', 'T1', '--agent', 'builder']);
+  h.ok(['submit', 'T1', '--agent', 'builder', '--sha', h.git(['rev-parse', 'HEAD'], wt)]);
+  const probe = [process.execPath, '-e', `const fs = require('node:fs'); const path = require('node:path'); const file = path.join(process.env.XDG_CACHE_HOME, 'receipt.txt'); process.stderr.write(fs.readFileSync(file, 'utf8')); fs.appendFileSync(file, 'second attempt\\n');`];
+  const second = spawn(h, u, 'hard', { ...env, STUB_RUN: JSON.stringify([probe]) });
+  assert.notEqual(second.agent, first.agent);
+  const seen = u.report();
+  assert.equal(seen.ran[0].code, 0, seen.ran[0].stderr);
+  assert.equal(seen.ran[0].stderr, 'first attempt\n');
+  assert.equal(fs.readFileSync(file, 'utf8'), 'first attempt\nsecond attempt\n');
+  assert.ok(seen.settings.sandbox.filesystem.allowWrite.includes(cache));
+  assert.ok(seen.prompt.includes(cache), 'the worker brief names the shared scratch');
+  assert.equal(h.json(['task', 'show', 'T1']).scratch, cache);
+  h.ok(['task', 'add', '--title', 'Another task', '--acceptance', 'separate scratch']);
+  h.ok(['brief', 'set', 'T2', '-'], { input: 'another task\n' });
+  const other = h.json(['spawn', '--role', 'hard', '--task', 'T2', '--wait'], { env: { ...u.env, XDG_CACHE_HOME: cache } });
+  assert.notEqual(other.agent, second.agent);
+  const otherCache = h.json(['task', 'show', 'T2']).scratch;
+  assert.notEqual(otherCache, cache);
+  assert.equal(path.dirname(otherCache), path.dirname(cache), 'an inherited task cache never nests the next task');
+  assert.ok(!fs.existsSync(path.join(otherCache, 'receipt.txt')));
+  assert.equal(fs.readFileSync(file, 'utf8'), 'first attempt\nsecond attempt\n');
+});
+
+test('cancel removes worker task scratch with read-only module trees alongside the worktree', { skip: NO_STUBS }, (t) => {
+  const { h, u, wt } = setup(t);
+  isolated(h, 'medium', 'codex');
+  const first = spawn(h, u, 'medium');
+  const config = u.report().config;
+  const cache = Object.entries(config.permissions['tower-crane'].filesystem)
+    .find(([w, v]) => v === 'write' && /[\\/]tower-crane[\\/](?:agents|tasks)[\\/][0-9a-f]{12}[\\/][^\\/]+$/.test(w))[0];
   const mod = path.join(cache, 'go-mod', 'example.com', 'm@v1.0.0');
   fs.mkdirSync(mod, { recursive: true });
   fs.writeFileSync(path.join(mod, 'go.mod'), 'module example.com/m\n');
@@ -819,9 +852,15 @@ test('the next spawn removes an exited agent\'s cache even when it holds read-on
   t.after(() => {
     for (const p of [path.dirname(mod), mod]) try { fs.chmodSync(p, 0o700); } catch {}
   });
-  const second = spawn(h, u, 'hard', env);
-  assert.notEqual(second.agent, first.agent);
-  assert.ok(!fs.existsSync(cache), `${cache} is removed`);
+  // setup plants an untracked local settings file; retirement must keep dirty worktrees and their scratch.
+  h.ok(['task', 'update', 'T1', '--status', 'cancelled'], { env: u.env });
+  assert.ok(fs.existsSync(wt));
+  assert.ok(fs.existsSync(cache));
+  fs.rmSync(path.join(wt, '.claude', 'settings.local.json'));
+  h.ok(['task', 'update', 'T1', '--status', 'cancelled'], { env: u.env });
+  assert.ok(!fs.existsSync(wt));
+  assert.ok(!fs.existsSync(cache), `${first.agent}'s task scratch is removed`);
+  assert.equal(h.json(['task', 'show', 'T1']).scratch, undefined);
 });
 
 test('a live spawn keeps its git, gh, hooks and policy on its recorded tool after a checkout upgrade', { skip: NO_STUBS }, (t) => {
