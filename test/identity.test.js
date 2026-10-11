@@ -152,7 +152,7 @@ test('terminal fallback cannot waive gates without explicit owner identity', { s
     const h = setup(t);
     h.ok(['owner-done', 'T1']);
     h.ok(['claim', 'T1', '--agent', 'worker']);
-    h.ok(['submit', 'T1', '--sha', 'abcdef1', '--pr', '1', '--agent', 'worker']);
+    h.ok(['submit', 'T1', '--sha', '50b732a15be40ccb2065cb2ba0e7b366d511b736', '--pr', '1', '--agent', 'worker']);
     const waive = ['accept', 'T1', '--waive', 'tests', '--waive', 'clean', '--waive', 'review', '--waive', 'ci', '--reason', 'approved'];
     const before = events(h);
     const blocked = terminal(h, waive);
@@ -479,7 +479,7 @@ test('owner-done and waivers require the resolved name owner exactly', (t) => {
   }
   h.ok(['owner-done', 'T1', '--agent', 'owner']);
   h.ok(['claim', 'T1', '--agent', 'worker']);
-  h.ok(['submit', 'T1', '--sha', 'abcdef1', '--agent', 'worker']);
+  h.ok(['submit', 'T1', '--sha', '50b732a15be40ccb2065cb2ba0e7b366d511b736', '--agent', 'worker']);
   const waive = ['accept', 'T1', '--waive', 'tests', '--waive', 'clean', '--waive', 'review', '--reason', 'owner approved'];
   for (const agent of ['reviewer', 'Owner']) {
     const r = h.run([...waive, '--agent', agent]);
