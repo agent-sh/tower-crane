@@ -460,7 +460,10 @@ test('spawn --wait runs the command rung in the task worktree with the tower-cra
   assert.equal(real(seen.cwdArg), real(wt));
   assert.equal(seen.task, 'T1');
   assert.notEqual(path.resolve(seen.brief), path.resolve(path.join(h.state, 'briefs', 'T1.md')));
-  assert.match(seen.briefText, /^## Goal\n[\s\S]*\n- start from the webhook handler\n\n## Task\n/);
+  assert.match(seen.briefText, /^## Goal\n[\s\S]*\n- start from the webhook handler\n\nTask scratch: [^\n]+\n\n## Task\n/);
+  const scratch = h.json(['task', 'show', 'T1']).scratch;
+  assert.ok(seen.briefText.includes(scratch));
+  assert.ok(seen.prompt.includes(scratch));
   assert.ok(!fs.existsSync(seen.brief), 'the temporary brief copy is removed after exit');
   assert.match(seen.prompt, /^P:## Goal\n[\s\S]*\n- start from the webhook handler/);
   assert.deepEqual([real(seen.env.s), seen.env.t, seen.env.a], [real(h.state), 'T1', 'worker-T1-1']);
