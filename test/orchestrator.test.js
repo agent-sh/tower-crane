@@ -140,8 +140,10 @@ C.execFileSync = (command, args) => {
   if (process.env.PARENT_QUERY_CASE === 'large' && !args[2].includes('-Filter')) {
     throw Object.assign(new Error('process listing exceeds maxBuffer'), { code: 'ENOBUFS' });
   }
-  return JSON.stringify([{ ProcessId: process.ppid, ParentProcessId: 1, Name: 'node.exe',
-    CreationDate: 'stable-start', CommandLine: 'node harness' }]);
+  return JSON.stringify([{ ProcessId: process.ppid, ParentProcessId: 444444, Name: 'node.exe',
+    CreationDate: 'stable-start', CommandLine: 'node harness' },
+    { ProcessId: 444444, ParentProcessId: 1, Name: 'ancestor.exe',
+      CreationDate: process.env.PARENT_QUERY_CASE, CommandLine: 'ancestor display metadata' }]);
 };
 const O = require(${JSON.stringify(path.join(__dirname, '../lib/orchestrator'))});
 console.log(JSON.stringify(O.identity({ env: { CLAUDE_SESSION_ID: 'same-session' }, agent: 'orchestrator' })));

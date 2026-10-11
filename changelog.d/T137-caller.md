@@ -1,0 +1,1 @@
+- Derive session keys from the stable caller selected from process ancestry, with normalized Windows creation ticks. Changes above that caller no longer replace its identity. Pure observers can read recorded events while the lease lock is busy.
