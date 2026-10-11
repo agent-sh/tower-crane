@@ -1,0 +1,1 @@
+- Codex profile pricing reads the user's origin configuration, matching dispatch from isolated callers.

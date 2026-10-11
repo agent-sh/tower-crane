@@ -72,8 +72,8 @@ const finish = () => {
   if (attempts.length <= ${failures}) {
     ${records ? `for (const record of ${JSON.stringify(records)}) console.log(JSON.stringify(record)); process.exit(1);`
       : ['signal', 'interrupt'].includes(error) ? `process.kill(process.pid, '${error === 'signal' ? 'SIGTERM' : 'SIGINT'}');`
-      : ['claude-error', 'codex-error', 'codex-failed'].includes(error)
-        ? `console.log(${JSON.stringify(JSON.stringify(error === 'claude-error' ? { type: 'result', is_error: true, api_error_status: 503 }
+      : ['harness-error', 'codex-error', 'codex-failed'].includes(error)
+        ? `console.log(${JSON.stringify(JSON.stringify(error === 'harness-error' ? { type: 'result', is_error: true, api_error_status: 503 }
           : error === 'codex-error' ? { type: 'error', message: 'HTTP 502 bad gateway' }
             : { type: 'turn.failed', error: { message: 'provider outage' } }))}); process.exit(1);`
         : ['outage', 'server', 'status-json'].includes(error) ? `console.error(${JSON.stringify(error === 'server' ? '500 Internal Server Error'
