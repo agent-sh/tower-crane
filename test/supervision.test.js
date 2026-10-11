@@ -503,13 +503,13 @@ test('a worker starts only after its supervisor takes the lease, so its first ed
   const h = setup(t, { claim: false, failures: 0 });
   const { paused, hooks } = pausedSupervisor(h);
   const spawned = h.json(['spawn', '--task', 'T1'], { hooks });
-  await until(() => fs.existsSync(paused), 'supervisor did not pause');
+  await waitOnRepo(h, () => fs.existsSync(paused), 'supervisor did not pause');
   assert.equal(h.readAttempts().length, 0, 'the harness waits behind its gate');
   assert.equal(h.json(['task', 'show', 'T1']).claim, null, 'no lease before the supervisor takes it');
   fs.writeFileSync(`${paused}.go`, '');
-  await until(() => h.readAttempts().length === 1, 'worker did not start');
+  await waitOnRepo(h, () => h.readAttempts().length === 1, 'worker did not start');
   assert.equal(h.readAttempts()[0].claim.agent, spawned.agent, 'the lease was taken before the harness started');
-  await until(() => log(h).some((e) => e.cmd === 'spawn exit' && e.detail.agent === spawned.agent), 'worker did not finish');
+  await waitOnRepo(h, () => log(h).some((e) => e.cmd === 'spawn exit' && e.detail.agent === spawned.agent), 'worker did not finish');
   assert.equal(log(h).findLast((e) => e.cmd === 'spawn phase' && e.detail.agent === spawned.agent).detail.phase, 'waiting');
 });
 
@@ -519,7 +519,7 @@ test('a worker whose lease is refused never starts, reports why and frees its sl
   const completed = h.runAsync(['spawn', '--task', 'T1', '--wait', '--json'], { hooks });
   let result;
   try {
-    await until(() => fs.existsSync(paused), 'supervisor did not pause');
+    await waitOnRepo(h, () => fs.existsSync(paused), 'supervisor did not pause');
     h.ok(['task', 'update', 'T1', '--needs-owner', 'waiting for a decision']);
   } finally {
     fs.writeFileSync(`${paused}.go`, '');
@@ -559,7 +559,7 @@ test('a schema bump before the supervisor first reads state stops its worker beh
   const h = setup(t, { claim: false, failures: 0 });
   const { paused, hooks } = pausedSupervisor(h);
   const spawned = h.json(['spawn', '--task', 'T1'], { hooks });
-  await until(() => fs.existsSync(paused), 'supervisor did not pause');
+  await waitOnRepo(h, () => fs.existsSync(paused), 'supervisor did not pause');
   // The lease gate waits on its supervisor, and this supervisor can no longer read the state.
   S.withLock(h.state, () => {
     const project = JSON.parse(fs.readFileSync(path.join(h.state, 'project.json'), 'utf8'));
@@ -567,7 +567,7 @@ test('a schema bump before the supervisor first reads state stops its worker beh
     S.writeAtomic(path.join(h.state, 'project.json'), S.json(project));
   });
   fs.writeFileSync(`${paused}.go`, '');
-  await until(() => !detachedAlive({ pid: spawned.monitor_pid }), 'supervisor kept waiting behind its gate');
+  await waitOnRepo(h, () => !detachedAlive({ pid: spawned.monitor_pid }), 'supervisor kept waiting behind its gate');
   assert.equal(detachedAlive({ pid: spawned.pid }), false, 'the gate was stopped with its supervisor');
   assert.equal(h.readAttempts().length, 0, 'the worker never started');
   const tasks = JSON.parse(fs.readFileSync(path.join(h.state, 'tasks.json'), 'utf8')).tasks;

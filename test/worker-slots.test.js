@@ -32,7 +32,7 @@ function setup(t, workers = 1, tasks = 3) {
 async function pausedSpawn(h, task) {
   const paused = path.join(h.base, `paused-${task}`);
   const spawned = h.json(['spawn', '--task', task], { hooks: { HOOK_PAUSE_ON: 'events.jsonl', HOOK_PAUSE_PROCESS: 'spawn-monitor.js', HOOK_PAUSED: paused } });
-  await until(() => fs.existsSync(paused), 'supervisor did not pause');
+  await waitOnRepo(h, () => fs.existsSync(paused), 'supervisor did not pause');
   return { spawned, release: () => fs.writeFileSync(`${paused}.go`, '') };
 }
 
@@ -168,7 +168,7 @@ test('spawn refuses a task with a live reservation and clears one whose processe
   assert.match(refused.stderr, /T1.*worker-T1-1.*reservation/);
   assert.equal(events(h).filter((e) => e.cmd === 'spawn').length, 1, 'the refused spawn records nothing');
   killWorker(spawned);
-  await until(() => workerGone(spawned), 'worker processes did not exit');
+  await waitOnRepo(h, () => workerGone(spawned), 'worker processes did not exit');
   const replacement = h.json(['spawn', '--task', 'T1']);
   assert.equal(replacement.agent, 'worker-T1-2');
   assert.ok(events(h).some((e) => e.cmd === 'reservation clear' && e.detail.agent === spawned.agent && e.detail.attempt === spawned.attempt),
@@ -198,7 +198,7 @@ test('a dead reservation frees the only worker slot before the first capacity ch
   controlledHarness(h);
   const { spawned } = await pausedSpawn(h, 'T1');
   killWorker(spawned);
-  await until(() => workerGone(spawned), 'worker processes did not exit');
+  await waitOnRepo(h, () => workerGone(spawned), 'worker processes did not exit');
   const replacement = h.json(['spawn', '--task', 'T2']);
   assert.equal(replacement.agent, 'worker-T2-1');
   assert.ok(events(h).some((e) => e.cmd === 'reservation clear' && e.detail.agent === spawned.agent),
@@ -211,7 +211,7 @@ test('a dead reservation frees the only worker slot for a batch spawn --ready', 
   controlledHarness(h);
   const { spawned } = await pausedSpawn(h, 'T1');
   killWorker(spawned);
-  await until(() => workerGone(spawned), 'worker processes did not exit');
+  await waitOnRepo(h, () => workerGone(spawned), 'worker processes did not exit');
   const batch = h.json(['spawn', '--ready', '--agent', 'orchestrator']);
   assert.equal(batch.results.length, 1, 'the batch starts a worker in the freed slot');
   assert.ok(batch.results[0].ok, JSON.stringify(batch.results));
