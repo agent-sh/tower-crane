@@ -1239,7 +1239,7 @@ test('an isolated reviewer posts through gh, records evidence in a symlinked sta
   const fixture = path.join(h.base, 'fixture');
   const run = [
     ['gh', 'pr', 'comment', '1', '--body', 'Review (tower-crane, clean context)'],
-    [process.execPath, BIN, 'evidence', 'T1', '--type', 'review', '--ok', '--sha', 'abcdef1', '--revision', '1', '--summary', 'nothing blocks'],
+    [process.execPath, BIN, 'evidence', 'T1', '--type', 'review', '--ok', '--sha', '50b732a15be40ccb2065cb2ba0e7b366d511b736', '--revision', '1', '--summary', 'nothing blocks'],
     ['git', 'init', '-q', fixture],
     ['git', '-C', fixture, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '--allow-empty', '-m', 'fixture'],
     ['git', 'init', '-q', '--bare', `${fixture}.git`],
@@ -1318,7 +1318,7 @@ test('a sandboxed agent changes the state only through its spawn\'s broker: as i
     fs.rmSync(fixture, { recursive: true, force: true });
   }
   isolated(h, 'hard', 'claude');
-  const worker = spawn(h, u, 'hard', { STUB_RUN: JSON.stringify([cli('claim', 'T1'), cli('evidence', 'T1', '--type', 'review', '--ok', '--sha', 'abcdef1')]) }).agent;
+  const worker = spawn(h, u, 'hard', { STUB_RUN: JSON.stringify([cli('claim', 'T1'), cli('evidence', 'T1', '--type', 'review', '--ok', '--sha', '50b732a15be40ccb2065cb2ba0e7b366d511b736')]) }).agent;
   assert.deepEqual(u.report().ran.map((r) => r.code), [0, 1], JSON.stringify(u.report().ran.map((r) => r.stderr)));
   const [t1, t2] = h.readState('tasks.json').tasks;
   assert.equal(t1.claim.agent, worker, 'the worker claimed as itself');
@@ -1438,8 +1438,8 @@ test('a codex rework resumes in a fresh isolated home and finds its first sessio
   const home = path.join(h.state, 'homes', first.agent);
   fs.writeFileSync(path.join(home, 'AGENTS.md'), 'PLANTED-BY-AGENT\n');
   h.ok(['claim', 'T1', '--agent', first.agent]);
-  h.ok(['submit', 'T1', '--sha', 'abcdef1', '--agent', first.agent]);
-  h.ok(['evidence', 'T1', '--type', 'review', '--fail', '--sha', 'abcdef1', '--revision', h.revision('T1'), '--agent', 'reviewer-T1-1', '--summary', 'redo']);
+  h.ok(['submit', 'T1', '--sha', '50b732a15be40ccb2065cb2ba0e7b366d511b736', '--agent', first.agent]);
+  h.ok(['evidence', 'T1', '--type', 'review', '--fail', '--sha', '50b732a15be40ccb2065cb2ba0e7b366d511b736', '--revision', h.revision('T1'), '--agent', 'reviewer-T1-1', '--summary', 'redo']);
   h.ok(['rework', 'T1', '--reason', 'redo']);
   const next = spawn(h, u, 'medium');
   assert.equal(next.resumed, true);

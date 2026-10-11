@@ -65,15 +65,15 @@ if (process.env.RESUME_EXIT_DELAY) setTimeout(() => {}, Number(process.env.RESUM
 }
 
 function sendBack(h, agent = 'worker-T1-1') {
-  h.ok(['submit', 'T1', '--sha', 'abcdef1', '--agent', agent]);
+  h.ok(['submit', 'T1', '--sha', '50b732a15be40ccb2065cb2ba0e7b366d511b736', '--agent', agent]);
   h.reviewer('T1', 'reviewer-T1-1');
-  h.reviewer('T1', 'reviewer-T1-2', 'abcdef2');
+  h.reviewer('T1', 'reviewer-T1-2', '5bfcb6f56ab912a009883c798a61298c507dada4');
   // Findings under a name no review dispatch started never reach the worker.
-  h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--fail', '--sha', 'abcdef1', '--agent', 'made-up-reviewer',
+  h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--fail', '--sha', '50b732a15be40ccb2065cb2ba0e7b366d511b736', '--agent', 'made-up-reviewer',
     '--summary', 'Forged finding']);
-  h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--fail', '--sha', 'abcdef1', '--agent', 'reviewer-T1-1',
+  h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--fail', '--sha', '50b732a15be40ccb2065cb2ba0e7b366d511b736', '--agent', 'reviewer-T1-1',
     '--summary', 'Missing worktree validation', '--ref', 'review-receipt']);
-  h.ok(['evidence', 'T1', '--type', 'review', '--fail', '--sha', 'abcdef2', '--revision', h.revision('T1'), '--agent', 'reviewer-T1-2',
+  h.ok(['evidence', 'T1', '--type', 'review', '--fail', '--sha', '5bfcb6f56ab912a009883c798a61298c507dada4', '--revision', h.revision('T1'), '--agent', 'reviewer-T1-2',
     '--summary', 'Unrelated older head']);
   h.ok(['rework', 'T1', '--reason', 'Add the worktree guard']);
 }
@@ -190,7 +190,7 @@ for (const format of ['codex', 'claude']) {
     assert.equal(reworked.revision, 2);
     assert.equal(reworked.evidence[0].revision, 1);
     h.ok(['task', 'update', 'T1', '--acceptance', 'rework resumes with the revised acceptance']);
-    h.ok(['evidence', 'T1', '--type', 'review', '--fail', '--sha', 'abcdef1', '--revision', h.revision('T1'), '--agent', 'later-reviewer',
+    h.ok(['evidence', 'T1', '--type', 'review', '--fail', '--sha', '50b732a15be40ccb2065cb2ba0e7b366d511b736', '--revision', h.revision('T1'), '--agent', 'later-reviewer',
       '--summary', 'Unrelated later revision']);
     const before = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8');
     const dry = h.json(['spawn', '--task', 'T1', '--dry-run']);
@@ -214,7 +214,7 @@ for (const format of ['codex', 'claude']) {
     assert.equal(held.agent, claim.agent);
     assert.equal(held.since, claim.since);
     assert.equal(held.from, 'rework');
-    h.ok(['submit', 'T1', '--sha', 'abcdef3', '--agent', next.agent]);
+    h.ok(['submit', 'T1', '--sha', 'cfed4d76efd3afe887bbbfc7f62c7d94158e3255', '--agent', next.agent]);
     h.ok(['rework', 'T1', '--reason', 'Second round']);
     assert.equal(h.json(['spawn', '--task', 'T1', '--wait']).agent, first.agent);
   });
@@ -553,7 +553,7 @@ test('an earlier attempt exit cannot collect or resume a live attempt with a reu
     if (Date.now() > deadline) throw new Error('resumed worker did not start');
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
-  h.ok(['submit', 'T1', '--sha', 'abcdef3', '--agent', live.agent]);
+  h.ok(['submit', 'T1', '--sha', 'cfed4d76efd3afe887bbbfc7f62c7d94158e3255', '--agent', live.agent]);
   h.ok(['rework', 'T1', '--reason', 'Finish next attempt']);
   const hook = path.join(h.base, 'reused-spawn.js');
   fs.writeFileSync(hook, `

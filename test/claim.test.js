@@ -38,7 +38,7 @@ test('an expired lease frees the task for another agent', (t) => {
   const task = h.readState('tasks.json').tasks[0];
   assert.equal(task.claim.agent, 'w-2');
   assert.equal(task.claim.from, 'todo');
-  const late = h.run(['submit', 'T1', '--sha', 'abcdef1', '--agent', 'w-1']);
+  const late = h.run(['submit', 'T1', '--sha', '50b732a15be40ccb2065cb2ba0e7b366d511b736', '--agent', 'w-1']);
   assert.equal(late.code, 1);
   assert.match(late.stderr, /only the claimant \(w-2\)/);
 });
@@ -90,10 +90,10 @@ test('renewing an expired lease takes a worker slot like a claim', (t) => {
   assert.deepEqual(inProgress.map((x) => x.id), ['T2'], 'one task in progress, as the limit says');
 
   h.ok(['renew', 'T2', '--agent', 'w-2']);
-  h.ok(['submit', 'T2', '--sha', 'abcdef1', '--agent', 'w-2']);
+  h.ok(['submit', 'T2', '--sha', '50b732a15be40ccb2065cb2ba0e7b366d511b736', '--agent', 'w-2']);
   h.ok(['renew', 'T1', '--agent', 'w-1']);
   assert.ok(Date.parse(h.readState('tasks.json').tasks[0].claim.until) > Date.now(), 'with a slot free, the late renewal stands');
-  h.ok(['submit', 'T1', '--sha', 'abcdef2', '--agent', 'w-1']);
+  h.ok(['submit', 'T1', '--sha', '5bfcb6f56ab912a009883c798a61298c507dada4', '--agent', 'w-1']);
 });
 
 test('renewing an expired claim passes the readiness checks a claim does', (t) => {
@@ -139,11 +139,11 @@ test('only the claimant submits, renews or releases', (t) => {
   const h = makeRepo(t);
   h.init();
   h.ok(['task', 'add', '--title', 'A', '--acceptance', 'a']);
-  const early = h.run(['submit', 'T1', '--sha', 'abcdef1', '--agent', 'w-1']);
+  const early = h.run(['submit', 'T1', '--sha', '50b732a15be40ccb2065cb2ba0e7b366d511b736', '--agent', 'w-1']);
   assert.equal(early.code, 1);
   assert.match(early.stderr, /not in progress; claim it/);
   h.ok(['claim', 'T1', '--agent', 'w-1', '--lease', '5']);
-  for (const args of [['submit', 'T1', '--sha', 'abcdef1'], ['renew', 'T1'], ['release', 'T1', '--reason', 'x']]) {
+  for (const args of [['submit', 'T1', '--sha', '50b732a15be40ccb2065cb2ba0e7b366d511b736'], ['renew', 'T1'], ['release', 'T1', '--reason', 'x']]) {
     const r = h.run([...args, '--agent', 'w-2']);
     assert.equal(r.code, 1, args.join(' '));
     assert.match(r.stderr, /only the claimant/);
@@ -152,11 +152,11 @@ test('only the claimant submits, renews or releases', (t) => {
   h.ok(['renew', 'T1', '--agent', 'w-1', '--lease', '120']);
   assert.ok(Date.parse(h.readState('tasks.json').tasks[0].claim.until) > Date.parse(before));
   assert.equal(h.run(['submit', 'T1', '--sha', 'not-a-sha', '--agent', 'w-1']).code, 2);
-  h.ok(['submit', 'T1', '--sha', 'ABCDEF1234', '--branch', 'feat/x', '--pr', '12', '--summary', 'did it', '--agent', 'w-1']);
+  h.ok(['submit', 'T1', '--sha', '50B732A15BE40CCB2065CB2BA0E7B366D511B736', '--branch', 'feat/x', '--pr', '12', '--summary', 'did it', '--agent', 'w-1']);
   const task = h.readState('tasks.json').tasks[0];
   assert.deepEqual(
     [task.status, task.sha, task.branch, task.pr, task.submitted_by, task.claim],
-    ['submitted', 'abcdef1234', 'feat/x', 12, 'w-1', null],
+    ['submitted', '50b732a15be40ccb2065cb2ba0e7b366d511b736', 'feat/x', 12, 'w-1', null],
   );
   assert.match(task.notes[0].text, /did it/);
 });

@@ -340,7 +340,7 @@ test('a brokered resubmit asks gh about its PR by name, with no repository for g
   h.init();
   h.ok(['task', 'add', '--title', 'pr', '--acceptance', 'checked']);
   h.ok(['claim', 'T1', '--agent', 'worker-T1-1']);
-  h.ok(['submit', 'T1', '--agent', 'worker-T1-1', '--sha', 'abcdef1', '--branch', 'change', '--pr', '7']);
+  h.ok(['submit', 'T1', '--agent', 'worker-T1-1', '--sha', '50b732a15be40ccb2065cb2ba0e7b366d511b736', '--branch', 'change', '--pr', '7']);
   const log = path.join(h.base, 'gh.log');
   const preload = path.join(h.base, 'gh.js');
   fs.writeFileSync(preload, `
@@ -361,19 +361,23 @@ cp.spawnSync = function (command, args, opts) {
   const job = { state: h.state, task: 'T1', agent: 'worker-T1-1', role: 'worker', cwd: h.repo, broker: path.join(h.base, 'brokers', 'worker-T1-1', B.FILE) };
   const broker = await B.start(job);
   t.after(() => broker.close());
-  const refused = await B.forward(job.broker, ['submit', 'T1', '--sha', 'abcdef2', '--pr', '7'], h.state);
+  const refused = await B.forward(job.broker, ['submit', 'T1', '--sha', '5bfcb6f56ab912a009883c798a61298c507dada4', '--pr', '7'], h.state);
   assert.equal(refused.code, 1);
   assert.match(refused.stderr, /needs the project's repo/);
   assert.ok(!fs.existsSync(log), 'gh did not run without a repository name');
   h.ok(['project', 'set', '--repo', 'acme/demo', '--agent', 'owner']);
-  const r = await B.forward(job.broker, ['submit', 'T1', '--sha', 'abcdef2', '--pr', '7'], h.state);
+  const abbreviated = await B.forward(job.broker, ['submit', 'T1', '--sha', '5bfcb6f5'], h.state);
+  assert.equal(abbreviated.code, 1);
+  assert.match(abbreviated.stderr, /needs a full commit sha/);
+  const r = await h.runAsync(['--agent', job.agent, 'submit', 'T1', '--sha=5BFCB6F5', '--pr', '7'],
+    { env: { TOWER_CRANE_BROKER: job.broker } });
   assert.equal(r.code, 0, r.stderr);
   const calls = fs.readFileSync(log, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
   assert.equal(calls.length, 1);
   assert.deepEqual(calls[0].args.slice(0, 5), ['pr', 'view', '7', '-R', 'acme/demo']);
   assert.equal(calls[0].cwd, h.state);
   assert.ok(calls[0].git_dir && !fs.existsSync(calls[0].git_dir), 'git finds no repository');
-  assert.equal(h.readState('tasks.json').tasks[0].sha, 'abcdef2');
+  assert.equal(h.readState('tasks.json').tasks[0].sha, '5bfcb6f56ab912a009883c798a61298c507dada4');
 });
 
 test('a brokered worker or reviewer messages only the orchestrator or the owner', async (t) => {

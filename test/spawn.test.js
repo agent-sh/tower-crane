@@ -358,7 +358,7 @@ const agent = env.TOWER_CRANE_AGENT;
 const task = env.TOWER_CRANE_TASK;
 const state = env.TOWER_CRANE_STATE;
 for (const key of Object.keys(env)) if (key.startsWith('TOWER_CRANE_')) delete env[key];
-const r = cp.spawnSync(process.execPath, [process.argv[1], 'evidence', 'T1', '--type', 'review', '--ok', '--sha', 'abcdef1', '--state', state], {
+const r = cp.spawnSync(process.execPath, [process.argv[1], 'evidence', 'T1', '--type', 'review', '--ok', '--sha', '50b732a15be40ccb2065cb2ba0e7b366d511b736', '--state', state], {
   env, encoding: 'utf8', timeout: 10000,
 });
 fs.writeFileSync(process.argv[2], JSON.stringify({ agent, task, remaining: Object.keys(env).filter((key) => key.startsWith('TOWER_CRANE_')), code: r.status, stderr: r.stderr }));
@@ -825,7 +825,7 @@ fs.writeFileSync(${JSON.stringify(output)}, "work in progress");`;
   h.ok(['task', 'add', '--title', 'Second', '--acceptance', 'b']);
   h.ok(['brief', 'set', 'T2', '-'], { input: 'second brief\n' });
   h.ok(['claim', 'T2', '--agent', 'w-1']);
-  h.ok(['submit', 'T2', '--sha', 'abcdef1', '--branch', 'feature/second', '--agent', 'w-1']);
+  h.ok(['submit', 'T2', '--sha', '50b732a15be40ccb2065cb2ba0e7b366d511b736', '--branch', 'feature/second', '--agent', 'w-1']);
   h.ok(['rework', 'T2', '--reason', 'again']);
   const a2Created = path.join(h.base, 'a2-created');
   const a2 = h.runAsync(['spawn', '--role', 'small', '--task', 'T2'], { hooks: { HOOK_STOP_WORKTREE_ADD: a2Created, HOOK_SPAWN_FAIL: '1' } });
