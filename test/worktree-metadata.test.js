@@ -177,6 +177,21 @@ test('a sandboxed git push clears an empty read-only lock placeholder that would
   assert.equal(h.git(['config', '--get', 'branch.task-T1.remote']), remote);
 });
 
+test('a sandboxed git call outside any repository runs without a placeholder cleanup', (t) => {
+  const h = makeRepo(t);
+  const outside = path.join(h.base, 'outside');
+  fs.mkdirSync(outside);
+  const policy = path.join(h.base, 'policy.json');
+  fs.writeFileSync(policy, JSON.stringify({ gitPush: 'branch', branch: 'task-T1', repo: null, gh: [] }));
+  const shimDir = path.join(h.base, 'shim');
+  fs.mkdirSync(shimDir);
+  const env = { ...h.env, TOWER_CRANE_PROC: procTable(h) };
+  const init = cp.spawnSync(process.execPath, [path.join(ROOT, 'lib', 'shim.js'), policy, shimDir, 'git', 'init', '-q', 'fresh'],
+    { cwd: outside, env, encoding: 'utf8', timeout: 30000 });
+  assert.equal(init.status, 0, init.stderr);
+  assert.ok(fs.existsSync(path.join(outside, 'fresh', '.git')));
+});
+
 test('a lock that a process holds is kept when the git directory is reached through a symlink', { skip: !fs.existsSync('/proc/self/fd') && 'needs /proc to see which process holds the lock' }, async (t) => {
   const h = makeRepo(t);
   h.init();
