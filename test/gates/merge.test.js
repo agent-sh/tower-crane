@@ -375,10 +375,11 @@ test('a partially merged stack retries on the project base and refuses an unrela
   const merged = f.h.json(['merge', 'T2', '--agent', 'orchestrator']);
   assert.equal(merged.ok, true, merged.summary);
   const merges = f.read().calls.filter((c) => isMerge(c.args));
-  assert.equal(merges.length, 1);
-  assert.match(merges[0].args[1], /pulls\/12\/merge-async$/);
-  assert.ok(merges[0].args.includes('merge_method=merge'));
-  assert.ok(merges[0].args.includes(`expected_head_sha=${f.upper.sha}`));
+  assert.equal(merges.length, 2);
+  assert.deepEqual(merges[0].args.slice(0, 3), ['pr', 'merge', '12']);
+  assert.match(merges[1].args[1], /pulls\/12\/merge-async$/);
+  assert.ok(merges[1].args.includes('merge_method=squash'));
+  assert.ok(merges[1].args.includes(`expected_head_sha=${f.upper.sha}`));
 });
 
 test('unstacked fallback retargets only the recorded dependency base after lower tasks land', (t) => {
