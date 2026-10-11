@@ -82,7 +82,7 @@ test('additive state stays readable and survives unrelated CLI writes', (t) => {
   assert.deepEqual(h.json(['task', 'show', 'T2']).future_field, future.task.future_field);
   h.ok(['task', 'note', 'T1', 'Current tool still writes']);
   h.ok(['claim', 'T1', '--agent', 'current-worker']);
-  h.ok(['ask', '--question', 'Current decision?', '--agent', 'current-worker']);
+  h.ok(['ask', '--kind', 'technical', '--question', 'Current decision?', '--agent', 'current-worker']);
   assert.deepEqual(h.readState('tasks.json').tasks[1], future.task);
   assert.deepEqual(h.readState('tasks.json').future_index, { next: 'opaque' });
   const decisions = h.readState('decisions.json');
@@ -129,7 +129,7 @@ test('a supervised worker survives additive state from a newer tool', async (t) 
 
 test('unknown decision statuses block only the tasks that need to interpret them', (t) => {
   const h = fixture(t);
-  h.ok(['ask', '--question', 'Future blocker?', '--blocks', 'T1']);
+  h.ok(['ask', '--kind', 'technical', '--question', 'Future blocker?', '--blocks', 'T1']);
   const decisions = h.readState('decisions.json');
   decisions.decisions[0].status = 'future-pending';
   h.writeState('decisions.json', decisions);

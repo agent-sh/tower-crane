@@ -22,7 +22,7 @@ test('--json output parses for every reading and writing command', (t) => {
   assert.equal(parse(['brief', 'get', 'T1']).brief, 'brief');
   assert.equal(parse(['validate']).ok, true);
   assert.equal(parse(['ready', '--all']).blocked[0].id, 'T2');
-  assert.equal(parse(['ask', '--question', 'Q?', '--option', 'a', '--option', 'b']).id, 'D1');
+  assert.equal(parse(['ask', '--kind', 'technical', '--question', 'Q?', '--option', 'a', '--option', 'b']).id, 'D1');
   assert.equal(parse(['decisions']).length, 1);
   assert.deepEqual(
     parse(['decision', 'delegate', 'D1', '--answerers', '["w"]', '--agent', 'owner']).answerers,
