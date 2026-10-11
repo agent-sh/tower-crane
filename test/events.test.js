@@ -562,6 +562,8 @@ test('worker progress after lease expiry postpones stall until progress is stale
 
 test('an observer waiting for the state lock does not block its timeout', async (t) => {
   const h = setup(t, ['--lease-minutes', '1']);
+  h.ok(['msg', '--to', 'orchestrator', 'already recorded']);
+  const message = log(h).findLast((e) => e.cmd === 'msg').id;
   const clock = path.join(h.base, 'clock');
   const start = Date.now();
   const hooks = { HOOK_CLOCK_FILE: clock };
@@ -577,6 +579,10 @@ test('an observer waiting for the state lock does not block its timeout', async 
   assert.equal(r.code, 2, r.stderr);
   assert.deepEqual(JSON.parse(r.stdout), { type: 'timeout', offset: fs.statSync(path.join(h.state, 'events.jsonl')).size });
   assert.ok(performance.now() - before < 2000, 'timeout is not held by the lock retry deadline');
+  const existing = h.run(['wait', '--agent', 'orchestrator', '--observe', '--after', '0',
+    '--types', 'worker-message', '--timeout', '0'], { hooks });
+  assert.equal(existing.code, 0, existing.stderr || existing.stdout);
+  assert.equal(JSON.parse(existing.stdout).id, message, 'a busy lease lock cannot hide an existing event');
   fs.writeFileSync(`${paused}.go`, '');
   assert.equal((await writer.result).code, 0);
 });

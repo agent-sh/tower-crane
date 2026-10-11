@@ -38,6 +38,8 @@ In a sandboxed claude or codex agent (`TOWER_CRANE_BROKER` set by its spawn), co
 
 Writes take the lock, re-read the files, validate, write atomically and append to `events.jsonl`. The Git/gh runner refuses commands inside mutation transactions. Rendering follows after the mutation releases its lock and reads current state under its own lock. A refused command writes nothing, except a refused brokered `msg`, which appends a `msg refused` event.
 
+Orchestrator writes also require the calling session lease. Native commands renew its idle window; engine reactions, collectors and hook writers never acquire or renew it. `orchestrator release` and owner-only `orchestrator takeover` clear it for the next native writer. MCP discovery needs no lease, and actual actions check the lease before running. Inbox reads stay open to competing sessions. Wait startup does not block its timeout behind a lease transaction. See [state.md: Orchestrator lease](state.md#orchestrator-lease).
+
 `hook tool` appends the agent's tool activity to `progress/<agent>.jsonl` without the state lock or a state read; a failed append drops that line. An inbox poll (`UserPromptSubmit`, and the poll after each tool hook) reads the event log without the lock and returns at once when nothing is pending. With messages pending it tries the lock once: a busy lock returns empty context and leaves them unread for the next hook. The bridge turns any failed progress append or poll into empty context, so neither fails the harness turn. Background-job, Stop and acknowledgement hooks still write audit events under the lock.
 
 Evidence that no gate decision reads any more moves out of `tasks.json` on the next write: entries at an older head or revision, every entry of a cancelled task, and all but the merge receipt of a merged task. Their fields over 1 KiB go to `evidence/<task>/<sha256>.json`, with a reference in `tasks.json`. Evidence at the task's current head stays inline whatever its size. `task show` and every reader get the full checked value back. Copy the evidence directory with the state. See [state.md](state.md#tasksjson) for the format and what older tools see.
@@ -247,6 +249,10 @@ Every spawn refreshes sibling-path entries in the requested agy settings. These 
 | `mcp` | start the newline-delimited JSON-RPC MCP server on stdin/stdout. Tools: `inbox` (optional `ack`), `spawn_ready`, `merge_accepted`, `rework_from_review` (`id`), and `release_dead`. Initialization and tool discovery work without a project; tool calls resolve the project and return missing-state or authorization errors as tool results. Calls retain the CLI process identity and state; there are no identity, state or shell overrides. Batch actions require the orchestrator or owner; all existing command checks and authority rules remain in force |
 | | |
 | `msg --to NAME [--task ID] [--steer] TEXT` | send a worker message through the event log |
+| | |
+| `orchestrator release` | holding orchestrator session only: clear the lease so another session can write; refuses another session even when it uses the same agent name |
+| | |
+| `orchestrator takeover` | owner only: explicitly clear the orchestrator lease; the next orchestrator write acquires it. Records the previous holder |
 | | |
 | `owner-done ID [--note T]` | the owner did what `needs_owner` asked; clears it. Operational: the orchestrator or the owner |
 | | |

@@ -92,14 +92,18 @@ test('an accepted brief needs explicit rework before edits, and dependents wait 
   h.ok(['accept', 'T1', '--agent', 'orchestrator']);
   h.ok(['task', 'add', '--title', 'Uses the link', '--acceptance', 'uses the accepted link', '--kind', 'docs', '--dep', 'T1']);
   h.ok(['brief', 'set', 'T1', '-'], { input: 'Check the link.\n' });
-  const state = fs.readFileSync(path.join(h.state, 'tasks.json'), 'utf8');
+  const state = h.readState('tasks.json');
   const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8');
   for (const agent of ['orchestrator', 'owner']) {
     const changed = h.run(['brief', 'set', 'T1', '-', '--agent', agent], { input: 'Check the link and log errors.\n' });
     assert.equal(changed.code, 1, 'accepted requirements must stay reviewed until explicit rework');
     assert.match(changed.stderr, /T1 is accepted.*brief.*rework T1/);
   }
-  assert.equal(fs.readFileSync(path.join(h.state, 'tasks.json'), 'utf8'), state);
+  const after = h.readState('tasks.json');
+  // A refused native command still renews its session heartbeat.
+  delete state.orchestrator_lease.heartbeat;
+  delete after.orchestrator_lease.heartbeat;
+  assert.deepEqual(after, state);
   assert.equal(fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8'), events);
   assert.equal(h.ok(['brief', 'get', 'T1']), 'Check the link.');
   const accepted = h.json(['task', 'show', 'T1']);

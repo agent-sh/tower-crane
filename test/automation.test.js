@@ -534,8 +534,14 @@ test('a failed generated-file push retries the prepared merge without a worker o
 
 test('submission runs real software gates once through the existing waiter', (t) => {
   const h = setup(t, { ci: 'pending' });
+  h.ok(['task', 'note', 'T1', 'live orchestrator', '--agent', 'orchestrator'], { env: { CLAUDE_SESSION_ID: 'holder' } });
+  const holder = h.readState('tasks.json').orchestrator_lease;
+  h.consume = () => h.run(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'owner'],
+    { env: { CLAUDE_SESSION_ID: 'engine-waiter' } });
   h.submit();
   assert.equal(h.consume().code, 2);
+  assert.equal(h.readState('tasks.json').orchestrator_lease.session_id, holder.session_id, 'automation inherits the holder');
+  assert.deepEqual(h.readState('tasks.json').orchestrator_lease, holder, 'background gates do not extend the session idle window');
   const task = h.readState('tasks.json').tasks[0];
   assert.deepEqual(task.evidence.map((e) => [e.type, e.ok]), [['tests', true], ['clean', true], ['ci', false]]);
   assert.ok(task.evidence.every((e) => e.commands.length && e.source === `check ${e.type}`));
@@ -543,6 +549,39 @@ test('submission runs real software gates once through the existing waiter', (t)
   h.consume();
   assert.equal(h.readState('tasks.json').tasks[0].evidence.length, 3, 'duplicate event delivery runs no gate twice');
   assert.equal(h.logs().filter((e) => e.cmd === 'spawn').length, 0, 'pending CI starts no model');
+});
+
+test('background reactions leave vacant, released, taken-over and expired leases available for handoff', (t) => {
+  const h = setup(t, { ci: 'pending' });
+  const lease = () => h.readState('tasks.json').orchestrator_lease ?? null;
+  const holder = { env: { CLAUDE_SESSION_ID: 'holder' } };
+  const acquire = () => h.ok(['task', 'note', 'T1', 'native session', '--agent', 'orchestrator'], holder);
+  const react = (opts) => h.ok(['ci', 'completed', 'T1', '--sha', h.sha, '--agent', 'owner'], opts);
+  h.submit();
+  react();
+  assert.equal(lease(), null, 'a monitor cannot become the first orchestrator');
+  acquire();
+  const live = lease();
+  react();
+  assert.deepEqual(lease(), live, 'background work cannot renew the holder');
+  h.ok(['orchestrator', 'release', '--agent', 'orchestrator'], holder);
+  react();
+  assert.equal(lease(), null, 'background work cannot undo release');
+  acquire();
+  h.ok(['orchestrator', 'takeover', '--agent', 'owner']);
+  react();
+  assert.equal(lease(), null, 'background work cannot undo takeover');
+  acquire();
+  const expired = lease();
+  const env = {
+    TOWER_CRANE_TEST_NOW: String(Date.parse(expired.heartbeat) + h.readState('project.json').limits.lease_minutes * 60000 + 1),
+    NODE_OPTIONS: `--require=${JSON.stringify(path.join(__dirname, 'fixtures', 'clock.js'))}`,
+  };
+  react({ env });
+  assert.deepEqual(lease(), expired, 'background work cannot revive an idle session');
+  h.ok(['task', 'note', 'T1', 'replacement session', '--agent', 'orchestrator'],
+    { env: { ...env, CLAUDE_SESSION_ID: 'replacement' } });
+  assert.notEqual(lease().session_id, expired.session_id);
 });
 
 test('CI completion refreshes a pending or failed receipt at the exact head and merges after review', (t) => {
@@ -1561,19 +1600,19 @@ test('a head replaced during its check is checked again at the new sha before th
   const replacement = h.git(['rev-parse', 'HEAD']);
   h.git(['switch', '-q', 'main']);
   h.moveMain();
-  // Rework, resubmit and reaccept T1 at a new head while its suite runs.
+  // The owner reworks and reaccepts T1 at a new head while its suite runs.
   fs.writeFileSync(path.join(h.base, 'during-check.js'), `const cp = require('node:child_process'), fs = require('node:fs');
 const env = ${JSON.stringify(h.env)};
 const cli = (...a) => cp.execFileSync(process.execPath, [${JSON.stringify(BIN)}, ...a], { cwd: ${JSON.stringify(h.repo)}, env, encoding: 'utf8' });
 const file = env.AUTOMATION_GITHUB;
-cli('rework', 'T1', '--reason', 'replace the head', '--agent', 'orchestrator');
+cli('rework', 'T1', '--reason', 'replace the head', '--agent', 'owner');
 const gh = JSON.parse(fs.readFileSync(file, 'utf8'));
 gh.prs['7'].headRefOid = ${JSON.stringify(replacement)};
 gh.ci[${JSON.stringify(replacement)}] = 'success';
 fs.writeFileSync(file, JSON.stringify(gh));
 cli('claim', 'T1', '--agent', 'worker');
 cli('submit', 'T1', '--sha', ${JSON.stringify(replacement)}, '--pr', '7', '--agent', 'worker');
-for (const gate of ['tests', 'clean', 'ci']) cli('check', gate, 'T1', '--agent', 'orchestrator');
+for (const gate of ['tests', 'clean', 'ci']) cli('check', gate, 'T1', '--agent', 'owner');
 const events = ${JSON.stringify(path.join(h.state, 'events.jsonl'))};
 const revision = JSON.parse(fs.readFileSync(${JSON.stringify(path.join(h.state, 'tasks.json'))}, 'utf8')).tasks.find((x) => x.id === 'T1').revision;
 const at = new Date().toISOString();
@@ -1582,7 +1621,7 @@ fs.appendFileSync(events, [
   { at, agent: 'orchestrator', cmd: 'spawn exit', task: 'T1', detail: { agent: 'reviewer', pid: 999999, attempt: 1, code: 0 } },
 ].map((e) => JSON.stringify(e) + '\\n').join(''));
 cli('evidence', 'T1', '--type', 'review', '--sha', ${JSON.stringify(replacement)}, '--ok', '--agent', 'reviewer');
-cli('accept', 'T1', '--agent', 'orchestrator');
+cli('accept', 'T1', '--agent', 'owner');
 `);
   h.reviewer('T1', 'reviewer');
   h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--sha', h.sha, '--ok', '--agent', 'reviewer']);
@@ -1647,9 +1686,9 @@ test('a head check that fails after its settings changed checks again under the 
   const h = queueFixture(t);
   h.moveMain();
   const cmd = h.readState('project.json').gates.tests_cmd;
-  // The suite fails, but only after another CLI replaced the tests command.
+  // The suite fails, but only after the owner replaces the tests command.
   fs.writeFileSync(path.join(h.base, 'during-check.js'), `const cp = require('node:child_process');
-cp.execFileSync(process.execPath, [${JSON.stringify(BIN)}, 'project', 'set', '--tests-cmd', ${JSON.stringify(`${cmd} again`)}, '--agent', 'orchestrator'],
+cp.execFileSync(process.execPath, [${JSON.stringify(BIN)}, 'project', 'set', '--tests-cmd', ${JSON.stringify(`${cmd} again`)}, '--agent', 'owner'],
   { cwd: ${JSON.stringify(h.repo)}, env: ${JSON.stringify(h.env)}, encoding: 'utf8' });
 process.exitCode = 1;
 `);

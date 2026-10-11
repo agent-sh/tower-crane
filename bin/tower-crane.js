@@ -188,6 +188,10 @@ const COMMANDS = [
 
   { section: 'Run', name: 'msg', pos: ['TEXT...'], usage: '--to NAME [--task ID] [--steer] TEXT', summary: 'send a worker message through the event log', flags: { to: str('NAME', 'recipient, usually orchestrator'), task: str('ID', 'task (default TOWER_CRANE_TASK)'), steer: bool('deliver into the running turn where the harness can, not after it') }, required: ['to'], run: run('../lib/events', 'message') },
 
+  { section: 'Run', name: 'orchestrator release', summary: 'release the calling orchestrator session lease', description: 'holding orchestrator session only: clear the lease so another session can write; refuses another session even when it uses the same agent name', run: run('../lib/orchestrator', 'release') },
+
+  { section: 'Run', name: 'orchestrator takeover', summary: 'owner-only clear the orchestrator lease for a new session', description: 'owner only: explicitly clear the orchestrator lease; the next orchestrator write acquires it. Records the previous holder', run: run('../lib/orchestrator', 'takeover') },
+
   { section: 'Run', name: 'owner-done', pos: ['ID'], usage: 'ID [--note T]', summary: 'the owner did what needs_owner asked; clears it', flags: { note: str('T', 'what was done') }, description: "the owner did what `needs_owner` asked; clears it. Operational: the orchestrator or the owner", run: T.ownerDone },
 
   { section: 'Run', name: 'owner-key', summary: 'owner only: create the owner key that stands in for a terminal; prints its path, never the key', description: "the owner, explicitly and at a terminal or with the current key, creates the key under the project's recorded `owner_config_dir` and prints `created PATH` or `exists PATH`; never prints the key. An unbound project requires a terminal owner to record the directory first. `TOWER_CRANE_OWNER_KEY` with its contents stands in for a terminal ([Agent identity](state.md#agent-identity))", run: run('../lib/authority', 'ownerKey') },
@@ -483,6 +487,7 @@ async function main(argv) {
       stateDir: cmd.name === 'mcp' ? undefined : locate(),
       ...(cmd.name === 'mcp' ? { resolveStateDir: locate } : {}),
     };
+    require('../lib/orchestrator').command(ctx, cmd.name);
     const res = await cmd.run(ctx);
     if (res && !res.printed) {
       if (ctx.json) out(JSON.stringify(res.data, null, 2));

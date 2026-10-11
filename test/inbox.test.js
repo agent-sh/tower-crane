@@ -177,7 +177,10 @@ test('ready dispatch respects worker slots and unobservable processes cannot be 
   h.ok(['project', 'set', '--workers', '3']);
   const before = h.readState('tasks.json');
   assert.deepEqual(h.json(['release', '--dead', '--agent', 'orchestrator']).results, []);
-  assert.deepEqual(h.readState('tasks.json'), before);
+  const after = h.readState('tasks.json');
+  delete after.orchestrator_lease;
+  delete before.orchestrator_lease;
+  assert.deepEqual(after, before);
   const worker = path.join(h.base, 'worker.js');
   fs.writeFileSync(worker, 'setTimeout(() => {}, 60000);\n');
   h.ok(['ladder', 'set', 'medium', '--harness', 'command', '--command', JSON.stringify([process.execPath, worker, '{prompt}']), '--clear', 'profile', '--clear', 'effort']);

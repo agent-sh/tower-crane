@@ -1,0 +1,1 @@
+- Query only the calling process ancestry for Windows orchestrator identity. An oversized whole-machine process listing can no longer change the session key; failed identity discovery refuses the command instead of silently choosing a different key.
