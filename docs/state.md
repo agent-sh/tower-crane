@@ -751,6 +751,8 @@ SIGTERM or SIGINT to `wait` stops new reservations and gates while its active
 gate finishes and records evidence. The interrupted reaction records
 `phase: "deferred"` with an interruption reason, releasing its executor lease
 before `wait` exits 0. The next startup reconciles the remaining work.
+Signal shutdown prints a final notice containing the signal and the number
+of gates that finished during the drain, distinct from a wake or timeout.
 A second signal kills the active command tree immediately or cancels its
 source-page fetch. An interrupted software gate records a failure without
 `confirmed_failure`, so it does not trigger a quality climb. `gates retry`

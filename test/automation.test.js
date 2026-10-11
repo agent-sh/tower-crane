@@ -880,10 +880,11 @@ if (release) {
 test('wait drains on either signal without starting another gate, and a second signal stops the gate', {
   skip: process.platform === 'win32' ? 'Windows child.kill does not deliver POSIX signals' : false,
 }, async (t) => {
-  for (const [signal, forced, stage] of [['SIGTERM', false], ['SIGINT', false], ['SIGTERM', true], ['SIGTERM', true, 'proof'], ['SIGTERM', true, 'sources'], ['SIGTERM', false, 'idle'], ['SIGINT', false, 'observe']]) {
+  for (const [signal, forced, stage] of [['SIGTERM', false], ['SIGINT', false], ['SIGTERM', true], ['SIGTERM', true, 'proof'], ['SIGTERM', true, 'sources'], ['SIGTERM', false, 'idle'], ['SIGINT', false, 'observe'], ['SIGTERM', false, 'follow']]) {
     const proof = stage === 'proof';
     const sources = stage === 'sources';
-    const idle = stage === 'idle' || stage === 'observe';
+    const idle = ['idle', 'observe', 'follow'].includes(stage);
+    const json = signal === 'SIGINT' || stage === 'follow';
     await t.test(`${signal}${forced ? ' twice' : ''}${stage ? ` during ${stage}` : ''}`, async (t) => {
       const h = cachedFixture(null, `wait-drain-${sources ? 'research' : 'code'}`, (repo) => {
         const h = setup(null, { repo, kind: sources ? 'research' : 'code' });
@@ -939,8 +940,9 @@ require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'public-http'))}).fet
 `);
       }
       const child = require('node:child_process').spawn(process.execPath,
-        ['--require', preload, BIN, 'wait', '--after', '0', '--types', 'never', '--timeout', '60',
-          ...(stage === 'observe' ? ['--observe'] : []), '--agent', 'orchestrator'],
+        ['--require', preload, BIN, 'wait', '--after', '0', '--types', 'never',
+          ...(stage === 'follow' ? ['--follow'] : ['--timeout', '60']),
+          ...(stage === 'observe' ? ['--observe'] : []), ...(json && stage !== 'follow' ? ['--json'] : []), '--agent', 'orchestrator'],
         { cwd: h.repo, env: h.env });
       let stdout = '';
       let stderr = '';
@@ -969,9 +971,17 @@ require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'public-http'))}).fet
       }
       const exit = await result;
       assert.equal(exit.code, 0, JSON.stringify(exit));
+      const drained = forced || idle ? 0 : 1;
+      if (json) {
+        const lines = stdout.trim().split('\n').map((line) => JSON.parse(line));
+        if (stage === 'follow') assert.equal(lines[0].type, 'ready', 'the follower retains its ready record');
+        assert.equal(lines.length, stage === 'follow' ? 2 : 1, 'only the stop notice follows readiness');
+        assert.deepEqual(lines.at(-1), { reason: 'signal', signal, drained }, 'the stop notice distinguishes a signal from a wake or timeout');
+      } else {
+        assert.equal(stdout.trim(), `stopped by ${signal} after draining ${drained} gate${drained === 1 ? '' : 's'}`);
+      }
       const receipts = h.logs().filter((e) => e.cmd === 'automation');
       if (idle) {
-        assert.equal(stdout, '', 'signal shutdown emits no wake event');
         assert.deepEqual(receipts, [], 'idle shutdown claims no automation work');
         return;
       }
