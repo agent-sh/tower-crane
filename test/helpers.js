@@ -1,19 +1,21 @@
 'use strict';
 
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
 const cp = require('node:child_process');
 const assert = require('node:assert/strict');
 const { createRepoSeed, cleanupRepoSeed } = require('./repo-seed');
+const { tempRoot } = require('./tmp-root');
 
 const ROOT = path.join(__dirname, '..');
 const BIN = path.join(ROOT, 'bin', 'tower-crane.js');
 const HOOKS = path.join(__dirname, 'fixtures', 'hooks.js');
-const TMP_ROOT = process.env.TOWER_CRANE_TEST_TMP || os.tmpdir();
+const TMP_ROOT = tempRoot();
 const SHARED_REPO_SEED = process.env.TC_TEST_REPO_SEED;
 const OWNER_KEY = 'fixture-owner-key';
 delete process.env.TC_TEST_REPO_SEED;
+// Scratch consumers can run directly without the runner's global setup.
+fs.mkdirSync(TMP_ROOT, { recursive: true });
 
 // Tests must not see the developer's git config (hooks, signing), an
 // agent's TOWER_CRANE_* variables or the developer's own ladder defaults, so every
@@ -35,6 +37,9 @@ function baseEnv(home) {
   env.TOWER_CRANE_OWNER_KEY = OWNER_KEY;
   // spawn keeps receipts under the user's cache, which is not the tests' to write.
   env.HOME = path.join(home, 'home');
+  env.USERPROFILE = env.HOME;
+  env.LOCALAPPDATA = path.join(env.HOME, 'AppData', 'Local');
+  env.XDG_CACHE_HOME = path.join(env.HOME, '.cache');
   return env;
 }
 

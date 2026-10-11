@@ -6,9 +6,9 @@
 // is installed (TOWER_CRANE_TEST_CHROME names one that is not on PATH).
 
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
 const cp = require('node:child_process');
+const { tempRoot } = require('./tmp-root');
 
 const NAMES = ['google-chrome', 'google-chrome-stable', 'chromium', 'chromium-browser', 'chrome'];
 
@@ -60,7 +60,9 @@ async function closeBrowser() {
 }
 
 async function launch() {
-  const profile = fs.mkdtempSync(path.join(process.env.TOWER_CRANE_TEST_TMP || os.tmpdir(), 'tower-crane-chrome-'));
+  const root = tempRoot();
+  fs.mkdirSync(root, { recursive: true });
+  const profile = fs.mkdtempSync(path.join(root, 'tower-crane-chrome-'));
   const args = ['--headless=new', '--remote-debugging-port=0', `--user-data-dir=${profile}`, '--no-first-run', '--no-default-browser-check', '--disable-gpu', '--disable-extensions'];
   const sandboxed = process.env.TOWER_CRANE_SANDBOX === '1';
   // Chrome's user/SUID sandbox cannot nest in the harness's outer sandbox.

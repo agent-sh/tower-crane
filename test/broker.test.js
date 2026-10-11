@@ -25,6 +25,43 @@ function parse(argv) {
   return parseOptions([...r.lead, ...r.rest], { ...(r.cmd.flags || {}), ...GLOBAL }, r.cmd.name);
 }
 
+test('a broker preserves existing directories and writes its ignore file only in a directory it creates', async (t) => {
+  const h = makeRepo(t);
+  const parent = path.join(h.base, 'brokers');
+  fs.mkdirSync(parent);
+  for (const existingIgnore of [false, true]) {
+    const where = path.join(parent, existingIgnore ? 'with-ignore' : 'without-ignore');
+    fs.mkdirSync(where);
+    const ignore = path.join(where, '.gitignore');
+    const sentinel = path.join(where, 'keep.txt');
+    fs.writeFileSync(sentinel, 'keep\n');
+    if (existingIgnore) fs.writeFileSync(ignore, 'keep.txt\n');
+    const broker = await B.start({ state: h.state, task: 'T1', agent: 'worker-T1-1', role: 'worker',
+      harness: 'codex', cwd: h.repo, broker: path.join(where, B.FILE) });
+    try {
+      assert.equal(fs.existsSync(path.join(parent, '.gitignore')), false, 'the broker does not write into its existing parent');
+      assert.equal(fs.existsSync(ignore), existingIgnore);
+      if (existingIgnore) assert.equal(fs.readFileSync(ignore, 'utf8'), 'keep.txt\n');
+    } finally {
+      broker.close();
+    }
+    assert.equal(fs.readFileSync(sentinel, 'utf8'), 'keep\n', 'closing a broker preserves an existing directory');
+    assert.equal(fs.existsSync(path.join(where, B.FILE)), false);
+  }
+
+  const where = path.join(h.repo, 'new-brokers', 'worker-T1-1');
+  const broker = await B.start({ state: h.state, task: 'T1', agent: 'worker-T1-1', role: 'worker',
+    harness: 'codex', cwd: h.repo, broker: path.join(where, B.FILE) });
+  try {
+    assert.equal(fs.readFileSync(path.join(where, '.gitignore'), 'utf8'), '*\n');
+    assert.equal(fs.existsSync(path.join(path.dirname(where), '.gitignore')), false);
+    assert.equal(h.git(['status', '--porcelain', '--untracked-files=all', '--', 'new-brokers']), '', 'git ignores the broker token');
+  } finally {
+    broker.close();
+  }
+  assert.equal(fs.existsSync(where), false, 'closing a broker removes its own directory');
+});
+
 test('option names from a request cannot reach Object.prototype', () => {
   for (const name of ['__proto__', 'constructor', 'prototype', 'toString', 'hasOwnProperty']) {
     assert.throws(() => parseOptions([`--${name}`, 'x'], {}, 'task note'), /unknown option/, name);
