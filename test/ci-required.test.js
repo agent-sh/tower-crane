@@ -81,7 +81,7 @@ function fixture(t, withPr = true) {
   });
   const { sha } = h;
   return {
-    check({ pr = { mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }, runs = REQUIRED.map((name) => run(name)), ci = {}, suites: given } = {}) {
+    check({ pr = { mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }, runs = REQUIRED.map((name) => run(name)), ci = {}, suites: given, workflows = [] } = {}) {
       const project = h.readState('project.json');
       h.writeState('project.json', { ...project, ci: { required: REQUIRED, capped_review: CAP_POLICY, ...ci } });
       const file = path.join(h.base, 'github.json');
@@ -93,7 +93,7 @@ function fixture(t, withPr = true) {
           latest_check_runs_count: linked.length,
         };
       });
-      fs.writeFileSync(file, JSON.stringify({ sha, pr, runs, suites }));
+      fs.writeFileSync(file, JSON.stringify({ sha, pr, runs, suites, workflows }));
       const r = cp.spawnSync(process.execPath, ['--require', github, BIN, 'check', 'ci', 'T1', '--agent', 'checker', '--json'], {
         cwd: h.repo, env: { ...h.env, TEST_GITHUB: file }, encoding: 'utf8', timeout: 60000,
       });
@@ -296,6 +296,49 @@ test('an unfinished or partly read suite blocks even when its runs were supersed
   const partial = h.check({ runs: [old, current, ...others], suites: [suite(1, 'completed', 'failure', 2), passing] });
   assert.equal(partial.code, 1, partial.summary);
   assert.match(partial.summary, /check suites not green.*failure, 2 runs/);
+});
+
+function workflow(id, checkSuite, conclusion = 'success', extra = {}) {
+  return {
+    id, check_suite_id: checkSuite, name: 'CI', path: '.github/workflows/ci.yml', event: 'pull_request',
+    created_at: `2026-10-11T${id === 100 ? '10' : '11'}:00:00Z`,
+    status: 'completed', conclusion, ...extra,
+  };
+}
+
+function actionSuite(id, conclusion = 'success', extra = {}) {
+  return { id, app: { slug: 'github-actions' }, status: 'completed', conclusion, latest_check_runs_count: REQUIRED.length, ...extra };
+}
+
+test('a newer passing workflow supersedes an old failed suite whose check runs are absent', (t) => {
+  const h = fixture(t);
+  const old = workflow(100, 1, 'failure');
+  const current = workflow(200, 2);
+  for (const workflows of [[old, current], [current, old]]) {
+    const r = h.check({
+      runs: REQUIRED.map((name) => run(name, 'success', 'completed', 'github-actions', 2)),
+      suites: [actionSuite(1, 'failure'), actionSuite(2)],
+      workflows,
+    });
+    assert.equal(r.code, 0, r.summary);
+    assert.match(r.summary, /CI green.*1 check suites completed/);
+    assert.match(r.summary, /Superseded workflow runs: .*ci\.yml.*pull_request.*100.*failure.*suite 1/);
+    assert.doesNotMatch(r.summary, /check suites not green/);
+    assert.equal(r.confirmed_failure, undefined);
+    assert.ok(r.commands.some((c) => c.args.includes(`repos/acme/app/actions/runs?head_sha=${r.sha}&per_page=100`)));
+  }
+});
+
+test('a newer failed workflow still blocks and its older passing run is recorded as superseded', (t) => {
+  const r = fixture(t).check({
+    runs: REQUIRED.map((name) => run(name, 'success', 'completed', 'github-actions', 2)),
+    suites: [actionSuite(1), actionSuite(2, 'failure')],
+    workflows: [workflow(200, 2, 'failure'), workflow(100, 1)],
+  });
+  assert.equal(r.code, 1, r.summary);
+  assert.match(r.summary, /check suites not green: github-actions \(failure/);
+  assert.match(r.summary, /Superseded workflow runs: .*100.*success.*suite 1/);
+  assert.doesNotMatch(r.summary, /Superseded workflow runs: .*200/);
 });
 
 test('a queued rerun newer than a success is the current run: the gate waits for it', (t) => {
