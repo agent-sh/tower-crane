@@ -1,0 +1,1 @@
+- Worker-slot fixtures bind their initialized state directory, including cached copies, so unrelated Git discovery failures cannot abort slot checks during metadata setup.

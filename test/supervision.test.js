@@ -6,6 +6,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
 const http = require('node:http');
+const { once } = require('node:events');
+const { createInterface } = require('node:readline');
 const { makeRepo, makeTaskRepo, BIN, HOOKS, detachedAlive } = require('./helpers');
 const { gateFixture, gateEvidence } = require('./gate-helpers');
 const bedrockOutage = require('./fixtures/bedrock-outage.json');
@@ -18,8 +20,13 @@ const sketches = (h) => ['sketch.md', 'sketch.html'].map((file) => ({
   file, text: fs.readFileSync(path.join(h.state, file), 'utf8'),
 }));
 
+// The runner's per-test timeout (test/run.js) is the only deadline: a loaded
+// machine can take as long as the test may run, and a wait that never comes
+// true still fails with its message.
+const HUNG_TEST_MS = 300000;
+
 async function until(fn, message) {
-  const deadline = Date.now() + 12000;
+  const deadline = Date.now() + HUNG_TEST_MS;
   while (!fn()) {
     if (Date.now() >= deadline) assert.fail(message);
     await new Promise((resolve) => setTimeout(resolve, 25));
@@ -86,7 +93,7 @@ else { const timer = setInterval(() => {
   return h;
 }
 
-test('supervisor tool hook writers survive a lock held beyond 15 seconds', { timeout: 90000 }, async (t) => {
+test('supervisor tool progress arrives while the state lock is held', { timeout: 90000 }, async (t) => {
   const h = makeTaskRepo(t, [{
     args: ['--title', 'Supervised tool progress', '--tier', 'easy', '--acceptance', 'tool event survives'],
     brief: 'Record tool progress.\n',
@@ -94,7 +101,6 @@ test('supervisor tool hook writers survive a lock held beyond 15 seconds', { tim
   const ready = path.join(h.base, 'harness-ready');
   const emit = path.join(h.base, 'emit-tool');
   const finish = path.join(h.base, 'finish');
-  const writerReady = path.join(h.base, 'writer-ready');
   const script = `
 const fs = require('node:fs');
 require('node:child_process').execFileSync(process.execPath, [${JSON.stringify(BIN)}, 'claim', 'T1', '--lease', '5']);
@@ -111,25 +117,21 @@ setInterval(() => {
   h.ok(['ladder', 'set', 'easy', '--harness', 'command', '--command', JSON.stringify([process.execPath, '-e', script, '{prompt}']),
     '--clear', 'profile', '--clear', 'effort', '--supervision', JSON.stringify({ retries: 0, stall_ms: 60000 })]);
   h.ok(['msg', '--to', 'worker-T1-1', '--task', 'T1', 'startup context']);
-  const fixture = path.join(__dirname, 'fixtures', 'supervisor-hook-lock.js');
-  const completed = h.runAsync(['spawn', '--task', 'T1', '--wait', '--json'], { env: {
-    NODE_OPTIONS: `--require=${JSON.stringify(fixture)}`,
-    TOWER_CRANE_TEST_HOOK_LOCK: path.join(h.state, 'lock'), TOWER_CRANE_TEST_HOOK_READY: writerReady,
-  } });
+  const completed = h.runAsync(['spawn', '--task', 'T1', '--wait', '--json']);
   let lock;
   try {
     await until(() => fs.existsSync(ready) && log(h).some((event) => event.cmd === 'hook inbox'), 'startup hook did not complete');
     lock = S.acquireLock(h.state);
     fs.writeFileSync(emit, '');
-    await until(() => fs.existsSync(writerReady), 'tool writer did not encounter the lock');
-    await new Promise((resolve) => setTimeout(resolve, 16000));
+    await until(() => fs.existsSync(S.progressFile(h.state, 'worker-T1-1')), 'tool progress waited for the lock');
   } finally {
     if (lock) S.releaseLock(lock);
     fs.writeFileSync(finish, '');
   }
   const result = await completed;
   assert.equal(result.code, 0, result.stderr);
-  assert.ok(log(h).some((event) => event.cmd === 'hook progress' && event.detail.tool === 'command_execution'), result.stderr);
+  assert.match(fs.readFileSync(S.progressFile(h.state, 'worker-T1-1'), 'utf8'), /command_execution/);
+  assert.equal(log(h).some((event) => event.cmd === 'hook progress'), false);
   assert.doesNotMatch(result.stderr, /harness event failed/);
 });
 
@@ -378,7 +380,7 @@ if (task === 'T1' && retry === 0) {
   await until(() => h.json(['task', 'show', 'T1']).run?.phase === 'waiting', 'retry attempt did not finish');
   await until(() => !detachedAlive({ pid: started.monitor_pid }), 'supervisor did not finish queued hook writes');
   const audit = log(h).filter((e) => e.task === 'T1' && e.agent === started.agent);
-  assert.ok(audit.some((e) => e.cmd === 'hook progress'), 'tool activity reached state');
+  assert.match(fs.readFileSync(S.progressFile(h.state, started.agent), 'utf8'), /hook progress/, 'tool activity reached the progress log');
   assert.equal(audit.findLast((e) => e.cmd === 'hook report')?.detail.report, `last report from ${started.agent}`);
   assert.equal(audit.findLast((e) => e.cmd === 'hook stop')?.detail.report, `last report from ${started.agent}`);
   assert.match(audit.find((e) => e.cmd === 'msg' && e.detail.to === 'orchestrator')?.detail.text || '', /without submit/);
@@ -465,6 +467,11 @@ test('progress paths and CPU detect a stalled process without dropping its live 
     for (const { file, text } of sketches(h)) {
       assert.doesNotMatch(text, /blocked: no progress paths or CPU activity/, `${file} clears the stalled phase`);
     }
+    // Tool hooks write outside the event log; the agent's progress file counts too.
+    await until(() => h.json(['task', 'show', 'T1']).run?.phase === 'blocked', 'idle process did not stall again');
+    fs.mkdirSync(path.dirname(S.progressFile(h.state, spawned.agent)), { recursive: true });
+    fs.appendFileSync(S.progressFile(h.state, spawned.agent), '{}\n');
+    await until(() => h.json(['task', 'show', 'T1']).run?.phase === 'running', 'tool progress did not clear stall');
     assert.equal(h.json(['task', 'show', 'T1']).claim.agent, spawned.agent);
     assert.deepEqual(h.json(['status']).exited_claims, []);
   } finally {
@@ -544,28 +551,29 @@ test('serve shows the recorded run phase on the board', async (t) => {
   const h = setup(t, { failures: 0 });
   assert.equal(h.spawn().code, 0);
   const server = cp.spawn(process.execPath, [BIN, 'serve', '--port', '0', '--json'], { cwd: h.repo, env: h.env });
-  const closed = new Promise((resolve) => server.on('close', resolve));
-  let url;
-  let output = '';
-  server.stdout.on('data', (data) => {
-    output += data;
-    if (output.includes('\n')) url = JSON.parse(output.trim()).url;
-  });
+  const closed = once(server, 'close');
+  const output = createInterface({ input: server.stdout });
+  let stderr = '';
+  server.stderr.on('data', (data) => { stderr += data; });
   try {
-    await until(() => !!url || server.exitCode !== null, 'serve did not start');
+    const [line] = await Promise.race([
+      once(output, 'line', { signal: t.signal }),
+      closed.then(([code]) => { throw new Error(`serve exited before readiness (${code}): ${stderr}`); }),
+    ]);
+    const { url } = JSON.parse(line);
     assert.ok(url);
     const body = await new Promise((resolve, reject) => {
-      const request = http.get(url, (response) => {
+      const request = http.get(url, { signal: t.signal }, (response) => {
         let html = '';
         response.on('data', (data) => { html += data; });
         response.on('end', () => resolve(html));
       });
       request.on('error', reject);
-      request.setTimeout(5000, () => request.destroy(new Error('serve request timed out')));
     });
     assert.match(body, /Phase/);
     assert.match(body, /waiting/);
   } finally {
+    output.close();
     server.kill();
     await closed;
   }

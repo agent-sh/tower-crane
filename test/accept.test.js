@@ -23,7 +23,7 @@ function submitted(t, extra = [], kind = 'code') {
 const ev = (h, type, agent, ok = true) => ['tests', 'clean', 'ci'].includes(type)
   ? gateEvidence(h, type, agent, ok)
   : (type === 'review' && agent !== 'w-1' && h.reviewer('T1', agent),
-    h.ok(['evidence', 'T1', '--type', type, ok ? '--ok' : '--fail', '--sha', h.sha, '--agent', agent]));
+    h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', type, ok ? '--ok' : '--fail', '--sha', h.sha, '--agent', agent]));
 
 // A reviewer that exits without recording anything, so a test sees whether
 // accept dispatched one without a real harness running.
@@ -95,12 +95,19 @@ test('the latest evidence at the submitted sha decides, and other shas do not co
   h.ok(['rework', 'T1', '--reason', 'check failure precedence']);
   h.ok(['claim', 'T1', '--agent', 'w-1']);
   h.ok(['submit', 'T1', '--sha', h.sha, '--agent', 'w-1']);
+  const reworked = h.json(['task', 'show', 'T1']);
+  assert.equal(reworked.revision, 2);
+  assert.ok(reworked.evidence.every((e) => e.revision === 1));
+  ev(h, 'clean', 'w-1');
+  ev(h, 'review', 'r-1');
+  ev(h, 'ci', 'ci');
   ev(h, 'tests', 'w-1', false);
   const failed = h.run(['accept', 'T1']);
   assert.equal(failed.code, 1);
   assert.match(failed.stderr, /latest tests at .* failed:/);
   ev(h, 'tests', 'w-1');
   h.ok(['accept', 'T1']);
+  assert.equal(h.json(['task', 'show', 'T1']).status, 'accepted');
 });
 
 test('a revision bump invalidates earlier evidence', (t) => {
@@ -149,9 +156,10 @@ test('an accepted task keeps its acceptance, dependencies and kind until it is s
   assert.equal(h.readState('tasks.json').tasks[0].revision, 1, 'unchanged acceptance is not a change');
 
   h.ok(['rework', 'T1', '--reason', 'it must also log retries']);
+  assert.equal(h.json(['task', 'show', 'T1']).revision, 2);
   h.ok(['task', 'update', 'T1', '--acceptance', 'it works', '--acceptance', 'it logs retries']);
   const reworked = h.readState('tasks.json').tasks[0];
-  assert.deepEqual([reworked.status, reworked.revision], ['rework', 2]);
+  assert.deepEqual([reworked.status, reworked.revision], ['rework', 3]);
   assert.deepEqual(h.json(['ready']).ready.map((x) => x.id), ['T1', 'T3'], 'T2 waits for T1 again');
 });
 
@@ -168,7 +176,7 @@ test('other kinds need only a review from another agent', async (t) => {
 test('review evidence counts only from a reviewer spawned for that head and revision, or the owner', async (t) => {
   const h = submitted(t, [], 'docs');
   // I6: a name no spawn started records an ok review; it is kept but does not count.
-  h.ok(['evidence', 'T1', '--type', 'review', '--ok', '--sha', h.sha, '--agent', 'made-up-reviewer']);
+  h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--ok', '--sha', h.sha, '--agent', 'made-up-reviewer']);
   const show = h.ok(['task', 'show', 'T1']);
   assert.match(show, /gates: review missing/);
   assert.match(show, /review ok at \w+ by made-up-reviewer .*\(does not count\)/);
@@ -187,21 +195,21 @@ test('review evidence counts only from a reviewer spawned for that head and revi
 
   // A reviewer spawn for another head, revision or task, or as a worker, does not vouch for it.
   h.reviewer('T1', 'r-other-sha', 'fffffff');
-  h.ok(['evidence', 'T1', '--type', 'review', '--ok', '--sha', h.sha, '--agent', 'r-other-sha']);
+  h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--ok', '--sha', h.sha, '--agent', 'r-other-sha']);
   const worker = { at: new Date().toISOString(), agent: 'orchestrator', cmd: 'spawn', task: 'T1',
     detail: { agent: 'worker-T1-9', role: 'worker', sha: h.sha, revision: 1, pid: 999999, attempt: 1 } };
   fs.appendFileSync(path.join(h.state, 'events.jsonl'), `${JSON.stringify(worker)}\n`);
-  h.ok(['evidence', 'T1', '--type', 'review', '--ok', '--sha', h.sha, '--agent', 'worker-T1-9']);
+  h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--ok', '--sha', h.sha, '--agent', 'worker-T1-9']);
   assert.match(h.json(['task', 'show', 'T1']).gates.missing.join('; '), /review by made-up-reviewer, r-other-sha, worker-T1-9 does not count/);
 
   h.reviewer('T1', 'reviewer-T1-7');
-  h.ok(['evidence', 'T1', '--type', 'review', '--ok', '--sha', h.sha, '--agent', 'reviewer-T1-7']);
+  h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--ok', '--sha', h.sha, '--agent', 'reviewer-T1-7']);
   acceptAfterReview(h, '--agent', 'orchestrator');
 });
 
 test('the owner review counts without a reviewer spawn', (t) => {
   const h = submitted(t, [], 'docs');
-  h.ok(['evidence', 'T1', '--type', 'review', '--ok', '--sha', h.sha, '--agent', 'owner']);
+  h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--ok', '--sha', h.sha, '--agent', 'owner']);
   h.ok(['accept', 'T1', '--agent', 'orchestrator']);
 });
 
@@ -300,8 +308,8 @@ test('evidence needs a sha and exactly one verdict', (t) => {
   const r = h.run(['evidence', 'T1', '--type', 'review', '--ok']);
   assert.equal(r.code, 2);
   assert.match(r.stderr, /review evidence needs --sha/);
-  assert.equal(h.run(['evidence', 'T1', '--type', 'review', '--ok', '--fail', '--sha', 'abcdef1']).code, 2);
+  assert.equal(h.run(['evidence', 'T1', '--type', 'review', '--ok', '--fail', '--sha', 'abcdef1', '--revision', h.revision('T1')]).code, 2);
   assert.equal(h.run(['evidence', 'T1', '--type', 'vibes', '--ok', '--sha', 'abcdef1']).code, 2);
-  h.ok(['evidence', 'T1', '--type', 'note', '--ok', '--sha', 'abcdef1', '--ref', 'run 42']);
+  h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'note', '--ok', '--sha', 'abcdef1', '--ref', 'run 42']);
   assert.equal(h.readState('tasks.json').tasks[0].evidence[0].ref, 'run 42');
 });

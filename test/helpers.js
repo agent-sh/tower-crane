@@ -198,7 +198,8 @@ function context(t, base) {
     detached: () => {
       const dir = path.join(base, 'detached');
       return fs.existsSync(dir) ? fs.readdirSync(dir).filter((f) => f.endsWith('.json')).flatMap((f) => {
-        try { return [JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8'))]; }
+        const file = path.join(dir, f);
+        try { return [{ ...JSON.parse(fs.readFileSync(file, 'utf8')), file }]; }
         catch (e) { if (e.code === 'ENOENT') return []; throw e; }
       }) : [];
     },
@@ -219,6 +220,8 @@ function context(t, base) {
       return r.stdout.trim();
     },
     readState: (file) => JSON.parse(fs.readFileSync(path.join(ctx.state, file), 'utf8')),
+    // The current revision of a task, for review evidence a test records as a reviewer spawn did not start.
+    revision: (id = 'T1') => String(ctx.readState('tasks.json').tasks.find((t) => t.id === id).revision),
     writeState: (file, data) => fs.writeFileSync(path.join(ctx.state, file), JSON.stringify(data, null, 2) + '\n'),
     // Record an exited reviewer dispatch of `agent` for the task's current head
     // and revision, so that agent's review evidence counts.
@@ -282,7 +285,10 @@ function runAsync(args, { cwd, env, pre = [] } = {}) {
 const real = (p) => fs.realpathSync.native(p);
 
 function detachedAlive(child) {
-  if (child.exited) return false;
+  if (process.platform === 'win32' && child.startTime !== undefined) {
+    return child.startTime !== null && require('./windows-process').startTime(child.pid) === child.startTime;
+  }
+  if (child.kind === 'worker' && child.file && !fs.existsSync(child.file)) return false;
   try { process.kill(child.pid, 0); } catch (e) { if (e.code === 'ESRCH') return false; throw e; }
   if (process.platform === 'linux') {
     let stat;
@@ -305,6 +311,70 @@ function killDetached(child) {
 
 async function stopDetached(children) {
   const monitors = children.filter((c) => c.kind === 'monitor');
+  if (process.platform === 'win32' && monitors.length) {
+    // Retain native handles before stopping workers. A PID can be reused
+    // between probes, but WaitForExit still observes the original process.
+    const records = JSON.stringify(monitors).replaceAll("'", "''");
+    const script = `
+$ErrorActionPreference = 'Stop'
+$monitors = @()
+try {
+  foreach ($entry in (ConvertFrom-Json '${records}')) {
+    if (!$entry.PSObject.Properties['startTime']) { throw 'Windows monitor creation identity is missing' }
+    if ($null -eq $entry.startTime) { continue }
+    try {
+      $monitor = [System.Diagnostics.Process]::GetProcessById($entry.pid)
+      $null = $monitor.Handle
+    } catch [System.ArgumentException] { continue }
+      catch [System.InvalidOperationException] { $monitor.Dispose(); continue }
+    if ($monitor.StartTime.ToFileTimeUtc().ToString() -ne $entry.startTime) {
+      $monitor.Dispose()
+      continue
+    }
+    $monitors += $monitor
+  }
+  [Console]::Out.WriteLine('ready:' + (ConvertTo-Json -InputObject @($monitors | ForEach-Object { $_.Id }) -Compress))
+  $null = [Console]::In.ReadLine()
+  $clock = [System.Diagnostics.Stopwatch]::StartNew()
+  $survivors = @()
+  foreach ($monitor in $monitors) {
+    if (!$monitor.WaitForExit([int][Math]::Max(0, 10000 - $clock.ElapsedMilliseconds))) {
+      $survivors += $monitor.Id
+    }
+  }
+  [Console]::Out.WriteLine((ConvertTo-Json -InputObject @($survivors) -Compress))
+} finally {
+  foreach ($monitor in $monitors) { $monitor.Dispose() }
+}
+`;
+    const child = cp.spawn('powershell.exe', [
+      '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64'),
+    ], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+    let stdout = '';
+    let stderr = '';
+    let stopped = false;
+    child.stdout.on('data', (data) => {
+      stdout += data;
+      const ready = stdout.split('\n').slice(0, -1).find((line) => line.startsWith('ready:'));
+      if (!stopped && ready) {
+        stopped = true;
+        for (const worker of children.filter((c) => c.kind === 'worker')) killDetached(worker);
+        for (const pid of JSON.parse(ready.slice(6).trim())) {
+          cp.spawnSync('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore', timeout: 10000 });
+        }
+        child.stdin.end('\n');
+      }
+    });
+    child.stderr.on('data', (data) => { stderr += data; });
+    const code = await new Promise((resolve, reject) => {
+      child.once('error', reject);
+      child.once('close', resolve);
+    });
+    assert.equal(code, 0, stderr);
+    assert.ok(stopped, 'monitor handles were not acquired');
+    assert.deepEqual(JSON.parse(stdout.trim().split('\n').at(-1)), [], 'detached usage monitors outlived test teardown');
+    return;
+  }
   try {
     for (const child of children.filter((c) => c.kind === 'worker')) killDetached(child);
     const deadline = Date.now() + 10000;

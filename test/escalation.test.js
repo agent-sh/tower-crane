@@ -289,11 +289,11 @@ for (const trigger of ['exit', 'preclaim', 'stall', 'review']) {
     if (trigger === 'review') {
       await h.until(() => h.task().status === 'submitted');
       h.reviewer('T1', 'reviewer');
-      h.ok(['evidence', 'T1', '--type', 'review', '--fail', '--sha', 'abcdef1', '--agent', 'reviewer']);
-      h.ok(['evidence', 'T1', '--type', 'review', '--fail', '--sha', h.git(['rev-parse', 'HEAD']),
+      h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--fail', '--sha', 'abcdef1', '--agent', 'reviewer']);
+      h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--fail', '--sha', h.git(['rev-parse', 'HEAD']),
         '--agent', 'worker-T1-1']);
       assert.equal(events(h).filter((e) => e.cmd === 'escalate').length, 0);
-      h.ok(['evidence', 'T1', '--type', 'review', '--fail', '--sha', h.git(['rev-parse', 'HEAD']),
+      h.ok(['evidence', 'T1', '--type', 'review', '--revision', h.revision(), '--fail', '--sha', h.git(['rev-parse', 'HEAD']),
         '--agent', 'reviewer', '--summary', 'incorrect boundary']);
     }
     await h.until(() => h.readAttempts().length === 2 && h.task().status === 'submitted');
@@ -406,7 +406,7 @@ test('a failed review waits for the monitor to finish cleaning submitted worker 
   h.ok(['spawn', '--task', 'T1']);
   await h.until(() => fs.existsSync(h.attempts + '.ready') && h.task().status === 'submitted');
   h.reviewer('T1', 'reviewer');
-  h.ok(['evidence', 'T1', '--type', 'review', '--fail', '--sha', h.git(['rev-parse', 'HEAD']),
+  h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--fail', '--sha', h.git(['rev-parse', 'HEAD']),
     '--agent', 'reviewer', '--summary', 'wrong result']);
   fs.writeFileSync(h.attempts + '.exit', '');
   await h.until(() => fs.existsSync(h.attempts + '.term'));
@@ -426,11 +426,14 @@ test('rework records the review climb before pending worker cleanup finishes', {
   h.ok(['spawn', '--task', 'T1']);
   await h.until(() => fs.existsSync(h.attempts + '.ready') && h.task().status === 'submitted');
   h.reviewer('T1', 'reviewer');
-  h.ok(['evidence', 'T1', '--type', 'review', '--fail', '--sha', h.git(['rev-parse', 'HEAD']),
+  h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--fail', '--sha', h.git(['rev-parse', 'HEAD']),
     '--agent', 'reviewer', '--summary', 'wrong result']);
   h.ok(['rework', 'T1', '--reason', 'correct the reviewed result', '--agent', 'orchestrator']);
   const pending = h.json(['task', 'show', 'T1']);
   assert.equal(pending.tier, 'medium', 'rework must preserve the failed attempt before cleanup');
+  assert.equal(pending.revision, 2);
+  assert.deepEqual(events(h).filter((e) => e.cmd === 'rework')
+    .map((e) => [e.detail.previous_revision, e.detail.revision]), [[1, 2]]);
   assert.equal(pending.escalation_pending, true);
   assert.equal(pending.escalations[0].trigger, 'review');
   assert.equal(h.readAttempts().length, 1);
@@ -450,10 +453,17 @@ for (const { route, required } of [
   test(`a confirmed ${route} gate failure${required ? ` while a required check is ${required}` : ''} climbs and reaches the owner at the range ceiling`, async (t) => {
     const h = await setup(t, 'review', 'easy..medium', (repo) => {
       gateFixture(repo);
-      // Spawn exit runs every software gate, so each fails only where the check asks it to.
+      // Recovery inherits the check's environment; only the selected gate fails.
       const exit = "process.exit(process.env.FIXTURE_GATE_OK === '0' ? 1 : 0)";
       repo.ok(['project', 'set', '--repo', 'acme/demo', '--tests-mode', 'run-only',
-        '--tests-cmd', `node -e "${exit}"`]);
+        '--tests-cmd', `node -e "${route === 'tests' ? exit : 'process.exit(0)'}"`]);
+      if (route !== 'clean') fs.writeFileSync(path.join(repo.base, 'tools', 'scanner.js'),
+        'console.log(JSON.stringify({ items: [] }));\n');
+      if (type !== 'ci') {
+        const gh = path.join(repo.base, 'tools', 'gh');
+        fs.writeFileSync(gh, fs.readFileSync(gh, 'utf8')
+          .replace("const ok = process.env.FIXTURE_GATE_OK !== '0';", 'const ok = true;'));
+      }
       if (route === 'local-ci') repo.ok(['project', 'set', '--ci-local', JSON.stringify({
         command: process.platform === 'win32'
           ? [process.env.ComSpec || 'cmd.exe', '/d', '/c', 'if "%FIXTURE_GATE_OK%"=="0" (exit /b 1) else (exit /b 0)']
@@ -470,24 +480,26 @@ if (args.some((arg) => arg.includes('/check-runs'))) {
 `);
       }
     });
-    // The monitor runs automated gates after spawn exit; check only once each reaction has ended.
-    const settled = (agent) => {
-      const log = events(h);
-      const exit = log.findIndex((e) => e.cmd === 'spawn exit' && e.detail.agent === agent);
-      const runs = log.filter((e) => e.cmd === 'automation' && e.detail.phase === 'running');
-      return exit >= 0 && log.slice(exit).some((e) => runs.includes(e))
-        && runs.every((r) => log.some((e) => e.cmd === 'automation' && e.detail.source === r.detail.source && e.detail.phase !== 'running'));
+    // A submit or reviewer reaction can finish before this worker's monitor
+    // drains its own exit reactions. Its socket closure observes completion.
+    const settled = async (agent) => {
+      const worker = events(h).findLast((e) => e.cmd === 'spawn' && e.detail.agent === agent);
+      assert.ok(worker, `no dispatch for ${agent}`);
+      const { exited } = await h.exitSignal({ pid: worker.detail.monitor_pid });
+      await exited;
     };
     h.ok(['spawn', '--task', 'T1']);
-    await h.until(() => settled('worker-T1-1'));
+    await settled('worker-T1-1');
     for (const rung of ['medium', null]) {
+      if (h.openDecisions().length === 1) break;
       const result = h.run(['check', type, 'T1', '--json'], { env: { FIXTURE_GATE_OK: '0' } });
       assert.equal(result.code, 1, result.stderr);
       assert.equal(JSON.parse(result.stdout).confirmed_failure, true, result.stdout);
       if (rung) {
-        await h.until(() => h.readAttempts().length === 2 && h.task().status === 'submitted');
+        await h.until(() => h.readAttempts().length === 2
+          && (h.task().status === 'submitted' || h.openDecisions().length === 1));
         assert.equal(h.json(['task', 'show', 'T1']).tier, rung);
-        await h.until(() => settled('worker-T1-2'));
+        await settled('worker-T1-2');
       } else {
         await h.until(() => h.openDecisions().length === 1);
       }
@@ -496,7 +508,14 @@ if (args.some((arg) => arg.includes('/check-runs'))) {
     assert.deepEqual(task.escalations.map((e) => e.trigger), [type, type]);
     assert.deepEqual(task.escalations.map((e) => e.to), ['medium', null]);
     assert.ok(task.evidence.filter((e) => e.type === type && !e.ok).every((e) => e.confirmed_failure === true));
-    assert.equal(task.evidence.filter((e) => e.type === type && !e.ok).length, 2);
+    const log = events(h);
+    for (const [index, climb] of task.escalations.entries()) {
+      const failure = log.find((e) => e.id === climb.source);
+      assert.equal(failure.cmd, `check ${type}`);
+      assert.equal(failure.detail.ok, false);
+      assert.equal(failure.detail.confirmed_failure, true);
+      assert.equal(failure.detail.revision, index + 1, 'each climb belongs to its failed revision');
+    }
     assert.equal(h.readAttempts().length, 2);
   });
 }
@@ -563,10 +582,10 @@ test('a later eligible passing review supersedes a failure before worker exit', 
   const sha = h.git(['rev-parse', 'HEAD']);
   h.ok(['submit', 'T1', '--sha', sha, '--agent', spawn.agent]);
   h.reviewer('T1', 'reviewer', sha);
-  h.ok(['evidence', 'T1', '--type', 'review', '--fail', '--sha', sha, '--agent', 'reviewer', '--summary', 'first verdict']);
-  h.ok(['evidence', 'T1', '--type', 'review', '--ok', '--sha', sha, '--agent', 'reviewer', '--summary', 'corrected verdict']);
-  h.ok(['evidence', 'T1', '--type', 'review', '--fail', '--sha', 'abcdef1', '--agent', 'reviewer']);
-  h.ok(['evidence', 'T1', '--type', 'review', '--fail', '--sha', sha, '--agent', spawn.agent]);
+  h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--fail', '--sha', sha, '--agent', 'reviewer', '--summary', 'first verdict']);
+  h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--ok', '--sha', sha, '--agent', 'reviewer', '--summary', 'corrected verdict']);
+  h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--fail', '--sha', 'abcdef1', '--agent', 'reviewer']);
+  h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--fail', '--sha', sha, '--agent', spawn.agent]);
   process.kill(spawn.pid, 'SIGKILL');
   await h.until(() => events(h).some((e) => e.cmd === 'spend' && e.detail.source === `spawn:${spawn.agent}`));
   assert.equal(h.json(['task', 'show', 'T1']).tier, 'easy');
@@ -609,7 +628,7 @@ test('a sandboxed reviewer waits for a hidden live worker to exit before climbin
   const sha = h.git(['rev-parse', 'HEAD']);
   h.ok(['submit', 'T1', '--sha', sha, '--agent', spawn.agent]);
   h.reviewer('T1', 'reviewer', sha);
-  h.ok(['evidence', 'T1', '--type', 'review', '--fail', '--sha', sha, '--agent', 'reviewer',
+  h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--fail', '--sha', sha, '--agent', 'reviewer',
     '--summary', 'wrong result'], {
     hooks: { HOOK_HIDDEN_PIDS: JSON.stringify([spawn.pid, spawn.monitor_pid]) },
   });
@@ -633,7 +652,7 @@ test('a reviewer without permission to create a worker home leaves the climb for
   const homes = path.join(h.state, 'homes');
   fs.chmodSync(homes, 0o500);
   try {
-    h.ok(['evidence', 'T1', '--type', 'review', '--fail', '--sha', h.git(['rev-parse', 'HEAD']),
+    h.ok(['evidence', 'T1', '--type', 'review', '--revision', h.revision(), '--fail', '--sha', h.git(['rev-parse', 'HEAD']),
       '--agent', 'reviewer', '--summary', 'needs rework']);
     assert.equal(h.json(['task', 'show', 'T1']).escalation_pending, true);
   } finally {
@@ -655,15 +674,29 @@ test('a brokered failed review records the climb and leaves dispatch to its host
     state: h.state, task: 'T1', agent: 'reviewer-T1-1', role: 'reviewer', cwd: spawn.cwd, broker: binding,
   });
   try {
-    const result = await B.forward(binding, ['evidence', 'T1', '--type', 'review', '--fail',
+    const result = await B.forward(binding, ['evidence', 'T1', '--type', 'review', '--revision', h.revision(), '--fail',
       '--sha', h.git(['rev-parse', 'HEAD']), '--summary', 'wrong result'], h.state);
     assert.equal(result.code, 0, result.stderr);
     const task = h.json(['task', 'show', 'T1']);
     assert.equal(task.tier, 'medium');
     assert.equal(task.escalation_pending, true);
+    assert.equal(task.revision, 2, 'automatic rework must invalidate the rejected revision');
+    assert.equal(task.evidence.findLast((e) => e.type === 'review').revision, 1);
+    const rework = events(h).findLast((e) => e.cmd === 'rework');
+    assert.equal(rework.detail.previous_revision, 1);
+    assert.equal(rework.detail.revision, 2);
     assert.equal(h.readAttempts().length, 1);
+    assert.match(h.json(['spawn', '--task', 'T1', '--dry-run']).argv.join('\n'),
+      /Failed review by reviewer-T1-1 at [0-9a-f]+: wrong result/);
     h.ok(['recover', 'T1', '--agent', 'orchestrator']);
     await h.until(() => h.readAttempts().length === 2 && h.task().status === 'submitted');
+    const sha = h.git(['rev-parse', 'HEAD']);
+    h.ok(['evidence', 'T1', '--type', 'review', '--ok', '--sha', sha,
+      '--revision', '1', '--agent', 'owner']);
+    assert.equal(h.json(['task', 'show', 'T1']).gates.gates.find((g) => g.type === 'review').ok, false);
+    h.ok(['evidence', 'T1', '--type', 'review', '--ok', '--sha', sha,
+      '--revision', '2', '--agent', 'owner']);
+    assert.equal(h.json(['task', 'show', 'T1']).gates.gates.find((g) => g.type === 'review').ok, true);
     assert.equal(events(h).filter((e) => e.cmd === 'escalate').length, 1);
   } finally {
     broker.close();
@@ -678,7 +711,7 @@ test('a resource lock delays dispatch while retaining the recorded climb for wai
   h.ok(['task', 'add', '--title', 'Hold the lab', '--lock', 'lab', '--acceptance', 'exclusive use']);
   h.ok(['claim', 'T2', '--agent', 'lab-holder']);
   h.reviewer('T1', 'reviewer');
-  h.ok(['evidence', 'T1', '--type', 'review', '--fail', '--sha', h.git(['rev-parse', 'HEAD']),
+  h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--fail', '--sha', h.git(['rev-parse', 'HEAD']),
     '--agent', 'reviewer', '--summary', 'wrong result']);
   const task = h.json(['task', 'show', 'T1']);
   assert.equal(task.tier, 'medium');
@@ -696,6 +729,9 @@ test('failure at the range top opens one owner decision and blocks further dispa
   h.ok(['spawn', '--task', 'T1']);
   await h.until(() => h.openDecisions().length === 1);
   assert.deepEqual(h.readAttempts().map((a) => a.rung), ['easy', 'medium', 'hard']);
+  assert.equal(h.json(['task', 'show', 'T1']).revision, 4);
+  assert.deepEqual(events(h).filter((e) => e.cmd === 'rework')
+    .map((e) => [e.detail.previous_revision, e.detail.revision]), [[1, 2], [1, 3], [1, 4]]);
   const decision = h.json(['decisions', '--open'])[0];
   assert.deepEqual(decision.blocks, ['T1']);
   assert.match(decision.question, /hard.*exit/i);

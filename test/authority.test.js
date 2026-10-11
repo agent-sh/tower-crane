@@ -229,6 +229,9 @@ test('owner-required changes by the orchestrator open one decision and change no
     assert.equal(d.id, `D${opened}`);
     assert.equal(d.asked_by, 'orchestrator');
     assert.deepEqual(d.escalation.settings, escalation);
+    assert.deepEqual(d.answerers, []);
+    assert.equal(d.technical, false);
+    assert.equal(d.answer_rule, null);
     const e = events(h).at(-1);
     assert.equal(e.cmd, 'ask');
     assert.deepEqual(e.detail.escalation.settings, escalation);
@@ -247,7 +250,9 @@ test('owner-required changes by the orchestrator open one decision and change no
   assert.equal(answer.code, 1, answer.stderr);
   assert.match(answer.stderr, /only the owner answers it/);
   h.ok(['project', 'set', '--merge-admin', 'true', '--budget-hours', '9']);
-  h.ok(['answer', 'D1', '--choice', 'done']);
+  const completed = h.readState('decisions.json').decisions.filter(d => d.applied);
+  assert.deepEqual(completed.map(d => d.escalation.settings), [['merge.admin'], ['budget.raise']]);
+  assert.ok(completed.every(d => d.applied.by === 'owner' && d.answer === 'approve'));
   h.ok(['ladder', 'set', 'easy', '--scope', '{}']);
   assert.equal(h.readState('project.json').merge.admin, true);
   assert.equal(h.readState('project.json').budget.hours, 9);

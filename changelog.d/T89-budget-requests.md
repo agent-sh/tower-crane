@@ -1,0 +1,1 @@
+- Retire matching budget raise requests when the owner writes the requested hours or tokens, including when the amount now lowers or repeats the current budget. Preserve operational authorization and audits, and keep failed writes from consuming approval.

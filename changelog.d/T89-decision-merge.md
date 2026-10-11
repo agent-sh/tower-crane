@@ -1,0 +1,1 @@
+- Keep approved waivers working for spawned orchestrators after decision delegation verifies agent names separately from authority roles. Acceptance applies the approval once and audits the orchestrator role while preserving the generated agent name.
