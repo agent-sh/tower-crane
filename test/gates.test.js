@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const cp = require('node:child_process');
-const { makeRepo, ROOT, real, HOOKS } = require('./helpers');
+const { makeRepo, cachedFixture, ROOT, real, HOOKS } = require('./helpers');
 const { waitFor } = require('./canary');
 const { gateFixture, gateEvidence } = require('./gate-helpers');
 const { shellQuote } = require('../lib/gates/common');
@@ -124,6 +124,73 @@ function submitTestsFixture(h, sha, keep, settings = []) {
   h.ok(['submit', 'T1', '--sha', sha, '--branch', 'fixture-change', '--agent', 'w-1']);
   h.env.TOWER_CRANE_TMP = path.join(h.base, 'gate-tmp');
 }
+
+function testOnlyFixture(t, mixed = false) {
+  const h = cachedFixture(t, 'test-only diff', (seed) => {
+    writeFiles(seed.repo, {
+      'lib/unused.js': 'module.exports = 0;\n',
+      'test/fixtures/value.json': '{"value":0}\n',
+      'test/value.test.js': "require('node:assert/strict').equal(require('./fixtures/value.json').value, 1);\n",
+    });
+    seed.git(['add', '-A']);
+    seed.git(['commit', '-qm', 'base fixture']);
+    seed.init(['--repo', 'acme/demo', '--base', 'main',
+      '--tests-cmd', `${shellQuote(process.execPath)} test/value.test.js`,
+      '--tests-paths', '["test/*.test.js"]',
+      '--tests-keep', '["test/fixtures/**","changelog.d/**"]',
+      '--tests-expensive', 'true']);
+    seed.ok(['task', 'add', '--title', 'Fix fixture', '--acceptance', 'tests pass']);
+    seed.ok(['claim', 'T1', '--agent', 'w-1']);
+  });
+  h.git(['switch', '-qc', 'fixture-change']);
+  writeFiles(h.repo, {
+    'test/fixtures/value.json': '{"value":1}\n',
+    'changelog.d/fix.md': 'Fix the test fixture.\n',
+    ...(mixed ? {
+      'lib/unused.js': 'module.exports = 1;\n',
+      'test/value.test.js': "const assert = require('node:assert/strict');\nassert.equal(require('./fixtures/value.json').value, 1);\n",
+    } : {}),
+  });
+  h.git(['add', '-A']);
+  h.git(['commit', '-qm', 'fix fixture']);
+  const sha = h.git(['rev-parse', 'HEAD']);
+  h.git(['switch', '-q', 'main']);
+  h.ok(['submit', 'T1', '--sha', sha, '--branch', 'fixture-change', '--agent', 'w-1']);
+  h.env.TOWER_CRANE_TMP = path.join(h.base, 'gate-tmp');
+  return h;
+}
+
+test('a fixture-only diff runs the pinned head suite once and audits its run-only receipt', (t) => {
+  const h = testOnlyFixture(t);
+  const result = h.run(['check', 'tests', 'T1', '--agent', 'checker', '--json']);
+  assert.equal(result.code, 0, result.stdout + result.stderr);
+  const evidence = JSON.parse(result.stdout);
+  assert.equal(evidence.tests_mode, 'prove');
+  assert.equal(evidence.receipt.mode, 'run-only (test-only diff)');
+  assert.deepEqual(evidence.receipt.changed_files, ['changelog.d/fix.md', 'test/fixtures/value.json']);
+  assert.match(evidence.summary, /run-only \(test-only diff\)/);
+  assert.equal(evidence.commands.filter((command) => command.command !== 'git').length, 1);
+  assert.deepEqual(h.readState('tasks.json').tasks[0].evidence.at(-1).receipt, evidence.receipt);
+  const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  assert.deepEqual(events.at(-1).detail.receipt, evidence.receipt);
+  assert.equal(h.json(['task', 'show', 'T1']).gates.gates.find((gate) => gate.type === 'tests').ok, true);
+});
+
+test('one lib change retains prove mode and rejects tests that pass after reversion', (t) => {
+  const h = testOnlyFixture(t, true);
+  h.ok(['project', 'set', '--tests-proof-cmd', `${shellQuote(process.execPath)} {tests}`]);
+  const result = h.run(['check', 'tests', 'T1', '--agent', 'checker', '--json']);
+  assert.equal(result.code, 1, result.stdout + result.stderr);
+  const evidence = JSON.parse(result.stdout);
+  assert.match(evidence.summary, /tests pass without the change; they do not prove it/);
+  assert.equal(evidence.receipt.mode, 'prove');
+  assert.deepEqual(evidence.receipt.changed_files, [
+    'changelog.d/fix.md', 'lib/unused.js', 'test/fixtures/value.json', 'test/value.test.js',
+  ]);
+  assert.deepEqual(evidence.receipt.proof_tests, ['test/value.test.js']);
+  assert.equal(evidence.commands.filter((command) => command.command !== 'git').length, 3);
+  assert.ok(evidence.commands.some((command) => command.command === 'git' && command.args.includes('checkout')));
+});
 
 test('failed tests evidence records TAP and spec names with a bounded output tail', (t) => {
   const h = makeRepo(t);

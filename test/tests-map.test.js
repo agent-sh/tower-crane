@@ -160,7 +160,7 @@ test('a task without a PR runs the full head suite because hosted CI is not requ
   assert.equal(result.commands.find((c) => c.command !== 'git').command, fullCommand);
 });
 
-test('a change only to test/browser.js selects its explicitly mapped suite', (t) => {
+test('a change only to test/browser.js runs the full head suite with run-only semantics', (t) => {
   const h = fixture(t, { ...map, 'test/browser.js': ['test/mapped.test.js'] });
   h.git(['branch', '-f', 'main', 'HEAD']);
   fs.writeFileSync(path.join(h.repo, 'test/browser.js'), 'module.exports = 1;\n');
@@ -172,8 +172,11 @@ test('a change only to test/browser.js selects its explicitly mapped suite', (t)
   h.ok(['submit', 'T1', '--agent', 'worker', '--sha', h.git(['rev-parse', 'HEAD'])]);
   h.ok(['project', 'set', '--tests-paths', '["test/**"]']);
   const result = check(h);
-  assert.equal(result.receipt.head_mode, 'mapped');
-  assert.ok(result.receipt.head_tests.includes('test/mapped.test.js'));
+  assert.equal(result.receipt.head_mode, 'full');
+  assert.equal(result.receipt.mode, 'run-only (test-only diff)');
+  assert.deepEqual(result.receipt.changed_files, ['test/browser.js']);
+  assert.equal(result.commands.filter((c) => c.command !== 'git').length, 1);
+  assert.equal(result.commands.find((c) => c.command !== 'git').command, fullCommand);
 });
 
 
