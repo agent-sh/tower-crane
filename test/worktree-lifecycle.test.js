@@ -276,3 +276,20 @@ test('cancel preserves local commits even when the checkout was already removed'
   assert.equal(h.git(['show', 'recovered:committed.txt']), 'recover a missing checkout');
   gone(h, wt);
 });
+
+test('prune and repeated cancellation preserve a live task that reuses a retired branch', (t) => {
+  const h = setup(t);
+  const old = h.json(['worktree', 'T1']);
+  h.ok(['task', 'update', 'T1', '--status', 'cancelled']);
+  h.ok(['claim', 'T2', '--agent', 'worker2']);
+  h.ok(['submit', 'T2', '--sha', h.git(['rev-parse', 'HEAD']), '--branch', old.branch, '--agent', 'worker2']);
+  h.ok(['rework', 'T2', '--reason', 'reuse the available branch']);
+  const live = h.json(['worktree', 'T2']);
+  fs.writeFileSync(path.join(live.path, 'dirty.txt'), 'keep the live replacement');
+  h.ok(['worktree', 'prune']);
+  assert.ok(fs.existsSync(live.path), 'prune preserves the new task checkout');
+  h.ok(['task', 'update', 'T1', '--status', 'cancelled']);
+  assert.equal(fs.readFileSync(path.join(live.path, 'dirty.txt'), 'utf8'), 'keep the live replacement');
+  assert.equal(h.json(['worktree', 'list']).worktrees[0].task, 'T2');
+  assert.ok(h.git(['branch', '--list', live.branch]));
+});
