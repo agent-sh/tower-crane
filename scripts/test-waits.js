@@ -49,18 +49,51 @@ function callArguments(text, start) {
   return [];
 }
 
-function hungBudget(value) {
-  if (/^Math\.max\(/.test(value)) {
-    return callArguments(value, value.indexOf('(')).some(hungBudget);
+function hungBudget(value, bindings = new Map(), seen = new Set()) {
+  value = value.trim();
+  if (value === 'HUNG_TEST_MS') return true;
+  if (bindings.has(value) && !seen.has(value)) {
+    return hungBudget(bindings.get(value), bindings, new Set([...seen, value]));
   }
-  return value === 'HUNG_TEST_MS' || Number(value.replaceAll('_', '')) >= HUNG_TEST_MS;
+  if (/^Math\.max\(/.test(value)) {
+    return callArguments(value, value.indexOf('(')).some((arg) => hungBudget(arg, bindings, seen));
+  }
+  return Number(value.replaceAll('_', '')) >= HUNG_TEST_MS;
+}
+
+function budgetExpression(value, bindings, seen = new Set()) {
+  value = value.trim();
+  const defaultValue = /^(\w+)\s*=\s*([\s\S]+)$/.exec(value);
+  if (defaultValue) {
+    return budgetExpression(defaultValue[2], bindings, seen)
+      || (/^(?:ms|timeout(?:Ms)?|budget|duration)$/i.test(defaultValue[1])
+        && !/^['"`{[]/.test(defaultValue[2].trim()));
+  }
+  if (bindings.has(value) && !seen.has(value)) {
+    const bound = bindings.get(value);
+    return budgetExpression(bound, bindings, new Set([...seen, value]))
+      || (/^(?:ms|timeout(?:Ms)?|budget|duration)$/i.test(value)
+        && !/^['"`{[]|\bfunction\b|=>/.test(bound));
+  }
+  if (/^['"`{[]/.test(value) || /\bfunction\b|=>/.test(value)) return false;
+  // Computed numbers are budgets too. Unknown expressions need an explicit
+  // hung-guard minimum or a reason rather than being treated as nonnumeric.
+  const expression = value.replace(/(['"`])(?:\\[\s\S]|(?!\1)[\s\S])*?\1/g, '');
+  if (/^[\w$.]+\s*\(/.test(expression)
+    && !/^(?:Math\.\w+|Number|parseInt|parseFloat)\s*\(/.test(expression)) return false;
+  return /^[\s(]*[+-]?\s*\d/.test(expression)
+    || /\b\d[\d_]*(?:e[+-]?\d+)?\b/i.test(expression)
+    || /^(?:Math\.\w+|Number|parseInt|parseFloat)\s*\(/.test(expression)
+    || /[\w$.()]+\s*[-+*/%]\s*[\w$.()]+/.test(expression)
+    || /^(?:HUNG_TEST_MS|ms|timeout(?:Ms)?|budget|duration)$/i.test(expression)
+    || /\b[\w$.]+_(?:MS|TIMEOUT|BUDGET|DURATION)\b/.test(expression);
 }
 
 function waitFindings(text) {
   const findings = [];
   const lines = text.replace(/\r\n/g, '\n').split('\n');
-  const numericBindings = new Map([...text.matchAll(/\b(?:const|let)\s+(\w+)\s*=\s*(\d[\d_]*)(?=\s*[;,])/g)]
-    .map((match) => [match[1], match[2]]));
+  const bindings = new Map([...text.matchAll(/\b(?:const|let)\s+(\w+)\s*=\s*([^;]+)/g)]
+    .map((match) => [match[1], match[2].trim()]));
   const report = (index, reason) => {
     if (!/^\s*\/\//.test(lines[index]) && !allowed(lines[index])) findings.push({ line: index + 1, reason });
   };
@@ -68,14 +101,13 @@ function waitFindings(text) {
     if (/^\s*\/\//.test(line)) continue;
     const guard = /\b(?:const|let)\s+HUNG_TEST_MS\s*=\s*([^;]+)/.exec(line);
     if (guard && !hungBudget(guard[1].trim())) report(index, 'hung-test backstop was shortened');
-    if (/\b(?:Date|performance)\.now\(\)\s*-\s*\w+\s*\)*\s*[<>]=?\s*\d+/.test(line)
-      || /\b\d[\d_]*\s*[<>]=?\s*\(*\s*(?:Date|performance)\.now\(\)\s*-\s*\w+/.test(line)) {
-      report(index, 'elapsed wall time is a pass condition');
-    }
     for (const match of line.matchAll(/(['"])--(timeout|test-timeout)=([\d.]+)\1/g)) {
       const budget = Number(match[3]) * (match[2] === 'timeout' ? 1000 : 1);
       if (budget > 0 && budget < HUNG_TEST_MS) report(index, 'CLI wait has a readiness budget below the hung-test timeout');
     }
+  }
+  for (const match of text.matchAll(/\b(?:Date|performance)\.now\(\)\s*-\s*[\w$.]+\s*\)*\s*[<>]=?|[<>]=?\s*\(*\s*(?:Date|performance)\.now\(\)\s*-\s*[\w$.]+/g)) {
+    report(text.slice(0, match.index).split('\n').length - 1, 'elapsed wall time is a pass condition');
   }
   for (const match of text.matchAll(/(['"])--(timeout|test-timeout)\1\s*,\s*(['"])([\d.]+)\3/g)) {
     const budget = Number(match[4]) * (match[2] === 'timeout' ? 1000 : 1);
@@ -102,9 +134,9 @@ function waitFindings(text) {
     }
   }
   for (const elapsed of text.matchAll(/\b(?:const|let)\s+(\w+)\s*=\s*(?:Date|performance)\.now\(\)\s*-\s*\w+/g)) {
-    const comparisons = new RegExp(`\\b${elapsed[1]}\\s*<=?\\s*(\\d[\\d_]*)`, 'g');
+    const comparisons = new RegExp(`\\b${elapsed[1]}\\s*[<>]=?|[<>]=?\\s*\\(*\\s*${elapsed[1]}\\b`, 'g');
     for (const match of text.matchAll(comparisons)) {
-      if (!hungBudget(match[1])) report(text.slice(0, match.index).split('\n').length - 1, 'elapsed wall time is a pass condition');
+      report(text.slice(0, match.index).split('\n').length - 1, 'elapsed wall time is a pass condition');
     }
   }
   for (const match of text.matchAll(/\b(setTimeout|until|waitFor\w*|waitUntil)\s*\(/g)) {
@@ -115,10 +147,10 @@ function waitFindings(text) {
       if (!hungBudget(args[1] || '')) report(index, 'timer wait needs a signal or a wait-allow reason');
     } else {
       for (const arg of args.slice(1)) {
-        const budget = /^(?:\w+\s*=\s*)?(\d[\d_]*|ms|timeout)$/.exec(arg)?.[1]
-          || numericBindings.get(arg);
-        if (budget && !hungBudget(budget)) report(index, 'wait supplies a fixed readiness budget');
-        if (/^\d/.test(arg) && !hungBudget(arg)) report(index, 'wait supplies a fixed readiness budget');
+        const value = /^\w+\s*=\s*([\s\S]+)$/.exec(arg)?.[1] || arg;
+        if (budgetExpression(arg, bindings) && !hungBudget(value, bindings)) {
+          report(index, 'wait supplies a fixed readiness budget');
+        }
         for (const option of arg.matchAll(/\b(?:ms|timeout|timeoutMs)\s*:\s*([^,}]+)/g)) {
           if (!hungBudget(option[1].trim())) report(index, 'wait options supply a fixed readiness budget');
         }

@@ -1420,11 +1420,8 @@ test('large review dispatch hands revuto findings to the reviewer and an ok that
   ];
   h.saveGithub(state);
   assert.equal((await h.runAsync(['spawn', '--task', 'T1', '--wait', '--agent', 'orchestrator'])).code, 0);
-  const deadline = Date.now() + 60000;
-  while (!h.logs().some((e) => e.cmd === 'spawn exit' && e.detail.role === 'reviewer')) {
-    if (Date.now() > deadline) throw new Error(JSON.stringify(h.logs().slice(-10)));
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
+  await waitOnRepo(h, () => h.logs().some((e) => e.cmd === 'spawn exit' && e.detail.role === 'reviewer'),
+    () => JSON.stringify(h.logs().slice(-10)));
   const review = h.logs().find((e) => e.cmd === 'spawn' && e.detail.role === 'reviewer');
   assert.deepEqual(review.detail.revuto.map((f) => [f.id, f.severity, f.reply]), [[101, 'P1', null], [102, 'P2', 103], [104, null, null]]);
   const brief = fs.readFileSync(path.join(h.state, 'reviews', `T1-${h.sha}.md`), 'utf8');
@@ -1463,11 +1460,8 @@ test('brokered review evidence clears a revuto finding whose file changed since 
   state.comments = [comment(201, before), comment(202, h.sha)];
   h.saveGithub(state);
   assert.equal((await h.runAsync(['spawn', '--task', 'T1', '--wait', '--agent', 'orchestrator'])).code, 0);
-  const deadline = Date.now() + 60000;
-  while (!h.logs().some((e) => e.cmd === 'spawn exit' && e.detail.role === 'reviewer')) {
-    if (Date.now() > deadline) throw new Error(JSON.stringify(h.logs().slice(-10)));
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
+  await waitOnRepo(h, () => h.logs().some((e) => e.cmd === 'spawn exit' && e.detail.role === 'reviewer'),
+    () => JSON.stringify(h.logs().slice(-10)));
   const review = h.logs().find((e) => e.cmd === 'spawn' && e.detail.role === 'reviewer');
   assert.deepEqual(review.detail.revuto.map((f) => [f.id, f.changed]), [[201, true], [202, false]]);
   // The state broker runs evidence with TOWER_CRANE_VIA=broker, where tower-crane reads no repository.

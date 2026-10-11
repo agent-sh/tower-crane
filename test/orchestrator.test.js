@@ -6,6 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
 const { makeProjectRepo, BIN } = require('./helpers');
+const { HUNG_TEST_MS } = require('./signals');
 
 test('authority and benchmark readers neither compete with a holder nor acquire a vacant lease', (t) => {
   const h = makeProjectRepo(t);
@@ -173,7 +174,7 @@ console.log(JSON.stringify(O.identity({ env: { CLAUDE_SESSION_ID: 'same-session'
 `;
   const identities = ['large', 'small'].map((value) => {
     const result = cp.spawnSync(process.execPath, ['-e', script], {
-      env: { ...process.env, PARENT_QUERY_CASE: value }, encoding: 'utf8', timeout: 10000,
+      env: { ...process.env, PARENT_QUERY_CASE: value }, encoding: 'utf8', timeout: HUNG_TEST_MS,
     });
     assert.equal(result.status, 0, result.stderr);
     return JSON.parse(result.stdout);

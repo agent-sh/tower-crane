@@ -111,6 +111,23 @@ test('shared checks reject readiness budgets and require a reason on allowed tim
     'assert.ok(1000 > performance.now() - started);', // wait-allow: rejected lint fixture
     'await h.runAsync(["wait", "--timeout",\n "10"]);', // wait-allow: rejected lint fixture
     'await fileWritten(file, { signal: AbortSignal.timeout(1000) });', // wait-allow: rejected lint fixture
+    'async function until(check, what, budget = 10 * 1000) {}', // wait-allow: rejected lint fixture
+    'async function waitFor(check, timeout = (10 * 1000)) {}', // wait-allow: rejected lint fixture
+    'const budget = 10 * 1000; until(check, "ready", budget);', // wait-allow: rejected lint fixture
+    'const window = 10 * 1000; until(check, "ready", window);', // wait-allow: rejected lint fixture
+    'const seconds = 10; const window = seconds * 1000; until(check, "ready", window);', // wait-allow: rejected lint fixture
+    'const delay = 1e4; const window = delay; until(check, "ready", window);', // wait-allow: rejected lint fixture
+    'const window =\n (10 * 1000);\n until(check, "ready", window);', // wait-allow: rejected lint fixture
+    'async function until(check, what, budget = S.LOCK_WAIT_MS / 4) {}', // wait-allow: rejected lint fixture
+    'const window = Math.min(HUNG_TEST_MS, 1000); until(check, "ready", window);', // wait-allow: rejected lint fixture
+    'if (Date.now() - started >= budget) throw new Error("late");', // wait-allow: rejected lint fixture
+    'assert.ok(Date.now() - started < S.LOCK_WAIT_MS / 4);', // wait-allow: rejected lint fixture
+    'assert.ok(S.LOCK_WAIT_MS / 4 > (performance.now() - started));', // wait-allow: rejected lint fixture
+    'const elapsed = Date.now() - started; assert.ok(elapsed < 10 * 1000);', // wait-allow: rejected lint fixture
+    'const elapsed = Date.now() - started; assert.ok(budget > elapsed);', // wait-allow: rejected lint fixture
+    'const window = ready ? 10000 : 20000; until(check, "ready", window);', // wait-allow: rejected lint fixture
+    'const budget = getBudget(); until(check, "ready", budget);', // wait-allow: rejected lint fixture
+    'assert.ok(Date.now() - started\n < S.LOCK_WAIT_MS / 4);', // wait-allow: rejected lint fixture
   ]) {
     assert.ok(waitFindings(source).length, source);
     const annotated = source.split('\n').map((line) => line + ' // wait-allow: verifies the production timer contract').join('\n');
@@ -120,6 +137,11 @@ test('shared checks reject readiness budgets and require a reason on allowed tim
   assert.deepEqual(waitFindings('const deadline = Date.now() + HUNG_TEST_MS;'), []);
   assert.deepEqual(waitFindings('const deadline = Date.now() + 300000;'), []);
   assert.deepEqual(waitFindings('cp.spawnSync("node", [], { timeout: Math.max(budget, HUNG_TEST_MS) });'), []);
+  assert.deepEqual(waitFindings('async function until(check, what, budget = Math.max(HUNG_TEST_MS, other)) {}'), []);
+  assert.deepEqual(waitFindings('const budget = 300000; const guard = budget; until(check, "ready", guard);'), []);
+  assert.deepEqual(waitFindings('const window = Math.max(HUNG_TEST_MS, other); until(check, "ready", window);'), []);
+  assert.deepEqual(waitFindings('async function waitFor(check, what = "ready", options = {}) {}'), []);
+  assert.deepEqual(waitFindings('const h = setup(t, "codex", { cpu_ms: 1000 }); until(t, h, check);'), []);
   assert.ok(waitFindings('await until(check, "// wait-allow: fake reason", 1000);').length); // wait-allow: rejected lint fixture
   const h = makeRepo(t);
   for (const dir of ['scripts', 'bin', 'lib', 'docs', 'changelog.d']) {
@@ -134,6 +156,18 @@ test('shared checks reject readiness budgets and require a reason on allowed tim
   const rejected = run();
   assert.equal(rejected.status, 1, rejected.stdout + rejected.stderr);
   assert.match(rejected.stderr, /test\/wait.test.js:1 readiness deadline/);
+  fs.writeFileSync(bad, [
+    'async function until(check, what, budget = 10 * 1000) {', // wait-allow: rejected lint fixture
+    '  const started = Date.now();',
+    '  while (!check()) {',
+    '    if (Date.now() - started >= budget) throw new Error(what);', // wait-allow: rejected lint fixture
+    '    await new Promise(setImmediate);',
+    '  }',
+    '}',
+  ].join('\n'));
+  const expression = run();
+  assert.equal(expression.status, 1, expression.stdout + expression.stderr);
+  assert.match(expression.stderr, /test\/wait.test.js:1 wait supplies/);
   fs.writeFileSync(bad, 'const deadline = Date.now() + 1000; // wait-allow: tests a production timeout\n'); // wait-allow: allowed lint fixture
   assert.equal(run().status, 0);
 });

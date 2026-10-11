@@ -142,7 +142,7 @@ test('UserPromptSubmit and tool hooks proceed while another process holds the st
     const prompt = bridge('UserPromptSubmit');
     assert.equal(prompt.status, 0, prompt.stderr);
     assert.equal(prompt.stdout, '');
-    assert.ok(Date.now() - started < S.LOCK_WAIT_MS / 4, 'the prompt did not wait for the lock');
+    assert.ok(Date.now() - started < S.LOCK_WAIT_MS / 4, 'the prompt did not wait for the lock'); // wait-allow: prompt hooks must use the nonblocking attempt instead of the ordinary lock wait
     assert.deepEqual(files(), unchanged);
   } finally {
     S.releaseLock(held);
