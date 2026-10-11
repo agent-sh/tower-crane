@@ -1103,6 +1103,7 @@ test('in a browser, Pause in the header pauses dispatch through the controls API
   const h = makeRepo(t);
   h.init();
   populate(h);
+  h.ok(['task', 'add', '--title', 'Changelog', '--acceptance', 'the release notes list it']);
   await withServers(async (servers) => {
     const url = await startServe(servers, h);
     const b = await openBrowser(t);
@@ -1121,6 +1122,11 @@ test('in a browser, Pause in the header pauses dispatch through the controls API
     assert.deepEqual([audit.detail.command, audit.detail.actor, audit.detail.mode, Object.keys(audit.detail.settings)], ['project set', 'owner', 'board', ['limits.paused']]);
     assert.match(await b.inPage(`document.querySelector('h1.sentence').textContent`), /^.*Paused: owner is inspecting the run.*still working/);
     assert.match(await b.inPage(`document.querySelector('.lead [data-pause]').textContent`), /Paused by owner, (now|\d+ \w+ ago)\. New work waits/);
+    // The pause is said once: ready work stays ready, held by it, and no
+    // blocked row repeats it as its own reason.
+    const next = await b.inPage(`document.querySelector('[data-region="next"]').textContent`);
+    assert.doesNotMatch(next, /project paused/);
+    assert.match(next, /Ready \d+, held by the pause/);
     await b.inPage(`document.querySelector('.lead [data-pause] button[type="submit"]').click()`);
     await b.until(`!document.querySelector('.lead [data-pause="paused"]') && !/^Paused/.test(document.title)`, 'dispatch resumed');
     assert.equal(h.readState('project.json').limits.paused, undefined);

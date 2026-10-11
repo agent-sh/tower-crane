@@ -15,16 +15,20 @@ Tower Crane is a delegation tool, and the board is the owner's house in it. The 
 | Plan | `/plan` | `#plan` | the dependency graph, and the same as layered lists on narrow screens |
 | Spend | `/spend` | `#spend` | budgets, burn rate, projection, top spenders with their tier's median, and the usage tables |
 | History | `/history` | `#history` | every event, newest first, by UTC day, with filters |
+| Controls | `/controls` | (serve only) | every row of the authority table with its form, pending approvals and blocked work (T91's controls, drawn in this system) |
 | Settings | `/settings` | (serve only) | the ladder and every task's tier |
 | Task sheet | `#T7` over any room | `#T7` | everything about one task, with its controls |
 
 The URL decides the room. A room fragment on a served page (`/#plan`) opens that room and becomes its path; nothing remembered in the browser overrides the URL. Only the routed room is displayed: after nav, a direct link, a sheet opened inside it, a cleared fragment and a live update. Without scripts the snapshot opens each room and sheet by its fragment.
 
-Every page, Settings included, leads with the shell: the bar (mark, project, rooms with counts, how fresh the page is, the theme switch) and the lead (the status sentence and the spend line).
+Controls keeps T91's groups (approvals, blocked work, project, agents and personal settings, tasks, the authority table) and Settings stays its own page. T70's grouping by intent (human-experience.md 5.1: run, money, models, quality, reach, release, authority), with Settings folded in, is not built yet.
+
+Every page, Controls and Settings included, leads with the shell: the bar (mark, project, rooms with counts, how fresh the page is, the theme switch) and the lead (the status sentence and the spend line).
 
 ## The front room
 
-- **Status sentence.** `6 need you (2 now) · 5 working, 1 stuck · 46% budget`, in words from counts, each count a link to what it counts. Claims on the floor that are not working are named: `stuck` (lease ran out, or the process exited) and `stopped`. Running agents whose usage is not known are counted aloud (`1 not counted`). The tab title repeats it.
+- **Status sentence.** `6 need you (2 now) · 5 working, 1 stuck · 46% budget`, in words from counts, each count a link to what it counts. Claims on the floor that are not working are named: `stuck` (lease ran out, or the process exited) and `stopped`. Running agents whose usage is not known are counted aloud (`1 not counted`). When dispatch is paused the sentence leads with it: `Paused: owner is inspecting the run · 5 still working`. The tab title repeats it.
+- **Pause.** Beside the sentence, `Pause dispatch` opens a reason field in place; Enter there posts `project set --paused REASON` to `POST /api/controls`, as the Controls form does. While paused the lead says who paused and when, that new work waits and running agents go on, with `Resume dispatch` (`--paused ''`). A pause does not stop running agents; Stop on a row is the brake for those. Next is drawn as if dispatch ran: ready tasks stay ready, "held by the pause", and no blocked row repeats the pause as its own reason.
 - **Spend line.** Budget used as a length (tokens, and hours when set), the burn rate from running agents' own readings with its age, the projection, and the top spender with its tier's median.
 - **The queue** (P1, P4). One list in two tiers, the tier in words at each item's left edge:
   - *Now* (alarm): a decision that blocks ready work, a runaway, a stuck claim (lease ran out, or the process exited without submitting), a budget at 90% or more.
@@ -91,13 +95,13 @@ Built for this board (human-experience.md 5.4); every value has a reason there.
 
 **Glyphs.** A shape and a word for every status, never color alone; the queue adds a filled triangle (Now), a filled square (Your turn), a gauge (runaway) and a stop square. Gate receipts: a check (passed), a cross (failed), a dashed circle (not yet run), an amber square (waived).
 
-**Space and shape.** A 4 px grid (4, 8, 12, 16, 24, 32, 48). Radius 6 for items and controls, 10 for rooms. Buttons at least 32 px tall, other targets at least 24 px. Elevation only for the task sheet and the in-place panels of an agent row (Message, Stop).
+**Space and shape.** A 4 px grid (4, 8, 12, 16, 24, 32, 48). Radius 6 for items and controls, 10 for rooms. Buttons at least 32 px tall, other targets at least 24 px. Elevation only for the task sheet, the in-place panels of an agent row (Message, Stop) and the Pause panel.
 
 **Motion.** Motion reports change and nothing else (P6): a new queue item slides in over 200 ms and its tier pulses once, a changed item washes from `--live-wash` over 1200 ms, the stop confirmation opens in 160 ms. No perpetual animation: liveness is the words `Live, updated 12 s ago`. `prefers-reduced-motion: reduce` removes all motion.
 
 ## Keyboard
 
-`n`, `r`, `p`, `s`, `h` open the rooms; Tab reaches every action in reading order with a visible ring; arrow keys move between the Next and Recent tabs; opening Message or Stop puts the cursor in its field, where Enter sends the message or confirms the stop; Escape closes an open Message or Stop panel and returns to its button, and closes a task sheet and returns focus to the link that opened it. A sheet holds focus and makes the page behind it inert.
+`n`, `r`, `p`, `s`, `h` open the rooms; Tab reaches every action in reading order with a visible ring; arrow keys move between the Next and Recent tabs; opening Message, Stop or Pause puts the cursor in its field, where Enter sends the message, confirms the stop or pauses dispatch; Escape closes an open Message, Stop or Pause panel and returns to its button, and closes a task sheet and returns focus to the link that opened it. A sheet holds focus and makes the page behind it inert.
 
 ## Live behavior
 
@@ -105,4 +109,4 @@ serve pushes a `reload` event when the state changes; the page fetches itself an
 
 ## What the board does not do
 
-It never accepts, merges, waives, claims, releases, submits, records evidence or edits the plan; it shows the command where it helps. It never invents a second path to a change: each control posts to a route that runs one CLI command (docs/cli.md, Board writes). It never shows money: the state has no prices. It never shows a stale or unknown usage reading as zero.
+Outside Controls it never accepts, waives or releases, and nowhere does it merge, claim, submit, record evidence or edit the plan; it shows the command where it helps. It never invents a second path to a change: each control posts to a route that runs one CLI command, or to `POST /api/controls`, which runs the CLI command's own handler and authority check (docs/cli.md, Board writes). It never shows money: the state has no prices. It never shows a stale or unknown usage reading as zero.
