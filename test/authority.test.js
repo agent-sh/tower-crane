@@ -59,6 +59,7 @@ const OPERATIONAL = [
 
 test('research web MCP changes use owner-required authority and deduplicate escalation', (t) => {
   const h = setup(t);
+  h.ok(['ladder', 'set', 'research', '--harness', 'claude', '--model', 'opus', '--effort', 'high']);
   const server = { name: 'harness-web', command: 'node', args: ['/web/server.mjs'] };
   const args = ['ladder', 'set', 'research', '--web-mcp', JSON.stringify(server)];
   const before = h.readState('project.json');
@@ -315,6 +316,7 @@ test('the orchestrator opts a rung in only to MCP servers the owner already defi
 
 test('a tool that is not a harness built-in or changes the rung sandbox is owner-required', (t) => {
   const h = setup(t);
+  h.ok(['ladder', 'set', 'medium', '--harness', 'codex', '--profile', 'sol', '--effort', 'high', '--clear', 'model']);
   h.ok(['ladder', 'set', 'easy', '--harness', 'codex', '--model', 'sonnet']);
   h.ok(['ladder', 'set', 'review', '--harness', 'claude', '--model', 'opus', '--clear', 'profile', '--clear', 'args']);
   // Built-ins that keep the sandbox are the orchestrator's.

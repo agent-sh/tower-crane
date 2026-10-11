@@ -93,6 +93,7 @@ test('the user file supplies the defaults a new project copies, and the project 
 test('research web MCP settings persist in user defaults and refuse other rungs or secret fields', (t) => {
   const h = makeRepo(t);
   h.init();
+  h.ok(['ladder', 'set', 'research', '--harness', 'claude', '--model', 'opus', '--effort', 'high']);
   const server = { name: 'harness-web', command: 'node', args: ['/web/server.mjs'] };
   h.ok(['ladder', 'set', 'research', '--web-mcp', JSON.stringify(server)]);
   h.ok(['ladder', 'save-user']);
@@ -111,6 +112,7 @@ test('research web MCP settings persist in user defaults and refuse other rungs 
 test('research web MCP stays owner guarded alongside personal provider fallbacks', (t) => {
   const h = makeRepo(t);
   h.init();
+  h.ok(['ladder', 'set', 'research', '--harness', 'claude', '--model', 'opus', '--effort', 'high']);
   const server = { name: 'harness-web', command: 'node', args: ['/web/server.mjs'] };
   const fallbacks = [{ harness: 'codex', model: 'second' }];
   writeUser(h, { ladder: { research: { fallbacks } } });
@@ -134,6 +136,7 @@ test('research web MCP stays owner guarded alongside personal provider fallbacks
 test('research web MCP inheritance remains Claude-only and refuses additional MCP servers', (t) => {
   const h = makeRepo(t);
   h.init();
+  h.ok(['ladder', 'set', 'research', '--harness', 'claude', '--model', 'opus', '--effort', 'high']);
   const server = { name: 'harness-web', command: 'node', args: ['/web/server.mjs'] };
   const fallbacks = [{ harness: 'claude', model: 'backup' }, { harness: 'codex', model: 'second' }];
   writeUser(h, { ladder: { research: { fallbacks } } });
@@ -153,7 +156,7 @@ test('ladder save-user makes the project ladder the default for new projects', (
   const h = makeRepo(t);
   h.init();
   // Pinned so the hard row and the pi refusal below do not follow the built-in ladder.
-  h.ok(['ladder', 'set', 'medium', '--clear', 'model', '--profile', 'sol', '--effort', 'high']);
+  h.ok(['ladder', 'set', 'medium', '--clear', 'model', '--clear', 'harness', '--profile', 'sol', '--effort', 'high']);
   h.ok(['ladder', 'set', 'hard', '--harness', 'claude', '--model', 'fable', '--effort', 'medium']);
   const project = h.readState('project.json');
   const out = h.json(['ladder', 'save-user']);
@@ -246,8 +249,9 @@ test('ladder harness moves every rung without its own harness, and spawn runs ea
   const h = makeRepo(t);
   h.init();
   for (const rung of ['easy', 'medium', 'review', 'small']) h.ok(['ladder', 'set', rung, '--model', `m-${rung}`, '--effort', 'high', '--clear', 'profile', '--clear', 'harness']);
-  h.ok(['ladder', 'set', 'hard', '--model', 'm-hard', '--effort', 'medium']);
-  h.ok(['ladder', 'set', 'research', '--model', 'm-research', '--effort', 'high']);
+  h.ok(['ladder', 'set', 'orchestrator', '--harness', 'claude', '--model', 'm-orchestrator', '--effort', 'high']);
+  h.ok(['ladder', 'set', 'hard', '--harness', 'claude', '--model', 'm-hard', '--effort', 'medium']);
+  h.ok(['ladder', 'set', 'research', '--harness', 'claude', '--model', 'm-research', '--effort', 'high']);
   h.ok(['task', 'add', '--title', 'Small', '--acceptance', 'a', '--size', 'S']);
   h.ok(['task', 'add', '--title', 'Medium', '--acceptance', 'a']);
   h.ok(['task', 'add', '--title', 'Large', '--acceptance', 'a', '--size', 'L']);
@@ -294,6 +298,7 @@ test('ladder harness moves every rung without its own harness, and spawn runs ea
 test('Claude providers and pi tool opt-ins validate independently', (t) => {
   const h = makeRepo(t);
   h.init();
+  h.ok(['ladder', 'set', 'hard', '--harness', 'claude', '--model', 'opus', '--effort', 'medium', '--clear', 'profile']);
   for (const provider of ['bedrock', 'anthropic']) {
     h.ok(['ladder', 'set', 'hard', '--provider', provider]);
     assert.equal(h.readState('project.json').ladder.hard.provider, provider);
@@ -318,7 +323,11 @@ test('ladder writes are validated, and a refused one leaves project.json as it w
   const h = makeRepo(t);
   h.init();
   // Pinned so the pi refusal below comes from this codex rung, not the built-in one.
-  h.ok(['ladder', 'set', 'medium', '--clear', 'model', '--profile', 'sol', '--effort', 'high']);
+  h.ok(['ladder', 'set', 'medium', '--clear', 'model', '--clear', 'harness', '--profile', 'sol', '--effort', 'high']);
+  // Pinned so the claude refusals below do not depend on the built-in easy, hard and research rungs.
+  h.ok(['ladder', 'set', 'easy', '--harness', 'claude', '--model', 'claude-haiku-5-5', '--effort', 'high', '--clear', 'profile']);
+  h.ok(['ladder', 'set', 'hard', '--harness', 'claude', '--model', 'opus', '--effort', 'medium', '--clear', 'profile']);
+  h.ok(['ladder', 'set', 'research', '--harness', 'claude', '--model', 'opus', '--effort', 'high', '--clear', 'profile']);
   const before = projectText(h);
   const logged = events(h).filter((e) => e.cmd.startsWith('ladder')).length;
   const cases = [

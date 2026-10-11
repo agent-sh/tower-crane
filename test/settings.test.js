@@ -71,6 +71,7 @@ test('the Settings view edits the ladder and task tiers only with the page token
   // Pinned so the expected hard model does not follow the built-in ladder.
   const pinned = h.readState('project.json');
   pinned.ladder.hard = { harness: 'claude', model: 'opus', effort: 'medium' };
+  pinned.ladder.medium = { profile: 'sol', effort: 'high' };
   h.writeState('project.json', pinned);
   h.ok(['task', 'add', '--title', 'Webhook retries', '--acceptance', 'a']);
   const s = await startServe(h);
@@ -240,6 +241,8 @@ test('a save made against a rung, default harness or tier that changed since the
 test("in a browser, saving one form keeps the other form's unsaved edits, and a stale rung save is refused", { skip: !CHROME && 'no Chrome to drive' }, async (t) => {
   const h = makeRepo(t);
   h.init();
+  // Pinned so the claude expectation below does not follow the built-in easy rung.
+  h.ok(['ladder', 'set', 'easy', '--harness', 'claude', '--model', 'claude-haiku-5-5', '--effort', 'high', '--clear', 'profile']);
   h.ok(['task', 'add', '--title', 'Webhook retries', '--acceptance', 'a']);
   const s = await startServe(h);
   t.after(() => s.stop());
