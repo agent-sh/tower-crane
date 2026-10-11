@@ -52,7 +52,8 @@ test('package support, CI matrix, and required jobs target Node 24 and 26', () =
 
 test('the model swap proof checks out the PR merge, so a branch older than its probe still runs it', () => {
   const root = path.resolve(__dirname, '..');
-  const workflow = fs.readFileSync(path.join(root, '.github', 'workflows', 'ci.yml'), 'utf8');
+  // A Windows checkout writes CRLF line endings.
+  const workflow = fs.readFileSync(path.join(root, '.github', 'workflows', 'ci.yml'), 'utf8').replace(/\r\n/g, '\n');
   const job = workflow.slice(workflow.indexOf('\n  model-swap:\n'));
   // Pinning the head sha checks out a branch that predates scripts/probe-model-swap.js.
   assert.doesNotMatch(job, /pull_request\.head\.sha/);
