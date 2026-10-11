@@ -1,0 +1,1 @@
+- Merged-stack confirmation regressions now use dispatched reviewers at the reviewed revision and verify the lower review is failing before confirming the accepted head.

@@ -4,6 +4,67 @@ const cp = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 
+if (process.env.TOWER_CRANE_TEST_CLAUDE_PROVIDER) {
+  const now = () => Number(process.hrtime.bigint()) / 1e6;
+  const label = (file, args) => {
+    if (file !== process.execPath) return path.basename(file) + (file === 'git' ? `:${args[0]}` : '');
+    const index = args.findIndex((arg, i) => /\.(?:m?js|cjs)$/.test(arg) && !['--require', '-r'].includes(args[i - 1]));
+    const script = path.basename(args[index] || 'node');
+    return script === 'tower-crane.js' ? `cli:${args[index + 1]}` : script;
+  };
+  const profile = { process: label(process.execPath, process.argv.slice(1)), children: [], delays: [] };
+  const started = now();
+  for (const method of ['spawn', 'spawnSync', 'execFile', 'execFileSync']) {
+    const original = cp[method];
+    cp[method] = function providerProcess(file, args, ...rest) {
+      // Engine hook and spend subprocesses must not expire under runner load.
+      if (method !== 'spawn') {
+        if (typeof rest[0] === 'function' || rest.length === 0) rest.unshift({ timeout: 0 });
+        else rest[0] = { ...rest[0], timeout: 0 };
+      }
+      const child = { process: label(file, args), method, timeout: rest[0]?.timeout || 0 };
+      profile.children.push(child);
+      const start = now();
+      if (method === 'execFile' && child.process === 'cli:hook') {
+        // Hook delivery has separate integration coverage. Provider fixtures
+        // keep the real claim command without competing hook writers.
+        const writer = new (require('node:events').EventEmitter)();
+        writer.stdin = new (require('node:stream').PassThrough)();
+        writer.stdin.resume();
+        child.process = 'hook callback';
+        queueMicrotask(() => {
+          child.ms = now() - start;
+          rest.at(-1)(null, '', '');
+          writer.emit('close', 0);
+        });
+        return writer;
+      }
+      let result;
+      try { result = original.call(this, file, args, ...rest); }
+      finally { if (method.endsWith('Sync')) child.ms = now() - start; }
+      if (!method.endsWith('Sync')) result.once('close', () => { child.ms = now() - start; });
+      return result;
+    };
+  }
+  if (profile.process === 'spawn-monitor.js') {
+    // Exit and stream events advance these fixtures; scheduling cannot expire a job.
+    Object.defineProperty(require('node:perf_hooks').performance, 'now', { value: () => 0 });
+    const schedule = global.setTimeout;
+    global.setTimeout = function providerDelay(fn, ms, ...args) {
+      profile.delays.push(ms);
+      return schedule(fn, ms, ...args);
+    };
+    const ladder = require(path.join(path.dirname(process.argv[1]), 'ladder.js'));
+    const supervision = ladder.supervision;
+    ladder.supervision = (rung) => ({ ...supervision(rung), backoff_ms: 0, max_backoff_ms: 0 });
+  }
+  process.once('exit', () => {
+    if (process.env.TOWER_CRANE_TEST_PROVIDER_TRACE) {
+      fs.appendFileSync(process.env.TOWER_CRANE_TEST_PROVIDER_TRACE, JSON.stringify({ ...profile, ms: now() - started }) + '\n');
+    }
+  });
+}
+
 if (path.resolve(process.argv[1] || '') !== __filename) {
   if (process.env.TOWER_CRANE_TEST_VERIFIED_AGY === '1') {
     const agentsFile = path.join(path.dirname(path.dirname(process.argv[1])), 'lib', 'agents.js');
@@ -14,8 +75,12 @@ if (path.resolve(process.argv[1] || '') !== __filename) {
   }
   const spawn = cp.spawn;
   cp.spawn = function offlineHarness(file, args, options) {
-    const harness = /[\\/]scripts[\\/]fallback(?:\.exe)?$/.test(file) ? 'command' : file;
+    // The supervisor's lease gate starts its harness after `tower-crane-gate`.
+    const gated = file === '/bin/sh' && args[2] === 'tower-crane-gate';
+    const target = gated ? args[3] : file;
+    const harness = /[\\/]scripts[\\/]fallback(?:\.exe)?$/.test(target) ? 'command' : target;
     if (['codex', 'claude', 'agy', 'command'].includes(harness) && process.env.TOWER_CRANE_TEST_FALLBACK_FILE) {
+      if (gated) return spawn.call(this, file, [...args.slice(0, 3), process.execPath, __filename, harness, ...args.slice(4)], options);
       return spawn.call(this, process.execPath, [__filename, harness, ...args], options);
     }
     return spawn.call(this, file, args, options);
@@ -25,7 +90,7 @@ if (path.resolve(process.argv[1] || '') !== __filename) {
   const args = process.argv.slice(3);
   const file = process.env.TOWER_CRANE_TEST_FALLBACK_FILE;
   const cli = (argv) => cp.execFileSync(process.execPath, [path.join(__dirname, '..', '..', 'bin', 'tower-crane.js'), ...argv], {
-    encoding: 'utf8', timeout: 15000, stdio: ['pipe', 'pipe', 'pipe'],
+    encoding: 'utf8', timeout: process.env.TOWER_CRANE_TEST_CLAUDE_PROVIDER ? 0 : 15000, stdio: ['pipe', 'pipe', 'pipe'],
   });
   if (process.env.TOWER_CRANE_TEST_NESTED_DISPATCH && process.env.TOWER_CRANE_AGENT.startsWith('orchestrator-')) {
     const ladder = JSON.parse(cli(['ladder', 'show', '--json']));
@@ -51,6 +116,11 @@ if (path.resolve(process.argv[1] || '') !== __filename) {
   } : {};
   const provider = providerTest ? providerEnv.CLAUDE_CODE_USE_BEDROCK === '1' ? 'bedrock' : 'anthropic' : null;
   if (!attempts.length) cli(['claim', process.env.TOWER_CRANE_TASK]);
+  // Claim assertions need the real record, without another CLI per attempt.
+  const claim = providerTest
+    ? JSON.parse(fs.readFileSync(path.join(process.env.TOWER_CRANE_STATE, 'tasks.json'), 'utf8'))
+      .tasks.find((task) => task.id === process.env.TOWER_CRANE_TASK).claim
+    : JSON.parse(cli(['task', 'show', process.env.TOWER_CRANE_TASK, '--json'])).claim;
   const claudeHome = process.env.CLAUDE_CONFIG_DIR;
   const claude = harness === 'claude' ? {
     mcp: JSON.parse(fs.readFileSync(args[args.indexOf('--mcp-config') + 1], 'utf8')).mcpServers,
@@ -59,7 +129,7 @@ if (path.resolve(process.argv[1] || '') !== __filename) {
   } : {};
   attempts.push({
     harness, model, args, session: process.env.TOWER_CRANE_SESSION, retry: process.env.TOWER_CRANE_RETRY,
-    agent: process.env.TOWER_CRANE_AGENT, claim: JSON.parse(cli(['task', 'show', process.env.TOWER_CRANE_TASK, '--json'])).claim,
+    agent: process.env.TOWER_CRANE_AGENT, claim,
     env: process.env.ROUTE_ENV || null, broker: Boolean(process.env.TOWER_CRANE_BROKER),
     ...claude,
     node_test: Object.keys(process.env).filter((key) => /^NODE_TEST_/i.test(key)),
@@ -101,5 +171,9 @@ if (path.resolve(process.argv[1] || '') !== __filename) {
           : { type: 'turn.failed', error: { message } }));
     process.exit(type === 'permanent' ? 2 : type === 'signal' ? 75 : 1);
   }
-  if (process.env.TOWER_CRANE_TEST_FALLBACK_HOLD) setTimeout(() => {}, Number(process.env.TOWER_CRANE_TEST_FALLBACK_HOLD));
+  if (process.env.TOWER_CRANE_TEST_FALLBACK_FINISH) {
+    const timer = setInterval(() => {
+      if (fs.existsSync(process.env.TOWER_CRANE_TEST_FALLBACK_FINISH)) clearInterval(timer);
+    }, 25);
+  } else if (process.env.TOWER_CRANE_TEST_FALLBACK_HOLD) setTimeout(() => {}, Number(process.env.TOWER_CRANE_TEST_FALLBACK_HOLD));
 }

@@ -93,11 +93,10 @@ for (const nextHarness of ['codex', 'claude']) {
     const spawned = h.json(['spawn', '--task', 'T1'], { env: h.spawnEnv });
     // Windows pipe closure and hook writers can outlive the final harness.
     // Assert the recorded exit and usage instead of timing a foreground CLI.
-    const result = await h.runAsync(['wait', '--after', '0', '--task', 'T1', '--types', 'worker-exited', '--timeout', '20']);
-    assert.equal(result.code, 0, result.stderr);
-    const exited = JSON.parse(result.stdout);
-    assert.equal(exited.detail.agent, spawned.agent);
-    assert.equal(exited.detail.code, 0);
+    // worker-exited can be derived from a probe of an earlier attempt's process before
+    // its exit is recorded, so the recorded spawn exit carries the final code.
+    await until(() => events(h).some((e) => e.cmd === 'spawn exit' && e.detail.agent === spawned.agent), 'the worker did not record its exit');
+    assert.equal(events(h).findLast((e) => e.cmd === 'spawn exit' && e.detail.agent === spawned.agent).detail.code, 0);
     await until(() => events(h).filter((e) => e.cmd === 'spend').length === 2, 'route usage receipts were not recorded');
     const attempts = h.attempts();
     assert.deepEqual(attempts.map((a) => a.model), ['first', 'first', 'first', 'second']);
@@ -124,7 +123,7 @@ for (const nextHarness of ['codex', 'claude']) {
     const tokens = task.spend.tokens;
     h.ok(['spend', 'T1', '--from-spawn', 'worker-T1-1']);
     assert.equal(h.json(['task', 'show', 'T1']).spend.tokens, tokens);
-    h.ok(['submit', 'T1', '--agent', 'worker-T1-1', '--sha', 'abcdef1']);
+    h.ok(['submit', 'T1', '--agent', 'worker-T1-1', '--sha', '50b732a15be40ccb2065cb2ba0e7b366d511b736']);
     h.ok(['rework', 'T1', '--reason', 'fix review finding']);
     const preview = h.json(['spawn', '--task', 'T1', '--dry-run'], { env: h.spawnEnv });
     assert.equal(preview.resumed, false, 'the original route must not resume a fallback session');
@@ -238,7 +237,7 @@ test('rework during a live fallback refuses a second worker until the previous a
       throw error;
     }
   }, 'fallback worker did not start');
-  h.ok(['submit', 'T1', '--agent', 'worker-T1-1', '--sha', 'abcdef1']);
+  h.ok(['submit', 'T1', '--agent', 'worker-T1-1', '--sha', '50b732a15be40ccb2065cb2ba0e7b366d511b736']);
   h.ok(['rework', 'T1', '--reason', 'fix while worker is finishing']);
   for (const flags of [['--dry-run'], []]) {
     const result = h.run(['spawn', '--task', 'T1', ...flags], { env: h.spawnEnv });
@@ -331,15 +330,15 @@ test('agent output quoting outage and refusal does not switch routes', (t) => {
 
 test('user fallback configuration validates route shapes without project flags', (t) => {
   const h = makeProjectRepo(t);
-  for (const value of [{}, [null], [{ profile: 'sol', fallbacks: [] }]]) {
+  for (const value of [{}, [null], [{ profile: 'fixture-main', fallbacks: [] }]]) {
     setFallbacks(h, value);
     assert.notEqual(h.run(['ladder', 'show']).code, 0);
   }
-  setFallbacks(h, [{ profile: 'sol' }]);
+  setFallbacks(h, [{ profile: 'fixture-main' }]);
   assert.match(h.ok(['ladder', 'show']), /fallback 1.*from user file/);
-  assert.deepEqual(h.json(['ladder', 'show']).ladder.easy.fallbacks, [{ profile: 'sol' }]);
+  assert.deepEqual(h.json(['ladder', 'show']).ladder.easy.fallbacks, [{ profile: 'fixture-main' }]);
   h.ok(['ladder', 'save-user']);
-  assert.deepEqual(JSON.parse(fs.readFileSync(h.userConfig, 'utf8')).ladder.easy.fallbacks, [{ profile: 'sol' }]);
+  assert.deepEqual(JSON.parse(fs.readFileSync(h.userConfig, 'utf8')).ladder.easy.fallbacks, [{ profile: 'fixture-main' }]);
   setFallbacks(h, []);
   assert.deepEqual(h.json(['ladder', 'show']).ladder.easy.fallbacks, []);
 });
@@ -357,7 +356,7 @@ test('a project hard rung uses personal fallbacks and skips unavailable routes',
     { harness: 'command', command: [unavailable] },
     { harness: 'codex', profile: 'missing' },
     { harness: 'claude' },
-    { harness: 'pi', profile: 'sol' },
+    { harness: 'pi', profile: 'fixture-main' },
     { harness: 'claude', model: 'second' },
   ], 'hard');
   const shown = h.json(['ladder', 'show'], { env: h.spawnEnv });
@@ -463,10 +462,11 @@ test('missing expanded command fallback executables are skipped during preparati
 
 test('a detached switch wakes a live waiter, keeps its lease, and collects route usage on exit', async (t) => {
   const h = setup(t);
+  const finish = path.join(h.base, 'finish-fallback');
   const cursor = events(h).at(-1).id;
   const waiting = h.runAsync(['wait', '--after', cursor, '--types', 'spawn-fallback', '--timeout', '10']);
   const spawn = h.json(['spawn', '--task', 'T1'], {
-    env: { ...h.spawnEnv, TOWER_CRANE_TEST_FALLBACK_HOLD: '1800' },
+    env: { ...h.spawnEnv, TOWER_CRANE_TEST_FALLBACK_FINISH: finish },
   });
   const wake = await waiting;
   assert.equal(wake.code, 0, wake.stderr);
@@ -476,9 +476,15 @@ test('a detached switch wakes a live waiter, keeps its lease, and collects route
   assert.deepEqual(h.json(['status']).exited_claims, []);
   assert.equal(h.json(['task', 'show', 'T1']).claim.agent, spawn.agent);
   assert.equal(h.run(['release', 'T1', '--agent', 'recovery', '--reason', 'too early']).code, 1);
-  await until(() => h.json(['task', 'show', 'T1']).spend.entries?.length === 2, 'detached route usage was not collected');
+  fs.writeFileSync(finish, '');
+  await until(() => {
+    const entries = h.readState('tasks.json').tasks[0].spend.entries;
+    return entries?.length === 2 && entries.every((entry) => !entry.live)
+      && events(h).some((e) => e.cmd === 'worker-exited' && e.detail.agent === spawn.agent);
+  }, 'detached route usage and exit receipt were not collected');
   const task = h.json(['task', 'show', 'T1']);
   assert.equal(task.run.phase, 'waiting');
   assert.deepEqual(task.spend.entries.map((e) => [e.model, e.tokens]), [['first', 39], ['second', 13]]);
+  assert.ok(task.spend.entries.every((entry) => !entry.live), 'both routes have finalized usage');
   assert.equal(events(h).filter((e) => e.cmd === 'worker-exited').length, 1);
 });

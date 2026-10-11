@@ -3,7 +3,7 @@
     "agent": "worker-T8-1",
     "harness": "codex",
     "provider": "Bedrock",
-    "profile": "luna",
+    "profile": "fixture-light",
     "incident_date": "2026-10-07"
   },
   "attempts": [

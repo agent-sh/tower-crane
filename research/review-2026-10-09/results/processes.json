@@ -1,0 +1,114 @@
+{
+  "revision": "b3111056bcc5e0d3b898abb355bd5e8fb7721b8e",
+  "engine_root": "/home/avifenesh/.cache/tower-crane/agents/22cd04e4ddaf/worker-T144-1/T144-engine-BQZpDG/engine",
+  "node": "v26.10.0",
+  "platform": "linux",
+  "scratch": "/home/avifenesh/.cache/tower-crane/agents/22cd04e4ddaf/worker-T144-1/T144-probes",
+  "probes": [
+    {
+      "id": "P01",
+      "surface": "executor shutdown",
+      "command": "nice -n 19 node research/review-2026-10-09/at-revision.js b3111056bcc5e0d3b898abb355bd5e8fb7721b8e P01",
+      "expected": "SIGTERM stops the executor before any queued task starts.",
+      "observed": {
+        "signals": [
+          "SIGTERM to executor"
+        ],
+        "firstGateAliveAfterExecutorSignal": true,
+        "firstGateCommandSignal": null,
+        "secondGateStarted": true,
+        "sameExecutorStartedT2": true,
+        "executorStillAlive": true,
+        "cleanup": "SIGKILL to owned executor and remaining owned gate groups"
+      },
+      "verdict": "CONFIRMED"
+    },
+    {
+      "id": "P02",
+      "surface": "executor shutdown",
+      "command": "nice -n 19 node research/review-2026-10-09/at-revision.js b3111056bcc5e0d3b898abb355bd5e8fb7721b8e P02",
+      "expected": "After SIGTERM to executor and active gate, the executor does not start the next queued task.",
+      "observed": {
+        "signals": [
+          "SIGTERM to executor",
+          "SIGTERM to first gate process group"
+        ],
+        "firstGateAliveAfterExecutorSignal": true,
+        "firstGateCommandSignal": "SIGTERM",
+        "secondGateStarted": true,
+        "sameExecutorStartedT2": true,
+        "executorStillAlive": true,
+        "cleanup": "SIGKILL to owned executor and remaining owned gate groups"
+      },
+      "verdict": "CONFIRMED"
+    },
+    {
+      "id": "P03",
+      "surface": "supervisor lifetime",
+      "command": "nice -n 19 node research/review-2026-10-09/at-revision.js b3111056bcc5e0d3b898abb355bd5e8fb7721b8e P03",
+      "expected": "A worker supervisor can remain an executor after worker exit and drain another task through the shared queue.",
+      "observed": {
+        "workerExited": true,
+        "workerExitReceipt": 0,
+        "supervisorRunsT2": true,
+        "spawnWaitStillPending": true,
+        "workerEnv": {
+          "TOWER_CRANE_TASK": "T1",
+          "TOWER_CRANE_AGENT": "worker-T1-1",
+          "HOME": "/home/avifenesh/.cache/tower-crane/agents/22cd04e4ddaf/worker-T144-1/T144-probes/tower-crane-mWFNBe/repo/.tower-crane/homes/worker-T1-1/home",
+          "XDG_CACHE_HOME": "/home/avifenesh/.cache/tower-crane/agents/22cd04e4ddaf/worker-T144-1/T144-probes/tower-crane-mWFNBe/home/.cache/tower-crane/agents/767de4e004a8/worker-T1-1"
+        },
+        "secondGateEnv": {
+          "TOWER_CRANE_TASK": "T1",
+          "TOWER_CRANE_AGENT": "worker-T1-1",
+          "HOME": "/home/avifenesh/.cache/tower-crane/agents/22cd04e4ddaf/worker-T144-1/T144-probes/tower-crane-mWFNBe/repo/.tower-crane/homes/worker-T1-1/home",
+          "XDG_CACHE_HOME": "/home/avifenesh/.cache/tower-crane/agents/22cd04e4ddaf/worker-T144-1/T144-probes/tower-crane-mWFNBe/home/.cache/tower-crane/agents/767de4e004a8/worker-T1-1"
+        },
+        "inheritedWorkerEnv": [
+          "TOWER_CRANE_TASK",
+          "TOWER_CRANE_AGENT",
+          "HOME",
+          "XDG_CACHE_HOME"
+        ],
+        "dispatcherCache": "/home/avifenesh/.cache/tower-crane/agents/22cd04e4ddaf/worker-T144-1/T144-probes/tower-crane-mWFNBe/dispatcher-cache",
+        "duration": "event barriers only; no 3.5-hour wait",
+        "spawnExitAfterGates": 0
+      },
+      "verdict": "by design"
+    },
+    {
+      "id": "P04",
+      "surface": "supervisor environment",
+      "command": "nice -n 19 node research/review-2026-10-09/at-revision.js b3111056bcc5e0d3b898abb355bd5e8fb7721b8e P04",
+      "expected": "A departed worker supervisor uses dispatcher identity and environment for another task gate.",
+      "observed": {
+        "workerExited": true,
+        "workerExitReceipt": 0,
+        "supervisorRunsT2": true,
+        "spawnWaitStillPending": true,
+        "workerEnv": {
+          "TOWER_CRANE_TASK": "T1",
+          "TOWER_CRANE_AGENT": "worker-T1-1",
+          "HOME": "/home/avifenesh/.cache/tower-crane/agents/22cd04e4ddaf/worker-T144-1/T144-probes/tower-crane-mWFNBe/repo/.tower-crane/homes/worker-T1-1/home",
+          "XDG_CACHE_HOME": "/home/avifenesh/.cache/tower-crane/agents/22cd04e4ddaf/worker-T144-1/T144-probes/tower-crane-mWFNBe/home/.cache/tower-crane/agents/767de4e004a8/worker-T1-1"
+        },
+        "secondGateEnv": {
+          "TOWER_CRANE_TASK": "T1",
+          "TOWER_CRANE_AGENT": "worker-T1-1",
+          "HOME": "/home/avifenesh/.cache/tower-crane/agents/22cd04e4ddaf/worker-T144-1/T144-probes/tower-crane-mWFNBe/repo/.tower-crane/homes/worker-T1-1/home",
+          "XDG_CACHE_HOME": "/home/avifenesh/.cache/tower-crane/agents/22cd04e4ddaf/worker-T144-1/T144-probes/tower-crane-mWFNBe/home/.cache/tower-crane/agents/767de4e004a8/worker-T1-1"
+        },
+        "inheritedWorkerEnv": [
+          "TOWER_CRANE_TASK",
+          "TOWER_CRANE_AGENT",
+          "HOME",
+          "XDG_CACHE_HOME"
+        ],
+        "dispatcherCache": "/home/avifenesh/.cache/tower-crane/agents/22cd04e4ddaf/worker-T144-1/T144-probes/tower-crane-mWFNBe/dispatcher-cache",
+        "duration": "event barriers only; no 3.5-hour wait",
+        "spawnExitAfterGates": 0
+      },
+      "verdict": "CONFIRMED"
+    }
+  ]
+}

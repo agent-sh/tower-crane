@@ -1,0 +1,2 @@
+- Apply the supervisor's final usage even when an early exit collector already finalized the source entry, without double counting or restoring live state.
+- Preserve measured counters, cost and age as stale when cumulative telemetry shrinks, including a partial Claude log after session loss. Only an explicit invocation result can lower the total.

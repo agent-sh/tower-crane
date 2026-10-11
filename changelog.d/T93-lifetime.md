@@ -1,0 +1,1 @@
+- Keep live usage collection and budget enforcement active after submission until the harness closes. Missing telemetry preserves known spend and marks it stale, and the open board ages its telemetry and summaries without waiting for state changes.

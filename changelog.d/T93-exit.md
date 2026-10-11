@@ -1,0 +1,1 @@
+- Claude spawns that exit without a result now include session usage written after the last live sample. The supervisor reads the final session usage after the process group exits, before exit collection. Budget escalations retain owner-only answers under decision delegation.
