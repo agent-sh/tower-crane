@@ -89,7 +89,7 @@ test('both interruption commands audit once and a failed interruption audits not
 
 test('per-decision delegation uses owner approval and the shared setting audit', t => {
   const h = setup(t);
-  h.ok(['ask', '--question', 'Which implementation?', '--option', 'a', '--option', 'b']);
+  h.ok(['ask', '--kind', 'technical', '--question', 'Which implementation?', '--option', 'a', '--option', 'b']);
   h.ok(['decision', 'delegate', 'D1', '--answerers', '["worker-one"]']);
   assert.deepEqual(audits(h).at(-1)?.detail.settings, { 'decision.delegate': 'owner-required' });
   const args = ['decision', 'delegate', 'D1', '--answerers', '["worker-two"]', '--technical', 'true'];

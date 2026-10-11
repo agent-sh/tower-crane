@@ -1,0 +1,1 @@
+- Keep `authority`, `bench gates` and `bench tokens` open to competing orchestrator readers. These inspection commands never acquire a vacant session lease.
