@@ -204,6 +204,11 @@ const MUTANTS = [
     from: 'out.model_providers = keepTables(doc.model_providers, PROVIDER_FIELDS);', to: 'out.model_providers = doc.model_providers;', tests: ['test/isolation.test.js'] },
   { id: 'env-file-error-echoes', area: 'secrets', file: 'lib/spawn-settings.js',
     from: 'throw refuse(`invalid env_file ${file} at line ${assignmentLine}`);', to: 'throw refuse(`invalid env_file ${file} at line ${assignmentLine}: ${text}`);', tests: ['test/sandbox-extensions.test.js'] },
+  // git shim
+  { id: 'masked-merge-skip-worktree-dropped', area: 'git', file: 'lib/masked-merge.js',
+    from: "'--skip-worktree', '--stdin'], { input: [...after.keys()]", to: "'--skip-worktree', '--stdin'], { input: []", tests: ['test/masked-merge.test.js'] },
+  { id: 'masked-merge-never-plumbs', area: 'git', file: 'lib/masked-merge.js',
+    from: 'if (!touched.length) return null;', to: 'if (true) return null;', tests: ['test/masked-merge.test.js'] },
   // board
   { id: 'board-unescaped-lt', area: 'board', file: 'lib/board/view.js',
     from: ".replace(/</g, '&lt;')", to: '', tests: ['test/board.test.js'] },

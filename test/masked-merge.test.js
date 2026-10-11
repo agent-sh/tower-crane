@@ -56,7 +56,7 @@ function fixture(t, { base, task, main }) {
     commit(src, files, env, 'main again');
     git(['fetch', '-q', 'origin'], wt, env);
   };
-  return { env, wt, merge, commitMain, head: () => git(['rev-parse', 'HEAD'], wt, env), show: (rev) => git(['show', rev], wt, env) };
+  return { env, wt, merge, commitMain, git: (args) => git(args, wt, env), head: () => git(['rev-parse', 'HEAD'], wt, env), show: (rev) => git(['show', rev], wt, env) };
 }
 
 test('a merge through the shim that brings in a sandbox-masked path succeeds and leaves the mount alone', (t) => {
@@ -94,6 +94,20 @@ test('a merge through the shim that changes a tracked masked path keeps the file
   assert.equal(fs.readFileSync(path.join(f.wt, '.mcp.json'), 'utf8'), '{"v":1}\n');
   assert.equal(f.show('HEAD:.mcp.json'), '{"v":3}');
   assert.equal(git(['status', '--porcelain'], f.wt, f.env), '');
+});
+
+test('a fast-forward through the shim that brings in a sandbox-masked path moves the branch and leaves the mount alone', (t) => {
+  const f = fixture(t, { base: { 'a.txt': 'a\n' }, task: { 'b.txt': 'b\n' }, main: { '.mcp.json': '{}\n' } });
+  // Put the branch on the base that main descends from, so the merge is a fast-forward.
+  f.git(['checkout', '-q', '-B', 'B', 'origin/main^']);
+  fs.mkdirSync(path.join(f.wt, '.mcp.json'));
+  fs.writeFileSync(path.join(f.wt, '.mcp.json', 'keep'), 'keep\n');
+  const r = f.merge('--no-edit', 'origin/main');
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(f.head(), f.git(['rev-parse', 'origin/main']));
+  assert.equal(f.show('HEAD:.mcp.json'), '{}');
+  assert.equal(fs.readFileSync(path.join(f.wt, '.mcp.json', 'keep'), 'utf8'), 'keep\n');
+  assert.equal(f.git(['status', '--porcelain']), '');
 });
 
 test('a masked merge that conflicts is refused with its reason, and the branch does not move', (t) => {
