@@ -7,7 +7,7 @@ const path = require('node:path');
 const cp = require('node:child_process');
 const { makeRepo, ROOT } = require('./helpers');
 const { shellQuote } = require('../lib/gates/common');
-const { clearPlaceholders, REAP_DIR, REAP_STALE_MS } = require('../lib/git-placeholders');
+const { clearPlaceholders, REAP_DIR } = require('../lib/git-placeholders');
 
 function orphan(h, name = 'orphan') {
   const dir = path.join(h.repo, '.git', 'worktrees', name);
@@ -226,7 +226,9 @@ test('a cleanup keeps placeholders while another cleanup holds the git directory
   assert.match(messages.join(''), /another cleanup holds/);
 });
 
-test('a cleanup removes the directory a dead cleanup left behind, then the placeholder', (t) => {
+// A holder paused past any age limit still holds the directory. Taking it over
+// would let the paused cleanup rename a live lock that this one then moved away.
+test('a cleanup keeps placeholders behind a directory of any age, since its holder may only be paused', { timeout: 30000 }, (t) => {
   const h = makeRepo(t);
   h.init();
   const commonDir = path.join(h.repo, '.git');
@@ -234,13 +236,18 @@ test('a cleanup removes the directory a dead cleanup left behind, then the place
   fs.writeFileSync(lock, '', { mode: 0o444 });
   const dir = path.join(commonDir, REAP_DIR);
   fs.mkdirSync(dir);
-  const old = new Date(Date.now() - REAP_STALE_MS - 1000);
+  const old = new Date(Date.now() - 60 * 60 * 1000);
   fs.utimesSync(dir, old, old);
-  t.mock.method(process.stderr, 'write', () => true);
+  const messages = [];
+  t.mock.method(process.stderr, 'write', (chunk) => {
+    messages.push(String(chunk));
+    return true;
+  });
   onlyProcesses(t, h);
-  assert.deepEqual(clearPlaceholders(commonDir).map((file) => path.basename(file)), ['index.lock']);
-  assert.equal(fs.existsSync(lock), false);
-  assert.equal(fs.existsSync(dir), false);
+  assert.deepEqual(clearPlaceholders(commonDir), []);
+  assert.equal(fs.existsSync(lock), true);
+  assert.equal(fs.existsSync(dir), true);
+  assert.ok(messages.join('').includes(`remove ${dir} if no cleanup is running`));
 });
 
 // Python makes this process non-dumpable, so its descriptors are unreadable to
