@@ -38,6 +38,10 @@ function plant(h) {
     'merge.tc.driver': cmd('merge-driver'),
     'core.sshCommand': cmd('ssh-command'),
     'credential.helper': cmd('credential-helper'),
+    // Runs for each signed commit when no user.signingKey is set.
+    'commit.gpgSign': 'true',
+    'gpg.format': 'ssh',
+    'gpg.ssh.defaultKeyCommand': cmd('gpg-key-command'),
   };
   for (const [key, value] of Object.entries(settings)) h.git(['config', key, value]);
   return { cmd, ran: () => (fs.existsSync(marker) ? fs.readFileSync(marker, 'utf8').trim().split('\n') : []) };
@@ -89,7 +93,8 @@ test('git the CLI and gates run takes no command from repository config or hooks
 });
 
 // gh runs git itself (gh stack sync rebases and pushes), so the stub gh runs
-// git status in its working directory the way gh would.
+// git status and commits in its working directory the way gh would. The
+// commit fails once the planted signing command is emptied.
 test('git started through gh takes no command from repository config or hooks', (t) => {
   const h = makeRepo(t);
   h.init();
@@ -102,7 +107,9 @@ test('git started through gh takes no command from repository config or hooks', 
   const bin = path.join(h.base, 'gh-bin');
   fs.mkdirSync(bin);
   const stub = path.join(bin, 'gh.js');
-  fs.writeFileSync(stub, `require('node:child_process').execFileSync('git', ['status', '--porcelain'], { stdio: 'ignore' });
+  fs.writeFileSync(stub, `const cp = require('node:child_process');
+cp.execFileSync('git', ['status', '--porcelain'], { stdio: 'ignore' });
+cp.spawnSync('git', ['commit', '-q', '--allow-empty', '-m', 'sync'], { stdio: 'ignore' });
 console.log(JSON.stringify({ state: 'OPEN', headRefName: 'feature' }));\n`);
   fs.writeFileSync(path.join(bin, 'gh'), `#!/bin/sh\nexec ${shellQuote(process.execPath)} ${shellQuote(stub)} "$@"\n`, { mode: 0o755 });
   fs.writeFileSync(path.join(bin, 'gh.cmd'), `@"${process.execPath}" "${stub}" %*\r\n`);
