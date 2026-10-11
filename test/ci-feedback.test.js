@@ -8,8 +8,9 @@ const { cachedFixture } = require('./helpers');
 const B = require('../lib/broker');
 const { failingTests } = require('../lib/ci-feedback');
 
+// GitHub stamps every line of a job log.
 const PLAIN = [
-  '2026-10-11T10:00:01.0000000Z ##[group]Run npm test',
+  '##[group]Run npm test',
   'TAP version 13',
   'ok 1 - reads the config',
   'not ok 2 - writes the report',
@@ -20,10 +21,10 @@ const PLAIN = [
   "  error: 'expected 409 to equal 422'",
   '  ...',
   '1..3',
-].join('\n') + '\n';
+].map((line, i) => `2026-10-11T10:00:${String(i).padStart(2, '0')}.0000000Z ${line}`).join('\n') + '\n';
 // The same log as a runner colors it: a CSI color, and an OSC hyperlink around the group title.
 const LOG = PLAIN
-  .replace('2026-10-11T10:00:01.0000000Z', '\x1b[36m2026-10-11T10:00:01.0000000Z\x1b[0m')
+  .replace('2026-10-11T10:00:00.0000000Z', '\x1b[36m2026-10-11T10:00:00.0000000Z\x1b[0m')
   .replace('Run npm test', '\x1b]8;;https://example.test/run\x07Run npm test\x1b]8;;\x07')
   .replace('not ok 2 - writes the report', '\x1b[31mnot ok 2 - writes the report\x1b[0m');
 
@@ -60,12 +61,16 @@ function fixture(t) {
         most_recent_instance: { location: { path: 'src/a.js', start_line: 12 }, message: { text: 'untrusted input' } } }],
     },
   }));
-  // gh on the PATH is the stub; the CLI's gh calls reach it through the gates' gh helper.
-  const tools = path.join(h.base, 'tools');
-  fs.mkdirSync(tools);
-  fs.writeFileSync(path.join(tools, 'gh'), `#!${process.execPath}\nrequire(${JSON.stringify(path.join(__dirname, 'fixtures', 'ci-feedback-gh.js'))});\n`, { mode: 0o755 });
-  const pathKey = Object.keys(h.env).find((key) => key.toUpperCase() === 'PATH') || 'PATH';
-  h.env[pathKey] = tools + path.delimiter + (h.env[pathKey] || '');
+  // A preload sends only gh to the stub, on every platform: Windows cannot run a shebang script.
+  const stub = path.join(__dirname, 'fixtures', 'ci-feedback-gh.js');
+  const preload = path.join(h.base, 'gh-preload.js');
+  fs.writeFileSync(preload, `const cp = require('node:child_process');
+const original = cp.spawnSync;
+cp.spawnSync = (command, args, opts) => command === 'gh'
+  ? original(process.execPath, [${JSON.stringify(stub)}, ...args], opts)
+  : original(command, args, opts);
+`);
+  h.env.NODE_OPTIONS = `${h.env.NODE_OPTIONS || ''} --require=${JSON.stringify(preload)}`;
   return h;
 }
 
@@ -105,6 +110,27 @@ test('ci log refuses a job from another PR and writes nothing', (t) => {
   assert.equal(r.code, 1);
   assert.match(r.stderr, /job 43 is not in a check run on T1's PR head: it runs on tower-crane\/T2-other/);
   assert.equal(fs.existsSync(path.join(h.scratch, 'ci', 'job-43.log')), false);
+});
+
+test('ci log writes nothing through a link the worker planted in its scratch', { skip: process.platform === 'win32' && 'creating a link needs a privilege on Windows' }, (t) => {
+  const h = fixture(t);
+  const outside = path.join(h.base, 'outside');
+  fs.mkdirSync(outside);
+  fs.symlinkSync(outside, path.join(h.scratch, 'ci'));
+  const dirLink = h.run(['ci', 'log', '42', '--task', 'T1']);
+  assert.equal(dirLink.code, 1);
+  assert.match(dirLink.stderr, /is not a directory/);
+  assert.deepEqual(fs.readdirSync(outside), []);
+  // A log file that is a link out of the scratch is replaced, and its target is left alone.
+  fs.rmSync(path.join(h.scratch, 'ci'));
+  fs.mkdirSync(path.join(h.scratch, 'ci'));
+  const target = path.join(outside, 'target.txt');
+  fs.writeFileSync(target, 'keep\n');
+  fs.symlinkSync(target, path.join(h.scratch, 'ci', 'job-42.log'));
+  const leaf = h.run(['ci', 'log', '42', '--task', 'T1']);
+  assert.equal(leaf.code, 0, leaf.stderr);
+  assert.equal(fs.readFileSync(target, 'utf8'), 'keep\n');
+  assert.equal(fs.lstatSync(path.join(h.scratch, 'ci', 'job-42.log')).isFile(), true);
 });
 
 test('ci log reads the branch head before the task is submitted, and alerts wait for its PR', (t) => {
