@@ -615,6 +615,8 @@ test('a Windows worker whose supervisor stops waiting for its lease never starts
   const task = JSON.parse(fs.readFileSync(path.join(h.state, 'tasks.json'), 'utf8')).tasks.find((x) => x.id === 'T1');
   assert.equal(task.claim, null, 'the lease is rolled back');
   assert.equal(task.status, 'todo');
+  assert.equal(task.branch, null, 'the rest of the failed spawn is not recorded either');
+  assert.ok(!log(h).some((e) => e.cmd === 'worktree'), 'nor its worktree event');
   assert.ok(log(h).some((e) => e.cmd === 'release' && e.detail.rollback), 'the rollback is recorded');
   assert.ok(!log(h).some((e) => e.cmd === 'spawn'), 'no spawn is recorded');
   h.ok(['claim', 'T1', '--agent', 'manual']);
