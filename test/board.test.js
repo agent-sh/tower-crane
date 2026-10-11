@@ -200,6 +200,7 @@ test('review gate pips and ledger ignore unspawned and self-review verdicts', (t
   const sha = h.git(['rev-parse', 'HEAD']);
   h.ok(['submit', 'T1', '--sha', sha, '--agent', 'worker']);
   const sheet = () => fs.readFileSync(path.join(h.state, 'sketch.html'), 'utf8').match(/<article id="T1"[\s\S]*?<\/article>/)[0];
+  const room = () => fs.readFileSync(path.join(h.state, 'sketch.html'), 'utf8').match(/<article class="rv[^"]*" data-key="review-T1"[\s\S]*?<\/article>/)[0];
 
   for (const agent of ['made-up-reviewer', 'worker']) {
     for (const verdict of ['--ok', '--fail']) {
@@ -208,6 +209,7 @@ test('review gate pips and ledger ignore unspawned and self-review verdicts', (t
       assert.match(page, /class="pip missing">review not yet run<\/span>/, `${agent} ${verdict} leaves review missing`);
       assert.doesNotMatch(page, /class="pip (?:pass|fail)">review/);
       assert.match(page, /class="nocount">\(does not count: (?:not a spawned reviewer|self-review)\)/);
+      assert.match(room(), /No review at this commit yet\./, `the Review room ignores ${agent} ${verdict} too`);
       assert.equal(h.json(['task', 'show', 'T1']).gates.gates.find((g) => g.type === 'review').ok, false);
     }
   }
@@ -216,6 +218,7 @@ test('review gate pips and ledger ignore unspawned and self-review verdicts', (t
   for (const [verdict, state, word] of [['--fail', 'fail', 'failed'], ['--ok', 'pass', 'passed']]) {
     h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', verdict, '--sha', sha, '--agent', 'reviewer']);
     assert.match(sheet(), new RegExp(`class="pip ${state}">review ${word}</span>`));
+    assert.match(room(), state === 'pass' ? /Reviewer passed it:/ : /Reviewer sent findings:/);
   }
 });
 
@@ -1197,6 +1200,20 @@ test('the queue orders Now before Your turn, and an approval reads as a sentence
   assert.match(approval, /merge\.admin<\/b> is <span class="class-word">yours<\/span>/);
   assert.match(approval, /project set --merge-admin true --agent owner/, 'the change to make, as a command');
   assert.match(page, /<title>4 need you · 1 working/);
+});
+
+test('an approval offers a command to make the change only when project set can make it', (t) => {
+  const h = makeRepo(t);
+  h.init();
+  assert.notEqual(h.run(['project', 'set', '--merge-admin', 'true', '--agent', 'orchestrator']).code, 0);
+  assert.notEqual(h.run(['ladder', 'set', 'easy', '--tools', '["computer_use"]', '--agent', 'orchestrator']).code, 0);
+  h.ok(['render']);
+  const page = fs.readFileSync(path.join(h.state, 'sketch.html'), 'utf8');
+  const item = (id) => page.match(new RegExp(`<li class="qi" data-tier="\\w+" data-kind="approval" data-key="${id}"[\\s\\S]*?</li>`))[0];
+  assert.match(item('D1'), /Make it yourself[\s\S]*project set --merge-admin true --agent owner/);
+  assert.match(item('D2'), /ladder\.reach/, 'D2 is the ladder reach request');
+  assert.doesNotMatch(item('D2'), /Make it yourself|project set --ladder/, 'no project set flag makes a ladder reach change');
+  assert.match(page, /No tasks yet/, 'the requests show beside the first-run hint');
 });
 
 // The deterministic bars of the human bench (docs/human-bench.md), kept as
