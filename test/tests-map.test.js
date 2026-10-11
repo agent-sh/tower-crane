@@ -173,6 +173,7 @@ test('a change only to test/browser.js runs the full head suite with run-only se
   h.ok(['project', 'set', '--tests-paths', '["test/**"]']);
   const result = check(h);
   assert.equal(result.receipt.head_mode, 'full');
+  assert.ok(!result.receipt.head_tests?.includes('test/mapped.test.js'));
   assert.equal(result.receipt.mode, 'run-only (test-only diff)');
   assert.deepEqual(result.receipt.changed_files, ['test/browser.js']);
   assert.equal(result.commands.filter((c) => c.command !== 'git').length, 1);
