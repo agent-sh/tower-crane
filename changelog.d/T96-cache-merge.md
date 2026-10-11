@@ -1,0 +1,1 @@
+- Cached test fixtures initialize with the pinned ladder and keep their copies independent. Harness startup expectations retain pi and agy isolation behavior while using fictional model and profile IDs.

@@ -1,0 +1,1 @@
+- Reviewer prefix fixtures use the caller's default cache so running tests inside an agent cache does not change their cache-location assertion.

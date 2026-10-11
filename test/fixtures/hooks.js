@@ -368,6 +368,7 @@ if (env.HOOK_USAGE_HARNESS) {
   const original = cp.spawn;
   cp.spawn = function usageHarness(file, args, options) {
     if (file === env.HOOK_USAGE_HARNESS) {
+      if (env.HOOK_USAGE_ARGV) fs.writeFileSync(env.HOOK_USAGE_ARGV, JSON.stringify(args));
       return original.call(this, process.execPath, [
         require('node:path').join(__dirname, 'usage-harness.js'), env.HOOK_USAGE_FILE,
       ], options);

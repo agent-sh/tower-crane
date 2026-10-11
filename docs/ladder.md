@@ -2,6 +2,28 @@
 
 Every task has a tier, and the ladder in `project.json` says which harness, model and effort runs each tier and each other job. `tower-crane ladder show` prints it and where each rung comes from; `docs/state.md` has the full shape and the precedence (project, then the user file `~/.config/tower-crane/config.json`, then built-in).
 
+## Swap a model
+
+Change the `model` value on one rung in `~/.config/tower-crane/config.json`. For example, this line chooses the easy model for new projects:
+
+```json
+"easy": { "harness": "claude", "model": "global.anthropic.claude-haiku-5-5", "effort": "high" }
+```
+
+Put it inside the file's `"ladder": { ... }` object. Replacing the model ID needs no code changes. Keep the harness and effort valid for the CLI you use. Claude models on Bedrock need the `global.anthropic.` inference profile ID, rather than a regional `us.` ID. A rung with an explicit Claude `provider` adds that prefix itself and expands the short names in `BUILTIN.claude_aliases` (`opus`, `fable`, `sonnet`) to the release each names; any full ID passes through unchanged, so a new release needs only the ID. On Codex, use `model` for an explicit ID or change `profile` to the name of your configured profile.
+
+Existing projects keep the ladder copied at initialization. Swap a project rung through the CLI in one command:
+
+```sh
+tower-crane ladder set easy --model YOUR_MODEL_ID --clear profile
+```
+
+This keeps that rung's harness and effort. `ladder show` confirms the resolved model and its source. [builtin-ladder.json](builtin-ladder.json) records the shipped defaults. Tests pin their own rungs through `fixtureLadder()` and `pinRung()` in `test/helpers.js`; only the defaults test checks that snapshot. `node scripts/probe-model-swap.js` changes every built-in rung to a fictional model on another harness in a temporary copy and checks that only the defaults test fails. It uses the software-gate runner at three workers with a 45-minute deadline, private fixture caches and a short Chrome socket path. Live probes require `TOWER_CRANE_LIVE_MODEL` or `TOWER_CRANE_LIVE_PROFILE` explicitly.
+
+`node scripts/check-model-config.js` scans the raw text of `lib/`, `bin/` and JSON outside documentation for model ID and profile patterns. Comments and strings are checked alike. Every hit outside the BUILTIN table needs an entry in [tools/model-literals.json](../tools/model-literals.json) with an exact file path, matched text and reason. Matching uses the text written in the file.
+
+CI runs the complete model swap probe once on Linux with Node 26. Its temporary repositories live in the runner's cache outside the checkout, so parent project rules, state and agent cache identity cannot affect the fixtures.
+
 | Rung | Does | Good fit |
 |---|---|---|
 | `orchestrator` | plans, writes briefs, dispatches, runs gates, merges | the strongest model you have, in the harness you talk to |
@@ -121,7 +143,7 @@ Codex roles with `gitPush: branch` also get an explicit `git push` allow rule. T
 
 Claude reads named definitions from the user's config directory `mcp.json`, falling back to `~/.claude.json`, and pre-approves `mcp__NAME`. Codex reads `[mcp_servers.NAME]` and sets the selected servers' default and per-tool approvals to `approve`, including profile overrides. Neither copies the kit's env or headers. Workers' generated instructions and reviewers' user prompts name the approved servers. Configure the user's browser server and install its browser ahead of dispatch; Tower Crane does not install tools or guess server commands. The kit adds no filesystem grants: the existing read-only browser path and per-browser temp profile suffice for sandboxed command tests. MCP subprocesses follow the harness's MCP launch policy; the command sandbox applies to Bash/shell tools, so Tower Crane does not inject `--no-sandbox` into MCP server arguments.
 
-Run `TOWER_CRANE_LIVE_BROWSER=1 node --test test/live-browser.test.js` from an unsandboxed Linux session with logged-in claude and codex CLIs, Chrome installed and the browser kit configured in both harnesses. The opt-in probe spawns one real sandboxed worker per harness on a design task. It requires MCP navigation to the board, a PNG screenshot and one board browser test to pass; a missing Chrome, skipped browser test or worker that omits an action fails. `TOWER_CRANE_LIVE_BROWSER_HARNESS=claude` or `codex` selects one harness, `TOWER_CRANE_LIVE_MODEL` selects the Claude model (`opus` by default), and `TOWER_CRANE_LIVE_PROFILE` selects the Codex profile (`sol` by default). `TOWER_CRANE_TEST_CHROME` names a browser outside `PATH`.
+Run `TOWER_CRANE_LIVE_BROWSER=1 node --test test/live-browser.test.js` from an unsandboxed Linux session with logged-in claude and codex CLIs, Chrome installed and the browser kit configured in both harnesses. The opt-in probe spawns one real sandboxed worker per harness on a design task. It requires MCP navigation to the board, a PNG screenshot and one board browser test to pass; a missing Chrome, skipped browser test or worker that omits an action fails. `TOWER_CRANE_LIVE_BROWSER_HARNESS=claude` or `codex` selects one harness, `TOWER_CRANE_LIVE_MODEL` sets the required Claude model, and `TOWER_CRANE_LIVE_PROFILE` sets the required Codex profile. Missing selections fail before fixture preparation or harness dispatch. `TOWER_CRANE_TEST_CHROME` names a browser outside `PATH`.
 
 Every spawn removes the outer Node test runner's `NODE_TEST_*` variables before launching an agent, including retries and fallback routes; configured env values cannot restore them. This lets the worker's `node --test` run its own tests. The live probe rejects stderr, nonzero exits and empty test output, and prints the child receipt and agent log tails on failure.
 
@@ -216,4 +238,6 @@ Agy research rungs render the researcher role with native `search_web` and `read
 
 `tower-crane accept` refuses review evidence recorded by the agent that submitted the task. Review dispatch gives the reviewer a clean context, so its model may match the builder. Selection starts at the task tier, raises for a broad or risky diff, and promotes to a stronger tier when T31 review spend shows its median cost is no higher. Unknown usage leaves the complexity choice intact. The `review` rung is used when no tier rung at the needed level can run. `tower-crane validate` warns only when no reviewer rung can run.
 
-Only an explicitly identified owner can set `project set --review-policy JSON`. Its prices use canonical model identities shared by rungs and spend entries: `sol` resolves to `openai.gpt-6.1-sol`, `luna` to `openai.gpt-6-luna`, and `opus` to `claude-opus-5-5`.
+Only an explicitly identified owner can set `project set --review-policy JSON`. Its prices use the configured model IDs shared by rungs and spend entries, with whitespace trimmed and case folded. Provider prefixes remain distinct. Codex profiles resolve their actual model from the user's origin configuration, matching dispatch even when the caller's home is isolated: `<profile>.config.toml` or `[profiles.<profile>]` in `config.toml`; a readable standalone profile or a named profile table can inherit the base config's top-level model. An unknown profile keeps its configured identity. Every Claude rung expands `BUILTIN.claude_aliases` to its release ID; explicit provider routes also add their provider prefix. Native Claude review-spend aliases resolve through the same table before matching samples to prices; recorded IDs stay unchanged.
+
+Run `TOWER_CRANE_LIVE_REVIEW_CACHE=1 TOWER_CRANE_LIVE_MODEL=YOUR_MODEL node --test --test-name-pattern="real Claude reviewers" test/reviewer.test.js` to measure first-turn reviewer cache reads and writes. Choose a Claude model that supports prompt caching; the probe requires an explicit model and a logged-in Claude CLI.
