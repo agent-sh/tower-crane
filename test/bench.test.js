@@ -4,7 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { makeRepo } = require('./helpers');
+const { makeRepo, fixtureLadder } = require('./helpers');
 const { score, ciChecks } = require('../lib/bench-gates');
 const { taskSpend } = require('../lib/bench-tokens');
 
@@ -262,17 +262,21 @@ test('bench tokens reports accepted-task tokens and cost by rung and escalation 
   const h = makeRepo(t);
   t.after(h.cleanup);
   h.init();
+  const pinned = fixtureLadder().ladder;
+  const light = pinned.easy.model || pinned.easy.profile;
+  const main = pinned.medium.model || pinned.medium.profile;
+  const extended = `${main}[1m]`;
   for (const title of ['climbed', 'direct', 'open']) h.ok(['task', 'add', '--title', title, '--acceptance', 'done']);
   const spend = (task, rung, model, tokens, cached) => h.ok(['spend', task, '--tokens', String(tokens), '--input', String(tokens - 10),
     '--cached', String(cached), '--output', '10', '--rung', rung, '--model', model, '--harness', 'codex', '--agent', `${rung}-${task}`]);
   const spawn = (task, rung) => JSON.stringify({ at: '2026-10-07T00:00:00Z', agent: 'orchestrator', cmd: 'spawn', task, detail: { role: 'worker', rung, agent: `${rung}-${task}` } });
   fs.appendFileSync(path.join(h.state, 'events.jsonl'), [spawn('T1', 'easy'), spawn('T1', 'easy'), spawn('T1', 'medium'), spawn('T2', 'medium')].join('\n') + '\n');
-  spend('T1', 'easy', 'openai.gpt-6-luna', 1000010, 0);
-  spend('T1', 'medium', 'openai.gpt-6.1-sol', 3000010, 2000000);
-  spend('T1', 'review', 'openai.gpt-6.1-sol', 500010, 0);
-  spend('T2', 'medium', 'openai.gpt-6.1-sol', 2000010, 0);
-  spend('T2', 'review', 'global.anthropic.claude-opus-5-5[1m]', 100010, 0);
-  spend('T3', 'easy', 'openai.gpt-6-luna', 7000010, 0);
+  spend('T1', 'easy', light, 1000010, 0);
+  spend('T1', 'medium', main, 3000010, 2000000);
+  spend('T1', 'review', main, 500010, 0);
+  spend('T2', 'medium', main, 2000010, 0);
+  spend('T2', 'review', extended, 100010, 0);
+  spend('T3', 'easy', light, 7000010, 0);
   // Minute-only manual records are not missing telemetry.
   h.ok(['spend', 'T2', '--minutes', '5']);
   const doc = h.readState('tasks.json');
@@ -280,12 +284,14 @@ test('bench tokens reports accepted-task tokens and cost by rung and escalation 
   doc.tasks[1].status = 'accepted';
   h.writeState('tasks.json', doc);
   const prices = path.join(h.base, 'prices.json');
-  fs.writeFileSync(prices, JSON.stringify({ luna: { input: 0.1, cache_write: 0.1, cache_read: 0.01, output: 0.5 }, sol: { input: 2, cache_write: 2, cache_read: 0.1, output: 10 } }));
+  const rates = { [light]: { input: 0.1, cache_write: 0.1, cache_read: 0.01, output: 0.5 },
+    [main]: { input: 2, cache_write: 2, cache_read: 0.1, output: 10 } };
+  fs.writeFileSync(prices, JSON.stringify(rates));
   const r = h.json(['bench', 'tokens', '--prices', prices]);
   assert.deepEqual([r.accepted, r.complete], [2, 2]);
   assert.equal(r.all_tasks_tokens, 13600060, 'spend on unaccepted tasks counts toward the cost of accepted ones');
   assert.equal(r.tokens_per_accepted, 6800030);
-  assert.deepEqual(r.unpriced_models, { 'global.anthropic.claude-opus-5-5[1m]': 1 }, 'the 1M-context id needs its own price row');
+  assert.deepEqual(r.unpriced_models, { [extended]: 1 }, 'the 1M-context id needs its own price row');
   assert.equal(r.by_path.medium.priced_tasks, 0);
   assert.deepEqual(Object.keys(r.by_path), ['easy>medium', 'medium']);
   assert.equal(r.by_path['easy>medium'].median_tokens, 4500030);
@@ -293,13 +299,14 @@ test('bench tokens reports accepted-task tokens and cost by rung and escalation 
   assert.equal(r.by_rung.medium.tasks, 2);
   const t1 = r.tasks.find((x) => x.id === 'T1');
   assert.deepEqual([t1.fresh, t1.cached, t1.output], [2500000, 2000000, 30]);
-  // easy 1M fresh luna, medium 1M fresh + 2M cached sol, review 0.5M fresh sol, plus output.
+  // The path includes fresh easy tokens, cached medium tokens and fresh review tokens.
   const usd = 1 * 0.1 + 10e-6 * 0.5 + (1 * 2 + 2 * 0.1 + 10e-6 * 10) + (0.5 * 2 + 10e-6 * 10);
   assert.ok(Math.abs(r.by_path['easy>medium'].median_usd - usd) < 1e-9);
+  h.ok(['project', 'set', '--review-policy', JSON.stringify({ prices: rates })]);
   const text = h.ok(['bench', 'tokens']);
   assert.match(text, /accepted tasks: 2, with complete token records: 2/);
   assert.match(text, /easy>medium\s+1\s+4\.50M/);
-  assert.match(text, /unpriced entries by model: global\.anthropic\.claude-opus-5-5\[1m\] 1/);
+  assert.ok(text.includes(`unpriced entries by model: ${extended} 1`), text);
 });
 
 test('bench excludes accepted tasks missing worker, reviewer or resumed-session usage from medians', (t) => {
