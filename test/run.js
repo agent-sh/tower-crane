@@ -15,8 +15,13 @@ function testFiles() {
     ...fs.readdirSync(path.join(__dirname, 'gates')).filter((file) => file.endsWith('.test.js')).map((file) => `test/gates/${file}`),
   ].sort();
 }
+// Shard INDEX of TOTAL takes every TOTAL-th file of the sorted list. The runner
+// owns the split, so every Node version runs the same files in each shard.
+function shardFiles(files, index, total) {
+  return [...files].sort().filter((_, i) => i % total === index - 1);
+}
 if (require.main !== module) {
-  module.exports = { testFiles };
+  module.exports = { testFiles, shardFiles };
   return;
 }
 
@@ -46,14 +51,26 @@ const args = [
   '--test-timeout=300000', '--test-force-exit',
   ...flags,
 ];
+let list = files.length ? files : testFiles();
 const shard = process.env.TC_TEST_SHARD;
-if (shard) args.push(`--test-shard=${shard}`);
+if (shard) {
+  const match = /^([1-9]\d*)\/([1-9]\d*)$/.exec(shard);
+  if (!match || Number(match[1]) > Number(match[2])) {
+    console.error('TC_TEST_SHARD requires INDEX/TOTAL with 1 <= INDEX <= TOTAL');
+    process.exit(1);
+  }
+  list = shardFiles(list, Number(match[1]), Number(match[2]));
+}
+// Node would run its default pattern, the whole tree, when given no files.
+if (!list.length) {
+  console.log(`TC_TEST_SHARD ${shard} has no test files`);
+  return;
+}
 // A sandboxed run skips tests.host_only files; the tests gate runs them on the host. Only a sandbox
 // loads the helper, so an ordinary run needs no lib/ modules.
-const selected = files.length ? files : testFiles();
 const { run, skipped, refused } = process.env.TOWER_CRANE_SANDBOX === '1'
-  ? require('../lib/tests-host-only').split(selected, process.env)
-  : { run: selected, skipped: [], refused: [] };
+  ? require('../lib/tests-host-only').split(list, process.env)
+  : { run: list, skipped: [], refused: [] };
 if (refused.length) {
   console.error(`tower-crane: a sandboxed run with tests.host_only names test files, not directories or globs: ${refused.join(' ')}`);
   process.exit(1);
