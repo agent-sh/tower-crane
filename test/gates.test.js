@@ -53,6 +53,7 @@ module.exports = {
   async run(ctx) {
     fs.writeFileSync(process.env.GATE_OUT, JSON.stringify({ root: ctx.root, worktree: ctx.worktree, task: ctx.task.id, sha: ctx.task.sha, args: ctx.args, base: ctx.project.base }));
     ctx.log('fake gate ran');
+    await ctx.exec(process.execPath, ['-e', 'process.exit(0)']);
     return { ok: process.env.GATE_OK === '1', summary: 'fake gate', ref: 'run-1', sha: process.env.GATE_SHA || undefined };
   },
 };
@@ -559,7 +560,7 @@ test('merge removes the merged task worktree and records it', (t) => {
   assert.equal(removed.detail.removed, true);
 });
 
-test('merge keeps a worktree with uncommitted changes and says why', (t) => {
+test('merge saves uncommitted changes and removes the worktree', (t) => {
   const h = makeRepo(t);
   h.init();
   const wt = acceptedWithWorktree(h);
@@ -570,14 +571,14 @@ test('merge keeps a worktree with uncommitted changes and says why', (t) => {
 
   const merged = cli.run(['merge', 'T1'], { GATE_OUT: path.join(h.base, 'gate.json'), GATE_OK: '1' });
   assert.equal(merged.code, 0, merged.stderr);
-  assert.equal(fs.readFileSync(path.join(wt.path, 'notes.txt'), 'utf8'), 'unfinished\n');
-  assert.ok(h.registers(wt.path), 'git still registers it');
-  const kept = readEvents(h).find((e) => e.cmd === 'worktree kept');
-  assert.equal(kept.task, 'T1');
-  assert.equal(kept.detail.reason, 'uncommitted changes');
+  assert.ok(!fs.existsSync(wt.path));
+  assert.ok(!h.registers(wt.path));
+  const removed = readEvents(h).find((e) => e.cmd === 'worktree removed');
+  assert.equal(removed.task, 'T1');
+  assert.equal(fs.readFileSync(path.join(removed.detail.saved, 'files', 'notes.txt'), 'utf8'), 'unfinished\n');
 });
 
-test('merge keeps the worktree while merge.keep_branch is set', (t) => {
+test('merge retires local worktrees even when remote branches are kept', (t) => {
   const h = makeRepo(t);
   h.init(['--merge-keep-branch', 'true']);
   const wt = acceptedWithWorktree(h);
@@ -587,9 +588,9 @@ test('merge keeps the worktree while merge.keep_branch is set', (t) => {
 
   const merged = cli.run(['merge', 'T1'], { GATE_OUT: path.join(h.base, 'gate.json'), GATE_OK: '1' });
   assert.equal(merged.code, 0, merged.stderr);
-  assert.ok(fs.existsSync(wt.path), 'the worktree stays for its branch');
-  const kept = readEvents(h).find((e) => e.cmd === 'worktree kept');
-  assert.equal(kept.detail.reason, 'merge.keep_branch is set');
+  assert.ok(!fs.existsSync(wt.path));
+  assert.equal(h.git(['branch', '--list', wt.branch]), '');
+  assert.equal(readEvents(h).find((e) => e.cmd === 'worktree removed').task, 'T1');
 });
 
 test('a task sent back and claimed after merge looked at its worktree keeps the worktree', async (t) => {

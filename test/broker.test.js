@@ -407,3 +407,28 @@ test('a brokered worker or reviewer messages only the orchestrator or the owner'
   }
   assert.deepEqual(events().filter((e) => e.cmd === 'msg').map((e) => [e.task, e.detail.to]), [['T2', 'orchestrator'], ['T2', 'owner']]);
 });
+
+test('a sandboxed worker can print and list its prepared worktree without state writes', async (t) => {
+  const h = makeRepo(t);
+  h.init();
+  h.ok(['task', 'add', '--title', 'Prepared', '--acceptance', 'read worktree state']);
+  const wt = h.json(['worktree', 'T1']);
+  const job = { state: h.state, task: 'T1', agent: 'worker-T1-1', role: 'worker', harness: 'codex',
+    cwd: wt.path, broker: path.join(h.base, 'brokers', 'worker-T1-1', B.FILE) };
+  const broker = await B.start(job);
+  t.after(() => broker.close());
+  const env = { ...broker.env, TOWER_CRANE_AGENT: job.agent, TOWER_CRANE_TASK: job.task };
+  const before = h.readState('tasks.json');
+  const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8');
+  for (const args of [['worktree', 'T1'], ['worktree', 'list']]) {
+    const result = await h.runAsync([...args, '--json'], { env });
+    assert.equal(result.code, 0, result.stderr);
+    const data = JSON.parse(result.stdout);
+    assert.equal(args[1] === 'T1' ? data.path : data.worktrees[0].path, wt.path);
+  }
+  assert.deepEqual(h.readState('tasks.json'), before);
+  assert.equal(fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8'), events);
+  const denied = await h.runAsync(['worktree', 'prune'], { env });
+  assert.equal(denied.code, 1);
+  assert.match(denied.stderr, /not worktree prune/);
+});

@@ -128,15 +128,15 @@ test('failed current gates permit only confirmation of a merged PR at the accept
   assert.equal(confirmed.commands.length, 1, 'confirmation records the single lookup that proved the merge');
 });
 
-test('project merge options retain a branch checked out in a live worktree and select admin merging', (t) => {
+test('merge options retain the remote branch and select admin merging while retiring the local worktree', (t) => {
   const { h, merge } = acceptedTask(t);
   const worktree = h.json(['worktree', 'T1', '--agent', 'orchestrator']).path;
   h.ok(['project', 'set', '--merge-keep-branch', 'true', '--merge-admin', 'true']);
   const kept = merge();
   assert.ok(!kept.includes('--delete-branch'));
   assert.ok(kept.includes('--admin'));
-  assert.equal(h.git(['symbolic-ref', '--short', 'HEAD'], worktree), 'fixture-change');
-  assert.ok(h.git(['worktree', 'list', '--porcelain']).includes('branch refs/heads/fixture-change'));
+  assert.equal(fs.existsSync(worktree), false);
+  assert.equal(h.git(['branch', '--list', 'fixture-change']), '');
   h.ok(['project', 'set', '--merge-keep-branch', 'false', '--merge-admin', 'false']);
   const reset = merge(['--method', 'merge']);
   assert.ok(reset.includes('--merge'));
