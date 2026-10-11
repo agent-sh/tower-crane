@@ -151,6 +151,9 @@ function bindingScopes(text) {
   for (let i = 0; i < tokens.length; i++) {
     const declaration = tokens[i];
     if (!['const', 'let', 'var'].includes(declaration.value)) continue;
+    // var can escape a block. Collect possible values conservatively when
+    // its function boundary is ambiguous, retaining each initializer's scope.
+    const storage = declaration.value === 'var' ? root : declaration.scope;
     let j = i + 1;
     while (j < tokens.length) {
       let name = null;
@@ -180,9 +183,9 @@ function bindingScopes(text) {
       }
       const end = tokens[j]?.start ?? text.length;
       if (name) {
-        const values = declaration.scope.values.get(name) || [];
-        values.push(text.slice(from, end).trim());
-        declaration.scope.values.set(name, values);
+        const values = storage.values.get(name) || [];
+        values.push({ value: text.slice(from, end).trim(), scope: declaration.scope });
+        storage.values.set(name, values);
       }
       if (tokens[j]?.value !== ',') break;
       j++;
@@ -196,10 +199,9 @@ function bindingScopes(text) {
     const values = new Map();
     cache.set(initial, values);
     for (let scope = initial; scope; scope = scope.parent) {
-      const declarationScope = scope;
       for (const [name, initializers] of scope.values) {
-        if (!values.has(name)) values.set(name, initializers.map((value) => ({
-          value, bindings: () => scopedBindings(declarationScope),
+        if (!values.has(name)) values.set(name, initializers.map((initializer) => ({
+          value: initializer.value, bindings: () => scopedBindings(initializer.scope),
         })));
       }
     }

@@ -133,6 +133,8 @@ test('shared checks reject readiness budgets and require a reason on allowed tim
     'const { unused } = settings, window = 1000; until(check, "ready", window);', // wait-allow: rejected lint fixture
     'const [unused] = settings, window = 1000; until(check, "ready", window);', // wait-allow: rejected lint fixture
     'function short() { const delay = 1000; const pattern = /[},]/; until(check, "ready", delay); }', // wait-allow: rejected lint fixture
+    'function short() { if (ready) { var window = 1000; } until(check, "ready", window); }', // wait-allow: rejected lint fixture
+    'function short() { if (ready) { const delay = 1000; var window = delay; } until(check, "ready", window); }', // wait-allow: rejected lint fixture
     'const unused = 0, HUNG_TEST_MS = 1000; until(check, "ready", HUNG_TEST_MS);', // wait-allow: rejected lint fixture
     'const delay = 1000, window = delay; function ready() { const delay = 300000; until(check, "ready", window); }', // wait-allow: rejected lint fixture
     'const delay = 1000; { const window = delay; { const delay = window; until(check, "ready", delay); } }', // wait-allow: rejected lint fixture
