@@ -8,8 +8,12 @@ const cp = require('node:child_process');
 const { BIN, cachedFixture } = require('./helpers');
 
 const REQUIRED = [
-  'test (ubuntu-latest, node 26)',
-  'test (ubuntu-latest, node 24)',
+  'test (ubuntu-latest, node 26, shard 1/3)',
+  'test (ubuntu-latest, node 26, shard 2/3)',
+  'test (ubuntu-latest, node 26, shard 3/3)',
+  'test (ubuntu-latest, node 24, shard 1/3)',
+  'test (ubuntu-latest, node 24, shard 2/3)',
+  'test (ubuntu-latest, node 24, shard 3/3)',
   'test (windows-latest, node 26, shard 1/3)',
   'test (windows-latest, node 26, shard 2/3)',
   'test (windows-latest, node 26, shard 3/3)',
@@ -23,16 +27,19 @@ test('package support, CI matrix, and required jobs target Node 24 and 26', () =
   assert.equal(metadata.engines.node, '>=24');
 
   const workflow = fs.readFileSync(path.join(root, '.github', 'workflows', 'ci.yml'), 'utf8');
-  const matrix = [...workflow.matchAll(/^\s+- \{ os: ([^,]+), node: (\d+), shard: '([^']*)' \}$/gm)]
-    .map(([, os, node, shard]) => ({ os, node: Number(node), shard }));
-  assert.deepEqual(matrix, [
-    { os: 'ubuntu-latest', node: 26, shard: '' },
-    { os: 'ubuntu-latest', node: 24, shard: '' },
-    { os: 'windows-latest', node: 26, shard: '1/3' },
-    { os: 'windows-latest', node: 26, shard: '2/3' },
-    { os: 'windows-latest', node: 26, shard: '3/3' },
-  ]);
-  assert.deepEqual(matrix.map(({ os, node, shard }) => `test (${os}, node ${node}${shard ? `, shard ${shard}` : ''})`), REQUIRED);
+  const matrix = [...workflow.matchAll(/^\s+- \{ os: ([^,]+), node: (\d+), shard: '(\d+)\/(\d+)' \}$/gm)]
+    .map(([, os, node, index, total]) => ({ os, node: Number(node), index: Number(index), total: Number(total) }));
+  // Each OS and Node pair must run every shard of its split once, and no other shard.
+  const jobs = new Map();
+  for (const entry of matrix) {
+    const job = `${entry.os} node ${entry.node}`;
+    jobs.set(job, [...(jobs.get(job) || []), entry]);
+  }
+  for (const [job, shards] of jobs) {
+    const { total } = shards[0];
+    assert.deepEqual(shards.map(({ index, total }) => `${index}/${total}`), Array.from({ length: total }, (_, i) => `${i + 1}/${total}`), `${job} shards`);
+  }
+  assert.deepEqual(matrix.map(({ os, node, index, total }) => `test (${os}, node ${node}, shard ${index}/${total})`), REQUIRED);
 
   const requiredJson = JSON.stringify(REQUIRED);
   for (const file of ['docs/state.md', 'docs/cli.md']) {
@@ -41,6 +48,16 @@ test('package support, CI matrix, and required jobs target Node 24 and 26', () =
   }
   const agents = fs.readFileSync(path.join(root, 'AGENTS.md'), 'utf8');
   assert.match(agents, /\bNode 24 or newer\b/);
+});
+
+test('the model swap proof checks out the PR merge, so a branch older than its probe still runs it', () => {
+  const root = path.resolve(__dirname, '..');
+  // A Windows checkout writes CRLF line endings.
+  const workflow = fs.readFileSync(path.join(root, '.github', 'workflows', 'ci.yml'), 'utf8').replace(/\r\n/g, '\n');
+  const job = workflow.slice(workflow.indexOf('\n  model-swap:\n'));
+  // Pinning the head sha checks out a branch that predates scripts/probe-model-swap.js.
+  assert.doesNotMatch(job, /pull_request\.head\.sha/);
+  assert.match(job, /node scripts\/probe-model-swap\.js/);
 });
 
 function run(name, conclusion = 'success', status = 'completed', app = 'github-actions', id = 1) {
@@ -64,11 +81,11 @@ function fixture(t, withPr = true) {
   });
   const { sha } = h;
   return {
-    check({ pr = { mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }, runs = REQUIRED.map((name) => run(name)), ci = {} } = {}) {
+    check({ pr = { mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }, runs = REQUIRED.map((name) => run(name)), ci = {}, suites: given, workflows = [] } = {}) {
       const project = h.readState('project.json');
       h.writeState('project.json', { ...project, ci: { required: REQUIRED, capped_review: CAP_POLICY, ...ci } });
       const file = path.join(h.base, 'github.json');
-      const suites = [...new Set(runs.map((c) => c.check_suite.id))].map((id) => {
+      const suites = given ?? [...new Set(runs.map((c) => c.check_suite.id))].map((id) => {
         const linked = runs.filter((c) => c.check_suite.id === id);
         return {
           id, app: linked[0].app, status: 'completed',
@@ -76,7 +93,7 @@ function fixture(t, withPr = true) {
           latest_check_runs_count: linked.length,
         };
       });
-      fs.writeFileSync(file, JSON.stringify({ sha, pr, runs, suites }));
+      fs.writeFileSync(file, JSON.stringify({ sha, pr, runs, suites, workflows }));
       const r = cp.spawnSync(process.execPath, ['--require', github, BIN, 'check', 'ci', 'T1', '--agent', 'checker', '--json'], {
         cwd: h.repo, env: { ...h.env, TEST_GITHUB: file }, encoding: 'utf8', timeout: 60000,
       });
@@ -223,4 +240,141 @@ test('required checks also apply to a submitted head without a PR', (t) => {
   assert.equal(missing.code, 1, missing.summary);
   assert.match(missing.summary, /missing required check runs/);
   assert.equal(h.check().code, 0);
+});
+
+test('a superseded failed run does not block: the latest run of each required check decides', (t) => {
+  // T160 at f361335: one windows shard failed on 2026-10-09 and passed on a rerun the next day.
+  const h = fixture(t);
+  const name = 'test (windows-latest, node 26, shard 2/3)';
+  const failed = { ...run(name, 'failure'), id: 114055863456, started_at: '2026-10-09T22:36:00Z' };
+  const passed = { ...run(name, 'success'), id: 114217721960, started_at: '2026-10-10T12:54:00Z' };
+  const others = REQUIRED.filter((n) => n !== name).map((n) => run(n));
+  const suite = (id, conclusion, runs) => ({ id, app: { slug: 'github-actions' }, status: 'completed', conclusion, latest_check_runs_count: runs });
+
+  // A rerun in the same suite: GitHub grades the suite by its current runs, so it is green. The stale run is listed first.
+  const rerun = h.check({ runs: [failed, ...others, passed], suites: [suite(1, 'success', REQUIRED.length)] });
+  assert.equal(rerun.code, 0, rerun.summary);
+  assert.match(rerun.summary, /CI green/);
+
+  // A reopened PR starts every workflow again in a new suite. The old suite keeps its failure with no current run.
+  const reopened = h.check({
+    runs: [
+      { ...failed, check_suite: { id: 1 } },
+      ...others.map((r) => ({ ...r, check_suite: { id: 1 }, started_at: '2026-10-09T22:36:00Z' })),
+      ...others.map((r) => ({ ...r, check_suite: { id: 2 }, started_at: '2026-10-10T12:54:00Z' })),
+      { ...passed, check_suite: { id: 2 } },
+    ],
+    suites: [suite(1, 'failure', REQUIRED.length), suite(2, 'success', REQUIRED.length)],
+  });
+  assert.equal(reopened.code, 0, reopened.summary);
+  assert.match(reopened.summary, /CI green/);
+
+  // The newest run decides: a later failure still blocks after an earlier success.
+  const relapse = h.check({
+    runs: [passed, { ...run(name, 'failure'), id: 114300000000, started_at: '2026-10-10T13:30:00Z' }, ...others],
+    suites: [suite(1, 'failure', REQUIRED.length)],
+  });
+  assert.equal(relapse.code, 1, relapse.summary);
+  assert.ok(relapse.summary.includes(`failing: ${name} (failure)`), relapse.summary);
+});
+
+test('an unfinished or partly read suite blocks even when its runs were superseded', (t) => {
+  const h = fixture(t);
+  const name = 'test (windows-latest, node 26, shard 2/3)';
+  const old = { ...run(name, 'success'), id: 114055863456, started_at: '2026-10-09T22:36:00Z', check_suite: { id: 1 } };
+  const current = { ...run(name, 'success'), id: 114217721960, started_at: '2026-10-10T12:54:00Z', check_suite: { id: 2 } };
+  const others = REQUIRED.filter((n) => n !== name).map((n) => ({ ...run(n), check_suite: { id: 2 } }));
+  const suite = (id, status, conclusion, runs) => ({ id, app: { slug: 'github-actions' }, status, conclusion, latest_check_runs_count: runs });
+  const passing = suite(2, 'completed', 'success', REQUIRED.length);
+
+  // The old suite has not finished, so more of its runs may still come.
+  const running = h.check({ runs: [old, current, ...others], suites: [suite(1, 'in_progress', null, 1), passing] });
+  assert.equal(running.code, 1, running.summary);
+  assert.match(running.summary, /check suites not green.*in_progress/);
+
+  // The old suite failed and reports two runs, but only one was read, so the other one is unknown.
+  const partial = h.check({ runs: [old, current, ...others], suites: [suite(1, 'completed', 'failure', 2), passing] });
+  assert.equal(partial.code, 1, partial.summary);
+  assert.match(partial.summary, /check suites not green.*failure, 2 runs/);
+});
+
+function workflow(id, checkSuite, conclusion = 'success', extra = {}) {
+  return {
+    id, check_suite_id: checkSuite, name: 'CI', path: '.github/workflows/ci.yml', event: 'pull_request',
+    created_at: `2026-10-11T${id === 100 ? '10' : '11'}:00:00Z`,
+    status: 'completed', conclusion, ...extra,
+  };
+}
+
+function actionSuite(id, conclusion = 'success', extra = {}) {
+  return { id, app: { slug: 'github-actions' }, status: 'completed', conclusion, latest_check_runs_count: REQUIRED.length, ...extra };
+}
+
+test('a newer passing workflow supersedes an old failed suite whose check runs are absent', (t) => {
+  const h = fixture(t);
+  const old = workflow(100, 1, 'failure');
+  const current = workflow(200, 2);
+  for (const workflows of [[old, current], [current, old]]) {
+    const r = h.check({
+      runs: REQUIRED.map((name) => run(name, 'success', 'completed', 'github-actions', 2)),
+      suites: [actionSuite(1, 'failure'), actionSuite(2)],
+      workflows,
+    });
+    assert.equal(r.code, 0, r.summary);
+    assert.match(r.summary, /CI green.*1 check suites completed/);
+    assert.match(r.summary, /Superseded workflow runs: .*ci\.yml.*pull_request.*100.*failure.*suite 1/);
+    assert.doesNotMatch(r.summary, /check suites not green/);
+    assert.equal(r.confirmed_failure, undefined);
+    assert.ok(r.commands.some((c) => c.args.includes(`repos/acme/app/actions/runs?head_sha=${r.sha}&per_page=100`)));
+  }
+});
+
+test('a newer failed workflow still blocks and its older passing run is recorded as superseded', (t) => {
+  const r = fixture(t).check({
+    runs: REQUIRED.map((name) => run(name, 'success', 'completed', 'github-actions', 2)),
+    suites: [actionSuite(1), actionSuite(2, 'failure')],
+    workflows: [workflow(200, 2, 'failure'), workflow(100, 1)],
+  });
+  assert.equal(r.code, 1, r.summary);
+  assert.match(r.summary, /check suites not green: github-actions \(failure/);
+  assert.match(r.summary, /Superseded workflow runs: .*100.*success.*suite 1/);
+  assert.doesNotMatch(r.summary, /Superseded workflow runs: .*200/);
+});
+
+test('a queued rerun newer than a success is the current run: the gate waits for it', (t) => {
+  // A queued run has no started_at yet, so the earlier success must not supersede it by its start time.
+  const h = fixture(t);
+  const name = 'test (windows-latest, node 26, shard 2/3)';
+  const passed = { ...run(name, 'success'), id: 114217721960, started_at: '2026-10-10T12:54:00Z' };
+  const queued = { ...run(name, null, 'queued'), id: 114300000000 };
+  const others = REQUIRED.filter((n) => n !== name).map((n) => run(n));
+  const suite = (id, status, conclusion, runs) => ({ id, app: { slug: 'github-actions' }, status, conclusion, latest_check_runs_count: runs });
+
+  // The rerun is queued in the same suite, which is still running. A success that started earlier but has a higher id
+  // is in the mix too: the verdict must hold whatever order GitHub lists the three runs in.
+  const early = { ...run(name, 'success'), id: 114400000000, started_at: '2026-10-10T11:00:00Z' };
+  const inSuite = [suite(1, 'in_progress', null, REQUIRED.length)];
+  const orders = [
+    [passed, queued, early], [passed, early, queued], [queued, passed, early],
+    [queued, early, passed], [early, passed, queued], [early, queued, passed],
+  ];
+  for (const order of orders) {
+    const same = h.check({ runs: [...order, ...others], suites: inSuite });
+    assert.equal(same.code, 1, same.summary);
+    assert.ok(same.summary.includes(`${name} (queued)`), same.summary);
+  }
+
+  // A reopened PR queues the rerun in a new suite. The old suite's success is no longer current.
+  const reopened = h.check({
+    runs: [{ ...passed, check_suite: { id: 1 } }, ...others.map((r) => ({ ...r, check_suite: { id: 1 } })), { ...queued, check_suite: { id: 2 } }],
+    suites: [suite(1, 'completed', 'success', REQUIRED.length), suite(2, 'queued', null, 1)],
+  });
+  assert.equal(reopened.code, 1, reopened.summary);
+  assert.ok(reopened.summary.includes(`${name} (queued)`), reopened.summary);
+
+  // A run that was cancelled before it started, and is older than a rerun that did start, does not block the rerun.
+  const stale = { ...run(name, 'cancelled'), id: 114100000000 };
+  const rerun = h.check({ runs: [stale, passed, ...others], suites: [suite(1, 'completed', 'success', REQUIRED.length)] });
+  assert.equal(rerun.code, 0, rerun.summary);
+  assert.match(rerun.summary, /CI green/);
 });

@@ -1,0 +1,1 @@
+- Stack confirmation uses audited asynchronous request receipts to keep wrong-base merges failed across retries and stack sync errors, including lower-member attempts recorded under a higher task. Failed retries preserve the task's worktree.

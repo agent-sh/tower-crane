@@ -15,8 +15,13 @@ function testFiles() {
     ...fs.readdirSync(path.join(__dirname, 'gates')).filter((file) => file.endsWith('.test.js')).map((file) => `test/gates/${file}`),
   ].sort();
 }
+// Shard INDEX of TOTAL takes every TOTAL-th file of the sorted list. The runner
+// owns the split, so every Node version runs the same files in each shard.
+function shardFiles(files, index, total) {
+  return [...files].sort().filter((_, i) => i % total === index - 1);
+}
 if (require.main !== module) {
-  module.exports = { testFiles };
+  module.exports = { testFiles, shardFiles };
   return;
 }
 
@@ -46,15 +51,39 @@ const args = [
   '--test-timeout=300000', '--test-force-exit',
   ...flags,
 ];
+let list = files.length ? files : testFiles();
 const shard = process.env.TC_TEST_SHARD;
-if (shard) args.push(`--test-shard=${shard}`);
-args.push(...(files.length ? files : testFiles()));
+if (shard) {
+  const match = /^([1-9]\d*)\/([1-9]\d*)$/.exec(shard);
+  if (!match || Number(match[1]) > Number(match[2])) {
+    console.error('TC_TEST_SHARD requires INDEX/TOTAL with 1 <= INDEX <= TOTAL');
+    process.exit(1);
+  }
+  list = shardFiles(list, Number(match[1]), Number(match[2]));
+}
+// Node would run its default pattern, the whole tree, when given no files.
+if (!list.length) {
+  console.log(`TC_TEST_SHARD ${shard} has no test files`);
+  return;
+}
+// A sandboxed run skips tests.host_only files; the tests gate runs them on the host. Only a sandbox
+// loads the helper, so an ordinary run needs no lib/ modules.
+const { run, skipped, refused } = process.env.TOWER_CRANE_SANDBOX === '1'
+  ? require('../lib/tests-host-only').split(list, process.env)
+  : { run: list, skipped: [], refused: [] };
+if (refused.length) {
+  console.error(`tower-crane: a sandboxed run with tests.host_only names test files, not directories or globs: ${refused.join(' ')}`);
+  process.exit(1);
+}
+if (skipped.length) console.error(`tower-crane: skipped host-only tests in this sandbox, the tests gate runs them on the host: ${skipped.join(' ')}`);
+args.push(...run);
 
 const env = { ...process.env };
 delete env.TC_TEST_SHARD;
 // A runner invoked from a test must launch a new run, not Node's recursive no-op.
 delete env.NODE_TEST_CONTEXT;
-const result = cp.spawnSync(process.execPath, args, { stdio: 'inherit', env });
+// With every file skipped there is nothing to run; node --test with no file would search the directory.
+const result = run.length ? cp.spawnSync(process.execPath, args, { stdio: 'inherit', env }) : { status: 0 };
 if (result.error) {
   console.error(result.error.message);
   process.exitCode = 1;

@@ -1,0 +1,1 @@
+- Keep live budget escalations compatible with agy/pi authority checks. Live-spend tests reuse cached fixtures and close the shared browser on completion.

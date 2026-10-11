@@ -1,0 +1,1 @@
+- Native Claude alias spend records cost under the same release identity used by reviewer pricing, without rewriting stored model IDs. Provider prices stay distinct and rung cost totals stay known when complete usage has a price. Live browser and Codex sandbox probes require explicit model or profile selections.

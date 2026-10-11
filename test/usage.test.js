@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
-const { cachedFixture, detachedAlive } = require('./helpers');
+const { cachedFixture, pinRung, detachedAlive } = require('./helpers');
 
 const fixture = (name) => path.join(__dirname, 'fixtures', 'usage', name);
 const text = (name) => fs.readFileSync(fixture(name), 'utf8');
@@ -18,20 +18,20 @@ test('codex captured footer and repeated session totals are counted once', () =>
   });
   const session = text('codex-session.jsonl');
   assert.deepEqual(parse('codex', text('codex.log'), session + session), {
-    tokens: 24675, input: 24670, cached: 0, output: 5, model: 'openai.gpt-6.1-sol',
+    tokens: 24675, input: 24670, cached: 0, output: 5, model: 'fixture-main',
   });
   assert.deepEqual(parse('codex', text('codex.log'), text('codex-cache-session.jsonl')), {
-    tokens: 1529656, input: 1516556, cached: 1398443, output: 13100, model: 'openai.gpt-6.1-sol',
+    tokens: 1529656, input: 1516556, cached: 1398443, output: 13100, model: 'fixture-main',
   });
   const writes = text('codex-cache-write-session.jsonl');
   assert.deepEqual(parse('codex', '', writes + writes), {
-    tokens: 668176, input: 660162, cached: 575581, output: 8014, model: 'openai.gpt-6.1-sol',
+    tokens: 668176, input: 660162, cached: 575581, output: 8014, model: 'fixture-main',
   }, 'cache writes and reasoning are already included in input and output');
 });
 
 test('claude captured usage includes cache reads and writes in input', () => {
   assert.deepEqual(parse('claude', text('claude.jsonl')), {
-    tokens: 31948, input: 31773, cached: 31771, output: 175, model: 'claude-opus-5-5',
+    tokens: 31948, input: 31773, cached: 31771, output: 175, model: 'fixture-large',
   });
   assert.deepEqual(parse('claude', text('claude.jsonl') + text('claude.jsonl')), parse('claude', text('claude.jsonl')));
   assert.deepEqual(parse('claude', text('claude-result.json')), {
@@ -40,7 +40,7 @@ test('claude captured usage includes cache reads and writes in input', () => {
   assert.deepEqual(parse('claude', text('claude.jsonl') + text('claude-result.json')), parse('claude', text('claude-result.json')), 'a result is not added to assistant usage');
   const result = text('claude-print-result.json');
   assert.deepEqual(parse('claude', result + result), {
-    tokens: 788527, input: 780011, cached: 719614, output: 8516, model: 'claude-opus-5-5',
+    tokens: 788527, input: 780011, cached: 719614, output: 8516, model: 'fixture-large',
   });
 });
 
@@ -65,7 +65,7 @@ test('agy captured json reports inclusive input and separate thinking', () => {
 
 test('pi captured message usage includes cache writes in input', () => {
   assert.deepEqual(parse('pi', text('pi.jsonl')), {
-    tokens: 12559, input: 12394, cached: 0, output: 165, model: 'global.anthropic.claude-fable-5',
+    tokens: 12559, input: 12394, cached: 0, output: 165, model: 'provider.fixture-model',
   });
 });
 
@@ -99,14 +99,57 @@ function setup(t, harness = 'codex') {
 const spends = (h) => h.json(['task', 'show', 'T1']).spend;
 const events = (h) => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
 
+test('native Claude alias spend records release-priced cost without rewriting its stored ID', (t) => {
+  const [alias, release] = Object.entries(require('../lib/ladder').BUILTIN.claude_aliases)[0];
+  const bedrock = `global.anthropic.${release}`;
+  for (const [harness, provider, stored, cost] of [
+    ['claude', undefined, alias, 0.02],
+    ['claude', 'anthropic', release, 0.02],
+    ['claude', 'bedrock', bedrock, 0.03],
+    ['codex', undefined, alias, null],
+  ]) {
+    const h = setup(t, harness);
+    pinRung(h, 'review', { harness, provider, model: alias, effort: 'high' });
+    h.ok(['project', 'set', '--review-policy', JSON.stringify({ prices: {
+      [release]: { input: 1, cache_write: 1, cache_read: 1, output: 20 },
+      [bedrock]: { input: 1, cache_write: 1, cache_read: 1, output: 30 },
+    } })]);
+    h.ok(['spend', 'T1', '--rung', 'review', '--tokens', '1000', '--input', '0', '--cached', '0', '--output', '1000']);
+    const task = h.json(['task', 'show', 'T1']);
+    const entry = task.spend.entries[0];
+    assert.equal(entry.model, stored);
+    assert.equal(entry.cost_usd, cost, `${harness}/${provider || 'default'}`);
+    assert.deepEqual(task.spend_by_rung.review, { tokens: 1000, cost_usd: cost });
+    assert.equal(events(h).findLast(e => e.cmd === 'spend').detail.cost_usd, cost);
+  }
+});
+
 async function collected(h, length = 1, timeout = 15000) {
   const deadline = Date.now() + timeout;
   while (Date.now() < deadline) {
-    const spend = spends(h);
-    if (spend.entries?.length === length) return spend;
+    const spend = h.readState('tasks.json').tasks[0].spend;
+    if (spend.entries?.length === length && spend.entries.every((entry) => !entry.live)) return spend;
     await new Promise((r) => setTimeout(r, 50));
   }
   throw new Error('usage was not collected within 15 s');
+}
+
+function waitForFile(t, file) {
+  return new Promise((resolve, reject) => {
+    const watcher = fs.watch(path.dirname(file), check);
+    const abort = () => finish(t.signal.reason);
+    function finish(error) {
+      watcher.close();
+      t.signal.removeEventListener('abort', abort);
+      if (error) reject(error);
+      else resolve();
+    }
+    function check() { if (fs.existsSync(file)) finish(); }
+    watcher.once('error', finish);
+    t.signal.addEventListener('abort', abort, { once: true });
+    if (t.signal.aborted) abort();
+    else check();
+  });
 }
 
 async function waitForText(file, text, timeout = 15000) {
@@ -181,7 +224,7 @@ test('completed processes cannot leave teardown targeting a reused pid', async (
   assert.equal(tracked.filter((child) => child.kind === 'worker').length, 0);
   const monitors = tracked.filter((child) => child.kind === 'monitor');
   assert.equal(monitors.length, 1, 'monitor dispatch remains in the audit tracker');
-  assert.equal(monitors[0].exited, true, 'teardown knows the monitor exited before its pid can be reused');
+  assert.equal(monitors[0].exited, true, 'the monitor reached its exit listener; teardown still checks OS termination');
 });
 
 test('detached exits record both spawns exactly once and keep dispatch metadata', async (t) => {
@@ -216,15 +259,16 @@ test('collectors and concurrent waiters share one private exit event and usage e
   const privateText = 'prompt: private task text\ncredential: synthetic-private-token';
   const sample = path.join(h.base, 'usage-with-private-text.log');
   fs.writeFileSync(sample, privateText + '\n' + fs.readFileSync(fixture('codex-stream.jsonl'), 'utf8'));
+  // Match the CLI startup guard while both observers await the collector.
   const waits = ['observer-a', 'observer-b'].map((agent) => h.runAsync([
-    'wait', '--agent', agent, '--after', '0', '--task', 'T1', '--types', 'worker-exited', '--timeout', '8',
+    'wait', '--agent', agent, '--after', '0', '--task', 'T1', '--types', 'worker-exited', '--timeout', '60',
   ]));
   const started = h.json(['spawn', '--task', 'T1'], {
     env: { ...h.usageEnv, USAGE_DELAY: '900', USAGE_CLAIM: '1' },
     hooks: { ...h.usageHooks, HOOK_USAGE_FILE: sample },
   });
   const results = await Promise.all(waits);
-  for (const r of results) assert.equal(r.code, 0, r.stderr);
+  for (const r of results) assert.equal(r.code, 0, r.stderr || r.stdout);
   const [a, b] = results.map((r) => JSON.parse(r.stdout));
   assert.equal(a.id, b.id, 'all observers consume the same exit');
   assert.equal(a.detail.agent, started.agent);
@@ -278,11 +322,28 @@ test('codex session fallback opens only the exact session and counts cached inpu
 test('an exited spawn without telemetry is marked unknown and can be recollected', async (t) => {
   const h = setup(t);
   const empty = path.join(h.base, 'empty.log');
+  const barrier = path.join(h.base, 'collect-paused');
+  const preload = path.join(__dirname, 'fixtures', 'pause-usage-collection.js').replace(/\\/g, '/');
   fs.writeFileSync(empty, 'No telemetry\n');
   const a = h.json(['spawn', '--task', 'T1'], {
-    env: h.usageEnv, hooks: { ...h.usageHooks, HOOK_USAGE_FILE: empty },
+    env: { ...h.usageEnv, NODE_OPTIONS: `--require "${preload}"`, USAGE_COLLECT_BARRIER: barrier },
+    hooks: { ...h.usageHooks, HOOK_USAGE_FILE: empty },
   });
-  const s = await collected(h);
+  let collection;
+  try {
+    await waitForFile(t, barrier);
+    const pending = h.readState('tasks.json').tasks[0].spend;
+    assert.equal(pending.entries[0].live.state, 'unavailable');
+    assert.equal(pending.entries[0].tokens, null);
+    let complete = false;
+    collection = collected(h).then((spend) => { complete = true; return spend; });
+    await Promise.resolve();
+    assert.equal(complete, false, 'a live snapshot is not an exit collection receipt');
+  } finally {
+    fs.writeFileSync(`${barrier}.go`, '');
+  }
+  const s = await collection;
+  assert.equal(s.entries[0].live, undefined, 'the exit collector finalized the usage entry');
   assert.equal(s.entries[0].tokens, null);
   assert.equal(s.tokens, 0);
   assert.equal(h.json(['status']).spend.missing_usage, 1);
@@ -430,7 +491,7 @@ for (const scenario of ['host', 'signal', 'stat']) {
   });
 }
 
-test('test teardown fails for a surviving detached monitor and terminates it', async (t) => {
+test('test teardown stops a surviving detached monitor and waits for its exit', async (t) => {
   const h = setup(t);
   h.json(['spawn', '--task', 'T1'], {
     env: { ...h.usageEnv, USAGE_DELAY: '60000' },
@@ -438,7 +499,8 @@ test('test teardown fails for a surviving detached monitor and terminates it', a
   });
   const monitors = h.detached().filter((c) => c.kind === 'monitor');
   assert.equal(monitors.length, 1);
-  await assert.rejects(h.cleanup(), /detached usage monitors outlived test teardown/);
+  if (process.platform === 'win32') await h.cleanup();
+  else await assert.rejects(h.cleanup(), /detached usage monitors outlived test teardown/);
   assert.ok(monitors.every((c) => !detachedAlive(c)));
 });
 

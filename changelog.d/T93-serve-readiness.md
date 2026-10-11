@@ -1,0 +1,1 @@
+- Wait for the supervision board test's server readiness line within the test runner deadline, so loaded Windows runners do not fail a separate 12-second startup window.

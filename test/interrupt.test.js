@@ -156,8 +156,9 @@ for (const fresh of [false, true]) {
     await until(() => !detachedAlive({ pid: first.monitor_pid }), 'interrupted monitor did not finish');
     h.ok(['claim', 'T1', '--agent', first.agent]);
     const claim = h.json(['task', 'show', 'T1']).claim;
-    h.ok(['submit', 'T1', '--sha', 'abcdef1', '--agent', first.agent]);
-    h.ok(['evidence', 'T1', '--type', 'review', '--fail', '--sha', 'abcdef1', '--agent', 'reviewer-T1-1',
+    h.ok(['submit', 'T1', '--sha', '50b732a15be40ccb2065cb2ba0e7b366d511b736', '--agent', first.agent]);
+    h.reviewer('T1', 'reviewer-T1-1');
+    h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--fail', '--sha', '50b732a15be40ccb2065cb2ba0e7b366d511b736', '--agent', 'reviewer-T1-1',
       '--summary', 'Add the missing regression', '--ref', 'current-review']);
     h.ok(['rework', 'T1', '--reason', 'Fix the current review feedback']);
     if (fresh) h.ok(['ladder', 'set', 'medium', '--args', '["new-route"]']);
@@ -184,8 +185,9 @@ test('interrupting a rework run keeps its failed review feedback for the next di
   h.ok(['interrupt', 'T1']);
   await until(() => !detachedAlive({ pid: first.monitor_pid }), 'interrupted monitor did not finish');
   h.ok(['claim', 'T1', '--agent', first.agent]);
-  h.ok(['submit', 'T1', '--sha', 'abcdef1', '--agent', first.agent]);
-  h.ok(['evidence', 'T1', '--type', 'review', '--fail', '--sha', 'abcdef1', '--agent', 'reviewer-T1-1',
+  h.ok(['submit', 'T1', '--sha', '50b732a15be40ccb2065cb2ba0e7b366d511b736', '--agent', first.agent]);
+  h.reviewer('T1', 'reviewer-T1-1');
+  h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--fail', '--sha', '50b732a15be40ccb2065cb2ba0e7b366d511b736', '--agent', 'reviewer-T1-1',
     '--summary', 'Add the missing regression', '--ref', 'current-review']);
   h.ok(['rework', 'T1', '--reason', 'Fix the current review feedback']);
   // A new route starts the rework run fresh, so it stays alive until it is interrupted.
@@ -217,6 +219,8 @@ test('interrupt stops supervision, preserves dirty work and resumes the original
   const h = setup(t);
   const first = h.json(['spawn', '--task', 'T1']);
   await until(() => events(h).some((e) => e.cmd === 'spawn session'), 'worker did not record its session');
+  const workerTracked = () => h.detached().some((child) => child.kind === 'worker' && child.pid === first.pid);
+  assert.equal(workerTracked(), true);
   const before = h.json(['task', 'show', 'T1']);
   const claim = before.claim;
   h.ok(['claim', 'T1', '--agent', first.agent]);
@@ -226,8 +230,11 @@ test('interrupt stops supervision, preserves dirty work and resumes the original
   assert.equal(stopped.claim, null);
   assert.equal(stopped.revision, 1);
   assert.equal(stopped.branch, before.branch);
-  await until(() => !detachedAlive({ pid: first.monitor_pid }), 'supervisor did not stop');
-  assert.equal(detachedAlive({ pid: first.pid }), false);
+  // Windows can reuse a reaped PID before this assertion; the parent tracks
+  // the original child's exit and removes only that child's record.
+  await until(() => h.detached().some((child) => child.kind === 'monitor'
+    && child.pid === first.monitor_pid && child.exited), 'supervisor did not stop');
+  assert.equal(workerTracked(), false);
   assert.equal(fs.readFileSync(path.join(first.cwd, 'README.md'), 'utf8'), '# unfinished tracked work\n');
   assert.equal(fs.readFileSync(path.join(first.cwd, 'unfinished.txt'), 'utf8'), 'keep this untracked work\n');
   assert.equal(events(h).filter((e) => e.cmd === 'spawn exit').length, 1);
@@ -349,7 +356,7 @@ test('manual claims can be interrupted only by the owner or an orchestrator', (t
   assert.equal(stopped.status, 'todo');
   assert.equal(h.run(['interrupt', 'T1']).code, 1);
   h.ok(['claim', 'T1', '--agent', 'manual-worker']);
-  h.ok(['submit', 'T1', '--sha', 'abcdef1', '--agent', 'manual-worker']);
+  h.ok(['submit', 'T1', '--sha', '50b732a15be40ccb2065cb2ba0e7b366d511b736', '--agent', 'manual-worker']);
   h.ok(['rework', 'T1', '--reason', 'finish it']);
   h.ok(['claim', 'T1', '--agent', 'manual-worker']);
   assert.equal(h.json(['interrupt', 'T1']).status, 'rework');

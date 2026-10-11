@@ -1,0 +1,1 @@
+- The complete model swap probe reports assertion details for unexpected test failures, including failures outside the retained log tail.

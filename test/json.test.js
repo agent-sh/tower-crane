@@ -22,7 +22,7 @@ test('--json output parses for every reading and writing command', (t) => {
   assert.equal(parse(['brief', 'get', 'T1']).brief, 'brief');
   assert.equal(parse(['validate']).ok, true);
   assert.equal(parse(['ready', '--all']).blocked[0].id, 'T2');
-  assert.equal(parse(['ask', '--question', 'Q?', '--option', 'a', '--option', 'b']).id, 'D1');
+  assert.equal(parse(['ask', '--kind', 'technical', '--question', 'Q?', '--option', 'a', '--option', 'b']).id, 'D1');
   assert.equal(parse(['decisions']).length, 1);
   assert.deepEqual(
     parse(['decision', 'delegate', 'D1', '--answerers', '["w"]', '--agent', 'owner']).answerers,
@@ -33,8 +33,8 @@ test('--json output parses for every reading and writing command', (t) => {
   assert.equal(parse(['claim', 'T1', '--agent', 'w']).claim.agent, 'w');
   assert.equal(parse(['renew', 'T1', '--agent', 'w']).status, 'in_progress');
   assert.equal(parse(['spend', 'T1', '--minutes', '5', '--tokens', '10']).spend.tokens, 10);
-  assert.equal(parse(['submit', 'T1', '--sha', 'abcdef1', '--agent', 'w']).status, 'submitted');
-  assert.equal(parse(['evidence', 'T1', '--type', 'review', '--ok', '--sha', 'abcdef1', '--agent', 'r']).type, 'review');
+  assert.equal(parse(['submit', 'T1', '--sha', '50b732a15be40ccb2065cb2ba0e7b366d511b736', '--agent', 'w']).status, 'submitted');
+  assert.equal(parse(['evidence', 'T1', '--type', 'review', '--ok', '--sha', '50b732a15be40ccb2065cb2ba0e7b366d511b736', '--revision', '1', '--agent', 'r']).type, 'review');
   assert.equal(parse(['rework', 'T1', '--reason', 'r']).status, 'rework');
   assert.equal(parse(['ladder', 'set', 'small', '--harness', 'pi', '--model', 'm', '--clear', 'profile']).harness, 'pi');
   assert.equal(parse(['ladder', 'show']).ladder.small.model, 'm');
