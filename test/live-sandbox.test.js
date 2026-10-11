@@ -117,7 +117,7 @@ test('in a real claude sandbox with sandbox.session_bus, a command connects to t
   h.ok(['brief', 'set', 'T1', '-'], {
     input: `Sandbox probe set up by the owner. Run exactly this one command with the Bash tool, then reply with its exit code. Do not use tower-crane.\n\n${node} -e '${script}'\n`,
   });
-  h.ok(['ladder', 'set', 'small', '--harness', 'claude', '--model', process.env.TOWER_CRANE_LIVE_MODEL || 'opus', '--clear', 'profile', '--clear', 'effort']);
+  pinLiveRung(h, 'claude');
   const r = await h.runAsync(['spawn', '--role', 'small', '--task', 'T1', '--wait'], {
     env: { ...h.env, XDG_RUNTIME_DIR: runtime, DBUS_SESSION_BUS_ADDRESS: `unix:path=${sock}` },
   });
@@ -140,7 +140,7 @@ test('in a real claude sandbox with sandbox.session_bus, systemd-run --user --sc
   h.ok(['brief', 'set', 'T1', '-'], {
     input: `Sandbox probe set up by the owner. Run exactly this one command with the Bash tool, then reply with its exit code. Do not use tower-crane.\n\nsystemd-run --user --scope --quiet -- ${node} -e '${script}'\n`,
   });
-  h.ok(['ladder', 'set', 'small', '--harness', 'claude', '--model', process.env.TOWER_CRANE_LIVE_MODEL || 'opus', '--clear', 'profile', '--clear', 'effort']);
+  pinLiveRung(h, 'claude');
   const r = await h.runAsync(['spawn', '--role', 'small', '--task', 'T1', '--wait'], {
     env: { ...h.env, XDG_RUNTIME_DIR: runDir, DBUS_SESSION_BUS_ADDRESS: `unix:path=${path.join(runDir, 'bus')}` },
   });
