@@ -124,7 +124,7 @@ for (const nextHarness of ['codex', 'claude']) {
     const tokens = task.spend.tokens;
     h.ok(['spend', 'T1', '--from-spawn', 'worker-T1-1']);
     assert.equal(h.json(['task', 'show', 'T1']).spend.tokens, tokens);
-    h.ok(['submit', 'T1', '--agent', 'worker-T1-1', '--sha', 'abcdef1']);
+    h.ok(['submit', 'T1', '--agent', 'worker-T1-1', '--sha', '50b732a15be40ccb2065cb2ba0e7b366d511b736']);
     h.ok(['rework', 'T1', '--reason', 'fix review finding']);
     const preview = h.json(['spawn', '--task', 'T1', '--dry-run'], { env: h.spawnEnv });
     assert.equal(preview.resumed, false, 'the original route must not resume a fallback session');
@@ -238,7 +238,7 @@ test('rework during a live fallback refuses a second worker until the previous a
       throw error;
     }
   }, 'fallback worker did not start');
-  h.ok(['submit', 'T1', '--agent', 'worker-T1-1', '--sha', 'abcdef1']);
+  h.ok(['submit', 'T1', '--agent', 'worker-T1-1', '--sha', '50b732a15be40ccb2065cb2ba0e7b366d511b736']);
   h.ok(['rework', 'T1', '--reason', 'fix while worker is finishing']);
   for (const flags of [['--dry-run'], []]) {
     const result = h.run(['spawn', '--task', 'T1', ...flags], { env: h.spawnEnv });
