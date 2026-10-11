@@ -8,7 +8,7 @@ const path = require('node:path');
 const { makeRepo } = require('../helpers');
 const { shellQuote } = require('../../lib/gates/common');
 
-test('gates.tmp_root holds the worktrees of check tests, ci and clean; TOWER_CRANE_TMP overrides it', (t) => {
+test('gates.tmp_root holds the worktrees of check tests, ci and clean, and status names it; TOWER_CRANE_TMP overrides it', (t) => {
   const h = makeRepo(t);
   // Every gate command appends the directory it ran in to a log outside the temporary roots.
   const recorder = path.join(h.base, 'record.js');
@@ -21,6 +21,11 @@ if (gate === 'clean') console.log(JSON.stringify({ items: [] }));
 `);
   const shellCommand = (gate) => `${shellQuote(process.execPath)} ${shellQuote(recorder)} ${gate} ${shellQuote(log)}`;
   const ranLog = () => fs.readFileSync(log, 'utf8').trim().split('\n').map(JSON.parse);
+  // status names the root the gates use and the setting that chose it, in text and JSON.
+  const statusRoot = (root, source) => {
+    assert.ok(h.ok(['status']).split('\n').includes(`gate tmp root: ${root} (${source})`));
+    assert.deepEqual(h.json(['status']).gate_tmp_root, { root, source });
+  };
   h.init(['--tests-mode', 'run-only', '--tests-cmd', shellCommand('tests'), '--clean-cmd', shellCommand('clean'),
     '--ci-local', JSON.stringify({ command: [process.execPath, recorder, 'ci', log], timeout: 30 })]);
   h.ok(['task', 'add', '--title', 'Scratch on the project root', '--acceptance', 'gates build under gates.tmp_root']);
@@ -39,6 +44,7 @@ if (gate === 'clean') console.log(JSON.stringify({ items: [] }));
   fs.mkdirSync(root);
   h.ok(['project', 'set', '--tmp-root', root, '--agent', 'orchestrator']);
   assert.match(h.ok(['project', 'show']), new RegExp(`gates\\.tmp_root: ${JSON.stringify(root).replace(/[\\^$.*+?()[\]{}|]/g, '\\$&')}`));
+  statusRoot(root, 'gates.tmp_root');
   for (const gate of ['tests', 'clean', 'ci']) {
     const result = h.run(['check', gate, 'T1', '--agent', 'orchestrator']);
     assert.equal(result.code, 0, result.stdout + result.stderr);
@@ -59,11 +65,13 @@ if (gate === 'clean') console.log(JSON.stringify({ items: [] }));
   assert.ok(ranLog().at(-1).cwd.startsWith(`${override}${path.sep}`));
   evidence = h.readState('tasks.json').tasks[0].evidence;
   assert.equal(evidence.findLast((e) => e.type === 'tests').tmp_root, override);
+  statusRoot(override, 'TOWER_CRANE_TMP');
   delete h.env.TOWER_CRANE_TMP;
 
   // Unset, the gates use the OS temporary directory again.
   h.ok(['project', 'set', '--tmp-root', 'null', '--agent', 'orchestrator']);
   assert.match(h.ok(['project', 'show']), /gates\.tmp_root: null/);
+  statusRoot(os.tmpdir(), 'system');
   const defaulted = h.run(['check', 'clean', 'T1', '--agent', 'orchestrator']);
   assert.equal(defaulted.code, 0, defaulted.stdout + defaulted.stderr);
   assert.ok(ranLog().at(-1).cwd.startsWith(`${fs.realpathSync.native(os.tmpdir())}${path.sep}`));
