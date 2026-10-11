@@ -173,6 +173,26 @@ test('provider checks accept only local auth presence and use global model ids',
   assert.match(bad.stderr, /anthropic.*bedrock/);
 });
 
+test('a Claude alias on a Bedrock rung maps to its global id or is refused at ladder set', (t) => {
+  const h = setup(t);
+  h.aws();
+  const table = L.BUILTIN.claude_aliases;
+  // haiku is the name the incident sent, so it stays in the list when the table lacks it.
+  for (const alias of new Set([...Object.keys(table), 'haiku'])) {
+    const set = h.run(['ladder', 'set', 'hard', '--provider', 'bedrock', '--model', alias]);
+    if (!Object.hasOwn(table, alias)) {
+      assert.equal(set.code, 1, alias);
+      assert.match(set.stderr, /full model id/, alias);
+      continue;
+    }
+    assert.equal(set.code, 0, set.stderr);
+    const preview = h.json(['spawn', '--task', 'T1', '--dry-run']);
+    assert.equal(preview.argv[preview.argv.indexOf('--model') + 1], `global.anthropic.${table[alias]}`, alias);
+  }
+  // The shipped table fills only the pins the user did not set.
+  assert.equal(h.json(['spawn', '--task', 'T1', '--dry-run']).env.ANTHROPIC_DEFAULT_HAIKU_MODEL, 'global.anthropic.fixture-stub');
+});
+
 test('Claude helper commands and AWS SSO config can satisfy local auth checks', (t) => {
   const h = setup(t);
   fs.writeFileSync(path.join(h.claude, 'settings.json'), JSON.stringify({ apiKeyHelper: 'unused stub helper' }));

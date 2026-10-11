@@ -147,7 +147,9 @@ test('a task that changes only tests: ok with a note', async () => {
   const sha = task({ 'test/mul2.test.js': MUL_TEST });
   const r = await gate.run(ctx(sha));
   assert.equal(r.ok, true, r.summary);
-  assert.match(r.summary, /only test files/);
+  assert.match(r.summary, /run-only \(test-only diff\)/);
+  assert.equal(r.receipt.mode, 'run-only (test-only diff)');
+  assert.deepEqual(r.receipt.changed_files, ['test/mul2.test.js']);
   assertCleanedUp();
 });
 
@@ -159,7 +161,8 @@ test('commits the task inherited from origin/<base> are not its change', async (
     const sha = task({ 'test/mul2.test.js': MUL_TEST }, ahead);
     const r = await gate.run(ctx(sha));
     assert.equal(r.ok, true, r.summary);
-    assert.match(r.summary, /only test files/);
+    assert.match(r.summary, /run-only \(test-only diff\)/);
+    assert.deepEqual(r.receipt.changed_files, ['test/mul2.test.js']);
   } finally {
     git(root, 'update-ref', '-d', 'refs/remotes/origin/main');
   }
@@ -169,13 +172,14 @@ test('a timeout stops the command and everything it started', { skip: process.pl
   const sha = task({ 'lib/add.js': FIX, 'test/add.test.js': ADD_TEST });
   const marker = path.join(tmp, 'late-write');
   // `; true` keeps the shell alive, so the writer is a grandchild, not the shell itself.
-  const cmd = `${NODE} -e "setTimeout(() => require('fs').writeFileSync(process.argv[1], 'x'), 3000)" ${quote(marker)}; true`;
+  // The writer would finish long after the gate's own setup, which under host load can take seconds.
+  const cmd = `${NODE} -e "setTimeout(() => require('fs').writeFileSync(process.argv[1], 'x'), 10000)" ${quote(marker)}; true`;
   const started = Date.now();
   const r = await gate.run(ctx(sha, { args: { cmd, timeout: 0.01 } }));
   assert.equal(r.ok, false);
   assert.match(r.summary, /timed out/);
-  assert.ok(Date.now() - started < 3000, 'the gate waited for the command instead of stopping it');
-  await new Promise((resolve) => setTimeout(resolve, 4000 - (Date.now() - started)));
+  assert.ok(Date.now() - started < 8000, 'the gate waited for the command instead of stopping it');
+  await new Promise((resolve) => setTimeout(resolve, 11000 - (Date.now() - started)));
   assert.equal(fs.existsSync(marker), false, 'a process the command started outlived the timeout');
   assertCleanedUp();
 });
@@ -354,13 +358,14 @@ test('a change of only tests and kept build files passes without a revert run, u
   const cmd = verify(Object.keys(MANIFESTS));
   const r = await gate.run(ctx(sha, { args: { cmd }, project: KEEP }));
   assert.equal(r.ok, true, r.summary);
-  assert.match(r.summary, /Tests: test\/mul2\.test\.js/);
-  assert.match(r.summary, /only tests and kept build files/);
-  assert.match(r.summary, /no non-test files to revert/);
+  assert.match(r.summary, /run-only \(test-only diff\)/);
+  assert.match(r.summary, /no revert run/);
+  assert.deepEqual(r.receipt.changed_files, [...Object.keys(MANIFESTS), 'test/mul2.test.js'].sort());
   for (const file of Object.keys(MANIFESTS)) assert.ok(r.summary.includes(file), file);
   const failing = task({ 'Cargo.lock': '# fixture-task-head\n', 'test/add.test.js': ADD_TEST });
   const f = await gate.run(ctx(failing, { args: { cmd: verify(['Cargo.lock']) } }));
   assert.equal(f.ok, false);
+  assert.equal(f.receipt.mode, 'run-only (test-only diff)');
   assert.match(f.summary, /at [a-f0-9]+: exit 1/);
   assertCleanedUp();
 });
