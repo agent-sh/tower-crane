@@ -17,7 +17,7 @@ function acceptedTask(t) {
   h.ok(['submit', 'T1', '--sha', sha, '--pr', '9', '--branch', 'fixture-change', '--agent', 'w-1']);
   for (const type of ['tests', 'clean', 'ci']) gateEvidence(h, type, 'checker');
   h.reviewer('T1', 'r-1', sha);
-  h.ok(['evidence', 'T1', '--type', 'review', '--ok', '--sha', sha, '--agent', 'r-1']);
+  h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--ok', '--sha', sha, '--agent', 'r-1']);
   h.ok(['accept', 'T1']);
   const log = path.join(h.base, 'gh-args.jsonl');
   h.env.FIXTURE_GH_LOG = log;

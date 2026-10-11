@@ -12,7 +12,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const { makeRepo, detachedAlive } = require('./helpers');
+const { makeRepo, pinLiveRung, detachedAlive } = require('./helpers');
 const canary = require('./canary');
 
 const NO_STUBS = process.platform === 'win32' && 'harness stubs are shebang scripts';
@@ -39,11 +39,11 @@ function setup(t, harness, mode, { big = 0 } = {}) {
   fs.writeFileSync(sources[1], JSON.stringify({ claudeAiOauth: { accessToken: c.credentialFile } }));
   fs.writeFileSync(sources[2], `TC_FILE_SECRET=${c.file}\n`);
   // A codex fallback route needs its profile configured.
-  fs.writeFileSync(path.join(home, '.codex', 'config.toml'), '[profiles.sol]\nmodel = "stub"\n');
+  fs.writeFileSync(path.join(home, '.codex', 'config.toml'), '[profiles.fixture-main]\nmodel = "stub"\n');
   fs.writeFileSync(path.join(bin, harness), `#!${process.execPath}\nrequire(${JSON.stringify(HARNESS)})(${JSON.stringify(harness)});\n`, { mode: 0o755 });
-  const route = harness === 'codex' ? { profile: 'sol' } : { model: 'opus' };
+  const route = harness === 'codex' ? { profile: 'fixture-main' } : { model: 'fixture-large' };
   h.ok(['ladder', 'set', 'medium', '--harness', harness,
-    ...(harness === 'codex' ? ['--profile', 'sol', '--clear', 'model'] : ['--model', 'opus', '--clear', 'profile']),
+    ...(harness === 'codex' ? ['--profile', 'fixture-main', '--clear', 'model'] : ['--model', 'fixture-large', '--clear', 'profile']),
     '--clear', 'effort', '--clear', 'args', '--supervision', '{"retries":0,"backoff_ms":1}',
     '--env', JSON.stringify({ ROUTE: 'primary', TC_RUNG_SECRET: c.rung })]);
   // Fallbacks are personal: the user file holds them, and their env.
@@ -222,9 +222,8 @@ for (const harness of ['claude', 'codex']) {
     h.ok(['brief', 'set', 'T2', '-'], {
       input: `This task is a live secret-isolation fixture set up by the owner. Run exactly this command with your command tool, then report its exit code and stop. Do not read the script or its result, print environment variables, change files, use tower-crane, open a PR or delegate work.\n\n${JSON.stringify(process.execPath)} ${JSON.stringify(probe)}\n`,
     });
-    h.ok(['ladder', 'set', 'small', '--harness', harness,
-      ...(harness === 'codex' ? ['--profile', process.env.TOWER_CRANE_LIVE_PROFILE || 'sol', '--clear', 'model'] : ['--model', process.env.TOWER_CRANE_LIVE_MODEL || 'opus', '--clear', 'profile']),
-      '--clear', 'effort', '--supervision', '{"retries":0}', '--env', JSON.stringify({ TC_RUNG_SECRET: c.rung })]);
+    pinLiveRung(h, harness);
+    h.ok(['ladder', 'set', 'small', '--supervision', '{"retries":0}', '--env', JSON.stringify({ TC_RUNG_SECRET: c.rung })]);
     const r = await h.runAsync(['spawn', '--task', 'T2', '--role', 'small', '--wait'], { env: { TMPDIR: tmp, GH_TOKEN: c.gh } });
     assert.equal(r.code, 0, r.stderr);
     const seen = JSON.parse(fs.readFileSync(result, 'utf8'));

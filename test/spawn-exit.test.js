@@ -51,13 +51,13 @@ ${claim ? "cp.execFileSync(process.execPath, [process.argv[2], 'claim', task]);"
 fs.writeSync(1, Array.from({ length: 30 }, (_, i) => 'progress ' + i).join('\\n') + '\\n');
 fs.writeSync(2, 'last diagnostic before exit\\n');
 fs.writeSync(2, ${JSON.stringify(PRIVATE_LOG + '\n')});
-${submit ? "cp.execFileSync(process.execPath, [process.argv[2], 'submit', task, '--sha', 'abcdef1']);" : ''}
+${submit ? "cp.execFileSync(process.execPath, [process.argv[2], 'submit', task, '--sha', '50b732a15be40ccb2065cb2ba0e7b366d511b736']);" : ''}
 fs.writeFileSync(process.argv[3], JSON.stringify({ agent: process.env.TOWER_CRANE_AGENT, pid: process.pid }));
 ${wait ? 'process.exit(7);' : 'setInterval(() => {}, 1000);'}
 `;
   fs.writeFileSync(worker, script);
   h.ok(['ladder', 'set', 'easy', '--harness', 'command', '--command', JSON.stringify([process.execPath, worker, BIN, marker, '{prompt}']),
-    '--clear', 'model', '--clear', 'profile', '--clear', 'effort']);
+    '--clear', 'profile', '--clear', 'effort']);
   if (wait) return h.run(['spawn', '--role', 'easy', '--task', 'T1', '--wait']);
   const spawned = h.json(['spawn', '--task', 'T1'], { env });
   let killed = false;

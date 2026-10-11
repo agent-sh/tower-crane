@@ -50,7 +50,7 @@ const OPERATIONAL = [
   ['project', 'set', '--tests-mode', 'run-only', '--tests-paths', '["test/**"]', '--tests-keep', '[]', '--tests-by-kind', '{}', '--tests-expensive', 'false'],
   ['project', 'set', '--workers', '3', '--lease-minutes', '45', '--budget-hours', '10'],
   ['project', 'set', '--review-policy', '{"small_lines":50}'],
-  ['ladder', 'set', 'easy', '--harness', 'codex', '--model', 'sonnet', '--effort', 'high', '--args', '[]', '--tools', '["web_search"]', '--mcp', '["docs"]'],
+  ['ladder', 'set', 'easy', '--harness', 'codex', '--model', 'fixture-other', '--effort', 'high', '--args', '[]', '--tools', '["web_search"]', '--mcp', '["docs"]'],
   ['ladder', 'save-user'],
   ['task', 'update', 'T1', '--tier', 'hard'],
   ['task', 'update', 'T1', '--needs-owner', 'approve other access'],
@@ -59,7 +59,6 @@ const OPERATIONAL = [
 
 test('research web MCP changes use owner-required authority and deduplicate escalation', (t) => {
   const h = setup(t);
-  h.ok(['ladder', 'set', 'research', '--harness', 'claude', '--model', 'opus', '--effort', 'high']);
   const server = { name: 'harness-web', command: 'node', args: ['/web/server.mjs'] };
   const args = ['ladder', 'set', 'research', '--web-mcp', JSON.stringify(server)];
   const before = h.readState('project.json');
@@ -139,7 +138,7 @@ test('the orchestrator changes operational settings under its own identity; a wo
   assert.equal(p.gates.tests_cmd, 'npm test');
   assert.deepEqual(p.ci.capped_review, [{ app: 'cursor', pattern: 'usage limit' }]);
   assert.equal(p.limits.workers, 3);
-  assert.equal(p.ladder.easy.model, 'sonnet');
+  assert.equal(p.ladder.easy.model, 'fixture-other');
   assert.equal(events(h).findLast((e) => e.cmd === 'project set').detail.authority, 'orchestrator');
   assert.equal(h.readState('tasks.json').tasks[0].needs_owner, null);
   assert.equal(h.readState('decisions.json').decisions.length, 0);
@@ -287,7 +286,7 @@ test('an unpinned project does not block: the orchestrator pins detected gate co
 
 test('the orchestrator opts a rung in only to MCP servers the owner already defines', (t) => {
   const h = setup(t);
-  h.ok(['ladder', 'set', 'easy', '--harness', 'codex', '--model', 'sonnet']);
+  h.ok(['ladder', 'set', 'easy', '--harness', 'codex', '--model', 'fixture-other']);
   const before = h.readState('project.json');
   for (const [args, missing] of [
     [['ladder', 'set', 'easy', '--mcp', '["shell"]'], /ladder easy opts in MCP server shell, which .*config\.toml does not define/],
@@ -301,8 +300,8 @@ test('the orchestrator opts a rung in only to MCP servers the owner already defi
   // Moving a rung, with the owner's fallback route that follows its harness,
   // to a harness whose config lacks the route's MCP server is a new opt-in too.
   h.ok(['ladder', 'set', 'easy', '--mcp', '["docs"]'], as('orchestrator'));
-  writeUser(h, { ladder: { easy: { fallbacks: [{ model: 'opus', mcp: ['docs'] }] } } });
-  const moved = h.run(['ladder', 'set', 'easy', '--harness', 'claude', '--model', 'opus', '--clear', 'mcp'], as('orchestrator'));
+  writeUser(h, { ladder: { easy: { fallbacks: [{ model: 'fixture-large', mcp: ['docs'] }] } } });
+  const moved = h.run(['ladder', 'set', 'easy', '--harness', 'claude', '--model', 'fixture-large', '--clear', 'mcp'], as('orchestrator'));
   assert.equal(moved.code, 1, moved.stderr);
   assert.match(moved.stderr, /ladder easy opts in MCP server docs, which .*mcp\.json or .*\.claude\.json does not define/);
   writeUser(h, {});
@@ -316,20 +315,19 @@ test('the orchestrator opts a rung in only to MCP servers the owner already defi
 
 test('a tool that is not a harness built-in or changes the rung sandbox is owner-required', (t) => {
   const h = setup(t);
-  h.ok(['ladder', 'set', 'medium', '--harness', 'codex', '--profile', 'sol', '--effort', 'high', '--clear', 'model']);
-  h.ok(['ladder', 'set', 'easy', '--harness', 'codex', '--model', 'sonnet']);
-  h.ok(['ladder', 'set', 'review', '--harness', 'claude', '--model', 'opus', '--clear', 'profile', '--clear', 'args']);
+  h.ok(['ladder', 'set', 'easy', '--harness', 'codex', '--model', 'fixture-other']);
+  h.ok(['ladder', 'set', 'review', '--harness', 'claude', '--model', 'fixture-large', '--clear', 'profile', '--clear', 'args']);
   // Built-ins that keep the sandbox are the orchestrator's.
   h.ok(['ladder', 'set', 'easy', '--tools', '["web_search","multi_agent"]'], as('orchestrator'));
   h.ok(['ladder', 'set', 'review', '--tools', '["WebFetch","Agent"]'], as('orchestrator'));
-  writeUser(h, { ladder: { medium: { fallbacks: [{ model: 'opus', tools: ['Edit'] }] } } });
+  writeUser(h, { ladder: { medium: { fallbacks: [{ model: 'fixture-large', tools: ['Edit'] }] } } });
   let opened = 0;
   for (const [args, tools] of [
     [['ladder', 'set', 'easy', '--tools', '["web_search","computer_use"]'], { easy: { tools: ['computer_use'] } }],
     [['ladder', 'set', 'review', '--tools', '["WebFetch","Edit"]'], { review: { tools: ['Edit'] } }],
     [['ladder', 'set', 'review', '--tools', '["Bash(gh pr merge:*)"]'], { review: { tools: ['Bash(gh pr merge:*)'] } }],
     // The owner's fallback route follows the primary to claude, where Edit is reach.
-    [['ladder', 'set', 'medium', '--harness', 'claude', '--model', 'opus', '--clear', 'profile'], { medium: { tools: ['Edit'] } }],
+    [['ladder', 'set', 'medium', '--harness', 'claude', '--model', 'fixture-large', '--clear', 'profile'], { medium: { tools: ['Edit'] } }],
   ]) {
     const before = h.readState('project.json');
     const r = h.run(args, as('orchestrator'));
@@ -356,12 +354,9 @@ for (const harness of L.HARNESSES.filter((name) => name !== 'command')) {
   test(`${harness}: primary, following fallback and default harness moves follow its sandbox capability`, (t) => {
     const h = setup(t);
     // Valid model-only rungs keep profile and effort incompatibilities from
-    // hiding the authority result when the default harness changes. Every rung
-    // names its harness except medium, which follows the default under test, so
-    // a built-in route change cannot move these cases.
-    for (const rung of L.RUNGS) h.ok(['ladder', 'set', rung,
-      ...(rung === 'medium' ? ['--clear', 'harness'] : ['--harness', 'claude']),
-      '--model', 'fixture', '--clear', 'profile', '--clear', 'effort', '--clear', 'args', '--clear', 'provider']);
+    // hiding the authority result when the default harness changes.
+    for (const rung of L.RUNGS) h.ok(['ladder', 'set', rung, '--model', 'fixture',
+      '--clear', 'profile', '--clear', 'effort', '--clear', 'args', '--clear', 'provider']);
     h.ok(['ladder', 'harness', 'claude']);
     const sandbox = A.CAPABILITIES[harness].sandbox;
     const unconfined = { unconfined: [{ harness }] };
@@ -371,7 +366,8 @@ for (const harness of L.HARNESSES.filter((name) => name !== 'command')) {
       [['ladder', 'set', 'hard', '--harness', harness, '--model', 'fixture'], { ladder: { hard: unconfined } }],
       [['ladder', 'set', 'research', '--harness', harness, '--model', 'fixture'],
         { ladder: { research: { unconfined: [{ harness }, { harness }] } } }],
-      [['ladder', 'harness', harness], { harness, ladder: { medium: unconfined } }],
+      [['ladder', 'harness', harness], { harness, ladder: Object.fromEntries(
+        ['easy', 'medium', 'review', 'small'].map((rung) => [rung, unconfined])) }],
     ]) {
       const before = h.readState('project.json');
       const result = h.run(args, as('orchestrator'));

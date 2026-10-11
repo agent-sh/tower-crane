@@ -4,18 +4,18 @@ const { test, describe } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { makeRepo, makeProjectRepo, cachedFixture, BIN, runPty, PTY_AVAILABLE } = require('./helpers');
+const { makeRepo, makeProjectRepo, cachedFixture, pinRung, BIN, runPty, PTY_AVAILABLE } = require('./helpers');
 const { gateFixture, gateEvidence, changeKind } = require('./gate-helpers');
 
 const prices = {
-  'openai.gpt-6-luna': { input: 0.10, cache_write: 0.125, cache_read: 0.01, output: 0.50 },
-  'openai.gpt-6.1-sol': { input: 2, cache_write: 2.50, cache_read: 0.10, output: 10 },
-  'claude-opus-5-5': { input: 4, cache_write: 5, cache_read: 0.20, output: 20 },
+  'fixture-light': { input: 0.10, cache_write: 0.125, cache_read: 0.01, output: 0.50 },
+  'fixture-main': { input: 2, cache_write: 2.50, cache_read: 0.10, output: 10 },
+  'fixture-large': { input: 4, cache_write: 5, cache_read: 0.20, output: 20 },
 };
 const windowsConcurrency = process.platform === 'win32' ? 2 : false;
 
 function rung(h, name, model) {
-  h.ok(['ladder', 'set', name, '--harness', 'opencode', '--model', model, '--clear', 'profile', '--clear', 'effort']);
+  pinRung(h, name, { harness: 'opencode', model });
 }
 
 // Built once per process for each combination and copied for each test.
@@ -34,6 +34,9 @@ function setup(t, tier = 'easy', builder = 'other', profile, { gated = false } =
       fs.writeFileSync(path.join(bin, process.platform === 'win32' ? 'codex.exe' : 'codex'), '', { mode: 0o755 });
       // An isolated caller's default must not rename another rung's known profile.
       fs.writeFileSync(path.join(codexHome, 'config.toml'), 'model = "caller-model"\n');
+      for (const name of ['fixture-light', 'fixture-main']) {
+        fs.writeFileSync(path.join(codexHome, `${name}.config.toml`), `model = "${name}"\n`);
+      }
       h.reviewEnv = { CODEX_HOME: codexHome, PATH: bin + path.delimiter + (h.env.PATH || h.env.Path || ''), USAGE_CLAIM: '1' };
       h.ok(['ladder', 'set', tier, '--harness', 'codex', '--profile', profile, '--clear', 'model', '--clear', 'effort']);
       h.builder = h.json(['spawn', '--task', 'T1', '--wait'], {
@@ -46,8 +49,8 @@ function setup(t, tier = 'easy', builder = 'other', profile, { gated = false } =
     }
     h.ok(['spend', 'T1', '--agent', h.builder, '--tokens', '10', '--input', '10', '--output', '0', '--rung', tier, '--model', builder]);
     h.ok(['submit', 'T1', '--agent', h.builder, '--sha', h.sha, '--branch', 'fixture-change']);
-    for (const [name, model] of [['easy', 'luna'], ['medium', 'sol'], ['hard', 'opus'], ['research', 'opus'], ['review', 'fallback']]) rung(h, name, model);
-    if (profile) for (const [name, value] of [['easy', 'luna'], ['medium', 'sol']]) {
+    for (const [name, model] of [['easy', 'fixture-light'], ['medium', 'fixture-main'], ['hard', 'fixture-large'], ['research', 'fixture-large'], ['review', 'fallback']]) rung(h, name, model);
+    if (profile) for (const [name, value] of [['easy', 'fixture-light'], ['medium', 'fixture-main']]) {
       h.ok(['ladder', 'set', name, '--harness', 'codex', '--profile', value, '--clear', 'model', '--clear', 'effort']);
     }
     h.ok(['project', 'set', '--review-policy', JSON.stringify({ prices, small_lines: 100, small_files: 5, risk_paths: ['auth/**'] })]);
@@ -261,7 +264,7 @@ console.log(JSON.stringify({type:'result', result:'cache probe', usage: {
   fs.writeFileSync(path.join(caller, '.claude', 'CLAUDE.md'), 'STUB_GLOBAL_RULE\n');
   fs.writeFileSync(path.join(caller, '.codex', 'AGENTS.md'), 'STUB_GLOBAL_RULE\n');
   const env = { HOME: caller, CLAUDE_CONFIG_DIR: path.join(caller, '.claude'), CODEX_HOME: path.join(caller, '.codex'),
-    XDG_CACHE_HOME: path.join(caller, 'cache'),
+    XDG_CACHE_HOME: '',
     PATH: bin + path.delimiter + (h.env.PATH || ''), FORCE_PROMPT_CACHING_5M: '0' };
   for (const harness of ['claude', 'codex']) {
     h.ok(['ladder', 'set', 'easy', '--harness', harness, '--model', 'fixture', '--clear', 'profile']);
@@ -284,7 +287,7 @@ console.log(JSON.stringify({type:'result', result:'cache probe', usage: {
       assert.equal(row.repo, 'acme/demo', 'reviewer shims retain the recorded repository');
       assert.match(row.system, /Role instructions: tower-crane-review/);
       assert.ok(!row.system.includes('## Task'));
-      assert.ok(row.cache.startsWith(path.join(caller, 'cache') + path.sep));
+      assert.ok(row.cache.startsWith(path.join(caller, '.cache') + path.sep));
       assert.deepEqual(row.tool_caches, ['go-build', 'go-mod', 'npm'].map((dir) => path.join(row.cache, dir)));
       assert.ok(!row.system.includes(row.cache), 'per-agent filesystem paths stay out of the shared prefix');
       if (harness === 'claude') {
@@ -300,32 +303,32 @@ console.log(JSON.stringify({type:'result', result:'cache probe', usage: {
 test('review selection also uses tier and diff defaults without a price table', (t) => {
   const h = setup(t, 'easy', 'other', undefined, { gated: true });
   h.ok(['project', 'set', '--review-policy', 'null']);
-  assert.equal(model(choice(h)), 'luna');
+  assert.equal(model(choice(h)), 'fixture-light');
 });
 
 test('review choice follows tier, diff limits and configured risk paths', (t) => {
-  for (const [tier, expected] of [['easy', 'luna'], ['medium', 'sol'], ['hard', 'opus'], ['research', 'opus']]) {
+  for (const [tier, expected] of [['easy', 'fixture-light'], ['medium', 'fixture-main'], ['hard', 'fixture-large'], ['research', 'fixture-large']]) {
     const h = setup(t, tier, 'other', undefined, { gated: true });
     assert.equal(model(choice(h)), expected, tier);
   }
   for (const policy of [{ small_lines: 1 }, { small_files: 1 }, { risk_paths: ['value.js'] }]) {
     const h = setup(t, 'easy', 'other', undefined, { gated: true });
     h.ok(['project', 'set', '--review-policy', JSON.stringify({ prices, ...policy })]);
-    assert.equal(model(choice(h)), policy.risk_paths ? 'opus' : 'sol', JSON.stringify(policy));
+    assert.equal(model(choice(h)), policy.risk_paths ? 'fixture-large' : 'fixture-main', JSON.stringify(policy));
   }
 });
 
 test('top-tier Claude builders can receive review on the same model', (t) => {
   for (const tier of ['hard', 'research']) {
-    const h = setup(t, tier, 'claude-opus-5-5', undefined, { gated: true });
-    assert.equal(model(choice(h)), 'opus', tier);
+    const h = setup(t, tier, 'fixture-large', undefined, { gated: true });
+    assert.equal(model(choice(h)), 'fixture-large', tier);
   }
 });
 
 test('Codex profile builders share canonical identity with provider spend and prices', (t) => {
   for (const [tier, profile, provider, promotedTier, promotedModel, promotedProvider] of [
-    ['easy', 'luna', 'openai.gpt-6-luna', 'medium', 'sol', 'openai.gpt-6.1-sol'],
-    ['medium', 'sol', 'openai.gpt-6.1-sol', 'hard', 'opus', 'claude-opus-5-5'],
+    ['easy', 'fixture-light', 'fixture-light', 'medium', 'fixture-main', 'fixture-main'],
+    ['medium', 'fixture-main', 'fixture-main', 'hard', 'fixture-large', 'fixture-large'],
   ]) {
     const h = setup(t, tier, provider, profile, { gated: true });
     // A later self-reported model and ladder edit cannot rename the builder route.
@@ -342,34 +345,97 @@ test('Codex profile builders share canonical identity with provider spend and pr
   }
 });
 
+test('arbitrary Codex profiles resolve configured models without inheriting the caller default', (t) => {
+  const h = setup(t);
+  ready(h);
+  const home = path.join(h.base, 'profiles');
+  fs.mkdirSync(home);
+  fs.writeFileSync(path.join(home, 'config.toml'),
+    'model = "caller-model"\n[profiles.custom-review]\nmodel = "vendor/new-model-2099"\n');
+  pinRung(h, 'easy', { harness: 'codex', profile: 'custom-review', effort: 'high' });
+  const prompt = () => choice(h, { CODEX_HOME: home }).argv.find(arg => arg.includes('## Task'));
+  assert.ok(prompt().includes('builder model vendor/new-model-2099'));
+  fs.writeFileSync(path.join(home, 'custom-review.config.toml'), 'model = "vendor/replacement-2100"\n');
+  assert.ok(prompt().includes('builder model vendor/replacement-2100'));
+  fs.rmSync(path.join(home, 'custom-review.config.toml'));
+  fs.writeFileSync(path.join(home, 'config.toml'), 'model = "caller-model"\n[profiles.custom-review]\nmodel_reasoning_effort = "high"\n');
+  assert.ok(prompt().includes('builder model caller-model'));
+  fs.writeFileSync(path.join(home, 'config.toml'), 'model = "caller-model"\n');
+  assert.ok(prompt().includes('builder model custom-review'));
+  fs.writeFileSync(path.join(home, 'custom-review.config.toml'), 'model = [\n');
+  assert.ok(prompt().includes('builder model custom-review'));
+});
+
+test('a standalone Codex profile inherits base-model pricing for review promotion', (t) => {
+  const h = setup(t, 'medium', 'other', 'fixture-main');
+  ready(h);
+  const home = h.reviewEnv.CODEX_HOME;
+  fs.writeFileSync(path.join(home, 'config.toml'), 'model = "fixture-main"\n');
+  fs.writeFileSync(path.join(home, 'inherited-review.config.toml'), 'model_reasoning_effort = "high"\n');
+  pinRung(h, 'medium', { harness: 'codex', profile: 'inherited-review', effort: 'high' });
+  sample(h, 'fixture-main', 100000, 50000, 60000);
+  sample(h, 'fixture-large', 100000, 50000, 20000, 20000);
+  assert.equal(choice(h).review_rung, 'hard');
+  assert.ok(choice(h).argv.some(arg => arg.includes('builder model fixture-main')));
+});
+
+test('Codex review pricing follows the user origin from a private caller home', (t) => {
+  const h = setup(t, 'medium', 'other', 'fixture-main');
+  ready(h);
+  const userHome = path.join(h.base, 'user-origin');
+  const codex = path.join(userHome, '.codex');
+  const privateHome = path.join(h.base, 'private-caller');
+  fs.mkdirSync(codex, { recursive: true });
+  fs.mkdirSync(privateHome);
+  fs.writeFileSync(path.join(codex, 'config.toml'), 'model = "fixture-main"\n');
+  fs.writeFileSync(path.join(codex, 'origin-review.config.toml'), 'model_reasoning_effort = "high"\n');
+  const marker = {
+    home: userHome, codex,
+    claude: { dir: path.join(userHome, '.claude'), json: path.join(userHome, '.claude.json') },
+    pi: path.join(userHome, '.pi', 'agent'), agy: path.join(userHome, '.gemini'),
+  };
+  fs.writeFileSync(path.join(privateHome, '.tower-crane-origin.json'), JSON.stringify(marker));
+  pinRung(h, 'medium', { harness: 'codex', profile: 'origin-review', effort: 'high' });
+  sample(h, 'fixture-main', 100000, 50000, 60000);
+  sample(h, 'fixture-large', 100000, 50000, 20000, 20000);
+  const userEnv = { HOME: userHome, USERPROFILE: userHome, CODEX_HOME: '', CLAUDE_CONFIG_DIR: '' };
+  assert.equal(choice(h, userEnv).review_rung, 'hard');
+  const privateEnv = { ...userEnv, HOME: privateHome, USERPROFILE: privateHome };
+  assert.equal(choice(h, privateEnv).review_rung, 'hard');
+  const dispatch = h.json(['spawn', '--task', 'T1', '--dry-run'], { env: { ...h.reviewEnv, ...privateEnv } });
+  assert.equal(dispatch.harness, 'codex');
+  assert.equal(dispatch.argv[dispatch.argv.indexOf('-p') + 1], 'origin-review');
+});
+
 test('a stronger model wins only when its median priced review cost is no higher', (t) => {
   const h = setup(t, 'medium', 'other', undefined, { gated: true });
   // Inclusive input includes cache writes and cache reads.
-  sample(h, 'sol', 100000, 50000, 60000); // $0.705
-  sample(h, 'opus', 100000, 50000, 20000, 20000); // $0.63
-  assert.equal(model(choice(h)), 'opus');
-  sample(h, 'opus', 100000, 50000, 100000, 20000); // median $1.43
-  assert.equal(model(choice(h)), 'sol');
+  sample(h, 'fixture-main', 100000, 50000, 60000); // $0.705
+  sample(h, 'fixture-large', 100000, 50000, 20000, 20000); // $0.63
+  assert.equal(model(choice(h)), 'fixture-large');
+  sample(h, 'fixture-large', 100000, 50000, 100000, 20000); // median $1.43
+  assert.equal(model(choice(h)), 'fixture-main');
   // Worker spend must not masquerade as a cheap review sample.
-  h.ok(['spend', 'T1', '--agent', 'cheap-worker', '--tokens', '1', '--input', '1', '--cached', '0', '--output', '0', '--rung', 'hard', '--model', 'opus']);
-  assert.equal(model(choice(h)), 'sol');
+  h.ok(['spend', 'T1', '--agent', 'cheap-worker', '--tokens', '1', '--input', '1', '--cached', '0', '--output', '0', '--rung', 'hard', '--model', 'fixture-large']);
+  assert.equal(model(choice(h)), 'fixture-main');
 });
 
 test('a running reviewer\'s live reading is not a cost sample until exit finalizes it', (t) => {
   const h = setup(t, 'medium');
   ready(h);
-  sample(h, 'sol', 100000, 50000, 60000);
-  sample(h, 'opus', 100000, 50000, 20000, 20000);
+  sample(h, 'fixture-main', 100000, 50000, 60000);
+  sample(h, 'fixture-large', 100000, 50000, 20000, 20000);
+  assert.equal(model(choice(h)), 'fixture-large');
   const tasks = h.readState('tasks.json');
-  const entry = tasks.tasks[0].spend.entries.find((e) => e.agent === 'review-opus');
+  const entry = tasks.tasks[0].spend.entries.find((e) => e.agent === 'review-fixture-large');
   entry.live = { state: 'live', interval_ms: 1000 };
   h.writeState('tasks.json', tasks);
-  assert.equal(model(choice(h)), 'sol');
+  assert.equal(model(choice(h)), 'fixture-main');
 });
 
 test('review selection matches Claude provider aliases to recorded provider spend', (t) => {
-  const bedrock = 'global.anthropic.claude-opus-5-5';
-  const anthropic = 'claude-opus-5-5';
+  const anthropic = 'fixture-claude';
+  const bedrock = `global.anthropic.${anthropic}`;
   for (const tier of ['medium', 'hard']) {
     const h = setup(t, tier);
     const bin = path.join(h.base, 'bin');
@@ -378,11 +444,11 @@ test('review selection matches Claude provider aliases to recorded provider spen
     const env = { PATH: bin + path.delimiter + (h.env.PATH || h.env.Path || ''),
       AWS_REGION: 'eu-west-1', AWS_BEARER_TOKEN_BEDROCK: 'stub-secret-bedrock',
       ANTHROPIC_API_KEY: 'stub-secret-anthropic' };
-    h.ok(['ladder', 'set', 'hard', '--harness', 'claude', '--provider', 'bedrock', '--model', 'opus']);
-    h.ok(['ladder', 'set', 'research', '--harness', 'claude', '--provider', 'anthropic', '--model', 'opus']);
-    h.ok(['project', 'set', '--review-policy', JSON.stringify({ prices: { ...prices, [bedrock]: prices[anthropic] } })]);
+    h.ok(['ladder', 'set', 'hard', '--harness', 'claude', '--provider', 'bedrock', '--model', anthropic]);
+    h.ok(['ladder', 'set', 'research', '--harness', 'claude', '--provider', 'anthropic', '--model', anthropic]);
+    h.ok(['project', 'set', '--review-policy', JSON.stringify({ prices: { ...prices, [anthropic]: prices['fixture-large'], [bedrock]: prices['fixture-large'] } })]);
     ready(h);
-    sample(h, tier === 'medium' ? 'sol' : bedrock, 1000000, 0, 0);
+    sample(h, tier === 'medium' ? 'fixture-main' : bedrock, 1000000, 0, 0);
     sample(h, tier === 'medium' ? bedrock : anthropic, 0, 0, 1);
     const promoted = choice(h, env);
     assert.equal(promoted.review_rung, tier === 'medium' ? 'hard' : 'research');
@@ -392,36 +458,80 @@ test('review selection matches Claude provider aliases to recorded provider spen
   }
 });
 
+test('review selection prices a Claude alias rung by the release id its spend records', (t) => {
+  const [alias, release] = Object.entries(require('../lib/ladder').BUILTIN.claude_aliases)[0];
+  for (const configured of [alias, alias.toUpperCase(), ` ${alias} `, ` ${alias.toUpperCase()} `]) {
+    assert.equal(require('../lib/reviewer').modelOf({ harness: 'claude', model: configured }),
+      require('../lib/ladder').modelIdentity(release), configured);
+    const h = setup(t, 'medium');
+    const bin = path.join(h.base, 'bin');
+    fs.mkdirSync(bin);
+    fs.writeFileSync(path.join(bin, process.platform === 'win32' ? 'claude.exe' : 'claude'), '', { mode: 0o755 });
+    const env = { PATH: bin + path.delimiter + (h.env.PATH || h.env.Path || '') };
+    h.ok(['ladder', 'set', 'hard', '--harness', 'claude', '--model', configured, '--clear', 'provider']);
+    h.ok(['project', 'set', '--review-policy', JSON.stringify({ prices: { ...prices, [release]: prices['fixture-large'] } })]);
+    ready(h);
+    sample(h, 'fixture-main', 1000000, 0, 0);
+    sample(h, release, 0, 0, 1);
+    const promoted = choice(h, env);
+    assert.equal(promoted.review_rung, 'hard', configured);
+    assert.equal(model(promoted), configured.trim());
+  }
+});
+
+test('native Claude alias review spend matches release-id pricing', (t) => {
+  const [alias, release] = Object.entries(require('../lib/ladder').BUILTIN.claude_aliases)[0];
+  const h = setup(t, 'medium');
+  const bin = path.join(h.base, 'bin');
+  fs.mkdirSync(bin);
+  fs.writeFileSync(path.join(bin, process.platform === 'win32' ? 'claude.exe' : 'claude'), '', { mode: 0o755 });
+  const env = { PATH: bin + path.delimiter + (h.env.PATH || h.env.Path || '') };
+  pinRung(h, 'hard', { harness: 'claude', model: alias, effort: 'high' });
+  pinRung(h, 'review', { harness: 'claude', model: alias, effort: 'high' });
+  h.ok(['project', 'set', '--review-policy', JSON.stringify({ prices: { ...prices, [release]: prices['fixture-large'] } })]);
+  ready(h);
+  sample(h, 'fixture-main', 1000000, 0, 0);
+  sample(h, alias, 0, 0, 1);
+  const recorded = h.json(['task', 'show', 'T1']).spend.entries.find(e => e.model === alias);
+  assert.equal(recorded.harness, 'claude');
+  assert.equal(recorded.provider, undefined);
+  const promoted = choice(h, env);
+  assert.equal(promoted.review_rung, 'hard');
+  assert.equal(model(promoted), alias);
+  sample(h, alias, 0, 0, 1000000);
+  assert.equal(choice(h, env).review_rung, 'medium', 'a higher alias median keeps the current rung');
+});
+
 test('equal cost promotes, missing components do not provide a cost sample', (t) => {
   const h = setup(t, 'medium', 'other', undefined, { gated: true });
-  h.ok(['spend', 'T1', '--agent', 'unknown-review', '--tokens', '1', '--rung', 'review', '--model', 'opus']);
-  sample(h, 'sol', 0, 0, 1000);
-  assert.equal(model(choice(h)), 'sol');
-  sample(h, 'opus', 0, 0, 500);
-  assert.equal(model(choice(h)), 'opus');
+  h.ok(['spend', 'T1', '--agent', 'unknown-review', '--tokens', '1', '--rung', 'review', '--model', 'fixture-large']);
+  sample(h, 'fixture-main', 0, 0, 1000);
+  assert.equal(model(choice(h)), 'fixture-main');
+  sample(h, 'fixture-large', 0, 0, 500);
+  assert.equal(model(choice(h)), 'fixture-large');
 });
 
 test('review history from other tasks and cached tokens determines cost', (t) => {
   const h = setup(t, 'medium', 'other', undefined, { gated: true });
   h.ok(['task', 'add', '--title', 'Recorded review history', '--acceptance', 'usage captured']);
-  sample(h, 'sol', 1000000, 990000, 0);
-  h.ok(['spend', 'T2', '--agent', 'historical-reviewer', '--rung', 'review', '--model', 'opus',
+  sample(h, 'fixture-main', 1000000, 990000, 0);
+  h.ok(['spend', 'T2', '--agent', 'historical-reviewer', '--rung', 'review', '--model', 'fixture-large',
     '--tokens', '100000', '--input', '100000', '--cached', '99000', '--cache-write', '0', '--output', '0']);
-  assert.equal(model(choice(h)), 'opus', 'cached token prices, rather than input-only prices, decide');
+  assert.equal(model(choice(h)), 'fixture-large', 'cached token prices, rather than input-only prices, decide');
 });
 
 test('review escalation climbs one tier after failed reviews', (t) => {
   const h = setup(t, 'easy', 'other', undefined, { gated: true });
-  assert.equal(model(choice(h)), 'luna');
+  assert.equal(model(choice(h)), 'fixture-light');
   // A failure under a name no review dispatch started does not escalate.
-  h.ok(['evidence', 'T1', '--agent', 'made-up', '--type', 'review', '--fail', '--sha', h.sha]);
-  assert.equal(model(choice(h)), 'luna');
+  h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--agent', 'made-up', '--type', 'review', '--fail', '--sha', h.sha]);
+  assert.equal(model(choice(h)), 'fixture-light');
   h.reviewer('T1', 'r1');
-  h.ok(['evidence', 'T1', '--agent', 'r1', '--type', 'review', '--fail', '--sha', h.sha, '--summary', 'needs stronger reasoning']);
-  assert.equal(model(choice(h)), 'sol');
+  h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--agent', 'r1', '--type', 'review', '--fail', '--sha', h.sha, '--summary', 'needs stronger reasoning']);
+  assert.equal(model(choice(h)), 'fixture-main');
   h.reviewer('T1', 'r2');
-  h.ok(['evidence', 'T1', '--agent', 'r2', '--type', 'review', '--fail', '--sha', h.sha]);
-  assert.equal(model(choice(h)), 'opus');
+  h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--agent', 'r2', '--type', 'review', '--fail', '--sha', h.sha]);
+  assert.equal(model(choice(h)), 'fixture-large');
 });
 
 test('escalation starts above the actual dispatched reviewer rung', (t) => {
@@ -484,8 +594,8 @@ test('review dispatch computes its diff once outside the state lock', (t) => {
 });
 });
 
-test('real Haiku reviewers expose first-turn cache reads and writes across worktrees', {
-  skip: process.env.TOWER_CRANE_LIVE_REVIEW_CACHE !== '1' && 'set TOWER_CRANE_LIVE_REVIEW_CACHE=1 for the paid Haiku probe',
+test('real Claude reviewers expose first-turn cache reads and writes across worktrees', {
+  skip: process.env.TOWER_CRANE_LIVE_REVIEW_CACHE !== '1' && 'set TOWER_CRANE_LIVE_REVIEW_CACHE=1 for the paid Claude probe',
   timeout: 300000,
 }, async (t) => {
   const h = setup(t);
@@ -497,8 +607,8 @@ test('real Haiku reviewers expose first-turn cache reads and writes across workt
   h.ok(['brief', 'set', 'T2', '-'], { input: instruction });
   h.ok(['claim', 'T2', '--agent', 'another-builder']);
   h.ok(['submit', 'T2', '--agent', 'another-builder', '--sha', h.sha]);
-  h.ok(['ladder', 'set', 'easy', '--harness', 'claude', '--model', 'claude-haiku-5-5', '--clear', 'profile',
-    '--args', '["--max-turns","1"]']);
+  assert.ok(process.env.TOWER_CRANE_LIVE_MODEL, 'set TOWER_CRANE_LIVE_MODEL to run a live Claude probe');
+  pinRung(h, 'easy', { harness: 'claude', model: process.env.TOWER_CRANE_LIVE_MODEL, effort: 'high', args: ['--max-turns', '1'] });
   const liveHome = process.env.TOWER_CRANE_LIVE_REVIEW_HOME || require('node:os').homedir();
   const env = { HOME: liveHome, CODEX_HOME: path.join(liveHome, '.codex'),
     CLAUDE_CONFIG_DIR: process.env.TOWER_CRANE_LIVE_REVIEW_CLAUDE_CONFIG || path.join(liveHome, '.claude') };
@@ -513,13 +623,13 @@ test('real Haiku reviewers expose first-turn cache reads and writes across workt
     }).findLast((e) => e?.type === 'result');
     assert.ok(result?.result?.includes('CACHE_PROBE_OK'), log.slice(-2000));
     const usage = result.usage;
-    assert.ok(usage, 'Haiku returned usage');
+    assert.ok(usage, 'Claude returned usage');
     const startup = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse)
       .findLast((e) => e.cmd === 'startup' && e.detail.agent === launch.agent);
     rows.push({ task, agent: launch.agent, system_bytes: startup.detail.system_bytes,
       model: result.modelUsage, usage, total_cost_usd: result.total_cost_usd });
   }
-  t.diagnostic(`Haiku first-turn cache probe: ${JSON.stringify(rows)}`);
+  t.diagnostic(`Claude first-turn cache probe: ${JSON.stringify(rows)}`);
   assert.equal(new Set(rows.map((r) => r.system_bytes)).size, 1, 'system context size is stable across worktrees');
   assert.ok(rows.slice(1).every((r) => r.usage.cache_read_input_tokens > 0), 'warm reviewer first turns read the cache');
   for (const row of rows) {
@@ -665,14 +775,14 @@ test('the review packet flags changed files outside the paths the brief names', 
 
 test('review policy validates price and diff settings through the CLI', (t) => {
   const h = makeProjectRepo(t);
-  for (const bad of [{ prices: { 'openai.gpt-6.1-sol': { input: -1 } } },
-    { prices: { sol: prices['openai.gpt-6.1-sol'], 'openai.gpt-6.1-sol': prices['openai.gpt-6.1-sol'] } },
+  for (const bad of [{ prices: { 'fixture-main': { input: -1 } } },
+    { prices: { 'FIXTURE-MAIN': prices['fixture-main'], 'fixture-main': prices['fixture-main'] } },
     { small_lines: -1 }, { risk_paths: [3] }, { surprise: true }]) {
     assert.equal(h.run(['project', 'set', '--review-policy', JSON.stringify(bad)]).code, 2);
   }
-  h.ok(['project', 'set', '--review-policy', JSON.stringify({ prices: { sol: prices['openai.gpt-6.1-sol'] } })]);
-  assert.deepEqual(h.json(['project', 'show']).review.prices, { 'openai.gpt-6.1-sol': prices['openai.gpt-6.1-sol'] });
-  for (const [alias, provider] of [['sol', 'openai.gpt-6.1-sol'], ['luna', 'openai.gpt-6-luna'], ['opus', 'claude-opus-5-5']]) {
+  h.ok(['project', 'set', '--review-policy', JSON.stringify({ prices: { 'FIXTURE-MAIN': prices['fixture-main'] } })]);
+  assert.deepEqual(h.json(['project', 'show']).review.prices, { 'fixture-main': prices['fixture-main'] });
+  for (const [alias, provider] of [['FIXTURE-MAIN', 'fixture-main'], ['fixture-light', 'fixture-light'], ['vendor/fixture-large', 'vendor/fixture-large']]) {
     const task = h.json(['task', 'add', '--title', alias, '--acceptance', 'usage']);
     const out = h.json(['spend', task.id, '--tokens', '1', '--model', alias]);
     assert.equal(out.spend.entries[0].model, provider);
