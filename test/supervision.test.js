@@ -445,7 +445,7 @@ test('a permanent exit is blocked without retrying and submit clears its phase',
   assert.equal(h.spawn().code, 2);
   assert.equal(h.readAttempts().length, 1);
   assert.equal(h.json(['task', 'show', 'T1']).run.reason, 'exit 2');
-  h.ok(['submit', 'T1', '--agent', 'worker-T1-1', '--sha', 'abcdef1']);
+  h.ok(['submit', 'T1', '--agent', 'worker-T1-1', '--sha', '50b732a15be40ccb2065cb2ba0e7b366d511b736']);
   assert.equal(h.json(['task', 'show', 'T1']).run, null);
 });
 
@@ -887,7 +887,7 @@ test('rework cannot resume a session while its transient rerun is still alive', 
   const spawned = h.json(['spawn', '--task', 'T1']);
   try {
     await until(() => h.readAttempts().length === 2, 'transient rerun did not start');
-    h.ok(['submit', 'T1', '--agent', spawned.agent, '--sha', 'abcdef1']);
+    h.ok(['submit', 'T1', '--agent', spawned.agent, '--sha', '50b732a15be40ccb2065cb2ba0e7b366d511b736']);
     h.ok(['rework', 'T1', '--reason', 'review correction']);
     const result = h.run(['spawn', '--task', 'T1']);
     assert.equal(result.code, 1, result.stderr);
