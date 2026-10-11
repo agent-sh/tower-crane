@@ -266,9 +266,12 @@ test('cancel preserves local commits even when the checkout was already removed'
   fs.writeFileSync(path.join(wt.path, 'committed.txt'), 'recover a missing checkout\n');
   h.git(['add', 'committed.txt'], wt.path);
   h.git(['commit', '-qm', 'local work'], wt.path);
+  const head = h.git(['rev-parse', 'HEAD'], wt.path);
   h.git(['worktree', 'remove', wt.path]);
   h.ok(['task', 'update', 'T1', '--status', 'cancelled']);
-  const saved = h.json(['task', 'show', 'T1']).worktree.saved;
+  const record = h.json(['task', 'show', 'T1']).worktree;
+  assert.equal(record.head, head);
+  const saved = record.saved;
   h.git(['fetch', path.join(saved, 'commits.bundle'), `refs/heads/${wt.branch}:refs/heads/recovered`]);
   assert.equal(h.git(['show', 'recovered:committed.txt']), 'recover a missing checkout');
   gone(h, wt);
