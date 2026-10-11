@@ -880,9 +880,10 @@ if (release) {
 test('wait drains on either signal without starting another gate, and a second signal stops the gate', {
   skip: process.platform === 'win32' ? 'Windows child.kill does not deliver POSIX signals' : false,
 }, async (t) => {
-  for (const [signal, forced, stage] of [['SIGTERM', false], ['SIGINT', false], ['SIGTERM', true], ['SIGTERM', true, 'proof'], ['SIGTERM', true, 'sources']]) {
+  for (const [signal, forced, stage] of [['SIGTERM', false], ['SIGINT', false], ['SIGTERM', true], ['SIGTERM', true, 'proof'], ['SIGTERM', true, 'sources'], ['SIGTERM', false, 'idle'], ['SIGINT', false, 'observe']]) {
     const proof = stage === 'proof';
     const sources = stage === 'sources';
+    const idle = stage === 'idle' || stage === 'observe';
     await t.test(`${signal}${forced ? ' twice' : ''}${stage ? ` during ${stage}` : ''}`, async (t) => {
       const h = cachedFixture(null, `wait-drain-${sources ? 'research' : 'code'}`, (repo) => {
         const h = setup(null, { repo, kind: sources ? 'research' : 'code' });
@@ -905,7 +906,7 @@ test('wait drains on either signal without starting another gate, and a second s
       h.logs = () => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
       const release = path.join(h.base, 'release-suite');
       const heldRun = proof ? 2 : 1;
-      const runs = slowSuite(h, { executors: 1, release, hold: heldRun });
+      const runs = idle ? null : slowSuite(h, { executors: 1, release, hold: heldRun });
       if (proof) h.ok(['project', 'set', '--tests-mode', 'prove', '--agent', 'orchestrator']);
       const observed = path.join(h.base, 'signal-observed');
       const preload = path.join(h.base, 'signal-observer.js');
@@ -913,6 +914,16 @@ test('wait drains on either signal without starting another gate, and a second s
       fs.writeFileSync(preload, `const fs = require('node:fs');
 for (const signal of ['SIGTERM', 'SIGINT']) process.on(signal, () => fs.appendFileSync(${JSON.stringify(observed)}, signal + '\\n'));
 `);
+      if (idle) {
+        fs.appendFileSync(preload, `
+const watch = fs.watch;
+fs.watch = (...args) => {
+  const watcher = watch(...args);
+  fs.writeFileSync(${JSON.stringify(path.join(h.base, 'suite-started-1'))}, '');
+  return watcher;
+};
+`);
+      }
       if (sources) {
         fs.appendFileSync(preload, `
 require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'public-http'))}).fetchPublic = (url, opts) => new Promise((resolve, reject) => {
@@ -928,10 +939,12 @@ require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'public-http'))}).fet
 `);
       }
       const child = require('node:child_process').spawn(process.execPath,
-        ['--require', preload, BIN, 'wait', '--after', '0', '--types', 'never', '--timeout', '60', '--agent', 'orchestrator'],
+        ['--require', preload, BIN, 'wait', '--after', '0', '--types', 'never', '--timeout', '60',
+          ...(stage === 'observe' ? ['--observe'] : []), '--agent', 'orchestrator'],
         { cwd: h.repo, env: h.env });
+      let stdout = '';
       let stderr = '';
-      child.stdout.resume();
+      child.stdout.on('data', (chunk) => { stdout += chunk; });
       child.stderr.on('data', (chunk) => { stderr += chunk; });
       const result = new Promise((resolve, reject) => {
         child.on('error', reject);
@@ -945,19 +958,24 @@ require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'public-http'))}).fet
         await result;
         await h.cleanup();
       });
-      assert.notEqual(await waitFor(path.join(h.base, `suite-started-${heldRun}`), { ms: 60000 }), null, 'the gate starts');
+      assert.notEqual(await waitFor(path.join(h.base, `suite-started-${heldRun}`), { ms: 60000 }), null, idle ? 'wait is ready' : 'the gate starts');
       child.kill(signal);
       assert.notEqual(await waitFor(observed), null, 'the wait process receives the signal');
-      assert.equal(child.exitCode, null, 'the running gate still holds wait open');
+      if (!idle) assert.equal(child.exitCode, null, 'the running gate still holds wait open');
       if (forced) {
         child.kill(signal);
       } else {
         fs.writeFileSync(release, '');
       }
       const exit = await result;
-      assert.deepEqual(runs(), { starts: heldRun, peak: 1 }, 'no queued gate starts during shutdown');
       assert.equal(exit.code, 0, JSON.stringify(exit));
       const receipts = h.logs().filter((e) => e.cmd === 'automation');
+      if (idle) {
+        assert.equal(stdout, '', 'signal shutdown emits no wake event');
+        assert.deepEqual(receipts, [], 'idle shutdown claims no automation work');
+        return;
+      }
+      assert.deepEqual(runs(), { starts: heldRun, peak: 1 }, 'no queued gate starts during shutdown');
       assert.deepEqual(receipts.filter((e) => e.detail.phase === 'running').map((e) => e.task), ['T1']);
       assert.equal(receipts.at(-1).detail.phase, 'deferred', 'the executor lease is released for a retry');
       const tasks = h.readState('tasks.json').tasks;
