@@ -462,7 +462,7 @@ test('ask --setting requests an owner-required change no command makes, and appl
 test('tagged questions cannot be reused as one-use setting approvals', (t) => {
   const h = makeRepo(t);
   h.init();
-  h.ok(['ask', '--question', 'Discuss publishing?', '--option', 'approve', '--option', 'decline',
+  h.ok(['ask', '--kind', 'technical', '--question', 'Discuss publishing?', '--option', 'approve', '--option', 'decline',
     '--setting', 'publish'], as('worker-T1-1'));
   const publish = ['ask', '--setting', 'publish'];
   assert.match(h.run(publish, as('orchestrator')).stderr, /opened D2/, 'an open question is not an approval request');

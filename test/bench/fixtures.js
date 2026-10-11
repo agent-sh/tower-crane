@@ -230,9 +230,9 @@ function busy(root, bin) {
   // Decisions: one blocks ready work, one does not; the orchestrator's request
   // for an owner-required setting becomes an approval.
   s.at(48 * MIN);
-  s.ok(['ask', '--question', 'Which store backs the delivery dashboard?', '--option', 'redis', '--option', 'postgres', '--recommend', 'postgres', '--why', 'delivery history must survive a flush; postgres is already in the stack', '--blocks', store], { agent: 'orchestrator' });
+  s.ok(['ask', '--kind', 'technical', '--owner-required', 'the owner picks the store for customer data', '--question', 'Which store backs the delivery dashboard?', '--option', 'redis', '--option', 'postgres', '--recommend', 'postgres', '--why', 'delivery history must survive a flush; postgres is already in the stack', '--blocks', store], { agent: 'orchestrator' });
   s.at(31 * MIN);
-  s.ok(['ask', '--question', 'Ship v2 to the first tenant on Friday?', '--option', 'yes', '--option', 'wait a week', '--why', 'load test is still running', '--blocks', flag], { agent: 'orchestrator' });
+  s.ok(['ask', '--kind', 'technical', '--owner-required', 'a customer rollout date is the owner\'s call', '--question', 'Ship v2 to the first tenant on Friday?', '--option', 'yes', '--option', 'wait a week', '--why', 'load test is still running', '--blocks', flag], { agent: 'orchestrator' });
   s.at(12 * MIN);
   s.run(['project', 'set', '--merge-admin', 'true'], { agent: 'orchestrator' });
   s.at(9 * MIN);

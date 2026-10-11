@@ -13,7 +13,7 @@ function populate(h) {
   h.ok(['task', 'add', '--title', 'API', '--acceptance', 'b', '--dep', 'T1']);
   h.ok(['task', 'add', '--title', 'Docs', '--acceptance', 'c', '--kind', 'docs', '--dep', 'T2', '--needs-owner', 'approve wording']);
   h.ok(['task', 'add', '--title', 'Metrics', '--acceptance', 'd', '--dep', 'T1']);
-  h.ok(['ask', '--question', 'Which dashboard?', '--option', 'grafana', '--option', 'datadog', '--blocks', 'T4']);
+  h.ok(['ask', '--kind', 'technical', '--question', 'Which dashboard?', '--option', 'grafana', '--option', 'datadog', '--blocks', 'T4']);
   h.ok(['claim', 'T1', '--agent', 'w-1']);
 }
 

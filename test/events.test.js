@@ -325,7 +325,7 @@ test('owner task comment wakes, worker progress notes are not owner comments', a
 
 test('owner decision comment wakes its blocked task', async (t) => {
   const h = setup(t);
-  h.ok(['ask', '--question', 'which?', '--blocks', 'T1']);
+  h.ok(['ask', '--kind', 'technical', '--question', 'which?', '--blocks', 'T1']);
   const result = await waiting(t, h, { automation: false, args: ['--task', 'T1', '--types', 'owner-comment'] });
   h.ok(['decision', 'note', 'D1', 'new context', '--agent', 'owner']);
   const e = await event(result, 'owner-comment', null);
@@ -335,7 +335,7 @@ test('owner decision comment wakes its blocked task', async (t) => {
 
 test('decision answer wakes its blocked task with the answer', async (t) => {
   const h = setup(t);
-  h.ok(['ask', '--question', 'which?', '--option', 'a', '--option', 'b', '--blocks', 'T1']);
+  h.ok(['ask', '--kind', 'technical', '--question', 'which?', '--option', 'a', '--option', 'b', '--blocks', 'T1']);
   const result = await waiting(t, h, { automation: false, args: ['--task', 'T1', '--types', 'decision-answer'] });
   h.ok(['answer', 'D1', '--choice', 'b']);
   assert.equal((await event(result, 'decision-answer', null)).detail.choice, 'b');
@@ -358,7 +358,7 @@ test('worker progress, decision requests and releases wake without a notificatio
   assert.equal((await event(progress, 'task note')).agent, 'worker');
   h.ok(['claim', 'T1', '--agent', 'worker']);
   const request = await waiting(t, h, { automation: false, args: ['--task', 'T1', '--types', 'decision-opened'] });
-  h.ok(['ask', '--question', 'Need owner input', '--option', 'yes', '--option', 'no', '--blocks', 'T1', '--agent', 'worker']);
+  h.ok(['ask', '--kind', 'technical', '--question', 'Need owner input', '--option', 'yes', '--option', 'no', '--blocks', 'T1', '--agent', 'worker']);
   assert.equal((await event(request, 'decision-opened', null)).detail.decision, 'D1');
   const release = await waiting(t, h, { automation: false, args: ['--task', 'T1', '--types', 'released'] });
   h.ok(['release', 'T1', '--reason', 'waiting on D1', '--agent', 'worker']);
@@ -562,6 +562,8 @@ test('worker progress after lease expiry postpones stall until progress is stale
 
 test('an observer waiting for the state lock does not block its timeout', async (t) => {
   const h = setup(t, ['--lease-minutes', '1']);
+  h.ok(['msg', '--to', 'orchestrator', 'already recorded']);
+  const message = log(h).findLast((e) => e.cmd === 'msg').id;
   const clock = path.join(h.base, 'clock');
   const start = Date.now();
   const hooks = { HOOK_CLOCK_FILE: clock };
@@ -577,6 +579,10 @@ test('an observer waiting for the state lock does not block its timeout', async 
   assert.equal(r.code, 2, r.stderr);
   assert.deepEqual(JSON.parse(r.stdout), { type: 'timeout', offset: fs.statSync(path.join(h.state, 'events.jsonl')).size });
   assert.ok(performance.now() - before < 2000, 'timeout is not held by the lock retry deadline');
+  const existing = h.run(['wait', '--agent', 'orchestrator', '--observe', '--after', '0',
+    '--types', 'worker-message', '--timeout', '0'], { hooks });
+  assert.equal(existing.code, 0, existing.stderr || existing.stdout);
+  assert.equal(JSON.parse(existing.stdout).id, message, 'a busy lease lock cannot hide an existing event');
   fs.writeFileSync(`${paused}.go`, '');
   assert.equal((await writer.result).code, 0);
 });
@@ -666,7 +672,7 @@ test('wait skips its own writes and advances timeout cursors past filtered event
 test('owner identity waits retain owner comments, answers, owner-done and messages', async (t) => {
   const h = setup(t);
   h.ok(['task', 'update', 'T1', '--needs-owner', 'access']);
-  h.ok(['ask', '--question', 'which?', '--option', 'a', '--option', 'b', '--blocks', 'T1']);
+  h.ok(['ask', '--kind', 'technical', '--question', 'which?', '--option', 'a', '--option', 'b', '--blocks', 'T1']);
   const snapshot = h.run(['wait', '--agent', 'owner', '--timeout', '0']);
   assert.equal(snapshot.code, 2, snapshot.stderr);
   let after = JSON.parse(snapshot.stdout).offset;
@@ -703,7 +709,7 @@ async function board(t, h) {
 test('non-owner serve hides owner forms and refuses all owner write routes', async (t) => {
   const h = setup(t);
   h.ok(['task', 'update', 'T1', '--needs-owner', 'access']);
-  h.ok(['ask', '--question', 'which?', '--option', 'a', '--option', 'b', '--blocks', 'T1']);
+  h.ok(['ask', '--kind', 'technical', '--question', 'which?', '--option', 'a', '--option', 'b', '--blocks', 'T1']);
   h.serveAgent = 'worker-evil';
   const { url } = await board(t, h);
   const page = await (await fetch(url)).text();
@@ -732,7 +738,7 @@ for (const agent of ['orchestrator', 'owner']) {
   test(`serve posts task and decision comments, answers and owner-done to ${agent} waits through locked CLI functions`, async (t) => {
     const h = setup(t);
     h.ok(['task', 'update', 'T1', '--needs-owner', 'access']);
-    h.ok(['ask', '--question', 'which?', '--option', 'a', '--option', 'b', '--blocks', 'T1']);
+    h.ok(['ask', '--kind', 'technical', '--question', 'which?', '--option', 'a', '--option', 'b', '--blocks', 'T1']);
     const { url, open } = await board(t, h);
     const page = await (await fetch(open)).text();
     const token = /<meta name="tower-crane-token" content="([0-9a-f]{48})">/.exec(page)[1];
