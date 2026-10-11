@@ -542,6 +542,25 @@ test('a worker whose spawn is not recorded within its startup window never start
   assert.equal(h.readAttempts().length, 0, 'the worker never started');
 });
 
+test('a schema bump before the supervisor first reads state stops its worker behind the gate', { skip: GATE_SKIP }, async (t) => {
+  const h = setup(t, { claim: false, failures: 0 });
+  const { paused, hooks } = pausedSupervisor(h);
+  const spawned = h.json(['spawn', '--task', 'T1'], { hooks });
+  await until(() => fs.existsSync(paused), 'supervisor did not pause');
+  // The lease gate waits on its supervisor, and this supervisor can no longer read the state.
+  S.withLock(h.state, () => {
+    const project = JSON.parse(fs.readFileSync(path.join(h.state, 'project.json'), 'utf8'));
+    project.schema_version = 2;
+    S.writeAtomic(path.join(h.state, 'project.json'), S.json(project));
+  });
+  fs.writeFileSync(`${paused}.go`, '');
+  await until(() => !detachedAlive({ pid: spawned.monitor_pid }), 'supervisor kept waiting behind its gate');
+  assert.equal(detachedAlive({ pid: spawned.pid }), false, 'the gate was stopped with its supervisor');
+  assert.equal(h.readAttempts().length, 0, 'the worker never started');
+  const tasks = JSON.parse(fs.readFileSync(path.join(h.state, 'tasks.json'), 'utf8')).tasks;
+  assert.equal(tasks.find((task) => task.id === 'T1').claim, null, 'no lease was taken');
+});
+
 test('a worker spawned behind a live lease held by another agent never starts and says why', (t) => {
   const h = setup(t, { claim: false, failures: 0 });
   h.ok(['claim', 'T1', '--agent', 'holder']);

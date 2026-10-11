@@ -210,6 +210,20 @@ test('a dead reservation frees the only worker slot before the first capacity ch
   fs.writeFileSync(path.join(h.base, 'T2.exit'), '');
 });
 
+test('a dead reservation frees the only worker slot for a batch spawn --ready', async (t) => {
+  const h = setup(t, 1, 2);
+  controlledHarness(h);
+  const { spawned } = await pausedSpawn(h, 'T1');
+  killWorker(spawned);
+  await until(() => workerGone(spawned), 'worker processes did not exit');
+  const batch = h.json(['spawn', '--ready', '--agent', 'orchestrator']);
+  assert.equal(batch.results.length, 1, 'the batch starts a worker in the freed slot');
+  assert.ok(batch.results[0].ok, JSON.stringify(batch.results));
+  assert.ok(events(h).some((e) => e.cmd === 'reservation clear' && e.detail.agent === spawned.agent),
+    'the dead reservation is cleared before the batch counts its slots');
+  for (const task of ['T1', 'T2']) fs.writeFileSync(path.join(h.base, `${task}.exit`), '');
+});
+
 test('reviewer dispatch is unaffected when worker reservations fill the limit', async (t) => {
   const h = setup(t);
   h.ok(['task', 'update', 'T2', '--kind', 'docs']);
