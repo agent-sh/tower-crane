@@ -85,6 +85,16 @@ test('changing the builder preserves independent reviews of earlier submissions'
   assert.equal(h.json(['status']).review_churn[0].count, 3);
 });
 
+test('a delayed verdict keeps the builder identity from its reviewer dispatch', (t) => {
+  const h = setup(t);
+  h.ok(['rework', 'T1', '--reason', 'another builder resubmits the same head']);
+  h.ok(['claim', 'T1', '--agent', 'reviewer-3']);
+  h.ok(['submit', 'T1', '--sha', h.sha, '--agent', 'reviewer-3']);
+  h.ok(['evidence', 'T1', '--type', 'review', '--fail', '--sha', h.sha, '--agent', 'reviewer-3',
+    '--summary', 'Acceptance item 2: delayed verdict from the previous dispatch']);
+  assert.equal(churn(h).count, 4);
+});
+
 test('review policy validates churn threshold through the CLI', (t) => {
   const h = setup(t);
   const { errors } = require('../lib/reviewer');
