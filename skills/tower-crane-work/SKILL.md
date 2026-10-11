@@ -32,7 +32,7 @@ Arguments: `$ARGUMENTS`. Use `TOWER_CRANE_TASK` and `TOWER_CRANE_AGENT` when set
    - Copies and contracts: docs, callers and other copies the change touched still agree with it.
    - Edge cases and scope: error paths, wrong conditions, unused additions, and files outside the task's named paths, each with a reason.
    - Revuto at the head: read the PR's comments and checks there (`gh pr view <n> --comments`, `gh pr checks <n>`). Fix each valid finding, or record why it is not valid.
-   - CI at the head: every required check is green at the head sha, or name the failing one. Wait for it in the foreground with `tower-crane wait --task <id> --agent <name> --timeout SEC`.
+   - CI at the head: every required check is green at the head sha, or name the failing one. The task is still claimed at this step, so `tower-crane wait` never receives a CI result. Watch the PR's checks in the foreground with a bound: `timeout SEC gh pr checks <n> --watch`.
    - Fresh context: if your tools include a subagent and your dispatch allows starting one, give it only the task acceptance, the diff and the PR body, and have it run the checklist. Otherwise run it in this context and record `Fresh context: no`.
 
    Sort each finding by the review skill's `What blocks` rules. Fix the blocking ones, push, and run the checklist again on the new head until nothing blocks. Follow-ups stay out of this PR. Then add a `## Pre-submit review` section to the PR body. Read the body with `gh pr view <n> --json body`, then write the whole body back with `gh pr edit <n> --body-file <file>`:
