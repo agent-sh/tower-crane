@@ -154,6 +154,10 @@ test('a Claude run on several models names its primary model and keeps each mode
   const single = parse('claude', unnamed);
   assert.equal(single.model, 'fixture-large');
   assert.equal(single.models, undefined);
+  // A result's placeholder model with no counts is not a second model either.
+  const placeholder = { type: 'result', usage: { input_tokens: 50, cache_read_input_tokens: 0, output_tokens: 5 },
+    modelUsage: { 'fixture-large': { inputTokens: 50, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, outputTokens: 5 }, '<synthetic>': {} } };
+  assert.equal(parse('claude', JSON.stringify(placeholder)).models, undefined);
 });
 
 test('review prices for one model agree across Bedrock and plain ids', (t) => {
