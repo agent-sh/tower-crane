@@ -236,3 +236,19 @@ test('brief set warns when a reviewer section has no worker section', (t) => {
   assert.equal(missingWorker.code, 0, missingWorker.stderr);
   assert.match(missingWorker.stderr, /Reviewer section.*without a .*Worker section/i);
 });
+
+test('task add --brief writes the brief in the same command and refuses an unreadable file before adding', (t) => {
+  const h = makeRepo(t);
+  h.init();
+  const file = path.join(h.base, 'brief.md');
+  fs.writeFileSync(file, '# Context\n\nFrom the add.\n');
+  assert.equal(h.ok(['task', 'add', '--title', 'Briefed', '--acceptance', 'brief lands', '--brief', file]), 'T1');
+  assert.equal(fs.readFileSync(path.join(h.state, 'briefs', 'T1.md'), 'utf8'), '# Context\n\nFrom the add.\n');
+  assert.equal(h.ok(['brief', 'get', 'T1']), '# Context\n\nFrom the add.');
+
+  const missing = h.run(['task', 'add', '--title', 'Lost', '--acceptance', 'never added', '--brief', path.join(h.base, 'absent.md')]);
+  assert.equal(missing.code, 1);
+  assert.match(missing.stderr, /cannot read/);
+  assert.equal(h.readState('tasks.json').tasks.length, 1);
+  assert.equal(fs.existsSync(path.join(h.state, 'briefs', 'T2.md')), false);
+});
