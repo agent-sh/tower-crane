@@ -68,7 +68,7 @@ async function main() {
     if (background) out.turns.push(hookWith('PostToolUse', {
       tool_name: 'Bash', tool_input: { command: 'gh pr checks 1 --watch', run_in_background: true },
     }));
-    if (mode === 'submitted') cli('submit', 'T1', '--sha', 'abcdef1');
+    if (mode === 'submitted') cli('submit', 'T1', '--sha', '50b732a15be40ccb2065cb2ba0e7b366d511b736');
     out.stops = reports.map((last) => hookWith('Stop', { last_assistant_message: last }));
     out.blocked = out.stops.some((stop) => stop.decision === 'block');
     fs.writeFileSync(process.env.MESSAGE_OUT, JSON.stringify(out));
@@ -167,7 +167,7 @@ async function main() {
     run('git', ['push', process.env.MESSAGE_REMOTE, 'HEAD:refs/heads/probe']);
     run('gh', ['pr', 'create', '--title', 'probe']);
   }
-  if (process.env.MESSAGE_SUBMIT === '1') cli('submit', 'T1', '--sha', 'abcdef1');
+  if (process.env.MESSAGE_SUBMIT === '1') cli('submit', 'T1', '--sha', '50b732a15be40ccb2065cb2ba0e7b366d511b736');
   fs.writeFileSync(process.env.MESSAGE_OUT, JSON.stringify(out));
   if (process.env.MESSAGE_RETRY === '1') process.exitCode = 75;
 }

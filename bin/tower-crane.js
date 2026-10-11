@@ -463,7 +463,16 @@ async function main(argv) {
     // verifies requests against the identity it spawned.
     if (process.env.TOWER_CRANE_BROKER && !require('../lib/broker').READS.has(cmd.name)) {
       const input = argv.includes('-') ? readStdin() : undefined;
-      const res = await require('../lib/broker').forward(process.env.TOWER_CRANE_BROKER, argv, locate(), input);
+      let forwarded = argv;
+      if (cmd.name === 'submit') {
+        const sha = T.resolveSubmitSha({ cwd: process.cwd(), env: process.env, stateDir: locate(),
+          pos: parsed.pos, flags: own }, own.sha);
+        const tokens = [...resolved.lead, ...resolved.rest];
+        const span = parsed.spans.find((s) => s.name === 'sha');
+        tokens.splice(span.from, span.to - span.from + 1, '--sha', sha);
+        forwarded = ['submit', ...tokens];
+      }
+      const res = await require('../lib/broker').forward(process.env.TOWER_CRANE_BROKER, forwarded, locate(), input);
       if (res) {
         process.stdout.write(res.stdout || '');
         process.stderr.write(res.stderr || '');

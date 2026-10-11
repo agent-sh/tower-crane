@@ -94,7 +94,7 @@ async function event(result, type, task = 'T1') {
 
 function submit(h, extra = []) {
   h.ok(['claim', 'T1', '--agent', 'worker']);
-  h.ok(['submit', 'T1', '--agent', 'worker', '--sha', h.sha || 'abcdef1', ...extra]);
+  h.ok(['submit', 'T1', '--agent', 'worker', '--sha', h.sha || '50b732a15be40ccb2065cb2ba0e7b366d511b736', ...extra]);
 }
 
 function gates(h, ci = false) {
@@ -131,9 +131,9 @@ test('submitted wakes a live waiter with one event JSON line, even with --json',
   const h = setup(t);
   h.ok(['claim', 'T1', '--agent', 'worker']);
   const result = await waiting(t, h, { automation: false, args: ['--types', 'submitted', '--json'] });
-  h.ok(['submit', 'T1', '--agent', 'worker', '--sha', 'abcdef1']);
+  h.ok(['submit', 'T1', '--agent', 'worker', '--sha', '50b732a15be40ccb2065cb2ba0e7b366d511b736']);
   const e = await event(result, 'submitted');
-  assert.equal(e.detail.sha, 'abcdef1');
+  assert.equal(e.detail.sha, '50b732a15be40ccb2065cb2ba0e7b366d511b736');
   assert.equal(log(h).find((x) => x.id === e.id).type, e.type);
 });
 
@@ -406,7 +406,7 @@ test('submitted spawned workers never emit worker-exited', async (t) => {
   const h = setup(t);
   const script = path.join(h.base, 'submit.js');
   fs.writeFileSync(script, `const cp = require('node:child_process');
-for (const args of [['claim', 'T1'], ['submit', 'T1', '--sha', 'abcdef1']]) {
+for (const args of [['claim', 'T1'], ['submit', 'T1', '--sha', '50b732a15be40ccb2065cb2ba0e7b366d511b736']]) {
 const r = cp.spawnSync(process.execPath, [${JSON.stringify(BIN)}, ...args], { env: process.env }); if (r.status) process.exit(r.status);
 }\n`);
   h.ok(['brief', 'set', 'T1', '-'], { input: 'stand-in\n' });
