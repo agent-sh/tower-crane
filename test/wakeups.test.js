@@ -60,7 +60,7 @@ test('the default wait wakes on every owner event and skips bookkeeping', async 
 test('wait --follow streams id-only lines and event prints the content', async (t) => {
   const h = setup(t);
   h.ok(['ask', '--kind', 'technical', '--question', 'which way?', '--option', 'left', '--option', 'right', '--blocks', 'T1', '--agent', 'worker']);
-  const p = cp.spawn(process.execPath, [BIN, 'wait', '--follow', '--agent', 'orchestrator'], { cwd: h.repo, env: h.env });
+  const p = cp.spawn(process.execPath, [BIN, 'wait', '--observe', '--follow', '--agent', 'orchestrator'], { cwd: h.repo, env: h.env });
   t.after(() => p.kill());
   let out = '';
   p.stdout.on('data', (d) => { out += d; });
@@ -206,6 +206,7 @@ function engine(t, h) {
 
 test('the Claude Code mod pushes a decision answer and a worker message into the session', async (t) => {
   const h = setup(t);
+  h.ok(['project', 'set', '--paused', 'notification-only probe']);
   h.ok(['ask', '--kind', 'technical', '--question', 'merge now?', '--option', 'yes', '--option', 'later', '--agent', 'worker']);
   const { register } = await import(pathToFileURL(MOD).href);
   const cc = engine(t, h);

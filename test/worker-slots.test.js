@@ -224,6 +224,26 @@ test('a dead reservation frees the only worker slot for a batch spawn --ready', 
   for (const task of ['T1', 'T2']) fs.writeFileSync(path.join(h.base, `${task}.exit`), '');
 });
 
+test('wait clears a dead reservation before counting capacity and refills the cancelled worker slot', async (t) => {
+  const h = setup(t, 1, 2);
+  controlledHarness(h);
+  const { spawned } = await pausedSpawn(h, 'T1');
+  killWorker(spawned);
+  await until(() => workerGone(spawned), 'worker processes did not exit');
+  h.ok(['task', 'update', 'T1', '--status', 'cancelled']);
+  const result = await h.runAsync(['wait', '--after', '0', '--types', 'spawn', '--task', 'T2',
+    '--timeout', '5', '--agent', 'orchestrator']);
+  assert.equal(result.code, 0, result.stderr || result.stdout);
+  const replacement = JSON.parse(result.stdout);
+  assert.equal(replacement.detail.agent, 'worker-T2-1');
+  const cleared = events(h).findIndex((e) => e.cmd === 'reservation clear' && e.detail.agent === spawned.agent);
+  const dispatched = events(h).findIndex((e) => e.cmd === 'spawn' && e.task === 'T2');
+  assert.ok(cleared >= 0 && cleared < dispatched, 'the reservation is cleared before dispatch');
+  const st = require('../lib/state').loadState(h.state);
+  assert.equal(require('../lib/tasks').workerHolders(st, Date.now()).length, 1);
+  fs.writeFileSync(path.join(h.base, 'T2.exit'), '');
+});
+
 test('reviewer dispatch is unaffected when worker reservations fill the limit', async (t) => {
   const h = setup(t);
   h.ok(['task', 'update', 'T2', '--kind', 'docs']);
