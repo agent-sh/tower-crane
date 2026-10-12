@@ -210,14 +210,14 @@ for (const type of ['tests', 'clean']) {
     h.ok(['project', 'set', `--${type}-cmd`, next]);
     assert.match(entries()[0], /does not count/);
     assert.match(sheet(), new RegExp(`class="nocount">\\(does not count: ${type} evidence command policy`));
-    assert.match(sheet(), new RegExp(`class="pip missing">${type}</span>`));
+    assert.match(sheet(), new RegExp(`class="pip missing">${type} not yet run</span>`));
 
     h.ok(['check', type, 'T1'], { env: { TOWER_CRANE_CLEAN_CMD: '' } });
     assert.equal(entries().length, 2);
     assert.match(entries()[0], /does not count/);
     assert.doesNotMatch(entries()[1], /does not count/);
     assert.equal((sheet().match(new RegExp(`does not count: ${type} evidence command policy`, 'g')) || []).length, 1);
-    assert.match(sheet(), new RegExp(`class="pip pass">${type}</span>`));
+    assert.match(sheet(), new RegExp(`class="pip pass">${type} passed</span>`));
   });
 }
 
