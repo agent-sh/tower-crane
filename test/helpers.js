@@ -381,12 +381,15 @@ try {
   foreach ($entry in (ConvertFrom-Json '${records}')) {
     if (!$entry.PSObject.Properties['startTime']) { throw 'Windows monitor creation identity is missing' }
     if ($null -eq $entry.startTime) { continue }
+    $monitor = $null
     try {
       $monitor = [System.Diagnostics.Process]::GetProcessById($entry.pid)
       $null = $monitor.Handle
     } catch [System.ArgumentException] { continue }
-      catch [System.InvalidOperationException] { $monitor.Dispose(); continue }
-    if ($monitor.StartTime.ToFileTimeUtc().ToString() -ne $entry.startTime) {
+      catch [System.InvalidOperationException] { if ($monitor) { $monitor.Dispose() }; continue }
+    # A monitor exiting during this query reads a null creation time; it has already stopped.
+    $started = $monitor.StartTime
+    if ($null -eq $started -or $started.ToFileTimeUtc().ToString() -ne $entry.startTime) {
       $monitor.Dispose()
       continue
     }
