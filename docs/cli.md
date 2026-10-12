@@ -957,3 +957,9 @@ Recovery saves include `commits.bundle` when the task head is not already reacha
 Worktree recovery retries compare the retained branch head with actual saved bundle heads. New commits get a new recovery directory linked to the earlier save by `previous` in its manifest. Ownership is checked under the lock that reserves removal; a reservation blocks other tasks from assigning or preparing that path or branch. A partial stack merge retires confirmed merged members after the merge attempt finishes and preserves every still-open upper branch and worktree.
 
 Orphan removal with `worktree prune --orphans` checks current task ownership and reserves both the path and branch under the state lock before saving, removing the checkout or deleting its branch. Task assignment and preparation honor that reservation. Adoption before the locked check preserves the live checkout; adoption during removal is refused. Each cleanup releases only its own reservation, including a failed attempt.
+
+## Review churn
+
+`project set --review-policy '{"churn_after":3}'` sets the failed-review threshold; it defaults to 3 and must be a positive safe integer. The orchestrator or owner can change it. `--review-policy null` restores the review defaults.
+
+`inbox` surfaces `review_churn` for active tasks at the threshold with each failed review's one-line findings, explicit acceptance-line and finding-location comparisons, and recorded spend. It asks the orchestrator to bound scope, split the task or change tier, while rework proceeds. Findings without comparable scope references are marked `unknown`. Counts span heads and rework revision bumps, and reset on an acceptance revision change. Later stack refreshes preserve that reset. `status`, the board and both sketches show the count per task. See [Orchestrator inbox](state.md#orchestrator-inbox) for the fields and revision rules.
