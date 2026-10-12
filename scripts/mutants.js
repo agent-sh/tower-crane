@@ -161,7 +161,7 @@ const MUTANTS = [
   { id: 'incompatible-gate-waits-for-stdin', area: 'spawn/supervisor', file: 'lib/spawn-monitor.js',
     from: 'if (awaitingLease && gateStdin && !exit) {\n              awaitingLease = false;\n              terminateGroup(child);', to: 'if (false) {', tests: ['test/supervision.test.js'] },
   { id: 'supervisor-stop-trusts-exit-code', area: 'spawn/supervisor', file: 'lib/spawn-monitor.js',
-    from: 'const stopped = !!stopReason || !!budgetStop || stalled || harnessRefusal || exit.code !== 0;', to: 'const stopped = harnessRefusal || exit.code !== 0;', tests: ['test/supervision.test.js'] },
+    from: 'const stopped = !!stopReason || !!budgetStop || stalled || harnessRefusal || loginFailed || exit.code !== 0;', to: 'const stopped = harnessRefusal || loginFailed || exit.code !== 0;', tests: ['test/supervision.test.js'] },
   { id: 'group-probe-clears-live-group', area: 'spawn/supervisor', file: 'lib/processes.js',
     from: "try { process.kill(-pgid, 0); return 'unknown'; }", to: "try { process.kill(-pgid, 0); return 'exited'; }", tests: ['test/worker-slots.test.js'] },
   { id: 'startup-window-silent', area: 'spawn/supervisor', file: 'lib/spawn-monitor.js',
