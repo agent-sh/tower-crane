@@ -345,13 +345,8 @@ test('a broker whose temp root is too deep for a socket keeps its socket out of 
     }
   });
   const job = { ...s.job, broker_harnesses: ['claude'], broker: path.join(s.base, 'w'.repeat(90), B.FILE) };
-  // A home this deep cannot hold a socket either, and then the broker refuses; it must not use /tmp.
-  const started = await B.start(job).then((broker) => broker, (error) => error);
-  if (started instanceof Error) {
-    assert.match(started.message, /no socket path short enough/);
-    return;
-  }
-  t.after(() => started.close());
+  const broker = await B.start(job);
+  t.after(() => broker.close());
   const { socket } = JSON.parse(fs.readFileSync(job.broker, 'utf8'));
   assert.ok(socket.startsWith(path.join(home, '.cache', 'tower-crane') + path.sep), socket);
 });
