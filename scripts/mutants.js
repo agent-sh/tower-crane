@@ -217,7 +217,7 @@ const MUTANTS = [
   { id: 'session-bus-address-from-spawning-env', area: 'sandbox', file: 'lib/spawn-monitor.js',
     from: "require('./agents').sessionBusEnv(spawn.harness, spawn.settings || {}, agentEnv)", to: "require('./agents').sessionBusEnv(spawn.harness, spawn.settings || {}, process.env)", tests: ['test/sandbox-extensions.test.js'] },
   { id: 'sandbox-denies-spawning-runtime', area: 'sandbox', file: 'lib/agents.js',
-    from: '...(env.XDG_RUNTIME_DIR && env.XDG_RUNTIME_DIR !== `/run/user/${uid}` ? [env.XDG_RUNTIME_DIR] : []),', to: '...(ctx.env.XDG_RUNTIME_DIR && ctx.env.XDG_RUNTIME_DIR !== `/run/user/${uid}` ? [ctx.env.XDG_RUNTIME_DIR] : []),', tests: ['test/sandbox-extensions.test.js'] },
+    from: '...[...new Set([ctx.env.XDG_RUNTIME_DIR, env.XDG_RUNTIME_DIR])].filter((dir) => dir && dir !== `/run/user/${uid}`),', to: '...[env.XDG_RUNTIME_DIR].filter((dir) => dir && dir !== `/run/user/${uid}`),', tests: ['test/sandbox-extensions.test.js'] },
   // board
   { id: 'board-unescaped-lt', area: 'board', file: 'lib/board/view.js',
     from: ".replace(/</g, '&lt;')", to: '', tests: ['test/board.test.js'] },

@@ -513,6 +513,38 @@ test('claude: sandbox.session_bus addresses the bus of the runtime the env_file 
   assert.ok(seen.sandbox.filesystem.allowWrite.includes(bus), 'the sandbox writes the socket the bus address names');
 });
 
+test('claude: the runtime the spawning env names stays denied when the project env names another', { skip: NO_STUBS }, (t) => {
+  const h = setup(t, 'claude');
+  const bin = path.join(h.base, 'bin');
+  fs.mkdirSync(bin);
+  const out = path.join(h.base, 'result.json');
+  writeClaudeStub(bin, out);
+  // Both runtimes sit outside /run/user/<uid>, so only the sandbox's own denial hides the spawning one.
+  const host = path.join(h.base, 'host-runtime');
+  const runtime = path.join(h.base, 'runtime');
+  fs.mkdirSync(host);
+  fs.mkdirSync(runtime);
+  const bus = path.join(fs.realpathSync(runtime), 'bus');
+  const env = { ...h.env, XDG_RUNTIME_DIR: host, DBUS_SESSION_BUS_ADDRESS: `unix:path=${path.join(host, 'bus')}`,
+    PATH: `${bin}${path.delimiter}${process.env.PATH}`, CLAUDE_CONFIG_DIR: '' };
+  h.ok(['project', 'set', '--env', JSON.stringify({ XDG_RUNTIME_DIR: runtime })]);
+  h.ok(['spawn', '--task', 'T1', '--wait'], { env });
+  const off = JSON.parse(fs.readFileSync(out, 'utf8'));
+  assert.equal(off.env.XDG_RUNTIME_DIR, runtime, 'the worker starts in the project runtime');
+  assert.ok(off.sandbox.filesystem.denyRead.includes(fs.realpathSync(host)), 'off: the spawning runtime stays denied');
+  assert.ok(off.sandbox.filesystem.denyRead.includes(fs.realpathSync(runtime)), 'off: the worker runtime stays denied');
+
+  fs.writeFileSync(bus, '');
+  h.ok(['project', 'set', '--session-bus', 'true']);
+  releaseExited(h);
+  h.ok(['spawn', '--task', 'T1', '--wait'], { env });
+  const on = JSON.parse(fs.readFileSync(out, 'utf8'));
+  assert.ok(on.sandbox.filesystem.denyRead.includes(fs.realpathSync(host)), 'on: the spawning runtime stays denied');
+  assert.ok(on.sandbox.filesystem.denyRead.includes(fs.realpathSync(runtime)), 'on: the worker runtime stays denied');
+  assert.deepEqual(on.sandbox.filesystem.allowRead.filter((p) => p.startsWith(fs.realpathSync(host))), [], 'on: no socket in the spawning runtime is granted');
+  assert.ok(on.sandbox.filesystem.allowRead.includes(bus), 'on: the worker bus is granted');
+});
+
 test('claude: dry-run never reads env_file, and a real spawn that cannot read it refuses', { skip: NO_STUBS }, (t) => {
   const h = setup(t, 'claude');
   const bin = path.join(h.base, 'bin');
