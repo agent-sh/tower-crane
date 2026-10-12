@@ -489,3 +489,80 @@ test('expensive prove needs a pinned scoped command that passes at head, fails a
   assert.match(r.summary, /kept a scoped proof/);
   assertCleanedUp();
 });
+
+test('the gate command runs with TMPDIR under the gate temp root, and that directory is removed when the gate ends', async () => {
+  // Records the temp directories it sees, then leaves a directory behind as a test helper might.
+  const log = path.join(tmp, 'probe.log');
+  const probe = path.join(tmp, 'probe.js');
+  fs.writeFileSync(probe, `const fs = require('fs');
+const os = require('os');
+const path = require('path');
+fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify([process.env.TMPDIR, process.env.TMP, process.env.TEMP, os.tmpdir(), process.env.NODE_COMPILE_CACHE]) + '\\n');
+fs.mkdtempSync(path.join(os.tmpdir(), 'tower-crane-leftover-'));
+`);
+  // The test process's own temp directory is elsewhere, so a command that inherits it is caught.
+  const inherited = path.join(tmp, 'inherited');
+  fs.mkdirSync(inherited);
+  const saved = process.env.TMPDIR;
+  const savedCache = process.env.NODE_COMPILE_CACHE;
+  process.env.TMPDIR = inherited;
+  // A compile cache named by an absolute path is not moved by TMPDIR, so the gate must redirect it too.
+  process.env.NODE_COMPILE_CACHE = path.join(inherited, 'compile-cache');
+  try {
+    const sha = task({ 'lib/add.js': FIX, 'test/add.test.js': ADD_TEST });
+    const r = await gate.run(ctx(sha, { args: { cmd: `${NODE} ${quote(probe)}` }, project: { tests: { mode: 'run-only' } } }));
+    assert.equal(r.ok, true, r.summary);
+    const [seen] = fs.readFileSync(log, 'utf8').trim().split('\n').map((line) => JSON.parse(line));
+    for (const dir of seen) assert.ok(dir.startsWith(process.env.TOWER_CRANE_TMP + path.sep), dir);
+    assert.equal(fs.existsSync(seen[0]), false, 'the gate removed its temp directory');
+    assertCleanedUp();
+  } finally {
+    if (saved === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = saved;
+    if (savedCache === undefined) delete process.env.NODE_COMPILE_CACHE;
+    else process.env.NODE_COMPILE_CACHE = savedCache;
+  }
+});
+
+test('a post-checkout hook makes no scratch in the caller temp root when the gate adds its worktree and restores files', async () => {
+  // Git runs this hook for the gate's worktree add and its checkout, so it writes wherever their TMPDIR points.
+  const inherited = path.join(tmp, 'inherited-hook');
+  fs.mkdirSync(inherited);
+  const hook = path.join(root, '.git', 'hooks', 'post-checkout');
+  const saved = process.env.TMPDIR;
+  process.env.TMPDIR = inherited;
+  try {
+    const sha = task({ 'lib/add.js': FIX, 'test/add.test.js': ADD_TEST });
+    // Written after task(), whose own checkouts would otherwise fill the caller temp root.
+    fs.writeFileSync(hook, `#!/bin/sh\n${NODE} -e "require('fs').mkdtempSync(require('path').join(process.env.TMPDIR || require('os').tmpdir(), 'tower-crane-hook-'))"\n`, { mode: 0o755 });
+    const r = await gate.run(ctx(sha));
+    assert.equal(r.ok, true, r.summary);
+    assert.deepEqual(fs.readdirSync(inherited), []);
+    assertCleanedUp();
+  } finally {
+    if (saved === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = saved;
+    fs.rmSync(hook, { force: true });
+  }
+});
+
+test('a gate whose scratch directory cannot be made removes the temp parent it already created', async () => {
+  const sha = task({ 'lib/add.js': FIX, 'test/add.test.js': ADD_TEST });
+  // Fails the scratch directory inside the gate's parent, as a full disk would, after the parent exists.
+  const mkdirSync = fs.mkdirSync;
+  fs.mkdirSync = function (dir, ...rest) {
+    if (path.basename(dir) === 'tmp' && path.basename(path.dirname(dir)).startsWith('tower-crane-')) {
+      throw Object.assign(new Error('ENOSPC: no space left on device'), { code: 'ENOSPC' });
+    }
+    return mkdirSync.call(this, dir, ...rest);
+  };
+  let r;
+  try {
+    r = await gate.run(ctx(sha));
+  } finally {
+    fs.mkdirSync = mkdirSync;
+  }
+  assert.equal(r.ok, false);
+  assert.match(r.summary, /cannot create a temporary directory/);
+  assertCleanedUp();
+});
