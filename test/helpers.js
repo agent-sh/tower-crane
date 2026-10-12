@@ -314,9 +314,9 @@ function withHooks(ctx, opts) {
 
 // A timeout here only guards against a hung CLI; the runner's per-test timeout
 // is the backstop. Spawns that waited 15 to 23 s on a machine at load 50 to 80
-// set the 60 s floor, so a slow machine does not read as a failure.
+// set the 60 s floor. An explicit zero leaves only the runner's backstop.
 function run(args, { cwd, env, input, pre = [], timeout = 60000 } = {}) {
-  const r = cp.spawnSync(process.execPath, [...pre, BIN, ...args], { cwd, env, input, encoding: 'utf8', timeout: Math.max(timeout, 60000) });
+  const r = cp.spawnSync(process.execPath, [...pre, BIN, ...args], { cwd, env, input, encoding: 'utf8', timeout: timeout === 0 ? 0 : Math.max(timeout, 60000) });
   return { code: r.status, stdout: r.stdout || '', stderr: r.stderr || '', signal: r.signal };
 }
 

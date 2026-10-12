@@ -102,6 +102,44 @@ test('two live copies of the same harness session cannot both drive the queue', 
   assert.equal((await run(clients[1], ['task', 'note', 'T1', 'released process replaced'])).code, 0);
 });
 
+test('a lease whose holder process exited is released at once, including a reused pid', async (t) => {
+  const h = makeProjectRepo(t);
+  const env = { ...h.env, TOWER_CRANE_AGENT: 'orchestrator', CLAUDE_SESSION_ID: 'restarted-session' };
+  const fork = () => cp.fork(path.join(__dirname, 'fixtures', 'orchestrator-session.js'),
+    [BIN, h.repo], { env, stdio: ['ignore', 'ignore', 'pipe', 'ipc'] });
+  const clients = [fork(), fork()];
+  t.after(() => clients.forEach((client) => client.kill()));
+  const run = (client, args) => new Promise((resolve, reject) => {
+    client.once('error', reject);
+    client.once('message', resolve);
+    client.send(args);
+  });
+  assert.equal((await run(clients[0], ['task', 'add', '--title', 'held', '--acceptance', 'dead holder'])).code, 0);
+  const held = h.readState('tasks.json').orchestrator_lease;
+  assert.equal(held.pid, clients[0].pid);
+  assert.equal((await run(clients[1], ['task', 'note', 'T1', 'refused'])).code, 1, 'a live holder keeps the lease');
+  if (process.platform === 'linux') {
+    // A fallback or legacy lease without persistent identity waits out the idle window.
+    const { persistent, ...legacy } = held;
+    assert.equal(persistent, true);
+    h.writeState('tasks.json', { ...h.readState('tasks.json'), orchestrator_lease: { ...legacy, start_ticks: '1' } });
+    assert.equal((await run(clients[1], ['task', 'note', 'T1', 'refused'])).code, 1, 'a legacy lease is not released early');
+    // A pid reused by another process does not keep a dead holder's lease.
+    h.writeState('tasks.json', { ...h.readState('tasks.json'), orchestrator_lease: { ...held, start_ticks: '1' } });
+    const reused = await run(clients[1], ['task', 'note', 'T1', 'pid was reused']);
+    assert.equal(reused.code, 0, reused.stderr);
+    assert.equal(h.readState('tasks.json').orchestrator_lease.pid, clients[1].pid);
+    assert.equal((await run(clients[1], ['orchestrator', 'release'])).code, 0);
+    assert.equal((await run(clients[0], ['task', 'note', 'T1', 'holder again'])).code, 0);
+  }
+  const exited = new Promise((resolve) => clients[0].once('exit', resolve));
+  clients[0].kill();
+  await exited;
+  const taken = await run(clients[1], ['task', 'note', 'T1', 'dead holder replaced']);
+  assert.equal(taken.code, 0, taken.stderr);
+  assert.equal(h.readState('tasks.json').orchestrator_lease.pid, clients[1].pid);
+});
+
 test('engine lease bindings reject stale work without extending the idle window', () => {
   const O = require('../lib/orchestrator');
   const old = { session_id: 'old', heartbeat: new Date().toISOString() };
@@ -160,7 +198,7 @@ const C = require(${JSON.stringify(path.join(__dirname, '../lib/commands'))});
 Object.defineProperty(process, 'platform', { value: 'win32' });
 C.execFileSync = (command, args) => {
   if (command !== 'powershell.exe') throw new Error('unexpected command');
-  if (process.env.PARENT_QUERY_CASE === 'large' && !args[2].includes('-Filter')) {
+  if (process.env.PARENT_QUERY_CASE === 'large' && !args[2].includes('ConvertTo-Json -InputObject @($taskParents)')) {
     throw Object.assign(new Error('process listing exceeds maxBuffer'), { code: 'ENOBUFS' });
   }
   return JSON.stringify([{ ProcessId: process.ppid, ParentProcessId: 444444, Name: 'node.exe',
@@ -179,4 +217,54 @@ console.log(JSON.stringify(O.identity({ env: { CLAUDE_SESSION_ID: 'same-session'
     return JSON.parse(result.stdout);
   });
   assert.deepEqual(identities[0], identities[1], 'changing process-list size cannot change the session key');
+});
+
+test('Windows parent discovery waits for query completion with the cold-start hang guard', async (t) => {
+  const h = makeProjectRepo(t);
+  const release = path.join(h.base, 'query-release');
+  const script = `
+const cp = require('node:child_process');
+const C = require(${JSON.stringify(path.join(__dirname, '../lib/commands'))});
+Object.defineProperty(process, 'platform', { value: 'win32' });
+C.execFileSync = (command, args, options) => {
+  if (command !== 'powershell.exe') throw new Error('unexpected command');
+  const result = [{ ProcessId: process.ppid, ParentProcessId: 1, Name: 'node.exe',
+    CreationDate: 'stable-start', CommandLine: 'node harness' }];
+  process.send({ timeout: options.timeout });
+  return cp.execFileSync(process.execPath, ['-e',
+    ${JSON.stringify(`
+const fs = require('node:fs');
+const release = ${JSON.stringify(release)};
+const watcher = fs.watch(${JSON.stringify(h.base)}, check);
+function check() {
+  if (!fs.existsSync(release)) return;
+  watcher.close();
+  process.stdout.write(process.argv[1]);
+}
+check();
+`)}, JSON.stringify(result)], options);
+};
+const O = require(${JSON.stringify(path.join(__dirname, '../lib/orchestrator'))});
+const identity = O.identity({ env: { CLAUDE_SESSION_ID: 'cold-session' }, agent: 'orchestrator' });
+if (identity.pid !== process.ppid || !identity.persistent) throw new Error('query lost the persistent caller');
+console.log(identity.harness_session_id);
+`;
+  const child = cp.spawn(process.execPath, ['-e', script], {
+    stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
+  });
+  let stdout = '';
+  let stderr = '';
+  child.stdout.on('data', data => { stdout += data; });
+  child.stderr.on('data', data => { stderr += data; });
+  const closed = new Promise((resolve, reject) => {
+    child.once('error', reject);
+    child.once('close', resolve);
+  });
+  t.after(() => { if (child.exitCode === null) child.kill(); });
+  const query = new Promise(resolve => child.once('message', resolve));
+  const options = await Promise.race([query, closed.then(code => { throw new Error(`query exited ${code}: ${stderr}`); })]);
+  fs.writeFileSync(release, '');
+  assert.equal(await closed, 0, stderr);
+  assert.equal(stdout.trim(), 'cold-session');
+  assert.equal(options.timeout, 60000, 'cold discovery cannot reuse a ten-second deadline');
 });

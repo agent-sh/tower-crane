@@ -393,13 +393,13 @@ setInterval(() => {}, 1000);\n`);
   assert.match(h.json(['status']).exited_claims[0].tail, /worker alive/);
   assert.equal(log(h).filter((e) => e.type === 'worker-exited').length, 1);
   assert.equal(h.readState('tasks.json').tasks[0].status, 'in_progress');
-  assert.equal(h.run(['wait', '--agent', 'orchestrator', '--types', 'worker-exited', '--timeout', '0.1']).code, 2);
+  assert.equal(h.run(['wait', '--observe', '--agent', 'orchestrator', '--types', 'worker-exited', '--timeout', '0.1']).code, 2);
   const recovery = await waiting(t, h, { automation: false, args: ['--types', 'released', '--agent', 'observer'] });
   h.ok(['release', 'T1', '--reason', 'spawned worker exited', '--agent', 'orchestrator']);
   assert.equal((await event(recovery, 'released')).detail.exited_spawn.pid, spawned.pid);
   assert.equal(h.readState('tasks.json').tasks[0].status, 'todo');
   h.ok(['claim', 'T1', '--agent', 'replacement']);
-  assert.equal(h.run(['wait', '--agent', 'orchestrator', '--types', 'worker-exited', '--timeout', '0.1']).code, 2, 'recovery does not report the old spawn against a replacement');
+  assert.equal(h.run(['wait', '--observe', '--agent', 'orchestrator', '--types', 'worker-exited', '--timeout', '0.1']).code, 2, 'recovery does not report the old spawn against a replacement');
 });
 
 test('submitted spawned workers never emit worker-exited', async (t) => {
@@ -450,7 +450,7 @@ setInterval(() => {}, 1000);\n`);
   });
 }
 
-test('a spawned worker that exits before claiming wakes without waiting for a lease', async (t) => {
+test('a spawned worker that exits before submitting wakes without waiting for its lease', async (t) => {
   const h = setup(t);
   h.ok(['brief', 'set', 'T1', '-'], { input: 'stand-in\n' });
   commandWorker(h, [process.execPath, '-e', 'process.exit(0)', '{prompt}']);
@@ -460,7 +460,7 @@ test('a spawned worker that exits before claiming wakes without waiting for a le
   assert.equal(e.detail.pid, started.pid);
   assert.equal(e.detail.agent, started.agent);
   assert.equal(e.detail.attempt, started.attempt);
-  assert.equal(h.readState('tasks.json').tasks[0].claim, null);
+  assert.equal(h.readState('tasks.json').tasks[0].claim.agent, started.agent, 'the exited worker keeps its lease until released');
   assert.equal(h.run(['wait', '--agent', 'orchestrator', '--types', 'worker-exited', '--timeout', '0.1']).code, 2);
 });
 
@@ -486,6 +486,7 @@ fs.readFileSync = function(file, ...args) {
 };
 `);
   const opts = { env: { NODE_OPTIONS: `--require "${hook.replace(/\\/g, '/')}"` } };
+  h.ok(['release', 'T1', '--agent', h.json(['task', 'show', 'T1']).claim.agent, '--reason', 'worker exited']);
   const started = h.json(['spawn', '--task', 'T1', '--wait'], opts);
   const observed = h.json(['wait', '--agent', 'orchestrator', '--after', String(cursor), '--types', 'worker-exited', '--timeout', '1'], opts);
   assert.equal(observed.detail.pid, started.pid);
@@ -612,7 +613,7 @@ test('startup reconciliation with an active PR does not hold a timeout behind th
 test('timeout and invalid cursors have bounded exits and default now ignores history', async (t) => {
   const h = setup(t);
   h.ok(['msg', '--to', 'orchestrator', 'already handled']);
-  const r = h.run(['wait', '--agent', 'orchestrator', '--timeout', '0.05', '--json']);
+  const r = h.run(['wait', '--observe', '--agent', 'orchestrator', '--timeout', '0.05', '--json']);
   assert.equal(r.code, 2);
   assert.deepEqual(JSON.parse(r.stdout), { type: 'timeout', offset: fs.statSync(path.join(h.state, 'events.jsonl')).size });
   assert.equal(r.stderr, '');
