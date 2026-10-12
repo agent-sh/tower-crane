@@ -24210,5 +24210,1072 @@
     },
     "raw_logs": "Task scratch rework-escalation-conflict/final-loaded-test_escalation.test.js-{1..5}.log; hashes are recorded with each run.",
     "prior_evidence": "Earlier conversion, lint and mutation receipts retain their named source revisions; unchanged files were not rerun."
+  },
+  "automation_contract_refresh": {
+    "previous_submitted_head": "5694fc4950bd83ee207dff9389f04fb35643b5d0",
+    "base_head": "d6d4be8310e4a29c932d4d2a838e76abbe1eb845",
+    "code_heads": [
+      "0ab2db524220cf0c8caa9ab7acd12451c269feca",
+      "84bb2611268d0a544ac8e89a53ab7e86e736405b",
+      "e657a134b6031cd7f78f7dd3a72fc354294a6f06"
+    ],
+    "changes": [
+      "Retain task-specific automation rework and lease-first slot assertions from main.",
+      "Stack retry checks observe a completed stack link instead of a clock loop.",
+      "New lease-handshake readiness checks use waitOnRepo.",
+      "The submission watchdog retains the suite minimum.",
+      "Two deliberate lease-refusal/live-group timing windows have line-level reasons.",
+      "The review dry run uses fixture credential stores."
+    ],
+    "measurement": {
+      "cpu_load_processes_per_runner": 2,
+      "peak_cpu_load_processes": 4,
+      "cpu_load_command": "nice -n 15 node -e \"for (;;) Math.sqrt(Math.random());\"",
+      "peak_test_file_workers": 4,
+      "file_concurrency": 1,
+      "command": "node test/run.js --test-concurrency=1 FILE",
+      "file_watchdog_seconds": 900
+    },
+    "loaded_files": {
+      "test/automation.test.js": [
+        {
+          "run": 1,
+          "status": 0,
+          "wall_s": 326.1587317030062,
+          "load_before": [
+            11.896484375,
+            10.568359375,
+            10.45166015625
+          ],
+          "load_after": [
+            12.779296875,
+            14.18017578125,
+            12.37158203125
+          ],
+          "log_sha256": "7c00202e826e4c04b1ea469aa81203bd4f99893b8e2bf6fb3625a39b9d0185a3",
+          "tests": {
+            "tests": 97,
+            "pass": 97,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          },
+          "source_head": "0ab2db524220cf0c8caa9ab7acd12451c269feca"
+        },
+        {
+          "run": 2,
+          "status": 0,
+          "wall_s": 319.93940165199456,
+          "load_before": [
+            16.76611328125,
+            15.64501953125,
+            13.5947265625
+          ],
+          "load_after": [
+            16.1806640625,
+            17.43798828125,
+            15.10107421875
+          ],
+          "log_sha256": "d069ad36a882bfd8e76294973f4cddad63919372f5ac99ca54b386ed61619489",
+          "tests": {
+            "tests": 97,
+            "pass": 97,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          },
+          "source_head": "84bb2611268d0a544ac8e89a53ab7e86e736405b"
+        },
+        {
+          "run": 3,
+          "status": 0,
+          "wall_s": 311.51824255699466,
+          "load_before": [
+            15.060546875,
+            17.0029296875,
+            15.05322265625
+          ],
+          "load_after": [
+            14.2998046875,
+            14.3193359375,
+            14.3798828125
+          ],
+          "log_sha256": "1fbaa212e6afe58d751526a08500dafa5e979af96c60760ac3d54b485dedba08",
+          "tests": {
+            "tests": 97,
+            "pass": 97,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          },
+          "source_head": "84bb2611268d0a544ac8e89a53ab7e86e736405b"
+        },
+        {
+          "run": 4,
+          "status": 0,
+          "wall_s": 322.46658722299617,
+          "load_before": [
+            14.03515625,
+            14.26416015625,
+            14.361328125
+          ],
+          "load_after": [
+            13.39599609375,
+            14.6513671875,
+            14.5947265625
+          ],
+          "log_sha256": "209d99b458ffd525d9685e891ce030ad692ddaf4188725725220bf706f7ec23a",
+          "tests": {
+            "tests": 97,
+            "pass": 97,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          },
+          "source_head": "84bb2611268d0a544ac8e89a53ab7e86e736405b"
+        },
+        {
+          "run": 5,
+          "status": 0,
+          "wall_s": 312.5803011129901,
+          "load_before": [
+            10.94580078125,
+            13.75927734375,
+            14.29248046875
+          ],
+          "load_after": [
+            10.82958984375,
+            11.900390625,
+            13.32373046875
+          ],
+          "log_sha256": "62b58209889f96bf3c0ad5d7918dfddec65f39ace0728f1809edb40a2ea3e48f",
+          "tests": {
+            "tests": 97,
+            "pass": 97,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          },
+          "source_head": "84bb2611268d0a544ac8e89a53ab7e86e736405b"
+        }
+      ],
+      "test/supervision.test.js": [
+        {
+          "run": 1,
+          "status": 0,
+          "wall_s": 115.76700447499752,
+          "load_before": [
+            11.896484375,
+            10.568359375,
+            10.45166015625
+          ],
+          "load_after": [
+            21.93310546875,
+            14.306640625,
+            11.80419921875
+          ],
+          "log_sha256": "d0ed0e6a0d6dcddbd1dd6723a6f455f9b30b22b32953f5a65f6c3c467a519231",
+          "tests": {
+            "tests": 44,
+            "pass": 44,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          },
+          "source_head": "0ab2db524220cf0c8caa9ab7acd12451c269feca"
+        },
+        {
+          "run": 2,
+          "status": 0,
+          "wall_s": 112.33406012901105,
+          "load_before": [
+            21.93310546875,
+            14.306640625,
+            11.80419921875
+          ],
+          "load_after": [
+            14.3173828125,
+            14.83984375,
+            12.3525390625
+          ],
+          "log_sha256": "7e137b205b34b8a4854159b76e3d7e9939937ecfc7f21f7d05338076941f10f8",
+          "tests": {
+            "tests": 44,
+            "pass": 44,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          },
+          "source_head": "0ab2db524220cf0c8caa9ab7acd12451c269feca"
+        },
+        {
+          "run": 3,
+          "status": 0,
+          "wall_s": 111.79868193699804,
+          "load_before": [
+            14.3173828125,
+            14.83984375,
+            12.3525390625
+          ],
+          "load_after": [
+            12.05908203125,
+            13.94384765625,
+            12.32275390625
+          ],
+          "log_sha256": "2782839036d2eed6a1eba4656d353b950e66c373062a5b6137ca795595aef361",
+          "tests": {
+            "tests": 44,
+            "pass": 44,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          },
+          "source_head": "0ab2db524220cf0c8caa9ab7acd12451c269feca"
+        },
+        {
+          "run": 4,
+          "status": 0,
+          "wall_s": 111.22720646900416,
+          "load_before": [
+            12.05908203125,
+            13.94384765625,
+            12.32275390625
+          ],
+          "load_after": [
+            13.939453125,
+            13.93310546875,
+            12.49267578125
+          ],
+          "log_sha256": "c57c46181e5f22103a37f185b0170a63503ace73954dbdbc3e6a1f9d260f2b26",
+          "tests": {
+            "tests": 44,
+            "pass": 44,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          },
+          "source_head": "0ab2db524220cf0c8caa9ab7acd12451c269feca"
+        },
+        {
+          "run": 5,
+          "status": 0,
+          "wall_s": 112.0594501690066,
+          "load_before": [
+            15.16650390625,
+            14.79345703125,
+            13.03125
+          ],
+          "load_after": [
+            15.970703125,
+            15.41552734375,
+            13.47705078125
+          ],
+          "log_sha256": "f646a0bcaf2425a06e0b1b86dae8a635aee97d8866a3144aef3c085d0bf82719",
+          "tests": {
+            "tests": 44,
+            "pass": 44,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          },
+          "source_head": "84bb2611268d0a544ac8e89a53ab7e86e736405b"
+        }
+      ],
+      "test/stack.test.js": [
+        {
+          "run": 1,
+          "status": 0,
+          "wall_s": 34.21850692899898,
+          "load_before": [
+            12.45849609375,
+            13.83544921875,
+            14.212890625
+          ],
+          "load_after": [
+            16.5,
+            14.75634765625,
+            14.5107421875
+          ],
+          "log_sha256": "78c4b2389e5ef6db2c2e23c00f9190ace1cc01dfdf591b7e539400c58c8d08e3",
+          "tests": {
+            "tests": 28,
+            "pass": 28,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          },
+          "source_head": "84bb2611268d0a544ac8e89a53ab7e86e736405b"
+        },
+        {
+          "run": 2,
+          "status": 0,
+          "wall_s": 32.88854617800098,
+          "load_before": [
+            16.5,
+            14.75634765625,
+            14.5107421875
+          ],
+          "load_after": [
+            16.9248046875,
+            15.05224609375,
+            14.61865234375
+          ],
+          "log_sha256": "779dcc7ddc48a18c532ccba076ec58893d6352cec94d0ce27e20c765c4c00093",
+          "tests": {
+            "tests": 28,
+            "pass": 28,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          },
+          "source_head": "84bb2611268d0a544ac8e89a53ab7e86e736405b"
+        },
+        {
+          "run": 3,
+          "status": 0,
+          "wall_s": 31.787042081006803,
+          "load_before": [
+            16.9248046875,
+            15.05224609375,
+            14.61865234375
+          ],
+          "load_after": [
+            15.89990234375,
+            14.982421875,
+            14.6103515625
+          ],
+          "log_sha256": "ee207ba3173f83df4ce83a8ce6461193c7aa9e5261fb3db7c85e2f1057f77dbc",
+          "tests": {
+            "tests": 28,
+            "pass": 28,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          },
+          "source_head": "84bb2611268d0a544ac8e89a53ab7e86e736405b"
+        },
+        {
+          "run": 4,
+          "status": 0,
+          "wall_s": 32.35672478399647,
+          "load_before": [
+            15.89990234375,
+            14.982421875,
+            14.6103515625
+          ],
+          "load_after": [
+            17.20361328125,
+            15.48681640625,
+            14.79833984375
+          ],
+          "log_sha256": "f22de0e61795f8fe01ae92e9e9b65ac1b476409e5419064fe06adab0acdc5b5b",
+          "tests": {
+            "tests": 28,
+            "pass": 28,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          },
+          "source_head": "84bb2611268d0a544ac8e89a53ab7e86e736405b"
+        },
+        {
+          "run": 5,
+          "status": 0,
+          "wall_s": 32.22970903699752,
+          "load_before": [
+            17.20361328125,
+            15.48681640625,
+            14.79833984375
+          ],
+          "load_after": [
+            16.97509765625,
+            15.61181640625,
+            14.86376953125
+          ],
+          "log_sha256": "e260f64de7b7c8a404f127e8ca1641094622bf8de21d9b1a279ef8fbf972dcea",
+          "tests": {
+            "tests": 28,
+            "pass": 28,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          },
+          "source_head": "84bb2611268d0a544ac8e89a53ab7e86e736405b"
+        }
+      ],
+      "test/worker-slots.test.js": [
+        {
+          "run": 1,
+          "status": 0,
+          "wall_s": 26.323148087001755,
+          "load_before": [
+            16.97509765625,
+            15.61181640625,
+            14.86376953125
+          ],
+          "load_after": [
+            15.5615234375,
+            15.3740234375,
+            14.80419921875
+          ],
+          "log_sha256": "de081d8d70a88d951244897f5751f58952339f3b59f8e25c6548b08c01c226a1",
+          "tests": {
+            "tests": 22,
+            "pass": 21,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 1
+          },
+          "source_head": "84bb2611268d0a544ac8e89a53ab7e86e736405b"
+        },
+        {
+          "run": 2,
+          "status": 0,
+          "wall_s": 26.278245702997083,
+          "load_before": [
+            15.5615234375,
+            15.3740234375,
+            14.80419921875
+          ],
+          "load_after": [
+            14.11279296875,
+            15.02294921875,
+            14.7041015625
+          ],
+          "log_sha256": "e438985bd4789a7e60222baac43ec0a1e9c4629ffdec4013017fd5809f97c711",
+          "tests": {
+            "tests": 22,
+            "pass": 21,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 1
+          },
+          "source_head": "84bb2611268d0a544ac8e89a53ab7e86e736405b"
+        },
+        {
+          "run": 3,
+          "status": 0,
+          "wall_s": 25.916856152995024,
+          "load_before": [
+            14.11279296875,
+            15.02294921875,
+            14.7041015625
+          ],
+          "load_after": [
+            13.73876953125,
+            14.85986328125,
+            14.65771484375
+          ],
+          "log_sha256": "f29e62c6757db7a7780c750a0c74e31b6446b12e6592c0c50573ca4341ba15fd",
+          "tests": {
+            "tests": 22,
+            "pass": 21,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 1
+          },
+          "source_head": "84bb2611268d0a544ac8e89a53ab7e86e736405b"
+        },
+        {
+          "run": 4,
+          "status": 0,
+          "wall_s": 26.574632487012423,
+          "load_before": [
+            13.73876953125,
+            14.85986328125,
+            14.65771484375
+          ],
+          "load_after": [
+            13.46044921875,
+            14.7080078125,
+            14.6123046875
+          ],
+          "log_sha256": "0eff7fbef9e5d2df9628aea33b0eadbf31d3408325df4173bac84dfd27cfa8a6",
+          "tests": {
+            "tests": 22,
+            "pass": 21,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 1
+          },
+          "source_head": "84bb2611268d0a544ac8e89a53ab7e86e736405b"
+        },
+        {
+          "run": 5,
+          "status": 0,
+          "wall_s": 26.885496055998374,
+          "load_before": [
+            13.46044921875,
+            14.7080078125,
+            14.6123046875
+          ],
+          "load_after": [
+            12.70458984375,
+            14.43798828125,
+            14.525390625
+          ],
+          "log_sha256": "37d56c7543c77d46fbb2daea884170b4f537d1aeba6f060e21a50d78a3bfe83b",
+          "tests": {
+            "tests": 22,
+            "pass": 21,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 1
+          },
+          "source_head": "84bb2611268d0a544ac8e89a53ab7e86e736405b"
+        }
+      ],
+      "test/submit-ci.test.js": [
+        {
+          "run": 1,
+          "status": 0,
+          "wall_s": 1.868893045000732,
+          "load_before": [
+            12.70458984375,
+            14.43798828125,
+            14.525390625
+          ],
+          "load_after": [
+            12.80859375,
+            14.4306640625,
+            14.5224609375
+          ],
+          "log_sha256": "46bb864e2c97c1e5f066cb57412f42cd67e6bb076f1d22d6b201378f8d09f02d",
+          "tests": {
+            "tests": 12,
+            "pass": 12,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          },
+          "source_head": "84bb2611268d0a544ac8e89a53ab7e86e736405b"
+        },
+        {
+          "run": 2,
+          "status": 0,
+          "wall_s": 1.7674248349940171,
+          "load_before": [
+            12.80859375,
+            14.4306640625,
+            14.5224609375
+          ],
+          "load_after": [
+            12.80859375,
+            14.4306640625,
+            14.5224609375
+          ],
+          "log_sha256": "a7b5f16089192cabdb9ce5d68322b0db07a00f6d15a5784d49e901fdcd858260",
+          "tests": {
+            "tests": 12,
+            "pass": 12,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          },
+          "source_head": "84bb2611268d0a544ac8e89a53ab7e86e736405b"
+        },
+        {
+          "run": 3,
+          "status": 0,
+          "wall_s": 1.5670864129933761,
+          "load_before": [
+            12.80859375,
+            14.4306640625,
+            14.5224609375
+          ],
+          "load_after": [
+            12.80859375,
+            14.4306640625,
+            14.5224609375
+          ],
+          "log_sha256": "d809991a87f991bc444f8f5f7c644be54c83868efd5a7010d567ee898635336a",
+          "tests": {
+            "tests": 12,
+            "pass": 12,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          },
+          "source_head": "84bb2611268d0a544ac8e89a53ab7e86e736405b"
+        },
+        {
+          "run": 4,
+          "status": 0,
+          "wall_s": 1.5669284499890637,
+          "load_before": [
+            12.80859375,
+            14.4306640625,
+            14.5224609375
+          ],
+          "load_after": [
+            12.904296875,
+            14.42333984375,
+            14.51953125
+          ],
+          "log_sha256": "466355b59c34e74a5f13a2b08420d5e9b2407a5ead523365f2a4312bb64d5e20",
+          "tests": {
+            "tests": 12,
+            "pass": 12,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          },
+          "source_head": "84bb2611268d0a544ac8e89a53ab7e86e736405b"
+        },
+        {
+          "run": 5,
+          "status": 0,
+          "wall_s": 1.6705232620006427,
+          "load_before": [
+            12.904296875,
+            14.42333984375,
+            14.51953125
+          ],
+          "load_after": [
+            12.904296875,
+            14.42333984375,
+            14.51953125
+          ],
+          "log_sha256": "677a7591b20c90eaae7b7c3edaf18ec225779a86d673f4c868db0f6f2dd7556b",
+          "tests": {
+            "tests": 12,
+            "pass": 12,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          },
+          "source_head": "84bb2611268d0a544ac8e89a53ab7e86e736405b"
+        }
+      ],
+      "test/stack-merge.test.js": [
+        {
+          "run": 1,
+          "status": 0,
+          "wall_s": 36.01595593598904,
+          "load_before": [
+            14.6064453125,
+            14.90478515625,
+            12.35986328125
+          ],
+          "load_after": [
+            13.59814453125,
+            14.58984375,
+            12.34814453125
+          ],
+          "log_sha256": "bd7c2d46072862fe33f9e524129a9208a8d7b0be059705ce078b8cf5ea12a056",
+          "tests": {
+            "tests": 47,
+            "pass": 47,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          },
+          "source_head": "84bb2611268d0a544ac8e89a53ab7e86e736405b"
+        },
+        {
+          "run": 2,
+          "status": 0,
+          "wall_s": 35.612463758996455,
+          "load_before": [
+            13.59814453125,
+            14.58984375,
+            12.34814453125
+          ],
+          "load_after": [
+            13.20556640625,
+            14.4091796875,
+            12.3837890625
+          ],
+          "log_sha256": "03ddbdda17c4af7c18e320518022f7d1593378f15f2e9492c6950fd47b14b950",
+          "tests": {
+            "tests": 47,
+            "pass": 47,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          },
+          "source_head": "84bb2611268d0a544ac8e89a53ab7e86e736405b"
+        },
+        {
+          "run": 3,
+          "status": 0,
+          "wall_s": 35.735465749996365,
+          "load_before": [
+            13.20556640625,
+            14.4091796875,
+            12.3837890625
+          ],
+          "load_after": [
+            12.236328125,
+            14.0439453125,
+            12.3369140625
+          ],
+          "log_sha256": "6a1fdf17c84f60a2d44ee001140a5d616d98641fe5c4a1defcfbaf4f52d1ea60",
+          "tests": {
+            "tests": 47,
+            "pass": 47,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          },
+          "source_head": "84bb2611268d0a544ac8e89a53ab7e86e736405b"
+        },
+        {
+          "run": 4,
+          "status": 0,
+          "wall_s": 36.35070101299789,
+          "load_before": [
+            12.236328125,
+            14.0439453125,
+            12.3369140625
+          ],
+          "load_after": [
+            12.189453125,
+            13.8203125,
+            12.32470703125
+          ],
+          "log_sha256": "6b32e4019426af4d645b6a34ff7d24d3b7510ebae545e9cb40222ff178d6df54",
+          "tests": {
+            "tests": 47,
+            "pass": 47,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          },
+          "source_head": "84bb2611268d0a544ac8e89a53ab7e86e736405b"
+        },
+        {
+          "run": 5,
+          "status": 0,
+          "wall_s": 37.5745392950048,
+          "load_before": [
+            12.189453125,
+            13.8203125,
+            12.32470703125
+          ],
+          "load_after": [
+            12.86181640625,
+            13.83447265625,
+            12.3857421875
+          ],
+          "log_sha256": "a2f8e2ccc612e955b7d53aa512442bea093829d77fa23421c8f88ef17b628f81",
+          "tests": {
+            "tests": 47,
+            "pass": 47,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          },
+          "source_head": "84bb2611268d0a544ac8e89a53ab7e86e736405b"
+        }
+      ],
+      "test/sandbox-extensions.test.js": [
+        {
+          "run": 1,
+          "status": 0,
+          "wall_s": 17.701271395999356,
+          "load_before": [
+            11.4521484375,
+            11.755859375,
+            12.685546875
+          ],
+          "load_after": [
+            10.98193359375,
+            11.63720703125,
+            12.630859375
+          ],
+          "log_sha256": "dbe6286f166b8b402ed0f9b589449103add95f3b00052e8e0c5e2c4137998ef7",
+          "tests": {
+            "tests": 14,
+            "pass": 13,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 1
+          },
+          "source_head": "e657a134b6031cd7f78f7dd3a72fc354294a6f06"
+        },
+        {
+          "run": 2,
+          "status": 0,
+          "wall_s": 17.951250842990703,
+          "load_before": [
+            10.98193359375,
+            11.63720703125,
+            12.630859375
+          ],
+          "load_after": [
+            11.18408203125,
+            11.63037109375,
+            12.60693359375
+          ],
+          "log_sha256": "3272c143a138adca50c88fcdbea945604bee93540b50c3401c7f97768c575a34",
+          "tests": {
+            "tests": 14,
+            "pass": 13,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 1
+          },
+          "source_head": "e657a134b6031cd7f78f7dd3a72fc354294a6f06"
+        },
+        {
+          "run": 3,
+          "status": 0,
+          "wall_s": 20.09782229400298,
+          "load_before": [
+            11.18408203125,
+            11.63037109375,
+            12.60693359375
+          ],
+          "load_after": [
+            11.5078125,
+            11.67138671875,
+            12.599609375
+          ],
+          "log_sha256": "68ec8f8254b3abdb04a8ea97e4171ebc06e80b26994d8d1cd631f7592a15ed2c",
+          "tests": {
+            "tests": 14,
+            "pass": 13,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 1
+          },
+          "source_head": "e657a134b6031cd7f78f7dd3a72fc354294a6f06"
+        },
+        {
+          "run": 4,
+          "status": 0,
+          "wall_s": 18.449763390002772,
+          "load_before": [
+            11.5078125,
+            11.67138671875,
+            12.599609375
+          ],
+          "load_after": [
+            11.37841796875,
+            11.64111328125,
+            12.5703125
+          ],
+          "log_sha256": "8cbc3f3d8ed9d56fd477d8a94195693add18b3fd9963a26ab68d7e4ff2e69d37",
+          "tests": {
+            "tests": 14,
+            "pass": 13,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 1
+          },
+          "source_head": "e657a134b6031cd7f78f7dd3a72fc354294a6f06"
+        },
+        {
+          "run": 5,
+          "status": 0,
+          "wall_s": 18.347302902999218,
+          "load_before": [
+            11.37841796875,
+            11.64111328125,
+            12.5703125
+          ],
+          "load_after": [
+            14.060546875,
+            12.25439453125,
+            12.7578125
+          ],
+          "log_sha256": "c854a603b438fd431aedd370b210525bbd771f2b11694de3ebaf2b43e0c3cbba",
+          "tests": {
+            "tests": 14,
+            "pass": 13,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 1
+          },
+          "source_head": "e657a134b6031cd7f78f7dd3a72fc354294a6f06"
+        }
+      ]
+    },
+    "interruption": {
+      "tool_process_exit": 137,
+      "test_assertion_failure_reported": false,
+      "cause": "not established; no cgroup diagnostics exposed",
+      "retained_complete_samples": [
+        "automation 1",
+        "supervision 1..4"
+      ],
+      "excluded_incomplete_logs": [
+        {
+          "file": "loaded-test_automation.test.js-2.log",
+          "sha256": "55cefa0736bc8a9c9b67a41ca2564d57ca7a83b726c537a621c60c8a763d8e64",
+          "snapshot": "excluded-loaded-test_automation.test.js-2.log",
+          "snapshot_sha256": "55cefa0736bc8a9c9b67a41ca2564d57ca7a83b726c537a621c60c8a763d8e64",
+          "changed_after_initial_hash": false
+        },
+        {
+          "file": "loaded-test_supervision.test.js-5.log",
+          "sha256": "603767dc7169af6a35f66a80b668aa9916225d0ab13459923609ed2821bac48a",
+          "snapshot": "excluded-loaded-test_supervision.test.js-5.log",
+          "snapshot_sha256": "603767dc7169af6a35f66a80b668aa9916225d0ab13459923609ed2821bac48a",
+          "changed_after_initial_hash": false
+        }
+      ],
+      "resume": "Only complete zero-exit runs count; remaining runs use new filenames and one file worker per invocation."
+    },
+    "regressions": {
+      "shared_red": {
+        "artifact": "shared-merge.log",
+        "sha256": "cac123d205474ce75e40a6f9a7d0c6883acd0fe3848a9942f93c72097f9eaaba",
+        "footer": {}
+      },
+      "shared_green": {
+        "artifact": "shared-green.log",
+        "sha256": "2ad0e6eb1527b47c9e9602d50d1d7058eb9f0e0310779e5bca1a68bd1c170350",
+        "footer": {}
+      },
+      "handshake_red": {
+        "artifact": "handshake-red.log",
+        "sha256": "9c071e8a410bfb8d5dc4e2f9e372a167b06599f4280613484b570d22d393a0e4",
+        "footer": {
+          "tests": 1,
+          "pass": 0,
+          "fail": 1,
+          "cancelled": 0,
+          "skipped": 0
+        }
+      },
+      "handshake_green": {
+        "artifact": "handshake-green.log",
+        "sha256": "c9ad52b2b214d27dab961c6169b69be71223c01119f2d1633a94759b738b59dc",
+        "footer": {
+          "tests": 1,
+          "pass": 1,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 0
+        }
+      },
+      "stack_link_green": {
+        "artifact": "stack-green.log",
+        "sha256": "d99ca1355938adb9e92faf85eb28f368a76cb61f40932d1af6613e4b3bbcd385",
+        "footer": {
+          "tests": 2,
+          "pass": 2,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 0
+        }
+      },
+      "review_fixture_green": {
+        "artifact": "stack-review-green.log",
+        "sha256": "8135b84e48d25b1cfa48894875d4f5097813183e7610b53b6795d7650ece6d45",
+        "footer": {
+          "tests": 1,
+          "pass": 1,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 0
+        }
+      }
+    },
+    "merge_check": {
+      "artifact": "merge-checks.log",
+      "sha256": "57f4d983fc33090ab1ef631c048caa567797a1367fa3136ed1bcd7e8dedd09c8",
+      "footer": {
+        "tests": 127,
+        "pass": 126,
+        "fail": 1,
+        "cancelled": 0,
+        "skipped": 0
+      }
+    },
+    "merge_check_note": "127 named tests ran at 0ab2db52: 126 passed and the review dry run reached a protected parent credential store. The isolated stack-merge file then passed five complete loaded runs at its later checkpoint. The other five readiness files and their shared inputs did not change between these checkpoints.",
+    "affected_mutations": {
+      "source_head": "84bb2611268d0a544ac8e89a53ab7e86e736405b",
+      "score": "4/4",
+      "baseline": "green unmodified named baseline before mutation; no full-suite fallback",
+      "commands": [
+        "node scripts/mutants.js --jobs 1 --only worker-starts-before-lease,handshake-launches-before-go,spawn-ignores-live-reservation,group-probe-clears-live-group --no-full",
+        "node scripts/mutants.js --jobs 1 --only spawn-ignores-live-reservation,group-probe-clears-live-group --skip PATTERN --no-full"
+      ],
+      "skip_pattern": "five held worker slots refuse dispatch before process, home or spend|concurrent dispatch reserves the last slot until claim and does not double count it|a started worker holds its lease against strangers until its own claim renews it|a failed launch holds no slot, and an exited worker frees its slot once released|on Windows the harness process stands for its group in the exit probe|a dead reservation frees the only worker slot before the first capacity check|a dead reservation frees the only worker slot for a batch spawn --ready|wait clears a dead reservation before counting capacity and refills the cancelled worker slot|reviewer dispatch is unaffected when worker reservations fill the limit|dispatch rechecks slots under the lock after worktree preparation|a retrying worker keeps its slot through backoff and expired-lease renewal|an expired pre-claim holds the only slot before supervision can renew|sandboxed claims and expired renewals cannot discard hidden live reservations|a finished worker keeps its lease for every observer until it is released|historical worker spawns from the 2026-10-07 log hold no slot for a sandboxed claim|an unclaimed retry keeps its slot through a backoff longer than the lease|a lapsed reservation is not revived by later monitor records|a session receipt replaying the first attempt does not hide the retry exit|without attempt releases its matching spawn reservation",
+      "selection_control": {
+        "artifact": "mutation-selected-baseline.log",
+        "sha256": "5013cae9e2c9453e4adfde1885637d48d2e93ad9e2c101651796bf0d976392ad",
+        "footer": {
+          "tests": 2,
+          "pass": 2,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 0
+        }
+      },
+      "logs": [
+        {
+          "artifact": "mutants.log",
+          "sha256": "06900b665789d05d2a8b3ac319196bf6efe327f7af2157eb0f25ea42ea3b79f7",
+          "footer": {}
+        },
+        {
+          "artifact": "mutants-focused.log",
+          "sha256": "46870a91ea3dc015817be6887a009f74cc8a6787830dc9245c09c3d8d6fead0f",
+          "footer": {}
+        }
+      ],
+      "note": "The full-file run was interrupted after two catches while later observer waits remained outstanding. The final two catches select their direct cases, after a two-test green baseline. The earlier negative selector skipped the file and its 0/2 result is excluded.",
+      "excluded_selector": {
+        "artifact": "mutants-direct.log",
+        "sha256": "c7ca5e490fa3fe6046aef38136c5e6cdc97563a73ecd996114e42a021700513b",
+        "footer": {}
+      }
+    },
+    "raw_logs": "Task scratch rework-automation-conflict and stack-review subdirectory; each run records its raw-log SHA-256.",
+    "prior_evidence": "Earlier lint, conversion and 73 mutation receipts retain their named source revisions.",
+    "latest_base_refresh": {
+      "base_head": "168dbd4172ec516328c96bcd4bf63329790f4685",
+      "merged_head": "4b31f7556e6fd6b16b5360b787ca1b1d60771edc",
+      "check": {
+        "artifact": "final-merge-checks.log",
+        "sha256": "5e10882d620eeed953bc415e29e0d2ad41517de6c4e0cd29a155dfd90a4c7e6d",
+        "footer": {
+          "tests": 289,
+          "pass": 282,
+          "fail": 5,
+          "cancelled": 0,
+          "skipped": 2
+        }
+      },
+      "check_note": "All six readiness consumers and authority pass after the session-bus merge. Five new sandbox-extension cases reach the protected parent credential tree; the isolated file then passes five loaded runs without changing runtime-directory or env-file assertions.",
+      "isolated_head": "e657a134b6031cd7f78f7dd3a72fc354294a6f06",
+      "sandbox_green": {
+        "artifact": "sandbox-green.log",
+        "sha256": "f067a5d3ada6b49f2345762ae48a8d156dba36bac3f59bf1326edcf49c93e00e",
+        "footer": {
+          "tests": 14,
+          "pass": 13,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 1
+        }
+      },
+      "session_mutations": {
+        "score": "7/7",
+        "baseline": "green unmodified sandbox-extension file; no full-suite fallback",
+        "log": {
+          "artifact": "session-mutants.log",
+          "sha256": "4fea222ce0d76a9361e3c6ed2a989eff1dce312b1f0c8f739fbcf6a5ada285b9",
+          "footer": {}
+        },
+        "ids": [
+          "env-file-error-echoes",
+          "session-bus-grants-manager-socket",
+          "session-bus-missing-socket-spawns",
+          "session-bus-spawning-env-names-sockets",
+          "session-bus-dry-run-reads-env-file",
+          "session-bus-address-from-spawning-env",
+          "sandbox-denies-spawning-runtime"
+        ]
+      },
+      "host_only_skipped_locally": [
+        "test/live-git-sandbox.test.js",
+        "test/live-sandbox.test.js"
+      ]
+    }
   }
 }

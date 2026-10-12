@@ -34,6 +34,10 @@ The [T166 signal-wait measurements](testing-signal-waits.json) record five passi
 
 The escalation contract refresh merges main through `b61efe2b` and retains its failed-review rework event, findings and revision checks. `test/escalation.test.js` passes all 39 tests in each of five loaded runs at `05791d6b`, with two CPU load processes and one file worker. Earlier lint, conversion and mutation measurements retain their named source revisions.
 
+The automation contract refresh merges main through `d6d4be83`, retaining task-specific rework and lease-first spawning. Six refreshed test files each pass five loaded runs at named `0ab2db52` and `84bb2611` checkpoints. The five readiness files and their shared inputs remain unchanged between the checkpoints. An initial runner exit 137 interrupted two samples; those logs are retained and excluded, and completed repetitions resume one file per invocation. Each resumed measurement runner uses two CPU load processes, with four at the peak; the initial series used two, also shared by the stack-review series. Total test-file workers stay at four or fewer. The receipt retains the protected-credential failure from the initial named merge check, the fixed review fixture, the handshake red/green control, and four distinct affected mutation catches after green baselines. The last two mutation checks select their direct reservation and group-probe cases; the earlier empty selector is excluded.
+
+The final base refresh through `168dbd41` adds opt-in session-bus access. All six measured consumers and authority pass their named check after that merge; five new sandbox-extension cases expose parent credential discovery. Isolating that fixture preserves its runtime-directory and env-file assertions, and the file passes five loaded runs at `e657a134`. Seven relevant session-bus and env-file mutants are caught after a green baseline. The host-only sandbox files stay on host gates and CI.
+
 ## Tools
 
 - `node scripts/test-cost.js [--before DIR] [files...]` measures CPU and wall seconds per file, median of three runs, four files at a time. With `--before`, it measures another checkout interleaved with this one.
