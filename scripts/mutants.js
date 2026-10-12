@@ -166,6 +166,8 @@ const MUTANTS = [
     from: 'const stopped = !!stopReason || !!budgetStop || stalled || harnessRefusal || loginFailed || exit.code !== 0;', to: 'const stopped = harnessRefusal || loginFailed || exit.code !== 0;', tests: ['test/supervision.test.js'] },
   { id: 'clean-exit-clears-any-pause', area: 'spawn/supervisor', file: 'lib/spawn-monitor.js',
     from: 'if (!stopped && spawn.probe && Health.probed(currentState, spawn.harness, spawn.probe)) Health.cleared', to: 'if (!stopped && Health.paused(currentState, spawn.harness)) Health.cleared', tests: ['test/harness-auth.test.js'] },
+  { id: 'login-check-clears-superseded-pause', area: 'spawn/supervisor', file: 'lib/harness-health.js',
+    from: 'if (!probed(current, harness, token)) return;', to: '', tests: ['test/harness-auth.test.js'] },
   { id: 'group-probe-clears-live-group', area: 'spawn/supervisor', file: 'lib/processes.js',
     from: "try { process.kill(-pgid, 0); return 'unknown'; }", to: "try { process.kill(-pgid, 0); return 'exited'; }", tests: ['test/worker-slots.test.js'] },
   { id: 'startup-window-silent', area: 'spawn/supervisor', file: 'lib/spawn-monitor.js',

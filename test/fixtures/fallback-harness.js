@@ -207,7 +207,13 @@ if (path.resolve(process.argv[1] || '') !== __filename) {
   }
   if (process.env.TOWER_CRANE_TEST_FALLBACK_FINISH) {
     const timer = setInterval(() => {
-      if (fs.existsSync(process.env.TOWER_CRANE_TEST_FALLBACK_FINISH)) clearInterval(timer);
+      if (!fs.existsSync(process.env.TOWER_CRANE_TEST_FALLBACK_FINISH)) return;
+      clearInterval(timer);
+      // A login that expires while the worker runs: its last request fails with the harness's own record.
+      if (process.env.TOWER_CRANE_TEST_LATE_AUTH) {
+        console.log(JSON.stringify(authRecord(harness, 'Failed to authenticate: OAuth session expired and could not be refreshed')));
+        process.exit(1);
+      }
     }, 25);
   } else if (process.env.TOWER_CRANE_TEST_FALLBACK_HOLD) setTimeout(() => {}, Number(process.env.TOWER_CRANE_TEST_FALLBACK_HOLD));
 }

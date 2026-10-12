@@ -36,7 +36,7 @@ function setup(t, { tier = 'easy', tasks = ['T1'], fallbacks = [] } = {}) {
   const logged = 'require(\'node:fs\').existsSync(process.env.TOWER_CRANE_TEST_LOGIN_FLAG)';
   const expired = 'Failed to authenticate: OAuth session expired and could not be refreshed';
   fs.writeFileSync(path.join(bin, exe('claude')), process.platform === 'win32' ? ''
-    : `#!${process.execPath}\nconst ok = ${logged};\nif (process.argv[2] === 'auth') { console.log(JSON.stringify({ loggedIn: true })); process.exit(0); }\nconsole.log(JSON.stringify(ok ? { type: 'result', subtype: 'success', is_error: false, result: 'OK' }\n  : { type: 'result', subtype: 'error', is_error: true, result: '${expired}' }));\nprocess.exitCode = ok ? 0 : 1;\n`, { mode: 0o755 });
+    : `#!${process.execPath}\nconst ok = ${logged};\nif (process.argv[2] === 'auth') { console.log(JSON.stringify({ loggedIn: true })); process.exit(0); }\nif (process.argv.includes('Reply OK.') && process.env.TOWER_CRANE_TEST_LOGIN_HOLD) {\n  while (!require('node:fs').existsSync(process.env.TOWER_CRANE_TEST_LOGIN_HOLD)) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);\n}\nconsole.log(JSON.stringify(ok ? { type: 'result', subtype: 'success', is_error: false, result: 'OK' }\n  : { type: 'result', subtype: 'error', is_error: true, result: '${expired}' }));\nprocess.exitCode = ok ? 0 : 1;\n`, { mode: 0o755 });
   fs.writeFileSync(path.join(bin, exe('codex')), process.platform === 'win32' ? ''
     : `#!${process.execPath}\nconst ok = ${logged};\nif (process.argv[2] === 'login') { console.log('Logged in using ChatGPT'); process.exit(0); }\nif (ok) console.log(JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1 } }));\nelse console.error('Failed to refresh token: Your access token could not be refreshed. Please log out and sign in again.');\nprocess.exitCode = ok ? 0 : 1;\n`, { mode: 0o755 });
   h.ok(['ladder', 'set', 'easy', '--harness', 'claude', '--model', 'first', '--clear', 'profile', '--clear', 'effort', '--supervision', JSON.stringify(supervision)]);
@@ -145,6 +145,37 @@ for (const harness of ['claude', 'agy']) {
     assert.equal(owner(h).length, 1);
   });
 }
+
+// A login check that passes after another worker's login has failed checked a login that is already gone.
+test('a login check that passes after a newer login failure does not clear the pause', { skip: process.platform === 'win32' && 'the claude stub is a POSIX script' }, async (t) => {
+  const h = setup(t, { tasks: ['T1', 'T2', 'T3'] });
+  fs.writeFileSync(h.loginFlag, '');
+  const finish = path.join(h.base, 'finish-worker');
+  const release = path.join(h.base, 'release-check');
+  // T1 starts on the login it has now; that login expires while T1 runs.
+  h.json(['spawn', '--task', 'T1'], { env: { ...h.spawnEnv, TOWER_CRANE_TEST_FALLBACK_FINISH: finish, TOWER_CRANE_TEST_LATE_AUTH: '1' } });
+  await until(() => h.attempts().length === 1, 'the held worker did not start');
+  fs.rmSync(h.loginFlag);
+  assert.notEqual(h.spawnTask('T2').code, 0);
+  assert.deepEqual(health(h).map((e) => [e.detail.harness, e.detail.status, e.detail.source]), [['claude', 'unavailable', 'exit']]);
+  // Logged in again and due: T3's login check runs, and holds its success until released.
+  fs.writeFileSync(h.loginFlag, '');
+  const probing = h.runAsync(['spawn', '--task', 'T3'], { env: { ...h.later(6), TOWER_CRANE_TEST_LOGIN_HOLD: release } });
+  await until(() => health(h, 'probe').length === 1, 'the login check did not start');
+  // While the check runs, T1's login fails.
+  fs.writeFileSync(finish, '');
+  await until(() => health(h, 'exit').length === 2, 'the held worker did not report its login failure');
+  // The check then passes, but it checked a login that T1 has just seen fail, so the pause stands.
+  fs.writeFileSync(release, '');
+  const result = await probing;
+  assert.notEqual(result.code, 0, result.stderr);
+  assert.match(result.stderr, /claude is paused after a login failure/);
+  assert.deepEqual(health(h).map((e) => [e.detail.harness, e.detail.status, e.detail.source]), [
+    ['claude', 'unavailable', 'exit'], ['claude', 'unavailable', 'probe'], ['claude', 'unavailable', 'exit'],
+  ]);
+  assert.equal(h.attempts().length, 2, 'no attempt runs on the failed login');
+  assert.equal(owner(h).length, 1, 'the pause raises one notice');
+});
 
 // Command fallback routes run the fixture through an executable committed in the repository.
 function commandFallback(h) {
