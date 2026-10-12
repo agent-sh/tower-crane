@@ -786,6 +786,36 @@ test('a missing pinned test command stays submitted with a gate_config item for 
   assert.match(item.summary, /no test command pinned in project\.json gates\.tests_cmd/);
 });
 
+test('a proof run killed after the change is reverted retries once and reworks when the retry is also killed', { skip: process.platform === 'win32' }, (t) => {
+  const h = setup(t, { ci: 'pending' });
+  const script = path.join(h.base, 'proof-killed.js');
+  // Passes at the submitted head, where value.js is 1, and is killed once the change is reverted to 0.
+  fs.writeFileSync(script, "const fs = require('node:fs');\nif (fs.readFileSync('value.js', 'utf8').includes('0')) process.kill(process.pid, 'SIGKILL');\n");
+  h.ok(['project', 'set', '--tests-cmd', 'node test/value.test.js', '--tests-mode', 'prove', '--tests-expensive', 'true',
+    '--tests-proof-cmd', `node ${shellQuote(script)} {tests}`]);
+  h.submit();
+  h.consume();
+  assert.equal(h.logs().filter((e) => e.cmd === 'check tests').length, 2, 'the killed proof runs once more, and no third time');
+  const task = h.readState('tasks.json').tasks[0];
+  assert.deepEqual(task.evidence.filter((e) => e.type === 'tests').map((e) => [e.ok, e.runner_crash === true]), [[false, true], [false, true]]);
+  assert.equal(task.status, 'rework');
+});
+
+test('a missing pinned proof command stays submitted with a gate_config item for the orchestrator, not a rework', (t) => {
+  const h = setup(t, { ci: 'pending' });
+  h.ok(['project', 'set', '--tests-cmd', 'node test/value.test.js', '--tests-mode', 'prove', '--tests-expensive', 'true', '--tests-proof-cmd', 'null']);
+  h.submit();
+  h.consume();
+  assert.equal(h.logs().filter((e) => e.cmd === 'check tests').length, 1);
+  const task = h.readState('tasks.json').tasks[0];
+  assert.equal(task.status, 'submitted');
+  assert.deepEqual(task.evidence.filter((e) => e.type === 'tests').at(-1).config_failure, { key: 'tests_proof_cmd' });
+  assert.equal(h.logs().filter((e) => e.cmd === 'rework').length, 0);
+  const item = h.json(['inbox', '--agent', 'orchestrator']).items.find((i) => i.kind === 'gate_config');
+  assert.equal(item.setting, 'gates.tests_proof_cmd');
+  assert.equal(item.then, 'gates retry T1');
+});
+
 test('a change that adds no test reworks with the reason, and the worker adds a test', (t) => {
   const h = setup(t, { ci: 'pending' });
   h.git(['switch', '-qc', 'no-test-change', 'main']);
