@@ -637,6 +637,72 @@ test('sandbox cleanup refuses placeholder paths under a symlinked parent', { ski
   assert.equal(status, '', 'restoring the tracked project settings leaves the worktree clean');
 });
 
+test('sandbox cleanup changes only the file it checked when a parent is swapped after the check', { skip: NO_STUBS }, (t) => {
+  const { base } = makeRepo(t);
+  const wt = path.join(base, 'worktree');
+  const claudeDir = path.join(wt, '.claude');
+  const outside = path.join(base, 'outside');
+  const outsideFile = path.join(outside, 'settings.json');
+  fs.mkdirSync(claudeDir, { recursive: true });
+  fs.mkdirSync(outside);
+  fs.writeFileSync(path.join(claudeDir, 'settings.json'), '');
+  fs.chmodSync(path.join(claudeDir, 'settings.json'), 0o444);
+  fs.writeFileSync(outsideFile, 'REAL USER SETTINGS\n');
+  fs.chmodSync(outsideFile, 0o444);
+  // Swap .claude for a symlink to outside just before the first removal, after every check.
+  const originals = { unlinkSync: fs.unlinkSync, spawnSync: cp.spawnSync };
+  let swapped = false;
+  const swapBefore = (target) => {
+    if (swapped || !String(target).startsWith(claudeDir)) return;
+    swapped = true;
+    fs.renameSync(claudeDir, path.join(base, 'claude-moved'));
+    fs.symlinkSync(outside, claudeDir, 'dir');
+  };
+  let result;
+  try {
+    fs.unlinkSync = (file) => { swapBefore(file); return originals.unlinkSync(file); };
+    cp.spawnSync = (command, args, options) => { swapBefore(options?.cwd || ''); return originals.spawnSync(command, args, options); };
+    result = ClaudeSandboxPlaceholders.remove(wt, []);
+  } finally {
+    fs.unlinkSync = originals.unlinkSync;
+    cp.spawnSync = originals.spawnSync;
+  }
+  assert.equal(swapped, true, 'the swap ran before the first change');
+  assert.deepEqual(result.removed, [], 'no file is reported as removed');
+  assert.equal(result.failures[0].relative, '.claude/settings.json');
+  assert.match(result.failures[0].error.message, /directory changed/);
+  assert.ok(result.failures.slice(1).every((failure) => /symlink/.test(failure.error.message)), 'later entries are refused as symlinked');
+  assert.equal(fs.readFileSync(outsideFile, 'utf8'), 'REAL USER SETTINGS\n', 'the outside file keeps its content');
+  assert.equal(fs.statSync(outsideFile).mode & 0o222, 0, 'the outside file keeps its mode');
+});
+
+test('the Claude sandbox git env drops only core.excludesFile from an inherited GIT_CONFIG_PARAMETERS', () => {
+  const own = { GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'core.excludesFile', GIT_CONFIG_VALUE_0: '/x' };
+  const cases = [
+    ["'advice.detachedHead'", {}],
+    ["'core.excludesFile'='/g' 'advice.detachedHead'", { GIT_CONFIG_PARAMETERS: "'advice.detachedHead'" }],
+    ["'url.https://h/?a=b.insteadOf'='x' 'core.excludesfile'='/g'", { GIT_CONFIG_PARAMETERS: "'url.https://h/?a=b.insteadOf'='x'" }],
+    ["'a'\\''b'='c' 'core.excludesFile'='/g'", { GIT_CONFIG_PARAMETERS: "'a'\\''b'='c'" }],
+  ];
+  for (const [parameters, kept] of cases) {
+    assert.deepEqual(ClaudeSandboxPlaceholders.gitEnvironment('/x', { GIT_CONFIG_PARAMETERS: parameters }), { ...kept, ...own }, parameters);
+  }
+});
+
+test('a valueless GIT_CONFIG_PARAMETERS entry does not stop a sandboxed claude from starting', { skip: NO_STUBS }, (t) => {
+  const { h, u, wt } = setup(t);
+  isolateGitEnvironment(h, u);
+  isolated(h, 'small', 'claude');
+  fs.rmSync(path.join(wt, '.claude', 'settings.local.json'));
+  u.env.GIT_CONFIG_PARAMETERS = "'advice.detachedHead'";
+
+  spawn(h, u, 'small', {
+    STUB_CLAUDE_SANDBOX_PLACEHOLDERS: JSON.stringify(SANDBOX_MOUNTS),
+  });
+  assert.deepEqual(u.report().placeholderGitStatus, { code: 0, stdout: '', stderr: '' }, 'git status stays clean while the placeholders exist');
+  assert.equal(fs.existsSync(path.join(wt, '.bashrc')), false, '.bashrc placeholder is removed after exit');
+});
+
 test('claude\'s own Read, Grep and Glob tools are denied every path its sandbox hides', { skip: NO_STUBS }, (t) => {
   const { h, u, wt } = setup(t);
   isolated(h, 'small', 'claude');

@@ -66,7 +66,7 @@ function setup(t, harness, mode, { big = 0 } = {}) {
     GH_TOKEN: c.gh, [CREDENTIAL[harness]]: c.credential, CANARY_OUT: out, CANARY_MODE: mode,
     CANARY_VARS: Object.keys(values).join(','),
   };
-  env.XDG_CACHE_HOME = '';
+  delete env.XDG_CACHE_HOME;
   const spawn = (args) => h.run(['spawn', '--task', 'T1', ...args], { env, hooks: { HOOK_KEEP_SPAWN_DIRS: '1' } });
   // The configured sources: the ladder and project env live in project.json,
   // the fallback env in the user file.

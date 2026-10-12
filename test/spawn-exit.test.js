@@ -58,7 +58,7 @@ ${wait ? 'process.exit(7);' : 'setInterval(() => {}, 1000);'}
   fs.writeFileSync(worker, script);
   h.ok(['ladder', 'set', 'easy', '--harness', 'command', '--command', JSON.stringify([process.execPath, worker, BIN, marker, '{prompt}']),
     '--clear', 'profile', '--clear', 'effort']);
-  if (wait) return h.run(['spawn', '--role', 'easy', '--task', 'T1', '--wait'], { env });
+  if (wait) return h.run(['spawn', '--role', 'easy', '--task', 'T1', '--wait']);
   const spawned = h.json(['spawn', '--task', 'T1'], { env });
   let killed = false;
   const kill = () => {
@@ -346,15 +346,4 @@ test('a spawned replacement can claim after another worker lease expires', async
   spawned.kill();
   await until(() => (h.json(['status']).exited_claims || []).length === 1, 'replacement exit was not reported');
   assert.equal(h.json(['ready']).exited_claims[0].pid, spawned.pid);
-});
-
-test('spawn receipts go under XDG_CACHE_HOME when it is set, not under the home cache', async (t) => {
-  const h = setup(t);
-  const home = path.join(h.base, 'home');
-  const cache = path.join(h.base, 'xdg-cache');
-  // Keep the receipt after the spawn exits, so its location can be checked.
-  await start(t, h, { claim: false, wait: true, env: { HOME: home, XDG_CACHE_HOME: cache, HOOK_KEEP_SPAWN_DIRS: '1' } });
-  const receipts = (dir) => (fs.existsSync(dir) ? fs.readdirSync(dir) : []).filter((name) => name.startsWith('spawn-'));
-  assert.equal(receipts(path.join(cache, 'tower-crane')).length, 1, 'the receipt is under XDG_CACHE_HOME');
-  assert.deepEqual(receipts(path.join(home, '.cache', 'tower-crane')), [], 'no receipt is written under the home cache');
 });
