@@ -21283,6 +21283,249 @@
         }
       },
       "change": "Expose dispatch stdout and spawn log only on natural-exit failure; leave success assertions intact. Isolate the two simulated harness-route fixtures from inherited origin directories. No Windows test is skipped."
+    },
+    "latest_ancestry_merge": {
+      "head": "52aa842b262eb86c26dfeb8961f8b40119007d6f",
+      "base": "bd53a1fb66333f94d388a10bdf0ba2c80c041861",
+      "cpu_load_processes": 2,
+      "test_file_workers": 2,
+      "groups": {
+        "test/orchestrator.test.js": [
+          {
+            "run": 1,
+            "status": 0,
+            "wall_s": 3.1194703629989817,
+            "load_before": [
+              14.18017578125,
+              13.77294921875,
+              12.8837890625
+            ],
+            "load_after": [
+              14.326171875,
+              13.81005859375,
+              12.90087890625
+            ],
+            "log_sha256": "c020ba6316927a6a63de19adc3891f15396ac5ecf924f67aed6beb3ad95c0520",
+            "tests": {
+              "tests": 9,
+              "pass": 9,
+              "fail": 0,
+              "cancelled": 0,
+              "skipped": 0
+            }
+          },
+          {
+            "run": 2,
+            "status": 0,
+            "wall_s": 3.320819526001287,
+            "load_before": [
+              14.326171875,
+              13.81005859375,
+              12.90087890625
+            ],
+            "load_after": [
+              14.46044921875,
+              13.8466796875,
+              12.91796875
+            ],
+            "log_sha256": "12a6df273e09311e2584b94b06915d893cda52f115cf43c6512c087eb3fec3db",
+            "tests": {
+              "tests": 9,
+              "pass": 9,
+              "fail": 0,
+              "cancelled": 0,
+              "skipped": 0
+            }
+          },
+          {
+            "run": 3,
+            "status": 0,
+            "wall_s": 3.1697522869981185,
+            "load_before": [
+              14.46044921875,
+              13.8466796875,
+              12.91796875
+            ],
+            "load_after": [
+              14.46044921875,
+              13.8466796875,
+              12.91796875
+            ],
+            "log_sha256": "820c320be0d5d866358990277e4b7426aa6e55b0b5305cf30175875912d33827",
+            "tests": {
+              "tests": 9,
+              "pass": 9,
+              "fail": 0,
+              "cancelled": 0,
+              "skipped": 0
+            }
+          },
+          {
+            "run": 4,
+            "status": 0,
+            "wall_s": 3.2223870439993334,
+            "load_before": [
+              14.46044921875,
+              13.8466796875,
+              12.91796875
+            ],
+            "load_after": [
+              15.46484375,
+              14.0654296875,
+              12.99365234375
+            ],
+            "log_sha256": "ab94eb6994ae6aa8a6ca7d6b619d57408e72e20705bb79d35c1e6592786483c4",
+            "tests": {
+              "tests": 9,
+              "pass": 9,
+              "fail": 0,
+              "cancelled": 0,
+              "skipped": 0
+            }
+          },
+          {
+            "run": 5,
+            "status": 0,
+            "wall_s": 3.4224418929989042,
+            "load_before": [
+              15.46484375,
+              14.0654296875,
+              12.99365234375
+            ],
+            "load_after": [
+              15.5078125,
+              14.09765625,
+              13.01025390625
+            ],
+            "log_sha256": "ebe994ba47756b0ec17f6074e42fb0d808d39d5f484682752aa43e172e83edb6",
+            "tests": {
+              "tests": 9,
+              "pass": 9,
+              "fail": 0,
+              "cancelled": 0,
+              "skipped": 0
+            }
+          }
+        ],
+        "test/windows-ancestry.test.js": [
+          {
+            "run": 1,
+            "status": 0,
+            "wall_s": 0.3147799880025559,
+            "load_before": [
+              14.18017578125,
+              13.77294921875,
+              12.8837890625
+            ],
+            "load_after": [
+              14.18017578125,
+              13.77294921875,
+              12.8837890625
+            ],
+            "log_sha256": "bffdb405a1bf23affcd5deb178a8c8e12891c4c0143c967dbcb44a2d022c64ba",
+            "tests": {
+              "tests": 2,
+              "pass": 1,
+              "fail": 0,
+              "cancelled": 0,
+              "skipped": 1
+            }
+          },
+          {
+            "run": 2,
+            "status": 0,
+            "wall_s": 0.31449320200044895,
+            "load_before": [
+              14.18017578125,
+              13.77294921875,
+              12.8837890625
+            ],
+            "load_after": [
+              14.18017578125,
+              13.77294921875,
+              12.8837890625
+            ],
+            "log_sha256": "fa89cff8f0e1f3e0bc5fc7906c051ddb5eb75058b77b736f405ad17e211936d3",
+            "tests": {
+              "tests": 2,
+              "pass": 1,
+              "fail": 0,
+              "cancelled": 0,
+              "skipped": 1
+            }
+          },
+          {
+            "run": 3,
+            "status": 0,
+            "wall_s": 0.31462524000016856,
+            "load_before": [
+              14.18017578125,
+              13.77294921875,
+              12.8837890625
+            ],
+            "load_after": [
+              14.18017578125,
+              13.77294921875,
+              12.8837890625
+            ],
+            "log_sha256": "6452b81566f5c407d239b245d0c99b48e0c36de9fe75a71ca61c20cb6fb5c836",
+            "tests": {
+              "tests": 2,
+              "pass": 1,
+              "fail": 0,
+              "cancelled": 0,
+              "skipped": 1
+            }
+          },
+          {
+            "run": 4,
+            "status": 0,
+            "wall_s": 0.31458928099891637,
+            "load_before": [
+              14.18017578125,
+              13.77294921875,
+              12.8837890625
+            ],
+            "load_after": [
+              14.326171875,
+              13.81005859375,
+              12.90087890625
+            ],
+            "log_sha256": "ae696f2b3b846921559f30bb8f92e5a891947a35b0ef5264f06c378f3f37ec7e",
+            "tests": {
+              "tests": 2,
+              "pass": 1,
+              "fail": 0,
+              "cancelled": 0,
+              "skipped": 1
+            }
+          },
+          {
+            "run": 5,
+            "status": 0,
+            "wall_s": 0.3143914539978141,
+            "load_before": [
+              14.326171875,
+              13.81005859375,
+              12.90087890625
+            ],
+            "load_after": [
+              14.326171875,
+              13.81005859375,
+              12.90087890625
+            ],
+            "log_sha256": "970c5d32343acb7bb70d16388162a6c73ac333473ac3011a937c5bdd07f06d94",
+            "tests": {
+              "tests": 2,
+              "pass": 1,
+              "fail": 0,
+              "cancelled": 0,
+              "skipped": 1
+            }
+          }
+        ]
+      },
+      "resolution": "Keep main's signaled Windows parent-query completion rather than the old eleven-second timer."
     }
   }
 }
