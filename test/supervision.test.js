@@ -596,6 +596,9 @@ test('a worker without the lease gate, as on Windows, first runs on its own leas
 
 test('a worker without the lease gate whose supervisor stops waiting for its lease never starts, and its lease is rolled back', async (t) => {
   const h = setup(t, { claim: false, failures: 0 });
+  // A paused harness past its interval admits this spawn as its probe.
+  S.withLock(h.state, () => S.appendEvents(h.state, [{ at: new Date(Date.now() - 10 * 60000).toISOString(), agent: 'test', cmd: 'harness health',
+    task: null, detail: { harness: 'command', status: 'unavailable', reason: 'login expired', source: 'exit' } }]));
   const paused = path.join(h.base, 'go-paused');
   const completed = h.runAsync(['spawn', '--task', 'T1', '--wait', '--json'], { hooks: { ...NO_SH, HOOK_STOP_GO: paused } });
   let result;
@@ -620,6 +623,7 @@ test('a worker without the lease gate whose supervisor stops waiting for its lea
   assert.ok(!log(h).some((e) => e.cmd === 'worktree'), 'nor its worktree event');
   assert.ok(log(h).some((e) => e.cmd === 'release' && e.detail.rollback), 'the rollback is recorded');
   assert.ok(!log(h).some((e) => e.cmd === 'spawn'), 'no spawn is recorded');
+  assert.ok(!log(h).some((e) => e.cmd === 'harness health' && e.detail.source === 'probe'), 'nor does it spend the probe interval');
   h.ok(['claim', 'T1', '--agent', 'manual']);
 });
 
