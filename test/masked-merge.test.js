@@ -6,8 +6,32 @@ const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
 const { ROOT, TMP_ROOT } = require('./helpers');
+const { isMasked } = require('../lib/masked-merge');
 
 const SHIM = path.join(ROOT, 'lib', 'shim.js');
+
+test('masked file names match case-insensitively through the sandbox search depth', () => {
+  for (const [file, masked] of [
+    ['.mcp.json', true],
+    ['.MCP.json', true],
+    ['lib/.bashrc', true],
+    ['lib/.Bashrc', true],
+    ['one/two/.gitconfig', true],
+    ['one/two/three/.gitconfig', false],
+    ['web/.vscode/settings.json', true],
+    ['.VSCode/settings.json', true],
+    ['.idea/workspace.xml', true],
+    ['.claude/commands/run.md', true],
+    ['web/.VSCode/deep/settings.json', true],
+    ['one/two/.vscode/settings.json', true],
+    ['one/two/three/.vscode/settings.json', false],
+    ['docs/.claude/commands/y.md', true],
+    ['lib/bashrc', false],
+    ['lib/.bashrc.backup', false],
+    ['web/vscode/settings.json', false],
+    ['.claude/hooks/run.md', false],
+  ]) assert.equal(isMasked(file), masked, file);
+});
 
 function git(args, cwd, env) {
   return cp.execFileSync('git', args, { cwd, env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
@@ -27,7 +51,11 @@ function commit(dir, files, env, message) {
 // worktree is a clone with B checked out from origin/feat.
 function fixture(t, { base, task, main }, { masks = true } = {}) {
   const root = fs.mkdtempSync(path.join(TMP_ROOT, 'masked-merge-'));
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const permissions = [];
+  t.after(() => {
+    for (const [file, mode] of permissions.reverse()) if (fs.existsSync(file)) fs.chmodSync(file, mode);
+    fs.rmSync(root, { recursive: true, force: true });
+  });
   const gitconfig = path.join(root, 'gitconfig');
   fs.writeFileSync(gitconfig, '[user]\n\tname = agent\n\temail = agent@example.test\n');
   const env = { ...process.env, GIT_CONFIG_GLOBAL: gitconfig, GIT_CONFIG_NOSYSTEM: '1', HOME: root };
@@ -68,6 +96,11 @@ function fixture(t, { base, task, main }, { masks = true } = {}) {
     git: (args) => git(args, wt, env),
     head: () => git(['rev-parse', 'HEAD'], wt, env),
     show: (rev) => git(['show', rev], wt, env),
+    readOnly: file => {
+      const full = path.join(wt, file);
+      permissions.push([full, fs.statSync(full).mode & 0o777]);
+      fs.chmodSync(full, fs.statSync(full).isDirectory() ? 0o555 : 0o444);
+    },
   };
 }
 
@@ -106,6 +139,122 @@ test('a merge through the shim that changes a tracked masked path keeps the file
   assert.equal(fs.readFileSync(path.join(f.wt, '.mcp.json'), 'utf8'), '{"v":1}\n');
   assert.equal(f.show('HEAD:.mcp.json'), '{"v":3}');
   assert.equal(git(['status', '--porcelain'], f.wt, f.env), '');
+});
+
+test('merge and checkout preserve existing nested and case-variant masked files', (t) => {
+  for (const file of ['lib/.bashrc', 'lib/.Bashrc', 'web/.vscode/settings.json', '.VSCode/settings.json', '.MCP.json']) {
+    for (const operation of ['merge', 'checkout']) {
+      const f = fixture(t, {
+        base: { 'a.txt': 'a\n', [file]: 'v1\n' },
+        task: { 'b.txt': 'b\n' },
+        main: { 'a.txt': 'a2\n', [file]: 'v2\n' },
+      });
+      // A mount can show content that differs from the index; ordinary git refuses that change.
+      fs.writeFileSync(path.join(f.wt, file), 'mount\n');
+      f.readOnly(file);
+      const result = operation === 'merge'
+        ? f.merge('--no-edit', 'origin/main')
+        : f.checkout('--detach', 'origin/main');
+      assert.equal(result.status, 0, `${operation} ${file}: ${result.stderr}`);
+      assert.equal(fs.readFileSync(path.join(f.wt, file), 'utf8'), 'mount\n', `${operation} ${file}`);
+      assert.equal(f.show(`HEAD:${file}`), 'v2', `${operation} ${file}`);
+      assert.equal(fs.readFileSync(path.join(f.wt, 'a.txt'), 'utf8'), 'a2\n');
+      assert.equal(f.git(['status', '--porcelain']), '', `${operation} ${file}`);
+    }
+  }
+});
+
+test('a nested read-only bind remains masked when its permission bits are writable', (t) => {
+  const file = 'lib/.Bashrc';
+  const f = fixture(t, {
+    base: { 'a.txt': 'a\n', [file]: 'v1\n' },
+    task: { 'b.txt': 'b\n' },
+    main: { [file]: 'v2\n' },
+  });
+  const target = path.join(f.wt, file);
+  assert.notEqual(fs.statSync(target).mode & 0o222, 0);
+  const preload = path.join(f.wt, '.git', 'mount-probe.js');
+  fs.writeFileSync(preload, `
+const fs = require('node:fs');
+const path = require('node:path');
+const access = fs.accessSync;
+fs.accessSync = (file, mode) => {
+  if (path.resolve(file) === ${JSON.stringify(target)} && mode === fs.constants.W_OK) {
+    throw Object.assign(new Error('read-only mount'), { code: 'EROFS' });
+  }
+  return access(file, mode);
+};
+`);
+  f.env.NODE_OPTIONS = `${f.env.NODE_OPTIONS || ''} --require ${JSON.stringify(preload)}`;
+  const result = f.merge('--no-edit', 'origin/main');
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(fs.readFileSync(target, 'utf8'), 'v1\n');
+  assert.equal(f.show(`HEAD:${file}`), 'v2');
+  assert.equal(f.git(['status', '--porcelain']), '');
+});
+
+test('a masked move materializes protected nested names that did not exist before it', (t) => {
+  const added = ['web/.Bashrc', 'web/.VSCode/settings.json'];
+  for (const operation of ['merge', 'checkout']) {
+    const f = fixture(t, {
+      base: { '.mcp.json': 'v1\n', 'a.txt': 'a\n' },
+      task: { 'b.txt': 'b\n' },
+      main: { '.mcp.json': 'v2\n', ...Object.fromEntries(added.map(file => [file, 'new\n'])) },
+    });
+    // An empty nested directory yields no match in the spawn-time file scan.
+    fs.mkdirSync(path.join(f.wt, 'web', '.VSCode'), { recursive: true });
+    const result = operation === 'merge'
+      ? f.merge('--no-edit', 'origin/main')
+      : f.checkout('--detach', 'origin/main');
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(fs.readFileSync(path.join(f.wt, '.mcp.json'), 'utf8'), 'v1\n');
+    for (const file of added) {
+      assert.equal(fs.readFileSync(path.join(f.wt, file), 'utf8'), 'new\n');
+      assert.match(f.git(['ls-files', '-v', '--', file]), /^H /, file);
+    }
+    assert.equal(f.git(['status', '--porcelain']), '');
+    // These files remain unmounted for this worker, including its next move.
+    f.commitMain({ '.mcp.json': 'v3\n', ...Object.fromEntries(added.map(file => [file, 'next\n'])) });
+    const again = operation === 'merge'
+      ? f.merge('--no-edit', 'origin/main')
+      : f.checkout('--detach', 'origin/main');
+    assert.equal(again.status, 0, again.stderr);
+    for (const file of added) {
+      assert.equal(fs.readFileSync(path.join(f.wt, file), 'utf8'), 'next\n');
+      assert.match(f.git(['ls-files', '-v', '--', file]), /^H /);
+    }
+  }
+});
+
+test('a discovered nested protected directory keeps deeper entries and new children off the mount', (t) => {
+  const f = fixture(t, {
+    base: { 'a.txt': 'a\n', 'web/.VSCode/settings.json': 'v1\n', 'web/.VSCode/deep/keep.json': 'keep\n' },
+    task: { 'b.txt': 'b\n' },
+    main: { 'web/.VSCode/settings.json': 'v2\n', 'web/.VSCode/deep/keep.json': 'updated\n', 'web/.VSCode/new.json': 'new\n' },
+  });
+  f.readOnly('web/.VSCode');
+  const result = f.merge('--no-edit', 'origin/main');
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(fs.readFileSync(path.join(f.wt, 'web/.VSCode/settings.json'), 'utf8'), 'v1\n');
+  assert.equal(fs.readFileSync(path.join(f.wt, 'web/.VSCode/deep/keep.json'), 'utf8'), 'keep\n');
+  assert.equal(fs.existsSync(path.join(f.wt, 'web/.VSCode/new.json')), false);
+  assert.equal(f.show('HEAD:web/.VSCode/new.json'), 'new');
+  assert.equal(f.show('HEAD:web/.VSCode/deep/keep.json'), 'updated');
+  assert.equal(f.git(['status', '--porcelain']), '');
+});
+
+test('a protected name below the scan depth is materialized when no shallower file discovers its directory', (t) => {
+  const f = fixture(t, {
+    base: { '.mcp.json': 'v1\n', 'web/.VSCode/deep/settings.json': 'v1\n' },
+    task: { 'b.txt': 'b\n' },
+    main: { '.mcp.json': 'v2\n', 'web/.VSCode/deep/settings.json': 'v2\n' },
+  });
+  const result = f.merge('--no-edit', 'origin/main');
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(fs.readFileSync(path.join(f.wt, '.mcp.json'), 'utf8'), 'v1\n');
+  assert.equal(fs.readFileSync(path.join(f.wt, 'web/.VSCode/deep/settings.json'), 'utf8'), 'v2\n');
+  assert.match(f.git(['ls-files', '-v', '--', 'web/.VSCode/deep/settings.json']), /^H /);
+  assert.equal(f.git(['status', '--porcelain']), '');
 });
 
 test('a fast-forward through the shim that brings in a sandbox-masked path moves the branch and leaves the mount alone', (t) => {
@@ -186,6 +335,7 @@ test('a merge through the shim brings in a masked path whose name contains a tab
   const f = fixture(t, { base: { 'a.txt': 'a\n' }, task: { 'b.txt': 'b\n' }, main: { [tabbed]: '{}\n' } });
   fs.mkdirSync(path.join(f.wt, tabbed), { recursive: true });
   fs.writeFileSync(path.join(f.wt, tabbed, 'keep'), 'keep\n');
+  f.readOnly(tabbed);
   const r = f.merge('--no-edit', 'origin/main');
   assert.equal(r.status, 0, r.stderr);
   assert.equal(f.show(`HEAD:${tabbed}`), '{}');
