@@ -358,7 +358,7 @@ entry without its matching gate audit receipt or evidence from an earlier
 revision or another sha, runs in the next submission or reconciliation reaction.
 An audited failure from another revision or sha cannot suppress a gate;
 only a current configuration failure (`gate_config`) waits for an explicit `gates retry`.
-An ordinary failed `tests`, `clean` or `ci` verdict reworks immediately and stops later gates from running.
+At a submitted head, an ordinary failed `tests`, `clean` or `ci` verdict reworks immediately and stops later gates from running.
 Infrastructure failures retry once before rework. A configuration failure waits
 for its command to be pinned, while later software gates still collect missing
 evidence and settle any independent failure. Pending CI waits for completion.

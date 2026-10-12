@@ -870,7 +870,7 @@ recorded but cannot mark a current gate handled. Passing evidence staled by a
 pinned command or tests policy change runs again. Completed reaction
 receipts do not suppress those runs; only an audited configuration failure at the
 current head and revision waits for an explicit `gates retry`. An idle startup writes no request.
-An ordinary failed `tests`, `clean` or `ci` verdict reworks immediately and stops later gates from running.
+At a submitted head, an ordinary failed `tests`, `clean` or `ci` verdict reworks immediately and stops later gates from running.
 Infrastructure failures retry once before rework. A configuration failure waits
 for its command to be pinned, while later software gates still collect missing
 evidence and settle any independent failure. Pending CI waits for completion.
