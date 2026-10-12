@@ -71,6 +71,17 @@ for (const command of ['sync', 'unstack']) {
 
 test('a stale local stack uses the single PR merge path after confirming its lower merge', (t) => {
   const f = stacked(t);
+  // The review dry run reads fixture credentials instead of its parent's agent home.
+  Object.assign(f.h.env, {
+    USERPROFILE: f.h.env.HOME,
+    CLAUDE_CONFIG_DIR: path.join(f.h.env.HOME, '.claude'),
+    CODEX_HOME: path.join(f.h.env.HOME, '.codex'),
+    PI_CODING_AGENT_DIR: path.join(f.h.env.HOME, '.pi', 'agent'),
+    GH_CONFIG_DIR: path.join(f.h.env.HOME, '.config', 'gh'),
+    XDG_CONFIG_HOME: path.join(f.h.env.HOME, '.config'),
+    XDG_DATA_HOME: path.join(f.h.env.HOME, '.local', 'share'),
+    OPENCODE_CONFIG_DIR: path.join(f.h.env.HOME, '.config', 'opencode'),
+  });
   confirmLower(f);
   assert.equal(f.h.json(['task', 'show', 'T2']).stack, undefined);
   assert.equal(f.h.json(['task', 'list']).find((t) => t.id === 'T2').stack, undefined);
