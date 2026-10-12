@@ -213,8 +213,8 @@ const MUTANTS = [
     from: "tool === 'git' && policy.masks && args[sub] === 'merge'", to: "tool === 'git' && args[sub] === 'merge'", tests: ['test/masked-merge.test.js'] },
   { id: 'masked-checkout-never-plumbs', area: 'git', file: 'lib/masked-merge.js',
     from: 'if (refs.length > 1 || (!refs.length && !create) || (create && !create.name)) return null;', to: 'if (true) return null;', tests: ['test/masked-merge.test.js'] },
-  { id: 'masked-merge-cwd-relative-ls-tree', area: 'git', file: 'lib/masked-merge.js',
-    from: "'ls-tree', '-r', '-z', '--full-tree', rev", to: "'ls-tree', '-r', '-z', rev", tests: ['test/masked-merge.test.js'] },
+  { id: 'masked-merge-runs-in-cwd', area: 'git', file: 'lib/masked-merge.js',
+    from: 'const r = cp.spawnSync(real, [...rest, ...argv], { cwd, encoding', to: 'const r = cp.spawnSync(real, [...rest, ...argv], { encoding', tests: ['test/masked-merge.test.js'] },
   { id: 'masked-merge-splits-every-tab', area: 'git', file: 'lib/masked-merge.js',
     from: 'return [line.slice(tab + 1), { mode, sha }];', to: "return [line.slice(tab + 1).split('\\t')[0], { mode, sha }];", tests: ['test/masked-merge.test.js'] },
   // board

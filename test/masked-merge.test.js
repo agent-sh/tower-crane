@@ -252,3 +252,19 @@ test('a checkout through the shim of a local branch that brings in a changed san
   assert.equal(f.show('HEAD:.mcp.json'), '{"v":2}');
   assert.equal(f.git(['status', '--porcelain']), '');
 });
+
+test('a checkout through the shim run with -C into a directory the checkout removes still moves HEAD', (t) => {
+  const f = fixture(t, {
+    base: { 'a.txt': 'a\n', '.mcp.json': '{"v":1}\n' },
+    task: { 'sub/a.txt': 'sub\n' },
+    main: { '.mcp.json': '{"v":2}\n' },
+  });
+  // main has no sub/, so the checkout removes the directory -C names.
+  fs.writeFileSync(path.join(f.wt, '.mcp.json'), '');
+  const r = f.shim(f.wt, '-C', 'sub', 'checkout', '--detach', 'origin/main');
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(f.head(), f.git(['rev-parse', 'origin/main']));
+  assert.equal(fs.existsSync(path.join(f.wt, 'sub')), false);
+  assert.equal(fs.readFileSync(path.join(f.wt, '.mcp.json'), 'utf8'), '');
+  assert.equal(f.git(['status', '--porcelain']), '');
+});
