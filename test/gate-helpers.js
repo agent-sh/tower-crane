@@ -153,7 +153,8 @@ function gateEvidence(h, type, agent, ok = true) {
     args.push('--cmd', cmd);
   }
   const r = h.run(args, { env: { FIXTURE_GATE_OK: ok ? '1' : '0' } });
-  if (r.code !== (ok ? 0 : 1)) throw new Error(`gate ${type}: ${r.stderr}\n${r.stdout}`);
+  // The status and signal show whether the CLI reached its result or was killed before printing one.
+  if (r.code !== (ok ? 0 : 1)) throw new Error(`gate ${type}: exit ${r.code}, signal ${r.signal}\n${r.stderr}\n${r.stdout}`);
   return r;
 }
 

@@ -681,7 +681,9 @@ for (const reaction of ['submit', 'reconcile']) {
     assert.deepEqual(checks().slice(count).map((e) => [e.cmd, e.detail.ok, e.detail.revision]),
       [['check tests', false, 2]]);
     const after = h.json(['task', 'show', 'T1']);
-    assert.equal(after.status, 'rework', 'a deterministic failure reworks before clean and ci run');
+    // Automation refills the free worker slot with the reworked task, so it may already be claimed again.
+    assert.ok(h.logs().some((e) => e.cmd === 'rework' && e.task === 'T1'), 'a deterministic failure reworks before clean and ci run');
+    assert.ok(['rework', 'in_progress'].includes(after.status), after.status);
     assert.equal(after.gates.gates.find((g) => g.type === 'tests').ok, false);
     h.reconcile();
     assert.equal(checks().length, count + 1, 'a reworked task runs no more gates');
@@ -1053,7 +1055,8 @@ test('a test gate that fails by hand while the watcher runs reworks, not left su
   assert.equal(h.run(['check', 'tests', 'T1']).code, 1);
   assert.equal((await watcher).code, 2, 'the watcher runs to its deadline');
   const task = h.readState('tasks.json').tasks[0];
-  assert.equal(task.status, 'rework', 'a failure recorded by a manual check reworks at once');
+  // The refill may claim the reworked task again before the watcher exits, so the rework event is the proof.
+  assert.ok(['rework', 'in_progress'].includes(task.status), `a failure recorded by a manual check reworks at once: ${task.status}`);
   assert.match(h.logs().findLast((e) => e.cmd === 'rework').detail.reason, /^tests failed at [0-9a-f]+: /);
 });
 
@@ -1101,7 +1104,8 @@ test('a test that fails on a newer origin main retries once though the local bas
   assert.equal(h.logs().filter((e) => e.cmd === 'check tests').length, 2, 'the failure that also fails on origin main runs once more');
   const task = h.readState('tasks.json').tasks[0];
   assert.deepEqual(task.evidence.filter((e) => e.type === 'tests').map((e) => e.main_failure?.names), [['sums two numbers'], ['sums two numbers']]);
-  assert.equal(task.status, 'rework');
+  assert.ok(['rework', 'in_progress'].includes(task.status), task.status);
+  assert.ok(h.logs().some((e) => e.cmd === 'rework' && e.task === 'T1'), 'the second failure reworks');
 });
 
 test('gates retry exits nonzero while a retried gate still fails', (t) => {
