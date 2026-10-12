@@ -74,21 +74,23 @@ function normalizedBudget(value) {
   }
 }
 
-function hungBudget(value, bindings = new Map(), seen = new Set()) {
+function hungBudget(value, bindings = new Map(), seen = new Set(), sign = 1) {
   value = normalizedBudget(value);
+  if (/^-(?!-)/.test(value)) return hungBudget(value.slice(1), bindings, seen, -sign);
   if (bindings.has(value)) {
     return bindings.get(value).every((bound) => !seen.has(bound)
-      && hungBudget(bound.value, bound.bindings(), new Set([...seen, bound])));
+      && hungBudget(bound.value, bound.bindings(), new Set([...seen, bound]), sign));
   }
-  if (value === 'HUNG_TEST_MS') return true;
+  if (value === 'HUNG_TEST_MS') return sign > 0;
   if (/^Math\.max\(/.test(value)) {
-    return callArguments(value, value.indexOf('(')).some((arg) => hungBudget(arg, bindings, seen));
+    return sign > 0 && callArguments(value, value.indexOf('(')).some((arg) => hungBudget(arg, bindings, seen));
   }
-  return Number(value.replaceAll('_', '')) >= HUNG_TEST_MS;
+  return sign * Number(value.replaceAll('_', '')) >= HUNG_TEST_MS;
 }
 
 function budgetExpression(value, bindings, seen = new Set()) {
   value = normalizedBudget(value);
+  if (/^-(?!-)/.test(value)) return budgetExpression(value.slice(1), bindings, seen);
   const defaultValue = /^(\w+)\s*=\s*([\s\S]+)$/.exec(value);
   if (defaultValue) {
     return budgetExpression(defaultValue[2], bindings, seen)

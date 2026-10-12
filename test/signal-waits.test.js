@@ -117,6 +117,8 @@ test('shared checks reject readiness budgets and require a reason on allowed tim
     'const window = 10 * 1000; until(check, "ready", window);', // wait-allow: rejected lint fixture
     'const delay = 1000; until(check, "ready", (delay));', // wait-allow: rejected lint fixture
     'const delay = 1000; until(check, "ready", +delay);', // wait-allow: rejected lint fixture
+    'const delay = 1000; until(check, "ready", -delay);', // wait-allow: rejected lint fixture
+    'const delay = 300000; until(check, "ready", -(delay));', // wait-allow: rejected lint fixture
     'const delay = 1000; until(check, "ready", delay /* c */);', // wait-allow: rejected lint fixture
     'const delay = (1000); until(check, "ready", ((+delay)));', // wait-allow: rejected lint fixture
     'const delay = /* c */ 1000; until(check, "ready", /* c */ (delay));', // wait-allow: rejected lint fixture
@@ -176,6 +178,7 @@ test('shared checks reject readiness budgets and require a reason on allowed tim
   assert.deepEqual(waitFindings('async function until(check, what, budget = Math.max(HUNG_TEST_MS, other)) {}'), []);
   assert.deepEqual(waitFindings('const budget = 300000; const guard = budget; until(check, "ready", guard);'), []);
   assert.deepEqual(waitFindings('const delay = 300000; until(check, "ready", ((+delay)) /* c */);'), []);
+  assert.deepEqual(waitFindings('const delay = -300000; until(check, "ready", -delay);'), []);
   assert.deepEqual(waitFindings('function ready(window = /* c */ (300000)) { until(check, "ready", +(window)); }'), []);
   assert.deepEqual(waitFindings('const label = "/* 1000 */"; until(check, label);'), []);
   assert.deepEqual(waitFindings('const window = Math.max(HUNG_TEST_MS, other); until(check, "ready", window);'), []);
@@ -234,6 +237,7 @@ test('shared checks reject readiness budgets and require a reason on allowed tim
   for (const source of [
     'const delay = 1000; until(check, "ready", (delay));', // wait-allow: rejected lint fixture
     'const delay = 1000; until(check, "ready", +delay);', // wait-allow: rejected lint fixture
+    'const delay = 1000; until(check, "ready", -delay);', // wait-allow: rejected lint fixture
     'const delay = 1000; until(check, "ready", delay /* c */);', // wait-allow: rejected lint fixture
     'function ready(window = 1000) { until(check, "ready", (window)); }', // wait-allow: rejected lint fixture
     'const window = 10 * 1000\nuntil(() => ready, "ready", window)', // wait-allow: rejected lint fixture
