@@ -93,11 +93,10 @@ for (const nextHarness of ['codex', 'claude']) {
     const spawned = h.json(['spawn', '--task', 'T1'], { env: h.spawnEnv });
     // Windows pipe closure and hook writers can outlive the final harness.
     // Assert the recorded exit and usage instead of timing a foreground CLI.
-    const result = await h.runAsync(['wait', '--after', '0', '--task', 'T1', '--types', 'worker-exited', '--timeout', '20']);
-    assert.equal(result.code, 0, result.stderr);
-    const exited = JSON.parse(result.stdout);
-    assert.equal(exited.detail.agent, spawned.agent);
-    assert.equal(exited.detail.code, 0);
+    // worker-exited can be derived from a probe of an earlier attempt's process before
+    // its exit is recorded, so the recorded spawn exit carries the final code.
+    await until(() => events(h).some((e) => e.cmd === 'spawn exit' && e.detail.agent === spawned.agent), 'the worker did not record its exit');
+    assert.equal(events(h).findLast((e) => e.cmd === 'spawn exit' && e.detail.agent === spawned.agent).detail.code, 0);
     await until(() => events(h).filter((e) => e.cmd === 'spend').length === 2, 'route usage receipts were not recorded');
     const attempts = h.attempts();
     assert.deepEqual(attempts.map((a) => a.model), ['first', 'first', 'first', 'second']);

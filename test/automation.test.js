@@ -534,8 +534,14 @@ test('a failed generated-file push retries the prepared merge without a worker o
 
 test('submission runs real software gates once through the existing waiter', (t) => {
   const h = setup(t, { ci: 'pending' });
+  h.ok(['task', 'note', 'T1', 'live orchestrator', '--agent', 'orchestrator'], { env: { CLAUDE_SESSION_ID: 'holder' } });
+  const holder = h.readState('tasks.json').orchestrator_lease;
+  h.consume = () => h.run(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'owner'],
+    { env: { CLAUDE_SESSION_ID: 'engine-waiter' } });
   h.submit();
   assert.equal(h.consume().code, 2);
+  assert.equal(h.readState('tasks.json').orchestrator_lease.session_id, holder.session_id, 'automation inherits the holder');
+  assert.deepEqual(h.readState('tasks.json').orchestrator_lease, holder, 'background gates do not extend the session idle window');
   const task = h.readState('tasks.json').tasks[0];
   assert.deepEqual(task.evidence.map((e) => [e.type, e.ok]), [['tests', true], ['clean', true], ['ci', false]]);
   assert.ok(task.evidence.every((e) => e.commands.length && e.source === `check ${e.type}`));
@@ -543,6 +549,39 @@ test('submission runs real software gates once through the existing waiter', (t)
   h.consume();
   assert.equal(h.readState('tasks.json').tasks[0].evidence.length, 3, 'duplicate event delivery runs no gate twice');
   assert.equal(h.logs().filter((e) => e.cmd === 'spawn').length, 0, 'pending CI starts no model');
+});
+
+test('background reactions leave vacant, released, taken-over and expired leases available for handoff', (t) => {
+  const h = setup(t, { ci: 'pending' });
+  const lease = () => h.readState('tasks.json').orchestrator_lease ?? null;
+  const holder = { env: { CLAUDE_SESSION_ID: 'holder' } };
+  const acquire = () => h.ok(['task', 'note', 'T1', 'native session', '--agent', 'orchestrator'], holder);
+  const react = (opts) => h.ok(['ci', 'completed', 'T1', '--sha', h.sha, '--agent', 'owner'], opts);
+  h.submit();
+  react();
+  assert.equal(lease(), null, 'a monitor cannot become the first orchestrator');
+  acquire();
+  const live = lease();
+  react();
+  assert.deepEqual(lease(), live, 'background work cannot renew the holder');
+  h.ok(['orchestrator', 'release', '--agent', 'orchestrator'], holder);
+  react();
+  assert.equal(lease(), null, 'background work cannot undo release');
+  acquire();
+  h.ok(['orchestrator', 'takeover', '--agent', 'owner']);
+  react();
+  assert.equal(lease(), null, 'background work cannot undo takeover');
+  acquire();
+  const expired = lease();
+  const env = {
+    TOWER_CRANE_TEST_NOW: String(Date.parse(expired.heartbeat) + h.readState('project.json').limits.lease_minutes * 60000 + 1),
+    NODE_OPTIONS: `--require=${JSON.stringify(path.join(__dirname, 'fixtures', 'clock.js'))}`,
+  };
+  react({ env });
+  assert.deepEqual(lease(), expired, 'background work cannot revive an idle session');
+  h.ok(['task', 'note', 'T1', 'replacement session', '--agent', 'orchestrator'],
+    { env: { ...env, CLAUDE_SESSION_ID: 'replacement' } });
+  assert.notEqual(lease().session_id, expired.session_id);
 });
 
 test('CI completion refreshes a pending or failed receipt at the exact head and merges after review', (t) => {
@@ -598,8 +637,155 @@ test('a passing gate reruns in the next reaction after its tests mode changes', 
   assert.equal(latest.tests_mode, 'none');
 });
 
+function reconciledFixture(t) {
+  const h = cachedFixture(t, 'reconciled-submission', (repo) => {
+    const h = setup(null, { repo });
+    h.submit();
+    h.consume();
+    return { sha: h.sha };
+  });
+  h.logs = () => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  h.reconcile = () => h.run(['wait', '--types', 'never', '--timeout', '0.01', '--agent', 'orchestrator']);
+  return h;
+}
+
+for (const reaction of ['submit', 'reconcile']) {
+  test(`${reaction} runs missing gates after a resubmitted revision's tests fail`, (t) => {
+    const h = reconciledFixture(t);
+    h.ok(['brief', 'set', 'T1', '-', '--agent', 'orchestrator'],
+      { input: '# Change\n\nVerify the revised acceptance.\n' });
+    h.ok(['project', 'set', '--tests-cmd', 'node -e "process.exit(1)"', '--tests-mode', 'run-only']);
+    h.ok(['submit', 'T1', '--sha', h.sha, '--agent', 'worker']);
+    const task = h.json(['task', 'show', 'T1']);
+    assert.equal(task.revision, 2);
+    assert.ok(task.evidence.every((e) => e.revision === 1), 'only historical evidence survives resubmission');
+    const checks = () => h.logs().filter((e) => e.cmd.startsWith('check '));
+    const count = checks().length;
+    if (reaction === 'reconcile') {
+      // T155's submit reaction recorded a revision-2 tests failure, then
+      // finished before clean and CI. Startup must recover those missing gates.
+      assert.equal(h.run(['check', 'tests', 'T1', '--agent', 'orchestrator']).code, 1);
+      const source = h.logs().findLast((e) => e.cmd === 'submit').id;
+      fs.appendFileSync(path.join(h.state, 'events.jsonl'), JSON.stringify({
+        at: new Date().toISOString(), agent: 'orchestrator', cmd: 'automation', task: 'T1',
+        detail: { source, phase: 'done' },
+      }) + '\n');
+      assert.equal(h.reconcile().code, 2);
+    } else {
+      assert.equal(h.run(['wait', '--after', '0', '--types', 'never', '--timeout', '0',
+        '--agent', 'orchestrator']).code, 2);
+    }
+    assert.deepEqual(checks().slice(count).map((e) => [e.cmd, e.detail.ok, e.detail.revision]),
+      [['check tests', false, 2], ['check clean', true, 2], ['check ci', true, 2]]);
+    const after = h.json(['task', 'show', 'T1']);
+    assert.equal(after.status, 'submitted', 'a failed gate still prevents acceptance');
+    assert.equal(after.gates.gates.find((g) => g.type === 'tests').ok, false);
+    h.reconcile();
+    assert.equal(checks().length, count + 3, 'current failures wait for retry and current passes are reused');
+  });
+}
+
+for (const obsolete of ['revision', 'sha']) {
+  for (const reaction of ['submit', 'reconcile']) {
+    test(`${reaction} runs software gates with only earlier ${obsolete} evidence`, (t) => {
+      const h = reconciledFixture(t);
+      // Keep an audited failure too: only a failure at the current revision
+      // and head can wait for an explicit retry.
+      h.env.FIXTURE_GATE_OK = '0';
+      assert.equal(h.run(['check', 'clean', 'T1']).code, 1);
+      delete h.env.FIXTURE_GATE_OK;
+      const previous = h.json(['task', 'show', 'T1']);
+      const checks = () => h.logs().filter((e) => e.cmd.startsWith('check '));
+      const count = checks().length;
+      let sha = h.sha;
+      if (obsolete === 'revision') {
+        h.ok(['brief', 'set', 'T1', '-', '--agent', 'orchestrator'],
+          { input: '# Change\n\nVerify the revised acceptance.\n' });
+      } else {
+        fs.appendFileSync(path.join(h.repo, 'README.md'), 'Resubmitted change.\n');
+        h.git(['add', 'README.md']);
+        h.git(['commit', '-qm', 'resubmitted head']);
+        sha = h.git(['rev-parse', 'HEAD']);
+        const github = JSON.parse(fs.readFileSync(h.env.AUTOMATION_GITHUB, 'utf8'));
+        github.prs[7].headRefOid = sha;
+        github.ci[sha] = 'success';
+        fs.writeFileSync(h.env.AUTOMATION_GITHUB, JSON.stringify(github));
+      }
+      h.ok(['submit', 'T1', '--sha', sha, '--agent', 'worker']);
+      const submitted = h.json(['task', 'show', 'T1']);
+      assert.equal(submitted.revision, obsolete === 'revision' ? 2 : previous.revision);
+      assert.deepEqual(submitted.evidence, previous.evidence, 'resubmission keeps historical receipts');
+      assert.ok(submitted.gates.gates.filter((g) => g.type !== 'review').every((g) => !g.ok));
+      if (reaction === 'reconcile') {
+        // A completed submit reaction must not suppress startup reconciliation.
+        const events = h.logs();
+        const source = events.findLast((e) => e.cmd === 'submit').id;
+        fs.appendFileSync(path.join(h.state, 'events.jsonl'), JSON.stringify({
+          at: new Date().toISOString(), agent: 'orchestrator', cmd: 'automation', task: 'T1',
+          detail: { source, phase: 'done' },
+        }) + '\n');
+        assert.deepEqual(h.json(['status']).gate_queue, { running: [], queued: [], blocked: [] });
+        assert.equal(h.reconcile().code, 2);
+      } else {
+        assert.equal(h.run(['wait', '--after', '0', '--types', 'never', '--timeout', '0',
+          '--agent', 'orchestrator']).code, 2);
+      }
+      assert.deepEqual(checks().slice(count).map((e) => [e.cmd, e.detail.ok, e.detail.sha, e.detail.revision]),
+        ['tests', 'clean', 'ci'].map((type) => [`check ${type}`, true, sha, submitted.revision]));
+      const after = h.json(['task', 'show', 'T1']);
+      assert.ok(after.gates.gates.filter((g) => g.type !== 'review').every((g) => g.ok));
+      assert.equal(after.status, 'submitted', 'software evidence does not replace independent review');
+      h.reconcile();
+      assert.equal(checks().length, count + 3, 'current receipts prevent duplicate runs');
+    });
+  }
+}
+
+for (const entries of ['absent', 'unaudited pass', 'unaudited failure']) {
+  test(`startup reconciles missing software evidence with ${entries} entries and an empty queue`, (t) => {
+    const h = reconciledFixture(t);
+    const tasks = h.readState('tasks.json');
+    const task = tasks.tasks[0];
+    if (entries === 'absent') task.evidence = [];
+    else for (const entry of task.evidence) entry.ok = entries === 'unaudited pass';
+    fs.writeFileSync(path.join(h.state, 'tasks.json'), JSON.stringify(tasks));
+    const events = h.logs().filter((e) => !['check tests', 'check clean', 'check ci'].includes(e.cmd));
+    fs.writeFileSync(path.join(h.state, 'events.jsonl'), events.map((e) => JSON.stringify(e) + '\n').join(''));
+    const before = h.json(['task', 'show', 'T1']);
+    assert.ok(before.gates.gates.filter((g) => g.type !== 'review').every((g) => !g.ok));
+    assert.deepEqual(h.json(['status']).gate_queue, { running: [], queued: [], blocked: [] });
+    assert.ok(events.some((e) => e.cmd === 'automation' && e.detail.phase === 'done'));
+
+    assert.equal(h.reconcile().code, 2);
+    const checks = h.logs().filter((e) => e.cmd.startsWith('check '));
+    assert.deepEqual(checks.map((e) => [e.cmd, e.detail.ok, e.detail.sha, e.detail.revision]),
+      ['tests', 'clean', 'ci'].map((type) => [`check ${type}`, true, h.sha, task.revision]));
+    const after = h.json(['task', 'show', 'T1']);
+    assert.ok(after.gates.gates.filter((g) => g.type !== 'review').every((g) => g.ok));
+    assert.equal(after.status, 'submitted', 'software evidence does not replace independent review');
+    h.reconcile();
+    assert.equal(h.logs().filter((e) => e.cmd.startsWith('check ')).length, 3, 'valid receipts prevent duplicate runs');
+  });
+}
+
+test('startup reconciles tests evidence staled by a tests keep setting change after a completed reaction', (t) => {
+  const h = reconciledFixture(t);
+  const checks = () => h.logs().filter((e) => e.cmd.startsWith('check '));
+  const before = checks();
+  assert.deepEqual(h.json(['status']).gate_queue, { running: [], queued: [], blocked: [] });
+  h.ok(['project', 'set', '--tests-keep', '["test/**","docs/**"]']);
+  const stale = h.json(['task', 'show', 'T1']).gates.gates.find((g) => g.type === 'tests');
+  assert.equal(stale.ok, false);
+  assert.match(stale.reason, /tests evidence no longer matches/);
+  assert.equal(h.reconcile().code, 2);
+  const added = checks().slice(before.length);
+  assert.deepEqual(added.map((e) => [e.cmd, e.detail.ok]), [['check tests', true]]);
+  assert.deepEqual(added[0].detail.gate_policy.keep, ['test/**', 'docs/**']);
+  assert.equal(h.json(['task', 'show', 'T1']).gates.gates.find((g) => g.type === 'tests').ok, true);
+});
+
 test('a failed gate at unchanged inputs waits for gates retry, which reruns it', (t) => {
-  const h = setup(t, { ci: 'pending' });
+  const h = setup(t);
   const marker = path.join(h.base, 'infra-failed-once');
   const script = path.join(h.base, 'flaky-tests.js');
   fs.writeFileSync(script, `const fs = require('node:fs');\nif (fs.existsSync(${JSON.stringify(marker)})) process.exit(0);\nfs.writeFileSync(${JSON.stringify(marker)}, '');\nprocess.exit(1);\n`);
@@ -1358,6 +1544,182 @@ test('supervisor reactions pin unconfigured gates and bypass the real restrictiv
   startupContexts(h, false);
 });
 
+test('large review dispatch hands revuto findings to the reviewer and an ok that ignores a P1 is refused', async (t) => {
+  const h = setup(t);
+  fs.writeFileSync(path.join(h.repo, 'large.md'), 'A focused review reads this diff. '.repeat(1000) + '\n');
+  h.git(['add', 'large.md']);
+  h.git(['commit', '-qm', 'large review diff']);
+  h.sha = h.git(['rev-parse', 'HEAD']);
+  configureHarness(h);
+  const state = h.github();
+  state.prs['7'].headRefOid = h.sha;
+  state.ci[h.sha] = 'success';
+  const comment = (id, body, extra = {}) => ({ id, in_reply_to_id: null, path: 'src.js', line: 3, original_line: 3, body,
+    user: 'revuto-review[bot]', original_commit_id: h.sha, html_url: `https://github.com/acme/demo/pull/7#discussion_r${id}`, ...extra });
+  state.comments = [
+    comment(101, '[P1] The loop never terminates on empty input.'),
+    comment(102, '[P2] Missing null check.'),
+    { ...comment(103, '[resolved]\nFixed by the guard above.'), in_reply_to_id: 102, user: 'worker' },
+    comment(104, 'Nit: rename this.'),
+    comment(105, '[P1] Outdated finding.', { line: null }),
+    comment(106, '[P1] Not from revuto.', { user: 'someone' }),
+  ];
+  h.saveGithub(state);
+  assert.equal((await h.runAsync(['spawn', '--task', 'T1', '--wait', '--agent', 'orchestrator'])).code, 0);
+  const deadline = Date.now() + 60000;
+  while (!h.logs().some((e) => e.cmd === 'spawn exit' && e.detail.role === 'reviewer')) {
+    if (Date.now() > deadline) throw new Error(JSON.stringify(h.logs().slice(-10)));
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  const review = h.logs().find((e) => e.cmd === 'spawn' && e.detail.role === 'reviewer');
+  assert.deepEqual(review.detail.revuto.map((f) => [f.id, f.severity, f.reply]), [[101, 'P1', null], [102, 'P2', 103], [104, null, null]]);
+  const brief = fs.readFileSync(path.join(h.state, 'reviews', `T1-${h.sha}.md`), 'utf8');
+  assert.match(brief, /## Revuto findings/);
+  assert.match(brief, /### \[P1\] src\.js:3 \(comment 101\)\n\n\[P1\] The loop never terminates on empty input\./);
+  assert.match(brief, /### \[P2\] src\.js:3 \(comment 102, resolved in reply 103\)/);
+  assert.match(brief, /### src\.js:3 \(comment 104\)/);
+  assert.doesNotMatch(brief, /Outdated finding|Not from revuto/);
+  const contextFile = path.join(h.env.AUTOMATION_CONTEXT_DIR, `${review.detail.agent}.json`);
+  assert.ok(fs.existsSync(contextFile), fs.readFileSync(review.detail.log, 'utf8'));
+  const { prompt } = JSON.parse(fs.readFileSync(contextFile, 'utf8'));
+  assert.match(prompt, /Read .*reviews.* for the diff at/);
+  assert.match(prompt, /## Revuto findings/);
+  assert.match(prompt, /### \[P1\] src\.js:3 \(comment 101\)\n\n\[P1\] The loop never terminates on empty input\./);
+  assert.match(prompt, /## Gate results/);
+  assert.doesNotMatch(prompt, /diff --git a\/large.md/);
+  const task = h.readState('tasks.json').tasks[0];
+  assert.equal(task.evidence.some((e) => e.type === 'review'), false, 'the reviewer ok was refused');
+  assert.equal(task.status, 'submitted');
+  const refused = h.run(['evidence', 'T1', '--type', 'review', '--sha', h.sha, '--ok', '--agent', review.detail.agent]);
+  assert.equal(refused.code, 1, refused.stdout + refused.stderr);
+  assert.match(refused.stderr, /review ok refused; revuto \[P1\] comment 101 at src\.js:3 \(https:\/\/github\.com\/acme\/demo\/pull\/7#discussion_r101\)/);
+  assert.doesNotMatch(refused.stderr, /comment 10[2-6]/);
+  h.ok(['evidence', 'T1', '--type', 'review', '--sha', h.sha, '--fail', '--agent', review.detail.agent]);
+  assert.equal(h.github().calls.some((a) => a[1] === 'merge'), false);
+});
+
+test('brokered review evidence clears a revuto finding whose file changed since the comment', async (t) => {
+  const h = setup(t);
+  configureHarness(h);
+  const state = h.github();
+  const before = h.git(['rev-parse', `${h.sha}^`]);
+  const comment = (id, commit) => ({ id, in_reply_to_id: null, path: 'value.js', line: 1, original_line: 1, body: `[P1] finding ${id}`,
+    user: 'revuto-review[bot]', original_commit_id: commit, html_url: null });
+  // value.js changed between before and the head; nothing changed after the head.
+  state.comments = [comment(201, before), comment(202, h.sha)];
+  h.saveGithub(state);
+  assert.equal((await h.runAsync(['spawn', '--task', 'T1', '--wait', '--agent', 'orchestrator'])).code, 0);
+  const deadline = Date.now() + 60000;
+  while (!h.logs().some((e) => e.cmd === 'spawn exit' && e.detail.role === 'reviewer')) {
+    if (Date.now() > deadline) throw new Error(JSON.stringify(h.logs().slice(-10)));
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  const review = h.logs().find((e) => e.cmd === 'spawn' && e.detail.role === 'reviewer');
+  assert.deepEqual(review.detail.revuto.map((f) => [f.id, f.changed]), [[201, true], [202, false]]);
+  // The state broker runs evidence with TOWER_CRANE_VIA=broker, where tower-crane reads no repository.
+  const broker = { env: { ...h.env, TOWER_CRANE_VIA: 'broker' } };
+  const refused = h.run(['evidence', 'T1', '--type', 'review', '--sha', h.sha, '--ok', '--agent', review.detail.agent, '--state', h.state], broker);
+  assert.equal(refused.code, 1, refused.stdout + refused.stderr);
+  assert.match(refused.stderr, /review ok refused; revuto \[P1\] comment 202 at value\.js:1 has no code change/);
+  assert.doesNotMatch(refused.stderr, /comment 201/);
+});
+
+test('revuto findings on bracketed paths require a change to the literal file', async (t) => {
+  const h = setup(t);
+  configureHarness(h);
+  fs.mkdirSync(path.join(h.repo, 'routes'));
+  fs.writeFileSync(path.join(h.repo, 'routes', '[id].js'), 'module.exports = 1;\n');
+  fs.writeFileSync(path.join(h.repo, 'routes', 'i.js'), 'module.exports = 1;\n');
+  h.git(['add', 'routes']);
+  h.git(['commit', '-qm', 'add route fixtures']);
+  const commented = h.git(['rev-parse', 'HEAD']);
+  fs.writeFileSync(path.join(h.repo, 'routes', 'i.js'), 'module.exports = 2;\n');
+  h.git(['add', 'routes']);
+  h.git(['commit', '-qm', 'change sibling route']);
+  h.sha = h.git(['rev-parse', 'HEAD']);
+  const state = h.github();
+  state.prs['7'].headRefOid = h.sha;
+  state.ci[h.sha] = 'success';
+  state.comments = [{ id: 401, in_reply_to_id: null, path: 'routes/[id].js', line: 1,
+    body: '[P1] The dynamic route is still broken.', user: 'revuto-review[bot]', original_commit_id: commented }];
+  h.saveGithub(state);
+  h.submit();
+  for (const type of ['tests', 'clean', 'ci']) gateEvidence(h, type, 'orchestrator');
+  const first = await h.runAsync(['spawn', '--role', 'review', '--task', 'T1', '--wait', '--agent', 'orchestrator']);
+  assert.equal(first.code, 1, first.stdout + first.stderr);
+  const review = h.logs().find((e) => e.cmd === 'spawn' && e.detail.role === 'reviewer');
+  assert.equal(review.detail.revuto[0].changed, false);
+  const broker = { env: { ...h.env, TOWER_CRANE_VIA: 'broker' } };
+  const refused = h.run(['evidence', 'T1', '--type', 'review', '--sha', h.sha, '--ok',
+    '--agent', review.detail.agent, '--state', h.state], broker);
+  assert.equal(refused.code, 1, refused.stdout + refused.stderr);
+  assert.match(refused.stderr, /review ok refused; revuto \[P1\] comment 401 at routes\/\[id\]\.js:1/);
+  assert.equal(h.readState('tasks.json').tasks[0].evidence.some((e) => e.type === 'review' && e.ok), false);
+
+  fs.writeFileSync(path.join(h.repo, 'routes', '[id].js'), 'module.exports = 2;\n');
+  h.git(['add', 'routes']);
+  h.git(['commit', '-qm', 'fix dynamic route']);
+  h.sha = h.git(['rev-parse', 'HEAD']);
+  const updated = h.github();
+  updated.prs['7'].headRefOid = h.sha;
+  updated.ci[h.sha] = 'success';
+  h.saveGithub(updated);
+  h.ok(['submit', 'T1', '--sha', h.sha, '--pr', '7', '--agent', 'worker']);
+  for (const type of ['tests', 'clean', 'ci']) gateEvidence(h, type, 'orchestrator');
+  const fixed = await h.runAsync(['spawn', '--role', 'review', '--task', 'T1', '--wait', '--agent', 'orchestrator']);
+  assert.equal(fixed.code, 0, fixed.stdout + fixed.stderr);
+  const latest = h.logs().findLast((e) => e.cmd === 'spawn' && e.detail.role === 'reviewer');
+  assert.equal(latest.detail.revuto[0].changed, true);
+  assert.ok(h.readState('tasks.json').tasks[0].evidence.some((e) => e.type === 'review' && e.ok && e.sha === h.sha));
+});
+
+test('revuto replies require an explicit resolution and later discussion reopens the finding', async (t) => {
+  const h = setup(t);
+  configureHarness(h);
+  const state = h.github();
+  const before = h.git(['rev-parse', `${h.sha}^`]);
+  const finding = (id, commit = h.sha) => ({ id, in_reply_to_id: null, path: 'value.js', line: 1,
+    body: `[P1] finding ${id}`, user: 'revuto-review[bot]', original_commit_id: commit });
+  const reply = (id, thread, body) => ({ id, in_reply_to_id: thread, user: 'worker', body });
+  state.comments = [
+    finding(301), reply(311, 301, 'I can still reproduce this. This is not fixed.'),
+    finding(302), reply(312, 302, '[resolved]\nFixed by the guard above.'),
+    finding(303, before), reply(313, 303, 'Please explain this change.'),
+    finding(304), reply(314, 304, 'Not fixed yet.'), reply(324, 304, '[RESOLVED]'),
+    finding(305), reply(315, 305, '[resolved]'), reply(325, 305, 'I can still reproduce this.'),
+    finding(306), reply(316, 306, '> [resolved]\nThis is a quote, not a resolution.'),
+  ];
+  h.saveGithub(state);
+  // A tracked worker lets automatic reactions dispatch another reviewer after
+  // a refused verdict; this test controls both snapshots with native submission.
+  h.submit();
+  for (const type of ['tests', 'clean', 'ci']) gateEvidence(h, type, 'orchestrator');
+  const first = await h.runAsync(['spawn', '--role', 'review', '--task', 'T1', '--wait', '--agent', 'orchestrator']);
+  assert.equal(first.code, 1, first.stdout + first.stderr);
+  const review = h.logs().find((e) => e.cmd === 'spawn' && e.detail.role === 'reviewer');
+  const broker = { env: { ...h.env, TOWER_CRANE_VIA: 'broker' } };
+  const refused = h.run(['evidence', 'T1', '--type', 'review', '--sha', h.sha, '--ok',
+    '--agent', review.detail.agent, '--state', h.state], broker);
+  assert.equal(refused.code, 1, refused.stdout + refused.stderr);
+  for (const id of [301, 305, 306]) assert.match(refused.stderr, new RegExp(`comment ${id} at value\\.js:1`));
+  assert.doesNotMatch(refused.stderr, /comment 30[234]/);
+  assert.deepEqual(review.detail.revuto.map((f) => [f.id, f.reply, f.resolved, f.changed]), [
+    [301, 311, false, false], [302, 312, true, false], [303, 313, false, true],
+    [304, 324, true, false], [305, 325, false, false], [306, 316, false, false],
+  ]);
+  assert.equal(h.readState('tasks.json').tasks[0].evidence.some((e) => e.type === 'review'), false);
+  assert.equal(h.github().calls.some((a) => a[1] === 'merge'), false);
+
+  const updated = h.github();
+  for (const id of [301, 305, 306]) updated.comments.push(reply(id + 100, id, '[resolved]\nVerified at this head.'));
+  h.saveGithub(updated);
+  const rerun = await h.runAsync(['spawn', '--role', 'review', '--task', 'T1', '--wait', '--agent', 'orchestrator']);
+  assert.equal(rerun.code, 0, rerun.stdout + rerun.stderr);
+  assert.equal(h.logs().filter((e) => e.cmd === 'spawn' && e.detail.role === 'worker').length, 0);
+  assert.equal(h.logs().filter((e) => e.cmd === 'spawn' && e.detail.role === 'reviewer').length, 2);
+  assert.ok(h.readState('tasks.json').tasks[0].evidence.some((e) => e.type === 'review' && e.ok));
+});
+
 test('a supervised worker submission runs gates and dispatches the offline reviewer after exit', async (t) => {
   const h = setup(t);
   configureHarness(h, { rules: true });
@@ -1561,19 +1923,19 @@ test('a head replaced during its check is checked again at the new sha before th
   const replacement = h.git(['rev-parse', 'HEAD']);
   h.git(['switch', '-q', 'main']);
   h.moveMain();
-  // Rework, resubmit and reaccept T1 at a new head while its suite runs.
+  // The owner reworks and reaccepts T1 at a new head while its suite runs.
   fs.writeFileSync(path.join(h.base, 'during-check.js'), `const cp = require('node:child_process'), fs = require('node:fs');
 const env = ${JSON.stringify(h.env)};
 const cli = (...a) => cp.execFileSync(process.execPath, [${JSON.stringify(BIN)}, ...a], { cwd: ${JSON.stringify(h.repo)}, env, encoding: 'utf8' });
 const file = env.AUTOMATION_GITHUB;
-cli('rework', 'T1', '--reason', 'replace the head', '--agent', 'orchestrator');
+cli('rework', 'T1', '--reason', 'replace the head', '--agent', 'owner');
 const gh = JSON.parse(fs.readFileSync(file, 'utf8'));
 gh.prs['7'].headRefOid = ${JSON.stringify(replacement)};
 gh.ci[${JSON.stringify(replacement)}] = 'success';
 fs.writeFileSync(file, JSON.stringify(gh));
 cli('claim', 'T1', '--agent', 'worker');
 cli('submit', 'T1', '--sha', ${JSON.stringify(replacement)}, '--pr', '7', '--agent', 'worker');
-for (const gate of ['tests', 'clean', 'ci']) cli('check', gate, 'T1', '--agent', 'orchestrator');
+for (const gate of ['tests', 'clean', 'ci']) cli('check', gate, 'T1', '--agent', 'owner');
 const events = ${JSON.stringify(path.join(h.state, 'events.jsonl'))};
 const revision = JSON.parse(fs.readFileSync(${JSON.stringify(path.join(h.state, 'tasks.json'))}, 'utf8')).tasks.find((x) => x.id === 'T1').revision;
 const at = new Date().toISOString();
@@ -1582,7 +1944,7 @@ fs.appendFileSync(events, [
   { at, agent: 'orchestrator', cmd: 'spawn exit', task: 'T1', detail: { agent: 'reviewer', pid: 999999, attempt: 1, code: 0 } },
 ].map((e) => JSON.stringify(e) + '\\n').join(''));
 cli('evidence', 'T1', '--type', 'review', '--sha', ${JSON.stringify(replacement)}, '--ok', '--agent', 'reviewer');
-cli('accept', 'T1', '--agent', 'orchestrator');
+cli('accept', 'T1', '--agent', 'owner');
 `);
   h.reviewer('T1', 'reviewer');
   h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--sha', h.sha, '--ok', '--agent', 'reviewer']);
@@ -1647,9 +2009,9 @@ test('a head check that fails after its settings changed checks again under the 
   const h = queueFixture(t);
   h.moveMain();
   const cmd = h.readState('project.json').gates.tests_cmd;
-  // The suite fails, but only after another CLI replaced the tests command.
+  // The suite fails, but only after the owner replaces the tests command.
   fs.writeFileSync(path.join(h.base, 'during-check.js'), `const cp = require('node:child_process');
-cp.execFileSync(process.execPath, [${JSON.stringify(BIN)}, 'project', 'set', '--tests-cmd', ${JSON.stringify(`${cmd} again`)}, '--agent', 'orchestrator'],
+cp.execFileSync(process.execPath, [${JSON.stringify(BIN)}, 'project', 'set', '--tests-cmd', ${JSON.stringify(`${cmd} again`)}, '--agent', 'owner'],
   { cwd: ${JSON.stringify(h.repo)}, env: ${JSON.stringify(h.env)}, encoding: 'utf8' });
 process.exitCode = 1;
 `);

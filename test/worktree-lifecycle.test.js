@@ -94,11 +94,17 @@ test('failed retirement appears in list, board and inbox; dry-run preserves it a
   assert.deepEqual(item.action.argv, ['worktree', 'prune']);
   assert.ok(fs.readFileSync(path.join(h.state, 'sketch.html'), 'utf8').includes(wt.path));
   assert.match(fs.readFileSync(path.join(h.state, 'sketch.md'), 'utf8'), /1 stale, 0 orphan/);
+  const board = fs.readFileSync(path.join(h.state, 'sketch.html'), 'utf8');
+  assert.match(board, /Worktrees: 1 stale, 0 orphan/);
+  assert.match(board, /data-region="worktrees"/);
   h.git(['worktree', 'unlock', wt.path]);
   assert.ok(h.ok(['worktree', 'prune', '--dry-run']).includes(wt.path));
   assert.ok(fs.existsSync(wt.path));
   h.ok(['worktree', 'prune']);
   gone(h, wt);
+  const cleaned = fs.readFileSync(path.join(h.state, 'sketch.html'), 'utf8');
+  assert.match(cleaned, /data-region="worktrees"/);
+  assert.doesNotMatch(cleaned, /Worktrees: 1 stale/);
   assert.equal(h.json(['inbox', '--agent', 'orchestrator']).items.some((i) => i.kind === 'worktree_stale'), false);
 });
 

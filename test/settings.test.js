@@ -77,7 +77,7 @@ test('the Settings view edits the ladder and task tiers only with the page token
     assert.match(page.text, /<label for="harness">Default harness<\/label>/);
     assert.match(page.text, /<input name="model" value="fixture-large" data-initial="fixture-large" aria-labelledby="r-hard c-model"/);
     assert.match(page.text, /<select name="tier" aria-labelledby="t-T1 c-tier" data-initial="medium"(?: data-preserve="[0-9a-f]{64}")?>/);
-    assert.match((await request(s.url)).text, /<a href="settings" data-view="settings"(?: data-preserve="[0-9a-f]{64}")?>Settings<\/a>/, 'the board links to Settings');
+    assert.match((await request(s.url)).text, /<a href="\/settings" data-room="settings"(?: data-preserve="[0-9a-f]{64}")?>Settings<\/a>/, 'the board links to Settings');
     assert.notEqual((await startAgain(h)).token, token, 'each run has its own token');
 
     const ladder = `${s.url}api/ladder`;
@@ -144,7 +144,7 @@ test('a local process without the one-time link gets no token serve accepts, wit
   const h = makeRepo(t);
   h.init();
   h.ok(['task', 'add', '--title', 'Webhook retries', '--acceptance', 'a']);
-  h.ok(['ask', '--question', 'ship it?', '--option', 'yes', '--option', 'no', '--agent', 'orchestrator']);
+  h.ok(['ask', '--kind', 'technical', '--question', 'ship it?', '--option', 'yes', '--option', 'no', '--agent', 'orchestrator']);
   const s = await startServe(h);
   try {
     const files = ['tasks.json', 'decisions.json', 'project.json', 'events.jsonl'];

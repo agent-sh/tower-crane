@@ -5,6 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
+const { EventEmitter, once } = require('node:events');
 const { pathToFileURL } = require('node:url');
 const { makeRepo, BIN, ROOT } = require('./helpers');
 
@@ -58,7 +59,7 @@ test('the default wait wakes on every owner event and skips bookkeeping', async 
 
 test('wait --follow streams id-only lines and event prints the content', async (t) => {
   const h = setup(t);
-  h.ok(['ask', '--question', 'which way?', '--option', 'left', '--option', 'right', '--blocks', 'T1', '--agent', 'worker']);
+  h.ok(['ask', '--kind', 'technical', '--question', 'which way?', '--option', 'left', '--option', 'right', '--blocks', 'T1', '--agent', 'worker']);
   const p = cp.spawn(process.execPath, [BIN, 'wait', '--follow', '--agent', 'orchestrator'], { cwd: h.repo, env: h.env });
   t.after(() => p.kill());
   let out = '';
@@ -98,7 +99,7 @@ for (const harness of ['claude', 'codex']) {
       ...(process.platform === 'win32' ? { NODE_OPTIONS: `--require "${preload.replace(/\\/g, '/')}"` } : {}),
     });
     h.ok(['ladder', 'set', 'orchestrator', '--harness', harness, '--model', 'stub-model', '--clear', 'profile', '--clear', 'effort']);
-    h.ok(['ask', '--question', 'ship it?', '--option', 'yes', '--option', 'no', '--agent', 'worker']);
+    h.ok(['ask', '--kind', 'technical', '--question', 'ship it?', '--option', 'yes', '--option', 'no', '--agent', 'worker']);
     const run = h.runAsync(['spawn', '--task', 'T1', '--role', 'orchestrator', '--wait', '--json']);
     let early = null;
     run.then((r) => { early = r; });
@@ -150,6 +151,19 @@ function engine(t, h) {
     return { catch: (handler) => { entry.fallback = handler; } };
   };
   const seen = { prompts: [], appended: [], toasts: [], tools: [], commands: [] };
+  const notices = new EventEmitter();
+  const record = (kind, text) => {
+    seen[kind].push(text);
+    notices.emit('notice');
+  };
+  const waitFor = async (kind, ids) => {
+    const signal = AbortSignal.timeout(15000);
+    for (;;) {
+      const text = seen[kind].join('\n');
+      if (ids.every((id) => text.includes(id))) return text;
+      await once(notices, 'notice', { signal });
+    }
+  };
   const children = [];
   t.after(() => { for (const p of children) p.kill(); });
   async function* spawn({ argv }) {
@@ -178,8 +192,8 @@ function engine(t, h) {
     env: { get: async (name) => ({ TOWER_CRANE_STATE: h.state })[name] },
     tool: { register: async (spec) => { seen.tools.push(spec); return { tool: `mcp__tower-crane__${spec.name}` }; } },
     command: { register: async (spec) => { seen.commands.push(spec); } },
-    prompt: { submit: async (p) => { seen.prompts.push(p.text); return { text: p.text }; } },
-    session: { append: async (a) => { seen.appended.push(a.message.content[0].text); return {}; } },
+    prompt: { submit: async (p) => { record('prompts', p.text); return { text: p.text }; } },
+    session: { append: async (a) => { record('appended', a.message.content[0].text); return {}; } },
     ui: { status() {}, toast: (text) => seen.toasts.push(text) },
     process: { spawn },
   };
@@ -187,12 +201,12 @@ function engine(t, h) {
     const hook = hooks[event].find((x) => match(x.matcher));
     return hook.fn($, e, async (x) => x);
   };
-  return { $, on, seen, fire };
+  return { $, on, seen, fire, waitFor };
 }
 
 test('the Claude Code mod pushes a decision answer and a worker message into the session', async (t) => {
   const h = setup(t);
-  h.ok(['ask', '--question', 'merge now?', '--option', 'yes', '--option', 'later', '--agent', 'worker']);
+  h.ok(['ask', '--kind', 'technical', '--question', 'merge now?', '--option', 'yes', '--option', 'later', '--agent', 'worker']);
   const { register } = await import(pathToFileURL(MOD).href);
   const cc = engine(t, h);
   register(cc.on);
@@ -205,10 +219,7 @@ test('the Claude Code mod pushes a decision answer and a worker message into the
   h.ok(['msg', '--to', 'orchestrator', '--task', 'T1', 'private worker text', '--agent', 'worker']);
   const answer = log(h).findLast((e) => e.cmd === 'answer').id;
   const message = log(h).findLast((e) => e.cmd === 'msg').id;
-  const pushed = await until(() => {
-    const text = cc.seen.prompts.join('\n');
-    return text.includes(answer) && text.includes(message) && text;
-  }, 'both pushes');
+  const pushed = await cc.waitFor('prompts', [answer, message]);
   assert.match(pushed, new RegExp(`${answer}: decision-answer D1 from owner`));
   assert.match(pushed, new RegExp(`${message}: worker-message T1 from worker`));
   assert.match(pushed, /tower-crane inbox/);
@@ -217,12 +228,18 @@ test('the Claude Code mod pushes a decision answer and a worker message into the
   // A steer joins a running turn; one the turn never read is pushed after it.
   await cc.fire('turn.start', { turnId: 't1', text: '' });
   const before = cc.seen.prompts.length;
+  // Inbox reconciliation can wake separately after the first two pushes.
+  // An ordinary message forces that overlap regardless of process startup speed.
+  h.ok(['msg', '--to', 'orchestrator', '--task', 'T1', 'private concurrent worker text', '--agent', 'worker']);
+  const concurrent = log(h).findLast((e) => e.cmd === 'msg').id;
   h.ok(['msg', '--to', 'orchestrator', '--steer', 'private steer text', '--agent', 'owner']);
   const steer = log(h).findLast((e) => e.cmd === 'msg').id;
-  await until(() => cc.seen.appended.some((x) => x.includes(steer)), 'the steer append');
-  assert.equal(cc.seen.prompts.length, before, 'a steer during a turn is not a new prompt');
+  await cc.waitFor('prompts', [concurrent]);
+  await cc.waitFor('appended', [steer]);
+  assert.ok(!cc.seen.prompts.slice(before).some((x) => x.includes(steer)), 'a steer during a turn is not a new prompt');
   await cc.fire('turn.complete', { turnId: 't1' });
-  await until(() => cc.seen.prompts.slice(before).some((x) => x.includes(steer)), 'the unread steer');
+  await cc.waitFor('prompts', [steer]);
+  idOnly(cc.seen.prompts.join('\n'), ['private concurrent worker text', 'private steer text']);
   idOnly(cc.seen.appended.join('\n'), ['private steer text']);
   assert.deepEqual(cc.seen.toasts, []);
 });
