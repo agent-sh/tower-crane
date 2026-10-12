@@ -219,6 +219,10 @@ const MUTANTS = [
     from: 'const r = cp.spawnSync(real, [...rest, ...argv], { cwd, encoding', to: 'const r = cp.spawnSync(real, [...rest, ...argv], { encoding', tests: ['test/masked-merge.test.js'] },
   { id: 'masked-merge-splits-every-tab', area: 'git', file: 'lib/masked-merge.js',
     from: 'return [line.slice(tab + 1), { mode, sha }];', to: "return [line.slice(tab + 1).split('\\t')[0], { mode, sha }];", tests: ['test/masked-merge.test.js'] },
+  { id: 'masked-checkout-ignores-other-worktree', area: 'git', file: 'lib/masked-merge.js',
+    from: 'const other = branch && checkedOutElsewhere(g, branch);', to: 'const other = null;', tests: ['test/masked-merge.test.js'] },
+  { id: 'masked-checkout-skips-name-check', area: 'git', file: 'lib/masked-merge.js',
+    from: "if (create && git(['check-ref-format', '--branch', create.name]).status !== 0) return fail(", to: 'if (false) return fail(', tests: ['test/masked-merge.test.js'] },
   // board
   { id: 'board-unescaped-lt', area: 'board', file: 'lib/board/view.js',
     from: ".replace(/</g, '&lt;')", to: '', tests: ['test/board.test.js'] },
@@ -261,7 +265,8 @@ try {
   const files = cp.execFileSync('git', ['ls-files', '--cached', '--others', '--exclude-standard', '-z'], { cwd: root, encoding: 'utf8' });
   for (const file of new Set(files.split('\0').filter(Boolean))) {
     const source = path.join(root, file);
-    if (!fs.existsSync(source)) continue;
+    // A sandbox mask is a character device (/dev/null) where the host has no file.
+    if (!fs.existsSync(source) || !fs.statSync(source).isFile()) continue;
     fs.mkdirSync(path.dirname(path.join(copy, file)), { recursive: true });
     fs.cpSync(source, path.join(copy, file), { recursive: true });
   }

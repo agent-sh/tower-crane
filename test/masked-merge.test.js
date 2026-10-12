@@ -268,3 +268,49 @@ test('a checkout through the shim run with -C into a directory the checkout remo
   assert.equal(fs.readFileSync(path.join(f.wt, '.mcp.json'), 'utf8'), '');
   assert.equal(f.git(['status', '--porcelain']), '');
 });
+
+test('a checkout through the shim of a branch another worktree has checked out is refused as git refuses it, and both worktrees stay as they were', (t) => {
+  const f = fixture(t, {
+    base: { 'a.txt': 'a\n', '.mcp.json': '{"v":1}\n' },
+    task: { 'b.txt': 'b\n' },
+    main: { '.mcp.json': '{"v":2}\n' },
+  });
+  // M sits on origin/main, so a plain checkout brings in the changed .mcp.json.
+  // N sits on the task head, so -B N origin/main would move it.
+  const [m, n] = ['M', 'N'].map((b) => path.join(path.dirname(f.wt), `other-${b}`));
+  f.git(['branch', 'M', 'origin/main']);
+  f.git(['branch', 'N']);
+  f.git(['worktree', 'add', '-q', m, 'M']);
+  f.git(['worktree', 'add', '-q', n, 'N']);
+  fs.writeFileSync(path.join(f.wt, '.mcp.json'), '');
+  const before = f.head();
+  for (const [args, branch, dir] of [[['-B', 'N', 'origin/main'], 'N', n], [['M'], 'M', m]]) {
+    const at = f.git(['rev-parse', branch]);
+    const r = f.checkout(...args);
+    assert.equal(r.status, 1, r.stderr);
+    assert.match(r.stderr, new RegExp(`'${branch}' is already used by worktree at`));
+    assert.equal(f.git(['rev-parse', branch]), at);
+    assert.equal(git(['status', '--porcelain'], dir, f.env), '');
+  }
+  assert.equal(f.head(), before);
+  assert.equal(f.git(['rev-parse', '--symbolic-full-name', 'HEAD']), 'refs/heads/B');
+  assert.equal(fs.readFileSync(path.join(f.wt, '.mcp.json'), 'utf8'), '');
+});
+
+test('a checkout through the shim with a branch name git refuses leaves HEAD, the index and the worktree as they were', (t) => {
+  const f = fixture(t, {
+    base: { 'a.txt': 'a\n', '.mcp.json': '{"v":1}\n' },
+    task: { 'b.txt': 'b\n' },
+    main: { '.mcp.json': '{"v":2}\n', 'a.txt': 'a2\n' },
+  });
+  fs.writeFileSync(path.join(f.wt, '.mcp.json'), '');
+  const before = f.head();
+  const r = f.checkout('-b', 'bad..name', 'origin/main');
+  assert.equal(r.status, 1, r.stderr);
+  assert.match(r.stderr, /'bad\.\.name' is not a valid branch name/);
+  assert.equal(f.head(), before);
+  assert.equal(f.git(['rev-parse', '--symbolic-full-name', 'HEAD']), 'refs/heads/B');
+  assert.equal(fs.readFileSync(path.join(f.wt, 'a.txt'), 'utf8'), 'a\n');
+  assert.equal(fs.readFileSync(path.join(f.wt, 'b.txt'), 'utf8'), 'b\n');
+  assert.equal(f.git(['diff', '--cached', '--name-only']), '');
+});
