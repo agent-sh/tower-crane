@@ -55,6 +55,29 @@ jobs:
           }
         env:
           TOWER_CRANE_TEST_TMP: ${{ runner.temp }}/tower-crane-tests
+      - name: Repeat owner authority and board approval shard ten times
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $files = node -e "const r=require('./test/run.js'); const [i,n]=process.env.TC_TEST_SHARD.split('/').map(Number); const affected=new Set(['test/authority.test.js','test/approval-context.test.js','test/board-controls.test.js','test/windows-ancestry.test.js']); console.log(r.shardFiles(r.testFiles(),i,n).filter(f=>affected.has(f)).join(' '))"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (!$files.Trim()) { exit 0 }
+          $selected = $files.Trim().Split(' ')
+          # The selected files already belong to this shard.
+          Remove-Item Env:TC_TEST_SHARD
+          if ($selected -contains 'test/windows-ancestry.test.js') {
+            node scripts/probe-windows-ancestry.js
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          foreach ($attempt in 1..10) {
+            Write-Host "Owner authority and board approval shard: pass $attempt/10 ($files)"
+            npm test -- @selected
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+        env:
+          TOWER_CRANE_TEST_TMP: ${{ runner.temp }}/tower-crane-tests
+          TC_TEST_SHARD: ${{ matrix.shard }}
+          TOWER_CRANE_CHANGE_BASE: ${{ github.event.pull_request.base.sha }}
 
   model-swap:
     name: complete model swap proof

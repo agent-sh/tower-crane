@@ -12,6 +12,8 @@ The suite proves behavior through the real CLI on temporary git repositories. It
 
 Windows shard 1/3 also runs the Claude interrupted native worker case ten consecutive times, stopping on the first failure. The case waits for final usage through `wait --types spend --observe` and checks the supervisor's stopped phase and exit receipt before redispatch. Its parent clock models startup consuming the session deadline, so shutdown completion must be independent of that deadline.
 
+Each Windows shard repeats its affected owner-authority and board-approval files ten consecutive times: `authority.test.js`, `approval-context.test.js`, `board-controls.test.js` and `windows-ancestry.test.js`. A shard with none of those files skips the repeat. The Windows ancestry regression releases a held CIM snapshot through a native event and waits for the CLI's close signal. It verifies one provider query, transient-shell skipping and bounded ancestry output even with a large unrelated command line. `scripts/probe-windows-ancestry.js` first proves that regression fails for per-parent queries when the PR base still has them, then restores the submitted code before repetitions.
+
 For projects Tower Crane manages, expensive proof is the default: the orchestrator pins `--tests-cmd "npm test" --tests-expensive true --tests-proof-cmd "node --test {tests}"`. A submission then runs the full suite once and proves the change with its own test files.
 
 ## Writing tests
