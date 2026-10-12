@@ -673,6 +673,9 @@ test('a brokered failed review leaves full-findings rework and the climb to its 
   const h = await setup(t, 'review');
   const spawn = h.json(['spawn', '--task', 'T1']);
   await h.until(() => events(h).some((e) => e.cmd === 'spawn exit'));
+  // The exit receipt precedes host recovery; finish that host before isolating the broker.
+  const { exited } = await h.exitSignal({ pid: spawn.monitor_pid });
+  await exited;
   h.reviewer('T1', 'reviewer-T1-1');
   const B = require('../lib/broker');
   const binding = path.join(h.base, 'review-broker', B.FILE);
