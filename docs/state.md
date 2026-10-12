@@ -994,7 +994,7 @@ After draining event reactions, the trusted `wait` host releases verified dead c
 
 Each wait remembers its latest refused dispatch inputs in memory. It retries when ready task data, brief or task-update receipts, project settings, personal ladder-set receipts or worker holders change. Task notes and unchanged fallback ticks do not retry or repeat the stderr diagnostic. A successful batch or a check with no available work clears that refusal. External filesystem or harness repairs can be retried with `spawn --ready` or a new wait. This adds no state fields or retry timer.
 
-Automatic dead release requires the existing cleanup proof: a terminal monitor receipt or verified monitor exit and an empty process group. A surviving or unobservable descendant keeps the claim and worker slot. Cleanup is checked again under the release lock. Ranged tasks with pending quality failures or climbs keep their claims for quality recovery, preserving the exit failure until cleanup allows the planned climb.
+Automatic dead release requires the existing cleanup proof: a terminal monitor receipt or verified monitor exit and an empty process group. A surviving or unobservable descendant keeps the claim and worker slot. Cleanup is checked again under the release lock. Ranged tasks awaiting exit classification or a quality climb keep their claims for quality recovery. A recorded availability failure can release after cleanup when no climb is pending.
 
 An incomplete final line remains unread until a subsequent append; after a crash, that append starts a fresh line without deleting the damaged bytes. Readers skip the damaged record and continue. The log must never be truncated or replaced; a cursor beyond its end is refused.
 

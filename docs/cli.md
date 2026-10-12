@@ -330,8 +330,8 @@ freed before the wait cursor. These capacity checks run only in a trusted
 wait without `--observe`.
 Automatic dead release waits for confirmed monitor cleanup or a verified
 empty process group, then rechecks under the release lock. Ranged recovery
-keeps claims with pending quality failures or climbs so their exit still
-triggers the planned climb.
+keeps claims while the exit awaits classification or a quality climb, so
+their exit still triggers the planned climb.
 Passing independent review accepts the task; accepted PRs with green
 gates merge through the existing head guards. A watcher creates a fresh
 reconciliation request for every active PR when starting, except a default
