@@ -173,7 +173,7 @@ const cp = require('node:child_process');
 const marker = ${JSON.stringify(marker)};
 if (!fs.existsSync(marker)) {
   fs.writeFileSync(marker, '');
-  if (${recovered}) cp.execFileSync('git', ['-c', 'remote.origin.uploadpack=git-upload-pack',
+  if (${recovered}) cp.execFileSync('git', ['-c', 'remote.origin.uploadpack=git-upload-pack', '-c', 'protocol.file.allow=always',
     'fetch', '--no-tags', '--no-write-fetch-head', 'origin', '+refs/heads/main:refs/remotes/origin/main'],
     { cwd: ${JSON.stringify(h.repo)}, stdio: 'pipe' });
   process.stderr.write('fatal: unpack-objects failed\\n');

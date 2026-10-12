@@ -7,7 +7,7 @@ const path = require('node:path');
 const cp = require('node:child_process');
 const crypto = require('node:crypto');
 const zlib = require('node:zlib');
-const { makeRepo } = require('./helpers');
+const { makeRepo, PTY_AVAILABLE } = require('./helpers');
 const { gateFixture } = require('./gate-helpers');
 const { shellQuote } = require('../lib/gates/common');
 
@@ -51,7 +51,12 @@ function plant(h) {
     'gc.recentObjectsHook': cmd('recent-objects-hook'),
   };
   for (const [key, value] of Object.entries(settings)) h.git(['config', key, value]);
-  // gc --auto counts the loose objects in objects/17.
+  ageLooseObjects(gitDir);
+  return { cmd, ran: () => (fs.existsSync(marker) ? fs.readFileSync(marker, 'utf8').trim().split('\n') : []) };
+}
+
+// gc --auto counts the loose objects in objects/17.
+function ageLooseObjects(gitDir) {
   const aged = Date.now() / 1000 - 30 * 86400;
   for (let i = 0, found = 0; found < 3; i++) {
     const body = Buffer.from(`aged ${i}\n`);
@@ -64,7 +69,6 @@ function plant(h) {
     fs.utimesSync(file, aged, aged);
     found++;
   }
-  return { cmd, ran: () => (fs.existsSync(marker) ? fs.readFileSync(marker, 'utf8').trim().split('\n') : []) };
 }
 
 // An HTTP origin that asks for credentials, in its own process so the
@@ -320,4 +324,138 @@ test('conditional includes cannot add a driver the config scan misses', (t) => {
   h.git(['config', 'includeIf.onbranch:tower-crane/**.path', '~nobody-here/branch.inc']);
   assert.match(h.run(['worktree', 'T3', '--agent', 'orchestrator']).stderr, /cannot read git configuration safely/);
   assert.deepEqual(ran(), []);
+});
+
+// One row per setting the closed list names. Plain git, run on a copy of the
+// planted repository, shows the setting takes effect; git started through
+// lib/commands must not take it. Rows with `caller` are the caller's own
+// settings, which still apply.
+const COMMIT = ['commit', '-q', '--allow-empty', '-m', 'row'];
+const SSH_ORIGIN = 'ssh://git@127.0.0.1:9/acme/demo.git';
+const ROWS = [
+  { name: 'core.fsmonitor', run: ['status', '--porcelain'], plant: (r) => r.set('core.fsmonitor', r.cmd('fsmonitor')) },
+  { name: 'core.hooksPath', run: COMMIT, plant: (r) => r.set('core.hooksPath', r.hook(path.join(r.base, 'hooks'), 'post-commit')) },
+  { name: 'the hooks directory', run: COMMIT, plant: (r) => r.hook(path.join(r.gitDir, 'hooks'), 'post-commit') },
+  { name: 'diff.external', run: ['diff'], plant: (r) => { r.change(); r.set('diff.external', r.cmd('diff-external')); } },
+  { name: 'diff.<driver>.textconv', run: ['diff'], plant: (r) => { r.attributes('* diff=tc'); r.change(); r.set('diff.tc.textconv', r.cmd('textconv')); } },
+  { name: 'diff.<driver>.command', run: ['diff'], plant: (r) => { r.attributes('* diff=tc'); r.change(); r.set('diff.tc.command', r.cmd('diff-command')); } },
+  { name: 'filter.<driver>.clean', run: ['add', 'README.md'], plant: (r) => { r.attributes('* filter=tc'); r.change(); r.set('filter.tc.clean', r.cmd('filter-clean')); } },
+  { name: 'filter.<driver>.smudge', run: ['checkout', '--', 'README.md'], plant: (r) => {
+    r.attributes('* filter=tc'); r.set('filter.tc.smudge', r.cmd('filter-smudge')); fs.rmSync(path.join(r.repo, 'README.md'));
+  } },
+  { name: 'filter.<driver>.process', run: ['add', 'README.md'], plant: (r) => { r.attributes('* filter=tc'); r.change(); r.set('filter.tc.process', r.cmd('filter-process')); } },
+  { name: 'merge.<driver>.driver', run: ['merge', '-q', '--no-edit', 'other'], plant: (r) => {
+    r.git(['switch', '-q', '-c', 'other']);
+    r.change('other\n'); r.git(['commit', '-qam', 'other']);
+    r.git(['switch', '-q', 'main']);
+    r.change('main\n'); r.git(['commit', '-qam', 'main']);
+    r.attributes('* merge=tc'); r.set('merge.tc.driver', r.cmd('merge-driver'));
+  } },
+  { name: 'core.sshCommand', run: ['fetch', 'origin'], plant: (r) => { r.git(['remote', 'add', 'origin', SSH_ORIGIN]); r.set('core.sshCommand', r.cmd('ssh-command')); } },
+  { name: 'GIT_SSH_COMMAND', run: ['fetch', 'origin'], caller: 'caller-ssh-command', plant: (r) => {
+    r.git(['remote', 'add', 'origin', SSH_ORIGIN]); r.set('core.sshCommand', r.cmd('ssh-command'));
+    return { GIT_SSH_COMMAND: r.cmd('caller-ssh-command') };
+  } },
+  { name: 'GIT_SSH', run: ['fetch', 'origin'], caller: 'caller-ssh', plant: (r) => {
+    r.git(['remote', 'add', 'origin', SSH_ORIGIN]); r.set('core.sshCommand', r.cmd('ssh-command'));
+    return { GIT_SSH: r.program('caller-ssh') };
+  } },
+  { name: 'credential.helper', run: ['fetch', 'origin'], plant: async (r, t) => {
+    r.git(['remote', 'add', 'origin', `http://127.0.0.1:${await unauthorizedServer(t)}/acme/demo.git`]);
+    r.set('credential.helper', r.cmd('credential-helper'));
+  } },
+  { name: 'credential.<url>.helper', run: ['fetch', 'origin'], plant: async (r, t) => {
+    const url = `http://127.0.0.1:${await unauthorizedServer(t)}`;
+    r.git(['remote', 'add', 'origin', `${url}/acme/demo.git`]);
+    r.set(`credential.${url}.helper`, r.cmd('credential-url-helper'));
+  } },
+  { name: 'gpg.program', run: COMMIT, plant: (r) => { r.set('commit.gpgSign', 'true'); r.set('gpg.program', r.program('gpg-program')); } },
+  { name: 'gpg.ssh.defaultKeyCommand', run: COMMIT, plant: (r) => {
+    r.set('commit.gpgSign', 'true'); r.set('gpg.format', 'ssh'); r.set('gpg.ssh.defaultKeyCommand', r.cmd('gpg-key-command'));
+  } },
+  { name: 'gc.recentObjectsHook', run: COMMIT, plant: (r) => {
+    ageLooseObjects(r.gitDir);
+    r.set('gc.auto', '1'); r.set('gc.autoDetach', 'false'); r.set('gc.recentObjectsHook', r.cmd('recent-objects-hook'));
+  } },
+  // The user allows the helper protocol, so only the alias is the repository's.
+  { name: 'alias.remote-<name> through a <name>:: URL', run: ['fetch', 'origin'], plant: (r) => {
+    r.trust('protocol.tcx.allow', 'always');
+    r.git(['remote', 'add', 'origin', 'tcx::anything']); r.set('alias.remote-tcx', `!${r.cmd('helper-alias')}`);
+  } },
+  { name: 'alias.remote-<name> through remote.<r>.vcs', run: ['fetch', 'origin'], plant: (r) => {
+    r.trust('protocol.tcy.allow', 'always');
+    r.git(['remote', 'add', 'origin', 'https://127.0.0.1:9/acme/demo.git']); r.set('remote.origin.vcs', 'tcy');
+    r.set('alias.remote-tcy', `!${r.cmd('vcs-alias')}`);
+  } },
+  { name: 'protocol.ext.allow', run: ['fetch', 'origin'], plant: (r) => {
+    const ext = [process.execPath, r.script, 'ext-command'].map((a) => a.replace(/%/g, '%%').replace(/ /g, '% ')).join(' ');
+    r.git(['remote', 'add', 'origin', `ext::${ext}`]); r.set('protocol.ext.allow', 'always');
+  } },
+  // A helper the user installed, which git allows only for a typed URL.
+  { name: 'protocol.allow', run: ['fetch', 'origin'], plant: (r) => {
+    r.git(['remote', 'add', 'origin', 'tcz::anything']); r.set('protocol.allow', 'always');
+    return { PATH: r.helper('tcz') };
+  } },
+  { name: 'protocol.<name>.allow', run: ['fetch', 'origin'], plant: (r) => {
+    r.git(['remote', 'add', 'origin', 'tcz::anything']); r.set('protocol.tcz.allow', 'always');
+    return { PATH: r.helper('tcz') };
+  } },
+  // git pages only to a terminal.
+  { name: 'core.pager', run: ['log', '-1'], tty: true, plant: (r) => { r.set('core.pager', r.cmd('core-pager')); return { PAGER: 'cat' }; } },
+  { name: 'pager.<cmd>', run: ['log', '-1'], tty: true, plant: (r) => { r.set('pager.log', r.cmd('pager-log')); return { PAGER: 'cat' }; } },
+];
+
+function rowRepo(h) {
+  const marker = path.join(h.base, 'planted');
+  const script = path.join(h.base, 'planted.js');
+  fs.writeFileSync(script, `require('node:fs').appendFileSync(${JSON.stringify(marker)}, process.argv[2] + '\\n');\n`);
+  const cmd = (name) => `${shellQuote(process.execPath)} ${shellQuote(script)} ${name}`;
+  const bin = path.join(h.base, 'bin');
+  const program = (name) => {
+    fs.mkdirSync(bin, { recursive: true });
+    const file = path.join(bin, name);
+    fs.writeFileSync(file, `#!/bin/sh\n${cmd(name)}\n`, { mode: 0o755 });
+    return file;
+  };
+  const gitDir = path.join(h.repo, '.git');
+  return {
+    base: h.base, repo: h.repo, gitDir, script, cmd, program, git: h.git,
+    set: (key, value) => h.git(['config', key, value]),
+    trust: (key, value) => h.git(['config', '--file', h.env.GIT_CONFIG_GLOBAL, key, value]),
+    change: (text = 'changed\n') => fs.writeFileSync(path.join(h.repo, 'README.md'), text),
+    attributes: (line) => fs.writeFileSync(path.join(gitDir, 'info', 'attributes'), `${line}\n`),
+    hook: (dir, name) => {
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, name), `#!/bin/sh\n${cmd(`hook-${name}`)}\n`, { mode: 0o755 });
+      return dir;
+    },
+    helper: (name) => { program(`git-remote-${name}`); return `${bin}${path.delimiter}${process.env.PATH}`; },
+    ran: () => (fs.existsSync(marker) ? fs.readFileSync(marker, 'utf8').trim().split('\n') : []),
+    clear: () => fs.rmSync(marker, { force: true }),
+  };
+}
+
+test('git started through lib/commands takes none of the listed settings from repository config', async (t) => {
+  const commands = require('../lib/commands');
+  for (const row of ROWS) {
+    await t.test(row.name, { skip: row.tty && !PTY_AVAILABLE && 'no pty' }, async (t) => {
+      const h = makeRepo(t);
+      const r = rowRepo(h);
+      const env = { ...h.env, GIT_TERMINAL_PROMPT: '0', ...(await row.plant(r, t)) };
+      const git = (spawn, dir, rowEnv) => (row.tty
+        ? cp.spawnSync('script', ['-qec', ['git', '-C', dir, ...row.run].map(shellQuote).join(' '), '/dev/null'], { env: rowEnv, encoding: 'utf8', timeout: 60000 })
+        : spawn('git', ['-C', dir, ...row.run], { env: rowEnv, encoding: 'utf8', timeout: 60000 }));
+      if (!row.caller) {
+        const control = path.join(h.base, 'control');
+        fs.cpSync(h.repo, control, { recursive: true, preserveTimestamps: true });
+        git(cp.spawnSync, control, env);
+        assert.notDeepEqual(r.ran(), [], 'plain git takes the planted setting');
+        r.clear();
+      }
+      if (row.tty) git(null, h.repo, commands.gitEnv(h.repo, env));
+      else git(commands.spawnSync, h.repo, env);
+      // git can start ssh twice for one fetch, once to probe its variant.
+      assert.deepEqual([...new Set(r.ran())], row.caller ? [row.caller] : []);
+    });
+  }
 });
