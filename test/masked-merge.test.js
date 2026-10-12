@@ -45,18 +45,28 @@ function fixture(t, { base, task, main }, { masks = true } = {}) {
   git(['clone', '-q', src, wt], root, env);
   git(['checkout', '-q', '-b', 'B', 'origin/feat'], wt, env);
 
-  // The shim as a worker runs it: the agent's policy, then git's real merge.
+  // The shim as a worker runs it: the agent's policy, then git's own command in `cwd`.
   const policy = path.join(root, 'policy.json');
   fs.writeFileSync(policy, JSON.stringify({ gitPush: 'none', gh: [], masks }));
   const shimDir = path.join(root, 'bin');
   fs.mkdirSync(shimDir);
-  const merge = (...args) => cp.spawnSync(process.execPath, [SHIM, policy, shimDir, 'git', 'merge', ...args],
-    { cwd: wt, env, encoding: 'utf8' });
+  const shim = (cwd, ...args) => cp.spawnSync(process.execPath, [SHIM, policy, shimDir, 'git', ...args],
+    { cwd, env, encoding: 'utf8' });
   const commitMain = (files) => {
     commit(src, files, env, 'main again');
     git(['fetch', '-q', 'origin'], wt, env);
   };
-  return { env, wt, merge, commitMain, git: (args) => git(args, wt, env), head: () => git(['rev-parse', 'HEAD'], wt, env), show: (rev) => git(['show', rev], wt, env) };
+  return {
+    env,
+    wt,
+    shim,
+    merge: (...args) => shim(wt, 'merge', ...args),
+    checkout: (...args) => shim(wt, 'checkout', ...args),
+    commitMain,
+    git: (args) => git(args, wt, env),
+    head: () => git(['rev-parse', 'HEAD'], wt, env),
+    show: (rev) => git(['show', rev], wt, env),
+  };
 }
 
 test('a merge through the shim that brings in a sandbox-masked path succeeds and leaves the mount alone', (t) => {
@@ -156,4 +166,89 @@ test('a merge through the shim that brings in no masked path runs as git merge',
   assert.equal(r.status, 0, r.stderr);
   assert.equal(git(['rev-list', '--parents', '-n1', 'HEAD'], f.wt, f.env).split(' ').length, 3);
   assert.equal(fs.readFileSync(path.join(f.wt, 'c.txt'), 'utf8'), 'c\n');
+});
+
+test('a merge through the shim run from a subdirectory brings in a masked path at the top of the worktree', (t) => {
+  const f = fixture(t, { base: { 'a.txt': 'a\n' }, task: { 'sub/a.txt': 'sub\n' }, main: { '.mcp.json': '{}\n' } });
+  fs.mkdirSync(path.join(f.wt, '.mcp.json'));
+  fs.writeFileSync(path.join(f.wt, '.mcp.json', 'keep'), 'keep\n');
+  const r = f.shim(path.join(f.wt, 'sub'), 'merge', '--no-edit', 'origin/main');
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(f.show('HEAD:.mcp.json'), '{}');
+  assert.equal(fs.readFileSync(path.join(f.wt, '.mcp.json', 'keep'), 'utf8'), 'keep\n');
+  assert.equal(f.git(['status', '--porcelain']), '');
+});
+
+test('a merge through the shim brings in a masked path whose name contains a tab and leaves the mount alone', (t) => {
+  const tabbed = '.vscode/a\tb.json';
+  const f = fixture(t, { base: { 'a.txt': 'a\n' }, task: { 'b.txt': 'b\n' }, main: { [tabbed]: '{}\n' } });
+  fs.mkdirSync(path.join(f.wt, tabbed), { recursive: true });
+  fs.writeFileSync(path.join(f.wt, tabbed, 'keep'), 'keep\n');
+  const r = f.merge('--no-edit', 'origin/main');
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(f.show(`HEAD:${tabbed}`), '{}');
+  assert.equal(fs.readFileSync(path.join(f.wt, tabbed, 'keep'), 'utf8'), 'keep\n');
+  assert.equal(f.git(['status', '--porcelain']), '');
+});
+
+test('a masked merge with a staged change to another file is refused with its reason, and the branch does not move', (t) => {
+  const f = fixture(t, { base: { '.mcp.json': '{"v":1}\n', 'b.txt': 'b0\n' }, task: { 'c.txt': 'c\n' }, main: { '.mcp.json': '{"v":2}\n' } });
+  fs.writeFileSync(path.join(f.wt, 'b.txt'), 'local\n');
+  f.git(['add', 'b.txt']);
+  const before = f.head();
+  const r = f.merge('--no-edit', 'origin/main');
+  assert.equal(r.status, 1, r.stderr);
+  assert.match(r.stderr, /b\.txt has staged changes; commit or unstage them before merging origin\/main/);
+  assert.equal(f.head(), before);
+});
+
+test('a checkout through the shim that brings in a changed sandbox-masked path moves HEAD and leaves the mount alone', (t) => {
+  const f = fixture(t, {
+    base: { 'a.txt': 'a\n', '.mcp.json': '{"v":1}\n' },
+    task: { 'b.txt': 'b\n' },
+    main: { '.mcp.json': '{"v":2}\n' },
+  });
+  // The sandbox shows an empty file at the mount, which differs from the index, so a plain checkout refuses it.
+  fs.writeFileSync(path.join(f.wt, '.mcp.json'), '');
+  const r = f.checkout('--detach', 'origin/main');
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(f.git(['rev-parse', '--symbolic-full-name', 'HEAD']), 'HEAD');
+  assert.equal(f.head(), f.git(['rev-parse', 'origin/main']));
+  assert.equal(fs.readFileSync(path.join(f.wt, '.mcp.json'), 'utf8'), '');
+  assert.equal(f.show('HEAD:.mcp.json'), '{"v":2}');
+  assert.equal(f.git(['status', '--porcelain']), '');
+});
+
+test('a checkout through the shim that creates a branch lets git commit a change after the masked path moved', (t) => {
+  const f = fixture(t, {
+    base: { 'a.txt': 'a\n', '.mcp.json': '{"v":1}\n' },
+    task: { 'b.txt': 'b\n' },
+    main: { '.mcp.json': '{"v":2}\n' },
+  });
+  fs.writeFileSync(path.join(f.wt, '.mcp.json'), '');
+  const r = f.checkout('-b', 'C', 'origin/main');
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(f.git(['rev-parse', '--abbrev-ref', 'HEAD']), 'C');
+  fs.writeFileSync(path.join(f.wt, 'c.txt'), 'c\n');
+  f.git(['add', 'c.txt']);
+  f.git(['commit', '-q', '-m', 'add c']);
+  assert.equal(f.show('HEAD:c.txt'), 'c');
+  assert.equal(f.show('HEAD:.mcp.json'), '{"v":2}');
+  assert.equal(f.git(['status', '--porcelain']), '');
+});
+
+test('a checkout through the shim of a local branch that brings in a changed sandbox-masked path moves HEAD onto that branch', (t) => {
+  const f = fixture(t, {
+    base: { 'a.txt': 'a\n', '.mcp.json': '{"v":1}\n' },
+    task: { 'b.txt': 'b\n' },
+    main: { '.mcp.json': '{"v":2}\n' },
+  });
+  f.git(['branch', 'M', 'origin/main']);
+  fs.writeFileSync(path.join(f.wt, '.mcp.json'), '');
+  const r = f.checkout('M');
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(f.git(['rev-parse', '--symbolic-full-name', 'HEAD']), 'refs/heads/M');
+  assert.equal(fs.readFileSync(path.join(f.wt, '.mcp.json'), 'utf8'), '');
+  assert.equal(f.show('HEAD:.mcp.json'), '{"v":2}');
+  assert.equal(f.git(['status', '--porcelain']), '');
 });
