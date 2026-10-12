@@ -74,6 +74,11 @@ for (const route of ['claude', 'codex', 'codex-notify', 'pi', 'opencode', 'agy',
     }
     const result = await run;
     assert.equal(result.code, 0, result.stderr);
+    if (harness === 'opencode') {
+      const started = JSON.parse(result.stdout);
+      assert.equal(started.harness, 'opencode');
+      assert.ok(fs.existsSync(path.join(h.state, 'homes', started.agent, 'agents', 'gishra-worker.md')));
+    }
     const seen = JSON.parse(fs.readFileSync(out));
     if (live) {
       assert.match(JSON.stringify(seen.turns), /mid-run coordination/);
@@ -109,7 +114,7 @@ for (const route of ['claude', 'codex', 'codex-notify', 'pi', 'opencode', 'agy',
     assert.equal(notification.task, 'T1');
     if (['codex', 'command'].includes(harness)) {
       h.ok(['msg', '--to', 'worker-T1-1', 'queued resume coordination', '--agent', 'orchestrator']);
-      h.ok(['submit', 'T1', '--sha', 'abcdef1', '--agent', 'worker-T1-1']);
+      h.ok(['submit', 'T1', '--sha', '50b732a15be40ccb2065cb2ba0e7b366d511b736', '--agent', 'worker-T1-1']);
       h.ok(['rework', 'T1', '--reason', 'resume correction']);
       const next = h.json(['spawn', '--task', 'T1', '--wait'], { env: { MESSAGE_RESUME: '1' } });
       assert.equal(next.agent, 'worker-T1-1');

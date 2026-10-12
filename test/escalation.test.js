@@ -6,7 +6,7 @@ const cp = require('node:child_process');
 const fs = require('node:fs');
 const net = require('node:net');
 const path = require('node:path');
-const { cachedFixture, detachedAlive, BIN } = require('./helpers');
+const { cachedFixture, pinRung, detachedAlive, BIN } = require('./helpers');
 const { gateFixture } = require('./gate-helpers');
 
 const events = (h) => require('../lib/state').readEvents(h.state);
@@ -48,7 +48,7 @@ attempts.push({ rung: '${rung}', agent: process.env.TOWER_CRANE_AGENT, session: 
 require(require('node:path').join(require('node:path').dirname(process.argv[1]), '../lib/state'))
   .writeAtomic(process.argv[2], JSON.stringify(attempts));
 console.log(JSON.stringify({ type: 'thread.started', thread_id: '${rung}-thread' }));
-console.log(JSON.stringify({ type: 'result', modelUsage: { luna: {} },
+console.log(JSON.stringify({ type: 'result', modelUsage: { 'fixture-light': {} },
   usage: { input_tokens: 100, cache_read_input_tokens: 0, output_tokens: 20 } }));
 ${index === 0 && ['cleanup', 'orphan'].includes(trigger) ? `
 cp.spawn(process.execPath, ['-e', \`
@@ -283,7 +283,7 @@ for (const trigger of ['exit', 'preclaim', 'stall', 'review']) {
   }, async (t) => {
     const h = await setup(t, trigger);
     h.ok(['project', 'set', '--review-policy', JSON.stringify({ prices: {
-      luna: { input: 1, cache_write: 1, cache_read: 1, output: 1 },
+      'fixture-light': { input: 1, cache_write: 1, cache_read: 1, output: 1 },
     } })]);
     h.ok(['spawn', '--task', 'T1']);
     if (trigger === 'review') {
@@ -295,6 +295,10 @@ for (const trigger of ['exit', 'preclaim', 'stall', 'review']) {
       assert.equal(events(h).filter((e) => e.cmd === 'escalate').length, 0);
       h.ok(['evidence', 'T1', '--type', 'review', '--revision', h.revision(), '--fail', '--sha', h.git(['rev-parse', 'HEAD']),
         '--agent', 'reviewer', '--summary', 'incorrect boundary']);
+      const cursor = String(fs.statSync(path.join(h.state, 'events.jsonl')).size);
+      const host = await h.runAsync(['wait', '--after', cursor, '--types', 'submitted', '--task', 'T1',
+        '--timeout', '15', '--agent', 'orchestrator']);
+      assert.equal(host.code, 0, host.stderr || host.stdout);
     }
     await h.until(() => h.readAttempts().length === 2 && h.task().status === 'submitted');
     const attempts = h.readAttempts();
@@ -320,7 +324,7 @@ for (const trigger of ['outage', 'refusal']) {
     const h = await setup(t, trigger);
     h.ok(['spawn', '--task', 'T1']);
     await h.until(() => events(h).some((e) => e.cmd === 'spawn exit'));
-    const observed = await h.runAsync(['wait', '--after', '0', '--types', 'worker-exited', '--agent', 'orchestrator']);
+    const observed = await h.runAsync(['wait', '--observe', '--after', '0', '--types', 'worker-exited', '--agent', 'orchestrator']);
     assert.equal(observed.code, 0, observed.stderr || observed.stdout);
     h.ok(['recover', 'T1']);
     assert.equal(h.json(['task', 'show', 'T1']).tier, 'easy');
@@ -654,6 +658,11 @@ test('a reviewer without permission to create a worker home leaves the climb for
   try {
     h.ok(['evidence', 'T1', '--type', 'review', '--revision', h.revision(), '--fail', '--sha', h.git(['rev-parse', 'HEAD']),
       '--agent', 'reviewer', '--summary', 'needs rework']);
+    h.ok(['recover', 'T1', '--agent', 'orchestrator']);
+    await h.until(() => events(h).some((e) => e.cmd === 'rework' && e.task === 'T1'));
+    assert.equal(h.json(['task', 'show', 'T1']).status, 'rework');
+    assert.match(h.ok(['brief', 'get', 'T1']), /review FAIL by reviewer[\s\S]*needs rework/);
+    assert.equal(h.readAttempts().length, 1);
     assert.equal(h.json(['task', 'show', 'T1']).escalation_pending, true);
   } finally {
     fs.chmodSync(homes, 0o700);
@@ -663,7 +672,7 @@ test('a reviewer without permission to create a worker home leaves the climb for
   assert.equal(events(h).filter((e) => e.cmd === 'escalate').length, 1);
 });
 
-test('a brokered failed review records the climb and leaves dispatch to its host', async (t) => {
+test('a brokered failed review leaves full-findings rework and the climb to its host', async (t) => {
   const h = await setup(t, 'review');
   const spawn = h.json(['spawn', '--task', 'T1']);
   await h.until(() => events(h).some((e) => e.cmd === 'spawn exit'));
@@ -677,19 +686,19 @@ test('a brokered failed review records the climb and leaves dispatch to its host
     const result = await B.forward(binding, ['evidence', 'T1', '--type', 'review', '--revision', h.revision(), '--fail',
       '--sha', h.git(['rev-parse', 'HEAD']), '--summary', 'wrong result'], h.state);
     assert.equal(result.code, 0, result.stderr);
-    const task = h.json(['task', 'show', 'T1']);
-    assert.equal(task.tier, 'medium');
-    assert.equal(task.escalation_pending, true);
-    assert.equal(task.revision, 2, 'automatic rework must invalidate the rejected revision');
-    assert.equal(task.evidence.findLast((e) => e.type === 'review').revision, 1);
-    const rework = events(h).findLast((e) => e.cmd === 'rework');
+    assert.equal(h.readAttempts().length, 1);
+    h.ok(['recover', 'T1', '--agent', 'orchestrator']);
+    await h.until(() => events(h).some((e) => e.cmd === 'rework' && e.task === 'T1'));
+    const rework = events(h).findLast((e) => e.cmd === 'rework' && e.task === 'T1');
     assert.equal(rework.detail.previous_revision, 1);
     assert.equal(rework.detail.revision, 2);
-    assert.equal(h.readAttempts().length, 1);
-    assert.match(h.json(['spawn', '--task', 'T1', '--dry-run']).argv.join('\n'),
-      /Failed review by reviewer-T1-1 at [0-9a-f]+: wrong result/);
-    h.ok(['recover', 'T1', '--agent', 'orchestrator']);
+    assert.match(rework.detail.reason, /review FAIL by reviewer-T1-1[\s\S]*wrong result/);
+    assert.match(h.ok(['brief', 'get', 'T1']), /review FAIL by reviewer-T1-1[\s\S]*wrong result/);
     await h.until(() => h.readAttempts().length === 2 && h.task().status === 'submitted');
+    const task = h.json(['task', 'show', 'T1']);
+    assert.equal(task.tier, 'medium');
+    assert.equal(task.revision, 2, 'full-findings rework invalidates the rejected revision');
+    assert.equal(task.evidence.findLast((e) => e.type === 'review').revision, 1);
     const sha = h.git(['rev-parse', 'HEAD']);
     h.ok(['evidence', 'T1', '--type', 'review', '--ok', '--sha', sha,
       '--revision', '1', '--agent', 'owner']);
@@ -713,6 +722,7 @@ test('a resource lock delays dispatch while retaining the recorded climb for wai
   h.reviewer('T1', 'reviewer');
   h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--fail', '--sha', h.git(['rev-parse', 'HEAD']),
     '--agent', 'reviewer', '--summary', 'wrong result']);
+  h.ok(['recover', 'T1', '--agent', 'orchestrator']);
   const task = h.json(['task', 'show', 'T1']);
   assert.equal(task.tier, 'medium');
   assert.equal(task.escalation_pending, true);
@@ -759,14 +769,14 @@ test('failure at the range top opens one owner decision and blocks further dispa
 test('a native harness climb records captured tokens and configured cost for the failed rung', async (t) => {
   const h = await setup(t);
   h.ok(['project', 'set', '--review-policy', JSON.stringify({ prices: {
-    luna: { input: 1, cache_write: 1, cache_read: 1, output: 1 },
+    'fixture-light': { input: 1, cache_write: 1, cache_read: 1, output: 1 },
   } })]);
-  h.ok(['ladder', 'set', 'easy', '--harness', 'claude', '--model', 'luna', '--clear', 'command']);
+  pinRung(h, 'easy', { harness: 'claude', model: 'fixture-light', effort: 'high' });
   const bin = path.join(h.base, 'bin');
   fs.mkdirSync(bin);
   fs.writeFileSync(path.join(bin, process.platform === 'win32' ? 'claude.exe' : 'claude'), '', { mode: 0o755 });
   const usage = path.join(h.base, 'usage.json');
-  fs.writeFileSync(usage, JSON.stringify({ type: 'result', modelUsage: { luna: {} },
+  fs.writeFileSync(usage, JSON.stringify({ type: 'result', modelUsage: { 'fixture-light': {} },
     usage: { input_tokens: 100, cache_read_input_tokens: 0, output_tokens: 20 } }));
   h.ok(['spawn', '--task', 'T1'], {
     env: { PATH: bin + path.delimiter + (h.env.PATH || h.env.Path || ''), USAGE_CLAIM: '1', USAGE_EXIT: '1' },

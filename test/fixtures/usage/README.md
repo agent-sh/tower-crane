@@ -13,3 +13,5 @@ Captured on 2026-10-06 from installed harnesses or existing session records. Pro
 | `pi.jsonl` | Existing assistant session record with nonzero cache-write usage. Installed 0.83.0 help confirms `--mode json`. Live local and Bedrock probes emitted assistant error records with zero usage; those do not prove successful inference. |
 
 CLI integration tests replay these captured counts with an offline stand-in. They do not call providers or read developer sessions.
+
+Model and profile names in these captures are replaced with fictional fixture IDs. Token counters, event shapes and ordering are preserved.

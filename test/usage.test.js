@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
-const { cachedFixture, detachedAlive } = require('./helpers');
+const { cachedFixture, pinRung, detachedAlive } = require('./helpers');
 
 const fixture = (name) => path.join(__dirname, 'fixtures', 'usage', name);
 const text = (name) => fs.readFileSync(fixture(name), 'utf8');
@@ -18,20 +18,20 @@ test('codex captured footer and repeated session totals are counted once', () =>
   });
   const session = text('codex-session.jsonl');
   assert.deepEqual(parse('codex', text('codex.log'), session + session), {
-    tokens: 24675, input: 24670, cached: 0, output: 5, model: 'openai.gpt-6.1-sol',
+    tokens: 24675, input: 24670, cached: 0, output: 5, model: 'fixture-main',
   });
   assert.deepEqual(parse('codex', text('codex.log'), text('codex-cache-session.jsonl')), {
-    tokens: 1529656, input: 1516556, cached: 1398443, output: 13100, model: 'openai.gpt-6.1-sol',
+    tokens: 1529656, input: 1516556, cached: 1398443, output: 13100, model: 'fixture-main',
   });
   const writes = text('codex-cache-write-session.jsonl');
   assert.deepEqual(parse('codex', '', writes + writes), {
-    tokens: 668176, input: 660162, cached: 575581, output: 8014, model: 'openai.gpt-6.1-sol',
+    tokens: 668176, input: 660162, cached: 575581, output: 8014, model: 'fixture-main',
   }, 'cache writes and reasoning are already included in input and output');
 });
 
 test('claude captured usage includes cache reads and writes in input', () => {
   assert.deepEqual(parse('claude', text('claude.jsonl')), {
-    tokens: 31948, input: 31773, cached: 31771, output: 175, model: 'claude-opus-5-5',
+    tokens: 31948, input: 31773, cached: 31771, output: 175, model: 'fixture-large',
   });
   assert.deepEqual(parse('claude', text('claude.jsonl') + text('claude.jsonl')), parse('claude', text('claude.jsonl')));
   assert.deepEqual(parse('claude', text('claude-result.json')), {
@@ -40,7 +40,7 @@ test('claude captured usage includes cache reads and writes in input', () => {
   assert.deepEqual(parse('claude', text('claude.jsonl') + text('claude-result.json')), parse('claude', text('claude-result.json')), 'a result is not added to assistant usage');
   const result = text('claude-print-result.json');
   assert.deepEqual(parse('claude', result + result), {
-    tokens: 788527, input: 780011, cached: 719614, output: 8516, model: 'claude-opus-5-5',
+    tokens: 788527, input: 780011, cached: 719614, output: 8516, model: 'fixture-large',
   });
 });
 
@@ -65,7 +65,7 @@ test('agy captured json reports inclusive input and separate thinking', () => {
 
 test('pi captured message usage includes cache writes in input', () => {
   assert.deepEqual(parse('pi', text('pi.jsonl')), {
-    tokens: 12559, input: 12394, cached: 0, output: 165, model: 'global.anthropic.claude-fable-5',
+    tokens: 12559, input: 12394, cached: 0, output: 165, model: 'provider.fixture-model',
   });
 });
 
@@ -96,13 +96,38 @@ function setup(t, harness = 'codex') {
   });
 }
 
-const spends = (h) => h.json(['task', 'show', 'T1']).spend;
+const spends = (h, task = 'T1') => h.json(['task', 'show', task]).spend;
 const events = (h) => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
 
-async function collected(h, length = 1, timeout = 15000) {
+test('native Claude alias spend records release-priced cost without rewriting its stored ID', (t) => {
+  const [alias, release] = Object.entries(require('../lib/ladder').BUILTIN.claude_aliases)[0];
+  const bedrock = `global.anthropic.${release}`;
+  for (const [harness, provider, stored, cost] of [
+    ['claude', undefined, alias, 0.02],
+    ['claude', 'anthropic', release, 0.02],
+    ['claude', 'bedrock', bedrock, 0.03],
+    ['codex', undefined, alias, null],
+  ]) {
+    const h = setup(t, harness);
+    pinRung(h, 'review', { harness, provider, model: alias, effort: 'high' });
+    h.ok(['project', 'set', '--review-policy', JSON.stringify({ prices: {
+      [release]: { input: 1, cache_write: 1, cache_read: 1, output: 20 },
+      [bedrock]: { input: 1, cache_write: 1, cache_read: 1, output: 30 },
+    } })]);
+    h.ok(['spend', 'T1', '--rung', 'review', '--tokens', '1000', '--input', '0', '--cached', '0', '--output', '1000']);
+    const task = h.json(['task', 'show', 'T1']);
+    const entry = task.spend.entries[0];
+    assert.equal(entry.model, stored);
+    assert.equal(entry.cost_usd, cost, `${harness}/${provider || 'default'}`);
+    assert.deepEqual(task.spend_by_rung.review, { tokens: 1000, cost_usd: cost });
+    assert.equal(events(h).findLast(e => e.cmd === 'spend').detail.cost_usd, cost);
+  }
+});
+
+async function collected(h, length = 1, timeout = 15000, task = 'T1') {
   const deadline = Date.now() + timeout;
   while (Date.now() < deadline) {
-    const spend = h.readState('tasks.json').tasks[0].spend;
+    const spend = spends(h, task);
     if (spend.entries?.length === length && spend.entries.every((entry) => !entry.live)) return spend;
     await new Promise((r) => setTimeout(r, 50));
   }
@@ -204,21 +229,27 @@ test('completed processes cannot leave teardown targeting a reused pid', async (
 
 test('detached exits record both spawns exactly once and keep dispatch metadata', async (t) => {
   const h = setup(t);
+  // A live unclaimed worker holds its task's reservation, so the second spawn takes a second task.
+  h.ok(['task', 'add', '--title', 'Usage again', '--acceptance', 'accounted', '--tier', 'easy']);
+  h.ok(['brief', 'set', 'T2', '-'], { input: 'Record usage.\n' });
   const options = { env: { ...h.usageEnv, USAGE_DELAY: '900' }, hooks: h.usageHooks };
   const a = h.json(['spawn', '--task', 'T1'], options);
-  const b = h.json(['spawn', '--task', 'T1'], options);
+  const b = h.json(['spawn', '--task', 'T2'], options);
   h.ok(['ladder', 'set', 'easy', '--model', 'replacement']);
-  const s = await collected(h, 2);
-  assert.equal(s.tokens, 49632);
-  assert.deepEqual(s.entries.map((e) => e.source).sort(), [`spawn:${a.agent}`, `spawn:${b.agent}`]);
-  for (const e of s.entries) {
+  const [first, second] = await Promise.all([collected(h, 1, 15000, 'T1'), collected(h, 1, 15000, 'T2')]);
+  assert.equal(first.tokens, 24816);
+  assert.equal(second.tokens, 24816);
+  assert.equal(first.entries[0].source, `spawn:${a.agent}`);
+  assert.equal(second.entries[0].source, `spawn:${b.agent}`);
+  for (const e of [...first.entries, ...second.entries]) {
     assert.equal(e.rung, 'easy');
     assert.equal(e.harness, 'codex');
     assert.equal(e.model, 'dispatch-model');
   }
   h.ok(['spend', 'T1', '--from-spawn', a.agent]);
-  h.ok(['spend', 'T1', '--from-spawn', b.agent]);
-  assert.equal(spends(h).tokens, 49632);
+  h.ok(['spend', 'T2', '--from-spawn', b.agent]);
+  assert.equal(spends(h, 'T1').tokens, 24816);
+  assert.equal(spends(h, 'T2').tokens, 24816);
   assert.equal(events(h).filter((e) => e.cmd === 'spend').length, 2);
   const monitors = h.detached().filter((c) => c.kind === 'monitor');
   assert.equal(monitors.length, 2, 'both collectors are tracked for teardown');
@@ -234,6 +265,7 @@ test('collectors and concurrent waiters share one private exit event and usage e
   const privateText = 'prompt: private task text\ncredential: synthetic-private-token';
   const sample = path.join(h.base, 'usage-with-private-text.log');
   fs.writeFileSync(sample, privateText + '\n' + fs.readFileSync(fixture('codex-stream.jsonl'), 'utf8'));
+  // Match the CLI startup guard while both observers await the collector.
   const waits = ['observer-a', 'observer-b'].map((agent) => h.runAsync([
     'wait', '--agent', agent, '--after', '0', '--task', 'T1', '--types', 'worker-exited', '--timeout', '60',
   ]));
@@ -373,6 +405,12 @@ test('late session detail enriches a partial total without counting it twice', (
 test('detached accounting retries a lock held across the first collection attempt', async (t) => {
   const h = setup(t);
   h.json(['spawn', '--task', 'T1'], { env: { ...h.usageEnv, USAGE_DELAY: '1000' }, hooks: h.usageHooks });
+  // The worker takes its lease before the lock is held; the lock then delays only its collection.
+  const claimed = Date.now() + 10000;
+  while (!events(h).some((e) => e.cmd === 'claim')) {
+    assert.ok(Date.now() < claimed, 'worker did not take its lease');
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
   const S = require('../lib/state');
   const lock = S.acquireLock(h.state);
   const timer = setTimeout(() => S.releaseLock(lock), S.LOCK_WAIT_MS + 3000);

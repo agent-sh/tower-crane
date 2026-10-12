@@ -20,7 +20,7 @@ function setup(t, brief = 'probe\n') {
     fs.mkdirSync(path.dirname(file), { recursive: true });
     fs.writeFileSync(file, text);
   };
-  put(path.join(home, '.claude', 'CLAUDE.md'), '@~/.config/agents/SHARED.md\n\nCLAUDE-GLOBAL\n');
+  put(path.join(home, '.claude', 'CLAUDE.md'), '@~/.config/agents/SHARED.md\n\nGLOBAL-INSTRUCTIONS\n');
   put(path.join(home, '.config', 'agents', 'SHARED.md'), 'SHARED-RULES\n');
   put(path.join(home, '.codex', 'AGENTS.md'), 'CODEX-GLOBAL\n');
   put(path.join(h.base, 'AGENTS.md'), 'ANCESTOR-RULES\n');
@@ -45,7 +45,7 @@ function setup(t, brief = 'probe\n') {
 }
 
 const rung = (h, harness) => {
-  const model = harness === 'claude' ? ['--model', 'opus', '--clear', 'profile'] : ['--profile', 'sol', '--clear', 'model'];
+  const model = harness === 'claude' ? ['--model', 'fixture-large', '--clear', 'profile'] : ['--profile', 'fixture-main', '--clear', 'model'];
   h.ok(['ladder', 'set', 'small', '--harness', harness, ...model, '--clear', 'effort', '--clear', 'args']);
 };
 
@@ -77,7 +77,7 @@ test('a claude spawn imports the user rules and the repository chain by path, an
   assert.equal(startup[0].detail.rules_tokens, Math.ceil(startup[0].detail.rules_bytes / 4));
   assert.ok(startup[0].detail.prompt_bytes > 0);
   const memory = seen.memory.join('\n');
-  for (const text of ['CLAUDE-GLOBAL', 'SHARED-RULES', 'ANCESTOR-RULES', 'REPO-RULES', 'EXTRA-RULES']) assert.ok(memory.includes(text), `claude loads ${text}`);
+  for (const text of ['GLOBAL-INSTRUCTIONS', 'SHARED-RULES', 'ANCESTOR-RULES', 'REPO-RULES', 'EXTRA-RULES']) assert.ok(memory.includes(text), `claude loads ${text}`);
   const instructions = fs.readFileSync(path.join(h.state, 'homes', JSON.parse(r.stdout).agent, 'CLAUDE.md'), 'utf8');
   assert.ok(!/RULES|GLOBAL/.test(instructions), 'the home names the files, never copies them');
   assert.deepEqual(seen.mcp, {}, 'no MCP server it did not opt into');
@@ -182,9 +182,13 @@ test('agy keeps project instructions but excludes user memory and imported modul
 
 test('opencode and pi global discovery follows their configured directories and fallback files', { skip: NO_STUBS }, (t) => {
   const { h, env } = setup(t);
-  for (const [harness, key, name] of [['opencode', 'XDG_CONFIG_HOME', 'AGENTS.md'], ['pi', 'PI_CODING_AGENT_DIR', 'CLAUDE.md']]) {
-    const dir = path.join(h.base, `${harness}-config`);
-    const file = path.join(dir, ...(harness === 'opencode' ? ['opencode'] : []), name);
+  for (const [harness, key, name] of [
+    ['opencode', 'XDG_CONFIG_HOME', 'AGENTS.md'],
+    ['opencode', 'OPENCODE_CONFIG_DIR', 'AGENTS.md'],
+    ['pi', 'PI_CODING_AGENT_DIR', 'CLAUDE.md'],
+  ]) {
+    const dir = path.join(h.base, `${harness}-${key}`);
+    const file = path.join(dir, ...(key === 'XDG_CONFIG_HOME' ? ['opencode'] : []), name);
     fs.mkdirSync(path.dirname(file), { recursive: true });
     fs.writeFileSync(file, 'CUSTOM-GLOBAL\n');
     h.ok(['ladder', 'set', 'small', '--harness', harness, '--model', 'stub', '--clear', 'profile', '--clear', 'effort', '--clear', 'args']);
@@ -199,6 +203,12 @@ test('opencode and pi global discovery follows their configured directories and 
       assert.ok(!nested.startup.rules.some((f) => f.path.startsWith(dry.home.path + path.sep)));
     }
   }
+  h.ok(['ladder', 'set', 'small', '--harness', 'opencode', '--model', 'stub', '--clear', 'profile', '--clear', 'effort', '--clear', 'args']);
+  const fallback = h.json(['spawn', '--role', 'small', '--task', 'T1', '--dry-run'], {
+    env: { ...env, OPENCODE_CONFIG_DIR: path.join(h.base, 'missing-opencode-config') },
+  });
+  assert.ok(fallback.startup.rules.some((file) => file.path === path.join(env.HOME, '.claude', 'CLAUDE.md')
+    && file.scope === 'global' && file.loaded === 'read'));
 });
 
 test('codex prefers AGENTS.override.md in each directory and receipts match what the stub loads', { skip: NO_STUBS }, (t) => {

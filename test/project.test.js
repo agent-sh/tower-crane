@@ -191,7 +191,7 @@ test('project set and show text print configured lists and their defaults alongs
   const defaults = h.ok(['project', 'show']);
   assert.match(defaults, /tests\.paths: default layouts/);
   assert.match(defaults, /ci\.ignore_apps: \[\]/);
-  assert.match(defaults, /decision_delegation\.orchestrator_technical: false/);
+  assert.match(defaults, /decision_delegation\.orchestrator_technical: true/);
   assert.match(defaults, /ladder \(default harness /);
 
   const set = h.ok(['project', 'set', '--tests-paths', '["qa/"]', '--ci-ignore-apps', '["claude","cursor"]']);
@@ -203,7 +203,7 @@ test('project set and show text print configured lists and their defaults alongs
   ]);
   assert.deepEqual(delegated.decision_delegation, { orchestrator_technical: true });
   assert.match(h.ok(['project', 'show']), /decision_delegation\.orchestrator_technical: true/);
-  assert.match(h.ok(['project', 'set', '--decision-delegation', 'null', '--agent', 'owner']), /decision_delegation\.orchestrator_technical: false/);
+  assert.match(h.ok(['project', 'set', '--decision-delegation', 'null', '--agent', 'owner']), /decision_delegation\.orchestrator_technical: true/);
   assert.equal(h.ok(['project', 'show']), set);
 
   const empty = h.ok(['project', 'set', '--ci-ignore-apps', '[]']);
