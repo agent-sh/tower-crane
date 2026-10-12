@@ -1376,12 +1376,12 @@ function configureHarness(h, { rules = false } = {}) {
     ...['model', 'profile', 'provider', 'effort', 'args'].flatMap((f) => ['--clear', f])]);
 }
 
-test('automation reworks a current failed review once with its full findings, even before software passes', (t) => {
+for (const tier of ['medium', 'easy..medium']) {
+test(`automation reworks a current ${tier} failed review once with its full findings, even before software passes`, (t) => {
   const h = setup(t, { ci: 'pending' });
+  h.ok(['task', 'update', 'T1', '--tier', tier]);
   h.submit();
-  h.ok(['project', 'set', '--workers', '1']);
-  h.ok(['task', 'add', '--title', 'Occupied slot', '--acceptance', 'works']);
-  h.ok(['claim', 'T2', '--agent', 'busy-worker']);
+  h.ok(['project', 'set', '--paused', 'inspect review findings']);
   h.reviewer('T1', 'reviewer');
   const github = h.github();
   const ref = 'https://github.com/acme/demo/pull/7#issuecomment-123';
@@ -1401,6 +1401,7 @@ test('automation reworks a current failed review once with its full findings, ev
   h.consume();
   assert.equal(h.logs().filter((e) => e.cmd === 'rework').length, 1, 'replay never reworks the review twice');
 });
+}
 
 for (const stale of ['head', 'revision', 'superseded verdict']) {
   test(`automation ignores a failed review with a stale ${stale}`, (t) => {
@@ -1420,6 +1421,32 @@ for (const stale of ['head', 'revision', 'superseded verdict']) {
     h.consume();
     assert.equal(h.readState('tasks.json').tasks[0].status, 'submitted');
     assert.equal(h.logs().filter((e) => e.cmd === 'rework').length, before);
+  });
+}
+
+for (const command of ['accept', 'spawn review']) {
+  test(`${command} sends a current failed review to full-findings rework instead of repeating review`, (t) => {
+    const h = setup(t, { ci: 'pending' });
+    h.submit();
+    h.reviewer('T1', 'reviewer');
+    const ref = 'https://github.com/acme/demo/pull/7#issuecomment-456';
+    const body = `Review (Tower Crane) at ${h.sha}\nVerdict: FAIL\nlib/change.js:22 - reject the empty request`;
+    const github = h.github();
+    github.comments = [{ id: 456, body, html_url: ref }];
+    h.saveGithub(github);
+    h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--sha', h.sha,
+      '--fail', '--summary', 'one blocking finding', '--ref', ref, '--agent', 'reviewer']);
+    const before = h.logs().filter((e) => e.cmd === 'spawn').length;
+    const args = command === 'accept' ? ['accept', 'T1'] : ['spawn', '--task', 'T1', '--role', 'review'];
+    const result = h.run([...args, '--agent', 'orchestrator']);
+    assert.equal(result.code, 1, result.stderr || result.stdout);
+    const task = h.readState('tasks.json').tasks[0];
+    assert.equal(task.status, 'rework');
+    assert.equal(task.revision, 2);
+    assert.ok(h.ok(['brief', 'get', 'T1']).includes(body));
+    assert.ok(h.ok(['brief', 'get', 'T1']).includes(ref));
+    assert.equal(h.logs().filter((e) => e.cmd === 'spawn').length, before);
+    assert.equal(h.logs().filter((e) => e.cmd.startsWith('check ')).length, 0);
   });
 }
 
