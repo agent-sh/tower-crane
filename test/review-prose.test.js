@@ -79,6 +79,7 @@ test('prose-only failure stays submitted and the reviewer checks the edited body
   const { preview, text } = prompt(h);
   assert.equal(preview.review_rung, 'easy', 'wording corrections do not escalate the review');
   assert.match(text, /## Light claim check/);
+  assert.ok(text.includes(`git show ${h.sha}:<path>`));
   assert.doesNotMatch(text, /## Diff/);
   assert.match(text, /diagnostic claim is false/);
   assert.match(text, /first-reviewer/);
@@ -133,7 +134,8 @@ test('automatic reactions do not repeat a light check before the body is correct
   fail(h, [claim()]);
   h.run(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
   const events = fs.readFileSync(file, 'utf8').trim().split('\n').map(JSON.parse);
-  assert.ok(events.some((e) => e.cmd === 'automation'), 'the observer ran an automatic reaction');
+  assert.ok(events.some((e) => e.cmd === 'automation' && e.detail.phase !== 'running'),
+    'the observer completed an automatic reaction');
   assert.equal(events.filter((e) => e.cmd === 'spawn' && e.detail.role === 'reviewer').length, 1);
   assert.equal(h.json(['task', 'show', 'T1']).status, 'submitted');
 });
