@@ -90,7 +90,9 @@ test('a temp root too deep for Chrome\'s socket still starts Chrome, from a shal
   const deep = path.join(h.base, ...Array.from({ length: 4 }, (_, i) => `${i}-${'d'.repeat(30)}`));
   fs.mkdirSync(deep, { recursive: true });
   // The fixture's HOME is deep too, so the shallow profile goes to the account's cache root, as it does outside a fixture.
-  Object.assign(h.env, { TMPDIR: deep, XDG_CACHE_HOME: path.join(os.userInfo().homedir, '.cache') });
+  // Restricted workers can supply a writable cache whose path fits the socket.
+  const cache = process.env.TOWER_CRANE_TEST_SHALLOW_CACHE || path.join(os.userInfo().homedir, '.cache');
+  Object.assign(h.env, { TMPDIR: deep, XDG_CACHE_HOME: cache });
   const chrome = path.join(h.base, 'chrome');
   fs.writeFileSync(chrome, `#!${process.execPath}
 const fs = require('node:fs');
@@ -110,6 +112,7 @@ setInterval(() => {}, 1000);
 `, { mode: 0o755 });
   const result = attempt(h, chrome, '1', deep);
   assert.doesNotMatch(result.error ?? '', /exit code|Socket path/);
+  assert.equal(fs.existsSync(path.join(h.base, 'chrome.json')), true, result.error);
   const { profile, tmp } = JSON.parse(fs.readFileSync(path.join(h.base, 'chrome.json'), 'utf8'));
   assert.equal(profile.startsWith(deep + path.sep), false, profile);
   assert.equal(path.dirname(tmp), profile, 'Chrome\'s temp directory is in the shallow profile, not the deep TMPDIR');
