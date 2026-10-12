@@ -5,7 +5,17 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { makeRepo, fixtureLadder, ROOT } = require('./helpers');
+const A = require('../lib/agents');
 const L = require('../lib/ladder');
+
+test('every ladder harness declares its sandbox capabilities', () => {
+  assert.deepEqual(Object.keys(A.CAPABILITIES).sort(), [...L.HARNESSES].sort());
+  for (const capability of Object.values(A.CAPABILITIES)) {
+    assert.equal(typeof capability.sandbox, 'boolean');
+    assert.equal(typeof capability.osSandbox, 'boolean');
+    assert.ok(!capability.osSandbox || capability.sandbox);
+  }
+});
 
 const PINNED = fixtureLadder().ladder;
 

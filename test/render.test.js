@@ -13,7 +13,7 @@ function populate(h) {
   h.ok(['task', 'add', '--title', 'API', '--acceptance', 'b', '--dep', 'T1']);
   h.ok(['task', 'add', '--title', 'Docs', '--acceptance', 'c', '--kind', 'docs', '--dep', 'T2', '--needs-owner', 'approve wording']);
   h.ok(['task', 'add', '--title', 'Metrics', '--acceptance', 'd', '--dep', 'T1']);
-  h.ok(['ask', '--question', 'Which dashboard?', '--option', 'grafana', '--option', 'datadog', '--blocks', 'T4']);
+  h.ok(['ask', '--kind', 'technical', '--question', 'Which dashboard?', '--option', 'grafana', '--option', 'datadog', '--blocks', 'T4']);
   h.ok(['claim', 'T1', '--agent', 'w-1']);
 }
 
@@ -107,7 +107,7 @@ test('serve serves the sketch and pushes a reload when the state changes', async
     });
     const page = await get(url);
     assert.equal(page.status, 200);
-    assert.match(page.body, /<h1>demo<\/h1>/);
+    assert.match(page.body, /<span class="project" title="[^"]*">demo<\/span>/);
     assert.match(page.body, /"live":true/, 'the served board opens the event stream');
     assert.equal((await get(`${url}nope`)).status, 404);
 

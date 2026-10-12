@@ -75,7 +75,7 @@ test('one fixture exposes every inbox kind and resolving commands clear their co
   h.ok(['claim', stall, '--agent', 'stalled']);
   const claim = h.json(['task', 'show', stall]).claim;
   event(h, stall, 'stall', { agent: 'stalled', until: claim.until, progress_at: claim.since });
-  h.ok(['ask', '--question', 'Which API?', '--option', 'A', '--option', 'B', '--blocks', stall]);
+  h.ok(['ask', '--kind', 'technical', '--question', 'Which API?', '--option', 'A', '--option', 'B', '--blocks', stall]);
   h.ok(['msg', '--to', 'orchestrator', '--task', stall, 'Need API guidance', '--agent', 'messenger']);
   event(h, accepted, 'automation', { phase: 'running', pid: process.pid, ...require('../lib/processes').identity(process.pid) });
   const github = h.github();
@@ -177,7 +177,10 @@ test('ready dispatch respects worker slots and unobservable processes cannot be 
   h.ok(['project', 'set', '--workers', '3']);
   const before = h.readState('tasks.json');
   assert.deepEqual(h.json(['release', '--dead', '--agent', 'orchestrator']).results, []);
-  assert.deepEqual(h.readState('tasks.json'), before);
+  const after = h.readState('tasks.json');
+  delete after.orchestrator_lease;
+  delete before.orchestrator_lease;
+  assert.deepEqual(after, before);
   const worker = path.join(h.base, 'worker.js');
   fs.writeFileSync(worker, 'setTimeout(() => {}, 60000);\n');
   h.ok(['ladder', 'set', 'medium', '--harness', 'command', '--command', JSON.stringify([process.execPath, worker, '{prompt}']), '--clear', 'profile', '--clear', 'effort']);
@@ -477,7 +480,7 @@ test('CodeQL merge-ref alerts match the current merge commit and submitted paren
 test('decision answers and owner comments remain in the inbox until explicitly acknowledged', (t) => {
   const h = setup(t);
   const id = h.add('Owner input');
-  h.ok(['ask', '--question', 'Which API?', '--option', 'A', '--option', 'B', '--blocks', id]);
+  h.ok(['ask', '--kind', 'technical', '--question', 'Which API?', '--option', 'A', '--option', 'B', '--blocks', id]);
   h.ok(['decision', 'note', 'D1', 'Use the stable contract']);
   h.ok(['task', 'note', id, 'Preserve compatibility']);
   h.ok(['answer', 'D1', '--choice', 'B', '--note', 'Approved for this release']);
