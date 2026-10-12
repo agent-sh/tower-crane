@@ -1424,6 +1424,60 @@ for (const stale of ['head', 'revision', 'superseded verdict']) {
   });
 }
 
+for (const tier of ['medium', 'easy..medium']) {
+  for (const comment of ['missing', 'mismatched']) {
+    test(`a ${tier} ${comment} linked review comment keeps the wait host running`, (t) => {
+      const h = setup(t, { ci: 'pending' });
+      h.ok(['task', 'update', 'T1', '--tier', tier]);
+      h.submit();
+      h.ok(['project', 'set', '--paused', 'inspect review refusal']);
+      h.reviewer('T1', 'reviewer');
+      const ref = 'https://github.com/acme/demo/pull/7#issuecomment-123';
+      if (comment === 'mismatched') {
+        const github = h.github();
+        github.comments = [{ id: 123, html_url: ref,
+          body: `Review (Tower Crane) at ${'f'.repeat(40)}\nVerdict: FAIL\nwrong head` }];
+        h.saveGithub(github);
+      }
+      h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--sha', h.sha,
+        '--fail', '--summary', 'one blocking finding', '--ref', ref, '--agent', 'reviewer']);
+      const brief = h.ok(['brief', 'get', 'T1']);
+      const result = h.run(['wait', '--after', '0', '--types', 'never', '--timeout', '0.1',
+        '--agent', 'orchestrator']);
+      assert.equal(result.code, 2, result.stderr);
+      assert.match(result.stderr, /linked review comment does not identify/);
+      const task = h.readState('tasks.json').tasks[0];
+      assert.equal(task.status, 'submitted');
+      assert.equal(task.revision, 1);
+      assert.equal(h.ok(['brief', 'get', 'T1']), brief);
+    });
+  }
+}
+
+test('observation-only waits retain ranged full-findings recovery', (t) => {
+  const h = setup(t, { ci: 'pending' });
+  h.ok(['task', 'update', 'T1', '--tier', 'easy..medium']);
+  h.submit();
+  h.ok(['project', 'set', '--paused', 'inspect observed recovery']);
+  h.reviewer('T1', 'reviewer');
+  const ref = 'https://github.com/acme/demo/pull/7#issuecomment-123';
+  const body = `Review (Tower Crane) at ${h.sha}\nVerdict: FAIL\nlib/change.js:12 - handle the missing input`;
+  const github = h.github();
+  github.comments = [{ id: 123, body, html_url: ref }];
+  h.saveGithub(github);
+  h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--sha', h.sha,
+    '--fail', '--summary', 'one blocking finding', '--ref', ref, '--agent', 'reviewer']);
+  const spawns = h.logs().filter((e) => e.cmd === 'spawn').length;
+  const result = h.run(['wait', '--observe', '--after', '0', '--types', 'never', '--timeout', '0.1',
+    '--agent', 'orchestrator']);
+  assert.equal(result.code, 2, result.stderr);
+  assert.equal(h.readState('tasks.json').tasks[0].status, 'rework');
+  assert.equal(h.readState('tasks.json').tasks[0].revision, 2);
+  assert.ok(h.ok(['brief', 'get', 'T1']).includes(body));
+  assert.ok(h.ok(['brief', 'get', 'T1']).includes(ref));
+  assert.equal(h.logs().filter((e) => e.cmd === 'spawn').length, spawns);
+});
+
 for (const command of ['accept', 'spawn review']) {
   test(`${command} sends a current failed review to full-findings rework instead of repeating review`, (t) => {
     const h = setup(t, { ci: 'pending' });
@@ -1496,6 +1550,29 @@ poll();
   });
   return h;
 }
+
+test('a ranged review recovery refusal does not stop unrelated gates or worker refill', async (t) => {
+  const h = refillFixture(t);
+  h.ok(['task', 'update', 'T1', '--tier', 'easy..medium']);
+  h.submit();
+  h.reviewer('T1', 'reviewer');
+  h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--sha', h.sha,
+    '--fail', '--summary', 'one blocking finding',
+    '--ref', 'https://github.com/acme/demo/pull/7#issuecomment-123', '--agent', 'reviewer']);
+  h.ok(['claim', 'T2', '--agent', 'worker-2']);
+  h.ok(['submit', 'T2', '--sha', h.sha, '--pr', '7', '--agent', 'worker-2']);
+  const result = h.run(['wait', '--after', '0', '--types', 'spawn', '--task', 'T3',
+    '--timeout', '15', '--agent', 'orchestrator']);
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(JSON.parse(result.stdout).task, 'T3');
+  assert.match(result.stderr, /linked review comment does not identify/);
+  assert.notEqual(await waitFor(h.marker('T3')), null);
+  assert.ok(h.logs().some((e) => e.task === 'T2' && e.cmd === 'check tests'),
+    'the unrelated submission still runs its software gates');
+  const task = h.readState('tasks.json').tasks[0];
+  assert.equal(task.status, 'submitted');
+  assert.equal(task.revision, 1);
+});
 
 test('automation retains an exited worker claim until its lost monitor process group is empty', {
   skip: process.platform !== 'linux',

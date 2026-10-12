@@ -317,6 +317,11 @@ delay it. Stale or superseded reviews cannot rework the current submission;
 replaying a review never increments the revision twice.
 Ranged recovery uses the same full-findings rework action before recording
 its climb. Reviewer and broker callbacks leave that step to the trusted host.
+An unavailable or mismatched linked comment leaves that submission unchanged
+and reports a recovery refusal without stopping the wait host, other tasks'
+gate reactions or worker refill.
+`wait --observe` retains ranged quality recovery, including full-findings
+rework, while skipping submission automation and capacity refill.
 `accept` and a real `spawn --role review` also send a current independent FAIL
 to full-findings rework and exit 1, rather than repeating review at that head.
 If findings cannot be retrieved, the task stays submitted. Dry-run review
@@ -515,7 +520,7 @@ A budget stop keeps a ranged task on its current rung and asks the owner about t
 
 ## Decisions
 
-`--tier` accepts a single rung or an ascending range such as `easy..medium` in `task add`, `task update` and `plan import`. A range starts at its minimum and lets spawned workers climb after quality failure; a single tier retains manual recovery. Setting a new range resets the current tier to its minimum, while a single tier clears the range.
+`--tier` accepts a single rung or an ascending range such as `easy..medium` in `task add`, `task update` and `plan import`. A range starts at its minimum and lets spawned workers climb after quality failure. A single tier does not climb; trusted `wait` still reworks its current failed reviews and releases verified dead claims before refilling worker slots. Setting a new range resets the current tier to its minimum, while a single tier clears the range.
 
 `recover ID` handles a ranged task's failed independent review or confirmed tests, clean or CI gate failure at the current submitted head, exit without submit, or confirmed supervisor stall. The engine calls it after review failure and supervised exit; orchestrator `wait` also recovers observed exits and retries pending climbs. It waits for the old worker to stop, collects usage, records the climb and reason, sets rework, and starts a fresh session one rung higher in the same worktree. Provider outages and harness refusals follow same-rung availability fallback. Failed launches, full worker capacity and reviewer sandbox permission denials leave a pending climb that can be retried with `recover ID`. The reviewer's host monitor or orchestrator `wait` can complete a climb that its sandbox cannot launch.
 
