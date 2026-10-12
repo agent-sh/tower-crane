@@ -4,7 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { makeRepo } = require('./helpers');
+const { makeRepo, BIN } = require('./helpers');
 
 test('task add stores the task with defaults and refuses bad input', (t) => {
   const h = makeRepo(t);
@@ -268,17 +268,28 @@ test('task add keeps the brief of a task whose audit append failed', { skip: pro
   assert.equal(h.ok(['brief', 'get', 'T1']), '# Context\n\nFrom a failed audit.');
 });
 
-test('task add drops the brief of an add that never committed, so the next add gets none', (t) => {
+test('task add removes an uncommitted brief before a concurrent add reuses its id', (t) => {
   const h = makeRepo(t);
   h.init();
   const file = path.join(h.base, 'brief.md');
   fs.writeFileSync(file, '# Context\n\nNever committed.\n');
-  h.ok(['task', 'add', '--title', 'First', '--acceptance', 'exists']);
-  // The add is refused before it commits, so its brief goes and the next add reuses T2 without one.
-  const refused = h.run(['task', 'add', '--title', 'Uncommitted', '--acceptance', 'never added', '--dep', 'T9', '--brief', file]);
+  const receipt = path.join(h.base, 'replacement.json');
+  const preload = path.join(__dirname, 'fixtures', 'task-add-race.js');
+  const refused = h.run(['task', 'add', '--title', 'Uncommitted', '--acceptance', 'never added', '--brief', file], {
+    env: {
+      NODE_OPTIONS: `--require=${JSON.stringify(preload)}`,
+      TEST_ADD_STATE: h.state, TEST_ADD_BIN: BIN, TEST_ADD_RESULT: receipt,
+      TEST_ADD_OWNER_KEY: h.env.TOWER_CRANE_OWNER_KEY,
+    },
+  });
   assert.equal(refused.code, 1);
-  assert.match(refused.stderr, /depends on T9/);
-  assert.equal(fs.existsSync(path.join(h.state, 'briefs', 'T2.md')), false);
-  assert.equal(h.ok(['task', 'add', '--title', 'Next', '--acceptance', 'no brief yet']), 'T2');
-  assert.equal(h.run(['brief', 'get', 'T2']).code, 1);
+  assert.match(refused.stderr, /injected tasks.json write failure/);
+  const replacement = JSON.parse(fs.readFileSync(receipt, 'utf8'));
+  assert.equal(replacement.status, 0, JSON.stringify(replacement));
+  assert.equal(replacement.stdout.trim(), 'T1');
+  assert.deepEqual(h.readState('tasks.json').tasks.map((task) => task.title), ['Different task']);
+  assert.equal(fs.existsSync(path.join(h.state, 'briefs', 'T1.md')), false);
+  const missing = h.run(['brief', 'get', 'T1']);
+  assert.equal(missing.code, 1);
+  assert.match(missing.stderr, /T1 has no brief/);
 });
