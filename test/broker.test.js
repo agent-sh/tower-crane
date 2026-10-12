@@ -5,6 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { TMP_ROOT, detachedAlive, makeRepo } = require('./helpers');
+const { stacked } = require('./stack-fixture');
 const B = require('../lib/broker');
 const harnessHooks = require('../lib/harness-hooks');
 const { resolveCommand, parseOptions, GLOBAL } = require('../bin/tower-crane');
@@ -91,7 +92,7 @@ test('a worker broker refuses unscoped dead-claim recovery and preserves peer cl
 
 test('the broker answers no request without its token and acts on its own task only', async (t) => {
   const { job } = scratch(t);
-  for (const argv of [['task', 'note', 'T2', 'x'], ['claim', 'T2'], ['ask', '--question', 'q', '--option', 'a', '--option', 'b', '--blocks', 'T2']]) {
+  for (const argv of [['task', 'note', 'T2', 'x'], ['claim', 'T2'], ['ask', '--kind', 'technical', '--question', 'q', '--option', 'a', '--option', 'b', '--blocks', 'T2']]) {
     assert.throws(() => B.authorize(job, argv), /works on T1 only, not T2/, argv.join(' '));
   }
   const broker = await B.start(job);
@@ -112,7 +113,7 @@ for (const role of ['worker', 'reviewer', 'small']) test(`a sandboxed ${role} an
   const h = makeRepo(t);
   h.init();
   h.ok(['task', 'add', '--title', 'Choose a store', '--acceptance', 'answer is authorized']);
-  h.ok(['ask', '--question', 'Which store?', '--option', 'redis', '--blocks', 'T1']);
+  h.ok(['ask', '--kind', 'technical', '--question', 'Which store?', '--option', 'redis', '--blocks', 'T1']);
   const job = {
     state: h.state, task: 'T1', agent: `${role}-T1-1`, role, harness: 'codex',
     cwd: h.repo, broker: path.join(h.base, 'brokers', `${role}-T1-1`, B.FILE),
@@ -151,7 +152,7 @@ test('a sandboxed worker withdraws its own question through the broker; a review
   const h = makeRepo(t);
   h.init();
   h.ok(['task', 'add', '--title', 'Waits on a question', '--acceptance', 'the withdrawal frees it']);
-  h.ok(['ask', '--question', 'Which store?', '--option', 'redis', '--option', 'postgres', '--blocks', 'T1', '--agent', 'worker-T1-1']);
+  h.ok(['ask', '--kind', 'technical', '--question', 'Which store?', '--option', 'redis', '--option', 'postgres', '--blocks', 'T1', '--agent', 'worker-T1-1']);
   const brokerEnv = async (role) => {
     const job = {
       state: h.state, task: 'T1', agent: `${role}-T1-1`, role, harness: 'codex',
@@ -204,14 +205,14 @@ test('a sandboxed reviewer asks through the broker: a technical question reaches
   t.after(() => broker.close());
   const env = { ...broker.env, TOWER_CRANE_AGENT: job.agent, TOWER_CRANE_TASK: job.task };
 
-  const asked = await h.runAsync(['ask', '--question', 'Which store?', '--option', 'redis', '--option', 'postgres', '--blocks', 'T1'], { env });
+  const asked = await h.runAsync(['ask', '--kind', 'technical', '--question', 'Which store?', '--option', 'redis', '--option', 'postgres', '--blocks', 'T1'], { env });
   assert.equal(asked.code, 0, asked.stderr);
   const technical = h.readState('decisions.json').decisions[0];
   assert.deepEqual([technical.asked_by, technical.technical, technical.escalation], [job.agent, true, undefined]);
   h.ok(['answer', 'D1', '--choice', 'redis', '--agent', 'orchestrator']);
   assert.equal(h.readState('decisions.json').decisions[0].answer_rule, 'owner-technical-delegation');
 
-  const escalated = await h.runAsync(['ask', '--question', 'Raise the budget?', '--option', 'yes', '--option', 'no', '--setting', 'budget.raise', '--blocks', 'T1'], { env });
+  const escalated = await h.runAsync(['ask', '--kind', 'technical', '--question', 'Raise the budget?', '--option', 'yes', '--option', 'no', '--setting', 'budget.raise', '--blocks', 'T1'], { env });
   assert.equal(escalated.code, 0, escalated.stderr);
   assert.deepEqual(h.readState('decisions.json').decisions[1].escalation, { settings: ['budget.raise'], change: null });
   const refused = h.run(['answer', 'D2', '--choice', 'yes', '--agent', 'orchestrator']);
@@ -463,4 +464,46 @@ test('a brokered worker or reviewer messages only the orchestrator or the owner'
     assert.equal(r.code, 0, r.stderr);
   }
   assert.deepEqual(events().filter((e) => e.cmd === 'msg').map((e) => [e.task, e.detail.to]), [['T2', 'orchestrator'], ['T2', 'owner']]);
+});
+
+test('a sandboxed worker prints its worktree without the state lock, though a stack sync would write', async (t) => {
+  const f = stacked(t);
+  const { wt } = f.upper;
+  // origin's main moves, so the linked stack is due a sync that writes state.
+  f.h.git(['commit', '--allow-empty', '-qm', 'main moves']);
+  const remote = path.join(f.h.base, 'remote.git');
+  f.h.git(['--git-dir', remote, 'fetch', '-q', f.h.repo, 'HEAD:refs/heads/main']);
+  const job = { state: f.h.state, task: 'T2', agent: 'worker-T2-1', role: 'worker', cwd: wt.path, broker: path.join(f.h.base, 'brokers', 'worker-T2-1', B.FILE) };
+  const broker = await B.start(job);
+  t.after(() => broker.close());
+  const tasks = path.join(f.h.state, 'tasks.json');
+  const before = fs.readFileSync(tasks, 'utf8');
+  // The sandbox leaves the state directory read-only, so the lock cannot be created.
+  fs.chmodSync(f.h.state, 0o555);
+  let r;
+  try {
+    r = f.h.run(['worktree', 'T2'], { cwd: wt.path, env: { ...broker.env, TOWER_CRANE_AGENT: job.agent, TOWER_CRANE_TASK: job.task } });
+  } finally {
+    fs.chmodSync(f.h.state, 0o755);
+  }
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(r.stdout.trim(), wt.path);
+  assert.equal(fs.readFileSync(tasks, 'utf8'), before, 'the sandboxed worktree wrote no state');
+  assert.equal(fs.existsSync(path.join(f.h.state, 'lock')), false, 'no state lock was taken');
+});
+
+test('a test fixture with an inherited broker variable creates its own worktree; the broker serves only its state', async (t) => {
+  const sandbox = makeRepo(t);
+  sandbox.init();
+  const job = { state: sandbox.state, task: 'T1', agent: 'worker-T1-1', role: 'worker', cwd: sandbox.base, broker: path.join(sandbox.base, 'brokers', 'worker-T1-1', B.FILE) };
+  const broker = await B.start(job);
+  t.after(() => broker.close());
+  // The fixture is writable, so it is not the sandboxed worker's state.
+  const fixture = makeRepo(t);
+  fixture.init();
+  fixture.ok(['task', 'add', '--title', 'Change', '--acceptance', 'it works']);
+  const r = fixture.run(['worktree', 'T1'], { env: { TOWER_CRANE_BROKER: broker.env.TOWER_CRANE_BROKER } });
+  assert.equal(r.code, 0, r.stderr);
+  assert.ok(fixture.registers(r.stdout.trim()), 'the worktree was created');
+  assert.ok(fixture.readState('tasks.json').tasks.find((x) => x.id === 'T1').branch, 'the fixture recorded its branch');
 });

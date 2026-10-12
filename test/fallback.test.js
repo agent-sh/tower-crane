@@ -67,7 +67,7 @@ for (const explicit of [false, true]) {
     h.spawnEnv.LOCALAPPDATA = cache;
     h.spawnEnv.CLAUDE_CODE_USE_BEDROCK = '1';
     const spawned = h.json(['spawn', '--task', 'T1'], { env: h.spawnEnv });
-    const result = await h.runAsync(['wait', '--after', '0', '--task', 'T1', '--types', 'worker-exited', '--timeout', '20']);
+    const result = await h.runAsync(['wait', '--observe', '--after', '0', '--task', 'T1', '--types', 'worker-exited', '--timeout', '20']);
     assert.equal(result.code, 0, result.stderr);
     assert.equal(JSON.parse(result.stdout).detail.agent, spawned.agent);
     const [primary, fallback] = h.attempts();
@@ -93,11 +93,10 @@ for (const nextHarness of ['codex', 'claude']) {
     const spawned = h.json(['spawn', '--task', 'T1'], { env: h.spawnEnv });
     // Windows pipe closure and hook writers can outlive the final harness.
     // Assert the recorded exit and usage instead of timing a foreground CLI.
-    const result = await h.runAsync(['wait', '--after', '0', '--task', 'T1', '--types', 'worker-exited', '--timeout', '20']);
-    assert.equal(result.code, 0, result.stderr);
-    const exited = JSON.parse(result.stdout);
-    assert.equal(exited.detail.agent, spawned.agent);
-    assert.equal(exited.detail.code, 0);
+    // worker-exited can be derived from a probe of an earlier attempt's process before
+    // its exit is recorded, so the recorded spawn exit carries the final code.
+    await until(() => events(h).some((e) => e.cmd === 'spawn exit' && e.detail.agent === spawned.agent), 'the worker did not record its exit');
+    assert.equal(events(h).findLast((e) => e.cmd === 'spawn exit' && e.detail.agent === spawned.agent).detail.code, 0);
     await until(() => events(h).filter((e) => e.cmd === 'spend').length === 2, 'route usage receipts were not recorded');
     const attempts = h.attempts();
     assert.deepEqual(attempts.map((a) => a.model), ['first', 'first', 'first', 'second']);
@@ -114,7 +113,7 @@ for (const nextHarness of ['codex', 'claude']) {
     assert.equal(switches.length, 1);
     assert.equal(switches[0].detail.route_index, 1);
     assert.equal(switches[0].detail.reason, 'provider outage after 2 retries');
-    const wake = h.json(['wait', '--after', '0', '--types', 'spawn-fallback', '--timeout', '1']);
+    const wake = h.json(['wait', '--observe', '--after', '0', '--types', 'spawn-fallback', '--timeout', '1']);
     assert.equal(wake.id, switches[0].id);
     const task = h.json(['task', 'show', 'T1']);
     assert.equal(task.run.phase, 'waiting');
@@ -223,7 +222,7 @@ for (const primaryHarness of ['agy', 'claude']) {
 test('rework during a live fallback refuses a second worker until the previous attempt exits', async (t) => {
   const h = setup(t);
   const cursor = events(h).at(-1).id;
-  const waiting = h.runAsync(['wait', '--after', cursor, '--types', 'spawn-fallback', '--timeout', '10']);
+  const waiting = h.runAsync(['wait', '--observe', '--after', cursor, '--types', 'spawn-fallback', '--timeout', '10']);
   h.json(['spawn', '--task', 'T1'], {
     env: { ...h.spawnEnv, TOWER_CRANE_TEST_FALLBACK_HOLD: '4000' },
   });
@@ -465,7 +464,7 @@ test('a detached switch wakes a live waiter, keeps its lease, and collects route
   const h = setup(t);
   const finish = path.join(h.base, 'finish-fallback');
   const cursor = events(h).at(-1).id;
-  const waiting = h.runAsync(['wait', '--after', cursor, '--types', 'spawn-fallback', '--timeout', '10']);
+  const waiting = h.runAsync(['wait', '--observe', '--after', cursor, '--types', 'spawn-fallback', '--timeout', '10']);
   const spawn = h.json(['spawn', '--task', 'T1'], {
     env: { ...h.spawnEnv, TOWER_CRANE_TEST_FALLBACK_FINISH: finish },
   });

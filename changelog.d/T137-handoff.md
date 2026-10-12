@@ -1,0 +1,1 @@
+- Keep background reactions, usage collectors and harness hook writers from taking or reviving orchestrator leases. Preserve release, takeover and idle handoff, allow MCP discovery without state, guard MCP actions and keep wait deadlines independent of lease lock contention.

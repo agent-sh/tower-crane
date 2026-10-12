@@ -74,6 +74,11 @@ for (const route of ['claude', 'codex', 'codex-notify', 'pi', 'opencode', 'agy',
     }
     const result = await run;
     assert.equal(result.code, 0, result.stderr);
+    if (harness === 'opencode') {
+      const started = JSON.parse(result.stdout);
+      assert.equal(started.harness, 'opencode');
+      assert.ok(fs.existsSync(path.join(h.state, 'homes', started.agent, 'agents', 'gishra-worker.md')));
+    }
     const seen = JSON.parse(fs.readFileSync(out));
     if (live) {
       assert.match(JSON.stringify(seen.turns), /mid-run coordination/);
