@@ -14,6 +14,8 @@ Windows shard 1/3 also runs the Claude interrupted native worker case ten consec
 
 For projects Tower Crane manages, expensive proof is the default: the orchestrator pins `--tests-cmd "npm test" --tests-expensive true --tests-proof-cmd "node --test {tests}"`. A submission then runs the full suite once and proves the change with its own test files.
 
+CI also runs `node scripts/probe-gate-scratch.js` at the submitted head on an unsandboxed Linux runner. It initializes separate state through the CLI and runs a complete `check tests` in run-only mode with fresh on-disk outer and gate directories. The `gate-scratch-proof` artifact records both directories' before/after contents, the actual gate parents from command receipts and their removal. The check fails if the tests fail, the outer directory gains contents or a gate parent survives. This full proof refuses a worker sandbox; `test/gate-scratch-proof.test.js` verifies the recorder with small real-CLI fixtures.
+
 ## Writing tests
 
 - One integration test per piece of functionality and one end-to-end test per full feature. A unit test is only for pure logic nothing else reaches.
