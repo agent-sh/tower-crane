@@ -179,7 +179,7 @@ test('a merge through the shim run from a subdirectory brings in a masked path a
   assert.equal(f.git(['status', '--porcelain']), '');
 });
 
-test('a merge through the shim brings in a masked path whose name contains a tab and leaves the mount alone', (t) => {
+test('a merge through the shim brings in a masked path whose name contains a tab and leaves the mount alone', { skip: process.platform === 'win32' && 'Windows file names cannot contain a tab' }, (t) => {
   const tabbed = '.vscode/a\tb.json';
   const f = fixture(t, { base: { 'a.txt': 'a\n' }, task: { 'b.txt': 'b\n' }, main: { [tabbed]: '{}\n' } });
   fs.mkdirSync(path.join(f.wt, tabbed), { recursive: true });
