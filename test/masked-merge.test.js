@@ -53,7 +53,10 @@ function fixture(t, { base, task, main }, { masks = true } = {}) {
   const root = fs.mkdtempSync(path.join(TMP_ROOT, 'masked-merge-'));
   const permissions = [];
   t.after(() => {
-    for (const [file, mode] of permissions.reverse()) if (fs.existsSync(file)) fs.chmodSync(file, mode);
+    for (const [fd, mode] of permissions.reverse()) {
+      try { fs.fchmodSync(fd, mode); }
+      finally { fs.closeSync(fd); }
+    }
     fs.rmSync(root, { recursive: true, force: true });
   });
   const gitconfig = path.join(root, 'gitconfig');
@@ -98,8 +101,10 @@ function fixture(t, { base, task, main }, { masks = true } = {}) {
     show: (rev) => git(['show', rev], wt, env),
     readOnly: file => {
       const full = path.join(wt, file);
-      permissions.push([full, fs.statSync(full).mode & 0o777]);
-      fs.chmodSync(full, fs.statSync(full).isDirectory() ? 0o555 : 0o444);
+      const fd = fs.openSync(full, 'r');
+      const stat = fs.fstatSync(fd);
+      permissions.push([fd, stat.mode & 0o777]);
+      fs.fchmodSync(fd, stat.isDirectory() ? 0o555 : 0o444);
     },
   };
 }
