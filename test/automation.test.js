@@ -1731,6 +1731,23 @@ test('automation dispatches rework-ready work with the failed review findings', 
   assert.equal(h.logs().filter((e) => e.cmd === 'spawn' && e.detail.role === 'worker').length, 1);
 });
 
+for (const dispatch of ['spawn --ready', 'automation refill']) {
+  test(`${dispatch} takes urgent work before tasks unblocking more work`, async (t) => {
+    const h = refillFixture(t);
+    h.ok(['task', 'update', 'T2', '--priority', 'urgent', '--agent', 'orchestrator']);
+    if (dispatch === 'spawn --ready') {
+      const result = h.json(['spawn', '--ready', '--agent', 'orchestrator']);
+      assert.deepEqual(result.results.map((r) => [r.task, r.ok]), [['T2', true]]);
+    } else {
+      const result = await h.runAsync(['wait', '--after', '0', '--task', 'T2', '--types', 'spawn', '--timeout', '15', '--agent', 'orchestrator']);
+      assert.equal(result.code, 0, result.stdout + result.stderr);
+      assert.equal(JSON.parse(result.stdout).task, 'T2');
+    }
+    assert.notEqual(await waitFor(h.marker('T2')), null);
+    assert.deepEqual(h.logs().filter((e) => e.cmd === 'spawn' && e.detail.role === 'worker').map((e) => e.task), ['T2']);
+  });
+}
+
 for (const trigger of ['exit', 'release --dead', 'merge']) {
   test(`automation refills after ${trigger} in unblocking-first order and concurrent watchers respect the worker limit`, async (t) => {
     const h = refillFixture(t);
