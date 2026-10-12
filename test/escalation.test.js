@@ -669,9 +669,12 @@ test('a reviewer without permission to create a worker home leaves the climb for
   try {
     h.ok(['evidence', 'T1', '--type', 'review', '--revision', h.revision(), '--fail', '--sha', h.git(['rev-parse', 'HEAD']),
       '--agent', 'reviewer', '--summary', 'needs rework']);
-    assert.equal(h.task().status, 'submitted');
     h.ok(['recover', 'T1', '--agent', 'orchestrator']);
-    assert.equal(h.task().escalation_pending, true);
+    await h.until(() => events(h).some((e) => e.cmd === 'rework' && e.task === 'T1'));
+    assert.equal(h.json(['task', 'show', 'T1']).status, 'rework');
+    assert.match(h.ok(['brief', 'get', 'T1']), /review FAIL by reviewer[\s\S]*needs rework/);
+    assert.equal(h.readAttempts().length, 1);
+    assert.equal(h.json(['task', 'show', 'T1']).escalation_pending, true);
   } finally {
     fs.chmodSync(homes, 0o700);
   }
@@ -694,22 +697,19 @@ test('a brokered failed review leaves full-findings rework and the climb to its 
     const result = await B.forward(binding, ['evidence', 'T1', '--type', 'review', '--revision', h.revision(), '--fail',
       '--sha', h.git(['rev-parse', 'HEAD']), '--summary', 'wrong result'], h.state);
     assert.equal(result.code, 0, result.stderr);
-    // A host CLI read can reconcile the failed review before returning.
-    const recorded = h.task();
-    assert.equal(recorded.tier, 'easy');
-    assert.equal(recorded.status, 'submitted');
-    assert.equal(recorded.revision, 1, 'the host must copy findings before changing revision');
-    assert.equal(recorded.evidence.findLast((e) => e.type === 'review').revision, 1);
     assert.equal(h.readAttempts().length, 1);
     h.ok(['recover', 'T1', '--agent', 'orchestrator']);
+    await h.until(() => events(h).some((e) => e.cmd === 'rework' && e.task === 'T1'));
+    const rework = events(h).findLast((e) => e.cmd === 'rework' && e.task === 'T1');
+    assert.equal(rework.detail.previous_revision, 1);
+    assert.equal(rework.detail.revision, 2);
+    assert.match(rework.detail.reason, /review FAIL by reviewer-T1-1[\s\S]*wrong result/);
+    assert.match(h.ok(['brief', 'get', 'T1']), /review FAIL by reviewer-T1-1[\s\S]*wrong result/);
     await h.until(() => h.readAttempts().length === 2 && h.task().status === 'submitted');
     const task = h.json(['task', 'show', 'T1']);
     assert.equal(task.tier, 'medium');
     assert.equal(task.revision, 2, 'full-findings rework invalidates the rejected revision');
-    const rework = events(h).findLast((e) => e.cmd === 'rework');
-    assert.equal(rework.detail.previous_revision, 1);
-    assert.equal(rework.detail.revision, 2);
-    assert.match(h.ok(['brief', 'get', 'T1']), /review FAIL by reviewer-T1-1[\s\S]*wrong result/);
+    assert.equal(task.evidence.findLast((e) => e.type === 'review').revision, 1);
     const sha = h.git(['rev-parse', 'HEAD']);
     h.ok(['evidence', 'T1', '--type', 'review', '--ok', '--sha', sha,
       '--revision', '1', '--agent', 'owner']);
