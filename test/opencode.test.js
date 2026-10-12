@@ -61,6 +61,8 @@ function setup(t, rung = 'medium', inheritedPathName = null) {
   }
   const pathKey = Object.keys(h.env).find((key) => key.toUpperCase() === 'PATH') || 'PATH';
   const env = { ...h.env, HOME: home, USERPROFILE: home, OPENCODE_TEST_HOME: home,
+    CLAUDE_CONFIG_DIR: path.join(home, '.claude'), CODEX_HOME: path.join(home, '.codex'),
+    PI_CODING_AGENT_DIR: path.join(home, '.pi', 'agent'), GH_CONFIG_DIR: path.join(home, '.config', 'gh'),
     XDG_CONFIG_HOME: path.join(home, '.config'), XDG_DATA_HOME: path.join(home, '.local', 'share'),
     XDG_STATE_HOME: path.join(home, '.local', 'state'), XDG_CACHE_HOME: path.join(home, '.cache'),
     OPENCODE_CONFIG: path.join(global, 'opencode.json'), OPENCODE_CONFIG_DIR: global,
@@ -72,6 +74,12 @@ function setup(t, rung = 'medium', inheritedPathName = null) {
 
 const dry = (f) => f.h.json(['spawn', '--task', 'T1', '--role', f.rung, '--dry-run'], { env: f.env });
 const spawn = (f, env = {}) => f.h.ok(['spawn', '--task', 'T1', '--role', f.rung, '--wait'], { env: { ...f.env, ...env } });
+function releaseStub(f) {
+  const claim = f.h.readState('tasks.json').tasks[0].claim;
+  assert.ok(claim, 'the completed stub retains its task claim until release');
+  f.h.ok(['release', 'T1', '--agent', claim.agent, '--reason', 'stub run completed']);
+  assert.equal(f.h.readState('tasks.json').tasks[0].claim, null);
+}
 
 async function waitForFile(file) {
   const deadline = Date.now() + 20000;
@@ -221,6 +229,7 @@ test('opencode isolates config, memory, skills, MCP, approved rules and credenti
   const before = [];
   const after = [];
   for (let i = 0; i < 3; i++) {
+    if (i) releaseStub(f);
     const preview = dry(f);
     const baseline = cp.spawnSync(process.execPath, [STUB, ...preview.argv.slice(1)], { cwd: f.h.repo, env: f.env, encoding: 'utf8', timeout: 10000 });
     assert.equal(baseline.status, 0, baseline.stderr);
@@ -305,6 +314,7 @@ test('opencode excludes credential-triggered remote instructions, plugins and MC
     + fs.readFileSync(path.join(f.h.state, 'events.jsonl'), 'utf8')
     + fs.readFileSync(path.join(path.dirname(report.home), 'opencode.json'), 'utf8');
   assert.ok(!visible.includes('SECRET-CANARY'));
+  releaseStub(f);
   const inherited = await f.h.runAsync(['spawn', '--task', 'T1', '--wait', '--json'], {
     env: { ...f.env, OPENCODE_AUTH_CONTENT: JSON.stringify(auth) },
   });

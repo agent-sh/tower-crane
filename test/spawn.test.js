@@ -13,6 +13,12 @@ const SHORT_WAIT = path.join(__dirname, 'fixtures', 'lock-wait.js');
 
 function setup(t) {
   return cachedFixture(t, 'task', (h) => {
+    Object.assign(h.env, {
+      CLAUDE_CONFIG_DIR: path.join(h.env.HOME, '.claude'), CODEX_HOME: path.join(h.env.HOME, '.codex'),
+      PI_CODING_AGENT_DIR: path.join(h.env.HOME, '.pi', 'agent'),
+      XDG_CONFIG_HOME: path.join(h.env.HOME, '.config'), XDG_DATA_HOME: path.join(h.env.HOME, '.local', 'share'),
+      GH_CONFIG_DIR: path.join(h.env.HOME, '.config', 'gh'),
+    });
     h.init();
     h.ok(['task', 'add', '--title', 'Idempotency key on retries', '--acceptance', 'processed once', '--acceptance', 'test proves it']);
     h.ok(['brief', 'set', 'T1', '-'], { input: '- start from the webhook handler\n' });
