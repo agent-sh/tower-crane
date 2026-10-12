@@ -20253,7 +20253,7 @@
     "reproduction": {
       "tests": "TOWER_CRANE_TEST_TMP=<short writable scratch path> node test/run.js --test-concurrency=1 <named file>",
       "load": "Two nice -n 15 node -e \"for (;;) Math.sqrt(Math.random());\" processes during each five-run group. Run at most two named test files concurrently, five times each.",
-      "probe": "At the reviewed and measured revisions, plant each review_probes source as test/zz-planted.test.js after use strict, then run node scripts/check-shared-files.js. No full test suite is selected."
+      "probe": "At the reviewed and measured revisions, plant each review_probes source in a temporary JavaScript file under test/ after use strict, then run node scripts/check-shared-files.js. No full test suite is selected."
     }
   }
 }
