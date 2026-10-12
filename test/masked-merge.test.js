@@ -314,3 +314,40 @@ test('a checkout through the shim with a branch name git refuses leaves HEAD, th
   assert.equal(fs.readFileSync(path.join(f.wt, 'b.txt'), 'utf8'), 'b\n');
   assert.equal(f.git(['diff', '--cached', '--name-only']), '');
 });
+
+test('a checkout through the shim that resets the previous branch by its @{-1} shorthand moves that branch and leaves the mount alone', (t) => {
+  const f = fixture(t, {
+    base: { 'a.txt': 'a\n', '.mcp.json': '{"v":1}\n' },
+    task: { 'b.txt': 'b\n' },
+    main: { '.mcp.json': '{"v":2}\n', 'a.txt': 'a2\n' },
+  });
+  f.git(['checkout', '-q', '-b', 'prev', 'origin/main']);
+  f.git(['checkout', '-q', 'B']);
+  fs.writeFileSync(path.join(f.wt, '.mcp.json'), '');
+  const r = f.checkout('-B', '@{-1}', 'origin/main');
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(f.git(['rev-parse', '--symbolic-full-name', 'HEAD']), 'refs/heads/prev');
+  assert.equal(f.head(), f.git(['rev-parse', 'origin/main']));
+  assert.equal(fs.readFileSync(path.join(f.wt, '.mcp.json'), 'utf8'), '');
+  assert.equal(fs.readFileSync(path.join(f.wt, 'a.txt'), 'utf8'), 'a2\n');
+  assert.equal(fs.existsSync(path.join(f.wt, 'b.txt')), false);
+  assert.equal(f.git(['status', '--porcelain']), '');
+});
+
+test('a checkout through the shim of the previous branch by its @{-1} shorthand moves HEAD onto that branch', (t) => {
+  const f = fixture(t, {
+    base: { 'a.txt': 'a\n', '.mcp.json': '{"v":1}\n' },
+    task: { 'b.txt': 'b\n' },
+    main: { '.mcp.json': '{"v":2}\n' },
+  });
+  f.git(['checkout', '-q', '-b', 'prev', 'origin/main']);
+  f.git(['checkout', '-q', 'B']);
+  fs.writeFileSync(path.join(f.wt, '.mcp.json'), '');
+  const r = f.checkout('@{-1}');
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(f.git(['rev-parse', '--symbolic-full-name', 'HEAD']), 'refs/heads/prev');
+  assert.equal(f.head(), f.git(['rev-parse', 'origin/main']));
+  assert.equal(fs.readFileSync(path.join(f.wt, '.mcp.json'), 'utf8'), '');
+  assert.equal(f.show('HEAD:.mcp.json'), '{"v":2}');
+  assert.equal(f.git(['status', '--porcelain']), '');
+});

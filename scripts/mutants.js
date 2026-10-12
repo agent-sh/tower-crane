@@ -222,7 +222,9 @@ const MUTANTS = [
   { id: 'masked-checkout-ignores-other-worktree', area: 'git', file: 'lib/masked-merge.js',
     from: 'const other = branch && checkedOutElsewhere(g, branch);', to: 'const other = null;', tests: ['test/masked-merge.test.js'] },
   { id: 'masked-checkout-skips-name-check', area: 'git', file: 'lib/masked-merge.js',
-    from: "if (create && git(['check-ref-format', '--branch', create.name]).status !== 0) return fail(", to: 'if (false) return fail(', tests: ['test/masked-merge.test.js'] },
+    from: 'if (create && !name) return fail(', to: 'if (false) return fail(', tests: ['test/masked-merge.test.js'] },
+  { id: 'masked-checkout-ignores-shorthand', area: 'git', file: 'lib/masked-merge.js',
+    from: 'const name = branchName(g, create ? create.name : start);', to: 'const name = create ? create.name : start;', tests: ['test/masked-merge.test.js'] },
   // board
   { id: 'board-unescaped-lt', area: 'board', file: 'lib/board/view.js',
     from: ".replace(/</g, '&lt;')", to: '', tests: ['test/board.test.js'] },
