@@ -25277,5 +25277,467 @@
         "test/live-sandbox.test.js"
       ]
     }
+  },
+  "scratch_publication_refresh": {
+    "previous_green_ci_head": "6a1824340adca7a7e58676dd175a44aa5c59e8f1",
+    "previous_ci_run": 38302364552,
+    "base_head": "5d98dfed28f6ee2e87efeecefce63a0ff14d56bb",
+    "changes": [
+      "Keep the browser startup subprocess at the suite guard while preserving the separate scratch root.",
+      "The deep-browser fixture can name a writable shallow cache; the broker fixture can name a writable shallow home.",
+      "Reviewer fixtures use their own harness credential stores without changing explicit profile overrides."
+    ],
+    "loaded_files": {
+      "test/browser-startup.test.js": [
+        {
+          "head": "5a1427cb41c44bce5e29cb3afaf24d0efae9d5c4",
+          "file": "test/browser-startup.test.js",
+          "run": 1,
+          "status": 0,
+          "wall_s": 0.6649502240034053,
+          "load_before": [
+            12.587890625,
+            11.8271484375,
+            11.28955078125
+          ],
+          "load_after": [
+            12.54052734375,
+            11.830078125,
+            11.29345703125
+          ],
+          "log_sha256": "7fc7f5b2acbd89bb4d2d1128e7b5b9d37aec65fe8dabebf126b72631a587d0f2",
+          "tests": {
+            "tests": 6,
+            "pass": 6,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        },
+        {
+          "head": "5a1427cb41c44bce5e29cb3afaf24d0efae9d5c4",
+          "file": "test/browser-startup.test.js",
+          "run": 2,
+          "status": 0,
+          "wall_s": 0.6651098019938217,
+          "load_before": [
+            12.54052734375,
+            11.830078125,
+            11.29345703125
+          ],
+          "load_after": [
+            12.54052734375,
+            11.830078125,
+            11.29345703125
+          ],
+          "log_sha256": "606aa3f71b7ab05371b6424ef5a758450f5f282fc277168f446c0c40008ba48e",
+          "tests": {
+            "tests": 6,
+            "pass": 6,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        },
+        {
+          "head": "5a1427cb41c44bce5e29cb3afaf24d0efae9d5c4",
+          "file": "test/browser-startup.test.js",
+          "run": 3,
+          "status": 0,
+          "wall_s": 0.7154806460021064,
+          "load_before": [
+            12.54052734375,
+            11.830078125,
+            11.29345703125
+          ],
+          "load_after": [
+            12.54052734375,
+            11.830078125,
+            11.29345703125
+          ],
+          "log_sha256": "ed6829b96e200cf40968564f4869bf40097c4bc4b85bfd4fe12c139873b37168",
+          "tests": {
+            "tests": 6,
+            "pass": 6,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        },
+        {
+          "head": "5a1427cb41c44bce5e29cb3afaf24d0efae9d5c4",
+          "file": "test/browser-startup.test.js",
+          "run": 4,
+          "status": 0,
+          "wall_s": 0.6651189850090304,
+          "load_before": [
+            12.54052734375,
+            11.830078125,
+            11.29345703125
+          ],
+          "load_after": [
+            12.54052734375,
+            11.830078125,
+            11.29345703125
+          ],
+          "log_sha256": "d60fb3619710801f4fdf273460c6dcf5f049ef2f170b6c50d59fbc6f4c89b87b",
+          "tests": {
+            "tests": 6,
+            "pass": 6,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        },
+        {
+          "head": "5a1427cb41c44bce5e29cb3afaf24d0efae9d5c4",
+          "file": "test/browser-startup.test.js",
+          "run": 5,
+          "status": 0,
+          "wall_s": 0.6652525490062544,
+          "load_before": [
+            12.54052734375,
+            11.830078125,
+            11.29345703125
+          ],
+          "load_after": [
+            12.54052734375,
+            11.830078125,
+            11.29345703125
+          ],
+          "log_sha256": "043ae1df928a39342f00735169d6eee430dd3d53aead4643bfe5a251a2df3218",
+          "tests": {
+            "tests": 6,
+            "pass": 6,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        }
+      ],
+      "test/broker.test.js": [
+        {
+          "head": "6966ea31ef979eba0449d2da8d3cfb9849d19353",
+          "file": "test/broker.test.js",
+          "run": 1,
+          "status": 0,
+          "wall_s": 6.978503300997545,
+          "load_before": [
+            9.7001953125,
+            10.74609375,
+            11.0693359375
+          ],
+          "load_after": [
+            9.64404296875,
+            10.716796875,
+            11.05810546875
+          ],
+          "log_sha256": "6878f00dcecb69c1863d87bce64948a3a7113ea783601d4896f74d861f1e9c2b",
+          "tests": {
+            "tests": 22,
+            "pass": 22,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        },
+        {
+          "head": "6966ea31ef979eba0449d2da8d3cfb9849d19353",
+          "file": "test/broker.test.js",
+          "run": 2,
+          "status": 0,
+          "wall_s": 7.133002287999261,
+          "load_before": [
+            9.64404296875,
+            10.716796875,
+            11.05810546875
+          ],
+          "load_after": [
+            9.625,
+            10.67626953125,
+            11.041015625
+          ],
+          "log_sha256": "c4e9cfe905588a97f59be7774763db693a78ae3d27a1196cbf47a88cdb6187ea",
+          "tests": {
+            "tests": 22,
+            "pass": 22,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        },
+        {
+          "head": "6966ea31ef979eba0449d2da8d3cfb9849d19353",
+          "file": "test/broker.test.js",
+          "run": 3,
+          "status": 0,
+          "wall_s": 7.182811308986857,
+          "load_before": [
+            9.625,
+            10.67626953125,
+            11.041015625
+          ],
+          "load_after": [
+            9.41455078125,
+            10.615234375,
+            11.01904296875
+          ],
+          "log_sha256": "65808179dabf1a89883f7e87ea081bbb95afa943e6b18b47b61df62919d4b162",
+          "tests": {
+            "tests": 22,
+            "pass": 22,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        },
+        {
+          "head": "6966ea31ef979eba0449d2da8d3cfb9849d19353",
+          "file": "test/broker.test.js",
+          "run": 4,
+          "status": 0,
+          "wall_s": 7.027433461000328,
+          "load_before": [
+            9.41455078125,
+            10.615234375,
+            11.01904296875
+          ],
+          "load_after": [
+            9.123046875,
+            10.5126953125,
+            10.98095703125
+          ],
+          "log_sha256": "c0958bc21e92b7ed9913d58ae099ae49da644a4c657cdbf752ca585c6dcbc39f",
+          "tests": {
+            "tests": 22,
+            "pass": 22,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        },
+        {
+          "head": "6966ea31ef979eba0449d2da8d3cfb9849d19353",
+          "file": "test/broker.test.js",
+          "run": 5,
+          "status": 0,
+          "wall_s": 7.430684938997729,
+          "load_before": [
+            9.123046875,
+            10.5126953125,
+            10.98095703125
+          ],
+          "load_after": [
+            9.513671875,
+            10.57080078125,
+            10.99755859375
+          ],
+          "log_sha256": "14b78b0fb450db66c21614c5d3d92e1b7e90b9a0e02e285c4649eeeec246cbca",
+          "tests": {
+            "tests": 22,
+            "pass": 22,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        }
+      ],
+      "test/reviewer.test.js": [
+        {
+          "head": "6966ea31ef979eba0449d2da8d3cfb9849d19353",
+          "file": "test/reviewer.test.js",
+          "run": 1,
+          "status": 0,
+          "wall_s": 57.93641624299926,
+          "load_before": [
+            9.513671875,
+            10.57080078125,
+            10.99755859375
+          ],
+          "load_after": [
+            10.4716796875,
+            10.60205078125,
+            10.978515625
+          ],
+          "log_sha256": "05b04a3a1bb3ac4c098ecdbd0c6fc317bae19d56f2598f2e40770d44c83ba4a7",
+          "tests": {
+            "tests": 36,
+            "pass": 35,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 1
+          }
+        },
+        {
+          "head": "6966ea31ef979eba0449d2da8d3cfb9849d19353",
+          "file": "test/reviewer.test.js",
+          "run": 2,
+          "status": 0,
+          "wall_s": 59.9140353660041,
+          "load_before": [
+            10.4716796875,
+            10.60205078125,
+            10.978515625
+          ],
+          "load_after": [
+            12.44677734375,
+            11.09912109375,
+            11.1240234375
+          ],
+          "log_sha256": "f700ac7d01062ef07ed2312fc0387dbd0dc04433d73769f1b374f5043fb8a4d0",
+          "tests": {
+            "tests": 36,
+            "pass": 35,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 1
+          }
+        },
+        {
+          "head": "6966ea31ef979eba0449d2da8d3cfb9849d19353",
+          "file": "test/reviewer.test.js",
+          "run": 3,
+          "status": 0,
+          "wall_s": 57.02804836499854,
+          "load_before": [
+            12.44677734375,
+            11.09912109375,
+            11.1240234375
+          ],
+          "load_after": [
+            12.39111328125,
+            11.43408203125,
+            11.24267578125
+          ],
+          "log_sha256": "83a68e79fbf9b5dfc626c9deef9d980565d668742f4c7549f70f73bfb12fcc1a",
+          "tests": {
+            "tests": 36,
+            "pass": 35,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 1
+          }
+        },
+        {
+          "head": "6966ea31ef979eba0449d2da8d3cfb9849d19353",
+          "file": "test/reviewer.test.js",
+          "run": 4,
+          "status": 0,
+          "wall_s": 55.63242897599412,
+          "load_before": [
+            12.39111328125,
+            11.43408203125,
+            11.24267578125
+          ],
+          "load_after": [
+            11.68701171875,
+            11.44091796875,
+            11.2578125
+          ],
+          "log_sha256": "55c3024ce4bdd0d074812381cc10013eaf54972a94d72e2ec6dab16c24b5fd78",
+          "tests": {
+            "tests": 36,
+            "pass": 35,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 1
+          }
+        },
+        {
+          "head": "6966ea31ef979eba0449d2da8d3cfb9849d19353",
+          "file": "test/reviewer.test.js",
+          "run": 5,
+          "status": 0,
+          "wall_s": 56.339778925990686,
+          "load_before": [
+            11.68701171875,
+            11.44091796875,
+            11.2578125
+          ],
+          "load_after": [
+            10.83154296875,
+            11.27490234375,
+            11.21337890625
+          ],
+          "log_sha256": "c90e09f13e52905e99814b6f67e811016f535e354556587aa962657983e1c8b3",
+          "tests": {
+            "tests": 36,
+            "pass": 35,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 1
+          }
+        }
+      ]
+    },
+    "cpu_load_processes_per_runner": 2,
+    "test_file_concurrency": 1,
+    "peak_named_test_file_workers": 4,
+    "browser_red": {
+      "artifact": "resumed-test_browser-startup.test.js-1.log",
+      "sha256": "5a27b3d60c96c756bf2635c2c5afa078817b4bf490c77f82d4ed4ea92bc46f26",
+      "footer": {
+        "tests": 6,
+        "pass": 5,
+        "fail": 1,
+        "cancelled": 0,
+        "skipped": 0
+      }
+    },
+    "browser_green": {
+      "artifact": "browser-green.log",
+      "sha256": "dc7b6cf84761a55b338a1df99cfdbd5eb8fc876faccc49864a024c42ba77ef40",
+      "footer": {
+        "tests": 6,
+        "pass": 6,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 0
+      }
+    },
+    "named_merge_check": {
+      "artifact": "merge-checks.log",
+      "sha256": "f6069b44d6333a65b0d9a324b088fea508fa8540deccf2f9058e7cb8873d1cb6",
+      "footer": {
+        "tests": 292,
+        "pass": 284,
+        "fail": 7,
+        "cancelled": 0,
+        "skipped": 1
+      }
+    },
+    "named_merge_note": "292 named tests ran: 284 passed, one skipped, one broker cache assumption failed and six reviewer cases reached protected parent credentials. The other twelve named files passed. The broker and reviewer files then pass a focused 58-test check (57 passed, one skipped) and five loaded complete runs each.",
+    "fixtures_green": {
+      "artifact": "fixtures-green.log",
+      "sha256": "940dcd738b794d5d8a646aa6c0e00486ff1e1479359011a30b34975b8201b1b7",
+      "footer": {
+        "tests": 58,
+        "pass": 57,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 1
+      }
+    },
+    "gate_mutations": {
+      "score": "2/2",
+      "ids": [
+        "tests-pass-without-change",
+        "tests-deleted-test-counts"
+      ],
+      "baseline": "green unmodified named gate baseline; no full-suite fallback",
+      "log": {
+        "artifact": "mutants.log",
+        "sha256": "41376bf346808f81713562acf872b62bc402f7a0d39ab77c951984af383c8a7f",
+        "footer": {}
+      }
+    },
+    "reproduction": {
+      "browser_env": "TOWER_CRANE_TEST_SHALLOW_CACHE=WRITABLE_SHORT_CACHE",
+      "broker_env": "TOWER_CRANE_TEST_SOCKET_HOME=WRITABLE_SHORT_HOME",
+      "command": "node test/run.js --test-concurrency=1 FILE",
+      "runner": "/home/avifenesh/.cache/tower-crane/tasks/22cd04e4ddaf/T166/rework-publication-conflict/measure-one.py"
+    },
+    "raw_logs": "Task scratch rework-publication-conflict, with browser-fixed and fixtures-fixed series; run receipts include SHA-256 hashes.",
+    "prior_evidence": "Earlier measurements and mutation catches retain their named source revisions."
   }
 }

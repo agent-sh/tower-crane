@@ -40,6 +40,8 @@ The automation contract refresh merges main through `d6d4be83`, retaining task-s
 
 The final base refresh through `168dbd41` adds opt-in session-bus access. All six measured consumers and authority pass their named check after that merge; five new sandbox-extension cases expose parent credential discovery. Isolating that fixture preserves its runtime-directory and env-file assertions, and the file passes five loaded runs at `e657a134`. Seven relevant session-bus and env-file mutants are caught after a green baseline. The host-only sandbox files stay on host gates and CI.
 
+Main moved during the passing CI run at `6a182434`. The scratch refresh through `5d98dfed` retains the browser's suite guard and separate temporary root. Browser startup, broker and reviewer each pass five loaded runs at their recorded checkpoints. Their short-cache and parent-credential diagnostic failures remain in the receipt; the twelve other named merge files pass, and two gate-proof mutants are caught after a green baseline. The fixture settings select writable shallow paths in restricted workers without weakening socket, teardown or review assertions.
+
 ## Tools
 
 - `node scripts/test-cost.js [--before DIR] [files...]` measures CPU and wall seconds per file, median of three runs, four files at a time. With `--before`, it measures another checkout interleaved with this one.
