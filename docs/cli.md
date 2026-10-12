@@ -320,7 +320,7 @@ is reused when its policy still matches. Missing evidence, including an
 entry without its matching gate audit receipt or evidence from an earlier
 revision or another sha, runs in the next submission or reconciliation reaction.
 An audited failure from another revision or sha cannot suppress a gate;
-only a current failure waits for an explicit retry.
+only a current configuration failure (`gate_config`) waits for an explicit `gates retry`.
 Each due software gate runs even if an earlier gate failed. A current failure
 does not prevent clean or CI from collecting missing evidence.
 An earlier completed reaction does not suppress those gates.

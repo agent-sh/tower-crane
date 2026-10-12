@@ -868,8 +868,8 @@ an entry lacks a matching gate audit receipt or belongs to an earlier
 revision or another sha. Historical passes, failures and waivers stay
 recorded but cannot mark a current gate handled. Passing evidence staled by a
 pinned command or tests policy change runs again. Completed reaction
-receipts do not suppress those runs; only an audited failure at the current
-head and revision waits for an explicit retry. An idle startup writes no request.
+receipts do not suppress those runs; only an audited configuration failure at the
+current head and revision waits for an explicit `gates retry`. An idle startup writes no request.
 Every due software gate runs even when an earlier gate failed; that failure
 still prevents acceptance but cannot suppress missing evidence for later gates.
 A busy state lock defers the request to the existing watch notification
