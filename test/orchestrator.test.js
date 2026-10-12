@@ -199,7 +199,7 @@ const C = require(${JSON.stringify(path.join(__dirname, '../lib/commands'))});
 Object.defineProperty(process, 'platform', { value: 'win32' });
 C.execFileSync = (command, args) => {
   if (command !== 'powershell.exe') throw new Error('unexpected command');
-  if (process.env.PARENT_QUERY_CASE === 'large' && !args[2].includes('-Filter')) {
+  if (process.env.PARENT_QUERY_CASE === 'large' && !args[2].includes('ConvertTo-Json -InputObject @($taskParents)')) {
     throw Object.assign(new Error('process listing exceeds maxBuffer'), { code: 'ENOBUFS' });
   }
   return JSON.stringify([{ ProcessId: process.ppid, ParentProcessId: 444444, Name: 'node.exe',
@@ -220,7 +220,9 @@ console.log(JSON.stringify(O.identity({ env: { CLAUDE_SESSION_ID: 'same-session'
   assert.deepEqual(identities[0], identities[1], 'changing process-list size cannot change the session key');
 });
 
-test('Windows parent discovery tolerates a cold query longer than ten seconds', { timeout: HUNG_TEST_MS }, () => {
+test('Windows parent discovery waits for query completion with the cold-start hang guard', async (t) => {
+  const h = makeProjectRepo(t);
+  const release = path.join(h.base, 'query-release');
   const script = `
 const cp = require('node:child_process');
 const C = require(${JSON.stringify(path.join(__dirname, '../lib/commands'))});
@@ -229,17 +231,41 @@ C.execFileSync = (command, args, options) => {
   if (command !== 'powershell.exe') throw new Error('unexpected command');
   const result = [{ ProcessId: process.ppid, ParentProcessId: 1, Name: 'node.exe',
     CreationDate: 'stable-start', CommandLine: 'node harness' }];
+  process.send({ timeout: options.timeout });
   return cp.execFileSync(process.execPath, ['-e',
-    'setTimeout(() => process.stdout.write(' + JSON.stringify(JSON.stringify(result)) + '), 11000)'], options); // wait-allow: cold parent discovery must survive the former ten-second production query cutoff
+    ${JSON.stringify(`
+const fs = require('node:fs');
+const release = ${JSON.stringify(release)};
+const watcher = fs.watch(${JSON.stringify(h.base)}, check);
+function check() {
+  if (!fs.existsSync(release)) return;
+  watcher.close();
+  process.stdout.write(process.argv[1]);
+}
+check();
+`)}, JSON.stringify(result)], options);
 };
 const O = require(${JSON.stringify(path.join(__dirname, '../lib/orchestrator'))});
 const identity = O.identity({ env: { CLAUDE_SESSION_ID: 'cold-session' }, agent: 'orchestrator' });
 if (identity.pid !== process.ppid || !identity.persistent) throw new Error('query lost the persistent caller');
 console.log(identity.harness_session_id);
 `;
-  const result = cp.spawnSync(process.execPath, ['-e', script], {
-    encoding: 'utf8', timeout: HUNG_TEST_MS,
+  const child = cp.spawn(process.execPath, ['-e', script], {
+    stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
   });
-  assert.equal(result.status, 0, result.stderr);
-  assert.equal(result.stdout.trim(), 'cold-session');
+  let stdout = '';
+  let stderr = '';
+  child.stdout.on('data', data => { stdout += data; });
+  child.stderr.on('data', data => { stderr += data; });
+  const closed = new Promise((resolve, reject) => {
+    child.once('error', reject);
+    child.once('close', resolve);
+  });
+  t.after(() => { if (child.exitCode === null) child.kill(); });
+  const query = new Promise(resolve => child.once('message', resolve));
+  const options = await Promise.race([query, closed.then(code => { throw new Error(`query exited ${code}: ${stderr}`); })]);
+  fs.writeFileSync(release, '');
+  assert.equal(await closed, 0, stderr);
+  assert.equal(stdout.trim(), 'cold-session');
+  assert.equal(options.timeout, 60000, 'cold discovery cannot reuse a ten-second deadline');
 });
