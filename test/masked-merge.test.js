@@ -193,6 +193,21 @@ fs.accessSync = (file, mode) => {
   assert.equal(f.git(['status', '--porcelain']), '');
 });
 
+test('a nested protected file behind a read-only parent moves through the shim',
+  { skip: process.platform === 'win32' && 'Windows directory chmod does not model a read-only bind' }, (t) => {
+  const f = fixture(t, {
+    base: { 'a.txt': 'a\n', 'lib/.bashrc': 'v1\n' },
+    task: { 'b.txt': 'b\n' },
+    main: { 'lib/.bashrc': 'v2\n' },
+  });
+  f.readOnly('lib');
+  const result = f.merge('--no-edit', 'origin/main');
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(fs.readFileSync(path.join(f.wt, 'lib/.bashrc'), 'utf8'), 'v1\n');
+  assert.equal(f.show('HEAD:lib/.bashrc'), 'v2');
+  assert.equal(f.git(['status', '--porcelain']), '');
+});
+
 test('a masked move materializes protected nested names that did not exist before it', (t) => {
   const added = ['web/.Bashrc', 'web/.VSCode/settings.json'];
   for (const operation of ['merge', 'checkout']) {
