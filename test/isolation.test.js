@@ -1181,19 +1181,27 @@ test('node installs and harness programs under the home stay readable; other ins
   fs.mkdirSync(path.dirname(vendored), { recursive: true });
   fs.writeFileSync(vendored, '#!/bin/sh\n', { mode: 0o755 });
   // A harness installed under the home on PATH, outside any node install.
-  const local = path.join(u.home, '.local', 'bin');
-  fs.mkdirSync(local, { recursive: true });
-  fs.writeFileSync(path.join(local, 'opencode'), '#!/bin/sh\n', { mode: 0o755 });
-  // The node install last on PATH, so the real node keeps running the stubs.
-  const env = { PATH: `${local}${path.delimiter}${u.env.PATH}${path.delimiter}${path.join(prefix, 'bin')}` };
+  const tools = path.join(u.home, 'tools-bin');
+  fs.mkdirSync(tools, { recursive: true });
+  fs.writeFileSync(path.join(tools, 'opencode'), '#!/bin/sh\n', { mode: 0o755 });
+  // A node in ~/.local/bin opens that directory, never ~/.local/share.
+  const local = path.join(u.home, '.local', 'bin', 'node');
+  const share = path.join(u.home, '.local', 'share', 'opencode', 'auth.json');
+  for (const [file, text] of [[local, '#!/bin/sh\n'], [share, `${SECRET}-LOCAL\n`]]) {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, text, { mode: 0o755 });
+  }
+  // The node installs last on PATH, so the real node keeps running the stubs.
+  const env = { PATH: [tools, u.env.PATH, path.join(prefix, 'bin'), path.dirname(local)].join(path.delimiter) };
   for (const harness of ['claude', 'codex']) {
     isolated(h, 'medium', harness);
     spawn(h, u, 'medium', env);
     const seen = u.report();
-    for (const p of [vendored, path.join(prefix, 'bin', 'node'), path.join(local, 'opencode')]) {
+    for (const p of [vendored, path.join(prefix, 'bin', 'node'), path.join(tools, 'opencode'), local]) {
       assert.equal(commandsRead(seen, p), true, `${harness}: ${p} is readable`);
     }
     assert.equal(commandsRead(seen, other), false, `${harness}: a node install not on PATH stays hidden`);
+    assert.equal(commandsRead(seen, share), false, `${harness}: a node in ~/.local/bin leaves ~/.local/share hidden`);
   }
 });
 

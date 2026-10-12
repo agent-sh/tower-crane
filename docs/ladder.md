@@ -174,7 +174,7 @@ A sandboxed claude or codex agent's commands read nothing under the original use
 | The agent's own `homes/<agent>/` and `brokers/<agent>/` | its config, Tower Crane runtime snapshot, shims and broker token |
 | The state directory, still without other agents' homes, `brokers/` and the owner key | the read commands that run in the sandbox |
 | The Tower Crane checkout and `TOWER_CRANE_PLUGIN_ROOT` | skills and agent files |
-| Each node install the agent runs: the one running spawn and each `node` on `PATH` | node, npm and global packages |
+| For each node binary the agent runs, the one running spawn and each `node` on `PATH`: its directory and its install's `lib/node_modules`, never the whole prefix (a node in `~/.local/bin` leaves `~/.local/share` hidden) | node, npm and global packages |
 | Each harness program on `PATH`: its npm package, or the file | codex runs its own binary inside its sandbox |
 | The files the agent's git config names: `core.excludesFile` and `core.attributesFile`, or their XDG defaults | git ignores and attributes |
 | The user's global rules, project rules above the repository, and their imports until a chain enters the repository | house rules the prompt names |
