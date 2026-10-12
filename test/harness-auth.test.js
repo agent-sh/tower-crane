@@ -121,7 +121,8 @@ test('a paused claude waits for its login check, then runs again once the check 
 // A worker that started before the outage keeps the login it started with. Its clean exit proves
 // nothing about the login now, so it cannot clear the pause; only a probe admitted under the pause can.
 for (const harness of ['claude', 'agy']) {
-  test(`a ${harness} worker admitted before its login expired cannot clear the pause when it exits cleanly`, async (t) => {
+  const skip = harness === 'claude' && process.platform === 'win32' && 'the claude stub is a POSIX script; the agy case runs the same clear path on Windows';
+  test(`a ${harness} worker admitted before its login expired cannot clear the pause when it exits cleanly`, { skip }, async (t) => {
     const h = setup(t, { tasks: ['T1', 'T2', 'T3'] });
     h.ok(['ladder', 'set', 'easy', '--harness', harness, '--model', 'first']);
     fs.writeFileSync(h.loginFlag, '');
