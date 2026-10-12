@@ -1371,6 +1371,151 @@ function configureHarness(h, { rules = false } = {}) {
     ...['model', 'profile', 'provider', 'effort', 'args'].flatMap((f) => ['--clear', f])]);
 }
 
+test('automation reworks a current failed review once with its full findings, even before software passes', (t) => {
+  const h = setup(t, { ci: 'pending' });
+  h.submit();
+  h.ok(['project', 'set', '--workers', '1']);
+  h.ok(['task', 'add', '--title', 'Occupied slot', '--acceptance', 'works']);
+  h.ok(['claim', 'T2', '--agent', 'busy-worker']);
+  h.reviewer('T1', 'reviewer');
+  const github = h.github();
+  const ref = 'https://github.com/acme/demo/pull/7#issuecomment-123';
+  const body = `Review (Tower Crane) at ${h.sha}\nVerdict: FAIL\nlib/change.js:12 - handle the missing input`;
+  github.comments = [{ id: 123, body, html_url: ref }];
+  h.saveGithub(github);
+  h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--sha', h.sha,
+    '--fail', '--summary', 'one blocking finding', '--ref', ref, '--agent', 'reviewer']);
+  h.consume();
+  const task = h.readState('tasks.json').tasks[0];
+  assert.equal(task.status, 'rework');
+  assert.equal(task.revision, 2);
+  const reason = h.logs().find((e) => e.cmd === 'rework').detail.reason;
+  assert.ok(reason.includes(body));
+  assert.ok(reason.includes(ref));
+  assert.ok(h.ok(['brief', 'get', 'T1']).includes(body));
+  h.consume();
+  assert.equal(h.logs().filter((e) => e.cmd === 'rework').length, 1, 'replay never reworks the review twice');
+});
+
+for (const stale of ['head', 'revision', 'superseded verdict']) {
+  test(`automation ignores a failed review with a stale ${stale}`, (t) => {
+    const h = setup(t, { ci: 'pending' });
+    h.submit();
+    h.reviewer('T1', 'reviewer', stale === 'head' ? 'aaaaaaa' : h.sha);
+    h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review',
+      '--sha', stale === 'head' ? 'aaaaaaa' : h.sha, '--fail', '--summary', 'old finding', '--agent', 'reviewer']);
+    if (stale === 'revision') {
+      h.ok(['rework', 'T1', '--reason', 'new revision', '--agent', 'orchestrator']);
+      h.submit();
+    } else if (stale === 'superseded verdict') {
+      h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--sha', h.sha,
+        '--ok', '--agent', 'reviewer']);
+    }
+    const before = h.logs().filter((e) => e.cmd === 'rework').length;
+    h.consume();
+    assert.equal(h.readState('tasks.json').tasks[0].status, 'submitted');
+    assert.equal(h.logs().filter((e) => e.cmd === 'rework').length, before);
+  });
+}
+
+function refillFixture(t) {
+  const h = cachedFixture(null, 'automation-refill', (repo) => {
+    const h = setup(null, { ci: 'pending', repo });
+    configureHarness(h);
+    h.ok(['project', 'set', '--workers', '1']);
+    for (const id of ['T2', 'T3', 'T4']) {
+      h.ok(['task', 'add', '--title', id, '--acceptance', 'works', '--tier', 'easy',
+        ...(id === 'T4' ? ['--dep', 'T3'] : [])]);
+      h.ok(['brief', 'set', id, '-'], { input: `Implement ${id}.\n` });
+    }
+    const script = path.join(h.base, 'refill-worker.js');
+    fs.writeFileSync(script, `const fs = require('node:fs'), cp = require('node:child_process'), path = require('node:path');
+const task = process.env.TOWER_CRANE_TASK;
+cp.execFileSync(process.execPath, [${JSON.stringify(BIN)}, 'claim', task], { stdio: 'pipe' });
+const file = path.join(process.env.AUTOMATION_CONTEXT_DIR, task);
+fs.writeFileSync(file, '');
+fs.writeFileSync(file + '.prompt', process.argv[2]);
+const poll = () => fs.existsSync(file + '.go') ? fs.writeFileSync(file + '.exited', '') : setTimeout(poll, 25);
+poll();
+`);
+    h.ok(['ladder', 'set', 'easy', '--command', JSON.stringify([process.execPath, script, '{prompt}'])]);
+    return { sha: h.sha };
+  });
+  h.github = () => JSON.parse(fs.readFileSync(h.env.AUTOMATION_GITHUB, 'utf8'));
+  h.saveGithub = (state) => fs.writeFileSync(h.env.AUTOMATION_GITHUB, JSON.stringify(state));
+  h.submit = () => {
+    h.ok(['claim', 'T1', '--agent', 'worker']);
+    h.ok(['submit', 'T1', '--sha', h.sha, '--pr', '7', '--agent', 'worker']);
+  };
+  h.logs = () => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  h.consume = () => h.run(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
+  h.marker = (id) => path.join(h.env.AUTOMATION_CONTEXT_DIR, id);
+  t.after(async () => {
+    for (const id of ['T1', 'T2', 'T3', 'T4']) fs.writeFileSync(`${h.marker(id)}.go`, '');
+    for (const id of ['T1', 'T2', 'T3', 'T4']) {
+      if (fs.existsSync(h.marker(id))) await waitFor(`${h.marker(id)}.exited`);
+    }
+    await h.cleanup();
+  });
+  return h;
+}
+
+test('automation dispatches rework-ready work with the failed review findings', async (t) => {
+  const h = refillFixture(t);
+  h.ok(['task', 'update', 'T4', '--dep', 'T1']);
+  h.submit();
+  h.reviewer('T1', 'reviewer');
+  h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--sha', h.sha,
+    '--fail', '--summary', 'lib/change.js:12 - handle the missing input', '--agent', 'reviewer']);
+  h.consume();
+  assert.notEqual(await waitFor(h.marker('T1')), null, 'rework is dispatched without a manual command');
+  const task = h.readState('tasks.json').tasks[0];
+  assert.equal(task.status, 'in_progress');
+  assert.equal(task.claim.from, 'rework');
+  assert.equal(task.revision, 2);
+  assert.match(fs.readFileSync(`${h.marker('T1')}.prompt`, 'utf8'), /lib\/change.js:12 - handle the missing input/);
+  h.consume();
+  assert.equal(h.logs().filter((e) => e.cmd === 'rework').length, 1);
+  assert.equal(h.logs().filter((e) => e.cmd === 'spawn' && e.detail.role === 'worker').length, 1);
+});
+
+for (const trigger of ['exit', 'release --dead', 'merge']) {
+  test(`automation refills after ${trigger} in unblocking-first order and concurrent watchers respect the worker limit`, async (t) => {
+    const h = refillFixture(t);
+    if (trigger === 'merge') {
+      h.submit();
+      h.reviewer('T1', 'reviewer');
+      h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--sha', h.sha,
+        '--ok', '--agent', 'reviewer']);
+      const github = h.github();
+      github.ci[h.sha] = 'success';
+      h.saveGithub(github);
+    } else {
+      h.json(['spawn', '--task', 'T1', '--agent', 'orchestrator']);
+      assert.notEqual(await waitFor(h.marker('T1')), null, 'first worker claims the slot');
+      fs.writeFileSync(`${h.marker('T1')}.go`, '');
+      assert.notEqual(await waitFor(`${h.marker('T1')}.exited`), null);
+      if (trigger === 'release --dead') {
+        // Foreground observation records the exit before the explicit batch release.
+        h.run(['wait', '--after', '0', '--observe', '--types', 'worker-exited', '--timeout', '5', '--agent', 'orchestrator']);
+        h.ok(['release', '--dead', '--agent', 'orchestrator']);
+      }
+    }
+    const cursor = trigger === 'release --dead' ? String(fs.statSync(path.join(h.state, 'events.jsonl')).size) : '0';
+    const watchers = [h.runAsync(['wait', '--after', cursor, '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']),
+      h.runAsync(['wait', '--after', cursor, '--types', 'never', '--timeout', '0', '--agent', 'orchestrator'])];
+    const results = await Promise.all(watchers);
+    assert.ok(results.every((r) => r.code === 2), JSON.stringify(results));
+    assert.notEqual(await waitFor(h.marker('T3')), null, `the task unblocking T4 takes the free slot: ${JSON.stringify(results)}`);
+    const spawns = h.logs().filter((e) => e.cmd === 'spawn' && e.detail.role === 'worker');
+    assert.deepEqual(spawns.map((e) => e.task), trigger === 'merge' ? ['T3'] : ['T1', 'T3']);
+    const st = require('../lib/state').loadState(h.state);
+    assert.equal(require('../lib/tasks').workerHolders(st, Date.now()).length, 1);
+    h.consume();
+    assert.equal(h.logs().filter((e) => e.cmd === 'spawn' && e.detail.role === 'worker').length, spawns.length);
+  });
+}
+
 function startupContexts(h, withRules) {
   const startups = h.logs().filter((e) => e.cmd === 'startup');
   assert.deepEqual(startups.map((e) => e.detail.role), ['worker', 'reviewer']);

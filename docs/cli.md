@@ -310,6 +310,20 @@ once the PR head matches, including while mergeability is unknown. CI,
 review dispatch and merging still require known mergeability.
 A tracked worker must exit before automatic review dispatch. Native
 workers without a recorded exit use explicit `accept` to dispatch review.
+Failed independent review at the current submitted head and revision sends
+the task to rework through `rework --from-review`, with the full findings
+and comment link in its reason and brief. Pending software gates do not
+delay it. Stale or superseded reviews cannot rework the current submission;
+replaying a review never increments the revision twice.
+After draining event reactions, the trusted `wait` host releases verified
+dead claims through `release --dead`. Worker exits, releases, rework and confirmed merges refill
+free slots through `spawn --ready`, including ready rework tasks. The same
+worker limit, unblocking-first order, routing, fallback and locked reservations
+apply; concurrent watchers cannot dispatch above the limit. Dispatch refusals
+are reported on stderr and leave the task available for a later dispatch.
+Startup and the existing fallback tick also check capacity, recovering slots
+freed before the wait cursor. These capacity checks run only in a trusted
+wait without `--observe`.
 Passing independent review accepts the task; accepted PRs with green
 gates merge through the existing head guards. A watcher creates a fresh
 reconciliation request for every active PR when starting, except a default

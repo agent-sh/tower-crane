@@ -250,7 +250,7 @@ test('a detached command harness records its session and resumes with a separate
     if (Date.now() > deadline) throw new Error('session was not recorded');
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
-  const exit = h.json(['wait', '--after', '0', '--task', 'T1', '--types', 'worker-exited', '--timeout', '10']);
+  const exit = h.json(['wait', '--after', '0', '--task', 'T1', '--types', 'worker-exited', '--observe', '--timeout', '10']);
   assert.equal(exit.detail.agent, first.agent);
   assert.equal(exit.detail.pid, first.pid);
   sendBack(h);
