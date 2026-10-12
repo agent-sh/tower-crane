@@ -1647,9 +1647,18 @@ poll();
   });
   h.github = () => JSON.parse(fs.readFileSync(h.env.AUTOMATION_GITHUB, 'utf8'));
   h.saveGithub = (state) => fs.writeFileSync(h.env.AUTOMATION_GITHUB, JSON.stringify(state));
-  h.submit = () => {
-    h.ok(['claim', 'T1', '--agent', 'worker']);
-    h.ok(['submit', 'T1', '--sha', h.sha, '--pr', '7', '--agent', 'worker']);
+  h.submit = (id = 'T1', agent = 'worker') => {
+    h.ok(['claim', id, '--agent', agent]);
+    // A worker's submit refuses pending or failing CI (T149), so the head is submitted while its
+    // CI reads green. The CI the test set returns after the submit.
+    const before = h.github();
+    const ciAtSubmit = before.ci[h.sha];
+    before.ci[h.sha] = 'success';
+    h.saveGithub(before);
+    h.ok(['submit', id, '--sha', h.sha, '--pr', '7', '--agent', agent]);
+    const after = h.github();
+    after.ci[h.sha] = ciAtSubmit;
+    h.saveGithub(after);
   };
   h.logs = () => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
   h.consume = () => h.run(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
@@ -1673,8 +1682,7 @@ test('a ranged review recovery refusal does not stop unrelated gates or worker r
   h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--sha', h.sha,
     '--fail', '--summary', 'one blocking finding',
     '--ref', 'https://github.com/acme/demo/pull/7#issuecomment-123', '--agent', 'reviewer']);
-  h.ok(['claim', 'T2', '--agent', 'worker-2']);
-  h.ok(['submit', 'T2', '--sha', h.sha, '--pr', '7', '--agent', 'worker-2']);
+  h.submit('T2', 'worker-2');
   const result = h.run(['wait', '--after', '0', '--types', 'spawn', '--task', 'T3',
     '--timeout', '15', '--agent', 'orchestrator']);
   assert.equal(result.code, 0, result.stderr);
