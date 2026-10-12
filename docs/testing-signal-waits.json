@@ -25734,8 +25734,7 @@
     "reproduction": {
       "browser_env": "TOWER_CRANE_TEST_SHALLOW_CACHE=WRITABLE_SHORT_CACHE",
       "broker_env": "TOWER_CRANE_TEST_SOCKET_HOME=WRITABLE_SHORT_HOME",
-      "command": "node test/run.js --test-concurrency=1 FILE",
-      "runner": "/home/avifenesh/.cache/tower-crane/tasks/22cd04e4ddaf/T166/rework-publication-conflict/measure-one.py"
+      "command": "node test/run.js --test-concurrency=1 FILE"
     },
     "raw_logs": "Task scratch rework-publication-conflict, with browser-fixed and fixtures-fixed series; run receipts include SHA-256 hashes.",
     "prior_evidence": "Earlier measurements and mutation catches retain their named source revisions."
