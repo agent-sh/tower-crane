@@ -192,6 +192,7 @@ function engine(t, h) {
 
 test('the Claude Code mod pushes a decision answer and a worker message into the session', async (t) => {
   const h = setup(t);
+  h.ok(['project', 'set', '--paused', 'notification-only probe']);
   h.ok(['ask', '--kind', 'technical', '--question', 'merge now?', '--option', 'yes', '--option', 'later', '--agent', 'worker']);
   const { register } = await import(pathToFileURL(MOD).href);
   const cc = engine(t, h);
