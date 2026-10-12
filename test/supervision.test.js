@@ -623,6 +623,21 @@ test('a worker without the lease gate whose supervisor stops waiting for its lea
   h.ok(['claim', 'T1', '--agent', 'manual']);
 });
 
+test('a spawn reads no other task\'s stored evidence, so a missing evidence file elsewhere does not stop it', (t) => {
+  const h = setup(t, { failures: 0 });
+  h.ok(['task', 'add', '--title', 'Settled elsewhere', '--acceptance', 'old receipts']);
+  const doc = h.readState('tasks.json');
+  doc.tasks.find((task) => task.id === 'T2').evidence.push({ type: 'note', ok: true, sha: 'abcdef1', agent: 'checker', revision: 1,
+    source: 'evidence', summary: 'old report\n'.repeat(200) });
+  h.writeState('tasks.json', doc);
+  h.ok(['task', 'note', 'T2', 'store its settled evidence']);
+  const ref = h.readState('tasks.json').tasks.find((task) => task.id === 'T2').evidence[0].evidence_refs.summary;
+  fs.rmSync(path.join(h.state, 'evidence', 'T2', `${ref.sha256}.json`));
+  const result = h.spawn();
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(h.readAttempts().length, 1);
+});
+
 test('a worker spawned behind a live lease held by another agent never starts and says why', (t) => {
   const h = setup(t, { claim: false, failures: 0 });
   h.ok(['claim', 'T1', '--agent', 'holder']);
