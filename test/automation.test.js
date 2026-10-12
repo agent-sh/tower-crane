@@ -649,6 +649,98 @@ function reconciledFixture(t) {
   return h;
 }
 
+for (const reaction of ['submit', 'reconcile']) {
+  test(`${reaction} runs missing gates after a resubmitted revision's tests fail`, (t) => {
+    const h = reconciledFixture(t);
+    h.ok(['brief', 'set', 'T1', '-', '--agent', 'orchestrator'],
+      { input: '# Change\n\nVerify the revised acceptance.\n' });
+    h.ok(['project', 'set', '--tests-cmd', 'node -e "process.exit(1)"', '--tests-mode', 'run-only']);
+    h.ok(['submit', 'T1', '--sha', h.sha, '--agent', 'worker']);
+    const task = h.json(['task', 'show', 'T1']);
+    assert.equal(task.revision, 2);
+    assert.ok(task.evidence.every((e) => e.revision === 1), 'only historical evidence survives resubmission');
+    const checks = () => h.logs().filter((e) => e.cmd.startsWith('check '));
+    const count = checks().length;
+    if (reaction === 'reconcile') {
+      // T155's submit reaction recorded a revision-2 tests failure, then
+      // finished before clean and CI. Startup must recover those missing gates.
+      assert.equal(h.run(['check', 'tests', 'T1', '--agent', 'orchestrator']).code, 1);
+      const source = h.logs().findLast((e) => e.cmd === 'submit').id;
+      fs.appendFileSync(path.join(h.state, 'events.jsonl'), JSON.stringify({
+        at: new Date().toISOString(), agent: 'orchestrator', cmd: 'automation', task: 'T1',
+        detail: { source, phase: 'done' },
+      }) + '\n');
+      assert.equal(h.reconcile().code, 2);
+    } else {
+      assert.equal(h.run(['wait', '--after', '0', '--types', 'never', '--timeout', '0',
+        '--agent', 'orchestrator']).code, 2);
+    }
+    assert.deepEqual(checks().slice(count).map((e) => [e.cmd, e.detail.ok, e.detail.revision]),
+      [['check tests', false, 2], ['check clean', true, 2], ['check ci', true, 2]]);
+    const after = h.json(['task', 'show', 'T1']);
+    assert.equal(after.status, 'submitted', 'a failed gate still prevents acceptance');
+    assert.equal(after.gates.gates.find((g) => g.type === 'tests').ok, false);
+    h.reconcile();
+    assert.equal(checks().length, count + 3, 'current failures wait for retry and current passes are reused');
+  });
+}
+
+for (const obsolete of ['revision', 'sha']) {
+  for (const reaction of ['submit', 'reconcile']) {
+    test(`${reaction} runs software gates with only earlier ${obsolete} evidence`, (t) => {
+      const h = reconciledFixture(t);
+      // Keep an audited failure too: only a failure at the current revision
+      // and head can wait for an explicit retry.
+      h.env.FIXTURE_GATE_OK = '0';
+      assert.equal(h.run(['check', 'clean', 'T1']).code, 1);
+      delete h.env.FIXTURE_GATE_OK;
+      const previous = h.json(['task', 'show', 'T1']);
+      const checks = () => h.logs().filter((e) => e.cmd.startsWith('check '));
+      const count = checks().length;
+      let sha = h.sha;
+      if (obsolete === 'revision') {
+        h.ok(['brief', 'set', 'T1', '-', '--agent', 'orchestrator'],
+          { input: '# Change\n\nVerify the revised acceptance.\n' });
+      } else {
+        fs.appendFileSync(path.join(h.repo, 'README.md'), 'Resubmitted change.\n');
+        h.git(['add', 'README.md']);
+        h.git(['commit', '-qm', 'resubmitted head']);
+        sha = h.git(['rev-parse', 'HEAD']);
+        const github = JSON.parse(fs.readFileSync(h.env.AUTOMATION_GITHUB, 'utf8'));
+        github.prs[7].headRefOid = sha;
+        github.ci[sha] = 'success';
+        fs.writeFileSync(h.env.AUTOMATION_GITHUB, JSON.stringify(github));
+      }
+      h.ok(['submit', 'T1', '--sha', sha, '--agent', 'worker']);
+      const submitted = h.json(['task', 'show', 'T1']);
+      assert.equal(submitted.revision, obsolete === 'revision' ? 2 : previous.revision);
+      assert.deepEqual(submitted.evidence, previous.evidence, 'resubmission keeps historical receipts');
+      assert.ok(submitted.gates.gates.filter((g) => g.type !== 'review').every((g) => !g.ok));
+      if (reaction === 'reconcile') {
+        // A completed submit reaction must not suppress startup reconciliation.
+        const events = h.logs();
+        const source = events.findLast((e) => e.cmd === 'submit').id;
+        fs.appendFileSync(path.join(h.state, 'events.jsonl'), JSON.stringify({
+          at: new Date().toISOString(), agent: 'orchestrator', cmd: 'automation', task: 'T1',
+          detail: { source, phase: 'done' },
+        }) + '\n');
+        assert.deepEqual(h.json(['status']).gate_queue, { running: [], queued: [], blocked: [] });
+        assert.equal(h.reconcile().code, 2);
+      } else {
+        assert.equal(h.run(['wait', '--after', '0', '--types', 'never', '--timeout', '0',
+          '--agent', 'orchestrator']).code, 2);
+      }
+      assert.deepEqual(checks().slice(count).map((e) => [e.cmd, e.detail.ok, e.detail.sha, e.detail.revision]),
+        ['tests', 'clean', 'ci'].map((type) => [`check ${type}`, true, sha, submitted.revision]));
+      const after = h.json(['task', 'show', 'T1']);
+      assert.ok(after.gates.gates.filter((g) => g.type !== 'review').every((g) => g.ok));
+      assert.equal(after.status, 'submitted', 'software evidence does not replace independent review');
+      h.reconcile();
+      assert.equal(checks().length, count + 3, 'current receipts prevent duplicate runs');
+    });
+  }
+}
+
 for (const entries of ['absent', 'unaudited pass', 'unaudited failure']) {
   test(`startup reconciles missing software evidence with ${entries} entries and an empty queue`, (t) => {
     const h = reconciledFixture(t);
@@ -693,7 +785,7 @@ test('startup reconciles tests evidence staled by a tests keep setting change af
 });
 
 test('a failed gate at unchanged inputs waits for gates retry, which reruns it', (t) => {
-  const h = setup(t, { ci: 'pending' });
+  const h = setup(t);
   const marker = path.join(h.base, 'infra-failed-once');
   const script = path.join(h.base, 'flaky-tests.js');
   fs.writeFileSync(script, `const fs = require('node:fs');\nif (fs.existsSync(${JSON.stringify(marker)})) process.exit(0);\nfs.writeFileSync(${JSON.stringify(marker)}, '');\nprocess.exit(1);\n`);
