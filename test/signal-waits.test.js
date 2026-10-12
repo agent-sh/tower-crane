@@ -80,7 +80,31 @@ test('file probes recover when a recursive watcher cannot access restricted fixt
 });
 
 test('shared checks reject readiness budgets and require a reason on allowed timing waits', (t) => {
+  const lexicalWaits = [
+    'until(() => /ready\\)/.test(output), "ready", 1000);', // wait-allow: rejected lint fixture
+    'const delay = 1000; until(() => /ready\\)/.test(output), "ready", delay);', // wait-allow: rejected lint fixture
+    'until(() => { return /ready\\)/.test(output); }, "ready", 1000);', // wait-allow: rejected lint fixture
+    'waitFor(() => /[),/]/.test(output), "ready", 1000);', // wait-allow: rejected lint fixture
+    'waitUntil(() => /[\\]/),]/.test(output), "ready", 1000);', // wait-allow: rejected lint fixture
+    'until(() => `ready${output.includes(")") ? `nested${output}` : ","}`, "ready", 1000);', // wait-allow: rejected lint fixture
+    'until(() => `ready${/[,/)]/.test(output) /* ) */}`, "ready", 1000);', // wait-allow: rejected lint fixture
+    'until(check /* ), 300000 */ , "ready", /* ) */ 1000);', // wait-allow: rejected lint fixture
+    'until(check, // ), 300000\n "ready", 1000);', // wait-allow: rejected lint fixture
+    'setTimeout(() => /ready\\)/.test(output), 1000);', // wait-allow: rejected lint fixture
+    'const delay = 1000; until(() => count / 2 > 1, "ready", delay / 2);', // wait-allow: rejected lint fixture
+    'const delay = 1000; until(check, "ready", (delay + 1000 - 500) * 2 / 3);', // wait-allow: rejected lint fixture
+    'const first = 0, delay = 1000; until(check, "ready", delay);', // wait-allow: rejected lint fixture
+    'function ready(delay = 1000) { until(check, "ready", +(-(-delay))); }', // wait-allow: rejected lint fixture
+    'waitOnRepo(repo, check, 1000);', // wait-allow: rejected lint fixture
+    'fileWritten(file, 1000);', // wait-allow: rejected lint fixture
+    'eventAppended(file, check, 1000);', // wait-allow: rejected lint fixture
+    'childExit(child, 1000);', // wait-allow: rejected lint fixture
+    'childClosed(child, 1000);', // wait-allow: rejected lint fixture
+    'portListening(port, 1000);', // wait-allow: rejected lint fixture
+    'const delay = 1000; setTimeout(check, delay * 2);', // wait-allow: rejected lint fixture
+  ];
   for (const source of [
+    ...lexicalWaits,
     'const deadline = Date.now() + 15000;', // wait-allow: rejected lint fixture
     'const deadline = performance.now() + budget;', // wait-allow: rejected lint fixture
     'async function until(fn, what, ms = 15000) {', // wait-allow: rejected lint fixture
@@ -168,8 +192,10 @@ test('shared checks reject readiness budgets and require a reason on allowed tim
     'assert.ok(Date.now() - started\n < S.LOCK_WAIT_MS / 4);', // wait-allow: rejected lint fixture
   ]) {
     assert.ok(waitFindings(source).length, source);
-    const annotated = source.split('\n').map((line) => line + ' // wait-allow: verifies the production timer contract').join('\n');
-    assert.deepEqual(waitFindings(annotated), []);
+    const annotated = source.split('\n').map((line) => line
+      .replace('// ), 300000', '// wait-allow: verifies the production timer contract')
+      + ' // wait-allow: verifies the production timer contract').join('\n');
+    assert.deepEqual(waitFindings(annotated), [], source);
     assert.ok(waitFindings(source + ' // wait-allow:').length, 'an empty reason is refused');
   }
   assert.deepEqual(waitFindings('const deadline = Date.now() + HUNG_TEST_MS;'), []);
@@ -201,6 +227,17 @@ test('shared checks reject readiness budgets and require a reason on allowed tim
   assert.deepEqual(waitFindings('if (start + 300000 < performance.now()) throw new Error("hung");'), []);
   assert.deepEqual(waitFindings('const { setTimeout: sleep } = require("node:timers/promises"); await sleep(300000);'), []);
   assert.deepEqual(waitFindings('const timers = require("node:timers/promises"); await timers.setTimeout(HUNG_TEST_MS);'), []);
+  for (const source of [
+    'until(() => /ready\\)/.test(output), "ready", 300000);',
+    'waitFor(() => /[),/]/.test(output), "ready", 300000);',
+    'until(() => `ready${output.includes(")") ? `nested${output}` : ","}`, "ready", 300000);',
+    'until(check /* ), 1000 */, "ready", 300000);',
+    'const delay = 300000; until(() => count / 2 > 1, "ready", delay / 1);', // wait-allow: accepted folding fixture binds its constant in the generated source
+    'until(check, "ready", 300000 + 1000);',
+    'until(check, "ready", (600000 - 1000) * 2 / 3);',
+    'const delay = 1000; until(check, "ready", delay * 300);', // wait-allow: accepted folding fixture binds its constant in the generated source
+    'const delay = 300000; setTimeout(check, delay / 1);', // wait-allow: accepted folding fixture binds its constant in the generated source
+  ]) assert.deepEqual(waitFindings(source), [], source);
   assert.deepEqual(waitFindings('function other() { const delay = 1000; } function long() { const delay = 300000; until(check, "ready", delay); }'), []);
   const scoped = waitFindings('function short() {\nconst delay = 1000;\nuntil(check, "ready", delay);\n}\nfunction long() {\nconst delay = 300000;\nuntil(check, "ready", delay);\n}');
   assert.deepEqual(scoped.map((finding) => finding.line), [3]);
@@ -235,6 +272,7 @@ test('shared checks reject readiness budgets and require a reason on allowed tim
   assert.equal(declarations.status, 1, declarations.stdout + declarations.stderr);
   assert.match(declarations.stderr, /test\/wait.test.js:1 wait supplies/);
   for (const source of [
+    ...lexicalWaits,
     'const delay = 1000; until(check, "ready", (delay));', // wait-allow: rejected lint fixture
     'const delay = 1000; until(check, "ready", +delay);', // wait-allow: rejected lint fixture
     'const delay = 1000; until(check, "ready", -delay);', // wait-allow: rejected lint fixture

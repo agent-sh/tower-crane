@@ -5,6 +5,8 @@ const path = require('node:path');
 
 const HUNG_TEST_MS = 300000;
 function allowed(line) {
+  if (tokenize(line).some((token) => token.type === 'comment'
+    && /^\/\/\s*wait-allow:\s*\S.*$/.test(token.value))) return true;
   let quote = null;
   for (let i = 0; i < line.length; i++) {
     const char = line[i];
@@ -15,66 +17,183 @@ function allowed(line) {
       else if (quote === '`' && /^\/\/\s*wait-allow:\s*\S.*$/.test(line.slice(i))
         && !line.slice(i).includes('`')) return true;
     } else if (['"', "'", '`'].includes(char)) quote = char;
-    else if (line.slice(i, i + 2) === '//') {
-      return /^\/\/\s*wait-allow:\s*\S.*$/.test(line.slice(i));
-    }
   }
   return false;
 }
 
-// Read call arguments without splitting on commas in callbacks, strings or
-// nested calls. This keeps multiline waits subject to the same rule.
+// Keep literal bodies opaque so their delimiters cannot split a call or a
+// declaration. Template interpolations use the same lexer recursively.
+function tokenize(text, from = 0) {
+  const tokens = [];
+  let position = from;
+  const quotedEnd = (quote) => {
+    position++;
+    while (position < text.length) {
+      if (text[position++] === '\\') position++;
+      else if (text[position - 1] === quote) break;
+    }
+  };
+  const read = (previous) => {
+    while (/\s/.test(text[position] || '') && position < text.length) position++;
+    if (position >= text.length) return null;
+    const start = position;
+    const char = text[position];
+    let type = 'punctuation';
+    if (text.startsWith('//', position)) {
+      type = 'comment';
+      position = text.indexOf('\n', position);
+      if (position < 0) position = text.length;
+    } else if (text.startsWith('/*', position)) {
+      type = 'comment';
+      const end = text.indexOf('*/', position + 2);
+      position = end < 0 ? text.length : end + 2;
+    } else if (char === '"' || char === "'") {
+      type = 'string';
+      quotedEnd(char);
+    } else if (char === '`') {
+      type = 'template';
+      position++;
+      while (position < text.length) {
+        if (text[position] === '\\') position += 2;
+        else if (text[position++] === '`') break;
+        else if (text.slice(position - 1, position + 1) === '${') {
+          position++;
+          let depth = 1;
+          let last = null;
+          while (depth && position < text.length) {
+            const token = read(last);
+            if (!token) break;
+            if (token.type === 'comment') continue;
+            if (token.value === '{') depth++;
+            else if (token.value === '}') depth--;
+            last = token;
+          }
+        }
+      }
+    } else if (char === '/' && !(previous && (['identifier', 'number', 'string', 'template', 'regex'].includes(previous.type)
+      || [')', ']'].includes(previous.value)))) {
+      type = 'regex';
+      position++;
+      let inClass = false;
+      while (position < text.length && !/[\r\n]/.test(text[position])) {
+        const current = text[position++];
+        if (current === '\\') position++;
+        else if (current === '[') inClass = true;
+        else if (current === ']') inClass = false;
+        else if (current === '/' && !inClass) {
+          while (/[a-z]/i.test(text[position] || '')) position++;
+          break;
+        }
+      }
+    } else {
+      const number = /^(?:0[xX][\da-fA-F_]+|0[bB][01_]+|0[oO][0-7_]+|(?:\d[\d_]*(?:\.[\d_]*)?|\.\d[\d_]*)(?:[eE][+-]?[\d_]+)?)/.exec(text.slice(position));
+      const identifier = /^[$A-Z_a-z][$\w]*/.exec(text.slice(position));
+      if (number) { type = 'number'; position += number[0].length; }
+      else if (identifier) {
+        type = /^(?:return|throw|case|yield|typeof|void|delete|new)$/.test(identifier[0]) ? 'keyword' : 'identifier';
+        position += identifier[0].length;
+      } else position++;
+    }
+    return { type, value: text.slice(start, position), start, end: position };
+  };
+  let previous = null;
+  while (position < text.length) {
+    const token = read(previous);
+    if (!token) break;
+    tokens.push(token);
+    if (token.type !== 'comment') previous = token;
+  }
+  return tokens;
+}
+
 function callArguments(text, start) {
   const args = [];
   const stack = [')'];
   let from = start + 1;
-  let quote = null;
-  for (let i = from; i < text.length; i++) {
-    const char = text[i];
-    if (quote) {
-      if (char === '\\') i++;
-      else if (char === quote) quote = null;
-      continue;
-    }
-    if (['"', "'", '`'].includes(char)) { quote = char; continue; }
+  for (const token of tokenize(text, start).slice(1)) {
+    if (token.type !== 'punctuation') continue;
+    const char = token.value;
     if ('([{'.includes(char)) stack.push({ '(': ')', '[': ']', '{': '}' }[char]);
     else if (char === stack.at(-1)) {
       stack.pop();
-      if (!stack.length) { args.push(text.slice(from, i).trim()); return args; }
+      if (!stack.length) { args.push(text.slice(from, token.start).trim()); return args; }
     } else if (char === ',' && stack.length === 1) {
-      args.push(text.slice(from, i).trim());
-      from = i + 1;
+      args.push(text.slice(from, token.start).trim());
+      from = token.end;
     }
   }
   return [];
 }
 
 function normalizedBudget(value) {
-  // Comments and numeric identity wrappers do not change a bound budget.
-  // Preserve strings so a quoted label cannot become an identifier.
-  value = value.replace(/"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'|`(?:\\[\s\S]|[^`\\])*`|\/\*[\s\S]*?\*\/|\/\/[^\r\n]*/g,
-    (token) => /^\/[/*]/.test(token) ? ' ' : token).trim();
+  let tokens = tokenize(value).filter((token) => token.type !== 'comment');
+  // Identity wrappers can surround an identifier, but a literal label stays
+  // a string. Joining significant tokens also removes inline comments.
   for (;;) {
-    if (/^\+(?!\+)/.test(value)) { value = value.slice(1).trim(); continue; }
-    if (!value.startsWith('(') || !value.endsWith(')')) return value;
+    if (tokens[0]?.value === '+' && tokens[1]?.value !== '+') { tokens = tokens.slice(1); continue; }
+    if (tokens[0]?.value !== '(' || tokens.at(-1)?.value !== ')') break;
     let depth = 0;
-    let quote = null;
     let whole = true;
-    for (let i = 0; i < value.length; i++) {
-      const char = value[i];
-      if (quote) {
-        if (char === '\\') i++;
-        else if (char === quote) quote = null;
-      } else if (['"', "'", '`'].includes(char)) quote = char;
-      else if (char === '(') depth++;
-      else if (char === ')' && --depth === 0 && i !== value.length - 1) { whole = false; break; }
+    for (const [index, token] of tokens.entries()) {
+      if (token.value === '(') depth++;
+      else if (token.value === ')' && --depth === 0 && index !== tokens.length - 1) { whole = false; break; }
     }
-    if (!whole || depth !== 0 || quote) return value;
-    value = value.slice(1, -1).trim();
+    if (!whole || depth !== 0) break;
+    tokens = tokens.slice(1, -1);
   }
+  return tokens.map((token) => token.value).join('');
+}
+
+function foldedBudget(value, bindings, seen = new Set()) {
+  const tokens = tokenize(value).filter((token) => token.type !== 'comment');
+  let position = 0;
+  const primary = () => {
+    const token = tokens[position++];
+    if (!token) return undefined;
+    if (token.value === '+' || token.value === '-') {
+      const number = primary();
+      return number === undefined ? undefined : token.value === '-' ? -number : number;
+    }
+    if (token.value === '(') {
+      const number = sum();
+      return tokens[position++]?.value === ')' ? number : undefined;
+    }
+    if (token.type === 'number') return Number(token.value.replaceAll('_', ''));
+    if (token.type !== 'identifier') return undefined;
+    if (bindings.has(token.value)) {
+      const values = bindings.get(token.value).map((bound) => seen.has(bound) ? undefined
+        : foldedBudget(bound.value, bound.bindings(), new Set([...seen, bound])));
+      return values.length && values.every((number) => number === values[0]) ? values[0] : undefined;
+    }
+    return token.value === 'HUNG_TEST_MS' ? HUNG_TEST_MS : undefined;
+  };
+  const product = () => {
+    let result = primary();
+    while (['*', '/'].includes(tokens[position]?.value)) {
+      const operator = tokens[position++].value;
+      const right = primary();
+      result = result === undefined || right === undefined ? undefined
+        : operator === '*' ? result * right : result / right;
+    }
+    return result;
+  };
+  const sum = () => {
+    let result = product();
+    while (['+', '-'].includes(tokens[position]?.value)) {
+      const operator = tokens[position++].value;
+      const right = product();
+      result = result === undefined || right === undefined ? undefined
+        : operator === '+' ? result + right : result - right;
+    }
+    return result;
+  };
+  const result = sum();
+  return position === tokens.length ? result : undefined;
 }
 
 function hungBudget(value, bindings = new Map(), seen = new Set(), sign = 1) {
+  const folded = foldedBudget(value, bindings, seen);
+  if (folded !== undefined) return sign * folded >= HUNG_TEST_MS;
   value = normalizedBudget(value);
   if (/^-(?!-)/.test(value)) return hungBudget(value.slice(1), bindings, seen, -sign);
   if (bindings.has(value)) {
@@ -89,6 +208,7 @@ function hungBudget(value, bindings = new Map(), seen = new Set(), sign = 1) {
 }
 
 function budgetExpression(value, bindings, seen = new Set()) {
+  if (foldedBudget(value, bindings, seen) !== undefined) return true;
   value = normalizedBudget(value);
   if (/^-(?!-)/.test(value)) return budgetExpression(value.slice(1), bindings, seen);
   const defaultValue = /^(\w+)\s*=\s*([\s\S]+)$/.exec(value);
@@ -155,47 +275,16 @@ function bindingScopes(text) {
   const root = { start: 0, end: text.length, parent: null, values: new Map() };
   const scopes = [root];
   const stack = [root];
-  const templates = [];
-  const tokens = [];
-  const lex = /\/\/[^\n]*|\/\*[\s\S]*?\*\/|"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'|[\w$]+|[^\s]/g;
-  for (let match; (match = lex.exec(text));) {
-    let value = match[0];
-    if (/^\/[/*]/.test(value)) continue;
-    // Regex bodies must not close a scope or split a declaration.
-    if (value === '/' && (!tokens.length
-      || /^(?:[=([{,;:?!<>+*%&|^~-]|return|throw|case)$/.test(tokens.at(-1).value))) {
-      let inClass = false;
-      for (let end = match.index + 1; end < text.length && !/[\r\n]/.test(text[end]); end++) {
-        if (text[end] === '\\') end++;
-        else if (text[end] === '[') inClass = true;
-        else if (text[end] === ']') inClass = false;
-        else if (text[end] === '/' && !inClass) {
-          while (/[a-z]/i.test(text[end + 1] || '')) end++;
-          value = text.slice(match.index, end + 1);
-          lex.lastIndex = end + 1;
-          break;
-        }
-      }
-    }
-    const token = { value, start: match.index, end: match.index + value.length, scope: stack.at(-1) };
-    tokens.push(token);
-    if (/^['"]/.test(value)) continue;
-    if (value === '`' && text[match.index - 1] !== '\\') {
-      if (templates.length && templates.at(-1).scope === stack.at(-1)) {
-        stack.pop().end = match.index;
-        templates.pop();
-      } else {
-        const scope = { start: token.end, end: text.length, parent: stack.at(-1), values: new Map() };
-        scopes.push(scope);
-        stack.push(scope);
-        templates.push({ scope });
-      }
-    } else if (value === '{') {
+  const tokens = tokenize(text).filter((token) => token.type !== 'comment');
+  for (const token of tokens) {
+    token.scope = stack.at(-1);
+    if (token.type !== 'punctuation') continue;
+    if (token.value === '{') {
       const scope = { start: token.end, end: text.length, parent: stack.at(-1), values: new Map() };
       scopes.push(scope);
       stack.push(scope);
-    } else if (value === '}' && stack.length > 1 && stack.at(-1) !== templates.at(-1)?.scope) {
-      stack.pop().end = match.index;
+    } else if (token.value === '}' && stack.length > 1) {
+      stack.pop().end = token.start;
     }
   }
   const parentheses = new Map();
@@ -296,9 +385,7 @@ function waitFindings(text) {
     // A clock expression may be inside a quoted generated script. Tokenize
     // from that expression so an outer quote cannot absorb its delimiter.
     const fragment = text.slice(position);
-    const lex = /\/\/[^\n]*|\/\*[\s\S]*?\*\/|"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'|[\w$]+|[^\s]/g;
-    const tokens = [...fragment.matchAll(lex)].filter((match) => !/^\/[/*]/.test(match[0]))
-      .map((match) => ({ value: match[0], start: match.index, end: match.index + match[0].length }));
+    const tokens = tokenize(fragment).filter((token) => token.type !== 'comment');
     const end = expressionEnd(fragment, tokens, 0, true);
     const to = tokens[end - 1]?.end ?? 0;
     return { value: fragment.slice(0, to).trim(), end: position + to };
@@ -381,14 +468,14 @@ function waitFindings(text) {
       }
     }
   }
-  for (const match of text.matchAll(/\b(setTimeout|until|waitFor\w*|waitUntil)\s*\(/g)) {
+  for (const match of text.matchAll(/\b(setTimeout|until|waitFor\w*|waitUntil|waitOnRepo|fileWritten|eventAppended|childExit|childClosed|portListening)\s*\(/g)) {
     if (promisePositions.has(match.index)) continue;
     const bindings = bindingsAt(match.index);
     const index = text.slice(0, match.index).split('\n').length - 1;
     if (/^\s*\/\//.test(lines[index])) continue;
     const args = callArguments(text, match.index + match[0].lastIndexOf('('));
     if (match[1] === 'setTimeout') {
-      if (!hungBudget(args[1] || '')) report(index, 'timer wait needs a signal or a wait-allow reason');
+      if (!hungBudget(args[1] || '', bindings)) report(index, 'timer wait needs a signal or a wait-allow reason');
     } else {
       for (const arg of args.slice(1)) {
         const value = /^\w+\s*=\s*([\s\S]+)$/.exec(arg)?.[1] || arg;
