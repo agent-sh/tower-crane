@@ -208,7 +208,7 @@ test('bench prices Bedrock and 1M-context ids and a two-model run from canonical
   fs.writeFileSync(prices, JSON.stringify({
     'claude-opus-5-5': { input: 2, cache_write: 2.5, cache_read: 0.2, output: 10 },
     'claude-haiku-5-5': { input: 1, cache_write: 1, cache_read: 0.1, output: 5 },
-    'claude-haiku-4-5-20251001-v1:0': { input: 1, cache_write: 1, cache_read: 0.1, output: 5 },
+    'claude-haiku-4-5-20251001': { input: 1, cache_write: 1, cache_read: 0.1, output: 5 },
   }));
   const r = h.json(['bench', 'tokens', '--prices', prices]);
   assert.deepEqual(r.unpriced_models, {}, 'canonical rates price every id form');
@@ -218,7 +218,7 @@ test('bench prices Bedrock and 1M-context ids and a two-model run from canonical
     'claude-opus-5-5': { input: 2, cache_write: 2.5, cache_read: 0.2, output: 10 },
     'claude-haiku-5-5': { input: 1, cache_write: 1, cache_read: 0.1, output: 5 },
   }));
-  assert.deepEqual(h.json(['bench', 'tokens', '--prices', partial]).unpriced_models, { 'claude-haiku-4-5-20251001-v1:0': 1 });
+  assert.deepEqual(h.json(['bench', 'tokens', '--prices', partial]).unpriced_models, { 'claude-haiku-4-5-20251001': 1 });
   const usd = (90 * 2.5 + 800 * 0.2 + 40 * 10) / 1e6 + (10 + 100 * 0.1 + 10 * 5) / 1e6;
   assert.ok(Math.abs(r.metered_usd - usd) < 1e-12, `${r.metered_usd} vs ${usd}`);
   assert.ok(Math.abs(r.list_usd - (usd + (40 + 4 * 5) / 1e6)) < 1e-12, `${r.list_usd}`);

@@ -467,14 +467,19 @@ test('switching from Codex to agy refuses inherited Codex flags until explicitly
   assert.equal(h.json(['ladder', 'show']).ladder.hard.harness, 'agy');
 });
 
-test('pricing identity drops the Claude provider prefix and the 1M context suffix and nothing else', () => {
+test('pricing identity drops Claude provider, context and Bedrock version suffixes', () => {
   for (const [id, identity] of [
     ['global.anthropic.claude-opus-5-5[1m]', 'claude-opus-5-5'],
     ['anthropic.claude-haiku-5-5', 'claude-haiku-5-5'],
     [' Global.Anthropic.Claude-Opus-5-5[1M] ', 'claude-opus-5-5'],
     ['claude-opus-5-5', 'claude-opus-5-5'],
+    ['global.anthropic.claude-haiku-4-5-20251001-v1:0', 'claude-haiku-4-5-20251001'],
+    ['anthropic.claude-haiku-4-5-20251001-v12:34', 'claude-haiku-4-5-20251001'],
+    ['claude-haiku-4-5-20251001-v1:0[1m]', 'claude-haiku-4-5-20251001'],
+    ['claude-haiku-4-5-20251001-v1:0-extra', 'claude-haiku-4-5-20251001-v1:0-extra'],
     ['global.anthropic.fixture-release', 'fixture-release'],
     ['openai.gpt-fixture', 'openai.gpt-fixture'],
+    ['openai.gpt-fixture-v1:0', 'openai.gpt-fixture-v1:0'],
     ['a/easy', 'a/easy'],
   ]) assert.equal(L.modelIdentity(id), identity, id);
   assert.equal(L.billing({ harness: 'claude', provider: 'bedrock' }, {}), 'api');
