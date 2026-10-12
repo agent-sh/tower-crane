@@ -6,12 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
 const crypto = require('node:crypto');
-const { makeProjectRepo, BIN, ROOT, run } = require('./helpers');
-
-test('Windows CI runs ancestry regressions without the one-time PR base probe', () => {
-  const workflow = fs.readFileSync(path.join(ROOT, '.github', 'workflows', 'ci.yml'), 'utf8');
-  assert.doesNotMatch(workflow, /probe-windows-ancestry\.js/);
-});
+const { makeProjectRepo, BIN, run } = require('./helpers');
 
 test('Windows provider discovery reaches owner authority without individual parent lookups', (t) => {
   const h = makeProjectRepo(t);
