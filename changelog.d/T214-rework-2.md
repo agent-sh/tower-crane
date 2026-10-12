@@ -1,0 +1,1 @@
+- Keep the wait host running when a ranged task's linked review findings cannot be resolved, so other tasks' gate reactions and worker refill continue. Clarify review retries, brokered recovery, single-tier dead-claim release and the ranged recovery retained by observation-only waits.
