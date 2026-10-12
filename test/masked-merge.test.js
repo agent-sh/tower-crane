@@ -32,6 +32,8 @@ function fixture(t, { base, task, main }, { masks = true } = {}) {
   fs.writeFileSync(gitconfig, '[user]\n\tname = agent\n\temail = agent@example.test\n');
   const env = { ...process.env, GIT_CONFIG_GLOBAL: gitconfig, GIT_CONFIG_NOSYSTEM: '1', HOME: root };
   for (const k of Object.keys(env)) if (k.startsWith('TOWER_CRANE_') || (k.startsWith('GIT_') && !k.startsWith('GIT_CONFIG_'))) delete env[k];
+  // A sandbox passes its own git config this way; its excludes file hides masked paths, so the fixture's repositories must not see it.
+  for (const k of Object.keys(env)) if (/^GIT_CONFIG_(COUNT|KEY_\d+|VALUE_\d+|PARAMETERS)$/.test(k)) delete env[k];
 
   const src = path.join(root, 'src');
   fs.mkdirSync(src);
@@ -350,4 +352,66 @@ test('a checkout through the shim of the previous branch by its @{-1} shorthand 
   assert.equal(fs.readFileSync(path.join(f.wt, '.mcp.json'), 'utf8'), '');
   assert.equal(f.show('HEAD:.mcp.json'), '{"v":2}');
   assert.equal(f.git(['status', '--porcelain']), '');
+});
+
+test('a checkout through the shim of a name that is both a branch and a tag moves HEAD onto the branch and loads the branch', (t) => {
+  const f = fixture(t, {
+    base: { 'a.txt': 'a\n', '.mcp.json': '{"v":1}\n' },
+    task: { 'b.txt': 'b\n' },
+    main: { '.mcp.json': '{"v":2}\n', 'a.txt': 'a2\n' },
+  });
+  // The branch M is the task head and the tag M is origin/main. git's checkout takes the branch.
+  f.git(['branch', 'M', 'B']);
+  f.git(['tag', 'M', 'origin/main']);
+  fs.writeFileSync(path.join(f.wt, '.mcp.json'), '');
+  const before = f.head();
+  const r = f.checkout('M');
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(f.git(['rev-parse', '--symbolic-full-name', 'HEAD']), 'refs/heads/M');
+  assert.equal(f.head(), before);
+  assert.equal(fs.readFileSync(path.join(f.wt, 'a.txt'), 'utf8'), 'a\n');
+  assert.equal(fs.existsSync(path.join(f.wt, 'b.txt')), true);
+  assert.equal(f.git(['diff', '--cached', '--name-only']), '');
+});
+
+test('a checkout through the shim of a branch records git\'s reflog message, so @{-1} after it names the branch it left', (t) => {
+  const f = fixture(t, {
+    base: { 'a.txt': 'a\n', '.mcp.json': '{"v":1}\n' },
+    task: { 'b.txt': 'b\n' },
+    main: { '.mcp.json': '{"v":2}\n', 'a.txt': 'a2\n' },
+  });
+  f.git(['branch', 'M', 'origin/main']);
+  fs.writeFileSync(path.join(f.wt, '.mcp.json'), '');
+  assert.equal(f.checkout('M').status, 0);
+  assert.equal(f.git(['reflog', '-n1', '--format=%gs', 'HEAD']), 'checkout: moving from B to M');
+  fs.writeFileSync(path.join(f.wt, '.mcp.json'), '');
+  const r = f.checkout('@{-1}');
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(f.git(['rev-parse', '--symbolic-full-name', 'HEAD']), 'refs/heads/B');
+  assert.equal(f.git(['status', '--porcelain']), '');
+});
+
+test('a detached checkout through the shim records git\'s reflog message', (t) => {
+  const f = fixture(t, {
+    base: { 'a.txt': 'a\n', '.mcp.json': '{"v":1}\n' },
+    task: { 'b.txt': 'b\n' },
+    main: { '.mcp.json': '{"v":2}\n' },
+  });
+  fs.writeFileSync(path.join(f.wt, '.mcp.json'), '');
+  const r = f.checkout('--detach', 'origin/main');
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(f.git(['reflog', '-n1', '--format=%gs', 'HEAD']), 'checkout: moving from B to origin/main');
+});
+
+test('a checkout through the shim that creates a branch records git\'s branch and HEAD reflog messages', (t) => {
+  const f = fixture(t, {
+    base: { 'a.txt': 'a\n', '.mcp.json': '{"v":1}\n' },
+    task: { 'b.txt': 'b\n' },
+    main: { '.mcp.json': '{"v":2}\n' },
+  });
+  fs.writeFileSync(path.join(f.wt, '.mcp.json'), '');
+  const r = f.checkout('-b', 'N', 'origin/main');
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(f.git(['reflog', '-n1', '--format=%gs', 'HEAD']), 'checkout: moving from B to N');
+  assert.equal(f.git(['reflog', '-n1', '--format=%gs', 'refs/heads/N']), 'branch: Created from origin/main');
 });

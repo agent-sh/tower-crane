@@ -229,6 +229,10 @@ const MUTANTS = [
     from: 'if (create && !name) return fail(', to: 'if (false) return fail(', tests: ['test/masked-merge.test.js'] },
   { id: 'masked-checkout-ignores-shorthand', area: 'git', file: 'lib/masked-merge.js',
     from: 'const name = branchName(g, create ? create.name : start);', to: 'const name = create ? create.name : start;', tests: ['test/masked-merge.test.js'] },
+  { id: 'masked-checkout-takes-tag-over-branch', area: 'git', file: 'lib/masked-merge.js',
+    from: '`${existing ? `refs/heads/${name}` : start}^{commit}`', to: '`${start}^{commit}`', tests: ['test/masked-merge.test.js'] },
+  { id: 'masked-checkout-reflog-not-git', area: 'git', file: 'lib/masked-merge.js',
+    from: 'const reason = `checkout: moving from ${from} to ${name ?? start}`;', to: 'const reason = `checkout ${start}`;', tests: ['test/masked-merge.test.js'] },
   // board
   { id: 'board-unescaped-lt', area: 'board', file: 'lib/board/view.js',
     from: ".replace(/</g, '&lt;')", to: '', tests: ['test/board.test.js'] },
