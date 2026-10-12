@@ -1,0 +1,1 @@
+- Owner credentials and sandbox denials use the canonical config directory recorded in project state. Changing the caller's config path or home cannot substitute a fabricated owner key. A project without a recorded directory requires an explicit owner at a terminal to establish it.

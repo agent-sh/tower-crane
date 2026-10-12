@@ -1,0 +1,1 @@
+- Merge queue timeout and stack acceptance tests record reviewer spawns so their valid review evidence counts toward the gate.

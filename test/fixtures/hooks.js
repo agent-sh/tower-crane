@@ -14,6 +14,15 @@ const cp = require('node:child_process');
 const { EventEmitter } = require('node:events');
 
 const env = process.env;
+// The probe child observes the environment passed to Git, then runs real Git.
+if (env.HOOK_GIT_ENV_REPORT && path.basename(process.argv[1] || '') === 'tower-crane.js') {
+  const exec = cp.execFileSync;
+  cp.execFileSync = function gitEnvironment(command, args, options) {
+    if (command !== 'git') return exec.call(this, command, args, options);
+    return exec.call(this, process.execPath, [path.join(__dirname, 'git-env-probe.js'), ...args], options);
+  };
+}
+
 // Keep a known missing PID absent when a test waits long enough for OS reuse.
 if (env.HOOK_DEAD_PID) {
   const kill = process.kill;
@@ -67,6 +76,16 @@ if (env.HOOK_PIDNS) {
   };
 }
 
+// HOOK_NO_SH=1: the CLI finds no /bin/sh, as on Windows, so it has no POSIX
+// lease gate and spawns its workers through the launch handshake.
+if (env.HOOK_NO_SH && path.basename(process.argv[1] || '') === 'tower-crane.js') {
+  const exists = fs.existsSync;
+  fs.existsSync = function noShell(file) {
+    if (file === '/bin/sh') return false;
+    return exists.call(this, file);
+  };
+}
+
 if (env.HOOK_CLOCK_FILE) {
   const DateClass = Date;
   const clock = () => Number(fs.readFileSync(env.HOOK_CLOCK_FILE, 'utf8'));
@@ -87,7 +106,7 @@ if (env.HOOK_WATCH_READY || env.HOOK_NO_WATCH || env.HOOK_SILENT_WATCH) {
 }
 const STATE = env.HOOK_STATE ? path.resolve(env.HOOK_STATE) : null;
 const LOCK = STATE ? path.join(STATE, 'lock') : null;
-const WRAPPED = ['openSync', 'closeSync', 'readFileSync', 'writeFileSync', 'appendFileSync', 'renameSync', 'unlinkSync', 'rmdirSync', 'rmSync', 'linkSync', 'statSync', 'readdirSync', 'mkdirSync', 'existsSync', 'utimesSync'];
+const WRAPPED = ['openSync', 'closeSync', 'readFileSync', 'readSync', 'writeFileSync', 'appendFileSync', 'renameSync', 'unlinkSync', 'rmdirSync', 'rmSync', 'linkSync', 'statSync', 'readdirSync', 'mkdirSync', 'existsSync', 'utimesSync'];
 // Calls that remove or move what is at their first argument.
 const CHANGES = ['renameSync', 'unlinkSync', 'rmdirSync', 'rmSync', 'linkSync'];
 const BUSY = ['EEXIST', 'ENOTEMPTY', 'ENOTDIR', 'EPERM', 'EACCES'];
@@ -98,6 +117,16 @@ const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 
 const under = (root, p) => !!root && typeof p === 'string' && (path.resolve(p) === root || path.resolve(p).startsWith(root + path.sep));
 const inState = (p) => under(STATE, p);
 const inLock = (p) => under(LOCK, p);
+
+function ownsLock() {
+  try {
+    return real.readdirSync(LOCK).some((name) =>
+      JSON.parse(real.readFileSync(path.join(LOCK, name), 'utf8')).pid === process.pid);
+  } catch (error) {
+    if (['ENOENT', 'ENOTDIR'].includes(error.code)) return false;
+    throw error;
+  }
+}
 
 // Tells the test this process reached a point (by creating SIGNAL with its
 // pid), then waits until the test creates SIGNAL.go.
@@ -130,14 +159,23 @@ function first(key) {
 
 function before(name, args) {
   const target = args[0];
+  // Stdin is read with readStdin (readSync) or a bare readFileSync(0).
+  if (env.HOOK_STDIN_READY && (name === 'readFileSync' || name === 'readSync') && target === 0) {
+    real.writeFileSync(env.HOOK_STDIN_READY, '');
+  }
+  // HOOK_STOP_GO=FILE stops the dispatch after it records a worker's lease,
+  // before it lets the supervisor launch the harness (the Windows handshake).
+  if (env.HOOK_STOP_GO && name === 'writeFileSync' && typeof target === 'string' && path.basename(target) === 'go'
+    && path.basename(process.argv[1]) === 'tower-crane.js' && first('go')) stop(env.HOOK_STOP_GO);
   // HOOK_JITTER_MS=MS: a random pause of up to MS before each call on the state.
   if (env.HOOK_JITTER_MS && (inState(target) || inState(args[1]))) sleep(Math.floor(Math.random() * Number(env.HOOK_JITTER_MS)));
   // State commits precede board replacement; expose that interval to readers.
   if (env.HOOK_RENDER_DELAY_MS && name === 'renameSync' && args[1] === path.join(STATE, 'sketch.html')) {
     sleep(Number(env.HOOK_RENDER_DELAY_MS));
   }
-  // HOOK_DIE_ON=FILE: killed when it reads FILE, which a write does while it holds the lock.
-  if (env.HOOK_DIE_ON && name === 'readFileSync' && inState(target) && path.basename(target) === env.HOOK_DIE_ON) {
+  // Authentication reads project.json before locking; a dead-holder probe
+  // must kill the process only after its own lock marker has been published.
+  if (env.HOOK_DIE_ON && name === 'readFileSync' && inState(target) && path.basename(target) === env.HOOK_DIE_ON && ownsLock()) {
     process.kill(process.pid, 'SIGKILL');
     sleep(5000);
   }
@@ -156,6 +194,10 @@ function after(name, args, rawArgs = args) {
   const target = args[0];
   if (env.HOOK_STOP_RENDER && name === 'renameSync' && args[1] === path.join(STATE, 'sketch.md')
     && path.basename(process.argv[1]) === 'tower-crane.js' && process.argv.includes('spawn') && first('render')) stop(env.HOOK_STOP_RENDER);
+  // HOOK_STOP_STARTED=FILE stops the dispatch after it reads its supervisor's startup receipt,
+  // before its spawn is committed, so the supervisor's startup window can close first.
+  if (env.HOOK_STOP_STARTED && name === 'rmSync' && path.basename(target) === 'started.json'
+    && path.basename(process.argv[1]) === 'tower-crane.js' && first('started')) stop(env.HOOK_STOP_STARTED);
   // HOOK_PAUSE_ON=FILE stops at HOOK_PAUSED after its first read; HOOK_PAUSE_PROCESS
   // optionally limits the pause to one executable's basename.
   if (env.HOOK_PAUSE_ON && name === 'readFileSync' && inState(target) && path.basename(target) === env.HOOK_PAUSE_ON
@@ -209,6 +251,26 @@ if (env.HOOK_STOP_WORKTREE_ADD) {
       || (args[1] === 'add' && !args.includes('--lock')));
     if (completed && first('worktree-add')) stop(env.HOOK_STOP_WORKTREE_ADD);
     return out;
+  };
+}
+
+// HOOK_STOP_WORKTREE_STATUS=SIGNAL: stop before the first git status runs, which
+// is the first look at a worktree that a removal may delete.
+if (env.HOOK_STOP_WORKTREE_STATUS) {
+  const orig = cp.execFileSync;
+  cp.execFileSync = function hookedExecFileSync(file, args, ...rest) {
+    if (args[0] === 'status' && first('worktree-status')) stop(env.HOOK_STOP_WORKTREE_STATUS);
+    return orig.call(this, file, args, ...rest);
+  };
+}
+
+// HOOK_STOP_WORKTREE_REMOVE=SIGNAL: stop before the first git worktree remove runs,
+// after the removal has passed its checks and released the state lock.
+if (env.HOOK_STOP_WORKTREE_REMOVE) {
+  const orig = cp.execFileSync;
+  cp.execFileSync = function hookedExecFileSync(file, args, ...rest) {
+    if (args[0] === 'worktree' && args[1] === 'remove' && first('worktree-remove')) stop(env.HOOK_STOP_WORKTREE_REMOVE);
+    return orig.call(this, file, args, ...rest);
   };
 }
 
@@ -323,10 +385,12 @@ if (env.HOOK_SPAWN_FAIL) {
 if (env.HOOK_USAGE_HARNESS) {
   const original = cp.spawn;
   cp.spawn = function usageHarness(file, args, options) {
-    if (file === env.HOOK_USAGE_HARNESS) {
-      return original.call(this, process.execPath, [
-        require('node:path').join(__dirname, 'usage-harness.js'), env.HOOK_USAGE_FILE,
-      ], options);
+    // The supervisor's lease gate starts its harness after `tower-crane-gate`.
+    const gated = file === '/bin/sh' && args[2] === 'tower-crane-gate' && args[3] === env.HOOK_USAGE_HARNESS;
+    if (file === env.HOOK_USAGE_HARNESS || gated) {
+      if (env.HOOK_USAGE_ARGV) fs.writeFileSync(env.HOOK_USAGE_ARGV, JSON.stringify(args));
+      const stub = [require('node:path').join(__dirname, 'usage-harness.js'), env.HOOK_USAGE_FILE];
+      return original.call(this, gated ? file : process.execPath, gated ? [...args.slice(0, 3), process.execPath, ...stub] : stub, options);
     }
     return original.call(this, file, args, options);
   };
@@ -401,6 +465,8 @@ if (env.HOOK_PROCESSES_DIR) {
     }
     const child = original.call(this, file, args, options);
     if (options?.detached && child.pid) {
+      const startTime = process.platform === 'win32' && monitor
+        ? require('../windows-process').startTime(child.pid) : undefined;
       let startTicks;
       if (process.platform === 'linux') {
         try {
@@ -411,11 +477,12 @@ if (env.HOOK_PROCESSES_DIR) {
       real.mkdirSync(env.HOOK_PROCESSES_DIR, { recursive: true });
       const trackedFile = path.join(env.HOOK_PROCESSES_DIR, `${child.pid}.json`);
       real.writeFileSync(trackedFile, JSON.stringify({
-        pid: child.pid, startTicks,
+        pid: child.pid, startTicks, startTime,
         kind: monitor ? 'monitor' : 'worker',
       }));
       // A reaped Windows PID can immediately belong to another test's CLI.
-      // The live parent observes worker exit; monitors record their own exit.
+      // The live parent observes worker exit. A monitor's own exit marker
+      // precedes OS termination, so teardown also checks process identity.
       if (!monitor) child.once('exit', () => real.rmSync(trackedFile, { force: true }));
     }
     return child;

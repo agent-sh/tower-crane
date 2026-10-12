@@ -1,0 +1,2 @@
+- Ranged failed reviews copy full findings and their comment link before recording a climb. Acceptance and real review dispatch rework a current failed review instead of repeating it at the unchanged head.
+- Automatic refill clears verified dead reservations before counting worker capacity, including reservations from cancelled tasks.

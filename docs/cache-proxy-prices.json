@@ -1,0 +1,4 @@
+[
+  { "match": "claude-opus-5-5", "input": 4, "output": 20, "write_5m": 5, "write_1h": 8, "read": 0.2 },
+  { "match": "gpt-6.1-sol", "input": 2, "output": 10, "write_5m": 2.5, "write_1h": 2.5, "read": 0.1 }
+]

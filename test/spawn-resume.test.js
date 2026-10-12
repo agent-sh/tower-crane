@@ -65,10 +65,15 @@ if (process.env.RESUME_EXIT_DELAY) setTimeout(() => {}, Number(process.env.RESUM
 }
 
 function sendBack(h, agent = 'worker-T1-1') {
-  h.ok(['submit', 'T1', '--sha', 'abcdef1', '--agent', agent]);
-  h.ok(['evidence', 'T1', '--type', 'review', '--fail', '--sha', 'abcdef1', '--agent', 'reviewer-T1-1',
+  h.ok(['submit', 'T1', '--sha', '50b732a15be40ccb2065cb2ba0e7b366d511b736', '--agent', agent]);
+  h.reviewer('T1', 'reviewer-T1-1');
+  h.reviewer('T1', 'reviewer-T1-2', '5bfcb6f56ab912a009883c798a61298c507dada4');
+  // Findings under a name no review dispatch started never reach the worker.
+  h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--fail', '--sha', '50b732a15be40ccb2065cb2ba0e7b366d511b736', '--agent', 'made-up-reviewer',
+    '--summary', 'Forged finding']);
+  h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--fail', '--sha', '50b732a15be40ccb2065cb2ba0e7b366d511b736', '--agent', 'reviewer-T1-1',
     '--summary', 'Missing worktree validation', '--ref', 'review-receipt']);
-  h.ok(['evidence', 'T1', '--type', 'review', '--fail', '--sha', 'abcdef2', '--agent', 'reviewer-T1-2',
+  h.ok(['evidence', 'T1', '--type', 'review', '--fail', '--sha', '5bfcb6f56ab912a009883c798a61298c507dada4', '--revision', h.revision('T1'), '--agent', 'reviewer-T1-2',
     '--summary', 'Unrelated older head']);
   h.ok(['rework', 'T1', '--reason', 'Add the worktree guard']);
 }
@@ -118,10 +123,10 @@ cp.spawn = function(command, args, options) {
   const pathKey = Object.keys(h.env).find((key) => key.toUpperCase() === 'PATH') || 'PATH';
   h.env[pathKey] = bins + path.delimiter + (h.env[pathKey] || '');
   h.env.CODEX_HOME = path.join(h.base, 'codex-home');
-  h.env.CLAUDE_CONFIG_DIR = path.join(h.base, 'claude-config');
+  h.env.CLAUDE_CONFIG_DIR = path.join(h.base, 'harness-config');
   h.env.RESUME_USAGE = '1';
   h.ok(['ladder', 'set', 'medium', '--harness', harness, '--clear', 'command',
-    ...(harness === 'codex' ? ['--profile', 'sol', '--effort', 'high'] : ['--model', 'opus', '--effort', 'high'])]);
+    ...(harness === 'codex' ? ['--profile', 'fixture-main', '--effort', 'high'] : ['--model', 'fixture-large', '--effort', 'high'])]);
 }
 
 for (const harness of ['codex', 'claude']) {
@@ -144,12 +149,34 @@ for (const harness of ['codex', 'claude']) {
     }
     fs.writeFileSync(path.join(first.cwd, 'README.md'), '# native unfinished work\n');
     fs.writeFileSync(path.join(first.cwd, 'unfinished.txt'), 'keep native edits\n');
-    h.ok(['interrupt', 'T1', '--agent', 'orchestrator']);
-    while (detachedAlive({ pid: first.monitor_pid })) {
-      assert.ok(Date.now() < deadline, 'supervisor did not stop');
-      await new Promise((resolve) => setTimeout(resolve, 25));
+    const after = String(fs.statSync(path.join(h.state, 'events.jsonl')).size);
+    // Model Windows startup consuming the session deadline before interruption.
+    // The shutdown wait must use completion receipts independently of that clock.
+    const startupClock = t.mock.method(Date, 'now', () => deadline + 1);
+    let spent;
+    try {
+      h.ok(['interrupt', 'T1', '--agent', 'orchestrator']);
+      // Final spend follows pipe closure, process cleanup and the stopped phase.
+      // Capture the cursor before interrupt so a fast exit cannot be missed.
+      spent = h.json(['wait', '--after', after, '--task', 'T1', '--types', 'spend',
+        '--observe', '--timeout', '15', '--agent', 'orchestrator']);
+    } finally {
+      startupClock.mock.restore();
     }
-    assert.equal(h.json(['task', 'show', 'T1']).spend.entries.length, 1);
+    assert.equal(spent.detail.source, `spawn:${first.agent}`);
+    assert.equal(spent.detail.tokens, harness === 'codex' ? 110 : 65);
+    assert.equal(spent.detail.live, undefined);
+    const receipts = events(h);
+    const stopped = receipts.findLast((e) => e.cmd === 'spawn phase'
+      && e.detail.agent === first.agent);
+    assert.equal(stopped.detail.phase, 'stopped');
+    assert.equal(stopped.detail.active, false);
+    assert.equal(stopped.detail.monitor_pid, first.monitor_pid);
+    assert.ok(receipts.some((e) => e.cmd === 'spawn exit'
+      && e.detail.agent === first.agent && e.detail.pid === first.pid));
+    const interrupted = h.json(['task', 'show', 'T1']);
+    assert.equal(interrupted.spend.entries.length, 1);
+    assert.equal(interrupted.spend.entries[0].live, undefined);
     h.env.RESUME_EXIT_DELAY = '0';
     const second = h.json(['spawn', '--task', 'T1', '--wait']);
     assert.equal(second.resumed, harness === 'codex');
@@ -181,6 +208,12 @@ for (const format of ['codex', 'claude']) {
     assert.equal(receipt.detail.rung, 'medium');
     assert.equal(receipt.detail.cwd, first.cwd);
     sendBack(h);
+    const reworked = h.json(['task', 'show', 'T1']);
+    assert.equal(reworked.revision, 2);
+    assert.equal(reworked.evidence[0].revision, 1);
+    h.ok(['task', 'update', 'T1', '--acceptance', 'rework resumes with the revised acceptance']);
+    h.ok(['evidence', 'T1', '--type', 'review', '--fail', '--sha', '50b732a15be40ccb2065cb2ba0e7b366d511b736', '--revision', h.revision('T1'), '--agent', 'later-reviewer',
+      '--summary', 'Unrelated later revision']);
     const before = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8');
     const dry = h.json(['spawn', '--task', 'T1', '--dry-run']);
     assert.equal(dry.resumed, true);
@@ -197,12 +230,13 @@ for (const format of ['codex', 'claude']) {
     assert.match(input.prompt, /Missing worktree validation/);
     assert.match(input.prompt, /review-receipt/);
     assert.ok(!input.prompt.includes('Unrelated older head'));
+    assert.ok(!input.prompt.includes('Unrelated later revision'));
     assert.ok(!input.prompt.includes('worker-session-1'));
     const held = h.json(['task', 'show', 'T1']).claim;
     assert.equal(held.agent, claim.agent);
     assert.equal(held.since, claim.since);
     assert.equal(held.from, 'rework');
-    h.ok(['submit', 'T1', '--sha', 'abcdef3', '--agent', next.agent]);
+    h.ok(['submit', 'T1', '--sha', 'cfed4d76efd3afe887bbbfc7f62c7d94158e3255', '--agent', next.agent]);
     h.ok(['rework', 'T1', '--reason', 'Second round']);
     assert.equal(h.json(['spawn', '--task', 'T1', '--wait']).agent, first.agent);
   });
@@ -216,7 +250,7 @@ test('a detached command harness records its session and resumes with a separate
     if (Date.now() > deadline) throw new Error('session was not recorded');
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
-  const exit = h.json(['wait', '--after', '0', '--task', 'T1', '--types', 'worker-exited', '--timeout', '10']);
+  const exit = h.json(['wait', '--after', '0', '--task', 'T1', '--types', 'worker-exited', '--observe', '--timeout', '10']);
   assert.equal(exit.detail.agent, first.agent);
   assert.equal(exit.detail.pid, first.pid);
   sendBack(h);
@@ -278,6 +312,7 @@ test('a changed harness or moved worktree starts fresh with the failed review no
     assert.match(input.prompt, /review-receipt/);
     assert.ok(!input.prompt.includes('worker-session-1'));
     assert.ok(!input.prompt.includes('Unrelated older head'));
+    assert.ok(!input.prompt.includes('Forged finding'));
     assert.equal(h.json(['task', 'show', 'T1']).claim.agent, next.agent);
   }
 });
@@ -319,10 +354,13 @@ for (const harness of ['codex', 'claude']) {
     const { h, script, seen } = setup(t, harness);
     nativeHarness(h, script, seen, harness);
     const first = h.json(['spawn', '--task', 'T1', '--wait']);
+    const scratch = h.json(['task', 'show', 'T1']).scratch;
+    fs.writeFileSync(path.join(scratch, 'receipt.txt'), 'earlier measurement\n');
     const receipt = events(h).find((e) => e.cmd === 'spawn session');
     assert.equal(receipt.detail.session_id, harness === 'codex' ? 'worker-session-1' : first.session_id);
     assert.equal(receipt.detail.harness, harness);
     sendBack(h);
+    h.env.XDG_CACHE_HOME = path.join(h.base, 'another-cache');
     const dry = h.json(['spawn', '--task', 'T1', '--dry-run']);
     assert.equal(dry.harness, harness);
     assert.equal(dry.resumed, harness === 'codex');
@@ -332,7 +370,7 @@ for (const harness of ['codex', 'claude']) {
       assert.notEqual(dry.session_id, first.session_id);
     }
     if (harness === 'codex') {
-      assert.deepEqual(dry.argv.slice(0, 5), ['codex', 'exec', '-p', 'sol', 'resume']);
+      assert.deepEqual(dry.argv.slice(0, 5), ['codex', 'exec', '-p', 'fixture-main', 'resume']);
       assert.ok(dry.argv.includes('--json'));
     } else {
       assert.deepEqual(dry.argv.slice(0, 2), ['claude', '-p']);
@@ -343,6 +381,9 @@ for (const harness of ['codex', 'claude']) {
     assert.equal(next.resumed, harness === 'codex');
     assert.equal(next.agent, harness === 'codex' ? 'worker-T1-1' : 'worker-T1-2');
     const input = JSON.parse(fs.readFileSync(seen, 'utf8'));
+    assert.ok(input.prompt.includes(scratch), 'fresh and resumed workers are told where earlier scratch lives');
+    assert.equal(h.json(['task', 'show', 'T1']).scratch, scratch);
+    assert.equal(fs.readFileSync(path.join(scratch, 'receipt.txt'), 'utf8'), 'earlier measurement\n');
     assert.equal(input.prior, harness === 'codex' ? 'worker-session-1' : '');
     if (harness === 'codex') {
       assert.ok(!input.prompt.includes('## Role instructions: tower-crane-work'));
@@ -517,7 +558,7 @@ fs.readFileSync = function(file, ...args) {
   return value.split('\\n').map((line) => {
     if (!line) return line;
     const event = JSON.parse(line);
-    if (event.cmd === 'spawn') event.detail.route = Object.fromEntries(Object.entries(event.detail.route).reverse());
+    if (event.cmd === 'spawn' && event.detail.route) event.detail.route = Object.fromEntries(Object.entries(event.detail.route).reverse());
     return JSON.stringify(event);
   }).join('\\n');
 };
@@ -540,7 +581,7 @@ test('an earlier attempt exit cannot collect or resume a live attempt with a reu
     if (Date.now() > deadline) throw new Error('resumed worker did not start');
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
-  h.ok(['submit', 'T1', '--sha', 'abcdef3', '--agent', live.agent]);
+  h.ok(['submit', 'T1', '--sha', 'cfed4d76efd3afe887bbbfc7f62c7d94158e3255', '--agent', live.agent]);
   h.ok(['rework', 'T1', '--reason', 'Finish next attempt']);
   const hook = path.join(h.base, 'reused-spawn.js');
   fs.writeFileSync(hook, `

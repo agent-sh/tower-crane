@@ -1,0 +1,2 @@
+- Reconcile Claude's final session usage even when the log contains partial assistant usage, and retain that total when collecting again. Explicit invocation results remain authoritative.
+- Keep routine live-spend readings quiet for the default orchestrator waiter. Budget stops still wake it, and explicit event filters can observe live readings.

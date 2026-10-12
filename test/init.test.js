@@ -18,6 +18,7 @@ test('init creates the state files and excludes them from git', (t) => {
   assert.equal(p.name, 'demo');
   assert.equal(p.base, 'main');
   assert.equal(p.roles, undefined);
+  assert.equal(p.owner_config_dir, fs.realpathSync.native(path.dirname(h.userConfig)));
   assert.equal(p.harness, 'codex');
   assert.deepEqual(Object.keys(p.ladder), ['orchestrator', 'easy', 'medium', 'hard', 'research', 'review', 'small']);
   assert.deepEqual(p.limits, { workers: 6, lease_minutes: 60 });

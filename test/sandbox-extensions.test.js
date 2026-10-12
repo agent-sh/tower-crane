@@ -18,7 +18,7 @@ function setup(t, harness = 'codex') {
     h.ok(['task', 'add', '--title', 'Toolchain probe', '--acceptance', 'lock written']);
     h.ok(['brief', 'set', 'T1', '-'], { input: 'probe' });
     h.ok(['ladder', 'set', 'medium', '--harness', harness,
-      ...(harness === 'codex' ? ['--profile', 'sol', '--clear', 'model'] : ['--model', 'opus', '--clear', 'profile']),
+      ...(harness === 'codex' ? ['--profile', 'fixture-main', '--clear', 'model'] : ['--model', 'fixture-large', '--clear', 'profile']),
       '--clear', 'effort', '--clear', 'args']);
   });
 }
@@ -33,6 +33,12 @@ function noFileSecrets(dir) {
       assert.ok(!text.includes(SECRET), `${file} contains the file value`);
     }
   }
+}
+
+// An exited worker keeps its lease until the orchestrator releases it, so each dispatch releases the last one.
+function releaseExited(h) {
+  const claim = h.json(['task', 'show', 'T1']).claim;
+  if (claim) h.ok(['release', 'T1', '--agent', claim.agent, '--reason', 'worker exited']);
 }
 
 test('project and rung spawn settings require explicit owner identity, including unchanged and cleared fields', (t) => {
@@ -123,8 +129,11 @@ for (const harness of ['codex', 'claude']) {
     fs.renameSync(file, `${file}.saved`);
     h.ok(['spawn', '--task', 'T1', '--dry-run'], { env });
     fs.renameSync(`${file}.saved`, file);
+    releaseExited(h);
     const result = h.run(['spawn', '--task', 'T1', '--wait'], { env });
     assert.equal(result.code, 0, result.stderr);
+    // The exited worker's lease holds the task until it is released.
+    h.ok(['release', 'T1', '--agent', h.json(['task', 'show', 'T1']).claim.agent, '--reason', 'worker finished']);
     assert.equal(fs.existsSync(path.join(cargo, '.package-cache')), true);
     const seen = JSON.parse(fs.readFileSync(out, 'utf8'));
     assert.deepEqual(seen.values, {
@@ -143,6 +152,7 @@ for (const harness of ['codex', 'claude']) {
     h.ok(['ladder', 'set', 'medium', '--env_file', '~/other.env']);
     fs.rmSync(file);
     fs.rmSync(path.join(cargo, '.package-cache'));
+    releaseExited(h);
     h.ok(['spawn', '--task', 'T1', '--wait'], { env });
     assert.equal(JSON.parse(fs.readFileSync(out, 'utf8')).values.FROM_FILE, 'replacement');
     noFileSecrets(h.state);
@@ -179,12 +189,13 @@ ${harness === 'codex' ? 'console.log(JSON.stringify({type: "thread.started", thr
 process.exit(process.env.TOWER_CRANE_RETRY === '0' ? 75 : 0);
 `, { mode: 0o755 });
     h.ok(['ladder', 'set', 'medium', '--harness', harness,
-      ...(harness === 'codex' ? ['--profile', 'sol', '--clear', 'model'] : ['--model', 'opus', '--clear', 'profile']),
+      ...(harness === 'codex' ? ['--profile', 'fixture-main', '--clear', 'model'] : ['--model', 'fixture-large', '--clear', 'profile']),
       '--supervision', '{"retries":1,"backoff_ms":1}']);
     h.ok(['project', 'set', '--scope', '{"CPUQuota":"200%","MemoryMax":"8G"}', '--env_file', file]);
     const dry = h.json(['spawn', '--task', 'T1', '--dry-run'], { env });
     assert.deepEqual(dry.argv.slice(0, 10), ['systemd-run', '--user', '--scope', '--quiet', '--expand-environment=no', '-p', 'CPUQuota=200%', '-p', 'MemoryMax=8G', '--']);
     assert.ok(!JSON.stringify(dry).includes(SECRET_KEY) && !JSON.stringify(dry).includes(SECRET));
+    releaseExited(h);
     h.ok(['spawn', '--task', 'T1', '--wait'], { env });
     let attempts = fs.readFileSync(out, 'utf8').trim().split('\n').map(JSON.parse);
     assert.deepEqual(attempts.slice(-2), [{ scoped: '1', retry: '0' }, { scoped: '1', retry: '1' }]);
@@ -193,11 +204,13 @@ process.exit(process.env.TOWER_CRANE_RETRY === '0' ? 75 : 0);
     h.ok(['ladder', 'set', 'medium', '--scope', '{"MemoryMax":"4G"}']);
     const overridden = h.json(['spawn', '--task', 'T1', '--dry-run'], { env });
     assert.deepEqual(overridden.argv.slice(0, 8), ['systemd-run', '--user', '--scope', '--quiet', '--expand-environment=no', '-p', 'MemoryMax=4G', '--']);
+    releaseExited(h);
     h.ok(['spawn', '--task', 'T1', '--wait'], { env });
     wrappers = fs.readFileSync(wrapped, 'utf8').trim().split('\n').map(JSON.parse);
     assert.deepEqual(wrappers.at(-1).slice(0, 7), overridden.argv.slice(1, 8));
     h.ok(['ladder', 'set', 'medium', '--scope', '{}']);
     const wrapperCount = wrappers.length;
+    releaseExited(h);
     h.ok(['spawn', '--task', 'T1', '--wait'], { env });
     attempts = fs.readFileSync(out, 'utf8').trim().split('\n').map(JSON.parse);
     assert.deepEqual(attempts.slice(-2), [{ scoped: null, retry: '0' }, { scoped: null, retry: '1' }]);
@@ -245,10 +258,12 @@ process.exit(r.status ?? 1);
     '--clear', 'profile', '--supervision', '{"retries":0}']);
   h.ok(['project', 'set', '--scope', '{"CPUQuota":"200%"}', '--env', '{"TC_ARG_ENV":"configured-value"}', '--env_file', file]);
   const env = { PATH: `${bin}${path.delimiter}${process.env.PATH}` };
+  releaseExited(h);
   h.ok(['spawn', '--task', 'T1', '--wait'], { env });
   assert.deepEqual(JSON.parse(fs.readFileSync(out, 'utf8')), literals);
   noFileSecrets(h.state);
   fs.rmSync(out);
+  releaseExited(h);
   const refused = h.run(['spawn', '--task', 'T1', '--wait'], { env: { ...env, SIMULATE_OLD_SYSTEMD: '1' } });
   assert.equal(refused.code, 1, refused.stderr);
   assert.match(refused.stderr, /unrecognized option.*--expand-environment=no/);
@@ -274,6 +289,7 @@ fs.statSync = function(file, ...args) {
   h.ok(['ladder', 'set', 'medium', '--harness', 'command', '--command', JSON.stringify([process.execPath, harness, '{prompt}']), '--clear', 'profile']);
   h.ok(['project', 'set', '--scope', '{"CPUQuota":"200%"}']);
   const before = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8');
+  releaseExited(h);
   const result = h.run(['spawn', '--task', 'T1', '--wait'], { env: { NODE_OPTIONS: `--require ${JSON.stringify(missing)}` } });
   assert.equal(result.code, 1, result.stderr);
   assert.match(result.stderr, /scope requires.*systemd-run|scope requires Linux/);
@@ -290,6 +306,7 @@ test('invalid or unreadable env files fail without echoing their contents', { sk
   h.ok(['project', 'set', '--env_file', file]);
   for (const text of [null, `${SECRET_KEY}="${SECRET}`, `${SECRET_KEY}='${SECRET}' trailing`, `HOME='${SECRET}'`]) {
     if (text !== null) fs.writeFileSync(file, text);
+    releaseExited(h);
     const r = h.run(['spawn', '--task', 'T1', '--wait'], { env: { PATH: `${bin}${path.delimiter}${process.env.PATH}` } });
     assert.equal(r.code, 1, r.stderr);
     assert.ok(!r.stderr.includes(SECRET_KEY) && !r.stderr.includes(SECRET));
@@ -301,6 +318,7 @@ test('real Codex worker writes the toolchain lock, receives a private env file, 
   skip: process.env.TOWER_CRANE_LIVE_CODEX !== '1' && 'set TOWER_CRANE_LIVE_CODEX=1 to run a real Codex worker',
   timeout: 240000,
 }, async (t) => {
+  assert.ok(process.env.TOWER_CRANE_LIVE_PROFILE, 'set TOWER_CRANE_LIVE_PROFILE to run a live codex probe');
   const fixtureRoot = process.env.TOWER_CRANE_TEST_TMP;
   const inside = (dir, target) => {
     const rel = path.relative(path.resolve(dir), path.resolve(target));
@@ -368,13 +386,14 @@ test('real Codex worker writes the toolchain lock, receives a private env file, 
   ].join('\n'));
   h.ok(['project', 'set', '--sandbox', JSON.stringify({ write: [cargo, results] }), '--scope', '{"CPUQuota":"200%","MemoryMax":"8G"}',
     '--env', JSON.stringify({ CARGO_HOME: cargo, RUSTUP_HOME: rustup }), '--env_file', file]);
-  h.ok(['ladder', 'set', 'medium', '--harness', 'codex', '--profile', process.env.TOWER_CRANE_LIVE_PROFILE || 'sol',
+  h.ok(['ladder', 'set', 'medium', '--harness', 'codex', '--profile', process.env.TOWER_CRANE_LIVE_PROFILE,
     '--clear', 'model', '--clear', 'effort', '--supervision', '{"retries":0}']);
   h.ok(['brief', 'set', 'T1', '-'], {
     input: `This task is a live sandbox verification fixture. Run exactly this command with your command tool, then report its exit code and stop. Do not read the script or private environment file, print environment variables, change files, use tower-crane, open a PR or delegate work.\n\n${JSON.stringify(process.execPath)} ${JSON.stringify(script)}\n`,
   });
   const dry = h.ok(['spawn', '--task', 'T1', '--dry-run']);
   assert.ok(!dry.includes(SECRET_KEY) && !dry.includes(SECRET));
+  releaseExited(h);
   const result = await h.runAsync(['spawn', '--task', 'T1', '--wait'], { env: { TMPDIR: privateTmp } });
   assert.equal(result.code, 0, result.stderr);
   assert.equal(fs.existsSync(out), true, result.stdout);
@@ -382,4 +401,159 @@ test('real Codex worker writes the toolchain lock, receives a private env file, 
   assert.equal(fs.existsSync(path.join(cargo, '.package-cache')), true);
   noFileSecrets(h.state);
   assert.ok(!result.stdout.includes(SECRET_KEY) && !result.stderr.includes(SECRET));
+});
+
+// A claude stub that writes the sandbox settings and the env its spawn gave it to out.
+function writeClaudeStub(bin, out) {
+  const stub = [
+    `#!${process.execPath}`, "'use strict';",
+    'const fs = require("node:fs"), path = require("node:path");',
+    'const settings = JSON.parse(fs.readFileSync(path.join(process.env.CLAUDE_CONFIG_DIR, "settings.json"), "utf8"));',
+    `fs.writeFileSync(${JSON.stringify(out)}, JSON.stringify({ sandbox: settings.sandbox, env: { XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR, DBUS_SESSION_BUS_ADDRESS: process.env.DBUS_SESSION_BUS_ADDRESS } }));`,
+    'console.log("bus probe passed");', '',
+  ].join('\n');
+  fs.writeFileSync(path.join(bin, 'claude'), stub, { mode: 0o755 });
+}
+
+test('claude: sandbox.session_bus grants the bus socket, read and write, and off it grants nothing', { skip: NO_STUBS }, (t) => {
+  const h = setup(t, 'claude');
+  const bin = path.join(h.base, 'bin');
+  fs.mkdirSync(bin);
+  // The runtime directory is the test's own, so the host's session bus never matters.
+  // The stub never connects, so an empty file stands in for the socket.
+  const runtime = path.join(h.base, 'runtime');
+  fs.mkdirSync(path.join(runtime, 'systemd'), { recursive: true });
+  const bus = path.join(fs.realpathSync(runtime), 'bus');
+  const manager = path.join(fs.realpathSync(runtime), 'systemd', 'private');
+  fs.writeFileSync(bus, '');
+  fs.writeFileSync(manager, '');
+  const out = path.join(h.base, 'result.json');
+  writeClaudeStub(bin, out);
+  const env = { ...h.env, XDG_RUNTIME_DIR: runtime, DBUS_SESSION_BUS_ADDRESS: `unix:path=${bus}`,
+    PATH: `${bin}${path.delimiter}${process.env.PATH}`, CLAUDE_CONFIG_DIR: '' };
+  const spawnSeen = () => {
+    releaseExited(h);
+    h.ok(['spawn', '--task', 'T1', '--wait'], { env });
+    return JSON.parse(fs.readFileSync(out, 'utf8'));
+  };
+
+  const off = spawnSeen();
+  assert.ok(!off.sandbox.filesystem.allowRead.includes(bus), 'off by default: no read grant');
+  assert.ok(!off.sandbox.filesystem.allowWrite.includes(bus), 'off by default: no write grant');
+
+  assert.equal(h.run(['project', 'set', '--session-bus', 'maybe']).code, 2);
+  h.ok(['project', 'set', '--session-bus', 'true']);
+  fs.rmSync(bus);
+  releaseExited(h);
+  const refused = h.run(['spawn', '--task', 'T1', '--wait'], { env });
+  assert.notEqual(refused.code, 0, 'a missing bus socket refuses the spawn');
+  assert.match(refused.stderr, /\/bus/);
+  fs.writeFileSync(bus, '');
+  const on = spawnSeen();
+  assert.ok(on.sandbox.filesystem.allowRead.includes(bus), 'the sandbox reads the bus socket');
+  assert.ok(on.sandbox.filesystem.allowWrite.includes(bus), 'the sandbox writes the bus socket');
+  assert.ok(!on.sandbox.filesystem.allowRead.includes(manager), 'the user manager socket stays unreadable: a scope cannot start through it from the sandbox');
+  assert.ok(!on.sandbox.filesystem.allowWrite.includes(manager), 'the user manager socket stays unwritable');
+  assert.ok(on.sandbox.filesystem.denyRead.includes(fs.realpathSync(runtime)), 'the rest of the runtime directory stays denied');
+  assert.deepEqual(on.sandbox.filesystem.allowWrite.filter((p) => p.startsWith(fs.realpathSync(runtime))), [bus], 'only the bus socket is writable under the runtime directory');
+  assert.deepEqual(on.env, { XDG_RUNTIME_DIR: runtime, DBUS_SESSION_BUS_ADDRESS: `unix:path=${bus}` });
+
+  h.ok(['project', 'set', '--session-bus', 'false']);
+  assert.ok(!spawnSeen().sandbox.filesystem.allowRead.includes(bus), 'false turns the grant off again');
+  assert.equal(JSON.parse(fs.readFileSync(path.join(h.state, 'project.json'), 'utf8')).sandbox, undefined);
+});
+
+test('claude: sandbox.session_bus grants the sockets the worker env names, even when the spawning env names none', { skip: NO_STUBS }, (t) => {
+  const h = setup(t, 'claude');
+  const bin = path.join(h.base, 'bin');
+  fs.mkdirSync(bin);
+  const out = path.join(h.base, 'result.json');
+  writeClaudeStub(bin, out);
+  // The spawning environment names a runtime directory with no bus; the project's env names one that has both sockets.
+  const absent = path.join(h.base, 'absent');
+  const runtime = path.join(h.base, 'runtime');
+  fs.mkdirSync(path.join(runtime, 'systemd'), { recursive: true });
+  const bus = path.join(fs.realpathSync(runtime), 'bus');
+  const manager = path.join(fs.realpathSync(runtime), 'systemd', 'private');
+  fs.writeFileSync(bus, '');
+  fs.writeFileSync(manager, '');
+  const env = { ...h.env, XDG_RUNTIME_DIR: absent, DBUS_SESSION_BUS_ADDRESS: `unix:path=${path.join(absent, 'bus')}`,
+    PATH: `${bin}${path.delimiter}${process.env.PATH}`, CLAUDE_CONFIG_DIR: '' };
+  h.ok(['project', 'set', '--session-bus', 'true', '--env', JSON.stringify({ XDG_RUNTIME_DIR: runtime, DBUS_SESSION_BUS_ADDRESS: `unix:path=${bus}` })]);
+  h.ok(['spawn', '--task', 'T1', '--wait'], { env });
+  const seen = JSON.parse(fs.readFileSync(out, 'utf8'));
+  assert.deepEqual(seen.env, { XDG_RUNTIME_DIR: runtime, DBUS_SESSION_BUS_ADDRESS: `unix:path=${bus}` });
+  assert.ok(seen.sandbox.filesystem.allowRead.includes(bus), 'the bus the worker env names is granted');
+  assert.ok(!seen.sandbox.filesystem.allowWrite.includes(manager), 'the manager socket in that runtime stays denied');
+  assert.ok(seen.sandbox.filesystem.denyRead.includes(fs.realpathSync(runtime)), 'that runtime is denied');
+});
+
+test('claude: sandbox.session_bus addresses the bus of the runtime the env_file names, not the spawning one', { skip: NO_STUBS }, (t) => {
+  const h = setup(t, 'claude');
+  const bin = path.join(h.base, 'bin');
+  fs.mkdirSync(bin);
+  const out = path.join(h.base, 'result.json');
+  writeClaudeStub(bin, out);
+  // The spawning environment names a runtime directory with no bus, and an empty bus address; the env_file moves the worker to a runtime that has one.
+  const parent = path.join(h.base, 'parent');
+  const runtime = path.join(h.base, 'runtime');
+  fs.mkdirSync(parent);
+  fs.mkdirSync(runtime);
+  const bus = path.join(fs.realpathSync(runtime), 'bus');
+  fs.writeFileSync(bus, '');
+  const file = path.join(h.base, 'worker.env');
+  fs.writeFileSync(file, `XDG_RUNTIME_DIR=${runtime}\n`);
+  const env = { ...h.env, XDG_RUNTIME_DIR: parent, DBUS_SESSION_BUS_ADDRESS: '',
+    PATH: `${bin}${path.delimiter}${process.env.PATH}`, CLAUDE_CONFIG_DIR: '' };
+  h.ok(['project', 'set', '--session-bus', 'true', '--env_file', file]);
+  h.ok(['spawn', '--task', 'T1', '--wait'], { env });
+  const seen = JSON.parse(fs.readFileSync(out, 'utf8'));
+  assert.deepEqual(seen.env, { XDG_RUNTIME_DIR: runtime, DBUS_SESSION_BUS_ADDRESS: `unix:path=${path.join(runtime, 'bus')}` });
+  assert.ok(seen.sandbox.filesystem.allowRead.includes(bus), 'the sandbox grants the socket the bus address names');
+  assert.ok(seen.sandbox.filesystem.allowWrite.includes(bus), 'the sandbox writes the socket the bus address names');
+});
+
+test('claude: the runtime the spawning env names stays denied when the project env names another', { skip: NO_STUBS }, (t) => {
+  const h = setup(t, 'claude');
+  const bin = path.join(h.base, 'bin');
+  fs.mkdirSync(bin);
+  const out = path.join(h.base, 'result.json');
+  writeClaudeStub(bin, out);
+  // Both runtimes sit outside /run/user/<uid>, so only the sandbox's own denial hides the spawning one.
+  const host = path.join(h.base, 'host-runtime');
+  const runtime = path.join(h.base, 'runtime');
+  fs.mkdirSync(host);
+  fs.mkdirSync(runtime);
+  const bus = path.join(fs.realpathSync(runtime), 'bus');
+  const env = { ...h.env, XDG_RUNTIME_DIR: host, DBUS_SESSION_BUS_ADDRESS: `unix:path=${path.join(host, 'bus')}`,
+    PATH: `${bin}${path.delimiter}${process.env.PATH}`, CLAUDE_CONFIG_DIR: '' };
+  h.ok(['project', 'set', '--env', JSON.stringify({ XDG_RUNTIME_DIR: runtime })]);
+  h.ok(['spawn', '--task', 'T1', '--wait'], { env });
+  const off = JSON.parse(fs.readFileSync(out, 'utf8'));
+  assert.equal(off.env.XDG_RUNTIME_DIR, runtime, 'the worker starts in the project runtime');
+  assert.ok(off.sandbox.filesystem.denyRead.includes(fs.realpathSync(host)), 'off: the spawning runtime stays denied');
+  assert.ok(off.sandbox.filesystem.denyRead.includes(fs.realpathSync(runtime)), 'off: the worker runtime stays denied');
+
+  fs.writeFileSync(bus, '');
+  h.ok(['project', 'set', '--session-bus', 'true']);
+  releaseExited(h);
+  h.ok(['spawn', '--task', 'T1', '--wait'], { env });
+  const on = JSON.parse(fs.readFileSync(out, 'utf8'));
+  assert.ok(on.sandbox.filesystem.denyRead.includes(fs.realpathSync(host)), 'on: the spawning runtime stays denied');
+  assert.ok(on.sandbox.filesystem.denyRead.includes(fs.realpathSync(runtime)), 'on: the worker runtime stays denied');
+  assert.deepEqual(on.sandbox.filesystem.allowRead.filter((p) => p.startsWith(fs.realpathSync(host))), [], 'on: no socket in the spawning runtime is granted');
+  assert.ok(on.sandbox.filesystem.allowRead.includes(bus), 'on: the worker bus is granted');
+});
+
+test('claude: dry-run never reads env_file, and a real spawn that cannot read it refuses', { skip: NO_STUBS }, (t) => {
+  const h = setup(t, 'claude');
+  const bin = path.join(h.base, 'bin');
+  fs.mkdirSync(bin);
+  writeClaudeStub(bin, path.join(h.base, 'result.json'));
+  const env = { ...h.env, PATH: `${bin}${path.delimiter}${process.env.PATH}`, CLAUDE_CONFIG_DIR: '' };
+  h.ok(['project', 'set', '--session-bus', 'true', '--env_file', path.join(h.base, 'missing.env')]);
+  h.ok(['spawn', '--task', 'T1', '--dry-run'], { env });
+  const real = h.run(['spawn', '--task', 'T1', '--wait'], { env });
+  assert.notEqual(real.code, 0, 'the real spawn refuses');
+  assert.match(real.stderr, /cannot read env_file/);
 });

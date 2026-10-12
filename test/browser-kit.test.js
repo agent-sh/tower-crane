@@ -72,9 +72,12 @@ test('a brokered worker can read the browser kit but cannot change the user sett
     const shown = await h.runAsync(['browser-kit', 'show', '--json'], { env });
     assert.equal(shown.code, 0, shown.stderr);
     assert.deepEqual(JSON.parse(shown.stdout).servers, ['playwright']);
-    const changed = await h.runAsync(['browser-kit', 'set', '--servers', '["other"]', '--agent', 'owner'], { env });
+    const changed = await h.runAsync(['browser-kit', 'set', '--servers', '["other"]'], { env });
     assert.notEqual(changed.code, 0);
     assert.match(changed.stderr, /not browser-kit set/);
+    const asOwner = await h.runAsync(['browser-kit', 'set', '--servers', '["other"]', '--agent', 'owner'], { env });
+    assert.notEqual(asOwner.code, 0);
+    assert.match(asOwner.stderr, /TOWER_CRANE_AGENT names worker-T1-1/);
     assert.equal(fs.existsSync(h.userConfig), false);
   } finally {
     await broker.close();

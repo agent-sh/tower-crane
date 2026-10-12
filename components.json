@@ -1,5 +1,5 @@
 {
   "agents": ["tower-crane-worker", "tower-crane-researcher", "tower-crane-reviewer", "tower-crane-small", "tower-crane-orchestrator"],
   "skills": ["tower-crane", "tower-crane-work", "tower-crane-review"],
-  "commands": []
+  "commands": ["tower-crane-inbox", "tower-crane-spawn-ready", "tower-crane-merge-accepted", "tower-crane-rework-from-review", "tower-crane-release-dead"]
 }

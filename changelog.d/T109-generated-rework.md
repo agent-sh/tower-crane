@@ -1,0 +1,1 @@
+- Generated-file repair records a mixed-conflict handoff at the new rework revision while retaining its guard against concurrent requirements changes.

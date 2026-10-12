@@ -1,0 +1,1 @@
+- Gate policy and inbox tests record reviewer spawns so acceptance, failed-review findings and rework exercise eligible review evidence.

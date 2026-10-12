@@ -6,23 +6,49 @@ const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
 const http = require('node:http');
+const { once } = require('node:events');
+const { createInterface } = require('node:readline');
 const { makeRepo, makeTaskRepo, BIN, HOOKS, detachedAlive } = require('./helpers');
 const { gateFixture, gateEvidence } = require('./gate-helpers');
 const bedrockOutage = require('./fixtures/bedrock-outage.json');
 const { errorReader, transient } = require('../lib/spawn-monitor');
+
+// The lease gate is POSIX-only; on Windows the dispatch records the lease before launch.
+const GATE_SKIP = process.platform === 'win32' && 'the lease gate is POSIX-only';
+// A dispatch that finds no /bin/sh spawns its workers through the Windows launch handshake.
+const NO_SH = { HOOK_NO_SH: '1' };
 const windowsConcurrency = process.platform === 'win32' ? 2 : false;
+const S = require('../lib/state');
 
 const log = (h) => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
 const sketches = (h) => ['sketch.md', 'sketch.html'].map((file) => ({
   file, text: fs.readFileSync(path.join(h.state, file), 'utf8'),
 }));
 
+// The runner's per-test timeout (test/run.js) is the only deadline: a loaded
+// machine can take as long as the test may run, and a wait that never comes
+// true still fails with its message.
+const HUNG_TEST_MS = 300000;
+
 async function until(fn, message) {
-  const deadline = Date.now() + 12000;
+  const deadline = Date.now() + HUNG_TEST_MS;
   while (!fn()) {
     if (Date.now() >= deadline) assert.fail(message);
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
+}
+
+function controlledBackoff(h) {
+  const file = path.join(h.base, 'backoff-clock');
+  const hook = path.join(__dirname, 'fixtures', 'supervision-backoff-clock.js').replace(/\\/g, '/');
+  fs.writeFileSync(file, '0');
+  return {
+    env: {
+      NODE_OPTIONS: `--require "${HOOKS.replace(/\\/g, '/')}" --require "${hook}"`,
+      TOWER_CRANE_TEST_BACKOFF_CLOCK: file,
+    },
+    advance: (ms) => fs.writeFileSync(file, String(ms)),
+  };
 }
 
 function setup(t, { failures = 1, error = '75', records = null, hold = 0, waitForFinish = false, config = {}, env = {}, busy = false, claimDelay = 0, claim = true, sessionReceipt = false } = {}) {
@@ -43,7 +69,7 @@ if (!attempts.length && ${claim}) {
 }
 const task = JSON.parse(cli(['task', 'show', 'T1', '--json']));
 attempts.push({ agent: process.env.TOWER_CRANE_AGENT, session: process.env.TOWER_CRANE_SESSION, retry: process.env.TOWER_CRANE_RETRY,
-  cwd: process.cwd(), claim: task.claim });
+  cwd: process.cwd(), claim: task.claim, pid: process.pid });
 fs.writeFileSync(file, JSON.stringify(attempts));
 ${sessionReceipt ? "console.log(JSON.stringify({ type: 'thread.started', thread_id: 'supervised-session' }));" : ''}
 ${busy ? "cp.spawn(process.execPath, ['-e', 'const end = Date.now() + 3500; while (Date.now() < end) {}'], { stdio: 'ignore' });" : ''}
@@ -51,17 +77,18 @@ const finish = () => {
   if (attempts.length <= ${failures}) {
     ${records ? `for (const record of ${JSON.stringify(records)}) console.log(JSON.stringify(record)); process.exit(1);`
       : ['signal', 'interrupt'].includes(error) ? `process.kill(process.pid, '${error === 'signal' ? 'SIGTERM' : 'SIGINT'}');`
-      : ['claude-error', 'codex-error', 'codex-failed'].includes(error)
-        ? `console.log(${JSON.stringify(JSON.stringify(error === 'claude-error' ? { type: 'result', is_error: true, api_error_status: 503 }
+      : ['harness-error', 'codex-error', 'codex-failed'].includes(error)
+        ? `console.log(${JSON.stringify(JSON.stringify(error === 'harness-error' ? { type: 'result', is_error: true, api_error_status: 503 }
           : error === 'codex-error' ? { type: 'error', message: 'HTTP 502 bad gateway' }
             : { type: 'turn.failed', error: { message: 'provider outage' } }))}); process.exit(1);`
         : ['outage', 'server', 'status-json'].includes(error) ? `console.error(${JSON.stringify(error === 'server' ? '500 Internal Server Error'
           : error === 'status-json' ? '{"status_code":502}' : 'API Error: 503 service unavailable')}); process.exit(1);` : `process.exit(${error});`}
   } else process.exit(0);
 };
-${waitForFinish ? `const timer = setInterval(() => {
-  if (fs.existsSync(file + '.finish')) { clearInterval(timer); finish(); }
-}, 25);` : `setTimeout(finish, ${hold});`}
+${waitForFinish ? `if (attempts.length <= ${failures}) finish();
+else { const watcher = fs.watch(require('node:path').dirname(file), () => {
+  if (fs.existsSync(file + '.finish')) { watcher.close(); finish(); }
+}); if (fs.existsSync(file + '.finish')) { watcher.close(); finish(); } }` : `setTimeout(finish, ${hold});`}
 `;
   h.ok(['ladder', 'set', 'easy', '--harness', 'command', '--command', JSON.stringify([process.execPath, '-e', script, BIN, h.attempts, '{prompt}']),
     '--clear', 'profile', '--clear', 'effort', '--supervision',
@@ -70,6 +97,48 @@ ${waitForFinish ? `const timer = setInterval(() => {
   h.readAttempts = () => fs.existsSync(h.attempts) ? JSON.parse(fs.readFileSync(h.attempts, 'utf8')) : [];
   return h;
 }
+
+test('supervisor tool progress arrives while the state lock is held', { timeout: 90000 }, async (t) => {
+  const h = makeTaskRepo(t, [{
+    args: ['--title', 'Supervised tool progress', '--tier', 'easy', '--acceptance', 'tool event survives'],
+    brief: 'Record tool progress.\n',
+  }]);
+  const ready = path.join(h.base, 'harness-ready');
+  const emit = path.join(h.base, 'emit-tool');
+  const finish = path.join(h.base, 'finish');
+  const script = `
+const fs = require('node:fs');
+require('node:child_process').execFileSync(process.execPath, [${JSON.stringify(BIN)}, 'claim', 'T1', '--lease', '5']);
+fs.writeFileSync(${JSON.stringify(ready)}, '');
+let emitted = false;
+setInterval(() => {
+  if (!emitted && fs.existsSync(${JSON.stringify(emit)})) {
+    emitted = true;
+    console.log(JSON.stringify({ type: 'item.completed', item: { type: 'command_execution', command: 'supervised tool' } }));
+  }
+  if (fs.existsSync(${JSON.stringify(finish)})) process.exit(0);
+}, 25);
+`;
+  h.ok(['ladder', 'set', 'easy', '--harness', 'command', '--command', JSON.stringify([process.execPath, '-e', script, '{prompt}']),
+    '--clear', 'profile', '--clear', 'effort', '--supervision', JSON.stringify({ retries: 0, stall_ms: 60000 })]);
+  h.ok(['msg', '--to', 'worker-T1-1', '--task', 'T1', 'startup context']);
+  const completed = h.runAsync(['spawn', '--task', 'T1', '--wait', '--json']);
+  let lock;
+  try {
+    await until(() => fs.existsSync(ready) && log(h).some((event) => event.cmd === 'hook inbox'), 'startup hook did not complete');
+    lock = S.acquireLock(h.state);
+    fs.writeFileSync(emit, '');
+    await until(() => fs.existsSync(S.progressFile(h.state, 'worker-T1-1')), 'tool progress waited for the lock');
+  } finally {
+    if (lock) S.releaseLock(lock);
+    fs.writeFileSync(finish, '');
+  }
+  const result = await completed;
+  assert.equal(result.code, 0, result.stderr);
+  assert.match(fs.readFileSync(S.progressFile(h.state, 'worker-T1-1'), 'utf8'), /command_execution/);
+  assert.equal(log(h).some((event) => event.cmd === 'hook progress'), false);
+  assert.doesNotMatch(result.stderr, /harness event failed/);
+});
 
 // What counts as an outage is decided per output line, in process: every
 // recorded and synthetic case here, and one supervised spawn per family below.
@@ -183,7 +252,7 @@ for (const error of ['75', 'outage', 'codex-error', 'signal']) {
     for (const key of ['agent', 'session', 'cwd', 'claim']) assert.deepEqual(attempts[1][key], attempts[0][key]);
     assert.equal(attempts[1].retry, '1');
     assert.equal(log(h).filter((e) => e.cmd === 'spawn').length, 1);
-    assert.equal(log(h).filter((e) => e.cmd === 'claim').length, 1);
+    assert.equal(log(h).filter((e) => e.cmd === 'claim' && !e.detail.renewed).length, 1);
     assert.equal(log(h).filter((e) => e.cmd === 'spawn retry').length, 1);
     assert.equal(h.json(['task', 'show', 'T1']).run.phase, 'waiting');
     assert.match(h.ok(['task', 'show', 'T1']), /phase: waiting/);
@@ -239,11 +308,12 @@ test('repeated transient exits render the blocked phase before foreground spend'
 
 test('detached supervision renews a short lease during backoff and does not allow premature recovery', async (t) => {
   const h = setup(t, { config: { backoff_ms: 1400, max_backoff_ms: 1400 } });
+  const backoff = controlledBackoff(h);
   const clockFile = path.join(h.base, 'clock');
   const now = Date.now();
   fs.writeFileSync(clockFile, String(now));
   const spawned = h.json(['spawn', '--task', 'T1'], {
-    env: { NODE_OPTIONS: `--require "${HOOKS.replace(/\\/g, '/')}"`, HOOK_CLOCK_FILE: clockFile },
+    env: { ...backoff.env, HOOK_CLOCK_FILE: clockFile },
   });
   await until(() => h.json(['task', 'show', 'T1']).run?.phase === 'retrying', 'retry was not recorded');
   await until(() => sketches(h).every(({ text }) => /retrying 1/.test(text)), 'saved sketches did not render the retry phase');
@@ -253,11 +323,14 @@ test('detached supervision renews a short lease during backoff and does not allo
   const task = h.json(['task', 'show', 'T1']);
   assert.equal(task.claim.agent, spawned.agent);
   assert.ok(Date.parse(task.claim.until) > now + 60000);
+  assert.equal(task.run.phase, 'retrying');
+  assert.equal(h.readAttempts().length, 1);
   assert.deepEqual(h.json(['status']).exited_claims, []);
   assert.equal(h.run(['release', 'T1', '--agent', 'other', '--reason', 'premature']).code, 1);
+  backoff.advance(1400);
   await until(() => h.json(['task', 'show', 'T1']).run?.phase === 'waiting', 'retry did not finish');
   assert.equal(h.readAttempts().length, 2);
-  assert.equal(log(h).filter((e) => e.cmd === 'claim').length, 1);
+  assert.equal(log(h).filter((e) => e.cmd === 'claim' && !e.detail.renewed).length, 1);
 });
 
 test('later spawns preserve retrying homes through backoff, retries and queued hook writes', async (t) => {
@@ -291,14 +364,17 @@ if (task === 'T1' && retry === 0) {
   h.ok(['ladder', 'set', 'easy', '--harness', 'command', '--command', JSON.stringify([process.execPath, '-e', script, BIN, '{prompt}']),
     '--clear', 'profile', '--clear', 'effort', '--supervision', JSON.stringify({ retries: 1, backoff_ms: 3500, max_backoff_ms: 3500 })]);
 
-  const started = h.json(['spawn', '--task', 'T1']);
+  const backoff = controlledBackoff(h);
+  const started = h.json(['spawn', '--task', 'T1'], { env: backoff.env });
   const home = path.join(h.state, 'homes', started.agent);
   await until(() => h.json(['task', 'show', 'T1']).run?.phase === 'retrying', 'first attempt did not enter backoff');
 
   const duringBackoff = h.json(['spawn', '--task', 'T2', '--wait']);
   assert.equal(duringBackoff.code, 0);
   assert.ok(fs.existsSync(path.join(home, 'hook.json')), 'a later spawn keeps the home while the supervisor waits to retry');
+  assert.equal(h.json(['task', 'show', 'T1']).run.phase, 'retrying');
 
+  backoff.advance(3500);
   await until(() => fs.existsSync(retryReady), 'retry attempt did not start');
   assert.ok(log(h).some((e) => e.cmd === 'spawn retry' && e.task === 'T1'), 'retry event was recorded');
   const duringRetry = h.json(['spawn', '--task', 'T3', '--wait']);
@@ -309,34 +385,39 @@ if (task === 'T1' && retry === 0) {
   await until(() => h.json(['task', 'show', 'T1']).run?.phase === 'waiting', 'retry attempt did not finish');
   await until(() => !detachedAlive({ pid: started.monitor_pid }), 'supervisor did not finish queued hook writes');
   const audit = log(h).filter((e) => e.task === 'T1' && e.agent === started.agent);
-  assert.ok(audit.some((e) => e.cmd === 'hook progress'), 'tool activity reached state');
+  assert.match(fs.readFileSync(S.progressFile(h.state, started.agent), 'utf8'), /hook progress/, 'tool activity reached the progress log');
   assert.equal(audit.findLast((e) => e.cmd === 'hook report')?.detail.report, `last report from ${started.agent}`);
   assert.equal(audit.findLast((e) => e.cmd === 'hook stop')?.detail.report, `last report from ${started.agent}`);
   assert.match(audit.find((e) => e.cmd === 'msg' && e.detail.to === 'orchestrator')?.detail.text || '', /without submit/);
 });
 
 test('a running process keeps its lease without claimant writes', async (t) => {
-  const h = setup(t, { failures: 0, hold: 1800 });
+  const h = setup(t, { failures: 0, waitForFinish: true });
   const clockFile = path.join(h.base, 'clock');
   const now = Date.now();
   fs.writeFileSync(clockFile, String(now));
   const spawned = h.json(['spawn', '--task', 'T1'], {
     env: { NODE_OPTIONS: `--require "${HOOKS.replace(/\\/g, '/')}"`, HOOK_CLOCK_FILE: clockFile },
   });
-  await until(() => h.readAttempts().length === 1, 'worker did not claim');
-  fs.writeFileSync(clockFile, String(now + 40000));
-  await until(() => log(h).some((e) => e.cmd === 'renew'), 'live worker lease was not renewed');
-  const task = h.json(['task', 'show', 'T1']);
-  assert.equal(task.claim.since, h.readAttempts()[0].claim.since);
-  assert.equal(task.claim.agent, spawned.agent);
-  assert.ok(Date.parse(task.claim.until) > now + 60000);
-  assert.equal(task.run.phase, 'running');
+  try {
+    await until(() => h.readAttempts().length === 1, 'worker did not claim');
+    fs.writeFileSync(clockFile, String(now + 40000));
+    await until(() => log(h).some((e) => e.cmd === 'renew'), 'live worker lease was not renewed');
+    const task = h.json(['task', 'show', 'T1']);
+    assert.equal(task.claim.since, h.readAttempts()[0].claim.since);
+    assert.equal(task.claim.agent, spawned.agent);
+    assert.ok(Date.parse(task.claim.until) > now + 60000);
+    assert.equal(task.run.phase, 'running');
+  } finally {
+    fs.writeFileSync(`${h.attempts}.finish`, '');
+  }
   await until(() => h.json(['task', 'show', 'T1']).run?.phase === 'waiting', 'worker did not finish');
 });
 
 test('release during backoff fences the old supervisor from a replacement claim', async (t) => {
   const h = setup(t, { failures: 9, config: { backoff_ms: 1400, max_backoff_ms: 1400 } });
-  const spawned = h.json(['spawn', '--task', 'T1']);
+  const backoff = controlledBackoff(h);
+  const spawned = h.json(['spawn', '--task', 'T1'], { env: backoff.env });
   await until(() => h.json(['task', 'show', 'T1']).run?.phase === 'retrying', 'retry was not recorded');
   h.ok(['release', 'T1', '--agent', spawned.agent, '--reason', 'replace this run']);
   h.ok(['claim', 'T1', '--agent', 'replacement']);
@@ -369,7 +450,7 @@ test('a permanent exit is blocked without retrying and submit clears its phase',
   assert.equal(h.spawn().code, 2);
   assert.equal(h.readAttempts().length, 1);
   assert.equal(h.json(['task', 'show', 'T1']).run.reason, 'exit 2');
-  h.ok(['submit', 'T1', '--agent', 'worker-T1-1', '--sha', 'abcdef1']);
+  h.ok(['submit', 'T1', '--agent', 'worker-T1-1', '--sha', '50b732a15be40ccb2065cb2ba0e7b366d511b736']);
   assert.equal(h.json(['task', 'show', 'T1']).run, null);
 });
 
@@ -391,6 +472,11 @@ test('progress paths and CPU detect a stalled process without dropping its live 
     for (const { file, text } of sketches(h)) {
       assert.doesNotMatch(text, /blocked: no progress paths or CPU activity/, `${file} clears the stalled phase`);
     }
+    // Tool hooks write outside the event log; the agent's progress file counts too.
+    await until(() => h.json(['task', 'show', 'T1']).run?.phase === 'blocked', 'idle process did not stall again');
+    fs.mkdirSync(path.dirname(S.progressFile(h.state, spawned.agent)), { recursive: true });
+    fs.appendFileSync(S.progressFile(h.state, spawned.agent), '{}\n');
+    await until(() => h.json(['task', 'show', 'T1']).run?.phase === 'running', 'tool progress did not clear stall');
     assert.equal(h.json(['task', 'show', 'T1']).claim.agent, spawned.agent);
     assert.deepEqual(h.json(['status']).exited_claims, []);
   } finally {
@@ -399,6 +485,184 @@ test('progress paths and CPU detect a stalled process without dropping its live 
   }
   await until(() => !detachedAlive({ pid: spawned.monitor_pid }), 'supervisor did not finish');
   assert.equal(h.json(['task', 'show', 'T1']).run.phase, 'waiting');
+});
+
+// Pauses the supervisor before its first read of the state, so the spawn's
+// reservation stays live until the test lets the supervisor take the lease.
+function pausedSupervisor(h) {
+  const paused = path.join(h.base, 'paused');
+  return { paused, hooks: { HOOK_PAUSE_ON: 'events.jsonl', HOOK_PAUSE_PROCESS: 'spawn-monitor.js', HOOK_PAUSED: paused } };
+}
+
+test('a worker starts only after its supervisor takes the lease, so its first edit is leased', { skip: GATE_SKIP }, async (t) => {
+  const h = setup(t, { claim: false, failures: 0 });
+  const { paused, hooks } = pausedSupervisor(h);
+  const spawned = h.json(['spawn', '--task', 'T1'], { hooks });
+  await until(() => fs.existsSync(paused), 'supervisor did not pause');
+  assert.equal(h.readAttempts().length, 0, 'the harness waits behind its gate');
+  assert.equal(h.json(['task', 'show', 'T1']).claim, null, 'no lease before the supervisor takes it');
+  fs.writeFileSync(`${paused}.go`, '');
+  await until(() => h.readAttempts().length === 1, 'worker did not start');
+  assert.equal(h.readAttempts()[0].claim.agent, spawned.agent, 'the lease was taken before the harness started');
+  await until(() => log(h).some((e) => e.cmd === 'spawn exit' && e.detail.agent === spawned.agent), 'worker did not finish');
+  assert.equal(log(h).findLast((e) => e.cmd === 'spawn phase' && e.detail.agent === spawned.agent).detail.phase, 'waiting');
+});
+
+test('a worker whose lease is refused never starts, reports why and frees its slot', { skip: GATE_SKIP }, async (t) => {
+  const h = setup(t, { claim: false, failures: 0 });
+  const { paused, hooks } = pausedSupervisor(h);
+  const completed = h.runAsync(['spawn', '--task', 'T1', '--wait', '--json'], { hooks });
+  let result;
+  try {
+    await until(() => fs.existsSync(paused), 'supervisor did not pause');
+    h.ok(['task', 'update', 'T1', '--needs-owner', 'waiting for a decision']);
+  } finally {
+    fs.writeFileSync(`${paused}.go`, '');
+    result = await completed;
+  }
+  assert.notEqual(result.code, 0, result.stderr);
+  assert.match(result.stderr, /tower-crane: no lease: T1 is blocked: needs owner: waiting for a decision/);
+  const blocked = log(h).findLast((e) => e.cmd === 'spawn phase' && e.detail.phase === 'blocked');
+  assert.match(blocked.detail.reason, /^no lease: T1 is blocked: needs owner: waiting for a decision/);
+  assert.equal(h.readAttempts().length, 0, 'the refused worker never ran');
+  assert.equal(log(h).filter((e) => e.cmd === 'spawn retry').length, 0, 'and is not rerun');
+  assert.ok(log(h).some((e) => e.cmd === 'spawn exit' && e.detail.availability_failure === false), 'a refused lease is not an outage');
+  h.ok(['task', 'update', 'T1', '--needs-owner', '']);
+  h.ok(['claim', 'T1', '--agent', 'manual']);
+});
+
+test('a worker whose spawn is not recorded within its startup window never starts and says why', { skip: GATE_SKIP }, async (t) => {
+  const h = setup(t, { claim: false, failures: 0 });
+  const started = path.join(h.base, 'started-paused');
+  const completed = h.runAsync(['spawn', '--task', 'T1', '--wait', '--json'], { hooks: { HOOK_STOP_STARTED: started } });
+  let result;
+  try {
+    await until(() => fs.existsSync(started), 'dispatch did not pause before committing its spawn');
+    // The supervisor's startup window closes while the paused dispatch holds the state lock.
+    await new Promise((resolve) => setTimeout(resolve, 11000));
+    assert.equal(h.readAttempts().length, 0, 'the harness waits behind its gate');
+  } finally {
+    fs.writeFileSync(`${started}.go`, '');
+    result = await completed;
+  }
+  assert.notEqual(result.code, 0, result.stderr);
+  assert.match(result.stderr, /no lease: its spawn was not recorded within 10 s/);
+  assert.equal(h.readAttempts().length, 0, 'the worker never started');
+});
+
+test('a schema bump before the supervisor first reads state stops its worker behind the gate', { skip: GATE_SKIP }, async (t) => {
+  const h = setup(t, { claim: false, failures: 0 });
+  const { paused, hooks } = pausedSupervisor(h);
+  const spawned = h.json(['spawn', '--task', 'T1'], { hooks });
+  await until(() => fs.existsSync(paused), 'supervisor did not pause');
+  // The lease gate waits on its supervisor, and this supervisor can no longer read the state.
+  S.withLock(h.state, () => {
+    const project = JSON.parse(fs.readFileSync(path.join(h.state, 'project.json'), 'utf8'));
+    project.schema_version = 2;
+    S.writeAtomic(path.join(h.state, 'project.json'), S.json(project));
+  });
+  fs.writeFileSync(`${paused}.go`, '');
+  await until(() => !detachedAlive({ pid: spawned.monitor_pid }), 'supervisor kept waiting behind its gate');
+  assert.equal(detachedAlive({ pid: spawned.pid }), false, 'the gate was stopped with its supervisor');
+  assert.equal(h.readAttempts().length, 0, 'the worker never started');
+  const tasks = JSON.parse(fs.readFileSync(path.join(h.state, 'tasks.json'), 'utf8')).tasks;
+  assert.equal(tasks.find((task) => task.id === 'T1').claim, null, 'no lease was taken');
+});
+
+test('a worker without the lease gate, as on Windows, first runs on its own lease while its dispatch still holds the lock, and spawn reports its pid', async (t) => {
+  const h = setup(t, { claim: false, failures: 0 });
+  const paused = path.join(h.base, 'render-paused');
+  const completed = h.runAsync(['spawn', '--task', 'T1', '--wait', '--json'], { hooks: { ...NO_SH, HOOK_STOP_RENDER: paused } });
+  let result;
+  try {
+    await until(() => fs.existsSync(paused), 'dispatch did not pause after committing its spawn');
+    // The paused render holds the state lock, so no supervisor can claim now:
+    // the harness can only see a lease recorded before it started.
+    await until(() => h.readAttempts().length === 1, 'worker did not start');
+  } finally {
+    fs.writeFileSync(`${paused}.go`, '');
+    result = await completed;
+  }
+  assert.equal(result.code, 0, result.stderr);
+  const spawned = JSON.parse(result.stdout);
+  const [attempt] = h.readAttempts();
+  assert.equal(attempt.claim?.agent, spawned.agent, 'the harness first saw its own lease');
+  assert.equal(attempt.pid, spawned.pid, 'spawn reports the harness process, not a wrapper');
+  const events = log(h);
+  const claim = events.findIndex((e) => e.cmd === 'claim' && e.agent === spawned.agent);
+  assert.ok(claim >= 0 && claim < events.findIndex((e) => e.cmd === 'spawn'), 'the lease is recorded before the spawn');
+  assert.equal(events.filter((e) => e.cmd === 'claim' && !e.detail.renewed).length, 1, 'the supervisor takes no second lease');
+});
+
+test('a worker without the lease gate whose supervisor stops waiting for its lease never starts, and its lease is rolled back', async (t) => {
+  const h = setup(t, { claim: false, failures: 0 });
+  // A paused harness past its interval admits this spawn as its probe.
+  S.withLock(h.state, () => S.appendEvents(h.state, [{ at: new Date(Date.now() - 10 * 60000).toISOString(), agent: 'test', cmd: 'harness health',
+    task: null, detail: { harness: 'command', status: 'unavailable', reason: 'login expired', source: 'exit' } }]));
+  const paused = path.join(h.base, 'go-paused');
+  const completed = h.runAsync(['spawn', '--task', 'T1', '--wait', '--json'], { hooks: { ...NO_SH, HOOK_STOP_GO: paused } });
+  let result;
+  try {
+    await until(() => fs.existsSync(paused), 'dispatch did not pause before launching its worker');
+    const claim = JSON.parse(fs.readFileSync(path.join(h.state, 'tasks.json'), 'utf8')).tasks.find((task) => task.id === 'T1').claim;
+    assert.match(claim?.agent || '', /^worker-T1-/, 'the lease is on disk while the supervisor waits');
+    assert.equal(h.readAttempts().length, 0, 'no harness runs before go');
+    // The supervisor's wait for go closes while the paused dispatch holds the state lock.
+    await new Promise((resolve) => setTimeout(resolve, 11000));
+  } finally {
+    fs.writeFileSync(`${paused}.go`, '');
+    result = await completed;
+  }
+  assert.notEqual(result.code, 0, result.stderr);
+  assert.match(result.stderr, /did not start: no lease: it was not recorded within 10 s/);
+  assert.equal(h.readAttempts().length, 0, 'the worker never started');
+  const task = JSON.parse(fs.readFileSync(path.join(h.state, 'tasks.json'), 'utf8')).tasks.find((x) => x.id === 'T1');
+  assert.equal(task.claim, null, 'the lease is rolled back');
+  assert.equal(task.status, 'todo');
+  assert.equal(task.branch, null, 'the rest of the failed spawn is not recorded either');
+  assert.ok(!log(h).some((e) => e.cmd === 'worktree'), 'nor its worktree event');
+  assert.ok(log(h).some((e) => e.cmd === 'release' && e.detail.rollback), 'the rollback is recorded');
+  assert.ok(!log(h).some((e) => e.cmd === 'spawn'), 'no spawn is recorded');
+  assert.ok(!log(h).some((e) => e.cmd === 'harness health' && e.detail.source === 'probe'), 'nor does it spend the probe interval');
+  h.ok(['claim', 'T1', '--agent', 'manual']);
+});
+
+test('a spawn reads no other task\'s stored evidence, so a missing evidence file elsewhere does not stop it', (t) => {
+  const h = setup(t, { failures: 0 });
+  h.ok(['task', 'add', '--title', 'Settled elsewhere', '--acceptance', 'old receipts']);
+  const doc = h.readState('tasks.json');
+  doc.tasks.find((task) => task.id === 'T2').evidence.push({ type: 'note', ok: true, sha: 'abcdef1', agent: 'checker', revision: 1,
+    source: 'evidence', summary: 'old report\n'.repeat(200) });
+  h.writeState('tasks.json', doc);
+  h.ok(['task', 'note', 'T2', 'store its settled evidence']);
+  const ref = h.readState('tasks.json').tasks.find((task) => task.id === 'T2').evidence[0].evidence_refs.summary;
+  fs.rmSync(path.join(h.state, 'evidence', 'T2', `${ref.sha256}.json`));
+  const result = h.spawn();
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(h.readAttempts().length, 1);
+});
+
+test('a worker spawned behind a live lease held by another agent never starts and says why', (t) => {
+  const h = setup(t, { claim: false, failures: 0 });
+  h.ok(['claim', 'T1', '--agent', 'holder']);
+  const result = h.spawn(undefined, 20000);
+  assert.equal(result.code, 1, result.stderr);
+  assert.match(result.stderr, /T1 is claimed by holder until/);
+  assert.equal(h.readAttempts().length, 0, 'the harness never started');
+  assert.equal(h.json(['task', 'show', 'T1']).claim.agent, 'holder', 'the holder keeps its lease');
+});
+
+test('a supervisor stop stays blocked with its reason when its harness exits 0 on SIGTERM', { skip: process.platform !== 'linux' }, (t) => {
+  const h = setup(t, { config: { stall_ms: 250 } });
+  h.ok(['task', 'update', 'T1', '--tier', 'easy..medium']);
+  h.ok(['ladder', 'set', 'easy', '--harness', 'command', '--command', JSON.stringify([process.execPath, '-e',
+    "process.on('SIGTERM', () => process.exit(0)); setInterval(() => {}, 1000);", '{prompt}'])]);
+  const result = h.spawn(undefined, 30000);
+  assert.equal(result.code, 1, result.stderr);
+  const last = log(h).findLast((e) => e.cmd === 'spawn phase');
+  assert.equal(last.detail.phase, 'blocked');
+  assert.equal(last.detail.reason, 'no progress paths or CPU activity');
+  assert.ok(log(h).some((e) => e.cmd === 'spawn exit' && e.detail.code === 0), 'the harness did exit cleanly');
 });
 
 test('submitted-task reviewers resume transient exits and show their phase', (t) => {
@@ -470,28 +734,29 @@ test('serve shows the recorded run phase on the board', async (t) => {
   const h = setup(t, { failures: 0 });
   assert.equal(h.spawn().code, 0);
   const server = cp.spawn(process.execPath, [BIN, 'serve', '--port', '0', '--json'], { cwd: h.repo, env: h.env });
-  const closed = new Promise((resolve) => server.on('close', resolve));
-  let url;
-  let output = '';
-  server.stdout.on('data', (data) => {
-    output += data;
-    if (output.includes('\n')) url = JSON.parse(output.trim()).url;
-  });
+  const closed = once(server, 'close');
+  const output = createInterface({ input: server.stdout });
+  let stderr = '';
+  server.stderr.on('data', (data) => { stderr += data; });
   try {
-    await until(() => !!url || server.exitCode !== null, 'serve did not start');
+    const [line] = await Promise.race([
+      once(output, 'line', { signal: t.signal }),
+      closed.then(([code]) => { throw new Error(`serve exited before readiness (${code}): ${stderr}`); }),
+    ]);
+    const { url } = JSON.parse(line);
     assert.ok(url);
     const body = await new Promise((resolve, reject) => {
-      const request = http.get(url, (response) => {
+      const request = http.get(url, { signal: t.signal }, (response) => {
         let html = '';
         response.on('data', (data) => { html += data; });
         response.on('end', () => resolve(html));
       });
       request.on('error', reject);
-      request.setTimeout(5000, () => request.destroy(new Error('serve request timed out')));
     });
     assert.match(body, /Phase/);
     assert.match(body, /waiting/);
   } finally {
+    output.close();
     server.kill();
     await closed;
   }
@@ -545,7 +810,7 @@ for (const harness of ['claude', 'codex']) {
       assert.equal(second.args.some((arg) => arg.includes('Finish the task')), false);
     }
     assert.equal(log(h).filter((e) => e.cmd === 'spawn').length, 1);
-    assert.equal(log(h).filter((e) => e.cmd === 'claim').length, 1);
+    assert.equal(log(h).filter((e) => e.cmd === 'claim' && !e.detail.renewed).length, 1);
   });
 }
 
@@ -699,23 +964,24 @@ if (!fs.existsSync(file)) {
   assert.equal(log(h).filter((e) => e.cmd === 'spawn retry').length, 1);
 });
 
-test('foreground output is durable while the dispatch CLI is blocked rendering', async (t) => {
+test('a worker waits for its lease while the dispatch CLI is blocked rendering, then its output is durable', { skip: GATE_SKIP }, async (t) => {
   const h = setup(t, { error: 'outage', claim: false });
   const paused = path.join(h.base, 'render-paused');
   const completed = h.runAsync(['spawn', '--task', 'T1', '--wait', '--json'], { hooks: { HOOK_STOP_RENDER: paused } });
   let result;
   try {
     await until(() => fs.existsSync(paused), 'dispatch did not pause after committing its spawn');
-    await until(() => h.readAttempts().length === 1, 'harness did not emit its result');
+    // The paused render holds the state lock, so the lease and the harness after it wait.
     await new Promise((resolve) => setTimeout(resolve, 300));
-    const spawned = log(h).find((e) => e.cmd === 'spawn').detail;
-    assert.match(fs.readFileSync(spawned.log, 'utf8'), /503 service unavailable/);
+    assert.equal(h.readAttempts().length, 0, 'no harness starts before its lease');
   } finally {
     fs.writeFileSync(`${paused}.go`, '');
     result = await completed;
   }
   assert.equal(result.code, 0, result.stderr);
   assert.equal(h.readAttempts().length, 2);
+  const spawned = log(h).find((e) => e.cmd === 'spawn').detail;
+  assert.match(fs.readFileSync(spawned.log, 'utf8'), /503 service unavailable/);
 });
 
 test('foreground exit waits until the retained stdout pipe has been captured', async (t) => {
@@ -801,14 +1067,18 @@ fs.writeFileSync(process.argv[2], JSON.stringify({
 });
 
 test('rework cannot resume a session while its transient rerun is still alive', async (t) => {
-  const h = setup(t, { hold: 2500, sessionReceipt: true });
+  const h = setup(t, { waitForFinish: true, sessionReceipt: true });
   const spawned = h.json(['spawn', '--task', 'T1']);
-  await until(() => h.readAttempts().length === 2, 'transient rerun did not start');
-  h.ok(['submit', 'T1', '--agent', spawned.agent, '--sha', 'abcdef1']);
-  h.ok(['rework', 'T1', '--reason', 'review correction']);
-  const result = h.run(['spawn', '--task', 'T1']);
-  assert.equal(result.code, 1, result.stderr);
-  assert.match(result.stderr, /previous worker.*still running/);
+  try {
+    await until(() => h.readAttempts().length === 2, 'transient rerun did not start');
+    h.ok(['submit', 'T1', '--agent', spawned.agent, '--sha', '50b732a15be40ccb2065cb2ba0e7b366d511b736']);
+    h.ok(['rework', 'T1', '--reason', 'review correction']);
+    const result = h.run(['spawn', '--task', 'T1']);
+    assert.equal(result.code, 1, result.stderr);
+    assert.match(result.stderr, /previous worker.*still running/);
+  } finally {
+    fs.writeFileSync(`${h.attempts}.finish`, '');
+  }
   await until(() => !detachedAlive({ pid: spawned.monitor_pid }), 'previous supervisor did not finish');
 });
 });

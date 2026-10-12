@@ -1,0 +1,2 @@
+- Apply nullable budget flags, one-use approvals and owner-write retirement to task budgets introduced by live spend. Keep task and project budget targets distinct.
+- Keep live-budget alert questions separate from setting approvals when merging the shared authority implementation.

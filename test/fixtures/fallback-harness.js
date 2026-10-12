@@ -4,6 +4,76 @@ const cp = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 
+// Each harness's own record for an expired login, in the shape its CLI prints.
+function authRecord(harness, message) {
+  if (harness === 'agy') return { status: 'ERROR', error: message };
+  if (harness === 'opencode') return { type: 'error', error: { name: 'APIError', data: { message } } };
+  if (harness === 'pi') return { type: 'message_end', message: { role: 'assistant', stopReason: 'error', errorMessage: message } };
+  if (harness === 'claude') return { type: 'result', is_error: true, result: message };
+  return { type: 'turn.failed', error: { message } };
+}
+
+if (process.env.TOWER_CRANE_TEST_CLAUDE_PROVIDER) {
+  const now = () => Number(process.hrtime.bigint()) / 1e6;
+  const label = (file, args) => {
+    if (file !== process.execPath) return path.basename(file) + (file === 'git' ? `:${args[0]}` : '');
+    const index = args.findIndex((arg, i) => /\.(?:m?js|cjs)$/.test(arg) && !['--require', '-r'].includes(args[i - 1]));
+    const script = path.basename(args[index] || 'node');
+    return script === 'tower-crane.js' ? `cli:${args[index + 1]}` : script;
+  };
+  const profile = { process: label(process.execPath, process.argv.slice(1)), children: [], delays: [] };
+  const started = now();
+  for (const method of ['spawn', 'spawnSync', 'execFile', 'execFileSync']) {
+    const original = cp[method];
+    cp[method] = function providerProcess(file, args, ...rest) {
+      // Engine hook and spend subprocesses must not expire under runner load.
+      if (method !== 'spawn') {
+        if (typeof rest[0] === 'function' || rest.length === 0) rest.unshift({ timeout: 0 });
+        else rest[0] = { ...rest[0], timeout: 0 };
+      }
+      const child = { process: label(file, args), method, timeout: rest[0]?.timeout || 0 };
+      profile.children.push(child);
+      const start = now();
+      if (method === 'execFile' && child.process === 'cli:hook') {
+        // Hook delivery has separate integration coverage. Provider fixtures
+        // keep the real claim command without competing hook writers.
+        const writer = new (require('node:events').EventEmitter)();
+        writer.stdin = new (require('node:stream').PassThrough)();
+        writer.stdin.resume();
+        child.process = 'hook callback';
+        queueMicrotask(() => {
+          child.ms = now() - start;
+          rest.at(-1)(null, '', '');
+          writer.emit('close', 0);
+        });
+        return writer;
+      }
+      let result;
+      try { result = original.call(this, file, args, ...rest); }
+      finally { if (method.endsWith('Sync')) child.ms = now() - start; }
+      if (!method.endsWith('Sync')) result.once('close', () => { child.ms = now() - start; });
+      return result;
+    };
+  }
+  if (profile.process === 'spawn-monitor.js') {
+    // Exit and stream events advance these fixtures; scheduling cannot expire a job.
+    Object.defineProperty(require('node:perf_hooks').performance, 'now', { value: () => 0 });
+    const schedule = global.setTimeout;
+    global.setTimeout = function providerDelay(fn, ms, ...args) {
+      profile.delays.push(ms);
+      return schedule(fn, ms, ...args);
+    };
+    const ladder = require(path.join(path.dirname(process.argv[1]), 'ladder.js'));
+    const supervision = ladder.supervision;
+    ladder.supervision = (rung) => ({ ...supervision(rung), backoff_ms: 0, max_backoff_ms: 0 });
+  }
+  process.once('exit', () => {
+    if (process.env.TOWER_CRANE_TEST_PROVIDER_TRACE) {
+      fs.appendFileSync(process.env.TOWER_CRANE_TEST_PROVIDER_TRACE, JSON.stringify({ ...profile, ms: now() - started }) + '\n');
+    }
+  });
+}
+
 if (path.resolve(process.argv[1] || '') !== __filename) {
   if (process.env.TOWER_CRANE_TEST_VERIFIED_AGY === '1') {
     const agentsFile = path.join(path.dirname(path.dirname(process.argv[1])), 'lib', 'agents.js');
@@ -14,8 +84,12 @@ if (path.resolve(process.argv[1] || '') !== __filename) {
   }
   const spawn = cp.spawn;
   cp.spawn = function offlineHarness(file, args, options) {
-    const harness = /[\\/]scripts[\\/]fallback(?:\.exe)?$/.test(file) ? 'command' : file;
-    if (['codex', 'claude', 'agy', 'command'].includes(harness) && process.env.TOWER_CRANE_TEST_FALLBACK_FILE) {
+    // The supervisor's lease gate starts its harness after `tower-crane-gate`.
+    const gated = file === '/bin/sh' && args[2] === 'tower-crane-gate';
+    const target = gated ? args[3] : file;
+    const harness = /[\\/]scripts[\\/]fallback(?:\.exe)?$/.test(target) ? 'command' : target;
+    if (['codex', 'claude', 'agy', 'opencode', 'pi', 'command'].includes(harness) && process.env.TOWER_CRANE_TEST_FALLBACK_FILE) {
+      if (gated) return spawn.call(this, file, [...args.slice(0, 3), process.execPath, __filename, harness, ...args.slice(4)], options);
       return spawn.call(this, process.execPath, [__filename, harness, ...args], options);
     }
     return spawn.call(this, file, args, options);
@@ -25,7 +99,7 @@ if (path.resolve(process.argv[1] || '') !== __filename) {
   const args = process.argv.slice(3);
   const file = process.env.TOWER_CRANE_TEST_FALLBACK_FILE;
   const cli = (argv) => cp.execFileSync(process.execPath, [path.join(__dirname, '..', '..', 'bin', 'tower-crane.js'), ...argv], {
-    encoding: 'utf8', timeout: 15000, stdio: ['pipe', 'pipe', 'pipe'],
+    encoding: 'utf8', timeout: process.env.TOWER_CRANE_TEST_CLAUDE_PROVIDER ? 0 : 15000, stdio: ['pipe', 'pipe', 'pipe'],
   });
   if (process.env.TOWER_CRANE_TEST_NESTED_DISPATCH && process.env.TOWER_CRANE_AGENT.startsWith('orchestrator-')) {
     const ladder = JSON.parse(cli(['ladder', 'show', '--json']));
@@ -35,6 +109,9 @@ if (path.resolve(process.argv[1] || '') !== __filename) {
     }));
     process.exit(0);
   }
+  // A login flag file stands for a completed re-login: the primary route then works, unless the login is broken despite it.
+  // Read before the attempt is recorded: a test removes the flag as soon as it sees the attempt.
+  const relogged = Boolean(process.env.TOWER_CRANE_TEST_LOGIN_FLAG) && fs.existsSync(process.env.TOWER_CRANE_TEST_LOGIN_FLAG);
   let attempts;
   try {
     attempts = JSON.parse(fs.readFileSync(file, 'utf8'));
@@ -51,6 +128,11 @@ if (path.resolve(process.argv[1] || '') !== __filename) {
   } : {};
   const provider = providerTest ? providerEnv.CLAUDE_CODE_USE_BEDROCK === '1' ? 'bedrock' : 'anthropic' : null;
   if (!attempts.length) cli(['claim', process.env.TOWER_CRANE_TASK]);
+  // Claim assertions need the real record, without another CLI per attempt.
+  const claim = providerTest
+    ? JSON.parse(fs.readFileSync(path.join(process.env.TOWER_CRANE_STATE, 'tasks.json'), 'utf8'))
+      .tasks.find((task) => task.id === process.env.TOWER_CRANE_TASK).claim
+    : JSON.parse(cli(['task', 'show', process.env.TOWER_CRANE_TASK, '--json'])).claim;
   const claudeHome = process.env.CLAUDE_CONFIG_DIR;
   const claude = harness === 'claude' ? {
     mcp: JSON.parse(fs.readFileSync(args[args.indexOf('--mcp-config') + 1], 'utf8')).mcpServers,
@@ -59,7 +141,7 @@ if (path.resolve(process.argv[1] || '') !== __filename) {
   } : {};
   attempts.push({
     harness, model, args, session: process.env.TOWER_CRANE_SESSION, retry: process.env.TOWER_CRANE_RETRY,
-    agent: process.env.TOWER_CRANE_AGENT, claim: JSON.parse(cli(['task', 'show', process.env.TOWER_CRANE_TASK, '--json'])).claim,
+    agent: process.env.TOWER_CRANE_AGENT, claim,
     env: process.env.ROUTE_ENV || null, broker: Boolean(process.env.TOWER_CRANE_BROKER),
     ...claude,
     node_test: Object.keys(process.env).filter((key) => /^NODE_TEST_/i.test(key)),
@@ -83,7 +165,7 @@ if (path.resolve(process.argv[1] || '') !== __filename) {
     console.log(JSON.stringify({ type: 'result', is_error: false, model,
       usage: { input_tokens: 20, output_tokens: 4 } }));
   }
-  if (model === 'first' || model === 'second' && process.env.TOWER_CRANE_TEST_FALLBACK_CHAIN
+  if (model === 'first' && (!relogged || process.env.TOWER_CRANE_TEST_LOGIN_BROKEN) || model === 'second' && process.env.TOWER_CRANE_TEST_FALLBACK_CHAIN
     || providerTest && provider === process.env.TOWER_CRANE_TEST_FAIL_PROVIDER) {
     if (process.env.TOWER_CRANE_TEST_FALLBACK_REASON === 'refusal') {
       console.log(JSON.stringify(harness === 'codex'
@@ -92,14 +174,47 @@ if (path.resolve(process.argv[1] || '') !== __filename) {
       process.exit(0);
     }
     const type = process.env.TOWER_CRANE_TEST_FALLBACK_REASON;
-    const message = 'rate limit exceeded: The service is temporarily unavailable.';
-    if (harness === 'agy') console.error('HTTP 503 service unavailable');
+    const auth = type === 'auth' || type === 'auth-stderr';
+    const message = auth ? 'Failed to authenticate: OAuth session expired and could not be refreshed'
+      : 'rate limit exceeded: The service is temporarily unavailable.';
+    if (harness === 'agy' && !auth) console.error('HTTP 503 service unavailable');
+    // An assistant record that quotes a login failure on stderr, from a run that succeeds.
+    if (type === 'quoted-stderr') {
+      const text = 'The task log says: Failed to authenticate: OAuth session expired and could not be refreshed';
+      console.error(JSON.stringify(harness === 'codex'
+        ? { type: 'item.completed', item: { type: 'agent_message', text } }
+        : harness === 'agy' ? { status: 'SUCCESS', response: text }
+          : { type: 'assistant', message: { content: [{ type: 'text', text }] } }));
+      process.exit(0);
+    }
+    // A typed record on stderr is the case the supervisor must still read.
+    if (type === 'auth-stderr') {
+      console.error(JSON.stringify({ type: 'error', message }));
+      process.exit(1);
+    }
+    // Codex's own plain-text wording for an expired login, as its CLI printed it.
+    if (type === 'auth-text') {
+      console.error('Failed to refresh token: Your access token could not be refreshed. Please log out and sign in again.');
+      process.exit(1);
+    }
     console.log(JSON.stringify(type === 'quoted'
       ? { type: 'item.completed', item: { type: 'agent_message', text: message + ' Request refused by policy' } }
       : ['signal', 'permanent'].includes(type) ? { type: 'error', message: 'invalid configuration' }
-        : harness === 'claude' ? { type: 'result', is_error: true, result: message }
-          : { type: 'turn.failed', error: { message } }));
-    process.exit(type === 'permanent' ? 2 : type === 'signal' ? 75 : 1);
+        : auth ? authRecord(harness, message)
+          : harness === 'claude' ? { type: 'result', is_error: true, result: message }
+            : { type: 'turn.failed', error: { message } }));
+    // Pi records its failed turn and exits zero, as the real CLI does.
+    process.exit(type === 'permanent' ? 2 : type === 'signal' ? 75 : auth && harness === 'pi' ? 0 : 1);
   }
-  if (process.env.TOWER_CRANE_TEST_FALLBACK_HOLD) setTimeout(() => {}, Number(process.env.TOWER_CRANE_TEST_FALLBACK_HOLD));
+  if (process.env.TOWER_CRANE_TEST_FALLBACK_FINISH) {
+    const timer = setInterval(() => {
+      if (!fs.existsSync(process.env.TOWER_CRANE_TEST_FALLBACK_FINISH)) return;
+      clearInterval(timer);
+      // A login that expires while the worker runs: its last request fails with the harness's own record.
+      if (process.env.TOWER_CRANE_TEST_LATE_AUTH) {
+        console.log(JSON.stringify(authRecord(harness, 'Failed to authenticate: OAuth session expired and could not be refreshed')));
+        process.exit(1);
+      }
+    }, 25);
+  } else if (process.env.TOWER_CRANE_TEST_FALLBACK_HOLD) setTimeout(() => {}, Number(process.env.TOWER_CRANE_TEST_FALLBACK_HOLD));
 }

@@ -1,0 +1,1 @@
+- Preserve the supervisor contention regression alongside consolidated outage tests and align the PID-namespace mutation with the lock process-identity check.
