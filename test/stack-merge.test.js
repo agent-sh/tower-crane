@@ -194,7 +194,8 @@ test('an unlinked dependent targets main and merges normally when its lower PR m
   const sha = f.h.git(['rev-parse', 'HEAD'], wt.path);
   f.write((d) => {
     d.prs[12] = { number: 12, state: 'OPEN', headRefOid: sha, headRefName: wt.branch,
-      baseRefName: f.lower.branch, isCrossRepository: false, autoMergeRequest: null };
+      baseRefName: f.lower.branch, isCrossRepository: false, autoMergeRequest: null,
+      mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' };
   });
   f.accept('T1');
   f.h.ok(['merge', 'T1']);

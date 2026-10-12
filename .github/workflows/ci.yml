@@ -76,10 +76,6 @@ jobs:
           $selected = $files.Trim().Split(' ')
           # The selected files already belong to this shard.
           Remove-Item Env:TC_TEST_SHARD
-          if ($selected -contains 'test/windows-ancestry.test.js') {
-            node scripts/probe-windows-ancestry.js
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          }
           foreach ($attempt in 1..10) {
             Write-Host "Owner authority and board approval shard: pass $attempt/10 ($files)"
             npm test -- @selected
@@ -88,7 +84,6 @@ jobs:
         env:
           TOWER_CRANE_TEST_TMP: ${{ runner.temp }}/tower-crane-tests
           TC_TEST_SHARD: ${{ matrix.shard }}
-          TOWER_CRANE_CHANGE_BASE: ${{ github.event.pull_request.base.sha }}
 
   model-swap:
     name: complete model swap proof

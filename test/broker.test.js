@@ -350,7 +350,12 @@ const original = cp.spawnSync;
 cp.spawnSync = function (command, args, opts) {
   if (command !== 'gh' || process.env.TOWER_CRANE_VIA !== 'broker') return original.call(this, command, args, opts);
   require('node:fs').appendFileSync(process.env.BROKER_GH_LOG, JSON.stringify({ args, cwd: opts.cwd, git_dir: opts.env.GIT_DIR || null }) + '\\n');
-  return { status: 0, stdout: JSON.stringify({ state: 'OPEN', headRefName: 'change' }), stderr: '' };
+  // The submit also reads the head's green checks, so the stub answers those endpoints too.
+  const green = { name: 'test (ubuntu)', status: 'completed', conclusion: 'success', app: 'github-actions', suite: 1, url: null, output: null };
+  const suite = { id: 1, app: 'github-actions', status: 'completed', conclusion: 'success', runs: 1 };
+  const out = args[0] === 'pr' ? { state: 'OPEN', headRefName: 'change', mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }
+    : args[1].includes('check-runs') ? green : args[1].includes('check-suites') ? suite : null;
+  return { status: 0, stdout: out ? JSON.stringify(out) : '', stderr: '' };
 };
 `);
   const saved = { NODE_OPTIONS: process.env.NODE_OPTIONS, BROKER_GH_LOG: process.env.BROKER_GH_LOG };
@@ -374,10 +379,15 @@ cp.spawnSync = function (command, args, opts) {
     { env: { TOWER_CRANE_BROKER: job.broker } });
   assert.equal(r.code, 0, r.stderr);
   const calls = fs.readFileSync(log, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
-  assert.equal(calls.length, 1);
-  assert.deepEqual(calls[0].args.slice(0, 5), ['pr', 'view', '7', '-R', 'acme/demo']);
-  assert.equal(calls[0].cwd, h.state);
-  assert.ok(calls[0].git_dir && !fs.existsSync(calls[0].git_dir), 'git finds no repository');
+  // The submit reads the PR twice: its state and branch, then its mergeability.
+  const views = calls.filter((c) => c.args[0] === 'pr');
+  assert.equal(views.length, 2);
+  for (const view of views) assert.deepEqual(view.args.slice(0, 5), ['pr', 'view', '7', '-R', 'acme/demo']);
+  assert.ok(calls.some((c) => c.args[0] === 'api' && c.args[1].includes('/check-runs')), 'the submit reads the head checks');
+  for (const call of calls) {
+    assert.equal(call.cwd, h.state);
+    assert.ok(call.git_dir && !fs.existsSync(call.git_dir), 'git finds no repository');
+  }
   assert.equal(h.readState('tasks.json').tasks[0].sha, '5bfcb6f56ab912a009883c798a61298c507dada4');
 });
 
