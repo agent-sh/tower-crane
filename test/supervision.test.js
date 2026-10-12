@@ -959,8 +959,17 @@ setInterval(() => {}, 1000);
 test('a rerun waits for previous descendants even when they close their output pipes', {
   skip: process.platform !== 'linux' && 'Linux process state',
 }, (t) => {
+  // After hooks run in registration order, so this one comes before setup's, which deletes the fixture
+  // that holds the group file.
+  let groupFile;
+  t.after(() => {
+    // Read the file, not a spawn result: a spawn that throws before returning still leaves the group running.
+    const recorded = groupFile && fs.existsSync(groupFile) ? JSON.parse(fs.readFileSync(groupFile, 'utf8')) : null;
+    if (!recorded) return;
+    try { process.kill(-recorded.parent, 'SIGKILL'); } catch (e) { if (e.code !== 'ESRCH') throw e; }
+  });
   const h = setup(t, { failures: 0 });
-  const groupFile = path.join(h.base, 'previous-group.json');
+  groupFile = path.join(h.base, 'previous-group.json');
   const script = `
 const cp = require('node:child_process');
 const fs = require('node:fs');
@@ -983,14 +992,8 @@ if (!fs.existsSync(file)) {
 }
 `;
   h.ok(['ladder', 'set', 'easy', '--command', JSON.stringify([process.execPath, '-e', script, BIN, groupFile, '{prompt}'])]);
-  let group;
-  t.after(() => {
-    if (!group) return;
-    try { process.kill(-group.parent, 'SIGKILL'); } catch (e) { if (e.code !== 'ESRCH') throw e; }
-  });
   // The rerun waits out the previous child's SIGTERM grace, so allow for a loaded machine.
   const result = h.spawn(undefined, 60000);
-  group = JSON.parse(fs.readFileSync(groupFile, 'utf8'));
   assert.equal(result.code, 0, result.stderr);
   assert.equal(log(h).filter((e) => e.cmd === 'spawn retry').length, 1);
 });

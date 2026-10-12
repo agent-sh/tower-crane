@@ -5,6 +5,7 @@ const { waitUntil } = require('./signals');
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const { TMP_ROOT, detachedAlive, makeRepo } = require('./helpers');
 const { stacked } = require('./stack-fixture');
@@ -226,8 +227,23 @@ test('a sandboxed reviewer asks through the broker: a technical question reaches
 });
 
 test('closing the broker stops the commands it is running and what they started', async (t) => {
+  // After hooks run in registration order, so this one comes before scratch(t)'s, which deletes the
+  // fixture that holds the pids file.
+  const saved = { NODE_OPTIONS: process.env.NODE_OPTIONS, BROKER_TEST_PIDS: process.env.BROKER_TEST_PIDS };
+  let pids;
+  let broker;
+  let started = [];
+  t.after(() => {
+    // A failed test leaves the broker's servers open, which keeps the test runner alive.
+    broker?.close();
+    for (const [k, v] of Object.entries(saved)) if (v === undefined) delete process.env[k]; else process.env[k] = v;
+    // Read the file, not `started`: a test that fails before reading it still leaves them running.
+    const text = pids && fs.existsSync(pids) ? fs.readFileSync(pids, 'utf8') : '';
+    const recorded = text ? JSON.parse(text) : [];
+    for (const pid of recorded.filter((p) => detachedAlive({ pid: p }))) process.kill(pid, 'SIGKILL');
+  });
   const { base, state, job } = scratch(t);
-  const pids = path.join(base, 'pids.json');
+  pids = path.join(base, 'pids.json');
   // Preloaded into the CLI the broker runs: it starts a process in a group of
   // its own, as a check's test run does, records both and never returns.
   const preload = path.join(base, 'hang.js');
@@ -240,17 +256,10 @@ const run = cp.spawn(process.execPath, ['-e', 'setInterval(() => {}, 1e9)'], { e
 require('node:fs').writeFileSync(process.env.BROKER_TEST_PIDS, JSON.stringify([process.pid, run.pid]));
 Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0);
 `);
-  const saved = { NODE_OPTIONS: process.env.NODE_OPTIONS, BROKER_TEST_PIDS: process.env.BROKER_TEST_PIDS };
   process.env.NODE_OPTIONS = `--require ${JSON.stringify(preload)}`;
   process.env.BROKER_TEST_PIDS = pids;
-  let started = [];
-  t.after(() => {
-    for (const [k, v] of Object.entries(saved)) if (v === undefined) delete process.env[k]; else process.env[k] = v;
-    // Only a test that failed leaves them running.
-    for (const pid of started.filter((p) => detachedAlive({ pid: p }))) process.kill(pid, 'SIGKILL');
-  });
 
-  const broker = await B.start(job);
+  broker = await B.start(job);
   const answer = B.forward(job.broker, ['task', 'note', 'T1', 'slow'], state).then((r) => ({ r }), (e) => ({ e }));
   const until = (check) => waitUntil(check, { paths: [base], signal: t.signal });
   await until(() => fs.existsSync(pids) && fs.readFileSync(pids, 'utf8').length > 0, 'the brokered command started');
@@ -314,6 +323,61 @@ test('a worker cannot have the broker run its tests, its cleanup or git', () => 
     assert.throws(() => B.authorize(job, argv), /changes state only with/, argv.join(' '));
   }
   for (const role of Object.keys(B.ROLES)) for (const cmd of B.ROLES[role]) assert.ok(!/^(check|worktree|merge|spawn)\b/.test(cmd), `${role}: ${cmd}`);
+});
+
+test('a broker whose temp root is too deep for a socket keeps its socket out of /tmp', { skip: process.platform === 'win32' && 'Windows uses a named pipe' }, async (t) => {
+  const s = scratch(t);
+  // A temp root this deep leaves no room for a Unix socket path under it. The home is the account's,
+  // as in production: a gate or a sandbox can set HOME deep, and then its cache root fits no socket.
+  const deep = path.join(s.base, 'd'.repeat(120));
+  fs.mkdirSync(deep);
+  const saved = { TMPDIR: process.env.TMPDIR, HOME: process.env.HOME };
+  process.env.TMPDIR = deep;
+  process.env.HOME = os.userInfo().homedir;
+  t.after(() => {
+    for (const key of ['TMPDIR', 'HOME']) {
+      if (saved[key] === undefined) delete process.env[key];
+      else process.env[key] = saved[key];
+    }
+  });
+  const job = { ...s.job, broker_harnesses: ['claude'], broker: path.join(s.base, 'w'.repeat(90), B.FILE) };
+  const broker = await B.start(job);
+  t.after(() => broker.close());
+  const { socket } = JSON.parse(fs.readFileSync(job.broker, 'utf8'));
+  assert.ok(socket.startsWith(path.join(os.homedir(), '.cache', 'tower-crane') + path.sep), socket);
+});
+
+test('a broker whose cache root cannot be written tries /tmp next', { skip: process.platform === 'win32' && 'Windows uses a named pipe' }, async (t) => {
+  const s = scratch(t);
+  const deep = path.join(s.base, 'd'.repeat(120));
+  fs.mkdirSync(deep);
+  const savedTmp = process.env.TMPDIR;
+  process.env.TMPDIR = deep;
+  t.after(() => {
+    if (savedTmp === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = savedTmp;
+  });
+  // A short home, so its cache root fits a socket path on any account. The cache root is refused as on a
+  // read-only home, and so is every mkdtemp: nothing is made and nothing is listened on.
+  t.mock.method(os, 'homedir', () => '/h');
+  const cache = path.join('/h', '.cache', 'tower-crane');
+  const attempted = [];
+  const readOnly = () => Object.assign(new Error('EROFS: read-only file system'), { code: 'EROFS' });
+  const mkdir = fs.mkdirSync;
+  t.mock.method(fs, 'mkdirSync', (p, options) => {
+    if (p === cache) {
+      attempted.push(p);
+      throw readOnly();
+    }
+    return mkdir(p, options);
+  });
+  t.mock.method(fs, 'mkdtempSync', (prefix) => {
+    attempted.push(path.dirname(prefix));
+    throw readOnly();
+  });
+  const job = { ...s.job, broker_harnesses: ['claude'], broker: path.join(s.base, 'w'.repeat(90), B.FILE) };
+  await assert.rejects(B.start(job), /no socket path short enough and writable/);
+  assert.deepEqual(attempted, [cache, '/tmp']);
 });
 
 test('a broker for claude and codex routes listens on both, and an agent that cannot use the socket uses TCP', { skip: process.platform === 'win32' && 'Windows uses a named pipe for both' }, async (t) => {
