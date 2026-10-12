@@ -719,6 +719,13 @@ for (const harness of ['claude', 'codex']) {
     const attemptsFile = path.join(h.base, 'harness-attempts.json');
     const result = h.run(['spawn', '--task', 'T1', '--wait'], {
       env: {
+        CLAUDE_CONFIG_DIR: path.join(h.base, 'home', '.claude'),
+        CODEX_HOME: path.join(h.base, 'home', '.codex'),
+        PI_CODING_AGENT_DIR: path.join(h.base, 'home', '.pi', 'agent'),
+        GH_CONFIG_DIR: path.join(h.base, 'home', '.config', 'gh'),
+        XDG_CONFIG_HOME: path.join(h.base, 'home', '.config'),
+        XDG_DATA_HOME: path.join(h.base, 'home', '.local', 'share'),
+        OPENCODE_CONFIG_DIR: path.join(h.base, 'home', '.config', 'opencode'),
         PATH: bin + path.delimiter + (h.env.PATH || h.env.Path || ''),
         NODE_OPTIONS: `--require "${stub}"`, TOWER_CRANE_TEST_SUPERVISION_FILE: attemptsFile,
       },
@@ -834,7 +841,11 @@ test('Windows natural exits do not send taskkill to an exited or reused pid', (t
   const result = h.run(['spawn', '--task', 'T1', '--wait'], { env: {
     NODE_OPTIONS: `--require "${hook}"`, TOWER_CRANE_TEST_TASKKILL: audit,
   } });
-  assert.equal(result.code, 0, result.stderr);
+  if (result.code !== 0) {
+    const exit = log(h).findLast((event) => event.cmd === 'spawn exit');
+    const output = exit?.detail.log && fs.existsSync(exit.detail.log) ? fs.readFileSync(exit.detail.log, 'utf8') : '';
+    assert.fail(result.stderr + result.stdout + output + JSON.stringify(exit));
+  }
   assert.equal(fs.existsSync(audit), false, 'taskkill can target a new process after the harness pid is released');
 });
 
