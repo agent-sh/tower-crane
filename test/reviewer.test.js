@@ -685,35 +685,37 @@ test('changed requirements and unrelated rework keep the full review scope', (t)
   }
 });
 
-test('a rebased rework gets a full review without upstream changes in its diff', (t) => {
-  const h = setup(t, 'easy', 'other', undefined, { gated: true });
-  h.reviewer('T1', 'first-reviewer');
-  h.ok(['evidence', 'T1', '--agent', 'first-reviewer', '--type', 'review', '--fail',
-    '--sha', h.sha, '--summary', 'correction.md must explain the value']);
-  h.ok(['rework', '--from-review', 'T1']);
-  h.git(['switch', 'main']);
-  fs.writeFileSync(path.join(h.repo, 'upstream.md'), 'An upstream change.\n');
-  h.git(['add', 'upstream.md']);
-  h.git(['commit', '-qm', 'advance the base']);
-  h.git(['switch', 'fixture-change']);
-  h.git(['rebase', 'main']);
-  fs.writeFileSync(path.join(h.repo, 'correction.md'), 'The value becomes one.\n');
-  h.git(['add', 'correction.md']);
-  h.git(['commit', '-qm', 'explain the value']);
-  h.sha = h.git(['rev-parse', 'HEAD']);
-  h.ok(['claim', 'T1', '--agent', 'builder']);
-  h.ok(['submit', 'T1', '--agent', 'builder', '--sha', h.sha]);
-  ready(h);
-  const out = path.join(h.base, 'rebased-review.txt');
-  commandReviewer(h, out);
-  const dispatched = h.json(['spawn', '--task', 'T1', '--role', 'review', '--wait']);
-  const prompt = fs.readFileSync(out, 'utf8');
-  assert.match(prompt, /## Review scope\n\nFull review/);
-  assert.match(prompt, /not an ancestor/);
-  assert.match(prompt, /diff --git a\/value.js b\/value.js/);
-  assert.match(prompt, /diff --git a\/correction.md b\/correction.md/);
-  assert.ok(!prompt.includes('diff --git a/upstream.md'));
-  assert.equal(dispatched.review_scope, null);
+test('a rework with a rebased or merged base update gets a full review without upstream changes in its diff', (t) => {
+  for (const update of ['rebase', 'merge']) {
+    const h = setup(t, 'easy', 'other', undefined, { gated: true });
+    h.reviewer('T1', 'first-reviewer');
+    h.ok(['evidence', 'T1', '--agent', 'first-reviewer', '--type', 'review', '--fail',
+      '--sha', h.sha, '--summary', 'correction.md must explain the value']);
+    h.ok(['rework', '--from-review', 'T1']);
+    h.git(['switch', 'main']);
+    fs.writeFileSync(path.join(h.repo, 'upstream.md'), 'An upstream change.\n');
+    h.git(['add', 'upstream.md']);
+    h.git(['commit', '-qm', 'advance the base']);
+    h.git(['switch', 'fixture-change']);
+    h.git(update === 'rebase' ? ['rebase', 'main'] : ['merge', '--no-ff', '-m', 'merge updated base', 'main']);
+    fs.writeFileSync(path.join(h.repo, 'correction.md'), 'The value becomes one.\n');
+    h.git(['add', 'correction.md']);
+    h.git(['commit', '-qm', 'explain the value']);
+    h.sha = h.git(['rev-parse', 'HEAD']);
+    h.ok(['claim', 'T1', '--agent', 'builder']);
+    h.ok(['submit', 'T1', '--agent', 'builder', '--sha', h.sha]);
+    ready(h);
+    const out = path.join(h.base, 'rebased-review.txt');
+    commandReviewer(h, out);
+    const dispatched = h.json(['spawn', '--task', 'T1', '--role', 'review', '--wait']);
+    const prompt = fs.readFileSync(out, 'utf8');
+    assert.match(prompt, /## Review scope\n\nFull review/);
+    assert.match(prompt, /not an ancestor|base advanced/);
+    assert.match(prompt, /diff --git a\/value.js b\/value.js/);
+    assert.match(prompt, /diff --git a\/correction.md b\/correction.md/);
+    assert.ok(!prompt.includes('diff --git a/upstream.md'));
+    assert.equal(dispatched.review_scope, null);
+  }
 });
 
 test('review packet uses role headings consistently and ignores fenced headings', (t) => {
