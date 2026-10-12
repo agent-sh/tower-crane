@@ -3,6 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const { TMP_ROOT, detachedAlive, makeRepo } = require('./helpers');
 const { stacked } = require('./stack-fixture');
@@ -330,25 +331,21 @@ test('a worker cannot have the broker run its tests, its cleanup or git', () => 
 
 test('a broker whose temp root is too deep for a socket keeps its socket out of /tmp', { skip: process.platform === 'win32' && 'Windows uses a named pipe' }, async (t) => {
   const s = scratch(t);
-  // A temp root this deep leaves no room for a Unix socket path under it.
+  // A temp root this deep leaves no room for a Unix socket path under it. The home is the user's, as
+  // in production, so its cache root is short wherever the temp root is not.
   const deep = path.join(s.base, 'd'.repeat(120));
-  const home = path.join(s.base, 'home-dir');
   fs.mkdirSync(deep);
-  fs.mkdirSync(home);
-  const saved = { TMPDIR: process.env.TMPDIR, HOME: process.env.HOME };
+  const saved = process.env.TMPDIR;
   process.env.TMPDIR = deep;
-  process.env.HOME = home;
   t.after(() => {
-    for (const [key, value] of Object.entries(saved)) {
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-    }
+    if (saved === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = saved;
   });
   const job = { ...s.job, broker_harnesses: ['claude'], broker: path.join(s.base, 'w'.repeat(90), B.FILE) };
   const broker = await B.start(job);
   t.after(() => broker.close());
   const { socket } = JSON.parse(fs.readFileSync(job.broker, 'utf8'));
-  assert.ok(socket.startsWith(path.join(home, '.cache', 'tower-crane') + path.sep), socket);
+  assert.ok(socket.startsWith(path.join(os.homedir(), '.cache', 'tower-crane') + path.sep), socket);
 });
 
 test('a broker for claude and codex routes listens on both, and an agent that cannot use the socket uses TCP', { skip: process.platform === 'win32' && 'Windows uses a named pipe for both' }, async (t) => {
