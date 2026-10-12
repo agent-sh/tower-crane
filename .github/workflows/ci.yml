@@ -61,7 +61,7 @@ jobs:
         run: |
           $files = node -e "const r=require('./test/run.js'); const [i,n]=process.env.TC_TEST_SHARD.split('/').map(Number); const affected=new Set(['test/authority.test.js','test/approval-context.test.js','test/board-controls.test.js','test/windows-ancestry.test.js']); console.log(r.shardFiles(r.testFiles(),i,n).filter(f=>affected.has(f)).join(' '))"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          if (!$files.Trim()) { exit 0 }
+          if ([string]::IsNullOrWhiteSpace($files)) { exit 0 }
           $selected = $files.Trim().Split(' ')
           # The selected files already belong to this shard.
           Remove-Item Env:TC_TEST_SHARD
