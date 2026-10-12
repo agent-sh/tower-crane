@@ -76,6 +76,8 @@ const MUTANTS = [
     from: 'Number.isInteger(revision) && revision > 0 && change.revision === revision', to: 'true', tests: ['test/approval-context.test.js'] },
   { id: 'release-approval-ignores-claim-instance', area: 'authority', file: 'lib/tasks.js',
     from: 'holder: t.claim.agent, claim_since: t.claim.since', to: 'holder: t.claim.agent', tests: ['test/approval-context.test.js'] },
+  { id: 'release-keeps-previous-sha', area: 'tasks', file: 'lib/tasks.js',
+    from: 'if (t.pr && t.pr !== pr) t.sha = null;', to: '', tests: ['test/decision-resume.test.js'] },
   { id: 'browser-kit-approval-ignores-file', area: 'authority', file: 'lib/browser-kit.js',
     from: 'change: { user_file: file, servers: names }', to: 'change: { servers: names }', tests: ['test/approval-context.test.js'] },
   { id: 'personal-fallback-borrows-primary-grants', area: 'authority', file: 'lib/project.js',
