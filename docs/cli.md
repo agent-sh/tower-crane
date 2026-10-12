@@ -320,7 +320,11 @@ dead claims through `release --dead`. Worker exits, releases, rework and confirm
 free slots through `spawn --ready`, including ready rework tasks. The same
 worker limit, unblocking-first order, routing, fallback and locked reservations
 apply; concurrent watchers cannot dispatch above the limit. Dispatch refusals
-are reported on stderr and leave the task available for a later dispatch.
+are reported once on stderr per wait while dispatch inputs are unchanged.
+Changed task or brief data, routing, project settings or worker holders retry
+the batch. Progress notes and fallback ticks alone do not retry a refusal.
+After fixing external availability or filesystem conditions, use
+`spawn --ready` or restart the wait to retry.
 Startup and the existing fallback tick also check capacity, recovering slots
 freed before the wait cursor. These capacity checks run only in a trusted
 wait without `--observe`.

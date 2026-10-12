@@ -1455,14 +1455,35 @@ poll();
   h.consume = () => h.run(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
   h.marker = (id) => path.join(h.env.AUTOMATION_CONTEXT_DIR, id);
   t.after(async () => {
-    for (const id of ['T1', 'T2', 'T3', 'T4']) fs.writeFileSync(`${h.marker(id)}.go`, '');
-    for (const id of ['T1', 'T2', 'T3', 'T4']) {
+    const ids = h.readState('tasks.json').tasks.map((task) => task.id);
+    for (const id of ids) fs.writeFileSync(`${h.marker(id)}.go`, '');
+    for (const id of ids) {
       if (fs.existsSync(h.marker(id))) await waitFor(`${h.marker(id)}.exited`);
     }
     await h.cleanup();
   });
   return h;
 }
+
+test('automation reports unchanged dispatch refusals once and retries after the brief changes', async (t) => {
+  const h = refillFixture(t);
+  for (const id of ['T1', 'T2', 'T3', 'T4']) h.ok(['task', 'update', id, '--status', 'cancelled']);
+  h.ok(['task', 'add', '--title', 'Missing brief', '--acceptance', 'works', '--tier', 'easy']);
+  const started = path.join(h.base, 'wait-started');
+  const waiter = h.runAsync(['wait', '--types', 'spawn', '--timeout', '15', '--agent', 'orchestrator'],
+    { hooks: { HOOK_WATCH_READY: started } });
+  assert.notEqual(await waitFor(started), null);
+  for (let i = 0; i < 3; i++) {
+    h.ok(['task', 'note', 'T5', `unrelated progress ${i}`]);
+    await new Promise((resolve) => setTimeout(resolve, 1100));
+  }
+  h.ok(['brief', 'set', 'T5', '-'], { input: 'Implement the acceptance.\n' });
+  const result = await waiter;
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(JSON.parse(result.stdout).task, 'T5');
+  assert.equal(result.stderr.match(/has no brief/g)?.length, 1, result.stderr);
+  assert.notEqual(await waitFor(h.marker('T5')), null, 'the changed brief retries dispatch');
+});
 
 test('automation dispatches rework-ready work with the failed review findings', async (t) => {
   const h = refillFixture(t);
