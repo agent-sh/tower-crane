@@ -64,13 +64,15 @@ is recovered through the merge gate's accepted-head confirmation.
 
 Software gates run again when their passing evidence no longer matches its
 inputs, such as the pinned command or tests policy. A failed `tests`, `clean`
-or `ci` gate at a submitted head does not wait for an operator. Each failure
+or `ci` gate at a submitted head does not wait for an operator, whether the
+run came from a reaction, a `check` run by hand or `gates retry`. Each failure
 is classified by what it says about the change:
 
 - Infrastructure runs once more at the same head, and a second failure reworks.
   That covers a timeout, a runner killed by a signal, a CI run that timed out,
   was cancelled or never started, a cleanup scan with checks that did not run,
-  and a test that also fails on the base branch (`main` in the project).
+  and a test that also fails on the base branch (`main` in the project, local
+  or `origin`, whichever is newer).
 - A change the worker must fix reworks at once: no test covers the change, it
   has no changes against the base, a test or cleanup command fails, or a
   required CI run is not successful.

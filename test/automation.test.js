@@ -854,6 +854,76 @@ test('a test that also fails on main retries once, then reworks with the main fa
   assert.match(h.logs().findLast((e) => e.cmd === 'rework').detail.reason, /^tests failed at [0-9a-f]+: .*Also fails on main at [0-9a-f]+: known base failure/s);
 });
 
+test('a test gate that fails by hand while the watcher runs reworks, not left submitted', async (t) => {
+  const h = setup(t, { ci: 'pending' });
+  const flag = path.join(h.base, 'broken');
+  const script = path.join(h.base, 'breaks-when-flagged.js');
+  fs.writeFileSync(script, `const fs = require('node:fs');\nif (fs.existsSync(${JSON.stringify(flag)})) process.exit(1);\n`);
+  h.ok(['project', 'set', '--tests-cmd', `node ${shellQuote(script)}`, '--tests-mode', 'run-only']);
+  h.submit();
+  h.consume();
+  const finished = () => h.logs().filter((e) => e.cmd === 'automation' && e.detail.phase === 'done').length;
+  const before = finished();
+  const offset = fs.statSync(path.join(h.state, 'events.jsonl')).size;
+  const watcher = h.runAsync(['wait', '--after', String(offset), '--types', 'never', '--timeout', '8', '--agent', 'orchestrator']);
+  // The watcher's startup reconcile settles the submission first; the failure comes after it.
+  for (let i = 0; i < 100 && finished() === before; i++) await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.ok(finished() > before, 'the watcher reconciled the submitted task');
+  fs.writeFileSync(flag, '');
+  assert.equal(h.run(['check', 'tests', 'T1']).code, 1);
+  assert.equal((await watcher).code, 2, 'the watcher runs to its deadline');
+  const task = h.readState('tasks.json').tasks[0];
+  assert.equal(task.status, 'rework', 'a failure recorded by a manual check reworks at once');
+  assert.match(h.logs().findLast((e) => e.cmd === 'rework').detail.reason, /^tests failed at [0-9a-f]+: /);
+});
+
+test('a test that also fails on main reworks without a quality climb on a task with a tier range', (t) => {
+  const h = setup(t, { ci: 'pending' });
+  h.ok(['task', 'update', 'T1', '--tier', 'easy..medium']);
+  const script = path.join(h.base, 'known-failure.js');
+  fs.writeFileSync(script, "console.log('# Subtest: test/known.test.js');\nconsole.log('not ok 1 - known base failure');\nprocess.exit(1);\n");
+  h.ok(['project', 'set', '--tests-cmd', `node ${shellQuote(script)}`, '--tests-mode', 'run-only']);
+  h.submit();
+  h.consume();
+  assert.equal(h.logs().filter((e) => e.cmd === 'check tests').length, 2, 'the failure that also fails on main runs once more');
+  const task = h.readState('tasks.json').tasks[0];
+  assert.equal(task.status, 'rework');
+  assert.equal(task.tier, 'easy', 'a failure that also fails on main is not the change\'s, so it does not climb');
+  assert.deepEqual(task.escalations ?? [], []);
+});
+
+test('a run with a failing name that does not fail on main keeps its verdict and reworks at once', (t) => {
+  const h = setup(t, { ci: 'pending' });
+  const script = path.join(h.base, 'partly-known.js');
+  fs.writeFileSync(script, "const fs = require('node:fs');\nconsole.log('# Subtest: test/known.test.js');\nconsole.log('not ok 1 - known base failure');\nif (fs.readFileSync('value.js', 'utf8').includes('1')) console.log('not ok 2 - change breaks a test');\nprocess.exit(1);\n");
+  h.ok(['project', 'set', '--tests-cmd', `node ${shellQuote(script)}`, '--tests-mode', 'run-only']);
+  h.submit();
+  h.consume();
+  assert.equal(h.logs().filter((e) => e.cmd === 'check tests').length, 1, 'a failure with a name the change added is not retried');
+  const task = h.readState('tasks.json').tasks[0];
+  assert.equal(task.status, 'rework');
+  const latest = task.evidence.filter((e) => e.type === 'tests').at(-1);
+  assert.equal(latest.confirmed_failure, true);
+  assert.equal(latest.main_failure, undefined, 'only a run whose every failing name also fails on main is not the change\'s');
+  assert.match(h.logs().findLast((e) => e.cmd === 'rework').detail.reason, /change breaks a test/);
+});
+
+test('a test that fails on a newer origin main retries once though the local base is behind', (t) => {
+  const h = setup(t, { ci: 'pending' });
+  const script = path.join(h.base, 'fails-with-value.js');
+  fs.writeFileSync(script, "const fs = require('node:fs');\nif (!fs.readFileSync('value.js', 'utf8').includes('1')) process.exit(0);\nconsole.log('# Subtest: test/sum.test.js');\nconsole.log('not ok 1 - sums two numbers');\nprocess.exit(1);\n");
+  // origin/main moved past local main with the change's value, so the failure exists only on the newer base.
+  const moved = h.git(['commit-tree', h.git(['rev-parse', 'fixture-change^{tree}']), '-p', 'main', '-m', 'main moved']);
+  h.git(['update-ref', 'refs/remotes/origin/main', moved]);
+  h.ok(['project', 'set', '--tests-cmd', `node ${shellQuote(script)}`, '--tests-mode', 'run-only']);
+  h.submit();
+  h.consume();
+  assert.equal(h.logs().filter((e) => e.cmd === 'check tests').length, 2, 'the failure that also fails on origin main runs once more');
+  const task = h.readState('tasks.json').tasks[0];
+  assert.deepEqual(task.evidence.filter((e) => e.type === 'tests').map((e) => e.main_failure?.names), [['sums two numbers'], ['sums two numbers']]);
+  assert.equal(task.status, 'rework');
+});
+
 test('gates retry exits nonzero while a retried gate still fails', (t) => {
   const h = setup(t, { ci: 'pending' });
   h.ok(['project', 'set', '--tests-cmd', 'node -e "process.exit(1)"', '--tests-mode', 'run-only']);
