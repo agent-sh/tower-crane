@@ -313,7 +313,10 @@ gates merge through the existing head guards. A watcher creates a fresh
 reconciliation request for every active PR when starting, except a default
 `wait --timeout 0` cursor snapshot. It queries current mergeability even
 when the last reaction completed, recovering conflicts after merges that
-happened without a waiter. Existing evidence at the same head is reused.
+happened without a waiter. Audited evidence at the same head and revision
+is reused when its policy still matches. Missing evidence, including an
+entry without its matching gate audit receipt, runs in the next reaction.
+An earlier completed reaction does not suppress those gates.
 Reconciliation does not wait on a busy state lock; the next notification
 or existing fallback tick retries it within the wait's timeout.
 Filters apply to the returned event, not to the software reactions.

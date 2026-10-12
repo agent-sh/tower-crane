@@ -856,7 +856,12 @@ unique identifier for that watcher. It uses the same task reservation as
 other reactions and queries current PR state regardless of earlier
 completed receipts. A newly conflicting PR goes to rework even if its
 base moved while no watcher ran. Matching gate evidence is reused rather
-than rerun because of reconciliation. An idle startup writes no request.
+than rerun because of reconciliation. A submitted task's required software
+gates run when evidence is absent at its head and revision, including when
+an entry lacks a matching gate audit receipt. Passing evidence staled by a
+pinned command or tests policy change runs again. Completed reaction
+receipts do not suppress those runs; an audited failure still waits for an
+explicit retry. An idle startup writes no request.
 A busy state lock defers the request to the existing watch notification
 or fallback tick without holding the wait timeout.
 `merge queue` events have no task and record `{phase}`: `running` with the
