@@ -68,6 +68,14 @@ function choice(h, env) {
   return h.json(['spawn', '--task', 'T1', '--role', 'review', '--dry-run'], { env: { ...h.reviewEnv, ...env } });
 }
 
+function assertReviewDiff(h, prompt, pattern) {
+  if (pattern.test(prompt)) return;
+  // Long scratch paths enlarge receipts, so even a small diff can use the context file.
+  const packet = path.join(h.state, 'reviews', `T1-${h.sha}.md`);
+  assert.ok(prompt.includes(`Read ${packet} for the diff at ${h.sha}.`),
+    'the review must include the diff or reference its complete context packet');
+}
+
 function model(out) {
   const flag = out.harness === 'claude' ? '--model' : out.argv.includes('-m') ? '-m' : out.argv.includes('-p') ? '-p' : '--model';
   return out.argv[out.argv.indexOf(flag) + 1];
@@ -558,7 +566,7 @@ test('direct review dispatch refuses missing and failed gates and supplies lean 
   assert.equal(out.agent, 'reviewer-T1-1');
   const prompt = out.argv.find((arg) => arg.includes('## Task'));
   assert.match(prompt, /value becomes one/);
-  assert.match(prompt, /diff --git a\/value.js b\/value.js/);
+  assertReviewDiff(h, prompt, /diff --git a\/value.js b\/value.js/);
   assert.match(prompt, /Gate results/);
   assert.match(prompt, /fail without/);
   assert.match(prompt, /probe/);
@@ -823,7 +831,7 @@ test('review uses the nearest base when only origin has it or the local base is 
   const base = h.git(['rev-parse', 'main']);
   h.git(['update-ref', 'refs/remotes/origin/main', base]);
   h.git(['branch', '-D', 'main']);
-  assert.match(choice(h).argv.find((arg) => arg.includes('## Task')), /diff --git/);
+  assertReviewDiff(h, choice(h).argv.find((arg) => arg.includes('## Task')), /diff --git/);
   h.git(['branch', 'main', `${base}~1`]);
   const prompt = choice(h).argv.find((arg) => arg.includes('## Task'));
   assert.ok(prompt.includes(`Base: ${base}.`));
