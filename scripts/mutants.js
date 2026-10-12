@@ -135,6 +135,8 @@ const MUTANTS = [
     from: "const sandboxed = !!ctx.env?.TOWER_CRANE_BROKER && require('./broker').serves(ctx.env.TOWER_CRANE_BROKER, ctx.stateDir);", to: 'const sandboxed = false;', tests: ['test/broker.test.js'] },
   { id: 'sandboxed-worktree-any-state', area: 'broker', file: 'lib/worktree.js',
     from: "const sandboxed = !!ctx.env?.TOWER_CRANE_BROKER && require('./broker').serves(ctx.env.TOWER_CRANE_BROKER, ctx.stateDir);", to: 'const sandboxed = !!ctx.env?.TOWER_CRANE_BROKER;', tests: ['test/broker.test.js'] },
+  { id: 'orphan-removal-skips-reservation', area: 'worktrees', file: 'lib/worktree.js',
+    from: 'markOrphanRetiring(ctx, hit, outcome.reservation_id);', to: '', tests: ['test/worktree-lifecycle.test.js'] },
   // host-only tests
   { id: 'sandbox-runs-directory-selection', area: 'host-only tests', file: 'lib/tests-host-only.js',
     from: 'const refused = files.filter((file) => !isFile(path.resolve(root, file)));', to: 'const refused = [];', tests: ['test/host-only.test.js'] },

@@ -422,3 +422,172 @@ test('a removal reservation blocks assigning its branch to another task', { time
   }
   gone(h, wt);
 });
+
+test('orphan prune rechecks a live adopter under the reservation lock', { timeout: 60000 }, async (t) => {
+  const h = setup(t);
+  const wt = { path: path.join(h.base, 'repo-worktrees', 'unrecorded'), branch: 'unrecorded' };
+  h.git(['worktree', 'add', '-b', wt.branch, wt.path, 'main']);
+  const paused = path.join(h.base, 'orphan-status');
+  const prune = h.runAsync(['worktree', 'prune', '--orphans', '--json'], { hooks: { HOOK_STOP_WORKTREE_STATUS: paused } });
+  try {
+    assert.ok(await require('./canary').waitFor(paused));
+    h.ok(['claim', 'T1', '--agent', 'adopter']);
+    h.ok(['submit', 'T1', '--sha', h.git(['rev-parse', 'HEAD']), '--branch', wt.branch, '--agent', 'adopter']);
+    h.ok(['rework', 'T1', '--reason', 'continue in the adopted checkout']);
+    const live = h.json(['worktree', 'T1']);
+    fs.writeFileSync(path.join(live.path, 'live.txt'), 'live rework files\n');
+    assert.equal(h.json(['worktree', 'list']).worktrees.find((w) => w.path === wt.path).state, 'live');
+    fs.writeFileSync(`${paused}.go`, '');
+    const result = await prune;
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(JSON.parse(result.stdout).outcomes.find((w) => w.path === wt.path).removed, false);
+    assert.equal(fs.readFileSync(path.join(live.path, 'live.txt'), 'utf8'), 'live rework files\n');
+    assert.ok(h.git(['branch', '--list', wt.branch]));
+  } finally {
+    fs.writeFileSync(`${paused}.go`, '');
+    await prune;
+  }
+});
+
+for (const hook of ['HOOK_STOP_WORKTREE_SAVE', 'HOOK_STOP_WORKTREE_REMOVE', 'HOOK_STOP_BRANCH_DELETE']) {
+  test(`orphan reservation blocks branch assignment throughout removal (${hook})`, { timeout: 60000 }, async (t) => {
+    const h = setup(t);
+    const wt = { path: path.join(h.base, 'repo-worktrees', 'unrecorded'), branch: 'unrecorded' };
+    h.git(['worktree', 'add', '-b', wt.branch, wt.path, 'main']);
+    fs.writeFileSync(path.join(wt.path, 'notes.txt'), 'orphan notes\n');
+    h.ok(['claim', 'T1', '--agent', 'adopter']);
+    const paused = path.join(h.base, 'orphan-removal');
+    const prune = h.runAsync(['worktree', 'prune', '--orphans', '--json'], { hooks: { [hook]: paused } });
+    try {
+      assert.ok(await require('./canary').waitFor(paused));
+      const assigned = h.run(['submit', 'T1', '--sha', h.git(['rev-parse', 'HEAD']), '--branch', wt.branch, '--agent', 'adopter']);
+      assert.equal(assigned.code, 1, 'an orphan being removed cannot become a task branch');
+      assert.match(assigned.stderr, /being removed|retiring/);
+      assert.equal(h.json(['task', 'show', 'T1']).status, 'in_progress');
+    } finally {
+      fs.writeFileSync(`${paused}.go`, '');
+      await prune;
+    }
+    gone(h, wt);
+    assert.deepEqual(h.readState('tasks.json').orphan_retirements || [], []);
+    const removal = JSON.parse((await prune).stdout).outcomes.find((w) => w.path === wt.path);
+    assert.equal(fs.readFileSync(path.join(removal.saved, 'files', 'notes.txt'), 'utf8'), 'orphan notes\n');
+  });
+}
+
+test('a competing orphan prune cannot clear the first remover reservation', { timeout: 60000 }, async (t) => {
+  const h = setup(t);
+  const wt = { path: path.join(h.base, 'repo-worktrees', 'unrecorded'), branch: 'unrecorded' };
+  h.git(['worktree', 'add', '-b', wt.branch, wt.path, 'main']);
+  h.ok(['claim', 'T1', '--agent', 'adopter']);
+  const paused = path.join(h.base, 'orphan-remove');
+  const prune = h.runAsync(['worktree', 'prune', '--orphans', '--json'], { hooks: { HOOK_STOP_WORKTREE_REMOVE: paused } });
+  try {
+    assert.ok(await require('./canary').waitFor(paused));
+    const competing = h.json(['worktree', 'prune', '--orphans']);
+    assert.equal(competing.outcomes.find((w) => w.path === wt.path).removed, false);
+    assert.match(competing.outcomes.find((w) => w.path === wt.path).reason, /being removed|retiring/);
+    assert.equal(h.readState('tasks.json').orphan_retirements.length, 1);
+    const assigned = h.run(['submit', 'T1', '--sha', h.git(['rev-parse', 'HEAD']), '--branch', wt.branch, '--agent', 'adopter']);
+    assert.equal(assigned.code, 1, 'another failed prune must leave the active reservation intact');
+  } finally {
+    fs.writeFileSync(`${paused}.go`, '');
+    await prune;
+  }
+  gone(h, wt);
+  assert.deepEqual(h.readState('tasks.json').orphan_retirements || [], []);
+});
+
+test('failed orphan removal clears its reservation and allows later adoption', (t) => {
+  const h = setup(t);
+  const wt = { path: path.join(h.base, 'repo-worktrees', 'unrecorded'), branch: 'unrecorded' };
+  h.git(['worktree', 'add', '-b', wt.branch, wt.path, 'main']);
+  h.git(['worktree', 'lock', wt.path]);
+  const result = h.json(['worktree', 'prune', '--orphans']);
+  assert.equal(result.outcomes[0].removed, false);
+  assert.match(result.outcomes[0].reason, /locked/);
+  const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  const reserved = events.findLast((e) => e.cmd === 'worktree orphan retiring');
+  assert.equal(reserved?.detail.path, wt.path);
+  assert.equal(reserved?.detail.branch, wt.branch);
+  assert.deepEqual(h.readState('tasks.json').orphan_retirements || [], []);
+  h.git(['worktree', 'unlock', wt.path]);
+  h.ok(['claim', 'T1', '--agent', 'adopter']);
+  h.ok(['submit', 'T1', '--sha', h.git(['rev-parse', 'HEAD']), '--branch', wt.branch, '--agent', 'adopter']);
+  h.ok(['rework', 'T1', '--reason', 'continue after the failed cleanup']);
+  assert.equal(h.json(['worktree', 'T1']).path, wt.path);
+});
+
+test('orphan reservation blocks preparation of a task with the same generated branch', { timeout: 60000 }, async (t) => {
+  const h = setup(t);
+  const wt = { path: path.join(h.base, 'repo-worktrees', 'unrecorded'), branch: 'tower-crane/T1-retire' };
+  h.git(['worktree', 'add', '-b', wt.branch, wt.path, 'main']);
+  h.ok(['claim', 'T1', '--agent', 'adopter']);
+  const paused = path.join(h.base, 'orphan-prepare');
+  const prune = h.runAsync(['worktree', 'prune', '--orphans'], { hooks: { HOOK_STOP_WORKTREE_REMOVE: paused } });
+  try {
+    assert.ok(await require('./canary').waitFor(paused));
+    const prepared = h.run(['worktree', 'T1']);
+    assert.equal(prepared.code, 1, 'preparation must not reuse an orphan reserved by prune');
+    assert.match(prepared.stderr, /being removed|retiring/);
+    assert.equal(h.json(['task', 'show', 'T1']).worktree, undefined);
+  } finally {
+    fs.writeFileSync(`${paused}.go`, '');
+    await prune;
+  }
+  gone(h, wt);
+});
+
+test('orphan ownership includes a newly submitted branch before its worktree record changes', { timeout: 60000 }, async (t) => {
+  const h = setup(t);
+  h.ok(['claim', 'T1', '--agent', 'adopter']);
+  const old = h.json(['worktree', 'T1']);
+  const wt = { path: path.join(h.base, 'repo-worktrees', 'unrecorded'), branch: 'unrecorded' };
+  h.git(['worktree', 'add', '-b', wt.branch, wt.path, 'main']);
+  const paused = path.join(h.base, 'orphan-owner');
+  const prune = h.runAsync(['worktree', 'prune', '--orphans', '--json'], { hooks: { HOOK_STOP_WORKTREE_STATUS: paused } });
+  try {
+    assert.ok(await require('./canary').waitFor(paused));
+    h.ok(['submit', 'T1', '--sha', h.git(['rev-parse', 'HEAD']), '--branch', wt.branch, '--agent', 'adopter']);
+    h.ok(['rework', 'T1', '--reason', 'resume the newly submitted branch']);
+    fs.writeFileSync(path.join(wt.path, 'live.txt'), 'new branch work\n');
+    fs.writeFileSync(`${paused}.go`, '');
+    const result = await prune;
+    assert.equal(JSON.parse(result.stdout).outcomes.find((w) => w.path === wt.path).removed, false);
+    assert.equal(fs.readFileSync(path.join(wt.path, 'live.txt'), 'utf8'), 'new branch work\n');
+    assert.equal(h.json(['worktree', 'list']).worktrees.find((w) => w.path === wt.path).state, 'live');
+    assert.ok(h.git(['branch', '--list', wt.branch]));
+    assert.ok(fs.existsSync(old.path), 'the previous checkout also remains intact');
+  } finally {
+    fs.writeFileSync(`${paused}.go`, '');
+    await prune;
+  }
+});
+
+test('an exited orphan remover holds no resources and its next prune discards the marker', { timeout: 60000 }, async (t) => {
+  const h = setup(t);
+  const wt = { path: path.join(h.base, 'repo-worktrees', 'unrecorded'), branch: 'unrecorded' };
+  h.git(['worktree', 'add', '-b', wt.branch, wt.path, 'main']);
+  fs.writeFileSync(path.join(wt.path, 'live.txt'), 'keep after remover crash\n');
+  const paused = path.join(h.base, 'orphan-crash');
+  const prune = h.runAsync(['worktree', 'prune', '--orphans'], { hooks: { HOOK_STOP_WORKTREE_REMOVE: paused } });
+  try {
+    assert.ok(await require('./canary').waitFor(paused));
+    const reservation = h.readState('tasks.json').orphan_retirements?.[0];
+    assert.equal(reservation?.path, wt.path);
+    process.kill(reservation.pid, 'SIGKILL');
+    await prune;
+    h.ok(['claim', 'T1', '--agent', 'adopter']);
+    h.ok(['submit', 'T1', '--sha', h.git(['rev-parse', 'HEAD']), '--branch', wt.branch, '--agent', 'adopter']);
+    h.ok(['rework', 'T1', '--reason', 'resume after remover crash']);
+    assert.equal(h.json(['worktree', 'T1']).path, wt.path);
+    const other = path.join(h.base, 'repo-worktrees', 'other-orphan');
+    h.git(['worktree', 'add', '-b', 'other-orphan', other, 'main']);
+    h.ok(['worktree', 'prune', '--orphans']);
+    assert.deepEqual(h.readState('tasks.json').orphan_retirements || [], []);
+    assert.equal(fs.readFileSync(path.join(wt.path, 'live.txt'), 'utf8'), 'keep after remover crash\n');
+  } finally {
+    fs.writeFileSync(`${paused}.go`, '');
+    await prune;
+  }
+});
