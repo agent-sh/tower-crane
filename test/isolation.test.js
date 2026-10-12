@@ -568,6 +568,29 @@ test('a sandboxed claude removes its ignored cwd placeholders after exit', { ski
   }
 });
 
+test('the agent honors its worktree\'s own core.excludesFile, not the main checkout\'s', { skip: NO_STUBS }, (t) => {
+  const { h, u, wt } = setup(t);
+  isolateGitEnvironment(h, u);
+  isolated(h, 'small', 'claude');
+  fs.rmSync(path.join(wt, '.claude', 'settings.local.json'));
+  const worktreeIgnore = path.join(h.base, 'worktree-ignore');
+  fs.writeFileSync(worktreeIgnore, 'worktree-ignored/\n');
+  const mainIgnore = path.join(h.base, 'main-ignore');
+  fs.writeFileSync(mainIgnore, 'main-ignored/\n');
+  h.git(['config', 'extensions.worktreeConfig', 'true']);
+  h.git(['config', '--worktree', 'core.excludesFile', mainIgnore]);
+  h.git(['config', '--worktree', 'core.excludesFile', worktreeIgnore], wt);
+  for (const dir of ['worktree-ignored', 'main-ignored']) {
+    fs.mkdirSync(path.join(wt, dir));
+    fs.writeFileSync(path.join(wt, dir, 'data'), 'a file\n');
+  }
+
+  spawn(h, u, 'small', {
+    STUB_CLAUDE_SANDBOX_PLACEHOLDERS: JSON.stringify(SANDBOX_MOUNTS),
+  });
+  assert.deepEqual(u.report().placeholderGitStatus, { code: 0, stdout: '?? main-ignored/data\n', stderr: '' }, 'the worktree\'s excludes hide its ignored directory and the main checkout\'s do not reach it');
+});
+
 test('sandbox cleanup preserves and reports a pre-existing empty read-only file with a placeholder name', { skip: NO_STUBS }, (t) => {
   const { h, u, wt } = setup(t);
   const { global } = isolateGitEnvironment(h, u);
@@ -720,6 +743,54 @@ test('sandbox cleanup keeps a real file that takes a placeholder name just befor
   assert.equal(result.failures.length, 1);
   assert.match(result.failures[0].error.message, /changed during cleanup/);
   assert.equal(fs.readFileSync(bashrc, 'utf8'), 'REAL SHELL CONFIG\n', 'the real file keeps its content');
+  assert.deepEqual(fs.readdirSync(wt).filter((name) => name.startsWith('.tower-crane-cleanup-')), [], 'no moved name is left behind');
+});
+
+test('sandbox cleanup puts back a directory that takes a placeholder name just before its removal', { skip: NO_STUBS }, (t) => {
+  const { base } = makeRepo(t);
+  const wt = path.join(base, 'worktree');
+  fs.mkdirSync(wt);
+  const bashrc = path.join(wt, '.bashrc');
+  fs.writeFileSync(bashrc, '');
+  fs.chmodSync(bashrc, 0o444);
+  // Loaded only into the cleanup child: the first rename of the placeholder finds a
+  // directory at its name, which the child moves aside before it can check it.
+  const preload = path.join(base, 'race-preload.js');
+  fs.writeFileSync(preload, [
+    'const fs = require("node:fs");',
+    'const path = require("node:path");',
+    'const { renameSync } = fs;',
+    'const target = process.env.TOWER_CRANE_RACE_TARGET;',
+    'let raced = false;',
+    'fs.renameSync = (from, ...rest) => {',
+    '  if (!raced && path.resolve(String(from)) === target) {',
+    '    raced = true;',
+    '    fs.unlinkSync(target);',
+    '    fs.mkdirSync(target);',
+    '    fs.writeFileSync(path.join(target, "user-data"), "REAL USER DATA\\n");',
+    '  }',
+    '  return renameSync(from, ...rest);',
+    '};',
+  ].join('\n'));
+  const race = {
+    NODE_OPTIONS: `--require "${preload.replace(/\\/g, '/')}"`,
+    TOWER_CRANE_RACE_TARGET: fs.realpathSync(bashrc),
+  };
+  const saved = Object.fromEntries(Object.keys(race).map((key) => [key, process.env[key]]));
+  let result;
+  Object.assign(process.env, race);
+  try {
+    result = ClaudeSandboxPlaceholders.remove(wt, []);
+  } finally {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+  assert.deepEqual(result.removed, [], 'the directory is not reported as removed');
+  assert.equal(result.failures.length, 1);
+  assert.match(result.failures[0].error.message, /changed during cleanup/);
+  assert.equal(fs.readFileSync(path.join(bashrc, 'user-data'), 'utf8'), 'REAL USER DATA\n', 'the directory is put back under its name');
   assert.deepEqual(fs.readdirSync(wt).filter((name) => name.startsWith('.tower-crane-cleanup-')), [], 'no moved name is left behind');
 });
 
