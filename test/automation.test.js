@@ -989,9 +989,10 @@ test('a change that adds no test reworks with the reason, and the worker adds a 
 test('a CI run that was cancelled retries once and reworks when it is cancelled again', (t) => {
   const h = setup(t, { ci: 'cancelled' });
   h.submit();
+  const before = h.github().calls.filter((a) => a[0] === 'api' && a[1].includes('check-runs')).length;
   h.consume();
   const checks = h.github().calls.filter((a) => a[0] === 'api' && a[1].includes('check-runs'));
-  assert.equal(checks.length, 2, 'a cancelled run is read once more and no third time');
+  assert.equal(checks.length - before, 2, 'a cancelled run is read once more and no third time');
   const task = h.readState('tasks.json').tasks[0];
   assert.deepEqual(task.evidence.filter((e) => e.type === 'ci').map((e) => [e.ok, e.infrastructure_failure === true]),
     [[false, true], [false, true]]);
@@ -1003,8 +1004,9 @@ test('a CI run that was cancelled retries once and reworks when it is cancelled 
 test('a CI run that needs action sends a submitted task to rework at once, with its conclusion', (t) => {
   const h = setup(t, { ci: 'action_required' });
   h.submit();
+  const before = h.github().calls.filter((a) => a[0] === 'api' && a[1].includes('check-runs')).length;
   h.consume();
-  assert.equal(h.github().calls.filter((a) => a[0] === 'api' && a[1].includes('check-runs')).length, 1, 'a verdict on the change is not retried');
+  assert.equal(h.github().calls.filter((a) => a[0] === 'api' && a[1].includes('check-runs')).length - before, 1, 'a verdict on the change is not retried');
   const task = h.readState('tasks.json').tasks[0];
   // A refill may claim the reworked task before this read, so the rework event is the proof.
   assert.ok(h.logs().some((e) => e.cmd === 'rework' && e.task === 'T1'), 'the action-required run reworks');
@@ -1016,9 +1018,10 @@ test('a CI run that needs action sends a submitted task to rework at once, with 
 test('a CI run that times out retries once and reworks when it times out again', (t) => {
   const h = setup(t, { ci: 'timed_out' });
   h.submit();
+  const before = h.github().calls.filter((a) => a[0] === 'api' && a[1].includes('check-runs')).length;
   h.consume();
   const checks = h.github().calls.filter((a) => a[0] === 'api' && a[1].includes('check-runs'));
-  assert.equal(checks.length, 2, 'the CI gate reads GitHub once more and no third time');
+  assert.equal(checks.length - before, 2, 'the CI gate reads GitHub once more and no third time');
   const task = h.readState('tasks.json').tasks[0];
   assert.deepEqual(task.evidence.filter((e) => e.type === 'ci').map((e) => [e.ok, e.infrastructure_failure === true]),
     [[false, true], [false, true]]);
@@ -1030,8 +1033,9 @@ test('a CI run that times out retries once and reworks when it times out again',
 test('a failed CI run sends a submitted task to rework with the failing run', (t) => {
   const h = setup(t, { ci: 'failure' });
   h.submit();
+  const before = h.github().calls.filter((a) => a[0] === 'api' && a[1].includes('check-runs')).length;
   h.consume();
-  assert.equal(h.github().calls.filter((a) => a[0] === 'api' && a[1].includes('check-runs')).length, 1, 'a code failure is not retried');
+  assert.equal(h.github().calls.filter((a) => a[0] === 'api' && a[1].includes('check-runs')).length - before, 1, 'a code failure is not retried');
   const task = h.readState('tasks.json').tasks[0];
   assert.equal(task.status, 'rework');
   assert.equal(task.evidence.filter((e) => e.type === 'ci').at(-1).confirmed_failure, true);
