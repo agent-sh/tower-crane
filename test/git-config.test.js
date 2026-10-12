@@ -235,12 +235,16 @@ test('a config scan is reused until a file it read changes', (t) => {
   h.git(['worktree', 'add', '-q', '--detach', wt]);
   const trace = path.join(h.base, 'trace');
   const env = { ...h.env, GIT_TRACE: trace };
-  const scans = () => (fs.existsSync(trace) ? fs.readFileSync(trace, 'utf8').split('\n').filter((l) => l.includes('config --list --show-scope')).length : 0);
+  const count = (text) => (fs.existsSync(trace) ? fs.readFileSync(trace, 'utf8').split('\n').filter((l) => l.includes(text)).length : 0);
+  const scans = () => count('config --list --show-scope');
+  const parses = () => count('config --file - --no-includes');
   const { spawnSync } = require('../lib/commands');
   const git = (dir, args) => spawnSync('git', ['-C', dir, ...args], { env, encoding: 'utf8' });
 
+  fs.writeFileSync(path.join(h.repo, '.git', 'worktrees', 'wt', 'config.worktree'), '');
   for (const dir of [h.repo, h.repo, wt, wt]) git(dir, ['status', '--porcelain']);
   assert.equal(scans(), 2, 'one scan per checkout');
+  assert.equal(parses(), 0, 'a config without includes is taken from the listing');
 
   const marker = path.join(h.base, 'planted');
   const script = path.join(h.base, 'planted.js');
@@ -251,6 +255,7 @@ test('a config scan is reused until a file it read changes', (t) => {
   h.git(['config', 'include.path', 'extra']);
   git(h.repo, ['status', '--porcelain']);
   assert.equal(scans(), 3, 'the config changed');
+  assert.equal(parses(), 1, 'a config with an include is parsed');
   h.git(['config', '--file', extra, 'diff.tc.textconv', `${shellQuote(process.execPath)} ${shellQuote(script)}`]);
   for (const dir of [h.repo, wt]) {
     fs.writeFileSync(path.join(dir, 'value.txt'), 'two\n');

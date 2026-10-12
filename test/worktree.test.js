@@ -283,9 +283,10 @@ for (const command of ['worktree', 'spawn']) {
       for (const id of ids) h.ok(['brief', 'set', id, '-'], { input: 'Use the fresh base.\n' });
     }
     const attempts = guardUploadPack(h, 15000);
-    const started = Date.now();
+    let started = Date.now();
     const hooks = { HOOK_WORKTREE_ADD_ACTIVE: path.join(h.base, 'worktree-add-active') };
     const trees = h.json(['worktree', ...ids], { hooks });
+    assert.ok(Date.now() - started < 30000, 'the worktrees are ready within two fetch times');
     assert.equal(trees.length, 6);
     for (let i = 0; i < trees.length; i++) {
       assert.equal(trees[i].id, ids[i]);
@@ -293,14 +294,17 @@ for (const command of ['worktree', 'spawn']) {
       assert.ok(h.json(['task', 'show', ids[i]]).branch);
     }
     if (command === 'spawn') {
+      // Six spawns take about half a fetch time on Windows, so they are timed
+      // on their own: none of them may wait for a fetch.
+      started = Date.now();
       const results = await Promise.all(ids.map((id) => h.runAsync(
         ['spawn', '--role', 'medium', '--task', id, '--wait', '--json'], { hooks })));
+      assert.ok(Date.now() - started < 15000, 'the spawns finish within one fetch time');
       assert.deepEqual(results.map((r) => r.code), Array(6).fill(0), results.map((r) => r.stderr).join('\n'));
       for (const r of results) assert.equal(h.git(['rev-parse', 'HEAD'], JSON.parse(r.stdout).cwd), fresh);
     }
     assert.equal(h.git(['rev-parse', 'origin/main']), fresh);
     assert.equal(fs.readFileSync(attempts, 'utf8'), '.', 'the dispatcher fetched once before preparing workers');
-    assert.ok(Date.now() - started < 30000, 'the dispatch finishes within two fetch times');
   });
 }
 
