@@ -182,9 +182,13 @@ test('agy keeps project instructions but excludes user memory and imported modul
 
 test('opencode and pi global discovery follows their configured directories and fallback files', { skip: NO_STUBS }, (t) => {
   const { h, env } = setup(t);
-  for (const [harness, key, name] of [['opencode', 'XDG_CONFIG_HOME', 'AGENTS.md'], ['pi', 'PI_CODING_AGENT_DIR', 'CLAUDE.md']]) {
-    const dir = path.join(h.base, `${harness}-config`);
-    const file = path.join(dir, ...(harness === 'opencode' ? ['opencode'] : []), name);
+  for (const [harness, key, name] of [
+    ['opencode', 'XDG_CONFIG_HOME', 'AGENTS.md'],
+    ['opencode', 'OPENCODE_CONFIG_DIR', 'AGENTS.md'],
+    ['pi', 'PI_CODING_AGENT_DIR', 'CLAUDE.md'],
+  ]) {
+    const dir = path.join(h.base, `${harness}-${key}`);
+    const file = path.join(dir, ...(key === 'XDG_CONFIG_HOME' ? ['opencode'] : []), name);
     fs.mkdirSync(path.dirname(file), { recursive: true });
     fs.writeFileSync(file, 'CUSTOM-GLOBAL\n');
     h.ok(['ladder', 'set', 'small', '--harness', harness, '--model', 'stub', '--clear', 'profile', '--clear', 'effort', '--clear', 'args']);
@@ -199,6 +203,12 @@ test('opencode and pi global discovery follows their configured directories and 
       assert.ok(!nested.startup.rules.some((f) => f.path.startsWith(dry.home.path + path.sep)));
     }
   }
+  h.ok(['ladder', 'set', 'small', '--harness', 'opencode', '--model', 'stub', '--clear', 'profile', '--clear', 'effort', '--clear', 'args']);
+  const fallback = h.json(['spawn', '--role', 'small', '--task', 'T1', '--dry-run'], {
+    env: { ...env, OPENCODE_CONFIG_DIR: path.join(h.base, 'missing-opencode-config') },
+  });
+  assert.ok(fallback.startup.rules.some((file) => file.path === path.join(env.HOME, '.claude', 'CLAUDE.md')
+    && file.scope === 'global' && file.loaded === 'read'));
 });
 
 test('codex prefers AGENTS.override.md in each directory and receipts match what the stub loads', { skip: NO_STUBS }, (t) => {

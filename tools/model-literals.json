@@ -148,5 +148,10 @@
     "path": "tools/tests-map.json",
     "text": "claude-result.json",
     "reason": "Module or fixture filename in the test coverage map"
+  },
+  {
+    "path": "lib/agents.js",
+    "text": "claude-code",
+    "reason": "npm package name @anthropic-ai/claude-code, matched to keep the harness binary runnable in the sandbox; not a model"
   }
 ]
