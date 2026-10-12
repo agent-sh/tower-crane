@@ -1,0 +1,1 @@
+- Preserve a worker's live lease when Windows supervisor startup races its claim, checking under the state lock so short leases keep their renewal schedule. Synchronize missing-log recovery assertions with the monitor's exit receipt.

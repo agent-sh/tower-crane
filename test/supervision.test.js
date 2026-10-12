@@ -62,6 +62,9 @@ const cli = (args) => cp.execFileSync(process.execPath, [process.argv[1], ...arg
 const file = process.argv[2];
 const attempts = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : [];
 if (!attempts.length && ${claim}) {
+  if (process.env.TOWER_CRANE_TEST_MONITOR_CLAIM) {
+    while (!fs.existsSync(process.env.TOWER_CRANE_TEST_MONITOR_CLAIM)) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+  }
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ${claimDelay});
   cli(['claim', 'T1', '--lease', '1']);
 }
@@ -387,6 +390,34 @@ if (task === 'T1' && retry === 0) {
   assert.equal(audit.findLast((e) => e.cmd === 'hook report')?.detail.report, `last report from ${started.agent}`);
   assert.equal(audit.findLast((e) => e.cmd === 'hook stop')?.detail.report, `last report from ${started.agent}`);
   assert.match(audit.find((e) => e.cmd === 'msg' && e.detail.to === 'orchestrator')?.detail.text || '', /without submit/);
+});
+
+test('Windows startup preserves a worker lease taken after the monitor read its state', async (t) => {
+  const h = setup(t, { failures: 0, waitForFinish: true });
+  const barrier = path.join(h.base, 'monitor-claim');
+  const clockFile = path.join(h.base, 'clock');
+  const now = Date.now();
+  fs.writeFileSync(clockFile, String(now));
+  const windows = path.join(__dirname, 'fixtures', 'windows-supervision.js').replace(/\\/g, '/');
+  const spawned = h.json(['spawn', '--task', 'T1'], { env: {
+    NODE_OPTIONS: `--require "${HOOKS.replace(/\\/g, '/')}" --require "${windows}"`,
+    HOOK_CLOCK_FILE: clockFile, TOWER_CRANE_TEST_MONITOR_CLAIM: barrier,
+  } });
+  try {
+    await until(() => h.readAttempts().length === 1, 'worker did not claim during the paused monitor claim');
+    const claim = h.json(['task', 'show', 'T1']).claim;
+    fs.writeFileSync(`${barrier}.go`, '');
+    await until(() => fs.existsSync(`${barrier}.done`), 'monitor did not finish its startup claim');
+    assert.deepEqual(h.json(['task', 'show', 'T1']).claim, claim, 'startup must preserve the worker lease under the claim lock');
+    fs.writeFileSync(clockFile, String(now + 40000));
+    await until(() => log(h).some((e) => e.cmd === 'renew'), 'the preserved short lease was not renewed');
+    assert.equal(h.json(['task', 'show', 'T1']).claim.agent, spawned.agent);
+  } finally {
+    fs.writeFileSync(barrier, '');
+    fs.writeFileSync(`${barrier}.go`, '');
+    fs.writeFileSync(`${h.attempts}.finish`, '');
+  }
+  await until(() => h.json(['task', 'show', 'T1']).run?.phase === 'waiting', 'worker did not finish');
 });
 
 test('a running process keeps its lease without claimant writes', async (t) => {
