@@ -12,6 +12,13 @@ const clock = path.join(__dirname, 'fixtures', 'shifted-clock.js').replace(/\\/g
 const supervision = { retries: 2, backoff_ms: 10, max_backoff_ms: 20, stall_ms: 60000 };
 const owner = (h) => events(h).filter((e) => e.cmd === 'msg' && e.detail.to === 'owner');
 const health = (h, source) => events(h).filter((e) => e.cmd === 'harness health' && (!source || e.detail.source === source));
+async function until(fn, message) {
+  const deadline = Date.now() + 12000;
+  while (!fn()) {
+    if (Date.now() >= deadline) assert.fail(message);
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+}
 
 // The login checks are real commands on PATH. Like the real CLIs, the status
 // commands report stored credentials as logged in, and a request passes only
@@ -110,6 +117,33 @@ test('a paused claude waits for its login check, then runs again once the check 
   assert.deepEqual(health(h, 'probe').map((e) => e.detail.status), ['unavailable', 'unavailable', 'unavailable', 'available']);
   assert.equal(owner(h).length, 1, 'clearing a pause raises no notice');
 });
+
+// A worker that started before the outage keeps the login it started with. Its clean exit proves
+// nothing about the login now, so it cannot clear the pause; only a probe admitted under the pause can.
+for (const harness of ['claude', 'agy']) {
+  test(`a ${harness} worker admitted before its login expired cannot clear the pause when it exits cleanly`, async (t) => {
+    const h = setup(t, { tasks: ['T1', 'T2', 'T3'] });
+    h.ok(['ladder', 'set', 'easy', '--harness', harness, '--model', 'first']);
+    fs.writeFileSync(h.loginFlag, '');
+    const finish = path.join(h.base, 'finish-worker');
+    const held = h.json(['spawn', '--task', 'T1'], { env: { ...h.spawnEnv, TOWER_CRANE_TEST_FALLBACK_FINISH: finish } });
+    await until(() => h.attempts().length === 1, 'the held worker did not start');
+    // The login expires while T1 runs; T2 hits it and pauses the harness.
+    fs.rmSync(h.loginFlag);
+    assert.notEqual(h.spawnTask('T2').code, 0);
+    assert.deepEqual(health(h).map((e) => [e.detail.harness, e.detail.status, e.detail.source]), [[harness, 'unavailable', 'exit']]);
+    // T1 then finishes cleanly on the login it started with.
+    fs.writeFileSync(finish, '');
+    await until(() => events(h).some((e) => e.cmd === 'spawn phase' && e.detail.agent === held.agent && e.detail.phase === 'waiting'), 'the held worker did not exit');
+    assert.deepEqual(health(h).map((e) => [e.detail.harness, e.detail.status, e.detail.source]), [[harness, 'unavailable', 'exit']], 'a clean exit from before the outage cleared nothing');
+    // So the next task is still refused on the paused harness, with no attempt and no second notice.
+    const next = h.run(['spawn', '--task', 'T3'], { env: h.spawnEnv });
+    assert.notEqual(next.code, 0);
+    assert.match(next.stderr, new RegExp(`${harness} is paused after a login failure`));
+    assert.deepEqual(h.attempts().map((a) => a.harness), [harness, harness]);
+    assert.equal(owner(h).length, 1);
+  });
+}
 
 // Command fallback routes run the fixture through an executable committed in the repository.
 function commandFallback(h) {
