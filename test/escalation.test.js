@@ -669,9 +669,9 @@ test('a reviewer without permission to create a worker home leaves the climb for
   try {
     h.ok(['evidence', 'T1', '--type', 'review', '--revision', h.revision(), '--fail', '--sha', h.git(['rev-parse', 'HEAD']),
       '--agent', 'reviewer', '--summary', 'needs rework']);
-    assert.equal(h.json(['task', 'show', 'T1']).status, 'submitted');
+    assert.equal(h.task().status, 'submitted');
     h.ok(['recover', 'T1', '--agent', 'orchestrator']);
-    assert.equal(h.json(['task', 'show', 'T1']).escalation_pending, true);
+    assert.equal(h.task().escalation_pending, true);
   } finally {
     fs.chmodSync(homes, 0o700);
   }
