@@ -216,6 +216,24 @@ test('a quoted force-ci-pending line in a fenced block does not allow the overri
   assert.equal(status(h), 'in_progress');
 });
 
+test('a quoted force-ci-pending line in an HTML comment does not allow the override', (t) => {
+  const h = fixture(t);
+  const brief = path.join(h.base, 'brief.md');
+  fs.writeFileSync(brief, [
+    '# T1', '', '## Shared', '',
+    'Do not use --force-ci-pending. Wait for CI to finish.', '',
+    '<!-- Hidden example only, not approval:', 'force-ci-pending: allowed', '-->', '',
+  ].join('\n'));
+  h.ok(['brief', 'set', 'T1', '--file', brief]);
+  const r = submitPr(h, {
+    runs: [checkRun('test (ubuntu-latest)', { status: 'queued', conclusion: null })],
+    suites: [suite(1, { status: 'queued', conclusion: null, runs: 1 })],
+  }, ['--force-ci-pending']);
+  assert.equal(r.status, 1, r.stderr);
+  assert.match(r.stderr, /T1's brief does not allow --force-ci-pending/);
+  assert.equal(status(h), 'in_progress');
+});
+
 test('a failing refusal prints the logs of the first three failing jobs and the command for the rest', (t) => {
   const h = fixture(t);
   const job = (id, name) => checkRun(name, { conclusion: 'failure', url: `https://github.com/acme/app/actions/runs/9/job/${id}` });
