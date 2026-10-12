@@ -35,11 +35,11 @@ const hooks = [];
 `);
   const r = cp.spawnSync(process.execPath, [runner], {
     env: { ...h.env, TOWER_CRANE_TEST_CHROME: chrome, TOWER_CRANE_TEST_TMP: tmp, TOWER_CRANE_SANDBOX: sandbox, CHROME_REPORT: path.join(h.base, 'chrome.json') },
-    encoding: 'utf8', timeout: 90000,
+    cwd: h.base, encoding: 'utf8', timeout: 90000,
   });
   assert.equal(r.status, 0, `${r.error || ''}\n${r.stderr}`);
   const result = JSON.parse(r.stdout);
-  if (result.profile) assert.equal(fs.existsSync(result.profile), false, 'teardown removes the selected profile');
+  if (result.profile) assert.equal(fs.existsSync(path.resolve(h.base, result.profile)), false, 'teardown removes the selected profile');
   return result;
 }
 
@@ -92,7 +92,7 @@ fsModule.mkdirSync = function (dir, ...rest) {
   assert.deepEqual(fs.readdirSync(h.base).filter((f) => f.startsWith('tower-crane-chrome-')), []);
 });
 
-test('deep test, system temp and cache roots keep Chrome sockets in a short private cache directory', {
+for (const relative of [false, true]) test(`deep test, system temp and cache roots keep Chrome sockets in a short private cache directory (relative=${relative})`, {
   skip: process.platform === 'win32' && 'browser fixture uses a shebang; Unix socket path limits do not apply on Windows',
 }, (t) => {
   const h = makeRepo(t);
@@ -104,10 +104,10 @@ test('deep test, system temp and cache roots keep Chrome sockets in a short priv
   fs.writeFileSync(chrome, `#!${process.execPath}
 const fs = require('node:fs');
 const path = require('node:path');
-const profile = process.argv.find((arg) => arg.startsWith('--user-data-dir=')).slice('--user-data-dir='.length);
+const profile = path.resolve(process.argv.find((arg) => arg.startsWith('--user-data-dir=')).slice('--user-data-dir='.length));
 // Chrome keeps its singleton socket in the profile only up to 78 bytes (see browser.js), and under
 // TMPDIR otherwise, where a socket path must also fit 107 bytes.
-const sockets = [path.join(profile, 'SingletonSocket'), path.join(process.env.TMPDIR, 'com.google.Chrome.000000', 'SingletonSocket')];
+const sockets = [path.join(profile, 'SingletonSocket'), path.join(path.resolve(process.env.TMPDIR), 'com.google.Chrome.000000', 'SingletonSocket')];
 if (Buffer.byteLength(sockets[0]) > 78 || Buffer.byteLength(sockets[1]) > 107) {
   console.error('Socket path too long');
   process.exit(1);
@@ -117,7 +117,7 @@ fs.writeFileSync(process.env.CHROME_REPORT, JSON.stringify({ profile, tmp: proce
 fs.writeFileSync(path.join(profile, 'DevToolsActivePort'), '1\\n');
 setInterval(() => {}, 1000);
 `, { mode: 0o755 });
-  const result = attempt(h, chrome, '1', deep);
+  const result = attempt(h, chrome, '1', relative ? 'tmp' : deep);
   assert.doesNotMatch(result.error ?? '', /exit code|Socket path/);
   const { profile, tmp } = JSON.parse(fs.readFileSync(path.join(h.base, 'chrome.json'), 'utf8'));
   assert.equal(profile.startsWith(deep + path.sep), false, profile);

@@ -71,7 +71,7 @@ const CHROME_SOCKET_PATH = 78;
 
 function profileBase() {
   const cache = process.env.XDG_CACHE_HOME || path.join(os.homedir(), '.cache');
-  const bases = [tempRoot(), path.join(cache, 'tct'), path.join(os.userInfo().homedir, '.cache', 'tct')];
+  const bases = [tempRoot(), path.join(cache, 'tct'), path.join(os.userInfo().homedir, '.cache', 'tct')].map((base) => path.resolve(base));
   const fits = (base) => Buffer.byteLength(path.join(base, 'tower-crane-chrome-000000', 'SingletonSocket')) <= CHROME_SOCKET_PATH;
   const base = bases.find((base) => process.platform === 'win32' || fits(base));
   if (!base) throw new Error('no cache directory is short enough for Chrome sockets; set TOWER_CRANE_TEST_TMP to a shorter disk path');
