@@ -175,7 +175,9 @@ const MUTANTS = [
   { id: 'session-bus-spawning-env-names-sockets', area: 'sandbox', file: 'lib/agents.js',
     from: 'const env = workerEnv(ctx);\n  const runtime = runtimeDir(env);', to: 'const env = { ...ctx.env };\n  const runtime = runtimeDir(env);', tests: ['test/sandbox-extensions.test.js'] },
   { id: 'session-bus-dry-run-reads-env-file', area: 'sandbox', file: 'lib/agents.js',
-    from: 'const env = { ...ctx.env, ...ctx.settings.env };', to: 'const env = workerEnv(ctx);', tests: ['test/sandbox-extensions.test.js'] },
+    from: 'return { flags, env: { CLAUDE_CONFIG_DIR: home, ...ClaudeProvider', to: 'return { flags, env: { CLAUDE_CONFIG_DIR: home, ...Settings.agentEnv(ctx.settings || {}), ...ClaudeProvider', tests: ['test/sandbox-extensions.test.js'] },
+  { id: 'session-bus-address-from-spawning-env', area: 'sandbox', file: 'lib/spawn-monitor.js',
+    from: "require('./agents').sessionBusEnv(spawn.harness, spawn.settings || {}, agentEnv)", to: "require('./agents').sessionBusEnv(spawn.harness, spawn.settings || {}, process.env)", tests: ['test/sandbox-extensions.test.js'] },
   { id: 'sandbox-denies-spawning-runtime', area: 'sandbox', file: 'lib/agents.js',
     from: '...(env.XDG_RUNTIME_DIR && env.XDG_RUNTIME_DIR !== `/run/user/${uid}` ? [env.XDG_RUNTIME_DIR] : []),', to: '...(ctx.env.XDG_RUNTIME_DIR && ctx.env.XDG_RUNTIME_DIR !== `/run/user/${uid}` ? [ctx.env.XDG_RUNTIME_DIR] : []),', tests: ['test/sandbox-extensions.test.js'] },
   // board

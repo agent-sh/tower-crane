@@ -468,6 +468,31 @@ test('claude: sandbox.session_bus grants the sockets the worker env names, even 
   assert.ok(seen.sandbox.filesystem.denyRead.includes(fs.realpathSync(runtime)), 'that runtime is denied');
 });
 
+test('claude: sandbox.session_bus addresses the bus of the runtime the env_file names, not the spawning one', { skip: NO_STUBS }, (t) => {
+  const h = setup(t, 'claude');
+  const bin = path.join(h.base, 'bin');
+  fs.mkdirSync(bin);
+  const out = path.join(h.base, 'result.json');
+  writeClaudeStub(bin, out);
+  // The spawning environment names a runtime directory with no bus, and an empty bus address; the env_file moves the worker to a runtime that has one.
+  const parent = path.join(h.base, 'parent');
+  const runtime = path.join(h.base, 'runtime');
+  fs.mkdirSync(parent);
+  fs.mkdirSync(runtime);
+  const bus = path.join(fs.realpathSync(runtime), 'bus');
+  fs.writeFileSync(bus, '');
+  const file = path.join(h.base, 'worker.env');
+  fs.writeFileSync(file, `XDG_RUNTIME_DIR=${runtime}\n`);
+  const env = { ...h.env, XDG_RUNTIME_DIR: parent, DBUS_SESSION_BUS_ADDRESS: '',
+    PATH: `${bin}${path.delimiter}${process.env.PATH}`, CLAUDE_CONFIG_DIR: '' };
+  h.ok(['project', 'set', '--session-bus', 'true', '--env_file', file]);
+  h.ok(['spawn', '--task', 'T1', '--wait'], { env });
+  const seen = JSON.parse(fs.readFileSync(out, 'utf8'));
+  assert.deepEqual(seen.env, { XDG_RUNTIME_DIR: runtime, DBUS_SESSION_BUS_ADDRESS: `unix:path=${path.join(runtime, 'bus')}` });
+  assert.ok(seen.sandbox.filesystem.allowRead.includes(bus), 'the sandbox grants the socket the bus address names');
+  assert.ok(seen.sandbox.filesystem.allowWrite.includes(bus), 'the sandbox writes the socket the bus address names');
+});
+
 test('claude: dry-run never reads env_file, and a real spawn that cannot read it refuses', { skip: NO_STUBS }, (t) => {
   const h = setup(t, 'claude');
   const bin = path.join(h.base, 'bin');
