@@ -12,6 +12,8 @@ The suite proves behavior through the real CLI on temporary git repositories. It
 
 Windows shard 1/3 also runs the Claude interrupted native worker case ten consecutive times, stopping on the first failure. The case waits for final usage through `wait --types spend --observe` and checks the supervisor's stopped phase and exit receipt before redispatch. Its parent clock models startup consuming the session deadline, so shutdown completion must be independent of that deadline.
 
+Windows shard 2/3 runs the Claude Code mod wakeup case twenty consecutive times, stopping on the first failure. It waits on prompt and append signals, then checks the steer's event id rather than the total prompt count. An ordinary worker message during the turn forces an independent wake to overlap with the steer, as delayed inbox reconciliation can do after the initial decision answer and worker message.
+
 For projects Tower Crane manages, expensive proof is the default: the orchestrator pins `--tests-cmd "npm test" --tests-expensive true --tests-proof-cmd "node --test {tests}"`. A submission then runs the full suite once and proves the change with its own test files.
 
 ## Writing tests

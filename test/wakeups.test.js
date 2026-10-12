@@ -1,12 +1,13 @@
 'use strict';
 
-const { waitOnRepo } = require('./signals');
+const { HUNG_TEST_MS, waitOnRepo } = require('./signals');
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
+const { EventEmitter, once } = require('node:events');
 const { pathToFileURL } = require('node:url');
 const { makeRepo, BIN, ROOT } = require('./helpers');
 
@@ -144,6 +145,19 @@ function engine(t, h) {
     return { catch: (handler) => { entry.fallback = handler; } };
   };
   const seen = { prompts: [], appended: [], toasts: [], tools: [], commands: [] };
+  const notices = new EventEmitter();
+  const record = (kind, text) => {
+    seen[kind].push(text);
+    notices.emit('notice');
+  };
+  const waitFor = async (kind, ids) => {
+    const signal = AbortSignal.timeout(HUNG_TEST_MS);
+    for (;;) {
+      const text = seen[kind].join('\n');
+      if (ids.every((id) => text.includes(id))) return text;
+      await once(notices, 'notice', { signal });
+    }
+  };
   const children = [];
   t.after(() => { for (const p of children) p.kill(); });
   async function* spawn({ argv }) {
@@ -172,8 +186,8 @@ function engine(t, h) {
     env: { get: async (name) => ({ TOWER_CRANE_STATE: h.state })[name] },
     tool: { register: async (spec) => { seen.tools.push(spec); return { tool: `mcp__tower-crane__${spec.name}` }; } },
     command: { register: async (spec) => { seen.commands.push(spec); } },
-    prompt: { submit: async (p) => { seen.prompts.push(p.text); return { text: p.text }; } },
-    session: { append: async (a) => { seen.appended.push(a.message.content[0].text); return {}; } },
+    prompt: { submit: async (p) => { record('prompts', p.text); return { text: p.text }; } },
+    session: { append: async (a) => { record('appended', a.message.content[0].text); return {}; } },
     ui: { status() {}, toast: (text) => seen.toasts.push(text) },
     process: { spawn },
   };
@@ -181,7 +195,7 @@ function engine(t, h) {
     const hook = hooks[event].find((x) => match(x.matcher));
     return hook.fn($, e, async (x) => x);
   };
-  return { $, on, seen, fire };
+  return { $, on, seen, fire, waitFor };
 }
 
 test('the Claude Code mod pushes a decision answer and a worker message into the session', async (t) => {
@@ -199,10 +213,7 @@ test('the Claude Code mod pushes a decision answer and a worker message into the
   h.ok(['msg', '--to', 'orchestrator', '--task', 'T1', 'private worker text', '--agent', 'worker']);
   const answer = log(h).findLast((e) => e.cmd === 'answer').id;
   const message = log(h).findLast((e) => e.cmd === 'msg').id;
-  const pushed = await waitOnRepo(h, () => {
-    const text = cc.seen.prompts.join('\n');
-    return text.includes(answer) && text.includes(message) && text;
-  }, 'both pushes');
+  const pushed = await cc.waitFor('prompts', [answer, message]);
   assert.match(pushed, new RegExp(`${answer}: decision-answer D1 from owner`));
   assert.match(pushed, new RegExp(`${message}: worker-message T1 from worker`));
   assert.match(pushed, /tower-crane inbox/);
@@ -211,12 +222,18 @@ test('the Claude Code mod pushes a decision answer and a worker message into the
   // A steer joins a running turn; one the turn never read is pushed after it.
   await cc.fire('turn.start', { turnId: 't1', text: '' });
   const before = cc.seen.prompts.length;
+  // Inbox reconciliation can wake separately after the first two pushes.
+  // An ordinary message forces that overlap regardless of process startup speed.
+  h.ok(['msg', '--to', 'orchestrator', '--task', 'T1', 'private concurrent worker text', '--agent', 'worker']);
+  const concurrent = log(h).findLast((e) => e.cmd === 'msg').id;
   h.ok(['msg', '--to', 'orchestrator', '--steer', 'private steer text', '--agent', 'owner']);
   const steer = log(h).findLast((e) => e.cmd === 'msg').id;
-  await waitOnRepo(h, () => cc.seen.appended.some((x) => x.includes(steer)), 'the steer append');
-  assert.equal(cc.seen.prompts.length, before, 'a steer during a turn is not a new prompt');
+  await cc.waitFor('prompts', [concurrent]);
+  await cc.waitFor('appended', [steer]);
+  assert.ok(!cc.seen.prompts.slice(before).some((x) => x.includes(steer)), 'a steer during a turn is not a new prompt');
   await cc.fire('turn.complete', { turnId: 't1' });
-  await waitOnRepo(h, () => cc.seen.prompts.slice(before).some((x) => x.includes(steer)), 'the unread steer');
+  await cc.waitFor('prompts', [steer]);
+  idOnly(cc.seen.prompts.join('\n'), ['private concurrent worker text', 'private steer text']);
   idOnly(cc.seen.appended.join('\n'), ['private steer text']);
   assert.deepEqual(cc.seen.toasts, []);
 });
