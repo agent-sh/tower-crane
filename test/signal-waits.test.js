@@ -109,6 +109,10 @@ test('shared checks reject readiness budgets and require a reason on allowed tim
     'function ready(/* c */ window = 1000) { until(check, "ready", window); }', // wait-allow: rejected lint fixture
     'function ready(window /* c */ = 1000) { until(check, "ready", window); }', // wait-allow: rejected lint fixture
     'function until(check, /* c */ delay = 1000) {}', // wait-allow: rejected lint fixture
+    'waitUntil(async () => await /ready\\)/.test(output), "ready", 1000);', // wait-allow: rejected lint fixture
+    'const delay = 1000; waitUntil(async () => await /[),/]/.test(output), "ready", delay);', // wait-allow: rejected lint fixture
+    'until(() => /x/ instanceof /ready\\)/.constructor, "ready", 1000);', // wait-allow: rejected lint fixture
+    'until(() => "source" in /ready\\)/, "ready", 1000);', // wait-allow: rejected lint fixture
   ];
   for (const source of [
     ...lexicalWaits,
@@ -247,6 +251,9 @@ test('shared checks reject readiness budgets and require a reason on allowed tim
     'function ready(/* c */ window = 300000) { until(check, "ready", window); }',
     'function ready(window /* c */ = 300000) { until(check, "ready", window); }',
     'function until(check, /* c */ delay = 300000) {}',
+    'waitUntil(async () => await /ready\\)/.test(output), "ready", 300000);',
+    'until(() => /x/ instanceof /ready\\)/.constructor, "ready", 300000);',
+    'until(() => "source" in /ready\\)/, "ready", 300000);',
   ]) assert.deepEqual(waitFindings(source), [], source);
   assert.deepEqual(waitFindings('function other() { const delay = 1000; } function long() { const delay = 300000; until(check, "ready", delay); }'), []);
   const scoped = waitFindings('function short() {\nconst delay = 1000;\nuntil(check, "ready", delay);\n}\nfunction long() {\nconst delay = 300000;\nuntil(check, "ready", delay);\n}');

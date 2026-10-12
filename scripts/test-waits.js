@@ -90,7 +90,7 @@ function tokenize(text, from = 0) {
       const identifier = /^[$A-Z_a-z][$\w]*/.exec(text.slice(position));
       if (number) { type = 'number'; position += number[0].length; }
       else if (identifier) {
-        type = /^(?:return|throw|case|yield|typeof|void|delete|new)$/.test(identifier[0]) ? 'keyword' : 'identifier';
+        type = /^(?:return|throw|case|await|yield|typeof|void|delete|new|in|instanceof)$/.test(identifier[0]) ? 'keyword' : 'identifier';
         position += identifier[0].length;
       } else position++;
     }
