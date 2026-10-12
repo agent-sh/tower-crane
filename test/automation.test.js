@@ -1066,8 +1066,9 @@ test('a test gate that fails by hand while the watcher runs reworks, not left su
   assert.match(h.logs().findLast((e) => e.cmd === 'rework').detail.reason, /^tests failed at [0-9a-f]+: /);
 });
 
-test('a test that also fails on main reworks without a quality climb on a task with a tier range', (t) => {
-  const h = setup(t, { ci: 'pending' });
+test('a test that also fails on main reworks without a quality climb on a task with a tier range', async (t) => {
+  const h = refillFixture(t);
+  for (const id of ['T2', 'T3', 'T4']) h.ok(['task', 'update', id, '--status', 'cancelled']);
   h.ok(['task', 'update', 'T1', '--tier', 'easy..medium']);
   const script = path.join(h.base, 'known-failure.js');
   fs.writeFileSync(script, "console.log('# Subtest: test/known.test.js');\nconsole.log('not ok 1 - known base failure');\nprocess.exit(1);\n");
@@ -1075,8 +1076,17 @@ test('a test that also fails on main reworks without a quality climb on a task w
   h.submit();
   h.consume();
   assert.equal(h.logs().filter((e) => e.cmd === 'check tests').length, 2, 'the failure that also fails on main runs once more');
+  assert.notEqual(await waitFor(h.marker('T1')), null, 'the refill claims the reworked task');
   const task = h.readState('tasks.json').tasks[0];
-  assert.equal(task.status, 'rework');
+  // The worker holds its claim so the test checks settlement after refill, without racing it.
+  assert.equal(task.status, 'in_progress');
+  assert.equal(task.claim.from, 'rework');
+  assert.equal(task.revision, 2);
+  const reworks = h.logs().filter((e) => e.cmd === 'rework' && e.task === 'T1');
+  assert.equal(reworks.length, 1);
+  assert.match(reworks[0].detail.reason, /^tests failed at [0-9a-f]+: .*Also fails on main at [0-9a-f]+: known base failure/s);
+  assert.deepEqual(task.evidence.filter((e) => e.type === 'tests').map((e) => [e.main_failure?.names, e.confirmed_failure]),
+    [[['known base failure'], undefined], [['known base failure'], undefined]]);
   assert.equal(task.tier, 'easy', 'a failure that also fails on main is not the change\'s, so it does not climb');
   assert.deepEqual(task.escalations ?? [], []);
 });
