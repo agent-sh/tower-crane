@@ -89,8 +89,8 @@ test('a temp root too deep for Chrome\'s socket still starts Chrome, from a shal
   // A gate's TMPDIR sits under TOWER_CRANE_TMP, which can be deeper than the socket path allows.
   const deep = path.join(h.base, ...Array.from({ length: 4 }, (_, i) => `${i}-${'d'.repeat(30)}`));
   fs.mkdirSync(deep, { recursive: true });
-  // The fixture's HOME is deep too, so the shallow profile goes to the user's cache root, as it does outside a fixture.
-  Object.assign(h.env, { TMPDIR: deep, XDG_CACHE_HOME: path.join(os.homedir(), '.cache') });
+  // The fixture's HOME is deep too, so the shallow profile goes to the account's cache root, as it does outside a fixture.
+  Object.assign(h.env, { TMPDIR: deep, XDG_CACHE_HOME: path.join(os.userInfo().homedir, '.cache') });
   const chrome = path.join(h.base, 'chrome');
   fs.writeFileSync(chrome, `#!${process.execPath}
 const fs = require('node:fs');

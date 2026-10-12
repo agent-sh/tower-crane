@@ -331,15 +331,18 @@ test('a worker cannot have the broker run its tests, its cleanup or git', () => 
 
 test('a broker whose temp root is too deep for a socket keeps its socket out of /tmp', { skip: process.platform === 'win32' && 'Windows uses a named pipe' }, async (t) => {
   const s = scratch(t);
-  // A temp root this deep leaves no room for a Unix socket path under it. The home is the user's, as
-  // in production, so its cache root is short wherever the temp root is not.
+  // A temp root this deep leaves no room for a Unix socket path under it. The home is the account's,
+  // as in production: a gate or a sandbox can set HOME deep, and then its cache root fits no socket.
   const deep = path.join(s.base, 'd'.repeat(120));
   fs.mkdirSync(deep);
-  const saved = process.env.TMPDIR;
+  const saved = { TMPDIR: process.env.TMPDIR, HOME: process.env.HOME };
   process.env.TMPDIR = deep;
+  process.env.HOME = os.userInfo().homedir;
   t.after(() => {
-    if (saved === undefined) delete process.env.TMPDIR;
-    else process.env.TMPDIR = saved;
+    for (const key of ['TMPDIR', 'HOME']) {
+      if (saved[key] === undefined) delete process.env[key];
+      else process.env[key] = saved[key];
+    }
   });
   const job = { ...s.job, broker_harnesses: ['claude'], broker: path.join(s.base, 'w'.repeat(90), B.FILE) };
   const broker = await B.start(job);
