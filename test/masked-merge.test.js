@@ -226,7 +226,8 @@ test('a masked move materializes protected nested names that did not exist befor
   }
 });
 
-test('a discovered nested protected directory keeps deeper entries and new children off the mount', (t) => {
+test('a discovered nested protected directory keeps deeper entries and new children off the mount',
+  { skip: process.platform === 'win32' && 'Windows directory chmod does not model a read-only bind' }, (t) => {
   const f = fixture(t, {
     base: { 'a.txt': 'a\n', 'web/.VSCode/settings.json': 'v1\n', 'web/.VSCode/deep/keep.json': 'keep\n' },
     task: { 'b.txt': 'b\n' },
