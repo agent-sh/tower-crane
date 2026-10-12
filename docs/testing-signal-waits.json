@@ -20961,6 +20961,151 @@
       "log_sha256": "34f326f940ec64c52642ac38ee5b769e49ea007b76b33eee96468b9d4d6ffe3f",
       "tests": {}
     },
-    "reproduction": "At each loaded_files head, run its named file five times via node test/run.js --test-concurrency=1 with TOWER_CRANE_TEST_TMP on writable disk, while two nice -n 15 node -e \"for (;;) Math.sqrt(Math.random());\" processes run. Keep combined test-file workers at four or below. Plant each probes source in a temporary JavaScript file under test/ and run node scripts/check-shared-files.js at the before and after heads."
+    "reproduction": "At each loaded_files head, run its named file five times via node test/run.js --test-concurrency=1 with TOWER_CRANE_TEST_TMP on writable disk, while two nice -n 15 node -e \"for (;;) Math.sqrt(Math.random());\" processes run. Keep combined test-file workers at four or below. Plant each probes source in a temporary JavaScript file under test/ and run node scripts/check-shared-files.js at the before and after heads.",
+    "unary_sign_control": {
+      "head": "ed5fefce7b52c2f5192528724cea159fbc86b915",
+      "before": "b5d9e40b9318da340826eb2cec0a7b4735f74bd2",
+      "red": {
+        "status": 1,
+        "log_sha256": "3fbbc21339721c0fe5e640e844b02a8121763c665019069d094d9e6cbc76e3c9",
+        "tests": {
+          "tests": 1,
+          "pass": 0,
+          "fail": 1,
+          "cancelled": 0,
+          "skipped": 0
+        }
+      },
+      "green": {
+        "status": 0,
+        "log_sha256": "abfcfdfe032993c3ee43d4776f023a631fecb125f7ac9fd84f60128c585bfe2e",
+        "tests": {
+          "tests": 4,
+          "pass": 4,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 0
+        }
+      },
+      "passed_runs": 5,
+      "runs": [
+        {
+          "run": 1,
+          "status": 0,
+          "wall_s": 1.0158020170001691,
+          "load_before": [
+            12.71337890625,
+            13.57373046875,
+            15.61181640625
+          ],
+          "load_after": [
+            13.29736328125,
+            13.6806640625,
+            15.6357421875
+          ],
+          "log_sha256": "be2267df6f458e1bd9eefb798ee9c16a66bce5f384937b80cf0a3d8eabc81f8f",
+          "tests": {
+            "tests": 4,
+            "pass": 4,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        },
+        {
+          "run": 2,
+          "status": 0,
+          "wall_s": 1.0164647199999308,
+          "load_before": [
+            13.29736328125,
+            13.6806640625,
+            15.6357421875
+          ],
+          "load_after": [
+            13.29736328125,
+            13.6806640625,
+            15.6357421875
+          ],
+          "log_sha256": "cfdaf9eeabded03d3e12a5b417827077a0d202227066d87b69d6742fc7f22aaa",
+          "tests": {
+            "tests": 4,
+            "pass": 4,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        },
+        {
+          "run": 3,
+          "status": 0,
+          "wall_s": 1.0169905689999723,
+          "load_before": [
+            13.29736328125,
+            13.6806640625,
+            15.6357421875
+          ],
+          "load_after": [
+            13.29736328125,
+            13.6806640625,
+            15.6357421875
+          ],
+          "log_sha256": "2fa06946ed1015f1183dfef4261f826943a0a9d02686573a0e0a2fb7fa12c759",
+          "tests": {
+            "tests": 4,
+            "pass": 4,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        },
+        {
+          "run": 4,
+          "status": 0,
+          "wall_s": 1.0166100740007096,
+          "load_before": [
+            13.29736328125,
+            13.6806640625,
+            15.6357421875
+          ],
+          "load_after": [
+            13.29736328125,
+            13.6806640625,
+            15.6357421875
+          ],
+          "log_sha256": "e4c3a630bc3f6abfe39151f100ab41161aaa2806206d97ada924b176f031bb4d",
+          "tests": {
+            "tests": 4,
+            "pass": 4,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        },
+        {
+          "run": 5,
+          "status": 0,
+          "wall_s": 1.0699516249987937,
+          "load_before": [
+            13.29736328125,
+            13.6806640625,
+            15.6357421875
+          ],
+          "load_after": [
+            13.29736328125,
+            13.6806640625,
+            15.6357421875
+          ],
+          "log_sha256": "39f0545d8d69d515ae3d1b0b8d60cca89a3ea1b67182282cec43085ec1d9796a",
+          "tests": {
+            "tests": 4,
+            "pass": 4,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        }
+      ],
+      "reason": "Negating a bound positive constant cannot retain its hung minimum; negating an already-negative constant resolves with the resulting sign."
+    }
   }
 }
