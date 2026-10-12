@@ -715,6 +715,7 @@ test('failed review inbox and rework preserve every finding from the latest comm
   assert.equal(task.status, 'rework');
   assert.equal(task.revision, 2);
   assert.ok(task.evidence.every((entry) => entry.revision === 1));
+  assert.deepEqual(task.evidence.find((entry) => entry.type === 'review').areas, ['lib/cache.js', 'lib/store.js']);
   const rework = h.logs().findLast((entry) => entry.cmd === 'rework' && entry.task === id);
   assert.equal(rework.detail.previous_revision, 1);
   assert.equal(rework.detail.revision, 2);
@@ -730,6 +731,12 @@ test('failed review inbox and rework preserve every finding from the latest comm
   h.ok(['evidence', id, '--type', 'review', '--ok', '--sha', h.sha,
     '--revision', '2', '--agent', 'owner']);
   assert.equal(h.json(['task', 'show', id]).gates.gates.find((gate) => gate.type === 'review').ok, true);
+  h.ok(['evidence', id, '--type', 'review', '--fail', '--sha', h.sha,
+    '--revision', '2', '--agent', 'owner', '--summary', '2 blockers; see full comment', '--ref', ref]);
+  h.ok(['rework', '--from-review', id, '--agent', 'orchestrator']);
+  const redesign = h.inbox().items.find((item) => item.task === id && item.kind === 'review_redesign');
+  assert.deepEqual(redesign.areas, ['lib/cache.js', 'lib/store.js']);
+  assert.equal(h.run(['claim', id, '--agent', 'next-worker']).code, 1);
 });
 
 test('review comment failures refuse rework without replacing full findings with a summary', (t) => {
