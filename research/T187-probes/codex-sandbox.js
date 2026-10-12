@@ -1,86 +1,76 @@
 'use strict';
 // What a codex permission profile can express for reads under $HOME, run
-// against the real codex sandbox (`codex sandbox`) on the host: nested user
-// namespaces are refused inside an agent's sandbox. No model call is made.
+// against the real codex sandbox (`codex sandbox`). No model call is made.
 //
-//   node research/T187-probes/codex-sandbox.js [path/to/codex]
+//   node research/T187-probes/codex-sandbox.js SCRATCH [path/to/codex]
 //
-// The default codex is the one installed next to this node. A scratch
-// CODEX_HOME keeps the user's config out; probe files are created under
-// $HOME/.cache/tower-crane-t187-probe-<pid> and removed at exit. Only
-// readable/denied verdicts are printed, never file contents.
+// SCRATCH is a writable directory under $HOME; the probe tree and a scratch
+// CODEX_HOME (which keeps the user's config out) are made in it. Nothing is
+// written elsewhere. Each variant runs the same check inside the sandbox, and
+// the baseline runs it outside, so a path the caller's own sandbox already
+// hides is told apart from one codex hides. Only readable/denied verdicts are
+// printed, never file contents.
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const cp = require('node:child_process');
 
 const home = fs.realpathSync(os.homedir());
-const codex = process.argv[2] || path.join(path.dirname(process.execPath), 'codex');
-const scratch = path.join(home, '.cache', `tower-crane-t187-probe-${process.pid}`);
-const codexHome = path.join(scratch, 'codex-home');
-const allowedRead = path.join(scratch, 'allowed-read');
-const allowedWrite = path.join(scratch, 'allowed-write');
-const secret = path.join(home, `tower-crane-t187-secret-test-${process.pid}`);
-const nodePrefix = path.dirname(path.dirname(fs.realpathSync(process.execPath)));
-
+const scratch = fs.realpathSync(process.argv[2]);
+const codex = process.argv[3] || 'codex';
+const base = path.join(scratch, 'codex-probe');
+const codexHome = path.join(base, 'codex-home');
+const files = ['hidden/file', 'open/file', 'open/deeper/file', 'open/sub/file'];
+fs.rmSync(base, { recursive: true, force: true });
+for (const f of files) {
+  fs.mkdirSync(path.dirname(path.join(base, f)), { recursive: true });
+  fs.writeFileSync(path.join(base, f), 'probe\n');
+}
 fs.mkdirSync(codexHome, { recursive: true });
 fs.writeFileSync(path.join(codexHome, 'config.toml'), '');
-for (const d of [allowedRead, allowedWrite]) {
-  fs.mkdirSync(d, { recursive: true });
-  fs.writeFileSync(path.join(d, 'file'), 'probe\n');
-}
-fs.writeFileSync(secret, 'probe\n');
-process.on('exit', () => {
-  fs.rmSync(scratch, { recursive: true, force: true });
-  fs.rmSync(secret, { force: true });
-});
 
 const targets = {
-  secret, allowedRead: path.join(allowedRead, 'file'), allowedWrite: path.join(allowedWrite, 'file'),
-  gh: path.join(home, '.config', 'gh'), claude: path.join(home, '.claude', '.credentials.json'),
-  codexAuth: path.join(home, '.codex', 'auth.json'), aws: path.join(home, '.aws'),
-  docker: path.join(home, '.docker', 'config.json'), npmrc: path.join(home, '.npmrc'),
-  netrc: path.join(home, '.netrc'), gitconfig: path.join(home, '.gitconfig'), homeDir: home,
-  etc: '/etc/hostname', usr: '/usr/bin/git',
+  ...Object.fromEntries(files.map((f) => [`<probe>/${f}`, path.join(base, f)])),
+  '~': home, '~/.bashrc': path.join(home, '.bashrc'), '~/.gitconfig': path.join(home, '.gitconfig'),
+  '~/.config/gh': path.join(home, '.config', 'gh'), '~/.claude/.credentials.json': path.join(home, '.claude', '.credentials.json'),
+  '~/.codex/auth.json': path.join(home, '.codex', 'auth.json'), '~/.aws': path.join(home, '.aws'),
+  '~/.docker/config.json': path.join(home, '.docker', 'config.json'), '~/.npmrc': path.join(home, '.npmrc'),
+  '~/.netrc': path.join(home, '.netrc'), '/etc/hostname': '/etc/hostname',
 };
-// Runs inside the sandbox: report each target as readable or the error code.
-const check = `const fs=require("fs");const t=${JSON.stringify(targets)};const o={};for(const[k,p]of Object.entries(t)){try{const s=fs.statSync(p);if(s.isDirectory())fs.readdirSync(p);else fs.closeSync(fs.openSync(p,"r"));o[k]="readable"}catch(e){o[k]="ERR "+e.code}}try{fs.writeFileSync(${JSON.stringify(path.join(allowedWrite, 'w'))},"x");o.writeAllowed="wrote"}catch(e){o.writeAllowed="ERR "+e.code}console.log(JSON.stringify(o))`;
+const check = `const fs=require("fs");const t=${JSON.stringify(targets)};const o={};for(const[k,p]of Object.entries(t)){try{const s=fs.statSync(p);if(s.isDirectory())o[k]="readable dir ("+fs.readdirSync(p).length+" entries)";else{fs.closeSync(fs.openSync(p,"r"));o[k]="readable"}}catch(e){o[k]="ERR "+e.code}}console.log(JSON.stringify(o))`;
 
-// Every top-level directory except the ones on the way to $HOME is readable;
-// on that way, every sibling is. What stays out is $HOME itself.
-function outsideHome() {
-  const roots = [];
-  let dir = '/';
-  for (const part of home.split(path.sep).filter(Boolean)) {
-    for (const e of fs.readdirSync(dir)) {
-      if (e === part || (dir === '/' && ['proc', 'dev', 'sys'].includes(e))) continue;
-      roots.push(path.join(dir, e));
-    }
-    dir = path.join(dir, part);
-  }
-  return roots;
-}
-
-const toml = (rules) => `{${Object.entries(rules).map(([k, v]) => `${JSON.stringify(k)}=${typeof v === 'string' ? JSON.stringify(v) : toml(v)}`).join(',')}}`;
+const at = (...p) => path.join(base, ...p);
+const node = path.dirname(fs.realpathSync(process.execPath));
 const variants = {
-  // T106's shape: read everything, hide $HOME, reopen a read-only path in it.
-  nestedRead: { ':root': 'read', ':tmpdir': 'write', [home]: 'none', [allowedRead]: 'read', [nodePrefix]: 'read', [allowedWrite]: 'write' },
-  // No :root. Read only the listed roots, so $HOME is never mounted.
-  restricted: { ':minimal': 'read', ':tmpdir': 'write', ...Object.fromEntries(outsideHome().map((p) => [p, 'read'])), [allowedRead]: 'read', [nodePrefix]: 'read', [allowedWrite]: 'write' },
+  // A hidden directory with a readable path inside it, and a hidden one inside that.
+  nestedRead: { ':root': 'read', ':tmpdir': 'write', [at()]: 'none', [at('open')]: 'read', [at('open', 'deeper')]: 'none' },
+  // The same with the inner path writable.
+  nestedWrite: { ':root': 'read', ':tmpdir': 'write', [at()]: 'none', [at('open')]: 'write' },
+  // The whole home hidden, the probe tree and node reopened.
+  homeNone: { ':root': 'read', ':tmpdir': 'write', [home]: 'none', [at()]: 'read', [node]: 'read' },
+  // This PR's layout: hide each entry that holds no readable path, never a parent of one.
+  siblings: { ':root': 'read', ':tmpdir': 'write', [at('hidden')]: 'none', [at('open', 'deeper')]: 'none' },
 };
 
-const out = { codex: cp.spawnSync(codex, ['--version'], { encoding: 'utf8' }).stdout.trim(), home: '~', variants: {} };
+const toml = (rules) => `{${Object.entries(rules).map(([k, v]) => `${JSON.stringify(k)}=${JSON.stringify(v)}`).join(',')}}`;
+const parse = (r) => {
+  try { return JSON.parse(r.stdout.trim().split('\n').pop()); }
+  catch { return { exit: r.status, stdout: r.stdout.slice(-500), stderr: r.stderr.slice(-1500) }; }
+};
+const out = {
+  codex: cp.spawnSync(codex, ['--version'], { encoding: 'utf8' }).stdout.trim(),
+  baseline: parse(cp.spawnSync(process.execPath, ['-e', check], { encoding: 'utf8' })),
+  variants: {},
+};
 for (const [name, rules] of Object.entries(variants)) {
   const r = cp.spawnSync(codex, ['sandbox', '-c', 'default_permissions="t187"', '-c', `permissions.t187.filesystem=${toml(rules)}`,
     '-c', 'permissions.t187.network={enabled=false}', '--', process.execPath, '-e', check], {
-    encoding: 'utf8', cwd: allowedWrite, env: { ...process.env, CODEX_HOME: codexHome }, timeout: 60000,
+    encoding: 'utf8', cwd: base, env: { ...process.env, CODEX_HOME: codexHome }, timeout: 60000,
   });
-  let result;
-  try { result = JSON.parse(r.stdout.trim().split('\n').pop()); }
-  catch { result = { exit: r.status, stdout: r.stdout.slice(-500), stderr: r.stderr.slice(-1500) }; }
-  out.variants[name] = { rules: Object.fromEntries(Object.entries(rules).map(([k, v]) => [k.split(home).join('~'), v])), result };
+  out.variants[name] = { rules, result: parse(r) };
 }
-const text = JSON.stringify(out, null, 2).split(home).join('~');
+fs.rmSync(base, { recursive: true, force: true });
+const text = JSON.stringify(out, null, 2).split(base).join('<probe>').split(home).join('~');
 fs.mkdirSync(path.join(__dirname, 'results'), { recursive: true });
 fs.writeFileSync(path.join(__dirname, 'results', 'codex-sandbox.json'), `${text}\n`);
 console.log(text);
