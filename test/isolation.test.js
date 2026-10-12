@@ -676,12 +676,61 @@ test('sandbox cleanup changes only the file it checked when a parent is swapped 
   assert.equal(fs.statSync(outsideFile).mode & 0o222, 0, 'the outside file keeps its mode');
 });
 
+test('sandbox cleanup keeps a real file that takes a placeholder name just before its removal', { skip: NO_STUBS }, (t) => {
+  const { base } = makeRepo(t);
+  const wt = path.join(base, 'worktree');
+  fs.mkdirSync(wt);
+  const bashrc = path.join(wt, '.bashrc');
+  fs.writeFileSync(bashrc, '');
+  fs.chmodSync(bashrc, 0o444);
+  // Loaded only into the cleanup child, through NODE_OPTIONS: the first change to the
+  // placeholder finds a real file at its name, which the child would otherwise delete.
+  const preload = path.join(base, 'race-preload.js');
+  fs.writeFileSync(preload, [
+    'const fs = require("node:fs");',
+    'const path = require("node:path");',
+    'const { renameSync, unlinkSync, writeFileSync } = fs;',
+    'const target = process.env.TOWER_CRANE_RACE_TARGET;',
+    'let raced = false;',
+    'const race = (file) => {',
+    '  if (raced || path.resolve(String(file)) !== target) return;',
+    '  raced = true;',
+    '  unlinkSync(target);',
+    '  writeFileSync(target, "REAL SHELL CONFIG\\n");',
+    '};',
+    'fs.renameSync = (from, ...rest) => { race(from); return renameSync(from, ...rest); };',
+    'fs.unlinkSync = (file) => { race(file); return unlinkSync(file); };',
+  ].join('\n'));
+  const race = {
+    NODE_OPTIONS: `--require "${preload.replace(/\\/g, '/')}"`,
+    TOWER_CRANE_RACE_TARGET: fs.realpathSync(bashrc),
+  };
+  const saved = Object.fromEntries(Object.keys(race).map((key) => [key, process.env[key]]));
+  let result;
+  Object.assign(process.env, race);
+  try {
+    result = ClaudeSandboxPlaceholders.remove(wt, []);
+  } finally {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+  assert.deepEqual(result.removed, [], 'the replaced file is not reported as removed');
+  assert.equal(result.failures.length, 1);
+  assert.match(result.failures[0].error.message, /changed during cleanup/);
+  assert.equal(fs.readFileSync(bashrc, 'utf8'), 'REAL SHELL CONFIG\n', 'the real file keeps its content');
+  assert.deepEqual(fs.readdirSync(wt).filter((name) => name.startsWith('.tower-crane-cleanup-')), [], 'no moved name is left behind');
+});
+
 test('the Claude sandbox git env drops only core.excludesFile from an inherited GIT_CONFIG_PARAMETERS', () => {
   const own = { GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'core.excludesFile', GIT_CONFIG_VALUE_0: '/x' };
   const cases = [
     ["'advice.detachedHead'", {}],
     ["'core.excludesFile'='/g' 'advice.detachedHead'", { GIT_CONFIG_PARAMETERS: "'advice.detachedHead'" }],
+    ["'core.excludesFile=/g' 'advice.detachedHead'", { GIT_CONFIG_PARAMETERS: "'advice.detachedHead'" }],
     ["'url.https://h/?a=b.insteadOf'='x' 'core.excludesfile'='/g'", { GIT_CONFIG_PARAMETERS: "'url.https://h/?a=b.insteadOf'='x'" }],
+    ["'core.excludesfile=/g' 'url.https://h/?a=b.insteadOf'='x'", { GIT_CONFIG_PARAMETERS: "'url.https://h/?a=b.insteadOf'='x'" }],
     ["'a'\\''b'='c' 'core.excludesFile'='/g'", { GIT_CONFIG_PARAMETERS: "'a'\\''b'='c'" }],
   ];
   for (const [parameters, kept] of cases) {
@@ -695,6 +744,22 @@ test('a valueless GIT_CONFIG_PARAMETERS entry does not stop a sandboxed claude f
   isolated(h, 'small', 'claude');
   fs.rmSync(path.join(wt, '.claude', 'settings.local.json'));
   u.env.GIT_CONFIG_PARAMETERS = "'advice.detachedHead'";
+
+  spawn(h, u, 'small', {
+    STUB_CLAUDE_SANDBOX_PLACEHOLDERS: JSON.stringify(SANDBOX_MOUNTS),
+  });
+  assert.deepEqual(u.report().placeholderGitStatus, { code: 0, stdout: '', stderr: '' }, 'git status stays clean while the placeholders exist');
+  assert.equal(fs.existsSync(path.join(wt, '.bashrc')), false, '.bashrc placeholder is removed after exit');
+});
+
+test('an older-form GIT_CONFIG_PARAMETERS excludes entry does not stop a sandboxed claude from hiding its placeholders', { skip: NO_STUBS }, (t) => {
+  const { h, u, wt } = setup(t);
+  isolateGitEnvironment(h, u);
+  isolated(h, 'small', 'claude');
+  fs.rmSync(path.join(wt, '.claude', 'settings.local.json'));
+  const globalIgnore = path.join(h.base, 'explicit-global-ignore');
+  fs.writeFileSync(globalIgnore, 'explicitly-ignored/\n');
+  u.env.GIT_CONFIG_PARAMETERS = `'core.excludesFile=${globalIgnore.replace(/\\/g, '/')}'`;
 
   spawn(h, u, 'small', {
     STUB_CLAUDE_SANDBOX_PLACEHOLDERS: JSON.stringify(SANDBOX_MOUNTS),
