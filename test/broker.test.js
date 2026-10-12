@@ -333,7 +333,7 @@ test('a broker whose temp root is too deep for a socket keeps its socket out of 
   fs.mkdirSync(deep);
   const saved = { TMPDIR: process.env.TMPDIR, HOME: process.env.HOME };
   process.env.TMPDIR = deep;
-  process.env.HOME = os.userInfo().homedir;
+  process.env.HOME = process.env.TOWER_CRANE_TEST_SOCKET_HOME || os.userInfo().homedir;
   t.after(() => {
     for (const key of ['TMPDIR', 'HOME']) {
       if (saved[key] === undefined) delete process.env[key];

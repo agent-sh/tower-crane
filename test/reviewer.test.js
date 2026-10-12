@@ -20,10 +20,25 @@ function rung(h, name, model) {
   pinRung(h, name, { harness: 'opencode', model });
 }
 
+function fixtureHomes(h) {
+  // Reviewer fixtures read their own credentials, not the parent's agent stores.
+  Object.assign(h.env, {
+    USERPROFILE: h.env.HOME,
+    CLAUDE_CONFIG_DIR: path.join(h.env.HOME, '.claude'),
+    CODEX_HOME: path.join(h.env.HOME, '.codex'),
+    PI_CODING_AGENT_DIR: path.join(h.env.HOME, '.pi', 'agent'),
+    GH_CONFIG_DIR: path.join(h.env.HOME, '.config', 'gh'),
+    XDG_CONFIG_HOME: path.join(h.env.HOME, '.config'),
+    XDG_DATA_HOME: path.join(h.env.HOME, '.local', 'share'),
+    OPENCODE_CONFIG_DIR: path.join(h.env.HOME, '.config', 'opencode'),
+  });
+}
+
 // Built once per process for each combination and copied for each test.
 // gated adds passing tests and clean evidence at the submitted sha.
 function setup(t, tier = 'easy', builder = 'other', profile, { gated = false } = {}) {
-  return cachedFixture(t, JSON.stringify([tier, builder, profile ?? null, gated]), (h) => {
+  const h = cachedFixture(t, JSON.stringify([tier, builder, profile ?? null, gated]), (h) => {
+    fixtureHomes(h);
     h.init(['--repo', 'acme/demo']);
     h.ok(['task', 'add', '--title', 'Change', '--acceptance', 'value becomes one', '--tier', tier]);
     h.ok(['brief', 'set', 'T1', '-'], { input: 'BUILDER-HISTORY that the reviewer does not need\n\n## Reviewer\nREVIEWER-ONLY instruction\n\n## Worker\nWORKER-HISTORY that the reviewer does not need\n' });
@@ -59,6 +74,8 @@ function setup(t, tier = 'easy', builder = 'other', profile, { gated = false } =
     if (gated) ready(h);
     return { sha: h.sha, builder: h.builder, reviewEnv: h.reviewEnv };
   });
+  fixtureHomes(h);
+  return h;
 }
 
 function ready(h) {
