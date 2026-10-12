@@ -864,10 +864,14 @@ completed receipts. A newly conflicting PR goes to rework even if its
 base moved while no watcher ran. Matching gate evidence is reused rather
 than rerun because of reconciliation. A submitted task's required software
 gates run when evidence is absent at its head and revision, including when
-an entry lacks a matching gate audit receipt. Passing evidence staled by a
+an entry lacks a matching gate audit receipt or belongs to an earlier
+revision or another sha. Historical passes, failures and waivers stay
+recorded but cannot mark a current gate handled. Passing evidence staled by a
 pinned command or tests policy change runs again. Completed reaction
-receipts do not suppress those runs; an audited failure still waits for an
-explicit retry. An idle startup writes no request.
+receipts do not suppress those runs; only an audited failure at the current
+head and revision waits for an explicit retry. An idle startup writes no request.
+Every due software gate runs even when an earlier gate failed; that failure
+still prevents acceptance but cannot suppress missing evidence for later gates.
 A busy state lock defers the request to the existing watch notification
 or fallback tick without holding the wait timeout.
 `merge queue` events have no task and record `{phase}`: `running` with the
