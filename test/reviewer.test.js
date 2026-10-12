@@ -600,6 +600,91 @@ test('direct review dispatch refuses missing and failed gates and supplies lean 
   assert.equal(out.rung, 'review');
 });
 
+test('a rework review dispatch checks prior blockers and only the diff since the reviewed sha', (t) => {
+  const h = setup(t, 'easy', 'other', undefined, { gated: true });
+  const reviewedSha = h.sha;
+  const reviewedRevision = h.revision('T1');
+  h.reviewer('T1', 'first-reviewer');
+  h.ok(['evidence', 'T1', '--revision', reviewedRevision, '--agent', 'first-reviewer', '--type', 'review',
+    '--fail', '--sha', reviewedSha, '--summary', '1 blocker: correction.md must explain the value']);
+  const sameHead = choice(h).argv.find((arg) => arg.includes('## Task'));
+  assert.match(sameHead, /## Review scope\n\nRe-review/);
+  assert.ok(!sameHead.includes('diff --git'), 'a repeat review at the same sha has no new diff');
+  const task = h.readState('tasks.json').tasks[0];
+  const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  const recorded = events.findLast((e) => e.cmd === 'evidence' && e.detail.type === 'review');
+  recorded.at = new Date(Date.parse(task.evidence.at(-1).at) + 1).toISOString();
+  assert.equal(require('../lib/reviewer').reReview({ events }, task).sha, reviewedSha,
+    'evidence and its audit event can be timestamped in different milliseconds');
+  h.ok(['rework', '--from-review', 'T1']);
+  assert.equal(Number(h.revision('T1')), Number(reviewedRevision) + 1);
+  h.ok(['claim', 'T1', '--agent', 'builder']);
+  fs.writeFileSync(path.join(h.repo, 'correction.md'), 'The value becomes one.\n');
+  h.git(['add', 'correction.md']);
+  h.git(['commit', '-qm', 'explain the value']);
+  h.sha = h.git(['rev-parse', 'HEAD']);
+  h.ok(['submit', 'T1', '--agent', 'builder', '--sha', h.sha]);
+  ready(h);
+  // Evidence without an independent dispatch cannot replace the prior blockers.
+  h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--agent', 'made-up', '--type', 'review',
+    '--fail', '--sha', h.sha, '--summary', 'UNTRUSTED_FINDING']);
+  const out = path.join(h.base, 'rework-review.txt');
+  commandReviewer(h, out);
+  const dispatched = h.json(['spawn', '--task', 'T1', '--role', 'review', '--wait']);
+  const prompt = fs.readFileSync(out, 'utf8');
+  assert.match(prompt, /## Review scope\n\nRe-review/);
+  assert.ok(prompt.includes(`git diff ${reviewedSha} ${h.sha}`));
+  assert.match(prompt, /first-reviewer/);
+  assert.match(prompt, /1 blocker: correction.md must explain the value/);
+  assert.match(prompt, /security or data-loss/);
+  assert.match(prompt, /follow-ups/);
+  assert.match(prompt, /diff --git a\/correction.md b\/correction.md/);
+  assert.ok(!prompt.includes('diff --git a/value.js'), 'already reviewed code stays out of the packet diff');
+  assert.ok(!prompt.includes('UNTRUSTED_FINDING'));
+  assert.equal(dispatched.review_scope.sha, reviewedSha);
+  assert.equal(dispatched.review_scope.revision, Number(reviewedRevision));
+  const event = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse)
+    .findLast((e) => e.cmd === 'spawn' && e.detail.role === 'reviewer');
+  assert.deepEqual(event.detail.review_scope, dispatched.review_scope);
+});
+
+test('changed requirements and unrelated rework keep the full review scope', (t) => {
+  for (const edit of ['acceptance', 'brief', 'kind', 'second-rework', 'new-head', 'passed', 'untrusted', 'late-review']) {
+    const h = setup(t, 'easy', 'other', undefined, { gated: true });
+    if (edit !== 'untrusted') h.reviewer('T1', 'first-reviewer');
+    const reviewedRevision = h.revision('T1');
+    if (edit !== 'late-review') h.ok(['evidence', 'T1', '--revision', reviewedRevision, '--agent', 'first-reviewer', '--type', 'review',
+      '--fail', '--sha', h.sha, '--summary', 'OLD_BLOCKER']);
+    if (edit === 'passed') h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--agent', 'first-reviewer',
+      '--type', 'review', '--ok', '--sha', h.sha]);
+    if (edit === 'new-head') {
+      fs.writeFileSync(path.join(h.repo, 'extra.md'), 'An unrelated change.\n');
+      h.git(['add', 'extra.md']);
+      h.git(['commit', '-qm', 'unrelated change']);
+      h.sha = h.git(['rev-parse', 'HEAD']);
+      h.ok(['submit', 'T1', '--agent', 'builder', '--sha', h.sha]);
+    }
+    h.ok(['rework', 'T1', '--reason', 'correct the submission']);
+    if (edit === 'late-review') h.ok(['evidence', 'T1', '--revision', reviewedRevision, '--agent', 'first-reviewer',
+      '--type', 'review', '--fail', '--sha', h.sha, '--summary', 'OLD_BLOCKER']);
+    if (edit === 'acceptance' || edit === 'second-rework') h.ok(['task', 'update', 'T1', '--acceptance', 'value becomes two']);
+    if (edit === 'brief') h.ok(['brief', 'set', 'T1', '-'], { input: 'Changed requirements.\n' });
+    if (edit === 'kind') h.ok(['task', 'update', 'T1', '--kind', 'docs']);
+    if (edit === 'second-rework') {
+      h.ok(['claim', 'T1', '--agent', 'builder']);
+      h.ok(['submit', 'T1', '--agent', 'builder', '--sha', h.sha]);
+      h.ok(['rework', 'T1', '--reason', 'refresh the branch']);
+    }
+    h.ok(['claim', 'T1', '--agent', 'builder']);
+    h.ok(['submit', 'T1', '--agent', 'builder', '--sha', h.sha]);
+    ready(h);
+    const prompt = choice(h).argv.find((arg) => arg.includes('## Task'));
+    assert.match(prompt, /## Review scope\n\nFull review/, edit);
+    assert.match(prompt, /diff --git a\/value.js b\/value.js/, edit);
+    assert.ok(!prompt.includes('OLD_BLOCKER'), edit);
+  }
+});
+
 test('review packet uses role headings consistently and ignores fenced headings', (t) => {
   const h = setup(t);
   h.ok(['brief', 'set', 'T1', '-'], { input: [
@@ -670,8 +755,8 @@ test('real Claude reviewers expose first-turn cache reads and writes across work
   }
 });
 
-test('review dispatch refuses a submitted head or configured base changed after diff preparation', async (t) => {
-  for (const change of ['head', 'base']) {
+test('review dispatch refuses a submitted head, configured base or review scope changed after diff preparation', async (t) => {
+  for (const change of ['head', 'base', 'scope']) {
     const h = setup(t);
     changeKind(h, 'docs');
     commandReviewer(h, path.join(h.base, 'context.txt'));
@@ -689,7 +774,12 @@ test('review dispatch refuses a submitted head or configured base changed after 
       }
       assert.ok(!fs.existsSync(path.join(h.state, 'lock')), 'diff preparation leaves state writable');
       if (change === 'head') h.ok(['submit', 'T1', '--agent', 'builder', '--sha', next]);
-      else h.ok(['project', 'set', '--base', 'fixture-change']);
+      else if (change === 'base') h.ok(['project', 'set', '--base', 'fixture-change']);
+      else {
+        h.reviewer('T1', 'first-reviewer');
+        h.ok(['evidence', 'T1', '--agent', 'first-reviewer', '--type', 'review', '--fail',
+          '--sha', h.sha, '--summary', 'new blockers']);
+      }
     } finally {
       fs.writeFileSync(`${paused}.go`, '');
     }
@@ -697,7 +787,7 @@ test('review dispatch refuses a submitted head or configured base changed after 
     assert.equal(result.code, 1, result.stderr);
     assert.match(result.stderr, /changed.*diff.*retry/i);
     const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
-    assert.ok(!events.some((e) => e.cmd === 'spawn'));
+    assert.ok(!events.some((e) => e.cmd === 'spawn' && e.detail.agent !== 'first-reviewer'));
     assert.ok(!fs.existsSync(path.join(h.state, 'reviews')), 'a stale packet is never written');
   }
 });
@@ -763,6 +853,9 @@ test('accept reuses an active review and direct dispatch refuses a duplicate', (
 
 test('large review diffs use a context file and a short argv', (t) => {
   const h = setup(t);
+  h.reviewer('T1', 'first-reviewer');
+  h.ok(['evidence', 'T1', '--agent', 'first-reviewer', '--type', 'review', '--fail',
+    '--sha', h.sha, '--summary', 'PRIOR_BLOCKER_FOR_LARGE_PACKET']);
   fs.writeFileSync(path.join(h.repo, 'large.md'), 'A focused review reads this diff.\n'.repeat(1000));
   h.git(['add', 'large.md']);
   h.git(['commit', '-qm', 'large diff']);
@@ -779,11 +872,14 @@ test('large review diffs use a context file and a short argv', (t) => {
   assert.match(user, /## Gate results/);
   assert.match(user, /"type": "tests"/);
   assert.match(user, /"type": "clean"/);
+  assert.match(user, /## Review scope\n\nRe-review/);
+  assert.match(user, /PRIOR_BLOCKER_FOR_LARGE_PACKET/);
   h.json(['spawn', '--role', 'review', '--task', 'T1', '--wait']);
   assert.match(fs.readFileSync(out, 'utf8'), /reviews/);
   const fullPacket = fs.readFileSync(packet, 'utf8');
   assert.match(fullPacket, /diff --git a\/large.md b\/large.md/);
   assert.match(fullPacket, /## Reviewer\nREVIEWER-ONLY instruction/);
+  assert.ok(!fullPacket.includes('diff --git a/value.js'));
   assert.ok(!fullPacket.includes('WORKER-HISTORY'));
 });
 
