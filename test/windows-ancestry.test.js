@@ -6,7 +6,21 @@ const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
 const crypto = require('node:crypto');
-const { makeProjectRepo, BIN } = require('./helpers');
+const { makeProjectRepo, BIN, run } = require('./helpers');
+
+test('Windows provider discovery reaches owner authority without individual parent lookups', (t) => {
+  const h = makeProjectRepo(t);
+  const result = run(['project', 'set', '--merge-admin', 'true'], {
+    cwd: h.repo,
+    pre: ['--require', path.join(__dirname, 'fixtures', 'windows-ancestry.js')],
+    env: { ...h.env, TOWER_CRANE_AGENT: 'orchestrator', ANCESTRY_PROVIDER_SNAPSHOT: '1' },
+  });
+  assert.equal(result.code, 1, result.stderr);
+  assert.match(result.stderr, /merge\.admin is owner-required; opened D1/);
+  assert.equal(h.readState('project.json').merge?.admin, undefined);
+  assert.equal(h.readState('decisions.json').decisions.length, 1);
+  assert.equal(h.readState('tasks.json').orchestrator_lease.pid, process.pid);
+});
 
 test('Windows orchestrator discovery waits for one snapshot and binds the persistent caller', {
   skip: process.platform !== 'win32' && 'requires PowerShell and Windows process discovery',

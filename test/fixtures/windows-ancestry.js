@@ -3,6 +3,23 @@
 const cp = require('node:child_process');
 const fs = require('node:fs');
 
+// A loaded provider can supply a snapshot while individual parent lookups
+// time out. Drive the real CLI through that boundary on either platform.
+if (process.env.ANCESTRY_PROVIDER_SNAPSHOT === '1') {
+  const commands = require('../../lib/commands');
+  const exec = commands.execFileSync;
+  Object.defineProperty(process, 'platform', { value: 'win32' });
+  commands.execFileSync = function providerSnapshot(command, args, options) {
+    if (command !== 'powershell.exe') return exec(command, args, options);
+    if (/\bGet-CimInstance\b[^\n;]*-Filter\b/.test(args.join('\n'))) {
+      throw Object.assign(new Error('parent lookup exceeded the provider budget'), { code: 'ETIMEDOUT' });
+    }
+    return JSON.stringify([{ ProcessId: process.ppid, ParentProcessId: 1,
+      Name: 'node.exe', CommandLine: 'node harness', CreationDate: 'stable-start' }]);
+  };
+  return;
+}
+
 // Exercise the real PowerShell walk with a fixed process snapshot. Transient
 // shells precede the persistent caller, so per-parent CIM queries are visible.
 const exec = cp.execFileSync;

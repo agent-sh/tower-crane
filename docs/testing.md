@@ -14,6 +14,8 @@ Windows shard 1/3 also runs the Claude interrupted native worker case ten consec
 
 Each Windows shard repeats its affected owner-authority and board-approval files ten consecutive times: `authority.test.js`, `approval-context.test.js`, `board-controls.test.js` and `windows-ancestry.test.js`. A shard with none of those files skips the repeat. The Windows ancestry regression releases a held CIM snapshot through a native event and waits for the CLI's close signal. It verifies one provider query, transient-shell skipping and bounded ancestry output even with a large unrelated command line. `scripts/probe-windows-ancestry.js` first proves that regression fails for per-parent queries when the PR base still has them, then restores the submitted code before repetitions.
 
+The same file also runs a CLI authority regression on either platform with a provider fixture that refuses individual parent lookups. It reproduces the `ETIMEDOUT` refusal with the old discovery code and reaches the owner-required decision with snapshot discovery, so the Linux tests gate can prove the change too.
+
 For projects Tower Crane manages, expensive proof is the default: the orchestrator pins `--tests-cmd "npm test" --tests-expensive true --tests-proof-cmd "node --test {tests}"`. A submission then runs the full suite once and proves the change with its own test files.
 
 ## Writing tests
