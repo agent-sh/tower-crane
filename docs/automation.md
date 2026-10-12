@@ -62,8 +62,10 @@ authorization context. Unknown mergeability and transport errors remain
 retryable at startup. A remote merge completed before its local receipt
 is recovered through the merge gate's accepted-head confirmation.
 
-Software gates run again when their passing evidence no longer matches its
-inputs, such as the pinned command or tests policy. A failed gate waits for `gates retry ID` at
+Software gates run when no audited evidence exists at the submitted head
+and revision, even if an unaudited entry or a completed reaction remains.
+They run again when their passing evidence no longer matches its
+inputs, such as the pinned command or tests policy. An audited failed gate waits for `gates retry ID` at
 unchanged inputs; an infrastructure failure a later fix removed is the case
 it serves.
 

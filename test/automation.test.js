@@ -637,6 +637,61 @@ test('a passing gate reruns in the next reaction after its tests mode changes', 
   assert.equal(latest.tests_mode, 'none');
 });
 
+function reconciledFixture(t) {
+  const h = cachedFixture(t, 'reconciled-submission', (repo) => {
+    const h = setup(null, { repo });
+    h.submit();
+    h.consume();
+    return { sha: h.sha };
+  });
+  h.logs = () => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  h.reconcile = () => h.run(['wait', '--types', 'never', '--timeout', '0.01', '--agent', 'orchestrator']);
+  return h;
+}
+
+for (const entries of ['absent', 'unaudited pass', 'unaudited failure']) {
+  test(`startup reconciles missing software evidence with ${entries} entries and an empty queue`, (t) => {
+    const h = reconciledFixture(t);
+    const tasks = h.readState('tasks.json');
+    const task = tasks.tasks[0];
+    if (entries === 'absent') task.evidence = [];
+    else for (const entry of task.evidence) entry.ok = entries === 'unaudited pass';
+    fs.writeFileSync(path.join(h.state, 'tasks.json'), JSON.stringify(tasks));
+    const events = h.logs().filter((e) => !['check tests', 'check clean', 'check ci'].includes(e.cmd));
+    fs.writeFileSync(path.join(h.state, 'events.jsonl'), events.map((e) => JSON.stringify(e) + '\n').join(''));
+    const before = h.json(['task', 'show', 'T1']);
+    assert.ok(before.gates.gates.filter((g) => g.type !== 'review').every((g) => !g.ok));
+    assert.deepEqual(h.json(['status']).gate_queue, { running: [], queued: [], blocked: [] });
+    assert.ok(events.some((e) => e.cmd === 'automation' && e.detail.phase === 'done'));
+
+    assert.equal(h.reconcile().code, 2);
+    const checks = h.logs().filter((e) => e.cmd.startsWith('check '));
+    assert.deepEqual(checks.map((e) => [e.cmd, e.detail.ok, e.detail.sha, e.detail.revision]),
+      ['tests', 'clean', 'ci'].map((type) => [`check ${type}`, true, h.sha, task.revision]));
+    const after = h.json(['task', 'show', 'T1']);
+    assert.ok(after.gates.gates.filter((g) => g.type !== 'review').every((g) => g.ok));
+    assert.equal(after.status, 'submitted', 'software evidence does not replace independent review');
+    h.reconcile();
+    assert.equal(h.logs().filter((e) => e.cmd.startsWith('check ')).length, 3, 'valid receipts prevent duplicate runs');
+  });
+}
+
+test('startup reconciles tests evidence staled by a tests keep setting change after a completed reaction', (t) => {
+  const h = reconciledFixture(t);
+  const checks = () => h.logs().filter((e) => e.cmd.startsWith('check '));
+  const before = checks();
+  assert.deepEqual(h.json(['status']).gate_queue, { running: [], queued: [], blocked: [] });
+  h.ok(['project', 'set', '--tests-keep', '["test/**","docs/**"]']);
+  const stale = h.json(['task', 'show', 'T1']).gates.gates.find((g) => g.type === 'tests');
+  assert.equal(stale.ok, false);
+  assert.match(stale.reason, /tests evidence no longer matches/);
+  assert.equal(h.reconcile().code, 2);
+  const added = checks().slice(before.length);
+  assert.deepEqual(added.map((e) => [e.cmd, e.detail.ok]), [['check tests', true]]);
+  assert.deepEqual(added[0].detail.gate_policy.keep, ['test/**', 'docs/**']);
+  assert.equal(h.json(['task', 'show', 'T1']).gates.gates.find((g) => g.type === 'tests').ok, true);
+});
+
 test('a failed gate at unchanged inputs waits for gates retry, which reruns it', (t) => {
   const h = setup(t, { ci: 'pending' });
   const marker = path.join(h.base, 'infra-failed-once');
