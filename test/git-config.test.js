@@ -82,7 +82,7 @@ test('git the CLI and gates run takes no command from repository config or hooks
   h.init();
   const sha = gateFixture(h);
   h.ok(['project', 'set', '--tests-cmd', 'node test/value.test.js', '--clean-cmd', h.env.TOWER_CRANE_CLEAN_CMD]);
-  for (const title of ['Change', 'Other', 'Ssh', 'Https', 'Local']) h.ok(['task', 'add', '--title', title, '--acceptance', 'works']);
+  for (const title of ['Change', 'Other', 'Ssh', 'Https', 'Local', 'Helper', 'Vcs']) h.ok(['task', 'add', '--title', title, '--acceptance', 'works']);
   h.ok(['brief', 'set', 'T2', '-'], { input: '- change it\n' });
   h.ok(['claim', 'T1', '--agent', 'worker']);
   h.ok(['submit', 'T1', '--sha', sha, '--agent', 'worker']);
@@ -117,6 +117,20 @@ test('git the CLI and gates run takes no command from repository config or hooks
   h.git(['remote', 'set-url', 'origin', origin]);
   h.ok(['worktree', 'T5', '--agent', 'orchestrator'], { env });
   assert.deepEqual(ran(), []);
+
+  // A remote helper with no git-remote-<name> program runs the alias.
+  h.git(['config', 'alias.remote-tcx', `!${cmd('remote-helper-alias')} </dev/null; false`]);
+  h.git(['remote', 'set-url', 'origin', 'tcx::anything']);
+  const helper = h.run(['worktree', 'T6', '--agent', 'orchestrator'], { env });
+  assert.deepEqual(ran(), []);
+  assert.match(helper.stderr, /git fetch origin main failed/);
+  h.git(['config', 'alias.remote-tcy', `!${cmd('remote-vcs-alias')} </dev/null; false`]);
+  h.git(['config', 'protocol.tcy.allow', 'always']);
+  h.git(['remote', 'set-url', 'origin', 'https://127.0.0.1:9/acme/demo.git']);
+  h.git(['config', 'remote.origin.vcs', 'tcy']);
+  const vcs = h.run(['worktree', 'T7', '--agent', 'orchestrator'], { env });
+  assert.deepEqual(ran(), []);
+  assert.match(vcs.stderr, /git fetch origin main failed/);
 });
 
 // gh runs git itself (gh stack sync rebases and pushes), so the stub gh runs
