@@ -48,7 +48,7 @@ Tower Crane benches what agents do. This page benches what the owner does on the
 | H2 | Decision controls in the first viewport, 1280x800 | 2 of 2 themes without a scroll, pass | 2 of 2 themes without a scroll, pass |
 | H2a | Approve a change | sentence fail, raw JSON shown; approve: no path, fail | sentence pass, raw JSON behind a disclosure; 1 click, answer approve from the board; applied yes by the orchestrator's retry (setting event cli, approved_by D3), pass |
 | H3 | Judge a review and send it back | 3 clicks, 3 scrolls, KLM 14.99 s without typing, 711 px scrolled, fail | 3 clicks, 0 scrolls, KLM 10.1 s without typing, 0 px scrolled, pass |
-| H4 | Stop a runaway | spend rose before exit: yes; flagged: no; stop: no path, fail | spend rose before exit: yes; flagged: yes, 152 ms after the rule's threshold; stop: 1 click, 1 key, KLM 4.68 s, stopped with no retry; recorded 10000000 of the stub's 10000000, pass |
+| H4 | Stop a runaway | spend rose before exit: yes; flagged: no; stop: no path, fail | spend rose before exit: yes; flagged: yes, 199 ms after the rule's threshold; stop: 1 click, 1 key, KLM 4.68 s, stopped with no retry; recorded 10000000 of the stub's 10000000, pass |
 | H4s | Lost telemetry: stale | state in words: no; drawn as zero: no; Now item: no; sentence says not counted: no, fail | state in words: yes; drawn as zero: no; Now item: yes; sentence says not counted: yes, pass |
 | H4s | Lost telemetry: unavailable | state in words: no; drawn as zero: no; Now item: no; sentence says not counted: no, fail | state in words: yes; drawn as zero: no; Now item: no; sentence says not counted: yes, pass |
 | H4p | Pause dispatch | no path: the board has no pause control, fail | 1 click, 1 key, KLM 4.68 s without typing; sentence leads: yes; project show: yes; claim refused: yes; floor kept: yes; resumed: yes, pass |
@@ -101,7 +101,7 @@ The other rooms, a task sheet, Settings and Controls, at all four sizes in both 
 | One room at a time, 390x844: nav, direct link, sheet inside, cleared fragment, live update | 20 of 20, pass | 25 of 25, pass |
 | Reduced motion: running animations after load | 0, pass | 0, pass |
 
-Runs: before 2026-10-11 21:49Z on `before-tree`, after 2026-10-11 22:18Z. Errors recorded: before 0, after 0.
+Runs: before 2026-10-11 21:49Z on `before-tree`, after 2026-10-12 02:44Z. Errors recorded: before 0, after 0.
 
 <!-- /results -->
 
