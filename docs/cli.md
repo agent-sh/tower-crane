@@ -367,7 +367,8 @@ Filters apply to the returned event, not to the software reactions.
 Queued or running CI and missing required runs record `PENDING`, remain
 blocking, and are rechecked once per minute by the trusted wait host.
 Completed failures take precedence over pending runs. CI completion
-notifications can also trigger a check.
+notifications can also trigger a check. Startup refreshes unconfirmed CI
+failures, including older queued-job receipts without a pending marker.
 
 After a confirmed merge, outstanding submitted or accepted PRs are checked
 against their fetched base in temporary detached worktrees. Hand-written

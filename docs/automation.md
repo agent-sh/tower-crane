@@ -70,7 +70,8 @@ the current head and revision send the task to rework once, with the gate's
 findings in the reason. Unconfirmed or infrastructure failures wait for
 `gates retry ID` at unchanged inputs. Pending CI records `PENDING` and the
 trusted wait host rechecks it once per minute without needing a completion
-notification.
+notification. Startup refreshes unconfirmed CI failures so older queued-job
+receipts acquire the pending state too.
 
 Failures remain visible in gate receipts and task notes. Conflicting PRs
 return to rework with a file list. Unknown mergeability, failed transport,

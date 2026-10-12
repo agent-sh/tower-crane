@@ -876,7 +876,9 @@ the current head and revision sends the task to rework, with the gate summary
 and failing test names or findings in the reason and brief. The locked recheck
 requires the same verdict, head and revision; rework increments the revision,
 so replay cannot send that failure back twice. Infrastructure failures and
-unconfirmed observations wait for an explicit retry. An idle startup writes no request.
+unconfirmed observations wait for an explicit retry, except that startup
+refreshes unconfirmed CI verdicts to classify older pending failures again.
+An idle startup writes no request.
 Every due software gate runs even when an earlier gate failed; that failure
 still prevents acceptance but cannot suppress missing evidence for later gates.
 A busy state lock defers the request to the existing watch notification

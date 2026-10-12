@@ -707,6 +707,24 @@ test('pending CI is persisted and rechecked on schedule without a completion not
   assert.equal(latest().pending, undefined);
 });
 
+test('startup refreshes a legacy unconfirmed CI failure without a pending marker', (t) => {
+  const h = setup(t, { ci: 'pending' });
+  h.submit();
+  h.consume();
+  const tasks = h.readState('tasks.json');
+  for (const entry of tasks.tasks[0].evidence) if (entry.type === 'ci') delete entry.pending;
+  fs.writeFileSync(path.join(h.state, 'tasks.json'), JSON.stringify(tasks));
+  const events = h.logs();
+  for (const event of events) if (event.cmd === 'check ci') delete event.detail.pending;
+  fs.writeFileSync(path.join(h.state, 'events.jsonl'), events.map((e) => JSON.stringify(e) + '\n').join(''));
+  h.consume();
+  const task = h.json(['task', 'show', 'T1']);
+  assert.equal(task.status, 'submitted');
+  assert.equal(task.evidence.findLast((e) => e.type === 'ci').pending, true);
+  assert.equal(h.logs().filter((e) => e.cmd === 'check ci').length, 2);
+  assert.equal(h.logs().some((e) => e.cmd === 'rework' || e.cmd === 'ci completed'), false);
+});
+
 for (const reaction of ['submit', 'reconcile']) {
   test(`${reaction} runs missing gates after a resubmitted revision's tests fail`, (t) => {
     const h = reconciledFixture(t);
