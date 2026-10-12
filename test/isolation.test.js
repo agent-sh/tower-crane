@@ -1276,8 +1276,13 @@ test('a sandboxed agent runs with the user\'s git settings but none of their cre
     const started = spawn(h, u, 'hard');
     const seen = u.report();
     const rendered = path.join(h.state, 'homes', started.agent, 'home', '.gitconfig');
-    assert.equal(fs.lstatSync(rendered).isSymbolicLink(), false, `${harness}: the agent's git config is its own file`);
-    const text = fs.readFileSync(rendered, 'utf8');
+    // O_NOFOLLOW refuses a link, so one open proves the file is the agent's own.
+    const fd = fs.openSync(rendered, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+    let text;
+    try {
+      assert.equal(fs.fstatSync(fd).isFile(), true, `${harness}: the agent's git config is its own file`);
+      text = fs.readFileSync(fd, 'utf8');
+    } finally { fs.closeSync(fd); }
     assert.doesNotMatch(text, /HEADER-SECRET|cache --timeout|helper = "?store/, 'no credential helper or auth header');
     const gitEnv = { ...h.env, GIT_CONFIG_GLOBAL: rendered, GIT_CONFIG_NOSYSTEM: '1', GIT_TERMINAL_PROMPT: '0' };
     const get = (key) => cp.spawnSync(git, ['config', '--global', '--get', key], { env: gitEnv, encoding: 'utf8' }).stdout.trim();
