@@ -29,6 +29,7 @@ const args = process.argv.slice(2);
 const sha = ${JSON.stringify(sha)};
 const head = ${JSON.stringify(head)};
 const ok = process.env.FIXTURE_GATE_OK !== '0';
+if (process.env.FIXTURE_GH_ERROR) { console.error('fixture gh observation error'); process.exit(1); }
 if (args[0] === 'pr') {
   console.log(JSON.stringify({state: process.env.FIXTURE_PR_STATE || 'MERGED', headRefOid: head,
     mergeCommit: {oid: process.env.FIXTURE_MERGE_SHA || sha}, baseRefName: process.env.FIXTURE_BASE || 'main'}));
@@ -40,7 +41,8 @@ if (args[0] === 'pr') {
     status: 'completed', conclusion: ok ? 'success' : 'failure'}));
 } else if (args[1].includes('/actions/runs')) {
   console.log(JSON.stringify({id: 20, name: 'CI', path: 'ci.yml', head_sha: sha, head_branch: 'main',
-    event: process.env.FIXTURE_EVENT || 'push', check_suite_id: 10, status: 'completed', conclusion: ok ? 'success' : 'failure'}));
+    event: process.env.FIXTURE_EVENT || 'push', check_suite_id: 10,
+    status: process.env.FIXTURE_WORKFLOW_STATUS || 'completed', conclusion: ok ? 'success' : 'failure'}));
 }
 `);
     h.ok(['project', 'set', '--ci-required', '["test ("]']);
@@ -190,9 +192,42 @@ test('hotfix CI requires push run on main, and acceptance permits no gate waiver
   const ci = h.run(['check', 'ci', 'T1'], { env: { FIXTURE_EVENT: 'pull_request' } });
   assert.equal(ci.code, 1);
   assert.match(ci.stdout, /no matching push workflow/);
+  assert.equal(task(h).status, 'submitted');
   const fresh = fixture(t);
   record(fresh);
   const r = fresh.run(['accept', 'T1', '--waive', 'review', '--reason', 'skip']);
   assert.equal(r.code, 1);
   assert.match(r.stderr, /hotfix acceptance requires every gate/);
+});
+
+test('pending CI and observation errors keep the hotfix submitted and can be retried', (t) => {
+  const h = fixture(t);
+  record(h);
+  for (const env of [{ FIXTURE_WORKFLOW_STATUS: 'in_progress' }, { FIXTURE_GH_ERROR: '1' }]) {
+    const r = h.run(['check', 'ci', 'T1'], { env });
+    assert.equal(r.code, 1);
+    assert.equal(task(h).status, 'submitted');
+    assert.equal(task(h).hotfix.follow_up, undefined);
+    assert.equal(h.readState('tasks.json').tasks.length, 1);
+  }
+  h.ok(['check', 'ci', 'T1']);
+  assert.equal(task(h).evidence.at(-1).ok, true);
+});
+
+test('a test timeout stays retryable while insufficient proof opens follow-up rework', (t) => {
+  const h = fixture(t);
+  record(h);
+  h.ok(['project', 'set', '--tests-cmd', 'node -e "setInterval(() => {}, 1000)"', '--tests-timeout-min', '0.001']);
+  const timeout = h.run(['check', 'tests', 'T1']);
+  assert.equal(timeout.code, 1);
+  assert.equal(task(h).evidence.at(-1).infrastructure_failure, true);
+  assert.equal(task(h).status, 'submitted');
+  assert.equal(task(h).hotfix.follow_up, undefined);
+  h.ok(['project', 'set', '--tests-cmd', 'node -e "0"', '--tests-timeout-min', '1']);
+  const proof = h.run(['check', 'tests', 'T1']);
+  assert.equal(proof.code, 1);
+  assert.match(proof.stdout, /tests pass without the change/);
+  assert.equal(task(h).evidence.at(-1).confirmed_failure, true);
+  assert.equal(task(h).status, 'cancelled');
+  assert.equal(task(h, task(h).hotfix.follow_up).status, 'rework');
 });

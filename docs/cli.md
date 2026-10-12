@@ -176,7 +176,7 @@ the successful push workflows on the recorded base at that commit. Once
 software gates pass, normal independent review receives the landed diff;
 call `accept` again after its verdict if no watcher is running. A pass
 shows `accepted (hotfix)`; it does not merge the PR again. Waivers are refused.
-A failed gate or review creates one follow-up rework task against the
+A confirmed gate failure or failed review creates one follow-up rework task against the
 project base and retains the historical merge on the original task. See
 [state.md](state.md#already-merged-hotfixes) for fields and counts.
 
@@ -279,7 +279,7 @@ Every spawn refreshes sibling-path entries in the requested agy settings. These 
 | | |
 | `hook ACTION --binding FILE [--payload JSON\|-]` | deliver harness messages and record activity under the home identity |
 | | |
-| `hotfix ID --pr N --sha SHA` | orchestrator or owner: verify the PR merged into the project base at SHA, record its merge and first parent, and move the task (including cancelled tasks) to submitted with a new revision. Run `accept ID` to check tests, clean and push CI at that merge commit, then dispatch normal independent review of the landed diff. Every gate must pass, without waivers. Acceptance displays `accepted (hotfix)` and records that it merged before its gates. A failed gate or review cancels the historical task and creates a separate rework task for a follow-up PR against the project base. Repeating the same record preserves receipts |
+| `hotfix ID --pr N --sha SHA` | orchestrator or owner: verify the PR merged into the project base at SHA, record its merge and first parent, and move the task (including cancelled tasks) to submitted with a new revision. Run `accept ID` to check tests, clean and push CI at that merge commit, then dispatch normal independent review of the landed diff. Every gate must pass, without waivers. Acceptance displays `accepted (hotfix)` and records that it merged before its gates. A confirmed software failure or failed independent review cancels the historical task and creates a separate rework task for a follow-up PR against the project base. Pending checks and infrastructure errors remain submitted for a gate retry. Repeating the same record preserves receipts |
 | | |
 | `interrupt ID [--needs-owner REASON]` | owner or orchestrator only: stop the live agent through its supervisor and release the claim to its prior `todo` or `rework`. The revision, branch, evidence and dirty worktree stay, so the next dispatch resumes the work (Codex warm resume, or a fresh Claude worker in the same worktree). `--needs-owner REASON` sets the owner ask in the write that releases the claim, so the task waits until `owner-done`; the event's `reason` and `needs_owner` carry REASON, and replacing a different ask is audited as `task.needs_owner`. The board's Stop sends it. Distinct from `rework`, which sends a submitted task back with a reason, and from a requirements edit, which bumps the revision |
 | | |

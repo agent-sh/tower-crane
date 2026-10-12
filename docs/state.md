@@ -487,7 +487,7 @@ merge; automation does not merge the PR again. Dependencies treat it as
 accepted. Status counts and `bench tokens` include `accepted_hotfix` as a
 separate subset of `accepted`; bench task rows include a `hotfix` boolean.
 
-A failed software gate or eligible independent review creates a separate
+A confirmed software gate failure or eligible failed independent review creates a separate
 task with status `rework` and `hotfix_of: ID`. Its brief preserves the
 original instructions and names the failure and a follow-up PR against
 the project base. It starts without a branch, PR, SHA or evidence. The
@@ -495,6 +495,10 @@ historical task becomes `cancelled` and records `hotfix.follow_up`; further
 failures reuse that task instead of creating duplicates. Explicit `rework`
 on a recorded hotfix uses the same follow-up path. Its merge commit stays
 fixed; workers submit the follow-up task.
+Pending CI, observation errors and timeouts keep the hotfix submitted;
+retry its gate when the run completes or the infrastructure recovers.
+Missing regression coverage and a proof that passes without the hotfix
+are confirmed tests failures.
 
 Evidence that no gate decision reads any more is settled: an entry whose `sha` does not match the task's head or whose `revision` is older, every entry of a cancelled task, and every entry but the merge receipt of a task accepted with a passing merge at its head. Each write stores a settled entry's `summary`, `commands`, `receipt`, `gate_policy`, `ci_policy`, `test_failure` and `capped_review` over 1 KiB of compact JSON in `evidence/<task>/<sha256>.json`, and adds `evidence_refs` to the entry, mapping each stored field to `{sha256, bytes}`. The field itself keeps a placeholder of the same type: `[stored in evidence/<task>/<sha256>.json]` for `summary`, an empty array for `commands` and `capped_review`, null for the others. Evidence at the current head stays inline whatever its size, and unknown evidence types are never stored. So `tasks.json` grows by a bounded amount per receipt, not by the size of its output.
 
