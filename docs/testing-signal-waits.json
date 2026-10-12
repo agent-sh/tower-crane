@@ -21106,6 +21106,183 @@
         }
       ],
       "reason": "Negating a bound positive constant cannot retain its hung minimum; negating an already-negative constant resolves with the resulting sign."
+    },
+    "supervision_ci_followup": {
+      "head": "86ba70e705703cbd9e398f89c6818cf0009458e6",
+      "passed_runs": 5,
+      "runs": [
+        {
+          "run": 1,
+          "status": 0,
+          "wall_s": 97.72141500100042,
+          "load_before": [
+            8.00341796875,
+            10.82421875,
+            12.4072265625
+          ],
+          "load_after": [
+            11.0498046875,
+            11.1650390625,
+            12.37890625
+          ],
+          "log_sha256": "4d847513fb0905455e198068d96ebd9369782c2e79fa961c87800c53547384ff",
+          "tests": {
+            "tests": 41,
+            "pass": 41,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        },
+        {
+          "run": 2,
+          "status": 0,
+          "wall_s": 102.05020434000107,
+          "load_before": [
+            11.0498046875,
+            11.1650390625,
+            12.37890625
+          ],
+          "load_after": [
+            13.01611328125,
+            11.81591796875,
+            12.48193359375
+          ],
+          "log_sha256": "73e6df6f350ada5c17c44b90016ac0b4e71751fdb7e66957e5b20be910d3dc21",
+          "tests": {
+            "tests": 41,
+            "pass": 41,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        },
+        {
+          "run": 3,
+          "status": 0,
+          "wall_s": 99.83754991599926,
+          "load_before": [
+            13.01611328125,
+            11.81591796875,
+            12.48193359375
+          ],
+          "load_after": [
+            11.07275390625,
+            11.52294921875,
+            12.3115234375
+          ],
+          "log_sha256": "6b05d4e85cfcf0e435c8e2fcab5dffa33450200017f435b703277c7f10b0d318",
+          "tests": {
+            "tests": 41,
+            "pass": 41,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        },
+        {
+          "run": 4,
+          "status": 0,
+          "wall_s": 99.03844135100007,
+          "load_before": [
+            11.07275390625,
+            11.52294921875,
+            12.3115234375
+          ],
+          "load_after": [
+            10.77294921875,
+            11.216796875,
+            12.115234375
+          ],
+          "log_sha256": "38716f516a4c53de10b5df0fe50707e144e31586fba4224ba31df9a4a45b3ea8",
+          "tests": {
+            "tests": 41,
+            "pass": 41,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        },
+        {
+          "run": 5,
+          "status": 0,
+          "wall_s": 99.2730736500016,
+          "load_before": [
+            10.77294921875,
+            11.216796875,
+            12.115234375
+          ],
+          "load_after": [
+            9.26025390625,
+            10.5986328125,
+            11.80517578125
+          ],
+          "log_sha256": "a25270ef1ea364ed0ef5e5d05b67f49fbc426aae9aab340e23ec27570f2cd384",
+          "tests": {
+            "tests": 41,
+            "pass": 41,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        }
+      ],
+      "original_ci": {
+        "head": "6d441ddae50ec9f79afa1115c3f517e7a781d371",
+        "run": 38206882535,
+        "failed_job": "test (windows-latest, node 26, shard 1/3)",
+        "failure": "Windows natural exits do not send taskkill to an exited or reused pid returned code 1 without diagnostic output. The simulated-Windows local case passes five stress probes; the cause of the original platform result is not established."
+      },
+      "local_stress": [
+        {
+          "run": 1,
+          "status": 0,
+          "wall_s": 1.016715865000151
+        },
+        {
+          "run": 2,
+          "status": 0,
+          "wall_s": 1.0159847070026444
+        },
+        {
+          "run": 3,
+          "status": 0,
+          "wall_s": 1.0166917749993445
+        },
+        {
+          "run": 4,
+          "status": 0,
+          "wall_s": 1.016193118000956
+        },
+        {
+          "run": 5,
+          "status": 0,
+          "wall_s": 0.9179849979991559
+        }
+      ],
+      "full_before_fixture_isolation": {
+        "status": 1,
+        "log_sha256": "942bff6eabf9ccd54944937aba04815e2c3a9147b00a43e083a0d48b7a793f71",
+        "tests": {
+          "tests": 41,
+          "pass": 39,
+          "fail": 2,
+          "cancelled": 0,
+          "skipped": 0
+        }
+      },
+      "isolated_cases": {
+        "status": 0,
+        "log_sha256": "e50638be74536e14a5023b08fc00dd2d381ef4a9194efe6a5d21c623e4874d86",
+        "tests": {
+          "tests": 3,
+          "pass": 3,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 0
+        }
+      },
+      "change": "Expose dispatch stdout and spawn log only on natural-exit failure; leave success assertions intact. Isolate the two simulated harness-route fixtures from inherited origin directories. No Windows test is skipped."
     }
   }
 }
