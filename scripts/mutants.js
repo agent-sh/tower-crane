@@ -95,7 +95,7 @@ const MUTANTS = [
   { id: 'board-range-removal-without-audit', area: 'authority', file: 'lib/tasks.js',
     from: 't.tier !== tiers[t.id] || t.tier_range', to: 't.tier !== tiers[t.id]', tests: ['test/control-modes.test.js'] },
   { id: 'generated-delegation-not-consumed', area: 'authority', file: 'lib/spawn.js',
-    from: "delegation && Auth.role(ctx, st.events) === 'orchestrator'", to: "delegation && Auth.actor(ctx, st.events) === 'orchestrator'", tests: ['test/control-rework.test.js'] },
+    from: "delegation && (Auth.role(ctx, st.events) === 'orchestrator' ||", to: "delegation && (Auth.actor(ctx, st.events) === 'orchestrator' ||", tests: ['test/control-rework.test.js'] },
   { id: 'mixed-waiver-tags-operational', area: 'authority', file: 'lib/tasks.js',
     from: 'approved && Authority.classOf(settings[i]) === Authority.OWNER', to: 'approved', tests: ['test/control-rework.test.js'] },
   { id: 'interrupt-without-setting-audit', area: 'authority', file: 'lib/tasks.js',
