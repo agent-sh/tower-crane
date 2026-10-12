@@ -185,6 +185,23 @@ test('generated-only conflicts merge, regenerate and push without rework or a wo
   assert.ok(h.logs().some((e) => e.cmd === 'generated merge' && e.detail.phase === 'pushed'));
 });
 
+test('a generated-file conflict in a gate runs its checkout hooks with the gate scratch, not the caller temp root', (t) => {
+  const h = generatedSetup(t);
+  h.submit();
+  const inherited = path.join(h.base, 'inherited-tmp');
+  fs.mkdirSync(inherited);
+  // Git runs post-checkout for path checkouts too. The hook writes only in a gate worktree
+  // (<gate root>/tower-crane-*/wt), so the task worktree a repair creates stays out of it.
+  fs.writeFileSync(path.join(h.repo, '.git', 'hooks', 'post-checkout'),
+    '#!/bin/sh\ncase "$(pwd)" in */tower-crane-*/wt) mkdir -p "$TMPDIR/tower-crane-hook-$$";; esac\n', { mode: 0o755 });
+  const env = { TMPDIR: inherited };
+  h.ok(['check', 'tests', 'T1', '--agent', 'orchestrator'], { env });
+  h.run(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator'], { env });
+  assert.ok(h.logs().some((e) => e.cmd === 'generated merge' && e.detail.phase === 'pushed'));
+  // Node's own compile cache also lands in TMPDIR, so only the hook's directories count.
+  assert.deepEqual(fs.readdirSync(inherited).filter((name) => name.startsWith('tower-crane-hook-')), []);
+});
+
 test('a sole docs conflict regenerates every declared output of its script', (t) => {
   const h = generatedSetup(t);
   h.git(['switch', 'main']);
