@@ -103,12 +103,13 @@ test('a legacy short submitted sha reuses its full-sha reviewer and recognizes i
   assert.match(failed.reason, /Check null/);
   const denied = h.run(['accept', 'T1']);
   assert.equal(denied.code, 1);
-  assert.match(denied.stderr, /Check null/);
+  assert.match(denied.stdout, /current review FAIL.*sent back for rework/);
   assert.equal(events(h).filter((e) => e.cmd === 'spawn' && e.detail.role === 'reviewer').length, 1);
   assert.equal(h.readState('tasks.json').tasks[0].sha, sha.slice(0, 8));
-  const reworked = h.json(['rework', '--from-review', 'T1', '--agent', 'orchestrator']);
+  const reworked = h.json(['task', 'show', 'T1']);
   assert.equal(reworked.status, 'rework');
   assert.match(reworked.notes.at(-1).text, /Check null/);
+  assert.match(h.ok(['brief', 'get', 'T1']), /Check null before dereferencing/);
 });
 
 test('submit refuses an ambiguous prefix and a non-commit object', (t) => {
