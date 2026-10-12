@@ -254,7 +254,7 @@ test('task add --brief writes the brief in the same command and refuses an unrea
   assert.equal(fs.existsSync(path.join(h.state, 'briefs', 'T2.md')), false);
 });
 
-test('task add drops the brief of an add that never committed and keeps the brief of one whose audit append failed', { skip: process.platform === 'win32' || process.getuid?.() === 0 }, (t) => {
+test('task add keeps the brief of a task whose audit append failed', { skip: process.platform === 'win32' || process.getuid?.() === 0 }, (t) => {
   const h = makeRepo(t);
   h.init();
   const file = path.join(h.base, 'brief.md');
@@ -266,7 +266,14 @@ test('task add drops the brief of an add that never committed and keeps the brie
   assert.equal(audit.code, 1);
   assert.equal(h.readState('tasks.json').tasks.find((task) => task.id === 'T1').title, 'Persisted');
   assert.equal(h.ok(['brief', 'get', 'T1']), '# Context\n\nFrom a failed audit.');
+});
 
+test('task add drops the brief of an add that never committed, so the next add gets none', (t) => {
+  const h = makeRepo(t);
+  h.init();
+  const file = path.join(h.base, 'brief.md');
+  fs.writeFileSync(file, '# Context\n\nNever committed.\n');
+  h.ok(['task', 'add', '--title', 'First', '--acceptance', 'exists']);
   // The add is refused before it commits, so its brief goes and the next add reuses T2 without one.
   const refused = h.run(['task', 'add', '--title', 'Uncommitted', '--acceptance', 'never added', '--dep', 'T9', '--brief', file]);
   assert.equal(refused.code, 1);
