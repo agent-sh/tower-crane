@@ -164,6 +164,47 @@ test('a changelog correction gets a light check but an implementation change get
   assert.match(review, /## Diff/);
 });
 
+test('changelog correction diffs are prepared once outside the spawn state lock', (t) => {
+  const h = setup(t);
+  fail(h, [claim('changelog.d/T1.md')]);
+  fs.writeFileSync(path.join(h.repo, 'changelog.d', 'T1.md'), 'The reason is recorded in state.\n');
+  h.git(['add', '.']);
+  h.git(['commit', '-qm', 'Correct claim']);
+  const sha = h.git(['rev-parse', 'HEAD']);
+  h.ok(['submit', 'T1', '--agent', 'worker', '--sha', sha]);
+  const report = path.join(h.base, 'diff-calls.jsonl');
+  h.json(['spawn', '--task', 'T1', '--role', 'review', '--wait'], {
+    hooks: { HOOK_REVIEW_DIFF_REPORT: report },
+  });
+  const calls = fs.readFileSync(report, 'utf8').trim().split('\n').map(JSON.parse);
+  assert.deepEqual(calls, Array.from({ length: 5 }, () => ({ locked: false })));
+  assert.match(fs.readFileSync(path.join(h.state, 'reviews', `T1-${sha}.md`), 'utf8'), /## Light claim check/);
+});
+
+test('a newer verdict between preparation and spawn refuses the stale light packet', async (t) => {
+  const h = setup(t);
+  fail(h, [claim()]);
+  const paused = path.join(h.base, 'worktree-ready');
+  const running = h.runAsync(['spawn', '--task', 'T1', '--role', 'review', '--wait'], {
+    hooks: { HOOK_STOP_WORKTREE_ADD: paused },
+  });
+  try {
+    const deadline = Date.now() + 10000;
+    while (!fs.existsSync(paused)) {
+      assert.ok(Date.now() < deadline, 'worktree preparation did not finish');
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    assert.ok(!fs.existsSync(path.join(h.state, 'lock')));
+    h.ok(['evidence', 'T1', '--agent', 'first-reviewer', '--type', 'review', '--fail', '--sha', h.sha,
+      '--summary', 'A contract claim also blocks.', '--findings', JSON.stringify([claim('docs/state.md')])]);
+  } finally {
+    fs.writeFileSync(`${paused}.go`, '');
+  }
+  const result = await running;
+  assert.equal(result.code, 1, result.stderr);
+  assert.match(result.stderr, /review changed after light-check preparation/);
+});
+
 test('contract claims and mixed blockers keep the ordinary rework path', (t) => {
   const h = setup(t);
   fail(h, [claim(), claim('docs/state.md')]);
