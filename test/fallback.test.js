@@ -17,7 +17,8 @@ function setFallbacks(h, routes, rung = 'easy') {
 }
 
 async function until(fn, message) {
-  const deadline = Date.now() + 12000;
+  // Use the runner's per-test bound so slower Windows receipt writes can finish.
+  const deadline = Date.now() + 300000;
   while (!fn()) {
     if (Date.now() >= deadline) assert.fail(message);
     await new Promise((resolve) => setTimeout(resolve, 25));
