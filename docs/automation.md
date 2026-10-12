@@ -78,9 +78,11 @@ is classified by what it says about the change:
 - A change the worker must fix reworks at once: no test covers the change, it
   has no changes against the base, a test or cleanup command fails, or a
   required CI run is not successful.
-- A missing or uninstalled pinned command is project configuration. The task
-  stays submitted, and the inbox shows a `gate_config` item addressed to the
-  orchestrator, not the owner, that names the setting. Nothing waits on the owner.
+- A missing or uninstalled pinned command is project configuration. Its receipt
+  waits for the command to be pinned, and the inbox shows a `gate_config` item
+  addressed to the orchestrator that names the setting. Later software gates
+  still run and settle any independent failure. If they pass or remain pending,
+  the task stays submitted for the configuration fix.
 - A pending CI run waits for CI.
 
 A rework names the failing tests and their output tail. When the failing tests

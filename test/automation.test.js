@@ -853,7 +853,7 @@ test('a test run killed by a signal retries once and reworks when the retry is a
 });
 
 test('a test command that is not installed stays submitted, and the inbox asks the orchestrator to pin one', (t) => {
-  const h = setup(t, { ci: 'pending' });
+  const h = setup(t, { ci: 'success' });
   h.ok(['project', 'set', '--tests-cmd', 'tower-crane-no-such-tool', '--tests-mode', 'run-only']);
   h.submit();
   h.consume();
@@ -862,11 +862,46 @@ test('a test command that is not installed stays submitted, and the inbox asks t
   assert.equal(task.status, 'submitted');
   assert.equal(task.evidence.filter((e) => e.type === 'tests').at(-1).ok, false);
   assert.equal(h.logs().filter((e) => e.cmd === 'rework').length, 0);
+  assert.deepEqual(task.evidence.map((e) => [e.type, e.ok]), [['tests', false], ['clean', true], ['ci', true]]);
   const items = h.json(['inbox', '--agent', 'orchestrator']).items.filter((i) => i.kind === 'gate_config');
   assert.deepEqual(items.map((i) => [i.task, i.gate, i.setting, i.addressed_to]), [['T1', 'tests', 'gates.tests_cmd', 'orchestrator']]);
   assert.deepEqual(items[0].action.argv.slice(0, 3), ['project', 'set', '--tests-cmd']);
   assert.equal(h.json(['inbox', '--agent', 'orchestrator']).items.some((i) => i.kind === 'gate_failed'), false, 'no failed-gate item for configuration');
 });
+
+for (const [configuration, failure] of [['tests', 'ci'], ['tests', 'clean'], ['clean', 'ci']]) {
+  test(`a ${configuration} configuration failure does not hide an audited ${failure} failure`, (t) => {
+    const h = setup(t, { ci: failure === 'ci' ? 'failure' : 'pending' });
+    delete h.env.TOWER_CRANE_CLEAN_CMD;
+    h.ok(['project', 'set', `--${configuration}-cmd`,
+      configuration === 'tests' ? 'null' : 'tower-crane-no-such-cleaner']);
+    if (failure === 'clean') {
+      const script = path.join(h.base, 'incomplete-clean.js');
+      fs.writeFileSync(script, "console.log(JSON.stringify({items: [], failedChecks: ['cannot scan changed source']}));\n");
+      h.ok(['project', 'set', '--clean-cmd', `node ${shellQuote(script)}`]);
+    }
+    h.submit();
+    h.ok(['project', 'set', '--paused', 'inspect gate settlement']);
+    assert.equal(h.run(['check', failure, 'T1', '--agent', 'orchestrator']).code, 1);
+    h.consume();
+    const task = h.readState('tasks.json').tasks[0];
+    assert.equal(task.status, 'rework');
+    assert.deepEqual(task.evidence.filter((e) => e.type === configuration).at(-1).config_failure,
+      { key: `${configuration}_cmd` });
+    const receipts = task.evidence.filter((e) => e.type === failure);
+    assert.equal(receipts.length, failure === 'clean' ? 2 : 1, 'cleanup retries once; the audited CI verdict reworks without rerunning');
+    assert.ok(receipts.every((e) => !e.ok));
+    if (failure === 'clean') assert.ok(receipts.every((e) => e.infrastructure_failure));
+    else assert.equal(receipts[0].confirmed_failure, true);
+    const reworks = h.logs().filter((e) => e.cmd === 'rework' && e.task === 'T1');
+    assert.equal(reworks.length, 1);
+    assert.match(reworks[0].detail.reason, new RegExp(`^${failure} failed at [0-9a-f]+: `));
+    assert.match(reworks[0].detail.reason, failure === 'clean' ? /cannot scan changed source/ : /failing: test \(failure\)/);
+    assert.deepEqual(h.json(['status']).gate_queue, { running: [], queued: [], blocked: [] });
+    h.consume();
+    assert.equal(h.logs().filter((e) => e.cmd === `check ${failure}`).length, receipts.length, 'settlement starts no extra gate runs');
+  });
+}
 
 test('a missing pinned test command stays submitted with a gate_config item for the orchestrator, not a rework', (t) => {
   const h = setup(t, { ci: 'pending' });
