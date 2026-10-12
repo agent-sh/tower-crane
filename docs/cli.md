@@ -928,6 +928,8 @@ Agy spawn selects the generated `gishra-<job>` agent in its private HOME. `--too
 
 ### Orchestrator tools
 
+Windows orchestrator commands discover their persistent caller from one CIM process snapshot before taking the state lock. PowerShell returns only the caller's ancestry. A failed or timed-out snapshot refuses the command; retry it rather than changing the identity.
+
 `tower-crane mcp --agent orchestrator` serves the inbox and batch actions as MCP tools over stdio. Pass `--state DIR` outside the project. The plugin registers it for Claude Code, and spawned Claude and Codex orchestrators receive it in their generated homes. The Codex plugin command surface exposes `/tower-crane-inbox`, `/tower-crane-spawn-ready`, `/tower-crane-merge-accepted`, `/tower-crane-rework-from-review ID` and `/tower-crane-release-dead`.
 
 Use `inbox --json` for typed findings with `action.command` and `action.argv`; use the returned command to resolve each item. Messages, stalls, decision answers and owner comments can be acknowledged after handling with `inbox --ack ITEM`. Owner-only decisions require the owner's answer; technical decisions are the orchestrator's to answer unless `decision_delegation.orchestrator_technical` is false. GitHub observation failures remain visible as `github_error` items. Batch merge refusals remain in the inbox while independent mergeable entries continue through the existing current-base and stack checks.
