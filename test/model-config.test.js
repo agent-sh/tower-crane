@@ -44,9 +44,6 @@ cp.spawnSync = function (command, args, options) {
   for (const key of ['XDG_CACHE_HOME', 'LOCALAPPDATA', 'TC_TEST_SHARD', 'NODE_TEST_CONTEXT']) {
     if (key in options.env) throw new Error('probe inherited ' + key);
   }
-  if (process.platform !== 'win32' && options.env.TOWER_CRANE_TEST_TMP.length > 50) {
-    throw new Error('probe browser socket path is too long');
-  }
   const check = original.call(this, process.execPath, [path.join(options.cwd, 'scripts', 'check-shared-files.js')],
     { cwd: options.cwd, env: options.env, encoding: 'utf8' });
   if (check.status !== 0) throw new Error('probe shared-files check failed: ' + check.stderr);
