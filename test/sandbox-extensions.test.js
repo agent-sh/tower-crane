@@ -13,7 +13,7 @@ const SECRET_KEY = 'TC_PRIVATE_ENV_FILE_KEY';
 const SECRET = 'private-file-value $literal `literal`';
 
 function setup(t, harness = 'codex') {
-  return cachedFixture(t, harness, (h) => {
+  const h = cachedFixture(t, harness, (h) => {
     h.init();
     h.ok(['task', 'add', '--title', 'Toolchain probe', '--acceptance', 'lock written']);
     h.ok(['brief', 'set', 'T1', '-'], { input: 'probe' });
@@ -21,6 +21,18 @@ function setup(t, harness = 'codex') {
       ...(harness === 'codex' ? ['--profile', 'fixture-main', '--clear', 'model'] : ['--model', 'fixture-large', '--clear', 'profile']),
       '--clear', 'effort', '--clear', 'args']);
   });
+  // Native harness fixtures must not copy the parent's credential tree.
+  Object.assign(h.env, {
+    USERPROFILE: h.env.HOME,
+    CLAUDE_CONFIG_DIR: path.join(h.env.HOME, '.claude'),
+    CODEX_HOME: path.join(h.env.HOME, '.codex'),
+    PI_CODING_AGENT_DIR: path.join(h.env.HOME, '.pi', 'agent'),
+    GH_CONFIG_DIR: path.join(h.env.HOME, '.config', 'gh'),
+    XDG_CONFIG_HOME: path.join(h.env.HOME, '.config'),
+    XDG_DATA_HOME: path.join(h.env.HOME, '.local', 'share'),
+    OPENCODE_CONFIG_DIR: path.join(h.env.HOME, '.config', 'opencode'),
+  });
+  return h;
 }
 
 function noFileSecrets(dir) {
