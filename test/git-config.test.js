@@ -5,6 +5,8 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
+const crypto = require('node:crypto');
+const zlib = require('node:zlib');
 const { makeRepo } = require('./helpers');
 const { gateFixture } = require('./gate-helpers');
 const { shellQuote } = require('../lib/gates/common');
@@ -42,8 +44,26 @@ function plant(h) {
     'commit.gpgSign': 'true',
     'gpg.format': 'ssh',
     'gpg.ssh.defaultKeyCommand': cmd('gpg-key-command'),
+    // With loose objects past gc.auto, a fetch or commit runs gc --auto in
+    // the foreground, whose prune runs this hook.
+    'gc.auto': '1',
+    'gc.autoDetach': 'false',
+    'gc.recentObjectsHook': cmd('recent-objects-hook'),
   };
   for (const [key, value] of Object.entries(settings)) h.git(['config', key, value]);
+  // gc --auto counts the loose objects in objects/17.
+  const aged = Date.now() / 1000 - 30 * 86400;
+  for (let i = 0, found = 0; found < 3; i++) {
+    const body = Buffer.from(`aged ${i}\n`);
+    const object = Buffer.concat([Buffer.from(`blob ${body.length}\0`), body]);
+    const id = crypto.createHash('sha1').update(object).digest('hex');
+    if (!id.startsWith('17')) continue;
+    const file = path.join(gitDir, 'objects', '17', id.slice(2));
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, zlib.deflateSync(object));
+    fs.utimesSync(file, aged, aged);
+    found++;
+  }
   return { cmd, ran: () => (fs.existsSync(marker) ? fs.readFileSync(marker, 'utf8').trim().split('\n') : []) };
 }
 
@@ -62,11 +82,13 @@ test('git the CLI and gates run takes no command from repository config or hooks
   h.init();
   const sha = gateFixture(h);
   h.ok(['project', 'set', '--tests-cmd', 'node test/value.test.js', '--clean-cmd', h.env.TOWER_CRANE_CLEAN_CMD]);
-  for (const title of ['Change', 'Other', 'Ssh', 'Https']) h.ok(['task', 'add', '--title', title, '--acceptance', 'works']);
+  for (const title of ['Change', 'Other', 'Ssh', 'Https', 'Local']) h.ok(['task', 'add', '--title', title, '--acceptance', 'works']);
   h.ok(['brief', 'set', 'T2', '-'], { input: '- change it\n' });
   h.ok(['claim', 'T1', '--agent', 'worker']);
   h.ok(['submit', 'T1', '--sha', sha, '--agent', 'worker']);
   h.git(['switch', '-q', 'main']);
+  const origin = path.join(h.base, 'origin.git');
+  h.git(['clone', '-q', '--bare', h.repo, origin]);
   const { cmd, ran } = plant(h);
   const env = { GIT_TERMINAL_PROMPT: '0' };
 
@@ -89,6 +111,11 @@ test('git the CLI and gates run takes no command from repository config or hooks
   h.git(['remote', 'set-url', 'origin', `http://127.0.0.1:${port}/acme/demo.git`]);
   h.git(['config', `credential.http://127.0.0.1:${port}.helper`, cmd('credential-url-helper')]);
   assert.match(h.run(['worktree', 'T4', '--agent', 'orchestrator'], { env }).stderr, /git fetch origin main failed/);
+  assert.deepEqual(ran(), []);
+
+  // A fetch that succeeds runs auto-maintenance.
+  h.git(['remote', 'set-url', 'origin', origin]);
+  h.ok(['worktree', 'T5', '--agent', 'orchestrator'], { env });
   assert.deepEqual(ran(), []);
 });
 
