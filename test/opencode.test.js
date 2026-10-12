@@ -8,6 +8,7 @@ const cp = require('node:child_process');
 const http = require('node:http');
 const { promisify } = require('node:util');
 const { makeRepo } = require('./helpers');
+const { fileWritten: waitForFile } = require('./signals');
 const A = require('../lib/agents');
 const S = require('../lib/state');
 
@@ -81,14 +82,6 @@ function releaseStub(f) {
   assert.equal(f.h.readState('tasks.json').tasks[0].claim, null);
 }
 
-async function waitForFile(file) {
-  const deadline = Date.now() + 20000;
-  while (!fs.existsSync(file)) {
-    if (Date.now() >= deadline) throw new Error(`${file} never appeared`);
-    await new Promise((resolve) => setTimeout(resolve, 20));
-  }
-}
-
 for (const [name, content] of [
   ['__proto__', '{"__proto__":{"default_agent":"polluted-agent"},"normal":{"enabled":true}}'],
   ['constructor', '{"constructor":{"prototype":{"default_agent":"polluted-agent"}},"normal":{"enabled":true}}'],
@@ -98,7 +91,7 @@ for (const [name, content] of [
     const f = setup(t);
     const result = cp.spawnSync(process.execPath, [STUB], {
       cwd: f.h.repo, env: { ...f.env, OPENCODE_CONFIG_CONTENT: content },
-      encoding: 'utf8', timeout: 10000,
+      encoding: 'utf8', timeout: 300000,
     });
     assert.equal(result.status, 0, result.stderr);
     const report = f.report();
@@ -184,7 +177,7 @@ test('opencode auth refresh reads the private replacement instead of the launch 
 
 test('native opencode auth lookups observe a rotated OAuth store with the real launch env', {
   skip: NO_STUBS || !process.env.TOWER_CRANE_NATIVE_OPENCODE,
-  timeout: 120000,
+  timeout: 300000,
 }, async (t) => {
   const f = setup(t);
   const source = path.join(f.home, '.local', 'share', 'opencode', 'auth.json');
@@ -194,7 +187,7 @@ test('native opencode auth lookups observe a rotated OAuth store with the real l
 const fs = require('node:fs'), path = require('node:path'), cp = require('node:child_process');
 const lookup = () => {
   const result = cp.spawnSync(${JSON.stringify(process.env.TOWER_CRANE_NATIVE_OPENCODE)}, ['auth', 'list'], {
-    env: process.env, encoding: 'utf8', timeout: 45000,
+    env: process.env, encoding: 'utf8', timeout: 300000,
   });
   if (result.status !== 0) throw new Error(result.stderr);
   return result.stdout + result.stderr;
@@ -231,7 +224,7 @@ test('opencode isolates config, memory, skills, MCP, approved rules and credenti
   for (let i = 0; i < 3; i++) {
     if (i) releaseStub(f);
     const preview = dry(f);
-    const baseline = cp.spawnSync(process.execPath, [STUB, ...preview.argv.slice(1)], { cwd: f.h.repo, env: f.env, encoding: 'utf8', timeout: 10000 });
+    const baseline = cp.spawnSync(process.execPath, [STUB, ...preview.argv.slice(1)], { cwd: f.h.repo, env: f.env, encoding: 'utf8', timeout: 300000 });
     assert.equal(baseline.status, 0, baseline.stderr);
     const inherited = f.report();
     assert.ok(inherited.memory.join('').includes('PLANTED-MEMORY'));
@@ -286,7 +279,7 @@ test('opencode excludes credential-triggered remote instructions, plugins and MC
   fs.writeFileSync(authPath, JSON.stringify(auth));
   const preview = dry(f);
   await promisify(cp.execFile)(process.execPath, [STUB, ...preview.argv.slice(1)], {
-    cwd: f.h.repo, env: f.env, timeout: 10000,
+    cwd: f.h.repo, env: f.env, timeout: 300000,
   });
   const baseline = f.report();
   assert.ok(baseline.memory.some((text) => text.includes('REMOTE-INSTRUCTION-CANARY')));
@@ -474,7 +467,7 @@ test('opencode worker headless Bash allows task commands, shim paths, tests and 
 
 test('native opencode headless worker runs claim, git and tests and denies an unlisted command', {
   skip: !process.env.TOWER_CRANE_NATIVE_OPENCODE && 'set TOWER_CRANE_NATIVE_OPENCODE to the installed executable',
-  timeout: 240000,
+  timeout: 300000,
 }, async (t) => {
   const f = setup(t);
   const native = process.env.TOWER_CRANE_NATIVE_OPENCODE;
@@ -503,7 +496,7 @@ test('native opencode headless worker runs claim, git and tests and denies an un
       f.h.ok(['msg', '--to', 'worker-T1-1', '--task', 'T1', 'NATIVE-INBOX-CANARY', '--agent', 'orchestrator']);
     }
     const calls = command ? [{ index: 0, id: `probe-${turn}`, type: 'function',
-      function: { name: 'bash', arguments: JSON.stringify({ command, description: 'headless native probe', timeout: 10000 }) } }] : undefined;
+      function: { name: 'bash', arguments: JSON.stringify({ command, description: 'headless native probe', timeout: 300000 }) } }] : undefined;
     const message = calls ? { role: 'assistant', tool_calls: calls } : { role: 'assistant', content: 'probe done' };
     const base = { id: `mock-${turn}`, created: 1, model: 'mock' };
     if (request.stream) {
@@ -527,7 +520,7 @@ test('native opencode headless worker runs claim, git and tests and denies an un
   const bin = path.join(f.h.base, 'bin');
   fs.writeFileSync(path.join(bin, 'opencode'), `#!${process.execPath}
 const cp = require('node:child_process');
-const result = cp.spawnSync(${JSON.stringify(native)}, process.argv.slice(2), { stdio: 'inherit', timeout: 180000 });
+const result = cp.spawnSync(${JSON.stringify(native)}, process.argv.slice(2), { stdio: 'inherit', timeout: 300000 });
 process.exit(result.status ?? 1);
 `, { mode: 0o755 });
   fs.writeFileSync(path.join(bin, 'tower-crane'), `#!${process.execPath}

@@ -647,7 +647,7 @@ function reconciledFixture(t) {
     return { sha: h.sha };
   });
   h.logs = () => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
-  h.reconcile = () => h.run(['wait', '--types', 'never', '--timeout', '0.01', '--agent', 'orchestrator']);
+  h.reconcile = () => h.run(['wait', '--types', 'never', '--timeout', '0.01', '--agent', 'orchestrator']); // wait-allow: end the idle observation after startup reconciliation; assertions read state after the CLI exits
   return h;
 }
 
