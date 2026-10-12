@@ -25273,9 +25273,9 @@
         ]
       },
       "host_only_skipped_locally": [
-        "test/live-git-sandbox.test.js",
         "test/live-sandbox.test.js"
-      ]
+      ],
+      "host_only_config_note": "Project settings also list a host-only test absent from this checkout; only existing configured files are listed above."
     }
   },
   "scratch_publication_refresh": {
