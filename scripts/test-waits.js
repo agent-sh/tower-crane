@@ -101,6 +101,29 @@ function budgetExpression(value, bindings, seen = new Set()) {
     || /\b[\w$.]+_(?:MS|TIMEOUT|BUDGET|DURATION)\b/.test(expression);
 }
 
+function expressionEnd(text, tokens, start, comparison = false) {
+  const nested = [];
+  let end = start;
+  for (; end < tokens.length; end++) {
+    const token = tokens[end];
+    if (!nested.length) {
+      if ([',', ';', '}', ')', ']'].includes(token.value)) break;
+      if (comparison && (['<', '>', '='].includes(token.value)
+        || ['&', '|', '?'].includes(token.value) && tokens[end + 1]?.value === token.value)) break;
+      if (end > start && /[\r\n]/.test(text.slice(tokens[end - 1].end, token.start))) {
+        const previous = tokens[end - 1].value;
+        // A newline ends a completed initializer, but not a continued sum,
+        // member access or call. The declaration need not have a semicolon.
+        if (!/^(?:[=+\-*/%&|^?:.!~<>]|in|instanceof)$/.test(previous)
+          && !/^(?:[+\-*/%&|^?:.<>[(]|in|instanceof)$/.test(token.value)) break;
+      }
+    }
+    if (['(', '[', '{'].includes(token.value)) nested.push(token.value);
+    else if ([')', ']', '}'].includes(token.value)) nested.pop();
+  }
+  return end;
+}
+
 function bindingScopes(text) {
   const root = { start: 0, end: text.length, parent: null, values: new Map() };
   const scopes = [root];
@@ -148,6 +171,37 @@ function bindingScopes(text) {
       stack.pop().end = match.index;
     }
   }
+  const parentheses = new Map();
+  const opened = [];
+  for (let i = 0; i < tokens.length; i++) {
+    if (tokens[i].value === '(') opened.push(i);
+    else if (tokens[i].value === ')' && opened.length) parentheses.set(opened.pop(), i);
+  }
+  for (const [open, close] of parentheses) {
+    const arrow = tokens[close + 1]?.value === '=' && tokens[close + 2]?.value === '>';
+    const body = tokens[close + (arrow ? 3 : 1)];
+    if (!body || (!arrow && (body.value !== '{'
+      || /^(?:if|for|while|switch|catch|with)$/.test(tokens[open - 1]?.value)))) continue;
+    const args = callArguments(text, tokens[open].start);
+    if (!args.some((arg) => /^[$\w]+\s*=/.test(arg))) continue;
+    const block = body.value === '{' && scopes.find((scope) => scope.start === body.end);
+    const end = block ? block.end : (tokens[expressionEnd(text, tokens, close + 3)]?.start ?? text.length);
+    const parameters = { start: tokens[open].end, end, parent: tokens[open].scope, values: new Map() };
+    // Defaults belong to the callable's parameter environment, not a body
+    // local with the same name or a default on another callable.
+    for (const scope of scopes) {
+      if (scope.parent === parameters.parent && scope.start >= parameters.start && scope.end <= end) {
+        scope.parent = parameters;
+      }
+    }
+    scopes.push(parameters);
+    for (const arg of args) {
+      const parameter = /^([$\w]+)(?:\s*=\s*([\s\S]+))?$/.exec(arg);
+      if (parameter) parameters.values.set(parameter[1], [{
+        value: parameter[2] || 'undefined', scope: parameters,
+      }]);
+    }
+  }
   for (let i = 0; i < tokens.length; i++) {
     const declaration = tokens[i];
     if (!['const', 'let', 'var'].includes(declaration.value)) continue;
@@ -170,18 +224,8 @@ function bindingScopes(text) {
       } else break;
       let from = tokens[j - 1].end;
       if (tokens[j]?.value === '=') from = tokens[j++].end;
-      const nested = [];
-      while (j < tokens.length) {
-        const token = tokens[j];
-        if (!nested.length && [',', ';', '}'].includes(token.value)) break;
-        if (['(', '[', '{'].includes(token.value)) nested.push(token.value);
-        else if ([')', ']', '}'].includes(token.value)) {
-          if (!nested.length) break;
-          nested.pop();
-        }
-        j++;
-      }
-      const end = tokens[j]?.start ?? text.length;
+      j = expressionEnd(text, tokens, j);
+      const end = tokens[j - 1]?.end ?? from;
       if (name) {
         const values = storage.values.get(name) || [];
         values.push({ value: text.slice(from, end).trim(), scope: declaration.scope });
@@ -207,19 +251,31 @@ function bindingScopes(text) {
     }
     return values;
   };
-  return (position) => {
+  const bindingsAt = (position) => {
     let scope = root;
     for (const candidate of scopes) {
       if (candidate.start <= position && position <= candidate.end && candidate.start >= scope.start) scope = candidate;
     }
     return scopedBindings(scope);
   };
+  return bindingsAt;
 }
 
 function waitFindings(text) {
   const findings = [];
   const lines = text.replace(/\r\n/g, '\n').split('\n');
   const bindingsAt = bindingScopes(text);
+  const expressionAt = (position) => {
+    // A clock expression may be inside a quoted generated script. Tokenize
+    // from that expression so an outer quote cannot absorb its delimiter.
+    const fragment = text.slice(position);
+    const lex = /\/\/[^\n]*|\/\*[\s\S]*?\*\/|"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'|[\w$]+|[^\s]/g;
+    const tokens = [...fragment.matchAll(lex)].filter((match) => !/^\/[/*]/.test(match[0]))
+      .map((match) => ({ value: match[0], start: match.index, end: match.index + match[0].length }));
+    const end = expressionEnd(fragment, tokens, 0, true);
+    const to = tokens[end - 1]?.end ?? 0;
+    return { value: fragment.slice(0, to).trim(), end: position + to };
+  };
   const report = (index, reason) => {
     if (!/^\s*\/\//.test(lines[index]) && !allowed(lines[index])) findings.push({ line: index + 1, reason });
   };
@@ -241,11 +297,25 @@ function waitFindings(text) {
       report(text.slice(0, match.index).split('\n').length - 1, 'CLI wait has a readiness budget below the hung-test timeout');
     }
   }
-  // Deadline arithmetic also appears inside generated child scripts.
-  for (const match of text.matchAll(/\b(?:const|let)\s+\w+\s*=\s*(?:Date|performance)\.now\(\)\s*\+\s*([^;\n]+)/g)) {
+  // Assignments and var declarations create the same deadline as const/let.
+  for (const match of text.matchAll(/\b[\w$.]+\s*=\s*(?:Date|performance)\.now\(\)\s*\+\s*/g)) {
     const index = text.slice(0, match.index).split('\n').length - 1;
-    if (!/^\s*\/\//.test(lines[index]) && !hungBudget(match[1].trim())) {
+    const { value } = expressionAt(match.index + match[0].length);
+    if (!/^\s*\/\//.test(lines[index]) && !hungBudget(value, bindingsAt(match.index))) {
       report(index, 'readiness deadline below the hung-test timeout');
+    }
+  }
+  for (const match of text.matchAll(/\b(?:Date|performance)\.now\(\)\s*[<>]=?\s*\(*\s*[\w$.]+\s*\+\s*/g)) {
+    const { value } = expressionAt(match.index + match[0].length);
+    if (!hungBudget(value, bindingsAt(match.index))) {
+      report(text.slice(0, match.index).split('\n').length - 1, 'readiness deadline below the hung-test timeout');
+    }
+  }
+  for (const match of text.matchAll(/\b[\w$.]+\s*\+\s*/g)) {
+    const { value, end } = expressionAt(match.index + match[0].length);
+    if (/^\s*\)*\s*[<>]=?\s*(?:Date|performance)\.now\(\)/.test(text.slice(end))
+      && !hungBudget(value, bindingsAt(match.index))) {
+      report(text.slice(0, match.index).split('\n').length - 1, 'readiness deadline below the hung-test timeout');
     }
   }
   for (const match of text.matchAll(/\bmonitorGraceMs\s*:\s*([^,}]+)/g)) {
@@ -265,7 +335,27 @@ function waitFindings(text) {
       report(text.slice(0, match.index).split('\n').length - 1, 'elapsed wall time is a pass condition');
     }
   }
+  const promiseTimers = new Set();
+  for (const match of text.matchAll(/\b(?:const|let|var)\s+(?:\{([^}]+)\}|([$\w]+))\s*=\s*require\(\s*(['"])(?:node:)?timers\/promises\3\s*\)/g)) {
+    if (match[2]) promiseTimers.add(`${match[2]}.setTimeout`);
+    else {
+      const timer = /(?:^|,)\s*setTimeout(?:\s*:\s*([$\w]+))?\s*(?:,|$)/.exec(match[1]);
+      if (timer) promiseTimers.add(timer[1] || 'setTimeout');
+    }
+  }
+  const promisePositions = new Set();
+  for (const timer of promiseTimers) {
+    const escaped = timer.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    for (const match of text.matchAll(new RegExp(`(?<![\\w$])${escaped}\\s*\\(`, 'g'))) {
+      const args = callArguments(text, match.index + match[0].lastIndexOf('('));
+      promisePositions.add(match.index + timer.lastIndexOf('.') + 1);
+      if (!hungBudget(args[0] || '', bindingsAt(match.index))) {
+        report(text.slice(0, match.index).split('\n').length - 1, 'timer wait needs a signal or a wait-allow reason');
+      }
+    }
+  }
   for (const match of text.matchAll(/\b(setTimeout|until|waitFor\w*|waitUntil)\s*\(/g)) {
+    if (promisePositions.has(match.index)) continue;
     const bindings = bindingsAt(match.index);
     const index = text.slice(0, match.index).split('\n').length - 1;
     if (/^\s*\/\//.test(lines[index])) continue;

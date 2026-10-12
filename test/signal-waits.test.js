@@ -129,6 +129,22 @@ test('shared checks reject readiness budgets and require a reason on allowed tim
     'const budget = getBudget(); until(check, "ready", budget);', // wait-allow: rejected lint fixture
     'const window = getBudget() + 1000; until(check, "ready", window);', // wait-allow: rejected lint fixture
     'const label = "ready", delay = 1000; until(check, label, delay);', // wait-allow: rejected lint fixture
+    'const window = 10 * 1000\nuntil(() => ready, "ready", window)', // wait-allow: rejected lint fixture
+    'const window = 10000\nawait until(check, "ready", window)', // wait-allow: rejected lint fixture
+    'const window =\n  10 *\n  1000\nuntil(check, "ready", window)', // wait-allow: rejected lint fixture
+    'function ready(window = 10000) { until(check, "ready", window); }', // wait-allow: rejected lint fixture
+    'function ready(window = 10 * 1000) { until(check, "ready", window); }', // wait-allow: rejected lint fixture
+    'const ready = (window = 10000) => until(check, "ready", window);', // wait-allow: rejected lint fixture
+    'const ready = (window = 10 * 1000) => { until(check, "ready", window); };', // wait-allow: rejected lint fixture
+    'function ready(window = 1000) { until(check, "ready", window); } function other(window = 300000) {}', // wait-allow: rejected lint fixture
+    'if (Date.now() > start + 5000) throw new Error("late");', // wait-allow: rejected lint fixture
+    'if (start + (5 * 1000) < performance.now()) throw new Error("late");', // wait-allow: rejected lint fixture
+    'var deadline = Date.now() + 5000; while (!ok()) { if (Date.now() > deadline) throw new Error("late"); }', // wait-allow: rejected lint fixture
+    'let deadline; deadline = Date.now() + 5000; while (!ok()) { if (Date.now() > deadline) throw new Error("late"); }', // wait-allow: rejected lint fixture
+    'const window = 5000; if (Date.now() > start + window) throw new Error("late");', // wait-allow: rejected lint fixture
+    'const { setTimeout: sleep } = require("node:timers/promises"); await sleep(500); if (!ok()) throw new Error("late");', // wait-allow: rejected lint fixture
+    'const { setTimeout } = require("timers/promises"); await setTimeout(500);', // wait-allow: rejected lint fixture
+    'const timers = require("node:timers/promises"); await timers.setTimeout(500);', // wait-allow: rejected lint fixture
     'const label = "ready", delay = 10 * 1000, alias = delay; until(check, label, alias);', // wait-allow: rejected lint fixture
     'const { unused } = settings, window = 1000; until(check, "ready", window);', // wait-allow: rejected lint fixture
     'const [unused] = settings, window = 1000; until(check, "ready", window);', // wait-allow: rejected lint fixture
@@ -160,6 +176,18 @@ test('shared checks reject readiness budgets and require a reason on allowed tim
   assert.deepEqual(waitFindings('const h = setup(t, "codex", { cpu_ms: 1000 }); until(t, h, check);'), []);
   assert.deepEqual(waitFindings('const h = setup(t, "codex", { cpu_ms: 10 * 1000 }); until(t, h, check);'), []);
   assert.deepEqual(waitFindings('const label = "ready", delay = 300000; until(check, label, delay);'), []);
+  assert.deepEqual(waitFindings('const window = 300000\nuntil(check, "ready", window)'), []);
+  assert.deepEqual(waitFindings('const window = 300000 // hung guard\nuntil(check, "ready", window)'), []);
+  assert.deepEqual(waitFindings('function ready(window = 300000) { until(check, "ready", window); }'), []);
+  assert.deepEqual(waitFindings('const ready = (window = 300000) => until(check, "ready", window);'), []);
+  assert.deepEqual(waitFindings('function ready(window = 300000) { until(check, "ready", window); } function other(window = 1000) {}'), []);
+  assert.deepEqual(waitFindings('const window = 300000; function ready(delay = window) { const window = 1000; until(check, "ready", delay); }'), []);
+  assert.deepEqual(waitFindings('var deadline = Date.now() + HUNG_TEST_MS;'), []);
+  assert.deepEqual(waitFindings('let deadline; deadline = performance.now() + 300000;'), []);
+  assert.deepEqual(waitFindings('if (Date.now() > start + HUNG_TEST_MS) throw new Error("hung");'), []);
+  assert.deepEqual(waitFindings('if (start + 300000 < performance.now()) throw new Error("hung");'), []);
+  assert.deepEqual(waitFindings('const { setTimeout: sleep } = require("node:timers/promises"); await sleep(300000);'), []);
+  assert.deepEqual(waitFindings('const timers = require("node:timers/promises"); await timers.setTimeout(HUNG_TEST_MS);'), []);
   assert.deepEqual(waitFindings('function other() { const delay = 1000; } function long() { const delay = 300000; until(check, "ready", delay); }'), []);
   const scoped = waitFindings('function short() {\nconst delay = 1000;\nuntil(check, "ready", delay);\n}\nfunction long() {\nconst delay = 300000;\nuntil(check, "ready", delay);\n}');
   assert.deepEqual(scoped.map((finding) => finding.line), [3]);
@@ -193,6 +221,20 @@ test('shared checks reject readiness budgets and require a reason on allowed tim
   const declarations = run();
   assert.equal(declarations.status, 1, declarations.stdout + declarations.stderr);
   assert.match(declarations.stderr, /test\/wait.test.js:1 wait supplies/);
+  for (const source of [
+    'const window = 10 * 1000\nuntil(() => ready, "ready", window)', // wait-allow: rejected lint fixture
+    'function ready(window = 10000) { until(check, "ready", window); }', // wait-allow: rejected lint fixture
+    'function ready(window = 10 * 1000) { until(check, "ready", window); }', // wait-allow: rejected lint fixture
+    'async function f(ok) { const start = Date.now(); while (!ok()) { if (Date.now() > start + 5000) throw new Error("late"); await new Promise(setImmediate); } }', // wait-allow: rejected lint fixture
+    'async function f(ok) { var deadline = Date.now() + 5000; while (!ok()) { if (Date.now() > deadline) throw new Error("late"); await new Promise(setImmediate); } }', // wait-allow: rejected lint fixture
+    'async function f(ok) { let deadline; deadline = Date.now() + 5000; while (!ok()) { if (Date.now() > deadline) throw new Error("late"); await new Promise(setImmediate); } }', // wait-allow: rejected lint fixture
+    'async function f(ok) { const { setTimeout: sleep } = require("node:timers/promises"); await sleep(500); if (!ok()) throw new Error("late"); }', // wait-allow: rejected lint fixture
+  ]) {
+    fs.writeFileSync(bad, "'use strict';\n" + source + '\n');
+    const result = run();
+    assert.equal(result.status, 1, source + '\n' + result.stdout + result.stderr);
+    assert.match(result.stderr, /test\/wait.test.js:\d+ (wait supplies|readiness deadline|timer wait)/);
+  }
   fs.writeFileSync(bad, 'const deadline = Date.now() + 1000; // wait-allow: tests a production timeout\n'); // wait-allow: allowed lint fixture
   assert.equal(run().status, 0);
 });
