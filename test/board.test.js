@@ -1339,7 +1339,13 @@ test('an open board draws a live reading stale once it stops arriving, with no s
   // Spawn caches under HOME; this one keeps them in the scratch directory.
   const home = path.join(h.base, 'home');
   fs.mkdirSync(path.join(home, '.cache'), { recursive: true });
-  h.json(['spawn', '--task', 'T1'], { env: { HOME: home, XDG_CACHE_HOME: path.join(home, '.cache'), PATH: bin + path.delimiter + h.env.PATH, NODE_OPTIONS: `--require "${stub}"`, LIVE_STEPS: '2', LIVE_STEP_TOKENS: '700', LIVE_HOLD: '60000', LIVE_DONE: path.join(h.base, 'done') } });
+  // Inherited harness homes carry origin markers; resolve only this fixture's home.
+  const env = { HOME: home, USERPROFILE: home, XDG_CACHE_HOME: path.join(home, '.cache'),
+    CLAUDE_CONFIG_DIR: path.join(home, '.claude'), CODEX_HOME: path.join(home, '.codex'),
+    PI_CODING_AGENT_DIR: path.join(home, '.pi', 'agent'), GH_CONFIG_DIR: path.join(home, '.config', 'gh'),
+    XDG_CONFIG_HOME: path.join(home, '.config'), XDG_DATA_HOME: path.join(home, '.local', 'share'),
+    OPENCODE_CONFIG_DIR: path.join(home, '.config', 'opencode') };
+  h.json(['spawn', '--task', 'T1'], { env: { ...env, PATH: bin + path.delimiter + h.env.PATH, NODE_OPTIONS: `--require "${stub}"`, LIVE_STEPS: '2', LIVE_STEP_TOKENS: '700', LIVE_HOLD: '60000', LIVE_DONE: path.join(h.base, 'done') } });
   await waitOnRepo(h, () => h.json(['status']).spend.live.some((l) => l.tokens === 1400), 'live usage was not read');
   await withServers(async (servers) => {
     const url = await startServe(servers, h, 'viewer');
