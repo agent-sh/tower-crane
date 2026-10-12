@@ -107,7 +107,7 @@ test('serve serves the sketch and pushes a reload when the state changes', async
     });
     const page = await get(url);
     assert.equal(page.status, 200);
-    assert.match(page.body, /<h1>demo<\/h1>/);
+    assert.match(page.body, /<span class="project" title="[^"]*">demo<\/span>/);
     assert.match(page.body, /"live":true/, 'the served board opens the event stream');
     assert.equal((await get(`${url}nope`)).status, 404);
 

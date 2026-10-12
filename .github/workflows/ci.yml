@@ -40,6 +40,17 @@ jobs:
       - run: npm run check:shared
         env:
           TOWER_CRANE_CHANGE_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+      - name: Repeat Claude Code mod wakeup twenty times
+        if: matrix.os == 'windows-latest' && matrix.shard == '2/3'
+        shell: pwsh
+        run: |
+          foreach ($attempt in 1..20) {
+            Write-Host "Claude Code mod wakeup: pass $attempt/20"
+            npm test -- test/wakeups.test.js --test-name-pattern="the Claude Code mod pushes a decision answer and a worker message into the session"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+        env:
+          TOWER_CRANE_TEST_TMP: ${{ runner.temp }}/tower-crane-tests
       - run: npm test
         env:
           TOWER_CRANE_TEST_TMP: ${{ runner.temp }}/tower-crane-tests
