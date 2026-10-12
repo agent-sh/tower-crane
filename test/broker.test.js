@@ -328,6 +328,34 @@ test('a worker cannot have the broker run its tests, its cleanup or git', () => 
   for (const role of Object.keys(B.ROLES)) for (const cmd of B.ROLES[role]) assert.ok(!/^(check|worktree|merge|spawn)\b/.test(cmd), `${role}: ${cmd}`);
 });
 
+test('a broker whose temp root is too deep for a socket keeps its socket out of /tmp', { skip: process.platform === 'win32' && 'Windows uses a named pipe' }, async (t) => {
+  const s = scratch(t);
+  // A temp root this deep leaves no room for a Unix socket path under it.
+  const deep = path.join(s.base, 'd'.repeat(120));
+  const home = path.join(s.base, 'home-dir');
+  fs.mkdirSync(deep);
+  fs.mkdirSync(home);
+  const saved = { TMPDIR: process.env.TMPDIR, HOME: process.env.HOME };
+  process.env.TMPDIR = deep;
+  process.env.HOME = home;
+  t.after(() => {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+  const job = { ...s.job, broker_harnesses: ['claude'], broker: path.join(s.base, 'w'.repeat(90), B.FILE) };
+  // A home this deep cannot hold a socket either, and then the broker refuses; it must not use /tmp.
+  const started = await B.start(job).then((broker) => broker, (error) => error);
+  if (started instanceof Error) {
+    assert.match(started.message, /no socket path short enough/);
+    return;
+  }
+  t.after(() => started.close());
+  const { socket } = JSON.parse(fs.readFileSync(job.broker, 'utf8'));
+  assert.ok(socket.startsWith(path.join(home, '.cache', 'tower-crane') + path.sep), socket);
+});
+
 test('a broker for claude and codex routes listens on both, and an agent that cannot use the socket uses TCP', { skip: process.platform === 'win32' && 'Windows uses a named pipe for both' }, async (t) => {
   const h = makeRepo(t);
   h.init();

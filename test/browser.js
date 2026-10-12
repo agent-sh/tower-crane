@@ -60,8 +60,9 @@ async function closeBrowser() {
 }
 
 // Chrome keeps its singleton socket in the profile directory only while that path is at most 78
-// bytes (Google Chrome 155, measured with profiles of 62 and 63 bytes); a longer one moves under
-// TMPDIR, which a sandboxed start sets inside the profile, so it does not help. A temp root deep
+// bytes (Google Chrome 155, measured with profiles of 62 and 63 bytes). Its temp directory holds
+// a socket too, so spawnChrome gives Chrome a TMPDIR inside the profile: that socket adds 45 bytes,
+// which the same 62-byte profile limit keeps under the 108-byte Unix path limit. A temp root deep
 // enough to overflow that (a gate's TMPDIR under TOWER_CRANE_TMP) moves the profile to the first
 // directory whose path fits, on disk, and the browser's teardown removes it. The cache root is
 // on-disk scratch that stays writable where /var/tmp may be read-only. When none fits, the first
@@ -92,23 +93,23 @@ async function launch() {
 async function spawnChrome(profile) {
   const args = ['--headless=new', '--remote-debugging-port=0', `--user-data-dir=${profile}`, '--no-first-run', '--no-default-browser-check', '--disable-gpu', '--disable-extensions'];
   const sandboxed = process.env.TOWER_CRANE_SANDBOX === '1';
+  // The caller's TMPDIR can be too deep for Chrome's socket, so Chrome's temp directory is
+  // inside the profile, where the browser's teardown removes it with the rest.
+  const tmp = path.join(profile, 'tmp');
+  fs.mkdirSync(tmp);
+  let env = { ...process.env, TMPDIR: tmp, TMP: tmp, TEMP: tmp };
   // Chrome's user/SUID sandbox cannot nest in the harness's outer sandbox.
   // Temp-backed shared memory avoids granting writes to the host's /dev/shm.
-  let env;
   if (sandboxed) {
     args.push('--no-sandbox', '--disable-dev-shm-usage');
     const config = path.join(profile, 'config');
     const cache = path.join(profile, 'cache');
-    const tmp = path.join(profile, 'tmp');
-    for (const dir of [config, cache, tmp]) fs.mkdirSync(dir);
+    for (const dir of [config, cache]) fs.mkdirSync(dir);
     // Crashpad and first-run caches must not write under the agent's HOME.
-    env = {
-      ...process.env, HOME: profile, USERPROFILE: profile,
-      XDG_CONFIG_HOME: config, XDG_CACHE_HOME: cache, TMPDIR: tmp, TMP: tmp, TEMP: tmp,
-    };
+    env = { ...env, HOME: profile, USERPROFILE: profile, XDG_CONFIG_HOME: config, XDG_CACHE_HOME: cache };
   } else if (process.getuid && process.getuid() === 0) args.push('--no-sandbox');
   const proc = cp.spawn(CHROME, [...args, 'about:blank'], {
-    ...(env ? { env } : {}), stdio: sandboxed ? ['ignore', 'ignore', 'pipe'] : 'ignore',
+    env, stdio: sandboxed ? ['ignore', 'ignore', 'pipe'] : 'ignore',
   });
   let stderr = '';
   let failure = null;

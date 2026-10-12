@@ -494,14 +494,17 @@ test('the gate command runs with TMPDIR under the gate temp root, and that direc
   fs.writeFileSync(probe, `const fs = require('fs');
 const os = require('os');
 const path = require('path');
-fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify([process.env.TMPDIR, process.env.TMP, process.env.TEMP, os.tmpdir()]) + '\\n');
+fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify([process.env.TMPDIR, process.env.TMP, process.env.TEMP, os.tmpdir(), process.env.NODE_COMPILE_CACHE]) + '\\n');
 fs.mkdtempSync(path.join(os.tmpdir(), 'tower-crane-leftover-'));
 `);
   // The test process's own temp directory is elsewhere, so a command that inherits it is caught.
   const inherited = path.join(tmp, 'inherited');
   fs.mkdirSync(inherited);
   const saved = process.env.TMPDIR;
+  const savedCache = process.env.NODE_COMPILE_CACHE;
   process.env.TMPDIR = inherited;
+  // A compile cache named by an absolute path is not moved by TMPDIR, so the gate must redirect it too.
+  process.env.NODE_COMPILE_CACHE = path.join(inherited, 'compile-cache');
   try {
     const sha = task({ 'lib/add.js': FIX, 'test/add.test.js': ADD_TEST });
     const r = await gate.run(ctx(sha, { args: { cmd: `${NODE} ${quote(probe)}` }, project: { tests: { mode: 'run-only' } } }));
@@ -513,6 +516,8 @@ fs.mkdtempSync(path.join(os.tmpdir(), 'tower-crane-leftover-'));
   } finally {
     if (saved === undefined) delete process.env.TMPDIR;
     else process.env.TMPDIR = saved;
+    if (savedCache === undefined) delete process.env.NODE_COMPILE_CACHE;
+    else process.env.NODE_COMPILE_CACHE = savedCache;
   }
 });
 
