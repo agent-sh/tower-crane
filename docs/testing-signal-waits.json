@@ -22207,6 +22207,247 @@
       }
     ],
     "reproduction": "Plant each real_shared_checker_cases source in a temporary JavaScript file under test/ in an isolated repository at the before/after source checkpoints, then run node scripts/check-shared-files.js. Run each loaded_files file five times with node test/run.js --test-concurrency=1 while two nice -n 15 node -e \"for (;;) Math.sqrt(Math.random());\" processes run. Keep combined test-file workers below the repository cap.",
-    "historical_receipts": "Earlier conversion measurements and 73 mutation catches retain their original source checkpoints; this rework reruns only the helper/lint file and automation file affected by the latest main refresh."
+    "historical_receipts": "Earlier conversion measurements and 73 mutation catches retain their original source checkpoints; this rework reruns only the helper/lint file and automation file affected by the latest main refresh.",
+    "keyword_context_refinement": {
+      "before_head": "2db4560a4ad0a77c31f1cbad4c5885b855c965dd",
+      "code_head": "b8e43e869f33e47aa379c4d2e00b1b58568a55d9",
+      "covered_cases": "Operator and statement keywords begin regex expressions; keyword member names remain division operands. Tests cover await, in, instanceof, extends and member names, with long-guard controls.",
+      "real_shared_checker_cases": [
+        {
+          "case": "29",
+          "source": "waitUntil(async () => await /ready\\)/.test(output), \"ready\", 1000);",
+          "before_status": 0,
+          "after_status": 1,
+          "before_log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "after_log_sha256": "586945f8b9db7a9868cbbf40cc56bcfd00ed6f6c84336cabfe30f4863e418ac4"
+        },
+        {
+          "case": "30",
+          "source": "const delay = 1000; waitUntil(async () => await /[),/]/.test(output), \"ready\", delay);",
+          "before_status": 0,
+          "after_status": 1,
+          "before_log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "after_log_sha256": "586945f8b9db7a9868cbbf40cc56bcfd00ed6f6c84336cabfe30f4863e418ac4"
+        },
+        {
+          "case": "31",
+          "source": "until(() => /x/ instanceof /ready\\)/.constructor, \"ready\", 1000);",
+          "before_status": 0,
+          "after_status": 1,
+          "before_log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "after_log_sha256": "586945f8b9db7a9868cbbf40cc56bcfd00ed6f6c84336cabfe30f4863e418ac4"
+        },
+        {
+          "case": "32",
+          "source": "until(() => \"source\" in /ready\\)/, \"ready\", 1000);",
+          "before_status": 0,
+          "after_status": 1,
+          "before_log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "after_log_sha256": "586945f8b9db7a9868cbbf40cc56bcfd00ed6f6c84336cabfe30f4863e418ac4"
+        },
+        {
+          "case": "33",
+          "source": "until(() => class extends /ready\\)/.constructor {}, \"ready\", 1000);",
+          "before_status": 0,
+          "after_status": 1,
+          "before_log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "after_log_sha256": "586945f8b9db7a9868cbbf40cc56bcfd00ed6f6c84336cabfe30f4863e418ac4"
+        },
+        {
+          "case": "34",
+          "source": "until(() => output.await / 2, \"ready\", 1000);",
+          "before_status": 1,
+          "after_status": 1,
+          "before_log_sha256": "586945f8b9db7a9868cbbf40cc56bcfd00ed6f6c84336cabfe30f4863e418ac4",
+          "after_log_sha256": "586945f8b9db7a9868cbbf40cc56bcfd00ed6f6c84336cabfe30f4863e418ac4"
+        },
+        {
+          "case": "35",
+          "source": "until(() => output.in / 2, \"ready\", 1000);",
+          "before_status": 1,
+          "after_status": 1,
+          "before_log_sha256": "586945f8b9db7a9868cbbf40cc56bcfd00ed6f6c84336cabfe30f4863e418ac4",
+          "after_log_sha256": "586945f8b9db7a9868cbbf40cc56bcfd00ed6f6c84336cabfe30f4863e418ac4"
+        },
+        {
+          "case": "36",
+          "source": "until(() => output.return / 2, \"ready\", 1000);",
+          "before_status": 0,
+          "after_status": 1,
+          "before_log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "after_log_sha256": "586945f8b9db7a9868cbbf40cc56bcfd00ed6f6c84336cabfe30f4863e418ac4"
+        }
+      ],
+      "operator_red": {
+        "status": 1,
+        "log_sha256": "d68efe24198d5382041bc5864f0f452948ae092abca99e9b165b1eb1f931a5fa",
+        "tests": {
+          "tests": 1,
+          "pass": 0,
+          "fail": 1,
+          "cancelled": 0,
+          "skipped": 0
+        }
+      },
+      "operator_green": {
+        "status": 0,
+        "log_sha256": "4e3b8463fcc4f7b3605a1b25211e1cb4ab88d2b058e62b08766e038debe90b4e",
+        "tests": {
+          "tests": 4,
+          "pass": 4,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 0
+        }
+      },
+      "member_context_red": {
+        "status": 1,
+        "log_sha256": "c5d20647fcc7839e0977a92a5d846f25cb240f16a5a07b1bed0cf1ef618c9857",
+        "tests": {
+          "tests": 1,
+          "pass": 0,
+          "fail": 1,
+          "cancelled": 0,
+          "skipped": 0
+        }
+      },
+      "member_context_green": {
+        "status": 0,
+        "log_sha256": "0ca1c61bb85a08dbe010b3001d6c8da17f41574be886879ca6159364b272d6e2",
+        "tests": {
+          "tests": 4,
+          "pass": 4,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 0
+        }
+      },
+      "loaded_files": [
+        {
+          "file": "test/signal-waits.test.js",
+          "head": "b8e43e869f33e47aa379c4d2e00b1b58568a55d9",
+          "passed_runs": 5,
+          "runs": [
+            {
+              "run": 1,
+              "status": 0,
+              "wall_s": 2.5181766280002194,
+              "load_before": [
+                6.1728515625,
+                7.52587890625,
+                10.0283203125
+              ],
+              "load_after": [
+                6.3193359375,
+                7.5341796875,
+                10.01708984375
+              ],
+              "log_sha256": "b3f81968cb7c88248a79c04436e8fe54cd53739ebc28f59e8abec4da600f31dc",
+              "tests": {
+                "tests": 4,
+                "pass": 4,
+                "fail": 0,
+                "cancelled": 0,
+                "skipped": 0
+              }
+            },
+            {
+              "run": 2,
+              "status": 0,
+              "wall_s": 2.5200448680006957,
+              "load_before": [
+                6.3193359375,
+                7.5341796875,
+                10.01708984375
+              ],
+              "load_after": [
+                6.3193359375,
+                7.5341796875,
+                10.01708984375
+              ],
+              "log_sha256": "fd282895b6e250df8ef12a3af8d9b23d468c1d71ed4fe32a7db75a6a95d9b173",
+              "tests": {
+                "tests": 4,
+                "pass": 4,
+                "fail": 0,
+                "cancelled": 0,
+                "skipped": 0
+              }
+            },
+            {
+              "run": 3,
+              "status": 0,
+              "wall_s": 2.4693788420008786,
+              "load_before": [
+                6.3193359375,
+                7.5341796875,
+                10.01708984375
+              ],
+              "load_after": [
+                6.3740234375,
+                7.52490234375,
+                10.00048828125
+              ],
+              "log_sha256": "45118e3a50c5d9c99228582fc72cbab9df16d14ec007b9e263a5fe2109698d94",
+              "tests": {
+                "tests": 4,
+                "pass": 4,
+                "fail": 0,
+                "cancelled": 0,
+                "skipped": 0
+              }
+            },
+            {
+              "run": 4,
+              "status": 0,
+              "wall_s": 2.519806031999906,
+              "load_before": [
+                6.3740234375,
+                7.52490234375,
+                10.00048828125
+              ],
+              "load_after": [
+                6.3740234375,
+                7.52490234375,
+                10.00048828125
+              ],
+              "log_sha256": "a73389d84f38ca03d8a0e0dc52419c10066bd45a4d79620d248dca6b73ea59c2",
+              "tests": {
+                "tests": 4,
+                "pass": 4,
+                "fail": 0,
+                "cancelled": 0,
+                "skipped": 0
+              }
+            },
+            {
+              "run": 5,
+              "status": 0,
+              "wall_s": 2.522293312002148,
+              "load_before": [
+                6.3740234375,
+                7.52490234375,
+                10.00048828125
+              ],
+              "load_after": [
+                6.34375,
+                7.49951171875,
+                9.978515625
+              ],
+              "log_sha256": "52eba807692d7f507c3eaf294478a80e49a9e851d0621ecaa5fb1b88a2bd9849",
+              "tests": {
+                "tests": 4,
+                "pass": 4,
+                "fail": 0,
+                "cancelled": 0,
+                "skipped": 0
+              }
+            }
+          ]
+        }
+      ],
+      "cpu_load_processes": 2,
+      "test_file_workers": 1
+    }
   }
 }
