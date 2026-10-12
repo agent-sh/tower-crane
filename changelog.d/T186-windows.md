@@ -1,2 +1,2 @@
-- Preserve a worker's live lease when Windows supervisor startup races its claim, checking under the state lock so short leases keep their renewal schedule. Synchronize missing-log recovery assertions with the monitor's exit receipt.
+- Synchronize missing-log recovery assertions with the monitor's exit receipt.
 - Use the runner's existing per-test deadline for fallback exit receipts after Windows completion exceeded the shorter helper deadline.
