@@ -1205,7 +1205,7 @@ test('a sandbox read path that is the whole home refuses dispatch', { skip: NO_S
     fs.rmSync(u.out, { force: true });
     const refused = h.run(['spawn', '--role', 'hard', '--task', 'T1', '--wait', '--json'], { env: u.env });
     assert.notEqual(refused.code, 0, `${harness}: reading the whole home must refuse dispatch`);
-    assert.match(refused.stderr, /sandbox read path .* is the user's home/);
+    assert.match(refused.stderr, /sandbox path .* is the user's home/);
     assert.ok(!fs.existsSync(u.out), 'the harness must not start');
   }
   assert.notEqual(h.run(['project', 'set', '--sandbox', JSON.stringify({ read: 'tools' })]).code, 0, 'sandbox.read must be a list of paths');
