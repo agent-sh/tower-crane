@@ -84,6 +84,17 @@ async function setup(t, trigger = 'exit', range = 'easy..medium', prepare = null
     repo.ok(['brief', 'set', 'T1', '-'], { input: 'Finish the task.\n' });
     configure(repo, trigger);
   });
+  // Harness discovery must use fixture credentials and origin directories.
+  Object.assign(h.env, {
+    USERPROFILE: h.env.HOME,
+    CLAUDE_CONFIG_DIR: path.join(h.env.HOME, '.claude'),
+    CODEX_HOME: path.join(h.env.HOME, '.codex'),
+    PI_CODING_AGENT_DIR: path.join(h.env.HOME, '.pi', 'agent'),
+    GH_CONFIG_DIR: path.join(h.env.HOME, '.config', 'gh'),
+    XDG_CONFIG_HOME: path.join(h.env.HOME, '.config'),
+    XDG_DATA_HOME: path.join(h.env.HOME, '.local', 'share'),
+    OPENCODE_CONFIG_DIR: path.join(h.env.HOME, '.config', 'opencode'),
+  });
   h.attempts = path.join(h.base, 'attempts.json');
   const exits = new Map();
   const sockets = new Set();
@@ -683,7 +694,8 @@ test('a brokered failed review leaves full-findings rework and the climb to its 
     const result = await B.forward(binding, ['evidence', 'T1', '--type', 'review', '--revision', h.revision(), '--fail',
       '--sha', h.git(['rev-parse', 'HEAD']), '--summary', 'wrong result'], h.state);
     assert.equal(result.code, 0, result.stderr);
-    const recorded = h.json(['task', 'show', 'T1']);
+    // A host CLI read can reconcile the failed review before returning.
+    const recorded = h.task();
     assert.equal(recorded.tier, 'easy');
     assert.equal(recorded.status, 'submitted');
     assert.equal(recorded.revision, 1, 'the host must copy findings before changing revision');

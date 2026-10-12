@@ -30,6 +30,17 @@ function setup(t, format = 'codex', session = true) {
     args: ['--title', 'Resume worker', '--acceptance', 'rework resumes'],
     brief: 'Implement the acceptance.\n',
   }]);
+  // Harness discovery must use fixture credentials and origin directories.
+  Object.assign(h.env, {
+    USERPROFILE: h.env.HOME,
+    CLAUDE_CONFIG_DIR: path.join(h.env.HOME, '.claude'),
+    CODEX_HOME: path.join(h.env.HOME, '.codex'),
+    PI_CODING_AGENT_DIR: path.join(h.env.HOME, '.pi', 'agent'),
+    GH_CONFIG_DIR: path.join(h.env.HOME, '.config', 'gh'),
+    XDG_CONFIG_HOME: path.join(h.env.HOME, '.config'),
+    XDG_DATA_HOME: path.join(h.env.HOME, '.local', 'share'),
+    OPENCODE_CONFIG_DIR: path.join(h.env.HOME, '.config', 'opencode'),
+  });
   const script = path.join(h.base, 'harness.js');
   const seen = path.join(h.base, 'seen.json');
   fs.writeFileSync(script, `
