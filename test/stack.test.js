@@ -17,6 +17,22 @@ test('submitted dependencies dispatch from the exact dependency head and spawn l
   f.h.ok(['spawn', '--task', 'T2', '--wait']);
   const link = f.read().calls.find((c) => c.args[0] === 'stack' && c.args[1] === 'link');
   assert.deepEqual(link.args, ['stack', 'link', '11', '12', '--base', 'main']);
+  // A spawn event that lands during the link's GitHub call (here the reviewer's exit) refuses
+  // the link and records it. The next observer pass links the PR, as production does.
+  const until = Date.now() + 60000;
+  while (!f.h.json(['task', 'show', 'T2']).stack.linked && Date.now() < until) f.h.run(['wait', '--timeout', '1']);
+  assert.equal(f.h.json(['task', 'show', 'T2']).stack.linked, true);
+});
+
+test('a task event during the link\'s GitHub call refuses the link, and the next observer pass links the PR', (t) => {
+  const f = setup(t);
+  worker(f);
+  f.write((d) => { d.during = { 'stack link': [['task', 'note', 'T2', 'racing note', '--agent', 'worker-T2']] }; });
+  f.h.ok(['spawn', '--task', 'T2', '--wait']);
+  assert.equal(f.h.json(['task', 'show', 'T2']).stack.linked, false);
+  assert.match(fs.readFileSync(path.join(f.h.repo, '.tower-crane', 'events.jsonl'), 'utf8'), /"cmd":"stack link failed"/);
+  // The observer pass of `wait` (exit 2 at its timeout) links the PR once nothing races it.
+  f.h.run(['wait', '--timeout', '1']);
   assert.equal(f.h.json(['task', 'show', 'T2']).stack.linked, true);
 });
 
