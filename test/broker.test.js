@@ -351,6 +351,39 @@ test('a broker whose temp root is too deep for a socket keeps its socket out of 
   assert.ok(socket.startsWith(path.join(os.homedir(), '.cache', 'tower-crane') + path.sep), socket);
 });
 
+test('a broker whose cache root cannot be written tries /tmp next', { skip: process.platform === 'win32' && 'Windows uses a named pipe' }, async (t) => {
+  const s = scratch(t);
+  const deep = path.join(s.base, 'd'.repeat(120));
+  fs.mkdirSync(deep);
+  const savedTmp = process.env.TMPDIR;
+  process.env.TMPDIR = deep;
+  t.after(() => {
+    if (savedTmp === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = savedTmp;
+  });
+  // A short home, so its cache root fits a socket path on any account. The cache root is refused as on a
+  // read-only home, and so is every mkdtemp: nothing is made and nothing is listened on.
+  t.mock.method(os, 'homedir', () => '/h');
+  const cache = path.join('/h', '.cache', 'tower-crane');
+  const attempted = [];
+  const readOnly = () => Object.assign(new Error('EROFS: read-only file system'), { code: 'EROFS' });
+  const mkdir = fs.mkdirSync;
+  t.mock.method(fs, 'mkdirSync', (p, options) => {
+    if (p === cache) {
+      attempted.push(p);
+      throw readOnly();
+    }
+    return mkdir(p, options);
+  });
+  t.mock.method(fs, 'mkdtempSync', (prefix) => {
+    attempted.push(path.dirname(prefix));
+    throw readOnly();
+  });
+  const job = { ...s.job, broker_harnesses: ['claude'], broker: path.join(s.base, 'w'.repeat(90), B.FILE) };
+  await assert.rejects(B.start(job), /no socket path short enough and writable/);
+  assert.deepEqual(attempted, [cache, '/tmp']);
+});
+
 test('a broker for claude and codex routes listens on both, and an agent that cannot use the socket uses TCP', { skip: process.platform === 'win32' && 'Windows uses a named pipe for both' }, async (t) => {
   const h = makeRepo(t);
   h.init();
