@@ -658,6 +658,8 @@ test('a reviewer without permission to create a worker home leaves the climb for
   try {
     h.ok(['evidence', 'T1', '--type', 'review', '--revision', h.revision(), '--fail', '--sha', h.git(['rev-parse', 'HEAD']),
       '--agent', 'reviewer', '--summary', 'needs rework']);
+    assert.equal(h.json(['task', 'show', 'T1']).status, 'submitted');
+    h.ok(['recover', 'T1', '--agent', 'orchestrator']);
     assert.equal(h.json(['task', 'show', 'T1']).escalation_pending, true);
   } finally {
     fs.chmodSync(homes, 0o700);
@@ -719,6 +721,7 @@ test('a resource lock delays dispatch while retaining the recorded climb for wai
   h.reviewer('T1', 'reviewer');
   h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--fail', '--sha', h.git(['rev-parse', 'HEAD']),
     '--agent', 'reviewer', '--summary', 'wrong result']);
+  h.ok(['recover', 'T1', '--agent', 'orchestrator']);
   const task = h.json(['task', 'show', 'T1']);
   assert.equal(task.tier, 'medium');
   assert.equal(task.escalation_pending, true);
