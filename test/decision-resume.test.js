@@ -66,6 +66,9 @@ test('a worker asks and releases with its PR linked; answering resumes that PR, 
   assert.match(prompt, /submit with --pr 7; do not open another PR\./);
   assert.equal(dispatched.agent.startsWith('worker-T1-'), true);
 
+  // The spawned worker exited without submitting, so its claim stays held until someone releases it.
+  h.ok(['release', 'T1', '--reason', 'worker exited without submit', '--agent', 'owner']);
+
   // The next worker continues PR 7 with a new head, instead of opening its own PR.
   h.ok(['claim', 'T1', '--agent', 'w-4']);
   fs.writeFileSync(path.join(dispatched.cwd, 'value.js'), 'module.exports = 2;\n');
@@ -159,4 +162,46 @@ test('a worker released with a PR whose branch exists only on origin resumes tha
   assert.equal(h.git(['rev-parse', 'HEAD'], dispatched.cwd), prSha);
   assert.equal(fs.readFileSync(path.join(dispatched.cwd, 'store.js'), 'utf8'), 'module.exports = "redis";\n');
   assert.match(fs.readFileSync(seen, 'utf8'), /This task's pull request is #7 on branch tower-crane\/T1\./);
+});
+
+test('a rework moved to a replacement PR starts from that PR head, not the submission it retired', (t) => {
+  const h = makeRepo(t);
+  const sha = gateFixture(h);
+  h.init(['--repo', 'acme/demo', '--base', 'main']);
+  h.ok(['task', 'add', '--title', 'Pick a store', '--acceptance', 'the store is chosen']);
+  h.ok(['brief', 'set', 'T1', '-'], { input: 'Implement the store.\n' });
+  recordWorker(h);
+
+  // PR 7 is submitted at commit A, sent back for rework, and then closed.
+  h.env.FIXTURE_PR_HEAD_7 = 'tower-crane/T1';
+  h.env.FIXTURE_PR_STATE_7 = 'OPEN';
+  h.ok(['claim', 'T1', '--agent', 'w-1']);
+  h.ok(['submit', 'T1', '--sha', sha, '--branch', 'tower-crane/T1', '--pr', '7', '--agent', 'w-1']);
+  h.ok(['rework', 'T1', '--reason', 'PR 7 is superseded', '--agent', 'owner']);
+  h.env.FIXTURE_PR_STATE_7 = 'CLOSED';
+
+  // The replacement PR 9 has a commit that exists only on origin, so dispatch must fetch it.
+  h.git(['switch', '-qc', 'tower-crane/T1-retry', 'main']);
+  fs.writeFileSync(path.join(h.repo, 'store.js'), 'module.exports = "redis";\n');
+  h.git(['add', 'store.js']);
+  h.git(['commit', '-qm', 'store on PR 9']);
+  const prSha = h.git(['rev-parse', 'HEAD']);
+  const origin = path.join(h.base, 'origin.git');
+  h.git(['clone', '-q', '--bare', h.repo, origin]);
+  h.git(['switch', '-q', 'main']);
+  h.git(['branch', '-D', 'tower-crane/T1-retry']);
+  h.git(['remote', 'add', 'origin', origin]);
+  h.env.FIXTURE_PR_HEAD_9 = 'tower-crane/T1-retry';
+  h.env.FIXTURE_PR_STATE_9 = 'OPEN';
+
+  h.ok(['claim', 'T1', '--agent', 'w-2']);
+  h.ok(['ask', '--kind', 'technical', '--question', 'Which store?', '--option', 'redis', '--option', 'postgres', '--blocks', 'T1', '--agent', 'w-2']);
+  h.ok(['release', 'T1', '--reason', 'waiting on D1', '--pr', '9', '--agent', 'w-2']);
+  assert.deepEqual([task(h, 'T1').status, task(h, 'T1').pr, task(h, 'T1').branch], ['rework', 9, 'tower-crane/T1-retry']);
+  h.ok(['answer', 'D1', '--choice', 'redis', '--agent', 'owner']);
+
+  // The retired submission is not the head to resume: dispatch starts from PR 9's head on origin.
+  const dispatched = h.json(['spawn', '--task', 'T1', '--wait']);
+  assert.equal(h.git(['rev-parse', 'HEAD'], dispatched.cwd), prSha);
+  assert.equal(fs.readFileSync(path.join(dispatched.cwd, 'store.js'), 'utf8'), 'module.exports = "redis";\n');
 });
