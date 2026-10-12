@@ -7,6 +7,27 @@ const path = require('node:path');
 const cp = require('node:child_process');
 const { makeRepo, ROOT } = require('./helpers');
 
+test('the CLI helper retains launch errors alongside the exit status and signal', (t) => {
+  const h = makeRepo(t);
+  h.init();
+  const original = cp.spawnSync;
+  const error = Object.assign(new Error('launch temporarily unavailable'), { code: 'EAGAIN' });
+  cp.spawnSync = (command, args, options) => {
+    if (command === process.execPath && args.includes('--ci-local')) {
+      return { status: null, signal: null, stdout: '', stderr: '', error };
+    }
+    return original(command, args, options);
+  };
+  try {
+    const result = h.run(['project', 'set', '--ci-local', '{}']);
+    assert.equal(result.code, null);
+    assert.equal(result.signal, null);
+    assert.deepEqual(result.error, { code: 'EAGAIN', message: 'launch temporarily unavailable' });
+  } finally {
+    cp.spawnSync = original;
+  }
+});
+
 test('the test runner emits one capped concurrency value, including repeated and split options', (t) => {
   const h = makeRepo(t);
   const runner = path.join(ROOT, 'test/run.js');

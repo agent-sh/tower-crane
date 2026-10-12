@@ -318,7 +318,10 @@ function withHooks(ctx, opts) {
 // not cut short by a separate subprocess budget.
 function run(args, { cwd, env, input, pre = [], timeout = HUNG_TEST_MS } = {}) {
   const r = cp.spawnSync(process.execPath, [...pre, BIN, ...args], { cwd, env, input, encoding: 'utf8', timeout: timeout === 0 ? 0 : Math.max(timeout, HUNG_TEST_MS) }); // wait-allow: explicit zero delegates to the runner; positive command watchdogs retain the hung minimum
-  return { code: r.status, stdout: r.stdout || '', stderr: r.stderr || '', signal: r.signal };
+  return {
+    code: r.status, stdout: r.stdout || '', stderr: r.stderr || '', signal: r.signal,
+    ...(r.error && { error: { code: r.error.code, message: r.error.message } }),
+  };
 }
 
 const PTY_AVAILABLE = process.platform === 'linux'
