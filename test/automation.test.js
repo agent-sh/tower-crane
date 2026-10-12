@@ -1074,20 +1074,25 @@ test('gate executors across several watchers stay within gates.executors and que
   const release = path.join(h.base, 'release-suite');
   const runs = slowSuite(h, { release });
   assert.match(h.ok(['project', 'show']), /gates\.executors: 2/);
+  // A zero-timeout watcher can exit at a contended startup lock before reading
+  // submissions. Keep consumers alive until the last task's gate evidence.
   const watchers = [0, 1, 2].map(() =>
-    h.runAsync(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']));
+    h.runAsync(['wait', '--after', '0', '--types', 'evidence', '--task', 'T3', '--agent', 'orchestrator']));
+  let results;
   try {
     assert.notEqual(await waitFor(path.join(h.base, 'suite-started-2'), { ms: 60000 }), null, 'two executors start');
     // Keep both slots occupied until a watcher has queued the third submission.
-    assert.equal(h.consume().code, 2);
+    const notification = await h.runAsync(['wait', '--observe', '--after', '0', '--types', 'automation queued',
+      '--task', 'T3', '--timeout', '60', '--agent', 'orchestrator']);
+    assert.equal(notification.code, 0, JSON.stringify(notification));
     const queued = h.logs().filter((e) => e.cmd === 'automation queued' && e.detail.executors === 2);
     assert.ok(queued.some((e) => e.task === 'T3'), JSON.stringify(queued));
   } finally {
     fs.writeFileSync(release, '');
+    results = await Promise.all(watchers);
   }
   assert.notEqual(await waitFor(path.join(h.base, 'suite-started-3'), { ms: 60000 }), null, 'the third executor starts');
-  const results = await Promise.all(watchers);
-  assert.ok(results.every((r) => r.code === 2), JSON.stringify(results));
+  assert.ok(results.every((r) => r.code === 0 && JSON.parse(r.stdout).type === 'evidence'), JSON.stringify(results));
   assert.deepEqual(runs(), { starts: 3, peak: 2 });
   const started = h.logs().filter((e) => e.cmd === 'automation' && e.detail.phase === 'running').map((e) => e.task);
   assert.equal(started.at(-1), 'T3', 'the queued submission runs after a slot frees');
