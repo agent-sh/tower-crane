@@ -8,6 +8,7 @@ The suite proves behavior through the real CLI on temporary git repositories. It
 - `npm test -- test/claim.test.js test/gates/tests.test.js` runs only those files. Pass node:test flags the same way: `npm test -- test/events.test.js --test-name-pattern="decision answer"`.
 - Run only the files a change touches. The tests gate runs the full suite once at the submitted head, and CI runs it on Linux (Node 24 and 26) and on Windows, each in three shards. `TC_TEST_SHARD=INDEX/TOTAL` selects one shard of the file list, and `test/shard.test.js` checks that the shards cover every file once.
 - Set `TOWER_CRANE_TEST_TMP` to keep temporary repositories off `/tmp`.
+- Windows CI jobs have a 45-minute budget and Linux jobs have a 15-minute budget; each test still has its own 300-second deadline.
 
 Windows shard 1/3 also runs the Claude interrupted native worker case ten consecutive times, stopping on the first failure. The case waits for final usage through `wait --types spend --observe` and checks the supervisor's stopped phase and exit receipt before redispatch. Its parent clock models startup consuming the session deadline, so shutdown completion must be independent of that deadline.
 
@@ -19,7 +20,7 @@ For projects Tower Crane manages, expensive proof is the default: the orchestrat
 - A table of variants over pure logic runs in process against the module, with one CLI test for the wiring: address ranges and markup in `test/sources.test.js`, build-file and policy tables in `test/gates/tests.test.js`, outage classification in `test/supervision.test.js`, broker authorization in `test/broker.test.js`.
 - A fixture several tests share is built once per file with `cachedFixture(t, key, build)` from `test/helpers.js`. Each test gets a copy, with paths that name the template rewritten in its files, env and git config.
 - Each test repository has its own `HOME`, so no test writes the developer's home: `spawn` keeps receipts under `~/.cache/tower-crane`.
-- No fixed sleeps. Wait for a file, an event or a process with a deadline, and size the deadline for a loaded machine. `run()` in `test/helpers.js` gives every CLI call at least 60 s, and the runner gives each test 300 s; neither is a pass condition.
+- No fixed sleeps. Wait for a file, an event or a process with a deadline, and size the deadline for a loaded machine. `run()` in `test/helpers.js` defaults to 60 s and applies that floor to positive timeouts; an explicit `timeout: 0` disables its per-call deadline. The runner's 300 s per-test hang guard still applies. Retry fixtures audit the actual parent spawn options as well as child deadlines.
 - Assert the reason a command refuses, not only its exit code. A refusal for the wrong reason passes an exit-code check while the guarded code is gone.
 
 ## Tools

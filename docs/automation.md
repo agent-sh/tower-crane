@@ -62,7 +62,9 @@ authorization context. Unknown mergeability and transport errors remain
 retryable at startup. A remote merge completed before its local receipt
 is recovered through the merge gate's accepted-head confirmation.
 
-Software gates run again when their passing evidence no longer matches its
+Software gates run when no audited evidence exists at the submitted head
+and revision, even if an unaudited entry or a completed reaction remains.
+They run again when their passing evidence no longer matches its
 inputs, such as the pinned command or tests policy. A failed `tests`, `clean`
 or `ci` gate at a submitted head does not wait for an operator, whether the
 run came from a reaction, a `check` run by hand or `gates retry`. Each failure
@@ -85,7 +87,7 @@ A rework names the failing tests and their output tail. When the failing tests
 also fail on the base branch, the rework says so with their names, so the worker
 can link the existing failure instead of fixing unrelated code. A failure of a
 confirmed quality check on a task with a tier range is escalation's: it sends
-the task back with a climb, as before.
+the task back with a climb, as before. `gates retry ID` reruns a failed gate at unchanged inputs, such as after an infrastructure cause is fixed.
 
 Failures remain visible in gate receipts and task notes. Conflicting PRs
 return to rework with a file list. Unknown mergeability, failed transport,
