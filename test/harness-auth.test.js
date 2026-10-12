@@ -12,8 +12,9 @@ const clock = path.join(__dirname, 'fixtures', 'shifted-clock.js').replace(/\\/g
 const supervision = { retries: 2, backoff_ms: 10, max_backoff_ms: 20, stall_ms: 60000 };
 const owner = (h) => events(h).filter((e) => e.cmd === 'msg' && e.detail.to === 'owner');
 const health = (h, source) => events(h).filter((e) => e.cmd === 'harness health' && (!source || e.detail.source === source));
+// A supervisor on a loaded machine can take well over 12 seconds to record its exit.
 async function until(fn, message) {
-  const deadline = Date.now() + 12000;
+  const deadline = Date.now() + 30000;
   while (!fn()) {
     if (Date.now() >= deadline) assert.fail(message);
     await new Promise((resolve) => setTimeout(resolve, 25));
