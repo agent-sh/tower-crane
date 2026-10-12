@@ -2,7 +2,7 @@
 
 Command tables are generated from `COMMANDS` in `bin/tower-crane.js` with `npm run docs:generate`. CI rejects drift; keep further contract details outside the generated blocks.
 
-`tower-crane <command> [args]`. Every command accepts `--state DIR`, `--agent NAME`, `--json` (machine output on stdout: the task, decision, project or list the command touched) and `--help`. Exit status: 0 done, 1 refused (with the reason on stderr), 2 usage error or wait timeout, 3 lock not acquired within 60 s. `validate` and a failing gate print their report on stdout and exit 1; `spawn --wait` exits with the agent's code. `wait` always prints one compact JSON line, including with `--json`. If a reader closes stdout or stderr, the CLI treats the resulting `EPIPE` as a quiet close, finishes the command and any state write, lets the other output stream drain, then exits with that command's status.
+`tower-crane <command> [args]`. Every command accepts `--state DIR`, `--agent NAME`, `--json` (machine output on stdout: the task, decision, project or list the command touched) and `--help`. Exit status: 0 done, 1 refused (with the reason on stderr), 2 usage error or wait timeout, 3 lock not acquired within 60 s. `validate` and a failing gate print their report on stdout and exit 1; `spawn --wait` exits with the agent's code, or 1 when a harness login failure ended the dispatch. `wait` always prints one compact JSON line, including with `--json`. If a reader closes stdout or stderr, the CLI treats the resulting `EPIPE` as a quiet close, finishes the command and any state write, lets the other output stream drain, then exits with that command's status.
 
 Agent identity comes from `--agent NAME`, then `TOWER_CRANE_AGENT`. With neither, `owner` is used only when stdin and stdout are both TTYs and `TOWER_CRANE_TASK` is unset. Otherwise the command exits 2 with `no agent: pass --agent NAME or set TOWER_CRANE_AGENT` and writes nothing. An empty or whitespace-only identity exits 2 with the same message. Help needs no agent.
 
@@ -352,7 +352,12 @@ reconciliation request for every active PR when starting, except a default
 when the last reaction completed, recovering conflicts after merges that
 happened without a waiter. Audited evidence at the same head and revision
 is reused when its policy still matches. Missing evidence, including an
-entry without its matching gate audit receipt, runs in the next reaction.
+entry without its matching gate audit receipt or evidence from an earlier
+revision or another sha, runs in the next submission or reconciliation reaction.
+An audited failure from another revision or sha cannot suppress a gate;
+only a current failure waits for an explicit retry.
+Each due software gate runs even if an earlier gate failed. A current failure
+does not prevent clean or CI from collecting missing evidence.
 An earlier completed reaction does not suppress those gates.
 Reconciliation does not wait on a busy state lock; the next notification
 or existing fallback tick retries it within the wait's timeout.
