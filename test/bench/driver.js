@@ -98,7 +98,7 @@ class Path {
       this.scrolled += Math.abs(dy);
       this.inputs.push({ type: 'scroll', dy });
       this.op('W');
-      await new Promise((resolve) => setTimeout(resolve, 80));
+      await new Promise((resolve) => setTimeout(resolve, 80)); // wait-allow: human benchmark pacing and settle intervals define the measurement protocol
     }
     throw new Error(`could not scroll ${selector} into view`);
   }
@@ -174,8 +174,8 @@ async function shot(b, file) {
 async function load(b, url, live = true) {
   await b.goto('about:blank');
   await b.goto(url);
-  if (live) await b.until(`(document.querySelector('[data-conn]') || {}).dataset?.conn === 'live'`, 'the live stream', 20000);
-  await new Promise((resolve) => setTimeout(resolve, 250));
+  if (live) await b.until(`(document.querySelector('[data-conn]') || {}).dataset?.conn === 'live'`, 'the live stream', 20000); // wait-allow: human benchmark caps live-stream setup on baseline builds before measuring the scripted path
+  await new Promise((resolve) => setTimeout(resolve, 250)); // wait-allow: human benchmark pacing and settle intervals define the measurement protocol
 }
 
 module.exports = { SIZES, THEMES, KLM, serve, browser, Path, setSize, setMedia, shot, load };

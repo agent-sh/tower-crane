@@ -49,8 +49,33 @@ function callArguments(text, start) {
   return [];
 }
 
+function normalizedBudget(value) {
+  // Comments and numeric identity wrappers do not change a bound budget.
+  // Preserve strings so a quoted label cannot become an identifier.
+  value = value.replace(/"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'|`(?:\\[\s\S]|[^`\\])*`|\/\*[\s\S]*?\*\/|\/\/[^\r\n]*/g,
+    (token) => /^\/[/*]/.test(token) ? ' ' : token).trim();
+  for (;;) {
+    if (/^\+(?!\+)/.test(value)) { value = value.slice(1).trim(); continue; }
+    if (!value.startsWith('(') || !value.endsWith(')')) return value;
+    let depth = 0;
+    let quote = null;
+    let whole = true;
+    for (let i = 0; i < value.length; i++) {
+      const char = value[i];
+      if (quote) {
+        if (char === '\\') i++;
+        else if (char === quote) quote = null;
+      } else if (['"', "'", '`'].includes(char)) quote = char;
+      else if (char === '(') depth++;
+      else if (char === ')' && --depth === 0 && i !== value.length - 1) { whole = false; break; }
+    }
+    if (!whole || depth !== 0 || quote) return value;
+    value = value.slice(1, -1).trim();
+  }
+}
+
 function hungBudget(value, bindings = new Map(), seen = new Set()) {
-  value = value.trim();
+  value = normalizedBudget(value);
   if (bindings.has(value)) {
     return bindings.get(value).every((bound) => !seen.has(bound)
       && hungBudget(bound.value, bound.bindings(), new Set([...seen, bound])));
@@ -63,7 +88,7 @@ function hungBudget(value, bindings = new Map(), seen = new Set()) {
 }
 
 function budgetExpression(value, bindings, seen = new Set()) {
-  value = value.trim();
+  value = normalizedBudget(value);
   const defaultValue = /^(\w+)\s*=\s*([\s\S]+)$/.exec(value);
   if (defaultValue) {
     return budgetExpression(defaultValue[2], bindings, seen)

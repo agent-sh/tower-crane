@@ -115,6 +115,13 @@ test('shared checks reject readiness budgets and require a reason on allowed tim
     'async function waitFor(check, timeout = (10 * 1000)) {}', // wait-allow: rejected lint fixture
     'const budget = 10 * 1000; until(check, "ready", budget);', // wait-allow: rejected lint fixture
     'const window = 10 * 1000; until(check, "ready", window);', // wait-allow: rejected lint fixture
+    'const delay = 1000; until(check, "ready", (delay));', // wait-allow: rejected lint fixture
+    'const delay = 1000; until(check, "ready", +delay);', // wait-allow: rejected lint fixture
+    'const delay = 1000; until(check, "ready", delay /* c */);', // wait-allow: rejected lint fixture
+    'const delay = (1000); until(check, "ready", ((+delay)));', // wait-allow: rejected lint fixture
+    'const delay = /* c */ 1000; until(check, "ready", /* c */ (delay));', // wait-allow: rejected lint fixture
+    'function ready(window = 1000) { until(check, "ready", (window)); }', // wait-allow: rejected lint fixture
+    'function ready(window = /* c */ (1000)) { until(check, "ready", +(window)); }', // wait-allow: rejected lint fixture
     'const seconds = 10; const window = seconds * 1000; until(check, "ready", window);', // wait-allow: rejected lint fixture
     'const delay = 1e4; const window = delay; until(check, "ready", window);', // wait-allow: rejected lint fixture
     'const window =\n (10 * 1000);\n until(check, "ready", window);', // wait-allow: rejected lint fixture
@@ -168,6 +175,9 @@ test('shared checks reject readiness budgets and require a reason on allowed tim
   assert.deepEqual(waitFindings('cp.spawnSync("node", [], { timeout: Math.max(budget, HUNG_TEST_MS) });'), []);
   assert.deepEqual(waitFindings('async function until(check, what, budget = Math.max(HUNG_TEST_MS, other)) {}'), []);
   assert.deepEqual(waitFindings('const budget = 300000; const guard = budget; until(check, "ready", guard);'), []);
+  assert.deepEqual(waitFindings('const delay = 300000; until(check, "ready", ((+delay)) /* c */);'), []);
+  assert.deepEqual(waitFindings('function ready(window = /* c */ (300000)) { until(check, "ready", +(window)); }'), []);
+  assert.deepEqual(waitFindings('const label = "/* 1000 */"; until(check, label);'), []);
   assert.deepEqual(waitFindings('const window = Math.max(HUNG_TEST_MS, other); until(check, "ready", window);'), []);
   assert.deepEqual(waitFindings('const { unused } = settings, window = 300000; until(check, "ready", window);'), []);
   assert.deepEqual(waitFindings('const delay = 300000, window = delay; function ready() { const delay = 1000; until(check, "ready", window); }'), []);
@@ -222,6 +232,10 @@ test('shared checks reject readiness budgets and require a reason on allowed tim
   assert.equal(declarations.status, 1, declarations.stdout + declarations.stderr);
   assert.match(declarations.stderr, /test\/wait.test.js:1 wait supplies/);
   for (const source of [
+    'const delay = 1000; until(check, "ready", (delay));', // wait-allow: rejected lint fixture
+    'const delay = 1000; until(check, "ready", +delay);', // wait-allow: rejected lint fixture
+    'const delay = 1000; until(check, "ready", delay /* c */);', // wait-allow: rejected lint fixture
+    'function ready(window = 1000) { until(check, "ready", (window)); }', // wait-allow: rejected lint fixture
     'const window = 10 * 1000\nuntil(() => ready, "ready", window)', // wait-allow: rejected lint fixture
     'function ready(window = 10000) { until(check, "ready", window); }', // wait-allow: rejected lint fixture
     'function ready(window = 10 * 1000) { until(check, "ready", window); }', // wait-allow: rejected lint fixture
