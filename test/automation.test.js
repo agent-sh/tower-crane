@@ -119,7 +119,10 @@ fs.writeFileSync('generated.txt', rows + '\\n');
   h.github = () => JSON.parse(fs.readFileSync(h.env.AUTOMATION_GITHUB, 'utf8'));
   h.saveGithub = (state) => fs.writeFileSync(h.env.AUTOMATION_GITHUB, JSON.stringify(state));
   h.logs = () => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
-  h.consume = () => h.run(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
+  h.consume = () => {
+    h.ok(['project', 'set', '--paused', 'manual generated conflict probe']);
+    return h.run(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
+  };
   h.submit = () => {
     h.ok(['claim', 'T1', '--agent', 'worker']);
     h.ok(['submit', 'T1', '--sha', h.sha, '--branch', 'fixture-change', '--pr', '7', '--agent', 'worker']);
@@ -1148,6 +1151,7 @@ test('a merge sends another conflicting PR to rework with real filenames and pre
   h.submit('T2', other, '8');
   h.reviewer('T1', 'reviewer');
   h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--sha', h.sha, '--ok', '--agent', 'reviewer']);
+  h.ok(['project', 'set', '--paused', 'manual conflict probe']);
   const before = h.git(['status', '--porcelain']);
   h.consume();
   const task = h.readState('tasks.json').tasks[1];
@@ -1238,6 +1242,7 @@ test('a submitted PR that GitHub reports UNKNOWN, then CONFLICTING, goes to rewo
   const github = h.github();
   Object.assign(github.prs['7'], { mergeable: 'CONFLICTING', mergeStateStatus: 'DIRTY', unknownViews: 1 });
   h.saveGithub(github);
+  h.ok(['project', 'set', '--paused', 'manual conflict probe']);
   h.consume();
   const task = h.readState('tasks.json').tasks[0];
   assert.equal(task.status, 'rework');
@@ -1759,6 +1764,305 @@ function configureHarness(h, { rules = false } = {}) {
     ...['model', 'profile', 'provider', 'effort', 'args'].flatMap((f) => ['--clear', f])]);
 }
 
+for (const tier of ['medium', 'easy..medium']) {
+test(`automation reworks a current ${tier} failed review once with its full findings, even before software passes`, (t) => {
+  const h = setup(t, { ci: 'pending' });
+  h.ok(['task', 'update', 'T1', '--tier', tier]);
+  h.submit();
+  h.ok(['project', 'set', '--paused', 'inspect review findings']);
+  h.reviewer('T1', 'reviewer');
+  const github = h.github();
+  const ref = 'https://github.com/acme/demo/pull/7#issuecomment-123';
+  const body = `Review (Tower Crane) at ${h.sha}\nVerdict: FAIL\nlib/change.js:12 - handle the missing input`;
+  github.comments = [{ id: 123, body, html_url: ref }];
+  h.saveGithub(github);
+  h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--sha', h.sha,
+    '--fail', '--summary', 'one blocking finding', '--ref', ref, '--agent', 'reviewer']);
+  h.consume();
+  const task = h.readState('tasks.json').tasks[0];
+  assert.equal(task.status, 'rework');
+  assert.equal(task.revision, 2);
+  const reason = h.logs().find((e) => e.cmd === 'rework').detail.reason;
+  assert.ok(reason.includes(body));
+  assert.ok(reason.includes(ref));
+  assert.ok(h.ok(['brief', 'get', 'T1']).includes(body));
+  h.consume();
+  assert.equal(h.logs().filter((e) => e.cmd === 'rework').length, 1, 'replay never reworks the review twice');
+});
+}
+
+for (const stale of ['head', 'revision', 'superseded verdict']) {
+  test(`automation ignores a failed review with a stale ${stale}`, (t) => {
+    const h = setup(t, { ci: 'pending' });
+    h.submit();
+    h.reviewer('T1', 'reviewer', stale === 'head' ? 'aaaaaaa' : h.sha);
+    h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review',
+      '--sha', stale === 'head' ? 'aaaaaaa' : h.sha, '--fail', '--summary', 'old finding', '--agent', 'reviewer']);
+    if (stale === 'revision') {
+      h.ok(['rework', 'T1', '--reason', 'new revision', '--agent', 'orchestrator']);
+      h.submit();
+    } else if (stale === 'superseded verdict') {
+      h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--sha', h.sha,
+        '--ok', '--agent', 'reviewer']);
+    }
+    const before = h.logs().filter((e) => e.cmd === 'rework').length;
+    h.consume();
+    assert.equal(h.readState('tasks.json').tasks[0].status, 'submitted');
+    assert.equal(h.logs().filter((e) => e.cmd === 'rework').length, before);
+  });
+}
+
+for (const tier of ['medium', 'easy..medium']) {
+  for (const comment of ['missing', 'mismatched']) {
+    test(`a ${tier} ${comment} linked review comment keeps the wait host running`, (t) => {
+      const h = setup(t, { ci: 'pending' });
+      h.ok(['task', 'update', 'T1', '--tier', tier]);
+      h.submit();
+      h.ok(['project', 'set', '--paused', 'inspect review refusal']);
+      h.reviewer('T1', 'reviewer');
+      const ref = 'https://github.com/acme/demo/pull/7#issuecomment-123';
+      if (comment === 'mismatched') {
+        const github = h.github();
+        github.comments = [{ id: 123, html_url: ref,
+          body: `Review (Tower Crane) at ${'f'.repeat(40)}\nVerdict: FAIL\nwrong head` }];
+        h.saveGithub(github);
+      }
+      h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--sha', h.sha,
+        '--fail', '--summary', 'one blocking finding', '--ref', ref, '--agent', 'reviewer']);
+      const brief = h.ok(['brief', 'get', 'T1']);
+      const result = h.run(['wait', '--after', '0', '--types', 'never', '--timeout', '0.1',
+        '--agent', 'orchestrator']);
+      assert.equal(result.code, 2, result.stderr);
+      assert.match(result.stderr, /linked review comment does not identify/);
+      const task = h.readState('tasks.json').tasks[0];
+      assert.equal(task.status, 'submitted');
+      assert.equal(task.revision, 1);
+      assert.equal(h.ok(['brief', 'get', 'T1']), brief);
+    });
+  }
+}
+
+test('observation-only waits retain ranged full-findings recovery', (t) => {
+  const h = setup(t, { ci: 'pending' });
+  h.ok(['task', 'update', 'T1', '--tier', 'easy..medium']);
+  h.submit();
+  h.ok(['project', 'set', '--paused', 'inspect observed recovery']);
+  h.reviewer('T1', 'reviewer');
+  const ref = 'https://github.com/acme/demo/pull/7#issuecomment-123';
+  const body = `Review (Tower Crane) at ${h.sha}\nVerdict: FAIL\nlib/change.js:12 - handle the missing input`;
+  const github = h.github();
+  github.comments = [{ id: 123, body, html_url: ref }];
+  h.saveGithub(github);
+  h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--sha', h.sha,
+    '--fail', '--summary', 'one blocking finding', '--ref', ref, '--agent', 'reviewer']);
+  const spawns = h.logs().filter((e) => e.cmd === 'spawn').length;
+  const result = h.run(['wait', '--observe', '--after', '0', '--types', 'never', '--timeout', '0.1',
+    '--agent', 'orchestrator']);
+  assert.equal(result.code, 2, result.stderr);
+  assert.equal(h.readState('tasks.json').tasks[0].status, 'rework');
+  assert.equal(h.readState('tasks.json').tasks[0].revision, 2);
+  assert.ok(h.ok(['brief', 'get', 'T1']).includes(body));
+  assert.ok(h.ok(['brief', 'get', 'T1']).includes(ref));
+  assert.equal(h.logs().filter((e) => e.cmd === 'spawn').length, spawns);
+});
+
+for (const command of ['accept', 'spawn review']) {
+  test(`${command} sends a current failed review to full-findings rework instead of repeating review`, (t) => {
+    const h = setup(t, { ci: 'pending' });
+    h.submit();
+    h.reviewer('T1', 'reviewer');
+    const ref = 'https://github.com/acme/demo/pull/7#issuecomment-456';
+    const body = `Review (Tower Crane) at ${h.sha}\nVerdict: FAIL\nlib/change.js:22 - reject the empty request`;
+    const github = h.github();
+    github.comments = [{ id: 456, body, html_url: ref }];
+    h.saveGithub(github);
+    h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--sha', h.sha,
+      '--fail', '--summary', 'one blocking finding', '--ref', ref, '--agent', 'reviewer']);
+    const before = h.logs().filter((e) => e.cmd === 'spawn').length;
+    const args = command === 'accept' ? ['accept', 'T1'] : ['spawn', '--task', 'T1', '--role', 'review'];
+    const result = h.run([...args, '--agent', 'orchestrator']);
+    assert.equal(result.code, 1, result.stderr || result.stdout);
+    const task = h.readState('tasks.json').tasks[0];
+    assert.equal(task.status, 'rework');
+    assert.equal(task.revision, 2);
+    assert.ok(h.ok(['brief', 'get', 'T1']).includes(body));
+    assert.ok(h.ok(['brief', 'get', 'T1']).includes(ref));
+    assert.equal(h.logs().filter((e) => e.cmd === 'spawn').length, before);
+    assert.equal(h.logs().filter((e) => e.cmd.startsWith('check ')).length, 0);
+  });
+}
+
+function refillFixture(t) {
+  const h = cachedFixture(null, 'automation-refill', (repo) => {
+    const h = setup(null, { ci: 'pending', repo });
+    configureHarness(h);
+    h.ok(['project', 'set', '--workers', '1']);
+    for (const id of ['T2', 'T3', 'T4']) {
+      h.ok(['task', 'add', '--title', id, '--acceptance', 'works', '--tier', 'easy',
+        ...(id === 'T4' ? ['--dep', 'T3'] : [])]);
+      h.ok(['brief', 'set', id, '-'], { input: `Implement ${id}.\n` });
+    }
+    const script = path.join(h.base, 'refill-worker.js');
+    fs.writeFileSync(script, `const fs = require('node:fs'), cp = require('node:child_process'), path = require('node:path');
+const task = process.env.TOWER_CRANE_TASK;
+cp.execFileSync(process.execPath, [${JSON.stringify(BIN)}, 'claim', task], { stdio: 'pipe' });
+const file = path.join(process.env.AUTOMATION_CONTEXT_DIR, task);
+fs.writeFileSync(file, '');
+fs.writeFileSync(file + '.prompt', process.argv[2]);
+if (process.env.REFILL_ORPHAN) {
+  const child = cp.spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+  fs.writeFileSync(file + '.orphan', String(child.pid));
+}
+const poll = () => fs.existsSync(file + '.go') ? fs.writeFileSync(file + '.exited', '') : setTimeout(poll, 25);
+poll();
+`);
+    h.ok(['ladder', 'set', 'easy', '--command', JSON.stringify([process.execPath, script, '{prompt}'])]);
+    return { sha: h.sha };
+  });
+  h.github = () => JSON.parse(fs.readFileSync(h.env.AUTOMATION_GITHUB, 'utf8'));
+  h.saveGithub = (state) => fs.writeFileSync(h.env.AUTOMATION_GITHUB, JSON.stringify(state));
+  h.submit = () => {
+    h.ok(['claim', 'T1', '--agent', 'worker']);
+    h.ok(['submit', 'T1', '--sha', h.sha, '--pr', '7', '--agent', 'worker']);
+  };
+  h.logs = () => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  h.consume = () => h.run(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
+  h.marker = (id) => path.join(h.env.AUTOMATION_CONTEXT_DIR, id);
+  t.after(async () => {
+    const ids = h.readState('tasks.json').tasks.map((task) => task.id);
+    for (const id of ids) fs.writeFileSync(`${h.marker(id)}.go`, '');
+    for (const id of ids) {
+      if (fs.existsSync(h.marker(id))) await waitFor(`${h.marker(id)}.exited`);
+    }
+    await h.cleanup();
+  });
+  return h;
+}
+
+test('a ranged review recovery refusal does not stop unrelated gates or worker refill', async (t) => {
+  const h = refillFixture(t);
+  h.ok(['task', 'update', 'T1', '--tier', 'easy..medium']);
+  h.submit();
+  h.reviewer('T1', 'reviewer');
+  h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--sha', h.sha,
+    '--fail', '--summary', 'one blocking finding',
+    '--ref', 'https://github.com/acme/demo/pull/7#issuecomment-123', '--agent', 'reviewer']);
+  h.ok(['claim', 'T2', '--agent', 'worker-2']);
+  h.ok(['submit', 'T2', '--sha', h.sha, '--pr', '7', '--agent', 'worker-2']);
+  const result = h.run(['wait', '--after', '0', '--types', 'spawn', '--task', 'T3',
+    '--timeout', '15', '--agent', 'orchestrator']);
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(JSON.parse(result.stdout).task, 'T3');
+  assert.match(result.stderr, /linked review comment does not identify/);
+  assert.notEqual(await waitFor(h.marker('T3')), null);
+  assert.ok(h.logs().some((e) => e.task === 'T2' && e.cmd === 'check tests'),
+    'the unrelated submission still runs its software gates');
+  const task = h.readState('tasks.json').tasks[0];
+  assert.equal(task.status, 'submitted');
+  assert.equal(task.revision, 1);
+});
+
+test('automation retains an exited worker claim until its lost monitor process group is empty', {
+  skip: process.platform !== 'linux',
+}, async (t) => {
+  const h = refillFixture(t);
+  const spawn = h.json(['spawn', '--task', 'T1', '--agent', 'orchestrator'], { env: { REFILL_ORPHAN: '1' } });
+  assert.notEqual(await waitFor(`${h.marker('T1')}.orphan`), null);
+  const orphan = Number(fs.readFileSync(`${h.marker('T1')}.orphan`, 'utf8'));
+  const cursor = String(fs.statSync(path.join(h.state, 'events.jsonl')).size);
+  const waiting = h.runAsync(['wait', '--after', cursor, '--types', 'spawn', '--timeout', '15', '--agent', 'orchestrator']);
+  try {
+    process.kill(spawn.monitor_pid, 'SIGKILL');
+    process.kill(spawn.pid, 'SIGKILL');
+    fs.writeFileSync(`${h.marker('T1')}.exited`, '');
+    await new Promise((resolve) => setTimeout(resolve, 2200));
+    assert.equal(h.readState('tasks.json').tasks[0].claim?.agent, spawn.agent, 'the orphan keeps its worker slot');
+    assert.equal(fs.existsSync(h.marker('T3')), false);
+  } finally {
+    try { process.kill(orphan, 'SIGKILL'); } catch (e) { if (e.code !== 'ESRCH') throw e; }
+  }
+  const result = await waiting;
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(JSON.parse(result.stdout).task, 'T3');
+  assert.notEqual(await waitFor(h.marker('T3')), null);
+});
+
+test('automation reports unchanged dispatch refusals once and retries after the brief changes', async (t) => {
+  const h = refillFixture(t);
+  for (const id of ['T1', 'T2', 'T3', 'T4']) h.ok(['task', 'update', id, '--status', 'cancelled']);
+  h.ok(['task', 'add', '--title', 'Missing brief', '--acceptance', 'works', '--tier', 'easy']);
+  const started = path.join(h.base, 'wait-started');
+  const waiter = h.runAsync(['wait', '--types', 'spawn', '--timeout', '15', '--agent', 'orchestrator'],
+    { hooks: { HOOK_WATCH_READY: started } });
+  assert.notEqual(await waitFor(started), null);
+  for (let i = 0; i < 3; i++) {
+    h.ok(['task', 'note', 'T5', `unrelated progress ${i}`]);
+    await new Promise((resolve) => setTimeout(resolve, 1100));
+  }
+  h.ok(['brief', 'set', 'T5', '-'], { input: 'Implement the acceptance.\n' });
+  const result = await waiter;
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(JSON.parse(result.stdout).task, 'T5');
+  assert.equal(result.stderr.match(/has no brief/g)?.length, 1, result.stderr);
+  assert.notEqual(await waitFor(h.marker('T5')), null, 'the changed brief retries dispatch');
+});
+
+test('automation dispatches rework-ready work with the failed review findings', async (t) => {
+  const h = refillFixture(t);
+  h.ok(['task', 'update', 'T4', '--dep', 'T1']);
+  h.submit();
+  h.reviewer('T1', 'reviewer');
+  h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--sha', h.sha,
+    '--fail', '--summary', 'lib/change.js:12 - handle the missing input', '--agent', 'reviewer']);
+  h.consume();
+  assert.notEqual(await waitFor(h.marker('T1')), null, 'rework is dispatched without a manual command');
+  const task = h.readState('tasks.json').tasks[0];
+  assert.equal(task.status, 'in_progress');
+  assert.equal(task.claim.from, 'rework');
+  assert.equal(task.revision, 2);
+  assert.match(fs.readFileSync(`${h.marker('T1')}.prompt`, 'utf8'), /lib\/change.js:12 - handle the missing input/);
+  h.consume();
+  assert.equal(h.logs().filter((e) => e.cmd === 'rework').length, 1);
+  assert.equal(h.logs().filter((e) => e.cmd === 'spawn' && e.detail.role === 'worker').length, 1);
+});
+
+for (const trigger of ['exit', 'release --dead', 'merge']) {
+  test(`automation refills after ${trigger} in unblocking-first order and concurrent watchers respect the worker limit`, async (t) => {
+    const h = refillFixture(t);
+    if (trigger === 'merge') {
+      h.submit();
+      h.reviewer('T1', 'reviewer');
+      h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--sha', h.sha,
+        '--ok', '--agent', 'reviewer']);
+      const github = h.github();
+      github.ci[h.sha] = 'success';
+      h.saveGithub(github);
+    } else {
+      h.json(['spawn', '--task', 'T1', '--agent', 'orchestrator']);
+      assert.notEqual(await waitFor(h.marker('T1')), null, 'first worker claims the slot');
+      fs.writeFileSync(`${h.marker('T1')}.go`, '');
+      assert.notEqual(await waitFor(`${h.marker('T1')}.exited`), null);
+      if (trigger === 'release --dead') {
+        // Foreground observation records the exit before the explicit batch release.
+        h.run(['wait', '--after', '0', '--observe', '--types', 'worker-exited', '--timeout', '5', '--agent', 'orchestrator']);
+        h.ok(['release', '--dead', '--agent', 'orchestrator']);
+      }
+    }
+    const cursor = trigger === 'release --dead' ? String(fs.statSync(path.join(h.state, 'events.jsonl')).size) : '0';
+    const watchers = [h.runAsync(['wait', '--after', cursor, '--task', 'T3', '--types', 'spawn', '--timeout', '15', '--agent', 'orchestrator']),
+      h.runAsync(['wait', '--after', cursor, '--task', 'T3', '--types', 'spawn', '--timeout', '15', '--agent', 'orchestrator'])];
+    const results = await Promise.all(watchers);
+    assert.ok(results.every((r) => r.code === 0 && JSON.parse(r.stdout).task === 'T3'), JSON.stringify(results));
+    assert.notEqual(await waitFor(h.marker('T3')), null, `the task unblocking T4 takes the free slot: ${JSON.stringify(results)}`);
+    const spawns = h.logs().filter((e) => e.cmd === 'spawn' && e.detail.role === 'worker');
+    assert.deepEqual(spawns.map((e) => e.task), trigger === 'merge' ? ['T3'] : ['T1', 'T3']);
+    const st = require('../lib/state').loadState(h.state);
+    assert.equal(require('../lib/tasks').workerHolders(st, Date.now()).length, 1);
+    h.consume();
+    assert.equal(h.logs().filter((e) => e.cmd === 'spawn' && e.detail.role === 'worker').length, spawns.length);
+  });
+}
+
 function startupContexts(h, withRules) {
   const startups = h.logs().filter((e) => e.cmd === 'startup');
   assert.deepEqual(startups.map((e) => e.detail.role), ['worker', 'reviewer']);
@@ -2155,6 +2459,7 @@ test('the head of the line that turns CONFLICTING goes to rework with its files 
   github.prs['7'].mergeable = 'CONFLICTING';
   github.prs['7'].mergeStateStatus = 'DIRTY';
   h.saveGithub(github);
+  h.ok(['project', 'set', '--paused', 'manual queue conflict probe']);
   h.consume();
   const [t1, t2] = h.readState('tasks.json').tasks;
   assert.equal(t1.status, 'rework');

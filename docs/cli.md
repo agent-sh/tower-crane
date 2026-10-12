@@ -2,7 +2,7 @@
 
 Command tables are generated from `COMMANDS` in `bin/tower-crane.js` with `npm run docs:generate`. CI rejects drift; keep further contract details outside the generated blocks.
 
-`tower-crane <command> [args]`. Every command accepts `--state DIR`, `--agent NAME`, `--json` (machine output on stdout: the task, decision, project or list the command touched) and `--help`. Exit status: 0 done, 1 refused (with the reason on stderr), 2 usage error or wait timeout, 3 lock not acquired within 60 s. `validate` and a failing gate print their report on stdout and exit 1; `spawn --wait` exits with the agent's code. `wait` always prints one compact JSON line, including with `--json`. If a reader closes stdout or stderr, the CLI treats the resulting `EPIPE` as a quiet close, finishes the command and any state write, lets the other output stream drain, then exits with that command's status.
+`tower-crane <command> [args]`. Every command accepts `--state DIR`, `--agent NAME`, `--json` (machine output on stdout: the task, decision, project or list the command touched) and `--help`. Exit status: 0 done, 1 refused (with the reason on stderr), 2 usage error or wait timeout, 3 lock not acquired within 60 s. `validate` and a failing gate print their report on stdout and exit 1; `spawn --wait` exits with the agent's code, or 1 when a harness login failure ended the dispatch. `wait` always prints one compact JSON line, including with `--json`. If a reader closes stdout or stderr, the CLI treats the resulting `EPIPE` as a quiet close, finishes the command and any state write, lets the other output stream drain, then exits with that command's status.
 
 Agent identity comes from `--agent NAME`, then `TOWER_CRANE_AGENT`. With neither, `owner` is used only when stdin and stdout are both TTYs and `TOWER_CRANE_TASK` is unset. Otherwise the command exits 2 with `no agent: pass --agent NAME or set TOWER_CRANE_AGENT` and writes nothing. An empty or whitespace-only identity exits 2 with the same message. Help needs no agent.
 
@@ -246,7 +246,7 @@ Every spawn refreshes sibling-path entries in the requested agy settings. These 
 <!-- commands:Run:start -->
 | Command | Does |
 |---|---|
-| `accept ID [--cmd CMD] [--proof-cmd CMD] [--waive TYPE --reason R]` | run unattempted software gates first; tests and clean use pinned project commands. Optional `--cmd` and `--proof-cmd` must match their pins; none mode needs no test command. When they pass and review is missing, dispatch it and return `review_pending: true` while keeping the task submitted. Call again after review evidence arrives to accept. Existing successful receipts are reused; attempted failures or invalid receipts require an explicit gate rerun. `--waive review` is operational when the reviewer is capped or down at the submitted head (a capped review run in its `check ci` evidence, or a review spawn that exited without a verdict) and owner-required otherwise; waiving tests, clean, sources or ci is owner-required |
+| `accept ID [--cmd CMD] [--proof-cmd CMD] [--waive TYPE --reason R]` | a current independent failed review sends the task through `rework --from-review` and exits 1; otherwise run unattempted software gates first. Tests and clean use pinned project commands. Optional `--cmd` and `--proof-cmd` must match their pins; none mode needs no test command. When they pass and review is missing, dispatch it and return `review_pending: true` while keeping the task submitted. Call again after review evidence arrives to accept. Existing successful receipts are reused; attempted failures or invalid receipts require an explicit gate rerun. `--waive review` is operational when the reviewer is capped or down at the submitted head (a capped review run in its `check ci` evidence, or a review spawn that exited without a verdict) and owner-required otherwise; waiving tests, clean, sources or ci is owner-required |
 | | |
 | `ci completed ID --sha SHA` | orchestrator or owner: deliver a CI completion hint for an active submitted head, rerun the CI gate and advance passing tasks |
 | | |
@@ -310,6 +310,41 @@ once the PR head matches, including while mergeability is unknown. CI,
 review dispatch and merging still require known mergeability.
 A tracked worker must exit before automatic review dispatch. Native
 workers without a recorded exit use explicit `accept` to dispatch review.
+Failed independent review at the current submitted head and revision sends
+the task to rework through `rework --from-review`, with the full findings
+and comment link in its reason and brief. Pending software gates do not
+delay it. Stale or superseded reviews cannot rework the current submission;
+replaying a review never increments the revision twice.
+Ranged recovery uses the same full-findings rework action before recording
+its climb. Reviewer and broker callbacks leave that step to the trusted host.
+An unavailable or mismatched linked comment leaves that submission unchanged
+and reports a recovery refusal without stopping the wait host, other tasks'
+gate reactions or worker refill.
+`wait --observe` retains ranged quality recovery, including full-findings
+rework, while skipping submission automation and capacity refill.
+`accept` and a real `spawn --role review` also send a current independent FAIL
+to full-findings rework and exit 1, rather than repeating review at that head.
+If findings cannot be retrieved, the task stays submitted. Dry-run review
+previews do not change state.
+After draining event reactions, the trusted `wait` host releases verified
+dead claims through `release --dead`. Worker exits, releases, rework and confirmed merges refill
+free slots through `spawn --ready`, including ready rework tasks. The same
+worker limit, unblocking-first order, routing, fallback and locked reservations
+apply; concurrent watchers cannot dispatch above the limit. Before counting
+capacity, the host clears verified dead reservations under the state lock,
+including reservations from cancelled tasks. Dispatch refusals
+are reported once on stderr per wait while dispatch inputs are unchanged.
+Changed task or brief data, routing, project settings or worker holders retry
+the batch. Progress notes and fallback ticks alone do not retry a refusal.
+After fixing external availability or filesystem conditions, use
+`spawn --ready` or restart the wait to retry.
+Startup and the existing fallback tick also check capacity, recovering slots
+freed before the wait cursor. These capacity checks run only in a trusted
+wait without `--observe`.
+Automatic dead release waits for confirmed monitor cleanup or a verified
+empty process group, then rechecks under the release lock. Ranged recovery
+keeps claims while the exit awaits classification or a quality climb, so
+their exit still triggers the planned climb.
 Passing independent review accepts the task; accepted PRs with green
 gates merge through the existing head guards. A watcher creates a fresh
 reconciliation request for every active PR when starting, except a default
@@ -490,7 +525,7 @@ A budget stop keeps a ranged task on its current rung and asks the owner about t
 
 ## Decisions
 
-`--tier` accepts a single rung or an ascending range such as `easy..medium` in `task add`, `task update` and `plan import`. A range starts at its minimum and lets spawned workers climb after quality failure; a single tier retains manual recovery. Setting a new range resets the current tier to its minimum, while a single tier clears the range.
+`--tier` accepts a single rung or an ascending range such as `easy..medium` in `task add`, `task update` and `plan import`. A range starts at its minimum and lets spawned workers climb after quality failure. A single tier does not climb; trusted `wait` still reworks its current failed reviews and releases verified dead claims before refilling worker slots. Setting a new range resets the current tier to its minimum, while a single tier clears the range.
 
 `recover ID` handles a ranged task's failed independent review or confirmed tests, clean or CI gate failure at the current submitted head, exit without submit, or confirmed supervisor stall. The engine calls it after review failure and supervised exit; orchestrator `wait` also recovers observed exits and retries pending climbs. It waits for the old worker to stop, collects usage, records the climb and reason, sets rework, and starts a fresh session one rung higher in the same worktree. Provider outages and harness refusals follow same-rung availability fallback. Failed launches, full worker capacity and reviewer sandbox permission denials leave a pending climb that can be retried with `recover ID`. The reviewer's host monitor or orchestrator `wait` can complete a climb that its sandbox cannot launch.
 
@@ -714,7 +749,7 @@ Both write under the lock, validate, log events (`ladder harness`, `ladder set` 
 <!-- commands:Agents and worktrees:start -->
 | Command | Does |
 |---|---|
-| `spawn (--task ID \| --ready) [--role RUNG] [--dry-run] [--wait]` | `--ready` dispatches ready todo and rework tasks without a live worker, serially within the worker limit. Each dispatch rechecks readiness and worker identity under the existing spawn lock. Otherwise start a rung's harness in the task's worktree with the brief and task as the prompt: the rung of the task's tier, or the rung `--role` names (`--role review` for a review); sets `TOWER_CRANE_STATE`, `TOWER_CRANE_TASK`, `TOWER_CRANE_AGENT`; logs to the state directory; prints the pid or, with `--dry-run`, the command. A claude, codex, opencode, agy or pi rung runs under its role's agent file in a config home of its own (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `OPENCODE_CONFIG_DIR`, `PI_CODING_AGENT_DIR` or agy HOME); `--dry-run` prints a `#` line naming the agent file, the home, the MCP servers and the opted-in tools, and `--json` adds them as `home`. Every `--dry-run` also prints a `# rules:` line with the house rules files, how each reaches the agent and their size, and the prompt size; `--json` adds them as `startup`, the same record the `startup` event keeps. Claude/Codex reviewers receive the role skill, house-rule contents, standards and review contract sections in system context, with task JSON, review brief, gate receipts and diff in the user message. Claude writes it to `system.md` in its home and passes `--append-system-prompt-file` and `--exclude-dynamic-system-prompt-sections`; Codex writes its generated `AGENTS.md`. Every Claude spawn sets `FORCE_PROMPT_CACHING_5M=1`. Claude/Codex reviewer startup receipts add `system_bytes` and `system_tokens`. The rung is resolved again from the state read under the lock, so a tier or ladder change made while spawn created the worktree is the one that runs |
+| `spawn (--task ID \| --ready) [--role RUNG] [--dry-run] [--wait]` | `--ready` dispatches ready todo and rework tasks without a live worker, serially within the worker limit. Each dispatch rechecks readiness and worker identity under the existing spawn lock. A real `--role review` dispatch with a current independent failed review sends the task through `rework --from-review` and exits 1; dry-run previews do not change state. Otherwise start a rung's harness in the task's worktree with the brief and task as the prompt: the rung of the task's tier, or the rung `--role` names (`--role review` for a review); sets `TOWER_CRANE_STATE`, `TOWER_CRANE_TASK`, `TOWER_CRANE_AGENT`; logs to the state directory; prints the pid or, with `--dry-run`, the command. A claude, codex, opencode, agy or pi rung runs under its role's agent file in a config home of its own (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `OPENCODE_CONFIG_DIR`, `PI_CODING_AGENT_DIR` or agy HOME); `--dry-run` prints a `#` line naming the agent file, the home, the MCP servers and the opted-in tools, and `--json` adds them as `home`. Every `--dry-run` also prints a `# rules:` line with the house rules files, how each reaches the agent and their size, and the prompt size; `--json` adds them as `startup`, the same record the `startup` event keeps. Claude/Codex reviewers receive the role skill, house-rule contents, standards and review contract sections in system context, with task JSON, review brief, gate receipts and diff in the user message. Claude writes it to `system.md` in its home and passes `--append-system-prompt-file` and `--exclude-dynamic-system-prompt-sections`; Codex writes its generated `AGENTS.md`. Every Claude spawn sets `FORCE_PROMPT_CACHING_5M=1`. Claude/Codex reviewer startup receipts add `system_bytes` and `system_tokens`. The rung is resolved again from the state read under the lock, so a tier or ladder change made while spawn created the worktree is the one that runs |
 | | |
 | `worktree ID [ID ...]` | create (or print) a git worktree and branch `tower-crane/<id>-<slug>` from the freshest base for each task, at `<repo-parent>/<repo>-worktrees/<id>-<slug>`; records the branch on the task. Once the task has a branch, its worktree is found by branch, so renaming the task does not move it |
 <!-- commands:Agents and worktrees:end -->
