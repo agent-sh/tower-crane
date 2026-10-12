@@ -317,7 +317,12 @@ reconciliation request for every active PR when starting, except a default
 when the last reaction completed, recovering conflicts after merges that
 happened without a waiter. Audited evidence at the same head and revision
 is reused when its policy still matches. Missing evidence, including an
-entry without its matching gate audit receipt, runs in the next reaction.
+entry without its matching gate audit receipt or evidence from an earlier
+revision or another sha, runs in the next submission or reconciliation reaction.
+An audited failure from another revision or sha cannot suppress a gate;
+only a current failure waits for an explicit retry.
+Each due software gate runs even if an earlier gate failed. A current failure
+does not prevent clean or CI from collecting missing evidence.
 An earlier completed reaction does not suppress those gates.
 Reconciliation does not wait on a busy state lock; the next notification
 or existing fallback tick retries it within the wait's timeout.
@@ -897,6 +902,8 @@ Only the gate runner produces the local receipt. It records `variant`, `command`
 Agy spawn selects the generated `gishra-<job>` agent in its private HOME. `--tools` takes native agy tool names such as `search_web`; `--mcp` takes names from the original user’s `~/.gemini/config/mcp_config.json`. Both appear in `spawn --dry-run`. Workspace MCP configurations or a workspace agent overriding the generated role refuse dispatch. See [Agent files and homes](ladder.md#agent-files-and-homes) for permissions and authentication.
 
 ### Orchestrator tools
+
+Windows orchestrator commands discover their persistent caller from one CIM process snapshot before taking the state lock. PowerShell returns only the caller's ancestry. A failed or timed-out snapshot refuses the command; retry it rather than changing the identity.
 
 `tower-crane mcp --agent orchestrator` serves the inbox and batch actions as MCP tools over stdio. Pass `--state DIR` outside the project. The plugin registers it for Claude Code, and spawned Claude and Codex orchestrators receive it in their generated homes. The Codex plugin command surface exposes `/tower-crane-inbox`, `/tower-crane-spawn-ready`, `/tower-crane-merge-accepted`, `/tower-crane-rework-from-review ID` and `/tower-crane-release-dead`.
 

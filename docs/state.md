@@ -67,7 +67,7 @@ The first orchestrator write takes `tasks.json.orchestrator_lease` under the sta
 
 The session key binds the host and stable caller selected from the parent process chain to the first available `CLAUDE_SESSION_ID`, `CLAUDE_CODE_SESSION_ID`, `CODEX_THREAD_ID` or `CODEX_SESSION_ID`. Without a harness id it uses the host and caller process identity alone. Linux start ticks and Windows creation ticks identify that process; changes to ancestors above the caller do not change the key. Linux process start times and pid namespace distinguish reused pids and namespaces. Two live copies of the same resumed harness session have different process chains, so they cannot both hold the lease. Transient Linux command shells are skipped.
 
-Windows parent discovery runs before taking the state lock and uses its 60-second wait budget to allow cold PowerShell/CIM queries under load. A query that exceeds the budget refuses the command without choosing a fallback identity.
+Windows parent discovery runs before taking the state lock. One CIM process snapshot supplies every ancestor; only the caller's chain is returned from PowerShell. This avoids one provider round trip per ancestor while keeping command-line output within the pipe buffer. The existing 60-second hang guard allows cold PowerShell startup under load. A failed or timed-out snapshot refuses the command without choosing a fallback identity.
 
 Native orchestrator commands renew the matching holder's heartbeat once at command entry, including reads. A read never takes a vacant lease or renews another session's lease. Writes from another live session exit 1 naming the holder, pid, host, heartbeat and recovery commands. The guard runs before CLI commands start external work and again inside every state mutation. MCP initialization and discovery need no project or lease; actual tool actions use the same guard. Pure inbox reads stay open. `authority`, `bench gates` and `bench tokens` also remain open to competing readers and never acquire a vacant lease. Wait startup tries its lease transaction without blocking behind the state lock, so its event deadline stays effective; any later mutation still checks the lease under the lock. Workers and owner commands keep their existing authority.
 
@@ -862,10 +862,14 @@ completed receipts. A newly conflicting PR goes to rework even if its
 base moved while no watcher ran. Matching gate evidence is reused rather
 than rerun because of reconciliation. A submitted task's required software
 gates run when evidence is absent at its head and revision, including when
-an entry lacks a matching gate audit receipt. Passing evidence staled by a
+an entry lacks a matching gate audit receipt or belongs to an earlier
+revision or another sha. Historical passes, failures and waivers stay
+recorded but cannot mark a current gate handled. Passing evidence staled by a
 pinned command or tests policy change runs again. Completed reaction
-receipts do not suppress those runs; an audited failure still waits for an
-explicit retry. An idle startup writes no request.
+receipts do not suppress those runs; only an audited failure at the current
+head and revision waits for an explicit retry. An idle startup writes no request.
+Every due software gate runs even when an earlier gate failed; that failure
+still prevents acceptance but cannot suppress missing evidence for later gates.
 A busy state lock defers the request to the existing watch notification
 or fallback tick without holding the wait timeout.
 `merge queue` events have no task and record `{phase}`: `running` with the
