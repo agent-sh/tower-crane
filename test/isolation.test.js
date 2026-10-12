@@ -2420,11 +2420,11 @@ test('TOML tables have no prototype, so __proto__ and inherited names are plain 
   assert.equal(doc.a.__proto__.polluted, true);
 });
 
-test('claude, codex, agy and pi rungs dispatch through spawn, never as native subagents', () => {
+test('claude, codex, opencode, agy and pi rungs dispatch through spawn, never as native subagents', () => {
   const skill = fs.readFileSync(path.join(ROOT, 'skills', 'tower-crane', 'SKILL.md'), 'utf8');
   const ladder = fs.readFileSync(path.join(ROOT, 'docs', 'ladder.md'), 'utf8');
   for (const text of [skill, ladder]) {
-    assert.match(text, /A rung on claude, codex, agy or pi always runs through `tower-crane spawn`/);
+    assert.match(text, /A rung on claude, codex, opencode, agy or pi always runs through `tower-crane spawn`/);
     assert.doesNotMatch(text, /dispatch natively with (that|the) rung's model/);
   }
 });
