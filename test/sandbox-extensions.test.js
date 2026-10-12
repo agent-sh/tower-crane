@@ -432,6 +432,7 @@ test('claude: sandbox.session_bus grants the bus socket, read and write, and off
   const env = { ...h.env, XDG_RUNTIME_DIR: runtime, DBUS_SESSION_BUS_ADDRESS: `unix:path=${bus}`,
     PATH: `${bin}${path.delimiter}${process.env.PATH}`, CLAUDE_CONFIG_DIR: '' };
   const spawnSeen = () => {
+    releaseExited(h);
     h.ok(['spawn', '--task', 'T1', '--wait'], { env });
     return JSON.parse(fs.readFileSync(out, 'utf8'));
   };
@@ -443,6 +444,7 @@ test('claude: sandbox.session_bus grants the bus socket, read and write, and off
   assert.equal(h.run(['project', 'set', '--session-bus', 'maybe']).code, 2);
   h.ok(['project', 'set', '--session-bus', 'true']);
   fs.rmSync(bus);
+  releaseExited(h);
   const refused = h.run(['spawn', '--task', 'T1', '--wait'], { env });
   assert.notEqual(refused.code, 0, 'a missing bus socket refuses the spawn');
   assert.match(refused.stderr, /\/bus/);
