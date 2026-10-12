@@ -22449,5 +22449,1635 @@
       "cpu_load_processes": 2,
       "test_file_workers": 1
     }
+  },
+  "settings_gate_rework": {
+    "failed_host_head": "3ac8b24ae7aa93b08ada2d6c6e6e7070b2d6f03c",
+    "code_head": "b7d0c901afcd17443ea6afbdb06c1ac87cf6d1ff",
+    "base_head": "633b79fb977ba6b65cb9ad50c3f1a2f9c187a249",
+    "host_failure": "The project-settings case received a null subprocess status after about 1.26 seconds. The host receipt had no input, signal, stderr or launch-error detail. This was not the 300-second readiness backstop. No original null status reproduced locally; the underlying interruption cause is not established.",
+    "changes": "The CLI helper retains native error code/message on a failed launch. The settings assertion reports the input and complete command result. The missing-command fixture uses an absent absolute path rather than searching protected host PATH entries. Main merge retains --observe and signal waits, converts auth readiness and refill budgets, isolates inherited harness origin directories, and reads broker state before a host CLI can reconcile it.",
+    "transport_red": {
+      "status": 1,
+      "log_sha256": "86a1fd8fd3eadd6c50a061aa4473ebef1790157c7e851e0a1e2b16857625a4e5",
+      "tests": {
+        "tests": 1,
+        "pass": 0,
+        "fail": 1,
+        "cancelled": 0,
+        "skipped": 0
+      }
+    },
+    "touched_green": {
+      "status": 0,
+      "log_sha256": "56c14670fe70c7d9e2bb64729da4e757142229ed42fa00a3a8d1ab86e0112ef4",
+      "tests": {
+        "tests": 30,
+        "pass": 30,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 0
+      }
+    },
+    "initial_diagnostic_runs": {
+      "head": "3ac8b24ae7aa93b08ada2d6c6e6e7070b2d6f03c",
+      "cpu_load_processes": 2,
+      "test_file_workers": 1,
+      "groups": {
+        "test/local-ci.test.js": [
+          {
+            "run": 1,
+            "status": 1,
+            "wall_s": 26.699504096002784,
+            "load_before": [
+              11.326171875,
+              10.4501953125,
+              10.54248046875
+            ],
+            "load_after": [
+              13.615234375,
+              11.0576171875,
+              10.7421875
+            ],
+            "log_sha256": "2aa08f9efad328b4eebc8e0eb677e8fe25c9b885d352188186853bd651c356b3",
+            "tests": {
+              "tests": 23,
+              "pass": 22,
+              "fail": 1,
+              "cancelled": 0,
+              "skipped": 0
+            }
+          },
+          {
+            "run": 2,
+            "status": 1,
+            "wall_s": 27.75521272199694,
+            "load_before": [
+              13.615234375,
+              11.0576171875,
+              10.7421875
+            ],
+            "load_after": [
+              14.78076171875,
+              11.59326171875,
+              10.93212890625
+            ],
+            "log_sha256": "226f36420b03222d50d925e2a71f21fc55523209085b9cb912035a785579ff0c",
+            "tests": {
+              "tests": 23,
+              "pass": 22,
+              "fail": 1,
+              "cancelled": 0,
+              "skipped": 0
+            }
+          },
+          {
+            "run": 3,
+            "status": 1,
+            "wall_s": 24.76657750900631,
+            "load_before": [
+              14.78076171875,
+              11.59326171875,
+              10.93212890625
+            ],
+            "load_after": [
+              15.0771484375,
+              11.9169921875,
+              11.05712890625
+            ],
+            "log_sha256": "04bd3cf56115f991e8495a67dfd9a534e56763acc49c73f61b1a8c67700a5e62",
+            "tests": {
+              "tests": 23,
+              "pass": 22,
+              "fail": 1,
+              "cancelled": 0,
+              "skipped": 0
+            }
+          },
+          {
+            "run": 4,
+            "status": 1,
+            "wall_s": 28.669830279999587,
+            "load_before": [
+              15.0771484375,
+              11.9169921875,
+              11.05712890625
+            ],
+            "load_after": [
+              16.34228515625,
+              12.45751953125,
+              11.25927734375
+            ],
+            "log_sha256": "679321b7c1ceb52daf1e4f8a76e7c8eb12f03bf32c3d8e364a8788e486833300",
+            "tests": {
+              "tests": 23,
+              "pass": 22,
+              "fail": 1,
+              "cancelled": 0,
+              "skipped": 0
+            }
+          },
+          {
+            "run": 5,
+            "status": 1,
+            "wall_s": 28.922832661002758,
+            "load_before": [
+              16.34228515625,
+              12.45751953125,
+              11.25927734375
+            ],
+            "load_after": [
+              16.03466796875,
+              12.763671875,
+              11.400390625
+            ],
+            "log_sha256": "43a6cf691fd37fe6b8fafbe243205b0bc1cb9ee313f3b77c1250bb59364512b7",
+            "tests": {
+              "tests": 23,
+              "pass": 22,
+              "fail": 1,
+              "cancelled": 0,
+              "skipped": 0
+            }
+          }
+        ]
+      }
+    },
+    "initial_diagnostic_note": "These five runs had only the settings-assertion diagnostic overlay on the failed head. All five settings cases passed, but each whole file failed the missing-command case with EACCES from host PATH. Four raw logs and all five summaries are retained in task scratch; the first raw log was replaced by the final measurement before preservation. Its failure excerpt remains in the execution record.",
+    "merge_diagnostic": {
+      "status": 1,
+      "log_sha256": "8c4b9021a118f61f05fceb63a513cd4d09c7e418c6dcd59404de704518b1132d",
+      "tests": {
+        "tests": 315,
+        "pass": 273,
+        "fail": 42,
+        "cancelled": 0,
+        "skipped": 0
+      },
+      "reason": "Initial refreshed files inherited harness origin directories leading to sandbox-denied host credential discovery. One broker boundary case also invoked host reconciliation while trying to inspect the persisted state."
+    },
+    "broker_read_red": {
+      "status": 1,
+      "log_sha256": "de646486a52b5ca9c15e83039b35da38eae24f03c7d38a4bbfa82fc61d289e62",
+      "tests": {
+        "tests": 91,
+        "pass": 90,
+        "fail": 1,
+        "cancelled": 0,
+        "skipped": 0
+      }
+    },
+    "broker_read_green": {
+      "status": 0,
+      "log_sha256": "5f011f4edc30ee27762ee11522ac097099c1eb914aafc2b0a52ca602fad31ffa",
+      "tests": {
+        "tests": 1,
+        "pass": 1,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 0
+      }
+    },
+    "auth_green": {
+      "status": 0,
+      "log_sha256": "40cd6522fb24e7993721bfed87af355fb3bd06dc4a4eadbc0a6a5f5768a452d8",
+      "tests": {
+        "tests": 19,
+        "pass": 19,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 0
+      }
+    },
+    "affected_mutations": {
+      "baseline": "green named auth and worker-slot files",
+      "caught": 3,
+      "ids": [
+        "clean-exit-clears-any-pause",
+        "login-check-clears-superseded-pause",
+        "group-probe-clears-live-group"
+      ],
+      "no_full_suite_fallback": true,
+      "log_sha256": "4c1566999be24562289ce482718a8692661c45f0ff74935c99ce10616b99ab67"
+    },
+    "cpu_load_processes_per_runner": 2,
+    "peak_cpu_load_processes": 4,
+    "peak_local_test_file_workers": 4,
+    "reviewer_permission_refinement": {
+      "code_head": "9ee7ef37ab46269195a34063c76d4e62b9048cc0",
+      "initial_runs": [
+        {
+          "run": 1,
+          "status": 0,
+          "wall_s": 105.37050391200319,
+          "load_before": [
+            35.40673828125,
+            41.0009765625,
+            28.45068359375
+          ],
+          "load_after": [
+            31.57177734375,
+            38.10302734375,
+            28.75439453125
+          ],
+          "log_sha256": "d40098fe743822e96542e431c9f41c7e538f4b8fa3cea0a8a00fb5a7a5a30758",
+          "tests": {
+            "tests": 39,
+            "pass": 39,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        },
+        {
+          "run": 2,
+          "status": 1,
+          "wall_s": 96.80932448700332,
+          "load_before": [
+            31.57177734375,
+            38.10302734375,
+            28.75439453125
+          ],
+          "load_after": [
+            31.03759765625,
+            35.88525390625,
+            28.853515625
+          ],
+          "log_sha256": "e1c35cb08dec3cb3c10ef0736c6fbe3d597fe26c89742b8a5ba081516e5161c1",
+          "tests": {
+            "tests": 39,
+            "pass": 38,
+            "fail": 1,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        },
+        {
+          "run": 3,
+          "status": 0,
+          "wall_s": 98.43110256699583,
+          "load_before": [
+            31.03759765625,
+            35.88525390625,
+            28.853515625
+          ],
+          "load_after": [
+            19.9658203125,
+            30.3466796875,
+            27.56884765625
+          ],
+          "log_sha256": "0c996b453a4b1dd6ed8c7053c97dbb38f81daeae702c0d30c589d830543499bb",
+          "tests": {
+            "tests": 39,
+            "pass": 39,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        }
+      ],
+      "excluded_runs": [
+        4,
+        5
+      ],
+      "exclusion_reason": "The original escalation source changed during the later runs, which are not attributed to the initial checkpoint. The first three runs remain, including one failing host-read observation.",
+      "green": {
+        "status": 0,
+        "log_sha256": "25127904c832d86e7836ee631ee00ee3390d0b912e4ef04c6c539b846d95d05d",
+        "tests": {
+          "tests": 1,
+          "pass": 1,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 0
+        }
+      }
+    },
+    "auth_jsonl_refinement": {
+      "code_head": "a5d8ff9007d2b6ac5b5002388a7af945a89ffb3d",
+      "initial_runs": [
+        {
+          "run": 1,
+          "status": 0,
+          "wall_s": 42.11786074699921,
+          "load_before": [
+            53.19775390625,
+            44.38671875,
+            26.54150390625
+          ],
+          "load_after": [
+            48.34521484375,
+            44.34375,
+            27.28759765625
+          ],
+          "log_sha256": "c283575679dbe6579f1a1eb13da74680d7f185b22eede0242ad1eb6b08f44b97",
+          "tests": {
+            "tests": 19,
+            "pass": 19,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        },
+        {
+          "run": 2,
+          "status": 0,
+          "wall_s": 35.457119209000666,
+          "load_before": [
+            48.34521484375,
+            44.34375,
+            27.28759765625
+          ],
+          "load_after": [
+            44.4189453125,
+            43.69384765625,
+            27.78173828125
+          ],
+          "log_sha256": "0787ce24087941860f5995632e73637f4b3d873404ac8649c149513737771c7a",
+          "tests": {
+            "tests": 19,
+            "pass": 19,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        },
+        {
+          "run": 3,
+          "status": 1,
+          "wall_s": 32.6135683370012,
+          "load_before": [
+            44.4189453125,
+            43.69384765625,
+            27.78173828125
+          ],
+          "load_after": [
+            39.25341796875,
+            42.49951171875,
+            27.8896484375
+          ],
+          "log_sha256": "3cd3453733df984ce0b0bde384d41d3fdfabbccaed59d9169a0eeefa92b8cd03",
+          "tests": {
+            "tests": 19,
+            "pass": 18,
+            "fail": 1,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        },
+        {
+          "run": 4,
+          "status": 0,
+          "wall_s": 35.578691814000194,
+          "load_before": [
+            39.25341796875,
+            42.49951171875,
+            27.8896484375
+          ],
+          "load_after": [
+            40.7333984375,
+            42.44580078125,
+            28.40966796875
+          ],
+          "log_sha256": "5e86c8bf23cc85695fcc74e3e6286f7c7dc504949d7e1c2c1eb3b0d614e83d7f",
+          "tests": {
+            "tests": 19,
+            "pass": 19,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        },
+        {
+          "run": 5,
+          "status": 0,
+          "wall_s": 31.844448298004863,
+          "load_before": [
+            40.7333984375,
+            42.44580078125,
+            28.40966796875
+          ],
+          "load_after": [
+            35.40673828125,
+            41.0009765625,
+            28.45068359375
+          ],
+          "log_sha256": "165e4e7e578a0efd4da01c3bfd34d25ef8f2969796ff9c32147435780fe52915",
+          "tests": {
+            "tests": 19,
+            "pass": 19,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        }
+      ],
+      "failure": "One loaded run parsed an incomplete appended JSONL record after its wait. The event reader now consumes only newline-terminated records and still rejects malformed complete records.",
+      "red": {
+        "status": 1,
+        "log_sha256": "94d5d87f0a409fd0b528c191c2ac5bb757db21da7f4db81e24c95e296ddd58a6",
+        "tests": {
+          "tests": 1,
+          "pass": 0,
+          "fail": 1,
+          "cancelled": 0,
+          "skipped": 0
+        }
+      },
+      "green": {
+        "status": 0,
+        "log_sha256": "129c35a96db0906a629d834425067c4da0cbb085080a6c03fe44208cc0b7596a",
+        "tests": {
+          "tests": 1,
+          "pass": 1,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 0
+        }
+      },
+      "load_note": "Fresh auth runs briefly overlapped the original runner. The other measured files and their fixture/helper/bin/lib inputs were unchanged; only the auth test reader changed."
+    },
+    "loaded_files": [
+      {
+        "file": "test/automation.test.js",
+        "head": "b7d0c901afcd17443ea6afbdb06c1ac87cf6d1ff",
+        "passed_runs": 5,
+        "median_s": 320.5319199279984,
+        "wall_s": [
+          333.84356514400133,
+          320.5319199279984,
+          306.9313801219978,
+          296.68536288500036,
+          344.5256950490002
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "load_before": [
+          [
+            26.84912109375,
+            36.0029296875,
+            28.4892578125
+          ],
+          [
+            16.49169921875,
+            23.736328125,
+            25.46533203125
+          ],
+          [
+            17.62060546875,
+            19.53564453125,
+            23.04248046875
+          ],
+          [
+            9.84033203125,
+            15.1044921875,
+            20.35791015625
+          ],
+          [
+            12.00634765625,
+            12.6689453125,
+            17.775390625
+          ]
+        ],
+        "load_after": [
+          [
+            16.49169921875,
+            23.736328125,
+            25.46533203125
+          ],
+          [
+            17.62060546875,
+            19.53564453125,
+            23.04248046875
+          ],
+          [
+            9.84033203125,
+            15.1044921875,
+            20.35791015625
+          ],
+          [
+            12.00634765625,
+            12.6689453125,
+            17.775390625
+          ],
+          [
+            18.31396484375,
+            19.7958984375,
+            19.51904296875
+          ]
+        ],
+        "log_sha256": [
+          "5041e8d0973ae60a9f9851853489cde5c0eb2cd36ae35ebf961783723e25eb1e",
+          "4e05e975530f5b83ee77cbb4e1cac34594a2ecf567811f8a86cd2fc0bf1a663a",
+          "b1b75f48ce21a3770a134137369fa4997134d315f710f99e60b4c34dd1386585",
+          "6c65194aaed2e39db4c9fa73e3c4b948287642e2e71a701e7d88aa8a56cbed0d",
+          "7e71fb927980ea0d9afe5e845852091976b2f3a7ebb29f8b022c0049a35a78b3"
+        ],
+        "test_counts": [
+          {
+            "tests": 97,
+            "pass": 97,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          },
+          {
+            "tests": 97,
+            "pass": 97,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          },
+          {
+            "tests": 97,
+            "pass": 97,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          },
+          {
+            "tests": 97,
+            "pass": 97,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          },
+          {
+            "tests": 97,
+            "pass": 97,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        ]
+      },
+      {
+        "file": "test/escalation.test.js",
+        "head": "9ee7ef37ab46269195a34063c76d4e62b9048cc0",
+        "passed_runs": 5,
+        "median_s": 94.8179691050027,
+        "wall_s": [
+          94.70174689000123,
+          94.14611536300072,
+          101.69258428000467,
+          94.8179691050027,
+          95.72469019999699
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "load_before": [
+          [
+            16.26708984375,
+            24.93115234375,
+            25.919921875
+          ],
+          [
+            17.51123046875,
+            22.84619140625,
+            25.06787109375
+          ],
+          [
+            15.45751953125,
+            20.595703125,
+            24.0400390625
+          ],
+          [
+            18.5634765625,
+            20.40673828125,
+            23.625
+          ],
+          [
+            22.052734375,
+            20.46240234375,
+            23.2919921875
+          ]
+        ],
+        "load_after": [
+          [
+            17.51123046875,
+            22.84619140625,
+            25.06787109375
+          ],
+          [
+            15.45751953125,
+            20.595703125,
+            24.0400390625
+          ],
+          [
+            18.5634765625,
+            20.40673828125,
+            23.625
+          ],
+          [
+            22.052734375,
+            20.46240234375,
+            23.2919921875
+          ],
+          [
+            17.74462890625,
+            19.4619140625,
+            22.65869140625
+          ]
+        ],
+        "log_sha256": [
+          "a7642e258f31598e4c4523177de0783effb5c4bb4da343185797fcd296469599",
+          "8e8b1b294986204d22ce73511b3fd0bd7ae0122ac67ad61b71de55029ff8e54e",
+          "967275e0866380e320a63967f7bb113022357569609a7ae6be3eae10b5fe1ab2",
+          "90cb836f3a0ca377efc017c29b695aff7518db8042e6c80bb9a5f6b81826bd5f",
+          "665f4213636eafd8326c82e9e7420d74a5403364cd0b80c5e4cc329ccbd8c42d"
+        ],
+        "test_counts": [
+          {
+            "tests": 39,
+            "pass": 39,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          },
+          {
+            "tests": 39,
+            "pass": 39,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          },
+          {
+            "tests": 39,
+            "pass": 39,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          },
+          {
+            "tests": 39,
+            "pass": 39,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          },
+          {
+            "tests": 39,
+            "pass": 39,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        ]
+      },
+      {
+        "file": "test/events.test.js",
+        "head": "b7d0c901afcd17443ea6afbdb06c1ac87cf6d1ff",
+        "passed_runs": 5,
+        "median_s": 158.99488352700428,
+        "wall_s": [
+          209.1809744889979,
+          205.38278988000093,
+          158.99488352700428,
+          140.7071777079982,
+          132.38404973100114
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "load_before": [
+          [
+            13.5205078125,
+            10.130859375,
+            10.25244140625
+          ],
+          [
+            59.62451171875,
+            31.8671875,
+            18.5380859375
+          ],
+          [
+            52.767578125,
+            44.00732421875,
+            26.2275390625
+          ],
+          [
+            40.7333984375,
+            42.44580078125,
+            28.40966796875
+          ],
+          [
+            31.6865234375,
+            38.01806640625,
+            28.77734375
+          ]
+        ],
+        "load_after": [
+          [
+            59.62451171875,
+            31.8671875,
+            18.5380859375
+          ],
+          [
+            52.767578125,
+            44.00732421875,
+            26.2275390625
+          ],
+          [
+            40.7333984375,
+            42.44580078125,
+            28.40966796875
+          ],
+          [
+            31.6865234375,
+            38.01806640625,
+            28.77734375
+          ],
+          [
+            22.35791015625,
+            33.11865234375,
+            28.2236328125
+          ]
+        ],
+        "log_sha256": [
+          "33e82257f1b6f4f583b169c85cd65eb7c10039e8068082cff0a79808ce6d7ba4",
+          "c38f8815b41d8a6f4363d41ff73340216dae6f1ebb4473f61523d9e77547f01a",
+          "f93fd946c14b91afc2cb157e8f0f701a5e99228fd58955a1be17281798b4a9bf",
+          "b07d7db54a9fa201b85828cbfc25ada69399f090618a647d6ad61b64a4b05a1d",
+          "f46ac2b107b107eabdf0abc354d1da9ec9b5df634525848d61cfab40a3535d16"
+        ],
+        "test_counts": [
+          {
+            "tests": 38,
+            "pass": 38,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          },
+          {
+            "tests": 38,
+            "pass": 38,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          },
+          {
+            "tests": 38,
+            "pass": 38,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          },
+          {
+            "tests": 38,
+            "pass": 38,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          },
+          {
+            "tests": 38,
+            "pass": 38,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        ]
+      },
+      {
+        "file": "test/fallback.test.js",
+        "head": "b7d0c901afcd17443ea6afbdb06c1ac87cf6d1ff",
+        "passed_runs": 5,
+        "median_s": 89.61634182600392,
+        "wall_s": [
+          42.39647591600078,
+          89.61634182600392,
+          117.19695330000104,
+          89.90443437400245,
+          81.6767623439955
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "load_before": [
+          [
+            14.11962890625,
+            10.3115234375,
+            10.310546875
+          ],
+          [
+            17.19580078125,
+            11.66259765625,
+            10.77099609375
+          ],
+          [
+            47.1337890625,
+            22.35009765625,
+            14.60009765625
+          ],
+          [
+            64.48291015625,
+            37.11962890625,
+            20.95263671875
+          ],
+          [
+            57.42041015625,
+            42.52294921875,
+            24.40625
+          ]
+        ],
+        "load_after": [
+          [
+            17.19580078125,
+            11.66259765625,
+            10.77099609375
+          ],
+          [
+            47.1337890625,
+            22.35009765625,
+            14.60009765625
+          ],
+          [
+            64.48291015625,
+            37.11962890625,
+            20.95263671875
+          ],
+          [
+            57.42041015625,
+            42.52294921875,
+            24.40625
+          ],
+          [
+            53.19775390625,
+            44.38671875,
+            26.54150390625
+          ]
+        ],
+        "log_sha256": [
+          "4e4a60d6cff4bc591c8a962f280c02fa2ca619323f667e38351f94c44562012d",
+          "74b5140f8c65127b07b99c58578c36ac278b17ac2ad3bce0f14e4f8357934639",
+          "a8881b6306ee13e5054416530edd6a981b6fd5586da7bd7cfb7bcf638882a19a",
+          "cc5e4ce63d788937c7588ae955232184622897021aaa13347d8f77a4b1772488",
+          "63ea1061e4df6d8e059f7de3bc03a20f6b2ea1358e35db10522735aa878a2bb1"
+        ],
+        "test_counts": [
+          {
+            "tests": 31,
+            "pass": 31,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          },
+          {
+            "tests": 31,
+            "pass": 31,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          },
+          {
+            "tests": 31,
+            "pass": 31,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          },
+          {
+            "tests": 31,
+            "pass": 31,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          },
+          {
+            "tests": 31,
+            "pass": 31,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        ]
+      },
+      {
+        "file": "test/harness-auth.test.js",
+        "head": "a5d8ff9007d2b6ac5b5002388a7af945a89ffb3d",
+        "passed_runs": 5,
+        "median_s": 27.130032489003497,
+        "wall_s": [
+          30.857872886001132,
+          27.130032489003497,
+          25.46734909099905,
+          26.373526393006614,
+          29.991070119998767
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "load_before": [
+          [
+            26.84912109375,
+            36.0029296875,
+            28.4892578125
+          ],
+          [
+            31.2275390625,
+            36.2578125,
+            28.81689453125
+          ],
+          [
+            31.19482421875,
+            35.8369140625,
+            28.8759765625
+          ],
+          [
+            24.5166015625,
+            33.8896484375,
+            28.416015625
+          ],
+          [
+            20.61181640625,
+            32.037109375,
+            27.97216796875
+          ]
+        ],
+        "load_after": [
+          [
+            31.2275390625,
+            36.2578125,
+            28.81689453125
+          ],
+          [
+            31.19482421875,
+            35.8369140625,
+            28.8759765625
+          ],
+          [
+            24.5166015625,
+            33.8896484375,
+            28.416015625
+          ],
+          [
+            20.61181640625,
+            32.037109375,
+            27.97216796875
+          ],
+          [
+            18.62841796875,
+            30.63916015625,
+            27.6162109375
+          ]
+        ],
+        "log_sha256": [
+          "505b1fa25406c31267bc629823c9c199cb4f9397672aa8999fc46bbd5825c74e",
+          "cc0b76e7f07e5fd2924b6b46bdc5c91722831971b0ebf5dc7d307fac27cd85f9",
+          "28c426313d6ac03efef142e84d51e62372ce8776d273a602e659840fe954fca3",
+          "25f34bf0ccde033f12f7aeef0cbeb77c23819f50c74187ba335c8770b0d5f34d",
+          "65c0a21d329864837ee989cf0775fddfafeaf0fb9cd92b94caae85e1ba1c2a31"
+        ],
+        "test_counts": [
+          {
+            "tests": 20,
+            "pass": 20,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          },
+          {
+            "tests": 20,
+            "pass": 20,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          },
+          {
+            "tests": 20,
+            "pass": 20,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          },
+          {
+            "tests": 20,
+            "pass": 20,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          },
+          {
+            "tests": 20,
+            "pass": 20,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        ]
+      },
+      {
+        "file": "test/local-ci.test.js",
+        "head": "b7d0c901afcd17443ea6afbdb06c1ac87cf6d1ff",
+        "passed_runs": 5,
+        "median_s": 30.306297513998288,
+        "wall_s": [
+          24.6255380970033,
+          25.286207851000654,
+          30.306297513998288,
+          75.27989883199916,
+          76.10667345899856
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "load_before": [
+          [
+            13.1640625,
+            9.94775390625,
+            10.1953125
+          ],
+          [
+            16.29833984375,
+            10.9228515625,
+            10.5107421875
+          ],
+          [
+            17.30029296875,
+            11.58935546875,
+            10.74267578125
+          ],
+          [
+            23.62744140625,
+            13.55419921875,
+            11.41796875
+          ],
+          [
+            50.2177734375,
+            23.83544921875,
+            15.1669921875
+          ]
+        ],
+        "load_after": [
+          [
+            16.29833984375,
+            10.9228515625,
+            10.5107421875
+          ],
+          [
+            17.30029296875,
+            11.58935546875,
+            10.74267578125
+          ],
+          [
+            23.62744140625,
+            13.55419921875,
+            11.41796875
+          ],
+          [
+            50.2177734375,
+            23.83544921875,
+            15.1669921875
+          ],
+          [
+            62.38916015625,
+            33.37109375,
+            19.17041015625
+          ]
+        ],
+        "log_sha256": [
+          "a537a97d489c495bd75ba936acf0836bd0a8a3a671307eea6244466f04028104",
+          "1b5f07d74dbcd7dfa048a3bf674aa711d77e1cf10e3a6aa146731a5c8d35a5e0",
+          "8e60e884bd8cdf9061a0f2fffb79058cd1ff3b0c49cd78a3ac868e2e7ae29d8a",
+          "c546d439495cfa09aa2984278409a57eccd10ea331377dbc4ba9c860cf65f965",
+          "9dc197c95f8f332e81652c25b1591b83cbad689e9b933ec013eaef7658501206"
+        ],
+        "test_counts": [
+          {
+            "tests": 23,
+            "pass": 23,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          },
+          {
+            "tests": 23,
+            "pass": 23,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          },
+          {
+            "tests": 23,
+            "pass": 23,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          },
+          {
+            "tests": 23,
+            "pass": 23,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          },
+          {
+            "tests": 23,
+            "pass": 23,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        ]
+      },
+      {
+        "file": "test/signal-waits.test.js",
+        "head": "b7d0c901afcd17443ea6afbdb06c1ac87cf6d1ff",
+        "passed_runs": 5,
+        "median_s": 2.919377172998793,
+        "wall_s": [
+          2.8690318250010023,
+          3.0702986839969526,
+          2.870400232000975,
+          3.077344818004349,
+          2.919377172998793
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "load_before": [
+          [
+            13.1640625,
+            9.94775390625,
+            10.1953125
+          ],
+          [
+            13.3916015625,
+            10.04833984375,
+            10.2265625
+          ],
+          [
+            13.3916015625,
+            10.04833984375,
+            10.2265625
+          ],
+          [
+            13.5205078125,
+            10.130859375,
+            10.25244140625
+          ],
+          [
+            13.5205078125,
+            10.130859375,
+            10.25244140625
+          ]
+        ],
+        "load_after": [
+          [
+            13.3916015625,
+            10.04833984375,
+            10.2265625
+          ],
+          [
+            13.3916015625,
+            10.04833984375,
+            10.2265625
+          ],
+          [
+            13.5205078125,
+            10.130859375,
+            10.25244140625
+          ],
+          [
+            13.5205078125,
+            10.130859375,
+            10.25244140625
+          ],
+          [
+            14.11962890625,
+            10.3115234375,
+            10.310546875
+          ]
+        ],
+        "log_sha256": [
+          "c9be79f6ce0407ef2b076b5cf88f3406d39ff2503332b247375deff7e798ff84",
+          "b3a652a190d36cbce8ea5b0821dcb3d3a97e8f92257bf2ad3d9747a6c8d8274d",
+          "996784b2c6a379a2db949c74cef8360f7fb11b51a8e3cbbe277d58b40d642533",
+          "95fdc5020b18ed13c49bbd52f5009102ab62ba5b4341ac8d7acf122f98c14c88",
+          "610194b3d7aba78fbf0310baa503f7660afa8b67a65be5c8e8405dbaa903c82a"
+        ],
+        "test_counts": [
+          {
+            "tests": 4,
+            "pass": 4,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          },
+          {
+            "tests": 4,
+            "pass": 4,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          },
+          {
+            "tests": 4,
+            "pass": 4,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          },
+          {
+            "tests": 4,
+            "pass": 4,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          },
+          {
+            "tests": 4,
+            "pass": 4,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        ]
+      },
+      {
+        "file": "test/spawn-resume.test.js",
+        "head": "b7d0c901afcd17443ea6afbdb06c1ac87cf6d1ff",
+        "passed_runs": 5,
+        "median_s": 69.0875121420031,
+        "wall_s": [
+          107.73785806800151,
+          88.83256390300085,
+          69.0875121420031,
+          59.9525842150033,
+          58.57065272000182
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "load_before": [
+          [
+            62.38916015625,
+            33.37109375,
+            19.17041015625
+          ],
+          [
+            59.98681640625,
+            42.1953125,
+            24.005859375
+          ],
+          [
+            52.86669921875,
+            44.17333984375,
+            26.376953125
+          ],
+          [
+            44.7861328125,
+            43.7353515625,
+            27.4482421875
+          ],
+          [
+            38.4453125,
+            42.21923828125,
+            27.95556640625
+          ]
+        ],
+        "load_after": [
+          [
+            59.98681640625,
+            42.1953125,
+            24.005859375
+          ],
+          [
+            52.86669921875,
+            44.17333984375,
+            26.376953125
+          ],
+          [
+            44.7861328125,
+            43.7353515625,
+            27.4482421875
+          ],
+          [
+            38.4453125,
+            42.21923828125,
+            27.95556640625
+          ],
+          [
+            35.40673828125,
+            41.0009765625,
+            28.45068359375
+          ]
+        ],
+        "log_sha256": [
+          "34ab0c2d697a4e00e937fdacfd8c67de9b5d13e95d90ffb08a050742ef836c0d",
+          "dfd8c178ea30ccd77cfc335ad896c1c1ba26219e713d9fdc718677a057e3ced0",
+          "7a2e3c167c3f7bd37b4f71323114b44c83b733310435a9eab7426501886d0e6c",
+          "06671675d28158dd2233fbd43594edb1f487250349e45bb77c89b96d55837266",
+          "16496ca8b68ed0715e8a631b91e9e2cb5826e822d34e7a632fd658d11796dda3"
+        ],
+        "test_counts": [
+          {
+            "tests": 21,
+            "pass": 21,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          },
+          {
+            "tests": 21,
+            "pass": 21,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          },
+          {
+            "tests": 21,
+            "pass": 21,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          },
+          {
+            "tests": 21,
+            "pass": 21,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          },
+          {
+            "tests": 21,
+            "pass": 21,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        ]
+      },
+      {
+        "file": "test/test-tools.test.js",
+        "head": "b7d0c901afcd17443ea6afbdb06c1ac87cf6d1ff",
+        "passed_runs": 5,
+        "median_s": 1.7674790890014265,
+        "wall_s": [
+          1.717474928998854,
+          1.8719008370026131,
+          1.8744826969996211,
+          1.7172880459984299,
+          1.7674790890014265
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "load_before": [
+          [
+            13.1640625,
+            9.94775390625,
+            10.1953125
+          ],
+          [
+            13.1640625,
+            9.94775390625,
+            10.1953125
+          ],
+          [
+            13.3916015625,
+            10.04833984375,
+            10.2265625
+          ],
+          [
+            13.3916015625,
+            10.04833984375,
+            10.2265625
+          ],
+          [
+            13.3916015625,
+            10.04833984375,
+            10.2265625
+          ]
+        ],
+        "load_after": [
+          [
+            13.1640625,
+            9.94775390625,
+            10.1953125
+          ],
+          [
+            13.3916015625,
+            10.04833984375,
+            10.2265625
+          ],
+          [
+            13.3916015625,
+            10.04833984375,
+            10.2265625
+          ],
+          [
+            13.3916015625,
+            10.04833984375,
+            10.2265625
+          ],
+          [
+            13.5205078125,
+            10.130859375,
+            10.25244140625
+          ]
+        ],
+        "log_sha256": [
+          "e2df2d63f1c884faf48c6155a4f7f22db2f67339b51dfd2af40224ba2908b8be",
+          "86104f3f5d7dd19d1e96d3a5fe520e84123f40f6318af8c189440f5281d924dc",
+          "b214582e1e23f4f40d12efc6d55f71ee152feb0727c6f6b61271c9cf68297069",
+          "bcceb7f5f4bd81b61753b6d623512919f1be10db321617f84865635ea17000c2",
+          "915fbf44062a0180c9a8dc0e258df2af23658afac6efe27582ad7aa8d5bdd6e6"
+        ],
+        "test_counts": [
+          {
+            "tests": 3,
+            "pass": 3,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          },
+          {
+            "tests": 3,
+            "pass": 3,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          },
+          {
+            "tests": 3,
+            "pass": 3,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          },
+          {
+            "tests": 3,
+            "pass": 3,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          },
+          {
+            "tests": 3,
+            "pass": 3,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        ]
+      },
+      {
+        "file": "test/worker-slots.test.js",
+        "head": "b7d0c901afcd17443ea6afbdb06c1ac87cf6d1ff",
+        "passed_runs": 5,
+        "median_s": 29.288779663998866,
+        "wall_s": [
+          31.47968421800033,
+          28.25639784699888,
+          30.481943017999583,
+          29.288779663998866,
+          28.60075641399453
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "load_before": [
+          [
+            35.40673828125,
+            41.0009765625,
+            28.45068359375
+          ],
+          [
+            35.79443359375,
+            40.51806640625,
+            28.68701171875
+          ],
+          [
+            31.8916015625,
+            39.10205078125,
+            28.59033203125
+          ],
+          [
+            34.41357421875,
+            38.951171875,
+            28.87060546875
+          ],
+          [
+            29.8701171875,
+            37.42333984375,
+            28.6826171875
+          ]
+        ],
+        "load_after": [
+          [
+            35.79443359375,
+            40.51806640625,
+            28.68701171875
+          ],
+          [
+            31.8916015625,
+            39.10205078125,
+            28.59033203125
+          ],
+          [
+            34.41357421875,
+            38.951171875,
+            28.87060546875
+          ],
+          [
+            29.8701171875,
+            37.42333984375,
+            28.6826171875
+          ],
+          [
+            26.84912109375,
+            36.0029296875,
+            28.4892578125
+          ]
+        ],
+        "log_sha256": [
+          "47451a19a97bfcedaf49d7be44e85a1ee179741c0934015f3d8431e1c8b38d6d",
+          "4de538ce1ebf079e49558009802897c2d6b1d4b5bf40603d21110d4cfd943cd9",
+          "2a801bd5be208a04caa57a1fb177f816e4241291d9d78ca4388205ace40b3736",
+          "8e9d1beb1cdc31c175f30a9d02eddb50a965d3bc365611f6f697004876c6193c",
+          "e8d4562aa9640ad24de7ce908553a48d3704aeb177ac7533e59de154a2b47193"
+        ],
+        "test_counts": [
+          {
+            "tests": 21,
+            "pass": 21,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          },
+          {
+            "tests": 21,
+            "pass": 21,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          },
+          {
+            "tests": 21,
+            "pass": 21,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          },
+          {
+            "tests": 21,
+            "pass": 21,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          },
+          {
+            "tests": 21,
+            "pass": 21,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        ]
+      }
+    ],
+    "reproduction": "At code_head run each named loaded_files file five times with node test/run.js --test-concurrency=1 while two nice -n 15 node -e \"for (;;) Math.sqrt(Math.random());\" processes run, and keep combined file workers at four or below; the original runner uses three. Select only the listed files. Reproduce the launch-error regression using test/test-tools.test.js and the CLI helper error fault; no process signal is swallowed or retried."
   }
 }
