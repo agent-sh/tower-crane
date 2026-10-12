@@ -55,7 +55,16 @@ cp.spawnSync=(cmd,args,opts)=>{
   h.ok(['brief', 'set', 'T1', '-'], { input: '# Change\n\nImplement the acceptance.\n' });
   h.submit = (id = 'T1', sha = h.sha, pr = '7') => {
     h.ok(['claim', id, '--agent', 'worker']);
+    // A worker's submit refuses pending or failing CI (T149), so the head is submitted while its
+    // CI reads green. The CI the test set returns before any reaction runs.
+    const before = h.github();
+    const ciAtSubmit = before.ci[sha];
+    before.ci[sha] = 'success';
+    h.saveGithub(before);
     h.ok(['submit', id, '--sha', sha, '--pr', pr, '--agent', 'worker']);
+    const after = h.github();
+    after.ci[sha] = ciAtSubmit;
+    h.saveGithub(after);
   };
   h.consume = () => h.run(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
   h.logs = () => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
@@ -125,7 +134,18 @@ fs.writeFileSync('generated.txt', rows + '\\n');
   };
   h.submit = () => {
     h.ok(['claim', 'T1', '--agent', 'worker']);
+    // A worker's submit refuses pending CI and unknown mergeability (T149), so the head is submitted while GitHub reads it green and mergeable; the test's state returns before any reaction runs.
+    const before = h.github();
+    const ciAtSubmit = before.ci[h.sha];
+    const mergeAtSubmit = { mergeable: before.prs['7'].mergeable, mergeStateStatus: before.prs['7'].mergeStateStatus };
+    before.ci[h.sha] = 'success';
+    Object.assign(before.prs['7'], { mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' });
+    h.saveGithub(before);
     h.ok(['submit', 'T1', '--sha', h.sha, '--branch', 'fixture-change', '--pr', '7', '--agent', 'worker']);
+    const after = h.github();
+    after.ci[h.sha] = ciAtSubmit;
+    Object.assign(after.prs['7'], mergeAtSubmit);
+    h.saveGithub(after);
   };
   return h;
 }
@@ -1251,10 +1271,14 @@ test('startup reconciles a newly conflicting PR after a merge happened without a
   conflicting.prs['8'].mergeStateStatus = 'DIRTY';
   h.saveGithub(conflicting);
   const before = h.git(['rev-parse', 'HEAD']);
-  const event = JSON.parse(h.ok(['wait', '--types', 'rework', '--timeout', '5', '--agent', 'orchestrator']));
+  // The CLI helper bounds hangs without imposing a reconciliation deadline.
+  const event = JSON.parse(h.ok(['wait', '--task', 'T2', '--types', 'rework', '--agent', 'orchestrator']));
   assert.equal(event.task, 'T2');
   const task = h.readState('tasks.json').tasks[1];
-  assert.equal(task.status, 'rework');
+  // The merge freed a worker slot, which may dispatch T2 at once. A lease-first
+  // spawn (Windows) claims it from the start; a reserved one leaves it in rework.
+  const refill = h.logs().findLast((e) => e.cmd === 'spawn' && e.task === 'T2' && e.detail.role === 'worker');
+  assert.equal(task.status, refill && !refill.detail.reserved ? 'in_progress' : 'rework');
   assert.match(task.notes.at(-1).text, /value\.js/);
   assert.equal(h.git(['rev-parse', 'HEAD']), before);
 });
@@ -1294,6 +1318,8 @@ test('a submitted PR that GitHub reports UNKNOWN, then CONFLICTING, goes to rewo
   h.git(['add', 'value.js']);
   h.git(['commit', '-qm', 'main moves value']);
   h.submit();
+  // Submit reads the PR's mergeability before this test turns it UNKNOWN; count only the reaction's reads.
+  const submitViews = h.github().calls.filter((a) => a[0] === 'pr' && a[1] === 'view').length;
   const github = h.github();
   Object.assign(github.prs['7'], { mergeable: 'CONFLICTING', mergeStateStatus: 'DIRTY', unknownViews: 1 });
   h.saveGithub(github);
@@ -1303,7 +1329,7 @@ test('a submitted PR that GitHub reports UNKNOWN, then CONFLICTING, goes to rewo
   assert.equal(task.status, 'rework');
   assert.match(task.notes.at(-1).text, /conflicts with main: value\.js/);
   assert.equal(h.logs().filter((e) => ['check tests', 'check clean'].includes(e.cmd)).length, 0, 'no suite or clean runs');
-  assert.equal(h.github().calls.filter((a) => a[0] === 'pr' && a[1] === 'view').length, 2, 'the UNKNOWN read is retried once');
+  assert.equal(h.github().calls.filter((a) => a[0] === 'pr' && a[1] === 'view').length - submitViews, 2, 'the UNKNOWN read is retried once');
 });
 
 test('startup retains gate evidence when main moves and the submitted head stays mergeable', (t) => {
@@ -1976,9 +2002,18 @@ poll();
   });
   h.github = () => JSON.parse(fs.readFileSync(h.env.AUTOMATION_GITHUB, 'utf8'));
   h.saveGithub = (state) => fs.writeFileSync(h.env.AUTOMATION_GITHUB, JSON.stringify(state));
-  h.submit = () => {
-    h.ok(['claim', 'T1', '--agent', 'worker']);
-    h.ok(['submit', 'T1', '--sha', h.sha, '--pr', '7', '--agent', 'worker']);
+  h.submit = (id = 'T1', agent = 'worker') => {
+    h.ok(['claim', id, '--agent', agent]);
+    // A worker's submit refuses pending or failing CI (T149), so the head is submitted while its
+    // CI reads green. The CI the test set returns after the submit.
+    const before = h.github();
+    const ciAtSubmit = before.ci[h.sha];
+    before.ci[h.sha] = 'success';
+    h.saveGithub(before);
+    h.ok(['submit', id, '--sha', h.sha, '--pr', '7', '--agent', agent]);
+    const after = h.github();
+    after.ci[h.sha] = ciAtSubmit;
+    h.saveGithub(after);
   };
   h.logs = () => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
   h.consume = () => h.run(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
@@ -2002,8 +2037,7 @@ test('a ranged review recovery refusal does not stop unrelated gates or worker r
   h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--sha', h.sha,
     '--fail', '--summary', 'one blocking finding',
     '--ref', 'https://github.com/acme/demo/pull/7#issuecomment-123', '--agent', 'reviewer']);
-  h.ok(['claim', 'T2', '--agent', 'worker-2']);
-  h.ok(['submit', 'T2', '--sha', h.sha, '--pr', '7', '--agent', 'worker-2']);
+  h.submit('T2', 'worker-2');
   const result = h.run(['wait', '--after', '0', '--types', 'spawn', '--task', 'T3',
     '--timeout', '15', '--agent', 'orchestrator']);
   assert.equal(result.code, 0, result.stderr);
