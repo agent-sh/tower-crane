@@ -48,6 +48,7 @@ test('Windows orchestrator discovery waits for one snapshot and binds the persis
   });
   t.after(() => { if (child.exitCode === null) child.kill(); });
   await Promise.race([ready, closed.then(code => { throw new Error(`CLI exited before snapshot readiness: ${code}: ${stderr}`); })]);
+  watcher.close();
   const signal = cp.spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
     '$gate=[Threading.EventWaitHandle]::OpenExisting($env:ANCESTRY_GATE); try { $null=$gate.Set() } finally { $gate.Dispose() }',
   ], { env: { ...h.env, ANCESTRY_GATE: gate }, windowsHide: true });
