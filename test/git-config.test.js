@@ -24,7 +24,8 @@ function plant(h) {
   for (const hook of ['post-checkout', 'reference-transaction', 'post-index-change']) {
     fs.writeFileSync(path.join(hooks, hook), `#!/bin/sh\n${cmd(`hook-${hook}`)}\n`, { mode: 0o755 });
   }
-  // git splits this one itself, without a shell, so it names a program.
+  // git splits this one itself, without a shell, so it names a program. Its
+  // splitting reads a backslash as an escape, so the path uses forward slashes.
   const keyCommand = path.join(hooks, 'key-command');
   fs.writeFileSync(keyCommand, `#!/bin/sh\n${cmd('gpg-key-command')}\n`, { mode: 0o755 });
   const gitDir = path.join(h.repo, '.git');
@@ -46,7 +47,7 @@ function plant(h) {
     // Runs for each signed commit when no user.signingKey is set.
     'commit.gpgSign': 'true',
     'gpg.format': 'ssh',
-    'gpg.ssh.defaultKeyCommand': keyCommand,
+    'gpg.ssh.defaultKeyCommand': keyCommand.replace(/\\/g, '/'),
     // With loose objects past gc.auto, a fetch or commit runs gc --auto in
     // the foreground, whose prune runs this hook.
     'gc.auto': '1',
@@ -330,8 +331,10 @@ test('conditional includes cannot add a driver the config scan misses', (t) => {
 });
 
 // One row per setting the closed list names. Git runs a credential helper
-// through the shell only with a leading !, and splits gpg.program and
-// gpg.ssh.defaultKeyCommand without one, so those name a program file. Plain git, run on a copy of the
+// through the shell only with a leading !, and runs gpg.program and
+// gpg.ssh.defaultKeyCommand without one, so those name a program file. It
+// splits defaultKeyCommand reading a backslash as an escape, so that path uses
+// forward slashes. Plain git, run on a copy of the
 // planted repository, shows the setting takes effect; git started through
 // lib/commands must not take it. Rows with `caller` are the caller's own
 // settings, which still apply.
@@ -376,7 +379,7 @@ const ROWS = [
   } },
   { name: 'gpg.program', run: COMMIT, plant: (r) => { r.set('commit.gpgSign', 'true'); r.set('gpg.program', r.program('gpg-program')); } },
   { name: 'gpg.ssh.defaultKeyCommand', run: COMMIT, plant: (r) => {
-    r.set('commit.gpgSign', 'true'); r.set('gpg.format', 'ssh'); r.set('gpg.ssh.defaultKeyCommand', r.program('gpg-key-command'));
+    r.set('commit.gpgSign', 'true'); r.set('gpg.format', 'ssh'); r.set('gpg.ssh.defaultKeyCommand', r.program('gpg-key-command').replace(/\\/g, '/'));
   } },
   { name: 'gc.recentObjectsHook', run: COMMIT, plant: (r) => {
     ageLooseObjects(r.gitDir);
