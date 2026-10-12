@@ -11,7 +11,9 @@ $ErrorActionPreference = 'Stop'
 try {
   $process = [System.Diagnostics.Process]::GetProcessById(${pid})
   $null = $process.Handle
-  [Console]::Out.WriteLine($process.StartTime.ToFileTimeUtc().ToString())
+  # PowerShell reads a getter that throws as null; a process exiting here has no creation time.
+  $started = $process.StartTime
+  if ($null -ne $started) { [Console]::Out.WriteLine($started.ToFileTimeUtc().ToString()) }
 } catch [System.ArgumentException] {
 } catch [System.InvalidOperationException] {
 } finally {

@@ -19,6 +19,19 @@ test('submitted dependencies dispatch from the exact dependency head and spawn l
   f.h.ok(['spawn', '--task', 'T2', '--wait']);
   const link = f.read().calls.find((c) => c.args[0] === 'stack' && c.args[1] === 'link');
   assert.deepEqual(link.args, ['stack', 'link', '11', '12', '--base', 'main']);
+  // The observer retries a link refused by a concurrent spawn event.
+  f.h.ok(['wait', '--task', 'T2', '--types', 'stack link', '--after', '0', '--observe']);
+  assert.equal(f.h.json(['task', 'show', 'T2']).stack.linked, true);
+});
+
+test('a task event during the link\'s GitHub call refuses the link, and the next observer pass links the PR', (t) => {
+  const f = setup(t);
+  worker(f);
+  f.write((d) => { d.during = { 'stack link': [['task', 'note', 'T2', 'racing note', '--agent', 'worker-T2']] }; });
+  f.h.ok(['spawn', '--task', 'T2', '--wait']);
+  assert.match(fs.readFileSync(path.join(f.h.repo, '.tower-crane', 'events.jsonl'), 'utf8'), /"cmd":"stack link failed"/);
+  // A completed link event proves the observer retried after the racing note.
+  f.h.ok(['wait', '--task', 'T2', '--types', 'stack link', '--after', '0', '--observe']);
   assert.equal(f.h.json(['task', 'show', 'T2']).stack.linked, true);
 });
 
@@ -284,7 +297,9 @@ test('a spawned worker claims a task whose dependency merged while gh api is den
   const spawned = f.h.run(['spawn', '--task', 'T2', '--wait']);
   assert.equal(spawned.code, 0, spawned.stderr);
   assert.equal(f.h.json(['task', 'show', 'T2']).status, 'submitted');
-  assert.equal(apiCalls(f).length, before);
+  // The worker's submit reads its PR's checks through gh api, which is refused here and does not block the submit.
+  const submitted = apiCalls(f).slice(before);
+  assert.ok(submitted.every((c) => /\/check-(runs|suites)\?/.test(c.args[1])), 'only the submit reads gh api after the claim');
 });
 
 test('a spawned worker claim reads the recorded stack and makes no gh api call while its dependency is submitted', (t) => {

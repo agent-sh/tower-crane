@@ -6,6 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
 const { BIN, cachedFixture } = require('./helpers');
+const { gateFixture } = require('./gate-helpers');
 
 const APP = 'revuto-review';
 const CAP = { title: 'Revuto did not review this pull request', summary: 'reached the 2-round review limit', text: null };
@@ -25,7 +26,8 @@ function fixture(t) {
     h.init(['--repo', 'acme/app']);
     h.ok(['task', 'add', '--title', 'Change', '--acceptance', 'works']);
     h.ok(['claim', 'T1', '--agent', 'worker']);
-    const sha = h.git(['rev-parse', 'HEAD']);
+    // Submit reads the PR's checks, so it needs the fake gh that gateFixture puts on PATH.
+    const sha = gateFixture(h);
     h.ok(['submit', 'T1', '--agent', 'worker', '--sha', sha, '--pr', '9']);
     return { sha };
   });

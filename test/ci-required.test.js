@@ -6,6 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
 const { BIN, cachedFixture } = require('./helpers');
+const { gateFixture } = require('./gate-helpers');
 
 const REQUIRED = [
   'test (ubuntu-latest, node 26, shard 1/3)',
@@ -93,7 +94,8 @@ function fixture(t, withPr = true) {
     h.init(['--repo', 'acme/app']);
     h.ok(['task', 'add', '--title', 'Change', '--acceptance', 'works']);
     h.ok(['claim', 'T1', '--agent', 'worker']);
-    const sha = h.git(['rev-parse', 'HEAD']);
+    // Submit with a PR reads its checks, so it needs the fake gh that gateFixture puts on PATH.
+    const sha = gateFixture(h);
     h.ok(['submit', 'T1', '--agent', 'worker', '--sha', sha, ...(withPr ? ['--pr', '40'] : [])]);
     return { sha };
   });
