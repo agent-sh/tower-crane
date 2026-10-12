@@ -903,7 +903,10 @@ test('startup reconciles a newly conflicting PR after a merge happened without a
   const event = JSON.parse(h.ok(['wait', '--types', 'rework', '--timeout', '5', '--agent', 'orchestrator']));
   assert.equal(event.task, 'T2');
   const task = h.readState('tasks.json').tasks[1];
-  assert.equal(task.status, 'rework');
+  // The merge freed a worker slot, which may dispatch T2 at once. A lease-first
+  // spawn (Windows) claims it from the start; a reserved one leaves it in rework.
+  const refill = h.logs().findLast((e) => e.cmd === 'spawn' && e.task === 'T2' && e.detail.role === 'worker');
+  assert.equal(task.status, refill && !refill.detail.reserved ? 'in_progress' : 'rework');
   assert.match(task.notes.at(-1).text, /value\.js/);
   assert.equal(h.git(['rev-parse', 'HEAD']), before);
 });

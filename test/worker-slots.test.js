@@ -236,7 +236,7 @@ test('a dead reservation frees the only worker slot for a batch spawn --ready', 
   for (const task of ['T1', 'T2']) fs.writeFileSync(path.join(h.base, `${task}.exit`), '');
 });
 
-test('wait clears a dead reservation before counting capacity and refills the cancelled worker slot', async (t) => {
+test('wait clears a dead reservation before counting capacity and refills the cancelled worker slot', { skip: RESERVES }, async (t) => {
   const h = setup(t, 1, 2);
   controlledHarness(h);
   const { spawned } = await pausedSpawn(h, 'T1');
