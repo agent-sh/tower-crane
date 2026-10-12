@@ -101,7 +101,7 @@ const MUTANTS = [
   { id: 'mixed-waiver-tags-operational', area: 'authority', file: 'lib/tasks.js',
     from: 'approved && Authority.classOf(settings[i]) === Authority.OWNER', to: 'approved', tests: ['test/control-rework.test.js'] },
   { id: 'interrupt-without-setting-audit', area: 'authority', file: 'lib/tasks.js',
-    from: "Authority.enforce(ctx, st, ['task.interrupt'], { emit: audit ? emit : null, quiet: !audit });", to: "Authority.enforce(ctx, st, ['task.interrupt'], { quiet: true });", tests: ['test/control-rework.test.js'] },
+    from: 'Authority.enforce(ctx, st, settings, { emit: audit ? emit : null, quiet: !audit });', to: 'Authority.enforce(ctx, st, settings, { quiet: true });', tests: ['test/control-rework.test.js'] },
   { id: 'decision-delegation-without-enforcement', area: 'authority', file: 'lib/decisions.js',
     from: "Authority.enforce(ctx, st, ['decision.delegate'], { change, emit, commit });", to: '', tests: ['test/control-rework.test.js'] },
   { id: 'technical-delegation-defaults-off', area: 'authority', file: 'lib/decisions.js',
@@ -207,7 +207,7 @@ const MUTANTS = [
   { id: 'env-file-error-echoes', area: 'secrets', file: 'lib/spawn-settings.js',
     from: 'throw refuse(`invalid env_file ${file} at line ${assignmentLine}`);', to: 'throw refuse(`invalid env_file ${file} at line ${assignmentLine}: ${text}`);', tests: ['test/sandbox-extensions.test.js'] },
   // board
-  { id: 'board-unescaped-lt', area: 'board', file: 'lib/board/view.js',
+  { id: 'board-unescaped-lt', area: 'board', file: 'lib/board/parts.js',
     from: ".replace(/</g, '&lt;')", to: '', tests: ['test/board.test.js'] },
   { id: 'serve-no-page-token', area: 'board', file: 'lib/serve.js',
     from: "if (!same(req.headers['x-tower-crane-token'], token)) {", to: 'if (false) {', tests: ['test/settings.test.js'] },
