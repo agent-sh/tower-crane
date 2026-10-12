@@ -154,6 +154,8 @@ const MUTANTS = [
     from: 'if (leaseExpired(t, now)) checkReady(', to: 'if (leaseExpired(t, now)) checkWorkers(', tests: ['test/claim.test.js'] },
   { id: 'worker-starts-before-lease', area: 'spawn/supervisor', file: 'lib/spawn-monitor.js',
     from: "const gated = initial && spawn.role === 'worker' && !spawn.handshake;", to: 'const gated = false;', tests: ['test/supervision.test.js'] },
+  { id: 'handshake-launches-before-go', area: 'spawn/supervisor', file: 'lib/spawn-monitor.js',
+    from: 'while (!fs.existsSync(spawn.handshake.go)) {', to: 'while (false) {', tests: ['test/supervision.test.js'] },
   { id: 'spawn-ignores-live-reservation', area: 'spawn/supervisor', file: 'lib/spawn.js',
     from: 'if (held.length) throw refuse(', to: 'if (false) throw refuse(', tests: ['test/worker-slots.test.js'] },
   { id: 'spawn-counts-dead-reservation-first', area: 'spawn/supervisor', file: 'lib/spawn.js',
