@@ -45,7 +45,8 @@ test('repository seeds, test helpers and gate scratch share the cache default an
     [{ TOWER_CRANE_TMP: path.join(h.base, 'tmp') }, path.join(h.base, 'tmp')],
     [{ TOWER_CRANE_TMP: path.join(h.base, 'tmp'), TOWER_CRANE_TEST_TMP: path.join(h.base, 'test-tmp') }, path.join(h.base, 'test-tmp')],
   ]) {
-    const env = { ...h.env, USERPROFILE: h.env.HOME, XDG_CACHE_HOME: '', LOCALAPPDATA: '', ...overrides };
+    const env = { ...h.env, USERPROFILE: h.env.HOME, XDG_CACHE_HOME: '', LOCALAPPDATA: '',
+      TOWER_CRANE_TMP: '', TOWER_CRANE_TEST_TMP: '', ...overrides };
     const result = cp.spawnSync(process.execPath, ['-e', probe], { cwd: ROOT, env, encoding: 'utf8' });
     assert.equal(result.status, 0, result.stderr);
     assert.deepEqual(JSON.parse(result.stdout), [expected, expected, expected]);

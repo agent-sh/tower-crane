@@ -34,7 +34,11 @@ function silentReviewer(h) {
   }
 }
 
-const events = (h) => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+// A detached monitor may be mid-append; its line is whole on the next read.
+const events = (h) => {
+  const text = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8');
+  return text.slice(0, text.lastIndexOf('\n') + 1).trim().split('\n').map(JSON.parse);
+};
 const reviewerSpawns = (h) => events(h).filter((e) => e.cmd === 'spawn' && e.task === 'T1' && e.detail.role === 'reviewer');
 
 // The dispatched reviewer runs detached; the test must outlive it and its monitor.

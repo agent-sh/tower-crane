@@ -22,7 +22,7 @@ fs.writeFileSync(fake, `const fs = require('fs');
 const { spawnSync } = require('child_process');
 const [dir, ...rest] = process.argv.slice(2);
 const head = spawnSync('git', ['-C', dir, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim();
-fs.writeFileSync(process.env.FAKE_CLEAN_LOG, JSON.stringify({ dir, rest, head, via: process.env.FAKE_CLEAN_VIA || 'env' }));
+fs.writeFileSync(process.env.FAKE_CLEAN_LOG, JSON.stringify({ dir, rest, head, tmpdir: process.env.TMPDIR, via: process.env.FAKE_CLEAN_VIA || 'env' }));
 if (process.env.FAKE_CLEAN_MODE === 'crash') { console.error('cannot read the repository'); process.exit(1); }
 if (process.env.FAKE_CLEAN_MODE === 'text') { console.log('deslop: 2 findings'); process.exit(0); }
 process.stdout.write(fs.readFileSync(process.env.FAKE_CLEAN_REPORT, 'utf8'));
@@ -89,6 +89,8 @@ test('a HIGH finding: not ok, listing the first 10 HIGH items and counts by chec
   assert.equal(c.head, sha);
   assert.deepEqual(c.rest, [`--base=${base}`, '--json']);
   assert.ok(c.dir.startsWith(process.env.TOWER_CRANE_TMP));
+  // Its scratch goes under the gate's temp root too, not the system temp directory.
+  assert.ok(c.tmpdir.startsWith(process.env.TOWER_CRANE_TMP + path.sep), c.tmpdir);
   assertCleanedUp();
 });
 

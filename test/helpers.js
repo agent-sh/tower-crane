@@ -40,6 +40,9 @@ function baseEnv(home) {
   env.USERPROFILE = env.HOME;
   env.LOCALAPPDATA = path.join(env.HOME, 'AppData', 'Local');
   env.XDG_CACHE_HOME = path.join(env.HOME, '.cache');
+  // A gate's worktree and temp directories stay in the fixture, so a gate the test kills
+  // cannot leave them in the shared temporary directory.
+  env.TOWER_CRANE_TMP = path.join(home, 'gate-tmp');
   return env;
 }
 
@@ -122,23 +125,30 @@ function makeRepo(t, options = {}) {
   return makeRepoFromSeed(t, getRepoSeed().repo, options);
 }
 
-function makeRepoFromSeed(t, seedRepo, options = {}) {
-  fs.mkdirSync(TMP_ROOT, { recursive: true });
-  const base = fs.realpathSync.native(fs.mkdtempSync(path.join(TMP_ROOT, 'tower-crane-')));
-  fs.writeFileSync(
-    path.join(base, 'gitconfig'),
-    '[user]\n\tname = tower-crane test\n\temail = test@example.invalid\n[init]\n\tdefaultBranch = main\n[commit]\n\tgpgsign = false\n[core]\n\tautocrlf = false\n',
-  );
-  const env = baseEnv(base);
-  const repo = path.join(base, 'repo');
+// A new fixture directory under the temp root, removed if its setup throws: no test owns it yet.
+function fixtureDir(setup) {
+  const dir = fs.mkdtempSync(path.join(TMP_ROOT, 'tower-crane-'));
   try {
-    fs.cpSync(seedRepo, repo, { recursive: true });
-    fs.mkdirSync(path.join(repo, '.git', 'refs', 'remotes', 'origin'), { recursive: true });
+    return setup(fs.realpathSync.native(dir));
   } catch (error) {
-    fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     throw error;
   }
-  return context(t, base, options);
+}
+
+function makeRepoFromSeed(t, seedRepo, options = {}) {
+  fs.mkdirSync(TMP_ROOT, { recursive: true });
+  return fixtureDir((base) => {
+    fs.writeFileSync(
+      path.join(base, 'gitconfig'),
+      '[user]\n\tname = tower-crane test\n\temail = test@example.invalid\n[init]\n\tdefaultBranch = main\n[commit]\n\tgpgsign = false\n[core]\n\tautocrlf = false\n',
+    );
+    const env = baseEnv(base);
+    const repo = path.join(base, 'repo');
+    fs.cpSync(seedRepo, repo, { recursive: true });
+    fs.mkdirSync(path.join(repo, '.git', 'refs', 'remotes', 'origin'), { recursive: true });
+    return context(t, base, options);
+  });
 }
 
 const repoTemplates = new Map();
@@ -183,9 +193,10 @@ function makeTaskRepo(t, tasks, { projectArgs = [] } = {}) {
 // build one fixture and give each test its own copy instead of rebuilding it.
 // Git and state paths still name the source; the caller repairs them.
 function copyRepo(t, source) {
-  const base = fs.realpathSync.native(fs.mkdtempSync(path.join(TMP_ROOT, 'tower-crane-')));
-  fs.cpSync(source, base, { recursive: true });
-  return context(t, base);
+  return fixtureDir((base) => {
+    fs.cpSync(source, base, { recursive: true });
+    return context(t, base);
+  });
 }
 
 // A fixture built once per test process, each test getting its own copy:
@@ -386,12 +397,15 @@ try {
   foreach ($entry in (ConvertFrom-Json '${records}')) {
     if (!$entry.PSObject.Properties['startTime']) { throw 'Windows monitor creation identity is missing' }
     if ($null -eq $entry.startTime) { continue }
+    $monitor = $null
     try {
       $monitor = [System.Diagnostics.Process]::GetProcessById($entry.pid)
       $null = $monitor.Handle
     } catch [System.ArgumentException] { continue }
-      catch [System.InvalidOperationException] { $monitor.Dispose(); continue }
-    if ($monitor.StartTime.ToFileTimeUtc().ToString() -ne $entry.startTime) {
+      catch [System.InvalidOperationException] { if ($monitor) { $monitor.Dispose() }; continue }
+    # A monitor exiting during this query reads a null creation time; it has already stopped.
+    $started = $monitor.StartTime
+    if ($null -eq $started -or $started.ToFileTimeUtc().ToString() -ne $entry.startTime) {
       $monitor.Dispose()
       continue
     }
