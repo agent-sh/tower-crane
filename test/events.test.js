@@ -384,13 +384,13 @@ setInterval(() => {}, 1000);\n`);
   assert.match(h.json(['status']).exited_claims[0].tail, /worker alive/);
   assert.equal(log(h).filter((e) => e.type === 'worker-exited').length, 1);
   assert.equal(h.readState('tasks.json').tasks[0].status, 'in_progress');
-  assert.equal(h.run(['wait', '--agent', 'orchestrator', '--types', 'worker-exited', '--timeout', '0.1']).code, 2); // wait-allow: verify the CLI observation, filtering or timeout contract with already-published state
+  assert.equal(h.run(['wait', '--observe', '--agent', 'orchestrator', '--types', 'worker-exited', '--timeout', '0.1']).code, 2); // wait-allow: verify the CLI observation, filtering or timeout contract with already-published state
   const recovery = await waiting(t, h, { automation: false, args: ['--types', 'released', '--agent', 'observer'] });
   h.ok(['release', 'T1', '--reason', 'spawned worker exited', '--agent', 'orchestrator']);
   assert.equal((await event(recovery, 'released')).detail.exited_spawn.pid, spawned.pid);
   assert.equal(h.readState('tasks.json').tasks[0].status, 'todo');
   h.ok(['claim', 'T1', '--agent', 'replacement']);
-  assert.equal(h.run(['wait', '--agent', 'orchestrator', '--types', 'worker-exited', '--timeout', '0.1']).code, 2, 'recovery does not report the old spawn against a replacement'); // wait-allow: verify the CLI observation, filtering or timeout contract with already-published state
+  assert.equal(h.run(['wait', '--observe', '--agent', 'orchestrator', '--types', 'worker-exited', '--timeout', '0.1']).code, 2, 'recovery does not report the old spawn against a replacement'); // wait-allow: verify the CLI observation, filtering or timeout contract with already-published state
 });
 
 test('submitted spawned workers never emit worker-exited', async (t) => {
@@ -604,7 +604,7 @@ test('startup reconciliation with an active PR does not hold a timeout behind th
 test('timeout and invalid cursors have bounded exits and default now ignores history', async (t) => {
   const h = setup(t);
   h.ok(['msg', '--to', 'orchestrator', 'already handled']);
-  const r = h.run(['wait', '--agent', 'orchestrator', '--timeout', '0.05', '--json']); // wait-allow: verify the CLI observation, filtering or timeout contract with already-published state
+  const r = h.run(['wait', '--observe', '--agent', 'orchestrator', '--timeout', '0.05', '--json']); // wait-allow: verify the CLI observation, filtering or timeout contract with already-published state
   assert.equal(r.code, 2);
   assert.deepEqual(JSON.parse(r.stdout), { type: 'timeout', offset: fs.statSync(path.join(h.state, 'events.jsonl')).size });
   assert.equal(r.stderr, '');

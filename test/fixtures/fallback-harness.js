@@ -4,6 +4,15 @@ const cp = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 
+// Each harness's own record for an expired login, in the shape its CLI prints.
+function authRecord(harness, message) {
+  if (harness === 'agy') return { status: 'ERROR', error: message };
+  if (harness === 'opencode') return { type: 'error', error: { name: 'APIError', data: { message } } };
+  if (harness === 'pi') return { type: 'message_end', message: { role: 'assistant', stopReason: 'error', errorMessage: message } };
+  if (harness === 'claude') return { type: 'result', is_error: true, result: message };
+  return { type: 'turn.failed', error: { message } };
+}
+
 if (process.env.TOWER_CRANE_TEST_CLAUDE_PROVIDER) {
   const now = () => Number(process.hrtime.bigint()) / 1e6;
   const label = (file, args) => {
@@ -79,7 +88,7 @@ if (path.resolve(process.argv[1] || '') !== __filename) {
     const gated = file === '/bin/sh' && args[2] === 'tower-crane-gate';
     const target = gated ? args[3] : file;
     const harness = /[\\/]scripts[\\/]fallback(?:\.exe)?$/.test(target) ? 'command' : target;
-    if (['codex', 'claude', 'agy', 'command'].includes(harness) && process.env.TOWER_CRANE_TEST_FALLBACK_FILE) {
+    if (['codex', 'claude', 'agy', 'opencode', 'pi', 'command'].includes(harness) && process.env.TOWER_CRANE_TEST_FALLBACK_FILE) {
       if (gated) return spawn.call(this, file, [...args.slice(0, 3), process.execPath, __filename, harness, ...args.slice(4)], options);
       return spawn.call(this, process.execPath, [__filename, harness, ...args], options);
     }
@@ -100,6 +109,9 @@ if (path.resolve(process.argv[1] || '') !== __filename) {
     }));
     process.exit(0);
   }
+  // A login flag file stands for a completed re-login: the primary route then works, unless the login is broken despite it.
+  // Read before the attempt is recorded: a test removes the flag as soon as it sees the attempt.
+  const relogged = Boolean(process.env.TOWER_CRANE_TEST_LOGIN_FLAG) && fs.existsSync(process.env.TOWER_CRANE_TEST_LOGIN_FLAG);
   let attempts;
   try {
     attempts = JSON.parse(fs.readFileSync(file, 'utf8'));
@@ -153,7 +165,7 @@ if (path.resolve(process.argv[1] || '') !== __filename) {
     console.log(JSON.stringify({ type: 'result', is_error: false, model,
       usage: { input_tokens: 20, output_tokens: 4 } }));
   }
-  if (model === 'first' || model === 'second' && process.env.TOWER_CRANE_TEST_FALLBACK_CHAIN
+  if (model === 'first' && (!relogged || process.env.TOWER_CRANE_TEST_LOGIN_BROKEN) || model === 'second' && process.env.TOWER_CRANE_TEST_FALLBACK_CHAIN
     || providerTest && provider === process.env.TOWER_CRANE_TEST_FAIL_PROVIDER) {
     if (process.env.TOWER_CRANE_TEST_FALLBACK_REASON === 'refusal') {
       console.log(JSON.stringify(harness === 'codex'
@@ -162,18 +174,47 @@ if (path.resolve(process.argv[1] || '') !== __filename) {
       process.exit(0);
     }
     const type = process.env.TOWER_CRANE_TEST_FALLBACK_REASON;
-    const message = 'rate limit exceeded: The service is temporarily unavailable.';
-    if (harness === 'agy') console.error('HTTP 503 service unavailable');
+    const auth = type === 'auth' || type === 'auth-stderr';
+    const message = auth ? 'Failed to authenticate: OAuth session expired and could not be refreshed'
+      : 'rate limit exceeded: The service is temporarily unavailable.';
+    if (harness === 'agy' && !auth) console.error('HTTP 503 service unavailable');
+    // An assistant record that quotes a login failure on stderr, from a run that succeeds.
+    if (type === 'quoted-stderr') {
+      const text = 'The task log says: Failed to authenticate: OAuth session expired and could not be refreshed';
+      console.error(JSON.stringify(harness === 'codex'
+        ? { type: 'item.completed', item: { type: 'agent_message', text } }
+        : harness === 'agy' ? { status: 'SUCCESS', response: text }
+          : { type: 'assistant', message: { content: [{ type: 'text', text }] } }));
+      process.exit(0);
+    }
+    // A typed record on stderr is the case the supervisor must still read.
+    if (type === 'auth-stderr') {
+      console.error(JSON.stringify({ type: 'error', message }));
+      process.exit(1);
+    }
+    // Codex's own plain-text wording for an expired login, as its CLI printed it.
+    if (type === 'auth-text') {
+      console.error('Failed to refresh token: Your access token could not be refreshed. Please log out and sign in again.');
+      process.exit(1);
+    }
     console.log(JSON.stringify(type === 'quoted'
       ? { type: 'item.completed', item: { type: 'agent_message', text: message + ' Request refused by policy' } }
       : ['signal', 'permanent'].includes(type) ? { type: 'error', message: 'invalid configuration' }
-        : harness === 'claude' ? { type: 'result', is_error: true, result: message }
-          : { type: 'turn.failed', error: { message } }));
-    process.exit(type === 'permanent' ? 2 : type === 'signal' ? 75 : 1);
+        : auth ? authRecord(harness, message)
+          : harness === 'claude' ? { type: 'result', is_error: true, result: message }
+            : { type: 'turn.failed', error: { message } }));
+    // Pi records its failed turn and exits zero, as the real CLI does.
+    process.exit(type === 'permanent' ? 2 : type === 'signal' ? 75 : auth && harness === 'pi' ? 0 : 1);
   }
   if (process.env.TOWER_CRANE_TEST_FALLBACK_FINISH) {
     const timer = setInterval(() => {
-      if (fs.existsSync(process.env.TOWER_CRANE_TEST_FALLBACK_FINISH)) clearInterval(timer);
+      if (!fs.existsSync(process.env.TOWER_CRANE_TEST_FALLBACK_FINISH)) return;
+      clearInterval(timer);
+      // A login that expires while the worker runs: its last request fails with the harness's own record.
+      if (process.env.TOWER_CRANE_TEST_LATE_AUTH) {
+        console.log(JSON.stringify(authRecord(harness, 'Failed to authenticate: OAuth session expired and could not be refreshed')));
+        process.exit(1);
+      }
     }, 25);
   } else if (process.env.TOWER_CRANE_TEST_FALLBACK_HOLD) setTimeout(() => {}, Number(process.env.TOWER_CRANE_TEST_FALLBACK_HOLD)); // wait-allow: fixture simulates route duration for fallback and slot contention
 }

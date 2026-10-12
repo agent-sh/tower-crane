@@ -241,7 +241,7 @@ test('a detached command harness records its session and resumes with a separate
   const { h } = setup(t);
   const first = h.json(['spawn', '--task', 'T1'], { env: { RESUME_EXIT_DELAY: '2000' } });
   await waitOnRepo(h, () => events(h).some((e) => e.cmd === 'spawn session'));
-  const exit = h.json(['wait', '--after', '0', '--task', 'T1', '--types', 'worker-exited', '--timeout', '300']);
+  const exit = h.json(['wait', '--observe', '--after', '0', '--task', 'T1', '--types', 'worker-exited', '--timeout', '300']);
   assert.equal(exit.detail.agent, first.agent);
   assert.equal(exit.detail.pid, first.pid);
   sendBack(h);
