@@ -587,6 +587,59 @@ test('background reactions leave vacant, released, taken-over and expired leases
   assert.notEqual(lease().session_id, expired.session_id);
 });
 
+for (const takeover of [false, true]) {
+  test(`automation ${takeover ? 'stops after another session takes' : 'acts after aging past'} its captured lease`, async (t) => {
+    const h = cachedFixture(t, 'automation-idle-lease', (repo) => {
+      const fixture = setup(null, { repo, ci: 'pending' });
+      return { sha: fixture.sha };
+    });
+    h.env.CLAUDE_SESSION_ID = 'holder';
+    const { stalled, release } = holdSuite(h);
+    const clock = path.join(h.base, 'lease-clock');
+    const preload = path.join(h.base, 'lease-clock.js');
+    fs.writeFileSync(preload, `const fs = require('node:fs');
+const RealDate = Date;
+global.Date = class extends RealDate {
+  constructor(...args) { super(...(args.length ? args : [Date.now()])); }
+  static now() {
+    return fs.existsSync(${JSON.stringify(clock)})
+      ? Number(fs.readFileSync(${JSON.stringify(clock)}, 'utf8')) : RealDate.now();
+  }
+};
+`);
+    const env = { NODE_OPTIONS: `${h.env.NODE_OPTIONS || ''} --require=${JSON.stringify(preload)}`.trim() };
+    h.ok(['claim', 'T1', '--agent', 'worker']);
+    h.ok(['submit', 'T1', '--sha', h.sha, '--pr', '7', '--agent', 'worker']);
+    const waiting = h.runAsync(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator'], { env });
+    try {
+      assert.notEqual(await waitFor(stalled, { ms: 30000 }), null, 'automation did not start its gate');
+      const holder = h.readState('tasks.json').orchestrator_lease;
+      const idle = h.readState('project.json').limits.lease_minutes * 60000;
+      fs.writeFileSync(clock, String(Date.parse(holder.heartbeat) + idle + 1));
+      if (takeover) {
+        h.ok(['task', 'note', 'T1', 'replacement session', '--agent', 'orchestrator'],
+          { env: { ...env, CLAUDE_SESSION_ID: 'replacement' } });
+        assert.notEqual(h.readState('tasks.json').orchestrator_lease.session_id, holder.session_id);
+      }
+      const before = h.readState('tasks.json').orchestrator_lease;
+      fs.writeFileSync(release, '');
+      const result = await waiting;
+      assert.equal(result.code, takeover ? 1 : 2, result.stderr);
+      const after = h.readState('tasks.json');
+      assert.deepEqual(after.orchestrator_lease, before, 'automation cannot acquire or renew a lease');
+      if (takeover) {
+        assert.match(result.stderr, /orchestrator lease changed during automation/);
+        assert.equal(after.tasks[0].evidence.some((e) => e.type === 'tests'), false, 'the old session cannot publish its gate result');
+      } else {
+        assert.ok(after.tasks[0].evidence.some((e) => e.type === 'tests' && e.ok), 'automation publishes its gate result after expiry');
+      }
+    } finally {
+      fs.writeFileSync(release, '');
+      await waiting;
+    }
+  });
+}
+
 test('CI completion refreshes a pending or failed receipt at the exact head and merges after review', (t) => {
   const h = setup(t, { ci: 'pending' });
   h.submit();

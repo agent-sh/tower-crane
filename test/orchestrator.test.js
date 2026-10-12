@@ -151,7 +151,7 @@ test('engine lease bindings reject stale work without extending the idle window'
     ['holder', old, old, true],
     ['released', null, old, false],
     ['taken over', replacement, old, false],
-    ['expired during work', expired, old, false],
+    ['expired during work', expired, old, true],
     ['native writer arrived', old, null, false],
   ]) {
     const st = { events: [], project: { limits: { lease_minutes: 60 } }, tasks: { orchestrator_lease: lease } };
