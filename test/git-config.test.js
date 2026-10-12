@@ -24,6 +24,9 @@ function plant(h) {
   for (const hook of ['post-checkout', 'reference-transaction', 'post-index-change']) {
     fs.writeFileSync(path.join(hooks, hook), `#!/bin/sh\n${cmd(`hook-${hook}`)}\n`, { mode: 0o755 });
   }
+  // git splits this one itself, without a shell, so it names a program.
+  const keyCommand = path.join(hooks, 'key-command');
+  fs.writeFileSync(keyCommand, `#!/bin/sh\n${cmd('gpg-key-command')}\n`, { mode: 0o755 });
   const gitDir = path.join(h.repo, '.git');
   fs.mkdirSync(path.join(gitDir, 'info'), { recursive: true });
   fs.writeFileSync(path.join(gitDir, 'info', 'attributes'), '* filter=tc diff=tc merge=tc\nvalue.js filter=tp\n');
@@ -39,11 +42,11 @@ function plant(h) {
     'filter.tp.process': cmd('filter-process'),
     'merge.tc.driver': cmd('merge-driver'),
     'core.sshCommand': cmd('ssh-command'),
-    'credential.helper': cmd('credential-helper'),
+    'credential.helper': `!${cmd('credential-helper')}`,
     // Runs for each signed commit when no user.signingKey is set.
     'commit.gpgSign': 'true',
     'gpg.format': 'ssh',
-    'gpg.ssh.defaultKeyCommand': cmd('gpg-key-command'),
+    'gpg.ssh.defaultKeyCommand': keyCommand,
     // With loose objects past gc.auto, a fetch or commit runs gc --auto in
     // the foreground, whose prune runs this hook.
     'gc.auto': '1',
@@ -113,7 +116,7 @@ test('git the CLI and gates run takes no command from repository config or hooks
 
   const port = await unauthorizedServer(t);
   h.git(['remote', 'set-url', 'origin', `http://127.0.0.1:${port}/acme/demo.git`]);
-  h.git(['config', `credential.http://127.0.0.1:${port}.helper`, cmd('credential-url-helper')]);
+  h.git(['config', `credential.http://127.0.0.1:${port}.helper`, `!${cmd('credential-url-helper')}`]);
   assert.match(h.run(['worktree', 'T4', '--agent', 'orchestrator'], { env }).stderr, /git fetch origin main failed/);
   assert.deepEqual(ran(), []);
 
@@ -326,7 +329,9 @@ test('conditional includes cannot add a driver the config scan misses', (t) => {
   assert.deepEqual(ran(), []);
 });
 
-// One row per setting the closed list names. Plain git, run on a copy of the
+// One row per setting the closed list names. Git runs a credential helper
+// through the shell only with a leading !, and splits gpg.program and
+// gpg.ssh.defaultKeyCommand without one, so those name a program file. Plain git, run on a copy of the
 // planted repository, shows the setting takes effect; git started through
 // lib/commands must not take it. Rows with `caller` are the caller's own
 // settings, which still apply.
@@ -362,16 +367,16 @@ const ROWS = [
   } },
   { name: 'credential.helper', run: ['fetch', 'origin'], plant: async (r, t) => {
     r.git(['remote', 'add', 'origin', `http://127.0.0.1:${await unauthorizedServer(t)}/acme/demo.git`]);
-    r.set('credential.helper', r.cmd('credential-helper'));
+    r.set('credential.helper', `!${r.cmd('credential-helper')}`);
   } },
   { name: 'credential.<url>.helper', run: ['fetch', 'origin'], plant: async (r, t) => {
     const url = `http://127.0.0.1:${await unauthorizedServer(t)}`;
     r.git(['remote', 'add', 'origin', `${url}/acme/demo.git`]);
-    r.set(`credential.${url}.helper`, r.cmd('credential-url-helper'));
+    r.set(`credential.${url}.helper`, `!${r.cmd('credential-url-helper')}`);
   } },
   { name: 'gpg.program', run: COMMIT, plant: (r) => { r.set('commit.gpgSign', 'true'); r.set('gpg.program', r.program('gpg-program')); } },
   { name: 'gpg.ssh.defaultKeyCommand', run: COMMIT, plant: (r) => {
-    r.set('commit.gpgSign', 'true'); r.set('gpg.format', 'ssh'); r.set('gpg.ssh.defaultKeyCommand', r.cmd('gpg-key-command'));
+    r.set('commit.gpgSign', 'true'); r.set('gpg.format', 'ssh'); r.set('gpg.ssh.defaultKeyCommand', r.program('gpg-key-command'));
   } },
   { name: 'gc.recentObjectsHook', run: COMMIT, plant: (r) => {
     ageLooseObjects(r.gitDir);
