@@ -102,6 +102,13 @@ test('shared checks reject readiness budgets and require a reason on allowed tim
     'childClosed(child, 1000);', // wait-allow: rejected lint fixture
     'portListening(port, 1000);', // wait-allow: rejected lint fixture
     'const delay = 1000; setTimeout(check, delay * 2);', // wait-allow: rejected lint fixture
+    'until(check, "ready", 500 + 500);', // wait-allow: rejected lint fixture
+    'until(check, "ready", 2000 - 1000);', // wait-allow: rejected lint fixture
+    'until(check, "ready", 10 * 100);', // wait-allow: rejected lint fixture
+    'until(check, "ready", 10000 / 10);', // wait-allow: rejected lint fixture
+    'function ready(/* c */ window = 1000) { until(check, "ready", window); }', // wait-allow: rejected lint fixture
+    'function ready(window /* c */ = 1000) { until(check, "ready", window); }', // wait-allow: rejected lint fixture
+    'function until(check, /* c */ delay = 1000) {}', // wait-allow: rejected lint fixture
   ];
   for (const source of [
     ...lexicalWaits,
@@ -237,6 +244,9 @@ test('shared checks reject readiness budgets and require a reason on allowed tim
     'until(check, "ready", (600000 - 1000) * 2 / 3);',
     'const delay = 1000; until(check, "ready", delay * 300);', // wait-allow: accepted folding fixture binds its constant in the generated source
     'const delay = 300000; setTimeout(check, delay / 1);', // wait-allow: accepted folding fixture binds its constant in the generated source
+    'function ready(/* c */ window = 300000) { until(check, "ready", window); }',
+    'function ready(window /* c */ = 300000) { until(check, "ready", window); }',
+    'function until(check, /* c */ delay = 300000) {}',
   ]) assert.deepEqual(waitFindings(source), [], source);
   assert.deepEqual(waitFindings('function other() { const delay = 1000; } function long() { const delay = 300000; until(check, "ready", delay); }'), []);
   const scoped = waitFindings('function short() {\nconst delay = 1000;\nuntil(check, "ready", delay);\n}\nfunction long() {\nconst delay = 300000;\nuntil(check, "ready", delay);\n}');

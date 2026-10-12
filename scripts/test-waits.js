@@ -298,7 +298,7 @@ function bindingScopes(text) {
     const body = tokens[close + (arrow ? 3 : 1)];
     if (!body || (!arrow && (body.value !== '{'
       || /^(?:if|for|while|switch|catch|with)$/.test(tokens[open - 1]?.value)))) continue;
-    const args = callArguments(text, tokens[open].start);
+    const args = callArguments(text, tokens[open].start).map(normalizedBudget);
     if (!args.some((arg) => /^[$\w]+\s*=/.test(arg))) continue;
     const block = body.value === '{' && scopes.find((scope) => scope.start === body.end);
     const end = block ? block.end : (tokens[expressionEnd(text, tokens, close + 3)]?.start ?? text.length);
@@ -478,7 +478,8 @@ function waitFindings(text) {
       if (!hungBudget(args[1] || '', bindings)) report(index, 'timer wait needs a signal or a wait-allow reason');
     } else {
       for (const arg of args.slice(1)) {
-        const value = /^\w+\s*=\s*([\s\S]+)$/.exec(arg)?.[1] || arg;
+        const normalized = normalizedBudget(arg);
+        const value = /^\w+\s*=\s*([\s\S]+)$/.exec(normalized)?.[1] || normalized;
         if (budgetExpression(arg, bindings) && !hungBudget(value, bindings)) {
           report(index, 'wait supplies a fixed readiness budget');
         }
