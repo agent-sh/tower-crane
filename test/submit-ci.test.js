@@ -107,7 +107,7 @@ test('capped or crashed revuto does not block a green submit', (t) => {
   assert.equal(status(h), 'submitted');
 });
 
-test('revuto findings print with file, line and body, and answered findings drop out', (t) => {
+test('revuto findings print with file, line and body; only a latest [resolved] reply closes one', (t) => {
   const h = fixture(t);
   const r = submitPr(h, {
     runs: [checkRun('test (ubuntu-latest)'), checkRun('test (windows-latest)')],
@@ -115,27 +115,46 @@ test('revuto findings print with file, line and body, and answered findings drop
     comments: [
       comment(11, { line: 12, body: '**[P1]** Quoted paths break on Windows.' }),
       comment(12, { line: 30, body: 'Answered finding' }),
-      comment(13, { in_reply_to_id: 12, user: 'worker-T1', body: 'fixed in the next commit' }),
-      comment(14, { user: 'a-person', body: 'a human comment' }),
+      comment(13, { in_reply_to_id: 12, user: 'worker-T1', body: '[resolved]\nfixed in the next commit' }),
+      comment(14, { line: 40, body: 'Question finding' }),
+      comment(15, { in_reply_to_id: 14, user: 'worker-T1', body: 'Can you explain what input breaks?' }),
+      comment(16, { line: 50, body: 'Reopened finding' }),
+      comment(17, { in_reply_to_id: 16, user: 'worker-T1', body: '[resolved]' }),
+      comment(18, { in_reply_to_id: 16, user: 'a-person', body: 'Still broken on Windows.' }),
+      comment(19, { user: 'a-person', body: 'a human comment' }),
     ],
   });
   assert.equal(r.status, 0, r.stderr);
-  assert.match(r.stdout, /revuto left 1 open inline finding on PR #7 \(listed for you; they do not block the submit\):\n {2}lib\/x\.js:12\n {4}\*\*\[P1\]\*\* Quoted paths break on Windows\./);
+  assert.match(r.stdout, /revuto left 3 open inline findings on PR #7 \(listed for you; they do not block the submit\):\n {2}lib\/x\.js:12\n {4}\*\*\[P1\]\*\* Quoted paths break on Windows\.\n {2}lib\/x\.js:40\n {4}Question finding\n {2}lib\/x\.js:50\n {4}Reopened finding/);
   assert.doesNotMatch(r.stdout, /Answered finding|a human comment/);
   assert.equal(status(h), 'submitted');
 });
 
-test('a PR that conflicts with its base submits with a notice that GitHub ran no checks on it', (t) => {
+test('--json carries the CI report as ci_report, findings included', (t) => {
+  const h = fixture(t);
+  const r = submitPr(h, {
+    runs: [checkRun('test (ubuntu-latest)')],
+    suites: [suite(1)],
+    comments: [comment(11, { line: 12, body: '**[P1]** Quoted paths break on Windows.' })],
+  }, ['--json']);
+  assert.equal(r.status, 0, r.stderr);
+  const data = JSON.parse(r.stdout);
+  assert.equal(data.status, 'submitted');
+  assert.match(data.ci_report, /revuto left 1 open inline finding on PR #7/);
+  assert.match(data.ci_report, /lib\/x\.js:12\n {4}\*\*\[P1\]\*\* Quoted paths break on Windows\./);
+});
+
+test('a PR that conflicts with its base refuses the submit, even with a failing required check', (t) => {
   const h = fixture(t);
   const r = submitPr(h, {
     pr: { mergeable: 'CONFLICTING', mergeStateStatus: 'DIRTY' },
-    runs: [checkRun('test (ubuntu-latest)', { status: 'in_progress', conclusion: null })],
-    suites: [suite(1, { status: 'in_progress', conclusion: null })],
+    runs: [checkRun('test (windows-latest)', { conclusion: 'failure', url: JOB_LOG })],
+    suites: [suite(1, { conclusion: 'failure' })],
   });
-  assert.equal(r.status, 0, r.stderr);
-  assert.match(r.stdout, /PR #7 is CONFLICTING \(DIRTY\): GitHub runs no checks on it, so CI at \w+ in acme\/app was not checked/);
-  assert.doesNotMatch(r.stdout, /wait for CI/);
-  assert.equal(status(h), 'submitted');
+  assert.equal(r.status, 1, r.stderr);
+  assert.match(r.stderr, /PR #7 is CONFLICTING \(DIRTY\): resolve merge conflicts with the base branch and submit the new head\./);
+  assert.doesNotMatch(r.stderr, /wait for CI/);
+  assert.equal(status(h), 'in_progress');
 });
 
 test('a shimmed agent whose gh policy refuses gh api submits with a notice that the head was not checked', (t) => {
