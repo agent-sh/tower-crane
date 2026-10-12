@@ -19620,5 +19620,640 @@
       "reason": "A var initializer in a nested block can supply a short budget after that block. Possible var values are collected conservatively, and aliases retain each initializer's original scope.",
       "reproduction": "Use the refined helper/lint reproduction at this head with label=\"var\"."
     }
+  },
+  "clock_forms_review_fix": {
+    "reviewed_head": "0cd19041c8091a84f0aae9c8e6204e0668480c45",
+    "measured_code_head": "990c109e4b8e9224f52c36249abd8306252fc252",
+    "required_scope": "Number literals, arithmetic of literals, and const identifiers or numeric default parameters bound to them. Call-derived, environment and mutable runtime values are not statically evaluated.",
+    "review_probes": {
+      "before": "0cd19041c8091a84f0aae9c8e6204e0668480c45",
+      "after": "9c34e0b3e64cd3158323d2ca28c6609b1786b9a8",
+      "cases": [
+        {
+          "id": "asi",
+          "source": "const window = 10 * 1000\nuntil(() => ready, \"ready\", window)",
+          "before": {
+            "status": 0,
+            "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "after": {
+            "status": 1,
+            "log_sha256": "6d2436f22f7316059c4e9594642e76dc091a71d5d7b04d0c274f511106d30c9c"
+          }
+        },
+        {
+          "id": "default-literal",
+          "source": "function ready(window = 10000) { until(check, \"ready\", window); }",
+          "before": {
+            "status": 0,
+            "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "after": {
+            "status": 1,
+            "log_sha256": "87c828f6e7b6ba566b1f1a47c5ebfdc481ed6f4a4576897b21454185f377ee7e"
+          }
+        },
+        {
+          "id": "default-arithmetic",
+          "source": "function ready(window = 10 * 1000) { until(check, \"ready\", window); }",
+          "before": {
+            "status": 0,
+            "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "after": {
+            "status": 1,
+            "log_sha256": "87c828f6e7b6ba566b1f1a47c5ebfdc481ed6f4a4576897b21454185f377ee7e"
+          }
+        },
+        {
+          "id": "additive-clock",
+          "source": "async function f(ok) { const start = Date.now(); while (!ok()) { if (Date.now() > start + 5000) throw new Error(\"late\"); await new Promise(setImmediate); } }",
+          "before": {
+            "status": 0,
+            "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "after": {
+            "status": 1,
+            "log_sha256": "e34b3752cbc8fcf973e7efe75a66cd9f7a0f3c96af88f847896444c04432b64d"
+          }
+        },
+        {
+          "id": "var-deadline",
+          "source": "async function f(ok) { var deadline = Date.now() + 5000; while (!ok()) { if (Date.now() > deadline) throw new Error(\"late\"); await new Promise(setImmediate); } }",
+          "before": {
+            "status": 0,
+            "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "after": {
+            "status": 1,
+            "log_sha256": "e34b3752cbc8fcf973e7efe75a66cd9f7a0f3c96af88f847896444c04432b64d"
+          }
+        },
+        {
+          "id": "assigned-deadline",
+          "source": "async function f(ok) { let deadline; deadline = Date.now() + 5000; while (!ok()) { if (Date.now() > deadline) throw new Error(\"late\"); await new Promise(setImmediate); } }",
+          "before": {
+            "status": 0,
+            "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "after": {
+            "status": 1,
+            "log_sha256": "e34b3752cbc8fcf973e7efe75a66cd9f7a0f3c96af88f847896444c04432b64d"
+          }
+        },
+        {
+          "id": "promise-timer",
+          "source": "async function f(ok) { const { setTimeout: sleep } = require(\"node:timers/promises\"); await sleep(500); if (!ok()) throw new Error(\"late\"); }",
+          "before": {
+            "status": 0,
+            "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "after": {
+            "status": 1,
+            "log_sha256": "885df2c199ea6a965b9d4abb4f0c62a1fd17b6fc666df423b31e99ec560c1c1e"
+          }
+        }
+      ]
+    },
+    "red_regression": {
+      "status": 1,
+      "sha256": "1140374e0c4b577fbb2f02809bcdc2b7045f67ba0cc8cac2be9bd3e200392686",
+      "tests": {
+        "tests": 1,
+        "pass": 0,
+        "fail": 1,
+        "cancelled": 0,
+        "skipped": 0
+      }
+    },
+    "green_regression": {
+      "status": 0,
+      "sha256": "c4aa9985017e69e74c43ff136b10dd4da3d8c9e888988ebc2b8898eb62549c69",
+      "tests": {
+        "tests": 4,
+        "pass": 4,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 0
+      }
+    },
+    "cpu_load_processes": 2,
+    "test_file_workers": 2,
+    "peak_local_test_file_workers": 4,
+    "loaded_files": [
+      {
+        "file": "test/automation.test.js",
+        "passed_runs": 5,
+        "median_s": 284.381421518,
+        "min_s": 274.51098719200036,
+        "max_s": 317.3694891320001,
+        "runs": [
+          {
+            "run": 1,
+            "status": 0,
+            "wall_s": 317.3694891320001,
+            "load_before": [
+              15.87109375,
+              16.92578125,
+              25.89013671875
+            ],
+            "load_after": [
+              30.50732421875,
+              25.1083984375,
+              26.73388671875
+            ],
+            "log_sha256": "871e2144454425b513c11c512a1fc02bb76357a1b087e1caad5560d5b90fe46a",
+            "tests": {
+              "tests": 72,
+              "pass": 72,
+              "fail": 0,
+              "cancelled": 0,
+              "skipped": 0
+            }
+          },
+          {
+            "run": 2,
+            "status": 0,
+            "wall_s": 285.3211115899994,
+            "load_before": [
+              30.50732421875,
+              25.1083984375,
+              26.73388671875
+            ],
+            "load_after": [
+              20.21533203125,
+              22.47705078125,
+              25.21875
+            ],
+            "log_sha256": "0e42e322a44d3797e448a33cecca1c37110946c28912d48e641a45f696101b41",
+            "tests": {
+              "tests": 72,
+              "pass": 72,
+              "fail": 0,
+              "cancelled": 0,
+              "skipped": 0
+            }
+          },
+          {
+            "run": 3,
+            "status": 0,
+            "wall_s": 281.1551120970007,
+            "load_before": [
+              20.21533203125,
+              22.47705078125,
+              25.21875
+            ],
+            "load_after": [
+              26.79833984375,
+              22.20361328125,
+              24.158203125
+            ],
+            "log_sha256": "edd4fb0f2fec378063cd6dcf72dda8a7b8cadd5a20e534d14b192a4d373da9cd",
+            "tests": {
+              "tests": 72,
+              "pass": 72,
+              "fail": 0,
+              "cancelled": 0,
+              "skipped": 0
+            }
+          },
+          {
+            "run": 4,
+            "status": 0,
+            "wall_s": 284.381421518,
+            "load_before": [
+              26.79833984375,
+              22.20361328125,
+              24.158203125
+            ],
+            "load_after": [
+              15.30712890625,
+              19.900390625,
+              22.921875
+            ],
+            "log_sha256": "b1b475c089e9ca0aae05895d9ee7e17adb8cce21631a48988dc9be667be28169",
+            "tests": {
+              "tests": 72,
+              "pass": 72,
+              "fail": 0,
+              "cancelled": 0,
+              "skipped": 0
+            }
+          },
+          {
+            "run": 5,
+            "status": 0,
+            "wall_s": 274.51098719200036,
+            "load_before": [
+              15.30712890625,
+              19.900390625,
+              22.921875
+            ],
+            "load_after": [
+              17.44482421875,
+              19.02294921875,
+              21.828125
+            ],
+            "log_sha256": "f0933a89d7ee74aa75d94aee4df4b2d0b666ef2932c1de7956047677b195b9af",
+            "tests": {
+              "tests": 72,
+              "pass": 72,
+              "fail": 0,
+              "cancelled": 0,
+              "skipped": 0
+            }
+          }
+        ]
+      },
+      {
+        "file": "test/opencode.test.js",
+        "passed_runs": 5,
+        "median_s": 20.346062536000318,
+        "min_s": 19.125943001999985,
+        "max_s": 22.468205737999597,
+        "runs": [
+          {
+            "run": 1,
+            "status": 0,
+            "wall_s": 19.125943001999985,
+            "load_before": [
+              15.87109375,
+              16.92578125,
+              25.89013671875
+            ],
+            "load_after": [
+              15.99951171875,
+              16.88330078125,
+              25.68359375
+            ],
+            "log_sha256": "65bbc1ab0c2d0650184f587e2639095fd2edac4f79de3ed4bccf05f2ec6bd6b4",
+            "tests": {
+              "tests": 24,
+              "pass": 22,
+              "fail": 0,
+              "cancelled": 0,
+              "skipped": 2
+            }
+          },
+          {
+            "run": 2,
+            "status": 0,
+            "wall_s": 20.346062536000318,
+            "load_before": [
+              15.99951171875,
+              16.88330078125,
+              25.68359375
+            ],
+            "load_after": [
+              19.0107421875,
+              17.5595703125,
+              25.720703125
+            ],
+            "log_sha256": "deb6e7b4b69e4a86d3bd2c8df7c7093f3dc8c12a322d75114299736b180eecf0",
+            "tests": {
+              "tests": 24,
+              "pass": 22,
+              "fail": 0,
+              "cancelled": 0,
+              "skipped": 2
+            }
+          },
+          {
+            "run": 3,
+            "status": 0,
+            "wall_s": 20.79367333800019,
+            "load_before": [
+              19.0107421875,
+              17.5595703125,
+              25.720703125
+            ],
+            "load_after": [
+              21.15380859375,
+              18.19140625,
+              25.75732421875
+            ],
+            "log_sha256": "95a48478a7782237def317e122a26b54f3e41cd470d33e59e67c76ad99a42649",
+            "tests": {
+              "tests": 24,
+              "pass": 22,
+              "fail": 0,
+              "cancelled": 0,
+              "skipped": 2
+            }
+          },
+          {
+            "run": 4,
+            "status": 0,
+            "wall_s": 19.604525976999867,
+            "load_before": [
+              21.15380859375,
+              18.19140625,
+              25.75732421875
+            ],
+            "load_after": [
+              19.7646484375,
+              18.078125,
+              25.55908203125
+            ],
+            "log_sha256": "4ecdb36fd61b2b77e2df7299bd0c33c015fee9fe7ea9f2ef6c1cfeeba664435c",
+            "tests": {
+              "tests": 24,
+              "pass": 22,
+              "fail": 0,
+              "cancelled": 0,
+              "skipped": 2
+            }
+          },
+          {
+            "run": 5,
+            "status": 0,
+            "wall_s": 22.468205737999597,
+            "load_before": [
+              19.7646484375,
+              18.078125,
+              25.55908203125
+            ],
+            "load_after": [
+              23.2265625,
+              18.9833984375,
+              25.65673828125
+            ],
+            "log_sha256": "d0bac0b60fb3aad5c08b7ddb947e7829910800543c24aa1d9369eb33377176dd",
+            "tests": {
+              "tests": 24,
+              "pass": 22,
+              "fail": 0,
+              "cancelled": 0,
+              "skipped": 2
+            }
+          }
+        ]
+      },
+      {
+        "file": "test/orchestrator.test.js",
+        "passed_runs": 5,
+        "median_s": 15.175969708999219,
+        "min_s": 14.52267158199993,
+        "max_s": 22.045641291999345,
+        "runs": [
+          {
+            "run": 1,
+            "status": 0,
+            "wall_s": 22.045641291999345,
+            "load_before": [
+              23.2265625,
+              18.9833984375,
+              25.65673828125
+            ],
+            "load_after": [
+              23.43798828125,
+              19.30859375,
+              25.62060546875
+            ],
+            "log_sha256": "8c818b2d5081343996f3a686e6db4ecb3d3095093cd0d5287910f69665bec65c",
+            "tests": {
+              "tests": 9,
+              "pass": 9,
+              "fail": 0,
+              "cancelled": 0,
+              "skipped": 0
+            }
+          },
+          {
+            "run": 2,
+            "status": 0,
+            "wall_s": 14.950978136999765,
+            "load_before": [
+              23.43798828125,
+              19.30859375,
+              25.62060546875
+            ],
+            "load_after": [
+              26.1083984375,
+              20.10888671875,
+              25.7822265625
+            ],
+            "log_sha256": "6b50d42d21d141ac0b3e70defa53c895ff886edefa45ec2ae9b1ecea9b56cff4",
+            "tests": {
+              "tests": 9,
+              "pass": 9,
+              "fail": 0,
+              "cancelled": 0,
+              "skipped": 0
+            }
+          },
+          {
+            "run": 3,
+            "status": 0,
+            "wall_s": 15.175969708999219,
+            "load_before": [
+              26.1083984375,
+              20.10888671875,
+              25.7822265625
+            ],
+            "load_after": [
+              27.08203125,
+              20.63818359375,
+              25.86572265625
+            ],
+            "log_sha256": "ea757c9ea8cbf6650fdb50e4a7d7c4f3da2541f9e365e74182cbeea2e31ecff1",
+            "tests": {
+              "tests": 9,
+              "pass": 9,
+              "fail": 0,
+              "cancelled": 0,
+              "skipped": 0
+            }
+          },
+          {
+            "run": 4,
+            "status": 0,
+            "wall_s": 14.52267158199993,
+            "load_before": [
+              27.08203125,
+              20.63818359375,
+              25.86572265625
+            ],
+            "load_after": [
+              27.6552734375,
+              21.06787109375,
+              25.921875
+            ],
+            "log_sha256": "52ebeb9459c1bd1e13f1200129e83d3a5cb2d16b26a9e1e68e85d30c8669f755",
+            "tests": {
+              "tests": 9,
+              "pass": 9,
+              "fail": 0,
+              "cancelled": 0,
+              "skipped": 0
+            }
+          },
+          {
+            "run": 5,
+            "status": 0,
+            "wall_s": 17.22783910599992,
+            "load_before": [
+              27.6552734375,
+              21.06787109375,
+              25.921875
+            ],
+            "load_after": [
+              28.65869140625,
+              21.72705078125,
+              26.0361328125
+            ],
+            "log_sha256": "bc5c575b476fa87c0d5866e3bfd23f09639594f9f576cfd89aec64d1e3ad51fb",
+            "tests": {
+              "tests": 9,
+              "pass": 9,
+              "fail": 0,
+              "cancelled": 0,
+              "skipped": 0
+            }
+          }
+        ]
+      },
+      {
+        "file": "test/signal-waits.test.js",
+        "passed_runs": 5,
+        "median_s": 1.518308636999791,
+        "min_s": 1.2949552509999194,
+        "max_s": 2.439678126000217,
+        "runs": [
+          {
+            "run": 1,
+            "status": 0,
+            "wall_s": 1.4408236350000152,
+            "load_before": [
+              28.65869140625,
+              21.72705078125,
+              26.0361328125
+            ],
+            "load_after": [
+              28.65869140625,
+              21.72705078125,
+              26.0361328125
+            ],
+            "log_sha256": "513742663604bb69279d0879ee5b5b9cb25713e680724652ed5191b6a731010b",
+            "tests": {
+              "tests": 4,
+              "pass": 4,
+              "fail": 0,
+              "cancelled": 0,
+              "skipped": 0
+            }
+          },
+          {
+            "run": 2,
+            "status": 0,
+            "wall_s": 1.518308636999791,
+            "load_before": [
+              28.65869140625,
+              21.72705078125,
+              26.0361328125
+            ],
+            "load_after": [
+              28.65869140625,
+              21.72705078125,
+              26.0361328125
+            ],
+            "log_sha256": "5bbef4b795a09b7b757458eb52f1e9ca36d84f35932ec05d4abaf8e4a045a908",
+            "tests": {
+              "tests": 4,
+              "pass": 4,
+              "fail": 0,
+              "cancelled": 0,
+              "skipped": 0
+            }
+          },
+          {
+            "run": 3,
+            "status": 0,
+            "wall_s": 1.748573151000528,
+            "load_before": [
+              28.65869140625,
+              21.72705078125,
+              26.0361328125
+            ],
+            "load_after": [
+              28.65869140625,
+              21.72705078125,
+              26.0361328125
+            ],
+            "log_sha256": "f06a6529a0043d69f64cfcf6a47813f41df2a5bf8317642711c8181cca552ec0",
+            "tests": {
+              "tests": 4,
+              "pass": 4,
+              "fail": 0,
+              "cancelled": 0,
+              "skipped": 0
+            }
+          },
+          {
+            "run": 4,
+            "status": 0,
+            "wall_s": 2.439678126000217,
+            "load_before": [
+              28.65869140625,
+              21.72705078125,
+              26.0361328125
+            ],
+            "load_after": [
+              29.24658203125,
+              21.96435546875,
+              26.08984375
+            ],
+            "log_sha256": "eb10d509576fdc439ef7b39f6f242efc46dd311416b455ab2fb36acaa058050b",
+            "tests": {
+              "tests": 4,
+              "pass": 4,
+              "fail": 0,
+              "cancelled": 0,
+              "skipped": 0
+            }
+          },
+          {
+            "run": 5,
+            "status": 0,
+            "wall_s": 1.2949552509999194,
+            "load_before": [
+              29.24658203125,
+              21.96435546875,
+              26.08984375
+            ],
+            "load_after": [
+              29.24658203125,
+              21.96435546875,
+              26.08984375
+            ],
+            "log_sha256": "17916091d63a9c353e01486d7e2446bbd460e1f9a98478a71d4c8b4abb2fecbf",
+            "tests": {
+              "tests": 4,
+              "pass": 4,
+              "fail": 0,
+              "cancelled": 0,
+              "skipped": 0
+            }
+          }
+        ]
+      }
+    ],
+    "merge_checks": {
+      "status": 1,
+      "sha256": "0cc551ac25deee2a911e09745b496a923c1810f1ee13e2c1c3388bd67c97858e",
+      "tests": {
+        "tests": 183,
+        "pass": 176,
+        "fail": 6,
+        "cancelled": 0,
+        "skipped": 1
+      },
+      "limitation": "Six reviewer-file tests fail because credential-link discovery tries to scan the host .ssh directory denied by the native worker sandbox. The other four files pass; a host rerun of test/reviewer.test.js is requested."
+    },
+    "reproduction": {
+      "tests": "TOWER_CRANE_TEST_TMP=<short writable scratch path> node test/run.js --test-concurrency=1 <named file>",
+      "load": "Two nice -n 15 node -e \"for (;;) Math.sqrt(Math.random());\" processes during each five-run group. Run at most two named test files concurrently, five times each.",
+      "probe": "At the reviewed and measured revisions, plant each review_probes source as test/zz-planted.test.js after use strict, then run node scripts/check-shared-files.js. No full test suite is selected."
+    }
   }
 }
