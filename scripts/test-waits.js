@@ -90,7 +90,11 @@ function tokenize(text, from = 0) {
       const identifier = /^[$A-Z_a-z][$\w]*/.exec(text.slice(position));
       if (number) { type = 'number'; position += number[0].length; }
       else if (identifier) {
-        type = /^(?:return|throw|case|await|yield|typeof|void|delete|new|in|instanceof)$/.test(identifier[0]) ? 'keyword' : 'identifier';
+        // Reserved words can also be member names. Members finish an operand;
+        // operator and statement keywords begin the next expression instead.
+        type = !['.', '#'].includes(previous?.value)
+          && /^(?:await|break|case|catch|class|const|continue|debugger|default|delete|do|else|export|extends|finally|for|function|if|import|in|instanceof|let|new|return|switch|throw|try|typeof|var|void|while|with|yield)$/.test(identifier[0])
+          ? 'keyword' : 'identifier';
         position += identifier[0].length;
       } else position++;
     }
@@ -159,12 +163,12 @@ function foldedBudget(value, bindings, seen = new Set()) {
       return tokens[position++]?.value === ')' ? number : undefined;
     }
     if (token.type === 'number') return Number(token.value.replaceAll('_', ''));
-    if (token.type !== 'identifier') return undefined;
     if (bindings.has(token.value)) {
       const values = bindings.get(token.value).map((bound) => seen.has(bound) ? undefined
         : foldedBudget(bound.value, bound.bindings(), new Set([...seen, bound])));
       return values.length && values.every((number) => number === values[0]) ? values[0] : undefined;
     }
+    if (token.type !== 'identifier') return undefined;
     return token.value === 'HUNG_TEST_MS' ? HUNG_TEST_MS : undefined;
   };
   const product = () => {
