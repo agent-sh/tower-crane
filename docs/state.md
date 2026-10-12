@@ -629,6 +629,11 @@ Any agent recovers a verified exited task with `release ID --reason R`. The dete
 
 An independent reviewer is the owner, or a reviewer that `spawn` dispatched for that task at that sha and revision, never the submitter. Review evidence that does not count also does not hold back the review dispatch `accept` makes, does not raise the review rung and is not passed to a rework worker as a finding. The board keeps it in the ledger with a does-not-count reason; neither its pass nor its fail verdict sets the review gate indicator.
 
+The sources gate marks deliverable and citation validation failures as
+`confirmed_failure: true`, including a missing deliverable, duplicate sources
+and quotes absent from fetched pages. Missing repository state, failed page
+fetches and gate deadlines remain unconfirmed observations.
+
 Tests modes change how `check tests` produces evidence, not which gates acceptance requires. A code task in mode `none` still needs audited tests evidence for its submitted sha, plus cleanup and independent review.
 
 Successful tests evidence counts only when its audited `tests_mode` matches the mode currently resolved for the project and task kind. A mode change, a missing mode on older evidence or a malformed current policy needs a new tests check. The audit event must contain the same mode as the evidence; changing the mode in tasks.json alone cannot retarget evidence. Owner waivers still apply. Task views, board gate pips and evidence ledger (including accepted tasks), acceptance and merge use this same rule.
@@ -856,7 +861,7 @@ Reactions run before event output filters, and active PRs catch up at
 watcher startup except a default zero-timeout cursor snapshot.
 `automation reconcile` records a fresh startup request for every active
 submitted or accepted PR, with `{sha, revision, startup}`; `startup` is a
-unique identifier for that watcher. It uses the same task reservation as
+unique identifier for that reconciliation request. It uses the same task reservation as
 other reactions and queries current PR state regardless of earlier
 completed receipts. A newly conflicting PR goes to rework even if its
 base moved while no watcher ran. Matching gate evidence is reused rather
@@ -866,12 +871,24 @@ an entry lacks a matching gate audit receipt or belongs to an earlier
 revision or another sha. Historical passes, failures and waivers stay
 recorded but cannot mark a current gate handled. Passing evidence staled by a
 pinned command or tests policy change runs again. Completed reaction
-receipts do not suppress those runs; only an audited failure at the current
-head and revision waits for an explicit retry. An idle startup writes no request.
+receipts do not suppress those runs. An audited, confirmed software failure at
+the current head and revision sends the task to rework, with the gate summary
+and failing test names or findings in the reason and brief. The locked recheck
+requires the same verdict, head and revision; rework increments the revision,
+so replay cannot send that failure back twice. Infrastructure failures and
+unconfirmed observations wait for an explicit retry. An idle startup writes no request.
 Every due software gate runs even when an earlier gate failed; that failure
 still prevents acceptance but cannot suppress missing evidence for later gates.
 A busy state lock defers the request to the existing watch notification
 or fallback tick without holding the wait timeout.
+Hosted CI records `pending: true` in its evidence and audit receipt while
+current runs or suites are queued or in progress, required runs have not
+appeared, or GitHub is still computing mergeability. Pending is not a pass
+and does not trigger rework. Completed failures take precedence over pending
+runs. A trusted `wait` host reconciles pending CI once per minute on its
+existing timer, without a CI completion webhook; current tests and cleanup
+passes are reused. The check command prints `PENDING`, and status and the
+sketch distinguish `failed`, `pending` and `missing` gates.
 `merge queue` events have no task and record `{phase}`: `running` with the
 executor `pid`, `host` and Linux `start_ticks`, `requested` from a reaction
 that found a live executor, then `done`, or `error` with `error`. `done` and

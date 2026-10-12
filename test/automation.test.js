@@ -550,7 +550,9 @@ test('submission runs real software gates once through the existing waiter', (t)
   assert.ok(task.evidence.every((e) => e.commands.length && e.source === `check ${e.type}`));
   assert.equal(task.status, 'submitted');
   h.consume();
-  assert.equal(h.readState('tasks.json').tasks[0].evidence.length, 3, 'duplicate event delivery runs no gate twice');
+  const evidence = h.readState('tasks.json').tasks[0].evidence;
+  assert.equal(evidence.length, 4, 'startup rechecks pending CI');
+  assert.deepEqual(evidence.map((e) => e.type), ['tests', 'clean', 'ci', 'ci'], 'other gates are reused');
   assert.equal(h.logs().filter((e) => e.cmd === 'spawn').length, 0, 'pending CI starts no model');
 });
 
@@ -587,24 +589,19 @@ test('background reactions leave vacant, released, taken-over and expired leases
   assert.notEqual(lease().session_id, expired.session_id);
 });
 
-test('CI completion refreshes a pending or failed receipt at the exact head and merges after review', (t) => {
+test('CI completion refreshes a pending receipt at the exact head and merges after review', (t) => {
   const h = setup(t, { ci: 'pending' });
   h.submit();
   h.consume();
   h.reviewer('T1', 'reviewer');
   h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--sha', h.sha, '--ok', '--agent', 'reviewer']);
-  const bad = h.github();
-  bad.ci[h.sha] = 'failure';
-  h.saveGithub(bad);
-  h.ok(['ci', 'completed', 'T1', '--sha', h.sha, '--agent', 'orchestrator']);
-  assert.equal(h.readState('tasks.json').tasks[0].status, 'submitted');
   const good = h.github();
   good.ci[h.sha] = 'success';
   h.saveGithub(good);
   h.ok(['ci', 'completed', 'T1', '--sha', h.sha, '--agent', 'orchestrator']);
   const task = h.readState('tasks.json').tasks[0];
   assert.equal(task.status, 'accepted');
-  assert.deepEqual(task.evidence.filter((e) => e.type === 'ci').map((e) => e.ok), [false, false, true]);
+  assert.deepEqual(task.evidence.filter((e) => e.type === 'ci').map((e) => e.ok), [false, true]);
   assert.equal(task.evidence.at(-1).type, 'merge');
   const calls = h.github().calls.filter((a) => a[0] === 'pr' && a[1] === 'merge');
   assert.equal(calls.length, 1);
@@ -652,6 +649,64 @@ function reconciledFixture(t) {
   return h;
 }
 
+for (const type of ['tests', 'clean', 'ci', 'sources']) {
+  test(`automation reworks a current ${type} failure once with its findings`, (t) => {
+    const h = setup(t, { ci: type === 'ci' ? 'failure' : 'pending', kind: type === 'sources' ? 'research' : 'code' });
+    if (type === 'tests') h.ok(['project', 'set', '--tests-mode', 'run-only', '--tests-cmd',
+      'node -e "console.log(\'not ok 1 - failing regression\');process.exit(1)"']);
+    if (type === 'clean') h.env.FIXTURE_GATE_OK = '0';
+    h.submit();
+    h.ok(['project', 'set', '--paused', 'rework probe']);
+    assert.equal(h.run(['check', type, 'T1', '--agent', 'orchestrator']).code, 1);
+    const status = h.ok(['status']);
+    assert.match(status, new RegExp(`failed ${type}`));
+    h.ok(['render']);
+    assert.match(fs.readFileSync(path.join(h.state, 'sketch.md'), 'utf8'), new RegExp(`failed ${type}`));
+    h.consume();
+    const task = h.json(['task', 'show', 'T1']);
+    assert.equal(task.status, 'rework');
+    assert.equal(task.revision, 2);
+    const rework = h.logs().filter((e) => e.cmd === 'rework');
+    assert.equal(rework.length, 1);
+    const finding = { tests: /failing regression/, clean: /fixture finding/, ci: /test \(failure\)/,
+      sources: /research\/T1.json/ }[type];
+    assert.match(rework[0].detail.reason, finding);
+    h.consume();
+    assert.equal(h.logs().filter((e) => e.cmd === 'rework').length, 1);
+  });
+}
+
+test('pending CI is persisted and rechecked on schedule without a completion notification', async (t) => {
+  const h = setup(t, { ci: 'pending' });
+  h.submit();
+  h.consume();
+  const latest = () => h.json(['task', 'show', 'T1']).evidence.findLast((e) => e.type === 'ci');
+  assert.equal(latest().pending, true);
+  assert.match(h.ok(['status']), /pending ci/);
+  const clock = path.join(h.base, 'ci-clock');
+  const start = Date.now();
+  fs.writeFileSync(clock, String(start));
+  const before = h.logs().filter((e) => e.cmd === 'check ci').length;
+  const waiter = h.runAsync(['wait', '--types', 'never', '--timeout', '5', '--agent', 'orchestrator'],
+    { hooks: { HOOK_CLOCK_FILE: clock } });
+  t.after(() => waiter);
+  const until = async (probe) => {
+    const deadline = Date.now() + 10000;
+    while (!probe() && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.ok(probe(), 'CI check completed before the deadline');
+  };
+  await until(() => h.logs().filter((e) => e.cmd === 'check ci').length > before);
+  const state = h.github();
+  state.ci[h.sha] = 'success';
+  h.saveGithub(state);
+  fs.writeFileSync(clock, String(start + 60001));
+  await until(() => h.readState('tasks.json').tasks[0].evidence.findLast((e) => e.type === 'ci')?.ok);
+  const result = await waiter;
+  assert.equal(result.code, 2);
+  assert.equal(h.logs().some((e) => e.cmd === 'ci completed' || e.cmd === 'rework'), false);
+  assert.equal(latest().pending, undefined);
+});
+
 for (const reaction of ['submit', 'reconcile']) {
   test(`${reaction} runs missing gates after a resubmitted revision's tests fail`, (t) => {
     const h = reconciledFixture(t);
@@ -681,10 +736,10 @@ for (const reaction of ['submit', 'reconcile']) {
     assert.deepEqual(checks().slice(count).map((e) => [e.cmd, e.detail.ok, e.detail.revision]),
       [['check tests', false, 2], ['check clean', true, 2], ['check ci', true, 2]]);
     const after = h.json(['task', 'show', 'T1']);
-    assert.equal(after.status, 'submitted', 'a failed gate still prevents acceptance');
-    assert.equal(after.gates.gates.find((g) => g.type === 'tests').ok, false);
+    assert.equal(after.status, 'rework', 'a confirmed failure requests a new revision');
+    assert.equal(after.revision, 3);
     h.reconcile();
-    assert.equal(checks().length, count + 3, 'current failures wait for retry and current passes are reused');
+    assert.equal(checks().length, count + 3, 'rework does not repeat the failed revision');
   });
 }
 
@@ -787,18 +842,19 @@ test('startup reconciles tests evidence staled by a tests keep setting change af
   assert.equal(h.json(['task', 'show', 'T1']).gates.gates.find((g) => g.type === 'tests').ok, true);
 });
 
-test('a failed gate at unchanged inputs waits for gates retry, which reruns it', (t) => {
+test('an infrastructure failure at unchanged inputs waits for gates retry, which reruns it', (t) => {
   const h = setup(t);
   const marker = path.join(h.base, 'infra-failed-once');
   const script = path.join(h.base, 'flaky-tests.js');
-  fs.writeFileSync(script, `const fs = require('node:fs');\nif (fs.existsSync(${JSON.stringify(marker)})) process.exit(0);\nfs.writeFileSync(${JSON.stringify(marker)}, '');\nprocess.exit(1);\n`);
-  h.ok(['project', 'set', '--tests-cmd', `node ${shellQuote(script)}`, '--tests-mode', 'run-only']);
+  fs.writeFileSync(script, `const fs = require('node:fs');\nif (fs.existsSync(${JSON.stringify(marker)})) process.exit(0);\nfs.writeFileSync(${JSON.stringify(marker)}, '');\nsetTimeout(() => process.exit(0), 10000);\n`);
+  h.ok(['project', 'set', '--tests-cmd', `node ${shellQuote(script)}`, '--tests-mode', 'run-only', '--tests-timeout-min', '0.01']);
   h.submit();
   const runs = () => h.logs().filter((e) => e.cmd === 'check tests').length;
   const latest = () => h.readState('tasks.json').tasks[0].evidence.filter((e) => e.type === 'tests').at(-1);
   h.consume();
   assert.equal(runs(), 1);
-  assert.equal(latest().ok, false, 'the first run fails as infrastructure would');
+  assert.equal(latest().ok, false);
+  assert.equal(latest().infrastructure_failure, true, 'the first run times out');
   h.consume();
   assert.equal(runs(), 1, 'a failure at unchanged inputs is not retried without an explicit retry');
   assert.equal(h.run(['gates', 'retry', 'T1', '--agent', 'worker']).code, 1);
@@ -812,7 +868,7 @@ test('gates retry exits nonzero while a retried gate still fails', (t) => {
   const h = setup(t, { ci: 'pending' });
   h.ok(['project', 'set', '--tests-cmd', 'node -e "process.exit(1)"', '--tests-mode', 'run-only']);
   h.submit();
-  h.consume();
+  assert.equal(h.run(['check', 'tests', 'T1', '--agent', 'orchestrator']).code, 1);
   const latest = () => h.readState('tasks.json').tasks[0].evidence.filter((e) => e.type === 'tests').at(-1);
   assert.equal(latest().ok, false);
   const retry = h.run(['gates', 'retry', 'T1', '--agent', 'orchestrator']);
@@ -1004,6 +1060,7 @@ test('a completion webhook is only a hint, rejects another repository and ignore
   const deliver = () => h.run(['ci', 'webhook', '-', '--agent', 'orchestrator'], { input: JSON.stringify(payload) });
   assert.equal(deliver().code, 0);
   assert.equal(h.readState('tasks.json').tasks[0].evidence.at(-1).ok, false, 'GitHub failure wins over payload success');
+  assert.equal(h.readState('tasks.json').tasks[0].status, 'rework');
   payload.repository.full_name = 'acme/other';
   assert.equal(deliver().code, 1);
   payload.repository.full_name = 'acme/demo';
@@ -1014,12 +1071,15 @@ test('a completion webhook is only a hint, rejects another repository and ignore
   const state = h.github();
   state.ci[h.sha] = 'success';
   h.saveGithub(state);
+  h.submit();
+  h.reviewer('T1', 'reviewer-v2');
+  h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--sha', h.sha, '--ok', '--agent', 'reviewer-v2']);
   assert.equal(deliver().code, 0);
   assert.equal(h.github().prs['7'].state, 'MERGED');
 });
 
 test('concurrent event consumers execute each submission gate only once', async (t) => {
-  const h = setup(t, { ci: 'pending' });
+  const h = setup(t);
   h.submit();
   const results = await Promise.all([
     h.runAsync(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']),

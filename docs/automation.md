@@ -65,9 +65,12 @@ is recovered through the merge gate's accepted-head confirmation.
 Software gates run when no audited evidence exists at the submitted head
 and revision, even if an unaudited entry or a completed reaction remains.
 They run again when their passing evidence no longer matches its
-inputs, such as the pinned command or tests policy. An audited failed gate waits for `gates retry ID` at
-unchanged inputs; an infrastructure failure a later fix removed is the case
-it serves.
+inputs, such as the pinned command or tests policy. Confirmed failures at
+the current head and revision send the task to rework once, with the gate's
+findings in the reason. Unconfirmed or infrastructure failures wait for
+`gates retry ID` at unchanged inputs. Pending CI records `PENDING` and the
+trusted wait host rechecks it once per minute without needing a completion
+notification.
 
 Failures remain visible in gate receipts and task notes. Conflicting PRs
 return to rework with a file list. Unknown mergeability, failed transport,

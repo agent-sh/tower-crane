@@ -355,13 +355,19 @@ is reused when its policy still matches. Missing evidence, including an
 entry without its matching gate audit receipt or evidence from an earlier
 revision or another sha, runs in the next submission or reconciliation reaction.
 An audited failure from another revision or sha cannot suppress a gate;
-only a current failure waits for an explicit retry.
+only a current unconfirmed or infrastructure failure waits for an explicit retry.
+Confirmed software failures send the task to rework once, with their findings
+in the reason. Status and the sketch label failed gates `failed`.
 Each due software gate runs even if an earlier gate failed. A current failure
 does not prevent clean or CI from collecting missing evidence.
 An earlier completed reaction does not suppress those gates.
 Reconciliation does not wait on a busy state lock; the next notification
 or existing fallback tick retries it within the wait's timeout.
 Filters apply to the returned event, not to the software reactions.
+Queued or running CI and missing required runs record `PENDING`, remain
+blocking, and are rechecked once per minute by the trusted wait host.
+Completed failures take precedence over pending runs. CI completion
+notifications can also trigger a check.
 
 After a confirmed merge, outstanding submitted or accepted PRs are checked
 against their fetched base in temporary detached worktrees. Hand-written

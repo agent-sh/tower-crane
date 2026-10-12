@@ -61,6 +61,7 @@ test('a run still in progress: not ok', async () => {
   const gh = github({ runs: [...GREEN_RUNS, run('e2e', null, 'in_progress')], suites: GREEN_SUITES });
   const r = await gate.run(ctx(gh));
   assert.equal(r.ok, false);
+  assert.equal(r.pending, true);
   assert.match(r.summary, /not completed: e2e \(in_progress\)/);
 });
 
@@ -68,10 +69,33 @@ test('a suite that is queued or failed: not ok even when the listed runs are gre
   // A second workflow of the same CI app has its suite but no runs yet.
   const queued = await gate.run(ctx(github({ runs: GREEN_RUNS, suites: [...GREEN_SUITES, suite('github-actions', null, 'queued', 0)] })));
   assert.equal(queued.ok, false);
+  assert.equal(queued.pending, true);
   assert.match(queued.summary, /check suites not green: github-actions \(queued, 0 runs\)/);
   const failed = await gate.run(ctx(github({ runs: GREEN_RUNS, suites: [...GREEN_SUITES, suite('github-actions', 'failure')] })));
   assert.equal(failed.ok, false);
+  assert.equal(failed.pending, undefined);
   assert.match(failed.summary, /github-actions \(failure, 1 runs\)/);
+});
+
+test('required queued and running jobs are pending, while completed failures take precedence', async () => {
+  for (const status of ['queued', 'in_progress']) {
+    const r = await gate.run(ctx(github({ runs: [run('test (linux)', null, status)] }),
+      {}, { ci: { required: ['test ('] } }));
+    assert.equal(r.ok, false);
+    assert.equal(r.pending, true, r.summary);
+    assert.equal(r.confirmed_failure, undefined);
+  }
+  const rerun = await gate.run(ctx(github({
+    runs: [{ ...run('test (linux)', 'failure'), id: 1, suite: 1, started_at: '2026-10-12T10:00:00Z' },
+      { ...run('test (linux)', null, 'queued'), id: 2, suite: 2 }],
+    suites: [{ ...suite('github-actions', 'failure'), id: 1 },
+      { ...suite('github-actions', null, 'queued'), id: 2 }],
+  }), {}, { ci: { required: ['test ('] } }));
+  assert.equal(rerun.pending, true, 'an old failed suite does not turn its queued replacement into FAIL');
+  const r = await gate.run(ctx(github({ runs: [run('test (linux)', null, 'queued'), run('test (windows)', 'failure')] }),
+    {}, { ci: { required: ['test ('] } }));
+  assert.equal(r.pending, undefined);
+  assert.equal(r.confirmed_failure, true);
 });
 
 test('a suite with no runs from another app is never inferred away', async () => {
