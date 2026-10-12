@@ -94,6 +94,38 @@ process.exit(r.status ?? 1);`;
   h.ok(['ladder', 'set', 'review', '--harness', 'command', '--clear', 'model', '--command', JSON.stringify([process.execPath, '-e', script, out, '{prompt}'])]);
 }
 
+test('opencode reviewer Bash denies unlisted interpreter and absolute-path commands', {
+  skip: process.platform === 'win32' && 'the stub uses a shebang executable',
+}, (t) => {
+  const h = setup(t);
+  ready(h);
+  const bin = path.join(h.base, 'bin');
+  fs.mkdirSync(bin);
+  const stub = path.join(__dirname, 'fixtures', 'opencode-stub.js');
+  fs.writeFileSync(path.join(bin, 'opencode'), `#!${process.execPath}\nrequire(${JSON.stringify(stub)});\n`, { mode: 0o755 });
+  const canary = path.join(h.base, 'reviewer-outside-canary.txt');
+  const output = path.join(h.base, 'reviewer-permissions.json');
+  const probes = [
+    'node -e "process.exit(0)"', 'python3 -c "pass"', 'curl https://example.invalid',
+    '/usr/bin/git push origin HEAD', '/usr/bin/gh pr merge 1',
+  ].map((command) => ['bash', command]);
+  const started = h.json(['spawn', '--task', 'T1', '--role', 'review', '--wait'], {
+    env: {
+      HOME: path.join(h.base, 'user'), GH_TOKEN: 'fixture-gh',
+      PATH: bin + path.delimiter + (h.env.PATH || h.env.Path || ''),
+      STUB_OUT: output, STUB_BASH_CANARY: canary, STUB_PROBES: JSON.stringify(probes),
+    },
+  });
+  assert.equal(started.role, 'reviewer');
+  const report = JSON.parse(fs.readFileSync(output, 'utf8'));
+  assert.equal(report.name, 'gishra-reviewer');
+  assert.equal(report.permission.bash['*'], 'deny');
+  assert.deepEqual(report.probes, ['deny', 'deny', 'deny', 'deny', 'deny']);
+  assert.equal(report.bash.decision, 'deny');
+  assert.equal(report.bash.code, undefined);
+  assert.throws(() => fs.readFileSync(canary, 'utf8'), { code: 'ENOENT' });
+});
+
 describe('reviewer integration cases', { concurrency: windowsConcurrency }, () => {
 test('reviewers share static system instructions and receive audited gates in the user prompt', (t) => {
   const h = setup(t);

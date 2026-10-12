@@ -219,3 +219,27 @@ console.log(JSON.stringify(O.identity({ env: { CLAUDE_SESSION_ID: 'same-session'
   });
   assert.deepEqual(identities[0], identities[1], 'changing process-list size cannot change the session key');
 });
+
+test('Windows parent discovery tolerates a cold query longer than ten seconds', { timeout: 70000 }, () => {
+  const script = `
+const cp = require('node:child_process');
+const C = require(${JSON.stringify(path.join(__dirname, '../lib/commands'))});
+Object.defineProperty(process, 'platform', { value: 'win32' });
+C.execFileSync = (command, args, options) => {
+  if (command !== 'powershell.exe') throw new Error('unexpected command');
+  const result = [{ ProcessId: process.ppid, ParentProcessId: 1, Name: 'node.exe',
+    CreationDate: 'stable-start', CommandLine: 'node harness' }];
+  return cp.execFileSync(process.execPath, ['-e',
+    'setTimeout(() => process.stdout.write(' + JSON.stringify(JSON.stringify(result)) + '), 11000)'], options);
+};
+const O = require(${JSON.stringify(path.join(__dirname, '../lib/orchestrator'))});
+const identity = O.identity({ env: { CLAUDE_SESSION_ID: 'cold-session' }, agent: 'orchestrator' });
+if (identity.pid !== process.ppid || !identity.persistent) throw new Error('query lost the persistent caller');
+console.log(identity.harness_session_id);
+`;
+  const result = cp.spawnSync(process.execPath, ['-e', script], {
+    encoding: 'utf8', timeout: 65000,
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout.trim(), 'cold-session');
+});

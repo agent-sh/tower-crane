@@ -15,6 +15,12 @@ const SHORT_WAIT = path.join(__dirname, 'fixtures', 'lock-wait.js');
 
 function setup(t) {
   return cachedFixture(t, 'task', (h) => {
+    Object.assign(h.env, {
+      CLAUDE_CONFIG_DIR: path.join(h.env.HOME, '.claude'), CODEX_HOME: path.join(h.env.HOME, '.codex'),
+      PI_CODING_AGENT_DIR: path.join(h.env.HOME, '.pi', 'agent'),
+      XDG_CONFIG_HOME: path.join(h.env.HOME, '.config'), XDG_DATA_HOME: path.join(h.env.HOME, '.local', 'share'),
+      GH_CONFIG_DIR: path.join(h.env.HOME, '.config', 'gh'),
+    });
     h.init();
     h.ok(['task', 'add', '--title', 'Idempotency key on retries', '--acceptance', 'processed once', '--acceptance', 'test proves it']);
     h.ok(['brief', 'set', 'T1', '-'], { input: '- start from the webhook handler\n' });
@@ -175,8 +181,8 @@ test('spawn --dry-run builds each harness command', (t) => {
     [['--harness', 'claude', '--model', 'fixture-large', '--effort', 'high'], (p, s) => ['claude', '-p', p, '--model', 'fixture-large', '--effort', 'high', '--output-format', 'json', ...claudeOwn(s)]],
     [['--harness', 'codex', '--profile', 'fixture-main'], (p, s) => ['codex', 'exec', '--json', '-p', 'fixture-main', ...codexOwn(s), p]],
     [['--harness', 'codex', '--model', 'fixture-model', '--effort', 'high', '--args', '["--skip-git-repo-check"]'], (p, s) => ['codex', 'exec', '--json', '-m', 'fixture-model', '-c', 'model_reasoning_effort=high', ...codexOwn(s), p, '--skip-git-repo-check']],
-    [['--harness', 'opencode', '--model', 'provider/fixture-model'], (p) => ['opencode', 'run', '--format', 'json', '-m', 'provider/fixture-model', p]],
-    [['--harness', 'opencode', '--model', 'openai/fixture-model', '--effort', 'high'], (p) => ['opencode', 'run', '--format', 'json', '-m', 'openai/fixture-model', '--variant', 'high', p]],
+    [['--harness', 'opencode', '--model', 'provider/fixture-model'], (p) => ['opencode', 'run', '--format', 'json', '-m', 'provider/fixture-model', '--agent', 'gishra-small', p]],
+    [['--harness', 'opencode', '--model', 'openai/fixture-model', '--effort', 'high'], (p) => ['opencode', 'run', '--format', 'json', '-m', 'openai/fixture-model', '--variant', 'high', '--agent', 'gishra-small', p]],
     [['--harness', 'agy', '--model', 'fixture-large'], (p) => ['agy', '-p', p, '--mode', 'accept-edits', '--output-format', 'json', '--model', 'fixture-large', '--agent', 'gishra-small', '--disable-slash-commands', '--sandbox']],
     [['--harness', 'agy', '--model', 'fixture-large', '--effort', 'max', '--args', '["--print-timeout","60s"]'], (p) => ['agy', '-p', p, '--mode', 'accept-edits', '--output-format', 'json', '--model', 'fixture-large', '--effort', 'max', '--agent', 'gishra-small', '--disable-slash-commands', '--sandbox', '--print-timeout', '60s']],
     [['--harness', 'pi', '--model', 'provider/fixture-model'], (p, s) => ['pi', '-p', p, '--mode', 'json', '--model', 'provider/fixture-model', ...piOwn(s)]],
@@ -208,7 +214,7 @@ test('spawn --dry-run builds each harness command', (t) => {
   assert.ok(!fs.existsSync(path.join(h.base, 'repo-worktrees')), 'a dry run creates nothing');
 });
 
-test('opencode inline config keeps caller fields and plugins when adding the home plugin', (t) => {
+test('opencode replaces caller inline config with the generated hook plugin', (t) => {
   const h = setup(t);
   setRung(h, 'small', ['--harness', 'opencode', '--model', 'provider/fixture-model']);
   const original = {
@@ -220,7 +226,7 @@ test('opencode inline config keeps caller fields and plugins when adding the hom
   const out = dry(h, 'small', { OPENCODE_CONFIG_CONTENT: JSON.stringify(original) });
   const config = JSON.parse(out.env.OPENCODE_CONFIG_CONTENT);
   const generated = pathToFileURL(path.join(h.state, 'homes', out.agent, 'hook.mjs')).href;
-  assert.deepEqual(config, { ...original, plugin: [...original.plugin, generated] });
+  assert.deepEqual(config, { plugin: [generated] });
 });
 
 test('spawn embeds the role skill in the system context for isolated reviewers and before the brief for other jobs', (t) => {
