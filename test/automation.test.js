@@ -119,7 +119,10 @@ fs.writeFileSync('generated.txt', rows + '\\n');
   h.github = () => JSON.parse(fs.readFileSync(h.env.AUTOMATION_GITHUB, 'utf8'));
   h.saveGithub = (state) => fs.writeFileSync(h.env.AUTOMATION_GITHUB, JSON.stringify(state));
   h.logs = () => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
-  h.consume = () => h.run(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
+  h.consume = () => {
+    h.ok(['project', 'set', '--paused', 'manual generated conflict probe']);
+    return h.run(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
+  };
   h.submit = () => {
     h.ok(['claim', 'T1', '--agent', 'worker']);
     h.ok(['submit', 'T1', '--sha', h.sha, '--branch', 'fixture-change', '--pr', '7', '--agent', 'worker']);
@@ -760,6 +763,7 @@ test('a merge sends another conflicting PR to rework with real filenames and pre
   h.submit('T2', other, '8');
   h.reviewer('T1', 'reviewer');
   h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--sha', h.sha, '--ok', '--agent', 'reviewer']);
+  h.ok(['project', 'set', '--paused', 'manual conflict probe']);
   const before = h.git(['status', '--porcelain']);
   h.consume();
   const task = h.readState('tasks.json').tasks[1];
