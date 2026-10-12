@@ -30,7 +30,8 @@ $taskGate = [Threading.EventWaitHandle]::new($false, [Threading.EventResetMode]:
 function Get-CimInstance {
   param($ClassName, $Property, $Filter)
   [IO.File]::AppendAllText($env:ANCESTRY_CALLS, "query\\n")
-  $rows = @(ConvertFrom-Json ([IO.File]::ReadAllText($env:ANCESTRY_ROWS)))
+  # Wrapping the JSON array's pipeline output nests it on Windows PowerShell.
+  $rows = ConvertFrom-Json ([IO.File]::ReadAllText($env:ANCESTRY_ROWS))
   foreach ($row in $rows) { $row.CreationDate = [datetime]$row.CreationDate }
   [IO.File]::WriteAllText($env:ANCESTRY_READY, '')
   $null = $taskGate.WaitOne()
