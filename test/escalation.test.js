@@ -320,7 +320,7 @@ for (const trigger of ['outage', 'refusal']) {
     const h = await setup(t, trigger);
     h.ok(['spawn', '--task', 'T1']);
     await h.until(() => events(h).some((e) => e.cmd === 'spawn exit'));
-    const observed = await h.runAsync(['wait', '--after', '0', '--types', 'worker-exited', '--agent', 'orchestrator']);
+    const observed = await h.runAsync(['wait', '--observe', '--after', '0', '--types', 'worker-exited', '--agent', 'orchestrator']);
     assert.equal(observed.code, 0, observed.stderr || observed.stdout);
     h.ok(['recover', 'T1']);
     assert.equal(h.json(['task', 'show', 'T1']).tier, 'easy');

@@ -854,6 +854,7 @@ test('a submitted PR that GitHub reports UNKNOWN, then CONFLICTING, goes to rewo
   const github = h.github();
   Object.assign(github.prs['7'], { mergeable: 'CONFLICTING', mergeStateStatus: 'DIRTY', unknownViews: 1 });
   h.saveGithub(github);
+  h.ok(['project', 'set', '--paused', 'manual conflict probe']);
   h.consume();
   const task = h.readState('tasks.json').tasks[0];
   assert.equal(task.status, 'rework');
@@ -1439,6 +1440,10 @@ cp.execFileSync(process.execPath, [${JSON.stringify(BIN)}, 'claim', task], { std
 const file = path.join(process.env.AUTOMATION_CONTEXT_DIR, task);
 fs.writeFileSync(file, '');
 fs.writeFileSync(file + '.prompt', process.argv[2]);
+if (process.env.REFILL_ORPHAN) {
+  const child = cp.spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+  fs.writeFileSync(file + '.orphan', String(child.pid));
+}
 const poll = () => fs.existsSync(file + '.go') ? fs.writeFileSync(file + '.exited', '') : setTimeout(poll, 25);
 poll();
 `);
@@ -1464,6 +1469,31 @@ poll();
   });
   return h;
 }
+
+test('automation retains an exited worker claim until its lost monitor process group is empty', {
+  skip: process.platform !== 'linux',
+}, async (t) => {
+  const h = refillFixture(t);
+  const spawn = h.json(['spawn', '--task', 'T1', '--agent', 'orchestrator'], { env: { REFILL_ORPHAN: '1' } });
+  assert.notEqual(await waitFor(`${h.marker('T1')}.orphan`), null);
+  const orphan = Number(fs.readFileSync(`${h.marker('T1')}.orphan`, 'utf8'));
+  const cursor = String(fs.statSync(path.join(h.state, 'events.jsonl')).size);
+  const waiting = h.runAsync(['wait', '--after', cursor, '--types', 'spawn', '--timeout', '15', '--agent', 'orchestrator']);
+  try {
+    process.kill(spawn.monitor_pid, 'SIGKILL');
+    process.kill(spawn.pid, 'SIGKILL');
+    fs.writeFileSync(`${h.marker('T1')}.exited`, '');
+    await new Promise((resolve) => setTimeout(resolve, 2200));
+    assert.equal(h.readState('tasks.json').tasks[0].claim?.agent, spawn.agent, 'the orphan keeps its worker slot');
+    assert.equal(fs.existsSync(h.marker('T3')), false);
+  } finally {
+    try { process.kill(orphan, 'SIGKILL'); } catch (e) { if (e.code !== 'ESRCH') throw e; }
+  }
+  const result = await waiting;
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(JSON.parse(result.stdout).task, 'T3');
+  assert.notEqual(await waitFor(h.marker('T3')), null);
+});
 
 test('automation reports unchanged dispatch refusals once and retries after the brief changes', async (t) => {
   const h = refillFixture(t);
@@ -1527,10 +1557,10 @@ for (const trigger of ['exit', 'release --dead', 'merge']) {
       }
     }
     const cursor = trigger === 'release --dead' ? String(fs.statSync(path.join(h.state, 'events.jsonl')).size) : '0';
-    const watchers = [h.runAsync(['wait', '--after', cursor, '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']),
-      h.runAsync(['wait', '--after', cursor, '--types', 'never', '--timeout', '0', '--agent', 'orchestrator'])];
+    const watchers = [h.runAsync(['wait', '--after', cursor, '--task', 'T3', '--types', 'spawn', '--timeout', '15', '--agent', 'orchestrator']),
+      h.runAsync(['wait', '--after', cursor, '--task', 'T3', '--types', 'spawn', '--timeout', '15', '--agent', 'orchestrator'])];
     const results = await Promise.all(watchers);
-    assert.ok(results.every((r) => r.code === 2), JSON.stringify(results));
+    assert.ok(results.every((r) => r.code === 0 && JSON.parse(r.stdout).task === 'T3'), JSON.stringify(results));
     assert.notEqual(await waitFor(h.marker('T3')), null, `the task unblocking T4 takes the free slot: ${JSON.stringify(results)}`);
     const spawns = h.logs().filter((e) => e.cmd === 'spawn' && e.detail.role === 'worker');
     assert.deepEqual(spawns.map((e) => e.task), trigger === 'merge' ? ['T3'] : ['T1', 'T3']);
