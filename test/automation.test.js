@@ -1916,6 +1916,7 @@ test('the head of the line that turns CONFLICTING goes to rework with its files 
   github.prs['7'].mergeable = 'CONFLICTING';
   github.prs['7'].mergeStateStatus = 'DIRTY';
   h.saveGithub(github);
+  h.ok(['project', 'set', '--paused', 'manual queue conflict probe']);
   h.consume();
   const [t1, t2] = h.readState('tasks.json').tasks;
   assert.equal(t1.status, 'rework');
