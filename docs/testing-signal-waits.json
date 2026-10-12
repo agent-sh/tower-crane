@@ -24079,5 +24079,136 @@
       }
     ],
     "reproduction": "At code_head run each named loaded_files file five times with node test/run.js --test-concurrency=1 while two nice -n 15 node -e \"for (;;) Math.sqrt(Math.random());\" processes run, and keep combined file workers at four or below; the original runner uses three. Select only the listed files. Reproduce the launch-error regression using test/test-tools.test.js and the CLI helper error fault; no process signal is swallowed or retried."
+  },
+  "escalation_contract_refresh": {
+    "previous_submitted_head": "673e30ba55baf589c30d63c75a5875107408f8dd",
+    "base_head": "b61efe2bada70001bf46cb694b9e5777445f9c66",
+    "code_head": "05791d6bac977f4f29fa976a402f46db6aa0ee40",
+    "changes": "Retain the base failed-review rework event, findings and revision assertions; retain watched readiness and the existing suite guard.",
+    "cpu_load_processes": 2,
+    "cpu_load_command": "nice -n 15 node -e \"for (;;) Math.sqrt(Math.random());\"",
+    "test_file_workers": 1,
+    "command": "node test/run.js --test-concurrency=1 test/escalation.test.js",
+    "loaded_files": {
+      "test/escalation.test.js": [
+        {
+          "run": 1,
+          "status": 0,
+          "wall_s": 133.45256422599778,
+          "load_before": [
+            20.88720703125,
+            22.08251953125,
+            20.97998046875
+          ],
+          "load_after": [
+            36.52783203125,
+            27.98388671875,
+            23.3232421875
+          ],
+          "log_sha256": "4b6c70603ad66e3e44ab29fc8fee770d0852616fb5420a3818317c2cd7038910",
+          "tests": {
+            "tests": 39,
+            "pass": 39,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        },
+        {
+          "run": 2,
+          "status": 0,
+          "wall_s": 136.2472708350033,
+          "load_before": [
+            36.52783203125,
+            27.98388671875,
+            23.3232421875
+          ],
+          "load_after": [
+            35.29931640625,
+            31.517578125,
+            25.322265625
+          ],
+          "log_sha256": "1d2ecb4daed7c5a8dd2a0dc49fd6404a3661a6a117222ac399e7703b09b8f17a",
+          "tests": {
+            "tests": 39,
+            "pass": 39,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        },
+        {
+          "run": 3,
+          "status": 0,
+          "wall_s": 111.7959260199932,
+          "load_before": [
+            35.29931640625,
+            31.517578125,
+            25.322265625
+          ],
+          "load_after": [
+            25.443359375,
+            29.05029296875,
+            25.14404296875
+          ],
+          "log_sha256": "e2cc46be234d8d8ae8ae8414390349e48455f17093dfddfd1b16a607822b99b5",
+          "tests": {
+            "tests": 39,
+            "pass": 39,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        },
+        {
+          "run": 4,
+          "status": 0,
+          "wall_s": 109.86965062499803,
+          "load_before": [
+            25.443359375,
+            29.05029296875,
+            25.14404296875
+          ],
+          "load_after": [
+            23.72216796875,
+            27.0693359375,
+            24.84619140625
+          ],
+          "log_sha256": "ded3eb21153bbc84c4c3ed87f5858071ce77a484db0ebdb48b200099b369b7a3",
+          "tests": {
+            "tests": 39,
+            "pass": 39,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        },
+        {
+          "run": 5,
+          "status": 0,
+          "wall_s": 126.58015218299988,
+          "load_before": [
+            23.72216796875,
+            27.0693359375,
+            24.84619140625
+          ],
+          "load_after": [
+            34.2666015625,
+            29.85986328125,
+            26.134765625
+          ],
+          "log_sha256": "f219842f7e51a9d526f2e7eac7b14c782edc40ca4385a44796f651352615f365",
+          "tests": {
+            "tests": 39,
+            "pass": 39,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        }
+      ]
+    },
+    "raw_logs": "Task scratch rework-escalation-conflict/final-loaded-test_escalation.test.js-{1..5}.log; hashes are recorded with each run.",
+    "prior_evidence": "Earlier conversion, lint and mutation receipts retain their named source revisions; unchanged files were not rerun."
   }
 }
