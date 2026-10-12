@@ -29,10 +29,12 @@ test('a task event during the link\'s GitHub call refuses the link, and the next
   worker(f);
   f.write((d) => { d.during = { 'stack link': [['task', 'note', 'T2', 'racing note', '--agent', 'worker-T2']] }; });
   f.h.ok(['spawn', '--task', 'T2', '--wait']);
-  assert.equal(f.h.json(['task', 'show', 'T2']).stack.linked, false);
   assert.match(fs.readFileSync(path.join(f.h.repo, '.tower-crane', 'events.jsonl'), 'utf8'), /"cmd":"stack link failed"/);
-  // The observer pass of `wait` (exit 2 at its timeout) links the PR once nothing races it.
-  f.h.run(['wait', '--timeout', '1']);
+  // The next observer pass links the PR once nothing races it. That pass can be the spawn's own, so
+  // the state after spawn is not fixed; a single `wait` can also end before its pass does, so wait
+  // in a bounded loop as the first case does.
+  const until = Date.now() + 60000;
+  while (!f.h.json(['task', 'show', 'T2']).stack.linked && Date.now() < until) f.h.run(['wait', '--timeout', '1']);
   assert.equal(f.h.json(['task', 'show', 'T2']).stack.linked, true);
 });
 
