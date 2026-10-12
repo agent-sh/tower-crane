@@ -29,7 +29,7 @@ Every page, Controls and Settings included, leads with the shell: the bar (mark,
 
 - **Status sentence.** `6 need you (2 now) · 5 working, 1 stuck · 46% budget`, in words from counts, each count a link to what it counts. Claims on the floor that are not working are named: `stuck` (lease ran out, or the process exited) and `stopped`. Running agents whose usage is not known are counted aloud (`1 not counted`). When dispatch is paused the sentence leads with it: `Paused: owner is inspecting the run · 5 still working`. The tab title repeats it.
 - **Pause.** Beside the sentence, `Pause dispatch` opens a reason field in place; Enter there posts `project set --paused REASON` to `POST /api/controls`, as the Controls form does. While paused the lead says who paused and when, that new work waits and running agents go on, with `Resume dispatch` (`--paused ''`). A pause does not stop running agents; Stop on a row is the brake for those. Next is drawn as if dispatch ran: ready tasks stay ready, "held by the pause", and no blocked row repeats the pause as its own reason.
-- **Spend line.** Budget used as a length (tokens, and hours when set), the burn rate from running agents' own readings with its age, the projection, and the top spender with its tier's median.
+- **Spend line.** Budget used as a length (tokens, and hours when set), the burn rate from running agents' own readings with its age, the projection, and the top spender with its tier's median, or `project median` when the tier has no median of its own.
 - **The queue** (P1, P4). One list in two tiers, the tier in words at each item's left edge:
   - *Now* (alarm): a decision that blocks ready work, a runaway, a stuck claim (lease ran out, or the process exited without submitting), a budget at 90% or more.
   - *Your turn* (attention): other decisions, approvals, owner tasks, messages to the owner.
@@ -55,7 +55,7 @@ The page scrolls as one; no band has a scroll area of its own.
 
 Computed by `lib/runaway.js` on each read and never stored; `status` prints the same flags (`runaway: T1 agent: rule`). For each claim:
 
-- **spend**: tokens above a multiple of the tier's median accepted-task spend. The multiple is the project's 90th percentile over its median once ten accepted tasks report tokens, and 5.5 (T70's window W) before. A tier median needs three accepted tasks; otherwise the project median is used.
+- **spend**: tokens above a multiple of the tier's median accepted-task spend. The multiple is the project's 90th percentile over its median once ten accepted tasks report tokens, and 5.5 (T70's window W) before. A tier median needs three accepted tasks; otherwise the project median is used, and the text says so: `13M tokens, 6.5 times the project median of 2M (hard has 1 accepted task with tokens)`. `status --json` gives each tier's `from` (`tier` or `project`) and `samples` under `runaway_norms.tiers`.
 - **rate**: tokens per minute over five minutes of live readings above the same multiple of the tier's median rate.
 - **stale**: the live reading is older than T93's stale limit.
 - **lease**: the lease ran out (with or without a live process).
