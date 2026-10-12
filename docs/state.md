@@ -753,6 +753,10 @@ gate finishes and records evidence. The interrupted reaction records
 before `wait` exits 0. The next startup reconciles the remaining work.
 Signal shutdown prints a final notice containing the signal and the number
 of gates that finished during the drain, distinct from a wake or timeout.
+PR inspection and gate commands, including Git and GitHub queries, run
+asynchronously so they do not block signal delivery. Forced cancellation
+stops their process trees; temporary worktree removal and pruning still run
+before the executor lease is released.
 A second signal kills the active command tree immediately or cancels its
 source-page fetch. An interrupted software gate records a failure without
 `confirmed_failure`, so it does not trigger a quality climb. `gates retry`

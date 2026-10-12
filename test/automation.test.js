@@ -839,7 +839,7 @@ test('concurrent event consumers execute each submission gate only once', async 
 
 // A slow stub suite records each run's start and end, so the log shows how
 // many gate executors ran at once across every consumer process.
-function slowSuite(h, { executors, crash = false, release = null, hold = 1 } = {}) {
+function slowSuite(h, { executors, crash = false, release = null, hold = 1, pr = false } = {}) {
   const runs = path.join(h.base, 'suite-runs.log');
   const suite = path.join(h.base, 'tools', 'slow-suite.js');
   fs.writeFileSync(suite, `const fs = require('node:fs');
@@ -866,7 +866,7 @@ if (release) {
   for (const id of ['T1', 'T2', 'T3']) {
     if (id !== 'T1') h.ok(['task', 'add', '--title', `Change ${id}`, '--acceptance', 'it works', '--kind', 'code']);
     h.ok(['claim', id, '--agent', 'worker']);
-    h.ok(['submit', id, '--sha', h.sha, '--agent', 'worker']);
+    h.ok(['submit', id, '--sha', h.sha, ...(pr && id === 'T1' ? ['--pr', '7'] : []), '--agent', 'worker']);
   }
   return () => {
     let now = 0;
@@ -880,11 +880,12 @@ if (release) {
 test('wait drains on either signal without starting another gate, and a second signal stops the gate', {
   skip: process.platform === 'win32' ? 'Windows child.kill does not deliver POSIX signals' : false,
 }, async (t) => {
-  for (const [signal, forced, stage] of [['SIGTERM', false], ['SIGINT', false], ['SIGTERM', true], ['SIGTERM', true, 'proof'], ['SIGTERM', true, 'sources'], ['SIGTERM', false, 'idle'], ['SIGINT', false, 'observe'], ['SIGTERM', false, 'follow']]) {
+  for (const [signal, forced, stage] of [['SIGTERM', false], ['SIGINT', false], ['SIGTERM', true], ['SIGTERM', true, 'proof'], ['SIGTERM', true, 'sources'], ['SIGTERM', false, 'idle'], ['SIGINT', false, 'observe'], ['SIGTERM', false, 'follow'], ['SIGTERM', false, 'pr'], ['SIGTERM', true, 'ci']]) {
     const proof = stage === 'proof';
     const sources = stage === 'sources';
     const idle = ['idle', 'observe', 'follow'].includes(stage);
     const json = signal === 'SIGINT' || stage === 'follow';
+    const github = stage === 'pr' || stage === 'ci';
     await t.test(`${signal}${forced ? ' twice' : ''}${stage ? ` during ${stage}` : ''}`, async (t) => {
       const h = cachedFixture(null, `wait-drain-${sources ? 'research' : 'code'}`, (repo) => {
         const h = setup(null, { repo, kind: sources ? 'research' : 'code' });
@@ -907,8 +908,32 @@ test('wait drains on either signal without starting another gate, and a second s
       h.logs = () => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
       const release = path.join(h.base, 'release-suite');
       const heldRun = proof ? 2 : 1;
-      const runs = idle ? null : slowSuite(h, { executors: 1, release, hold: heldRun });
+      const runs = idle ? null : slowSuite(h, { executors: 1, release, hold: heldRun, pr: github });
       if (proof) h.ok(['project', 'set', '--tests-mode', 'prove', '--agent', 'orchestrator']);
+      if (github) {
+        if (stage === 'ci') {
+          fs.writeFileSync(release, '');
+          h.ok(['check', 'tests', 'T1', '--agent', 'orchestrator']);
+          h.ok(['check', 'clean', 'T1', '--agent', 'orchestrator']);
+          fs.unlinkSync(release);
+        }
+        const stub = path.join(h.base, 'held-gh.js');
+        fs.writeFileSync(stub, `const fs = require('node:fs');
+const args = process.argv.slice(2);
+const held = ${JSON.stringify(stage)} === 'pr'
+  ? args[0] === 'pr' && args[1] === 'view'
+  : args[0] === 'api' && args[1].includes('check-runs');
+if (held) {
+  fs.writeFileSync(${JSON.stringify(path.join(h.base, 'github-started'))}, String(process.pid));
+  const poll = () => {
+    if (fs.existsSync(${JSON.stringify(release)})) require(${JSON.stringify(ghStub)});
+    else setTimeout(poll, 25);
+  };
+  poll();
+} else require(${JSON.stringify(ghStub)});
+`);
+        fs.writeFileSync(path.join(h.base, 'tools', 'gh'), `#!/usr/bin/env node\nrequire(${JSON.stringify(stub)});\n`);
+      }
       const observed = path.join(h.base, 'signal-observed');
       const preload = path.join(h.base, 'signal-observer.js');
       // A receipt synchronizes the test with signal delivery before it releases the gate.
@@ -944,6 +969,7 @@ require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'public-http'))}).fet
           ...(stage === 'follow' ? ['--follow'] : ['--timeout', '60']),
           ...(stage === 'observe' ? ['--observe'] : []), ...(json && stage !== 'follow' ? ['--json'] : []), '--agent', 'orchestrator'],
         { cwd: h.repo, env: h.env });
+      const started = path.join(h.base, github ? 'github-started' : `suite-started-${heldRun}`);
       let stdout = '';
       let stderr = '';
       child.stdout.on('data', (chunk) => { stdout += chunk; });
@@ -958,20 +984,27 @@ require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'public-http'))}).fet
         fs.writeFileSync(release, '');
         if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
         await result;
+        if (github && fs.existsSync(started)) {
+          try { process.kill(Number(fs.readFileSync(started, 'utf8')), 'SIGKILL'); }
+          catch (e) { if (e.code !== 'ESRCH') throw e; }
+        }
         await h.cleanup();
       });
-      assert.notEqual(await waitFor(path.join(h.base, `suite-started-${heldRun}`), { ms: 60000 }), null, idle ? 'wait is ready' : 'the gate starts');
+      assert.notEqual(await waitFor(started, { ms: 60000 }), null, idle ? 'wait is ready' : 'the gate starts');
       child.kill(signal);
+      if (github) {
+        assert.notEqual(await waitFor(observed, { ms: 5000 }), null, 'the held GitHub command does not block signal delivery');
+      }
       assert.notEqual(await waitFor(observed), null, 'the wait process receives the signal');
       if (!idle) assert.equal(child.exitCode, null, 'the running gate still holds wait open');
       if (forced) {
-        child.kill(signal);
+        child.kill(github ? 'SIGINT' : signal);
       } else {
         fs.writeFileSync(release, '');
       }
       const exit = await result;
       assert.equal(exit.code, 0, JSON.stringify(exit));
-      const drained = forced || idle ? 0 : 1;
+      const drained = forced || idle || stage === 'pr' ? 0 : 1;
       if (json) {
         const lines = stdout.trim().split('\n').map((line) => JSON.parse(line));
         if (stage === 'follow') assert.equal(lines[0].type, 'ready', 'the follower retains its ready record');
@@ -981,6 +1014,21 @@ require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'public-http'))}).fet
         assert.equal(stdout.trim(), `stopped by ${signal} after draining ${drained} gate${drained === 1 ? '' : 's'}`);
       }
       const receipts = h.logs().filter((e) => e.cmd === 'automation');
+      if (github) {
+        const task = h.readState('tasks.json').tasks[0];
+        if (stage === 'pr') {
+          assert.deepEqual(task.evidence, [], 'no gate starts after signal delivery during PR inspection');
+        } else {
+          assert.deepEqual(task.evidence.map((e) => [e.type, e.ok]), [['tests', true], ['clean', true], ['ci', false]]);
+          const pid = Number(fs.readFileSync(started, 'utf8'));
+          assert.equal(require('../lib/processes').processState({ pid }), 'exited', 'the second signal stops the GitHub query');
+          assert.equal(fs.existsSync(release), false, 'the query stops without its release file');
+          assert.equal(task.evidence.at(-1).confirmed_failure, undefined);
+        }
+        assert.equal(receipts.at(-1).detail.phase, 'deferred', 'the GitHub reaction releases its lease');
+        assert.ok(h.readState('tasks.json').tasks.slice(1).every((t) => !t.evidence.length), 'queued gates stay pending');
+        return;
+      }
       if (idle) {
         assert.deepEqual(receipts, [], 'idle shutdown claims no automation work');
         return;
