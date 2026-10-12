@@ -15,7 +15,8 @@ const { errorReader, transient } = require('../lib/spawn-monitor');
 
 // The lease gate is POSIX-only; on Windows the dispatch records the lease before launch.
 const GATE_SKIP = process.platform === 'win32' && 'the lease gate is POSIX-only';
-const HANDSHAKE_SKIP = process.platform !== 'win32' && 'POSIX holds the harness behind its lease gate instead';
+// A dispatch that finds no /bin/sh spawns its workers through the Windows launch handshake.
+const NO_SH = { HOOK_NO_SH: '1' };
 const windowsConcurrency = process.platform === 'win32' ? 2 : false;
 const S = require('../lib/state');
 
@@ -568,10 +569,10 @@ test('a schema bump before the supervisor first reads state stops its worker beh
   assert.equal(tasks.find((task) => task.id === 'T1').claim, null, 'no lease was taken');
 });
 
-test('a Windows worker first runs on its own lease while its dispatch still holds the lock, and spawn reports its pid', { skip: HANDSHAKE_SKIP }, async (t) => {
+test('a worker without the lease gate, as on Windows, first runs on its own lease while its dispatch still holds the lock, and spawn reports its pid', async (t) => {
   const h = setup(t, { claim: false, failures: 0 });
   const paused = path.join(h.base, 'render-paused');
-  const completed = h.runAsync(['spawn', '--task', 'T1', '--wait', '--json'], { hooks: { HOOK_STOP_RENDER: paused } });
+  const completed = h.runAsync(['spawn', '--task', 'T1', '--wait', '--json'], { hooks: { ...NO_SH, HOOK_STOP_RENDER: paused } });
   let result;
   try {
     await until(() => fs.existsSync(paused), 'dispatch did not pause after committing its spawn');
@@ -593,10 +594,10 @@ test('a Windows worker first runs on its own lease while its dispatch still hold
   assert.equal(events.filter((e) => e.cmd === 'claim' && !e.detail.renewed).length, 1, 'the supervisor takes no second lease');
 });
 
-test('a Windows worker whose supervisor stops waiting for its lease never starts, and its lease is rolled back', { skip: HANDSHAKE_SKIP }, async (t) => {
+test('a worker without the lease gate whose supervisor stops waiting for its lease never starts, and its lease is rolled back', async (t) => {
   const h = setup(t, { claim: false, failures: 0 });
   const paused = path.join(h.base, 'go-paused');
-  const completed = h.runAsync(['spawn', '--task', 'T1', '--wait', '--json'], { hooks: { HOOK_STOP_GO: paused } });
+  const completed = h.runAsync(['spawn', '--task', 'T1', '--wait', '--json'], { hooks: { ...NO_SH, HOOK_STOP_GO: paused } });
   let result;
   try {
     await until(() => fs.existsSync(paused), 'dispatch did not pause before launching its worker');

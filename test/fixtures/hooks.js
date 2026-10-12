@@ -76,6 +76,16 @@ if (env.HOOK_PIDNS) {
   };
 }
 
+// HOOK_NO_SH=1: the CLI finds no /bin/sh, as on Windows, so it has no POSIX
+// lease gate and spawns its workers through the launch handshake.
+if (env.HOOK_NO_SH && path.basename(process.argv[1] || '') === 'tower-crane.js') {
+  const exists = fs.existsSync;
+  fs.existsSync = function noShell(file) {
+    if (file === '/bin/sh') return false;
+    return exists.call(this, file);
+  };
+}
+
 if (env.HOOK_CLOCK_FILE) {
   const DateClass = Date;
   const clock = () => Number(fs.readFileSync(env.HOOK_CLOCK_FILE, 'utf8'));
