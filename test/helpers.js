@@ -278,7 +278,25 @@ function context(t, base, options = {}) {
     },
     cleanup: async () => {
       try { await stopDetached(ctx.detached()); }
-      finally { fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); }
+      finally {
+        // A killed monitor cannot close its broker's socket outside this fixture.
+        try {
+          const brokers = path.join(ctx.state, 'brokers');
+          if (fs.existsSync(brokers)) {
+            for (const agent of fs.readdirSync(brokers, { withFileTypes: true }).filter((entry) => entry.isDirectory())) {
+              const file = path.join(brokers, agent.name, 'broker.json');
+              let socket;
+              try { ({ socket } = JSON.parse(fs.readFileSync(file, 'utf8'))); }
+              catch (error) { if (error.code === 'ENOENT' || error instanceof SyntaxError) continue; throw error; }
+              if (typeof socket === 'string' && path.basename(socket) === 's' && /^tower-crane-[A-Za-z0-9]{6}$/.test(path.basename(path.dirname(socket)))) {
+                fs.rmSync(path.dirname(socket), { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+              }
+            }
+          }
+        } finally {
+          fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+        }
+      }
     },
     run: (args, opts = {}) => fixtureInit(ctx, args, opts, (a, o) => run(a, withHooks(ctx, o))),
     runAsync: (args, opts = {}) => runAsync(args, withHooks(ctx, opts)),
