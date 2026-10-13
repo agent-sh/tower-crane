@@ -901,7 +901,9 @@ function queued(t) {
   const suite = path.join(f.h.base, 'suite.js');
   fs.writeFileSync(suite, `require('node:fs').appendFileSync(${JSON.stringify(log)}, JSON.stringify(
   ['T1.txt', 'T2.txt', 'moved.txt'].filter((f) => require('node:fs').existsSync(f))) + '\\n');\n`);
-  f.h.ok(['project', 'set', '--tests-cmd', `${shellQuote(process.execPath)} ${shellQuote(suite)}`]);
+  // Each change adds only a text file, which prove would refuse without a test. Run-only runs the suite at the head
+  // instead; the suite log keeps only the head checks, the runs that merge in main's moved.txt.
+  f.h.ok(['project', 'set', '--tests-cmd', `${shellQuote(process.execPath)} ${shellQuote(suite)}`, '--tests-mode', 'run-only']);
   // The shared stack template submits docs tasks, and a submitted task's kind
   // cannot change, so these copies are written as code tasks.
   const tasks = f.h.readState('tasks.json');
@@ -916,7 +918,8 @@ function queued(t) {
   f.acceptCode = (id) => f.h.ok(['accept', id, '--waive', 'tests', '--waive', 'clean', '--waive', 'review', '--waive', 'ci',
     '--reason', 'offline stack fixture']);
   f.consume = () => f.h.run(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
-  f.suites = () => (fs.existsSync(log) ? fs.readFileSync(log, 'utf8').trim().split('\n').map(JSON.parse) : []);
+  f.suites = () => (fs.existsSync(log) ? fs.readFileSync(log, 'utf8').trim().split('\n').map(JSON.parse) : [])
+    .filter((files) => files.includes('moved.txt'));
   f.checks = () => fs.readFileSync(path.join(f.h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse)
     .filter((e) => e.cmd === 'head check');
   f.merges = () => routes(f);

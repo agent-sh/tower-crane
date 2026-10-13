@@ -304,13 +304,29 @@ test('a spawned worker claims a task whose dependency merged while gh api is den
   f.h.git(['commit', '-qam', 'T2 rework'], wt.path);
   worker(f);
   const before = apiCalls(f).length;
+  const eventFile = path.join(f.h.state, 'events.jsonl');
+  const beforeEvents = fs.readFileSync(eventFile, 'utf8').trim().split('\n').length;
   f.write((d) => { d.apiFailure = DENIED_API; });
   const spawned = f.h.run(['spawn', '--task', 'T2', '--wait']);
   assert.equal(spawned.code, 0, spawned.stderr);
-  assert.equal(f.h.json(['task', 'show', 'T2']).status, 'submitted');
-  // The worker's submit reads its PR's checks through gh api, which is refused here and does not block the submit.
-  const submitted = apiCalls(f).slice(before);
-  assert.ok(submitted.every((c) => /\/check-(runs|suites)\?/.test(c.args[1])), 'only the submit reads gh api after the claim');
+  const task = f.h.json(['task', 'show', 'T2']);
+  const events = fs.readFileSync(eventFile, 'utf8').trim().split('\n').slice(beforeEvents).map(JSON.parse);
+  const claim = events.find((e) => e.task === 'T2' && e.cmd === 'claim');
+  const submit = events.find((e) => e.task === 'T2' && e.cmd === 'submit');
+  assert.ok(claim, 'the worker claims the task after its dependency merged');
+  assert.ok(submit, 'denied API access does not refuse the worker submission');
+  assert.equal(submit.agent, claim.agent);
+  // Both CI observations fail under this fixture's denied API, so rework follows the one retry.
+  const rework = events.find((e) => e.task === 'T2' && e.cmd === 'rework');
+  assert.ok(rework, 'the submitted task was sent back before refill could claim it');
+  assert.ok(task.notes.some((note) => note.text === `rework: ${rework.detail.reason}`));
+  assert.deepEqual(task.evidence.filter((e) => e.type === 'ci' && e.revision === rework.detail.previous_revision)
+    .map((e) => [e.ok, e.infrastructure_failure === true]), [[false, true], [false, true]]);
+  assert.equal(events.filter((e) => e.task === 'T2' && e.cmd === 'check ci').length, 2);
+  assert.match(rework.detail.reason, /^ci failed at .*is not allowed by this agent's agent file/s);
+  // The dependency already merged, so neither the claim nor the later reaction needs the stack API.
+  const inspections = apiCalls(f).slice(before);
+  assert.ok(inspections.every((c) => /\/check-(runs|suites)\?/.test(c.args[1])), 'only CI inspections read gh api after the claim');
 });
 
 test('a spawned worker claim reads the recorded stack and makes no gh api call while its dependency is submitted', (t) => {
