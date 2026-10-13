@@ -90,6 +90,15 @@ test('blocking areas handle markdown, path variants and follow-ups', () => {
     ['duplicate', '- lib/retry.js:12 - duplicate\n- lib/retry.js:40 - variant', ['lib/retry.js']],
     ['nonblocking', 'lib/retry.js:12 - duplicate\nNonblocking: lib/store.js:8 - later', ['lib/retry.js']],
     ['fenced probe', '## Blocking findings\nlib/retry.js:12 - duplicate\n```\nlib/store.js:8 - fixture\n```', ['lib/retry.js']],
+    ['fixed blocker before heading', '## Prior blockers\nlib/retry.js:12 - fixed\n## Blocking findings\nlib/store.js:8 - new failure', ['lib/store.js']],
+    ['fixed status before plain heading', 'Earlier lib/retry.js:12 is fixed.\nBlocking: 1 finding.\nlib/store.js:8 - new failure', ['lib/store.js']],
+    ['reproduction reference', '## Blocking findings\n- lib/retry.js:12 - duplicate; reproduce using lib/store.js:8\n  - Run lib/fixture.js:20 - fixture setup\n## Verification\nlib/check.js:10 - passed', ['lib/retry.js']],
+    ['reproduction subsection', '## Blocking findings\nlib/retry.js:12 - duplicate\n### Reproduction\nlib/fixture.js:20 - setup', ['lib/retry.js']],
+    ['plain reproduction label', 'Blocking: 1 finding.\nlib/retry.js:12 - duplicate\nSteps to reproduce:\nlib/fixture.js:20 - setup', ['lib/retry.js']],
+    ['review with no blockers', 'Review (Tower Crane, clean context)\nSHA: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n## Prior blockers\nlib/retry.js:12 - fixed\n## Blocking findings\nNone\n## Follow-ups\nlib/store.js:8 - later', []],
+    ['header mentions path', 'Review (Tower Crane, clean context)\nVerified lib/retry.js:12\n## Blocking findings\nlib/store.js:8 - new failure', ['lib/store.js']],
+    ['only nonblocking sections', '## Follow-ups\nlib/store.js:8 - later\n## Tests\nlib/retry.js:12 - passed', []],
+    ['review without blocking section', 'Review (Tower Crane, clean context)\nlib/retry.js:12 - fixed', []],
     ['no paths', '2 blocking findings, missing retry guards', []],
   ];
   for (const [name, body, expected] of cases) assert.deepEqual(Reviews.areas(body), expected, name);

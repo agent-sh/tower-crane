@@ -703,8 +703,10 @@ test('a remotely merged accepted PR remains actionable until its audited merge r
 function reviewComments(h, id) {
   const ref = 'https://github.com/acme/demo/pull/7#issuecomment-23';
   const body = `Review (Tower Crane, clean context)\n\nBlocking: 2 findings at ${h.sha}.\n\n`
+    + '## Prior blockers\n\nEarlier lib/fixed.js:7 is fixed.\n\n## Blocking findings\n\n'
     + '- [P1] lib/store.js:12 - First finding: reject duplicate writes - Prevent corruption.\n'
-    + '- [P2] lib/cache.js:31 - Second finding: invalidate deleted entries - Prevent stale reads.\n';
+    + '- [P2] lib/cache.js:31 - Second finding: invalidate deleted entries - Prevent stale reads.\n'
+    + '\nReproduce through lib/fixture.js:50, then run the existing checks.\n';
   h.submit(id, 7);
   h.reviewer(id, 'reviewer', h.sha);
   h.ok(['evidence', id, '--revision', h.revision(id), '--type', 'review', '--fail', '--sha', h.sha, '--agent', 'reviewer',

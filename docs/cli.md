@@ -85,7 +85,7 @@ Lock attempts use private staging directories named with the process pid and a f
 | | |
 | `task list [--status S]` | read; `S` is a status, `ready` or `blocked` |
 | | |
-| `task note ID TEXT [--kind scope-ruling]` | append a note; a scope-ruling records a design change after repeated review failures |
+| `task note ID TEXT [--kind scope-ruling]` | append a note; a scope-ruling records a design change after repeated review failures and clears the dispatch gate. Only the orchestrator or owner may record it |
 | | |
 | `task show ID` | read; `S` is a status, `ready` or `blocked` |
 | | |

@@ -239,7 +239,7 @@ const COMMANDS = [
 
   { section: 'Plan', name: 'task list', usage: '[--status S]', summary: 'list tasks (S: a status, ready or blocked)', flags: { status: str('S', 'todo, in_progress, submitted, accepted, rework, cancelled, ready or blocked') }, description: "read; `S` is a status, `ready` or `blocked`", run: T.taskList },
 
-  { section: 'Plan', name: 'task note', pos: ['ID', 'TEXT...'], usage: 'ID TEXT [--kind scope-ruling]', summary: 'append a note; a scope-ruling records a design change after repeated review failures', flags: { kind: str('scope-ruling', 'operational (orchestrator or owner): record a design change and clear the repeated-review dispatch gate') }, run: T.taskNote },
+  { section: 'Plan', name: 'task note', pos: ['ID', 'TEXT...'], usage: 'ID TEXT [--kind scope-ruling]', summary: 'append a note', description: 'append a note; a scope-ruling records a design change after repeated review failures and clears the dispatch gate. Only the orchestrator or owner may record it', flags: { kind: str('scope-ruling', 'operational (orchestrator or owner): record a design change and clear the repeated-review dispatch gate') }, run: T.taskNote },
 
   { section: 'Plan', name: 'task show', pos: ['ID'], usage: 'ID', summary: 'show one task with its gates, evidence and notes', description: "read; `S` is a status, `ready` or `blocked`", run: T.taskShow },
 
