@@ -4,7 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { cachedFixture, makeRepo } = require('./helpers');
+const { cachedFixture, makeRepo, run } = require('./helpers');
 
 // A task, a bare origin and a clone of it standing in for another machine;
 // built once per process for each base and copied for each test.
@@ -498,9 +498,10 @@ test('a task worktree keeps its admin directory outside the git directory\'s wor
   const name = path.basename(wt.path);
   const entry = path.join(common, 'worktrees', name);
   const admin = path.join(path.dirname(wt.path), '.git-admin', name);
-  assert.equal(fs.readlinkSync(entry), admin);
-  assert.equal(fs.readFileSync(path.join(wt.path, '.git'), 'utf8'), `gitdir: ${admin}\n`);
-  assert.equal(fs.readFileSync(path.join(admin, 'commondir'), 'utf8'), `${common}\n`);
+  // Relative, so a move of the project directory keeps them.
+  assert.equal(fs.readlinkSync(entry), path.relative(path.dirname(entry), admin));
+  assert.equal(fs.readFileSync(path.join(wt.path, '.git'), 'utf8'), `gitdir: ${path.relative(wt.path, admin)}\n`);
+  assert.equal(fs.readFileSync(path.join(admin, 'commondir'), 'utf8'), `${path.relative(admin, common)}\n`);
   assert.equal(fs.realpathSync.native(h.git(['rev-parse', '--path-format=absolute', '--git-common-dir'], wt.path)), common);
   fs.writeFileSync(path.join(wt.path, 'f.txt'), 'f\n');
   h.git(['add', 'f.txt'], wt.path);
@@ -509,7 +510,42 @@ test('a task worktree keeps its admin directory outside the git directory\'s wor
   assert.ok(h.registers(wt.path));
   h.ok(['task', 'update', 'T1', '--status', 'cancelled']);
   assert.ok(!h.registers(wt.path), 'git forgets the worktree');
-  assert.ok(!fs.existsSync(entry) && !fs.existsSync(admin), 'the link and the admin directory are gone');
+  // lstat: a dangling link would pass an existsSync check.
+  for (const p of [entry, admin]) assert.equal(fs.lstatSync(p, { throwIfNoEntry: false }), undefined, `${p} is gone`);
+});
+
+// The repository and the worktrees root sit side by side in the project
+// directory; moving it keeps a task worktree working, and the next prune
+// does not take its admin directory for a stale one.
+test('a moved project directory keeps its relocated task worktree, and the next worktree call relinks it before prune', { skip: process.platform === 'win32' && 'links need privileges on Windows' }, (t) => {
+  const h = makeRepo(t);
+  h.init();
+  h.ok(['task', 'add', '--title', 'Moved', '--acceptance', 'not needed']);
+  const wt = h.json(['worktree', 'T1']);
+  fs.writeFileSync(path.join(wt.path, 'f.txt'), 'f\n');
+  h.git(['add', 'f.txt'], wt.path);
+  h.git(['commit', '-qm', 'f'], wt.path);
+  fs.writeFileSync(path.join(wt.path, 'staged.txt'), 'staged\n');
+  h.git(['add', 'staged.txt'], wt.path);
+  const head = h.git(['rev-parse', 'HEAD'], wt.path);
+  const project = path.join(h.base, 'moved');
+  fs.mkdirSync(project);
+  const repo = path.join(project, path.basename(h.repo));
+  const moved = path.join(project, path.basename(path.dirname(wt.path)), path.basename(wt.path));
+  fs.renameSync(h.repo, repo);
+  fs.renameSync(path.dirname(wt.path), path.dirname(moved));
+  // git alone already works in the moved worktree.
+  assert.equal(h.git(['rev-parse', 'HEAD'], moved), head);
+  assert.equal(h.git(['status', '--porcelain'], moved), 'A  staged.txt');
+  // git still names the old place, and its prune would empty the admin directory.
+  assert.match(h.git(['worktree', 'list', '--porcelain'], repo), /prunable/);
+  const r = run(['worktree', 'T1', '--json'], { cwd: repo, env: h.env });
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(JSON.parse(r.stdout).path, moved);
+  const listing = h.git(['worktree', 'list', '--porcelain'], repo);
+  assert.doesNotMatch(listing, /prunable/);
+  assert.match(listing, new RegExp(`^worktree ${moved.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'm'));
+  assert.equal(h.git(['status', '--porcelain'], moved), 'A  staged.txt', 'the index survived');
 });
 
 test('cancelling keeps a worktree that git still has locked', (t) => {

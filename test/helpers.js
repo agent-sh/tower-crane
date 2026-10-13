@@ -253,34 +253,15 @@ function cachedFixture(t, key, build) {
   return Object.assign(h, JSON.parse(rewrite(JSON.stringify(template.fields))));
 }
 
-// Relinks a copied repository's task worktrees to the copy. Their admin
-// directories in repo-worktrees/.git-admin, the links to them in the git
-// directory's worktrees/ and their .git files carry absolute paths
-// (lib/worktree.js relocateAdmin), which git worktree repair does not
-// follow; it then fixes the rest.
+// Relinks a copied repository's task worktrees to the copy. A copy turns the
+// link to each relocated admin directory into an absolute one naming the
+// template, and git worktree repair does not follow those links:
+// lib/worktree.js relinkAdmins joins them as after a project move, and git
+// repairs the rest.
 function repairWorktrees(h) {
   const root = path.join(h.base, 'repo-worktrees');
   if (!fs.existsSync(root)) return;
-  const admin = path.join(root, '.git-admin');
-  for (const name of fs.existsSync(admin) ? fs.readdirSync(admin) : []) {
-    const dir = path.join(admin, name);
-    fs.writeFileSync(path.join(dir, 'commondir'), `${fs.realpathSync.native(path.join(h.repo, '.git'))}\n`);
-    const link = path.join(h.repo, '.git', 'worktrees', name);
-    if (fs.lstatSync(link, { throwIfNoEntry: false })?.isSymbolicLink()) {
-      fs.unlinkSync(link);
-      fs.symlinkSync(dir, link, 'dir');
-    }
-    // Opened as it is, not checked first: a removed worktree has no .git file.
-    let fd;
-    try { fd = fs.openSync(path.join(root, name, '.git'), 'r+'); } catch (e) { if (e.code !== 'ENOENT') throw e; }
-    if (fd === undefined) continue;
-    try {
-      fs.ftruncateSync(fd, 0);
-      fs.writeSync(fd, `gitdir: ${dir}\n`, 0);
-    } finally {
-      fs.closeSync(fd);
-    }
-  }
+  require('../lib/worktree').relinkAdmins(h.repo, path.join(h.repo, '.git'));
   const trees = fs.readdirSync(root).filter((name) => name !== '.git-admin').map((name) => path.join(root, name));
   if (trees.length) h.git(['worktree', 'repair', ...trees]);
 }
