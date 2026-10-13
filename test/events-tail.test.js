@@ -5,13 +5,14 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
-const { once } = require('node:events');
+const { EventEmitter, once } = require('node:events');
 const { cachedFixture, HOOKS, BIN } = require('./helpers');
 const { EventReader } = require('../lib/event-reader');
 const S = require('../lib/state');
 const T = require('../lib/tasks');
 const hooksPath = HOOKS.replace(/\\/g, '/');
 const budgetPath = path.join(__dirname, 'fixtures', 'events-read-budget.js').replace(/\\/g, '/');
+const resetPath = path.join(__dirname, 'fixtures', 'event-reset-notice.js').replace(/\\/g, '/');
 
 function largeFixture(t) {
   return cachedFixture(t, 'large-events', (h) => {
@@ -206,3 +207,123 @@ test('orchestrator lease writes leave frozen retained snapshots unchanged', (t) 
     assert.equal(h.readState('tasks.json').orchestrator_lease.session_id, session.session_id);
   }
 });
+
+function restoreFixture() {
+  return cachedFixture(null, 'restore-events', (h) => {
+    h.init();
+    for (let i = 1; i <= 3; i++) h.ok(['msg', '--to', 'orchestrator', `historical ${i}`]);
+  });
+}
+
+function resetReader(t, h, args) {
+  const changes = new EventEmitter();
+  const notices = [];
+  let output = '';
+  let stderr = '';
+  const child = cp.spawn(process.execPath, [BIN, ...args], {
+    cwd: h.repo, env: { ...h.env, NODE_OPTIONS: `--require "${hooksPath}" --require "${resetPath}"` },
+    stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
+  });
+  const closed = once(child, 'close');
+  child.stdout.on('data', (data) => { output += data; changes.emit('change'); });
+  child.stderr.on('data', (data) => { stderr += data; });
+  child.on('message', (message) => { notices.push(message); changes.emit('change'); });
+  const timer = setTimeout(() => child.kill(), 30000);
+  const stop = async () => {
+    if (child.exitCode === null && child.signalCode === null) {
+      if (child.connected) child.send('stop');
+      else child.kill();
+    }
+    return await closed;
+  };
+  t.after(async () => {
+    await stop();
+    clearTimeout(timer);
+    await h.cleanup();
+  });
+  const until = async (probe) => {
+    const signal = AbortSignal.timeout(15000);
+    for (;;) {
+      const value = probe();
+      if (value) return value;
+      await Promise.race([
+        once(changes, 'change', { signal }),
+        closed.then(() => { throw new Error(stderr || 'reader exited before its notification'); }),
+      ]);
+    }
+  };
+  const lines = () => output.slice(0, output.lastIndexOf('\n') + 1).split('\n').filter(Boolean).map(JSON.parse);
+  return { child, notices, changes, closed, stop, until, lines };
+}
+
+function restoreLog(h, smaller) {
+  const file = path.join(h.state, 'events.jsonl');
+  const original = fs.readFileSync(file, 'utf8');
+  const restored = smaller ? original.trimEnd().split('\n').slice(0, -1).join('\n') + '\n' : original;
+  fs.writeFileSync(file + '.restore', restored);
+  fs.renameSync(file + '.restore', file);
+  return restored.trimEnd().split('\n').map(JSON.parse).filter((row) => row.cmd === 'msg').map((row) => row.detail.text);
+}
+
+function appendAfterRestore(h) {
+  h.ok(['msg', '--to', 'orchestrator', 'after restore']);
+  return JSON.parse(fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trimEnd().split('\n').at(-1)).id;
+}
+
+for (const follow of [false, true]) for (const smaller of [false, true]) {
+  test(`restored history does not wake wait (follow: ${follow}, smaller: ${smaller})`, async (t) => {
+    const h = restoreFixture();
+    const reader = resetReader(t, h, ['wait', '--observe', '--agent', 'orchestrator',
+      ...(follow ? ['--follow'] : ['--timeout', '10'])]);
+    await reader.until(() => reader.notices.some((notice) => !notice.reset));
+    restoreLog(h, smaller);
+    await reader.until(() => reader.notices.some((notice) => notice.reset));
+    const id = appendAfterRestore(h);
+    if (follow) {
+      await reader.until(() => reader.lines().some((row) => row.id === id));
+      await reader.stop();
+    } else {
+      const [code] = await reader.closed;
+      assert.equal(code, 0);
+    }
+    assert.deepEqual(reader.lines().filter((row) => row.type !== 'ready').map((row) => row.id), [id]);
+  });
+}
+
+for (const smaller of [false, true]) {
+  test(`restored owner history stays queryable without SSE replay (smaller: ${smaller})`, async (t) => {
+    const h = restoreFixture();
+    const server = resetReader(t, h, ['serve', '--agent', 'viewer', '--port', '0', '--json']);
+    const { url } = await server.until(() => server.lines()[0]);
+    const controller = new AbortController();
+    const response = await fetch(new URL('/events', url), { signal: controller.signal });
+    const stream = response.body.getReader();
+    let output = '';
+    const drained = (async () => {
+      try {
+        for (;;) {
+          const { value, done } = await stream.read();
+          if (done) return;
+          output += Buffer.from(value).toString('utf8');
+          server.changes.emit('change');
+        }
+      } catch (error) {
+        if (!controller.signal.aborted) throw error;
+      }
+    })();
+    t.after(async () => { controller.abort(); await drained; });
+    await server.until(() => output.includes(': connected'));
+    const history = restoreLog(h, smaller);
+    const restored = await fetch(new URL('/api/messages?after=0', url));
+    assert.deepEqual((await restored.json()).messages.map((row) => row.detail.text), history);
+    await server.until(() => server.notices.some((notice) => notice.reset));
+    const id = appendAfterRestore(h);
+    await server.until(() => output.includes(id));
+    controller.abort();
+    await drained;
+    await server.stop();
+    const wakes = output.split('\n\n').filter((block) => block.startsWith('event: wake'))
+      .map((block) => JSON.parse(block.split('data: ')[1]));
+    assert.deepEqual(wakes.map((wake) => wake.id), [id]);
+  });
+}

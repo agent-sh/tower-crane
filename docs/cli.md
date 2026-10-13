@@ -568,7 +568,7 @@ An orchestrator still requires both technical settings when listed in `answerers
 
 ## Event wakeups
 
-`wait` and the automation it hosts tail `events.jsonl` while running. Idle fallback checks do not reread historical event bytes or unchanged validated state snapshots. Partial lines stay buffered; truncating or replacing the log resets the reader to its beginning. Byte cursors belong to one log, so restart clients with a fresh cursor after replacing it.
+`wait` and the automation it hosts tail `events.jsonl` while running. Idle fallback checks do not reread historical event bytes or unchanged validated state snapshots. Partial lines stay buffered. Truncating or replacing the log rebuilds retained history from its beginning; active waits resume wake delivery from the new end and do not replay restored records. Byte cursors belong to one log, so restart clients with a fresh cursor after replacing it.
 
 The orchestrator does not run a waiter of its own. Its harness delivers events into the session (table below); `tower-crane wait` is the interface underneath and the fallback for a harness with nothing better.
 
@@ -691,7 +691,7 @@ The Settings view (`/settings`) edits the default harness, every rung and each t
 
 ### serve endpoints
 
-The server tails the event log for reloads and owner messages, and retains history for repeated page and message requests. Its directory watch has a one-second fallback check even when no watch error occurs.
+The server tails the event log for reloads and owner messages, and retains history for repeated page and message requests. Its directory watch has a one-second fallback check even when no watch error occurs. A replaced or truncated log rebuilds queryable message history, but SSE wakes resume from the new end without replaying restored messages.
 
 | Method and path | Does |
 |---|---|
