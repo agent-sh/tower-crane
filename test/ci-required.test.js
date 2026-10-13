@@ -79,7 +79,7 @@ test('pull requests run CI for every base, with main pushes, daily and manual fu
   assert.match(workflow, /^ {2}workflow_dispatch:\s*$/m);
 });
 
-test('PRs run Windows shards, proofs and shared checks; other events run all nine shards', () => {
+test('PRs run Windows shards and shared checks; other events run all nine shards, proofs and repeats', () => {
   const workflow = readWorkflow(path.resolve(__dirname, '..'));
   assert.deepEqual(jobNames(workflowMatrix(workflow, 'pull_request')), REQUIRED.filter((name) => name.includes('windows-latest')));
   for (const event of ['push', 'schedule', 'workflow_dispatch']) {
@@ -93,11 +93,17 @@ test('PRs run Windows shards, proofs and shared checks; other events run all nin
   assert.match(testJob, /- run: npm test\n[\s\S]*TC_TEST_SHARD: \$\{\{ matrix\.shard \}\}/);
   for (const id of ['gate-scratch', 'model-swap']) {
     const job = workflow.split(`\n  ${id}:\n`)[1].split(/\n {2}[\w-]+:\n/)[0];
-    assert.doesNotMatch(job, /^ {4}if:/m, `${id} also runs on pull requests`);
+    assert.match(job, /^ {4}if: github\.event_name != 'pull_request'$/m, `${id} skips pull requests`);
     assert.match(job, /- run: node scripts\/probe-/);
   }
-  assert.match(workflow, /^concurrency:\n {2}group: \$\{\{ github\.event_name == 'pull_request' && format\('ci-pr-\{0\}', github\.event\.pull_request\.number\) \|\| format\('ci-run-\{0\}', github\.run_id\) \}\}\n {2}cancel-in-progress: \$\{\{ github\.event_name == 'pull_request' \}\}\n/m,
-    'only PR runs share a group; unique run IDs keep pending and running non-PR runs independent');
+  // Flake repeat loops cost hosted Windows time on every PR; they run after merge and daily.
+  const repeats = [...testJob.matchAll(/- name: Repeat [^\n]+\n {8}if: ([^\n]+)/g)].map((m) => m[1]);
+  assert.equal(repeats.length, 3);
+  for (const condition of repeats) assert.match(condition, /^github\.event_name != 'pull_request' && /);
+  // GitHub keeps one running and one pending run per group, and a newer run replaces the pending one.
+  // Main pushes share a group so only the newest pending head waits; scheduled and manual runs stay unique.
+  assert.match(workflow, /^concurrency:\n {2}group: \$\{\{ github\.event_name == 'pull_request' && format\('ci-pr-\{0\}', github\.event\.pull_request\.number\) \|\| github\.event_name == 'push' && 'ci-main-push' \|\| format\('ci-run-\{0\}', github\.run_id\) \}\}\n {2}cancel-in-progress: \$\{\{ github\.event_name == 'pull_request' \}\}\n/m,
+    'PR runs cancel per PR; main pushes share one group that never cancels a running run; scheduled and manual runs are unique');
 });
 
 test('the stack section says hosted CI runs on every stack member at its own base', () => {
@@ -138,7 +144,7 @@ function fixture(t, withPr = true) {
   });
   const { sha } = h;
   return {
-    check({ pr = { mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }, runs = REQUIRED.map((name) => run(name)), ci = {}, suites: given, workflows = [] } = {}) {
+    check({ pr = { mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }, runs = REQUIRED.map((name) => run(name)), ci = {}, suites: given, workflows = [], spawnFailure = null } = {}) {
       const project = h.readState('project.json');
       h.writeState('project.json', { ...project, ci: { required: REQUIRED, capped_review: CAP_POLICY, ...ci } });
       const file = path.join(h.base, 'github.json');
@@ -151,7 +157,17 @@ function fixture(t, withPr = true) {
         };
       });
       fs.writeFileSync(file, JSON.stringify({ sha, pr, runs, suites, workflows }));
-      const r = cp.spawnSync(process.execPath, ['--require', github, BIN, 'check', 'ci', 'T1', '--agent', 'checker', '--json'], {
+      const preload = [];
+      if (spawnFailure) {
+        const failureFile = path.join(h.base, 'gh-failure.cjs');
+        fs.writeFileSync(failureFile, `const cp = require('node:child_process');
+const original = cp.spawnSync;
+cp.spawnSync = (cmd, args, opts) => cmd === 'gh' && args[0] === 'api'
+  ? ${JSON.stringify(spawnFailure)} : original(cmd, args, opts);
+`);
+        preload.push('--require', failureFile);
+      }
+      const r = cp.spawnSync(process.execPath, ['--require', github, ...preload, BIN, 'check', 'ci', 'T1', '--agent', 'checker', '--json'], {
         cwd: h.repo, env: { ...h.env, TEST_GITHUB: file }, encoding: 'utf8', timeout: 60000,
       });
       assert.ok(r.stdout, r.stderr);
@@ -164,6 +180,17 @@ function fixture(t, withPr = true) {
     },
   };
 }
+
+test('CI evidence records an empty-output gh startup failure', (t) => {
+  const r = fixture(t, false).check({
+    spawnFailure: { status: null, signal: null, error: { code: 'EAGAIN', message: 'spawnSync gh EAGAIN' } },
+  });
+  assert.equal(r.code, 1);
+  assert.equal(r.ok, false);
+  assert.match(r.summary, /status=null/);
+  assert.match(r.summary, /EAGAIN: spawnSync gh EAGAIN/);
+  assert.match(r.summary, /no output/);
+});
 
 test('documented PR job lists pass CI with Windows-only check runs', (t) => {
   const root = path.resolve(__dirname, '..');

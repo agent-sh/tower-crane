@@ -1,0 +1,1 @@
+- Main push CI runs share one concurrency group without cancel-in-progress. A running main run always finishes; a newer push replaces the pending one, so only the newest main head waits for hosted runners and covers every earlier commit. PR runs still cancel per PR, and scheduled and manual runs keep unique groups so none is replaced.

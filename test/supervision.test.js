@@ -51,7 +51,7 @@ function controlledBackoff(h) {
   };
 }
 
-function setup(t, { failures = 1, error = '75', records = null, hold = 0, waitForFinish = false, config = {}, env = {}, busy = false, claimDelay = 0, claim = true, sessionReceipt = false } = {}) {
+function setup(t, { failures = 1, error = '75', records = null, hold = 0, waitForFinish = false, config = {}, env = {}, busy = false, claimDelay = 0, claim = true, sessionReceipt = false, publishBarrier = false } = {}) {
   const h = makeTaskRepo(t, [{
     args: ['--title', 'Supervise an outage', '--tier', 'easy', '--acceptance', 'same session reruns'],
     brief: 'Finish the task.\n',
@@ -70,7 +70,18 @@ if (!attempts.length && ${claim}) {
 const task = JSON.parse(cli(['task', 'show', 'T1', '--json']));
 attempts.push({ agent: process.env.TOWER_CRANE_AGENT, session: process.env.TOWER_CRANE_SESSION, retry: process.env.TOWER_CRANE_RETRY,
   cwd: process.cwd(), claim: task.claim, pid: process.pid });
-fs.writeFileSync(file, JSON.stringify(attempts));
+${publishBarrier ? `if (attempts.length === 2) {
+  const write = fs.writeFileSync;
+  fs.writeFileSync = (target, data) => {
+    const fd = fs.openSync(target, 'w');
+    write(file + '.writing', '');
+    while (!fs.existsSync(file + '.publish')) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
+    try { write(fd, data); } finally { fs.closeSync(fd); }
+  };
+}` : ''}
+const pending = file + '.next-' + process.pid;
+fs.writeFileSync(pending, JSON.stringify(attempts));
+fs.renameSync(pending, file);
 ${sessionReceipt ? "console.log(JSON.stringify({ type: 'thread.started', thread_id: 'supervised-session' }));" : ''}
 ${busy ? "cp.spawn(process.execPath, ['-e', 'const end = Date.now() + 3500; while (Date.now() < end) {}'], { stdio: 'ignore' });" : ''}
 const finish = () => {
@@ -425,28 +436,36 @@ if (task === 'T1' && retry === 0) {
   assert.match(audit.find((e) => e.cmd === 'msg' && e.detail.to === 'orchestrator')?.detail.text || '', /without submit/);
 });
 
-test('a running process keeps its lease without claimant writes', async (t) => {
-  const h = setup(t, { failures: 0, waitForFinish: true });
-  const clockFile = path.join(h.base, 'clock');
-  const now = Date.now();
-  fs.writeFileSync(clockFile, String(now));
-  const spawned = h.json(['spawn', '--task', 'T1'], {
-    env: { NODE_OPTIONS: `--require "${HOOKS.replace(/\\/g, '/')}"`, HOOK_CLOCK_FILE: clockFile },
+// The renewal is due only if the worker's own one-minute claim is the last
+// one: a supervisor claim landing after it would stretch the lease to the
+// project default. Both launch paths take the lease before the harness starts;
+// Linux runs both, Windows has only the handshake.
+for (const [launch, hooks] of [['the lease gate', {}], ['the launch handshake', NO_SH]]) {
+  test(`a running process keeps its lease without claimant writes (${launch})`, {
+    skip: process.platform === 'win32' && !hooks.HOOK_NO_SH && 'Windows launches through the handshake',
+  }, async (t) => {
+    const h = setup(t, { failures: 0, waitForFinish: true });
+    const clockFile = path.join(h.base, 'clock');
+    const now = Date.now();
+    fs.writeFileSync(clockFile, String(now));
+    const spawned = h.json(['spawn', '--task', 'T1'], {
+      env: { NODE_OPTIONS: `--require "${HOOKS.replace(/\\/g, '/')}"`, HOOK_CLOCK_FILE: clockFile, ...hooks },
+    });
+    try {
+      await until(() => h.readAttempts().length === 1, 'worker did not claim');
+      fs.writeFileSync(clockFile, String(now + 40000));
+      await until(() => log(h).some((e) => e.cmd === 'renew'), 'live worker lease was not renewed');
+      const task = h.json(['task', 'show', 'T1']);
+      assert.equal(task.claim.since, h.readAttempts()[0].claim.since);
+      assert.equal(task.claim.agent, spawned.agent);
+      assert.ok(Date.parse(task.claim.until) > now + 60000);
+      assert.equal(task.run.phase, 'running');
+    } finally {
+      fs.writeFileSync(`${h.attempts}.finish`, '');
+    }
+    await until(() => h.json(['task', 'show', 'T1']).run?.phase === 'waiting', 'worker did not finish');
   });
-  try {
-    await until(() => h.readAttempts().length === 1, 'worker did not claim');
-    fs.writeFileSync(clockFile, String(now + 40000));
-    await until(() => log(h).some((e) => e.cmd === 'renew'), 'live worker lease was not renewed');
-    const task = h.json(['task', 'show', 'T1']);
-    assert.equal(task.claim.since, h.readAttempts()[0].claim.since);
-    assert.equal(task.claim.agent, spawned.agent);
-    assert.ok(Date.parse(task.claim.until) > now + 60000);
-    assert.equal(task.run.phase, 'running');
-  } finally {
-    fs.writeFileSync(`${h.attempts}.finish`, '');
-  }
-  await until(() => h.json(['task', 'show', 'T1']).run?.phase === 'waiting', 'worker did not finish');
-});
+}
 
 test('release during backoff fences the old supervisor from a replacement claim', async (t) => {
   const h = setup(t, { failures: 9, config: { backoff_ms: 1400, max_backoff_ms: 1400 } });
@@ -1101,6 +1120,20 @@ fs.writeFileSync(process.argv[2], JSON.stringify({
   assert.equal(path.basename(captured.args[monitorIndex + 1]), 'job.json');
   assert.ok(!captured.args.some((arg) => arg.includes('x'.repeat(1024))), 'the prompt is not in monitor argv');
   assert.equal(h.json(['task', 'show', 'T1']).run.phase, 'waiting');
+});
+
+test('supervision attempt readers keep a complete snapshot during the next write', async (t) => {
+  const h = setup(t, { waitForFinish: true, publishBarrier: true });
+  const spawned = h.json(['spawn', '--task', 'T1']);
+  try {
+    await until(() => fs.existsSync(`${h.attempts}.writing`), 'second attempt did not start writing');
+    assert.equal(h.readAttempts().length, 1, 'readers keep the previous complete attempt list');
+  } finally {
+    fs.writeFileSync(`${h.attempts}.publish`, '');
+    fs.writeFileSync(`${h.attempts}.finish`, '');
+    await until(() => !detachedAlive({ pid: spawned.monitor_pid }), 'previous supervisor did not finish');
+  }
+  assert.equal(h.readAttempts().length, 2);
 });
 
 test('rework cannot resume a session while its transient rerun is still alive', async (t) => {
