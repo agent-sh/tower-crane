@@ -338,3 +338,83 @@ for (const where of ['beside the home', 'in /var/tmp']) {
     assert.ok(!fs.existsSync(path.join(caller, 'written')));
   });
 }
+
+// Found in review 2026-10-14: codex, with network on, does not block
+// connect() on a Unix socket, and the codex profile read /run whole. A codex
+// agent reached the user's session bus and ran a command on the host with
+// `systemd-run --user`, and the docker socket, which is root on the host for
+// a user in the docker group. Like claude's, the codex profile hides the
+// user's runtime directory and the docker and podman sockets. The probe uses
+// the host's real runtime directory; the command it tries only touches a
+// file in the test's directory.
+function hostBus() {
+  const skip = realCodexSandbox();
+  if (skip) return skip;
+  const runtime = process.env.XDG_RUNTIME_DIR || (uid === null ? null : `/run/user/${uid}`);
+  if (!runtime || !fs.existsSync(path.join(runtime, 'bus'))) return 'needs a user session bus';
+  if (cp.spawnSync('systemd-run', ['--version']).status !== 0) return 'needs systemd-run';
+  return false;
+}
+
+function busProbe(h, targets, marker, out) {
+  return `const n=require("net"),f=require("fs"),cp=require("child_process");const o={};const t=${JSON.stringify(targets)};`
+    + `try{o.runtime=f.readdirSync(${JSON.stringify(path.dirname(targets.bus))}).length}catch(e){o.runtime="ERR "+e.code}`
+    + `const r=cp.spawnSync("systemd-run",["--user","--wait","-q","touch",${JSON.stringify(marker)}],{encoding:"utf8"});o.systemdRun=r.error?"ERR "+r.error.code:r.status;`
+    + `let left=Object.keys(t).length;for(const[k,p]of Object.entries(t)){const done=(v)=>{o[k]=v;if(--left===0)f.writeFileSync(${JSON.stringify(out)},JSON.stringify(o))};`
+    + `n.connect(p).on("connect",function(){this.destroy();done("CONNECTED")}).on("error",e=>done("ERR "+e.code))}`;
+}
+
+test('a real codex sandbox cannot reach the session bus or the docker socket, so systemd-run cannot run a host command', { skip: hostBus(), timeout: 300000 }, async (t) => {
+  const h = makeRepo(t);
+  h.init();
+  h.ok(['task', 'add', '--title', 'Bus probe', '--acceptance', 'the host stays out of reach']);
+  h.ok(['brief', 'set', 'T1', '-'], { input: 'bus probe\n' });
+  const runtime = process.env.XDG_RUNTIME_DIR || `/run/user/${uid}`;
+  const targets = { bus: path.join(runtime, 'bus') };
+  for (const p of ['/run/docker.sock', '/var/run/docker.sock']) if (fs.existsSync(p)) targets[p] = p;
+  const marker = path.join(h.base, 'host-command-ran');
+  const out = path.join(results(h), 'bus-probe.json');
+  const bin = standInCodex(h, busProbe(h, targets, marker, out));
+  const r = await h.runAsync(['spawn', '--role', 'small', '--task', 'T1', '--wait'],
+    { env: { ...h.env, PATH: `${bin}${path.delimiter}${h.env.PATH}`, XDG_RUNTIME_DIR: runtime, DBUS_SESSION_BUS_ADDRESS: `unix:path=${targets.bus}` } });
+  assert.equal(r.code, 0, `${r.stderr}\n${agentLog(h)}`);
+  assert.ok(fs.existsSync(out), `the probe ran\n${agentLog(h)}`);
+  const seen = JSON.parse(fs.readFileSync(out, 'utf8'));
+  console.log(`codex bus probe: ${JSON.stringify(seen)}`);
+  assert.equal(fs.existsSync(marker), false, 'systemd-run ran no command on the host');
+  assert.notEqual(seen.systemdRun, 0, 'systemd-run failed');
+  for (const k of Object.keys(targets)) assert.match(seen[k], /^ERR /, `${k} is out of reach`);
+  assert.match(String(seen.runtime), /^ERR /, 'the runtime directory is hidden');
+});
+
+test('a real codex sandbox with sandbox.session_bus connects to the bus socket and nothing else in the runtime directory', { skip: realCodexSandbox(), timeout: 300000 }, async (t) => {
+  const h = makeRepo(t);
+  h.init();
+  h.ok(['task', 'add', '--title', 'Bus grant', '--acceptance', 'only the bus is reachable']);
+  h.ok(['brief', 'set', 'T1', '-'], { input: 'bus grant\n' });
+  // A runtime directory of the test's own, so the probe never touches the
+  // user's session. In /var/tmp, outside the home, an entry of / exposes it
+  // as one does /run/user/<uid>.
+  const runtime = fs.existsSync('/var/tmp') ? fs.mkdtempSync('/var/tmp/tower-crane-runtime-') : path.join(h.base, 'runtime');
+  fs.mkdirSync(runtime, { recursive: true });
+  t.after(() => fs.rmSync(runtime, { recursive: true, force: true }));
+  const servers = [];
+  const listen = async (p) => {
+    const s = net.createServer((c) => { c.on('error', () => {}); c.end(); });
+    await new Promise((resolve) => s.listen(p, resolve));
+    servers.push(s);
+  };
+  t.after(() => { for (const s of servers) s.close(); });
+  const targets = { bus: path.join(runtime, 'bus'), other: path.join(runtime, 'other.sock') };
+  for (const p of Object.values(targets)) await listen(p);
+  const out = path.join(results(h), 'bus-grant.json');
+  h.ok(['project', 'set', '--session-bus', 'true']);
+  const bin = standInCodex(h, busProbe(h, targets, path.join(h.base, 'unused'), out));
+  const r = await h.runAsync(['spawn', '--role', 'small', '--task', 'T1', '--wait'],
+    { env: { ...h.env, PATH: `${bin}${path.delimiter}${h.env.PATH}`, XDG_RUNTIME_DIR: runtime, DBUS_SESSION_BUS_ADDRESS: '' } });
+  assert.equal(r.code, 0, `${r.stderr}\n${agentLog(h)}`);
+  const seen = JSON.parse(fs.readFileSync(out, 'utf8'));
+  console.log(`codex bus grant probe: ${JSON.stringify(seen)}`);
+  assert.equal(seen.bus, 'CONNECTED', 'the granted bus socket is reachable');
+  assert.match(seen.other, /^ERR /, 'another socket in the runtime directory is not');
+});

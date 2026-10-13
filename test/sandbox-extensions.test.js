@@ -463,6 +463,52 @@ test('claude: sandbox.session_bus grants the bus socket, read and write, and off
   assert.equal(JSON.parse(fs.readFileSync(path.join(h.state, 'project.json'), 'utf8')).sandbox, undefined);
 });
 
+// Found in review 2026-10-14: the codex profile read /run whole, so a codex
+// agent reached the user's session bus, and through it ran host commands with
+// systemd-run --user, and the docker socket. test/live-sandbox.test.js runs
+// both against the real codex sandbox.
+test('codex: the profile hides the runtime directory and container sockets, and sandbox.session_bus reopens the bus alone', { skip: (NO_STUBS || !fs.existsSync('/var/tmp')) && 'needs /var/tmp' }, (t) => {
+  const h = setup(t, 'codex');
+  const bin = path.join(h.base, 'bin');
+  fs.mkdirSync(bin);
+  const out = path.join(h.base, 'result.json');
+  fs.writeFileSync(path.join(bin, 'codex'), [
+    `#!${process.execPath}`, "'use strict';",
+    'const fs = require("node:fs"), path = require("node:path");',
+    `fs.writeFileSync(${JSON.stringify(out)}, JSON.stringify({ config: fs.readFileSync(path.join(process.env.CODEX_HOME, "config.toml"), "utf8"), env: { XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR, DBUS_SESSION_BUS_ADDRESS: process.env.DBUS_SESSION_BUS_ADDRESS } }));`,
+    'console.log(JSON.stringify({ type: "thread.started", thread_id: "bus" }));', '',
+  ].join('\n'), { mode: 0o755 });
+  // Outside the home, an entry of / exposes it as one does /run/user/<uid>.
+  // The stub never connects, so empty files stand in for the sockets.
+  const runtime = fs.realpathSync(fs.mkdtempSync('/var/tmp/tower-crane-runtime-'));
+  t.after(() => fs.rmSync(runtime, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(runtime, 'systemd'));
+  const bus = path.join(runtime, 'bus');
+  for (const f of [bus, path.join(runtime, 'systemd', 'private'), path.join(runtime, 'openssh_agent')]) fs.writeFileSync(f, '');
+  const env = { ...h.env, XDG_RUNTIME_DIR: runtime, DBUS_SESSION_BUS_ADDRESS: '', PATH: `${bin}${path.delimiter}${process.env.PATH}`, CODEX_HOME: '' };
+  const spawnSeen = () => {
+    releaseExited(h);
+    h.ok(['spawn', '--task', 'T1', '--wait'], { env });
+    const seen = JSON.parse(fs.readFileSync(out, 'utf8'));
+    return { rules: TOML.parse(seen.config).permissions['tower-crane'].filesystem, env: seen.env };
+  };
+  const uid = process.getuid();
+  const off = spawnSeen();
+  assert.equal(off.rules[runtime], 'none', 'the runtime directory is hidden');
+  for (const p of [`/run/user/${uid}`, '/run/docker.sock', '/var/run/docker.sock', '/run/podman'].filter((p) => fs.existsSync(p))) {
+    assert.equal(off.rules[fs.realpathSync(p)], 'none', `${p} is hidden`);
+  }
+  assert.equal(off.rules[bus], undefined, 'off by default: no bus grant');
+  assert.equal(off.env.DBUS_SESSION_BUS_ADDRESS, '');
+
+  h.ok(['project', 'set', '--session-bus', 'true']);
+  const on = spawnSeen();
+  assert.equal(on.rules[bus], 'read', 'the bus socket is reachable: a readable rule mounts it');
+  assert.equal(on.rules[runtime], undefined, 'the runtime directory itself stays, since codex cannot reopen a path inside a hidden one');
+  for (const p of ['systemd', 'openssh_agent']) assert.equal(on.rules[path.join(runtime, p)], 'none', `${p} stays hidden, the user manager socket included`);
+  assert.deepEqual(on.env, { XDG_RUNTIME_DIR: runtime, DBUS_SESSION_BUS_ADDRESS: `unix:path=${bus}` });
+});
+
 test('claude: sandbox.session_bus grants the sockets the worker env names, even when the spawning env names none', { skip: NO_STUBS }, (t) => {
   const h = setup(t, 'claude');
   const bin = path.join(h.base, 'bin');
