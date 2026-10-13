@@ -46,7 +46,7 @@ test('served pages and owner message requests reuse history on a 50 MiB log', as
   const child = cp.spawn(process.execPath, [BIN, 'serve', '--agent', 'viewer', '--port', '0', '--json'], {
     cwd: h.repo,
     env: { ...h.env, EVENT_READ_BUDGET: meter, NODE_OPTIONS: `--require "${hooksPath}" --require "${budgetPath}"` },
-    stdio: ['ignore', 'pipe', 'pipe'],
+    stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
   });
   const closed = once(child, 'close');
   const timer = setTimeout(() => child.kill(), 30000);
@@ -68,7 +68,8 @@ test('served pages and owner message requests reuse history on a 50 MiB log', as
     assert.equal(response.status, 200);
     assert.deepEqual((await response.json()).messages, []);
   }
-  child.kill('SIGTERM');
+  // Windows kill terminates immediately, without running the exit meter.
+  child.send('stop');
   const [code] = await closed;
   assert.equal(code, 0, stderr);
   const budget = JSON.parse(fs.readFileSync(meter, 'utf8'));
@@ -107,7 +108,12 @@ test('event tail buffers partial UTF-8 bytes and resets history only on truncati
   fs.appendFileSync(file, 'broken\n');
   fs.appendFileSync(file, line('renew'));
   assert.deepEqual(reader.read().rows.map((e) => e.cmd), ['renew']);
-  assert.equal(reader.offset, fs.statSync(file).size);
+  const fd = fs.openSync(file, 'r');
+  try {
+    assert.equal(reader.offset, fs.fstatSync(fd).size);
+  } finally {
+    fs.closeSync(fd);
+  }
 
   fs.writeFileSync(file, line('truncate'));
   let batch = reader.read();

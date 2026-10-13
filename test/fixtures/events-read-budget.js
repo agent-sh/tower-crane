@@ -40,3 +40,8 @@ fs.watch = function (...args) {
 process.on('exit', () => {
   fs.writeFileSync(process.env.EVENT_READ_BUDGET, JSON.stringify({ bytes: bytes - baseline, snapshotBytes: snapshotBytes - snapshotBaseline }));
 });
+if (process.connected) process.once('message', (message) => {
+  if (message !== 'stop') throw new Error('unexpected meter command');
+  process.disconnect();
+  process.emit('SIGTERM');
+});

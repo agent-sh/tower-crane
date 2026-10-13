@@ -27,12 +27,12 @@ async function measure(run) {
   const h = makeTaskRepo(null, [{ args: ['--title', 'Idle reader', '--tier', 'easy', '--acceptance', 'idle'], brief: 'Hold.' }]);
   const finish = path.join(h.base, 'finish');
   const ready = path.join(h.base, 'ready');
-  const script = `const fs = require('node:fs'); fs.writeFileSync(${JSON.stringify(ready)}, ''); setInterval(() => { if (fs.existsSync(${JSON.stringify(finish)})) process.exit(0); }, 100);`;
+  const harness = path.join(__dirname, '..', 'test', 'fixtures', 'bench-idle-harness.js');
   let waiter;
   let closed;
   let writer;
   try {
-    h.ok(['ladder', 'set', 'easy', '--harness', 'command', '--command', JSON.stringify([process.execPath, '-e', script, '{prompt}']),
+    h.ok(['ladder', 'set', 'easy', '--harness', 'command', '--command', JSON.stringify([process.execPath, harness, ready, finish, '{prompt}']),
       '--clear', 'profile', '--clear', 'effort', '--supervision', JSON.stringify({ retries: 0, stall_ms: 120000 })]);
     const file = path.join(h.state, 'events.jsonl');
     const row = JSON.stringify({ at: new Date().toISOString(), agent: 'fixture', cmd: 'hook progress', task: null, detail: { text: 'x'.repeat(900) } }) + '\n';
