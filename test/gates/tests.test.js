@@ -5,7 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const gate = require('../../lib/gates/tests');
 const { scratch, isolateGit, git, commit, initRepo, worktrees, quote } = require('./helpers');
-const { shellQuote } = require('../../lib/gates/common');
+const { shellQuote, treeExec } = require('../../lib/gates/common');
 
 const NODE = quote(process.execPath);
 const CMD = `${NODE} run-tests.js`;
@@ -79,6 +79,195 @@ function assertCleanedUp() {
   assert.deepEqual(fs.readdirSync(process.env.TOWER_CRANE_TMP), []);
   assert.equal(worktrees(root), 1);
 }
+
+test('host_env opts host-only tests in without reaching the ordinary suite, and records skips', async () => {
+  const marker = path.join(tmp, 'host-env-marker');
+  const sha = task({
+    'test/host.test.js': `const test = require('node:test');
+test('live host case', { skip: process.env.TC_HOST_OPT_IN !== '1' }, () => {
+  require('node:assert/strict').equal(process.env.TC_HOST_OPT_IN, '1');
+  require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'ran');
+});
+test('unavailable host case', { skip: 'unavailable' }, () => {
+  require('node:assert/strict').fail('unavailable case must remain skipped');
+});
+`,
+    'test/plain.test.js': "require('node:assert/strict').equal(process.env.TC_HOST_OPT_IN, undefined);\n",
+  });
+  // This runner follows the gate exclusion contract without depending on the repository runner.
+  const runner = path.join(tmp, 'host-env-runner.cjs');
+  fs.writeFileSync(runner, `const cp = require('node:child_process');
+const excluded = JSON.parse(process.env.TOWER_CRANE_TEST_EXCLUDE || '[]');
+const files = process.argv.slice(2).filter(f => !excluded.includes(f));
+process.exit(files.length ? cp.spawnSync(process.execPath, ['--test', ...files], { stdio: 'inherit' }).status : 0);
+`);
+  const suite = `${NODE} ${quote(runner)} test/host.test.js test/plain.test.js`;
+  const project = {
+    tests: { mode: 'run-only', host_only: ['test/host.test.js'] },
+    gates: { tests_cmd: suite, tests_proof_cmd: `${NODE} --test {tests}` },
+  };
+  const skipped = await gate.run(ctx(sha, { args: { cmd: suite }, project }));
+  assert.equal(skipped.ok, true, skipped.summary);
+  assert.equal(fs.existsSync(marker), false);
+  project.tests.host_env = { TC_HOST_OPT_IN: '1' };
+  const ran = await gate.run(ctx(sha, { args: { cmd: suite }, project }));
+  assert.equal(ran.ok, true, ran.summary);
+  assert.equal(fs.readFileSync(marker, 'utf8'), 'ran');
+  assert.deepEqual(skipped.receipt.host_only.run, []);
+  assert.deepEqual(skipped.receipt.host_only.skipped, ['test/host.test.js']);
+  assert.equal(skipped.receipt.host_only.results[0].skipped, 2);
+  assert.deepEqual(ran.receipt.host_only.run, ['test/host.test.js']);
+  assert.deepEqual(ran.receipt.host_only.skipped, ['test/host.test.js']);
+  assert.equal(ran.receipt.host_only.results[0].ran, 1);
+  assert.equal(ran.receipt.host_only.results[0].skipped, 1);
+  assertCleanedUp();
+});
+
+test('a host-only failure on the base keeps its opt-in and command for retry classification', async () => {
+  task({
+    'test/host-known.test.js': `require('node:test')('known host failure', { skip: process.env.TC_HOST_OPT_IN !== '1' }, () => {
+  require('node:assert/strict').fail('existing host failure');
+});
+`,
+  });
+  const base = `task-${branches}`;
+  const sha = task({ 'lib/add.js': FIX, 'test/add.test.js': ADD_TEST }, base);
+  const ordinary = `${NODE} --test test/mul.test.js`;
+  const host = `${NODE} --test ${shellQuote('test/host-known.test.js')}`;
+  for (const mode of ['run-only', 'prove']) {
+    const r = await gate.run(ctx(sha, {
+      args: { cmd: ordinary },
+      project: {
+        base,
+        tests: { mode, host_only: ['test/host-known.test.js'], host_env: { TC_HOST_OPT_IN: '1' } },
+        gates: { tests_cmd: ordinary, tests_proof_cmd: `${NODE} --test {tests}` },
+      },
+    }));
+    assert.equal(r.ok, false);
+    assert.deepEqual(r.test_failure.names, ['known host failure']);
+    assert.deepEqual(r.main_failure?.names, ['known host failure']);
+    assert.equal(r.confirmed_failure, undefined, 'a matching base failure is retried without a quality climb');
+    assert.ok(r.summary.includes(`\`${host}\``), r.summary);
+    assert.match(r.summary, /Also fails on task-\d+ at [0-9a-f]+: known host failure/);
+    assert.deepEqual(r.receipt.host_only.run, ['test/host-known.test.js']);
+    assertCleanedUp();
+  }
+});
+
+test('missing host-only command pins report the proof command configuration', async () => {
+  const sha = task({ 'test/host-pin.test.js': "require('node:test')('host pin', () => {});\n" });
+  const ordinary = `${NODE} --test test/mul.test.js`;
+  const absent = 'tower-crane-no-such-host-runner {tests}';
+  for (const [proof, windowsDiagnostic] of [[null, false], [absent, false], [absent, true]]) {
+    const check = ctx(sha, {
+      args: { cmd: ordinary },
+      project: {
+        tests: { mode: 'run-only', host_only: ['test/host-pin.test.js'] },
+        gates: { tests_cmd: ordinary, tests_proof_cmd: proof },
+      },
+    });
+    if (windowsDiagnostic) {
+      const host = proof.replace('{tests}', shellQuote('test/host-pin.test.js'));
+      check.exec = (command, args, opts) => command === host
+        ? { status: 1, stdout: '', stderr: "'tower-crane-no-such-host-runner' is not recognized as an internal or external command,\r\noperable program or batch file.\r\n" }
+        : treeExec(command, args, opts);
+    }
+    const r = await gate.run(check);
+    assert.equal(r.ok, false);
+    assert.deepEqual(r.config_failure, { key: 'tests_proof_cmd' });
+    assert.equal(r.confirmed_failure, undefined);
+    assertCleanedUp();
+  }
+});
+
+test('host case counts distinguish TAP, spec, all skips and unreported output', () => {
+  for (const [output, expected] of [
+    ['# tests 2\n# pass 1\n# fail 0\n# skipped 1\n', { ran: 1, skipped: 1 }],
+    ['ℹ tests 2\nℹ pass 0\nℹ fail 0\nℹ skipped 2\n', { ran: 0, skipped: 2 }],
+    ['# tests 1\n# pass 0\n# fail 0\n# skipped 0\n# todo 1\n', { ran: 0, skipped: 1 }],
+    ['ok host.test.js\n', { ran: null, skipped: null }],
+    ['# tests 2\n# pass 1\n# fail 0\n# skipped 0\n', { ran: null, skipped: null }],
+  ]) assert.deepEqual(gate.hostCounts({ output }), expected, output);
+});
+
+test('default host test formats exclude data; explicit paths support other formats', () => {
+  const defaults = gate.hostTestMatcher({});
+  for (const [file, expected] of [
+    ['test/lab/live.test.js', true],
+    ['tests/test_session.py', true],
+    ['Tests/SessionTest.java', true],
+    ['test/session.sh', true],
+    ['test/session.feature', true],
+    ['test/README.md', false],
+    ['test/test_config.json', false],
+    ['test/session.csv', false],
+    ['test/fixtures/value.test.js', false],
+    ['test/helpers/value.test.js', false],
+    ['test/session.case', false],
+    ['test/session', false],
+  ]) assert.equal(defaults.match(file), expected, file);
+  const explicit = gate.hostTestMatcher({ tests: { paths: ['test/**'] } });
+  assert.equal(explicit.match('test/session.case'), true);
+  assert.equal(explicit.match('test/session'), true);
+  assert.equal(explicit.match('test/fixtures/session.case'), false);
+});
+
+test('a broad host-only glob selects tests, excluding fixtures and non-test files', async () => {
+  const sha = task({
+    'lib/add.js': FIX,
+    'test/lab/live.test.js': `require('node:test')('host selection', () => {
+  require('node:assert/strict').equal(process.env.TC_HOST_OPT_IN, '1');
+  require('node:assert/strict').equal(require('../../lib/add')(1, 2), 3);
+});
+`,
+    'test/lab/fixtures/input.test.js': "throw new Error('a fixture must not run');\n",
+    'test/lab/helpers/util.test.js': "throw new Error('a helper must not run');\n",
+    'test/lab/README.md': 'This is documentation, not a test.\n',
+    'test/lab/session.json': '{"description":"test data"}\n',
+  });
+  const runner = `${NODE} ${quote(path.resolve(__dirname, '../run.js'))}`;
+  const suite = `${runner} test/mul.test.js`;
+  for (const paths of [null, ['test/**/*.test.js']]) {
+    const r = await gate.run(ctx(sha, {
+      args: { cmd: suite },
+      project: {
+        tests: { expensive: true, paths, host_only: ['test/lab/**'], host_env: { TC_HOST_OPT_IN: '1' } },
+        gates: { tests_cmd: suite, tests_proof_cmd: `${runner} {tests}` },
+      },
+    }));
+    assert.equal(r.ok, true, r.summary);
+    assert.match(r.summary, /tests pass with the change and fail without it/);
+    assert.deepEqual(r.receipt.host_only.run, ['test/lab/live.test.js']);
+    assert.equal(r.receipt.host_only.results.length, 1);
+  }
+  assertCleanedUp();
+});
+
+test('a skipped changed host-only test cannot prove code, and host_env reaches its revert run', async () => {
+  const sha = task({
+    'lib/add.js': FIX,
+    'test/host-proof.test.js': `require('node:test')('live proof', { skip: process.env.TC_HOST_OPT_IN !== '1' }, () => {
+  require('node:assert/strict').equal(require('../lib/add')(1, 2), 3);
+});
+`,
+  });
+  const suite = `${NODE} --test test/mul.test.js`;
+  const project = {
+    tests: { host_only: ['test/host-proof.test.js'], expensive: true },
+    gates: { tests_cmd: suite, tests_proof_cmd: `${NODE} --test {tests}` },
+  };
+  const skipped = await gate.run(ctx(sha, { args: { cmd: suite }, project }));
+  assert.equal(skipped.ok, false, skipped.summary);
+  assert.match(skipped.summary, /changed host-only tests skipped.*do not prove/);
+  assert.deepEqual(skipped.receipt.host_only.run, []);
+  assert.deepEqual(skipped.receipt.host_only.skipped, ['test/host-proof.test.js']);
+  project.tests.host_env = { TC_HOST_OPT_IN: '1' };
+  const ran = await gate.run(ctx(sha, { args: { cmd: suite }, project }));
+  assert.equal(ran.ok, true, ran.summary);
+  assert.match(ran.summary, /tests pass with the change and fail without it/);
+  assert.deepEqual(ran.receipt.host_only.run, ['test/host-proof.test.js']);
+  assertCleanedUp();
+});
 
 test('a test that fails without the change and passes with it: ok', async () => {
   const sha = task({ 'lib/add.js': FIX, 'test/add.test.js': ADD_TEST });
@@ -222,8 +411,11 @@ test('a worktree add that fails after registering leaves no registration behind'
   const hooks = path.join(tmp, 'hooks');
   fs.mkdirSync(hooks, { recursive: true });
   fs.writeFileSync(path.join(hooks, 'post-checkout'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
-  git(hooked, 'config', 'core.hooksPath', hooks);
-  const r = await gate.run({ ...ctx(sha), root: hooked });
+  // The gate's git runs only hooks from the user's own config.
+  git(hooked, 'config', '--global', 'core.hooksPath', hooks);
+  let r;
+  try { r = await gate.run({ ...ctx(sha), root: hooked }); }
+  finally { git(hooked, 'config', '--global', '--unset', 'core.hooksPath'); }
   assert.equal(r.ok, false);
   assert.match(r.summary, /could not create a worktree/);
   assert.equal(worktrees(hooked), 1);
@@ -249,6 +441,7 @@ test('a helper or fixture edited under test/ is not a test for the change', asyn
   const r = await gate.run(ctx(sha));
   assert.equal(r.ok, false, r.summary);
   assert.match(r.summary, /no test covers this change: .*adds or changes no test file/);
+  assert.equal(r.worker_failure, true, 'the worker fixes it, so the gate says so');
   assertCleanedUp();
 });
 
@@ -456,6 +649,7 @@ test('none mode needs no command but still verifies the submitted sha; prove and
     const r = await gate.run(ctx(sha, { args: { cmd: undefined }, project: { tests: { mode }, gates: {} } }));
     assert.equal(r.ok, false);
     assert.match(r.summary, /no test command pinned/);
+    assert.deepEqual(r.config_failure, { key: 'tests_cmd' });
   }
   for (const [key, value] of [['mode', 'skip'], ['by_kind', { docs: null }], ['by_kind', { tooling: 'none' }], ['expensive', 'true']]) {
     const r = await gate.run(ctx(sha, { project: { tests: { mode: 'none', [key]: value } } }));
@@ -484,5 +678,82 @@ test('expensive prove needs a pinned scoped command that passes at head, fails a
   const r = await gate.run(ctx(sha, { project: expensive(`${NODE} proof.js {tests}`) }));
   assert.equal(r.ok, true, r.summary);
   assert.match(r.summary, /kept a scoped proof/);
+  assertCleanedUp();
+});
+
+test('the gate command runs with TMPDIR under the gate temp root, and that directory is removed when the gate ends', async () => {
+  // Records the temp directories it sees, then leaves a directory behind as a test helper might.
+  const log = path.join(tmp, 'probe.log');
+  const probe = path.join(tmp, 'probe.js');
+  fs.writeFileSync(probe, `const fs = require('fs');
+const os = require('os');
+const path = require('path');
+fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify([process.env.TMPDIR, process.env.TMP, process.env.TEMP, os.tmpdir(), process.env.NODE_COMPILE_CACHE]) + '\\n');
+fs.mkdtempSync(path.join(os.tmpdir(), 'tower-crane-leftover-'));
+`);
+  // The test process's own temp directory is elsewhere, so a command that inherits it is caught.
+  const inherited = path.join(tmp, 'inherited');
+  fs.mkdirSync(inherited);
+  const saved = process.env.TMPDIR;
+  const savedCache = process.env.NODE_COMPILE_CACHE;
+  process.env.TMPDIR = inherited;
+  // A compile cache named by an absolute path is not moved by TMPDIR, so the gate must redirect it too.
+  process.env.NODE_COMPILE_CACHE = path.join(inherited, 'compile-cache');
+  try {
+    const sha = task({ 'lib/add.js': FIX, 'test/add.test.js': ADD_TEST });
+    const r = await gate.run(ctx(sha, { args: { cmd: `${NODE} ${quote(probe)}` }, project: { tests: { mode: 'run-only' } } }));
+    assert.equal(r.ok, true, r.summary);
+    const [seen] = fs.readFileSync(log, 'utf8').trim().split('\n').map((line) => JSON.parse(line));
+    for (const dir of seen) assert.ok(dir.startsWith(process.env.TOWER_CRANE_TMP + path.sep), dir);
+    assert.equal(fs.existsSync(seen[0]), false, 'the gate removed its temp directory');
+    assertCleanedUp();
+  } finally {
+    if (saved === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = saved;
+    if (savedCache === undefined) delete process.env.NODE_COMPILE_CACHE;
+    else process.env.NODE_COMPILE_CACHE = savedCache;
+  }
+});
+
+test('a post-checkout hook makes no scratch in the caller temp root when the gate adds its worktree and restores files', async () => {
+  // Git runs this hook for the gate's worktree add and its checkout, so it writes wherever their TMPDIR points.
+  const inherited = path.join(tmp, 'inherited-hook');
+  fs.mkdirSync(inherited);
+  const hook = path.join(root, '.git', 'hooks', 'post-checkout');
+  const saved = process.env.TMPDIR;
+  process.env.TMPDIR = inherited;
+  try {
+    const sha = task({ 'lib/add.js': FIX, 'test/add.test.js': ADD_TEST });
+    // Written after task(), whose own checkouts would otherwise fill the caller temp root.
+    fs.writeFileSync(hook, `#!/bin/sh\n${NODE} -e "require('fs').mkdtempSync(require('path').join(process.env.TMPDIR || require('os').tmpdir(), 'tower-crane-hook-'))"\n`, { mode: 0o755 });
+    const r = await gate.run(ctx(sha));
+    assert.equal(r.ok, true, r.summary);
+    assert.deepEqual(fs.readdirSync(inherited), []);
+    assertCleanedUp();
+  } finally {
+    if (saved === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = saved;
+    fs.rmSync(hook, { force: true });
+  }
+});
+
+test('a gate whose scratch directory cannot be made removes the temp parent it already created', async () => {
+  const sha = task({ 'lib/add.js': FIX, 'test/add.test.js': ADD_TEST });
+  // Fails the scratch directory inside the gate's parent, as a full disk would, after the parent exists.
+  const mkdirSync = fs.mkdirSync;
+  fs.mkdirSync = function (dir, ...rest) {
+    if (path.basename(dir) === 'tmp' && path.basename(path.dirname(dir)).startsWith('tower-crane-')) {
+      throw Object.assign(new Error('ENOSPC: no space left on device'), { code: 'ENOSPC' });
+    }
+    return mkdirSync.call(this, dir, ...rest);
+  };
+  let r;
+  try {
+    r = await gate.run(ctx(sha));
+  } finally {
+    fs.mkdirSync = mkdirSync;
+  }
+  assert.equal(r.ok, false);
+  assert.match(r.summary, /cannot create a temporary directory/);
   assertCleanedUp();
 });

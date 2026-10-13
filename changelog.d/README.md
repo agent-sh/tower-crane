@@ -1,6 +1,6 @@
 # Changelog fragments
 
-Add one `changelog.d/<task-or-pr>.md` file per change, for example `T86.md` or `123.md`. Use Markdown bullets. Leave existing fragments and `CHANGELOG.md` unchanged; CI rejects edits to them and requires a new fragment in each change.
+Add one `changelog.d/<task-or-pr>.md` file per change, for example `T86.md` or `123.md`. Use Markdown bullets. Fragments are draft release notes: when a change makes an existing fragment untrue, correct it in that change. CI rejects edits to `CHANGELOG.md` and deleted fragments, and requires a new fragment in each change.
 
 `CHANGELOG.md` is the historical archive. At release, run `node scripts/changelog.js` from a Git checkout with full history. It assembles fragments newest first in the order they landed on the first-parent branch history, followed by that archive on stdout. Fragments added in the same commit use filename order; uncommitted fragments appear first for a local preview. Save that output as the release changelog artifact outside the checkout. Assembly keeps the source fragments, so the complete changelog can be regenerated for every release.
 

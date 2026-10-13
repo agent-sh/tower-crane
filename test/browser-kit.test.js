@@ -65,7 +65,8 @@ test('a brokered worker can read the browser kit but cannot change the user sett
   const h = makeRepo(t);
   h.init();
   const B = require('../lib/broker');
-  const binding = path.join(h.base, B.FILE);
+  // The broker writes its .gitignore one level above its directory, so the binding gets a directory of its own.
+  const binding = path.join(h.base, 'brokers', 'worker-T1-1', B.FILE);
   const broker = await B.start({ state: h.state, task: 'T1', agent: 'worker-T1-1', role: 'worker', cwd: h.repo, broker: binding });
   try {
     const env = { TOWER_CRANE_BROKER: binding, TOWER_CRANE_AGENT: 'worker-T1-1' };

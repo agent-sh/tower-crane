@@ -1,0 +1,47 @@
+'use strict';
+
+// A gh that serves one repository's job, branch ref, job log and code-scanning alerts from
+// CI_FEEDBACK_GH, printed the way gh api prints them: JSON, the raw log, and --jq arrays one element per line.
+const fs = require('node:fs');
+const args = process.argv.slice(2);
+const data = JSON.parse(fs.readFileSync(process.env.CI_FEEDBACK_GH, 'utf8'));
+const endpoint = args[1] || '';
+const fail = (message) => {
+  console.error(message);
+  process.exitCode = 1;
+};
+const job = /^repos\/[^/]+\/[^/]+\/actions\/jobs\/(\d+)(\/logs)?$/.exec(endpoint);
+const ref = /^repos\/[^/]+\/[^/]+\/git\/ref\/(.+)$/.exec(endpoint);
+const checks = /^repos\/[^/]+\/[^/]+\/commits\/([^/]+)\/check-runs\?/.exec(endpoint);
+const suites = /^repos\/[^/]+\/[^/]+\/commits\/([^/]+)\/check-suites\?/.exec(endpoint);
+const annotations = /^repos\/[^/]+\/[^/]+\/check-runs\/(\d+)\/annotations\?/.exec(endpoint);
+const pull = /^repos\/[^/]+\/[^/]+\/pulls\/(\d+)$/.exec(endpoint);
+const commit = /^repos\/[^/]+\/[^/]+\/git\/commits\/([^/]+)$/.exec(endpoint);
+if (args[0] === 'pr' && args[1] === 'view') console.log(JSON.stringify(data.pr));
+else if (args[0] !== 'api') fail(`unexpected gh call: ${args.join(' ')}`);
+else if (checks) {
+  for (const run of data.checks[checks[1]] || []) console.log(JSON.stringify(run));
+} else if (suites) {
+  for (const suite of data.suites || []) console.log(JSON.stringify(suite));
+} else if (/^repos\/[^/]+\/[^/]+\/actions\/runs\?/.test(endpoint)) {
+  for (const run of data.workflows || []) console.log(JSON.stringify(run));
+} else if (annotations) {
+  for (const row of data.annotations[annotations[1]] || []) console.log(JSON.stringify(row));
+} else if (pull) console.log(JSON.stringify(data.pull));
+else if (commit) console.log(JSON.stringify(data.commits[commit[1]]));
+else if (job?.[2]) {
+  if (data.logs[job[1]] === undefined) fail('gh: Not Found (HTTP 404)');
+  else if (/[\x00-\x08\x0b-\x1f\x7f-\x9f]/.test(data.logs[job[1]]) && !args.includes('--allow-escape-sequences')) {
+    fail('the response contains terminal escape sequences; pass --allow-escape-sequences to output it anyway');
+  }
+  else process.stdout.write(data.logs[job[1]]);
+} else if (job) {
+  if (!data.jobs[job[1]]) fail('gh: Not Found (HTTP 404)');
+  else console.log(JSON.stringify(data.jobs[job[1]]));
+} else if (ref) {
+  if (!data.refs[ref[1]]) fail('gh: Not Found (HTTP 404)');
+  else console.log(JSON.stringify(data.refs[ref[1]]));
+} else if (/^repos\/[^/]+\/[^/]+\/code-scanning\/alerts\?/.test(endpoint)) {
+  const alertRef = new URL(`https://api.github.com/${endpoint}`).searchParams.get('ref');
+  for (const alert of data.alerts[alertRef] || []) console.log(JSON.stringify(alert));
+} else fail(`unexpected gh call: ${args.join(' ')}`);

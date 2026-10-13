@@ -147,6 +147,7 @@ if (path.resolve(process.argv[1] || '') !== __filename) {
     node_test: Object.keys(process.env).filter((key) => /^NODE_TEST_/i.test(key)),
     ...(providerTest ? { provider, provider_env: Object.fromEntries([
       'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY',
+      'CLAUDE_CODE_USE_ANTHROPIC_AWS', 'CLAUDE_CODE_USE_GATEWAY', 'CLAUDE_CODE_USE_MANTLE',
       'ANTHROPIC_MODEL', 'AWS_PROFILE', 'AWS_REGION', 'AWS_CONFIG_FILE', 'AWS_SHARED_CREDENTIALS_FILE',
     ].map((key) => [key, providerEnv[key] || null])) } : {}),
   });

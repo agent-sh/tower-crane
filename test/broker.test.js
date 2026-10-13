@@ -3,6 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const { TMP_ROOT, detachedAlive, makeRepo } = require('./helpers');
 const { stacked } = require('./stack-fixture');
@@ -224,8 +225,23 @@ test('a sandboxed reviewer asks through the broker: a technical question reaches
 });
 
 test('closing the broker stops the commands it is running and what they started', async (t) => {
+  // After hooks run in registration order, so this one comes before scratch(t)'s, which deletes the
+  // fixture that holds the pids file.
+  const saved = { NODE_OPTIONS: process.env.NODE_OPTIONS, BROKER_TEST_PIDS: process.env.BROKER_TEST_PIDS };
+  let pids;
+  let broker;
+  let started = [];
+  t.after(() => {
+    // A failed test leaves the broker's servers open, which keeps the test runner alive.
+    broker?.close();
+    for (const [k, v] of Object.entries(saved)) if (v === undefined) delete process.env[k]; else process.env[k] = v;
+    // Read the file, not `started`: a test that fails before reading it still leaves them running.
+    const text = pids && fs.existsSync(pids) ? fs.readFileSync(pids, 'utf8') : '';
+    const recorded = text ? JSON.parse(text) : [];
+    for (const pid of recorded.filter((p) => detachedAlive({ pid: p }))) process.kill(pid, 'SIGKILL');
+  });
   const { base, state, job } = scratch(t);
-  const pids = path.join(base, 'pids.json');
+  pids = path.join(base, 'pids.json');
   // Preloaded into the CLI the broker runs: it starts a process in a group of
   // its own, as a check's test run does, records both and never returns.
   const preload = path.join(base, 'hang.js');
@@ -238,17 +254,10 @@ const run = cp.spawn(process.execPath, ['-e', 'setInterval(() => {}, 1e9)'], { e
 require('node:fs').writeFileSync(process.env.BROKER_TEST_PIDS, JSON.stringify([process.pid, run.pid]));
 Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0);
 `);
-  const saved = { NODE_OPTIONS: process.env.NODE_OPTIONS, BROKER_TEST_PIDS: process.env.BROKER_TEST_PIDS };
   process.env.NODE_OPTIONS = `--require ${JSON.stringify(preload)}`;
   process.env.BROKER_TEST_PIDS = pids;
-  let started = [];
-  t.after(() => {
-    for (const [k, v] of Object.entries(saved)) if (v === undefined) delete process.env[k]; else process.env[k] = v;
-    // Only a test that failed leaves them running.
-    for (const pid of started.filter((p) => detachedAlive({ pid: p }))) process.kill(pid, 'SIGKILL');
-  });
 
-  const broker = await B.start(job);
+  broker = await B.start(job);
   const answer = B.forward(job.broker, ['task', 'note', 'T1', 'slow'], state).then((r) => ({ r }), (e) => ({ e }));
   const until = async (ok, what) => {
     const deadline = Date.now() + 15000;
@@ -320,6 +329,61 @@ test('a worker cannot have the broker run its tests, its cleanup or git', () => 
   for (const role of Object.keys(B.ROLES)) for (const cmd of B.ROLES[role]) assert.ok(!/^(check|worktree|merge|spawn)\b/.test(cmd), `${role}: ${cmd}`);
 });
 
+test('a broker whose temp root is too deep for a socket keeps its socket out of /tmp', { skip: process.platform === 'win32' && 'Windows uses a named pipe' }, async (t) => {
+  const s = scratch(t);
+  // A temp root this deep leaves no room for a Unix socket path under it. The home is the account's,
+  // as in production: a gate or a sandbox can set HOME deep, and then its cache root fits no socket.
+  const deep = path.join(s.base, 'd'.repeat(120));
+  fs.mkdirSync(deep);
+  const saved = { TMPDIR: process.env.TMPDIR, HOME: process.env.HOME };
+  process.env.TMPDIR = deep;
+  process.env.HOME = os.userInfo().homedir;
+  t.after(() => {
+    for (const key of ['TMPDIR', 'HOME']) {
+      if (saved[key] === undefined) delete process.env[key];
+      else process.env[key] = saved[key];
+    }
+  });
+  const job = { ...s.job, broker_harnesses: ['claude'], broker: path.join(s.base, 'w'.repeat(90), B.FILE) };
+  const broker = await B.start(job);
+  t.after(() => broker.close());
+  const { socket } = JSON.parse(fs.readFileSync(job.broker, 'utf8'));
+  assert.ok(socket.startsWith(path.join(os.homedir(), '.cache', 'tower-crane') + path.sep), socket);
+});
+
+test('a broker whose cache root cannot be written tries /tmp next', { skip: process.platform === 'win32' && 'Windows uses a named pipe' }, async (t) => {
+  const s = scratch(t);
+  const deep = path.join(s.base, 'd'.repeat(120));
+  fs.mkdirSync(deep);
+  const savedTmp = process.env.TMPDIR;
+  process.env.TMPDIR = deep;
+  t.after(() => {
+    if (savedTmp === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = savedTmp;
+  });
+  // A short home, so its cache root fits a socket path on any account. The cache root is refused as on a
+  // read-only home, and so is every mkdtemp: nothing is made and nothing is listened on.
+  t.mock.method(os, 'homedir', () => '/h');
+  const cache = path.join('/h', '.cache', 'tower-crane');
+  const attempted = [];
+  const readOnly = () => Object.assign(new Error('EROFS: read-only file system'), { code: 'EROFS' });
+  const mkdir = fs.mkdirSync;
+  t.mock.method(fs, 'mkdirSync', (p, options) => {
+    if (p === cache) {
+      attempted.push(p);
+      throw readOnly();
+    }
+    return mkdir(p, options);
+  });
+  t.mock.method(fs, 'mkdtempSync', (prefix) => {
+    attempted.push(path.dirname(prefix));
+    throw readOnly();
+  });
+  const job = { ...s.job, broker_harnesses: ['claude'], broker: path.join(s.base, 'w'.repeat(90), B.FILE) };
+  await assert.rejects(B.start(job), /no socket path short enough and writable/);
+  assert.deepEqual(attempted, [cache, '/tmp']);
+});
+
 test('a broker for claude and codex routes listens on both, and an agent that cannot use the socket uses TCP', { skip: process.platform === 'win32' && 'Windows uses a named pipe for both' }, async (t) => {
   const h = makeRepo(t);
   h.init();
@@ -350,7 +414,12 @@ const original = cp.spawnSync;
 cp.spawnSync = function (command, args, opts) {
   if (command !== 'gh' || process.env.TOWER_CRANE_VIA !== 'broker') return original.call(this, command, args, opts);
   require('node:fs').appendFileSync(process.env.BROKER_GH_LOG, JSON.stringify({ args, cwd: opts.cwd, git_dir: opts.env.GIT_DIR || null }) + '\\n');
-  return { status: 0, stdout: JSON.stringify({ state: 'OPEN', headRefName: 'change' }), stderr: '' };
+  // The submit also reads the head's green checks, so the stub answers those endpoints too.
+  const green = { name: 'test (ubuntu)', status: 'completed', conclusion: 'success', app: 'github-actions', suite: 1, url: null, output: null };
+  const suite = { id: 1, app: 'github-actions', status: 'completed', conclusion: 'success', runs: 1 };
+  const out = args[0] === 'pr' ? { state: 'OPEN', headRefName: 'change', mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }
+    : args[1].includes('check-runs') ? green : args[1].includes('check-suites') ? suite : null;
+  return { status: 0, stdout: out ? JSON.stringify(out) : '', stderr: '' };
 };
 `);
   const saved = { NODE_OPTIONS: process.env.NODE_OPTIONS, BROKER_GH_LOG: process.env.BROKER_GH_LOG };
@@ -374,10 +443,15 @@ cp.spawnSync = function (command, args, opts) {
     { env: { TOWER_CRANE_BROKER: job.broker } });
   assert.equal(r.code, 0, r.stderr);
   const calls = fs.readFileSync(log, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
-  assert.equal(calls.length, 1);
-  assert.deepEqual(calls[0].args.slice(0, 5), ['pr', 'view', '7', '-R', 'acme/demo']);
-  assert.equal(calls[0].cwd, h.state);
-  assert.ok(calls[0].git_dir && !fs.existsSync(calls[0].git_dir), 'git finds no repository');
+  // The submit reads the PR twice: its state and branch, then its mergeability.
+  const views = calls.filter((c) => c.args[0] === 'pr');
+  assert.equal(views.length, 2);
+  for (const view of views) assert.deepEqual(view.args.slice(0, 5), ['pr', 'view', '7', '-R', 'acme/demo']);
+  assert.ok(calls.some((c) => c.args[0] === 'api' && c.args[1].includes('/check-runs')), 'the submit reads the head checks');
+  for (const call of calls) {
+    assert.equal(call.cwd, h.state);
+    assert.ok(call.git_dir && !fs.existsSync(call.git_dir), 'git finds no repository');
+  }
   assert.equal(h.readState('tasks.json').tasks[0].sha, '5bfcb6f56ab912a009883c798a61298c507dada4');
 });
 
@@ -464,6 +538,31 @@ test('a brokered worker or reviewer messages only the orchestrator or the owner'
     assert.equal(r.code, 0, r.stderr);
   }
   assert.deepEqual(events().filter((e) => e.cmd === 'msg').map((e) => [e.task, e.detail.to]), [['T2', 'orchestrator'], ['T2', 'owner']]);
+});
+
+test('a sandboxed worker can print and list its prepared worktree without state writes', async (t) => {
+  const h = makeRepo(t);
+  h.init();
+  h.ok(['task', 'add', '--title', 'Prepared', '--acceptance', 'read worktree state']);
+  const wt = h.json(['worktree', 'T1']);
+  const job = { state: h.state, task: 'T1', agent: 'worker-T1-1', role: 'worker', harness: 'codex',
+    cwd: wt.path, broker: path.join(h.base, 'brokers', 'worker-T1-1', B.FILE) };
+  const broker = await B.start(job);
+  t.after(() => broker.close());
+  const env = { ...broker.env, TOWER_CRANE_AGENT: job.agent, TOWER_CRANE_TASK: job.task };
+  const before = h.readState('tasks.json');
+  const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8');
+  for (const args of [['worktree', 'T1'], ['worktree', 'list']]) {
+    const result = await h.runAsync([...args, '--json'], { env });
+    assert.equal(result.code, 0, result.stderr);
+    const data = JSON.parse(result.stdout);
+    assert.equal(args[1] === 'T1' ? data.path : data.worktrees[0].path, wt.path);
+  }
+  assert.deepEqual(h.readState('tasks.json'), before);
+  assert.equal(fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8'), events);
+  const denied = await h.runAsync(['worktree', 'prune'], { env });
+  assert.equal(denied.code, 1);
+  assert.match(denied.stderr, /not worktree prune/);
 });
 
 test('a sandboxed worker prints its worktree without the state lock, though a stack sync would write', async (t) => {

@@ -59,27 +59,69 @@ async function closeBrowser() {
   if (started) await (await started).close();
 }
 
+// Chrome keeps its singleton socket in the profile directory only while that path is at most 78
+// bytes (Google Chrome 155, measured with profiles of 62 and 63 bytes). Its temp directory holds
+// a socket too, so spawnChrome gives Chrome a TMPDIR inside the profile: that socket adds 45 bytes,
+// which the same 62-byte profile limit keeps under the 108-byte Unix path limit. A temp root deep
+// enough to overflow that (a gate's TMPDIR under TOWER_CRANE_TMP) moves the profile to the first
+// directory whose path fits, on disk, and the browser's teardown removes it. An on-disk cache can
+// work where /var/tmp is read-only. A gate's XDG_CACHE_HOME can
+// also be a deep task cache, so a fitting account cache is tried by allocating the profile there.
+// If that allocation fails, or no root fits, use the first root and let Chrome report its socket error.
+const CHROME_SOCKET_PATH = 78;
+
+function createProfile() {
+  const cache = process.env.XDG_CACHE_HOME || path.join(os.homedir(), '.cache');
+  const bases = [process.env.TOWER_CRANE_TEST_TMP || os.tmpdir(), os.tmpdir(), cache];
+  const fits = (base) => Buffer.byteLength(path.join(base, 'tower-crane-chrome-000000', 'SingletonSocket')) <= CHROME_SOCKET_PATH;
+  const create = (base) => {
+    fs.mkdirSync(base, { recursive: true });
+    return fs.mkdtempSync(path.join(base, 'tower-crane-chrome-'));
+  };
+  const base = bases.find(fits);
+  if (base) return create(base);
+  const accountCache = path.join(os.userInfo().homedir, '.cache');
+  if (fits(accountCache)) {
+    try { return create(accountCache); }
+    catch {
+      // An agent sandbox can make even a short account cache read-only.
+    }
+  }
+  return create(bases[0]);
+}
+
+// The profile is removed when a start fails at any point, including its own setup; a started browser
+// removes it in close.
 async function launch() {
-  const profile = fs.mkdtempSync(path.join(process.env.TOWER_CRANE_TEST_TMP || os.tmpdir(), 'tower-crane-chrome-'));
+  const profile = createProfile();
+  try {
+    return await spawnChrome(profile);
+  } catch (error) {
+    fs.rmSync(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    throw error;
+  }
+}
+
+async function spawnChrome(profile) {
   const args = ['--headless=new', '--remote-debugging-port=0', `--user-data-dir=${profile}`, '--no-first-run', '--no-default-browser-check', '--disable-gpu', '--disable-extensions'];
   const sandboxed = process.env.TOWER_CRANE_SANDBOX === '1';
+  // The caller's TMPDIR can be too deep for Chrome's socket, so Chrome's temp directory is
+  // inside the profile, where the browser's teardown removes it with the rest.
+  const tmp = path.join(profile, 'tmp');
+  fs.mkdirSync(tmp);
+  let env = { ...process.env, TMPDIR: tmp, TMP: tmp, TEMP: tmp };
   // Chrome's user/SUID sandbox cannot nest in the harness's outer sandbox.
   // Temp-backed shared memory avoids granting writes to the host's /dev/shm.
-  let env;
   if (sandboxed) {
     args.push('--no-sandbox', '--disable-dev-shm-usage');
     const config = path.join(profile, 'config');
     const cache = path.join(profile, 'cache');
-    const tmp = path.join(profile, 'tmp');
-    for (const dir of [config, cache, tmp]) fs.mkdirSync(dir);
+    for (const dir of [config, cache]) fs.mkdirSync(dir);
     // Crashpad and first-run caches must not write under the agent's HOME.
-    env = {
-      ...process.env, HOME: profile, USERPROFILE: profile,
-      XDG_CONFIG_HOME: config, XDG_CACHE_HOME: cache, TMPDIR: tmp, TMP: tmp, TEMP: tmp,
-    };
+    env = { ...env, HOME: profile, USERPROFILE: profile, XDG_CONFIG_HOME: config, XDG_CACHE_HOME: cache };
   } else if (process.getuid && process.getuid() === 0) args.push('--no-sandbox');
   const proc = cp.spawn(CHROME, [...args, 'about:blank'], {
-    ...(env ? { env } : {}), stdio: sandboxed ? ['ignore', 'ignore', 'pipe'] : 'ignore',
+    env, stdio: ['ignore', 'ignore', 'pipe'],
   });
   let stderr = '';
   let failure = null;
@@ -109,7 +151,10 @@ async function launch() {
   // File teardown refs and reaps Chrome before the runner records child CPU.
   proc.unref();
   proc.stderr?.unref?.();
-  const lastResort = () => proc.kill('SIGKILL');
+  const lastResort = () => {
+    proc.kill('SIGKILL');
+    remove();
+  };
   process.once('exit', lastResort);
   const close = async () => {
     proc.ref();
