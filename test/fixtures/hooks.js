@@ -270,6 +270,10 @@ function after(name, args, rawArgs = args) {
     pendingLockRead = undefined;
     stop(env.HOOK_STOP_LOCK_READ);
   }
+  // HOOK_STOP_ADMIN_LINK=SIGNAL: stop once a task worktree's .git file names
+  // its relocated admin directory, before the link in worktrees/ is made.
+  if (env.HOOK_STOP_ADMIN_LINK && name === 'writeFileSync' && typeof target === 'string' && path.basename(target) === '.git'
+    && /^gitdir: .*\.git-admin/.test(String(args[1])) && first('admin-link')) stop(env.HOOK_STOP_ADMIN_LINK);
   // HOOK_STOP_LOCK_CHANGE=SIGNAL: stop after the first attempt to remove or
   // move what is at or inside the lock, whether or not it worked.
   if (env.HOOK_STOP_LOCK_CHANGE && CHANGES.includes(name) && inLock(target) && first('lock-change')) stop(env.HOOK_STOP_LOCK_CHANGE);
