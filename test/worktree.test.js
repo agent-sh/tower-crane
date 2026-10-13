@@ -173,7 +173,7 @@ const cp = require('node:child_process');
 const marker = ${JSON.stringify(marker)};
 if (!fs.existsSync(marker)) {
   fs.writeFileSync(marker, '');
-  if (${recovered}) cp.execFileSync('git', ['-c', 'remote.origin.uploadpack=git-upload-pack',
+  if (${recovered}) cp.execFileSync('git', ['-c', 'remote.origin.uploadpack=git-upload-pack', '-c', 'protocol.file.allow=always',
     'fetch', '--no-tags', '--no-write-fetch-head', 'origin', '+refs/heads/main:refs/remotes/origin/main'],
     { cwd: ${JSON.stringify(h.repo)}, stdio: 'pipe' });
   process.stderr.write('fatal: unpack-objects failed\\n');
@@ -183,7 +183,8 @@ const r = cp.spawnSync('git-upload-pack', process.argv.slice(2), { stdio: 'inher
 process.exit(r.status === null ? 1 : r.status);
 `);
     const quote = (s) => `'${s.replace(/'/g, "'\\''")}'`;
-    h.git(['config', 'remote.origin.uploadpack', `${quote(process.execPath)} ${quote(uploadPack)}`]);
+    // The CLI's git takes upload-pack only from the user's own config.
+    h.git(['config', '--global', 'remote.origin.uploadpack', `${quote(process.execPath)} ${quote(uploadPack)}`]);
     const before = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8');
     const result = h.run(['worktree', 'T1', '--json']);
     if (recovered) {
@@ -262,7 +263,8 @@ try {
 }
 `);
   const quote = (s) => `'${s.replace(/'/g, "'\\''")}'`;
-  h.git(['config', 'remote.origin.uploadpack', `${quote(process.execPath)} ${quote(uploadPack)}`]);
+  // The CLI's git takes upload-pack only from the user's own config.
+  h.git(['config', '--global', 'remote.origin.uploadpack', `${quote(process.execPath)} ${quote(uploadPack)}`]);
   return attempts;
 }
 
@@ -281,10 +283,10 @@ for (const command of ['worktree', 'spawn']) {
       for (const id of ids) h.ok(['brief', 'set', id, '-'], { input: 'Use the fresh base.\n' });
     }
     const attempts = guardUploadPack(h, 15000);
-    const started = Date.now();
+    let started = Date.now();
     const hooks = { HOOK_WORKTREE_ADD_ACTIVE: path.join(h.base, 'worktree-add-active') };
     const trees = h.json(['worktree', ...ids], { hooks });
-    assert.ok(Date.now() - started < 30000, 'preparation finishes within two fetch times');
+    assert.ok(Date.now() - started < 30000, 'the worktrees are ready within two fetch times');
     assert.equal(trees.length, 6);
     for (let i = 0; i < trees.length; i++) {
       assert.equal(trees[i].id, ids[i]);
@@ -292,8 +294,12 @@ for (const command of ['worktree', 'spawn']) {
       assert.ok(h.json(['task', 'show', ids[i]]).branch);
     }
     if (command === 'spawn') {
+      // Six spawns take about half a fetch time on Windows, so they are timed
+      // on their own: none of them may wait for a fetch.
+      started = Date.now();
       const results = await Promise.all(ids.map((id) => h.runAsync(
         ['spawn', '--role', 'medium', '--task', id, '--wait', '--json'], { hooks })));
+      assert.ok(Date.now() - started < 15000, 'the spawns finish within one fetch time');
       assert.deepEqual(results.map((r) => r.code), Array(6).fill(0), results.map((r) => r.stderr).join('\n'));
       for (const r of results) assert.equal(h.git(['rev-parse', 'HEAD'], JSON.parse(r.stdout).cwd), fresh);
     }
@@ -357,7 +363,11 @@ fs.writeFileSync('orphan.txt', 'original Git child');
 fs.writeFileSync(${JSON.stringify(done)}, '');
 `);
   const quote = (value) => `'${value.replace(/'/g, "'\\''")}'`;
-  const script = path.join(h.repo, '.git', 'hooks', 'post-checkout');
+  // The CLI's git runs only hooks from the user's own config.
+  const hooks = path.join(h.base, 'hooks');
+  fs.mkdirSync(hooks);
+  fs.appendFileSync(h.env.GIT_CONFIG_GLOBAL, `[core]\n\thooksPath = ${JSON.stringify(hooks)}\n`);
+  const script = path.join(hooks, 'post-checkout');
   fs.writeFileSync(script, `#!/bin/sh\nexec ${quote(process.execPath)} ${quote(hook)}\n`, { mode: 0o755 });
   const first = h.runAsync(['worktree', 'T1'], { hooks: { HOOK_ADD_PID: cliPid } });
   try {
