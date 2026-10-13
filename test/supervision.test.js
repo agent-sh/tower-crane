@@ -38,6 +38,47 @@ async function until(fn, message) {
   }
 }
 
+function advanceClock(file, ms) {
+  // Other processes read the clock while it changes; truncation publishes time zero.
+  S.writeAtomic(file, String(ms));
+}
+
+test('clock advances stay complete for concurrent supervisor readers', async (t) => {
+  const h = makeRepo(t);
+  const file = path.join(h.base, 'clock');
+  const done = `${file}.done`;
+  const now = Date.now();
+  fs.writeFileSync(file, String(now));
+  const child = cp.spawn(process.execPath, ['--require', HOOKS, '-e', `
+const fs = require('node:fs');
+let reads = 0, incomplete = 0;
+process.send('reading');
+while (!fs.existsSync(${JSON.stringify(done)})) {
+  const value = Date.now();
+  if (value !== ${now} && value !== ${now + 40000}) incomplete++;
+  reads++;
+}
+console.log(JSON.stringify({ reads, incomplete }));
+`], { cwd: h.repo, env: { ...h.env, HOOK_CLOCK_FILE: file }, stdio: ['ignore', 'pipe', 'pipe', 'ipc'] });
+  const closed = once(child, 'close');
+  let stdout = '', stderr = '';
+  child.stdout.on('data', (data) => { stdout += data; });
+  child.stderr.on('data', (data) => { stderr += data; });
+  t.after(() => { if (child.exitCode === null) child.kill(); });
+  await once(child, 'message', { signal: t.signal });
+  try {
+    // A batch exercises the publication boundary while the independent reader runs.
+    for (let i = 0; i < 200; i++) advanceClock(file, now + 40000);
+  } finally {
+    fs.writeFileSync(done, '');
+  }
+  const [code] = await closed;
+  assert.equal(code, 0, stderr);
+  const result = JSON.parse(stdout);
+  assert.ok(result.reads > 0, 'child sampled the shared clock');
+  assert.equal(result.incomplete, 0, 'the clock never exposed a truncated value');
+});
+
 function controlledBackoff(h) {
   const file = path.join(h.base, 'backoff-clock');
   const hook = path.join(__dirname, 'fixtures', 'supervision-backoff-clock.js').replace(/\\/g, '/');
@@ -47,7 +88,7 @@ function controlledBackoff(h) {
       NODE_OPTIONS: `--require "${HOOKS.replace(/\\/g, '/')}" --require "${hook}"`,
       TOWER_CRANE_TEST_BACKOFF_CLOCK: file,
     },
-    advance: (ms) => fs.writeFileSync(file, String(ms)),
+    advance: (ms) => advanceClock(file, ms),
   };
 }
 
@@ -318,7 +359,7 @@ test('detached supervision renews a short lease during backoff and does not allo
   await until(() => h.json(['task', 'show', 'T1']).run?.phase === 'retrying', 'retry was not recorded');
   await until(() => sketches(h).every(({ text }) => /retrying 1/.test(text)), 'saved sketches did not render the retry phase');
   for (const { file, text } of sketches(h)) assert.match(text, /retrying 1/, `${file} shows the retry phase`);
-  fs.writeFileSync(clockFile, String(now + 40000));
+  advanceClock(clockFile, now + 40000);
   await until(() => log(h).some((e) => e.cmd === 'renew'), 'supervisor did not renew the short lease');
   const task = h.json(['task', 'show', 'T1']);
   assert.equal(task.claim.agent, spawned.agent);
@@ -410,7 +451,8 @@ test('a running process keeps its lease without claimant writes', async (t) => {
   try {
     await until(() => h.readAttempts().length === 1, 'worker did not claim');
     stage = 'renew';
-    fs.writeFileSync(clockFile, String(now + 40000));
+    assert.equal(Date.parse(h.readAttempts()[0].claim.until) - now, 60000, 'worker holds the controlled one-minute lease');
+    advanceClock(clockFile, now + 40000);
     await until(() => log(h).some((e) => e.cmd === 'renew'), 'live worker lease was not renewed');
     const task = h.json(['task', 'show', 'T1']);
     assert.equal(task.claim.since, h.readAttempts()[0].claim.since);
