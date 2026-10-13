@@ -1,0 +1,1 @@
+- Git-config security tests use the suite's subprocess guard. Batch dispatch proves one fetch across preparation and spawning through its upload-pack fixture count.

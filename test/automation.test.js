@@ -187,6 +187,27 @@ test('generated-only conflicts merge, regenerate and push without rework or a wo
   assert.ok(h.logs().some((e) => e.cmd === 'generated merge' && e.detail.phase === 'pushed'));
 });
 
+// A worker can write .git/config. pushInsteadOf rewrites a URL named on the
+// command line but not remote.origin.pushurl, so a push to the checked URL
+// would reach this repository and run its hooks outside every sandbox.
+test('the generated-file repair pushes to the checked origin push URL, not a pushInsteadOf rewrite of it', (t) => {
+  const h = generatedSetup(t);
+  const evil = path.join(h.base, 'evil');
+  const decoy = path.join(evil, path.basename(h.remote));
+  h.git(['init', '-q', '--bare', decoy]);
+  const marker = path.join(h.base, 'pre-receive-ran');
+  fs.writeFileSync(path.join(decoy, 'hooks', 'pre-receive'), `#!/bin/sh\necho ran > ${shellQuote(marker)}\n`, { mode: 0o755 });
+  h.git(['config', 'remote.origin.pushurl', h.remote]);
+  h.git(['config', `url.${evil}${path.sep}.pushInsteadOf`, `${path.dirname(h.remote)}${path.sep}`]);
+  h.submit();
+  h.ok(['check', 'tests', 'T1', '--agent', 'orchestrator']);
+  h.consume();
+  const task = h.readState('tasks.json').tasks[0];
+  assert.equal(fs.existsSync(marker), false, 'the rewritten destination\'s pre-receive hook ran');
+  assert.ok(h.logs().some((e) => e.cmd === 'generated merge' && e.detail.phase === 'pushed'), JSON.stringify(h.logs().filter((e) => /automation|generated/.test(e.cmd)).map((e) => e.detail)));
+  assert.equal(h.git(['--git-dir', h.remote, 'rev-parse', 'fixture-change']), task.sha);
+});
+
 test('a generated-file conflict in a gate runs its checkout hooks with the gate scratch, not the caller temp root', (t) => {
   const h = generatedSetup(t);
   h.submit();
