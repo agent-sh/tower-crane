@@ -658,6 +658,86 @@ test('background reactions leave vacant, released, taken-over and expired leases
   assert.notEqual(lease().session_id, expired.session_id);
 });
 
+const IDLE_LEASE = {
+  aged: 'acts after aging past its captured lease',
+  takeover: 'stops after another session takes its captured lease',
+  late: 'started after its holder idled out acts when that holder returns',
+};
+for (const [mode, title] of Object.entries(IDLE_LEASE)) {
+  const takeover = mode === 'takeover';
+  test(`automation ${title}`, async (t) => {
+    const h = cachedFixture(t, 'automation-idle-lease', (repo) => {
+      const fixture = setup(null, { repo, ci: 'pending' });
+      return { sha: fixture.sha };
+    });
+    h.env.CLAUDE_SESSION_ID = 'holder';
+    const { stalled, release } = holdSuite(h);
+    const clock = path.join(h.base, 'lease-clock');
+    const preload = path.join(h.base, 'lease-clock.js');
+    fs.writeFileSync(preload, `const fs = require('node:fs');
+const RealDate = Date;
+global.Date = class extends RealDate {
+  constructor(...args) { super(...(args.length ? args : [Date.now()])); }
+  static now() {
+    return fs.existsSync(${JSON.stringify(clock)})
+      ? Number(fs.readFileSync(${JSON.stringify(clock)}, 'utf8')) : RealDate.now();
+  }
+};
+`);
+    const env = { NODE_OPTIONS: `${h.env.NODE_OPTIONS || ''} --require=${JSON.stringify(preload)}`.trim() };
+    let holder = h.readState('tasks.json').orchestrator_lease;
+    const idle = h.readState('project.json').limits.lease_minutes * 60000;
+    const expire = () => fs.writeFileSync(clock, String(Date.parse(holder.heartbeat) + idle + 1));
+    // A late reaction starts under the expired record; an owner waiter cannot renew it.
+    if (mode === 'late') expire();
+    h.ok(['claim', 'T1', '--agent', 'worker'], { env });
+    // Submit refuses pending CI; the gates still see it pending afterwards.
+    const github = () => JSON.parse(fs.readFileSync(h.env.AUTOMATION_GITHUB, 'utf8'));
+    const ci = (state) => fs.writeFileSync(h.env.AUTOMATION_GITHUB, JSON.stringify({ ...github(), ci: { [h.sha]: state } }));
+    ci('success');
+    h.ok(['submit', 'T1', '--sha', h.sha, '--pr', '7', '--agent', 'worker'], { env });
+    ci('pending');
+    const waiting = mode === 'late'
+      ? h.runAsync(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'owner'],
+        { env: { ...env, CLAUDE_SESSION_ID: 'engine-waiter' } })
+      : h.runAsync(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator'], { env });
+    try {
+      assert.notEqual(await waitFor(stalled, { ms: 30000 }), null, 'automation did not start its gate');
+      if (mode === 'late') {
+        assert.deepEqual(h.readState('tasks.json').orchestrator_lease, holder, 'an owner waiter keeps the holder heartbeat');
+        // The holder wakes on the submit; its first read renews its own heartbeat.
+        h.ok(['status', '--agent', 'orchestrator'], { env });
+        const renewed = h.readState('tasks.json').orchestrator_lease;
+        assert.equal(renewed.session_id, holder.session_id);
+        assert.notEqual(renewed.heartbeat, holder.heartbeat, 'the returning holder renews its lease');
+      } else {
+        holder = h.readState('tasks.json').orchestrator_lease;
+        expire();
+      }
+      if (takeover) {
+        h.ok(['task', 'note', 'T1', 'replacement session', '--agent', 'orchestrator'],
+          { env: { ...env, CLAUDE_SESSION_ID: 'replacement' } });
+        assert.notEqual(h.readState('tasks.json').orchestrator_lease.session_id, holder.session_id);
+      }
+      const before = h.readState('tasks.json').orchestrator_lease;
+      fs.writeFileSync(release, '');
+      const result = await waiting;
+      assert.equal(result.code, takeover ? 1 : 2, result.stderr);
+      const after = h.readState('tasks.json');
+      assert.deepEqual(after.orchestrator_lease, before, 'automation cannot acquire or renew a lease');
+      if (takeover) {
+        assert.match(result.stderr, /orchestrator lease changed during automation/);
+        assert.equal(after.tasks[0].evidence.some((e) => e.type === 'tests'), false, 'the old session cannot publish its gate result');
+      } else {
+        assert.ok(after.tasks[0].evidence.some((e) => e.type === 'tests' && e.ok), 'automation publishes its gate result after expiry');
+      }
+    } finally {
+      fs.writeFileSync(release, '');
+      await waiting;
+    }
+  });
+}
+
 test('CI completion refreshes a pending receipt at the exact head and merges after review', (t) => {
   const h = setup(t, { ci: 'pending' });
   h.submit();
@@ -1663,6 +1743,82 @@ poll();
     '--executors', '1', '--agent', 'orchestrator']);
   return { stalled, release };
 }
+
+test('accepted merges take the next executor in acceptance order before queued submitted gates', async (t) => {
+  const h = setup(t);
+  const events = path.join(h.state, 'events.jsonl');
+  const { stalled, release } = holdSuite(h);
+  fs.writeFileSync(stalled, '');
+  for (const id of ['T2', 'T3', 'T4', 'T5']) {
+    h.ok(['task', 'add', '--title', `Change ${id}`, '--acceptance', 'it works', '--kind', 'code']);
+  }
+  const github = h.github();
+  github.prs['8'] = { ...github.prs['7'] };
+  h.saveGithub(github);
+  // Submit T4 first, but accept T5 first. Both already passed their gates.
+  for (const id of ['T4', 'T5']) {
+    h.ok(['claim', id, '--agent', 'worker']);
+    h.ok(['submit', id, '--sha', h.sha, '--agent', 'worker']);
+    for (const gate of ['tests', 'clean', 'ci']) h.ok(['check', gate, id, '--agent', 'orchestrator']);
+    h.reviewer(id, 'reviewer', h.sha);
+    h.ok(['evidence', id, '--type', 'review', '--sha', h.sha, '--revision', h.revision(id), '--ok', '--agent', 'reviewer']);
+  }
+  // An independent base change requires each merge to test the merged tree.
+  h.git(['switch', 'main']);
+  fs.appendFileSync(path.join(h.repo, 'README.md'), 'Independent base update.\n');
+  h.git(['add', 'README.md']);
+  h.git(['commit', '-qm', 'advance main']);
+  fs.rmSync(stalled);
+  h.ok(['claim', 'T1', '--agent', 'worker']);
+  const offset = fs.statSync(events).size;
+  h.ok(['submit', 'T1', '--sha', h.sha, '--agent', 'worker']);
+  // Start only T1's reaction, leaving the prepared PRs for explicit acceptance.
+  const holder = h.runAsync(['wait', '--after', String(offset), '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
+  let text, queue;
+  try {
+    assert.notEqual(await waitFor(stalled), null, 'T1 holds the only executor');
+    const after = fs.statSync(events).size;
+    for (const id of ['T2', 'T3']) {
+      h.ok(['claim', id, '--agent', 'worker']);
+      h.ok(['submit', id, '--sha', h.sha, '--agent', 'worker']);
+    }
+    // Attach the PRs after T1 starts, so startup reconciliation cannot advance them first.
+    for (const [id, pr] of [['T4', '7'], ['T5', '8']]) {
+      h.ok(['submit', id, '--sha', h.sha, '--pr', pr, '--agent', 'worker']);
+    }
+    h.run(['wait', '--after', String(after), '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
+    // A request made while T4 is submitted gives way to its acceptance.
+    h.ok(['gates', 'prioritize', 'T4', '--reason', 'request before acceptance', '--agent', 'orchestrator']);
+    const accepted = fs.statSync(events).size;
+    for (const id of ['T5', 'T4']) h.ok(['accept', id, '--agent', 'orchestrator']);
+    h.run(['wait', '--after', String(accepted), '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
+    const late = h.run(['gates', 'prioritize', 'T4', '--reason', 'later merge request', '--agent', 'orchestrator']);
+    assert.notEqual(late.code, 0);
+    assert.match(late.stderr, /T4 is accepted; its merge already runs ahead of submitted gate work, in acceptance order/);
+    h.ok(['gates', 'prioritize', 'T3', '--reason', 'submitted gate request', '--agent', 'orchestrator']);
+    text = h.ok(['status']);
+    queue = h.json(['status']).gate_queue;
+    assert.deepEqual(h.json(['inbox', '--agent', 'orchestrator']).gate_queue, queue);
+    assert.deepEqual(h.logs().filter((e) => e.cmd === 'automation' && e.detail.phase === 'running').map((e) => e.task),
+      ['T1'], 'acceptance does not preempt the running gate');
+    assert.equal(h.github().calls.some((a) => a[1] === 'merge'), false);
+  } finally {
+    fs.writeFileSync(release, '');
+    assert.equal((await holder).code, 2, 'the held executor finishes and drains the queue');
+  }
+  assert.match(text, /^gate running: T1$/m);
+  assert.match(text, /^gate queue: T5, T4, T3 \(prioritized: submitted gate request\), T2$/m);
+  assert.deepEqual(queue.queued.map((q) => q.id), ['T5', 'T4', 'T3', 'T2']);
+  const log = h.logs();
+  assert.deepEqual(log.filter((e) => e.cmd === 'automation' && e.detail.phase === 'running').map((e) => e.task),
+    ['T1', 'T5', 'T4', 'T3', 'T2']);
+  assert.deepEqual(log.filter((e) => e.cmd === 'head check').map((e) => [e.task, e.detail.ok]),
+    [['T5', true], ['T4', true]], 'merged-tree tests keep merge priority');
+  assert.deepEqual(h.github().calls.filter((a) => a[1] === 'merge').map((a) => a[2]), ['8', '7']);
+  const gates = log.findIndex((e) => e.cmd === 'automation' && e.task === 'T3' && e.detail.phase === 'running');
+  assert.ok(log.findLastIndex((e) => e.cmd === 'merge' && e.detail.ok) < gates,
+    'both merges finish before a queued submitted gate starts');
+});
 
 test('gates prioritize runs the last queued task first; status and inbox show the gate queue', async (t) => {
   const h = setup(t);

@@ -4,8 +4,11 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const net = require('node:net');
+const cp = require('node:child_process');
+const { once } = require('node:events');
 const { pathToFileURL } = require('node:url');
-const { cachedFixture, pinRung, real, BIN, PTY_AVAILABLE } = require('./helpers');
+const { cachedFixture, pinRung, real, BIN, ROOT, PTY_AVAILABLE } = require('./helpers');
 const stack = require('./stack-fixture');
 const A = require('../lib/agents');
 const S = require('../lib/state');
@@ -41,6 +44,74 @@ const commandRung = (h, rung, argv) => {
   const command = argv.some((arg) => /\{(prompt|brief)\}/.test(arg)) ? argv : [...argv, '{prompt}'];
   setRung(h, rung, ['--harness', 'command', '--command', JSON.stringify(command)]);
 };
+
+test('the dead-agent sweep removes orphan brokers and keeps live claims, processes and sockets', async (t) => {
+  const h = setup(t);
+  h.ok(['task', 'add', '--title', 'Live peer', '--acceptance', 'kept']);
+  h.ok(['claim', 'T2', '--agent', 'worker-live-claim']);
+  const brokerDir = (agent) => path.join(h.state, 'brokers', agent);
+  const plant = (agent, address) => {
+    fs.mkdirSync(brokerDir(agent), { recursive: true });
+    fs.writeFileSync(path.join(brokerDir(agent), 'broker.json'), JSON.stringify({
+      ...address, token: 'stale-test-token', state: h.state, task: 'T2', agent, role: 'worker',
+    }));
+  };
+  // Killing a listener leaves its Unix socket behind, as a killed supervisor does.
+  const job = { state: h.state, task: 'T2', agent: 'worker-orphan', role: 'worker', harness: 'claude',
+    cwd: h.repo, broker: path.join(brokerDir('worker-orphan'), 'broker.json') };
+  const listener = cp.spawn(process.execPath, ['-e',
+    'require(process.argv[1]).start(JSON.parse(process.argv[2])).then(() => process.stdout.write("ready\\n"))',
+    path.join(ROOT, 'lib', 'broker.js'), JSON.stringify(job)],
+  { stdio: ['ignore', 'pipe', 'pipe'] });
+  t.after(() => listener.kill('SIGKILL'));
+  await once(listener.stdout, 'data');
+  const { socket } = JSON.parse(fs.readFileSync(job.broker, 'utf8'));
+  if (process.platform !== 'win32' && path.dirname(socket) !== brokerDir('worker-orphan')) {
+    t.after(() => fs.rmSync(path.dirname(socket), { recursive: true, force: true }));
+  }
+  const exited = once(listener, 'exit');
+  listener.kill('SIGKILL');
+  await exited;
+  if (process.platform !== 'win32') assert.ok(fs.statSync(socket).isSocket());
+  for (const agent of ['worker-orphan', 'worker-live-claim', 'worker-live-process', 'worker-live-monitor', 'worker-unknown-process']) {
+    plant(agent, { socket });
+  }
+  const live = net.createServer((conn) => conn.end());
+  live.listen({ host: '127.0.0.1', port: 0 });
+  await once(live, 'listening');
+  t.after(() => new Promise((resolve) => live.close(resolve)));
+  plant('worker-live-socket', { socket, host: '127.0.0.1', port: live.address().port });
+  const closed = net.createServer();
+  closed.listen({ host: '127.0.0.1', port: 0 });
+  await once(closed, 'listening');
+  const port = closed.address().port;
+  await new Promise((resolve) => closed.close(resolve));
+  plant('worker-orphan-tcp', { host: '127.0.0.1', port });
+  plant('worker-uncertain', {});
+  const identity = require('../lib/processes').identity(process.pid);
+  for (const [agent, processInfo] of [
+    ['worker-live-process', { pid: process.pid, ...identity }],
+    ['worker-live-monitor', { pid: 2147483647, ...identity, monitor_pid: process.pid, monitor_start_ticks: identity.start_ticks }],
+    ['worker-unknown-process', { pid: process.pid, host: 'another-host' }],
+  ]) {
+    fs.appendFileSync(path.join(h.state, 'events.jsonl'), JSON.stringify({
+      at: new Date().toISOString(), cmd: 'spawn', agent: 'owner', task: 'T2', detail: { agent, role: 'worker', ...processInfo },
+    }) + '\n');
+  }
+  const bin = path.join(h.base, 'bin');
+  fs.mkdirSync(bin);
+  fs.writeFileSync(path.join(bin, `codex${process.platform === 'win32' ? '.exe' : ''}`), '', { mode: 0o755 });
+  const out = await h.runAsync(['spawn', '--task', 'T1', '--wait'], {
+    env: { PATH: bin + path.delimiter + (h.env.PATH || h.env.Path || ''), USAGE_CLAIM: '1' },
+    hooks: { HOOK_USAGE_HARNESS: 'codex', HOOK_USAGE_FILE: path.join(__dirname, 'fixtures', 'usage', 'codex-stream.jsonl') },
+  });
+  assert.equal(out.code, 0, out.stderr);
+  assert.equal(fs.existsSync(brokerDir('worker-orphan')), false, 'broker with no home, claim or process and a dead socket is swept');
+  assert.equal(fs.existsSync(brokerDir('worker-orphan-tcp')), false, 'a dead TCP-only broker is swept');
+  for (const agent of ['worker-live-claim', 'worker-live-process', 'worker-live-monitor', 'worker-unknown-process', 'worker-live-socket', 'worker-uncertain']) {
+    assert.ok(fs.existsSync(path.join(brokerDir(agent), 'broker.json')), `${agent} is kept`);
+  }
+});
 
 for (const harness of ['claude', 'codex', 'opencode', 'agy', 'pi']) {
   test(`a ${harness} rung spawns with an arbitrary model ID`, (t) => {
@@ -525,6 +596,35 @@ require('node:fs').writeFileSync(${JSON.stringify(out)}, JSON.stringify({
   assert.equal(seen.stderr, '');
   assert.match(seen.stdout, /# pass 1\b/);
   assert.equal(fs.readFileSync(marker, 'utf8'), 'ran');
+});
+
+test('command brief copies default to the user cache and keep explicit temp overrides', (t) => {
+  const h = setup(t);
+  const out = path.join(h.base, 'brief-location.json');
+  commandRung(h, 'medium', [process.execPath, '-e',
+    "require('node:fs').writeFileSync(process.argv[1], JSON.stringify({ file: process.argv[2], text: require('node:fs').readFileSync(process.argv[2], 'utf8') }))",
+    out, '{brief}']);
+  const cache = process.platform === 'win32'
+    ? path.join(h.env.HOME, 'AppData', 'Local')
+    : path.join(h.env.HOME, '.cache');
+  const env = { USERPROFILE: h.env.HOME, XDG_CACHE_HOME: '', LOCALAPPDATA: '', TOWER_CRANE_TMP: '', TOWER_CRANE_TEST_TMP: '' };
+  const expected = path.join(cache, 'tower-crane');
+  const planned = dry(h, 'medium', env);
+  const file = planned.argv.find((arg) => arg.endsWith('-brief.md'));
+  assert.equal(path.dirname(file), expected);
+  assert.equal(fs.existsSync(file), false, 'dry-run does not create a brief');
+  h.ok(['spawn', '--task', 'T1', '--wait'], { env });
+  const seen = JSON.parse(fs.readFileSync(out, 'utf8'));
+  assert.equal(path.dirname(seen.file), expected);
+  assert.match(seen.text, /webhook handler/);
+  assert.equal(fs.existsSync(seen.file), false, 'the cache brief is removed after the command exits');
+  for (const overrides of [
+    { TOWER_CRANE_TEST_TMP: path.join(h.base, 'test-tmp') },
+    { TOWER_CRANE_TEST_TMP: path.join(h.base, 'test-tmp'), TOWER_CRANE_TMP: path.join(h.base, 'spawn-tmp') },
+  ]) {
+    const next = dry(h, 'medium', { ...env, ...overrides }).argv.find((arg) => arg.endsWith('-brief.md'));
+    assert.equal(path.dirname(next), overrides.TOWER_CRANE_TMP || overrides.TOWER_CRANE_TEST_TMP);
+  }
 });
 
 test('command brief placeholders point to role-filtered temporary copies', async (t) => {
