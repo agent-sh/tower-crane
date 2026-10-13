@@ -432,6 +432,13 @@ If a generator cannot run until source conflicts are resolved, the merge
 keeps the branch's generated bodies staged and the worker reruns the scripts
 after resolving the hand-written files.
 
+In the gate executor queue, accepted tasks' merge reactions run ahead of
+queued submitted-task gates, in acceptance order. Their merged-tree tests
+keep that priority. A running gate finishes before the next reaction starts.
+`gates prioritize` moves submitted work within the submitted queue; it
+cannot move it ahead of accepted merges or change acceptance order.
+`status` and `inbox` show the order the next free executor takes.
+
 Accepted PRs merge through a merge queue in the order of their `accept`
 events. A stack is one entry, ordered by its lowest unmerged task: it holds
 that task and the accepted, linked tasks directly above it, and an upper
@@ -933,7 +940,7 @@ The CLI refuses manual software verdicts, and software receipts require matching
 | | |
 | `check tests ID [--cmd CMD] [--proof-cmd CMD]` | use `tests.by_kind` over `tests.mode` (default `prove`); `prove` requires pinned `gates.tests_cmd` to pass at head and fail after reverting other changes, with T8 build-file keeps; expensive proof runs mapped head suites when `tests.map` and full-suite `ci.required` are pinned, falls back to CMD for unmapped sources, and uses a scoped `{tests}` command at head and after reversion; `run-only` requires the pinned command to pass once at head; `none` verifies the submitted commit without running CMD; records `tests`, resolved `tests_mode`, and failed test names plus a bounded output tail when its command fails; timeouts record infrastructure failure and interrupted files instead |
 | | |
-| `gates prioritize ID --reason R` | operational (orchestrator or owner): move the task's queued automation reactions, such as its submission gates or merge, ahead of older queued work, so the next free executor takes them first. Several requests run newest first. Only the work queued when the request is made moves; a notification queued later keeps its place, and a running reaction is not queued work. Refused when nothing is queued for the task. Logs a `gates prioritize` event with the reason; `status` and `inbox` show the gate queue |
+| `gates prioritize ID --reason R` | operational (orchestrator or owner): move the task's queued submitted gate reactions ahead of older submitted work. Accepted merges always run first in acceptance order, including their merged-tree tests; requests cannot change that order. Several requests run newest first among submitted work. Only the work queued when the request is made moves; a notification queued later keeps its place unless its task becomes accepted, and a running reaction is not queued work. Refused for an accepted task, whose merge already runs first, and when nothing is queued for the task. Logs a `gates prioritize` event with the reason; `status` and `inbox` show the gate queue |
 | | |
 | `gates retry ID` | orchestrator or owner: rerun each failed `tests`, `clean`, `sources` or `ci` gate of a submitted task at its current head and revision, with the same pinned commands and policy. Use it after a later fix removed the environment problem behind a failed gate, such as a pinned command the orchestrator has now set. Automation retries an infrastructure failure once, including a test that also fails on the base branch, and sends any other failed check to rework; a missing pinned command stays submitted until the orchestrator pins it, and this reruns the gate. Passing evidence whose inputs changed, such as the pinned command or tests policy, reruns on its own. Refuses a task that is not submitted and one with no failed software gate. Exits 1 while a retried gate still fails. Run `accept` afterwards to continue |
 | | |

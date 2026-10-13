@@ -116,7 +116,7 @@ Workers, reviewers and every other identity are refused both. For an operational
 | `gates.executors` | operational | `project set --executors` |
 | `gates.tests_timeout_min`, `gates.clean_timeout_min` | operational | `project set --tests-timeout-min`, `--clean-timeout-min` |
 | `gates.tmp_root` | operational | `project set --tmp-root` |
-| `gates.priority` | operational | `gates prioritize ID --reason R`: a task's queued gate reactions run before older queued work |
+| `gates.priority` | operational | `gates prioritize ID --reason R`: a task's queued submitted gate reactions run before older submitted work; accepted merges stay first |
 | `ci.required`, `ci.ignore_apps`, `ci.capped_review` | operational | `project set --ci-required`, `--ci-ignore-apps`, `--ci-capped-review` |
 | `ci.local` | operational | `project set --ci-local`, `task update --ci-local` |
 | `tests.paths`, `tests.keep`, `tests.host_only`, `tests.host_env`, `tests.mode`, `tests.by_kind`, `tests.expensive`, `tests.map` | operational | `project set --tests-*` |
@@ -848,16 +848,23 @@ identity releases it when the process dies. Running receipts from other
 hosts do not count against this host's cap.
 `automation queued` records a blocked notification's source, with
 `executors` set to the cap when the cap blocked it rather than another
-executor of the same task. Queued notifications run in drain order: submission
-order, except that the queued notifications a `gates prioritize` event names
-run first, the most recent request first. While one waits, a later
-notification queues behind it even if a slot is free. A notification queued
-after the request keeps submission order.
+executor of the same task. Queued notifications for accepted, unmerged PR
+tasks run first, in the order of their current `accept` events. This includes
+older notifications that now run a merge and any merged-tree test the merge
+needs. Running reactions are never preempted.
+Submitted tasks follow in submission order, except that the queued
+notifications a `gates prioritize` event names run first among submitted
+work, the most recent request first. An explicit request cannot move
+submitted work ahead of accepted merges or change acceptance order.
+While higher-ranked work waits, a later notification queues behind it even
+if a slot is free. A notification queued after a priority request keeps
+submission order unless its task becomes accepted.
 `gates prioritize ID --reason R` is operational ([Authority](#authority)); it
 records a `gates prioritize` event with `reason`, `sources` (the sources of
 the task's queued notifications at that moment), `queued` (their count) and
-`authority`. Only those notifications move. It is refused when the task has
-no queued notification, since it would change nothing. A notification queued
+`authority`. Only those notifications move. It is refused when the task is
+an accepted, unmerged PR task, whose merge already runs first, and when the
+task has no queued notification, since either would change nothing. A notification queued
 behind the task's own running reaction counts, but the running reaction does
 not: its receipt is running and its executor is live, so it is no longer
 queued. A dead executor's notification stays queued for its retry. `status`
@@ -865,7 +872,8 @@ lists the gate queue: running tasks, then the queued tasks in the order a free
 executor takes them, then the tasks whose notification waits behind their own
 running reaction, marked as blocked. `--json` carries it as `gate_queue` with
 `running`, `queued` and `blocked`, each queued or blocked task with its
-`prioritized` request or `null`. `inbox` carries the same `gate_queue`. Each executor drains the queue after releasing its slot; watchers
+`prioritized` request or `null`. An accepted task shows `null`, since its
+acceptance sets its place. `inbox` carries the same `gate_queue`. Each executor drains the queue after releasing its slot; watchers
 also retry their pending notifications on their next check. State locks cover only
 reservation and receipts, never Git, GitHub, gates or model calls.
 Automatic state changes and evidence use `agent: orchestrator` and
