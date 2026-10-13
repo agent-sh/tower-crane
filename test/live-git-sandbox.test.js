@@ -9,9 +9,9 @@
 //
 // The codex probe makes no model call: a stand-in harness runs `git status`
 // as the harness process, then the probe in `codex sandbox` with the
-// generated permission profile. It runs wherever codex is on PATH and its
-// sandbox starts. The claude probe runs a real claude agent, so it costs a
-// model call: set TOWER_CRANE_LIVE_CLAUDE=1 (TOWER_CRANE_LIVE_MODEL picks the
+// generated permission profile. It runs with TOWER_CRANE_LIVE_CODEX=1
+// wherever codex is on PATH and its sandbox starts. The claude probe runs a
+// real claude agent, so it costs a model call: set TOWER_CRANE_LIVE_CLAUDE=1 (TOWER_CRANE_LIVE_MODEL picks the
 // model, claude-haiku-5-5 by default: a full id resolves on every provider).
 
 const test = require('node:test');
@@ -125,8 +125,11 @@ function check(f, label, outs) {
   assert.equal(f.h.git(['merge-base', '--is-ancestor', 'origin/main', 'HEAD'], wt.path), '', `${label}: the branch is rebased onto main`);
 }
 
-// A real codex whose sandbox starts here, past any stand-in on PATH.
+// A real codex whose sandbox starts here, past any stand-in on PATH. Without
+// the opt-in, the test guard stands in for codex (test/helpers.js), and
+// even this check would start the real one.
 function realCodex() {
+  if (process.env.TOWER_CRANE_LIVE_CODEX !== '1') return { skip: 'set TOWER_CRANE_LIVE_CODEX=1 to run against the real codex sandbox' };
   if (process.platform !== 'linux') return { skip: 'the codex probe covers the Linux sandbox' };
   if (process.env.TOWER_CRANE_SANDBOX === '1') return { skip: 'inside a sandbox, where a nested one cannot start' };
   const r = cp.spawnSync('codex', ['sandbox', '--', 'true'], { encoding: 'utf8', timeout: 60000, cwd: process.env.TOWER_CRANE_TEST_TMP || undefined });
@@ -188,7 +191,7 @@ test('from a real claude sandbox a worker cannot write the shared git config or 
   }, 500);
   let r;
   try { r = await spawned; } finally { clearInterval(timer); }
-  assert.equal(r.code, 0, r.stderr);
+  assert.equal(r.code, 0, r.stderr || r.stdout);
   assert.ok(added, 'the late worktree was added while the agent ran');
   check(f, 'claude', [first, second]);
 });
