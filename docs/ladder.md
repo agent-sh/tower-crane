@@ -22,7 +22,7 @@ This keeps that rung's harness and effort. `ladder show` confirms the resolved m
 
 `node scripts/check-model-config.js` scans the raw text of `lib/`, `bin/` and JSON outside documentation for model ID and profile patterns. Comments and strings are checked alike. Every hit outside the BUILTIN table needs an entry in [tools/model-literals.json](../tools/model-literals.json) with an exact file path, matched text and reason. Matching uses the text written in the file.
 
-CI runs the complete model swap probe once on Linux with Node 26. Its temporary repositories live in the runner's cache outside the checkout, so parent project rules, state and agent cache identity cannot affect the fixtures.
+Main pushes, daily and manual CI runs run the complete model swap probe once on Linux with Node 26. Its temporary repositories live in the runner's cache outside the checkout, so parent project rules, state and agent cache identity cannot affect the fixtures.
 
 | Rung | Does | Good fit |
 |---|---|---|

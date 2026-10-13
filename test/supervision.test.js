@@ -51,7 +51,7 @@ function controlledBackoff(h) {
   };
 }
 
-function setup(t, { failures = 1, error = '75', records = null, hold = 0, waitForFinish = false, config = {}, env = {}, busy = false, claimDelay = 0, claim = true, sessionReceipt = false } = {}) {
+function setup(t, { failures = 1, error = '75', records = null, hold = 0, waitForFinish = false, config = {}, env = {}, busy = false, claimDelay = 0, claim = true, sessionReceipt = false, publishBarrier = false } = {}) {
   const h = makeTaskRepo(t, [{
     args: ['--title', 'Supervise an outage', '--tier', 'easy', '--acceptance', 'same session reruns'],
     brief: 'Finish the task.\n',
@@ -70,7 +70,18 @@ if (!attempts.length && ${claim}) {
 const task = JSON.parse(cli(['task', 'show', 'T1', '--json']));
 attempts.push({ agent: process.env.TOWER_CRANE_AGENT, session: process.env.TOWER_CRANE_SESSION, retry: process.env.TOWER_CRANE_RETRY,
   cwd: process.cwd(), claim: task.claim, pid: process.pid });
-fs.writeFileSync(file, JSON.stringify(attempts));
+${publishBarrier ? `if (attempts.length === 2) {
+  const write = fs.writeFileSync;
+  fs.writeFileSync = (target, data) => {
+    const fd = fs.openSync(target, 'w');
+    write(file + '.writing', '');
+    while (!fs.existsSync(file + '.publish')) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
+    try { write(fd, data); } finally { fs.closeSync(fd); }
+  };
+}` : ''}
+const pending = file + '.next-' + process.pid;
+fs.writeFileSync(pending, JSON.stringify(attempts));
+fs.renameSync(pending, file);
 ${sessionReceipt ? "console.log(JSON.stringify({ type: 'thread.started', thread_id: 'supervised-session' }));" : ''}
 ${busy ? "cp.spawn(process.execPath, ['-e', 'const end = Date.now() + 3500; while (Date.now() < end) {}'], { stdio: 'ignore' });" : ''}
 const finish = () => {
@@ -1103,6 +1114,20 @@ fs.writeFileSync(process.argv[2], JSON.stringify({
   assert.equal(path.basename(captured.args[monitorIndex + 1]), 'job.json');
   assert.ok(!captured.args.some((arg) => arg.includes('x'.repeat(1024))), 'the prompt is not in monitor argv');
   assert.equal(h.json(['task', 'show', 'T1']).run.phase, 'waiting');
+});
+
+test('supervision attempt readers keep a complete snapshot during the next write', async (t) => {
+  const h = setup(t, { waitForFinish: true, publishBarrier: true });
+  const spawned = h.json(['spawn', '--task', 'T1']);
+  try {
+    await until(() => fs.existsSync(`${h.attempts}.writing`), 'second attempt did not start writing');
+    assert.equal(h.readAttempts().length, 1, 'readers keep the previous complete attempt list');
+  } finally {
+    fs.writeFileSync(`${h.attempts}.publish`, '');
+    fs.writeFileSync(`${h.attempts}.finish`, '');
+    await until(() => !detachedAlive({ pid: spawned.monitor_pid }), 'previous supervisor did not finish');
+  }
+  assert.equal(h.readAttempts().length, 2);
 });
 
 test('rework cannot resume a session while its transient rerun is still alive', async (t) => {
