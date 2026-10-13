@@ -65,15 +65,20 @@ async function closeBrowser() {
 // which the same 62-byte profile limit keeps under the 108-byte Unix path limit. A temp root deep
 // enough to overflow that (a gate's TMPDIR under TOWER_CRANE_TMP) moves the profile to the first
 // directory whose path fits, on disk, and the browser's teardown removes it. The cache root is
-// on-disk scratch that stays writable where /var/tmp may be read-only. When none fits, the first
-// root is used and Chrome reports its own socket error, which names the problem.
+// on-disk scratch that stays writable where /var/tmp may be read-only. A gate's XDG_CACHE_HOME can
+// also be a deep task cache, so the account's normal cache is the last fallback. When none fits,
+// the first root is used and Chrome reports its own socket error, which names the problem.
 const CHROME_SOCKET_PATH = 78;
 
 function profileBase() {
   const cache = process.env.XDG_CACHE_HOME || path.join(os.homedir(), '.cache');
   const bases = [process.env.TOWER_CRANE_TEST_TMP || os.tmpdir(), os.tmpdir(), cache];
   const fits = (base) => Buffer.byteLength(path.join(base, 'tower-crane-chrome-000000', 'SingletonSocket')) <= CHROME_SOCKET_PATH;
-  const base = bases.find(fits) || bases[0];
+  let base = bases.find(fits);
+  if (!base) {
+    const accountCache = path.join(os.userInfo().homedir, '.cache');
+    base = fits(accountCache) ? accountCache : bases[0];
+  }
   fs.mkdirSync(base, { recursive: true });
   return base;
 }
