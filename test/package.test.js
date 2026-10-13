@@ -22,6 +22,16 @@ test('pack output parses from the npm 11 array and npm 12 object shapes', () => 
   }
 });
 
+test('fixture children disable Node compile caches', (t) => {
+  const h = makeRepo(t);
+  const child = cp.spawnSync(process.execPath, ['-e', `
+const cache = require('node:module').enableCompileCache();
+console.log(JSON.stringify(cache));
+`], { env: h.env, encoding: 'utf8', timeout: 300000 });
+  assert.equal(child.status, 0, child.stderr);
+  assert.equal(JSON.parse(child.stdout).status, require('node:module').constants.compileCacheStatus.DISABLED);
+});
+
 test('the npm package ships the plugin and loads pi skills through its CLI', (t) => {
   const h = makeRepo(t);
   const args = ['pack', '--dry-run', '--json', '--cache', path.join(h.base, 'npm-cache')];

@@ -126,6 +126,209 @@ test('native Claude alias spend records release-priced cost without rewriting it
   }
 });
 
+test('a Claude run on several models names its primary model and keeps each model\'s counts', () => {
+  const result = { type: 'result', usage: { input_tokens: 100, cache_read_input_tokens: 900, output_tokens: 50 },
+    modelUsage: {
+      'global.anthropic.claude-opus-5-5[1m]': { inputTokens: 90, cacheReadInputTokens: 800, cacheCreationInputTokens: 0, outputTokens: 40 },
+      'anthropic.claude-haiku-5-5': { inputTokens: 10, cacheReadInputTokens: 100, cacheCreationInputTokens: 0, outputTokens: 10 },
+    } };
+  assert.deepEqual(parse('claude', JSON.stringify(result)), {
+    tokens: 1050, input: 1000, cached: 900, output: 50, model: 'global.anthropic.claude-opus-5-5[1m]',
+    models: [
+      { model: 'global.anthropic.claude-opus-5-5[1m]', tokens: 930, input: 890, cached: 800, output: 40 },
+      { model: 'anthropic.claude-haiku-5-5', tokens: 120, input: 110, cached: 100, output: 10 },
+    ],
+  });
+  const message = (id, model, u) => JSON.stringify({ type: 'assistant', message: { id, model, usage: u } });
+  const log = [
+    message('a', 'fixture-large', { input_tokens: 50, cache_read_input_tokens: 0, output_tokens: 5 }),
+    message('b', 'fixture-small', { input_tokens: 3, cache_read_input_tokens: 0, output_tokens: 1 }),
+    message('c', 'fixture-large', { input_tokens: 20, cache_read_input_tokens: 0, output_tokens: 2 }),
+  ].join('\n');
+  const split = parse('claude', log);
+  assert.equal(split.model, 'fixture-large');
+  assert.deepEqual(split.models.map((r) => [r.model, r.tokens]), [['fixture-large', 77], ['fixture-small', 4]]);
+  // Usage that names no model counts toward the primary model, and zero-token placeholders, named or not, make no second model.
+  const unnamed = [
+    message('d', 'fixture-large', { input_tokens: 50, cache_read_input_tokens: 0, output_tokens: 5 }),
+    JSON.stringify({ type: 'assistant', message: { id: 'e', usage: { input_tokens: 0, output_tokens: 0 } } }),
+    message('f', '<synthetic>', { input_tokens: 0, cache_read_input_tokens: 0, output_tokens: 0 }),
+  ].join('\n');
+  const single = parse('claude', unnamed);
+  assert.equal(single.model, 'fixture-large');
+  assert.equal(single.models, undefined);
+  // A result's placeholder model with no counts is not a second model either.
+  const placeholder = { type: 'result', usage: { input_tokens: 50, cache_read_input_tokens: 0, output_tokens: 5 },
+    modelUsage: { 'fixture-large': { inputTokens: 50, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, outputTokens: 5 }, '<synthetic>': {} } };
+  assert.equal(parse('claude', JSON.stringify(placeholder)).models, undefined);
+});
+
+test('a base-valid provider price table loads and retains exact rows through project set', (t) => {
+  const h = setup(t, 'claude');
+  const row = (output) => ({ input: 1, cache_write: 1, cache_read: 1, output });
+  const prices = { 'claude-opus-5-5': row(20), 'global.anthropic.claude-opus-5-5': row(30) };
+  const project = h.readState('project.json');
+  assert.equal(project.schema_version, 1);
+  project.review = { ...project.review, prices };
+  h.writeState('project.json', project);
+  assert.deepEqual(h.json(['project', 'show']).review.prices, prices, 'a schema-1 table from the base still loads');
+  h.ok(['project', 'set', '--review-policy', JSON.stringify({ prices })]);
+  assert.deepEqual(h.readState('project.json').review.prices, prices, 'saving does not collapse provider rows');
+  assert.equal(h.readState('project.json').schema_version, 1);
+  for (const [model, usd] of [
+    ['claude-opus-5-5', 0.02],
+    ['global.anthropic.claude-opus-5-5', 0.03],
+    ['global.anthropic.claude-opus-5-5[1m]', 0.02],
+  ]) {
+    h.ok(['spend', 'T1', '--harness', 'claude', '--model', model, '--tokens', '1000', '--input', '0', '--cached', '0', '--output', '1000']);
+    assert.equal(spends(h).entries.at(-1).cost_usd, usd, model);
+  }
+  const tasks = h.readState('tasks.json');
+  tasks.tasks[0].status = 'accepted';
+  for (const entry of tasks.tasks[0].spend.entries) entry.cost_usd = null;
+  h.writeState('tasks.json', tasks);
+  const bench = h.json(['bench', 'tokens']);
+  assert.deepEqual(bench.unpriced_models, {});
+  assert.ok(Math.abs(bench.list_usd - 0.07) < 1e-12, 'bench uses the same exact-first lookup when no recorded cost exists');
+});
+
+test('exact price rows take precedence over canonical fallbacks for every model in a run', () => {
+  const { rateTable, entryCost } = require('../lib/reviewer');
+  const row = (output) => ({ input: 1, cache_write: 1, cache_read: 1, output });
+  const rates = rateTable({
+    'global.anthropic.claude-opus-5-5': row(30),
+    'claude-opus-5-5': row(20),
+    'global.anthropic.claude-opus-5-5[1m]': row(40),
+    'claude-haiku-4-5-20251001': row(5),
+  });
+  const usage = (model) => ({ model, tokens: 1000, input: 0, cached: 0, output: 1000 });
+  for (const [model, output] of [
+    ['claude-opus-5-5', 20],
+    ['global.anthropic.claude-opus-5-5', 30],
+    ['global.anthropic.claude-opus-5-5[1m]', 40],
+    [' Global.Anthropic.Claude-Opus-5-5 ', 30],
+    ['anthropic.claude-opus-5-5[1m]', 20],
+    ['eu.anthropic.claude-opus-5-5', 20],
+    ['global.anthropic.claude-haiku-4-5-20251001-v1:0', 5],
+  ]) assert.equal(entryCost(usage(model), rates), output / 1000, model);
+  assert.equal(entryCost({ models: [
+    usage('global.anthropic.claude-opus-5-5'), usage('claude-opus-5-5'),
+  ] }, rates), 0.05);
+});
+
+test('bench prices Bedrock and 1M-context ids and a two-model run from canonical rates, split by billing', (t) => {
+  const h = setup(t, 'claude');
+  h.ok(['task', 'add', '--title', 'Second', '--acceptance', 'done', '--tier', 'easy']);
+  h.ok(['brief', 'set', 'T2', '-'], { input: 'Record usage.\n' });
+  const run = (task, env, modelUsage, usage) => {
+    const file = path.join(h.base, `${task}.json`);
+    fs.writeFileSync(file, JSON.stringify({ type: 'result', usage, modelUsage }));
+    const r = h.run(['spawn', '--task', task, '--wait', '--json'], {
+      // Pinned off, so a shell on Bedrock does not turn the login run into an API run.
+      env: { ...h.usageEnv, CLAUDE_CODE_USE_BEDROCK: '0', ANTHROPIC_API_KEY: env },
+      hooks: { HOOK_USAGE_HARNESS: 'claude', HOOK_USAGE_FILE: file },
+    });
+    assert.equal(r.code, 0, r.stderr);
+  };
+  // Two models, one with an 1M-context Bedrock id and one plain Bedrock Haiku id.
+  run('T1', 'fixture-key', {
+    'global.anthropic.claude-opus-5-5[1m]': { inputTokens: 90, cacheReadInputTokens: 800, cacheCreationInputTokens: 0, outputTokens: 40 },
+    'global.anthropic.claude-haiku-4-5-20251001-v1:0': { inputTokens: 10, cacheReadInputTokens: 100, cacheCreationInputTokens: 0, outputTokens: 10 },
+  }, { input_tokens: 100, cache_read_input_tokens: 900, output_tokens: 50 });
+  // A login run on a plain Bedrock Haiku id with no API key in its environment.
+  run('T2', '', { 'global.anthropic.claude-haiku-5-5': { inputTokens: 40, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, outputTokens: 4 } },
+    { input_tokens: 40, cache_read_input_tokens: 0, output_tokens: 4 });
+  const doc = h.readState('tasks.json');
+  for (const task of doc.tasks) task.status = 'accepted';
+  h.writeState('tasks.json', doc);
+  const [first, second] = h.json(['task', 'show', 'T1']).spend.entries.concat(h.json(['task', 'show', 'T2']).spend.entries);
+  assert.equal(first.model, 'global.anthropic.claude-opus-5-5[1m]', 'the primary model names the entry');
+  assert.deepEqual(first.models.map((r) => r.model), ['global.anthropic.claude-opus-5-5[1m]', 'global.anthropic.claude-haiku-4-5-20251001-v1:0']);
+  assert.equal(first.billing, 'api');
+  assert.equal(second.billing, 'subscription');
+  // Prices name only canonical ids; the entries above were recorded before any price existed.
+  const prices = path.join(h.base, 'prices.json');
+  fs.writeFileSync(prices, JSON.stringify({
+    'claude-opus-5-5': { input: 2, cache_write: 2.5, cache_read: 0.2, output: 10 },
+    'claude-haiku-5-5': { input: 1, cache_write: 1, cache_read: 0.1, output: 5 },
+    'claude-haiku-4-5-20251001': { input: 1, cache_write: 1, cache_read: 0.1, output: 5 },
+  }));
+  const r = h.json(['bench', 'tokens', '--prices', prices]);
+  assert.deepEqual(r.unpriced_models, {}, 'canonical rates price every id form');
+  // Without the Haiku 4.5 row only that model is named; the priced Opus row is not blamed.
+  const partial = path.join(h.base, 'partial-prices.json');
+  fs.writeFileSync(partial, JSON.stringify({
+    'claude-opus-5-5': { input: 2, cache_write: 2.5, cache_read: 0.2, output: 10 },
+    'claude-haiku-5-5': { input: 1, cache_write: 1, cache_read: 0.1, output: 5 },
+  }));
+  assert.deepEqual(h.json(['bench', 'tokens', '--prices', partial]).unpriced_models, { 'claude-haiku-4-5-20251001': 1 });
+  const usd = (90 * 2.5 + 800 * 0.2 + 40 * 10) / 1e6 + (10 + 100 * 0.1 + 10 * 5) / 1e6;
+  assert.ok(Math.abs(r.metered_usd - usd) < 1e-12, `${r.metered_usd} vs ${usd}`);
+  assert.ok(Math.abs(r.list_usd - (usd + (40 + 4 * 5) / 1e6)) < 1e-12, `${r.list_usd}`);
+  assert.match(h.ok(['bench', 'tokens', '--prices', prices]), /^metered USD \(api billing\): \$0\.00; list-price equivalent of all priced spend: \$0\.00$/m);
+  // A record from before per-model rows joined its ids; it is named as such, not as a missing price row.
+  const legacy = h.readState('tasks.json');
+  const t2 = legacy.tasks.find((task) => task.id === 'T2');
+  t2.spend.entries.push({ ...t2.spend.entries[0], source: 'manual', cost_usd: null,
+    model: 'claude-opus-5-5[1m], global.anthropic.claude-haiku-4-5-20251001' });
+  h.writeState('tasks.json', legacy);
+  assert.deepEqual(h.json(['bench', 'tokens', '--prices', prices]).unpriced_models,
+    { 'legacy joined: claude-opus-5-5 + claude-haiku-4-5-20251001': 1 });
+});
+
+test('Codex Bedrock profiles record api billing and contribute to metered USD without launch keys', (t) => {
+  const h = setup(t, 'codex');
+  const home = h.usageEnv.CODEX_HOME;
+  fs.mkdirSync(home, { recursive: true });
+  fs.writeFileSync(path.join(home, 'config.toml'), 'model_provider = "openai"\n[profiles.login]\nmodel_provider = "openai"\n');
+  fs.writeFileSync(path.join(home, 'sol.config.toml'), 'model_provider = "amazon-bedrock"\n');
+  fs.writeFileSync(path.join(home, '.env'), 'AWS_PROFILE=fixture\nAWS_REGION=us-east-1\n');
+  for (const name of Object.keys(h.env)) if (/^AWS_/.test(name)) delete h.env[name];
+  h.ok(['task', 'add', '--title', 'Login usage', '--acceptance', 'accounted', '--tier', 'easy']);
+  h.ok(['brief', 'set', 'T2', '-'], { input: 'Record login usage.\n' });
+  const rate = { input: 1, cache_write: 1, cache_read: 1, output: 5 };
+  h.ok(['project', 'set', '--review-policy', JSON.stringify({ prices: { 'fixture-model': rate } })]);
+  for (const [task, profile, billing] of [['T1', 'sol', 'api'], ['T2', 'login', 'subscription']]) {
+    pinRung(h, 'easy', { harness: 'codex', profile, model: 'fixture-model' });
+    h.json(['spawn', '--task', task, '--wait'], {
+      env: { ...h.usageEnv, OPENAI_API_KEY: '' }, hooks: h.usageHooks,
+    });
+    assert.equal(events(h).findLast(e => e.cmd === 'spawn' && e.task === task).detail.billing, billing);
+    assert.equal(spends(h, task).entries[0].billing, billing);
+  }
+  const tasks = h.readState('tasks.json');
+  for (const task of tasks.tasks) task.status = 'accepted';
+  h.writeState('tasks.json', tasks);
+  const apiCost = spends(h, 'T1').entries[0].cost_usd;
+  assert.ok(apiCost > 0);
+  const bench = h.json(['bench', 'tokens']);
+  assert.deepEqual(bench.unpriced_models, {});
+  assert.ok(Math.abs(bench.metered_usd - apiCost) < 1e-12);
+  assert.ok(Math.abs(bench.list_usd - apiCost * 2) < 1e-12);
+});
+
+test('a resumed Claude run prices only what it ran, with the baseline off each model', () => {
+  const { usageSince } = require('../lib/tasks');
+  const { rateTable, entryCost } = require('../lib/reviewer');
+  const message = (id, model, output) => JSON.stringify({ type: 'assistant', message: { id, model, usage: { input_tokens: 0, cache_read_input_tokens: 0, output_tokens: output } } });
+  const rates = rateTable({
+    'claude-opus-5-5': { input: 1, cache_write: 1, cache_read: 1, output: 20 },
+    'claude-haiku-5-5': { input: 1, cache_write: 1, cache_read: 1, output: 5 },
+  });
+  const earlier = message('a', 'claude-opus-5-5', 1000);
+  const one = usageSince(parse('claude', [earlier, message('b', 'claude-haiku-5-5', 100)].join('\n')), parse('claude', earlier));
+  assert.equal(one.model, 'claude-haiku-5-5', 'the primary model is one this invocation ran');
+  assert.equal(one.models, undefined);
+  assert.ok(Math.abs(entryCost(one, rates) - 100 * 5 / 1e6) < 1e-12, 'the earlier Opus tokens are not priced again');
+  // Two models in this invocation: the primary is picked from what it ran, not from the whole session.
+  const two = usageSince(parse('claude', [earlier, message('b', 'claude-haiku-5-5', 100), message('c', 'claude-opus-5-5', 50)].join('\n')), parse('claude', earlier));
+  assert.equal(two.model, 'claude-haiku-5-5');
+  assert.deepEqual(two.models.map((r) => [r.model, r.tokens]), [['claude-opus-5-5', 50], ['claude-haiku-5-5', 100]]);
+  assert.ok(Math.abs(entryCost(two, rates) - (50 * 20 + 100 * 5) / 1e6) < 1e-12);
+  // A resumed run that added nothing keeps the model name for telemetry.
+  assert.equal(usageSince(parse('claude', earlier), parse('claude', earlier)).model, 'claude-opus-5-5');
+});
+
 function collected(h, length = 1, task = 'T1') {
   return waitOnRepo(h, () => {
     const spend = spends(h, task);

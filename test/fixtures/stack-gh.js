@@ -10,6 +10,10 @@ Date.now = () => now() + skew;
 const BIN = path.join(__dirname, '..', '..', 'bin', 'tower-crane.js');
 const { ownerKeyFile, ownerProject } = require('../../lib/authority');
 
+if (process.env.TEST_STACK_DEFER_OBSERVE) {
+  require('../../lib/stack').observe = () => {};
+}
+
 // Holds a gh call open until the test releases it, so another command can run meanwhile.
 function pause(ready, release) {
   fs.writeFileSync(ready, 'ready');

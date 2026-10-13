@@ -202,7 +202,7 @@ test('the shared file check rejects bare stdin reads in lib and bin, and points 
   assert.equal(f.check().status, 0, 'lib/util.js is where readStdin reads fd 0');
 });
 
-test('tasks add fragments instead of editing the archive or an existing change', (t) => {
+test('tasks add fragments instead of editing the archive or deleting an existing change', (t) => {
   const f = fixture(t, { crlfProtected: true });
   f.write('README.md', '# changed\n');
   const missing = f.check();
@@ -227,14 +227,14 @@ test('tasks add fragments instead of editing the archive or an existing change',
   f.write('CHANGELOG.md', archive);
   assert.equal(f.check().status, 0, 'restoring raw CRLF removes the line-ending edit');
   const original = fs.readFileSync(path.join(f.h.repo, 'changelog.d/T86.md'));
-  f.write('changelog.d/T86.md', '- Edited another change.\n');
-  const edited = f.check();
-  assert.equal(edited.status, 1);
-  assert.match(edited.stderr, /belongs to its original change/);
+  f.write('changelog.d/T86.md', '- Corrected by a later change.\n');
+  assert.equal(f.check().status, 0, 'a change may correct an existing fragment');
   f.write('changelog.d/T86.md', original);
   assert.equal(f.check().status, 0, 'the fragment snapshot restores its original bytes');
   fs.rmSync(path.join(f.h.repo, 'changelog.d/T86.md'));
-  assert.equal(f.check().status, 1, 'existing fragments cannot be deleted');
+  const deleted = f.check();
+  assert.equal(deleted.status, 1, 'existing fragments cannot be deleted');
+  assert.match(deleted.stderr, /belongs to its original change/);
   f.write('changelog.d/T86.md', original);
   assert.equal(f.check().status, 0, 'recreating the fragment preserves its original bytes');
   f.write('changelog.d/T999.md', '\n');
@@ -270,7 +270,7 @@ test('this repository keeps generated rows and its fragment instructions local',
   assert.doesNotMatch(skill, /changelog\.d|COMMANDS|check:shared|docs:generate/);
   const rules = readText(path.join(ROOT, 'AGENTS.md'));
   assert.match(rules, /Add `changelog\.d\/<task-or-pr>\.md`/);
-  assert.match(rules, /leave `CHANGELOG\.md` and existing fragments unchanged/);
+  assert.match(rules, /leave `CHANGELOG\.md` unchanged and keep existing fragments, editing one only where your change made it untrue/);
   assert.match(rules, /npm run check:shared -- --base origin\/BASE/);
 });
 

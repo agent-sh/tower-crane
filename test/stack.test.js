@@ -16,12 +16,13 @@ test('submitted dependencies dispatch from the exact dependency head and spawn l
   assert.equal(f.h.git(['rev-parse', 'HEAD'], wt.path), f.sha);
   assert.equal(f.h.json(['task', 'show', 'T2']).stack.base, f.lower.branch);
   worker(f);
-  f.h.ok(['spawn', '--task', 'T2', '--wait']);
-  const link = f.read().calls.find((c) => c.args[0] === 'stack' && c.args[1] === 'link');
-  assert.deepEqual(link.args, ['stack', 'link', '11', '12', '--base', 'main']);
-  // The observer retries a link refused by a concurrent spawn event.
+  f.h.ok(['spawn', '--task', 'T2', '--wait'], { env: { TEST_STACK_DEFER_OBSERVE: '1' } });
+  // Linking finishes in a later observer pass; wait for its event before inspecting its GitHub call.
   f.h.ok(['wait', '--task', 'T2', '--types', 'stack link', '--after', '0', '--observe']);
   assert.equal(f.h.json(['task', 'show', 'T2']).stack.linked, true);
+  const link = f.read().calls.find((c) => c.args[0] === 'stack' && c.args[1] === 'link');
+  assert.ok(link, 'completed stack linking records its GitHub call');
+  assert.deepEqual(link.args, ['stack', 'link', '11', '12', '--base', 'main']);
 });
 
 test('a task event during the link\'s GitHub call refuses the link, and the next observer pass links the PR', (t) => {

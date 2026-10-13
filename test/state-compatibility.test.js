@@ -50,8 +50,6 @@ function futureState(h) {
   return { task: tasks.tasks[1], event };
 }
 
-
-
 function heldWorker(h) {
   const ready = path.join(h.base, 'ready');
   const finish = path.join(h.base, 'finish');

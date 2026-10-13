@@ -3,19 +3,67 @@
 const { waitUntil, HUNG_TEST_MS } = require('./signals');
 
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
 const cp = require('node:child_process');
 const assert = require('node:assert/strict');
+const test = require('node:test');
 const { createRepoSeed, cleanupRepoSeed } = require('./repo-seed');
+const { tempRoot } = require('./tmp-root');
 
 const ROOT = path.join(__dirname, '..');
 const BIN = path.join(ROOT, 'bin', 'tower-crane.js');
 const HOOKS = path.join(__dirname, 'fixtures', 'hooks.js');
-const TMP_ROOT = process.env.TOWER_CRANE_TEST_TMP || os.tmpdir();
+const TMP_ROOT = tempRoot();
 const SHARED_REPO_SEED = process.env.TC_TEST_REPO_SEED;
 const OWNER_KEY = 'fixture-owner-key';
+const fileFixtures = new Set();
+async function cleanupFileFixtures() {
+  for (const fixture of fileFixtures) await fixture.cleanup();
+}
+// A stopping monitor can start the next attempt's monitor and worker after a snapshot of the
+// detached records, so teardown takes new snapshots and kills their unseen records until none appear.
+function unseenDetached(fixture, seen) {
+  const key = (c) => `${c.pid}:${c.startTicks ?? c.startTime}`;
+  const fresh = fixture.detached().filter((c) => !seen.has(key(c)));
+  for (const c of fresh) seen.add(key(c));
+  return fresh;
+}
+// Processes started during teardown are not expected to exit on their own, so they are killed.
+async function killStarted(children) {
+  children.forEach(killDetached);
+  await waitUntil(() => !children.some(detachedAlive), {
+    what: () => `processes started during teardown survived it: ${children.filter(detachedAlive).map((c) => c.pid).join(', ')}`,
+  });
+}
+// process.exit() and uncaught exceptions skip beforeExit, and an exit listener runs only
+// synchronous code, so this stops detached children with signals and removes the directories.
+function cleanupFileFixturesSync() {
+  for (const fixture of fileFixtures) {
+    try {
+      const seen = new Set();
+      for (let fresh; (fresh = unseenDetached(fixture, seen)).length;) fresh.forEach(killDetached);
+    } catch (error) {
+      console.error(error);
+    } finally {
+      fs.rmSync(fixture.base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+      fileFixtures.delete(fixture);
+    }
+  }
+}
+// Plain CLI probes also import helpers; only test workers have file teardown.
+if (process.env.NODE_TEST_CONTEXT) test.after(cleanupFileFixtures);
+else {
+  process.once('beforeExit', () => {
+    cleanupFileFixtures().catch((error) => {
+      console.error(error);
+      process.exitCode = 1;
+    });
+  });
+  process.once('exit', cleanupFileFixturesSync);
+}
 delete process.env.TC_TEST_REPO_SEED;
+// Scratch consumers can run directly without the runner's global setup.
+fs.mkdirSync(TMP_ROOT, { recursive: true });
 
 // Tests must not see the developer's git config (hooks, signing), an
 // agent's TOWER_CRANE_* variables or the developer's own ladder defaults, so every
@@ -23,6 +71,7 @@ delete process.env.TC_TEST_REPO_SEED;
 // absent between calls unless a test writes it.
 function baseEnv(home) {
   const env = { ...process.env };
+  delete env.NODE_TEST_CONTEXT;
   for (const k of Object.keys(env)) {
     if (k.startsWith('TOWER_CRANE_') || k.startsWith('GIT_') || k === 'TC_TEST_REPO_SEED') delete env[k];
   }
@@ -37,6 +86,12 @@ function baseEnv(home) {
   env.TOWER_CRANE_OWNER_KEY = OWNER_KEY;
   // spawn keeps receipts under the user's cache, which is not the tests' to write.
   env.HOME = path.join(home, 'home');
+  env.USERPROFILE = env.HOME;
+  env.LOCALAPPDATA = path.join(env.HOME, 'AppData', 'Local');
+  env.XDG_CACHE_HOME = path.join(env.HOME, '.cache');
+  // A child exiting after teardown must not recreate its fixture with a compile-cache write.
+  env.NODE_DISABLE_COMPILE_CACHE = '1';
+  delete env.NODE_COMPILE_CACHE;
   // A gate's worktree and temp directories stay in the fixture, so a gate the test kills
   // cannot leave them in the shared temporary directory.
   env.TOWER_CRANE_TMP = path.join(home, 'gate-tmp');
@@ -71,11 +126,11 @@ function pinRung(h, name, rung) {
   h.ok(args);
 }
 
-function pinLiveRung(h, harness) {
+function pinLiveRung(h, harness, rung = 'small') {
   const field = harness === 'codex' ? 'profile' : 'model';
   const variable = `TOWER_CRANE_LIVE_${field.toUpperCase()}`;
   assert.ok(process.env[variable], `set ${variable} to run a live ${harness} probe`);
-  pinRung(h, 'small', { harness, [field]: process.env[variable] });
+  pinRung(h, rung, { harness, [field]: process.env[variable] });
 }
 
 // Init copies defaults from the user layer. Seed that layer only for the call,
@@ -157,9 +212,6 @@ function getRepoTemplate(key, prepare) {
     prepare(ctx);
     const template = { base: ctx.base, repo: ctx.repo };
     repoTemplates.set(key, template);
-    process.once('exit', () => {
-      fs.rmSync(template.base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
-    });
     return template;
   } catch (error) {
     fs.rmSync(ctx.base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
@@ -212,7 +264,6 @@ function cachedFixture(t, key, build) {
       throw error;
     }
     fixtures.set(key, template);
-    process.once('exit', () => fs.rmSync(h.base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
   }
   const from = template.h;
   const h = copyRepo(t, from.base);
@@ -276,8 +327,32 @@ function context(t, base, options = {}) {
       }) : [];
     },
     cleanup: async ({ monitorGraceMs } = {}) => {
-      try { await stopDetached(ctx.detached(), monitorGraceMs); }
-      finally { fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); }
+      const seen = new Set();
+      try {
+        try { await stopDetached(unseenDetached(ctx, seen), monitorGraceMs); }
+        finally {
+          for (let fresh; (fresh = unseenDetached(ctx, seen)).length;) await killStarted(fresh);
+        }
+      } finally {
+        try {
+          // A killed monitor cannot close its broker's socket outside this fixture.
+          const brokers = path.join(ctx.state, 'brokers');
+          if (fs.existsSync(brokers)) {
+            for (const agent of fs.readdirSync(brokers, { withFileTypes: true }).filter((entry) => entry.isDirectory())) {
+              const file = path.join(brokers, agent.name, 'broker.json');
+              let socket;
+              try { ({ socket } = JSON.parse(fs.readFileSync(file, 'utf8'))); }
+              catch (error) { if (error.code === 'ENOENT' || error instanceof SyntaxError) continue; throw error; }
+              if (typeof socket === 'string' && path.basename(socket) === 's' && /^tower-crane-[A-Za-z0-9]{6}$/.test(path.basename(path.dirname(socket)))) {
+                fs.rmSync(path.dirname(socket), { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+              }
+            }
+          }
+        } finally {
+          fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+          fileFixtures.delete(ctx);
+        }
+      }
     },
     run: (args, opts = {}) => fixtureInit(ctx, args, opts, (a, o) => run(a, withHooks(ctx, o))),
     runAsync: (args, opts = {}) => runAsync(args, withHooks(ctx, opts)),
@@ -312,6 +387,7 @@ function context(t, base, options = {}) {
       .some((line) => line.startsWith('worktree ') && path.resolve(line.slice('worktree '.length)) === path.resolve(dir)),
     init: (extra = []) => ctx.ok(['init', '--name', 'demo', '--goal', 'prove the engine', ...(ctx.gateSettings || []), ...extra]),
   };
+  fileFixtures.add(ctx);
   if (t) t.after(ctx.cleanup);
   return ctx;
 }

@@ -11,6 +11,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const cp = require('node:child_process');
+const { tempRoot } = require('./tmp-root');
 
 const NAMES = ['google-chrome', 'google-chrome-stable', 'chromium', 'chromium-browser', 'chrome'];
 
@@ -58,29 +59,28 @@ async function closeBrowser() {
 // a socket too, so spawnChrome gives Chrome a TMPDIR inside the profile: that socket adds 45 bytes,
 // which the same 62-byte profile limit keeps under the 108-byte Unix path limit. A temp root deep
 // enough to overflow that (a gate's TMPDIR under TOWER_CRANE_TMP) moves the profile to the first
-// directory whose path fits, on disk, and the browser's teardown removes it. An on-disk cache can
-// work where /var/tmp is read-only. A gate's XDG_CACHE_HOME can
-// also be a deep task cache, so a fitting account cache is tried by allocating the profile there.
-// If that allocation fails, or no root fits, use the first root and let Chrome report its socket error.
+// directory whose path fits in the cache, and the browser's teardown removes it. The account's
+// cache remains a short fallback when XDG_CACHE_HOME also names a deep task directory.
 const CHROME_SOCKET_PATH = 78;
 
 function createProfile() {
   const cache = process.env.XDG_CACHE_HOME || path.join(os.homedir(), '.cache');
-  const bases = [process.env.TOWER_CRANE_TEST_TMP || os.tmpdir(), os.tmpdir(), cache];
+  const bases = [tempRoot(), path.join(cache, 'tct'), path.join(os.userInfo().homedir, '.cache', 'tct')].map((base) => path.resolve(base));
   const fits = (base) => Buffer.byteLength(path.join(base, 'tower-crane-chrome-000000', 'SingletonSocket')) <= CHROME_SOCKET_PATH;
   const create = (base) => {
-    fs.mkdirSync(base, { recursive: true });
+    fs.mkdirSync(base, { recursive: true, mode: 0o700 });
     return fs.mkdtempSync(path.join(base, 'tower-crane-chrome-'));
   };
-  const base = bases.find(fits);
-  if (base) return create(base);
-  const accountCache = path.join(os.userInfo().homedir, '.cache');
-  if (fits(accountCache)) {
-    try { return create(accountCache); }
-    catch {
-      // An agent sandbox can make even a short account cache read-only.
+  if (process.platform === 'win32' || fits(bases[0])) return create(bases[0]);
+  for (const base of new Set(bases.slice(1))) {
+    if (!fits(base)) continue;
+    try { return create(base); }
+    catch (error) {
+      // macOS sandboxes refuse with EPERM; Linux permissions and read-only mounts use the others.
+      if (!['EACCES', 'EPERM', 'EROFS'].includes(error.code)) throw error;
     }
   }
+  // A refused cache must not hide the browser's own startup error.
   return create(bases[0]);
 }
 
@@ -115,7 +115,7 @@ async function spawnChrome(profile) {
     env = { ...env, HOME: profile, USERPROFILE: profile, XDG_CONFIG_HOME: config, XDG_CACHE_HOME: cache };
   } else if (process.getuid && process.getuid() === 0) args.push('--no-sandbox');
   const proc = cp.spawn(CHROME, [...args, 'about:blank'], {
-    env, stdio: sandboxed ? ['ignore', 'ignore', 'pipe'] : 'ignore',
+    env, stdio: ['ignore', 'ignore', 'pipe'],
   });
   let stderr = '';
   let failure = null;
@@ -145,7 +145,10 @@ async function spawnChrome(profile) {
   // File teardown refs and reaps Chrome before the runner records child CPU.
   proc.unref();
   proc.stderr?.unref?.();
-  const lastResort = () => proc.kill('SIGKILL');
+  const lastResort = () => {
+    proc.kill('SIGKILL');
+    remove();
+  };
   process.once('exit', lastResort);
   const close = async () => {
     proc.ref();

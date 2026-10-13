@@ -75,8 +75,8 @@ test('a failing check refuses with its job and the first failing lines of the lo
   allowPending(h);
   const log = [
     'test (windows-latest)\tRun tests\t2026-10-09T10:00:00.1234567Z ok 1 - runs fine',
-    'test (windows-latest)\tRun tests\t2026-10-09T10:00:01.0000000Z not ok 4 - quoted paths keep their backslashes',
-    'test (windows-latest)\tRun tests\t2026-10-09T10:00:01.1000000Z   AssertionError: expected C:\\repo\\lib',
+    'test (windows-latest)\tRun tests\t2026-10-09T10:00:01.0000000Z \x1b[31mnot ok 4 - quoted paths keep their backslashes\x1b[0m',
+    'test (windows-latest)\tRun tests\t2026-10-09T10:00:01.1000000Z   \x1b]8;;https://example.test\x07AssertionError\x1b]8;;\x1b\\: expected C:\\repo\\lib\x00\x07\x1b',
   ].join('\n');
   const data = {
     runs: [checkRun('test (windows-latest)', { conclusion: 'failure', url: JOB_LOG }), checkRun('test (ubuntu-latest)', { status: 'in_progress', conclusion: null })],
@@ -90,6 +90,7 @@ test('a failing check refuses with its job and the first failing lines of the lo
   assert.match(r.stderr, /tower-crane ci checks T1/);
   assert.match(r.stderr, /test \(windows-latest\) log:\n {2}not ok 4 - quoted paths keep their backslashes\n {4}AssertionError: expected C:\\repo\\lib/);
   assert.doesNotMatch(r.stderr, /ok 1 - runs fine|2026-10-09T10/);
+  assert.doesNotMatch(r.stderr, /[\x00-\x08\x0b-\x1f\x7f-\x9f]/);
   assert.equal(status(h), 'in_progress');
 });
 

@@ -174,7 +174,7 @@ async function shot(b, file) {
 async function load(b, url, live = true) {
   await b.goto('about:blank');
   await b.goto(url);
-  if (live) await b.until(`(document.querySelector('[data-conn]') || {}).dataset?.conn === 'live'`, 'the live stream', 20000); // wait-allow: human benchmark caps live-stream setup on baseline builds before measuring the scripted path
+  if (live) await b.until(`(document.querySelector('[data-conn]') || {}).dataset?.conn === 'live'`);
   await new Promise((resolve) => setTimeout(resolve, 250)); // wait-allow: human benchmark pacing and settle intervals define the measurement protocol
 }
 

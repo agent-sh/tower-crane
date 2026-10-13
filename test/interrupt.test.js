@@ -11,8 +11,6 @@ const { makeRepo, BIN, detachedAlive } = require('./helpers');
 // Pollers can read while a writer is appending the final record.
 const events = (h) => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').split('\n').slice(0, -1).filter(Boolean).map(JSON.parse);
 
-
-
 function setup(t, retry = false, stubborn = false) {
   const h = makeRepo(t);
   h.init(['--workers', '1']);

@@ -44,8 +44,9 @@ function checkChanges(root, base) {
     changed++;
     if (file === 'CHANGELOG.md') throw new Error('do not edit CHANGELOG.md; add changelog.d/<task-or-pr>.md');
     if (file.startsWith('changelog.d/') && file !== 'changelog.d/README.md') {
-      if (status !== 'A') throw new Error(`${file} belongs to its original change; add a new fragment`);
-      added++;
+      // Fragments are draft release notes: a later change may correct one it made untrue, but not remove it.
+      if (status === 'D') throw new Error(`${file} belongs to its original change; correct it instead of deleting it`);
+      if (status === 'A') added++;
     }
   }
   if (changed && !added) throw new Error('every change needs a new changelog.d/<task-or-pr>.md fragment');

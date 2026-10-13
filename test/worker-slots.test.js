@@ -28,8 +28,6 @@ function setup(t, workers = 1, tasks = 3) {
   });
 }
 
-
-
 // The supervisor pauses before taking the lease, so the spawn's reservation
 // holds the slot until release() lets the supervisor claim.
 async function pausedSpawn(h, task) {
@@ -137,8 +135,9 @@ test('a started worker holds its lease against strangers until its own claim ren
   assert.equal(stranger.code, 1, stranger.stderr);
   assert.match(stranger.stderr, /T1.*worker-T1-1/);
   fs.writeFileSync(path.join(h.base, 'T1.claim'), '');
-  await waitOnRepo(h, () => fs.existsSync(path.join(h.base, 'T1.claimed')), 'worker did not claim');
-  const claim = JSON.parse(fs.readFileSync(path.join(h.base, 'T1.claimed'), 'utf8'));
+  // The harness writes its result non-atomically, so readiness is a complete record.
+  const claimed = path.join(h.base, 'T1.claimed');
+  const claim = await waitOnRepo(h, () => fs.existsSync(claimed) && JSON.parse(fs.readFileSync(claimed, 'utf8')), 'worker did not claim');
   assert.equal(claim.code, 0, claim.stderr);
   assert.equal(h.readState('tasks.json').tasks[0].claim.agent, spawned.agent);
   assert.equal(h.run(['claim', 'T2', '--agent', 'another']).code, 1);

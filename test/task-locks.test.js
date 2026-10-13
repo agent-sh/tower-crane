@@ -39,8 +39,6 @@ function setup(t) {
   });
 }
 
-
-
 function controlledHarness(h) {
   const script = path.join(h.base, 'worker.js');
   fs.writeFileSync(script, `

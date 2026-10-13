@@ -445,6 +445,138 @@ test('a missing isolated codex rollout falls back to a fresh worker and records 
   assert.equal(first.agent, 'worker-T1-1');
 });
 
+for (const format of ['codex', 'claude', 'native-codex']) {
+  for (const freshOverflow of [false, true]) {
+    test(`${format} resumed context overflow retries fresh once${freshOverflow ? ' even if fresh also overflows' : ''}`, (t) => {
+      const { h, script } = setup(t, format);
+      const calls = path.join(h.base, 'calls.jsonl');
+      const error = format !== 'claude'
+        ? { type: 'turn.failed', error: { message: "Codex ran out of room in the model's context window. Start a new thread or clear earlier history before retrying." } }
+        : { type: 'result', is_error: true, errors: ['Prompt is too long'], subtype: 'error_during_execution' };
+      fs.writeFileSync(script, `
+const fs = require('node:fs');
+const cp = require('node:child_process');
+const [bin, out, prior, prompt, format] = process.argv.slice(2);
+const task = JSON.parse(cp.execFileSync(process.execPath, [bin, 'task', 'show', 'T1', '--json'], { encoding: 'utf8' }));
+fs.appendFileSync(${JSON.stringify(calls)}, JSON.stringify({ prior, prompt, cwd: process.cwd(), agent: process.env.TOWER_CRANE_AGENT, claim: task.claim }) + '\\n');
+if (prior || (${freshOverflow} && prompt.includes('## Rework'))) {
+  console.log(JSON.stringify(${JSON.stringify(error)}));
+  process.exit(1);
+}
+console.log(JSON.stringify({ type: 'thread.started', thread_id: prompt.includes('## Rework') ? 'fresh-session-2' : 'worker-session-1' }));
+console.log(JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 10, cached_input_tokens: 2, output_tokens: 1 } }));
+`);
+      if (format === 'native-codex') {
+        nativeHarness(h, script, path.join(h.base, 'seen.json'), 'codex');
+        fs.mkdirSync(h.env.CODEX_HOME, { recursive: true });
+        fs.writeFileSync(path.join(h.env.CODEX_HOME, 'config.toml'), '[profiles.fixture-main]\nmodel = "fixture-large"\n');
+      }
+      const first = h.json(['spawn', '--task', 'T1', '--wait']);
+      sendBack(h);
+      h.ok(['claim', 'T1', '--agent', first.agent]);
+      const claim = h.json(['task', 'show', 'T1']).claim;
+      const result = h.run(['spawn', '--task', 'T1', '--wait', '--json']);
+      assert.equal(result.code, freshOverflow ? 1 : 0, result.stderr);
+      const inputs = fs.readFileSync(calls, 'utf8').trim().split('\n').map(JSON.parse);
+      assert.equal(inputs.length, 3, 'one resumed invocation and exactly one fresh retry');
+      assert.equal(inputs[1].prior, 'worker-session-1');
+      assert.equal(inputs[2].prior, '');
+      assert.equal(inputs[2].agent, first.agent);
+      assert.equal(inputs[2].cwd, first.cwd);
+      assert.deepEqual(inputs[2].claim, claim);
+      assert.match(inputs[2].prompt, /Project goal: prove the engine/);
+      if (format === 'native-codex') assert.match(inputs[2].prompt, /## Role instructions: tower-crane-work/);
+      assert.match(inputs[2].prompt, /## Task/);
+      assert.match(inputs[2].prompt, /Implement the acceptance/);
+      assert.match(inputs[2].prompt, /Add the worktree guard/);
+      assert.match(inputs[2].prompt, /Missing worktree validation/);
+      assert.match(inputs[2].prompt, /review-receipt/);
+      assert.deepEqual(h.json(['task', 'show', 'T1']).claim, claim);
+      const fallbacks = events(h).filter((e) => e.cmd === 'spawn fallback');
+      assert.equal(fallbacks.length, 1);
+      assert.equal(fallbacks[0].detail.reason, 'session context overflow');
+      assert.equal(fallbacks[0].detail.previous.session_id, 'worker-session-1');
+      assert.equal(fallbacks[0].detail.previous.overflowed, true);
+      assert.equal(fallbacks[0].detail.route_index, 0);
+      assert.equal(fallbacks[0].detail.fresh, true);
+      assert.equal(events(h).filter((e) => e.cmd === 'spawn retry').length, 0);
+      const audit = events(h);
+      const prior = audit.findLast((e) => e.cmd === 'spawn').detail;
+      const candidate = { cmd: 'spawn', task: 'T1', detail: {
+        ...prior, attempt: prior.attempt + 1, session_id: 'worker-session-1', pid: 999999999,
+      } };
+      const history = [...audit, candidate, { cmd: 'spawn exit', task: 'T1', detail: candidate.detail }];
+      const policy = { job: 'worker', task: { id: 'T1', status: 'rework', submitted_by: first.agent },
+        rung: prior.route, rungName: prior.rung };
+      assert.equal(Sessions.eligible(policy, first.cwd, history), null, 'overflowed ids stay excluded in later attempts');
+      assert.equal(Sessions.eligible(policy, first.cwd, history.filter((e) => e.cmd !== 'spawn fallback')).id,
+        'worker-session-1', 'the overflow marker is what excludes the id');
+      assert.equal(Sessions.eligible(policy, first.cwd, [
+        ...history.filter((e) => e.cmd !== 'spawn fallback'),
+        { cmd: 'spawn exit', task: 'T1', detail: { ...candidate.detail, overflowed: true } },
+      ]), null, 'an overflow exit excludes the session even without a fallback');
+      if (freshOverflow) assert.equal(audit.findLast((e) => e.cmd === 'spawn exit').detail.overflowed, true);
+      const spend = h.json(['task', 'show', 'T1']).spend;
+      const freshUsage = spend.entries.find((e) => e.source === `spawn:${first.agent}:attempt:2:retry:0`);
+      assert.ok(freshUsage, 'fresh fallback has a separate usage receipt');
+      assert.equal(freshUsage.live, undefined, 'exit collection finalizes fresh fallback usage');
+      if (!freshOverflow && format === 'native-codex') assert.equal(freshUsage.tokens, 11);
+      h.ok(['spend', 'T1', '--from-spawn', first.agent]);
+      assert.deepEqual(h.json(['task', 'show', 'T1']).spend, spend, 'collection cannot double count fallback usage');
+      h.ok(['submit', 'T1', '--sha', 'cfed4d76efd3afe887bbbfc7f62c7d94158e3255', '--agent', first.agent]);
+      h.ok(['rework', 'T1', '--reason', 'Next round']);
+      assert.equal(h.json(['spawn', '--task', 'T1', '--dry-run']).resumed, false);
+    });
+  }
+}
+
+test('a resumed overflow recovered by the harness completes without a fresh retry', (t) => {
+  const { h, script } = setup(t, 'claude');
+  const calls = path.join(h.base, 'recovered-calls.jsonl');
+  fs.writeFileSync(script, `
+const fs = require('node:fs');
+const [bin, out, prior] = process.argv.slice(2);
+fs.appendFileSync(${JSON.stringify(calls)}, JSON.stringify({ prior }) + '\\n');
+if (prior) {
+  console.log(JSON.stringify({ type: 'assistant', isApiErrorMessage: true, message: { content: [{ type: 'text', text: 'Prompt is too long' }] } }));
+}
+console.log(JSON.stringify({ type: 'result', session_id: prior || 'worker-session-1', is_error: false }));
+`);
+  h.json(['spawn', '--task', 'T1', '--wait']);
+  sendBack(h);
+  assert.equal(h.run(['spawn', '--task', 'T1', '--wait']).code, 0);
+  assert.equal(fs.readFileSync(calls, 'utf8').trim().split('\n').length, 2);
+  const audit = events(h);
+  assert.equal(audit.filter((e) => e.cmd === 'spawn fallback').length, 0);
+  assert.equal(audit.findLast((e) => e.cmd === 'spawn exit').detail.overflowed, undefined);
+  assert.equal(audit.findLast((e) => e.cmd === 'spawn phase').detail.phase, 'waiting');
+});
+
+test('a fresh native Claude outage retry that overflows blocks without another fresh retry', (t) => {
+  const { h, script, seen } = setup(t, 'claude');
+  nativeHarness(h, script, seen, 'claude');
+  const calls = path.join(h.base, 'claude-calls.json');
+  fs.writeFileSync(script, `
+const fs = require('node:fs');
+const file = ${JSON.stringify(calls)};
+const calls = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : [];
+calls.push(process.argv.slice(2));
+fs.writeFileSync(file, JSON.stringify(calls));
+console.log(JSON.stringify({ type: 'result', is_error: true, errors: [calls.length === 1 ? 'HTTP 503 service unavailable' : 'Prompt is too long'] }));
+process.exit(1);
+`);
+  h.ok(['ladder', 'set', 'medium', '--supervision', JSON.stringify({
+    retries: 1, backoff_ms: 10, max_backoff_ms: 10, stall_ms: 60000,
+  })]);
+  const result = h.run(['spawn', '--task', 'T1', '--wait']);
+  assert.equal(result.code, 1);
+  assert.equal(JSON.parse(fs.readFileSync(calls, 'utf8')).length, 2);
+  const audit = events(h);
+  assert.equal(audit.filter((e) => e.cmd === 'spawn retry').length, 1);
+  assert.equal(audit.filter((e) => e.cmd === 'spawn fallback').length, 0);
+  assert.equal(audit.findLast((e) => e.cmd === 'spawn exit').detail.overflowed, true);
+});
+
 test('a pre-launch fallback failure restores the old claim and permits retry', (t) => {
   const { h, script, seen } = setup(t, 'codex');
   nativeHarness(h, script, seen, 'codex');
