@@ -5,6 +5,11 @@
     "reason": "Relative import of the Claude provider routing module"
   },
   {
+    "path": "lib/orchestrator.js",
+    "text": "claude-code",
+    "reason": "Installed harness package name used to identify the nearest orchestrator process"
+  },
+  {
     "path": "lib/agents.js",
     "text": "claude-sandbox-placeholders",
     "reason": "Relative import of the Claude sandbox placeholder module"

@@ -77,38 +77,131 @@ test('one orchestrator session holds writes while reads, release, expiry and own
   h.ok(['validate'], second);
 });
 
-test('two live copies of the same harness session cannot both drive the queue', async (t) => {
+test('harness scripts share the lease while rival sessions and resumed live copies refuse writes', async (t) => {
+  const clients = [];
+  const closed = [];
+  // Windows cannot remove the copied harness executable while a client runs.
+  t.after(async () => {
+    clients.forEach((client) => client.kill());
+    await Promise.all(closed);
+  });
   const h = makeProjectRepo(t);
   const env = { ...h.env, TOWER_CRANE_AGENT: 'orchestrator', CLAUDE_SESSION_ID: 'resumed-session' };
-  const clients = [0, 1].map(() => cp.fork(path.join(__dirname, 'fixtures', 'orchestrator-session.js'),
-    [BIN, h.repo], { env, stdio: ['ignore', 'ignore', 'pipe', 'ipc'] }));
-  t.after(() => clients.forEach((client) => client.kill()));
-  const run = (client, args) => new Promise((resolve, reject) => {
+  const script = path.join(h.repo, process.platform === 'win32' ? 'loop.ps1' : 'loop.sh');
+  fs.writeFileSync(script, process.platform === 'win32'
+    ? '$command = $args[0]\n$commandArgs = $args[1..($args.Length - 1)]\n& $command @commandArgs\nexit $LASTEXITCODE\n'
+    : '"$@"\nexit $?\n');
+  // Windows retains the executable name when Node changes its process title.
+  const execPath = process.platform === 'win32' ? path.join(h.repo, 'claude.exe') : process.execPath;
+  if (process.platform === 'win32') fs.copyFileSync(process.execPath, execPath);
+  clients.push(...['resumed-session', 'resumed-session', 'different-session'].map((session) =>
+    cp.fork(path.join(__dirname, 'fixtures', 'orchestrator-session.js'), [BIN, h.repo],
+      { execPath, env: { ...env, CLAUDE_SESSION_ID: session }, stdio: ['ignore', 'ignore', 'pipe', 'ipc'] })));
+  closed.push(...clients.map((client) => new Promise((resolve) => client.once('close', resolve))));
+  const run = (client, args, fromScript = false) => new Promise((resolve, reject) => {
     client.once('error', reject);
     client.once('message', resolve);
-    client.send(args);
+    client.send(fromScript ? { args, script } : args);
   });
   const first = await run(clients[0], ['task', 'add', '--title', 'first copy', '--acceptance', 'one writer']);
   assert.equal(first.code, 0, first.stderr);
   const lease = h.readState('tasks.json').orchestrator_lease;
-  const second = await run(clients[1], ['task', 'add', '--title', 'second copy', '--acceptance', 'refused']);
-  assert.equal(second.code, 1);
-  assert.match(second.stderr, /orchestrator lease.*resumed-session/);
+  assert.equal(lease.pid, clients[0].pid, 'the nearest harness holds the lease');
+  assert.equal(lease.persistent, true, 'the harness, not its per-command script, controls early release');
+  if (process.platform === 'linux') {
+    assert.equal(lease.pidns, fs.readlinkSync('/proc/self/ns/pid'));
+    assert.equal(typeof lease.start_ticks, 'string');
+  }
+  const scripted = await run(clients[0], ['task', 'note', 'T1', 'script under holder'], true);
+  assert.equal(scripted.code, 0, scripted.stderr);
+  assert.equal(h.readState('tasks.json').orchestrator_lease.session_id, lease.session_id);
+  for (const client of clients.slice(1)) {
+    const before = h.readState('tasks.json');
+    const second = await run(client, ['task', 'add', '--title', 'second copy', '--acceptance', 'refused'], true);
+    assert.equal(second.code, 1);
+    assert.match(second.stderr, /orchestrator lease.*resumed-session/);
+    assert.deepEqual(h.readState('tasks.json'), before, 'refused scripts leave state unchanged');
+  }
   assert.equal(h.readState('tasks.json').tasks.length, 1);
   assert.equal((await run(clients[1], ['status'])).code, 0, 'competing process can read');
   assert.equal((await run(clients[0], ['task', 'note', 'T1', 'same live process'])).code, 0);
   assert.equal(h.readState('tasks.json').orchestrator_lease.session_id, lease.session_id);
-  assert.equal((await run(clients[0], ['orchestrator', 'release'])).code, 0);
+  assert.equal((await run(clients[0], ['orchestrator', 'release'], true)).code, 0);
   assert.equal((await run(clients[1], ['task', 'note', 'T1', 'released process replaced'])).code, 0);
 });
 
+test('identity selects the nearest harness or login shell and preserves the caller fallback', () => {
+  const script = `
+const assert = require('node:assert/strict');
+const C = require(${JSON.stringify(path.join(__dirname, '../lib/commands'))});
+const modulePath = ${JSON.stringify(path.join(__dirname, '../lib/orchestrator'))};
+Object.defineProperty(process, 'platform', { value: 'win32' });
+const variants = [
+  ...['claude', 'codex', 'opencode', 'agy', 'pi'].map(name => [name + '.exe', name, true]),
+  ['node.exe', '"C:\\\\Program Files\\\\node.exe" "C:\\\\tools\\\\pi.js"', true],
+  ['node', 'node /tools/node_modules/@anthropic-ai/claude-code/cli.js', true],
+  ['node', 'node /tools/node_modules/@mariozechner/pi-coding-agent/dist/cli.js', true],
+  ['bash', '-bash', true],
+  ['zsh', 'zsh -il', true],
+  ['bash', 'bash -l /tools/script.sh', false],
+  ['bash', 'bash /tools/codex', false],
+  ['powershell.exe', 'powershell.exe -NoProfile', true],
+  ['powershell.exe', 'powershell.exe -NoProfile -File loop.ps1', false],
+  ['node.exe', 'node.exe /tools/script.js codex', false],
+  ['node', 'node /tools/codex/loop.js', false],
+];
+for (const [Name, CommandLine, isHarness] of variants) {
+  const caller = { ProcessId: process.ppid, ParentProcessId: 444444, Name: 'helper.exe',
+    CreationDate: 'helper-start', CommandLine: 'helper.exe' };
+  const candidate = { ProcessId: 444444, ParentProcessId: 555555, Name,
+    CreationDate: 'harness-start', CommandLine };
+  const outer = { ProcessId: 555555, ParentProcessId: 1, Name: 'codex.exe', CreationDate: 'outer-start' };
+  C.execFileSync = () => JSON.stringify([caller, candidate, ...(isHarness ? [outer] : [])]);
+  delete require.cache[require.resolve(modulePath)];
+  const O = require(modulePath);
+  const ctx = { env: { CLAUDE_SESSION_ID: 'session' }, agent: 'orchestrator' };
+  const first = O.identity(ctx);
+  assert.equal(first.pid, isHarness ? candidate.ProcessId : caller.ProcessId, CommandLine);
+  assert.equal(first.persistent, isHarness, CommandLine);
+  const differentId = O.identity({ ...ctx, env: { CLAUDE_SESSION_ID: 'different' } });
+  assert.notEqual(first.session_id, differentId.session_id, CommandLine);
+  if (!isHarness) {
+    const st = { tasks: { orchestrator_lease: { ...first, pid: 2147483647, heartbeat: new Date().toISOString() } },
+      project: { limits: { lease_minutes: 60 } } };
+    assert.equal(O.live(st), true, 'a fallback caller cannot release by exiting: ' + CommandLine);
+    continue;
+  }
+  caller.ProcessId = 666666;
+  // A different intermediate script process still belongs to the nearest harness.
+  const shell = { ProcessId: process.ppid, ParentProcessId: 666666, Name: 'powershell.exe',
+    CreationDate: 'shell-start', CommandLine: 'powershell.exe -File loop.ps1' };
+  C.execFileSync = () => JSON.stringify([shell, caller, candidate, outer]);
+  delete require.cache[require.resolve(modulePath)];
+  assert.deepEqual(require(modulePath).identity(ctx), first, CommandLine);
+  candidate.CreationDate = 'reused-pid-start';
+  delete require.cache[require.resolve(modulePath)];
+  assert.notEqual(require(modulePath).identity(ctx).session_id, first.session_id, CommandLine);
+}
+`;
+  const result = cp.spawnSync(process.execPath, ['-e', script], { encoding: 'utf8', timeout: 10000 });
+  assert.equal(result.status, 0, result.stderr);
+});
+
 test('a lease whose holder process exited is released at once, including a reused pid', async (t) => {
+  const clients = [];
+  const closed = [];
+  t.after(async () => {
+    clients.forEach((client) => client.kill());
+    await Promise.all(closed);
+  });
   const h = makeProjectRepo(t);
   const env = { ...h.env, TOWER_CRANE_AGENT: 'orchestrator', CLAUDE_SESSION_ID: 'restarted-session' };
+  const execPath = process.platform === 'win32' ? path.join(h.repo, 'claude.exe') : process.execPath;
+  if (process.platform === 'win32') fs.copyFileSync(process.execPath, execPath);
   const fork = () => cp.fork(path.join(__dirname, 'fixtures', 'orchestrator-session.js'),
-    [BIN, h.repo], { env, stdio: ['ignore', 'ignore', 'pipe', 'ipc'] });
-  const clients = [fork(), fork()];
-  t.after(() => clients.forEach((client) => client.kill()));
+    [BIN, h.repo], { execPath, env, stdio: ['ignore', 'ignore', 'pipe', 'ipc'] });
+  clients.push(fork(), fork());
+  closed.push(...clients.map((client) => new Promise((resolve) => client.once('close', resolve))));
   const run = (client, args) => new Promise((resolve, reject) => {
     client.once('error', reject);
     client.once('message', resolve);
@@ -132,9 +225,8 @@ test('a lease whose holder process exited is released at once, including a reuse
     assert.equal((await run(clients[1], ['orchestrator', 'release'])).code, 0);
     assert.equal((await run(clients[0], ['task', 'note', 'T1', 'holder again'])).code, 0);
   }
-  const exited = new Promise((resolve) => clients[0].once('exit', resolve));
   clients[0].kill();
-  await exited;
+  await closed[0];
   const taken = await run(clients[1], ['task', 'note', 'T1', 'dead holder replaced']);
   assert.equal(taken.code, 0, taken.stderr);
   assert.equal(h.readState('tasks.json').orchestrator_lease.pid, clients[1].pid);
@@ -229,8 +321,8 @@ const C = require(${JSON.stringify(path.join(__dirname, '../lib/commands'))});
 Object.defineProperty(process, 'platform', { value: 'win32' });
 C.execFileSync = (command, args, options) => {
   if (command !== 'powershell.exe') throw new Error('unexpected command');
-  const result = [{ ProcessId: process.ppid, ParentProcessId: 1, Name: 'node.exe',
-    CreationDate: 'stable-start', CommandLine: 'node harness' }];
+  const result = [{ ProcessId: process.ppid, ParentProcessId: 1, Name: 'claude.exe',
+    CreationDate: 'stable-start', CommandLine: 'claude harness' }];
   process.send({ timeout: options.timeout });
   return cp.execFileSync(process.execPath, ['-e',
     ${JSON.stringify(`
