@@ -4,7 +4,40 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { cachedFixture, makeRepo, run } = require('./helpers');
+const cp = require('node:child_process');
+const { cachedFixture, makeRepo, run, runAsync, HOOKS } = require('./helpers');
+
+// Gate preparation (lib/gates/common.js withWorktree) at `sha` in `repo`, in
+// a process with the fixture's environment. `marker` is created when the
+// gate runs git worktree prune, which follows its relink.
+function gate(h, repo, sha, marker = '') {
+  const script = `
+    const cp = require('node:child_process');
+    const fs = require('node:fs');
+    const { withWorktree } = require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'gates', 'common'))});
+    const exec = async (cmd, args, opts) => {
+      if (process.env.GATE_MARK && args.includes('prune')) fs.writeFileSync(process.env.GATE_MARK, '');
+      const r = cp.spawnSync(cmd, args, opts);
+      return { status: r.status, stdout: r.stdout, stderr: r.stderr };
+    };
+    withWorktree({ exec }, process.env.GATE_REPO, process.env.GATE_SHA, async () => ({ ok: true })).then((r) => {
+      process.stdout.write(JSON.stringify(r));
+      process.exitCode = r && r.ok ? 0 : 1;
+    });`;
+  return new Promise((resolve) => {
+    const child = cp.spawn(process.execPath, ['-e', script], { cwd: repo, env: { ...h.env, GATE_REPO: repo, GATE_SHA: sha, GATE_MARK: marker } });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (d) => (stdout += d));
+    child.stderr.on('data', (d) => (stderr += d));
+    child.on('close', (code) => resolve({ code, stdout, stderr }));
+  });
+}
+
+async function until(check, ms) {
+  for (const end = Date.now() + ms; !check() && Date.now() < end;) await new Promise((r) => setTimeout(r, 20));
+  return check();
+}
 
 // A task, a bare origin and a clone of it standing in for another machine;
 // built once per process for each base and copied for each test.
@@ -547,6 +580,78 @@ test('a moved project directory keeps its relocated task worktree, and the next 
   assert.doesNotMatch(listing, /prunable/);
   assert.match(listing, new RegExp(`^worktree ${moved.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'm'));
   assert.equal(h.git(['status', '--porcelain'], moved), 'A  staged.txt', 'the index survived');
+});
+
+// Gate preparation prunes worktree registrations too, so after a move it
+// relinks the relocated admin directories first, as the worktree command does.
+test('gate preparation in a moved project relinks a relocated task worktree before it prunes', { skip: process.platform === 'win32' && 'links need privileges on Windows' }, async (t) => {
+  const h = makeRepo(t);
+  h.init();
+  h.ok(['task', 'add', '--title', 'Moved', '--acceptance', 'not needed']);
+  const wt = h.json(['worktree', 'T1']);
+  fs.writeFileSync(path.join(wt.path, 'staged.txt'), 'staged\n');
+  h.git(['add', 'staged.txt'], wt.path);
+  const sha = h.git(['rev-parse', 'HEAD']);
+  const project = path.join(h.base, 'moved');
+  fs.mkdirSync(project);
+  const repo = path.join(project, path.basename(h.repo));
+  const moved = path.join(project, path.basename(path.dirname(wt.path)), path.basename(wt.path));
+  fs.renameSync(h.repo, repo);
+  fs.renameSync(path.dirname(wt.path), path.dirname(moved));
+  assert.match(h.git(['worktree', 'list', '--porcelain'], repo), /prunable/);
+  const r = await gate(h, repo, sha);
+  assert.equal(r.code, 0, r.stderr + r.stdout);
+  const listing = h.git(['worktree', 'list', '--porcelain'], repo);
+  assert.doesNotMatch(listing, /prunable/);
+  assert.match(listing, new RegExp(`^worktree ${moved.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'm'));
+  assert.equal(h.git(['status', '--porcelain'], moved), 'A  staged.txt', 'the index survived');
+});
+
+// A relink that ran between the move of a new worktree's admin directory and
+// its link would make the link first, and the creation would fail with the
+// worktree left locked; both take the repository's worktree lock.
+test('a gate that prepares while a task worktree is being created waits until its admin directory is linked', { skip: process.platform === 'win32' && 'links need privileges on Windows' }, async (t) => {
+  const h = makeRepo(t);
+  h.init();
+  h.ok(['task', 'add', '--title', 'Race', '--acceptance', 'not needed']);
+  const sha = h.git(['rev-parse', 'HEAD']);
+  const signal = path.join(h.base, 'admin-link');
+  const creating = runAsync(['worktree', 'T1', '--json'], { cwd: h.repo, pre: ['--require', HOOKS],
+    env: { ...h.env, HOOK_STATE: h.state, HOOK_STOP_ADMIN_LINK: signal } });
+  assert.ok(await until(() => fs.existsSync(signal), 30000), 'the creation reached its link');
+  const pruned = path.join(h.base, 'pruned');
+  const gated = gate(h, h.repo, sha, pruned);
+  // Without the lock the gate relinks and prunes now; with it, it waits.
+  await until(() => fs.existsSync(pruned), 3000);
+  fs.writeFileSync(`${signal}.go`, '');
+  const [created, prepared] = await Promise.all([creating, gated]);
+  assert.equal(created.code, 0, created.stderr);
+  assert.equal(prepared.code, 0, prepared.stderr + prepared.stdout);
+  const wt = JSON.parse(created.stdout);
+  assert.equal(h.git(['rev-parse', 'HEAD'], wt.path), sha);
+  assert.doesNotMatch(h.git(['worktree', 'list', '--porcelain']), /^locked/m, 'no registration is left locked');
+});
+
+// `p/r` and `p/r.git` share `p/r-worktrees`, so a relink from one must leave
+// the other's relocated admin directories alone.
+test('a repository that shares the worktrees root does not relink the other repository\'s task worktrees', { skip: process.platform === 'win32' && 'links need privileges on Windows' }, (t) => {
+  const h = makeRepo(t);
+  h.init();
+  const other = path.join(h.base, `${path.basename(h.repo)}.git`);
+  fs.cpSync(h.repo, other, { recursive: true });
+  h.ok(['task', 'add', '--title', 'Mine', '--acceptance', 'not needed']);
+  const mine = h.json(['worktree', 'T1']);
+  const common = fs.realpathSync.native(path.join(h.repo, '.git'));
+  const admin = path.join(path.dirname(mine.path), '.git-admin', path.basename(mine.path));
+  const commondir = fs.readFileSync(path.join(admin, 'commondir'), 'utf8');
+  assert.ok(run(['task', 'add', '--title', 'Theirs', '--acceptance', 'not needed'], { cwd: other, env: h.env }).code === 0);
+  const r = run(['worktree', 'T1', '--json'], { cwd: other, env: h.env });
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(path.dirname(JSON.parse(r.stdout).path), path.dirname(mine.path), 'both repositories use one worktrees root');
+  assert.equal(fs.readFileSync(path.join(admin, 'commondir'), 'utf8'), commondir);
+  assert.equal(fs.lstatSync(path.join(other, '.git', 'worktrees', path.basename(mine.path)), { throwIfNoEntry: false }), undefined);
+  assert.equal(fs.realpathSync.native(h.git(['rev-parse', '--path-format=absolute', '--git-common-dir'], mine.path)), common);
+  assert.ok(h.registers(mine.path));
 });
 
 test('cancelling keeps a worktree that git still has locked', (t) => {
