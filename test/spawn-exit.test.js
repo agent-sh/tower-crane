@@ -291,7 +291,8 @@ test('terminal fallback cannot release another live claim', { skip: !PTY_AVAILAB
 
 test('Linux zombie and reused pid diagnostics do not mistake the process for a live worker', { skip: process.platform !== 'linux' }, async (t) => {
   const h = setup(t);
-  const spawned = await start(t, h);
+  const markerHook = path.join(__dirname, 'fixtures', 'slow-ready-marker.js').replace(/\\/g, '/');
+  const spawned = await start(t, h, { env: { NODE_OPTIONS: `--require "${markerHook}"` } });
   const hook = path.join(__dirname, 'fixtures', 'process-stat.js').replace(/\\/g, '/');
   const stat = fs.readFileSync(`/proc/${spawned.pid}/stat`, 'utf8');
   const ticks = stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\s+/)[19];

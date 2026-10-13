@@ -1,0 +1,1 @@
+- Rebuild retained event history after a log replacement or truncation without replaying restored records as wait or board SSE wakes. Later appends still wake readers.

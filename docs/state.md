@@ -779,6 +779,8 @@ The orchestrator's technical rule takes precedence over `answerers`, including f
 
 ## events.jsonl
 
+Long-lived wait hosts, spawn supervisors and board servers retain parsed history and a byte offset. They read only appended bytes, buffer incomplete lines until a newline arrives, and reset on truncation or file replacement. Reset rebuilds retained history from the beginning; active waits and board SSE resume wake delivery from the new end without replaying restored records. Unchanged project, task and decision snapshots retain their validation and parsed values; mutations always load fresh writable copies. Directory watches wake readers promptly; bounded fallback checks also cover lost notifications. The broker handles requests through command subprocesses and does not poll the log.
+
 Trusted watchers and dispatch supervisors consume lifecycle events as
 software reactions. They run submission gates, dispatch review after the
 tracked worker exits, accept independent passing review, merge accepted
