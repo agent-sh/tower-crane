@@ -34,9 +34,14 @@ if (path.resolve(process.argv[1] || '') !== __filename) {
   }
   if (path.basename(process.argv[1] || '') === 'spawn-monitor.js' && process.env.LIVE_READS) {
     const read = fs.readFileSync;
+    let delayed = false;
     fs.readFileSync = function (file, ...args) {
       if (typeof file === 'string' && /[\\/]projects[\\/].+\.jsonl$/.test(file)) {
-        fs.appendFileSync(process.env.LIVE_READS, `${Date.now()}\n`);
+        if (!delayed && process.env.LIVE_READ_DELAY_MS) {
+          delayed = true;
+          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Number(process.env.LIVE_READ_DELAY_MS));
+        }
+        fs.appendFileSync(process.env.LIVE_READS, `${performance.now()}\n`);
       }
       return read.call(this, file, ...args);
     };

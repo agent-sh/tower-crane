@@ -1,0 +1,106 @@
+{
+  "codex": "codex-cli 0.162.1",
+  "baseline": {
+    "<probe>/hidden/file": "readable",
+    "<probe>/open/file": "readable",
+    "<probe>/open/deeper/file": "readable",
+    "~": "readable dir (147 entries)",
+    "~/.bashrc": "readable",
+    "~/.gitconfig": "readable",
+    "~/.config/gh": "readable dir (3 entries)",
+    "~/.claude/.credentials.json": "readable",
+    "~/.codex/auth.json": "readable",
+    "~/.aws": "ERR ENOENT",
+    "~/.docker/config.json": "readable",
+    "~/.npmrc": "readable",
+    "~/.netrc": "ERR ENOENT",
+    "/etc/hostname": "readable",
+    "/bin/sh": "readable"
+  },
+  "variants": {
+    "noneOverRead": {
+      "rules": {
+        ":root": "read",
+        ":tmpdir": "write",
+        "<probe>": "none",
+        "<probe>/open": "read",
+        "<probe>/out": "write"
+      },
+      "exit": 0,
+      "signal": null,
+      "verdicts": {
+        "<probe>/hidden/file": "ERR ENOENT",
+        "<probe>/open/file": "ERR ENOENT",
+        "<probe>/open/deeper/file": "ERR ENOENT",
+        "~": "readable dir (147 entries)",
+        "~/.bashrc": "readable",
+        "~/.gitconfig": "readable",
+        "~/.config/gh": "readable dir (3 entries)",
+        "~/.claude/.credentials.json": "readable",
+        "~/.codex/auth.json": "readable",
+        "~/.aws": "ERR ENOENT",
+        "~/.docker/config.json": "readable",
+        "~/.npmrc": "readable",
+        "~/.netrc": "ERR ENOENT",
+        "/etc/hostname": "readable",
+        "/bin/sh": "readable"
+      },
+      "stdout": "",
+      "stderr": ""
+    },
+    "noneOverWrite": {
+      "rules": {
+        ":root": "read",
+        ":tmpdir": "write",
+        "<probe>": "none",
+        "<probe>/open": "write"
+      },
+      "exit": 1,
+      "signal": null,
+      "verdicts": null,
+      "stdout": "",
+      "stderr": "node:fs:3020\n    return binding.writeFileUtf8(\n                   ^\n\nError: ENOENT: no such file or directory, open '<probe>/out/noneOverWrite.json'\n    at Object.writeFileSync (node:fs:3020:20)\n    a"
+    },
+    "homeNone": {
+      "rules": {
+        ":root": "read",
+        ":tmpdir": "write",
+        "~": "none",
+        "<probe>/open": "read",
+        "~/.nvm/versions/node/v26.10.0/bin": "read",
+        "~/.nvm/versions/node/v26.10.0/lib/node_modules": "read",
+        "~/.local/bin/codex": "read",
+        "<probe>/out": "write"
+      },
+      "exit": 1,
+      "signal": null,
+      "verdicts": null,
+      "stdout": "",
+      "stderr": "bwrap: execvp ~/.nvm/versions/node/v26.10.0/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex: No such file or directory\n"
+    },
+    "allowlist": {
+      "rules": "28 rules, 713 bytes",
+      "exit": 0,
+      "signal": null,
+      "verdicts": {
+        "<probe>/hidden/file": "ERR ENOENT",
+        "<probe>/open/file": "readable",
+        "<probe>/open/deeper/file": "ERR EACCES",
+        "~": "readable dir (3 entries)",
+        "~/.bashrc": "ERR ENOENT",
+        "~/.gitconfig": "ERR ENOENT",
+        "~/.config/gh": "ERR ENOENT",
+        "~/.claude/.credentials.json": "ERR ENOENT",
+        "~/.codex/auth.json": "ERR ENOENT",
+        "~/.aws": "ERR ENOENT",
+        "~/.docker/config.json": "ERR ENOENT",
+        "~/.npmrc": "ERR ENOENT",
+        "~/.netrc": "ERR ENOENT",
+        "/etc/hostname": "readable",
+        "/bin/sh": "readable"
+      },
+      "stdout": "",
+      "stderr": ""
+    }
+  }
+}

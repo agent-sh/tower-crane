@@ -6,6 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
 const { makeRepo, copyRepo, TMP_ROOT, ROOT } = require('./helpers');
+const { gateFixture, gateEvidence } = require('./gate-helpers');
 
 // Runs f and returns the fixture directories it made, recorded by wrapping mkdtemp.
 function recordFixtureDirs(f) {
@@ -80,4 +81,42 @@ require(${JSON.stringify(path.join(ROOT, 'lib/broker.js'))}).start({
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   await h.cleanup();
   assert.equal(fs.existsSync(dir), false, 'the fixture owns the killed broker socket too');
+});
+
+test('gate fixture creation and restoration recover from an incomplete native directory copy', (t) => {
+  const cpSync = fs.cpSync;
+  let interrupt = false;
+  let failures = 0;
+  fs.cpSync = function (source, destination, options) {
+    if (interrupt && path.basename(source) === '.git') {
+      interrupt = false;
+      failures++;
+      fs.mkdirSync(destination, { recursive: true });
+      throw Object.assign(new Error('incomplete native directory copy'), {
+        code: 'ENOENT', path: path.join(destination, 'objects'), syscall: 'cp',
+      });
+    }
+    return cpSync.call(this, source, destination, options);
+  };
+  try {
+    let first;
+    for (const phase of ['create', 'restore']) {
+      const h = makeRepo(t);
+      h.init();
+      interrupt = true;
+      const sha = gateFixture(h);
+      assert.equal(interrupt, false, phase);
+      first ||= sha;
+      assert.equal(sha, first);
+      assert.equal(h.git(['rev-parse', 'HEAD']), sha);
+      assert.equal(fs.readFileSync(path.join(h.repo, 'value.js'), 'utf8'), 'module.exports = 1;\n');
+      h.ok(['task', 'add', '--title', phase, '--acceptance', 'regression passes with the change']);
+      h.ok(['claim', 'T1', '--agent', 'worker']);
+      h.ok(['submit', 'T1', '--sha', sha, '--agent', 'worker']);
+      gateEvidence(h, 'tests', 'orchestrator');
+    }
+    assert.equal(failures, 2);
+  } finally {
+    fs.cpSync = cpSync;
+  }
 });

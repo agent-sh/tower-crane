@@ -5,7 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const gate = require('../../lib/gates/tests');
 const { scratch, isolateGit, git, commit, initRepo, worktrees, quote } = require('./helpers');
-const { shellQuote } = require('../../lib/gates/common');
+const { shellQuote, treeExec } = require('../../lib/gates/common');
 
 const NODE = quote(process.execPath);
 const CMD = `${NODE} run-tests.js`;
@@ -121,6 +121,63 @@ process.exit(files.length ? cp.spawnSync(process.execPath, ['--test', ...files],
   assert.equal(ran.receipt.host_only.results[0].ran, 1);
   assert.equal(ran.receipt.host_only.results[0].skipped, 1);
   assertCleanedUp();
+});
+
+test('a host-only failure on the base keeps its opt-in and command for retry classification', async () => {
+  task({
+    'test/host-known.test.js': `require('node:test')('known host failure', { skip: process.env.TC_HOST_OPT_IN !== '1' }, () => {
+  require('node:assert/strict').fail('existing host failure');
+});
+`,
+  });
+  const base = `task-${branches}`;
+  const sha = task({ 'lib/add.js': FIX, 'test/add.test.js': ADD_TEST }, base);
+  const ordinary = `${NODE} --test test/mul.test.js`;
+  const host = `${NODE} --test ${shellQuote('test/host-known.test.js')}`;
+  for (const mode of ['run-only', 'prove']) {
+    const r = await gate.run(ctx(sha, {
+      args: { cmd: ordinary },
+      project: {
+        base,
+        tests: { mode, host_only: ['test/host-known.test.js'], host_env: { TC_HOST_OPT_IN: '1' } },
+        gates: { tests_cmd: ordinary, tests_proof_cmd: `${NODE} --test {tests}` },
+      },
+    }));
+    assert.equal(r.ok, false);
+    assert.deepEqual(r.test_failure.names, ['known host failure']);
+    assert.deepEqual(r.main_failure?.names, ['known host failure']);
+    assert.equal(r.confirmed_failure, undefined, 'a matching base failure is retried without a quality climb');
+    assert.ok(r.summary.includes(`\`${host}\``), r.summary);
+    assert.match(r.summary, /Also fails on task-\d+ at [0-9a-f]+: known host failure/);
+    assert.deepEqual(r.receipt.host_only.run, ['test/host-known.test.js']);
+    assertCleanedUp();
+  }
+});
+
+test('missing host-only command pins report the proof command configuration', async () => {
+  const sha = task({ 'test/host-pin.test.js': "require('node:test')('host pin', () => {});\n" });
+  const ordinary = `${NODE} --test test/mul.test.js`;
+  const absent = 'tower-crane-no-such-host-runner {tests}';
+  for (const [proof, windowsDiagnostic] of [[null, false], [absent, false], [absent, true]]) {
+    const check = ctx(sha, {
+      args: { cmd: ordinary },
+      project: {
+        tests: { mode: 'run-only', host_only: ['test/host-pin.test.js'] },
+        gates: { tests_cmd: ordinary, tests_proof_cmd: proof },
+      },
+    });
+    if (windowsDiagnostic) {
+      const host = proof.replace('{tests}', shellQuote('test/host-pin.test.js'));
+      check.exec = (command, args, opts) => command === host
+        ? { status: 1, stdout: '', stderr: "'tower-crane-no-such-host-runner' is not recognized as an internal or external command,\r\noperable program or batch file.\r\n" }
+        : treeExec(command, args, opts);
+    }
+    const r = await gate.run(check);
+    assert.equal(r.ok, false);
+    assert.deepEqual(r.config_failure, { key: 'tests_proof_cmd' });
+    assert.equal(r.confirmed_failure, undefined);
+    assertCleanedUp();
+  }
 });
 
 test('host case counts distinguish TAP, spec, all skips and unreported output', () => {
@@ -354,8 +411,11 @@ test('a worktree add that fails after registering leaves no registration behind'
   const hooks = path.join(tmp, 'hooks');
   fs.mkdirSync(hooks, { recursive: true });
   fs.writeFileSync(path.join(hooks, 'post-checkout'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
-  git(hooked, 'config', 'core.hooksPath', hooks);
-  const r = await gate.run({ ...ctx(sha), root: hooked });
+  // The gate's git runs only hooks from the user's own config.
+  git(hooked, 'config', '--global', 'core.hooksPath', hooks);
+  let r;
+  try { r = await gate.run({ ...ctx(sha), root: hooked }); }
+  finally { git(hooked, 'config', '--global', '--unset', 'core.hooksPath'); }
   assert.equal(r.ok, false);
   assert.match(r.summary, /could not create a worktree/);
   assert.equal(worktrees(hooked), 1);
@@ -381,6 +441,7 @@ test('a helper or fixture edited under test/ is not a test for the change', asyn
   const r = await gate.run(ctx(sha));
   assert.equal(r.ok, false, r.summary);
   assert.match(r.summary, /no test covers this change: .*adds or changes no test file/);
+  assert.equal(r.worker_failure, true, 'the worker fixes it, so the gate says so');
   assertCleanedUp();
 });
 
@@ -588,6 +649,7 @@ test('none mode needs no command but still verifies the submitted sha; prove and
     const r = await gate.run(ctx(sha, { args: { cmd: undefined }, project: { tests: { mode }, gates: {} } }));
     assert.equal(r.ok, false);
     assert.match(r.summary, /no test command pinned/);
+    assert.deepEqual(r.config_failure, { key: 'tests_cmd' });
   }
   for (const [key, value] of [['mode', 'skip'], ['by_kind', { docs: null }], ['by_kind', { tooling: 'none' }], ['expensive', 'true']]) {
     const r = await gate.run(ctx(sha, { project: { tests: { mode: 'none', [key]: value } } }));
