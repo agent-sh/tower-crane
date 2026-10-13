@@ -37,6 +37,13 @@ if (mode === 'worker' || mode === 'auto' && taskState.status !== 'submitted') {
     }
     if (!fs.existsSync(`${hold}.go`)) throw new Error('worker release was not delivered');
   }
+} else if (process.env.AUTOMATION_REVIEW_NOTE) {
+  // A reviewer whose ok is refused notes why and exits 0 without a verdict.
+  try {
+    run(['evidence', task, '--type', 'review', '--sha', pr.headRefOid, '--ok']);
+  } catch (e) {
+    run(['task', 'note', task, `Review passed; evidence refused: ${String(e.stderr).trim()}`]);
+  }
 } else {
   run(['evidence', task, '--type', 'review', '--sha', pr.headRefOid, '--ok']);
 }
