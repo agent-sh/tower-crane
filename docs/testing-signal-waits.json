@@ -26420,5 +26420,623 @@
     },
     "raw_logs": "Task scratch rework-browser-current; run receipts record source heads and raw-log hashes.",
     "prior_evidence": "Earlier source-versioned measurements, CI results and D30 host diagnostics remain intact."
+  },
+  "fallback_worktree_refresh": {
+    "previous_head": "e3848b500fcfacf19b10cd867859a0794728cad0",
+    "base_head": "29c5fc0085b8187c2b1d98c8d88aae3ed424ce1a",
+    "changes": [
+      "Keep fallback readiness on waitOnRepo instead of restoring the polling helper.",
+      "New worktree-lifecycle file readiness uses fileWritten, including empty markers, and test watchdogs retain the suite guard.",
+      "Batch preparation uses guarded fetch counts, fresh heads and non-overlapping adds instead of the reintroduced clock assertion.",
+      "New spawn-exit receipt readiness uses waitOnRepo; main lifecycle assertions remain intact."
+    ],
+    "loaded_files": {
+      "test/fallback.test.js": [
+        {
+          "head": "e620f5d69d3fc7112588b09803a8849bbe8b385a",
+          "file": "test/fallback.test.js",
+          "run": 1,
+          "status": 0,
+          "wall_s": 74.88939437099907,
+          "load_before": [
+            19.8974609375,
+            19.75732421875,
+            16.7724609375
+          ],
+          "load_after": [
+            29.5283203125,
+            22.56103515625,
+            17.97509765625
+          ],
+          "log_sha256": "8219cc3e947d3cc09b62a8be9302cf715f313db05a6667bafffe65e873592e6a",
+          "tests": {
+            "tests": 31,
+            "pass": 31,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        },
+        {
+          "head": "e620f5d69d3fc7112588b09803a8849bbe8b385a",
+          "file": "test/fallback.test.js",
+          "run": 2,
+          "status": 0,
+          "wall_s": 77.11318627100263,
+          "load_before": [
+            35.4609375,
+            28.33837890625,
+            21.03662109375
+          ],
+          "load_after": [
+            34.744140625,
+            30.146484375,
+            22.30029296875
+          ],
+          "log_sha256": "de647eaa666ae224cc5560171a1c4a24af20bb8cd108147d124407f9fe081d59",
+          "tests": {
+            "tests": 31,
+            "pass": 31,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        },
+        {
+          "head": "e620f5d69d3fc7112588b09803a8849bbe8b385a",
+          "file": "test/fallback.test.js",
+          "run": 3,
+          "status": 0,
+          "wall_s": 68.23221270501381,
+          "load_before": [
+            34.744140625,
+            30.146484375,
+            22.30029296875
+          ],
+          "load_after": [
+            28.193359375,
+            29.37744140625,
+            22.57958984375
+          ],
+          "log_sha256": "bf3da16edfcd29910eb4ce9d6412027f672242dc3bb42072ec8cae4e6d93f689",
+          "tests": {
+            "tests": 31,
+            "pass": 31,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        },
+        {
+          "head": "0930ce6ebc44d7955d19155b561192b51566ff84",
+          "file": "test/fallback.test.js",
+          "run": 4,
+          "status": 0,
+          "wall_s": 61.453395770993666,
+          "load_before": [
+            19.8076171875,
+            19.96923828125,
+            20.123046875
+          ],
+          "load_after": [
+            15.03271484375,
+            18.587890625,
+            19.63671875
+          ],
+          "log_sha256": "423e9cd9fcfda6da50c447ef2790ecdc4675df953d870ad940817effe5188116",
+          "tests": {
+            "tests": 31,
+            "pass": 31,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        },
+        {
+          "head": "0930ce6ebc44d7955d19155b561192b51566ff84",
+          "file": "test/fallback.test.js",
+          "run": 5,
+          "status": 0,
+          "wall_s": 68.24869735899847,
+          "load_before": [
+            15.03271484375,
+            18.587890625,
+            19.63671875
+          ],
+          "load_after": [
+            21.11328125,
+            19.45556640625,
+            19.8505859375
+          ],
+          "log_sha256": "f8e3b095f24a976a8df4f712ffc98900d260d19ff924b3df9c833de52f8d3f30",
+          "tests": {
+            "tests": 31,
+            "pass": 31,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        }
+      ],
+      "test/worktree-lifecycle.test.js": [
+        {
+          "head": "0930ce6ebc44d7955d19155b561192b51566ff84",
+          "file": "test/worktree-lifecycle.test.js",
+          "run": 1,
+          "status": 0,
+          "wall_s": 19.221879593009362,
+          "load_before": [
+            10.73583984375,
+            19.236328125,
+            19.93603515625
+          ],
+          "load_after": [
+            13.19287109375,
+            19.27734375,
+            19.935546875
+          ],
+          "log_sha256": "b16e50b306676101f98ba0af0e7b9a84f492210ae1b42aeaef364cecb41abe4e",
+          "tests": {
+            "tests": 30,
+            "pass": 30,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        },
+        {
+          "head": "0930ce6ebc44d7955d19155b561192b51566ff84",
+          "file": "test/worktree-lifecycle.test.js",
+          "run": 2,
+          "status": 0,
+          "wall_s": 20.553970467997715,
+          "load_before": [
+            13.19287109375,
+            19.27734375,
+            19.935546875
+          ],
+          "load_after": [
+            13.4208984375,
+            18.921875,
+            19.8037109375
+          ],
+          "log_sha256": "36fe00d7ad528b6e31f4689e0e0e9a52bb6d4a1f3b090839e67890d03636cf6d",
+          "tests": {
+            "tests": 30,
+            "pass": 30,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        },
+        {
+          "head": "0930ce6ebc44d7955d19155b561192b51566ff84",
+          "file": "test/worktree-lifecycle.test.js",
+          "run": 3,
+          "status": 0,
+          "wall_s": 20.71767941500002,
+          "load_before": [
+            13.4208984375,
+            18.921875,
+            19.8037109375
+          ],
+          "load_after": [
+            18.80908203125,
+            19.82568359375,
+            20.08447265625
+          ],
+          "log_sha256": "a256f45c671c3945048128cb0a116336d3abb1c3c892e68749b3466dfbd26cbc",
+          "tests": {
+            "tests": 30,
+            "pass": 30,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        },
+        {
+          "head": "0930ce6ebc44d7955d19155b561192b51566ff84",
+          "file": "test/worktree-lifecycle.test.js",
+          "run": 4,
+          "status": 0,
+          "wall_s": 20.309919896011706,
+          "load_before": [
+            18.80908203125,
+            19.82568359375,
+            20.08447265625
+          ],
+          "load_after": [
+            18.689453125,
+            19.75048828125,
+            20.05517578125
+          ],
+          "log_sha256": "68b9d151f7d14a2edce91dcc718ed14016232bca4633e40885c02d6663301d9d",
+          "tests": {
+            "tests": 30,
+            "pass": 30,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        },
+        {
+          "head": "0930ce6ebc44d7955d19155b561192b51566ff84",
+          "file": "test/worktree-lifecycle.test.js",
+          "run": 5,
+          "status": 0,
+          "wall_s": 20.976120270002866,
+          "load_before": [
+            18.689453125,
+            19.75048828125,
+            20.05517578125
+          ],
+          "load_after": [
+            19.42236328125,
+            19.88671875,
+            20.09521484375
+          ],
+          "log_sha256": "573249fa4310d4c401b6be82e3a0c560a49160f53f3f3cb8480d9c1fba72563a",
+          "tests": {
+            "tests": 30,
+            "pass": 30,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        }
+      ],
+      "test/worktree.test.js": [
+        {
+          "head": "0930ce6ebc44d7955d19155b561192b51566ff84",
+          "file": "test/worktree.test.js",
+          "run": 1,
+          "status": 0,
+          "wall_s": 53.24803979200078,
+          "load_before": [
+            14.9482421875,
+            18.39599609375,
+            19.556640625
+          ],
+          "load_after": [
+            20.22314453125,
+            19.29833984375,
+            19.79736328125
+          ],
+          "log_sha256": "28326a214417327cadd67ec535f7d450a856356bd3d420a1f26b77c0c5847060",
+          "tests": {
+            "tests": 31,
+            "pass": 31,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        },
+        {
+          "head": "0930ce6ebc44d7955d19155b561192b51566ff84",
+          "file": "test/worktree.test.js",
+          "run": 2,
+          "status": 0,
+          "wall_s": 52.8912135730061,
+          "load_before": [
+            20.22314453125,
+            19.29833984375,
+            19.79736328125
+          ],
+          "load_after": [
+            18.01708984375,
+            18.8349609375,
+            19.6083984375
+          ],
+          "log_sha256": "cc37e0f471d7f840bb315eaa7a279444106198cc2d824d2f0b767ebb754d73ad",
+          "tests": {
+            "tests": 31,
+            "pass": 31,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        },
+        {
+          "head": "0930ce6ebc44d7955d19155b561192b51566ff84",
+          "file": "test/worktree.test.js",
+          "run": 3,
+          "status": 0,
+          "wall_s": 54.52515664399834,
+          "load_before": [
+            18.01708984375,
+            18.8349609375,
+            19.6083984375
+          ],
+          "load_after": [
+            21.63037109375,
+            19.7451171875,
+            19.8798828125
+          ],
+          "log_sha256": "579a8083f60960aec64abb3aa23a304e4e2c6c9b827ca1b73b17e9013642603f",
+          "tests": {
+            "tests": 31,
+            "pass": 31,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        },
+        {
+          "head": "0930ce6ebc44d7955d19155b561192b51566ff84",
+          "file": "test/worktree.test.js",
+          "run": 4,
+          "status": 0,
+          "wall_s": 55.774524766005925,
+          "load_before": [
+            21.63037109375,
+            19.7451171875,
+            19.8798828125
+          ],
+          "load_after": [
+            23.7431640625,
+            20.8515625,
+            20.26025390625
+          ],
+          "log_sha256": "702b0126363e4ee33dc5c9f3ab5be809ba96f2f09561da711d32c6737b1cfdea",
+          "tests": {
+            "tests": 31,
+            "pass": 31,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        },
+        {
+          "head": "0930ce6ebc44d7955d19155b561192b51566ff84",
+          "file": "test/worktree.test.js",
+          "run": 5,
+          "status": 0,
+          "wall_s": 58.6315612920007,
+          "load_before": [
+            23.7431640625,
+            20.8515625,
+            20.26025390625
+          ],
+          "load_after": [
+            27.07275390625,
+            22.11083984375,
+            20.71728515625
+          ],
+          "log_sha256": "34b96b99ca5408abff36951bcbd9703c70eecf3e6ddc65d4b48165670b8cf729",
+          "tests": {
+            "tests": 31,
+            "pass": 31,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        }
+      ],
+      "test/spawn-exit.test.js": [
+        {
+          "head": "0930ce6ebc44d7955d19155b561192b51566ff84",
+          "file": "test/spawn-exit.test.js",
+          "run": 1,
+          "status": 0,
+          "wall_s": 27.54852948599728,
+          "load_before": [
+            19.265625,
+            19.1337890625,
+            19.73193359375
+          ],
+          "load_after": [
+            18.83447265625,
+            19.01708984375,
+            19.67529296875
+          ],
+          "log_sha256": "d5ccfd8f1dca5418c0f0eca95d231c1935eacd71437b6f8c550cc3aaef58b08c",
+          "tests": {
+            "tests": 12,
+            "pass": 12,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        },
+        {
+          "head": "0930ce6ebc44d7955d19155b561192b51566ff84",
+          "file": "test/spawn-exit.test.js",
+          "run": 2,
+          "status": 0,
+          "wall_s": 27.56962989400199,
+          "load_before": [
+            18.83447265625,
+            19.01708984375,
+            19.67529296875
+          ],
+          "load_after": [
+            19.97314453125,
+            19.181640625,
+            19.70361328125
+          ],
+          "log_sha256": "ec2b486a517f7daddb81b230ef22c98ea1b9ad883ea9d2420d86f79c1ea948ac",
+          "tests": {
+            "tests": 12,
+            "pass": 12,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        },
+        {
+          "head": "0930ce6ebc44d7955d19155b561192b51566ff84",
+          "file": "test/spawn-exit.test.js",
+          "run": 3,
+          "status": 0,
+          "wall_s": 28.734471235002275,
+          "load_before": [
+            19.97314453125,
+            19.181640625,
+            19.70361328125
+          ],
+          "load_after": [
+            21.63037109375,
+            19.7451171875,
+            19.8798828125
+          ],
+          "log_sha256": "8170ae0b57c4c50b7ffea8ee40b56cb69cd4b1c61d9a0abd825502894a6dbdd3",
+          "tests": {
+            "tests": 12,
+            "pass": 12,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        },
+        {
+          "head": "0930ce6ebc44d7955d19155b561192b51566ff84",
+          "file": "test/spawn-exit.test.js",
+          "run": 4,
+          "status": 0,
+          "wall_s": 29.69005420799658,
+          "load_before": [
+            21.63037109375,
+            19.7451171875,
+            19.8798828125
+          ],
+          "load_after": [
+            25.76708984375,
+            20.82958984375,
+            20.2314453125
+          ],
+          "log_sha256": "d42704d5399a625e6a3de2d49e1a0b78bc757ee6bedd7678d6401c536d5ff0cb",
+          "tests": {
+            "tests": 12,
+            "pass": 12,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        },
+        {
+          "head": "0930ce6ebc44d7955d19155b561192b51566ff84",
+          "file": "test/spawn-exit.test.js",
+          "run": 5,
+          "status": 0,
+          "wall_s": 29.115685020995443,
+          "load_before": [
+            25.76708984375,
+            20.82958984375,
+            20.2314453125
+          ],
+          "load_after": [
+            24.59130859375,
+            20.96728515625,
+            20.29443359375
+          ],
+          "log_sha256": "34ddcfd8678e0ef4c332eb5edbe33362be17f4434154fcbc31605cbedaea0c54",
+          "tests": {
+            "tests": 12,
+            "pass": 12,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        }
+      ]
+    },
+    "cpu_load_processes_per_runner": 2,
+    "peak_cpu_load_processes": 4,
+    "test_file_concurrency": 1,
+    "peak_named_test_workers": 4,
+    "batch_red": {
+      "artifact": "batch-red.log",
+      "sha256": "1891eeb4fe95d1325b3ff66b1748fb596830e61e69e1791512224790d3657c52",
+      "footer": {
+        "tests": 1,
+        "pass": 0,
+        "fail": 1,
+        "cancelled": 0,
+        "skipped": 0
+      }
+    },
+    "batch_green": {
+      "artifact": "batch-green.log",
+      "sha256": "cd0fa35be5c7b5a142e254dc69804cc71987314f5fc57daaadb36cda25dcebbe",
+      "footer": {
+        "tests": 1,
+        "pass": 1,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 0
+      }
+    },
+    "lifecycle_conversion_diagnostic": {
+      "artifact": "resumed-test_worktree-lifecycle.test.js-1.log",
+      "sha256": "706cbcc6a4fce0d4ac37f935ebd61e7e6960c681eaae35a2f4edbd673063ed8b",
+      "footer": {
+        "tests": 30,
+        "pass": 29,
+        "fail": 1,
+        "cancelled": 0,
+        "skipped": 0
+      }
+    },
+    "lifecycle_conversion_note": "The first conversion incorrectly asserted truthiness of returned empty file contents. The corrected probe awaits the write signal, preserving the original existence requirement; the failed sample is retained and excluded from passing counts.",
+    "lifecycle_corrected_probe": {
+      "artifact": "lifecycle-green.log",
+      "sha256": "ef4f8ac2713092721ffa8e096418d3d2031dfc977af595be3d3b3c557203f0ec",
+      "footer": {
+        "tests": 3,
+        "pass": 3,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 0
+      }
+    },
+    "shared_before_conversion": {
+      "artifact": "shared-merge.log",
+      "sha256": "04fa4da483dde9184bfc9ef3c9a0581bf19f96bac2a39bac3b0a7a44aa88e04e",
+      "footer": {}
+    },
+    "shared_after_conversion": {
+      "artifact": "shared-final-code.log",
+      "sha256": "d9ade0c3c97adaf32d66294c89c98f61a10b0276806a23a7d641a1e3f5d703cf",
+      "footer": {}
+    },
+    "named_merge_check": {
+      "artifact": "merge-checks.log",
+      "sha256": "6b27fd0251e154d66d9bbc82204d7e4edc901f223e2a0f45bd2537ea46a6e192",
+      "footer": {
+        "tests": 251,
+        "pass": 251,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 0
+      }
+    },
+    "named_files": [
+      "test/broker.test.js",
+      "test/ci-feedback.test.js",
+      "test/escalation.test.js",
+      "test/gates.test.js",
+      "test/isolation.test.js",
+      "test/merge-options.test.js",
+      "test/stack-merge.test.js",
+      "test/submit-ci.test.js",
+      "test/signal-waits.test.js"
+    ],
+    "affected_mutation": {
+      "score": "1/1",
+      "id": "orphan-removal-skips-reservation",
+      "baseline": "green unmodified named lifecycle baseline; no full-suite fallback",
+      "log": {
+        "artifact": "mutants.log",
+        "sha256": "c01a3d946692213c31bb941ac8b1b94577331c640be4fe7d485a20986c72c430",
+        "footer": {}
+      }
+    },
+    "reproduction": {
+      "command": "node test/run.js --test-concurrency=1 FILE",
+      "cpu_load": "two nice -n 15 node processes evaluating Math.sqrt(Math.random()) continuously",
+      "socket_home": "TOWER_CRANE_TEST_SOCKET_HOME=WRITABLE_SHORT_HOME"
+    },
+    "raw_logs": "Task scratch rework-fallback-current, lifecycle-fixed and fallback-resume; source heads and raw-log hashes are recorded.",
+    "prior_evidence": "Earlier source-versioned loaded and mutation receipts remain unchanged; no tokenizer expansion."
   }
 }

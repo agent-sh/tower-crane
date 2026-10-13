@@ -48,6 +48,8 @@ The final base through `4f0ae5fc` enables the configured environment for live ho
 
 The browser account-cache refresh through `8b4697d9` keeps the suite guard and main's simulated account-home, deep-cache, allocation-refusal and teardown checks. Browser startup passes nine tests in each of five loaded runs at `b91149ab`; seven named merge consumers pass, and two tests-gate proof mutants are caught after a green baseline. A writable short test root supplies the simulated account; the earlier direct shallow-cache override is superseded. Earlier measurements retain their source checkpoints.
 
+The fallback/worktree refresh through `29c5fc00` keeps repository and file signals while preserving main's lifecycle assertions. Fallback, worktree lifecycle, batch preparation and spawn-exit each pass five loaded runs at recorded checkpoints; nine named merge consumers pass separately. The batch probe records the reintroduced undefined clock variable failing before correction, and lifecycle records the corrected empty-marker probe before five full passes. The orphan-removal reservation mutant is caught after a green baseline. The receipt retains the failed conversion sample and contains no machine-local paths.
+
 ## Tools
 
 - `node scripts/test-cost.js [--before DIR] [files...]` measures CPU and wall seconds per file, median of three runs, four files at a time. With `--before`, it measures another checkout interleaved with this one.
