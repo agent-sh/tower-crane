@@ -66,6 +66,14 @@ is recovered through the merge gate's accepted-head confirmation.
 
 Software gates run when no audited evidence exists at the submitted head
 and revision, even if an unaudited entry or a completed reaction remains.
+Hosted CI that is still running or waiting for GitHub's mergeability result
+records `PENDING`. The trusted wait host checks pending CI once per minute
+without needing a completion notification, and records a recheck only when
+its result changed. A completed failure takes precedence over pending runs and
+unknown mergeability. CI with nothing queued or running for 30 minutes, or on
+a closed PR, records `STALLED`: the orchestrator inbox shows it and the
+per-minute recheck stops for that head. Status and the board show the gate
+name with its failed, stalled, pending or missing state.
 They run again when their passing evidence no longer matches its
 inputs, such as the pinned command or tests policy. A failed `tests`, `clean`
 or `ci` gate at a submitted head does not wait for an operator, whether the

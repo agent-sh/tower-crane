@@ -59,6 +59,7 @@ function fixture(t) {
         ...(evidence.infrastructure_failure ? { infrastructure_failure: true } : {}),
         ...(evidence.worker_failure ? { worker_failure: true } : {}),
         ...(evidence.pending ? { pending: true } : {}),
+        ...(evidence.not_running ? { not_running: true } : {}),
       });
       assert.equal(evidence.source, 'check ci');
       assert.ok(Array.isArray(evidence.commands));
