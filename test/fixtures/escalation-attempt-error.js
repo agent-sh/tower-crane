@@ -2,6 +2,21 @@
 
 const fs = require('node:fs');
 
+// Acknowledgements keep each worker at the phase the test is checking.
+exports.phase = (phase) => new Promise((resolve, reject) => {
+  const socket = require('node:net').connect(Number(process.env.HOOK_ESCALATION_SIGNAL_PORT), '127.0.0.1', () => {
+    socket.write(JSON.stringify({ agent: process.env.TOWER_CRANE_AGENT, phase }) + '\n');
+  });
+  let reply = '';
+  socket.on('data', (data) => { reply += data; });
+  socket.once('error', reject);
+  socket.once('end', () => {
+    socket.destroy();
+    if (reply === 'continue\n') resolve();
+    else reject(new Error(`worker phase ${phase} was not acknowledged`));
+  });
+});
+
 // The first attempt creates the file; Windows sharing errors affect replacement.
 if (process.env.TOWER_CRANE_AGENT === 'worker-T1-2') {
   const rename = fs.renameSync;

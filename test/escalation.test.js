@@ -40,13 +40,19 @@ function configure(h, trigger) {
 const fs = require('node:fs');
 const cp = require('node:child_process');
 const cli = (args) => cp.execFileSync(process.execPath, [process.argv[1], ...args], { encoding: 'utf8' });
+const phase = process.env.HOOK_ESCALATION_PHASES
+  ? require(process.env.HOOK_ESCALATION_PHASES).phase : async () => {};
+(async () => {
+await phase('before-claim');
 ${index === 0 && trigger === 'preclaim' ? '' : "cli(['claim', 'T1']);"}
+await phase('claimed');
 const attempts = fs.existsSync(process.argv[2]) ? JSON.parse(fs.readFileSync(process.argv[2])) : [];
 attempts.push({ rung: '${rung}', agent: process.env.TOWER_CRANE_AGENT, session: process.env.TOWER_CRANE_SESSION,
   previous: process.argv[3], cwd: process.cwd() });
 // Readers and fs.watch can briefly prevent replacing an existing file on Windows.
 require(require('node:path').join(require('node:path').dirname(process.argv[1]), '../lib/state'))
   .writeAtomic(process.argv[2], JSON.stringify(attempts));
+await phase('recorded');
 console.log(JSON.stringify({ type: 'thread.started', thread_id: '${rung}-thread' }));
 console.log(JSON.stringify({ type: 'result', modelUsage: { 'fixture-light': {} },
   usage: { input_tokens: 100, cache_read_input_tokens: 0, output_tokens: 20 } }));
@@ -64,11 +70,13 @@ ${index === 0 && ['stall', 'hold', 'orphan'].includes(trigger) ? 'setInterval(()
       : index === 0 && trigger === 'refusal' ? "console.log(JSON.stringify({ type: 'refusal' })); process.exit(1);"
         : trigger === 'top' || index === 0 && ['exit', 'preclaim'].includes(trigger) ? 'process.exit(0);'
       : "cli(['submit', 'T1', '--sha', fs.readFileSync(process.argv[2] + '.sha', 'utf8')]);"}
+await phase('submitted');
 ${index === 0 && trigger === 'cleanup' ? `
 const stop = () => { if (fs.existsSync(process.argv[2] + '.exit')) process.exit(0); };
 fs.watch(require('node:path').dirname(process.argv[2]), stop);
 stop();
 ` : ''}
+})().catch((error) => { console.error(error); process.exit(1); });
 `;
     h.ok(['ladder', 'set', rung, '--harness', 'command', '--command',
       JSON.stringify([process.execPath, '-e', script, BIN, h.attempts, '{session}', '{prompt}']),
@@ -87,6 +95,9 @@ async function setup(t, trigger = 'exit', range = 'easy..medium', prepare = null
   h.attempts = path.join(h.base, 'attempts.json');
   const exits = new Map();
   const sockets = new Set();
+  const phases = new Map();
+  const waiting = new Map();
+  const stopped = new Set();
   const signal = path.join(h.base, 'process-signal.cjs');
   // Socket closure observes detached exits even when SIGKILL prevents a receipt.
   fs.writeFileSync(signal, `
@@ -94,7 +105,7 @@ const path = require('node:path');
 if (process.execArgv.includes('-e') && process.env.TOWER_CRANE_SESSION
   || ['spawn-monitor.js', 'usage-harness.js'].includes(path.basename(process.argv[1] || ''))) {
   const socket = require('node:net').connect(Number(process.env.HOOK_ESCALATION_SIGNAL_PORT), '127.0.0.1', () => {
-    socket.write(String(process.pid) + '\\n');
+    socket.write(JSON.stringify({ pid: process.pid, agent: process.env.TOWER_CRANE_AGENT }) + '\\n');
     socket.unref();
   });
   socket.on('error', () => socket.destroy());
@@ -103,14 +114,29 @@ if (process.execArgv.includes('-e') && process.env.TOWER_CRANE_SESSION
   const server = net.createServer((socket) => {
     sockets.add(socket);
     let text = '';
+    let agent;
     const exited = new Promise((resolve) => socket.once('close', () => {
       sockets.delete(socket);
+      if (agent) {
+        stopped.add(agent);
+        for (const [key, waiter] of waiting) {
+          if (key.startsWith(agent + ':')) waiter.fail();
+        }
+      }
       resolve();
     }));
     socket.on('data', (data) => {
       text += data;
       if (text.includes('\n')) {
-        exits.set(Number(text.trim()), exited);
+        const message = JSON.parse(text.trim());
+        if (message.phase) {
+          const key = `${message.agent}:${message.phase}`;
+          phases.set(key, socket);
+          waiting.get(key)?.ready();
+          return;
+        }
+        agent = message.agent;
+        exits.set(message.pid, exited);
         fs.writeFileSync(path.join(h.base, 'process-connected'), text);
       }
     });
@@ -122,6 +148,30 @@ if (process.execArgv.includes('-e') && process.env.TOWER_CRANE_SESSION
   });
   h.env.HOOK_ESCALATION_SIGNAL_PORT = String(server.address().port);
   h.env.NODE_OPTIONS = preloadOption(signal);
+  h.phase = (agent, phase) => new Promise((resolve, reject) => {
+    const key = `${agent}:${phase}`;
+    const abort = () => {
+      waiting.delete(key);
+      reject(t.signal.reason);
+    };
+    const ready = () => {
+      waiting.delete(key);
+      t.signal.removeEventListener('abort', abort);
+      resolve(() => phases.get(key).end('continue\n'));
+    };
+    const fail = () => {
+      waiting.delete(key);
+      t.signal.removeEventListener('abort', abort);
+      const log = events(h).findLast((event) => event.cmd === 'spawn' && event.detail.agent === agent)?.detail.log;
+      reject(new Error(`${agent} exited before ${phase}\n`
+        + (log && fs.existsSync(log) ? fs.readFileSync(log, 'utf8') : 'No worker log')));
+    };
+    waiting.set(key, { ready, fail });
+    t.signal.addEventListener('abort', abort, { once: true });
+    if (t.signal.aborted) abort();
+    else if (phases.has(key)) ready();
+    else if (stopped.has(agent)) fail();
+  });
   h.task = () => h.readState('tasks.json').tasks.find((task) => task.id === 'T1');
   h.openDecisions = () => h.readState('decisions.json').decisions.filter((decision) => decision.status === 'open');
   h.until = (fn, dirs = [h.state, h.base]) => until(t, dirs, () => {
@@ -215,9 +265,34 @@ function attemptError(h, code) {
 }
 
 test('a replacement worker retries Windows sharing errors when recording its attempt', async (t) => {
-  const h = await setup(t, 'exit', 'easy..medium', (repo) => attemptError(repo, 'EPERM'));
-  h.ok(['spawn', '--task', 'T1']);
-  await h.until(() => h.readAttempts().length === 2 && h.task().status === 'submitted');
+  const h = await setup(t, 'exit', 'easy..medium', (repo) => {
+    attemptError(repo, 'EPERM');
+    repo.env.HOOK_ESCALATION_PHASES = path.join(__dirname, 'fixtures', 'escalation-attempt-error.js');
+  });
+  // State-directory notifications need not arrive for worker progress to be observed.
+  const watch = t.mock.method(fs, 'watch', () => { throw new Error('unexpected filesystem wait'); });
+  try {
+    // Keep the server responsive while dispatch and Windows process discovery run.
+    const spawned = await h.runAsync(['spawn', '--task', 'T1']);
+    assert.equal(spawned.code, 0, spawned.stderr);
+    for (const [index, agent] of ['worker-T1-1', 'worker-T1-2'].entries()) {
+      const start = await h.phase(agent, 'before-claim');
+      assert.equal(h.readAttempts().length, index);
+      start();
+      const claimed = await h.phase(agent, 'claimed');
+      assert.ok(events(h).some((event) => event.cmd === 'claim' && event.agent === agent && event.detail.renewed));
+      claimed();
+      const recorded = await h.phase(agent, 'recorded');
+      assert.equal(h.readAttempts().length, index + 1);
+      recorded();
+    }
+    const submitted = await h.phase('worker-T1-2', 'submitted');
+    assert.equal(h.task().status, 'submitted');
+    submitted();
+    assert.equal(watch.mock.callCount(), 0);
+  } finally {
+    watch.mock.restore();
+  }
   assert.deepEqual(h.readAttempts().map((attempt) => attempt.rung), ['easy', 'medium']);
   assert.equal(fs.readFileSync(h.attempts + '.errors', 'utf8'), 'EPERM\nEACCES\nEBUSY\n');
   assert.equal(h.openDecisions().length, 0);
