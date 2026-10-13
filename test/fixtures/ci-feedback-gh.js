@@ -15,6 +15,9 @@ const ref = /^repos\/[^/]+\/[^/]+\/git\/ref\/(.+)$/.exec(endpoint);
 if (args[0] !== 'api') fail(`unexpected gh call: ${args.join(' ')}`);
 else if (job?.[2]) {
   if (data.logs[job[1]] === undefined) fail('gh: Not Found (HTTP 404)');
+  else if (/[\x00-\x08\x0b-\x1f\x7f-\x9f]/.test(data.logs[job[1]]) && !args.includes('--allow-escape-sequences')) {
+    fail('the response contains terminal escape sequences; pass --allow-escape-sequences to output it anyway');
+  }
   else process.stdout.write(data.logs[job[1]]);
 } else if (job) {
   if (!data.jobs[job[1]]) fail('gh: Not Found (HTTP 404)');

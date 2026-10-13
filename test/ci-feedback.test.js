@@ -7,6 +7,8 @@ const path = require('node:path');
 const { cachedFixture } = require('./helpers');
 const B = require('../lib/broker');
 const { failingTests } = require('../lib/ci-feedback');
+const { cleanLog } = require('../lib/ci-log-text');
+const { ghDenied } = require('../lib/shim');
 
 // GitHub stamps every line of a job log.
 const PLAIN = [
@@ -22,13 +24,33 @@ const PLAIN = [
   '  ...',
   '1..3',
 ].map((line, i) => `2026-10-11T10:00:${String(i).padStart(2, '0')}.0000000Z ${line}`).join('\n') + '\n';
-// The same log as a runner colors it: a CSI color, and an OSC hyperlink around the group title.
+// Runner colors, OSC hyperlinks with both terminators, and stray terminal controls.
 const LOG = PLAIN
   .replace('2026-10-11T10:00:00.0000000Z', '\x1b[36m2026-10-11T10:00:00.0000000Z\x1b[0m')
-  .replace('Run npm test', '\x1b]8;;https://example.test/run\x07Run npm test\x1b]8;;\x07')
-  .replace('not ok 2 - writes the report', '\x1b[31mnot ok 2 - writes the report\x1b[0m');
+  .replace('Run npm test', '\x1b]8;;https://example.test/run\x07Run npm test\x1b]8;;\x1b\\')
+  .replace('not ok 2 - writes the report', '\x1b[31mnot ok 2 - writes the report\x1b[0m\x1b')
+  .replace("  error: 'ENOENT: no such file or directory'", "  \x00\x07\x08\x0b\x0c\x0e\x1f\x7ferror: 'ENOENT: no such file or directory'\r");
 
 const BRANCH = 'tower-crane/T1-change';
+
+test('CI log cleanup preserves text, tabs and newlines while removing terminal controls', () => {
+  const cases = [
+    ['CSI', '\x1b[31mred\x1b[0m \x1b[2Kline', 'red line'],
+    ['OSC BEL', '\x1b]0;title\x07text', 'text'],
+    ['OSC ST', '\x1b]8;;https://example.test\x1b\\link\x1b]8;;\x1b\\', 'link'],
+    ['C1 CSI', '\x9b31mred\x9b0m', 'red'],
+    ['bare ESC', 'text\x1b\n', 'text\n'],
+    ['C0, DEL and C1', 'a\x00\x07\x08\x0b\x0c\x0e\x1f\x7f\x80b\r\n', 'ab\n'],
+    ['layout and Unicode', '\t✖ тест\n', '\t✖ тест\n'],
+  ];
+  for (const [name, input, expected] of cases) assert.equal(cleanLog(input), expected, name);
+});
+
+test('gh log flag preserves the existing shim policy', () => {
+  const args = ['api', 'repos/acme/app/actions/jobs/42/logs', '--allow-escape-sequences'];
+  assert.equal(ghDenied(args, { gh: ['api'] }), null);
+  assert.match(ghDenied(args, { gh: ['pr view', 'run view'] }), /^gh api /);
+});
 
 function fixture(t) {
   const h = cachedFixture(t, 'ci-feedback', (h) => {
@@ -94,7 +116,7 @@ test('failing test names come from node, go and pytest output', () => {
   for (const [what, lines, expected] of cases) assert.deepEqual(failingTests(lines.join('\n')), expected, what);
 });
 
-test('ci log writes the clean log under the task scratch and names both failing tests', (t) => {
+test('ci log fetches escape sequences, writes a clean log and prints clean failing tests', (t) => {
   const h = fixture(t);
   const r = h.run(['ci', 'log', '42', '--failed-tests', '--task', 'T1']);
   assert.equal(r.code, 0, r.stderr);
