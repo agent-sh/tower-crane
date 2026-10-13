@@ -6,8 +6,20 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { makeRepo, cachedFixture } = require('./helpers');
 
-const events = (h) => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+// A concurrent writer can leave its last audit line unfinished while a scheduling probe reads it.
+const events = (h) => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').split('\n').slice(0, -1).filter(Boolean).map(JSON.parse);
 const snapshot = (h) => ['tasks.json', 'events.jsonl'].map((file) => fs.readFileSync(path.join(h.state, file), 'utf8'));
+
+test('hardware scheduling observations wait for the complete audit line', (t) => {
+  const h = makeRepo(t);
+  h.init();
+  const before = events(h);
+  const file = path.join(h.state, 'events.jsonl');
+  fs.appendFileSync(file, '{"cmd":"claim","task":"T1"');
+  assert.deepEqual(events(h), before);
+  fs.appendFileSync(file, '}\n');
+  assert.deepEqual(events(h).at(-1), { cmd: 'claim', task: 'T1' });
+});
 
 function setup(t) {
   return cachedFixture(t, 'labs', (h) => {

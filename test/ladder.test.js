@@ -4,7 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { makeRepo, fixtureLadder, ROOT } = require('./helpers');
+const { makeRepo, fixtureLadder, ROOT, TMP_ROOT } = require('./helpers');
 const A = require('../lib/agents');
 const L = require('../lib/ladder');
 
@@ -384,7 +384,7 @@ test('a ladder write is evented and re-renders the sketch with the ladder and ea
   assert.match(html, /<a href="#T1" class="node s-ready"[^>]*aria-label="T1 Small fix, ready, tier easy"/, 'the graph shows the task tier');
   const md = fs.readFileSync(path.join(h.state, 'sketch.md'), 'utf8');
   assert.match(md, /^\| easy \| codex \(default\) \| fixture-model \| medium \|$/m);
-  assert.match(md, /^\| T1 \| Small fix \| code \| S \| easy \| 0 \|$/m, 'the ready table shows the tier');
+  assert.match(md, /^\| T1 \| Small fix \(no brief\) \| code \| S \| easy \| 0 \|$/m, 'the ready table shows the tier and the missing brief');
 });
 
 test('tasks take a tier from kind and size unless one is given', (t) => {
@@ -465,4 +465,69 @@ test('switching from Codex to agy refuses inherited Codex flags until explicitly
   assert.deepEqual(h.readState('project.json'), before);
   h.ok(['ladder', 'set', 'hard', '--harness', 'agy', '--model', 'fixture-large', '--clear', 'args']);
   assert.equal(h.json(['ladder', 'show']).ladder.hard.harness, 'agy');
+});
+
+test('pricing identity drops Claude provider, context and Bedrock version suffixes', () => {
+  for (const [id, identity] of [
+    ['global.anthropic.claude-opus-5-5[1m]', 'claude-opus-5-5'],
+    ['anthropic.claude-haiku-5-5', 'claude-haiku-5-5'],
+    [' Global.Anthropic.Claude-Opus-5-5[1M] ', 'claude-opus-5-5'],
+    ['claude-opus-5-5', 'claude-opus-5-5'],
+    ['global.anthropic.claude-haiku-4-5-20251001-v1:0', 'claude-haiku-4-5-20251001'],
+    ['anthropic.claude-haiku-4-5-20251001-v12:34', 'claude-haiku-4-5-20251001'],
+    ['claude-haiku-4-5-20251001-v1:0[1m]', 'claude-haiku-4-5-20251001'],
+    ['claude-haiku-4-5-20251001-v1:0-extra', 'claude-haiku-4-5-20251001-v1:0-extra'],
+    ['global.anthropic.fixture-release', 'fixture-release'],
+    ['openai.gpt-fixture', 'openai.gpt-fixture'],
+    ['openai.gpt-fixture-v1:0', 'openai.gpt-fixture-v1:0'],
+    ['a/easy', 'a/easy'],
+  ]) assert.equal(L.modelIdentity(id), identity, id);
+  assert.equal(L.billing({ harness: 'claude', provider: 'bedrock' }, {}), 'api');
+  assert.equal(L.billing({ harness: 'claude' }, { ANTHROPIC_API_KEY: 'x' }), 'api');
+  assert.equal(L.billing({ harness: 'claude' }, { ANTHROPIC_API_KEY: '' }), 'subscription');
+  assert.equal(L.billing({ harness: 'pi' }, {}), null);
+  // A rung that names no provider runs on the Bedrock route its environment inherits; a pinned provider decides alone.
+  assert.equal(L.billing({ harness: 'claude' }, { CLAUDE_CODE_USE_BEDROCK: '1', AWS_PROFILE: 'fixture', AWS_REGION: 'eu-west-1' }), 'api');
+  assert.equal(L.billing({ harness: 'claude' }, { CLAUDE_CODE_USE_BEDROCK: '0' }), 'subscription');
+  assert.equal(L.billing({ harness: 'claude', provider: 'anthropic' }, { CLAUDE_CODE_USE_BEDROCK: '1' }), 'subscription');
+  // Every provider switch Claude Code reads is a metered route, with Claude Code's truthy spellings.
+  for (const name of ['BEDROCK', 'VERTEX', 'FOUNDRY', 'ANTHROPIC_AWS', 'ANTHROPIC_GOOGLE_CLOUD', 'MANTLE', 'GATEWAY']) {
+    for (const value of ['1', 'true', 'YES', ' on ']) {
+      assert.equal(L.billing({ harness: 'claude', model: 'claude-opus-5-5' }, { [`CLAUDE_CODE_USE_${name}`]: value }), 'api', `${name}=${value}`);
+    }
+    assert.equal(L.billing({ harness: 'claude' }, { [`CLAUDE_CODE_USE_${name}`]: 'off' }), 'subscription', `${name}=off`);
+    assert.equal(L.billing({ harness: 'claude', provider: 'anthropic' }, { [`CLAUDE_CODE_USE_${name}`]: '1' }), 'subscription', `pinned ${name}`);
+  }
+  assert.equal(L.billing({ harness: 'claude' }, { CLAUDE_CODE_USE_POWERSHELL_TOOL: '1' }), 'subscription');
+});
+
+test('Codex billing follows the configured provider rather than inherited credentials', (t) => {
+  const base = fs.mkdtempSync(path.join(TMP_ROOT, 'codex-billing-'));
+  t.after(() => fs.rmSync(base, { recursive: true, force: true }));
+  for (const [name, config, standalone, rung, env, expected] of [
+    ['default login', '', undefined, {}, {}, 'subscription'],
+    ['OpenAI key', '', undefined, {}, { OPENAI_API_KEY: 'fixture-key' }, 'api'],
+    ['AWS credentials on OpenAI', 'model_provider = "openai"', undefined, {}, { AWS_PROFILE: 'fixture', AWS_REGION: 'us-east-1' }, 'subscription'],
+    ['global Bedrock', 'model_provider = "amazon-bedrock"', undefined, {}, {}, 'api'],
+    ['named Bedrock profile', 'model_provider = "openai"\n[profiles.sol]\nmodel_provider = "amazon-bedrock"', undefined, { profile: 'sol' }, {}, 'api'],
+    ['named profile inherits Bedrock', 'model_provider = "amazon-bedrock"\n[profiles.sol]\nmodel = "fixture"', undefined, { profile: 'sol' }, {}, 'api'],
+    ['standalone Bedrock', 'model_provider = "openai"', 'model_provider = "amazon-bedrock"', { profile: 'sol', model: 'fixture' }, {}, 'api'],
+    ['standalone login', 'model_provider = "amazon-bedrock"', 'model_provider = "openai"', { profile: 'sol' }, {}, 'subscription'],
+    ['standalone inherits Bedrock', 'model_provider = "amazon-bedrock"', 'model = "fixture"', { profile: 'sol' }, {}, 'api'],
+    ['missing profile', 'model_provider = "openai"', undefined, { profile: 'missing' }, { AWS_BEARER_TOKEN_BEDROCK: 'fixture-token' }, null],
+    ['invalid config', '[broken', undefined, {}, {}, null],
+    ['invalid provider', 'model_provider = false', undefined, {}, {}, null],
+    ['provider override', 'model_provider = "openai"', undefined, { args: ['-c', 'model_provider=amazon-bedrock'] }, {}, 'api'],
+    ['local Ollama', 'model_provider = "ollama"', undefined, {}, { OPENAI_API_KEY: 'fixture-key' }, null],
+    ['local LM Studio profile', 'model_provider = "openai"\n[profiles.sol]\nmodel_provider = "lmstudio"', undefined, { profile: 'sol' }, {}, null],
+    ['last provider override wins', 'model_provider = "amazon-bedrock"', undefined, { args: ['-c', 'model_provider="amazon-bedrock"', '-c', 'model_provider="openai"'] }, {}, 'subscription'],
+  ]) {
+    const home = path.join(base, name);
+    fs.mkdirSync(home);
+    fs.writeFileSync(path.join(home, 'config.toml'), config);
+    if (standalone !== undefined) fs.writeFileSync(path.join(home, 'sol.config.toml'), standalone);
+    // Codex can load AWS credentials itself; billing needs only the route.
+    fs.writeFileSync(path.join(home, '.env'), 'AWS_BEARER_TOKEN_BEDROCK=fixture-token\n');
+    assert.equal(L.billing({ harness: 'codex', ...rung }, env, { codex: home }), expected, name);
+  }
 });

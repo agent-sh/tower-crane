@@ -96,6 +96,20 @@ module.exports = function stub(harness) {
     if (!args.includes('--strict-mcp-config')) Object.assign(report.mcp, json(global).mcpServers || {});
     if (after('--mcp-config')) Object.assign(report.mcp, json(after('--mcp-config')).mcpServers || {});
     report.auth = read(path.join(dir, '.credentials.json'));
+    if (process.env.STUB_CLAUDE_SANDBOX_PLACEHOLDERS) {
+      const placeholders = JSON.parse(process.env.STUB_CLAUDE_SANDBOX_PLACEHOLDERS);
+      for (const relative of placeholders) {
+        const file = path.join(process.cwd(), relative);
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        try {
+          fs.writeFileSync(file, '', { flag: 'wx', mode: 0o444 });
+        } catch (error) {
+          if (error.code !== 'EEXIST') throw error;
+        }
+      }
+      const status = cp.spawnSync('git', ['status', '--short', '--untracked-files=all'], { encoding: 'utf8' });
+      report.placeholderGitStatus = { code: status.status, stdout: status.stdout || '', stderr: status.stderr || '' };
+    }
     // claude's Read, Grep and Glob tools answer to permission rules, not to
     // the sandbox: STUB_READ files are read the way those tools would, after
     // the deny rules from settings and --disallowedTools. A relative file is
@@ -104,8 +118,16 @@ module.exports = function stub(harness) {
     const end = args.findIndex((a, i) => i >= from && a.startsWith('--'));
     const disallowed = from ? args.slice(from, end === -1 ? undefined : end) : [];
     const denyRules = [...((settings.permissions && settings.permissions.deny) || []), ...disallowed];
+    // Then the PreToolUse hooks whose matcher names the tool, as claude runs
+    // them: exit 2 blocks the call.
+    const blocked = (tool, file) => ((settings.hooks && settings.hooks.PreToolUse) || [])
+      .filter((group) => new RegExp(`^(?:${group.matcher || '.*'})$`).test(tool))
+      .flatMap((group) => group.hooks || []).some((hook) => cp.spawnSync('/bin/sh', ['-c', hook.command], {
+        input: JSON.stringify({ hook_event_name: 'PreToolUse', tool_name: tool, cwd: process.cwd(),
+          tool_input: tool === 'Read' ? { file_path: file } : { pattern: tool === 'Glob' ? '*' : 'x', path: file } }),
+      }).status === 2);
     report.reads = JSON.parse(process.env.STUB_READ || '[]').map((f) => path.resolve(dir, f)).flatMap((file) => ['Read', 'Grep', 'Glob'].map((tool) => {
-      const denied = denyRules.some((r) => toolRuleMatches(r, tool, file));
+      const denied = denyRules.some((r) => toolRuleMatches(r, tool, file)) || blocked(tool, file);
       return { file, tool, denied, text: denied ? null : read(file) };
     }));
   } else if (harness === 'codex') {

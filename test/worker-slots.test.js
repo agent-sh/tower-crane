@@ -9,6 +9,9 @@ const path = require('node:path');
 const { cachedFixture, BIN } = require('./helpers');
 const P = require('../lib/processes');
 
+// A Windows worker spawn records its lease before its harness starts, so it never reserves a slot.
+const RESERVES = process.platform === 'win32' && 'a Windows worker spawn holds a lease, never a reservation';
+
 const events = (h) => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
 
 function setup(t, workers = 1, tasks = 3) {
@@ -163,7 +166,7 @@ test('a failed launch holds no slot, and an exited worker frees its slot once re
   h.ok(['claim', 'T2', '--agent', 'manual']);
 });
 
-test('spawn refuses a task with a live reservation and clears one whose processes are gone', async (t) => {
+test('spawn refuses a task with a live reservation and clears one whose processes are gone', { skip: RESERVES }, async (t) => {
   const h = setup(t, 2, 2);
   controlledHarness(h);
   const { spawned } = await pausedSpawn(h, 'T1');
@@ -197,7 +200,16 @@ test('a group probe without /proc proves exit only once the group is empty', { s
   }
 });
 
-test('a dead reservation frees the only worker slot before the first capacity check', async (t) => {
+test('on Windows the harness process stands for its group in the exit probe', { skip: process.platform !== 'win32' && 'POSIX probes the process group' }, async (t) => {
+  const exited = cp.spawn(process.execPath, ['-e', ''], { stdio: 'ignore' });
+  await once(exited, 'exit');
+  const live = cp.spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { stdio: 'ignore' });
+  t.after(() => live.kill());
+  assert.equal(P.processGroupState({ pid: exited.pid }), 'exited');
+  assert.equal(P.processGroupState({ pid: live.pid }), 'running');
+});
+
+test('a dead reservation frees the only worker slot before the first capacity check', { skip: RESERVES }, async (t) => {
   const h = setup(t, 1, 2);
   controlledHarness(h);
   const { spawned } = await pausedSpawn(h, 'T1');
@@ -210,7 +222,7 @@ test('a dead reservation frees the only worker slot before the first capacity ch
   fs.writeFileSync(path.join(h.base, 'T2.exit'), '');
 });
 
-test('a dead reservation frees the only worker slot for a batch spawn --ready', async (t) => {
+test('a dead reservation frees the only worker slot for a batch spawn --ready', { skip: RESERVES }, async (t) => {
   const h = setup(t, 1, 2);
   controlledHarness(h);
   const { spawned } = await pausedSpawn(h, 'T1');
@@ -222,6 +234,26 @@ test('a dead reservation frees the only worker slot for a batch spawn --ready', 
   assert.ok(events(h).some((e) => e.cmd === 'reservation clear' && e.detail.agent === spawned.agent),
     'the dead reservation is cleared before the batch counts its slots');
   for (const task of ['T1', 'T2']) fs.writeFileSync(path.join(h.base, `${task}.exit`), '');
+});
+
+test('wait clears a dead reservation before counting capacity and refills the cancelled worker slot', { skip: RESERVES }, async (t) => {
+  const h = setup(t, 1, 2);
+  controlledHarness(h);
+  const { spawned } = await pausedSpawn(h, 'T1');
+  killWorker(spawned);
+  await until(() => workerGone(spawned), 'worker processes did not exit');
+  h.ok(['task', 'update', 'T1', '--status', 'cancelled']);
+  const result = await h.runAsync(['wait', '--after', '0', '--types', 'spawn', '--task', 'T2',
+    '--timeout', '5', '--agent', 'orchestrator']);
+  assert.equal(result.code, 0, result.stderr || result.stdout);
+  const replacement = JSON.parse(result.stdout);
+  assert.equal(replacement.detail.agent, 'worker-T2-1');
+  const cleared = events(h).findIndex((e) => e.cmd === 'reservation clear' && e.detail.agent === spawned.agent);
+  const dispatched = events(h).findIndex((e) => e.cmd === 'spawn' && e.task === 'T2');
+  assert.ok(cleared >= 0 && cleared < dispatched, 'the reservation is cleared before dispatch');
+  const st = require('../lib/state').loadState(h.state);
+  assert.equal(require('../lib/tasks').workerHolders(st, Date.now()).length, 1);
+  fs.writeFileSync(path.join(h.base, 'T2.exit'), '');
 });
 
 test('reviewer dispatch is unaffected when worker reservations fill the limit', async (t) => {
@@ -260,8 +292,6 @@ test('dispatch rechecks slots under the lock after worktree preparation', async 
 });
 
 test('a retrying worker keeps its slot through backoff and expired-lease renewal', async (t) => {
-  // Windows starts the harness before its claim lands, so the slot may still be a reservation there.
-  const HOLD_KIND = process.platform === 'win32' ? 'lease|reservation' : 'lease';
   const h = setup(t, 1);
   h.ok(['claim', 'T3', '--agent', 'expired']);
   const doc = h.readState('tasks.json');
@@ -273,10 +303,10 @@ test('a retrying worker keeps its slot through backoff and expired-lease renewal
   await until(() => events(h).some((e) => e.cmd === 'spawn phase' && e.detail.phase === 'retrying'), 'worker did not enter backoff');
   const renew = h.run(['renew', 'T3', '--agent', 'expired']);
   assert.equal(renew.code, 1, renew.stderr);
-  assert.match(renew.stderr, new RegExp(`T1.*worker-T1-1.*(${HOLD_KIND})`));
+  assert.match(renew.stderr, /T1.*worker-T1-1.*lease/);
   const refused = h.run(['spawn', '--task', 'T2']);
   assert.equal(refused.code, 1, refused.stderr);
-  assert.match(refused.stderr, new RegExp(`T1.*worker-T1-1.*(${HOLD_KIND})`));
+  assert.match(refused.stderr, /T1.*worker-T1-1.*lease/);
   await until(() => events(h).some((e) => e.cmd === 'spawn retry'), 'worker did not retry');
   h.ok(['claim', 'T1', '--agent', spawned.agent]);
   assert.equal(h.run(['claim', 'T2', '--agent', 'manual']).code, 1);
@@ -330,7 +360,7 @@ test('an expired pre-claim holds the only slot before supervision can renew', as
 });
 
 for (const cmd of ['spawn exit', 'worker-exited']) {
-  test(`${cmd} without attempt releases its matching spawn reservation`, async (t) => {
+  test(`${cmd} without attempt releases its matching spawn reservation`, { skip: RESERVES }, async (t) => {
     const h = setup(t, 1);
     controlledHarness(h);
     const { spawned, release } = await pausedSpawn(h, 'T1');
@@ -372,7 +402,7 @@ fs.readFileSync = function(file, ...args) {
   });
 }
 
-test('sandboxed claims and expired renewals cannot discard hidden live reservations', async (t) => {
+test('sandboxed claims and expired renewals cannot discard hidden live reservations', { skip: RESERVES }, async (t) => {
   const h = setup(t, 1);
   controlledHarness(h);
   h.ok(['claim', 'T3', '--agent', 'expired-worker']);

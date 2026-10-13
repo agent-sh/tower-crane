@@ -134,8 +134,10 @@ test('automatic reactions do not repeat a light check before the body is correct
   fail(h, [claim()]);
   h.run(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
   const events = fs.readFileSync(file, 'utf8').trim().split('\n').map(JSON.parse);
-  assert.ok(events.some((e) => e.cmd === 'automation' && e.detail.phase !== 'running'),
-    'the observer completed an automatic reaction');
+  const reactions = events.filter((e) => e.cmd === 'automation' && e.detail.phase !== 'running');
+  assert.ok(reactions.length, 'the observer completed an automatic reaction');
+  // Automatic rework would refuse prose-only findings; the reaction leaves the task for its correction.
+  assert.deepEqual(reactions.filter((e) => e.detail.error), []);
   assert.equal(events.filter((e) => e.cmd === 'spawn' && e.detail.role === 'reviewer').length, 1);
   assert.equal(h.json(['task', 'show', 'T1']).status, 'submitted');
 });
@@ -196,7 +198,7 @@ test('a newer verdict between preparation and spawn refuses the stale light pack
     }
     assert.ok(!fs.existsSync(path.join(h.state, 'lock')));
     h.ok(['evidence', 'T1', '--agent', 'first-reviewer', '--type', 'review', '--fail', '--sha', h.sha,
-      '--summary', 'A contract claim also blocks.', '--findings', JSON.stringify([claim('docs/state.md')])]);
+      '--summary', 'A changelog claim also blocks.', '--findings', JSON.stringify([claim(), claim('changelog.d/T1.md')])]);
   } finally {
     fs.writeFileSync(`${paused}.go`, '');
   }

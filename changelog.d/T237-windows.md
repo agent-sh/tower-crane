@@ -1,0 +1,1 @@
+- Set all temp variables in the browser cache-refusal fixture so Windows also exercises the fallback after a refused account cache.
