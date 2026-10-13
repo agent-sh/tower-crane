@@ -214,6 +214,51 @@ const MUTANTS = [
     from: 'out.model_providers = keepTables(doc.model_providers, PROVIDER_FIELDS);', to: 'out.model_providers = doc.model_providers;', tests: ['test/isolation.test.js'] },
   { id: 'env-file-error-echoes', area: 'secrets', file: 'lib/spawn-settings.js',
     from: 'throw refuse(`invalid env_file ${file} at line ${assignmentLine}`);', to: 'throw refuse(`invalid env_file ${file} at line ${assignmentLine}: ${text}`);', tests: ['test/sandbox-extensions.test.js'] },
+  // git shim
+  { id: 'masked-merge-skip-worktree-dropped', area: 'git', file: 'lib/masked-merge.js',
+    from: "'--skip-worktree', '--stdin'], { input: [...after.keys()]", to: "'--skip-worktree', '--stdin'], { input: []", tests: ['test/masked-merge.test.js'] },
+  { id: 'masked-merge-never-plumbs', area: 'git', file: 'lib/masked-merge.js',
+    from: 'if (refs.length !== 1) return null;', to: 'if (true) return null;', tests: ['test/masked-merge.test.js'] },
+  { id: 'masked-merge-ignores-policy', area: 'git', file: 'lib/shim.js',
+    from: "tool === 'git' && policy.masks && args[sub] === 'merge'", to: "tool === 'git' && args[sub] === 'merge'", tests: ['test/masked-merge.test.js'] },
+  { id: 'masked-checkout-never-plumbs', area: 'git', file: 'lib/masked-merge.js',
+    from: 'if (refs.length > 1 || (!refs.length && !create) || (create && !create.name)) return null;', to: 'if (true) return null;', tests: ['test/masked-merge.test.js'] },
+  { id: 'masked-merge-runs-in-cwd', area: 'git', file: 'lib/masked-merge.js',
+    from: 'const r = cp.spawnSync(real, [...rest, ...argv], { cwd, encoding', to: 'const r = cp.spawnSync(real, [...rest, ...argv], { encoding', tests: ['test/masked-merge.test.js'] },
+  { id: 'masked-merge-splits-every-tab', area: 'git', file: 'lib/masked-merge.js',
+    from: 'return [line.slice(tab + 1), { mode, sha }];', to: "return [line.slice(tab + 1).split('\\t')[0], { mode, sha }];", tests: ['test/masked-merge.test.js'] },
+  { id: 'masked-checkout-ignores-other-worktree', area: 'git', file: 'lib/masked-merge.js',
+    from: 'const other = branch && checkedOutElsewhere(g, branch);', to: 'const other = null;', tests: ['test/masked-merge.test.js'] },
+  { id: 'masked-checkout-skips-name-check', area: 'git', file: 'lib/masked-merge.js',
+    from: 'if (create && !name) return fail(', to: 'if (false) return fail(', tests: ['test/masked-merge.test.js'] },
+  { id: 'masked-checkout-ignores-shorthand', area: 'git', file: 'lib/masked-merge.js',
+    from: 'const name = branchName(g, create ? create.name : start);', to: 'const name = create ? create.name : start;', tests: ['test/masked-merge.test.js'] },
+  { id: 'masked-checkout-takes-tag-over-branch', area: 'git', file: 'lib/masked-merge.js',
+    from: '`${existing ? `refs/heads/${name}` : start}^{commit}`', to: '`${start}^{commit}`', tests: ['test/masked-merge.test.js'] },
+  { id: 'masked-checkout-reflog-not-git', area: 'git', file: 'lib/masked-merge.js',
+    from: 'const reason = `checkout: moving from ${from} to ${name ?? start}`;', to: 'const reason = `checkout ${start}`;', tests: ['test/masked-merge.test.js'] },
+  { id: 'masked-names-case-sensitive', area: 'git', file: 'lib/masked-merge.js',
+    from: 'const lower = p.toLowerCase();', to: 'const lower = p;', tests: ['test/masked-merge.test.js'] },
+  { id: 'masked-names-root-only', area: 'git', file: 'lib/masked-merge.js',
+    from: 'return (parts.length <= MASK_SEARCH_DEPTH && MASKED_FILES.some(file => lower === file || lower.endsWith(`/${file}`)))\n    || maskedDirectories(p).length > 0;', to: 'return MASKED_FILES.includes(p) || MASKED_DIRS.some(d => p.startsWith(`${d}/`));', tests: ['test/masked-merge.test.js'] },
+  { id: 'masked-tree-root-pathspecs', area: 'git', file: 'lib/masked-merge.js',
+    from: "run(['ls-tree', '--full-tree', '-r', '-z', rev]);", to: "run(['ls-tree', '--full-tree', '-r', '-z', rev, '--', ...MASKED_FILES, ...MASKED_DIRS]);", tests: ['test/masked-merge.test.js'] },
+  { id: 'masked-absent-nested-file-held', area: 'git', file: 'lib/masked-merge.js',
+    from: 'return isMasked(p) && mounted(p);', to: 'return isMasked(p);', tests: ['test/masked-merge.test.js'] },
+  { id: 'masked-root-mounts-files-only', area: 'git', file: 'lib/masked-merge.js',
+    from: 'const ROOT_MOUNTS = [...MASKED_FILES, ...MASKED_DIRS];', to: 'const ROOT_MOUNTS = MASKED_FILES;', tests: ['test/masked-merge.test.js', 'test/masked-mounts.test.js'] },
+  { id: 'masked-deleted-left-unnamed', area: 'git', file: 'lib/masked-merge.js',
+    from: 'leftOnMount(g, [...before.keys()].filter((p) => !after.has(p)));', to: 'void before;', tests: ['test/masked-merge.test.js'] },
+  { id: 'masked-search-depth-too-deep', area: 'git', file: 'lib/masked-merge.js',
+    from: 'const MASK_SEARCH_DEPTH = 3;', to: 'const MASK_SEARCH_DEPTH = 4;', tests: ['test/masked-merge.test.js'] },
+  { id: 'masked-bind-writable-mode-bits', area: 'git', file: 'lib/masked-merge.js',
+    from: 'fs.accessSync(p, fs.constants.W_OK);', to: 'void p;', tests: ['test/masked-merge.test.js'] },
+  { id: 'masked-readonly-parent-ignored', area: 'git', file: 'lib/masked-merge.js',
+    from: 'if (mounted(dir)) return true;', to: 'if (false) return true;', tests: ['test/masked-merge.test.js'] },
+  { id: 'masked-claude-settings-omitted', area: 'git', file: 'lib/claude-sandbox-placeholders.js',
+    from: "['.claude/settings.json', 'file']", to: "['.claude/other-settings.json', 'file']", tests: ['test/masked-merge.test.js'] },
+  { id: 'masked-claude-hooks-omitted', area: 'git', file: 'lib/claude-sandbox-placeholders.js',
+    from: "['.claude/hooks', 'directory']", to: "['.claude/other-hooks', 'directory']", tests: ['test/masked-merge.test.js'] },
   { id: 'session-bus-grants-manager-socket', area: 'sandbox', file: 'lib/agents.js',
     from: 'return { sockets: [bus] };', to: "return { sockets: [bus, resolved(path.join(runtime, 'systemd', 'private'))] };", tests: ['test/sandbox-extensions.test.js'] },
   { id: 'session-bus-missing-socket-spawns', area: 'sandbox', file: 'lib/agents.js',
@@ -268,7 +313,8 @@ try {
   const files = cp.execFileSync('git', ['ls-files', '--cached', '--others', '--exclude-standard', '-z'], { cwd: root, encoding: 'utf8' });
   for (const file of new Set(files.split('\0').filter(Boolean))) {
     const source = path.join(root, file);
-    if (!fs.existsSync(source)) continue;
+    // A sandbox mask is a character device (/dev/null) where the host has no file.
+    if (!fs.existsSync(source) || !fs.statSync(source).isFile()) continue;
     fs.mkdirSync(path.dirname(path.join(copy, file)), { recursive: true });
     fs.cpSync(source, path.join(copy, file), { recursive: true });
   }
