@@ -251,6 +251,8 @@ test('a missing log does not hide an exited claimant', async (t) => {
   const exit = h.json(['status']).exited_claims[0];
   assert.equal(exit.log, spawned.log);
   assert.match(exit.tail, /log unavailable.*ENOENT/);
+  // Process death is visible before the monitor finishes writing its exit receipt.
+  await until(() => h.json(['status']).exited_claims[0]?.code === (process.platform === 'win32' ? 1 : null), 'exit receipt did not arrive');
   h.ok(['release', 'T1', '--reason', 'recover worker with missing log']);
   const release = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse)
     .find((e) => e.cmd === 'release');
