@@ -358,9 +358,19 @@ function runAsync(args, { cwd, env, pre = [] } = {}) {
 
 const real = (p) => fs.realpathSync.native(p);
 
+// Process creation times follow the Windows system timer tick (about 15.6 ms)
+// and Node reads the clock differently, so a child recorded right after its
+// start may appear to start a few ticks after its record.
+const RECORD_TOLERANCE_MS = 100;
+
 function detachedAlive(child) {
-  if (process.platform === 'win32' && child.startTime !== undefined) {
-    return child.startTime !== null && require('./windows-process').startTime(child.pid) === child.startTime;
+  if (process.platform === 'win32' && (child.startTime !== undefined || child.recordedAt !== undefined)) {
+    if (child.startTime === null) return false;
+    const started = require('./windows-process').startTime(child.pid);
+    if (started === null) return false;
+    if (child.startTime !== undefined) return started === child.startTime;
+    // FILETIME counts 100 ns intervals from 1601; the record counts milliseconds from 1970.
+    return Number(BigInt(started) / 10000n - 11644473600000n) <= child.recordedAt + RECORD_TOLERANCE_MS;
   }
   if (child.kind === 'worker' && child.file && !fs.existsSync(child.file)) return false;
   try { process.kill(child.pid, 0); } catch (e) { if (e.code === 'ESRCH') return false; throw e; }
@@ -388,8 +398,8 @@ async function stopDetached(children) {
   if (process.platform === 'win32' && children.length) {
     // Retain native handles before stopping anything. A PID can be reused
     // between probes, but a held handle keeps it and WaitForExit observes the
-    // original process. A monitor proves itself by its creation time; a
-    // worker by starting no later than its parent recorded it.
+    // original process. A process proves itself by its recorded creation time
+    // or by starting no later than its parent recorded it.
     const records = JSON.stringify(children.map((c) => ({ pid: c.pid, kind: c.kind, startTime: c.startTime, recordedAt: c.recordedAt ?? null })))
       .replaceAll("'", "''");
     const script = `
@@ -397,10 +407,12 @@ $ErrorActionPreference = 'Stop'
 $held = @()
 try {
   foreach ($entry in (ConvertFrom-Json '${records}')) {
-    if ($entry.kind -eq 'monitor') {
-      if (!$entry.PSObject.Properties['startTime']) { throw 'Windows monitor creation identity is missing' }
+    if ($entry.PSObject.Properties['startTime']) {
       if ($null -eq $entry.startTime) { continue }
-    } elseif ($null -eq $entry.recordedAt) { continue }
+    } elseif ($null -eq $entry.recordedAt) {
+      if ($entry.kind -eq 'monitor') { throw 'Windows monitor creation identity is missing' }
+      continue
+    }
     $process = $null
     try {
       $process = [System.Diagnostics.Process]::GetProcessById($entry.pid)
@@ -410,10 +422,8 @@ try {
     # A process exiting during this query reads a null creation time; it has already stopped.
     $started = $process.StartTime
     if ($null -eq $started) { $same = $false }
-    elseif ($entry.kind -eq 'monitor') { $same = $started.ToFileTimeUtc().ToString() -eq $entry.startTime }
-    # Creation times follow the system timer tick (about 15.6 ms) and Node reads
-    # the clock differently, so a worker may appear to start up to a few ticks late.
-    else { $same = $started.ToUniversalTime() -le [DateTimeOffset]::FromUnixTimeMilliseconds([int64]$entry.recordedAt + 100).UtcDateTime }
+    elseif ($entry.PSObject.Properties['startTime']) { $same = $started.ToFileTimeUtc().ToString() -eq $entry.startTime }
+    else { $same = $started.ToUniversalTime() -le [DateTimeOffset]::FromUnixTimeMilliseconds([int64]$entry.recordedAt + ${RECORD_TOLERANCE_MS}).UtcDateTime }
     if (!$same) {
       $process.Dispose()
       continue

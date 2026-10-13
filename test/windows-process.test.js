@@ -22,6 +22,24 @@ for (const [name, output, expected] of [
   });
 }
 
+// A tracked child without a creation time is the process with its PID only if
+// that process started no later than its record, give or take a few clock ticks.
+const recordedAt = 1760000000000;
+const filetime = (ms) => String((BigInt(ms) + 11644473600000n) * 10000n);
+for (const [name, started, expected] of [
+  ['started before its record', recordedAt - 5, 'running'],
+  ['started within clock tolerance of its record', recordedAt + 50, 'running'],
+  ['started after its record, a reused PID', recordedAt + 1000, 'exited'],
+]) {
+  test(`Windows process probe by record time: ${name}`, (t) => {
+    const platform = Object.getOwnPropertyDescriptor(process, 'platform');
+    Object.defineProperty(process, 'platform', { ...platform, value: 'win32' });
+    t.after(() => Object.defineProperty(process, 'platform', platform));
+    t.mock.method(cp, 'execFileSync', () => filetime(started));
+    assert.equal(detachedAlive({ pid: 1234, kind: 'monitor', recordedAt }) ? 'running' : 'exited', expected);
+  });
+}
+
 test('Windows process probe keeps query failures visible', (t) => {
   const error = new Error('PowerShell failed');
   t.mock.method(cp, 'execFileSync', () => { throw error; });

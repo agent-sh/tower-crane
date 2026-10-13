@@ -485,8 +485,6 @@ if (env.HOOK_PROCESSES_DIR) {
     }
     const child = original.call(this, file, args, options);
     if (options?.detached && child.pid) {
-      const startTime = process.platform === 'win32' && monitor
-        ? require('../windows-process').startTime(child.pid) : undefined;
       let startTicks;
       if (process.platform === 'linux') {
         try {
@@ -495,13 +493,15 @@ if (env.HOOK_PROCESSES_DIR) {
         } catch { /* A short-lived child may have already exited. */ }
       }
       // This parent holds the child's handle until its exit is processed, so
-      // a process created after this moment cannot be this child: Windows
-      // teardown kills a worker only if it started no later.
+      // a process created after this moment cannot be this child: on Windows
+      // a process with this PID is the child only if it started no later.
+      // No process query runs here: a dispatch spawns its monitor inside the
+      // window the monitor gives it to record the lease.
       const recordedAt = systemNow();
       real.mkdirSync(env.HOOK_PROCESSES_DIR, { recursive: true });
       const trackedFile = path.join(env.HOOK_PROCESSES_DIR, `${child.pid}.json`);
       real.writeFileSync(trackedFile, JSON.stringify({
-        pid: child.pid, startTicks, startTime, recordedAt, ...(token ? { token } : {}),
+        pid: child.pid, startTicks, recordedAt, ...(token ? { token } : {}),
         kind: monitor ? 'monitor' : 'worker',
       }));
       // A reaped Windows PID can immediately belong to another test's CLI.
