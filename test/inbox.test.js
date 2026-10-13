@@ -846,8 +846,13 @@ test('a red push or schedule run on the base shows in inbox and status until a l
   assert.equal(actionCalls(), calls);
   red();
   assert.equal(mainEvents(), 1);
+  // Only an open task on this base's fix prefix with the whole workflow token is the fix task.
+  for (const title of ['Notes on workflow 11 runners', 'Fix release CI: CI (workflow 11), red since run 9', 'Fix main CI: CI (workflow 110)']) {
+    h.ok(['task', 'add', '--title', title, '--kind', 'code', '--acceptance', 'works']);
+  }
+  assert.equal(red()[0].action.argv[1], 'add');
   h.ok([...failed.action.argv, '--agent', 'orchestrator']);
-  const fix = h.json(['task', 'list']).find((x) => x.title.startsWith('Fix main CI: CI (workflow 11)'));
+  const fix = h.json(['task', 'list']).find((x) => x.title === 'Fix main CI: CI (workflow 11), red since run 1001');
   assert.deepEqual(red()[0].action.argv, ['task', 'show', fix.id]);
 
   // Main stays red across a merge: the next push fails the same test. The fix task covers it, and it is not flaky.
