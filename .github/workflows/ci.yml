@@ -13,9 +13,9 @@ jobs:
   test:
     name: test (${{ matrix.os }}, node ${{ matrix.node }}, shard ${{ matrix.shard }})
     runs-on: ${{ matrix.os }}
-    # Windows process startup can exceed the old job budget while tests pass;
-    # the runner still bounds each test independently.
-    timeout-minutes: ${{ matrix.os == 'windows-latest' && 45 || 15 }}
+    # Full CLI suites use the same 45-minute bound as the software tests gate.
+    # The runner still bounds each test independently.
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:

@@ -1992,12 +1992,10 @@ test('cancel removes worker task scratch with read-only module trees alongside t
   t.after(() => {
     for (const p of [path.dirname(mod), mod]) try { fs.chmodSync(p, 0o700); } catch {}
   });
-  // setup plants an untracked local settings file; retirement must keep dirty worktrees and their scratch.
+  const settings = fs.readFileSync(path.join(wt, '.claude', 'settings.local.json'), 'utf8');
   h.ok(['task', 'update', 'T1', '--status', 'cancelled'], { env: u.env });
-  assert.ok(fs.existsSync(wt));
-  assert.ok(fs.existsSync(cache));
-  fs.rmSync(path.join(wt, '.claude', 'settings.local.json'));
-  h.ok(['task', 'update', 'T1', '--status', 'cancelled'], { env: u.env });
+  const saved = h.json(['task', 'show', 'T1']).worktree.saved;
+  assert.equal(fs.readFileSync(path.join(saved, 'files', '.claude', 'settings.local.json'), 'utf8'), settings);
   assert.ok(!fs.existsSync(wt));
   assert.ok(!fs.existsSync(cache), `${first.agent}'s task scratch is removed`);
   assert.equal(h.json(['task', 'show', 'T1']).scratch, undefined);
