@@ -80,6 +80,10 @@ test('failing test names come from node, go and pytest output', () => {
       [{ name: 'parses the flag', error: 'AssertionError [ERR_ASSERTION]: expected true' }]],
     ['go test', ['--- FAIL: TestParse (0.00s)', '    parse_test.go:12: expected 2, got 3', '--- FAIL: TestLoad (0.00s)'],
       [{ name: 'TestParse', error: 'parse_test.go:12: expected 2, got 3' }, { name: 'TestLoad', error: null }]],
+    ['go subtest', ['--- FAIL: TestParent (0.00s)', '    --- FAIL: TestParent/child (0.00s)', '        parse_test.go:12: want 2, got 3', 'FAIL'],
+      [{ name: 'TestParent', error: null }, { name: 'TestParent/child', error: 'parse_test.go:12: want 2, got 3' }]],
+    ['go diagnostic', ['--- FAIL: TestParse (0.00s)', '    parse_test.go:12: want 2, got 3', '    parse_test.go:13: another diagnostic', 'FAIL'],
+      [{ name: 'TestParse', error: 'parse_test.go:12: want 2, got 3' }]],
     ['pytest', ['FAILED tests/test_ci.py::test_names - AssertionError: expected 2'],
       [{ name: 'tests/test_ci.py::test_names', error: 'AssertionError: expected 2' }]],
     ['no failures', ['ok 1 - passes', '1..1'], []],
@@ -101,6 +105,33 @@ test('ci log writes the clean log under the task scratch and names both failing 
     "    error: 'ENOENT: no such file or directory'",
     '  rejects a stale head',
     "    error: 'expected 409 to equal 422'",
+  ]);
+});
+
+test('ci log names indented Go subtests and their first diagnostics without error keywords', (t) => {
+  const h = fixture(t);
+  const lines = [
+    '--- FAIL: TestParent (0.00s)',
+    '    --- FAIL: TestParent/child (0.00s)',
+    '        parse_test.go:12: want 2, got 3',
+    '        parse_test.go:13: another diagnostic',
+    '--- FAIL: TestParse (0.00s)',
+    '    parse_test.go:20: want true, got false',
+    'FAIL',
+  ];
+  const github = JSON.parse(fs.readFileSync(h.env.CI_FEEDBACK_GH, 'utf8'));
+  github.logs[42] = lines.map((line) => `2026-10-11T10:00:00.0000000Z ${line}`).join('\n') + '\n';
+  fs.writeFileSync(h.env.CI_FEEDBACK_GH, JSON.stringify(github));
+  const r = h.run(['ci', 'log', '42', '--failed-tests', '--task', 'T1']);
+  assert.equal(r.code, 0, r.stderr);
+  assert.deepEqual(r.stdout.trimEnd().split('\n'), [
+    path.join(h.scratch, 'ci-job-42.log'),
+    'failing tests (3):',
+    '  TestParent',
+    '  TestParent/child',
+    '    parse_test.go:12: want 2, got 3',
+    '  TestParse',
+    '    parse_test.go:20: want true, got false',
   ]);
 });
 
