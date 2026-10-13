@@ -373,6 +373,44 @@ test('a timeout stops the command and everything it started', { skip: process.pl
   assertCleanedUp();
 });
 
+// A test command whose own fixtures start detached processes moves them into new sessions, out
+// of the gate's process group. One here outlives its parent; the other keeps its parent but
+// runs with a cleared environment.
+test('a command\'s processes in their own sessions stop with it, orphaned or not', { skip: process.platform !== 'linux' }, async () => {
+  const sha = task({ 'lib/add.js': FIX, 'test/add.test.js': ADD_TEST });
+  const pids = path.join(tmp, 'session-pids');
+  fs.writeFileSync(pids, '');
+  const poller = `require('fs').appendFileSync(process.argv[1], process.pid + '\\n'); setInterval(() => {}, 1000);`;
+  // The starter returns once the detached process has recorded its pid; `held` keeps it running.
+  const starter = (env, held) => `const fs = require('fs');
+const count = () => fs.readFileSync(process.argv[2], 'utf8').split('\\n').length;
+const before = count();
+require('child_process').spawn(process.execPath, ['-e', ${JSON.stringify(poller)}, process.argv[2]],
+  { detached: true, stdio: 'ignore'${env} }).unref();
+const tick = () => (count() > before ? ${held ? 'setInterval(() => {}, 1000)' : 'process.exit(0)'} : setTimeout(tick, 20));
+tick();
+`;
+  const running = (pid) => {
+    try { return !/^\S+ \(.*\) [ZX]/.test(fs.readFileSync(`/proc/${pid}/stat`, 'utf8')); } catch { return false; }
+  };
+  for (const [name, script, timeout] of [['exited', starter('', false), undefined], ['timed out', starter(', env: {}', true), 0.05]]) {
+    const file = path.join(tmp, 'session-starter.js');
+    fs.writeFileSync(file, script);
+    const cmd = `${NODE} ${quote(file)} ${quote(pids)} && ${CMD}`;
+    const recorded = () => fs.readFileSync(pids, 'utf8').split('\n').filter(Boolean).map(Number);
+    const before = recorded().length;
+    await gate.run(ctx(sha, { args: { cmd, ...(timeout ? { timeout } : {}) } }));
+    const started = recorded().slice(before);
+    assert.ok(started.length > 0, 'the detached process started');
+    const until = Date.now() + 5000;
+    while (started.some(running) && Date.now() < until) await new Promise((resolve) => setTimeout(resolve, 50));
+    const alive = started.filter(running);
+    for (const pid of alive) process.kill(pid, 'SIGKILL');
+    assert.deepEqual(alive, [], `a detached process outlived a command that ${name}`);
+    assertCleanedUp();
+  }
+});
+
 test('timeouts at head, scoped proof and reversion are infrastructure failures, never proof', async () => {
   const sha = task({ 'lib/add.js': FIX, 'test/add.test.js': ADD_TEST });
   for (const stage of [1, 2, 3]) {

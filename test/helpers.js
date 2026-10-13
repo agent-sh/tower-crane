@@ -273,8 +273,13 @@ function context(t, base, options = {}) {
         catch (e) { if (e.code === 'ENOENT') return []; throw e; }
       }) : [];
     },
+    // Steps that must run before the directory goes, such as stopping processes that poll in it.
+    teardown: [],
     cleanup: async () => {
-      try { await stopDetached(ctx.detached()); }
+      try {
+        for (const step of ctx.teardown.splice(0)) await step();
+        await stopDetached(ctx.detached());
+      }
       finally { fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); }
     },
     run: (args, opts = {}) => fixtureInit(ctx, args, opts, (a, o) => run(a, withHooks(ctx, o))),

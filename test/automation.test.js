@@ -1503,10 +1503,16 @@ test('concurrent event consumers execute each submission gate only once', async 
 });
 
 // A slow stub suite records each run's start and end, so the log shows how
-// many gate executors ran at once across every consumer process.
+// many gate executors ran at once across every consumer process. With
+// `release`, a run records its pid in its start file and waits for the release
+// file; it also stops when the fixture is gone or after SLOW_SUITE_MS, so a
+// test that fails first cannot leave it polling. Teardown releases and stops
+// every recorded run before the fixture is removed.
+const SLOW_SUITE_MS = 240000;
 function slowSuite(h, { executors, crash = false, release = null } = {}) {
   const runs = path.join(h.base, 'suite-runs.log');
   const suite = path.join(h.base, 'tools', 'slow-suite.js');
+  if (release) h.teardown.push(() => stopSlowSuites(h, release));
   fs.writeFileSync(suite, `const fs = require('node:fs');
 fs.appendFileSync(${JSON.stringify(runs)}, '+\\n');
 const crash = ${JSON.stringify(crash ? path.join(h.base, 'crashed') : null)};
@@ -1519,8 +1525,13 @@ const finish = () => fs.appendFileSync(${JSON.stringify(runs)}, '-\\n');
 const release = ${JSON.stringify(release)};
 if (release) {
   const starts = fs.readFileSync(${JSON.stringify(runs)}, 'utf8').split('\\n').filter((m) => m === '+').length;
-  fs.writeFileSync(${JSON.stringify(path.join(h.base, 'suite-started-'))} + starts, '');
-  const poll = () => (fs.existsSync(release) ? finish() : setTimeout(poll, 50));
+  fs.writeFileSync(${JSON.stringify(path.join(h.base, 'suite-started-'))} + starts, String(process.pid));
+  const until = Date.now() + ${SLOW_SUITE_MS};
+  const poll = () => {
+    if (!fs.existsSync(${JSON.stringify(h.base)}) || Date.now() > until) process.exit(1);
+    if (fs.existsSync(release)) finish();
+    else setTimeout(poll, 50);
+  };
   poll();
 } else {
   setTimeout(finish, 2500);
@@ -1540,6 +1551,29 @@ if (release) {
     for (const mark of marks) peak = Math.max(peak, now += mark === '+' ? 1 : -1);
     return { starts: marks.filter((m) => m === '+').length, peak };
   };
+}
+
+function slowSuitePids(h) {
+  return fs.readdirSync(h.base).filter((f) => f.startsWith('suite-started-'))
+    .map((f) => Number(fs.readFileSync(path.join(h.base, f), 'utf8'))).filter((pid) => pid > 0);
+}
+
+function slowSuiteRunning(pid) {
+  if (process.platform === 'linux') {
+    try { return !/^\S+ \(.*\) [ZX]/.test(fs.readFileSync(`/proc/${pid}/stat`, 'utf8')); } catch { return false; }
+  }
+  try { process.kill(pid, 0); return true; } catch { return false; }
+}
+
+async function stopSlowSuites(h, release) {
+  if (!fs.existsSync(h.base)) return;
+  const pids = slowSuitePids(h);
+  fs.writeFileSync(release, '');
+  const until = Date.now() + 5000;
+  while (pids.some(slowSuiteRunning) && Date.now() < until) await new Promise((resolve) => setTimeout(resolve, 50));
+  for (const pid of pids.filter(slowSuiteRunning)) {
+    try { process.kill(pid, 'SIGKILL'); } catch { /* It exited meanwhile. */ }
+  }
 }
 
 test('gate executors across several watchers stay within gates.executors and queue the rest in order', async (t) => {
@@ -1584,6 +1618,34 @@ test('gate executors across several watchers stay within gates.executors and que
   const firstStarts = [...new Set(started)];
   assert.deepEqual(new Set(firstStarts), new Set(['T1', 'T2', 'T3']));
   assert.equal(firstStarts.at(-1), 'T3', 'the queued submission runs after a slot frees');
+});
+
+// The orphans this guards against: a test killed with its runner's process
+// group before it released its suites, so its teardown never ran, and the
+// fixture then removed with the tests gate's temporary directory.
+test('slow suites stop when their fixture is removed before they are released', async (t) => {
+  const h = setup(t);
+  const release = path.join(h.base, 'release-suite');
+  slowSuite(h, { release });
+  const watchers = [0, 1].map(() =>
+    h.runAsync(['wait', '--after', '0', '--types', 'evidence', '--task', 'T3',
+      '--timeout', '60', '--agent', 'orchestrator']));
+  let pids = [];
+  for (const until = Date.now() + 60000; pids.length < 2 && Date.now() < until;) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    pids = slowSuitePids(h);
+  }
+  assert.equal(pids.length, 2, 'two executors start');
+  for (const e of h.logs().filter((e) => e.cmd === 'automation' && e.detail.phase === 'running')) {
+    try { process.kill(e.detail.pid, 'SIGKILL'); } catch { /* It exited already. */ }
+  }
+  await Promise.all(watchers);
+  fs.rmSync(h.base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  const until = Date.now() + 5000;
+  while (pids.some(slowSuiteRunning) && Date.now() < until) await new Promise((resolve) => setTimeout(resolve, 50));
+  const left = pids.filter(slowSuiteRunning);
+  for (const pid of left) process.kill(pid, 'SIGKILL');
+  assert.deepEqual(left, [], 'a slow suite outlived its fixture');
 });
 
 test('a killed executor releases its gate executor slot', (t) => {
