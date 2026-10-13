@@ -1,4 +1,4 @@
 - Windows test teardown kills a tracked worker only while it holds that worker's handle and the worker started no later than its record, so a reused PID is never killed. A monitor marks its exit in a marker file of its own instead of rewriting the record tests read.
 - The live usage test for final session usage now fixes the order it tests: only the exit reading sees the final record. A second test covers the Windows order, where a periodic sample crosses the budget first and early collection waits for the supervisor.
-- Fallback tests wait for their events with the runner's per-test timeout as the only bound, instead of 10 and 20 second waits that a Windows runner can exceed.
+- Fallback tests wait for their events with the runner's per-test timeout as the only bound, instead of 10 and 20 second waits that a Windows runner can exceed. The rework test holds its fallback worker until it has checked every refusal, not for 4 seconds.
 - The lease renewal test also runs through the launch handshake on Linux, and the Windows process probe has tests for a vanished process, a null or throwing StartTime and a reused PID.

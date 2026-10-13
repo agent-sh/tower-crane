@@ -108,11 +108,14 @@ jobs:
             'a detached switch wakes a live waiter', 'rework during a live fallback', 'research Claude fallback',
             'retries Windows sharing errors', 'completed processes cannot leave teardown', 'teardown', 'probe'
           ) | ForEach-Object { "--test-name-pattern=$_" }
+          $failed = 0
           foreach ($attempt in 1..10) {
             Write-Host "Windows flake cases: pass $attempt/10"
             npm test -- @files @patterns
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            if ($LASTEXITCODE -ne 0) { $failed++; Write-Host "Windows flake cases: pass $attempt/10 failed" }
           }
+          Write-Host "Windows flake cases: $failed of 10 passes failed"
+          if ($failed) { exit 1 }
         env:
           TOWER_CRANE_TEST_TMP: ${{ runner.temp }}/tower-crane-tests
 

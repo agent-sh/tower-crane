@@ -226,10 +226,12 @@ for (const primaryHarness of ['agy', 'claude']) {
 
 test('rework during a live fallback refuses a second worker until the previous attempt exits', async (t) => {
   const h = setup(t);
+  // The fallback worker runs until the test has checked every refusal.
+  const finish = path.join(h.base, 'finish-fallback');
   const cursor = events(h).at(-1).id;
   const waiting = h.runAsync(['wait', '--observe', '--after', cursor, '--types', 'spawn-fallback', '--timeout', WAIT_TIMEOUT_S]);
   h.json(['spawn', '--task', 'T1'], {
-    env: { ...h.spawnEnv, TOWER_CRANE_TEST_FALLBACK_HOLD: '4000' },
+    env: { ...h.spawnEnv, TOWER_CRANE_TEST_FALLBACK_FINISH: finish },
   });
   const wake = await waiting;
   assert.equal(wake.code, 0, wake.stderr);
@@ -251,6 +253,7 @@ test('rework during a live fallback refuses a second worker until the previous a
   }
   assert.equal(events(h).filter((e) => e.cmd === 'spawn').length, 1);
   assert.equal(h.attempts().length, 4);
+  fs.writeFileSync(finish, '');
   await until(() => events(h).some((e) => e.cmd === 'spawn exit'), 'fallback worker did not exit');
   const preview = h.json(['spawn', '--task', 'T1', '--dry-run'], { env: h.spawnEnv });
   assert.equal(preview.resumed, false);
