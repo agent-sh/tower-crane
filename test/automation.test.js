@@ -71,6 +71,15 @@ cp.spawnSync=(cmd,args,opts)=>{
   return h;
 }
 
+function assertReworked(h, task) {
+  // Refill can claim the task immediately; the event and note persist across that claim.
+  const events = h.logs().filter((e) => e.cmd === 'rework' && e.task === task.id && e.detail.revision === task.revision);
+  assert.equal(events.length, 1, 'this revision was sent to rework once');
+  assert.equal(events[0].detail.sha, task.sha);
+  assert.ok(task.notes.some((note) => note.text === `rework: ${events[0].detail.reason}`),
+    'the worker keeps the failing gate reason after refill');
+}
+
 function generatedSetup(t) {
   const h = cachedFixture(t, 'generated-conflicts', (repo) => {
     const h = setup(null, { repo });
@@ -718,9 +727,7 @@ for (const reaction of ['submit', 'reconcile']) {
     assert.deepEqual(checks().slice(count).map((e) => [e.cmd, e.detail.ok, e.detail.revision]),
       [['check tests', false, 2]]);
     const after = h.json(['task', 'show', 'T1']);
-    // Automation refills the free worker slot with the reworked task, so it may already be claimed again.
-    assert.ok(h.logs().some((e) => e.cmd === 'rework' && e.task === 'T1'), 'a deterministic failure reworks before clean and ci run');
-    assert.ok(['rework', 'in_progress'].includes(after.status), after.status);
+    assertReworked(h, after);
     assert.equal(after.gates.gates.find((g) => g.type === 'tests').ok, false);
     h.reconcile();
     assert.equal(checks().length, count + 1, 'a reworked task runs no more gates');
@@ -837,7 +844,7 @@ test('a deterministic test failure reworks with its failing test names and outpu
   const runs = h.logs().filter((e) => e.cmd === 'check tests');
   assert.equal(runs.length, 1, 'a failure that is not infrastructure is not retried');
   const task = h.readState('tasks.json').tasks[0];
-  assert.equal(task.status, 'rework');
+  assertReworked(h, task);
   const latest = task.evidence.filter((e) => e.type === 'tests').at(-1);
   assert.equal(latest.ok, false);
   assert.deepEqual(latest.test_failure.names, ['sums two numbers']);
@@ -872,7 +879,7 @@ test('a timeout that repeats at its head reworks after the retry', (t) => {
   h.consume();
   assert.equal(h.logs().filter((e) => e.cmd === 'check tests').length, 2);
   const task = h.readState('tasks.json').tasks[0];
-  assert.equal(task.status, 'rework');
+  assertReworked(h, task);
   assert.match(h.logs().findLast((e) => e.cmd === 'rework').detail.reason, /timed out after 0\.05 min/);
 });
 
@@ -886,7 +893,7 @@ test('a test run killed by a signal retries once and reworks when the retry is a
   assert.equal(h.logs().filter((e) => e.cmd === 'check tests').length, 2);
   const task = h.readState('tasks.json').tasks[0];
   assert.deepEqual(task.evidence.filter((e) => e.type === 'tests').map((e) => e.runner_crash === true), [true, true]);
-  assert.equal(task.status, 'rework');
+  assertReworked(h, task);
 });
 
 test('a test command that is not installed stays submitted, and the inbox asks the orchestrator to pin one', (t) => {
@@ -922,7 +929,7 @@ for (const [configuration, failure] of [['tests', 'ci'], ['tests', 'clean'], ['c
     assert.equal(h.run(['check', failure, 'T1', '--agent', 'orchestrator']).code, 1);
     h.consume();
     const task = h.readState('tasks.json').tasks[0];
-    assert.equal(task.status, 'rework');
+    assertReworked(h, task);
     assert.deepEqual(task.evidence.filter((e) => e.type === configuration).at(-1).config_failure,
       { key: `${configuration}_cmd` });
     const receipts = task.evidence.filter((e) => e.type === failure);
@@ -967,7 +974,7 @@ test('a proof run killed after the change is reverted retries once and reworks w
   assert.equal(h.logs().filter((e) => e.cmd === 'check tests').length, 2, 'the killed proof runs once more, and no third time');
   const task = h.readState('tasks.json').tasks[0];
   assert.deepEqual(task.evidence.filter((e) => e.type === 'tests').map((e) => [e.ok, e.runner_crash === true]), [[false, true], [false, true]]);
-  assert.equal(task.status, 'rework');
+  assertReworked(h, task);
 });
 
 test('a missing pinned proof command stays submitted with a gate_config item for the orchestrator, not a rework', (t) => {
@@ -998,7 +1005,7 @@ test('a change that adds no test reworks with the reason, and the worker adds a 
   h.consume();
   assert.equal(h.logs().filter((e) => e.cmd === 'check tests').length, 1, 'a change with no test is not retried');
   const task = h.readState('tasks.json').tasks[0];
-  assert.equal(task.status, 'rework');
+  assertReworked(h, task);
   assert.equal(task.evidence.filter((e) => e.type === 'tests').at(-1).worker_failure, true);
   assert.match(h.logs().findLast((e) => e.cmd === 'rework').detail.reason, /^tests failed at [0-9a-f]{7,}: no test covers this change: .*adds or changes no test file/);
 });
@@ -1013,9 +1020,7 @@ test('a CI run that was cancelled retries once and reworks when it is cancelled 
   const task = h.readState('tasks.json').tasks[0];
   assert.deepEqual(task.evidence.filter((e) => e.type === 'ci').map((e) => [e.ok, e.infrastructure_failure === true]),
     [[false, true], [false, true]]);
-  // A refill may claim the reworked task before this read, so the rework event is the proof.
-  assert.ok(h.logs().some((e) => e.cmd === 'rework' && e.task === 'T1'), 'the cancelled run reworks');
-  assert.ok(['rework', 'in_progress'].includes(task.status), task.status);
+  assertReworked(h, task);
 });
 
 test('a CI run that needs action sends a submitted task to rework at once, with its conclusion', (t) => {
@@ -1025,9 +1030,7 @@ test('a CI run that needs action sends a submitted task to rework at once, with 
   h.consume();
   assert.equal(h.github().calls.filter((a) => a[0] === 'api' && a[1].includes('check-runs')).length - before, 1, 'a verdict on the change is not retried');
   const task = h.readState('tasks.json').tasks[0];
-  // A refill may claim the reworked task before this read, so the rework event is the proof.
-  assert.ok(h.logs().some((e) => e.cmd === 'rework' && e.task === 'T1'), 'the action-required run reworks');
-  assert.ok(['rework', 'in_progress'].includes(task.status), task.status);
+  assertReworked(h, task);
   assert.equal(task.evidence.filter((e) => e.type === 'ci').at(-1).worker_failure, true);
   assert.match(h.logs().findLast((e) => e.cmd === 'rework').detail.reason, /^ci failed at [0-9a-f]+: .*action_required/s);
 });
@@ -1042,9 +1045,7 @@ test('a CI run that times out retries once and reworks when it times out again',
   const task = h.readState('tasks.json').tasks[0];
   assert.deepEqual(task.evidence.filter((e) => e.type === 'ci').map((e) => [e.ok, e.infrastructure_failure === true]),
     [[false, true], [false, true]]);
-  // A refill may claim the reworked task before this read, so the rework event is the proof.
-  assert.ok(h.logs().some((e) => e.cmd === 'rework' && e.task === 'T1'), 'the timed-out run reworks');
-  assert.ok(['rework', 'in_progress'].includes(task.status), task.status);
+  assertReworked(h, task);
 });
 
 test('a failed CI run sends a submitted task to rework with the failing run', (t) => {
@@ -1054,7 +1055,7 @@ test('a failed CI run sends a submitted task to rework with the failing run', (t
   h.consume();
   assert.equal(h.github().calls.filter((a) => a[0] === 'api' && a[1].includes('check-runs')).length - before, 1, 'a code failure is not retried');
   const task = h.readState('tasks.json').tasks[0];
-  assert.equal(task.status, 'rework');
+  assertReworked(h, task);
   assert.equal(task.evidence.filter((e) => e.type === 'ci').at(-1).confirmed_failure, true);
   assert.match(h.logs().findLast((e) => e.cmd === 'rework').detail.reason, /^ci failed at [0-9a-f]+: .*failing: test \(failure\)/s);
 });
@@ -1073,20 +1074,23 @@ test('a CI timeout after a pending check retries once: the pending receipt is no
   const task = h.readState('tasks.json').tasks[0];
   assert.deepEqual(task.evidence.filter((e) => e.type === 'ci').map((e) => [e.ok, e.infrastructure_failure === true]),
     [[false, false], [false, true], [false, true]]);
-  assert.equal(task.status, 'rework');
+  assertReworked(h, task);
 });
 
-test('a local CI command killed by a signal retries once and reworks when the retry is killed too', { skip: process.platform === 'win32' }, (t) => {
-  const h = setup(t, { ci: 'pending' });
+test('a local CI command killed by a signal retries once and reworks when the retry is killed too', { skip: process.platform === 'win32' }, async (t) => {
+  const h = refillFixture(t);
+  for (const id of ['T2', 'T3', 'T4']) h.ok(['task', 'update', id, '--status', 'cancelled']);
+  h.ok(['task', 'update', 'T1', '--tier', 'easy']);
   const script = path.join(h.base, 'local-killed.js');
   fs.writeFileSync(script, 'process.kill(process.pid, \'SIGKILL\');\n');
   h.ok(['project', 'set', '--ci-local', JSON.stringify({ command: [process.execPath, script], timeout: 5 })]);
   h.submit();
   h.consume();
+  assert.notEqual(await waitFor(h.marker('T1')), null, 'the refill claims the reworked task before it is inspected');
   assert.equal(h.logs().filter((e) => e.cmd === 'check ci').length, 2, 'the killed run runs once more, and no third time');
   const task = h.readState('tasks.json').tasks[0];
   assert.deepEqual(task.evidence.filter((e) => e.type === 'ci').map((e) => e.runner_crash === true), [true, true]);
-  assert.equal(task.status, 'rework');
+  assertReworked(h, task);
   assert.match(h.logs().findLast((e) => e.cmd === 'rework').detail.reason, /^ci failed at [0-9a-f]+: local CI killed by SIGKILL/);
 });
 
@@ -1100,7 +1104,7 @@ test('a local CI command that times out retries once and reworks when the retry 
   assert.equal(h.logs().filter((e) => e.cmd === 'check ci').length, 2, 'the timeout runs once more, and no third time');
   const task = h.readState('tasks.json').tasks[0];
   assert.deepEqual(task.evidence.filter((e) => e.type === 'ci').map((e) => e.infrastructure_failure === true), [true, true]);
-  assert.equal(task.status, 'rework');
+  assertReworked(h, task);
   assert.match(h.logs().findLast((e) => e.cmd === 'rework').detail.reason, /^ci failed at [0-9a-f]+: local CI timed out/);
 });
 
@@ -1114,7 +1118,7 @@ test('a test that also fails on main retries once, then reworks with the main fa
   assert.equal(h.logs().filter((e) => e.cmd === 'check tests').length, 2, 'the failure that also fails on main runs once more, and no third time');
   const task = h.readState('tasks.json').tasks[0];
   assert.deepEqual(task.evidence.filter((e) => e.type === 'tests').map((e) => e.main_failure?.names), [['known base failure'], ['known base failure']]);
-  assert.equal(task.status, 'rework');
+  assertReworked(h, task);
   assert.match(h.logs().findLast((e) => e.cmd === 'rework').detail.reason, /^tests failed at [0-9a-f]+: .*Also fails on main at [0-9a-f]+: known base failure/s);
 });
 
@@ -1137,8 +1141,7 @@ test('a test gate that fails by hand while the watcher runs reworks, not left su
   assert.equal(h.run(['check', 'tests', 'T1']).code, 1);
   assert.equal((await watcher).code, 2, 'the watcher runs to its deadline');
   const task = h.readState('tasks.json').tasks[0];
-  // The refill may claim the reworked task again before the watcher exits, so the rework event is the proof.
-  assert.ok(['rework', 'in_progress'].includes(task.status), `a failure recorded by a manual check reworks at once: ${task.status}`);
+  assertReworked(h, task);
   assert.match(h.logs().findLast((e) => e.cmd === 'rework').detail.reason, /^tests failed at [0-9a-f]+: /);
 });
 
@@ -1176,7 +1179,7 @@ test('a run with a failing name that does not fail on main keeps its verdict and
   h.consume();
   assert.equal(h.logs().filter((e) => e.cmd === 'check tests').length, 1, 'a failure with a name the change added is not retried');
   const task = h.readState('tasks.json').tasks[0];
-  assert.equal(task.status, 'rework');
+  assertReworked(h, task);
   const latest = task.evidence.filter((e) => e.type === 'tests').at(-1);
   assert.equal(latest.confirmed_failure, true);
   assert.equal(latest.main_failure, undefined, 'only a run whose every failing name also fails on main is not the change\'s');
@@ -1196,8 +1199,7 @@ test('a test that fails on a newer origin main retries once though the local bas
   assert.equal(h.logs().filter((e) => e.cmd === 'check tests').length, 2, 'the failure that also fails on origin main runs once more');
   const task = h.readState('tasks.json').tasks[0];
   assert.deepEqual(task.evidence.filter((e) => e.type === 'tests').map((e) => e.main_failure?.names), [['sums two numbers'], ['sums two numbers']]);
-  assert.ok(['rework', 'in_progress'].includes(task.status), task.status);
-  assert.ok(h.logs().some((e) => e.cmd === 'rework' && e.task === 'T1'), 'the second failure reworks');
+  assertReworked(h, task);
 });
 
 test('gates retry exits nonzero while a retried gate still fails', (t) => {

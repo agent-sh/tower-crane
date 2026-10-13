@@ -317,9 +317,11 @@ test('a spawned worker claims a task whose dependency merged while gh api is den
   assert.ok(submit, 'denied API access does not refuse the worker submission');
   assert.equal(submit.agent, claim.agent);
   // The later CI observation fails under this fixture's denied API, so automation reworks after submission.
-  assert.equal(task.status, 'rework');
+  const rework = events.find((e) => e.task === 'T2' && e.cmd === 'rework');
+  assert.ok(rework, 'the submitted task was sent back before refill could claim it');
+  assert.ok(task.notes.some((note) => note.text === `rework: ${rework.detail.reason}`));
   assert.equal(task.evidence.findLast((e) => e.type === 'ci').ok, false);
-  assert.match(events.find((e) => e.task === 'T2' && e.cmd === 'rework').detail.reason, /^ci failed at .*is not allowed by this agent's agent file/s);
+  assert.match(rework.detail.reason, /^ci failed at .*is not allowed by this agent's agent file/s);
   // The dependency already merged, so neither the claim nor the later reaction needs the stack API.
   const inspections = apiCalls(f).slice(before);
   assert.ok(inspections.every((c) => /\/check-(runs|suites)\?/.test(c.args[1])), 'only CI inspections read gh api after the claim');
