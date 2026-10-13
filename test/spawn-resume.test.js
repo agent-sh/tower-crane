@@ -509,6 +509,11 @@ console.log(JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 10, 
       assert.equal(Sessions.eligible(policy, first.cwd, history), null, 'overflowed ids stay excluded in later attempts');
       assert.equal(Sessions.eligible(policy, first.cwd, history.filter((e) => e.cmd !== 'spawn fallback')).id,
         'worker-session-1', 'the overflow marker is what excludes the id');
+      assert.equal(Sessions.eligible(policy, first.cwd, [
+        ...history.filter((e) => e.cmd !== 'spawn fallback'),
+        { cmd: 'spawn exit', task: 'T1', detail: { ...candidate.detail, overflowed: true } },
+      ]), null, 'an overflow exit excludes the session even without a fallback');
+      if (freshOverflow) assert.equal(audit.findLast((e) => e.cmd === 'spawn exit').detail.overflowed, true);
       const spend = h.json(['task', 'show', 'T1']).spend;
       const freshUsage = spend.entries.find((e) => e.source === `spawn:${first.agent}:attempt:2:retry:0`);
       assert.ok(freshUsage, 'fresh fallback has a separate usage receipt');
