@@ -416,7 +416,23 @@ const ROWS = [
   // git pages only to a terminal.
   { name: 'core.pager', run: ['log', '-1'], tty: true, plant: (r) => { r.set('core.pager', r.cmd('core-pager')); return { PAGER: 'cat' }; } },
   { name: 'pager.<cmd>', run: ['log', '-1'], tty: true, plant: (r) => { r.set('pager.log', r.cmd('pager-log')); return { PAGER: 'cat' }; } },
+  // The user's git-lfs filter downloads a.bin through the agent the
+  // repository names.
+  { name: 'lfs.customtransfer.<name>.path', lfs: true, run: ['checkout', '--', 'a.bin'], plant: (r) => {
+    r.lfs(); r.set('lfs.standalonetransferagent', 'tc'); r.set('lfs.customtransfer.tc.path', r.program('lfs-transfer'));
+  } },
+  { name: 'lfs.<url>.standalonetransferagent', lfs: true, run: ['checkout', '--', 'a.bin'], plant: (r) => {
+    r.lfs(); r.set(`lfs.${LFS_URL}.standalonetransferagent`, 'tc'); r.set('lfs.customtransfer.tc.path', r.program('lfs-transfer'));
+  } },
+  // git-lfs splits an extension command at spaces and runs it without a shell.
+  { name: 'lfs.extension.<name>.clean', lfs: true, run: ['add', 'b.bin'], plant: (r) => {
+    r.lfs(); fs.writeFileSync(path.join(r.repo, 'b.bin'), 'content\n');
+    const command = [process.execPath, r.script, 'lfs-extension'].join(' ');
+    for (const [key, value] of [['clean', command], ['smudge', command], ['priority', '0']]) r.set(`lfs.extension.tc.${key}`, value);
+  } },
 ];
+const LFS_AVAILABLE = cp.spawnSync('git-lfs', ['version'], { timeout: 10000 }).status === 0;
+const LFS_URL = 'http://127.0.0.1:9/acme/demo.git/info/lfs';
 
 function rowRepo(h) {
   const marker = path.join(h.base, 'planted');
@@ -443,6 +459,18 @@ function rowRepo(h) {
       return dir;
     },
     helper: (name) => { program(`git-remote-${name}`); return `${bin}${path.delimiter}${process.env.PATH}`; },
+    // A committed pointer whose object is not here, under the filter
+    // `git lfs install` puts in the user's config. a.bin is left to check out.
+    lfs: () => {
+      fs.writeFileSync(path.join(h.repo, 'a.bin'), `version https://git-lfs.github.com/spec/v1\noid sha256:${'1'.repeat(64)}\nsize 5\n`);
+      h.git(['add', 'a.bin']);
+      h.git(['commit', '-qm', 'pointer']);
+      fs.rmSync(path.join(h.repo, 'a.bin'));
+      for (const [key, value] of [['process', 'git-lfs filter-process'], ['required', 'true']]) h.git(['config', '--file', h.env.GIT_CONFIG_GLOBAL, `filter.lfs.${key}`, value]);
+      fs.writeFileSync(path.join(gitDir, 'info', 'attributes'), '*.bin filter=lfs\n');
+      h.git(['config', 'lfs.url', LFS_URL]);
+      h.git(['config', 'lfs.transfer.maxretries', '1']);
+    },
     ran: () => (fs.existsSync(marker) ? fs.readFileSync(marker, 'utf8').trim().split('\n') : []),
     clear: () => fs.rmSync(marker, { force: true }),
   };
@@ -451,7 +479,7 @@ function rowRepo(h) {
 test('git started through lib/commands takes none of the listed settings from repository config', async (t) => {
   const commands = require('../lib/commands');
   for (const row of ROWS) {
-    await t.test(row.name, { skip: row.tty && !PTY_AVAILABLE && 'no pty' }, async (t) => {
+    await t.test(row.name, { skip: (row.tty && !PTY_AVAILABLE && 'no pty') || (row.lfs && !LFS_AVAILABLE && 'no git-lfs') }, async (t) => {
       const h = makeRepo(t);
       const r = rowRepo(h);
       const env = { ...h.env, GIT_TERMINAL_PROMPT: '0', ...(await row.plant(r, t)) };
@@ -471,4 +499,20 @@ test('git started through lib/commands takes none of the listed settings from re
       assert.deepEqual([...new Set(r.ran())], row.caller ? [row.caller] : []);
     });
   }
+});
+
+test('tower-crane worktree takes no git-lfs transfer agent from repository config', { skip: !LFS_AVAILABLE && 'no git-lfs' }, (t) => {
+  const h = makeRepo(t);
+  h.init();
+  h.ok(['task', 'add', '--title', 'Lfs', '--acceptance', 'works']);
+  const r = rowRepo(h);
+  r.lfs();
+  r.set('lfs.standalonetransferagent', 'tc');
+  r.set('lfs.customtransfer.tc.path', r.program('lfs-transfer'));
+  cp.spawnSync('git', ['-C', h.repo, 'worktree', 'add', '-q', '--detach', path.join(h.base, 'control')], { env: h.env, stdio: 'ignore', timeout: 60000 });
+  assert.notDeepEqual(r.ran(), [], 'plain git runs the planted agent');
+  r.clear();
+
+  h.run(['worktree', 'T1', '--agent', 'orchestrator'], { env: { GIT_TERMINAL_PROMPT: '0' } });
+  assert.deepEqual(r.ran(), []);
 });
