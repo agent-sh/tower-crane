@@ -1119,20 +1119,26 @@ test('gate executors across several watchers stay within gates.executors and que
   const release = path.join(h.base, 'release-suite');
   const runs = slowSuite(h, { release });
   assert.match(h.ok(['project', 'show']), /gates\.executors: 2/);
+  // Keep consumers alive until the last task's gate evidence, including contended startup.
   const watchers = [0, 1, 2].map(() =>
-    h.runAsync(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']));
+    h.runAsync(['wait', '--after', '0', '--types', 'evidence', '--task', 'T3',
+      '--timeout', '300', '--agent', 'orchestrator']));
+  let results;
   try {
     assert.notEqual(await fileWritten(path.join(h.base, 'suite-started-2')), null, 'two executors start');
     // Keep both slots occupied until a watcher has queued the third submission.
-    assert.equal(h.consume().code, 2);
+    const notification = await h.runAsync(['wait', '--observe', '--after', '0', '--types', 'automation queued',
+      '--task', 'T3', '--timeout', '300', '--agent', 'orchestrator']);
+    assert.equal(notification.code, 0, JSON.stringify(notification));
     const queued = h.logs().filter((e) => e.cmd === 'automation queued' && e.detail.executors === 2);
     assert.ok(queued.some((e) => e.task === 'T3'), JSON.stringify(queued));
+    fs.writeFileSync(release, '');
+    assert.notEqual(await fileWritten(path.join(h.base, 'suite-started-3')), null, 'the third executor starts');
   } finally {
     fs.writeFileSync(release, '');
+    results = await Promise.all(watchers);
   }
-  assert.notEqual(await fileWritten(path.join(h.base, 'suite-started-3')), null, 'the third executor starts');
-  const results = await Promise.all(watchers);
-  assert.ok(results.every((r) => r.code === 2), JSON.stringify(results));
+  assert.ok(results.every((r) => r.code === 0 && JSON.parse(r.stdout).type === 'evidence'), JSON.stringify(results));
   assert.deepEqual(runs(), { starts: 3, peak: 2 });
   const started = h.logs().filter((e) => e.cmd === 'automation' && e.detail.phase === 'running').map((e) => e.task);
   assert.equal(started.at(-1), 'T3', 'the queued submission runs after a slot frees');
