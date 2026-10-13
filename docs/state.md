@@ -116,7 +116,7 @@ Workers, reviewers and every other identity are refused both. For an operational
 | `gates.executors` | operational | `project set --executors` |
 | `gates.tests_timeout_min`, `gates.clean_timeout_min` | operational | `project set --tests-timeout-min`, `--clean-timeout-min` |
 | `gates.tmp_root` | operational | `project set --tmp-root` |
-| `gates.priority` | operational | `gates prioritize ID --reason R`: a task's queued gate reactions run before older queued work |
+| `gates.priority` | operational | `gates prioritize ID --reason R`: a task's queued submitted gate reactions run before older submitted work; accepted merges stay first |
 | `ci.required`, `ci.ignore_apps`, `ci.capped_review` | operational | `project set --ci-required`, `--ci-ignore-apps`, `--ci-capped-review` |
 | `ci.local` | operational | `project set --ci-local`, `task update --ci-local` |
 | `tests.paths`, `tests.keep`, `tests.host_only`, `tests.host_env`, `tests.mode`, `tests.by_kind`, `tests.expensive`, `tests.map` | operational | `project set --tests-*` |
@@ -842,8 +842,9 @@ submission order unless its task becomes accepted.
 `gates prioritize ID --reason R` is operational ([Authority](#authority)); it
 records a `gates prioritize` event with `reason`, `sources` (the sources of
 the task's queued notifications at that moment), `queued` (their count) and
-`authority`. Only those notifications move. It is refused when the task has
-no queued notification, since it would change nothing. A notification queued
+`authority`. Only those notifications move. It is refused when the task is
+an accepted, unmerged PR task, whose merge already runs first, and when the
+task has no queued notification, since either would change nothing. A notification queued
 behind the task's own running reaction counts, but the running reaction does
 not: its receipt is running and its executor is live, so it is no longer
 queued. A dead executor's notification stays queued for its retry. `status`
@@ -851,7 +852,8 @@ lists the gate queue: running tasks, then the queued tasks in the order a free
 executor takes them, then the tasks whose notification waits behind their own
 running reaction, marked as blocked. `--json` carries it as `gate_queue` with
 `running`, `queued` and `blocked`, each queued or blocked task with its
-`prioritized` request or `null`. `inbox` carries the same `gate_queue`. Each executor drains the queue after releasing its slot; watchers
+`prioritized` request or `null`. An accepted task shows `null`, since its
+acceptance sets its place. `inbox` carries the same `gate_queue`. Each executor drains the queue after releasing its slot; watchers
 also retry their pending notifications on their next check. State locks cover only
 reservation and receipts, never Git, GitHub, gates or model calls.
 Automatic state changes and evidence use `agent: orchestrator` and

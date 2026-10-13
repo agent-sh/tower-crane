@@ -55,8 +55,10 @@ use explicit `accept` for review dispatch. `ci completed ID --sha SHA` and
 `ci webhook FILE` receive host completion notifications. A host integration
 must deliver those notifications; Tower Crane does not install a webhook
 listener. Concurrent consumers serialize reactions per task using audited
-event receipts and drain queued notifications. The orchestrator can move a
-task's queued gate work to the front with `gates prioritize` ([state](state.md#eventsjsonl)).
+event receipts and drain queued notifications. Accepted tasks' merges run
+first, in acceptance order. The orchestrator can move a submitted task's
+queued gate work ahead of older submitted work with `gates prioritize`
+([state](state.md#eventsjsonl)).
 Supervisors use the dispatcher's command PATH and an explicit trusted
 authorization context. Unknown mergeability and transport errors remain
 retryable at startup. A remote merge completed before its local receipt

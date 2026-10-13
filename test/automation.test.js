@@ -1263,10 +1263,14 @@ test('accepted merges take the next executor in acceptance order before queued s
       h.ok(['submit', id, '--sha', h.sha, '--pr', pr, '--agent', 'worker']);
     }
     h.run(['wait', '--after', String(after), '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
+    // A request made while T4 is submitted gives way to its acceptance.
+    h.ok(['gates', 'prioritize', 'T4', '--reason', 'request before acceptance', '--agent', 'orchestrator']);
     const accepted = fs.statSync(events).size;
     for (const id of ['T5', 'T4']) h.ok(['accept', id, '--agent', 'orchestrator']);
     h.run(['wait', '--after', String(accepted), '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
-    h.ok(['gates', 'prioritize', 'T4', '--reason', 'later merge request', '--agent', 'orchestrator']);
+    const late = h.run(['gates', 'prioritize', 'T4', '--reason', 'later merge request', '--agent', 'orchestrator']);
+    assert.notEqual(late.code, 0);
+    assert.match(late.stderr, /T4 is accepted; its merge already runs ahead of submitted gate work, in acceptance order/);
     h.ok(['gates', 'prioritize', 'T3', '--reason', 'submitted gate request', '--agent', 'orchestrator']);
     text = h.ok(['status']);
     queue = h.json(['status']).gate_queue;
@@ -1279,7 +1283,7 @@ test('accepted merges take the next executor in acceptance order before queued s
     assert.equal((await holder).code, 2, 'the held executor finishes and drains the queue');
   }
   assert.match(text, /^gate running: T1$/m);
-  assert.match(text, /^gate queue: T5, T4 \(prioritized: later merge request\), T3 \(prioritized: submitted gate request\), T2$/m);
+  assert.match(text, /^gate queue: T5, T4, T3 \(prioritized: submitted gate request\), T2$/m);
   assert.deepEqual(queue.queued.map((q) => q.id), ['T5', 'T4', 'T3', 'T2']);
   const log = h.logs();
   assert.deepEqual(log.filter((e) => e.cmd === 'automation' && e.detail.phase === 'running').map((e) => e.task),
