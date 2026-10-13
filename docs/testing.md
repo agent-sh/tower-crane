@@ -69,6 +69,8 @@ The base refresh through `5b48d520` converts main's hotfix reviewer-exit loop to
 
 The base refresh through `3ad4cc4e` keeps main's Windows worker and monitor teardown handles, lease renewal variants, fallback waiter constant, final-sample ordering and single-fetch batch proof, with suite guards for their budgets. The reused-PID worker teardown test waits for the worker's exit. CI-required, fallback, spawn-exit, supervision, worktree and live spend pass 179 of 179 tests in each of five loaded runs at `38a7f377`, and the full suite there passes 2197 tests with 24 skipped and no failures.
 
+The base refreshes through `2dc450f3` and `bd5ed7ea` keep main's harness guard, CLI failure details, teardown steps and self-stopping slow suites. Their new readiness loops wait through `waitUntil`, with kill-on-teardown guards where a failure could leave processes; the orphan backstop, teardown grace and probe cadences carry reasons. Fixtures, automation, supervision and the tests gate pass 235 of 235 tests in each of five loaded runs at `194d328b`. The full suite passes at `04f08fc2` (2199 tests, 24 skipped) and at `194d328b` (2205 tests, 25 skipped), with no failures.
+
 ## Tools
 
 - `node scripts/test-cost.js [--before DIR] [files...]` measures CPU and wall seconds per file, median of three runs, four files at a time. With `--before`, it measures another checkout interleaved with this one.
