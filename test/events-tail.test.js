@@ -10,6 +10,8 @@ const { cachedFixture, HOOKS, BIN } = require('./helpers');
 const { EventReader } = require('../lib/event-reader');
 const S = require('../lib/state');
 const T = require('../lib/tasks');
+const hooksPath = HOOKS.replace(/\\/g, '/');
+const budgetPath = path.join(__dirname, 'fixtures', 'events-read-budget.js').replace(/\\/g, '/');
 
 function largeFixture(t) {
   return cachedFixture(t, 'large-events', (h) => {
@@ -29,9 +31,8 @@ const waitModes = [{ observe: true, silent: false }, { observe: true, silent: tr
 for (const { observe, silent } of waitModes) test(`idle wait reads no historical bytes on fallback ticks with a 50 MiB log (observe: ${observe}, silent watch: ${silent})`, async (t) => {
   const h = largeFixture(t);
   const meter = path.join(h.base, 'read-budget.json');
-  const hook = path.join(__dirname, 'fixtures', 'events-read-budget.js');
   const result = await h.runAsync(['wait', ...(observe ? ['--observe'] : []), '--agent', 'orchestrator', '--timeout', '3'], {
-    env: { EVENT_READ_BUDGET: meter, NODE_OPTIONS: `--require "${HOOKS}" --require "${hook}"`, ...(silent ? { HOOK_SILENT_WATCH: '1' } : {}) },
+    env: { EVENT_READ_BUDGET: meter, NODE_OPTIONS: `--require "${hooksPath}" --require "${budgetPath}"`, ...(silent ? { HOOK_SILENT_WATCH: '1' } : {}) },
   });
   assert.equal(result.code, 2, result.stderr);
   const budget = JSON.parse(fs.readFileSync(meter, 'utf8'));
@@ -42,10 +43,9 @@ for (const { observe, silent } of waitModes) test(`idle wait reads no historical
 test('served pages and owner message requests reuse history on a 50 MiB log', async (t) => {
   const h = largeFixture(null);
   const meter = path.join(h.base, 'board-read-budget.json');
-  const hook = path.join(__dirname, 'fixtures', 'events-read-budget.js');
   const child = cp.spawn(process.execPath, [BIN, 'serve', '--agent', 'viewer', '--port', '0', '--json'], {
     cwd: h.repo,
-    env: { ...h.env, EVENT_READ_BUDGET: meter, NODE_OPTIONS: `--require "${HOOKS}" --require "${hook}"` },
+    env: { ...h.env, EVENT_READ_BUDGET: meter, NODE_OPTIONS: `--require "${hooksPath}" --require "${budgetPath}"` },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   const closed = once(child, 'close');
