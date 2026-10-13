@@ -254,7 +254,6 @@ test('the Claude Code mod pushes a decision answer and a worker message into the
   register(cc.on);
   await cc.fire('session.start', { cwd: h.repo, isInteractive: true });
   assert.deepEqual(cc.seen.tools.map((x) => x.name), ['watch']);
-  const probeStart = performance.now();
   const armed = await cc.fire('tool.call', { tool: 'mcp__tower-crane__watch', tool_use_id: 'u1', after: String(size(h)), agent: 'orchestrator' });
   assert.match(armed.result, /tower-crane inbox/);
   // The follower takes its cursor from the call, so writes from here on count.
@@ -263,11 +262,7 @@ test('the Claude Code mod pushes a decision answer and a worker message into the
   const answer = log(h).findLast((e) => e.cmd === 'answer').id;
   const message = log(h).findLast((e) => e.cmd === 'msg').id;
   await cc.followerReady();
-  const probeReady = performance.now() - probeStart;
   const pushed = await cc.waitFor('prompts', [answer, message]);
-  const probeLine = `T250 probe: follower ready ${Math.round(probeReady)} ms, first push ${Math.round(performance.now() - probeStart)} ms after arm`;
-  t.diagnostic(probeLine);
-  process.stderr.write(probeLine + '\n');
   assert.match(pushed, new RegExp(`${answer}: decision-answer D1 from owner`));
   assert.match(pushed, new RegExp(`${message}: worker-message T1 from worker`));
   assert.match(pushed, /tower-crane inbox/);
