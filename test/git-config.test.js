@@ -141,6 +141,56 @@ test('git the CLI and gates run takes no command from repository config or hooks
   assert.match(vcs.stderr, /git fetch origin main failed/);
 });
 
+// A sandboxed worker can create the common directory's commondir file. Git in
+// the main checkout then reads the repository it names: its config, hooks,
+// refs and objects, and Tower Crane finds its state beside it. Here that
+// repository's config sets core.fsmonitor and its state names a tests command.
+test('a planted commondir in the common directory stops git the CLI and gates run', (t) => {
+  const h = makeRepo(t);
+  h.init();
+  const sha = gateFixture(h);
+  h.ok(['project', 'set', '--tests-cmd', 'node test/value.test.js', '--clean-cmd', h.env.TOWER_CRANE_CLEAN_CMD]);
+  for (const title of ['Change', 'Other']) h.ok(['task', 'add', '--title', title, '--acceptance', 'works']);
+  h.ok(['claim', 'T1', '--agent', 'worker']);
+  h.ok(['submit', 'T1', '--sha', sha, '--agent', 'worker']);
+  h.git(['switch', '-q', 'main']);
+  const marker = path.join(h.base, 'planted');
+  const script = path.join(h.base, 'planted.js');
+  fs.writeFileSync(script, `require('node:fs').appendFileSync(${JSON.stringify(marker)}, process.argv[2] + '\\n');\n`);
+  const cmd = (name) => `${shellQuote(process.execPath)} ${shellQuote(script)} ${name}`;
+  const ran = () => (fs.existsSync(marker) ? fs.readFileSync(marker, 'utf8').trim().split('\n') : []);
+  const other = path.join(h.base, 'other');
+  fs.cpSync(h.repo, other, { recursive: true });
+  h.git(['config', 'core.fsmonitor', cmd('fsmonitor')], other);
+  h.ok(['project', 'set', '--tests-cmd', cmd('tests-cmd'), '--state', path.join(other, '.tower-crane')]);
+  h.git(['worktree', 'add', '-q', '--detach', path.join(h.base, 'linked'), 'main']);
+  const planted = path.join(h.repo, '.git', 'commondir');
+  fs.writeFileSync(planted, `${path.join(other, '.git')}\n`);
+
+  cp.spawnSync('git', ['status'], { cwd: h.repo, env: h.env, stdio: 'ignore' });
+  assert.deepEqual(ran(), ['fsmonitor'], 'plain git in the main checkout takes the planted setting');
+  fs.rmSync(marker);
+
+  const env = { GIT_TERMINAL_PROMPT: '0', TOWER_CRANE_CLEAN_CMD: '' };
+  for (const args of [['status'], ['worktree', 'T2', '--agent', 'orchestrator'],
+    ['check', 'tests', 'T1', '--agent', 'checker'], ['check', 'clean', 'T1', '--agent', 'checker']]) {
+    const r = h.run(args, { env });
+    assert.notEqual(r.code, 0, `${args.join(' ')} refused`);
+    assert.match(r.stderr, /commondir points git at .*other.*then remove /s, args.join(' '));
+  }
+  // A linked worktree's git is not redirected, but its common directory is the same.
+  const commands = require('../lib/commands');
+  for (const dir of [h.repo, path.join(h.repo, 'test'), path.join(h.base, 'linked')]) {
+    assert.throws(() => commands.execFileSync('git', ['rev-parse', '--git-common-dir'], { cwd: dir, env: h.env }), /commondir/, dir);
+    assert.throws(() => commands.spawnSync('git', ['status'], { cwd: dir, env: h.env }), /commondir/, dir);
+  }
+  assert.deepEqual(ran(), []);
+
+  fs.rmSync(planted);
+  h.ok(['worktree', 'T2', '--agent', 'orchestrator'], { env });
+  assert.deepEqual(ran(), []);
+});
+
 // gh runs git itself (gh stack sync rebases and pushes), so the stub gh runs
 // git status and commits in its working directory the way gh would. The
 // commit fails once the planted signing command is emptied.

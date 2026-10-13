@@ -1119,3 +1119,39 @@ test('rework cannot resume a session while its transient rerun is still alive', 
   await until(() => !detachedAlive({ pid: spawned.monitor_pid }), 'previous supervisor did not finish');
 });
 });
+
+// A sandboxed worker can create the common directory's commondir file, which
+// points git in the main checkout at another repository. The supervisor
+// removes it while the worker still runs, and records that.
+test('the supervisor removes a commondir its worker plants in the common directory', (t) => {
+  const h = makeTaskRepo(t, [{
+    args: ['--title', 'Plant a commondir', '--tier', 'easy', '--acceptance', 'it is removed'],
+    brief: 'Finish the task.\n',
+  }]);
+  const planted = path.join(h.repo, '.git', 'commondir');
+  const result = path.join(h.base, 'result');
+  const script = `
+const fs = require('node:fs');
+const [planted, result, named] = process.argv.slice(1, 4);
+fs.writeFileSync(planted, named + '\\n');
+const end = Date.now() + 60000;
+const check = () => {
+  if (!fs.existsSync(planted)) fs.writeFileSync(result, 'removed');
+  else if (Date.now() > end) fs.writeFileSync(result, 'kept');
+  else return setTimeout(check, 20);
+};
+check();
+`;
+  const named = path.join(h.base, 'other', '.git');
+  h.ok(['ladder', 'set', 'easy', '--harness', 'command', '--command', JSON.stringify([process.execPath, '-e', script, planted, result, named, '{prompt}']),
+    '--clear', 'profile', '--clear', 'effort', '--supervision', JSON.stringify({ retries: 0 })]);
+  const r = h.run(['spawn', '--task', 'T1', '--wait', '--json']);
+  assert.equal(fs.existsSync(result) && fs.readFileSync(result, 'utf8'), 'removed', r.stderr);
+  assert.equal(fs.existsSync(planted), false);
+  const removed = log(h).filter((e) => e.cmd === 'commondir removed');
+  assert.equal(removed.length, 1, r.stderr);
+  assert.equal(removed[0].task, 'T1');
+  assert.equal(removed[0].detail.path, planted);
+  assert.equal(removed[0].detail.named, named);
+  assert.match(removed[0].detail.agent, /^worker-T1/);
+});
