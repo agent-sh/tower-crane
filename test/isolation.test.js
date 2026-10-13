@@ -1688,6 +1688,22 @@ for (const [command, args, opts] of calls) {
   assert.match(fs.readFileSync(S.progressFile(h.state, started.agent), 'utf8'), /"cmd":"hook progress"/);
 });
 
+test('a claude sandboxed worker has policy masks, so its shim plumbs merges of the paths the sandbox masks', { skip: NO_STUBS }, (t) => {
+  const { h, u } = setup(t);
+  isolated(h, 'medium', 'claude');
+  spawn(h, u, 'medium');
+  const policy = JSON.parse(fs.readFileSync(path.join(h.state, 'homes', 'worker-T1-1', 'policy.json'), 'utf8'));
+  assert.equal(policy.masks, true);
+});
+
+test('a codex sandboxed worker has no policy masks: the mask list is claude\'s', { skip: NO_STUBS }, (t) => {
+  const { h, u } = setup(t);
+  isolated(h, 'medium', 'codex');
+  spawn(h, u, 'medium');
+  const policy = JSON.parse(fs.readFileSync(path.join(h.state, 'homes', 'worker-T1-1', 'policy.json'), 'utf8'));
+  assert.equal(policy.masks, false);
+});
+
 test('the shim migrates a pre-T112 policy using recorded state and refuses unbound migrations', { skip: NO_STUBS }, (t) => {
   const { h, u, wt } = setup(t);
   isolated(h, 'medium', 'codex');
