@@ -285,6 +285,18 @@ test('a move that adds a file under an absent root directory mount is held off t
   }
 });
 
+test('a masked move that deletes a file the mount still holds names it as untracked', (t) => {
+  for (const operation of ['merge', 'checkout']) {
+    const f = fixture(t, { base: { 'a.txt': 'a\n', '.mcp.json': 'v1\n' }, task: { 'b.txt': 'b\n' }, main: { 'a.txt': 'a2\n', '.mcp.json': null } });
+    f.readOnly('.mcp.json');
+    const result = operation === 'merge' ? f.merge('--no-edit', 'origin/main') : f.checkout('--detach', 'origin/main');
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(f.git(['ls-tree', '-r', '--name-only', 'HEAD', '--', '.mcp.json']), '');
+    assert.equal(f.git(['status', '--porcelain']), '?? .mcp.json');
+    assert.match(result.stderr, /^tower-crane: \.mcp\.json was deleted by this move, but the sandbox mount still holds it, so it is untracked now; do not add it back$/m, operation);
+  }
+});
+
 test('a masked move materializes protected nested names that did not exist before it', (t) => {
   const added = ['web/.Bashrc', 'web/.VSCode/settings.json', 'web/.claude/skills/new/SKILL.md'];
   for (const operation of ['merge', 'checkout']) {

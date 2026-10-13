@@ -247,6 +247,8 @@ const MUTANTS = [
     from: 'return isMasked(p) && mounted(p);', to: 'return isMasked(p);', tests: ['test/masked-merge.test.js'] },
   { id: 'masked-root-mounts-files-only', area: 'git', file: 'lib/masked-merge.js',
     from: 'const ROOT_MOUNTS = [...MASKED_FILES, ...MASKED_DIRS];', to: 'const ROOT_MOUNTS = MASKED_FILES;', tests: ['test/masked-merge.test.js', 'test/masked-mounts.test.js'] },
+  { id: 'masked-deleted-left-unnamed', area: 'git', file: 'lib/masked-merge.js',
+    from: 'leftOnMount(g, [...before.keys()].filter((p) => !after.has(p)));', to: 'void before;', tests: ['test/masked-merge.test.js'] },
   { id: 'masked-search-depth-too-deep', area: 'git', file: 'lib/masked-merge.js',
     from: 'const MASK_SEARCH_DEPTH = 3;', to: 'const MASK_SEARCH_DEPTH = 4;', tests: ['test/masked-merge.test.js'] },
   { id: 'masked-bind-writable-mode-bits', area: 'git', file: 'lib/masked-merge.js',

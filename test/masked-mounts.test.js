@@ -193,9 +193,10 @@ for (const name of Placeholders.FILES) {
               // exists unless this cell starts without it.
               if (name.startsWith('.claude/') && state === 'absent') fs.mkdirSync(path.join(wt, '.claude', '.cc-writes'), { recursive: true });
             });
+            let r;
             for (let step = mains.length - 1; step >= 0; step--) {
               const rev = step ? `origin/main~${step}` : 'origin/main';
-              const r = operation === 'merge' ? w.run('merge', '--no-edit', rev) : w.run('checkout', '--detach', rev);
+              r = operation === 'merge' ? w.run('merge', '--no-edit', rev) : w.run('checkout', '--detach', rev);
               assert.equal(r.status, 0, `${label}, to ${rev}: ${r.stderr}`);
               assert.match(r.trace, /built-in: git read-tree -m -u /, `${label}, to ${rev}: the masked move ran`);
               assert.doesNotMatch(r.trace, /built-in: git (merge|checkout) /, `${label}, to ${rev}: plain git did not run`);
@@ -220,6 +221,9 @@ for (const name of Placeholders.FILES) {
             // A file deleted under a present bind stays on the mount, untracked.
             const status = w.git(['status', '--porcelain', '-uall']).split('\n').filter(Boolean);
             assert.deepEqual(status, state === 'present' && edit === 'delete' ? [`?? ${file}`] : [], `${label}: status`);
+            // The shim names each one, so a later `git add -A` is not a surprise.
+            const noted = [...r.stderr.matchAll(/^tower-crane: (.+) was deleted by this move, but the sandbox mount still holds it/gm)].map((m) => m[1]);
+            assert.deepEqual(noted, status.map((line) => line.slice(3)), `${label}: note`);
             covered.push(label);
           });
         }
