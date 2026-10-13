@@ -498,6 +498,25 @@ test('review selection matches Claude provider aliases to recorded provider spen
   }
 });
 
+test('review cost samples keep provider premiums when a canonical price row also exists', (t) => {
+  const h = setup(t, 'hard', 'other', undefined, { gated: true });
+  const anthropic = 'fixture-claude';
+  const bedrock = `global.anthropic.${anthropic}`;
+  const bin = path.join(h.base, 'bin');
+  fs.mkdirSync(bin);
+  fs.writeFileSync(path.join(bin, process.platform === 'win32' ? 'claude.exe' : 'claude'), '', { mode: 0o755 });
+  const env = { PATH: bin + path.delimiter + (h.env.PATH || h.env.Path || ''),
+    AWS_REGION: 'eu-west-1', AWS_BEARER_TOKEN_BEDROCK: 'stub-secret-bedrock',
+    ANTHROPIC_API_KEY: 'stub-secret-anthropic' };
+  h.ok(['ladder', 'set', 'hard', '--harness', 'claude', '--provider', 'bedrock', '--model', anthropic]);
+  h.ok(['ladder', 'set', 'research', '--harness', 'claude', '--provider', 'anthropic', '--model', anthropic]);
+  const row = (output) => ({ input: 1, cache_write: 1, cache_read: 1, output });
+  h.ok(['project', 'set', '--review-policy', JSON.stringify({ prices: { [anthropic]: row(20), [bedrock]: row(30) } })]);
+  sample(h, bedrock, 0, 0, 1000); // $0.03
+  sample(h, anthropic, 0, 0, 1200); // $0.024
+  assert.equal(choice(h, env).review_rung, 'research', 'the higher provider rate matters, not just token counts');
+});
+
 test('review selection prices a Claude alias rung by the release id its spend records', (t) => {
   const [alias, release] = Object.entries(require('../lib/ladder').BUILTIN.claude_aliases)[0];
   for (const configured of [alias, alias.toUpperCase(), ` ${alias} `, ` ${alias.toUpperCase()} `]) {

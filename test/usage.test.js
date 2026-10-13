@@ -105,13 +105,14 @@ test('native Claude alias spend records release-priced cost without rewriting it
   for (const [harness, provider, stored, cost] of [
     ['claude', undefined, alias, 0.02],
     ['claude', 'anthropic', release, 0.02],
-    ['claude', 'bedrock', bedrock, 0.02],
+    ['claude', 'bedrock', bedrock, 0.03],
     ['codex', undefined, alias, null],
   ]) {
     const h = setup(t, harness);
     pinRung(h, 'review', { harness, provider, model: alias, effort: 'high' });
     h.ok(['project', 'set', '--review-policy', JSON.stringify({ prices: {
       [release]: { input: 1, cache_write: 1, cache_read: 1, output: 20 },
+      [bedrock]: { input: 1, cache_write: 1, cache_read: 1, output: 30 },
     } })]);
     h.ok(['spend', 'T1', '--rung', 'review', '--tokens', '1000', '--input', '0', '--cached', '0', '--output', '1000']);
     const task = h.json(['task', 'show', 'T1']);
@@ -160,17 +161,57 @@ test('a Claude run on several models names its primary model and keeps each mode
   assert.equal(parse('claude', JSON.stringify(placeholder)).models, undefined);
 });
 
-test('review prices for one model agree across Bedrock and plain ids', (t) => {
+test('a base-valid provider price table loads and retains exact rows through project set', (t) => {
   const h = setup(t, 'claude');
   const row = (output) => ({ input: 1, cache_write: 1, cache_read: 1, output });
-  const conflict = h.run(['project', 'set', '--review-policy', JSON.stringify({ prices: {
-    'claude-x': row(20), 'global.anthropic.claude-x[1m]': row(30),
-  } })]);
-  assert.equal(conflict.code, 2);
-  assert.match(conflict.stderr, /more than one rate for model claude-x/);
-  h.ok(['project', 'set', '--review-policy', JSON.stringify({ prices: {
-    'claude-x': row(20), 'global.anthropic.claude-x[1m]': row(20),
-  } })]);
+  const prices = { 'claude-opus-5-5': row(20), 'global.anthropic.claude-opus-5-5': row(30) };
+  const project = h.readState('project.json');
+  assert.equal(project.schema_version, 1);
+  project.review = { ...project.review, prices };
+  h.writeState('project.json', project);
+  assert.deepEqual(h.json(['project', 'show']).review.prices, prices, 'a schema-1 table from the base still loads');
+  h.ok(['project', 'set', '--review-policy', JSON.stringify({ prices })]);
+  assert.deepEqual(h.readState('project.json').review.prices, prices, 'saving does not collapse provider rows');
+  assert.equal(h.readState('project.json').schema_version, 1);
+  for (const [model, usd] of [
+    ['claude-opus-5-5', 0.02],
+    ['global.anthropic.claude-opus-5-5', 0.03],
+    ['global.anthropic.claude-opus-5-5[1m]', 0.02],
+  ]) {
+    h.ok(['spend', 'T1', '--harness', 'claude', '--model', model, '--tokens', '1000', '--input', '0', '--cached', '0', '--output', '1000']);
+    assert.equal(spends(h).entries.at(-1).cost_usd, usd, model);
+  }
+  const tasks = h.readState('tasks.json');
+  tasks.tasks[0].status = 'accepted';
+  for (const entry of tasks.tasks[0].spend.entries) entry.cost_usd = null;
+  h.writeState('tasks.json', tasks);
+  const bench = h.json(['bench', 'tokens']);
+  assert.deepEqual(bench.unpriced_models, {});
+  assert.ok(Math.abs(bench.list_usd - 0.07) < 1e-12, 'bench uses the same exact-first lookup when no recorded cost exists');
+});
+
+test('exact price rows take precedence over canonical fallbacks for every model in a run', () => {
+  const { rateTable, entryCost } = require('../lib/reviewer');
+  const row = (output) => ({ input: 1, cache_write: 1, cache_read: 1, output });
+  const rates = rateTable({
+    'global.anthropic.claude-opus-5-5': row(30),
+    'claude-opus-5-5': row(20),
+    'global.anthropic.claude-opus-5-5[1m]': row(40),
+    'claude-haiku-4-5-20251001': row(5),
+  });
+  const usage = (model) => ({ model, tokens: 1000, input: 0, cached: 0, output: 1000 });
+  for (const [model, output] of [
+    ['claude-opus-5-5', 20],
+    ['global.anthropic.claude-opus-5-5', 30],
+    ['global.anthropic.claude-opus-5-5[1m]', 40],
+    [' Global.Anthropic.Claude-Opus-5-5 ', 30],
+    ['anthropic.claude-opus-5-5[1m]', 20],
+    ['eu.anthropic.claude-opus-5-5', 20],
+    ['global.anthropic.claude-haiku-4-5-20251001-v1:0', 5],
+  ]) assert.equal(entryCost(usage(model), rates), output / 1000, model);
+  assert.equal(entryCost({ models: [
+    usage('global.anthropic.claude-opus-5-5'), usage('claude-opus-5-5'),
+  ] }, rates), 0.05);
 });
 
 test('bench prices Bedrock and 1M-context ids and a two-model run from canonical rates, split by billing', (t) => {
