@@ -218,7 +218,7 @@ const COMMANDS = [
 
   { section: 'Run', name: 'release', pos: ['[ID]'], usage: 'ID --reason R [--pr N] | --dead', summary: 'give a claimed task back; it returns to todo or rework', flags: { reason: str('R', 'why'), pr: int('N', 'open pull request the claim opened, linked to the task'), dead: bool('release every claim verified exited, rechecking under the lock') }, description: "`--dead` recovers every claim the shared process detector verifies exited; remote or unobservable processes stay claimed. The worker broker refuses this unscoped batch; workers use `release ID --reason R` on their own task. Otherwise give it back; status returns to its prior `todo` or `rework`. `--pr N` links an open PR, checked as `submit` checks it, so the next worker resumes that PR. Its head branch must be the task's branch, except that a task with no branch, or one moving from a closed or merged PR to N, takes N's head branch. Linking a PR other than the one the task recorded drops its submitted sha, so the next dispatch resumes N's head from origin. A task linked to another open PR keeps that PR and refuses the release until it closes. The branch and PR link stay when the claim is released. A task released while an open decision blocks it can be sent back with `rework` from `todo`. The claimant or the owner (owner-required: the orchestrator's attempt opens a decision); any agent may recover a spawned claim verified exited by the shared detector under the lock. Preserves only pid, log path, exit code and log size in a note and the release event", run: T.release },
 
-  { section: 'Views', name: 'render', summary: 'write sketch.md and sketch.html (self-contained, no network)', description: "write `sketch.md` (Mermaid graph plus tables) and `sketch.html`, the board as a read-only snapshot, from the state as it stands under the lock", run: R.render },
+  { section: 'Views', name: 'render', summary: 'write sketch.md and sketch.html (self-contained, no network)', description: "write `sketch.md` (Mermaid graph plus tables) and `sketch.html`, the board as a read-only snapshot, from the state as it stands when the command starts; a sketch another process already published from later state is kept (`--json` `published: false`)", run: R.render },
 
   { section: 'Run', name: 'renew', pos: ['ID'], usage: 'ID [--lease MIN]', summary: 'extend your lease; an expired one only while the workers limit has room', flags: { lease: int('MIN', 'new lease length from now') }, description: "extend the lease from now; only the claimant. An expired lease must pass the claim checks again (unmet dependency, owner blocker, open decision, resource lock, workers limit), so a refused renewal leaves it expired", run: T.renew },
 
@@ -513,8 +513,16 @@ async function main(argv) {
       stateDir: cmd.name === 'mcp' ? undefined : locate(),
       ...(cmd.name === 'mcp' ? { resolveStateDir: locate } : {}),
     };
-    require('../lib/orchestrator').command(ctx, cmd.name);
-    const res = await cmd.run(ctx);
+    // A command reads the event log several times: the first read parses it
+    // and later ones only what was appended since.
+    const releaseEvents = ctx.stateDir ? S.retainEvents(ctx.stateDir) : () => {};
+    let res;
+    try {
+      require('../lib/orchestrator').command(ctx, cmd.name);
+      res = await cmd.run(ctx);
+    } finally {
+      releaseEvents();
+    }
     if (res && !res.printed) {
       if (ctx.json) out(JSON.stringify(res.data, null, 2));
       else if (res.text !== undefined) out(res.text);

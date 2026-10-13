@@ -50,7 +50,10 @@ test('one orchestrator session holds writes while reads, release, expiry and own
   h.ok(['inbox'], second);
   assert.deepEqual(lease(), held, 'another reader cannot renew the holder');
   h.ok(['status'], first);
-  assert.ok(Date.parse(lease().heartbeat) > Date.parse(held.heartbeat));
+  assert.deepEqual(lease(), held, 'a fresh heartbeat is not renewed');
+  h.ok(['status'], { env: { ...first.env, TOWER_CRANE_TEST_NOW: String(Date.parse(held.heartbeat) + 61000),
+    NODE_OPTIONS: `--require=${JSON.stringify(path.join(__dirname, 'fixtures', 'shifted-clock.js'))}` } });
+  assert.ok(Date.parse(lease().heartbeat) > Date.parse(held.heartbeat), 'a due heartbeat is renewed by a read');
   const releaseDenied = h.run(['orchestrator', 'release'], second);
   assert.equal(releaseDenied.code, 1);
   assert.match(releaseDenied.stderr, /orchestrator lease/);
@@ -75,6 +78,32 @@ test('one orchestrator session holds writes while reads, release, expiry and own
   } });
   assert.notEqual(lease().session_id, held.session_id);
   h.ok(['validate'], second);
+});
+
+test('orchestrator status takes no state lock, and a due renewal never waits for a busy one', (t) => {
+  const h = makeProjectRepo(t);
+  const S = require('../lib/state');
+  const holder = { TOWER_CRANE_AGENT: 'orchestrator', CLAUDE_SESSION_ID: 'holder' };
+  h.ok(['task', 'add', '--title', 'held task', '--acceptance', 'holds the lease'], { env: holder });
+  const lease = () => h.readState('tasks.json').orchestrator_lease;
+  const held = lease();
+  const meter = path.join(h.base, 'locked-reads.json');
+  const preload = (...files) => files.map((f) => `--require=${JSON.stringify(path.join(__dirname, 'fixtures', f))}`).join(' ');
+  const fresh = h.run(['status'], { env: { ...holder, LOCKED_READS: meter, NODE_OPTIONS: preload('locked-reads.js') } });
+  assert.equal(fresh.code, 0, fresh.stderr);
+  assert.equal(JSON.parse(fs.readFileSync(meter, 'utf8')).holdings, 0, 'status with a fresh lease takes no lock');
+  const lock = S.acquireLock(h.state);
+  try {
+    const started = Date.now();
+    const due = h.run(['status'], { env: { ...holder, TOWER_CRANE_TEST_NOW: String(Date.parse(held.heartbeat) + 61000),
+      LOCKED_READS: meter, NODE_OPTIONS: preload('shifted-clock.js', 'locked-reads.js') } });
+    assert.equal(due.code, 0, due.stderr);
+    assert.ok(Date.now() - started < 30000, 'a read does not wait out the lock bound');
+    assert.equal(JSON.parse(fs.readFileSync(meter, 'utf8')).holdings, 0);
+    assert.deepEqual(lease(), held, 'a busy lock leaves the renewal to a later command');
+  } finally {
+    S.releaseLock(lock);
+  }
 });
 
 test('two live copies of the same harness session cannot both drive the queue', async (t) => {

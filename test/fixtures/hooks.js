@@ -173,12 +173,6 @@ function before(name, args) {
   if (env.HOOK_RENDER_DELAY_MS && name === 'renameSync' && args[1] === path.join(STATE, 'sketch.html')) {
     sleep(Number(env.HOOK_RENDER_DELAY_MS));
   }
-  // Authentication reads project.json before locking; a dead-holder probe
-  // must kill the process only after its own lock marker has been published.
-  if (env.HOOK_DIE_ON && name === 'readFileSync' && inState(target) && path.basename(target) === env.HOOK_DIE_ON && ownsLock()) {
-    process.kill(process.pid, 'SIGKILL');
-    sleep(5000);
-  }
   // HOOK_FAIL_LOCK=FILE: removing or moving anything at or inside the lock
   // fails with EPERM; each attempt adds a byte to FILE.
   if (env.HOOK_FAIL_LOCK && CHANGES.includes(name) && inLock(target)) {
@@ -198,6 +192,17 @@ function after(name, args, rawArgs = args) {
   // before its spawn is committed, so the supervisor's startup window can close first.
   if (env.HOOK_STOP_STARTED && name === 'rmSync' && path.basename(target) === 'started.json'
     && path.basename(process.argv[1]) === 'tower-crane.js' && first('started')) stop(env.HOOK_STOP_STARTED);
+  // Writers read the state before they take the lock, so a test that needs a
+  // holder stops or kills it as soon as it holds the lock: HOOK_PAUSE_LOCKED=SIGNAL
+  // stops it there, HOOK_DIE_LOCKED=1 leaves the lock to a dead pid.
+  if ((env.HOOK_PAUSE_LOCKED || env.HOOK_DIE_LOCKED) && name === 'renameSync' && path.resolve(String(args[1])) === LOCK
+    && (!env.HOOK_PAUSE_PROCESS || path.basename(process.argv[1]) === env.HOOK_PAUSE_PROCESS) && ownsLock() && first('locked')) {
+    if (env.HOOK_DIE_LOCKED) {
+      process.kill(process.pid, 'SIGKILL');
+      sleep(5000);
+    }
+    stop(env.HOOK_PAUSE_LOCKED);
+  }
   // HOOK_PAUSE_ON=FILE stops at HOOK_PAUSED after its first read; HOOK_PAUSE_PROCESS
   // optionally limits the pause to one executable's basename.
   if (env.HOOK_PAUSE_ON && ['readFileSync', 'readSync'].includes(name) && inState(target) && path.basename(target) === env.HOOK_PAUSE_ON
