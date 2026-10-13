@@ -1,0 +1,1 @@
+- PR CI skips the gate scratch and model swap proofs and the Windows flake repeat loops; main pushes, daily and manual runs keep them.
