@@ -10,6 +10,11 @@
     "reason": "Relative import of the Claude sandbox placeholder module"
   },
   {
+    "path": "lib/masked-merge.js",
+    "text": "claude-sandbox-placeholders",
+    "reason": "Relative import of the shared Claude sandbox mount classification"
+  },
+  {
     "path": "lib/project.js",
     "text": "claude-provider",
     "reason": "Relative import of the Claude provider routing module"
