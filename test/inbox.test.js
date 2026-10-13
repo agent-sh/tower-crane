@@ -705,6 +705,7 @@ function reviewComments(h, id) {
   const body = `Review (Tower Crane, clean context)\n\nBlocking: 2 findings at ${h.sha}.\n\n`
     + '## Prior blockers\n\nEarlier lib/fixed.js:7 is fixed.\n\n## Blocking findings\n\n'
     + '- [P1] lib/store.js:12 - First finding: reject duplicate writes - Prevent corruption.\n'
+    + '  Reproduction:\n  Write twice through lib/fixture.js:50.\n'
     + '- [P2] lib/cache.js:31 - Second finding: invalidate deleted entries - Prevent stale reads.\n'
     + '\nReproduce through lib/fixture.js:50, then run the existing checks.\n';
   h.submit(id, 7);
