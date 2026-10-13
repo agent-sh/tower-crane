@@ -7,6 +7,7 @@ const path = require('node:path');
 const cp = require('node:child_process');
 const { ROOT, TMP_ROOT } = require('./helpers');
 const { isMasked } = require('../lib/masked-merge');
+const { FILES: SANDBOX_PATHS } = require('../lib/claude-sandbox-placeholders');
 
 const SHIM = path.join(ROOT, 'lib', 'shim.js');
 
@@ -29,8 +30,18 @@ test('masked file names match case-insensitively through the sandbox search dept
     ['lib/bashrc', false],
     ['lib/.bashrc.backup', false],
     ['web/vscode/settings.json', false],
-    ['.claude/hooks/run.md', false],
+    ['.claude/hooks/run.md', true],
+    ['.claude/settings.json', true],
+    ['.CLAUDE/Settings.Local.JSON', true],
+    ['web/.claude/settings.json', true],
+    ['.claude/unknown.json', false],
   ]) assert.equal(isMasked(file), masked, file);
+});
+
+test('every known root sandbox placeholder is covered by the Git mask classifier', () => {
+  for (const file of SANDBOX_PATHS) {
+    assert.ok(isMasked(file), file);
+  }
 });
 
 function git(args, cwd, env) {
@@ -218,8 +229,35 @@ test('a nested protected file behind a read-only parent moves through the shim',
   assert.equal(f.git(['status', '--porcelain']), '');
 });
 
+test('merge and checkout preserve all protected Claude configuration entries', (t) => {
+  for (const file of [
+    '.claude/settings.json', '.claude/settings.local.json', '.claude/launch.json',
+    '.claude/loop.md', '.claude/scheduled_tasks.json', '.claude/skills/x/SKILL.md',
+    '.claude/hooks/pre.sh', '.claude/output-styles/style.md',
+    '.claude/routines/routine.md', '.claude/workflows/workflow.md',
+  ]) {
+    for (const operation of ['merge', 'checkout']) {
+      const f = fixture(t, {
+        base: { 'a.txt': 'a\n', [file]: 'v1\n' },
+        task: { 'b.txt': 'b\n' },
+        main: { 'a.txt': 'a2\n', [file]: 'v2\n' },
+      });
+      fs.writeFileSync(path.join(f.wt, file), 'mount\n');
+      f.readOnly(file);
+      const result = operation === 'merge'
+        ? f.merge('--no-edit', 'origin/main')
+        : f.checkout('--detach', 'origin/main');
+      assert.equal(result.status, 0, `${operation} ${file}: ${result.stderr}`);
+      assert.equal(fs.readFileSync(path.join(f.wt, file), 'utf8'), 'mount\n', `${operation} ${file}`);
+      assert.equal(f.show(`HEAD:${file}`), 'v2', `${operation} ${file}`);
+      assert.equal(fs.readFileSync(path.join(f.wt, 'a.txt'), 'utf8'), 'a2\n');
+      assert.equal(f.git(['status', '--porcelain']), '', `${operation} ${file}`);
+    }
+  }
+});
+
 test('a masked move materializes protected nested names that did not exist before it', (t) => {
-  const added = ['web/.Bashrc', 'web/.VSCode/settings.json'];
+  const added = ['web/.Bashrc', 'web/.VSCode/settings.json', '.claude/skills/new/SKILL.md'];
   for (const operation of ['merge', 'checkout']) {
     const f = fixture(t, {
       base: { '.mcp.json': 'v1\n', 'a.txt': 'a\n' },
