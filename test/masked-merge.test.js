@@ -5,8 +5,8 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
-const { ROOT, TMP_ROOT } = require('./helpers');
-const { isMasked } = require('../lib/masked-merge');
+const { ROOT, TMP_ROOT, cachedFixture } = require('./helpers');
+const { isMasked, MASKED_DIRS } = require('../lib/masked-merge');
 const { FILES: SANDBOX_PATHS } = require('../lib/claude-sandbox-placeholders');
 
 const SHIM = path.join(ROOT, 'lib', 'shim.js');
@@ -50,6 +50,10 @@ function git(args, cwd, env) {
 
 function commit(dir, files, env, message) {
   for (const [rel, text] of Object.entries(files)) {
+    if (text === null) {
+      fs.rmSync(path.join(dir, rel), { recursive: true, force: true });
+      continue;
+    }
     fs.mkdirSync(path.dirname(path.join(dir, rel)), { recursive: true });
     fs.writeFileSync(path.join(dir, rel), text);
   }
@@ -60,7 +64,7 @@ function commit(dir, files, env, message) {
 // A source repository where origin/main is ahead of the task branch B: the
 // files in `main` change on main, the files in `task` on the branch. The
 // worktree is a clone with B checked out from origin/feat.
-function fixture(t, { base, task, main }, { masks = true } = {}) {
+function fixture(t, { base, task, main }, { masks = true, source } = {}) {
   const root = fs.mkdtempSync(path.join(TMP_ROOT, 'masked-merge-'));
   const permissions = [];
   t.after(() => {
@@ -77,14 +81,16 @@ function fixture(t, { base, task, main }, { masks = true } = {}) {
   // A sandbox passes its own git config this way; its excludes file hides masked paths, so the fixture's repositories must not see it.
   for (const k of Object.keys(env)) if (/^GIT_CONFIG_(COUNT|KEY_\d+|VALUE_\d+|PARAMETERS)$/.test(k)) delete env[k];
 
-  const src = path.join(root, 'src');
-  fs.mkdirSync(src);
-  git(['init', '-q', '-b', 'main'], src, env);
-  commit(src, base, env, 'base');
-  git(['checkout', '-q', '-b', 'feat'], src, env);
-  commit(src, task, env, 'task');
-  git(['checkout', '-q', 'main'], src, env);
-  commit(src, main, env, 'main');
+  const src = source || path.join(root, 'src');
+  if (!source) {
+    fs.mkdirSync(src);
+    git(['init', '-q', '-b', 'main'], src, env);
+    commit(src, base, env, 'base');
+    git(['checkout', '-q', '-b', 'feat'], src, env);
+    commit(src, task, env, 'task');
+    git(['checkout', '-q', 'main'], src, env);
+    commit(src, main, env, 'main');
+  }
   const wt = path.join(root, 'wt');
   git(['clone', '-q', src, wt], root, env);
   git(['checkout', '-q', '-b', 'B', 'origin/feat'], wt, env);
@@ -256,8 +262,91 @@ test('merge and checkout preserve all protected Claude configuration entries', (
   }
 });
 
+test('every shared mount supports present binds and absent character placeholders for all Git moves', (t) => {
+  let cells = 0;
+  const mounts = SANDBOX_PATHS.map(mount => ({
+    mount,
+    kind: MASKED_DIRS.includes(mount) ? 'directory' : 'file',
+    file: MASKED_DIRS.includes(mount) ? `${mount}/new/file.txt` : mount,
+  }));
+  for (const { mount, kind, file } of mounts) {
+    for (const edit of ['add', 'change', 'delete']) {
+      for (const present of [false, true]) {
+        for (const operation of ['merge', 'checkout']) {
+          const seed = cachedFixture(t, `masked:${mount}:${edit}`, h => {
+            commit(h.repo, { 'a.txt': 'a\n', ...(edit === 'add' ? {} : { [file]: 'old\n' }) }, h.env, 'base');
+            git(['checkout', '-q', '-b', 'feat'], h.repo, h.env);
+            commit(h.repo, { 'b.txt': 'b\n' }, h.env, 'task');
+            git(['checkout', '-q', 'main'], h.repo, h.env);
+            commit(h.repo, { 'a.txt': 'a2\n', [file]: edit === 'delete' ? null : 'new\n' }, h.env, 'main');
+            return { source: h.repo };
+          });
+          const f = fixture(t, {}, { source: seed.source });
+          const target = path.join(f.git(['rev-parse', '--show-toplevel']), mount);
+          fs.rmSync(target, { recursive: true, force: true });
+          fs.mkdirSync(path.dirname(target), { recursive: true });
+          if (present && kind === 'directory') {
+            fs.mkdirSync(path.dirname(path.join(f.wt, file)), { recursive: true });
+            fs.writeFileSync(path.join(f.wt, file), 'mount\n');
+          } else {
+            fs.writeFileSync(target, 'mount\n');
+          }
+          const preload = path.join(f.wt, '.git', 'mask-device.js');
+          const trace = path.join(f.wt, '.git', 'move-trace');
+          f.env.GIT_TRACE = trace;
+          fs.writeFileSync(preload, `
+const fs = require('node:fs');
+const path = require('node:path');
+const lstat = fs.lstatSync;
+const access = fs.accessSync;
+fs.lstatSync = (file, ...args) => {
+  const stat = lstat(file, ...args);
+  if (!${present} && path.resolve(file) === ${JSON.stringify(target)}) {
+    stat.mode = 0o20666;
+    stat.isCharacterDevice = () => true;
+  }
+  return stat;
+};
+fs.accessSync = (file, mode) => {
+  const resolved = path.resolve(file);
+  if (mode === fs.constants.W_OK && (resolved === ${JSON.stringify(target)} || resolved.startsWith(${JSON.stringify(target + path.sep)}))) {
+    if (!${present}) return;
+    throw Object.assign(new Error('read-only bind'), { code: 'EROFS' });
+  }
+  return access(file, mode);
+};
+`);
+          f.env.NODE_OPTIONS = `${f.env.NODE_OPTIONS || ''} --require ${JSON.stringify(preload)}`;
+          const label = `${mount} (${kind}), ${present ? 'present bind' : 'absent device'}, ${edit}, ${operation}`;
+          const result = operation === 'merge'
+            ? f.merge('--no-edit', 'origin/main')
+            : f.checkout('--detach', 'origin/main');
+          assert.equal(result.status, 0, `${label}: ${result.stderr}`);
+          assert.match(fs.readFileSync(trace, 'utf8'), /git read-tree -m -u/, label);
+          const visible = present && kind === 'directory' ? path.join(f.wt, file) : target;
+          assert.equal(fs.readFileSync(visible, 'utf8'), 'mount\n', label);
+          assert.equal(fs.readFileSync(path.join(f.wt, 'a.txt'), 'utf8'), 'a2\n');
+          if (edit === 'delete') {
+            assert.equal(f.git(['ls-tree', '-r', 'HEAD', '--', file]), '', label);
+            assert.equal(f.git(['ls-files', '--', file]), '', label);
+          } else {
+            assert.equal(f.show(`HEAD:${file}`), 'new', label);
+            assert.match(f.git(['ls-files', '-v', '--', file]), /^S /, label);
+          }
+          // Private excludes hide mount points left untracked by a deletion.
+          fs.appendFileSync(path.join(f.wt, '.git', 'info', 'exclude'), `\n/${mount}\n`);
+          assert.equal(f.git(['status', '--porcelain']), '', label);
+          cells++;
+        }
+      }
+    }
+  }
+  assert.equal(cells, SANDBOX_PATHS.length * 2 * 3 * 2);
+  t.diagnostic(`${cells} mount/startup/edit/operation cells passed`);
+});
+
 test('a masked move materializes protected nested names that did not exist before it', (t) => {
-  const added = ['web/.Bashrc', 'web/.VSCode/settings.json', '.claude/skills/new/SKILL.md'];
+  const added = ['web/.Bashrc', 'web/.VSCode/settings.json', 'web/.claude/skills/new/SKILL.md'];
   for (const operation of ['merge', 'checkout']) {
     const f = fixture(t, {
       base: { '.mcp.json': 'v1\n', 'a.txt': 'a\n' },

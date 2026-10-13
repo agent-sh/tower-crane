@@ -253,6 +253,8 @@ const MUTANTS = [
     from: 'fs.accessSync(p, fs.constants.W_OK);', to: 'void p;', tests: ['test/masked-merge.test.js'] },
   { id: 'masked-readonly-parent-ignored', area: 'git', file: 'lib/masked-merge.js',
     from: 'readOnly(path.join(cwd, path.dirname(p)))', to: 'false', tests: ['test/masked-merge.test.js'] },
+  { id: 'masked-character-device-is-writable', area: 'git', file: 'lib/masked-merge.js',
+    from: 'if (stat.isCharacterDevice()) return true;', to: 'if (false) return true;', tests: ['test/masked-merge.test.js'] },
   { id: 'masked-claude-settings-omitted', area: 'git', file: 'lib/claude-sandbox-placeholders.js',
     from: "['.claude/settings.json', 'file']", to: "['.claude/other-settings.json', 'file']", tests: ['test/masked-merge.test.js'] },
   { id: 'masked-claude-hooks-omitted', area: 'git', file: 'lib/claude-sandbox-placeholders.js',
