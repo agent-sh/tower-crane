@@ -1,0 +1,1 @@
+- Make the stacked-dispatch regression wait for link completion before checking its GitHub call, including when initial observation is deferred.
