@@ -27,6 +27,20 @@ function checkStdinReads(root) {
   if (found.length) throw new Error(found.join('\n'));
 }
 
+// A release change adds the section for package.json's version as the first release
+// heading of CHANGELOG.md; every other change leaves the file alone.
+function releaseEdit(root, git, sha) {
+  let version;
+  try { version = JSON.parse(readText(path.join(root, 'package.json'))).version; } catch { return false; }
+  if (typeof version !== 'string' || !fs.existsSync(path.join(root, 'CHANGELOG.md'))) return false;
+  const heading = (text) => text.split('\n').find((line) => line.startsWith('## '));
+  const isVersion = (line) => line === `## ${version}` || (line || '').startsWith(`## ${version} `);
+  if (!isVersion(heading(readText(path.join(root, 'CHANGELOG.md'))))) return false;
+  let before = '';
+  try { before = normalizeText(git(['show', `${sha}:CHANGELOG.md`])); } catch { /* no archive at the base */ }
+  return !before.split('\n').some(isVersion);
+}
+
 function checkChanges(root, base) {
   const git = (args) => cp.execFileSync('git', args, { cwd: root, encoding: 'utf8', timeout: 30000 });
   const sha = normalizeText(git(['rev-parse', '--verify', `${base}^{commit}`])).trim();
@@ -41,7 +55,9 @@ function checkChanges(root, base) {
     const status = fields[i];
     const file = fields[i + 1].replace(/\\/g, '/');
     changed++;
-    if (file === 'CHANGELOG.md') throw new Error('do not edit CHANGELOG.md; add changelog.d/<task-or-pr>.md');
+    if (file === 'CHANGELOG.md' && (status === 'D' || !releaseEdit(root, git, sha))) {
+      throw new Error('do not edit CHANGELOG.md; add changelog.d/<task-or-pr>.md (only a release adds its "## <version>" section)');
+    }
     if (file.startsWith('changelog.d/') && file !== 'changelog.d/README.md') {
       // Fragments are draft release notes: a later change may correct one it made untrue, but not remove it.
       if (status === 'D') throw new Error(`${file} belongs to its original change; correct it instead of deleting it`);

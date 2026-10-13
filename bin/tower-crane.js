@@ -279,7 +279,7 @@ function generalHelp() {
   }
   lines.push('', 'global options:', ...Object.entries(GLOBAL).map(([n, s]) => flagLine(n, s)));
   lines.push('', `exit status: 0 done, 1 refused (reason on stderr), 2 usage error, 3 lock not acquired within ${S.LOCK_WAIT_MS / 1000} s`);
-  lines.push('run tower-crane <command> --help for its options; docs/cli.md and docs/state.md hold the contract');
+  lines.push('run tower-crane <command> --help for its options, tower-crane --version for the version; docs/cli.md and docs/state.md hold the contract');
   return lines.join('\n');
 }
 
@@ -377,6 +377,7 @@ function resolveCommand(argv) {
   while (i < argv.length && argv[i].startsWith('-')) {
     const tok = argv[i];
     const name = tok.replace(/^--?/, '').split('=')[0];
+    if (tok === '--version') return { version: true };
     if (tok === '-h' || name === 'help' || name === 'json') {
       lead.push(tok);
       i += 1;
@@ -427,6 +428,10 @@ async function main(argv) {
   let jsonOut = argv.includes('--json');
   try {
     resolved = resolveCommand(argv);
+    if (resolved.version) {
+      out(require('../package.json').version);
+      return 0;
+    }
     if (resolved.help) {
       if (resolved.help === true) {
         if (argv.length) {

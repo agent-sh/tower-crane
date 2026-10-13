@@ -87,4 +87,7 @@ test('help lists every command and per-command help works', (t) => {
   assert.match(bad.stderr, /unknown option --bogus/);
   const unknown = h.run(['frobnicate']);
   assert.equal(unknown.code, 2);
+  const version = h.run(['--version']);
+  assert.equal(version.code, 0, version.stderr);
+  assert.equal(version.stdout.trim(), require('../package.json').version);
 });

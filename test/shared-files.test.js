@@ -250,8 +250,10 @@ test('release assembly is deterministic and leaves the archive and fragments unc
   const release = f.script('changelog.js');
   assert.equal(release.status, 0, release.stderr);
   const entries = ['T999.md', ...fs.readdirSync(path.join(f.h.repo, 'changelog.d')).filter((name) => !['README.md', 'T999.md'].includes(name)).sort()];
+  // The fixture commits the repository's fragments with its release notes, so only T999 is unreleased.
   const expected = '# Changelog\n\n' + [
-    ...entries.map((name) => f.read(`changelog.d/${name}`).trim()),
+    '## Unreleased',
+    f.read('changelog.d/T999.md').trim(),
     archive.slice('# Changelog\n'.length).trim(),
   ].join('\n\n') + '\n';
   assert.equal(release.stdout, expected);
@@ -308,9 +310,11 @@ test('generated table cells escape every backslash and pipe in one pass', (t) =>
 
 test('release fragments follow landing history rather than task or PR filename order', (t) => {
   const f = fixture(t);
-  f.h.git(['rm', 'changelog.d/T86.md', 'changelog.d/T100.md']);
-  f.h.git(['commit', '-qm', 'prepare release history']);
   const oldest = ['T9.md', 'T86.md', 'T100.md', '123.md'];
+  // The fixture starts from this repository's fragments; names this test lands must be new.
+  const taken = [...oldest, 'T7.md', 'T2.md'].filter((name) => fs.existsSync(path.join(f.h.repo, 'changelog.d', name)));
+  f.h.git(['rm', '-q', ...taken.map((name) => `changelog.d/${name}`)]);
+  f.h.git(['commit', '-qm', 'prepare release history']);
   for (const name of oldest) {
     f.write(`changelog.d/${name}`, `- Landed ${name}.\n`);
     f.h.git(['add', `changelog.d/${name}`]);
@@ -329,4 +333,37 @@ test('release fragments follow landing history rather than task or PR filename o
   assert.equal(release.status, 0, release.stderr);
   const bullets = release.stdout.split('\n').filter((line) => line.startsWith('- Landed '));
   assert.deepEqual(bullets, ['T7.md', 'T2.md', ...oldest.reverse()].map((name) => `- Landed ${name}.`));
+});
+
+test('a release section marks the fragments before it released, and only a release edits CHANGELOG.md', (t) => {
+  const f = fixture(t);
+  f.write('changelog.d/T999.md', '- Shipped in 9.9.0.\n');
+  f.h.git(['add', 'changelog.d/T999.md']);
+  f.h.git(['commit', '-qm', 'land T999']);
+  const base = f.h.git(['rev-parse', 'HEAD']);
+  const check = () => f.script('check-shared-files.js', ['--base', base]);
+  const notes = f.read('CHANGELOG.md');
+  const section = (heading) => notes.replace('# Changelog\n', `# Changelog\n\n${heading}\n\n- Release notes.\n`);
+  f.write('package.json', '{ "name": "fixture", "version": "9.9.0" }\n');
+  f.write('changelog.d/T1000.md', '- The 9.9.0 release.\n');
+  f.write('CHANGELOG.md', section('## 9.8.0 (2026-01-02)'));
+  assert.match(check().stderr, /do not edit CHANGELOG.md/, 'the section must be for the package.json version');
+  f.write('CHANGELOG.md', notes.trimEnd() + '\n\n## 9.9.0 (2026-01-02)\n\n- Release notes.\n');
+  assert.match(check().stderr, /do not edit CHANGELOG.md/, 'the new section must be the first release heading');
+  f.write('CHANGELOG.md', section('## 9.9.0 (2026-01-02)'));
+  const release = check();
+  assert.equal(release.status, 0, release.stderr);
+  f.h.git(['add', '.']);
+  f.h.git(['commit', '-qm', 'release 9.9.0']);
+  const assembled = f.script('changelog.js');
+  assert.equal(assembled.status, 0, assembled.stderr);
+  assert.equal(assembled.stdout, f.read('CHANGELOG.md'), 'nothing is unreleased right after a release');
+  f.write('changelog.d/T1001.md', '- After the release.\n');
+  const after = f.script('changelog.js').stdout;
+  assert.ok(after.startsWith('# Changelog\n\n## Unreleased\n\n- After the release.\n\n## 9.9.0 (2026-01-02)\n'), after);
+  assert.ok(!after.includes('Shipped in 9.9.0') && !after.includes('The 9.9.0 release'));
+  const next = f.h.git(['rev-parse', 'HEAD']);
+  f.write('CHANGELOG.md', f.read('CHANGELOG.md') + '- Late edit.\n');
+  const late = f.script('check-shared-files.js', ['--base', next]);
+  assert.match(late.stderr, /do not edit CHANGELOG.md/, 'a released section is not reopened');
 });

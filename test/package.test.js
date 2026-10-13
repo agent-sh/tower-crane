@@ -55,6 +55,21 @@ test('the npm package ships the plugin and loads pi skills through its CLI', (t)
     'hooks/tower-crane.mjs',
   ]) assert.ok(files.includes(file), `npm package is missing ${file}`);
   assert.ok(!files.includes('commands/tower-crane.md'), 'the skill must be the only tower-crane entry point');
+  // The package carries the contract docs the CLI, skills and agent files point to,
+  // not the benchmark evidence, screenshots and review records kept in the repository.
+  assert.deepEqual(files.filter((file) => file.startsWith('docs/')).sort(), [
+    'docs/automation.md', 'docs/builtin-ladder.json', 'docs/cli.md', 'docs/design.md', 'docs/ladder.md', 'docs/state.md',
+  ]);
+  assert.ok(files.includes('CHANGELOG.md') && files.includes('LICENSE') && files.includes('README.md'));
+  assert.ok(!files.some((file) => /^(test|scripts|research|tools|changelog\.d)\/|^\.tower-crane\//.test(file)),
+    'tests, scripts, research, fragments and state stay out of the package');
+  assert.ok(artifact.size < 2 * 1024 * 1024, `packed size ${artifact.size} bytes`);
+  const plugin = JSON.parse(fs.readFileSync(path.join(ROOT, '.claude-plugin/plugin.json'), 'utf8'));
+  const marketplace = JSON.parse(fs.readFileSync(path.join(ROOT, '.claude-plugin/marketplace.json'), 'utf8'));
+  for (const [where, version] of [['plugin.json', plugin.version], ['marketplace.json', marketplace.version],
+    ...marketplace.plugins.map((p) => [`marketplace.json plugin ${p.name}`, p.version])]) {
+    assert.equal(version, metadata.version, `${where} version matches package.json`);
+  }
   const components = JSON.parse(fs.readFileSync(path.join(ROOT, 'components.json'), 'utf8'));
   for (const [type, names] of Object.entries(components)) {
     for (const name of names) {
