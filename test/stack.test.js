@@ -39,13 +39,15 @@ test('detached spawn links the PR after its worker submits and exits', async (t)
   const f = setup(t);
   worker(f);
   f.h.ok(['spawn', '--task', 'T2']);
-  const task = await waitOnRepo(f.h, () => {
+  const { task, order } = await waitOnRepo(f.h, () => {
     const task = f.h.json(['task', 'show', 'T2']);
-    return task.stack?.linked && task;
+    if (!task.stack?.linked) return false;
+    // A final observer call can still be publishing the fixture after linking.
+    return { task, order: f.read().order };
   });
   assert.equal(task.stack.linked, true);
   assert.equal(task.status, 'submitted');
-  assert.deepEqual(f.read().order, [11, 12]);
+  assert.deepEqual(order, [11, 12]);
 });
 
 test('a worktree prepared before its dependency was submitted moves onto the dependency head at dispatch', (t) => {
