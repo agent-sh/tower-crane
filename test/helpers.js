@@ -379,9 +379,21 @@ function cachedFixture(t, key, build) {
   h.env.GIT_CONFIG_GLOBAL = path.join(h.base, 'gitconfig');
   h.env.TOWER_CRANE_CONFIG = path.join(h.base, 'user-config', 'config.json');
   if (from.gateSettings) h.gateSettings = from.gateSettings.map(rewrite);
-  const worktrees = path.join(h.base, 'repo-worktrees');
-  if (fs.existsSync(worktrees)) h.git(['worktree', 'repair', ...fs.readdirSync(worktrees).map((name) => path.join(worktrees, name))]);
+  repairWorktrees(h);
   return Object.assign(h, JSON.parse(rewrite(JSON.stringify(template.fields))));
+}
+
+// Relinks a copied repository's task worktrees to the copy. A copy turns the
+// link to each relocated admin directory into an absolute one naming the
+// template, and git worktree repair does not follow those links:
+// lib/worktree.js relinkAdmins joins them as after a project move, and git
+// repairs the rest.
+function repairWorktrees(h) {
+  const root = path.join(h.base, 'repo-worktrees');
+  if (!fs.existsSync(root)) return;
+  require('../lib/worktree').relinkAdmins(h.repo, path.join(h.repo, '.git'));
+  const trees = fs.readdirSync(root).filter((name) => name !== '.git-admin').map((name) => path.join(root, name));
+  if (trees.length) h.git(['worktree', 'repair', ...trees]);
 }
 
 function context(t, base, options = {}) {
@@ -669,4 +681,4 @@ try {
   }
 }
 
-module.exports = { makeRepo, makeProjectRepo, makeTaskRepo, copyRepo, cachedFixture, fixtureLadder, pinRung, pinLiveRung, stubRungs, STUB_RUNG, HARNESS_GUARD, run, runPty, PTY_AVAILABLE, runAsync, BIN, ROOT, HOOKS, real, TMP_ROOT, detachedAlive };
+module.exports = { repairWorktrees, makeRepo, makeProjectRepo, makeTaskRepo, copyRepo, cachedFixture, fixtureLadder, pinRung, pinLiveRung, stubRungs, STUB_RUNG, HARNESS_GUARD, run, runPty, PTY_AVAILABLE, runAsync, BIN, ROOT, HOOKS, real, TMP_ROOT, detachedAlive };

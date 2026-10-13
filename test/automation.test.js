@@ -626,9 +626,172 @@ test('submission runs real software gates once through the existing waiter', (t)
   assert.ok(task.evidence.every((e) => e.commands.length && e.source === `check ${e.type}`));
   assert.equal(task.status, 'submitted');
   h.consume();
-  assert.equal(h.readState('tasks.json').tasks[0].evidence.length, 3, 'duplicate event delivery runs no gate twice');
+  assert.deepEqual(h.readState('tasks.json').tasks[0].evidence.map((e) => e.type),
+    ['tests', 'clean', 'ci'], 'startup refreshes pending CI, records no unchanged result and reuses the other gates');
+  assert.ok(h.github().calls.filter((a) => a[0] === 'api').length > 2, 'startup read the checks again');
   assert.equal(h.logs().filter((e) => e.cmd === 'spawn').length, 0, 'pending CI starts no model');
 });
+
+for (const waiting of ['runs', 'mergeability']) {
+  test(`pending CI ${waiting} completes on the timer without a completion notification`, async (t) => {
+    const h = setup(t, { ci: 'pending' });
+    h.submit();
+    if (waiting === 'mergeability') {
+      const github = h.github();
+      github.prs['7'].mergeable = github.prs['7'].mergeStateStatus = 'UNKNOWN';
+      h.saveGithub(github);
+    }
+    const checked = h.run(['check', 'ci', 'T1', '--agent', 'orchestrator']);
+    assert.equal(checked.code, 1);
+    assert.match(checked.stdout, /ci PENDING/);
+    assert.doesNotMatch(checked.stdout, /ci FAIL/);
+    h.consume();
+    const latest = () => h.readState('tasks.json').tasks[0].evidence.findLast((e) => e.type === 'ci');
+    assert.equal(latest().pending, true);
+    assert.equal(latest().infrastructure_failure, undefined);
+    assert.equal(h.json(['task', 'show', 'T1']).status, 'submitted');
+    assert.match(h.ok(['status']), /pending ci/);
+    const board = fs.readFileSync(path.join(h.state, 'sketch.html'), 'utf8');
+    assert.match(board, /class="pip pending">ci pending/);
+    assert.doesNotMatch(board, /class="pip fail">ci failed/);
+    const clock = path.join(h.base, 'ci-clock');
+    const start = Date.now();
+    fs.writeFileSync(clock, String(start));
+    const reconciled = () => h.logs().filter((e) => e.cmd === 'automation reconcile').length;
+    const before = reconciled();
+    // The waiter's own timeout ends this engine run; the test asserts it timed out without waking.
+    const waiter = h.runAsync(['wait', '--types', 'never', '--timeout', '10', '--agent', 'orchestrator'], // wait-allow: the engine run ends at its own timeout
+      { hooks: { HOOK_CLOCK_FILE: clock } });
+    t.after(() => waiter);
+    let ended = false;
+    waiter.then(() => { ended = true; });
+    // Readiness is the record; a waiter that ended first fails at once.
+    const until = (probe) => waitOnRepo(h, () => {
+      if (probe()) return true;
+      if (ended) throw new Error('the waiter ended before the CI check completed');
+      return false;
+    }, 'CI check completed');
+    await until(() => reconciled() > before);
+    const github = h.github();
+    github.ci[h.sha] = 'success';
+    github.prs['7'].mergeable = 'MERGEABLE';
+    github.prs['7'].mergeStateStatus = 'CLEAN';
+    h.saveGithub(github);
+    fs.writeFileSync(clock, String(start + 60001));
+    await until(() => latest().ok);
+    assert.equal((await waiter).code, 2);
+    assert.equal(latest().pending, undefined);
+    assert.equal(h.logs().some((e) => e.cmd === 'ci completed' || e.cmd === 'rework'), false);
+    assert.equal(h.logs().filter((e) => e.cmd === 'check tests').length, 1);
+    assert.equal(h.logs().filter((e) => e.cmd === 'check clean').length, 1);
+  });
+}
+
+test('unchanged pending CI is rechecked each minute without new records, and CI that never starts stalls after 30 minutes', async (t) => {
+  const h = setup(t, { ci: 'none' });
+  h.submit();
+  h.consume();
+  const ci = () => h.readState('tasks.json').tasks[0].evidence.filter((e) => e.type === 'ci');
+  assert.equal(ci().length, 1);
+  assert.equal(ci()[0].pending, true);
+  assert.equal(ci()[0].not_running, true);
+  const clock = path.join(h.base, 'ci-clock');
+  let now = Date.now();
+  fs.writeFileSync(clock, String(now));
+  const reconciles = () => h.logs().filter((e) => e.cmd === 'automation reconcile');
+  const rechecked = () => {
+    const sources = new Set(reconciles().map((e) => e.id));
+    return h.logs().filter((e) => e.cmd === 'automation' && sources.has(e.detail.source) && e.detail.phase === 'done').length;
+  };
+  const waiter = h.runAsync(['wait', '--types', 'worker-message', '--timeout', '300', '--agent', 'orchestrator'],
+    { hooks: { HOOK_CLOCK_FILE: clock } });
+  t.after(() => waiter);
+  let ended = false;
+  waiter.then(() => { ended = true; });
+  const until = (probe, what) => waitOnRepo(h, () => {
+    if (probe()) return true;
+    if (ended) throw new Error(`the waiter ended first: ${what}`);
+    return false;
+  }, what);
+  await until(() => rechecked() >= 1, 'startup rechecks pending CI');
+  const checks = h.logs().filter((e) => e.cmd === 'check ci').length;
+  const tasks = h.readState('tasks.json').tasks;
+  for (let minute = 1; minute <= 6; minute++) {
+    const before = rechecked();
+    now += 60001;
+    fs.writeFileSync(clock, String(now));
+    await until(() => rechecked() > before, `minute ${minute} rechecks pending CI`);
+  }
+  assert.equal(ci().length, 1, 'an unchanged pending result adds no evidence');
+  assert.equal(h.logs().filter((e) => e.cmd === 'check ci').length, checks, 'and no gate event');
+  assert.deepEqual(h.readState('tasks.json').tasks, tasks, 'no task record changes');
+  assert.match(h.ok(['status']), /pending ci/);
+  now += 25 * 60000;
+  fs.writeFileSync(clock, String(now));
+  await until(() => ci().at(-1).stalled === true, 'CI that never started stalls after 30 minutes');
+  assert.equal(ci().length, 2);
+  assert.match(ci().at(-1).summary, /Stalled: no CI run has been queued or running at this head since/);
+  assert.equal(h.readState('tasks.json').tasks[0].status, 'submitted', 'a stall is not a verdict on the change');
+  assert.match(h.ok(['status']), /stalled ci/);
+  assert.match(h.ok(['task', 'show', 'T1']), /ci stalled/);
+  const item = h.json(['inbox', '--agent', 'orchestrator']).items.find((i) => i.kind === 'ci_stalled');
+  assert.equal(item.task, 'T1');
+  assert.equal(item.addressed_to, 'orchestrator');
+  assert.deepEqual(item.action.argv, ['check', 'ci', 'T1']);
+  const page = fs.readFileSync(path.join(h.state, 'sketch.html'), 'utf8');
+  assert.match(page, /class="pip stalled">ci stalled/);
+  const settled = reconciles().length;
+  const calls = h.github().calls.length;
+  for (let minute = 1; minute <= 3; minute++) {
+    now += 60001;
+    fs.writeFileSync(clock, String(now));
+    await new Promise((resolve) => setTimeout(resolve, 1500)); // wait-allow: give the engine each simulated minute to show it schedules no recheck
+  }
+  assert.equal(reconciles().length, settled, 'a stalled head gets no scheduled recheck');
+  assert.equal(h.github().calls.length, calls, 'and no GitHub call');
+  h.ok(['msg', '--to', 'orchestrator', '--task', 'T1', 'done', '--agent', 'w-1']);
+  assert.equal((await waiter).code, 0);
+  assert.equal(h.logs().some((e) => e.cmd === 'rework'), false);
+});
+
+test('pending CI on a PR closed without merging stalls at the next recheck', (t) => {
+  const h = setup(t, { ci: 'pending' });
+  h.submit();
+  h.consume();
+  const latest = () => h.readState('tasks.json').tasks[0].evidence.findLast((e) => e.type === 'ci');
+  assert.equal(latest().pending, true);
+  const github = h.github();
+  github.prs['7'].state = 'CLOSED';
+  h.saveGithub(github);
+  h.consume();
+  assert.equal(latest().stalled, true);
+  assert.match(latest().summary, /closed without merging/);
+  assert.equal(h.readState('tasks.json').tasks[0].status, 'submitted');
+  const checks = () => h.logs().filter((e) => e.cmd === 'check ci').length;
+  const before = checks();
+  h.consume();
+  assert.equal(checks(), before, 'a stalled head is not checked again on its own');
+  assert.equal(latest().stalled, true);
+});
+
+for (const type of ['tests', 'clean', 'ci', 'sources']) {
+  test(`status and the board label the current failed ${type} gate`, (t) => {
+    const h = setup(t, { kind: type === 'sources' ? 'research' : 'code', ci: type === 'ci' ? 'failure' : 'success' });
+    h.submit();
+    if (type === 'tests') h.ok(['project', 'set', '--tests-mode', 'run-only',
+      '--tests-cmd', 'node -e "process.exit(1)"']);
+    if (type === 'clean') h.env.FIXTURE_GATE_OK = '0';
+    assert.equal(h.run(['check', type, 'T1', '--agent', 'orchestrator']).code, 1);
+    assert.match(h.ok(['status']), new RegExp(`failed ${type}`));
+    assert.match(h.ok(['task', 'show', 'T1']), new RegExp(`${type} failed`));
+    const page = fs.readFileSync(path.join(h.state, 'sketch.html'), 'utf8');
+    const sheet = page.match(/<article id="T1"[\s\S]*?<\/article>/)[0];
+    assert.match(sheet, new RegExp(`class="pip fail">${type} failed`));
+    assert.match(sheet, new RegExp(`failed ${type}`));
+    const task = h.json(['task', 'show', 'T1']);
+    assert.equal(task.gates.gates.find((g) => g.type === type).state, 'failed');
+  });
+}
 
 test('background reactions leave vacant, released, taken-over and expired leases available for handoff', (t) => {
   const h = setup(t, { ci: 'pending' });
@@ -760,7 +923,7 @@ test('CI completion refreshes a pending receipt at the exact head and merges aft
   h.ok(['ci', 'completed', 'T1', '--sha', h.sha, '--agent', 'orchestrator']);
   const task = h.readState('tasks.json').tasks[0];
   assert.equal(task.status, 'accepted');
-  assert.deepEqual(task.evidence.filter((e) => e.type === 'ci').map((e) => e.ok), [false, false, true]);
+  assert.deepEqual(task.evidence.filter((e) => e.type === 'ci').map((e) => e.ok), [false, true]);
   assert.equal(task.evidence.at(-1).type, 'merge');
   const calls = h.github().calls.filter((a) => a[0] === 'pr' && a[1] === 'merge');
   assert.equal(calls.length, 1);
@@ -1494,6 +1657,8 @@ test('a matching UNKNOWN head runs submission gates during the same wait', async
   h.consume();
   assert.equal(h.readState('tasks.json').tasks[0].status, 'submitted',
     'UNKNOWN still blocks acceptance even with earlier passing CI and independent review');
+  assert.equal(h.readState('tasks.json').tasks[0].evidence.findLast((e) => e.type === 'ci').pending, true,
+    'UNKNOWN replaces a passing CI receipt with a pending receipt for the timer');
   assert.equal(h.github().calls.some((a) => a[1] === 'merge'), false);
 });
 
@@ -1581,7 +1746,7 @@ test('a completion webhook is only a hint, rejects another repository and ignore
 });
 
 test('concurrent event consumers execute each submission gate only once', async (t) => {
-  const h = setup(t, { ci: 'pending' });
+  const h = setup(t);
   h.submit();
   const results = await Promise.all([
     h.runAsync(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']),
