@@ -254,42 +254,55 @@ test('task add --brief writes the brief in the same command and refuses an unrea
   assert.equal(fs.existsSync(path.join(h.state, 'briefs', 'T2.md')), false);
 });
 
-test('task add keeps the brief of a task whose audit append failed', { skip: process.platform === 'win32' || process.getuid?.() === 0 }, (t) => {
+test('task add whose audit append fails adds nothing and keeps no brief', { skip: process.platform === 'win32' || process.getuid?.() === 0 }, (t) => {
   const h = makeRepo(t);
   h.init();
   const file = path.join(h.base, 'brief.md');
   fs.writeFileSync(file, '# Context\n\nFrom a failed audit.\n');
-  // The audit append fails after tasks.json is written, so the task is persisted and keeps its brief.
+  // The event append is the commit point, so a failed append commits nothing.
   fs.chmodSync(path.join(h.state, 'events.jsonl'), 0o400);
-  const audit = h.run(['task', 'add', '--title', 'Persisted', '--acceptance', 'brief stays', '--brief', file]);
+  const audit = h.run(['task', 'add', '--title', 'Lost', '--acceptance', 'nothing stays', '--brief', file]);
   fs.chmodSync(path.join(h.state, 'events.jsonl'), 0o644);
   assert.equal(audit.code, 1);
-  assert.equal(h.readState('tasks.json').tasks.find((task) => task.id === 'T1').title, 'Persisted');
-  assert.equal(h.ok(['brief', 'get', 'T1']), '# Context\n\nFrom a failed audit.');
+  assert.deepEqual(h.readState('tasks.json').tasks, []);
+  assert.equal(fs.existsSync(path.join(h.state, 'briefs', 'T1.md')), false);
+  assert.deepEqual(fs.readdirSync(h.state).filter((name) => name.startsWith('tasks.json.')), []);
 });
 
-test('task add removes an uncommitted brief before a concurrent add reuses its id', (t) => {
-  const h = makeRepo(t);
-  h.init();
+function racedAdd(h, fail) {
   const file = path.join(h.base, 'brief.md');
-  fs.writeFileSync(file, '# Context\n\nNever committed.\n');
+  fs.writeFileSync(file, '# Context\n\nRaced.\n');
   const receipt = path.join(h.base, 'replacement.json');
   const preload = path.join(__dirname, 'fixtures', 'task-add-race.js');
-  const refused = h.run(['task', 'add', '--title', 'Uncommitted', '--acceptance', 'never added', '--brief', file], {
+  const refused = h.run(['task', 'add', '--title', 'Raced', '--acceptance', 'raced', '--brief', file], {
     env: {
       NODE_OPTIONS: `--require=${JSON.stringify(preload)}`,
-      TEST_ADD_STATE: h.state, TEST_ADD_BIN: BIN, TEST_ADD_RESULT: receipt,
+      TEST_ADD_STATE: h.state, TEST_ADD_BIN: BIN, TEST_ADD_RESULT: receipt, TEST_ADD_FAIL: fail,
       TEST_ADD_OWNER_KEY: h.env.TOWER_CRANE_OWNER_KEY,
     },
   });
   assert.equal(refused.code, 1);
-  assert.match(refused.stderr, /injected tasks.json write failure/);
+  assert.match(refused.stderr, /injected .* write failure/);
   const replacement = JSON.parse(fs.readFileSync(receipt, 'utf8'));
   assert.equal(replacement.status, 0, JSON.stringify(replacement));
-  assert.equal(replacement.stdout.trim(), 'T1');
+  return replacement.stdout.trim();
+}
+
+test('task add removes an uncommitted brief before a concurrent add reuses its id', (t) => {
+  const h = makeRepo(t);
+  h.init();
+  assert.equal(racedAdd(h, 'append'), 'T1');
   assert.deepEqual(h.readState('tasks.json').tasks.map((task) => task.title), ['Different task']);
   assert.equal(fs.existsSync(path.join(h.state, 'briefs', 'T1.md')), false);
   const missing = h.run(['brief', 'get', 'T1']);
   assert.equal(missing.code, 1);
   assert.match(missing.stderr, /T1 has no brief/);
+});
+
+test('task add that fails after logging its event keeps its task and brief, completed by the next writer', (t) => {
+  const h = makeRepo(t);
+  h.init();
+  assert.equal(racedAdd(h, 'rename'), 'T2');
+  assert.deepEqual(h.readState('tasks.json').tasks.map((task) => task.title), ['Raced', 'Different task']);
+  assert.equal(h.ok(['brief', 'get', 'T1']), '# Context\n\nRaced.');
 });
