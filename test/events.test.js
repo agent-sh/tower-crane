@@ -462,7 +462,7 @@ test('a spawned worker that exits before submitting wakes without waiting for it
   assert.equal(e.detail.agent, started.agent);
   assert.equal(e.detail.attempt, started.attempt);
   assert.equal(h.readState('tasks.json').tasks[0].claim.agent, started.agent, 'the exited worker keeps its lease until released');
-  assert.equal(h.run(['wait', '--agent', 'orchestrator', '--types', 'worker-exited', '--timeout', '0.1']).code, 2);
+  assert.equal(h.run(['wait', '--agent', 'orchestrator', '--observe', '--types', 'worker-exited', '--timeout', '0.1']).code, 2);
 });
 
 test('exit observers include attempts for spawns recorded without an attempt field', (t) => {
