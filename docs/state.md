@@ -828,11 +828,17 @@ identity releases it when the process dies. Running receipts from other
 hosts do not count against this host's cap.
 `automation queued` records a blocked notification's source, with
 `executors` set to the cap when the cap blocked it rather than another
-executor of the same task. Queued notifications run in drain order: submission
-order, except that the queued notifications a `gates prioritize` event names
-run first, the most recent request first. While one waits, a later
-notification queues behind it even if a slot is free. A notification queued
-after the request keeps submission order.
+executor of the same task. Queued notifications for accepted, unmerged PR
+tasks run first, in the order of their current `accept` events. This includes
+older notifications that now run a merge and any merged-tree test the merge
+needs. Running reactions are never preempted.
+Submitted tasks follow in submission order, except that the queued
+notifications a `gates prioritize` event names run first among submitted
+work, the most recent request first. An explicit request cannot move
+submitted work ahead of accepted merges or change acceptance order.
+While higher-ranked work waits, a later notification queues behind it even
+if a slot is free. A notification queued after a priority request keeps
+submission order unless its task becomes accepted.
 `gates prioritize ID --reason R` is operational ([Authority](#authority)); it
 records a `gates prioritize` event with `reason`, `sources` (the sources of
 the task's queued notifications at that moment), `queued` (their count) and
