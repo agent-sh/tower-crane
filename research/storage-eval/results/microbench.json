@@ -1,0 +1,137 @@
+[
+  {
+    "option": "A-proto", 
+    "dataset": "live", 
+    "n": 30, 
+    "hook_p50": 288.63, 
+    "hook_p95": 328.85, 
+    "note_p50": 326.34, 
+    "note_p95": 396.25
+  }, 
+  {
+    "option": "B", 
+    "dataset": "live", 
+    "n": 200, 
+    "hook_p50": 0.57, 
+    "hook_p95": 0.78, 
+    "note_p50": 3.6, 
+    "note_p95": 7.02
+  }, 
+  {
+    "option": "C-files", 
+    "dataset": "live", 
+    "n": 200, 
+    "hook_p50": 0.12, 
+    "hook_p95": 0.98, 
+    "note_p50": 0.64, 
+    "note_p95": 2.56
+  }, 
+  {
+    "option": "C-sqlite", 
+    "dataset": "live", 
+    "n": 200, 
+    "hook_p50": 0.13, 
+    "hook_p95": 0.99, 
+    "note_p50": 1.06, 
+    "note_p95": 3.71
+  }, 
+  {
+    "option": "D", 
+    "dataset": "live", 
+    "n": 200, 
+    "hook_p50": 0.47, 
+    "hook_p95": 1.07, 
+    "note_p50": 1.8, 
+    "note_p95": 3.73
+  }, 
+  {
+    "option": "A-proto", 
+    "dataset": "s50", 
+    "n": 30, 
+    "hook_p50": 158.52, 
+    "hook_p95": 188.35, 
+    "note_p50": 246.75, 
+    "note_p95": 275.1
+  }, 
+  {
+    "option": "B", 
+    "dataset": "s50", 
+    "n": 200, 
+    "hook_p50": 0.64, 
+    "hook_p95": 0.76, 
+    "note_p50": 3.73, 
+    "note_p95": 7.66
+  }, 
+  {
+    "option": "C-files", 
+    "dataset": "s50", 
+    "n": 200, 
+    "hook_p50": 0.13, 
+    "hook_p95": 0.94, 
+    "note_p50": 0.62, 
+    "note_p95": 2.0
+  }, 
+  {
+    "option": "C-sqlite", 
+    "dataset": "s50", 
+    "n": 200, 
+    "hook_p50": 0.13, 
+    "hook_p95": 1.01, 
+    "note_p50": 1.11, 
+    "note_p95": 3.74
+  }, 
+  {
+    "option": "D", 
+    "dataset": "s50", 
+    "n": 200, 
+    "hook_p50": 0.44, 
+    "hook_p95": 0.72, 
+    "note_p50": 1.64, 
+    "note_p95": 4.53
+  }, 
+  {
+    "option": "A-proto", 
+    "dataset": "s200", 
+    "n": 30, 
+    "hook_p50": 619.9, 
+    "hook_p95": 737.38, 
+    "note_p50": 690.41, 
+    "note_p95": 797.17
+  }, 
+  {
+    "option": "B", 
+    "dataset": "s200", 
+    "n": 200, 
+    "hook_p50": 0.64, 
+    "hook_p95": 0.8, 
+    "note_p50": 4.0, 
+    "note_p95": 8.58
+  }, 
+  {
+    "option": "C-files", 
+    "dataset": "s200", 
+    "n": 200, 
+    "hook_p50": 0.1, 
+    "hook_p95": 0.97, 
+    "note_p50": 0.62, 
+    "note_p95": 2.49
+  }, 
+  {
+    "option": "C-sqlite", 
+    "dataset": "s200", 
+    "n": 200, 
+    "hook_p50": 0.13, 
+    "hook_p95": 0.98, 
+    "note_p50": 1.23, 
+    "note_p95": 5.08
+  }, 
+  {
+    "option": "D", 
+    "dataset": "s200", 
+    "n": 200, 
+    "hook_p50": 0.44, 
+    "hook_p95": 0.87, 
+    "note_p50": 1.66, 
+    "note_p95": 4.5
+  }
+]
