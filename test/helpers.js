@@ -407,12 +407,18 @@ function context(t, base, options = {}) {
         return [{ ...record, file }];
       }) : [];
     },
+    // Steps that must run before the directory goes, such as stopping processes that poll in it.
+    teardown: [],
     cleanup: async () => {
       const seen = new Set();
       try {
-        try { await stopDetached(unseenDetached(ctx, seen)); }
-        finally {
-          for (let fresh; (fresh = unseenDetached(ctx, seen)).length;) await killStarted(fresh);
+        try {
+          for (const step of ctx.teardown.splice(0)) await step();
+        } finally {
+          try { await stopDetached(unseenDetached(ctx, seen)); }
+          finally {
+            for (let fresh; (fresh = unseenDetached(ctx, seen)).length;) await killStarted(fresh);
+          }
         }
       } finally {
         try {
