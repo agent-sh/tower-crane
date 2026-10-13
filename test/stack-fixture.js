@@ -7,12 +7,14 @@ const test = require('node:test');
 const fs = require('node:fs');
 const path = require('node:path');
 const { makeRepo, copyRepo, BIN } = require('./helpers');
+const { writeAtomic } = require('../lib/state');
 
 function worker(f) {
   const script = path.join(f.h.base, 'worker.js');
   fs.writeFileSync(script, `const fs = require('node:fs');
 const cp = require('node:child_process');
 const bin = ${JSON.stringify(BIN)};
+const { writeAtomic } = require(${JSON.stringify(path.join(path.dirname(BIN), '../lib/state'))});
 const task = process.env.TOWER_CRANE_TASK;
 const cli = (args) => cp.execFileSync(process.execPath, [bin, ...args], {encoding: 'utf8'});
 const git = (args) => cp.execFileSync('git', args, {encoding: 'utf8'}).trim();
@@ -28,7 +30,7 @@ const data = JSON.parse(fs.readFileSync(file, 'utf8'));
 data.prs[12] = {number: 12, state: 'OPEN', headRefOid: sha, headRefName: state.branch,
   baseRefName: state.stack?.base || 'main', isCrossRepository: false, autoMergeRequest: null,
   mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN'};
-fs.writeFileSync(file, JSON.stringify(data));
+writeAtomic(file, JSON.stringify(data));
 process.stdout.write(cli(['submit', task, '--sha', sha, '--pr', '12']));
 `);
   f.h.ok(['ladder', 'set', 'medium', '--harness', 'command', '--clear', 'model', '--clear', 'profile', '--clear', 'effort',
@@ -93,7 +95,8 @@ const stacked = (t) => copy(t, template('stacked'));
 function fixture(h) {
   const file = path.join(h.base, 'github.json');
   const read = () => JSON.parse(fs.readFileSync(file, 'utf8'));
-  const write = (fn) => { const d = read(); fn(d); fs.writeFileSync(file, JSON.stringify(d)); };
+  // Background PR checks can read the registry while the fixture publishes it.
+  const write = (fn) => { const d = read(); fn(d); writeAtomic(file, JSON.stringify(d)); };
   h.env.TEST_STACK_DATA = file;
   h.env.NODE_OPTIONS = `--require=${JSON.stringify(path.join(__dirname, 'fixtures', 'stack-gh.js'))}`;
   const add = (title, dep) => {

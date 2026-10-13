@@ -20,6 +20,8 @@ Windows shard 2/3 runs the Claude Code mod wakeup case twenty consecutive times,
 
 Two sequential Windows jobs run all of `test/escalation.test.js` five times each at the submitted head to verify ten consecutive passes, stopping on the first failure. Splitting the batch keeps the existing 45-minute job budget and 300-second test deadline. The replacement-worker sharing-error case uses acknowledged socket messages before claim, after claim, after attempt publication and after submission. It verifies progress without filesystem watchers and injects `EPERM`, `EACCES` and `EBUSY` into the replacement worker's rename.
 
+Stack fixtures publish their GitHub registry atomically. The detached-stack CLI case injects a reader between direct truncation and publication, so a writer that exposes incomplete JSON fails without relying on scheduling.
+
 For projects Tower Crane manages, expensive proof is the default: the orchestrator pins `--tests-cmd "npm test" --tests-expensive true --tests-proof-cmd "node --test {tests}"`. A submission then runs the full suite once and proves the change with its own test files.
 
 CI also runs `node scripts/probe-gate-scratch.js` at the submitted head on an unsandboxed Linux runner. It initializes separate state through the CLI and runs a complete `check tests` in run-only mode with fresh on-disk outer and gate directories. The `gate-scratch-proof` artifact records both directories' before/after contents, the actual gate parents from command receipts and their removal. The check fails if the tests fail, the outer directory gains contents or a gate parent survives. This full proof refuses a worker sandbox; `test/gate-scratch-proof.test.js` verifies the recorder with small real-CLI fixtures.

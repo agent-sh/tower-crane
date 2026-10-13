@@ -1,6 +1,7 @@
 'use strict';
 
 const fs = require('node:fs');
+const { writeAtomic } = require('../../lib/state');
 const path = require('node:path');
 const cp = require('node:child_process');
 const original = cp.spawnSync;
@@ -9,6 +10,18 @@ let skew = 0;
 Date.now = () => now() + skew;
 const BIN = path.join(__dirname, '..', '..', 'bin', 'tower-crane.js');
 const { ownerKeyFile, ownerProject } = require('../../lib/authority');
+
+if (process.env.TEST_STACK_PUBLICATION_READER) {
+  const write = fs.writeFileSync;
+  fs.writeFileSync = function observedPublication(file, data, ...options) {
+    if (file === process.env.TEST_STACK_DATA) {
+      // A reader can run after truncation and before writeFileSync fills the file.
+      write.call(this, file, '');
+      JSON.parse(fs.readFileSync(file, 'utf8'));
+    }
+    return write.call(this, file, data, ...options);
+  };
+}
 
 // Holds a gh call open until the test releases it, so another command can run meanwhile.
 function pause(ready, release) {
@@ -27,7 +40,7 @@ cp.spawnSync = function stackGh(command, args, opts) {
   const data = JSON.parse(fs.readFileSync(file, 'utf8'));
   data.calls.push({ args, cwd: opts.cwd });
   const finish = (value = '', status = 0, stderr = '') => {
-    fs.writeFileSync(file, JSON.stringify(data));
+    writeAtomic(file, JSON.stringify(data));
     return { status, stdout: typeof value === 'string' ? value : JSON.stringify(value), stderr };
   };
   const response = (r, fallback = '') => {

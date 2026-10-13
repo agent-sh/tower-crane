@@ -40,6 +40,7 @@ test('a task event during the link\'s GitHub call refuses the link, and the next
 
 test('detached spawn links the PR after its worker submits and exits', async (t) => {
   const f = setup(t);
+  f.h.env.TEST_STACK_PUBLICATION_READER = '1';
   worker(f);
   f.h.ok(['spawn', '--task', 'T2']);
   // The worker runs git, the CLI and its submit checks; on Windows that takes about 20 seconds.
