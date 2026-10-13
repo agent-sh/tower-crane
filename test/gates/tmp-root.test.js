@@ -10,6 +10,8 @@ const { shellQuote } = require('../../lib/gates/common');
 
 test('gates.tmp_root holds the worktrees of check tests, ci and clean, and status names it; TOWER_CRANE_TMP overrides it', (t) => {
   const h = makeRepo(t);
+  // The fixture sets TOWER_CRANE_TMP, which outranks the project setting this test checks.
+  delete h.env.TOWER_CRANE_TMP;
   // Every gate command appends the directory it ran in to a log outside the temporary roots.
   const recorder = path.join(h.base, 'record.js');
   const log = path.join(h.base, 'ran.jsonl');
