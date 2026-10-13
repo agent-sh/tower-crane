@@ -106,14 +106,10 @@ test('event tail buffers partial UTF-8 bytes and resets history only on truncati
   assert.deepEqual(reader.read().rows.map((e) => e.detail.text), ['שלום']);
   assert.equal(bytes, original.length + next.length);
   fs.appendFileSync(file, 'broken\n');
-  fs.appendFileSync(file, line('renew'));
+  const renewal = line('renew');
+  fs.appendFileSync(file, renewal);
   assert.deepEqual(reader.read().rows.map((e) => e.cmd), ['renew']);
-  const fd = fs.openSync(file, 'r');
-  try {
-    assert.equal(reader.offset, fs.fstatSync(fd).size);
-  } finally {
-    fs.closeSync(fd);
-  }
+  assert.equal(reader.offset, original.length + next.length + Buffer.byteLength('broken\n') + renewal.length);
 
   fs.writeFileSync(file, line('truncate'));
   let batch = reader.read();
