@@ -8,6 +8,31 @@ const path = require('node:path');
 const cp = require('node:child_process');
 const { makeRepo } = require('./helpers');
 
+function accountHome() {
+  const scratch = process.env.TOWER_CRANE_TEST_TMP;
+  return scratch && Buffer.byteLength(path.join(scratch, '.cache', 'tower-crane-chrome-000000', 'SingletonSocket')) <= 78
+    ? scratch : os.userInfo().homedir;
+}
+
+function accountPrelude(account) {
+  return `const osModule = require('node:os');
+const userInfo = osModule.userInfo;
+osModule.userInfo = () => ({ ...userInfo(), homedir: ${JSON.stringify(account)} });`;
+}
+
+function refusedAccountPrelude(account) {
+  return `${accountPrelude(account)}
+const fsModule = require('node:fs');
+const pathModule = require('node:path');
+const create = fsModule.mkdtempSync;
+fsModule.mkdtempSync = function (prefix, ...args) {
+  if (pathModule.dirname(prefix) === ${JSON.stringify(path.join(account, '.cache'))}) {
+    throw Object.assign(new Error('EROFS'), { code: 'EROFS' });
+  }
+  return create.call(this, prefix, ...args);
+};`;
+}
+
 function attempt(h, chrome, sandbox, tmp = h.base, before = '') {
   const runner = path.join(h.base, 'browser-runner.js');
   fs.writeFileSync(runner, `
@@ -82,15 +107,15 @@ fsModule.mkdirSync = function (dir, ...rest) {
   assert.deepEqual(fs.readdirSync(h.base).filter((f) => f.startsWith('tower-crane-chrome-')), []);
 });
 
-test('a temp root too deep for Chrome\'s socket still starts Chrome, from a shallow profile directory', {
-  skip: process.platform === 'win32' && 'browser fixture uses a shebang; Unix socket path limits do not apply on Windows',
-}, (t) => {
+function deepProfile(t, deepCache) {
   const h = makeRepo(t);
   // A gate's TMPDIR sits under TOWER_CRANE_TMP, which can be deeper than the socket path allows.
   const deep = path.join(h.base, ...Array.from({ length: 4 }, (_, i) => `${i}-${'d'.repeat(30)}`));
   fs.mkdirSync(deep, { recursive: true });
-  // The fixture's HOME is deep too, so the shallow profile goes to the account's cache root, as it does outside a fixture.
-  Object.assign(h.env, { TMPDIR: deep, XDG_CACHE_HOME: path.join(os.userInfo().homedir, '.cache') });
+  const account = accountHome();
+  const accountCache = path.join(account, '.cache');
+  const cache = deepCache ? path.join(deep, 'task-cache') : accountCache;
+  Object.assign(h.env, { TMPDIR: deep, XDG_CACHE_HOME: cache });
   const chrome = path.join(h.base, 'chrome');
   fs.writeFileSync(chrome, `#!${process.execPath}
 const fs = require('node:fs');
@@ -108,14 +133,64 @@ fs.writeFileSync(process.env.CHROME_REPORT, JSON.stringify({ profile, tmp: proce
 fs.writeFileSync(path.join(profile, 'DevToolsActivePort'), '1\\n');
 setInterval(() => {}, 1000);
 `, { mode: 0o755 });
-  const result = attempt(h, chrome, '1', deep);
+  const result = attempt(h, chrome, '1', deep, accountPrelude(account));
   assert.doesNotMatch(result.error ?? '', /exit code|Socket path/);
   const { profile, tmp } = JSON.parse(fs.readFileSync(path.join(h.base, 'chrome.json'), 'utf8'));
+  assert.equal(path.dirname(profile), accountCache);
   assert.equal(profile.startsWith(deep + path.sep), false, profile);
   assert.equal(path.dirname(tmp), profile, 'Chrome\'s temp directory is in the shallow profile, not the deep TMPDIR');
   assert.equal(fs.existsSync(profile), false, 'the shallow profile is removed with the browser');
   assert.deepEqual(fs.readdirSync(deep).filter((f) => f.startsWith('tower-crane-chrome-')), []);
+}
+
+test('a temp root too deep for Chrome\'s socket still starts Chrome, from a shallow profile directory', {
+  skip: process.platform === 'win32' && 'browser fixture uses a shebang; Unix socket path limits do not apply on Windows',
+}, (t) => {
+  deepProfile(t, false);
 });
+
+test('deep temp and task-cache roots fall back to the account cache for Chrome sockets', {
+  skip: process.platform === 'win32' && 'browser fixture uses a shebang; Unix socket path limits do not apply on Windows',
+}, (t) => {
+  deepProfile(t, true);
+});
+
+for (const [method, code] of [['mkdirSync', 'EACCES'], ['mkdtempSync', 'EROFS']]) {
+  test(`an account cache refused by ${method} falls back to the requested root`, (t) => {
+    const h = makeRepo(t);
+    const deep = path.join(h.base, 'd'.repeat(100));
+    fs.mkdirSync(deep);
+    Object.assign(h.env, { TMPDIR: deep, TEMP: deep, TMP: deep, XDG_CACHE_HOME: path.join(deep, 'cache') });
+    const account = accountHome();
+    const accountCache = path.join(account, '.cache');
+    const report = path.join(h.base, 'profile.json');
+    const refusal = path.join(h.base, 'cache-refusal.json');
+    const result = attempt(h, path.join(h.base, 'missing-chrome'), '1', deep, `
+${accountPrelude(account)}
+const fsModule = require('node:fs');
+const pathModule = require('node:path');
+const denied = fsModule[${JSON.stringify(method)}];
+fsModule[${JSON.stringify(method)}] = function (target, ...args) {
+  if (target === ${JSON.stringify(accountCache)} || pathModule.dirname(target) === ${JSON.stringify(accountCache)}) {
+    fsModule.writeFileSync(${JSON.stringify(refusal)}, JSON.stringify(${JSON.stringify(code)}));
+    throw Object.assign(new Error(${JSON.stringify(code)}), { code: ${JSON.stringify(code)} });
+  }
+  return denied.call(this, target, ...args);
+};
+const create = fsModule.mkdtempSync;
+fsModule.mkdtempSync = function (prefix, ...args) {
+  const profile = create.call(this, prefix, ...args);
+  fsModule.writeFileSync(${JSON.stringify(report)}, JSON.stringify({ profile }));
+  return profile;
+};
+`);
+    assert.match(result.error, /Chrome.*ENOENT/s, 'the cache error must not replace the browser spawn error');
+    assert.equal(JSON.parse(fs.readFileSync(refusal, 'utf8')), code, 'the account cache allocation was refused');
+    const { profile } = JSON.parse(fs.readFileSync(report, 'utf8'));
+    assert.equal(path.dirname(profile), deep);
+    assert.equal(fs.existsSync(profile), false, 'the fallback profile is removed after the failed launch');
+  });
+}
 
 for (const sandbox of ['0', '1']) {
   test(`Chrome startup in sandbox=${sandbox} keeps Chrome's temp files in its profile and reports an early exit`, {
@@ -141,7 +216,7 @@ process.exit(23);
       TMPDIR: path.join(h.base, 'host-tmp'), TEMP: path.join(h.base, 'host-temp'), TMP: path.join(h.base, 'host-win-tmp'),
     };
     Object.assign(h.env, hostEnv);
-    const result = attempt(h, chrome, sandbox);
+    const result = attempt(h, chrome, sandbox, h.base, refusedAccountPrelude(accountHome()));
     assert.match(result.error, /Chrome.*23/s);
     if (sandbox === '1') assert.match(result.error, /fixture Chrome sandbox failure/);
     else assert.doesNotMatch(result.error, /fixture Chrome sandbox failure/, 'host Chrome keeps ignored stderr');
@@ -155,7 +230,7 @@ process.exit(23);
       ...(sandbox === '1' ? ['--no-sandbox', '--disable-dev-shm-usage'] : process.getuid && process.getuid() === 0 ? ['--no-sandbox'] : []),
       'about:blank',
     ]);
-    assert.equal(path.dirname(profile), h.base);
+    assert.equal(path.dirname(profile), h.base, 'a refused account cache preserves the requested fixture root');
     for (const dir of [seen.tmp, seen.temp, seen.winTmp]) assert.equal(dir, path.join(profile, 'tmp'));
     if (sandbox === '1') {
       assert.equal(seen.home, profile);
