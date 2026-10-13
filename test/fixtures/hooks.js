@@ -14,6 +14,8 @@ const cp = require('node:child_process');
 const { EventEmitter } = require('node:events');
 
 const env = process.env;
+// Process creation times are on the system clock, which HOOK_CLOCK_FILE replaces below.
+const systemNow = Date.now;
 // The probe child observes the environment passed to Git, then runs real Git.
 if (env.HOOK_GIT_ENV_REPORT && path.basename(process.argv[1] || '') === 'tower-crane.js') {
   const exec = cp.execFileSync;
@@ -449,21 +451,22 @@ if (env.HOOK_USAGE_WRITE_FAIL) {
 }
 
 // Track detached children outside state so teardown can await every collector.
+// A monitor marks its exit in a file of its own, named by the token its record
+// carries: it never rewrites the record a test may be reading, and a marker
+// left by an earlier process with the same pid cannot pass for its exit.
 if (env.HOOK_PROCESSES_DIR) {
   if (path.basename(process.argv[1] || '') === 'spawn-monitor.js') {
+    const token = env.HOOK_PROCESS_TOKEN || String(process.pid);
     process.once('exit', () => {
-      const file = path.join(env.HOOK_PROCESSES_DIR, `${process.pid}.json`);
-      try {
-        const tracked = JSON.parse(real.readFileSync(file, 'utf8'));
-        const tmp = `${file}.exited`;
-        real.writeFileSync(tmp, JSON.stringify({ ...tracked, exited: true }));
-        real.renameSync(tmp, file);
-      } catch (e) { if (e.code !== 'ENOENT') throw e; }
+      real.mkdirSync(env.HOOK_PROCESSES_DIR, { recursive: true });
+      real.writeFileSync(path.join(env.HOOK_PROCESSES_DIR, `${token}.exited`), '');
     });
   }
   const original = cp.spawn;
   cp.spawn = function trackDetached(file, args, options) {
     const monitor = args.some((arg) => path.basename(arg) === 'spawn-monitor.js');
+    const token = monitor && options?.detached ? require('node:crypto').randomUUID() : null;
+    if (token) options = { ...options, env: { ...(options.env || process.env), HOOK_PROCESS_TOKEN: token } };
     if (monitor && Number.isInteger(options?.stdio?.[3])) {
       options = { ...options, env: { ...options.env, HOOK_USAGE_INHERITED_FD: '3' } };
     }
@@ -491,10 +494,14 @@ if (env.HOOK_PROCESSES_DIR) {
           startTicks = stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\s+/)[19];
         } catch { /* A short-lived child may have already exited. */ }
       }
+      // This parent holds the child's handle until its exit is processed, so
+      // a process created after this moment cannot be this child: Windows
+      // teardown kills a worker only if it started no later.
+      const recordedAt = systemNow() + 1;
       real.mkdirSync(env.HOOK_PROCESSES_DIR, { recursive: true });
       const trackedFile = path.join(env.HOOK_PROCESSES_DIR, `${child.pid}.json`);
       real.writeFileSync(trackedFile, JSON.stringify({
-        pid: child.pid, startTicks, startTime,
+        pid: child.pid, startTicks, startTime, recordedAt, ...(token ? { token } : {}),
         kind: monitor ? 'monitor' : 'worker',
       }));
       // A reaped Windows PID can immediately belong to another test's CLI.

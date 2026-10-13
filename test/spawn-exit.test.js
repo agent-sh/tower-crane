@@ -159,6 +159,26 @@ test('teardown observes a monitor exit recorded after its PID snapshot', {
   assert.equal(process.kill(child.pid, 0), true, 'teardown killed a reused PID');
 });
 
+test('teardown leaves a reused worker PID alone', {
+  skip: !['linux', 'win32'].includes(process.platform),
+}, async (t) => {
+  const h = setup(t);
+  // The stand-in started after the record was written, as a process reusing an exited worker's PID would.
+  const recordedAt = Date.now();
+  const child = cp.spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+    detached: true, stdio: 'ignore',
+  });
+  const closed = new Promise((resolve) => child.once('close', resolve));
+  t.after(async () => { child.kill(); await closed; });
+  const dir = path.join(h.base, 'detached');
+  fs.mkdirSync(dir);
+  fs.writeFileSync(path.join(dir, `${child.pid}.json`), JSON.stringify({
+    pid: child.pid, kind: 'worker', startTicks: '0', recordedAt: recordedAt - 1000,
+  }));
+  await h.cleanup();
+  assert.equal(process.kill(child.pid, 0), true, 'teardown killed a reused worker PID');
+});
+
 test('teardown waits for OS termination after a monitor marks its exit', async (t) => {
   const h = setup(t);
   const dir = path.join(h.base, 'detached');

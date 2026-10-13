@@ -269,8 +269,12 @@ function context(t, base, options = {}) {
       const dir = path.join(base, 'detached');
       return fs.existsSync(dir) ? fs.readdirSync(dir).filter((f) => f.endsWith('.json')).flatMap((f) => {
         const file = path.join(dir, f);
-        try { return [{ ...JSON.parse(fs.readFileSync(file, 'utf8')), file }]; }
+        let record;
+        try { record = JSON.parse(fs.readFileSync(file, 'utf8')); }
         catch (e) { if (e.code === 'ENOENT') return []; throw e; }
+        // A monitor's exit listener marks its exit beside its record.
+        if (record.kind === 'monitor' && fs.existsSync(path.join(dir, `${record.token || record.pid}.exited`))) record.exited = true;
+        return [{ ...record, file }];
       }) : [];
     },
     cleanup: async () => {
@@ -381,43 +385,55 @@ function killDetached(child) {
 
 async function stopDetached(children) {
   const monitors = children.filter((c) => c.kind === 'monitor');
-  if (process.platform === 'win32' && monitors.length) {
-    // Retain native handles before stopping workers. A PID can be reused
-    // between probes, but WaitForExit still observes the original process.
-    const records = JSON.stringify(monitors).replaceAll("'", "''");
+  if (process.platform === 'win32' && children.length) {
+    // Retain native handles before stopping anything. A PID can be reused
+    // between probes, but a held handle keeps it and WaitForExit observes the
+    // original process. A monitor proves itself by its creation time; a
+    // worker by starting no later than its parent recorded it.
+    const records = JSON.stringify(children.map((c) => ({ pid: c.pid, kind: c.kind, startTime: c.startTime, recordedAt: c.recordedAt ?? null })))
+      .replaceAll("'", "''");
     const script = `
 $ErrorActionPreference = 'Stop'
-$monitors = @()
+$held = @()
 try {
   foreach ($entry in (ConvertFrom-Json '${records}')) {
-    if (!$entry.PSObject.Properties['startTime']) { throw 'Windows monitor creation identity is missing' }
-    if ($null -eq $entry.startTime) { continue }
-    $monitor = $null
+    if ($entry.kind -eq 'monitor') {
+      if (!$entry.PSObject.Properties['startTime']) { throw 'Windows monitor creation identity is missing' }
+      if ($null -eq $entry.startTime) { continue }
+    } elseif ($null -eq $entry.recordedAt) { continue }
+    $process = $null
     try {
-      $monitor = [System.Diagnostics.Process]::GetProcessById($entry.pid)
-      $null = $monitor.Handle
+      $process = [System.Diagnostics.Process]::GetProcessById($entry.pid)
+      $null = $process.Handle
     } catch [System.ArgumentException] { continue }
-      catch [System.InvalidOperationException] { if ($monitor) { $monitor.Dispose() }; continue }
-    # A monitor exiting during this query reads a null creation time; it has already stopped.
-    $started = $monitor.StartTime
-    if ($null -eq $started -or $started.ToFileTimeUtc().ToString() -ne $entry.startTime) {
-      $monitor.Dispose()
+      catch [System.InvalidOperationException] { if ($process) { $process.Dispose() }; continue }
+    # A process exiting during this query reads a null creation time; it has already stopped.
+    $started = $process.StartTime
+    if ($null -eq $started) { $same = $false }
+    elseif ($entry.kind -eq 'monitor') { $same = $started.ToFileTimeUtc().ToString() -eq $entry.startTime }
+    else { $same = $started.ToUniversalTime() -le [DateTimeOffset]::FromUnixTimeMilliseconds([int64]$entry.recordedAt).UtcDateTime }
+    if (!$same) {
+      $process.Dispose()
       continue
     }
-    $monitors += $monitor
+    $held += [pscustomobject]@{ Kind = $entry.kind; Process = $process }
   }
-  [Console]::Out.WriteLine('ready:' + (ConvertTo-Json -InputObject @($monitors | ForEach-Object { $_.Id }) -Compress))
+  $ids = @{
+    monitors = @($held | Where-Object { $_.Kind -eq 'monitor' } | ForEach-Object { $_.Process.Id })
+    workers = @($held | Where-Object { $_.Kind -ne 'monitor' } | ForEach-Object { $_.Process.Id })
+  }
+  [Console]::Out.WriteLine('ready:' + (ConvertTo-Json -InputObject $ids -Compress))
   $null = [Console]::In.ReadLine()
   $clock = [System.Diagnostics.Stopwatch]::StartNew()
   $survivors = @()
-  foreach ($monitor in $monitors) {
-    if (!$monitor.WaitForExit([int][Math]::Max(0, 10000 - $clock.ElapsedMilliseconds))) {
-      $survivors += $monitor.Id
+  foreach ($entry in $held) {
+    if (!$entry.Process.WaitForExit([int][Math]::Max(0, 10000 - $clock.ElapsedMilliseconds))) {
+      $survivors += [pscustomobject]@{ kind = $entry.Kind; pid = $entry.Process.Id }
     }
   }
   [Console]::Out.WriteLine((ConvertTo-Json -InputObject @($survivors) -Compress))
 } finally {
-  foreach ($monitor in $monitors) { $monitor.Dispose() }
+  foreach ($entry in $held) { $entry.Process.Dispose() }
 }
 `;
     const child = cp.spawn('powershell.exe', [
@@ -431,8 +447,8 @@ try {
       const ready = stdout.split('\n').slice(0, -1).find((line) => line.startsWith('ready:'));
       if (!stopped && ready) {
         stopped = true;
-        for (const worker of children.filter((c) => c.kind === 'worker')) killDetached(worker);
-        for (const pid of JSON.parse(ready.slice(6).trim())) {
+        const ids = JSON.parse(ready.slice(6).trim());
+        for (const pid of [...ids.workers, ...ids.monitors]) {
           cp.spawnSync('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore', timeout: 10000 });
         }
         child.stdin.end('\n');
@@ -444,8 +460,10 @@ try {
       child.once('close', resolve);
     });
     assert.equal(code, 0, stderr);
-    assert.ok(stopped, 'monitor handles were not acquired');
-    assert.deepEqual(JSON.parse(stdout.trim().split('\n').at(-1)), [], 'detached usage monitors outlived test teardown');
+    assert.ok(stopped, 'process handles were not acquired');
+    const survivors = JSON.parse(stdout.trim().split('\n').at(-1));
+    assert.deepEqual(survivors.filter((s) => s.kind === 'monitor').map((s) => s.pid), [], 'detached usage monitors outlived test teardown');
+    assert.deepEqual(survivors.map((s) => s.pid), [], 'detached workers outlived test teardown');
     return;
   }
   try {

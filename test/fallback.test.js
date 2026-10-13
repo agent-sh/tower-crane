@@ -10,6 +10,10 @@ const windowsConcurrency = process.platform === 'win32' ? 2 : false;
 
 const events = (h) => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
 const supervision = { retries: 2, backoff_ms: 10, max_backoff_ms: 20, stall_ms: 60000 };
+// A waiter blocks until its event arrives. The runner's per-test timeout
+// (test/run.js) is its only bound: three attempts and a route switch, each a
+// supervised harness launch, took up to 14 s on a Windows runner.
+const WAIT_TIMEOUT_S = '300';
 
 function setFallbacks(h, routes, rung = 'easy') {
   fs.mkdirSync(path.dirname(h.userConfig), { recursive: true });
@@ -68,7 +72,7 @@ for (const explicit of [false, true]) {
     h.spawnEnv.LOCALAPPDATA = cache;
     h.spawnEnv.CLAUDE_CODE_USE_BEDROCK = '1';
     const spawned = h.json(['spawn', '--task', 'T1'], { env: h.spawnEnv });
-    const result = await h.runAsync(['wait', '--observe', '--after', '0', '--task', 'T1', '--types', 'worker-exited', '--timeout', '20']);
+    const result = await h.runAsync(['wait', '--observe', '--after', '0', '--task', 'T1', '--types', 'worker-exited', '--timeout', WAIT_TIMEOUT_S]);
     assert.equal(result.code, 0, result.stderr);
     assert.equal(JSON.parse(result.stdout).detail.agent, spawned.agent);
     const [primary, fallback] = h.attempts();
@@ -223,7 +227,7 @@ for (const primaryHarness of ['agy', 'claude']) {
 test('rework during a live fallback refuses a second worker until the previous attempt exits', async (t) => {
   const h = setup(t);
   const cursor = events(h).at(-1).id;
-  const waiting = h.runAsync(['wait', '--observe', '--after', cursor, '--types', 'spawn-fallback', '--timeout', '10']);
+  const waiting = h.runAsync(['wait', '--observe', '--after', cursor, '--types', 'spawn-fallback', '--timeout', WAIT_TIMEOUT_S]);
   h.json(['spawn', '--task', 'T1'], {
     env: { ...h.spawnEnv, TOWER_CRANE_TEST_FALLBACK_HOLD: '4000' },
   });
@@ -465,7 +469,7 @@ test('a detached switch wakes a live waiter, keeps its lease, and collects route
   const h = setup(t);
   const finish = path.join(h.base, 'finish-fallback');
   const cursor = events(h).at(-1).id;
-  const waiting = h.runAsync(['wait', '--observe', '--after', cursor, '--types', 'spawn-fallback', '--timeout', '10']);
+  const waiting = h.runAsync(['wait', '--observe', '--after', cursor, '--types', 'spawn-fallback', '--timeout', WAIT_TIMEOUT_S]);
   const spawn = h.json(['spawn', '--task', 'T1'], {
     env: { ...h.spawnEnv, TOWER_CRANE_TEST_FALLBACK_FINISH: finish },
   });
