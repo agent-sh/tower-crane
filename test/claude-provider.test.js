@@ -379,7 +379,7 @@ test('a Bedrock switch in the user settings file bills a rung that names no prov
   assert.equal(L.billing({ harness: 'claude' }, P.routedEnv({}, from)), 'api');
 });
 
-test('an apiKeyHelper in the user settings file bills as api unless an OAuth token comes first', () => {
+test('Claude billing follows Claude Code credential precedence on the first-party route', () => {
   const base = fs.realpathSync.native(fs.mkdtempSync(path.join(TMP_ROOT, 'claude-provider-helper-')));
   const from = { claude: { dir: path.join(base, 'claude') } };
   fs.mkdirSync(from.claude.dir, { recursive: true });
@@ -387,6 +387,15 @@ test('an apiKeyHelper in the user settings file bills as api unless an OAuth tok
   fs.writeFileSync(path.join(from.claude.dir, 'settings.json'), JSON.stringify({ apiKeyHelper: 'print-key' }));
   for (const rung of [{ harness: 'claude' }, { harness: 'claude', provider: 'anthropic' }]) {
     assert.equal(L.billing(rung, P.routedEnv({}, from), from), 'api');
-    assert.equal(L.billing(rung, P.routedEnv({ CLAUDE_CODE_OAUTH_TOKEN: 'fixture' }, from), from), 'subscription');
+    // apiKeyHelper ranks above a long-lived OAuth token.
+    assert.equal(L.billing(rung, P.routedEnv({ CLAUDE_CODE_OAUTH_TOKEN: 'fixture' }, from), from), 'api');
   }
+  fs.writeFileSync(path.join(from.claude.dir, 'settings.json'), '{}');
+  const profile = { ANTHROPIC_PROFILE: 'fixture' };
+  const federation = { ANTHROPIC_FEDERATION_RULE_ID: 'fixture', ANTHROPIC_ORGANIZATION_ID: 'fixture' };
+  assert.equal(L.billing({ harness: 'claude' }, { CLAUDE_CODE_OAUTH_TOKEN: 'fixture' }, from), 'subscription');
+  assert.equal(L.billing({ harness: 'claude' }, profile, from), 'api', 'a named profile is a Console login');
+  assert.equal(L.billing({ harness: 'claude' }, federation, from), 'api', 'federation credentials are a Console login');
+  assert.equal(L.billing({ harness: 'claude' }, { ANTHROPIC_FEDERATION_RULE_ID: 'fixture' }, from), 'subscription', 'federation needs both variables');
+  assert.equal(L.billing({ harness: 'claude' }, { ...profile, CLAUDE_CODE_OAUTH_TOKEN: 'fixture' }, from), 'subscription', 'an OAuth token ranks above profiles');
 });
