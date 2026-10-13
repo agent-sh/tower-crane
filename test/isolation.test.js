@@ -1154,7 +1154,7 @@ test('claude and codex sandboxes deny the user\'s home except the paths the agen
   }
 });
 
-test('codex never names a hidden path inside another hidden directory', { skip: NO_STUBS }, t => {
+test('claude and codex keep a link inside a hidden directory and its target hidden; codex names no hidden path inside another', { skip: NO_STUBS }, t => {
   // Seen 2026-10-12: ~/.claude/debug/latest links to a file in the same hidden
   // directory, and Codex's bwrap could not mount over it inside the masked parent.
   const { h, u } = setup(t);
@@ -1162,20 +1162,63 @@ test('codex never names a hidden path inside another hidden directory', { skip: 
   fs.mkdirSync(debug, { recursive: true });
   fs.writeFileSync(path.join(debug, 'session.txt'), 'log\n');
   fs.symlinkSync(path.join(debug, 'session.txt'), path.join(debug, 'latest'));
-  isolated(h, 'small', 'codex');
-  // The owner key directory sits inside ~/.config.
   const project = h.readState('project.json');
-  delete project.owner_config_dir;
-  h.writeState('project.json', project);
-  const started = spawn(h, u, 'small', { TOWER_CRANE_AGENT: 'orchestrator', TOWER_CRANE_CONFIG: '' });
-  const config = TOML.parse(fs.readFileSync(path.join(h.state, 'homes', started.agent, 'config.toml'), 'utf8'));
-  const rules = config.permissions['tower-crane'].filesystem;
-  const hidden = Object.keys(rules).filter(p => rules[p] === 'none');
-  for (const p of [path.join(debug, 'latest'), path.join(u.home, '.config', 'tower-crane', 'owner', 'key')]) {
-    assert.equal(commandsRead({ harness: 'codex', config }, p), false, `${p} stays hidden`);
+  const secrets = [path.join(debug, 'latest'), path.join(debug, 'session.txt'), path.join(u.home, '.config', 'tower-crane', 'owner', 'key')];
+  for (const harness of ['claude', 'codex']) {
+    h.writeState('project.json', project);
+    isolated(h, 'small', harness);
+    // The owner key directory sits inside ~/.config.
+    const { owner_config_dir: _, ...unbound } = project;
+    h.writeState('project.json', unbound);
+    spawn(h, u, 'small', { TOWER_CRANE_AGENT: 'orchestrator', TOWER_CRANE_CONFIG: '' });
+    const seen = u.report();
+    for (const p of secrets) assert.equal(commandsRead(seen, p), false, `${harness}: ${p} stays hidden`);
+    if (harness === 'codex') {
+      const rules = seen.config.permissions['tower-crane'].filesystem;
+      const hidden = Object.keys(rules).filter(p => rules[p] === 'none');
+      const nested = hidden.filter(p => hidden.some(dir => p !== dir && p.startsWith(dir + path.sep)));
+      assert.deepEqual(nested, [], 'no hidden path is named inside a hidden directory');
+    }
   }
-  const nested = hidden.filter(p => hidden.some(dir => p !== dir && p.startsWith(dir + path.sep)));
-  assert.deepEqual(nested, [], 'no hidden path is named inside a hidden directory');
+});
+
+test('a project sandbox path inside a hidden credential store, or a writable one holding it, refuses dispatch', { skip: NO_STUBS }, t => {
+  // A path inside a hidden store reopens what lies under it: codex mounts
+  // writable paths after hidden ones, and claude remounts an allowed path
+  // inside a denied one. A writable path holding a store keeps it masked for
+  // the run, but in codex the agent can rename a directory between the two
+  // and so move the store out from under the next spawn's mask.
+  const { h, u } = setup(t);
+  const owner = path.join(path.dirname(h.userConfig), 'owner');
+  const refused = [
+    ['write', path.join(h.state, 'brokers', 'worker-T9-1'), 'is inside'],
+    ['write', path.join(h.state, 'homes', 'worker-T9-1', 'home', '.aws'), 'is inside'],
+    ['read', owner, 'is inside'],
+    ['write', h.state, 'holds'],
+    ['write', path.dirname(owner), 'holds'],
+  ];
+  for (const [field, p, why] of refused) {
+    fs.mkdirSync(p, { recursive: true });
+    h.ok(['project', 'set', '--sandbox', JSON.stringify({ [field]: [p] })]);
+    for (const harness of ['claude', 'codex']) {
+      isolated(h, 'hard', harness);
+      fs.rmSync(u.out, { force: true });
+      const r = h.run(['spawn', '--role', 'hard', '--task', 'T1', '--wait', '--json'], { env: u.env });
+      assert.notEqual(r.code, 0, `${harness}: sandbox.${field} ${p} must refuse dispatch`);
+      assert.match(r.stderr, new RegExp(`sandbox\\.${field} path .* ${why} .* which the sandbox hides because it holds credentials`));
+      assert.ok(!fs.existsSync(u.out), `${harness}: the harness must not start`);
+    }
+  }
+  // A readable path holding a store keeps it hidden: the deeper mask wins.
+  h.ok(['project', 'set', '--sandbox', JSON.stringify({ read: [h.state, path.dirname(owner)] })]);
+  for (const harness of ['claude', 'codex']) {
+    isolated(h, 'hard', harness);
+    spawn(h, u, 'hard');
+    const seen = u.report();
+    for (const f of [path.join(owner, 'key'), path.join(h.state, 'brokers', 'worker-T9-1', 'broker.json')]) {
+      assert.equal(commandsRead(seen, f), false, `${harness}: ${f} stays hidden under a readable parent`);
+    }
+  }
 });
 
 test('codex names the same rules however many entries the home holds', { skip: NO_STUBS }, t => {
