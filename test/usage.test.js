@@ -266,6 +266,37 @@ test('bench prices Bedrock and 1M-context ids and a two-model run from canonical
   assert.match(h.ok(['bench', 'tokens', '--prices', prices]), /^metered USD \(api billing\): \$0\.00; list-price equivalent of all priced spend: \$0\.00$/m);
 });
 
+test('Codex Bedrock profiles record api billing and contribute to metered USD without launch keys', (t) => {
+  const h = setup(t, 'codex');
+  const home = h.usageEnv.CODEX_HOME;
+  fs.mkdirSync(home, { recursive: true });
+  fs.writeFileSync(path.join(home, 'config.toml'), 'model_provider = "openai"\n[profiles.login]\nmodel_provider = "openai"\n');
+  fs.writeFileSync(path.join(home, 'sol.config.toml'), 'model_provider = "amazon-bedrock"\n');
+  fs.writeFileSync(path.join(home, '.env'), 'AWS_PROFILE=fixture\nAWS_REGION=us-east-1\n');
+  for (const name of Object.keys(h.env)) if (/^AWS_/.test(name)) delete h.env[name];
+  h.ok(['task', 'add', '--title', 'Login usage', '--acceptance', 'accounted', '--tier', 'easy']);
+  h.ok(['brief', 'set', 'T2', '-'], { input: 'Record login usage.\n' });
+  const rate = { input: 1, cache_write: 1, cache_read: 1, output: 5 };
+  h.ok(['project', 'set', '--review-policy', JSON.stringify({ prices: { 'fixture-model': rate } })]);
+  for (const [task, profile, billing] of [['T1', 'sol', 'api'], ['T2', 'login', 'subscription']]) {
+    pinRung(h, 'easy', { harness: 'codex', profile, model: 'fixture-model' });
+    h.json(['spawn', '--task', task, '--wait'], {
+      env: { ...h.usageEnv, OPENAI_API_KEY: '' }, hooks: h.usageHooks,
+    });
+    assert.equal(events(h).findLast(e => e.cmd === 'spawn' && e.task === task).detail.billing, billing);
+    assert.equal(spends(h, task).entries[0].billing, billing);
+  }
+  const tasks = h.readState('tasks.json');
+  for (const task of tasks.tasks) task.status = 'accepted';
+  h.writeState('tasks.json', tasks);
+  const apiCost = spends(h, 'T1').entries[0].cost_usd;
+  assert.ok(apiCost > 0);
+  const bench = h.json(['bench', 'tokens']);
+  assert.deepEqual(bench.unpriced_models, {});
+  assert.ok(Math.abs(bench.metered_usd - apiCost) < 1e-12);
+  assert.ok(Math.abs(bench.list_usd - apiCost * 2) < 1e-12);
+});
+
 test('a resumed Claude run prices only what it ran, with the baseline off each model', () => {
   const { usageSince } = require('../lib/tasks');
   const { rateTable, entryCost } = require('../lib/reviewer');
