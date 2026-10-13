@@ -117,6 +117,14 @@ cp.spawnSync = function stackGh(command, args, opts) {
     if (asyncPath) {
       const job = data.asyncMerges[asyncPath[2]];
       const pr = data.prs[job.pr];
+      if (process.env.TEST_STACK_POLL_READY) {
+        if (process.env.TEST_STACK_POLL_RELEASE) {
+          pause(process.env.TEST_STACK_POLL_READY, process.env.TEST_STACK_POLL_RELEASE);
+        } else {
+          fs.writeFileSync(process.env.TEST_STACK_POLL_READY, '');
+          return finish({ id: asyncPath[2], status: 'pending' });
+        }
+      }
       const reply = data.asyncResponses?.[pr.number]?.polls?.shift();
       if (reply) return response(reply);
       // data.pollFailures[pr] lists errors for successive polls. GitHub retires a finished

@@ -828,6 +828,9 @@ A second signal kills the active command tree immediately or cancels its
 source-page fetch. An interrupted software gate records a failure without
 `confirmed_failure`, so it does not trigger a quality climb. `gates retry`
 can rerun that gate.
+Asynchronous stack merge polling and backoff also stop on the second signal,
+recording failed merge evidence. The remote request may still be pending;
+another merge invocation confirms its state.
 `automation queued` records a blocked notification's source, with
 `executors` set to the cap when the cap blocked it rather than another
 executor of the same task. Queued notifications run in drain order: submission
