@@ -1,6 +1,6 @@
 'use strict';
 
-const { waitOnRepo, fileWritten } = require('./signals');
+const { waitOnRepo, waitUntil, fileWritten } = require('./signals');
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -1592,10 +1592,19 @@ test('concurrent event consumers execute each submission gate only once', async 
 });
 
 // A slow stub suite records each run's start and end, so the log shows how
-// many gate executors ran at once across every consumer process.
+// many gate executors ran at once across every consumer process. With
+// `release`, a run records its pid in its start file and waits for the release
+// file; it also stops when its start file is gone or after SLOW_SUITE_MS, so a
+// test that fails first cannot leave it polling. The start file goes with the
+// fixture. A run does not watch the fixture directory itself: the run and its
+// shell work in a gate worktree inside it, and Windows cannot remove a
+// directory that is a live process's working directory. Teardown releases and
+// stops every recorded run before the fixture is removed.
+const SLOW_SUITE_MS = 240000;
 function slowSuite(h, { executors, crash = false, release = null } = {}) {
   const runs = path.join(h.base, 'suite-runs.log');
   const suite = path.join(h.base, 'tools', 'slow-suite.js');
+  if (release) h.teardown.push(() => stopSlowSuites(h, release));
   fs.writeFileSync(suite, `const fs = require('node:fs');
 fs.appendFileSync(${JSON.stringify(runs)}, '+\\n');
 const crash = ${JSON.stringify(crash ? path.join(h.base, 'crashed') : null)};
@@ -1608,10 +1617,15 @@ const finish = () => fs.appendFileSync(${JSON.stringify(runs)}, '-\\n');
 const release = ${JSON.stringify(release)};
 if (release) {
   const starts = fs.readFileSync(${JSON.stringify(runs)}, 'utf8').split('\\n').filter((m) => m === '+').length;
-  fs.writeFileSync(${JSON.stringify(path.join(h.base, 'suite-started-'))} + starts, '');
-  const watcher = fs.watch(require('node:path').dirname(release), check);
-  function check() { if (fs.existsSync(release)) { watcher.close(); finish(); } }
-  check();
+  const started = ${JSON.stringify(path.join(h.base, 'suite-started-'))} + starts;
+  fs.writeFileSync(started, String(process.pid));
+  const until = Date.now() + ${SLOW_SUITE_MS}; // wait-allow: an orphaned suite stops itself; release and start-file removal are its signals
+  const poll = () => {
+    if (!fs.existsSync(started) || Date.now() > until) process.exit(1);
+    if (fs.existsSync(release)) finish();
+    else setTimeout(poll, 50); // wait-allow: probe cadence only; the suite has no file watcher inside its fixture
+  };
+  poll();
 } else {
   setTimeout(finish, 2500); // wait-allow: exercise overlapping gate completions with staggered commands
 }
@@ -1630,6 +1644,33 @@ if (release) {
     for (const mark of marks) peak = Math.max(peak, now += mark === '+' ? 1 : -1);
     return { starts: marks.filter((m) => m === '+').length, peak };
   };
+}
+
+function slowSuiteStarts(h) {
+  return fs.readdirSync(h.base).filter((f) => f.startsWith('suite-started-')).map((f) => path.join(h.base, f));
+}
+
+function slowSuitePids(h) {
+  return slowSuiteStarts(h).map((f) => Number(fs.readFileSync(f, 'utf8'))).filter((pid) => pid > 0);
+}
+
+function slowSuiteRunning(pid) {
+  if (process.platform === 'linux') {
+    try { return !/^\S+ \(.*\) [ZX]/.test(fs.readFileSync(`/proc/${pid}/stat`, 'utf8')); } catch { return false; }
+  }
+  try { process.kill(pid, 0); return true; } catch { return false; }
+}
+
+async function stopSlowSuites(h, release) {
+  if (!fs.existsSync(h.base)) return;
+  const pids = slowSuitePids(h);
+  fs.writeFileSync(release, '');
+  // Teardown only: released suites get a grace before survivors are killed.
+  const until = Date.now() + 5000; // wait-allow: teardown grace before killing released suites
+  while (pids.some(slowSuiteRunning) && Date.now() < until) await new Promise((resolve) => setTimeout(resolve, 50)); // wait-allow: teardown grace before killing released suites
+  for (const pid of pids.filter(slowSuiteRunning)) {
+    try { process.kill(pid, 'SIGKILL'); } catch { /* It exited meanwhile. */ }
+  }
 }
 
 test('gate executors across several watchers stay within gates.executors and queue the rest in order', async (t) => {
@@ -1672,6 +1713,34 @@ test('gate executors across several watchers stay within gates.executors and que
   const firstStarts = [...new Set(started)];
   assert.deepEqual(new Set(firstStarts), new Set(['T1', 'T2', 'T3']));
   assert.equal(firstStarts.at(-1), 'T3', 'the queued submission runs after a slot frees');
+});
+
+// The orphans this guards against: a test killed with its runner's process
+// group before it released its suites, so its teardown never ran, and the
+// fixture then removed with the tests gate's temporary directory.
+test('slow suites stop when their fixture is removed before they are released', async (t) => {
+  const h = setup(t);
+  const release = path.join(h.base, 'release-suite');
+  slowSuite(h, { release });
+  const watchers = [0, 1].map(() =>
+    h.runAsync(['wait', '--after', '0', '--types', 'evidence', '--task', 'T3',
+      '--timeout', '300', '--agent', 'orchestrator']));
+  let pids = [];
+  // A failed wait below must not leave the suites polling after the test.
+  t.after(() => { for (const pid of pids.filter(slowSuiteRunning)) process.kill(pid, 'SIGKILL'); });
+  await waitUntil(() => (pids = slowSuitePids(h)).length >= 2, { what: 'two executors start' });
+  assert.equal(pids.length, 2, 'two executors start');
+  for (const e of h.logs().filter((e) => e.cmd === 'automation' && e.detail.phase === 'running')) {
+    try { process.kill(e.detail.pid, 'SIGKILL'); } catch { /* It exited already. */ }
+  }
+  await Promise.all(watchers);
+  // Windows cannot remove the fixture while the suites and their shells work
+  // in it, so there the removal takes what it can first: the start files.
+  if (process.platform === 'win32') for (const file of slowSuiteStarts(h)) fs.rmSync(file);
+  else fs.rmSync(h.base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  await waitUntil(() => !pids.some(slowSuiteRunning), {
+    what: () => `a slow suite outlived its fixture: ${pids.filter(slowSuiteRunning).join(', ')}`,
+  });
 });
 
 test('a killed executor releases its gate executor slot', (t) => {

@@ -5,7 +5,8 @@ const fs = require('fs');
 const path = require('path');
 const gate = require('../../lib/gates/tests');
 const { scratch, isolateGit, git, commit, initRepo, worktrees, quote } = require('./helpers');
-const { shellQuote, treeExec } = require('../../lib/gates/common');
+const { shellQuote, treeExec, withWorktree } = require('../../lib/gates/common');
+const { waitUntil } = require('../signals');
 
 const NODE = quote(process.execPath);
 const CMD = `${NODE} run-tests.js`;
@@ -462,6 +463,65 @@ test('a timeout stops the command and everything it started', { skip: process.pl
   assert.ok(Date.now() - started < 8000, 'the gate waited for the command instead of stopping it'); // wait-allow: verify the gate terminates the command before its delayed marker write
   await new Promise((resolve) => setTimeout(resolve, 11000 - (Date.now() - started))); // wait-allow: verify timed-out commands cannot write a delayed marker
   assert.equal(fs.existsSync(marker), false, 'a process the command started outlived the timeout');
+  assertCleanedUp();
+});
+
+// A test command whose own fixtures start detached processes moves them into new sessions, out
+// of the gate's process group. One here outlives its parent; the other keeps its parent but
+// runs with a cleared environment.
+test('a command\'s processes in their own sessions stop with it, orphaned or not', { skip: process.platform !== 'linux' }, async (t) => {
+  const sha = task({ 'lib/add.js': FIX, 'test/add.test.js': ADD_TEST });
+  const pids = path.join(tmp, 'session-pids');
+  fs.writeFileSync(pids, '');
+  const poller = `require('fs').appendFileSync(process.argv[1], process.pid + '\\n'); setInterval(() => {}, 1000);`;
+  // The starter returns once the detached process has recorded its pid; `held` keeps it running.
+  const starter = (env, held) => `const fs = require('fs');
+const count = () => fs.readFileSync(process.argv[2], 'utf8').split('\\n').length;
+const before = count();
+require('child_process').spawn(process.execPath, ['-e', ${JSON.stringify(poller)}, process.argv[2]],
+  { detached: true, stdio: 'ignore'${env} }).unref();
+const tick = () => (count() > before ? ${held ? 'setInterval(() => {}, 1000)' : 'process.exit(0)'} : setTimeout(tick, 20)); // wait-allow: probe cadence only; the recorded pid is the signal
+tick();
+`;
+  const running = (pid) => {
+    try { return !/^\S+ \(.*\) [ZX]/.test(fs.readFileSync(`/proc/${pid}/stat`, 'utf8')); } catch { return false; }
+  };
+  for (const [name, script, timeout] of [['exited', starter('', false), undefined], ['timed out', starter(', env: {}', true), 0.05]]) {
+    const file = path.join(tmp, 'session-starter.js');
+    fs.writeFileSync(file, script);
+    const cmd = `${NODE} ${quote(file)} ${quote(pids)} && ${CMD}`;
+    const recorded = () => fs.readFileSync(pids, 'utf8').split('\n').filter(Boolean).map(Number);
+    const before = recorded().length;
+    await gate.run(ctx(sha, { args: { cmd, ...(timeout ? { timeout } : {}) } }));
+    const started = recorded().slice(before);
+    assert.ok(started.length > 0, 'the detached process started');
+    t.after(() => { for (const pid of started.filter(running)) process.kill(pid, 'SIGKILL'); });
+    await waitUntil(() => !started.some(running), {
+      what: () => `a detached process outlived a command that ${name}: ${started.filter(running).join(', ')}`,
+    });
+    assertCleanedUp();
+  }
+});
+
+test('gate commands run with gc.autoDetach=false after the caller\'s own GIT_CONFIG entries', async () => {
+  const sha = task({ 'lib/add.js': FIX, 'test/add.test.js': ADD_TEST });
+  const saved = { ...process.env };
+  Object.assign(process.env, { GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'towercrane.probe', GIT_CONFIG_VALUE_0: 'kept' });
+  try {
+    const seen = await withWorktree(ctx(sha), root, sha, async (dir, env) => ({
+      env: Object.fromEntries(Object.entries(env).filter(([k]) => /^GIT_CONFIG_(COUNT|KEY_|VALUE_)/.test(k))),
+      git: ['towercrane.probe', 'gc.autoDetach'].map((key) =>
+        require('child_process').execFileSync('git', ['-C', dir, 'config', '--get', key], { env, encoding: 'utf8' }).trim()),
+    }));
+    assert.deepEqual(seen.env, {
+      GIT_CONFIG_COUNT: '2', GIT_CONFIG_KEY_0: 'towercrane.probe', GIT_CONFIG_VALUE_0: 'kept',
+      GIT_CONFIG_KEY_1: 'gc.autoDetach', GIT_CONFIG_VALUE_1: 'false',
+    });
+    assert.deepEqual(seen.git, ['kept', 'false']);
+  } finally {
+    for (const k of Object.keys(process.env)) if (!(k in saved)) delete process.env[k];
+    Object.assign(process.env, saved);
+  }
   assertCleanedUp();
 });
 

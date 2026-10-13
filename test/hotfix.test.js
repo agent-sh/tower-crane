@@ -284,6 +284,23 @@ test('a natively merged todo task records from the PR merge commit and its poste
   assert.equal(h.readState('tasks.json').tasks.length, 2);
 });
 
+test('a posted review with markdown bold labels records like the plain form', (t) => {
+  const h = fixture(t);
+  h.ok(['task', 'add', '--title', 'Merged natively', '--acceptance', 'value becomes one']);
+  // Reviewers write their header lines in markdown: **SHA:** and **Verdict:** pass.
+  const body = `## Review (native, clean context)\n\n**SHA:** ${h.head}\n**Verdict:** pass\n\n### Blocking findings\nNone.\n`;
+  const recorded = h.json(['hotfix', 'T2', '--pr', '42', '--review', REVIEW_URL], { env: { FIXTURE_REVIEW_BODY: body } });
+  assert.equal(recorded.status, 'submitted');
+  const review = task(h, 'T2').evidence.find((e) => e.type === 'review');
+  assert.equal(review.ok, true);
+  assert.equal(review.sha, h.sha);
+  const failing = body.replace('**Verdict:** pass', '**Verdict:** fail');
+  h.ok(['task', 'add', '--title', 'Merged natively too', '--acceptance', 'value becomes one']);
+  const r = h.run(['hotfix', 'T3', '--pr', '42', '--review', REVIEW_URL], { env: { FIXTURE_REVIEW_BODY: failing } });
+  assert.equal(r.code, 1, r.stderr);
+  assert.match(r.stdout, /follow-up T4/);
+});
+
 test('a failing posted review opens follow-up rework; a review of another head, another PR or without the review heading is refused', (t) => {
   const h = fixture(t);
   const cases = [
