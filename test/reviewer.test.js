@@ -669,6 +669,7 @@ test('a rework review dispatch checks prior blockers and only the diff since the
   assert.match(prompt, /first-reviewer/);
   assert.match(prompt, /1 blocker: correction.md must explain the value/);
   assert.match(prompt, /security or data-loss/);
+  assert.match(prompt, /unchanged caller/);
   assert.match(prompt, /follow-ups/);
   const packet = reviewPacket(h);
   assert.match(packet, /diff --git a\/correction.md b\/correction.md/);
@@ -679,6 +680,69 @@ test('a rework review dispatch checks prior blockers and only the diff since the
   const event = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse)
     .findLast((e) => e.cmd === 'spawn' && e.detail.role === 'reviewer');
   assert.deepEqual(event.detail.review_scope, dispatched.review_scope);
+});
+
+function reworkCorrection(h) {
+  // A failed review from a dispatched reviewer already sends the task back.
+  if (h.readState('tasks.json').tasks[0].status !== 'rework') h.ok(['rework', '--from-review', 'T1']);
+  h.ok(['claim', 'T1', '--agent', 'builder']);
+  fs.writeFileSync(path.join(h.repo, 'correction.md'), 'The value becomes one.\n');
+  h.git(['add', 'correction.md']);
+  h.git(['commit', '-qm', 'explain the value']);
+  h.sha = h.git(['rev-parse', 'HEAD']);
+  h.ok(['submit', 'T1', '--agent', 'builder', '--sha', h.sha]);
+  ready(h);
+}
+
+test('a narrowed re-review keeps the failed review rung and the risk of the whole change', (t) => {
+  for (const variant of ['rung', 'risk']) {
+    const h = setup(t, 'easy', 'other', undefined, { gated: true });
+    const script = `const cp = require('node:child_process');
+const r = cp.spawnSync(process.execPath, [${JSON.stringify(BIN)}, 'evidence', 'T1', '--type', 'review', '--fail', '--sha', ${JSON.stringify(h.sha)}, '--summary', 'blocker'], {env: process.env});
+process.exit(r.status ?? 1);`;
+    for (const name of ['easy', 'medium', 'hard', 'research', 'review']) {
+      h.ok(['ladder', 'set', name, '--harness', 'command', '--clear', 'model', '--clear', 'profile',
+        '--clear', 'provider', '--clear', 'effort', '--command', JSON.stringify([process.execPath, '-e', script, '{prompt}'])]);
+    }
+    h.ok(['project', 'set', '--review-policy', JSON.stringify({ risk_paths: ['value.js'] })]);
+    if (variant === 'rung') {
+      assert.equal(h.json(['spawn', '--task', 'T1', '--role', 'review', '--wait']).review_rung, 'hard');
+      // Without the risk glob only the failed review's rung can keep the level.
+      h.ok(['project', 'set', '--review-policy', 'null']);
+    } else {
+      // A dispatch without a recorded rung leaves only the whole change's risk.
+      h.reviewer('T1', 'first-reviewer');
+      h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--agent', 'first-reviewer', '--type', 'review',
+        '--fail', '--sha', h.sha, '--summary', 'blocker']);
+    }
+    reworkCorrection(h);
+    const out = choice(h);
+    assert.match(out.argv.find((arg) => arg.includes('## Task')), /## Review scope\n\nRe-review/, variant);
+    assert.equal(out.review_rung, 'hard', variant);
+  }
+});
+
+test('a rework whose reviewed sha is gone gets a full review instead of a refusal', (t) => {
+  const h = setup(t, 'easy', 'other', undefined, { gated: true });
+  const reviewedSha = h.sha;
+  h.reviewer('T1', 'first-reviewer');
+  h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--agent', 'first-reviewer', '--type', 'review',
+    '--fail', '--sha', reviewedSha, '--summary', 'OLD_BLOCKER']);
+  h.ok(['rework', '--from-review', 'T1']);
+  h.ok(['claim', 'T1', '--agent', 'builder']);
+  fs.writeFileSync(path.join(h.repo, 'correction.md'), 'The value becomes one.\n');
+  h.git(['add', 'correction.md']);
+  h.git(['commit', '-q', '--amend', '-m', 'change with explanation']);
+  h.sha = h.git(['rev-parse', 'HEAD']);
+  h.git(['reflog', 'expire', '--expire=now', '--all']);
+  h.git(['gc', '-q', '--prune=now']);
+  assert.throws(() => h.git(['cat-file', '-e', `${reviewedSha}^{commit}`]), 'the reviewed commit must be gone for this test');
+  h.ok(['submit', 'T1', '--agent', 'builder', '--sha', h.sha]);
+  ready(h);
+  const prompt = choice(h).argv.find((arg) => arg.includes('## Task'));
+  assert.match(prompt, /## Review scope\n\nFull review/);
+  assert.match(prompt, /no longer in the repository/);
+  assertReviewDiff(h, prompt, /diff --git a\/value.js b\/value.js/);
 });
 
 test('changed requirements and unrelated rework keep the full review scope', (t) => {
