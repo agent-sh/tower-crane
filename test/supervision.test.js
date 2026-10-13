@@ -436,28 +436,36 @@ if (task === 'T1' && retry === 0) {
   assert.match(audit.find((e) => e.cmd === 'msg' && e.detail.to === 'orchestrator')?.detail.text || '', /without submit/);
 });
 
-test('a running process keeps its lease without claimant writes', async (t) => {
-  const h = setup(t, { failures: 0, waitForFinish: true });
-  const clockFile = path.join(h.base, 'clock');
-  const now = Date.now();
-  fs.writeFileSync(clockFile, String(now));
-  const spawned = h.json(['spawn', '--task', 'T1'], {
-    env: { NODE_OPTIONS: `--require "${HOOKS.replace(/\\/g, '/')}"`, HOOK_CLOCK_FILE: clockFile },
+// The renewal is due only if the worker's own one-minute claim is the last
+// one: a supervisor claim landing after it would stretch the lease to the
+// project default. Both launch paths take the lease before the harness starts;
+// Linux runs both, Windows has only the handshake.
+for (const [launch, hooks] of [['the lease gate', {}], ['the launch handshake', NO_SH]]) {
+  test(`a running process keeps its lease without claimant writes (${launch})`, {
+    skip: process.platform === 'win32' && !hooks.HOOK_NO_SH && 'Windows launches through the handshake',
+  }, async (t) => {
+    const h = setup(t, { failures: 0, waitForFinish: true });
+    const clockFile = path.join(h.base, 'clock');
+    const now = Date.now();
+    fs.writeFileSync(clockFile, String(now));
+    const spawned = h.json(['spawn', '--task', 'T1'], {
+      env: { NODE_OPTIONS: `--require "${HOOKS.replace(/\\/g, '/')}"`, HOOK_CLOCK_FILE: clockFile, ...hooks },
+    });
+    try {
+      await until(() => h.readAttempts().length === 1, 'worker did not claim');
+      fs.writeFileSync(clockFile, String(now + 40000));
+      await until(() => log(h).some((e) => e.cmd === 'renew'), 'live worker lease was not renewed');
+      const task = h.json(['task', 'show', 'T1']);
+      assert.equal(task.claim.since, h.readAttempts()[0].claim.since);
+      assert.equal(task.claim.agent, spawned.agent);
+      assert.ok(Date.parse(task.claim.until) > now + 60000);
+      assert.equal(task.run.phase, 'running');
+    } finally {
+      fs.writeFileSync(`${h.attempts}.finish`, '');
+    }
+    await until(() => h.json(['task', 'show', 'T1']).run?.phase === 'waiting', 'worker did not finish');
   });
-  try {
-    await until(() => h.readAttempts().length === 1, 'worker did not claim');
-    fs.writeFileSync(clockFile, String(now + 40000));
-    await until(() => log(h).some((e) => e.cmd === 'renew'), 'live worker lease was not renewed');
-    const task = h.json(['task', 'show', 'T1']);
-    assert.equal(task.claim.since, h.readAttempts()[0].claim.since);
-    assert.equal(task.claim.agent, spawned.agent);
-    assert.ok(Date.parse(task.claim.until) > now + 60000);
-    assert.equal(task.run.phase, 'running');
-  } finally {
-    fs.writeFileSync(`${h.attempts}.finish`, '');
-  }
-  await until(() => h.json(['task', 'show', 'T1']).run?.phase === 'waiting', 'worker did not finish');
-});
+}
 
 test('release during backoff fences the old supervisor from a replacement claim', async (t) => {
   const h = setup(t, { failures: 9, config: { backoff_ms: 1400, max_backoff_ms: 1400 } });
