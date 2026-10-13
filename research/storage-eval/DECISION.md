@@ -11,7 +11,7 @@ Do not adopt Valkey. Do not build the persistent service (C) now.
 Why, from the numbers below:
 
 1. Files do not scale, even after T254. Every command still parses the whole log and the 10 MB `tasks.json`. With the T254 CLI, a hook takes 506 ms at p50 on the 91 MB live log and 955 ms at 200 MB. A mutation takes 2.5 s at p95 on live and 4.0 s at 200 MB. B, C and D stay flat as the log grows.
-2. B, C and D tie end to end. Hook p50 is 29 to 32 ms and mutation p50 31 to 34 ms on every log size. Nearly all of that is process start: B's hook takes 29 ms end to end and 0.6 ms in storage. On storage alone, B's write is 3.6 ms, D's 1.7 ms and C's 0.6 to 1.1 ms. All are noise next to process start.
+2. B, C and D tie end to end. Hook p50 is 29 to 33 ms and mutation p50 31 to 34 ms on every log size. Nearly all of that is process start: B's hook takes 29 ms end to end and 0.6 ms in storage. On storage alone, B's write is 3.6 ms, D's 1.8 ms and C's 0.6 to 1.1 ms (single run, live log). All are noise next to process start.
 3. The guarantee is the same. strace shows a sync before every acknowledgement in A-proto, B, C and D. 270 random `kill -9` (45 per option) lost no acknowledged write. They left B, C and D consistent. Killing the writer at its commit write leaves A with a task change that has no event. B, C and D stay consistent at every crash point.
 4. B has no server. Nothing has to be started, supervised, restarted or ported. C needs 50 to 545 ms to restart and D 100 to 312 ms, and both grow with the data in C-files and D. There is no new dependency: `node:sqlite` is built into Node 24 and later (checked on 24.21.0 and 26.10.0). It runs on Windows, where Valkey has no official build. The whole state is one file.
 5. B loses in one place. Its mutation p95 is 52 ms under 6 concurrent writers; C and D sit at 36 to 42 ms. That comes from SQLite's single writer lock and from the WAL checkpoint each process runs when it closes the last connection. B is still within budget, and C over B (group commit) removes the gap if it ever matters.
@@ -32,7 +32,7 @@ Push delivery, dependencies, claims, conflict detection, checkpointing and recov
 
 ## Results
 
-Median of 3 runs, with min..max across runs; each run contributes its own p50 or p95. Full tables are in `results/summary.md`; every operation is in `results/raw/`.
+Each run contributes its own p50 or p95, and the tables below show the median of the 3 runs. The min..max across runs for every cell is in `results/summary.md`; every operation is in `results/raw/`.
 
 Concurrent hooks (8 agents polling back to back, plus a message every 500 ms), p50 / p95 ms:
 
@@ -58,7 +58,7 @@ Task transitions (6 writers cycling claim, submit and evidence, automation sendi
 
 Event replay, fresh reader, ms from offset 0 / from the last 1000 events: A 247 / 38, 348 / 39 and 671 / 40; B 147 / 31, 209 / 31 and 410 / 30; D 294 / 36, 481 / 34 and 887 / 33 (50 MiB, live, 200 MiB). Replay in C reads the backend directly, so it matches A or B. D's replay includes the minimal RESP client in `stores/resp.js`; replay does not decide anything here.
 
-Storage alone (`results/microbench.json`: one process, 200 sequential operations, no process start), live log, p50 / p95 ms:
+Storage alone (`results/microbench.json`: a single run of 200 sequential operations in one process, no process start), live log, p50 / p95 ms:
 
 | option | empty hook poll | note write (task + event, synced) |
 |---|---|---|
@@ -68,7 +68,7 @@ Storage alone (`results/microbench.json`: one process, 200 sequential operations
 | C-sqlite | 0.1 / 1.0 | 1.1 / 3.7 |
 | D | 0.5 / 1.1 | 1.8 / 3.7 |
 
-B, C and D change by less than 1 ms between 50 MiB and 200 MiB. A-proto goes from 159 to 620 ms for a hook.
+Between 50 MiB and 200 MiB, B, C and D change by less than 1 ms at p50 and by up to 1.4 ms at p95 (C-sqlite note p95 3.7 to 5.1 ms). A-proto goes from 159 to 620 ms for a hook.
 
 Crash recovery, 5 random `kill -9` per run (same kill points for every option; for C and D the owner process is killed too):
 
@@ -89,13 +89,14 @@ Syncs per acknowledged write (`results/fsync.json`, strace): A-proto 1.5, B 5 (t
 
 - `appendEvents` never syncs `events.jsonl`. A `msg` syncs only the `tasks.json` temp file, so an acknowledged event-only write (a message, a hook delivery) can be lost on power loss.
 - `tasks.json` is written before the events are appended. A crash in between leaves a task change without its event, and `validate` reports drift only in the other direction.
-- The directory is not synced after the `tasks.json` rename.
+- The directory is not synced after the `tasks.json` rename. A-proto keeps that gap, as main does, so its durability is slightly weaker than B, C and D and its numbers slightly favour A.
 
 ## Method
 
 - A-cli is the T254 tree at `7828330a`, run through its real CLI. A-proto, B, C-files, C-sqlite and D are storage prototypes in `stores/`. They share one transition model (`stores/model.js`) and run each operation in a fresh Node process, as a command or hook does (`op.js`).
 - Datasets: a copy of the live state taken 2026-10-13 22:47: a 91 MB log of 103,861 lines (66,695 state events) and a 10 MB `tasks.json` with 262 tasks. `s50` is the newest 50 MiB of that log. `s200` is the live log after 113 MiB of copies of finished-task events with new ids. B and D hold state events only; the legacy tool-progress lines that A's readers skip are not migrated. Benchmark-only edits: the pause is lifted, the live orchestrator lease is dropped, and the 8 bench tasks lose their PR numbers, so `submit` does not query GitHub.
-- 54 runs: 3 runs × 3 datasets × 6 options, interleaved inside each run. Every run restores a fresh copy. The machine was shared: load at run start was 6.7 to 28.6 (median 13.5) on 24 cores. Runs were niced. CPU is client plus server CPU from `/proc`.
+- 54 runs: 3 runs × 3 datasets × 6 options. A-cli, A-proto, B, C-sqlite and D were interleaved inside each run, at load 6.7 to 28.6 (median 12.6) on 24 cores. All 9 C-files runs were redone afterwards as a separate block, after a fix to its first checkpoint, at load 16.9 to 26.0 (median 17.7). Every run restores a fresh copy. The machine was shared. Runs were niced. CPU is client plus server CPU from `/proc`.
+- A-cli runs `validate` after the last crash of each run, and it exits 1 in all 9 runs. The cause is plan findings already in the live state before any bench write: L-size tasks without a `split:` note (T91, T92, T98, T166). No run reported drift. `validate` checks only for events that `tasks.json` lacks, so it cannot see a task change written before its event (the gap T266 covers).
 - `kill -9` covers process crashes. Power-loss durability rests on the measured syncs, not on a power cut.
 
 ## Reproduce
