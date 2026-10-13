@@ -574,7 +574,7 @@ The orchestrator does not run a waiter of its own. Its harness delivers events i
 
 | Orchestrator harness | Busy | Idle |
 | --- | --- | --- |
-| Claude Code, interactive, with this plugin | The mod `hooks/tower-crane.mjs` runs one `wait --follow` child per session and turns each line into a prompt with `$.prompt.submit`, queued until the turn ends; events arriving meanwhile go out together. An owner message sent with `--steer` joins the running turn (`$.session.append`) and is pushed again after the turn if the turn made no further model request | The queued prompt starts a turn |
+| Claude Code, interactive, with this plugin | The mod `hooks/tower-crane.mjs` runs one `wait --follow` child per session and turns each line into a prompt with `$.prompt.submit`, queued until the turn ends; events arriving meanwhile go out together. An owner message sent with `--steer` joins the running turn (`$.session.append`) and is pushed again after the turn if the turn made no further model request. An append that completes after its original turn ends is queued for the next turn | The queued prompt starts a turn |
 | Claude (`claude -p`) spawned on the orchestrator rung | Home `PostToolUse` and `UserPromptSubmit` hooks return the notice as `additionalContext` | Home `Stop` returns `decision: block` with pending events; with none and a task still open it blocks in `tower-crane wait` (hook timeout one day) and then blocks with the event |
 | Codex spawned on the orchestrator rung | The same home hooks in `config.toml` | The same blocking `Stop`; Codex has no asynchronous rewake |
 | pi, OpenCode | Their home adapters add the notice at tool boundaries (and OpenCode on `session.idle`) | Unsupported: no idle hold; use `tower-crane wait` |
