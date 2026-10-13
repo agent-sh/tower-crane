@@ -7,6 +7,16 @@ const { TMP_ROOT } = require('./helpers');
 
 let gateRepoSeed;
 
+function copyTree(source, destination) {
+  try {
+    fs.cpSync(source, destination, { recursive: true });
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+    // A filter selects JavaScript traversal when native copying leaves a directory incomplete.
+    fs.cpSync(source, destination, { recursive: true, filter: () => true });
+  }
+}
+
 function gitBaseline(h) {
   if (h.git(['status', '--porcelain', '--untracked-files=all'])) return null;
   const gitDir = path.join(h.repo, '.git');
@@ -29,9 +39,9 @@ function gitBaseline(h) {
 function saveGateRepoSeed(h, sha, baseline) {
   const base = fs.realpathSync.native(fs.mkdtempSync(path.join(TMP_ROOT, 'tower-crane-gate-seed-')));
   try {
-    fs.cpSync(path.join(h.repo, '.git'), path.join(base, '.git'), { recursive: true });
+    copyTree(path.join(h.repo, '.git'), path.join(base, '.git'));
     fs.copyFileSync(path.join(h.repo, 'value.js'), path.join(base, 'value.js'));
-    fs.cpSync(path.join(h.repo, 'test'), path.join(base, 'test'), { recursive: true });
+    copyTree(path.join(h.repo, 'test'), path.join(base, 'test'));
     gateRepoSeed = { base, sha, baseline };
     process.once('exit', () => {
       fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
@@ -44,9 +54,9 @@ function saveGateRepoSeed(h, sha, baseline) {
 
 function restoreGateRepo(h) {
   fs.rmSync(path.join(h.repo, '.git'), { recursive: true, force: true });
-  fs.cpSync(path.join(gateRepoSeed.base, '.git'), path.join(h.repo, '.git'), { recursive: true });
+  copyTree(path.join(gateRepoSeed.base, '.git'), path.join(h.repo, '.git'));
   fs.copyFileSync(path.join(gateRepoSeed.base, 'value.js'), path.join(h.repo, 'value.js'));
-  fs.cpSync(path.join(gateRepoSeed.base, 'test'), path.join(h.repo, 'test'), { recursive: true });
+  copyTree(path.join(gateRepoSeed.base, 'test'), path.join(h.repo, 'test'));
   fs.mkdirSync(path.join(h.repo, '.git', 'refs', 'remotes', 'origin'), { recursive: true });
   return gateRepoSeed.sha;
 }
