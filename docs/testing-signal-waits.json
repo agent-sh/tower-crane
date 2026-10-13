@@ -25738,5 +25738,495 @@
     },
     "raw_logs": "Task scratch rework-publication-conflict, with browser-fixed and fixtures-fixed series; run receipts include SHA-256 hashes.",
     "prior_evidence": "Earlier measurements and mutation catches retain their named source revisions."
+  },
+  "executor_capacity_refresh": {
+    "previous_head": "6b3e9f480a111ea97d09689789bd1983da0ba012",
+    "base_head": "c26563bdcd4b11c551dc650b7096feea9e4a8f61",
+    "changes": [
+      "Consumers wait for T3 gate evidence, and the observation-only waiter verifies its queue event.",
+      "Executor start files use fileWritten; watcher guards and the task-add race subprocess retain the suite minimum.",
+      "The ladder native dry run reads fixture credentials while preserving all harness and flag assertions."
+    ],
+    "loaded_files": {
+      "test/automation.test.js": [
+        {
+          "head": "cde4c3775209c0bbef03079e26d2f46ca374c671",
+          "file": "test/automation.test.js",
+          "run": 1,
+          "status": 0,
+          "wall_s": 314.91707757599943,
+          "load_before": [
+            5.384765625,
+            6.7919921875,
+            8.4306640625
+          ],
+          "load_after": [
+            8.61962890625,
+            8.3095703125,
+            8.65673828125
+          ],
+          "log_sha256": "6d3999a30a93ca6ba819f6c14fdcf1dfb121d51b652932c1eb7d115293744b6b",
+          "tests": {
+            "tests": 98,
+            "pass": 98,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        },
+        {
+          "head": "5eaf92b2af340b90a7ad896934aaa5b71fa850ef",
+          "file": "test/automation.test.js",
+          "run": 2,
+          "status": 0,
+          "wall_s": 308.5826505849982,
+          "load_before": [
+            7.87451171875,
+            8.1591796875,
+            8.59912109375
+          ],
+          "load_after": [
+            10.8798828125,
+            9.78662109375,
+            9.15380859375
+          ],
+          "log_sha256": "547a32314b27160a7685a6d990b065cba408c7150fd8733d9ad3143f4a1caea4",
+          "tests": {
+            "tests": 98,
+            "pass": 98,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        },
+        {
+          "head": "5eaf92b2af340b90a7ad896934aaa5b71fa850ef",
+          "file": "test/automation.test.js",
+          "run": 3,
+          "status": 0,
+          "wall_s": 313.14673674100777,
+          "load_before": [
+            10.48876953125,
+            9.7236328125,
+            9.13671875
+          ],
+          "load_after": [
+            11.36181640625,
+            11.10302734375,
+            9.9501953125
+          ],
+          "log_sha256": "baddb3ff52db0ee8d5d47e809899eb918a87e487b94a214da101edef7bd690fa",
+          "tests": {
+            "tests": 98,
+            "pass": 98,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        },
+        {
+          "head": "5eaf92b2af340b90a7ad896934aaa5b71fa850ef",
+          "file": "test/automation.test.js",
+          "run": 4,
+          "status": 0,
+          "wall_s": 310.7717044479941,
+          "load_before": [
+            10.85205078125,
+            11.00146484375,
+            9.92333984375
+          ],
+          "load_after": [
+            9.0859375,
+            10.443359375,
+            10.02734375
+          ],
+          "log_sha256": "fad1b627d1477bb88cbf28cdd818c4f704809496baeb0d4b942af854fe0b4069",
+          "tests": {
+            "tests": 98,
+            "pass": 98,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        },
+        {
+          "head": "5eaf92b2af340b90a7ad896934aaa5b71fa850ef",
+          "file": "test/automation.test.js",
+          "run": 5,
+          "status": 0,
+          "wall_s": 308.7564113680128,
+          "load_before": [
+            9.3193359375,
+            10.46923828125,
+            10.0380859375
+          ],
+          "load_after": [
+            8.75830078125,
+            9.06982421875,
+            9.5283203125
+          ],
+          "log_sha256": "4614c8325e21054dc9124f2a1466df610463011104f3a90ca7676606140a54ab",
+          "tests": {
+            "tests": 98,
+            "pass": 98,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        }
+      ],
+      "test/plan.test.js": [
+        {
+          "head": "cde4c3775209c0bbef03079e26d2f46ca374c671",
+          "file": "test/plan.test.js",
+          "run": 1,
+          "status": 0,
+          "wall_s": 4.423019909998402,
+          "load_before": [
+            7.173828125,
+            7.033203125,
+            8.43212890625
+          ],
+          "load_after": [
+            7.400390625,
+            7.08251953125,
+            8.44091796875
+          ],
+          "log_sha256": "a30291c76ddf11a713d1257e55f45fb7afe7eb48241ee9404560e5612423bffb",
+          "tests": {
+            "tests": 11,
+            "pass": 11,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        },
+        {
+          "head": "cde4c3775209c0bbef03079e26d2f46ca374c671",
+          "file": "test/plan.test.js",
+          "run": 2,
+          "status": 0,
+          "wall_s": 4.889975231999415,
+          "load_before": [
+            7.400390625,
+            7.08251953125,
+            8.44091796875
+          ],
+          "load_after": [
+            7.84912109375,
+            7.18115234375,
+            8.4658203125
+          ],
+          "log_sha256": "7d529ee9f2bcdaecc152a879a732255164c4afb4309f518b0eee46e6f92f80d2",
+          "tests": {
+            "tests": 11,
+            "pass": 11,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        },
+        {
+          "head": "cde4c3775209c0bbef03079e26d2f46ca374c671",
+          "file": "test/plan.test.js",
+          "run": 3,
+          "status": 0,
+          "wall_s": 4.9818869159935275,
+          "load_before": [
+            7.84912109375,
+            7.18115234375,
+            8.4658203125
+          ],
+          "load_after": [
+            8.021484375,
+            7.22802734375,
+            8.47412109375
+          ],
+          "log_sha256": "2880c71bfdb378ceaa0b82f24b610614cc7392b50f615d6ed7e1310c0217d6a2",
+          "tests": {
+            "tests": 11,
+            "pass": 11,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        },
+        {
+          "head": "cde4c3775209c0bbef03079e26d2f46ca374c671",
+          "file": "test/plan.test.js",
+          "run": 4,
+          "status": 0,
+          "wall_s": 4.572830663993955,
+          "load_before": [
+            8.021484375,
+            7.22802734375,
+            8.47412109375
+          ],
+          "load_after": [
+            8.18017578125,
+            7.2744140625,
+            8.482421875
+          ],
+          "log_sha256": "1f473e57d218d94468799f7113d578c30730293b59df302fe0adf743298cf4a6",
+          "tests": {
+            "tests": 11,
+            "pass": 11,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        },
+        {
+          "head": "cde4c3775209c0bbef03079e26d2f46ca374c671",
+          "file": "test/plan.test.js",
+          "run": 5,
+          "status": 0,
+          "wall_s": 4.8259202469926095,
+          "load_before": [
+            8.18017578125,
+            7.2744140625,
+            8.482421875
+          ],
+          "load_after": [
+            8.486328125,
+            7.35302734375,
+            8.50146484375
+          ],
+          "log_sha256": "fee1658014d64ca3ea21a16b16c5992816f68260191ca0e50d3d95ebcf7b948c",
+          "tests": {
+            "tests": 11,
+            "pass": 11,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        }
+      ],
+      "test/ladder.test.js": [
+        {
+          "head": "5eaf92b2af340b90a7ad896934aaa5b71fa850ef",
+          "file": "test/ladder.test.js",
+          "run": 1,
+          "status": 0,
+          "wall_s": 10.08363603700127,
+          "load_before": [
+            8.73388671875,
+            8.07958984375,
+            8.62353515625
+          ],
+          "load_after": [
+            9.015625,
+            8.16015625,
+            8.64453125
+          ],
+          "log_sha256": "73ebc5973bc4aedc6b49d5c37d18ff0ceecdaa5d27e70047dd17ecc846c7b815",
+          "tests": {
+            "tests": 20,
+            "pass": 20,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        },
+        {
+          "head": "5eaf92b2af340b90a7ad896934aaa5b71fa850ef",
+          "file": "test/ladder.test.js",
+          "run": 2,
+          "status": 0,
+          "wall_s": 10.387193985996419,
+          "load_before": [
+            9.015625,
+            8.16015625,
+            8.64453125
+          ],
+          "load_after": [
+            9.79541015625,
+            8.353515625,
+            8.7021484375
+          ],
+          "log_sha256": "9282aa73236ecc5b78fcd725568bba00706084b7770db3554b75ead25e7f094f",
+          "tests": {
+            "tests": 20,
+            "pass": 20,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        },
+        {
+          "head": "5eaf92b2af340b90a7ad896934aaa5b71fa850ef",
+          "file": "test/ladder.test.js",
+          "run": 3,
+          "status": 0,
+          "wall_s": 10.643592380001792,
+          "load_before": [
+            9.79541015625,
+            8.353515625,
+            8.7021484375
+          ],
+          "load_after": [
+            9.5927734375,
+            8.35791015625,
+            8.7001953125
+          ],
+          "log_sha256": "725352fdcabdbef779d4cafea8e46a85971cb1473e032f17cd5afe8fb67a5075",
+          "tests": {
+            "tests": 20,
+            "pass": 20,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        },
+        {
+          "head": "5eaf92b2af340b90a7ad896934aaa5b71fa850ef",
+          "file": "test/ladder.test.js",
+          "run": 4,
+          "status": 0,
+          "wall_s": 10.392642830003751,
+          "load_before": [
+            9.5927734375,
+            8.35791015625,
+            8.7001953125
+          ],
+          "load_after": [
+            9.66162109375,
+            8.41259765625,
+            8.71484375
+          ],
+          "log_sha256": "59d54608f5f39c8244f686f1ea5e8cd42a15513cce53f5939fc14f05a7586bb3",
+          "tests": {
+            "tests": 20,
+            "pass": 20,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        },
+        {
+          "head": "5eaf92b2af340b90a7ad896934aaa5b71fa850ef",
+          "file": "test/ladder.test.js",
+          "run": 5,
+          "status": 0,
+          "wall_s": 10.442141673003789,
+          "load_before": [
+            9.66162109375,
+            8.41259765625,
+            8.71484375
+          ],
+          "load_after": [
+            9.48583984375,
+            8.41552734375,
+            8.712890625
+          ],
+          "log_sha256": "0473c279a2ad5d3a607bd633ba82f813d11a498e882d0be82fd847a26a31501f",
+          "tests": {
+            "tests": 20,
+            "pass": 20,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        }
+      ]
+    },
+    "cpu_load_processes_per_runner": 2,
+    "peak_cpu_load_processes": 4,
+    "test_file_concurrency": 1,
+    "peak_named_test_workers": 4,
+    "focused_executor": {
+      "artifact": "executor-green.log",
+      "sha256": "09bfb874515450eef96b7f7b0379723e4bd8ec7fefb57f66ed2386f960e8c289",
+      "footer": {
+        "tests": 1,
+        "pass": 1,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 0
+      }
+    },
+    "shared_before_conversion": {
+      "artifact": "shared-merge.log",
+      "sha256": "bce1452c641d799ce7e8f7c04bd19ff1f8ea50a5ae2be86335ec8924d8812f22",
+      "footer": {}
+    },
+    "shared_after_conversion": {
+      "artifact": "shared-green.log",
+      "sha256": "a037223bd11b10d99fb0e13c183ecb66e3aaaf5b24c6608c3db8d87a9bb92a55",
+      "footer": {}
+    },
+    "named_merge_check": {
+      "artifact": "merge-checks.log",
+      "sha256": "96152f687c1002eec622829aac4a1e27071da3ebc8fbf4249c603aaaaa7724be",
+      "footer": {
+        "tests": 188,
+        "pass": 185,
+        "fail": 2,
+        "cancelled": 0,
+        "skipped": 1
+      }
+    },
+    "named_merge_note": "188 checks: 185 passed, one skipped, two host-fixture assumptions failed. Broker was invoked without its existing shallow socket-home option; ladder dry runs reached parent credentials. The focused broker/ladder run then passes with the correct socket-home option and isolated ladder stores, and ladder has five loaded whole-file passes. Other named files retain their passing check.",
+    "fixtures_green": {
+      "artifact": "fixtures-green.log",
+      "sha256": "741a0e2e50cf02336ca0c484311949cd8fe4ec0819b3f200d63a0c7688b8e07d",
+      "footer": {
+        "tests": 42,
+        "pass": 42,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 0
+      }
+    },
+    "affected_mutations": {
+      "score": "2/2",
+      "ids": [
+        "broker-other-task",
+        "broker-no-token"
+      ],
+      "baseline": "green unmodified named broker baseline; no full-suite fallback",
+      "log": {
+        "artifact": "mutants.log",
+        "sha256": "13ef8cd1674d7958d16ccebba8d38b4e81182bbb98c7f935c68ea6a09776c36a",
+        "footer": {}
+      }
+    },
+    "reproduction": {
+      "command": "node test/run.js --test-concurrency=1 FILE",
+      "broker_env": "TOWER_CRANE_TEST_SOCKET_HOME=WRITABLE_SHORT_HOME",
+      "cpu_load": "two nice -n 15 node processes evaluating Math.sqrt(Math.random()) continuously"
+    },
+    "raw_logs": "Task scratch rework-automation-latest; run receipts include source heads, counts, CPU load and raw-log hashes.",
+    "prior_evidence": "Earlier source-versioned conversion and mutation receipts remain intact; no tokenizer expansion.",
+    "final_base_refresh": {
+      "base_head": "4f0ae5fc79338c3283dd97a30c2d70a5b3d94467",
+      "code_head": "3952e4aaa24107c86e81c96dc3aaed882c1ad830",
+      "named_files": [
+        "test/gates/tests.test.js",
+        "test/host-only.test.js",
+        "test/test-tools.test.js"
+      ],
+      "check": {
+        "artifact": "final-merge-checks.log",
+        "sha256": "6aef25681698f2d0594559103c15e9e73dead1bed39d8a37853059ca963b1bfd",
+        "footer": {
+          "tests": 50,
+          "pass": 50,
+          "fail": 0,
+          "skipped": 0
+        }
+      },
+      "note": "Main host_env handling merged after the frozen loaded checkpoints. Its gate and runner checks pass separately; real live host-only files were not selected locally.",
+      "gate_mutations": {
+        "score": "2/2",
+        "ids": [
+          "tests-pass-without-change",
+          "tests-deleted-test-counts"
+        ],
+        "baseline": "green unmodified named gate tests; no full-suite fallback",
+        "artifact": "gate-mutants.log",
+        "sha256": "41376bf346808f81713562acf872b62bc402f7a0d39ab77c951984af383c8a7f"
+      }
+    }
   }
 }

@@ -42,6 +42,10 @@ The final base refresh through `168dbd41` adds opt-in session-bus access. All si
 
 Main moved during the passing CI run at `6a182434`. The scratch refresh through `5d98dfed` retains the browser's suite guard and separate temporary root. Browser startup, broker and reviewer each pass five loaded runs at their recorded checkpoints. Their short-cache and parent-credential diagnostic failures remain in the receipt; the twelve other named merge files pass, and two gate-proof mutants are caught after a green baseline. The fixture settings select writable shallow paths in restricted workers without weakening socket, teardown or review assertions.
 
+The executor-capacity refresh through `c26563bd` retains watchers until T3 gate evidence and observes its queue event. Executor starts use file signals, and the task-add race subprocess uses the suite guard. Automation, plan and ladder each pass five loaded runs at named checkpoints; the focused capacity case passes and two broker authorization mutants are caught after a green baseline. The initial named check's socket-home and credential-store failures are retained, with passing broker/ladder replacements. The whole receipt has no machine-local paths.
+
+The final base through `4f0ae5fc` enables the configured environment for live host-only tests on the host. Fifty named gate, host-selection and runner checks pass after that merge. The loaded measurements retain their earlier source checkpoints, and real live host-only files are not selected locally.
+
 ## Tools
 
 - `node scripts/test-cost.js [--before DIR] [files...]` measures CPU and wall seconds per file, median of three runs, four files at a time. With `--before`, it measures another checkout interleaved with this one.
