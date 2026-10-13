@@ -1509,9 +1509,12 @@ test('concurrent event consumers execute each submission gate only once', async 
 // A slow stub suite records each run's start and end, so the log shows how
 // many gate executors ran at once across every consumer process. With
 // `release`, a run records its pid in its start file and waits for the release
-// file; it also stops when the fixture is gone or after SLOW_SUITE_MS, so a
-// test that fails first cannot leave it polling. Teardown releases and stops
-// every recorded run before the fixture is removed.
+// file; it also stops when its start file is gone or after SLOW_SUITE_MS, so a
+// test that fails first cannot leave it polling. The start file goes with the
+// fixture. A run does not watch the fixture directory itself: the run and its
+// shell work in a gate worktree inside it, and Windows cannot remove a
+// directory that is a live process's working directory. Teardown releases and
+// stops every recorded run before the fixture is removed.
 const SLOW_SUITE_MS = 240000;
 function slowSuite(h, { executors, crash = false, release = null } = {}) {
   const runs = path.join(h.base, 'suite-runs.log');
@@ -1529,10 +1532,11 @@ const finish = () => fs.appendFileSync(${JSON.stringify(runs)}, '-\\n');
 const release = ${JSON.stringify(release)};
 if (release) {
   const starts = fs.readFileSync(${JSON.stringify(runs)}, 'utf8').split('\\n').filter((m) => m === '+').length;
-  fs.writeFileSync(${JSON.stringify(path.join(h.base, 'suite-started-'))} + starts, String(process.pid));
+  const started = ${JSON.stringify(path.join(h.base, 'suite-started-'))} + starts;
+  fs.writeFileSync(started, String(process.pid));
   const until = Date.now() + ${SLOW_SUITE_MS};
   const poll = () => {
-    if (!fs.existsSync(${JSON.stringify(h.base)}) || Date.now() > until) process.exit(1);
+    if (!fs.existsSync(started) || Date.now() > until) process.exit(1);
     if (fs.existsSync(release)) finish();
     else setTimeout(poll, 50);
   };
@@ -1557,9 +1561,12 @@ if (release) {
   };
 }
 
+function slowSuiteStarts(h) {
+  return fs.readdirSync(h.base).filter((f) => f.startsWith('suite-started-')).map((f) => path.join(h.base, f));
+}
+
 function slowSuitePids(h) {
-  return fs.readdirSync(h.base).filter((f) => f.startsWith('suite-started-'))
-    .map((f) => Number(fs.readFileSync(path.join(h.base, f), 'utf8'))).filter((pid) => pid > 0);
+  return slowSuiteStarts(h).map((f) => Number(fs.readFileSync(f, 'utf8'))).filter((pid) => pid > 0);
 }
 
 function slowSuiteRunning(pid) {
@@ -1644,7 +1651,10 @@ test('slow suites stop when their fixture is removed before they are released', 
     try { process.kill(e.detail.pid, 'SIGKILL'); } catch { /* It exited already. */ }
   }
   await Promise.all(watchers);
-  fs.rmSync(h.base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  // Windows cannot remove the fixture while the suites and their shells work
+  // in it, so there the removal takes what it can first: the start files.
+  if (process.platform === 'win32') for (const file of slowSuiteStarts(h)) fs.rmSync(file);
+  else fs.rmSync(h.base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   const until = Date.now() + 5000;
   while (pids.some(slowSuiteRunning) && Date.now() < until) await new Promise((resolve) => setTimeout(resolve, 50));
   const left = pids.filter(slowSuiteRunning);
