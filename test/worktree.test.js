@@ -269,7 +269,10 @@ try {
 }
 
 for (const command of ['worktree', 'spawn']) {
-  test(`one dispatch prepares six ${command} tasks from one slow base fetch`, { timeout: 60000 }, async (t) => {
+  // Proof comes from the recorded upload-pack calls, not elapsed time, which
+  // tracks host load. The timeout only catches a hang: about four times the
+  // slowest passing run (32 s) on a host at a load of 30.
+  test(`one dispatch prepares six ${command} tasks from one slow base fetch`, { timeout: 120000 }, async (t) => {
     const h = setup(t);
     const fresh = advance(h, h.upstream, 'remote.txt');
     h.git(['push', 'origin', 'main'], h.upstream);
@@ -283,10 +286,9 @@ for (const command of ['worktree', 'spawn']) {
       for (const id of ids) h.ok(['brief', 'set', id, '-'], { input: 'Use the fresh base.\n' });
     }
     const attempts = guardUploadPack(h, 15000);
-    let started = Date.now();
     const hooks = { HOOK_WORKTREE_ADD_ACTIVE: path.join(h.base, 'worktree-add-active') };
     const trees = h.json(['worktree', ...ids], { hooks });
-    assert.ok(Date.now() - started < 30000, 'the worktrees are ready within two fetch times');
+    assert.equal(fs.readFileSync(attempts, 'utf8'), '.', 'the dispatcher fetched once before preparing workers');
     assert.equal(trees.length, 6);
     for (let i = 0; i < trees.length; i++) {
       assert.equal(trees[i].id, ids[i]);
@@ -294,18 +296,16 @@ for (const command of ['worktree', 'spawn']) {
       assert.ok(h.json(['task', 'show', ids[i]]).branch);
     }
     if (command === 'spawn') {
-      // Six spawns take about half a fetch time on Windows, so they are timed
-      // on their own: none of them may wait for a fetch.
-      started = Date.now();
       const results = await Promise.all(ids.map((id) => h.runAsync(
         ['spawn', '--role', 'medium', '--task', id, '--wait', '--json'], { hooks })));
-      assert.ok(Date.now() - started < 15000, 'the spawns finish within one fetch time');
       assert.deepEqual(results.map((r) => r.code), Array(6).fill(0), results.map((r) => r.stderr).join('\n'));
+      // Each spawn runs in the worktree the dispatch prepared from its one
+      // fetch, and none of them fetched again.
+      assert.deepEqual(results.map((r) => JSON.parse(r.stdout).cwd), trees.map((tree) => tree.path));
       for (const r of results) assert.equal(h.git(['rev-parse', 'HEAD'], JSON.parse(r.stdout).cwd), fresh);
+      assert.equal(fs.readFileSync(attempts, 'utf8'), '.', 'no spawn fetched');
     }
     assert.equal(h.git(['rev-parse', 'origin/main']), fresh);
-    // Counting fetches proves reuse across worker startup on slower runners.
-    assert.equal(fs.readFileSync(attempts, 'utf8'), '.', 'the dispatcher fetched once before preparing workers');
   });
 }
 
