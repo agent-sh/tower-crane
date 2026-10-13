@@ -13,9 +13,9 @@ const suite = (app, conclusion = 'success', status = 'completed', runs = 1) => (
 // gh --jq prints one JSON value per line, across all pages.
 const lines = (items) => items.map((i) => JSON.stringify(i)).join('\n') + (items.length ? '\n' : '');
 
-function github({ runs = [], suites = [], workflows = [], head = SHA, apiError = null } = {}) {
+function github({ runs = [], suites = [], workflows = [], head = SHA, apiError = null, view = {} } = {}) {
   return fakeExec((args) => {
-    if (args[0] === 'pr' && args[1] === 'view') return result(JSON.stringify({ headRefOid: head, mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }));
+    if (args[0] === 'pr' && args[1] === 'view') return result(JSON.stringify({ headRefOid: head, mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN', ...view }));
     if (args[0] !== 'api') return null;
     assert.ok(args.includes('--paginate'), 'every page must be read');
     if (apiError) return result('', 1, apiError);
@@ -99,13 +99,60 @@ test('required queued and running jobs are pending, while completed failures tak
 });
 
 test('UNKNOWN mergeability is pending without consuming an infrastructure retry', async () => {
-  const gh = fakeExec((args) => args[0] === 'pr' && args[1] === 'view'
-    ? result(JSON.stringify({ headRefOid: SHA, mergeable: 'UNKNOWN', mergeStateStatus: 'UNKNOWN' })) : null);
+  const gh = github({ runs: GREEN_RUNS, suites: GREEN_SUITES, view: { mergeable: 'UNKNOWN', mergeStateStatus: 'UNKNOWN' } });
   const r = await gate.run(ctx(gh, { pr: 9 }));
   assert.equal(r.ok, false);
   assert.equal(r.pending, true);
   assert.equal(r.infrastructure_failure, undefined);
   assert.match(r.summary, /mergeability is unknown/);
+});
+
+test('UNKNOWN mergeability reads the checks first, so a completed failure is not pending', async () => {
+  const checks = (runs) => github({ runs, suites: GREEN_SUITES, view: { state: 'OPEN', mergeable: 'UNKNOWN', mergeStateStatus: 'UNKNOWN' } });
+  const failed = await gate.run(ctx(checks([run('test (linux)', 'failure')]), { pr: 9 }, { ci: { required: ['test ('] } }));
+  assert.equal(failed.pending, undefined, failed.summary);
+  assert.equal(failed.confirmed_failure, true);
+  const green = await gate.run(ctx(checks(GREEN_RUNS), { pr: 9 }));
+  assert.equal(green.ok, false);
+  assert.equal(green.pending, true);
+  assert.equal(green.not_running, true);
+  assert.match(green.summary, /mergeability is unknown/);
+  const running = await gate.run(ctx(checks([...GREEN_RUNS, run('e2e', null, 'in_progress')]), { pr: 9 }));
+  assert.equal(running.pending, true);
+  assert.equal(running.not_running, undefined);
+});
+
+test('a PR closed without merging stalls its CI at once', async () => {
+  const gh = fakeExec((args) => args[0] === 'pr' && args[1] === 'view'
+    ? result(JSON.stringify({ state: 'CLOSED', headRefOid: SHA, mergeable: 'UNKNOWN', mergeStateStatus: 'UNKNOWN' })) : null);
+  const r = await gate.run(ctx(gh, { pr: 9 }));
+  assert.equal(r.ok, false);
+  assert.equal(r.pending, true);
+  assert.equal(r.stalled, true);
+  assert.match(r.summary, /closed without merging/);
+});
+
+test('CI with nothing queued or running for 30 minutes at the head stalls', async () => {
+  const idle = (minutes, extra = {}) => ({ type: 'ci', ok: false, pending: true, not_running: true, sha: SHA, revision: 1,
+    at: new Date(Date.now() - minutes * 60000).toISOString(), ...extra });
+  const none = () => github({ runs: [], suites: [] });
+  const first = await gate.run(ctx(none(), { revision: 1, evidence: [] }));
+  assert.equal(first.pending, true);
+  assert.equal(first.not_running, true);
+  assert.equal(first.stalled, undefined);
+  const young = await gate.run(ctx(none(), { revision: 1, evidence: [idle(29), idle(1)] }));
+  assert.equal(young.stalled, undefined);
+  const old = await gate.run(ctx(none(), { revision: 1, evidence: [idle(31), idle(1)] }));
+  assert.equal(old.stalled, true);
+  assert.match(old.summary, /Stalled: no CI run has been queued or running at this head since/);
+  // A run that started in between, another revision, or a recorded stall restarts the window.
+  for (const evidence of [[idle(31), idle(10, { not_running: undefined }), idle(1)], [idle(31, { revision: 0 }), idle(1)],
+    [idle(31), idle(20, { stalled: true })]]) {
+    assert.equal((await gate.run(ctx(none(), { revision: 1, evidence }))).stalled, undefined);
+  }
+  const running = await gate.run(ctx(github({ runs: [run('e2e', null, 'queued')] }), { revision: 1, evidence: [idle(31)] }));
+  assert.equal(running.pending, true);
+  assert.equal(running.stalled, undefined);
 });
 
 test('a completed failed suite takes precedence over required queued jobs', async () => {
@@ -170,7 +217,7 @@ test('the PR head moved off the submitted sha: not ok', async () => {
   const r = await gate.run(ctx(gh, { pr: 42 }));
   assert.equal(r.ok, false);
   assert.match(r.summary, /PR head moved: PR #42 head is bbbbbbbbbb/);
-  assert.deepEqual(gh.calls[0], ['gh', 'pr', 'view', '42', '-R', REPO, '--json', 'headRefOid,mergeable,mergeStateStatus']);
+  assert.deepEqual(gh.calls[0], ['gh', 'pr', 'view', '42', '-R', REPO, '--json', 'state,headRefOid,mergeable,mergeStateStatus']);
 });
 
 test('the PR head is the submitted sha: CI decides', async () => {

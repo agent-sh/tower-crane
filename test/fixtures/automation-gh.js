@@ -79,7 +79,8 @@ if (args[0] === 'pr') {
   const sha = /commits\/([a-f\d]+)/.exec(args[1])?.[1];
   const status = state.ci?.[sha] || 'success';
   const suite = args[1].includes('check-suites');
-  out = JSON.stringify({
+  // 'none' is CI that never started: no check runs or suites at the commit.
+  out = status === 'none' ? '' : JSON.stringify({
     ...(suite ? { id: 1, runs: 1 } : { name: 'test', suite: 1 }),
     app: 'fixture', status: status === 'pending' ? 'in_progress' : 'completed',
     conclusion: status === 'pending' ? null : status,

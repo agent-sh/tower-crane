@@ -190,7 +190,7 @@ test('T71 regression: conflicts block CodeQL successes plus a capped review with
   assert.match(r.summary, /PR #40.*CONFLICTING.*conflict/i);
   assert.doesNotMatch(r.summary, /CI green/);
   assert.equal(r.commands.length, 1, 'conflicts fail before reading check runs');
-  assert.equal(r.commands[0].args.at(-1), 'headRefOid,mergeable,mergeStateStatus');
+  assert.equal(r.commands[0].args.at(-1), 'state,headRefOid,mergeable,mergeStateStatus');
 });
 
 test('unknown or absent mergeability requires a later check even with successful tests', (t) => {
