@@ -165,6 +165,25 @@ test('gh failing: not ok with its message', async () => {
   assert.match(r.summary, /HTTP 404/);
 });
 
+test('gh failures retain child startup errors, exit status and signals', async () => {
+  const cases = [
+    [{ status: null, error: { code: 'EAGAIN', message: 'spawnSync gh EAGAIN' } }, ['status=null', 'EAGAIN', 'spawnSync gh EAGAIN']],
+    [{ status: null, error: { code: 'ETXTBSY', message: 'spawnSync gh ETXTBSY' } }, ['status=null', 'ETXTBSY']],
+    [{ status: null, signal: 'SIGTERM' }, ['status=null', 'signal=SIGTERM']],
+    [{ status: null, signal: 'SIGKILL', error: { code: 'ETIMEDOUT', message: 'spawnSync gh ETIMEDOUT' } }, ['ETIMEDOUT', 'signal=SIGKILL']],
+    [{ status: 7 }, ['status=7', 'no output']],
+    [{ status: 1, stderr: 'gh: Not Found (HTTP 404)' }, ['status=1', 'HTTP 404']],
+    [{ status: null, error: { code: 'ENOENT', message: 'spawnSync gh ENOENT' } }, ['ENOENT', 'gh not found on PATH', 'gh auth login']],
+  ];
+  for (const [failure, expected] of cases) {
+    const gh = fakeExec(() => failure);
+    const r = await gate.run(ctx(gh));
+    assert.equal(r.ok, false);
+    for (const text of expected) assert.ok(r.summary.includes(text), `${text}: ${r.summary}`);
+    assert.equal(gh.calls.length, 1, 'a failure is reported without retrying');
+  }
+});
+
 test('GitHub observation errors are infrastructure failures, including unknown mergeability', async () => {
   const cases = [
     ['PR transport', 'view', result('', 1, 'HTTP 502: Bad Gateway'), /HTTP 502/],
