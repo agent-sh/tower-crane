@@ -95,7 +95,7 @@ const TASK_FIELDS = {
   dep: many('ID', 'a task this one depends on; repeat for more'),
   lock: many('NAME', 'exclusive resource name; repeat for several'),
   environment: str('LABEL', "environment label; '' clears it"),
-  tier: str('T', 'easy, medium, hard, research or an ascending range (easy..medium): the ladder rung that does it (default: research for kind research, else S easy, M medium, L hard)'),
+  tier: str('T', 'easy, medium, hard, research or an ascending range (easy..medium): the ladder rung that does it (default: research for kind research, easy for S docs, hard for L, else medium)'),
   'needs-owner': str('REASON', 'what the owner has to do first'),
 };
 
@@ -172,7 +172,7 @@ const COMMANDS = [
 
   { section: 'Run', name: 'evidence', pos: ['ID'], usage: 'ID --type T (--ok | --fail) [--sha S] [--revision N] [--summary T] [--ref URL] [--findings JSON]', summary: 'record review or note evidence; review needs --sha, note defaults to the submitted sha', flags: { type: str('T', 'review or note; tests, clean, sources, ci and merge require gate commands'), ok: bool('it passed'), fail: bool('it failed'), sha: str('S', 'commit the evidence is about; required for review'), revision: int('N', 'task revision the evidence is about; required for review from a reviewer spawn did not start'), summary: str('T', 'one line'), ref: str('URL', 'link to the run, review or log'), findings: str('JSON', 'every blocking finding as {kind, path, claim}; failed reviews only') }, required: ['type'], description: "record `review` or `note` evidence; `review` requires `--sha`, while `note` defaults to the task's submitted sha. `--revision N` names the task revision the evidence is about and is refused above the current revision; review evidence from a reviewer that `spawn` did not start requires it, and a spawned reviewer's verdict keeps its dispatch revision. `--findings JSON` on a failed review records every blocker as `{kind, path, claim}`; only `false-claim` blockers confined to `PR body`, `CHANGELOG.md` or `changelog.d/*.md` get a light correction check without rework. Missing or mixed metadata keeps the full review path. Refuses `tests`, `clean`, `sources`, `ci` and `merge` for every agent and either verdict; use the gate commands", run: T.evidence },
 
-  { section: 'Gates', name: 'gates prioritize', pos: ['ID'], usage: 'ID --reason R', summary: "move a task's queued gate work to the front of the executor queue", flags: { reason: str('R', 'why the task goes first; kept on the event and shown in status') }, required: ['reason'], description: "operational (orchestrator or owner): move the task's queued automation reactions, such as its submission gates or merge, ahead of older queued work, so the next free executor takes them first. Several requests run newest first. Only the work queued when the request is made moves; a notification queued later keeps its place, and a running reaction is not queued work. Refused when nothing is queued for the task. Logs a `gates prioritize` event with the reason; `status` and `inbox` show the gate queue", run: run('../lib/automation', 'prioritize') },
+  { section: 'Gates', name: 'gates prioritize', pos: ['ID'], usage: 'ID --reason R', summary: "prioritize a task's queued gate work after accepted merges", flags: { reason: str('R', 'why the task goes first; kept on the event and shown in status') }, required: ['reason'], description: "operational (orchestrator or owner): move the task's queued submitted gate reactions ahead of older submitted work. Accepted merges always run first in acceptance order, including their merged-tree tests; requests cannot change that order. Several requests run newest first among submitted work. Only the work queued when the request is made moves; a notification queued later keeps its place unless its task becomes accepted, and a running reaction is not queued work. Refused for an accepted task, whose merge already runs first, and when nothing is queued for the task. Logs a `gates prioritize` event with the reason; `status` and `inbox` show the gate queue", run: run('../lib/automation', 'prioritize') },
 
   { section: 'Gates', name: 'gates retry', pos: ['ID'], usage: 'ID', summary: 'orchestrator or owner: rerun each failed software gate at the submitted head, at unchanged inputs', description: "orchestrator or owner: rerun each failed `tests`, `clean`, `sources` or `ci` gate of a submitted task at its current head and revision, with the same pinned commands and policy. Use it after a later fix removed the environment problem behind a failed gate, such as a pinned command the orchestrator has now set. Automation retries an infrastructure failure once, including a test that also fails on the base branch, and sends any other failed check to rework; a missing pinned command stays submitted until the orchestrator pins it, and this reruns the gate. Passing evidence whose inputs changed, such as the pinned command or tests policy, reruns on its own. Refuses a task that is not submitted and one with no failed software gate. Exits 1 while a retried gate still fails. Run `accept` afterwards to continue", run: run('../lib/automation', 'gatesRetry') },
 
@@ -475,6 +475,11 @@ async function main(argv) {
     const identity = agent.trim();
     let stateDir;
     const locate = () => stateDir ??= S.locateStateDir(globals.state, process.env, process.cwd());
+    // A wait at "now" starts at the log's end as of this point. Orchestrator
+    // discovery below takes seconds on a cold Windows host, and events written
+    // meanwhile must reach the waiter.
+    const startCursor = cmd.name === 'wait' && (own.after === undefined || own.after === 'now')
+      ? require('../lib/events').startCursor(locate()) : undefined;
     const authority = require('../lib/authority');
     const ownerConfigDir = identity === 'owner'
       ? authority.checkOwner(process.env, ownerCredential, ownerTerminal, () => authority.ownerProject(locate()), cmd.name === 'init')
@@ -512,6 +517,7 @@ async function main(argv) {
       request: { command: cmd.name, flags: own, pos: parsed.pos },
       stateDir: cmd.name === 'mcp' ? undefined : locate(),
       ...(cmd.name === 'mcp' ? { resolveStateDir: locate } : {}),
+      ...(startCursor === undefined ? {} : { startCursor }),
     };
     require('../lib/orchestrator').command(ctx, cmd.name);
     const res = await cmd.run(ctx);
