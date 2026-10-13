@@ -64,24 +64,36 @@ async function closeBrowser() {
 // a socket too, so spawnChrome gives Chrome a TMPDIR inside the profile: that socket adds 45 bytes,
 // which the same 62-byte profile limit keeps under the 108-byte Unix path limit. A temp root deep
 // enough to overflow that (a gate's TMPDIR under TOWER_CRANE_TMP) moves the profile to the first
-// directory whose path fits, on disk, and the browser's teardown removes it. The cache root is
-// on-disk scratch that stays writable where /var/tmp may be read-only. When none fits, the first
-// root is used and Chrome reports its own socket error, which names the problem.
+// directory whose path fits, on disk, and the browser's teardown removes it. An on-disk cache can
+// work where /var/tmp is read-only. A gate's XDG_CACHE_HOME can
+// also be a deep task cache, so a fitting account cache is tried by allocating the profile there.
+// If that allocation fails, or no root fits, use the first root and let Chrome report its socket error.
 const CHROME_SOCKET_PATH = 78;
 
-function profileBase() {
+function createProfile() {
   const cache = process.env.XDG_CACHE_HOME || path.join(os.homedir(), '.cache');
   const bases = [process.env.TOWER_CRANE_TEST_TMP || os.tmpdir(), os.tmpdir(), cache];
   const fits = (base) => Buffer.byteLength(path.join(base, 'tower-crane-chrome-000000', 'SingletonSocket')) <= CHROME_SOCKET_PATH;
-  const base = bases.find(fits) || bases[0];
-  fs.mkdirSync(base, { recursive: true });
-  return base;
+  const create = (base) => {
+    fs.mkdirSync(base, { recursive: true });
+    return fs.mkdtempSync(path.join(base, 'tower-crane-chrome-'));
+  };
+  const base = bases.find(fits);
+  if (base) return create(base);
+  const accountCache = path.join(os.userInfo().homedir, '.cache');
+  if (fits(accountCache)) {
+    try { return create(accountCache); }
+    catch {
+      // An agent sandbox can make even a short account cache read-only.
+    }
+  }
+  return create(bases[0]);
 }
 
 // The profile is removed when a start fails at any point, including its own setup; a started browser
 // removes it in close.
 async function launch() {
-  const profile = fs.mkdtempSync(path.join(profileBase(), 'tower-crane-chrome-'));
+  const profile = createProfile();
   try {
     return await spawnChrome(profile);
   } catch (error) {
@@ -109,7 +121,7 @@ async function spawnChrome(profile) {
     env = { ...env, HOME: profile, USERPROFILE: profile, XDG_CONFIG_HOME: config, XDG_CACHE_HOME: cache };
   } else if (process.getuid && process.getuid() === 0) args.push('--no-sandbox');
   const proc = cp.spawn(CHROME, [...args, 'about:blank'], {
-    env, stdio: sandboxed ? ['ignore', 'ignore', 'pipe'] : 'ignore',
+    env, stdio: ['ignore', 'ignore', 'pipe'],
   });
   let stderr = '';
   let failure = null;
@@ -139,7 +151,10 @@ async function spawnChrome(profile) {
   // File teardown refs and reaps Chrome before the runner records child CPU.
   proc.unref();
   proc.stderr?.unref?.();
-  const lastResort = () => proc.kill('SIGKILL');
+  const lastResort = () => {
+    proc.kill('SIGKILL');
+    remove();
+  };
   process.once('exit', lastResort);
   const close = async () => {
     proc.ref();

@@ -1,0 +1,1 @@
+- Synchronize brokered review tests with host monitor completion so post-exit recovery cannot race assertions about the broker's permissions.

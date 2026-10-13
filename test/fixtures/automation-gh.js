@@ -8,6 +8,10 @@ const file = process.env.AUTOMATION_GITHUB;
 const state = JSON.parse(fs.readFileSync(file, 'utf8'));
 state.calls ||= [];
 state.calls.push(args);
+if (process.env.AUTOMATION_ENV_PROBE) {
+  const { HOME, PATH, XDG_CACHE_HOME, TOWER_CRANE_SANDBOX, TOWER_CRANE_AGENT, TOWER_CRANE_TASK } = process.env;
+  fs.appendFileSync(process.env.AUTOMATION_ENV_PROBE, JSON.stringify({ args, HOME, PATH, XDG_CACHE_HOME, TOWER_CRANE_SANDBOX, TOWER_CRANE_AGENT, TOWER_CRANE_TASK }) + '\n');
+}
 // Write through a rename so a test reading the file never sees it truncated.
 const save = () => {
   fs.writeFileSync(`${file}.${process.pid}`, JSON.stringify(state));
@@ -67,6 +71,11 @@ if (args[0] === 'pr') {
       state.becomeMergeableAfterView = false;
     }
   }
+} else if (args[0] === 'api' && state.apiFailures > 0) {
+  state.apiFailures -= 1;
+  save();
+  console.error('HTTP 502: Bad Gateway');
+  process.exit(1);
 } else if (args[0] === 'api' && /\/(?:pulls|issues)\/\d+\/comments(?:\?|$)/.test(args[1])) {
   // Already in the shape the caller's --jq filter produces: one comment per line.
   out = (state.comments || []).map((c) => JSON.stringify(c)).join('\n');

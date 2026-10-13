@@ -14,6 +14,10 @@ const harness = path.join(__dirname, 'fixtures', 'automation-harness.js');
 
 function setup(t, { kind = 'code', ci = 'success', repo } = {}) {
   const h = repo || makeRepo(t);
+  // Sandboxed command harnesses create synthetic mount targets under their inherited TMPDIR.
+  const tmp = path.join(h.base, 'tmp');
+  fs.mkdirSync(tmp, { recursive: true });
+  Object.assign(h.env, { TMPDIR: tmp, TMP: tmp, TEMP: tmp });
   h.sha = gateFixture(h);
   h.init(['--repo', 'acme/demo', '--base', 'main']);
   const tools = path.join(h.base, 'tools');
@@ -69,6 +73,15 @@ cp.spawnSync=(cmd,args,opts)=>{
   h.consume = () => h.run(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
   h.logs = () => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
   return h;
+}
+
+function assertReworked(h, task) {
+  // Refill can claim the task immediately; the event and note persist across that claim.
+  const events = h.logs().filter((e) => e.cmd === 'rework' && e.task === task.id && e.detail.revision === task.revision);
+  assert.equal(events.length, 1, 'this revision was sent to rework once');
+  assert.equal(events[0].detail.sha, task.sha);
+  assert.ok(task.notes.some((note) => note.text === `rework: ${events[0].detail.reason}`),
+    'the worker keeps the failing gate reason after refill');
 }
 
 function generatedSetup(t) {
@@ -183,6 +196,27 @@ test('generated-only conflicts merge, regenerate and push without rework or a wo
   assert.ok(task.evidence.some((e) => e.type === 'tests' && e.ok && e.sha === h.sha), 'old evidence remains historical');
   assert.ok(task.evidence.some((e) => e.type === 'tests' && e.ok && e.sha === task.sha), 'gates rerun on the repaired head');
   assert.ok(h.logs().some((e) => e.cmd === 'generated merge' && e.detail.phase === 'pushed'));
+});
+
+// A worker can write .git/config. pushInsteadOf rewrites a URL named on the
+// command line but not remote.origin.pushurl, so a push to the checked URL
+// would reach this repository and run its hooks outside every sandbox.
+test('the generated-file repair pushes to the checked origin push URL, not a pushInsteadOf rewrite of it', (t) => {
+  const h = generatedSetup(t);
+  const evil = path.join(h.base, 'evil');
+  const decoy = path.join(evil, path.basename(h.remote));
+  h.git(['init', '-q', '--bare', decoy]);
+  const marker = path.join(h.base, 'pre-receive-ran');
+  fs.writeFileSync(path.join(decoy, 'hooks', 'pre-receive'), `#!/bin/sh\necho ran > ${shellQuote(marker)}\n`, { mode: 0o755 });
+  h.git(['config', 'remote.origin.pushurl', h.remote]);
+  h.git(['config', `url.${evil}${path.sep}.pushInsteadOf`, `${path.dirname(h.remote)}${path.sep}`]);
+  h.submit();
+  h.ok(['check', 'tests', 'T1', '--agent', 'orchestrator']);
+  h.consume();
+  const task = h.readState('tasks.json').tasks[0];
+  assert.equal(fs.existsSync(marker), false, 'the rewritten destination\'s pre-receive hook ran');
+  assert.ok(h.logs().some((e) => e.cmd === 'generated merge' && e.detail.phase === 'pushed'), JSON.stringify(h.logs().filter((e) => /automation|generated/.test(e.cmd)).map((e) => e.detail)));
+  assert.equal(h.git(['--git-dir', h.remote, 'rev-parse', 'fixture-change']), task.sha);
 });
 
 test('a generated-file conflict in a gate runs its checkout hooks with the gate scratch, not the caller temp root', (t) => {
@@ -624,14 +658,14 @@ test('background reactions leave vacant, released, taken-over and expired leases
   assert.notEqual(lease().session_id, expired.session_id);
 });
 
-test('CI completion refreshes a pending or failed receipt at the exact head and merges after review', (t) => {
+test('CI completion refreshes a pending receipt at the exact head and merges after review', (t) => {
   const h = setup(t, { ci: 'pending' });
   h.submit();
   h.consume();
   h.reviewer('T1', 'reviewer');
   h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--sha', h.sha, '--ok', '--agent', 'reviewer']);
   const bad = h.github();
-  bad.ci[h.sha] = 'failure';
+  bad.ci[h.sha] = 'pending';
   h.saveGithub(bad);
   h.ok(['ci', 'completed', 'T1', '--sha', h.sha, '--agent', 'orchestrator']);
   assert.equal(h.readState('tasks.json').tasks[0].status, 'submitted');
@@ -690,7 +724,7 @@ function reconciledFixture(t) {
 }
 
 for (const reaction of ['submit', 'reconcile']) {
-  test(`${reaction} runs missing gates after a resubmitted revision's tests fail`, (t) => {
+  test(`${reaction} reworks a resubmitted revision whose tests fail, before its missing gates run`, (t) => {
     const h = reconciledFixture(t);
     h.ok(['brief', 'set', 'T1', '-', '--agent', 'orchestrator'],
       { input: '# Change\n\nVerify the revised acceptance.\n' });
@@ -703,7 +737,7 @@ for (const reaction of ['submit', 'reconcile']) {
     const count = checks().length;
     if (reaction === 'reconcile') {
       // T155's submit reaction recorded a revision-2 tests failure, then
-      // finished before clean and CI. Startup must recover those missing gates.
+      // finished before clean and CI. Startup must settle that failure into rework.
       assert.equal(h.run(['check', 'tests', 'T1', '--agent', 'orchestrator']).code, 1);
       const source = h.logs().findLast((e) => e.cmd === 'submit').id;
       fs.appendFileSync(path.join(h.state, 'events.jsonl'), JSON.stringify({
@@ -716,12 +750,12 @@ for (const reaction of ['submit', 'reconcile']) {
         '--agent', 'orchestrator']).code, 2);
     }
     assert.deepEqual(checks().slice(count).map((e) => [e.cmd, e.detail.ok, e.detail.revision]),
-      [['check tests', false, 2], ['check clean', true, 2], ['check ci', true, 2]]);
+      [['check tests', false, 2]]);
     const after = h.json(['task', 'show', 'T1']);
-    assert.equal(after.status, 'submitted', 'a failed gate still prevents acceptance');
+    assertReworked(h, after);
     assert.equal(after.gates.gates.find((g) => g.type === 'tests').ok, false);
     h.reconcile();
-    assert.equal(checks().length, count + 3, 'current failures wait for retry and current passes are reused');
+    assert.equal(checks().length, count + 1, 'a reworked task runs no more gates');
   });
 }
 
@@ -824,32 +858,433 @@ test('startup reconciles tests evidence staled by a tests keep setting change af
   assert.equal(h.json(['task', 'show', 'T1']).gates.gates.find((g) => g.type === 'tests').ok, true);
 });
 
-test('a failed gate at unchanged inputs waits for gates retry, which reruns it', (t) => {
-  const h = setup(t);
-  const marker = path.join(h.base, 'infra-failed-once');
-  const script = path.join(h.base, 'flaky-tests.js');
-  fs.writeFileSync(script, `const fs = require('node:fs');\nif (fs.existsSync(${JSON.stringify(marker)})) process.exit(0);\nfs.writeFileSync(${JSON.stringify(marker)}, '');\nprocess.exit(1);\n`);
+test('a deterministic test failure reworks with its failing test names and output tail', (t) => {
+  const h = setup(t, { ci: 'pending' });
+  const script = path.join(h.base, 'failing-tests.js');
+  // Fails only at the submitted head: the base holds value.js at 0, so the same test passes there.
+  fs.writeFileSync(script, "const fs = require('node:fs');\nif (!fs.readFileSync('value.js', 'utf8').includes('1')) process.exit(0);\nconsole.log('# Subtest: test/sum.test.js');\nconsole.log('not ok 1 - sums two numbers');\nconsole.log('  expected 3 got 4');\nprocess.exit(1);\n");
   h.ok(['project', 'set', '--tests-cmd', `node ${shellQuote(script)}`, '--tests-mode', 'run-only']);
   h.submit();
-  const runs = () => h.logs().filter((e) => e.cmd === 'check tests').length;
-  const latest = () => h.readState('tasks.json').tasks[0].evidence.filter((e) => e.type === 'tests').at(-1);
   h.consume();
-  assert.equal(runs(), 1);
-  assert.equal(latest().ok, false, 'the first run fails as infrastructure would');
+  const runs = h.logs().filter((e) => e.cmd === 'check tests');
+  assert.equal(runs.length, 1, 'a failure that is not infrastructure is not retried');
+  const task = h.readState('tasks.json').tasks[0];
+  assertReworked(h, task);
+  const latest = task.evidence.filter((e) => e.type === 'tests').at(-1);
+  assert.equal(latest.ok, false);
+  assert.deepEqual(latest.test_failure.names, ['sums two numbers']);
+  const reason = h.logs().findLast((e) => e.cmd === 'rework').detail.reason;
+  assert.match(reason, /^tests failed at [0-9a-f]{7,}: /);
+  assert.match(reason, /Failing tests:\n- sums two numbers/);
+  assert.match(reason, /expected 3 got 4/);
+  assert.equal(latest.main_failure, undefined, 'a failure that passes on main is the change\'s');
+});
+
+test('a timed-out test run retries once at its head and the passing retry keeps the task submitted', (t) => {
+  const h = setup(t, { ci: 'pending' });
+  const marker = path.join(h.base, 'timed-out-once');
+  const script = path.join(h.base, 'slow-once.js');
+  fs.writeFileSync(script, `const fs = require('node:fs');\nif (fs.existsSync(${JSON.stringify(marker)})) process.exit(0);\nfs.writeFileSync(${JSON.stringify(marker)}, '');\nsetTimeout(() => {}, 10000);\n`);
+  h.ok(['project', 'set', '--tests-cmd', `node ${shellQuote(script)}`, '--tests-mode', 'run-only', '--tests-timeout-min', '0.05']);
+  h.submit();
   h.consume();
-  assert.equal(runs(), 1, 'a failure at unchanged inputs is not retried without an explicit retry');
-  assert.equal(h.run(['gates', 'retry', 'T1', '--agent', 'worker']).code, 1);
-  assert.equal(runs(), 1);
-  h.ok(['gates', 'retry', 'T1', '--agent', 'orchestrator']);
-  assert.equal(runs(), 2);
-  assert.equal(latest().ok, true, 'the retry at the same inputs passes');
+  assert.equal(h.logs().filter((e) => e.cmd === 'check tests').length, 2, 'the timeout runs once more, and no third time');
+  const task = h.readState('tasks.json').tasks[0];
+  assert.deepEqual(task.evidence.filter((e) => e.type === 'tests').map((e) => [e.ok, e.infrastructure_failure === true]),
+    [[false, true], [true, false]]);
+  assert.equal(task.status, 'submitted');
+});
+
+test('a timeout that repeats at its head reworks after the retry', (t) => {
+  const h = setup(t, { ci: 'pending' });
+  const script = path.join(h.base, 'hang.js');
+  fs.writeFileSync(script, 'setTimeout(() => {}, 10000);\n');
+  h.ok(['project', 'set', '--tests-cmd', `node ${shellQuote(script)}`, '--tests-mode', 'run-only', '--tests-timeout-min', '0.05']);
+  h.submit();
+  h.consume();
+  assert.equal(h.logs().filter((e) => e.cmd === 'check tests').length, 2);
+  const task = h.readState('tasks.json').tasks[0];
+  assertReworked(h, task);
+  assert.match(h.logs().findLast((e) => e.cmd === 'rework').detail.reason, /timed out after 0\.05 min/);
+});
+
+test('a test run killed by a signal retries once and reworks when the retry is also killed', { skip: process.platform === 'win32' }, (t) => {
+  const h = setup(t, { ci: 'pending' });
+  const script = path.join(h.base, 'killed.js');
+  fs.writeFileSync(script, 'process.kill(process.pid, \'SIGKILL\');\n');
+  h.ok(['project', 'set', '--tests-cmd', `node ${shellQuote(script)}`, '--tests-mode', 'run-only']);
+  h.submit();
+  h.consume();
+  assert.equal(h.logs().filter((e) => e.cmd === 'check tests').length, 2);
+  const task = h.readState('tasks.json').tasks[0];
+  assert.deepEqual(task.evidence.filter((e) => e.type === 'tests').map((e) => e.runner_crash === true), [true, true]);
+  assertReworked(h, task);
+});
+
+test('a test command that is not installed stays submitted, and the inbox asks the orchestrator to pin one', (t) => {
+  const h = setup(t, { ci: 'success' });
+  h.ok(['project', 'set', '--tests-cmd', 'tower-crane-no-such-tool', '--tests-mode', 'run-only']);
+  h.submit();
+  h.consume();
+  assert.equal(h.logs().filter((e) => e.cmd === 'check tests').length, 1, 'a missing command is not retried');
+  const task = h.readState('tasks.json').tasks[0];
+  assert.equal(task.status, 'submitted');
+  assert.equal(task.evidence.filter((e) => e.type === 'tests').at(-1).ok, false);
+  assert.equal(h.logs().filter((e) => e.cmd === 'rework').length, 0);
+  assert.deepEqual(task.evidence.map((e) => [e.type, e.ok]), [['tests', false], ['clean', true], ['ci', true]]);
+  const items = h.json(['inbox', '--agent', 'orchestrator']).items.filter((i) => i.kind === 'gate_config');
+  assert.deepEqual(items.map((i) => [i.task, i.gate, i.setting, i.addressed_to]), [['T1', 'tests', 'gates.tests_cmd', 'orchestrator']]);
+  assert.deepEqual(items[0].action.argv.slice(0, 3), ['project', 'set', '--tests-cmd']);
+  assert.equal(h.json(['inbox', '--agent', 'orchestrator']).items.some((i) => i.kind === 'gate_failed'), false, 'no failed-gate item for configuration');
+});
+
+for (const [configuration, failure] of [['tests', 'ci'], ['tests', 'clean'], ['clean', 'ci']]) {
+  test(`a ${configuration} configuration failure does not hide an audited ${failure} failure`, (t) => {
+    const h = setup(t, { ci: failure === 'ci' ? 'failure' : 'pending' });
+    delete h.env.TOWER_CRANE_CLEAN_CMD;
+    h.ok(['project', 'set', `--${configuration}-cmd`,
+      configuration === 'tests' ? 'null' : 'tower-crane-no-such-cleaner']);
+    if (failure === 'clean') {
+      const script = path.join(h.base, 'incomplete-clean.js');
+      fs.writeFileSync(script, "console.log(JSON.stringify({items: [], failedChecks: ['cannot scan changed source']}));\n");
+      h.ok(['project', 'set', '--clean-cmd', `node ${shellQuote(script)}`]);
+    }
+    h.submit();
+    h.ok(['project', 'set', '--paused', 'inspect gate settlement']);
+    assert.equal(h.run(['check', failure, 'T1', '--agent', 'orchestrator']).code, 1);
+    h.consume();
+    const task = h.readState('tasks.json').tasks[0];
+    assertReworked(h, task);
+    assert.deepEqual(task.evidence.filter((e) => e.type === configuration).at(-1).config_failure,
+      { key: `${configuration}_cmd` });
+    const receipts = task.evidence.filter((e) => e.type === failure);
+    assert.equal(receipts.length, failure === 'clean' ? 2 : 1, 'cleanup retries once; the audited CI verdict reworks without rerunning');
+    assert.ok(receipts.every((e) => !e.ok));
+    if (failure === 'clean') assert.ok(receipts.every((e) => e.infrastructure_failure));
+    else assert.equal(receipts[0].confirmed_failure, true);
+    const reworks = h.logs().filter((e) => e.cmd === 'rework' && e.task === 'T1');
+    assert.equal(reworks.length, 1);
+    assert.match(reworks[0].detail.reason, new RegExp(`^${failure} failed at [0-9a-f]+: `));
+    assert.match(reworks[0].detail.reason, failure === 'clean' ? /cannot scan changed source/ : /failing: test \(failure\)/);
+    assert.deepEqual(h.json(['status']).gate_queue, { running: [], queued: [], blocked: [] });
+    h.consume();
+    assert.equal(h.logs().filter((e) => e.cmd === `check ${failure}`).length, receipts.length, 'settlement starts no extra gate runs');
+  });
+}
+
+test('a missing pinned test command stays submitted with a gate_config item for the orchestrator, not a rework', (t) => {
+  const h = setup(t, { ci: 'pending' });
+  h.ok(['project', 'set', '--tests-cmd', 'null']);
+  h.submit();
+  h.consume();
+  assert.equal(h.logs().filter((e) => e.cmd === 'check tests').length, 1);
+  const task = h.readState('tasks.json').tasks[0];
+  assert.equal(task.status, 'submitted');
+  assert.deepEqual(task.evidence.filter((e) => e.type === 'tests').at(-1).config_failure, { key: 'tests_cmd' });
+  assert.equal(h.logs().filter((e) => e.cmd === 'rework').length, 0);
+  const item = h.json(['inbox', '--agent', 'orchestrator']).items.find((i) => i.kind === 'gate_config');
+  assert.equal(item.then, 'gates retry T1');
+  assert.match(item.summary, /no test command pinned in project\.json gates\.tests_cmd/);
+});
+
+test('a proof run killed after the change is reverted retries once and reworks when the retry is also killed', { skip: process.platform === 'win32' }, (t) => {
+  const h = setup(t, { ci: 'pending' });
+  const script = path.join(h.base, 'proof-killed.js');
+  // Passes at the submitted head, where value.js is 1, and is killed once the change is reverted to 0.
+  fs.writeFileSync(script, "const fs = require('node:fs');\nif (fs.readFileSync('value.js', 'utf8').includes('0')) process.kill(process.pid, 'SIGKILL');\n");
+  h.ok(['project', 'set', '--tests-cmd', 'node test/value.test.js', '--tests-mode', 'prove', '--tests-expensive', 'true',
+    '--tests-proof-cmd', `node ${shellQuote(script)} {tests}`]);
+  h.submit();
+  h.consume();
+  assert.equal(h.logs().filter((e) => e.cmd === 'check tests').length, 2, 'the killed proof runs once more, and no third time');
+  const task = h.readState('tasks.json').tasks[0];
+  assert.deepEqual(task.evidence.filter((e) => e.type === 'tests').map((e) => [e.ok, e.runner_crash === true]), [[false, true], [false, true]]);
+  assertReworked(h, task);
+});
+
+test('a missing pinned proof command stays submitted with a gate_config item for the orchestrator, not a rework', (t) => {
+  const h = setup(t, { ci: 'pending' });
+  h.ok(['project', 'set', '--tests-cmd', 'node test/value.test.js', '--tests-mode', 'prove', '--tests-expensive', 'true', '--tests-proof-cmd', 'null']);
+  h.submit();
+  h.consume();
+  assert.equal(h.logs().filter((e) => e.cmd === 'check tests').length, 1);
+  const task = h.readState('tasks.json').tasks[0];
+  assert.equal(task.status, 'submitted');
+  assert.deepEqual(task.evidence.filter((e) => e.type === 'tests').at(-1).config_failure, { key: 'tests_proof_cmd' });
+  assert.equal(h.logs().filter((e) => e.cmd === 'rework').length, 0);
+  const item = h.json(['inbox', '--agent', 'orchestrator']).items.find((i) => i.kind === 'gate_config');
+  assert.equal(item.setting, 'gates.tests_proof_cmd');
+  assert.equal(item.then, 'gates retry T1');
+});
+
+test('a change that adds no test reworks with the reason, and the worker adds a test', (t) => {
+  const h = setup(t, { ci: 'pending' });
+  h.git(['switch', '-qc', 'no-test-change', 'main']);
+  fs.writeFileSync(path.join(h.repo, 'value.js'), 'module.exports = 2;\n');
+  h.git(['commit', '-qam', 'change without a test']);
+  const sha = h.git(['rev-parse', 'HEAD']);
+  const github = h.github();
+  Object.assign(github.prs['7'], { headRefOid: sha, headRefName: 'no-test-change' });
+  h.saveGithub(github);
+  h.submit('T1', sha);
+  h.consume();
+  assert.equal(h.logs().filter((e) => e.cmd === 'check tests').length, 1, 'a change with no test is not retried');
+  const task = h.readState('tasks.json').tasks[0];
+  assertReworked(h, task);
+  assert.equal(task.evidence.filter((e) => e.type === 'tests').at(-1).worker_failure, true);
+  assert.match(h.logs().findLast((e) => e.cmd === 'rework').detail.reason, /^tests failed at [0-9a-f]{7,}: no test covers this change: .*adds or changes no test file/);
+});
+
+test('a GitHub API observation failure retries once and keeps the submission when GitHub recovers', (t) => {
+  const h = setup(t);
+  h.submit();
+  const github = h.github();
+  github.apiFailures = 1;
+  h.saveGithub(github);
+  h.consume();
+  const task = h.readState('tasks.json').tasks[0];
+  assert.deepEqual(task.evidence.filter((e) => e.type === 'ci').map((e) => [e.ok, e.infrastructure_failure === true]),
+    [[false, true], [true, false]]);
+  assert.equal(h.logs().filter((e) => e.cmd === 'check ci').length, 2);
+  assert.equal(h.logs().filter((e) => e.cmd === 'rework').length, 0);
+  assert.equal(task.status, 'submitted');
+});
+
+test('a GitHub API observation failure that repeats retries once and reworks with the transport error', (t) => {
+  const h = setup(t);
+  h.submit();
+  const github = h.github();
+  github.apiFailures = 2;
+  h.saveGithub(github);
+  h.consume();
+  const task = h.readState('tasks.json').tasks[0];
+  assert.deepEqual(task.evidence.filter((e) => e.type === 'ci').map((e) => [e.ok, e.infrastructure_failure === true]),
+    [[false, true], [false, true]]);
+  assert.equal(h.logs().filter((e) => e.cmd === 'check ci').length, 2);
+  assertReworked(h, task);
+  assert.match(h.logs().findLast((e) => e.cmd === 'rework').detail.reason, /ci failed at .*HTTP 502: Bad Gateway/s);
+});
+
+test('a stale GitHub PR observation failure retries after recovery instead of reworking green CI', (t) => {
+  const h = setup(t, { ci: 'pending' });
+  h.submit();
+  h.consume();
+  h.ok(['project', 'set', '--paused', 'manual CI observation probe']);
+  const outage = h.github();
+  outage.failView = true;
+  h.saveGithub(outage);
+  assert.equal(h.run(['check', 'ci', 'T1', '--agent', 'orchestrator']).code, 1);
+  const recovered = h.github();
+  recovered.failView = false;
+  recovered.ci[h.sha] = 'success';
+  h.saveGithub(recovered);
+  h.consume();
+  const task = h.readState('tasks.json').tasks[0];
+  assert.deepEqual(task.evidence.filter((e) => e.type === 'ci').map((e) =>
+    [e.ok, e.pending === true, e.infrastructure_failure === true]),
+  [[false, true, false], [false, false, true], [true, false, false]]);
+  assert.equal(h.logs().filter((e) => e.cmd === 'check ci').length, 3);
+  assert.equal(h.logs().filter((e) => e.cmd === 'rework').length, 0);
+  assert.equal(task.status, 'submitted');
+});
+
+test('a CI run that was cancelled retries once and reworks when it is cancelled again', (t) => {
+  const h = setup(t, { ci: 'cancelled' });
+  h.submit();
+  const before = h.github().calls.filter((a) => a[0] === 'api' && a[1].includes('check-runs')).length;
+  h.consume();
+  const checks = h.github().calls.filter((a) => a[0] === 'api' && a[1].includes('check-runs'));
+  assert.equal(checks.length - before, 2, 'a cancelled run is read once more and no third time');
+  const task = h.readState('tasks.json').tasks[0];
+  assert.deepEqual(task.evidence.filter((e) => e.type === 'ci').map((e) => [e.ok, e.infrastructure_failure === true]),
+    [[false, true], [false, true]]);
+  assertReworked(h, task);
+});
+
+test('a CI run that needs action sends a submitted task to rework at once, with its conclusion', (t) => {
+  const h = setup(t, { ci: 'action_required' });
+  h.submit();
+  const before = h.github().calls.filter((a) => a[0] === 'api' && a[1].includes('check-runs')).length;
+  h.consume();
+  assert.equal(h.github().calls.filter((a) => a[0] === 'api' && a[1].includes('check-runs')).length - before, 1, 'a verdict on the change is not retried');
+  const task = h.readState('tasks.json').tasks[0];
+  assertReworked(h, task);
+  assert.equal(task.evidence.filter((e) => e.type === 'ci').at(-1).worker_failure, true);
+  assert.match(h.logs().findLast((e) => e.cmd === 'rework').detail.reason, /^ci failed at [0-9a-f]+: .*action_required/s);
+});
+
+test('a CI run that times out retries once and reworks when it times out again', (t) => {
+  const h = setup(t, { ci: 'timed_out' });
+  h.submit();
+  const before = h.github().calls.filter((a) => a[0] === 'api' && a[1].includes('check-runs')).length;
+  h.consume();
+  const checks = h.github().calls.filter((a) => a[0] === 'api' && a[1].includes('check-runs'));
+  assert.equal(checks.length - before, 2, 'the CI gate reads GitHub once more and no third time');
+  const task = h.readState('tasks.json').tasks[0];
+  assert.deepEqual(task.evidence.filter((e) => e.type === 'ci').map((e) => [e.ok, e.infrastructure_failure === true]),
+    [[false, true], [false, true]]);
+  assertReworked(h, task);
+});
+
+test('a failed CI run sends a submitted task to rework with the failing run', (t) => {
+  const h = setup(t, { ci: 'failure' });
+  h.submit();
+  const before = h.github().calls.filter((a) => a[0] === 'api' && a[1].includes('check-runs')).length;
+  h.consume();
+  assert.equal(h.github().calls.filter((a) => a[0] === 'api' && a[1].includes('check-runs')).length - before, 1, 'a code failure is not retried');
+  const task = h.readState('tasks.json').tasks[0];
+  assertReworked(h, task);
+  assert.equal(task.evidence.filter((e) => e.type === 'ci').at(-1).confirmed_failure, true);
+  assert.match(h.logs().findLast((e) => e.cmd === 'rework').detail.reason, /^ci failed at [0-9a-f]+: .*failing: test \(failure\)/s);
+});
+
+test('a CI timeout after a pending check retries once: the pending receipt is not a failure', (t) => {
+  const h = setup(t, { ci: 'pending' });
+  h.submit();
+  h.consume();
+  const checkRuns = () => h.github().calls.filter((a) => a[0] === 'api' && a[1].includes('check-runs')).length;
+  const before = checkRuns();
+  const timedOut = h.github();
+  timedOut.ci[h.sha] = 'timed_out';
+  h.saveGithub(timedOut);
+  h.ok(['ci', 'completed', 'T1', '--sha', h.sha, '--agent', 'orchestrator']);
+  assert.equal(checkRuns() - before, 2, 'the first timeout reads CI once more before it reworks');
+  const task = h.readState('tasks.json').tasks[0];
+  assert.deepEqual(task.evidence.filter((e) => e.type === 'ci').map((e) => [e.ok, e.infrastructure_failure === true]),
+    [[false, false], [false, true], [false, true]]);
+  assertReworked(h, task);
+});
+
+test('a local CI command killed by a signal retries once and reworks when the retry is killed too', { skip: process.platform === 'win32' }, async (t) => {
+  const h = refillFixture(t);
+  for (const id of ['T2', 'T3', 'T4']) h.ok(['task', 'update', id, '--status', 'cancelled']);
+  h.ok(['task', 'update', 'T1', '--tier', 'easy']);
+  const script = path.join(h.base, 'local-killed.js');
+  fs.writeFileSync(script, 'process.kill(process.pid, \'SIGKILL\');\n');
+  h.ok(['project', 'set', '--ci-local', JSON.stringify({ command: [process.execPath, script], timeout: 5 })]);
+  h.submit();
+  h.consume();
+  assert.notEqual(await waitFor(h.marker('T1')), null, 'the refill claims the reworked task before it is inspected');
+  assert.equal(h.logs().filter((e) => e.cmd === 'check ci').length, 2, 'the killed run runs once more, and no third time');
+  const task = h.readState('tasks.json').tasks[0];
+  assert.deepEqual(task.evidence.filter((e) => e.type === 'ci').map((e) => e.runner_crash === true), [true, true]);
+  assertReworked(h, task);
+  assert.match(h.logs().findLast((e) => e.cmd === 'rework').detail.reason, /^ci failed at [0-9a-f]+: local CI killed by SIGKILL/);
+});
+
+test('a local CI command that times out retries once and reworks when the retry times out too', (t) => {
+  const h = setup(t, { ci: 'pending' });
+  const script = path.join(h.base, 'local-hang.js');
+  fs.writeFileSync(script, 'setTimeout(() => {}, 10000);\n');
+  h.ok(['project', 'set', '--ci-local', JSON.stringify({ command: [process.execPath, script], timeout: 0.05 })]);
+  h.submit();
+  h.consume();
+  assert.equal(h.logs().filter((e) => e.cmd === 'check ci').length, 2, 'the timeout runs once more, and no third time');
+  const task = h.readState('tasks.json').tasks[0];
+  assert.deepEqual(task.evidence.filter((e) => e.type === 'ci').map((e) => e.infrastructure_failure === true), [true, true]);
+  assertReworked(h, task);
+  assert.match(h.logs().findLast((e) => e.cmd === 'rework').detail.reason, /^ci failed at [0-9a-f]+: local CI timed out/);
+});
+
+test('a test that also fails on main retries once, then reworks with the main failure to link', (t) => {
+  const h = setup(t, { ci: 'pending' });
+  const script = path.join(h.base, 'known-failure.js');
+  fs.writeFileSync(script, "console.log('# Subtest: test/known.test.js');\nconsole.log('not ok 1 - known base failure');\nprocess.exit(1);\n");
+  h.ok(['project', 'set', '--tests-cmd', `node ${shellQuote(script)}`, '--tests-mode', 'run-only']);
+  h.submit();
+  h.consume();
+  assert.equal(h.logs().filter((e) => e.cmd === 'check tests').length, 2, 'the failure that also fails on main runs once more, and no third time');
+  const task = h.readState('tasks.json').tasks[0];
+  assert.deepEqual(task.evidence.filter((e) => e.type === 'tests').map((e) => e.main_failure?.names), [['known base failure'], ['known base failure']]);
+  assertReworked(h, task);
+  assert.match(h.logs().findLast((e) => e.cmd === 'rework').detail.reason, /^tests failed at [0-9a-f]+: .*Also fails on main at [0-9a-f]+: known base failure/s);
+});
+
+test('a test gate that fails by hand while the watcher runs reworks, not left submitted', async (t) => {
+  const h = setup(t, { ci: 'pending' });
+  const flag = path.join(h.base, 'broken');
+  const script = path.join(h.base, 'breaks-when-flagged.js');
+  fs.writeFileSync(script, `const fs = require('node:fs');\nif (fs.existsSync(${JSON.stringify(flag)})) process.exit(1);\n`);
+  h.ok(['project', 'set', '--tests-cmd', `node ${shellQuote(script)}`, '--tests-mode', 'run-only']);
+  h.submit();
+  h.consume();
+  const finished = () => h.logs().filter((e) => e.cmd === 'automation' && e.detail.phase === 'done').length;
+  const before = finished();
+  const offset = fs.statSync(path.join(h.state, 'events.jsonl')).size;
+  const watcher = h.runAsync(['wait', '--after', String(offset), '--types', 'never', '--timeout', '8', '--agent', 'orchestrator']);
+  // The watcher's startup reconcile settles the submission first; the failure comes after it.
+  for (let i = 0; i < 100 && finished() === before; i++) await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.ok(finished() > before, 'the watcher reconciled the submitted task');
+  fs.writeFileSync(flag, '');
+  assert.equal(h.run(['check', 'tests', 'T1']).code, 1);
+  assert.equal((await watcher).code, 2, 'the watcher runs to its deadline');
+  const task = h.readState('tasks.json').tasks[0];
+  assertReworked(h, task);
+  assert.match(h.logs().findLast((e) => e.cmd === 'rework').detail.reason, /^tests failed at [0-9a-f]+: /);
+});
+
+test('a test that also fails on main reworks without a quality climb on a task with a tier range', async (t) => {
+  const h = refillFixture(t);
+  for (const id of ['T2', 'T3', 'T4']) h.ok(['task', 'update', id, '--status', 'cancelled']);
+  h.ok(['task', 'update', 'T1', '--tier', 'easy..medium']);
+  const script = path.join(h.base, 'known-failure.js');
+  fs.writeFileSync(script, "console.log('# Subtest: test/known.test.js');\nconsole.log('not ok 1 - known base failure');\nprocess.exit(1);\n");
+  h.ok(['project', 'set', '--tests-cmd', `node ${shellQuote(script)}`, '--tests-mode', 'run-only']);
+  h.submit();
+  h.consume();
+  assert.equal(h.logs().filter((e) => e.cmd === 'check tests').length, 2, 'the failure that also fails on main runs once more');
+  assert.notEqual(await waitFor(h.marker('T1')), null, 'the refill claims the reworked task');
+  const task = h.readState('tasks.json').tasks[0];
+  // The worker holds its claim so the test checks settlement after refill, without racing it.
+  assert.equal(task.status, 'in_progress');
+  assert.equal(task.claim.from, 'rework');
+  assert.equal(task.revision, 2);
+  const reworks = h.logs().filter((e) => e.cmd === 'rework' && e.task === 'T1');
+  assert.equal(reworks.length, 1);
+  assert.match(reworks[0].detail.reason, /^tests failed at [0-9a-f]+: .*Also fails on main at [0-9a-f]+: known base failure/s);
+  assert.deepEqual(task.evidence.filter((e) => e.type === 'tests').map((e) => [e.main_failure?.names, e.confirmed_failure]),
+    [[['known base failure'], undefined], [['known base failure'], undefined]]);
+  assert.equal(task.tier, 'easy', 'a failure that also fails on main is not the change\'s, so it does not climb');
+  assert.deepEqual(task.escalations ?? [], []);
+});
+
+test('a run with a failing name that does not fail on main keeps its verdict and reworks at once', (t) => {
+  const h = setup(t, { ci: 'pending' });
+  const script = path.join(h.base, 'partly-known.js');
+  fs.writeFileSync(script, "const fs = require('node:fs');\nconsole.log('# Subtest: test/known.test.js');\nconsole.log('not ok 1 - known base failure');\nif (fs.readFileSync('value.js', 'utf8').includes('1')) console.log('not ok 2 - change breaks a test');\nprocess.exit(1);\n");
+  h.ok(['project', 'set', '--tests-cmd', `node ${shellQuote(script)}`, '--tests-mode', 'run-only']);
+  h.submit();
+  h.consume();
+  assert.equal(h.logs().filter((e) => e.cmd === 'check tests').length, 1, 'a failure with a name the change added is not retried');
+  const task = h.readState('tasks.json').tasks[0];
+  assertReworked(h, task);
+  const latest = task.evidence.filter((e) => e.type === 'tests').at(-1);
+  assert.equal(latest.confirmed_failure, true);
+  assert.equal(latest.main_failure, undefined, 'only a run whose every failing name also fails on main is not the change\'s');
+  assert.match(h.logs().findLast((e) => e.cmd === 'rework').detail.reason, /change breaks a test/);
+});
+
+test('a test that fails on a newer origin main retries once though the local base is behind', (t) => {
+  const h = setup(t, { ci: 'pending' });
+  const script = path.join(h.base, 'fails-with-value.js');
+  fs.writeFileSync(script, "const fs = require('node:fs');\nif (!fs.readFileSync('value.js', 'utf8').includes('1')) process.exit(0);\nconsole.log('# Subtest: test/sum.test.js');\nconsole.log('not ok 1 - sums two numbers');\nprocess.exit(1);\n");
+  // origin/main moved past local main with the change's value, so the failure exists only on the newer base.
+  const moved = h.git(['commit-tree', h.git(['rev-parse', 'fixture-change^{tree}']), '-p', 'main', '-m', 'main moved']);
+  h.git(['update-ref', 'refs/remotes/origin/main', moved]);
+  h.ok(['project', 'set', '--tests-cmd', `node ${shellQuote(script)}`, '--tests-mode', 'run-only']);
+  h.submit();
+  h.consume();
+  assert.equal(h.logs().filter((e) => e.cmd === 'check tests').length, 2, 'the failure that also fails on origin main runs once more');
+  const task = h.readState('tasks.json').tasks[0];
+  assert.deepEqual(task.evidence.filter((e) => e.type === 'tests').map((e) => e.main_failure?.names), [['sums two numbers'], ['sums two numbers']]);
+  assertReworked(h, task);
 });
 
 test('gates retry exits nonzero while a retried gate still fails', (t) => {
   const h = setup(t, { ci: 'pending' });
   h.ok(['project', 'set', '--tests-cmd', 'node -e "process.exit(1)"', '--tests-mode', 'run-only']);
   h.submit();
-  h.consume();
+  h.run(['check', 'tests', 'T1']);
   const latest = () => h.readState('tasks.json').tasks[0].evidence.filter((e) => e.type === 'tests').at(-1);
   assert.equal(latest().ok, false);
   const retry = h.run(['gates', 'retry', 'T1', '--agent', 'orchestrator']);
@@ -937,14 +1372,14 @@ test('startup reconciles a newly conflicting PR after a merge happened without a
   conflicting.prs['8'].mergeStateStatus = 'DIRTY';
   h.saveGithub(conflicting);
   const before = h.git(['rev-parse', 'HEAD']);
+  // Keep worker refill out of this conflict-reconciliation probe.
+  h.ok(['project', 'set', '--paused', 'manual startup conflict probe']);
   // The CLI helper bounds hangs without imposing a reconciliation deadline.
   const event = JSON.parse(h.ok(['wait', '--task', 'T2', '--types', 'rework', '--agent', 'orchestrator']));
   assert.equal(event.task, 'T2');
   const task = h.readState('tasks.json').tasks[1];
-  // The merge freed a worker slot, which may dispatch T2 at once. A lease-first
-  // spawn (Windows) claims it from the start; a reserved one leaves it in rework.
-  const refill = h.logs().findLast((e) => e.cmd === 'spawn' && e.task === 'T2' && e.detail.role === 'worker');
-  assert.equal(task.status, refill && !refill.detail.reserved ? 'in_progress' : 'rework');
+  assert.equal(task.status, 'rework');
+  assert.equal(h.logs().filter((e) => e.cmd === 'spawn' && e.task === 'T2' && e.detail.role === 'worker').length, 0);
   assert.match(task.notes.at(-1).text, /value\.js/);
   assert.equal(h.git(['rev-parse', 'HEAD']), before);
 });
@@ -1037,7 +1472,7 @@ test('stale or unknown PR heads and missing review never merge', (t) => {
 });
 
 test('a completion webhook is only a hint, rejects another repository and ignores stale heads', (t) => {
-  const h = setup(t, { kind: 'docs', ci: 'failure' });
+  const h = setup(t, { kind: 'docs', ci: 'pending' });
   h.submit();
   h.reviewer('T1', 'reviewer');
   h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--sha', h.sha, '--ok', '--agent', 'reviewer']);
@@ -1045,7 +1480,7 @@ test('a completion webhook is only a hint, rejects another repository and ignore
     check_suite: { head_sha: h.sha, status: 'completed', conclusion: 'success' } };
   const deliver = () => h.run(['ci', 'webhook', '-', '--agent', 'orchestrator'], { input: JSON.stringify(payload) });
   assert.equal(deliver().code, 0);
-  assert.equal(h.readState('tasks.json').tasks[0].evidence.at(-1).ok, false, 'GitHub failure wins over payload success');
+  assert.equal(h.readState('tasks.json').tasks[0].evidence.at(-1).ok, false, 'GitHub pending wins over payload success');
   payload.repository.full_name = 'acme/other';
   assert.equal(deliver().code, 1);
   payload.repository.full_name = 'acme/demo';
@@ -1116,26 +1551,43 @@ test('gate executors across several watchers stay within gates.executors and que
   const release = path.join(h.base, 'release-suite');
   const runs = slowSuite(h, { release });
   assert.match(h.ok(['project', 'show']), /gates\.executors: 2/);
+  // A zero-timeout watcher can exit at a contended startup lock before reading
+  // submissions. Keep consumers alive until the last task's gate evidence.
+  // The start-file budget also bounds cleanup when the queue stops advancing.
   const watchers = [0, 1, 2].map(() =>
-    h.runAsync(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']));
+    h.runAsync(['wait', '--after', '0', '--types', 'evidence', '--task', 'T3',
+      '--timeout', '60', '--agent', 'orchestrator']));
+  let results;
   try {
     assert.notEqual(await waitFor(path.join(h.base, 'suite-started-2'), { ms: 60000 }), null, 'two executors start');
     // Keep both slots occupied until a watcher has queued the third submission.
-    assert.equal(h.consume().code, 2);
+    const notification = await h.runAsync(['wait', '--observe', '--after', '0', '--types', 'automation queued',
+      '--task', 'T3', '--timeout', '60', '--agent', 'orchestrator']);
+    assert.equal(notification.code, 0, JSON.stringify(notification));
     const queued = h.logs().filter((e) => e.cmd === 'automation queued' && e.detail.executors === 2);
     assert.ok(queued.some((e) => e.task === 'T3'), JSON.stringify(queued));
+    fs.writeFileSync(release, '');
+    assert.notEqual(await waitFor(path.join(h.base, 'suite-started-3'), { ms: 60000 }), null, 'the third executor starts');
   } finally {
     fs.writeFileSync(release, '');
+    results = await Promise.all(watchers);
   }
-  assert.notEqual(await waitFor(path.join(h.base, 'suite-started-3'), { ms: 60000 }), null, 'the third executor starts');
-  const results = await Promise.all(watchers);
-  assert.ok(results.every((r) => r.code === 2), JSON.stringify(results));
+  assert.ok(results.every((r) => r.code === 0 && JSON.parse(r.stdout).type === 'evidence'), JSON.stringify(results));
   assert.deepEqual(runs(), { starts: 3, peak: 2 });
-  const started = h.logs().filter((e) => e.cmd === 'automation' && e.detail.phase === 'running').map((e) => e.task);
-  assert.equal(started.at(-1), 'T3', 'the queued submission runs after a slot frees');
   for (const task of h.readState('tasks.json').tasks) {
     assert.deepEqual(task.evidence.map((e) => [e.type, e.ok]), [['tests', true], ['clean', true]], task.id);
   }
+  // A successful manual observation schedules a later reaction without another tests run.
+  const beforeFollowUp = h.logs().length;
+  h.ok(['check', 'clean', 'T2']);
+  h.consume();
+  assert.deepEqual(runs(), { starts: 3, peak: 2 });
+  const started = h.logs().filter((e) => e.cmd === 'automation' && e.detail.phase === 'running').map((e) => e.task);
+  assert.ok(h.logs().slice(beforeFollowUp).some((e) => e.cmd === 'automation'
+    && e.detail.phase === 'running' && e.task === 'T2'), 'a later observation runs without restarting its suite');
+  const firstStarts = [...new Set(started)];
+  assert.deepEqual(new Set(firstStarts), new Set(['T1', 'T2', 'T3']));
+  assert.equal(firstStarts.at(-1), 'T3', 'the queued submission runs after a slot frees');
 });
 
 test('a killed executor releases its gate executor slot', (t) => {
@@ -1510,6 +1962,25 @@ function configureHarness(h, { rules = false } = {}) {
     JSON.stringify([process.execPath, harness, BIN, 'auto', '{prompt}']),
     ...['model', 'profile', 'provider', 'effort', 'args'].flatMap((f) => ['--clear', f])]);
 }
+
+test('automation command harness temp files stay inside its fixture', (t) => {
+  const h = setup(t);
+  configureHarness(h);
+  const script = `
+const fs = require('node:fs'), os = require('node:os'), path = require('node:path');
+const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'harness-child-'));
+fs.writeFileSync(path.join(process.env.AUTOMATION_CONTEXT_DIR, 'tmp.json'),
+  JSON.stringify({ tmp, winTmp: process.env.TMP, temp: process.env.TEMP }));
+`;
+  h.ok(['ladder', 'set', 'easy', '--command', JSON.stringify([process.execPath, '-e', script, '{prompt}'])]);
+  h.ok(['spawn', '--task', 'T1', '--wait', '--agent', 'orchestrator']);
+  const seen = JSON.parse(fs.readFileSync(path.join(h.env.AUTOMATION_CONTEXT_DIR, 'tmp.json'), 'utf8'));
+  // Remove the probe's temp directory even when containment fails.
+  fs.rmSync(seen.tmp, { recursive: true, force: true });
+  for (const dir of [seen.tmp, seen.winTmp, seen.temp]) {
+    assert.ok(dir && path.relative(h.base, dir).split(path.sep)[0] !== '..' && !path.isAbsolute(path.relative(h.base, dir)), dir);
+  }
+});
 
 for (const tier of ['medium', 'easy..medium']) {
 test(`automation reworks a current ${tier} failed review once with its full findings, even before software passes`, (t) => {
@@ -1897,6 +2368,82 @@ test('supervisor reactions pin unconfigured gates and bypass the real restrictiv
   assert.ok(probes.every((p) => p.denials.every((d) => d.status === 126 && /not allowed/.test(d.stderr))), JSON.stringify(probes));
   assert.ok(probes.every((p) => p.path.includes(path.join(h.state, 'homes'))));
   startupContexts(h, false);
+});
+
+test('gates and merges a supervisor runs keep the host environment, not its agent\'s home, shims, cache or identity', { skip: process.platform === 'win32' && 'the pi stub and git hook are shebang scripts' }, async (t) => {
+  const h = setup(t);
+  configureHarness(h);
+  // Git reads ~/.gitconfig as the global file: a home's config is the user's.
+  delete h.env.GIT_CONFIG_GLOBAL;
+  const probe = (name) => path.join(h.base, `${name}.jsonl`);
+  const read = (name) => (fs.existsSync(probe(name)) ? fs.readFileSync(probe(name), 'utf8').trim().split('\n').map(JSON.parse) : []);
+  // Each agent writes a global git config in its own home, which runs a hook on checkout.
+  const hooks = path.join(h.base, 'planted-hooks');
+  fs.mkdirSync(hooks);
+  fs.writeFileSync(path.join(hooks, 'post-checkout'), `#!/bin/sh\necho "$PWD" >> ${shellQuote(probe('planted-hook'))}\n`, { mode: 0o755 });
+  const bin = path.join(h.base, 'agent-bin');
+  fs.mkdirSync(bin);
+  fs.writeFileSync(path.join(bin, 'pi'), `#!${process.execPath}
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+fs.writeFileSync(path.join(os.homedir(), '.gitconfig'), '[core]\\n\\thooksPath = ' + ${JSON.stringify(hooks)} + '\\n');
+fs.appendFileSync(${JSON.stringify(probe('agent'))}, JSON.stringify({ HOME: os.homedir(), XDG_CACHE_HOME: process.env.XDG_CACHE_HOME }) + '\\n');
+process.argv.splice(2, 0, ${JSON.stringify(BIN)}, 'auto');
+require(${JSON.stringify(harness)});
+`, { mode: 0o755 });
+  for (const rung of ['easy', 'review']) h.ok(['ladder', 'set', rung, '--harness', 'pi', '--model', 'stub-model',
+    ...['profile', 'provider', 'effort', 'args', 'command'].flatMap((f) => ['--clear', f])]);
+  const record = `const fs = require('node:fs');
+const { HOME, PATH, XDG_CACHE_HOME, TMPDIR, TOWER_CRANE_AGENT, TOWER_CRANE_TASK, TOWER_CRANE_HOOK } = process.env;
+fs.appendFileSync(${JSON.stringify(probe('tests-gate'))}, JSON.stringify({ HOME, PATH, XDG_CACHE_HOME, TMPDIR, TOWER_CRANE_AGENT, TOWER_CRANE_TASK, TOWER_CRANE_HOOK }) + '\\n');
+require(require('node:path').resolve('test/value.test.js'));
+`;
+  fs.writeFileSync(path.join(h.base, 'tests-gate.js'), record);
+  const tmpRoot = path.join(h.base, 'project-tmp');
+  fs.mkdirSync(tmpRoot);
+  h.ok(['project', 'set', '--tests-cmd', `node ${shellQuote(path.join(h.base, 'tests-gate.js'))}`, '--tests-mode', 'run-only',
+    '--tmp-root', tmpRoot]);
+  h.env.AUTOMATION_ENV_PROBE = probe('gh');
+  h.env.PATH = `${bin}${path.delimiter}${h.env.PATH}`;
+  // The dispatcher's own gate root, which a gate the supervisor runs later must not keep.
+  assert.ok(h.env.TOWER_CRANE_TMP);
+  assert.equal((await h.runAsync(['spawn', '--task', 'T1', '--wait', '--agent', 'orchestrator'])).code, 0);
+  const deadline = Date.now() + 60000;
+  while (!h.readState('tasks.json').tasks[0].evidence.some((e) => e.type === 'merge' && e.ok)) {
+    if (Date.now() > deadline) throw new Error(JSON.stringify(h.logs().slice(-10)));
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  // The agents ran in their own homes and caches, so the host values below are not theirs.
+  const agents = read('agent');
+  assert.equal(agents.length, 2);
+  for (const agent of agents) {
+    assert.ok(agent.HOME.startsWith(path.join(h.state, 'homes')), agent.HOME);
+    assert.notEqual(agent.XDG_CACHE_HOME, h.env.XDG_CACHE_HOME);
+  }
+  const planted = fs.existsSync(probe('planted-hook')) ? fs.readFileSync(probe('planted-hook'), 'utf8') : '';
+  assert.equal(planted, '', 'no gate git ran a hook from an agent home');
+  const host = (seen) => {
+    assert.equal(seen.HOME, h.env.HOME);
+    assert.equal(seen.XDG_CACHE_HOME, h.env.XDG_CACHE_HOME);
+    assert.ok(!seen.PATH.includes(path.join(h.state, 'homes')), seen.PATH);
+    // The dispatcher's identity, or the orchestrator a reaction dispatched the reviewer as; never a spawned agent's.
+    assert.ok([h.env.TOWER_CRANE_AGENT, 'orchestrator'].includes(seen.TOWER_CRANE_AGENT), seen.TOWER_CRANE_AGENT);
+    assert.equal(seen.TOWER_CRANE_TASK, undefined);
+  };
+  const gates = read('tests-gate');
+  assert.ok(gates.length >= 1);
+  for (const seen of gates) {
+    host(seen);
+    assert.equal(seen.TOWER_CRANE_HOOK, undefined);
+    assert.ok(seen.TMPDIR.startsWith(tmpRoot), seen.TMPDIR);
+  }
+  const merges = read('gh').filter((call) => call.args[0] === 'pr' && call.args[1] === 'merge');
+  assert.equal(merges.length, 1);
+  host(merges[0]);
+  assert.equal(merges[0].TOWER_CRANE_SANDBOX, undefined);
+  const tests = h.readState('tasks.json').tasks[0].evidence.find((e) => e.type === 'tests');
+  assert.equal(tests.tmp_root, tmpRoot);
 });
 
 test('large review dispatch hands revuto findings to the reviewer and an ok that ignores a P1 is refused', async (t) => {
