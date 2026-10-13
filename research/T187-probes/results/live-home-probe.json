@@ -1,0 +1,56 @@
+{
+  "head": "3e067137cffd52b7b73b13d23bbc14a7a5e7d515",
+  "ran": "2026-10-13 11:10 Jerusalem, orchestrator, unsandboxed host session",
+  "command": "TOWER_CRANE_LIVE_CLAUDE=1 TOWER_CRANE_LIVE_MODEL=<model> or TOWER_CRANE_LIVE_CODEX=1 TOWER_CRANE_LIVE_PROFILE=<profile> node --test --test-name-pattern=\"home but what\" test/live-sandbox.test.js; the PR for T187 names the model and profile",
+  "claude": {
+    "version": "2.1.296",
+    "small": {
+      "result": "no verdict: the model refused the probe prompt (stop_reason refusal, safeguards flagged the session); the command never ran"
+    },
+    "easy": {
+      ".config/gh": "ERR ENOENT",
+      ".claude/.credentials.json": "ERR ENOENT",
+      ".codex/auth.json": "ERR ENOENT",
+      ".aws": "ERR ENOENT",
+      ".docker/config.json": "ERR ENOENT",
+      ".npmrc": "ERR ENOENT",
+      ".netrc": "ERR ENOENT",
+      "secret-test": "ERR ENOENT",
+      "node": "v26.10.0",
+      "npm": 0,
+      "test": 0,
+      "push": 0
+    }
+  },
+  "codex": {
+    "version": "codex-cli 0.162.1",
+    "small": {
+      ".config/gh": "ERR ENOENT",
+      ".claude/.credentials.json": "ERR ENOENT",
+      ".codex/auth.json": "ERR ENOENT",
+      ".aws": "ERR ENOENT",
+      ".docker/config.json": "ERR ENOENT",
+      ".npmrc": "ERR ENOENT",
+      ".netrc": "ERR ENOENT",
+      "secret-test": "ERR ENOENT",
+      "node": "v26.10.0",
+      "npm": 0,
+      "test": 0,
+      "push": 0
+    },
+    "easy": {
+      ".config/gh": "ERR ENOENT",
+      ".claude/.credentials.json": "ERR ENOENT",
+      ".codex/auth.json": "ERR ENOENT",
+      ".aws": "ERR ENOENT",
+      ".docker/config.json": "ERR ENOENT",
+      ".npmrc": "ERR ENOENT",
+      ".netrc": "ERR ENOENT",
+      "secret-test": "ERR ENOENT",
+      "node": "v26.10.0",
+      "npm": 0,
+      "test": 0,
+      "push": 0
+    }
+  }
+}

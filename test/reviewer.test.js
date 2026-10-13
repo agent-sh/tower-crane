@@ -68,6 +68,14 @@ function choice(h, env) {
   return h.json(['spawn', '--task', 'T1', '--role', 'review', '--dry-run'], { env: { ...h.reviewEnv, ...env } });
 }
 
+function assertReviewDiff(h, prompt, pattern) {
+  if (pattern.test(prompt)) return;
+  // Long scratch paths enlarge receipts, so even a small diff can use the context file.
+  const packet = path.join(h.state, 'reviews', `T1-${h.sha}.md`);
+  assert.ok(prompt.includes(`Read ${packet} for the diff at ${h.sha}.`),
+    'the review must include the diff or reference its complete context packet');
+}
+
 function model(out) {
   const flag = out.harness === 'claude' ? '--model' : out.argv.includes('-m') ? '-m' : out.argv.includes('-p') ? '-p' : '--model';
   return out.argv[out.argv.indexOf(flag) + 1];
@@ -490,6 +498,25 @@ test('review selection matches Claude provider aliases to recorded provider spen
   }
 });
 
+test('review cost samples keep provider premiums when a canonical price row also exists', (t) => {
+  const h = setup(t, 'hard', 'other', undefined, { gated: true });
+  const anthropic = 'fixture-claude';
+  const bedrock = `global.anthropic.${anthropic}`;
+  const bin = path.join(h.base, 'bin');
+  fs.mkdirSync(bin);
+  fs.writeFileSync(path.join(bin, process.platform === 'win32' ? 'claude.exe' : 'claude'), '', { mode: 0o755 });
+  const env = { PATH: bin + path.delimiter + (h.env.PATH || h.env.Path || ''),
+    AWS_REGION: 'eu-west-1', AWS_BEARER_TOKEN_BEDROCK: 'stub-secret-bedrock',
+    ANTHROPIC_API_KEY: 'stub-secret-anthropic' };
+  h.ok(['ladder', 'set', 'hard', '--harness', 'claude', '--provider', 'bedrock', '--model', anthropic]);
+  h.ok(['ladder', 'set', 'research', '--harness', 'claude', '--provider', 'anthropic', '--model', anthropic]);
+  const row = (output) => ({ input: 1, cache_write: 1, cache_read: 1, output });
+  h.ok(['project', 'set', '--review-policy', JSON.stringify({ prices: { [anthropic]: row(20), [bedrock]: row(30) } })]);
+  sample(h, bedrock, 0, 0, 1000); // $0.03
+  sample(h, anthropic, 0, 0, 1200); // $0.024
+  assert.equal(choice(h, env).review_rung, 'research', 'the higher provider rate matters, not just token counts');
+});
+
 test('review selection prices a Claude alias rung by the release id its spend records', (t) => {
   const [alias, release] = Object.entries(require('../lib/ladder').BUILTIN.claude_aliases)[0];
   for (const configured of [alias, alias.toUpperCase(), ` ${alias} `, ` ${alias.toUpperCase()} `]) {
@@ -590,7 +617,7 @@ test('direct review dispatch refuses missing and failed gates and supplies lean 
   assert.equal(out.agent, 'reviewer-T1-1');
   const prompt = out.argv.find((arg) => arg.includes('## Task'));
   assert.match(prompt, /value becomes one/);
-  assert.match(prompt, /diff --git a\/value.js b\/value.js/);
+  assertReviewDiff(h, prompt, /diff --git a\/value.js b\/value.js/);
   assert.match(prompt, /Gate results/);
   assert.match(prompt, /fail without/);
   assert.match(prompt, /probe/);
@@ -808,7 +835,7 @@ test('the review packet flags changed files outside the paths the brief names', 
 test('review policy validates price and diff settings through the CLI', (t) => {
   const h = makeProjectRepo(t);
   for (const bad of [{ prices: { 'fixture-main': { input: -1 } } },
-    { prices: { 'FIXTURE-MAIN': prices['fixture-main'], 'fixture-main': prices['fixture-main'] } },
+    { prices: { 'FIXTURE-MAIN': prices['fixture-main'], 'fixture-main': { ...prices['fixture-main'], output: prices['fixture-main'].output + 1 } } },
     { small_lines: -1 }, { risk_paths: [3] }, { surprise: true }]) {
     assert.equal(h.run(['project', 'set', '--review-policy', JSON.stringify(bad)]).code, 2);
   }
@@ -855,7 +882,7 @@ test('review uses the nearest base when only origin has it or the local base is 
   const base = h.git(['rev-parse', 'main']);
   h.git(['update-ref', 'refs/remotes/origin/main', base]);
   h.git(['branch', '-D', 'main']);
-  assert.match(choice(h).argv.find((arg) => arg.includes('## Task')), /diff --git/);
+  assertReviewDiff(h, choice(h).argv.find((arg) => arg.includes('## Task')), /diff --git/);
   h.git(['branch', 'main', `${base}~1`]);
   const prompt = choice(h).argv.find((arg) => arg.includes('## Task'));
   assert.ok(prompt.includes(`Base: ${base}.`));

@@ -6,8 +6,10 @@ const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
 const { makeRepo, BIN, HOOKS } = require('./helpers');
-const { CHROME, openBrowser } = require('./browser');
+const { CHROME, openBrowser, closeBrowser } = require('./browser');
 const Authority = require('../lib/authority');
+
+test.after(closeBrowser);
 
 function fixture(t) {
   const h = makeRepo();

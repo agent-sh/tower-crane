@@ -1,0 +1,1 @@
+- Use the account cache for browser test profiles when inherited temp and task-cache paths are too long for Chrome's Unix sockets.

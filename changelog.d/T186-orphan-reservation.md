@@ -1,0 +1,1 @@
+- Reserve orphan worktree paths and branches under the state lock before saving or removing them. Task assignment and preparation honor these reservations; competing prunes cannot clear another remover's reservation. Live branch adoption before reservation preserves the checkout and files.

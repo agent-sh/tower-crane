@@ -132,7 +132,7 @@ test('a stack that adds then modifies the same file merges without changing acce
     assert.equal(f.h.git(['merge-base', head, 'origin/main']), head);
   }
   assert.equal(f.h.git(['show', 'origin/main:T1.txt']), 'T2 modified T1');
-  assert.equal(f.h.git(['rev-parse', wt.branch]), upper);
+  assert.equal(f.h.git(['branch', '--list', wt.branch]), '', 'the merged local branch is removed');
   assert.ok(!fs.existsSync(wt.path), 'the merged task worktree is removed');
   for (const id of ['T1', 'T2']) assert.equal(f.h.json(['task', 'show', id]).evidence.findLast((e) => e.type === 'merge').ok, true);
 });
@@ -194,7 +194,8 @@ test('an unlinked dependent targets main and merges normally when its lower PR m
   const sha = f.h.git(['rev-parse', 'HEAD'], wt.path);
   f.write((d) => {
     d.prs[12] = { number: 12, state: 'OPEN', headRefOid: sha, headRefName: wt.branch,
-      baseRefName: f.lower.branch, isCrossRepository: false, autoMergeRequest: null };
+      baseRefName: f.lower.branch, isCrossRepository: false, autoMergeRequest: null,
+      mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' };
   });
   f.accept('T1');
   f.h.ok(['merge', 'T1']);
@@ -246,7 +247,9 @@ test('stack merge rechecks every accepted head and records evidence for all merg
     assert.ok(evidence.commands.some((c) => c.args[0] === 'api' && c.args.includes(`expected_head_sha=${head}`)));
     assert.match(task.phase?.label || f.h.ok(['task', 'show', id]), /merged/);
   }
-  const upper = f.h.git(['rev-parse', 'HEAD'], f.h.json(['worktree', 'T2']).path);
+  const upper = f.upper.sha;
+  assert.equal(f.h.git(['branch', '--list', f.upper.wt.branch]), '', 'the merged upper branch is removed');
+  assert.ok(!fs.existsSync(f.upper.wt.path), 'the merged upper worktree is removed');
   assert.equal(f.h.git(['merge-base', upper, 'origin/main']), upper);
   assert.equal(f.h.git(['rev-parse', 'origin/main^{tree}']), f.h.git(['rev-parse', `${upper}^{tree}`]));
   f.write((d) => { d.linked = false; });
@@ -437,6 +440,12 @@ test('a refused upper merge retains lower evidence and retries without merging t
   assert.equal(f.h.json(['task', 'show', 'T1']).evidence.findLast((e) => e.type === 'merge').ok, true);
   assert.equal(f.read().prs[12].baseRefName, 'main');
   assert.equal(f.read().prs[12].state, 'OPEN');
+  assert.ok(fs.existsSync(f.upper.wt.path), 'a partial merge keeps the open upper checkout');
+  assert.equal(f.h.git(['rev-parse', f.upper.wt.branch]), f.upper.sha, 'a partial merge keeps the upper branch');
+  assert.equal(f.h.json(['worktree', 'list']).worktrees.find((w) => w.task === 'T2').state, 'live');
+  f.h.ok(['worktree', 'prune']);
+  assert.ok(fs.existsSync(f.upper.wt.path), 'prune keeps the still-open upper task');
+  assert.equal(f.h.git(['rev-parse', f.upper.wt.branch]), f.upper.sha);
   f.write((d) => { delete d.refuseMergePr; });
   f.h.ok(['merge', 'T2']);
   assert.deepEqual(routes(f), ['async 11', 'async 12', 'pr 12', 'async 12']);
@@ -822,7 +831,9 @@ function queued(t) {
   const suite = path.join(f.h.base, 'suite.js');
   fs.writeFileSync(suite, `require('node:fs').appendFileSync(${JSON.stringify(log)}, JSON.stringify(
   ['T1.txt', 'T2.txt', 'moved.txt'].filter((f) => require('node:fs').existsSync(f))) + '\\n');\n`);
-  f.h.ok(['project', 'set', '--tests-cmd', `${shellQuote(process.execPath)} ${shellQuote(suite)}`]);
+  // Each change adds only a text file, which prove would refuse without a test. Run-only runs the suite at the head
+  // instead; the suite log keeps only the head checks, the runs that merge in main's moved.txt.
+  f.h.ok(['project', 'set', '--tests-cmd', `${shellQuote(process.execPath)} ${shellQuote(suite)}`, '--tests-mode', 'run-only']);
   // The shared stack template submits docs tasks, and a submitted task's kind
   // cannot change, so these copies are written as code tasks.
   const tasks = f.h.readState('tasks.json');
@@ -837,7 +848,8 @@ function queued(t) {
   f.acceptCode = (id) => f.h.ok(['accept', id, '--waive', 'tests', '--waive', 'clean', '--waive', 'review', '--waive', 'ci',
     '--reason', 'offline stack fixture']);
   f.consume = () => f.h.run(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
-  f.suites = () => (fs.existsSync(log) ? fs.readFileSync(log, 'utf8').trim().split('\n').map(JSON.parse) : []);
+  f.suites = () => (fs.existsSync(log) ? fs.readFileSync(log, 'utf8').trim().split('\n').map(JSON.parse) : [])
+    .filter((files) => files.includes('moved.txt'));
   f.checks = () => fs.readFileSync(path.join(f.h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse)
     .filter((e) => e.cmd === 'head check');
   f.merges = () => routes(f);

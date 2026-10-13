@@ -67,6 +67,11 @@ if (args[0] === 'pr') {
       state.becomeMergeableAfterView = false;
     }
   }
+} else if (args[0] === 'api' && state.apiFailures > 0) {
+  state.apiFailures -= 1;
+  save();
+  console.error('HTTP 502: Bad Gateway');
+  process.exit(1);
 } else if (args[0] === 'api' && /\/(?:pulls|issues)\/\d+\/comments(?:\?|$)/.test(args[1])) {
   // Already in the shape the caller's --jq filter produces: one comment per line.
   out = (state.comments || []).map((c) => JSON.stringify(c)).join('\n');

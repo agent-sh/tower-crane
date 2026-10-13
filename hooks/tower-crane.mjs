@@ -38,10 +38,11 @@ async function flush($) {
 // A steer joins the running turn at its next model request. A turn that
 // makes no further request never read it, so turn.complete queues it again.
 async function deliver($, w) {
-  if (w.steer && live.turn) {
+  const turn = live.turn
+  if (w.steer && turn) {
     const appended = await $.session.append({ message: { type: 'user', content: [{ type: 'text', text: notice([w], live.watch.agent) }] } })
-    if (!appended?.deny) {
-      live.steered.push({ w, step: live.turn.steps })
+    if (!appended?.deny && live.turn === turn) {
+      live.steered.push({ w, step: turn.steps })
       return
     }
   }
