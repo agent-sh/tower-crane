@@ -53,6 +53,7 @@ module.exports = {
   async run(ctx) {
     fs.writeFileSync(process.env.GATE_OUT, JSON.stringify({ root: ctx.root, worktree: ctx.worktree, task: ctx.task.id, sha: ctx.task.sha, args: ctx.args, base: ctx.project.base }));
     ctx.log('fake gate ran');
+    await ctx.exec(process.execPath, ['-e', 'process.exit(0)']);
     return { ok: process.env.GATE_OK === '1', summary: 'fake gate', ref: 'run-1', sha: process.env.GATE_SHA || undefined };
   },
 };
@@ -122,7 +123,6 @@ function submitTestsFixture(h, sha, keep, settings = []) {
   h.ok(['task', 'add', '--title', 'Change', '--acceptance', 'test the behavior']);
   h.ok(['claim', 'T1', '--agent', 'w-1']);
   h.ok(['submit', 'T1', '--sha', sha, '--branch', 'fixture-change', '--agent', 'w-1']);
-  h.env.TOWER_CRANE_TMP = path.join(h.base, 'gate-tmp');
 }
 
 function testOnlyFixture(t, mixed = false) {
@@ -252,8 +252,8 @@ test('colored regression failure', () => {
 
   const evidence = h.readState('tasks.json').tasks[0].evidence.at(-1);
   assert.equal(evidence.test_failure.names.length, 1);
-  assert.match(evidence.test_failure.names[0], /^colored regression failure \(/);
-  assert.match(evidence.summary, /Failing tests:\n- colored regression failure \(/);
+  assert.equal(evidence.test_failure.names[0], 'colored regression failure');
+  assert.match(evidence.summary, /Failing tests:\n- colored regression failure\n/);
   assert.equal(evidence.test_failure.output_tail.includes('\u001b'), false);
   assert.match(result.stdout, /colored regression failure/);
 });
@@ -591,6 +591,21 @@ test('merge checks the gates as they stand, not only the accepted status', (t) =
   assert.ok(fs.existsSync(out), 'with the gates passing again, the merge gate runs');
 });
 
+test('a gate run from a fixture keeps its temp directory under the fixture', (t) => {
+  const h = makeRepo(t);
+  const sha = manifestTask(h, { submitted: { 'test/ok.test.js': "require('node:test')('ok', () => {});\n" } });
+  submitTestsFixture(h, sha);
+  // The command logs the TMPDIR it sees. Without a gate root in the fixture, that is the shared temp directory.
+  const log = path.join(h.base, 'tmpdir.log');
+  const probe = path.join(h.base, 'probe.js');
+  fs.writeFileSync(probe, `require('node:fs').appendFileSync(${JSON.stringify(log)}, process.env.TMPDIR + '\\n');\n`);
+  h.ok(['project', 'set', '--tests-mode', 'run-only', '--tests-cmd', `${shellQuote(process.execPath)} ${shellQuote(probe)}`]);
+  const result = h.run(['check', 'tests', 'T1', '--agent', 'checker']);
+  assert.equal(result.code, 0, result.stdout + result.stderr);
+  const [tmpdir] = fs.readFileSync(log, 'utf8').trim().split('\n');
+  assert.ok(tmpdir.startsWith(path.join(h.base, 'gate-tmp') + path.sep), tmpdir);
+});
+
 function readEvents(h) {
   return fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
 }
@@ -626,7 +641,7 @@ test('merge removes the merged task worktree and records it', (t) => {
   assert.equal(removed.detail.removed, true);
 });
 
-test('merge keeps a worktree with uncommitted changes and says why', (t) => {
+test('merge saves uncommitted changes and removes the worktree', (t) => {
   const h = makeRepo(t);
   h.init();
   const wt = acceptedWithWorktree(h);
@@ -637,14 +652,14 @@ test('merge keeps a worktree with uncommitted changes and says why', (t) => {
 
   const merged = cli.run(['merge', 'T1'], { GATE_OUT: path.join(h.base, 'gate.json'), GATE_OK: '1' });
   assert.equal(merged.code, 0, merged.stderr);
-  assert.equal(fs.readFileSync(path.join(wt.path, 'notes.txt'), 'utf8'), 'unfinished\n');
-  assert.ok(h.registers(wt.path), 'git still registers it');
-  const kept = readEvents(h).find((e) => e.cmd === 'worktree kept');
-  assert.equal(kept.task, 'T1');
-  assert.equal(kept.detail.reason, 'uncommitted changes');
+  assert.ok(!fs.existsSync(wt.path));
+  assert.ok(!h.registers(wt.path));
+  const removed = readEvents(h).find((e) => e.cmd === 'worktree removed');
+  assert.equal(removed.task, 'T1');
+  assert.equal(fs.readFileSync(path.join(removed.detail.saved, 'files', 'notes.txt'), 'utf8'), 'unfinished\n');
 });
 
-test('merge keeps the worktree while merge.keep_branch is set', (t) => {
+test('merge retires local worktrees even when remote branches are kept', (t) => {
   const h = makeRepo(t);
   h.init(['--merge-keep-branch', 'true']);
   const wt = acceptedWithWorktree(h);
@@ -654,9 +669,9 @@ test('merge keeps the worktree while merge.keep_branch is set', (t) => {
 
   const merged = cli.run(['merge', 'T1'], { GATE_OUT: path.join(h.base, 'gate.json'), GATE_OK: '1' });
   assert.equal(merged.code, 0, merged.stderr);
-  assert.ok(fs.existsSync(wt.path), 'the worktree stays for its branch');
-  const kept = readEvents(h).find((e) => e.cmd === 'worktree kept');
-  assert.equal(kept.detail.reason, 'merge.keep_branch is set');
+  assert.ok(!fs.existsSync(wt.path));
+  assert.equal(h.git(['branch', '--list', wt.branch]), '');
+  assert.equal(readEvents(h).find((e) => e.cmd === 'worktree removed').task, 'T1');
 });
 
 test('a task sent back and claimed after merge looked at its worktree keeps the worktree', async (t) => {

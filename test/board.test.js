@@ -1382,3 +1382,16 @@ test('the board shows a refused brokered message as trouble, without its text', 
   assert.match(item.text, /worker-T2-1 tried to message worker-T1-1; the broker refused it/);
   assert.ok(!JSON.stringify(board).includes('text the board must not show'), 'the board never shows the refused text');
 });
+
+test('the board marks a ready task without a brief until its brief is written', (t) => {
+  const h = makeRepo(t);
+  h.init();
+  h.ok(['task', 'add', '--title', 'briefless', '--acceptance', 'marked']);
+  const marks = () => {
+    const st = require('../lib/state').loadState(h.state);
+    return [require('../lib/board/model').build(st).ready.map((r) => r.brief), require('../lib/render').renderHtml(st).includes('no brief')];
+  };
+  assert.deepEqual(marks(), [[false], true]);
+  h.ok(['brief', 'set', 'T1', '-'], { input: 'Context.\n' });
+  assert.deepEqual(marks(), [[true], false]);
+});

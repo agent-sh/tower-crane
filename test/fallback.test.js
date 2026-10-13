@@ -17,7 +17,8 @@ function setFallbacks(h, routes, rung = 'easy') {
 }
 
 async function until(fn, message) {
-  const deadline = Date.now() + 12000;
+  // Use the runner's per-test bound so slower Windows receipt writes can finish.
+  const deadline = Date.now() + 300000;
   while (!fn()) {
     if (Date.now() >= deadline) assert.fail(message);
     await new Promise((resolve) => setTimeout(resolve, 25));
@@ -67,7 +68,7 @@ for (const explicit of [false, true]) {
     h.spawnEnv.LOCALAPPDATA = cache;
     h.spawnEnv.CLAUDE_CODE_USE_BEDROCK = '1';
     const spawned = h.json(['spawn', '--task', 'T1'], { env: h.spawnEnv });
-    const result = await h.runAsync(['wait', '--after', '0', '--task', 'T1', '--types', 'worker-exited', '--timeout', '20']);
+    const result = await h.runAsync(['wait', '--observe', '--after', '0', '--task', 'T1', '--types', 'worker-exited', '--timeout', '20']);
     assert.equal(result.code, 0, result.stderr);
     assert.equal(JSON.parse(result.stdout).detail.agent, spawned.agent);
     const [primary, fallback] = h.attempts();
@@ -113,7 +114,7 @@ for (const nextHarness of ['codex', 'claude']) {
     assert.equal(switches.length, 1);
     assert.equal(switches[0].detail.route_index, 1);
     assert.equal(switches[0].detail.reason, 'provider outage after 2 retries');
-    const wake = h.json(['wait', '--after', '0', '--types', 'spawn-fallback', '--timeout', '1']);
+    const wake = h.json(['wait', '--observe', '--after', '0', '--types', 'spawn-fallback', '--timeout', '1']);
     assert.equal(wake.id, switches[0].id);
     const task = h.json(['task', 'show', 'T1']);
     assert.equal(task.run.phase, 'waiting');
@@ -222,7 +223,7 @@ for (const primaryHarness of ['agy', 'claude']) {
 test('rework during a live fallback refuses a second worker until the previous attempt exits', async (t) => {
   const h = setup(t);
   const cursor = events(h).at(-1).id;
-  const waiting = h.runAsync(['wait', '--after', cursor, '--types', 'spawn-fallback', '--timeout', '10']);
+  const waiting = h.runAsync(['wait', '--observe', '--after', cursor, '--types', 'spawn-fallback', '--timeout', '10']);
   h.json(['spawn', '--task', 'T1'], {
     env: { ...h.spawnEnv, TOWER_CRANE_TEST_FALLBACK_HOLD: '4000' },
   });
@@ -464,7 +465,7 @@ test('a detached switch wakes a live waiter, keeps its lease, and collects route
   const h = setup(t);
   const finish = path.join(h.base, 'finish-fallback');
   const cursor = events(h).at(-1).id;
-  const waiting = h.runAsync(['wait', '--after', cursor, '--types', 'spawn-fallback', '--timeout', '10']);
+  const waiting = h.runAsync(['wait', '--observe', '--after', cursor, '--types', 'spawn-fallback', '--timeout', '10']);
   const spawn = h.json(['spawn', '--task', 'T1'], {
     env: { ...h.spawnEnv, TOWER_CRANE_TEST_FALLBACK_FINISH: finish },
   });

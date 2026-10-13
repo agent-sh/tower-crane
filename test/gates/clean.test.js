@@ -22,8 +22,9 @@ fs.writeFileSync(fake, `const fs = require('fs');
 const { spawnSync } = require('child_process');
 const [dir, ...rest] = process.argv.slice(2);
 const head = spawnSync('git', ['-C', dir, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim();
-fs.writeFileSync(process.env.FAKE_CLEAN_LOG, JSON.stringify({ dir, rest, head, via: process.env.FAKE_CLEAN_VIA || 'env' }));
+fs.writeFileSync(process.env.FAKE_CLEAN_LOG, JSON.stringify({ dir, rest, head, tmpdir: process.env.TMPDIR, via: process.env.FAKE_CLEAN_VIA || 'env' }));
 if (process.env.FAKE_CLEAN_MODE === 'crash') { console.error('cannot read the repository'); process.exit(1); }
+if (process.env.FAKE_CLEAN_MODE === 'kill') process.kill(process.pid, 'SIGKILL');
 if (process.env.FAKE_CLEAN_MODE === 'text') { console.log('deslop: 2 findings'); process.exit(0); }
 process.stdout.write(fs.readFileSync(process.env.FAKE_CLEAN_REPORT, 'utf8'));
 `);
@@ -89,6 +90,8 @@ test('a HIGH finding: not ok, listing the first 10 HIGH items and counts by chec
   assert.equal(c.head, sha);
   assert.deepEqual(c.rest, [`--base=${base}`, '--json']);
   assert.ok(c.dir.startsWith(process.env.TOWER_CRANE_TMP));
+  // Its scratch goes under the gate's temp root too, not the system temp directory.
+  assert.ok(c.tmpdir.startsWith(process.env.TOWER_CRANE_TMP + path.sep), c.tmpdir);
   assertCleanedUp();
 });
 
@@ -112,6 +115,7 @@ test('a scan with checks that did not run: not ok, naming them', async () => {
     report([], extra);
     const r = await gate.run(ctx());
     assert.equal(r.ok, false, JSON.stringify(extra));
+    assert.equal(r.infrastructure_failure, true, 'a scan that did not complete is retried once, not reworked');
     assert.match(r.summary, /The scan is incomplete/);
     assert.match(r.summary, named);
   }
@@ -128,6 +132,16 @@ test('an installed cleanup tool is not inferred when the owner has not pinned it
   assert.equal(r.ok, false);
   assert.match(r.summary, /pinned/);
   assert.equal(fs.existsSync(logFile), false);
+});
+
+test('a tool killed by a signal: not ok, recorded as a runner crash rather than a finding', { skip: process.platform === 'win32' }, async () => {
+  process.env.TOWER_CRANE_CLEAN_CMD = fakeCmd;
+  process.env.FAKE_CLEAN_MODE = 'kill';
+  const killed = await gate.run(ctx());
+  assert.equal(killed.ok, false);
+  assert.equal(killed.runner_crash, true);
+  assert.equal(killed.confirmed_failure, undefined);
+  assertCleanedUp();
 });
 
 test('a tool that fails or prints no JSON: not ok', async () => {

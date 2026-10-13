@@ -52,7 +52,8 @@ fs.writeSync(1, Array.from({ length: 30 }, (_, i) => 'progress ' + i).join('\\n'
 fs.writeSync(2, 'last diagnostic before exit\\n');
 fs.writeSync(2, ${JSON.stringify(PRIVATE_LOG + '\n')});
 ${submit ? "cp.execFileSync(process.execPath, [process.argv[2], 'submit', task, '--sha', '50b732a15be40ccb2065cb2ba0e7b366d511b736']);" : ''}
-fs.writeFileSync(process.argv[3], JSON.stringify({ agent: process.env.TOWER_CRANE_AGENT, pid: process.pid }));
+fs.writeFileSync(process.argv[3] + '.tmp', JSON.stringify({ agent: process.env.TOWER_CRANE_AGENT, pid: process.pid }));
+fs.renameSync(process.argv[3] + '.tmp', process.argv[3]);
 ${wait ? 'process.exit(7);' : 'setInterval(() => {}, 1000);'}
 `;
   fs.writeFileSync(worker, script);
@@ -250,6 +251,8 @@ test('a missing log does not hide an exited claimant', async (t) => {
   const exit = h.json(['status']).exited_claims[0];
   assert.equal(exit.log, spawned.log);
   assert.match(exit.tail, /log unavailable.*ENOENT/);
+  // Process death is visible before the monitor finishes writing its exit receipt.
+  await until(() => h.json(['status']).exited_claims[0]?.code === (process.platform === 'win32' ? 1 : null), 'exit receipt did not arrive');
   h.ok(['release', 'T1', '--reason', 'recover worker with missing log']);
   const release = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse)
     .find((e) => e.cmd === 'release');
@@ -288,7 +291,8 @@ test('terminal fallback cannot release another live claim', { skip: !PTY_AVAILAB
 
 test('Linux zombie and reused pid diagnostics do not mistake the process for a live worker', { skip: process.platform !== 'linux' }, async (t) => {
   const h = setup(t);
-  const spawned = await start(t, h);
+  const markerHook = path.join(__dirname, 'fixtures', 'slow-ready-marker.js').replace(/\\/g, '/');
+  const spawned = await start(t, h, { env: { NODE_OPTIONS: `--require "${markerHook}"` } });
   const hook = path.join(__dirname, 'fixtures', 'process-stat.js').replace(/\\/g, '/');
   const stat = fs.readFileSync(`/proc/${spawned.pid}/stat`, 'utf8');
   const ticks = stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\s+/)[19];

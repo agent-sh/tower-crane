@@ -1,0 +1,1 @@
+- `ci log --failed-tests` includes indented Go subtest failures and the first Go source diagnostic even when its message has no error keyword.

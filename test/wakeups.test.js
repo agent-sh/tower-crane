@@ -24,6 +24,35 @@ async function until(check, what) {
   }
 }
 
+// An orchestrator follower prints its ready line only after the lease's
+// process discovery. On Windows that is a PowerShell CIM snapshot, which takes
+// many seconds on a cold runner, so readiness is the line or the exit, never a
+// clock. Delivery deadlines start after it.
+function readyLine(child) {
+  return new Promise((resolve, reject) => {
+    let out = '';
+    let err = '';
+    const isReady = (line) => {
+      try { return JSON.parse(line).type === 'ready'; } catch { return false; }
+    };
+    const finish = (settle) => {
+      child.stdout.off('data', onOut);
+      child.stderr.off('data', onErr);
+      child.off('close', onClose);
+      settle();
+    };
+    const onOut = (d) => {
+      out += d;
+      if (out.split('\n').some(isReady)) finish(resolve);
+    };
+    const onErr = (d) => { err += d; };
+    const onClose = (code, signal) => finish(() => reject(new Error(`the follower exited (${code ?? signal}) before its ready line: ${err.trim()}`)));
+    child.stdout.on('data', onOut);
+    child.stderr.on('data', onErr);
+    child.on('close', onClose);
+  });
+}
+
 function setup(t) {
   const h = makeRepo(t);
   h.init();
@@ -60,12 +89,12 @@ test('the default wait wakes on every owner event and skips bookkeeping', async 
 test('wait --follow streams id-only lines and event prints the content', async (t) => {
   const h = setup(t);
   h.ok(['ask', '--kind', 'technical', '--question', 'which way?', '--option', 'left', '--option', 'right', '--blocks', 'T1', '--agent', 'worker']);
-  const p = cp.spawn(process.execPath, [BIN, 'wait', '--follow', '--agent', 'orchestrator'], { cwd: h.repo, env: h.env });
+  const p = cp.spawn(process.execPath, [BIN, 'wait', '--observe', '--follow', '--agent', 'orchestrator'], { cwd: h.repo, env: h.env });
   t.after(() => p.kill());
   let out = '';
   p.stdout.on('data', (d) => { out += d; });
   const lines = () => out.split('\n').filter(Boolean).map(JSON.parse);
-  await until(() => lines().some((l) => l.type === 'ready'), 'the ready line');
+  await readyLine(p);
   h.ok(['answer', 'D1', '--choice', 'right', '--note', 'private answer note', '--agent', 'owner']);
   h.ok(['msg', '--to', 'orchestrator', '--task', 'T1', 'private worker text', '--agent', 'worker']);
   const wakes = await until(() => lines().length >= 3 && lines().slice(1), 'two wake lines');
@@ -141,7 +170,7 @@ for (const harness of ['claude', 'codex']) {
 
 // A stand-in for the engine's $ with real child processes, so the mod runs
 // the shipped CLI exactly as a Claude Code session would.
-function engine(t, h) {
+function engine(t, h, { appendPause } = {}) {
   const hooks = {};
   const on = (event, matcher, fn) => {
     if (typeof matcher === 'function') [fn, matcher] = [matcher, null];
@@ -161,15 +190,24 @@ function engine(t, h) {
     for (;;) {
       const text = seen[kind].join('\n');
       if (ids.every((id) => text.includes(id))) return text;
-      await once(notices, 'notice', { signal });
+      try {
+        await once(notices, 'notice', { signal });
+      } catch (error) {
+        if (!signal.aborted) throw error;
+        assert.fail(`${kind} did not receive ${ids.join(', ')}; prompts: ${JSON.stringify(seen.prompts)}; appended: ${JSON.stringify(seen.appended)}; toasts: ${JSON.stringify(seen.toasts)}`);
+      }
     }
   };
   const children = [];
+  let followerReady = null;
   t.after(() => { for (const p of children) p.kill(); });
   async function* spawn({ argv }) {
     assert.equal(argv[0], 'node');
     const p = cp.spawn(process.execPath, argv.slice(1), { cwd: h.repo, env: h.env });
     children.push(p);
+    followerReady = readyLine(p);
+    // A follower the test never waits on may exit before its ready line.
+    followerReady.catch(() => {});
     const queue = [];
     let wake = null;
     let ended = false;
@@ -193,7 +231,7 @@ function engine(t, h) {
     tool: { register: async (spec) => { seen.tools.push(spec); return { tool: `mcp__tower-crane__${spec.name}` }; } },
     command: { register: async (spec) => { seen.commands.push(spec); } },
     prompt: { submit: async (p) => { record('prompts', p.text); return { text: p.text }; } },
-    session: { append: async (a) => { record('appended', a.message.content[0].text); return {}; } },
+    session: { append: async (a) => { record('appended', a.message.content[0].text); if (appendPause) await appendPause; return {}; } },
     ui: { status() {}, toast: (text) => seen.toasts.push(text) },
     process: { spawn },
   };
@@ -201,14 +239,18 @@ function engine(t, h) {
     const hook = hooks[event].find((x) => match(x.matcher));
     return hook.fn($, e, async (x) => x);
   };
-  return { $, on, seen, fire, waitFor };
+  return { $, on, seen, fire, waitFor, followerReady: () => followerReady };
 }
 
 test('the Claude Code mod pushes a decision answer and a worker message into the session', async (t) => {
   const h = setup(t);
+  h.ok(['project', 'set', '--paused', 'notification-only probe']);
   h.ok(['ask', '--kind', 'technical', '--question', 'merge now?', '--option', 'yes', '--option', 'later', '--agent', 'worker']);
   const { register } = await import(pathToFileURL(MOD).href);
-  const cc = engine(t, h);
+  let finishAppend;
+  const appendPause = new Promise((resolve) => { finishAppend = resolve; });
+  t.after(() => finishAppend());
+  const cc = engine(t, h, { appendPause });
   register(cc.on);
   await cc.fire('session.start', { cwd: h.repo, isInteractive: true });
   assert.deepEqual(cc.seen.tools.map((x) => x.name), ['watch']);
@@ -219,6 +261,7 @@ test('the Claude Code mod pushes a decision answer and a worker message into the
   h.ok(['msg', '--to', 'orchestrator', '--task', 'T1', 'private worker text', '--agent', 'worker']);
   const answer = log(h).findLast((e) => e.cmd === 'answer').id;
   const message = log(h).findLast((e) => e.cmd === 'msg').id;
+  await cc.followerReady();
   const pushed = await cc.waitFor('prompts', [answer, message]);
   assert.match(pushed, new RegExp(`${answer}: decision-answer D1 from owner`));
   assert.match(pushed, new RegExp(`${message}: worker-message T1 from worker`));
@@ -238,6 +281,7 @@ test('the Claude Code mod pushes a decision answer and a worker message into the
   await cc.waitFor('appended', [steer]);
   assert.ok(!cc.seen.prompts.slice(before).some((x) => x.includes(steer)), 'a steer during a turn is not a new prompt');
   await cc.fire('turn.complete', { turnId: 't1' });
+  finishAppend();
   await cc.waitFor('prompts', [steer]);
   idOnly(cc.seen.prompts.join('\n'), ['private concurrent worker text', 'private steer text']);
   idOnly(cc.seen.appended.join('\n'), ['private steer text']);

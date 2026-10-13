@@ -13,8 +13,10 @@ const { gateFixture, gateEvidence } = require('./gate-helpers');
 const bedrockOutage = require('./fixtures/bedrock-outage.json');
 const { errorReader, transient } = require('../lib/spawn-monitor');
 
-// The lease gate is POSIX-only: on Windows a worker can start before its claim.
+// The lease gate is POSIX-only; on Windows the dispatch records the lease before launch.
 const GATE_SKIP = process.platform === 'win32' && 'the lease gate is POSIX-only';
+// A dispatch that finds no /bin/sh spawns its workers through the Windows launch handshake.
+const NO_SH = { HOOK_NO_SH: '1' };
 const windowsConcurrency = process.platform === 'win32' ? 2 : false;
 const S = require('../lib/state');
 
@@ -67,7 +69,7 @@ if (!attempts.length && ${claim}) {
 }
 const task = JSON.parse(cli(['task', 'show', 'T1', '--json']));
 attempts.push({ agent: process.env.TOWER_CRANE_AGENT, session: process.env.TOWER_CRANE_SESSION, retry: process.env.TOWER_CRANE_RETRY,
-  cwd: process.cwd(), claim: task.claim });
+  cwd: process.cwd(), claim: task.claim, pid: process.pid });
 fs.writeFileSync(file, JSON.stringify(attempts));
 ${sessionReceipt ? "console.log(JSON.stringify({ type: 'thread.started', thread_id: 'supervised-session' }));" : ''}
 ${busy ? "cp.spawn(process.execPath, ['-e', 'const end = Date.now() + 3500; while (Date.now() < end) {}'], { stdio: 'ignore' });" : ''}
@@ -147,6 +149,40 @@ function outage(harness, stream, lines) {
   read(null, true);
   return seen;
 }
+
+test('context overflow comes from harness errors, never quoted work output', () => {
+  const message = "Codex ran out of room in the model's context window. Start a new thread or clear earlier history before retrying.";
+  const cases = [
+    ['codex', false, { type: 'turn.failed', error: { message } }, true],
+    ['codex', false, '{"type":"turn.failed","error":{"message":"context_length_exceeded"}}\n{"type":"turn.completed"}', false],
+    ['claude', false, { type: 'result', is_error: true, errors: ['Prompt is too long'] }, true],
+    ['claude', false, { type: 'assistant', isApiErrorMessage: true, message: { content: [{ type: 'text', text: 'Prompt is too long' }] } }, true],
+    ['command', true, 'API Error: 400 prompt is too long: 210000 tokens > 200000 maximum', true],
+    ['codex', true, { type: 'item.completed', item: { type: 'command_execution', aggregated_output: message } }, false],
+    ['claude', true, { type: 'assistant', message: { content: [{ type: 'text', text: 'Prompt is too long' }] } }, false],
+    ['claude', false, { type: 'result', is_error: false, result: 'Prompt is too long' }, false],
+    ['command', true, { message }, false],
+    ['command', false, message, false],
+    ['pi', true, 'Prompt is too long', false],
+  ];
+  for (const [harness, stderr, value, expected] of cases) {
+    const read = errorReader(harness, stderr, () => {});
+    const text = typeof value === 'string' ? value : JSON.stringify(value);
+    read(Buffer.from(text.slice(0, 13)));
+    read(Buffer.from(text.slice(13)));
+    assert.equal(read(null, true).overflowed, expected, JSON.stringify([harness, stderr, value]));
+  }
+  let overflowed = false;
+  const report = (value) => { overflowed = value; };
+  const stdout = errorReader('command', false, () => {}, report);
+  const stderr = errorReader('command', true, () => {}, report);
+  stderr(Buffer.from('Prompt is too long\n'));
+  assert.equal(overflowed, true);
+  stdout(Buffer.from('{"type":"result","is_error":false}\n'));
+  assert.equal(overflowed, false);
+  stderr(null, true);
+  assert.equal(overflowed, false, 'closing an earlier error stream cannot undo successful recovery');
+});
 
 test('outages come only from harness error envelopes and stderr, and quoted errors never count', () => {
   const json = (records) => records.map((record) => JSON.stringify(record));
@@ -567,6 +603,79 @@ test('a schema bump before the supervisor first reads state stops its worker beh
   assert.equal(tasks.find((task) => task.id === 'T1').claim, null, 'no lease was taken');
 });
 
+test('a worker without the lease gate, as on Windows, first runs on its own lease while its dispatch still holds the lock, and spawn reports its pid', async (t) => {
+  const h = setup(t, { claim: false, failures: 0 });
+  const paused = path.join(h.base, 'render-paused');
+  const completed = h.runAsync(['spawn', '--task', 'T1', '--wait', '--json'], { hooks: { ...NO_SH, HOOK_STOP_RENDER: paused } });
+  let result;
+  try {
+    await until(() => fs.existsSync(paused), 'dispatch did not pause after committing its spawn');
+    // The paused render holds the state lock, so no supervisor can claim now:
+    // the harness can only see a lease recorded before it started.
+    await until(() => h.readAttempts().length === 1, 'worker did not start');
+  } finally {
+    fs.writeFileSync(`${paused}.go`, '');
+    result = await completed;
+  }
+  assert.equal(result.code, 0, result.stderr);
+  const spawned = JSON.parse(result.stdout);
+  const [attempt] = h.readAttempts();
+  assert.equal(attempt.claim?.agent, spawned.agent, 'the harness first saw its own lease');
+  assert.equal(attempt.pid, spawned.pid, 'spawn reports the harness process, not a wrapper');
+  const events = log(h);
+  const claim = events.findIndex((e) => e.cmd === 'claim' && e.agent === spawned.agent);
+  assert.ok(claim >= 0 && claim < events.findIndex((e) => e.cmd === 'spawn'), 'the lease is recorded before the spawn');
+  assert.equal(events.filter((e) => e.cmd === 'claim' && !e.detail.renewed).length, 1, 'the supervisor takes no second lease');
+});
+
+test('a worker without the lease gate whose supervisor stops waiting for its lease never starts, and its lease is rolled back', async (t) => {
+  const h = setup(t, { claim: false, failures: 0 });
+  // A paused harness past its interval admits this spawn as its probe.
+  S.withLock(h.state, () => S.appendEvents(h.state, [{ at: new Date(Date.now() - 10 * 60000).toISOString(), agent: 'test', cmd: 'harness health',
+    task: null, detail: { harness: 'command', status: 'unavailable', reason: 'login expired', source: 'exit' } }]));
+  const paused = path.join(h.base, 'go-paused');
+  const completed = h.runAsync(['spawn', '--task', 'T1', '--wait', '--json'], { hooks: { ...NO_SH, HOOK_STOP_GO: paused } });
+  let result;
+  try {
+    await until(() => fs.existsSync(paused), 'dispatch did not pause before launching its worker');
+    const claim = JSON.parse(fs.readFileSync(path.join(h.state, 'tasks.json'), 'utf8')).tasks.find((task) => task.id === 'T1').claim;
+    assert.match(claim?.agent || '', /^worker-T1-/, 'the lease is on disk while the supervisor waits');
+    assert.equal(h.readAttempts().length, 0, 'no harness runs before go');
+    // The supervisor's wait for go closes while the paused dispatch holds the state lock.
+    await new Promise((resolve) => setTimeout(resolve, 11000));
+  } finally {
+    fs.writeFileSync(`${paused}.go`, '');
+    result = await completed;
+  }
+  assert.notEqual(result.code, 0, result.stderr);
+  assert.match(result.stderr, /did not start: no lease: it was not recorded within 10 s/);
+  assert.equal(h.readAttempts().length, 0, 'the worker never started');
+  const task = JSON.parse(fs.readFileSync(path.join(h.state, 'tasks.json'), 'utf8')).tasks.find((x) => x.id === 'T1');
+  assert.equal(task.claim, null, 'the lease is rolled back');
+  assert.equal(task.status, 'todo');
+  assert.equal(task.branch, null, 'the rest of the failed spawn is not recorded either');
+  assert.ok(!log(h).some((e) => e.cmd === 'worktree'), 'nor its worktree event');
+  assert.ok(log(h).some((e) => e.cmd === 'release' && e.detail.rollback), 'the rollback is recorded');
+  assert.ok(!log(h).some((e) => e.cmd === 'spawn'), 'no spawn is recorded');
+  assert.ok(!log(h).some((e) => e.cmd === 'harness health' && e.detail.source === 'probe'), 'nor does it spend the probe interval');
+  h.ok(['claim', 'T1', '--agent', 'manual']);
+});
+
+test('a spawn reads no other task\'s stored evidence, so a missing evidence file elsewhere does not stop it', (t) => {
+  const h = setup(t, { failures: 0 });
+  h.ok(['task', 'add', '--title', 'Settled elsewhere', '--acceptance', 'old receipts']);
+  const doc = h.readState('tasks.json');
+  doc.tasks.find((task) => task.id === 'T2').evidence.push({ type: 'note', ok: true, sha: 'abcdef1', agent: 'checker', revision: 1,
+    source: 'evidence', summary: 'old report\n'.repeat(200) });
+  h.writeState('tasks.json', doc);
+  h.ok(['task', 'note', 'T2', 'store its settled evidence']);
+  const ref = h.readState('tasks.json').tasks.find((task) => task.id === 'T2').evidence[0].evidence_refs.summary;
+  fs.rmSync(path.join(h.state, 'evidence', 'T2', `${ref.sha256}.json`));
+  const result = h.spawn();
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(h.readAttempts().length, 1);
+});
+
 test('a worker spawned behind a live lease held by another agent never starts and says why', (t) => {
   const h = setup(t, { claim: false, failures: 0 });
   h.ok(['claim', 'T1', '--agent', 'holder']);
@@ -853,8 +962,17 @@ setInterval(() => {}, 1000);
 test('a rerun waits for previous descendants even when they close their output pipes', {
   skip: process.platform !== 'linux' && 'Linux process state',
 }, (t) => {
+  // After hooks run in registration order, so this one comes before setup's, which deletes the fixture
+  // that holds the group file.
+  let groupFile;
+  t.after(() => {
+    // Read the file, not a spawn result: a spawn that throws before returning still leaves the group running.
+    const recorded = groupFile && fs.existsSync(groupFile) ? JSON.parse(fs.readFileSync(groupFile, 'utf8')) : null;
+    if (!recorded) return;
+    try { process.kill(-recorded.parent, 'SIGKILL'); } catch (e) { if (e.code !== 'ESRCH') throw e; }
+  });
   const h = setup(t, { failures: 0 });
-  const groupFile = path.join(h.base, 'previous-group.json');
+  groupFile = path.join(h.base, 'previous-group.json');
   const script = `
 const cp = require('node:child_process');
 const fs = require('node:fs');
@@ -877,14 +995,8 @@ if (!fs.existsSync(file)) {
 }
 `;
   h.ok(['ladder', 'set', 'easy', '--command', JSON.stringify([process.execPath, '-e', script, BIN, groupFile, '{prompt}'])]);
-  let group;
-  t.after(() => {
-    if (!group) return;
-    try { process.kill(-group.parent, 'SIGKILL'); } catch (e) { if (e.code !== 'ESRCH') throw e; }
-  });
   // The rerun waits out the previous child's SIGTERM grace, so allow for a loaded machine.
   const result = h.spawn(undefined, 60000);
-  group = JSON.parse(fs.readFileSync(groupFile, 'utf8'));
   assert.equal(result.code, 0, result.stderr);
   assert.equal(log(h).filter((e) => e.cmd === 'spawn retry').length, 1);
 });

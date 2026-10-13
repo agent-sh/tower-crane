@@ -6,6 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
 const { BIN, cachedFixture } = require('./helpers');
+const { gateFixture } = require('./gate-helpers');
 
 const REQUIRED = [
   'test (ubuntu-latest, node 26, shard 1/3)',
@@ -26,14 +27,33 @@ function readWorkflow(root) {
   return fs.readFileSync(path.join(root, '.github', 'workflows', 'ci.yml'), 'utf8').replace(/\r\n/g, '\n');
 }
 
+function workflowMatrix(workflow, event) {
+  const included = [...workflow.matchAll(/^\s+- \{ os: ([^,]+), node: (\d+), shard: '(\d+\/\d+)' \}$/gm)]
+    .map(([, os, node, shard]) => ({ os, node: Number(node), shard }));
+  if (included.length) return included;
+
+  // Read the workflow's event expression and axes, rather than a second matrix in the test.
+  const expression = workflow.match(/os: \$\{\{ fromJSON\(github\.event_name == 'pull_request' && '([^']+)' \|\| '([^']+)'\) \}\}/);
+  assert.ok(expression, 'the OS axis selects its JSON list from the event');
+  const systems = JSON.parse(expression[event === 'pull_request' ? 1 : 2]);
+  const nodes = JSON.parse(workflow.match(/^\s+node: (\[[^\n]+\])/m)[1]);
+  const shards = JSON.parse(workflow.match(/^\s+shard: (\[[^\n]+\])/m)[1].replace(/'/g, '"'));
+  const excluded = [...workflow.matchAll(/^\s+- \{ os: ([^,]+), node: (\d+) \}$/gm)];
+  return systems.flatMap((os) => nodes.flatMap((node) => shards.map((shard) => ({ os, node, shard }))))
+    .filter((entry) => !excluded.some(([, os, node]) => entry.os === os && entry.node === Number(node)));
+}
+
+function jobNames(matrix) {
+  return matrix.map(({ os, node, shard }) => `test (${os}, node ${node}, shard ${shard})`);
+}
+
 test('package support, CI matrix, and required jobs target Node 24 and 26', () => {
   const root = path.resolve(__dirname, '..');
   const metadata = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
   assert.equal(metadata.engines.node, '>=24');
 
   const workflow = readWorkflow(root);
-  const matrix = [...workflow.matchAll(/^\s+- \{ os: ([^,]+), node: (\d+), shard: '(\d+)\/(\d+)' \}$/gm)]
-    .map(([, os, node, index, total]) => ({ os, node: Number(node), index: Number(index), total: Number(total) }));
+  const matrix = workflowMatrix(workflow, 'push');
   // Each OS and Node pair must run every shard of its split once, and no other shard.
   const jobs = new Map();
   for (const entry of matrix) {
@@ -41,25 +61,45 @@ test('package support, CI matrix, and required jobs target Node 24 and 26', () =
     jobs.set(job, [...(jobs.get(job) || []), entry]);
   }
   for (const [job, shards] of jobs) {
-    const { total } = shards[0];
-    assert.deepEqual(shards.map(({ index, total }) => `${index}/${total}`), Array.from({ length: total }, (_, i) => `${i + 1}/${total}`), `${job} shards`);
+    const total = Number(shards[0].shard.split('/')[1]);
+    assert.deepEqual(shards.map(({ shard }) => shard), Array.from({ length: total }, (_, i) => `${i + 1}/${total}`), `${job} shards`);
   }
-  assert.deepEqual(matrix.map(({ os, node, index, total }) => `test (${os}, node ${node}, shard ${index}/${total})`), REQUIRED);
+  assert.deepEqual(jobNames(matrix), REQUIRED);
 
-  const requiredJson = JSON.stringify(REQUIRED);
-  for (const file of ['docs/state.md', 'docs/cli.md']) {
-    const text = fs.readFileSync(path.join(root, file), 'utf8');
-    assert.ok(text.includes(requiredJson), `${file} has stale required job names`);
-  }
   const agents = fs.readFileSync(path.join(root, 'AGENTS.md'), 'utf8');
   assert.match(agents, /\bNode 24 or newer\b/);
 });
 
-test('pull requests run CI for every base, and pushes run it for main', () => {
+test('pull requests run CI for every base, with main pushes, daily and manual full runs', () => {
   const root = path.resolve(__dirname, '..');
   const workflow = readWorkflow(root);
   // A base filter would drop CI from stacks on custom task branches, which submission accepts.
   assert.match(workflow, /^on:\n {2}pull_request:\n(?: {4}#.*\n)* {2}push:\n {4}branches: \[main\]\n/m);
+  assert.match(workflow, /^ {2}schedule:\n {4}- cron: '[0-9]+ [0-9]+ \* \* \*'\n/m);
+  assert.match(workflow, /^ {2}workflow_dispatch:\s*$/m);
+});
+
+test('PRs run Windows shards, proofs and shared checks; other events run all nine shards', () => {
+  const workflow = readWorkflow(path.resolve(__dirname, '..'));
+  assert.deepEqual(jobNames(workflowMatrix(workflow, 'pull_request')), REQUIRED.filter((name) => name.includes('windows-latest')));
+  for (const event of ['push', 'schedule', 'workflow_dispatch']) {
+    assert.deepEqual(jobNames(workflowMatrix(workflow, event)), REQUIRED, event);
+  }
+  assert.equal([...workflow.matchAll(/^ {2}test:\n/gm)].length, 1, 'one test job owns the matrix');
+  assert.match(workflow, /^ {4}name: test \(\$\{\{ matrix\.os \}\}, node \$\{\{ matrix\.node \}\}, shard \$\{\{ matrix\.shard \}\}\)$/m);
+  const testJob = workflow.split('\n  test:\n')[1].split(/\n {2}[\w-]+:\n/)[0];
+  assert.doesNotMatch(testJob, /^ {4}if:/m, 'the test job runs on every workflow event');
+  assert.match(testJob, /- run: npm run check:shared/);
+  assert.match(testJob, /- run: npm test\n[\s\S]*TC_TEST_SHARD: \$\{\{ matrix\.shard \}\}/);
+  for (const id of ['gate-scratch', 'model-swap']) {
+    const job = workflow.split(`\n  ${id}:\n`)[1].split(/\n {2}[\w-]+:\n/)[0];
+    assert.doesNotMatch(job, /^ {4}if:/m, `${id} also runs on pull requests`);
+    assert.match(job, /- run: node scripts\/probe-/);
+  }
+  // GitHub keeps one running and one pending run per group, and a newer run replaces the pending one.
+  // Main pushes share a group so only the newest pending head waits; scheduled and manual runs stay unique.
+  assert.match(workflow, /^concurrency:\n {2}group: \$\{\{ github\.event_name == 'pull_request' && format\('ci-pr-\{0\}', github\.event\.pull_request\.number\) \|\| github\.event_name == 'push' && 'ci-main-push' \|\| format\('ci-run-\{0\}', github\.run_id\) \}\}\n {2}cancel-in-progress: \$\{\{ github\.event_name == 'pull_request' \}\}\n/m,
+    'PR runs cancel per PR; main pushes share one group that never cancels a running run; scheduled and manual runs are unique');
 });
 
 test('the stack section says hosted CI runs on every stack member at its own base', () => {
@@ -93,7 +133,8 @@ function fixture(t, withPr = true) {
     h.init(['--repo', 'acme/app']);
     h.ok(['task', 'add', '--title', 'Change', '--acceptance', 'works']);
     h.ok(['claim', 'T1', '--agent', 'worker']);
-    const sha = h.git(['rev-parse', 'HEAD']);
+    // Submit with a PR reads its checks, so it needs the fake gh that gateFixture puts on PATH.
+    const sha = gateFixture(h);
     h.ok(['submit', 'T1', '--agent', 'worker', '--sha', sha, ...(withPr ? ['--pr', '40'] : [])]);
     return { sha };
   });
@@ -125,6 +166,21 @@ function fixture(t, withPr = true) {
     },
   };
 }
+
+test('documented PR job lists pass CI with Windows-only check runs', (t) => {
+  const root = path.resolve(__dirname, '..');
+  const names = jobNames(workflowMatrix(readWorkflow(root), 'pull_request'));
+  const h = fixture(t);
+  for (const file of ['docs/state.md', 'docs/cli.md']) {
+    const text = fs.readFileSync(path.join(root, file), 'utf8');
+    const documented = text.match(/(?:PR test jobs are|matrix jobs have these full names:)\s+`(\[[^`]+\])`/);
+    assert.ok(documented, `${file} documents the PR job names`);
+    const required = JSON.parse(documented[1]);
+    const r = h.check({ ci: { required }, runs: [...CODEQL, ...names.map((name) => run(name))] });
+    assert.equal(r.code, 0, `${file}: ${r.summary}`);
+    assert.deepEqual(required, names, `${file} requires every PR shard`);
+  }
+});
 
 test('T71 regression: conflicts block CodeQL successes plus a capped review with no test workflow', (t) => {
   const r = fixture(t).check({
@@ -192,6 +248,7 @@ test('a literal required prefix needs matching jobs, all completed successfully'
   const h = fixture(t);
   const ci = { required: ['test ('] };
   assert.equal(h.check({ ci }).code, 0);
+  assert.equal(h.check({ ci, runs: REQUIRED.filter((name) => name.includes('windows-latest')).map((name) => run(name)) }).code, 0);
   assert.equal(h.check({ ci, runs: CODEQL }).code, 1);
   for (const [conclusion, status] of [
     ['skipped', 'completed'], ['neutral', 'completed'], ['failure', 'completed'],
