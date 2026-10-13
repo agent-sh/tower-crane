@@ -176,8 +176,7 @@ test('a nested read-only bind remains masked when its permission bits are writab
     task: { 'b.txt': 'b\n' },
     main: { [file]: 'v2\n' },
   });
-  const target = path.join(f.wt, file);
-  assert.notEqual(fs.statSync(target).mode & 0o222, 0);
+  const target = path.join(f.git(['rev-parse', '--show-toplevel']), file);
   const preload = path.join(f.wt, '.git', 'mount-probe.js');
   fs.writeFileSync(preload, `
 const fs = require('node:fs');
@@ -193,7 +192,13 @@ fs.accessSync = (file, mode) => {
   f.env.NODE_OPTIONS = `${f.env.NODE_OPTIONS || ''} --require ${JSON.stringify(preload)}`;
   const result = f.merge('--no-edit', 'origin/main');
   assert.equal(result.status, 0, result.stderr);
-  assert.equal(fs.readFileSync(target, 'utf8'), 'v1\n');
+  const fd = fs.openSync(target, 'r');
+  try {
+    assert.notEqual(fs.fstatSync(fd).mode & 0o222, 0);
+    assert.equal(fs.readFileSync(fd, 'utf8'), 'v1\n');
+  } finally {
+    fs.closeSync(fd);
+  }
   assert.equal(f.show(`HEAD:${file}`), 'v2');
   assert.equal(f.git(['status', '--porcelain']), '');
 });
