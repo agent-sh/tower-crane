@@ -303,6 +303,8 @@ The sweep before home construction scans both `homes/` and `brokers/`. An orphan
 
 `ci log JOB_ID [--failed-tests]` reads a job on the task's current branch head and writes its ANSI-stripped log to `ci-job-JOB_ID.log` directly in `scratch`. It needs the task's recorded `branch` and `scratch`, so it can read feedback before `submit` records a PR or SHA. `ci alerts` needs the recorded `pr` and reads open code-scanning alerts at `refs/pull/N/head`. Both default `--task` to `TOWER_CRANE_TASK`; the worker broker restricts them to its own task. Neither command changes state.
 
+`ci checks [ID] [--task ID]` resolves the current PR head from the recorded PR number or branch, so it also works before the first submit. It reads all non-green check runs with title, summary and paginated annotations. The same `ci.ignore_apps` and `ci.capped_review` rules as the CI gate mark matching runs nonblocking and name the policy reason. Superseded review rounds, check reruns and replaced workflow runs stay visible as nonblocking using the gate's judgment. These exceptions do not satisfy `ci.required`. Open code-scanning alerts include rule, path, line and message from the head ref and the current merge ref. A merge analysis counts only when both parents match the PR's current head and base; stale alert instances are excluded. An alert fetch error is reported as `alerts_error` with `alerts: null`, while check output stays visible. The command changes no state and the worker broker restricts it to its own task. Submit's failing or pending CI refusal points workers to this command before an orchestrator question.
+
 ### Ladder
 
 The ladder says which harness, model and effort runs each kind of work. It has seven rungs:
