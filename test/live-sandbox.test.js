@@ -211,6 +211,12 @@ for (const [harness, rung] of [['claude', 'small'], ['claude', 'easy'], ['codex'
     pinLiveRung(h, harness, rung);
     const env = { ...h.env, HOME: home, USERPROFILE: home, CLAUDE_CONFIG_DIR: '', CODEX_HOME: '', XDG_CACHE_HOME: path.join(h.base, 'cache') };
     const r = await h.runAsync(['spawn', '--role', rung, '--task', 'T1', '--wait'], { env });
+    // A model that refuses the prompt never runs the command, so the sandbox
+    // gave no verdict: a skip, not a pass or a sandbox failure.
+    if (r.code !== 0 && !fs.existsSync(out) && /"stop_reason":"refusal"/.test(`${r.stderr}\n${agentLog(h)}`)) {
+      t.skip(`${harness} ${rung}: the model refused the probe prompt; no sandbox verdict`);
+      return;
+    }
     assert.equal(r.code, 0, `${r.stderr}\n${agentLog(h)}`);
     assert.ok(fs.existsSync(out), `the probe ran\n${agentLog(h)}`);
     const seen = JSON.parse(fs.readFileSync(out, 'utf8'));
