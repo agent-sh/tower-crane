@@ -489,18 +489,25 @@ or its first parent is not local. A task without a claim, in `todo`,
 `hotfix` records `pr`, `merge_sha`, the PR's `head_sha`, the merge's first
 parent `base_sha`, `base`, `recorded_at` and `recorded_by`. Repeating the same
 record preserves its revision and evidence; a different merge is refused.
+The first parent must precede the whole PR, because the gates read only the
+merge against it: a two-parent merge must have the PR head as its second
+parent, and a single-parent merge must be a squash or a one-commit PR. A
+rebase merge of several commits, whose first parent matches the subject and
+author time of the PR's second-to-last commit, is refused.
 
 `--review` reads a PR comment posted by a clean-context reviewer outside
-Tower Crane: `latest` picks the PR's last such comment, or a comment URL or
-id names one. Its first line is `Review (native, clean context)` or
+Tower Crane, named by its comment URL or id. Workers and reviewers can post as
+the same login, so there is no "latest" lookup: the orchestrator names the
+exact review. The comment's `author_association` must be `OWNER`, `MEMBER` or
+`COLLABORATOR`; anyone else can comment on a public repository. Its first line is `Review (native, clean context)` or
 `Review (Tower Crane, clean context)`, its `SHA:` is the merged `head_sha`,
 and a `Verdict: pass|fail` line, else a `Blocking findings` section reading
 `None`, decides it. The verdict is stored as review evidence at `merge_sha`
-with `source: "hotfix review"`, `ref` (the comment URL), `reviewed_sha` and
-`author`. It counts as independent review only with a `hotfix` event by the
+with `source: "hotfix review"`, `ref` (the comment URL), `reviewed_sha`,
+`author` and `author_association`. It counts as independent review only with a `hotfix` event by the
 orchestrator or owner whose `review` names the same URL and verdict at that
-revision. A comment on another PR, of another head, or without the title or
-a verdict is refused. A failing posted review creates the follow-up below.
+revision. A comment on another PR, of another head, by an untrusted
+association, or without the title or a verdict is refused. A failing posted review creates the follow-up below.
 
 `accept ID` runs the existing software gates at `merge_sha`. Tests retain
 the configured proof mode, reverting the landed changes against `base_sha`;
@@ -526,7 +533,8 @@ original instructions and names the failure and a follow-up PR against
 the project base. It starts without a branch, PR, SHA or evidence. The
 historical task becomes `cancelled` and records `hotfix.follow_up`; further
 failures reuse that task instead of creating duplicates. Explicit `rework`
-on a recorded hotfix uses the same follow-up path. Its merge commit stays
+on a submitted hotfix uses the same follow-up path; an accepted hotfix
+refuses it, since its merge stands. Its merge commit stays
 fixed; workers submit the follow-up task.
 Pending CI, observation errors and timeouts keep the hotfix submitted;
 retry its gate when the run completes or the infrastructure recovers.

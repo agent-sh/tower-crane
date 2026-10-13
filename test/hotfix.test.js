@@ -33,14 +33,11 @@ if (process.env.FIXTURE_GH_ERROR) { console.error('fixture gh observation error'
 if (args[0] === 'pr' && args[1] === 'merge') { console.error('fixture: a merged hotfix must not merge again'); process.exit(3); }
 if (args[0] === 'pr') {
   console.log(JSON.stringify({state: process.env.FIXTURE_PR_STATE || 'MERGED', headRefOid: head,
-    mergeCommit: {oid: process.env.FIXTURE_MERGE_SHA || sha}, baseRefName: process.env.FIXTURE_BASE || 'main'}));
-} else if (args[1].includes('/issues/42/comments')) {
-  for (const [id, body] of [[76, process.env.FIXTURE_REVIEW_BODY], [78, 'Thanks, merging.']]) {
-    console.log(JSON.stringify({id, user: {login: 'avifenesh'}, html_url: 'https://github.com/acme/demo/pull/42#issuecomment-' + id,
-      issue_url: 'https://api.github.com/repos/acme/demo/issues/42', body}));
-  }
+    mergeCommit: {oid: process.env.FIXTURE_MERGE_SHA || sha}, baseRefName: process.env.FIXTURE_BASE || 'main',
+    commits: JSON.parse(process.env.FIXTURE_PR_COMMITS || '[]')}));
 } else if (args[1].includes('/issues/comments/')) {
-  console.log(JSON.stringify({id: Number(args[1].split('/').pop()), user: {login: 'avifenesh'},
+  console.log(JSON.stringify({id: Number(args[1].split('/').pop()), user: {login: process.env.FIXTURE_REVIEW_LOGIN || 'avifenesh'},
+    author_association: process.env.FIXTURE_REVIEW_ASSOC || 'OWNER',
     html_url: 'https://github.com/acme/demo/pull/42#issuecomment-' + args[1].split('/').pop(),
     issue_url: 'https://api.github.com/repos/acme/demo/issues/' + (process.env.FIXTURE_REVIEW_PR || '42'),
     body: process.env.FIXTURE_REVIEW_BODY || ''}));
@@ -221,6 +218,7 @@ test('pending CI and observation errors keep the hotfix submitted and can be ret
     assert.equal(task(h).hotfix.follow_up, undefined);
     assert.equal(h.readState('tasks.json').tasks.length, 1);
   }
+  assert.equal(task(h).evidence.find((e) => e.type === 'ci').pending, true);
   h.ok(['check', 'ci', 'T1']);
   assert.equal(task(h).evidence.at(-1).ok, true);
 });
@@ -259,6 +257,7 @@ test('a natively merged todo task records from the PR merge commit and its poste
   assert.equal(review.sha, h.sha);
   assert.equal(review.ref, REVIEW_URL);
   assert.match(review.summary, /avifenesh/);
+  assert.equal(review.author_association, 'OWNER');
   assert.ok(h.json(['task', 'show', 'T2']).gates.gates.find((g) => g.type === 'review').ok);
   const accepted = h.run(['accept', 'T2'], { env });
   assert.equal(accepted.code, 0, accepted.stderr);
@@ -273,13 +272,12 @@ test('a natively merged todo task records from the PR merge commit and its poste
   assert.ok(events(h).some((e) => e.cmd === 'merge' && e.task === 'T2' && e.detail.ok === true));
   // Repeating the merge confirmation stays a confirmation.
   assert.equal(h.run(['merge', 'T2']).code, 0);
-  // `latest` finds the PR's last clean-context review among its comments.
-  h.ok(['task', 'add', '--title', 'Also merged natively', '--acceptance', 'value becomes one']);
-  h.ok(['hotfix', 'T3', '--pr', '42', '--review', 'latest'], { env });
-  assert.equal(task(h, 'T3').evidence.find((e) => e.type === 'review').ref, 'https://github.com/acme/demo/pull/42#issuecomment-76');
-  const none = h.run(['hotfix', 'T3', '--pr', '42', '--review', 'latest'], { env: { FIXTURE_REVIEW_BODY: 'no review here' } });
-  assert.equal(none.code, 1);
-  assert.match(none.stderr, /no clean-context review comment/);
+  // An accepted hotfix's merge stands; rework cannot cancel it.
+  const rework = h.run(['rework', 'T2', '--reason', 'late finding']);
+  assert.equal(rework.code, 1);
+  assert.match(rework.stderr, /accepted hotfix/);
+  assert.equal(task(h, 'T2').status, 'accepted');
+  assert.equal(h.readState('tasks.json').tasks.length, 2);
 });
 
 test('a failing posted review opens follow-up rework; a review of another head, another PR or without the review heading is refused', (t) => {
@@ -289,6 +287,9 @@ test('a failing posted review opens follow-up rework; a review of another head, 
     [{ FIXTURE_REVIEW_BODY: posted(h.head, 'pass'), FIXTURE_REVIEW_PR: '43' }, /not on PR #42/],
     [{ FIXTURE_REVIEW_BODY: `Looks good\n\nSHA: ${h.head}\nVerdict: **pass**\n` }, /not a clean-context review/],
     [{ FIXTURE_REVIEW_BODY: `## Review (native, clean context)\n\nSHA: ${h.head}\n` }, /no verdict/],
+    // Anyone can comment on a public repository; only the owner, members and collaborators review.
+    [{ FIXTURE_REVIEW_BODY: posted(h.head, 'pass'), FIXTURE_REVIEW_LOGIN: 'drive-by', FIXTURE_REVIEW_ASSOC: 'NONE' }, /author_association NONE/],
+    [{ FIXTURE_REVIEW_BODY: posted(h.head, 'pass'), FIXTURE_REVIEW_ASSOC: 'CONTRIBUTOR' }, /author_association CONTRIBUTOR/],
   ];
   for (const [env, message] of cases) {
     const r = h.run(['hotfix', 'T1', '--pr', '42', '--review', REVIEW_URL], { env });
@@ -297,6 +298,11 @@ test('a failing posted review opens follow-up rework; a review of another head, 
     assert.equal(task(h).status, 'cancelled');
     assert.equal(task(h).hotfix, undefined);
   }
+  // Workers and reviewers post as the same login, so the orchestrator names the exact review.
+  const latest = h.run(['hotfix', 'T1', '--pr', '42', '--review', 'latest'], { env: { FIXTURE_REVIEW_BODY: posted(h.head, 'pass') } });
+  assert.notEqual(latest.code, 0);
+  assert.match(latest.stderr, /comment URL ending in #issuecomment-N, or the comment id/);
+  assert.equal(task(h).hotfix, undefined);
   const r = h.run(['hotfix', 'T1', '--pr', '42', '--review', '77'],
     { env: { FIXTURE_REVIEW_BODY: posted(h.head, 'fail', '1. value.js:1 - the value is wrong - callers break') } });
   assert.equal(r.code, 1);
@@ -305,4 +311,28 @@ test('a failing posted review opens follow-up rework; a review of another head, 
   assert.equal(task(h).hotfix.follow_up, 'T2');
   assert.equal(task(h, 'T2').status, 'rework');
   assert.match(h.ok(['brief', 'get', 'T2']), /value.js:1 - the value is wrong/);
+});
+
+test('a multi-commit rebase merge is refused because its first parent is an earlier PR commit', (t) => {
+  const h = fixture(t);
+  h.git(['switch', '-c', 'rebased', h.base_sha]);
+  const commits = [];
+  for (const word of ['one', 'two']) {
+    fs.writeFileSync(path.join(h.repo, `step-${word}.txt`), `${word}\n`);
+    h.git(['add', '.']);
+    h.git(['commit', '-qm', `step ${word}`]);
+    commits.push({ oid: h.git(['rev-parse', 'HEAD']), messageHeadline: `step ${word}`,
+      authoredDate: new Date(Number(h.git(['log', '-1', '--format=%at'])) * 1000).toISOString() });
+  }
+  h.git(['switch', 'main']);
+  const r = h.run(['hotfix', 'T1', '--pr', '42'], { env: { FIXTURE_MERGE_SHA: commits[1].oid, FIXTURE_PR_COMMITS: JSON.stringify(commits) } });
+  assert.equal(r.code, 1);
+  assert.match(r.stderr, /rebase merge/);
+  assert.equal(task(h).status, 'cancelled');
+  assert.equal(task(h).hotfix, undefined);
+  // A one-commit PR lands on the base whether it was squashed or rebased.
+  const single = h.json(['hotfix', 'T1', '--pr', '42'],
+    { env: { FIXTURE_MERGE_SHA: commits[0].oid, FIXTURE_PR_COMMITS: JSON.stringify(commits.slice(0, 1)) } });
+  assert.equal(single.status, 'submitted');
+  assert.equal(single.hotfix.base_sha, h.base_sha);
 });
