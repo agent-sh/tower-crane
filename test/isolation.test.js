@@ -1154,7 +1154,7 @@ test('claude and codex sandboxes deny the user\'s home except the paths the agen
   }
 });
 
-test('codex never names a hidden path inside another hidden directory', { skip: NO_STUBS }, t => {
+test('claude and codex keep a link inside a hidden directory and its target hidden; codex names no hidden path inside another', { skip: NO_STUBS }, t => {
   // Seen 2026-10-12: ~/.claude/debug/latest links to a file in the same hidden
   // directory, and Codex's bwrap could not mount over it inside the masked parent.
   const { h, u } = setup(t);
@@ -1162,20 +1162,49 @@ test('codex never names a hidden path inside another hidden directory', { skip: 
   fs.mkdirSync(debug, { recursive: true });
   fs.writeFileSync(path.join(debug, 'session.txt'), 'log\n');
   fs.symlinkSync(path.join(debug, 'session.txt'), path.join(debug, 'latest'));
-  isolated(h, 'small', 'codex');
-  // The owner key directory sits inside ~/.config.
   const project = h.readState('project.json');
-  delete project.owner_config_dir;
-  h.writeState('project.json', project);
-  const started = spawn(h, u, 'small', { TOWER_CRANE_AGENT: 'orchestrator', TOWER_CRANE_CONFIG: '' });
-  const config = TOML.parse(fs.readFileSync(path.join(h.state, 'homes', started.agent, 'config.toml'), 'utf8'));
-  const rules = config.permissions['tower-crane'].filesystem;
-  const hidden = Object.keys(rules).filter(p => rules[p] === 'none');
-  for (const p of [path.join(debug, 'latest'), path.join(u.home, '.config', 'tower-crane', 'owner', 'key')]) {
-    assert.equal(commandsRead({ harness: 'codex', config }, p), false, `${p} stays hidden`);
+  const secrets = [path.join(debug, 'latest'), path.join(debug, 'session.txt'), path.join(u.home, '.config', 'tower-crane', 'owner', 'key')];
+  for (const harness of ['claude', 'codex']) {
+    h.writeState('project.json', project);
+    isolated(h, 'small', harness);
+    // The owner key directory sits inside ~/.config.
+    const { owner_config_dir: _, ...unbound } = project;
+    h.writeState('project.json', unbound);
+    spawn(h, u, 'small', { TOWER_CRANE_AGENT: 'orchestrator', TOWER_CRANE_CONFIG: '' });
+    const seen = u.report();
+    for (const p of secrets) assert.equal(commandsRead(seen, p), false, `${harness}: ${p} stays hidden`);
+    if (harness === 'codex') {
+      const rules = seen.config.permissions['tower-crane'].filesystem;
+      const hidden = Object.keys(rules).filter(p => rules[p] === 'none');
+      const nested = hidden.filter(p => hidden.some(dir => p !== dir && p.startsWith(dir + path.sep)));
+      assert.deepEqual(nested, [], 'no hidden path is named inside a hidden directory');
+    }
   }
-  const nested = hidden.filter(p => hidden.some(dir => p !== dir && p.startsWith(dir + path.sep)));
-  assert.deepEqual(nested, [], 'no hidden path is named inside a hidden directory');
+});
+
+test('a project sandbox path inside a hidden credential store refuses dispatch', { skip: NO_STUBS }, t => {
+  // A sandbox.write path inside a hidden store reopens what lies under it:
+  // codex mounts writable paths after hidden ones, and claude remounts an
+  // allowed path inside a denied one.
+  const { h, u } = setup(t);
+  const stores = {
+    write: [path.join(h.state, 'brokers', 'worker-T9-1'), path.join(h.state, 'homes', 'worker-T9-1', 'home', '.aws')],
+    read: [path.join(path.dirname(h.userConfig), 'owner')],
+  };
+  for (const [field, paths] of Object.entries(stores)) {
+    for (const p of paths) {
+      fs.mkdirSync(p, { recursive: true });
+      h.ok(['project', 'set', '--sandbox', JSON.stringify({ [field]: [p] })]);
+      for (const harness of ['claude', 'codex']) {
+        isolated(h, 'hard', harness);
+        fs.rmSync(u.out, { force: true });
+        const refused = h.run(['spawn', '--role', 'hard', '--task', 'T1', '--wait', '--json'], { env: u.env });
+        assert.notEqual(refused.code, 0, `${harness}: sandbox.${field} ${p} must refuse dispatch`);
+        assert.match(refused.stderr, new RegExp(`sandbox\\.${field} path .* is inside .* which the sandbox hides because it holds credentials`));
+        assert.ok(!fs.existsSync(u.out), `${harness}: the harness must not start`);
+      }
+    }
+  }
 });
 
 test('codex names the same rules however many entries the home holds', { skip: NO_STUBS }, t => {
