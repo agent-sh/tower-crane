@@ -925,13 +925,16 @@ test('a spawn refuses a worktree whose .git file names a git directory of anothe
   fs.cpSync(h.repo, other, { recursive: true });
   const dotgit = path.join(wt, '.git');
   const original = fs.readFileSync(dotgit, 'utf8');
+  // Git hides a worktree's .git file on Windows, and opening a hidden file for
+  // writing fails there, so it is replaced rather than rewritten.
+  const rewrite = (text) => { fs.rmSync(dotgit); fs.writeFileSync(dotgit, text); };
   h.git(['worktree', 'add', '-q', '--detach', path.join(h.base, 'other-wt'), 'main'], other);
   for (const named of [path.join(other, '.git'), path.join(other, '.git', 'worktrees', 'other-wt')]) {
-    fs.writeFileSync(dotgit, `gitdir: ${named}\n`);
+    rewrite(`gitdir: ${named}\n`);
     const r = h.run(['spawn', '--task', 'T1', '--dry-run', '--json']);
     assert.notEqual(r.code, 0, named);
     assert.match(r.stderr, /is not a worktree admin directory of/, named);
   }
-  fs.writeFileSync(dotgit, original);
+  rewrite(original);
   assert.equal(h.run(['spawn', '--task', 'T1', '--dry-run', '--json']).code, 0);
 });

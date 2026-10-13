@@ -309,6 +309,9 @@ test('a commondir in a separate git directory, a bare repository or a rewritten 
   fs.mkdirSync(path.dirname(moved));
   fs.renameSync(admin, moved);
   fs.writeFileSync(path.join(moved, 'commondir'), `${path.join(h.repo, '.git')}\n`);
+  // Git hides a worktree's .git file on Windows, and opening a hidden file for
+  // writing fails there, so it is replaced rather than rewritten.
+  fs.rmSync(path.join(linked, '.git'));
   fs.writeFileSync(path.join(linked, '.git'), `gitdir: ${moved}\n`);
   assert.throws(() => status(linked), /does not hold this worktree's admin directory/);
   fs.symlinkSync(moved, admin);
