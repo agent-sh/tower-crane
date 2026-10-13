@@ -1124,7 +1124,9 @@ test('claude and codex sandboxes hide the user\'s credential stores and keep the
     }
     assert.equal(seen.ghToken, 'stub-gh-token', `${harness}: gh gets its token`);
     assert.ok(!fs.existsSync(path.join(home, 'home', '.config', 'gh')), `${harness}: gh reads GH_TOKEN, not a config it may not read`);
-    assert.equal(fs.readlinkSync(path.join(home, 'home', '.gitconfig')), path.join(u.home, '.gitconfig'));
+    const gitconfig = path.join(home, 'home', '.gitconfig');
+    assert.ok(fs.lstatSync(gitconfig).isFile(), `${harness}: the git config cannot be replaced through a link`);
+    assert.equal(h.git(['config', '--file', gitconfig, '--get', 'include.path']), path.join(u.home, '.gitconfig'));
   }
 });
 
