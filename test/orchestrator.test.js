@@ -232,6 +232,33 @@ test('a lease whose holder process exited is released at once, including a reuse
   assert.equal(h.readState('tasks.json').orchestrator_lease.pid, clients[1].pid);
 });
 
+test('TOWER_CRANE_VIA=automation in the environment cannot write under another session lease', (t) => {
+  const h = makeProjectRepo(t);
+  const holder = { env: { TOWER_CRANE_AGENT: 'orchestrator', CLAUDE_SESSION_ID: 'holder' } };
+  h.ok(['task', 'add', '--title', 'Held', '--acceptance', 'one writer'], holder);
+  const before = h.readState('tasks.json');
+  const events = () => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8');
+  const log = events();
+  for (const [label, extra] of [
+    ['claim alone', {}],
+    ['wrong key', { TOWER_CRANE_AUTOMATION_KEY: 'guessed' }],
+  ]) {
+    const rival = h.run(['task', 'add', '--title', 'Rival', '--acceptance', 'refused'],
+      { env: { TOWER_CRANE_AGENT: 'orchestrator', CLAUDE_SESSION_ID: 'rival', TOWER_CRANE_VIA: 'automation', ...extra } });
+    assert.equal(rival.code, 1, `${label}: ${rival.stderr}`);
+    assert.match(rival.stderr, /orchestrator lease held by orchestrator session holder/, label);
+    assert.deepEqual(h.readState('tasks.json'), before, label);
+    assert.equal(events(), log, label);
+  }
+  // The holder's own write with the claim still renews its lease and records no engine provenance.
+  h.ok(['task', 'note', 'T1', 'holder continues'], { env: { ...holder.env, TOWER_CRANE_VIA: 'automation' } });
+  const after = h.readState('tasks.json');
+  assert.equal(after.orchestrator_lease.session_id, before.orchestrator_lease.session_id);
+  assert.notEqual(after.orchestrator_lease.heartbeat, before.orchestrator_lease.heartbeat);
+  const note = events().trim().split('\n').map(JSON.parse).findLast((e) => e.cmd === 'task note');
+  assert.equal(note.via, undefined);
+});
+
 test('engine lease bindings reject stale work without extending the idle window', () => {
   const O = require('../lib/orchestrator');
   const old = { session_id: 'old', heartbeat: new Date().toISOString() };
@@ -249,8 +276,8 @@ test('engine lease bindings reject stale work without extending the idle window'
   ]) {
     const st = { events: [], project: { limits: { lease_minutes: 60 } }, tasks: { orchestrator_lease: lease } };
     const before = structuredClone(st);
-    const ctx = { agent: 'orchestrator', agentExplicit: true, orchestratorSession: bound,
-      env: { TOWER_CRANE_AGENT: 'orchestrator', TOWER_CRANE_VIA: 'automation' } };
+    const ctx = { agent: 'orchestrator', agentExplicit: true, automation: true, orchestratorSession: bound,
+      env: { TOWER_CRANE_AGENT: 'orchestrator' } };
     if (ok) assert.doesNotThrow(() => O.guard(ctx, st, true), label);
     else assert.throws(() => O.guard(ctx, st, true), /lease changed during automation/, label);
     assert.deepEqual(st, before, label);
