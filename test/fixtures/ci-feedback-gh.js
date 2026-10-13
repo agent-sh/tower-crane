@@ -12,7 +12,18 @@ const fail = (message) => {
 };
 const job = /^repos\/[^/]+\/[^/]+\/actions\/jobs\/(\d+)(\/logs)?$/.exec(endpoint);
 const ref = /^repos\/[^/]+\/[^/]+\/git\/ref\/(.+)$/.exec(endpoint);
-if (args[0] !== 'api') fail(`unexpected gh call: ${args.join(' ')}`);
+const checks = /^repos\/[^/]+\/[^/]+\/commits\/([^/]+)\/check-runs\?/.exec(endpoint);
+const annotations = /^repos\/[^/]+\/[^/]+\/check-runs\/(\d+)\/annotations\?/.exec(endpoint);
+const pull = /^repos\/[^/]+\/[^/]+\/pulls\/(\d+)$/.exec(endpoint);
+const commit = /^repos\/[^/]+\/[^/]+\/git\/commits\/([^/]+)$/.exec(endpoint);
+if (args[0] === 'pr' && args[1] === 'view') console.log(JSON.stringify(data.pr));
+else if (args[0] !== 'api') fail(`unexpected gh call: ${args.join(' ')}`);
+else if (checks) {
+  for (const run of data.checks[checks[1]] || []) console.log(JSON.stringify(run));
+} else if (annotations) {
+  for (const row of data.annotations[annotations[1]] || []) console.log(JSON.stringify(row));
+} else if (pull) console.log(JSON.stringify(data.pull));
+else if (commit) console.log(JSON.stringify(data.commits[commit[1]]));
 else if (job?.[2]) {
   if (data.logs[job[1]] === undefined) fail('gh: Not Found (HTTP 404)');
   else process.stdout.write(data.logs[job[1]]);
