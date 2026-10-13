@@ -1236,6 +1236,19 @@ test('codex keeps its profile under the argument limit however many entries the 
   for (const p of [path.join(h.state, 'tasks.json'), wt, path.join(h.repo, '.git', 'HEAD')]) assert.equal(commandsRead(seen, p), true, `${p} stays readable`);
 });
 
+test('a PATH directory at the root never opens the root or a directory that holds the home to codex', { skip: NO_STUBS }, t => {
+  // Seen in review 2026-10-13: /opt on PATH named its parent, /, and codex
+  // mounted the whole filesystem, the home with it.
+  const { h, u } = setup(t);
+  isolated(h, 'small', 'codex');
+  const home = fs.realpathSync(u.home);
+  const started = spawn(h, u, 'small', { PATH: `${u.env.PATH}${path.delimiter}/usr${path.delimiter}${path.dirname(home)}` });
+  const rules = TOML.parse(fs.readFileSync(path.join(h.state, 'homes', started.agent, 'config.toml'), 'utf8')).permissions['tower-crane'].filesystem;
+  const holders = Object.keys(rules).filter((p) => !p.startsWith(':') && rules[p] !== 'none' && (p === path.parse(p).root || home.startsWith(p.endsWith(path.sep) ? p : p + path.sep)));
+  assert.deepEqual(holders, [], 'no rule opens a directory that holds the home');
+  assert.equal(commandsRead({ harness: 'codex', config: { permissions: { 'tower-crane': { filesystem: rules } } } }, path.join(home, '.codex', 'auth.json')), false);
+});
+
 test('a read-only claude worktree under the home has no hidden directory above it', { skip: NO_STUBS }, t => {
   // Seen 2026-10-13: claude hid the home empty, and inside it could not make
   // the placeholders it binds over a read-only worktree's dotfiles, so no
@@ -1303,6 +1316,19 @@ test('a sandbox read path that is the whole home refuses dispatch', { skip: NO_S
     assert.notEqual(refused.code, 0, `${harness}: reading the whole home must refuse dispatch`);
     assert.match(refused.stderr, /sandbox path .* is the user's home/);
     assert.ok(!fs.existsSync(u.out), 'the harness must not start');
+  }
+  // A directory that holds the home would open all of it: / mounts the whole
+  // filesystem in codex's sandbox.
+  for (const read of ['/', path.dirname(u.home)]) {
+    h.ok(['project', 'set', '--sandbox', JSON.stringify({ read: [read] })]);
+    for (const harness of ['claude', 'codex']) {
+      isolated(h, 'hard', harness);
+      fs.rmSync(u.out, { force: true });
+      const refused = h.run(['spawn', '--role', 'hard', '--task', 'T1', '--wait', '--json'], { env: u.env });
+      assert.notEqual(refused.code, 0, `${harness}: reading ${read} must refuse dispatch`);
+      assert.match(refused.stderr, /sandbox path .* holds the user's home/);
+      assert.ok(!fs.existsSync(u.out), 'the harness must not start');
+    }
   }
   assert.notEqual(h.run(['project', 'set', '--sandbox', JSON.stringify({ read: 'tools' })]).code, 0, 'sandbox.read must be a list of paths');
 });
