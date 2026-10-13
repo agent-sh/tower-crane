@@ -5,7 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const gate = require('../../lib/gates/tests');
 const { scratch, isolateGit, git, commit, initRepo, worktrees, quote } = require('./helpers');
-const { shellQuote, treeExec } = require('../../lib/gates/common');
+const { shellQuote, treeExec, withWorktree } = require('../../lib/gates/common');
 
 const NODE = quote(process.execPath);
 const CMD = `${NODE} run-tests.js`;
@@ -409,6 +409,28 @@ tick();
     assert.deepEqual(alive, [], `a detached process outlived a command that ${name}`);
     assertCleanedUp();
   }
+});
+
+test('gate commands run with gc.autoDetach=false after the caller\'s own GIT_CONFIG entries', async () => {
+  const sha = task({ 'lib/add.js': FIX, 'test/add.test.js': ADD_TEST });
+  const saved = { ...process.env };
+  Object.assign(process.env, { GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'towercrane.probe', GIT_CONFIG_VALUE_0: 'kept' });
+  try {
+    const seen = await withWorktree(ctx(sha), root, sha, async (dir, env) => ({
+      env: Object.fromEntries(Object.entries(env).filter(([k]) => /^GIT_CONFIG_(COUNT|KEY_|VALUE_)/.test(k))),
+      git: ['towercrane.probe', 'gc.autoDetach'].map((key) =>
+        require('child_process').execFileSync('git', ['-C', dir, 'config', '--get', key], { env, encoding: 'utf8' }).trim()),
+    }));
+    assert.deepEqual(seen.env, {
+      GIT_CONFIG_COUNT: '2', GIT_CONFIG_KEY_0: 'towercrane.probe', GIT_CONFIG_VALUE_0: 'kept',
+      GIT_CONFIG_KEY_1: 'gc.autoDetach', GIT_CONFIG_VALUE_1: 'false',
+    });
+    assert.deepEqual(seen.git, ['kept', 'false']);
+  } finally {
+    for (const k of Object.keys(process.env)) if (!(k in saved)) delete process.env[k];
+    Object.assign(process.env, saved);
+  }
+  assertCleanedUp();
 });
 
 test('timeouts at head, scoped proof and reversion are infrastructure failures, never proof', async () => {
