@@ -133,6 +133,28 @@ test('host case counts distinguish TAP, spec, all skips and unreported output', 
   ]) assert.deepEqual(gate.hostCounts({ output }), expected, output);
 });
 
+test('default host test formats exclude data; explicit paths support other formats', () => {
+  const defaults = gate.hostTestMatcher({});
+  for (const [file, expected] of [
+    ['test/lab/live.test.js', true],
+    ['tests/test_session.py', true],
+    ['Tests/SessionTest.java', true],
+    ['test/session.sh', true],
+    ['test/session.feature', true],
+    ['test/README.md', false],
+    ['test/test_config.json', false],
+    ['test/session.csv', false],
+    ['test/fixtures/value.test.js', false],
+    ['test/helpers/value.test.js', false],
+    ['test/session.case', false],
+    ['test/session', false],
+  ]) assert.equal(defaults.match(file), expected, file);
+  const explicit = gate.hostTestMatcher({ tests: { paths: ['test/**'] } });
+  assert.equal(explicit.match('test/session.case'), true);
+  assert.equal(explicit.match('test/session'), true);
+  assert.equal(explicit.match('test/fixtures/session.case'), false);
+});
+
 test('a broad host-only glob selects tests, excluding fixtures and non-test files', async () => {
   const sha = task({
     'lib/add.js': FIX,
@@ -144,20 +166,23 @@ test('a broad host-only glob selects tests, excluding fixtures and non-test file
     'test/lab/fixtures/input.test.js': "throw new Error('a fixture must not run');\n",
     'test/lab/helpers/util.test.js': "throw new Error('a helper must not run');\n",
     'test/lab/README.md': 'This is documentation, not a test.\n',
+    'test/lab/session.json': '{"description":"test data"}\n',
   });
   const runner = `${NODE} ${quote(path.resolve(__dirname, '../run.js'))}`;
   const suite = `${runner} test/mul.test.js`;
-  const r = await gate.run(ctx(sha, {
-    args: { cmd: suite },
-    project: {
-      tests: { expensive: true, paths: ['test/**/*.test.js'], host_only: ['test/lab/**'], host_env: { TC_HOST_OPT_IN: '1' } },
-      gates: { tests_cmd: suite, tests_proof_cmd: `${runner} {tests}` },
-    },
-  }));
-  assert.equal(r.ok, true, r.summary);
-  assert.match(r.summary, /tests pass with the change and fail without it/);
-  assert.deepEqual(r.receipt.host_only.run, ['test/lab/live.test.js']);
-  assert.equal(r.receipt.host_only.results.length, 1);
+  for (const paths of [null, ['test/**/*.test.js']]) {
+    const r = await gate.run(ctx(sha, {
+      args: { cmd: suite },
+      project: {
+        tests: { expensive: true, paths, host_only: ['test/lab/**'], host_env: { TC_HOST_OPT_IN: '1' } },
+        gates: { tests_cmd: suite, tests_proof_cmd: `${runner} {tests}` },
+      },
+    }));
+    assert.equal(r.ok, true, r.summary);
+    assert.match(r.summary, /tests pass with the change and fail without it/);
+    assert.deepEqual(r.receipt.host_only.run, ['test/lab/live.test.js']);
+    assert.equal(r.receipt.host_only.results.length, 1);
+  }
   assertCleanedUp();
 });
 
