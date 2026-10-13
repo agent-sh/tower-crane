@@ -39,6 +39,7 @@ For an owner answer, have the owner run `tower-crane answer <id> --choice "<opti
 - Write the plan with `tower-crane task add` or `tower-crane plan import`, then `tower-crane validate` until it is clean.
 - Write a brief for every ready task (`tower-crane brief set ID -`). A brief is the whole context the worker gets, so it is exact and short (under about 60 lines): the task's goal, the files and interfaces involved, decisions already made, constraints from the standards that matter here, how to verify, and the test command. No repository tour, no history.
 - Include the plugin's absolute worker skill path in the brief: `worker: read and follow <abs>/skills/tower-crane-work/SKILL.md`. Spawn supplies reviewers with the matching skill and a separate diff and gate packet.
+- Say in the brief that a worker reads a failed CI job with `tower-crane ci log JOB_ID --failed-tests` and the PR's code-scanning alerts with `tower-crane ci alerts` while the run is still going. The worker then does not wait for the whole run or ask you to fetch logs.
 - `tower-crane render` and tell the owner where `sketch.html` is.
 
 ## 3. Run
