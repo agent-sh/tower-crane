@@ -160,10 +160,11 @@ for (const [method, code] of [['mkdirSync', 'EACCES'], ['mkdtempSync', 'EROFS']]
     const h = makeRepo(t);
     const deep = path.join(h.base, 'd'.repeat(100));
     fs.mkdirSync(deep);
-    Object.assign(h.env, { TMPDIR: deep, XDG_CACHE_HOME: path.join(deep, 'cache') });
+    Object.assign(h.env, { TMPDIR: deep, TEMP: deep, TMP: deep, XDG_CACHE_HOME: path.join(deep, 'cache') });
     const account = accountHome();
     const accountCache = path.join(account, '.cache');
     const report = path.join(h.base, 'profile.json');
+    const refusal = path.join(h.base, 'cache-refusal.json');
     const result = attempt(h, path.join(h.base, 'missing-chrome'), '1', deep, `
 ${accountPrelude(account)}
 const fsModule = require('node:fs');
@@ -171,6 +172,7 @@ const pathModule = require('node:path');
 const denied = fsModule[${JSON.stringify(method)}];
 fsModule[${JSON.stringify(method)}] = function (target, ...args) {
   if (target === ${JSON.stringify(accountCache)} || pathModule.dirname(target) === ${JSON.stringify(accountCache)}) {
+    fsModule.writeFileSync(${JSON.stringify(refusal)}, JSON.stringify(${JSON.stringify(code)}));
     throw Object.assign(new Error(${JSON.stringify(code)}), { code: ${JSON.stringify(code)} });
   }
   return denied.call(this, target, ...args);
@@ -183,6 +185,7 @@ fsModule.mkdtempSync = function (prefix, ...args) {
 };
 `);
     assert.match(result.error, /Chrome.*ENOENT/s, 'the cache error must not replace the browser spawn error');
+    assert.equal(JSON.parse(fs.readFileSync(refusal, 'utf8')), code, 'the account cache allocation was refused');
     const { profile } = JSON.parse(fs.readFileSync(report, 'utf8'));
     assert.equal(path.dirname(profile), deep);
     assert.equal(fs.existsSync(profile), false, 'the fallback profile is removed after the failed launch');
