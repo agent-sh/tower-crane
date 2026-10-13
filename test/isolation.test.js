@@ -472,6 +472,10 @@ test('research Codex explicitly enables live search with worker file and git con
     delete rules[sessions];
     delete rules[report.home];
     delete rules[broker];
+    // What lies outside the home is listed as it is at each spawn.
+    const home = fs.realpathSync(u.home);
+    const above = (dir) => home.startsWith(dir.endsWith(path.sep) ? dir : dir + path.sep);
+    for (const k of Object.keys(rules)) if (above(path.dirname(k)) && !above(k)) delete rules[k];
   }
   assert.deepEqual(researchFs, workerFs);
   assert.deepEqual(researcher.rules, worker.rules);
@@ -1085,8 +1089,10 @@ test('browser spawns use the original user kit through a nested isolated home an
 // Whether the agent's commands can read file, as each sandbox decides it.
 // claude mounts each denied directory empty, shallowest first, and remounts
 // the allowed paths inside it, so the deepest entry naming the path wins.
-// codex mounts readable paths, then hides each 'none' path, then mounts the
-// writable ones, so only a writable rule inside a hidden path reopens it.
+// codex starts from an empty root and mounts only the paths its rules name
+// (the fixture's home is no system directory): readable paths, then each
+// 'none' path hidden, then the writable ones, so only a writable rule inside
+// a hidden path reopens it.
 function commandsRead(seen, file) {
   const under = (p, dir) => p === dir || p.startsWith(dir + path.sep);
   if (seen.harness === 'claude') {
@@ -1096,8 +1102,10 @@ function commandsRead(seen, file) {
     return entries.length === 0 || entries.at(-1)[1] === 1;
   }
   const rules = seen.config.permissions['tower-crane'].filesystem;
-  return !Object.keys(rules).some((dir) => rules[dir] === 'none' && under(file, dir)
-    && !Object.keys(rules).some((w) => rules[w] === 'write' && under(w, dir) && under(file, w)));
+  const named = Object.keys(rules).filter((p) => !p.startsWith(':'));
+  return named.some((p) => rules[p] !== 'none' && under(file, p))
+    && !named.some((dir) => rules[dir] === 'none' && under(file, dir)
+      && !named.some((w) => rules[w] === 'write' && under(w, dir) && under(file, w)));
 }
 
 // What T106's credential table missed, with no entry for any of it now: an
@@ -1138,6 +1146,8 @@ test('claude and codex sandboxes deny the user\'s home except the paths the agen
       for (const r of seen.reads) assert.equal(r.denied, !open.includes(r.file), `claude ${r.tool} ${r.file}`);
     } else {
       const rules = seen.config.permissions['tower-crane'].filesystem;
+      assert.equal(rules[':root'], undefined, 'codex: nothing is read through the root');
+      assert.equal(rules[':minimal'], 'read', 'codex: the system directories come from :minimal');
       const none = Object.keys(rules).filter((p) => rules[p] === 'none');
       assert.deepEqual(none.filter((p) => none.some((d) => p !== d && p.startsWith(d + path.sep))), [], 'codex: no hidden path inside another');
     }
@@ -1153,7 +1163,7 @@ test('codex never names a hidden path inside another hidden directory', { skip: 
   fs.writeFileSync(path.join(debug, 'session.txt'), 'log\n');
   fs.symlinkSync(path.join(debug, 'session.txt'), path.join(debug, 'latest'));
   isolated(h, 'small', 'codex');
-  // The owner key directory sits inside a hidden ~/.config.
+  // The owner key directory sits inside ~/.config.
   const project = h.readState('project.json');
   delete project.owner_config_dir;
   h.writeState('project.json', project);
@@ -1161,10 +1171,50 @@ test('codex never names a hidden path inside another hidden directory', { skip: 
   const config = TOML.parse(fs.readFileSync(path.join(h.state, 'homes', started.agent, 'config.toml'), 'utf8'));
   const rules = config.permissions['tower-crane'].filesystem;
   const hidden = Object.keys(rules).filter(p => rules[p] === 'none');
-  assert.ok(hidden.includes(fs.realpathSync(path.join(u.home, '.claude'))), 'the directory itself stays hidden');
-  assert.ok(commandsRead({ harness: 'codex', config }, path.join(u.home, '.config', 'tower-crane', 'owner', 'key')) === false, 'the owner key stays hidden');
+  for (const p of [path.join(debug, 'latest'), path.join(u.home, '.config', 'tower-crane', 'owner', 'key')]) {
+    assert.equal(commandsRead({ harness: 'codex', config }, p), false, `${p} stays hidden`);
+  }
   const nested = hidden.filter(p => hidden.some(dir => p !== dir && p.startsWith(dir + path.sep)));
   assert.deepEqual(nested, [], 'no hidden path is named inside a hidden directory');
+});
+
+test('codex names the same rules however many entries the home holds', { skip: NO_STUBS }, t => {
+  // Seen 2026-10-13: a rule per hidden entry of a large ~/.cache made codex's
+  // profile, which it passes its sandbox as one argument, too long to exec.
+  const { h, u } = setup(t);
+  isolated(h, 'small', 'codex');
+  // Rules outside the fixture's home name what holds it in the real filesystem.
+  const home = fs.realpathSync(u.home);
+  const rules = () => {
+    const started = spawn(h, u, 'small');
+    return Object.keys(TOML.parse(fs.readFileSync(path.join(h.state, 'homes', started.agent, 'config.toml'), 'utf8'))
+      .permissions['tower-crane'].filesystem).filter((p) => p.startsWith(home + path.sep)).length;
+  };
+  const before = rules();
+  for (const dir of [u.home, path.join(u.home, '.cache')]) {
+    fs.mkdirSync(dir, { recursive: true });
+    for (let i = 0; i < 50; i++) fs.writeFileSync(path.join(dir, `entry-${i}`), '');
+  }
+  assert.equal(rules(), before);
+});
+
+test('a read-only claude worktree under the home has no hidden directory above it', { skip: NO_STUBS }, t => {
+  // Seen 2026-10-13: claude hid the home empty, and inside it could not make
+  // the placeholders it binds over a read-only worktree's dotfiles, so no
+  // command ran. The fixture's base is the home here, so it holds the worktree.
+  const { h, u, wt } = setup(t);
+  const home = fs.realpathSync(h.base);
+  for (const [rung, hidesHome] of [['small', false], ['hard', true]]) {
+    isolated(h, rung, 'claude');
+    spawn(h, u, rung, { HOME: home, USERPROFILE: home });
+    const seen = u.report();
+    const deny = seen.settings.sandbox.filesystem.denyRead;
+    assert.equal(deny.includes(home), hidesHome, `${rung}: the home is hidden whole only over a writable worktree`);
+    if (hidesHome) continue;
+    assert.deepEqual(deny.filter((p) => wt === p || wt.startsWith(p + path.sep)), [], `${rung}: nothing above the worktree is hidden`);
+    for (const p of [path.join(wt, '.claude', 'settings.local.json'), path.join(h.state, 'tasks.json')]) assert.equal(commandsRead(seen, p), true, `${rung}: ${p} stays readable`);
+    for (const p of [path.join(u.home, '.codex', 'auth.json'), path.join(h.base, 'gitconfig')]) assert.equal(commandsRead(seen, p), false, `${rung}: ${p} is hidden`);
+  }
 });
 
 test('node installs and harness programs under the home stay readable; other installs there do not', { skip: NO_STUBS }, t => {
@@ -1378,7 +1428,7 @@ test('a codex agent writes only where its agent file says; a worker writes its g
     const rules = config.permissions['tower-crane'].filesystem;
     for (const d of [common, own]) assert.equal(rules[d], worktree === 'write' ? 'write' : undefined, `${rung}: ${d}`);
     assert.deepEqual(rules[':workspace_roots'], { '.': worktree }, rung);
-    assert.equal(rules[':root'], 'read', rung);
+    assert.equal(rules[':minimal'], 'read', rung);
     assert.equal(rules[h.state], 'read', `${rung}: the state is read-only; the broker writes it`);
     assert.equal(rules[path.join(h.state, 'homes')], 'none', `${rung}: other agent homes are hidden, including future spawns`);
     assert.equal(rules[home], 'read', `${rung}: its generated home remains readable`);
