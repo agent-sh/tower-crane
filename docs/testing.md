@@ -21,7 +21,7 @@ Each Windows shard repeats its affected owner-authority and board-approval files
 
 The same file also runs a CLI authority regression on either platform with a provider fixture that refuses individual parent lookups. It reproduces the `ETIMEDOUT` refusal with the old discovery code and reaches the owner-required decision with snapshot discovery, so the Linux tests gate can prove the change too.
 
-Windows shard 2/3 runs the Claude Code mod wakeup case twenty consecutive times, stopping on the first failure. It waits on prompt and append signals, then checks the steer's event id rather than the total prompt count. An ordinary worker message during the turn forces an independent wake to overlap with the steer, as delayed inbox reconciliation can do after the initial decision answer and worker message.
+Windows shard 2/3 runs the Claude Code mod wakeup case twenty consecutive times, stopping on the first failure. The first pass is the job's first orchestrator command, so its follower's lease discovery is the runner's first PowerShell CIM snapshot, which can take longer than the push deadline. The case waits for the follower's ready line or exit before any delivery deadline starts. It then waits on prompt and append signals, then checks the steer's event id rather than the total prompt count. An ordinary worker message during the turn forces an independent wake to overlap with the steer, as delayed inbox reconciliation can do after the initial decision answer and worker message.
 
 For projects Tower Crane manages, expensive proof is the default: the orchestrator pins `--tests-cmd "npm test" --tests-expensive true --tests-proof-cmd "node --test {tests}"`. A submission then runs the full suite once and proves the change with its own test files.
 

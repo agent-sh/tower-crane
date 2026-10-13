@@ -89,6 +89,9 @@ function baseEnv(home) {
   env.USERPROFILE = env.HOME;
   env.LOCALAPPDATA = path.join(env.HOME, 'AppData', 'Local');
   env.XDG_CACHE_HOME = path.join(env.HOME, '.cache');
+  // A child exiting after teardown must not recreate its fixture with a compile-cache write.
+  env.NODE_DISABLE_COMPILE_CACHE = '1';
+  delete env.NODE_COMPILE_CACHE;
   // A gate's worktree and temp directories stay in the fixture, so a gate the test kills
   // cannot leave them in the shared temporary directory.
   env.TOWER_CRANE_TMP = path.join(home, 'gate-tmp');
@@ -123,11 +126,11 @@ function pinRung(h, name, rung) {
   h.ok(args);
 }
 
-function pinLiveRung(h, harness) {
+function pinLiveRung(h, harness, rung = 'small') {
   const field = harness === 'codex' ? 'profile' : 'model';
   const variable = `TOWER_CRANE_LIVE_${field.toUpperCase()}`;
   assert.ok(process.env[variable], `set ${variable} to run a live ${harness} probe`);
-  pinRung(h, 'small', { harness, [field]: process.env[variable] });
+  pinRung(h, rung, { harness, [field]: process.env[variable] });
 }
 
 // Init copies defaults from the user layer. Seed that layer only for the call,
@@ -325,10 +328,26 @@ function context(t, base, options = {}) {
     },
     cleanup: async () => {
       const seen = new Set();
-      try { await stopDetached(unseenDetached(ctx, seen)); }
-      finally {
-        try {
+      try {
+        try { await stopDetached(unseenDetached(ctx, seen)); }
+        finally {
           for (let fresh; (fresh = unseenDetached(ctx, seen)).length;) await killStarted(fresh);
+        }
+      } finally {
+        try {
+          // A killed monitor cannot close its broker's socket outside this fixture.
+          const brokers = path.join(ctx.state, 'brokers');
+          if (fs.existsSync(brokers)) {
+            for (const agent of fs.readdirSync(brokers, { withFileTypes: true }).filter((entry) => entry.isDirectory())) {
+              const file = path.join(brokers, agent.name, 'broker.json');
+              let socket;
+              try { ({ socket } = JSON.parse(fs.readFileSync(file, 'utf8'))); }
+              catch (error) { if (error.code === 'ENOENT' || error instanceof SyntaxError) continue; throw error; }
+              if (typeof socket === 'string' && path.basename(socket) === 's' && /^tower-crane-[A-Za-z0-9]{6}$/.test(path.basename(path.dirname(socket)))) {
+                fs.rmSync(path.dirname(socket), { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+              }
+            }
+          }
         } finally {
           fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
           fileFixtures.delete(ctx);
