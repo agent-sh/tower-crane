@@ -4,7 +4,40 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { cachedFixture, makeRepo } = require('./helpers');
+const cp = require('node:child_process');
+const { cachedFixture, makeRepo, run, runAsync, HOOKS } = require('./helpers');
+
+// Gate preparation (lib/gates/common.js withWorktree) at `sha` in `repo`, in
+// a process with the fixture's environment. `marker` is created when the
+// gate runs git worktree prune, which follows its relink.
+function gate(h, repo, sha, marker = '') {
+  const script = `
+    const cp = require('node:child_process');
+    const fs = require('node:fs');
+    const { withWorktree } = require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'gates', 'common'))});
+    const exec = async (cmd, args, opts) => {
+      if (process.env.GATE_MARK && args.includes('prune')) fs.writeFileSync(process.env.GATE_MARK, '');
+      const r = cp.spawnSync(cmd, args, opts);
+      return { status: r.status, stdout: r.stdout, stderr: r.stderr };
+    };
+    withWorktree({ exec }, process.env.GATE_REPO, process.env.GATE_SHA, async () => ({ ok: true })).then((r) => {
+      process.stdout.write(JSON.stringify(r));
+      process.exitCode = r && r.ok ? 0 : 1;
+    });`;
+  return new Promise((resolve) => {
+    const child = cp.spawn(process.execPath, ['-e', script], { cwd: repo, env: { ...h.env, GATE_REPO: repo, GATE_SHA: sha, GATE_MARK: marker } });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (d) => (stdout += d));
+    child.stderr.on('data', (d) => (stderr += d));
+    child.on('close', (code) => resolve({ code, stdout, stderr }));
+  });
+}
+
+async function until(check, ms) {
+  for (const end = Date.now() + ms; !check() && Date.now() < end;) await new Promise((r) => setTimeout(r, 20));
+  return check();
+}
 
 // A task, a bare origin and a clone of it standing in for another machine;
 // built once per process for each base and copied for each test.
@@ -43,7 +76,9 @@ for (const base of ['main', 'release/next']) {
     assert.equal(h.git(['rev-parse', 'HEAD'], wt.path), fresh);
     assert.equal(h.git(['rev-parse', `origin/${base}`]), fresh);
     assert.equal(h.git(['rev-parse', base]), stale);
-    assert.equal(h.git(['for-each-ref', '--format=%(upstream)', `refs/heads/${wt.branch}`]), '');
+    // The branch tracks its namesake on origin, never the base: a sandboxed
+    // worker cannot write the config `git push -u` would change.
+    assert.equal(h.git(['for-each-ref', '--format=%(upstream)', `refs/heads/${wt.branch}`]), `refs/remotes/origin/${wt.branch}`);
     assert.equal(fs.readFileSync(path.join(wt.path, 'remote.txt'), 'utf8'), 'new base commit\n');
     assert.equal(h.json(['task', 'show', 'T1']).branch, wt.branch);
 
@@ -269,7 +304,10 @@ try {
 }
 
 for (const command of ['worktree', 'spawn']) {
-  test(`one dispatch prepares six ${command} tasks from one slow base fetch`, { timeout: 60000 }, async (t) => {
+  // Proof comes from the recorded upload-pack calls, not elapsed time, which
+  // tracks host load. The timeout only catches a hang: about four times the
+  // slowest passing run (32 s) on a host at a load of 30.
+  test(`one dispatch prepares six ${command} tasks from one slow base fetch`, { timeout: 120000 }, async (t) => {
     const h = setup(t);
     const fresh = advance(h, h.upstream, 'remote.txt');
     h.git(['push', 'origin', 'main'], h.upstream);
@@ -283,10 +321,9 @@ for (const command of ['worktree', 'spawn']) {
       for (const id of ids) h.ok(['brief', 'set', id, '-'], { input: 'Use the fresh base.\n' });
     }
     const attempts = guardUploadPack(h, 15000);
-    let started = Date.now();
     const hooks = { HOOK_WORKTREE_ADD_ACTIVE: path.join(h.base, 'worktree-add-active') };
     const trees = h.json(['worktree', ...ids], { hooks });
-    assert.ok(Date.now() - started < 30000, 'the worktrees are ready within two fetch times');
+    assert.equal(fs.readFileSync(attempts, 'utf8'), '.', 'the dispatcher fetched once before preparing workers');
     assert.equal(trees.length, 6);
     for (let i = 0; i < trees.length; i++) {
       assert.equal(trees[i].id, ids[i]);
@@ -294,17 +331,16 @@ for (const command of ['worktree', 'spawn']) {
       assert.ok(h.json(['task', 'show', ids[i]]).branch);
     }
     if (command === 'spawn') {
-      // Six spawns take about half a fetch time on Windows, so they are timed
-      // on their own: none of them may wait for a fetch.
-      started = Date.now();
       const results = await Promise.all(ids.map((id) => h.runAsync(
         ['spawn', '--role', 'medium', '--task', id, '--wait', '--json'], { hooks })));
-      assert.ok(Date.now() - started < 15000, 'the spawns finish within one fetch time');
       assert.deepEqual(results.map((r) => r.code), Array(6).fill(0), results.map((r) => r.stderr).join('\n'));
+      // Each spawn runs in the worktree the dispatch prepared from its one
+      // fetch, and none of them fetched again.
+      assert.deepEqual(results.map((r) => JSON.parse(r.stdout).cwd), trees.map((tree) => tree.path));
       for (const r of results) assert.equal(h.git(['rev-parse', 'HEAD'], JSON.parse(r.stdout).cwd), fresh);
+      assert.equal(fs.readFileSync(attempts, 'utf8'), '.', 'no spawn fetched');
     }
     assert.equal(h.git(['rev-parse', 'origin/main']), fresh);
-    assert.equal(fs.readFileSync(attempts, 'utf8'), '.', 'the dispatcher fetched once before preparing workers');
   });
 }
 
@@ -482,6 +518,140 @@ test('cancelling removes clean, dirty and missing worktrees, saving dirty files'
   const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
   const saved = events.find((e) => e.cmd === 'worktree removed' && e.task === 'T2').detail.saved;
   assert.equal(fs.readFileSync(path.join(saved, 'files', 'notes.txt'), 'utf8'), 'unfinished\n');
+});
+
+// A sandboxed agent writes the git directory but not its worktrees/, so a
+// task worktree's admin directory lives beside the worktrees, where git
+// reaches it through a link; git works there and removal takes both away.
+test('a task worktree keeps its admin directory outside the git directory\'s worktrees/, and removal takes it away', { skip: process.platform === 'win32' && 'links need privileges on Windows' }, (t) => {
+  const h = makeRepo(t);
+  h.init();
+  h.ok(['task', 'add', '--title', 'Admin', '--acceptance', 'not needed']);
+  const wt = h.json(['worktree', 'T1']);
+  const common = fs.realpathSync.native(path.join(h.repo, '.git'));
+  const name = path.basename(wt.path);
+  const entry = path.join(common, 'worktrees', name);
+  const admin = path.join(path.dirname(wt.path), '.git-admin', name);
+  // Relative, so a move of the project directory keeps them.
+  assert.equal(fs.readlinkSync(entry), path.relative(path.dirname(entry), admin));
+  assert.equal(fs.readFileSync(path.join(wt.path, '.git'), 'utf8'), `gitdir: ${path.relative(wt.path, admin)}\n`);
+  assert.equal(fs.readFileSync(path.join(admin, 'commondir'), 'utf8'), `${path.relative(admin, common)}\n`);
+  assert.equal(fs.realpathSync.native(h.git(['rev-parse', '--path-format=absolute', '--git-common-dir'], wt.path)), common);
+  fs.writeFileSync(path.join(wt.path, 'f.txt'), 'f\n');
+  h.git(['add', 'f.txt'], wt.path);
+  h.git(['commit', '-qm', 'f'], wt.path);
+  assert.equal(h.git(['rev-parse', `refs/heads/${wt.branch}`]), h.git(['rev-parse', 'HEAD'], wt.path));
+  assert.ok(h.registers(wt.path));
+  h.ok(['task', 'update', 'T1', '--status', 'cancelled']);
+  assert.ok(!h.registers(wt.path), 'git forgets the worktree');
+  // lstat: a dangling link would pass an existsSync check.
+  for (const p of [entry, admin]) assert.equal(fs.lstatSync(p, { throwIfNoEntry: false }), undefined, `${p} is gone`);
+});
+
+// The repository and the worktrees root sit side by side in the project
+// directory; moving it keeps a task worktree working, and the next prune
+// does not take its admin directory for a stale one.
+test('a moved project directory keeps its relocated task worktree, and the next worktree call relinks it before prune', { skip: process.platform === 'win32' && 'links need privileges on Windows' }, (t) => {
+  const h = makeRepo(t);
+  h.init();
+  h.ok(['task', 'add', '--title', 'Moved', '--acceptance', 'not needed']);
+  const wt = h.json(['worktree', 'T1']);
+  fs.writeFileSync(path.join(wt.path, 'f.txt'), 'f\n');
+  h.git(['add', 'f.txt'], wt.path);
+  h.git(['commit', '-qm', 'f'], wt.path);
+  fs.writeFileSync(path.join(wt.path, 'staged.txt'), 'staged\n');
+  h.git(['add', 'staged.txt'], wt.path);
+  const head = h.git(['rev-parse', 'HEAD'], wt.path);
+  const project = path.join(h.base, 'moved');
+  fs.mkdirSync(project);
+  const repo = path.join(project, path.basename(h.repo));
+  const moved = path.join(project, path.basename(path.dirname(wt.path)), path.basename(wt.path));
+  fs.renameSync(h.repo, repo);
+  fs.renameSync(path.dirname(wt.path), path.dirname(moved));
+  // git alone already works in the moved worktree.
+  assert.equal(h.git(['rev-parse', 'HEAD'], moved), head);
+  assert.equal(h.git(['status', '--porcelain'], moved), 'A  staged.txt');
+  // git still names the old place, and its prune would empty the admin directory.
+  assert.match(h.git(['worktree', 'list', '--porcelain'], repo), /prunable/);
+  const r = run(['worktree', 'T1', '--json'], { cwd: repo, env: h.env });
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(JSON.parse(r.stdout).path, moved);
+  const listing = h.git(['worktree', 'list', '--porcelain'], repo);
+  assert.doesNotMatch(listing, /prunable/);
+  assert.match(listing, new RegExp(`^worktree ${moved.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'm'));
+  assert.equal(h.git(['status', '--porcelain'], moved), 'A  staged.txt', 'the index survived');
+});
+
+// Gate preparation prunes worktree registrations too, so after a move it
+// relinks the relocated admin directories first, as the worktree command does.
+test('gate preparation in a moved project relinks a relocated task worktree before it prunes', { skip: process.platform === 'win32' && 'links need privileges on Windows' }, async (t) => {
+  const h = makeRepo(t);
+  h.init();
+  h.ok(['task', 'add', '--title', 'Moved', '--acceptance', 'not needed']);
+  const wt = h.json(['worktree', 'T1']);
+  fs.writeFileSync(path.join(wt.path, 'staged.txt'), 'staged\n');
+  h.git(['add', 'staged.txt'], wt.path);
+  const sha = h.git(['rev-parse', 'HEAD']);
+  const project = path.join(h.base, 'moved');
+  fs.mkdirSync(project);
+  const repo = path.join(project, path.basename(h.repo));
+  const moved = path.join(project, path.basename(path.dirname(wt.path)), path.basename(wt.path));
+  fs.renameSync(h.repo, repo);
+  fs.renameSync(path.dirname(wt.path), path.dirname(moved));
+  assert.match(h.git(['worktree', 'list', '--porcelain'], repo), /prunable/);
+  const r = await gate(h, repo, sha);
+  assert.equal(r.code, 0, r.stderr + r.stdout);
+  const listing = h.git(['worktree', 'list', '--porcelain'], repo);
+  assert.doesNotMatch(listing, /prunable/);
+  assert.match(listing, new RegExp(`^worktree ${moved.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'm'));
+  assert.equal(h.git(['status', '--porcelain'], moved), 'A  staged.txt', 'the index survived');
+});
+
+// A relink that ran between the move of a new worktree's admin directory and
+// its link would make the link first, and the creation would fail with the
+// worktree left locked; both take the repository's worktree lock.
+test('a gate that prepares while a task worktree is being created waits until its admin directory is linked', { skip: process.platform === 'win32' && 'links need privileges on Windows' }, async (t) => {
+  const h = makeRepo(t);
+  h.init();
+  h.ok(['task', 'add', '--title', 'Race', '--acceptance', 'not needed']);
+  const sha = h.git(['rev-parse', 'HEAD']);
+  const signal = path.join(h.base, 'admin-link');
+  const creating = runAsync(['worktree', 'T1', '--json'], { cwd: h.repo, pre: ['--require', HOOKS],
+    env: { ...h.env, HOOK_STATE: h.state, HOOK_STOP_ADMIN_LINK: signal } });
+  assert.ok(await until(() => fs.existsSync(signal), 30000), 'the creation reached its link');
+  const pruned = path.join(h.base, 'pruned');
+  const gated = gate(h, h.repo, sha, pruned);
+  // Without the lock the gate relinks and prunes now; with it, it waits.
+  await until(() => fs.existsSync(pruned), 3000);
+  fs.writeFileSync(`${signal}.go`, '');
+  const [created, prepared] = await Promise.all([creating, gated]);
+  assert.equal(created.code, 0, created.stderr);
+  assert.equal(prepared.code, 0, prepared.stderr + prepared.stdout);
+  const wt = JSON.parse(created.stdout);
+  assert.equal(h.git(['rev-parse', 'HEAD'], wt.path), sha);
+  assert.doesNotMatch(h.git(['worktree', 'list', '--porcelain']), /^locked/m, 'no registration is left locked');
+});
+
+// `p/r` and `p/r.git` share `p/r-worktrees`, so a relink from one must leave
+// the other's relocated admin directories alone.
+test('a repository that shares the worktrees root does not relink the other repository\'s task worktrees', { skip: process.platform === 'win32' && 'links need privileges on Windows' }, (t) => {
+  const h = makeRepo(t);
+  h.init();
+  const other = path.join(h.base, `${path.basename(h.repo)}.git`);
+  fs.cpSync(h.repo, other, { recursive: true });
+  h.ok(['task', 'add', '--title', 'Mine', '--acceptance', 'not needed']);
+  const mine = h.json(['worktree', 'T1']);
+  const common = fs.realpathSync.native(path.join(h.repo, '.git'));
+  const admin = path.join(path.dirname(mine.path), '.git-admin', path.basename(mine.path));
+  const commondir = fs.readFileSync(path.join(admin, 'commondir'), 'utf8');
+  assert.ok(run(['task', 'add', '--title', 'Theirs', '--acceptance', 'not needed'], { cwd: other, env: h.env }).code === 0);
+  const r = run(['worktree', 'T1', '--json'], { cwd: other, env: h.env });
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(path.dirname(JSON.parse(r.stdout).path), path.dirname(mine.path), 'both repositories use one worktrees root');
+  assert.equal(fs.readFileSync(path.join(admin, 'commondir'), 'utf8'), commondir);
+  assert.equal(fs.lstatSync(path.join(other, '.git', 'worktrees', path.basename(mine.path)), { throwIfNoEntry: false }), undefined);
+  assert.equal(fs.realpathSync.native(h.git(['rev-parse', '--path-format=absolute', '--git-common-dir'], mine.path)), common);
+  assert.ok(h.registers(mine.path));
 });
 
 test('cancelling keeps a worktree that git still has locked', (t) => {

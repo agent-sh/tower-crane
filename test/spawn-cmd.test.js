@@ -67,3 +67,22 @@ test('CLI spawn preserves the full multiline prompt, using an npm .cmd harness o
   assert.ok(echoed, result.stdout);
   assert.deepEqual(JSON.parse(echoed).argv, expected);
 });
+
+test('spawned agents drop the dispatcher session ids and engine provenance', (t) => {
+  const h = makeRepo(t);
+  h.init();
+  h.ok(['task', 'add', '--title', 'Session env', '--acceptance', 'agent env names its own session']);
+  h.ok(['brief', 'set', 'T1', '-'], { input: 'print the inherited session variables\n' });
+  const script = path.join(h.base, 'env.cjs');
+  const names = ['CLAUDE_SESSION_ID', 'CLAUDE_CODE_SESSION_ID', 'CODEX_THREAD_ID', 'CODEX_SESSION_ID', 'TOWER_CRANE_VIA', 'TOWER_CRANE_AUTOMATION_KEY'];
+  fs.writeFileSync(script, `console.log('ENV ' + JSON.stringify(${JSON.stringify(names)}.filter((k) => process.env[k] !== undefined)));\n`);
+  const command = JSON.stringify([process.execPath, script, '{prompt}']);
+  const clear = ['--clear', 'model', '--clear', 'profile', '--clear', 'provider', '--clear', 'effort', '--clear', 'args'];
+  h.ok(['ladder', 'set', 'medium', '--harness', 'command', '--command', command, ...clear]);
+  const env = Object.fromEntries(names.map((k) => [k, 'dispatcher']));
+  const result = h.run(['spawn', '--task', 'T1', '--wait'], { env });
+  assert.equal(result.code, 0, result.stderr);
+  const line = result.stdout.split('\n').find((l) => l.startsWith('ENV '));
+  assert.ok(line, result.stdout);
+  assert.deepEqual(JSON.parse(line.slice(4)), []);
+});
