@@ -1318,7 +1318,12 @@ test('a sandboxed agent runs with the user\'s git settings but none of their cre
     '[credential]', '\thelper = cache --timeout=3600',
     '[http "https://github.com/"]', '\textraHeader = AUTHORIZATION: bearer HEADER-SECRET',
     '[core]', '\texcludesFile = ~/global.gitignore',
-    '[include]', `\tpath = ${included}`, '',
+    '[include]', `\tpath = ${included}`,
+    // Secrets git keeps outside credential.*: a URL's userinfo and a mail password.
+    '[url "https://x:URL-SECRET@github.com/"]', '\tinsteadOf = https://github.com/',
+    '[url "ssh://git@example.com/"]', '\tinsteadOf = https://example.com/',
+    '[http]', '\tproxy = http://u:PROXY-SECRET@proxy.example:8080',
+    '[sendemail]', '\tsmtpPass = SMTP-SECRET', '',
   ].join('\n'));
   const git = require(path.join(ROOT, 'lib', 'shim.js')).findReal('git', '');
   for (const harness of ['claude', 'codex']) {
@@ -1334,11 +1339,14 @@ test('a sandboxed agent runs with the user\'s git settings but none of their cre
       text = fs.readFileSync(fd, 'utf8');
     } finally { fs.closeSync(fd); }
     assert.doesNotMatch(text, /HEADER-SECRET|cache --timeout|helper = "?store/, 'no credential helper or auth header');
+    assert.doesNotMatch(text, /URL-SECRET|PROXY-SECRET|SMTP-SECRET/, 'no URL userinfo or mail password');
     const gitEnv = { ...h.env, GIT_CONFIG_GLOBAL: rendered, GIT_CONFIG_NOSYSTEM: '1', GIT_TERMINAL_PROMPT: '0' };
     const get = (key) => cp.spawnSync(git, ['config', '--global', '--get', key], { env: gitEnv, encoding: 'utf8' }).stdout.trim();
     assert.equal(get('user.name'), 'Planted User');
     assert.equal(get('alias.st'), 'status', 'included files are flattened in');
     assert.equal(get('core.excludesfile'), ignore);
+    assert.equal(get('url.ssh://git@example.com/.insteadof'), 'https://example.com/', 'a user name in an ssh URL stays');
+    assert.equal(get('http.proxy'), 'http://proxy.example:8080');
     assert.equal(commandsRead(seen, ignore), true, `${harness}: the excludes file it names stays readable`);
     const fill = (host, token) => cp.spawnSync(git, ['credential', 'fill'], {
       env: { ...gitEnv, GH_TOKEN: token }, input: `protocol=https\nhost=${host}\n\n`, encoding: 'utf8', cwd: h.base,
