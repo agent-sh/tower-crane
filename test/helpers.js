@@ -411,7 +411,9 @@ try {
     $started = $process.StartTime
     if ($null -eq $started) { $same = $false }
     elseif ($entry.kind -eq 'monitor') { $same = $started.ToFileTimeUtc().ToString() -eq $entry.startTime }
-    else { $same = $started.ToUniversalTime() -le [DateTimeOffset]::FromUnixTimeMilliseconds([int64]$entry.recordedAt).UtcDateTime }
+    # Creation times follow the system timer tick (about 15.6 ms) and Node reads
+    # the clock differently, so a worker may appear to start up to a few ticks late.
+    else { $same = $started.ToUniversalTime() -le [DateTimeOffset]::FromUnixTimeMilliseconds([int64]$entry.recordedAt + 100).UtcDateTime }
     if (!$same) {
       $process.Dispose()
       continue

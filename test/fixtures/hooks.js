@@ -497,7 +497,7 @@ if (env.HOOK_PROCESSES_DIR) {
       // This parent holds the child's handle until its exit is processed, so
       // a process created after this moment cannot be this child: Windows
       // teardown kills a worker only if it started no later.
-      const recordedAt = systemNow() + 1;
+      const recordedAt = systemNow();
       real.mkdirSync(env.HOOK_PROCESSES_DIR, { recursive: true });
       const trackedFile = path.join(env.HOOK_PROCESSES_DIR, `${child.pid}.json`);
       real.writeFileSync(trackedFile, JSON.stringify({
