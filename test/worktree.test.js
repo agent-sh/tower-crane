@@ -281,8 +281,10 @@ for (const command of ['worktree', 'spawn']) {
       for (const id of ids) h.ok(['brief', 'set', id, '-'], { input: 'Use the fresh base.\n' });
     }
     const attempts = guardUploadPack(h, 15000);
+    const started = Date.now();
     const hooks = { HOOK_WORKTREE_ADD_ACTIVE: path.join(h.base, 'worktree-add-active') };
     const trees = h.json(['worktree', ...ids], { hooks });
+    assert.ok(Date.now() - started < 30000, 'preparation finishes within two fetch times');
     assert.equal(trees.length, 6);
     for (let i = 0; i < trees.length; i++) {
       assert.equal(trees[i].id, ids[i]);
@@ -451,7 +453,7 @@ test('submit fetches the task branch before resolving a remote-only abbreviation
   assert.deepEqual(h.readState('tasks.json'), before);
 });
 
-test('cancelling a task removes its worktree; a dirty one stays and says why', (t) => {
+test('cancelling removes clean, dirty and missing worktrees, saving dirty files', (t) => {
   const h = makeRepo(t);
   h.init();
   for (const title of ['Clean', 'Dirty', 'Gone']) h.ok(['task', 'add', '--title', title, '--acceptance', 'not needed']);
@@ -464,14 +466,13 @@ test('cancelling a task removes its worktree; a dirty one stays and says why', (
   for (const id of ['T1', 'T2', 'T3']) h.ok(['task', 'update', id, '--status', 'cancelled']);
 
   assert.ok(!fs.existsSync(clean.path), 'the clean worktree is removed');
-  assert.ok(fs.existsSync(dirty.path), 'the dirty worktree stays');
-  assert.ok(h.registers(dirty.path), 'git still registers the dirty worktree');
+  assert.ok(!fs.existsSync(dirty.path), 'the dirty worktree is saved and removed');
+  assert.ok(!h.registers(dirty.path), 'git forgets the dirty worktree');
   assert.ok(!h.registers(clean.path), 'git forgets the removed worktree');
   assert.ok(!h.registers(gone.path), 'prune clears the registration of a missing directory');
   const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
-  const kept = events.find((e) => e.cmd === 'worktree kept');
-  assert.equal(kept.task, 'T2');
-  assert.equal(kept.detail.reason, 'uncommitted changes');
+  const saved = events.find((e) => e.cmd === 'worktree removed' && e.task === 'T2').detail.saved;
+  assert.equal(fs.readFileSync(path.join(saved, 'files', 'notes.txt'), 'utf8'), 'unfinished\n');
 });
 
 test('cancelling keeps a worktree that git still has locked', (t) => {

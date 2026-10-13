@@ -66,6 +66,7 @@ test('a pending required check refuses the submit and names the jobs still runni
   assert.equal(r.status, 1, r.stderr);
   assert.match(r.stderr, /CI is still running at \w+ in acme\/app: wait for CI to finish, then submit again\./);
   assert.match(r.stderr, /pending: test \(ubuntu-latest\) \(in_progress\)/);
+  assert.match(r.stderr, /tower-crane ci checks T1/);
   assert.equal(status(h), 'in_progress');
 });
 
@@ -86,6 +87,7 @@ test('a failing check refuses with its job and the first failing lines of the lo
   assert.equal(r.status, 1, r.stderr);
   assert.match(r.stderr, /CI failed at \w+ in acme\/app: fix the failing checks, push, and submit again\./);
   assert.match(r.stderr, /failing: test \(windows-latest\) \(failure\)/);
+  assert.match(r.stderr, /tower-crane ci checks T1/);
   assert.match(r.stderr, /test \(windows-latest\) log:\n {2}not ok 4 - quoted paths keep their backslashes\n {4}AssertionError: expected C:\\repo\\lib/);
   assert.doesNotMatch(r.stderr, /ok 1 - runs fine|2026-10-09T10/);
   assert.equal(status(h), 'in_progress');
