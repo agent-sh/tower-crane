@@ -48,7 +48,7 @@ function child(t, h, args, hooks = {}) {
   p.stdout.on('data', (d) => { stdout += d; });
   p.stderr.on('data', (d) => { stderr += d; });
   // A hung child cannot hold teardown beyond the suite backstop.
-  const timer = setTimeout(() => p.kill(), HUNG_TEST_MS); // wait-allow: stagger concurrent operations to exercise both race orderings
+  const timer = setTimeout(() => p.kill(), HUNG_TEST_MS);
   const result = once(p, 'close').then(([code]) => {
     clearTimeout(timer);
     return { code, stdout, stderr };
