@@ -3,13 +3,15 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const cp = require('node:child_process');
 const { makeRepo } = require('./helpers');
 
-function attempt(h, chrome, sandbox) {
+function attempt(h, chrome, sandbox, tmp = h.base, before = '') {
   const runner = path.join(h.base, 'browser-runner.js');
   fs.writeFileSync(runner, `
+${before}
 const { openBrowser, closeBrowser } = require(${JSON.stringify(path.join(__dirname, 'browser.js'))});
 const hooks = [];
 (async () => {
@@ -24,7 +26,7 @@ const hooks = [];
 })().catch((e) => { console.error(e); process.exitCode = 1; });
 `);
   const r = cp.spawnSync(process.execPath, [runner], {
-    env: { ...h.env, TOWER_CRANE_TEST_CHROME: chrome, TOWER_CRANE_TEST_TMP: h.base, TOWER_CRANE_SANDBOX: sandbox, CHROME_REPORT: path.join(h.base, 'chrome.json') },
+    env: { ...h.env, TOWER_CRANE_TEST_CHROME: chrome, TOWER_CRANE_TEST_TMP: tmp, TOWER_CRANE_SANDBOX: sandbox, CHROME_REPORT: path.join(h.base, 'chrome.json') },
     encoding: 'utf8', timeout: 15000,
   });
   assert.equal(r.status, 0, `${r.error || ''}\n${r.stderr}`);
@@ -65,8 +67,58 @@ test('a missing browser reports its spawn error and cleans up its profile', (t) 
   assert.deepEqual(fs.readdirSync(h.base).filter((f) => f.startsWith('tower-crane-chrome-')), []);
 });
 
+test('a Chrome profile whose setup fails is removed, and the start rejects', (t) => {
+  const h = makeRepo(t);
+  // The sandboxed start creates config, cache and tmp inside the profile; a full disk fails the first.
+  const result = attempt(h, path.join(h.base, 'missing-chrome'), '1', h.base, `
+const fsModule = require('node:fs');
+const pathModule = require('node:path');
+const mkdirSync = fsModule.mkdirSync;
+fsModule.mkdirSync = function (dir, ...rest) {
+  if (pathModule.basename(dir) === 'config') throw Object.assign(new Error('ENOSPC: no space left on device'), { code: 'ENOSPC' });
+  return mkdirSync.call(this, dir, ...rest);
+};`);
+  assert.match(result.error, /ENOSPC/);
+  assert.deepEqual(fs.readdirSync(h.base).filter((f) => f.startsWith('tower-crane-chrome-')), []);
+});
+
+test('a temp root too deep for Chrome\'s socket still starts Chrome, from a shallow profile directory', {
+  skip: process.platform === 'win32' && 'browser fixture uses a shebang; Unix socket path limits do not apply on Windows',
+}, (t) => {
+  const h = makeRepo(t);
+  // A gate's TMPDIR sits under TOWER_CRANE_TMP, which can be deeper than the socket path allows.
+  const deep = path.join(h.base, ...Array.from({ length: 4 }, (_, i) => `${i}-${'d'.repeat(30)}`));
+  fs.mkdirSync(deep, { recursive: true });
+  // The fixture's HOME is deep too, so the shallow profile goes to the account's cache root, as it does outside a fixture.
+  Object.assign(h.env, { TMPDIR: deep, XDG_CACHE_HOME: path.join(os.userInfo().homedir, '.cache') });
+  const chrome = path.join(h.base, 'chrome');
+  fs.writeFileSync(chrome, `#!${process.execPath}
+const fs = require('node:fs');
+const path = require('node:path');
+const profile = process.argv.find((arg) => arg.startsWith('--user-data-dir=')).slice('--user-data-dir='.length);
+// Chrome keeps its singleton socket in the profile only up to 78 bytes (see browser.js), and under
+// TMPDIR otherwise, where a socket path must also fit 107 bytes.
+const sockets = [path.join(profile, 'SingletonSocket'), path.join(process.env.TMPDIR, 'com.google.Chrome.000000', 'SingletonSocket')];
+if (Buffer.byteLength(sockets[0]) > 78 || Buffer.byteLength(sockets[1]) > 107) {
+  console.error('Socket path too long');
+  process.exit(1);
+}
+fs.writeFileSync(process.env.CHROME_REPORT, JSON.stringify({ profile, tmp: process.env.TMPDIR }));
+// An invalid DevTools endpoint makes openBrowser reject after a successful launch.
+fs.writeFileSync(path.join(profile, 'DevToolsActivePort'), '1\\n');
+setInterval(() => {}, 1000);
+`, { mode: 0o755 });
+  const result = attempt(h, chrome, '1', deep);
+  assert.doesNotMatch(result.error ?? '', /exit code|Socket path/);
+  const { profile, tmp } = JSON.parse(fs.readFileSync(path.join(h.base, 'chrome.json'), 'utf8'));
+  assert.equal(profile.startsWith(deep + path.sep), false, profile);
+  assert.equal(path.dirname(tmp), profile, 'Chrome\'s temp directory is in the shallow profile, not the deep TMPDIR');
+  assert.equal(fs.existsSync(profile), false, 'the shallow profile is removed with the browser');
+  assert.deepEqual(fs.readdirSync(deep).filter((f) => f.startsWith('tower-crane-chrome-')), []);
+});
+
 for (const sandbox of ['0', '1']) {
-  test(`Chrome startup in sandbox=${sandbox} isolates browser files only inside the sandbox and reports an early exit`, {
+  test(`Chrome startup in sandbox=${sandbox} keeps Chrome's temp files in its profile and reports an early exit`, {
     skip: process.platform === 'win32' && 'browser fixture uses a shebang',
   }, (t) => {
     const h = makeRepo(t);
@@ -104,14 +156,15 @@ process.exit(23);
       'about:blank',
     ]);
     assert.equal(path.dirname(profile), h.base);
+    for (const dir of [seen.tmp, seen.temp, seen.winTmp]) assert.equal(dir, path.join(profile, 'tmp'));
     if (sandbox === '1') {
       assert.equal(seen.home, profile);
       assert.equal(seen.userProfile, profile);
       for (const dir of [seen.config, seen.cache, seen.tmp, seen.temp, seen.winTmp]) assert.equal(path.dirname(dir), profile);
     } else {
-      assert.deepEqual(seen.profileEntries, [], 'host profiles have no sandbox config/cache/temp directories');
-      assert.deepEqual([seen.home, seen.config, seen.cache, seen.tmp, seen.temp, seen.winTmp, seen.userProfile],
-        [hostEnv.HOME, hostEnv.XDG_CONFIG_HOME, hostEnv.XDG_CACHE_HOME, hostEnv.TMPDIR, hostEnv.TEMP, hostEnv.TMP, hostEnv.USERPROFILE]);
+      assert.deepEqual(seen.profileEntries, ['tmp'], 'host profiles have no sandbox config or cache directories');
+      assert.deepEqual([seen.home, seen.config, seen.cache, seen.userProfile],
+        [hostEnv.HOME, hostEnv.XDG_CONFIG_HOME, hostEnv.XDG_CACHE_HOME, hostEnv.USERPROFILE]);
     }
     assert.equal(fs.existsSync(profile), false, 'even a failed launch removes the profile');
   });
