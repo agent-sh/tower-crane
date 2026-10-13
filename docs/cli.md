@@ -165,6 +165,48 @@ The list settings also work with `init`. Omitted options leave their fields unch
 
 Harness sandbox support comes from `CAPABILITIES` in [lib/agents.js](../lib/agents.js). Its `sandbox` flag selects the ladder authority rule: moving a role that requests confinement to a harness with `sandbox: false` is owner-required. The separate `osSandbox` flag controls the OS-isolated state broker and nested browser setup; it does not classify ladder reach. Opencode keeps its private home and native file-tool permissions, with both sandbox capabilities false; those rules do not constrain Bash writes.
 
+## Already-merged hotfixes
+
+The orchestrator records a merged PR, then uses the normal acceptance path:
+
+```sh
+tower-crane hotfix T207 --pr 199 --agent orchestrator
+tower-crane accept T207 --agent orchestrator
+```
+
+`--sha` defaults to the PR's merge commit. A task merged natively, with a
+clean-context review already posted on its PR, names that exact comment by
+URL or id:
+
+```sh
+tower-crane hotfix T235 --pr 235 --review https://github.com/agent-sh/tower-crane/pull/235#issuecomment-N --agent orchestrator
+tower-crane accept T235 --agent orchestrator
+```
+
+The comment's first line is `Review (native, clean context)` or
+`Review (Tower Crane, clean context)`. Its `SHA:` must be the PR head that
+merged, and its `Verdict:` line or `Blocking findings` section decides it.
+Its author must be an `OWNER`, `MEMBER` or `COLLABORATOR` of the repository.
+Only squash and merge-commit merges are recorded; a rebase merge of several
+commits is refused. A posted review of an earlier head is refused; omit `--review` and `accept`
+dispatches a fresh review of the landed diff.
+
+A trusted watcher also advances the `hotfix` event. Tests and cleanup use
+that merge commit and its first parent, even after main moves. CI requires
+the successful push workflows on the recorded base at that commit. Once
+software gates pass, a counted posted review or normal independent review
+of the landed diff decides; call `accept` again after a dispatched verdict if
+no watcher is running. A pass shows `accepted (hotfix)`, and `accept` then
+confirms the merge and records merge evidence at the merge commit; it does
+not merge the PR again. A failed confirmation is retried with `merge ID`.
+Waivers are refused.
+A confirmed gate failure or failed review creates one follow-up rework task against the
+project base and retains the historical merge on the original task. Pending
+CI and infrastructure errors stay submitted: rerun the gate with `check ci ID`
+(or `check tests ID`, `check clean ID`), or let `ci completed` rerun CI, then
+`accept` again. An accepted hotfix cannot be sent back with `rework`. See
+[state.md](state.md#already-merged-hotfixes) for fields and counts.
+
 ## Run
 
 Dependent tasks can start while a single dependency chain is submitted or accepted but unmerged. `worktree` and `spawn` check the GitHub stacks endpoint, verify the dependency PR's current head and repository, fetch its branch, and create the upper branch at that head. The worker prompt names the dependency branch as the PR base. `ready` and `claim` allow submitted dependencies when they form one chain with a PR, branch and sha; dispatch still verifies availability. Claim readiness checks task status, dependencies, stack state, decisions, locks and worker slots. Worker spawn runs the same check before any worktree work and refuses with the claim reason. When an existing stacked PR affects readiness, spawn re-reads its membership from `gh api repos/OWNER/REPO/stacks` before dispatch. A claim of the task a spawn dispatched, by the agent it dispatched, reads that recorded result; any other claim re-reads it. A chain with fewer than two unmerged PRs is not read. Transient API errors require retry and do not mark stacks disabled. Independent dependency chains and forks wait for the ordinary accepted-dependency flow. A worktree made before its dependency was submitted is revalidated at dispatch: a clean branch with no commits of its own moves onto the dependency head, and one holding its own work is refused until the worktree is removed or the dependency merges. A branch that already contains the dependency head is used as it is. A rework whose branch is gone starts from its own pushed head, never from its dependency. Two siblings prepared at once on the same dependency cannot both record it as their stack parent; the second dispatch is refused under the lock and waits as a fork.
@@ -265,6 +307,8 @@ Before constructing an agent home, spawn also sweeps orphan `brokers/<agent>/` d
 | `evidence ID --type T (--ok \| --fail) [--sha S] [--revision N] [--summary T] [--ref URL]` | record `review` or `note` evidence; `review` requires `--sha`, while `note` defaults to the task's submitted sha. `--revision N` names the task revision the evidence is about and is refused above the current revision; review evidence from a reviewer that `spawn` did not start requires it, and a spawned reviewer's verdict keeps its dispatch revision. Refuses `tests`, `clean`, `sources`, `ci` and `merge` for every agent and either verdict; use the gate commands |
 | | |
 | `hook ACTION --binding FILE [--payload JSON\|-]` | deliver harness messages and record activity under the home identity |
+| | |
+| `hotfix ID --pr N [--sha SHA] [--review URL]` | orchestrator or owner: verify the PR merged into the project base (at SHA when given, else its merge commit), record its merge and first parent (squash or merge-commit merges only; a multi-commit rebase merge is refused), and move the task (todo, rework, submitted or cancelled, without a claim) to submitted with a new revision. `--review` takes the exact PR comment URL or id of a review by an OWNER, MEMBER or COLLABORATOR, whose first line is `Review (native, clean context)` or `Review (Tower Crane, clean context)`, whose `SHA:` is the merged PR head, and whose `Verdict: pass\|fail` line or `Blocking findings` section decides it; it is recorded as review evidence at the merge commit. Run `accept ID` to check tests, clean and push CI at that merge commit, dispatch independent review of the landed diff unless a posted review counts, accept, and confirm the merge as merge evidence without merging again. Every gate must pass, without waivers. Acceptance displays `accepted (hotfix)` and records that it merged before its gates. A confirmed software failure or failed review cancels the historical task and creates a separate rework task for a follow-up PR against the project base. Pending checks and infrastructure errors remain submitted for a gate retry with `check GATE ID`. An accepted hotfix refuses `rework`. Repeating the same record preserves receipts |
 | | |
 | `interrupt ID [--needs-owner REASON]` | owner or orchestrator only: stop the live agent through its supervisor and release the claim to its prior `todo` or `rework`. The revision, branch, evidence and dirty worktree stay, so the next dispatch resumes the work (Codex warm resume, or a fresh Claude worker in the same worktree). `--needs-owner REASON` sets the owner ask in the write that releases the claim, so the task waits until `owner-done`; the event's `reason` and `needs_owner` carry REASON, and replacing a different ask is audited as `task.needs_owner`. The board's Stop sends it. Distinct from `rework`, which sends a submitted task back with a reason, and from a requirements edit, which bumps the revision |
 | | |
@@ -932,13 +976,13 @@ The CLI refuses manual software verdicts, and software receipts require matching
 <!-- commands:Gates:start -->
 | Command | Does |
 |---|---|
-| `check ci ID` | with `ci.local`, resolve task override, kind mapping or default, run its argv against the merged base and submitted head and record a local receipt; otherwise verify the PR head and mergeability, require `ci.required` runs to be present and successful on the submitted sha, require at least one run outside `ci.ignore_apps` and `ci.capped_review` exceptions and all remaining checks green; records `ci` |
+| `check ci ID` | for a recorded hotfix, check successful push workflows on its recorded base at the merge commit. Otherwise with `ci.local`, resolve task override, kind mapping or default, run its argv against the merged base and submitted head and record a local receipt; without local CI, verify the PR head and mergeability. Require `ci.required` runs to be present and successful on the submitted sha, require at least one run outside `ci.ignore_apps` and `ci.capped_review` exceptions and all remaining checks green; records `ci` |
 | | |
-| `check clean ID [--cmd CMD]` | run pinned `gates.clean_cmd` on the task branch against `base`; records `clean`, ok when every check ran and none reported a HIGH finding; timeouts record infrastructure failure |
+| `check clean ID [--cmd CMD]` | run pinned `gates.clean_cmd` at the submitted commit against `base` (the recorded first parent for hotfixes); records `clean`, ok when every check ran and none reported a HIGH finding; timeouts record infrastructure failure |
 | | |
 | `check sources ID` | fetch the distinct cited pages from committed `research/ID.json` and verify every quote; records sources evidence; required for research kind on every tier |
 | | |
-| `check tests ID [--cmd CMD] [--proof-cmd CMD]` | use `tests.by_kind` over `tests.mode` (default `prove`); `prove` requires pinned `gates.tests_cmd` to pass at head and fail after reverting other changes, with T8 build-file keeps; expensive proof runs mapped head suites when `tests.map` and full-suite `ci.required` are pinned, falls back to CMD for unmapped sources, and uses a scoped `{tests}` command at head and after reversion; `run-only` requires the pinned command to pass once at head; `none` verifies the submitted commit without running CMD; records `tests`, resolved `tests_mode`, and failed test names plus a bounded output tail when its command fails; timeouts record infrastructure failure and interrupted files instead |
+| `check tests ID [--cmd CMD] [--proof-cmd CMD]` | use `tests.by_kind` over `tests.mode` (default `prove`); `prove` requires pinned `gates.tests_cmd` to pass at head and fail after reverting other changes, with T8 build-file keeps; expensive proof runs mapped head suites when `tests.map` and full-suite `ci.required` are pinned, falls back to CMD for unmapped sources, and uses a scoped `{tests}` command at head and after reversion; `run-only` requires the pinned command to pass once at head; `none` verifies the submitted commit without running CMD; records `tests`, resolved `tests_mode`, and failed test names plus a bounded output tail when its command fails; timeouts record infrastructure failure and interrupted files instead. Hotfix proof compares the merge commit with its recorded first parent |
 | | |
 | `gates prioritize ID --reason R` | operational (orchestrator or owner): move the task's queued submitted gate reactions ahead of older submitted work. Accepted merges always run first in acceptance order, including their merged-tree tests; requests cannot change that order. Several requests run newest first among submitted work. Only the work queued when the request is made moves; a notification queued later keeps its place unless its task becomes accepted, and a running reaction is not queued work. Refused for an accepted task, whose merge already runs first, and when nothing is queued for the task. Logs a `gates prioritize` event with the reason; `status` and `inbox` show the gate queue |
 | | |

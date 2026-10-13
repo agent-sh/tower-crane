@@ -479,6 +479,68 @@ The list and tests policy flags also work with `init`. Omitting a flag leaves it
 
 Optional `orphan_retirements` records orphan removals in progress as an array of `{reservation_id, path, branch, since, pid, host, start_ticks}`. `branch` may be null; `start_ticks` is present where the platform reports it. Under the state lock, `worktree prune --orphans` checks current task ownership and appends its reservation before any destructive Git operation. A task whose `branch` names the worktree's branch owns it even before the task records the worktree. Claim, rework, submit and preparation use the same path/branch guard as task retirement. `worktree orphan retiring` audits reservation acquisition; `worktree orphan cleanup` releases only the matching `reservation_id` and records the outcome. Failed cleanup also releases its reservation. A reservation whose process has exited holds nothing, and the next orphan reservation discards exited entries. The index is omitted when empty.
 
+### Already-merged hotfixes
+
+`hotfix ID --pr N [--sha SHA] [--review URL]` is an orchestrator or owner
+command. It verifies that the PR merged into the project base at SHA, which
+defaults to the PR's merge commit, and fetches the base once when the merge
+or its first parent is not local. A task without a claim, in `todo`,
+`rework`, `submitted` or `cancelled`, moves to `submitted` at a new revision.
+`hotfix` records `pr`, `merge_sha`, the PR's `head_sha`, the merge's first
+parent `base_sha`, `base`, `recorded_at` and `recorded_by`. Repeating the same
+record preserves its revision and evidence; a different merge is refused.
+The first parent must precede the whole PR, because the gates read only the
+merge against it: a two-parent merge must have the PR head as its second
+parent, and a single-parent merge must be a squash or a one-commit PR. A
+rebase merge of several commits, whose first parent matches the subject and
+author time of the PR's second-to-last commit, is refused.
+
+`--review` reads a PR comment posted by a clean-context reviewer outside
+Tower Crane, named by its comment URL or id. Workers and reviewers can post as
+the same login, so there is no "latest" lookup: the orchestrator names the
+exact review. The comment's `author_association` must be `OWNER`, `MEMBER` or
+`COLLABORATOR`; anyone else can comment on a public repository. Its first line is `Review (native, clean context)` or
+`Review (Tower Crane, clean context)`, its `SHA:` is the merged `head_sha`,
+and a `Verdict: pass|fail` line, else a `Blocking findings` section reading
+`None`, decides it. The verdict is stored as review evidence at `merge_sha`
+with `source: "hotfix review"`, `ref` (the comment URL), `reviewed_sha`,
+`author` and `author_association`. It counts as independent review only with a `hotfix` event by the
+orchestrator or owner whose `review` names the same URL and verdict at that
+revision. A comment on another PR, of another head, by an untrusted
+association, or without the title or a verdict is refused. A failing posted review creates the follow-up below.
+
+`accept ID` runs the existing software gates at `merge_sha`. Tests retain
+the configured proof mode, reverting the landed changes against `base_sha`;
+cleanup scans the same change. CI checks the successful GitHub Actions
+`push` workflows on the recorded base at that commit and their required
+check runs, even when local CI is configured. PR head and mergeability
+checks do not apply to a merged PR. The normal reviewer receives the landed
+diff against the first parent and records its verdict at the merge commit.
+Waivers cannot accept a hotfix.
+
+A pass stores status `accepted`, displays `accepted (hotfix)`, and emits an
+`accept` event with `hotfix: true`, the PR and a reason saying it merged
+before its gates. The matching `hotfix` audit event proves the recorded
+merge. `accept` then runs the merge gate, which only confirms that the PR
+merged at `merge_sha` with the recorded head and base, and records `merge`
+evidence at `merge_sha`; nothing merges the PR again. Dependencies treat it as
+accepted. Status counts and `bench tokens` include `accepted_hotfix` as a
+separate subset of `accepted`; bench task rows include a `hotfix` boolean.
+
+A confirmed software gate failure or eligible failed independent review creates a separate
+task with status `rework` and `hotfix_of: ID`. Its brief preserves the
+original instructions and names the failure and a follow-up PR against
+the project base. It starts without a branch, PR, SHA or evidence. The
+historical task becomes `cancelled` and records `hotfix.follow_up`; further
+failures reuse that task instead of creating duplicates. Explicit `rework`
+on a submitted hotfix uses the same follow-up path; an accepted hotfix
+refuses it, since its merge stands. Its merge commit stays
+fixed; workers submit the follow-up task.
+Pending CI, observation errors and timeouts keep the hotfix submitted;
+retry its gate when the run completes or the infrastructure recovers.
+Missing regression coverage and a proof that passes without the hotfix
+are confirmed tests failures.
+
 Evidence that no gate decision reads any more is settled: an entry whose `sha` does not match the task's head or whose `revision` is older, every entry of a cancelled task, and every entry but the merge receipt of a task accepted with a passing merge at its head. Each write stores a settled entry's `summary`, `commands`, `receipt`, `gate_policy`, `ci_policy`, `test_failure` and `capped_review` over 1 KiB of compact JSON in `evidence/<task>/<sha256>.json`, and adds `evidence_refs` to the entry, mapping each stored field to `{sha256, bytes}`. The field itself keeps a placeholder of the same type: `[stored in evidence/<task>/<sha256>.json]` for `summary`, an empty array for `commands` and `capped_review`, null for the others. Evidence at the current head stays inline whatever its size, and unknown evidence types are never stored. So `tasks.json` grows by a bounded amount per receipt, not by the size of its output.
 
 Readers load a stored field on first use and check its byte length and SHA-256; a missing or changed file refuses that read with the file's path. `task show` and other views show the entry as recorded, without `evidence_refs`. Writes that do not use a stored field keep its reference without reading the file. A write reads a stored field back into the entry when the entry becomes current again. The first write by this version moves existing settled fields out; the files are written before `tasks.json` names them. Copy `evidence/` with the rest of the state. Files are never deleted.
