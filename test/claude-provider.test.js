@@ -371,8 +371,9 @@ for (const source of ['project env', 'rung env', 'env_file']) {
   });
 }
 
-test('a Bedrock switch in the user settings file bills a rung that names no provider as api', () => {
+test('a Bedrock switch in the user settings file bills a rung that names no provider as api', (t) => {
   const base = fs.realpathSync.native(fs.mkdtempSync(path.join(TMP_ROOT, 'claude-provider-billing-')));
+  t.after(() => fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
   const from = { claude: { dir: path.join(base, 'claude') } };
   fs.mkdirSync(from.claude.dir, { recursive: true });
   fs.writeFileSync(path.join(from.claude.dir, 'settings.json'), JSON.stringify({ env: { CLAUDE_CODE_USE_BEDROCK: '1' } }));
@@ -380,8 +381,9 @@ test('a Bedrock switch in the user settings file bills a rung that names no prov
   assert.equal(L.billing({ harness: 'claude' }, P.routedEnv({}, from)), 'api');
 });
 
-test('Claude billing follows Claude Code credential precedence on the first-party route', () => {
+test('Claude billing follows Claude Code credential precedence on the first-party route', (t) => {
   const base = fs.realpathSync.native(fs.mkdtempSync(path.join(TMP_ROOT, 'claude-provider-helper-')));
+  t.after(() => fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
   const from = { claude: { dir: path.join(base, 'claude') } };
   fs.mkdirSync(from.claude.dir, { recursive: true });
   assert.equal(L.billing({ harness: 'claude' }, {}, from), 'subscription', 'no settings file is a login');

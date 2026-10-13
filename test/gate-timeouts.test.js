@@ -107,5 +107,7 @@ test('a timeout that comes due during a blocked event loop stops only a child wi
   block();
   const r = await pending;
   assert.equal(r.timedOut, true);
-  assert.equal(C.ghFailure({ ...r, stdout: '{"id":1}' }, 'gh api runs'), 'gh api runs failed: timed out after 300 ms');
+  const failure = C.ghFailure({ ...r, stdout: '{"id":1}' }, 'gh api runs');
+  assert.match(failure, /^gh api runs failed: timed out after 300 ms \(status=/);
+  assert.doesNotMatch(failure, /"id"/);
 });
