@@ -1496,11 +1496,20 @@ test('gate executors across several watchers stay within gates.executors and que
   }
   assert.ok(results.every((r) => r.code === 0 && JSON.parse(r.stdout).type === 'evidence'), JSON.stringify(results));
   assert.deepEqual(runs(), { starts: 3, peak: 2 });
-  const started = h.logs().filter((e) => e.cmd === 'automation' && e.detail.phase === 'running').map((e) => e.task);
-  assert.equal(started.at(-1), 'T3', 'the queued submission runs after a slot frees');
   for (const task of h.readState('tasks.json').tasks) {
     assert.deepEqual(task.evidence.map((e) => [e.type, e.ok]), [['tests', true], ['clean', true]], task.id);
   }
+  // A successful manual observation schedules a later reaction without another tests run.
+  const beforeFollowUp = h.logs().length;
+  h.ok(['check', 'clean', 'T2']);
+  h.consume();
+  assert.deepEqual(runs(), { starts: 3, peak: 2 });
+  const started = h.logs().filter((e) => e.cmd === 'automation' && e.detail.phase === 'running').map((e) => e.task);
+  assert.ok(h.logs().slice(beforeFollowUp).some((e) => e.cmd === 'automation'
+    && e.detail.phase === 'running' && e.task === 'T2'), 'a later observation runs without restarting its suite');
+  const firstStarts = [...new Set(started)];
+  assert.deepEqual(new Set(firstStarts), new Set(['T1', 'T2', 'T3']));
+  assert.equal(firstStarts.at(-1), 'T3', 'the queued submission runs after a slot frees');
 });
 
 test('a killed executor releases its gate executor slot', (t) => {
