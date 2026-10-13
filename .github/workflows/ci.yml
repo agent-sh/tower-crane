@@ -2,6 +2,7 @@ name: CI
 
 on:
   pull_request:
+    # No base filter: a stacked task's PR targets its lower task's branch, whatever its name.
   push:
     branches: [main]
 
@@ -39,6 +40,17 @@ jobs:
       - run: npm run check:shared
         env:
           TOWER_CRANE_CHANGE_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+      - name: Repeat Claude Code mod wakeup twenty times
+        if: matrix.os == 'windows-latest' && matrix.shard == '2/3'
+        shell: pwsh
+        run: |
+          foreach ($attempt in 1..20) {
+            Write-Host "Claude Code mod wakeup: pass $attempt/20"
+            npm test -- test/wakeups.test.js --test-name-pattern="the Claude Code mod pushes a decision answer and a worker message into the session"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+        env:
+          TOWER_CRANE_TEST_TMP: ${{ runner.temp }}/tower-crane-tests
       - run: npm test
         env:
           TOWER_CRANE_TEST_TMP: ${{ runner.temp }}/tower-crane-tests
@@ -54,6 +66,49 @@ jobs:
           }
         env:
           TOWER_CRANE_TEST_TMP: ${{ runner.temp }}/tower-crane-tests
+      - name: Repeat owner authority and board approval shard ten times
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $files = node -e "const r=require('./test/run.js'); const [i,n]=process.env.TC_TEST_SHARD.split('/').map(Number); const affected=new Set(['test/authority.test.js','test/approval-context.test.js','test/board-controls.test.js','test/windows-ancestry.test.js']); console.log(r.shardFiles(r.testFiles(),i,n).filter(f=>affected.has(f)).join(' '))"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ([string]::IsNullOrWhiteSpace($files)) { exit 0 }
+          $selected = $files.Trim().Split(' ')
+          # The selected files already belong to this shard.
+          Remove-Item Env:TC_TEST_SHARD
+          foreach ($attempt in 1..10) {
+            Write-Host "Owner authority and board approval shard: pass $attempt/10 ($files)"
+            npm test -- @selected
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+        env:
+          TOWER_CRANE_TEST_TMP: ${{ runner.temp }}/tower-crane-tests
+          TC_TEST_SHARD: ${{ matrix.shard }}
+
+  gate-scratch:
+    name: complete gate scratch cleanup proof
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      # The measurement must identify the submitted head, not GitHub's merge commit.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 26
+      - run: node scripts/probe-gate-scratch.js
+        env:
+          TOWER_CRANE_TEST_TMP: /home/runner/.cache/tower-crane-gate-proof
+          TOWER_CRANE_PROOF_OUTPUT: ${{ runner.temp }}/gate-scratch-proof.json
+      - name: Save gate scratch measurement
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: gate-scratch-proof
+          path: ${{ runner.temp }}/gate-scratch-proof.json
+          if-no-files-found: error
 
   model-swap:
     name: complete model swap proof

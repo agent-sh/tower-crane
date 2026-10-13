@@ -6,6 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
 const { BIN, cachedFixture } = require('./helpers');
+const { gateFixture } = require('./gate-helpers');
 
 const REQUIRED = [
   'test (ubuntu-latest, node 26, shard 1/3)',
@@ -21,12 +22,17 @@ const REQUIRED = [
 const CAP_POLICY = [{ app: 'revuto-review', pattern: 'reached the \\d+-round review limit' }];
 const github = path.join(__dirname, 'fixtures', 'github.js');
 
+function readWorkflow(root) {
+  // Windows checkouts can write CRLF line endings; the patterns below expect LF.
+  return fs.readFileSync(path.join(root, '.github', 'workflows', 'ci.yml'), 'utf8').replace(/\r\n/g, '\n');
+}
+
 test('package support, CI matrix, and required jobs target Node 24 and 26', () => {
   const root = path.resolve(__dirname, '..');
   const metadata = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
   assert.equal(metadata.engines.node, '>=24');
 
-  const workflow = fs.readFileSync(path.join(root, '.github', 'workflows', 'ci.yml'), 'utf8');
+  const workflow = readWorkflow(root);
   const matrix = [...workflow.matchAll(/^\s+- \{ os: ([^,]+), node: (\d+), shard: '(\d+)\/(\d+)' \}$/gm)]
     .map(([, os, node, index, total]) => ({ os, node: Number(node), index: Number(index), total: Number(total) }));
   // Each OS and Node pair must run every shard of its split once, and no other shard.
@@ -48,6 +54,19 @@ test('package support, CI matrix, and required jobs target Node 24 and 26', () =
   }
   const agents = fs.readFileSync(path.join(root, 'AGENTS.md'), 'utf8');
   assert.match(agents, /\bNode 24 or newer\b/);
+});
+
+test('pull requests run CI for every base, and pushes run it for main', () => {
+  const root = path.resolve(__dirname, '..');
+  const workflow = readWorkflow(root);
+  // A base filter would drop CI from stacks on custom task branches, which submission accepts.
+  assert.match(workflow, /^on:\n {2}pull_request:\n(?: {4}#.*\n)* {2}push:\n {4}branches: \[main\]\n/m);
+});
+
+test('the stack section says hosted CI runs on every stack member at its own base', () => {
+  const root = path.resolve(__dirname, '..');
+  const state = fs.readFileSync(path.join(root, 'docs', 'state.md'), 'utf8');
+  assert.match(state, /Hosted CI runs on every stack member at its own base\. `ci\.yml` has no base filter on pull requests\b/);
 });
 
 test('the model swap proof checks out the PR merge, so a branch older than its probe still runs it', () => {
@@ -75,7 +94,8 @@ function fixture(t, withPr = true) {
     h.init(['--repo', 'acme/app']);
     h.ok(['task', 'add', '--title', 'Change', '--acceptance', 'works']);
     h.ok(['claim', 'T1', '--agent', 'worker']);
-    const sha = h.git(['rev-parse', 'HEAD']);
+    // Submit with a PR reads its checks, so it needs the fake gh that gateFixture puts on PATH.
+    const sha = gateFixture(h);
     h.ok(['submit', 'T1', '--agent', 'worker', '--sha', sha, ...(withPr ? ['--pr', '40'] : [])]);
     return { sha };
   });

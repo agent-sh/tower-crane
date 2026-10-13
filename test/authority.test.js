@@ -205,6 +205,7 @@ test('owner-required changes by the orchestrator open one decision and change no
     [['project', 'set', '--merge-admin', 'true'], ['merge.admin']],
     [['project', 'set', '--decision-delegation', '{"orchestrator_technical":true}'], ['decision_delegation']],
     [['project', 'set', '--sandbox', '{"write":["/tmp/x"]}'], ['sandbox']],
+    [['project', 'set', '--session-bus', 'true'], ['sandbox.session_bus']],
     [['project', 'set', '--env', '{"A":"1"}'], ['env']],
     [['project', 'set', '--budget-hours', '5'], null],
     [['ladder', 'set', 'easy', '--scope', '{}'], ['scope']],
@@ -514,4 +515,64 @@ test('cancelling a task that waits on the owner needs the owner', (t) => {
   assert.match(worker.stderr, /only the owner/);
   h.ok(['task', 'update', 'T1', '--status', 'cancelled']);
   assert.equal(h.json(['task', 'show', 'T1']).status, 'cancelled');
+});
+
+test('opencode MCP authority and dispatch read the same inline configuration', (t) => {
+  const h = setup(t);
+  h.ok(['brief', 'set', 'T1', '-'], { input: 'probe inline MCP\n' });
+  const user = path.join(h.base, 'inline-user');
+  fs.mkdirSync(user);
+  const env = {
+    HOME: user, USERPROFILE: user, XDG_CONFIG_HOME: path.join(user, '.config'),
+    XDG_DATA_HOME: path.join(user, '.local', 'share'), OPENCODE_CONFIG: '', OPENCODE_CONFIG_DIR: '',
+    OPENCODE_CONFIG_CONTENT: JSON.stringify({ mcp: {
+      inlineDocs: { type: 'local', command: ['node', 'inline-docs.js'] },
+    } }),
+  };
+  h.ok(['ladder', 'set', 'hard', '--harness', 'opencode', '--model', 'fixture',
+    '--clear', 'profile', '--clear', 'effort', '--clear', 'args']);
+  h.ok(['ladder', 'set', 'hard', '--mcp', '["inlineDocs"]'], { env: { ...env, TOWER_CRANE_AGENT: 'orchestrator' } });
+  assert.equal(h.readState('decisions.json').decisions.length, 0);
+  const preview = h.json(['spawn', '--task', 'T1', '--role', 'hard', '--dry-run'], { env });
+  assert.deepEqual(preview.home.mcp, ['inlineDocs']);
+  const before = h.readState('project.json');
+  const missing = h.run(['ladder', 'set', 'hard', '--mcp', '["inlineMissing"]'],
+    { env: { ...env, TOWER_CRANE_AGENT: 'orchestrator' } });
+  assert.equal(missing.code, 1, missing.stderr);
+  assert.match(missing.stderr, /inlineMissing.*OPENCODE_CONFIG_CONTENT/);
+  assert.deepEqual(h.readState('project.json'), before);
+});
+
+test('moving confined roles to opencode requires the owner despite its private home and native edit rules', (t) => {
+  const h = setup(t);
+  for (const rung of L.RUNGS) h.ok(['ladder', 'set', rung, '--model', 'fixture',
+    '--clear', 'profile', '--clear', 'effort', '--clear', 'args', '--clear', 'provider']);
+  h.ok(['ladder', 'harness', 'claude']);
+  writeUser(h, { ladder: { research: { fallbacks: [{ model: 'backup' }] } } });
+  for (const [index, args] of [
+    ...['hard', 'review', 'small', 'research'].map((rung) => ['ladder', 'set', rung, '--harness', 'opencode', '--model', 'fixture']),
+    ['ladder', 'harness', 'opencode'],
+  ].entries()) {
+    const before = h.readState('project.json');
+    const result = h.run(args, as('orchestrator'));
+    assert.equal(result.code, 1, result.stderr);
+    assert.match(result.stderr, new RegExp(`ladder\\.reach is owner-required; opened D${index + 1} `));
+    assert.deepEqual(h.readState('project.json'), before);
+    const routes = h.readState('decisions.json').decisions.at(-1).escalation.change.ladder;
+    assert.ok(Object.values(routes).every((rung) => rung.unconfined.every((route) => route.harness === 'opencode')));
+  }
+  assert.equal(A.CAPABILITIES.opencode.sandbox, false);
+  assert.equal(A.CAPABILITIES.opencode.osSandbox, false);
+});
+
+test('native opencode web tool names are operational like their agent-file aliases on an owner-selected route', (t) => {
+  const h = setup(t);
+  h.ok(['ladder', 'set', 'hard', '--harness', 'opencode', '--model', 'fixture',
+    '--clear', 'profile', '--clear', 'effort', '--clear', 'args']);
+  for (const tools of [['webfetch'], ['WebFetch'], ['websearch'], ['WebSearch'], ['webfetch', 'WebFetch', 'websearch', 'WebSearch']]) {
+    h.ok(['ladder', 'set', 'hard', '--tools', JSON.stringify(tools)], as('orchestrator'));
+    assert.deepEqual(h.readState('project.json').ladder.hard.tools, tools);
+    assert.equal(h.readState('decisions.json').decisions.length, 0);
+    assert.equal(events(h).findLast((event) => event.cmd === 'ladder set').detail.authority, 'orchestrator');
+  }
 });

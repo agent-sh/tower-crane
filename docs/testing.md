@@ -12,7 +12,15 @@ The suite proves behavior through the real CLI on temporary git repositories. It
 
 Windows shard 1/3 also runs the Claude interrupted native worker case ten consecutive times, stopping on the first failure. The case waits for final usage through `wait --types spend --observe` and checks the supervisor's stopped phase and exit receipt before redispatch. Its parent clock models startup consuming the session deadline, so shutdown completion must be independent of that deadline.
 
+Each Windows shard repeats its affected owner-authority and board-approval files ten consecutive times: `authority.test.js`, `approval-context.test.js`, `board-controls.test.js` and `windows-ancestry.test.js`. A shard with none of those files skips the repeat. The Windows ancestry regression releases a held CIM snapshot through a native event and waits for the CLI's close signal. It verifies one provider query, transient-shell skipping and bounded ancestry output even with a large unrelated command line. Repetitions run the submitted code without loading ancestry code from the PR base.
+
+The same file also runs a CLI authority regression on either platform with a provider fixture that refuses individual parent lookups. It reproduces the `ETIMEDOUT` refusal with the old discovery code and reaches the owner-required decision with snapshot discovery, so the Linux tests gate can prove the change too.
+
+Windows shard 2/3 runs the Claude Code mod wakeup case twenty consecutive times, stopping on the first failure. It waits on prompt and append signals, then checks the steer's event id rather than the total prompt count. An ordinary worker message during the turn forces an independent wake to overlap with the steer, as delayed inbox reconciliation can do after the initial decision answer and worker message.
+
 For projects Tower Crane manages, expensive proof is the default: the orchestrator pins `--tests-cmd "npm test" --tests-expensive true --tests-proof-cmd "node --test {tests}"`. A submission then runs the full suite once and proves the change with its own test files.
+
+CI also runs `node scripts/probe-gate-scratch.js` at the submitted head on an unsandboxed Linux runner. It initializes separate state through the CLI and runs a complete `check tests` in run-only mode with fresh on-disk outer and gate directories. The `gate-scratch-proof` artifact records both directories' before/after contents, the actual gate parents from command receipts and their removal. The check fails if the tests fail, the outer directory gains contents or a gate parent survives. This full proof refuses a worker sandbox; `test/gate-scratch-proof.test.js` verifies the recorder with small real-CLI fixtures.
 
 ## Writing tests
 
@@ -20,7 +28,7 @@ For projects Tower Crane manages, expensive proof is the default: the orchestrat
 - A table of variants over pure logic runs in process against the module, with one CLI test for the wiring: address ranges and markup in `test/sources.test.js`, build-file and policy tables in `test/gates/tests.test.js`, outage classification in `test/supervision.test.js`, broker authorization in `test/broker.test.js`.
 - A fixture several tests share is built once per file with `cachedFixture(t, key, build)` from `test/helpers.js`. Each test gets a copy, with paths that name the template rewritten in its files, env and git config.
 - Each test repository has its own `HOME`, so no test writes the developer's home: `spawn` keeps receipts under `~/.cache/tower-crane`.
-- No fixed sleeps. Wait for a file, an event or a process with a deadline, and size the deadline for a loaded machine. `run()` in `test/helpers.js` gives every CLI call at least 60 s, and the runner gives each test 300 s; neither is a pass condition.
+- No fixed sleeps. Wait for a file, an event or a process with a deadline, and size the deadline for a loaded machine. `run()` in `test/helpers.js` defaults to 60 s and applies that floor to positive timeouts; an explicit `timeout: 0` disables its per-call deadline. The runner's 300 s per-test hang guard still applies. Retry fixtures audit the actual parent spawn options as well as child deadlines.
 - Assert the reason a command refuses, not only its exit code. A refusal for the wrong reason passes an exit-code check while the guarded code is gone.
 
 ## Tools

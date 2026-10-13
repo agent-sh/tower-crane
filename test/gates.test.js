@@ -122,7 +122,6 @@ function submitTestsFixture(h, sha, keep, settings = []) {
   h.ok(['task', 'add', '--title', 'Change', '--acceptance', 'test the behavior']);
   h.ok(['claim', 'T1', '--agent', 'w-1']);
   h.ok(['submit', 'T1', '--sha', sha, '--branch', 'fixture-change', '--agent', 'w-1']);
-  h.env.TOWER_CRANE_TMP = path.join(h.base, 'gate-tmp');
 }
 
 function testOnlyFixture(t, mixed = false) {
@@ -589,6 +588,21 @@ test('merge checks the gates as they stand, not only the accepted status', (t) =
   const merged = cli.run(['merge', 'T1'], { GATE_OUT: out, GATE_OK: '1' });
   assert.equal(merged.code, 0, merged.stderr);
   assert.ok(fs.existsSync(out), 'with the gates passing again, the merge gate runs');
+});
+
+test('a gate run from a fixture keeps its temp directory under the fixture', (t) => {
+  const h = makeRepo(t);
+  const sha = manifestTask(h, { submitted: { 'test/ok.test.js': "require('node:test')('ok', () => {});\n" } });
+  submitTestsFixture(h, sha);
+  // The command logs the TMPDIR it sees. Without a gate root in the fixture, that is the shared temp directory.
+  const log = path.join(h.base, 'tmpdir.log');
+  const probe = path.join(h.base, 'probe.js');
+  fs.writeFileSync(probe, `require('node:fs').appendFileSync(${JSON.stringify(log)}, process.env.TMPDIR + '\\n');\n`);
+  h.ok(['project', 'set', '--tests-mode', 'run-only', '--tests-cmd', `${shellQuote(process.execPath)} ${shellQuote(probe)}`]);
+  const result = h.run(['check', 'tests', 'T1', '--agent', 'checker']);
+  assert.equal(result.code, 0, result.stdout + result.stderr);
+  const [tmpdir] = fs.readFileSync(log, 'utf8').trim().split('\n');
+  assert.ok(tmpdir.startsWith(path.join(h.base, 'gate-tmp') + path.sep), tmpdir);
 });
 
 function readEvents(h) {

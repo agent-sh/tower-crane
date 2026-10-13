@@ -55,7 +55,16 @@ cp.spawnSync=(cmd,args,opts)=>{
   h.ok(['brief', 'set', 'T1', '-'], { input: '# Change\n\nImplement the acceptance.\n' });
   h.submit = (id = 'T1', sha = h.sha, pr = '7') => {
     h.ok(['claim', id, '--agent', 'worker']);
+    // A worker's submit refuses pending or failing CI (T149), so the head is submitted while its
+    // CI reads green. The CI the test set returns before any reaction runs.
+    const before = h.github();
+    const ciAtSubmit = before.ci[sha];
+    before.ci[sha] = 'success';
+    h.saveGithub(before);
     h.ok(['submit', id, '--sha', sha, '--pr', pr, '--agent', 'worker']);
+    const after = h.github();
+    after.ci[sha] = ciAtSubmit;
+    h.saveGithub(after);
   };
   h.consume = () => h.run(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
   h.logs = () => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
@@ -119,10 +128,24 @@ fs.writeFileSync('generated.txt', rows + '\\n');
   h.github = () => JSON.parse(fs.readFileSync(h.env.AUTOMATION_GITHUB, 'utf8'));
   h.saveGithub = (state) => fs.writeFileSync(h.env.AUTOMATION_GITHUB, JSON.stringify(state));
   h.logs = () => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
-  h.consume = () => h.run(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
+  h.consume = () => {
+    h.ok(['project', 'set', '--paused', 'manual generated conflict probe']);
+    return h.run(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
+  };
   h.submit = () => {
     h.ok(['claim', 'T1', '--agent', 'worker']);
+    // A worker's submit refuses pending CI and unknown mergeability (T149), so the head is submitted while GitHub reads it green and mergeable; the test's state returns before any reaction runs.
+    const before = h.github();
+    const ciAtSubmit = before.ci[h.sha];
+    const mergeAtSubmit = { mergeable: before.prs['7'].mergeable, mergeStateStatus: before.prs['7'].mergeStateStatus };
+    before.ci[h.sha] = 'success';
+    Object.assign(before.prs['7'], { mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' });
+    h.saveGithub(before);
     h.ok(['submit', 'T1', '--sha', h.sha, '--branch', 'fixture-change', '--pr', '7', '--agent', 'worker']);
+    const after = h.github();
+    after.ci[h.sha] = ciAtSubmit;
+    Object.assign(after.prs['7'], mergeAtSubmit);
+    h.saveGithub(after);
   };
   return h;
 }
@@ -160,6 +183,23 @@ test('generated-only conflicts merge, regenerate and push without rework or a wo
   assert.ok(task.evidence.some((e) => e.type === 'tests' && e.ok && e.sha === h.sha), 'old evidence remains historical');
   assert.ok(task.evidence.some((e) => e.type === 'tests' && e.ok && e.sha === task.sha), 'gates rerun on the repaired head');
   assert.ok(h.logs().some((e) => e.cmd === 'generated merge' && e.detail.phase === 'pushed'));
+});
+
+test('a generated-file conflict in a gate runs its checkout hooks with the gate scratch, not the caller temp root', (t) => {
+  const h = generatedSetup(t);
+  h.submit();
+  const inherited = path.join(h.base, 'inherited-tmp');
+  fs.mkdirSync(inherited);
+  // Git runs post-checkout for path checkouts too. The hook writes only in a gate worktree
+  // (<gate root>/tower-crane-*/wt), so the task worktree a repair creates stays out of it.
+  fs.writeFileSync(path.join(h.repo, '.git', 'hooks', 'post-checkout'),
+    '#!/bin/sh\ncase "$(pwd)" in */tower-crane-*/wt) mkdir -p "$TMPDIR/tower-crane-hook-$$";; esac\n', { mode: 0o755 });
+  const env = { TMPDIR: inherited };
+  h.ok(['check', 'tests', 'T1', '--agent', 'orchestrator'], { env });
+  h.run(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator'], { env });
+  assert.ok(h.logs().some((e) => e.cmd === 'generated merge' && e.detail.phase === 'pushed'));
+  // Node's own compile cache also lands in TMPDIR, so only the hook's directories count.
+  assert.deepEqual(fs.readdirSync(inherited).filter((name) => name.startsWith('tower-crane-hook-')), []);
 });
 
 test('a sole docs conflict regenerates every declared output of its script', (t) => {
@@ -637,8 +677,155 @@ test('a passing gate reruns in the next reaction after its tests mode changes', 
   assert.equal(latest.tests_mode, 'none');
 });
 
+function reconciledFixture(t) {
+  const h = cachedFixture(t, 'reconciled-submission', (repo) => {
+    const h = setup(null, { repo });
+    h.submit();
+    h.consume();
+    return { sha: h.sha };
+  });
+  h.logs = () => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  h.reconcile = () => h.run(['wait', '--types', 'never', '--timeout', '0.01', '--agent', 'orchestrator']);
+  return h;
+}
+
+for (const reaction of ['submit', 'reconcile']) {
+  test(`${reaction} runs missing gates after a resubmitted revision's tests fail`, (t) => {
+    const h = reconciledFixture(t);
+    h.ok(['brief', 'set', 'T1', '-', '--agent', 'orchestrator'],
+      { input: '# Change\n\nVerify the revised acceptance.\n' });
+    h.ok(['project', 'set', '--tests-cmd', 'node -e "process.exit(1)"', '--tests-mode', 'run-only']);
+    h.ok(['submit', 'T1', '--sha', h.sha, '--agent', 'worker']);
+    const task = h.json(['task', 'show', 'T1']);
+    assert.equal(task.revision, 2);
+    assert.ok(task.evidence.every((e) => e.revision === 1), 'only historical evidence survives resubmission');
+    const checks = () => h.logs().filter((e) => e.cmd.startsWith('check '));
+    const count = checks().length;
+    if (reaction === 'reconcile') {
+      // T155's submit reaction recorded a revision-2 tests failure, then
+      // finished before clean and CI. Startup must recover those missing gates.
+      assert.equal(h.run(['check', 'tests', 'T1', '--agent', 'orchestrator']).code, 1);
+      const source = h.logs().findLast((e) => e.cmd === 'submit').id;
+      fs.appendFileSync(path.join(h.state, 'events.jsonl'), JSON.stringify({
+        at: new Date().toISOString(), agent: 'orchestrator', cmd: 'automation', task: 'T1',
+        detail: { source, phase: 'done' },
+      }) + '\n');
+      assert.equal(h.reconcile().code, 2);
+    } else {
+      assert.equal(h.run(['wait', '--after', '0', '--types', 'never', '--timeout', '0',
+        '--agent', 'orchestrator']).code, 2);
+    }
+    assert.deepEqual(checks().slice(count).map((e) => [e.cmd, e.detail.ok, e.detail.revision]),
+      [['check tests', false, 2], ['check clean', true, 2], ['check ci', true, 2]]);
+    const after = h.json(['task', 'show', 'T1']);
+    assert.equal(after.status, 'submitted', 'a failed gate still prevents acceptance');
+    assert.equal(after.gates.gates.find((g) => g.type === 'tests').ok, false);
+    h.reconcile();
+    assert.equal(checks().length, count + 3, 'current failures wait for retry and current passes are reused');
+  });
+}
+
+for (const obsolete of ['revision', 'sha']) {
+  for (const reaction of ['submit', 'reconcile']) {
+    test(`${reaction} runs software gates with only earlier ${obsolete} evidence`, (t) => {
+      const h = reconciledFixture(t);
+      // Keep an audited failure too: only a failure at the current revision
+      // and head can wait for an explicit retry.
+      h.env.FIXTURE_GATE_OK = '0';
+      assert.equal(h.run(['check', 'clean', 'T1']).code, 1);
+      delete h.env.FIXTURE_GATE_OK;
+      const previous = h.json(['task', 'show', 'T1']);
+      const checks = () => h.logs().filter((e) => e.cmd.startsWith('check '));
+      const count = checks().length;
+      let sha = h.sha;
+      if (obsolete === 'revision') {
+        h.ok(['brief', 'set', 'T1', '-', '--agent', 'orchestrator'],
+          { input: '# Change\n\nVerify the revised acceptance.\n' });
+      } else {
+        fs.appendFileSync(path.join(h.repo, 'README.md'), 'Resubmitted change.\n');
+        h.git(['add', 'README.md']);
+        h.git(['commit', '-qm', 'resubmitted head']);
+        sha = h.git(['rev-parse', 'HEAD']);
+        const github = JSON.parse(fs.readFileSync(h.env.AUTOMATION_GITHUB, 'utf8'));
+        github.prs[7].headRefOid = sha;
+        github.ci[sha] = 'success';
+        fs.writeFileSync(h.env.AUTOMATION_GITHUB, JSON.stringify(github));
+      }
+      h.ok(['submit', 'T1', '--sha', sha, '--agent', 'worker']);
+      const submitted = h.json(['task', 'show', 'T1']);
+      assert.equal(submitted.revision, obsolete === 'revision' ? 2 : previous.revision);
+      assert.deepEqual(submitted.evidence, previous.evidence, 'resubmission keeps historical receipts');
+      assert.ok(submitted.gates.gates.filter((g) => g.type !== 'review').every((g) => !g.ok));
+      if (reaction === 'reconcile') {
+        // A completed submit reaction must not suppress startup reconciliation.
+        const events = h.logs();
+        const source = events.findLast((e) => e.cmd === 'submit').id;
+        fs.appendFileSync(path.join(h.state, 'events.jsonl'), JSON.stringify({
+          at: new Date().toISOString(), agent: 'orchestrator', cmd: 'automation', task: 'T1',
+          detail: { source, phase: 'done' },
+        }) + '\n');
+        assert.deepEqual(h.json(['status']).gate_queue, { running: [], queued: [], blocked: [] });
+        assert.equal(h.reconcile().code, 2);
+      } else {
+        assert.equal(h.run(['wait', '--after', '0', '--types', 'never', '--timeout', '0',
+          '--agent', 'orchestrator']).code, 2);
+      }
+      assert.deepEqual(checks().slice(count).map((e) => [e.cmd, e.detail.ok, e.detail.sha, e.detail.revision]),
+        ['tests', 'clean', 'ci'].map((type) => [`check ${type}`, true, sha, submitted.revision]));
+      const after = h.json(['task', 'show', 'T1']);
+      assert.ok(after.gates.gates.filter((g) => g.type !== 'review').every((g) => g.ok));
+      assert.equal(after.status, 'submitted', 'software evidence does not replace independent review');
+      h.reconcile();
+      assert.equal(checks().length, count + 3, 'current receipts prevent duplicate runs');
+    });
+  }
+}
+
+for (const entries of ['absent', 'unaudited pass', 'unaudited failure']) {
+  test(`startup reconciles missing software evidence with ${entries} entries and an empty queue`, (t) => {
+    const h = reconciledFixture(t);
+    const tasks = h.readState('tasks.json');
+    const task = tasks.tasks[0];
+    if (entries === 'absent') task.evidence = [];
+    else for (const entry of task.evidence) entry.ok = entries === 'unaudited pass';
+    fs.writeFileSync(path.join(h.state, 'tasks.json'), JSON.stringify(tasks));
+    const events = h.logs().filter((e) => !['check tests', 'check clean', 'check ci'].includes(e.cmd));
+    fs.writeFileSync(path.join(h.state, 'events.jsonl'), events.map((e) => JSON.stringify(e) + '\n').join(''));
+    const before = h.json(['task', 'show', 'T1']);
+    assert.ok(before.gates.gates.filter((g) => g.type !== 'review').every((g) => !g.ok));
+    assert.deepEqual(h.json(['status']).gate_queue, { running: [], queued: [], blocked: [] });
+    assert.ok(events.some((e) => e.cmd === 'automation' && e.detail.phase === 'done'));
+
+    assert.equal(h.reconcile().code, 2);
+    const checks = h.logs().filter((e) => e.cmd.startsWith('check '));
+    assert.deepEqual(checks.map((e) => [e.cmd, e.detail.ok, e.detail.sha, e.detail.revision]),
+      ['tests', 'clean', 'ci'].map((type) => [`check ${type}`, true, h.sha, task.revision]));
+    const after = h.json(['task', 'show', 'T1']);
+    assert.ok(after.gates.gates.filter((g) => g.type !== 'review').every((g) => g.ok));
+    assert.equal(after.status, 'submitted', 'software evidence does not replace independent review');
+    h.reconcile();
+    assert.equal(h.logs().filter((e) => e.cmd.startsWith('check ')).length, 3, 'valid receipts prevent duplicate runs');
+  });
+}
+
+test('startup reconciles tests evidence staled by a tests keep setting change after a completed reaction', (t) => {
+  const h = reconciledFixture(t);
+  const checks = () => h.logs().filter((e) => e.cmd.startsWith('check '));
+  const before = checks();
+  assert.deepEqual(h.json(['status']).gate_queue, { running: [], queued: [], blocked: [] });
+  h.ok(['project', 'set', '--tests-keep', '["test/**","docs/**"]']);
+  const stale = h.json(['task', 'show', 'T1']).gates.gates.find((g) => g.type === 'tests');
+  assert.equal(stale.ok, false);
+  assert.match(stale.reason, /tests evidence no longer matches/);
+  assert.equal(h.reconcile().code, 2);
+  const added = checks().slice(before.length);
+  assert.deepEqual(added.map((e) => [e.cmd, e.detail.ok]), [['check tests', true]]);
+  assert.deepEqual(added[0].detail.gate_policy.keep, ['test/**', 'docs/**']);
+  assert.equal(h.json(['task', 'show', 'T1']).gates.gates.find((g) => g.type === 'tests').ok, true);
+});
+
 test('a failed gate at unchanged inputs waits for gates retry, which reruns it', (t) => {
-  const h = setup(t, { ci: 'pending' });
+  const h = setup(t);
   const marker = path.join(h.base, 'infra-failed-once');
   const script = path.join(h.base, 'flaky-tests.js');
   fs.writeFileSync(script, `const fs = require('node:fs');\nif (fs.existsSync(${JSON.stringify(marker)})) process.exit(0);\nfs.writeFileSync(${JSON.stringify(marker)}, '');\nprocess.exit(1);\n`);
@@ -705,6 +892,7 @@ test('a merge sends another conflicting PR to rework with real filenames and pre
   h.submit('T2', other, '8');
   h.reviewer('T1', 'reviewer');
   h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--sha', h.sha, '--ok', '--agent', 'reviewer']);
+  h.ok(['project', 'set', '--paused', 'manual conflict probe']);
   const before = h.git(['status', '--porcelain']);
   h.consume();
   const task = h.readState('tasks.json').tasks[1];
@@ -749,10 +937,14 @@ test('startup reconciles a newly conflicting PR after a merge happened without a
   conflicting.prs['8'].mergeStateStatus = 'DIRTY';
   h.saveGithub(conflicting);
   const before = h.git(['rev-parse', 'HEAD']);
-  const event = JSON.parse(h.ok(['wait', '--types', 'rework', '--timeout', '5', '--agent', 'orchestrator']));
+  // The CLI helper bounds hangs without imposing a reconciliation deadline.
+  const event = JSON.parse(h.ok(['wait', '--task', 'T2', '--types', 'rework', '--agent', 'orchestrator']));
   assert.equal(event.task, 'T2');
   const task = h.readState('tasks.json').tasks[1];
-  assert.equal(task.status, 'rework');
+  // The merge freed a worker slot, which may dispatch T2 at once. A lease-first
+  // spawn (Windows) claims it from the start; a reserved one leaves it in rework.
+  const refill = h.logs().findLast((e) => e.cmd === 'spawn' && e.task === 'T2' && e.detail.role === 'worker');
+  assert.equal(task.status, refill && !refill.detail.reserved ? 'in_progress' : 'rework');
   assert.match(task.notes.at(-1).text, /value\.js/);
   assert.equal(h.git(['rev-parse', 'HEAD']), before);
 });
@@ -792,15 +984,18 @@ test('a submitted PR that GitHub reports UNKNOWN, then CONFLICTING, goes to rewo
   h.git(['add', 'value.js']);
   h.git(['commit', '-qm', 'main moves value']);
   h.submit();
+  // Submit reads the PR's mergeability before this test turns it UNKNOWN; count only the reaction's reads.
+  const submitViews = h.github().calls.filter((a) => a[0] === 'pr' && a[1] === 'view').length;
   const github = h.github();
   Object.assign(github.prs['7'], { mergeable: 'CONFLICTING', mergeStateStatus: 'DIRTY', unknownViews: 1 });
   h.saveGithub(github);
+  h.ok(['project', 'set', '--paused', 'manual conflict probe']);
   h.consume();
   const task = h.readState('tasks.json').tasks[0];
   assert.equal(task.status, 'rework');
   assert.match(task.notes.at(-1).text, /conflicts with main: value\.js/);
   assert.equal(h.logs().filter((e) => ['check tests', 'check clean'].includes(e.cmd)).length, 0, 'no suite or clean runs');
-  assert.equal(h.github().calls.filter((a) => a[0] === 'pr' && a[1] === 'view').length, 2, 'the UNKNOWN read is retried once');
+  assert.equal(h.github().calls.filter((a) => a[0] === 'pr' && a[1] === 'view').length - submitViews, 2, 'the UNKNOWN read is retried once');
 });
 
 test('startup retains gate evidence when main moves and the submitted head stays mergeable', (t) => {
@@ -1316,6 +1511,313 @@ function configureHarness(h, { rules = false } = {}) {
     ...['model', 'profile', 'provider', 'effort', 'args'].flatMap((f) => ['--clear', f])]);
 }
 
+for (const tier of ['medium', 'easy..medium']) {
+test(`automation reworks a current ${tier} failed review once with its full findings, even before software passes`, (t) => {
+  const h = setup(t, { ci: 'pending' });
+  h.ok(['task', 'update', 'T1', '--tier', tier]);
+  h.submit();
+  h.ok(['project', 'set', '--paused', 'inspect review findings']);
+  h.reviewer('T1', 'reviewer');
+  const github = h.github();
+  const ref = 'https://github.com/acme/demo/pull/7#issuecomment-123';
+  const body = `Review (Tower Crane) at ${h.sha}\nVerdict: FAIL\nlib/change.js:12 - handle the missing input`;
+  github.comments = [{ id: 123, body, html_url: ref }];
+  h.saveGithub(github);
+  h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--sha', h.sha,
+    '--fail', '--summary', 'one blocking finding', '--ref', ref, '--agent', 'reviewer']);
+  h.consume();
+  const task = h.readState('tasks.json').tasks[0];
+  assert.equal(task.status, 'rework');
+  assert.equal(task.revision, 2);
+  const reason = h.logs().find((e) => e.cmd === 'rework').detail.reason;
+  assert.ok(reason.includes(body));
+  assert.ok(reason.includes(ref));
+  assert.ok(h.ok(['brief', 'get', 'T1']).includes(body));
+  h.consume();
+  assert.equal(h.logs().filter((e) => e.cmd === 'rework').length, 1, 'replay never reworks the review twice');
+});
+}
+
+for (const stale of ['head', 'revision', 'superseded verdict']) {
+  test(`automation ignores a failed review with a stale ${stale}`, (t) => {
+    const h = setup(t, { ci: 'pending' });
+    h.submit();
+    h.reviewer('T1', 'reviewer', stale === 'head' ? 'aaaaaaa' : h.sha);
+    h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review',
+      '--sha', stale === 'head' ? 'aaaaaaa' : h.sha, '--fail', '--summary', 'old finding', '--agent', 'reviewer']);
+    if (stale === 'revision') {
+      h.ok(['rework', 'T1', '--reason', 'new revision', '--agent', 'orchestrator']);
+      h.submit();
+    } else if (stale === 'superseded verdict') {
+      h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--sha', h.sha,
+        '--ok', '--agent', 'reviewer']);
+    }
+    const before = h.logs().filter((e) => e.cmd === 'rework').length;
+    h.consume();
+    assert.equal(h.readState('tasks.json').tasks[0].status, 'submitted');
+    assert.equal(h.logs().filter((e) => e.cmd === 'rework').length, before);
+  });
+}
+
+for (const tier of ['medium', 'easy..medium']) {
+  for (const comment of ['missing', 'mismatched']) {
+    test(`a ${tier} ${comment} linked review comment keeps the wait host running`, (t) => {
+      const h = setup(t, { ci: 'pending' });
+      h.ok(['task', 'update', 'T1', '--tier', tier]);
+      h.submit();
+      h.ok(['project', 'set', '--paused', 'inspect review refusal']);
+      h.reviewer('T1', 'reviewer');
+      const ref = 'https://github.com/acme/demo/pull/7#issuecomment-123';
+      if (comment === 'mismatched') {
+        const github = h.github();
+        github.comments = [{ id: 123, html_url: ref,
+          body: `Review (Tower Crane) at ${'f'.repeat(40)}\nVerdict: FAIL\nwrong head` }];
+        h.saveGithub(github);
+      }
+      h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--sha', h.sha,
+        '--fail', '--summary', 'one blocking finding', '--ref', ref, '--agent', 'reviewer']);
+      const brief = h.ok(['brief', 'get', 'T1']);
+      const result = h.run(['wait', '--after', '0', '--types', 'never', '--timeout', '0.1',
+        '--agent', 'orchestrator']);
+      assert.equal(result.code, 2, result.stderr);
+      assert.match(result.stderr, /linked review comment does not identify/);
+      const task = h.readState('tasks.json').tasks[0];
+      assert.equal(task.status, 'submitted');
+      assert.equal(task.revision, 1);
+      assert.equal(h.ok(['brief', 'get', 'T1']), brief);
+    });
+  }
+}
+
+test('observation-only waits retain ranged full-findings recovery', (t) => {
+  const h = setup(t, { ci: 'pending' });
+  h.ok(['task', 'update', 'T1', '--tier', 'easy..medium']);
+  h.submit();
+  h.ok(['project', 'set', '--paused', 'inspect observed recovery']);
+  h.reviewer('T1', 'reviewer');
+  const ref = 'https://github.com/acme/demo/pull/7#issuecomment-123';
+  const body = `Review (Tower Crane) at ${h.sha}\nVerdict: FAIL\nlib/change.js:12 - handle the missing input`;
+  const github = h.github();
+  github.comments = [{ id: 123, body, html_url: ref }];
+  h.saveGithub(github);
+  h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--sha', h.sha,
+    '--fail', '--summary', 'one blocking finding', '--ref', ref, '--agent', 'reviewer']);
+  const spawns = h.logs().filter((e) => e.cmd === 'spawn').length;
+  const result = h.run(['wait', '--observe', '--after', '0', '--types', 'never', '--timeout', '0.1',
+    '--agent', 'orchestrator']);
+  assert.equal(result.code, 2, result.stderr);
+  assert.equal(h.readState('tasks.json').tasks[0].status, 'rework');
+  assert.equal(h.readState('tasks.json').tasks[0].revision, 2);
+  assert.ok(h.ok(['brief', 'get', 'T1']).includes(body));
+  assert.ok(h.ok(['brief', 'get', 'T1']).includes(ref));
+  assert.equal(h.logs().filter((e) => e.cmd === 'spawn').length, spawns);
+});
+
+for (const command of ['accept', 'spawn review']) {
+  test(`${command} sends a current failed review to full-findings rework instead of repeating review`, (t) => {
+    const h = setup(t, { ci: 'pending' });
+    h.submit();
+    h.reviewer('T1', 'reviewer');
+    const ref = 'https://github.com/acme/demo/pull/7#issuecomment-456';
+    const body = `Review (Tower Crane) at ${h.sha}\nVerdict: FAIL\nlib/change.js:22 - reject the empty request`;
+    const github = h.github();
+    github.comments = [{ id: 456, body, html_url: ref }];
+    h.saveGithub(github);
+    h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--sha', h.sha,
+      '--fail', '--summary', 'one blocking finding', '--ref', ref, '--agent', 'reviewer']);
+    const before = h.logs().filter((e) => e.cmd === 'spawn').length;
+    const args = command === 'accept' ? ['accept', 'T1'] : ['spawn', '--task', 'T1', '--role', 'review'];
+    const result = h.run([...args, '--agent', 'orchestrator']);
+    assert.equal(result.code, 1, result.stderr || result.stdout);
+    const task = h.readState('tasks.json').tasks[0];
+    assert.equal(task.status, 'rework');
+    assert.equal(task.revision, 2);
+    assert.ok(h.ok(['brief', 'get', 'T1']).includes(body));
+    assert.ok(h.ok(['brief', 'get', 'T1']).includes(ref));
+    assert.equal(h.logs().filter((e) => e.cmd === 'spawn').length, before);
+    assert.equal(h.logs().filter((e) => e.cmd.startsWith('check ')).length, 0);
+  });
+}
+
+function refillFixture(t) {
+  const h = cachedFixture(null, 'automation-refill', (repo) => {
+    const h = setup(null, { ci: 'pending', repo });
+    configureHarness(h);
+    h.ok(['project', 'set', '--workers', '1']);
+    for (const id of ['T2', 'T3', 'T4']) {
+      h.ok(['task', 'add', '--title', id, '--acceptance', 'works', '--tier', 'easy',
+        ...(id === 'T4' ? ['--dep', 'T3'] : [])]);
+      h.ok(['brief', 'set', id, '-'], { input: `Implement ${id}.\n` });
+    }
+    const script = path.join(h.base, 'refill-worker.js');
+    fs.writeFileSync(script, `const fs = require('node:fs'), cp = require('node:child_process'), path = require('node:path');
+const task = process.env.TOWER_CRANE_TASK;
+cp.execFileSync(process.execPath, [${JSON.stringify(BIN)}, 'claim', task], { stdio: 'pipe' });
+const file = path.join(process.env.AUTOMATION_CONTEXT_DIR, task);
+fs.writeFileSync(file, '');
+fs.writeFileSync(file + '.prompt', process.argv[2]);
+if (process.env.REFILL_ORPHAN) {
+  const child = cp.spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+  fs.writeFileSync(file + '.orphan', String(child.pid));
+}
+const poll = () => fs.existsSync(file + '.go') ? fs.writeFileSync(file + '.exited', '') : setTimeout(poll, 25);
+poll();
+`);
+    h.ok(['ladder', 'set', 'easy', '--command', JSON.stringify([process.execPath, script, '{prompt}'])]);
+    return { sha: h.sha };
+  });
+  h.github = () => JSON.parse(fs.readFileSync(h.env.AUTOMATION_GITHUB, 'utf8'));
+  h.saveGithub = (state) => fs.writeFileSync(h.env.AUTOMATION_GITHUB, JSON.stringify(state));
+  h.submit = (id = 'T1', agent = 'worker') => {
+    h.ok(['claim', id, '--agent', agent]);
+    // A worker's submit refuses pending or failing CI (T149), so the head is submitted while its
+    // CI reads green. The CI the test set returns after the submit.
+    const before = h.github();
+    const ciAtSubmit = before.ci[h.sha];
+    before.ci[h.sha] = 'success';
+    h.saveGithub(before);
+    h.ok(['submit', id, '--sha', h.sha, '--pr', '7', '--agent', agent]);
+    const after = h.github();
+    after.ci[h.sha] = ciAtSubmit;
+    h.saveGithub(after);
+  };
+  h.logs = () => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  h.consume = () => h.run(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
+  h.marker = (id) => path.join(h.env.AUTOMATION_CONTEXT_DIR, id);
+  t.after(async () => {
+    const ids = h.readState('tasks.json').tasks.map((task) => task.id);
+    for (const id of ids) fs.writeFileSync(`${h.marker(id)}.go`, '');
+    for (const id of ids) {
+      if (fs.existsSync(h.marker(id))) await waitFor(`${h.marker(id)}.exited`);
+    }
+    await h.cleanup();
+  });
+  return h;
+}
+
+test('a ranged review recovery refusal does not stop unrelated gates or worker refill', async (t) => {
+  const h = refillFixture(t);
+  h.ok(['task', 'update', 'T1', '--tier', 'easy..medium']);
+  h.submit();
+  h.reviewer('T1', 'reviewer');
+  h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--sha', h.sha,
+    '--fail', '--summary', 'one blocking finding',
+    '--ref', 'https://github.com/acme/demo/pull/7#issuecomment-123', '--agent', 'reviewer']);
+  h.submit('T2', 'worker-2');
+  const result = h.run(['wait', '--after', '0', '--types', 'spawn', '--task', 'T3',
+    '--timeout', '15', '--agent', 'orchestrator']);
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(JSON.parse(result.stdout).task, 'T3');
+  assert.match(result.stderr, /linked review comment does not identify/);
+  assert.notEqual(await waitFor(h.marker('T3')), null);
+  assert.ok(h.logs().some((e) => e.task === 'T2' && e.cmd === 'check tests'),
+    'the unrelated submission still runs its software gates');
+  const task = h.readState('tasks.json').tasks[0];
+  assert.equal(task.status, 'submitted');
+  assert.equal(task.revision, 1);
+});
+
+test('automation retains an exited worker claim until its lost monitor process group is empty', {
+  skip: process.platform !== 'linux',
+}, async (t) => {
+  const h = refillFixture(t);
+  const spawn = h.json(['spawn', '--task', 'T1', '--agent', 'orchestrator'], { env: { REFILL_ORPHAN: '1' } });
+  assert.notEqual(await waitFor(`${h.marker('T1')}.orphan`), null);
+  const orphan = Number(fs.readFileSync(`${h.marker('T1')}.orphan`, 'utf8'));
+  const cursor = String(fs.statSync(path.join(h.state, 'events.jsonl')).size);
+  const waiting = h.runAsync(['wait', '--after', cursor, '--types', 'spawn', '--timeout', '15', '--agent', 'orchestrator']);
+  try {
+    process.kill(spawn.monitor_pid, 'SIGKILL');
+    process.kill(spawn.pid, 'SIGKILL');
+    fs.writeFileSync(`${h.marker('T1')}.exited`, '');
+    await new Promise((resolve) => setTimeout(resolve, 2200));
+    assert.equal(h.readState('tasks.json').tasks[0].claim?.agent, spawn.agent, 'the orphan keeps its worker slot');
+    assert.equal(fs.existsSync(h.marker('T3')), false);
+  } finally {
+    try { process.kill(orphan, 'SIGKILL'); } catch (e) { if (e.code !== 'ESRCH') throw e; }
+  }
+  const result = await waiting;
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(JSON.parse(result.stdout).task, 'T3');
+  assert.notEqual(await waitFor(h.marker('T3')), null);
+});
+
+test('automation reports unchanged dispatch refusals once and retries after the brief changes', async (t) => {
+  const h = refillFixture(t);
+  for (const id of ['T1', 'T2', 'T3', 'T4']) h.ok(['task', 'update', id, '--status', 'cancelled']);
+  h.ok(['task', 'add', '--title', 'Missing brief', '--acceptance', 'works', '--tier', 'easy']);
+  const started = path.join(h.base, 'wait-started');
+  const waiter = h.runAsync(['wait', '--types', 'spawn', '--timeout', '15', '--agent', 'orchestrator'],
+    { hooks: { HOOK_WATCH_READY: started } });
+  assert.notEqual(await waitFor(started), null);
+  for (let i = 0; i < 3; i++) {
+    h.ok(['task', 'note', 'T5', `unrelated progress ${i}`]);
+    await new Promise((resolve) => setTimeout(resolve, 1100));
+  }
+  h.ok(['brief', 'set', 'T5', '-'], { input: 'Implement the acceptance.\n' });
+  const result = await waiter;
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(JSON.parse(result.stdout).task, 'T5');
+  assert.equal(result.stderr.match(/has no brief/g)?.length, 1, result.stderr);
+  assert.notEqual(await waitFor(h.marker('T5')), null, 'the changed brief retries dispatch');
+});
+
+test('automation dispatches rework-ready work with the failed review findings', async (t) => {
+  const h = refillFixture(t);
+  h.ok(['task', 'update', 'T4', '--dep', 'T1']);
+  h.submit();
+  h.reviewer('T1', 'reviewer');
+  h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--sha', h.sha,
+    '--fail', '--summary', 'lib/change.js:12 - handle the missing input', '--agent', 'reviewer']);
+  h.consume();
+  assert.notEqual(await waitFor(h.marker('T1')), null, 'rework is dispatched without a manual command');
+  const task = h.readState('tasks.json').tasks[0];
+  assert.equal(task.status, 'in_progress');
+  assert.equal(task.claim.from, 'rework');
+  assert.equal(task.revision, 2);
+  assert.match(fs.readFileSync(`${h.marker('T1')}.prompt`, 'utf8'), /lib\/change.js:12 - handle the missing input/);
+  h.consume();
+  assert.equal(h.logs().filter((e) => e.cmd === 'rework').length, 1);
+  assert.equal(h.logs().filter((e) => e.cmd === 'spawn' && e.detail.role === 'worker').length, 1);
+});
+
+for (const trigger of ['exit', 'release --dead', 'merge']) {
+  test(`automation refills after ${trigger} in unblocking-first order and concurrent watchers respect the worker limit`, async (t) => {
+    const h = refillFixture(t);
+    if (trigger === 'merge') {
+      h.submit();
+      h.reviewer('T1', 'reviewer');
+      h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--sha', h.sha,
+        '--ok', '--agent', 'reviewer']);
+      const github = h.github();
+      github.ci[h.sha] = 'success';
+      h.saveGithub(github);
+    } else {
+      h.json(['spawn', '--task', 'T1', '--agent', 'orchestrator']);
+      assert.notEqual(await waitFor(h.marker('T1')), null, 'first worker claims the slot');
+      fs.writeFileSync(`${h.marker('T1')}.go`, '');
+      assert.notEqual(await waitFor(`${h.marker('T1')}.exited`), null);
+      if (trigger === 'release --dead') {
+        // Foreground observation records the exit before the explicit batch release.
+        h.run(['wait', '--after', '0', '--observe', '--types', 'worker-exited', '--timeout', '5', '--agent', 'orchestrator']);
+        h.ok(['release', '--dead', '--agent', 'orchestrator']);
+      }
+    }
+    const cursor = trigger === 'release --dead' ? String(fs.statSync(path.join(h.state, 'events.jsonl')).size) : '0';
+    const watchers = [h.runAsync(['wait', '--after', cursor, '--task', 'T3', '--types', 'spawn', '--timeout', '15', '--agent', 'orchestrator']),
+      h.runAsync(['wait', '--after', cursor, '--task', 'T3', '--types', 'spawn', '--timeout', '15', '--agent', 'orchestrator'])];
+    const results = await Promise.all(watchers);
+    assert.ok(results.every((r) => r.code === 0 && JSON.parse(r.stdout).task === 'T3'), JSON.stringify(results));
+    assert.notEqual(await waitFor(h.marker('T3')), null, `the task unblocking T4 takes the free slot: ${JSON.stringify(results)}`);
+    const spawns = h.logs().filter((e) => e.cmd === 'spawn' && e.detail.role === 'worker');
+    assert.deepEqual(spawns.map((e) => e.task), trigger === 'merge' ? ['T3'] : ['T1', 'T3']);
+    const st = require('../lib/state').loadState(h.state);
+    assert.equal(require('../lib/tasks').workerHolders(st, Date.now()).length, 1);
+    h.consume();
+    assert.equal(h.logs().filter((e) => e.cmd === 'spawn' && e.detail.role === 'worker').length, spawns.length);
+  });
+}
+
 function startupContexts(h, withRules) {
   const startups = h.logs().filter((e) => e.cmd === 'startup');
   assert.deepEqual(startups.map((e) => e.detail.role), ['worker', 'reviewer']);
@@ -1712,6 +2214,7 @@ test('the head of the line that turns CONFLICTING goes to rework with its files 
   github.prs['7'].mergeable = 'CONFLICTING';
   github.prs['7'].mergeStateStatus = 'DIRTY';
   h.saveGithub(github);
+  h.ok(['project', 'set', '--paused', 'manual queue conflict probe']);
   h.consume();
   const [t1, t2] = h.readState('tasks.json').tasks;
   assert.equal(t1.status, 'rework');

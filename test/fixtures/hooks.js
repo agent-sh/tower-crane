@@ -76,6 +76,16 @@ if (env.HOOK_PIDNS) {
   };
 }
 
+// HOOK_NO_SH=1: the CLI finds no /bin/sh, as on Windows, so it has no POSIX
+// lease gate and spawns its workers through the launch handshake.
+if (env.HOOK_NO_SH && path.basename(process.argv[1] || '') === 'tower-crane.js') {
+  const exists = fs.existsSync;
+  fs.existsSync = function noShell(file) {
+    if (file === '/bin/sh') return false;
+    return exists.call(this, file);
+  };
+}
+
 if (env.HOOK_CLOCK_FILE) {
   const DateClass = Date;
   const clock = () => Number(fs.readFileSync(env.HOOK_CLOCK_FILE, 'utf8'));
@@ -153,6 +163,10 @@ function before(name, args) {
   if (env.HOOK_STDIN_READY && (name === 'readFileSync' || name === 'readSync') && target === 0) {
     real.writeFileSync(env.HOOK_STDIN_READY, '');
   }
+  // HOOK_STOP_GO=FILE stops the dispatch after it records a worker's lease,
+  // before it lets the supervisor launch the harness (the Windows handshake).
+  if (env.HOOK_STOP_GO && name === 'writeFileSync' && typeof target === 'string' && path.basename(target) === 'go'
+    && path.basename(process.argv[1]) === 'tower-crane.js' && first('go')) stop(env.HOOK_STOP_GO);
   // HOOK_JITTER_MS=MS: a random pause of up to MS before each call on the state.
   if (env.HOOK_JITTER_MS && (inState(target) || inState(args[1]))) sleep(Math.floor(Math.random() * Number(env.HOOK_JITTER_MS)));
   // State commits precede board replacement; expose that interval to readers.
@@ -180,6 +194,10 @@ function after(name, args, rawArgs = args) {
   const target = args[0];
   if (env.HOOK_STOP_RENDER && name === 'renameSync' && args[1] === path.join(STATE, 'sketch.md')
     && path.basename(process.argv[1]) === 'tower-crane.js' && process.argv.includes('spawn') && first('render')) stop(env.HOOK_STOP_RENDER);
+  // HOOK_STOP_STARTED=FILE stops the dispatch after it reads its supervisor's startup receipt,
+  // before its spawn is committed, so the supervisor's startup window can close first.
+  if (env.HOOK_STOP_STARTED && name === 'rmSync' && path.basename(target) === 'started.json'
+    && path.basename(process.argv[1]) === 'tower-crane.js' && first('started')) stop(env.HOOK_STOP_STARTED);
   // HOOK_PAUSE_ON=FILE stops at HOOK_PAUSED after its first read; HOOK_PAUSE_PROCESS
   // optionally limits the pause to one executable's basename.
   if (env.HOOK_PAUSE_ON && name === 'readFileSync' && inState(target) && path.basename(target) === env.HOOK_PAUSE_ON
@@ -367,11 +385,12 @@ if (env.HOOK_SPAWN_FAIL) {
 if (env.HOOK_USAGE_HARNESS) {
   const original = cp.spawn;
   cp.spawn = function usageHarness(file, args, options) {
-    if (file === env.HOOK_USAGE_HARNESS) {
+    // The supervisor's lease gate starts its harness after `tower-crane-gate`.
+    const gated = file === '/bin/sh' && args[2] === 'tower-crane-gate' && args[3] === env.HOOK_USAGE_HARNESS;
+    if (file === env.HOOK_USAGE_HARNESS || gated) {
       if (env.HOOK_USAGE_ARGV) fs.writeFileSync(env.HOOK_USAGE_ARGV, JSON.stringify(args));
-      return original.call(this, process.execPath, [
-        require('node:path').join(__dirname, 'usage-harness.js'), env.HOOK_USAGE_FILE,
-      ], options);
+      const stub = [require('node:path').join(__dirname, 'usage-harness.js'), env.HOOK_USAGE_FILE];
+      return original.call(this, gated ? file : process.execPath, gated ? [...args.slice(0, 3), process.execPath, ...stub] : stub, options);
     }
     return original.call(this, file, args, options);
   };
