@@ -5,7 +5,17 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { makeRepo, fixtureLadder, ROOT } = require('./helpers');
+const A = require('../lib/agents');
 const L = require('../lib/ladder');
+
+test('every ladder harness declares its sandbox capabilities', () => {
+  assert.deepEqual(Object.keys(A.CAPABILITIES).sort(), [...L.HARNESSES].sort());
+  for (const capability of Object.values(A.CAPABILITIES)) {
+    assert.equal(typeof capability.sandbox, 'boolean');
+    assert.equal(typeof capability.osSandbox, 'boolean');
+    assert.ok(!capability.osSandbox || capability.sandbox);
+  }
+});
 
 const PINNED = fixtureLadder().ladder;
 
@@ -374,7 +384,7 @@ test('a ladder write is evented and re-renders the sketch with the ladder and ea
   assert.match(html, /<a href="#T1" class="node s-ready"[^>]*aria-label="T1 Small fix, ready, tier easy"/, 'the graph shows the task tier');
   const md = fs.readFileSync(path.join(h.state, 'sketch.md'), 'utf8');
   assert.match(md, /^\| easy \| codex \(default\) \| fixture-model \| medium \|$/m);
-  assert.match(md, /^\| T1 \| Small fix \| code \| S \| easy \| 0 \|$/m, 'the ready table shows the tier');
+  assert.match(md, /^\| T1 \| Small fix \(no brief\) \| code \| S \| easy \| 0 \|$/m, 'the ready table shows the tier and the missing brief');
 });
 
 test('tasks take a tier from kind and size unless one is given', (t) => {

@@ -12,6 +12,13 @@ const L = require('../lib/ladder');
 const events = (h) => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
 const as = (agent) => ({ env: { TOWER_CRANE_AGENT: agent } });
 
+// Refused settings can renew the session heartbeat without changing tasks.
+function tasks(h) {
+  const doc = h.readState('tasks.json');
+  delete doc.orchestrator_lease;
+  return doc;
+}
+
 // A spawn record as spawn writes it, so an agent name has a recorded role.
 function recordSpawn(h, agent, role) {
   fs.appendFileSync(path.join(h.state, 'events.jsonl'), `${JSON.stringify({
@@ -98,12 +105,12 @@ test('research source policy and waivers retain owner-required authority', (t) =
     [['project', 'set', '--research-min-sources', '4'], 'research.min_sources'],
     [['accept', 'T1', '--waive', 'sources', '--reason', 'owner exception'], 'waive.sources'],
   ]) {
-    const before = { project: h.readState('project.json'), tasks: h.readState('tasks.json') };
+    const before = { project: h.readState('project.json'), tasks: tasks(h) };
     const r = h.run(args, as('orchestrator'));
     assert.equal(r.code, 1, r.stderr);
     assert.match(r.stderr, /owner-required; opened D/);
     assert.deepEqual(h.readState('decisions.json').decisions.at(-1).escalation.settings, [key]);
-    assert.deepEqual({ project: h.readState('project.json'), tasks: h.readState('tasks.json') }, before);
+    assert.deepEqual({ project: h.readState('project.json'), tasks: tasks(h) }, before);
     assert.equal(h.run(args, as('worker-T1-1')).code, 1);
   }
   h.ok(['project', 'set', '--research-min-sources', '4']);
@@ -122,13 +129,13 @@ test('research defaults and operational model tuning need no new authority grant
 test('the orchestrator changes operational settings under its own identity; a worker is sent to the orchestrator', (t) => {
   const h = setup(t);
   for (const args of OPERATIONAL) {
-    const before = { project: h.readState('project.json'), tasks: h.readState('tasks.json') };
+    const before = { project: h.readState('project.json'), tasks: tasks(h) };
     for (const worker of [as('worker-T1-1'), { env: { TOWER_CRANE_AGENT: 'worker-T1-1' }, extra: ['--agent', 'orchestrator'] }]) {
       const r = h.run([...args, ...(worker.extra || [])], { env: worker.env });
       assert.equal(r.code, 1, `${args.join(' ')}: ${r.stderr}`);
       assert.match(r.stderr, /only the orchestrator or the owner/);
       assert.match(r.stderr, /msg --to orchestrator/);
-      assert.deepEqual({ project: h.readState('project.json'), tasks: h.readState('tasks.json') }, before);
+      assert.deepEqual({ project: h.readState('project.json'), tasks: tasks(h) }, before);
     }
     const r = h.run(args, as('orchestrator'));
     assert.equal(r.code, 0, `${args.join(' ')}: ${r.stderr}`);
@@ -140,7 +147,7 @@ test('the orchestrator changes operational settings under its own identity; a wo
   assert.equal(p.limits.workers, 3);
   assert.equal(p.ladder.easy.model, 'fixture-other');
   assert.equal(events(h).findLast((e) => e.cmd === 'project set').detail.authority, 'orchestrator');
-  assert.equal(h.readState('tasks.json').tasks[0].needs_owner, null);
+  assert.equal(tasks(h).tasks[0].needs_owner, null);
   assert.equal(h.readState('decisions.json').decisions.length, 0);
 });
 
@@ -198,6 +205,7 @@ test('owner-required changes by the orchestrator open one decision and change no
     [['project', 'set', '--merge-admin', 'true'], ['merge.admin']],
     [['project', 'set', '--decision-delegation', '{"orchestrator_technical":true}'], ['decision_delegation']],
     [['project', 'set', '--sandbox', '{"write":["/tmp/x"]}'], ['sandbox']],
+    [['project', 'set', '--session-bus', 'true'], ['sandbox.session_bus']],
     [['project', 'set', '--env', '{"A":"1"}'], ['env']],
     [['project', 'set', '--budget-hours', '5'], null],
     [['ladder', 'set', 'easy', '--scope', '{}'], ['scope']],
@@ -207,7 +215,7 @@ test('owner-required changes by the orchestrator open one decision and change no
   ];
   let opened = 0;
   for (const [args, escalation] of cases) {
-    const before = { project: h.readState('project.json'), tasks: h.readState('tasks.json') };
+    const before = { project: h.readState('project.json'), tasks: tasks(h) };
     const r = h.run(args, as('orchestrator'));
     if (!escalation) {
       // Lowering the budget is operational.
@@ -217,7 +225,7 @@ test('owner-required changes by the orchestrator open one decision and change no
     opened += 1;
     assert.equal(r.code, 1, `${args.join(' ')}: ${r.stderr}`);
     assert.match(r.stderr, new RegExp(`owner-required; opened D${opened} for the owner`));
-    assert.deepEqual({ project: h.readState('project.json'), tasks: h.readState('tasks.json') }, before);
+    assert.deepEqual({ project: h.readState('project.json'), tasks: tasks(h) }, before);
     const d = h.readState('decisions.json').decisions.at(-1);
     assert.equal(d.id, `D${opened}`);
     assert.equal(d.asked_by, 'orchestrator');
@@ -456,11 +464,11 @@ test('an orchestrator init with an owner-required setting is told to init withou
 test('the orchestrator cannot downgrade a code task to docs, which drops its tests gate', (t) => {
   const h = setup(t);
   h.ok(['task', 'add', '--title', 'Code change', '--acceptance', 'it works']);
-  const before = h.readState('tasks.json');
+  const before = tasks(h);
   const r = h.run(['task', 'update', 'T2', '--kind', 'docs'], as('orchestrator'));
   assert.equal(r.code, 1, r.stderr);
   assert.match(r.stderr, /task\.downgrade is owner-required; opened D1 /);
-  assert.deepEqual(h.readState('tasks.json'), before);
+  assert.deepEqual(tasks(h), before);
   assert.deepEqual(h.readState('decisions.json').decisions[0].escalation, {
     settings: ['task.downgrade'], change: { task: 'T2', kind: 'docs' },
   });
@@ -484,11 +492,11 @@ test('a submitted task keeps its kind until it is sent back for rework', (t) => 
   h.ok(['claim', 'T2', '--agent', 'worker-T2-1']);
   h.ok(['submit', 'T2', '--sha', sha, '--branch', 'fixture-change', '--pr', '7', '--agent', 'worker-T2-1']);
   for (const agent of ['owner', 'orchestrator', 'worker-T2-1']) {
-    const before = { tasks: h.readState('tasks.json'), decisions: h.readState('decisions.json') };
+    const before = { tasks: tasks(h), decisions: h.readState('decisions.json') };
     const r = h.run(['task', 'update', 'T2', '--kind', 'docs'], as(agent));
     assert.equal(r.code, 1, `${agent}: ${r.stderr}`);
     assert.match(r.stderr, /on a submitted or accepted task is refused; rework the task first/);
-    assert.deepEqual({ tasks: h.readState('tasks.json'), decisions: h.readState('decisions.json') }, before);
+    assert.deepEqual({ tasks: tasks(h), decisions: h.readState('decisions.json') }, before);
   }
   h.ok(['rework', 'T2', '--reason', 'move to docs', '--agent', 'owner']);
   h.ok(['task', 'update', 'T2', '--kind', 'docs']);
@@ -497,14 +505,74 @@ test('a submitted task keeps its kind until it is sent back for rework', (t) => 
 
 test('cancelling a task that waits on the owner needs the owner', (t) => {
   const h = setup(t);
-  const before = h.readState('tasks.json');
+  const before = tasks(h);
   const r = h.run(['task', 'update', 'T1', '--status', 'cancelled'], as('orchestrator'));
   assert.equal(r.code, 1, r.stderr);
   assert.match(r.stderr, /task\.cancel_needs_owner is owner-required; opened D1 /);
-  assert.deepEqual(h.readState('tasks.json'), before);
+  assert.deepEqual(tasks(h), before);
   const worker = h.run(['task', 'update', 'T1', '--status', 'cancelled'], as('worker-T1-1'));
   assert.equal(worker.code, 1);
   assert.match(worker.stderr, /only the owner/);
   h.ok(['task', 'update', 'T1', '--status', 'cancelled']);
   assert.equal(h.json(['task', 'show', 'T1']).status, 'cancelled');
+});
+
+test('opencode MCP authority and dispatch read the same inline configuration', (t) => {
+  const h = setup(t);
+  h.ok(['brief', 'set', 'T1', '-'], { input: 'probe inline MCP\n' });
+  const user = path.join(h.base, 'inline-user');
+  fs.mkdirSync(user);
+  const env = {
+    HOME: user, USERPROFILE: user, XDG_CONFIG_HOME: path.join(user, '.config'),
+    XDG_DATA_HOME: path.join(user, '.local', 'share'), OPENCODE_CONFIG: '', OPENCODE_CONFIG_DIR: '',
+    OPENCODE_CONFIG_CONTENT: JSON.stringify({ mcp: {
+      inlineDocs: { type: 'local', command: ['node', 'inline-docs.js'] },
+    } }),
+  };
+  h.ok(['ladder', 'set', 'hard', '--harness', 'opencode', '--model', 'fixture',
+    '--clear', 'profile', '--clear', 'effort', '--clear', 'args']);
+  h.ok(['ladder', 'set', 'hard', '--mcp', '["inlineDocs"]'], { env: { ...env, TOWER_CRANE_AGENT: 'orchestrator' } });
+  assert.equal(h.readState('decisions.json').decisions.length, 0);
+  const preview = h.json(['spawn', '--task', 'T1', '--role', 'hard', '--dry-run'], { env });
+  assert.deepEqual(preview.home.mcp, ['inlineDocs']);
+  const before = h.readState('project.json');
+  const missing = h.run(['ladder', 'set', 'hard', '--mcp', '["inlineMissing"]'],
+    { env: { ...env, TOWER_CRANE_AGENT: 'orchestrator' } });
+  assert.equal(missing.code, 1, missing.stderr);
+  assert.match(missing.stderr, /inlineMissing.*OPENCODE_CONFIG_CONTENT/);
+  assert.deepEqual(h.readState('project.json'), before);
+});
+
+test('moving confined roles to opencode requires the owner despite its private home and native edit rules', (t) => {
+  const h = setup(t);
+  for (const rung of L.RUNGS) h.ok(['ladder', 'set', rung, '--model', 'fixture',
+    '--clear', 'profile', '--clear', 'effort', '--clear', 'args', '--clear', 'provider']);
+  h.ok(['ladder', 'harness', 'claude']);
+  writeUser(h, { ladder: { research: { fallbacks: [{ model: 'backup' }] } } });
+  for (const [index, args] of [
+    ...['hard', 'review', 'small', 'research'].map((rung) => ['ladder', 'set', rung, '--harness', 'opencode', '--model', 'fixture']),
+    ['ladder', 'harness', 'opencode'],
+  ].entries()) {
+    const before = h.readState('project.json');
+    const result = h.run(args, as('orchestrator'));
+    assert.equal(result.code, 1, result.stderr);
+    assert.match(result.stderr, new RegExp(`ladder\\.reach is owner-required; opened D${index + 1} `));
+    assert.deepEqual(h.readState('project.json'), before);
+    const routes = h.readState('decisions.json').decisions.at(-1).escalation.change.ladder;
+    assert.ok(Object.values(routes).every((rung) => rung.unconfined.every((route) => route.harness === 'opencode')));
+  }
+  assert.equal(A.CAPABILITIES.opencode.sandbox, false);
+  assert.equal(A.CAPABILITIES.opencode.osSandbox, false);
+});
+
+test('native opencode web tool names are operational like their agent-file aliases on an owner-selected route', (t) => {
+  const h = setup(t);
+  h.ok(['ladder', 'set', 'hard', '--harness', 'opencode', '--model', 'fixture',
+    '--clear', 'profile', '--clear', 'effort', '--clear', 'args']);
+  for (const tools of [['webfetch'], ['WebFetch'], ['websearch'], ['WebSearch'], ['webfetch', 'WebFetch', 'websearch', 'WebSearch']]) {
+    h.ok(['ladder', 'set', 'hard', '--tools', JSON.stringify(tools)], as('orchestrator'));
+    assert.deepEqual(h.readState('project.json').ladder.hard.tools, tools);
+    assert.equal(h.readState('decisions.json').decisions.length, 0);
+    assert.equal(events(h).findLast((event) => event.cmd === 'ladder set').detail.authority, 'orchestrator');
+  }
 });
