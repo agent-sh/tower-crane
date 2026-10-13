@@ -319,10 +319,14 @@ test('TOWER_CRANE_VIA=automation in the environment cannot write under another s
     assert.equal(events(), log, label);
   }
   // The holder's own write with the claim still renews its lease and records no engine provenance.
+  // A heartbeat renews once it is a sixtieth of the lease window old, so age it first.
+  const aged = h.readState('tasks.json');
+  aged.orchestrator_lease.heartbeat = new Date(Date.now() - 61000).toISOString();
+  h.writeState('tasks.json', aged);
   h.ok(['task', 'note', 'T1', 'holder continues'], { env: { ...holder.env, TOWER_CRANE_VIA: 'automation' } });
   const after = h.readState('tasks.json');
   assert.equal(after.orchestrator_lease.session_id, before.orchestrator_lease.session_id);
-  assert.notEqual(after.orchestrator_lease.heartbeat, before.orchestrator_lease.heartbeat);
+  assert.notEqual(after.orchestrator_lease.heartbeat, aged.orchestrator_lease.heartbeat);
   const note = events().trim().split('\n').map(JSON.parse).findLast((e) => e.cmd === 'task note');
   assert.equal(note.via, undefined);
 });
