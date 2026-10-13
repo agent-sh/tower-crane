@@ -46,7 +46,7 @@ async function measure(run) {
     h.json(['spawn', '--task', 'T1'], { env: { ...h.env, NODE_OPTIONS: `--require "${HOOKS}" --cpu-prof --cpu-prof-dir="${profiles}"` } });
     const monitor = S.readEvents(h.state).findLast((e) => e.cmd === 'spawn').detail.monitor_pid;
     waiter = cp.spawn(process.execPath, ['--cpu-prof', `--cpu-prof-dir=${profiles}`, '--require', HOOKS, BIN,
-      'wait', '--observe', '--agent', 'orchestrator', '--for', 'unused', '--timeout', '60'], {
+      'wait', '--agent', 'orchestrator', '--for', 'unused', '--timeout', '60'], {
       cwd: h.repo, env: h.env, stdio: ['ignore', 'ignore', 'pipe'],
     });
     let stderr = '';

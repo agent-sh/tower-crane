@@ -24,11 +24,12 @@ function largeFixture(t) {
   });
 }
 
-for (const silent of [false, true]) test(`idle wait reads no historical bytes on fallback ticks with a 50 MiB log (silent watch: ${silent})`, async (t) => {
+const waitModes = [{ observe: true, silent: false }, { observe: true, silent: true }, { observe: false, silent: false }];
+for (const { observe, silent } of waitModes) test(`idle wait reads no historical bytes on fallback ticks with a 50 MiB log (observe: ${observe}, silent watch: ${silent})`, async (t) => {
   const h = largeFixture(t);
   const meter = path.join(h.base, 'read-budget.json');
   const hook = path.join(__dirname, 'fixtures', 'events-read-budget.js');
-  const result = await h.runAsync(['wait', '--observe', '--agent', 'orchestrator', '--timeout', '3'], {
+  const result = await h.runAsync(['wait', ...(observe ? ['--observe'] : []), '--agent', 'orchestrator', '--timeout', '3'], {
     env: { EVENT_READ_BUDGET: meter, NODE_OPTIONS: `--require "${HOOKS}" --require "${hook}"`, ...(silent ? { HOOK_SILENT_WATCH: '1' } : {}) },
   });
   assert.equal(result.code, 2, result.stderr);
