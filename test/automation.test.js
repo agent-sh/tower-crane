@@ -2546,6 +2546,31 @@ test('revuto replies require an explicit resolution and later discussion reopens
   assert.ok(h.readState('tasks.json').tasks[0].evidence.some((e) => e.type === 'review' && e.ok));
 });
 
+// A poll can read the event log mid-append; that read counts as not yet.
+async function pollUntil(h, what, check) {
+  const ready = () => {
+    try { return check(); } catch (e) { if (e instanceof SyntaxError) return false; throw e; }
+  };
+  const deadline = Date.now() + 60000;
+  while (!ready()) {
+    if (Date.now() > deadline) throw new Error(`${what}: ${JSON.stringify(h.logs().slice(-10))}`);
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+}
+
+test('a reviewer that exits 1 without a verdict is replaced at the same head', async (t) => {
+  const h = setup(t);
+  configureHarness(h);
+  h.env.AUTOMATION_REVIEW_CRASH_ONCE = path.join(h.base, 'review-crashed');
+  const reviewers = () => h.logs().filter((e) => e.cmd === 'spawn' && e.detail.role === 'reviewer');
+  assert.equal((await h.runAsync(['spawn', '--task', 'T1', '--wait', '--agent', 'orchestrator'])).code, 0);
+  await pollUntil(h, 'replacement review', () => reviewers().length === 2
+    && h.readState('tasks.json').tasks[0].evidence.some((e) => e.type === 'review' && e.ok));
+  const exit = h.logs().find((e) => e.cmd === 'spawn exit' && e.detail.agent === reviewers()[0].detail.agent);
+  assert.equal(exit.detail.code, 1);
+  assert.equal(h.logs().some((e) => e.cmd === 'review held'), false);
+});
+
 test('a reviewer that exits without a verdict is not respawned at that head until a revuto thread changes', async (t) => {
   const h = setup(t);
   configureHarness(h);
@@ -2556,17 +2581,7 @@ test('a reviewer that exits without a verdict is not respawned at that head unti
   h.saveGithub(state);
   const reviewers = () => h.logs().filter((e) => e.cmd === 'spawn' && e.detail.role === 'reviewer');
   const held = () => h.logs().filter((e) => e.cmd === 'review held');
-  // A poll can read the event log mid-append; that read counts as not yet.
-  const ready = (check) => {
-    try { return check(); } catch (e) { if (e instanceof SyntaxError) return false; throw e; }
-  };
-  const until = async (what, check) => {
-    const deadline = Date.now() + 60000;
-    while (!ready(check)) {
-      if (Date.now() > deadline) throw new Error(`${what}: ${JSON.stringify(h.logs().slice(-10))}`);
-      await new Promise((resolve) => setTimeout(resolve, 25));
-    }
-  };
+  const until = (what, check) => pollUntil(h, what, check);
   const gone = (pid) => {
     try { process.kill(pid, 0); return false; } catch { return true; }
   };
@@ -2588,6 +2603,7 @@ test('a reviewer that exits without a verdict is not respawned at that head unti
   assert.equal(notice.to, 'orchestrator');
   assert.equal(notice.detail.agent, first);
   assert.equal(notice.detail.sha, h.sha);
+  assert.deepEqual(notice.detail.exit, { code: 0, signal: null });
   assert.match(notice.detail.reason, /Review passed; evidence refused: .*review ok refused; revuto \[P1\] comment 501/);
   assert.match(notice.detail.reason, /\[resolved\]/, 'the refusal names how the finding gets resolved');
   assert.deepEqual(notice.detail.revuto, ['[P1] comment 501 at value.js:1 (https://github.com/acme/demo/pull/7#discussion_r501)']);
@@ -2613,11 +2629,14 @@ test('a reviewer that exits without a verdict is not respawned at that head unti
   assert.deepEqual(held().map((e) => e.detail.agent), [first, second]);
 
   // The orchestrator resolves the finding: the reply re-enables dispatch and the next ok counts.
-  const resolved = h.ok(['ci', 'resolve', '501', '--task', 'T1', '--reason', 'Fixed by the guard in parse.js.', '--agent', 'orchestrator']);
+  const long = h.run(['ci', 'resolve', '501', '--task', 'T1', '--reason', 'x'.repeat(1001), '--agent', 'orchestrator']);
+  assert.equal(long.code, 2, long.stderr);
+  assert.match(long.stderr, /1001 characters; keep it to 1000/);
+  const resolved = h.ok(['ci', 'resolve', '501', '--task', 'T1', '--reason', 'Fixed by the guard in parse.js, as @owner asked.', '--agent', 'orchestrator']);
   assert.match(resolved, /comment 501/);
   const reply = h.github().comments.at(-1);
   assert.equal(reply.in_reply_to_id, 501);
-  assert.equal(reply.body, '[resolved]\nFixed by the guard in parse.js.');
+  assert.equal(reply.body, '[resolved]\nFixed by the guard in parse.js, as @\u200downer asked.\n\nby orchestrator');
   await until('third reviewer', () => reviewers().length === 3);
   assert.equal(reviewers()[2].detail.revuto[0].resolved, true);
   await until('review evidence', () => h.readState('tasks.json').tasks[0].evidence.some((e) => e.type === 'review' && e.ok));
