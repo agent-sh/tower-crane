@@ -1,1 +1,2 @@
 - Clean remaining test fixtures at file teardown, stopping detached processes before removing directories. Plain helper scripts clean fixtures on exit, including after `process.exit()` or an uncaught exception. Teardown also kills detached processes recorded while it runs, so a redispatched monitor cannot keep writing into a fixture being removed.
+- Claude provider billing tests remove their settings directories, which they left in the test temp root.
