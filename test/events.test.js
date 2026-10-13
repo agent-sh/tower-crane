@@ -11,7 +11,8 @@ const { cachedFixture, BIN, HOOKS, ROOT } = require('./helpers');
 const { gateFixture, gateEvidence } = require('./gate-helpers');
 
 function log(h) {
-  return fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  // A live writer can still be appending the final line.
+  return fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').split('\n').slice(0, -1).filter(Boolean).map(JSON.parse);
 }
 
 function setup(t, flags = []) {

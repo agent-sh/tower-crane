@@ -121,6 +121,7 @@ if (args[0] === 'pr' && args[1] === 'merge') {
 `);
   fs.chmodSync(gh, 0o755);
   if (process.platform === 'win32') {
+    fs.writeFileSync(path.join(tools, 'gh.cmd'), `@"${process.execPath}" "${gh}" %*\r\n`);
     // Windows cannot execute a shebang stub, so route only gh to the same fixture.
     const preload = path.join(tools, 'gh-preload.js');
     fs.writeFileSync(preload, `const cp = require('node:child_process');

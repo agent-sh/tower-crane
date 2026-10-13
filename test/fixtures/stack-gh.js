@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
 const original = cp.spawnSync;
+const originalSpawn = cp.spawn;
 const now = Date.now;
 let skew = 0;
 Date.now = () => now() + skew;
@@ -249,4 +250,29 @@ cp.spawnSync = function stackGh(command, args, opts) {
     return finish();
   }
   throw new Error(`unexpected gh stack: ${args}`);
+};
+
+// Async callers use a real child so held GitHub calls remain cancellable.
+// Transfer clock advances back to the caller for merge deadline probes.
+cp.spawn = function stackGhAsync(command, args, opts) {
+  if (!/^gh(?:\.exe)?$/i.test(path.basename(command)) || !process.env.TEST_STACK_DATA) {
+    return originalSpawn(command, args, opts);
+  }
+  const script = 'require(process.argv[1]).runGh(JSON.parse(process.argv[2]));';
+  const child = originalSpawn(process.execPath, ['-e', script, __filename, JSON.stringify(args)], {
+    ...opts, stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
+  });
+  child.on('message', (message) => { skew += message.skew || 0; });
+  return child;
+};
+
+module.exports.runGh = function runGh(args) {
+  const result = cp.spawnSync('gh', args, {
+    cwd: process.cwd(), env: process.env, encoding: 'utf8',
+  });
+  process.stdout.write(result.stdout || '');
+  process.stderr.write(result.stderr || '');
+  if (result.error) process.stderr.write(String(result.error.message || result.error));
+  process.exitCode = result.status ?? 1;
+  if (process.send) process.send({ skew }, () => process.disconnect());
 };
