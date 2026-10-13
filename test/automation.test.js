@@ -939,14 +939,14 @@ test('startup reconciles a newly conflicting PR after a merge happened without a
   conflicting.prs['8'].mergeStateStatus = 'DIRTY';
   h.saveGithub(conflicting);
   const before = h.git(['rev-parse', 'HEAD']);
+  // Keep worker refill out of this conflict-reconciliation probe.
+  h.ok(['project', 'set', '--paused', 'manual startup conflict probe']);
   // The CLI helper bounds hangs without imposing a reconciliation deadline.
   const event = JSON.parse(h.ok(['wait', '--task', 'T2', '--types', 'rework', '--agent', 'orchestrator']));
   assert.equal(event.task, 'T2');
   const task = h.readState('tasks.json').tasks[1];
-  // The merge freed a worker slot, which may dispatch T2 at once. A lease-first
-  // spawn (Windows) claims it from the start; a reserved one leaves it in rework.
-  const refill = h.logs().findLast((e) => e.cmd === 'spawn' && e.task === 'T2' && e.detail.role === 'worker');
-  assert.equal(task.status, refill && !refill.detail.reserved ? 'in_progress' : 'rework');
+  assert.equal(task.status, 'rework');
+  assert.equal(h.logs().filter((e) => e.cmd === 'spawn' && e.task === 'T2' && e.detail.role === 'worker').length, 0);
   assert.match(task.notes.at(-1).text, /value\.js/);
   assert.equal(h.git(['rev-parse', 'HEAD']), before);
 });

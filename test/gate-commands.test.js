@@ -9,6 +9,7 @@ const path = require('node:path');
 const { makeRepo, cachedFixture, runPty, PTY_AVAILABLE } = require('./helpers');
 const { gateFixture } = require('./gate-helpers');
 const { shellQuote } = require('../lib/gates/common');
+const { mismatch } = require('../lib/gate-commands');
 
 // Built once per process and copied for each test.
 function fixture(t) {
@@ -192,6 +193,91 @@ test('expensive proof uses an owner-pinned template and rejects caller-selected 
   h.ok(['project', 'set', '--tests-proof-cmd', 'node --trace-warnings {tests}']);
   assert.equal(shown(h, 'tests').ok, false);
 });
+
+for (const mode of ['prove', 'run-only']) {
+  test(`host-only command receipts count for review and acceptance in ${mode} mode`, (t) => {
+    const files = ["test/host's value.test.js", 'test/host-skipped.test.js'];
+    const h = cachedFixture(t, 'host-only-submitted', (h) => {
+      Object.assign(h.env, {
+        CLAUDE_CONFIG_DIR: path.join(h.env.HOME, '.claude'), CODEX_HOME: path.join(h.env.HOME, '.codex'),
+        PI_CODING_AGENT_DIR: path.join(h.env.HOME, '.pi', 'agent'),
+        XDG_CONFIG_HOME: path.join(h.env.HOME, '.config'), XDG_DATA_HOME: path.join(h.env.HOME, '.local', 'share'),
+        GH_CONFIG_DIR: path.join(h.env.HOME, '.config', 'gh'),
+      });
+      h.init();
+      gateFixture(h);
+      h.git(['switch', '-q', 'main']);
+      fs.mkdirSync(path.join(h.repo, 'test'), { recursive: true });
+      fs.writeFileSync(path.join(h.repo, files[0]), `require('node:test')('host case', () => {
+  require('node:assert/strict').equal(process.env.TC_HOST_OPT_IN, '1');
+});
+`);
+      fs.writeFileSync(path.join(h.repo, files[1]), "require('node:test')('unavailable case', { skip: true }, () => {});\n");
+      h.git(['add', 'test']);
+      h.git(['commit', '-qm', 'host cases']);
+      h.git(['switch', '-q', 'fixture-change']);
+      h.git(['merge', '-qm', 'include host cases', 'main']);
+      const sha = h.git(['rev-parse', 'HEAD']);
+      h.env.FIXTURE_SHA = sha;
+      h.ok(['project', 'set', '--tests-host-only', JSON.stringify(['test/host*.test.js']),
+        '--tests-host-env', '{"TC_HOST_OPT_IN":"1"}', '--tests-expensive', 'true',
+        '--tests-proof-cmd', 'node --test {tests}']);
+      h.ok(['task', 'add', '--title', 'Change', '--acceptance', 'works']);
+      h.ok(['claim', 'T1', '--agent', 'worker']);
+      h.ok(['submit', 'T1', '--sha', sha, '--agent', 'worker']);
+      return { sha };
+    });
+    h.ok(['project', 'set', '--tests-mode', mode]);
+    const pass = h.json(['check', 'tests', 'T1', '--agent', 'worker']);
+    assert.equal(pass.ok, true, pass.summary);
+    assert.deepEqual(pass.receipt.host_only.results.map((r) => r.file).sort(), [...files].sort());
+    assert.deepEqual(pass.receipt.host_only.run, [files[0]]);
+    assert.deepEqual(pass.receipt.host_only.skipped, [files[1]]);
+    if (mode === 'prove') {
+      const proof = pass.gate_policy.tests_proof_cmd.replaceAll('{tests}', pass.receipt.proof_tests.map(shellQuote).join(' '));
+      assert.ok(pass.commands.some((c) => c.command === proof && c.status !== 0), 'the without proof ran');
+    }
+    const project = h.readState('project.json');
+    const task = h.json(['task', 'show', 'T1']);
+    assert.equal(mismatch(pass, project, task), null);
+    for (const results of [undefined, [], [null], [{ file: 1 }]]) {
+      const altered = structuredClone(pass);
+      altered.receipt.host_only.results = results;
+      assert.match(mismatch(altered, project, task), /command receipts do not match/);
+    }
+    const unrecorded = structuredClone(pass);
+    unrecorded.commands.push({ ...pass.commands.find((c) => c.command !== 'git'),
+      command: pass.gate_policy.tests_proof_cmd.replaceAll('{tests}', 'test/unrecorded.test.js') });
+    assert.match(mismatch(unrecorded, project, task), /command receipts do not match/);
+    assert.equal(shown(h, 'tests').ok, true);
+    h.ok(['check', 'clean', 'T1']);
+    const spawn = () => h.run(['spawn', '--task', 'T1', '--role', 'review', '--dry-run']);
+    const dispatch = spawn();
+    assert.equal(dispatch.code, 0, dispatch.stderr);
+    h.reviewer('T1', 'reviewer', h.sha);
+    h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review',
+      '--ok', '--sha', h.sha, '--agent', 'reviewer']);
+
+    // Matching audit records still cannot authorize an unrelated shell command.
+    const tasks = h.readState('tasks.json');
+    const audit = events(h);
+    const entry = tasks.tasks[0].evidence.findLast((e) => e.type === 'tests');
+    const detail = audit.findLast((e) => e.cmd === 'check tests').detail;
+    const extra = { ...entry.commands.find((c) => c.command !== 'git'), command: 'node -e "process.exit(0)"' };
+    entry.commands.push(extra);
+    detail.commands.push(extra);
+    h.writeState('tasks.json', tasks);
+    fs.writeFileSync(path.join(h.state, 'events.jsonl'), audit.map(JSON.stringify).join('\n') + '\n');
+    assert.match(mismatch(entry, project, task), /command receipts do not match/);
+    assert.equal(shown(h, 'tests').ok, false);
+    assert.match(spawn().stderr, /command receipts do not match/);
+    const refused = h.run(['accept', 'T1']);
+    assert.equal(refused.code, 1);
+    assert.match(refused.stderr, /command receipts do not match/);
+    h.ok(['check', 'tests', 'T1']);
+    h.ok(['accept', 'T1']);
+  });
+}
 
 for (const type of ['tests', 'clean']) {
   test(`individual ${type} receipts stay visibly stale after a command change and a fresh pass`, (t) => {
