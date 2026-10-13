@@ -34,7 +34,7 @@ const num = (arg, help) => ({ type: 'number', arg, help });
 const many = (arg, help) => ({ type: 'multi', arg, help });
 const bool = (help) => ({ type: 'bool', help });
 const SPAWN_SETTINGS = {
-  sandbox: str('JSON', 'owner-required: {write: extra writable paths}; project set accepts null to clear'),
+  sandbox: str('JSON', 'owner-required: {write: extra writable paths, read: extra readable paths under the home}; project set accepts null to clear'),
   env: str('JSON', 'owner-required: extra environment variables; use env_file for secrets; project set accepts null to clear'),
   env_file: str('FILE', 'owner-required: systemd-quoted env file read only at spawn; project set accepts null to clear'),
   scope: str('JSON', 'owner-required: systemd user scope properties, e.g. {CPUQuota: "200%", MemoryMax: "8G"}; {} disables, project set accepts null to clear'),

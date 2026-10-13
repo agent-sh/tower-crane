@@ -200,8 +200,9 @@ for (const [provider, other, model, plain] of [
     assert.deepEqual(pinned, events.find((e) => e.cmd === 'spawn').detail.tool, 'provider fallback keeps the original runtime');
     const providerFile = path.relative(ROOT, require.resolve('../lib/claude-provider'));
     assert.ok(fs.existsSync(path.join(pinned.path, providerFile)));
-    for (const event of Object.values(JSON.parse(generated).hooks)) {
-      assert.ok(event[0].hooks[0].command.includes(path.join(pinned.path, 'lib', 'hook-bridge.js')));
+    for (const [name, event] of Object.entries(JSON.parse(generated).hooks)) {
+      const script = name === 'PreToolUse' ? 'read-guard.js' : 'hook-bridge.js';
+      assert.ok(event[0].hooks[0].command.includes(path.join(pinned.path, 'lib', script)), name);
     }
   });
 }

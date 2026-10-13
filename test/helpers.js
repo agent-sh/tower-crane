@@ -69,11 +69,11 @@ function pinRung(h, name, rung) {
   h.ok(args);
 }
 
-function pinLiveRung(h, harness) {
+function pinLiveRung(h, harness, rung = 'small') {
   const field = harness === 'codex' ? 'profile' : 'model';
   const variable = `TOWER_CRANE_LIVE_${field.toUpperCase()}`;
   assert.ok(process.env[variable], `set ${variable} to run a live ${harness} probe`);
-  pinRung(h, 'small', { harness, [field]: process.env[variable] });
+  pinRung(h, rung, { harness, [field]: process.env[variable] });
 }
 
 // Init copies defaults from the user layer. Seed that layer only for the call,

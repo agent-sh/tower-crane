@@ -141,7 +141,7 @@ for (const harness of ['claude', 'codex']) {
 
 // A stand-in for the engine's $ with real child processes, so the mod runs
 // the shipped CLI exactly as a Claude Code session would.
-function engine(t, h) {
+function engine(t, h, { appendPause } = {}) {
   const hooks = {};
   const on = (event, matcher, fn) => {
     if (typeof matcher === 'function') [fn, matcher] = [matcher, null];
@@ -161,7 +161,12 @@ function engine(t, h) {
     for (;;) {
       const text = seen[kind].join('\n');
       if (ids.every((id) => text.includes(id))) return text;
-      await once(notices, 'notice', { signal });
+      try {
+        await once(notices, 'notice', { signal });
+      } catch (error) {
+        if (!signal.aborted) throw error;
+        assert.fail(`${kind} did not receive ${ids.join(', ')}; prompts: ${JSON.stringify(seen.prompts)}; appended: ${JSON.stringify(seen.appended)}; toasts: ${JSON.stringify(seen.toasts)}`);
+      }
     }
   };
   const children = [];
@@ -193,7 +198,7 @@ function engine(t, h) {
     tool: { register: async (spec) => { seen.tools.push(spec); return { tool: `mcp__tower-crane__${spec.name}` }; } },
     command: { register: async (spec) => { seen.commands.push(spec); } },
     prompt: { submit: async (p) => { record('prompts', p.text); return { text: p.text }; } },
-    session: { append: async (a) => { record('appended', a.message.content[0].text); return {}; } },
+    session: { append: async (a) => { record('appended', a.message.content[0].text); if (appendPause) await appendPause; return {}; } },
     ui: { status() {}, toast: (text) => seen.toasts.push(text) },
     process: { spawn },
   };
@@ -209,7 +214,10 @@ test('the Claude Code mod pushes a decision answer and a worker message into the
   h.ok(['project', 'set', '--paused', 'notification-only probe']);
   h.ok(['ask', '--kind', 'technical', '--question', 'merge now?', '--option', 'yes', '--option', 'later', '--agent', 'worker']);
   const { register } = await import(pathToFileURL(MOD).href);
-  const cc = engine(t, h);
+  let finishAppend;
+  const appendPause = new Promise((resolve) => { finishAppend = resolve; });
+  t.after(() => finishAppend());
+  const cc = engine(t, h, { appendPause });
   register(cc.on);
   await cc.fire('session.start', { cwd: h.repo, isInteractive: true });
   assert.deepEqual(cc.seen.tools.map((x) => x.name), ['watch']);
@@ -239,6 +247,7 @@ test('the Claude Code mod pushes a decision answer and a worker message into the
   await cc.waitFor('appended', [steer]);
   assert.ok(!cc.seen.prompts.slice(before).some((x) => x.includes(steer)), 'a steer during a turn is not a new prompt');
   await cc.fire('turn.complete', { turnId: 't1' });
+  finishAppend();
   await cc.waitFor('prompts', [steer]);
   idOnly(cc.seen.prompts.join('\n'), ['private concurrent worker text', 'private steer text']);
   idOnly(cc.seen.appended.join('\n'), ['private steer text']);
