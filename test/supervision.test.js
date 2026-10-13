@@ -8,7 +8,7 @@ const cp = require('node:child_process');
 const http = require('node:http');
 const { once } = require('node:events');
 const { createInterface } = require('node:readline');
-const { makeRepo, makeTaskRepo, BIN, HOOKS, detachedAlive } = require('./helpers');
+const { makeRepo, makeTaskRepo, pinRung, STUB_RUNG, BIN, HOOKS, detachedAlive } = require('./helpers');
 const { gateFixture, gateEvidence } = require('./gate-helpers');
 const bedrockOutage = require('./fixtures/bedrock-outage.json');
 const { errorReader, transient } = require('../lib/spawn-monitor');
@@ -51,7 +51,7 @@ function controlledBackoff(h) {
   };
 }
 
-function setup(t, { failures = 1, error = '75', records = null, hold = 0, waitForFinish = false, config = {}, env = {}, busy = false, claimDelay = 0, claim = true, sessionReceipt = false } = {}) {
+function setup(t, { failures = 1, error = '75', records = null, hold = 0, waitForFinish = false, config = {}, env = {}, busy = false, claimDelay = 0, claim = true, sessionReceipt = false, publishBarrier = false } = {}) {
   const h = makeTaskRepo(t, [{
     args: ['--title', 'Supervise an outage', '--tier', 'easy', '--acceptance', 'same session reruns'],
     brief: 'Finish the task.\n',
@@ -70,7 +70,18 @@ if (!attempts.length && ${claim}) {
 const task = JSON.parse(cli(['task', 'show', 'T1', '--json']));
 attempts.push({ agent: process.env.TOWER_CRANE_AGENT, session: process.env.TOWER_CRANE_SESSION, retry: process.env.TOWER_CRANE_RETRY,
   cwd: process.cwd(), claim: task.claim, pid: process.pid });
-fs.writeFileSync(file, JSON.stringify(attempts));
+${publishBarrier ? `if (attempts.length === 2) {
+  const write = fs.writeFileSync;
+  fs.writeFileSync = (target, data) => {
+    const fd = fs.openSync(target, 'w');
+    write(file + '.writing', '');
+    while (!fs.existsSync(file + '.publish')) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
+    try { write(fd, data); } finally { fs.closeSync(fd); }
+  };
+}` : ''}
+const pending = file + '.next-' + process.pid;
+fs.writeFileSync(pending, JSON.stringify(attempts));
+fs.renameSync(pending, file);
 ${sessionReceipt ? "console.log(JSON.stringify({ type: 'thread.started', thread_id: 'supervised-session' }));" : ''}
 ${busy ? "cp.spawn(process.execPath, ['-e', 'const end = Date.now() + 3500; while (Date.now() < end) {}'], { stdio: 'ignore' });" : ''}
 const finish = () => {
@@ -425,28 +436,36 @@ if (task === 'T1' && retry === 0) {
   assert.match(audit.find((e) => e.cmd === 'msg' && e.detail.to === 'orchestrator')?.detail.text || '', /without submit/);
 });
 
-test('a running process keeps its lease without claimant writes', async (t) => {
-  const h = setup(t, { failures: 0, waitForFinish: true });
-  const clockFile = path.join(h.base, 'clock');
-  const now = Date.now();
-  fs.writeFileSync(clockFile, String(now));
-  const spawned = h.json(['spawn', '--task', 'T1'], {
-    env: { NODE_OPTIONS: `--require "${HOOKS.replace(/\\/g, '/')}"`, HOOK_CLOCK_FILE: clockFile },
+// The renewal is due only if the worker's own one-minute claim is the last
+// one: a supervisor claim landing after it would stretch the lease to the
+// project default. Both launch paths take the lease before the harness starts;
+// Linux runs both, Windows has only the handshake.
+for (const [launch, hooks] of [['the lease gate', {}], ['the launch handshake', NO_SH]]) {
+  test(`a running process keeps its lease without claimant writes (${launch})`, {
+    skip: process.platform === 'win32' && !hooks.HOOK_NO_SH && 'Windows launches through the handshake',
+  }, async (t) => {
+    const h = setup(t, { failures: 0, waitForFinish: true });
+    const clockFile = path.join(h.base, 'clock');
+    const now = Date.now();
+    fs.writeFileSync(clockFile, String(now));
+    const spawned = h.json(['spawn', '--task', 'T1'], {
+      env: { NODE_OPTIONS: `--require "${HOOKS.replace(/\\/g, '/')}"`, HOOK_CLOCK_FILE: clockFile, ...hooks },
+    });
+    try {
+      await until(() => h.readAttempts().length === 1, 'worker did not claim');
+      fs.writeFileSync(clockFile, String(now + 40000));
+      await until(() => log(h).some((e) => e.cmd === 'renew'), 'live worker lease was not renewed');
+      const task = h.json(['task', 'show', 'T1']);
+      assert.equal(task.claim.since, h.readAttempts()[0].claim.since);
+      assert.equal(task.claim.agent, spawned.agent);
+      assert.ok(Date.parse(task.claim.until) > now + 60000);
+      assert.equal(task.run.phase, 'running');
+    } finally {
+      fs.writeFileSync(`${h.attempts}.finish`, '');
+    }
+    await until(() => h.json(['task', 'show', 'T1']).run?.phase === 'waiting', 'worker did not finish');
   });
-  try {
-    await until(() => h.readAttempts().length === 1, 'worker did not claim');
-    fs.writeFileSync(clockFile, String(now + 40000));
-    await until(() => log(h).some((e) => e.cmd === 'renew'), 'live worker lease was not renewed');
-    const task = h.json(['task', 'show', 'T1']);
-    assert.equal(task.claim.since, h.readAttempts()[0].claim.since);
-    assert.equal(task.claim.agent, spawned.agent);
-    assert.ok(Date.parse(task.claim.until) > now + 60000);
-    assert.equal(task.run.phase, 'running');
-  } finally {
-    fs.writeFileSync(`${h.attempts}.finish`, '');
-  }
-  await until(() => h.json(['task', 'show', 'T1']).run?.phase === 'waiting', 'worker did not finish');
-});
+}
 
 test('release during backoff fences the old supervisor from a replacement claim', async (t) => {
   const h = setup(t, { failures: 9, config: { backoff_ms: 1400, max_backoff_ms: 1400 } });
@@ -691,6 +710,8 @@ test('a supervisor stop stays blocked with its reason when its harness exits 0 o
   h.ok(['task', 'update', 'T1', '--tier', 'easy..medium']);
   h.ok(['ladder', 'set', 'easy', '--harness', 'command', '--command', JSON.stringify([process.execPath, '-e',
     "process.on('SIGTERM', () => process.exit(0)); setInterval(() => {}, 1000);", '{prompt}'])]);
+  // The blocked stop climbs the range to medium, which must not reach a real codex.
+  pinRung(h, 'medium', STUB_RUNG);
   const result = h.spawn(undefined, 30000);
   assert.equal(result.code, 1, result.stderr);
   const last = log(h).findLast((e) => e.cmd === 'spawn phase');
@@ -1103,6 +1124,20 @@ fs.writeFileSync(process.argv[2], JSON.stringify({
   assert.equal(h.json(['task', 'show', 'T1']).run.phase, 'waiting');
 });
 
+test('supervision attempt readers keep a complete snapshot during the next write', async (t) => {
+  const h = setup(t, { waitForFinish: true, publishBarrier: true });
+  const spawned = h.json(['spawn', '--task', 'T1']);
+  try {
+    await until(() => fs.existsSync(`${h.attempts}.writing`), 'second attempt did not start writing');
+    assert.equal(h.readAttempts().length, 1, 'readers keep the previous complete attempt list');
+  } finally {
+    fs.writeFileSync(`${h.attempts}.publish`, '');
+    fs.writeFileSync(`${h.attempts}.finish`, '');
+    await until(() => !detachedAlive({ pid: spawned.monitor_pid }), 'previous supervisor did not finish');
+  }
+  assert.equal(h.readAttempts().length, 2);
+});
+
 test('rework cannot resume a session while its transient rerun is still alive', async (t) => {
   const h = setup(t, { waitForFinish: true, sessionReceipt: true });
   const spawned = h.json(['spawn', '--task', 'T1']);
@@ -1118,4 +1153,45 @@ test('rework cannot resume a session while its transient rerun is still alive', 
   }
   await until(() => !detachedAlive({ pid: spawned.monitor_pid }), 'previous supervisor did not finish');
 });
+});
+
+// A sandboxed worker can create the common directory's commondir file, which
+// points git in the main checkout at another repository. The supervisor
+// removes it while the worker still runs, and records that.
+test('the supervisor removes a commondir its worker plants in the common directory, one event per sample', (t) => {
+  const h = makeTaskRepo(t, [{
+    args: ['--title', 'Plant a commondir', '--tier', 'easy', '--acceptance', 'it is removed'],
+    brief: 'Finish the task.\n',
+  }]);
+  const planted = path.join(h.repo, '.git', 'commondir');
+  const result = path.join(h.base, 'result');
+  const script = `
+const fs = require('node:fs');
+const [planted, result, named] = process.argv.slice(1, 4);
+// A write loop, as a worker that fights the removal would run.
+const spin = (ms) => { const until = Date.now() + ms; while (Date.now() < until); };
+for (let i = 0; i < 300; i++) { fs.writeFileSync(planted, named + '\\n'); spin(5); }
+const end = Date.now() + 60000;
+const check = () => {
+  if (!fs.existsSync(planted)) fs.writeFileSync(result, 'removed');
+  else if (Date.now() > end) fs.writeFileSync(result, 'kept');
+  else return setTimeout(check, 20);
+};
+check();
+`;
+  const named = path.join(h.base, 'other', '.git');
+  h.ok(['ladder', 'set', 'easy', '--harness', 'command', '--command', JSON.stringify([process.execPath, '-e', script, planted, result, named, '{prompt}']),
+    '--clear', 'profile', '--clear', 'effort', '--supervision', JSON.stringify({ retries: 0 })]);
+  const r = h.run(['spawn', '--task', 'T1', '--wait', '--json']);
+  assert.equal(fs.existsSync(result) && fs.readFileSync(result, 'utf8'), 'removed', r.stderr);
+  assert.equal(fs.existsSync(planted), false);
+  const removed = log(h).filter((e) => e.cmd === 'commondir removed');
+  // About 1.5 s of writes: one event per sample interval and one at exit.
+  assert.ok(removed.length >= 1 && removed.length <= 4, `${removed.length} events`);
+  assert.ok(removed.every((e) => e.detail.count >= 1));
+  assert.ok(removed.reduce((n, e) => n + e.detail.count, 0) > removed.length, 'removals are counted, not recorded one by one');
+  assert.equal(removed[0].task, 'T1');
+  assert.equal(removed[0].detail.path, planted);
+  assert.equal(removed[0].detail.named, named);
+  assert.match(removed[0].detail.agent, /^worker-T1/);
 });

@@ -1,1 +1,1 @@
-- CI runs the complete fake-BUILTIN suite proof at the exact PR head in an isolated Linux runner cache, accepting only the single documented-defaults failure.
+- Main pushes, daily and manual CI runs run the complete fake-BUILTIN suite proof at the pushed head in an isolated Linux runner cache, accepting only the single documented-defaults failure.
