@@ -35,8 +35,9 @@ function baseEnv(home) {
   env.TOWER_CRANE_OWNER_KEY = OWNER_KEY;
   // spawn keeps receipts under the user's cache, which is not the tests' to write.
   env.HOME = path.join(home, 'home');
-  // npm and child Node caches belong to the fixture that removes them.
-  env.NODE_COMPILE_CACHE = path.join(home, 'node-compile-cache');
+  // A child exiting after teardown must not recreate its fixture with a compile-cache write.
+  env.NODE_DISABLE_COMPILE_CACHE = '1';
+  delete env.NODE_COMPILE_CACHE;
   // A gate's worktree and temp directories stay in the fixture, so a gate the test kills
   // cannot leave them in the shared temporary directory.
   env.TOWER_CRANE_TMP = path.join(home, 'gate-tmp');
