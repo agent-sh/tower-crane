@@ -1092,20 +1092,35 @@ test('browser spawns use the original user kit through a nested isolated home an
 // codex starts from an empty root and mounts only the paths its rules name
 // (the fixture's home is no system directory): readable paths, then each
 // 'none' path hidden, then the writable ones, so only a writable rule inside
-// a hidden path reopens it.
+// a hidden path reopens it. A special path stands for what codex resolves it
+// to: :root for /, :minimal for the system directories, :tmpdir for the
+// TMPDIR codex started with. :slash_tmp is left out: a fixture's home sits in
+// /tmp when TOWER_CRANE_TEST_TMP is unset, where no real home does.
+const CODEX_MINIMAL = ['/bin', '/sbin', '/usr', '/etc', '/lib', '/lib64', '/nix/store', '/run/current-system/sw'];
+function codexTargets(seen, p) {
+  if (!p.startsWith(':')) return [p];
+  if (p === ':root') return [path.parse(process.cwd()).root];
+  if (p === ':minimal') return CODEX_MINIMAL;
+  if (p === ':tmpdir') return seen.tmpdir && path.isAbsolute(seen.tmpdir) ? [seen.tmpdir] : [];
+  return [];
+}
+
 function commandsRead(seen, file) {
-  const under = (p, dir) => p === dir || p.startsWith(dir + path.sep);
+  const under = (p, dir) => p === dir || p.startsWith(dir.endsWith(path.sep) ? dir : dir + path.sep);
   if (seen.harness === 'claude') {
     const box = seen.settings.sandbox.filesystem;
     const entries = [...box.denyRead.map((p) => [p, 0]), ...box.allowRead.map((p) => [p, 1])]
       .filter(([p]) => under(file, p)).sort((a, b) => a[0].length - b[0].length || a[1] - b[1]);
     return entries.length === 0 || entries.at(-1)[1] === 1;
   }
-  const rules = seen.config.permissions['tower-crane'].filesystem;
-  const named = Object.keys(rules).filter((p) => !p.startsWith(':'));
-  return named.some((p) => rules[p] !== 'none' && under(file, p))
-    && !named.some((dir) => rules[dir] === 'none' && under(file, dir)
-      && !named.some((w) => rules[w] === 'write' && under(w, dir) && under(file, w)));
+  const profile = seen.config.permissions['tower-crane'].filesystem;
+  const rules = Object.entries(profile).filter(([, access]) => typeof access === 'string')
+    .flatMap(([p, access]) => codexTargets(seen, p).map((target) => [target, access]));
+  const named = (access) => rules.filter(([, a]) => access(a)).map(([p]) => p);
+  const hidden = named((a) => a === 'none');
+  const writable = named((a) => a === 'write');
+  return named((a) => a !== 'none').some((p) => under(file, p))
+    && !hidden.some((dir) => under(file, dir) && !writable.some((w) => under(w, dir) && under(file, w)));
 }
 
 // What T106's credential table missed, with no entry for any of it now: an
@@ -1176,6 +1191,29 @@ test('codex never names a hidden path inside another hidden directory', { skip: 
   }
   const nested = hidden.filter(p => hidden.some(dir => p !== dir && p.startsWith(dir + path.sep)));
   assert.deepEqual(nested, [], 'no hidden path is named inside a hidden directory');
+});
+
+test('a codex agent\'s temp directory is its own, never the caller\'s TMPDIR', { skip: NO_STUBS }, t => {
+  // Found in review 2026-10-13: codex resolves :tmpdir from the TMPDIR it
+  // starts with, so with the caller's TMPDIR under the home (~/.cache/tct
+  // here) every codex agent read and wrote other tasks' scratch and fixtures.
+  const { h, u } = setup(t);
+  const caller = path.join(u.home, '.cache', 'tct');
+  const planted = path.join(caller, 'other-task', 'fixture.txt');
+  fs.mkdirSync(path.dirname(planted), { recursive: true });
+  fs.writeFileSync(planted, `${SECRET}-TMP\n`);
+  for (const rung of ['small', 'hard', 'review']) {
+    isolated(h, rung, 'codex');
+    spawn(h, u, rung, { TMPDIR: caller });
+    const seen = u.report();
+    const rules = seen.config.permissions['tower-crane'].filesystem;
+    assert.equal(commandsRead(seen, planted), false, `${rung}: the caller's TMPDIR stays hidden`);
+    assert.ok(seen.tmpdir && !seen.tmpdir.startsWith(caller), `${rung}: codex starts with a TMPDIR of its own, not ${seen.tmpdir}`);
+    const writes = Object.keys(rules).filter((p) => rules[p] === 'write' && !p.startsWith(':'));
+    assert.ok(writes.some((w) => seen.tmpdir === w || seen.tmpdir.startsWith(w + path.sep)), `${rung}: the agent writes its own temp directory`);
+    assert.ok(fs.statSync(seen.tmpdir).isDirectory(), `${rung}: the temp directory exists before codex starts`);
+    if (rung === 'hard') assert.ok(seen.tmpdir.startsWith(h.readState('tasks.json').tasks[0].scratch + path.sep), 'a worker\'s temp directory is in its task scratch');
+  }
 });
 
 test('codex names the same rules however many entries the home holds', { skip: NO_STUBS }, t => {

@@ -159,6 +159,8 @@ module.exports = function stub(harness) {
     report.mcp = Object.fromEntries(Object.keys(config.mcp_servers || {}).map((k) => [k, true]));
     report.auth = read(path.join(dir, 'auth.json'));
     report.env = read(path.join(dir, '.env'));
+    // codex resolves :tmpdir from the TMPDIR it starts with.
+    report.tmpdir = process.env.TMPDIR || null;
     // codex keeps sessions under its home; a resume must find the first one.
     const sessions = path.join(dir, 'sessions');
     report.resumed = args.includes('resume');
