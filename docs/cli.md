@@ -568,6 +568,8 @@ An orchestrator still requires both technical settings when listed in `answerers
 
 ## Event wakeups
 
+`wait` and the automation it hosts tail `events.jsonl` while running. Idle fallback checks do not reread historical event bytes. Partial lines stay buffered; truncating or replacing the log resets the reader to its beginning. Byte cursors belong to one log, so restart clients with a fresh cursor after replacing it.
+
 The orchestrator does not run a waiter of its own. Its harness delivers events into the session (table below); `tower-crane wait` is the interface underneath and the fallback for a harness with nothing better.
 
 | Orchestrator harness | Busy | Idle |
@@ -686,6 +688,8 @@ With scripts enabled, a task sheet contains keyboard focus and makes the backgro
 The Settings view (`/settings`) edits the default harness, every rung and each task's tier when serve runs as the explicit owner. Other identities get a read-only Settings view with no edit controls and the command `tower-crane serve --agent owner` for enabling edits. Live Settings reloads use the same identity snapshot to restore disclosures, the focused control and every scroll container, including the ladder and tier panels, for both owners and read-only viewers. Position is kept in the tab's session storage only until the reload restores it. Further live writes arriving before restoration reuse the pending snapshot, and notifications for the displayed version are ignored. While a form has unsaved edits, a change on disk shows a notice instead of reloading the page. A form is read-only while its save is in flight, with its Save button showing `Saving...`. Saving a form reloads the page only when the other form has nothing unsaved; otherwise the saved form shows the server's state in place and the other keeps its edits. A save sends the values its edit was based on, so one made against a rung, default harness or tier that changed since the page loaded is refused, and the page says to reload.
 
 ### serve endpoints
+
+The server tails the event log for reloads and owner messages, and retains history for repeated page and message requests. Its directory watch has a one-second fallback check even when no watch error occurs.
 
 | Method and path | Does |
 |---|---|
