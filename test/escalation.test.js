@@ -650,8 +650,11 @@ test('a reviewer without permission to create a worker home leaves the climb for
   skip: process.platform === 'win32' || process.getuid?.() === 0,
 }, async (t) => {
   const h = await setup(t, 'review');
-  h.ok(['spawn', '--task', 'T1']);
+  const spawn = h.json(['spawn', '--task', 'T1']);
   await h.until(() => events(h).some((e) => e.cmd === 'spawn exit'));
+  // Finish host recovery before applying the reviewer's home permission boundary.
+  const { exited } = await h.exitSignal({ pid: spawn.monitor_pid });
+  await exited;
   h.reviewer('T1', 'reviewer');
   const homes = path.join(h.state, 'homes');
   fs.chmodSync(homes, 0o500);
@@ -676,6 +679,9 @@ test('a brokered failed review leaves full-findings rework and the climb to its 
   const h = await setup(t, 'review');
   const spawn = h.json(['spawn', '--task', 'T1']);
   await h.until(() => events(h).some((e) => e.cmd === 'spawn exit'));
+  // The exit receipt precedes host recovery; finish that host before isolating the broker.
+  const { exited } = await h.exitSignal({ pid: spawn.monitor_pid });
+  await exited;
   h.reviewer('T1', 'reviewer-T1-1');
   const B = require('../lib/broker');
   const binding = path.join(h.base, 'review-broker', B.FILE);
