@@ -150,6 +150,40 @@ function outage(harness, stream, lines) {
   return seen;
 }
 
+test('context overflow comes from harness errors, never quoted work output', () => {
+  const message = "Codex ran out of room in the model's context window. Start a new thread or clear earlier history before retrying.";
+  const cases = [
+    ['codex', false, { type: 'turn.failed', error: { message } }, true],
+    ['codex', false, '{"type":"turn.failed","error":{"message":"context_length_exceeded"}}\n{"type":"turn.completed"}', false],
+    ['claude', false, { type: 'result', is_error: true, errors: ['Prompt is too long'] }, true],
+    ['claude', false, { type: 'assistant', isApiErrorMessage: true, message: { content: [{ type: 'text', text: 'Prompt is too long' }] } }, true],
+    ['command', true, 'API Error: 400 prompt is too long: 210000 tokens > 200000 maximum', true],
+    ['codex', true, { type: 'item.completed', item: { type: 'command_execution', aggregated_output: message } }, false],
+    ['claude', true, { type: 'assistant', message: { content: [{ type: 'text', text: 'Prompt is too long' }] } }, false],
+    ['claude', false, { type: 'result', is_error: false, result: 'Prompt is too long' }, false],
+    ['command', true, { message }, false],
+    ['command', false, message, false],
+    ['pi', true, 'Prompt is too long', false],
+  ];
+  for (const [harness, stderr, value, expected] of cases) {
+    const read = errorReader(harness, stderr, () => {});
+    const text = typeof value === 'string' ? value : JSON.stringify(value);
+    read(Buffer.from(text.slice(0, 13)));
+    read(Buffer.from(text.slice(13)));
+    assert.equal(read(null, true).overflowed, expected, JSON.stringify([harness, stderr, value]));
+  }
+  let overflowed = false;
+  const report = (value) => { overflowed = value; };
+  const stdout = errorReader('command', false, () => {}, report);
+  const stderr = errorReader('command', true, () => {}, report);
+  stderr(Buffer.from('Prompt is too long\n'));
+  assert.equal(overflowed, true);
+  stdout(Buffer.from('{"type":"result","is_error":false}\n'));
+  assert.equal(overflowed, false);
+  stderr(null, true);
+  assert.equal(overflowed, false, 'closing an earlier error stream cannot undo successful recovery');
+});
+
 test('outages come only from harness error envelopes and stderr, and quoted errors never count', () => {
   const json = (records) => records.map((record) => JSON.stringify(record));
   for (const attempt of bedrockOutage.attempts) {
