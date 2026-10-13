@@ -183,3 +183,26 @@ test('idle reservation checks reuse history while expiry and appended claims rem
   assert.deepEqual(T.reservations(st, 1000), []);
   assert.ok(visits > 0, 'a new receipt must invalidate the cached reservation history');
 });
+
+test('orchestrator lease writes leave frozen retained snapshots unchanged', (t) => {
+  const h = cachedFixture(t, 'reader', (h) => h.init());
+  t.after(S.retainEvents(h.state));
+  const freeze = (value) => {
+    if (value && typeof value === 'object' && !Object.isFrozen(value)) {
+      Object.freeze(value);
+      for (const child of Object.values(value)) freeze(child);
+    }
+    return value;
+  };
+  const session = { session_id: 'snapshot-writer', harness_session_id: null,
+    agent: 'orchestrator', host: 'fixture', pid: process.pid };
+  const ctx = { stateDir: h.state, agent: 'orchestrator', agentExplicit: true,
+    env: h.env, flags: {}, pos: [], orchestratorSession: session };
+  for (const action of ['acquire', 'renew']) {
+    const snapshot = freeze(S.loadState(h.state));
+    const before = structuredClone(snapshot);
+    assert.doesNotThrow(() => require('../lib/orchestrator').command(ctx, 'wait'), action);
+    assert.deepEqual(snapshot, before, `${action} must not mutate a retained reader snapshot`);
+    assert.equal(h.readState('tasks.json').orchestrator_lease.session_id, session.session_id);
+  }
+});
