@@ -6,7 +6,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { makeRepo, cachedFixture, BIN } = require('./helpers');
+const { makeRepo, cachedFixture, stubRungs, BIN } = require('./helpers');
 const { gateFixture, gateEvidence } = require('./gate-helpers');
 const { waitFor } = require('./canary');
 const { shellQuote } = require('../lib/gates/common');
@@ -21,6 +21,9 @@ function setup(t, { kind = 'code', ci = 'success', repo } = {}) {
   fs.mkdirSync(tmp, { recursive: true });
   Object.assign(h.env, { TMPDIR: tmp, TMP: tmp, TEMP: tmp });
   h.sha = gateFixture(h);
+  // A rework refills workers and a submission starts reviewers; a test that
+  // checks one pins its own harness.
+  stubRungs(h);
   h.init(['--repo', 'acme/demo', '--base', 'main']);
   const tools = path.join(h.base, 'tools');
   fs.writeFileSync(path.join(tools, 'gh'), `#!/usr/bin/env node\nrequire(${JSON.stringify(ghStub)});\n`);

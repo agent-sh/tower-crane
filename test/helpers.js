@@ -65,6 +65,72 @@ delete process.env.TC_TEST_REPO_SEED;
 // Scratch consumers can run directly without the runner's global setup.
 fs.mkdirSync(TMP_ROOT, { recursive: true });
 
+// A non-live test must never start a real harness CLI: that can spend money,
+// reach the network and depend on the host's login. Every test process puts a
+// guard for each harness first on PATH, so a fixture that forgets a stub, or a
+// route that falls back to a harness on PATH, reaches the guard instead. A live
+// probe's opt-in lifts the guard for the harness it runs.
+const liveBrowser = (env, harness) => env.TOWER_CRANE_LIVE_BROWSER === '1'
+  && (!env.TOWER_CRANE_LIVE_BROWSER_HARNESS || env.TOWER_CRANE_LIVE_BROWSER_HARNESS === harness);
+const LIVE_OPT_INS = {
+  claude: (env) => env.TOWER_CRANE_LIVE_CLAUDE === '1' || env.TOWER_CRANE_LIVE_REVIEW_CACHE === '1' || liveBrowser(env, 'claude'),
+  codex: (env) => env.TOWER_CRANE_LIVE_CODEX === '1' || liveBrowser(env, 'codex'),
+  opencode: () => false,
+  pi: () => false,
+  agy: () => false,
+};
+const HARNESS_GUARD = installHarnessGuard();
+
+function installHarnessGuard() {
+  const guarded = Object.keys(LIVE_OPT_INS).filter((name) => !LIVE_OPT_INS[name](process.env));
+  if (!guarded.length) return null;
+  fs.mkdirSync(TMP_ROOT, { recursive: true });
+  const dir = fs.realpathSync.native(fs.mkdtempSync(path.join(TMP_ROOT, 'tower-crane-harness-guard-')));
+  const hits = path.join(dir, 'hits.jsonl');
+  const argv = (name) => [process.execPath, path.join(__dirname, 'fixtures', 'harness-guard.js'), hits, name];
+  for (const name of guarded) {
+    fs.writeFileSync(path.join(dir, name), `#!/bin/sh\nexec ${argv(name).map((a) => `'${a.replace(/'/g, "'\\''")}'`).join(' ')} "$@"\n`, { mode: 0o755 });
+    fs.writeFileSync(path.join(dir, `${name}.cmd`), `@${argv(name).map((a) => `"${a}"`).join(' ')} %*\r\n`);
+  }
+  const key = Object.keys(process.env).find((k) => k.toUpperCase() === 'PATH') || 'PATH';
+  process.env[key] = dir + path.delimiter + (process.env[key] || '');
+  return { dir, hits, reported: new Set() };
+}
+
+// Fails on guard calls not yet reported: with `base`, only those a fixture
+// under it made (by working directory or state directory), so the test that
+// owns the fixture fails; without it, every one left.
+function assertNoHarnessCalls(base) {
+  if (!HARNESS_GUARD) return;
+  let text;
+  try { text = fs.readFileSync(HARNESS_GUARD.hits, 'utf8'); }
+  catch (e) { if (e.code === 'ENOENT') return; throw e; }
+  const inside = (p) => typeof p === 'string' && (p === base || p.startsWith(base + path.sep));
+  // A line still being written has no newline yet; the next check reads it.
+  const found = text.split('\n').slice(0, -1).map((line, i) => ({ i, hit: JSON.parse(line) }))
+    .filter(({ i, hit }) => !HARNESS_GUARD.reported.has(i) && (!base || inside(hit.cwd) || inside(hit.state)));
+  for (const { i } of found) HARNESS_GUARD.reported.add(i);
+  if (found.length) {
+    assert.fail(`a non-live test started a real harness instead of a stub:\n${found.map(({ hit }) => JSON.stringify(hit)).join('\n')}`);
+  }
+}
+// Calls no fixture owns, such as a test running a harness itself, fail the
+// file. A plain script fails through its exit code: a node:test hook would make
+// the test runner own the script's exit.
+if (HARNESS_GUARD) {
+  if (process.env.NODE_TEST_CONTEXT) test.after(() => assertNoHarnessCalls());
+  process.once('exit', () => {
+    try {
+      if (!process.env.NODE_TEST_CONTEXT) assertNoHarnessCalls();
+    } catch (error) {
+      console.error(error.message);
+      process.exitCode ||= 1;
+    } finally {
+      fs.rmSync(HARNESS_GUARD.dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    }
+  });
+}
+
 // Tests must not see the developer's git config (hooks, signing), an
 // agent's TOWER_CRANE_* variables or the developer's own ladder defaults, so every
 // child gets a clean, explicit env. The user file path is in the temp dir and
@@ -117,6 +183,16 @@ function fixtureLadder() {
   };
 }
 
+// A command rung that fails at once and starts nothing, as an unconfigured
+// harness would. stubRungs(h) puts it on every rung but the orchestrator when
+// h.init() runs next, for fixtures whose automation dispatches workers or
+// reviewers the test never inspects; without it they reach the harness guard.
+const STUB_RUNG = { harness: 'command', command: [process.execPath, '-e', 'process.exit(1)', '{prompt}'] };
+function stubRungs(h) {
+  h.initLadder = Object.fromEntries(Object.keys(fixtureLadder().ladder)
+    .filter((name) => name !== 'orchestrator').map((name) => [name, STUB_RUNG]));
+}
+
 function pinRung(h, name, rung) {
   const args = ['ladder', 'set', name];
   for (const key of ['harness', 'model', 'profile', 'provider', 'effort', 'args', 'command']) {
@@ -146,6 +222,7 @@ function fixtureInit(ctx, args, opts, call) {
   if (!user || typeof user !== 'object' || Array.isArray(user)) return call(args, opts);
   if (user.ladder !== undefined && (!user.ladder || typeof user.ladder !== 'object' || Array.isArray(user.ladder))) return call(args, opts);
   const pinned = fixtureLadder();
+  Object.assign(pinned.ladder, ctx.initLadder);
   for (const [name, rung] of Object.entries(user.ladder || {})) {
     pinned.ladder[name] = rung && Object.keys(rung).every(k => k === 'fallbacks')
       ? { ...pinned.ladder[name], ...rung } : rung;
@@ -357,17 +434,18 @@ function context(t, base, options = {}) {
           fileFixtures.delete(ctx);
         }
       }
+      assertNoHarnessCalls(base);
     },
     run: (args, opts = {}) => fixtureInit(ctx, args, opts, (a, o) => run(a, withHooks(ctx, o))),
     runAsync: (args, opts = {}) => runAsync(args, withHooks(ctx, opts)),
     json: (args, opts) => {
       const r = ctx.run([...args, '--json'], opts);
-      if (r.code !== 0) throw new Error(`tower-crane ${args.join(' ')} exited ${r.code}: ${r.stderr}`);
+      if (r.code !== 0) throw cliFailure(args, r);
       return JSON.parse(r.stdout);
     },
     ok: (args, opts) => {
       const r = ctx.run(args, opts);
-      if (r.code !== 0) throw new Error(`tower-crane ${args.join(' ')} exited ${r.code}: ${r.stderr}`);
+      if (r.code !== 0) throw cliFailure(args, r);
       return r.stdout.trim();
     },
     readState: (file) => JSON.parse(fs.readFileSync(path.join(ctx.state, file), 'utf8')),
@@ -413,6 +491,14 @@ function run(args, { cwd, env, input, pre = [], timeout = HUNG_TEST_MS } = {}) {
     code: r.status, stdout: r.stdout || '', stderr: r.stderr || '', signal: r.signal,
     ...(r.error && { error: { code: r.error.code, message: r.error.message } }),
   };
+}
+
+function cliFailure(args, result) {
+  const details = [
+    result.signal && `signal ${result.signal}`,
+    result.error && `error ${result.error.code}: ${result.error.message}`,
+  ].filter(Boolean).join('; ');
+  return new Error(`tower-crane ${args.join(' ')} exited ${result.code}${details ? ` (${details})` : ''}: ${result.stderr}`);
 }
 
 const PTY_AVAILABLE = process.platform === 'linux'
@@ -577,4 +663,4 @@ try {
   }
 }
 
-module.exports = { makeRepo, makeProjectRepo, makeTaskRepo, copyRepo, cachedFixture, fixtureLadder, pinRung, pinLiveRung, run, runPty, PTY_AVAILABLE, runAsync, BIN, ROOT, HOOKS, real, TMP_ROOT, detachedAlive };
+module.exports = { makeRepo, makeProjectRepo, makeTaskRepo, copyRepo, cachedFixture, fixtureLadder, pinRung, pinLiveRung, stubRungs, STUB_RUNG, HARNESS_GUARD, run, runPty, PTY_AVAILABLE, runAsync, BIN, ROOT, HOOKS, real, TMP_ROOT, detachedAlive };

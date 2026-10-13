@@ -71,6 +71,15 @@ const tokenOf = (page) => /<meta name="tower-crane-token" content="([0-9a-f]{48}
 const post = (url, token, body) => fetch(url, { method: 'POST', headers: { 'content-type': 'application/json', 'x-tower-crane-token': token }, body: JSON.stringify(body) });
 const log = (h) => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
 
+test('driven CLI failures distinguish killed children from failed spawns', (t) => {
+  const h = makeRepo(t);
+  h.init();
+  assert.throws(() => h.json(['task', 'show', 'T1'], { cwd: path.join(h.base, 'missing') }), /error ENOENT/, 'a failed spawn reports its OS error');
+  if (process.platform !== 'win32') {
+    assert.throws(() => h.ok(['task', 'add', '--title', 'Killed write', '--acceptance', 'a'], { hooks: { HOOK_DIE_ON: 'tasks.json' } }), /signal SIGKILL/, 'a child killed while holding the lock reports its signal');
+  }
+});
+
 test('blocker rows and repeated mentions have distinct identities without breaking serve', async (t) => {
   const h = makeRepo(t);
   h.init();
