@@ -139,6 +139,31 @@ test('installed Chrome opens a page with deep test, system temp and cache roots'
   assert.equal(path.dirname(result.profile), path.join(os.userInfo().homedir, '.cache', 'tct'));
 });
 
+for (const [method, code] of [['mkdirSync', 'EACCES'], ['mkdtempSync', 'EROFS']]) {
+  test(`a cache refused by ${method} preserves browser startup errors and cleans its fallback`, (t) => {
+    const h = makeRepo(t);
+    const deep = path.join(h.base, 'd'.repeat(100));
+    fs.mkdirSync(deep);
+    Object.assign(h.env, { TMPDIR: deep, XDG_CACHE_HOME: path.join(deep, 'cache') });
+    const cache = path.join(os.userInfo().homedir, '.cache', 'tct');
+    const refused = path.join(h.base, 'refused.json');
+    const result = attempt(h, path.join(h.base, 'missing-chrome'), '1', deep, `
+const fsModule = require('node:fs');
+const pathModule = require('node:path');
+const original = fsModule[${JSON.stringify(method)}];
+fsModule[${JSON.stringify(method)}] = function (target, ...args) {
+  if (target === ${JSON.stringify(cache)} || pathModule.dirname(target) === ${JSON.stringify(cache)}) {
+    fsModule.writeFileSync(${JSON.stringify(refused)}, JSON.stringify(${JSON.stringify(code)}));
+    throw Object.assign(new Error(${JSON.stringify(code)}), { code: ${JSON.stringify(code)} });
+  }
+  return original.call(this, target, ...args);
+};`);
+    assert.match(result.error, /Chrome.*ENOENT/s);
+    if (process.platform !== 'win32') assert.equal(JSON.parse(fs.readFileSync(refused, 'utf8')), code);
+    assert.equal(path.dirname(result.profile), deep);
+  });
+}
+
 for (const sandbox of ['0', '1']) {
   test(`Chrome startup in sandbox=${sandbox} keeps Chrome's temp files in its profile and reports an early exit`, {
     skip: process.platform === 'win32' && 'browser fixture uses a shebang',

@@ -69,20 +69,30 @@ async function closeBrowser() {
 // cache remains a short fallback when XDG_CACHE_HOME also names a deep task directory.
 const CHROME_SOCKET_PATH = 78;
 
-function profileBase() {
+function createProfile() {
   const cache = process.env.XDG_CACHE_HOME || path.join(os.homedir(), '.cache');
   const bases = [tempRoot(), path.join(cache, 'tct'), path.join(os.userInfo().homedir, '.cache', 'tct')].map((base) => path.resolve(base));
   const fits = (base) => Buffer.byteLength(path.join(base, 'tower-crane-chrome-000000', 'SingletonSocket')) <= CHROME_SOCKET_PATH;
-  const base = bases.find((base) => process.platform === 'win32' || fits(base));
-  if (!base) throw new Error('no cache directory is short enough for Chrome sockets; set TOWER_CRANE_TEST_TMP to a shorter disk path');
-  fs.mkdirSync(base, { recursive: true, mode: 0o700 });
-  return base;
+  const create = (base) => {
+    fs.mkdirSync(base, { recursive: true, mode: 0o700 });
+    return fs.mkdtempSync(path.join(base, 'tower-crane-chrome-'));
+  };
+  if (process.platform === 'win32' || fits(bases[0])) return create(bases[0]);
+  for (const base of new Set(bases.slice(1))) {
+    if (!fits(base)) continue;
+    try { return create(base); }
+    catch (error) {
+      if (!['EACCES', 'EROFS'].includes(error.code)) throw error;
+    }
+  }
+  // A refused cache must not hide the browser's own startup error.
+  return create(bases[0]);
 }
 
 // The profile is removed when a start fails at any point, including its own setup; a started browser
 // removes it in close.
 async function launch() {
-  const profile = fs.mkdtempSync(path.join(profileBase(), 'tower-crane-chrome-'));
+  const profile = createProfile();
   try {
     return await spawnChrome(profile);
   } catch (error) {
