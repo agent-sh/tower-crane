@@ -481,12 +481,26 @@ Optional `orphan_retirements` records orphan removals in progress as an array of
 
 ### Already-merged hotfixes
 
-`hotfix ID --pr N --sha SHA` is an orchestrator or owner command. It verifies
-that the PR merged into the project base at that commit. A task without a
-claim, including a cancelled task, moves to `submitted` at a new revision.
+`hotfix ID --pr N [--sha SHA] [--review URL]` is an orchestrator or owner
+command. It verifies that the PR merged into the project base at SHA, which
+defaults to the PR's merge commit, and fetches the base once when the merge
+or its first parent is not local. A task without a claim, in `todo`,
+`rework`, `submitted` or `cancelled`, moves to `submitted` at a new revision.
 `hotfix` records `pr`, `merge_sha`, the PR's `head_sha`, the merge's first
 parent `base_sha`, `base`, `recorded_at` and `recorded_by`. Repeating the same
 record preserves its revision and evidence; a different merge is refused.
+
+`--review` reads a PR comment posted by a clean-context reviewer outside
+Tower Crane: `latest` picks the PR's last such comment, or a comment URL or
+id names one. Its first line is `Review (native, clean context)` or
+`Review (Tower Crane, clean context)`, its `SHA:` is the merged `head_sha`,
+and a `Verdict: pass|fail` line, else a `Blocking findings` section reading
+`None`, decides it. The verdict is stored as review evidence at `merge_sha`
+with `source: "hotfix review"`, `ref` (the comment URL), `reviewed_sha` and
+`author`. It counts as independent review only with a `hotfix` event by the
+orchestrator or owner whose `review` names the same URL and verdict at that
+revision. A comment on another PR, of another head, or without the title or
+a verdict is refused. A failing posted review creates the follow-up below.
 
 `accept ID` runs the existing software gates at `merge_sha`. Tests retain
 the configured proof mode, reverting the landed changes against `base_sha`;
@@ -500,7 +514,9 @@ Waivers cannot accept a hotfix.
 A pass stores status `accepted`, displays `accepted (hotfix)`, and emits an
 `accept` event with `hotfix: true`, the PR and a reason saying it merged
 before its gates. The matching `hotfix` audit event proves the recorded
-merge; automation does not merge the PR again. Dependencies treat it as
+merge. `accept` then runs the merge gate, which only confirms that the PR
+merged at `merge_sha` with the recorded head and base, and records `merge`
+evidence at `merge_sha`; nothing merges the PR again. Dependencies treat it as
 accepted. Status counts and `bench tokens` include `accepted_hotfix` as a
 separate subset of `accepted`; bench task rows include a `hotfix` boolean.
 

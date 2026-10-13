@@ -30,9 +30,20 @@ const sha = ${JSON.stringify(sha)};
 const head = ${JSON.stringify(head)};
 const ok = process.env.FIXTURE_GATE_OK !== '0';
 if (process.env.FIXTURE_GH_ERROR) { console.error('fixture gh observation error'); process.exit(1); }
+if (args[0] === 'pr' && args[1] === 'merge') { console.error('fixture: a merged hotfix must not merge again'); process.exit(3); }
 if (args[0] === 'pr') {
   console.log(JSON.stringify({state: process.env.FIXTURE_PR_STATE || 'MERGED', headRefOid: head,
     mergeCommit: {oid: process.env.FIXTURE_MERGE_SHA || sha}, baseRefName: process.env.FIXTURE_BASE || 'main'}));
+} else if (args[1].includes('/issues/42/comments')) {
+  for (const [id, body] of [[76, process.env.FIXTURE_REVIEW_BODY], [78, 'Thanks, merging.']]) {
+    console.log(JSON.stringify({id, user: {login: 'avifenesh'}, html_url: 'https://github.com/acme/demo/pull/42#issuecomment-' + id,
+      issue_url: 'https://api.github.com/repos/acme/demo/issues/42', body}));
+  }
+} else if (args[1].includes('/issues/comments/')) {
+  console.log(JSON.stringify({id: Number(args[1].split('/').pop()), user: {login: 'avifenesh'},
+    html_url: 'https://github.com/acme/demo/pull/42#issuecomment-' + args[1].split('/').pop(),
+    issue_url: 'https://api.github.com/repos/acme/demo/issues/' + (process.env.FIXTURE_REVIEW_PR || '42'),
+    body: process.env.FIXTURE_REVIEW_BODY || ''}));
 } else if (args[1].includes('/check-runs')) {
   console.log(JSON.stringify({id: 1, name: 'test (linux)', app: 'github-actions', suite: 10,
     status: 'completed', conclusion: ok ? 'success' : 'failure'}));
@@ -230,4 +241,68 @@ test('a test timeout stays retryable while insufficient proof opens follow-up re
   assert.equal(task(h).evidence.at(-1).confirmed_failure, true);
   assert.equal(task(h).status, 'cancelled');
   assert.equal(task(h, task(h).hotfix.follow_up).status, 'rework');
+});
+
+const REVIEW_URL = 'https://github.com/acme/demo/pull/42#issuecomment-77';
+const posted = (sha, verdict, blocking = 'None.') => `## Review (native, clean context)\n\nSHA: ${sha}\nVerdict: **${verdict}**\n\n### Acceptance\n1. holds.\n\n### Blocking findings\n${blocking}\n\n### Follow-ups (not blocking)\n- none\n`;
+
+test('a natively merged todo task records from the PR merge commit and its posted review, then accept confirms the merge without merging again', (t) => {
+  const h = fixture(t);
+  h.ok(['task', 'add', '--title', 'Merged natively', '--acceptance', 'value becomes one']);
+  assert.equal(task(h, 'T2').status, 'todo');
+  const env = { FIXTURE_REVIEW_BODY: posted(h.head, 'pass') };
+  const recorded = h.json(['hotfix', 'T2', '--pr', '42', '--review', REVIEW_URL], { env });
+  assert.equal(recorded.status, 'submitted');
+  assert.equal(recorded.sha, h.sha);
+  const review = task(h, 'T2').evidence.find((e) => e.type === 'review');
+  assert.equal(review.ok, true);
+  assert.equal(review.sha, h.sha);
+  assert.equal(review.ref, REVIEW_URL);
+  assert.match(review.summary, /avifenesh/);
+  assert.ok(h.json(['task', 'show', 'T2']).gates.gates.find((g) => g.type === 'review').ok);
+  const accepted = h.run(['accept', 'T2'], { env });
+  assert.equal(accepted.code, 0, accepted.stderr);
+  assert.match(accepted.stdout, /accepted \(hotfix\) T2/);
+  assert.match(accepted.stdout, /merge ok/);
+  assert.equal(task(h, 'T2').status, 'accepted');
+  assert.equal(events(h).filter((e) => e.cmd === 'spawn' && e.detail.role === 'reviewer').length, 0);
+  const merge = task(h, 'T2').evidence.find((e) => e.type === 'merge');
+  assert.equal(merge.ok, true);
+  assert.equal(merge.sha, h.sha);
+  assert.match(merge.summary, /nothing merged again/);
+  assert.ok(events(h).some((e) => e.cmd === 'merge' && e.task === 'T2' && e.detail.ok === true));
+  // Repeating the merge confirmation stays a confirmation.
+  assert.equal(h.run(['merge', 'T2']).code, 0);
+  // `latest` finds the PR's last clean-context review among its comments.
+  h.ok(['task', 'add', '--title', 'Also merged natively', '--acceptance', 'value becomes one']);
+  h.ok(['hotfix', 'T3', '--pr', '42', '--review', 'latest'], { env });
+  assert.equal(task(h, 'T3').evidence.find((e) => e.type === 'review').ref, 'https://github.com/acme/demo/pull/42#issuecomment-76');
+  const none = h.run(['hotfix', 'T3', '--pr', '42', '--review', 'latest'], { env: { FIXTURE_REVIEW_BODY: 'no review here' } });
+  assert.equal(none.code, 1);
+  assert.match(none.stderr, /no clean-context review comment/);
+});
+
+test('a failing posted review opens follow-up rework; a review of another head, another PR or without the review heading is refused', (t) => {
+  const h = fixture(t);
+  const cases = [
+    [{ FIXTURE_REVIEW_BODY: posted('b'.repeat(40), 'pass') }, /reviewed b{7}.*omit --review/],
+    [{ FIXTURE_REVIEW_BODY: posted(h.head, 'pass'), FIXTURE_REVIEW_PR: '43' }, /not on PR #42/],
+    [{ FIXTURE_REVIEW_BODY: `Looks good\n\nSHA: ${h.head}\nVerdict: **pass**\n` }, /not a clean-context review/],
+    [{ FIXTURE_REVIEW_BODY: `## Review (native, clean context)\n\nSHA: ${h.head}\n` }, /no verdict/],
+  ];
+  for (const [env, message] of cases) {
+    const r = h.run(['hotfix', 'T1', '--pr', '42', '--review', REVIEW_URL], { env });
+    assert.equal(r.code, 1, r.stdout);
+    assert.match(r.stderr, message);
+    assert.equal(task(h).status, 'cancelled');
+    assert.equal(task(h).hotfix, undefined);
+  }
+  const r = h.run(['hotfix', 'T1', '--pr', '42', '--review', '77'],
+    { env: { FIXTURE_REVIEW_BODY: posted(h.head, 'fail', '1. value.js:1 - the value is wrong - callers break') } });
+  assert.equal(r.code, 1);
+  assert.match(r.stdout, /follow-up T2/);
+  assert.equal(task(h).status, 'cancelled');
+  assert.equal(task(h).hotfix.follow_up, 'T2');
+  assert.equal(task(h, 'T2').status, 'rework');
+  assert.match(h.ok(['brief', 'get', 'T2']), /value.js:1 - the value is wrong/);
 });

@@ -170,18 +170,37 @@ Harness sandbox support comes from `CAPABILITIES` in [lib/agents.js](../lib/agen
 The orchestrator records a merged PR, then uses the normal acceptance path:
 
 ```sh
-tower-crane hotfix T207 --pr 199 --sha 4abc9120 --agent orchestrator
+tower-crane hotfix T207 --pr 199 --agent orchestrator
 tower-crane accept T207 --agent orchestrator
 ```
+
+`--sha` defaults to the PR's merge commit. A task merged natively, with a
+clean-context review already posted on its PR, names that comment (`latest`
+for the PR's last one, or its URL or id):
+
+```sh
+tower-crane hotfix T235 --pr 235 --review latest --agent orchestrator
+tower-crane accept T235 --agent orchestrator
+```
+
+The comment's first line is `Review (native, clean context)` or
+`Review (Tower Crane, clean context)`. Its `SHA:` must be the PR head that
+merged, and its `Verdict:` line or `Blocking findings` section decides it.
+A posted review of an earlier head is refused; omit `--review` and `accept`
+dispatches a fresh review of the landed diff.
 
 A trusted watcher also advances the `hotfix` event. Tests and cleanup use
 that merge commit and its first parent, even after main moves. CI requires
 the successful push workflows on the recorded base at that commit. Once
-software gates pass, normal independent review receives the landed diff;
-call `accept` again after its verdict if no watcher is running. A pass
-shows `accepted (hotfix)`; it does not merge the PR again. Waivers are refused.
+software gates pass, a counted posted review or normal independent review
+of the landed diff decides; call `accept` again after a dispatched verdict if
+no watcher is running. A pass shows `accepted (hotfix)`, and `accept` then
+confirms the merge and records merge evidence at the merge commit; it does
+not merge the PR again. A failed confirmation is retried with `merge ID`.
+Waivers are refused.
 A confirmed gate failure or failed review creates one follow-up rework task against the
-project base and retains the historical merge on the original task. See
+project base and retains the historical merge on the original task. Pending
+CI and infrastructure errors stay submitted; run `accept` again later. See
 [state.md](state.md#already-merged-hotfixes) for fields and counts.
 
 ## Run
@@ -285,7 +304,7 @@ Before constructing an agent home, spawn also sweeps orphan `brokers/<agent>/` d
 | | |
 | `hook ACTION --binding FILE [--payload JSON\|-]` | deliver harness messages and record activity under the home identity |
 | | |
-| `hotfix ID --pr N --sha SHA` | orchestrator or owner: verify the PR merged into the project base at SHA, record its merge and first parent, and move the task (including cancelled tasks) to submitted with a new revision. Run `accept ID` to check tests, clean and push CI at that merge commit, then dispatch normal independent review of the landed diff. Every gate must pass, without waivers. Acceptance displays `accepted (hotfix)` and records that it merged before its gates. A confirmed software failure or failed independent review cancels the historical task and creates a separate rework task for a follow-up PR against the project base. Pending checks and infrastructure errors remain submitted for a gate retry. Repeating the same record preserves receipts |
+| `hotfix ID --pr N [--sha SHA] [--review latest\|URL]` | orchestrator or owner: verify the PR merged into the project base (at SHA when given, else its merge commit), record its merge and first parent, and move the task (todo, rework, submitted or cancelled, without a claim) to submitted with a new revision. `--review` takes `latest` (the PR's last such comment), or a PR comment URL or id, whose first line is `Review (native, clean context)` or `Review (Tower Crane, clean context)`, whose `SHA:` is the merged PR head, and whose `Verdict: pass\|fail` line or `Blocking findings` section decides it; it is recorded as review evidence at the merge commit. Run `accept ID` to check tests, clean and push CI at that merge commit, dispatch independent review of the landed diff unless a posted review counts, accept, and confirm the merge as merge evidence without merging again. Every gate must pass, without waivers. Acceptance displays `accepted (hotfix)` and records that it merged before its gates. A confirmed software failure or failed review cancels the historical task and creates a separate rework task for a follow-up PR against the project base. Pending checks and infrastructure errors remain submitted for a gate retry. Repeating the same record preserves receipts |
 | | |
 | `interrupt ID [--needs-owner REASON]` | owner or orchestrator only: stop the live agent through its supervisor and release the claim to its prior `todo` or `rework`. The revision, branch, evidence and dirty worktree stay, so the next dispatch resumes the work (Codex warm resume, or a fresh Claude worker in the same worktree). `--needs-owner REASON` sets the owner ask in the write that releases the claim, so the task waits until `owner-done`; the event's `reason` and `needs_owner` carry REASON, and replacing a different ask is audited as `task.needs_owner`. The board's Stop sends it. Distinct from `rework`, which sends a submitted task back with a reason, and from a requirements edit, which bumps the revision |
 | | |
