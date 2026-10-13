@@ -2571,6 +2571,41 @@ test('a reviewer that exits 1 without a verdict is replaced at the same head', a
   assert.equal(h.logs().some((e) => e.cmd === 'review held'), false);
 });
 
+test('a reviewer whose monitor never records its exit is replaced after the receipt bound with one notice', async (t) => {
+  const h = setup(t);
+  configureHarness(h);
+  h.submit();
+  for (const type of ['tests', 'clean', 'ci']) gateEvidence(h, type, 'orchestrator');
+  const task = h.readState('tasks.json').tasks[0];
+  const at = new Date().toISOString();
+  // The worker exited; the reviewer's process is gone, and its monitor (this
+  // test process) runs on without writing the reviewer's spawn exit.
+  fs.appendFileSync(path.join(h.state, 'events.jsonl'), [
+    { at, agent: 'orchestrator', cmd: 'spawn', task: 'T1', detail: { agent: 'worker', role: 'worker', sha: task.sha, revision: task.revision, pid: 999998, attempt: 1 } },
+    { at, agent: 'orchestrator', cmd: 'spawn exit', task: 'T1', detail: { agent: 'worker', pid: 999998, attempt: 1, code: 0 } },
+    { at, agent: 'orchestrator', cmd: 'spawn', task: 'T1', detail: { agent: 'reviewer-T1-9', role: 'reviewer', rung: 'review',
+      sha: task.sha, revision: task.revision, pid: 999999, attempt: 1, monitor_pid: process.pid, revuto: [] } },
+  ].map((e) => `${JSON.stringify(e)}\n`).join(''));
+  const reviewers = () => h.logs().filter((e) => e.cmd === 'spawn' && e.detail.role === 'reviewer');
+  const missing = () => h.logs().filter((e) => e.cmd === 'review exit missing');
+  h.consume();
+  assert.equal(reviewers().length, 1, 'no replacement while the monitor may still record the exit');
+  assert.equal(missing().length, 0);
+  // Default supervision: 10 min max backoff, 7 s group cleanup and a 1 min drain.
+  const clock = path.join(__dirname, 'fixtures', 'clock.js').replace(/\\/g, '/');
+  const later = { env: { NODE_OPTIONS: `--require "${clock}"`, TOWER_CRANE_TEST_NOW: String(Date.parse(at) + 11 * 60000 + 8000) } };
+  h.run(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator'], later);
+  await pollUntil(h, 'replacement reviewer', () => reviewers().length === 2);
+  assert.equal(missing().length, 1);
+  assert.equal(missing()[0].detail.agent, 'reviewer-T1-9');
+  assert.equal(missing()[0].detail.reason, 'reviewer monitor did not record its exit');
+  const item = h.json(['inbox', '--agent', 'orchestrator']).items.find((i) => i.kind === 'review_exit_missing');
+  assert.equal(item.task, 'T1');
+  assert.deepEqual(item.action.argv.slice(0, 2), ['inbox', '--ack']);
+  h.run(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator'], later);
+  assert.equal(missing().length, 1, 'one notice per reviewer');
+});
+
 test('a reviewer that exits without a verdict is not respawned at that head until a revuto thread changes', async (t) => {
   const h = setup(t);
   configureHarness(h);
