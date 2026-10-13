@@ -37,7 +37,7 @@ Subject to the re-review rule below, these findings block:
 
 Defects in code the diff did not touch, requirements beyond the acceptance, hardening ideas, style and P3s are follow-ups. List them under **Follow-ups** in the review. The orchestrator files them as separate tasks after a passing or failing review; the worker does not add them to this PR.
 
-When every blocker is only a false claim in the PR body, `CHANGELOG.md` or `changelog.d/*.md` prose, keep the task submitted at its current revision. The orchestrator corrects the body, or has the submitter correct and resubmit the changelog, then requests `accept ID` for a light reviewer check. The claim still blocks until verified. Claims in `docs/cli.md` and `docs/state.md` are contract text and stay on the full blocking path. Any implementation change during correction also restores the full review.
+When every blocker is only a false claim in the PR body, `CHANGELOG.md` or `changelog.d/*.md` prose, label them all `false-claim`. PR-body claims keep the task submitted at its current revision: the orchestrator corrects the body, then requests `accept ID` for a light reviewer check. Changelog claims go back through rework, and the next revision gets a light check when only the named fragments change. The claim still blocks until verified. Claims in `docs/cli.md` and `docs/state.md` are contract text and stay on the full blocking path. Any implementation change during correction also restores the full review.
 
 ## Re-review
 

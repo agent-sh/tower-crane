@@ -59,6 +59,27 @@ function fail(h, findings) {
     '--summary', '1 blocker: the diagnostic claim is false.', '--findings', JSON.stringify(findings)]);
 }
 
+// A task-bound worker identity, as a spawned worker has; --agent alone cannot claim it.
+const bound = (agent) => ({ env: { TOWER_CRANE_AGENT: agent, TOWER_CRANE_TASK: 'T1' } });
+
+// Sends a changelog failure back through review rework and resubmits a correction
+// from a verified worker on the next revision.
+function correctChangelog(h, text) {
+  const back = h.json(['rework', '--from-review', 'T1', '--agent', 'orchestrator']);
+  assert.equal(back.status, 'rework');
+  assert.equal(back.revision, 2);
+  const worker = 'worker-T1-2';
+  assert.notEqual(h.run(['submit', 'T1', '--agent', 'worker', '--sha', h.sha], bound('worker')).code, 0,
+    'the first worker cannot resubmit a reworked task without claiming it');
+  h.ok(['claim', 'T1', '--agent', worker], bound(worker));
+  fs.writeFileSync(path.join(h.repo, 'changelog.d', 'T1.md'), text);
+  h.git(['add', '.']);
+  h.git(['commit', '-qm', 'Correct changelog claim']);
+  const sha = h.git(['rev-parse', 'HEAD']);
+  h.ok(['submit', 'T1', '--agent', worker, '--sha', sha], bound(worker));
+  return { worker, sha };
+}
+
 function prompt(h) {
   const preview = h.json(['spawn', '--task', 'T1', '--role', 'review', '--dry-run']);
   return { preview, text: preview.argv.find((arg) => arg.includes('## Task')) };
@@ -142,25 +163,26 @@ test('automatic reactions do not repeat a light check before the body is correct
   assert.equal(h.json(['task', 'show', 'T1']).status, 'submitted');
 });
 
-test('a changelog correction gets a light check but an implementation change gets the full diff', (t) => {
+test('a changelog failure goes to rework and the next revision gets a light check unless the implementation changes', (t) => {
   const h = setup(t);
   fail(h, [claim('changelog.d/T1.md')]);
-  fs.writeFileSync(path.join(h.repo, 'changelog.d', 'T1.md'), 'The diagnostic reason is recorded in state.\n');
-  h.git(['add', '.']);
-  h.git(['commit', '-qm', 'Correct changelog claim']);
-  let sha = h.git(['rev-parse', 'HEAD']);
-  h.ok(['submit', 'T1', '--agent', 'worker', '--sha', sha]);
+  const inbox = h.json(['inbox', '--agent', 'orchestrator']);
+  const failed = inbox.items.find((i) => i.kind === 'review_failed' && i.task === 'T1');
+  assert.deepEqual(failed.action.argv, ['rework', '--from-review', 'T1']);
+  assert.equal(failed.prose_only, undefined);
+  const { worker } = correctChangelog(h, 'The diagnostic reason is recorded in state.\n');
   let review = prompt(h).text;
   assert.match(review, /## Light claim check/);
+  assert.match(review, /revision 1, found only false prose claims/);
   assert.match(review, /## Claim correction diff/);
   assert.match(review, /diagnostic reason is recorded/);
   assert.doesNotMatch(review, /## Diff/);
-  assert.equal(h.json(['task', 'show', 'T1']).revision, 1);
+  assert.equal(h.json(['task', 'show', 'T1']).revision, 2);
   fs.writeFileSync(path.join(h.repo, 'value.md'), 'A new implementation.\n');
   h.git(['add', '.']);
   h.git(['commit', '-qm', 'Change implementation']);
-  sha = h.git(['rev-parse', 'HEAD']);
-  h.ok(['submit', 'T1', '--agent', 'worker', '--sha', sha]);
+  const sha = h.git(['rev-parse', 'HEAD']);
+  h.ok(['submit', 'T1', '--agent', worker, '--sha', sha], bound(worker));
   review = prompt(h).text;
   assert.doesNotMatch(review, /## Light claim check/);
   assert.match(review, /## Diff/);
@@ -169,11 +191,7 @@ test('a changelog correction gets a light check but an implementation change get
 test('changelog correction diffs are prepared once outside the spawn state lock', (t) => {
   const h = setup(t);
   fail(h, [claim('changelog.d/T1.md')]);
-  fs.writeFileSync(path.join(h.repo, 'changelog.d', 'T1.md'), 'The reason is recorded in state.\n');
-  h.git(['add', '.']);
-  h.git(['commit', '-qm', 'Correct claim']);
-  const sha = h.git(['rev-parse', 'HEAD']);
-  h.ok(['submit', 'T1', '--agent', 'worker', '--sha', sha]);
+  const { sha } = correctChangelog(h, 'The reason is recorded in state.\n');
   const report = path.join(h.base, 'diff-calls.jsonl');
   h.json(['spawn', '--task', 'T1', '--role', 'review', '--wait'], {
     hooks: { HOOK_REVIEW_DIFF_REPORT: report },
@@ -198,7 +216,7 @@ test('a newer verdict between preparation and spawn refuses the stale light pack
     }
     assert.ok(!fs.existsSync(path.join(h.state, 'lock')));
     h.ok(['evidence', 'T1', '--agent', 'first-reviewer', '--type', 'review', '--fail', '--sha', h.sha,
-      '--summary', 'A changelog claim also blocks.', '--findings', JSON.stringify([claim(), claim('changelog.d/T1.md')])]);
+      '--summary', 'A second body claim also blocks.', '--findings', JSON.stringify([claim(), { ...claim(), claim: 'The retry is logged.' }])]);
   } finally {
     fs.writeFileSync(`${paused}.go`, '');
   }
@@ -218,10 +236,14 @@ test('contract claims and mixed blockers keep the ordinary rework path', (t) => 
 
 test('an explicit new revision cannot reuse the old prose-only classification', (t) => {
   const h = setup(t);
-  fail(h, [claim()]);
+  fail(h, [claim('changelog.d/T1.md')]);
   h.ok(['rework', 'T1', '--reason', 'Acceptance needs another check', '--agent', 'orchestrator']);
-  h.ok(['claim', 'T1', '--agent', 'worker']);
-  h.ok(['submit', 'T1', '--agent', 'worker', '--sha', h.sha]);
+  const worker = 'worker-T1-2';
+  h.ok(['claim', 'T1', '--agent', worker], bound(worker));
+  fs.writeFileSync(path.join(h.repo, 'changelog.d', 'T1.md'), 'The reason is recorded in state.\n');
+  h.git(['add', '.']);
+  h.git(['commit', '-qm', 'Correct claim']);
+  h.ok(['submit', 'T1', '--agent', worker, '--sha', h.git(['rev-parse', 'HEAD'])], bound(worker));
   assert.doesNotMatch(prompt(h).text, /## Light claim check/);
 });
 
