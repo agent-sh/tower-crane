@@ -116,7 +116,7 @@ Workers, reviewers and every other identity are refused both. For an operational
 | `gates.executors` | operational | `project set --executors` |
 | `gates.tests_timeout_min`, `gates.clean_timeout_min` | operational | `project set --tests-timeout-min`, `--clean-timeout-min` |
 | `gates.tmp_root` | operational | `project set --tmp-root` |
-| `gates.priority` | operational | `gates prioritize ID --reason R`: a task's queued gate reactions run before older queued work |
+| `gates.priority` | operational | `gates prioritize ID --reason R`: a task's queued submitted gate reactions run before older submitted work; accepted merges stay first |
 | `ci.required`, `ci.ignore_apps`, `ci.capped_review` | operational | `project set --ci-required`, `--ci-ignore-apps`, `--ci-capped-review` |
 | `ci.local` | operational | `project set --ci-local`, `task update --ci-local` |
 | `tests.paths`, `tests.keep`, `tests.host_only`, `tests.host_env`, `tests.mode`, `tests.by_kind`, `tests.expensive`, `tests.map` | operational | `project set --tests-*` |
@@ -283,9 +283,9 @@ Every use of `init --ci-local` or `project set --ci-local`, including setting th
 
 `ci.local.by_kind` is an optional object mapping known task kinds (`code`, `docs`, `research`, `design`, `ops`) to overrides, for example `{ "code": { "args": ["--native-extended"] }, "ops": { "args": ["--lab"], "timeout": 300 } }`. An override has exactly one of `command` (a replacement argv with the same validation as the default) or `args` (a string argv appended to the default, allowing an empty array). Optional `timeout` replaces the project timeout and uses the same range. Unknown fields and invalid mappings are refused. Missing kinds inherit the default. A task's `ci_local` override takes precedence and resolves directly against the project default, without combining with its kind mapping. These overrides apply only when `ci.local` is present.
 
-`review`, set through `project set --review-policy JSON` or `init --review-policy JSON` by the orchestrator or the owner, holds optional `small_lines`, `small_files`, `risk_paths`, `churn_after` and `prices`. `churn_after` is a positive safe integer, defaulting to 3 failed reviews before the inbox surfaces review churn. The line and file limits are non-negative safe integers, defaulting to 100 changed lines and 5 files: a short patch across a handful of files fits a focused review. They raise an easy task to medium when exceeded; they never lower the task's tier. `risk_paths` is an array of repository-path globs with the tests gate's glob syntax, defaulting to empty. A matching old or new path, or a binary diff, raises review to at least hard. `prices` maps configured model IDs to non-negative dollar rates per million tokens: `{ "input", "cache_write", "cache_read", "output" }`. All four rates are required for each model. IDs compare with whitespace trimmed and case folded; provider prefixes remain distinct. `null` clears the policy and restores diff defaults without cost promotion.
+`review`, set through `project set --review-policy JSON` or `init --review-policy JSON` by the orchestrator or the owner, holds optional `small_lines`, `small_files`, `risk_paths`, `min_rung`, `churn_after` and `prices`. `churn_after` is a positive safe integer, defaulting to 3 failed reviews before the inbox surfaces review churn. The line and file limits are non-negative safe integers, defaulting to 100 changed lines and 5 files: a short patch across a handful of files fits a focused review. They raise an easy task to medium when exceeded; they never lower the task's tier. `risk_paths` is an array of repository-path globs with the tests gate's glob syntax, defaulting to empty. A matching old or new path, or a binary diff, raises review to at least hard. `min_rung` is `easy`, `medium`, `hard`, `research` or `review`, defaulting to none. A tier name raises review to at least that tier, so escalation never picks a lower tier. `review` starts the reviewer on the `review` rung itself, skipping the tiers; the rung's own fallbacks handle a weaker model. After a failed review at the current head and revision it stays on the `review` rung until the failure rules below reach hard or research. When the `review` rung cannot run, it takes the first runnable tier at hard or above. It never picks easy or medium. `prices` maps configured model IDs to non-negative dollar rates per million tokens: `{ "input", "cache_write", "cache_read", "output" }`. All four rates are required for each model. IDs compare with whitespace trimmed and case folded; provider prefixes remain distinct. `null` clears the policy and restores diff defaults without cost promotion.
 
-Review selection starts at the task's tier, raised by the diff or failed reviews at the current head and revision. Each failed independent review climbs one tier, capped at research. It takes the first runnable tier at that level or above, then promotes to a stronger tier when its measured median review cost is no higher. The `review` rung is the fallback when no tier rung can run. The reviewer may use the builder's model because it receives a clean context. Builder identity comes from the submitter's worker spawn route, not its reported spend; without a recorded route it uses the current task tier. Explicit model names take precedence over profiles; readable Codex profiles resolve to their model. Profiles resolve from the user's origin configuration, matching dispatch even when the caller's home is isolated: `<profile>.config.toml` or `[profiles.<profile>]` in `config.toml`. A readable standalone profile or a named profile table can inherit the base config's top-level model. Unknown profiles retain their profile identity, rather than inheriting the caller's default model. Spend entries and rung models use the same case-folded price identity before cost comparisons. A running reviewer's live entry is not a cost sample until exit collection finalizes it. `validate` warns per open task only when no reviewer rung can run.
+Review selection starts at the task's tier, raised by the diff, `min_rung` or failed reviews at the current head and revision. Each failed independent review climbs one tier, capped at research. It takes the first runnable tier at that level or above, then promotes to a stronger tier when its measured median review cost is no higher. The `review` rung is the fallback when no tier rung can run. The reviewer may use the builder's model because it receives a clean context. Builder identity comes from the submitter's worker spawn route, not its reported spend; without a recorded route it uses the current task tier. Explicit model names take precedence over profiles; readable Codex profiles resolve to their model. Profiles resolve from the user's origin configuration, matching dispatch even when the caller's home is isolated: `<profile>.config.toml` or `[profiles.<profile>]` in `config.toml`. A readable standalone profile or a named profile table can inherit the base config's top-level model. Unknown profiles retain their profile identity, rather than inheriting the caller's default model. Spend entries and rung models use the same case-folded price identity before cost comparisons. A running reviewer's live entry is not a cost sample until exit collection finalizes it. `validate` warns per open task only when no reviewer rung can run.
 
 Review dispatch computes the submitted diff before taking the spawn state lock. Under the lock it rechecks software gates and refuses if the submitted SHA or configured base changed. It chooses the reviewer from the current tier, policy, history and ladder. A refusal starts no reviewer and writes no review packet; retry to prepare the current diff.
 
@@ -521,7 +521,7 @@ The format is additive within schema 1. A pinned older tool reads and preserves 
 - `needs`: capability names, currently only `browser`; defaults to `[]` for new and legacy tasks. Set through `task add/update --needs JSON` or plan import. Duplicate names are removed. A change bumps the revision and requires rework for an accepted task. A `design` task requests the kit automatically; only explicit `needs: ["browser"]` requires a capable route before dispatch.
 - `ci_local`: optional local CI override with exactly one of `command` or `args`, and optional `timeout`, using the `ci.local.by_kind` override shape above. Only `task update ID --ci-local JSON` by the orchestrator or the owner sets it; `--ci-local null` removes it. An accepted task needs `rework` before the override can change. Changing it does not bump the revision; receipt validation checks the current resolved variant, command and timeout.
 - `size`: `S` (under an hour), `M` (a few hours), `L` (a day). Anything larger is split; `validate` reports it.
-- `tier`: `easy`, `medium`, `hard` or `research`, the current ladder rung that does the task. When `task add` or `plan import` gives none: `research` for kind `research`, else `easy` for `S`, `medium` for `M`, `hard` for `L`. It changes through `--tier` or a ranged quality escalation; a later size or kind change does not move it. A task file without `tier` gets it the same way when it loads.
+- `tier`: `easy`, `medium`, `hard` or `research`, the current ladder rung that does the task. When `task add` or `plan import` gives none: `research` for kind `research`, `easy` for an `S` `docs` task, `hard` for `L`, else `medium`. Only trivial work starts on the easy rung; small code, ops and design tasks start at `medium`. It changes through `--tier` or a ranged quality escalation; a later size or kind change does not move it. A task file without `tier` gets it the same way when it loads.
 - `tier_range`: optional `{ "min": "easy", "max": "medium" }`, containing the current tier. `task add`, `task update` and `plan import` accept an ascending `tier` string such as `easy..medium`, store the range and start at its minimum. The order is easy, medium, hard, research. A single `--tier` clears the range; setting a new range resets its current tier to the minimum. Manual range changes use the operational `task.tier` authority, including clearing a range at its current rung from either the CLI or the board's `/api/tiers`; both record the setting audit.
 - `escalations`: optional history of `{ at, agent, from, to, trigger, reason, source, spend_by_rung, decision? }`. `to: null` means the range top opened an owner decision. Sources deduplicate repeated recovery. `escalation_pending: true` means the rung already climbed but its fresh worker has not launched; a successful dispatch clears it under the spawn lock.
 - `budget`: optional `{ "hours", "tokens" }`, each null or a non-negative number, set by `task update --budget-hours`, `--budget-tokens`. Enforced like the project budget on the task's own spend.
@@ -848,16 +848,23 @@ identity releases it when the process dies. Running receipts from other
 hosts do not count against this host's cap.
 `automation queued` records a blocked notification's source, with
 `executors` set to the cap when the cap blocked it rather than another
-executor of the same task. Queued notifications run in drain order: submission
-order, except that the queued notifications a `gates prioritize` event names
-run first, the most recent request first. While one waits, a later
-notification queues behind it even if a slot is free. A notification queued
-after the request keeps submission order.
+executor of the same task. Queued notifications for accepted, unmerged PR
+tasks run first, in the order of their current `accept` events. This includes
+older notifications that now run a merge and any merged-tree test the merge
+needs. Running reactions are never preempted.
+Submitted tasks follow in submission order, except that the queued
+notifications a `gates prioritize` event names run first among submitted
+work, the most recent request first. An explicit request cannot move
+submitted work ahead of accepted merges or change acceptance order.
+While higher-ranked work waits, a later notification queues behind it even
+if a slot is free. A notification queued after a priority request keeps
+submission order unless its task becomes accepted.
 `gates prioritize ID --reason R` is operational ([Authority](#authority)); it
 records a `gates prioritize` event with `reason`, `sources` (the sources of
 the task's queued notifications at that moment), `queued` (their count) and
-`authority`. Only those notifications move. It is refused when the task has
-no queued notification, since it would change nothing. A notification queued
+`authority`. Only those notifications move. It is refused when the task is
+an accepted, unmerged PR task, whose merge already runs first, and when the
+task has no queued notification, since either would change nothing. A notification queued
 behind the task's own running reaction counts, but the running reaction does
 not: its receipt is running and its executor is live, so it is no longer
 queued. A dead executor's notification stays queued for its retry. `status`
@@ -865,7 +872,8 @@ lists the gate queue: running tasks, then the queued tasks in the order a free
 executor takes them, then the tasks whose notification waits behind their own
 running reaction, marked as blocked. `--json` carries it as `gate_queue` with
 `running`, `queued` and `blocked`, each queued or blocked task with its
-`prioritized` request or `null`. `inbox` carries the same `gate_queue`. Each executor drains the queue after releasing its slot; watchers
+`prioritized` request or `null`. An accepted task shows `null`, since its
+acceptance sets its place. `inbox` carries the same `gate_queue`. Each executor drains the queue after releasing its slot; watchers
 also retry their pending notifications on their next check. State locks cover only
 reservation and receipts, never Git, GitHub, gates or model calls.
 Automatic state changes and evidence use `agent: orchestrator` and

@@ -1665,6 +1665,82 @@ poll();
   return { stalled, release };
 }
 
+test('accepted merges take the next executor in acceptance order before queued submitted gates', async (t) => {
+  const h = setup(t);
+  const events = path.join(h.state, 'events.jsonl');
+  const { stalled, release } = holdSuite(h);
+  fs.writeFileSync(stalled, '');
+  for (const id of ['T2', 'T3', 'T4', 'T5']) {
+    h.ok(['task', 'add', '--title', `Change ${id}`, '--acceptance', 'it works', '--kind', 'code']);
+  }
+  const github = h.github();
+  github.prs['8'] = { ...github.prs['7'] };
+  h.saveGithub(github);
+  // Submit T4 first, but accept T5 first. Both already passed their gates.
+  for (const id of ['T4', 'T5']) {
+    h.ok(['claim', id, '--agent', 'worker']);
+    h.ok(['submit', id, '--sha', h.sha, '--agent', 'worker']);
+    for (const gate of ['tests', 'clean', 'ci']) h.ok(['check', gate, id, '--agent', 'orchestrator']);
+    h.reviewer(id, 'reviewer', h.sha);
+    h.ok(['evidence', id, '--type', 'review', '--sha', h.sha, '--revision', h.revision(id), '--ok', '--agent', 'reviewer']);
+  }
+  // An independent base change requires each merge to test the merged tree.
+  h.git(['switch', 'main']);
+  fs.appendFileSync(path.join(h.repo, 'README.md'), 'Independent base update.\n');
+  h.git(['add', 'README.md']);
+  h.git(['commit', '-qm', 'advance main']);
+  fs.rmSync(stalled);
+  h.ok(['claim', 'T1', '--agent', 'worker']);
+  const offset = fs.statSync(events).size;
+  h.ok(['submit', 'T1', '--sha', h.sha, '--agent', 'worker']);
+  // Start only T1's reaction, leaving the prepared PRs for explicit acceptance.
+  const holder = h.runAsync(['wait', '--after', String(offset), '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
+  let text, queue;
+  try {
+    assert.notEqual(await waitFor(stalled), null, 'T1 holds the only executor');
+    const after = fs.statSync(events).size;
+    for (const id of ['T2', 'T3']) {
+      h.ok(['claim', id, '--agent', 'worker']);
+      h.ok(['submit', id, '--sha', h.sha, '--agent', 'worker']);
+    }
+    // Attach the PRs after T1 starts, so startup reconciliation cannot advance them first.
+    for (const [id, pr] of [['T4', '7'], ['T5', '8']]) {
+      h.ok(['submit', id, '--sha', h.sha, '--pr', pr, '--agent', 'worker']);
+    }
+    h.run(['wait', '--after', String(after), '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
+    // A request made while T4 is submitted gives way to its acceptance.
+    h.ok(['gates', 'prioritize', 'T4', '--reason', 'request before acceptance', '--agent', 'orchestrator']);
+    const accepted = fs.statSync(events).size;
+    for (const id of ['T5', 'T4']) h.ok(['accept', id, '--agent', 'orchestrator']);
+    h.run(['wait', '--after', String(accepted), '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
+    const late = h.run(['gates', 'prioritize', 'T4', '--reason', 'later merge request', '--agent', 'orchestrator']);
+    assert.notEqual(late.code, 0);
+    assert.match(late.stderr, /T4 is accepted; its merge already runs ahead of submitted gate work, in acceptance order/);
+    h.ok(['gates', 'prioritize', 'T3', '--reason', 'submitted gate request', '--agent', 'orchestrator']);
+    text = h.ok(['status']);
+    queue = h.json(['status']).gate_queue;
+    assert.deepEqual(h.json(['inbox', '--agent', 'orchestrator']).gate_queue, queue);
+    assert.deepEqual(h.logs().filter((e) => e.cmd === 'automation' && e.detail.phase === 'running').map((e) => e.task),
+      ['T1'], 'acceptance does not preempt the running gate');
+    assert.equal(h.github().calls.some((a) => a[1] === 'merge'), false);
+  } finally {
+    fs.writeFileSync(release, '');
+    assert.equal((await holder).code, 2, 'the held executor finishes and drains the queue');
+  }
+  assert.match(text, /^gate running: T1$/m);
+  assert.match(text, /^gate queue: T5, T4, T3 \(prioritized: submitted gate request\), T2$/m);
+  assert.deepEqual(queue.queued.map((q) => q.id), ['T5', 'T4', 'T3', 'T2']);
+  const log = h.logs();
+  assert.deepEqual(log.filter((e) => e.cmd === 'automation' && e.detail.phase === 'running').map((e) => e.task),
+    ['T1', 'T5', 'T4', 'T3', 'T2']);
+  assert.deepEqual(log.filter((e) => e.cmd === 'head check').map((e) => [e.task, e.detail.ok]),
+    [['T5', true], ['T4', true]], 'merged-tree tests keep merge priority');
+  assert.deepEqual(h.github().calls.filter((a) => a[1] === 'merge').map((a) => a[2]), ['8', '7']);
+  const gates = log.findIndex((e) => e.cmd === 'automation' && e.task === 'T3' && e.detail.phase === 'running');
+  assert.ok(log.findLastIndex((e) => e.cmd === 'merge' && e.detail.ok) < gates,
+    'both merges finish before a queued submitted gate starts');
+});
+
 test('gates prioritize runs the last queued task first; status and inbox show the gate queue', async (t) => {
   const h = setup(t);
   const events = path.join(h.state, 'events.jsonl');

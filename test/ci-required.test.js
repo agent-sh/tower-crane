@@ -79,7 +79,7 @@ test('pull requests run CI for every base, with main pushes, daily and manual fu
   assert.match(workflow, /^ {2}workflow_dispatch:\s*$/m);
 });
 
-test('PRs run Windows shards, proofs and shared checks; other events run all nine shards', () => {
+test('PRs run Windows shards and shared checks; other events run all nine shards, proofs and repeats', () => {
   const workflow = readWorkflow(path.resolve(__dirname, '..'));
   assert.deepEqual(jobNames(workflowMatrix(workflow, 'pull_request')), REQUIRED.filter((name) => name.includes('windows-latest')));
   for (const event of ['push', 'schedule', 'workflow_dispatch']) {
@@ -93,9 +93,13 @@ test('PRs run Windows shards, proofs and shared checks; other events run all nin
   assert.match(testJob, /- run: npm test\n[\s\S]*TC_TEST_SHARD: \$\{\{ matrix\.shard \}\}/);
   for (const id of ['gate-scratch', 'model-swap']) {
     const job = workflow.split(`\n  ${id}:\n`)[1].split(/\n {2}[\w-]+:\n/)[0];
-    assert.doesNotMatch(job, /^ {4}if:/m, `${id} also runs on pull requests`);
+    assert.match(job, /^ {4}if: github\.event_name != 'pull_request'$/m, `${id} skips pull requests`);
     assert.match(job, /- run: node scripts\/probe-/);
   }
+  // Flake repeat loops cost hosted Windows time on every PR; they run after merge and daily.
+  const repeats = [...testJob.matchAll(/- name: Repeat [^\n]+\n {8}if: ([^\n]+)/g)].map((m) => m[1]);
+  assert.equal(repeats.length, 3);
+  for (const condition of repeats) assert.match(condition, /^github\.event_name != 'pull_request' && /);
   // GitHub keeps one running and one pending run per group, and a newer run replaces the pending one.
   // Main pushes share a group so only the newest pending head waits; scheduled and manual runs stay unique.
   assert.match(workflow, /^concurrency:\n {2}group: \$\{\{ github\.event_name == 'pull_request' && format\('ci-pr-\{0\}', github\.event\.pull_request\.number\) \|\| github\.event_name == 'push' && 'ci-main-push' \|\| format\('ci-run-\{0\}', github\.run_id\) \}\}\n {2}cancel-in-progress: \$\{\{ github\.event_name == 'pull_request' \}\}\n/m,
