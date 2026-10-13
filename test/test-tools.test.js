@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
-const { makeRepo, ROOT } = require('./helpers');
+const { makeRepo, ROOT, detachedAlive } = require('./helpers');
 const { tempRoot } = require('./tmp-root');
 
 test('test temp roots prefer explicit overrides and otherwise use the user cache on each platform', () => {
@@ -83,6 +83,52 @@ ${finish}
   const { base } = JSON.parse(fs.readFileSync(output, 'utf8'));
   assert.equal(fs.existsSync(base), false, 'completion owns fixtures without a per-test context');
   assert.deepEqual(fs.readdirSync(path.join(h.base, 'scratch')), []);
+});
+
+test('fixture teardown stops a detached process recorded while it stops an earlier one', {
+  skip: process.platform !== 'linux' && 'reads process state from /proc',
+}, async (t) => {
+  const observer = makeRepo(t);
+  const out = path.join(observer.base, 'next-monitor-pid');
+  t.after(() => {
+    try { process.kill(-Number(fs.readFileSync(out, 'utf8')), 'SIGKILL'); } catch { /* already stopped */ }
+  });
+  const h = makeRepo();
+  const records = path.join(h.base, 'detached');
+  fs.mkdirSync(records);
+  const record = (kind, args) => {
+    const child = cp.spawn(process.execPath, args, { detached: true, stdio: 'ignore' });
+    child.unref();
+    fs.writeFileSync(path.join(records, `${child.pid}.json`), JSON.stringify({ pid: child.pid, kind }));
+    return child;
+  };
+  const worker = record('worker', ['-e', 'setInterval(() => {}, 1000)']);
+  // Like a monitor redispatching after its worker ends, this one starts and records the next
+  // monitor only once teardown has stopped the worker.
+  record('monitor', ['-e', `
+const cp = require('node:child_process');
+const fs = require('node:fs');
+const path = require('node:path');
+const [worker, records, out] = process.argv.slice(1);
+const alive = () => {
+  try { return !/^[ZX]/.test(fs.readFileSync('/proc/' + worker + '/stat', 'utf8').split(') ').at(-1)); }
+  catch { return false; }
+};
+const timer = setInterval(() => {
+  if (alive()) return;
+  clearInterval(timer);
+  const next = cp.spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: 'ignore' });
+  fs.writeFileSync(path.join(records, next.pid + '.json'), JSON.stringify({ pid: next.pid, kind: 'monitor' }));
+  fs.writeFileSync(out, String(next.pid));
+  process.exit(0);
+}, 20);
+`, String(worker.pid), records, out]);
+  await h.cleanup();
+  assert.equal(fs.existsSync(h.base), false);
+  const next = { pid: Number(fs.readFileSync(out, 'utf8')), kind: 'monitor' };
+  const deadline = Date.now() + 10000;
+  while (detachedAlive(next) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(detachedAlive(next), false, 'the monitor recorded during teardown outlived it');
 });
 
 test('the test runner emits one capped concurrency value, including repeated and split options', (t) => {

@@ -18,12 +18,30 @@ const fileFixtures = new Set();
 async function cleanupFileFixtures() {
   for (const fixture of fileFixtures) await fixture.cleanup();
 }
+// A stopping monitor can start the next attempt's monitor and worker after a snapshot of the
+// detached records, so teardown takes new snapshots and kills their unseen records until none appear.
+function unseenDetached(fixture, seen) {
+  const key = (c) => `${c.pid}:${c.startTicks ?? c.startTime}`;
+  const fresh = fixture.detached().filter((c) => !seen.has(key(c)));
+  for (const c of fresh) seen.add(key(c));
+  return fresh;
+}
+// Processes started during teardown are not expected to exit on their own, so they are killed.
+async function killStarted(children) {
+  children.forEach(killDetached);
+  const deadline = Date.now() + 10000;
+  while (children.some(detachedAlive) && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  assert.deepEqual(children.filter(detachedAlive).map((c) => c.pid), [], 'processes started during teardown survived it');
+}
 // process.exit() and uncaught exceptions skip beforeExit, and an exit listener runs only
 // synchronous code, so this stops detached children with signals and removes the directories.
 function cleanupFileFixturesSync() {
   for (const fixture of fileFixtures) {
     try {
-      for (const child of fixture.detached()) killDetached(child);
+      const seen = new Set();
+      for (let fresh; (fresh = unseenDetached(fixture, seen)).length;) fresh.forEach(killDetached);
     } catch (error) {
       console.error(error);
     } finally {
@@ -306,10 +324,15 @@ function context(t, base, options = {}) {
       }) : [];
     },
     cleanup: async () => {
-      try { await stopDetached(ctx.detached()); }
+      const seen = new Set();
+      try { await stopDetached(unseenDetached(ctx, seen)); }
       finally {
-        fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
-        fileFixtures.delete(ctx);
+        try {
+          for (let fresh; (fresh = unseenDetached(ctx, seen)).length;) await killStarted(fresh);
+        } finally {
+          fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+          fileFixtures.delete(ctx);
+        }
       }
     },
     run: (args, opts = {}) => fixtureInit(ctx, args, opts, (a, o) => run(a, withHooks(ctx, o))),
