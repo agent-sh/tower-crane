@@ -8,7 +8,7 @@ const cp = require('node:child_process');
 const http = require('node:http');
 const { once } = require('node:events');
 const { createInterface } = require('node:readline');
-const { makeRepo, makeTaskRepo, BIN, HOOKS, detachedAlive } = require('./helpers');
+const { makeRepo, makeTaskRepo, pinRung, STUB_RUNG, BIN, HOOKS, detachedAlive } = require('./helpers');
 const { gateFixture, gateEvidence } = require('./gate-helpers');
 const bedrockOutage = require('./fixtures/bedrock-outage.json');
 const { errorReader, transient } = require('../lib/spawn-monitor');
@@ -691,6 +691,8 @@ test('a supervisor stop stays blocked with its reason when its harness exits 0 o
   h.ok(['task', 'update', 'T1', '--tier', 'easy..medium']);
   h.ok(['ladder', 'set', 'easy', '--harness', 'command', '--command', JSON.stringify([process.execPath, '-e',
     "process.on('SIGTERM', () => process.exit(0)); setInterval(() => {}, 1000);", '{prompt}'])]);
+  // The blocked stop climbs the range to medium, which must not reach a real codex.
+  pinRung(h, 'medium', STUB_RUNG);
   const result = h.spawn(undefined, 30000);
   assert.equal(result.code, 1, result.stderr);
   const last = log(h).findLast((e) => e.cmd === 'spawn phase');

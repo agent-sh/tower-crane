@@ -292,6 +292,9 @@ test('the Claude Code mod pushes a decision answer and a worker message into the
 
 test('serve carries owner messages to the orchestrator and its replies back with content-free wakes', async (t) => {
   const h = setup(t);
+  // A worker holds T1, so the orchestrator wait refills nothing: a refilled
+  // worker's spawn events would race the event cursor the test compares.
+  h.ok(['claim', 'T1', '--agent', 'worker']);
   const server = cp.spawn(process.execPath, [BIN, 'serve', '--port', '0', '--json', '--agent', 'owner'], { cwd: h.repo, env: h.env });
   const exited = new Promise((resolve) => server.on('exit', resolve));
   const controller = new AbortController();
