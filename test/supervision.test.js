@@ -52,11 +52,11 @@ test('clock advances stay complete for concurrent supervisor readers', async (t)
   const child = cp.spawn(process.execPath, ['--require', HOOKS, '-e', `
 const fs = require('node:fs');
 let reads = 0, incomplete = 0;
-process.send('reading');
 while (!fs.existsSync(${JSON.stringify(done)})) {
   const value = Date.now();
   if (value !== ${now} && value !== ${now + 40000}) incomplete++;
   reads++;
+  if (reads === 1) process.send('reading');
 }
 console.log(JSON.stringify({ reads, incomplete }));
 `], { cwd: h.repo, env: { ...h.env, HOOK_CLOCK_FILE: file }, stdio: ['ignore', 'pipe', 'pipe', 'ipc'] });
