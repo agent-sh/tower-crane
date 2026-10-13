@@ -5,7 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const gate = require('../../lib/gates/tests');
 const { scratch, isolateGit, git, commit, initRepo, worktrees, quote } = require('./helpers');
-const { shellQuote } = require('../../lib/gates/common');
+const { shellQuote, treeExec } = require('../../lib/gates/common');
 
 const NODE = quote(process.execPath);
 const CMD = `${NODE} run-tests.js`;
@@ -157,14 +157,22 @@ test('a host-only failure on the base keeps its opt-in and command for retry cla
 test('missing host-only command pins report the proof command configuration', async () => {
   const sha = task({ 'test/host-pin.test.js': "require('node:test')('host pin', () => {});\n" });
   const ordinary = `${NODE} --test test/mul.test.js`;
-  for (const proof of [null, 'tower-crane-no-such-host-runner {tests}']) {
-    const r = await gate.run(ctx(sha, {
+  const absent = 'tower-crane-no-such-host-runner {tests}';
+  for (const [proof, windowsDiagnostic] of [[null, false], [absent, false], [absent, true]]) {
+    const check = ctx(sha, {
       args: { cmd: ordinary },
       project: {
         tests: { mode: 'run-only', host_only: ['test/host-pin.test.js'] },
         gates: { tests_cmd: ordinary, tests_proof_cmd: proof },
       },
-    }));
+    });
+    if (windowsDiagnostic) {
+      const host = proof.replace('{tests}', shellQuote('test/host-pin.test.js'));
+      check.exec = (command, args, opts) => command === host
+        ? { status: 1, stdout: '', stderr: "'tower-crane-no-such-host-runner' is not recognized as an internal or external command,\r\noperable program or batch file.\r\n" }
+        : treeExec(command, args, opts);
+    }
+    const r = await gate.run(check);
     assert.equal(r.ok, false);
     assert.deepEqual(r.config_failure, { key: 'tests_proof_cmd' });
     assert.equal(r.confirmed_failure, undefined);
