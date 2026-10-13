@@ -86,21 +86,25 @@ test('orchestrator status takes no state lock, and a due renewal never waits for
   const holder = { TOWER_CRANE_AGENT: 'orchestrator', CLAUDE_SESSION_ID: 'holder' };
   h.ok(['task', 'add', '--title', 'held task', '--acceptance', 'holds the lease'], { env: holder });
   const lease = () => h.readState('tasks.json').orchestrator_lease;
-  const held = lease();
   const meter = path.join(h.base, 'locked-reads.json');
   const preload = (...files) => files.map((f) => `--require=${JSON.stringify(path.join(__dirname, 'fixtures', f))}`).join(' ');
   const fresh = h.run(['status'], { env: { ...holder, LOCKED_READS: meter, NODE_OPTIONS: preload('locked-reads.js') } });
   assert.equal(fresh.code, 0, fresh.stderr);
   assert.equal(JSON.parse(fs.readFileSync(meter, 'utf8')).holdings, 0, 'status with a fresh lease takes no lock');
+  // Age the heartbeat rather than shift the clock: without a start-ticks
+  // identity (Windows, macOS) a shifted clock would make the held lock stale.
+  const doc = h.readState('tasks.json');
+  doc.orchestrator_lease.heartbeat = new Date(Date.now() - 61000).toISOString();
+  h.writeState('tasks.json', doc);
+  const aged = lease();
   const lock = S.acquireLock(h.state);
   try {
     const started = Date.now();
-    const due = h.run(['status'], { env: { ...holder, TOWER_CRANE_TEST_NOW: String(Date.parse(held.heartbeat) + 61000),
-      LOCKED_READS: meter, NODE_OPTIONS: preload('shifted-clock.js', 'locked-reads.js') } });
+    const due = h.run(['status'], { env: { ...holder, LOCKED_READS: meter, NODE_OPTIONS: preload('locked-reads.js') } });
     assert.equal(due.code, 0, due.stderr);
     assert.ok(Date.now() - started < 30000, 'a read does not wait out the lock bound');
     assert.equal(JSON.parse(fs.readFileSync(meter, 'utf8')).holdings, 0);
-    assert.deepEqual(lease(), held, 'a busy lock leaves the renewal to a later command');
+    assert.deepEqual(lease(), aged, 'a busy lock leaves the renewal to a later command');
   } finally {
     S.releaseLock(lock);
   }
