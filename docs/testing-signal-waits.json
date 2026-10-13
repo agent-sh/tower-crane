@@ -27617,5 +27617,186 @@
       "cpu_load": "Two nice -n 15 node processes evaluating Math.sqrt(Math.random()) continuously per measurement runner."
     },
     "raw_logs": "Task scratch rework-fallback-current/security-merge; only relative artifacts and hashes are committed."
+  },
+  "base_c4f957c6_refresh": {
+    "base_head": "c4f957c63d3d651d52da3cbb0765ac77bed3b62d",
+    "merge_head": "fc8a0d26",
+    "measured_source": "ba5bb361; it differs from fc8a0d26 only by a comment on the events.test.js child kill timer",
+    "changes": [
+      "Keep main's file-level fixture teardown and convert its 10 s teardown kill loop to a process-state signal wait.",
+      "Keep main's events-tail readers; the idle fallback-tick timeout carries a reason, reader kill timers use the suite guard and reader notifications have no 15 s abort.",
+      "Keep main's deferred stack linking; the test waits for the stack link event instead of polling wait --timeout 1 against a 60 s clock.",
+      "Keep main's first live-read delay and session-read match; supervisors no longer receive CLAUDE_CONFIG_DIR, so the fixture cannot derive the session path from it.",
+      "Keep main's Windows follower ready line in wakeups; the automation merge-evidence loop, test-tools teardown loop and the new 30 s and 60 s subprocess guards use signals or the suite guard.",
+      "The worker-slot lease test parses a complete claim record inside its repository wait, because its harness writes the record non-atomically.",
+      "Review follow-ups: the benchmark live-stream wait no longer passes an ignored 20 s cap, the worktree-metadata test timeout is 300 s, the events child kill timer has no timing reason and doubled blank lines left by removed helpers are gone."
+    ],
+    "regression_proof": {
+      "test": "test/worker-slots.test.js 'a started worker holds its lease against strangers until its own claim renews it'",
+      "ci_failure": "Linux node 26 shard 3/3 at c6cd05af: SyntaxError Unexpected end of JSON input at worker-slots.test.js:141",
+      "injection": "The controlled harness writes an empty .claimed file and blocks 500 ms before writing the JSON record.",
+      "before": {
+        "status": 1,
+        "pass": 0,
+        "fail": 1,
+        "error": "SyntaxError: Unexpected end of JSON input",
+        "log": "ws-red.log",
+        "log_sha256": "c032b63e0e15e58739c4291b06cd3f78fd6d8f37f5a7de4a656f182d4b4f7f89"
+      },
+      "after": {
+        "status": 0,
+        "pass": 1,
+        "fail": 0,
+        "log": "ws-green.log",
+        "log_sha256": "c2fa17dbb17b83f8b28ad8e0acb2060bf21c0e504002a294cbf3ea8453d20e5b"
+      },
+      "note": "The injection was removed after both runs; it is not committed."
+    },
+    "live_spend_regression": "With the merged CLAUDE_CONFIG_DIR session match, spawn failed at supervisor startup in two runs; with the merged regex match the test passes, and the file passes 125/125 together with five touched files.",
+    "loaded_command": "node test/run.js --test-concurrency=3 test/worker-slots.test.js test/events-tail.test.js test/test-tools.test.js test/stack.test.js test/live-spend.test.js test/package.test.js test/events.test.js test/wakeups.test.js test/browser-startup.test.js test/usage.test.js test/worktree-metadata.test.js test/automation.test.js",
+    "cpu_load": "Shared 24-core host with other sessions running test suites; one-minute load 8 to 16 during the runs.",
+    "loaded_runs": [
+      {
+        "run": 1,
+        "status": 0,
+        "started": "23:08:01",
+        "ended": "23:15:19",
+        "load_before": [
+          13.45,
+          14.58,
+          15.39
+        ],
+        "load_after": [
+          16.18,
+          16.33,
+          15.97
+        ],
+        "log": "loaded-1.log",
+        "log_sha256": "6d6656defa6d8d479a70472cce74ff0ee100f75dcdc98ac8c46dea87f88018f1",
+        "tests": {
+          "tests": 336,
+          "pass": 335,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 1
+        }
+      },
+      {
+        "run": 2,
+        "status": 0,
+        "started": "23:15:19",
+        "ended": "23:22:53",
+        "load_before": [
+          16.18,
+          16.33,
+          15.97
+        ],
+        "load_after": [
+          15.32,
+          15.73,
+          16.1
+        ],
+        "log": "loaded-2.log",
+        "log_sha256": "06f67a01699356d8773d8b1b461fc7089e5caed4c74a6b5de952b9c63228ca5f",
+        "tests": {
+          "tests": 336,
+          "pass": 335,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 1
+        }
+      },
+      {
+        "run": 3,
+        "status": 0,
+        "started": "23:22:53",
+        "ended": "23:30:06",
+        "load_before": [
+          15.32,
+          15.73,
+          16.1
+        ],
+        "load_after": [
+          10.46,
+          12.54,
+          14.52
+        ],
+        "log": "loaded-3.log",
+        "log_sha256": "385901fbbc3485161577006848b0135b6c8d312111a376f48df04875d89fa278",
+        "tests": {
+          "tests": 336,
+          "pass": 335,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 1
+        }
+      },
+      {
+        "run": 4,
+        "status": 0,
+        "started": "23:30:06",
+        "ended": "23:37:13",
+        "load_before": [
+          10.46,
+          12.54,
+          14.52
+        ],
+        "load_after": [
+          8.18,
+          9.21,
+          12.18
+        ],
+        "log": "loaded-4.log",
+        "log_sha256": "69f4a35041616f0ebc12dfbb41a448a4197a5957185b6a037d2810708c8dd43f",
+        "tests": {
+          "tests": 336,
+          "pass": 335,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 1
+        }
+      },
+      {
+        "run": 5,
+        "status": 0,
+        "started": "23:37:13",
+        "ended": "23:44:20",
+        "load_before": [
+          8.18,
+          9.21,
+          12.18
+        ],
+        "load_after": [
+          8.42,
+          9.05,
+          11.12
+        ],
+        "log": "loaded-5.log",
+        "log_sha256": "e5497231fc2840d1f00b9a2af95102d7bec80d80e7059ceaa9a67a384bddbaeb",
+        "tests": {
+          "tests": 336,
+          "pass": 335,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 1
+        }
+      }
+    ],
+    "full_suite": {
+      "command": "node test/run.js --test-concurrency=3",
+      "source": "fc8a0d26",
+      "status": 0,
+      "wall": "15m56s",
+      "tests": {
+        "tests": 2179,
+        "pass": 2159,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 20
+      },
+      "log": "full-1.log",
+      "log_sha256": "09f8a56af2f9fa9324159711e9aff58414a31b2c12d5ea45a6c07a0bc1867c93"
+    },
+    "raw_logs": "Task scratch; only relative artifact names and hashes are committed."
   }
 }

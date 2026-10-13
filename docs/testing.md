@@ -60,6 +60,8 @@ The detached-stack fixture refresh records a model-swap CI failure caused by an 
 
 The trusted git-config refresh through `8d1acac8` retains the security probes and trusted-config fixture hooks. Worktree dispatch uses its single upload-pack count across preparation and spawning instead of elapsed time; four new security subprocess guards use the suite minimum. Both files pass five loaded runs at recorded checkpoints. The initial security fixture was refused while scanning protected host credentials; command harnesses make its git checks independent of native credential stores, with the failed sample retained and a focused passing correction. Six named merge consumers pass, and the affected claim-hook mutant is caught after a green baseline.
 
+The base refresh through `c4f957c6` keeps main's file teardown, event-tail readers, deferred stack linking, first live-read delay and Windows ready line. Their new clock waits use process, event and file signals or the suite guard; the idle-wait probe that must reach its timeout carries a reason. The worker-slot lease test parses a complete claim record inside its repository wait. Injecting an empty first write into its harness fails the old reader with the CI shard's JSON parse error and passes the corrected one. The twelve refreshed files pass 335 of 336 tests, one skipped, in each of five loaded runs, and the full suite passes 2159 tests with 20 skipped and no failures.
+
 ## Tools
 
 - `node scripts/test-cost.js [--before DIR] [files...]` measures CPU and wall seconds per file, median of three runs, four files at a time. With `--before`, it measures another checkout interleaved with this one.
