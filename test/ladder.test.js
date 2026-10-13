@@ -228,6 +228,17 @@ test('fallback-only user rungs keep the pinned primary during init', (t) => {
 
 test('ladder harness moves every rung without its own harness, and spawn runs each tier there', (t) => {
   const h = makeRepo(t);
+  // Native dry runs use fixture credential stores for every harness.
+  Object.assign(h.env, {
+    USERPROFILE: h.env.HOME,
+    CLAUDE_CONFIG_DIR: path.join(h.env.HOME, '.claude'),
+    CODEX_HOME: path.join(h.env.HOME, '.codex'),
+    PI_CODING_AGENT_DIR: path.join(h.env.HOME, '.pi', 'agent'),
+    GH_CONFIG_DIR: path.join(h.env.HOME, '.config', 'gh'),
+    XDG_CONFIG_HOME: path.join(h.env.HOME, '.config'),
+    XDG_DATA_HOME: path.join(h.env.HOME, '.local', 'share'),
+    OPENCODE_CONFIG_DIR: path.join(h.env.HOME, '.config', 'opencode'),
+  });
   h.init();
   for (const rung of ['easy', 'medium', 'review', 'small']) h.ok(['ladder', 'set', rung, '--model', `m-${rung}`, '--clear', 'profile']);
   h.ok(['task', 'add', '--title', 'Small', '--acceptance', 'a', '--size', 'S']);
