@@ -13,7 +13,7 @@ const suite = (app, conclusion = 'success', status = 'completed', runs = 1) => (
 // gh --jq prints one JSON value per line, across all pages.
 const lines = (items) => items.map((i) => JSON.stringify(i)).join('\n') + (items.length ? '\n' : '');
 
-function github({ runs = [], suites = [], head = SHA, apiError = null } = {}) {
+function github({ runs = [], suites = [], workflows = [], head = SHA, apiError = null } = {}) {
   return fakeExec((args) => {
     if (args[0] === 'pr' && args[1] === 'view') return result(JSON.stringify({ headRefOid: head, mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }));
     if (args[0] !== 'api') return null;
@@ -21,6 +21,7 @@ function github({ runs = [], suites = [], head = SHA, apiError = null } = {}) {
     if (apiError) return result('', 1, apiError);
     if (args[1] === `repos/${REPO}/commits/${SHA}/check-runs?per_page=100`) return result(lines(runs));
     if (args[1] === `repos/${REPO}/commits/${SHA}/check-suites?per_page=100`) return result(lines(suites));
+    if (args[1] === `repos/${REPO}/actions/runs?head_sha=${SHA}&per_page=100`) return result(lines(workflows));
     return null;
   });
 }
@@ -136,4 +137,97 @@ test('gh failing: not ok with its message', async () => {
   const r = await gate.run(ctx(github({ apiError: 'gh: Not Found (HTTP 404)' })));
   assert.equal(r.ok, false);
   assert.match(r.summary, /HTTP 404/);
+});
+
+test('workflow supersession orders by creation time and id, with name fallback and a known replacement suite', async () => {
+  const old = { id: 100, head_sha: SHA, check_suite_id: 1, path: 'ci.yml', name: 'CI', event: 'pull_request', created_at: '2026-10-11T10:00:00Z', status: 'completed', conclusion: 'failure' };
+  const current = { ...old, id: 200, check_suite_id: 2, created_at: '2026-10-11T11:00:00Z', conclusion: 'success' };
+  const cases = [
+    ['time before id', { ...old, id: 300 }, current, true],
+    ['id breaks time tie', old, { ...current, created_at: old.created_at }, true],
+    ['missing time uses id', { ...old, created_at: null }, { ...current, created_at: null }, true],
+    ['missing latest timestamp uses id', old, { ...current, created_at: null }, true],
+    ['name fallback', { ...old, path: null }, { ...current, path: null }, true],
+    ['same path after rename', old, { ...current, name: 'Renamed CI' }, true],
+    ['different path with same name', old, { ...current, path: 'other.yml' }, false],
+    ['different event', old, { ...current, event: 'push' }, false],
+    ['different head', old, { ...current, head_sha: OTHER }, false],
+    ['missing event', old, { ...current, event: null }, false],
+    ['missing workflow identity', old, { ...current, path: null, name: null }, false],
+    ['missing suite mapping', old, { ...current, check_suite_id: null }, false],
+    ['unread replacement suite', old, { ...current, check_suite_id: 3 }, false],
+    ['same suite on rerun', old, { ...current, check_suite_id: 1 }, false],
+  ];
+  for (const [label, earlier, later, ok] of cases) {
+    const r = await gate.run(ctx(github({
+      runs: [{ ...run('build'), suite: 2 }],
+      suites: [{ ...suite('github-actions', 'failure'), id: 1 }, { ...suite('github-actions'), id: 2 }],
+      workflows: [later, earlier],
+    })));
+    assert.equal(r.ok, ok, `${label}: ${r.summary}`);
+    if (ok) assert.match(r.summary, /Superseded workflow runs/);
+    else assert.match(r.summary, /check suites not green/);
+  }
+});
+
+test('only superseded Actions suites and their jobs are excluded; the latest pending suite still blocks', async () => {
+  const workflows = [
+    { id: 100, check_suite_id: 1, name: 'CI', event: 'pull_request', head_sha: SHA },
+    { id: 200, check_suite_id: 2, name: 'CI', event: 'pull_request', head_sha: SHA },
+  ];
+  const suites = [{ ...suite('github-actions', 'failure'), id: 1 }, { ...suite('github-actions'), id: 2 }];
+  const runs = [{ ...run('old job', 'failure'), suite: 1 }, { ...run('build'), suite: 2 }];
+  const green = await gate.run(ctx(github({ runs, suites, workflows })));
+  assert.equal(green.ok, true, green.summary);
+  assert.doesNotMatch(green.summary, /failing: old job/);
+  const pending = await gate.run(ctx(github({
+    runs, workflows, suites: [suites[0], { ...suites[1], status: 'queued', conclusion: null, runs: 0 }],
+  })));
+  assert.equal(pending.ok, false);
+  assert.match(pending.summary, /check suites not green.*queued/);
+  assert.match(pending.summary, /Superseded workflow runs/);
+});
+
+test('an Actions API failure fails closed, but ignored Actions do not need its API', async () => {
+  const fake = github({ runs: GREEN_RUNS, suites: GREEN_SUITES });
+  const gh = fakeExec((args) => args[1]?.includes('/actions/runs?')
+    ? result('', 1, 'HTTP 403')
+    : fake.exec('gh', args));
+  const failed = await gate.run(ctx(gh));
+  assert.equal(failed.ok, false);
+  assert.match(failed.summary, /HTTP 403/);
+  const ignored = await gate.run(ctx(github({
+    runs: [run('external build', 'success', 'completed', 'external-ci')],
+    suites: [...GREEN_SUITES, suite('external-ci')],
+  }), {}, { ci: { ignore_apps: ['github-actions'] } }));
+  assert.equal(ignored.ok, true, ignored.summary);
+});
+
+test('same-named jobs from another workflow cannot supersede a current failed suite', async () => {
+  const r = await gate.run(ctx(github({
+    runs: [
+      { ...run('build', 'failure'), id: 100, started_at: '2026-10-11T10:00:00Z', suite: 1 },
+      { ...run('build'), id: 200, started_at: '2026-10-11T11:00:00Z', suite: 2 },
+    ],
+    suites: [{ ...suite('github-actions', 'failure'), id: 1 }, { ...suite('github-actions'), id: 2 }],
+    workflows: [
+      { id: 100, check_suite_id: 1, path: 'ci.yml', event: 'pull_request', head_sha: SHA },
+      { id: 200, check_suite_id: 2, path: 'other.yml', event: 'pull_request', head_sha: SHA },
+    ],
+  })));
+  assert.equal(r.ok, false, r.summary);
+  assert.match(r.summary, /check suites not green.*failure/);
+});
+
+test('workflow supersession cannot exclude a suite from another app', async () => {
+  const r = await gate.run(ctx(github({
+    runs: [{ ...run('build'), suite: 2 }],
+    suites: [{ ...suite('external-ci', 'failure'), id: 1 }, { ...suite('github-actions'), id: 2 }],
+    workflows: [
+      { id: 100, check_suite_id: 1, name: 'CI', event: 'pull_request', head_sha: SHA },
+      { id: 200, check_suite_id: 2, name: 'CI', event: 'pull_request', head_sha: SHA },
+    ],
+  })));
+  assert.equal(r.ok, false, r.summary);
+  assert.match(r.summary, /check suites not green: external-ci \(failure/);
 });

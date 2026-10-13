@@ -59,27 +59,57 @@ async function closeBrowser() {
   if (started) await (await started).close();
 }
 
+// Chrome keeps its singleton socket in the profile directory only while that path is at most 78
+// bytes (Google Chrome 155, measured with profiles of 62 and 63 bytes). Its temp directory holds
+// a socket too, so spawnChrome gives Chrome a TMPDIR inside the profile: that socket adds 45 bytes,
+// which the same 62-byte profile limit keeps under the 108-byte Unix path limit. A temp root deep
+// enough to overflow that (a gate's TMPDIR under TOWER_CRANE_TMP) moves the profile to the first
+// directory whose path fits, on disk, and the browser's teardown removes it. The cache root is
+// on-disk scratch that stays writable where /var/tmp may be read-only. When none fits, the first
+// root is used and Chrome reports its own socket error, which names the problem.
+const CHROME_SOCKET_PATH = 78;
+
+function profileBase() {
+  const cache = process.env.XDG_CACHE_HOME || path.join(os.homedir(), '.cache');
+  const bases = [process.env.TOWER_CRANE_TEST_TMP || os.tmpdir(), os.tmpdir(), cache];
+  const fits = (base) => Buffer.byteLength(path.join(base, 'tower-crane-chrome-000000', 'SingletonSocket')) <= CHROME_SOCKET_PATH;
+  const base = bases.find(fits) || bases[0];
+  fs.mkdirSync(base, { recursive: true });
+  return base;
+}
+
+// The profile is removed when a start fails at any point, including its own setup; a started browser
+// removes it in close.
 async function launch() {
-  const profile = fs.mkdtempSync(path.join(process.env.TOWER_CRANE_TEST_TMP || os.tmpdir(), 'tower-crane-chrome-'));
+  const profile = fs.mkdtempSync(path.join(profileBase(), 'tower-crane-chrome-'));
+  try {
+    return await spawnChrome(profile);
+  } catch (error) {
+    fs.rmSync(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    throw error;
+  }
+}
+
+async function spawnChrome(profile) {
   const args = ['--headless=new', '--remote-debugging-port=0', `--user-data-dir=${profile}`, '--no-first-run', '--no-default-browser-check', '--disable-gpu', '--disable-extensions'];
   const sandboxed = process.env.TOWER_CRANE_SANDBOX === '1';
+  // The caller's TMPDIR can be too deep for Chrome's socket, so Chrome's temp directory is
+  // inside the profile, where the browser's teardown removes it with the rest.
+  const tmp = path.join(profile, 'tmp');
+  fs.mkdirSync(tmp);
+  let env = { ...process.env, TMPDIR: tmp, TMP: tmp, TEMP: tmp };
   // Chrome's user/SUID sandbox cannot nest in the harness's outer sandbox.
   // Temp-backed shared memory avoids granting writes to the host's /dev/shm.
-  let env;
   if (sandboxed) {
     args.push('--no-sandbox', '--disable-dev-shm-usage');
     const config = path.join(profile, 'config');
     const cache = path.join(profile, 'cache');
-    const tmp = path.join(profile, 'tmp');
-    for (const dir of [config, cache, tmp]) fs.mkdirSync(dir);
+    for (const dir of [config, cache]) fs.mkdirSync(dir);
     // Crashpad and first-run caches must not write under the agent's HOME.
-    env = {
-      ...process.env, HOME: profile, USERPROFILE: profile,
-      XDG_CONFIG_HOME: config, XDG_CACHE_HOME: cache, TMPDIR: tmp, TMP: tmp, TEMP: tmp,
-    };
+    env = { ...env, HOME: profile, USERPROFILE: profile, XDG_CONFIG_HOME: config, XDG_CACHE_HOME: cache };
   } else if (process.getuid && process.getuid() === 0) args.push('--no-sandbox');
   const proc = cp.spawn(CHROME, [...args, 'about:blank'], {
-    ...(env ? { env } : {}), stdio: sandboxed ? ['ignore', 'ignore', 'pipe'] : 'ignore',
+    env, stdio: sandboxed ? ['ignore', 'ignore', 'pipe'] : 'ignore',
   });
   let stderr = '';
   let failure = null;
@@ -160,10 +190,20 @@ async function openBrowser(t) {
     if (r.exceptionDetails) throw new Error(`page threw: ${r.exceptionDetails.exception ? r.exceptionDetails.exception.description : r.exceptionDetails.text}`);
     return r.result.value;
   };
+  // Calls a page function (a function or its source) with values passed as
+  // protocol arguments, so no value is ever spliced into page code.
+  const call = async (fn, ...args) => {
+    const { result } = await send('Runtime.evaluate', { expression: 'globalThis' });
+    const r = await send('Runtime.callFunctionOn', { functionDeclaration: String(fn), objectId: result.objectId, arguments: args.map((value) => ({ value })), awaitPromise: true, returnByValue: true });
+    await send('Runtime.releaseObject', { objectId: result.objectId }).catch(() => {});
+    if (r.exceptionDetails) throw new Error(`page threw: ${r.exceptionDetails.exception ? r.exceptionDetails.exception.description : r.exceptionDetails.text}`);
+    return r.result.value;
+  };
   return {
     send,
     seen,
     inPage,
+    call,
     // Types into whatever has focus, as a keyboard would: a disabled field
     // cannot hold focus, so nothing lands there.
     type: (text) => send('Input.insertText', { text }),

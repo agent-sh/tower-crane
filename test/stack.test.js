@@ -17,6 +17,24 @@ test('submitted dependencies dispatch from the exact dependency head and spawn l
   f.h.ok(['spawn', '--task', 'T2', '--wait']);
   const link = f.read().calls.find((c) => c.args[0] === 'stack' && c.args[1] === 'link');
   assert.deepEqual(link.args, ['stack', 'link', '11', '12', '--base', 'main']);
+  // A spawn event that lands during the link's GitHub call (here the reviewer's exit) refuses
+  // the link and records it. The next observer pass links the PR, as production does.
+  const until = Date.now() + 60000;
+  while (!f.h.json(['task', 'show', 'T2']).stack.linked && Date.now() < until) f.h.run(['wait', '--timeout', '1']);
+  assert.equal(f.h.json(['task', 'show', 'T2']).stack.linked, true);
+});
+
+test('a task event during the link\'s GitHub call refuses the link, and the next observer pass links the PR', (t) => {
+  const f = setup(t);
+  worker(f);
+  f.write((d) => { d.during = { 'stack link': [['task', 'note', 'T2', 'racing note', '--agent', 'worker-T2']] }; });
+  f.h.ok(['spawn', '--task', 'T2', '--wait']);
+  assert.match(fs.readFileSync(path.join(f.h.repo, '.tower-crane', 'events.jsonl'), 'utf8'), /"cmd":"stack link failed"/);
+  // The next observer pass links the PR once nothing races it. That pass can be the spawn's own, so
+  // the state after spawn is not fixed; a single `wait` can also end before its pass does, so wait
+  // in a bounded loop as the first case does.
+  const until = Date.now() + 60000;
+  while (!f.h.json(['task', 'show', 'T2']).stack.linked && Date.now() < until) f.h.run(['wait', '--timeout', '1']);
   assert.equal(f.h.json(['task', 'show', 'T2']).stack.linked, true);
 });
 
@@ -24,7 +42,8 @@ test('detached spawn links the PR after its worker submits and exits', async (t)
   const f = setup(t);
   worker(f);
   f.h.ok(['spawn', '--task', 'T2']);
-  const until = Date.now() + 15000;
+  // The worker runs git, the CLI and its submit checks; on Windows that takes about 20 seconds.
+  const until = Date.now() + 60000;
   let task;
   do {
     task = f.h.json(['task', 'show', 'T2']);
@@ -271,12 +290,13 @@ const apiCalls = (f) => f.read().calls.filter((c) => c.args[0] === 'api');
 test('a spawned worker claims a task whose dependency merged while gh api is denied to it', (t) => {
   const f = setup(t);
   const { wt } = upper(f);
+  const previousStack = f.h.json(['task', 'show', 'T2']).stack;
   f.accept('T1');
   f.h.ok(['merge', 'T1']);
   f.h.ok(['rework', 'T2', '--reason', 'the lower change merged']);
   const state = f.h.readState('tasks.json');
   const upperTask = state.tasks.find((item) => item.id === 'T2');
-  upperTask.stack.linked = false;
+  upperTask.stack = { ...previousStack, linked: false };
   upperTask.stack_disabled = true;
   f.h.writeState('tasks.json', state);
   // The worker's commit must differ from the branch it was dispatched on.
@@ -288,7 +308,9 @@ test('a spawned worker claims a task whose dependency merged while gh api is den
   const spawned = f.h.run(['spawn', '--task', 'T2', '--wait']);
   assert.equal(spawned.code, 0, spawned.stderr);
   assert.equal(f.h.json(['task', 'show', 'T2']).status, 'submitted');
-  assert.equal(apiCalls(f).length, before);
+  // The worker's submit reads its PR's checks through gh api, which is refused here and does not block the submit.
+  const submitted = apiCalls(f).slice(before);
+  assert.ok(submitted.every((c) => /\/check-(runs|suites)\?/.test(c.args[1])), 'only the submit reads gh api after the claim');
 });
 
 test('a spawned worker claim reads the recorded stack and makes no gh api call while its dependency is submitted', (t) => {
