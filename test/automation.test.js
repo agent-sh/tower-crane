@@ -905,6 +905,115 @@ test('a merge sends another conflicting PR to rework with real filenames and pre
   assert.equal(h.git(['worktree', 'list', '--porcelain']).split('worktree ').length - 1, 1);
 });
 
+test('wait stops post-merge conflict work on the first signal without reworking another task', {
+  skip: process.platform === 'win32' ? 'Windows child.kill does not deliver POSIX signals' : false,
+}, async (t) => {
+  for (const [stage, forced] of [['view 8', false], ['view 8', true], ['view 9', false], ['trial', false], ['merge event', false]]) {
+    await t.test(`${stage}${forced ? ' twice' : ''}`, async (t) => {
+      const h = cachedFixture(null, 'wait-conflict-sweep', (repo) => {
+        const h = setup(null, { repo, kind: 'docs' });
+        h.submit();
+        for (const [id, number, conflicting] of [['T2', '8', false], ['T3', '9', true]]) {
+          const branch = `other-${id}`;
+          h.git(['switch', '-qc', branch, 'main']);
+          fs.writeFileSync(path.join(h.repo, conflicting ? 'value.js' : 'other.txt'),
+            conflicting ? 'module.exports = 2;\n' : 'independent change\n');
+          h.git(['add', '.']);
+          h.git(['commit', '-qm', branch]);
+          const sha = h.git(['rev-parse', 'HEAD']);
+          h.ok(['task', 'add', '--title', id, '--acceptance', 'works', '--kind', 'docs']);
+          const github = h.github();
+          github.prs[number] = { ...github.prs['7'], headRefOid: sha, headRefName: branch };
+          github.advanceBase = true;
+          h.saveGithub(github);
+          h.submit(id, sha, number);
+        }
+        h.reviewer('T1', 'reviewer');
+        h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--sha', h.sha, '--ok', '--agent', 'reviewer']);
+        h.ok(['project', 'set', '--paused', 'manual conflict sweep']);
+        return { sha: h.sha };
+      });
+      h.github = () => JSON.parse(fs.readFileSync(h.env.AUTOMATION_GITHUB, 'utf8'));
+      const cursor = JSON.parse(h.run(['wait', '--timeout', '0', '--agent', 'orchestrator']).stdout).offset;
+      if (stage === 'merge event') {
+        h.ok(['check', 'ci', 'T1', '--agent', 'orchestrator']);
+        h.ok(['accept', 'T1', '--agent', 'orchestrator']);
+        h.ok(['merge', 'T1', '--agent', 'orchestrator']);
+      }
+      const started = path.join(h.base, 'sweep-started');
+      const release = path.join(h.base, 'release-sweep');
+      const observed = path.join(h.base, 'signal-observed');
+      const calls = path.join(h.base, 'gh-calls.jsonl');
+      const wrapper = path.join(h.base, 'held-sweep-gh.js');
+      const heldPr = stage === 'view 9' ? '9' : '8';
+      fs.writeFileSync(wrapper, `const fs = require('node:fs'), args = process.argv.slice(2);
+fs.appendFileSync(${JSON.stringify(calls)}, JSON.stringify(args) + '\\n');
+if (${stage !== 'trial'} && args[0] === 'pr' && args[1] === 'view' && args[2] === ${JSON.stringify(heldPr)}) {
+  fs.writeFileSync(${JSON.stringify(started)}, '');
+  const poll = () => fs.existsSync(${JSON.stringify(release)}) ? require(${JSON.stringify(ghStub)}) : setTimeout(poll, 25);
+  poll();
+} else require(${JSON.stringify(ghStub)});
+`);
+      fs.writeFileSync(path.join(h.base, 'tools', 'gh'), `#!/usr/bin/env node\nrequire(${JSON.stringify(wrapper)});\n`);
+      const preload = path.join(h.base, 'sweep-observer.js');
+      fs.writeFileSync(preload, `const fs = require('node:fs');
+process.on('SIGTERM', () => fs.appendFileSync(${JSON.stringify(observed)}, 'SIGTERM\\n'));
+if (${stage === 'merge event'}) require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'automation'))}).backlog = () => [];
+if (${stage === 'trial'}) {
+  const C = require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'gates', 'common'))}), git = C.git;
+  C.git = async (...args) => {
+    const result = await git(...args);
+    const log = fs.existsSync(${JSON.stringify(calls)}) ? fs.readFileSync(${JSON.stringify(calls)}, 'utf8') : '';
+    if (args[2][0] === 'merge' && args[2].includes('--no-commit') && log.includes('["pr","view","9"')) {
+      fs.writeFileSync(${JSON.stringify(started)}, '');
+      await new Promise(resolve => {
+        const poll = () => fs.existsSync(${JSON.stringify(release)}) ? resolve() : setTimeout(poll, 25);
+        poll();
+      });
+    }
+    return result;
+  };
+}
+`);
+      const child = require('node:child_process').spawn(process.execPath,
+        ['--require', preload, BIN, 'wait', '--after', String(cursor), '--types', 'never', '--timeout', '60', '--agent', 'orchestrator'],
+        { cwd: h.repo, env: h.env });
+      let stdout = '', stderr = '';
+      child.stdout.on('data', (chunk) => { stdout += chunk; });
+      child.stderr.on('data', (chunk) => { stderr += chunk; });
+      const result = new Promise((resolve, reject) => {
+        child.on('error', reject);
+        child.on('close', (code) => resolve({ code, stdout, stderr }));
+      });
+      const bound = setTimeout(() => child.kill('SIGKILL'), 20000);
+      t.after(async () => {
+        clearTimeout(bound);
+        fs.writeFileSync(release, '');
+        if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+        await result;
+        await h.cleanup();
+      });
+      assert.notEqual(await waitFor(started, { ms: 10000 }), null, 'the post-merge sweep starts');
+      assert.equal(h.github().prs['7'].state, 'MERGED');
+      const before = h.readState('tasks.json').tasks.slice(1);
+      child.kill('SIGTERM');
+      assert.notEqual(await waitFor(observed, { ms: 5000 }), null, 'wait observes the signal during the sweep');
+      const count = fs.readFileSync(calls, 'utf8').trim().split('\n').length;
+      if (forced) child.kill('SIGTERM');
+      else fs.writeFileSync(release, '');
+      const exit = await result;
+      assert.equal(exit.code, 0, JSON.stringify(exit));
+      assert.match(exit.stdout, /stopped by SIGTERM after draining 0 gates/);
+      assert.equal(fs.readFileSync(calls, 'utf8').trim().split('\n').length, count, 'no further PR inspection starts');
+      assert.deepEqual(h.readState('tasks.json').tasks.slice(1), before, 'no conflict note, rework or generated repair changes another task');
+      const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+      assert.equal(events.findLast((e) => e.cmd === 'automation').detail.phase, 'deferred');
+      assert.equal(events.some((e) => e.cmd === 'automation' && e.task !== 'T1' && e.detail.phase === 'running'), false, 'no repair executor is claimed');
+      assert.equal(h.git(['worktree', 'list', '--porcelain']).match(/^worktree /gm).length, 1);
+    });
+  }
+});
+
 test('startup reconciles a newly conflicting PR after a merge happened without a waiter', (t) => {
   const h = setup(t, { kind: 'docs' });
   h.submit();

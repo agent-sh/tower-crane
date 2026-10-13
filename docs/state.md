@@ -834,6 +834,9 @@ gate finishes and records evidence. The interrupted reaction records
 before `wait` exits 0. The next startup reconciles the remaining work.
 Signal shutdown prints a final notice containing the signal and the number
 of gates that finished during the drain, distinct from a wake or timeout.
+Conflict sweeps and asynchronous stack conflict processing stop between tasks
+and before a probe requests rework or reserves generated repair. A cancelled
+probe releases its temporary worktree and adds no conflict-error note.
 PR inspection and gate commands, including Git and GitHub queries, run
 asynchronously so they do not block signal delivery. Forced cancellation
 stops their process trees; temporary worktree removal and pruning still run
