@@ -109,7 +109,7 @@ async function spawnChrome(profile) {
     env = { ...env, HOME: profile, USERPROFILE: profile, XDG_CONFIG_HOME: config, XDG_CACHE_HOME: cache };
   } else if (process.getuid && process.getuid() === 0) args.push('--no-sandbox');
   const proc = cp.spawn(CHROME, [...args, 'about:blank'], {
-    env, stdio: sandboxed ? ['ignore', 'ignore', 'pipe'] : 'ignore',
+    env, stdio: ['ignore', 'ignore', 'pipe'],
   });
   let stderr = '';
   let failure = null;
@@ -139,7 +139,10 @@ async function spawnChrome(profile) {
   // File teardown refs and reaps Chrome before the runner records child CPU.
   proc.unref();
   proc.stderr?.unref?.();
-  const lastResort = () => proc.kill('SIGKILL');
+  const lastResort = () => {
+    proc.kill('SIGKILL');
+    remove();
+  };
   process.once('exit', lastResort);
   const close = async () => {
     proc.ref();

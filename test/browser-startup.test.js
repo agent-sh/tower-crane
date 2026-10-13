@@ -8,7 +8,7 @@ const path = require('node:path');
 const cp = require('node:child_process');
 const { makeRepo } = require('./helpers');
 
-function attempt(h, chrome, sandbox, tmp = h.base, before = '') {
+function attempt(h, chrome, sandbox, tmp = h.base, before = '', close = true) {
   const runner = path.join(h.base, 'browser-runner.js');
   fs.writeFileSync(runner, `
 ${before}
@@ -20,9 +20,10 @@ const hooks = [];
   catch (e) { error = e.message; }
   finally {
     for (const hook of hooks.reverse()) await hook();
-    await closeBrowser?.();
+    if (${close}) await closeBrowser();
   }
   console.log(JSON.stringify({ error }));
+  if (!${close}) process.exit(0);
 })().catch((e) => { console.error(e); process.exitCode = 1; });
 `);
   const r = cp.spawnSync(process.execPath, [runner], {
@@ -67,6 +68,24 @@ test('a missing browser reports its spawn error and cleans up its profile', (t) 
   assert.deepEqual(fs.readdirSync(h.base).filter((f) => f.startsWith('tower-crane-chrome-')), []);
 });
 
+test('process exit removes the shared Chrome profile when its caller omits closeBrowser', {
+  skip: process.platform === 'win32' && 'browser fixture uses a shebang and SIGKILL',
+}, (t) => {
+  const h = makeRepo(t);
+  const chrome = path.join(h.base, 'chrome');
+  fs.writeFileSync(chrome, `#!${process.execPath}
+const fs = require('node:fs');
+const path = require('node:path');
+const profile = process.argv.find((arg) => arg.startsWith('--user-data-dir=')).slice('--user-data-dir='.length);
+fs.writeFileSync(process.env.CHROME_REPORT, JSON.stringify({ profile }));
+fs.writeFileSync(path.join(profile, 'DevToolsActivePort'), '1\\n');
+setInterval(() => {}, 1000);
+`, { mode: 0o755 });
+  attempt(h, chrome, '0', h.base, '', false);
+  const { profile } = JSON.parse(fs.readFileSync(path.join(h.base, 'chrome.json'), 'utf8'));
+  assert.equal(fs.existsSync(profile), false, 'the exit fallback removes the profile without caller teardown');
+});
+
 test('a Chrome profile whose setup fails is removed, and the start rejects', (t) => {
   const h = makeRepo(t);
   // The sandboxed start creates config, cache and tmp inside the profile; a full disk fails the first.
@@ -90,7 +109,9 @@ test('a temp root too deep for Chrome\'s socket still starts Chrome, from a shal
   const deep = path.join(h.base, ...Array.from({ length: 4 }, (_, i) => `${i}-${'d'.repeat(30)}`));
   fs.mkdirSync(deep, { recursive: true });
   // The fixture's HOME is deep too, so the shallow profile goes to the account's cache root, as it does outside a fixture.
-  Object.assign(h.env, { TMPDIR: deep, XDG_CACHE_HOME: path.join(os.userInfo().homedir, '.cache') });
+  const cache = [process.env.XDG_CACHE_HOME, path.join(os.userInfo().homedir, '.cache')]
+    .find((dir) => dir && Buffer.byteLength(path.join(dir, 'tower-crane-chrome-000000', 'SingletonSocket')) <= 78);
+  Object.assign(h.env, { TMPDIR: deep, XDG_CACHE_HOME: cache });
   const chrome = path.join(h.base, 'chrome');
   fs.writeFileSync(chrome, `#!${process.execPath}
 const fs = require('node:fs');
@@ -143,8 +164,7 @@ process.exit(23);
     Object.assign(h.env, hostEnv);
     const result = attempt(h, chrome, sandbox);
     assert.match(result.error, /Chrome.*23/s);
-    if (sandbox === '1') assert.match(result.error, /fixture Chrome sandbox failure/);
-    else assert.doesNotMatch(result.error, /fixture Chrome sandbox failure/, 'host Chrome keeps ignored stderr');
+    assert.match(result.error, /fixture Chrome sandbox failure/);
     const seen = JSON.parse(fs.readFileSync(path.join(h.base, 'chrome.json'), 'utf8'));
     assert.equal(seen.args.includes('--no-sandbox'), sandbox === '1' || (process.getuid && process.getuid() === 0));
     assert.equal(seen.args.includes('--disable-dev-shm-usage'), sandbox === '1');
