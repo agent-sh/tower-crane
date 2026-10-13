@@ -18,8 +18,6 @@ function setFallbacks(h, routes, rung = 'easy') {
   fs.writeFileSync(h.userConfig, JSON.stringify({ ladder: { [rung]: { fallbacks: routes } } }));
 }
 
-
-
 function setup(t, { reason = 'outage', primaryHarness = 'codex', nextHarness = 'codex', chain = false,
   rung = 'easy', webMcp, fallbackWebMcp } = {}) {
   const h = makeTaskRepo(t, [{

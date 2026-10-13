@@ -143,7 +143,7 @@ test('a stack that adds then modifies the same file merges without changing acce
     assert.equal(f.h.git(['merge-base', head, 'origin/main']), head);
   }
   assert.equal(f.h.git(['show', 'origin/main:T1.txt']), 'T2 modified T1');
-  assert.equal(f.h.git(['rev-parse', wt.branch]), upper);
+  assert.equal(f.h.git(['branch', '--list', wt.branch]), '', 'the merged local branch is removed');
   assert.ok(!fs.existsSync(wt.path), 'the merged task worktree is removed');
   for (const id of ['T1', 'T2']) assert.equal(f.h.json(['task', 'show', id]).evidence.findLast((e) => e.type === 'merge').ok, true);
 });
@@ -258,7 +258,9 @@ test('stack merge rechecks every accepted head and records evidence for all merg
     assert.ok(evidence.commands.some((c) => c.args[0] === 'api' && c.args.includes(`expected_head_sha=${head}`)));
     assert.match(task.phase?.label || f.h.ok(['task', 'show', id]), /merged/);
   }
-  const upper = f.h.git(['rev-parse', 'HEAD'], f.h.json(['worktree', 'T2']).path);
+  const upper = f.upper.sha;
+  assert.equal(f.h.git(['branch', '--list', f.upper.wt.branch]), '', 'the merged upper branch is removed');
+  assert.ok(!fs.existsSync(f.upper.wt.path), 'the merged upper worktree is removed');
   assert.equal(f.h.git(['merge-base', upper, 'origin/main']), upper);
   assert.equal(f.h.git(['rev-parse', 'origin/main^{tree}']), f.h.git(['rev-parse', `${upper}^{tree}`]));
   f.write((d) => { d.linked = false; });
@@ -449,6 +451,12 @@ test('a refused upper merge retains lower evidence and retries without merging t
   assert.equal(f.h.json(['task', 'show', 'T1']).evidence.findLast((e) => e.type === 'merge').ok, true);
   assert.equal(f.read().prs[12].baseRefName, 'main');
   assert.equal(f.read().prs[12].state, 'OPEN');
+  assert.ok(fs.existsSync(f.upper.wt.path), 'a partial merge keeps the open upper checkout');
+  assert.equal(f.h.git(['rev-parse', f.upper.wt.branch]), f.upper.sha, 'a partial merge keeps the upper branch');
+  assert.equal(f.h.json(['worktree', 'list']).worktrees.find((w) => w.task === 'T2').state, 'live');
+  f.h.ok(['worktree', 'prune']);
+  assert.ok(fs.existsSync(f.upper.wt.path), 'prune keeps the still-open upper task');
+  assert.equal(f.h.git(['rev-parse', f.upper.wt.branch]), f.upper.sha);
   f.write((d) => { delete d.refuseMergePr; });
   f.h.ok(['merge', 'T2']);
   assert.deepEqual(routes(f), ['async 11', 'async 12', 'pr 12', 'async 12']);
