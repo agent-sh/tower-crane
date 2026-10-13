@@ -76,6 +76,11 @@ function assertReviewDiff(h, prompt, pattern) {
     'the review must include the diff or reference its complete context packet');
 }
 
+// The written packet always holds the full diff; a long receipt moves it out of the prompt.
+function reviewPacket(h) {
+  return fs.readFileSync(path.join(h.state, 'reviews', `T1-${h.sha}.md`), 'utf8');
+}
+
 function model(out) {
   const flag = out.harness === 'claude' ? '--model' : out.argv.includes('-m') ? '-m' : out.argv.includes('-p') ? '-p' : '--model';
   return out.argv[out.argv.indexOf(flag) + 1];
@@ -665,9 +670,10 @@ test('a rework review dispatch checks prior blockers and only the diff since the
   assert.match(prompt, /1 blocker: correction.md must explain the value/);
   assert.match(prompt, /security or data-loss/);
   assert.match(prompt, /follow-ups/);
-  assert.match(prompt, /diff --git a\/correction.md b\/correction.md/);
-  assert.ok(!prompt.includes('diff --git a/value.js'), 'already reviewed code stays out of the packet diff');
-  assert.ok(!prompt.includes('UNTRUSTED_FINDING'));
+  const packet = reviewPacket(h);
+  assert.match(packet, /diff --git a\/correction.md b\/correction.md/);
+  assert.ok(!packet.includes('diff --git a/value.js'), 'already reviewed code stays out of the packet diff');
+  assert.ok(!packet.includes('UNTRUSTED_FINDING'));
   assert.equal(dispatched.review_scope.sha, reviewedSha);
   assert.equal(dispatched.review_scope.revision, Number(reviewedRevision));
   const event = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse)
@@ -707,7 +713,7 @@ test('changed requirements and unrelated rework keep the full review scope', (t)
     ready(h);
     const prompt = choice(h).argv.find((arg) => arg.includes('## Task'));
     assert.match(prompt, /## Review scope\n\nFull review/, edit);
-    assert.match(prompt, /diff --git a\/value.js b\/value.js/, edit);
+    assertReviewDiff(h, prompt, /diff --git a\/value.js b\/value.js/);
     assert.ok(!prompt.includes('OLD_BLOCKER'), edit);
   }
 });
@@ -738,9 +744,10 @@ test('a rework with a rebased or merged base update gets a full review without u
     const prompt = fs.readFileSync(out, 'utf8');
     assert.match(prompt, /## Review scope\n\nFull review/);
     assert.match(prompt, /not an ancestor|base advanced/);
-    assert.match(prompt, /diff --git a\/value.js b\/value.js/);
-    assert.match(prompt, /diff --git a\/correction.md b\/correction.md/);
-    assert.ok(!prompt.includes('diff --git a/upstream.md'));
+    const packet = reviewPacket(h);
+    assert.match(packet, /diff --git a\/value.js b\/value.js/);
+    assert.match(packet, /diff --git a\/correction.md b\/correction.md/);
+    assert.ok(!packet.includes('diff --git a/upstream.md'));
     assert.equal(dispatched.review_scope, null);
   }
 });
@@ -819,6 +826,20 @@ test('review dispatch refuses a submitted head, configured base or review scope 
   for (const change of ['head', 'base', 'scope']) {
     const h = setup(t);
     changeKind(h, 'docs');
+    if (change === 'scope') {
+      // A failed review blocks dispatch until rework, so the scope can only move after one.
+      h.reviewer('T1', 'first-reviewer');
+      h.ok(['evidence', 'T1', '--agent', 'first-reviewer', '--type', 'review', '--fail',
+        '--sha', h.sha, '--summary', 'correction.md must explain the value']);
+      h.ok(['rework', '--from-review', 'T1']);
+      h.ok(['claim', 'T1', '--agent', 'builder']);
+      fs.writeFileSync(path.join(h.repo, 'correction.md'), 'The value becomes one.\n');
+      h.git(['add', 'correction.md']);
+      h.git(['commit', '-qm', 'explain the value']);
+      h.sha = h.git(['rev-parse', 'HEAD']);
+      h.ok(['submit', 'T1', '--agent', 'builder', '--sha', h.sha]);
+      ready(h);
+    }
     commandReviewer(h, path.join(h.base, 'context.txt'));
     h.git(['commit', '--allow-empty', '-qm', 'next head']);
     const next = h.git(['rev-parse', 'HEAD']);
@@ -835,11 +856,7 @@ test('review dispatch refuses a submitted head, configured base or review scope 
       assert.ok(!fs.existsSync(path.join(h.state, 'lock')), 'diff preparation leaves state writable');
       if (change === 'head') h.ok(['submit', 'T1', '--agent', 'builder', '--sha', next]);
       else if (change === 'base') h.ok(['project', 'set', '--base', 'fixture-change']);
-      else {
-        h.reviewer('T1', 'first-reviewer');
-        h.ok(['evidence', 'T1', '--agent', 'first-reviewer', '--type', 'review', '--fail',
-          '--sha', h.sha, '--summary', 'new blockers']);
-      }
+      else h.ok(['task', 'update', 'T1', '--acceptance', 'value becomes two']);
     } finally {
       fs.writeFileSync(`${paused}.go`, '');
     }
