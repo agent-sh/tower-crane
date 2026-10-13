@@ -9,6 +9,7 @@ const { once } = require('node:events');
 const { cachedFixture, HOOKS, BIN } = require('./helpers');
 const { EventReader } = require('../lib/event-reader');
 const S = require('../lib/state');
+const T = require('../lib/tasks');
 
 function largeFixture(t) {
   return cachedFixture(t, 'large-events', (h) => {
@@ -33,7 +34,9 @@ for (const { observe, silent } of waitModes) test(`idle wait reads no historical
     env: { EVENT_READ_BUDGET: meter, NODE_OPTIONS: `--require "${HOOKS}" --require "${hook}"`, ...(silent ? { HOOK_SILENT_WATCH: '1' } : {}) },
   });
   assert.equal(result.code, 2, result.stderr);
-  assert.equal(JSON.parse(fs.readFileSync(meter, 'utf8')).bytes, 0);
+  const budget = JSON.parse(fs.readFileSync(meter, 'utf8'));
+  assert.equal(budget.bytes, 0);
+  assert.equal(budget.snapshotBytes, 0, 'idle checks must reuse validated state snapshots');
 });
 
 test('served pages and owner message requests reuse history on a 50 MiB log', async (t) => {
@@ -68,7 +71,9 @@ test('served pages and owner message requests reuse history on a 50 MiB log', as
   child.kill('SIGTERM');
   const [code] = await closed;
   assert.equal(code, 0, stderr);
-  assert.equal(JSON.parse(fs.readFileSync(meter, 'utf8')).bytes, 0);
+  const budget = JSON.parse(fs.readFileSync(meter, 'utf8'));
+  assert.equal(budget.bytes, 0);
+  assert.equal(budget.snapshotBytes, 0);
 });
 
 test('event tail buffers partial UTF-8 bytes and resets history only on truncation or replacement', (t) => {
@@ -134,8 +139,45 @@ test('retained state history keeps snapshots independent and does not duplicate 
   assert.equal(before.some((e) => e.detail?.text === 'one receipt'), false);
   assert.equal(after.filter((e) => e.detail?.text === 'one receipt').length, 1);
   assert.equal(S.readEvents(h.state), after, 'idle loads reuse their snapshot');
+  const snapshot = S.loadState(h.state);
+  assert.equal(S.loadState(h.state).tasks, snapshot.tasks);
+  S.mutate(ctx, 'project set', (st, emit) => {
+    st.project.goal = 'Changed goal';
+    emit(null, { goal: st.project.goal });
+  });
+  assert.notEqual(snapshot.project.goal, 'Changed goal', 'writers must not mutate retained snapshots');
+  assert.equal(S.loadState(h.state).project.goal, 'Changed goal');
   fs.writeFileSync(path.join(h.state, 'events.jsonl'), '');
   assert.deepEqual(S.readEvents(h.state), []);
   release();
   release();
+});
+
+test('idle reservation checks reuse history while expiry and appended claims remain visible', () => {
+  let visits = 0;
+  const history = Array.from({ length: 1000 }, () => ({ cmd: 'msg', detail: {} }));
+  history.push({ at: new Date(0).toISOString(), cmd: 'spawn', task: 'T1',
+    detail: { role: 'worker', reserved: true, agent: 'worker', attempt: 1, pid: 10 } });
+  const events = new Proxy(history, { get(target, key, receiver) {
+    if (/^\d+$/.test(String(key))) visits++;
+    return Reflect.get(target, key, receiver);
+  } });
+  const st = { events, project: { limits: { lease_minutes: 1 } } };
+  const slots = T.reservations(st, 0);
+  assert.equal(slots.length, 1);
+  slots[0].until = 0;
+  slots[0].proc.pid = 99;
+  visits = 0;
+  for (let i = 0; i < 10; i++) assert.equal(T.reservations(st, 1000).length, 1);
+  assert.deepEqual(T.reservations(st, 60001), []);
+  assert.equal(visits, 0, 'unchanged history must not be replayed on idle checks');
+  assert.equal(T.reservations(st, 1000)[0].proc.pid, 10, 'callers must not mutate cached reservations');
+  st.project.limits.lease_minutes = 2;
+  assert.equal(T.reservations(st, 60001).length, 1, 'a changed lease horizon must rebuild reservations');
+  st.project.limits.lease_minutes = 1;
+  assert.equal(T.reservations(st, 1000).length, 1);
+  visits = 0;
+  history.push({ cmd: 'claim', task: 'T1', agent: 'worker', detail: {} });
+  assert.deepEqual(T.reservations(st, 1000), []);
+  assert.ok(visits > 0, 'a new receipt must invalidate the cached reservation history');
 });

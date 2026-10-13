@@ -79,11 +79,56 @@ async function measure(run) {
   }
 }
 
+// A supplied state copy exercises the common idle queries without running reactions.
+async function measureState(run, dir) {
+  const E = require('../lib/events');
+  const P = require('../lib/processes');
+  const T = require('../lib/tasks');
+  const I = require('../lib/inbox');
+  // Keep a captured lease workload stable while replaying an old state copy.
+  const snapshotAt = fs.statSync(path.join(dir, 'tasks.json')).mtimeMs;
+  const release = S.retainEvents ? S.retainEvents(dir) : () => {};
+  const check = () => {
+    const st = S.loadState(dir);
+    const now = snapshotAt;
+    E.sources(st, st.events, now);
+    require('../lib/escalation').candidates(st);
+    P.exitedClaims(st, st.events, { includeTail: false });
+    T.reservations(st, now);
+    const holders = T.workerHolders(st, now);
+    if (holders.length < st.project.limits.workers) I.dispatchable(st);
+    // Detect, stack observation, consume and refill each load state in a wait tick.
+    for (let i = 0; i < 4; i++) S.loadState(dir);
+  };
+  try {
+    check();
+    await pause(5000);
+    const before = sample(process.pid);
+    const start = performance.now();
+    let checks = 0;
+    while (performance.now() - start < 12000) {
+      const tick = performance.now();
+      check();
+      checks++;
+      await pause(Math.max(1, Math.min(1000 - (performance.now() - tick), 12000 - (performance.now() - start))));
+    }
+    const seconds = (performance.now() - start) / 1000;
+    const after = sample(process.pid);
+    const measurements = [{ reader: 'state idle queries', cpu_percent: 100 * (after.ticks - before.ticks) / hz / seconds,
+      rchar: after.rchar - before.rchar, seconds, checks, snapshot_at: new Date(snapshotAt).toISOString() }];
+    console.log(JSON.stringify({ label, run, measurements }));
+    return measurements;
+  } finally {
+    release();
+  }
+}
+
 (async () => {
   const results = [];
-  for (let run = 1; run <= 3; run++) results.push(...await measure(run));
+  const state = process.argv[3];
+  for (let run = 1; run <= 3; run++) results.push(...await (state ? measureState(run, state) : measure(run)));
   fs.writeFileSync(path.join(cache, `${label}.json`), JSON.stringify(results, null, 2) + '\n');
-  for (const reader of ['wait', 'spawn-monitor']) {
+  for (const reader of [...new Set(results.map((m) => m.reader))]) {
     const samples = results.filter((m) => m.reader === reader);
     const range = (key) => {
       const values = samples.map((m) => m[key]).sort((a, b) => a - b);

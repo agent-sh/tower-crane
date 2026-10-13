@@ -568,7 +568,7 @@ An orchestrator still requires both technical settings when listed in `answerers
 
 ## Event wakeups
 
-`wait` and the automation it hosts tail `events.jsonl` while running. Idle fallback checks do not reread historical event bytes. Partial lines stay buffered; truncating or replacing the log resets the reader to its beginning. Byte cursors belong to one log, so restart clients with a fresh cursor after replacing it.
+`wait` and the automation it hosts tail `events.jsonl` while running. Idle fallback checks do not reread historical event bytes or unchanged validated state snapshots. Partial lines stay buffered; truncating or replacing the log resets the reader to its beginning. Byte cursors belong to one log, so restart clients with a fresh cursor after replacing it.
 
 The orchestrator does not run a waiter of its own. Its harness delivers events into the session (table below); `tower-crane wait` is the interface underneath and the fallback for a harness with nothing better.
 

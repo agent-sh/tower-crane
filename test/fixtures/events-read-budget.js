@@ -5,6 +5,8 @@ const path = require('node:path');
 const handles = new Set();
 let bytes = 0;
 let baseline = 0;
+let snapshotBytes = 0;
+let snapshotBaseline = 0;
 const open = fs.openSync;
 const close = fs.closeSync;
 const read = fs.readSync;
@@ -26,14 +28,15 @@ fs.readSync = function (fd, ...args) {
 fs.readFileSync = function (file, ...args) {
   const result = readFile.call(this, file, ...args);
   if (path.basename(String(file)) === 'events.jsonl') bytes += Buffer.byteLength(result);
+  if (['project.json', 'tasks.json', 'decisions.json'].includes(path.basename(String(file)))) snapshotBytes += Buffer.byteLength(result);
   return result;
 };
 const watch = fs.watch;
 fs.watch = function (...args) {
   // The first check runs in microtasks before this baseline, including startup reconciliation.
-  setImmediate(() => { baseline = bytes; });
+  setImmediate(() => { baseline = bytes; snapshotBaseline = snapshotBytes; });
   return watch.apply(this, args);
 };
 process.on('exit', () => {
-  fs.writeFileSync(process.env.EVENT_READ_BUDGET, JSON.stringify({ bytes: bytes - baseline }));
+  fs.writeFileSync(process.env.EVENT_READ_BUDGET, JSON.stringify({ bytes: bytes - baseline, snapshotBytes: snapshotBytes - snapshotBaseline }));
 });
