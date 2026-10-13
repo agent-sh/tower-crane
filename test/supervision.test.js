@@ -51,7 +51,7 @@ function controlledBackoff(h) {
   };
 }
 
-function setup(t, { failures = 1, error = '75', records = null, hold = 0, waitForFinish = false, config = {}, env = {}, busy = false, claimDelay = 0, claim = true, sessionReceipt = false, publishBarrier = false } = {}) {
+function setup(t, { failures = 1, error = '75', records = null, hold = 0, waitForFinish = false, config = {}, env = {}, busy = false, claimDelay = 0, claim = true, sessionReceipt = false } = {}) {
   const h = makeTaskRepo(t, [{
     args: ['--title', 'Supervise an outage', '--tier', 'easy', '--acceptance', 'same session reruns'],
     brief: 'Finish the task.\n',
@@ -70,18 +70,7 @@ if (!attempts.length && ${claim}) {
 const task = JSON.parse(cli(['task', 'show', 'T1', '--json']));
 attempts.push({ agent: process.env.TOWER_CRANE_AGENT, session: process.env.TOWER_CRANE_SESSION, retry: process.env.TOWER_CRANE_RETRY,
   cwd: process.cwd(), claim: task.claim, pid: process.pid });
-${publishBarrier ? `if (attempts.length === 2) {
-  const write = fs.writeFileSync;
-  fs.writeFileSync = (target, data) => {
-    const fd = fs.openSync(target, 'w');
-    write(file + '.writing', '');
-    while (!fs.existsSync(file + '.publish')) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
-    try { write(fd, data); } finally { fs.closeSync(fd); }
-  };
-}` : ''}
-const pending = file + '.next-' + process.pid;
-fs.writeFileSync(pending, JSON.stringify(attempts));
-fs.renameSync(pending, file);
+fs.writeFileSync(file, JSON.stringify(attempts));
 ${sessionReceipt ? "console.log(JSON.stringify({ type: 'thread.started', thread_id: 'supervised-session' }));" : ''}
 ${busy ? "cp.spawn(process.execPath, ['-e', 'const end = Date.now() + 3500; while (Date.now() < end) {}'], { stdio: 'ignore' });" : ''}
 const finish = () => {
@@ -160,6 +149,40 @@ function outage(harness, stream, lines) {
   read(null, true);
   return seen;
 }
+
+test('context overflow comes from harness errors, never quoted work output', () => {
+  const message = "Codex ran out of room in the model's context window. Start a new thread or clear earlier history before retrying.";
+  const cases = [
+    ['codex', false, { type: 'turn.failed', error: { message } }, true],
+    ['codex', false, '{"type":"turn.failed","error":{"message":"context_length_exceeded"}}\n{"type":"turn.completed"}', false],
+    ['claude', false, { type: 'result', is_error: true, errors: ['Prompt is too long'] }, true],
+    ['claude', false, { type: 'assistant', isApiErrorMessage: true, message: { content: [{ type: 'text', text: 'Prompt is too long' }] } }, true],
+    ['command', true, 'API Error: 400 prompt is too long: 210000 tokens > 200000 maximum', true],
+    ['codex', true, { type: 'item.completed', item: { type: 'command_execution', aggregated_output: message } }, false],
+    ['claude', true, { type: 'assistant', message: { content: [{ type: 'text', text: 'Prompt is too long' }] } }, false],
+    ['claude', false, { type: 'result', is_error: false, result: 'Prompt is too long' }, false],
+    ['command', true, { message }, false],
+    ['command', false, message, false],
+    ['pi', true, 'Prompt is too long', false],
+  ];
+  for (const [harness, stderr, value, expected] of cases) {
+    const read = errorReader(harness, stderr, () => {});
+    const text = typeof value === 'string' ? value : JSON.stringify(value);
+    read(Buffer.from(text.slice(0, 13)));
+    read(Buffer.from(text.slice(13)));
+    assert.equal(read(null, true).overflowed, expected, JSON.stringify([harness, stderr, value]));
+  }
+  let overflowed = false;
+  const report = (value) => { overflowed = value; };
+  const stdout = errorReader('command', false, () => {}, report);
+  const stderr = errorReader('command', true, () => {}, report);
+  stderr(Buffer.from('Prompt is too long\n'));
+  assert.equal(overflowed, true);
+  stdout(Buffer.from('{"type":"result","is_error":false}\n'));
+  assert.equal(overflowed, false);
+  stderr(null, true);
+  assert.equal(overflowed, false, 'closing an earlier error stream cannot undo successful recovery');
+});
 
 test('outages come only from harness error envelopes and stderr, and quoted errors never count', () => {
   const json = (records) => records.map((record) => JSON.stringify(record));
@@ -1078,20 +1101,6 @@ fs.writeFileSync(process.argv[2], JSON.stringify({
   assert.equal(path.basename(captured.args[monitorIndex + 1]), 'job.json');
   assert.ok(!captured.args.some((arg) => arg.includes('x'.repeat(1024))), 'the prompt is not in monitor argv');
   assert.equal(h.json(['task', 'show', 'T1']).run.phase, 'waiting');
-});
-
-test('supervision attempt readers keep a complete snapshot during the next write', async (t) => {
-  const h = setup(t, { waitForFinish: true, publishBarrier: true });
-  const spawned = h.json(['spawn', '--task', 'T1']);
-  try {
-    await until(() => fs.existsSync(`${h.attempts}.writing`), 'second attempt did not start writing');
-    assert.equal(h.readAttempts().length, 1, 'readers keep the previous complete attempt list');
-  } finally {
-    fs.writeFileSync(`${h.attempts}.publish`, '');
-    fs.writeFileSync(`${h.attempts}.finish`, '');
-    await until(() => !detachedAlive({ pid: spawned.monitor_pid }), 'previous supervisor did not finish');
-  }
-  assert.equal(h.readAttempts().length, 2);
 });
 
 test('rework cannot resume a session while its transient rerun is still alive', async (t) => {

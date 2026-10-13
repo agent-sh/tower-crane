@@ -158,6 +158,32 @@ test('gh failures retain child startup errors, exit status and signals', async (
   }
 });
 
+test('GitHub observation errors are infrastructure failures, including unknown mergeability', async () => {
+  const cases = [
+    ['PR transport', 'view', result('', 1, 'HTTP 502: Bad Gateway'), /HTTP 502/],
+    ['PR output', 'view', result('{'), /could not read gh pr view/],
+    ['mergeability', 'view', result(JSON.stringify({ headRefOid: SHA, mergeable: 'UNKNOWN', mergeStateStatus: 'UNKNOWN' })), /mergeability is unknown/],
+    ['check runs', 'check-runs', result('', 1, 'HTTP 502: Bad Gateway'), /HTTP 502/],
+    ['check suites', 'check-suites', result('', 1, 'HTTP 502: Bad Gateway'), /HTTP 502/],
+    ['Actions API', 'actions/runs', result('', 1, 'HTTP 502: Bad Gateway'), /HTTP 502/],
+    ['check output', 'check-runs', result('{'), /could not read gh api/],
+  ];
+  for (const [label, target, failure, message] of cases) {
+    const gh = fakeExec((args) => {
+      if (args[0] === 'pr') return target === 'view' ? failure
+        : result(JSON.stringify({ headRefOid: SHA, mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }));
+      if (args[1].includes(target)) return failure;
+      return result(lines(args[1].includes('check-runs') ? GREEN_RUNS
+        : args[1].includes('check-suites') ? GREEN_SUITES : []));
+    });
+    const r = await gate.run(ctx(gh, { pr: 42 }));
+    assert.equal(r.ok, false, label);
+    assert.equal(r.infrastructure_failure, true, label);
+    assert.notEqual(r.confirmed_failure, true, label);
+    assert.match(r.summary, message, label);
+  }
+});
+
 test('workflow supersession orders by creation time and id, with name fallback and a known replacement suite', async () => {
   const old = { id: 100, head_sha: SHA, check_suite_id: 1, path: 'ci.yml', name: 'CI', event: 'pull_request', created_at: '2026-10-11T10:00:00Z', status: 'completed', conclusion: 'failure' };
   const current = { ...old, id: 200, check_suite_id: 2, created_at: '2026-10-11T11:00:00Z', conclusion: 'success' };
