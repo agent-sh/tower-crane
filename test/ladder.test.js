@@ -230,7 +230,7 @@ test('ladder harness moves every rung without its own harness, and spawn runs ea
   const h = makeRepo(t);
   h.init();
   for (const rung of ['easy', 'medium', 'review', 'small']) h.ok(['ladder', 'set', rung, '--model', `m-${rung}`, '--clear', 'profile']);
-  h.ok(['task', 'add', '--title', 'Small', '--acceptance', 'a', '--size', 'S']);
+  h.ok(['task', 'add', '--title', 'Small', '--acceptance', 'a', '--kind', 'docs', '--size', 'S']);
   h.ok(['task', 'add', '--title', 'Medium', '--acceptance', 'a']);
   h.ok(['task', 'add', '--title', 'Large', '--acceptance', 'a', '--size', 'L']);
   h.ok(['task', 'add', '--title', 'Study', '--acceptance', 'a', '--kind', 'research', '--size', 'S']);
@@ -344,7 +344,7 @@ test('a ladder broken by a changed user file still loads, and ladder set repairs
   const h = makeRepo(t);
   writeUser(h, { harness: 'pi', ladder: { easy: { model: 'p/easy' }, medium: { model: 'p/medium' }, review: { model: 'p/review' }, small: { model: 'p/small' } } });
   h.init();
-  h.ok(['task', 'add', '--title', 'x', '--acceptance', 'a', '--size', 'S']);
+  h.ok(['task', 'add', '--title', 'x', '--acceptance', 'a', '--kind', 'docs', '--size', 'S']);
   h.ok(['brief', 'set', 'T1', '-'], { input: 'brief\n' });
   // The project keeps its default harness and its orchestrator rung, and
   // follows the user file for the rest.
@@ -373,7 +373,7 @@ test('a ladder broken by a changed user file still loads, and ladder set repairs
 test('a ladder write is evented and re-renders the sketch with the ladder and each task tier', (t) => {
   const h = makeRepo(t);
   h.init();
-  h.ok(['task', 'add', '--title', 'Small fix', '--acceptance', 'a', '--size', 'S']);
+  h.ok(['task', 'add', '--title', 'Small fix', '--acceptance', 'a', '--size', 'S', '--tier', 'easy']);
   h.ok(['ladder', 'set', 'easy', '--model', 'fixture-model', '--clear', 'profile', '--agent', 'orchestrator']);
   const ev = events(h).find((e) => e.cmd === 'ladder set');
   assert.deepEqual([ev.agent, ev.detail], ['orchestrator', { rung: 'easy', model: 'fixture-model', effort: 'medium', authority: 'orchestrator' }]);
@@ -391,11 +391,23 @@ test('tasks take a tier from kind and size unless one is given', (t) => {
   const h = makeRepo(t);
   h.init();
   const add = (...flags) => h.json(['task', 'add', '--title', 'x', '--acceptance', 'a', ...flags]).tier;
-  assert.equal(add('--size', 'S'), 'easy');
+  assert.equal(add('--kind', 'docs', '--size', 'S'), 'easy');
   assert.equal(add(), 'medium');
   assert.equal(add('--size', 'L'), 'hard');
   assert.equal(add('--kind', 'research', '--size', 'S'), 'research');
   assert.equal(add('--size', 'S', '--tier', 'research'), 'research');
+  // Only trivial work defaults to easy: small docs. Every other kind starts at medium.
+  const want = {
+    code: { S: 'medium', M: 'medium', L: 'hard' },
+    ops: { S: 'medium', M: 'medium', L: 'hard' },
+    design: { S: 'medium', M: 'medium', L: 'hard' },
+    docs: { S: 'easy', M: 'medium', L: 'hard' },
+    research: { S: 'research', M: 'research', L: 'research' },
+  };
+  for (const [kind, sizes] of Object.entries(want)) {
+    for (const [size, tier] of Object.entries(sizes)) assert.equal(add('--kind', kind, '--size', size), tier, `${kind} ${size}`);
+  }
+  assert.equal(add('--kind', 'code', '--size', 'S', '--tier', 'easy'), 'easy', 'an explicit tier still wins');
   assert.equal(h.json(['task', 'update', 'T2', '--tier', 'hard']).tier, 'hard');
   assert.equal(h.json(['task', 'update', 'T1', '--size', 'L']).tier, 'easy', 'a size change does not move the tier');
   assert.match(h.ok(['task', 'show', 'T2']), /size: M {2}tier: hard/);
@@ -403,8 +415,8 @@ test('tasks take a tier from kind and size unless one is given', (t) => {
   assert.equal(h.run(['task', 'update', 'T1', '--tier', 'expert']).code, 2);
 
   const plan = path.join(h.base, 'plan.json');
-  fs.writeFileSync(plan, JSON.stringify([{ title: 'p', acceptance: ['a'], tier: 'research' }, { title: 'q', acceptance: ['a'], size: 'S' }]));
-  assert.deepEqual(h.json(['plan', 'import', plan]).added.map((a) => h.json(['task', 'show', a.id]).tier), ['research', 'easy']);
+  fs.writeFileSync(plan, JSON.stringify([{ title: 'p', acceptance: ['a'], tier: 'research' }, { title: 'q', acceptance: ['a'], size: 'S' }, { title: 'd', acceptance: ['a'], kind: 'docs', size: 'S' }]));
+  assert.deepEqual(h.json(['plan', 'import', plan]).added.map((a) => h.json(['task', 'show', a.id]).tier), ['research', 'medium', 'easy']);
   fs.writeFileSync(plan, JSON.stringify([{ title: 'r', acceptance: ['a'], tier: 'expert' }]));
   const bad = h.run(['plan', 'import', plan]);
   assert.equal(bad.code, 1);
@@ -422,7 +434,7 @@ test('tasks take a tier from kind and size unless one is given', (t) => {
 test('validate does not warn when review uses the task tier model', (t) => {
   const h = makeRepo(t);
   h.init();
-  h.ok(['task', 'add', '--title', 'x', '--acceptance', 'a', '--size', 'S']);
+  h.ok(['task', 'add', '--title', 'x', '--acceptance', 'a', '--kind', 'docs', '--size', 'S']);
   assert.deepEqual(h.json(['validate']).warnings, [], 'easy runs fixture-light and review runs fixture-main');
   h.ok(['task', 'add', '--title', 'y', '--acceptance', 'a']);
   const r = h.run(['validate']);
@@ -439,7 +451,7 @@ test('validate does not warn when review uses the task tier model', (t) => {
 test('validate allows identical Codex profile and explicit model identities', (t) => {
   const h = makeRepo(t);
   h.init();
-  h.ok(['task', 'add', '--title', 'x', '--acceptance', 'a', '--size', 'S']);
+  h.ok(['task', 'add', '--title', 'x', '--acceptance', 'a', '--kind', 'docs', '--size', 'S']);
   // codex -m overrides the profile's model, so these two run the same model.
   h.ok(['ladder', 'set', 'easy', '--model', 'same-model', '--profile', 'author-profile']);
   h.ok(['ladder', 'set', 'review', '--model', 'same-model', '--profile', 'review-profile']);

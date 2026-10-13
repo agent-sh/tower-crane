@@ -13,9 +13,9 @@ const suite = (app, conclusion = 'success', status = 'completed', runs = 1) => (
 // gh --jq prints one JSON value per line, across all pages.
 const lines = (items) => items.map((i) => JSON.stringify(i)).join('\n') + (items.length ? '\n' : '');
 
-function github({ runs = [], suites = [], workflows = [], head = SHA, apiError = null } = {}) {
+function github({ runs = [], suites = [], workflows = [], head = SHA, apiError = null, pr } = {}) {
   return fakeExec((args) => {
-    if (args[0] === 'pr' && args[1] === 'view') return result(JSON.stringify({ headRefOid: head, mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }));
+    if (args[0] === 'pr' && args[1] === 'view') return result(JSON.stringify(pr || { headRefOid: head, mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }));
     if (args[0] !== 'api') return null;
     assert.ok(args.includes('--paginate'), 'every page must be read');
     if (apiError) return result('', 1, apiError);
@@ -32,6 +32,32 @@ function ctx(gh, task = {}, project = {}) {
 
 const GREEN_RUNS = [run('build'), run('lint'), run('docs', 'skipped'), run('bench', 'neutral')];
 const GREEN_SUITES = [suite('github-actions'), suite('github-actions', 'neutral')];
+
+test('hotfix checks only push workflows on the recorded base and merge SHA, including with local CI configured', async () => {
+  const task = { pr: 42, hotfix: { merge_sha: SHA, base: 'main' } };
+  const pr = { state: 'MERGED', headRefOid: OTHER, mergeCommit: { oid: SHA }, baseRefName: 'main' };
+  const push = { id: 20, path: 'ci.yml', event: 'push', head_sha: SHA, head_branch: 'main',
+    check_suite_id: 10, status: 'completed', conclusion: 'success' };
+  const runs = [{ ...run('test'), suite: 10 }, { ...run('PR only', 'failure'), suite: 11 }];
+  const suites = [{ ...suite('github-actions'), id: 10 }, { ...suite('github-actions', 'failure'), id: 11 }];
+  const r = await gate.run(ctx(github({ runs, suites, workflows: [push], pr }), task,
+    { ci: { required: ['test'], local: { default: { command: ['missing'] } } } }));
+  assert.equal(r.ok, true, r.summary);
+  for (const override of [{ event: 'pull_request' }, { head_branch: 'feature' }, { head_sha: OTHER },
+    { status: 'queued', conclusion: null }, { conclusion: 'failure' }, { check_suite_id: null }]) {
+    const r = await gate.run(ctx(github({ runs, suites, workflows: [{ ...push, ...override }], pr }), task));
+    assert.equal(r.ok, false, JSON.stringify(override));
+    assert.match(r.summary, /hotfix needs successful push CI/);
+  }
+  const failedJob = await gate.run(ctx(github({
+    runs: [{ ...runs[0], conclusion: 'failure' }], suites: [suites[0]], workflows: [push], pr,
+  }), task));
+  assert.equal(failedJob.ok, false);
+  assert.equal(failedJob.confirmed_failure, true);
+  const wrongMerge = await gate.run(ctx(github({ pr: { ...pr, mergeCommit: { oid: OTHER } } }), task));
+  assert.equal(wrongMerge.ok, false);
+  assert.match(wrongMerge.summary, /no longer matches/);
+});
 
 test('every run and suite completed, none failed: ok', async () => {
   const gh = github({ runs: GREEN_RUNS, suites: GREEN_SUITES });
@@ -137,6 +163,25 @@ test('gh failing: not ok with its message', async () => {
   const r = await gate.run(ctx(github({ apiError: 'gh: Not Found (HTTP 404)' })));
   assert.equal(r.ok, false);
   assert.match(r.summary, /HTTP 404/);
+});
+
+test('gh failures retain child startup errors, exit status and signals', async () => {
+  const cases = [
+    [{ status: null, error: { code: 'EAGAIN', message: 'spawnSync gh EAGAIN' } }, ['status=null', 'EAGAIN', 'spawnSync gh EAGAIN']],
+    [{ status: null, error: { code: 'ETXTBSY', message: 'spawnSync gh ETXTBSY' } }, ['status=null', 'ETXTBSY']],
+    [{ status: null, signal: 'SIGTERM' }, ['status=null', 'signal=SIGTERM']],
+    [{ status: null, signal: 'SIGKILL', error: { code: 'ETIMEDOUT', message: 'spawnSync gh ETIMEDOUT' } }, ['ETIMEDOUT', 'signal=SIGKILL']],
+    [{ status: 7 }, ['status=7', 'no output']],
+    [{ status: 1, stderr: 'gh: Not Found (HTTP 404)' }, ['status=1', 'HTTP 404']],
+    [{ status: null, error: { code: 'ENOENT', message: 'spawnSync gh ENOENT' } }, ['ENOENT', 'gh not found on PATH', 'gh auth login']],
+  ];
+  for (const [failure, expected] of cases) {
+    const gh = fakeExec(() => failure);
+    const r = await gate.run(ctx(gh));
+    assert.equal(r.ok, false);
+    for (const text of expected) assert.ok(r.summary.includes(text), `${text}: ${r.summary}`);
+    assert.equal(gh.calls.length, 1, 'a failure is reported without retrying');
+  }
 });
 
 test('GitHub observation errors are infrastructure failures, including unknown mergeability', async () => {
