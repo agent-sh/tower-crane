@@ -1182,27 +1182,41 @@ test('claude and codex keep a link inside a hidden directory and its target hidd
   }
 });
 
-test('a project sandbox path inside a hidden credential store refuses dispatch', { skip: NO_STUBS }, t => {
-  // A sandbox.write path inside a hidden store reopens what lies under it:
-  // codex mounts writable paths after hidden ones, and claude remounts an
-  // allowed path inside a denied one.
+test('a project sandbox path inside a hidden credential store, or a writable one holding it, refuses dispatch', { skip: NO_STUBS }, t => {
+  // A path inside a hidden store reopens what lies under it: codex mounts
+  // writable paths after hidden ones, and claude remounts an allowed path
+  // inside a denied one. A writable path holding a store keeps it masked for
+  // the run, but in codex the agent can rename a directory between the two
+  // and so move the store out from under the next spawn's mask.
   const { h, u } = setup(t);
-  const stores = {
-    write: [path.join(h.state, 'brokers', 'worker-T9-1'), path.join(h.state, 'homes', 'worker-T9-1', 'home', '.aws')],
-    read: [path.join(path.dirname(h.userConfig), 'owner')],
-  };
-  for (const [field, paths] of Object.entries(stores)) {
-    for (const p of paths) {
-      fs.mkdirSync(p, { recursive: true });
-      h.ok(['project', 'set', '--sandbox', JSON.stringify({ [field]: [p] })]);
-      for (const harness of ['claude', 'codex']) {
-        isolated(h, 'hard', harness);
-        fs.rmSync(u.out, { force: true });
-        const refused = h.run(['spawn', '--role', 'hard', '--task', 'T1', '--wait', '--json'], { env: u.env });
-        assert.notEqual(refused.code, 0, `${harness}: sandbox.${field} ${p} must refuse dispatch`);
-        assert.match(refused.stderr, new RegExp(`sandbox\\.${field} path .* is inside .* which the sandbox hides because it holds credentials`));
-        assert.ok(!fs.existsSync(u.out), `${harness}: the harness must not start`);
-      }
+  const owner = path.join(path.dirname(h.userConfig), 'owner');
+  const refused = [
+    ['write', path.join(h.state, 'brokers', 'worker-T9-1'), 'is inside'],
+    ['write', path.join(h.state, 'homes', 'worker-T9-1', 'home', '.aws'), 'is inside'],
+    ['read', owner, 'is inside'],
+    ['write', h.state, 'holds'],
+    ['write', path.dirname(owner), 'holds'],
+  ];
+  for (const [field, p, why] of refused) {
+    fs.mkdirSync(p, { recursive: true });
+    h.ok(['project', 'set', '--sandbox', JSON.stringify({ [field]: [p] })]);
+    for (const harness of ['claude', 'codex']) {
+      isolated(h, 'hard', harness);
+      fs.rmSync(u.out, { force: true });
+      const r = h.run(['spawn', '--role', 'hard', '--task', 'T1', '--wait', '--json'], { env: u.env });
+      assert.notEqual(r.code, 0, `${harness}: sandbox.${field} ${p} must refuse dispatch`);
+      assert.match(r.stderr, new RegExp(`sandbox\\.${field} path .* ${why} .* which the sandbox hides because it holds credentials`));
+      assert.ok(!fs.existsSync(u.out), `${harness}: the harness must not start`);
+    }
+  }
+  // A readable path holding a store keeps it hidden: the deeper mask wins.
+  h.ok(['project', 'set', '--sandbox', JSON.stringify({ read: [h.state, path.dirname(owner)] })]);
+  for (const harness of ['claude', 'codex']) {
+    isolated(h, 'hard', harness);
+    spawn(h, u, 'hard');
+    const seen = u.report();
+    for (const f of [path.join(owner, 'key'), path.join(h.state, 'brokers', 'worker-T9-1', 'broker.json')]) {
+      assert.equal(commandsRead(seen, f), false, `${harness}: ${f} stays hidden under a readable parent`);
     }
   }
 });
