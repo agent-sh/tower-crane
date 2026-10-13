@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
-const { ROOT, TMP_ROOT, cachedFixture } = require('./helpers');
+const { ROOT, TMP_ROOT } = require('./helpers');
 const { isMasked, MASKED_DIRS } = require('../lib/masked-merge');
 const { FILES: SANDBOX_PATHS } = require('../lib/claude-sandbox-placeholders');
 
@@ -262,87 +262,27 @@ test('merge and checkout preserve all protected Claude configuration entries', (
   }
 });
 
-test('every shared mount supports present binds and absent character placeholders for all Git moves', (t) => {
-  let cells = 0;
-  const mounts = SANDBOX_PATHS.map(mount => ({
-    mount,
-    kind: MASKED_DIRS.includes(mount) ? 'directory' : 'file',
-    file: MASKED_DIRS.includes(mount) ? `${mount}/new/file.txt` : mount,
-  }));
-  for (const { mount, kind, file } of mounts) {
-    for (const edit of ['add', 'change', 'delete']) {
-      for (const present of [false, true]) {
-        for (const operation of ['merge', 'checkout']) {
-          const seed = cachedFixture(t, `masked:${mount}:${edit}`, h => {
-            commit(h.repo, { 'a.txt': 'a\n', ...(edit === 'add' ? {} : { [file]: 'old\n' }) }, h.env, 'base');
-            git(['checkout', '-q', '-b', 'feat'], h.repo, h.env);
-            commit(h.repo, { 'b.txt': 'b\n' }, h.env, 'task');
-            git(['checkout', '-q', 'main'], h.repo, h.env);
-            commit(h.repo, { 'a.txt': 'a2\n', [file]: edit === 'delete' ? null : 'new\n' }, h.env, 'main');
-            return { source: h.repo };
-          });
-          const f = fixture(t, {}, { source: seed.source });
-          const target = path.join(f.git(['rev-parse', '--show-toplevel']), mount);
-          fs.rmSync(target, { recursive: true, force: true });
-          fs.mkdirSync(path.dirname(target), { recursive: true });
-          if (present && kind === 'directory') {
-            fs.mkdirSync(path.dirname(path.join(f.wt, file)), { recursive: true });
-            fs.writeFileSync(path.join(f.wt, file), 'mount\n');
-          } else {
-            fs.writeFileSync(target, 'mount\n');
-          }
-          const preload = path.join(f.wt, '.git', 'mask-device.js');
-          const trace = path.join(f.wt, '.git', 'move-trace');
-          f.env.GIT_TRACE = trace;
-          fs.writeFileSync(preload, `
-const fs = require('node:fs');
-const path = require('node:path');
-const lstat = fs.lstatSync;
-const access = fs.accessSync;
-fs.lstatSync = (file, ...args) => {
-  const stat = lstat(file, ...args);
-  if (!${present} && path.resolve(file) === ${JSON.stringify(target)}) {
-    stat.mode = 0o20666;
-    stat.isCharacterDevice = () => true;
-  }
-  return stat;
-};
-fs.accessSync = (file, mode) => {
-  const resolved = path.resolve(file);
-  if (mode === fs.constants.W_OK && (resolved === ${JSON.stringify(target)} || resolved.startsWith(${JSON.stringify(target + path.sep)}))) {
-    if (!${present}) return;
-    throw Object.assign(new Error('read-only bind'), { code: 'EROFS' });
-  }
-  return access(file, mode);
-};
-`);
-          f.env.NODE_OPTIONS = `${f.env.NODE_OPTIONS || ''} --require ${JSON.stringify(preload)}`;
-          const label = `${mount} (${kind}), ${present ? 'present bind' : 'absent device'}, ${edit}, ${operation}`;
-          const result = operation === 'merge'
-            ? f.merge('--no-edit', 'origin/main')
-            : f.checkout('--detach', 'origin/main');
-          assert.equal(result.status, 0, `${label}: ${result.stderr}`);
-          assert.match(fs.readFileSync(trace, 'utf8'), /git read-tree -m -u/, label);
-          const visible = present && kind === 'directory' ? path.join(f.wt, file) : target;
-          assert.equal(fs.readFileSync(visible, 'utf8'), 'mount\n', label);
-          assert.equal(fs.readFileSync(path.join(f.wt, 'a.txt'), 'utf8'), 'a2\n');
-          if (edit === 'delete') {
-            assert.equal(f.git(['ls-tree', '-r', 'HEAD', '--', file]), '', label);
-            assert.equal(f.git(['ls-files', '--', file]), '', label);
-          } else {
-            assert.equal(f.show(`HEAD:${file}`), 'new', label);
-            assert.match(f.git(['ls-files', '-v', '--', file]), /^S /, label);
-          }
-          // Private excludes hide mount points left untracked by a deletion.
-          fs.appendFileSync(path.join(f.wt, '.git', 'info', 'exclude'), `\n/${mount}\n`);
-          assert.equal(f.git(['status', '--porcelain']), '', label);
-          cells++;
-        }
-      }
+// test/masked-mounts.test.js runs every mount under real bubblewrap mounts.
+// This one runs everywhere: Claude mounts each root name of the shared list
+// even when it is absent at spawn, so a move under an absent root directory
+// mount is held off the worktree. An untracked file stands in for the mount.
+test('a move that adds a file under an absent root directory mount is held off the mount', (t) => {
+  for (const dir of MASKED_DIRS) {
+    for (const operation of ['merge', 'checkout']) {
+      const file = `${dir}/sub/new.txt`;
+      const f = fixture(t, { base: { 'a.txt': 'a\n' }, task: { 'b.txt': 'b\n' }, main: { 'a.txt': 'a2\n', [file]: 'new\n' } });
+      fs.mkdirSync(path.dirname(path.join(f.wt, dir)), { recursive: true });
+      fs.writeFileSync(path.join(f.wt, dir), '');
+      fs.appendFileSync(path.join(f.wt, '.git', 'info', 'exclude'), `/${dir}\n`);
+      const result = operation === 'merge' ? f.merge('--no-edit', 'origin/main') : f.checkout('--detach', 'origin/main');
+      assert.equal(result.status, 0, `${operation} ${dir}: ${result.stderr}`);
+      assert.equal(f.show(`HEAD:${file}`), 'new', `${operation} ${dir}`);
+      assert.match(f.git(['ls-files', '-v', '--', file]), /^S /, `${operation} ${dir}`);
+      assert.equal(fs.readFileSync(path.join(f.wt, dir), 'utf8'), '', `${operation} ${dir}`);
+      assert.equal(fs.readFileSync(path.join(f.wt, 'a.txt'), 'utf8'), 'a2\n');
+      assert.equal(f.git(['status', '--porcelain']), '', `${operation} ${dir}`);
     }
   }
-  assert.equal(cells, SANDBOX_PATHS.length * 2 * 3 * 2);
-  t.diagnostic(`${cells} mount/startup/edit/operation cells passed`);
 });
 
 test('a masked move materializes protected nested names that did not exist before it', (t) => {
