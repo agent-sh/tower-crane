@@ -1147,12 +1147,12 @@ test('supervision attempt readers keep a complete snapshot during the next write
   const h = setup(t, { waitForFinish: true, publishBarrier: true });
   const spawned = h.json(['spawn', '--task', 'T1']);
   try {
-    await until(() => fs.existsSync(`${h.attempts}.writing`), 'second attempt did not start writing');
+    await waitOnRepo(h, () => fs.existsSync(`${h.attempts}.writing`), 'second attempt did not start writing');
     assert.equal(h.readAttempts().length, 1, 'readers keep the previous complete attempt list');
   } finally {
     fs.writeFileSync(`${h.attempts}.publish`, '');
     fs.writeFileSync(`${h.attempts}.finish`, '');
-    await until(() => !detachedAlive({ pid: spawned.monitor_pid }), 'previous supervisor did not finish');
+    await waitOnRepo(h, () => !detachedAlive({ pid: spawned.monitor_pid }), 'previous supervisor did not finish');
   }
   assert.equal(h.readAttempts().length, 2);
 });
