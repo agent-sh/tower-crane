@@ -324,7 +324,7 @@ test('failed, missing and timed out local commands record failure and clean thei
   ]) {
     const h = fixture(t, script || '// no-op\n');
     // An absent fixture path avoids permission errors from the host PATH.
-    const argv = command ? [path.join(h.repo, command[0])] : h.command;
+    const argv = command ? [path.join(h.base, command[0])] : h.command;
     h.ok(['project', 'set', '--ci-local', JSON.stringify({ command: argv, timeout })]);
     const r = h.run(['check', 'ci', 'T1']);
     assert.equal(r.code, 1, r.stderr);

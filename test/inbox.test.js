@@ -554,7 +554,7 @@ test('current failed software gates expose diagnostics and commands that clear t
   for (const key of Object.keys(h.env)) if (key.startsWith('NODE_TEST_')) delete h.env[key];
   const id = h.add('Software gate failures', 'code');
   const script = path.join(h.base, 'failing.test.js');
-  fs.writeFileSync(script, "require('node:test')('rejects invalid gate inputs', () => require('node:assert/strict').equal(process.env.INBOX_TEST_OK, '1'));\n");
+  fs.writeFileSync(script, "if (!require('node:fs').readFileSync('value.js', 'utf8').includes('1')) process.exit(0);\nrequire('node:test')('rejects invalid gate inputs', () => require('node:assert/strict').equal(process.env.INBOX_TEST_OK, '1'));\n");
   h.ok(['project', 'set', '--tests-mode', 'run-only', '--tests-cmd',
     [process.execPath, '--test', script].map(shellQuote).join(' ')]);
   h.submit(id, 7);
