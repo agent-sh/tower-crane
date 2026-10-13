@@ -71,9 +71,9 @@ Windows parent discovery runs before taking the state lock. One CIM process snap
 
 Native orchestrator commands renew the matching holder's heartbeat once at command entry, including reads. A read never takes a vacant lease or renews another session's lease. Writes from another live session exit 1 naming the holder, pid, host, heartbeat and recovery commands. The guard runs before CLI commands start external work and again inside every state mutation. MCP initialization and discovery need no project or lease; actual tool actions use the same guard. Pure inbox reads stay open. `authority`, `bench gates` and `bench tokens` also remain open to competing readers and never acquire a vacant lease. Wait startup tries its lease transaction without blocking behind the state lock, so its event deadline stays effective; any later mutation still checks the lease under the lock. Workers and owner commands keep their existing authority.
 
-The lease expires after `project.limits.lease_minutes` of idle time, using the existing project lease window (60 minutes by default). After expiry the next orchestrator write replaces it. A persistent holder whose process has exited on the same host (and, on Linux, the same recorded pid namespace) releases the lease at once, so a restarted session does not wait out the idle window; on Linux the recorded start ticks mean a reused pid does not keep it. A fallback holder, or a lease recorded without these fields, still expires by idle time. The holder is the first persistent parent of the CLI, so a per-command wrapper such as `timeout` or `npx` releases the lease when that command ends; run orchestrator commands directly from the harness. A holder's exit also ends engine reactions bound to it, as expiry does. `tower-crane orchestrator release` clears the calling holder's lease. Only the owner can run `tower-crane orchestrator takeover --agent owner`, which clears a live holder explicitly; the next orchestrator write acquires it. Both commands record the previous holder in the audit log.
+The lease expires after `project.limits.lease_minutes` of idle time, using the existing project lease window (60 minutes by default). After expiry the next orchestrator write replaces it. A persistent holder whose process has exited on the same host (and, on Linux, the same recorded pid namespace) releases the lease at once, so a restarted session does not wait out the idle window; on Linux the recorded start ticks mean a reused pid does not keep it. A fallback holder, or a lease recorded without these fields, still expires by idle time. The holder is the first persistent parent of the CLI, so a per-command wrapper such as `timeout` or `npx` releases the lease when that command ends; run orchestrator commands directly from the harness. A holder's exit also ends engine reactions bound to it. `tower-crane orchestrator release` clears the calling holder's lease. Only the owner can run `tower-crane orchestrator takeover --agent owner`, which clears a live holder explicitly; the next orchestrator write acquires it. Both commands record the previous holder in the audit log.
 
-Engine reactions marked `via: automation` bind to the live lease holder, including reactions from a monitor or owner waiter. They never acquire a lease or renew its heartbeat. Usage collectors and harness hook writers use the same engine provenance, so short-lived helper processes cannot become lease holders. Without a live holder, engine work runs without taking a lease and leaves an expired or cleared lease available for the next native writer. An active reaction retains its captured binding, including a vacant binding; expiry, release, takeover or a new holder refuses its later state writes. Fresh engine work can resume under the current holder. This lease coordinates trusted sessions, like the existing state lock; it is not an authentication boundary for processes that can write state files directly.
+Engine reactions marked `via: automation` bind to the session in the lease record whose process has not exited, including reactions from a monitor or owner waiter. The heartbeat's age does not matter: a reaction that starts after the holder idled out binds to that holder, so the holder's next command, which renews its own heartbeat, does not stop it. Engine work never acquires a lease or renews its heartbeat. Usage collectors and harness hook writers use the same engine provenance, so short-lived helper processes cannot become lease holders. With no lease, or a holder whose process has exited, engine work runs without taking a lease and leaves the lease available for the next native writer; an expired lease stays available too. An active reaction retains its captured binding, including a vacant binding. Release, takeover, a new holder replacing the expired lease, or the holder's exit refuses its later state writes. Fresh engine work can resume under the current holder. This lease coordinates trusted sessions, like the existing state lock; it is not an authentication boundary for processes that can write state files directly.
 
 ## Authority
 
@@ -471,6 +471,8 @@ By default a file is a test when it sits under a `test/`, `tests/`, `spec/`, `sp
 
 `tests.host_env` is an operational map of environment variable names to string values, set with `project set --tests-host-env '{"TOWER_CRANE_LIVE_CLAUDE":"1","TOWER_CRANE_LIVE_MODEL":"claude-haiku-5-5"}'`. Names use letters, digits and underscores, starting with a letter or underscore; values cannot contain NUL. `{}` sets an empty map and `null` clears it. The gate applies the map only to separate host-only commands, clears their exclusion list, and keeps the gate sandbox markers authoritative. It does not pass this setting to spawned agents or ordinary suite commands.
 
+On Linux, a separate host-only command gets a short `TMPDIR`, `TMP` and `TEMP` of its own when the gate scratch directory is too deep for a live harness's sandbox socket. Claude Code's Linux sandbox listens on `<TMPDIR>/claude-socks-<16 hex>.sock` (or the one byte shorter `claude-http-` name), and socat takes a socket path of at most 108 bytes, so `TMPDIR` must be at most 73 bytes. The short directory is a fresh `tc-XXXXXX` under the user's `~/.cache`, with the home taken from the password database rather than `HOME`, else under `XDG_RUNTIME_DIR`. It is removed when the command ends. When no such directory fits and is writable, the gate refuses before running any command, with a `config_failure` on `tmp_root`. A `TMPDIR` named in `tests.host_env` is used as given. Ordinary suite commands keep the gate scratch.
+
 A tests receipt has `host_only: {run, skipped, unreported, results}` when host-only globs are configured. The first three arrays name files. Each result has `{file, ran, skipped}` with executed and skipped case counts from TAP or Node spec summaries; TODO cases count as skipped. A file with both executed and skipped cases appears in both arrays. Missing or inconsistent summaries produce null counts and an `unreported` entry, so exit zero alone is not proof. Prove mode rejects a changed host-only file with no reported executed cases. Run-only and test-only diffs still allow skips and report them in the receipt.
 
 The list and tests policy flags also work with `init`. Omitting a flag leaves its field unchanged. Setting a field replaces a non-object `tests` or `ci` section, and clearing removes that malformed section. Object sections keep their other settings; clearing removes the section when it becomes empty. `project set` and `project show` text output print the policy and lists, showing `prove`, `{}` and `false` for absent mode, kind overrides and expensive settings, `default layouts` when `tests.paths` is absent and `[]` when no extra build files or CI apps are configured. Invalid input exits 2 without writing state or events, even when passed alongside valid settings.
@@ -478,6 +480,68 @@ The list and tests policy flags also work with `init`. Omitting a flag leaves it
 ## tasks.json
 
 Optional `orphan_retirements` records orphan removals in progress as an array of `{reservation_id, path, branch, since, pid, host, start_ticks}`. `branch` may be null; `start_ticks` is present where the platform reports it. Under the state lock, `worktree prune --orphans` checks current task ownership and appends its reservation before any destructive Git operation. A task whose `branch` names the worktree's branch owns it even before the task records the worktree. Claim, rework, submit and preparation use the same path/branch guard as task retirement. `worktree orphan retiring` audits reservation acquisition; `worktree orphan cleanup` releases only the matching `reservation_id` and records the outcome. Failed cleanup also releases its reservation. A reservation whose process has exited holds nothing, and the next orphan reservation discards exited entries. The index is omitted when empty.
+
+### Already-merged hotfixes
+
+`hotfix ID --pr N [--sha SHA] [--review URL]` is an orchestrator or owner
+command. It verifies that the PR merged into the project base at SHA, which
+defaults to the PR's merge commit, and fetches the base once when the merge
+or its first parent is not local. A task without a claim, in `todo`,
+`rework`, `submitted` or `cancelled`, moves to `submitted` at a new revision.
+`hotfix` records `pr`, `merge_sha`, the PR's `head_sha`, the merge's first
+parent `base_sha`, `base`, `recorded_at` and `recorded_by`. Repeating the same
+record preserves its revision and evidence; a different merge is refused.
+The first parent must precede the whole PR, because the gates read only the
+merge against it: a two-parent merge must have the PR head as its second
+parent, and a single-parent merge must be a squash or a one-commit PR. A
+rebase merge of several commits, whose first parent matches the subject and
+author time of the PR's second-to-last commit, is refused.
+
+`--review` reads a PR comment posted by a clean-context reviewer outside
+Tower Crane, named by its comment URL or id. Workers and reviewers can post as
+the same login, so there is no "latest" lookup: the orchestrator names the
+exact review. The comment's `author_association` must be `OWNER`, `MEMBER` or
+`COLLABORATOR`; anyone else can comment on a public repository. Its first line is `Review (native, clean context)` or
+`Review (Tower Crane, clean context)`, its `SHA:` is the merged `head_sha`,
+and a `Verdict: pass|fail` line, else a `Blocking findings` section reading
+`None`, decides it. The verdict is stored as review evidence at `merge_sha`
+with `source: "hotfix review"`, `ref` (the comment URL), `reviewed_sha`,
+`author` and `author_association`. It counts as independent review only with a `hotfix` event by the
+orchestrator or owner whose `review` names the same URL and verdict at that
+revision. A comment on another PR, of another head, by an untrusted
+association, or without the title or a verdict is refused. A failing posted review creates the follow-up below.
+
+`accept ID` runs the existing software gates at `merge_sha`. Tests retain
+the configured proof mode, reverting the landed changes against `base_sha`;
+cleanup scans the same change. CI checks the successful GitHub Actions
+`push` workflows on the recorded base at that commit and their required
+check runs, even when local CI is configured. PR head and mergeability
+checks do not apply to a merged PR. The normal reviewer receives the landed
+diff against the first parent and records its verdict at the merge commit.
+Waivers cannot accept a hotfix.
+
+A pass stores status `accepted`, displays `accepted (hotfix)`, and emits an
+`accept` event with `hotfix: true`, the PR and a reason saying it merged
+before its gates. The matching `hotfix` audit event proves the recorded
+merge. `accept` then runs the merge gate, which only confirms that the PR
+merged at `merge_sha` with the recorded head and base, and records `merge`
+evidence at `merge_sha`; nothing merges the PR again. Dependencies treat it as
+accepted. Status counts and `bench tokens` include `accepted_hotfix` as a
+separate subset of `accepted`; bench task rows include a `hotfix` boolean.
+
+A confirmed software gate failure or eligible failed independent review creates a separate
+task with status `rework` and `hotfix_of: ID`. Its brief preserves the
+original instructions and names the failure and a follow-up PR against
+the project base. It starts without a branch, PR, SHA or evidence. The
+historical task becomes `cancelled` and records `hotfix.follow_up`; further
+failures reuse that task instead of creating duplicates. Explicit `rework`
+on a submitted hotfix uses the same follow-up path; an accepted hotfix
+refuses it, since its merge stands. Its merge commit stays
+fixed; workers submit the follow-up task.
+Pending CI, observation errors and timeouts keep the hotfix submitted;
+retry its gate when the run completes or the infrastructure recovers.
+Missing regression coverage and a proof that passes without the hotfix
+are confirmed tests failures.
 
 Evidence that no gate decision reads any more is settled: an entry whose `sha` does not match the task's head or whose `revision` is older, every entry of a cancelled task, and every entry but the merge receipt of a task accepted with a passing merge at its head. Each write stores a settled entry's `summary`, `commands`, `receipt`, `gate_policy`, `ci_policy`, `test_failure` and `capped_review` over 1 KiB of compact JSON in `evidence/<task>/<sha256>.json`, and adds `evidence_refs` to the entry, mapping each stored field to `{sha256, bytes}`. The field itself keeps a placeholder of the same type: `[stored in evidence/<task>/<sha256>.json]` for `summary`, an empty array for `commands` and `capped_review`, null for the others. Evidence at the current head stays inline whatever its size, and unknown evidence types are never stored. So `tasks.json` grows by a bounded amount per receipt, not by the size of its output.
 
@@ -641,6 +705,8 @@ Any agent recovers a verified exited task with `release ID --reason R`. The dete
 
 ### Acceptance gates
 
+Failed GitHub commands retain the child exit status, signal and startup error code and message in the gate evidence `summary`, including when stderr and stdout are empty.
+
 `tower-crane accept` refuses unless the task's current revision has, at the submitted `sha`:
 
 - `code` tasks: `tests` ok, `clean` ok, and `review` ok from an independent reviewer
@@ -671,6 +737,10 @@ The reviewer receives the submitted diff, task acceptance, audited software gate
 For a task with a PR in a project with `repo`, review dispatch also reads the PR's inline review comments through `gh api repos/<repo>/pulls/<pr>/comments` and lists in a `## Revuto findings` section every top-level comment by a login matching `revuto` that GitHub still anchors to a line at the head: path, line, body, marked `[P1]` or `[P2]` when the body carries that tag, and the id and resolution status of the latest reply by another login. A failed read refuses the dispatch. The reviewer's `spawn` event records them as `revuto: [{ "id", "path", "line", "severity", "commit", "url", "reply", "resolved", "changed" }]`, where `severity` is `P1`, `P2` or null and `commit` is the comment's original commit. `resolved` is true only when the latest non-revuto reply has `[resolved]` as its entire first line, case-insensitively; an explanation may follow on later lines. Ordinary discussion, quoted markers and later replies without the marker do not resolve the finding. `changed` records whether, at dispatch, `git --literal-pathspecs diff <commit> <sha> -- <path>` named the literal file for a `[P1]`/`[P2]` without such a resolution (false when it cannot be read). `evidence --type review --ok` at that sha and revision is refused, naming each comment, while a recorded `[P1]`/`[P2]` has neither `resolved: true` nor `changed: true`. Older snapshots without `resolved` cannot use a reply id alone to clear the finding. The check reads only the state, so brokered evidence, which runs no git, gets the same answer. `--fail` is always accepted.
 
 Reviewers use the supplied tests, clean and CI results. They do not re-run the full suite unless they change something in a scratch checkout to probe a specific concern, and run only the affected tests for that probe. The submitted worktree stays read-only. Packets over 12,000 characters put the diff in a context file; the user prompt still carries task context, gate results and revuto findings. This bounds diff arguments, not the static system text or unusually large gate receipts. Software waivers requested in the same accept remain atomic with acceptance and cannot authorize a review spawn; use audited software gate evidence or an owner accept that also waives review.
+
+Review packets include `## Review scope`. When the latest eligible independent verdict at the current revision failed, dispatch checks its blockers and supplies only the diff from its reviewed SHA. Rework can carry this scope across its revision bump: the latest rework event must end at the current revision, and the latest eligible review at its rejected `sha` and `previous_revision` must have failed. A brief, acceptance, dependency, needs or kind edit after the review resets the scope; rework without a matching failure stays full. The review evidence event must be present in the audit trail. Unrelated older reviews and ineligible verdicts cannot narrow dispatch.
+
+The review `spawn` event adds `review_scope: {sha, revision, agent, summary, ref, reason}`, with the prior review's identity and blockers, linked comment and rework request, or `null` for full review. The same scope appears in the packet and in short prompts referencing large packets. Scope changes during diff preparation refuse dispatch under the lock. The event also records `review_level`, the complexity level selection computed. The reviewed SHA must still exist, be an ancestor of the submitted head and contain the current merge base with the project base to narrow the diff. A missing reviewed SHA, rewritten history or base update gets a full review from the project base's merge base, excluding upstream changes. A narrowed review takes its risk and size from both the new diff and the whole change, and runs at or above the failed review's `review_rung` and `review_level`. It reports whether each prior blocker is fixed, then reviews the new diff. A defect the new diff causes blocks wherever it shows, including in unchanged code. Other newly noticed findings on already reviewed work are follow-ups unless they are security or data-loss defects introduced by the change. The current revision still requires fresh software gate evidence and an independent review at its submitted SHA; the prior verdict supplies context only.
 
 A gate passes when the latest eligible evidence of its type for the current revision, at a sha matching the submitted one, is ok. Shas match when one is a prefix of the other and the shorter has at least 7 characters. For `tests`, `clean`, `sources` and `ci`, evidence needs the matching gate `source` and an events.jsonl entry with `cmd === source`, the same task id and agent, and matching `type`, `source`, exact evidence `sha`, `ok`, `revision`, `commands` and optional `confirmed_failure` in `detail`. An ok entry also needs a non-empty commands list. Manual, forged and older unmarked entries are ignored, including later entries that would otherwise override a genuine pass or failure. For `review`, an entry counts only when its agent is `owner` or has a `spawn` event with `role: reviewer` for the task, at a sha matching the entry's and at the entry's revision, and is not the submitter. Recording review evidence needs no role, so a name no review dispatch started counts for nothing; its entry is kept, `task show` marks it `(does not count)` and the review gate names its agent. A waiver counts when its agent is `owner`; when the orchestrator recorded an operational waiver (`waive.review` for a capped or down reviewer); or when the orchestrator recorded it with `approved_by` naming an escalation the owner approved ([Authority](#authority)).
 

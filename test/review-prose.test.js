@@ -271,7 +271,9 @@ test('a newer verdict between preparation and spawn refuses the stale light pack
   }
   const result = await running;
   assert.equal(result.code, 1, result.stderr);
-  assert.match(result.stderr, /review changed after light-check preparation/);
+  // The review scope check or the light snapshot check refuses, whichever runs first.
+  assert.match(result.stderr, /(review scope changed after diff preparation|review changed after light-check preparation); retry review dispatch/);
+  assert.ok(!fs.existsSync(path.join(h.state, 'reviews', `T1-${h.sha}.md`)), 'no review packet is written');
 });
 
 test('contract claims and mixed blockers keep the ordinary rework path', (t) => {
