@@ -1010,6 +1010,59 @@ test('a change that adds no test reworks with the reason, and the worker adds a 
   assert.match(h.logs().findLast((e) => e.cmd === 'rework').detail.reason, /^tests failed at [0-9a-f]{7,}: no test covers this change: .*adds or changes no test file/);
 });
 
+test('a GitHub API observation failure retries once and keeps the submission when GitHub recovers', (t) => {
+  const h = setup(t);
+  h.submit();
+  const github = h.github();
+  github.apiFailures = 1;
+  h.saveGithub(github);
+  h.consume();
+  const task = h.readState('tasks.json').tasks[0];
+  assert.deepEqual(task.evidence.filter((e) => e.type === 'ci').map((e) => [e.ok, e.infrastructure_failure === true]),
+    [[false, true], [true, false]]);
+  assert.equal(h.logs().filter((e) => e.cmd === 'check ci').length, 2);
+  assert.equal(h.logs().filter((e) => e.cmd === 'rework').length, 0);
+  assert.equal(task.status, 'submitted');
+});
+
+test('a GitHub API observation failure that repeats retries once and reworks with the transport error', (t) => {
+  const h = setup(t);
+  h.submit();
+  const github = h.github();
+  github.apiFailures = 2;
+  h.saveGithub(github);
+  h.consume();
+  const task = h.readState('tasks.json').tasks[0];
+  assert.deepEqual(task.evidence.filter((e) => e.type === 'ci').map((e) => [e.ok, e.infrastructure_failure === true]),
+    [[false, true], [false, true]]);
+  assert.equal(h.logs().filter((e) => e.cmd === 'check ci').length, 2);
+  assertReworked(h, task);
+  assert.match(h.logs().findLast((e) => e.cmd === 'rework').detail.reason, /ci failed at .*HTTP 502: Bad Gateway/s);
+});
+
+test('a stale GitHub PR observation failure retries after recovery instead of reworking green CI', (t) => {
+  const h = setup(t, { ci: 'pending' });
+  h.submit();
+  h.consume();
+  h.ok(['project', 'set', '--paused', 'manual CI observation probe']);
+  const outage = h.github();
+  outage.failView = true;
+  h.saveGithub(outage);
+  assert.equal(h.run(['check', 'ci', 'T1', '--agent', 'orchestrator']).code, 1);
+  const recovered = h.github();
+  recovered.failView = false;
+  recovered.ci[h.sha] = 'success';
+  h.saveGithub(recovered);
+  h.consume();
+  const task = h.readState('tasks.json').tasks[0];
+  assert.deepEqual(task.evidence.filter((e) => e.type === 'ci').map((e) =>
+    [e.ok, e.pending === true, e.infrastructure_failure === true]),
+  [[false, true, false], [false, false, true], [true, false, false]]);
+  assert.equal(h.logs().filter((e) => e.cmd === 'check ci').length, 3);
+  assert.equal(h.logs().filter((e) => e.cmd === 'rework').length, 0);
+  assert.equal(task.status, 'submitted');
+});
+
 test('a CI run that was cancelled retries once and reworks when it is cancelled again', (t) => {
   const h = setup(t, { ci: 'cancelled' });
   h.submit();
