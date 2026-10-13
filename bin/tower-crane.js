@@ -475,6 +475,11 @@ async function main(argv) {
     const identity = agent.trim();
     let stateDir;
     const locate = () => stateDir ??= S.locateStateDir(globals.state, process.env, process.cwd());
+    // A wait at "now" starts at the log's end as of this point. Orchestrator
+    // discovery below takes seconds on a cold Windows host, and events written
+    // meanwhile must reach the waiter.
+    const startCursor = cmd.name === 'wait' && (own.after === undefined || own.after === 'now')
+      ? require('../lib/events').startCursor(locate()) : undefined;
     const authority = require('../lib/authority');
     const ownerConfigDir = identity === 'owner'
       ? authority.checkOwner(process.env, ownerCredential, ownerTerminal, () => authority.ownerProject(locate()), cmd.name === 'init')
@@ -512,6 +517,7 @@ async function main(argv) {
       request: { command: cmd.name, flags: own, pos: parsed.pos },
       stateDir: cmd.name === 'mcp' ? undefined : locate(),
       ...(cmd.name === 'mcp' ? { resolveStateDir: locate } : {}),
+      ...(startCursor === undefined ? {} : { startCursor }),
     };
     require('../lib/orchestrator').command(ctx, cmd.name);
     const res = await cmd.run(ctx);
