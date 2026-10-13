@@ -65,6 +65,72 @@ delete process.env.TC_TEST_REPO_SEED;
 // Scratch consumers can run directly without the runner's global setup.
 fs.mkdirSync(TMP_ROOT, { recursive: true });
 
+// A non-live test must never start a real harness CLI: that can spend money,
+// reach the network and depend on the host's login. Every test process puts a
+// guard for each harness first on PATH, so a fixture that forgets a stub, or a
+// route that falls back to a harness on PATH, reaches the guard instead. A live
+// probe's opt-in lifts the guard for the harness it runs.
+const liveBrowser = (env, harness) => env.TOWER_CRANE_LIVE_BROWSER === '1'
+  && (!env.TOWER_CRANE_LIVE_BROWSER_HARNESS || env.TOWER_CRANE_LIVE_BROWSER_HARNESS === harness);
+const LIVE_OPT_INS = {
+  claude: (env) => env.TOWER_CRANE_LIVE_CLAUDE === '1' || env.TOWER_CRANE_LIVE_REVIEW_CACHE === '1' || liveBrowser(env, 'claude'),
+  codex: (env) => env.TOWER_CRANE_LIVE_CODEX === '1' || liveBrowser(env, 'codex'),
+  opencode: () => false,
+  pi: () => false,
+  agy: () => false,
+};
+const HARNESS_GUARD = installHarnessGuard();
+
+function installHarnessGuard() {
+  const guarded = Object.keys(LIVE_OPT_INS).filter((name) => !LIVE_OPT_INS[name](process.env));
+  if (!guarded.length) return null;
+  fs.mkdirSync(TMP_ROOT, { recursive: true });
+  const dir = fs.realpathSync.native(fs.mkdtempSync(path.join(TMP_ROOT, 'tower-crane-harness-guard-')));
+  const hits = path.join(dir, 'hits.jsonl');
+  const argv = (name) => [process.execPath, path.join(__dirname, 'fixtures', 'harness-guard.js'), hits, name];
+  for (const name of guarded) {
+    fs.writeFileSync(path.join(dir, name), `#!/bin/sh\nexec ${argv(name).map((a) => `'${a.replace(/'/g, "'\\''")}'`).join(' ')} "$@"\n`, { mode: 0o755 });
+    fs.writeFileSync(path.join(dir, `${name}.cmd`), `@${argv(name).map((a) => `"${a}"`).join(' ')} %*\r\n`);
+  }
+  const key = Object.keys(process.env).find((k) => k.toUpperCase() === 'PATH') || 'PATH';
+  process.env[key] = dir + path.delimiter + (process.env[key] || '');
+  return { dir, hits, reported: new Set() };
+}
+
+// Fails on guard calls not yet reported: with `base`, only those a fixture
+// under it made (by working directory or state directory), so the test that
+// owns the fixture fails; without it, every one left.
+function assertNoHarnessCalls(base) {
+  if (!HARNESS_GUARD) return;
+  let text;
+  try { text = fs.readFileSync(HARNESS_GUARD.hits, 'utf8'); }
+  catch (e) { if (e.code === 'ENOENT') return; throw e; }
+  const inside = (p) => typeof p === 'string' && (p === base || p.startsWith(base + path.sep));
+  // A line still being written has no newline yet; the next check reads it.
+  const found = text.split('\n').slice(0, -1).map((line, i) => ({ i, hit: JSON.parse(line) }))
+    .filter(({ i, hit }) => !HARNESS_GUARD.reported.has(i) && (!base || inside(hit.cwd) || inside(hit.state)));
+  for (const { i } of found) HARNESS_GUARD.reported.add(i);
+  if (found.length) {
+    assert.fail(`a non-live test started a real harness instead of a stub:\n${found.map(({ hit }) => JSON.stringify(hit)).join('\n')}`);
+  }
+}
+// Calls no fixture owns, such as a test running a harness itself, fail the
+// file. A plain script fails through its exit code: a node:test hook would make
+// the test runner own the script's exit.
+if (HARNESS_GUARD) {
+  if (process.env.NODE_TEST_CONTEXT) test.after(() => assertNoHarnessCalls());
+  process.once('exit', () => {
+    try {
+      if (!process.env.NODE_TEST_CONTEXT) assertNoHarnessCalls();
+    } catch (error) {
+      console.error(error.message);
+      process.exitCode ||= 1;
+    } finally {
+      fs.rmSync(HARNESS_GUARD.dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    }
+  });
+}
+
 // Tests must not see the developer's git config (hooks, signing), an
 // agent's TOWER_CRANE_* variables or the developer's own ladder defaults, so every
 // child gets a clean, explicit env. The user file path is in the temp dir and
@@ -117,6 +183,16 @@ function fixtureLadder() {
   };
 }
 
+// A command rung that fails at once and starts nothing, as an unconfigured
+// harness would. stubRungs(h) puts it on every rung but the orchestrator when
+// h.init() runs next, for fixtures whose automation dispatches workers or
+// reviewers the test never inspects; without it they reach the harness guard.
+const STUB_RUNG = { harness: 'command', command: [process.execPath, '-e', 'process.exit(1)', '{prompt}'] };
+function stubRungs(h) {
+  h.initLadder = Object.fromEntries(Object.keys(fixtureLadder().ladder)
+    .filter((name) => name !== 'orchestrator').map((name) => [name, STUB_RUNG]));
+}
+
 function pinRung(h, name, rung) {
   const args = ['ladder', 'set', name];
   for (const key of ['harness', 'model', 'profile', 'provider', 'effort', 'args', 'command']) {
@@ -146,6 +222,7 @@ function fixtureInit(ctx, args, opts, call) {
   if (!user || typeof user !== 'object' || Array.isArray(user)) return call(args, opts);
   if (user.ladder !== undefined && (!user.ladder || typeof user.ladder !== 'object' || Array.isArray(user.ladder))) return call(args, opts);
   const pinned = fixtureLadder();
+  Object.assign(pinned.ladder, ctx.initLadder);
   for (const [name, rung] of Object.entries(user.ladder || {})) {
     pinned.ladder[name] = rung && Object.keys(rung).every(k => k === 'fallbacks')
       ? { ...pinned.ladder[name], ...rung } : rung;
@@ -322,16 +399,26 @@ function context(t, base, options = {}) {
       const dir = path.join(base, 'detached');
       return fs.existsSync(dir) ? fs.readdirSync(dir).filter((f) => f.endsWith('.json')).flatMap((f) => {
         const file = path.join(dir, f);
-        try { return [{ ...JSON.parse(fs.readFileSync(file, 'utf8')), file }]; }
+        let record;
+        try { record = JSON.parse(fs.readFileSync(file, 'utf8')); }
         catch (e) { if (e.code === 'ENOENT') return []; throw e; }
+        // A monitor's exit listener marks its exit beside its record.
+        if (record.kind === 'monitor' && fs.existsSync(path.join(dir, `${record.token || record.pid}.exited`))) record.exited = true;
+        return [{ ...record, file }];
       }) : [];
     },
+    // Steps that must run before the directory goes, such as stopping processes that poll in it.
+    teardown: [],
     cleanup: async () => {
       const seen = new Set();
       try {
-        try { await stopDetached(unseenDetached(ctx, seen)); }
-        finally {
-          for (let fresh; (fresh = unseenDetached(ctx, seen)).length;) await killStarted(fresh);
+        try {
+          for (const step of ctx.teardown.splice(0)) await step();
+        } finally {
+          try { await stopDetached(unseenDetached(ctx, seen)); }
+          finally {
+            for (let fresh; (fresh = unseenDetached(ctx, seen)).length;) await killStarted(fresh);
+          }
         }
       } finally {
         try {
@@ -353,17 +440,18 @@ function context(t, base, options = {}) {
           fileFixtures.delete(ctx);
         }
       }
+      assertNoHarnessCalls(base);
     },
     run: (args, opts = {}) => fixtureInit(ctx, args, opts, (a, o) => run(a, withHooks(ctx, o))),
     runAsync: (args, opts = {}) => runAsync(args, withHooks(ctx, opts)),
     json: (args, opts) => {
       const r = ctx.run([...args, '--json'], opts);
-      if (r.code !== 0) throw new Error(`tower-crane ${args.join(' ')} exited ${r.code}: ${r.stderr}`);
+      if (r.code !== 0) throw cliFailure(args, r);
       return JSON.parse(r.stdout);
     },
     ok: (args, opts) => {
       const r = ctx.run(args, opts);
-      if (r.code !== 0) throw new Error(`tower-crane ${args.join(' ')} exited ${r.code}: ${r.stderr}`);
+      if (r.code !== 0) throw cliFailure(args, r);
       return r.stdout.trim();
     },
     readState: (file) => JSON.parse(fs.readFileSync(path.join(ctx.state, file), 'utf8')),
@@ -406,7 +494,18 @@ function withHooks(ctx, opts) {
 // set the 60 s floor. An explicit zero leaves only the runner's backstop.
 function run(args, { cwd, env, input, pre = [], timeout = 60000 } = {}) {
   const r = cp.spawnSync(process.execPath, [...pre, BIN, ...args], { cwd, env, input, encoding: 'utf8', timeout: timeout === 0 ? 0 : Math.max(timeout, 60000) });
-  return { code: r.status, stdout: r.stdout || '', stderr: r.stderr || '', signal: r.signal };
+  return {
+    code: r.status, stdout: r.stdout || '', stderr: r.stderr || '', signal: r.signal,
+    ...(r.error && { error: { code: r.error.code, message: r.error.message } }),
+  };
+}
+
+function cliFailure(args, result) {
+  const details = [
+    result.signal && `signal ${result.signal}`,
+    result.error && `error ${result.error.code}: ${result.error.message}`,
+  ].filter(Boolean).join('; ');
+  return new Error(`tower-crane ${args.join(' ')} exited ${result.code}${details ? ` (${details})` : ''}: ${result.stderr}`);
 }
 
 const PTY_AVAILABLE = process.platform === 'linux'
@@ -432,9 +531,19 @@ function runAsync(args, { cwd, env, pre = [] } = {}) {
 
 const real = (p) => fs.realpathSync.native(p);
 
+// Process creation times follow the Windows system timer tick (about 15.6 ms)
+// and Node reads the clock differently, so a child recorded right after its
+// start may appear to start a few ticks after its record.
+const RECORD_TOLERANCE_MS = 100;
+
 function detachedAlive(child) {
-  if (process.platform === 'win32' && child.startTime !== undefined) {
-    return child.startTime !== null && require('./windows-process').startTime(child.pid) === child.startTime;
+  if (process.platform === 'win32' && (child.startTime !== undefined || child.recordedAt !== undefined)) {
+    if (child.startTime === null) return false;
+    const started = require('./windows-process').startTime(child.pid);
+    if (started === null) return false;
+    if (child.startTime !== undefined) return started === child.startTime;
+    // FILETIME counts 100 ns intervals from 1601; the record counts milliseconds from 1970.
+    return Number(BigInt(started) / 10000n - 11644473600000n) <= child.recordedAt + RECORD_TOLERANCE_MS;
   }
   if (child.kind === 'worker' && child.file && !fs.existsSync(child.file)) return false;
   try { process.kill(child.pid, 0); } catch (e) { if (e.code === 'ESRCH') return false; throw e; }
@@ -459,43 +568,57 @@ function killDetached(child) {
 
 async function stopDetached(children) {
   const monitors = children.filter((c) => c.kind === 'monitor');
-  if (process.platform === 'win32' && monitors.length) {
-    // Retain native handles before stopping workers. A PID can be reused
-    // between probes, but WaitForExit still observes the original process.
-    const records = JSON.stringify(monitors).replaceAll("'", "''");
+  if (process.platform === 'win32' && children.length) {
+    // Retain native handles before stopping anything. A PID can be reused
+    // between probes, but a held handle keeps it and WaitForExit observes the
+    // original process. A process proves itself by its recorded creation time
+    // or by starting no later than its parent recorded it.
+    const records = JSON.stringify(children.map((c) => ({ pid: c.pid, kind: c.kind, startTime: c.startTime, recordedAt: c.recordedAt ?? null })))
+      .replaceAll("'", "''");
     const script = `
 $ErrorActionPreference = 'Stop'
-$monitors = @()
+$held = @()
 try {
   foreach ($entry in (ConvertFrom-Json '${records}')) {
-    if (!$entry.PSObject.Properties['startTime']) { throw 'Windows monitor creation identity is missing' }
-    if ($null -eq $entry.startTime) { continue }
-    $monitor = $null
-    try {
-      $monitor = [System.Diagnostics.Process]::GetProcessById($entry.pid)
-      $null = $monitor.Handle
-    } catch [System.ArgumentException] { continue }
-      catch [System.InvalidOperationException] { if ($monitor) { $monitor.Dispose() }; continue }
-    # A monitor exiting during this query reads a null creation time; it has already stopped.
-    $started = $monitor.StartTime
-    if ($null -eq $started -or $started.ToFileTimeUtc().ToString() -ne $entry.startTime) {
-      $monitor.Dispose()
+    if ($entry.PSObject.Properties['startTime']) {
+      if ($null -eq $entry.startTime) { continue }
+    } elseif ($null -eq $entry.recordedAt) {
+      if ($entry.kind -eq 'monitor') { throw 'Windows monitor creation identity is missing' }
       continue
     }
-    $monitors += $monitor
+    $process = $null
+    try {
+      $process = [System.Diagnostics.Process]::GetProcessById($entry.pid)
+      $null = $process.Handle
+    } catch [System.ArgumentException] { continue }
+      catch [System.InvalidOperationException] { if ($process) { $process.Dispose() }; continue }
+    # A process exiting during this query reads a null creation time; it has already stopped.
+    $started = $process.StartTime
+    if ($null -eq $started) { $same = $false }
+    elseif ($entry.PSObject.Properties['startTime']) { $same = $started.ToFileTimeUtc().ToString() -eq $entry.startTime }
+    else { $same = $started.ToUniversalTime() -le [DateTimeOffset]::FromUnixTimeMilliseconds([int64]$entry.recordedAt + ${RECORD_TOLERANCE_MS}).UtcDateTime }
+    if (!$same) {
+      $process.Dispose()
+      continue
+    }
+    $held += [pscustomobject]@{ Kind = $entry.kind; Process = $process }
   }
-  [Console]::Out.WriteLine('ready:' + (ConvertTo-Json -InputObject @($monitors | ForEach-Object { $_.Id }) -Compress))
+  $ids = @{
+    monitors = @($held | Where-Object { $_.Kind -eq 'monitor' } | ForEach-Object { $_.Process.Id })
+    workers = @($held | Where-Object { $_.Kind -ne 'monitor' } | ForEach-Object { $_.Process.Id })
+  }
+  [Console]::Out.WriteLine('ready:' + (ConvertTo-Json -InputObject $ids -Compress))
   $null = [Console]::In.ReadLine()
   $clock = [System.Diagnostics.Stopwatch]::StartNew()
   $survivors = @()
-  foreach ($monitor in $monitors) {
-    if (!$monitor.WaitForExit([int][Math]::Max(0, 10000 - $clock.ElapsedMilliseconds))) {
-      $survivors += $monitor.Id
+  foreach ($entry in $held) {
+    if (!$entry.Process.WaitForExit([int][Math]::Max(0, 10000 - $clock.ElapsedMilliseconds))) {
+      $survivors += [pscustomobject]@{ kind = $entry.Kind; pid = $entry.Process.Id }
     }
   }
   [Console]::Out.WriteLine((ConvertTo-Json -InputObject @($survivors) -Compress))
 } finally {
-  foreach ($monitor in $monitors) { $monitor.Dispose() }
+  foreach ($entry in $held) { $entry.Process.Dispose() }
 }
 `;
     const child = cp.spawn('powershell.exe', [
@@ -509,8 +632,8 @@ try {
       const ready = stdout.split('\n').slice(0, -1).find((line) => line.startsWith('ready:'));
       if (!stopped && ready) {
         stopped = true;
-        for (const worker of children.filter((c) => c.kind === 'worker')) killDetached(worker);
-        for (const pid of JSON.parse(ready.slice(6).trim())) {
+        const ids = JSON.parse(ready.slice(6).trim());
+        for (const pid of [...ids.workers, ...ids.monitors]) {
           cp.spawnSync('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore', timeout: 10000 });
         }
         child.stdin.end('\n');
@@ -522,8 +645,10 @@ try {
       child.once('close', resolve);
     });
     assert.equal(code, 0, stderr);
-    assert.ok(stopped, 'monitor handles were not acquired');
-    assert.deepEqual(JSON.parse(stdout.trim().split('\n').at(-1)), [], 'detached usage monitors outlived test teardown');
+    assert.ok(stopped, 'process handles were not acquired');
+    const survivors = JSON.parse(stdout.trim().split('\n').at(-1));
+    assert.deepEqual(survivors.filter((s) => s.kind === 'monitor').map((s) => s.pid), [], 'detached usage monitors outlived test teardown');
+    assert.deepEqual(survivors.map((s) => s.pid), [], 'detached workers outlived test teardown');
     return;
   }
   try {
@@ -543,4 +668,4 @@ try {
   }
 }
 
-module.exports = { makeRepo, makeProjectRepo, makeTaskRepo, copyRepo, cachedFixture, fixtureLadder, pinRung, pinLiveRung, run, runPty, PTY_AVAILABLE, runAsync, BIN, ROOT, HOOKS, real, TMP_ROOT, detachedAlive };
+module.exports = { makeRepo, makeProjectRepo, makeTaskRepo, copyRepo, cachedFixture, fixtureLadder, pinRung, pinLiveRung, stubRungs, STUB_RUNG, HARNESS_GUARD, run, runPty, PTY_AVAILABLE, runAsync, BIN, ROOT, HOOKS, real, TMP_ROOT, detachedAlive };
