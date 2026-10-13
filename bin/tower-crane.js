@@ -95,7 +95,7 @@ const TASK_FIELDS = {
   dep: many('ID', 'a task this one depends on; repeat for more'),
   lock: many('NAME', 'exclusive resource name; repeat for several'),
   environment: str('LABEL', "environment label; '' clears it"),
-  tier: str('T', 'easy, medium, hard, research or an ascending range (easy..medium): the ladder rung that does it (default: research for kind research, else S easy, M medium, L hard)'),
+  tier: str('T', 'easy, medium, hard, research or an ascending range (easy..medium): the ladder rung that does it (default: research for kind research, easy for S docs, hard for L, else medium)'),
   'needs-owner': str('REASON', 'what the owner has to do first'),
 };
 
