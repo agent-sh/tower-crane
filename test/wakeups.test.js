@@ -24,6 +24,35 @@ async function until(check, what) {
   }
 }
 
+// An orchestrator follower prints its ready line only after the lease's
+// process discovery. On Windows that is a PowerShell CIM snapshot, which takes
+// many seconds on a cold runner, so readiness is the line or the exit, never a
+// clock. Delivery deadlines start after it.
+function readyLine(child) {
+  return new Promise((resolve, reject) => {
+    let out = '';
+    let err = '';
+    const isReady = (line) => {
+      try { return JSON.parse(line).type === 'ready'; } catch { return false; }
+    };
+    const finish = (settle) => {
+      child.stdout.off('data', onOut);
+      child.stderr.off('data', onErr);
+      child.off('close', onClose);
+      settle();
+    };
+    const onOut = (d) => {
+      out += d;
+      if (out.split('\n').some(isReady)) finish(resolve);
+    };
+    const onErr = (d) => { err += d; };
+    const onClose = (code, signal) => finish(() => reject(new Error(`the follower exited (${code ?? signal}) before its ready line: ${err.trim()}`)));
+    child.stdout.on('data', onOut);
+    child.stderr.on('data', onErr);
+    child.on('close', onClose);
+  });
+}
+
 function setup(t) {
   const h = makeRepo(t);
   h.init();
@@ -65,7 +94,7 @@ test('wait --follow streams id-only lines and event prints the content', async (
   let out = '';
   p.stdout.on('data', (d) => { out += d; });
   const lines = () => out.split('\n').filter(Boolean).map(JSON.parse);
-  await until(() => lines().some((l) => l.type === 'ready'), 'the ready line');
+  await readyLine(p);
   h.ok(['answer', 'D1', '--choice', 'right', '--note', 'private answer note', '--agent', 'owner']);
   h.ok(['msg', '--to', 'orchestrator', '--task', 'T1', 'private worker text', '--agent', 'worker']);
   const wakes = await until(() => lines().length >= 3 && lines().slice(1), 'two wake lines');
@@ -170,11 +199,15 @@ function engine(t, h, { appendPause } = {}) {
     }
   };
   const children = [];
+  let followerReady = null;
   t.after(() => { for (const p of children) p.kill(); });
   async function* spawn({ argv }) {
     assert.equal(argv[0], 'node');
     const p = cp.spawn(process.execPath, argv.slice(1), { cwd: h.repo, env: h.env });
     children.push(p);
+    followerReady = readyLine(p);
+    // A follower the test never waits on may exit before its ready line.
+    followerReady.catch(() => {});
     const queue = [];
     let wake = null;
     let ended = false;
@@ -206,7 +239,7 @@ function engine(t, h, { appendPause } = {}) {
     const hook = hooks[event].find((x) => match(x.matcher));
     return hook.fn($, e, async (x) => x);
   };
-  return { $, on, seen, fire, waitFor };
+  return { $, on, seen, fire, waitFor, followerReady: () => followerReady };
 }
 
 test('the Claude Code mod pushes a decision answer and a worker message into the session', async (t) => {
@@ -228,6 +261,7 @@ test('the Claude Code mod pushes a decision answer and a worker message into the
   h.ok(['msg', '--to', 'orchestrator', '--task', 'T1', 'private worker text', '--agent', 'worker']);
   const answer = log(h).findLast((e) => e.cmd === 'answer').id;
   const message = log(h).findLast((e) => e.cmd === 'msg').id;
+  await cc.followerReady();
   const pushed = await cc.waitFor('prompts', [answer, message]);
   assert.match(pushed, new RegExp(`${answer}: decision-answer D1 from owner`));
   assert.match(pushed, new RegExp(`${message}: worker-message T1 from worker`));
