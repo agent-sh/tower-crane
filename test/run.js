@@ -52,6 +52,12 @@ const args = [
   ...flags,
 ];
 let list = files.length ? files : testFiles();
+// The gate runs host-only files separately with their opt-in environment.
+const excluded = JSON.parse(process.env.TOWER_CRANE_TEST_EXCLUDE || '[]');
+if (excluded.length) {
+  const matchers = excluded.map(require('../lib/gates/tests').globToRegExp);
+  list = list.filter((file) => !matchers.some((re) => re.test(path.relative(process.cwd(), path.resolve(file)).split(path.sep).join('/'))));
+}
 const shard = process.env.TC_TEST_SHARD;
 if (shard) {
   const match = /^([1-9]\d*)\/([1-9]\d*)$/.exec(shard);
@@ -63,7 +69,7 @@ if (shard) {
 }
 // Node would run its default pattern, the whole tree, when given no files.
 if (!list.length) {
-  console.log(`TC_TEST_SHARD ${shard} has no test files`);
+  console.log(shard ? `TC_TEST_SHARD ${shard} has no test files` : 'No selected test files remain after exclusions');
   return;
 }
 // A sandboxed run skips tests.host_only files; the tests gate runs them on the host. Only a sandbox
