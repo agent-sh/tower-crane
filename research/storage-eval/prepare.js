@@ -134,7 +134,8 @@ async function main() {
     process.stdout.write(`${name} ${JSON.stringify(manifest[name])}\n`);
   }
   const file = path.join(out, 'manifest.json');
-  const prev = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : {};
+  let prev = {};
+  try { prev = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (e) { if (e.code !== 'ENOENT') throw e; }
   fs.writeFileSync(file, JSON.stringify({ ...prev, ...manifest }, null, 2) + '\n');
 }
 
