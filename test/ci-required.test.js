@@ -96,8 +96,10 @@ test('PRs run Windows shards, proofs and shared checks; other events run all nin
     assert.doesNotMatch(job, /^ {4}if:/m, `${id} also runs on pull requests`);
     assert.match(job, /- run: node scripts\/probe-/);
   }
-  assert.match(workflow, /^concurrency:\n {2}group: \$\{\{ github\.event_name == 'pull_request' && format\('ci-pr-\{0\}', github\.event\.pull_request\.number\) \|\| format\('ci-run-\{0\}', github\.run_id\) \}\}\n {2}cancel-in-progress: \$\{\{ github\.event_name == 'pull_request' \}\}\n/m,
-    'only PR runs share a group; unique run IDs keep pending and running non-PR runs independent');
+  // GitHub keeps one running and one pending run per group, and a newer run replaces the pending one.
+  // Main pushes share a group so only the newest pending head waits; scheduled and manual runs stay unique.
+  assert.match(workflow, /^concurrency:\n {2}group: \$\{\{ github\.event_name == 'pull_request' && format\('ci-pr-\{0\}', github\.event\.pull_request\.number\) \|\| github\.event_name == 'push' && 'ci-main-push' \|\| format\('ci-run-\{0\}', github\.run_id\) \}\}\n {2}cancel-in-progress: \$\{\{ github\.event_name == 'pull_request' \}\}\n/m,
+    'PR runs cancel per PR; main pushes share one group that never cancels a running run; scheduled and manual runs are unique');
 });
 
 test('the stack section says hosted CI runs on every stack member at its own base', () => {
