@@ -363,6 +363,28 @@ test('review choice follows tier, diff limits and configured risk paths', (t) =>
   }
 });
 
+test('review policy min_rung sets the first reviewer rung, and failed reviews never pick a rung below it', (t) => {
+  const h = setup(t, 'medium', 'other', undefined, { gated: true });
+  assert.equal(model(choice(h)), 'fixture-main');
+  h.ok(['project', 'set', '--review-policy', JSON.stringify({ prices, min_rung: 'review' })]);
+  assert.equal(h.json(['project', 'show']).review.min_rung, 'review');
+  assert.match(h.ok(['project', 'show']), /review: .*"min_rung":"review"/);
+  const first = choice(h);
+  assert.deepEqual([first.review_rung, model(first)], ['review', 'fallback']);
+  h.reviewer('T1', 'r1');
+  h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--agent', 'r1', '--type', 'review', '--fail', '--sha', h.sha]);
+  assert.deepEqual([choice(h).review_rung, model(choice(h))], ['hard', 'fixture-large']);
+  // An easy task's failure rules reach only medium, below the review minimum.
+  const easy = setup(t, 'easy', 'other', undefined, { gated: true });
+  easy.ok(['project', 'set', '--review-policy', JSON.stringify({ prices, min_rung: 'review' })]);
+  easy.reviewer('T1', 'r1');
+  easy.ok(['evidence', 'T1', '--revision', easy.revision('T1'), '--agent', 'r1', '--type', 'review', '--fail', '--sha', easy.sha]);
+  assert.deepEqual([choice(easy).review_rung, model(choice(easy))], ['review', 'fallback']);
+  const tiered = setup(t, 'easy', 'other', undefined, { gated: true });
+  tiered.ok(['project', 'set', '--review-policy', JSON.stringify({ prices, min_rung: 'hard' })]);
+  assert.deepEqual([choice(tiered).review_rung, model(choice(tiered))], ['hard', 'fixture-large']);
+});
+
 test('top-tier Claude builders can receive review on the same model', (t) => {
   for (const tier of ['hard', 'research']) {
     const h = setup(t, tier, 'fixture-large', undefined, { gated: true });
@@ -1046,7 +1068,7 @@ test('review policy validates price and diff settings through the CLI', (t) => {
   const h = makeProjectRepo(t);
   for (const bad of [{ prices: { 'fixture-main': { input: -1 } } },
     { prices: { 'FIXTURE-MAIN': prices['fixture-main'], 'fixture-main': { ...prices['fixture-main'], output: prices['fixture-main'].output + 1 } } },
-    { small_lines: -1 }, { risk_paths: [3] }, { surprise: true }]) {
+    { small_lines: -1 }, { risk_paths: [3] }, { min_rung: 'opus' }, { min_rung: null }, { surprise: true }]) {
     assert.equal(h.run(['project', 'set', '--review-policy', JSON.stringify(bad)]).code, 2);
   }
   h.ok(['project', 'set', '--review-policy', JSON.stringify({ prices: { 'FIXTURE-MAIN': prices['fixture-main'] } })]);
