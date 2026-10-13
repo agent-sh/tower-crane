@@ -36,7 +36,10 @@ function fixture(t) {
     h.ok(['task', 'add', '--title', 'Change', '--acceptance', 'works']);
     h.ok(['claim', 'T1', '--agent', 'worker']);
     const sha = h.git(['rev-parse', 'HEAD']);
-    h.ok(['submit', 'T1', '--agent', 'worker', '--sha', sha, '--pr', '9', '--branch', BRANCH]);
+    // Seed the PR fields so fixture setup does not invoke submit's separate CI checks.
+    const state = h.readState('tasks.json');
+    Object.assign(state.tasks.find((task) => task.id === 'T1'), { sha, pr: 9, branch: BRANCH });
+    h.writeState('tasks.json', state);
     return { sha };
   });
   // Spawn records the task scratch; the test sets it the same way.
