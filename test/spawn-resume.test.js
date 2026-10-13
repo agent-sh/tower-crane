@@ -528,6 +528,28 @@ console.log(JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 10, 
   }
 }
 
+test('a resumed overflow recovered by the harness completes without a fresh retry', (t) => {
+  const { h, script } = setup(t, 'claude');
+  const calls = path.join(h.base, 'recovered-calls.jsonl');
+  fs.writeFileSync(script, `
+const fs = require('node:fs');
+const [bin, out, prior] = process.argv.slice(2);
+fs.appendFileSync(${JSON.stringify(calls)}, JSON.stringify({ prior }) + '\\n');
+if (prior) {
+  console.log(JSON.stringify({ type: 'assistant', isApiErrorMessage: true, message: { content: [{ type: 'text', text: 'Prompt is too long' }] } }));
+}
+console.log(JSON.stringify({ type: 'result', session_id: prior || 'worker-session-1', is_error: false }));
+`);
+  h.json(['spawn', '--task', 'T1', '--wait']);
+  sendBack(h);
+  assert.equal(h.run(['spawn', '--task', 'T1', '--wait']).code, 0);
+  assert.equal(fs.readFileSync(calls, 'utf8').trim().split('\n').length, 2);
+  const audit = events(h);
+  assert.equal(audit.filter((e) => e.cmd === 'spawn fallback').length, 0);
+  assert.equal(audit.findLast((e) => e.cmd === 'spawn exit').detail.overflowed, undefined);
+  assert.equal(audit.findLast((e) => e.cmd === 'spawn phase').detail.phase, 'waiting');
+});
+
 test('a fresh native Claude outage retry that overflows blocks without another fresh retry', (t) => {
   const { h, script, seen } = setup(t, 'claude');
   nativeHarness(h, script, seen, 'claude');
