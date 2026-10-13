@@ -115,7 +115,7 @@ A `command` rung runs any other CLI with `{prompt}`, `{brief}`, `{task}` and `{c
 
 ## Model ladder
 
-Every task has a tier: `easy`, `medium`, `hard` or `research`. Kind and size pick it (`S` easy, `M` medium, `L` hard, kind `research` research), and `--tier` overrides it. The ladder maps each tier, and the orchestrator, review and small jobs, to a harness, model and effort. Built-in defaults from [docs/builtin-ladder.json](docs/builtin-ladder.json), with Codex as the default harness:
+Every task has a tier: `easy`, `medium`, `hard` or `research`. Kind and size pick it (kind `research` research, an `S` `docs` task easy, `L` hard, anything else medium), and `--tier` overrides it. The ladder maps each tier, and the orchestrator, review and small jobs, to a harness, model and effort. Built-in defaults from [docs/builtin-ladder.json](docs/builtin-ladder.json), with Codex as the default harness:
 
 | Rung | Runs | Default |
 |---|---|---|
