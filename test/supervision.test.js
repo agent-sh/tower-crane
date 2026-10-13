@@ -399,8 +399,17 @@ test('a running process keeps its lease without claimant writes', async (t) => {
   const spawned = h.json(['spawn', '--task', 'T1'], {
     env: { NODE_OPTIONS: `--require "${HOOKS.replace(/\\/g, '/')}"`, HOOK_CLOCK_FILE: clockFile },
   });
+  let stage = 'claim';
+  t.signal.addEventListener('abort', () => {
+    if (stage === 'done') return;
+    t.diagnostic(JSON.stringify({
+      stage, clock: fs.readFileSync(clockFile, 'utf8'), attempts: h.readAttempts(),
+      events: log(h), output: fs.readFileSync(spawned.log, 'utf8'),
+    }));
+  }, { once: true });
   try {
     await until(() => h.readAttempts().length === 1, 'worker did not claim');
+    stage = 'renew';
     fs.writeFileSync(clockFile, String(now + 40000));
     await until(() => log(h).some((e) => e.cmd === 'renew'), 'live worker lease was not renewed');
     const task = h.json(['task', 'show', 'T1']);
@@ -411,7 +420,9 @@ test('a running process keeps its lease without claimant writes', async (t) => {
   } finally {
     fs.writeFileSync(`${h.attempts}.finish`, '');
   }
+  stage = 'finish';
   await until(() => h.json(['task', 'show', 'T1']).run?.phase === 'waiting', 'worker did not finish');
+  stage = 'done';
 });
 
 test('release during backoff fences the old supervisor from a replacement claim', async (t) => {
