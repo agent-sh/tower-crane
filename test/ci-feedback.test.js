@@ -272,6 +272,36 @@ test('ci checks refuses another branch and does not present a stale merge analys
   assert.doesNotMatch(stale.stdout, /js\/file-system-race/);
 });
 
+test('ci checks keeps superseded review rounds, reruns and replaced workflow failures visible as nonblocking', (t) => {
+  const h = fixture(t);
+  const data = checkFeedback(h);
+  const runs = data.checks[h.sha];
+  runs[0].started_at = '2026-10-13T02:00:00Z';
+  runs.push(
+    { id: 0, name: 'Revuto', app: 'revuto-review', status: 'completed', conclusion: 'failure',
+      started_at: '2026-10-13T01:00:00Z', output: { title: 'Old finding', summary: 'previous review round', annotations_count: 0 } },
+    { id: 6, name: 'rerun', app: 'github-actions', status: 'completed', conclusion: 'failure',
+      output: { title: 'Old failure', annotations_count: 0 } },
+    { id: 7, name: 'rerun', app: 'github-actions', status: 'completed', conclusion: 'success', output: {} },
+    { id: 8, name: 'obsolete job', app: 'github-actions', suite: 101, status: 'completed', conclusion: 'failure',
+      output: { title: 'Replaced workflow failure', annotations_count: 0 } },
+  );
+  data.suites = [101, 102].map((id) => ({ id, app: 'github-actions', status: 'completed', conclusion: 'success', runs: 1 }));
+  data.workflows = [101, 102].map((id) => ({ id, check_suite_id: id, head_sha: h.sha, name: 'CI', path: '.github/workflows/ci.yml',
+    event: 'pull_request', created_at: `2026-10-13T0${id === 101 ? 1 : 2}:00:00Z`, status: 'completed', conclusion: 'success' }));
+  fs.writeFileSync(h.env.CI_FEEDBACK_GH, JSON.stringify(data));
+  const r = h.run(['ci', 'checks', 'T1', '--json']);
+  assert.equal(r.code, 0, r.stderr);
+  const rows = JSON.parse(r.stdout).checks;
+  for (const id of [0, 6, 8]) {
+    const row = rows.find((c) => c.id === id);
+    assert.ok(row, `old run ${id} stays visible`);
+    assert.equal(row.nonblocking, true, `old run ${id} does not block`);
+    assert.match(row.reason, /superseded/);
+  }
+  assert.equal(rows.find((c) => c.id === 2).nonblocking, false, 'the current CodeQL failure still blocks');
+});
+
 test('ci checks runs through the worker broker without loading the worktree git config', async (t) => {
   const h = fixture(t);
   checkFeedback(h);

@@ -13,6 +13,7 @@ const fail = (message) => {
 const job = /^repos\/[^/]+\/[^/]+\/actions\/jobs\/(\d+)(\/logs)?$/.exec(endpoint);
 const ref = /^repos\/[^/]+\/[^/]+\/git\/ref\/(.+)$/.exec(endpoint);
 const checks = /^repos\/[^/]+\/[^/]+\/commits\/([^/]+)\/check-runs\?/.exec(endpoint);
+const suites = /^repos\/[^/]+\/[^/]+\/commits\/([^/]+)\/check-suites\?/.exec(endpoint);
 const annotations = /^repos\/[^/]+\/[^/]+\/check-runs\/(\d+)\/annotations\?/.exec(endpoint);
 const pull = /^repos\/[^/]+\/[^/]+\/pulls\/(\d+)$/.exec(endpoint);
 const commit = /^repos\/[^/]+\/[^/]+\/git\/commits\/([^/]+)$/.exec(endpoint);
@@ -20,6 +21,10 @@ if (args[0] === 'pr' && args[1] === 'view') console.log(JSON.stringify(data.pr))
 else if (args[0] !== 'api') fail(`unexpected gh call: ${args.join(' ')}`);
 else if (checks) {
   for (const run of data.checks[checks[1]] || []) console.log(JSON.stringify(run));
+} else if (suites) {
+  for (const suite of data.suites || []) console.log(JSON.stringify(suite));
+} else if (/^repos\/[^/]+\/[^/]+\/actions\/runs\?/.test(endpoint)) {
+  for (const run of data.workflows || []) console.log(JSON.stringify(run));
 } else if (annotations) {
   for (const row of data.annotations[annotations[1]] || []) console.log(JSON.stringify(row));
 } else if (pull) console.log(JSON.stringify(data.pull));
