@@ -28046,5 +28046,126 @@
       }
     ],
     "raw_logs": "Task scratch; only relative artifact names and hashes are committed."
+  },
+  "base_3ad4cc4e_refresh": {
+    "base_head": "3ad4cc4e",
+    "source": "38a7f377",
+    "changes": [
+      "Main's Windows teardown now holds handles for workers and monitors; its WaitForExit budget and taskkill guard use the suite guard.",
+      "Main's lease renewal test runs for the lease gate and the launch handshake; its waits use the repository signal.",
+      "Main's fallback waiter constant (300 s) and final-sample ordering are kept; the branch's always-on final-sample wrapper is dropped because main's new periodic-sample test needs the final record sampled.",
+      "Main's reused-PID worker teardown test waits for the recorded worker's exit instead of a 10 s race.",
+      "Main's single-fetch batch proof is kept with the suite test timeout instead of 120 s; the CI-required subprocess guard is 300 s."
+    ],
+    "loaded_command": "node test/run.js --test-concurrency=3 test/ci-required.test.js test/fallback.test.js test/spawn-exit.test.js test/supervision.test.js test/worktree.test.js test/live-spend.test.js",
+    "cpu_load": "Shared 24-core host with other sessions running test suites; one-minute load 13 to 23 during the runs.",
+    "loaded_runs": [
+      {
+        "run": 1,
+        "status": 0,
+        "load_after": [
+          13.76,
+          17.98,
+          16.63
+        ],
+        "log": "loaded4-1.log",
+        "log_sha256": "8a141396484038c5bd6fccfba4cfb6ddda71807b0e90ac9e7dba57120054d2e8",
+        "tests": {
+          "tests": 179,
+          "pass": 179,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 0
+        }
+      },
+      {
+        "run": 2,
+        "status": 0,
+        "load_after": [
+          15.13,
+          16.55,
+          16.28
+        ],
+        "log": "loaded4-2.log",
+        "log_sha256": "42998678d5cc27b86a507542f0919cc2bcc147932a75dd583f0ea0517f2e46eb",
+        "tests": {
+          "tests": 179,
+          "pass": 179,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 0
+        }
+      },
+      {
+        "run": 3,
+        "status": 0,
+        "load_after": [
+          23.26,
+          19.8,
+          17.58
+        ],
+        "log": "loaded4-3.log",
+        "log_sha256": "b171ed9fa823fa68f94fd77c3ddeaac98766763fbbad7fe9e10b600db5956f33",
+        "tests": {
+          "tests": 179,
+          "pass": 179,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 0
+        }
+      },
+      {
+        "run": 4,
+        "status": 0,
+        "load_after": [
+          20.55,
+          20.69,
+          18.31
+        ],
+        "log": "loaded4-4.log",
+        "log_sha256": "9355a067a59bca37be205e2fc99930fb52dc15b973d5997e1f20de12cf2edc6f",
+        "tests": {
+          "tests": 179,
+          "pass": 179,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 0
+        }
+      },
+      {
+        "run": 5,
+        "status": 0,
+        "load_after": [
+          19.25,
+          20.61,
+          18.7
+        ],
+        "log": "loaded4-5.log",
+        "log_sha256": "8cf718333c3fa1e8a16f0db36fe8c30eb0be4f15c95342af1db18b4578b04e23",
+        "tests": {
+          "tests": 179,
+          "pass": 179,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 0
+        }
+      }
+    ],
+    "full_suite": {
+      "command": "node test/run.js --test-concurrency=3",
+      "source": "38a7f377",
+      "status": 0,
+      "wall": "15m22s",
+      "tests": {
+        "tests": 2221,
+        "pass": 2197,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 24
+      },
+      "log": "full-3.log",
+      "log_sha256": "fa395bec990d20f8e5dbd7d10de0be3f0271f69d2aaaa8af88d85425902a677a"
+    },
+    "raw_logs": "Task scratch; only relative artifact names and hashes are committed."
   }
 }

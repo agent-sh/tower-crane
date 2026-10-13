@@ -66,6 +66,8 @@ The base refresh through `1d2b8137` keeps main's post-discovery release clocks a
 
 The base refresh through `5b48d520` converts main's hotfix reviewer-exit loop to the repository signal and waits for the accepted event after review evidence. Hotfix, automation, orchestrator and the CI gate pass 170 of 170 tests in each of five loaded runs.
 
+The base refresh through `3ad4cc4e` keeps main's Windows worker and monitor teardown handles, lease renewal variants, fallback waiter constant, final-sample ordering and single-fetch batch proof, with suite guards for their budgets. The reused-PID worker teardown test waits for the worker's exit. CI-required, fallback, spawn-exit, supervision, worktree and live spend pass 179 of 179 tests in each of five loaded runs at `38a7f377`, and the full suite there passes 2197 tests with 24 skipped and no failures.
+
 ## Tools
 
 - `node scripts/test-cost.js [--before DIR] [files...]` measures CPU and wall seconds per file, median of three runs, four files at a time. With `--before`, it measures another checkout interleaved with this one.
