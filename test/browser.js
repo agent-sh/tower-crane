@@ -82,7 +82,8 @@ function createProfile() {
     if (!fits(base)) continue;
     try { return create(base); }
     catch (error) {
-      if (!['EACCES', 'EROFS'].includes(error.code)) throw error;
+      // macOS sandboxes refuse with EPERM; Linux permissions and read-only mounts use the others.
+      if (!['EACCES', 'EPERM', 'EROFS'].includes(error.code)) throw error;
     }
   }
   // A refused cache must not hide the browser's own startup error.

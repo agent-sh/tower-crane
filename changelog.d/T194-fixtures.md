@@ -1,1 +1,1 @@
-- Clean remaining test fixtures at file teardown, stopping detached processes before removing directories; plain helper scripts clean fixtures before exit.
+- Clean remaining test fixtures at file teardown, stopping detached processes before removing directories. Plain helper scripts clean fixtures on exit, including after `process.exit()` or an uncaught exception.

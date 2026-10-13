@@ -1,1 +1,1 @@
-- Keep Chrome test sockets within Unix path limits by falling back to a short private cache directory, including when test, system-temp and cache overrides are all deep.
+- Keep Chrome test sockets within Unix path limits by falling back to a short private cache directory, including when test, system-temp and cache overrides are all deep. A cache refused with `EACCES`, `EPERM` or `EROFS` falls back to the test root so Chrome reports its own startup error.

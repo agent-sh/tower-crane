@@ -53,7 +53,13 @@ test('repository seeds, test helpers and gate scratch share the cache default an
   }
 });
 
-for (const fileTest of [true, false]) test(`fixtures created without a test context are removed after completion (test=${fileTest})`, (t) => {
+for (const [fileTest, finish, status] of [
+  [true, '', 0],
+  [false, '', 0],
+  // These exits skip beforeExit, so only the exit listener can remove the fixture.
+  [false, 'process.exit(3);', 3],
+  [false, "throw new Error('script failed');", 1],
+]) test(`fixtures created without a test context are removed after completion (test=${fileTest}${finish && `, ${finish}`})`, (t) => {
   const h = makeRepo(t);
   const output = path.join(h.base, 'fixture.json');
   const file = path.join(h.base, 'fixture-lifetime.test.js');
@@ -66,13 +72,14 @@ const create = () => {
   fs.writeFileSync(${JSON.stringify(output)}, JSON.stringify({ base: fixture.base }));
 };
 ${fileTest ? "test('file fixture', create);" : 'create();'}
+${finish}
 `;
   fs.writeFileSync(file, body);
   const result = cp.spawnSync(process.execPath, [...(fileTest ? ['--test'] : []), file], {
     env: { ...h.env, NODE_TEST_CONTEXT: undefined, TOWER_CRANE_TEST_TMP: path.join(h.base, 'scratch') },
     encoding: 'utf8', timeout: 30000,
   });
-  assert.equal(result.status, 0, result.stderr + result.stdout);
+  assert.equal(result.status, status, result.stderr + result.stdout);
   const { base } = JSON.parse(fs.readFileSync(output, 'utf8'));
   assert.equal(fs.existsSync(base), false, 'completion owns fixtures without a per-test context');
   assert.deepEqual(fs.readdirSync(path.join(h.base, 'scratch')), []);

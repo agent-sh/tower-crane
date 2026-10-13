@@ -18,14 +18,31 @@ const fileFixtures = new Set();
 async function cleanupFileFixtures() {
   for (const fixture of fileFixtures) await fixture.cleanup();
 }
+// process.exit() and uncaught exceptions skip beforeExit, and an exit listener runs only
+// synchronous code, so this stops detached children with signals and removes the directories.
+function cleanupFileFixturesSync() {
+  for (const fixture of fileFixtures) {
+    try {
+      for (const child of fixture.detached()) killDetached(child);
+    } catch (error) {
+      console.error(error);
+    } finally {
+      fs.rmSync(fixture.base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+      fileFixtures.delete(fixture);
+    }
+  }
+}
 // Plain CLI probes also import helpers; only test workers have file teardown.
 if (process.env.NODE_TEST_CONTEXT) test.after(cleanupFileFixtures);
-else process.once('beforeExit', () => {
-  cleanupFileFixtures().catch((error) => {
-    console.error(error);
-    process.exitCode = 1;
+else {
+  process.once('beforeExit', () => {
+    cleanupFileFixtures().catch((error) => {
+      console.error(error);
+      process.exitCode = 1;
+    });
   });
-});
+  process.once('exit', cleanupFileFixturesSync);
+}
 delete process.env.TC_TEST_REPO_SEED;
 // Scratch consumers can run directly without the runner's global setup.
 fs.mkdirSync(TMP_ROOT, { recursive: true });

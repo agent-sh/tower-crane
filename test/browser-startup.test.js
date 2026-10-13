@@ -139,8 +139,9 @@ test('installed Chrome opens a page with deep test, system temp and cache roots'
   assert.equal(path.dirname(result.profile), path.join(os.userInfo().homedir, '.cache', 'tct'));
 });
 
-for (const [method, code] of [['mkdirSync', 'EACCES'], ['mkdtempSync', 'EROFS']]) {
-  test(`a cache refused by ${method} preserves browser startup errors and cleans its fallback`, (t) => {
+// macOS sandboxes refuse writes with EPERM rather than EACCES.
+for (const [method, code] of [['mkdirSync', 'EACCES'], ['mkdtempSync', 'EROFS'], ['mkdtempSync', 'EPERM']]) {
+  test(`a cache refused by ${method} with ${code} preserves browser startup errors and cleans its fallback`, (t) => {
     const h = makeRepo(t);
     const deep = path.join(h.base, 'd'.repeat(100));
     fs.mkdirSync(deep);
