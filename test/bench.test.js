@@ -348,13 +348,14 @@ test('bench excludes accepted tasks missing worker, reviewer or resumed-session 
   assert.equal(result.complete, 2);
   const routes = [
     ['spawn fallback', { route_index: 1 }],
+    ['spawn fallback', { route_index: 1, retry: 0, fresh: true }],
     ['spawn retry', { route_index: 1, retry: 1, fresh: true }],
     ['spawn retry', { route_index: 1, retry: 2, fresh: false }],
   ].map(([cmd, detail]) => ({ cmd, task: 'T3', at: '2026-10-07T00:00:20Z', detail: { agent: 'worker-T3', ...detail } }));
   fs.appendFileSync(path.join(h.state, 'events.jsonl'), routes.map((e) => JSON.stringify(e)).join('\n') + '\n');
   result = h.json(['bench', 'tokens']);
   const missing = result.tasks.find((row) => row.id === 'T3').missing_spawns;
-  assert.deepEqual(missing, ['spawn:worker-T3:route:1', 'spawn:worker-T3:route:1:retry:1']);
+  assert.deepEqual(missing, ['spawn:worker-T3:route:1', 'spawn:worker-T3:route:1:retry:0', 'spawn:worker-T3:route:1:retry:1']);
   assert.equal(result.complete, 1, 'resumable retries share usage; fresh routes need their own records');
   const updated = h.readState('tasks.json');
   for (const source of missing) updated.tasks[2].spend.entries.push({

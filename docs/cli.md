@@ -307,6 +307,8 @@ While a task is `submitted`, its recorded `submitted_by` agent can submit anothe
 
 `--precheck pass|fail|skipped` is the submitter's own pre-submit review of the diff at that head: the reviewer checklist run before `submit` ([worker skill](../skills/tower-crane-work/SKILL.md)). The event carries it as `precheck`, next to the submitted `sha`, and omitting the flag leaves the field out. It is a record for measurement, not a gate: `submit` never refuses or waits on it, and reviews and gates do not read it.
 
+When a resumed worker reports context overflow, `spawn` supervision records a `spawn fallback` with reason `session context overflow` and retries once with a fresh session on the same route. The full prompt, brief and rework notes are rebuilt; the agent, claim and worktree are kept. The failed session is excluded from later resumes. A fresh attempt that also overflows blocks. Native Claude workers already start fresh. No prelaunch size cutoff is applied.
+
 The trusted `wait` watcher and dispatch supervisor react to submissions,
 worker exits, review evidence, acceptance, CI completions and confirmed
 merges. Submission runs unattempted tests, cleanup and source verification
