@@ -6,7 +6,7 @@
 const test = require('node:test');
 const fs = require('node:fs');
 const path = require('node:path');
-const { makeRepo, copyRepo, BIN } = require('./helpers');
+const { makeRepo, copyRepo, repairWorktrees, BIN } = require('./helpers');
 
 function worker(f) {
   const script = path.join(f.h.base, 'worker.js');
@@ -79,8 +79,7 @@ function copy(t, from) {
     fs.writeFileSync(file, text);
   }
   h.git(['remote', 'set-url', 'origin', path.join(h.base, 'remote.git')]);
-  const worktrees = path.join(h.base, 'repo-worktrees');
-  h.git(['worktree', 'repair', ...fs.readdirSync(worktrees).map((name) => path.join(worktrees, name))]);
+  repairWorktrees(h);
   const moved = (wt) => ({ ...wt, path: path.join(h.base, path.relative(from.h.base, wt.path)) });
   const f = { ...fixture(h), lower: moved(from.lower), sha: from.sha };
   if (from.upper) f.upper = { ...from.upper, wt: moved(from.upper.wt) };
