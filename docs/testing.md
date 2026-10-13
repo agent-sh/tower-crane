@@ -6,7 +6,9 @@ The suite proves behavior through the real CLI on temporary git repositories. It
 
 - `npm test` runs every file in `test/` and `test/gates/`. Every concurrency option, including repeated and space-separated values, is consumed before emitting one value. File workers are capped at 4 and at one below the machine's core count, since each file also starts CLI, git and stub processes.
 - `npm test -- test/claim.test.js test/gates/tests.test.js` runs only those files. Pass node:test flags the same way: `npm test -- test/events.test.js --test-name-pattern="decision answer"`.
-- Run only the files a change touches. The tests gate runs the full suite once at the submitted head, and CI runs it on Linux (Node 24 and 26) and on Windows, each in three shards. `TC_TEST_SHARD=INDEX/TOTAL` selects one shard of the file list, and `test/shard.test.js` checks that the shards cover every file once.
+- Run only the files a change touches. The tests gate runs the full suite once at the submitted head. PR CI runs three Windows Node 26 shards, the gate scratch cleanup and model swap proofs, and `npm run check:shared` in each Windows job. The local Linux tests gate covers each submitted head, so PRs skip the six Linux jobs and leave hosted capacity for other tasks.
+- Pushes to `main`, the daily schedule at 03:17 UTC, and `workflow_dispatch` run all nine test shards: Linux Node 26, Linux Node 24 and Windows Node 26, three shards each. These runs also keep the proofs and shared check. One event-dependent matrix selects the platforms, with job names `test (<os>, node <n>, shard <i>/3)` so the `ci.required` prefix `test (` still matches PR jobs.
+- `TC_TEST_SHARD=INDEX/TOTAL` selects one shard of the file list. `test/shard.test.js` checks that the shards cover every file once, and `test/ci-required.test.js` checks the workflow matrix for PR, push, schedule and manual events.
 - Set `TOWER_CRANE_TEST_TMP` to keep temporary repositories off `/tmp`.
 - Windows CI jobs have a 45-minute budget and Linux jobs have a 15-minute budget; each test still has its own 300-second deadline.
 
