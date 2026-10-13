@@ -139,6 +139,25 @@ test('gh failing: not ok with its message', async () => {
   assert.match(r.summary, /HTTP 404/);
 });
 
+test('gh failures retain child startup errors, exit status and signals', async () => {
+  const cases = [
+    [{ status: null, error: { code: 'EAGAIN', message: 'spawnSync gh EAGAIN' } }, ['status=null', 'EAGAIN', 'spawnSync gh EAGAIN']],
+    [{ status: null, error: { code: 'ETXTBSY', message: 'spawnSync gh ETXTBSY' } }, ['status=null', 'ETXTBSY']],
+    [{ status: null, signal: 'SIGTERM' }, ['status=null', 'signal=SIGTERM']],
+    [{ status: null, signal: 'SIGKILL', error: { code: 'ETIMEDOUT', message: 'spawnSync gh ETIMEDOUT' } }, ['ETIMEDOUT', 'signal=SIGKILL']],
+    [{ status: 7 }, ['status=7', 'no output']],
+    [{ status: 1, stderr: 'gh: Not Found (HTTP 404)' }, ['status=1', 'HTTP 404']],
+    [{ status: null, error: { code: 'ENOENT', message: 'spawnSync gh ENOENT' } }, ['ENOENT', 'gh not found on PATH', 'gh auth login']],
+  ];
+  for (const [failure, expected] of cases) {
+    const gh = fakeExec(() => failure);
+    const r = await gate.run(ctx(gh));
+    assert.equal(r.ok, false);
+    for (const text of expected) assert.ok(r.summary.includes(text), `${text}: ${r.summary}`);
+    assert.equal(gh.calls.length, 1, 'a failure is reported without retrying');
+  }
+});
+
 test('workflow supersession orders by creation time and id, with name fallback and a known replacement suite', async () => {
   const old = { id: 100, head_sha: SHA, check_suite_id: 1, path: 'ci.yml', name: 'CI', event: 'pull_request', created_at: '2026-10-11T10:00:00Z', status: 'completed', conclusion: 'failure' };
   const current = { ...old, id: 200, check_suite_id: 2, created_at: '2026-10-11T11:00:00Z', conclusion: 'success' };

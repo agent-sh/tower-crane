@@ -631,6 +631,8 @@ Any agent recovers a verified exited task with `release ID --reason R`. The dete
 
 ### Acceptance gates
 
+Failed GitHub commands retain the child exit status, signal and startup error code and message in the gate evidence `summary`, including when stderr and stdout are empty.
+
 `tower-crane accept` refuses unless the task's current revision has, at the submitted `sha`:
 
 - `code` tasks: `tests` ok, `clean` ok, and `review` ok from an independent reviewer
