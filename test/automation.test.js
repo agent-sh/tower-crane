@@ -658,8 +658,14 @@ test('background reactions leave vacant, released, taken-over and expired leases
   assert.notEqual(lease().session_id, expired.session_id);
 });
 
-for (const takeover of [false, true]) {
-  test(`automation ${takeover ? 'stops after another session takes' : 'acts after aging past'} its captured lease`, async (t) => {
+const IDLE_LEASE = {
+  aged: 'acts after aging past its captured lease',
+  takeover: 'stops after another session takes its captured lease',
+  late: 'started after its holder idled out acts when that holder returns',
+};
+for (const [mode, title] of Object.entries(IDLE_LEASE)) {
+  const takeover = mode === 'takeover';
+  test(`automation ${title}`, async (t) => {
     const h = cachedFixture(t, 'automation-idle-lease', (repo) => {
       const fixture = setup(null, { repo, ci: 'pending' });
       return { sha: fixture.sha };
@@ -679,14 +685,35 @@ global.Date = class extends RealDate {
 };
 `);
     const env = { NODE_OPTIONS: `${h.env.NODE_OPTIONS || ''} --require=${JSON.stringify(preload)}`.trim() };
-    h.ok(['claim', 'T1', '--agent', 'worker']);
-    h.ok(['submit', 'T1', '--sha', h.sha, '--pr', '7', '--agent', 'worker']);
-    const waiting = h.runAsync(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator'], { env });
+    let holder = h.readState('tasks.json').orchestrator_lease;
+    const idle = h.readState('project.json').limits.lease_minutes * 60000;
+    const expire = () => fs.writeFileSync(clock, String(Date.parse(holder.heartbeat) + idle + 1));
+    // A late reaction starts under the expired record; an owner waiter cannot renew it.
+    if (mode === 'late') expire();
+    h.ok(['claim', 'T1', '--agent', 'worker'], { env });
+    // Submit refuses pending CI; the gates still see it pending afterwards.
+    const github = () => JSON.parse(fs.readFileSync(h.env.AUTOMATION_GITHUB, 'utf8'));
+    const ci = (state) => fs.writeFileSync(h.env.AUTOMATION_GITHUB, JSON.stringify({ ...github(), ci: { [h.sha]: state } }));
+    ci('success');
+    h.ok(['submit', 'T1', '--sha', h.sha, '--pr', '7', '--agent', 'worker'], { env });
+    ci('pending');
+    const waiting = mode === 'late'
+      ? h.runAsync(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'owner'],
+        { env: { ...env, CLAUDE_SESSION_ID: 'engine-waiter' } })
+      : h.runAsync(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator'], { env });
     try {
       assert.notEqual(await waitFor(stalled, { ms: 30000 }), null, 'automation did not start its gate');
-      const holder = h.readState('tasks.json').orchestrator_lease;
-      const idle = h.readState('project.json').limits.lease_minutes * 60000;
-      fs.writeFileSync(clock, String(Date.parse(holder.heartbeat) + idle + 1));
+      if (mode === 'late') {
+        assert.deepEqual(h.readState('tasks.json').orchestrator_lease, holder, 'an owner waiter keeps the holder heartbeat');
+        // The holder wakes on the submit; its first read renews its own heartbeat.
+        h.ok(['status', '--agent', 'orchestrator'], { env });
+        const renewed = h.readState('tasks.json').orchestrator_lease;
+        assert.equal(renewed.session_id, holder.session_id);
+        assert.notEqual(renewed.heartbeat, holder.heartbeat, 'the returning holder renews its lease');
+      } else {
+        holder = h.readState('tasks.json').orchestrator_lease;
+        expire();
+      }
       if (takeover) {
         h.ok(['task', 'note', 'T1', 'replacement session', '--agent', 'orchestrator'],
           { env: { ...env, CLAUDE_SESSION_ID: 'replacement' } });
