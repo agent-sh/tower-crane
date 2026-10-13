@@ -270,8 +270,16 @@ function repairWorktrees(h) {
       fs.unlinkSync(link);
       fs.symlinkSync(dir, link, 'dir');
     }
-    const dotGit = path.join(root, name, '.git');
-    if (fs.existsSync(dotGit)) fs.writeFileSync(dotGit, `gitdir: ${dir}\n`);
+    // Opened as it is, not checked first: a removed worktree has no .git file.
+    let fd;
+    try { fd = fs.openSync(path.join(root, name, '.git'), 'r+'); } catch (e) { if (e.code !== 'ENOENT') throw e; }
+    if (fd === undefined) continue;
+    try {
+      fs.ftruncateSync(fd, 0);
+      fs.writeSync(fd, `gitdir: ${dir}\n`, 0);
+    } finally {
+      fs.closeSync(fd);
+    }
   }
   const trees = fs.readdirSync(root).filter((name) => name !== '.git-admin').map((name) => path.join(root, name));
   if (trees.length) h.git(['worktree', 'repair', ...trees]);

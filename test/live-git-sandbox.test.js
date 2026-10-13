@@ -179,14 +179,16 @@ test('from a real claude sandbox a worker cannot write the shared git config or 
   f.h.ok(['ladder', 'set', 'hard', '--harness', 'claude', '--model', process.env.TOWER_CRANE_LIVE_MODEL || 'claude-haiku-5-5', '--clear', 'profile', '--clear', 'effort', '--clear', 'args']);
   const spawned = f.h.runAsync(['spawn', '--role', 'hard', '--task', 'T1', '--wait']);
   // Once the first command has written its result, add the worktree and let it finish.
+  let added = false;
   const timer = setInterval(() => {
-    if (!fs.existsSync(first) || fs.existsSync(ready)) return;
+    if (added || !fs.existsSync(first)) return;
+    added = true;
     f.addLate();
-    fs.writeFileSync(ready, '');
+    fs.writeFileSync(ready, '', { flag: 'wx' });
   }, 500);
   let r;
   try { r = await spawned; } finally { clearInterval(timer); }
   assert.equal(r.code, 0, r.stderr);
-  assert.ok(fs.existsSync(ready), 'the late worktree was added while the agent ran');
+  assert.ok(added, 'the late worktree was added while the agent ran');
   check(f, 'claude', [first, second]);
 });
