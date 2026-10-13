@@ -323,7 +323,8 @@ test('failed, missing and timed out local commands record failure and clean thei
     ['setInterval(() => {}, 1000);', null, 0.05, /timed out/],
   ]) {
     const h = fixture(t, script || '// no-op\n');
-    h.ok(['project', 'set', '--ci-local', JSON.stringify({ command: command || h.command, timeout })]);
+    const argv = command ? [path.join(h.base, command[0])] : h.command;
+    h.ok(['project', 'set', '--ci-local', JSON.stringify({ command: argv, timeout })]);
     const r = h.run(['check', 'ci', 'T1']);
     assert.equal(r.code, 1, r.stderr);
     assert.match(r.stdout, pattern);

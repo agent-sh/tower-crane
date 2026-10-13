@@ -200,7 +200,7 @@ function after(name, args, rawArgs = args) {
     && path.basename(process.argv[1]) === 'tower-crane.js' && first('started')) stop(env.HOOK_STOP_STARTED);
   // HOOK_PAUSE_ON=FILE stops at HOOK_PAUSED after its first read; HOOK_PAUSE_PROCESS
   // optionally limits the pause to one executable's basename.
-  if (env.HOOK_PAUSE_ON && name === 'readFileSync' && inState(target) && path.basename(target) === env.HOOK_PAUSE_ON
+  if (env.HOOK_PAUSE_ON && ['readFileSync', 'readSync'].includes(name) && inState(target) && path.basename(target) === env.HOOK_PAUSE_ON
     && (!env.HOOK_PAUSE_PROCESS || path.basename(process.argv[1]) === env.HOOK_PAUSE_PROCESS) && first('pause')) stop(env.HOOK_PAUSED);
   // Windows keeps an unlinked marker pending deletion until its reader closes
   // it. Pause with the snapshot, without keeping the lock directory open.
@@ -264,12 +264,29 @@ if (env.HOOK_STOP_WORKTREE_STATUS) {
   };
 }
 
+// Pause inside removal after the reservation, before inspecting the sandbox mask.
+if (env.HOOK_STOP_WORKTREE_SAVE) {
+  const orig = cp.execFileSync;
+  cp.execFileSync = function hookedExecFileSync(file, args, ...rest) {
+    if (args[0] === 'status' && args.includes('.mcp.json') && first('worktree-save')) stop(env.HOOK_STOP_WORKTREE_SAVE);
+    return orig.call(this, file, args, ...rest);
+  };
+}
+
 // HOOK_STOP_WORKTREE_REMOVE=SIGNAL: stop before the first git worktree remove runs,
 // after the removal has passed its checks and released the state lock.
 if (env.HOOK_STOP_WORKTREE_REMOVE) {
   const orig = cp.execFileSync;
   cp.execFileSync = function hookedExecFileSync(file, args, ...rest) {
     if (args[0] === 'worktree' && args[1] === 'remove' && first('worktree-remove')) stop(env.HOOK_STOP_WORKTREE_REMOVE);
+    return orig.call(this, file, args, ...rest);
+  };
+}
+
+if (env.HOOK_STOP_BRANCH_DELETE) {
+  const orig = cp.execFileSync;
+  cp.execFileSync = function hookedExecFileSync(file, args, ...rest) {
+    if (args[0] === 'branch' && args[1] === '-D' && first('branch-delete')) stop(env.HOOK_STOP_BRANCH_DELETE);
     return orig.call(this, file, args, ...rest);
   };
 }
