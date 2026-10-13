@@ -590,6 +590,8 @@ A push carries ids, never content: one line per event (`- E…: decision-answer 
 - An event line contains `id`, `type`, `to`, `at`, `agent`, `cmd`, `task`, `detail`, and `offset`. `offset` is the byte position after that event's newline. Use either returned cursor for the next wait to retain events that arrived while handling the first.
 - `--follow` never exits on an event: it prints `{"type":"ready","offset":N}` once its cursor is set, then one line per matching event with `id`, `type`, `to`, `agent`, `task`, `offset`, `decision` for decision events and `steer: true` for a steered message, and no `detail`. It runs until interrupted or until its reader closes stdout, and refuses `--timeout`.
 
+Automatic stack maintenance still uses synchronous Git/GitHub commands and can delay signal handling until the current command returns. Software gate commands and PR inspection run asynchronously and remain cancellable.
+
 `tower-crane event ID` remains a read-only audit lookup. Orchestrators use `tower-crane inbox` after a wake to get current findings and resolving commands instead of interpreting the event log. `wait --inbox` refreshes GitHub once per minute and emits deduplicated `inbox item` wakeups. The plugin watch and spawned orchestrator Stop hooks enable it.
 
 On startup or resume without a saved cursor, run `tower-crane wait --timeout 0` once. It exits 2 with a timeout and the current cursor, without observing worker exits or stalls. Save that offset, read state once, then start the background wait with `--after <offset>`. Events during the state read remain available, and the blocking wait observes current exits and stalls. With an explicit earlier `--after`, a zero timeout returns an already available matching event or a timeout cursor.
