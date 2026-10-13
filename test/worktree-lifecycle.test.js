@@ -380,7 +380,7 @@ test('cancellation rechecks a replacement owner while reserving removal', { time
   const paused = path.join(h.base, 'cancel-paused');
   const cancel = h.runAsync(['task', 'update', 'T1', '--status', 'cancelled'], { hooks: { HOOK_STOP_WORKTREE_STATUS: paused } });
   try {
-    assert.ok(await fileWritten(paused));
+    await fileWritten(paused);
     h.ok(['claim', 'T2', '--agent', 'replacement']);
     h.ok(['submit', 'T2', '--sha', h.git(['rev-parse', 'HEAD']), '--branch', wt.branch, '--agent', 'replacement']);
     h.ok(['rework', 'T2', '--reason', 'continue in the existing branch']);
@@ -408,7 +408,7 @@ test('a removal reservation blocks assigning its branch to another task', { time
   const paused = path.join(h.base, 'remove-paused');
   const cancel = h.runAsync(['task', 'update', 'T1', '--status', 'cancelled'], { hooks: { HOOK_STOP_WORKTREE_REMOVE: paused } });
   try {
-    assert.ok(await fileWritten(paused));
+    await fileWritten(paused);
     const assigned = h.run(['submit', 'T2', '--sha', h.git(['rev-parse', 'HEAD']), '--branch', wt.branch, '--agent', 'replacement']);
     assert.equal(assigned.code, 1, 'a retiring branch cannot become a live replacement');
     assert.match(assigned.stderr, /being removed|retiring/);
@@ -427,7 +427,7 @@ test('orphan prune rechecks a live adopter under the reservation lock', { timeou
   const paused = path.join(h.base, 'orphan-status');
   const prune = h.runAsync(['worktree', 'prune', '--orphans', '--json'], { hooks: { HOOK_STOP_WORKTREE_STATUS: paused } });
   try {
-    assert.ok(await fileWritten(paused));
+    await fileWritten(paused);
     h.ok(['claim', 'T1', '--agent', 'adopter']);
     h.ok(['submit', 'T1', '--sha', h.git(['rev-parse', 'HEAD']), '--branch', wt.branch, '--agent', 'adopter']);
     h.ok(['rework', 'T1', '--reason', 'continue in the adopted checkout']);
@@ -456,7 +456,7 @@ for (const hook of ['HOOK_STOP_WORKTREE_SAVE', 'HOOK_STOP_WORKTREE_REMOVE', 'HOO
     const paused = path.join(h.base, 'orphan-removal');
     const prune = h.runAsync(['worktree', 'prune', '--orphans', '--json'], { hooks: { [hook]: paused } });
     try {
-      assert.ok(await fileWritten(paused));
+      await fileWritten(paused);
       const assigned = h.run(['submit', 'T1', '--sha', h.git(['rev-parse', 'HEAD']), '--branch', wt.branch, '--agent', 'adopter']);
       assert.equal(assigned.code, 1, 'an orphan being removed cannot become a task branch');
       assert.match(assigned.stderr, /being removed|retiring/);
@@ -480,7 +480,7 @@ test('a competing orphan prune cannot clear the first remover reservation', { ti
   const paused = path.join(h.base, 'orphan-remove');
   const prune = h.runAsync(['worktree', 'prune', '--orphans', '--json'], { hooks: { HOOK_STOP_WORKTREE_REMOVE: paused } });
   try {
-    assert.ok(await fileWritten(paused));
+    await fileWritten(paused);
     const competing = h.json(['worktree', 'prune', '--orphans']);
     assert.equal(competing.outcomes.find((w) => w.path === wt.path).removed, false);
     assert.match(competing.outcomes.find((w) => w.path === wt.path).reason, /being removed|retiring/);
@@ -523,7 +523,7 @@ test('orphan reservation blocks preparation of a task with the same generated br
   const paused = path.join(h.base, 'orphan-prepare');
   const prune = h.runAsync(['worktree', 'prune', '--orphans'], { hooks: { HOOK_STOP_WORKTREE_REMOVE: paused } });
   try {
-    assert.ok(await fileWritten(paused));
+    await fileWritten(paused);
     const prepared = h.run(['worktree', 'T1']);
     assert.equal(prepared.code, 1, 'preparation must not reuse an orphan reserved by prune');
     assert.match(prepared.stderr, /being removed|retiring/);
@@ -544,7 +544,7 @@ test('orphan ownership includes a newly submitted branch before its worktree rec
   const paused = path.join(h.base, 'orphan-owner');
   const prune = h.runAsync(['worktree', 'prune', '--orphans', '--json'], { hooks: { HOOK_STOP_WORKTREE_STATUS: paused } });
   try {
-    assert.ok(await fileWritten(paused));
+    await fileWritten(paused);
     h.ok(['submit', 'T1', '--sha', h.git(['rev-parse', 'HEAD']), '--branch', wt.branch, '--agent', 'adopter']);
     h.ok(['rework', 'T1', '--reason', 'resume the newly submitted branch']);
     fs.writeFileSync(path.join(wt.path, 'live.txt'), 'new branch work\n');
@@ -569,7 +569,7 @@ test('an exited orphan remover holds no resources and its next prune discards th
   const paused = path.join(h.base, 'orphan-crash');
   const prune = h.runAsync(['worktree', 'prune', '--orphans'], { hooks: { HOOK_STOP_WORKTREE_REMOVE: paused } });
   try {
-    assert.ok(await fileWritten(paused));
+    await fileWritten(paused);
     const reservation = h.readState('tasks.json').orphan_retirements?.[0];
     assert.equal(reservation?.path, wt.path);
     process.kill(reservation.pid, 'SIGKILL');
