@@ -50,6 +50,8 @@ The browser account-cache refresh through `8b4697d9` keeps the suite guard and m
 
 The fallback/worktree refresh through `29c5fc00` keeps repository and file signals while preserving main's lifecycle assertions. Fallback, worktree lifecycle, batch preparation and spawn-exit each pass five loaded runs at recorded checkpoints; nine named merge consumers pass separately. The batch probe records the reintroduced undefined clock variable failing before correction, and lifecycle records the corrected empty-marker probe before five full passes. The orphan-removal reservation mutant is caught after a green baseline. The receipt retains the failed conversion sample and contains no machine-local paths.
 
+The detached-stack fixture refresh records a model-swap CI failure caused by an incomplete final fixture read. Capturing that snapshot inside the repository signal wait retains the linked, submitted and PR-order assertions. A swapped-model probe with a forced incomplete read fails with the old test and passes after correction. The complete stack file passes 28/28 in five loaded runs; its affected claim-hook mutant is caught after a green baseline. Raw logs stay in task scratch, with relative artifact names and hashes in the receipt.
+
 ## Tools
 
 - `node scripts/test-cost.js [--before DIR] [files...]` measures CPU and wall seconds per file, median of three runs, four files at a time. With `--before`, it measures another checkout interleaved with this one.

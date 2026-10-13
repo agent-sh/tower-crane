@@ -27038,5 +27038,197 @@
     },
     "raw_logs": "Task scratch rework-fallback-current, lifecycle-fixed and fallback-resume; source heads and raw-log hashes are recorded.",
     "prior_evidence": "Earlier source-versioned loaded and mutation receipts remain unchanged; no tokenizer expansion."
+  },
+  "stack_fixture_refresh": {
+    "previous_head": "50322d15c1f9d1ffd33a8326a8557d85d20ce393",
+    "source_head": "caae36b81354cdd6ce53a4a09dde74448882c848",
+    "failure": {
+      "ci_run": "https://github.com/agent-sh/tower-crane/actions/runs/38399741020",
+      "test": "detached spawn links the PR after its worker submits and exits",
+      "error": "Unexpected end of JSON input at final fixture read",
+      "log": {
+        "artifact": "model-job-failed.log",
+        "sha256": "8ad0b1a2b97a482f59bb1f241ea25ef8036fb257858d73bdced24f497a11964b"
+      },
+      "other_platform_jobs": "All nine passed at the failed model-proof head."
+    },
+    "change": "Capture task and fixture order inside waitOnRepo; keep the linked, submitted and exact order assertions. A concurrent incomplete JSON read retries on the existing repository signal instead of failing after the wait.",
+    "probe": {
+      "scope": "Only detached stack test, with model defaults swapped as the CI proof and one forced incomplete JSON read. Other test files are excluded.",
+      "expected": {
+        "red": 1,
+        "green": 0
+      },
+      "red": {
+        "exit": 1,
+        "artifact": "stack-race-red.log",
+        "sha256": "5a4ec9369eacfb6fbfaf143c928eb5fb551fee9f906bc146a448db6d4e392122",
+        "footer": {
+          "tests": 1,
+          "pass": 0,
+          "fail": 1,
+          "cancelled": 0,
+          "skipped": 0
+        }
+      },
+      "green": {
+        "exit": 0,
+        "artifact": "stack-race-green.log",
+        "sha256": "a754dd473f9b8518edad2fa9bac6c49e6029702cd17161ca3c90e39fb25f2d89",
+        "footer": {
+          "tests": 1,
+          "pass": 1,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 0
+        }
+      }
+    },
+    "loaded_files": {
+      "test/stack.test.js": [
+        {
+          "head": "caae36b81354cdd6ce53a4a09dde74448882c848",
+          "file": "test/stack.test.js",
+          "run": 1,
+          "status": 0,
+          "wall_s": 39.68480317798094,
+          "load_before": [
+            15.423828125,
+            16.6240234375,
+            17.1923828125
+          ],
+          "load_after": [
+            17.94873046875,
+            17.08740234375,
+            17.32275390625
+          ],
+          "log_sha256": "2a554477573f11e1912d0bb93d6cc33e38f7c44eaed3da672bf85349a282aa51",
+          "tests": {
+            "tests": 28,
+            "pass": 28,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        },
+        {
+          "head": "caae36b81354cdd6ce53a4a09dde74448882c848",
+          "file": "test/stack.test.js",
+          "run": 2,
+          "status": 0,
+          "wall_s": 42.16039487498347,
+          "load_before": [
+            17.94873046875,
+            17.08740234375,
+            17.32275390625
+          ],
+          "load_after": [
+            18.6201171875,
+            17.4248046875,
+            17.4287109375
+          ],
+          "log_sha256": "28dc72416312af59fcdc05a5a99af97c80a92199a76999d85db7c19d1fed99ba",
+          "tests": {
+            "tests": 28,
+            "pass": 28,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        },
+        {
+          "head": "caae36b81354cdd6ce53a4a09dde74448882c848",
+          "file": "test/stack.test.js",
+          "run": 3,
+          "status": 0,
+          "wall_s": 40.19756131997565,
+          "load_before": [
+            18.6201171875,
+            17.4248046875,
+            17.4287109375
+          ],
+          "load_after": [
+            19.12646484375,
+            17.7900390625,
+            17.55615234375
+          ],
+          "log_sha256": "45e9c0642bf0391ebcfd27d7583e5d7980a0803c8f75de60699d6d55b872742c",
+          "tests": {
+            "tests": 28,
+            "pass": 28,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        },
+        {
+          "head": "caae36b81354cdd6ce53a4a09dde74448882c848",
+          "file": "test/stack.test.js",
+          "run": 4,
+          "status": 0,
+          "wall_s": 41.90881044999696,
+          "load_before": [
+            19.12646484375,
+            17.7900390625,
+            17.55615234375
+          ],
+          "load_after": [
+            21.70947265625,
+            18.60791015625,
+            17.84033203125
+          ],
+          "log_sha256": "4fda78b30b217e1fd128c99e623674bb293ae1a40740fe674970536728884ac7",
+          "tests": {
+            "tests": 28,
+            "pass": 28,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        },
+        {
+          "head": "caae36b81354cdd6ce53a4a09dde74448882c848",
+          "file": "test/stack.test.js",
+          "run": 5,
+          "status": 0,
+          "wall_s": 41.518123454996385,
+          "load_before": [
+            21.70947265625,
+            18.60791015625,
+            17.84033203125
+          ],
+          "load_after": [
+            20.9921875,
+            18.7744140625,
+            17.9267578125
+          ],
+          "log_sha256": "45dd8f69082648ef870ffbec347894e08ed70a4b1766c664d93c2706484b0988",
+          "tests": {
+            "tests": 28,
+            "pass": 28,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        }
+      ]
+    },
+    "cpu_load_processes_per_runner": 2,
+    "test_file_concurrency": 1,
+    "affected_mutation": {
+      "id": "claim-hook-skips-undispatched-refresh",
+      "score": "1/1",
+      "baseline": "green unmodified named stack baseline; no full-suite fallback",
+      "log": {
+        "artifact": "stack-mutants.log",
+        "sha256": "38748ebab656e3fb503a5c85d51f1a78386581dd84310307a2cc39871d92bdee"
+      }
+    },
+    "reproduction": {
+      "loaded_command": "node test/run.js --test-concurrency=1 test/stack.test.js",
+      "race_probe": "A scratch copy swaps BUILTIN exactly as the model proof and forces one incomplete fixture JSON read; only the detached-stack test runs. Old test fails once, corrected test passes once.",
+      "cpu_load": "two nice -n 15 node processes evaluating Math.sqrt(Math.random()) continuously"
+    },
+    "raw_logs": "Task scratch rework-fallback-current; source checkpoints and raw-log hashes recorded."
   }
 }
