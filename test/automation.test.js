@@ -1250,8 +1250,10 @@ test('gate executors across several watchers stay within gates.executors and que
   assert.match(h.ok(['project', 'show']), /gates\.executors: 2/);
   const watchers = [0, 1, 2].map(() =>
     h.runAsync(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']));
+  const exited = [];
+  watchers.forEach((watcher) => watcher.then((result) => exited.push(result)));
   try {
-    assert.notEqual(await waitFor(path.join(h.base, 'suite-started-2'), { ms: 60000 }), null, 'two executors start');
+    assert.notEqual(await waitFor(path.join(h.base, 'suite-started-2'), { ms: 60000 }), null, `two executors start: ${JSON.stringify(exited)}`);
     // Keep both slots occupied until a watcher has queued the third submission.
     assert.equal(h.consume().code, 2);
     const queued = h.logs().filter((e) => e.cmd === 'automation queued' && e.detail.executors === 2);
