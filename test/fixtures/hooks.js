@@ -200,7 +200,7 @@ function after(name, args, rawArgs = args) {
     && path.basename(process.argv[1]) === 'tower-crane.js' && first('started')) stop(env.HOOK_STOP_STARTED);
   // HOOK_PAUSE_ON=FILE stops at HOOK_PAUSED after its first read; HOOK_PAUSE_PROCESS
   // optionally limits the pause to one executable's basename.
-  if (env.HOOK_PAUSE_ON && name === 'readFileSync' && inState(target) && path.basename(target) === env.HOOK_PAUSE_ON
+  if (env.HOOK_PAUSE_ON && ['readFileSync', 'readSync'].includes(name) && inState(target) && path.basename(target) === env.HOOK_PAUSE_ON
     && (!env.HOOK_PAUSE_PROCESS || path.basename(process.argv[1]) === env.HOOK_PAUSE_PROCESS) && first('pause')) stop(env.HOOK_PAUSED);
   // Windows keeps an unlinked marker pending deletion until its reader closes
   // it. Pause with the snapshot, without keeping the lock directory open.
