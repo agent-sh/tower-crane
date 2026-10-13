@@ -1,0 +1,1 @@
+- Publish the supervision test harness attempt list atomically so polling readers never parse a truncated file.

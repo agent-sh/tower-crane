@@ -7,7 +7,7 @@ const path = require('node:path');
 const cp = require('node:child_process');
 const { EventEmitter, once } = require('node:events');
 const { pathToFileURL } = require('node:url');
-const { makeRepo, BIN, ROOT } = require('./helpers');
+const { makeRepo, stubRungs, BIN, ROOT } = require('./helpers');
 
 const STUB = path.join(__dirname, 'fixtures', 'message-harness.js');
 const MOD = path.join(ROOT, 'hooks', 'tower-crane.mjs');
@@ -53,8 +53,23 @@ function readyLine(child) {
   });
 }
 
+// A startup step polled without a clock: a slow start (a cold Windows CIM
+// snapshot in orchestrator discovery) is not a failure, an exit is. `ended`
+// returns why the process is gone, or nothing while it runs.
+async function started(check, ended, what) {
+  for (;;) {
+    const value = check();
+    if (value) return value;
+    const reason = ended();
+    if (reason) throw new Error(`${what} never came: ${reason}`);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+}
+
 function setup(t) {
   const h = makeRepo(t);
+  // An orchestrator wait refills workers for the ready task.
+  stubRungs(h);
   h.init();
   h.ok(['task', 'add', '--title', 'Wake', '--acceptance', 'events arrive']);
   h.ok(['brief', 'set', 'T1', '-'], { input: 'wake the orchestrator\n' });
@@ -107,6 +122,53 @@ test('wait --follow streams id-only lines and event prints the content', async (
   assert.equal(h.run(['event', 'Enope', '--agent', 'orchestrator']).code, 2);
 });
 
+// The Claude Code mod arms its follower at now on session start. A cold
+// discovery takes seconds; what is written meanwhile must still arrive.
+test('a follower armed at now delivers events written during orchestrator discovery', async (t) => {
+  const h = setup(t);
+  const held = path.join(h.base, 'discovery-held');
+  const release = path.join(h.base, 'discovery-release');
+  const preload = path.join(h.base, 'slow-discovery.js');
+  // Holds the first ancestry lookup of orchestrator discovery (/proc on Linux,
+  // ps on macOS, the CIM snapshot on Windows) until the test releases it.
+  fs.writeFileSync(preload, `'use strict';
+const fs = require('node:fs');
+const cp = require('node:child_process');
+let pending = true;
+function hold() {
+  if (!pending || !/\\bparents\\b[^\\n]*orchestrator\\.js/.test(new Error().stack)) return;
+  pending = false;
+  fs.writeFileSync(${JSON.stringify(held)}, '');
+  const cell = new Int32Array(new SharedArrayBuffer(4));
+  const deadline = Date.now() + 60000;
+  while (!fs.existsSync(${JSON.stringify(release)}) && Date.now() < deadline) Atomics.wait(cell, 0, 0, 20);
+}
+const readFileSync = fs.readFileSync;
+fs.readFileSync = function (...args) { hold(); return readFileSync.apply(this, args); };
+const execFileSync = cp.execFileSync;
+cp.execFileSync = function (...args) { hold(); return execFileSync.apply(this, args); };
+`);
+  const p = cp.spawn(process.execPath, ['--require', preload, BIN, 'wait', '--observe', '--follow', '--after', 'now', '--agent', 'orchestrator'], { cwd: h.repo, env: h.env });
+  t.after(() => p.kill());
+  let out = '';
+  let err = '';
+  let exit = null;
+  p.stdout.on('data', (d) => { out += d; });
+  p.stderr.on('data', (d) => { err += d; });
+  p.on('close', (code, signal) => { exit = `exited ${code ?? signal}: ${err.trim()}`; });
+  const ready = readyLine(p);
+  await started(() => fs.existsSync(held), () => exit, 'orchestrator discovery');
+  h.ok(['msg', '--to', 'orchestrator', '--task', 'T1', 'during discovery', '--agent', 'worker']);
+  const during = log(h).findLast((e) => e.cmd === 'msg').id;
+  fs.writeFileSync(release, '');
+  await ready;
+  h.ok(['msg', '--to', 'orchestrator', '--task', 'T1', 'after ready', '--agent', 'worker']);
+  const later = log(h).findLast((e) => e.cmd === 'msg').id;
+  const ids = () => out.split('\n').filter(Boolean).map((line) => JSON.parse(line).id);
+  await until(() => ids().includes(later), 'the message after ready');
+  assert.deepEqual(ids().filter(Boolean), [during, later]);
+});
+
 // A real spawn on the orchestrator rung: the stub harness runs the hooks its
 // generated home configures, the way Claude Code and Codex call them.
 for (const harness of ['claude', 'codex']) {
@@ -132,7 +194,10 @@ for (const harness of ['claude', 'codex']) {
     const run = h.runAsync(['spawn', '--task', 'T1', '--role', 'orchestrator', '--wait', '--json']);
     let early = null;
     run.then((r) => { early = r; });
-    await until(() => fs.existsSync(ready) || (early && assert.fail(`spawn ended: ${early.code} ${early.stderr} ${early.stdout}`)), "the harness");
+    // Orchestrator CLI calls (the harness start, then its hooks) run process
+    // discovery, seconds on a cold Windows runner: wait on readiness or exit.
+    const ended = () => early && `spawn ended: ${early.code} ${early.stderr} ${early.stdout}`;
+    await started(() => fs.existsSync(ready), ended, 'the harness');
     const binding = JSON.parse(fs.readFileSync(path.join(h.state, 'homes', 'orchestrator-T1-1', 'hook.json'), 'utf8'));
     assert.equal(binding.role, 'orchestrator');
     const home = path.join(h.state, 'homes', 'orchestrator-T1-1');
@@ -149,7 +214,7 @@ for (const harness of ['claude', 'codex']) {
     const message = log(h).findLast((e) => e.cmd === 'msg').id;
     assert.equal(h.run(['wait', '--inbox', '--observe', '--after', '0', '--types', 'never', '--timeout', '0.01', '--agent', 'orchestrator']).code, 2);
     fs.writeFileSync(ready + '.go', '');
-    await until(() => fs.existsSync(ready + '.stop'), 'the Stop hook');
+    await started(() => fs.existsSync(ready + '.stop'), ended, 'the Stop hook');
     fs.writeFileSync(ready + '.stop.go', '');
     // Stop finds nothing pending and holds until the owner answers.
     await new Promise((resolve) => setTimeout(resolve, 300));
@@ -290,6 +355,9 @@ test('the Claude Code mod pushes a decision answer and a worker message into the
 
 test('serve carries owner messages to the orchestrator and its replies back with content-free wakes', async (t) => {
   const h = setup(t);
+  // A worker holds T1, so the orchestrator wait refills nothing: a refilled
+  // worker's spawn events would race the event cursor the test compares.
+  h.ok(['claim', 'T1', '--agent', 'worker']);
   const server = cp.spawn(process.execPath, [BIN, 'serve', '--port', '0', '--json', '--agent', 'owner'], { cwd: h.repo, env: h.env });
   const exited = new Promise((resolve) => server.on('exit', resolve));
   const controller = new AbortController();
