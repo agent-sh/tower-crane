@@ -294,7 +294,7 @@ Before constructing an agent home, spawn also sweeps orphan `brokers/<agent>/` d
 <!-- commands:Run:start -->
 | Command | Does |
 |---|---|
-| `accept ID [--cmd CMD] [--proof-cmd CMD] [--waive TYPE --reason R]` | a current independent failed review sends the task through `rework --from-review` and exits 1; otherwise run unattempted software gates first. Tests and clean use pinned project commands. Optional `--cmd` and `--proof-cmd` must match their pins; none mode needs no test command. When they pass and review is missing, dispatch it and return `review_pending: true` while keeping the task submitted. Call again after review evidence arrives to accept. Existing successful receipts are reused; attempted failures or invalid receipts require an explicit gate rerun. `--waive review` is operational when the reviewer is capped or down at the submitted head (a capped review run in its `check ci` evidence, or a review spawn that exited without a verdict) and owner-required otherwise; waiving tests, clean, sources or ci is owner-required |
+| `accept ID [--cmd CMD] [--proof-cmd CMD] [--waive TYPE --reason R]` | a current independent failed review sends the task through `rework --from-review` and exits 1, unless every finding is a false claim in the PR body; otherwise run unattempted software gates first. Tests and clean use pinned project commands. Optional `--cmd` and `--proof-cmd` must match their pins; none mode needs no test command. When they pass and review is missing, dispatch it and return `review_pending: true` while keeping the task submitted. After correcting the PR body for such a review, explicit `accept` requests a light claim check at the same revision; automatic reactions do not retry an unchanged failed head. Call again after review evidence arrives to accept. Existing successful receipts are reused; attempted failures or invalid receipts require an explicit gate rerun. `--waive review` is operational when the reviewer is capped or down at the submitted head (a capped review run in its `check ci` evidence, or a review spawn that exited without a verdict) and owner-required otherwise; waiving tests, clean, sources or ci is owner-required |
 | | |
 | `ci completed ID --sha SHA` | orchestrator or owner: deliver a CI completion hint for an active submitted head, rerun the CI gate and advance passing tasks |
 | | |
@@ -304,7 +304,7 @@ Before constructing an agent home, spawn also sweeps orphan `brokers/<agent>/` d
 | | |
 | `event ID` | print one event with its detail, as a wake line names it |
 | | |
-| `evidence ID --type T (--ok \| --fail) [--sha S] [--revision N] [--summary T] [--ref URL]` | record `review` or `note` evidence; `review` requires `--sha`, while `note` defaults to the task's submitted sha. `--revision N` names the task revision the evidence is about and is refused above the current revision; review evidence from a reviewer that `spawn` did not start requires it, and a spawned reviewer's verdict keeps its dispatch revision. Refuses `tests`, `clean`, `sources`, `ci` and `merge` for every agent and either verdict; use the gate commands |
+| `evidence ID --type T (--ok \| --fail) [--sha S] [--revision N] [--summary T] [--ref URL] [--findings JSON]` | record `review` or `note` evidence; `review` requires `--sha`, while `note` defaults to the task's submitted sha. `--revision N` names the task revision the evidence is about and is refused above the current revision; review evidence from a reviewer that `spawn` did not start requires it, and a spawned reviewer's verdict keeps its dispatch revision. `--findings JSON` on a failed review records every blocker as `{kind, path, claim}`; only `false-claim` blockers confined to `PR body`, `CHANGELOG.md` or `changelog.d/*.md` get a light correction check without rework. Missing or mixed metadata keeps the full review path. Refuses `tests`, `clean`, `sources`, `ci` and `merge` for every agent and either verdict; use the gate commands |
 | | |
 | `hook ACTION --binding FILE [--payload JSON\|-]` | deliver harness messages and record activity under the home identity |
 | | |
@@ -332,7 +332,7 @@ Before constructing an agent home, spawn also sweeps orphan `brokers/<agent>/` d
 | | |
 | `renew ID [--lease MIN]` | extend the lease from now; only the claimant. An expired lease must pass the claim checks again (unmet dependency, owner blocker, open decision, resource lock, workers limit), so a refused renewal leaves it expired |
 | | |
-| `rework ID --reason R \| --from-review ID` | `--from-review ID` fetches all issue-comment pages for the linked PR and selects the last `Review (Tower Crane` body at the submitted SHA, preserving every finding and its comment link in the reason. Unposted reviews use their evidence summary. A linked review that cannot be fetched or matched refuses without changing state; the head, revision and latest failed evidence are rechecked under the lock after fetching. Otherwise send a submitted or accepted task back and bump `revision`, invalidating earlier evidence even at the same sha, and a todo task whose latest release came while a decision blocked it, answered or not, goes back the same way; the reason is appended under `## Rework notes` in its brief and as a task note |
+| `rework ID --reason R \| --from-review ID` | `--from-review ID` refuses failed reviews whose findings are all PR-body false claims, with correction and light-check instructions, leaving the revision unchanged. For other failures it fetches all issue-comment pages for the linked PR and selects the last `Review (Tower Crane` body at the submitted SHA, preserving every finding and its comment link in the reason. Unposted reviews use their evidence summary. A linked review that cannot be fetched or matched refuses without changing state; the head, revision and latest failed evidence are rechecked under the lock after fetching. Otherwise send a submitted or accepted task back and bump `revision`, invalidating earlier evidence even at the same sha, and a todo task whose latest release came while a decision blocked it, answered or not, goes back the same way; the reason is appended under `## Rework notes` in its brief and as a task note |
 | | |
 | `spend ID [--minutes N] [--tokens N] [--input N] [--cached N] [--cache-write N] [--output N] [--rung R] [--harness H] [--model M] [--from-spawn AGENT]` | add spend, with optional native-agent usage breakdown and metadata; rung defaults the harness, model and profile from the current ladder. Model IDs are trimmed and case-folded; provider prefixes remain distinct. Collect an exited spawn's captured usage once per route and fresh retry invocation; resumed retries share their session's cumulative usage. Retry a failed monitor or enrich an unknown/partial entry when telemetry arrives. Refuses a live process or an unknown spawn; cannot be mixed with manual spend |
 | | |
@@ -342,6 +342,12 @@ Before constructing an agent home, spawn also sweeps orphan `brokers/<agent>/` d
 <!-- commands:Run:end -->
 
 `task add --lock lab/rdma --lock gpu/0 --environment lab` stores exclusive resource names and an informational environment label. Names are case-sensitive, trimmed and deduplicated. Tasks with any shared lock cannot hold worker leases or dispatch reservations at the same time, regardless of `limits.workers` or environment labels. Claim, worker spawn and expired renewal check under the state lock and name the holding task and agent on refusal. An unclaimed spawn reserves its locks with its worker slot, including retry backoff; its generated agent consumes that reservation on claim. Reviewer and other non-worker dispatches do not acquire resource locks. Environment labels do not select a harness or change its environment variables.
+
+Failed review evidence can supply `--findings '[{"kind":"false-claim","path":"PR body","claim":"The diagnostic is printed."}]'`. List every blocker with non-blank `kind`, `path` and `claim` strings and no other fields; this flag is refused for notes and passing reviews. A false claim qualifies only when correcting prose resolves it without a behavior or contract change. All blockers must be false claims confined to `PR body`, `CHANGELOG.md` or single Markdown fragments under `changelog.d/` for the light path. Missing metadata, mixed blockers and contract claims, including `docs/cli.md` and `docs/state.md`, retain full review and rework.
+
+When every finding is in the PR body, correct it with `gh pr edit --body-file`, then run `accept ID` to request a light reviewer check without a new revision. `rework --from-review` refuses these failures without changing state, and the inbox's `prose_only: true` item supplies `accept ID` with correction instructions. If the body cannot be corrected, `rework ID --reason R` sends the task back. Automatic reactions do not retry a failed light check at an unchanged head.
+
+Changelog claims need a new head, so they go through `rework --from-review` like other failures. The next revision's review is a light check when the diff since the failed review changes only the named changelog fragments. The new head requires software gates as usual. Other source changes restore full review. The reviewer checks every corrected claim against its code or probe and records fresh evidence; an uncorrected claim still blocks. Prose-only failures do not escalate rungs.
 
 `submit` stores the full lowercase commit SHA in the task and submit event. Full 40-character SHA-1 or 64-character SHA-256 IDs are accepted as given without requiring their objects locally; a commit may exist only in another checkout. Abbreviations are resolved with `git rev-parse --verify <sha>^{commit}` in the task repository. If local resolution fails, submit fetches the supplied or recorded task branch from origin and retries. A prefix that remains unknown or ambiguous, or resolves to a non-commit object, refuses without changing state. A sandboxed worker resolves inside its sandbox before forwarding the full SHA; the host broker runs no Git. Existing abbreviated submitted SHAs stay unchanged and match review and gate evidence by prefix, including active reviewer dispatches, so a full-SHA failed review remains actionable through `rework --from-review`.
 
@@ -366,7 +372,8 @@ A tracked worker must exit before automatic review dispatch. Native
 workers without a recorded exit use explicit `accept` to dispatch review.
 Failed independent review at the current submitted head and revision sends
 the task to rework through `rework --from-review`, with the full findings
-and comment link in its reason and brief. Pending software gates do not
+and comment link in its reason and brief. Findings all in the PR body are
+the exception: the task stays submitted for a correction and an explicit `accept`. Pending software gates do not
 delay it. Stale or superseded reviews cannot rework the current submission;
 replaying a review never increments the revision twice.
 Ranged recovery uses the same full-findings rework action before recording
@@ -378,6 +385,7 @@ gate reactions or worker refill.
 rework, while skipping submission automation and capacity refill.
 `accept` and a real `spawn --role review` also send a current independent FAIL
 to full-findings rework and exit 1, rather than repeating review at that head.
+PR-body-only failures are excepted.
 If findings cannot be retrieved, the task stays submitted. Dry-run review
 previews do not change state.
 After draining event reactions, the trusted `wait` host releases verified
