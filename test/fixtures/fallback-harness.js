@@ -217,5 +217,5 @@ if (path.resolve(process.argv[1] || '') !== __filename) {
         process.exit(1);
       }
     }, 25);
-  } else if (process.env.TOWER_CRANE_TEST_FALLBACK_HOLD) setTimeout(() => {}, Number(process.env.TOWER_CRANE_TEST_FALLBACK_HOLD)); // wait-allow: fixture simulates route duration for fallback and slot contention
+  }
 }

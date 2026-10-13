@@ -144,7 +144,7 @@ function fixture(t, withPr = true) {
   });
   const { sha } = h;
   return {
-    check({ pr = { mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }, runs = REQUIRED.map((name) => run(name)), ci = {}, suites: given, workflows = [] } = {}) {
+    check({ pr = { mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }, runs = REQUIRED.map((name) => run(name)), ci = {}, suites: given, workflows = [], spawnFailure = null } = {}) {
       const project = h.readState('project.json');
       h.writeState('project.json', { ...project, ci: { required: REQUIRED, capped_review: CAP_POLICY, ...ci } });
       const file = path.join(h.base, 'github.json');
@@ -157,7 +157,17 @@ function fixture(t, withPr = true) {
         };
       });
       fs.writeFileSync(file, JSON.stringify({ sha, pr, runs, suites, workflows }));
-      const r = cp.spawnSync(process.execPath, ['--require', github, BIN, 'check', 'ci', 'T1', '--agent', 'checker', '--json'], {
+      const preload = [];
+      if (spawnFailure) {
+        const failureFile = path.join(h.base, 'gh-failure.cjs');
+        fs.writeFileSync(failureFile, `const cp = require('node:child_process');
+const original = cp.spawnSync;
+cp.spawnSync = (cmd, args, opts) => cmd === 'gh' && args[0] === 'api'
+  ? ${JSON.stringify(spawnFailure)} : original(cmd, args, opts);
+`);
+        preload.push('--require', failureFile);
+      }
+      const r = cp.spawnSync(process.execPath, ['--require', github, ...preload, BIN, 'check', 'ci', 'T1', '--agent', 'checker', '--json'], {
         cwd: h.repo, env: { ...h.env, TEST_GITHUB: file }, encoding: 'utf8', timeout: 300000,
       });
       assert.ok(r.stdout, r.stderr);
@@ -170,6 +180,17 @@ function fixture(t, withPr = true) {
     },
   };
 }
+
+test('CI evidence records an empty-output gh startup failure', (t) => {
+  const r = fixture(t, false).check({
+    spawnFailure: { status: null, signal: null, error: { code: 'EAGAIN', message: 'spawnSync gh EAGAIN' } },
+  });
+  assert.equal(r.code, 1);
+  assert.equal(r.ok, false);
+  assert.match(r.summary, /status=null/);
+  assert.match(r.summary, /EAGAIN: spawnSync gh EAGAIN/);
+  assert.match(r.summary, /no output/);
+});
 
 test('documented PR job lists pass CI with Windows-only check runs', (t) => {
   const root = path.resolve(__dirname, '..');

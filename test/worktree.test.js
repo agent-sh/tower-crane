@@ -271,6 +271,8 @@ try {
 }
 
 for (const command of ['worktree', 'spawn']) {
+  // Proof comes from the recorded upload-pack calls, not elapsed time, which
+  // tracks host load. The suite's hung-test timeout only catches a hang.
   test(`one dispatch prepares six ${command} tasks from one slow base fetch`, { timeout: 300000 }, async (t) => {
     const h = setup(t);
     const fresh = advance(h, h.upstream, 'remote.txt');
@@ -287,7 +289,7 @@ for (const command of ['worktree', 'spawn']) {
     const attempts = guardUploadPack(h, 15000);
     const hooks = { HOOK_WORKTREE_ADD_ACTIVE: path.join(h.base, 'worktree-add-active') };
     const trees = h.json(['worktree', ...ids], { hooks });
-    // The guarded upload-pack count and worktree adds prove batching without a clock cutoff.
+    assert.equal(fs.readFileSync(attempts, 'utf8'), '.', 'the dispatcher fetched once before preparing workers');
     assert.equal(trees.length, 6);
     for (let i = 0; i < trees.length; i++) {
       assert.equal(trees[i].id, ids[i]);
@@ -298,10 +300,13 @@ for (const command of ['worktree', 'spawn']) {
       const results = await Promise.all(ids.map((id) => h.runAsync(
         ['spawn', '--role', 'medium', '--task', id, '--wait', '--json'], { hooks })));
       assert.deepEqual(results.map((r) => r.code), Array(6).fill(0), results.map((r) => r.stderr).join('\n'));
+      // Each spawn runs in the worktree the dispatch prepared from its one
+      // fetch, and none of them fetched again.
+      assert.deepEqual(results.map((r) => JSON.parse(r.stdout).cwd), trees.map((tree) => tree.path));
       for (const r of results) assert.equal(h.git(['rev-parse', 'HEAD'], JSON.parse(r.stdout).cwd), fresh);
+      assert.equal(fs.readFileSync(attempts, 'utf8'), '.', 'no spawn fetched');
     }
     assert.equal(h.git(['rev-parse', 'origin/main']), fresh);
-    assert.equal(fs.readFileSync(attempts, 'utf8'), '.', 'the dispatcher fetched once before preparing workers');
   });
 }
 

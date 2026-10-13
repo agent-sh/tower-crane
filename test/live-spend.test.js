@@ -246,6 +246,7 @@ test('final session usage repairs spend collected before submitted supervisor re
   h.ok(['task', 'update', 'T1', '--budget-tokens', '1500']);
   const spawned = h.json(['spawn', '--task', 'T1'], { env: h.liveEnv({
     LIVE_STEPS: '1', LIVE_HOLD: 'until-stop', LIVE_FINISH: finish, LIVE_LOG_PREFIX: '1', LIVE_PAUSE_FINAL: paused,
+    LIVE_FINAL_UNSAMPLED: '1',
   }) });
   try {
     await until(t, h, () => liveEntries(h).some((e) => e.tokens === 1000), 'initial usage was not recorded');
@@ -269,6 +270,41 @@ test('final session usage repairs spend collected before submitted supervisor re
   assert.ok(events(h).some((e) => e.cmd === 'budget stop'), 'reconciled usage still enforces the budget');
   h.ok(['spend', 'T1', '--from-spawn', spawned.agent]);
   assert.equal(h.json(['task', 'show', 'T1']).spend.tokens, 2000, 'recollection preserves the reconciled total');
+});
+
+test('a periodic sample that crosses the budget after submit keeps early collection behind the supervisor', async (t) => {
+  const h = setup(t, 'claude');
+  const finish = path.join(h.base, 'finish');
+  const paused = path.join(h.base, 'final-paused');
+  h.ok(['task', 'update', 'T1', '--budget-tokens', '1500']);
+  const spawned = h.json(['spawn', '--task', 'T1'], { env: h.liveEnv({
+    LIVE_STEPS: '1', LIVE_HOLD: 'until-stop', LIVE_FINISH: finish, LIVE_LOG_PREFIX: '1', LIVE_PAUSE_FINAL: paused,
+    LIVE_FINAL_HOLD: '1',
+  }) });
+  try {
+    await until(t, h, () => liveEntries(h).some((e) => e.tokens === 1000), 'initial usage was not recorded');
+    h.ok(['submit', 'T1', '--agent', spawned.agent, '--sha', h.git(['rev-parse', 'HEAD'])]);
+    fs.writeFileSync(finish, '');
+    // The harness holds after its final record, so a periodic sample reads it before any exit.
+    await until(t, h, () => events(h).some((e) => e.cmd === 'budget stop'), 'the live sample did not stop the budget');
+    await until(t, h, () => fs.existsSync(paused), 'the supervisor did not pause before its final read');
+    const early = h.run(['spend', 'T1', '--from-spawn', spawned.agent]);
+    assert.equal(early.code, 1);
+    assert.match(early.stderr, new RegExp(`${spawned.agent} is still supervised`));
+    assert.equal(recordedSpend(h).tokens, 2000, 'the live reading stays until the supervisor reconciles');
+  } finally {
+    fs.writeFileSync(`${paused}.go`, '');
+  }
+  await until(t, h, () => exited(h, spawned.agent), 'the supervisor did not finish reconciliation');
+  await until(t, h, () => recordedSpend(h).entries?.every((e) => !e.live), 'exit usage was not finalized');
+  const final = h.json(['task', 'show', 'T1']);
+  assert.equal(final.spend.tokens, 2000);
+  assert.equal(final.spend.entries.length, 1);
+  assert.equal(final.spend.entries[0].live, undefined);
+  assert.equal(final.run.active, false, 'the closed budget stop leaves no supervised phase');
+  assert.equal(events(h).filter((e) => e.cmd === 'budget stop').length, 1);
+  h.ok(['spend', 'T1', '--from-spawn', spawned.agent]);
+  assert.equal(h.json(['task', 'show', 'T1']).spend.tokens, 2000);
 });
 
 for (const tokens of [1500, 0]) {

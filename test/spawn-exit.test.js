@@ -1,6 +1,6 @@
 'use strict';
 
-const { waitOnRepo } = require('./signals');
+const { waitOnRepo, childExit } = require('./signals');
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -184,6 +184,42 @@ test('ordinary teardown waits for a monitor exit even when the wall clock jumps'
   } finally {
     now.mock.restore();
   }
+});
+
+test('teardown kills a recorded worker and leaves a reused worker PID alone', {
+  skip: !['linux', 'win32'].includes(process.platform),
+}, async (t) => {
+  const h = setup(t);
+  const dir = path.join(h.base, 'detached');
+  fs.mkdirSync(dir);
+  const children = [];
+  const start = (record) => {
+    const child = cp.spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: 'ignore' });
+    const closed = new Promise((resolve) => child.once('close', resolve));
+    children.push({ child, closed });
+    let startTicks = '0';
+    if (process.platform === 'linux') {
+      const stat = fs.readFileSync(`/proc/${child.pid}/stat`, 'utf8');
+      startTicks = record.genuine ? stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\s+/)[19] : '0';
+    }
+    fs.writeFileSync(path.join(dir, `${child.pid}.json`), JSON.stringify({
+      pid: child.pid, kind: 'worker', startTicks, recordedAt: record.recordedAt ?? Date.now(),
+    }));
+    return child;
+  };
+  t.after(async () => {
+    for (const { child, closed } of children) {
+      child.kill();
+      await closed;
+    }
+  });
+  // Recorded right after its start, as the spawning parent records a worker.
+  const recorded = start({ genuine: true });
+  // Started after its record was written, as a process reusing an exited worker's PID would.
+  const reused = start({ recordedAt: Date.now() - 1000 });
+  await h.cleanup();
+  await childExit(recorded, { what: `teardown did not kill recorded worker ${recorded.pid}` });
+  assert.equal(process.kill(reused.pid, 0), true, 'teardown killed a reused worker PID');
 });
 
 test('teardown waits for OS termination after a monitor marks its exit', async (t) => {

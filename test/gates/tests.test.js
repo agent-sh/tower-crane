@@ -123,6 +123,98 @@ process.exit(files.length ? cp.spawnSync(process.execPath, ['--test', ...files],
   assertCleanedUp();
 });
 
+// Claude Code's sandbox bridge socket, measured on 2.1.296: <TMPDIR>/claude-socks-<16 hex>.sock, at most 108 bytes.
+const HARNESS_SOCKET = 'claude-socks-0123456789abcdef.sock';
+const socketFits = (dir) => Buffer.byteLength(path.join(dir, HARNESS_SOCKET)) <= 108;
+
+// A host-only file whose run records the TMPDIR it got, as a live harness started there would see it.
+function harnessStub(name, log) {
+  return task({
+    [`test/${name}.test.js`]: `const test = require('node:test');
+test('stub harness records its temp directory', () => {
+  const os = require('node:os');
+  require('node:fs').appendFileSync(${JSON.stringify(log)}, JSON.stringify([process.env.TMPDIR, process.env.TMP, process.env.TEMP, os.tmpdir()]) + '\\n');
+});
+`,
+  });
+}
+
+test('a deep gate temp root gives host-only commands a short TMPDIR that fits the harness socket, removed afterwards', { skip: process.platform !== 'linux' && 'the harness socket bound is Linux-only' }, async () => {
+  const log = path.join(tmp, 'harness-tmp.jsonl');
+  const ordinaryLog = path.join(tmp, 'ordinary-tmp.jsonl');
+  const sha = harnessStub('harness', log);
+  const saved = process.env.TOWER_CRANE_TMP;
+  // Deep enough that <root>/tower-crane-XXXXXX/tmp cannot hold the socket, as in the 2026-10-13 gate failure.
+  process.env.TOWER_CRANE_TMP = path.join(tmp, 'deep-gate-root-'.padEnd(90, 'x'));
+  fs.mkdirSync(process.env.TOWER_CRANE_TMP);
+  const recorder = path.join(tmp, 'ordinary-tmp.js');
+  fs.writeFileSync(recorder, `require('fs').appendFileSync(${JSON.stringify(ordinaryLog)}, process.env.TMPDIR + '\\n');\n`);
+  const ordinary = `${NODE} ${quote(recorder)}`;
+  const messages = [];
+  try {
+    const c = ctx(sha, { args: { cmd: ordinary }, project: {
+      tests: { mode: 'run-only', host_only: ['test/harness.test.js'], host_env: { TC_HOST_OPT_IN: '1' } },
+      gates: { tests_cmd: ordinary, tests_proof_cmd: `${NODE} --test {tests}` },
+    } });
+    c.log = (m) => messages.push(m);
+    const r = await gate.run(c);
+    assert.equal(r.ok, true, r.summary);
+    assert.deepEqual(r.receipt.host_only.run, ['test/harness.test.js']);
+    const [seen] = fs.readFileSync(log, 'utf8').trim().split('\n').map((line) => JSON.parse(line));
+    for (const dir of seen) {
+      assert.ok(socketFits(dir), `the harness TMPDIR ${dir} (${Buffer.byteLength(dir)} bytes) leaves no room for ${HARNESS_SOCKET}`);
+      assert.equal(dir, seen[0]);
+    }
+    assert.equal(fs.existsSync(seen[0]), false, 'the short TMPDIR is removed after the run');
+    assert.ok(messages.some((m) => m.includes(`host-only TMPDIR ${seen[0]}`)), messages.join('\n'));
+    // The ordinary suite keeps the gate scratch under the configured root.
+    const ordinaryTmp = fs.readFileSync(ordinaryLog, 'utf8').trim();
+    assert.ok(ordinaryTmp.startsWith(process.env.TOWER_CRANE_TMP + path.sep), ordinaryTmp);
+    assertCleanedUp();
+  } finally {
+    fs.rmSync(process.env.TOWER_CRANE_TMP, { recursive: true, force: true });
+    process.env.TOWER_CRANE_TMP = saved;
+  }
+});
+
+test('a deep gate temp root with no short directory refuses before running, naming the temp root setting', { skip: process.platform !== 'linux' && 'the harness socket bound is Linux-only' }, async () => {
+  const log = path.join(tmp, 'harness-refused.jsonl');
+  const sha = harnessStub('harness-refused', log);
+  const os = require('node:os');
+  const saved = { root: process.env.TOWER_CRANE_TMP, runtime: process.env.XDG_RUNTIME_DIR, userInfo: os.userInfo };
+  const deep = path.join(tmp, 'deep-'.padEnd(90, 'y'));
+  process.env.TOWER_CRANE_TMP = deep;
+  fs.mkdirSync(deep);
+  // Both short bases are too deep: the password-database home and XDG_RUNTIME_DIR.
+  os.userInfo = () => ({ ...saved.userInfo(), homedir: deep });
+  process.env.XDG_RUNTIME_DIR = deep;
+  try {
+    const project = {
+      tests: { mode: 'run-only', host_only: ['test/harness-refused.test.js'], host_env: { TC_HOST_OPT_IN: '1' } },
+      gates: { tests_cmd: CMD, tests_proof_cmd: `${NODE} --test {tests}` },
+    };
+    const r = await gate.run(ctx(sha, { project }));
+    assert.equal(r.ok, false);
+    assert.match(r.summary, /TMPDIR of at most 73 bytes/);
+    assert.match(r.summary, /TOWER_CRANE_TMP/);
+    assert.match(r.summary, /gates\.tmp_root/);
+    assert.deepEqual(r.config_failure, { key: 'tmp_root' });
+    assert.equal(fs.existsSync(log), false, 'nothing ran');
+    // A TMPDIR named in tests.host_env is the operator's choice and is used as given.
+    project.tests.host_env.TMPDIR = path.join(tmp, 'host-env-tmp');
+    fs.mkdirSync(project.tests.host_env.TMPDIR);
+    const given = await gate.run(ctx(sha, { project }));
+    assert.equal(given.ok, true, given.summary);
+    assert.equal(JSON.parse(fs.readFileSync(log, 'utf8').trim())[0], project.tests.host_env.TMPDIR);
+  } finally {
+    os.userInfo = saved.userInfo;
+    if (saved.runtime === undefined) delete process.env.XDG_RUNTIME_DIR;
+    else process.env.XDG_RUNTIME_DIR = saved.runtime;
+    fs.rmSync(deep, { recursive: true, force: true });
+    process.env.TOWER_CRANE_TMP = saved.root;
+  }
+});
+
 test('a host-only failure on the base keeps its opt-in and command for retry classification', async () => {
   task({
     'test/host-known.test.js': `require('node:test')('known host failure', { skip: process.env.TC_HOST_OPT_IN !== '1' }, () => {
