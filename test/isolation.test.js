@@ -1250,16 +1250,67 @@ test('a codex agent\'s temp directory is its own, never the caller\'s TMPDIR or 
   fs.writeFileSync(planted, `${SECRET}-TMP\n`);
   for (const rung of ['small', 'hard', 'review']) {
     isolated(h, rung, 'codex');
-    spawn(h, u, rung, { TMPDIR: caller });
+    spawn(h, u, rung, { TMPDIR: caller, TMP: caller, TEMP: caller });
     const seen = u.report();
     const rules = seen.config.permissions['tower-crane'].filesystem;
     assert.equal(commandsRead(seen, planted), false, `${rung}: the caller's TMPDIR stays hidden`);
     assert.equal(commandsRead(seen, '/tmp/another-session/scratch.txt'), false, `${rung}: the host's /tmp stays hidden`);
     assert.ok(seen.tmpdir && !seen.tmpdir.startsWith(caller), `${rung}: codex starts with a TMPDIR of its own, not ${seen.tmpdir}`);
+    // Found in review 2026-10-14: on Windows codex and programs read TMP and TEMP, not TMPDIR.
+    assert.deepEqual([seen.tmpEnv.TMP, seen.tmpEnv.TEMP], [seen.tmpdir, seen.tmpdir], `${rung}: TMP and TEMP name the same directory`);
+    assert.equal(seen.tmpEnv.JAVA_TOOL_OPTIONS, `-Djava.io.tmpdir=${seen.tmpdir}`, `${rung}: the JVM uses it too`);
     const writes = Object.keys(rules).filter((p) => rules[p] === 'write' && !p.startsWith(':'));
     assert.ok(writes.some((w) => seen.tmpdir === w || seen.tmpdir.startsWith(w + path.sep)), `${rung}: the agent writes its own temp directory`);
-    assert.ok(fs.statSync(seen.tmpdir).isDirectory(), `${rung}: the temp directory exists before codex starts`);
-    if (rung === 'hard') assert.ok(seen.tmpdir.startsWith(h.readState('tasks.json').tasks[0].scratch + path.sep), 'a worker\'s temp directory is in its task scratch');
+    assert.ok(fs.lstatSync(seen.tmpdir).isDirectory(), `${rung}: the temp directory exists before codex starts`);
+    if (rung === 'hard') {
+      // A worker's is in its task scratch, or, when that path is too long for
+      // a browser's singleton socket, the short directory kept for it.
+      const scratch = h.readState('tasks.json').tasks[0].scratch;
+      const long = Buffer.byteLength(path.join(scratch, 'tmp')) > 62;
+      if (long) assert.match(seen.tmpdir, /[\\/]tower-crane[\\/]t[\\/][0-9a-f]{12}$/, 'a long scratch path gets the short temp directory');
+      else assert.equal(seen.tmpdir, path.join(scratch, 'tmp'));
+    }
+  }
+});
+
+test('a codex worker\'s temp directory replaces a file or link an earlier attempt left there, and goes with its scratch', { skip: NO_STUBS }, t => {
+  // Found in review 2026-10-14: mkdirSync threw EEXIST on a file or a
+  // dangling link, so the next worker spawn for the task failed.
+  const { h, u } = setup(t);
+  isolated(h, 'hard', 'codex');
+  spawn(h, u, 'hard');
+  const tmp = u.report().tmpdir;
+  const outside = path.join(u.home, '.ssh');
+  fs.mkdirSync(outside, { recursive: true });
+  for (const plant of [() => fs.writeFileSync(tmp, 'x'), () => fs.symlinkSync(path.join(u.home, 'gone'), tmp), () => fs.symlinkSync(outside, tmp)]) {
+    fs.rmSync(tmp, { recursive: true, force: true });
+    plant();
+    spawn(h, u, 'hard');
+    assert.equal(u.report().tmpdir, tmp);
+    const st = fs.lstatSync(tmp);
+    assert.ok(st.isDirectory() && !st.isSymbolicLink(), 'a directory of its own replaced what was there');
+    assert.ok(fs.existsSync(outside), 'a link is removed, never followed');
+  }
+  const scratch = h.readState('tasks.json').tasks[0].scratch;
+  A.removeTaskCache({ scratch });
+  assert.ok(!fs.existsSync(scratch) && !fs.existsSync(tmp), 'removing the scratch removes the temp directory');
+});
+
+test('a codex agent cannot read a caller TMPDIR outside the home that an entry of / exposes', { skip: (NO_STUBS || !fs.existsSync('/var/tmp')) && 'needs /var/tmp' }, t => {
+  // Found in review 2026-10-14: /var/tmp on Linux, or /var/folders through
+  // /private on macOS, stayed readable through the entry of / that holds it.
+  const { h, u } = setup(t);
+  const caller = fs.mkdtempSync('/var/tmp/tower-crane-caller-');
+  t.after(() => fs.rmSync(caller, { recursive: true, force: true }));
+  const planted = path.join(caller, 'other-task', 'fixture.txt');
+  fs.mkdirSync(path.dirname(planted), { recursive: true });
+  fs.writeFileSync(planted, `${SECRET}-TMP\n`);
+  for (const rung of ['small', 'review']) {
+    isolated(h, rung, 'codex');
+    spawn(h, u, rung, { TMPDIR: caller });
+    const seen = u.report();
+    assert.equal(commandsRead(seen, planted), false, `${rung}: the caller's TMPDIR in /var/tmp stays hidden`);
+    assert.equal(commandsRead(seen, '/var/tmp/another/file'), true, `${rung}: the rest of /var/tmp stays as it was`);
   }
 });
 
@@ -1671,8 +1722,13 @@ test('worker and reviewer sandboxes write a cache of their own, never the user c
       for (const w of writes) {
         for (const p of forbidden) assert.ok(!contains(w, p), `${seen.harness} ${rung}: ${w} grants a write on ${p}`);
       }
-      const own = writes.filter((w) => contains(root, w));
+      // Besides it, codex writes its temp directory, which is the short
+      // tower-crane/t/<12 hex> when tmp in the cache is too long (codexTmp).
+      const own = writes.filter((w) => contains(root, w) && !(seen.harness === 'codex' && w === seen.tmpdir));
       assert.equal(own.length, 1, `${seen.harness} ${rung}: one directory under the cache root: ${JSON.stringify(own)}`);
+      if (seen.harness === 'codex' && !contains(own[0], seen.tmpdir)) {
+        assert.match(seen.tmpdir, /[\\/]tower-crane[\\/]t[\\/][0-9a-f]{12}$/, `${rung}: the codex temp directory is its own`);
+      }
       assert.ok(contains(path.join(fs.realpathSync(root), 'tower-crane', rung === 'review' ? 'agents' : 'tasks'), own[0]) && path.basename(own[0]) === (rung === 'review' ? started.agent : 'T1'), own[0]);
       assert.ok(fs.statSync(own[0]).isDirectory(), 'the granted cache exists');
       assert.deepEqual(JSON.parse(seen.ran[0].stderr), [own[0], ...['go-build', 'go-mod', 'npm'].map((d) => path.join(own[0], d))], `${seen.harness} ${rung}: tool caches point at the agent cache`);
