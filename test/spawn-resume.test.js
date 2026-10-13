@@ -528,6 +528,31 @@ console.log(JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 10, 
   }
 }
 
+test('a fresh native Claude outage retry that overflows blocks without another fresh retry', (t) => {
+  const { h, script, seen } = setup(t, 'claude');
+  nativeHarness(h, script, seen, 'claude');
+  const calls = path.join(h.base, 'claude-calls.json');
+  fs.writeFileSync(script, `
+const fs = require('node:fs');
+const file = ${JSON.stringify(calls)};
+const calls = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : [];
+calls.push(process.argv.slice(2));
+fs.writeFileSync(file, JSON.stringify(calls));
+console.log(JSON.stringify({ type: 'result', is_error: true, errors: [calls.length === 1 ? 'HTTP 503 service unavailable' : 'Prompt is too long'] }));
+process.exit(1);
+`);
+  h.ok(['ladder', 'set', 'medium', '--supervision', JSON.stringify({
+    retries: 1, backoff_ms: 10, max_backoff_ms: 10, stall_ms: 60000,
+  })]);
+  const result = h.run(['spawn', '--task', 'T1', '--wait']);
+  assert.equal(result.code, 1);
+  assert.equal(JSON.parse(fs.readFileSync(calls, 'utf8')).length, 2);
+  const audit = events(h);
+  assert.equal(audit.filter((e) => e.cmd === 'spawn retry').length, 1);
+  assert.equal(audit.filter((e) => e.cmd === 'spawn fallback').length, 0);
+  assert.equal(audit.findLast((e) => e.cmd === 'spawn exit').detail.overflowed, true);
+});
+
 test('a pre-launch fallback failure restores the old claim and permits retry', (t) => {
   const { h, script, seen } = setup(t, 'codex');
   nativeHarness(h, script, seen, 'codex');
