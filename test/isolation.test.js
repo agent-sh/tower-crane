@@ -1243,6 +1243,57 @@ test('codex names the same rules however many entries the home holds', { skip: N
   assert.equal(rules(), before);
 });
 
+// The profile as codex hands it to its sandbox: one JSON argument with an
+// entry per rule. Linux caps one argument at MAX_ARG_STRLEN, 32 pages or
+// 131072 bytes with its terminating NUL; the 2,143-rule profile seen on
+// 2026-10-13 passed 200 KB and failed to exec.
+const MAX_ARG_STRLEN = 32 * 4096;
+function codexProfileArg(rules) {
+  const entry = (p, access) => ({ path: p.startsWith(':') ? { type: 'special', value: { kind: p.slice(1) } } : { type: 'path', path: p },
+    access: access === 'none' ? 'deny' : access });
+  const entries = Object.entries(rules).flatMap(([p, access]) => typeof access === 'string' ? [entry(p, access)]
+    : Object.entries(access).map(([sub, a]) => entry(`${p}/${sub}`, a)));
+  return JSON.stringify({ type: 'managed', file_system: { type: 'restricted', entries }, network: 'enabled' });
+}
+
+test('codex keeps its profile under the argument limit however many entries the home and the directories above it hold', { skip: NO_STUBS }, t => {
+  // Seen 2026-10-13: a home in a test's temp directory under ~/.cache made
+  // codex name every entry of ~/.cache, and it failed with "Argument list too
+  // long (os error 7)". /home on a shared host is the same shape.
+  const { h, u, wt } = setup(t);
+  isolated(h, 'small', 'codex');
+  const rules = () => {
+    const started = spawn(h, u, 'small');
+    return TOML.parse(fs.readFileSync(path.join(h.state, 'homes', started.agent, 'config.toml'), 'utf8')).permissions['tower-crane'].filesystem;
+  };
+  const before = Object.keys(rules()).length;
+  const beside = path.join(h.base, 'entry-0');
+  for (const dir of [u.home, h.base]) {
+    for (let i = 0; i < 5000; i++) fs.mkdirSync(path.join(dir, `entry-${i}`));
+  }
+  const after = rules();
+  assert.equal(Object.keys(after).length, before, 'no rule per entry');
+  const bytes = Buffer.byteLength(codexProfileArg(after)) + 1;
+  assert.ok(bytes < MAX_ARG_STRLEN, `the profile argument is ${bytes} bytes`);
+  // What sits beside the home is hidden; what the agent needs there is named.
+  const seen = { harness: 'codex', config: { permissions: { 'tower-crane': { filesystem: after } } } };
+  assert.equal(commandsRead(seen, beside), false, 'an entry beside the home is hidden');
+  for (const p of [path.join(h.state, 'tasks.json'), wt, path.join(h.repo, '.git', 'HEAD')]) assert.equal(commandsRead(seen, p), true, `${p} stays readable`);
+});
+
+test('a PATH directory at the root never opens the root or a directory that holds the home to codex', { skip: NO_STUBS }, t => {
+  // Seen in review 2026-10-13: /opt on PATH named its parent, /, and codex
+  // mounted the whole filesystem, the home with it.
+  const { h, u } = setup(t);
+  isolated(h, 'small', 'codex');
+  const home = fs.realpathSync(u.home);
+  const started = spawn(h, u, 'small', { PATH: `${u.env.PATH}${path.delimiter}/usr${path.delimiter}${path.dirname(home)}` });
+  const rules = TOML.parse(fs.readFileSync(path.join(h.state, 'homes', started.agent, 'config.toml'), 'utf8')).permissions['tower-crane'].filesystem;
+  const holders = Object.keys(rules).filter((p) => !p.startsWith(':') && rules[p] !== 'none' && (p === path.parse(p).root || home.startsWith(p.endsWith(path.sep) ? p : p + path.sep)));
+  assert.deepEqual(holders, [], 'no rule opens a directory that holds the home');
+  assert.equal(commandsRead({ harness: 'codex', config: { permissions: { 'tower-crane': { filesystem: rules } } } }, path.join(home, '.codex', 'auth.json')), false);
+});
+
 test('a read-only claude worktree under the home has no hidden directory above it', { skip: NO_STUBS }, t => {
   // Seen 2026-10-13: claude hid the home empty, and inside it could not make
   // the placeholders it binds over a read-only worktree's dotfiles, so no
@@ -1310,6 +1361,19 @@ test('a sandbox read path that is the whole home refuses dispatch', { skip: NO_S
     assert.notEqual(refused.code, 0, `${harness}: reading the whole home must refuse dispatch`);
     assert.match(refused.stderr, /sandbox path .* is the user's home/);
     assert.ok(!fs.existsSync(u.out), 'the harness must not start');
+  }
+  // A directory that holds the home would open all of it: / mounts the whole
+  // filesystem in codex's sandbox.
+  for (const read of ['/', path.dirname(u.home)]) {
+    h.ok(['project', 'set', '--sandbox', JSON.stringify({ read: [read] })]);
+    for (const harness of ['claude', 'codex']) {
+      isolated(h, 'hard', harness);
+      fs.rmSync(u.out, { force: true });
+      const refused = h.run(['spawn', '--role', 'hard', '--task', 'T1', '--wait', '--json'], { env: u.env });
+      assert.notEqual(refused.code, 0, `${harness}: reading ${read} must refuse dispatch`);
+      assert.match(refused.stderr, /sandbox path .* holds the user's home/);
+      assert.ok(!fs.existsSync(u.out), 'the harness must not start');
+    }
   }
   assert.notEqual(h.run(['project', 'set', '--sandbox', JSON.stringify({ read: 'tools' })]).code, 0, 'sandbox.read must be a list of paths');
 });
@@ -1504,7 +1568,7 @@ test('a codex agent writes only where its agent file says; a worker writes its g
     const home = path.join(h.state, 'homes', started.agent);
     const { config } = u.report();
     const rules = config.permissions['tower-crane'].filesystem;
-    for (const d of [common, own]) assert.equal(rules[d], worktree === 'write' ? 'write' : undefined, `${rung}: ${d}`);
+    for (const d of [common, own]) assert.equal(rules[d], worktree, `${rung}: ${d}`);
     assert.deepEqual(rules[':workspace_roots'], { '.': worktree }, rung);
     assert.equal(rules[':minimal'], 'read', rung);
     assert.equal(rules[h.state], 'read', `${rung}: the state is read-only; the broker writes it`);
