@@ -362,12 +362,12 @@ function context(t, base, options = {}) {
     runAsync: (args, opts = {}) => runAsync(args, withHooks(ctx, opts)),
     json: (args, opts) => {
       const r = ctx.run([...args, '--json'], opts);
-      if (r.code !== 0) throw new Error(`tower-crane ${args.join(' ')} exited ${r.code}: ${r.stderr}`);
+      if (r.code !== 0) throw cliFailure(args, r);
       return JSON.parse(r.stdout);
     },
     ok: (args, opts) => {
       const r = ctx.run(args, opts);
-      if (r.code !== 0) throw new Error(`tower-crane ${args.join(' ')} exited ${r.code}: ${r.stderr}`);
+      if (r.code !== 0) throw cliFailure(args, r);
       return r.stdout.trim();
     },
     readState: (file) => JSON.parse(fs.readFileSync(path.join(ctx.state, file), 'utf8')),
@@ -410,7 +410,18 @@ function withHooks(ctx, opts) {
 // set the 60 s floor. An explicit zero leaves only the runner's backstop.
 function run(args, { cwd, env, input, pre = [], timeout = 60000 } = {}) {
   const r = cp.spawnSync(process.execPath, [...pre, BIN, ...args], { cwd, env, input, encoding: 'utf8', timeout: timeout === 0 ? 0 : Math.max(timeout, 60000) });
-  return { code: r.status, stdout: r.stdout || '', stderr: r.stderr || '', signal: r.signal };
+  return {
+    code: r.status, stdout: r.stdout || '', stderr: r.stderr || '', signal: r.signal,
+    ...(r.error && { error: { code: r.error.code, message: r.error.message } }),
+  };
+}
+
+function cliFailure(args, result) {
+  const details = [
+    result.signal && `signal ${result.signal}`,
+    result.error && `error ${result.error.code}: ${result.error.message}`,
+  ].filter(Boolean).join('; ');
+  return new Error(`tower-crane ${args.join(' ')} exited ${result.code}${details ? ` (${details})` : ''}: ${result.stderr}`);
 }
 
 const PTY_AVAILABLE = process.platform === 'linux'
