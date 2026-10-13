@@ -257,6 +257,26 @@ test('a write reads under the lock only the events appended since its own read, 
   assert.match(fs.readFileSync(path.join(h.state, 'sketch.md'), 'utf8'), /first/);
 });
 
+test('without a start-ticks identity, a waiter keeps a live holder\'s lock and writes as soon as it is released', async (t) => {
+  const h = makeRepo(t);
+  h.init();
+  h.ok(['task', 'add', '--title', 'first', '--acceptance', 'a']);
+  const paused = path.join(h.base, 'holder');
+  // As on Windows and macOS: the holder's marker has no start ticks.
+  const holder = h.runAsync(['task', 'note', 'T1', 'holder'], { hooks: { HOOK_PAUSE_LOCKED: paused, HOOK_NO_START_TICKS: '1' } });
+  await waitForFile(paused);
+  const waiter = h.runAsync(['task', 'note', 'T1', 'waiter']);
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  assert.ok(fs.existsSync(path.join(h.state, 'lock')), 'the waiter did not break the live lock');
+  const released = Date.now();
+  fs.writeFileSync(`${paused}.go`, '');
+  const [a, b] = await Promise.all([holder, waiter]);
+  assert.equal(a.code, 0, a.stderr);
+  assert.equal(b.code, 0, b.stderr);
+  assert.ok(Date.now() - released < 20000, 'the waiter wrote after the release, within its bound');
+  assert.deepEqual(h.readState('tasks.json').tasks[0].notes.map((n) => n.text), ['holder', 'waiter']);
+});
+
 test('a stale lock is broken: its holder is gone, or it is older than 60 s', (t) => {
   const h = makeRepo(t);
   h.init();

@@ -110,6 +110,41 @@ test('orchestrator status takes no state lock, and a due renewal never waits for
   }
 });
 
+test('without a start-ticks identity, status with a due heartbeat leaves a live writer holding the lock', async (t) => {
+  const h = makeProjectRepo(t);
+  const holder = { TOWER_CRANE_AGENT: 'orchestrator', CLAUDE_SESSION_ID: 'holder' };
+  h.ok(['task', 'add', '--title', 'held task', '--acceptance', 'holds the lease'], { env: holder });
+  const doc = h.readState('tasks.json');
+  doc.orchestrator_lease.heartbeat = new Date(Date.now() - 61000).toISOString();
+  h.writeState('tasks.json', doc);
+  const aged = h.readState('tasks.json').orchestrator_lease;
+  // As on Windows and macOS: the writer's marker has no start ticks.
+  const paused = path.join(h.base, 'writer-holds');
+  const writer = h.runAsync(['task', 'note', 'T1', 'written behind status'], { hooks: { HOOK_PAUSE_LOCKED: paused, HOOK_NO_START_TICKS: '1' } });
+  const end = Date.now() + 20000;
+  while (!fs.existsSync(paused)) {
+    if (Date.now() > end) throw new Error('the writer never took the lock');
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  try {
+    const lock = path.join(h.state, 'lock');
+    const [name] = fs.readdirSync(lock);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(lock, name), 'utf8')).start_ticks, undefined);
+    const meter = path.join(h.base, 'locked-reads.json');
+    const due = h.run(['status'], { env: { ...holder, LOCKED_READS: meter,
+      NODE_OPTIONS: `--require=${JSON.stringify(path.join(__dirname, 'fixtures', 'locked-reads.js'))}` } });
+    assert.equal(due.code, 0, due.stderr);
+    assert.equal(JSON.parse(fs.readFileSync(meter, 'utf8')).holdings, 0, 'status neither waits for nor breaks the live lock');
+    assert.deepEqual(fs.readdirSync(lock), [name], 'the writer still holds its lock');
+    assert.deepEqual(h.readState('tasks.json').orchestrator_lease, aged);
+  } finally {
+    fs.writeFileSync(`${paused}.go`, '');
+  }
+  const done = await writer;
+  assert.equal(done.code, 0, done.stderr);
+  assert.deepEqual(h.readState('tasks.json').tasks[0].notes.map((n) => n.text), ['written behind status']);
+});
+
 test('two live copies of the same harness session cannot both drive the queue', async (t) => {
   const h = makeProjectRepo(t);
   const env = { ...h.env, TOWER_CRANE_AGENT: 'orchestrator', CLAUDE_SESSION_ID: 'resumed-session' };

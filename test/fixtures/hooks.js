@@ -66,6 +66,21 @@ if (env.HOOK_KEEP_SPAWN_DIRS) {
   };
 }
 
+// HOOK_NO_START_TICKS=1: this process writes lock markers without a start
+// identity, as on Windows and macOS, so other processes judge its live lock
+// by pid and marker age alone.
+if (env.HOOK_NO_START_TICKS) {
+  const write = fs.writeFileSync;
+  fs.writeFileSync = function markerWithoutStartTicks(file, data, ...args) {
+    if (typeof file === 'string' && /[\\/]lock\.\d+\.[0-9a-f]{16}\.new[\\/][0-9a-f]{16}$/.test(file) && typeof data === 'string') {
+      const marker = JSON.parse(data);
+      delete marker.start_ticks;
+      data = JSON.stringify(marker);
+    }
+    return write.call(this, file, data, ...args);
+  };
+}
+
 // HOOK_PIDNS=ID: this process reports ID as its pid namespace, as a command
 // in a sandbox of its own does.
 if (env.HOOK_PIDNS) {
