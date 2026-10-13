@@ -64,14 +64,37 @@ is recovered through the merge gate's accepted-head confirmation.
 
 Software gates run when no audited evidence exists at the submitted head
 and revision, even if an unaudited entry or a completed reaction remains.
+Hosted CI that is still running or waiting for GitHub's mergeability result
+records `PENDING`. The trusted wait host checks pending CI once per minute
+without needing a completion notification. A completed failure takes
+precedence over pending runs. Status and the board show the gate name with
+its failed, pending or missing state.
 They run again when their passing evidence no longer matches its
-inputs, such as the pinned command or tests policy. Confirmed failures at
-the current head and revision send the task to rework once, with the gate's
-findings in the reason. Unconfirmed or infrastructure failures wait for
-`gates retry ID` at unchanged inputs. Pending CI records `PENDING` and the
-trusted wait host rechecks it once per minute without needing a completion
-notification. Startup refreshes unconfirmed CI failures so older queued-job
-receipts acquire the pending state too.
+inputs, such as the pinned command or tests policy. A failed `tests`, `clean`
+or `ci` gate at a submitted head does not wait for an operator, whether the
+run came from a reaction, a `check` run by hand or `gates retry`. Each failure
+is classified by what it says about the change:
+
+- Infrastructure runs once more at the same head, and a second failure reworks.
+  That covers a timeout, a runner killed by a signal, a CI run that timed out,
+  was cancelled or never started, a cleanup scan with checks that did not run,
+  and a test that also fails on the base branch (`main` in the project, local
+  or `origin`, whichever is newer).
+- A change the worker must fix reworks at once: no test covers the change, it
+  has no changes against the base, a test or cleanup command fails, or a
+  required CI run is not successful.
+- A missing or uninstalled pinned command is project configuration. Its receipt
+  waits for the command to be pinned, and the inbox shows a `gate_config` item
+  addressed to the orchestrator that names the setting. Later software gates
+  still run and settle any independent failure. If they pass or remain pending,
+  the task stays submitted for the configuration fix.
+- A pending CI run waits for CI.
+
+A rework names the failing tests and their output tail. When the failing tests
+also fail on the base branch, the rework says so with their names, so the worker
+can link the existing failure instead of fixing unrelated code. A failure of a
+confirmed quality check on a task with a tier range is escalation's: it sends
+the task back with a climb, as before. `gates retry ID` reruns a failed gate at unchanged inputs, such as after an infrastructure cause is fixed.
 
 Failures remain visible in gate receipts and task notes. Conflicting PRs
 return to rework with a file list. Unknown mergeability, failed transport,

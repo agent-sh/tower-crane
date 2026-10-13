@@ -98,6 +98,27 @@ test('required queued and running jobs are pending, while completed failures tak
   assert.equal(r.confirmed_failure, true);
 });
 
+test('UNKNOWN mergeability is pending without consuming an infrastructure retry', async () => {
+  const gh = fakeExec((args) => args[0] === 'pr' && args[1] === 'view'
+    ? result(JSON.stringify({ headRefOid: SHA, mergeable: 'UNKNOWN', mergeStateStatus: 'UNKNOWN' })) : null);
+  const r = await gate.run(ctx(gh, { pr: 9 }));
+  assert.equal(r.ok, false);
+  assert.equal(r.pending, true);
+  assert.equal(r.infrastructure_failure, undefined);
+  assert.match(r.summary, /mergeability is unknown/);
+});
+
+test('a completed failed suite takes precedence over required queued jobs', async () => {
+  const r = await gate.run(ctx(github({
+    runs: [run('test (linux)', null, 'queued')],
+    suites: [suite('external-ci', 'failure')],
+  }), {}, { ci: { required: ['test ('] } }));
+  assert.equal(r.ok, false);
+  assert.equal(r.pending, undefined);
+  assert.equal(r.worker_failure, true);
+  assert.match(r.summary, /failed check suites: external-ci \(failure\)/);
+});
+
 test('a suite with no runs from another app is never inferred away', async () => {
   // Green Actions runs next to another provider whose suite has no runs yet: CI is still going.
   for (const status of ['queued', 'in_progress']) {
@@ -161,6 +182,31 @@ test('gh failing: not ok with its message', async () => {
   const r = await gate.run(ctx(github({ apiError: 'gh: Not Found (HTTP 404)' })));
   assert.equal(r.ok, false);
   assert.match(r.summary, /HTTP 404/);
+});
+
+test('GitHub observation errors are infrastructure failures', async () => {
+  const cases = [
+    ['PR transport', 'view', result('', 1, 'HTTP 502: Bad Gateway'), /HTTP 502/],
+    ['PR output', 'view', result('{'), /could not read gh pr view/],
+    ['check runs', 'check-runs', result('', 1, 'HTTP 502: Bad Gateway'), /HTTP 502/],
+    ['check suites', 'check-suites', result('', 1, 'HTTP 502: Bad Gateway'), /HTTP 502/],
+    ['Actions API', 'actions/runs', result('', 1, 'HTTP 502: Bad Gateway'), /HTTP 502/],
+    ['check output', 'check-runs', result('{'), /could not read gh api/],
+  ];
+  for (const [label, target, failure, message] of cases) {
+    const gh = fakeExec((args) => {
+      if (args[0] === 'pr') return target === 'view' ? failure
+        : result(JSON.stringify({ headRefOid: SHA, mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }));
+      if (args[1].includes(target)) return failure;
+      return result(lines(args[1].includes('check-runs') ? GREEN_RUNS
+        : args[1].includes('check-suites') ? GREEN_SUITES : []));
+    });
+    const r = await gate.run(ctx(gh, { pr: 42 }));
+    assert.equal(r.ok, false, label);
+    assert.equal(r.infrastructure_failure, true, label);
+    assert.notEqual(r.confirmed_failure, true, label);
+    assert.match(r.summary, message, label);
+  }
 });
 
 test('workflow supersession orders by creation time and id, with name fallback and a known replacement suite', async () => {

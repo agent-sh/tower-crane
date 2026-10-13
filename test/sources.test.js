@@ -39,8 +39,6 @@ async function fixture(t, tier) {
   t.after(() => { server.closeAllConnections(); server.close(); });
   const base = 'http://source.example';
   const h = makeRepo(t);
-  h.env.CLAUDE_CONFIG_DIR = path.join(h.env.HOME, '.claude');
-  h.env.CODEX_HOME = path.join(h.env.HOME, '.codex');
   const preload = path.join(__dirname, 'fixtures', 'sources-network.js');
   h.env.NODE_OPTIONS = `${h.env.NODE_OPTIONS || ''} --require=${JSON.stringify(preload)}`;
   h.env.HOOK_SOURCES_ORIGIN = `http://127.0.0.1:${server.address().port}`;
@@ -268,9 +266,6 @@ test('sources gate rejects bad citations and pages through the CLI, and a failed
     const result = await h.runAsync(['check', 'sources', 'T1']);
     assert.equal(result.code, 1, `${name}: ${result.stderr}`);
     assert.match(result.stdout, pattern, name);
-    const evidence = h.json(['task', 'show', 'T1']).evidence.findLast((e) => e.type === 'sources');
-    const fetchFailed = ['non-public address', 'non-public redirect hop', 'dead link'].includes(name);
-    assert.equal(evidence.confirmed_failure, fetchFailed ? undefined : true, name);
     if (name === 'non-public address') assert.deepEqual(requests, [], 'nothing is fetched from a private address');
     if (name === 'non-public redirect hop') assert.deepEqual(requests, ['/second-hop', '/private-redirect']);
   }

@@ -76,6 +76,16 @@ if (env.HOOK_PIDNS) {
   };
 }
 
+// HOOK_NO_SH=1: the CLI finds no /bin/sh, as on Windows, so it has no POSIX
+// lease gate and spawns its workers through the launch handshake.
+if (env.HOOK_NO_SH && path.basename(process.argv[1] || '') === 'tower-crane.js') {
+  const exists = fs.existsSync;
+  fs.existsSync = function noShell(file) {
+    if (file === '/bin/sh') return false;
+    return exists.call(this, file);
+  };
+}
+
 if (env.HOOK_CLOCK_FILE) {
   const DateClass = Date;
   const clock = () => Number(fs.readFileSync(env.HOOK_CLOCK_FILE, 'utf8'));
@@ -153,6 +163,10 @@ function before(name, args) {
   if (env.HOOK_STDIN_READY && (name === 'readFileSync' || name === 'readSync') && target === 0) {
     real.writeFileSync(env.HOOK_STDIN_READY, '');
   }
+  // HOOK_STOP_GO=FILE stops the dispatch after it records a worker's lease,
+  // before it lets the supervisor launch the harness (the Windows handshake).
+  if (env.HOOK_STOP_GO && name === 'writeFileSync' && typeof target === 'string' && path.basename(target) === 'go'
+    && path.basename(process.argv[1]) === 'tower-crane.js' && first('go')) stop(env.HOOK_STOP_GO);
   // HOOK_JITTER_MS=MS: a random pause of up to MS before each call on the state.
   if (env.HOOK_JITTER_MS && (inState(target) || inState(args[1]))) sleep(Math.floor(Math.random() * Number(env.HOOK_JITTER_MS)));
   // State commits precede board replacement; expose that interval to readers.
@@ -250,12 +264,29 @@ if (env.HOOK_STOP_WORKTREE_STATUS) {
   };
 }
 
+// Pause inside removal after the reservation, before inspecting the sandbox mask.
+if (env.HOOK_STOP_WORKTREE_SAVE) {
+  const orig = cp.execFileSync;
+  cp.execFileSync = function hookedExecFileSync(file, args, ...rest) {
+    if (args[0] === 'status' && args.includes('.mcp.json') && first('worktree-save')) stop(env.HOOK_STOP_WORKTREE_SAVE);
+    return orig.call(this, file, args, ...rest);
+  };
+}
+
 // HOOK_STOP_WORKTREE_REMOVE=SIGNAL: stop before the first git worktree remove runs,
 // after the removal has passed its checks and released the state lock.
 if (env.HOOK_STOP_WORKTREE_REMOVE) {
   const orig = cp.execFileSync;
   cp.execFileSync = function hookedExecFileSync(file, args, ...rest) {
     if (args[0] === 'worktree' && args[1] === 'remove' && first('worktree-remove')) stop(env.HOOK_STOP_WORKTREE_REMOVE);
+    return orig.call(this, file, args, ...rest);
+  };
+}
+
+if (env.HOOK_STOP_BRANCH_DELETE) {
+  const orig = cp.execFileSync;
+  cp.execFileSync = function hookedExecFileSync(file, args, ...rest) {
+    if (args[0] === 'branch' && args[1] === '-D' && first('branch-delete')) stop(env.HOOK_STOP_BRANCH_DELETE);
     return orig.call(this, file, args, ...rest);
   };
 }
