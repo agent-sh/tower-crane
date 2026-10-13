@@ -1,0 +1,1 @@
+- `hotfix --review` reads a posted review whose labels are markdown bold (`**SHA:**`, `**Verdict:** pass`) the same as the plain form.
