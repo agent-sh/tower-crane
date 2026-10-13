@@ -35,6 +35,9 @@ function baseEnv(home) {
   env.TOWER_CRANE_OWNER_KEY = OWNER_KEY;
   // spawn keeps receipts under the user's cache, which is not the tests' to write.
   env.HOME = path.join(home, 'home');
+  // A child exiting after teardown must not recreate its fixture with a compile-cache write.
+  env.NODE_DISABLE_COMPILE_CACHE = '1';
+  delete env.NODE_COMPILE_CACHE;
   // A gate's worktree and temp directories stay in the fixture, so a gate the test kills
   // cannot leave them in the shared temporary directory.
   env.TOWER_CRANE_TMP = path.join(home, 'gate-tmp');
@@ -275,7 +278,25 @@ function context(t, base, options = {}) {
     },
     cleanup: async () => {
       try { await stopDetached(ctx.detached()); }
-      finally { fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); }
+      finally {
+        // A killed monitor cannot close its broker's socket outside this fixture.
+        try {
+          const brokers = path.join(ctx.state, 'brokers');
+          if (fs.existsSync(brokers)) {
+            for (const agent of fs.readdirSync(brokers, { withFileTypes: true }).filter((entry) => entry.isDirectory())) {
+              const file = path.join(brokers, agent.name, 'broker.json');
+              let socket;
+              try { ({ socket } = JSON.parse(fs.readFileSync(file, 'utf8'))); }
+              catch (error) { if (error.code === 'ENOENT' || error instanceof SyntaxError) continue; throw error; }
+              if (typeof socket === 'string' && path.basename(socket) === 's' && /^tower-crane-[A-Za-z0-9]{6}$/.test(path.basename(path.dirname(socket)))) {
+                fs.rmSync(path.dirname(socket), { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+              }
+            }
+          }
+        } finally {
+          fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+        }
+      }
     },
     run: (args, opts = {}) => fixtureInit(ctx, args, opts, (a, o) => run(a, withHooks(ctx, o))),
     runAsync: (args, opts = {}) => runAsync(args, withHooks(ctx, opts)),
