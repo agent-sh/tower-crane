@@ -358,7 +358,7 @@ test('review choice follows tier, diff limits and configured risk paths', (t) =>
   }
 });
 
-test('review policy min_rung sets the first reviewer rung, and failures escalate per the tier rules', (t) => {
+test('review policy min_rung sets the first reviewer rung, and failed reviews never pick a rung below it', (t) => {
   const h = setup(t, 'medium', 'other', undefined, { gated: true });
   assert.equal(model(choice(h)), 'fixture-main');
   h.ok(['project', 'set', '--review-policy', JSON.stringify({ prices, min_rung: 'review' })]);
@@ -369,9 +369,15 @@ test('review policy min_rung sets the first reviewer rung, and failures escalate
   h.reviewer('T1', 'r1');
   h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--agent', 'r1', '--type', 'review', '--fail', '--sha', h.sha]);
   assert.deepEqual([choice(h).review_rung, model(choice(h))], ['hard', 'fixture-large']);
+  // An easy task's failure rules reach only medium, below the review minimum.
   const easy = setup(t, 'easy', 'other', undefined, { gated: true });
-  easy.ok(['project', 'set', '--review-policy', JSON.stringify({ prices, min_rung: 'hard' })]);
-  assert.deepEqual([choice(easy).review_rung, model(choice(easy))], ['hard', 'fixture-large']);
+  easy.ok(['project', 'set', '--review-policy', JSON.stringify({ prices, min_rung: 'review' })]);
+  easy.reviewer('T1', 'r1');
+  easy.ok(['evidence', 'T1', '--revision', easy.revision('T1'), '--agent', 'r1', '--type', 'review', '--fail', '--sha', easy.sha]);
+  assert.deepEqual([choice(easy).review_rung, model(choice(easy))], ['review', 'fallback']);
+  const tiered = setup(t, 'easy', 'other', undefined, { gated: true });
+  tiered.ok(['project', 'set', '--review-policy', JSON.stringify({ prices, min_rung: 'hard' })]);
+  assert.deepEqual([choice(tiered).review_rung, model(choice(tiered))], ['hard', 'fixture-large']);
 });
 
 test('top-tier Claude builders can receive review on the same model', (t) => {
