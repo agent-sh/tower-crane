@@ -27943,5 +27943,108 @@
       "log_sha256": "b0aaacb418b02b574315052687f4d363145a789e599f2041d7dad53ece0840b5"
     },
     "raw_logs": "Task scratch; only relative artifact names and hashes are committed."
+  },
+  "base_5b48d520_refresh": {
+    "base_head": "5b48d520",
+    "changes": [
+      "Main's hotfix reviewer-exit loop waits on the repository signal; its acceptance pass waits for the accepted event after the review evidence instead of a 0.2 s pass.",
+      "The single reaction pass that must not dispatch a second reviewer keeps its 0.2 s timeout with a reason.",
+      "Main's 30 s option on the canary file wait is dropped; that helper never read it."
+    ],
+    "loaded_command": "node test/run.js --test-concurrency=3 test/hotfix.test.js test/automation.test.js test/orchestrator.test.js test/gates/ci.test.js",
+    "cpu_load": "Shared 24-core host with other sessions running test suites; one-minute load 8 to 15 during the runs.",
+    "loaded_runs": [
+      {
+        "run": 1,
+        "status": 0,
+        "load_after": [
+          14.17,
+          12.38,
+          13.46
+        ],
+        "log": "loaded3-1.log",
+        "log_sha256": "87d9acdca892dbe8a5756fd5765e804439706d10b82e85325d683f09c7f00351",
+        "tests": {
+          "tests": 170,
+          "pass": 170,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 0
+        }
+      },
+      {
+        "run": 2,
+        "status": 0,
+        "load_after": [
+          8.25,
+          10.89,
+          12.4
+        ],
+        "log": "loaded3-2.log",
+        "log_sha256": "5b776b573df24706b8957f7a21e014181351ef4d606aead9055eb25870716a18",
+        "tests": {
+          "tests": 170,
+          "pass": 170,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 0
+        }
+      },
+      {
+        "run": 3,
+        "status": 0,
+        "load_after": [
+          9.44,
+          10.62,
+          11.76
+        ],
+        "log": "loaded3-3.log",
+        "log_sha256": "f182df9d5fcfdca23fffc2157c001f251f0bb5e9e4e3b56bac0113a8217fc02e",
+        "tests": {
+          "tests": 170,
+          "pass": 170,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 0
+        }
+      },
+      {
+        "run": 4,
+        "status": 0,
+        "load_after": [
+          11.58,
+          12.12,
+          12.22
+        ],
+        "log": "loaded3-4.log",
+        "log_sha256": "83275d83e0c223e42b7285a408da7358ef0dfd2b7826e33c42d5f0f279797b76",
+        "tests": {
+          "tests": 170,
+          "pass": 170,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 0
+        }
+      },
+      {
+        "run": 5,
+        "status": 0,
+        "load_after": [
+          14.47,
+          13.01,
+          12.74
+        ],
+        "log": "loaded3-5.log",
+        "log_sha256": "3436ece5ebce7bafd7375fc959d739a692322aed4f254bab7ef711a8401d0ac0",
+        "tests": {
+          "tests": 170,
+          "pass": 170,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 0
+        }
+      }
+    ],
+    "raw_logs": "Task scratch; only relative artifact names and hashes are committed."
   }
 }

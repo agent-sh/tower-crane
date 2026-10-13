@@ -64,6 +64,8 @@ The base refresh through `c4f957c6` keeps main's file teardown, event-tail reade
 
 The base refresh through `1d2b8137` keeps main's post-discovery release clocks at the suite guard and its exit-aware startup waits through `waitUntil`. Main's new supervision snapshot test called the removed `until` helper and failed with a ReferenceError; it now waits on the repository signal. Wakeups, supervision and harness hooks pass 74 of 74 tests in each of five loaded runs, and the full suite at `5c7f3a76` passes 2163 tests with 20 skipped and no failures.
 
+The base refresh through `5b48d520` converts main's hotfix reviewer-exit loop to the repository signal and waits for the accepted event after review evidence. Hotfix, automation, orchestrator and the CI gate pass 170 of 170 tests in each of five loaded runs.
+
 ## Tools
 
 - `node scripts/test-cost.js [--before DIR] [files...]` measures CPU and wall seconds per file, median of three runs, four files at a time. With `--before`, it measures another checkout interleaved with this one.

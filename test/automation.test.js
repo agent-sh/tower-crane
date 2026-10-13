@@ -704,7 +704,7 @@ global.Date = class extends RealDate {
         { env: { ...env, CLAUDE_SESSION_ID: 'engine-waiter' } })
       : h.runAsync(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator'], { env });
     try {
-      assert.notEqual(await waitFor(stalled, { ms: 30000 }), null, 'automation did not start its gate');
+      assert.notEqual(await waitFor(stalled), null, 'automation did not start its gate');
       if (mode === 'late') {
         assert.deepEqual(h.readState('tasks.json').orchestrator_lease, holder, 'an owner waiter keeps the holder heartbeat');
         // The holder wakes on the submit; its first read renews its own heartbeat.
