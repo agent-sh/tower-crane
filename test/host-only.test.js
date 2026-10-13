@@ -13,8 +13,11 @@ const RUNNER = path.join(ROOT, 'test', 'run.js');
 // Each file leaves a marker in MARK_DIR when it runs.
 const mark = (name) => `require('node:fs').writeFileSync(require('node:path').join(process.env.MARK_DIR, '${name}'), 'ran');\n`;
 const FILES = {
-  'test/host.test.js': mark('host'),
-  'test/plain.test.js': mark('plain'),
+  'test/host.test.js': `require('node:test')('opted-in host test', { skip: process.env.TC_HOST_OPT_IN !== '1' }, () => {
+require('node:assert/strict').equal(process.env.TC_HOST_OPT_IN, '1');
+${mark('host')}});
+`,
+  'test/plain.test.js': "require('node:assert/strict').equal(process.env.TC_HOST_OPT_IN, undefined);\n" + mark('plain'),
 };
 
 function submitChange(h) {
@@ -38,7 +41,8 @@ test('a host_only test is skipped in a sandboxed run and executed by check tests
   fs.mkdirSync(marks);
   const env = { MARK_DIR: marks };
   const cmd = `${shellQuote(process.execPath)} ${shellQuote(RUNNER)} test/host.test.js test/plain.test.js`;
-  h.init(['--repo', 'acme/demo', '--base', 'main', '--tests-mode', 'run-only', '--tests-cmd', cmd, '--tests-host-only', JSON.stringify(['test/host.test.js'])]);
+  const proof = `${shellQuote(process.execPath)} ${shellQuote(RUNNER)} {tests}`;
+  h.init(['--repo', 'acme/demo', '--base', 'main', '--tests-mode', 'run-only', '--tests-cmd', cmd, '--tests-proof-cmd', proof, '--tests-host-only', JSON.stringify(['test/host.test.js']), '--tests-host-env', '{"TC_HOST_OPT_IN":"1"}']);
   submitChange(h);
 
   // A sandboxed worker runs the test command with the environment its spawn gives it.
@@ -77,15 +81,42 @@ test('a host_only test is skipped in a sandboxed run and executed by check tests
   const evidence = h.readState('tasks.json').tasks[0].evidence.at(-1);
   assert.equal(evidence.type, 'tests');
   assert.equal(evidence.ok, true);
+  assert.deepEqual(evidence.receipt.host_only.run, ['test/host.test.js']);
+  assert.deepEqual(evidence.receipt.host_only.skipped, []);
+  assert.equal(evidence.receipt.host_only.results[0].ran, 1);
+});
+
+test('host_env is operational, stored, printed, replaced and cleared, and rejects invalid maps', (t) => {
+  const h = makeRepo(t);
+  const values = { TC_HOST_OPT_IN: '1', TC_HOST_MODEL: 'test-model' };
+  h.init(['--tests-host-env', JSON.stringify(values), '--tests-host-only', '["test/host.test.js"]']);
+  assert.deepEqual(h.readState('project.json').tests.host_env, values);
+  assert.match(h.ok(['project', 'show']), /tests\.host_env: .*TC_HOST_OPT_IN/);
+  h.ok(['project', 'set', '--tests-host-env', '{"TC_HOST_OPT_IN":"2"}'], { env: { TOWER_CRANE_AGENT: 'orchestrator' } });
+  assert.deepEqual(h.readState('project.json').tests.host_env, { TC_HOST_OPT_IN: '2' });
+  const before = h.readState('project.json');
+  for (const value of ['[', '[]', '1', '"x"', '{"":"1"}', '{"BAD-NAME":"1"}', '{"OPT_IN":1}', '{"OPT_IN":"\\u0000"}']) {
+    const bad = h.run(['project', 'set', '--tests-host-env', value]);
+    assert.equal(bad.code, 2, bad.stderr);
+    assert.match(bad.stderr, /--tests-host-env.*JSON map/);
+    assert.deepEqual(h.readState('project.json'), before);
+  }
+  h.ok(['project', 'set', '--tests-host-env', '{}']);
+  assert.deepEqual(h.readState('project.json').tests.host_env, {});
+  h.ok(['project', 'set', '--tests-host-env', 'null']);
+  assert.deepEqual(h.readState('project.json').tests, { host_only: ['test/host.test.js'] });
 });
 
 test('a spawned worker is told the host-only tests and gets them in its environment', (t) => {
   const h = makeRepo(t);
-  h.init(['--repo', 'acme/demo', '--base', 'main', '--tests-host-only', JSON.stringify(['test/host.test.js'])]);
+  h.init(['--repo', 'acme/demo', '--base', 'main', '--tests-host-only', JSON.stringify(['test/host.test.js']), '--tests-host-env', '{"TC_HOST_OPT_IN":"1"}']);
   h.ok(['task', 'add', '--title', 'Change', '--acceptance', 'works']);
   h.ok(['brief', 'set', 'T1', '-'], { input: '- change the lab session\n' });
+  h.env.CODEX_HOME = path.join(h.base, 'codex');
+  h.env.CLAUDE_CONFIG_DIR = path.join(h.base, 'claude');
   const seen = h.json(['spawn', '--task', 'T1', '--dry-run']);
   const prompt = seen.argv.find((arg) => arg.includes('## Task'));
   assert.match(prompt, /## Host-only tests[\s\S]*- test\/host\.test\.js/);
   assert.equal(seen.env.TOWER_CRANE_HOST_ONLY, JSON.stringify(['test/host.test.js']));
+  assert.equal(seen.env.TC_HOST_OPT_IN, undefined);
 });
