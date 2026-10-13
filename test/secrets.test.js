@@ -3,9 +3,9 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
 const Secrets = require('../lib/secrets');
+const { tempRoot } = require('./tmp-root');
 
 // A spawn job names the rung env under rung_config, route, routes and the
 // project ladder, and the settings repeat it.
@@ -26,7 +26,9 @@ test('split sends a value repeated across the job once, and join restores every 
 });
 
 test('a payload that fits one environment entry travels in it; a larger one in a 0600 file deleted on read', (t) => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tc-secrets-'));
+  const root = tempRoot();
+  fs.mkdirSync(root, { recursive: true });
+  const dir = fs.mkdtempSync(path.join(root, 'tc-secrets-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const small = Secrets.split(job({ A: 'a' })).secrets;
   const env = Secrets.handoff(small, dir);

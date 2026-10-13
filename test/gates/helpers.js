@@ -2,13 +2,13 @@
 // Fixtures for the gate tests: scratch directories, git repositories isolated from the user's
 // git config, and a fake gh for the gates that talk to GitHub.
 const fs = require('fs');
-const os = require('os');
 const path = require('path');
 const { spawnSync } = require('child_process');
+const { tempRoot } = require('../tmp-root');
 
-// A scratch directory under TOWER_CRANE_TEST_TMP (or the system temp dir), removed by the caller.
+// A scratch directory under the test temp root, removed by the caller.
 function scratch(prefix) {
-  const base = process.env.TOWER_CRANE_TEST_TMP || os.tmpdir();
+  const base = tempRoot();
   fs.mkdirSync(base, { recursive: true });
   return fs.mkdtempSync(path.join(base, `${prefix}-`));
 }
