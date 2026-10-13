@@ -269,7 +269,7 @@ while (Date.now() < stop) {
 
 // Only a worktree admin directory names its common directory, and only one
 // that holds it. A separate git directory, as a submodule's is, has none.
-test('a commondir in a separate git directory or a rewritten admin directory is refused', (t) => {
+test('a commondir in a separate git directory, a bare repository or a rewritten admin directory is refused', (t) => {
   const h = makeRepo(t);
   h.init();
   const commands = require('../lib/commands');
@@ -284,14 +284,28 @@ test('a commondir in a separate git directory or a rewritten admin directory is 
   fs.writeFileSync(path.join(sepDir, 'commondir'), `${path.join(other, '.git')}\n`);
   assert.throws(() => status(separate), /separate\.git.commondir points git at/);
 
+  // Planting `gitdir` too, with an entry in the other repository that leads
+  // back, does not make a git directory with objects of its own an admin one.
+  fs.writeFileSync(path.join(sepDir, 'gitdir'), `${path.join(separate, '.git')}\n`);
+  fs.mkdirSync(path.join(other, '.git', 'worktrees'), { recursive: true });
+  fs.symlinkSync(sepDir, path.join(other, '.git', 'worktrees', 'separate.git'));
+  assert.throws(() => status(separate), /separate\.git.commondir points git at/);
+  const bare = path.join(h.base, 'bare.git');
+  cp.execFileSync('git', ['clone', '-q', '--bare', h.repo, bare], { env: h.env });
+  assert.equal(commands.spawnSync('git', ['rev-parse', '--git-common-dir'], { cwd: bare, env: h.env }).status, 0);
+  fs.writeFileSync(path.join(bare, 'gitdir'), `${path.join(h.base, 'nowhere', '.git')}\n`);
+  fs.writeFileSync(path.join(bare, 'commondir'), `${path.join(other, '.git')}\n`);
+  fs.symlinkSync(bare, path.join(other, '.git', 'worktrees', 'bare.git'));
+  assert.throws(() => commands.spawnSync('git', ['rev-parse', '--git-common-dir'], { cwd: bare, env: h.env }), /bare\.git.commondir points git at/);
+
   const linked = path.join(h.base, 'linked');
   h.git(['worktree', 'add', '-q', '--detach', linked, 'main']);
   assert.equal(status(linked).status, 0);
   const admin = path.join(h.repo, '.git', 'worktrees', 'linked');
   fs.writeFileSync(path.join(admin, 'commondir'), `${path.join(other, '.git')}\n`);
   assert.throws(() => status(linked), /does not hold this worktree's admin directory/);
-  // An admin directory kept outside worktrees/ is held through that entry.
-  const moved = path.join(h.base, 'admin', 'linked');
+  // An admin directory kept in .git-admin/ is held through that entry.
+  const moved = path.join(h.base, '.git-admin', 'linked');
   fs.mkdirSync(path.dirname(moved));
   fs.renameSync(admin, moved);
   fs.writeFileSync(path.join(moved, 'commondir'), `${path.join(h.repo, '.git')}\n`);

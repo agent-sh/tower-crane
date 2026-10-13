@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');
-const { cachedFixture, pinRung, real, BIN, PTY_AVAILABLE } = require('./helpers');
+const { cachedFixture, pinRung, real, BIN, PTY_AVAILABLE, makeTaskRepo } = require('./helpers');
 const stack = require('./stack-fixture');
 const A = require('../lib/agents');
 const S = require('../lib/state');
@@ -912,4 +912,26 @@ test('spawn refuses a stacked rework with claim\'s reason when its dependency we
   assert.match(r.stderr, /T2 is blocked: depends on T1 \(in_progress\)/);
   assert.doesNotMatch(r.stderr, /prepared on T1|before dispatch/);
   assert.equal(f.h.json(['task', 'show', 'T2']).status, 'rework');
+});
+
+// A worker writes its worktree's `.git` file. The directory it names is
+// granted to the next sandbox in that worktree, so it must be an admin
+// directory of this repository.
+test('a spawn refuses a worktree whose .git file names a git directory of another repository', (t) => {
+  const h = makeTaskRepo(t, [{ args: ['--title', 'Grant', '--acceptance', 'works'], brief: 'Do it.\n' }]);
+  const wt = h.json(['worktree', 'T1', '--agent', 'orchestrator']).path;
+  assert.equal(h.run(['spawn', '--task', 'T1', '--dry-run', '--json']).code, 0);
+  const other = path.join(h.base, 'other');
+  fs.cpSync(h.repo, other, { recursive: true });
+  const dotgit = path.join(wt, '.git');
+  const original = fs.readFileSync(dotgit, 'utf8');
+  h.git(['worktree', 'add', '-q', '--detach', path.join(h.base, 'other-wt'), 'main'], other);
+  for (const named of [path.join(other, '.git'), path.join(other, '.git', 'worktrees', 'other-wt')]) {
+    fs.writeFileSync(dotgit, `gitdir: ${named}\n`);
+    const r = h.run(['spawn', '--task', 'T1', '--dry-run', '--json']);
+    assert.notEqual(r.code, 0, named);
+    assert.match(r.stderr, /is not a worktree admin directory of/, named);
+  }
+  fs.writeFileSync(dotgit, original);
+  assert.equal(h.run(['spawn', '--task', 'T1', '--dry-run', '--json']).code, 0);
 });
