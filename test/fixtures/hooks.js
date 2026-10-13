@@ -184,6 +184,11 @@ function before(name, args) {
   // before it lets the supervisor launch the harness (the Windows handshake).
   if (env.HOOK_STOP_GO && name === 'writeFileSync' && typeof target === 'string' && path.basename(target) === 'go'
     && path.basename(process.argv[1]) === 'tower-crane.js' && first('go')) stop(env.HOOK_STOP_GO);
+  // HOOK_FAIL_EVENT_SYNC=1: the first sync of events.jsonl fails with EIO
+  // after its lines are written, as a failing disk reports it.
+  if (env.HOOK_FAIL_EVENT_SYNC && name === 'fsyncSync' && path.resolve(String(target)) === path.join(STATE, 'events.jsonl') && first('event-sync')) {
+    throw Object.assign(new Error('EIO: i/o error, fsync'), { code: 'EIO' });
+  }
   // HOOK_JITTER_MS=MS: a random pause of up to MS before each call on the state.
   if (env.HOOK_JITTER_MS && (inState(target) || inState(args[1]))) sleep(Math.floor(Math.random() * Number(env.HOOK_JITTER_MS)));
   // State commits precede board replacement; expose that interval to readers.
