@@ -188,6 +188,55 @@ test('a changelog failure goes to rework and the next revision gets a light chec
   assert.match(review, /## Diff/);
 });
 
+test('a light check takes the task tier, not the PR diff\'s size or risk rung', (t) => {
+  const h = setup(t);
+  // The fixture commits on main; move main back so the PR diff holds value.md.
+  h.git(['checkout', '-qb', 'change']);
+  h.git(['branch', '-f', 'main', 'HEAD~1']);
+  h.ok(['project', 'set', '--review-policy', JSON.stringify({ risk_paths: ['value.md'] })]);
+  assert.equal(prompt(h).preview.review_rung, 'hard');
+  fail(h, [claim('changelog.d/T1.md')]);
+  const { worker } = correctChangelog(h, 'The diagnostic reason is recorded in state.\n');
+  let { preview, text } = prompt(h);
+  assert.match(text, /## Light claim check/);
+  assert.equal(preview.review_rung, 'easy');
+  fs.writeFileSync(path.join(h.repo, 'value.md'), 'A new implementation.\n');
+  h.git(['add', '.']);
+  h.git(['commit', '-qm', 'Change implementation']);
+  h.ok(['submit', 'T1', '--agent', worker, '--sha', h.git(['rev-parse', 'HEAD'])], bound(worker));
+  ({ preview, text } = prompt(h));
+  assert.doesNotMatch(text, /## Light claim check/);
+  assert.equal(preview.review_rung, 'hard');
+});
+
+test('a late review of an older head at the reworked revision cannot select the light path', (t) => {
+  const h = setup(t);
+  fail(h, [claim('changelog.d/T1.md')]);
+  const commit = (text) => {
+    fs.writeFileSync(path.join(h.repo, 'changelog.d', 'T1.md'), text);
+    h.git(['add', '.']);
+    h.git(['commit', '-qm', 'Change changelog']);
+    return h.git(['rev-parse', 'HEAD']);
+  };
+  // The submitter replaces the head at revision 1; that head fails, and a reviewer
+  // of the first head records its verdict after it.
+  const second = commit('The reason is printed.\n');
+  h.ok(['submit', 'T1', '--agent', 'worker', '--sha', second], bound('worker'));
+  h.reviewer('T1', 'second-reviewer', second);
+  h.reviewer('T1', 'late-reviewer', h.sha);
+  h.ok(['evidence', 'T1', '--agent', 'second-reviewer', '--type', 'review', '--fail', '--sha', second,
+    '--summary', '1 blocker: the changelog claim is false.', '--findings', JSON.stringify([claim('changelog.d/T1.md')])]);
+  h.ok(['evidence', 'T1', '--agent', 'late-reviewer', '--type', 'review', '--fail', '--sha', h.sha, '--revision', '1',
+    '--summary', '1 blocker: the changelog claim is false.', '--findings', JSON.stringify([claim('changelog.d/T1.md')])]);
+  const back = h.json(['rework', '--from-review', 'T1', '--agent', 'orchestrator']);
+  assert.equal(back.revision, 2);
+  const worker = 'worker-T1-2';
+  h.ok(['claim', 'T1', '--agent', worker], bound(worker));
+  h.ok(['submit', 'T1', '--agent', worker, '--sha', commit('The reason is recorded in state.\n')], bound(worker));
+  // The latest revision-1 verdict reviewed the first head, not the one rework sent back.
+  assert.doesNotMatch(prompt(h).text, /## Light claim check/);
+});
+
 test('changelog correction diffs are prepared once outside the spawn state lock', (t) => {
   const h = setup(t);
   fail(h, [claim('changelog.d/T1.md')]);
