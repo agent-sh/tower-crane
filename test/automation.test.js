@@ -1238,6 +1238,10 @@ require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'public-http'))}).fet
       }
       const exit = await result;
       assert.equal(exit.code, 0, JSON.stringify(exit));
+      if (!idle) {
+        assert.equal(h.git(['worktree', 'list', '--porcelain']).match(/^worktree /gm).length, 1,
+          'shutdown removes the gate worktree registration before releasing the executor');
+      }
       const drained = forced || idle || stage === 'pr' ? 0 : 1;
       if (json) {
         const lines = stdout.trim().split('\n').map((line) => JSON.parse(line));
