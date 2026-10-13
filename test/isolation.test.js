@@ -384,8 +384,10 @@ test('a codex spawn on Bedrock starts with the region from the user config', { s
   assert.deepEqual(config.model_providers, PROVIDERS_KEPT);
   const profile = TOML.parse(fs.readFileSync(path.join(home, 'fixture-main.config.toml'), 'utf8'));
   assert.deepEqual(JSON.parse(JSON.stringify(profile.model_providers)), PROVIDERS_KEPT);
-  // An installed codex also loads the generated home with the spawn's -c
-  // overrides, so a field it refuses fails here instead of at dispatch.
+  // With TOWER_CRANE_LIVE_CODEX=1 the installed codex also loads the generated
+  // home with the spawn's -c overrides, so a field it refuses fails here
+  // instead of at dispatch. A non-live run never starts the real harness.
+  if (process.env.TOWER_CRANE_LIVE_CODEX !== '1') return t.diagnostic('set TOWER_CRANE_LIVE_CODEX=1 to load this home in the installed codex');
   const version = cp.spawnSync('codex', ['--version'], { encoding: 'utf8' });
   if (version.status !== 0) return t.diagnostic('codex is not installed; the stub alone checked startup');
   const overrides = spawned.flatMap((a, i) => (spawned[i - 1] === '-c' ? ['-c', a] : []));

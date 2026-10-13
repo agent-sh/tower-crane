@@ -7,7 +7,7 @@ const path = require('node:path');
 const cp = require('node:child_process');
 const { EventEmitter, once } = require('node:events');
 const { pathToFileURL } = require('node:url');
-const { makeRepo, BIN, ROOT } = require('./helpers');
+const { makeRepo, stubRungs, BIN, ROOT } = require('./helpers');
 
 const STUB = path.join(__dirname, 'fixtures', 'message-harness.js');
 const MOD = path.join(ROOT, 'hooks', 'tower-crane.mjs');
@@ -55,6 +55,8 @@ function readyLine(child) {
 
 function setup(t) {
   const h = makeRepo(t);
+  // An orchestrator wait refills workers for the ready task.
+  stubRungs(h);
   h.init();
   h.ok(['task', 'add', '--title', 'Wake', '--acceptance', 'events arrive']);
   h.ok(['brief', 'set', 'T1', '-'], { input: 'wake the orchestrator\n' });
