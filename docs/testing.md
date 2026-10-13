@@ -62,6 +62,8 @@ The trusted git-config refresh through `8d1acac8` retains the security probes an
 
 The base refresh through `c4f957c6` keeps main's file teardown, event-tail readers, deferred stack linking, first live-read delay and Windows ready line. Their new clock waits use process, event and file signals or the suite guard; the idle-wait probe that must reach its timeout carries a reason. The worker-slot lease test parses a complete claim record inside its repository wait. Injecting an empty first write into its harness fails the old reader with the CI shard's JSON parse error and passes the corrected one. The twelve refreshed files pass 335 of 336 tests, one skipped, in each of five loaded runs, and the full suite passes 2159 tests with 20 skipped and no failures.
 
+The base refresh through `1d2b8137` keeps main's post-discovery release clocks at the suite guard and its exit-aware startup waits through `waitUntil`. Main's new supervision snapshot test called the removed `until` helper and failed with a ReferenceError; it now waits on the repository signal. Wakeups, supervision and harness hooks pass 74 of 74 tests in each of five loaded runs, and the full suite at `5c7f3a76` passes 2163 tests with 20 skipped and no failures.
+
 ## Tools
 
 - `node scripts/test-cost.js [--before DIR] [files...]` measures CPU and wall seconds per file, median of three runs, four files at a time. With `--before`, it measures another checkout interleaved with this one.

@@ -27798,5 +27798,150 @@
       "log_sha256": "09f8a56af2f9fa9324159711e9aff58414a31b2c12d5ea45a6c07a0bc1867c93"
     },
     "raw_logs": "Task scratch; only relative artifact names and hashes are committed."
+  },
+  "base_1d2b8137_refresh": {
+    "base_head": "1d2b81373f238e18b2ee105615b53f1d7cbcf622",
+    "source": "5c7f3a76",
+    "changes": [
+      "Message-harness release clocks keep main's post-discovery start and use the suite guard.",
+      "The cold-discovery follower test keeps its exit-aware startup waits, now through waitUntil, and its discovery hold uses the suite guard.",
+      "Main's new supervision attempt-snapshot test called the removed until helper; it now waits through the repository signal. A call-site scan finds no other helper call without a binding."
+    ],
+    "supervision_failure_before_fix": "ReferenceError: until is not defined at supervision.test.js:1155 in the first merged run; 308 of 310 passed in that run, one skipped.",
+    "loaded_command": "node test/run.js --test-concurrency=3 test/wakeups.test.js test/supervision.test.js test/harness-hooks.test.js",
+    "cpu_load": "Shared 24-core host with other sessions running test suites; one-minute load 9 to 18 during the runs.",
+    "loaded_runs": [
+      {
+        "run": 1,
+        "status": 0,
+        "load_before": [
+          17.95,
+          16.82,
+          16.78
+        ],
+        "load_after": [
+          8.93,
+          13.77,
+          15.67
+        ],
+        "log": "loaded2-1.log",
+        "log_sha256": "6f01f3c24e3baf91db52c8e0563a5fe0dc21504d800842e92188914fd5394a05",
+        "tests": {
+          "tests": 74,
+          "pass": 74,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 0
+        }
+      },
+      {
+        "run": 2,
+        "status": 0,
+        "load_before": [
+          8.93,
+          13.77,
+          15.67
+        ],
+        "load_after": [
+          14.03,
+          13.7,
+          15.38
+        ],
+        "log": "loaded2-2.log",
+        "log_sha256": "79222b11378b628896cd4f00e9a256555ed6cae14bb532c37c9e07232788be3f",
+        "tests": {
+          "tests": 74,
+          "pass": 74,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 0
+        }
+      },
+      {
+        "run": 3,
+        "status": 0,
+        "load_before": [
+          14.03,
+          13.7,
+          15.38
+        ],
+        "load_after": [
+          14.92,
+          14.44,
+          15.47
+        ],
+        "log": "loaded2-3.log",
+        "log_sha256": "7f78237ecb77a9c86d8f5032bc7ecfc5b10640f5e18c0034e75858dbb60bac1e",
+        "tests": {
+          "tests": 74,
+          "pass": 74,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 0
+        }
+      },
+      {
+        "run": 4,
+        "status": 0,
+        "load_before": [
+          14.92,
+          14.44,
+          15.47
+        ],
+        "load_after": [
+          13.01,
+          14.02,
+          15.2
+        ],
+        "log": "loaded2-4.log",
+        "log_sha256": "0430c0ca8fd365449c43236bf9f1e100ab08336eee14c0f60aead67d045f1b09",
+        "tests": {
+          "tests": 74,
+          "pass": 74,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 0
+        }
+      },
+      {
+        "run": 5,
+        "status": 0,
+        "load_before": [
+          13.01,
+          14.02,
+          15.2
+        ],
+        "load_after": [
+          14.01,
+          13.74,
+          14.93
+        ],
+        "log": "loaded2-5.log",
+        "log_sha256": "227a322be223f092a0e80a8f43153338b2299920ce99307e39198d6c7d612076",
+        "tests": {
+          "tests": 74,
+          "pass": 74,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 0
+        }
+      }
+    ],
+    "full_suite": {
+      "command": "node test/run.js --test-concurrency=3",
+      "source": "5c7f3a76",
+      "status": 0,
+      "wall": "15m20s",
+      "tests": {
+        "tests": 2183,
+        "pass": 2163,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 20
+      },
+      "log": "full-2.log",
+      "log_sha256": "b0aaacb418b02b574315052687f4d363145a789e599f2041d7dad53ece0840b5"
+    },
+    "raw_logs": "Task scratch; only relative artifact names and hashes are committed."
   }
 }
