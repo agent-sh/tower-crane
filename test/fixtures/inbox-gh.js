@@ -17,6 +17,18 @@ if (data.fail || data.failEndpoint && args[1]?.includes(data.failEndpoint)) {
     pr.mergeCommit = { oid: pr.headRefOid };
   }
   result = pr;
+} else if (args[1].includes('/actions/runs?')) {
+  result = data.main_runs || [];
+} else if (args[1].includes('/actions/workflows')) {
+  result = data.workflows || [...new Set((data.main_runs || []).map((r) => r.workflow_id))].map((id) => ({ id, state: 'active' }));
+} else if (/\/actions\/runs\/\d+\/attempts\/\d+\/jobs/.test(args[1])) {
+  result = data.jobs?.[args[1].split('/')[5]] || [];
+} else if (/\/actions\/jobs\/\d+\/logs$/.test(args[1])) {
+  const text = data.logs?.[args[1].split('/')[5]];
+  if (text === undefined) {
+    console.error('HTTP 410: logs expired');
+    process.exitCode = 1;
+  } else process.stdout.write(text);
 } else if (/\/pulls\/\d+$/.test(args[1])) {
   const pr = data.prs[args[1].split('/').at(-1)];
   result = { head: { sha: pr.headRefOid }, base: { sha: pr.baseRefOid || 'b'.repeat(40) }, merge_commit_sha: pr.mergeRefOid || null };

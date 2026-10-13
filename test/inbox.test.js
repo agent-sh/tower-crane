@@ -801,3 +801,70 @@ test('review rework rechecks the verdict after fetching comments outside the sta
   assert.equal(task.evidence.findLast((e) => e.type === 'review').ok, true);
   assert.equal(fs.readFileSync(path.join(h.state, 'briefs', `${id}.md`), 'utf8'), original);
 });
+
+test('a red push or schedule run on the base shows in inbox and status until a later green run of its workflow', (t) => {
+  const h = setup(t);
+  const run = (id, number, event, status, conclusion) => ({ id, run_number: number, run_attempt: 1, workflow_id: 11, name: 'CI',
+    path: '.github/workflows/ci.yml', event, status, conclusion, head_sha: h.sha, html_url: `https://github.com/acme/demo/actions/runs/${id}` });
+  const job = (id, name, conclusion) => ({ id, name, status: 'completed', conclusion, html_url: `https://github.com/acme/demo/actions/runs/1/job/${id}` });
+  const linux = 'test (ubuntu-latest, node 26, shard 1/3)';
+  const log = (name) => ['TAP version 13', 'ok 1 - reads the config', `not ok 2 - ${name}`, '  ---',
+    "  error: 'expected /tmp/a to equal /tmp/b'", '  ...', '1..2']
+    .map((line, i) => `2026-10-13T03:20:0${i}.0000000Z ${line}`).join('\n') + '\n';
+  const github = h.github();
+  github.main_runs = [run(1001, 50, 'push', 'completed', 'failure')];
+  github.jobs = { 1001: [job(501, linux, 'failure'), job(502, 'test (windows-latest, node 26, shard 1/3)', 'success')] };
+  github.logs = { 501: log('resolves a linux path') };
+  h.save(github);
+  const red = () => h.inbox().items.filter((i) => i.kind.startsWith('main_ci_'));
+  const mainEvents = () => h.logs().filter((e) => e.cmd === 'main ci').length;
+
+  const [failed] = red();
+  assert.equal(failed.kind, 'main_ci_failed', JSON.stringify(red()));
+  assert.equal(failed.id, 'main_ci_failed:project:11');
+  assert.deepEqual(failed.jobs.map((j) => [j.name, j.conclusion, j.tests.map((x) => x.name)]), [[linux, 'failure', ['resolves a linux path']]]);
+  assert.match(failed.reason, /CI run 1001 attempt 1 \(push at .+\): failure/);
+  assert.deepEqual(failed.action.argv, ['task', 'add', '--title', 'Fix main CI: CI run 1001', '--kind', 'code', '--acceptance', 'CI on main is green']);
+  const status = h.ok(['status']);
+  assert.match(status, /main ci red: CI run 1001 attempt 1 \(push at /);
+  assert.ok(status.includes(`${linux}: failure; failing tests: resolves a linux path`), status);
+  assert.equal(h.json(['status']).main_ci_red[0].jobs[0].tests[0].error, "error: 'expected /tmp/a to equal /tmp/b'");
+  // An unchanged red run is read from the recorded event, not written again.
+  red();
+  assert.equal(mainEvents(), 1);
+  h.ok([...failed.action.argv, '--agent', 'orchestrator']);
+  const fix = h.json(['task', 'list']).find((x) => x.title === 'Fix main CI: CI run 1001');
+  assert.deepEqual(red()[0].action.argv, ['task', 'show', fix.id]);
+
+  // A later green run of the workflow, here the daily schedule at the same head, clears it.
+  github.main_runs.unshift(run(1002, 51, 'schedule', 'completed', 'success'));
+  h.save(github);
+  assert.deepEqual(red(), []);
+  assert.doesNotMatch(h.ok(['status']), /ci red/);
+
+  // A cancelled run with a newer run of its workflow was superseded and is not red.
+  github.main_runs.unshift(run(1004, 53, 'push', 'in_progress', null), run(1003, 52, 'push', 'completed', 'cancelled'));
+  h.save(github);
+  assert.deepEqual(red(), []);
+  assert.doesNotMatch(h.ok(['status']), /ci red/);
+
+  // Without a newer run, a cancelled run is not green.
+  github.main_runs.shift();
+  github.jobs[1003] = [job(503, linux, 'cancelled')];
+  h.save(github);
+  const [cancelled] = red();
+  assert.equal(cancelled.conclusion, 'cancelled');
+  assert.equal(cancelled.jobs[0].name, linux);
+  assert.match(cancelled.jobs[0].log_error, /logs expired/);
+  assert.match(h.ok(['status']), /main ci red: CI run 1003 attempt 1 \(push at .+\): cancelled/);
+
+  // The same test failing again on the base is a flaky-test item.
+  github.main_runs.unshift(run(1005, 54, 'push', 'completed', 'failure'));
+  github.jobs[1005] = [job(505, linux, 'failure')];
+  github.logs[505] = log('resolves a linux path');
+  h.save(github);
+  const flaky = red().find((i) => i.kind === 'main_ci_flaky');
+  assert.deepEqual([flaky.test, flaky.run, flaky.earlier_runs], ['resolves a linux path', 1005, [1001]]);
+  assert.deepEqual(flaky.action.argv, ['task', 'add', '--title', 'Flaky test on main CI: resolves a linux path', '--kind', 'code',
+    '--acceptance', 'resolves a linux path passes repeatably on main']);
+});
