@@ -100,7 +100,7 @@ for (const [harness, next] of [['claude', 'retry'], ['codex', 'retry'], ['claude
 test('sub-second usage requests obey the sampling floor and unchanged readings write once', async (t) => {
   const h = setup(t, 'claude', { usage_ms: 1 });
   const reads = path.join(h.base, 'reads');
-  h.json(['spawn', '--task', 'T1'], { env: h.liveEnv({ LIVE_STEPS: '1', LIVE_HOLD: 'until-stop', LIVE_READS: reads, LIVE_NO_CLAIM: '1' }) });
+  h.json(['spawn', '--task', 'T1'], { env: h.liveEnv({ LIVE_STEPS: '1', LIVE_HOLD: 'until-stop', LIVE_READS: reads, LIVE_READ_DELAY_MS: '250', LIVE_NO_CLAIM: '1' }) });
   await until(t, h, () => h.readState('tasks.json').tasks[0].spend.tokens === 1000, 'initial usage was not recorded');
   const readTimes = () => fs.readFileSync(reads, 'utf8').trim().split('\n').map(Number);
   await until(t, h, () => readTimes().length >= 3, 'the supervisor did not keep sampling');

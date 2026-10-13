@@ -572,11 +572,13 @@ An orchestrator still requires both technical settings when listed in `answerers
 
 ## Event wakeups
 
+`wait` and the automation it hosts tail `events.jsonl` while running. Idle fallback checks do not reread historical event bytes or unchanged validated state snapshots. Partial lines stay buffered. Truncating or replacing the log rebuilds retained history from its beginning; active waits resume wake delivery from the new end and do not replay restored records. Byte cursors belong to one log, so restart clients with a fresh cursor after replacing it.
+
 The orchestrator does not run a waiter of its own. Its harness delivers events into the session (table below); `tower-crane wait` is the interface underneath and the fallback for a harness with nothing better.
 
 | Orchestrator harness | Busy | Idle |
 | --- | --- | --- |
-| Claude Code, interactive, with this plugin | The mod `hooks/tower-crane.mjs` runs one `wait --follow` child per session and turns each line into a prompt with `$.prompt.submit`, queued until the turn ends; events arriving meanwhile go out together. An owner message sent with `--steer` joins the running turn (`$.session.append`) and is pushed again after the turn if the turn made no further model request | The queued prompt starts a turn |
+| Claude Code, interactive, with this plugin | The mod `hooks/tower-crane.mjs` runs one `wait --follow` child per session and turns each line into a prompt with `$.prompt.submit`, queued until the turn ends; events arriving meanwhile go out together. An owner message sent with `--steer` joins the running turn (`$.session.append`) and is pushed again after the turn if the turn made no further model request. An append that completes after its original turn ends is queued for the next turn | The queued prompt starts a turn |
 | Claude (`claude -p`) spawned on the orchestrator rung | Home `PostToolUse` and `UserPromptSubmit` hooks return the notice as `additionalContext` | Home `Stop` returns `decision: block` with pending events; with none and a task still open it blocks in `tower-crane wait` (hook timeout one day) and then blocks with the event |
 | Codex spawned on the orchestrator rung | The same home hooks in `config.toml` | The same blocking `Stop`; Codex has no asynchronous rewake |
 | pi, OpenCode | Their home adapters add the notice at tool boundaries (and OpenCode on `session.idle`) | Unsupported: no idle hold; use `tower-crane wait` |
@@ -692,6 +694,8 @@ With scripts enabled, a task sheet contains keyboard focus and makes the backgro
 The Settings view (`/settings`) edits the default harness, every rung and each task's tier when serve runs as the explicit owner. Other identities get a read-only Settings view with no edit controls and the command `tower-crane serve --agent owner` for enabling edits. Live Settings reloads use the same identity snapshot to restore disclosures, the focused control and every scroll container, including the ladder and tier panels, for both owners and read-only viewers. Position is kept in the tab's session storage only until the reload restores it. Further live writes arriving before restoration reuse the pending snapshot, and notifications for the displayed version are ignored. While a form has unsaved edits, a change on disk shows a notice instead of reloading the page. A form is read-only while its save is in flight, with its Save button showing `Saving...`. Saving a form reloads the page only when the other form has nothing unsaved; otherwise the saved form shows the server's state in place and the other keeps its edits. A save sends the values its edit was based on, so one made against a rung, default harness or tier that changed since the page loaded is refused, and the page says to reload.
 
 ### serve endpoints
+
+The server tails the event log for reloads and owner messages, and retains history for repeated page and message requests. Its directory watch has a one-second fallback check even when no watch error occurs. A replaced or truncated log rebuilds queryable message history, but SSE wakes resume from the new end without replaying restored messages.
 
 | Method and path | Does |
 |---|---|
