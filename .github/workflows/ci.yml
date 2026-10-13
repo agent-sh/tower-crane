@@ -85,8 +85,8 @@ jobs:
           TOWER_CRANE_TEST_TMP: ${{ runner.temp }}/tower-crane-tests
           TC_TEST_SHARD: ${{ matrix.shard }}
 
-  escalation-repeat:
-    name: test (windows-latest, escalation ten passes)
+  escalation-repeat-first:
+    name: test (windows-latest, escalation first five passes)
     runs-on: windows-latest
     timeout-minutes: 45
     steps:
@@ -96,10 +96,33 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 26
-      - name: Repeat the escalation file ten consecutive times
+      - name: Run the first five escalation passes
         shell: pwsh
         run: |
-          foreach ($attempt in 1..10) {
+          foreach ($attempt in 1..5) {
+            Write-Host "Windows escalation file: pass $attempt/10"
+            npm test -- test/escalation.test.js
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+        env:
+          TOWER_CRANE_TEST_TMP: ${{ runner.temp }}/tower-crane-tests
+
+  escalation-repeat:
+    name: test (windows-latest, escalation final five passes)
+    needs: escalation-repeat-first
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 26
+      - name: Run the final five escalation passes
+        shell: pwsh
+        run: |
+          foreach ($attempt in 6..10) {
             Write-Host "Windows escalation file: pass $attempt/10"
             npm test -- test/escalation.test.js
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

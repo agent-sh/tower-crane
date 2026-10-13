@@ -18,7 +18,7 @@ The same file also runs a CLI authority regression on either platform with a pro
 
 Windows shard 2/3 runs the Claude Code mod wakeup case twenty consecutive times, stopping on the first failure. It waits on prompt and append signals, then checks the steer's event id rather than the total prompt count. An ordinary worker message during the turn forces an independent wake to overlap with the steer, as delayed inbox reconciliation can do after the initial decision answer and worker message.
 
-A separate Windows job runs all of `test/escalation.test.js` ten consecutive times at the submitted head, stopping on the first failure. The replacement-worker sharing-error case uses acknowledged socket messages before claim, after claim, after attempt publication and after submission. It verifies progress without filesystem watchers and injects `EPERM`, `EACCES` and `EBUSY` into the replacement worker's rename.
+Two sequential Windows jobs run all of `test/escalation.test.js` five times each at the submitted head to verify ten consecutive passes, stopping on the first failure. Splitting the batch keeps the existing 45-minute job budget and 300-second test deadline. The replacement-worker sharing-error case uses acknowledged socket messages before claim, after claim, after attempt publication and after submission. It verifies progress without filesystem watchers and injects `EPERM`, `EACCES` and `EBUSY` into the replacement worker's rename.
 
 For projects Tower Crane manages, expensive proof is the default: the orchestrator pins `--tests-cmd "npm test" --tests-expensive true --tests-proof-cmd "node --test {tests}"`. A submission then runs the full suite once and proves the change with its own test files.
 
