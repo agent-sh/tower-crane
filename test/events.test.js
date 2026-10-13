@@ -11,8 +11,9 @@ const { cachedFixture, BIN, HOOKS, ROOT } = require('./helpers');
 const { gateFixture, gateEvidence } = require('./gate-helpers');
 
 function log(h) {
-  // A live writer can still be appending the final line.
-  return fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').split('\n').slice(0, -1).filter(Boolean).map(JSON.parse);
+  const raw = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8');
+  // A concurrent append becomes readable only when its final newline arrives.
+  return raw.slice(0, raw.lastIndexOf('\n') + 1).split('\n').filter(Boolean).map(JSON.parse);
 }
 
 function setup(t, flags = []) {
@@ -111,6 +112,28 @@ function commandWorker(h, argv) {
   h.ok(['ladder', 'set', 'medium', '--harness', 'command', '--command', JSON.stringify([...argv, '{prompt}']),
     ...['model', 'profile', 'provider', 'effort', 'args'].flatMap((field) => ['--clear', field])]);
 }
+
+test('log waits for a final newline and rejects malformed completed records', (t) => {
+  const h = setup(t);
+  const before = log(h);
+  const appended = { ...before.at(-1), id: 'Epending' };
+  const encoded = JSON.stringify(appended);
+  const file = path.join(h.state, 'events.jsonl');
+  const read = fs.readFileSync;
+  let tail = '';
+  t.mock.method(fs, 'readFileSync', function (target, ...args) {
+    const raw = read.call(this, target, ...args);
+    return target === file ? raw + tail : raw;
+  });
+  for (const suffix of [encoded.slice(0, -1), encoded]) {
+    tail = suffix;
+    assert.deepEqual(log(h), before, 'an append is unread until its newline arrives');
+  }
+  tail = `${encoded}\n`;
+  assert.deepEqual(log(h), [...before, appended]);
+  tail = '{"broken":}\n';
+  assert.throws(() => log(h), SyntaxError, 'completed records still have to be valid JSON');
+});
 
 test('readiness observes a CLI marker without directory watch notifications', async (t) => {
   const h = setup(t);
