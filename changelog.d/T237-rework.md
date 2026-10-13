@@ -1,0 +1,1 @@
+- Read only complete event-log records in event tests so a concurrent append cannot fail the merge-race probe with a JSON parse error.
