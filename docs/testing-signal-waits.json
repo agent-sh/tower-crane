@@ -27230,5 +27230,392 @@
       "cpu_load": "two nice -n 15 node processes evaluating Math.sqrt(Math.random()) continuously"
     },
     "raw_logs": "Task scratch rework-fallback-current; source checkpoints and raw-log hashes recorded."
+  },
+  "security_config_refresh": {
+    "base_head": "8d1acac8d46f2e45181242f212dbd4deec548e54",
+    "changes": [
+      "Preserve main trusted-config git commands and security assertions.",
+      "Worktree/spawn batching retains a single upload-pack count across preparation and dispatch, fresh heads and non-overlapping adds instead of reintroduced elapsed-time cutoffs.",
+      "Four new git-config subprocess watchdogs use the suite guard.",
+      "Git security spawn probes pin command harnesses because git configuration does not require native credential stores."
+    ],
+    "loaded_files": {
+      "test/worktree.test.js": [
+        {
+          "head": "029c96e7037a9f8badfa8a79cc7daabf827c884c",
+          "file": "test/worktree.test.js",
+          "run": 1,
+          "status": 0,
+          "wall_s": 56.64127478300361,
+          "load_before": [
+            17.54052734375,
+            17.150390625,
+            17.5
+          ],
+          "load_after": [
+            16.69091796875,
+            17.0546875,
+            17.45166015625
+          ],
+          "log_sha256": "cd67d4c41d2950d0fc71603497a3a771e0566ab19c137f0dd6c48ff808cebbdd",
+          "tests": {
+            "tests": 31,
+            "pass": 31,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        },
+        {
+          "head": "029c96e7037a9f8badfa8a79cc7daabf827c884c",
+          "file": "test/worktree.test.js",
+          "run": 2,
+          "status": 0,
+          "wall_s": 54.188556153996615,
+          "load_before": [
+            16.69091796875,
+            17.0546875,
+            17.45166015625
+          ],
+          "load_after": [
+            12.828125,
+            16.009765625,
+            17.07666015625
+          ],
+          "log_sha256": "d593ce4b742f850be8a588cc8b9c8fbb04e91e24fc398b80c0147ce519313f3c",
+          "tests": {
+            "tests": 31,
+            "pass": 31,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        },
+        {
+          "head": "029c96e7037a9f8badfa8a79cc7daabf827c884c",
+          "file": "test/worktree.test.js",
+          "run": 3,
+          "status": 0,
+          "wall_s": 53.68142363399966,
+          "load_before": [
+            12.828125,
+            16.009765625,
+            17.07666015625
+          ],
+          "load_after": [
+            14.09765625,
+            15.8310546875,
+            16.95751953125
+          ],
+          "log_sha256": "3e63801689ca5975f2175f1d1c98d25af7d0e873ba32c2e052b4756e4358536b",
+          "tests": {
+            "tests": 31,
+            "pass": 31,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        },
+        {
+          "head": "029c96e7037a9f8badfa8a79cc7daabf827c884c",
+          "file": "test/worktree.test.js",
+          "run": 4,
+          "status": 0,
+          "wall_s": 55.14236091100611,
+          "load_before": [
+            14.09765625,
+            15.8310546875,
+            16.95751953125
+          ],
+          "load_after": [
+            15.14501953125,
+            15.69677734375,
+            16.8330078125
+          ],
+          "log_sha256": "e8da5fc86edbf15e12720da3dc4c64e351f8e19729a012373b473956ea1aeff7",
+          "tests": {
+            "tests": 31,
+            "pass": 31,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        },
+        {
+          "head": "029c96e7037a9f8badfa8a79cc7daabf827c884c",
+          "file": "test/worktree.test.js",
+          "run": 5,
+          "status": 0,
+          "wall_s": 56.77291143700131,
+          "load_before": [
+            15.14501953125,
+            15.69677734375,
+            16.8330078125
+          ],
+          "load_after": [
+            16.82568359375,
+            15.89892578125,
+            16.82568359375
+          ],
+          "log_sha256": "8084b678eaeb9cb66221bb87fab52aab5a6577c6505ccd5552871f4095bb1ee2",
+          "tests": {
+            "tests": 31,
+            "pass": 31,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        }
+      ],
+      "test/git-config.test.js": [
+        {
+          "head": "37a6b50588497f79dda3f5538a8a1e1ad11de5e9",
+          "file": "test/git-config.test.js",
+          "run": 1,
+          "status": 0,
+          "wall_s": 8.581176156003494,
+          "load_before": [
+            12.6015625,
+            15.90966796875,
+            17.03857421875
+          ],
+          "load_after": [
+            12.7939453125,
+            15.89453125,
+            17.02734375
+          ],
+          "log_sha256": "bee11b4cde5c99551d0cb38bee4d08d7d0520a5761b7fbf692b1ebc5066dfd6f",
+          "tests": {
+            "tests": 38,
+            "pass": 38,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        },
+        {
+          "head": "37a6b50588497f79dda3f5538a8a1e1ad11de5e9",
+          "file": "test/git-config.test.js",
+          "run": 2,
+          "status": 0,
+          "wall_s": 8.578788719984004,
+          "load_before": [
+            12.7939453125,
+            15.89453125,
+            17.02734375
+          ],
+          "load_after": [
+            13.1396484375,
+            15.865234375,
+            17.0048828125
+          ],
+          "log_sha256": "4b55b139152167f5709d28f8d695c56e7eab13485f31266e1a80d0a534a1ea6b",
+          "tests": {
+            "tests": 38,
+            "pass": 38,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        },
+        {
+          "head": "37a6b50588497f79dda3f5538a8a1e1ad11de5e9",
+          "file": "test/git-config.test.js",
+          "run": 3,
+          "status": 0,
+          "wall_s": 9.03941284600296,
+          "load_before": [
+            13.1396484375,
+            15.865234375,
+            17.0048828125
+          ],
+          "load_after": [
+            13.6728515625,
+            15.88671875,
+            16.99951171875
+          ],
+          "log_sha256": "ffc708b972dee3814bc9c28722ac0c5da78c1dd7763bb6147136dfdb693915d8",
+          "tests": {
+            "tests": 38,
+            "pass": 38,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        },
+        {
+          "head": "37a6b50588497f79dda3f5538a8a1e1ad11de5e9",
+          "file": "test/git-config.test.js",
+          "run": 4,
+          "status": 0,
+          "wall_s": 8.983619886013912,
+          "load_before": [
+            13.6728515625,
+            15.88671875,
+            16.99951171875
+          ],
+          "load_after": [
+            13.48291015625,
+            15.77392578125,
+            16.951171875
+          ],
+          "log_sha256": "1a7a3434d6c00c05432b48327b39f233e44f88bb261b18d66333ea307f34bf80",
+          "tests": {
+            "tests": 38,
+            "pass": 38,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        },
+        {
+          "head": "37a6b50588497f79dda3f5538a8a1e1ad11de5e9",
+          "file": "test/git-config.test.js",
+          "run": 5,
+          "status": 0,
+          "wall_s": 9.289638539019506,
+          "load_before": [
+            13.48291015625,
+            15.77392578125,
+            16.951171875
+          ],
+          "load_after": [
+            13.8447265625,
+            15.81103515625,
+            16.95703125
+          ],
+          "log_sha256": "fb88c0b6c4e5c05e85efe3084fcc21b23566725440d960a1feb2c807aba97a3d",
+          "tests": {
+            "tests": 38,
+            "pass": 38,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        }
+      ]
+    },
+    "cpu_load_processes_per_runner": 2,
+    "peak_cpu_load_processes": 4,
+    "peak_named_test_workers": 4,
+    "wait_scan_before": [
+      {
+        "file": "test/worktree.test.js",
+        "findings": [
+          {
+            "line": 289,
+            "reason": "elapsed wall time is a pass condition"
+          },
+          {
+            "line": 302,
+            "reason": "elapsed wall time is a pass condition"
+          },
+          {
+            "line": 342,
+            "reason": "readiness deadline below the hung-test timeout"
+          },
+          {
+            "line": 358,
+            "reason": "readiness deadline below the hung-test timeout"
+          },
+          {
+            "line": 345,
+            "reason": "timer wait needs a signal or a wait-allow reason"
+          },
+          {
+            "line": 272,
+            "reason": "subprocess or test watchdog below the hung-test timeout"
+          },
+          {
+            "line": 349,
+            "reason": "subprocess or test watchdog below the hung-test timeout"
+          }
+        ]
+      },
+      {
+        "file": "test/git-config.test.js",
+        "findings": [
+          {
+            "line": 434,
+            "reason": "subprocess or test watchdog below the hung-test timeout"
+          },
+          {
+            "line": 487,
+            "reason": "subprocess or test watchdog below the hung-test timeout"
+          },
+          {
+            "line": 488,
+            "reason": "subprocess or test watchdog below the hung-test timeout"
+          },
+          {
+            "line": 512,
+            "reason": "subprocess or test watchdog below the hung-test timeout"
+          }
+        ]
+      }
+    ],
+    "wait_scan_after": "Whole real test tree passes check:shared.",
+    "shared_check": {
+      "artifact": "shared-security-green.log",
+      "sha256": "8880aac88b40d01ff7053bfa2fb201bb25e8f9e5875dd79ab705be11675e814d",
+      "footer": {}
+    },
+    "failed_security_sample": {
+      "artifact": "security-merge/resumed-test_git-config.test.js-1.log",
+      "sha256": "bb1da7a9b4ee36b9c6aaf19c4911a354fe074f330acae3ec4e74aa47a96b5ea8",
+      "footer": {
+        "tests": 38,
+        "pass": 37,
+        "fail": 1,
+        "cancelled": 0,
+        "skipped": 0
+      }
+    },
+    "failed_sample_note": "The original new fixture attempted native credential-store scanning in the sandbox and was refused by policy. The failed sample is excluded from passing counts. Pinning command harnesses preserves the planted git-config assertions while making the fixture independent of host credentials.",
+    "corrected_security_probe": {
+      "artifact": "security-merge/git-config-focused.log",
+      "sha256": "db5f383a9ef9edb99092e09bf94ac002c99185089029721053d451201f778296",
+      "footer": {
+        "tests": 1,
+        "pass": 1,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 0
+      }
+    },
+    "named_merge_consumers": {
+      "artifact": "security-merge/consumers.log",
+      "sha256": "4e9da7dd69e96e91747b85a308be0f00a02e079ee40052f26cec98fab09d9405",
+      "footer": {
+        "tests": 216,
+        "pass": 216,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 0
+      }
+    },
+    "named_files": [
+      "test/automation.test.js",
+      "test/gates/tests.test.js",
+      "test/worktree-metadata.test.js",
+      "test/worktree-lifecycle.test.js",
+      "test/stack.test.js",
+      "test/signal-waits.test.js"
+    ],
+    "affected_mutation": {
+      "id": "claim-hook-skips-undispatched-refresh",
+      "score": "1/1",
+      "baseline": "Green unmodified named stack baseline; no full-suite fallback.",
+      "log": {
+        "artifact": "security-merge/mutants.log",
+        "sha256": "38748ebab656e3fb503a5c85d51f1a78386581dd84310307a2cc39871d92bdee",
+        "footer": {}
+      }
+    },
+    "reproduction": {
+      "command": "node test/run.js --test-concurrency=1 FILE",
+      "cpu_load": "Two nice -n 15 node processes evaluating Math.sqrt(Math.random()) continuously per measurement runner."
+    },
+    "raw_logs": "Task scratch rework-fallback-current/security-merge; only relative artifacts and hashes are committed."
   }
 }

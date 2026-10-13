@@ -52,6 +52,8 @@ The fallback/worktree refresh through `29c5fc00` keeps repository and file signa
 
 The detached-stack fixture refresh records a model-swap CI failure caused by an incomplete final fixture read. Capturing that snapshot inside the repository signal wait retains the linked, submitted and PR-order assertions. A swapped-model probe with a forced incomplete read fails with the old test and passes after correction. The complete stack file passes 28/28 in five loaded runs; its affected claim-hook mutant is caught after a green baseline. Raw logs stay in task scratch, with relative artifact names and hashes in the receipt.
 
+The trusted git-config refresh through `8d1acac8` retains the security probes and trusted-config fixture hooks. Worktree dispatch uses its single upload-pack count across preparation and spawning instead of elapsed time; four new security subprocess guards use the suite minimum. Both files pass five loaded runs at recorded checkpoints. The initial security fixture was refused while scanning protected host credentials; command harnesses make its git checks independent of native credential stores, with the failed sample retained and a focused passing correction. Six named merge consumers pass, and the affected claim-hook mutant is caught after a green baseline.
+
 ## Tools
 
 - `node scripts/test-cost.js [--before DIR] [files...]` measures CPU and wall seconds per file, median of three runs, four files at a time. With `--before`, it measures another checkout interleaved with this one.
