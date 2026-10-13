@@ -14,6 +14,10 @@ const harness = path.join(__dirname, 'fixtures', 'automation-harness.js');
 
 function setup(t, { kind = 'code', ci = 'success', repo } = {}) {
   const h = repo || makeRepo(t);
+  // Sandboxed command harnesses create synthetic mount targets under their inherited TMPDIR.
+  const tmp = path.join(h.base, 'tmp');
+  fs.mkdirSync(tmp, { recursive: true });
+  Object.assign(h.env, { TMPDIR: tmp, TMP: tmp, TEMP: tmp });
   h.sha = gateFixture(h);
   h.init(['--repo', 'acme/demo', '--base', 'main']);
   const tools = path.join(h.base, 'tools');
@@ -2030,6 +2034,25 @@ function configureHarness(h, { rules = false } = {}) {
     JSON.stringify([process.execPath, harness, BIN, 'auto', '{prompt}']),
     ...['model', 'profile', 'provider', 'effort', 'args'].flatMap((f) => ['--clear', f])]);
 }
+
+test('automation command harness temp files stay inside its fixture', (t) => {
+  const h = setup(t);
+  configureHarness(h);
+  const script = `
+const fs = require('node:fs'), os = require('node:os'), path = require('node:path');
+const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'harness-child-'));
+fs.writeFileSync(path.join(process.env.AUTOMATION_CONTEXT_DIR, 'tmp.json'),
+  JSON.stringify({ tmp, winTmp: process.env.TMP, temp: process.env.TEMP }));
+`;
+  h.ok(['ladder', 'set', 'easy', '--command', JSON.stringify([process.execPath, '-e', script, '{prompt}'])]);
+  h.ok(['spawn', '--task', 'T1', '--wait', '--agent', 'orchestrator']);
+  const seen = JSON.parse(fs.readFileSync(path.join(h.env.AUTOMATION_CONTEXT_DIR, 'tmp.json'), 'utf8'));
+  // Remove the probe's temp directory even when containment fails.
+  fs.rmSync(seen.tmp, { recursive: true, force: true });
+  for (const dir of [seen.tmp, seen.winTmp, seen.temp]) {
+    assert.ok(dir && path.relative(h.base, dir).split(path.sep)[0] !== '..' && !path.isAbsolute(path.relative(h.base, dir)), dir);
+  }
+});
 
 for (const tier of ['medium', 'easy..medium']) {
 test(`automation reworks a current ${tier} failed review once with its full findings, even before software passes`, (t) => {
