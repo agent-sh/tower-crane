@@ -74,6 +74,18 @@ test('the npm package ships the plugin and loads pi skills through its CLI', (t)
   assert.ok(!files.some((file) => /^(test|scripts|research|tools|changelog\.d)\/|^\.tower-crane\//.test(file)),
     'tests, scripts, research, fragments and state stay out of the package');
   assert.ok(artifact.size < 2 * 1024 * 1024, `packed size ${artifact.size} bytes`);
+  // An installed copy has only the packed files, so a relative link must land on one of them;
+  // repository-only files are linked by their GitHub URL.
+  const broken = [];
+  for (const file of files.filter((f) => f.endsWith('.md'))) {
+    const text = fs.readFileSync(path.join(ROOT, file), 'utf8');
+    for (const [, link] of text.matchAll(/(?:\]\(|src="|srcset=")([^)"\s]+)/g)) {
+      if (/^(https?:|mailto:|#)/.test(link)) continue;
+      const target = path.posix.normalize(path.posix.join(path.posix.dirname(file), link.split('#')[0])).replace(/\/$/, '');
+      if (!files.some((f) => f === target || f.startsWith(`${target}/`))) broken.push(`${file}: ${link}`);
+    }
+  }
+  assert.deepEqual(broken, [], 'shipped Markdown links to files the package leaves out');
   const plugin = JSON.parse(fs.readFileSync(path.join(ROOT, '.claude-plugin/plugin.json'), 'utf8'));
   const marketplace = JSON.parse(fs.readFileSync(path.join(ROOT, '.claude-plugin/marketplace.json'), 'utf8'));
   for (const [where, version] of [['plugin.json', plugin.version], ['marketplace.json', marketplace.version],

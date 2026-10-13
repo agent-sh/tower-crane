@@ -139,15 +139,15 @@ Every task has a tier: `easy`, `medium`, `hard` or `research`. Kind and size pic
 - **review**: an independent reviewer passed this commit and revision.
 - **merge**: the PR head still matches the accepted commit, and the gates still pass, when it merges.
 
-On this repository's own history, gate failures were mostly right: precision 83.3% for tests and 93.3% for CI. A passing gate still misses most problems that review or CI find later: the tests gate's recall is 26.0%. Labels and method are in [docs/bench.md](docs/bench.md#gates).
+On this repository's own history, gate failures were mostly right: precision 83.3% for tests and 93.3% for CI. A passing gate still misses most problems that review or CI find later: the tests gate's recall is 26.0%. Labels and method are in [docs/bench.md](https://github.com/agent-sh/tower-crane/blob/main/docs/bench.md#gates).
 
 ## Board
 
-`tower-crane serve` shows the board on `127.0.0.1`, live over server-sent events. It answers two questions first: is work moving, and does anything need you. Run as `tower-crane serve --agent owner` at a terminal where `TOWER_CRANE_AGENT` is unset, it also answers decisions, takes comments, sends work back and edits the ladder. It never accepts, merges or waives a gate. `tower-crane render` writes the same board as a static `sketch.html` that loads nothing from the network.
+`tower-crane serve` shows the board on `127.0.0.1`, live over server-sent events. It answers two questions first: is work moving, and does anything need you. Run as `tower-crane serve --agent owner` at a terminal where `TOWER_CRANE_AGENT` is unset, it also answers decisions, takes comments, sends work back and edits the ladder. Its Controls view accepts a task with gate waivers, and an owner-required waiver opens a decision first. It never merges. `tower-crane render` writes the same board as a static `sketch.html` that loads nothing from the network.
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/images/board-dark.png">
-  <img src="docs/images/board-light.png" alt="The Tower Crane board for this repository's own run: decisions waiting for the owner, workers with their phase and lease, and ready tasks ordered by what they unblock" width="960">
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/agent-sh/tower-crane/main/docs/images/board-dark.png">
+  <img src="https://raw.githubusercontent.com/agent-sh/tower-crane/main/docs/images/board-light.png" alt="The Tower Crane board for this repository's own run: decisions waiting for the owner, workers with their phase and lease, and ready tasks ordered by what they unblock" width="960">
 </picture>
 
 This repository's own run, served by `tower-crane serve` at 1600x1000, light and dark theme. Design notes are in [docs/design.md](docs/design.md).
@@ -202,17 +202,17 @@ Next:
 
 ## Contributing
 
-Tower Crane is built with Tower Crane. The orchestrator plans each change as a task, a spawned worker opens the PR, a clean-context reviewer posts the review, and `tower-crane merge` lands it after the gates pass. In the [2026-10-08 snapshot](docs/bench.md#results), the median accepted task used 16.16M tokens (68 tasks with complete records) and cost $3.55 (the 60 of them with priced usage).
+Tower Crane is built with Tower Crane. The orchestrator plans each change as a task, a spawned worker opens the PR, a clean-context reviewer posts the review, and `tower-crane merge` lands it after the gates pass. In the [2026-10-08 snapshot](https://github.com/agent-sh/tower-crane/blob/main/docs/bench.md#results), the median accepted task used 16.16M tokens (68 tasks with complete records) and cost $3.55 (the 60 of them with priced usage).
 
 To contribute by hand:
 
 - Node 24 or newer, CommonJS, no npm dependencies.
-- Tests are integration tests that run the real CLI on a temporary git repository. A fix comes with a test that fails without it. Run only the files you touch: `npm test -- test/claim.test.js`. Set `TOWER_CRANE_TEST_TMP` to keep temp files off `/tmp`. [docs/testing.md](docs/testing.md) has the rest, including `node scripts/mutants.js`.
-- Add `changelog.d/<task-or-pr>.md` for each change and leave `CHANGELOG.md` alone; a release writes its section ([changelog.d/README.md](changelog.d/README.md)).
+- Tests are integration tests that run the real CLI on a temporary git repository. A fix comes with a test that fails without it. Run only the files you touch: `npm test -- test/claim.test.js`. Set `TOWER_CRANE_TEST_TMP` to keep temp files off `/tmp`. [docs/testing.md](https://github.com/agent-sh/tower-crane/blob/main/docs/testing.md) has the rest, including `node scripts/mutants.js`.
+- Add `changelog.d/<task-or-pr>.md` for each change and leave `CHANGELOG.md` alone; a release writes its section ([changelog.d/README.md](https://github.com/agent-sh/tower-crane/blob/main/changelog.d/README.md)).
 - After changing a command in `bin/tower-crane.js`, run `npm run docs:generate`.
 - Before opening a PR, run `npm run check:shared -- --base origin/main`.
 
-Rules for agents and people working here are in [AGENTS.md](AGENTS.md).
+Rules for agents and people working here are in [AGENTS.md](https://github.com/agent-sh/tower-crane/blob/main/AGENTS.md).
 
 ## License
 

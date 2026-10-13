@@ -4,7 +4,7 @@ const cp = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 const { check } = require('./cli-docs');
-const { fragments } = require('./changelog');
+const { fragments, released } = require('./changelog');
 const { normalizeText, readText } = require('./text');
 
 // Non-blocking stdin fails a bare read with EAGAIN; readStdin in lib/util.js retries it.
@@ -27,18 +27,27 @@ function checkStdinReads(root) {
   if (found.length) throw new Error(found.join('\n'));
 }
 
-// A release change adds the section for package.json's version as the first release
-// heading of CHANGELOG.md; every other change leaves the file alone.
+const RELEASE_HEADING = /^## [0-9]/;
+const body = (text) => text.replace(/^# Changelog\n/, '').trim();
+
+// A release change adds the section for package.json's version above the earlier
+// release notes, which stay byte for byte; every other change leaves the file alone.
+// Returns the released version, or null when the edit is not a release.
 function releaseEdit(root, git, sha) {
   let version;
-  try { version = JSON.parse(readText(path.join(root, 'package.json'))).version; } catch { return false; }
-  if (typeof version !== 'string' || !fs.existsSync(path.join(root, 'CHANGELOG.md'))) return false;
-  const heading = (text) => text.split('\n').find((line) => line.startsWith('## '));
-  const isVersion = (line) => line === `## ${version}` || (line || '').startsWith(`## ${version} `);
-  if (!isVersion(heading(readText(path.join(root, 'CHANGELOG.md'))))) return false;
+  try { version = JSON.parse(readText(path.join(root, 'package.json'))).version; } catch { return null; }
+  if (typeof version !== 'string' || !fs.existsSync(path.join(root, 'CHANGELOG.md'))) return null;
+  const isVersion = (line) => line === `## ${version}` || line.startsWith(`## ${version} `);
+  const after = body(readText(path.join(root, 'CHANGELOG.md')));
   let before = '';
-  try { before = normalizeText(git(['show', `${sha}:CHANGELOG.md`])); } catch { /* no archive at the base */ }
-  return !before.split('\n').some(isVersion);
+  try { before = body(normalizeText(git(['show', `${sha}:CHANGELOG.md`]))); } catch { /* no archive at the base */ }
+  if (before.split('\n').some(isVersion)) return null;
+  const frozen = before.split('\n').some((line) => RELEASE_HEADING.test(line));
+  // Earlier releases are frozen: their notes must be the unchanged tail of the file.
+  if (frozen && !after.endsWith(`\n${before}`)) return null;
+  const added = frozen ? after.slice(0, after.length - before.length) : after;
+  const releases = added.split('\n').filter((line) => RELEASE_HEADING.test(line));
+  return releases.length === 1 && isVersion(added.split('\n').find((line) => line.startsWith('## '))) ? version : null;
 }
 
 function checkChanges(root, base) {
@@ -51,12 +60,16 @@ function checkChanges(root, base) {
   }
   let added = 0;
   let changed = 0;
+  let release = null;
   for (let i = 0; i < fields.length; i += 2) {
     const status = fields[i];
     const file = fields[i + 1].replace(/\\/g, '/');
     changed++;
-    if (file === 'CHANGELOG.md' && (status === 'D' || !releaseEdit(root, git, sha))) {
-      throw new Error('do not edit CHANGELOG.md; add changelog.d/<task-or-pr>.md (only a release adds its "## <version>" section)');
+    if (file === 'CHANGELOG.md') {
+      release = status === 'D' ? null : releaseEdit(root, git, sha);
+      if (!release) {
+        throw new Error('do not edit CHANGELOG.md; add changelog.d/<task-or-pr>.md (only a release adds its "## <version>" section above the earlier notes)');
+      }
     }
     if (file.startsWith('changelog.d/') && file !== 'changelog.d/README.md') {
       // Fragments are draft release notes: a later change may correct one it made untrue, but not remove it.
@@ -65,6 +78,12 @@ function checkChanges(root, base) {
     }
   }
   if (changed && !added) throw new Error('every change needs a new changelog.d/<task-or-pr>.md fragment');
+  if (release) {
+    // Merging marks every fragment in the tree released; list them so the notes can be checked against them.
+    const done = released(root, sha);
+    const consumed = fragments(root).map((fragment) => fragment.name).filter((name) => !done.has(name));
+    process.stdout.write(`release ${release} marks ${consumed.length} fragments released: ${consumed.join(', ')}\n`);
+  }
 }
 
 function main(args) {

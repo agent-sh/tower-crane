@@ -9,22 +9,22 @@ const ROOT = path.join(__dirname, '..');
 
 const git = (root, args) => cp.execFileSync('git', args, { cwd: root, encoding: 'utf8', timeout: 30000 });
 
-// The newest first-parent commit that added or changed a release heading in CHANGELOG.md.
-function releaseCommit(root = ROOT) {
+// The newest first-parent commit up to REF that added or changed a release heading in CHANGELOG.md.
+function releaseCommit(root = ROOT, ref = 'HEAD') {
   return git(root, ['log', '--first-parent', '--diff-merges=first-parent', '-1', '--no-patch', '--format=%H',
-    '-G', '^## [0-9]', '--', 'CHANGELOG.md']).trim() || null;
+    '-G', '^## [0-9]', ref, '--', 'CHANGELOG.md']).trim() || null;
 }
 
 const names = (out) => out.split('\0').map((file) => file.trim()).filter(Boolean)
   .map((file) => file.replace(/\\/g, '/').slice('changelog.d/'.length));
 
 // Fragments in the tree of the latest release commit went into that release's notes,
-// unless a later commit added the name again.
-function released(root = ROOT) {
-  const sha = releaseCommit(root);
+// unless a later commit up to REF added the name again.
+function released(root = ROOT, ref = 'HEAD') {
+  const sha = releaseCommit(root, ref);
   if (!sha) return new Set();
   const later = new Set(names(git(root, ['log', '--first-parent', '--diff-merges=first-parent',
-    '--diff-filter=A', '--format=', '--name-only', '-z', `${sha}..HEAD`, '--', 'changelog.d/'])));
+    '--diff-filter=A', '--format=', '--name-only', '-z', `${sha}..${ref}`, '--', 'changelog.d/'])));
   return new Set(names(git(root, ['ls-tree', '-z', '--name-only', sha, '--', 'changelog.d/']))
     .filter((name) => !later.has(name)));
 }
