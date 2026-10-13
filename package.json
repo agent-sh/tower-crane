@@ -1,5 +1,5 @@
 {
-  "name": "@agentsys/tower-crane",
+  "name": "@agent-sh/tower-crane",
   "version": "0.1.0",
   "description": "Plan, dispatch, review and merge agent work from one issue to a whole project, with state in plain files and gates in software",
   "license": "MIT",

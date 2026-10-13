@@ -17,7 +17,7 @@ test('pack output parses from the npm 11 array and npm 12 object shapes', () => 
   for (const shape of ['npm-11', 'npm-12']) {
     const stdout = fs.readFileSync(path.join(ROOT, 'test/fixtures/npm-pack', `${shape}.json`), 'utf8');
     const artifact = packedArtifact(stdout);
-    assert.equal(artifact.name, '@agentsys/tower-crane', shape);
+    assert.equal(artifact.name, '@agent-sh/tower-crane', shape);
     assert.ok(artifact.files.some((file) => file.path === 'skills/tower-crane/SKILL.md'), shape);
   }
 });
@@ -40,7 +40,7 @@ test('the npm package ships the plugin and loads pi skills through its CLI', (t)
     { cwd: ROOT, env: h.env, encoding: 'utf8', timeout: 60000, shell: !process.env.npm_execpath && process.platform === 'win32' });
   assert.equal(packed.status, 0, packed.stderr);
   const artifact = packedArtifact(packed.stdout);
-  assert.equal(artifact.name, '@agentsys/tower-crane');
+  assert.equal(artifact.name, '@agent-sh/tower-crane');
   const metadata = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
   assert.deepEqual(metadata.bin, { 'tower-crane': 'bin/tower-crane.js' });
   const files = artifact.files.map((file) => file.path);

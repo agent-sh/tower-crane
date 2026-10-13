@@ -2,7 +2,7 @@
 
 ## 0.1.0 (2026-10-13)
 
-First release. Tower Crane is a CLI and a Claude Code plugin for handing software work to coding agents. An orchestrator plans the work into tasks, spawns a worker per task in its own worktree and sandbox, has each change reviewed by an agent that did not write it, and merges it once software gates pass. Install with `npm install -g @agentsys/tower-crane`; Node 24 or newer.
+First release. Tower Crane is a CLI and a Claude Code plugin for handing software work to coding agents. An orchestrator plans the work into tasks, spawns a worker per task in its own worktree and sandbox, has each change reviewed by an agent that did not write it, and merges it once software gates pass. Install with `npm install -g @agent-sh/tower-crane`; Node 24 or newer.
 
 ### Plan and state
 

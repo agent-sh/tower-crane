@@ -3,7 +3,7 @@
   <p><strong>Hand agents an issue or a whole project. Software keeps the plan, the gates and the merge.</strong></p>
   <p>
     <a href="https://github.com/agent-sh/tower-crane/actions/workflows/ci.yml"><img src="https://github.com/agent-sh/tower-crane/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-    <a href="https://www.npmjs.com/package/@agentsys/tower-crane"><img src="https://img.shields.io/npm/v/@agentsys/tower-crane.svg" alt="npm"></a>
+    <a href="https://www.npmjs.com/package/@agent-sh/tower-crane"><img src="https://img.shields.io/npm/v/@agent-sh/tower-crane.svg" alt="npm"></a>
     <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-64748B.svg" alt="License: MIT"></a>
   </p>
 </div>
@@ -31,7 +31,7 @@ You need Node 24 or newer, git, an authenticated `gh`, a GitHub repository with 
 Install the CLI and check it runs:
 
 ```sh
-npm install -g @agentsys/tower-crane
+npm install -g @agent-sh/tower-crane
 tower-crane --version
 ```
 
@@ -66,7 +66,7 @@ To let an agent do all of this, install the Claude Code plugin and hand the `tow
 
 | Channel | Command | State |
 |---|---|---|
-| npm | `npm install -g @agentsys/tower-crane` | the CLI |
+| npm | `npm install -g @agent-sh/tower-crane` | the CLI |
 | Claude Code plugin | `/plugin marketplace add agent-sh/tower-crane` then `/plugin install tower-crane@tower-crane` | the skills, agents, commands, MCP server and mod; needs the CLI on `PATH` |
 | From source | `git clone https://github.com/agent-sh/tower-crane.git` then `npm install -g ./tower-crane` | the CLI at `main` |
 
@@ -190,7 +190,7 @@ Not covered yet:
 
 ## Status
 
-0.1.0 is the first release, on npm as `@agentsys/tower-crane`. [CHANGELOG.md](CHANGELOG.md) lists what it does.
+0.1.0 is the first release, on npm as `@agent-sh/tower-crane`. [CHANGELOG.md](CHANGELOG.md) lists what it does.
 
 Works today: the state and the CLI, the software gates, independent review dispatch, stacks, the merge queue, spawn on all five harnesses with isolated homes on four of them, sandboxes and the state broker on Claude Code and Codex, the board, and the Claude Code plugin. This repository is built with it.
 
