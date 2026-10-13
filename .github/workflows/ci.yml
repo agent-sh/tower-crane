@@ -12,8 +12,11 @@ on:
 permissions:
   contents: read
 
+# GitHub keeps one running and one pending run per group; a newer run replaces the pending one.
+# Main pushes share one group: the newest pending head covers every earlier commit, and a running
+# main run is never cancelled. Scheduled and manual runs keep unique groups so none is replaced.
 concurrency:
-  group: ${{ github.event_name == 'pull_request' && format('ci-pr-{0}', github.event.pull_request.number) || format('ci-run-{0}', github.run_id) }}
+  group: ${{ github.event_name == 'pull_request' && format('ci-pr-{0}', github.event.pull_request.number) || github.event_name == 'push' && 'ci-main-push' || format('ci-run-{0}', github.run_id) }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:

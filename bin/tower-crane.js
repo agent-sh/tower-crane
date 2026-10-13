@@ -82,7 +82,7 @@ const SETTINGS = {
   'session-bus': str('JSON', 'owner-required: true lets claude worker sandboxes reach the user session bus, which lifts their confinement; false turns it off (docs/state.md#projectjson)'),
   'merge-admin': str('JSON', 'owner-required: true uses gh --admin for solely owned repos; false or null disables it'),
   'decision-delegation': str('JSON', 'owner only: {"orchestrator_technical": false} keeps technical decisions with the owner; the default is true; null clears'),
-  'review-policy': str('JSON', 'operational (orchestrator or owner): review diff limits, churn threshold and canonical model prices; null clears the policy'),
+  'review-policy': str('JSON', 'operational (orchestrator or owner): review diff limits, minimum reviewer rung, churn threshold and canonical model prices; null clears the policy'),
   'research-min-sources': int('N', 'owner-required: minimum distinct cited pages for research (default 10)'),
 };
 
