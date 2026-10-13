@@ -490,6 +490,15 @@ test('pricing identity drops Claude provider, context and Bedrock version suffix
   assert.equal(L.billing({ harness: 'claude' }, { CLAUDE_CODE_USE_BEDROCK: '1', AWS_PROFILE: 'fixture', AWS_REGION: 'eu-west-1' }), 'api');
   assert.equal(L.billing({ harness: 'claude' }, { CLAUDE_CODE_USE_BEDROCK: '0' }), 'subscription');
   assert.equal(L.billing({ harness: 'claude', provider: 'anthropic' }, { CLAUDE_CODE_USE_BEDROCK: '1' }), 'subscription');
+  // Every provider switch Claude Code reads is a metered route, with Claude Code's truthy spellings.
+  for (const name of ['BEDROCK', 'VERTEX', 'FOUNDRY', 'ANTHROPIC_AWS', 'ANTHROPIC_GOOGLE_CLOUD', 'MANTLE', 'GATEWAY']) {
+    for (const value of ['1', 'true', 'YES', ' on ']) {
+      assert.equal(L.billing({ harness: 'claude', model: 'claude-opus-5-5' }, { [`CLAUDE_CODE_USE_${name}`]: value }), 'api', `${name}=${value}`);
+    }
+    assert.equal(L.billing({ harness: 'claude' }, { [`CLAUDE_CODE_USE_${name}`]: 'off' }), 'subscription', `${name}=off`);
+    assert.equal(L.billing({ harness: 'claude', provider: 'anthropic' }, { [`CLAUDE_CODE_USE_${name}`]: '1' }), 'subscription', `pinned ${name}`);
+  }
+  assert.equal(L.billing({ harness: 'claude' }, { CLAUDE_CODE_USE_POWERSHELL_TOOL: '1' }), 'subscription');
 });
 
 test('Codex billing follows the configured provider rather than inherited credentials', (t) => {
@@ -509,6 +518,8 @@ test('Codex billing follows the configured provider rather than inherited creden
     ['invalid config', '[broken', undefined, {}, {}, null],
     ['invalid provider', 'model_provider = false', undefined, {}, {}, null],
     ['provider override', 'model_provider = "openai"', undefined, { args: ['-c', 'model_provider=amazon-bedrock'] }, {}, 'api'],
+    ['local Ollama', 'model_provider = "ollama"', undefined, {}, { OPENAI_API_KEY: 'fixture-key' }, null],
+    ['local LM Studio profile', 'model_provider = "openai"\n[profiles.sol]\nmodel_provider = "lmstudio"', undefined, { profile: 'sol' }, {}, null],
     ['last provider override wins', 'model_provider = "amazon-bedrock"', undefined, { args: ['-c', 'model_provider="amazon-bedrock"', '-c', 'model_provider="openai"'] }, {}, 'subscription'],
   ]) {
     const home = path.join(base, name);

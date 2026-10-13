@@ -264,6 +264,14 @@ test('bench prices Bedrock and 1M-context ids and a two-model run from canonical
   assert.ok(Math.abs(r.metered_usd - usd) < 1e-12, `${r.metered_usd} vs ${usd}`);
   assert.ok(Math.abs(r.list_usd - (usd + (40 + 4 * 5) / 1e6)) < 1e-12, `${r.list_usd}`);
   assert.match(h.ok(['bench', 'tokens', '--prices', prices]), /^metered USD \(api billing\): \$0\.00; list-price equivalent of all priced spend: \$0\.00$/m);
+  // A record from before per-model rows joined its ids; it is named as such, not as a missing price row.
+  const legacy = h.readState('tasks.json');
+  const t2 = legacy.tasks.find((task) => task.id === 'T2');
+  t2.spend.entries.push({ ...t2.spend.entries[0], source: 'manual', cost_usd: null,
+    model: 'claude-opus-5-5[1m], global.anthropic.claude-haiku-4-5-20251001' });
+  h.writeState('tasks.json', legacy);
+  assert.deepEqual(h.json(['bench', 'tokens', '--prices', prices]).unpriced_models,
+    { 'legacy joined: claude-opus-5-5 + claude-haiku-4-5-20251001': 1 });
 });
 
 test('Codex Bedrock profiles record api billing and contribute to metered USD without launch keys', (t) => {
@@ -315,6 +323,8 @@ test('a resumed Claude run prices only what it ran, with the baseline off each m
   assert.equal(two.model, 'claude-haiku-5-5');
   assert.deepEqual(two.models.map((r) => [r.model, r.tokens]), [['claude-opus-5-5', 50], ['claude-haiku-5-5', 100]]);
   assert.ok(Math.abs(entryCost(two, rates) - (50 * 20 + 100 * 5) / 1e6) < 1e-12);
+  // A resumed run that added nothing keeps the model name for telemetry.
+  assert.equal(usageSince(parse('claude', earlier), parse('claude', earlier)).model, 'claude-opus-5-5');
 });
 
 async function collected(h, length = 1, timeout = 15000, task = 'T1') {

@@ -153,6 +153,9 @@ for (const [provider, other, model, plain] of [
     h.login();
     h.aws();
     h.env.CLAUDE_CODE_USE_VERTEX = '1';
+    h.env.CLAUDE_CODE_USE_ANTHROPIC_AWS = '1';
+    h.env.CLAUDE_CODE_USE_GATEWAY = '1';
+    h.env.CLAUDE_CODE_USE_MANTLE = '1';
     h.env.ANTHROPIC_API_KEY = 'stub-secret-env-value';
     h.env.TOWER_CRANE_TEST_FAIL_PROVIDER = provider;
     h.primary(provider, model);
@@ -174,6 +177,10 @@ for (const [provider, other, model, plain] of [
       assert.deepEqual(attempt.claim, attempts[0].claim);
       assert.equal(attempt.provider_env.CLAUDE_CODE_USE_VERTEX, '0');
       assert.equal(attempt.provider_env.CLAUDE_CODE_USE_FOUNDRY, '0');
+      assert.equal(attempt.provider_env.CLAUDE_CODE_USE_ANTHROPIC_AWS, '0');
+      assert.equal(attempt.provider_env.CLAUDE_CODE_USE_GATEWAY, '0');
+      // Mantle is a Bedrock endpoint, so only the first-party pin turns it off.
+      assert.equal(attempt.provider_env.CLAUDE_CODE_USE_MANTLE, attempt.provider === 'bedrock' ? '1' : '0');
       assert.equal(attempt.provider_env.ANTHROPIC_MODEL, attempt.model);
       if (attempt.provider === 'bedrock') {
         assert.equal(attempt.provider_env.AWS_PROFILE, 'personal');
@@ -370,4 +377,16 @@ test('a Bedrock switch in the user settings file bills a rung that names no prov
   fs.writeFileSync(path.join(from.claude.dir, 'settings.json'), JSON.stringify({ env: { CLAUDE_CODE_USE_BEDROCK: '1' } }));
   assert.equal(L.billing({ harness: 'claude' }, {}), 'subscription', 'the launch environment alone does not show the route');
   assert.equal(L.billing({ harness: 'claude' }, P.routedEnv({}, from)), 'api');
+});
+
+test('an apiKeyHelper in the user settings file bills as api unless an OAuth token comes first', () => {
+  const base = fs.realpathSync.native(fs.mkdtempSync(path.join(TMP_ROOT, 'claude-provider-helper-')));
+  const from = { claude: { dir: path.join(base, 'claude') } };
+  fs.mkdirSync(from.claude.dir, { recursive: true });
+  assert.equal(L.billing({ harness: 'claude' }, {}, from), 'subscription', 'no settings file is a login');
+  fs.writeFileSync(path.join(from.claude.dir, 'settings.json'), JSON.stringify({ apiKeyHelper: 'print-key' }));
+  for (const rung of [{ harness: 'claude' }, { harness: 'claude', provider: 'anthropic' }]) {
+    assert.equal(L.billing(rung, P.routedEnv({}, from), from), 'api');
+    assert.equal(L.billing(rung, P.routedEnv({ CLAUDE_CODE_OAUTH_TOKEN: 'fixture' }, from), from), 'subscription');
+  }
 });
