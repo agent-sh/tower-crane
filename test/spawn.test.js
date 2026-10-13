@@ -8,7 +8,7 @@ const net = require('node:net');
 const cp = require('node:child_process');
 const { once } = require('node:events');
 const { pathToFileURL } = require('node:url');
-const { cachedFixture, pinRung, real, BIN, ROOT, PTY_AVAILABLE } = require('./helpers');
+const { cachedFixture, pinRung, real, BIN, ROOT, PTY_AVAILABLE, makeTaskRepo } = require('./helpers');
 const stack = require('./stack-fixture');
 const A = require('../lib/agents');
 const S = require('../lib/state');
@@ -598,6 +598,35 @@ require('node:fs').writeFileSync(${JSON.stringify(out)}, JSON.stringify({
   assert.equal(fs.readFileSync(marker, 'utf8'), 'ran');
 });
 
+test('command brief copies default to the user cache and keep explicit temp overrides', (t) => {
+  const h = setup(t);
+  const out = path.join(h.base, 'brief-location.json');
+  commandRung(h, 'medium', [process.execPath, '-e',
+    "require('node:fs').writeFileSync(process.argv[1], JSON.stringify({ file: process.argv[2], text: require('node:fs').readFileSync(process.argv[2], 'utf8') }))",
+    out, '{brief}']);
+  const cache = process.platform === 'win32'
+    ? path.join(h.env.HOME, 'AppData', 'Local')
+    : path.join(h.env.HOME, '.cache');
+  const env = { USERPROFILE: h.env.HOME, XDG_CACHE_HOME: '', LOCALAPPDATA: '', TOWER_CRANE_TMP: '', TOWER_CRANE_TEST_TMP: '' };
+  const expected = path.join(cache, 'tower-crane');
+  const planned = dry(h, 'medium', env);
+  const file = planned.argv.find((arg) => arg.endsWith('-brief.md'));
+  assert.equal(path.dirname(file), expected);
+  assert.equal(fs.existsSync(file), false, 'dry-run does not create a brief');
+  h.ok(['spawn', '--task', 'T1', '--wait'], { env });
+  const seen = JSON.parse(fs.readFileSync(out, 'utf8'));
+  assert.equal(path.dirname(seen.file), expected);
+  assert.match(seen.text, /webhook handler/);
+  assert.equal(fs.existsSync(seen.file), false, 'the cache brief is removed after the command exits');
+  for (const overrides of [
+    { TOWER_CRANE_TEST_TMP: path.join(h.base, 'test-tmp') },
+    { TOWER_CRANE_TEST_TMP: path.join(h.base, 'test-tmp'), TOWER_CRANE_TMP: path.join(h.base, 'spawn-tmp') },
+  ]) {
+    const next = dry(h, 'medium', { ...env, ...overrides }).argv.find((arg) => arg.endsWith('-brief.md'));
+    assert.equal(path.dirname(next), overrides.TOWER_CRANE_TMP || overrides.TOWER_CRANE_TEST_TMP);
+  }
+});
+
 test('command brief placeholders point to role-filtered temporary copies', async (t) => {
   const h = setup(t);
   h.ok(['brief', 'set', 'T1', '-'], {
@@ -983,4 +1012,29 @@ test('spawn refuses a stacked rework with claim\'s reason when its dependency we
   assert.match(r.stderr, /T2 is blocked: depends on T1 \(in_progress\)/);
   assert.doesNotMatch(r.stderr, /prepared on T1|before dispatch/);
   assert.equal(f.h.json(['task', 'show', 'T2']).status, 'rework');
+});
+
+// A worker writes its worktree's `.git` file. The directory it names is
+// granted to the next sandbox in that worktree, so it must be an admin
+// directory of this repository.
+test('a spawn refuses a worktree whose .git file names a git directory of another repository', (t) => {
+  const h = makeTaskRepo(t, [{ args: ['--title', 'Grant', '--acceptance', 'works'], brief: 'Do it.\n' }]);
+  const wt = h.json(['worktree', 'T1', '--agent', 'orchestrator']).path;
+  assert.equal(h.run(['spawn', '--task', 'T1', '--dry-run', '--json']).code, 0);
+  const other = path.join(h.base, 'other');
+  fs.cpSync(h.repo, other, { recursive: true });
+  const dotgit = path.join(wt, '.git');
+  const original = fs.readFileSync(dotgit, 'utf8');
+  // Git hides a worktree's .git file on Windows, and opening a hidden file for
+  // writing fails there, so it is replaced rather than rewritten.
+  const rewrite = (text) => { fs.rmSync(dotgit); fs.writeFileSync(dotgit, text); };
+  h.git(['worktree', 'add', '-q', '--detach', path.join(h.base, 'other-wt'), 'main'], other);
+  for (const named of [path.join(other, '.git'), path.join(other, '.git', 'worktrees', 'other-wt')]) {
+    rewrite(`gitdir: ${named}\n`);
+    const r = h.run(['spawn', '--task', 'T1', '--dry-run', '--json']);
+    assert.notEqual(r.code, 0, named);
+    assert.match(r.stderr, /is not a worktree admin directory of/, named);
+  }
+  rewrite(original);
+  assert.equal(h.run(['spawn', '--task', 'T1', '--dry-run', '--json']).code, 0);
 });

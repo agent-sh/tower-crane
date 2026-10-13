@@ -45,6 +45,10 @@ The cleanup gate runs the deslop detector. Its own eval files label its checks t
 
 ## Token bench
 
+Accepted hotfixes stay in the accepted total and token calculations.
+`accepted_hotfix` counts them separately, and each task row's `hotfix`
+boolean identifies them.
+
 Tokens come from `spend.entries`. Every harness parser records input inclusive of cache reads, so fresh input is `input - cached`, and the bench reports fresh input, cache reads and output separately before any comparison. A task is complete when it has a positive recorded token total, no unknown or live token entries, and a spend record for every recorded spawned session, including workers and reviewers. Automatic records match their `spawn:<agent>` source IDs, including resumed-attempt, fallback-route and fresh-retry suffixes. A native manual token report matches its agent and dispatch time window; a report from before a resumed dispatch cannot cover that new session. Minute-only manual entries do not cover a session, while explicitly recorded zero tokens do. JSON lists unmatched source IDs in `missing_spawns`. Token and USD medians, including path and rung groups, use complete accepted tasks only.
 
 An entry with a `live` marker is incomplete even when it has measured tokens and cost, or its latest reading is stale. Exit collection must remove that marker before the task can enter any median or mean. Each live or unknown token entry contributes once to the task row's `unknown` count. Its recorded tokens still contribute to `all_tasks_tokens` and `tokens_per_accepted`.
