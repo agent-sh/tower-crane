@@ -20,8 +20,27 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # Same-repository PRs pass the full local tests gate before submit, so hosted CI only
+  # validates the shared files. Fork PRs, main pushes, daily and manual runs run the test matrix.
+  checks:
+    name: checks (shared files)
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 26
+      - run: npm run check:shared
+        env:
+          TOWER_CRANE_CHANGE_BASE: ${{ github.event.pull_request.base.sha }}
+
   test:
     name: test (${{ matrix.os }}, node ${{ matrix.node }}, shard ${{ matrix.shard }})
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
     runs-on: ${{ matrix.os }}
     # Full CLI suites use the same 45-minute bound as the software tests gate.
     # The runner still bounds each test independently.
