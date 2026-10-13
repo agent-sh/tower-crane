@@ -66,11 +66,6 @@ test('package support, CI matrix, and required jobs target Node 24 and 26', () =
   }
   assert.deepEqual(jobNames(matrix), REQUIRED);
 
-  const requiredJson = JSON.stringify(REQUIRED);
-  for (const file of ['docs/state.md', 'docs/cli.md']) {
-    const text = fs.readFileSync(path.join(root, file), 'utf8');
-    assert.ok(text.includes(requiredJson), `${file} has stale required job names`);
-  }
   const agents = fs.readFileSync(path.join(root, 'AGENTS.md'), 'utf8');
   assert.match(agents, /\bNode 24 or newer\b/);
 });
@@ -101,6 +96,8 @@ test('PRs run Windows shards, proofs and shared checks; other events run all nin
     assert.doesNotMatch(job, /^ {4}if:/m, `${id} also runs on pull requests`);
     assert.match(job, /- run: node scripts\/probe-/);
   }
+  assert.match(workflow, /^concurrency:\n {2}group: ci-\$\{\{ github\.event\.pull_request\.number \|\| github\.ref \}\}\n {2}cancel-in-progress: \$\{\{ github\.event_name == 'pull_request' \}\}\n/m,
+    'superseded runs are grouped by PR and cancellation applies only to PR events');
 });
 
 test('the stack section says hosted CI runs on every stack member at its own base', () => {
@@ -167,6 +164,21 @@ function fixture(t, withPr = true) {
     },
   };
 }
+
+test('documented PR job lists pass CI with Windows-only check runs', (t) => {
+  const root = path.resolve(__dirname, '..');
+  const names = jobNames(workflowMatrix(readWorkflow(root), 'pull_request'));
+  const h = fixture(t);
+  for (const file of ['docs/state.md', 'docs/cli.md']) {
+    const text = fs.readFileSync(path.join(root, file), 'utf8');
+    const documented = text.match(/(?:PR test jobs are|matrix jobs have these full names:)\s+`(\[[^`]+\])`/);
+    assert.ok(documented, `${file} documents the PR job names`);
+    const required = JSON.parse(documented[1]);
+    const r = h.check({ ci: { required }, runs: [...CODEQL, ...names.map((name) => run(name))] });
+    assert.equal(r.code, 0, `${file}: ${r.summary}`);
+    assert.deepEqual(required, names, `${file} requires every PR shard`);
+  }
+});
 
 test('T71 regression: conflicts block CodeQL successes plus a capped review with no test workflow', (t) => {
   const r = fixture(t).check({
