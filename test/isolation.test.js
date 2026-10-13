@@ -1096,14 +1096,14 @@ test('browser spawns use the original user kit through a nested isolated home an
 // 'none' path hidden, then the writable ones, so only a writable rule inside
 // a hidden path reopens it. A special path stands for what codex resolves it
 // to: :root for /, :minimal for the system directories, :tmpdir for the
-// TMPDIR codex started with. :slash_tmp is left out: a fixture's home sits in
-// /tmp when TOWER_CRANE_TEST_TMP is unset, where no real home does.
+// TMPDIR codex started with, :slash_tmp for /tmp.
 const CODEX_MINIMAL = ['/bin', '/sbin', '/usr', '/etc', '/lib', '/lib64', '/nix/store', '/run/current-system/sw'];
 function codexTargets(seen, p) {
   if (!p.startsWith(':')) return [p];
   if (p === ':root') return [path.parse(process.cwd()).root];
   if (p === ':minimal') return CODEX_MINIMAL;
   if (p === ':tmpdir') return seen.tmpdir && path.isAbsolute(seen.tmpdir) ? [seen.tmpdir] : [];
+  if (p === ':slash_tmp') return ['/tmp'];
   return [];
 }
 
@@ -1238,10 +1238,11 @@ test('a project sandbox path inside a hidden credential store, or a writable one
   }
 });
 
-test('a codex agent\'s temp directory is its own, never the caller\'s TMPDIR', { skip: NO_STUBS }, t => {
+test('a codex agent\'s temp directory is its own, never the caller\'s TMPDIR or /tmp', { skip: NO_STUBS }, t => {
   // Found in review 2026-10-13: codex resolves :tmpdir from the TMPDIR it
   // starts with, so with the caller's TMPDIR under the home (~/.cache/tct
   // here) every codex agent read and wrote other tasks' scratch and fixtures.
+  // :slash_tmp gave it the host's /tmp, which every other process shares.
   const { h, u } = setup(t);
   const caller = path.join(u.home, '.cache', 'tct');
   const planted = path.join(caller, 'other-task', 'fixture.txt');
@@ -1253,6 +1254,7 @@ test('a codex agent\'s temp directory is its own, never the caller\'s TMPDIR', {
     const seen = u.report();
     const rules = seen.config.permissions['tower-crane'].filesystem;
     assert.equal(commandsRead(seen, planted), false, `${rung}: the caller's TMPDIR stays hidden`);
+    assert.equal(commandsRead(seen, '/tmp/another-session/scratch.txt'), false, `${rung}: the host's /tmp stays hidden`);
     assert.ok(seen.tmpdir && !seen.tmpdir.startsWith(caller), `${rung}: codex starts with a TMPDIR of its own, not ${seen.tmpdir}`);
     const writes = Object.keys(rules).filter((p) => rules[p] === 'write' && !p.startsWith(':'));
     assert.ok(writes.some((w) => seen.tmpdir === w || seen.tmpdir.startsWith(w + path.sep)), `${rung}: the agent writes its own temp directory`);
@@ -1312,6 +1314,7 @@ test('codex keeps its profile under the argument limit however many entries the 
   const after = rules();
   assert.equal(Object.keys(after).length, before, 'no rule per entry');
   const bytes = Buffer.byteLength(codexProfileArg(after)) + 1;
+  t.diagnostic(`codex profile: ${Object.keys(after).length} rules, ${bytes} bytes`);
   assert.ok(bytes < MAX_ARG_STRLEN, `the profile argument is ${bytes} bytes`);
   // What sits beside the home is hidden; what the agent needs there is named.
   const seen = { harness: 'codex', config: { permissions: { 'tower-crane': { filesystem: after } } } };
