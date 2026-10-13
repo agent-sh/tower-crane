@@ -79,7 +79,7 @@ test('pull requests run CI for every base, with main pushes, daily and manual fu
   assert.match(workflow, /^ {2}workflow_dispatch:\s*$/m);
 });
 
-test('PRs run Windows shards and shared checks; other events run all nine shards, proofs and repeats', () => {
+test('same-repo PRs run the shared check, fork PRs the Windows shards; other events run all nine shards, proofs and repeats', () => {
   const workflow = readWorkflow(path.resolve(__dirname, '..'));
   assert.deepEqual(jobNames(workflowMatrix(workflow, 'pull_request')), REQUIRED.filter((name) => name.includes('windows-latest')));
   for (const event of ['push', 'schedule', 'workflow_dispatch']) {
@@ -88,7 +88,14 @@ test('PRs run Windows shards and shared checks; other events run all nine shards
   assert.equal([...workflow.matchAll(/^ {2}test:\n/gm)].length, 1, 'one test job owns the matrix');
   assert.match(workflow, /^ {4}name: test \(\$\{\{ matrix\.os \}\}, node \$\{\{ matrix\.node \}\}, shard \$\{\{ matrix\.shard \}\}\)$/m);
   const testJob = workflow.split('\n  test:\n')[1].split(/\n {2}[\w-]+:\n/)[0];
-  assert.doesNotMatch(testJob, /^ {4}if:/m, 'the test job runs on every workflow event');
+  // Same-repository PRs run only the shared-files check; fork PRs and every other event run the matrix.
+  const FORK = "github.event.pull_request.head.repo.full_name";
+  assert.ok(testJob.includes(`    if: github.event_name != 'pull_request' || ${FORK} != github.repository\n`), 'the test job skips same-repository PRs only');
+  const checks = workflow.split('\n  checks:\n')[1].split(/\n {2}[\w-]+:\n/)[0];
+  assert.ok(checks.includes(`    if: github.event_name == 'pull_request' && ${FORK} == github.repository\n`), 'the checks job runs on same-repository PRs only');
+  assert.match(checks, /^ {4}name: checks \(shared files\)$/m);
+  assert.match(checks, /- run: npm run check:shared\n {8}env:\n {10}TOWER_CRANE_CHANGE_BASE: \$\{\{ github\.event\.pull_request\.base\.sha \}\}/);
+  assert.doesNotMatch(checks, /npm test/, 'the PR check does not run the suite');
   assert.match(testJob, /- run: npm run check:shared/);
   assert.match(testJob, /- run: npm test\n[\s\S]*TC_TEST_SHARD: \$\{\{ matrix\.shard \}\}/);
   for (const id of ['gate-scratch', 'model-swap']) {
@@ -171,7 +178,7 @@ function fixture(t, withPr = true) {
   };
 }
 
-test('documented PR job lists pass CI with Windows-only check runs', (t) => {
+test('documented fork PR job lists pass CI with Windows-only check runs', (t) => {
   const root = path.resolve(__dirname, '..');
   const names = jobNames(workflowMatrix(readWorkflow(root), 'pull_request'));
   const h = fixture(t);
