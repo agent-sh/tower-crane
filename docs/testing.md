@@ -46,6 +46,8 @@ The executor-capacity refresh through `c26563bd` retains watchers until T3 gate 
 
 The final base through `4f0ae5fc` enables the configured environment for live host-only tests on the host. Fifty named gate, host-selection and runner checks pass after that merge. The loaded measurements retain their earlier source checkpoints, and real live host-only files are not selected locally.
 
+The browser account-cache refresh through `8b4697d9` keeps the suite guard and main's simulated account-home, deep-cache, allocation-refusal and teardown checks. Browser startup passes nine tests in each of five loaded runs at `b91149ab`; seven named merge consumers pass, and two tests-gate proof mutants are caught after a green baseline. A writable short test root supplies the simulated account; the earlier direct shallow-cache override is superseded. Earlier measurements retain their source checkpoints.
+
 ## Tools
 
 - `node scripts/test-cost.js [--before DIR] [files...]` measures CPU and wall seconds per file, median of three runs, four files at a time. With `--before`, it measures another checkout interleaved with this one.

@@ -26228,5 +26228,197 @@
         "sha256": "41376bf346808f81713562acf872b62bc402f7a0d39ab77c951984af383c8a7f"
       }
     }
+  },
+  "browser_account_cache_refresh": {
+    "previous_head": "d8ce4c8e1f829008032dd250c71ba8904d982b10",
+    "base_head": "8b4697d9bad48a4f584a67dcac81d281fb083a9d",
+    "changes": [
+      "Keep main simulated account-home, deep task-cache, allocation-refusal and teardown assertions.",
+      "Retain the suite subprocess guard and successful-launch report assertion.",
+      "Main accountHome fixture replaces the earlier direct shallow-cache override."
+    ],
+    "loaded_files": {
+      "test/browser-startup.test.js": [
+        {
+          "head": "b91149abea99db6bd676f522131da22caea91ab5",
+          "file": "test/browser-startup.test.js",
+          "run": 1,
+          "status": 0,
+          "wall_s": 1.2161453680018894,
+          "load_before": [
+            27.94287109375,
+            23.8798828125,
+            18.240234375
+          ],
+          "load_after": [
+            27.146484375,
+            23.7822265625,
+            18.23876953125
+          ],
+          "log_sha256": "a73375581841f2d894555e346d9f617511703a3ff96035425d85bccac89f7728",
+          "tests": {
+            "tests": 9,
+            "pass": 9,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        },
+        {
+          "head": "b91149abea99db6bd676f522131da22caea91ab5",
+          "file": "test/browser-startup.test.js",
+          "run": 2,
+          "status": 0,
+          "wall_s": 0.9163483429874759,
+          "load_before": [
+            27.146484375,
+            23.7822265625,
+            18.23876953125
+          ],
+          "load_after": [
+            27.146484375,
+            23.7822265625,
+            18.23876953125
+          ],
+          "log_sha256": "09a68bee0b8b33a7a29ab7d1e2f9867cb4c9d3211f7ec035e98977dfacddbff2",
+          "tests": {
+            "tests": 9,
+            "pass": 9,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        },
+        {
+          "head": "b91149abea99db6bd676f522131da22caea91ab5",
+          "file": "test/browser-startup.test.js",
+          "run": 3,
+          "status": 0,
+          "wall_s": 1.3169292899983702,
+          "load_before": [
+            27.146484375,
+            23.7822265625,
+            18.23876953125
+          ],
+          "load_after": [
+            27.146484375,
+            23.7822265625,
+            18.23876953125
+          ],
+          "log_sha256": "72e8f8d69389ea5f5911222589ab09b6afdc70100dfecd10ba881274eb45e312",
+          "tests": {
+            "tests": 9,
+            "pass": 9,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        },
+        {
+          "head": "b91149abea99db6bd676f522131da22caea91ab5",
+          "file": "test/browser-startup.test.js",
+          "run": 4,
+          "status": 0,
+          "wall_s": 0.9677961129928008,
+          "load_before": [
+            27.146484375,
+            23.7822265625,
+            18.23876953125
+          ],
+          "load_after": [
+            27.146484375,
+            23.7822265625,
+            18.23876953125
+          ],
+          "log_sha256": "6ef842d23b3b6d2e72847e88e9ce249a5117f2c6c4cb58dcded5c94368bad53d",
+          "tests": {
+            "tests": 9,
+            "pass": 9,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        },
+        {
+          "head": "b91149abea99db6bd676f522131da22caea91ab5",
+          "file": "test/browser-startup.test.js",
+          "run": 5,
+          "status": 0,
+          "wall_s": 0.8655045990017243,
+          "load_before": [
+            27.146484375,
+            23.7822265625,
+            18.23876953125
+          ],
+          "load_after": [
+            26.49365234375,
+            23.70263671875,
+            18.2431640625
+          ],
+          "log_sha256": "a472328780afdaa2630457dc22de59499ee6c504475dcec5e15014302d5e1b49",
+          "tests": {
+            "tests": 9,
+            "pass": 9,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0
+          }
+        }
+      ]
+    },
+    "cpu_load_processes": 2,
+    "test_file_concurrency": 1,
+    "peak_named_test_workers": 4,
+    "focused_browser": {
+      "artifact": "browser-green.log",
+      "sha256": "11efe6a6064f5eac1e42ad37c5667418eb01a6c48e050317188fe011067feacd",
+      "footer": {
+        "tests": 9,
+        "pass": 9,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 0
+      }
+    },
+    "named_merge_check": {
+      "artifact": "merge-checks.log",
+      "sha256": "236f437dedbfa58753722c209c70f5d8bf210355e6694118d9ed300a0edcff6d",
+      "footer": {
+        "tests": 277,
+        "pass": 277,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 0
+      }
+    },
+    "named_files": [
+      "test/automation.test.js",
+      "test/events.test.js",
+      "test/gate-commands.test.js",
+      "test/gates/tests.test.js",
+      "test/browser-kit.test.js",
+      "test/board.test.js",
+      "test/signal-waits.test.js"
+    ],
+    "gate_mutations": {
+      "score": "2/2",
+      "ids": [
+        "tests-pass-without-change",
+        "tests-deleted-test-counts"
+      ],
+      "baseline": "green unmodified named gate baseline; no full-suite fallback",
+      "log": {
+        "artifact": "mutants.log",
+        "sha256": "41376bf346808f81713562acf872b62bc402f7a0d39ab77c951984af383c8a7f",
+        "footer": {}
+      }
+    },
+    "reproduction": {
+      "browser_command": "node test/run.js --test-concurrency=1 test/browser-startup.test.js",
+      "test_root": "TOWER_CRANE_TEST_TMP=WRITABLE_SHORT_TEST_ROOT",
+      "cpu_load": "two nice -n 15 node processes evaluating Math.sqrt(Math.random()) continuously"
+    },
+    "raw_logs": "Task scratch rework-browser-current; run receipts record source heads and raw-log hashes.",
+    "prior_evidence": "Earlier source-versioned measurements, CI results and D30 host diagnostics remain intact."
   }
 }
