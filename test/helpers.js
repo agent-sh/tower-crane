@@ -94,7 +94,6 @@ function installHarnessGuard() {
   }
   const key = Object.keys(process.env).find((k) => k.toUpperCase() === 'PATH') || 'PATH';
   process.env[key] = dir + path.delimiter + (process.env[key] || '');
-  process.once('exit', () => fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
   return { dir, hits, reported: new Set() };
 }
 
@@ -115,9 +114,21 @@ function assertNoHarnessCalls(base) {
     assert.fail(`a non-live test started a real harness instead of a stub:\n${found.map(({ hit }) => JSON.stringify(hit)).join('\n')}`);
   }
 }
-// Calls no fixture owns, such as a test running a harness itself, fail the file.
-if (HARNESS_GUARD && (process.env.NODE_TEST_CONTEXT || /\.test\.js$/.test(require.main?.filename || ''))) {
-  test.after(() => assertNoHarnessCalls());
+// Calls no fixture owns, such as a test running a harness itself, fail the
+// file. A plain script fails through its exit code: a node:test hook would make
+// the test runner own the script's exit.
+if (HARNESS_GUARD) {
+  if (process.env.NODE_TEST_CONTEXT) test.after(() => assertNoHarnessCalls());
+  process.once('exit', () => {
+    try {
+      if (!process.env.NODE_TEST_CONTEXT) assertNoHarnessCalls();
+    } catch (error) {
+      console.error(error.message);
+      process.exitCode ||= 1;
+    } finally {
+      fs.rmSync(HARNESS_GUARD.dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    }
+  });
 }
 
 // Tests must not see the developer's git config (hooks, signing), an
