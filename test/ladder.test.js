@@ -4,7 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { makeRepo, fixtureLadder, ROOT } = require('./helpers');
+const { makeRepo, fixtureLadder, ROOT, TMP_ROOT } = require('./helpers');
 const A = require('../lib/agents');
 const L = require('../lib/ladder');
 
@@ -230,7 +230,7 @@ test('ladder harness moves every rung without its own harness, and spawn runs ea
   const h = makeRepo(t);
   h.init();
   for (const rung of ['easy', 'medium', 'review', 'small']) h.ok(['ladder', 'set', rung, '--model', `m-${rung}`, '--clear', 'profile']);
-  h.ok(['task', 'add', '--title', 'Small', '--acceptance', 'a', '--size', 'S']);
+  h.ok(['task', 'add', '--title', 'Small', '--acceptance', 'a', '--kind', 'docs', '--size', 'S']);
   h.ok(['task', 'add', '--title', 'Medium', '--acceptance', 'a']);
   h.ok(['task', 'add', '--title', 'Large', '--acceptance', 'a', '--size', 'L']);
   h.ok(['task', 'add', '--title', 'Study', '--acceptance', 'a', '--kind', 'research', '--size', 'S']);
@@ -344,7 +344,7 @@ test('a ladder broken by a changed user file still loads, and ladder set repairs
   const h = makeRepo(t);
   writeUser(h, { harness: 'pi', ladder: { easy: { model: 'p/easy' }, medium: { model: 'p/medium' }, review: { model: 'p/review' }, small: { model: 'p/small' } } });
   h.init();
-  h.ok(['task', 'add', '--title', 'x', '--acceptance', 'a', '--size', 'S']);
+  h.ok(['task', 'add', '--title', 'x', '--acceptance', 'a', '--kind', 'docs', '--size', 'S']);
   h.ok(['brief', 'set', 'T1', '-'], { input: 'brief\n' });
   // The project keeps its default harness and its orchestrator rung, and
   // follows the user file for the rest.
@@ -373,7 +373,7 @@ test('a ladder broken by a changed user file still loads, and ladder set repairs
 test('a ladder write is evented and re-renders the sketch with the ladder and each task tier', (t) => {
   const h = makeRepo(t);
   h.init();
-  h.ok(['task', 'add', '--title', 'Small fix', '--acceptance', 'a', '--size', 'S']);
+  h.ok(['task', 'add', '--title', 'Small fix', '--acceptance', 'a', '--size', 'S', '--tier', 'easy']);
   h.ok(['ladder', 'set', 'easy', '--model', 'fixture-model', '--clear', 'profile', '--agent', 'orchestrator']);
   const ev = events(h).find((e) => e.cmd === 'ladder set');
   assert.deepEqual([ev.agent, ev.detail], ['orchestrator', { rung: 'easy', model: 'fixture-model', effort: 'medium', authority: 'orchestrator' }]);
@@ -391,11 +391,23 @@ test('tasks take a tier from kind and size unless one is given', (t) => {
   const h = makeRepo(t);
   h.init();
   const add = (...flags) => h.json(['task', 'add', '--title', 'x', '--acceptance', 'a', ...flags]).tier;
-  assert.equal(add('--size', 'S'), 'easy');
+  assert.equal(add('--kind', 'docs', '--size', 'S'), 'easy');
   assert.equal(add(), 'medium');
   assert.equal(add('--size', 'L'), 'hard');
   assert.equal(add('--kind', 'research', '--size', 'S'), 'research');
   assert.equal(add('--size', 'S', '--tier', 'research'), 'research');
+  // Only trivial work defaults to easy: small docs. Every other kind starts at medium.
+  const want = {
+    code: { S: 'medium', M: 'medium', L: 'hard' },
+    ops: { S: 'medium', M: 'medium', L: 'hard' },
+    design: { S: 'medium', M: 'medium', L: 'hard' },
+    docs: { S: 'easy', M: 'medium', L: 'hard' },
+    research: { S: 'research', M: 'research', L: 'research' },
+  };
+  for (const [kind, sizes] of Object.entries(want)) {
+    for (const [size, tier] of Object.entries(sizes)) assert.equal(add('--kind', kind, '--size', size), tier, `${kind} ${size}`);
+  }
+  assert.equal(add('--kind', 'code', '--size', 'S', '--tier', 'easy'), 'easy', 'an explicit tier still wins');
   assert.equal(h.json(['task', 'update', 'T2', '--tier', 'hard']).tier, 'hard');
   assert.equal(h.json(['task', 'update', 'T1', '--size', 'L']).tier, 'easy', 'a size change does not move the tier');
   assert.match(h.ok(['task', 'show', 'T2']), /size: M {2}tier: hard/);
@@ -403,8 +415,8 @@ test('tasks take a tier from kind and size unless one is given', (t) => {
   assert.equal(h.run(['task', 'update', 'T1', '--tier', 'expert']).code, 2);
 
   const plan = path.join(h.base, 'plan.json');
-  fs.writeFileSync(plan, JSON.stringify([{ title: 'p', acceptance: ['a'], tier: 'research' }, { title: 'q', acceptance: ['a'], size: 'S' }]));
-  assert.deepEqual(h.json(['plan', 'import', plan]).added.map((a) => h.json(['task', 'show', a.id]).tier), ['research', 'easy']);
+  fs.writeFileSync(plan, JSON.stringify([{ title: 'p', acceptance: ['a'], tier: 'research' }, { title: 'q', acceptance: ['a'], size: 'S' }, { title: 'd', acceptance: ['a'], kind: 'docs', size: 'S' }]));
+  assert.deepEqual(h.json(['plan', 'import', plan]).added.map((a) => h.json(['task', 'show', a.id]).tier), ['research', 'medium', 'easy']);
   fs.writeFileSync(plan, JSON.stringify([{ title: 'r', acceptance: ['a'], tier: 'expert' }]));
   const bad = h.run(['plan', 'import', plan]);
   assert.equal(bad.code, 1);
@@ -422,7 +434,7 @@ test('tasks take a tier from kind and size unless one is given', (t) => {
 test('validate does not warn when review uses the task tier model', (t) => {
   const h = makeRepo(t);
   h.init();
-  h.ok(['task', 'add', '--title', 'x', '--acceptance', 'a', '--size', 'S']);
+  h.ok(['task', 'add', '--title', 'x', '--acceptance', 'a', '--kind', 'docs', '--size', 'S']);
   assert.deepEqual(h.json(['validate']).warnings, [], 'easy runs fixture-light and review runs fixture-main');
   h.ok(['task', 'add', '--title', 'y', '--acceptance', 'a']);
   const r = h.run(['validate']);
@@ -439,7 +451,7 @@ test('validate does not warn when review uses the task tier model', (t) => {
 test('validate allows identical Codex profile and explicit model identities', (t) => {
   const h = makeRepo(t);
   h.init();
-  h.ok(['task', 'add', '--title', 'x', '--acceptance', 'a', '--size', 'S']);
+  h.ok(['task', 'add', '--title', 'x', '--acceptance', 'a', '--kind', 'docs', '--size', 'S']);
   // codex -m overrides the profile's model, so these two run the same model.
   h.ok(['ladder', 'set', 'easy', '--model', 'same-model', '--profile', 'author-profile']);
   h.ok(['ladder', 'set', 'review', '--model', 'same-model', '--profile', 'review-profile']);
@@ -465,4 +477,69 @@ test('switching from Codex to agy refuses inherited Codex flags until explicitly
   assert.deepEqual(h.readState('project.json'), before);
   h.ok(['ladder', 'set', 'hard', '--harness', 'agy', '--model', 'fixture-large', '--clear', 'args']);
   assert.equal(h.json(['ladder', 'show']).ladder.hard.harness, 'agy');
+});
+
+test('pricing identity drops Claude provider, context and Bedrock version suffixes', () => {
+  for (const [id, identity] of [
+    ['global.anthropic.claude-opus-5-5[1m]', 'claude-opus-5-5'],
+    ['anthropic.claude-haiku-5-5', 'claude-haiku-5-5'],
+    [' Global.Anthropic.Claude-Opus-5-5[1M] ', 'claude-opus-5-5'],
+    ['claude-opus-5-5', 'claude-opus-5-5'],
+    ['global.anthropic.claude-haiku-4-5-20251001-v1:0', 'claude-haiku-4-5-20251001'],
+    ['anthropic.claude-haiku-4-5-20251001-v12:34', 'claude-haiku-4-5-20251001'],
+    ['claude-haiku-4-5-20251001-v1:0[1m]', 'claude-haiku-4-5-20251001'],
+    ['claude-haiku-4-5-20251001-v1:0-extra', 'claude-haiku-4-5-20251001-v1:0-extra'],
+    ['global.anthropic.fixture-release', 'fixture-release'],
+    ['openai.gpt-fixture', 'openai.gpt-fixture'],
+    ['openai.gpt-fixture-v1:0', 'openai.gpt-fixture-v1:0'],
+    ['a/easy', 'a/easy'],
+  ]) assert.equal(L.modelIdentity(id), identity, id);
+  assert.equal(L.billing({ harness: 'claude', provider: 'bedrock' }, {}), 'api');
+  assert.equal(L.billing({ harness: 'claude' }, { ANTHROPIC_API_KEY: 'x' }), 'api');
+  assert.equal(L.billing({ harness: 'claude' }, { ANTHROPIC_API_KEY: '' }), 'subscription');
+  assert.equal(L.billing({ harness: 'pi' }, {}), null);
+  // A rung that names no provider runs on the Bedrock route its environment inherits; a pinned provider decides alone.
+  assert.equal(L.billing({ harness: 'claude' }, { CLAUDE_CODE_USE_BEDROCK: '1', AWS_PROFILE: 'fixture', AWS_REGION: 'eu-west-1' }), 'api');
+  assert.equal(L.billing({ harness: 'claude' }, { CLAUDE_CODE_USE_BEDROCK: '0' }), 'subscription');
+  assert.equal(L.billing({ harness: 'claude', provider: 'anthropic' }, { CLAUDE_CODE_USE_BEDROCK: '1' }), 'subscription');
+  // Every provider switch Claude Code reads is a metered route, with Claude Code's truthy spellings.
+  for (const name of ['BEDROCK', 'VERTEX', 'FOUNDRY', 'ANTHROPIC_AWS', 'ANTHROPIC_GOOGLE_CLOUD', 'MANTLE', 'GATEWAY']) {
+    for (const value of ['1', 'true', 'YES', ' on ']) {
+      assert.equal(L.billing({ harness: 'claude', model: 'claude-opus-5-5' }, { [`CLAUDE_CODE_USE_${name}`]: value }), 'api', `${name}=${value}`);
+    }
+    assert.equal(L.billing({ harness: 'claude' }, { [`CLAUDE_CODE_USE_${name}`]: 'off' }), 'subscription', `${name}=off`);
+    assert.equal(L.billing({ harness: 'claude', provider: 'anthropic' }, { [`CLAUDE_CODE_USE_${name}`]: '1' }), 'subscription', `pinned ${name}`);
+  }
+  assert.equal(L.billing({ harness: 'claude' }, { CLAUDE_CODE_USE_POWERSHELL_TOOL: '1' }), 'subscription');
+});
+
+test('Codex billing follows the configured provider rather than inherited credentials', (t) => {
+  const base = fs.mkdtempSync(path.join(TMP_ROOT, 'codex-billing-'));
+  t.after(() => fs.rmSync(base, { recursive: true, force: true }));
+  for (const [name, config, standalone, rung, env, expected] of [
+    ['default login', '', undefined, {}, {}, 'subscription'],
+    ['OpenAI key', '', undefined, {}, { OPENAI_API_KEY: 'fixture-key' }, 'api'],
+    ['AWS credentials on OpenAI', 'model_provider = "openai"', undefined, {}, { AWS_PROFILE: 'fixture', AWS_REGION: 'us-east-1' }, 'subscription'],
+    ['global Bedrock', 'model_provider = "amazon-bedrock"', undefined, {}, {}, 'api'],
+    ['named Bedrock profile', 'model_provider = "openai"\n[profiles.sol]\nmodel_provider = "amazon-bedrock"', undefined, { profile: 'sol' }, {}, 'api'],
+    ['named profile inherits Bedrock', 'model_provider = "amazon-bedrock"\n[profiles.sol]\nmodel = "fixture"', undefined, { profile: 'sol' }, {}, 'api'],
+    ['standalone Bedrock', 'model_provider = "openai"', 'model_provider = "amazon-bedrock"', { profile: 'sol', model: 'fixture' }, {}, 'api'],
+    ['standalone login', 'model_provider = "amazon-bedrock"', 'model_provider = "openai"', { profile: 'sol' }, {}, 'subscription'],
+    ['standalone inherits Bedrock', 'model_provider = "amazon-bedrock"', 'model = "fixture"', { profile: 'sol' }, {}, 'api'],
+    ['missing profile', 'model_provider = "openai"', undefined, { profile: 'missing' }, { AWS_BEARER_TOKEN_BEDROCK: 'fixture-token' }, null],
+    ['invalid config', '[broken', undefined, {}, {}, null],
+    ['invalid provider', 'model_provider = false', undefined, {}, {}, null],
+    ['provider override', 'model_provider = "openai"', undefined, { args: ['-c', 'model_provider=amazon-bedrock'] }, {}, 'api'],
+    ['local Ollama', 'model_provider = "ollama"', undefined, {}, { OPENAI_API_KEY: 'fixture-key' }, null],
+    ['local LM Studio profile', 'model_provider = "openai"\n[profiles.sol]\nmodel_provider = "lmstudio"', undefined, { profile: 'sol' }, {}, null],
+    ['last provider override wins', 'model_provider = "amazon-bedrock"', undefined, { args: ['-c', 'model_provider="amazon-bedrock"', '-c', 'model_provider="openai"'] }, {}, 'subscription'],
+  ]) {
+    const home = path.join(base, name);
+    fs.mkdirSync(home);
+    fs.writeFileSync(path.join(home, 'config.toml'), config);
+    if (standalone !== undefined) fs.writeFileSync(path.join(home, 'sol.config.toml'), standalone);
+    // Codex can load AWS credentials itself; billing needs only the route.
+    fs.writeFileSync(path.join(home, '.env'), 'AWS_BEARER_TOKEN_BEDROCK=fixture-token\n');
+    assert.equal(L.billing({ harness: 'codex', ...rung }, env, { codex: home }), expected, name);
+  }
 });

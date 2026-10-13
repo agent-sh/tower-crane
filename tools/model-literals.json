@@ -10,6 +10,26 @@
     "reason": "Relative import of the Claude sandbox placeholder module"
   },
   {
+    "path": "lib/gate-tmp.js",
+    "text": "claude-http",
+    "reason": "Claude Code sandbox bridge socket name, which sets the harness TMPDIR length bound"
+  },
+  {
+    "path": "lib/gate-tmp.js",
+    "text": "claude-socks",
+    "reason": "Claude Code sandbox bridge socket name, which sets the harness TMPDIR length bound"
+  },
+  {
+    "path": "lib/gate-tmp.js",
+    "text": "claude-socks-0123456789abcdef.sock",
+    "reason": "Claude Code sandbox bridge socket name, which sets the harness TMPDIR length bound"
+  },
+  {
+    "path": "lib/masked-merge.js",
+    "text": "claude-sandbox-placeholders",
+    "reason": "Relative import of the shared Claude sandbox mount classification"
+  },
+  {
     "path": "lib/project.js",
     "text": "claude-provider",
     "reason": "Relative import of the Claude provider routing module"
@@ -153,5 +173,10 @@
     "path": "lib/agents.js",
     "text": "claude-code",
     "reason": "npm package name @anthropic-ai/claude-code, matched to keep the harness binary runnable in the sandbox; not a model"
+  },
+  {
+    "path": "lib/ladder.js",
+    "text": "claude-provider",
+    "reason": "Relative import of the Claude provider routing module"
   }
 ]

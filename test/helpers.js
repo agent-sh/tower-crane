@@ -1,19 +1,135 @@
 'use strict';
 
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
 const cp = require('node:child_process');
 const assert = require('node:assert/strict');
+const test = require('node:test');
 const { createRepoSeed, cleanupRepoSeed } = require('./repo-seed');
+const { tempRoot } = require('./tmp-root');
 
 const ROOT = path.join(__dirname, '..');
 const BIN = path.join(ROOT, 'bin', 'tower-crane.js');
 const HOOKS = path.join(__dirname, 'fixtures', 'hooks.js');
-const TMP_ROOT = process.env.TOWER_CRANE_TEST_TMP || os.tmpdir();
+const TMP_ROOT = tempRoot();
 const SHARED_REPO_SEED = process.env.TC_TEST_REPO_SEED;
 const OWNER_KEY = 'fixture-owner-key';
+const fileFixtures = new Set();
+async function cleanupFileFixtures() {
+  for (const fixture of fileFixtures) await fixture.cleanup();
+}
+// A stopping monitor can start the next attempt's monitor and worker after a snapshot of the
+// detached records, so teardown takes new snapshots and kills their unseen records until none appear.
+function unseenDetached(fixture, seen) {
+  const key = (c) => `${c.pid}:${c.startTicks ?? c.startTime}`;
+  const fresh = fixture.detached().filter((c) => !seen.has(key(c)));
+  for (const c of fresh) seen.add(key(c));
+  return fresh;
+}
+// Processes started during teardown are not expected to exit on their own, so they are killed.
+async function killStarted(children) {
+  children.forEach(killDetached);
+  const deadline = Date.now() + 10000;
+  while (children.some(detachedAlive) && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  assert.deepEqual(children.filter(detachedAlive).map((c) => c.pid), [], 'processes started during teardown survived it');
+}
+// process.exit() and uncaught exceptions skip beforeExit, and an exit listener runs only
+// synchronous code, so this stops detached children with signals and removes the directories.
+function cleanupFileFixturesSync() {
+  for (const fixture of fileFixtures) {
+    try {
+      const seen = new Set();
+      for (let fresh; (fresh = unseenDetached(fixture, seen)).length;) fresh.forEach(killDetached);
+    } catch (error) {
+      console.error(error);
+    } finally {
+      fs.rmSync(fixture.base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+      fileFixtures.delete(fixture);
+    }
+  }
+}
+// Plain CLI probes also import helpers; only test workers have file teardown.
+if (process.env.NODE_TEST_CONTEXT) test.after(cleanupFileFixtures);
+else {
+  process.once('beforeExit', () => {
+    cleanupFileFixtures().catch((error) => {
+      console.error(error);
+      process.exitCode = 1;
+    });
+  });
+  process.once('exit', cleanupFileFixturesSync);
+}
 delete process.env.TC_TEST_REPO_SEED;
+// Scratch consumers can run directly without the runner's global setup.
+fs.mkdirSync(TMP_ROOT, { recursive: true });
+
+// A non-live test must never start a real harness CLI: that can spend money,
+// reach the network and depend on the host's login. Every test process puts a
+// guard for each harness first on PATH, so a fixture that forgets a stub, or a
+// route that falls back to a harness on PATH, reaches the guard instead. A live
+// probe's opt-in lifts the guard for the harness it runs.
+const liveBrowser = (env, harness) => env.TOWER_CRANE_LIVE_BROWSER === '1'
+  && (!env.TOWER_CRANE_LIVE_BROWSER_HARNESS || env.TOWER_CRANE_LIVE_BROWSER_HARNESS === harness);
+const LIVE_OPT_INS = {
+  claude: (env) => env.TOWER_CRANE_LIVE_CLAUDE === '1' || env.TOWER_CRANE_LIVE_REVIEW_CACHE === '1' || liveBrowser(env, 'claude'),
+  codex: (env) => env.TOWER_CRANE_LIVE_CODEX === '1' || liveBrowser(env, 'codex'),
+  opencode: () => false,
+  pi: () => false,
+  agy: () => false,
+};
+const HARNESS_GUARD = installHarnessGuard();
+
+function installHarnessGuard() {
+  const guarded = Object.keys(LIVE_OPT_INS).filter((name) => !LIVE_OPT_INS[name](process.env));
+  if (!guarded.length) return null;
+  fs.mkdirSync(TMP_ROOT, { recursive: true });
+  const dir = fs.realpathSync.native(fs.mkdtempSync(path.join(TMP_ROOT, 'tower-crane-harness-guard-')));
+  const hits = path.join(dir, 'hits.jsonl');
+  const argv = (name) => [process.execPath, path.join(__dirname, 'fixtures', 'harness-guard.js'), hits, name];
+  for (const name of guarded) {
+    fs.writeFileSync(path.join(dir, name), `#!/bin/sh\nexec ${argv(name).map((a) => `'${a.replace(/'/g, "'\\''")}'`).join(' ')} "$@"\n`, { mode: 0o755 });
+    fs.writeFileSync(path.join(dir, `${name}.cmd`), `@${argv(name).map((a) => `"${a}"`).join(' ')} %*\r\n`);
+  }
+  const key = Object.keys(process.env).find((k) => k.toUpperCase() === 'PATH') || 'PATH';
+  process.env[key] = dir + path.delimiter + (process.env[key] || '');
+  return { dir, hits, reported: new Set() };
+}
+
+// Fails on guard calls not yet reported: with `base`, only those a fixture
+// under it made (by working directory or state directory), so the test that
+// owns the fixture fails; without it, every one left.
+function assertNoHarnessCalls(base) {
+  if (!HARNESS_GUARD) return;
+  let text;
+  try { text = fs.readFileSync(HARNESS_GUARD.hits, 'utf8'); }
+  catch (e) { if (e.code === 'ENOENT') return; throw e; }
+  const inside = (p) => typeof p === 'string' && (p === base || p.startsWith(base + path.sep));
+  // A line still being written has no newline yet; the next check reads it.
+  const found = text.split('\n').slice(0, -1).map((line, i) => ({ i, hit: JSON.parse(line) }))
+    .filter(({ i, hit }) => !HARNESS_GUARD.reported.has(i) && (!base || inside(hit.cwd) || inside(hit.state)));
+  for (const { i } of found) HARNESS_GUARD.reported.add(i);
+  if (found.length) {
+    assert.fail(`a non-live test started a real harness instead of a stub:\n${found.map(({ hit }) => JSON.stringify(hit)).join('\n')}`);
+  }
+}
+// Calls no fixture owns, such as a test running a harness itself, fail the
+// file. A plain script fails through its exit code: a node:test hook would make
+// the test runner own the script's exit.
+if (HARNESS_GUARD) {
+  if (process.env.NODE_TEST_CONTEXT) test.after(() => assertNoHarnessCalls());
+  process.once('exit', () => {
+    try {
+      if (!process.env.NODE_TEST_CONTEXT) assertNoHarnessCalls();
+    } catch (error) {
+      console.error(error.message);
+      process.exitCode ||= 1;
+    } finally {
+      fs.rmSync(HARNESS_GUARD.dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    }
+  });
+}
 
 // Tests must not see the developer's git config (hooks, signing), an
 // agent's TOWER_CRANE_* variables or the developer's own ladder defaults, so every
@@ -21,6 +137,7 @@ delete process.env.TC_TEST_REPO_SEED;
 // absent between calls unless a test writes it.
 function baseEnv(home) {
   const env = { ...process.env };
+  delete env.NODE_TEST_CONTEXT;
   for (const k of Object.keys(env)) {
     if (k.startsWith('TOWER_CRANE_') || k.startsWith('GIT_') || k === 'TC_TEST_REPO_SEED') delete env[k];
   }
@@ -35,6 +152,12 @@ function baseEnv(home) {
   env.TOWER_CRANE_OWNER_KEY = OWNER_KEY;
   // spawn keeps receipts under the user's cache, which is not the tests' to write.
   env.HOME = path.join(home, 'home');
+  env.USERPROFILE = env.HOME;
+  env.LOCALAPPDATA = path.join(env.HOME, 'AppData', 'Local');
+  env.XDG_CACHE_HOME = path.join(env.HOME, '.cache');
+  // A child exiting after teardown must not recreate its fixture with a compile-cache write.
+  env.NODE_DISABLE_COMPILE_CACHE = '1';
+  delete env.NODE_COMPILE_CACHE;
   // A gate's worktree and temp directories stay in the fixture, so a gate the test kills
   // cannot leave them in the shared temporary directory.
   env.TOWER_CRANE_TMP = path.join(home, 'gate-tmp');
@@ -58,6 +181,16 @@ function fixtureLadder() {
       small: { profile: 'fixture-light', effort: 'low' },
     },
   };
+}
+
+// A command rung that fails at once and starts nothing, as an unconfigured
+// harness would. stubRungs(h) puts it on every rung but the orchestrator when
+// h.init() runs next, for fixtures whose automation dispatches workers or
+// reviewers the test never inspects; without it they reach the harness guard.
+const STUB_RUNG = { harness: 'command', command: [process.execPath, '-e', 'process.exit(1)', '{prompt}'] };
+function stubRungs(h) {
+  h.initLadder = Object.fromEntries(Object.keys(fixtureLadder().ladder)
+    .filter((name) => name !== 'orchestrator').map((name) => [name, STUB_RUNG]));
 }
 
 function pinRung(h, name, rung) {
@@ -89,6 +222,7 @@ function fixtureInit(ctx, args, opts, call) {
   if (!user || typeof user !== 'object' || Array.isArray(user)) return call(args, opts);
   if (user.ladder !== undefined && (!user.ladder || typeof user.ladder !== 'object' || Array.isArray(user.ladder))) return call(args, opts);
   const pinned = fixtureLadder();
+  Object.assign(pinned.ladder, ctx.initLadder);
   for (const [name, rung] of Object.entries(user.ladder || {})) {
     pinned.ladder[name] = rung && Object.keys(rung).every(k => k === 'fallbacks')
       ? { ...pinned.ladder[name], ...rung } : rung;
@@ -155,9 +289,6 @@ function getRepoTemplate(key, prepare) {
     prepare(ctx);
     const template = { base: ctx.base, repo: ctx.repo };
     repoTemplates.set(key, template);
-    process.once('exit', () => {
-      fs.rmSync(template.base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
-    });
     return template;
   } catch (error) {
     fs.rmSync(ctx.base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
@@ -210,7 +341,6 @@ function cachedFixture(t, key, build) {
       throw error;
     }
     fixtures.set(key, template);
-    process.once('exit', () => fs.rmSync(h.base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
   }
   const from = template.h;
   const h = copyRepo(t, from.base);
@@ -281,24 +411,53 @@ function context(t, base, options = {}) {
       const dir = path.join(base, 'detached');
       return fs.existsSync(dir) ? fs.readdirSync(dir).filter((f) => f.endsWith('.json')).flatMap((f) => {
         const file = path.join(dir, f);
-        try { return [{ ...JSON.parse(fs.readFileSync(file, 'utf8')), file }]; }
+        let record;
+        try { record = JSON.parse(fs.readFileSync(file, 'utf8')); }
         catch (e) { if (e.code === 'ENOENT') return []; throw e; }
+        // A monitor's exit listener marks its exit beside its record.
+        if (record.kind === 'monitor' && fs.existsSync(path.join(dir, `${record.token || record.pid}.exited`))) record.exited = true;
+        return [{ ...record, file }];
       }) : [];
     },
     cleanup: async () => {
-      try { await stopDetached(ctx.detached()); }
-      finally { fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); }
+      const seen = new Set();
+      try {
+        try { await stopDetached(unseenDetached(ctx, seen)); }
+        finally {
+          for (let fresh; (fresh = unseenDetached(ctx, seen)).length;) await killStarted(fresh);
+        }
+      } finally {
+        try {
+          // A killed monitor cannot close its broker's socket outside this fixture.
+          const brokers = path.join(ctx.state, 'brokers');
+          if (fs.existsSync(brokers)) {
+            for (const agent of fs.readdirSync(brokers, { withFileTypes: true }).filter((entry) => entry.isDirectory())) {
+              const file = path.join(brokers, agent.name, 'broker.json');
+              let socket;
+              try { ({ socket } = JSON.parse(fs.readFileSync(file, 'utf8'))); }
+              catch (error) { if (error.code === 'ENOENT' || error instanceof SyntaxError) continue; throw error; }
+              if (typeof socket === 'string' && path.basename(socket) === 's' && /^tower-crane-[A-Za-z0-9]{6}$/.test(path.basename(path.dirname(socket)))) {
+                fs.rmSync(path.dirname(socket), { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+              }
+            }
+          }
+        } finally {
+          fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+          fileFixtures.delete(ctx);
+        }
+      }
+      assertNoHarnessCalls(base);
     },
     run: (args, opts = {}) => fixtureInit(ctx, args, opts, (a, o) => run(a, withHooks(ctx, o))),
     runAsync: (args, opts = {}) => runAsync(args, withHooks(ctx, opts)),
     json: (args, opts) => {
       const r = ctx.run([...args, '--json'], opts);
-      if (r.code !== 0) throw new Error(`tower-crane ${args.join(' ')} exited ${r.code}: ${r.stderr}`);
+      if (r.code !== 0) throw cliFailure(args, r);
       return JSON.parse(r.stdout);
     },
     ok: (args, opts) => {
       const r = ctx.run(args, opts);
-      if (r.code !== 0) throw new Error(`tower-crane ${args.join(' ')} exited ${r.code}: ${r.stderr}`);
+      if (r.code !== 0) throw cliFailure(args, r);
       return r.stdout.trim();
     },
     readState: (file) => JSON.parse(fs.readFileSync(path.join(ctx.state, file), 'utf8')),
@@ -322,6 +481,7 @@ function context(t, base, options = {}) {
       .some((line) => line.startsWith('worktree ') && path.resolve(line.slice('worktree '.length)) === path.resolve(dir)),
     init: (extra = []) => ctx.ok(['init', '--name', 'demo', '--goal', 'prove the engine', ...(ctx.gateSettings || []), ...extra]),
   };
+  fileFixtures.add(ctx);
   if (t) t.after(ctx.cleanup);
   return ctx;
 }
@@ -340,7 +500,18 @@ function withHooks(ctx, opts) {
 // set the 60 s floor. An explicit zero leaves only the runner's backstop.
 function run(args, { cwd, env, input, pre = [], timeout = 60000 } = {}) {
   const r = cp.spawnSync(process.execPath, [...pre, BIN, ...args], { cwd, env, input, encoding: 'utf8', timeout: timeout === 0 ? 0 : Math.max(timeout, 60000) });
-  return { code: r.status, stdout: r.stdout || '', stderr: r.stderr || '', signal: r.signal };
+  return {
+    code: r.status, stdout: r.stdout || '', stderr: r.stderr || '', signal: r.signal,
+    ...(r.error && { error: { code: r.error.code, message: r.error.message } }),
+  };
+}
+
+function cliFailure(args, result) {
+  const details = [
+    result.signal && `signal ${result.signal}`,
+    result.error && `error ${result.error.code}: ${result.error.message}`,
+  ].filter(Boolean).join('; ');
+  return new Error(`tower-crane ${args.join(' ')} exited ${result.code}${details ? ` (${details})` : ''}: ${result.stderr}`);
 }
 
 const PTY_AVAILABLE = process.platform === 'linux'
@@ -366,9 +537,19 @@ function runAsync(args, { cwd, env, pre = [] } = {}) {
 
 const real = (p) => fs.realpathSync.native(p);
 
+// Process creation times follow the Windows system timer tick (about 15.6 ms)
+// and Node reads the clock differently, so a child recorded right after its
+// start may appear to start a few ticks after its record.
+const RECORD_TOLERANCE_MS = 100;
+
 function detachedAlive(child) {
-  if (process.platform === 'win32' && child.startTime !== undefined) {
-    return child.startTime !== null && require('./windows-process').startTime(child.pid) === child.startTime;
+  if (process.platform === 'win32' && (child.startTime !== undefined || child.recordedAt !== undefined)) {
+    if (child.startTime === null) return false;
+    const started = require('./windows-process').startTime(child.pid);
+    if (started === null) return false;
+    if (child.startTime !== undefined) return started === child.startTime;
+    // FILETIME counts 100 ns intervals from 1601; the record counts milliseconds from 1970.
+    return Number(BigInt(started) / 10000n - 11644473600000n) <= child.recordedAt + RECORD_TOLERANCE_MS;
   }
   if (child.kind === 'worker' && child.file && !fs.existsSync(child.file)) return false;
   try { process.kill(child.pid, 0); } catch (e) { if (e.code === 'ESRCH') return false; throw e; }
@@ -393,43 +574,57 @@ function killDetached(child) {
 
 async function stopDetached(children) {
   const monitors = children.filter((c) => c.kind === 'monitor');
-  if (process.platform === 'win32' && monitors.length) {
-    // Retain native handles before stopping workers. A PID can be reused
-    // between probes, but WaitForExit still observes the original process.
-    const records = JSON.stringify(monitors).replaceAll("'", "''");
+  if (process.platform === 'win32' && children.length) {
+    // Retain native handles before stopping anything. A PID can be reused
+    // between probes, but a held handle keeps it and WaitForExit observes the
+    // original process. A process proves itself by its recorded creation time
+    // or by starting no later than its parent recorded it.
+    const records = JSON.stringify(children.map((c) => ({ pid: c.pid, kind: c.kind, startTime: c.startTime, recordedAt: c.recordedAt ?? null })))
+      .replaceAll("'", "''");
     const script = `
 $ErrorActionPreference = 'Stop'
-$monitors = @()
+$held = @()
 try {
   foreach ($entry in (ConvertFrom-Json '${records}')) {
-    if (!$entry.PSObject.Properties['startTime']) { throw 'Windows monitor creation identity is missing' }
-    if ($null -eq $entry.startTime) { continue }
-    $monitor = $null
-    try {
-      $monitor = [System.Diagnostics.Process]::GetProcessById($entry.pid)
-      $null = $monitor.Handle
-    } catch [System.ArgumentException] { continue }
-      catch [System.InvalidOperationException] { if ($monitor) { $monitor.Dispose() }; continue }
-    # A monitor exiting during this query reads a null creation time; it has already stopped.
-    $started = $monitor.StartTime
-    if ($null -eq $started -or $started.ToFileTimeUtc().ToString() -ne $entry.startTime) {
-      $monitor.Dispose()
+    if ($entry.PSObject.Properties['startTime']) {
+      if ($null -eq $entry.startTime) { continue }
+    } elseif ($null -eq $entry.recordedAt) {
+      if ($entry.kind -eq 'monitor') { throw 'Windows monitor creation identity is missing' }
       continue
     }
-    $monitors += $monitor
+    $process = $null
+    try {
+      $process = [System.Diagnostics.Process]::GetProcessById($entry.pid)
+      $null = $process.Handle
+    } catch [System.ArgumentException] { continue }
+      catch [System.InvalidOperationException] { if ($process) { $process.Dispose() }; continue }
+    # A process exiting during this query reads a null creation time; it has already stopped.
+    $started = $process.StartTime
+    if ($null -eq $started) { $same = $false }
+    elseif ($entry.PSObject.Properties['startTime']) { $same = $started.ToFileTimeUtc().ToString() -eq $entry.startTime }
+    else { $same = $started.ToUniversalTime() -le [DateTimeOffset]::FromUnixTimeMilliseconds([int64]$entry.recordedAt + ${RECORD_TOLERANCE_MS}).UtcDateTime }
+    if (!$same) {
+      $process.Dispose()
+      continue
+    }
+    $held += [pscustomobject]@{ Kind = $entry.kind; Process = $process }
   }
-  [Console]::Out.WriteLine('ready:' + (ConvertTo-Json -InputObject @($monitors | ForEach-Object { $_.Id }) -Compress))
+  $ids = @{
+    monitors = @($held | Where-Object { $_.Kind -eq 'monitor' } | ForEach-Object { $_.Process.Id })
+    workers = @($held | Where-Object { $_.Kind -ne 'monitor' } | ForEach-Object { $_.Process.Id })
+  }
+  [Console]::Out.WriteLine('ready:' + (ConvertTo-Json -InputObject $ids -Compress))
   $null = [Console]::In.ReadLine()
   $clock = [System.Diagnostics.Stopwatch]::StartNew()
   $survivors = @()
-  foreach ($monitor in $monitors) {
-    if (!$monitor.WaitForExit([int][Math]::Max(0, 10000 - $clock.ElapsedMilliseconds))) {
-      $survivors += $monitor.Id
+  foreach ($entry in $held) {
+    if (!$entry.Process.WaitForExit([int][Math]::Max(0, 10000 - $clock.ElapsedMilliseconds))) {
+      $survivors += [pscustomobject]@{ kind = $entry.Kind; pid = $entry.Process.Id }
     }
   }
   [Console]::Out.WriteLine((ConvertTo-Json -InputObject @($survivors) -Compress))
 } finally {
-  foreach ($monitor in $monitors) { $monitor.Dispose() }
+  foreach ($entry in $held) { $entry.Process.Dispose() }
 }
 `;
     const child = cp.spawn('powershell.exe', [
@@ -443,8 +638,8 @@ try {
       const ready = stdout.split('\n').slice(0, -1).find((line) => line.startsWith('ready:'));
       if (!stopped && ready) {
         stopped = true;
-        for (const worker of children.filter((c) => c.kind === 'worker')) killDetached(worker);
-        for (const pid of JSON.parse(ready.slice(6).trim())) {
+        const ids = JSON.parse(ready.slice(6).trim());
+        for (const pid of [...ids.workers, ...ids.monitors]) {
           cp.spawnSync('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore', timeout: 10000 });
         }
         child.stdin.end('\n');
@@ -456,8 +651,10 @@ try {
       child.once('close', resolve);
     });
     assert.equal(code, 0, stderr);
-    assert.ok(stopped, 'monitor handles were not acquired');
-    assert.deepEqual(JSON.parse(stdout.trim().split('\n').at(-1)), [], 'detached usage monitors outlived test teardown');
+    assert.ok(stopped, 'process handles were not acquired');
+    const survivors = JSON.parse(stdout.trim().split('\n').at(-1));
+    assert.deepEqual(survivors.filter((s) => s.kind === 'monitor').map((s) => s.pid), [], 'detached usage monitors outlived test teardown');
+    assert.deepEqual(survivors.map((s) => s.pid), [], 'detached workers outlived test teardown');
     return;
   }
   try {
@@ -477,4 +674,4 @@ try {
   }
 }
 
-module.exports = { repairWorktrees, makeRepo, makeProjectRepo, makeTaskRepo, copyRepo, cachedFixture, fixtureLadder, pinRung, pinLiveRung, run, runPty, PTY_AVAILABLE, runAsync, BIN, ROOT, HOOKS, real, TMP_ROOT, detachedAlive };
+module.exports = { repairWorktrees, makeRepo, makeProjectRepo, makeTaskRepo, copyRepo, cachedFixture, fixtureLadder, pinRung, pinLiveRung, stubRungs, STUB_RUNG, HARNESS_GUARD, run, runPty, PTY_AVAILABLE, runAsync, BIN, ROOT, HOOKS, real, TMP_ROOT, detachedAlive };

@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
-const { cachedFixture, BIN, ROOT } = require('./helpers');
+const { cachedFixture, BIN, ROOT, TMP_ROOT } = require('./helpers');
 
 function auditCli(run, timings, now) {
   return (args, options = {}) => {
@@ -34,6 +34,7 @@ function auditCli(run, timings, now) {
 }
 
 const L = require('../lib/ladder');
+const P = require('../lib/claude-provider');
 
 // Read the alias table rather than naming a release, so a swap of the shipped
 // table changes no test.
@@ -152,6 +153,9 @@ for (const [provider, other, model, plain] of [
     h.login();
     h.aws();
     h.env.CLAUDE_CODE_USE_VERTEX = '1';
+    h.env.CLAUDE_CODE_USE_ANTHROPIC_AWS = '1';
+    h.env.CLAUDE_CODE_USE_GATEWAY = '1';
+    h.env.CLAUDE_CODE_USE_MANTLE = '1';
     h.env.ANTHROPIC_API_KEY = 'stub-secret-env-value';
     h.env.TOWER_CRANE_TEST_FAIL_PROVIDER = provider;
     h.primary(provider, model);
@@ -173,6 +177,10 @@ for (const [provider, other, model, plain] of [
       assert.deepEqual(attempt.claim, attempts[0].claim);
       assert.equal(attempt.provider_env.CLAUDE_CODE_USE_VERTEX, '0');
       assert.equal(attempt.provider_env.CLAUDE_CODE_USE_FOUNDRY, '0');
+      assert.equal(attempt.provider_env.CLAUDE_CODE_USE_ANTHROPIC_AWS, '0');
+      assert.equal(attempt.provider_env.CLAUDE_CODE_USE_GATEWAY, '0');
+      // Mantle is a Bedrock endpoint, so only the first-party pin turns it off.
+      assert.equal(attempt.provider_env.CLAUDE_CODE_USE_MANTLE, attempt.provider === 'bedrock' ? '1' : '0');
       assert.equal(attempt.provider_env.ANTHROPIC_MODEL, attempt.model);
       if (attempt.provider === 'bedrock') {
         assert.equal(attempt.provider_env.AWS_PROFILE, 'personal');
@@ -362,3 +370,35 @@ for (const source of ['project env', 'rung env', 'env_file']) {
     assert.equal(h.attempts()[2].provider_env.AWS_REGION, 'eu-west-1');
   });
 }
+
+test('a Bedrock switch in the user settings file bills a rung that names no provider as api', (t) => {
+  const base = fs.realpathSync.native(fs.mkdtempSync(path.join(TMP_ROOT, 'claude-provider-billing-')));
+  t.after(() => fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
+  const from = { claude: { dir: path.join(base, 'claude') } };
+  fs.mkdirSync(from.claude.dir, { recursive: true });
+  fs.writeFileSync(path.join(from.claude.dir, 'settings.json'), JSON.stringify({ env: { CLAUDE_CODE_USE_BEDROCK: '1' } }));
+  assert.equal(L.billing({ harness: 'claude' }, {}), 'subscription', 'the launch environment alone does not show the route');
+  assert.equal(L.billing({ harness: 'claude' }, P.routedEnv({}, from)), 'api');
+});
+
+test('Claude billing follows Claude Code credential precedence on the first-party route', (t) => {
+  const base = fs.realpathSync.native(fs.mkdtempSync(path.join(TMP_ROOT, 'claude-provider-helper-')));
+  t.after(() => fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
+  const from = { claude: { dir: path.join(base, 'claude') } };
+  fs.mkdirSync(from.claude.dir, { recursive: true });
+  assert.equal(L.billing({ harness: 'claude' }, {}, from), 'subscription', 'no settings file is a login');
+  fs.writeFileSync(path.join(from.claude.dir, 'settings.json'), JSON.stringify({ apiKeyHelper: 'print-key' }));
+  for (const rung of [{ harness: 'claude' }, { harness: 'claude', provider: 'anthropic' }]) {
+    assert.equal(L.billing(rung, P.routedEnv({}, from), from), 'api');
+    // apiKeyHelper ranks above a long-lived OAuth token.
+    assert.equal(L.billing(rung, P.routedEnv({ CLAUDE_CODE_OAUTH_TOKEN: 'fixture' }, from), from), 'api');
+  }
+  fs.writeFileSync(path.join(from.claude.dir, 'settings.json'), '{}');
+  const profile = { ANTHROPIC_PROFILE: 'fixture' };
+  const federation = { ANTHROPIC_FEDERATION_RULE_ID: 'fixture', ANTHROPIC_ORGANIZATION_ID: 'fixture' };
+  assert.equal(L.billing({ harness: 'claude' }, { CLAUDE_CODE_OAUTH_TOKEN: 'fixture' }, from), 'subscription');
+  assert.equal(L.billing({ harness: 'claude' }, profile, from), 'api', 'a named profile is a Console login');
+  assert.equal(L.billing({ harness: 'claude' }, federation, from), 'api', 'federation credentials are a Console login');
+  assert.equal(L.billing({ harness: 'claude' }, { ANTHROPIC_FEDERATION_RULE_ID: 'fixture' }, from), 'subscription', 'federation needs both variables');
+  assert.equal(L.billing({ harness: 'claude' }, { ...profile, CLAUDE_CODE_OAUTH_TOKEN: 'fixture' }, from), 'subscription', 'an OAuth token ranks above profiles');
+});

@@ -8,6 +8,10 @@ const file = process.env.AUTOMATION_GITHUB;
 const state = JSON.parse(fs.readFileSync(file, 'utf8'));
 state.calls ||= [];
 state.calls.push(args);
+if (process.env.AUTOMATION_ENV_PROBE) {
+  const { HOME, PATH, XDG_CACHE_HOME, TOWER_CRANE_SANDBOX, TOWER_CRANE_AGENT, TOWER_CRANE_TASK } = process.env;
+  fs.appendFileSync(process.env.AUTOMATION_ENV_PROBE, JSON.stringify({ args, HOME, PATH, XDG_CACHE_HOME, TOWER_CRANE_SANDBOX, TOWER_CRANE_AGENT, TOWER_CRANE_TASK }) + '\n');
+}
 // Write through a rename so a test reading the file never sees it truncated.
 const save = () => {
   fs.writeFileSync(`${file}.${process.pid}`, JSON.stringify(state));

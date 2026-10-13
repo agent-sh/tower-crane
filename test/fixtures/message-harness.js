@@ -89,8 +89,10 @@ async function main() {
     out.turns.push(hook('PostToolUse'));
     // A second message exercises the Stop gate after the first delivery.
     fs.writeFileSync(process.env.MESSAGE_READY + '.stop', '');
+    // The test's release clock starts here, after the hooks above ran discovery.
+    const stopDeadline = Date.now() + 15000;
     while (!fs.existsSync(process.env.MESSAGE_READY + '.stop.go')) {
-      if (Date.now() >= deadline) throw new Error('stop test never released harness');
+      if (Date.now() >= stopDeadline) throw new Error('stop test never released harness');
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
     const held = hook('Stop');
@@ -109,8 +111,10 @@ async function main() {
     (await import(pathToFileURL(ext).href)).default(pi);
     out.turns.push(await handlers.tool_result({ toolName: 'bash', content: [] }));
     fs.writeFileSync(process.env.MESSAGE_READY + '.stop', '');
+    // The test's release clock starts here, after the hooks above ran discovery.
+    const stopDeadline = Date.now() + 15000;
     while (!fs.existsSync(process.env.MESSAGE_READY + '.stop.go')) {
-      if (Date.now() >= deadline) throw new Error('stop test never released harness');
+      if (Date.now() >= stopDeadline) throw new Error('stop test never released harness');
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
     await handlers.agent_end({ messages: [{ role: 'assistant', content: [{ type: 'text', text: 'last report from pi' }] }] });
@@ -141,8 +145,10 @@ async function main() {
     await plugin['tool.execute.after']({ sessionID: 'parent', tool: 'bash' }, output);
     out.turns.push(output);
     fs.writeFileSync(process.env.MESSAGE_READY + '.stop', '');
+    // The test's release clock starts here, after the hooks above ran discovery.
+    const stopDeadline = Date.now() + 15000;
     while (!fs.existsSync(process.env.MESSAGE_READY + '.stop.go')) {
-      if (Date.now() >= deadline) throw new Error('stop test never released harness');
+      if (Date.now() >= stopDeadline) throw new Error('stop test never released harness');
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
     await idle('parent');
