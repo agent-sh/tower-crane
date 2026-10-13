@@ -299,6 +299,8 @@ A merge or cancel retires the task's worktree after its state change is recorded
 
 Worker scratch is recorded as the task's `scratch` path on spawn: `tower-crane/tasks/<state hash>/<task id>` under the spawning user's cache root. Every later worker attempt, including rework, mounts that path read-write and sets `XDG_CACHE_HOME` there; Go and npm caches also stay inside it. The recorded path is reused even when a later dispatch changes its cache-root environment. Worker prompts and command-harness brief copies name the path, including resume prompts. Homes and reviewer caches remain per spawn and can be pruned independently. Successful task worktree retirement removes scratch, including read-only module trees, and clears `scratch`; each reason that keeps the worktree also keeps scratch. Superseding a task uses cancellation and the same retirement rules.
 
+`ci log JOB_ID [--failed-tests]` reads a job on the task's current branch head and writes its ANSI-stripped log to `ci-job-JOB_ID.log` directly in `scratch`. It needs the task's recorded `branch` and `scratch`, so it can read feedback before `submit` records a PR or SHA. `ci alerts` needs the recorded `pr` and reads open code-scanning alerts at `refs/pull/N/head`. Both default `--task` to `TOWER_CRANE_TASK`; the worker broker restricts them to its own task. Neither command changes state.
+
 ### Ladder
 
 The ladder says which harness, model and effort runs each kind of work. It has seven rungs:
