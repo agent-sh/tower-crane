@@ -1613,7 +1613,7 @@ test('concurrent event consumers execute each submission gate only once', async 
 
 // A slow stub suite records each run's start and end, so the log shows how
 // many gate executors ran at once across every consumer process.
-function slowSuite(h, { executors, crash = false, release = null, hold = 1, pr = false } = {}) {
+function slowSuite(h, { executors, crash = false, release = null, hold = 1, pr = false, fail = false } = {}) {
   const runs = path.join(h.base, 'suite-runs.log');
   const suite = path.join(h.base, 'tools', 'slow-suite.js');
   fs.writeFileSync(suite, `const fs = require('node:fs');
@@ -1624,7 +1624,7 @@ if (crash && !fs.existsSync(crash)) {
   const events = fs.readFileSync(${JSON.stringify(path.join(h.state, 'events.jsonl'))}, 'utf8').trim().split('\\n').map(JSON.parse);
   process.kill(events.findLast((e) => e.cmd === 'automation' && e.detail.phase === 'running').detail.pid, 'SIGKILL');
 }
-const finish = () => fs.appendFileSync(${JSON.stringify(runs)}, '-\\n');
+const finish = () => { fs.appendFileSync(${JSON.stringify(runs)}, '-\\n'); process.exitCode = ${fail ? 1 : 0}; };
 const release = ${JSON.stringify(release)};
 if (release) {
   const starts = fs.readFileSync(${JSON.stringify(runs)}, 'utf8').split('\\n').filter((m) => m === '+').length;
@@ -1654,7 +1654,7 @@ if (release) {
 test('wait drains on either signal without starting another gate, and a second signal stops the gate', {
   skip: process.platform === 'win32' ? 'Windows child.kill does not deliver POSIX signals' : false,
 }, async (t) => {
-  for (const [signal, forced, stage] of [['SIGTERM', false], ['SIGINT', false], ['SIGTERM', true], ['SIGTERM', true, 'proof'], ['SIGTERM', true, 'sources'], ['SIGTERM', false, 'idle'], ['SIGINT', false, 'observe'], ['SIGTERM', false, 'follow'], ['SIGTERM', false, 'pr'], ['SIGTERM', true, 'ci']]) {
+  for (const [signal, forced, stage] of [['SIGTERM', false], ['SIGINT', false], ['SIGTERM', true], ['SIGTERM', true, 'proof'], ['SIGTERM', true, 'sources'], ['SIGTERM', false, 'idle'], ['SIGINT', false, 'observe'], ['SIGTERM', false, 'follow'], ['SIGTERM', false, 'pr'], ['SIGTERM', true, 'ci'], ['SIGTERM', false, 'failure']]) {
     const proof = stage === 'proof';
     const sources = stage === 'sources';
     const idle = ['idle', 'observe', 'follow'].includes(stage);
@@ -1682,7 +1682,7 @@ test('wait drains on either signal without starting another gate, and a second s
       h.logs = () => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
       const release = path.join(h.base, 'release-suite');
       const heldRun = proof ? 2 : 1;
-      const runs = idle ? null : slowSuite(h, { executors: 1, release, hold: heldRun, pr: github });
+      const runs = idle ? null : slowSuite(h, { executors: 1, release, hold: heldRun, pr: github, fail: stage === 'failure' });
       if (proof) h.ok(['project', 'set', '--tests-mode', 'prove', '--agent', 'orchestrator']);
       if (github) {
         if (stage === 'ci') {
@@ -1781,6 +1781,8 @@ require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'public-http'))}).fet
       if (!idle) {
         assert.equal(h.git(['worktree', 'list', '--porcelain']).match(/^worktree /gm).length, 1,
           'shutdown removes the gate worktree registration before releasing the executor');
+        assert.equal(h.readState('tasks.json').tasks[0].status, 'submitted',
+          'shutdown leaves the interrupted reaction available for gate retry');
       }
       const drained = forced || idle || stage === 'pr' ? 0 : 1;
       if (json) {
@@ -1815,7 +1817,7 @@ require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'public-http'))}).fet
       assert.deepEqual(receipts.filter((e) => e.detail.phase === 'running').map((e) => e.task), ['T1']);
       assert.equal(receipts.at(-1).detail.phase, 'deferred', 'the executor lease is released for a retry');
       const tasks = h.readState('tasks.json').tasks;
-      assert.deepEqual(tasks[0].evidence.map((e) => [e.type, e.ok]), [[sources ? 'sources' : 'tests', !forced]],
+      assert.deepEqual(tasks[0].evidence.map((e) => [e.type, e.ok]), [[sources ? 'sources' : 'tests', !forced && stage !== 'failure']],
         'the active gate is recorded, and the next gate is left for a retry');
       assert.ok(tasks.slice(1).every((task) => !task.evidence.length), 'other tasks keep their pending gates');
       if (forced) {

@@ -599,6 +599,7 @@ A push carries ids, never content: one line per event (`- E…: decision-answer 
 Automatic stack maintenance still uses synchronous Git/GitHub commands and can delay signal handling until the current command returns. Software gate commands and PR inspection run asynchronously and remain cancellable.
 
 Post-merge conflict probes check the drain signal before inspecting another PR, requesting rework or reserving a generated repair. A pending inspection or trial command can finish; cancelled probes add no conflict-error notes.
+If a gate fails while draining, its evidence is retained and automatic retry or rework waits for a later reaction.
 
 The second signal also cancels asynchronous stack merge polling and its backoff. GitHub's merge request can remain pending remotely; rerun `merge ID` to confirm its state before continuing.
 
