@@ -7,7 +7,7 @@ const path = require('node:path');
 const cp = require('node:child_process');
 const crypto = require('node:crypto');
 const zlib = require('node:zlib');
-const { makeRepo, PTY_AVAILABLE } = require('./helpers');
+const { makeRepo, pinRung, PTY_AVAILABLE } = require('./helpers');
 const { gateFixture } = require('./gate-helpers');
 const { shellQuote } = require('../lib/gates/common');
 
@@ -88,6 +88,10 @@ function unauthorizedServer(t) {
 test('git the CLI and gates run takes no command from repository config or hooks', async (t) => {
   const h = makeRepo(t);
   h.init();
+  // Git configuration is independent of a native harness's credential stores.
+  for (const rung of ['medium', 'review']) pinRung(h, rung, {
+    harness: 'command', command: [process.execPath, '-e', 'process.exit(0)', '{prompt}'],
+  });
   const sha = gateFixture(h);
   h.ok(['project', 'set', '--tests-cmd', 'node test/value.test.js', '--clean-cmd', h.env.TOWER_CRANE_CLEAN_CMD]);
   for (const title of ['Change', 'Other', 'Ssh', 'Https', 'Local', 'Helper', 'Vcs']) h.ok(['task', 'add', '--title', title, '--acceptance', 'works']);
