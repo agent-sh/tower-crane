@@ -148,7 +148,9 @@ while (!fs.existsSync(${JSON.stringify(addRelease)})) {
       const admin = path.join(h.repo, '.git', 'worktrees', name);
       assert.ok(fs.readFileSync(path.join(admin, 'gitdir'), 'utf8').trim());
       assert.ok(fs.readFileSync(path.join(admin, 'HEAD'), 'utf8').trim());
-      assert.equal(fs.readFileSync(path.join(admin, 'commondir'), 'utf8').trim(), '../..');
+      // A task worktree's admin directory moved out of worktrees/, with an absolute commondir.
+      const moved = fs.lstatSync(admin).isSymbolicLink();
+      assert.equal(fs.readFileSync(path.join(admin, 'commondir'), 'utf8').trim(), moved ? fs.realpathSync.native(path.join(h.repo, '.git')) : '../..');
     }
   } finally {
     fs.writeFileSync(release, '');

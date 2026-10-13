@@ -516,7 +516,10 @@ test('a spawned claude agent imports the user\'s global rules by path, loads non
   assert.equal(seen.args[seen.args.indexOf('--allowedTools') + 1], 'Bash,Read,Grep,Glob');
   assert.deepEqual([box.enabled, box.failIfUnavailable, box.allowUnsandboxedCommands, box.network.allowAllUnixSockets], [true, true, false, true]);
   assert.deepEqual(box.filesystem.allowWrite, []);
-  assert.deepEqual(box.filesystem.denyWrite, [h.state, wt], 'the state is read-only');
+  assert.deepEqual(box.filesystem.denyWrite.slice(0, 2), [h.state, wt], 'the state is read-only');
+  // claude writes a linked worktree's git directory itself; what runs code stays read-only.
+  const common = h.git(['rev-parse', '--path-format=absolute', '--git-common-dir'], wt);
+  assert.ok(box.filesystem.denyWrite.includes(path.join(common, 'config')), 'the shared git config is read-only');
   assert.ok(box.filesystem.denyRead.includes(path.join(h.state, 'homes')), 'other agent homes are hidden, including future spawns');
   assert.ok(box.filesystem.denyRead.includes(path.join(h.state, 'brokers')), 'no agent reads another agent\'s broker token');
   assert.ok(box.filesystem.denyRead.includes(path.join(path.dirname(h.userConfig), 'owner')), 'no agent reads the owner key');
@@ -1865,6 +1868,7 @@ test('a codex agent writes only where its agent file says; a worker writes its g
   // What makes git outside the sandbox run commands, or read another config,
   // stays read-only though the git directory around it is writable.
   const guarded = [path.join(common, 'config'), path.join(common, 'config.worktree'), path.join(common, 'hooks'), path.join(common, 'info'),
+    path.join(common, 'remotes'), path.join(common, 'branches'),
     path.join(mod, 'config'), path.join(mod, 'hooks'), path.join(own, 'config.worktree'), path.join(own, 'commondir'), path.join(own, 'gitdir'),
     path.join(fs.realpathSync(wt), '.git')];
   // git resolves ~/ in the user's global config in the agent's HOME, which
@@ -1923,12 +1927,20 @@ test('a codex agent writes only where its agent file says; a worker writes its g
   }
   // The codex loop left T1 submitted; a worker needs a task it can claim.
   h.ok(['rework', 'T1', '--reason', 'probe the claude rungs']);
+  // Other worktrees' admin directories, whose commondir and config.worktree
+  // decide which config git reads there, are read-only, including one added
+  // later: the task worktree's own lives outside worktrees/. claude adds a
+  // linked worktree's common directory to its sandbox's writes itself, so a
+  // read-only role gets the same carve-outs.
+  assert.equal(path.dirname(own), path.join(path.dirname(fs.realpathSync(wt)), '.git-admin'));
+  const worktrees = path.join(common, 'worktrees');
   for (const [rung, writes] of [['hard', true], ['small', false]]) {
     isolated(h, rung, 'claude');
     spawn(h, u, rung);
     const { allowWrite: allow, denyWrite: deny } = u.report().settings.sandbox.filesystem;
     for (const d of [common, own]) assert.equal(allow.includes(d), writes, `claude ${rung}: ${d}`);
-    for (const p of guarded) assert.equal(deny.includes(p), writes, `claude ${rung}: ${p}`);
+    for (const p of [...guarded, worktrees]) assert.ok(deny.includes(p), `claude ${rung}: ${p}`);
+    assert.ok(!deny.some((p) => own === p || own.startsWith(p + path.sep)), `claude ${rung}: its own admin directory stays writable`);
   }
   // Each guarded path exists, so no sandbox masks it with a placeholder.
   for (const p of guarded) assert.ok(fs.existsSync(p), p);

@@ -249,9 +249,32 @@ function cachedFixture(t, key, build) {
   h.env.GIT_CONFIG_GLOBAL = path.join(h.base, 'gitconfig');
   h.env.TOWER_CRANE_CONFIG = path.join(h.base, 'user-config', 'config.json');
   if (from.gateSettings) h.gateSettings = from.gateSettings.map(rewrite);
-  const worktrees = path.join(h.base, 'repo-worktrees');
-  if (fs.existsSync(worktrees)) h.git(['worktree', 'repair', ...fs.readdirSync(worktrees).map((name) => path.join(worktrees, name))]);
+  repairWorktrees(h);
   return Object.assign(h, JSON.parse(rewrite(JSON.stringify(template.fields))));
+}
+
+// Relinks a copied repository's task worktrees to the copy. Their admin
+// directories in repo-worktrees/.git-admin, the links to them in the git
+// directory's worktrees/ and their .git files carry absolute paths
+// (lib/worktree.js relocateAdmin), which git worktree repair does not
+// follow; it then fixes the rest.
+function repairWorktrees(h) {
+  const root = path.join(h.base, 'repo-worktrees');
+  if (!fs.existsSync(root)) return;
+  const admin = path.join(root, '.git-admin');
+  for (const name of fs.existsSync(admin) ? fs.readdirSync(admin) : []) {
+    const dir = path.join(admin, name);
+    fs.writeFileSync(path.join(dir, 'commondir'), `${fs.realpathSync.native(path.join(h.repo, '.git'))}\n`);
+    const link = path.join(h.repo, '.git', 'worktrees', name);
+    if (fs.lstatSync(link, { throwIfNoEntry: false })?.isSymbolicLink()) {
+      fs.unlinkSync(link);
+      fs.symlinkSync(dir, link, 'dir');
+    }
+    const dotGit = path.join(root, name, '.git');
+    if (fs.existsSync(dotGit)) fs.writeFileSync(dotGit, `gitdir: ${dir}\n`);
+  }
+  const trees = fs.readdirSync(root).filter((name) => name !== '.git-admin').map((name) => path.join(root, name));
+  if (trees.length) h.git(['worktree', 'repair', ...trees]);
 }
 
 function context(t, base, options = {}) {
@@ -465,4 +488,4 @@ try {
   }
 }
 
-module.exports = { makeRepo, makeProjectRepo, makeTaskRepo, copyRepo, cachedFixture, fixtureLadder, pinRung, pinLiveRung, run, runPty, PTY_AVAILABLE, runAsync, BIN, ROOT, HOOKS, real, TMP_ROOT, detachedAlive };
+module.exports = { repairWorktrees, makeRepo, makeProjectRepo, makeTaskRepo, copyRepo, cachedFixture, fixtureLadder, pinRung, pinLiveRung, run, runPty, PTY_AVAILABLE, runAsync, BIN, ROOT, HOOKS, real, TMP_ROOT, detachedAlive };

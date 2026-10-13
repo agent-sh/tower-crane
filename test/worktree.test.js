@@ -486,6 +486,32 @@ test('cancelling removes clean, dirty and missing worktrees, saving dirty files'
   assert.equal(fs.readFileSync(path.join(saved, 'files', 'notes.txt'), 'utf8'), 'unfinished\n');
 });
 
+// A sandboxed agent writes the git directory but not its worktrees/, so a
+// task worktree's admin directory lives beside the worktrees, where git
+// reaches it through a link; git works there and removal takes both away.
+test('a task worktree keeps its admin directory outside the git directory\'s worktrees/, and removal takes it away', { skip: process.platform === 'win32' && 'links need privileges on Windows' }, (t) => {
+  const h = makeRepo(t);
+  h.init();
+  h.ok(['task', 'add', '--title', 'Admin', '--acceptance', 'not needed']);
+  const wt = h.json(['worktree', 'T1']);
+  const common = fs.realpathSync.native(path.join(h.repo, '.git'));
+  const name = path.basename(wt.path);
+  const entry = path.join(common, 'worktrees', name);
+  const admin = path.join(path.dirname(wt.path), '.git-admin', name);
+  assert.equal(fs.readlinkSync(entry), admin);
+  assert.equal(fs.readFileSync(path.join(wt.path, '.git'), 'utf8'), `gitdir: ${admin}\n`);
+  assert.equal(fs.readFileSync(path.join(admin, 'commondir'), 'utf8'), `${common}\n`);
+  assert.equal(fs.realpathSync.native(h.git(['rev-parse', '--path-format=absolute', '--git-common-dir'], wt.path)), common);
+  fs.writeFileSync(path.join(wt.path, 'f.txt'), 'f\n');
+  h.git(['add', 'f.txt'], wt.path);
+  h.git(['commit', '-qm', 'f'], wt.path);
+  assert.equal(h.git(['rev-parse', `refs/heads/${wt.branch}`]), h.git(['rev-parse', 'HEAD'], wt.path));
+  assert.ok(h.registers(wt.path));
+  h.ok(['task', 'update', 'T1', '--status', 'cancelled']);
+  assert.ok(!h.registers(wt.path), 'git forgets the worktree');
+  assert.ok(!fs.existsSync(entry) && !fs.existsSync(admin), 'the link and the admin directory are gone');
+});
+
 test('cancelling keeps a worktree that git still has locked', (t) => {
   const h = makeRepo(t);
   h.init();
