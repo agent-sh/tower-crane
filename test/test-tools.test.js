@@ -53,6 +53,31 @@ test('repository seeds, test helpers and gate scratch share the cache default an
   }
 });
 
+for (const fileTest of [true, false]) test(`fixtures created without a test context are removed after completion (test=${fileTest})`, (t) => {
+  const h = makeRepo(t);
+  const output = path.join(h.base, 'fixture.json');
+  const file = path.join(h.base, 'fixture-lifetime.test.js');
+  const body = `
+const test = require('node:test');
+const fs = require('node:fs');
+const { makeRepo } = require(${JSON.stringify(path.join(ROOT, 'test/helpers.js'))});
+const create = () => {
+  const fixture = makeRepo();
+  fs.writeFileSync(${JSON.stringify(output)}, JSON.stringify({ base: fixture.base }));
+};
+${fileTest ? "test('file fixture', create);" : 'create();'}
+`;
+  fs.writeFileSync(file, body);
+  const result = cp.spawnSync(process.execPath, [...(fileTest ? ['--test'] : []), file], {
+    env: { ...h.env, NODE_TEST_CONTEXT: undefined, TOWER_CRANE_TEST_TMP: path.join(h.base, 'scratch') },
+    encoding: 'utf8', timeout: 30000,
+  });
+  assert.equal(result.status, 0, result.stderr + result.stdout);
+  const { base } = JSON.parse(fs.readFileSync(output, 'utf8'));
+  assert.equal(fs.existsSync(base), false, 'completion owns fixtures without a per-test context');
+  assert.deepEqual(fs.readdirSync(path.join(h.base, 'scratch')), []);
+});
+
 test('the test runner emits one capped concurrency value, including repeated and split options', (t) => {
   const h = makeRepo(t);
   const runner = path.join(ROOT, 'test/run.js');

@@ -1,0 +1,1 @@
+- Clean remaining test fixtures at file teardown, stopping detached processes before removing directories; plain helper scripts clean fixtures before exit.
