@@ -133,7 +133,7 @@ test('a host-only failure on the base keeps its opt-in and command for retry cla
   const base = `task-${branches}`;
   const sha = task({ 'lib/add.js': FIX, 'test/add.test.js': ADD_TEST }, base);
   const ordinary = `${NODE} --test test/mul.test.js`;
-  const host = `${NODE} --test test/host-known.test.js`;
+  const host = `${NODE} --test ${shellQuote('test/host-known.test.js')}`;
   for (const mode of ['run-only', 'prove']) {
     const r = await gate.run(ctx(sha, {
       args: { cmd: ordinary },
@@ -150,6 +150,24 @@ test('a host-only failure on the base keeps its opt-in and command for retry cla
     assert.ok(r.summary.includes(`\`${host}\``), r.summary);
     assert.match(r.summary, /Also fails on task-\d+ at [0-9a-f]+: known host failure/);
     assert.deepEqual(r.receipt.host_only.run, ['test/host-known.test.js']);
+    assertCleanedUp();
+  }
+});
+
+test('missing host-only command pins report the proof command configuration', async () => {
+  const sha = task({ 'test/host-pin.test.js': "require('node:test')('host pin', () => {});\n" });
+  const ordinary = `${NODE} --test test/mul.test.js`;
+  for (const proof of [null, 'tower-crane-no-such-host-runner {tests}']) {
+    const r = await gate.run(ctx(sha, {
+      args: { cmd: ordinary },
+      project: {
+        tests: { mode: 'run-only', host_only: ['test/host-pin.test.js'] },
+        gates: { tests_cmd: ordinary, tests_proof_cmd: proof },
+      },
+    }));
+    assert.equal(r.ok, false);
+    assert.deepEqual(r.config_failure, { key: 'tests_proof_cmd' });
+    assert.equal(r.confirmed_failure, undefined);
     assertCleanedUp();
   }
 });

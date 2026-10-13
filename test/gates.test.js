@@ -251,8 +251,8 @@ test('colored regression failure', () => {
 
   const evidence = h.readState('tasks.json').tasks[0].evidence.at(-1);
   assert.equal(evidence.test_failure.names.length, 1);
-  assert.match(evidence.test_failure.names[0], /^colored regression failure \(/);
-  assert.match(evidence.summary, /Failing tests:\n- colored regression failure \(/);
+  assert.equal(evidence.test_failure.names[0], 'colored regression failure');
+  assert.match(evidence.summary, /Failing tests:\n- colored regression failure\n/);
   assert.equal(evidence.test_failure.output_tail.includes('\u001b'), false);
   assert.match(result.stdout, /colored regression failure/);
 });
