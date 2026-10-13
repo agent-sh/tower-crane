@@ -80,6 +80,85 @@ function assertCleanedUp() {
   assert.equal(worktrees(root), 1);
 }
 
+test('host_env opts host-only tests in without reaching the ordinary suite, and records skips', async () => {
+  const marker = path.join(tmp, 'host-env-marker');
+  const sha = task({
+    'test/host.test.js': `const test = require('node:test');
+test('live host case', { skip: process.env.TC_HOST_OPT_IN !== '1' }, () => {
+  require('node:assert/strict').equal(process.env.TC_HOST_OPT_IN, '1');
+  require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'ran');
+});
+test('unavailable host case', { skip: 'unavailable' }, () => {
+  require('node:assert/strict').fail('unavailable case must remain skipped');
+});
+`,
+    'test/plain.test.js': "require('node:assert/strict').equal(process.env.TC_HOST_OPT_IN, undefined);\n",
+  });
+  // This runner follows the gate exclusion contract without depending on the repository runner.
+  const runner = path.join(tmp, 'host-env-runner.cjs');
+  fs.writeFileSync(runner, `const cp = require('node:child_process');
+const excluded = JSON.parse(process.env.TOWER_CRANE_TEST_EXCLUDE || '[]');
+const files = process.argv.slice(2).filter(f => !excluded.includes(f));
+process.exit(files.length ? cp.spawnSync(process.execPath, ['--test', ...files], { stdio: 'inherit' }).status : 0);
+`);
+  const suite = `${NODE} ${quote(runner)} test/host.test.js test/plain.test.js`;
+  const project = {
+    tests: { mode: 'run-only', host_only: ['test/host.test.js'] },
+    gates: { tests_cmd: suite, tests_proof_cmd: `${NODE} --test {tests}` },
+  };
+  const skipped = await gate.run(ctx(sha, { args: { cmd: suite }, project }));
+  assert.equal(skipped.ok, true, skipped.summary);
+  assert.equal(fs.existsSync(marker), false);
+  project.tests.host_env = { TC_HOST_OPT_IN: '1' };
+  const ran = await gate.run(ctx(sha, { args: { cmd: suite }, project }));
+  assert.equal(ran.ok, true, ran.summary);
+  assert.equal(fs.readFileSync(marker, 'utf8'), 'ran');
+  assert.deepEqual(skipped.receipt.host_only.run, []);
+  assert.deepEqual(skipped.receipt.host_only.skipped, ['test/host.test.js']);
+  assert.equal(skipped.receipt.host_only.results[0].skipped, 2);
+  assert.deepEqual(ran.receipt.host_only.run, ['test/host.test.js']);
+  assert.deepEqual(ran.receipt.host_only.skipped, ['test/host.test.js']);
+  assert.equal(ran.receipt.host_only.results[0].ran, 1);
+  assert.equal(ran.receipt.host_only.results[0].skipped, 1);
+  assertCleanedUp();
+});
+
+test('host case counts distinguish TAP, spec, all skips and unreported output', () => {
+  for (const [output, expected] of [
+    ['# tests 2\n# pass 1\n# fail 0\n# skipped 1\n', { ran: 1, skipped: 1 }],
+    ['ℹ tests 2\nℹ pass 0\nℹ fail 0\nℹ skipped 2\n', { ran: 0, skipped: 2 }],
+    ['# tests 1\n# pass 0\n# fail 0\n# skipped 0\n# todo 1\n', { ran: 0, skipped: 1 }],
+    ['ok host.test.js\n', { ran: null, skipped: null }],
+    ['# tests 2\n# pass 1\n# fail 0\n# skipped 0\n', { ran: null, skipped: null }],
+  ]) assert.deepEqual(gate.hostCounts({ output }), expected, output);
+});
+
+test('a skipped changed host-only test cannot prove code, and host_env reaches its revert run', async () => {
+  const sha = task({
+    'lib/add.js': FIX,
+    'test/host-proof.test.js': `require('node:test')('live proof', { skip: process.env.TC_HOST_OPT_IN !== '1' }, () => {
+  require('node:assert/strict').equal(require('../lib/add')(1, 2), 3);
+});
+`,
+  });
+  const suite = `${NODE} --test test/mul.test.js`;
+  const project = {
+    tests: { host_only: ['test/host-proof.test.js'], expensive: true },
+    gates: { tests_cmd: suite, tests_proof_cmd: `${NODE} --test {tests}` },
+  };
+  const skipped = await gate.run(ctx(sha, { args: { cmd: suite }, project }));
+  assert.equal(skipped.ok, false, skipped.summary);
+  assert.match(skipped.summary, /changed host-only tests skipped.*do not prove/);
+  assert.deepEqual(skipped.receipt.host_only.run, []);
+  assert.deepEqual(skipped.receipt.host_only.skipped, ['test/host-proof.test.js']);
+  project.tests.host_env = { TC_HOST_OPT_IN: '1' };
+  const ran = await gate.run(ctx(sha, { args: { cmd: suite }, project }));
+  assert.equal(ran.ok, true, ran.summary);
+  assert.match(ran.summary, /tests pass with the change and fail without it/);
+  assert.deepEqual(ran.receipt.host_only.run, ['test/host-proof.test.js']);
+  assertCleanedUp();
+});
+
 test('a test that fails without the change and passes with it: ok', async () => {
   const sha = task({ 'lib/add.js': FIX, 'test/add.test.js': ADD_TEST });
   const r = await gate.run(ctx(sha));
