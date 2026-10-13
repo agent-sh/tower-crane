@@ -67,7 +67,7 @@ if (args[0] === 'pr') {
       state.becomeMergeableAfterView = false;
     }
   }
-} else if (args[0] === 'api' && /\/pulls\/\d+\/comments$/.test(args[1])) {
+} else if (args[0] === 'api' && /\/(?:pulls|issues)\/\d+\/comments(?:\?|$)/.test(args[1])) {
   // Already in the shape the caller's --jq filter produces: one comment per line.
   out = (state.comments || []).map((c) => JSON.stringify(c)).join('\n');
 } else if (args[0] === 'api') {

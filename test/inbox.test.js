@@ -165,6 +165,30 @@ test('review replacement, capped revuto, old CodeQL heads and unavailable GitHub
   assert.equal(h.json(['task', 'show', id]).sha, h.sha, 'a new remote head does not become reviewed evidence');
 });
 
+test('a ready task without a brief is brief_missing until brief set clears it', (t) => {
+  const h = setup(t);
+  const id = h.json(['task', 'add', '--title', 'Briefless', '--kind', 'docs', '--acceptance', 'works']).id;
+  const items = () => h.inbox().items.filter((i) => i.task === id && ['brief_missing', 'ready'].includes(i.kind));
+  assert.deepEqual(items().map((i) => [i.kind, i.action.argv]), [['brief_missing', ['brief', 'set', id, '--file', '<brief file>']]]);
+  assert.match(h.ok(['status']), new RegExp(`ready: ${id} Briefless \\(no brief\\)`));
+
+  h.ok(['brief', 'set', id, '-'], { input: 'Context.\n' });
+  assert.deepEqual(items().map((i) => i.kind), ['ready']);
+  assert.doesNotMatch(h.ok(['status']), /no brief/);
+});
+
+test('a rework task without a brief is brief_missing in place of its rework item', (t) => {
+  const h = setup(t);
+  const id = h.json(['task', 'add', '--title', 'Reworked', '--kind', 'docs', '--acceptance', 'works']).id;
+  h.submit(id);
+  h.ok(['rework', id, '--reason', 'base conflict in parser.js']);
+  const kinds = () => h.inbox().items.filter((i) => i.task === id).map((i) => i.kind);
+  assert.deepEqual(kinds(), ['rework_ready']);
+  // rework writes its notes into the brief, so only a removed brief file leaves the task without one.
+  fs.rmSync(path.join(h.state, 'briefs', `${id}.md`));
+  assert.deepEqual(kinds(), ['brief_missing']);
+});
+
 test('ready dispatch respects worker slots and unobservable processes cannot be released or replaced', (t) => {
   const h = setup(t);
   const remote = h.add('Remote claim');
