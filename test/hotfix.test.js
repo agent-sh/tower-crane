@@ -113,7 +113,8 @@ test('software gates use merge tree, passing independent review accepts hotfix a
   const preview = h.json(['spawn', '--task', 'T1', '--role', 'review', '--dry-run']);
   const prompt = preview.argv.find((a) => a.includes('## Task'));
   assert.match(prompt, /merged before its gates/);
-  assert.match(prompt, /module.exports = 1/);
+  // A prompt over the argv budget names the review packet instead of carrying the diff; the next test reads that packet.
+  assert.match(prompt, new RegExp(`module.exports = 1|Read .*reviews.* for the diff at ${h.sha}`));
   assert.match(prompt, new RegExp(`Record review evidence at merge commit ${h.sha}`));
   // A review by the recorder cannot stand in for an independent reviewer.
   h.ok(['evidence', 'T1', '--type', 'review', '--ok', '--sha', h.sha, '--revision', '2']);
@@ -150,6 +151,11 @@ test('accept runs missing software gates and dispatches one normal reviewer at t
   assert.equal(dispatches.length, 1);
   assert.equal(dispatches[0].detail.sha, h.sha);
   assert.equal(dispatches[0].detail.revision, 2);
+  // The reviewer's packet carries the landed merge-tree diff whatever the prompt's length.
+  const packet = fs.readFileSync(path.join(h.state, 'reviews', `T1-${h.sha}.md`), 'utf8');
+  assert.match(packet, /merged before its gates/);
+  assert.match(packet, /## Diff[\s\S]*module.exports = 1/);
+  assert.match(packet, new RegExp(`Base: ${h.base_sha}`));
   assert.equal(task(h).status, 'submitted');
   h.ok(['evidence', 'T1', '--type', 'review', '--ok', '--sha', h.sha, '--agent', r.reviewer]);
   h.run(['wait', '--task', 'T1', '--timeout', '0.2']);
