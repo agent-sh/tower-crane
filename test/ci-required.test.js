@@ -96,8 +96,8 @@ test('PRs run Windows shards, proofs and shared checks; other events run all nin
     assert.doesNotMatch(job, /^ {4}if:/m, `${id} also runs on pull requests`);
     assert.match(job, /- run: node scripts\/probe-/);
   }
-  assert.match(workflow, /^concurrency:\n {2}group: ci-\$\{\{ github\.event\.pull_request\.number \|\| github\.ref \}\}\n {2}cancel-in-progress: \$\{\{ github\.event_name == 'pull_request' \}\}\n/m,
-    'superseded runs are grouped by PR and cancellation applies only to PR events');
+  assert.match(workflow, /^concurrency:\n {2}group: \$\{\{ github\.event_name == 'pull_request' && format\('ci-pr-\{0\}', github\.event\.pull_request\.number\) \|\| format\('ci-run-\{0\}', github\.run_id\) \}\}\n {2}cancel-in-progress: \$\{\{ github\.event_name == 'pull_request' \}\}\n/m,
+    'only PR runs share a group; unique run IDs keep pending and running non-PR runs independent');
 });
 
 test('the stack section says hosted CI runs on every stack member at its own base', () => {
