@@ -11,9 +11,12 @@ $ErrorActionPreference = 'Stop'
 try {
   $process = [System.Diagnostics.Process]::GetProcessById(${pid})
   $null = $process.Handle
-  # PowerShell reads a getter that throws as null; a process exiting here has no creation time.
-  $started = $process.StartTime
-  if ($null -ne $started) { [Console]::Out.WriteLine($started.ToFileTimeUtc().ToString()) }
+  # A process exiting during the snapshot has a null StartTime.
+  $identity = [pscustomobject]@{ Id = $process.Id; StartTime = $process.StartTime }
+  if ($null -ne $identity.StartTime) {
+    $identity.StartTime = $identity.StartTime.ToFileTimeUtc().ToString()
+  }
+  [Console]::Out.WriteLine((ConvertTo-Json -InputObject $identity -Compress))
 } catch [System.ArgumentException] {
 } catch [System.InvalidOperationException] {
 } finally {
@@ -26,8 +29,12 @@ exit 0
   const value = cp.execFileSync('powershell.exe', [
     '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64'),
   ], { encoding: 'utf8', windowsHide: true, timeout: 60000 }).trim();
-  if (value && !/^\d+$/.test(value)) throw new Error('invalid Windows process creation time');
-  return value || null;
+  const identity = value ? JSON.parse(value) : null;
+  if (identity === null || identity.StartTime === null) return null;
+  if (identity.Id !== pid || typeof identity.StartTime !== 'string' || !/^\d+$/.test(identity.StartTime)) {
+    throw new Error('invalid Windows process creation time');
+  }
+  return identity.StartTime;
 }
 
 module.exports = { startTime };
