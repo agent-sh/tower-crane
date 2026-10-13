@@ -1345,6 +1345,31 @@ if (process.env.STUB_FAIL_HARNESS === ${JSON.stringify(harness)}) {
   }
 });
 
+test('a brokered ci log runs the host gh, not the agent\'s gh shim that refuses gh api', { skip: NO_STUBS }, t => {
+  const { h, u } = setup(t);
+  isolated(h, 'hard', 'claude');
+  const branch = h.readState('tasks.json').tasks[0].branch;
+  const sha = h.git(['rev-parse', 'HEAD']);
+  const data = path.join(h.base, 'ci-feedback.json');
+  fs.writeFileSync(data, JSON.stringify({
+    jobs: { 42: { id: 42, name: 'test', head_branch: branch, head_sha: sha } },
+    refs: { [`heads/${branch}`]: { ref: `refs/heads/${branch}`, object: { sha } } },
+    logs: { 42: 'not ok 1 - read through the broker\n' },
+    alerts: {},
+  }));
+  // The host gh: the plant's keyring login, and the CI feedback endpoints.
+  fs.writeFileSync(path.join(h.base, 'bin', 'gh'), `#!${process.execPath}
+if (process.argv[2] === 'auth' && process.argv[3] === 'token') console.log('stub-gh-token');
+else require(${JSON.stringify(path.join(__dirname, 'fixtures', 'ci-feedback-gh.js'))});
+`, { mode: 0o755 });
+  // The agent's PATH starts with its home's gh shim, which refuses gh api.
+  spawn(h, u, 'hard', { CI_FEEDBACK_GH: data, STUB_RUN: JSON.stringify([[process.execPath, BIN, 'ci', 'log', '42']]) });
+  const seen = u.report();
+  assert.equal(seen.ran[0].code, 0, seen.ran[0].stderr);
+  const scratch = h.readState('tasks.json').tasks[0].scratch;
+  assert.equal(fs.readFileSync(path.join(scratch, 'ci-job-42.log'), 'utf8'), 'not ok 1 - read through the broker\n');
+});
+
 for (const source of ['claude', 'codex']) {
   test(`${source} harness configuration credential paths remain denied`, { skip: NO_STUBS }, t => {
     const { h, u, wt } = setup(t);
