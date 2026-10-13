@@ -384,8 +384,10 @@ test('a codex spawn on Bedrock starts with the region from the user config', { s
   assert.deepEqual(config.model_providers, PROVIDERS_KEPT);
   const profile = TOML.parse(fs.readFileSync(path.join(home, 'fixture-main.config.toml'), 'utf8'));
   assert.deepEqual(JSON.parse(JSON.stringify(profile.model_providers)), PROVIDERS_KEPT);
-  // An installed codex also loads the generated home with the spawn's -c
-  // overrides, so a field it refuses fails here instead of at dispatch.
+  // With TOWER_CRANE_LIVE_CODEX=1 the installed codex also loads the generated
+  // home with the spawn's -c overrides, so a field it refuses fails here
+  // instead of at dispatch. A non-live run never starts the real harness.
+  if (process.env.TOWER_CRANE_LIVE_CODEX !== '1') return t.diagnostic('set TOWER_CRANE_LIVE_CODEX=1 to load this home in the installed codex');
   const version = cp.spawnSync('codex', ['--version'], { encoding: 'utf8' });
   if (version.status !== 0) return t.diagnostic('codex is not installed; the stub alone checked startup');
   const overrides = spawned.flatMap((a, i) => (spawned[i - 1] === '-c' ? ['-c', a] : []));
@@ -1169,7 +1171,7 @@ test('claude and codex sandboxes deny the user\'s home except the paths the agen
   }
 });
 
-test('codex never names a hidden path inside another hidden directory', { skip: NO_STUBS }, t => {
+test('claude and codex keep a link inside a hidden directory and its target hidden; codex names no hidden path inside another', { skip: NO_STUBS }, t => {
   // Seen 2026-10-12: ~/.claude/debug/latest links to a file in the same hidden
   // directory, and Codex's bwrap could not mount over it inside the masked parent.
   const { h, u } = setup(t);
@@ -1177,20 +1179,63 @@ test('codex never names a hidden path inside another hidden directory', { skip: 
   fs.mkdirSync(debug, { recursive: true });
   fs.writeFileSync(path.join(debug, 'session.txt'), 'log\n');
   fs.symlinkSync(path.join(debug, 'session.txt'), path.join(debug, 'latest'));
-  isolated(h, 'small', 'codex');
-  // The owner key directory sits inside ~/.config.
   const project = h.readState('project.json');
-  delete project.owner_config_dir;
-  h.writeState('project.json', project);
-  const started = spawn(h, u, 'small', { TOWER_CRANE_AGENT: 'orchestrator', TOWER_CRANE_CONFIG: '' });
-  const config = TOML.parse(fs.readFileSync(path.join(h.state, 'homes', started.agent, 'config.toml'), 'utf8'));
-  const rules = config.permissions['tower-crane'].filesystem;
-  const hidden = Object.keys(rules).filter(p => rules[p] === 'none');
-  for (const p of [path.join(debug, 'latest'), path.join(u.home, '.config', 'tower-crane', 'owner', 'key')]) {
-    assert.equal(commandsRead({ harness: 'codex', config }, p), false, `${p} stays hidden`);
+  const secrets = [path.join(debug, 'latest'), path.join(debug, 'session.txt'), path.join(u.home, '.config', 'tower-crane', 'owner', 'key')];
+  for (const harness of ['claude', 'codex']) {
+    h.writeState('project.json', project);
+    isolated(h, 'small', harness);
+    // The owner key directory sits inside ~/.config.
+    const { owner_config_dir: _, ...unbound } = project;
+    h.writeState('project.json', unbound);
+    spawn(h, u, 'small', { TOWER_CRANE_AGENT: 'orchestrator', TOWER_CRANE_CONFIG: '' });
+    const seen = u.report();
+    for (const p of secrets) assert.equal(commandsRead(seen, p), false, `${harness}: ${p} stays hidden`);
+    if (harness === 'codex') {
+      const rules = seen.config.permissions['tower-crane'].filesystem;
+      const hidden = Object.keys(rules).filter(p => rules[p] === 'none');
+      const nested = hidden.filter(p => hidden.some(dir => p !== dir && p.startsWith(dir + path.sep)));
+      assert.deepEqual(nested, [], 'no hidden path is named inside a hidden directory');
+    }
   }
-  const nested = hidden.filter(p => hidden.some(dir => p !== dir && p.startsWith(dir + path.sep)));
-  assert.deepEqual(nested, [], 'no hidden path is named inside a hidden directory');
+});
+
+test('a project sandbox path inside a hidden credential store, or a writable one holding it, refuses dispatch', { skip: NO_STUBS }, t => {
+  // A path inside a hidden store reopens what lies under it: codex mounts
+  // writable paths after hidden ones, and claude remounts an allowed path
+  // inside a denied one. A writable path holding a store keeps it masked for
+  // the run, but in codex the agent can rename a directory between the two
+  // and so move the store out from under the next spawn's mask.
+  const { h, u } = setup(t);
+  const owner = path.join(path.dirname(h.userConfig), 'owner');
+  const refused = [
+    ['write', path.join(h.state, 'brokers', 'worker-T9-1'), 'is inside'],
+    ['write', path.join(h.state, 'homes', 'worker-T9-1', 'home', '.aws'), 'is inside'],
+    ['read', owner, 'is inside'],
+    ['write', h.state, 'holds'],
+    ['write', path.dirname(owner), 'holds'],
+  ];
+  for (const [field, p, why] of refused) {
+    fs.mkdirSync(p, { recursive: true });
+    h.ok(['project', 'set', '--sandbox', JSON.stringify({ [field]: [p] })]);
+    for (const harness of ['claude', 'codex']) {
+      isolated(h, 'hard', harness);
+      fs.rmSync(u.out, { force: true });
+      const r = h.run(['spawn', '--role', 'hard', '--task', 'T1', '--wait', '--json'], { env: u.env });
+      assert.notEqual(r.code, 0, `${harness}: sandbox.${field} ${p} must refuse dispatch`);
+      assert.match(r.stderr, new RegExp(`sandbox\\.${field} path .* ${why} .* which the sandbox hides because it holds credentials`));
+      assert.ok(!fs.existsSync(u.out), `${harness}: the harness must not start`);
+    }
+  }
+  // A readable path holding a store keeps it hidden: the deeper mask wins.
+  h.ok(['project', 'set', '--sandbox', JSON.stringify({ read: [h.state, path.dirname(owner)] })]);
+  for (const harness of ['claude', 'codex']) {
+    isolated(h, 'hard', harness);
+    spawn(h, u, 'hard');
+    const seen = u.report();
+    for (const f of [path.join(owner, 'key'), path.join(h.state, 'brokers', 'worker-T9-1', 'broker.json')]) {
+      assert.equal(commandsRead(seen, f), false, `${harness}: ${f} stays hidden under a readable parent`);
+    }
+  }
 });
 
 test('a codex agent\'s temp directory is its own, never the caller\'s TMPDIR', { skip: NO_STUBS }, t => {
@@ -1234,6 +1279,57 @@ test('codex names the same rules however many entries the home holds', { skip: N
     for (let i = 0; i < 50; i++) fs.writeFileSync(path.join(dir, `entry-${i}`), '');
   }
   assert.equal(rules(), before);
+});
+
+// The profile as codex hands it to its sandbox: one JSON argument with an
+// entry per rule. Linux caps one argument at MAX_ARG_STRLEN, 32 pages or
+// 131072 bytes with its terminating NUL; the 2,143-rule profile seen on
+// 2026-10-13 passed 200 KB and failed to exec.
+const MAX_ARG_STRLEN = 32 * 4096;
+function codexProfileArg(rules) {
+  const entry = (p, access) => ({ path: p.startsWith(':') ? { type: 'special', value: { kind: p.slice(1) } } : { type: 'path', path: p },
+    access: access === 'none' ? 'deny' : access });
+  const entries = Object.entries(rules).flatMap(([p, access]) => typeof access === 'string' ? [entry(p, access)]
+    : Object.entries(access).map(([sub, a]) => entry(`${p}/${sub}`, a)));
+  return JSON.stringify({ type: 'managed', file_system: { type: 'restricted', entries }, network: 'enabled' });
+}
+
+test('codex keeps its profile under the argument limit however many entries the home and the directories above it hold', { skip: NO_STUBS }, t => {
+  // Seen 2026-10-13: a home in a test's temp directory under ~/.cache made
+  // codex name every entry of ~/.cache, and it failed with "Argument list too
+  // long (os error 7)". /home on a shared host is the same shape.
+  const { h, u, wt } = setup(t);
+  isolated(h, 'small', 'codex');
+  const rules = () => {
+    const started = spawn(h, u, 'small');
+    return TOML.parse(fs.readFileSync(path.join(h.state, 'homes', started.agent, 'config.toml'), 'utf8')).permissions['tower-crane'].filesystem;
+  };
+  const before = Object.keys(rules()).length;
+  const beside = path.join(h.base, 'entry-0');
+  for (const dir of [u.home, h.base]) {
+    for (let i = 0; i < 5000; i++) fs.mkdirSync(path.join(dir, `entry-${i}`));
+  }
+  const after = rules();
+  assert.equal(Object.keys(after).length, before, 'no rule per entry');
+  const bytes = Buffer.byteLength(codexProfileArg(after)) + 1;
+  assert.ok(bytes < MAX_ARG_STRLEN, `the profile argument is ${bytes} bytes`);
+  // What sits beside the home is hidden; what the agent needs there is named.
+  const seen = { harness: 'codex', config: { permissions: { 'tower-crane': { filesystem: after } } } };
+  assert.equal(commandsRead(seen, beside), false, 'an entry beside the home is hidden');
+  for (const p of [path.join(h.state, 'tasks.json'), wt, path.join(h.repo, '.git', 'HEAD')]) assert.equal(commandsRead(seen, p), true, `${p} stays readable`);
+});
+
+test('a PATH directory at the root never opens the root or a directory that holds the home to codex', { skip: NO_STUBS }, t => {
+  // Seen in review 2026-10-13: /opt on PATH named its parent, /, and codex
+  // mounted the whole filesystem, the home with it.
+  const { h, u } = setup(t);
+  isolated(h, 'small', 'codex');
+  const home = fs.realpathSync(u.home);
+  const started = spawn(h, u, 'small', { PATH: `${u.env.PATH}${path.delimiter}/usr${path.delimiter}${path.dirname(home)}` });
+  const rules = TOML.parse(fs.readFileSync(path.join(h.state, 'homes', started.agent, 'config.toml'), 'utf8')).permissions['tower-crane'].filesystem;
+  const holders = Object.keys(rules).filter((p) => !p.startsWith(':') && rules[p] !== 'none' && (p === path.parse(p).root || home.startsWith(p.endsWith(path.sep) ? p : p + path.sep)));
+  assert.deepEqual(holders, [], 'no rule opens a directory that holds the home');
+  assert.equal(commandsRead({ harness: 'codex', config: { permissions: { 'tower-crane': { filesystem: rules } } } }, path.join(home, '.codex', 'auth.json')), false);
 });
 
 test('a read-only claude worktree under the home has no hidden directory above it', { skip: NO_STUBS }, t => {
@@ -1303,6 +1399,19 @@ test('a sandbox read path that is the whole home refuses dispatch', { skip: NO_S
     assert.notEqual(refused.code, 0, `${harness}: reading the whole home must refuse dispatch`);
     assert.match(refused.stderr, /sandbox path .* is the user's home/);
     assert.ok(!fs.existsSync(u.out), 'the harness must not start');
+  }
+  // A directory that holds the home would open all of it: / mounts the whole
+  // filesystem in codex's sandbox.
+  for (const read of ['/', path.dirname(u.home)]) {
+    h.ok(['project', 'set', '--sandbox', JSON.stringify({ read: [read] })]);
+    for (const harness of ['claude', 'codex']) {
+      isolated(h, 'hard', harness);
+      fs.rmSync(u.out, { force: true });
+      const refused = h.run(['spawn', '--role', 'hard', '--task', 'T1', '--wait', '--json'], { env: u.env });
+      assert.notEqual(refused.code, 0, `${harness}: reading ${read} must refuse dispatch`);
+      assert.match(refused.stderr, /sandbox path .* holds the user's home/);
+      assert.ok(!fs.existsSync(u.out), 'the harness must not start');
+    }
   }
   assert.notEqual(h.run(['project', 'set', '--sandbox', JSON.stringify({ read: 'tools' })]).code, 0, 'sandbox.read must be a list of paths');
 });
@@ -1460,6 +1569,31 @@ if (process.env.STUB_FAIL_HARNESS === ${JSON.stringify(harness)}) {
   }
 });
 
+test('a brokered ci log runs the host gh, not the agent\'s gh shim that refuses gh api', { skip: NO_STUBS }, t => {
+  const { h, u } = setup(t);
+  isolated(h, 'hard', 'claude');
+  const branch = h.readState('tasks.json').tasks[0].branch;
+  const sha = h.git(['rev-parse', 'HEAD']);
+  const data = path.join(h.base, 'ci-feedback.json');
+  fs.writeFileSync(data, JSON.stringify({
+    jobs: { 42: { id: 42, name: 'test', head_branch: branch, head_sha: sha } },
+    refs: { [`heads/${branch}`]: { ref: `refs/heads/${branch}`, object: { sha } } },
+    logs: { 42: 'not ok 1 - read through the broker\n' },
+    alerts: {},
+  }));
+  // The host gh: the plant's keyring login, and the CI feedback endpoints.
+  fs.writeFileSync(path.join(h.base, 'bin', 'gh'), `#!${process.execPath}
+if (process.argv[2] === 'auth' && process.argv[3] === 'token') console.log('stub-gh-token');
+else require(${JSON.stringify(path.join(__dirname, 'fixtures', 'ci-feedback-gh.js'))});
+`, { mode: 0o755 });
+  // The agent's PATH starts with its home's gh shim, which refuses gh api.
+  spawn(h, u, 'hard', { CI_FEEDBACK_GH: data, STUB_RUN: JSON.stringify([[process.execPath, BIN, 'ci', 'log', '42']]) });
+  const seen = u.report();
+  assert.equal(seen.ran[0].code, 0, seen.ran[0].stderr);
+  const scratch = h.readState('tasks.json').tasks[0].scratch;
+  assert.equal(fs.readFileSync(path.join(scratch, 'ci-job-42.log'), 'utf8'), 'not ok 1 - read through the broker\n');
+});
+
 test('a codex agent writes only where its agent file says; a worker writes its git metadata, reviewer and small checks cannot write the worktree', { skip: NO_STUBS }, (t) => {
   const { h, u, wt } = setup(t);
   // A worker fetches, adds, commits and pushes: it writes the repository's
@@ -1472,7 +1606,7 @@ test('a codex agent writes only where its agent file says; a worker writes its g
     const home = path.join(h.state, 'homes', started.agent);
     const { config } = u.report();
     const rules = config.permissions['tower-crane'].filesystem;
-    for (const d of [common, own]) assert.equal(rules[d], worktree === 'write' ? 'write' : undefined, `${rung}: ${d}`);
+    for (const d of [common, own]) assert.equal(rules[d], worktree, `${rung}: ${d}`);
     assert.deepEqual(rules[':workspace_roots'], { '.': worktree }, rung);
     assert.equal(rules[':minimal'], 'read', rung);
     assert.equal(rules[h.state], 'read', `${rung}: the state is read-only; the broker writes it`);

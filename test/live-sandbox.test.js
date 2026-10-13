@@ -28,6 +28,14 @@ function login(h) {
   return h;
 }
 
+// The same for codex: spawn filters the owner's codex config, profiles
+// included, into each agent's home and links its login.
+const codexConfig = process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
+function codexLogin(h) {
+  h.env.CODEX_HOME = codexConfig;
+  return h;
+}
+
 // The agent's commands write nothing outside the worktree, and the state
 // directory is read-only, so a probe writes its result to a directory the
 // project's sandbox extension adds.
@@ -149,7 +157,7 @@ test('in a real claude sandbox a forged state edit fails and the CLI writes thro
 // on TCP loopback. Runs the real codex CLI: set TOWER_CRANE_LIVE_CODEX=1
 // (TOWER_CRANE_LIVE_PROFILE picks the profile explicitly).
 test('in a real codex sandbox forged state edits fail and the CLI writes through the broker over loopback', { skip: process.env.TOWER_CRANE_LIVE_CODEX !== '1' && 'set TOWER_CRANE_LIVE_CODEX=1 to run against the real codex CLI', timeout: 300000 }, async (t) => {
-  const h = makeRepo(t);
+  const h = codexLogin(makeRepo(t));
   h.init();
   h.ok(['task', 'add', '--title', 'Forge probe', '--acceptance', 'only the broker writes']);
   const files = ['events.jsonl', 'tasks.json', 'project.json'].map((f) => path.join(h.state, f));
@@ -264,3 +272,59 @@ for (const [harness, rung] of [['claude', 'small'], ['claude', 'easy'], ['codex'
     assert.equal(h.git(['--git-dir', bare, 'rev-parse', 'probe']), h.git(['-C', repo, 'rev-parse', 'HEAD']));
   });
 }
+
+// Codex hands its sandbox the permission profile as one argument, which
+// Linux caps at 128 KiB. A home in a directory of thousands of entries (a
+// test's temp directory under ~/.cache, or /home on a shared host) once grew
+// the profile past it, and codex failed with "Argument list too long (os
+// error 7)". A stand-in harness runs the real `codex sandbox` with the
+// profile spawn wrote, so no model call is made.
+function realCodexSandbox() {
+  if (process.env.TOWER_CRANE_LIVE_CODEX !== '1') return 'set TOWER_CRANE_LIVE_CODEX=1 to run against the real codex CLI';
+  if (process.platform !== 'linux') return 'the probe covers the Linux sandbox';
+  const r = cp.spawnSync('codex', ['sandbox', '--', 'true'], { encoding: 'utf8', timeout: 60000, cwd: process.env.TOWER_CRANE_TEST_TMP || undefined });
+  if (r.error?.code === 'ENOENT') return 'codex is not on PATH';
+  return r.status === 0 ? false : `codex sandbox does not start here: ${String(r.stderr).trim().split('\n').pop()}`;
+}
+
+test('a real codex sandbox starts for a home among 5,000 entries and reads nothing beside it but what the agent needs', { skip: realCodexSandbox(), timeout: 300000 }, async (t) => {
+  const h = makeRepo(t);
+  h.init();
+  h.ok(['task', 'add', '--title', 'Wide probe', '--acceptance', 'codex starts']);
+  h.ok(['brief', 'set', 'T1', '-'], { input: 'wide probe\n' });
+  const home = h.env.HOME;
+  for (const dir of [h.base, home]) {
+    fs.mkdirSync(dir, { recursive: true });
+    for (let i = 0; i < 5000; i++) fs.mkdirSync(path.join(dir, `entry-${i}`));
+  }
+  const secret = path.join(home, 'secret-test');
+  fs.writeFileSync(secret, 'PLANTED-HOME-SECRET\n', { mode: 0o600 });
+  const out = path.join(results(h), 'wide-probe.json');
+  const targets = { secret, beside: path.join(h.base, 'entry-0'), worktree: '.', state: path.join(h.state, 'tasks.json') };
+  const script = `const fs=require("fs");const o={node:process.version};for(const[k,p]of Object.entries(${JSON.stringify(targets)})){try{const s=fs.statSync(p);if(s.isDirectory())fs.readdirSync(p);else fs.readFileSync(p);o[k]="READABLE"}catch(e){o[k]="ERR "+e.code}}fs.writeFileSync(${JSON.stringify(out)},JSON.stringify(o))`;
+  const bin = path.join(h.base, 'bin');
+  fs.mkdirSync(bin);
+  fs.writeFileSync(path.join(bin, 'codex'), `#!${process.execPath}
+const cp = require('node:child_process');
+const path = require('node:path');
+const PATH = process.env.PATH.split(path.delimiter).filter((d) => path.resolve(d) !== ${JSON.stringify(bin)}).join(path.delimiter);
+process.stdout.write(JSON.stringify({ type: 'thread.started', thread_id: 'probe' }) + '\\n');
+const r = cp.spawnSync('codex', ['sandbox', '-c', 'default_permissions="tower-crane"', '--', process.execPath, '-e', ${JSON.stringify(script)}], { env: { ...process.env, PATH }, encoding: 'utf8' });
+process.stderr.write(r.stderr || '');
+process.exit(r.status ?? 1);
+`, { mode: 0o755 });
+  h.ok(['ladder', 'set', 'small', '--harness', 'codex', '--model', 'probe', '--clear', 'profile', '--clear', 'effort', '--clear', 'args']);
+  // Temp is writable in codex's sandbox, so it must not hold the home here.
+  const tmp = path.join(h.base, 'agent-tmp');
+  fs.mkdirSync(tmp);
+  const r = await h.runAsync(['spawn', '--role', 'small', '--task', 'T1', '--wait'],
+    { env: { ...h.env, PATH: `${bin}${path.delimiter}${h.env.PATH}`, TMPDIR: tmp, TMP: tmp, TEMP: tmp } });
+  assert.equal(r.code, 0, `${r.stderr}\n${agentLog(h)}`);
+  assert.ok(fs.existsSync(out), `the probe ran\n${agentLog(h)}`);
+  const seen = JSON.parse(fs.readFileSync(out, 'utf8'));
+  console.log(`codex wide-home probe: ${JSON.stringify(seen)}`);
+  assert.match(seen.secret, /^ERR /, 'the planted file in the home is hidden');
+  assert.match(seen.beside, /^ERR /, 'an entry beside the home is hidden');
+  assert.equal(seen.worktree, 'READABLE');
+  assert.equal(seen.state, 'READABLE');
+});

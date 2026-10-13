@@ -18,6 +18,19 @@ if (path.resolve(process.argv[1] || '') !== __filename) {
     const usage = require(path.join(path.dirname(process.argv[1]), 'usage-files.js'));
     const readResult = usage.readResult;
     let paused = false;
+    // How soon a supervisor sees its harness exit varies by platform: on
+    // Windows a periodic sample can read the final record before the exit.
+    // LIVE_FINAL_UNSAMPLED fixes the order where only the exit reading sees it.
+    if (process.env.LIVE_FINAL_UNSAMPLED && process.env.LIVE_FINISH) {
+      const readLive = usage.readLive;
+      let before;
+      usage.readLive = function (...args) {
+        if (paused) return readLive.apply(this, args);
+        if (fs.existsSync(process.env.LIVE_FINISH)) return before;
+        before = readLive.apply(this, args);
+        return before;
+      };
+    }
     usage.readResult = function (...args) {
       if (!paused) {
         paused = true;
@@ -103,6 +116,8 @@ if (path.resolve(process.argv[1] || '') !== __filename) {
         } }));
       }
       fs.writeFileSync(env.LIVE_DONE, String(step));
+      // A held harness leaves its final record to the periodic sampler.
+      if (env.LIVE_FINAL_HOLD) return;
       process.exit(70);
     }
     if (step === 1 && env.LIVE_CONTINUE) {
@@ -132,8 +147,10 @@ if (path.resolve(process.argv[1] || '') !== __filename) {
     setInterval(() => {}, 1000);
   } else write();
   if (env.LIVE_FINISH) {
-    setInterval(() => {
-      if (fs.existsSync(env.LIVE_FINISH)) write(true);
+    const finishing = setInterval(() => {
+      if (!fs.existsSync(env.LIVE_FINISH)) return;
+      clearInterval(finishing);
+      write(true);
     }, 25);
   }
 }
