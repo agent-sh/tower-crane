@@ -110,9 +110,13 @@ It returns the task to submitted at the revision it was submitted at, so that
 revision's passing evidence and any review count again, reruns the failed gates
 while it holds the task's reaction slot, and settles them as a reaction would.
 A gate that still fails reworks at a new revision. It refuses a rework that came
-from a review or a person, a revision change since the rework, a worker claim or
-submission since, a pending quality climb, and a moved PR or branch head. The
-inbox `rework_ready` item names the command when it applies. [State](state.md)
+from a review or a person, a revision or kind change since the rework, a worker
+claim or submission since, a pending quality climb, and a moved PR or branch
+head, checked again once it holds the reaction slot. The inbox `rework_ready`
+item names the command when it would succeed. Automatic refill holds such a
+task for `gates.rework_hold_min` minutes (default 5) after the rework, since
+the same wait pass would otherwise dispatch a worker at once; `spawn --ready`
+by hand does not wait. [State](state.md)
 explains why the revision goes back instead of carrying evidence forward.
 
 Failures remain visible in gate receipts and task notes. Conflicting PRs

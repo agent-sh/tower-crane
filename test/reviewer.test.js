@@ -1146,3 +1146,17 @@ test('a light re-review reaches the reviewed revision across a revision a restor
   ];
   assert.deepEqual(require('../lib/reviewer').prepareLight({ events }, task, null, {}).review_snapshot, review);
 });
+
+test('a reviewer an automatic gate rework stopped is not a failure or a held review after a restore', () => {
+  const sha = 'b'.repeat(40);
+  const task = { id: 'T1', status: 'submitted', revision: 1, sha, submitted_by: 'worker', evidence: [] };
+  const events = [
+    { at: '2026-10-15T00:00:00.000Z', cmd: 'spawn', task: 'T1', agent: 'orchestrator', detail: { role: 'reviewer', agent: 'reviewer-T1-1', revision: 1, sha } },
+    { at: '2026-10-15T00:00:01.000Z', cmd: 'rework', task: 'T1', agent: 'orchestrator', detail: { sha, previous_revision: 1, revision: 2, gate: 'ci' } },
+    { at: '2026-10-15T00:00:02.000Z', cmd: 'spawn exit', task: 'T1', agent: 'orchestrator', detail: { agent: 'reviewer-T1-1', code: null, signal: 'SIGTERM' } },
+    { at: '2026-10-15T00:00:03.000Z', cmd: 'restore', task: 'T1', agent: 'orchestrator', detail: { sha, from_revision: 2, revision: 1, gate: 'ci' } },
+  ];
+  const R = require('../lib/reviewer');
+  assert.deepEqual(R.failedReviews({ events }, task), [], 'the stop does not count toward REVIEW_EXIT_CAP');
+  assert.equal(R.reviewExit({ events }, task), null, 'the next reviewer is dispatched, not held');
+});

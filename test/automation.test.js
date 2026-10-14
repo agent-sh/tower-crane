@@ -7,7 +7,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { makeRepo, cachedFixture, stubRungs, BIN, detachedAlive, processesIn } = require('./helpers');
-const { gateFixture, gateEvidence } = require('./gate-helpers');
+const { gateFixture, gateEvidence, retireRevision } = require('./gate-helpers');
 const { waitFor } = require('./canary');
 const { shellQuote } = require('../lib/gates/common');
 const { readPublished } = require('./atomic-file');
@@ -1617,11 +1617,11 @@ function brokenEnvironment(t) {
   fs.writeFileSync(script, `process.exit(require('node:fs').existsSync(${JSON.stringify(h.broken)}) ? 1 : 0);\n`);
   h.ok(['project', 'set', '--ci-local', JSON.stringify({ command: [process.execPath, script], timeout: 30 })]);
   h.submit();
-  // Paused, so the refill does not hand the rework to a worker first.
-  h.ok(['project', 'set', '--paused', 'orchestrator fixes the environment']);
+  // The wait pass that reworks also refills free worker slots; the hold keeps this task back.
   h.consume();
   const task = h.readState('tasks.json').tasks[0];
-  assert.equal(task.status, 'rework', 'the environment failure reads as a code failure and reworks');
+  assert.equal(task.status, 'rework', 'the environment failure reads as a code failure and reworks, and refill holds it');
+  assert.equal(task.claim, null);
   assert.equal(h.logs().findLast((e) => e.cmd === 'rework').detail.gate, 'ci', 'the automatic rework names its gate');
   return h;
 }
@@ -1629,8 +1629,11 @@ function brokenEnvironment(t) {
 test('gates retry --from-rework restores an automatic gate rework at its submitted revision once the cause is fixed', (t) => {
   const h = brokenEnvironment(t);
   const submitted = h.logs().findLast((e) => e.cmd === 'rework').detail.previous_revision;
+  const rework = h.logs().findLast((e) => e.cmd === 'rework');
   const item = h.json(['inbox', '--agent', 'orchestrator']).items.find((i) => i.kind === 'rework_ready');
   assert.equal(item.restore, 'gates retry T1 --from-rework');
+  assert.equal(item.hold_until, new Date(Date.parse(rework.at) + 5 * 60000).toISOString(), 'refill waits the default five minutes');
+  assert.ok(!h.logs().some((e) => e.cmd === 'spawn' && e.detail.role === 'worker'), 'no worker round started');
   const runs = (type) => h.logs().filter((e) => e.cmd === `check ${type}`).length;
   const before = { tests: runs('tests'), clean: runs('clean'), ci: runs('ci') };
   fs.rmSync(h.broken);
@@ -1658,11 +1661,16 @@ test('gates retry --from-rework sends a gate that still fails back to rework at 
   assert.equal(task.status, 'rework');
   assert.equal(task.revision, retired + 1, 'the new rework skips the retired revision');
   assert.equal(h.logs().findLast((e) => e.cmd === 'rework').detail.gate, 'ci');
-  h.ok(['project', 'set', '--paused', '']);
-  h.ok(['claim', 'T1', '--agent', 'worker']);
+  h.consume();
+  assert.ok(!h.logs().some((e) => e.cmd === 'spawn' && e.detail.role === 'worker'), 'refill holds the new gate rework too');
+  // With the hold off, refill dispatches at once, and the restore leaves that round to the worker.
+  h.ok(['project', 'set', '--rework-hold-min', '0']);
+  h.consume();
+  const worker = h.logs().findLast((e) => e.cmd === 'spawn' && e.detail.role === 'worker');
+  assert.ok(worker, 'refill dispatches once the hold is off');
   const claimed = h.run(['gates', 'retry', 'T1', '--from-rework', '--agent', 'orchestrator']);
   assert.notEqual(claimed.code, 0);
-  assert.match(claimed.stderr, /claimed by worker/);
+  assert.match(claimed.stderr, new RegExp(`claimed by ${worker.detail.agent}|taken by`));
 });
 
 test('gates retry --from-rework refuses a moved head, a changed acceptance and a rework a person sent', (t) => {
@@ -1678,6 +1686,9 @@ test('gates retry --from-rework refuses a moved head, a changed acceptance and a
   github.prs['7'].headRefOid = 'f'.repeat(40);
   h.saveGithub(github);
   refused(/PR #7 head moved to fffffff/);
+  const hint = h.json(['inbox', '--agent', 'orchestrator']).items.find((i) => i.kind === 'rework_ready');
+  assert.equal(hint.restore, undefined, 'no restore command the restore would refuse');
+  assert.match(hint.restore_blocked, /PR #7 head moved/);
   github.prs['7'].headRefOid = h.sha;
   h.saveGithub(github);
   // The fixture submits with a PR only, so the PR's head branch is the local branch that must not move.
@@ -1685,6 +1696,8 @@ test('gates retry --from-rework refuses a moved head, a changed acceptance and a
   h.git(['update-ref', `refs/heads/${branch}`, h.git(['rev-parse', `${h.sha}~1`])]);
   refused(new RegExp(`branch ${branch} moved to`));
   h.git(['update-ref', `refs/heads/${branch}`, h.sha]);
+  h.ok(['task', 'update', 'T1', '--kind', 'docs', '--agent', 'owner']);
+  refused(/kind was changed to docs after its rework/);
   h.ok(['task', 'update', 'T1', '--acceptance', 'it works everywhere']);
   refused(/revision \d+ to \d+ after its rework/);
   const other = setup(t);
@@ -4107,4 +4120,58 @@ test('a submit the wait host reads before its files are renamed still runs the g
   assert.equal(receipts.at(-1)?.detail.phase, 'done', 'the host reacted to the submit');
   const tests = h.readState('tasks.json').tasks[0].evidence.filter((e) => e.type === 'tests');
   assert.equal(tests.length, 1, 'and ran its gates');
+});
+
+test('the refill hold ends at the rework time plus gates.rework_hold_min and only covers a restorable gate rework', () => {
+  const Hold = require('../lib/rework-hold');
+  const sha = 'a'.repeat(40);
+  const at = '2026-10-15T00:00:00.000Z';
+  const st = { project: { gates: {} }, events: [{ at, cmd: 'rework', task: 'T1', agent: 'orchestrator', via: 'automation',
+    detail: { sha, previous_revision: 1, revision: 2, gate: 'ci' } }] };
+  const task = { id: 'T1', status: 'rework', revision: 2, sha, claim: null };
+  const start = Date.parse(at);
+  assert.equal(Hold.until(st, task, start + 60000), '2026-10-15T00:05:00.000Z');
+  assert.equal(Hold.until(st, task, start + 5 * 60000), null, 'refill proceeds once the window ends');
+  assert.equal(Hold.until({ ...st, project: { gates: { rework_hold_min: 0 } } }, task, start), null, 'zero disables the hold');
+  assert.equal(Hold.until({ ...st, project: { gates: { rework_hold_min: 0.5 } } }, task, start + 20000), '2026-10-15T00:00:30.000Z');
+  assert.equal(Hold.until(st, { ...task, revision: 3 }, start), null, 'a task that can no longer be restored is not held');
+  const person = { ...st, events: [{ ...st.events[0], detail: { sha, previous_revision: 1, revision: 2 } }] };
+  assert.equal(Hold.until(person, task, start), null, 'a rework without a gate is not held');
+  assert.deepEqual(Hold.errors({ rework_hold_min: -1 }).length, 1);
+});
+
+test('task update and brief set skip a revision a restore retired', (t) => {
+  const h = setup(t);
+  h.submit();
+  const revision = () => h.readState('tasks.json').tasks[0].revision;
+  let current = revision();
+  retireRevision(h, 'T1', current + 1);
+  h.ok(['task', 'update', 'T1', '--acceptance', 'it works everywhere']);
+  assert.equal(revision(), current + 2, 'task update skips the retired number');
+  current = revision();
+  retireRevision(h, 'T1', current + 1);
+  h.ok(['brief', 'set', 'T1', '-'], { input: '# Change\n\nImplement the new acceptance.\n' });
+  assert.equal(revision(), current + 2, 'brief set skips the retired number');
+});
+
+test('a stack refresh and a quality climb skip a revision a restore retired', () => {
+  const dir = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'retired-'));
+  try {
+    const sha = 'a'.repeat(40);
+    const task = () => ({ id: 'T1', title: 'Change', status: 'submitted', kind: 'code', size: 'M', tier: 'easy',
+      tier_range: { min: 'easy', max: 'hard' }, revision: 2, sha, claim: null, notes: [], evidence: [], spend: { entries: [] }, escalations: [] });
+    const st = { dir, project: {}, decisions: { decisions: [] },
+      events: [{ at: '2026-10-15T00:00:00.000Z', cmd: 'restore', task: 'T1', agent: 'orchestrator', detail: { from_revision: 3, revision: 2 } }] };
+    const emitted = [];
+    const emit = (id, detail, cmd) => emitted.push({ id, detail, cmd });
+    const refreshed = task();
+    require('../lib/stack').sendBack(st, refreshed, 'stack sync moved the branch', 'orchestrator', emit);
+    assert.equal(refreshed.revision, 4, 'a stack refresh skips the retired number');
+    const climbed = task();
+    require('../lib/escalation').recordFailure(st, emit, climbed, 'orchestrator', { trigger: 'tests', reason: 'tests failed', source: 'E1' });
+    assert.equal(climbed.revision, 4, 'a quality climb skips the retired number');
+    assert.deepEqual(emitted.filter((e) => e.cmd === 'rework').map((e) => e.detail.revision), [4, 4]);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });

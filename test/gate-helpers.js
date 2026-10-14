@@ -184,4 +184,12 @@ function changeKind(h, kind) {
   h.ok(['submit', 'T1', '--sha', sha, '--agent', agent]);
 }
 
-module.exports = { gateFixture, gateEvidence, changeKind };
+// Appends the restore event gates retry --from-rework records, retiring
+// revision `from`, so a test can check that the next bump skips it.
+function retireRevision(h, id, from) {
+  fs.appendFileSync(path.join(h.state, 'events.jsonl'), `${JSON.stringify({ at: new Date().toISOString(), agent: 'orchestrator',
+    cmd: 'restore', task: id, detail: { from_revision: from, revision: from - 1 }, id: `E${require('node:crypto').randomUUID()}`,
+    type: 'restore', to: 'orchestrator' })}\n`);
+}
+
+module.exports = { gateFixture, gateEvidence, changeKind, retireRevision };

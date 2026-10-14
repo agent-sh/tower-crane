@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { cachedFixture } = require('./helpers');
 const { waitOnRepo } = require('./signals');
-const { gateFixture } = require('./gate-helpers');
+const { gateFixture, retireRevision } = require('./gate-helpers');
 const Reviewer = require('../lib/reviewer');
 
 function fixture(t) {
@@ -356,4 +356,10 @@ test('a multi-commit rebase merge is refused because its first parent is an earl
     { env: { FIXTURE_MERGE_SHA: commits[0].oid, FIXTURE_PR_COMMITS: JSON.stringify(commits.slice(0, 1)) } });
   assert.equal(single.status, 'submitted');
   assert.equal(single.hotfix.base_sha, h.base_sha);
+});
+
+test('a hotfix record skips a revision a restore retired', (t) => {
+  const h = fixture(t);
+  retireRevision(h, 'T1', task(h).revision + 1);
+  assert.equal(record(h).revision, 3);
 });
