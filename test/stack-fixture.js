@@ -7,11 +7,13 @@ const test = require('node:test');
 const fs = require('node:fs');
 const path = require('node:path');
 const { makeRepo, copyRepo, repairWorktrees, BIN } = require('./helpers');
+const { writeAtomic } = require('./atomic-file');
 
 function worker(f) {
   const script = path.join(f.h.base, 'worker.js');
   fs.writeFileSync(script, `const fs = require('node:fs');
 const cp = require('node:child_process');
+const { writeAtomic } = require(${JSON.stringify(path.join(__dirname, 'atomic-file.js'))});
 const bin = ${JSON.stringify(BIN)};
 const task = process.env.TOWER_CRANE_TASK;
 const cli = (args) => cp.execFileSync(process.execPath, [bin, ...args], {encoding: 'utf8'});
@@ -28,7 +30,7 @@ const data = JSON.parse(fs.readFileSync(file, 'utf8'));
 data.prs[12] = {number: 12, state: 'OPEN', headRefOid: sha, headRefName: state.branch,
   baseRefName: state.stack?.base || 'main', isCrossRepository: false, autoMergeRequest: null,
   mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN'};
-fs.writeFileSync(file, JSON.stringify(data));
+writeAtomic(file, JSON.stringify(data));
 process.stdout.write(cli(['submit', task, '--sha', sha, '--pr', '12']));
 `);
   f.h.ok(['ladder', 'set', 'medium', '--harness', 'command', '--clear', 'model', '--clear', 'profile', '--clear', 'effort',
@@ -92,7 +94,8 @@ const stacked = (t) => copy(t, template('stacked'));
 function fixture(h) {
   const file = path.join(h.base, 'github.json');
   const read = () => JSON.parse(fs.readFileSync(file, 'utf8'));
-  const write = (fn) => { const d = read(); fn(d); fs.writeFileSync(file, JSON.stringify(d)); };
+  // The gh stub reads this file while commands run; a rename never shows it half written.
+  const write = (fn) => { const d = read(); fn(d); writeAtomic(file, JSON.stringify(d)); };
   h.env.TEST_STACK_DATA = file;
   h.env.NODE_OPTIONS = `--require=${JSON.stringify(path.join(__dirname, 'fixtures', 'stack-gh.js'))}`;
   const add = (title, dep) => {

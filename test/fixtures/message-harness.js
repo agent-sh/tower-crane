@@ -5,6 +5,7 @@ const path = require('node:path');
 const cp = require('node:child_process');
 const { pathToFileURL } = require('node:url');
 const TOML = require('../../lib/toml');
+const { writeAtomic } = require('../atomic-file');
 const BIN = path.join(__dirname, '..', '..', 'bin', 'tower-crane.js');
 
 async function main() {
@@ -13,7 +14,7 @@ async function main() {
   const prompt = args.find((a) => a.includes('## Task') || a.includes('## Rework') || a.includes('Previous attempt')) || '';
   const out = { prompt, turns: [], blocked: false };
   const cli = (...argv) => {
-    const r = cp.spawnSync(process.execPath, [BIN, ...argv, '--agent', process.env.TOWER_CRANE_AGENT], { encoding: 'utf8', timeout: 15000 });
+    const r = cp.spawnSync(process.execPath, [BIN, ...argv, '--agent', process.env.TOWER_CRANE_AGENT], { encoding: 'utf8', timeout: 300000 });
     if (r.status) throw new Error(r.stderr);
   };
   const event = (value) => console.log(JSON.stringify(value));
@@ -37,18 +38,18 @@ async function main() {
   if (harness === 'codex') {
     const sessions = path.join(process.env.CODEX_HOME, 'sessions');
     fs.mkdirSync(sessions, { recursive: true });
-    fs.writeFileSync(path.join(sessions, 'rollout-message-session.jsonl'), '{}\n');
+    writeAtomic(path.join(sessions, 'rollout-message-session.jsonl'), '{}\n');
   }
   event({ type: 'thread.started', thread_id: 'message-session' });
   if (process.env.MESSAGE_RESUME === '1' || process.env.MESSAGE_RETRY === '1' && Number(process.env.TOWER_CRANE_RETRY) > 0) {
-    fs.writeFileSync(process.env.MESSAGE_OUT, JSON.stringify(out));
+    writeAtomic(process.env.MESSAGE_OUT, JSON.stringify(out));
     return;
   }
   fs.writeFileSync(process.env.MESSAGE_READY, '');
-  const deadline = Date.now() + 15000;
+  const deadline = Date.now() + 300000;
   while (!fs.existsSync(process.env.MESSAGE_READY + '.go')) {
     if (Date.now() >= deadline) throw new Error('message test never released harness');
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    await new Promise((resolve) => setTimeout(resolve, 10)); // wait-allow: probe cadence only; the release signal and hung-test timeout bound this fixture
   }
   if (harness === 'claude' && process.env.MESSAGE_HEADLESS) {
     // Stop is asked twice, so the test shows the hold is taken once. A resumed
@@ -58,7 +59,7 @@ async function main() {
     const hookWith = (name, body) => {
       const command = settings.hooks[name][0].hooks[0].command;
       const text = cp.execSync(command, {
-        input: JSON.stringify({ hook_event_name: name, ...body }), encoding: 'utf8', timeout: 15000,
+        input: JSON.stringify({ hook_event_name: name, ...body }), encoding: 'utf8', timeout: 300000,
       }).trim();
       return text ? JSON.parse(text) : {};
     };
@@ -71,7 +72,7 @@ async function main() {
     if (mode === 'submitted') cli('submit', 'T1', '--sha', '50b732a15be40ccb2065cb2ba0e7b366d511b736');
     out.stops = reports.map((last) => hookWith('Stop', { last_assistant_message: last }));
     out.blocked = out.stops.some((stop) => stop.decision === 'block');
-    fs.writeFileSync(process.env.MESSAGE_OUT, JSON.stringify(out));
+    writeAtomic(process.env.MESSAGE_OUT, JSON.stringify(out));
     return;
   }
   if (harness === 'claude' || harness === 'codex' && process.env.MESSAGE_NOTIFY_ONLY !== '1') {
@@ -82,7 +83,7 @@ async function main() {
       const command = settings.hooks[name][0].hooks[0].command;
       const text = cp.execSync(command, {
         input: JSON.stringify({ hook_event_name: name, tool_name: 'Bash', agent: 'owner', task: 'T999', last_assistant_message: `last report from ${harness}` }),
-        encoding: 'utf8', timeout: 15000,
+        encoding: 'utf8', timeout: 300000,
       }).trim();
       return text ? JSON.parse(text) : {};
     };
@@ -90,10 +91,10 @@ async function main() {
     // A second message exercises the Stop gate after the first delivery.
     fs.writeFileSync(process.env.MESSAGE_READY + '.stop', '');
     // The test's release clock starts here, after the hooks above ran discovery.
-    const stopDeadline = Date.now() + 15000;
+    const stopDeadline = Date.now() + 300000;
     while (!fs.existsSync(process.env.MESSAGE_READY + '.stop.go')) {
       if (Date.now() >= stopDeadline) throw new Error('stop test never released harness');
-      await new Promise((resolve) => setTimeout(resolve, 10));
+      await new Promise((resolve) => setTimeout(resolve, 10)); // wait-allow: probe cadence only; the release signal and hung-test timeout bound this fixture
     }
     const held = hook('Stop');
     out.blocked = held.decision === 'block';
@@ -112,10 +113,10 @@ async function main() {
     out.turns.push(await handlers.tool_result({ toolName: 'bash', content: [] }));
     fs.writeFileSync(process.env.MESSAGE_READY + '.stop', '');
     // The test's release clock starts here, after the hooks above ran discovery.
-    const stopDeadline = Date.now() + 15000;
+    const stopDeadline = Date.now() + 300000;
     while (!fs.existsSync(process.env.MESSAGE_READY + '.stop.go')) {
       if (Date.now() >= stopDeadline) throw new Error('stop test never released harness');
-      await new Promise((resolve) => setTimeout(resolve, 10));
+      await new Promise((resolve) => setTimeout(resolve, 10)); // wait-allow: probe cadence only; the release signal and hung-test timeout bound this fixture
     }
     await handlers.agent_end({ messages: [{ role: 'assistant', content: [{ type: 'text', text: 'last report from pi' }] }] });
     await handlers.agent_end({ messages: [{ role: 'assistant', content: [{ type: 'text', text: 'last report from pi' }] }] });
@@ -138,7 +139,7 @@ async function main() {
         out.failedReceipts = receipts();
       }
       await idle('parent');
-      fs.writeFileSync(process.env.MESSAGE_OUT, JSON.stringify(out));
+      writeAtomic(process.env.MESSAGE_OUT, JSON.stringify(out));
       return;
     }
     const output = { output: 'tool result' };
@@ -146,10 +147,10 @@ async function main() {
     out.turns.push(output);
     fs.writeFileSync(process.env.MESSAGE_READY + '.stop', '');
     // The test's release clock starts here, after the hooks above ran discovery.
-    const stopDeadline = Date.now() + 15000;
+    const stopDeadline = Date.now() + 300000;
     while (!fs.existsSync(process.env.MESSAGE_READY + '.stop.go')) {
       if (Date.now() >= stopDeadline) throw new Error('stop test never released harness');
-      await new Promise((resolve) => setTimeout(resolve, 10));
+      await new Promise((resolve) => setTimeout(resolve, 10)); // wait-allow: probe cadence only; the release signal and hung-test timeout bound this fixture
     }
     await idle('parent');
     event({ type: 'text', part: { text: 'last report from opencode' } });
@@ -167,14 +168,14 @@ async function main() {
   }
   if (process.env.MESSAGE_COMMANDS === '1') {
     const run = (tool, argv) => {
-      const r = cp.spawnSync(tool, argv, { encoding: 'utf8', timeout: 15000, shell: process.platform === 'win32' });
+      const r = cp.spawnSync(tool, argv, { encoding: 'utf8', timeout: 300000, shell: process.platform === 'win32' });
       if (r.status !== 0) throw new Error(r.stderr || r.error?.message);
     };
     run('git', ['push', process.env.MESSAGE_REMOTE, 'HEAD:refs/heads/probe']);
     run('gh', ['pr', 'create', '--title', 'probe']);
   }
   if (process.env.MESSAGE_SUBMIT === '1') cli('submit', 'T1', '--sha', '50b732a15be40ccb2065cb2ba0e7b366d511b736');
-  fs.writeFileSync(process.env.MESSAGE_OUT, JSON.stringify(out));
+  writeAtomic(process.env.MESSAGE_OUT, JSON.stringify(out));
   if (process.env.MESSAGE_RETRY === '1') process.exitCode = 75;
 }
 

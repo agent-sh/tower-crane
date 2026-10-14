@@ -1,5 +1,7 @@
 'use strict';
 
+const { fileWritten, waitOnRepo, HUNG_TEST_MS } = require('./signals');
+
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -327,43 +329,17 @@ test('a resumed Claude run prices only what it ran, with the baseline off each m
   assert.equal(usageSince(parse('claude', earlier), parse('claude', earlier)).model, 'claude-opus-5-5');
 });
 
-async function collected(h, length = 1, timeout = 15000, task = 'T1') {
-  const deadline = Date.now() + timeout;
-  while (Date.now() < deadline) {
+function collected(h, length = 1, task = 'T1') {
+  return waitOnRepo(h, () => {
     const spend = spends(h, task);
-    if (spend.entries?.length === length && spend.entries.every((entry) => !entry.live)) return spend;
-    await new Promise((r) => setTimeout(r, 50));
-  }
-  throw new Error('usage was not collected within 15 s');
-}
-
-function waitForFile(t, file) {
-  return new Promise((resolve, reject) => {
-    const watcher = fs.watch(path.dirname(file), check);
-    const abort = () => finish(t.signal.reason);
-    function finish(error) {
-      watcher.close();
-      t.signal.removeEventListener('abort', abort);
-      if (error) reject(error);
-      else resolve();
-    }
-    function check() { if (fs.existsSync(file)) finish(); }
-    watcher.once('error', finish);
-    t.signal.addEventListener('abort', abort, { once: true });
-    if (t.signal.aborted) abort();
-    else check();
+    return spend.entries?.length === length && spend.entries.every((entry) => !entry.live) && spend;
   });
 }
 
-async function waitForText(file, text, timeout = 15000) {
-  const deadline = Date.now() + timeout;
-  let contents = '';
-  while (Date.now() < deadline) {
-    contents = fs.readFileSync(file, 'utf8');
-    if (contents.includes(text)) return contents;
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
-  throw new Error(`${file} did not contain ${text} within ${timeout} ms`);
+const waitForFile = (t, file) => fileWritten(file, { signal: t.signal });
+
+function waitForText(file, text) {
+  return fileWritten(file, { check: (contents) => contents.includes(text) && contents });
 }
 
 test('native usage uses one CLI call and preserves rung metadata across ladder changes', (t) => {
@@ -417,12 +393,11 @@ test('completed processes cannot leave teardown targeting a reused pid', async (
     env: { ...h.usageEnv, USAGE_DELAY: '100' }, hooks: h.usageHooks,
   });
   await collected(h);
-  const deadline = Date.now() + 15000;
-  while (Date.now() < deadline) {
+  await waitOnRepo(h, () => {
     const tracked = h.detached();
-    if (!tracked.some((child) => child.kind === 'worker') && tracked.filter((child) => child.kind === 'monitor').every((child) => child.exited)) break;
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
+    return !tracked.some((child) => child.kind === 'worker')
+      && tracked.filter((child) => child.kind === 'monitor').every((child) => child.exited);
+  });
   const tracked = h.detached();
   assert.equal(tracked.filter((child) => child.kind === 'worker').length, 0);
   const monitors = tracked.filter((child) => child.kind === 'monitor');
@@ -439,7 +414,7 @@ test('detached exits record both spawns exactly once and keep dispatch metadata'
   const a = h.json(['spawn', '--task', 'T1'], options);
   const b = h.json(['spawn', '--task', 'T2'], options);
   h.ok(['ladder', 'set', 'easy', '--model', 'replacement']);
-  const [first, second] = await Promise.all([collected(h, 1, 15000, 'T1'), collected(h, 1, 15000, 'T2')]);
+  const [first, second] = await Promise.all([collected(h, 1, 'T1'), collected(h, 1, 'T2')]);
   assert.equal(first.tokens, 24816);
   assert.equal(second.tokens, 24816);
   assert.equal(first.entries[0].source, `spawn:${a.agent}`);
@@ -456,10 +431,7 @@ test('detached exits record both spawns exactly once and keep dispatch metadata'
   assert.equal(events(h).filter((e) => e.cmd === 'spend').length, 2);
   const monitors = h.detached().filter((c) => c.kind === 'monitor');
   assert.equal(monitors.length, 2, 'both collectors are tracked for teardown');
-  const deadline = Date.now() + 3000;
-  while (monitors.some(detachedAlive) && Date.now() < deadline) {
-    await new Promise((resolve) => setTimeout(resolve, 50));
-  }
+  await waitOnRepo(h, () => !(monitors.some(detachedAlive)));
   assert.ok(monitors.every((c) => !detachedAlive(c)), 'collectors exit after recording usage');
 });
 
@@ -470,7 +442,7 @@ test('collectors and concurrent waiters share one private exit event and usage e
   fs.writeFileSync(sample, privateText + '\n' + fs.readFileSync(fixture('codex-stream.jsonl'), 'utf8'));
   // Match the CLI startup guard while both observers await the collector.
   const waits = ['observer-a', 'observer-b'].map((agent) => h.runAsync([
-    'wait', '--agent', agent, '--after', '0', '--task', 'T1', '--types', 'worker-exited', '--timeout', '60',
+    'wait', '--agent', agent, '--after', '0', '--task', 'T1', '--types', 'worker-exited', '--timeout', '300',
   ]));
   const started = h.json(['spawn', '--task', 'T1'], {
     env: { ...h.usageEnv, USAGE_DELAY: '900', USAGE_CLAIM: '1' },
@@ -609,16 +581,12 @@ test('detached accounting retries a lock held across the first collection attemp
   const h = setup(t);
   h.json(['spawn', '--task', 'T1'], { env: { ...h.usageEnv, USAGE_DELAY: '1000' }, hooks: h.usageHooks });
   // The worker takes its lease before the lock is held; the lock then delays only its collection.
-  const claimed = Date.now() + 10000;
-  while (!events(h).some((e) => e.cmd === 'claim')) {
-    assert.ok(Date.now() < claimed, 'worker did not take its lease');
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
+  await waitOnRepo(h, () => events(h).some((e) => e.cmd === 'claim'), 'worker did not take its lease');
   const S = require('../lib/state');
   const lock = S.acquireLock(h.state);
-  const timer = setTimeout(() => S.releaseLock(lock), S.LOCK_WAIT_MS + 3000);
+  const timer = setTimeout(() => S.releaseLock(lock), S.LOCK_WAIT_MS + 3000); // wait-allow: hold the state lock beyond the production accounting timeout
   t.after(() => { clearTimeout(timer); S.releaseLock(lock); });
-  const s = await collected(h, 1, S.LOCK_WAIT_MS * 3);
+  const s = await collected(h, 1);
   assert.equal(s.tokens, 24816);
 });
 
@@ -675,7 +643,7 @@ async function runMonitor(t, h, detail, { clock = false, env = {} } = {}) {
     if (child.exitCode === null && child.signalCode === null) child.kill();
     await closed;
   });
-  const timer = setTimeout(() => { timedOut = true; child.kill(); }, 3000);
+  const timer = setTimeout(() => { timedOut = true; child.kill(); }, HUNG_TEST_MS); // wait-allow: hold the state lock beyond the production accounting timeout
   try {
     const code = await closed;
     return { code: timedOut ? 'timeout' : code, stderr };
@@ -715,7 +683,7 @@ test('test teardown stops a surviving detached monitor and waits for its exit', 
   const monitors = h.detached().filter((c) => c.kind === 'monitor');
   assert.equal(monitors.length, 1);
   if (process.platform === 'win32') await h.cleanup();
-  else await assert.rejects(h.cleanup(), /detached usage monitors outlived test teardown/);
+  else await assert.rejects(h.cleanup({ monitorGraceMs: 10000 }), /detached usage monitors outlived test teardown/); // wait-allow: the intentionally unobservable monitor must require forced cleanup
   assert.ok(monitors.every((c) => !detachedAlive(c)));
 });
 

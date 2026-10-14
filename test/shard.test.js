@@ -5,6 +5,7 @@ const assert = require('node:assert/strict');
 const path = require('node:path');
 const cp = require('node:child_process');
 const { ROOT } = require('./helpers');
+const { HUNG_TEST_MS } = require('./signals');
 const { testFiles, shardFiles } = require('./run');
 
 const FIXTURES = ['a', 'b', 'c', 'd'].map((name) => path.join('test', 'fixtures', 'shard', `${name}.test.js`));
@@ -30,7 +31,7 @@ test('every shard count covers the real suite with each file in exactly one shar
 
 test('TC_TEST_SHARD makes the runner run only the files of the shard it names', () => {
   const run = (shard) => cp.spawnSync(process.execPath, [path.join(ROOT, 'test', 'run.js'), '--test-reporter=tap', ...FIXTURES], {
-    cwd: ROOT, encoding: 'utf8', timeout: 120000, env: { ...process.env, TC_TEST_SHARD: shard },
+    cwd: ROOT, encoding: 'utf8', timeout: HUNG_TEST_MS, env: { ...process.env, TC_TEST_SHARD: shard },
   });
   const subtests = (stdout) => [...stdout.matchAll(/^# Subtest: (.+)$/gm)].map(([, name]) => name);
 

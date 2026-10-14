@@ -175,7 +175,7 @@ cp.spawnSync = (cmd, args, opts) => cmd === 'gh' && args[0] === 'api'
         preload.push('--require', failureFile);
       }
       const r = cp.spawnSync(process.execPath, ['--require', github, ...preload, BIN, 'check', 'ci', 'T1', '--agent', 'checker', '--json'], {
-        cwd: h.repo, env: { ...h.env, TEST_GITHUB: file }, encoding: 'utf8', timeout: 60000,
+        cwd: h.repo, env: { ...h.env, TEST_GITHUB: file }, encoding: 'utf8', timeout: 300000,
       });
       assert.ok(r.stdout, r.stderr);
       const evidence = JSON.parse(r.stdout);

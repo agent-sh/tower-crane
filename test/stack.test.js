@@ -1,11 +1,13 @@
 'use strict';
 
+const { waitOnRepo } = require('./signals');
+
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { worker, setup, upper, resubmit } = require('./stack-fixture');
-const { BIN, detachedAlive } = require('./helpers');
+const { BIN } = require('./helpers');
 
 test('submitted dependencies dispatch from the exact dependency head and spawn links PRs bottom to top', (t) => {
   const f = setup(t);
@@ -15,44 +17,78 @@ test('submitted dependencies dispatch from the exact dependency head and spawn l
   assert.equal(f.h.json(['task', 'show', 'T2']).stack.base, f.lower.branch);
   worker(f);
   f.h.ok(['spawn', '--task', 'T2', '--wait'], { env: { TEST_STACK_DEFER_OBSERVE: '1' } });
-  // Linking can finish in a later observer pass; wait before inspecting its GitHub call.
-  const until = Date.now() + 60000;
-  while (!f.h.json(['task', 'show', 'T2']).stack.linked && Date.now() < until) f.h.run(['wait', '--timeout', '1']);
+  // Linking finishes in a later observer pass; wait for its event before inspecting its GitHub call.
+  f.h.ok(['wait', '--task', 'T2', '--types', 'stack link', '--after', '0', '--observe']);
   assert.equal(f.h.json(['task', 'show', 'T2']).stack.linked, true);
   const link = f.read().calls.find((c) => c.args[0] === 'stack' && c.args[1] === 'link');
   assert.ok(link, 'completed stack linking records its GitHub call');
   assert.deepEqual(link.args, ['stack', 'link', '11', '12', '--base', 'main']);
 });
 
-test('a task event during the link\'s GitHub call refuses the link, and the next observer pass links the PR', (t) => {
+// Snapshot-compare refusals for unrelated events are retried at once from fresh state.
+// Attempts are counted from the racing notes in the event log, which the state lock
+// serializes. The gh fixture's call log is a read-modify-write file, so concurrent gh
+// callers (automation, other observers) can drop records from it.
+const racingNotes = (f) => {
+  const byObserver = new Map();
+  for (const e of fs.readFileSync(path.join(f.h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse)) {
+    const pid = e.cmd === 'task note' && /^racing note from (\d+)$/.exec(e.detail?.text)?.[1];
+    if (pid) byObserver.set(pid, (byObserver.get(pid) || 0) + 1);
+  }
+  return byObserver;
+};
+const linkFailures = (f) => fs.readFileSync(path.join(f.h.state, 'events.jsonl'), 'utf8').trim().split('\n')
+  .map(JSON.parse).filter((e) => e.cmd === 'stack link failed');
+// The observer pass inside `wait --observe` links the PR; the wait returns on its event.
+const linkedByObserver = (f) => {
+  f.h.ok(['wait', '--task', 'T2', '--types', 'stack link', '--after', '0', '--observe']);
+  return f.h.json(['task', 'show', 'T2']).stack.linked;
+};
+
+test('a task event during the link\'s GitHub call is retried from fresh state and links the PR in the same pass', (t) => {
   const f = setup(t);
   worker(f);
-  f.write((d) => { d.during = { 'stack link': [['task', 'note', 'T2', 'racing note', '--agent', 'worker-T2']] }; });
+  f.write((d) => { d.during = { 'stack link': [['task', 'note', 'T2', 'racing note from {pid}', '--agent', 'worker-T2']] }; });
   f.h.ok(['spawn', '--task', 'T2', '--wait']);
-  assert.match(fs.readFileSync(path.join(f.h.repo, '.tower-crane', 'events.jsonl'), 'utf8'), /"cmd":"stack link failed"/);
-  // The next observer pass links the PR once nothing races it. That pass can be the spawn's own, so
-  // the state after spawn is not fixed; a single `wait` can also end before its pass does, so wait
-  // in a bounded loop as the first case does.
-  const until = Date.now() + 60000;
-  while (!f.h.json(['task', 'show', 'T2']).stack.linked && Date.now() < until) f.h.run(['wait', '--timeout', '1']);
-  assert.equal(f.h.json(['task', 'show', 'T2']).stack.linked, true);
+  assert.equal(linkedByObserver(f), true);
+  assert.deepEqual([...racingNotes(f).values()], [1], 'one link attempt raced a task event');
+  assert.deepEqual(linkFailures(f), [], 'the refused first attempt is retried, not recorded as a failure');
+});
+
+test('a link that keeps racing task events records its failure, and the next observer pass links the PR', (t) => {
+  const f = setup(t);
+  worker(f);
+  const racing = path.join(f.h.base, 'racing');
+  fs.writeFileSync(racing, '');
+  f.write((d) => {
+    d.during = { 'stack link': [['task', 'note', 'T2', 'racing note from {pid}', '--agent', 'worker-T2']] };
+    // Every attempt races, whichever observer makes it, until the marker goes.
+    d.duringWhile = { 'stack link': racing };
+  });
+  f.h.ok(['spawn', '--task', 'T2', '--wait']);
+  const failures = linkFailures(f);
+  assert.equal(failures.length, 1, JSON.stringify(failures));
+  assert.match(failures[0].detail.reason, /state changed during stack link/);
+  const attempts = racingNotes(f);
+  assert.ok(Math.max(...attempts.values()) >= 5, `one observer made all five attempts: ${JSON.stringify([...attempts])}`);
+  fs.unlinkSync(racing);
+  assert.equal(linkedByObserver(f), true);
 });
 
 test('detached spawn links the PR after its worker submits and exits', async (t) => {
   const f = setup(t);
   worker(f);
   const spawned = f.h.json(['spawn', '--task', 'T2']);
-  // The worker runs git, the CLI and its submit checks; on Windows that takes about 20 seconds,
-  // more on a loaded runner. The monitor links the PR before it exits, so its exit ends the wait.
-  let task = f.h.json(['task', 'show', 'T2']);
-  while (!task.stack?.linked && detachedAlive({ pid: spawned.monitor_pid })) {
-    await new Promise((resolve) => setTimeout(resolve, 100));
-    task = f.h.json(['task', 'show', 'T2']);
-  }
-  task = f.h.json(['task', 'show', 'T2']);
+  // The monitor links the PR before it exits, so its exit ends the wait.
+  const { task, order } = await waitOnRepo(f.h, () => {
+    const task = f.h.json(['task', 'show', 'T2']);
+    if (!task.stack?.linked) return false;
+    // A final observer call can still be publishing the fixture after linking.
+    return { task, order: f.read().order };
+  }, 'the monitor did not link the PR', { alive: spawned.monitor_pid });
   assert.equal(task.stack.linked, true);
   assert.equal(task.status, 'submitted');
-  assert.deepEqual(f.read().order, [11, 12]);
+  assert.deepEqual(order, [11, 12]);
 });
 
 test('a worktree prepared before its dependency was submitted moves onto the dependency head at dispatch', (t) => {
@@ -137,11 +173,7 @@ test('concurrent sibling dispatch on one submitted dependency records a single s
     env: { TEST_STACK_PAUSE_VIEW: '11', TEST_STACK_PAUSE_READY: ready, TEST_STACK_PAUSE_RELEASE: release },
   });
   try {
-    const deadline = performance.now() + 15000;
-    while (!fs.existsSync(ready)) {
-      if (performance.now() > deadline) throw new Error('T3 preparation never read the dependency PR');
-      await new Promise((resolve) => setTimeout(resolve, 20));
-    }
+    await waitOnRepo(f.h, () => fs.existsSync(ready));
     f.h.json(['worktree', 'T2']);
   } finally {
     fs.writeFileSync(release, 'release');

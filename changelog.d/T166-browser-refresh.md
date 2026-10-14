@@ -1,0 +1,1 @@
+- Browser startup tests retain the suite hung guard and can use a writable shallow cache when the account cache is restricted.

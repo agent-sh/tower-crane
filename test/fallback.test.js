@@ -1,5 +1,7 @@
 'use strict';
 
+const { waitOnRepo } = require('./signals');
+
 const { test, describe } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -20,15 +22,6 @@ function setFallbacks(h, routes, rung = 'easy') {
   fs.writeFileSync(h.userConfig, JSON.stringify({ ladder: { [rung]: { fallbacks: routes } } }));
 }
 
-async function until(fn, message) {
-  // Use the runner's per-test bound so slower Windows receipt writes can finish.
-  const deadline = Date.now() + 300000;
-  while (!fn()) {
-    if (Date.now() >= deadline) assert.fail(message);
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
-}
-
 function setup(t, { reason = 'outage', primaryHarness = 'codex', nextHarness = 'codex', chain = false,
   rung = 'easy', webMcp, fallbackWebMcp } = {}) {
   const h = makeTaskRepo(t, [{
@@ -36,6 +29,17 @@ function setup(t, { reason = 'outage', primaryHarness = 'codex', nextHarness = '
       '--kind', rung === 'research' ? 'research' : 'code', '--acceptance', 'fresh fallback session'],
     brief: 'Complete the original task brief.\n',
   }]);
+  // Harness discovery must use fixture credentials and origin directories.
+  Object.assign(h.env, {
+    USERPROFILE: h.env.HOME,
+    CLAUDE_CONFIG_DIR: path.join(h.env.HOME, '.claude'),
+    CODEX_HOME: path.join(h.env.HOME, '.codex'),
+    PI_CODING_AGENT_DIR: path.join(h.env.HOME, '.pi', 'agent'),
+    GH_CONFIG_DIR: path.join(h.env.HOME, '.config', 'gh'),
+    XDG_CONFIG_HOME: path.join(h.env.HOME, '.config'),
+    XDG_DATA_HOME: path.join(h.env.HOME, '.local', 'share'),
+    OPENCODE_CONFIG_DIR: path.join(h.env.HOME, '.config', 'opencode'),
+  });
   const bin = path.join(h.base, 'bin');
   fs.mkdirSync(bin);
   // A gh on PATH and no token in the environment make every route ask gh for
@@ -101,9 +105,9 @@ for (const nextHarness of ['codex', 'claude']) {
     // Assert the recorded exit and usage instead of timing a foreground CLI.
     // worker-exited can be derived from a probe of an earlier attempt's process before
     // its exit is recorded, so the recorded spawn exit carries the final code.
-    await until(() => events(h).some((e) => e.cmd === 'spawn exit' && e.detail.agent === spawned.agent), 'the worker did not record its exit');
+    await waitOnRepo(h, () => events(h).some((e) => e.cmd === 'spawn exit' && e.detail.agent === spawned.agent), 'the worker did not record its exit');
     assert.equal(events(h).findLast((e) => e.cmd === 'spawn exit' && e.detail.agent === spawned.agent).detail.code, 0);
-    await until(() => events(h).filter((e) => e.cmd === 'spend').length === 2, 'route usage receipts were not recorded');
+    await waitOnRepo(h, () => events(h).filter((e) => e.cmd === 'spend').length === 2, 'route usage receipts were not recorded');
     const attempts = h.attempts();
     assert.deepEqual(attempts.map((a) => a.model), ['first', 'first', 'first', 'second']);
     assert.deepEqual(attempts.map((a) => a.retry), ['0', '1', '2', '0']);
@@ -119,7 +123,7 @@ for (const nextHarness of ['codex', 'claude']) {
     assert.equal(switches.length, 1);
     assert.equal(switches[0].detail.route_index, 1);
     assert.equal(switches[0].detail.reason, 'provider outage after 2 retries');
-    const wake = h.json(['wait', '--observe', '--after', '0', '--types', 'spawn-fallback', '--timeout', '1']);
+    const wake = h.json(['wait', '--observe', '--after', '0', '--types', 'spawn-fallback', '--timeout', '300']);
     assert.equal(wake.id, switches[0].id);
     const task = h.json(['task', 'show', 'T1']);
     assert.equal(task.run.phase, 'waiting');
@@ -237,7 +241,7 @@ test('rework during a live fallback refuses a second worker until the previous a
   const wake = await waiting;
   assert.equal(wake.code, 0, wake.stderr);
   // The harness truncates and rewrites attempts.json between fallback routes.
-  await until(() => {
+  await waitOnRepo(h, () => {
     try {
       return h.attempts().length === 4;
     } catch (error) {
@@ -245,17 +249,18 @@ test('rework during a live fallback refuses a second worker until the previous a
       throw error;
     }
   }, 'fallback worker did not start');
-  h.ok(['submit', 'T1', '--agent', 'worker-T1-1', '--sha', '50b732a15be40ccb2065cb2ba0e7b366d511b736']);
-  h.ok(['rework', 'T1', '--reason', 'fix while worker is finishing']);
-  for (const flags of [['--dry-run'], []]) {
-    const result = h.run(['spawn', '--task', 'T1', ...flags], { env: h.spawnEnv });
-    assert.equal(result.code, 1, result.stderr);
-    assert.match(result.stderr, /previous worker worker-T1-1 is still running or its exit is unverified/);
-  }
-  assert.equal(events(h).filter((e) => e.cmd === 'spawn').length, 1);
-  assert.equal(h.attempts().length, 4);
-  fs.writeFileSync(finish, '');
-  await until(() => events(h).some((e) => e.cmd === 'spawn exit'), 'fallback worker did not exit');
+  try {
+    h.ok(['submit', 'T1', '--agent', 'worker-T1-1', '--sha', '50b732a15be40ccb2065cb2ba0e7b366d511b736']);
+    h.ok(['rework', 'T1', '--reason', 'fix while worker is finishing']);
+    for (const flags of [['--dry-run'], []]) {
+      const result = h.run(['spawn', '--task', 'T1', ...flags], { env: h.spawnEnv });
+      assert.equal(result.code, 1, result.stderr);
+      assert.match(result.stderr, /previous worker worker-T1-1 is still running or its exit is unverified/);
+    }
+    assert.equal(events(h).filter((e) => e.cmd === 'spawn').length, 1);
+    assert.equal(h.attempts().length, 4);
+  } finally { fs.writeFileSync(finish, ''); }
+  await waitOnRepo(h, () => events(h).some((e) => e.cmd === 'spawn exit'), 'fallback worker did not exit');
   const preview = h.json(['spawn', '--task', 'T1', '--dry-run'], { env: h.spawnEnv });
   assert.equal(preview.resumed, false);
 });
@@ -421,7 +426,7 @@ for (const harness of ['claude', 'codex']) {
       h.ok(['brief', 'set', 'T2', '-'], { input: 'Dispatch with personal fallback routes.\n' });
       const nested = path.join(h.base, 'nested.json');
       const result = h.run(['spawn', '--task', 'T1', '--role', 'orchestrator', '--wait'], {
-        env: { ...h.spawnEnv, TOWER_CRANE_TEST_NESTED_DISPATCH: nested }, timeout: 25000,
+        env: { ...h.spawnEnv, TOWER_CRANE_TEST_NESTED_DISPATCH: nested },
       });
       assert.equal(result.code, 0, result.stderr);
       const seen = JSON.parse(fs.readFileSync(nested, 'utf8'));
@@ -486,7 +491,7 @@ test('a detached switch wakes a live waiter, keeps its lease, and collects route
   assert.equal(h.json(['task', 'show', 'T1']).claim.agent, spawn.agent);
   assert.equal(h.run(['release', 'T1', '--agent', 'recovery', '--reason', 'too early']).code, 1);
   fs.writeFileSync(finish, '');
-  await until(() => {
+  await waitOnRepo(h, () => {
     const entries = h.readState('tasks.json').tasks[0].spend.entries;
     return entries?.length === 2 && entries.every((entry) => !entry.live)
       && events(h).some((e) => e.cmd === 'worker-exited' && e.detail.agent === spawn.agent);

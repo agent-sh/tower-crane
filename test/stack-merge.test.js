@@ -8,6 +8,7 @@ const cp = require('node:child_process');
 const { once } = require('node:events');
 const { BIN } = require('./helpers');
 const { waitFor } = require('./canary');
+const { HUNG_TEST_MS } = require('./signals');
 const { setup, stacked } = require('./stack-fixture');
 
 // Every merge request the stub received, as 'pr N' for gh pr merge, 'async N' for
@@ -48,22 +49,22 @@ for (const signal of ['SIGTERM', 'SIGINT']) process.on(signal, () => fs.appendFi
         NODE_OPTIONS: `${f.h.env.NODE_OPTIONS} --require=${JSON.stringify(preload)}`,
         ...(stage === 'query' ? { TEST_STACK_POLL_RELEASE: path.join(f.h.base, 'unused-release') } : {}) };
       const child = cp.spawn(process.execPath, [BIN, 'wait', '--after', '0', '--types', 'never',
-        '--timeout', '60', '--agent', 'orchestrator'], { cwd: f.h.repo, env });
+        '--timeout', '300', '--agent', 'orchestrator'], { cwd: f.h.repo, env });
       let stdout = '', stderr = '';
       child.stdout.on('data', (data) => { stdout += data; });
       child.stderr.on('data', (data) => { stderr += data; });
       const result = once(child, 'close').then(([code]) => ({ code, stdout, stderr }));
-      const bound = setTimeout(() => child.kill('SIGKILL'), 20000);
+      const bound = setTimeout(() => child.kill('SIGKILL'), HUNG_TEST_MS);
       try {
-        assert.notEqual(await waitFor(stage === 'query' ? poll : sleeping, { ms: 10000 }), null, 'the merge reaches its poll');
+        await waitFor(stage === 'query' ? poll : sleeping, { what: 'the merge reaches its poll' });
         child.kill('SIGTERM');
-        assert.notEqual(await waitFor(observed, { ms: 5000 }), null, 'wait starts draining');
+        await waitFor(observed, { what: 'wait starts draining' });
         assert.equal(child.exitCode, null, 'the first signal drains the active merge');
         child.kill('SIGINT');
         const timeout = Symbol('timeout');
         let deadline;
         const exited = await Promise.race([result, new Promise((resolve) => {
-          deadline = setTimeout(() => resolve(timeout), 3000);
+          deadline = setTimeout(() => resolve(timeout), 3000); // wait-allow: cancellation must beat the merge's 10 s poll deadline
         })]);
         clearTimeout(deadline);
         assert.notEqual(exited, timeout, 'the second signal cancels the merge without waiting for its poll deadline');
@@ -141,6 +142,17 @@ for (const command of ['sync', 'unstack']) {
 
 test('a stale local stack uses the single PR merge path after confirming its lower merge', (t) => {
   const f = stacked(t);
+  // The review dry run reads fixture credentials instead of its parent's agent home.
+  Object.assign(f.h.env, {
+    USERPROFILE: f.h.env.HOME,
+    CLAUDE_CONFIG_DIR: path.join(f.h.env.HOME, '.claude'),
+    CODEX_HOME: path.join(f.h.env.HOME, '.codex'),
+    PI_CODING_AGENT_DIR: path.join(f.h.env.HOME, '.pi', 'agent'),
+    GH_CONFIG_DIR: path.join(f.h.env.HOME, '.config', 'gh'),
+    XDG_CONFIG_HOME: path.join(f.h.env.HOME, '.config'),
+    XDG_DATA_HOME: path.join(f.h.env.HOME, '.local', 'share'),
+    OPENCODE_CONFIG_DIR: path.join(f.h.env.HOME, '.config', 'opencode'),
+  });
   confirmLower(f);
   assert.equal(f.h.json(['task', 'show', 'T2']).stack, undefined);
   assert.equal(f.h.json(['task', 'list']).find((t) => t.id === 'T2').stack, undefined);

@@ -7,6 +7,7 @@ const os = require('node:os');
 const path = require('node:path');
 const cp = require('node:child_process');
 const { makeRepo, detachedAlive } = require('./helpers');
+const { waitUntil } = require('./signals');
 const { CHROME } = require('./browser');
 
 function attempt(h, chrome, sandbox, tmp = h.base, before = '', close = true) {
@@ -36,7 +37,7 @@ const hooks = [];
 `);
   const r = cp.spawnSync(process.execPath, [runner], {
     env: { ...h.env, TOWER_CRANE_TEST_CHROME: chrome, TOWER_CRANE_TEST_TMP: tmp, TOWER_CRANE_SANDBOX: sandbox, CHROME_REPORT: path.join(h.base, 'chrome.json') },
-    cwd: h.base, encoding: 'utf8', timeout: 90000,
+    cwd: h.base, encoding: 'utf8', timeout: 300000,
   });
   assert.equal(r.status, 0, `${r.error || ''}\n${r.stderr}`);
   const result = JSON.parse(r.stdout);
@@ -147,10 +148,7 @@ test('the exit fallback kills Chrome\'s helper processes before it removes the p
   attempt(h, chromeWithHelper(h), '1', h.base, '', false);
   const { profile, helper } = JSON.parse(fs.readFileSync(path.join(h.base, 'chrome.json'), 'utf8'));
   // A helper left running would recreate the profile, so the check waits for it to end.
-  for (const end = Date.now() + 60000; detachedAlive({ pid: helper });) {
-    assert.ok(Date.now() < end, 'the helper exits');
-    await new Promise((resolve) => setTimeout(resolve, 20));
-  }
+  await waitUntil(() => !detachedAlive({ pid: helper }), { what: 'the helper exits' });
   assert.equal(fs.existsSync(profile), false, 'no helper recreated the profile');
   assert.equal(fs.existsSync(path.join(h.base, 'helper.txt')), false, 'the helper was killed, not left to write');
 });
@@ -197,6 +195,7 @@ setInterval(() => {}, 1000);
 `, { mode: 0o755 });
   const result = attempt(h, chrome, '1', relative ? 'tmp' : deep);
   assert.doesNotMatch(result.error ?? '', /exit code|Socket path/);
+  assert.equal(fs.existsSync(path.join(h.base, 'chrome.json')), true, result.error);
   const { profile, tmp } = JSON.parse(fs.readFileSync(path.join(h.base, 'chrome.json'), 'utf8'));
   assert.equal(profile.startsWith(deep + path.sep), false, profile);
   assert.equal(path.dirname(profile), path.join(os.userInfo().homedir, '.cache', 'tct'));

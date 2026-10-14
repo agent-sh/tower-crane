@@ -4,6 +4,7 @@
 // the event log bytes it reads while holding one, and writes both on exit.
 const fs = require('node:fs');
 const path = require('node:path');
+const { writeAtomic } = require('../atomic-file');
 const handles = new Set();
 const STAGING = /^lock\.\d+\.([0-9a-f]{16})\.new$/;
 let marker = null;
@@ -49,5 +50,5 @@ fs.readFileSync = function (file, ...args) {
   return result;
 };
 process.on('exit', () => {
-  fs.writeFileSync(process.env.LOCKED_READS, JSON.stringify({ holdings, lockedBytes }));
+  writeAtomic(process.env.LOCKED_READS, JSON.stringify({ holdings, lockedBytes }));
 });

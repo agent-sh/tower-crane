@@ -10,6 +10,7 @@ let skew = 0;
 Date.now = () => now() + skew;
 const BIN = path.join(__dirname, '..', '..', 'bin', 'tower-crane.js');
 const { ownerKeyFile, ownerProject } = require('../../lib/authority');
+const { writeAtomic } = require('../atomic-file');
 
 if (process.env.TEST_STACK_DEFER_OBSERVE) {
   require('../../lib/stack').observe = () => {};
@@ -17,8 +18,9 @@ if (process.env.TEST_STACK_DEFER_OBSERVE) {
 
 // Holds a gh call open until the test releases it, so another command can run meanwhile.
 function pause(ready, release) {
+  // write-atomic: existence is the signal; no test reads the text.
   fs.writeFileSync(ready, 'ready');
-  const deadline = performance.now() + 20000;
+  const deadline = performance.now() + 300000;
   while (!fs.existsSync(release)) {
     if (performance.now() > deadline) throw new Error('paused gh fixture was not released');
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
@@ -32,24 +34,27 @@ cp.spawnSync = function stackGh(command, args, opts) {
   const data = JSON.parse(fs.readFileSync(file, 'utf8'));
   data.calls.push({ args, cwd: opts.cwd });
   const finish = (value = '', status = 0, stderr = '') => {
-    fs.writeFileSync(file, JSON.stringify(data));
+    writeAtomic(file, JSON.stringify(data));
     return { status, stdout: typeof value === 'string' ? value : JSON.stringify(value), stderr };
   };
   const response = (r, fallback = '') => {
     skew += r.advanceMs || 0;
     return finish(r.body ?? fallback, r.code || 0, r.error || '');
   };
-  // data.during runs tower-crane commands once while this gh call is in flight.
+  // data.during runs tower-crane commands while this gh call is in flight: once,
+  // or on every call while the file data.duringWhile[key] exists.
   // The CLI drops TOWER_CRANE_OWNER_KEY before it runs gh, so these commands
   // present the owner's key from its file, as the owner would.
   const key = /\/merge-async$/.test(args[1] || '') ? 'merge-async' : args.slice(0, 2).join(' ');
-  for (const cli of data.during?.[key] || []) {
+  const racing = !data.duringWhile?.[key] || fs.existsSync(data.duringWhile[key]);
+  for (const cli of (racing && data.during?.[key]) || []) {
     const project = ownerProject(path.join(data.repo, '.tower-crane'));
     const env = { ...process.env, TOWER_CRANE_OWNER_KEY: fs.readFileSync(ownerKeyFile(project), 'utf8').trim() };
-    const r = original(process.execPath, [BIN, ...cli], { cwd: data.repo, env, encoding: 'utf8' });
+    // {pid} names the CLI process making this gh call, so a test can count each observer's attempts.
+    const r = original(process.execPath, [BIN, ...cli.map((arg) => arg.replaceAll('{pid}', String(process.pid)))], { cwd: data.repo, env, encoding: 'utf8' });
     if (r.status !== 0) throw new Error(`tower-crane ${cli.join(' ')} failed: ${r.stderr}`);
   }
-  if (data.during) delete data.during[key];
+  if (data.during && !(data.duringWhile?.[key] && fs.existsSync(data.duringWhile[key]))) delete data.during[key];
   if (key === 'pr view' && args[2] === process.env.TEST_STACK_PAUSE_VIEW) {
     pause(process.env.TEST_STACK_PAUSE_READY, process.env.TEST_STACK_PAUSE_RELEASE);
   }
@@ -201,8 +206,9 @@ cp.spawnSync = function stackGh(command, args, opts) {
   if (data.unavailable) return finish('', 9, 'Stacked pull requests are not enabled');
   if (args[1] === 'link') {
     if (process.env.TEST_STACK_LINK_READY) {
+      // write-atomic: existence is the signal; no test reads the text.
       fs.writeFileSync(process.env.TEST_STACK_LINK_READY, 'ready');
-      const deadline = performance.now() + 20000;
+      const deadline = performance.now() + 300000;
       while (!fs.existsSync(process.env.TEST_STACK_LINK_RELEASE)) {
         if (performance.now() > deadline) throw new Error('slow link fixture was not released');
         Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
@@ -242,8 +248,9 @@ cp.spawnSync = function stackGh(command, args, opts) {
   }
   if (args[1] === 'sync') {
     if (process.env.TEST_STACK_SYNC_READY) {
+      // write-atomic: existence is the signal; no test reads the text.
       fs.writeFileSync(process.env.TEST_STACK_SYNC_READY, 'ready');
-      const deadline = performance.now() + 20000;
+      const deadline = performance.now() + 300000;
       while (!fs.existsSync(process.env.TEST_STACK_SYNC_RELEASE)) {
         if (performance.now() > deadline) throw new Error('slow gh fixture was not released');
         Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);

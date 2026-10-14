@@ -1,5 +1,7 @@
 'use strict';
 
+const { HUNG_TEST_MS, waitOnRepo } = require('./signals');
+
 const { test, describe } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -28,6 +30,17 @@ function setup(t, format = 'codex', session = true) {
     args: ['--title', 'Resume worker', '--acceptance', 'rework resumes'],
     brief: 'Implement the acceptance.\n',
   }]);
+  // Harness discovery must use fixture credentials and origin directories.
+  Object.assign(h.env, {
+    USERPROFILE: h.env.HOME,
+    CLAUDE_CONFIG_DIR: path.join(h.env.HOME, '.claude'),
+    CODEX_HOME: path.join(h.env.HOME, '.codex'),
+    PI_CODING_AGENT_DIR: path.join(h.env.HOME, '.pi', 'agent'),
+    GH_CONFIG_DIR: path.join(h.env.HOME, '.config', 'gh'),
+    XDG_CONFIG_HOME: path.join(h.env.HOME, '.config'),
+    XDG_DATA_HOME: path.join(h.env.HOME, '.local', 'share'),
+    OPENCODE_CONFIG_DIR: path.join(h.env.HOME, '.config', 'opencode'),
+  });
   const script = path.join(h.base, 'harness.js');
   const seen = path.join(h.base, 'seen.json');
   fs.writeFileSync(script, `
@@ -57,7 +70,7 @@ if (enabled === 'true') {
       : { input_tokens: 100, cached_input_tokens: 20, output_tokens: 10 } }));
   }
 }
-if (process.env.RESUME_EXIT_DELAY) setTimeout(() => {}, Number(process.env.RESUME_EXIT_DELAY));
+if (process.env.RESUME_EXIT_DELAY) setTimeout(() => {}, Number(process.env.RESUME_EXIT_DELAY)); // wait-allow: fixture injects exit delay to exercise resume while finalization is pending
 `);
   h.ok(['ladder', 'set', 'medium', '--harness', 'command', '--clear', 'profile', '--clear', 'effort',
     '--command', JSON.stringify([process.execPath, script, BIN, seen, '{session}', '{prompt}', format, String(session)])]);
@@ -135,31 +148,24 @@ for (const harness of ['codex', 'claude']) {
     nativeHarness(h, script, seen, harness);
     h.env.RESUME_EXIT_DELAY = '60000';
     const first = h.json(['spawn', '--task', 'T1']);
-    const deadline = Date.now() + 15000;
-    while (!events(h).some((e) => e.cmd === 'spawn session')) {
-      assert.ok(Date.now() < deadline, 'session not recorded');
-      await new Promise((resolve) => setTimeout(resolve, 25));
-    }
+    await waitOnRepo(h, () => events(h).some((e) => e.cmd === 'spawn session'));
     // Claude's session id is assigned before launch, so the session event does not show that the agent
     // printed anything. Wait for its usage to reach the log, so the interrupt keeps that usage.
-    const logged = Date.now() + 15000;
-    while (!fs.readFileSync(first.log, 'utf8').includes('"usage"')) {
-      assert.ok(Date.now() < logged, 'usage not logged');
-      await new Promise((resolve) => setTimeout(resolve, 25));
-    }
+    await waitOnRepo(h, () => fs.readFileSync(first.log, 'utf8').includes('"usage"'));
     fs.writeFileSync(path.join(first.cwd, 'README.md'), '# native unfinished work\n');
     fs.writeFileSync(path.join(first.cwd, 'unfinished.txt'), 'keep native edits\n');
     const after = String(fs.statSync(path.join(h.state, 'events.jsonl')).size);
     // Model Windows startup consuming the session deadline before interruption.
     // The shutdown wait must use completion receipts independently of that clock.
-    const startupClock = t.mock.method(Date, 'now', () => deadline + 1);
+    const clockBeforeInterrupt = Date.now();
+    const startupClock = t.mock.method(Date, 'now', () => clockBeforeInterrupt + HUNG_TEST_MS + 1);
     let spent;
     try {
       h.ok(['interrupt', 'T1', '--agent', 'orchestrator']);
       // Final spend follows pipe closure, process cleanup and the stopped phase.
       // Capture the cursor before interrupt so a fast exit cannot be missed.
       spent = h.json(['wait', '--after', after, '--task', 'T1', '--types', 'spend',
-        '--observe', '--timeout', '15', '--agent', 'orchestrator']);
+        '--observe', '--timeout', '300', '--agent', 'orchestrator']);
     } finally {
       startupClock.mock.restore();
     }
@@ -245,12 +251,8 @@ for (const format of ['codex', 'claude']) {
 test('a detached command harness records its session and resumes with a separate attempt log', async (t) => {
   const { h } = setup(t);
   const first = h.json(['spawn', '--task', 'T1'], { env: { RESUME_EXIT_DELAY: '2000' } });
-  const deadline = Date.now() + 10000;
-  while (!events(h).some((e) => e.cmd === 'spawn session')) {
-    if (Date.now() > deadline) throw new Error('session was not recorded');
-    await new Promise((resolve) => setTimeout(resolve, 50));
-  }
-  const exit = h.json(['wait', '--after', '0', '--task', 'T1', '--types', 'worker-exited', '--observe', '--timeout', '10']);
+  await waitOnRepo(h, () => events(h).some((e) => e.cmd === 'spawn session'));
+  const exit = h.json(['wait', '--observe', '--after', '0', '--task', 'T1', '--types', 'worker-exited', '--timeout', '300']);
   assert.equal(exit.detail.agent, first.agent);
   assert.equal(exit.detail.pid, first.pid);
   sendBack(h);
@@ -610,11 +612,7 @@ test('a still-running worker cannot be resumed', async (t) => {
   fs.appendFileSync(script, `\nfs.writeFileSync(${JSON.stringify(ready)}, String(process.pid));\nsetInterval(() => {}, 1000);\n`);
   const first = h.json(['spawn', '--task', 'T1']);
   t.after(() => { try { process.kill(first.pid, 'SIGKILL'); } catch (e) { if (e.code !== 'ESRCH') throw e; } });
-  const deadline = Date.now() + 10000;
-  while (!fs.existsSync(ready) || fs.readFileSync(ready, 'utf8') !== String(first.pid)) {
-    if (Date.now() > deadline) throw new Error('worker did not start');
-    await new Promise((resolve) => setTimeout(resolve, 50));
-  }
+  await waitOnRepo(h, () => fs.existsSync(ready) && fs.readFileSync(ready, 'utf8') === String(first.pid));
   sendBack(h);
   const result = h.run(['spawn', '--task', 'T1', '--wait']);
   assert.equal(result.code, 1, result.stderr);
@@ -708,11 +706,7 @@ test('an earlier attempt exit cannot collect or resume a live attempt with a reu
   const ready = path.join(h.base, 'live-ready');
   fs.appendFileSync(script, `\nfs.writeFileSync(${JSON.stringify(ready)}, String(process.pid));\nsetInterval(() => {}, 1000);\n`);
   const live = h.json(['spawn', '--task', 'T1']);
-  const deadline = Date.now() + 10000;
-  while (!fs.existsSync(ready) || fs.readFileSync(ready, 'utf8') !== String(live.pid)) {
-    if (Date.now() > deadline) throw new Error('resumed worker did not start');
-    await new Promise((resolve) => setTimeout(resolve, 50));
-  }
+  await waitOnRepo(h, () => fs.existsSync(ready) && fs.readFileSync(ready, 'utf8') === String(live.pid));
   h.ok(['submit', 'T1', '--sha', 'cfed4d76efd3afe887bbbfc7f62c7d94158e3255', '--agent', live.agent]);
   h.ok(['rework', 'T1', '--reason', 'Finish next attempt']);
   const hook = path.join(h.base, 'reused-spawn.js');

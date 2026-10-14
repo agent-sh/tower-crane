@@ -90,7 +90,7 @@ ${finish}
   fs.writeFileSync(file, body);
   const result = cp.spawnSync(process.execPath, [...(fileTest ? ['--test'] : []), file], {
     env: { ...h.env, NODE_TEST_CONTEXT: undefined, TOWER_CRANE_TEST_TMP: path.join(h.base, 'scratch') },
-    encoding: 'utf8', timeout: 30000,
+    encoding: 'utf8', timeout: 300000,
   });
   assert.equal(result.status, status, result.stderr + result.stdout);
   const { base } = JSON.parse(fs.readFileSync(output, 'utf8'));
@@ -139,9 +139,29 @@ const timer = setInterval(() => {
   await h.cleanup();
   assert.equal(fs.existsSync(h.base), false);
   const next = { pid: Number(fs.readFileSync(out, 'utf8')), kind: 'monitor' };
-  const deadline = Date.now() + 10000;
-  while (detachedAlive(next) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 50));
+  // Teardown returns only after the processes it saw start have exited.
   assert.equal(detachedAlive(next), false, 'the monitor recorded during teardown outlived it');
+});
+
+test('the CLI helper retains launch errors alongside the exit status and signal', (t) => {
+  const h = makeRepo(t);
+  h.init();
+  const original = cp.spawnSync;
+  const error = Object.assign(new Error('launch temporarily unavailable'), { code: 'EAGAIN' });
+  cp.spawnSync = (command, args, options) => {
+    if (command === process.execPath && args.includes('--ci-local')) {
+      return { status: null, signal: null, stdout: '', stderr: '', error };
+    }
+    return original(command, args, options);
+  };
+  try {
+    const result = h.run(['project', 'set', '--ci-local', '{}']);
+    assert.equal(result.code, null);
+    assert.equal(result.signal, null);
+    assert.deepEqual(result.error, { code: 'EAGAIN', message: 'launch temporarily unavailable' });
+  } finally {
+    cp.spawnSync = original;
+  }
 });
 
 test('the test runner emits one capped concurrency value, including repeated and split options', (t) => {
@@ -166,6 +186,7 @@ test('the test runner emits one capped concurrency value, including repeated and
     assert.equal(r.status, 0, r.stderr);
     const args = JSON.parse(r.stdout);
     assert.deepEqual(args.filter((arg) => arg.startsWith('--test-concurrency')), [`--test-concurrency=${expected}`]);
+    assert.ok(args.includes('--test-timeout=300000'), 'runner and signal waits share the hung-test backstop');
     assert.deepEqual(args.filter((arg) => !arg.startsWith('--')), ['test/claim.test.js']);
   }
 });
@@ -177,7 +198,7 @@ test('mutation fallback requires a green baseline in a copy containing all test 
     fs.mkdirSync(path.dirname(target), { recursive: true });
     fs.writeFileSync(target, text);
   };
-  for (const file of ['test/run.js', 'test/global-setup.js', 'test/repo-seed.js', 'test/tmp-root.js']) {
+  for (const file of ['test/run.js', 'test/signals.js', 'test/global-setup.js', 'test/repo-seed.js', 'test/tmp-root.js']) {
     write(file, fs.readFileSync(path.join(ROOT, file), 'utf8'));
   }
   write('test/gates/.keep', '');
@@ -197,7 +218,7 @@ test('mutation fallback requires a green baseline in a copy containing all test 
   `;
   const run = () => cp.spawnSync(process.execPath, [
     path.join(ROOT, 'scripts/mutants.js'), '--root', h.repo, '--jobs', '1', '--only', 'stack-merge-unaccepted-lower',
-  ], { env: { ...h.env, TOWER_CRANE_TEST_TMP: h.base }, encoding: 'utf8', timeout: 60000 });
+  ], { env: { ...h.env, TOWER_CRANE_TEST_TMP: h.base }, encoding: 'utf8', timeout: 300000 });
 
   write('test/fallback.test.js', baseline + `
     test('unaccepted lower', () => {

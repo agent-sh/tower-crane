@@ -1,0 +1,1 @@
+- The stack link retry tests count each observer's attempts from the event log, which the state lock serializes, instead of the gh fixture's call log, which concurrent gh callers can overwrite.

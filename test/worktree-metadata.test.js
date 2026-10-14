@@ -1,5 +1,7 @@
 'use strict';
 
+const { fileWritten } = require('./signals');
+
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -123,15 +125,9 @@ process.exit(${code});
   });
 }
 
-async function waitFor(file) {
-  const deadline = performance.now() + 15000;
-  while (!fs.existsSync(file)) {
-    assert.ok(performance.now() < deadline, `waiting for ${file}`);
-    await new Promise((resolve) => setTimeout(resolve, 20));
-  }
-}
+const waitFor = (file) => fileWritten(file);
 
-test('two preparations overlap a gate removal without pruning their initializing registrations', { timeout: 30000 }, async (t) => {
+test('two preparations overlap a gate removal without pruning their initializing registrations', { timeout: 300000 }, async (t) => {
   const h = makeRepo(t);
   const script = path.join(h.base, 'gate.js');
   const ready = path.join(h.base, 'gate-ready');
@@ -141,7 +137,7 @@ test('two preparations overlap a gate removal without pruning their initializing
   fs.writeFileSync(script, `
 const fs = require('node:fs');
 fs.writeFileSync(${JSON.stringify(ready)}, '');
-const deadline = performance.now() + 20000;
+const deadline = performance.now() + 300000;
 while (!fs.existsSync(${JSON.stringify(release)})) {
   if (performance.now() > deadline) process.exit(1);
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
@@ -155,7 +151,7 @@ const fs = require('node:fs'), path = require('node:path');
 const name = path.basename(process.cwd());
 if (name === 'wt') process.exit(0);
 fs.writeFileSync(path.join(${JSON.stringify(h.base)}, name + '-ready'), '');
-const deadline = performance.now() + 20000;
+const deadline = performance.now() + 300000;
 while (!fs.existsSync(${JSON.stringify(addRelease)})) {
   if (performance.now() > deadline) process.exit(1);
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
@@ -220,7 +216,7 @@ test('a sandboxed git push clears an empty read-only lock placeholder that would
   fs.mkdirSync(shimDir);
   const env = { ...h.env, TOWER_CRANE_PROC: procTable(h) };
   const push = cp.spawnSync(process.execPath, [path.join(ROOT, 'lib', 'shim.js'), policy, shimDir, 'git', 'push', '-u', remote, 'HEAD:refs/heads/task-T1'],
-    { cwd: h.repo, env, encoding: 'utf8', timeout: 30000 });
+    { cwd: h.repo, env, encoding: 'utf8', timeout: 300000 });
   assert.equal(push.status, 0, push.stderr);
   // Git reports a blocked upstream write without a failing status.
   assert.doesNotMatch(push.stderr, /could not lock config/);
@@ -239,7 +235,7 @@ test('a sandboxed git call outside any repository runs without a placeholder cle
   fs.mkdirSync(shimDir);
   const env = { ...h.env, TOWER_CRANE_PROC: procTable(h) };
   const init = cp.spawnSync(process.execPath, [path.join(ROOT, 'lib', 'shim.js'), policy, shimDir, 'git', 'init', '-q', 'fresh'],
-    { cwd: outside, env, encoding: 'utf8', timeout: 30000 });
+    { cwd: outside, env, encoding: 'utf8', timeout: 300000 });
   assert.equal(init.status, 0, init.stderr);
   assert.ok(fs.existsSync(path.join(outside, 'fresh', '.git')));
 });
@@ -261,7 +257,7 @@ test('a lock that a process holds is kept when the git directory is reached thro
   assert.equal(fs.existsSync(lock), true);
 });
 
-test('a cleanup keeps placeholders while another cleanup holds the git directory', { timeout: 30000 }, (t) => {
+test('a cleanup keeps placeholders while another cleanup holds the git directory', { timeout: 300000 }, (t) => {
   const h = makeRepo(t);
   h.init();
   const commonDir = path.join(h.repo, '.git');
@@ -280,7 +276,7 @@ test('a cleanup keeps placeholders while another cleanup holds the git directory
 
 // A holder paused past any age limit still holds the directory. Taking it over
 // would let the paused cleanup rename a live lock that this one then moved away.
-test('a cleanup keeps placeholders behind a directory of any age, since its holder may only be paused', { timeout: 30000 }, (t) => {
+test('a cleanup keeps placeholders behind a directory of any age, since its holder may only be paused', { timeout: 300000 }, (t) => {
   const h = makeRepo(t);
   h.init();
   const commonDir = path.join(h.repo, '.git');
@@ -316,7 +312,7 @@ const HOLDER_SKIP = !fs.existsSync('/proc/self/fd') ? 'needs /proc to see which 
   : process.getuid?.() === 0 ? 'root reads every descriptor table'
     : !PYTHON && 'needs python3 to make a process non-dumpable';
 
-test('a lock held by a same-user process whose descriptors are unreadable is kept', { skip: HOLDER_SKIP, timeout: 30000 }, async (t) => {
+test('a lock held by a same-user process whose descriptors are unreadable is kept', { skip: HOLDER_SKIP, timeout: 300000 }, async (t) => {
   const h = makeRepo(t);
   h.init();
   const lock = path.join(h.repo, '.git', 'config.lock');
@@ -343,7 +339,7 @@ print(pid, flush=True)
 time.sleep(60)
 `;
 
-test('a zombie of this user holds nothing, so it keeps no placeholder', { skip: HOLDER_SKIP, timeout: 30000 }, async (t) => {
+test('a zombie of this user holds nothing, so it keeps no placeholder', { skip: HOLDER_SKIP, timeout: 300000 }, async (t) => {
   const h = makeRepo(t);
   h.init();
   const lock = path.join(h.repo, '.git', 'config.lock');

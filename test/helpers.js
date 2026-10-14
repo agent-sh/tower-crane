@@ -1,5 +1,7 @@
 'use strict';
 
+const { waitUntil, HUNG_TEST_MS } = require('./signals');
+
 const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
@@ -30,11 +32,9 @@ function unseenDetached(fixture, seen) {
 // Processes started during teardown are not expected to exit on their own, so they are killed.
 async function killStarted(children) {
   children.forEach(killDetached);
-  const deadline = Date.now() + 10000;
-  while (children.some(detachedAlive) && Date.now() < deadline) {
-    await new Promise((resolve) => setTimeout(resolve, 50));
-  }
-  assert.deepEqual(children.filter(detachedAlive).map((c) => c.pid), [], 'processes started during teardown survived it');
+  await waitUntil(() => !children.some(detachedAlive), {
+    what: () => `processes started during teardown survived it: ${children.filter(detachedAlive).map((c) => c.pid).join(', ')}`,
+  });
 }
 // process.exit() and uncaught exceptions skip beforeExit, and an exit listener runs only
 // synchronous code, so this stops detached children with signals and removes the directories.
@@ -422,9 +422,10 @@ function context(t, base, options = {}) {
       const dir = path.join(base, 'detached');
       return fs.existsSync(dir) ? fs.readdirSync(dir).filter((f) => f.endsWith('.json')).flatMap((f) => {
         const file = path.join(dir, f);
+        // hooks.js publishes records atomically; one still incomplete is not recorded yet.
         let record;
         try { record = JSON.parse(fs.readFileSync(file, 'utf8')); }
-        catch (e) { if (e.code === 'ENOENT') return []; throw e; }
+        catch (e) { if (e.code === 'ENOENT' || e instanceof SyntaxError) return []; throw e; }
         // A monitor's exit listener marks its exit beside its record.
         if (record.kind === 'monitor' && fs.existsSync(path.join(dir, `${record.token || record.pid}.exited`))) record.exited = true;
         return [{ ...record, file }];
@@ -432,13 +433,13 @@ function context(t, base, options = {}) {
     },
     // Steps that must run before the directory goes, such as stopping processes that poll in it.
     teardown: [],
-    cleanup: async () => {
+    cleanup: async ({ monitorGraceMs } = {}) => {
       const seen = new Set();
       try {
         try {
           for (const step of ctx.teardown.splice(0)) await step();
         } finally {
-          try { await stopDetached(unseenDetached(ctx, seen)); }
+          try { await stopDetached(unseenDetached(ctx, seen), monitorGraceMs); }
           finally {
             for (let fresh; (fresh = unseenDetached(ctx, seen)).length;) await killStarted(fresh);
           }
@@ -518,11 +519,10 @@ function withHooks(ctx, opts) {
   return { cwd: ctx.repo, ...opts, env, pre };
 }
 
-// A timeout here only guards against a hung CLI; the runner's per-test timeout
-// is the backstop. Spawns that waited 15 to 23 s on a machine at load 50 to 80
-// set the 60 s floor. An explicit zero leaves only the runner's backstop.
-function run(args, { cwd, env, input, pre = [], timeout = 60000 } = {}) {
-  const r = cp.spawnSync(process.execPath, [...pre, BIN, ...args], { cwd, env, input, encoding: 'utf8', timeout: timeout === 0 ? 0 : Math.max(timeout, 60000) });
+// A command shares the runner's hung-test backstop so CLI wait readiness is
+// not cut short by a separate subprocess budget.
+function run(args, { cwd, env, input, pre = [], timeout = HUNG_TEST_MS } = {}) {
+  const r = cp.spawnSync(process.execPath, [...pre, BIN, ...args], { cwd, env, input, encoding: 'utf8', timeout: timeout === 0 ? 0 : Math.max(timeout, HUNG_TEST_MS) }); // wait-allow: explicit zero delegates to the runner; positive command watchdogs retain the hung minimum
   return {
     code: r.status, stdout: r.stdout || '', stderr: r.stderr || '', signal: r.signal,
     ...(r.error && { error: { code: r.error.code, message: r.error.message } }),
@@ -538,16 +538,16 @@ function cliFailure(args, result) {
 }
 
 const PTY_AVAILABLE = process.platform === 'linux'
-  && cp.spawnSync('script', ['--version'], { timeout: 10000 }).status === 0;
+  && cp.spawnSync('script', ['--version'], { timeout: 300000 }).status === 0;
 
-function runPty(args, { cwd, env, timeout = 10000 } = {}) {
+function runPty(args, { cwd, env, timeout = HUNG_TEST_MS } = {}) {
   // script uses a shell, so quote each argument to preserve names and paths.
   const command = [process.execPath, BIN, ...args].map((s) => `'${s.replace(/'/g, "'\\''")}'`).join(' ');
-  const r = cp.spawnSync('script', ['-qec', command, '/dev/null'], { cwd, env, encoding: 'utf8', timeout });
+  const r = cp.spawnSync('script', ['-qec', command, '/dev/null'], { cwd, env, encoding: 'utf8', timeout: Math.max(timeout, HUNG_TEST_MS) });
   return { code: r.status, stdout: r.stdout || '', stderr: r.stderr || '', signal: r.signal };
 }
 
-function runAsync(args, { cwd, env, pre = [] } = {}) {
+function runAsync(args, { cwd, env, pre = [], onSpawn } = {}) {
   return new Promise((resolve) => {
     const child = cp.spawn(process.execPath, [...pre, BIN, ...args], { cwd, env });
     let stdout = '';
@@ -555,6 +555,7 @@ function runAsync(args, { cwd, env, pre = [] } = {}) {
     child.stdout.on('data', (d) => (stdout += d));
     child.stderr.on('data', (d) => (stderr += d));
     child.on('close', (code) => resolve({ code, stdout, stderr }));
+    onSpawn?.(child);
   });
 }
 
@@ -589,13 +590,13 @@ function detachedAlive(child) {
 function killDetached(child) {
   if (!detachedAlive(child)) return;
   if (process.platform === 'win32') {
-    cp.spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore', timeout: 10000 });
+    cp.spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore', timeout: 300000 });
   } else {
     try { process.kill(-child.pid, 'SIGKILL'); } catch (e) { if (e.code !== 'ESRCH') throw e; }
   }
 }
 
-async function stopDetached(children) {
+async function stopDetached(children, monitorGraceMs) {
   const monitors = children.filter((c) => c.kind === 'monitor');
   if (process.platform === 'win32' && children.length) {
     // Retain native handles before stopping anything. A PID can be reused
@@ -641,7 +642,7 @@ try {
   $clock = [System.Diagnostics.Stopwatch]::StartNew()
   $survivors = @()
   foreach ($entry in $held) {
-    if (!$entry.Process.WaitForExit([int][Math]::Max(0, 10000 - $clock.ElapsedMilliseconds))) {
+    if (!$entry.Process.WaitForExit([int][Math]::Max(0, 300000 - $clock.ElapsedMilliseconds))) {
       $survivors += [pscustomobject]@{ kind = $entry.Kind; pid = $entry.Process.Id }
     }
   }
@@ -663,7 +664,7 @@ try {
         stopped = true;
         const ids = JSON.parse(ready.slice(6).trim());
         for (const pid of [...ids.workers, ...ids.monitors]) {
-          cp.spawnSync('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore', timeout: 10000 });
+          cp.spawnSync('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore', timeout: 300000 });
         }
         child.stdin.end('\n');
       }
@@ -680,19 +681,20 @@ try {
     assert.deepEqual(survivors.map((s) => s.pid), [], 'detached workers outlived test teardown');
     return;
   }
+  let grace;
+  const controller = new AbortController();
   try {
     for (const child of children.filter((c) => c.kind === 'worker')) killDetached(child);
-    const deadline = Date.now() + 10000;
-    while (monitors.some(detachedAlive) && Date.now() < deadline) {
-      await new Promise((resolve) => setTimeout(resolve, 50));
+    if (monitorGraceMs !== undefined) {
+      grace = setTimeout(() => controller.abort(new Error('detached usage monitors outlived test teardown')), monitorGraceMs); // wait-allow: deliberate teardown-failure tests supply their observation grace
     }
-    assert.deepEqual(monitors.filter(detachedAlive).map((c) => c.pid), [], 'detached usage monitors outlived test teardown');
+    await waitUntil(() => monitors.every((child) => !detachedAlive(child)), {
+      signal: controller.signal, what: 'detached usage monitors outlived test teardown',
+    });
   } finally {
+    clearTimeout(grace);
     for (const monitor of monitors) killDetached(monitor);
-    const deadline = Date.now() + 10000;
-    while (monitors.some(detachedAlive) && Date.now() < deadline) {
-      await new Promise((resolve) => setTimeout(resolve, 50));
-    }
+    await waitUntil(() => monitors.every((child) => !detachedAlive(child)));
     assert.ok(monitors.every((c) => !detachedAlive(c)), 'usage monitors survived forced cleanup');
   }
 }
