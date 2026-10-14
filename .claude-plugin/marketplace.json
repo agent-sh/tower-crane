@@ -3,8 +3,6 @@
   "description": "Hand over an issue, a goal or a whole project: plan into tasks, dispatch workers, clean-context review, software gates and merges",
   "version": "0.1.0",
   "owner": { "name": "Avi Fenesh", "url": "https://github.com/avifenesh" },
-  "repository": "https://github.com/agent-sh/tower-crane",
-  "keywords": ["tower-crane"],
   "plugins": [
     {
       "name": "tower-crane",

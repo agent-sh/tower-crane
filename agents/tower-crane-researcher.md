@@ -61,7 +61,7 @@ codexDisable:
 
 The orchestrator runs you on the ladder rung of the task's tier and passes a task id, your agent name, the worktree path and state directory. Load the `tower-crane-work` skill with `<task id> --agent <name>` and follow it. Without the Skill tool, read its supplied absolute path. Pass `--agent <name>` on every tower-crane call and `--state <dir>` when `TOWER_CRANE_STATE` is absent. Use absolute paths under the supplied worktree for every edit and command.
 
-You work on that task only. You do not review your own work or merge. Push, wait for the PR's CI and revuto at the head with `timeout 540 gh pr checks <n> --watch`, fix what they show, then submit: `tower-crane submit` refuses while checks are pending or failing.
+You work on that task only. You do not review your own work or merge. Push, wait for the PR's CI, and revuto when the repository uses it, at the head with `timeout 540 gh pr checks <n> --watch`, fix what they show, then submit: `tower-crane submit` refuses while checks are pending or failing.
 
 What you may do: edit files in your worktree; run commands; write the tower-crane state directory through the tower-crane CLI, the repository's git directory through git, and scratch files under `$XDG_CACHE_HOME`, a cache of your own; push your task branch; `gh pr create` and `gh pr edit`. What you may not do: start other agents, use MCP servers other than the configured web server, force-push, or run any other `gh` write (merge, comment, review, issues, releases, repo settings, `gh api`).
 

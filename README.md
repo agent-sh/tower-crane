@@ -52,7 +52,7 @@ tower-crane merge T1
 What each step does:
 
 1. `init` writes `.tower-crane/project.json` with the default ladder and adds the directory to `.git/info/exclude`.
-2. `task add` prints `T1`. Size `S` puts it on the `easy` rung.
+2. `task add` prints `T1`. Its kind defaults to `code`, so it runs on the `medium` rung even at size `S`. Only an `S` `docs` task goes to `easy`.
 3. `brief set` stores the context the worker gets.
 4. `spawn --dry-run` prints the agent file, the house rules and the exact command it would run. `spawn` runs it: a worker in a new worktree, which claims the task, commits, opens a PR and submits its head.
 5. `serve` opens the board at `http://127.0.0.1:4747/`.
@@ -69,7 +69,9 @@ To let an agent do all of this, install the Claude Code plugin and hand the `tow
 | Claude Code plugin | `/plugin marketplace add agent-sh/tower-crane` then `/plugin install tower-crane@tower-crane` | works; the plugin still needs the CLI on `PATH` |
 | npm | `npm install -g @agentsys/tower-crane` | not published yet |
 
-The CLI has no npm dependencies. The plugin adds the orchestrator, work and review skills, five agent files, five commands (`/tower-crane-inbox`, `/tower-crane-spawn-ready`, `/tower-crane-merge-accepted`, `/tower-crane-rework-from-review`, `/tower-crane-release-dead`), the `tower-crane` MCP server with inbox and batch tools, and a Claude Code mod (`hooks/tower-crane.mjs`) that wakes the orchestrator on new events.
+The CLI has no npm dependencies. The plugin adds the orchestrator, work and review skills, five agent files, six commands, the `tower-crane` MCP server with inbox and batch tools, and a Claude Code mod (`hooks/tower-crane.mjs`) that wakes the orchestrator on new events. Five commands are files in `commands/` (`/tower-crane-inbox`, `/tower-crane-spawn-ready`, `/tower-crane-merge-accepted`, `/tower-crane-rework-from-review`, `/tower-crane-release-dead`); the mod registers the sixth, `/tower-crane-watch`, which arms its event follower.
+
+[revuto](https://github.com/avifenesh/revuto) is optional. It is a local PR reviewer that posts inline findings and a `revuto-review` check on your PRs; install it with `npm i -g revuto` and follow its README to point it at your repository. When it reviews your PRs, workers fix or resolve its findings before submit and reviewers get them in their packet. Without it, the PR has no revuto comments or check, the skills skip their revuto steps, and nothing waits for it.
 
 ## How it works
 
@@ -120,8 +122,8 @@ Every task has a tier: `easy`, `medium`, `hard` or `research`. Kind and size pic
 | Rung | Runs | Default |
 |---|---|---|
 | `orchestrator` | planning, briefs, dispatch, gates, merges | Claude, `opus`, effort high |
-| `easy` | `S` tasks | Claude, `claude-haiku-5-5`, effort high |
-| `medium` | `M` tasks | Codex, profile `sol`, effort high |
+| `easy` | `S` `docs` tasks | Claude, `claude-haiku-5-5`, effort high |
+| `medium` | every other task that is not `L` or research | Codex, profile `sol`, effort high |
 | `hard` | `L` tasks | Claude, `opus`, effort medium |
 | `research` | research tasks | Claude, `opus`, effort high |
 | `review` | fallback reviewer | Claude, `claude-haiku-5-5`, effort high |

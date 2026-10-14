@@ -32,6 +32,28 @@ test('init creates the state files and excludes them from git', (t) => {
   assert.match(again.stderr, /already exists/);
 });
 
+test('a corrupt state file names repairs that work outside git', (t) => {
+  const h = makeRepo(t);
+  h.init();
+  const tasks = path.join(h.state, 'tasks.json');
+  const cases = [
+    [path.join(h.state, 'project.json'), '{', ['--agent', 'owner'], /project\.json is not valid JSON/],
+    [path.join(h.state, 'project.json'), '{', ['--agent', 'orchestrator'], /project\.json is not valid JSON/],
+    [tasks, '{"version":1}', ['--agent', 'orchestrator'], /tasks\.json is invalid/],
+  ];
+  const saved = new Map(cases.map(([file]) => [file, fs.readFileSync(file)]));
+  for (const [file, text, agent, problem] of cases) {
+    fs.writeFileSync(file, text);
+    const broken = h.run(['project', 'show', ...agent]);
+    fs.writeFileSync(file, saved.get(file));
+    assert.equal(broken.code, 1, broken.stderr);
+    assert.match(broken.stderr, problem);
+    assert.match(broken.stderr, /events\.jsonl beside it records every change/);
+    assert.match(broken.stderr, /git does not track it/);
+    assert.doesNotMatch(broken.stderr, /version control|\n\s+at /, 'no git restore and no stack trace');
+  }
+});
+
 test('init requires name and goal', (t) => {
   const h = makeRepo(t);
   const r = h.run(['init', '--name', 'demo']);
