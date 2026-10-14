@@ -56,7 +56,7 @@ test('render writes both files on demand', (t) => {
   assert.ok(fs.existsSync(out.md) && fs.existsSync(out.html));
 });
 
-test('render holds the lock, so a write made while it runs still shows in the sketch', async (t) => {
+test('a render that read the state before a write never replaces the sketch of that write', async (t) => {
   const h = makeRepo(t);
   h.init();
   const paused = path.join(h.base, 'render-read');

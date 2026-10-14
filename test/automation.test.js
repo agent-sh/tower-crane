@@ -3301,6 +3301,138 @@ test('revuto replies require an explicit resolution and later discussion reopens
   assert.ok(h.readState('tasks.json').tasks[0].evidence.some((e) => e.type === 'review' && e.ok));
 });
 
+// A poll can read the event log mid-append; that read counts as not yet.
+async function pollUntil(h, what, check) {
+  const ready = () => {
+    try { return check(); } catch (e) { if (e instanceof SyntaxError) return false; throw e; }
+  };
+  const deadline = Date.now() + 60000;
+  while (!ready()) {
+    if (Date.now() > deadline) throw new Error(`${what}: ${JSON.stringify(h.logs().slice(-10))}`);
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+}
+
+test('a reviewer that exits 1 without a verdict is replaced at the same head', async (t) => {
+  const h = setup(t);
+  configureHarness(h);
+  h.env.AUTOMATION_REVIEW_CRASH_ONCE = path.join(h.base, 'review-crashed');
+  const reviewers = () => h.logs().filter((e) => e.cmd === 'spawn' && e.detail.role === 'reviewer');
+  assert.equal((await h.runAsync(['spawn', '--task', 'T1', '--wait', '--agent', 'orchestrator'])).code, 0);
+  await pollUntil(h, 'replacement review', () => reviewers().length === 2
+    && h.readState('tasks.json').tasks[0].evidence.some((e) => e.type === 'review' && e.ok));
+  const exit = h.logs().find((e) => e.cmd === 'spawn exit' && e.detail.agent === reviewers()[0].detail.agent);
+  assert.equal(exit.detail.code, 1);
+  assert.equal(h.logs().some((e) => e.cmd === 'review held'), false);
+});
+
+test('a reviewer whose monitor never records its exit is replaced after the receipt bound with one notice', async (t) => {
+  const h = setup(t);
+  configureHarness(h);
+  h.submit();
+  for (const type of ['tests', 'clean', 'ci']) gateEvidence(h, type, 'orchestrator');
+  const task = h.readState('tasks.json').tasks[0];
+  const at = new Date().toISOString();
+  // The worker exited; the reviewer's process is gone, and its monitor (this
+  // test process) runs on without writing the reviewer's spawn exit.
+  fs.appendFileSync(path.join(h.state, 'events.jsonl'), [
+    { at, agent: 'orchestrator', cmd: 'spawn', task: 'T1', detail: { agent: 'worker', role: 'worker', sha: task.sha, revision: task.revision, pid: 999998, attempt: 1 } },
+    { at, agent: 'orchestrator', cmd: 'spawn exit', task: 'T1', detail: { agent: 'worker', pid: 999998, attempt: 1, code: 0 } },
+    { at, agent: 'orchestrator', cmd: 'spawn', task: 'T1', detail: { agent: 'reviewer-T1-9', role: 'reviewer', rung: 'review',
+      sha: task.sha, revision: task.revision, pid: 999999, attempt: 1, monitor_pid: process.pid, revuto: [] } },
+  ].map((e) => `${JSON.stringify(e)}\n`).join(''));
+  const reviewers = () => h.logs().filter((e) => e.cmd === 'spawn' && e.detail.role === 'reviewer');
+  const missing = () => h.logs().filter((e) => e.cmd === 'review exit missing');
+  h.consume();
+  assert.equal(reviewers().length, 1, 'no replacement while the monitor may still record the exit');
+  assert.equal(missing().length, 0);
+  // Default supervision: 10 min max backoff, 7 s group cleanup and a 1 min drain.
+  const clock = path.join(__dirname, 'fixtures', 'clock.js').replace(/\\/g, '/');
+  const later = { env: { NODE_OPTIONS: `--require "${clock}"`, TOWER_CRANE_TEST_NOW: String(Date.parse(at) + 11 * 60000 + 8000) } };
+  h.run(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator'], later);
+  await pollUntil(h, 'replacement reviewer', () => reviewers().length === 2);
+  assert.equal(missing().length, 1);
+  assert.equal(missing()[0].detail.agent, 'reviewer-T1-9');
+  assert.equal(missing()[0].detail.reason, 'reviewer monitor did not record its exit');
+  const item = h.json(['inbox', '--agent', 'orchestrator']).items.find((i) => i.kind === 'review_exit_missing');
+  assert.equal(item.task, 'T1');
+  assert.deepEqual(item.action.argv.slice(0, 2), ['inbox', '--ack']);
+  h.run(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator'], later);
+  assert.equal(missing().length, 1, 'one notice per reviewer');
+});
+
+test('a reviewer that exits without a verdict is not respawned at that head until a revuto thread changes', async (t) => {
+  const h = setup(t);
+  configureHarness(h);
+  h.env.AUTOMATION_REVIEW_NOTE = '1';
+  const state = h.github();
+  state.comments = [{ id: 501, in_reply_to_id: null, path: 'value.js', line: 1, body: '[P1] Bounds are unchecked.',
+    user: 'revuto-review[bot]', original_commit_id: h.sha, html_url: 'https://github.com/acme/demo/pull/7#discussion_r501' }];
+  h.saveGithub(state);
+  const reviewers = () => h.logs().filter((e) => e.cmd === 'spawn' && e.detail.role === 'reviewer');
+  const held = () => h.logs().filter((e) => e.cmd === 'review held');
+  const until = (what, check) => pollUntil(h, what, check);
+  const gone = (pid) => {
+    try { process.kill(pid, 0); return false; } catch { return true; }
+  };
+  // The reaction to a reviewer's exit is where automation used to dispatch the
+  // next reviewer; its monitor finishes before the orchestrator acts again.
+  const settled = (agent) => {
+    const spawn = reviewers().find((e) => e.detail.agent === agent);
+    const exit = h.logs().find((e) => e.cmd === 'spawn exit' && e.detail.agent === agent);
+    return !!exit && h.logs().some((e) => e.cmd === 'automation' && e.detail.source === exit.id && e.detail.phase !== 'running')
+      && gone(spawn.detail.monitor_pid);
+  };
+  assert.equal((await h.runAsync(['spawn', '--task', 'T1', '--wait', '--agent', 'orchestrator'])).code, 0);
+  await until('first reviewer', () => reviewers().length > 0);
+  const first = reviewers()[0].detail.agent;
+  await until('first reviewer exit reaction', () => settled(first));
+  assert.equal(reviewers().length, 1, 'no second reviewer at the same head');
+  assert.equal(held().length, 1);
+  const notice = held()[0];
+  assert.equal(notice.to, 'orchestrator');
+  assert.equal(notice.detail.agent, first);
+  assert.equal(notice.detail.sha, h.sha);
+  assert.deepEqual(notice.detail.exit, { code: 0, signal: null });
+  assert.match(notice.detail.reason, /Review passed; evidence refused: .*review ok refused; revuto \[P1\] comment 501/);
+  assert.match(notice.detail.reason, /\[resolved\]/, 'the refusal names how the finding gets resolved');
+  assert.deepEqual(notice.detail.revuto, ['[P1] comment 501 at value.js:1 (https://github.com/acme/demo/pull/7#discussion_r501)']);
+  const inbox = h.json(['inbox', '--agent', 'orchestrator']);
+  const item = inbox.items.find((i) => i.kind === 'review_held');
+  assert.equal(item.task, 'T1');
+  assert.deepEqual(item.action.argv, ['accept', 'T1']);
+
+  // A later reaction with nothing changed holds without a second notice.
+  h.consume();
+  assert.equal(reviewers().length, 1);
+  assert.equal(held().length, 1);
+
+  // Discussion on the thread is a new input: one more reviewer, held again when it stops the same way.
+  const discussed = h.github();
+  discussed.comments.push({ id: 511, in_reply_to_id: 501, user: 'owner', body: 'The guard is in parse.js.' });
+  h.saveGithub(discussed);
+  h.consume();
+  await until('second reviewer', () => reviewers().length === 2);
+  const second = reviewers()[1].detail.agent;
+  await until('second reviewer exit reaction', () => settled(second));
+  assert.equal(reviewers().length, 2);
+  assert.deepEqual(held().map((e) => e.detail.agent), [first, second]);
+
+  // The orchestrator resolves the finding: the reply re-enables dispatch and the next ok counts.
+  const long = h.run(['ci', 'resolve', '501', '--task', 'T1', '--reason', 'x'.repeat(1001), '--agent', 'orchestrator']);
+  assert.equal(long.code, 2, long.stderr);
+  assert.match(long.stderr, /1001 characters; keep it to 1000/);
+  const resolved = h.ok(['ci', 'resolve', '501', '--task', 'T1', '--reason', 'Fixed by the guard in parse.js, as @owner asked.', '--agent', 'orchestrator']);
+  assert.match(resolved, /comment 501/);
+  const reply = h.github().comments.at(-1);
+  assert.equal(reply.in_reply_to_id, 501);
+  assert.equal(reply.body, '[resolved]\nFixed by the guard in parse.js, as @\u200downer asked.\n\nby orchestrator');
+  await until('third reviewer', () => reviewers().length === 3);
+  assert.equal(reviewers()[2].detail.revuto[0].resolved, true);
+  await until('review evidence', () => h.readState('tasks.json').tasks[0].evidence.some((e) => e.type === 'review' && e.ok));
+  assert.equal(held().length, 2);
+});
+
 test('a supervised worker submission runs gates and dispatches the offline reviewer after exit', async (t) => {
   const h = setup(t);
   configureHarness(h, { rules: true });
