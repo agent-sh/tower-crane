@@ -94,6 +94,13 @@ if (env.HOOK_PIDNS) {
   };
 }
 
+// HOOK_HOSTNAME=NAME: this process reports NAME as its host name, as one in a
+// container or a sandbox with a UTS namespace of its own does.
+if (env.HOOK_HOSTNAME) {
+  const os = require('node:os');
+  os.hostname = () => env.HOOK_HOSTNAME;
+}
+
 // HOOK_NO_SH=1: the CLI finds no /bin/sh, as on Windows, so it has no POSIX
 // lease gate and spawns its workers through the launch handshake.
 if (env.HOOK_NO_SH && path.basename(process.argv[1] || '') === 'tower-crane.js') {
@@ -196,6 +203,13 @@ function before(name, args) {
   if (env.HOOK_FAIL_EVENT_SYNC && name === 'fsyncSync' && path.resolve(String(target)) === path.join(STATE, 'events.jsonl') && first('event-sync')) {
     throw Object.assign(new Error('EIO: i/o error, fsync'), { code: 'EIO' });
   }
+  // HOOK_SUPERVISOR_LOCK_AFTER=FILE: a supervisor takes no state lock until
+  // FILE exists, so a test can let another process hold the lock first.
+  if (env.HOOK_SUPERVISOR_LOCK_AFTER && name === 'mkdirSync' && inState(target) && /^lock\.\d+\.[0-9a-f]+\.new$/.test(path.basename(String(target)))
+    && path.basename(process.argv[1] || '') === 'spawn-monitor.js') {
+    const end = Date.now() + 300000;
+    while (!real.existsSync(env.HOOK_SUPERVISOR_LOCK_AFTER) && Date.now() < end) sleep(10);
+  }
   // HOOK_JITTER_MS=MS: a random pause of up to MS before each call on the state.
   if (env.HOOK_JITTER_MS && (inState(target) || inState(args[1]))) sleep(Math.floor(Math.random() * Number(env.HOOK_JITTER_MS)));
   // State commits precede board replacement; expose that interval to readers.
@@ -245,6 +259,13 @@ function after(name, args, rawArgs = args) {
     && path.basename(process.argv[1]) === 'tower-crane.js' && ownsLock()) {
     process.kill(process.pid, 'SIGKILL');
     sleep(5000);
+  }
+  // HOOK_COMMIT_DELAY_MS=MS: a lock holder pauses MS after its events reach
+  // the log while a staged commit file waits to be renamed into place, so
+  // readers without the lock meet the log ahead of the files.
+  if (env.HOOK_COMMIT_DELAY_MS && name === 'fsyncSync' && path.resolve(String(target)) === path.join(STATE, 'events.jsonl')
+    && real.readdirSync(STATE).some((file) => /\.json\.E[0-9a-f-]{36}\.commit$/.test(file)) && ownsLock()) {
+    sleep(Number(env.HOOK_COMMIT_DELAY_MS));
   }
   if (env.HOOK_STOP_RENDER && name === 'renameSync' && args[1] === path.join(STATE, 'sketch.md')
     && path.basename(process.argv[1]) === 'tower-crane.js' && process.argv.includes('spawn') && first('render')) stop(env.HOOK_STOP_RENDER);
