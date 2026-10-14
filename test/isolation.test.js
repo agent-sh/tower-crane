@@ -610,10 +610,11 @@ test('a spawn sweeps placeholders an earlier agent left, and keeps the worktree\
   }
   fs.writeFileSync(path.join(wt, '.profile'), '');
   fs.mkdirSync(path.join(wt, '.claude', 'agents'));
+  fs.mkdirSync(path.join(wt, '.claude', '.cc-writes'));
   fs.mkdirSync(path.join(wt, '.vscode'));
   fs.writeFileSync(path.join(wt, '.vscode', 'settings.json'), '{}\n');
   spawn(h, u, 'small');
-  for (const name of [...stale, '.claude/agents']) assert.equal(fs.existsSync(path.join(wt, name)), false, `stale ${name} is swept`);
+  for (const name of [...stale, '.claude/agents', '.claude/.cc-writes']) assert.equal(fs.existsSync(path.join(wt, name)), false, `stale ${name} is swept`);
   for (const name of ['.zshrc', '.profile', '.vscode/settings.json', '.claude/settings.json']) assert.equal(fs.existsSync(path.join(wt, name)), true, `${name} stays`);
   const exclude = fs.readFileSync(path.join(h.state, 'homes', fs.readdirSync(path.join(h.state, 'homes')).find((n) => n.startsWith('small-')), 'sandbox-git-exclude'), 'utf8').split('\n');
   assert.ok(exclude.includes('/.bashrc'), 'a swept name is excluded again');

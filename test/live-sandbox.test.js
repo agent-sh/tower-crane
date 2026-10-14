@@ -328,10 +328,14 @@ for (const harness of ['claude', 'codex']) {
     assert.equal(seen.go, true, 'the files were made while the command ran');
     assert.equal(seen.worktree, 'READABLE');
     for (const k of Object.keys(targets)) assert.match(seen[k], /^ERR /, `${harness} small: ${targets[k]}, made after the sandbox started, is not readable`);
-    // The placeholders claude bound in the read-only worktree are gone again.
+    // The placeholders claude bound in the read-only worktree are gone again,
+    // and so is the .claude directory they needed.
     const trees = path.join(h.base, 'repo-worktrees');
     for (const name of fs.readdirSync(trees).filter((n) => n !== '.git-admin')) {
-      assert.equal(h.git(['-C', path.join(trees, name), 'status', '--porcelain', '--untracked-files=all']), '', `${name} is left clean`);
+      const tree = path.join(trees, name);
+      assert.equal(h.git(['-C', tree, 'status', '--porcelain', '--untracked-files=all']), '', `${name} is left clean`);
+      const left = fs.readdirSync(tree).filter((n) => n.startsWith('.') && n !== '.git' && !fs.existsSync(path.join(h.repo, n)));
+      assert.deepEqual(left, [], `${name} keeps no placeholder directory: ${JSON.stringify(left.map((n) => [n, fs.statSync(path.join(tree, n)).isDirectory() ? fs.readdirSync(path.join(tree, n), { recursive: true }) : 'file']))}`);
     }
   });
 }
