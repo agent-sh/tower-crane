@@ -196,6 +196,13 @@ function before(name, args) {
   if (env.HOOK_FAIL_EVENT_SYNC && name === 'fsyncSync' && path.resolve(String(target)) === path.join(STATE, 'events.jsonl') && first('event-sync')) {
     throw Object.assign(new Error('EIO: i/o error, fsync'), { code: 'EIO' });
   }
+  // HOOK_SUPERVISOR_LOCK_AFTER=FILE: a supervisor takes no state lock until
+  // FILE exists, so a test can let another process hold the lock first.
+  if (env.HOOK_SUPERVISOR_LOCK_AFTER && name === 'mkdirSync' && inState(target) && /^lock\.\d+\.[0-9a-f]+\.new$/.test(path.basename(String(target)))
+    && path.basename(process.argv[1] || '') === 'spawn-monitor.js') {
+    const end = Date.now() + 300000;
+    while (!real.existsSync(env.HOOK_SUPERVISOR_LOCK_AFTER) && Date.now() < end) sleep(10);
+  }
   // HOOK_JITTER_MS=MS: a random pause of up to MS before each call on the state.
   if (env.HOOK_JITTER_MS && (inState(target) || inState(args[1]))) sleep(Math.floor(Math.random() * Number(env.HOOK_JITTER_MS)));
   // State commits precede board replacement; expose that interval to readers.

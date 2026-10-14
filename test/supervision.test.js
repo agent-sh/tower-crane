@@ -1060,7 +1060,9 @@ if (!fs.existsSync(file)) {
 test('a worker waits for its lease while the dispatch CLI is blocked rendering, then its output is durable', { skip: GATE_SKIP }, async (t) => {
   const h = setup(t, { error: 'outage', claim: false });
   const paused = path.join(h.base, 'render-paused');
-  const completed = h.runAsync(['spawn', '--task', 'T1', '--wait', '--json'], { hooks: { HOOK_STOP_RENDER: paused } });
+  // The dispatch releases the lock between its spawn commit and its render's
+  // publish; the supervisor's claim waits until the render holds it again.
+  const completed = h.runAsync(['spawn', '--task', 'T1', '--wait', '--json'], { hooks: { HOOK_STOP_RENDER: paused, HOOK_SUPERVISOR_LOCK_AFTER: paused } });
   let result;
   try {
     await waitOnRepo(h, () => fs.existsSync(paused), 'dispatch did not pause after committing its spawn');
