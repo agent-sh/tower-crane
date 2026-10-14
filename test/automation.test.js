@@ -3889,3 +3889,24 @@ poll();
   assert.equal(passes.at(-1).detail.blocked, null);
   assert.deepEqual(passes.at(-1).detail.skipped, []);
 });
+
+test('a submit the wait host reads before its files are renamed still runs the gates', async (t) => {
+  const h = setup(t);
+  h.ok(['claim', 'T1', '--agent', 'worker']);
+  const started = path.join(h.base, 'wait-started');
+  const waiter = h.runAsync(['wait', '--types', 'worker-message', '--timeout', '300', '--agent', 'orchestrator'],
+    { hooks: { HOOK_WATCH_READY: started } });
+  t.after(() => waiter);
+  await waitFor(started);
+  // The worker's commit pauses after its events reach the log, before
+  // tasks.json moves to submitted, which the host reads in that window.
+  h.ok(['submit', 'T1', '--sha', h.sha, '--pr', '7', '--agent', 'worker'], { hooks: { HOOK_COMMIT_DELAY_MS: '2000' } });
+  const submit = h.logs().findLast((e) => e.cmd === 'submit');
+  // The host handles the submit before it wakes on a message logged after it.
+  h.ok(['msg', '--to', 'orchestrator', '--task', 'T1', 'done', '--agent', 'w-1']);
+  assert.equal((await waiter).code, 0);
+  const receipts = h.logs().filter((e) => e.cmd === 'automation' && e.detail.source === submit.id);
+  assert.equal(receipts.at(-1)?.detail.phase, 'done', 'the host reacted to the submit');
+  const tests = h.readState('tasks.json').tasks[0].evidence.filter((e) => e.type === 'tests');
+  assert.equal(tests.length, 1, 'and ran its gates');
+});

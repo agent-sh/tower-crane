@@ -246,6 +246,13 @@ function after(name, args, rawArgs = args) {
     process.kill(process.pid, 'SIGKILL');
     sleep(5000);
   }
+  // HOOK_COMMIT_DELAY_MS=MS: a lock holder pauses MS after its events reach
+  // the log while a staged commit file waits to be renamed into place, so
+  // readers without the lock meet the log ahead of the files.
+  if (env.HOOK_COMMIT_DELAY_MS && name === 'fsyncSync' && path.resolve(String(target)) === path.join(STATE, 'events.jsonl')
+    && real.readdirSync(STATE).some((file) => /\.json\.E[0-9a-f-]{36}\.commit$/.test(file)) && ownsLock()) {
+    sleep(Number(env.HOOK_COMMIT_DELAY_MS));
+  }
   if (env.HOOK_STOP_RENDER && name === 'renameSync' && args[1] === path.join(STATE, 'sketch.md')
     && path.basename(process.argv[1]) === 'tower-crane.js' && process.argv.includes('spawn') && first('render')) stop(env.HOOK_STOP_RENDER);
   // HOOK_STOP_STARTED=FILE stops the dispatch after it reads its supervisor's startup receipt,

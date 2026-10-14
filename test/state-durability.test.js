@@ -7,6 +7,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { cachedFixture } = require('./helpers');
 const T = require('../lib/tasks');
+const { waitOnRepo } = require('./signals');
 
 function setup(t) {
   return cachedFixture(t, 'durability', (h) => {
@@ -216,5 +217,67 @@ test('a torn last line cut before its own id is cut off, even when its detail na
   assert.ok(!logged(h).some((e) => e.id === first.id), 'the torn commit left no event');
   assert.equal(fs.readFileSync(log, 'utf8').includes(second.detail.ref.id), false, 'the torn line is gone');
   assert.deepEqual(noted(h, 'torn note'), { task: false, event: false });
+  assertConsistent(h);
+});
+
+// What a reader without the lock gets: the notes in tasks.json and the note
+// events in the log, read as loadState reads them.
+const S = require('../lib/state');
+const unlocked = (h) => {
+  const st = S.loadState(h.state, { fresh: true });
+  return { notes: st.tasks.tasks[0].notes.map((n) => n.text), logged: st.events.filter((e) => e.cmd === 'task note').map((e) => e.detail.text) };
+};
+
+test('a reader without the lock sees a commit whose holder died after its commit point, before recovery renames it', (t) => {
+  const h = setup(t);
+  crash(h, 'landed', 'crashed note');
+  assert.ok(fs.readdirSync(h.state).some((name) => /^tasks\.json\.E.*\.commit$/.test(name)), 'the staged tasks.json waits for the next lock holder');
+  assert.deepEqual(unlocked(h), { notes: ['crashed note'], logged: ['crashed note'] });
+  assert.deepEqual(h.json(['task', 'show', 'T1']).notes.map((n) => n.text), ['crashed note']);
+  h.ok(['task', 'note', 'T1', 'next note']);
+  assert.deepEqual(unlocked(h).notes, ['crashed note', 'next note']);
+  assertConsistent(h);
+});
+
+test('a reader without the lock never sees staged files whose commit point was not reached', (t) => {
+  const h = setup(t);
+  crash(h, 'staged', 'unlogged note');
+  assert.ok(fs.readdirSync(h.state).some((name) => /^tasks\.json\.E.*\.commit$/.test(name)), 'the dead writer left its staged copy');
+  assert.deepEqual(unlocked(h), { notes: [], logged: [] });
+  // A torn append: the commit's first event is a whole line, its last lacks the newline.
+  const log = path.join(h.state, 'events.jsonl');
+  const fd = fs.openSync(log, 'a');
+  const event = (text) => ({ at: new Date().toISOString(), agent: 'owner', cmd: 'task note', task: 'T1', detail: { text }, id: `E${crypto.randomUUID()}`, type: 'task note', to: 'orchestrator' });
+  const first = event('torn first');
+  const second = event('torn last');
+  const doc = h.readState('tasks.json');
+  doc.tasks[0].notes.push({ at: first.at, agent: 'owner', text: 'torn first' }, { at: second.at, agent: 'owner', text: 'torn last' });
+  doc.last_event = second.id;
+  fs.writeFileSync(path.join(h.state, `tasks.json.${second.id}.commit`), JSON.stringify(doc, null, 2) + '\n');
+  fs.writeSync(fd, `${JSON.stringify(first)}\n${JSON.stringify(second)}`);
+  fs.closeSync(fd);
+  assert.deepEqual(unlocked(h).notes, [], 'a last line without its newline is no commit point');
+  // An older tool appended after a commit that reached its log: recovery
+  // deletes those staged files, so readers never show them either.
+  fs.appendFileSync(log, `\n${JSON.stringify(foreign('from an older tool'))}\n`);
+  assert.deepEqual(unlocked(h).notes, []);
+});
+
+test('a reader without the lock sees each commit it has the events of while the writer still renames', async (t) => {
+  const h = setup(t);
+  const writer = h.runAsync(['task', 'note', 'T1', 'live note'], { hooks: { HOOK_COMMIT_DELAY_MS: '3000' } });
+  let seen = null;
+  let staged = false;
+  await waitOnRepo(h, () => {
+    const read = unlocked(h);
+    if (!read.logged.includes('live note')) return false;
+    // Still staged after the read: tasks.json was the old file throughout it.
+    staged = fs.readdirSync(h.state).some((name) => /^tasks\.json\.E.*\.commit$/.test(name));
+    seen = read;
+    return true;
+  }, 'the writer logs its note');
+  assert.ok(staged, 'the reader read inside the window');
+  assert.deepEqual(seen, { notes: ['live note'], logged: ['live note'] });
+  assert.equal((await writer).code, 0);
   assertConsistent(h);
 });
