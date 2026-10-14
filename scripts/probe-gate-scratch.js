@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const cp = require('node:child_process');
+const { suiteTime, reportSuiteTime, DEADLINE_MIN } = require('./suite-time');
 
 const ROOT = path.resolve(__dirname, '..');
 const BIN = path.join(ROOT, 'bin', 'tower-crane.js');
@@ -11,7 +12,7 @@ const BIN = path.join(ROOT, 'bin', 'tower-crane.js');
 // The gate bounds each suite run. A failing head runs the suite again on the
 // base for the failing names, so the probe outlasts two runs and still gets
 // the gate's report naming the failures.
-const TESTS_MIN = 45;
+const TESTS_MIN = DEADLINE_MIN;
 
 function contents(root) {
   return fs.readdirSync(root, { recursive: true }).sort();
@@ -64,7 +65,11 @@ function probe({ root = ROOT, cache, command, environment = process.env } = {}) 
     call(['submit', id, '--sha', result.sha], 'scratch-proof-worker');
     result.outer_before = contents(outer);
     result.gate_root_before = contents(gates);
+    const started = performance.now();
     const checked = call(['check', 'tests', id]);
+    // A passing head runs the suite once, so this is its wall time; a failing
+    // head adds the base rerun, and the proof fails anyway.
+    result.suite_time = suiteTime(performance.now() - started);
     result.gate = checked.data;
     result.exit = checked.status;
     result.stderr = checked.stderr;
@@ -95,6 +100,7 @@ if (require.main === module) {
   fs.writeFileSync(file, JSON.stringify(result, null, 2) + '\n');
   console.log(JSON.stringify(result, null, 2));
   console.log(`Gate scratch proof: ${file}`);
+  if (result.suite_time) reportSuiteTime('Gate scratch proof', result.suite_time);
   if (!result.ok) process.exitCode = 1;
 }
 
