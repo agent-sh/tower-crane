@@ -458,6 +458,38 @@ test('a marker from another pid namespace is judged by its holder, not by what e
   assert.equal(fs.existsSync(live), true);
 });
 
+// A process whose pid namespace link cannot be read, such as a root
+// container's, can have the innermost pid of a dead holder's marker. Only the
+// exact start keeps the marker for it when the marker has no offset to place
+// one by: one from 0.1.0, or from a holder that could not read its offset.
+test('a marker without an offset is not kept by an unreadable process with its pid', { skip: (process.platform !== 'linux' || process.geteuid() === 0) && 'needs a namespace link this user cannot read', timeout: 300000 }, (t) => {
+  const h = makeRepo(t);
+  h.init();
+  const commonDir = path.join(h.repo, '.git');
+  const dir = path.join(commonDir, REAP_DIR);
+  const table = fs.mkdtempSync(path.join(h.base, 'proc-'));
+  const other = path.join(table, '5555');
+  fs.mkdirSync(path.join(other, 'ns'), { recursive: true });
+  fs.writeFileSync(path.join(other, 'status'), 'Name:\tcontainer\nState:\tS (sleeping)\nNSpid:\t5555\t924\n');
+  fs.writeFileSync(path.join(other, 'stat'), `5555 (container) ${['S', ...Array(18).fill('0'), '777'].join(' ')} 0 0\n`);
+  fs.chmodSync(path.join(other, 'ns'), 0);
+  // Readable again before the repository's own cleanup removes the table.
+  try {
+    const env = { HOOK_PIDNS: 'pid:[4026511111]', TOWER_CRANE_SANDBOX: '0', TOWER_CRANE_PROC: table };
+    for (const offset of [{}, { boottime_offset_ns: null }, { boottime_offset_ns: '0' }]) {
+      plantMarker(commonDir, { pid: 924, pidns: 'pid:[4026599999]', start_ticks: '1', ...offset });
+      const r = judge(h, commonDir, env);
+      assert.doesNotMatch(r.stderr, /another cleanup holds/, JSON.stringify(offset));
+      assert.equal(fs.existsSync(dir), false, JSON.stringify(offset));
+    }
+    // The exact start still keeps it.
+    plantMarker(commonDir, { pid: 924, pidns: 'pid:[4026599999]', start_ticks: '777' });
+    assert.match(judge(h, commonDir, env).stderr, /another cleanup holds/);
+  } finally {
+    fs.chmodSync(path.join(other, 'ns'), 0o755);
+  }
+});
+
 const UNSHARE = process.platform === 'linux' && cp.spawnSync('unshare', ['-Urpf', '--mount-proc', 'true'], { stdio: 'ignore' }).status === 0;
 
 // The holder sits in a real pid namespace of its own, under a host name of its
