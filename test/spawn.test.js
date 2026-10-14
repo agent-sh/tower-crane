@@ -10,7 +10,7 @@ const net = require('node:net');
 const cp = require('node:child_process');
 const { once } = require('node:events');
 const { pathToFileURL } = require('node:url');
-const { cachedFixture, pinRung, real, BIN, ROOT, PTY_AVAILABLE, makeTaskRepo } = require('./helpers');
+const { cachedFixture, pinRung, real, BIN, ROOT, HOOKS, PTY_AVAILABLE, makeTaskRepo } = require('./helpers');
 const stack = require('./stack-fixture');
 const A = require('../lib/agents');
 const S = require('../lib/state');
@@ -837,6 +837,31 @@ test('spawn in the background detaches, logs output and numbers agents', async (
   const noBrief = h.run(['spawn', '--role', 'small', '--task', 'T2', '--dry-run']);
   assert.equal(noBrief.code, 1);
   assert.match(noBrief.stderr, /T2 has no brief; write one with tower-crane brief set T2/);
+});
+
+// An agent's git runs through its shim, which cleans up placeholders in the
+// git directory first; stopping the agent kills its process group, shim
+// included. A supervisor runs its own git through the agent's shims before it
+// reports its start, so a directory the killed shim left held made every
+// later supervisor miss its startup window.
+test('a git shim killed while it cleans up placeholders does not keep the next supervisor from starting', (t) => {
+  const h = setup(t);
+  const policy = path.join(h.base, 'policy.json');
+  fs.writeFileSync(policy, JSON.stringify({ gitPush: 'branch', branch: 'task-T1', repo: null, gh: [] }));
+  const shimDir = path.join(h.base, 'shim');
+  fs.mkdirSync(shimDir);
+  // An empty process table lets the shim take the directory where there is no /proc.
+  const table = fs.mkdtempSync(path.join(h.base, 'proc-'));
+  commandRung(h, 'small', [process.execPath, '-e', 'process.exit(0)', '{prompt}']);
+  // On the host, and inside an agent's command sandbox, which has a pid namespace of its own.
+  for (const [attempt, hooks] of [[1, {}], [2, { HOOK_PIDNS: 'pid:[4026599999]' }]]) {
+    cp.spawnSync(process.execPath, ['--require', HOOKS, path.join(ROOT, 'lib', 'shim.js'), policy, shimDir, 'git', 'status'],
+      { cwd: h.repo, env: { ...h.env, TOWER_CRANE_PROC: table, HOOK_STATE: h.state, HOOK_DIE_REAP: '1', ...hooks } });
+    assert.equal(fs.existsSync(path.join(h.repo, '.git', 'tower-crane-reap')), true, 'the killed shim held the directory');
+    const started = h.run(['spawn', '--role', 'small', '--task', 'T1', '--wait', '--json']);
+    assert.equal(started.code, 0, started.stderr);
+    assert.equal(JSON.parse(started.stdout).agent, `small-T1-${attempt}`);
+  }
 });
 
 // Everything a spawn could leave behind: state files, events, logs, the
