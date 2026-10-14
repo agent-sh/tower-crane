@@ -27,14 +27,14 @@ Main pushes, daily and manual CI runs run the complete model swap probe once on 
 | Rung | Does | Good fit |
 |---|---|---|
 | `orchestrator` | plans, writes briefs, dispatches, runs gates, merges | the strongest model you have, in the harness you talk to |
-| `easy` | `S` tasks by default: mechanical, local changes | a fast, cheap coding model |
-| `medium` | `M` tasks by default | a strong coding model |
-| `hard` | `L` tasks by default: cross-cutting or risky changes | the strongest coding model |
+| `easy` | `S` `docs` tasks by default: mechanical, local changes | a fast, cheap coding model |
+| `medium` | every other task that is not `L` or research, by default | a strong coding model |
+| `hard` | `L` tasks other than research by default: cross-cutting or risky changes | the strongest coding model |
 | `research` | tasks of kind `research` by default: open questions, measurements | the strongest model at high effort |
 | `review` | fallback for clean-context review | used when no tier rung at the needed level can run |
 | `small` | mechanical checks, such as confirming lines the cleanup tool flagged | a small fast model |
 
-`task add` and `plan import` pick a tier from kind and size (`research` for kind `research`, else `S` easy, `M` medium, `L` hard); `--tier` overrides it, and only `--tier` changes it later.
+`task add` and `plan import` pick a tier from kind and size (`research` for kind `research`, else `L` hard, an `S` `docs` task easy, anything else medium); `--tier` overrides it, and only `--tier` changes it later.
 
 ```bash
 tower-crane ladder harness codex                                  # every rung without its own harness

@@ -465,12 +465,23 @@ test('opencode worker headless Bash allows task commands, shim paths, tests and 
   assert.ok(!Object.values(f.report().permission.bash).includes('ask'));
 });
 
-test('opencode allows Tower Crane repository scripts only in a project that has them', { skip: NO_STUBS }, (t) => {
+test('opencode allows Tower Crane repository scripts only when the main checkout has them', { skip: NO_STUBS }, (t) => {
   const scripts = ['scripts/check-shared-files.js', 'scripts/cli-docs.js'];
   const probes = scripts.map((script) => ['bash', `node ${script} --check`]);
   const bare = setup(t);
   spawn(bare, { STUB_PROBES: JSON.stringify(probes) });
   assert.deepEqual(bare.report().probes, ['deny', 'deny'], 'a user project has no such scripts');
+  // A worker can plant the scripts in its own worktree; only the main checkout counts.
+  const worktree = bare.report().cwd;
+  assert.notEqual(fs.realpathSync(worktree), fs.realpathSync(bare.h.repo));
+  for (const script of scripts) {
+    fs.mkdirSync(path.join(worktree, path.dirname(script)), { recursive: true });
+    fs.writeFileSync(path.join(worktree, script), '\n');
+  }
+  releaseStub(bare);
+  spawn(bare, { STUB_PROBES: JSON.stringify(probes) });
+  assert.equal(fs.realpathSync(bare.report().cwd), fs.realpathSync(worktree));
+  assert.deepEqual(bare.report().probes, ['deny', 'deny'], 'scripts planted in the worktree grant nothing');
 
   const own = setup(t);
   for (const script of scripts) {
