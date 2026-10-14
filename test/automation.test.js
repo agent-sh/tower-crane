@@ -14,6 +14,7 @@ const { readPublished } = require('./atomic-file');
 
 const ghStub = path.join(__dirname, 'fixtures', 'automation-gh.js');
 const harness = path.join(__dirname, 'fixtures', 'automation-harness.js');
+const MERGEABILITY_PAUSE = path.join(__dirname, 'fixtures', 'mergeability-pause.js');
 
 function setup(t, { kind = 'code', ci = 'success', repo } = {}) {
   const h = repo || makeRepo(t);
@@ -29,7 +30,9 @@ function setup(t, { kind = 'code', ci = 'success', repo } = {}) {
   const tools = path.join(h.base, 'tools');
   fs.writeFileSync(path.join(tools, 'gh'), `#!/usr/bin/env node\nrequire(${JSON.stringify(ghStub)});\n`);
   fs.chmodSync(path.join(tools, 'gh'), 0o755);
-  delete h.env.NODE_OPTIONS;
+  // The offline GitHub settles at once; automation keeps its UNKNOWN re-reads without their pauses.
+  h.env.NODE_OPTIONS = `--require=${JSON.stringify(MERGEABILITY_PAUSE)}`;
+  h.env.HOOK_MERGEABILITY_PAUSE_MS = '10';
   if (process.platform === 'win32') {
     fs.writeFileSync(path.join(tools, 'gh.cmd'), `@"${process.execPath}" "${ghStub}" %*\r\n`);
     const preload = path.join(h.base, 'offline-gh.js');
@@ -55,7 +58,7 @@ cp.spawnSync=(cmd,args,opts)=>{
   }
   return run(cmd,args,opts);
 };\n`);
-    h.env.NODE_OPTIONS = `--require=${JSON.stringify(preload)}`;
+    h.env.NODE_OPTIONS += ` --require=${JSON.stringify(preload)}`;
   }
   h.env.AUTOMATION_GITHUB = path.join(h.base, 'github.json');
   h.github = () => JSON.parse(fs.readFileSync(h.env.AUTOMATION_GITHUB, 'utf8'));

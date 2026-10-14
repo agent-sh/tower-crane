@@ -452,18 +452,35 @@ test('commits the task inherited from origin/<base> are not its change', async (
   }
 });
 
+// A pid that is gone or a zombie; Linux and macOS reap orphans promptly.
+function running(pid) {
+  try { killPid(pid, 0); } catch (e) { if (e.code === 'ESRCH') return false; throw e; }
+  try { return !/^\S+ \(.*\) [ZX] /.test(fs.readFileSync(`/proc/${pid}/stat`, 'utf8')); } catch { return true; }
+}
+
 test('a timeout stops the command and everything it started', { skip: process.platform === 'win32' }, async () => {
   const sha = task({ 'lib/add.js': FIX, 'test/add.test.js': ADD_TEST });
   const marker = path.join(tmp, 'late-write');
+  const pidFile = path.join(tmp, 'late-writer.pid');
   // `; true` keeps the shell alive, so the writer is a grandchild, not the shell itself.
   // The writer would finish long after the gate's own setup, which under host load can take seconds.
-  const cmd = `${NODE} -e "setTimeout(() => require('fs').writeFileSync(process.argv[1], 'x'), 10000)" ${quote(marker)}; true`; // wait-allow: verify timed-out commands cannot write a delayed marker
+  // It publishes its pid first, so the test can see it gone instead of waiting out its timer.
+  const writer = `const fs = require('fs'); fs.writeFileSync(process.argv[2] + '.new', String(process.pid)); fs.renameSync(process.argv[2] + '.new', process.argv[2]);
+setTimeout(() => fs.writeFileSync(process.argv[1], 'x'), 10000);`; // wait-allow: verify timed-out commands cannot write a delayed marker
+  const cmd = `${NODE} -e ${quote(writer)} ${quote(marker)} ${quote(pidFile)}; true`;
   const started = Date.now();
   const r = await gate.run(ctx(sha, { args: { cmd, timeout: 0.01 } }));
   assert.equal(r.ok, false);
   assert.match(r.summary, /timed out/);
   assert.ok(Date.now() - started < 8000, 'the gate waited for the command instead of stopping it'); // wait-allow: verify the gate terminates the command before its delayed marker write
-  await new Promise((resolve) => setTimeout(resolve, 11000 - (Date.now() - started))); // wait-allow: verify timed-out commands cannot write a delayed marker
+  if (fs.existsSync(pidFile)) {
+    // A writer that is gone cannot write; one that survived writes before it exits.
+    const pid = Number(fs.readFileSync(pidFile, 'utf8'));
+    await waitUntil(() => !running(pid), { what: 'the late writer to exit' });
+  } else {
+    // Under load the writer may not have published its pid; wait out its timer instead.
+    await new Promise((resolve) => setTimeout(resolve, 11000 - (Date.now() - started))); // wait-allow: verify timed-out commands cannot write a delayed marker
+  }
   assert.equal(fs.existsSync(marker), false, 'a process the command started outlived the timeout');
   assertCleanedUp();
 });
