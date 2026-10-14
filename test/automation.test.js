@@ -3008,13 +3008,41 @@ for (const trigger of ['exit', 'release --dead', 'merge']) {
     assert.ok(results.every((r) => r.code === 0 && JSON.parse(r.stdout).task === 'T3'), JSON.stringify(results));
     await waitFor(h.marker('T3'), { what: `the task unblocking T4 takes the free slot: ${JSON.stringify(results)}` });
     const spawns = h.logs().filter((e) => e.cmd === 'spawn' && e.detail.role === 'worker');
-    assert.deepEqual(spawns.map((e) => e.task), trigger === 'merge' ? ['T3'] : ['T1', 'T3']);
+    assert.deepEqual(spawns.map((e) => e.task), trigger === 'merge' ? ['T3'] : ['T1', 'T3'],
+      `DIAG ${JSON.stringify(h.logs().map((e) => ({ at: e.at, cmd: e.cmd, task: e.task, agent: e.agent, pid: e.pid, d: e.detail && { role: e.detail.role, agent: e.detail.agent, pid: e.detail.pid, reserved: e.detail.reserved, reason: e.detail.reason, attempt: e.detail.attempt, results: e.detail.results } })))}`);
     const st = require('../lib/state').loadState(h.state);
     assert.equal(require('../lib/tasks').workerHolders(st, Date.now()).length, 1);
     h.consume();
     assert.equal(h.logs().filter((e) => e.cmd === 'spawn' && e.detail.role === 'worker').length, spawns.length);
   });
 }
+
+test('a dispatch waits for another that is still preparing the first ready task instead of taking its slot', async (t) => {
+  const h = refillFixture(t);
+  h.json(['spawn', '--task', 'T1', '--agent', 'orchestrator']);
+  await waitFor(h.marker('T1'), { what: 'first worker claims the slot' });
+  fs.writeFileSync(`${h.marker('T1')}.go`, '');
+  await waitFor(`${h.marker('T1')}.exited`);
+  h.run(['wait', '--after', '0', '--observe', '--types', 'worker-exited', '--timeout', '300', '--agent', 'orchestrator']);
+  h.ok(['release', '--dead', '--agent', 'orchestrator']);
+  // The first dispatch stops while T3's new worktree is still registered as
+  // initializing, which refuses T3 to any other dispatch.
+  const preparing = path.join(h.base, 'preparing-T3');
+  const first = h.runAsync(['spawn', '--ready', '--agent', 'orchestrator'], { hooks: { HOOK_STOP_INITIALIZING: preparing } });
+  await waitFor(preparing, { what: 'the first dispatch prepares T3' });
+  const waiting = path.join(h.base, 'second-waiting');
+  let secondDone = false;
+  const second = h.runAsync(['spawn', '--ready', '--agent', 'orchestrator'], { hooks: { HOOK_DISPATCH_WAITING: waiting } });
+  second.then(() => { secondDone = true; });
+  await waitUntil(() => fs.existsSync(waiting) || secondDone, { paths: [h.base], what: 'the second dispatch neither waited nor finished' });
+  fs.writeFileSync(`${preparing}.go`, '');
+  const [firstResult, secondResult] = await Promise.all([first, second]);
+  assert.equal(firstResult.code, 0, firstResult.stderr + firstResult.stdout);
+  await waitFor(h.marker('T3'), { what: 'T3 takes the free slot' });
+  const spawns = h.logs().filter((e) => e.cmd === 'spawn' && e.detail.role === 'worker');
+  assert.deepEqual(spawns.map((e) => e.task), ['T1', 'T3'], secondResult.stdout + secondResult.stderr);
+  assert.match(secondResult.stdout, /^T1: the workers limit is reached .*holders: T3 /m);
+});
 
 function startupContexts(h, withRules) {
   const startups = h.logs().filter((e) => e.cmd === 'startup');
@@ -3898,3 +3926,4 @@ poll();
   assert.equal(passes.at(-1).detail.blocked, null);
   assert.deepEqual(passes.at(-1).detail.skipped, []);
 });
+

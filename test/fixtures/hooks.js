@@ -176,6 +176,17 @@ function first(key) {
   return true;
 }
 
+// Whether git's registration of some worktree under commonDir still carries
+// the lock reason worktree creation sets until it is complete.
+function initializing(commonDir) {
+  let names;
+  try { names = real.readdirSync(path.join(commonDir, 'worktrees')); } catch { return false; }
+  return names.some((name) => {
+    try { return real.readFileSync(path.join(commonDir, 'worktrees', name, 'locked'), 'utf8').startsWith('tower-crane: creating worktree'); }
+    catch { return false; }
+  });
+}
+
 function before(name, args) {
   const target = args[0];
   // Stdin is read with readStdin (readSync) or a bare readFileSync(0).
@@ -195,6 +206,18 @@ function before(name, args) {
   // after its lines are written, as a failing disk reports it.
   if (env.HOOK_FAIL_EVENT_SYNC && name === 'fsyncSync' && path.resolve(String(target)) === path.join(STATE, 'events.jsonl') && first('event-sync')) {
     throw Object.assign(new Error('EIO: i/o error, fsync'), { code: 'EIO' });
+  }
+  // HOOK_STOP_INITIALIZING=SIGNAL: stop before taking the worktree lock while
+  // a task worktree this process added is still registered as initializing.
+  if (env.HOOK_STOP_INITIALIZING && name === 'mkdirSync' && typeof target === 'string'
+    && path.basename(target) === 'tower-crane-worktree.lock' && initializing(path.dirname(target)) && first('initializing')) {
+    stop(env.HOOK_STOP_INITIALIZING);
+  }
+  // HOOK_DISPATCH_WAITING=FILE: created once this process looks inside a
+  // dispatch lock another holds, which only a waiter does.
+  if (env.HOOK_DISPATCH_WAITING && ['readdirSync', 'openSync', 'readFileSync'].includes(name)
+    && under(path.join(STATE, 'dispatch', 'lock'), target) && first('dispatch-waiting')) {
+    real.writeFileSync(env.HOOK_DISPATCH_WAITING, String(process.pid));
   }
   // HOOK_JITTER_MS=MS: a random pause of up to MS before each call on the state.
   if (env.HOOK_JITTER_MS && (inState(target) || inState(args[1]))) sleep(Math.floor(Math.random() * Number(env.HOOK_JITTER_MS)));
