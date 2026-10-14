@@ -951,6 +951,155 @@ test('a stale cache lock is broken once, so two waiters never hold the cache tog
   assert.deepEqual(fs.readdirSync(root), [], 'the lock is gone once both released');
 });
 
+// The shim as the agent runs it, with its process, so a test can kill it.
+function shimChild(f, args) {
+  const cp = require('node:child_process');
+  const child = cp.spawn(process.execPath, [path.join(ROOT, 'lib', 'shim.js'), path.join(f.h.base, 'shim', 'policy.json'), path.join(f.h.base, 'shim', 'bin'), ...args],
+    { cwd: f.wt.path, env: { ...f.h.env, TOWER_CRANE_BROKER: f.job.broker, GIT_TERMINAL_PROMPT: '0' }, stdio: ['ignore', 'pipe', 'pipe'] });
+  let stderr = '';
+  child.stderr.setEncoding('utf8').on('data', (d) => { stderr += d; });
+  child.stdout.resume();
+  const exited = new Promise((resolve) => child.on('close', (code) => resolve(code)));
+  return { child, exited, stderr: () => stderr };
+}
+
+const waitFor = async (check, ms) => {
+  const until = Date.now() + ms;
+  while (Date.now() < until) {
+    if (check()) return true;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  return check();
+};
+
+const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+
+// index-pack stops at the first object fsck refuses, long before a large
+// pack is read. The agent's push must end with the broker's answer, not wait
+// on a pack-objects blocked on a full pipe, and the broker keeps nothing.
+test('a pack the broker refuses partway ends the agent\'s push at once and leaves nothing in the cache', async (t) => {
+  const f = await pushFixture(t);
+  const base = f.h.git(['rev-parse', 'HEAD'], f.wt.path);
+  f.commit('seed.txt', 'seed\n');
+  assert.equal((await f.raw({ push: { sha: f.h.git(['rev-parse', 'HEAD'], f.wt.path) } })).code, 0);
+  f.h.git(['reset', '-q', '--hard', base], f.wt.path);
+  fs.writeFileSync(path.join(f.wt.path, 'big.bin'), require('node:crypto').randomBytes(8 << 20));
+  f.h.git(['add', 'big.bin'], f.wt.path);
+  const tree = f.h.git(['write-tree'], f.wt.path);
+  const bad = require('node:child_process').execFileSync('git', ['hash-object', '-t', 'commit', '--literally', '-w', '--stdin'],
+    { cwd: f.wt.path, encoding: 'utf8', input: `tree ${tree}\nparent ${base}\nauthor A <a@example.invalid> 1700000000 +99999\ncommitter A <a@example.invalid> 1700000000 +99999\n\nbad zone\n` }).trim();
+  f.h.git(['reset', '-q', '--hard', bad], f.wt.path);
+  const run = shimChild(f, ['git', 'push']);
+  const timer = setTimeout(() => run.child.kill('SIGKILL'), 20000);
+  const code = await run.exited;
+  clearTimeout(timer);
+  assert.notEqual(code, null, `the shim ended by itself\n${run.stderr()}`);
+  assert.notEqual(code, 0, run.stderr());
+  assert.match(run.stderr(), /badTimezone|fsck/);
+  const cache = path.join(f.h.state, 'push', 'cache.git');
+  const left = fs.readdirSync(cache, { recursive: true }).filter((n) => /tmp_pack_|quarantine/.test(n));
+  assert.deepEqual(left, [], 'no temporary pack is left in the cache');
+  assert.deepEqual(fs.readdirSync(path.join(f.h.state, 'push')).filter((n) => n.startsWith('quarantine-')), []);
+  assert.notEqual(require('node:child_process').spawnSync('git', ['--git-dir', cache, 'cat-file', '-e', `${tree}^{tree}`]).status, 0,
+    'nothing of the refused pack is in the cache');
+});
+
+// A push refused after its pack was indexed leaves none of its objects; the
+// pack has a size cap and an idle limit, after which the cache lock is free.
+test('the agent\'s pack is quarantined until the checks pass, capped in size, and dropped when it stalls', async (t) => {
+  const f = await pushFixture(t);
+  const G = require('../lib/github-broker');
+  const saved = { ...G.LIMITS };
+  t.after(() => Object.assign(G.LIMITS, saved));
+  const cache = path.join(f.h.state, 'push', 'cache.git');
+  const inCache = (sha) => require('node:child_process').spawnSync('git', ['--git-dir', cache, 'cat-file', '-e', sha]).status === 0;
+  const workflow = f.commit('.github/workflows/ci.yml', 'on: push\n');
+  const refused = await f.raw({ push: { sha: workflow } });
+  assert.match(refused.stderr, /changes \.github\/workflows\/ci\.yml/);
+  assert.equal(inCache(workflow), false, 'a refused push leaves its objects out of the cache');
+  f.h.git(['reset', '-q', '--hard', 'HEAD~1'], f.wt.path);
+  // Over the size cap.
+  G.LIMITS.input = 4096;
+  fs.writeFileSync(path.join(f.wt.path, 'noise.bin'), require('node:crypto').randomBytes(64 << 10));
+  f.h.git(['add', 'noise.bin'], f.wt.path);
+  f.h.git(['commit', '-qm', 'noise'], f.wt.path);
+  const large = f.h.git(['rev-parse', 'HEAD'], f.wt.path);
+  const big = await f.raw({ push: { sha: large } });
+  assert.notEqual(big.code, 0);
+  assert.match(big.stderr, /maximum allowed size|exceeds/);
+  assert.equal(f.remoteRef(`refs/heads/${f.task.branch}`), null);
+  G.LIMITS.input = saved.input;
+  // A sender that stalls after the pack header.
+  G.LIMITS.idleMs = 300;
+  const stuck = new (require('node:stream').PassThrough)();
+  stuck.write(Buffer.from([0x50, 0x41, 0x43, 0x4b, 0, 0, 0, 2, 0, 0, 0, 1]));
+  const started = Date.now();
+  const stalled = await f.raw({ push: { sha: large } }, { pack: () => stuck });
+  assert.notEqual(stalled.code, 0);
+  assert.match(stalled.stderr, /stalled/);
+  assert.ok(Date.now() - started < 10000, 'the stalled pack ended the push');
+  G.LIMITS.idleMs = saved.idleMs;
+  const ok = await f.raw({ push: { sha: large } });
+  assert.equal(ok.code, 0, ok.stderr);
+  assert.equal(f.remoteRef(`refs/heads/${f.task.branch}`), large);
+});
+
+// An agent that hangs up is stopped: a gh that prints nothing, and a push
+// still waiting for the cache lock.
+test('the broker stops a silent gh and a waiting push when the agent hangs up', async (t) => {
+  const f = await pushFixture(t);
+  // The commit is in the cache whole, so the push needs no pack.
+  const sha = f.commit('a.txt', 'a\n');
+  assert.equal((await f.raw({ push: { sha } })).code, 0);
+  require('node:child_process').execFileSync('git', ['--git-dir', f.remote, 'update-ref', '-d', `refs/heads/${f.task.branch}`]);
+  const G = require('../lib/github-broker');
+  const release = await G.lockCache(path.join(f.h.state, 'push'), { stderr() {}, gone: () => false });
+  const push = shimChild(f, ['git', 'push']);
+  const waiting = await waitFor(() => /waits for another push/.test(push.stderr()), 10000);
+  push.child.kill('SIGKILL');
+  await push.exited;
+  assert.ok(waiting, push.stderr());
+  // A branch the remote gains now shows in the cache only if the push
+  // still ran its fetch once the lock was free.
+  require('node:child_process').execFileSync('git', ['--git-dir', f.remote, 'update-ref', 'refs/heads/later', sha]);
+  await new Promise((r) => setTimeout(r, 400));
+  release();
+  await new Promise((r) => setTimeout(r, 1500));
+  const cacheRefs = require('node:child_process').execFileSync('git', ['--git-dir', path.join(f.h.state, 'push', 'cache.git'), 'for-each-ref'], { encoding: 'utf8' });
+  assert.doesNotMatch(cacheRefs, /refs\/remotes\/origin\/later/, 'the push of an agent that hung up stopped waiting and never fetched');
+  assert.equal(f.remoteRef(`refs/heads/${f.task.branch}`), null, 'the push of an agent that hung up does not run');
+
+  f.h.ok(['project', 'set', '--repo', 'acme/demo', '--agent', 'owner']);
+  const bin = path.join(f.h.base, 'silent-bin');
+  const pidFile = path.join(f.h.base, 'gh.pid');
+  fs.mkdirSync(bin);
+  fs.writeFileSync(path.join(bin, 'gh'), `#!${process.execPath}\nrequire('node:fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));\nsetInterval(() => {}, 1000);\n`, { mode: 0o755 });
+  const savedPath = process.env.PATH;
+  process.env.PATH = `${bin}${path.delimiter}${savedPath}`;
+  t.after(() => { process.env.PATH = savedPath; });
+  const gh = shimChild(f, ['gh', 'pr', 'checks']);
+  assert.ok(await waitFor(() => fs.existsSync(pidFile), 10000), `gh started\n${gh.stderr()}`);
+  const pid = Number(fs.readFileSync(pidFile, 'utf8'));
+  gh.child.kill('SIGKILL');
+  await gh.exited;
+  assert.ok(await waitFor(() => !alive(pid), 3000), 'the broker stopped the gh of an agent that hung up');
+});
+
+// cache.lock was a plain file in earlier versions of the broker.
+test('a cache lock left as a file by a dead holder is removed, without stopping the event loop', (t) => {
+  const { base } = scratch(t);
+  const root = path.join(base, 'push');
+  fs.mkdirSync(root);
+  const cp = require('node:child_process');
+  const gone = cp.spawnSync(process.execPath, ['-e', 'console.log(process.pid)'], { encoding: 'utf8' });
+  fs.writeFileSync(path.join(root, 'cache.lock'), JSON.stringify({ pid: Number(gone.stdout), host: os.hostname() }));
+  const r = cp.spawnSync(process.execPath, ['-e',
+    `require(${JSON.stringify(path.join(ROOT, 'lib', 'github-broker.js'))}).lockCache(${JSON.stringify(root)}, { stderr() {} }).then((release) => { release(); console.log('held'); })`],
+  { encoding: 'utf8', timeout: 10000 });
+  assert.equal(r.status, 0, `lockCache took the lock: ${r.signal || r.stderr}`);
+  assert.match(r.stdout, /held/);
+});
+
 // GitHub runs local actions from the pushed tree: those under .github/actions
 // and any other directory a workflow names with uses: ./path.
 test('the broker refuses a push that changes a local action a workflow runs, and keeps git tracing out of the agent\'s output', async (t) => {
