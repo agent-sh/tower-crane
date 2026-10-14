@@ -307,7 +307,7 @@ function plantMarker(commonDir, holder, nonce = '0123456789abcdef') {
 function judge(h, commonDir, env) {
   return cp.spawnSync(process.execPath, ['--require', HOOKS, '-e',
     `require(${JSON.stringify(path.join(ROOT, 'lib', 'git-placeholders.js'))}).clearPlaceholders(${JSON.stringify(commonDir)}, { waitMs: 0 })`],
-  { env: { ...unmarked(h.env), ...env }, encoding: 'utf8', timeout: 60000 });
+  { env: { ...unmarked(h.env), ...env }, encoding: 'utf8' });
 }
 
 // A git call through the agent shim, which cleans up placeholders first, with
