@@ -460,8 +460,14 @@ function context(t, base, options = {}) {
           }
         } finally {
           fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+          // rmSync returns without error when an entry vanished under it, leaving the rest;
+          // a second pass removes those. What a process still running keeps writing is a leak.
+          if (fs.existsSync(base)) fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
           fileFixtures.delete(ctx);
         }
+      }
+      if (fs.existsSync(base)) {
+        assert.fail(`fixture ${base} outlived its cleanup: ${fs.readdirSync(base, { recursive: true }).slice(0, 10).join(', ')}`);
       }
       assertNoHarnessCalls(base);
     },

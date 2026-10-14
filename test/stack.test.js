@@ -39,13 +39,14 @@ test('a task event during the link\'s GitHub call refuses the link, and the next
 test('detached spawn links the PR after its worker submits and exits', async (t) => {
   const f = setup(t);
   worker(f);
-  f.h.ok(['spawn', '--task', 'T2']);
+  const spawned = f.h.json(['spawn', '--task', 'T2']);
+  // The monitor links the PR before it exits, so its exit ends the wait.
   const { task, order } = await waitOnRepo(f.h, () => {
     const task = f.h.json(['task', 'show', 'T2']);
     if (!task.stack?.linked) return false;
     // A final observer call can still be publishing the fixture after linking.
     return { task, order: f.read().order };
-  });
+  }, 'the monitor did not link the PR', { alive: spawned.monitor_pid });
   assert.equal(task.stack.linked, true);
   assert.equal(task.status, 'submitted');
   assert.deepEqual(order, [11, 12]);

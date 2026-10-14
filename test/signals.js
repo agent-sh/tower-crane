@@ -7,7 +7,21 @@ const net = require('node:net');
 // This is the runner's hung-test backstop, never a readiness budget.
 const HUNG_TEST_MS = 300000;
 
-function waitUntil(check, { paths = [], signal, subscribe, poll = true, what = 'signal wait' } = {}) {
+// A process the test holds can end the wait early: once it is gone and the
+// condition is still false, nothing will make it true. `alive` takes a child
+// process, a detached pid or a function.
+function liveness(alive) {
+  if (!alive) return null;
+  if (typeof alive === 'function') return { running: alive };
+  if (typeof alive === 'number') return { running: () => require('./helpers').detachedAlive({ pid: alive }) };
+  return {
+    running: () => alive.exitCode === null && alive.signalCode === null,
+    subscribe: (probe) => { alive.on('exit', probe); return () => alive.off('exit', probe); },
+  };
+}
+
+function waitUntil(check, { paths = [], signal, subscribe, poll = true, alive, what = 'signal wait' } = {}) {
+  const held = liveness(alive);
   return new Promise((resolve, reject) => {
     const cleanups = [];
     let finished = false;
@@ -25,8 +39,12 @@ function waitUntil(check, { paths = [], signal, subscribe, poll = true, what = '
       if (checking) { again = true; return; }
       checking = true;
       try {
+        // Read liveness before the condition: whatever the process wrote
+        // before it exited is then visible to this check.
+        const running = !held || held.running();
         const value = await check();
         if (value) finish(null, value, false);
+        else if (!running) finish(new Error(`${typeof what === 'function' ? what() : what}: the process exited first`));
       } catch (error) {
         finish(error);
       } finally {
@@ -63,6 +81,7 @@ function waitUntil(check, { paths = [], signal, subscribe, poll = true, what = '
         }
       }
       if (subscribe) cleanups.push(subscribe(probe, finish));
+      if (held?.subscribe) cleanups.push(held.subscribe(probe));
       // Processes outside our child tree and browser protocol predicates have
       // no portable exit/change notification. Probes have no readiness deadline.
       if (poll) {

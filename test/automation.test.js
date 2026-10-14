@@ -34,7 +34,10 @@ function setup(t, { kind = 'code', ci = 'success', repo } = {}) {
     const preload = path.join(h.base, 'offline-gh.js');
     // Windows cannot spawn a .cmd directly. Resolve PATH first so agent
     // policy shims still run before the offline GitHub executable.
+    // The offline executable stands in for gh.exe, which takes each argument
+    // as given; through cmd.exe a multi-line argument would end at its newline.
     fs.writeFileSync(preload, `const cp=require('node:child_process'),fs=require('node:fs'),path=require('node:path'),run=cp.spawnSync;
+const offline=${JSON.stringify(path.join(tools, 'gh.cmd'))};
 cp.spawnSync=(cmd,args,opts)=>{
   if(cmd!=='gh')return run(cmd,args,opts);
   const env=opts?.env||process.env;
@@ -43,6 +46,7 @@ cp.spawnSync=(cmd,args,opts)=>{
       const file=path.join(dir,cmd+ext);
       if(!fs.existsSync(file))continue;
       if(ext==='.exe')return run(file,args,opts);
+      if(path.resolve(file)===path.resolve(offline))return run(process.execPath,[${JSON.stringify(ghStub)},...args],opts);
       const quoted=[file,...args].map(arg=>'"'+String(arg).replace(/"/g,'""')+'"').join(' ');
       return run(env.ComSpec||env.COMSPEC||'cmd.exe',['/d','/s','/c','"'+quoted+'"'],
         {...opts,windowsVerbatimArguments:true});
@@ -817,7 +821,7 @@ test('background reactions leave vacant, released, taken-over and expired leases
   const expired = lease();
   const env = {
     TOWER_CRANE_TEST_NOW: String(Date.parse(expired.heartbeat) + h.readState('project.json').limits.lease_minutes * 60000 + 1),
-    NODE_OPTIONS: `--require=${JSON.stringify(path.join(__dirname, 'fixtures', 'clock.js'))}`,
+    NODE_OPTIONS: `${h.env.NODE_OPTIONS || ''} --require=${JSON.stringify(path.join(__dirname, 'fixtures', 'clock.js'))}`.trim(),
   };
   react({ env });
   assert.deepEqual(lease(), expired, 'background work cannot revive an idle session');
@@ -3334,7 +3338,8 @@ test('a reviewer whose monitor never records its exit is replaced after the rece
   assert.equal(missing().length, 0);
   // Default supervision: 10 min max backoff, 7 s group cleanup and a 1 min drain.
   const clock = path.join(__dirname, 'fixtures', 'clock.js').replace(/\\/g, '/');
-  const later = { env: { NODE_OPTIONS: `--require "${clock}"`, TOWER_CRANE_TEST_NOW: String(Date.parse(at) + 11 * 60000 + 8000) } };
+  // The clock preload joins the offline GitHub preload Windows needs rather than replacing it.
+  const later = { env: { NODE_OPTIONS: `${h.env.NODE_OPTIONS || ''} --require "${clock}"`.trim(), TOWER_CRANE_TEST_NOW: String(Date.parse(at) + 11 * 60000 + 8000) } };
   h.run(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator'], later);
   await pollUntil(h, 'replacement reviewer', () => reviewers().length === 2);
   assert.equal(missing().length, 1);

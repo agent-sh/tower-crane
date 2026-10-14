@@ -31,6 +31,11 @@ const sketches = (h) => ['sketch.md', 'sketch.html'].map((file) => ({
 // machine can take as long as the test may run, and a wait that never comes
 // true still fails with its message.
 
+// A file a process writes exists before its content does; a wait on it needs the content.
+function written(file) {
+  try { return fs.readFileSync(file, 'utf8') || null; } catch (e) { if (e.code === 'ENOENT') return null; throw e; }
+}
+
 function controlledBackoff(h) {
   const file = path.join(h.base, 'backoff-clock');
   const hook = path.join(__dirname, 'fixtures', 'supervision-backoff-clock.js').replace(/\\/g, '/');
@@ -710,7 +715,7 @@ test('a worker spawned behind a live lease held by another agent never starts an
   assert.equal(h.json(['task', 'show', 'T1']).claim.agent, 'holder', 'the holder keeps its lease');
 });
 
-test('a supervisor stop stays blocked with its reason when its harness exits 0 on SIGTERM', { skip: process.platform !== 'linux' }, (t) => {
+test('a supervisor stop stays blocked with its reason when its harness exits 0 on SIGTERM', { skip: process.platform !== 'linux' }, async (t) => {
   const h = setup(t, { config: { stall_ms: 250 } });
   h.ok(['task', 'update', 'T1', '--tier', 'easy..medium']);
   h.ok(['ladder', 'set', 'easy', '--harness', 'command', '--command', JSON.stringify([process.execPath, '-e',
@@ -719,10 +724,13 @@ test('a supervisor stop stays blocked with its reason when its harness exits 0 o
   pinRung(h, 'medium', STUB_RUNG);
   const result = h.spawn(undefined, 30000);
   assert.equal(result.code, 1, result.stderr);
-  const last = log(h).findLast((e) => e.cmd === 'spawn phase');
+  // The climb's medium attempt runs on after the wait returns and records phases of its own.
+  const first = log(h).find((e) => e.cmd === 'spawn').detail.agent;
+  await waitOnRepo(h, () => log(h).some((e) => e.cmd === 'spawn exit' && e.detail.agent !== first), 'the medium attempt did not exit');
+  const last = log(h).findLast((e) => e.cmd === 'spawn phase' && e.detail.agent === first);
   assert.equal(last.detail.phase, 'blocked');
   assert.equal(last.detail.reason, 'no progress paths or CPU activity');
-  assert.ok(log(h).some((e) => e.cmd === 'spawn exit' && e.detail.code === 0), 'the harness did exit cleanly');
+  assert.ok(log(h).some((e) => e.cmd === 'spawn exit' && e.detail.agent === first && e.detail.code === 0), 'the harness did exit cleanly');
 });
 
 test('submitted-task reviewers resume transient exits and show their phase', (t) => {
@@ -994,13 +1002,13 @@ setInterval(() => {}, 1000);
 `;
   h.ok(['ladder', 'set', 'easy', '--command', JSON.stringify([process.execPath, '-e', script, BIN, pids, terminated, '{prompt}'])]);
   const spawned = h.json(['spawn', '--task', 'T1']);
-  const group = await waitOnRepo(h, () => fs.existsSync(pids) && JSON.parse(fs.readFileSync(pids, 'utf8')),
+  const group = await waitOnRepo(h, () => written(pids) && JSON.parse(written(pids)),
     'process group did not start');
   t.after(() => {
     try { process.kill(-group[0], 'SIGKILL'); } catch (e) { if (e.code !== 'ESRCH') throw e; }
   });
   process.kill(spawned.monitor_pid, 'SIGTERM');
-  await waitOnRepo(h, () => fs.existsSync(terminated + '.parent') && fs.existsSync(terminated + '.child'), 'stop did not send SIGTERM before SIGKILL');
+  await waitOnRepo(h, () => written(terminated + '.parent') && written(terminated + '.child'), 'stop did not send SIGTERM before SIGKILL');
   await waitOnRepo(h, () => group.every((pid) => !detachedAlive({ pid })), 'stop left a process group member alive');
   await waitOnRepo(h, () => !detachedAlive({ pid: spawned.monitor_pid }), 'stopped monitor survived');
   assert.equal(fs.readFileSync(terminated + '.parent', 'utf8'), 'parent');
@@ -1092,9 +1100,9 @@ test('foreground exit waits until the retained stdout pipe has been captured', a
   try {
     await waitOnRepo(h, () => log(h).some((e) => e.cmd === 'spawn'), 'spawn was not recorded');
     spawned = log(h).find((e) => e.cmd === 'spawn').detail;
-    await waitOnRepo(h, () => fs.existsSync(writerPidFile) && fs.existsSync(writerReady),
+    await waitOnRepo(h, () => written(writerPidFile) && written(writerReady),
       'detached writer did not open the foreground stdout pipe');
-    writerPid = Number(fs.readFileSync(writerPidFile, 'utf8'));
+    writerPid = Number(written(writerPidFile));
     assert.ok(Number.isInteger(writerPid));
     await waitOnRepo(h, () => !detachedAlive({ pid: spawned.pid }), 'foreground harness did not exit');
     await waitOnRepo(h, () => detachedAlive({ pid: writerPid }), 'detached writer did not keep the stdout pipe open');

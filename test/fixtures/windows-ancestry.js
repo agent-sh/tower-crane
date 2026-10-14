@@ -42,6 +42,13 @@ function Get-CimInstance {
   return $rows
 }
 `;
+  // A real snapshot holds the CLI's own process, where the walk starts.
+  const rows = JSON.parse(fs.readFileSync(process.env.ANCESTRY_ROWS, 'utf8'));
+  if (!rows.some((row) => row.ProcessId === process.pid)) {
+    rows.unshift({ ProcessId: process.pid, ParentProcessId: process.ppid, Name: 'node.exe',
+      CommandLine: `node ${process.argv.slice(1).join(' ')}`, CreationDate: rows[0]?.CreationDate });
+    fs.writeFileSync(process.env.ANCESTRY_ROWS, JSON.stringify(rows));
+  }
   const at = args.indexOf('-Command') + 1;
   const replaced = [...args];
   replaced[at] = prefix + args[at] + '\n$taskGate.Dispose()';
