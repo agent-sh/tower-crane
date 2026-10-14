@@ -76,6 +76,8 @@ The base refreshes through `b7c53e64` and `6e31e590` keep main's pending-CI rech
 
 The base refresh through `e869a37a` keeps main's reviewer crash and note fixtures, the chunked event-log hold and the lock timing contracts. Its readiness loops wait on repository and file signals; the gate timeout under test, the live-lock observation window and the production lock-bound assertions carry reasons. Automation, lock, orchestrator and gate timeouts pass 187 of 187 tests in each of five loaded runs, and the full suite at `34c4d17a` passes 2267 tests with 29 skipped and no failures.
 
+The base refresh through `aac8e164` keeps main's SIGTERM and SIGINT draining tests. Their wait commands and kill bounds use the suite guard and their readiness files are file signals; the bound that second-signal cancellation beats the merge poll deadline carries a reason. Automation, stack merge and events pass 250 of 250 tests in each of five loaded runs, and the full suite at `179181eb` passes 2297 tests with 34 skipped and no failures.
+
 ## Tools
 
 - `node scripts/test-cost.js [--before DIR] [files...]` measures CPU and wall seconds per file, median of three runs, four files at a time. With `--before`, it measures another checkout interleaved with this one.

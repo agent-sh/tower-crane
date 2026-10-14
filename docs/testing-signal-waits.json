@@ -28552,5 +28552,126 @@
       "log_sha256": "4f8cedaefa8cf70654575838c6812ba245feb61fa19ede356c144071fc2bca9e"
     },
     "raw_logs": "Task scratch; only relative artifact names and hashes are committed."
+  },
+  "base_aac8e164_refresh": {
+    "base_head": "aac8e164",
+    "source": "179181eb",
+    "changes": [
+      "Main's SIGTERM and SIGINT draining tests keep their signal receipts; their wait commands and kill bounds use the suite guard and their readiness files are file signals.",
+      "The bound that second-signal cancellation beats the merge's 10 s poll deadline and fixture probe cadences carry reasons.",
+      "Main's live sandbox probe waits for its command's ready file or the spawn's end through waitUntil.",
+      "Main's observe-mode exit check keeps its reason; the slow-suite hold count is kept."
+    ],
+    "loaded_command": "node test/run.js --test-concurrency=3 test/automation.test.js test/stack-merge.test.js test/events.test.js",
+    "cpu_load": "Shared 24-core host with other sessions running test suites; one-minute load 6 to 13 during the runs.",
+    "loaded_runs": [
+      {
+        "run": 1,
+        "status": 0,
+        "load_after": [
+          12.08,
+          12.03,
+          12.63
+        ],
+        "log": "loaded8-1.log",
+        "log_sha256": "08e5b7830bb0015873c5741198b7a5e38a14db5e38229e152e3ead02cb3df858",
+        "tests": {
+          "tests": 250,
+          "pass": 250,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 0
+        }
+      },
+      {
+        "run": 2,
+        "status": 0,
+        "load_after": [
+          13.24,
+          11.62,
+          11.82
+        ],
+        "log": "loaded8-2.log",
+        "log_sha256": "d5e4156757b30583c3ce829ea2b4e8c0b237b667a42fb1a80cd496887afa459b",
+        "tests": {
+          "tests": 250,
+          "pass": 250,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 0
+        }
+      },
+      {
+        "run": 3,
+        "status": 0,
+        "load_after": [
+          9.91,
+          10.83,
+          11.25
+        ],
+        "log": "loaded8-3.log",
+        "log_sha256": "7ee97cad6952be27e763ac862d28212669cb0749d711b58090d534d9f135adcf",
+        "tests": {
+          "tests": 250,
+          "pass": 250,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 0
+        }
+      },
+      {
+        "run": 4,
+        "status": 0,
+        "load_after": [
+          6.07,
+          7.06,
+          8.88
+        ],
+        "log": "loaded8-4.log",
+        "log_sha256": "ca96a15521abcdfc44e47cf02fe543112a89e20a12f0012cc9d64979db3faecf",
+        "tests": {
+          "tests": 250,
+          "pass": 250,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 0
+        }
+      },
+      {
+        "run": 5,
+        "status": 0,
+        "load_after": [
+          9.4,
+          9.4,
+          9.14
+        ],
+        "log": "loaded8-5.log",
+        "log_sha256": "93e95abddd42d29f6bcec2bb36d4643340d037f2a0cb49efb8580c6d4eed0bd5",
+        "tests": {
+          "tests": 250,
+          "pass": 250,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 0
+        }
+      }
+    ],
+    "full_suite": {
+      "command": "node test/run.js --test-concurrency=3",
+      "source": "179181eb",
+      "status": 0,
+      "wall": "18m49s",
+      "tests": {
+        "tests": 2331,
+        "pass": 2297,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 34
+      },
+      "log": "full-8.log",
+      "log_sha256": "e2ea692425b3ec0ddb79ce40d67db42fb5ffce3c76586e4c15852687f82ebc96"
+    },
+    "next_base_probe": "Merging ad656627 is conflict-free and the shared wait check passes on that merge tree.",
+    "raw_logs": "Task scratch; only relative artifact names and hashes are committed."
   }
 }
