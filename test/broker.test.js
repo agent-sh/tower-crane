@@ -7,7 +7,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { TMP_ROOT, ROOT, detachedAlive, makeRepo } = require('./helpers');
+const { TMP_ROOT, ROOT, detachedAlive, makeRepo, stubRungs } = require('./helpers');
 const { stacked } = require('./stack-fixture');
 const B = require('../lib/broker');
 const harnessHooks = require('../lib/harness-hooks');
@@ -1316,91 +1316,209 @@ test('gh arguments parse as gh does: clusters, attached values and "--", and an 
 });
 
 // Each sandboxed role's instructions, and the broker role its agent runs as:
-// the researcher is a worker on the research rung.
+// the researcher is a worker on the research rung. A .js file is prompt text
+// built in code; its comment lines are skipped.
 const ROLE_FILES = {
   'skills/tower-crane-work/SKILL.md': 'worker',
   'agents/tower-crane-worker.md': 'worker',
   'agents/tower-crane-researcher.md': 'worker',
+  'lib/harness-hooks.js': 'worker',
   'skills/tower-crane-review/SKILL.md': 'reviewer',
   'agents/tower-crane-reviewer.md': 'reviewer',
   'agents/tower-crane-small.md': 'small',
 };
-// Mentions of a command another role runs, which the text names without
-// telling this role to run it.
-const OTHER_ROLE = {
-  'skills/tower-crane-work/SKILL.md': ['stack sync'],
-  'skills/tower-crane-review/SKILL.md': ['spawn', 'ci resolve'],
-};
+// A line that names a command another role runs, without telling this role
+// to run it: the file, the command and text on that same line.
+const OTHER_ROLE = [
+  ['skills/tower-crane-work/SKILL.md', 'stack sync', "Stack refresh runs through the orchestrator's `tower-crane stack sync`"],
+  ['skills/tower-crane-review/SKILL.md', 'spawn', 'A reviewer that `tower-crane spawn` did not start'],
+  ['skills/tower-crane-review/SKILL.md', 'ci resolve', 'The worker or the orchestrator closes the finding'],
+];
+const SCOPE = { TOWER_CRANE_TASK: 'T1', TOWER_CRANE_AGENT: 'worker-T1-1' };
 
-// The tower-crane commands a markdown file shows in code: inline spans and fenced blocks.
-function commandMentions(text) {
-  const code = [...text.matchAll(/```[^\n]*\n([\s\S]*?)```/g)].map((m) => m[1]);
-  const prose = text.replace(/```[^\n]*\n[\s\S]*?```/g, '');
-  code.push(...[...prose.matchAll(/`([^`\n]+)`/g)].map((m) => m[1]));
-  const names = [];
-  for (const block of code) {
-    for (const m of block.matchAll(/(?:^|[\s(;|&])tower-crane\s+([^\n]*)/g)) {
-      const argv = m[1].trim().split(/\s+/);
-      let resolved;
-      try { resolved = resolveCommand(argv); } catch (e) { resolved = { error: e.message }; }
-      names.push(resolved.cmd ? resolved.cmd.name : `unknown: tower-crane ${m[1].trim()} (${resolved.error || 'no command'})`);
-    }
+// The code in a file, as [start, text] regions: fenced blocks (``` or ~~~)
+// and inline spans, which may wrap across lines but not a paragraph break,
+// in markdown; every line but comments in JavaScript.
+function codeRegions(text, js) {
+  if (js) {
+    let at = 0;
+    return text.split('\n').map((line) => { const r = [at, line]; at += line.length + 1; return r; }).filter(([, line]) => !/^\s*\/\//.test(line));
   }
-  return names;
+  const regions = [];
+  const masked = text.replace(/^(```|~~~)[^\n]*\n([\s\S]*?)^\1[^\n]*$/gm, (m, fence, body, offset) => {
+    regions.push([offset + m.indexOf('\n') + 1, body]);
+    return ' '.repeat(m.length);
+  });
+  for (const m of masked.matchAll(/`((?:[^`\n]|\n(?![ \t]*\n))+)`/g)) regions.push([m.index + 1, m[1].replace(/\n/g, ' ')]);
+  return regions;
 }
 
-test('every tower-crane command a sandboxed role is told to run is one its broker allows or a read it runs itself', () => {
-  for (const [file, role] of Object.entries(ROLE_FILES)) {
-    const mentions = commandMentions(fs.readFileSync(path.join(ROOT, file), 'utf8'));
-    const others = OTHER_ROLE[file] || [];
-    for (const name of others) assert.ok(mentions.includes(name), `${file} no longer mentions ${name}; drop it from OTHER_ROLE`);
-    const refused = [...new Set(mentions)].filter((name) => !others.includes(name) && !B.READS.has(name) && !B.ROLES[role].includes(name));
-    assert.deepEqual(refused, [], `${file} tells a sandboxed ${role} to run commands its broker refuses`);
+// Each tower-crane command a region shows: its name, the source line, and
+// its arguments up to a shell separator, the next tower-crane or the end of a
+// fenced line, cut where the command's own syntax ends (prose after it).
+function commandMentions(text, js = false) {
+  const { resolveCommand: resolve } = require('../bin/tower-crane');
+  const out = [];
+  for (const [start, region] of codeRegions(text, js)) {
+    for (const m of region.matchAll(/(?<![\w-])tower-crane(?![\w-])/g)) {
+      const at = start + m.index;
+      const line = text.slice(text.lastIndexOf('\n', at) + 1, text.indexOf('\n', at) < 0 ? text.length : text.indexOf('\n', at));
+      const rest = region.slice(m.index + m[0].length).split(/\n|&&|\|\||;|\||(?<![\w-])tower-crane(?![\w-])/)[0];
+      const words = rest.trim().split(/\s+/).filter(Boolean);
+      let r;
+      try { r = resolve(words); } catch (e) { r = { error: e.message }; }
+      if (!r.cmd) {
+        out.push({ name: `unknown: tower-crane ${rest.trim()} (${r.error || 'no command'})`, line });
+        continue;
+      }
+      const pos = r.cmd.pos || [];
+      const args = [];
+      let positionals = 0;
+      for (let i = 0; i < r.rest.length; i++) {
+        const tok = r.rest[i].replace(/[),.]+$/, '');
+        if (tok.startsWith('--')) {
+          const spec = { ...(r.cmd.flags || {}), ...GLOBAL }[tok.slice(2).split('=')[0]];
+          args.push(tok);
+          if (spec && spec.type !== 'bool' && !tok.includes('=') && i + 1 < r.rest.length) args.push(r.rest[++i].replace(/[),.]+$/, ''));
+        } else if (pos[0] === 'ID...' || positionals < pos.length) {
+          args.push(tok);
+          positionals++;
+        } else break;
+      }
+      out.push({ name: r.cmd.name, line, lead: r.lead, args, cmd: r.cmd });
+    }
   }
-  assert.ok(commandMentions(fs.readFileSync(path.join(ROOT, 'skills/tower-crane-work/SKILL.md'), 'utf8')).includes('wait'));
+  return out;
+}
+
+// A wait mention as the agent would run it, placeholders filled, through the
+// scope its sandbox applies.
+function scopedWait(mention) {
+  const fill = (t) => t.replace(/^(<id>|<task id>|ID|\$\{task\.id\})$/, SCOPE.TOWER_CRANE_TASK)
+    .replace(/^(<name>|NAME)$/, SCOPE.TOWER_CRANE_AGENT).replace(/^(SEC|<sec>)$/, '60');
+  const { flags } = parseOptions([...mention.lead, ...mention.args].map(fill), { ...(mention.cmd.flags || {}), ...GLOBAL }, 'wait');
+  B.scopeWait(flags, flags.agent ?? SCOPE.TOWER_CRANE_AGENT, SCOPE);
+}
+
+test('the command extractor finds every tower-crane command in code and checks the wait scope', () => {
+  const names = (text, js) => commandMentions(text, js).map((m) => m.name);
+  assert.deepEqual(names('Run `tower-crane task show T1 && tower-crane spend T1` now.'), ['task show', 'spend']);
+  assert.deepEqual(names('~~~sh\ntower-crane claim T1 --agent a\ntower-crane submit T1\n~~~\n'), ['claim', 'submit']);
+  assert.deepEqual(names('```\ntower-crane renew T1; tower-crane release T1 --reason x\n```\n'), ['renew', 'release']);
+  assert.deepEqual(names('Wait with `tower-crane wait --task <id>\n--timeout SEC` and go on.'), ['wait']);
+  assert.deepEqual(names('Prose tower-crane check is not code.\n\n`a`\n\n`tower-crane spawn`'), ['spawn']);
+  assert.deepEqual(names('// tower-crane check in a comment\nconst s = `(tower-crane wait --task ${task.id} --timeout SEC exits 2)`;', true), ['wait']);
+  const wait = (text) => commandMentions(text, true).find((m) => m.name === 'wait');
+  assert.deepEqual(wait('`(tower-crane wait --task ${task.id} --timeout SEC exits 2 on timeout)`').args, ['--task', '${task.id}', '--timeout', 'SEC']);
+  assert.doesNotThrow(() => scopedWait(wait('tower-crane wait --task <id> --agent <name> --timeout SEC')));
+  for (const [text, why] of [
+    ['tower-crane wait --task <id> --follow', /--follow is the orchestrator's/],
+    ['tower-crane wait --task <id>', /waits with a bound/],
+    ['tower-crane wait --task T9 --timeout SEC', /works on T1 only/],
+    ['tower-crane wait --task <id> --timeout SEC --for owner', /not owner/],
+  ]) assert.throws(() => scopedWait(wait(text)), why, text);
 });
+
+test('every tower-crane command a sandboxed role is told to run is one its broker allows or a read it runs itself', () => {
+  const seen = new Set();
+  for (const [file, role] of Object.entries(ROLE_FILES)) {
+    const mentions = commandMentions(fs.readFileSync(path.join(ROOT, file), 'utf8'), file.endsWith('.js'));
+    const exempt = (m) => OTHER_ROLE.some(([f, name, text]) => {
+      const hit = f === file && name === m.name && m.line.includes(text);
+      if (hit) seen.add(`${f} ${name}`);
+      return hit;
+    });
+    const refused = mentions.filter((m) => !exempt(m) && !B.READS.has(m.name) && !B.ROLES[role].includes(m.name));
+    assert.deepEqual(refused.map((m) => `${m.name}: ${m.line.trim().slice(0, 120)}`), [], `${file} tells a sandboxed ${role} to run commands its broker refuses`);
+    // A bare command name refers to the command; one with arguments is a call to run.
+    for (const m of mentions.filter((x) => x.name === 'wait' && x.args.length)) assert.doesNotThrow(() => scopedWait(m), `${file}: ${m.line.trim()}`);
+  }
+  assert.deepEqual(OTHER_ROLE.filter(([f, name]) => !seen.has(`${f} ${name}`)), [], 'every exemption still matches its line');
+  const work = commandMentions(fs.readFileSync(path.join(ROOT, 'skills/tower-crane-work/SKILL.md'), 'utf8'));
+  assert.ok(work.some((m) => m.name === 'wait' && m.args.includes('--timeout')));
+  const hooks = commandMentions(fs.readFileSync(path.join(ROOT, 'lib/harness-hooks.js'), 'utf8'), true);
+  assert.ok(hooks.some((m) => m.name === 'wait' && m.args.includes('--timeout')), 'the hook prompt is checked');
+});
+
+// Every path, mode-free, and file content under dir.
+function treeHash(dir) {
+  const hash = require('node:crypto').createHash('sha256');
+  const walk = (rel) => {
+    for (const e of fs.readdirSync(path.join(dir, rel), { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+      const p = path.join(rel, e.name);
+      if (e.isDirectory()) { hash.update(`d ${p}\n`); walk(p); }
+      else if (e.isSymbolicLink()) hash.update(`l ${p} ${fs.readlinkSync(path.join(dir, p))}\n`);
+      else hash.update(`f ${p}\n`).update(fs.readFileSync(path.join(dir, p)));
+    }
+  };
+  walk('');
+  return hash.digest('hex');
+}
+
+// Makes every directory and file under dir read-only, as the agent's sandbox
+// leaves the state; returns the restore.
+function readOnly(dir) {
+  const modes = [];
+  const walk = (p) => {
+    const st = fs.lstatSync(p);
+    if (st.isSymbolicLink()) return;
+    modes.push([p, st.mode & 0o7777]);
+    if (st.isDirectory()) for (const name of fs.readdirSync(p)) walk(path.join(p, name));
+    fs.chmodSync(p, st.isDirectory() ? 0o555 : 0o444);
+  };
+  walk(dir);
+  return () => { for (const [p, mode] of modes.reverse()) fs.chmodSync(p, mode); };
+}
 
 test('a sandboxed agent waits in its sandbox on its own task, bounded and without writing the state', async (t) => {
   const h = makeRepo(t);
+  // Work an orchestrator's wait would act on: a ready task with a brief that
+  // its refill dispatches, so a wait that leaks the orchestrator's role writes.
+  stubRungs(h);
   h.init();
   h.ok(['task', 'add', '--title', 'one', '--acceptance', 'noted']);
   h.ok(['task', 'add', '--title', 'two', '--acceptance', 'noted']);
+  h.ok(['brief', 'set', 'T2', '-'], { input: '# Two\n\nDo two.\n' });
   const offset = fs.statSync(path.join(h.state, 'events.jsonl')).size;
   h.ok(['msg', '--to', 'worker-T1-1', '--task', 'T1', 'rebase on main', '--agent', 'orchestrator']);
+  assert.ok(h.json(['ready']).ready.some((x) => x.id === 'T2'), 'T2 is ready for a refill to dispatch');
   const job = { state: h.state, task: 'T1', agent: 'worker-T1-1', role: 'worker', cwd: h.repo, broker: path.join(h.base, 'brokers', 'worker-T1-1', B.FILE) };
   const broker = await B.start(job);
   t.after(() => broker.close());
   const env = { ...broker.env, TOWER_CRANE_AGENT: job.agent, TOWER_CRANE_TASK: job.task };
-  const files = ['events.jsonl', 'tasks.json', 'decisions.json', 'project.json'];
-  const before = files.map((f) => fs.readFileSync(path.join(h.state, f), 'utf8'));
-  // The sandbox leaves the state directory read-only.
-  fs.chmodSync(h.state, 0o555);
-  try {
-    const wait = (args) => h.runAsync(['wait', ...args], { env });
-    // Refused waits never start, and the message is already published.
-    const bound = String(HUNG_TEST_MS / 1000);
-    const woke = await wait(['--task', 'T1', '--after', String(offset), '--timeout', bound]);
-    assert.equal(woke.code, 0, woke.stderr);
-    assert.equal(JSON.parse(woke.stdout).cmd, 'msg', 'the message to the worker wakes it');
-    const timedOut = await wait(['--timeout', '0.1']); // wait-allow: verify the CLI timeout contract with already-published state
-    assert.equal(timedOut.code, 2, timedOut.stderr);
-    assert.equal(JSON.parse(timedOut.stdout).type, 'timeout');
-    for (const [args, why] of [
-      [['--task', 'T2', '--timeout', bound], /works on T1 only, not T2/],
-      [['--task', 'T1'], /waits with a bound: --timeout SEC/],
-      [['--task', 'T1', '--follow'], /wait --follow is the orchestrator's/],
-      [['--task', 'T1', '--timeout', bound, '--observe'], /wait --observe is the orchestrator's/],
-      [['--task', 'T1', '--timeout', bound, '--inbox'], /wait --inbox is the orchestrator's/],
-      [['--task', 'T1', '--timeout', bound, '--for', 'reviewer-T1-1'], /own messages or the orchestrator's, not reviewer-T1-1/],
-      [['--task', 'T1', '--timeout', bound, '--agent', 'orchestrator'], /worker-T1-1 cannot wait as orchestrator/],
-    ]) {
-      const r = await wait(args);
-      assert.equal(r.code, 1, `${args.join(' ')}: ${r.stderr}`);
-      assert.match(r.stderr, why);
+  const wait = (args) => h.runAsync(['wait', ...args], { env });
+  // Refused waits never start, and the message is already published.
+  const bound = String(HUNG_TEST_MS / 1000);
+  const before = treeHash(h.state);
+  // Writable first, so a leaked write shows in the tree; then read-only, as
+  // the sandbox runs it, where a leaked write is an error on stderr.
+  for (const sandboxed of [false, true]) {
+    const restore = sandboxed ? readOnly(h.state) : () => {};
+    try {
+      const woke = await wait(['--task', 'T1', '--after', String(offset), '--timeout', bound]);
+      assert.equal(woke.code, 0, woke.stderr);
+      assert.equal(woke.stderr, '');
+      assert.equal(JSON.parse(woke.stdout).cmd, 'msg', 'the message to the worker wakes it');
+      const timedOut = await wait(['--timeout', '0.1']); // wait-allow: verify the CLI timeout contract with already-published state
+      assert.equal(timedOut.code, 2, timedOut.stderr);
+      assert.equal(timedOut.stderr, '');
+      assert.equal(JSON.parse(timedOut.stdout).type, 'timeout');
+      for (const [args, why] of [
+        [['--task', 'T2', '--timeout', bound], /works on T1 only, not T2/],
+        [['--task', 'T1'], /waits with a bound: --timeout SEC/],
+        [['--task', 'T1', '--follow'], /wait --follow is the orchestrator's/],
+        [['--task', 'T1', '--timeout', bound, '--observe'], /wait --observe is the orchestrator's/],
+        [['--task', 'T1', '--timeout', bound, '--inbox'], /wait --inbox is the orchestrator's/],
+        [['--task', 'T1', '--timeout', bound, '--for', 'reviewer-T1-1'], /own messages or the orchestrator's, not reviewer-T1-1/],
+        [['--task', 'T1', '--timeout', bound, '--agent', 'orchestrator'], /worker-T1-1 cannot wait as orchestrator/],
+      ]) {
+        const r = await wait(args);
+        assert.equal(r.code, 1, `${args.join(' ')}: ${r.stderr}`);
+        assert.match(r.stderr, why);
+      }
+    } finally {
+      restore();
     }
-  } finally {
-    fs.chmodSync(h.state, 0o755);
+    assert.equal(treeHash(h.state), before, `the ${sandboxed ? 'read-only' : 'writable'} waits wrote nothing under the state directory`);
   }
-  assert.deepEqual(files.map((f) => fs.readFileSync(path.join(h.state, f), 'utf8')), before, 'the sandboxed waits wrote no state');
-  assert.equal(fs.existsSync(path.join(h.state, 'lock')), false, 'no state lock was taken');
 });
