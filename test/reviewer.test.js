@@ -1132,3 +1132,17 @@ test('review uses the nearest base when only origin has it or the local base is 
   assert.ok(prompt.includes(`Base: ${base}.`));
 });
 });
+
+test('a light re-review reaches the reviewed revision across a revision a restore retired', () => {
+  const sha = 'a'.repeat(40);
+  const review = { type: 'review', ok: false, sha, revision: 1, agent: 'owner', at: '2026-10-15T00:00:03.000Z',
+    summary: 'changelog wording', findings: [{ path: 'changelog.d/T1.md', text: 'wording' }] };
+  const task = { id: 'T1', revision: 3, sha, submitted_by: 'worker', evidence: [review] };
+  // An automatic ci rework took revision 1 to 2, its restore retired 2, and the failed review reworked 1 to 3.
+  const events = [
+    { cmd: 'rework', task: 'T1', agent: 'orchestrator', detail: { sha, previous_revision: 1, revision: 2, gate: 'ci' } },
+    { cmd: 'restore', task: 'T1', agent: 'orchestrator', detail: { sha, from_revision: 2, revision: 1, gate: 'ci' } },
+    { cmd: 'rework', task: 'T1', agent: 'orchestrator', detail: { sha, previous_revision: 1, revision: 3, from_review: true } },
+  ];
+  assert.deepEqual(require('../lib/reviewer').prepareLight({ events }, task, null, {}).review_snapshot, review);
+});

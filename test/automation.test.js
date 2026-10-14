@@ -1607,6 +1607,94 @@ test('gates retry exits nonzero while a retried gate still fails', (t) => {
   assert.equal(h.readState('tasks.json').tasks[0].status, 'submitted');
 });
 
+// Local CI that fails while a marker file stands for a broken environment,
+// such as a gate temporary root on a full /tmp: it exits 1, a confirmed failure.
+function brokenEnvironment(t) {
+  const h = setup(t, { ci: 'pending' });
+  h.broken = path.join(h.base, 'environment-broken');
+  fs.writeFileSync(h.broken, '');
+  const script = path.join(h.base, 'local-environment.js');
+  fs.writeFileSync(script, `process.exit(require('node:fs').existsSync(${JSON.stringify(h.broken)}) ? 1 : 0);\n`);
+  h.ok(['project', 'set', '--ci-local', JSON.stringify({ command: [process.execPath, script], timeout: 30 })]);
+  h.submit();
+  // Paused, so the refill does not hand the rework to a worker first.
+  h.ok(['project', 'set', '--paused', 'orchestrator fixes the environment']);
+  h.consume();
+  const task = h.readState('tasks.json').tasks[0];
+  assert.equal(task.status, 'rework', 'the environment failure reads as a code failure and reworks');
+  assert.equal(h.logs().findLast((e) => e.cmd === 'rework').detail.gate, 'ci', 'the automatic rework names its gate');
+  return h;
+}
+
+test('gates retry --from-rework restores an automatic gate rework at its submitted revision once the cause is fixed', (t) => {
+  const h = brokenEnvironment(t);
+  const submitted = h.logs().findLast((e) => e.cmd === 'rework').detail.previous_revision;
+  const item = h.json(['inbox', '--agent', 'orchestrator']).items.find((i) => i.kind === 'rework_ready');
+  assert.equal(item.restore, 'gates retry T1 --from-rework');
+  const runs = (type) => h.logs().filter((e) => e.cmd === `check ${type}`).length;
+  const before = { tests: runs('tests'), clean: runs('clean'), ci: runs('ci') };
+  fs.rmSync(h.broken);
+  const restored = h.run(['gates', 'retry', 'T1', '--from-rework', '--agent', 'orchestrator']);
+  assert.equal(restored.code, 0, `${restored.stdout}${restored.stderr}`);
+  const task = h.readState('tasks.json').tasks[0];
+  assert.equal(task.status, 'submitted');
+  assert.equal(task.revision, submitted, 'the task is back at the revision it was submitted at');
+  assert.deepEqual({ tests: runs('tests'), clean: runs('clean'), ci: runs('ci') }, { ...before, ci: before.ci + 1 },
+    'only the failed gate runs again; tests and clean evidence at that revision still counts');
+  const report = h.json(['task', 'show', 'T1', '--agent', 'orchestrator']);
+  assert.deepEqual(report.gates.gates.filter((g) => g.type !== 'review').map((g) => [g.type, g.ok]), [['tests', true], ['clean', true], ['ci', true]]);
+  const restore = h.logs().findLast((e) => e.cmd === 'restore');
+  assert.deepEqual([restore.detail.from_revision, restore.detail.revision, restore.detail.gate], [submitted + 1, submitted, 'ci']);
+  h.ok(['rework', 'T1', '--reason', 'owner wants more', '--agent', 'owner']);
+  assert.equal(h.readState('tasks.json').tasks[0].revision, submitted + 2, 'the retired revision is never reused');
+});
+
+test('gates retry --from-rework sends a gate that still fails back to rework at a new revision, and refuses a claimed task', (t) => {
+  const h = brokenEnvironment(t);
+  const retired = h.readState('tasks.json').tasks[0].revision;
+  const again = h.run(['gates', 'retry', 'T1', '--from-rework', '--agent', 'orchestrator']);
+  assert.equal(again.code, 1, `${again.stdout}${again.stderr}`);
+  const task = h.readState('tasks.json').tasks[0];
+  assert.equal(task.status, 'rework');
+  assert.equal(task.revision, retired + 1, 'the new rework skips the retired revision');
+  assert.equal(h.logs().findLast((e) => e.cmd === 'rework').detail.gate, 'ci');
+  h.ok(['project', 'set', '--paused', '']);
+  h.ok(['claim', 'T1', '--agent', 'worker']);
+  const claimed = h.run(['gates', 'retry', 'T1', '--from-rework', '--agent', 'orchestrator']);
+  assert.notEqual(claimed.code, 0);
+  assert.match(claimed.stderr, /claimed by worker/);
+});
+
+test('gates retry --from-rework refuses a moved head, a changed acceptance and a rework a person sent', (t) => {
+  const h = brokenEnvironment(t);
+  fs.rmSync(h.broken);
+  const refused = (pattern) => {
+    const r = h.run(['gates', 'retry', 'T1', '--from-rework', '--agent', 'orchestrator']);
+    assert.notEqual(r.code, 0, r.stdout);
+    assert.match(r.stderr, pattern);
+    assert.equal(h.readState('tasks.json').tasks[0].status, 'rework');
+  };
+  const github = h.github();
+  github.prs['7'].headRefOid = 'f'.repeat(40);
+  h.saveGithub(github);
+  refused(/PR #7 head moved to fffffff/);
+  github.prs['7'].headRefOid = h.sha;
+  h.saveGithub(github);
+  // The fixture submits with a PR only, so the PR's head branch is the local branch that must not move.
+  const branch = h.readState('tasks.json').tasks[0].branch || github.prs['7'].headRefName;
+  h.git(['update-ref', `refs/heads/${branch}`, h.git(['rev-parse', `${h.sha}~1`])]);
+  refused(new RegExp(`branch ${branch} moved to`));
+  h.git(['update-ref', `refs/heads/${branch}`, h.sha]);
+  h.ok(['task', 'update', 'T1', '--acceptance', 'it works everywhere']);
+  refused(/revision \d+ to \d+ after its rework/);
+  const other = setup(t);
+  other.submit();
+  other.ok(['rework', 'T1', '--reason', 'not what I asked', '--agent', 'owner']);
+  const r = other.run(['gates', 'retry', 'T1', '--from-rework', '--agent', 'orchestrator']);
+  assert.notEqual(r.code, 0);
+  assert.match(r.stderr, /sent back by owner: not what I asked, not by an automatic gate failure/);
+});
+
 test('an accepted task with green gates merges in the event reaction without an agent turn', (t) => {
   const h = setup(t);
   h.submit();
