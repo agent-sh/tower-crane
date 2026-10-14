@@ -263,15 +263,17 @@ test('a reader without the lock never sees staged files whose commit point was n
   assert.deepEqual(unlocked(h).notes, []);
 });
 
-// Runs read with fs.readFileSync wrapped by onRead(file, text), as a writer
-// acting between a reader's own file reads would.
-function readingWith(t, onRead) {
+// Runs read with fs.readFileSync wrapped by onRead(file, text, read), as a
+// writer acting between a reader's own file reads would; `before` calls it
+// ahead of the read, without the text.
+function readingWith(t, onRead, { before = false } = {}) {
   const read = fs.readFileSync;
   const restore = () => { fs.readFileSync = read; };
   t.after(restore);
   fs.readFileSync = function observed(file, ...args) {
+    if (before && typeof file === 'string') onRead(path.resolve(file), undefined, read);
     const text = read.call(this, file, ...args);
-    if (typeof file === 'string') onRead(path.resolve(file), text, read);
+    if (!before && typeof file === 'string') onRead(path.resolve(file), text, read);
     return text;
   };
   return restore;
@@ -363,12 +365,12 @@ test('a reader that reads the other files after a commit\'s staged ones never ta
     fs.writeFileSync(`${project}.later`, JSON.stringify({ ...doc, goal: 'later goal' }, null, 2) + '\n');
     fs.renameSync(`${project}.later`, project);
     fs.appendFileSync(path.join(h.state, 'events.jsonl'), `${JSON.stringify(later)}\n`);
-  });
+  }, { before: true });
   const st = S.loadState(h.state, { fresh: true });
   restore();
   assert.ok(fired);
-  assert.equal(st.project.goal, 'later goal', 'the reader read again');
-  assert.ok(st.events.some((e) => e.id === later.id), 'with the event of the commit whose file it shows');
+  assert.equal(st.project.goal, 'later goal');
+  assert.ok(st.events.some((e) => e.id === later.id), 'the reader read again, with the event of the commit whose file it shows');
   assert.deepEqual(st.tasks.tasks[0].notes.map((n) => n.text), ['staged note']);
 });
 
