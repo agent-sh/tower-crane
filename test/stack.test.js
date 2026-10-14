@@ -27,8 +27,7 @@ test('submitted dependencies dispatch from the exact dependency head and spawn l
 
 // Snapshot-compare refusals for unrelated events are retried at once from fresh state.
 // Attempts are counted from the racing notes in the event log, which the state lock
-// serializes. The gh fixture's call log is a read-modify-write file, so concurrent gh
-// callers (automation, other observers) can drop records from it.
+// serializes.
 const racingNotes = (f) => {
   const byObserver = new Map();
   for (const e of fs.readFileSync(path.join(f.h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse)) {
@@ -79,12 +78,11 @@ test('detached spawn links the PR after its worker submits and exits', async (t)
   const f = setup(t);
   worker(f);
   const spawned = f.h.json(['spawn', '--task', 'T2']);
-  // The monitor links the PR before it exits, so its exit ends the wait.
+  // The monitor links the PR before it exits, so its exit ends the wait. A reviewer
+  // spawned meanwhile calls gh during the link; its call must not undo the link's record.
   const { task, order } = await waitOnRepo(f.h, () => {
     const task = f.h.json(['task', 'show', 'T2']);
-    if (!task.stack?.linked) return false;
-    // A final observer call can still be publishing the fixture after linking.
-    return { task, order: f.read().order };
+    return task.stack?.linked && { task, order: f.read().order };
   }, 'the monitor did not link the PR', { alive: spawned.monitor_pid });
   assert.equal(task.stack.linked, true);
   assert.equal(task.status, 'submitted');
