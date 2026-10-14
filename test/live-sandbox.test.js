@@ -13,7 +13,7 @@ const net = require('node:net');
 const os = require('node:os');
 const path = require('node:path');
 const cp = require('node:child_process');
-const { pinLiveRung, makeRepo, BIN, ROOT } = require('./helpers');
+const { pinLiveRung, makeRepo, BIN, ROOT, TMP_ROOT, LIVE_ROOT } = require('./helpers');
 
 const uid = typeof process.getuid === 'function' ? process.getuid() : null;
 const runDir = uid === null ? null : `/run/user/${uid}`;
@@ -223,16 +223,40 @@ function assertNetwork(seen, label) {
   for (const p of HOST_SOCKETS) assert.match(seen.sockets[p], /^ERR (EACCES|ENOENT|EPERM|ECONNREFUSED)$/, `${label}: ${p} is out of reach`);
 }
 
+// Other test processes add and remove fixtures in the shared temp root all
+// the time. These stand-ins exist when the agent starts and go one by one
+// while it runs, until stop() is called.
+function churn(t, h) {
+  const left = Array.from({ length: 3000 }, () => fs.mkdtempSync(path.join(TMP_ROOT, 'tower-crane-churn-')));
+  t.after(() => left.forEach((dir) => fs.rmSync(dir, { recursive: true, force: true })));
+  const logs = path.join(h.state, 'logs');
+  let remove;
+  const started = setInterval(() => {
+    if (!fs.existsSync(logs) || !fs.readdirSync(logs).length) return;
+    clearInterval(started);
+    remove = setInterval(() => {
+      const dir = left.pop();
+      if (dir) fs.rmSync(dir, { recursive: true, force: true });
+    }, 10);
+  }, 50);
+  return () => {
+    clearInterval(started);
+    clearInterval(remove);
+  };
+}
+
 // A real agent of each harness, with the user's own home as the original
 // home, reads none of the user's credential files or a file planted in the
 // home, and still runs node, npm install and a git push: a small agent, whose
 // worktree is read-only, and a worker. Writes stay in the test's
 // directories: the cache is redirected, and results land in a directory the
-// project's sandbox extension adds.
+// project's sandbox extension adds. The fixture lives in LIVE_ROOT, so the
+// fixtures other test processes add and remove in the shared temp root
+// meanwhile are none of the agent's business.
 for (const [harness, rung] of [['claude', 'small'], ['claude', 'easy'], ['codex', 'small'], ['codex', 'easy']]) {
   const flag = `TOWER_CRANE_LIVE_${harness.toUpperCase()}`;
   test(`a real ${harness} ${rung} sandbox reads nothing in the user's home but what the agent needs`, { skip: process.env[flag] !== '1' && `set ${flag}=1 to run against the real ${harness} CLI`, timeout: 300000 }, async (t) => {
-    const h = makeRepo(t);
+    const h = makeRepo(t, { root: LIVE_ROOT });
     h.init();
     h.ok(['task', 'add', '--title', 'Home probe', '--acceptance', 'the sandbox blocks every credential read']);
     const home = require('node:os').homedir();
@@ -263,7 +287,8 @@ for (const [harness, rung] of [['claude', 'small'], ['claude', 'easy'], ['codex'
     });
     pinLiveRung(h, harness, rung);
     const env = { ...h.env, HOME: home, USERPROFILE: home, CLAUDE_CONFIG_DIR: '', CODEX_HOME: '', XDG_CACHE_HOME: path.join(h.base, 'cache') };
-    const r = await h.runAsync(['spawn', '--role', rung, '--task', 'T1', '--wait'], { env });
+    const stop = churn(t, h);
+    const r = await h.runAsync(['spawn', '--role', rung, '--task', 'T1', '--wait'], { env }).finally(stop);
     // A model that refuses the prompt never runs the command, so the sandbox
     // gave no verdict: a skip, not a pass or a sandbox failure.
     if (r.code !== 0 && !fs.existsSync(out) && /"stop_reason":"refusal"/.test(`${r.stderr}\n${agentLog(h)}`)) {
