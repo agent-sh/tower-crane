@@ -736,8 +736,11 @@ test('unchanged pending CI is rechecked each minute without new records, and CI 
   // The stall record is written mid-run: the recheck that wrote it, and the
   // reaction its gate event queues, still render the board and read the PR.
   const stall = h.logs().findLast((e) => e.cmd === 'check ci');
-  const finished = (id) => h.logs().some((e) => e.cmd === 'automation' && e.detail.source === id && e.detail.phase !== 'running');
-  await until(() => [stall.id, ...reconciles().map((e) => e.id)].every(finished), 'the engine finishes the run that recorded the stall');
+  const outcome = (id) => h.logs().findLast((e) => e.cmd === 'automation' && e.detail.source === id && e.detail.phase !== 'running')?.detail.phase;
+  let sources = [];
+  await until(() => (sources = [stall.id, ...reconciles().map((e) => e.id)]).every(outcome), 'the engine finishes the run that recorded the stall');
+  // A reaction that failed also finishes; it must not pass for one that worked.
+  for (const id of sources) assert.ok(['done', 'deferred'].includes(outcome(id)), `the reaction to ${id} ended ${outcome(id)}`);
   assert.equal(ci().length, 2);
   assert.match(ci().at(-1).summary, /Stalled: no CI run has been queued or running at this head since/);
   assert.equal(h.readState('tasks.json').tasks[0].status, 'submitted', 'a stall is not a verdict on the change');
