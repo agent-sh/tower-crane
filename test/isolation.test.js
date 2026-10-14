@@ -1273,7 +1273,7 @@ test('a codex agent\'s temp directory is its own, never the caller\'s TMPDIR or 
       // a browser's singleton socket, the short directory kept for it.
       const scratch = h.readState('tasks.json').tasks[0].scratch;
       const long = Buffer.byteLength(path.join(scratch, 'tmp')) > 62;
-      if (long) assert.match(seen.tmpdir, /[\\/]tower-crane[\\/]t[\\/][0-9a-f]{12}$/, 'a long scratch path gets the short temp directory');
+      if (long) assert.match(seen.tmpdir, /[\\/]tc[\\/][0-9a-f]{12}$/, 'a long scratch path gets the short temp directory');
       else assert.equal(seen.tmpdir, path.join(scratch, 'tmp'));
     }
   }
@@ -1286,6 +1286,10 @@ test('a codex worker\'s temp directory replaces a file or link an earlier attemp
   isolated(h, 'hard', 'codex');
   spawn(h, u, 'hard');
   const tmp = u.report().tmpdir;
+  // Found in review 2026-10-14: against a lib/ that passes the caller's
+  // TMPDIR this was the runner's own temp directory, which the loop below
+  // removes. Only a path in the fixture is touched.
+  assert.ok(tmp && [h.base, fs.realpathSync(h.base)].some((b) => tmp.startsWith(b + path.sep)), `the temp directory is in the fixture: ${tmp}`);
   const outside = path.join(u.home, '.ssh');
   fs.mkdirSync(outside, { recursive: true });
   for (const plant of [() => fs.writeFileSync(tmp, 'x'), () => fs.symlinkSync(path.join(u.home, 'gone'), tmp), () => fs.symlinkSync(outside, tmp)]) {
@@ -1300,6 +1304,58 @@ test('a codex worker\'s temp directory replaces a file or link an earlier attemp
   const scratch = h.readState('tasks.json').tasks[0].scratch;
   A.removeTaskCache({ scratch });
   assert.ok(!fs.existsSync(scratch) && !fs.existsSync(tmp), 'removing the scratch removes the temp directory');
+});
+
+test('a codex agent\'s short temp directory is named from the resolved cache, so it goes with a cache behind a link', { skip: NO_STUBS }, t => {
+  // Found in review 2026-10-14: spawn named it from the resolved cache path
+  // and removal from the recorded one, so a cache root behind a link
+  // (/home -> /var/home on Fedora Atomic) leaked it.
+  const { h, u } = setup(t);
+  const real = path.join(h.base, 'real-cache');
+  const linked = path.join(h.base, 'c');
+  fs.mkdirSync(real);
+  fs.symlinkSync(real, linked, 'dir');
+  isolated(h, 'hard', 'codex');
+  spawn(h, u, 'hard', { XDG_CACHE_HOME: linked });
+  const tmp = u.report().tmpdir;
+  const scratch = h.readState('tasks.json').tasks[0].scratch;
+  assert.ok(tmp.startsWith(fs.realpathSync(real) + path.sep), `made under the resolved root: ${tmp}`);
+  assert.ok(fs.lstatSync(tmp).isDirectory());
+  A.removeTaskCache({ scratch });
+  assert.ok(!fs.existsSync(tmp), 'removing the scratch through the link removes the temp directory');
+});
+
+test('a codex agent\'s temp directory fits a browser\'s singleton socket when its cache root is short enough', { skip: NO_STUBS }, t => {
+  // Found in review 2026-10-14: the short fallback had no length check, and
+  // ran 98 to 104 bytes under a fixture's root.
+  const { h, u } = setup(t);
+  isolated(h, 'review', 'codex');
+  // A cache root of 46 bytes or less, as /home/<user>/.cache is for a user name of up to 34 letters.
+  const root = fs.mkdtempSync(path.join(require('node:os').homedir(), '.cache', 'tc-test-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  assert.ok(Buffer.byteLength(root) <= 46, `${root} is short enough for this check`);
+  spawn(h, u, 'review', { XDG_CACHE_HOME: root });
+  const tmp = u.report().tmpdir;
+  assert.ok(Buffer.byteLength(tmp) <= 62, `${tmp} is ${Buffer.byteLength(tmp)} bytes`);
+  assert.ok(tmp.startsWith(fs.realpathSync(root) + path.sep), tmp);
+});
+
+test('the project\'s env and env_file cannot move a codex agent\'s temp directory', { skip: NO_STUBS }, t => {
+  // Found in review 2026-10-14: spawn applies the project's env after the
+  // harness's, so it overrode TMPDIR, TMP, TEMP and JAVA_TOOL_OPTIONS.
+  const { h, u } = setup(t);
+  const elsewhere = path.join(u.home, '.cache', 'tct');
+  fs.mkdirSync(elsewhere, { recursive: true });
+  const file = path.join(h.base, 'agent.env');
+  fs.writeFileSync(file, `TMP=${elsewhere}\nTEMP=${elsewhere}\n`);
+  h.ok(['project', 'set', '--env', JSON.stringify({ TMPDIR: elsewhere, JAVA_TOOL_OPTIONS: `-Xss2m -Djava.io.tmpdir=${elsewhere}` }), '--env_file', file]);
+  isolated(h, 'small', 'codex');
+  spawn(h, u, 'small');
+  const seen = u.report();
+  assert.ok(seen.tmpdir && !seen.tmpdir.startsWith(elsewhere), `TMPDIR is the agent's own: ${seen.tmpdir}`);
+  assert.deepEqual([seen.tmpEnv.TMP, seen.tmpEnv.TEMP], [seen.tmpdir, seen.tmpdir]);
+  assert.equal(seen.tmpEnv.JAVA_TOOL_OPTIONS, `-Xss2m -Djava.io.tmpdir=${seen.tmpdir}`, 'the project\'s other options stay');
+  assert.equal(commandsRead(seen, path.join(elsewhere, 'x')), false, 'the directory the project names stays hidden');
 });
 
 test('a codex agent cannot read a caller TMPDIR outside the home that an entry of / exposes', { skip: (NO_STUBS || !fs.existsSync('/var/tmp')) && 'needs /var/tmp' }, t => {
@@ -1847,11 +1903,11 @@ test('worker and reviewer sandboxes write a cache of their own, never the user c
         for (const p of forbidden) assert.ok(!contains(w, p), `${seen.harness} ${rung}: ${w} grants a write on ${p}`);
       }
       // Besides it, codex writes its temp directory, which is the short
-      // tower-crane/t/<12 hex> when tmp in the cache is too long (codexTmp).
+      // tc/<12 hex> under the cache root when tmp in the cache is too long (codexTmp).
       const own = writes.filter((w) => contains(root, w) && !(seen.harness === 'codex' && w === seen.tmpdir));
       assert.equal(own.length, 1, `${seen.harness} ${rung}: one directory under the cache root: ${JSON.stringify(own)}`);
       if (seen.harness === 'codex' && !contains(own[0], seen.tmpdir)) {
-        assert.match(seen.tmpdir, /[\\/]tower-crane[\\/]t[\\/][0-9a-f]{12}$/, `${rung}: the codex temp directory is its own`);
+        assert.match(seen.tmpdir, /[\\/]tc[\\/][0-9a-f]{12}$/, `${rung}: the codex temp directory is its own`);
       }
       assert.ok(contains(path.join(fs.realpathSync(root), 'tower-crane', rung === 'review' ? 'agents' : 'tasks'), own[0]) && path.basename(own[0]) === (rung === 'review' ? started.agent : 'T1'), own[0]);
       assert.ok(fs.statSync(own[0]).isDirectory(), 'the granted cache exists');
