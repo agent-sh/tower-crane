@@ -584,6 +584,41 @@ test('a sandboxed claude removes its ignored cwd placeholders after exit', { ski
   }
 });
 
+test('a sandboxed claude removes the .claude directory its placeholders made', { skip: NO_STUBS }, (t) => {
+  const { h, u, wt } = setup(t);
+  isolated(h, 'small', 'claude');
+  fs.rmSync(path.join(wt, '.claude'), { recursive: true });
+  spawn(h, u, 'small', { STUB_CLAUDE_SANDBOX_PLACEHOLDERS: JSON.stringify(SANDBOX_MOUNTS) });
+  assert.equal(u.report().placeholderGitStatus.code, 0, 'the placeholders were made');
+  assert.equal(fs.existsSync(path.join(wt, '.claude')), false, '.claude is gone after exit');
+  for (const name of SANDBOX_MOUNTS.filter((n) => !n.includes('/'))) assert.equal(fs.existsSync(path.join(wt, name)), false, `${name} is gone after exit`);
+});
+
+test('a spawn sweeps placeholders an earlier agent left, and keeps the worktree\'s own files by those names', { skip: NO_STUBS }, (t) => {
+  // An agent whose monitor died before its cleanup leaves empty read-only
+  // files; the next spawn would take them for the worktree's own, leave them
+  // out of its exclude file, and a worker could commit them.
+  const { h, u, wt } = setup(t);
+  isolated(h, 'small', 'claude');
+  fs.writeFileSync(path.join(wt, '.zshrc'), '');
+  h.git(['add', '.zshrc'], wt);
+  h.git(['commit', '-q', '-m', 'an empty zshrc of the project'], wt);
+  const stale = ['.bashrc', '.gitconfig', '.claude/loop.md'];
+  for (const name of [...stale, '.zshrc']) {
+    fs.writeFileSync(path.join(wt, name), '');
+    fs.chmodSync(path.join(wt, name), 0o444);
+  }
+  fs.writeFileSync(path.join(wt, '.profile'), '');
+  fs.mkdirSync(path.join(wt, '.claude', 'agents'));
+  fs.mkdirSync(path.join(wt, '.vscode'));
+  fs.writeFileSync(path.join(wt, '.vscode', 'settings.json'), '{}\n');
+  spawn(h, u, 'small');
+  for (const name of [...stale, '.claude/agents']) assert.equal(fs.existsSync(path.join(wt, name)), false, `stale ${name} is swept`);
+  for (const name of ['.zshrc', '.profile', '.vscode/settings.json', '.claude/settings.json']) assert.equal(fs.existsSync(path.join(wt, name)), true, `${name} stays`);
+  const exclude = fs.readFileSync(path.join(h.state, 'homes', fs.readdirSync(path.join(h.state, 'homes')).find((n) => n.startsWith('small-')), 'sandbox-git-exclude'), 'utf8').split('\n');
+  assert.ok(exclude.includes('/.bashrc'), 'a swept name is excluded again');
+});
+
 test('the agent honors its worktree\'s own core.excludesFile, not the main checkout\'s', { skip: NO_STUBS }, (t) => {
   const { h, u, wt } = setup(t);
   isolateGitEnvironment(h, u);
@@ -607,14 +642,16 @@ test('the agent honors its worktree\'s own core.excludesFile, not the main check
   assert.deepEqual(u.report().placeholderGitStatus, { code: 0, stdout: '?? main-ignored/data\n', stderr: '' }, 'the worktree\'s excludes hide its ignored directory and the main checkout\'s do not reach it');
 });
 
-test('sandbox cleanup preserves and reports a pre-existing empty read-only file with a placeholder name', { skip: NO_STUBS }, (t) => {
+test('an untracked empty read-only file with a placeholder name is a stale placeholder: swept, excluded and never reported', { skip: NO_STUBS }, (t) => {
+  // Nothing tells it from a placeholder an earlier agent left, and kept as
+  // the worktree's own it would stay out of the exclude file.
   const { h, u, wt } = setup(t);
   const { global } = isolateGitEnvironment(h, u);
   isolated(h, 'small', 'claude');
   fs.rmSync(path.join(wt, '.claude', 'settings.local.json'));
-  const realFile = path.join(wt, '.bash_profile');
-  fs.writeFileSync(realFile, '');
-  fs.chmodSync(realFile, 0o444);
+  const stale = path.join(wt, '.bash_profile');
+  fs.writeFileSync(stale, '');
+  fs.chmodSync(stale, 0o444);
   const globalIgnore = path.join(h.base, 'explicit-global-ignore');
   fs.writeFileSync(globalIgnore, 'explicitly-ignored/\n');
   fs.mkdirSync(path.join(wt, 'explicitly-ignored'));
@@ -628,14 +665,11 @@ test('sandbox cleanup preserves and reports a pre-existing empty read-only file 
     STUB_CLAUDE_SANDBOX_PLACEHOLDERS: JSON.stringify(CLAUDE_SANDBOX_PLACEHOLDERS),
   });
   const seen = u.report();
-  assert.deepEqual(seen.placeholderGitStatus, { code: 0, stdout: '?? .bash_profile\n', stderr: '' });
-  assert.equal(fs.existsSync(realFile), true, 'the existing file remains');
-  assert.equal(fs.statSync(realFile).size, 0, 'the existing file stays empty');
-  assert.equal(fs.statSync(realFile).mode & 0o222, 0, 'the existing file keeps its read-only mode');
-  for (const relative of CLAUDE_SANDBOX_PLACEHOLDERS.filter((name) => name !== '.bash_profile' && name !== TRACKED_SETTINGS)) {
+  assert.deepEqual(seen.placeholderGitStatus, { code: 0, stdout: '', stderr: '' });
+  for (const relative of CLAUDE_SANDBOX_PLACEHOLDERS.filter((name) => name !== TRACKED_SETTINGS)) {
     assert.equal(fs.existsSync(path.join(wt, relative)), false, `${relative} placeholder is removed`);
   }
-  assert.equal(status(started.cwd), '?? .bash_profile');
+  assert.equal(status(started.cwd), '');
   assert.equal(u.env.GIT_CONFIG_GLOBAL, global, 'Git uses the test-only global config');
 });
 
@@ -1450,12 +1484,11 @@ test('a PATH directory at the root never opens the root or a directory that hold
 });
 
 test('a read-only claude worktree under the home hides the home whole and binds its placeholders before the worktree turns read-only', { skip: NO_STUBS }, t => {
-  // Seen 2026-10-14: a small agent's sandbox hid the entries beside the
-  // worktree's path as they were at spawn, so a file made later in the home
-  // was readable. The home is hidden whole now. claude remounts the worktree
-  // inside it and binds a placeholder over each absent protected dotfile;
-  // bubblewrap cannot make one once the worktree is read-only (seen
-  // 2026-10-13), so each comes before the worktree in denyWrite.
+  // A file made in the home after spawn must stay hidden, so the home is
+  // hidden whole. claude remounts the worktree inside it and binds a
+  // placeholder over each absent protected dotfile; bubblewrap cannot make
+  // one once the worktree is read-only, so each comes before the worktree
+  // in denyWrite.
   const { h, u, wt } = setup(t);
   const home = fs.realpathSync(h.base);
   fs.writeFileSync(path.join(wt, '.bashrc'), '');
@@ -1480,6 +1513,28 @@ test('a read-only claude worktree under the home hides the home whole and binds 
     const before = box.denyWrite.slice(0, at).filter((p) => p.startsWith(wt + path.sep)).map((p) => path.relative(wt, p).split(path.sep).join('/'));
     assert.deepEqual(before, ClaudeSandboxPlaceholders.FILES.filter((f) => !present.includes(f)), 'each absent placeholder precedes the worktree');
     assert.deepEqual(box.denyWrite.slice(at + 1).filter((p) => p.startsWith(wt + path.sep) && ClaudeSandboxPlaceholders.FILES.includes(path.relative(wt, p).split(path.sep).join('/'))), [], 'none follows it');
+  }
+});
+
+test('an agent of another project reads the Tower Crane code in the checkout, never its state, brokers or homes', { skip: NO_STUBS }, t => {
+  // The checkout the CLI runs from can hold its own project's state, whose
+  // brokers/ holds tokens and homes/ links to the user's credentials. The
+  // home here holds the checkout, as ~ holds ~/projects/<checkout>.
+  const { h, u } = setup(t);
+  const home = fs.realpathSync(path.dirname(ROOT));
+  const checkout = fs.realpathSync(ROOT);
+  const hidden = ['.tower-crane/brokers/orchestrator/broker.json', '.tower-crane/homes/worker-T1-1/.credentials.json', '.tower-crane/tasks.json', '.git/config']
+    .map((p) => path.join(checkout, ...p.split('/')));
+  const open = ['bin/tower-crane.js', 'lib/agents.js', 'skills/tower-crane-work/SKILL.md', 'agents/tower-crane-small.md', 'standards/default.md', 'package.json']
+    .map((p) => path.join(checkout, ...p.split('/')));
+  for (const harness of ['claude', 'codex']) {
+    for (const rung of ['small', 'hard']) {
+      isolated(h, rung, harness);
+      spawn(h, u, rung, { HOME: home, USERPROFILE: home });
+      const seen = u.report();
+      for (const p of hidden) assert.equal(commandsRead(seen, p), false, `${harness} ${rung}: ${path.relative(checkout, p)} is hidden`);
+      for (const p of open) assert.equal(commandsRead(seen, p), true, `${harness} ${rung}: ${path.relative(checkout, p)} is readable`);
+    }
   }
 });
 

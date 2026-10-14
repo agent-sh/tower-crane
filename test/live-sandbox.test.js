@@ -208,9 +208,10 @@ function churn(t, h) {
 // home, and still runs node, npm install and a git push: a small agent, whose
 // worktree is read-only, and a worker. Writes stay in the test's
 // directories: the cache is redirected, and results land in a directory the
-// project's sandbox extension adds. The fixture lives in LIVE_ROOT, so the
-// fixtures other test processes add and remove in the shared temp root
-// meanwhile are none of the agent's business.
+// project's sandbox extension adds. The fixture lives in LIVE_ROOT, apart
+// from the fixtures other test processes add and remove in the shared temp
+// root, and the probe runs while stand-ins there come and go: a sandbox that
+// listed the entries around the worktree would race them.
 for (const [harness, rung] of [['claude', 'small'], ['claude', 'easy'], ['codex', 'small'], ['codex', 'easy']]) {
   const flag = `TOWER_CRANE_LIVE_${harness.toUpperCase()}`;
   test(`a real ${harness} ${rung} sandbox reads nothing in the user's home but what the agent needs`, { skip: process.env[flag] !== '1' && `set ${flag}=1 to run against the real ${harness} CLI`, timeout: 300000 }, async (t) => {
@@ -266,15 +267,15 @@ for (const [harness, rung] of [['claude', 'small'], ['claude', 'easy'], ['codex'
 // the user's home after spawn, at the top or in a new directory, and in a
 // directory on the way from the home to a read-only worktree, stays hidden.
 // The command writes `ready` and waits for `go`, so the test makes them after
-// the sandbox around that very command is up. Seen 2026-10-14: a claude small
-// agent's sandbox hid only the entries each such directory held at spawn, and
-// read all three. Codex mounts only the paths its profile names. The fixture
-// must sit under the home (TOWER_CRANE_TEST_TMP under ~/.cache, the default).
+// the sandbox around that very command is up. claude hides the home whole
+// and codex mounts only the paths its profile names. The fixture lives in
+// LIVE_ROOT, under the home's cache, so a directory on its way from the home
+// is one the agent must not read.
 for (const harness of ['claude', 'codex']) {
   const flag = `TOWER_CRANE_LIVE_${harness.toUpperCase()}`;
   test(`a real ${harness} small sandbox hides files made in the user's home after it starts`, { skip: process.env[flag] !== '1' && `set ${flag}=1 to run against the real ${harness} CLI`, timeout: 300000 }, async (t) => {
     const home = fs.realpathSync(os.homedir());
-    const h = makeRepo(t);
+    const h = makeRepo(t, { root: LIVE_ROOT });
     if (!h.base.startsWith(home + path.sep)) {
       t.skip(`the fixture ${h.base} is outside the home ${home}`);
       return;
@@ -303,10 +304,7 @@ for (const harness of ['claude', 'codex']) {
       input: `Sandbox probe set up by the owner. Run exactly this one command with your command tool, then reply with its exit code and stop. It waits up to two minutes for a signal file; let it finish. Do not use tower-crane.\n\n${node} -e '${script}'\n`,
     });
     pinLiveRung(h, harness, 'small');
-    // Codex grants its temp directory, so temp must not hold the fixture.
-    const tmp = path.join(h.base, 'agent-tmp');
-    fs.mkdirSync(tmp);
-    const env = { ...h.env, HOME: home, USERPROFILE: home, CLAUDE_CONFIG_DIR: '', CODEX_HOME: '', XDG_CACHE_HOME: path.join(h.base, 'cache'), TMPDIR: tmp, TMP: tmp, TEMP: tmp };
+    const env = { ...h.env, HOME: home, USERPROFILE: home, CLAUDE_CONFIG_DIR: '', CODEX_HOME: '', XDG_CACHE_HOME: path.join(h.base, 'cache') };
     let done = false;
     const run = h.runAsync(['spawn', '--role', 'small', '--task', 'T1', '--wait'], { env }).finally(() => { done = true; });
     // The command's own signal; the spawn ending first means it never ran.
