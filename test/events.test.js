@@ -596,7 +596,7 @@ test('an observer waiting for the state lock does not block its timeout', async 
   h.ok(['claim', 'T1', '--agent', 'worker'], { hooks });
   const paused = path.join(h.base, 'paused');
   const ready = created(paused);
-  const writer = child(t, h, ['task', 'note', 'T1', 'owner comment'], { HOOK_PAUSE_ON: 'tasks.json', HOOK_PAUSED: paused });
+  const writer = child(t, h, ['task', 'note', 'T1', 'owner comment'], { HOOK_PAUSE_LOCKED: paused });
   await ready;
   fs.writeFileSync(clock, String(start + 60001));
   const before = performance.now();
@@ -619,7 +619,7 @@ test('startup reconciliation with an active PR does not hold a timeout behind th
   submit(h, ['--pr', '7']);
   const paused = path.join(h.base, 'paused');
   const ready = created(paused);
-  const writer = child(t, h, ['task', 'note', 'T1', 'owner comment'], { HOOK_PAUSE_ON: 'tasks.json', HOOK_PAUSED: paused });
+  const writer = child(t, h, ['task', 'note', 'T1', 'owner comment'], { HOOK_PAUSE_LOCKED: paused });
   await ready;
   try {
     const before = performance.now();
