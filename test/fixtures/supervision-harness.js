@@ -1,8 +1,9 @@
 'use strict';
 
 const cp = require('node:child_process');
+const fs = require('node:fs');
 const path = require('node:path');
-const { writeAtomic, readWritten } = require('../atomic-file');
+const { writeAtomic } = require('../atomic-file');
 
 if (path.resolve(process.argv[1] || '') !== __filename) {
   const spawn = cp.spawn;
@@ -20,7 +21,7 @@ if (path.resolve(process.argv[1] || '') !== __filename) {
   const harness = process.argv[2];
   const args = process.argv.slice(3);
   const file = process.env.TOWER_CRANE_TEST_SUPERVISION_FILE;
-  const attempts = readWritten(file, { json: true }) || [];
+  const attempts = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : [];
   if (!attempts.length) {
     cp.execFileSync(process.execPath, [path.join(__dirname, '..', '..', 'bin', 'tower-crane.js'), 'claim', process.env.TOWER_CRANE_TASK], { stdio: 'ignore' });
   }

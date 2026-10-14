@@ -1,5 +1,7 @@
 'use strict';
 
+const { fileWritten } = require('./signals');
+
 // Secret canaries: unique random values placed where an owner keeps secrets
 // (rung and project env, an env_file, a harness credential), then searched
 // for in every file, event, output and process listing a run leaves. A hit
@@ -10,7 +12,6 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const cp = require('node:child_process');
 const assert = require('node:assert/strict');
-const { readWritten } = require('./atomic-file');
 
 function make(labels) {
   return Object.fromEntries(labels.map((label) => [label, `tccanary${label.replace(/\W/g, '')}${crypto.randomBytes(12).toString('hex')}`]));
@@ -75,24 +76,15 @@ function processListing() {
     }
   }
   if (process.platform !== 'win32') {
-    const r = cp.spawnSync('ps', ['-eww', '-o', 'args='], { encoding: 'utf8', timeout: 10000 });
+    const r = cp.spawnSync('ps', ['-eww', '-o', 'args='], { encoding: 'utf8', timeout: 300000 });
     if (r.status === 0) parts.push(r.stdout);
   }
   return parts.join('\n');
 }
 
 // Empty files signal events; PID markers need content after file creation.
-// With `json` it returns the parsed value, waiting while a writer that does
-// not publish atomically has left the file empty or half written.
-async function waitFor(file, { ms = 20000, nonempty = false, json = false } = {}) {
-  const deadline = Date.now() + ms;
-  for (;;) {
-    const value = readWritten(file, { json });
-    if (value !== undefined && (json || !nonempty || value)) return value;
-    if (Date.now() >= deadline) return null;
-    await new Promise((resolve) => setTimeout(resolve, 50));
-  }
-}
+// `what` names a wait that fails at the hung-test guard, or early once `alive` exits.
+const waitFor = (file, { nonempty = false, ...options } = {}) => fileWritten(file, { ...options, check: (text) => !nonempty || text });
 
 function assertNoHits(hits, what) {
   assert.deepEqual(hits.map((h) => `${h.label} in ${h.where}`), [], `secret canaries leaked into ${what}`);

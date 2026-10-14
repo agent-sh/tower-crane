@@ -160,7 +160,7 @@ test('sources gate pins its DNS answer for the real HTTP transport despite rebin
   assert.deepEqual(requests, ['/0']);
 });
 
-test('the source fetch refuses non-public addresses and redirects before connecting', async () => {
+test('the source fetch refuses non-public addresses and redirects before connecting', async (t) => {
   const answers = {
     'source.example': [{ address: '93.184.216.34', family: 4 }],
     'private.example': [{ address: '10.0.0.1', family: 4 }],
@@ -186,7 +186,7 @@ test('the source fetch refuses non-public addresses and redirects before connect
         return new Response(null, { status: 302, headers: { location: REDIRECTS.get(target.pathname) } });
       },
     };
-    await assert.rejects(fetchPublic(url, { signal: AbortSignal.timeout(5000) }, ctx), /non-public address/, url);
+    await assert.rejects(fetchPublic(url, { signal: t.signal }, ctx), /non-public address/, url);
     assert.deepEqual(requests, expected, url);
   }
 });

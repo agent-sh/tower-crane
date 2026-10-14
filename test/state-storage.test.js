@@ -119,7 +119,7 @@ test('UserPromptSubmit and tool hooks proceed while another process holds the st
   fs.writeFileSync(binding, JSON.stringify({ agent, task: 'T1', state: h.state, harness: 'claude', attempt: 1 }));
   const env = { ...h.env, TOWER_CRANE_AGENT: agent, TOWER_CRANE_STATE: h.state };
   const bridge = (event) => cp.spawnSync(process.execPath, [BRIDGE, 'hook'], {
-    cwd: h.repo, env, input: JSON.stringify({ hook_event_name: event, tool_name: 'Read' }), encoding: 'utf8', timeout: 20000,
+    cwd: h.repo, env, input: JSON.stringify({ hook_event_name: event, tool_name: 'Read' }), encoding: 'utf8', timeout: 300000,
   });
   const files = () => ['tasks.json', 'events.jsonl'].map((name) => fs.readFileSync(stateFile(h, name), 'utf8'));
   const lock = S.acquireLock(h.state);
@@ -142,7 +142,7 @@ test('UserPromptSubmit and tool hooks proceed while another process holds the st
     const prompt = bridge('UserPromptSubmit');
     assert.equal(prompt.status, 0, prompt.stderr);
     assert.equal(prompt.stdout, '');
-    assert.ok(Date.now() - started < S.LOCK_WAIT_MS / 4, 'the prompt did not wait for the lock');
+    assert.ok(Date.now() - started < S.LOCK_WAIT_MS / 4, 'the prompt did not wait for the lock'); // wait-allow: prompt hooks must use the nonblocking attempt instead of the ordinary lock wait
     assert.deepEqual(files(), unchanged);
   } finally {
     S.releaseLock(held);

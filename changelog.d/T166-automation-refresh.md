@@ -1,0 +1,1 @@
+- Tests after the main refresh wait for stack-link events and lease-handshake state. Review dry runs read fixture credential stores.

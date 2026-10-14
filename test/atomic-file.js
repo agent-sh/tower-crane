@@ -4,8 +4,8 @@
 // creates or truncates the file before it writes, so a reader polling under
 // load can find it empty or half written. writeAtomic writes a hidden file
 // beside the target and renames it over the target, so a reader sees either
-// no file or all of it. readWritten is the reader's side: a missing file, and
-// with `json` an empty or unparsable one, is not written yet.
+// no file or all of it. The reader's side is fileWritten(file, { json: true })
+// in test/signals.js, which waits through a file that is not written yet.
 //
 // Fixtures that wrap fs pass their unwrapped functions as `impl`.
 
@@ -42,24 +42,4 @@ function writeAtomic(file, data, options, impl = fs) {
   }
 }
 
-// The file's text, or its parsed value with `json`; undefined while it is
-// not written yet.
-function readWritten(file, { json = false, impl = fs } = {}) {
-  let text;
-  try {
-    text = impl.readFileSync(file, 'utf8');
-  } catch (error) {
-    if (error.code === 'ENOENT') return undefined;
-    throw error;
-  }
-  if (!json) return text;
-  if (!text) return undefined;
-  try {
-    return JSON.parse(text);
-  } catch (error) {
-    if (error instanceof SyntaxError) return undefined;
-    throw error;
-  }
-}
-
-module.exports = { writeAtomic, readWritten };
+module.exports = { writeAtomic };

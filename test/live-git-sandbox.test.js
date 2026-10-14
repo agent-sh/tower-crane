@@ -61,7 +61,7 @@ if (spec.steps.includes('git')) {
 const marked = Object.fromEntries(Object.entries(process.env).filter(([k]) => /SANDBOX|^CODEX_/.test(k) && k !== 'CODEX_HOME'));
 fs.writeFileSync(out, JSON.stringify({ steps, marked, gc: git('config', 'gc.auto').stdout.trim() }));
 if (spec.wait) {
-  const until = Date.now() + 180000;
+  const until = Date.now() + 300000;
   while (!fs.existsSync(spec.wait) && Date.now() < until) cp.spawnSync('sleep', ['1']);
 }
 `;
@@ -132,7 +132,7 @@ function realCodex() {
   if (process.env.TOWER_CRANE_LIVE_CODEX !== '1') return { skip: 'set TOWER_CRANE_LIVE_CODEX=1 to run against the real codex sandbox' };
   if (process.platform !== 'linux') return { skip: 'the codex probe covers the Linux sandbox' };
   if (process.env.TOWER_CRANE_SANDBOX === '1') return { skip: 'inside a sandbox, where a nested one cannot start' };
-  const r = cp.spawnSync('codex', ['sandbox', '--', 'true'], { encoding: 'utf8', timeout: 60000, cwd: process.env.TOWER_CRANE_TEST_TMP || undefined });
+  const r = cp.spawnSync('codex', ['sandbox', '--', 'true'], { encoding: 'utf8', timeout: 300000, cwd: process.env.TOWER_CRANE_TEST_TMP || undefined });
   if (r.error?.code === 'ENOENT') return { skip: 'codex is not on PATH' };
   if (r.status !== 0) return { skip: `codex sandbox does not start here: ${String(r.stderr).trim().split('\n').pop()}` };
   return { skip: false };

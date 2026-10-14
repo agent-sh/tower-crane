@@ -7,7 +7,7 @@ const path = require('node:path');
 const cp = require('node:child_process');
 const crypto = require('node:crypto');
 const zlib = require('node:zlib');
-const { makeRepo, PTY_AVAILABLE } = require('./helpers');
+const { makeRepo, pinRung, PTY_AVAILABLE } = require('./helpers');
 const { gateFixture } = require('./gate-helpers');
 const { shellQuote } = require('../lib/gates/common');
 
@@ -88,6 +88,10 @@ function unauthorizedServer(t) {
 test('git the CLI and gates run takes no command from repository config or hooks', async (t) => {
   const h = makeRepo(t);
   h.init();
+  // Git configuration is independent of a native harness's credential stores.
+  for (const rung of ['medium', 'review']) pinRung(h, rung, {
+    harness: 'command', command: [process.execPath, '-e', 'process.exit(0)', '{prompt}'],
+  });
   const sha = gateFixture(h);
   h.ok(['project', 'set', '--tests-cmd', 'node test/value.test.js', '--clean-cmd', h.env.TOWER_CRANE_CLEAN_CMD]);
   for (const title of ['Change', 'Other', 'Ssh', 'Https', 'Local', 'Helper', 'Vcs']) h.ok(['task', 'add', '--title', title, '--acceptance', 'works']);
@@ -246,7 +250,7 @@ test('a commondir toggled in a loop never redirects the state lookup', (t) => {
   const toggler = cp.spawn(process.execPath, ['-e', `
 const fs = require('node:fs');
 const [file, named] = process.argv.slice(1);
-const spin = (ms) => { const end = process.hrtime.bigint() + BigInt(ms * 1e6); while (process.hrtime.bigint() < end); };
+const spin = (ms) => { const end = process.hrtime.bigint() + BigInt(ms * 1e6); while (process.hrtime.bigint() < end); }; // wait-allow: paces the toggler; it runs until the test stops it
 const stop = Date.now() + 300000;
 while (Date.now() < stop) {
   try { fs.writeFileSync(file, named + '\\n'); } catch {}
@@ -632,7 +636,7 @@ const ROWS = [
     for (const [key, value] of [['clean', command], ['smudge', command], ['priority', '0']]) r.set(`lfs.extension.tc.${key}`, value);
   } },
 ];
-const LFS_AVAILABLE = cp.spawnSync('git-lfs', ['version'], { timeout: 10000 }).status === 0;
+const LFS_AVAILABLE = cp.spawnSync('git-lfs', ['version'], { timeout: 300000 }).status === 0;
 const LFS_URL = 'http://127.0.0.1:9/acme/demo.git/info/lfs';
 
 function rowRepo(h) {
@@ -685,8 +689,8 @@ test('git started through lib/commands takes none of the listed settings from re
       const r = rowRepo(h);
       const env = { ...h.env, GIT_TERMINAL_PROMPT: '0', ...(await row.plant(r, t)) };
       const git = (spawn, dir, rowEnv) => (row.tty
-        ? cp.spawnSync('script', ['-qec', ['git', '-C', dir, ...row.run].map(shellQuote).join(' '), '/dev/null'], { env: rowEnv, encoding: 'utf8', timeout: 60000 })
-        : spawn('git', ['-C', dir, ...row.run], { env: rowEnv, encoding: 'utf8', timeout: 60000 }));
+        ? cp.spawnSync('script', ['-qec', ['git', '-C', dir, ...row.run].map(shellQuote).join(' '), '/dev/null'], { env: rowEnv, encoding: 'utf8', timeout: 300000 })
+        : spawn('git', ['-C', dir, ...row.run], { env: rowEnv, encoding: 'utf8', timeout: 300000 }));
       if (!row.caller) {
         const control = path.join(h.base, 'control');
         fs.cpSync(h.repo, control, { recursive: true, preserveTimestamps: true });
@@ -710,7 +714,7 @@ test('tower-crane worktree takes no git-lfs transfer agent from repository confi
   r.lfs();
   r.set('lfs.standalonetransferagent', 'tc');
   r.set('lfs.customtransfer.tc.path', r.program('lfs-transfer'));
-  cp.spawnSync('git', ['-C', h.repo, 'worktree', 'add', '-q', '--detach', path.join(h.base, 'control')], { env: h.env, stdio: 'ignore', timeout: 60000 });
+  cp.spawnSync('git', ['-C', h.repo, 'worktree', 'add', '-q', '--detach', path.join(h.base, 'control')], { env: h.env, stdio: 'ignore', timeout: 300000 });
   assert.notDeepEqual(r.ran(), [], 'plain git runs the planted agent');
   r.clear();
 

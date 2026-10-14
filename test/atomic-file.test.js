@@ -7,7 +7,6 @@ const path = require('node:path');
 const cp = require('node:child_process');
 const { makeRepo } = require('./helpers');
 const { waitFor } = require('./canary');
-const { readWritten } = require('./atomic-file');
 
 const FIXTURES = path.join(__dirname, 'fixtures');
 const PARTIAL = path.join(FIXTURES, 'partial-write.js');
@@ -35,7 +34,8 @@ test('a hook signal names its process even while the write is held halfway', asy
     { HOOK_STOP_WORKTREE_STATUS: signal });
   assert.notEqual(await waitFor(`${signal}.half`), null, `the hook did not start its signal: ${writer.stderr()}`);
   // A reader polling the signal now finds nothing or the whole pid, never a part of it.
-  const seen = readWritten(signal);
+  let seen;
+  try { seen = fs.readFileSync(signal, 'utf8'); } catch (error) { if (error.code !== 'ENOENT') throw error; }
   assert.ok(seen === undefined || Number(seen) === writer.child.pid, `a reader found ${JSON.stringify(seen)} for pid ${writer.child.pid}`);
   fs.writeFileSync(`${signal}.finish`, '');
   assert.equal(Number(await waitFor(signal, { nonempty: true })), writer.child.pid);
@@ -52,7 +52,6 @@ test('a JSON wait reads through a file a plain write has left half written', asy
   assert.notEqual(await waitFor(`${file}.half`), null, `the writer did not start: ${writer.stderr()}`);
   // The file exists with half its JSON: a reader that parses the first text it finds throws here.
   assert.throws(() => JSON.parse(fs.readFileSync(file, 'utf8')), SyntaxError);
-  assert.equal(readWritten(file, { json: true }), undefined);
   const read = waitFor(file, { json: true });
   fs.writeFileSync(`${file}.finish`, '');
   assert.deepEqual(await read, value);

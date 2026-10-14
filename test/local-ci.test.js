@@ -323,6 +323,7 @@ test('failed, missing and timed out local commands record failure and clean thei
     ['setInterval(() => {}, 1000);', null, 0.05, /timed out/],
   ]) {
     const h = fixture(t, script || '// no-op\n');
+    // An absent fixture path avoids permission errors from the host PATH.
     const argv = command ? [path.join(h.base, command[0])] : h.command;
     h.ok(['project', 'set', '--ci-local', JSON.stringify({ command: argv, timeout })]);
     const r = h.run(['check', 'ci', 'T1']);
@@ -572,7 +573,7 @@ test('project settings validate local argv and timeout, preserve CI siblings and
     '{"command":["node",2],"timeout":1}', '{"command":["node"]}', '{"command":["node"],"timeout":0}',
     '{"command":["node"],"timeout":"1"}']) {
     const r = h.run(['project', 'set', '--ci-local', local]);
-    assert.equal(r.code, 2);
+    assert.equal(r.code, 2, JSON.stringify({ local, ...r }));
     assert.match(r.stderr, /--ci-local/);
     assert.deepEqual(h.readState('project.json'), original);
   }

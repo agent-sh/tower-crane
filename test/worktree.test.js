@@ -1,5 +1,7 @@
 'use strict';
 
+const { fileWritten, childExit } = require('./signals');
+
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -32,11 +34,6 @@ function gate(h, repo, sha, marker = '') {
     child.stderr.on('data', (d) => (stderr += d));
     child.on('close', (code) => resolve({ code, stdout, stderr }));
   });
-}
-
-async function until(check, ms) {
-  for (const end = Date.now() + ms; !check() && Date.now() < end;) await new Promise((r) => setTimeout(r, 20));
-  return check();
 }
 
 // A task, a bare origin and a clone of it standing in for another machine;
@@ -290,7 +287,7 @@ try {
 }
 try {
   fs.appendFileSync(${JSON.stringify(attempts)}, '.');
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ${delay});
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ${delay}); // wait-allow: a slow upload-pack widens the window a concurrent fetch would hit
   const r = cp.spawnSync('git-upload-pack', process.argv.slice(2), { stdio: 'inherit' });
   process.exitCode = r.status === null ? 1 : r.status;
 } finally {
@@ -305,9 +302,8 @@ try {
 
 for (const command of ['worktree', 'spawn']) {
   // Proof comes from the recorded upload-pack calls, not elapsed time, which
-  // tracks host load. The timeout only catches a hang: about four times the
-  // slowest passing run (32 s) on a host at a load of 30.
-  test(`one dispatch prepares six ${command} tasks from one slow base fetch`, { timeout: 120000 }, async (t) => {
+  // tracks host load. The suite's hung-test timeout only catches a hang.
+  test(`one dispatch prepares six ${command} tasks from one slow base fetch`, { timeout: 300000 }, async (t) => {
     const h = setup(t);
     const fresh = advance(h, h.upstream, 'remote.txt');
     h.git(['push', 'origin', 'main'], h.upstream);
@@ -374,15 +370,9 @@ for (const hooks of [{ HOOK_ADD_ERROR: 'ETIMEDOUT' }, { HOOK_DIE_WORKTREE_ADD: '
   });
 }
 
-async function waitForFile(file) {
-  const deadline = Date.now() + 10000;
-  while (!fs.existsSync(file)) {
-    assert.ok(Date.now() < deadline, `${file} appeared before the deadline`);
-    await new Promise((resolve) => setTimeout(resolve, 20));
-  }
-}
+const waitForFile = (file) => fileWritten(file);
 
-test('a surviving post-checkout child cannot write into a replacement worktree', { timeout: 30000 }, async (t) => {
+test('a surviving post-checkout child cannot write into a replacement worktree', { timeout: 300000 }, async (t) => {
   const h = setup(t);
   const paused = path.join(h.base, 'hook-paused');
   const done = path.join(h.base, 'hook-done');
@@ -391,7 +381,7 @@ test('a surviving post-checkout child cannot write into a replacement worktree',
   fs.writeFileSync(hook, `
 const fs = require('node:fs');
 fs.writeFileSync(${JSON.stringify(paused)}, '');
-const end = Date.now() + 20000;
+const end = Date.now() + 300000;
 while (!fs.existsSync(${JSON.stringify(paused + '.go')}) && Date.now() < end) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
 }
@@ -405,11 +395,12 @@ fs.writeFileSync(${JSON.stringify(done)}, '');
   fs.appendFileSync(h.env.GIT_CONFIG_GLOBAL, `[core]\n\thooksPath = ${JSON.stringify(hooks)}\n`);
   const script = path.join(hooks, 'post-checkout');
   fs.writeFileSync(script, `#!/bin/sh\nexec ${quote(process.execPath)} ${quote(hook)}\n`, { mode: 0o755 });
-  const first = h.runAsync(['worktree', 'T1'], { hooks: { HOOK_ADD_PID: cliPid } });
+  let cli;
+  const first = h.runAsync(['worktree', 'T1'], { hooks: { HOOK_ADD_PID: cliPid }, onSpawn: (child) => { cli = child; } });
   try {
     await waitForFile(paused);
-    process.kill(Number(fs.readFileSync(cliPid, 'utf8')), 'SIGKILL');
-    assert.notEqual((await first).code, 0);
+    cli.kill('SIGKILL');
+    assert.notEqual((await childExit(cli, { signal: t.signal })).code, 0);
     const retry = h.run(['worktree', 'T1']);
     assert.equal(retry.code, 1, retry.stderr);
     assert.match(retry.stderr, /worktree.*unfinished/);
@@ -618,11 +609,11 @@ test('a gate that prepares while a task worktree is being created waits until it
   const signal = path.join(h.base, 'admin-link');
   const creating = runAsync(['worktree', 'T1', '--json'], { cwd: h.repo, pre: ['--require', HOOKS],
     env: { ...h.env, HOOK_STATE: h.state, HOOK_STOP_ADMIN_LINK: signal } });
-  assert.ok(await until(() => fs.existsSync(signal), 30000), 'the creation reached its link');
+  await fileWritten(signal);
   const pruned = path.join(h.base, 'pruned');
   const gated = gate(h, h.repo, sha, pruned);
   // Without the lock the gate relinks and prunes now; with it, it waits.
-  await until(() => fs.existsSync(pruned), 3000);
+  for (const end = Date.now() + 3000; !fs.existsSync(pruned) && Date.now() < end;) await new Promise((r) => setTimeout(r, 20)); // wait-allow: give an unlocked gate time to prune before the creation is released
   fs.writeFileSync(`${signal}.go`, '');
   const [created, prepared] = await Promise.all([creating, gated]);
   assert.equal(created.code, 0, created.stderr);

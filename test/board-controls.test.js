@@ -8,6 +8,7 @@ const cp = require('node:child_process');
 const { makeRepo, BIN, HOOKS } = require('./helpers');
 const { CHROME, openBrowser, closeBrowser } = require('./browser');
 const Authority = require('../lib/authority');
+const { waitOnRepo } = require('./signals');
 
 test.after(closeBrowser);
 
@@ -346,13 +347,7 @@ test('the board pauses dispatch, interrupts a real supervised fixture and delega
   assert.match(h.run(['spawn', '--task', 'T1']).stderr, /project paused/);
   h.ok(['project', 'set', '--paused', '']);
   const run = h.json(['spawn', '--task', 'T1']);
-  async function until(fn) {
-    const deadline = Date.now() + 15000;
-    while (!fn()) {
-      assert.ok(Date.now() < deadline, 'fixture process completed the transition');
-      await new Promise((resolve) => setTimeout(resolve, 25));
-    }
-  }
+  const until = (fn) => waitOnRepo(h, fn, "fixture process completed the transition");
   await until(() => h.readState('tasks.json').tasks[0].claim);
   const { post } = await serve(t, h);
   const stopped = await post(request('interrupt', {}, ['T1']));

@@ -62,7 +62,7 @@ class Scratch {
     fs.writeFileSync(this.clock, String(this.now - this.ago));
     const e = { ...this.env, ...env, ...(clock ? { HOOK_CLOCK_FILE: this.clock, HOOK_STATE: this.state } : {}) };
     if (agent) e.TOWER_CRANE_AGENT = agent;
-    const r = cp.spawnSync(process.execPath, ['--require', HOOKS, this.bin, ...args], { cwd: this.repo, env: e, input, encoding: 'utf8', timeout: 120000 });
+    const r = cp.spawnSync(process.execPath, ['--require', HOOKS, this.bin, ...args], { cwd: this.repo, env: e, input, encoding: 'utf8', timeout: 300000 });
     return { code: r.status, stdout: r.stdout || '', stderr: r.stderr || '' };
   }
 

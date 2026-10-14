@@ -7,6 +7,7 @@ const path = require('node:path');
 const cp = require('node:child_process');
 const { EventEmitter, once } = require('node:events');
 const { cachedFixture, HOOKS, BIN } = require('./helpers');
+const { HUNG_TEST_MS } = require('./signals');
 const { EventReader } = require('../lib/event-reader');
 const S = require('../lib/state');
 const T = require('../lib/tasks');
@@ -32,7 +33,7 @@ const waitModes = [{ observe: true, silent: false }, { observe: true, silent: tr
 for (const { observe, silent } of waitModes) test(`idle wait reads no historical bytes on fallback ticks with a 50 MiB log (observe: ${observe}, silent watch: ${silent})`, async (t) => {
   const h = largeFixture(t);
   const meter = path.join(h.base, 'read-budget.json');
-  const result = await h.runAsync(['wait', ...(observe ? ['--observe'] : []), '--agent', 'orchestrator', '--timeout', '3'], {
+  const result = await h.runAsync(['wait', ...(observe ? ['--observe'] : []), '--agent', 'orchestrator', '--timeout', '3'], { // wait-allow: an idle wait must reach its timeout to prove fallback ticks read no history
     env: { EVENT_READ_BUDGET: meter, NODE_OPTIONS: `--require "${hooksPath}" --require "${budgetPath}"`, ...(silent ? { HOOK_SILENT_WATCH: '1' } : {}) },
   });
   assert.equal(result.code, 2, result.stderr);
@@ -50,7 +51,7 @@ test('served pages and owner message requests reuse history on a 50 MiB log', as
     stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
   });
   const closed = once(child, 'close');
-  const timer = setTimeout(() => child.kill(), 30000);
+  const timer = setTimeout(() => child.kill(), HUNG_TEST_MS);
   let stderr = '';
   child.stderr.on('data', (chunk) => { stderr += chunk; });
   t.after(async () => {
@@ -228,7 +229,7 @@ function resetReader(t, h, args) {
   child.stdout.on('data', (data) => { output += data; changes.emit('change'); });
   child.stderr.on('data', (data) => { stderr += data; });
   child.on('message', (message) => { notices.push(message); changes.emit('change'); });
-  const timer = setTimeout(() => child.kill(), 30000);
+  const timer = setTimeout(() => child.kill(), HUNG_TEST_MS);
   const stop = async () => {
     if (child.exitCode === null && child.signalCode === null) {
       if (child.connected) child.send('stop');
@@ -242,12 +243,11 @@ function resetReader(t, h, args) {
     await h.cleanup();
   });
   const until = async (probe) => {
-    const signal = AbortSignal.timeout(15000);
     for (;;) {
       const value = probe();
       if (value) return value;
       await Promise.race([
-        once(changes, 'change', { signal }),
+        once(changes, 'change'),
         closed.then(() => { throw new Error(stderr || 'reader exited before its notification'); }),
       ]);
     }
@@ -274,7 +274,7 @@ for (const follow of [false, true]) for (const smaller of [false, true]) {
   test(`restored history does not wake wait (follow: ${follow}, smaller: ${smaller})`, async (t) => {
     const h = restoreFixture();
     const reader = resetReader(t, h, ['wait', '--observe', '--agent', 'orchestrator',
-      ...(follow ? ['--follow'] : ['--timeout', '10'])]);
+      ...(follow ? ['--follow'] : ['--timeout', '300'])]);
     await reader.until(() => reader.notices.some((notice) => !notice.reset));
     restoreLog(h, smaller);
     await reader.until(() => reader.notices.some((notice) => notice.reset));

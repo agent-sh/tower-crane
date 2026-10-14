@@ -43,7 +43,7 @@ function submitPr(h, data, extra = []) {
   fs.writeFileSync(file, JSON.stringify({ sha: h.sha, ...data }));
   return cp.spawnSync(process.execPath, ['--require', github, BIN, 'submit', 'T1', '--agent', 'worker',
     '--sha', h.sha, '--pr', '7', ...extra], {
-    cwd: h.repo, env: { ...h.env, TEST_GITHUB: file, TEST_OWNER_KEY: h.env.TOWER_CRANE_OWNER_KEY }, encoding: 'utf8', timeout: 60000,
+    cwd: h.repo, env: { ...h.env, TEST_GITHUB: file, TEST_OWNER_KEY: h.env.TOWER_CRANE_OWNER_KEY }, encoding: 'utf8', timeout: 300000,
   });
 }
 

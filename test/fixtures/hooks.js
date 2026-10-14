@@ -131,7 +131,8 @@ const BUSY = ['EEXIST', 'ENOTEMPTY', 'ENOTDIR', 'EPERM', 'EACCES'];
 const real = {};
 for (const name of WRAPPED) real[name] = fs[name];
 
-const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+// Injected delays that widen race windows, and probe cadence; callers name the delay.
+const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); // wait-allow: fixture delays and probe cadence
 const under = (root, p) => !!root && typeof p === 'string' && (path.resolve(p) === root || path.resolve(p).startsWith(root + path.sep));
 const inState = (p) => under(STATE, p);
 const inLock = (p) => under(LOCK, p);
@@ -151,7 +152,7 @@ function ownsLock() {
 function stop(signal) {
   writeAtomic(signal, String(process.pid), undefined, real);
   const go = `${signal}.go`;
-  const end = Date.now() + 30000;
+  const end = Date.now() + 300000;
   while (!real.existsSync(go) && Date.now() < end) sleep(10);
 }
 
@@ -163,7 +164,7 @@ function barrier() {
   if (barrierDone) return;
   barrierDone = true;
   real.writeFileSync(path.join(env.HOOK_BARRIER, String(process.pid)), '');
-  const end = Date.now() + 20000;
+  const end = Date.now() + 300000;
   while (real.readdirSync(env.HOOK_BARRIER).length < Number(env.HOOK_BARRIER_N) && Date.now() < end) sleep(5);
 }
 
