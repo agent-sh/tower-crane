@@ -279,15 +279,15 @@ function readingWith(t, onRead, { before = false } = {}) {
   return restore;
 }
 
-test('a reader whose files are renamed into place after it read them reads them again', (t) => {
+test('a reader whose staged files are renamed into place while it reads keeps that commit\'s state', (t) => {
   const h = setup(t);
   crash(h, 'landed', 'renamed note');
   const staged = fs.readdirSync(h.state).filter((name) => /^(tasks|project|decisions)\.json\.E[0-9a-f-]{36}\.commit$/.test(name));
   assert.ok(staged.length);
   let renamed = false;
-  // The renames land after the reader read tasks.json and before it looks for staged files.
+  // The renames land after the reader read the staged tasks.json, before it reads the rest.
   const restore = readingWith(t, (file) => {
-    if (renamed || file !== path.join(h.state, 'tasks.json')) return;
+    if (renamed || !staged.some((name) => file === path.join(h.state, name))) return;
     renamed = true;
     for (const name of staged) fs.renameSync(path.join(h.state, name), path.join(h.state, name.replace(/\.E[0-9a-f-]{36}\.commit$/, '')));
   });
@@ -297,13 +297,24 @@ test('a reader whose files are renamed into place after it read them reads them 
   assert.deepEqual(read, { notes: ['renamed note'], logged: ['renamed note'] });
 });
 
-test('a reader that keeps losing to renames reads once under the lock', (t) => {
+// Puts a copy of events.jsonl in its place: the reader cannot tell it from a
+// log that another commit changed while it read. The replaced file stays open
+// until the test ends, so the copy never reuses its inode.
+function replaceLog(t, h) {
+  const log = path.join(h.state, 'events.jsonl');
+  const fd = fs.openSync(log, 'r');
+  t.after(() => fs.closeSync(fd));
+  fs.copyFileSync(log, `${log}.replaced`);
+  fs.renameSync(`${log}.replaced`, log);
+}
+
+test('a reader that keeps losing to commits reads once under the lock', (t) => {
   const h = setup(t);
   crash(h, 'landed', 'contended note');
-  const file = path.join(h.state, 'tasks.json');
+  const file = path.join(h.state, 'project.json');
   const lock = path.join(h.state, 'lock');
   let replaced = 0;
-  // Another writer replaces tasks.json during every read made without the lock.
+  // The log changes during every read of project.json made without the lock.
   const restore = readingWith(t, (read, text, original) => {
     if (read !== file) return;
     let mine = false;
@@ -313,8 +324,7 @@ test('a reader that keeps losing to renames reads once under the lock', (t) => {
       // No lock, or one being replaced: not this process's.
     }
     if (mine) return;
-    fs.writeFileSync(`${file}.replaced`, text);
-    fs.renameSync(`${file}.replaced`, file);
+    replaceLog(t, h);
     replaced++;
   });
   const read = unlocked(h);
@@ -384,10 +394,9 @@ test('a reader that keeps losing waits only briefly for a held lock, then return
   try {
     await waitOnRepo(h, () => fs.existsSync(signal), 'the holder takes the lock');
     const file = path.join(h.state, 'tasks.json');
-    const restore = readingWith(t, (name, text) => {
+    const restore = readingWith(t, (name) => {
       if (name !== file) return;
-      fs.writeFileSync(`${file}.replaced`, text);
-      fs.renameSync(`${file}.replaced`, file);
+      replaceLog(t, h);
       replaced++;
     });
     const started = Date.now();
