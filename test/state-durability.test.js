@@ -385,6 +385,44 @@ test('a reader that reads the other files after a commit\'s staged ones never ta
   assert.deepEqual(st.tasks.tasks[0].notes.map((n) => n.text), ['staged note']);
 });
 
+for (const mode of ['fresh', 'retained']) {
+  test(`a ${mode} reader sees a torn tail cut and an append of the same size as a changed log`, (t) => {
+    const h = setup(t);
+    const log = path.join(h.state, 'events.jsonl');
+    const tasks = path.join(h.state, 'tasks.json');
+    const event = (text) => ({ at: new Date().toISOString(), agent: 'owner', cmd: 'task note', task: 'T1', detail: { text }, id: `E${crypto.randomUUID()}`, type: 'owner-comment', to: 'orchestrator' });
+    const next = event('next note');
+    const line = `${JSON.stringify(next)}\n`;
+    // A crashed append left a fragment exactly as long as the next commit's line.
+    const base = fs.statSync(log).size;
+    fs.appendFileSync(log, JSON.stringify(event('F'.repeat(400))).slice(0, line.length));
+    const release = mode === 'retained' ? S.retainEvents(h.state) : () => {};
+    t.after(release);
+    let fired = false;
+    // After the reader read the log, before it reads tasks.json: recovery cuts
+    // the fragment off the same file, and the next commit appends and renames.
+    const restore = readingWith(t, (file, text, original) => {
+      if (fired || file !== tasks) return;
+      fired = true;
+      fs.truncateSync(log, base);
+      fs.appendFileSync(log, line);
+      const doc = JSON.parse(original(tasks, 'utf8'));
+      doc.tasks[0].notes.push({ at: next.at, agent: 'owner', text: 'next note' });
+      doc.last_event = next.id;
+      fs.writeFileSync(`${tasks}.next`, JSON.stringify(doc, null, 2) + '\n');
+      fs.renameSync(`${tasks}.next`, tasks);
+    }, { before: true });
+    const read = unlocked(h);
+    restore();
+    assert.ok(fired);
+    assert.equal(fs.statSync(log).size, base + line.length, 'the log kept its size');
+    assert.deepEqual(read, { notes: ['next note'], logged: ['next note'] });
+    // A retained reader also keeps the next commit after the one it missed.
+    h.ok(['task', 'note', 'T1', 'later note']);
+    assert.deepEqual(unlocked(h), { notes: ['next note', 'later note'], logged: ['next note', 'later note'] });
+  });
+}
+
 test('a reader that keeps losing waits only briefly for a held lock, then returns its last read', async (t) => {
   const h = setup(t);
   const signal = path.join(h.base, 'holding');
