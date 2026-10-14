@@ -106,7 +106,7 @@ Reproduce the affected rows with `node scripts/test-cost.js --runs 3 --jobs 2 --
 | `test/init.test.js` | init, state discovery, --state override, help | 2.0 | 5.2 | 2.0 | 5.9 |
 | `test/epipe.test.js` | closed stdout and stderr pipes keep state writes and exit codes | 1.6 | 4.1 | 1.6 | 3.6 |
 | `test/commands.test.js` | a subprocess inside a state mutation refuses the whole write | 1.5 | 3.4 | 1.5 | 3.8 |
-| `test/browser-startup.test.js` | Chrome launcher for board tests: spawn errors, sandbox file isolation | 0.3 | 1.2 | 0.3 | 1.1 |
+| `test/browser-startup.test.js` | Chrome launcher for board tests: spawn errors, sandbox file isolation, process tree teardown | 0.3 | 1.2 | 0.3 | 1.1 |
 | `test/gates/ci.test.js` | CI gate on fake gh output: conclusions, suites, ignored apps, moved head | 0.1 | 0.3 | 0.1 | 0.4 |
 | `test/live-browser.test.js` | live: a real sandboxed browser worker (skipped unless TOWER_CRANE_LIVE_BROWSER=1) | 0.1 | 0.2 | 0.2 | 0.2 |
 | `test/gates/merge.test.js` | merge gate: accepted only, head match, admin policy, merge queue, already merged | 0.1 | 0.3 | 0.1 | 0.4 |
