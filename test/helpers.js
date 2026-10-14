@@ -6,12 +6,13 @@ const cp = require('node:child_process');
 const assert = require('node:assert/strict');
 const test = require('node:test');
 const { createRepoSeed, cleanupRepoSeed } = require('./repo-seed');
-const { tempRoot } = require('./tmp-root');
+const { tempRoot, liveRoot } = require('./tmp-root');
 
 const ROOT = path.join(__dirname, '..');
 const BIN = path.join(ROOT, 'bin', 'tower-crane.js');
 const HOOKS = path.join(__dirname, 'fixtures', 'hooks.js');
 const TMP_ROOT = tempRoot();
+const LIVE_ROOT = liveRoot();
 const SHARED_REPO_SEED = process.env.TC_TEST_REPO_SEED;
 const OWNER_KEY = 'fixture-owner-key';
 const fileFixtures = new Set();
@@ -69,7 +70,8 @@ fs.mkdirSync(TMP_ROOT, { recursive: true });
 // reach the network and depend on the host's login. Every test process puts a
 // guard for each harness first on PATH, so a fixture that forgets a stub, or a
 // route that falls back to a harness on PATH, reaches the guard instead. A live
-// probe's opt-in lifts the guard for the harness it runs.
+// probe's opt-in lifts the guard for the harness it runs, and a fixture pinned
+// to a live rung (pinLiveRung) runs without it.
 const liveBrowser = (env, harness) => env.TOWER_CRANE_LIVE_BROWSER === '1'
   && (!env.TOWER_CRANE_LIVE_BROWSER_HARNESS || env.TOWER_CRANE_LIVE_BROWSER_HARNESS === harness);
 const LIVE_OPT_INS = {
@@ -207,6 +209,13 @@ function pinLiveRung(h, harness, rung = 'small') {
   const variable = `TOWER_CRANE_LIVE_${field.toUpperCase()}`;
   assert.ok(process.env[variable], `set ${variable} to run a live ${harness} probe`);
   pinRung(h, rung, { harness, [field]: process.env[variable] });
+  // The fixture runs a real harness on purpose, so its agents get the PATH
+  // without the guard: the guard's stand-ins are test plumbing, not programs
+  // the agent's sandbox should open.
+  if (HARNESS_GUARD) {
+    const key = Object.keys(h.env).find((k) => k.toUpperCase() === 'PATH') || 'PATH';
+    h.env[key] = String(h.env[key] || '').split(path.delimiter).filter((dir) => dir !== HARNESS_GUARD.dir).join(path.delimiter);
+  }
 }
 
 // Init copies defaults from the user layer. Seed that layer only for the call,
@@ -249,14 +258,16 @@ function getRepoSeed() {
   return repoSeed;
 }
 
+// options.root puts the fixture under another directory than TMP_ROOT, such as LIVE_ROOT.
 function makeRepo(t, options = {}) {
   fs.mkdirSync(TMP_ROOT, { recursive: true });
   return makeRepoFromSeed(t, getRepoSeed().repo, options);
 }
 
 // A new fixture directory under the temp root, removed if its setup throws: no test owns it yet.
-function fixtureDir(setup) {
-  const dir = fs.mkdtempSync(path.join(TMP_ROOT, 'tower-crane-'));
+function fixtureDir(setup, root = TMP_ROOT) {
+  fs.mkdirSync(root, { recursive: true });
+  const dir = fs.mkdtempSync(path.join(root, 'tower-crane-'));
   try {
     return setup(fs.realpathSync.native(dir));
   } catch (error) {
@@ -277,7 +288,7 @@ function makeRepoFromSeed(t, seedRepo, options = {}) {
     fs.cpSync(seedRepo, repo, { recursive: true });
     fs.mkdirSync(path.join(repo, '.git', 'refs', 'remotes', 'origin'), { recursive: true });
     return context(t, base, options);
-  });
+  }, options.root);
 }
 
 const repoTemplates = new Map();
@@ -379,9 +390,21 @@ function cachedFixture(t, key, build) {
   h.env.GIT_CONFIG_GLOBAL = path.join(h.base, 'gitconfig');
   h.env.TOWER_CRANE_CONFIG = path.join(h.base, 'user-config', 'config.json');
   if (from.gateSettings) h.gateSettings = from.gateSettings.map(rewrite);
-  const worktrees = path.join(h.base, 'repo-worktrees');
-  if (fs.existsSync(worktrees)) h.git(['worktree', 'repair', ...fs.readdirSync(worktrees).map((name) => path.join(worktrees, name))]);
+  repairWorktrees(h);
   return Object.assign(h, JSON.parse(rewrite(JSON.stringify(template.fields))));
+}
+
+// Relinks a copied repository's task worktrees to the copy. A copy turns the
+// link to each relocated admin directory into an absolute one naming the
+// template, and git worktree repair does not follow those links:
+// lib/worktree.js relinkAdmins joins them as after a project move, and git
+// repairs the rest.
+function repairWorktrees(h) {
+  const root = path.join(h.base, 'repo-worktrees');
+  if (!fs.existsSync(root)) return;
+  require('../lib/worktree').relinkAdmins(h.repo, path.join(h.repo, '.git'));
+  const trees = fs.readdirSync(root).filter((name) => name !== '.git-admin').map((name) => path.join(root, name));
+  if (trees.length) h.git(['worktree', 'repair', ...trees]);
 }
 
 function context(t, base, options = {}) {
@@ -668,4 +691,4 @@ try {
   }
 }
 
-module.exports = { makeRepo, makeProjectRepo, makeTaskRepo, copyRepo, cachedFixture, fixtureLadder, pinRung, pinLiveRung, stubRungs, STUB_RUNG, HARNESS_GUARD, run, runPty, PTY_AVAILABLE, runAsync, BIN, ROOT, HOOKS, real, TMP_ROOT, detachedAlive };
+module.exports = { repairWorktrees, makeRepo, makeProjectRepo, makeTaskRepo, copyRepo, cachedFixture, fixtureLadder, pinRung, pinLiveRung, stubRungs, STUB_RUNG, HARNESS_GUARD, run, runPty, PTY_AVAILABLE, runAsync, BIN, ROOT, HOOKS, real, TMP_ROOT, LIVE_ROOT, detachedAlive };
