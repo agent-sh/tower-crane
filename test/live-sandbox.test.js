@@ -373,15 +373,23 @@ test('a real codex sandbox starts for a home among 5,000 entries and reads nothi
 // each is a Tower Crane shim, and what a push to another task's branch does.
 // The remote is a port nothing listens on, so a push that gets past the shim
 // fails in git itself and never reaches a server.
-function shimProbe(h, out, extra = '') {
-  const repo = path.join(path.dirname(out), 'shim-repo');
+// With inject, the push runs with NODE_OPTIONS asking node to load a file
+// first, which the shim must not do. before runs first, extra after the push.
+// The claude probe leaves it out: a model asked to run it declined
+// (2026-10-14), and the stub test in isolation.test.js covers claude's shim.
+function shimProbe(h, out, { before = '', extra = '', inject = false } = {}) {
+  const dir = path.dirname(out);
+  const repo = path.join(dir, 'shim-repo');
   for (const args of [['init', '-q', repo], ['-C', repo, 'commit', '-q', '--allow-empty', '-m', 'probe'],
     ['-C', repo, 'remote', 'add', 'origin', 'https://127.0.0.1:9/agent-sh/tower-crane.git']]) h.git(args);
-  return `const fs=require("fs"),cp=require("child_process");const o={};`
+  const injected = path.join(dir, 'injected');
+  const evil = path.join(dir, 'evil.cjs');
+  if (inject) fs.writeFileSync(evil, `require("node:fs").writeFileSync(${JSON.stringify(injected)}, "LOADED");\n`);
+  return `const fs=require("fs"),cp=require("child_process");const o={};${before}`
     + `for(const t of ["git","gh"]){const p=cp.spawnSync("sh",["-c","command -v "+t],{encoding:"utf8"}).stdout.trim();o[t]=p;`
     + `try{o[t+"Shim"]=fs.readFileSync(p,"utf8").includes("shim.js")}catch(e){o[t+"Shim"]="ERR "+e.code}}`
-    + `const r=cp.spawnSync("git",["push","origin","HEAD:refs/heads/tower-crane/T999-another-task"],{cwd:${JSON.stringify(repo)},encoding:"utf8",env:{...process.env,GIT_TERMINAL_PROMPT:"0"}});`
-    + `o.push=r.status;o.pushErr=String(r.stderr).trim().split("\\n").pop();${extra}fs.writeFileSync(${JSON.stringify(out)},JSON.stringify(o))`;
+    + `const r=cp.spawnSync("git",["push","origin","HEAD:refs/heads/tower-crane/T999-another-task"],{cwd:${JSON.stringify(repo)},encoding:"utf8",env:{...process.env,GIT_TERMINAL_PROMPT:"0"${inject ? `,NODE_OPTIONS:${JSON.stringify(`--require=${evil}`)}` : ''}}});`
+    + `o.push=r.status;o.pushErr=String(r.stderr).trim().split("\\n").pop();o.injected=fs.existsSync(${JSON.stringify(injected)});${extra}fs.writeFileSync(${JSON.stringify(out)},JSON.stringify(o))`;
 }
 
 function assertShims(h, seen, label) {
@@ -392,6 +400,7 @@ function assertShims(h, seen, label) {
   }
   assert.equal(seen.push, 126, `${label}: the shim refused the push: ${seen.pushErr}`);
   assert.match(seen.pushErr, /^tower-crane: git push.* is not allowed by this agent's agent file$/);
+  assert.equal(seen.injected, false, `${label}: the shim did not load the file NODE_OPTIONS names`);
 }
 
 // Found 2026-10-14 (codex-cli 0.162.1): the codex profile hides homes/, and
@@ -416,7 +425,10 @@ test('in a real codex sandbox the first git and gh on PATH are the agent\'s shim
     + `try{fs.readFileSync(require("path").join(d,"..","..","automation.key"));o.key="READABLE"}catch(e){o.key="ERR "+e.code}`
     // The residual docs/state.md names: the host's git by its path still runs.
     + `o.hostGit=cp.spawnSync(${JSON.stringify(require(path.join(ROOT, 'lib', 'shim.js')).findReal('git', ''))},["--version"]).status;`;
-  const bin = standInCodex(h, shimProbe(h, out, extra));
+  // A package.json the agent writes in its HOME, above the shims, must not
+  // make them ES modules.
+  const before = `fs.writeFileSync(require("path").join(process.env.HOME,"package.json"),'{"type":"module"}');`;
+  const bin = standInCodex(h, shimProbe(h, out, { before, extra, inject: true }));
   const r = await h.runAsync(['spawn', '--role', 'small', '--task', 'T1', '--wait'],
     { env: { ...h.env, PATH: `${bin}${path.delimiter}${h.env.PATH}` } });
   assert.equal(r.code, 0, `${r.stderr}\n${agentLog(h)}`);
