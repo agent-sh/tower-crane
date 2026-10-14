@@ -862,7 +862,7 @@ function credentialFixture(t) {
   h.ok(['task', 'add', '--title', 'Credential probe', '--acceptance', 'no GitHub credential in the sandbox; pushes go through the broker']);
   const remote = path.join(h.base, 'remote.git');
   h.git(['init', '-q', '--bare', remote]);
-  h.git(['remote', 'add', 'origin', remote]);
+  h.git(['remote', 'set-url', 'origin', remote]);
   h.git(['push', '-q', 'origin', 'HEAD:refs/heads/main']);
   const dir = results(h);
   const home = os.homedir();

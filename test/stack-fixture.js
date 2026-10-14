@@ -53,7 +53,7 @@ function template(name) {
       const h = makeRepo();
       const remote = path.join(h.base, 'remote.git');
       h.git(['init', '--bare', remote]);
-      h.git(['remote', 'add', 'origin', remote]);
+      h.git(['remote', 'set-url', 'origin', remote]);
       h.git(['push', 'origin', 'main']);
       h.init(['--repo', 'acme/app']);
       fs.writeFileSync(path.join(h.base, 'github.json'), JSON.stringify({ repo: h.repo, prs: {}, calls: [], order: [], linked: false }));

@@ -45,7 +45,11 @@ function createRepoSeed(tmpRoot = tempRoot()) {
     }
     fs.writeFileSync(
       path.join(gitDir, 'config'),
-      `[core]\n\trepositoryformatversion = 0\n\tfilemode = ${process.platform !== 'win32'}\n\tbare = false\n\tlogallrefupdates = true\n\tignorecase = ${process.platform === 'win32'}\n\tautocrlf = false\n`,
+      `[core]\n\trepositoryformatversion = 0\n\tfilemode = ${process.platform !== 'win32'}\n\tbare = false\n\tlogallrefupdates = true\n\tignorecase = ${process.platform === 'win32'}\n\tautocrlf = false\n`
+      // Workers push to origin, so spawn refuses a repository without one. The
+      // fixture's origin is the repository itself: a fetch or push there moves
+      // nothing, and no test reaches a network.
+      + '[remote "origin"]\n\turl = .\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n',
     );
     fs.writeFileSync(path.join(gitDir, 'HEAD'), 'ref: refs/heads/main\n');
     fs.writeFileSync(path.join(gitDir, 'description'), "Unnamed repository; edit this file 'description' to name the repository.\n");
