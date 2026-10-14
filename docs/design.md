@@ -1,6 +1,6 @@
 # The board
 
-The board is what `render` writes to `sketch.html` and what `serve` shows live. This document is its design contract: the rooms, the design system and the behavior. The research, the owner's task model and the reason behind each choice are in [human-experience.md](human-experience.md); principles cited as P1 to P10 are its section 2.9. The bench that measures it is [human-bench.md](human-bench.md). Code follows this document; when they disagree, fix one of them in the same PR.
+The board is what `render` writes to `sketch.html` and what `serve` shows live. This document is its design contract: the rooms, the design system and the behavior. The research, the owner's task model and the reason behind each choice are in [human-experience.md](https://github.com/agent-sh/tower-crane/blob/main/docs/human-experience.md); principles cited as P1 to P10 are its section 2.9. The bench that measures it is [human-bench.md](https://github.com/agent-sh/tower-crane/blob/main/docs/human-bench.md). Code follows this document; when they disagree, fix one of them in the same PR.
 
 ## What it is for
 

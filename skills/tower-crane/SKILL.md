@@ -6,7 +6,7 @@ argument-hint: "<issue URL | #N | goal text | plan.json> | status | decisions"
 
 # tower-crane: orchestrate
 
-Arguments: `$ARGUMENTS`. If `tower-crane` is not on PATH, say how to install it (`npm i -g @agentsys/tower-crane`) and stop.
+Arguments: `$ARGUMENTS`. If `tower-crane` is not on PATH, say how to install it (`npm i -g @agent-sh/tower-crane`) and stop.
 
 Use `TOWER_CRANE_AGENT` or `orchestrator` as your identity; pass `--agent <name>` on every tower-crane call. Commands below with `--agent owner` are for the owner to run.
 
