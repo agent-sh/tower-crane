@@ -10,7 +10,7 @@ let skew = 0;
 Date.now = () => now() + skew;
 const BIN = path.join(__dirname, '..', '..', 'bin', 'tower-crane.js');
 const { ownerKeyFile, ownerProject } = require('../../lib/authority');
-const { updateJson } = require('../atomic-file');
+const { updateJson, readPublished } = require('../atomic-file');
 
 if (process.env.TEST_STACK_DEFER_OBSERVE) {
   require('../../lib/stack').observe = () => {};
@@ -46,7 +46,7 @@ function applyChanges(before, after, current) {
 cp.spawnSync = function stackGh(command, args, opts) {
   if (command !== 'gh' || !process.env.TEST_STACK_DATA) return original(command, args, opts);
   const file = process.env.TEST_STACK_DATA;
-  const read = fs.readFileSync(file, 'utf8');
+  const read = readPublished(file, 'utf8');
   const data = JSON.parse(read);
   data.calls.push({ args, cwd: opts.cwd });
   const finish = (value = '', status = 0, stderr = '') => {

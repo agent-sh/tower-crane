@@ -75,6 +75,7 @@ const fs = require('node:fs'), cp = require('node:child_process');
 const run = cp.execFileSync;
 cp.execFileSync = function retiringGate(command, args, options) {
   if (command === 'git' && args[0] === 'worktree' && args[1] === 'add') {
+    // read-published: attempts are appended; nothing replaces the file.
     const previous = fs.existsSync(${JSON.stringify(attempts)}) ? fs.readFileSync(${JSON.stringify(attempts)}, 'utf8') : '';
     fs.appendFileSync(${JSON.stringify(attempts)}, '.');
     if (${persistent} || !previous) {

@@ -4,9 +4,9 @@ const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
 const { pathToFileURL } = require('node:url');
-const { writeAtomic } = require('../atomic-file');
+const { writeAtomic, readPublished } = require('../atomic-file');
 
-const text = (file) => fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
+const text = (file) => fs.existsSync(file) ? readPublished(file, 'utf8') : '';
 const json = (file) => JSON.parse(text(file) || '{}');
 
 async function main() {

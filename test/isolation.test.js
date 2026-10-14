@@ -12,6 +12,7 @@ const A = require('../lib/agents');
 const S = require('../lib/state');
 const TOML = require('../lib/toml');
 const ClaudeSandboxPlaceholders = require('../lib/claude-sandbox-placeholders');
+const { readPublished } = require('./atomic-file');
 
 const STUB = path.join(__dirname, 'fixtures', 'harness-stub.js');
 // The stubs are scripts started through a shebang; Windows starts only .exe
@@ -568,7 +569,7 @@ test('a sandboxed claude removes its ignored cwd placeholders after exit', { ski
   isolated(h, 'small', 'claude');
   fs.rmSync(path.join(wt, '.claude', 'settings.local.json'));
   const gitignoreFile = path.join(h.repo, '.gitignore');
-  const gitignore = fs.existsSync(gitignoreFile) ? fs.readFileSync(gitignoreFile, 'utf8') : null;
+  const gitignore = fs.existsSync(gitignoreFile) ? readPublished(gitignoreFile, 'utf8') : null;
   const globalIgnore = path.join(xdg, 'git', 'ignore');
   fs.mkdirSync(path.dirname(globalIgnore), { recursive: true });
   fs.writeFileSync(globalIgnore, 'globally-ignored/\n');
@@ -593,7 +594,7 @@ test('a sandboxed claude removes its ignored cwd placeholders after exit', { ski
   for (const pattern of ClaudeSandboxPlaceholders.IGNORE_PATTERNS) {
     assert.ok(!excludes.includes(pattern), `${pattern} is not left in shared git info/exclude`);
   }
-  assert.equal(fs.existsSync(gitignoreFile) ? fs.readFileSync(gitignoreFile, 'utf8') : null, gitignore, 'the repository .gitignore is unchanged');
+  assert.equal(fs.existsSync(gitignoreFile) ? readPublished(gitignoreFile, 'utf8') : null, gitignore, 'the repository .gitignore is unchanged');
 
   const other = path.join(h.base, 'other-worktree');
   h.git(['worktree', 'add', '--detach', other, 'main']);

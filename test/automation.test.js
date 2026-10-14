@@ -10,6 +10,7 @@ const { makeRepo, cachedFixture, stubRungs, BIN, detachedAlive, processesIn } = 
 const { gateFixture, gateEvidence } = require('./gate-helpers');
 const { waitFor } = require('./canary');
 const { shellQuote } = require('../lib/gates/common');
+const { readPublished } = require('./atomic-file');
 
 const ghStub = path.join(__dirname, 'fixtures', 'automation-gh.js');
 const harness = path.join(__dirname, 'fixtures', 'automation-harness.js');
@@ -857,7 +858,7 @@ global.Date = class extends RealDate {
   constructor(...args) { super(...(args.length ? args : [Date.now()])); }
   static now() {
     return fs.existsSync(${JSON.stringify(clock)})
-      ? Number(fs.readFileSync(${JSON.stringify(clock)}, 'utf8')) : RealDate.now();
+      ? Number(fs.readFileSync(${JSON.stringify(clock)}, 'utf8')) : RealDate.now(); // read-published: the test writes the clock in place.
   }
 };
 `);
@@ -1677,6 +1678,7 @@ if (${stage === 'trial'}) {
   const C = require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'gates', 'common'))}), git = C.git;
   C.git = async (...args) => {
     const result = await git(...args);
+    // read-published: the gh stub appends calls; nothing replaces the file.
     const log = fs.existsSync(${JSON.stringify(calls)}) ? fs.readFileSync(${JSON.stringify(calls)}, 'utf8') : '';
     if (args[2][0] === 'merge' && args[2].includes('--no-commit') && log.includes('["pr","view","9"')) {
       fs.writeFileSync(${JSON.stringify(started)}, '');
@@ -1946,7 +1948,7 @@ if (release) {
   return () => {
     let now = 0;
     let peak = 0;
-    const marks = fs.existsSync(runs) ? fs.readFileSync(runs, 'utf8').trim().split('\n') : [];
+    const marks = fs.existsSync(runs) ? readPublished(runs, 'utf8').trim().split('\n') : [];
     for (const mark of marks) peak = Math.max(peak, now += mark === '+' ? 1 : -1);
     return { starts: marks.filter((m) => m === '+').length, peak };
   };
@@ -2061,7 +2063,7 @@ require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'public-http'))}).fet
         if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
         await result;
         if (github && fs.existsSync(started)) {
-          try { killPid(Number(fs.readFileSync(started, 'utf8')), 'SIGKILL'); }
+          try { killPid(Number(readPublished(started, 'utf8')), 'SIGKILL'); }
           catch (e) { if (e.code !== 'ESRCH') throw e; }
         }
         await h.cleanup();
@@ -2442,6 +2444,7 @@ function stepSuite(h, { executors = 1 } = {}) {
 const path = require('node:path');
 const base = ${JSON.stringify(h.base)};
 const counter = path.join(base, 'runs');
+// read-published: one suite run at a time writes the counter in place; nothing replaces it.
 const n = (fs.existsSync(counter) ? Number(fs.readFileSync(counter, 'utf8')) : 0) + 1;
 fs.writeFileSync(counter, String(n));
 fs.writeFileSync(path.join(base, 'stalled-' + n), '');
@@ -3098,7 +3101,7 @@ test('gates and merges a supervisor runs keep the host environment, not its agen
   // Git reads ~/.gitconfig as the global file: a home's config is the user's.
   delete h.env.GIT_CONFIG_GLOBAL;
   const probe = (name) => path.join(h.base, `${name}.jsonl`);
-  const read = (name) => (fs.existsSync(probe(name)) ? fs.readFileSync(probe(name), 'utf8').trim().split('\n').map(JSON.parse) : []);
+  const read = (name) => (fs.existsSync(probe(name)) ? readPublished(probe(name), 'utf8').trim().split('\n').map(JSON.parse) : []);
   // Each agent writes a global git config in its own home, which runs a hook on checkout.
   const hooks = path.join(h.base, 'planted-hooks');
   fs.mkdirSync(hooks);
@@ -3140,7 +3143,7 @@ require(require('node:path').resolve('test/value.test.js'));
     assert.ok(agent.HOME.startsWith(path.join(h.state, 'homes')), agent.HOME);
     assert.notEqual(agent.XDG_CACHE_HOME, h.env.XDG_CACHE_HOME);
   }
-  const planted = fs.existsSync(probe('planted-hook')) ? fs.readFileSync(probe('planted-hook'), 'utf8') : '';
+  const planted = fs.existsSync(probe('planted-hook')) ? readPublished(probe('planted-hook'), 'utf8') : '';
   assert.equal(planted, '', 'no gate git ran a hook from an agent home');
   const host = (seen) => {
     assert.equal(seen.HOME, h.env.HOME);
@@ -3534,7 +3537,7 @@ for (const f of fs.readdirSync('test')) if (f.endsWith('.test.js')) require(path
 `);
   h.ok(['project', 'set', '--tests-cmd', `${shellQuote(process.execPath)} ${shellQuote(suite)}`]);
   h.suites = () => (fs.existsSync(h.suiteLog)
-    ? fs.readFileSync(h.suiteLog, 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse) : []);
+    ? readPublished(h.suiteLog, 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse) : []);
   h.moveMain = (file = 'README.md', text = 'Independent base update.\n') => {
     h.git(['switch', '-q', 'main']);
     fs.appendFileSync(path.join(h.repo, file), text);

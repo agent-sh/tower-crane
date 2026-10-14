@@ -14,6 +14,7 @@ const { cachedFixture, pinRung, real, BIN, ROOT, PTY_AVAILABLE, makeTaskRepo } =
 const stack = require('./stack-fixture');
 const A = require('../lib/agents');
 const S = require('../lib/state');
+const { readPublished } = require('./atomic-file');
 const SHORT_WAIT = path.join(__dirname, 'fixtures', 'lock-wait.js');
 
 function setup(t) {
@@ -823,7 +824,7 @@ test('spawn in the background detaches, logs output and numbers agents', async (
   assert.equal(real(path.dirname(started.log)), real(path.join(h.state, 'logs')));
   assert.equal(path.basename(started.log), 'T1-small-T1-1.log');
   if (process.platform !== 'win32') assert.equal(fs.statSync(started.log).mode & 0o777, 0o600);
-  await waitOnRepo(h, () => (fs.existsSync(started.log) && fs.readFileSync(started.log, 'utf8').includes('hello')));
+  await waitOnRepo(h, () => (fs.existsSync(started.log) && readPublished(started.log, 'utf8').includes('hello')));
   assert.match(fs.readFileSync(started.log, 'utf8'), /hello from small-T1-1/);
   assert.equal(h.json(['spawn', '--role', 'small', '--task', 'T1', '--dry-run']).agent, 'small-T1-2');
 
@@ -841,7 +842,7 @@ test('spawn in the background detaches, logs output and numbers agents', async (
 // Everything a spawn could leave behind: state files, events, logs, the
 // worktree and its branch.
 function footprint(h) {
-  const read = (f) => (fs.existsSync(path.join(h.state, f)) ? fs.readFileSync(path.join(h.state, f), 'utf8') : null);
+  const read = (f) => (fs.existsSync(path.join(h.state, f)) ? readPublished(path.join(h.state, f), 'utf8') : null);
   return {
     tasks: read('tasks.json'),
     events: read('events.jsonl'),

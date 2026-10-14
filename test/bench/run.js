@@ -16,6 +16,7 @@ const F = require('./fixtures');
 const D = require('./driver');
 const H = require('./scenarios');
 const TARGETS = require('./targets');
+const { readPublished } = require('../atomic-file');
 
 function args() {
   const out = {};
@@ -57,7 +58,7 @@ async function withServe(b, s, fn) {
 async function main() {
   const file = path.join(out, `results-${build}.json`);
   // A partial run (--only) updates the steps it ran and keeps the rest.
-  const results = only && fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8'))
+  const results = only && fs.existsSync(file) ? JSON.parse(readPublished(file, 'utf8'))
     : { build, tree: path.resolve(opt.tree), sizes: D.SIZES.map(sizeName), scenarios: {}, checks: {}, rooms: {} };
   results.started_at = new Date().toISOString();
   const b = await D.browser();

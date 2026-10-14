@@ -1,6 +1,7 @@
 'use strict';
 
 const { waitOnRepo, childExit, killPid } = require('./signals');
+const { readPublished } = require('./atomic-file');
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -65,7 +66,7 @@ ${wait ? 'process.exit(7);' : ending}
     try { killPid(spawned.pid, 'SIGKILL'); } catch (e) { if (e.code !== 'ESRCH') throw e; }
   };
   h.stopWorkers.push(kill);
-  const started = await waitOnRepo(h, () => fs.existsSync(marker) && JSON.parse(fs.readFileSync(marker, 'utf8')),
+  const started = await waitOnRepo(h, () => fs.existsSync(marker) && JSON.parse(readPublished(marker, 'utf8')),
     'stand-in did not claim the task');
   assert.deepEqual(started, { agent: spawned.agent, pid: spawned.pid });
   return { ...spawned, kill, marker };

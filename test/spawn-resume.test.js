@@ -1,6 +1,7 @@
 'use strict';
 
 const { HUNG_TEST_MS, waitOnRepo, killPid } = require('./signals');
+const { readPublished } = require('./atomic-file');
 
 const { test, describe } = require('node:test');
 const assert = require('node:assert/strict');
@@ -559,6 +560,7 @@ test('a fresh native Claude outage retry that overflows blocks without another f
   fs.writeFileSync(script, `
 const fs = require('node:fs');
 const file = ${JSON.stringify(calls)};
+// read-published: this stub writes the file in place; nothing replaces it.
 const calls = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : [];
 calls.push(process.argv.slice(2));
 fs.writeFileSync(file, JSON.stringify(calls));
@@ -612,7 +614,7 @@ test('a still-running worker cannot be resumed', async (t) => {
   fs.appendFileSync(script, `\nfs.writeFileSync(${JSON.stringify(ready)}, String(process.pid));\nsetInterval(() => {}, 1000);\n`);
   const first = h.json(['spawn', '--task', 'T1']);
   t.after(() => { try { killPid(first.pid, 'SIGKILL'); } catch (e) { if (e.code !== 'ESRCH') throw e; } });
-  await waitOnRepo(h, () => fs.existsSync(ready) && fs.readFileSync(ready, 'utf8') === String(first.pid));
+  await waitOnRepo(h, () => fs.existsSync(ready) && readPublished(ready, 'utf8') === String(first.pid));
   sendBack(h);
   const result = h.run(['spawn', '--task', 'T1', '--wait']);
   assert.equal(result.code, 1, result.stderr);
@@ -706,7 +708,7 @@ test('an earlier attempt exit cannot collect or resume a live attempt with a reu
   const ready = path.join(h.base, 'live-ready');
   fs.appendFileSync(script, `\nfs.writeFileSync(${JSON.stringify(ready)}, String(process.pid));\nsetInterval(() => {}, 1000);\n`);
   const live = h.json(['spawn', '--task', 'T1']);
-  await waitOnRepo(h, () => fs.existsSync(ready) && fs.readFileSync(ready, 'utf8') === String(live.pid));
+  await waitOnRepo(h, () => fs.existsSync(ready) && readPublished(ready, 'utf8') === String(live.pid));
   h.ok(['submit', 'T1', '--sha', 'cfed4d76efd3afe887bbbfc7f62c7d94158e3255', '--agent', live.agent]);
   h.ok(['rework', 'T1', '--reason', 'Finish next attempt']);
   const hook = path.join(h.base, 'reused-spawn.js');

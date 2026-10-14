@@ -9,6 +9,7 @@ const path = require('node:path');
 const { cachedFixture, pinRung, detachedAlive, BIN } = require('./helpers');
 const { gateFixture } = require('./gate-helpers');
 const { killPid, killGroup } = require('./signals');
+const { readPublished } = require('./atomic-file');
 
 const events = (h) => require('../lib/state').readEvents(h.state);
 const preloadOption = (file) => `--require ${JSON.stringify(file)}`;
@@ -42,7 +43,7 @@ const fs = require('node:fs');
 const cp = require('node:child_process');
 const cli = (args) => cp.execFileSync(process.execPath, [process.argv[1], ...args], { encoding: 'utf8' });
 ${index === 0 && trigger === 'preclaim' ? '' : "cli(['claim', 'T1']);"}
-const attempts = fs.existsSync(process.argv[2]) ? JSON.parse(fs.readFileSync(process.argv[2])) : [];
+const attempts = fs.existsSync(process.argv[2]) ? JSON.parse(require(${JSON.stringify(path.join(__dirname, 'atomic-file.js'))}).readPublished(process.argv[2])) : [];
 attempts.push({ rung: '${rung}', agent: process.env.TOWER_CRANE_AGENT, session: process.env.TOWER_CRANE_SESSION,
   previous: process.argv[3], cwd: process.cwd() });
 // Readers and fs.watch can briefly prevent replacing an existing file on Windows.
@@ -145,7 +146,7 @@ if (process.execArgv.includes('-e') && process.env.TOWER_CRANE_SESSION
       const log = exit?.detail.log;
       throw new Error(`Unexpected escalation ceiling: ${ceiling.question}\n`
         + `Worker ${exit?.agent}: exit ${exit?.detail.code}, signal ${exit?.detail.signal}, log ${log}\n`
-        + (log && fs.existsSync(log) ? fs.readFileSync(log, 'utf8') : 'No worker log'));
+        + (log && fs.existsSync(log) ? readPublished(log, 'utf8') : 'No worker log'));
     }
     return false;
   });
@@ -180,7 +181,7 @@ if (process.execArgv.includes('-e') && process.env.TOWER_CRANE_SESSION
   if (prepare) prepare(h);
   // Gate preparation can change HEAD after the cached ladder was built.
   fs.writeFileSync(h.attempts + '.sha', h.git(['rev-parse', 'HEAD']));
-  h.readAttempts = () => fs.existsSync(h.attempts) ? JSON.parse(fs.readFileSync(h.attempts)) : [];
+  h.readAttempts = () => fs.existsSync(h.attempts) ? JSON.parse(readPublished(h.attempts)) : [];
   return h;
 }
 

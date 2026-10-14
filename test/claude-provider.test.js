@@ -35,6 +35,7 @@ function auditCli(run, timings, now) {
 
 const L = require('../lib/ladder');
 const P = require('../lib/claude-provider');
+const { readPublished } = require('./atomic-file');
 
 // Read the alias table rather than naming a release, so a swap of the shipped
 // table changes no test.
@@ -57,7 +58,7 @@ function setup(t) {
   const commands = [];
   h.profiles = () => {
     const file = h.env.TOWER_CRANE_TEST_PROVIDER_TRACE;
-    return file && fs.existsSync(file) ? fs.readFileSync(file, 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse) : [];
+    return file && fs.existsSync(file) ? readPublished(file, 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse) : [];
   };
   t.after(async () => {
     try {

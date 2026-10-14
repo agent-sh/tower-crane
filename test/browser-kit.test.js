@@ -5,6 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { makeRepo, TMP_ROOT } = require('./helpers');
+const { readPublished } = require('./atomic-file');
 
 test('browser needs round-trip through add, update and plan import, and invalidate old evidence', (t) => {
   const h = makeRepo(t);
@@ -68,11 +69,11 @@ test('a brokered worker can read the browser kit but cannot change the user sett
   const roots = [...new Set([TMP_ROOT, require('node:os').tmpdir(), ...(process.platform === 'win32' ? [] : ['/tmp'])])];
   const ignores = roots.map((root) => {
     const file = path.join(root, '.gitignore');
-    return [file, fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : null];
+    return [file, fs.existsSync(file) ? readPublished(file, 'utf8') : null];
   });
   const unchangedIgnores = () => {
     for (const [file, before] of ignores) {
-      assert.equal(fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : null, before, `${file} stays unchanged`);
+      assert.equal(fs.existsSync(file) ? readPublished(file, 'utf8') : null, before, `${file} stays unchanged`);
     }
   };
   const binding = path.join(h.base, 'brokers', 'worker-T1-1', B.FILE);

@@ -7,7 +7,7 @@ const test = require('node:test');
 const fs = require('node:fs');
 const path = require('node:path');
 const { makeRepo, copyRepo, repairWorktrees, BIN } = require('./helpers');
-const { updateJson } = require('./atomic-file');
+const { updateJson, readPublished } = require('./atomic-file');
 
 function worker(f) {
   const script = path.join(f.h.base, 'worker.js');
@@ -93,7 +93,7 @@ const stacked = (t) => copy(t, template('stacked'));
 
 function fixture(h) {
   const file = path.join(h.base, 'github.json');
-  const read = () => JSON.parse(fs.readFileSync(file, 'utf8'));
+  const read = () => JSON.parse(readPublished(file, 'utf8'));
   // Commands still running call the gh stub, which changes this file under the same lock.
   const write = (fn) => updateJson(file, (d) => { fn(d); return d; });
   h.env.TEST_STACK_DATA = file;

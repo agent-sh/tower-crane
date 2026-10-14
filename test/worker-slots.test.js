@@ -1,6 +1,7 @@
 'use strict';
 
 const { waitOnRepo, killPid, killGroup } = require('./signals');
+const { readPublished } = require('./atomic-file');
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -137,7 +138,7 @@ test('a started worker holds its lease against strangers until its own claim ren
   fs.writeFileSync(path.join(h.base, 'T1.claim'), '');
   // The harness writes its result non-atomically, so readiness is a complete record.
   const claimed = path.join(h.base, 'T1.claimed');
-  const claim = await waitOnRepo(h, () => fs.existsSync(claimed) && JSON.parse(fs.readFileSync(claimed, 'utf8')), 'worker did not claim', { alive: spawned.monitor_pid });
+  const claim = await waitOnRepo(h, () => fs.existsSync(claimed) && JSON.parse(readPublished(claimed, 'utf8')), 'worker did not claim', { alive: spawned.monitor_pid });
   assert.equal(claim.code, 0, claim.stderr);
   assert.equal(h.readState('tasks.json').tasks[0].claim.agent, spawned.agent);
   assert.equal(h.run(['claim', 'T2', '--agent', 'another']).code, 1);

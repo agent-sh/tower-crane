@@ -12,7 +12,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
 const { EventEmitter } = require('node:events');
-const { writeAtomic } = require('../atomic-file');
+const { writeAtomic, readPublished } = require('../atomic-file');
 
 const env = process.env;
 // Process creation times are on the system clock, which HOOK_CLOCK_FILE replaces below.
@@ -140,7 +140,7 @@ const inLock = (p) => under(LOCK, p);
 function ownsLock() {
   try {
     return real.readdirSync(LOCK).some((name) =>
-      JSON.parse(real.readFileSync(path.join(LOCK, name), 'utf8')).pid === process.pid);
+      JSON.parse(readPublished(path.join(LOCK, name), 'utf8', real)).pid === process.pid);
   } catch (error) {
     if (['ENOENT', 'ENOTDIR'].includes(error.code)) return false;
     throw error;

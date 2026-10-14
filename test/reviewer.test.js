@@ -303,6 +303,7 @@ const system = claude ? fs.readFileSync(args[args.indexOf('--append-system-promp
 const configHome = process.env[claude ? 'CLAUDE_CONFIG_DIR' : 'CODEX_HOME'];
 const policy = JSON.parse(fs.readFileSync(path.join(configHome, 'policy.json'), 'utf8'));
 const hash = crypto.createHash('sha256').update(system).digest('hex');
+// read-published: this stub writes the checkpoint in place; nothing replaces it.
 const previous = fs.existsSync(${JSON.stringify(checkpoint)}) ? JSON.parse(fs.readFileSync(${JSON.stringify(checkpoint)})) : {};
 const tokens = Math.ceil(Buffer.byteLength(system) / 4);
 const hit = previous[claude ? 'claude' : 'codex'] === hash;
