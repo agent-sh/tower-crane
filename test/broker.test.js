@@ -1377,20 +1377,22 @@ test('a sandboxed agent waits in its sandbox on its own task, bounded and withou
   fs.chmodSync(h.state, 0o555);
   try {
     const wait = (args) => h.runAsync(['wait', ...args], { env });
-    const woke = await wait(['--task', 'T1', '--after', String(offset), '--timeout', '30']);
+    // Refused waits never start, and the message is already published.
+    const bound = String(HUNG_TEST_MS / 1000);
+    const woke = await wait(['--task', 'T1', '--after', String(offset), '--timeout', bound]);
     assert.equal(woke.code, 0, woke.stderr);
     assert.equal(JSON.parse(woke.stdout).cmd, 'msg', 'the message to the worker wakes it');
-    const timedOut = await wait(['--timeout', '1']);
+    const timedOut = await wait(['--timeout', '0.1']); // wait-allow: verify the CLI timeout contract with already-published state
     assert.equal(timedOut.code, 2, timedOut.stderr);
     assert.equal(JSON.parse(timedOut.stdout).type, 'timeout');
     for (const [args, why] of [
-      [['--task', 'T2', '--timeout', '1'], /works on T1 only, not T2/],
+      [['--task', 'T2', '--timeout', bound], /works on T1 only, not T2/],
       [['--task', 'T1'], /waits with a bound: --timeout SEC/],
       [['--task', 'T1', '--follow'], /wait --follow is the orchestrator's/],
-      [['--task', 'T1', '--timeout', '1', '--observe'], /wait --observe is the orchestrator's/],
-      [['--task', 'T1', '--timeout', '1', '--inbox'], /wait --inbox is the orchestrator's/],
-      [['--task', 'T1', '--timeout', '1', '--for', 'reviewer-T1-1'], /own messages or the orchestrator's, not reviewer-T1-1/],
-      [['--task', 'T1', '--timeout', '1', '--agent', 'orchestrator'], /worker-T1-1 cannot wait as orchestrator/],
+      [['--task', 'T1', '--timeout', bound, '--observe'], /wait --observe is the orchestrator's/],
+      [['--task', 'T1', '--timeout', bound, '--inbox'], /wait --inbox is the orchestrator's/],
+      [['--task', 'T1', '--timeout', bound, '--for', 'reviewer-T1-1'], /own messages or the orchestrator's, not reviewer-T1-1/],
+      [['--task', 'T1', '--timeout', bound, '--agent', 'orchestrator'], /worker-T1-1 cannot wait as orchestrator/],
     ]) {
       const r = await wait(args);
       assert.equal(r.code, 1, `${args.join(' ')}: ${r.stderr}`);
