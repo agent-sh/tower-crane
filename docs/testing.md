@@ -74,6 +74,8 @@ The base refreshes through `2dc450f3` and `bd5ed7ea` keep main's harness guard, 
 
 The base refreshes through `b7c53e64` and `6e31e590` keep main's pending-CI rechecks, prose claim checks, worktree races and orchestrator identity probes. Their probes wait on repository and file signals and fail at once when their waiter ends. An engine waiter that ends at its own timeout, the stalled-head observation and the unlocked-prune window carry reasons. Automation, review prose, worktree and orchestrator pass 202 of 202 tests in each of five loaded runs, and the full suite at `9a77495a` passes 2252 tests with 27 skipped and no failures.
 
+The base refresh through `e869a37a` keeps main's reviewer crash and note fixtures, the chunked event-log hold and the lock timing contracts. Its readiness loops wait on repository and file signals; the gate timeout under test, the live-lock observation window and the production lock-bound assertions carry reasons. Automation, lock, orchestrator and gate timeouts pass 187 of 187 tests in each of five loaded runs, and the full suite at `34c4d17a` passes 2267 tests with 29 skipped and no failures.
+
 ## Tools
 
 - `node scripts/test-cost.js [--before DIR] [files...]` measures CPU and wall seconds per file, median of three runs, four files at a time. With `--before`, it measures another checkout interleaved with this one.

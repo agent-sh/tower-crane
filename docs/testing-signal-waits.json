@@ -28432,5 +28432,125 @@
       "log_sha256": "b56e1a715e3a7ab83a947b68f3d58b7829bc7e38a254bb85fdf15979c382986c"
     },
     "raw_logs": "Task scratch; only relative artifact names and hashes are committed."
+  },
+  "base_e869a37a_refresh": {
+    "base_head": "e869a37a",
+    "source": "34c4d17a",
+    "changes": [
+      "Main's reviewer crash and note branches join the async automation harness.",
+      "Main's chunked event-log hold in the supervision fixture keeps the suite guard.",
+      "Main's pollUntil helper and the lock writer readiness loop wait on repository and file signals.",
+      "The gate timeout under test, its outliving child, the live-lock observation window and two production lock-bound assertions carry reasons."
+    ],
+    "loaded_command": "node test/run.js --test-concurrency=3 test/automation.test.js test/lock.test.js test/orchestrator.test.js test/gate-timeouts.test.js",
+    "cpu_load": "Shared 24-core host with other sessions running test suites; one-minute load 6 to 22 during the runs.",
+    "loaded_runs": [
+      {
+        "run": 1,
+        "status": 0,
+        "load_after": [
+          13.5,
+          12.94,
+          12.8
+        ],
+        "log": "loaded7-1.log",
+        "log_sha256": "e4ca1875138c62ae87d0850b3fb3e68242dde4930d212be26bd1dc7c38d28ff3",
+        "tests": {
+          "tests": 187,
+          "pass": 187,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 0
+        }
+      },
+      {
+        "run": 2,
+        "status": 0,
+        "load_after": [
+          19.36,
+          21.81,
+          17.76
+        ],
+        "log": "loaded7-2.log",
+        "log_sha256": "06c419084c84bb78c0c29e0808fb483659a9dc88ca8e971c9322a2f04dcd0382",
+        "tests": {
+          "tests": 187,
+          "pass": 187,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 0
+        }
+      },
+      {
+        "run": 3,
+        "status": 0,
+        "load_after": [
+          7.46,
+          13.82,
+          16.11
+        ],
+        "log": "loaded7-3.log",
+        "log_sha256": "47c39a5ab003b5b5abb499c505dd8a5561de074ed643d2d378cd40bf59be3693",
+        "tests": {
+          "tests": 187,
+          "pass": 187,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 0
+        }
+      },
+      {
+        "run": 4,
+        "status": 0,
+        "load_after": [
+          6.25,
+          8.9,
+          12.67
+        ],
+        "log": "loaded7-4.log",
+        "log_sha256": "c659c7da2524a56630cd56c04d65cafcfbb3513cb7ebfec79931a2921d3ca956",
+        "tests": {
+          "tests": 187,
+          "pass": 187,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 0
+        }
+      },
+      {
+        "run": 5,
+        "status": 0,
+        "load_after": [
+          15.12,
+          13.13,
+          12.95
+        ],
+        "log": "loaded7-5.log",
+        "log_sha256": "a317df137de8f9937a14b2d4b7f76e3d3f135fe9d8f6c386b890eaec1e6cebc5",
+        "tests": {
+          "tests": 187,
+          "pass": 187,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 0
+        }
+      }
+    ],
+    "full_suite": {
+      "command": "node test/run.js --test-concurrency=3",
+      "source": "34c4d17a",
+      "status": 0,
+      "wall": "16m26s",
+      "tests": {
+        "tests": 2296,
+        "pass": 2267,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 29
+      },
+      "log": "full-7.log",
+      "log_sha256": "4f8cedaefa8cf70654575838c6812ba245feb61fa19ede356c144071fc2bca9e"
+    },
+    "raw_logs": "Task scratch; only relative artifact names and hashes are committed."
   }
 }
