@@ -3,7 +3,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
 const { makeRepo } = require('../helpers');
 const { shellQuote } = require('../../lib/gates/common');
@@ -70,13 +69,16 @@ if (gate === 'clean') console.log(JSON.stringify({ items: [] }));
   statusRoot(override, 'TOWER_CRANE_TMP');
   delete h.env.TOWER_CRANE_TMP;
 
-  // Unset, the gates use the OS temporary directory again.
+  // Unset, the gates use tower-crane/gates under the user's cache, not the OS temporary
+  // directory: /tmp is often a RAM-backed tmpfs, and some suites refuse to run there.
   h.ok(['project', 'set', '--tmp-root', 'null', '--agent', 'orchestrator']);
   assert.match(h.ok(['project', 'show']), /gates\.tmp_root: null/);
-  statusRoot(os.tmpdir(), 'system');
+  const cache = path.join(process.platform === 'win32' ? h.env.LOCALAPPDATA : h.env.XDG_CACHE_HOME, 'tower-crane', 'gates');
+  statusRoot(cache, 'cache');
   const defaulted = h.run(['check', 'clean', 'T1', '--agent', 'orchestrator']);
   assert.equal(defaulted.code, 0, defaulted.stdout + defaulted.stderr);
-  assert.ok(ranLog().at(-1).cwd.startsWith(`${fs.realpathSync.native(os.tmpdir())}${path.sep}`));
+  assert.ok(ranLog().at(-1).cwd.startsWith(`${fs.realpathSync.native(cache)}${path.sep}`), ranLog().at(-1).cwd);
   evidence = h.readState('tasks.json').tasks[0].evidence;
-  assert.equal(evidence.findLast((e) => e.type === 'clean').tmp_root, os.tmpdir());
+  assert.equal(evidence.findLast((e) => e.type === 'clean').tmp_root, cache);
+  assert.deepEqual(fs.readdirSync(cache), []);
 });

@@ -338,6 +338,77 @@ test('failed, missing and timed out local commands record failure and clean thei
   }
 });
 
+test('a failed local CI keeps a redacted output tail, its full log and the artifacts it names', (t) => {
+  // Shaped like ginza's tools/check.py: the failing step prints early, later steps print after
+  // it, and the receipt it writes inside the gate worktree is named on the last line.
+  const h = fixture(t, `
+const fs = require('node:fs');
+const path = require('node:path');
+console.log('step 1: scaffold ok');
+for (let i = 0; i < 300; i++) console.log('early line ' + i);
+console.error('FAILING STEP: unit tests, token ' + process.env.CI_FIXTURE_TOKEN);
+for (let i = 0; i < 150; i++) console.log('cargo tree line ' + i);
+fs.mkdirSync('.local/checks', { recursive: true });
+fs.writeFileSync('.local/checks/receipt.json', JSON.stringify({ failure_reasons: ['unit tests failed'] }));
+fs.writeFileSync('.local/checks/extra.json', '{}');
+fs.writeFileSync(path.join(process.env.TMPDIR, 'report.txt'), 'scratch report');
+console.log('Scratch report: ' + path.join(process.env.TMPDIR, 'report.txt'));
+console.log('Local check receipt: ' + path.resolve('.local/checks/receipt.json'));
+console.log('Local check receipt: ' + path.resolve('..', '..', '..', 'outside.json'));
+process.exit(1);
+`);
+  const token = `ghp_${'a1'.repeat(18)}`;
+  h.env.CI_FIXTURE_TOKEN = token;
+  fs.writeFileSync(path.join(h.env.TOWER_CRANE_TMP, '..', 'outside.json'), '{}');
+  h.ok(['project', 'set', '--ci-local', JSON.stringify({ command: h.command, timeout: 30,
+    artifacts: ['.local/checks/*.json'], artifact_pattern: '^(?:Local check receipt|Scratch report): (.+)$' })]);
+  const r = h.run(['check', 'ci', 'T1']);
+  assert.equal(r.code, 1, r.stdout + r.stderr);
+  const e = h.readState('tasks.json').tasks[0].evidence.at(-1);
+  assert.equal(e.ok, false);
+  assert.equal(e.confirmed_failure, true);
+  const kept = e.local_ci;
+  // The tail reaches back past 150 later lines to the failing step, with the token redacted.
+  assert.match(kept.output_tail, /FAILING STEP: unit tests, token \[redacted:/);
+  assert.ok(!kept.output_tail.includes(token));
+  assert.ok(kept.output_tail.split('\n').length <= 200);
+  assert.doesNotMatch(kept.output_tail, /step 1: scaffold ok|early line 0$/m);
+  // The full log holds every line, redacted, under the state directory's logs.
+  assert.match(kept.log, /^logs\/ci-T1-[0-9a-f]{10}-[^/]+\/output\.log$/);
+  const log = fs.readFileSync(path.join(h.state, kept.log), 'utf8');
+  assert.match(log, /^step 1: scaffold ok$/m);
+  assert.match(log, /^early line 0$/m);
+  assert.match(log, /^cargo tree line 149$/m);
+  assert.ok(!log.includes(token));
+  assert.ok(r.stdout.includes(`Full log: ${path.join(h.state, kept.log)}`), r.stdout);
+  assert.ok(!r.stdout.includes(token));
+  // Printed paths come first, then the globs; a file outside the gate directory is left in place.
+  const copied = Object.fromEntries(kept.artifacts.map((a) => [path.basename(a.from), a]));
+  assert.deepEqual(Object.keys(copied).sort(), ['extra.json', 'receipt.json', 'report.txt']);
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(h.state, copied['receipt.json'].path), 'utf8')), { failure_reasons: ['unit tests failed'] });
+  assert.equal(fs.readFileSync(path.join(h.state, copied['report.txt'].path), 'utf8'), 'scratch report');
+  assert.match(copied['report.txt'].path, /\/artifacts\/TMPDIR\/report\.txt$/);
+  assert.match(copied['extra.json'].path, /\/artifacts\/\.local\/checks\/extra\.json$/);
+  assert.equal(copied['receipt.json'].bytes, fs.statSync(path.join(h.state, copied['receipt.json'].path)).size);
+  assert.deepEqual(kept.artifacts_skipped.map((s) => path.basename(s.from)), ['outside.json']);
+  assert.match(kept.artifacts_skipped[0].reason, /outside the gate worktree/);
+  assert.match(r.stdout, /Saved artifacts: .*receipt\.json -> /);
+  // The gate worktree is still removed.
+  assert.deepEqual(fs.readdirSync(h.env.TOWER_CRANE_TMP), []);
+  assert.equal(h.git(['worktree', 'list', '--porcelain']).match(/^worktree /gm).length, 1);
+  const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  assert.deepEqual(events.findLast((v) => v.cmd === 'check ci').detail.local_ci, kept);
+});
+
+test('a passing local CI keeps its log without a tail', (t) => {
+  const h = fixture(t);
+  const e = h.json(['check', 'ci', 'T1']);
+  assert.equal(e.ok, true);
+  assert.equal(e.local_ci.output_tail, undefined);
+  assert.deepEqual(e.local_ci.artifacts, []);
+  assert.ok(fs.existsSync(path.join(h.state, e.local_ci.log)));
+});
+
 test('conflicting merged trees fail before running the local command', (t) => {
   const h = fixture(t);
   fs.writeFileSync(path.join(h.repo, 'head.txt'), 'conflict\n');
@@ -574,7 +645,9 @@ test('project settings validate local argv and timeout, preserve CI siblings and
   const original = h.readState('project.json');
   for (const local of ['{', '[]', '{}', '{"command":[],"timeout":1}', '{"command":[""],"timeout":1}',
     '{"command":["node",2],"timeout":1}', '{"command":["node"]}', '{"command":["node"],"timeout":0}',
-    '{"command":["node"],"timeout":"1"}']) {
+    '{"command":["node"],"timeout":"1"}', '{"command":["node"],"timeout":1,"artifacts":["/abs/*.json"]}',
+    '{"command":["node"],"timeout":1,"artifacts":["../up/*.json"]}', '{"command":["node"],"timeout":1,"artifacts":".local"}',
+    '{"command":["node"],"timeout":1,"artifact_pattern":"("}', '{"command":["node"],"timeout":1,"artifact_pattern":""}']) {
     const r = h.run(['project', 'set', '--ci-local', local]);
     assert.equal(r.code, 2, JSON.stringify({ local, ...r }));
     assert.match(r.stderr, /--ci-local/);

@@ -65,7 +65,7 @@ const SETTINGS = {
   executors: int('N', 'operational (orchestrator or owner): automation executors running gates at once on this host (default 2)'),
   'tests-timeout-min': str('MIN', 'operational (orchestrator or owner): positive minutes per test command (default 20); null restores default'),
   'clean-timeout-min': str('MIN', 'operational (orchestrator or owner): positive minutes per cleanup command (default 20); null restores default'),
-  'tmp-root': str('DIR', 'operational (orchestrator or owner): absolute directory where check tests, check ci and check clean build worktrees and scratch (default the OS temp directory; TOWER_CRANE_TMP overrides it); null restores default'),
+  'tmp-root': str('DIR', 'operational (orchestrator or owner): absolute directory where check tests, check ci and check clean build worktrees and scratch (default tower-crane/gates under the user cache directory, not the OS temp directory; TOWER_CRANE_TMP overrides it); null restores default'),
   'tests-paths': str('JSON', 'operational (orchestrator or owner): non-empty array of test path globs; null restores default layouts'),
   'tests-keep': str('JSON', 'operational (orchestrator or owner): extra build file globs to keep at submitted sha; [] or null restores defaults'),
   'tests-host-only': str('JSON', 'operational (orchestrator or owner): test file globs a sandboxed worker cannot run, listed in its brief; the tests gate runs them on the host; [] or null clears them'),
