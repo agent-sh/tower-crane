@@ -54,22 +54,66 @@ function alive(pid) {
   catch (error) { return error.code === 'EPERM'; }
 }
 
+// The holder's pid, or null while the file is missing or, on Windows, pending deletion.
+function holderOf(file) {
+  try { return fs.readFileSync(file, 'utf8'); }
+  catch (error) { if (error.code === 'ENOENT' || BUSY.includes(error.code)) return null; throw error; }
+}
+
+// Creates `file` already holding this pid: link() of a filled staged file is
+// atomic, so no holder, even one killed at once, leaves a lock without a pid.
+function create(file) {
+  const staged = stagedName(file);
+  fs.writeFileSync(staged, String(process.pid));
+  try {
+    fs.linkSync(staged, file);
+    return true;
+  } catch (error) {
+    // Windows refuses a link over a lock that is still pending deletion.
+    if (error.code === 'EEXIST' || BUSY.includes(error.code)) return false;
+    throw error;
+  } finally {
+    fs.rmSync(staged, { force: true });
+  }
+}
+
+// Removes `file` only while it still names the dead `pid`: it is renamed
+// aside first, and put back when the rename took a file that replaced it.
+function removeDead(file, pid) {
+  const aside = stagedName(file);
+  try { fs.renameSync(file, aside); }
+  catch (error) { if (error.code === 'ENOENT' || BUSY.includes(error.code)) return; throw error; }
+  try {
+    if (holderOf(aside) !== pid) fs.linkSync(aside, file);
+  } catch (error) {
+    if (error.code !== 'EEXIST') throw error;
+  } finally {
+    fs.rmSync(aside, { force: true });
+  }
+}
+
+// A test can kill a holder inside its hold. One waiter at a time, the one
+// that creates the takeover lock, removes a lock whose holder is dead, so a
+// second waiter never removes the lock the first then took.
 function lock(file) {
   const lockFile = path.join(path.dirname(file), `.${path.basename(file)}.lock`);
+  const takeover = `${lockFile}.takeover`;
   const deadline = Date.now() + LOCK_WAIT_MS; // wait-allow: bounds a lock held by a stuck process, not a readiness wait
   for (;;) {
-    try {
-      fs.writeFileSync(lockFile, String(process.pid), { flag: 'wx' });
-      return () => fs.rmSync(lockFile, { force: true });
-    } catch (error) {
-      if (error.code !== 'EEXIST') throw error;
+    if (create(lockFile)) return () => fs.rmSync(lockFile, { force: true });
+    const holder = holderOf(lockFile);
+    if (holder && !alive(Number(holder))) {
+      if (create(takeover)) {
+        try { if (holderOf(lockFile) === holder) removeDead(lockFile, holder); }
+        finally { fs.rmSync(takeover, { force: true }); }
+        continue;
+      }
+      // A takeover lock outlives its holder only when a test kills that holder in these few calls.
+      const taker = holderOf(takeover);
+      if (taker && !alive(Number(taker))) removeDead(takeover, taker);
     }
-    let holder = '';
-    try { holder = fs.readFileSync(lockFile, 'utf8'); } catch { /* Released meanwhile. */ }
-    // A test can kill a holder. An empty file is a holder between its create and its pid write.
-    if (/^\d+$/.test(holder) && !alive(Number(holder))) fs.rmSync(lockFile, { force: true });
-    else if (Date.now() > deadline) throw new Error(`${lockFile} is still held by pid ${holder || 'unknown'}`);
-    else Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2); // wait-allow: retry cadence of a held lock
+    if (Date.now() > deadline) throw new Error(`${lockFile} is still held by pid ${holder || 'unknown'}`);
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2); // wait-allow: retry cadence of a held lock
   }
 }
 
