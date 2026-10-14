@@ -737,8 +737,11 @@ test('unchanged pending CI is rechecked each minute without new records, and CI 
   // The stall record is written mid-run: the recheck that wrote it, and the
   // reaction its gate event queues, still render the board and read the PR.
   const stall = h.logs().findLast((e) => e.cmd === 'check ci');
-  const finished = (id) => h.logs().some((e) => e.cmd === 'automation' && e.detail.source === id && e.detail.phase !== 'running');
-  await until(() => [stall.id, ...reconciles().map((e) => e.id)].every(finished), 'the engine finishes the run that recorded the stall');
+  const outcome = (id) => h.logs().findLast((e) => e.cmd === 'automation' && e.detail.source === id && e.detail.phase !== 'running')?.detail.phase;
+  let sources = [];
+  await until(() => (sources = [stall.id, ...reconciles().map((e) => e.id)]).every(outcome), 'the engine finishes the run that recorded the stall');
+  // A reaction that failed also finishes; it must not pass for one that worked.
+  for (const id of sources) assert.ok(['done', 'deferred'].includes(outcome(id)), `the reaction to ${id} ended ${outcome(id)}`);
   assert.equal(ci().length, 2);
   assert.match(ci().at(-1).summary, /Stalled: no CI run has been queued or running at this head since/);
   assert.equal(h.readState('tasks.json').tasks[0].status, 'submitted', 'a stall is not a verdict on the change');
@@ -3992,4 +3995,25 @@ poll();
   assert.equal(passes.at(-1).detail.phase, 'done');
   assert.equal(passes.at(-1).detail.blocked, null);
   assert.deepEqual(passes.at(-1).detail.skipped, []);
+});
+
+test('a submit the wait host reads before its files are renamed still runs the gates', async (t) => {
+  const h = setup(t);
+  h.ok(['claim', 'T1', '--agent', 'worker']);
+  const started = path.join(h.base, 'wait-started');
+  const waiter = h.runAsync(['wait', '--types', 'worker-message', '--timeout', '300', '--agent', 'orchestrator'],
+    { hooks: { HOOK_WATCH_READY: started } });
+  t.after(() => waiter);
+  await waitFor(started);
+  // The worker's commit pauses after its events reach the log, before
+  // tasks.json moves to submitted, which the host reads in that window.
+  h.ok(['submit', 'T1', '--sha', h.sha, '--pr', '7', '--agent', 'worker'], { hooks: { HOOK_COMMIT_DELAY_MS: '2000' } });
+  const submit = h.logs().findLast((e) => e.cmd === 'submit');
+  // The host handles the submit before it wakes on a message logged after it.
+  h.ok(['msg', '--to', 'orchestrator', '--task', 'T1', 'done', '--agent', 'w-1']);
+  assert.equal((await waiter).code, 0);
+  const receipts = h.logs().filter((e) => e.cmd === 'automation' && e.detail.source === submit.id);
+  assert.equal(receipts.at(-1)?.detail.phase, 'done', 'the host reacted to the submit');
+  const tests = h.readState('tasks.json').tasks[0].evidence.filter((e) => e.type === 'tests');
+  assert.equal(tests.length, 1, 'and ran its gates');
 });

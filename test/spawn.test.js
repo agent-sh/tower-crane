@@ -864,6 +864,28 @@ test('a git shim killed while it cleans up placeholders does not keep the next s
   }
 });
 
+// Only a cleanup outside every command sandbox judges a marker from a
+// sandbox's pid namespace. A stopped sandboxed agent's shim leaves one, and
+// until a host cleanup ran, every git call of every other sandboxed agent
+// waited 5 s on it. The supervisor is on the host when its agent's group ends.
+test('a supervisor clears the git directory a git shim in its agent\'s sandbox died holding', { skip: process.platform !== 'linux' && 'pid namespaces are Linux only' }, (t) => {
+  const h = setup(t);
+  for (const mark of ['TOWER_CRANE_SANDBOX', 'SANDBOX_RUNTIME', 'CODEX_SANDBOX']) delete h.env[mark];
+  const policy = path.join(h.base, 'policy.json');
+  fs.writeFileSync(policy, JSON.stringify({ gitPush: 'branch', branch: 'task-T1', repo: null, gh: [] }));
+  const shimDir = path.join(h.base, 'shim');
+  fs.mkdirSync(shimDir);
+  // The agent is a git call through its shim, killed once it holds the directory.
+  commandRung(h, 'small', ['env', 'HOOK_DIE_REAP=1', 'HOOK_PIDNS=pid:[4026599999]', 'TOWER_CRANE_SANDBOX=1', `HOOK_STATE=${h.state}`,
+    process.execPath, '--require', HOOKS, path.join(ROOT, 'lib', 'shim.js'), policy, shimDir, 'git', 'status', '--short', '{prompt}']);
+  const r = h.run(['spawn', '--role', 'small', '--task', 'T1', '--wait', '--json']);
+  assert.notEqual(r.code, 0, 'the agent was killed');
+  const dir = path.join(h.repo, '.git', 'tower-crane-reap');
+  const marker = fs.existsSync(dir) ? fs.readdirSync(dir) : [];
+  assert.deepEqual(marker, [], marker.length ? fs.readFileSync(path.join(dir, marker[0]), 'utf8') : '');
+  assert.equal(fs.existsSync(dir), false);
+});
+
 // Everything a spawn could leave behind: state files, events, logs, the
 // worktree and its branch.
 function footprint(h) {
