@@ -998,6 +998,12 @@ can rerun that gate.
 Asynchronous stack merge polling and backoff also stop on the second signal,
 recording failed merge evidence. The remote request may still be pending;
 another merge invocation confirms its state.
+Automatic stack maintenance (stack linking, post-merge stack refresh, its
+base fetch and `gh stack sync`) runs its Git and GitHub commands
+asynchronously. The first signal lets the running command finish and starts
+no further stack step or task; the second kills it. A `gh stack sync` that
+ran records its outcome either way, so moved heads still go to rework.
+Stopped steps record no deferral; the next refresh retries them.
 `automation queued` records a blocked notification's source, with
 `executors` set to the cap when the cap blocked it rather than another
 executor of the same task. Queued notifications for accepted, unmerged PR
