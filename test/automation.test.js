@@ -1475,9 +1475,36 @@ test('a test failure whose base rerun is killed is not confirmed, retries once a
     assert.match(run.base_rerun_killed.base, /^[0-9a-f]+$/);
     assert.ok(run.base_rerun_killed.signal === 'SIGKILL' || run.base_rerun_killed.status === 137, JSON.stringify(run.base_rerun_killed));
   }
+  assert.deepEqual(h.logs().filter((e) => e.cmd === 'check tests').map((e) => e.detail.base_rerun_killed), runs.map((e) => e.base_rerun_killed),
+    'the audit event carries the same flag as the evidence');
   assertReworked(h, task);
   assert.match(h.logs().findLast((e) => e.cmd === 'rework').detail.reason,
     /Base rerun at [0-9a-f]+ was killed \((?:SIGKILL|exit 137)\); shared failures were not checked\./);
+});
+
+test('a test failure whose base rerun times out is not confirmed, retries once and reports the unchecked base', (t) => {
+  const h = setup(t, { ci: 'pending' });
+  const script = path.join(h.base, 'base-hangs.js');
+  // Fails by name at the submitted head, where value.js is 1, and outlives the gate deadline on the base, where it is 0.
+  fs.writeFileSync(script, "const fs = require('node:fs');\nif (!fs.readFileSync('value.js', 'utf8').includes('1')) setTimeout(() => {}, 60000);\n" // wait-allow: outlive the gate deadline on the base
+    + "else {\n  console.log('# Subtest: test/sum.test.js');\n  console.log('not ok 1 - sums two numbers');\n  process.exit(1);\n}\n");
+  h.ok(['project', 'set', '--tests-cmd', `node ${shellQuote(script)}`, '--tests-mode', 'run-only', '--tests-timeout-min', '0.05']);
+  h.submit();
+  h.consume();
+  assert.equal(h.logs().filter((e) => e.cmd === 'check tests').length, 2, 'a timed-out base rerun runs once more, and no third time');
+  const task = h.readState('tasks.json').tasks[0];
+  const runs = task.evidence.filter((e) => e.type === 'tests');
+  assert.deepEqual(runs.map((e) => [e.confirmed_failure, e.main_failure, e.infrastructure_failure]), [[undefined, undefined, undefined], [undefined, undefined, undefined]],
+    'the base never said which names fail there, so the failure is not confirmed');
+  for (const run of runs) {
+    assert.match(run.base_rerun_timed_out.base, /^[0-9a-f]+$/);
+    assert.equal(run.base_rerun_timed_out.minutes, 0.05);
+  }
+  assert.deepEqual(h.logs().filter((e) => e.cmd === 'check tests').map((e) => e.detail.base_rerun_timed_out), runs.map((e) => e.base_rerun_timed_out),
+    'the audit event carries the same flag as the evidence');
+  assertReworked(h, task);
+  assert.match(h.logs().findLast((e) => e.cmd === 'rework').detail.reason,
+    /Base rerun at [0-9a-f]+ timed out after 0\.05 min; shared failures were not checked\./);
 });
 
 test('a test gate that fails by hand while the watcher runs reworks, not left submitted', async (t) => {
