@@ -35,7 +35,7 @@ cp.spawnSync = function stackGh(command, args, opts) {
   data.calls.push({ args, cwd: opts.cwd });
   const finish = (value = '', status = 0, stderr = '') => {
     // data.delayMs models a slow GitHub: every call takes that long to answer.
-    if (data.delayMs) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, data.delayMs);
+    if (data.delayMs) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, data.delayMs); // wait-allow: models GitHub's response time, not a readiness wait
     writeAtomic(file, JSON.stringify(data));
     return { status, stdout: typeof value === 'string' ? value : JSON.stringify(value), stderr };
   };

@@ -39,6 +39,7 @@ function setup(t) {
 async function start(t, h, { claim = true, submit = false, wait = false, env = {}, lifetimeMs = 0 } = {}) {
   const marker = path.join(h.base, `started-${Date.now()}.json`);
   const worker = path.join(h.base, 'worker.js');
+  const ending = lifetimeMs ? `setTimeout(() => { fs.writeFileSync(process.argv[3] + '.natural', ''); process.exit(0); }, ${lifetimeMs});` : 'setInterval(() => {}, 1000);'; // wait-allow: the stand-in's own end, which a test tells apart from being stopped
   const script = `
 const fs = require('node:fs');
 const cp = require('node:child_process');
@@ -50,7 +51,7 @@ fs.writeSync(2, ${JSON.stringify(PRIVATE_LOG + '\n')});
 ${submit ? "cp.execFileSync(process.execPath, [process.argv[2], 'submit', task, '--sha', '50b732a15be40ccb2065cb2ba0e7b366d511b736']);" : ''}
 fs.writeFileSync(process.argv[3] + '.tmp', JSON.stringify({ agent: process.env.TOWER_CRANE_AGENT, pid: process.pid }));
 fs.renameSync(process.argv[3] + '.tmp', process.argv[3]);
-${wait ? 'process.exit(7);' : lifetimeMs ? `setTimeout(() => { fs.writeFileSync(process.argv[3] + '.natural', ''); process.exit(0); }, ${lifetimeMs});` : 'setInterval(() => {}, 1000);'}
+${wait ? 'process.exit(7);' : ending}
 `;
   fs.writeFileSync(worker, script);
   h.ok(['ladder', 'set', 'easy', '--harness', 'command', '--command', JSON.stringify([process.execPath, worker, BIN, marker, '{prompt}']),
