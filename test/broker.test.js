@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { TMP_ROOT, detachedAlive, makeRepo } = require('./helpers');
+const { TMP_ROOT, ROOT, detachedAlive, makeRepo } = require('./helpers');
 const { stacked } = require('./stack-fixture');
 const B = require('../lib/broker');
 const harnessHooks = require('../lib/harness-hooks');
@@ -642,4 +642,273 @@ test('a test fixture with an inherited broker variable creates its own worktree;
   assert.equal(r.code, 0, r.stderr);
   assert.ok(fixture.registers(r.stdout.trim()), 'the worktree was created');
   assert.ok(fixture.readState('tasks.json').tasks.find((x) => x.id === 'T1').branch, 'the fixture recorded its branch');
+});
+
+function spawnAsync(command, args, { cwd, env, input }) {
+  return new Promise((resolve) => {
+    const child = require('node:child_process').spawn(command, args, { cwd, env, stdio: ['pipe', 'pipe', 'pipe'] });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.setEncoding('utf8').on('data', (d) => { stdout += d; });
+    child.stderr.setEncoding('utf8').on('data', (d) => { stderr += d; });
+    child.stdin.end(input);
+    child.on('close', (status) => resolve({ status, stdout, stderr }));
+  });
+}
+
+// A worker's push and gh commands go through its broker. The fixture is the
+// task worktree with origin a bare repository on this machine, a broker for
+// the worker, and its git shim with the policy spawn writes for a sandboxed
+// agent.
+async function pushFixture(t, { role = 'worker', title = 'Push' } = {}) {
+  const h = makeRepo(t);
+  h.init();
+  h.ok(['task', 'add', '--title', title, '--acceptance', 'pushes through the broker']);
+  const remote = path.join(h.base, 'remote.git');
+  h.git(['init', '-q', '--bare', remote]);
+  h.git(['remote', 'add', 'origin', remote]);
+  h.git(['push', '-q', 'origin', 'HEAD:refs/heads/main']);
+  const wt = h.json(['worktree', 'T1']);
+  const task = h.readState('tasks.json').tasks[0];
+  const common = path.resolve(h.repo, h.git(['rev-parse', '--git-common-dir']));
+  const agent = `${role}-T1-1`;
+  const job = { state: h.state, task: 'T1', agent, role, harness: 'claude', cwd: wt.path,
+    broker: path.join(h.base, 'brokers', agent, B.FILE), dispatch: { gitDirs: { common } } };
+  const broker = await B.start(job);
+  t.after(() => broker.close());
+  const shimDir = path.join(h.base, 'shim');
+  fs.mkdirSync(shimDir);
+  const A = require('../lib/agents');
+  const policy = path.join(shimDir, 'policy.json');
+  fs.writeFileSync(policy, JSON.stringify({ ...A.policy(A.load(role)), branch: task.branch, repo: null, masks: false, hook: null,
+    broker: true, repoDir: common }));
+  // Asynchronous: the broker answers from this process.
+  const shim = (tool, args, opts = {}) => spawnAsync(process.execPath,
+    [path.join(ROOT, 'lib', 'shim.js'), policy, path.join(shimDir, 'bin'), tool, ...args],
+    { cwd: opts.cwd || wt.path, input: opts.input, env: { ...h.env, ...broker.env, GIT_TERMINAL_PROMPT: '0', ...opts.env } });
+  const commit = (file, text) => {
+    fs.mkdirSync(path.dirname(path.join(wt.path, file)), { recursive: true });
+    fs.writeFileSync(path.join(wt.path, file), text);
+    h.git(['add', file], wt.path);
+    h.git(['commit', '-qm', `add ${file}`], wt.path);
+    return h.git(['rev-parse', 'HEAD'], wt.path);
+  };
+  const remoteRef = (ref) => {
+    const r = require('node:child_process').spawnSync('git', ['--git-dir', remote, 'rev-parse', '--verify', '--quiet', ref], { encoding: 'utf8' });
+    return r.status === 0 ? r.stdout.trim() : null;
+  };
+  const raw = (payload) => {
+    let stdout = '';
+    let stderr = '';
+    return B.request(job.broker, payload, { stdout: (s) => { stdout += s; }, stderr: (s) => { stderr += s; } })
+      .then((code) => ({ code, stdout, stderr }));
+  };
+  return { h, wt, task, job, remote, shim, commit, remoteRef, raw };
+}
+
+test('a worker\'s git push goes through its broker to its own task branch on origin, and the shim and broker refuse another branch, a force push and a workflow change', async (t) => {
+  const f = await pushFixture(t);
+  const branch = f.task.branch;
+  const first = f.commit('a.txt', 'a\n');
+  const pushed = await f.shim('git', ['push', 'origin', 'HEAD']);
+  assert.equal(pushed.status, 0, pushed.stderr);
+  assert.match(pushed.stderr, /the broker pushes/);
+  assert.equal(f.remoteRef(`refs/heads/${branch}`), first, 'the broker pushed the commit to the task branch');
+  assert.equal(f.h.git(['rev-parse', `refs/remotes/origin/${branch}`], f.wt.path), first, 'the shim records origin\'s branch');
+  const second = f.commit('b.txt', 'b\n');
+  const plain = await f.shim('git', ['push']);
+  assert.equal(plain.status, 0, plain.stderr);
+  assert.equal(f.remoteRef(`refs/heads/${branch}`), second, 'a plain push from the task branch goes to origin');
+
+  // The shim names its reason before a round trip.
+  for (const args of [['push', 'origin', 'HEAD:refs/heads/main'], ['push', 'origin', 'HEAD:other'],
+    ['push', '--force', 'origin', 'HEAD'], ['push', 'origin', `+HEAD:${branch}`], ['push', 'origin', `:${branch}`]]) {
+    const r = await f.shim('git', args);
+    assert.equal(r.status, 126, `${args.join(' ')}: ${r.stderr}`);
+    assert.match(r.stderr, /not allowed by this agent's agent file/);
+  }
+  assert.equal(f.remoteRef('refs/heads/other'), null);
+  assert.equal(f.remoteRef('refs/heads/main'), f.h.git(['rev-parse', 'main']), 'main is untouched');
+
+  // The broker trusts no field of the request but the commit: a request that
+  // names another branch still lands on the task branch only.
+  const third = f.commit('c.txt', 'c\n');
+  const named = await f.raw({ push: { sha: third, branch: 'main', ref: 'refs/heads/main', remote: 'elsewhere' } });
+  assert.equal(named.code, 0, named.stderr);
+  assert.equal(f.remoteRef(`refs/heads/${branch}`), third);
+  assert.equal(f.remoteRef('refs/heads/main'), f.h.git(['rev-parse', 'main']), 'main is untouched');
+
+  // A rewritten history is not a fast-forward, and the broker never forces.
+  f.h.git(['reset', '-q', '--hard', first], f.wt.path);
+  const rewritten = f.commit('d.txt', 'd\n');
+  const force = await f.raw({ push: { sha: rewritten, force: true } });
+  assert.notEqual(force.code, 0, 'a non-fast-forward push is refused');
+  assert.match(force.stderr, /rejected|non-fast-forward|fetch first/);
+  assert.equal(f.remoteRef(`refs/heads/${branch}`), third, 'the remote branch keeps its history');
+  f.h.git(['reset', '-q', '--hard', third], f.wt.path);
+
+  // A workflow file the task does not name stays off the remote, even inside a merge.
+  f.h.git(['checkout', '-q', '-b', 'side'], f.wt.path);
+  const workflow = f.commit('.github/workflows/ci.yml', 'on: push\n');
+  f.h.git(['checkout', '-q', branch], f.wt.path);
+  f.h.git(['merge', '-q', '--no-edit', 'side'], f.wt.path);
+  const merged = f.h.git(['rev-parse', 'HEAD'], f.wt.path);
+  const refused = await f.shim('git', ['push', 'origin', 'HEAD']);
+  assert.notEqual(refused.status, 0);
+  assert.match(refused.stderr, /changes \.github\/workflows\/ci\.yml/);
+  assert.equal(f.remoteRef(`refs/heads/${branch}`), third);
+  // The brief names the file, so the task allows it.
+  f.h.ok(['brief', 'set', 'T1', '-'], { input: 'Change `.github/workflows/ci.yml` to run on push.\n' });
+  const allowed = await f.shim('git', ['push', 'origin', 'HEAD']);
+  assert.equal(allowed.status, 0, allowed.stderr);
+  assert.equal(f.remoteRef(`refs/heads/${branch}`), merged);
+  assert.ok(workflow);
+  assert.deepEqual(fs.readdirSync(path.join(f.h.state, 'push')).filter((n) => n !== '.gitignore'), [], 'the broker removes its scratch repositories');
+});
+
+test('only a role whose agent file pushes can push through the broker, and only to the recorded repository', async (t) => {
+  const f = await pushFixture(t, { role: 'reviewer' });
+  const sha = f.h.git(['rev-parse', 'HEAD'], f.wt.path);
+  const r = await f.raw({ push: { sha } });
+  assert.equal(r.code, 1);
+  assert.match(r.stderr, /reviewer-T1-1 is a reviewer; its agent file allows no push/);
+  const w = await pushFixture(t);
+  const commit = w.commit('a.txt', 'a\n');
+  for (const sha of ['HEAD', commit.slice(0, 12), 'f'.repeat(40)]) {
+    const bad = await w.raw({ push: { sha } });
+    assert.notEqual(bad.code, 0, sha);
+    assert.match(bad.stderr, /full commit sha|not in the task repository/, sha);
+  }
+  // A project that records a GitHub repository pushes only to it.
+  w.h.ok(['project', 'set', '--repo', 'acme/demo', '--agent', 'owner']);
+  const local = await w.raw({ push: { sha: commit } });
+  assert.equal(local.code, 1);
+  assert.match(local.stderr, /not to the project's repository acme\/demo/);
+  w.h.git(['remote', 'set-url', 'origin', 'https://github.com/acme/other.git']);
+  const other = await w.raw({ push: { sha: commit } });
+  assert.match(other.stderr, /not to the project's repository acme\/demo/);
+  assert.equal(w.remoteRef(`refs/heads/${w.task.branch}`), null, 'nothing was pushed');
+});
+
+test('a sandboxed agent\'s push to another machine from outside its task repository is refused by its shim; a local push runs', async (t) => {
+  const f = await pushFixture(t);
+  const other = path.join(f.h.base, 'other');
+  f.h.git(['init', '-q', other]);
+  f.h.git(['commit', '-q', '--allow-empty', '-m', 'x'], other);
+  const bare = path.join(f.h.base, 'other.git');
+  f.h.git(['init', '-q', '--bare', bare]);
+  f.h.git(['remote', 'add', 'origin', 'https://github.com/acme/demo.git'], other);
+  // The recorded repository, which origin here names: the shim's checks
+  // pass, and only the missing credentials remain.
+  const policy = path.join(f.h.base, 'shim', 'policy.json');
+  fs.writeFileSync(policy, JSON.stringify({ ...JSON.parse(fs.readFileSync(policy, 'utf8')), repo: 'acme/demo' }));
+  const local = await f.shim('git', ['push', bare, 'HEAD:refs/heads/x'], { cwd: other });
+  assert.equal(local.status, 0, local.stderr);
+  const remote = await f.shim('git', ['push', 'origin', `HEAD:${f.task.branch}`], { cwd: other });
+  assert.equal(remote.status, 126, remote.stderr);
+  assert.match(remote.stderr, /has no credentials/);
+});
+
+// A gh on the broker's PATH that logs each call and answers a pull request
+// lookup: number 7 is the task's, 9 another branch's.
+function fakeGh(t, f) {
+  const bin = path.join(f.h.base, 'host-bin');
+  const log = path.join(f.h.base, 'gh-calls.jsonl');
+  fs.mkdirSync(bin);
+  fs.writeFileSync(path.join(bin, 'gh'), `#!${process.execPath}
+const fs = require('node:fs');
+const args = process.argv.slice(2);
+let stdin = '';
+try { stdin = fs.readFileSync(0, 'utf8'); } catch {}
+fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify({ args, stdin, env: process.env }) + '\\n');
+if (args[0] === 'pr' && args[1] === 'view' && args.includes('number,headRefName,isCrossRepository')) {
+  const sel = args.at(-1);
+  console.log(JSON.stringify(sel === '9' || sel === 'other' ? { number: 9, headRefName: 'other', isCrossRepository: false } : { number: 7, headRefName: ${JSON.stringify(f.task.branch)}, isCrossRepository: false }));
+} else console.log('gh ran ' + args.join(' '));
+`, { mode: 0o755 });
+  const saved = { PATH: process.env.PATH, GH_TOKEN: process.env.GH_TOKEN, GITHUB_TOKEN: process.env.GITHUB_TOKEN, SECRET_PROBE: process.env.SECRET_PROBE };
+  process.env.PATH = `${bin}${path.delimiter}${process.env.PATH}`;
+  delete process.env.GH_TOKEN;
+  delete process.env.GITHUB_TOKEN;
+  process.env.SECRET_PROBE = 'host-secret';
+  t.after(() => { for (const [k, v] of Object.entries(saved)) if (v === undefined) delete process.env[k]; else process.env[k] = v; });
+  return () => (fs.existsSync(log) ? fs.readFileSync(log, 'utf8').trim().split('\n').map((l) => JSON.parse(l)) : []);
+}
+
+test('a sandboxed worker\'s gh runs through its broker in the project repository, on its own pull request, in an environment without the host\'s variables', async (t) => {
+  const f = await pushFixture(t);
+  f.h.ok(['project', 'set', '--repo', 'acme/demo', '--agent', 'owner']);
+  const calls = fakeGh(t, f);
+  const branch = f.task.branch;
+  fs.writeFileSync(path.join(f.wt.path, 'body.md'), 'what changed\n');
+  const created = await f.shim('gh', ['pr', 'create', '-t', 'Title', '-F', 'body.md', '-d']);
+  assert.equal(created.status, 0, created.stderr);
+  let call = calls().at(-1);
+  assert.deepEqual(call.args, ['pr', 'create', '--title=Title', '--body-file=-', '--draft', '--repo=acme/demo', `--head=${branch}`]);
+  assert.equal(call.stdin, 'what changed\n', 'the shim read the body file in the sandbox and sent it');
+  assert.equal(call.env.SECRET_PROBE, undefined, 'gh runs without the host\'s other variables');
+  assert.equal(call.env.GH_PROMPT_DISABLED, '1');
+  assert.ok(call.env.GIT_DIR && !fs.existsSync(call.env.GIT_DIR), 'gh finds no local repository to read');
+  assert.equal(call.env.HOME, process.env.HOME, 'gh finds the user\'s login');
+
+  const viewed = await f.shim('gh', ['pr', 'view', '--json', 'body']);
+  assert.equal(viewed.status, 0, viewed.stderr);
+  assert.match(viewed.stdout, /^gh ran pr view/);
+  assert.deepEqual(calls().at(-1).args, ['pr', 'view', '--json=body', '--repo=acme/demo', '--', branch], 'the task branch names the pull request');
+
+  const edited = await f.shim('gh', ['pr', 'edit', '--title', 'New']);
+  assert.equal(edited.status, 0, edited.stderr);
+  assert.deepEqual(calls().at(-1).args, ['pr', 'edit', '--title=New', '--repo=acme/demo', '--', '7']);
+
+  const before = calls().length;
+  const foreign = await f.shim('gh', ['pr', 'edit', '9', '--title', 'New']);
+  assert.equal(foreign.status, 1);
+  assert.match(foreign.stderr, /#9 is from other, not the task branch/);
+  assert.deepEqual(calls().slice(before).map((c) => c.args.slice(0, 2)), [['pr', 'view']], 'only the lookup ran');
+
+  // Refused before gh runs: the agent file, commands with no broker route,
+  // flags that act on the host, another repository.
+  const refusals = [
+    [['api', 'user'], 126, /gh api user is not allowed/],
+    [['pr', 'comment', '7', '--body', 'x'], 126, /gh pr comment is not allowed/],
+    [['search', 'prs', 'x'], 126, /gh search prs is not available/],
+    [['pr', 'view', '7', '--web'], 1, /--web would act on the broker's host/],
+    [['pr', 'create', '--title', 'x', '--body', 'y', '--attach', '/etc/passwd'], 1, /--attach would act on the broker's host/],
+    [['pr', 'create', '--title', 'x', '-T', '/etc/passwd'], 1, /--template reads a file/],
+    [['pr', 'create', '--title', 'x', '--body', 'y', '--head', 'main'], 1, /comes from the task branch/],
+    [['pr', 'view', '-R', 'acme/other', '7'], 1, /acme\/demo only, not acme\/other/],
+    [['pr', 'view', 'https://github.com/acme/other/pull/7'], 1, /by number or branch/],
+    [['repo', 'view', 'acme/other'], 1, /repo view shows the project's repository/],
+    [['auth', 'status', '-t'], 1, /--show-token would act/],
+    [['pr', 'view', '7', '--no-such-flag'], 126, /has no flag --no-such-flag/],
+  ];
+  const count = calls().length;
+  for (const [args, code, message] of refusals) {
+    const r = await f.shim('gh', args);
+    assert.equal(r.status, code, `${args.join(' ')}: ${r.stderr}`);
+    assert.match(r.stderr, message, args.join(' '));
+  }
+  assert.equal(calls().length, count, 'no refused command reached gh');
+
+  // gh's --jq reads the environment gh runs with, so it is refused while a token is there.
+  const jq = await f.shim('gh', ['pr', 'view', '7', '--json', 'title', '--jq', '.title']);
+  assert.equal(jq.status, 0, jq.stderr);
+  process.env.GH_TOKEN = 'host-token';
+  const leak = await f.shim('gh', ['pr', 'view', '7', '--json', 'title', '--jq', '$ENV.GH_TOKEN']);
+  assert.equal(leak.status, 1);
+  assert.match(leak.stderr, /--jq can read the token/);
+});
+
+test('gh arguments parse as gh does: clusters, attached values and "--", and an unknown flag is refused', () => {
+  const G = require('../lib/github-broker');
+  assert.deepEqual(G.parseGh(['pr', 'create', '-dtTitle', '--body=x', '-B', 'main', '--', '-x']),
+    { command: 'pr create', flags: [{ name: 'draft' }, { name: 'title', value: 'Title' }, { name: 'body', value: 'x' }, { name: 'base', value: 'main' }], pos: ['-x'] });
+  assert.deepEqual(G.buildGh(G.parseGh(['pr', 'view', '12', '-c', '--json', 'body'])), ['pr', 'view', '--comments', '--json=body', '--', '12']);
+  // -w is --web in pr view and --workflow in run list.
+  assert.deepEqual(G.parseGh(['run', 'list', '-w', 'ci.yml']).flags, [{ name: 'workflow', value: 'ci.yml' }]);
+  assert.deepEqual(G.parseGh(['pr', 'view', '-w']).flags, [{ name: 'web' }]);
+  assert.throws(() => G.parseGh(['pr', 'view', '-z']), /no flag -z/);
+  assert.throws(() => G.parseGh(['pr', 'view', '--draft']), /no flag --draft/);
+  assert.throws(() => G.parseGh(['pr', 'create', '--title']), /needs a value/);
+  assert.throws(() => G.parseGh(['--repo', 'x', 'pr', 'view']), /not available/);
 });

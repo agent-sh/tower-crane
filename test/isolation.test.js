@@ -32,7 +32,7 @@ const TRACKED_SETTINGS = '.claude/settings.json';
 // A user home holding what must never reach a tower-crane agent: memory and
 // instruction files, hooks, an MCP server, approved-command rules, and
 // credentials that must reach it only through a link.
-function plant(h) {
+function plant(h, branch = null) {
   const home = path.join(h.base, 'home');
   const put = (rel, text) => {
     fs.mkdirSync(path.dirname(path.join(home, rel)), { recursive: true });
@@ -74,15 +74,18 @@ function plant(h) {
   for (const name of ['claude', 'codex']) {
     fs.writeFileSync(path.join(bin, name), `#!${process.execPath}\nrequire(${JSON.stringify(STUB)})(${JSON.stringify(name)});\n`, { mode: 0o755 });
   }
-  // gh is not on every CI runner; this one stands in for the real program
-  // the agent's gh shim hands allowed calls to.
-  // Like a gh whose login is in the system keyring: `auth token` answers
-  // outside a sandbox, and a write without GH_TOKEN gets the 401 a sandboxed
-  // agent got when the keyring was out of its reach.
+  // gh is not on every CI runner; this one stands in for the real program a
+  // sandboxed agent's broker runs on the host. Like a gh whose login is in
+  // the system keyring: `auth token` answers, and a call made with a token
+  // in its environment is refused, since no agent should hold one. Pull
+  // request 1 is the task's own; 2 is from another branch.
   fs.writeFileSync(path.join(bin, 'gh'), [
     '#!/bin/sh',
     'if [ "$1" = auth ] && [ "$2" = token ]; then echo stub-gh-token; exit 0; fi',
-    'if [ "$1" = pr ] && [ "$2" = comment ] && [ "$GH_TOKEN" != stub-gh-token ]; then echo "HTTP 401: Requires authentication" >&2; exit 1; fi',
+    'if [ -n "$GH_TOKEN" ]; then echo "fixture gh: a token in the environment" >&2; exit 1; fi',
+    'if [ "$1" = pr ] && [ "$2" = view ] && [ "$4" = --json ] && [ "$5" = number,headRefName,isCrossRepository ]; then',
+    `  if [ "$7" = 2 ]; then echo '{"number":2,"headRefName":"other","isCrossRepository":false}'; else echo '{"number":1,"headRefName":${JSON.stringify(branch || '')},"isCrossRepository":false}'; fi; exit 0`,
+    'fi',
     'echo fake gh', '',
   ].join('\n'), { mode: 0o755 });
   // A test nested inside an agent must not cycle through the parent and
@@ -141,7 +144,7 @@ function setup(t) {
   h.ok(['brief', 'set', 'T1', '-'], { input: 'probe\n' });
   const wt = h.json(['worktree', 'T1']).path;
   fs.writeFileSync(path.join(wt, '.claude', 'settings.local.json'), JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'command', command: 'planted-local-hook' }] }] } }));
-  return { h, u: plant(h), wt };
+  return { h, u: plant(h, h.git(['branch', '--show-current'], wt)), wt };
 }
 
 function isolateGitEnvironment(h, u) {
@@ -1577,7 +1580,7 @@ test('repository imports of files under the home the agent may not read refuse s
   assert.equal(commandsRead(u.report(), notes), true, 'a global rule import stays readable');
 });
 
-test('a sandboxed agent runs with the user\'s git settings but none of their credential helpers, and git reaches GitHub with the handed token', { skip: NO_STUBS }, (t) => {
+test('a sandboxed agent runs with the user\'s git settings but none of their credential helpers, and no helper answers for GitHub', { skip: NO_STUBS }, (t) => {
   const { h, u } = setup(t);
   const { global } = isolateGitEnvironment(h, u);
   const included = path.join(h.base, 'included.gitconfig');
@@ -1619,11 +1622,16 @@ test('a sandboxed agent runs with the user\'s git settings but none of their cre
     assert.equal(get('url.ssh://git@example.com/.insteadof'), 'https://example.com/', 'a user name in an ssh URL stays');
     assert.equal(get('http.proxy'), 'http://proxy.example:8080');
     assert.equal(commandsRead(seen, ignore), true, `${harness}: the excludes file it names stays readable`);
-    const fill = (host, token) => cp.spawnSync(git, ['credential', 'fill'], {
-      env: { ...gitEnv, GH_TOKEN: token }, input: `protocol=https\nhost=${host}\n\n`, encoding: 'utf8', cwd: h.base,
+    // A token an agent finds, or sets, in its environment reaches no helper:
+    // the agent's pushes go through its broker (lib/github-broker.js).
+    const fill = (host) => cp.spawnSync(git, ['credential', 'fill'], {
+      env: { ...gitEnv, GH_TOKEN: 'found-token', GITHUB_TOKEN: 'found-token' }, input: `protocol=https\nhost=${host}\n\n`, encoding: 'utf8', cwd: h.base,
     });
-    assert.match(fill('github.com', 'handed-token').stdout, /^password=handed-token$/m, 'GitHub gets the handed token');
-    assert.notEqual(fill('example.com', 'handed-token').status, 0, 'other hosts get no credential');
+    for (const host of ['github.com', 'example.com']) {
+      const filled = fill(host);
+      assert.notEqual(filled.status, 0, `${harness}: ${host} gets no credential`);
+      assert.doesNotMatch(filled.stdout, /password=/, `${harness}: ${host}`);
+    }
   }
 });
 
@@ -1640,7 +1648,7 @@ test('harness roots cover an npm package, never a whole bin directory', { skip: 
   assert.deepEqual(roots.sort(), [fs.realpathSync(path.join(bin, 'claude')), fs.realpathSync(pkg)].sort());
 });
 
-test('gh config isolation survives settings on initial and fallback launches', { skip: NO_STUBS }, t => {
+test('gh config isolation survives settings on initial and fallback launches, and the agent\'s gh runs on the host with the user\'s config', { skip: NO_STUBS }, t => {
   const { h, u } = setup(t);
   const reports = path.join(h.base, 'gh-launches.jsonl');
   const original = path.join(h.base, 'original-gh');
@@ -1653,17 +1661,19 @@ if (process.argv[2] === 'auth') {
   if (process.env.GH_CONFIG_DIR !== ${JSON.stringify(original)}) process.exit(1);
   console.log('stub-gh-token');
 } else {
-  if (process.env.GH_CONFIG_DIR !== path.join(process.env.HOME, '.config', 'gh')) {
-    console.error('permission denied reading gh config'); process.exit(1);
+  // The broker's gh, on the host: the user's own config, and no token.
+  if (process.env.GH_CONFIG_DIR !== ${JSON.stringify(original)}) {
+    console.error('not the gh config of the user'); process.exit(1);
   }
-  if (process.env.GH_TOKEN !== 'stub-gh-token') process.exit(1);
+  if (process.env.GH_TOKEN) process.exit(1);
 }
 `);
   for (const harness of ['claude', 'codex']) fs.writeFileSync(path.join(h.base, 'bin', harness), `#!${process.execPath}
 const fs = require('node:fs');
 require(${JSON.stringify(STUB)})(${JSON.stringify(harness)});
 const report = JSON.parse(fs.readFileSync(process.env.STUB_OUT, 'utf8'));
-fs.appendFileSync(${JSON.stringify(reports)}, JSON.stringify({ harness: report.harness, ran: report.ran, token: report.ghToken }) + '\\n');
+fs.appendFileSync(${JSON.stringify(reports)}, JSON.stringify({ harness: report.harness, ran: report.ran, token: report.ghToken,
+  config: process.env.GH_CONFIG_DIR, home: process.env.HOME }) + '\\n');
 if (process.env.STUB_FAIL_HARNESS === ${JSON.stringify(harness)}) {
   console.error('HTTP 503 service unavailable'); process.exit(1);
 }
@@ -1686,7 +1696,8 @@ if (process.env.STUB_FAIL_HARNESS === ${JSON.stringify(harness)}) {
       const seen = fs.readFileSync(reports, 'utf8').trim().split('\n').map(JSON.parse);
       assert.deepEqual(seen.map(report => report.harness), [primary, fallback]);
       for (const report of seen) {
-        assert.equal(report.token, 'stub-gh-token');
+        assert.equal(report.token, null, `${source} ${report.harness}: the agent holds no gh token`);
+        assert.equal(report.config, path.join(report.home, '.config', 'gh'), `${source} ${report.harness}: the agent's gh config is its own`);
         assert.equal(report.ran[0].code, 0, `${source} ${report.harness}: ${report.ran[0].stderr}`);
       }
     }
@@ -1751,7 +1762,8 @@ test('a codex agent writes only where its agent file says; a worker writes its g
     const global = path.join(h.state, 'gitconfig', started.agent);
     assert.equal(ran[0].stderr, global, `${rung}: GIT_CONFIG_GLOBAL`);
     assert.equal(fs.readFileSync(global, 'utf8'), fs.readFileSync(path.join(home, 'home', '.gitconfig'), 'utf8'), rung);
-    assert.match(fs.readFileSync(global, 'utf8'), /credential "https:\/\/github\.com"/, `${rung}: the rendered config, with the token helper`);
+    assert.match(fs.readFileSync(global, 'utf8'), /\[credential\]\n\thelper = ""\n$/, `${rung}: the rendered config clears every credential helper`);
+    assert.doesNotMatch(fs.readFileSync(global, 'utf8'), /credential "https:\/\/github\.com"|GH_TOKEN/, `${rung}: no helper answers for GitHub`);
     assert.equal(rules[path.join(home, 'home', '.gitconfig')], 'read', `${rung}: the copy in its HOME`);
     assert.equal(rules[path.join(common, 'worktrees')], worktree === 'write' ? 'read' : undefined, `${rung}: other worktrees' admin directories`);
     assert.deepEqual(rules[':workspace_roots'], { '.': worktree }, rung);
@@ -2011,14 +2023,17 @@ test('a live spawn keeps its git, gh, hooks and policy on its recorded tool afte
   h.git(['commit', '-qm', 'stub tool version'], checkout);
   const toolSha = h.git(['rev-parse', 'HEAD'], checkout);
   const pushed = path.join(h.base, 'pushed.json');
+  // The broker's git, on the host, reaches GitHub: the fixture records its
+  // push and answers its fetch of the remote's branches with none.
   fs.writeFileSync(path.join(h.base, 'bin', 'git'), `#!${process.execPath}
 const fs = require('node:fs');
 const cp = require('node:child_process');
 const args = process.argv.slice(2);
-if (args[0] === 'push') {
-  fs.writeFileSync(${JSON.stringify(pushed)}, JSON.stringify(args));
+if (args[2] === 'push') {
+  fs.writeFileSync(${JSON.stringify(pushed)}, JSON.stringify(args.slice(2)));
   process.exit(0);
 }
+if (args[2] === 'fetch') process.exit(0);
 const r = cp.spawnSync('git', args, { env: { ...process.env, PATH: ${JSON.stringify(process.env.PATH)} }, stdio: 'inherit' });
 process.exit(r.status ?? 1);
 `, { mode: 0o755 });
@@ -2061,7 +2076,8 @@ for (const [command, args, opts] of calls) {
     ]) },
   });
   assert.equal(result.status, 0, result.stderr);
-  assert.deepEqual(u.report().ran.map((r) => [r.code, r.stderr]), [[0, ''], [0, ''], [0, ''], [0, '']]);
+  assert.deepEqual(u.report().ran.map((r) => [r.code, r.stderr]), [[0, ''],
+    [0, `tower-crane: the broker pushes ${h.git(['rev-parse', 'HEAD'], wt).slice(0, 12)} to ${branch} on https://github.com/acme/app.git\n`], [0, ''], [0, '']]);
   const started = JSON.parse(result.stdout);
   assert.equal(started.tool.sha, toolSha);
   assert.notEqual(h.git(['rev-parse', 'HEAD'], checkout), toolSha);
@@ -2069,7 +2085,7 @@ for (const [command, args, opts] of calls) {
   assert.equal(started.tool.path, path.join(home, 'tool'));
   assert.deepEqual(JSON.parse(fs.readFileSync(path.join(home, 'tool.json'), 'utf8')), started.tool);
   assert.deepEqual(JSON.parse(fs.readFileSync(pushed, 'utf8')), [
-    'push', '--no-follow-tags', '--recurse-submodules=no', '-u', 'origin', `HEAD:refs/heads/${branch}`,
+    'push', '--no-verify', '--no-follow-tags', '--recurse-submodules=no', 'https://github.com/acme/app.git', `${h.git(['rev-parse', 'HEAD'], wt)}:refs/heads/${branch}`,
   ]);
   // A sandboxed codex agent runs the shims in its HOME, with a copy of the
   // snapshot's lib; its sandbox hides hook.json, so they record no hook event.
@@ -2464,7 +2480,11 @@ test('an isolated Codex worker can publish its task branch with an allow rule an
   const { h, u, wt } = setup(t);
   const remote = path.join(h.base, 'publish.git');
   h.git(['init', '-q', '--bare', remote]);
-  h.git(['remote', 'add', 'origin', remote]);
+  // origin is the recorded GitHub repository; the user's own git config
+  // rewrites it to the bare repository here, as the user's credentials would
+  // reach GitHub. The broker pushes with the user's config.
+  h.git(['remote', 'add', 'origin', 'https://github.com/acme/app.git']);
+  fs.appendFileSync(u.env.GIT_CONFIG_GLOBAL, `[url "${remote}"]\n\tinsteadOf = https://github.com/acme/app.git\n`);
   const branch = h.git(['branch', '--show-current'], wt);
   isolated(h, 'hard', 'codex');
   spawn(h, u, 'hard', { STUB_RUN: JSON.stringify([
@@ -2474,7 +2494,8 @@ test('an isolated Codex worker can publish its task branch with an allow rule an
   const seen = u.report();
   assert.match(seen.rules.join('\n'), /pattern = \["git", "push"\],\n {4}decision = "allow"/);
   assert.match(seen.rules.join('\n'), /pattern = \["git", "push", "--force"\],\n {4}decision = "forbidden"/);
-  assert.deepEqual(seen.ran.map((r) => r.code), [0, 126]);
+  assert.deepEqual(seen.ran.map((r) => r.code), [0, 126], JSON.stringify(seen.ran.map((r) => r.stderr)));
+  assert.match(seen.ran[0].stderr, /the broker pushes/);
   assert.equal(h.git(['--git-dir', remote, 'rev-parse', `refs/heads/${branch}`]), h.git(['rev-parse', 'HEAD'], wt));
   spawn(h, u, 'review');
   assert.doesNotMatch(u.report().rules.join('\n'), /decision = "allow"/);
@@ -2665,20 +2686,25 @@ test('a sandboxed role cannot write the state directory itself', () => {
   for (const job of ['worker', 'researcher', 'reviewer', 'small']) assert.ok(!A.load(job).writeOutside.includes('state'), job);
 });
 
-test('a gh token in the spawning environment passes through, and the keyring is asked only without one', { skip: NO_STUBS }, (t) => {
+test('a sandboxed agent gets no gh token, from the keyring or the spawning environment, and its gh runs on the host with the user\'s config', { skip: NO_STUBS }, (t) => {
   const { h, u } = setup(t);
   for (const harness of ['claude', 'codex']) {
     isolated(h, 'medium', harness);
     spawn(h, u, 'review');
-    assert.equal(u.report().ghToken, 'stub-gh-token', `${harness}: the keyring's token`);
-    spawn(h, u, 'review', { GH_TOKEN: 'spawner-token' });
-    assert.equal(u.report().ghToken, 'spawner-token', `${harness}: the spawner's own token`);
-    spawn(h, u, 'review', { GITHUB_TOKEN: 'spawner-github-token' });
-    assert.equal(u.report().ghToken, null, `${harness}: GITHUB_TOKEN is left for gh to read`);
+    assert.equal(u.report().ghToken, null, `${harness}: no token from the keyring`);
+    for (const name of ['GH_TOKEN', 'GITHUB_TOKEN', 'GH_ENTERPRISE_TOKEN', 'GITHUB_ENTERPRISE_TOKEN']) {
+      spawn(h, u, 'review', { [name]: 'spawner-token' });
+      assert.deepEqual(u.report().tokens, [], `${harness}: no ${name} from the spawner`);
+    }
+    // Nor from the project's env, which the owner sets for every agent.
+    h.ok(['project', 'set', '--env', JSON.stringify({ GH_TOKEN: 'project-token' })]);
+    spawn(h, u, 'review');
+    assert.deepEqual(u.report().tokens, [], `${harness}: no token from the project env`);
+    h.ok(['project', 'set', '--env', '{}']);
   }
 });
 
-test('sandboxed gh uses its handed token when the user selects a custom config directory', { skip: NO_STUBS }, (t) => {
+test('sandboxed gh runs on the host with the user\'s custom config directory, which the agent cannot read', { skip: NO_STUBS }, (t) => {
   const { h, u } = setup(t);
   const custom = path.join(u.home, 'custom-config');
   fs.mkdirSync(path.join(custom, 'gh'), { recursive: true });
@@ -2686,16 +2712,9 @@ test('sandboxed gh uses its handed token when the user selects a custom config d
 const path = require('node:path');
 const env = process.env;
 const config = env.GH_CONFIG_DIR || path.join(env.XDG_CONFIG_HOME || path.join(env.HOME, '.config'), 'gh');
-if (process.argv[2] === 'auth' && process.argv[3] === 'token') {
-  if (!config.startsWith(${JSON.stringify(custom)} + path.sep)) process.exit(1);
-  console.log('stub-gh-token');
-} else {
-  if (config.startsWith(${JSON.stringify(custom)} + path.sep)) {
-    process.stderr.write('permission denied reading gh config');
-    process.exit(1);
-  }
-  if (env.GH_TOKEN !== 'stub-gh-token') process.exit(1);
-  if (config !== path.join(env.HOME, '.config', 'gh')) process.exit(1);
+if (!config.startsWith(${JSON.stringify(custom)} + path.sep) || env.GH_TOKEN) {
+  process.stderr.write('not the gh login of the user');
+  process.exit(1);
 }
 `);
   for (const harness of ['claude', 'codex']) {
@@ -2704,7 +2723,7 @@ if (process.argv[2] === 'auth' && process.argv[3] === 'token') {
       spawn(h, u, 'hard', { ...customEnv, STUB_RUN: JSON.stringify([['gh', 'pr', 'view', '1']]) });
       const seen = u.report();
       assert.equal(seen.ran[0].code, 0, `${harness}: ${seen.ran[0].stderr}`);
-      assert.equal(seen.ghToken, 'stub-gh-token', 'the parent reads the token from the original config');
+      assert.equal(seen.ghToken, null, `${harness}: the agent holds no token`);
       assert.equal(commandsRead(seen, path.join(custom, 'gh')), false, `${harness}: the original gh config stays hidden`);
     }
   }
