@@ -192,3 +192,25 @@ test('rolling a commit forward syncs the log before it renames the staged files'
   assert.deepEqual(steps.slice(0, 2), ['fsync events.jsonl', 'rename tasks.json']);
   assert.deepEqual(noted(h, 'crashed note'), { task: true, event: true });
 });
+
+test('a torn last line cut before its own id is cut off, even when its detail names another event', (t) => {
+  const h = setup(t);
+  const log = path.join(h.state, 'events.jsonl');
+  const size = fs.statSync(log).size;
+  const event = (cmd, detail) => ({ at: new Date().toISOString(), agent: 'owner', cmd, task: 'T1', detail, id: `E${crypto.randomUUID()}`, type: cmd, to: 'orchestrator' });
+  const first = event('task note', { text: 'torn note' });
+  const second = event('evidence', { type: 'note', ok: true, ref: { id: `E${crypto.randomUUID()}` } });
+  const doc = h.readState('tasks.json');
+  doc.tasks[0].notes.push({ at: first.at, agent: 'owner', text: 'torn note' });
+  doc.last_event = second.id;
+  fs.writeFileSync(path.join(h.state, `tasks.json.${second.id}.commit`), JSON.stringify(doc, null, 2) + '\n');
+  const { dev, ino } = fs.statSync(log);
+  fs.writeFileSync(path.join(h.state, `commit.${second.id}.json`), JSON.stringify({ size, dev, ino, ids: [first.id, second.id] }));
+  const line = JSON.stringify(second);
+  fs.appendFileSync(log, `${JSON.stringify(first)}\n${line.slice(0, line.indexOf(',"id":"'))}`);
+  h.ok(['task', 'note', 'T1', 'next note']);
+  assert.ok(!logged(h).some((e) => e.id === first.id), 'the torn commit left no event');
+  assert.equal(fs.readFileSync(log, 'utf8').includes(second.detail.ref.id), false, 'the torn line is gone');
+  assert.deepEqual(noted(h, 'torn note'), { task: false, event: false });
+  assertConsistent(h);
+});
