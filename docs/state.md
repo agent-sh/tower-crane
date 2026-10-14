@@ -181,7 +181,7 @@ The owner is the resolved name `owner`, supplied explicitly by `--agent owner` o
 | `sketch.stamp` | `{ "log": BYTES, "at": MS }`, the event log size and time of the state the published sketch shows, so a slower render of older state does not replace it |
 | `lock` | the write lock, a directory; never edit |
 | `logs/<task>-<agent>.log` | output of agents started by `tower-crane spawn` |
-| `homes/<agent>/` | the home `tower-crane spawn` builds fresh for each claude, codex and agy agent: its harness config directory with generated settings, instructions and permission profile, `git` and `gh` shims, links to the user's credentials, and `home/`, the agent's `HOME`; plus what the harness writes there (transcripts). Private to the user; `homes/.gitignore` ignores everything. A spawn removes the homes of agents whose process has exited. `homes/.codex/<agent>/sessions/` keeps that agent's codex sessions for usage after its home is gone ([Agent files and homes](ladder.md#agent-files-and-homes)) |
+| `homes/<agent>/` | the home `tower-crane spawn` builds fresh for each claude, codex and agy agent: its harness config directory with generated settings, instructions and permission profile, `git` and `gh` shims, links to the user's credentials, and `home/`, the agent's `HOME`, which for a sandboxed codex agent also holds the shims it runs, `home/.tower-crane-shims/` (`bin/`, `policy.json` and a copy of `lib/`), since its sandbox hides the rest of `homes/<agent>/`; plus what the harness writes there (transcripts). Private to the user; `homes/.gitignore` ignores everything. A spawn removes the homes of agents whose process has exited. `homes/.codex/<agent>/sessions/` keeps that agent's codex sessions for usage after its home is gone ([Agent files and homes](ladder.md#agent-files-and-homes)) |
 | `brokers/<agent>/` | `broker.json`, the [state broker](ladder.md#state-broker)'s address and token for a sandboxed agent (and its `broker.sock` for claude), while the agent runs; only that agent's sandbox can read it. The broker writes `brokers/<agent>/.gitignore` when it creates that directory, never in an existing directory or its parent. Closing removes a directory it created; an existing directory keeps its other files |
 | `gitconfig/<agent>` | the global git config of a sandboxed claude or codex agent and its harness (`GIT_CONFIG_GLOBAL`), rendered from the user's global git config ([Shared git directory](ladder.md#shared-git-directory)); their sandboxes read it and never write it. A spawn removes it with the agent's home. `gitconfig/.gitignore` ignores everything |
 
@@ -833,6 +833,14 @@ Git and gh also refuse to start while the common directory of the repository the
 
 The config scan must complete successfully before git or gh starts. An error, timeout or output buffer overflow refuses the command rather than using a partial driver list, and so does a repository include whose path starts with `~user/` or `%(prefix)/`, which the scan does not resolve. Named driver keys are checked against the config files just before each command, so a key a worker adds between that read and git's own can still run. The fixed keys above have no such gap. Claude Code's sandbox mounts the git directory's `config`, `config.worktree` and `hooks/` read-only, which closes the gap for claude workers. The codex sandbox rules grant the whole git directory, so a codex worker can still add a key. The worker's own git and gh, through their shims, keep the repository's config.
 
+### What the git and gh shims guard
+
+Every spawned agent finds its `git` and `gh` shims first on `PATH`: claude, opencode, agy, pi and `command` agents in `homes/<agent>/bin/`, a sandboxed codex agent in `homes/<agent>/home/.tower-crane-shims/bin/`, which its sandbox shows read-only ([ladder.md](ladder.md#agent-files-and-homes)). Until 2026-10-14 a sandboxed codex agent's sandbox hid its shims, so `git` and `gh` were the host's and none of the shim policy applied to codex agents.
+
+The shims hold an agent that runs `git` and `gh` by name, and the tools that look them up on `PATH`, to its role's push and gh policy. They do not hold an agent that means to get past them. `/usr/bin/git` and `/usr/bin/gh` are readable and run in both sandboxes, and every sandboxed agent, reviewers and small agents included, gets `GH_TOKEN`: the spawning user's own gh token unless the spawning environment sets one ([ladder.md: gh auth](ladder.md#agent-files-and-homes)). git's rendered config hands that token to any https push, and `curl` or a script can use it against the API. What such an agent can do is what the token and the repository allow, not what the shim allows. On the owner's host on 2026-10-14 that token was an OAuth token with the `repo`, `workflow`, `delete_repo`, `gist` and `read:org` scopes, and `agent-sh/tower-crane` had no branch protection or ruleset on `main` (`gh api repos/agent-sh/tower-crane/rules/branches/main` returned `[]`). So an agent that calls git by path can push to `main` or to another task's branch, force-push or delete a branch, change workflows, merge a PR and, with `delete_repo`, delete a repository. Nothing server-side or in the broker backs the push rules: the state broker carries state writes only.
+
+Policy can rely on the shims for the cooperating agent's mistakes, and on the sandbox for files and the broker for state. Push and GitHub rules that matter for security need enforcement the agent cannot skip, which is a task of its own: a ruleset on the project's default branch (pull request required, no force push or deletion) and a token for agents scoped to the project repository with contents and pull request writes only, no `workflow`, `admin` or `delete_repo`. GitHub cannot scope a token to one branch, so "push only to the task branch" holds only if agents get no write token and their pushes go through a broker that applies the shim's checks outside the sandbox.
+
 ## decisions.json
 
 ```json
@@ -998,6 +1006,12 @@ can rerun that gate.
 Asynchronous stack merge polling and backoff also stop on the second signal,
 recording failed merge evidence. The remote request may still be pending;
 another merge invocation confirms its state.
+Automatic stack maintenance (stack linking, post-merge stack refresh, its
+base fetch and `gh stack sync`) runs its Git and GitHub commands
+asynchronously. The first signal lets the running command finish and starts
+no further stack step or task; the second kills it. A `gh stack sync` that
+ran records its outcome either way, so moved heads still go to rework.
+Stopped steps record no deferral; the next refresh retries them.
 `automation queued` records a blocked notification's source, with
 `executors` set to the cap when the cap blocked it rather than another
 executor of the same task. Queued notifications for accepted, unmerged PR
@@ -1179,7 +1193,7 @@ Hook state lives in the event log, except tool activity, which goes to the agent
 | `hook background` | `{harness, attempt}`; a Bash call with `run_in_background` started in this dispatch attempt |
 | `hook wait` | `{harness, attempt, source, reasons}`; the one hold a headless worker's stop took before submit, with source `hook-wait:<agent>:<dispatch attempt>` |
 | `hook report` | `{report}` captured assistant text |
-| `hook git-push`, `hook pr-created` | `{harness, unverified: true}`, meant for a successful shim command; an agent's own binding records it with no push or PR, so it is a hint: check GitHub or the repository before acting on it |
+| `hook git-push`, `hook pr-created` | `{harness, unverified: true}`, meant for a successful shim command; an agent's own binding records it with no push or PR, so it is a hint: check GitHub or the repository before acting on it. A sandboxed codex agent's shims record neither, since its sandbox hides its binding |
 | `hook stop` | `{harness, submitted, report, source}`; source is `hook-stop:<agent>:<dispatch attempt>` |
 
 Unread messages are `msg` events with `detail.to` equal to the bound agent and ids absent from its `hook inbox` receipts. Receipts use the state lock; a poll with nothing pending reads the log without it. Payload `ack:false` returns context and message ids without a receipt; a later inbox call with those `ids` writes the receipt. OpenCode delivers only to the session captured by the dispatch's first chat callback and writes its idle delivery receipt after `promptAsync` succeeds. Failed requests leave messages unread. A stop held for unread messages acknowledges them without emitting a final report. Once stopping is allowed, `hook stop` also emits a `msg` to `orchestrator` describing submission state and the last report. Identical reports for a dispatch are deduplicated; a changed report or submission state emits a follow-up. A supervisor stop after process exit leaves unread messages queued. Rework and transient resume prompts include pending messages and acknowledge the included ids after launch. A dry run does not acknowledge. See [CLI: event wakeups](cli.md#event-wakeups) for each harness's injection and stop limits, including Codex notify and agy's missing resume adapter.
