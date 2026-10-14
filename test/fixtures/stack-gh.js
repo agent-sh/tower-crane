@@ -50,7 +50,8 @@ cp.spawnSync = function stackGh(command, args, opts) {
   for (const cli of (racing && data.during?.[key]) || []) {
     const project = ownerProject(path.join(data.repo, '.tower-crane'));
     const env = { ...process.env, TOWER_CRANE_OWNER_KEY: fs.readFileSync(ownerKeyFile(project), 'utf8').trim() };
-    const r = original(process.execPath, [BIN, ...cli], { cwd: data.repo, env, encoding: 'utf8' });
+    // {pid} names the CLI process making this gh call, so a test can count each observer's attempts.
+    const r = original(process.execPath, [BIN, ...cli.map((arg) => arg.replaceAll('{pid}', String(process.pid)))], { cwd: data.repo, env, encoding: 'utf8' });
     if (r.status !== 0) throw new Error(`tower-crane ${cli.join(' ')} failed: ${r.stderr}`);
   }
   if (data.during && !(data.duringWhile?.[key] && fs.existsSync(data.duringWhile[key]))) delete data.during[key];

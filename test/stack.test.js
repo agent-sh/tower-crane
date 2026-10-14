@@ -26,7 +26,17 @@ test('submitted dependencies dispatch from the exact dependency head and spawn l
 });
 
 // Snapshot-compare refusals for unrelated events are retried at once from fresh state.
-const linkCalls = (f) => f.read().calls.filter((c) => c.args[0] === 'stack' && c.args[1] === 'link').length;
+// Attempts are counted from the racing notes in the event log, which the state lock
+// serializes. The gh fixture's call log is a read-modify-write file, so concurrent gh
+// callers (automation, other observers) can drop records from it.
+const racingNotes = (f) => {
+  const byObserver = new Map();
+  for (const e of fs.readFileSync(path.join(f.h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse)) {
+    const pid = e.cmd === 'task note' && /^racing note from (\d+)$/.exec(e.detail?.text)?.[1];
+    if (pid) byObserver.set(pid, (byObserver.get(pid) || 0) + 1);
+  }
+  return byObserver;
+};
 const linkFailures = (f) => fs.readFileSync(path.join(f.h.state, 'events.jsonl'), 'utf8').trim().split('\n')
   .map(JSON.parse).filter((e) => e.cmd === 'stack link failed');
 // The observer pass inside `wait --observe` links the PR; the wait returns on its event.
@@ -38,11 +48,11 @@ const linkedByObserver = (f) => {
 test('a task event during the link\'s GitHub call is retried from fresh state and links the PR in the same pass', (t) => {
   const f = setup(t);
   worker(f);
-  f.write((d) => { d.during = { 'stack link': [['task', 'note', 'T2', 'racing note', '--agent', 'worker-T2']] }; });
+  f.write((d) => { d.during = { 'stack link': [['task', 'note', 'T2', 'racing note from {pid}', '--agent', 'worker-T2']] }; });
   f.h.ok(['spawn', '--task', 'T2', '--wait']);
   assert.equal(linkedByObserver(f), true);
+  assert.deepEqual([...racingNotes(f).values()], [1], 'one link attempt raced a task event');
   assert.deepEqual(linkFailures(f), [], 'the refused first attempt is retried, not recorded as a failure');
-  assert.ok(linkCalls(f) >= 2, 'the retry links once more with fresh state');
 });
 
 test('a link that keeps racing task events records its failure, and the next observer pass links the PR', (t) => {
@@ -51,7 +61,7 @@ test('a link that keeps racing task events records its failure, and the next obs
   const racing = path.join(f.h.base, 'racing');
   fs.writeFileSync(racing, '');
   f.write((d) => {
-    d.during = { 'stack link': [['task', 'note', 'T2', 'racing note', '--agent', 'worker-T2']] };
+    d.during = { 'stack link': [['task', 'note', 'T2', 'racing note from {pid}', '--agent', 'worker-T2']] };
     // Every attempt races, whichever observer makes it, until the marker goes.
     d.duringWhile = { 'stack link': racing };
   });
@@ -59,7 +69,8 @@ test('a link that keeps racing task events records its failure, and the next obs
   const failures = linkFailures(f);
   assert.equal(failures.length, 1, JSON.stringify(failures));
   assert.match(failures[0].detail.reason, /state changed during stack link/);
-  assert.ok(linkCalls(f) >= 5, 'each of the five attempts called gh stack link');
+  const attempts = racingNotes(f);
+  assert.ok(Math.max(...attempts.values()) >= 5, `one observer made all five attempts: ${JSON.stringify([...attempts])}`);
   fs.unlinkSync(racing);
   assert.equal(linkedByObserver(f), true);
 });
