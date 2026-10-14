@@ -63,13 +63,13 @@ cp.spawnSync = function (command, args, options) {
 `);
   const result = cp.spawnSync(process.execPath, ['--require', hook, path.join(ROOT, 'scripts', 'probe-model-swap.js')],
     { cwd: ROOT, env: { ...h.env, TOWER_CRANE_TEST_TMP: cache, XDG_CACHE_HOME: 'caller-cache',
-      LOCALAPPDATA: 'caller-cache', TC_TEST_SHARD: '1/3' }, encoding: 'utf8', timeout: 60000 });
+      LOCALAPPDATA: 'caller-cache', TC_TEST_SHARD: '1/3' }, encoding: 'utf8', timeout: 300000 });
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /Model swap probe passed/);
   assert.equal(fs.readFileSync(path.join(cache, 'model-swap-probe.tap'), 'utf8'), 'not ok 1 - replaced log\n');
   const failed = cp.spawnSync(process.execPath, ['--require', hook, path.join(ROOT, 'scripts', 'probe-model-swap.js')],
     { cwd: ROOT, env: { ...h.env, TOWER_CRANE_TEST_TMP: cache, PROBE_UNEXPECTED_FAILURE: '1' },
-      encoding: 'utf8', timeout: 60000 });
+      encoding: 'utf8', timeout: 300000 });
   assert.equal(failed.status, 1);
   assert.match(failed.stderr, /error: fixture assertion details/);
 });

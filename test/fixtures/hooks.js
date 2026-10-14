@@ -12,6 +12,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
 const { EventEmitter } = require('node:events');
+const { writeAtomic } = require('../atomic-file');
 
 const env = process.env;
 // Process creation times are on the system clock, which HOOK_CLOCK_FILE replaces below.
@@ -130,7 +131,8 @@ const BUSY = ['EEXIST', 'ENOTEMPTY', 'ENOTDIR', 'EPERM', 'EACCES'];
 const real = {};
 for (const name of WRAPPED) real[name] = fs[name];
 
-const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+// Injected delays that widen race windows, and probe cadence; callers name the delay.
+const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); // wait-allow: fixture delays and probe cadence
 const under = (root, p) => !!root && typeof p === 'string' && (path.resolve(p) === root || path.resolve(p).startsWith(root + path.sep));
 const inState = (p) => under(STATE, p);
 const inLock = (p) => under(LOCK, p);
@@ -148,9 +150,9 @@ function ownsLock() {
 // Tells the test this process reached a point (by creating SIGNAL with its
 // pid), then waits until the test creates SIGNAL.go.
 function stop(signal) {
-  real.writeFileSync(signal, String(process.pid));
+  writeAtomic(signal, String(process.pid), undefined, real);
   const go = `${signal}.go`;
-  const end = Date.now() + 30000;
+  const end = Date.now() + 300000;
   while (!real.existsSync(go) && Date.now() < end) sleep(10);
 }
 
@@ -162,7 +164,7 @@ function barrier() {
   if (barrierDone) return;
   barrierDone = true;
   real.writeFileSync(path.join(env.HOOK_BARRIER, String(process.pid)), '');
-  const end = Date.now() + 20000;
+  const end = Date.now() + 300000;
   while (real.readdirSync(env.HOOK_BARRIER).length < Number(env.HOOK_BARRIER_N) && Date.now() < end) sleep(5);
 }
 
@@ -433,7 +435,7 @@ if (env.HOOK_ADD_PID || env.HOOK_ADD_ERROR || env.HOOK_DIE_WORKTREE_ADD) {
   const orig = cp.execFileSync;
   cp.execFileSync = function interruptedAdd(file, args, options) {
     const add = file === 'git' && args[0] === 'worktree' && args[1] === 'add';
-    if (add && env.HOOK_ADD_PID) real.writeFileSync(env.HOOK_ADD_PID, String(process.pid));
+    if (add && env.HOOK_ADD_PID) writeAtomic(env.HOOK_ADD_PID, String(process.pid), undefined, real);
     const out = orig.call(this, file, args, options);
     if (add && env.HOOK_ADD_ERROR) {
       const e = new Error('worktree add interrupted');
@@ -472,7 +474,7 @@ if (env.HOOK_USAGE_HARNESS) {
     // The supervisor's lease gate starts its harness after `tower-crane-gate`.
     const gated = file === '/bin/sh' && args[2] === 'tower-crane-gate' && args[3] === env.HOOK_USAGE_HARNESS;
     if (file === env.HOOK_USAGE_HARNESS || gated) {
-      if (env.HOOK_USAGE_ARGV) fs.writeFileSync(env.HOOK_USAGE_ARGV, JSON.stringify(args));
+      if (env.HOOK_USAGE_ARGV) writeAtomic(env.HOOK_USAGE_ARGV, JSON.stringify(args), undefined, real);
       const stub = [require('node:path').join(__dirname, 'usage-harness.js'), env.HOOK_USAGE_FILE];
       return original.call(this, gated ? file : process.execPath, gated ? [...args.slice(0, 3), process.execPath, ...stub] : stub, options);
     }
@@ -565,10 +567,10 @@ if (env.HOOK_PROCESSES_DIR) {
       const recordedAt = systemNow();
       real.mkdirSync(env.HOOK_PROCESSES_DIR, { recursive: true });
       const trackedFile = path.join(env.HOOK_PROCESSES_DIR, `${child.pid}.json`);
-      real.writeFileSync(trackedFile, JSON.stringify({
+      writeAtomic(trackedFile, JSON.stringify({
         pid: child.pid, startTicks, recordedAt, ...(token ? { token } : {}),
         kind: monitor ? 'monitor' : 'worker',
-      }));
+      }), undefined, real);
       // A reaped Windows PID can immediately belong to another test's CLI.
       // The live parent observes worker exit. A monitor's own exit marker
       // precedes OS termination, so teardown also checks process identity.

@@ -7,6 +7,7 @@ const path = require('node:path');
 const cp = require('node:child_process');
 const { makeRepo, copyRepo, TMP_ROOT, ROOT, HARNESS_GUARD } = require('./helpers');
 const { gateFixture, gateEvidence } = require('./gate-helpers');
+const { waitUntil } = require('./signals');
 
 // Runs f and returns the fixture directories it made, recorded by wrapping mkdtemp.
 function recordFixtureDirs(f) {
@@ -104,9 +105,7 @@ test('a fixture spawn without a stub reaches the harness guard and fails its tes
       catch (e) { if (e.code === 'ENOENT') return []; throw e; }
     };
     const mine = () => calls().filter((hit) => hit.state === h.state).map((hit) => hit.name).sort();
-    for (let deadline = Date.now() + 60000; Date.now() < deadline && new Set(mine()).size < 2;) {
-      await new Promise((resolve) => setTimeout(resolve, 50));
-    }
+    await waitUntil(() => new Set(mine()).size >= 2, { what: 'both rungs did not reach the harness guard' });
     assert.deepEqual([...new Set(mine())], ['claude', 'codex']);
   } finally {
     await assert.rejects(h.cleanup(), /a non-live test started a real harness instead of a stub:[\s\S]*"name":"(codex|claude)"/);

@@ -12,6 +12,7 @@ const os = require('node:os');
 const path = require('node:path');
 const cp = require('node:child_process');
 const TOML = require('../../lib/toml');
+const { writeAtomic } = require('../atomic-file');
 
 const read = (f) => {
   try {
@@ -171,7 +172,7 @@ module.exports = function stub(harness) {
     if (!report.resumed) {
       const id = 'stub-thread';
       fs.mkdirSync(sessions, { recursive: true });
-      fs.writeFileSync(path.join(sessions, `rollout-${process.env.TOWER_CRANE_AGENT}-${id}.jsonl`), '{}\n');
+      writeAtomic(path.join(sessions, `rollout-${process.env.TOWER_CRANE_AGENT}-${id}.jsonl`), '{}\n');
       process.stdout.write(`${JSON.stringify({ type: 'thread.started', thread_id: id })}\n`);
     }
     report.sessions = fs.existsSync(sessions) ? fs.readdirSync(sessions) : [];
@@ -182,5 +183,5 @@ module.exports = function stub(harness) {
     const r = cp.spawnSync(argv[0], argv.slice(1), { encoding: 'utf8' });
     report.ran.push({ argv, code: r.status, stderr: r.stderr });
   }
-  fs.writeFileSync(process.env.STUB_OUT, JSON.stringify(report));
+  writeAtomic(process.env.STUB_OUT, JSON.stringify(report));
 };

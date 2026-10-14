@@ -6,6 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
 const { makeProjectRepo, BIN } = require('./helpers');
+const { HUNG_TEST_MS, fileWritten } = require('./signals');
 
 test('authority and benchmark readers neither compete with a holder nor acquire a vacant lease', (t) => {
   const h = makeProjectRepo(t);
@@ -102,7 +103,7 @@ test('orchestrator status takes no state lock, and a due renewal never waits for
     const started = Date.now();
     const due = h.run(['status'], { env: { ...holder, LOCKED_READS: meter, NODE_OPTIONS: preload('locked-reads.js') } });
     assert.equal(due.code, 0, due.stderr);
-    assert.ok(Date.now() - started < 30000, 'a read does not wait out the lock bound');
+    assert.ok(Date.now() - started < 30000, 'a read does not wait out the lock bound'); // wait-allow: verify a read skips the production lock bound
     assert.equal(JSON.parse(fs.readFileSync(meter, 'utf8')).holdings, 0);
     assert.deepEqual(lease(), aged, 'a busy lock leaves the renewal to a later command');
   } finally {
@@ -121,11 +122,7 @@ test('without a start-ticks identity, status with a due heartbeat leaves a live 
   // As on Windows and macOS: the writer's marker has no start ticks.
   const paused = path.join(h.base, 'writer-holds');
   const writer = h.runAsync(['task', 'note', 'T1', 'written behind status'], { hooks: { HOOK_PAUSE_LOCKED: paused, HOOK_NO_START_TICKS: '1' } });
-  const end = Date.now() + 20000;
-  while (!fs.existsSync(paused)) {
-    if (Date.now() > end) throw new Error('the writer never took the lock');
-    await new Promise((resolve) => setTimeout(resolve, 20));
-  }
+  await fileWritten(paused);
   try {
     const lock = path.join(h.state, 'lock');
     const [name] = fs.readdirSync(lock);
@@ -251,7 +248,7 @@ for (const [Name, CommandLine, isHarness] of variants) {
   assert.notEqual(require(modulePath).identity(ctx).session_id, first.session_id, CommandLine);
 }
 `;
-  const result = cp.spawnSync(process.execPath, ['-e', script], { encoding: 'utf8', timeout: 10000 });
+  const result = cp.spawnSync(process.execPath, ['-e', script], { encoding: 'utf8', timeout: 300000 });
   assert.equal(result.status, 0, result.stderr);
 });
 
@@ -285,7 +282,7 @@ const lease = O.identity({ env: { CLAUDE_SESSION_ID: 'session' }, agent: 'orches
 console.log(JSON.stringify({ ...lease, ppid: process.ppid }));
 `;
   const result = cp.spawnSync(process.execPath, ['-e', script], {
-    env: { ...process.env, PLATFORM: platform, ROWS: JSON.stringify(rows) }, encoding: 'utf8', timeout: 10000,
+    env: { ...process.env, PLATFORM: platform, ROWS: JSON.stringify(rows) }, encoding: 'utf8', timeout: 300000,
   });
   assert.equal(result.status, 0, result.stderr);
   return JSON.parse(result.stdout);
@@ -504,7 +501,7 @@ console.log(JSON.stringify(O.identity({ env: { CLAUDE_SESSION_ID: 'same-session'
 `;
   const identities = ['large', 'small'].map((value) => {
     const result = cp.spawnSync(process.execPath, ['-e', script], {
-      env: { ...process.env, PARENT_QUERY_CASE: value }, encoding: 'utf8', timeout: 10000,
+      env: { ...process.env, PARENT_QUERY_CASE: value }, encoding: 'utf8', timeout: HUNG_TEST_MS,
     });
     assert.equal(result.status, 0, result.stderr);
     return JSON.parse(result.stdout);

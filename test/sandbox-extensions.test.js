@@ -13,7 +13,7 @@ const SECRET_KEY = 'TC_PRIVATE_ENV_FILE_KEY';
 const SECRET = 'private-file-value $literal `literal`';
 
 function setup(t, harness = 'codex') {
-  return cachedFixture(t, harness, (h) => {
+  const h = cachedFixture(t, harness, (h) => {
     h.init();
     h.ok(['task', 'add', '--title', 'Toolchain probe', '--acceptance', 'lock written']);
     h.ok(['brief', 'set', 'T1', '-'], { input: 'probe' });
@@ -21,6 +21,18 @@ function setup(t, harness = 'codex') {
       ...(harness === 'codex' ? ['--profile', 'fixture-main', '--clear', 'model'] : ['--model', 'fixture-large', '--clear', 'profile']),
       '--clear', 'effort', '--clear', 'args']);
   });
+  // Native harness fixtures must not copy the parent's credential tree.
+  Object.assign(h.env, {
+    USERPROFILE: h.env.HOME,
+    CLAUDE_CONFIG_DIR: path.join(h.env.HOME, '.claude'),
+    CODEX_HOME: path.join(h.env.HOME, '.codex'),
+    PI_CODING_AGENT_DIR: path.join(h.env.HOME, '.pi', 'agent'),
+    GH_CONFIG_DIR: path.join(h.env.HOME, '.config', 'gh'),
+    XDG_CONFIG_HOME: path.join(h.env.HOME, '.config'),
+    XDG_DATA_HOME: path.join(h.env.HOME, '.local', 'share'),
+    OPENCODE_CONFIG_DIR: path.join(h.env.HOME, '.config', 'opencode'),
+  });
+  return h;
 }
 
 function noFileSecrets(dir) {
@@ -316,7 +328,7 @@ test('invalid or unreadable env files fail without echoing their contents', { sk
 
 test('real Codex worker writes the toolchain lock, receives a private env file, serves loopback and inherits scope limits', {
   skip: process.env.TOWER_CRANE_LIVE_CODEX !== '1' && 'set TOWER_CRANE_LIVE_CODEX=1 to run a real Codex worker',
-  timeout: 240000,
+  timeout: 300000,
 }, async (t) => {
   assert.ok(process.env.TOWER_CRANE_LIVE_PROFILE, 'set TOWER_CRANE_LIVE_PROFILE to run a live codex probe');
   const fixtureRoot = process.env.TOWER_CRANE_TEST_TMP;
@@ -371,7 +383,7 @@ test('real Codex worker writes the toolchain lock, receives a private env file, 
     '}',
     'if (!limited) throw new Error("agent did not inherit CPUQuota=200% and MemoryMax=8G");',
     'const server = net.createServer(c => c.end("loopback"));',
-    'const deadline = setTimeout(() => { console.error("loopback timeout"); process.exit(1); }, 10000);',
+    'const deadline = setTimeout(() => { console.error("loopback timeout"); process.exit(1); }, 10000);', // wait-allow: hung-child backstop for the live sandbox network probe
     'server.on("error", e => { throw e; });',
     'server.listen(0, "127.0.0.1", () => {',
     '  let text = "";',

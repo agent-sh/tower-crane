@@ -1,5 +1,7 @@
 'use strict';
 
+const { waitOnRepo } = require('./signals');
+
 const { test, describe } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -28,15 +30,6 @@ const sketches = (h) => ['sketch.md', 'sketch.html'].map((file) => ({
 // The runner's per-test timeout (test/run.js) is the only deadline: a loaded
 // machine can take as long as the test may run, and a wait that never comes
 // true still fails with its message.
-const HUNG_TEST_MS = 300000;
-
-async function until(fn, message) {
-  const deadline = Date.now() + HUNG_TEST_MS;
-  while (!fn()) {
-    if (Date.now() >= deadline) assert.fail(message);
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
-}
 
 // A file a process writes exists before its content does; a wait on it needs the content.
 function written(file) {
@@ -69,7 +62,7 @@ const cli = (args) => cp.execFileSync(process.execPath, [process.argv[1], ...arg
 const file = process.argv[2];
 const attempts = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : [];
 if (!attempts.length && ${claim}) {
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ${claimDelay});
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ${claimDelay}); // wait-allow: a late claim is the race this fixture sets up
   cli(['claim', 'T1', '--lease', '1']);
 }
 const task = JSON.parse(cli(['task', 'show', 'T1', '--json']));
@@ -88,7 +81,8 @@ const pending = file + '.next-' + process.pid;
 fs.writeFileSync(pending, JSON.stringify(attempts));
 fs.renameSync(pending, file);
 ${sessionReceipt ? "console.log(JSON.stringify({ type: 'thread.started', thread_id: 'supervised-session' }));" : ''}
-${busy ? "cp.spawn(process.execPath, ['-e', 'const end = Date.now() + 3500; while (Date.now() < end) {}'], { stdio: 'ignore' });" : ''}
+${busy ? `cp.spawn(process.execPath, ['-e', ${JSON.stringify("const fs = require('node:fs'); fs.writeFileSync(process.argv[1], 'ready'); while (!fs.existsSync(process.argv[2])) { Math.sqrt(Math.random()); }")},
+  file + '.busy', file + '.finish'], { stdio: 'ignore' });` : ''}
 const finish = () => {
   if (attempts.length <= ${failures}) {
     ${records ? `for (const record of ${JSON.stringify(records)}) console.log(JSON.stringify(record)); process.exit(1);`
@@ -102,19 +96,19 @@ const finish = () => {
   } else process.exit(0);
 };
 ${waitForFinish ? `if (attempts.length <= ${failures}) finish();
-else { const watcher = fs.watch(require('node:path').dirname(file), () => {
+else { const check = () => {
   if (fs.existsSync(file + '.finish')) { watcher.close(); finish(); }
-}); if (fs.existsSync(file + '.finish')) { watcher.close(); finish(); } }` : `setTimeout(finish, ${hold});`}
+}; const watcher = fs.watch(require('node:path').dirname(file), check); check(); }` : `setTimeout(finish, ${hold});`} // wait-allow: fixture injects route duration for retry and stall scenarios
 `;
   h.ok(['ladder', 'set', 'easy', '--harness', 'command', '--command', JSON.stringify([process.execPath, '-e', script, BIN, h.attempts, '{prompt}']),
     '--clear', 'profile', '--clear', 'effort', '--supervision',
     JSON.stringify({ retries: 2, backoff_ms: 150, max_backoff_ms: 1000, stall_ms: 60000, ...config })]);
-  h.spawn = (role, timeout = 15000) => h.run(['spawn', '--task', 'T1', ...(role ? ['--role', role] : []), '--wait', '--json'], { env, timeout });
+  h.spawn = (role) => h.run(['spawn', '--task', 'T1', ...(role ? ['--role', role] : []), '--wait', '--json'], { env });
   h.readAttempts = () => fs.existsSync(h.attempts) ? JSON.parse(fs.readFileSync(h.attempts, 'utf8')) : [];
   return h;
 }
 
-test('supervisor tool progress arrives while the state lock is held', { timeout: 90000 }, async (t) => {
+test('supervisor tool progress arrives while the state lock is held', { timeout: 300000 }, async (t) => {
   const h = makeTaskRepo(t, [{
     args: ['--title', 'Supervised tool progress', '--tier', 'easy', '--acceptance', 'tool event survives'],
     brief: 'Record tool progress.\n',
@@ -141,10 +135,10 @@ setInterval(() => {
   const completed = h.runAsync(['spawn', '--task', 'T1', '--wait', '--json']);
   let lock;
   try {
-    await until(() => fs.existsSync(ready) && log(h).some((event) => event.cmd === 'hook inbox'), 'startup hook did not complete');
+    await waitOnRepo(h, () => fs.existsSync(ready) && log(h).some((event) => event.cmd === 'hook inbox'), 'startup hook did not complete');
     lock = S.acquireLock(h.state);
     fs.writeFileSync(emit, '');
-    await until(() => fs.existsSync(S.progressFile(h.state, 'worker-T1-1')), 'tool progress waited for the lock');
+    await waitOnRepo(h, () => fs.existsSync(S.progressFile(h.state, 'worker-T1-1')), 'tool progress waited for the lock');
   } finally {
     if (lock) S.releaseLock(lock);
     fs.writeFileSync(finish, '');
@@ -299,7 +293,11 @@ for (const error of ['75', 'outage', 'codex-error', 'signal']) {
     const attempts = h.readAttempts();
     assert.equal(attempts.length, 2);
     assert.equal(attempts[0].agent, 'worker-T1-1');
-    for (const key of ['agent', 'session', 'cwd', 'claim']) assert.deepEqual(attempts[1][key], attempts[0][key]);
+    for (const key of ['agent', 'session', 'cwd']) assert.deepEqual(attempts[1][key], attempts[0][key]);
+    const { until: firstUntil, ...firstClaim } = attempts[0].claim;
+    const { until: nextUntil, ...nextClaim } = attempts[1].claim;
+    assert.deepEqual(nextClaim, firstClaim);
+    assert.ok(Date.parse(nextUntil) >= Date.parse(firstUntil), 'supervision can renew the same claim');
     assert.equal(attempts[1].retry, '1');
     assert.equal(log(h).filter((e) => e.cmd === 'spawn').length, 1);
     assert.equal(log(h).filter((e) => e.cmd === 'claim' && !e.detail.renewed).length, 1);
@@ -325,7 +323,7 @@ test('repeated transient exits render the blocked phase before foreground spend'
   });
   let result;
   try {
-    await until(() => fs.existsSync(paused), 'foreground spend did not pause after the monitor exit');
+    await waitOnRepo(h, () => fs.existsSync(paused), 'foreground spend did not pause after the monitor exit');
     const events = log(h);
     assert.ok(events.some((e) => e.cmd === 'spawn exit'), 'the monitor recorded its exit before spend paused');
     const task = h.json(['task', 'show', 'T1']);
@@ -365,11 +363,11 @@ test('detached supervision renews a short lease during backoff and does not allo
   const spawned = h.json(['spawn', '--task', 'T1'], {
     env: { ...backoff.env, HOOK_CLOCK_FILE: clockFile },
   });
-  await until(() => h.json(['task', 'show', 'T1']).run?.phase === 'retrying', 'retry was not recorded');
-  await until(() => sketches(h).every(({ text }) => /retrying 1/.test(text)), 'saved sketches did not render the retry phase');
+  await waitOnRepo(h, () => h.json(['task', 'show', 'T1']).run?.phase === 'retrying', 'retry was not recorded');
+  await waitOnRepo(h, () => sketches(h).every(({ text }) => /retrying 1/.test(text)), 'saved sketches did not render the retry phase');
   for (const { file, text } of sketches(h)) assert.match(text, /retrying 1/, `${file} shows the retry phase`);
   fs.writeFileSync(clockFile, String(now + 40000));
-  await until(() => log(h).some((e) => e.cmd === 'renew'), 'supervisor did not renew the short lease');
+  await waitOnRepo(h, () => log(h).some((e) => e.cmd === 'renew'), 'supervisor did not renew the short lease');
   const task = h.json(['task', 'show', 'T1']);
   assert.equal(task.claim.agent, spawned.agent);
   assert.ok(Date.parse(task.claim.until) > now + 60000);
@@ -378,7 +376,7 @@ test('detached supervision renews a short lease during backoff and does not allo
   assert.deepEqual(h.json(['status']).exited_claims, []);
   assert.equal(h.run(['release', 'T1', '--agent', 'other', '--reason', 'premature']).code, 1);
   backoff.advance(1400);
-  await until(() => h.json(['task', 'show', 'T1']).run?.phase === 'waiting', 'retry did not finish');
+  await waitOnRepo(h, () => h.json(['task', 'show', 'T1']).run?.phase === 'waiting', 'retry did not finish');
   assert.equal(h.readAttempts().length, 2);
   assert.equal(log(h).filter((e) => e.cmd === 'claim' && !e.detail.renewed).length, 1);
 });
@@ -417,7 +415,7 @@ if (task === 'T1' && retry === 0) {
   const backoff = controlledBackoff(h);
   const started = h.json(['spawn', '--task', 'T1'], { env: backoff.env });
   const home = path.join(h.state, 'homes', started.agent);
-  await until(() => h.json(['task', 'show', 'T1']).run?.phase === 'retrying', 'first attempt did not enter backoff');
+  await waitOnRepo(h, () => h.json(['task', 'show', 'T1']).run?.phase === 'retrying', 'first attempt did not enter backoff');
 
   const duringBackoff = h.json(['spawn', '--task', 'T2', '--wait']);
   assert.equal(duringBackoff.code, 0);
@@ -425,15 +423,15 @@ if (task === 'T1' && retry === 0) {
   assert.equal(h.json(['task', 'show', 'T1']).run.phase, 'retrying');
 
   backoff.advance(3500);
-  await until(() => fs.existsSync(retryReady), 'retry attempt did not start');
+  await waitOnRepo(h, () => fs.existsSync(retryReady), 'retry attempt did not start');
   assert.ok(log(h).some((e) => e.cmd === 'spawn retry' && e.task === 'T1'), 'retry event was recorded');
   const duringRetry = h.json(['spawn', '--task', 'T3', '--wait']);
   assert.equal(duringRetry.code, 0);
   assert.ok(fs.existsSync(path.join(home, 'bin', 'git')), 'a later spawn keeps the home while the retry is running');
 
   fs.writeFileSync(`${retryReady}.go`, '');
-  await until(() => h.json(['task', 'show', 'T1']).run?.phase === 'waiting', 'retry attempt did not finish');
-  await until(() => !detachedAlive({ pid: started.monitor_pid }), 'supervisor did not finish queued hook writes');
+  await waitOnRepo(h, () => h.json(['task', 'show', 'T1']).run?.phase === 'waiting', 'retry attempt did not finish');
+  await waitOnRepo(h, () => !detachedAlive({ pid: started.monitor_pid }), 'supervisor did not finish queued hook writes');
   const audit = log(h).filter((e) => e.task === 'T1' && e.agent === started.agent);
   assert.match(fs.readFileSync(S.progressFile(h.state, started.agent), 'utf8'), /hook progress/, 'tool activity reached the progress log');
   assert.equal(audit.findLast((e) => e.cmd === 'hook report')?.detail.report, `last report from ${started.agent}`);
@@ -457,9 +455,9 @@ for (const [launch, hooks] of [['the lease gate', {}], ['the launch handshake', 
       env: { NODE_OPTIONS: `--require "${HOOKS.replace(/\\/g, '/')}"`, HOOK_CLOCK_FILE: clockFile, ...hooks },
     });
     try {
-      await until(() => h.readAttempts().length === 1, 'worker did not claim');
+      await waitOnRepo(h, () => h.readAttempts().length === 1, 'worker did not claim');
       fs.writeFileSync(clockFile, String(now + 40000));
-      await until(() => log(h).some((e) => e.cmd === 'renew'), 'live worker lease was not renewed');
+      await waitOnRepo(h, () => log(h).some((e) => e.cmd === 'renew'), 'live worker lease was not renewed');
       const task = h.json(['task', 'show', 'T1']);
       assert.equal(task.claim.since, h.readAttempts()[0].claim.since);
       assert.equal(task.claim.agent, spawned.agent);
@@ -468,7 +466,7 @@ for (const [launch, hooks] of [['the lease gate', {}], ['the launch handshake', 
     } finally {
       fs.writeFileSync(`${h.attempts}.finish`, '');
     }
-    await until(() => h.json(['task', 'show', 'T1']).run?.phase === 'waiting', 'worker did not finish');
+    await waitOnRepo(h, () => h.json(['task', 'show', 'T1']).run?.phase === 'waiting', 'worker did not finish');
   });
 }
 
@@ -476,10 +474,10 @@ test('release during backoff fences the old supervisor from a replacement claim'
   const h = setup(t, { failures: 9, config: { backoff_ms: 1400, max_backoff_ms: 1400 } });
   const backoff = controlledBackoff(h);
   const spawned = h.json(['spawn', '--task', 'T1'], { env: backoff.env });
-  await until(() => h.json(['task', 'show', 'T1']).run?.phase === 'retrying', 'retry was not recorded');
+  await waitOnRepo(h, () => h.json(['task', 'show', 'T1']).run?.phase === 'retrying', 'retry was not recorded');
   h.ok(['release', 'T1', '--agent', spawned.agent, '--reason', 'replace this run']);
   h.ok(['claim', 'T1', '--agent', 'replacement']);
-  await until(() => !detachedAlive({ pid: spawned.monitor_pid }), 'released supervisor did not stop');
+  await waitOnRepo(h, () => !detachedAlive({ pid: spawned.monitor_pid }), 'released supervisor did not stop');
   const task = h.json(['task', 'show', 'T1']);
   assert.equal(task.claim.agent, 'replacement');
   assert.equal(task.run, null);
@@ -495,7 +493,6 @@ test('an expired previous claim does not stop supervision before a slow replacem
   const clock = path.join(__dirname, 'fixtures', 'clock.js').replace(/\\/g, '/');
   const result = h.run(['spawn', '--task', 'T1', '--wait'], {
     env: { NODE_OPTIONS: `--require "${clock}"`, TOWER_CRANE_TEST_NOW: String(Date.parse(previous.until) + 1) },
-    timeout: 15000,
   });
   assert.equal(result.code, 0, result.stderr);
   assert.equal(h.readAttempts().length, 2);
@@ -516,32 +513,39 @@ test('progress paths and CPU detect a stalled process without dropping its live 
   const h = setup(t, { failures: 0, waitForFinish: true, config: { stall_ms: 250, progress_paths: ['progress.txt'] } });
   const spawned = h.json(['spawn', '--task', 'T1'], { hooks: { HOOK_RENDER_DELAY_MS: '500' } });
   try {
-    await until(() => h.json(['task', 'show', 'T1']).run?.phase === 'blocked', 'idle process did not stall');
-    assert.match(h.ok(['task', 'show', 'T1']), /blocked: no progress paths or CPU activity/);
-    await until(() => sketches(h).every(({ text }) => text.includes('blocked: no progress paths or CPU activity')),
-      'saved sketches did not show stall');
-    for (const { file, text } of sketches(h)) {
+    await waitOnRepo(h, () => h.readAttempts().length === 1, 'idle worker did not finish startup');
+    const blocked = await waitOnRepo(h, () => {
+      const shown = h.ok(['task', 'show', 'T1']);
+      const views = sketches(h);
+      return shown.includes('blocked: no progress paths or CPU activity')
+        && views.every(({ text }) => text.includes('blocked: no progress paths or CPU activity')) && { shown, views };
+    }, 'idle process and saved sketches did not show stall');
+    assert.match(blocked.shown, /blocked: no progress paths or CPU activity/);
+    for (const { file, text } of blocked.views) {
       assert.match(text, /blocked: no progress paths or CPU activity/, `${file} shows the stalled phase`);
     }
     fs.writeFileSync(path.join(spawned.cwd, 'progress.txt'), 'progress\n');
-    await until(() => h.json(['task', 'show', 'T1']).run?.phase === 'running', 'path progress did not clear stall');
-    await until(() => sketches(h).every(({ text }) => !text.includes('blocked: no progress paths or CPU activity')),
-      'saved sketches did not clear stall');
-    for (const { file, text } of sketches(h)) {
+    const cleared = await waitOnRepo(h, () => {
+      const phase = log(h).findLast((e) => e.cmd === 'spawn phase');
+      const views = sketches(h);
+      return phase?.detail.phase === 'running'
+        && views.every(({ text }) => !text.includes('blocked: no progress paths or CPU activity')) && views;
+    }, 'path progress and saved sketches did not clear stall');
+    for (const { file, text } of cleared) {
       assert.doesNotMatch(text, /blocked: no progress paths or CPU activity/, `${file} clears the stalled phase`);
     }
     // Tool hooks write outside the event log; the agent's progress file counts too.
-    await until(() => h.json(['task', 'show', 'T1']).run?.phase === 'blocked', 'idle process did not stall again');
+    await waitOnRepo(h, () => h.json(['task', 'show', 'T1']).run?.phase === 'blocked', 'idle process did not stall again');
     fs.mkdirSync(path.dirname(S.progressFile(h.state, spawned.agent)), { recursive: true });
     fs.appendFileSync(S.progressFile(h.state, spawned.agent), '{}\n');
-    await until(() => h.json(['task', 'show', 'T1']).run?.phase === 'running', 'tool progress did not clear stall');
+    await waitOnRepo(h, () => h.json(['task', 'show', 'T1']).run?.phase === 'running', 'tool progress did not clear stall');
     assert.equal(h.json(['task', 'show', 'T1']).claim.agent, spawned.agent);
     assert.deepEqual(h.json(['status']).exited_claims, []);
   } finally {
     // Keep the worker alive until both board transitions have been observed.
     fs.writeFileSync(`${h.attempts}.finish`, '');
   }
-  await until(() => !detachedAlive({ pid: spawned.monitor_pid }), 'supervisor did not finish');
+  await waitOnRepo(h, () => !detachedAlive({ pid: spawned.monitor_pid }), 'supervisor did not finish');
   assert.equal(h.json(['task', 'show', 'T1']).run.phase, 'waiting');
 });
 
@@ -556,13 +560,13 @@ test('a worker starts only after its supervisor takes the lease, so its first ed
   const h = setup(t, { claim: false, failures: 0 });
   const { paused, hooks } = pausedSupervisor(h);
   const spawned = h.json(['spawn', '--task', 'T1'], { hooks });
-  await until(() => fs.existsSync(paused), 'supervisor did not pause');
+  await waitOnRepo(h, () => fs.existsSync(paused), 'supervisor did not pause');
   assert.equal(h.readAttempts().length, 0, 'the harness waits behind its gate');
   assert.equal(h.json(['task', 'show', 'T1']).claim, null, 'no lease before the supervisor takes it');
   fs.writeFileSync(`${paused}.go`, '');
-  await until(() => h.readAttempts().length === 1, 'worker did not start');
+  await waitOnRepo(h, () => h.readAttempts().length === 1, 'worker did not start');
   assert.equal(h.readAttempts()[0].claim.agent, spawned.agent, 'the lease was taken before the harness started');
-  await until(() => log(h).some((e) => e.cmd === 'spawn exit' && e.detail.agent === spawned.agent), 'worker did not finish');
+  await waitOnRepo(h, () => log(h).some((e) => e.cmd === 'spawn exit' && e.detail.agent === spawned.agent), 'worker did not finish');
   assert.equal(log(h).findLast((e) => e.cmd === 'spawn phase' && e.detail.agent === spawned.agent).detail.phase, 'waiting');
 });
 
@@ -572,7 +576,7 @@ test('a worker whose lease is refused never starts, reports why and frees its sl
   const completed = h.runAsync(['spawn', '--task', 'T1', '--wait', '--json'], { hooks });
   let result;
   try {
-    await until(() => fs.existsSync(paused), 'supervisor did not pause');
+    await waitOnRepo(h, () => fs.existsSync(paused), 'supervisor did not pause');
     h.ok(['task', 'update', 'T1', '--needs-owner', 'waiting for a decision']);
   } finally {
     fs.writeFileSync(`${paused}.go`, '');
@@ -595,9 +599,9 @@ test('a worker whose spawn is not recorded within its startup window never start
   const completed = h.runAsync(['spawn', '--task', 'T1', '--wait', '--json'], { hooks: { HOOK_STOP_STARTED: started } });
   let result;
   try {
-    await until(() => fs.existsSync(started), 'dispatch did not pause before committing its spawn');
+    await waitOnRepo(h, () => fs.existsSync(started), 'dispatch did not pause before committing its spawn');
     // The supervisor's startup window closes while the paused dispatch holds the state lock.
-    await new Promise((resolve) => setTimeout(resolve, 11000));
+    await new Promise((resolve) => setTimeout(resolve, 11000)); // wait-allow: verify that a held startup gate cannot outlive the production startup window
     assert.equal(h.readAttempts().length, 0, 'the harness waits behind its gate');
   } finally {
     fs.writeFileSync(`${started}.go`, '');
@@ -612,7 +616,7 @@ test('a schema bump before the supervisor first reads state stops its worker beh
   const h = setup(t, { claim: false, failures: 0 });
   const { paused, hooks } = pausedSupervisor(h);
   const spawned = h.json(['spawn', '--task', 'T1'], { hooks });
-  await until(() => fs.existsSync(paused), 'supervisor did not pause');
+  await waitOnRepo(h, () => fs.existsSync(paused), 'supervisor did not pause');
   // The lease gate waits on its supervisor, and this supervisor can no longer read the state.
   S.withLock(h.state, () => {
     const project = JSON.parse(fs.readFileSync(path.join(h.state, 'project.json'), 'utf8'));
@@ -620,7 +624,7 @@ test('a schema bump before the supervisor first reads state stops its worker beh
     S.writeAtomic(path.join(h.state, 'project.json'), S.json(project));
   });
   fs.writeFileSync(`${paused}.go`, '');
-  await until(() => !detachedAlive({ pid: spawned.monitor_pid }), 'supervisor kept waiting behind its gate');
+  await waitOnRepo(h, () => !detachedAlive({ pid: spawned.monitor_pid }), 'supervisor kept waiting behind its gate');
   assert.equal(detachedAlive({ pid: spawned.pid }), false, 'the gate was stopped with its supervisor');
   assert.equal(h.readAttempts().length, 0, 'the worker never started');
   const tasks = JSON.parse(fs.readFileSync(path.join(h.state, 'tasks.json'), 'utf8')).tasks;
@@ -633,10 +637,10 @@ test('a worker without the lease gate, as on Windows, first runs on its own leas
   const completed = h.runAsync(['spawn', '--task', 'T1', '--wait', '--json'], { hooks: { ...NO_SH, HOOK_STOP_RENDER: paused } });
   let result;
   try {
-    await until(() => fs.existsSync(paused), 'dispatch did not pause after committing its spawn');
+    await waitOnRepo(h, () => fs.existsSync(paused), 'dispatch did not pause after committing its spawn');
     // The paused render holds the state lock, so no supervisor can claim now:
     // the harness can only see a lease recorded before it started.
-    await until(() => h.readAttempts().length === 1, 'worker did not start');
+    await waitOnRepo(h, () => h.readAttempts().length === 1, 'worker did not start');
   } finally {
     fs.writeFileSync(`${paused}.go`, '');
     result = await completed;
@@ -661,12 +665,12 @@ test('a worker without the lease gate whose supervisor stops waiting for its lea
   const completed = h.runAsync(['spawn', '--task', 'T1', '--wait', '--json'], { hooks: { ...NO_SH, HOOK_STOP_GO: paused } });
   let result;
   try {
-    await until(() => fs.existsSync(paused), 'dispatch did not pause before launching its worker');
+    await waitOnRepo(h, () => fs.existsSync(paused), 'dispatch did not pause before launching its worker');
     const claim = JSON.parse(fs.readFileSync(path.join(h.state, 'tasks.json'), 'utf8')).tasks.find((task) => task.id === 'T1').claim;
     assert.match(claim?.agent || '', /^worker-T1-/, 'the lease is on disk while the supervisor waits');
     assert.equal(h.readAttempts().length, 0, 'no harness runs before go');
     // The supervisor's wait for go closes while the paused dispatch holds the state lock.
-    await new Promise((resolve) => setTimeout(resolve, 11000));
+    await new Promise((resolve) => setTimeout(resolve, 11000)); // wait-allow: exercise the supervisor's 10-second no-lease refusal before releasing the paused dispatch
   } finally {
     fs.writeFileSync(`${paused}.go`, '');
     result = await completed;
@@ -703,7 +707,7 @@ test('a spawn reads no other task\'s stored evidence, so a missing evidence file
 test('a worker spawned behind a live lease held by another agent never starts and says why', (t) => {
   const h = setup(t, { claim: false, failures: 0 });
   h.ok(['claim', 'T1', '--agent', 'holder']);
-  const result = h.spawn(undefined, 20000);
+  const result = h.spawn();
   assert.equal(result.code, 1, result.stderr);
   assert.match(result.stderr, /T1 is claimed by holder until/);
   assert.equal(h.readAttempts().length, 0, 'the harness never started');
@@ -717,11 +721,11 @@ test('a supervisor stop stays blocked with its reason when its harness exits 0 o
     "process.on('SIGTERM', () => process.exit(0)); setInterval(() => {}, 1000);", '{prompt}'])]);
   // The blocked stop climbs the range to medium, which must not reach a real codex.
   pinRung(h, 'medium', STUB_RUNG);
-  const result = h.spawn(undefined, 30000);
+  const result = h.spawn();
   assert.equal(result.code, 1, result.stderr);
   // The climb's medium attempt runs on after the wait returns and records phases of its own.
   const first = log(h).find((e) => e.cmd === 'spawn').detail.agent;
-  await until(() => log(h).some((e) => e.cmd === 'spawn exit' && e.detail.agent !== first), 'the medium attempt did not exit');
+  await waitOnRepo(h, () => log(h).some((e) => e.cmd === 'spawn exit' && e.detail.agent !== first), 'the medium attempt did not exit');
   const last = log(h).findLast((e) => e.cmd === 'spawn phase' && e.detail.agent === first);
   assert.equal(last.detail.phase, 'blocked');
   assert.equal(last.detail.reason, 'no progress paths or CPU activity');
@@ -755,17 +759,17 @@ test('submitted-task reviewers resume transient exits and show their phase', (t)
 test('a state-lock timeout preserves the pending retry without spending another attempt', async (t) => {
   const h = setup(t, { config: { retries: 1, backoff_ms: 5000, max_backoff_ms: 5000 } });
   h.json(['spawn', '--task', 'T1']);
-  await until(() => h.json(['task', 'show', 'T1']).run?.phase === 'retrying', 'retry was not scheduled');
+  await waitOnRepo(h, () => h.json(['task', 'show', 'T1']).run?.phase === 'retrying', 'retry was not scheduled');
   const paused = path.join(h.base, 'holder');
   const holder = h.runAsync(['task', 'note', 'T1', 'hold state lock'], { hooks: { HOOK_PAUSE_LOCKED: paused } });
   try {
-    await until(() => fs.existsSync(paused), 'holder did not acquire the lock');
-    await new Promise((resolve) => setTimeout(resolve, 17000));
+    await waitOnRepo(h, () => fs.existsSync(paused), 'holder did not acquire the lock');
+    await new Promise((resolve) => setTimeout(resolve, 17000)); // wait-allow: hold the lock beyond the production state-lock timeout
   } finally {
     fs.writeFileSync(`${paused}.go`, '');
     assert.equal((await holder).code, 0);
   }
-  await until(() => h.json(['task', 'show', 'T1']).run?.phase === 'waiting', 'pending retry was lost after lock timeout');
+  await waitOnRepo(h, () => h.json(['task', 'show', 'T1']).run?.phase === 'waiting', 'pending retry was lost after lock timeout');
   assert.equal(h.readAttempts().length, 2);
   assert.equal(log(h).filter((e) => e.cmd === 'spawn retry').length, 1);
   assert.equal(h.readAttempts()[1].retry, '1');
@@ -782,15 +786,28 @@ test('rung supervision settings validate and clear through the CLI', (t) => {
 });
 
 test('descendant CPU activity postpones stall while paths remain quiet', { skip: process.platform !== 'linux' }, async (t) => {
-  const h = setup(t, { failures: 0, hold: 3800, busy: true, config: { stall_ms: 300 } });
-  h.json(['spawn', '--task', 'T1']);
-  await until(() => h.readAttempts().length === 1, 'CPU stub did not start');
-  // The supervisor samples once a second; two and a half seconds of busy
-  // child cover at least two samples even on a loaded machine.
-  await new Promise((resolve) => setTimeout(resolve, 2500));
-  assert.equal(log(h).filter((e) => e.cmd === 'stall').length, 0);
-  assert.equal(h.json(['task', 'show', 'T1']).run.phase, 'running');
-  await until(() => h.json(['task', 'show', 'T1']).run?.phase === 'waiting', 'CPU stub did not finish');
+  const h = setup(t, { failures: 0, waitForFinish: true, busy: true, config: { stall_ms: 300 } });
+  const audit = path.join(h.base, 'samples.jsonl');
+  const hook = path.join(__dirname, 'fixtures', 'supervision-samples.js').replace(/\\/g, '/');
+  h.json(['spawn', '--task', 'T1'], { env: { NODE_OPTIONS: `--require "${hook}"`, TOWER_CRANE_TEST_SAMPLES: audit } });
+  const phase = () => log(h).findLast((e) => ['spawn', 'spawn phase'].includes(e.cmd))?.detail.phase;
+  try {
+    await waitOnRepo(h, () => fs.existsSync(h.attempts + '.busy')
+      && phase() === 'running', 'CPU stub did not start');
+    const stalls = log(h).filter((e) => e.cmd === 'stall').length;
+    const samples = () => fs.existsSync(audit)
+      ? fs.readFileSync(audit, 'utf8').split('\n').slice(0, -1).map(JSON.parse).filter((s) => s.kind === 'cpu') : [];
+    const count = samples().length;
+    await waitOnRepo(h, () => {
+      const active = samples().slice(count);
+      return active.length >= 3 && active.at(-1).ticks > active[0].ticks;
+    }, 'supervisor did not sample descendant CPU activity');
+    assert.equal(log(h).filter((e) => e.cmd === 'stall').length, stalls);
+    assert.equal(phase(), 'running');
+  } finally {
+    fs.writeFileSync(h.attempts + '.finish', '');
+  }
+  await waitOnRepo(h, () => h.json(['task', 'show', 'T1']).run?.phase === 'waiting', 'CPU stub did not finish');
 });
 
 test('serve shows the recorded run phase on the board', async (t) => {
@@ -837,10 +854,16 @@ for (const harness of ['claude', 'codex']) {
     const attemptsFile = path.join(h.base, 'harness-attempts.json');
     const result = h.run(['spawn', '--task', 'T1', '--wait'], {
       env: {
+        CLAUDE_CONFIG_DIR: path.join(h.base, 'home', '.claude'),
+        CODEX_HOME: path.join(h.base, 'home', '.codex'),
+        PI_CODING_AGENT_DIR: path.join(h.base, 'home', '.pi', 'agent'),
+        GH_CONFIG_DIR: path.join(h.base, 'home', '.config', 'gh'),
+        XDG_CONFIG_HOME: path.join(h.base, 'home', '.config'),
+        XDG_DATA_HOME: path.join(h.base, 'home', '.local', 'share'),
+        OPENCODE_CONFIG_DIR: path.join(h.base, 'home', '.config', 'opencode'),
         PATH: bin + path.delimiter + (h.env.PATH || h.env.Path || ''),
         NODE_OPTIONS: `--require "${stub}"`, TOWER_CRANE_TEST_SUPERVISION_FILE: attemptsFile,
       },
-      timeout: 15000,
     });
     assert.equal(result.code, 0, result.stderr);
     const [first, second] = JSON.parse(fs.readFileSync(attemptsFile, 'utf8'));
@@ -923,14 +946,14 @@ test('quiet supervision samples state and progress paths on a seconds-scale inte
   } });
   const read = () => fs.existsSync(audit) ? fs.readFileSync(audit, 'utf8').split('\n').slice(0, -1).map(JSON.parse) : [];
   try {
-    await until(() => fs.existsSync(h.attempts), 'quiet worker did not finish claiming');
-    await until(() => read().filter((sample) => sample.kind === 'path').length >= 2, 'quiet sampling did not start');
+    await waitOnRepo(h, () => fs.existsSync(h.attempts), 'quiet worker did not finish claiming');
+    await waitOnRepo(h, () => read().filter((sample) => sample.kind === 'path').length >= 2, 'quiet sampling did not start');
     const before = read().filter((sample) => sample.kind === 'state').length;
     h.ok(['task', 'note', 'T1', 'wake the state observer']);
-    await until(() => read().filter((sample) => sample.kind === 'state').length > before, 'the state observer did not see the note');
+    await waitOnRepo(h, () => read().filter((sample) => sample.kind === 'state').length > before, 'the state observer did not see the note');
     // Startup writes may still arrive. Once they settle, several path samples
     // must reuse the state; polling it every tick never reaches this interval.
-    await until(() => {
+    await waitOnRepo(h, () => {
       const samples = read();
       const lastRead = samples.findLast((sample) => sample.kind === 'state');
       return samples.filter((sample) => sample.kind === 'path' && sample.at > lastRead.at).length >= 3;
@@ -940,7 +963,7 @@ test('quiet supervision samples state and progress paths on a seconds-scale inte
     for (let i = 1; i < walks.length; i++) assert.ok(walks[i].at - walks[i - 1].at >= 900, JSON.stringify(walks));
   } finally {
     fs.writeFileSync(h.attempts + '.finish', '');
-    await until(() => log(h).some((e) => e.cmd === 'spawn phase' && e.detail.phase === 'waiting'), 'quiet worker did not finish');
+    await waitOnRepo(h, () => log(h).some((e) => e.cmd === 'spawn phase' && e.detail.phase === 'waiting'), 'quiet worker did not finish');
   }
 });
 
@@ -952,7 +975,11 @@ test('Windows natural exits do not send taskkill to an exited or reused pid', (t
   const result = h.run(['spawn', '--task', 'T1', '--wait'], { env: {
     NODE_OPTIONS: `--require "${hook}"`, TOWER_CRANE_TEST_TASKKILL: audit,
   } });
-  assert.equal(result.code, 0, result.stderr);
+  if (result.code !== 0) {
+    const exit = log(h).findLast((event) => event.cmd === 'spawn exit');
+    const output = exit?.detail.log && fs.existsSync(exit.detail.log) ? fs.readFileSync(exit.detail.log, 'utf8') : '';
+    assert.fail(result.stderr + result.stdout + output + JSON.stringify(exit));
+  }
   assert.equal(fs.existsSync(audit), false, 'taskkill can target a new process after the harness pid is released');
 });
 
@@ -973,15 +1000,15 @@ setInterval(() => {}, 1000);
 `;
   h.ok(['ladder', 'set', 'easy', '--command', JSON.stringify([process.execPath, '-e', script, BIN, pids, terminated, '{prompt}'])]);
   const spawned = h.json(['spawn', '--task', 'T1']);
-  await until(() => written(pids), 'process group did not start');
-  const group = JSON.parse(written(pids));
+  const group = await waitOnRepo(h, () => written(pids) && JSON.parse(written(pids)),
+    'process group did not start');
   t.after(() => {
     try { process.kill(-group[0], 'SIGKILL'); } catch (e) { if (e.code !== 'ESRCH') throw e; }
   });
   process.kill(spawned.monitor_pid, 'SIGTERM');
-  await until(() => written(terminated + '.parent') && written(terminated + '.child'), 'stop did not send SIGTERM before SIGKILL');
-  await until(() => group.every((pid) => !detachedAlive({ pid })), 'stop left a process group member alive');
-  await until(() => !detachedAlive({ pid: spawned.monitor_pid }), 'stopped monitor survived');
+  await waitOnRepo(h, () => written(terminated + '.parent') && written(terminated + '.child'), 'stop did not send SIGTERM before SIGKILL');
+  await waitOnRepo(h, () => group.every((pid) => !detachedAlive({ pid })), 'stop left a process group member alive');
+  await waitOnRepo(h, () => !detachedAlive({ pid: spawned.monitor_pid }), 'stopped monitor survived');
   assert.equal(fs.readFileSync(terminated + '.parent', 'utf8'), 'parent');
   assert.equal(fs.readFileSync(terminated + '.child', 'utf8'), 'child');
   assert.equal(log(h).filter((e) => e.cmd === 'spawn retry').length, 0);
@@ -1025,7 +1052,7 @@ if (!fs.existsSync(file)) {
 `;
   h.ok(['ladder', 'set', 'easy', '--command', JSON.stringify([process.execPath, '-e', script, BIN, groupFile, '{prompt}'])]);
   // The rerun waits out the previous child's SIGTERM grace, so allow for a loaded machine.
-  const result = h.spawn(undefined, 60000);
+  const result = h.spawn();
   assert.equal(result.code, 0, result.stderr);
   assert.equal(log(h).filter((e) => e.cmd === 'spawn retry').length, 1);
 });
@@ -1036,9 +1063,9 @@ test('a worker waits for its lease while the dispatch CLI is blocked rendering, 
   const completed = h.runAsync(['spawn', '--task', 'T1', '--wait', '--json'], { hooks: { HOOK_STOP_RENDER: paused } });
   let result;
   try {
-    await until(() => fs.existsSync(paused), 'dispatch did not pause after committing its spawn');
+    await waitOnRepo(h, () => fs.existsSync(paused), 'dispatch did not pause after committing its spawn');
     // The paused render holds the state lock, so the lease and the harness after it wait.
-    await new Promise((resolve) => setTimeout(resolve, 300));
+    await new Promise((resolve) => setTimeout(resolve, 300)); // wait-allow: paused rendering holds the lock and must prevent harness startup
     assert.equal(h.readAttempts().length, 0, 'no harness starts before its lease');
   } finally {
     fs.writeFileSync(`${paused}.go`, '');
@@ -1069,15 +1096,15 @@ test('foreground exit waits until the retained stdout pipe has been captured', a
   let writerPid;
   let spawned;
   try {
-    await until(() => log(h).some((e) => e.cmd === 'spawn'), 'spawn was not recorded');
+    await waitOnRepo(h, () => log(h).some((e) => e.cmd === 'spawn'), 'spawn was not recorded');
     spawned = log(h).find((e) => e.cmd === 'spawn').detail;
-    await until(() => written(writerPidFile) && written(writerReady),
+    await waitOnRepo(h, () => written(writerPidFile) && written(writerReady),
       'detached writer did not open the foreground stdout pipe');
     writerPid = Number(written(writerPidFile));
     assert.ok(Number.isInteger(writerPid));
-    await until(() => !detachedAlive({ pid: spawned.pid }), 'foreground harness did not exit');
-    await until(() => detachedAlive({ pid: writerPid }), 'detached writer did not keep the stdout pipe open');
-    await new Promise((resolve) => setTimeout(resolve, 500));
+    await waitOnRepo(h, () => !detachedAlive({ pid: spawned.pid }), 'foreground harness did not exit');
+    await waitOnRepo(h, () => detachedAlive({ pid: writerPid }), 'detached writer did not keep the stdout pipe open');
+    await new Promise((resolve) => setTimeout(resolve, 500)); // wait-allow: verify a retained stdout pipe prevents premature exit finalization
     assert.equal(log(h).some((e) => e.cmd === 'spawn exit'), false);
     assert.doesNotMatch(fs.readFileSync(spawned.log, 'utf8'), /final foreground output/,
       'the retained pipe has not delivered its final output');
@@ -1136,12 +1163,12 @@ test('supervision attempt readers keep a complete snapshot during the next write
   const h = setup(t, { waitForFinish: true, publishBarrier: true });
   const spawned = h.json(['spawn', '--task', 'T1']);
   try {
-    await until(() => fs.existsSync(`${h.attempts}.writing`), 'second attempt did not start writing');
+    await waitOnRepo(h, () => fs.existsSync(`${h.attempts}.writing`), 'second attempt did not start writing');
     assert.equal(h.readAttempts().length, 1, 'readers keep the previous complete attempt list');
   } finally {
     fs.writeFileSync(`${h.attempts}.publish`, '');
     fs.writeFileSync(`${h.attempts}.finish`, '');
-    await until(() => !detachedAlive({ pid: spawned.monitor_pid }), 'previous supervisor did not finish');
+    await waitOnRepo(h, () => !detachedAlive({ pid: spawned.monitor_pid }), 'previous supervisor did not finish');
   }
   assert.equal(h.readAttempts().length, 2);
 });
@@ -1150,7 +1177,7 @@ test('rework cannot resume a session while its transient rerun is still alive', 
   const h = setup(t, { waitForFinish: true, sessionReceipt: true });
   const spawned = h.json(['spawn', '--task', 'T1']);
   try {
-    await until(() => h.readAttempts().length === 2, 'transient rerun did not start');
+    await waitOnRepo(h, () => h.readAttempts().length === 2, 'transient rerun did not start');
     h.ok(['submit', 'T1', '--agent', spawned.agent, '--sha', '50b732a15be40ccb2065cb2ba0e7b366d511b736']);
     h.ok(['rework', 'T1', '--reason', 'review correction']);
     const result = h.run(['spawn', '--task', 'T1']);
@@ -1159,7 +1186,7 @@ test('rework cannot resume a session while its transient rerun is still alive', 
   } finally {
     fs.writeFileSync(`${h.attempts}.finish`, '');
   }
-  await until(() => !detachedAlive({ pid: spawned.monitor_pid }), 'previous supervisor did not finish');
+  await waitOnRepo(h, () => !detachedAlive({ pid: spawned.monitor_pid }), 'previous supervisor did not finish');
 });
 });
 
@@ -1177,15 +1204,15 @@ test('the supervisor removes a commondir its worker plants in the common directo
 const fs = require('node:fs');
 const [planted, result, named] = process.argv.slice(1, 4);
 // A write loop, as a worker that fights the removal would run.
-const spin = (ms) => { const until = Date.now() + ms; while (Date.now() < until); };
+const spin = (ms) => { const until = Date.now() + ms; while (Date.now() < until); }; // wait-allow: paces the planted writes like a worker fighting the removal
 // Windows refuses to open a file the supervisor is deleting (EPERM).
 const plant = () => { try { fs.writeFileSync(planted, named + '\\n'); } catch (e) { if (e.code !== 'EPERM') throw e; } };
 for (let i = 0; i < 300; i++) { plant(); spin(5); }
-const end = Date.now() + 60000;
+const end = Date.now() + 300000;
 const check = () => {
   if (!fs.existsSync(planted)) fs.writeFileSync(result, 'removed');
   else if (Date.now() > end) fs.writeFileSync(result, 'kept');
-  else return setTimeout(check, 20);
+  else return setTimeout(check, 20); // wait-allow: probe cadence only; removal is the signal and the suite guard bounds it
 };
 check();
 `;

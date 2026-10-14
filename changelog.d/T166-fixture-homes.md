@@ -1,0 +1,1 @@
+- Broker and reviewer tests can use writable test homes and keep harness credential stores inside their fixtures.

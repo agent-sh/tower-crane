@@ -1,10 +1,12 @@
 'use strict';
 
+const { HUNG_TEST_MS, waitOnRepo, waitUntil, fileWritten } = require('./signals');
+
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { makeRepo, cachedFixture, stubRungs, BIN } = require('./helpers');
+const { makeRepo, cachedFixture, stubRungs, BIN, detachedAlive } = require('./helpers');
 const { gateFixture, gateEvidence } = require('./gate-helpers');
 const { waitFor } = require('./canary');
 const { shellQuote } = require('../lib/gates/common');
@@ -661,14 +663,18 @@ for (const waiting of ['runs', 'mergeability']) {
     fs.writeFileSync(clock, String(start));
     const reconciled = () => h.logs().filter((e) => e.cmd === 'automation reconcile').length;
     const before = reconciled();
-    const waiter = h.runAsync(['wait', '--types', 'never', '--timeout', '10', '--agent', 'orchestrator'],
+    // The waiter's own timeout ends this engine run; the test asserts it timed out without waking.
+    const waiter = h.runAsync(['wait', '--types', 'never', '--timeout', '10', '--agent', 'orchestrator'], // wait-allow: the engine run ends at its own timeout
       { hooks: { HOOK_CLOCK_FILE: clock } });
     t.after(() => waiter);
-    const until = async (probe) => {
-      const deadline = Date.now() + 10000;
-      while (!probe() && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 50));
-      assert.ok(probe(), 'CI check completed before the deadline');
-    };
+    let ended = false;
+    waiter.then(() => { ended = true; });
+    // Readiness is the record; a waiter that ended first fails at once.
+    const until = (probe) => waitOnRepo(h, () => {
+      if (probe()) return true;
+      if (ended) throw new Error('the waiter ended before the CI check completed');
+      return false;
+    }, 'CI check completed');
     await until(() => reconciled() > before);
     const github = h.github();
     github.ci[h.sha] = 'success';
@@ -701,14 +707,16 @@ test('unchanged pending CI is rechecked each minute without new records, and CI 
     const sources = new Set(reconciles().map((e) => e.id));
     return h.logs().filter((e) => e.cmd === 'automation' && sources.has(e.detail.source) && e.detail.phase === 'done').length;
   };
-  const until = async (probe, what) => {
-    const deadline = Date.now() + 15000;
-    while (!probe() && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 50));
-    assert.ok(probe(), what);
-  };
-  const waiter = h.runAsync(['wait', '--types', 'worker-message', '--timeout', '120', '--agent', 'orchestrator'],
+  const waiter = h.runAsync(['wait', '--types', 'worker-message', '--timeout', '300', '--agent', 'orchestrator'],
     { hooks: { HOOK_CLOCK_FILE: clock } });
   t.after(() => waiter);
+  let ended = false;
+  waiter.then(() => { ended = true; });
+  const until = (probe, what) => waitOnRepo(h, () => {
+    if (probe()) return true;
+    if (ended) throw new Error(`the waiter ended first: ${what}`);
+    return false;
+  }, what);
   await until(() => rechecked() >= 1, 'startup rechecks pending CI');
   const checks = h.logs().filter((e) => e.cmd === 'check ci').length;
   const tasks = h.readState('tasks.json').tasks;
@@ -741,7 +749,7 @@ test('unchanged pending CI is rechecked each minute without new records, and CI 
   for (let minute = 1; minute <= 3; minute++) {
     now += 60001;
     fs.writeFileSync(clock, String(now));
-    await new Promise((resolve) => setTimeout(resolve, 1500));
+    await new Promise((resolve) => setTimeout(resolve, 1500)); // wait-allow: give the engine each simulated minute to show it schedules no recheck
   }
   assert.equal(reconciles().length, settled, 'a stalled head gets no scheduled recheck');
   assert.equal(h.github().calls.length, calls, 'and no GitHub call');
@@ -866,7 +874,7 @@ global.Date = class extends RealDate {
         { env: { ...env, CLAUDE_SESSION_ID: 'engine-waiter' } })
       : h.runAsync(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator'], { env });
     try {
-      assert.notEqual(await waitFor(stalled, { ms: 30000 }), null, 'automation did not start its gate');
+      await waitFor(stalled, { what: 'automation did not start its gate' });
       if (mode === 'late') {
         assert.deepEqual(h.readState('tasks.json').orchestrator_lease, holder, 'an owner waiter keeps the holder heartbeat');
         // The holder wakes on the submit; its first read renews its own heartbeat.
@@ -963,7 +971,7 @@ function reconciledFixture(t) {
     return { sha: h.sha };
   });
   h.logs = () => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
-  h.reconcile = () => h.run(['wait', '--types', 'never', '--timeout', '0.01', '--agent', 'orchestrator']);
+  h.reconcile = () => h.run(['wait', '--types', 'never', '--timeout', '0.01', '--agent', 'orchestrator']); // wait-allow: end the idle observation after startup reconciliation; assertions read state after the CLI exits
   return h;
 }
 
@@ -1128,7 +1136,7 @@ test('a timed-out test run retries once at its head and the passing retry keeps 
   const h = setup(t, { ci: 'pending' });
   const marker = path.join(h.base, 'timed-out-once');
   const script = path.join(h.base, 'slow-once.js');
-  fs.writeFileSync(script, `const fs = require('node:fs');\nif (fs.existsSync(${JSON.stringify(marker)})) process.exit(0);\nfs.writeFileSync(${JSON.stringify(marker)}, '');\nsetTimeout(() => {}, 10000);\n`);
+  fs.writeFileSync(script, `const fs = require('node:fs');\nif (fs.existsSync(${JSON.stringify(marker)})) process.exit(0);\nfs.writeFileSync(${JSON.stringify(marker)}, '');\nsetTimeout(() => {}, 10000);\n`); // wait-allow: hold the first fixture run alive until the gate timeout; its retry exits on the marker
   h.ok(['project', 'set', '--tests-cmd', `node ${shellQuote(script)}`, '--tests-mode', 'run-only', '--tests-timeout-min', '0.05']);
   h.submit();
   h.consume();
@@ -1142,7 +1150,7 @@ test('a timed-out test run retries once at its head and the passing retry keeps 
 test('a timeout that repeats at its head reworks after the retry', (t) => {
   const h = setup(t, { ci: 'pending' });
   const script = path.join(h.base, 'hang.js');
-  fs.writeFileSync(script, 'setTimeout(() => {}, 10000);\n');
+  fs.writeFileSync(script, 'setTimeout(() => {}, 10000);\n'); // wait-allow: hold the fixture alive to verify the configured gate timeout and its retry
   h.ok(['project', 'set', '--tests-cmd', `node ${shellQuote(script)}`, '--tests-mode', 'run-only', '--tests-timeout-min', '0.05']);
   h.submit();
   h.consume();
@@ -1408,7 +1416,7 @@ test('a local CI command killed by a signal retries once and reworks when the re
   h.ok(['project', 'set', '--ci-local', JSON.stringify({ command: [process.execPath, script], timeout: 5 })]);
   h.submit();
   h.consume();
-  assert.notEqual(await waitFor(h.marker('T1')), null, 'the refill claims the reworked task before it is inspected');
+  await waitFor(h.marker('T1'), { what: 'the refill claims the reworked task before it is inspected' });
   assert.equal(h.logs().filter((e) => e.cmd === 'check ci').length, 2, 'the killed run runs once more, and no third time');
   const task = h.readState('tasks.json').tasks[0];
   assert.deepEqual(task.evidence.filter((e) => e.type === 'ci').map((e) => e.runner_crash === true), [true, true]);
@@ -1419,7 +1427,7 @@ test('a local CI command killed by a signal retries once and reworks when the re
 test('a local CI command that times out retries once and reworks when the retry times out too', (t) => {
   const h = setup(t, { ci: 'pending' });
   const script = path.join(h.base, 'local-hang.js');
-  fs.writeFileSync(script, 'setTimeout(() => {}, 10000);\n');
+  fs.writeFileSync(script, 'setTimeout(() => {}, 10000);\n'); // wait-allow: hold local CI alive to verify timeout classification and its retry
   h.ok(['project', 'set', '--ci-local', JSON.stringify({ command: [process.execPath, script], timeout: 0.05 })]);
   h.submit();
   h.consume();
@@ -1455,13 +1463,13 @@ test('a test gate that fails by hand while the watcher runs reworks, not left su
   const finished = () => h.logs().filter((e) => e.cmd === 'automation' && e.detail.phase === 'done').length;
   const before = finished();
   const offset = fs.statSync(path.join(h.state, 'events.jsonl')).size;
-  const watcher = h.runAsync(['wait', '--after', String(offset), '--types', 'never', '--timeout', '8', '--agent', 'orchestrator']);
+  const watcher = h.runAsync(['wait', '--after', String(offset), '--types', 'rework', '--timeout', '300', '--agent', 'orchestrator']);
   // The watcher's startup reconcile settles the submission first; the failure comes after it.
-  for (let i = 0; i < 100 && finished() === before; i++) await new Promise((resolve) => setTimeout(resolve, 50));
+  await waitOnRepo(h, () => finished() > before, 'the watcher reconciles the submission');
   assert.ok(finished() > before, 'the watcher reconciled the submitted task');
   fs.writeFileSync(flag, '');
   assert.equal(h.run(['check', 'tests', 'T1']).code, 1);
-  assert.equal((await watcher).code, 2, 'the watcher runs to its deadline');
+  assert.equal((await watcher).code, 0, 'the watcher observes the rework signal');
   const task = h.readState('tasks.json').tasks[0];
   assertReworked(h, task);
   assert.match(h.logs().findLast((e) => e.cmd === 'rework').detail.reason, /^tests failed at [0-9a-f]+: /);
@@ -1477,7 +1485,7 @@ test('a test that also fails on main reworks without a quality climb on a task w
   h.submit();
   h.consume();
   assert.equal(h.logs().filter((e) => e.cmd === 'check tests').length, 2, 'the failure that also fails on main runs once more');
-  assert.notEqual(await waitFor(h.marker('T1')), null, 'the refill claims the reworked task');
+  await waitFor(h.marker('T1'), { what: 'the refill claims the reworked task' });
   const task = h.readState('tasks.json').tasks[0];
   // The worker holds its claim so the test checks settlement after refill, without racing it.
   assert.equal(task.status, 'in_progress');
@@ -1547,7 +1555,7 @@ test('an accepted task with green gates merges in the event reaction without an 
   const spawns = () => h.logs().filter((e) => e.cmd === 'spawn').length;
   const recorded = spawns();
   h.ok(['accept', 'T1', '--agent', 'orchestrator']);
-  const notification = JSON.parse(h.ok(['wait', '--types', 'merged', '--timeout', '5', '--agent', 'orchestrator']));
+  const notification = JSON.parse(h.ok(['wait', '--types', 'merged', '--timeout', '300', '--agent', 'orchestrator']));
   assert.equal(notification.type, 'merged', 'startup catches up accepted PRs and retains its automatic merge event');
   assert.equal(h.github().prs['7'].state, 'MERGED');
   assert.equal(spawns(), recorded);
@@ -1629,7 +1637,7 @@ test('wait stops post-merge conflict work on the first signal without reworking 
 fs.appendFileSync(${JSON.stringify(calls)}, JSON.stringify(args) + '\\n');
 if (${stage !== 'trial'} && args[0] === 'pr' && args[1] === 'view' && args[2] === ${JSON.stringify(heldPr)}) {
   fs.writeFileSync(${JSON.stringify(started)}, '');
-  const poll = () => fs.existsSync(${JSON.stringify(release)}) ? require(${JSON.stringify(ghStub)}) : setTimeout(poll, 25);
+  const poll = () => fs.existsSync(${JSON.stringify(release)}) ? require(${JSON.stringify(ghStub)}) : setTimeout(poll, 25); // wait-allow: probe cadence only; the release file is the signal
   poll();
 } else require(${JSON.stringify(ghStub)});
 `);
@@ -1646,7 +1654,7 @@ if (${stage === 'trial'}) {
     if (args[2][0] === 'merge' && args[2].includes('--no-commit') && log.includes('["pr","view","9"')) {
       fs.writeFileSync(${JSON.stringify(started)}, '');
       await new Promise(resolve => {
-        const poll = () => fs.existsSync(${JSON.stringify(release)}) ? resolve() : setTimeout(poll, 25);
+        const poll = () => fs.existsSync(${JSON.stringify(release)}) ? resolve() : setTimeout(poll, 25); // wait-allow: probe cadence only; the release file is the signal
         poll();
       });
     }
@@ -1655,7 +1663,7 @@ if (${stage === 'trial'}) {
 }
 `);
       const child = require('node:child_process').spawn(process.execPath,
-        ['--require', preload, BIN, 'wait', '--after', String(cursor), '--types', 'never', '--timeout', '60', '--agent', 'orchestrator'],
+        ['--require', preload, BIN, 'wait', '--after', String(cursor), '--types', 'never', '--timeout', '300', '--agent', 'orchestrator'],
         { cwd: h.repo, env: h.env });
       let stdout = '', stderr = '';
       child.stdout.on('data', (chunk) => { stdout += chunk; });
@@ -1664,7 +1672,7 @@ if (${stage === 'trial'}) {
         child.on('error', reject);
         child.on('close', (code) => resolve({ code, stdout, stderr }));
       });
-      const bound = setTimeout(() => child.kill('SIGKILL'), 20000);
+      const bound = setTimeout(() => child.kill('SIGKILL'), HUNG_TEST_MS);
       t.after(async () => {
         clearTimeout(bound);
         fs.writeFileSync(release, '');
@@ -1672,11 +1680,11 @@ if (${stage === 'trial'}) {
         await result;
         await h.cleanup();
       });
-      assert.notEqual(await waitFor(started, { ms: 10000 }), null, 'the post-merge sweep starts');
+      await waitFor(started, { what: 'the post-merge sweep starts' });
       assert.equal(h.github().prs['7'].state, 'MERGED');
       const before = h.readState('tasks.json').tasks.slice(1);
       child.kill('SIGTERM');
-      assert.notEqual(await waitFor(observed, { ms: 5000 }), null, 'wait observes the signal during the sweep');
+      await waitFor(observed, { what: 'wait observes the signal during the sweep' });
       const count = fs.readFileSync(calls, 'utf8').trim().split('\n').length;
       if (forced) child.kill('SIGTERM');
       else fs.writeFileSync(release, '');
@@ -1744,7 +1752,7 @@ test('a matching UNKNOWN head runs submission gates during the same wait', async
   state.prs['7'].mergeable = state.prs['7'].mergeStateStatus = 'UNKNOWN';
   state.becomeMergeableAfterView = true;
   h.saveGithub(state);
-  const result = await h.runAsync(['wait', '--after', '0', '--types', 'never', '--timeout', '0.2', '--agent', 'orchestrator']);
+  const result = await h.runAsync(['wait', '--after', '0', '--types', 'never', '--timeout', '0.2', '--agent', 'orchestrator']); // wait-allow: verify the CLI observation, filtering or timeout contract with already-published state
   assert.equal(result.code, 2, result.stderr);
   const task = h.readState('tasks.json').tasks[0];
   assert.deepEqual(task.evidence.filter((e) => ['tests', 'clean'].includes(e.type)).map((e) => [e.type, e.ok]),
@@ -1889,15 +1897,15 @@ if (release) {
   const starts = fs.readFileSync(${JSON.stringify(runs)}, 'utf8').split('\\n').filter((m) => m === '+').length;
   const started = ${JSON.stringify(path.join(h.base, 'suite-started-'))} + starts;
   fs.writeFileSync(started, String(process.pid));
-  const until = Date.now() + ${SLOW_SUITE_MS};
+  const until = Date.now() + ${SLOW_SUITE_MS}; // wait-allow: an orphaned suite stops itself; release and start-file removal are its signals
   const poll = () => {
     if (!fs.existsSync(started) || Date.now() > until) process.exit(1);
     if (starts < ${hold} || fs.existsSync(release)) finish();
-    else setTimeout(poll, 50);
+    else setTimeout(poll, 50); // wait-allow: probe cadence only; the suite has no file watcher inside its fixture
   };
   poll();
 } else {
-  setTimeout(finish, 2500);
+  setTimeout(finish, 2500); // wait-allow: exercise overlapping gate completions with staggered commands
 }
 `);
   h.ok(['project', 'set', '--tests-cmd', `node ${JSON.stringify(suite)}`, '--tests-mode', 'run-only',
@@ -1966,7 +1974,7 @@ if (held) {
   fs.writeFileSync(${JSON.stringify(path.join(h.base, 'github-started'))}, String(process.pid));
   const poll = () => {
     if (fs.existsSync(${JSON.stringify(release)})) require(${JSON.stringify(ghStub)});
-    else setTimeout(poll, 25);
+    else setTimeout(poll, 25); // wait-allow: probe cadence only; the release file is the signal
   };
   poll();
 } else require(${JSON.stringify(ghStub)});
@@ -2005,7 +2013,7 @@ require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'public-http'))}).fet
       }
       const child = require('node:child_process').spawn(process.execPath,
         ['--require', preload, BIN, 'wait', '--after', '0', '--types', 'never',
-          ...(stage === 'follow' ? ['--follow'] : ['--timeout', '60']),
+          ...(stage === 'follow' ? ['--follow'] : ['--timeout', '300']),
           ...(stage === 'observe' ? ['--observe'] : []), ...(json && stage !== 'follow' ? ['--json'] : []), '--agent', 'orchestrator'],
         { cwd: h.repo, env: h.env });
       const started = path.join(h.base, github ? 'github-started' : `suite-started-${heldRun}`);
@@ -2017,7 +2025,7 @@ require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'public-http'))}).fet
         child.on('error', reject);
         child.on('close', (code, signal) => resolve({ code, signal, stderr }));
       });
-      const timer = setTimeout(() => child.kill('SIGKILL'), 60000);
+      const timer = setTimeout(() => child.kill('SIGKILL'), HUNG_TEST_MS);
       t.after(async () => {
         clearTimeout(timer);
         fs.writeFileSync(release, '');
@@ -2029,12 +2037,12 @@ require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'public-http'))}).fet
         }
         await h.cleanup();
       });
-      assert.notEqual(await waitFor(started, { ms: 60000 }), null, idle ? 'wait is ready' : 'the gate starts');
+      await waitFor(started, { what: idle ? 'wait is ready' : 'the gate starts' });
       child.kill(signal);
       if (github) {
-        assert.notEqual(await waitFor(observed, { ms: 5000 }), null, 'the held GitHub command does not block signal delivery');
+        await waitFor(observed, { what: 'the held GitHub command does not block signal delivery' });
       }
-      assert.notEqual(await waitFor(observed), null, 'the wait process receives the signal');
+      await waitFor(observed, { what: 'the wait process receives the signal' });
       if (!idle) assert.equal(child.exitCode, null, 'the running gate still holds wait open');
       if (forced) {
         child.kill(github ? 'SIGINT' : signal);
@@ -2115,8 +2123,9 @@ async function stopSlowSuites(h, release) {
   if (!fs.existsSync(h.base)) return;
   const pids = slowSuitePids(h);
   fs.writeFileSync(release, '');
-  const until = Date.now() + 5000;
-  while (pids.some(slowSuiteRunning) && Date.now() < until) await new Promise((resolve) => setTimeout(resolve, 50));
+  // Teardown only: released suites get a grace before survivors are killed.
+  const until = Date.now() + 5000; // wait-allow: teardown grace before killing released suites
+  while (pids.some(slowSuiteRunning) && Date.now() < until) await new Promise((resolve) => setTimeout(resolve, 50)); // wait-allow: teardown grace before killing released suites
   for (const pid of pids.filter(slowSuiteRunning)) {
     try { process.kill(pid, 'SIGKILL'); } catch { /* It exited meanwhile. */ }
   }
@@ -2127,23 +2136,21 @@ test('gate executors across several watchers stay within gates.executors and que
   const release = path.join(h.base, 'release-suite');
   const runs = slowSuite(h, { release });
   assert.match(h.ok(['project', 'show']), /gates\.executors: 2/);
-  // A zero-timeout watcher can exit at a contended startup lock before reading
-  // submissions. Keep consumers alive until the last task's gate evidence.
-  // The start-file budget also bounds cleanup when the queue stops advancing.
+  // Keep consumers alive until the last task's gate evidence, including contended startup.
   const watchers = [0, 1, 2].map(() =>
     h.runAsync(['wait', '--after', '0', '--types', 'evidence', '--task', 'T3',
-      '--timeout', '60', '--agent', 'orchestrator']));
+      '--timeout', '300', '--agent', 'orchestrator']));
   let results;
   try {
-    assert.notEqual(await waitFor(path.join(h.base, 'suite-started-2'), { ms: 60000 }), null, 'two executors start');
+    assert.notEqual(await fileWritten(path.join(h.base, 'suite-started-2')), null, 'two executors start');
     // Keep both slots occupied until a watcher has queued the third submission.
     const notification = await h.runAsync(['wait', '--observe', '--after', '0', '--types', 'automation queued',
-      '--task', 'T3', '--timeout', '60', '--agent', 'orchestrator']);
+      '--task', 'T3', '--timeout', '300', '--agent', 'orchestrator']);
     assert.equal(notification.code, 0, JSON.stringify(notification));
     const queued = h.logs().filter((e) => e.cmd === 'automation queued' && e.detail.executors === 2);
     assert.ok(queued.some((e) => e.task === 'T3'), JSON.stringify(queued));
     fs.writeFileSync(release, '');
-    assert.notEqual(await waitFor(path.join(h.base, 'suite-started-3'), { ms: 60000 }), null, 'the third executor starts');
+    assert.notEqual(await fileWritten(path.join(h.base, 'suite-started-3')), null, 'the third executor starts');
   } finally {
     fs.writeFileSync(release, '');
     results = await Promise.all(watchers);
@@ -2175,12 +2182,11 @@ test('slow suites stop when their fixture is removed before they are released', 
   slowSuite(h, { release });
   const watchers = [0, 1].map(() =>
     h.runAsync(['wait', '--after', '0', '--types', 'evidence', '--task', 'T3',
-      '--timeout', '60', '--agent', 'orchestrator']));
+      '--timeout', '300', '--agent', 'orchestrator']));
   let pids = [];
-  for (const until = Date.now() + 60000; pids.length < 2 && Date.now() < until;) {
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    pids = slowSuitePids(h);
-  }
+  // A failed wait below must not leave the suites polling after the test.
+  t.after(() => { for (const pid of pids.filter(slowSuiteRunning)) process.kill(pid, 'SIGKILL'); });
+  await waitUntil(() => (pids = slowSuitePids(h)).length >= 2, { what: 'two executors start' });
   assert.equal(pids.length, 2, 'two executors start');
   for (const e of h.logs().filter((e) => e.cmd === 'automation' && e.detail.phase === 'running')) {
     try { process.kill(e.detail.pid, 'SIGKILL'); } catch { /* It exited already. */ }
@@ -2190,11 +2196,9 @@ test('slow suites stop when their fixture is removed before they are released', 
   // in it, so there the removal takes what it can first: the start files.
   if (process.platform === 'win32') for (const file of slowSuiteStarts(h)) fs.rmSync(file);
   else fs.rmSync(h.base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
-  const until = Date.now() + 5000;
-  while (pids.some(slowSuiteRunning) && Date.now() < until) await new Promise((resolve) => setTimeout(resolve, 50));
-  const left = pids.filter(slowSuiteRunning);
-  for (const pid of left) process.kill(pid, 'SIGKILL');
-  assert.deepEqual(left, [], 'a slow suite outlived its fixture');
+  await waitUntil(() => !pids.some(slowSuiteRunning), {
+    what: () => `a slow suite outlived its fixture: ${pids.filter(slowSuiteRunning).join(', ')}`,
+  });
 });
 
 test('a killed executor releases its gate executor slot', (t) => {
@@ -2219,14 +2223,14 @@ const flag = ${JSON.stringify(path.join(h.base, 'stalled'))};
 if (fs.existsSync(flag)) process.exit(0);
 fs.writeFileSync(flag, '');
 const read = () => fs.readFileSync(${JSON.stringify(events)}, 'utf8').trim().split('\\n').map(JSON.parse);
-const until = Date.now() + 20000;
+const until = Date.now() + 300000;
 const poll = () => {
   const log = read();
   if (log.some((e) => e.cmd === 'automation queued' && e.task === 'T2') || Date.now() > until) {
     process.kill(log.findLast((e) => e.cmd === 'automation' && e.detail.phase === 'running').detail.pid, 'SIGKILL');
     process.exit(1);
   }
-  setTimeout(poll, 50);
+  setTimeout(poll, 50); // wait-allow: probe cadence only; the release signal and hung-test timeout bound this fixture
 };
 poll();
 `);
@@ -2239,7 +2243,7 @@ poll();
     h.ok(['submit', id, '--sha', h.sha, '--agent', 'worker']);
   }
   const holder = h.runAsync(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
-  assert.notEqual(await waitFor(path.join(h.base, 'stalled')), null, 'the first executor starts');
+  await waitFor(path.join(h.base, 'stalled'), { what: 'the first executor starts' });
   h.consume();
   assert.notEqual((await holder).code, 2, 'the stalled executor is killed');
   assert.ok(h.logs().some((e) => e.cmd === 'automation queued' && e.task === 'T2' && e.detail.executors === 1));
@@ -2263,7 +2267,7 @@ function holdSuite(h) {
   fs.writeFileSync(suite, `const fs = require('node:fs');
 if (fs.existsSync(${JSON.stringify(stalled)})) process.exit(0);
 fs.writeFileSync(${JSON.stringify(stalled)}, '');
-const poll = () => (fs.existsSync(${JSON.stringify(release)}) ? process.exit(0) : setTimeout(poll, 50));
+const poll = () => (fs.existsSync(${JSON.stringify(release)}) ? process.exit(0) : setTimeout(poll, 50)); // wait-allow: probe cadence only; the release signal and hung-test timeout bound this fixture
 poll();
 `);
   h.ok(['project', 'set', '--tests-cmd', `node ${JSON.stringify(suite)}`, '--tests-mode', 'run-only',
@@ -2303,7 +2307,7 @@ test('accepted merges take the next executor in acceptance order before queued s
   const holder = h.runAsync(['wait', '--after', String(offset), '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
   let text, queue;
   try {
-    assert.notEqual(await waitFor(stalled), null, 'T1 holds the only executor');
+    await waitFor(stalled, { what: 'T1 holds the only executor' });
     const after = fs.statSync(events).size;
     for (const id of ['T2', 'T3']) {
       h.ok(['claim', id, '--agent', 'worker']);
@@ -2356,7 +2360,7 @@ test('gates prioritize runs the last queued task first; status and inbox show th
   h.ok(['claim', 'T1', '--agent', 'worker']);
   h.ok(['submit', 'T1', '--sha', h.sha, '--agent', 'worker']);
   const holder = h.runAsync(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
-  assert.notEqual(await waitFor(stalled), null, 'the first executor starts');
+  await waitFor(stalled, { what: 'the first executor starts' });
   const offset = fs.statSync(events).size;
   for (const id of ['T2', 'T3', 'T4']) {
     h.ok(['claim', id, '--agent', 'worker']);
@@ -2412,7 +2416,7 @@ const n = (fs.existsSync(counter) ? Number(fs.readFileSync(counter, 'utf8')) : 0
 fs.writeFileSync(counter, String(n));
 fs.writeFileSync(path.join(base, 'stalled-' + n), '');
 const release = path.join(base, 'release-' + n);
-const poll = () => (fs.existsSync(release) ? process.exit(0) : setTimeout(poll, 50));
+const poll = () => (fs.existsSync(release) ? process.exit(0) : setTimeout(poll, 50)); // wait-allow: probe cadence only; the release signal and hung-test timeout bound this fixture
 poll();
 `);
   h.ok(['project', 'set', '--tests-cmd', `node ${JSON.stringify(suite)}`, '--tests-mode', 'run-only',
@@ -2428,7 +2432,7 @@ test('a request moves only the reactions queued when it was made', async (t) => 
   h.ok(['claim', 'T1', '--agent', 'worker']);
   h.ok(['submit', 'T1', '--sha', h.sha, '--agent', 'worker']);
   const holder = h.runAsync(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
-  assert.notEqual(await waitFor(stalled), null, 'the first executor starts');
+  await waitFor(stalled, { what: 'the first executor starts' });
   const offset = fs.statSync(events).size;
   for (const id of ['T2', 'T3']) {
     h.ok(['claim', id, '--agent', 'worker']);
@@ -2461,7 +2465,7 @@ test('a reaction that is running is not queued: status and prioritize leave it o
   h.ok(['claim', 'T1', '--agent', 'worker']);
   h.ok(['submit', 'T1', '--sha', h.sha, '--agent', 'worker']);
   const holder = h.runAsync(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
-  assert.notEqual(await waitFor(run(1).stalled), null, 'the first executor starts');
+  await waitFor(run(1).stalled, { what: 'the first executor starts' });
   const offset = fs.statSync(events).size;
   for (const id of ['T2', 'T3']) {
     h.ok(['claim', id, '--agent', 'worker']);
@@ -2470,7 +2474,7 @@ test('a reaction that is running is not queued: status and prioritize leave it o
   h.run(['wait', '--after', String(offset), '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
 
   fs.writeFileSync(run(1).release, '');
-  assert.notEqual(await waitFor(run(2).stalled), null, 'T2 takes the executor next');
+  await waitFor(run(2).stalled, { what: 'T2 takes the executor next' });
   const text = h.ok(['status']);
   assert.match(text, /^gate running: T2$/m);
   assert.match(text, /^gate queue: T3$/m, 'T2 is running, so only T3 waits');
@@ -2479,7 +2483,7 @@ test('a reaction that is running is not queued: status and prioritize leave it o
   assert.match(refused.stderr, /no queued gate work/);
 
   fs.writeFileSync(run(2).release, '');
-  assert.notEqual(await waitFor(run(3).stalled), null, 'T3 runs last');
+  await waitFor(run(3).stalled, { what: 'T3 runs last' });
   fs.writeFileSync(run(3).release, '');
   assert.equal((await holder).code, 2, 'the held executor finishes and drains the queue');
   const started = h.logs().filter((e) => e.cmd === 'automation' && e.detail.phase === 'running').map((e) => e.task);
@@ -2494,7 +2498,7 @@ test('a follow-up queued behind a live reaction can be prioritized and runs firs
   h.ok(['claim', 'T1', '--agent', 'worker']);
   h.ok(['submit', 'T1', '--sha', h.sha, '--agent', 'worker']);
   const holder = h.runAsync(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
-  assert.notEqual(await waitFor(stalled), null, 'the first executor starts');
+  await waitFor(stalled, { what: 'the first executor starts' });
   const offset = fs.statSync(events).size;
   // T1 has a live reaction, so T2 and then T1's CI completion queue behind it.
   h.ok(['claim', 'T2', '--agent', 'worker']);
@@ -2529,12 +2533,12 @@ test('status shows a blocked follow-up apart from the queue the next free execut
   h.ok(['claim', 'T1', '--agent', 'worker']);
   h.ok(['submit', 'T1', '--sha', h.sha, '--agent', 'worker']);
   const first = h.runAsync(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
-  assert.notEqual(await waitFor(run(1).stalled), null, 'T1 takes the first executor');
+  await waitFor(run(1).stalled, { what: 'T1 takes the first executor' });
   const offset = fs.statSync(events).size;
   h.ok(['claim', 'T2', '--agent', 'worker']);
   h.ok(['submit', 'T2', '--sha', h.sha, '--agent', 'worker']);
   const second = h.runAsync(['wait', '--after', String(offset), '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
-  assert.notEqual(await waitFor(run(2).stalled), null, 'T2 takes the second executor');
+  await waitFor(run(2).stalled, { what: 'T2 takes the second executor' });
 
   const queued = fs.statSync(events).size;
   h.ok(['claim', 'T3', '--agent', 'worker']);
@@ -2550,7 +2554,7 @@ test('status shows a blocked follow-up apart from the queue the next free execut
   assert.deepEqual([queue.running, queue.queued.map((q) => q.id), queue.blocked.map((q) => q.id)], [['T1', 'T2'], ['T3'], ['T1']]);
 
   fs.writeFileSync(run(2).release, '');
-  assert.notEqual(await waitFor(run(3).stalled), null, 'T3 takes the freed executor before the blocked follow-up');
+  await waitFor(run(3).stalled, { what: 'T3 takes the freed executor before the blocked follow-up' });
   const started = () => h.logs().filter((e) => e.cmd === 'automation' && e.detail.phase === 'running').map((e) => e.task);
   assert.deepEqual(started(), ['T1', 'T2', 'T3'], 'the blocked follow-up has not started');
   assert.match(h.ok(['status']), /^gate queue: none; blocked behind their running reactions: T1 \(prioritized: CI follow-up first\)$/m);
@@ -2581,7 +2585,7 @@ for (const reason of ['unknown mergeability', 'transport error']) {
     recovered.prs['7'].mergeable = 'MERGEABLE';
     recovered.prs['7'].mergeStateStatus = 'CLEAN';
     h.saveGithub(recovered);
-    h.ok(['wait', '--types', 'merged', '--timeout', '5', '--agent', 'orchestrator']);
+    h.ok(['wait', '--types', 'merged', '--timeout', '300', '--agent', 'orchestrator']);
     assert.equal(h.readState('tasks.json').tasks[0].evidence.at(-1).type, 'merge');
     assert.equal(h.github().prs['7'].state, 'MERGED');
   });
@@ -2600,7 +2604,7 @@ test('startup confirms the accepted head after the executor dies between remote 
   assert.equal(h.github().prs['7'].state, 'MERGED');
   assert.equal(h.readState('tasks.json').tasks[0].evidence.some((e) => e.type === 'merge'), false);
   assert.equal(h.logs().findLast((e) => e.cmd === 'automation').detail.phase, 'running');
-  h.ok(['wait', '--types', 'merged', '--timeout', '5', '--agent', 'orchestrator']);
+  h.ok(['wait', '--types', 'merged', '--timeout', '300', '--agent', 'orchestrator']);
   const receipt = h.readState('tasks.json').tasks[0].evidence.at(-1);
   assert.equal(receipt.type, 'merge');
   assert.equal(receipt.ok, true);
@@ -2731,7 +2735,7 @@ for (const tier of ['medium', 'easy..medium']) {
       h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--sha', h.sha,
         '--fail', '--summary', 'one blocking finding', '--ref', ref, '--agent', 'reviewer']);
       const brief = h.ok(['brief', 'get', 'T1']);
-      const result = h.run(['wait', '--after', '0', '--types', 'never', '--timeout', '0.1',
+      const result = h.run(['wait', '--after', '0', '--types', 'never', '--timeout', '0.1', // wait-allow: verify that a refused review recovery leaves the host observing without a matching event
         '--agent', 'orchestrator']);
       assert.equal(result.code, 2, result.stderr);
       assert.match(result.stderr, /linked review comment does not identify/);
@@ -2757,7 +2761,7 @@ test('observation-only waits retain ranged full-findings recovery', (t) => {
   h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--sha', h.sha,
     '--fail', '--summary', 'one blocking finding', '--ref', ref, '--agent', 'reviewer']);
   const spawns = h.logs().filter((e) => e.cmd === 'spawn').length;
-  const result = h.run(['wait', '--observe', '--after', '0', '--types', 'never', '--timeout', '0.1',
+  const result = h.run(['wait', '--observe', '--after', '0', '--types', 'never', '--timeout', '0.1', // wait-allow: verify recovery during the CLI observation timeout contract
     '--agent', 'orchestrator']);
   assert.equal(result.code, 2, result.stderr);
   assert.equal(h.readState('tasks.json').tasks[0].status, 'rework');
@@ -2814,7 +2818,7 @@ if (process.env.REFILL_ORPHAN) {
   const child = cp.spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
   fs.writeFileSync(file + '.orphan', String(child.pid));
 }
-const poll = () => fs.existsSync(file + '.go') ? fs.writeFileSync(file + '.exited', '') : setTimeout(poll, 25);
+const poll = () => fs.existsSync(file + '.go') ? fs.writeFileSync(file + '.exited', '') : setTimeout(poll, 25); // wait-allow: probe cadence only; the finish file releases the worker
 poll();
 `);
     h.ok(['ladder', 'set', 'easy', '--command', JSON.stringify([process.execPath, script, '{prompt}'])]);
@@ -2841,8 +2845,13 @@ poll();
   t.after(async () => {
     const ids = h.readState('tasks.json').tasks.map((task) => task.id);
     for (const id of ids) fs.writeFileSync(`${h.marker(id)}.go`, '');
+    // A worker a test killed never writes its exit marker; its gone process ends the wait.
     for (const id of ids) {
-      if (fs.existsSync(h.marker(id))) await waitFor(`${h.marker(id)}.exited`);
+      const pid = h.logs().findLast((e) => e.cmd === 'spawn' && e.task === id)?.detail.pid;
+      if (!fs.existsSync(h.marker(id)) || !pid) continue;
+      await waitUntil(() => fs.existsSync(`${h.marker(id)}.exited`) || !detachedAlive({ pid }), {
+        paths: [path.dirname(h.marker(id))], what: `refill worker ${id} did not exit`,
+      });
     }
     await h.cleanup();
   });
@@ -2859,11 +2868,11 @@ test('a ranged review recovery refusal does not stop unrelated gates or worker r
     '--ref', 'https://github.com/acme/demo/pull/7#issuecomment-123', '--agent', 'reviewer']);
   h.submit('T2', 'worker-2');
   const result = h.run(['wait', '--after', '0', '--types', 'spawn', '--task', 'T3',
-    '--timeout', '15', '--agent', 'orchestrator']);
+    '--timeout', '300', '--agent', 'orchestrator']);
   assert.equal(result.code, 0, result.stderr);
   assert.equal(JSON.parse(result.stdout).task, 'T3');
   assert.match(result.stderr, /linked review comment does not identify/);
-  assert.notEqual(await waitFor(h.marker('T3')), null);
+  await waitFor(h.marker('T3'));
   assert.ok(h.logs().some((e) => e.task === 'T2' && e.cmd === 'check tests'),
     'the unrelated submission still runs its software gates');
   const task = h.readState('tasks.json').tasks[0];
@@ -2876,15 +2885,15 @@ test('automation retains an exited worker claim until its lost monitor process g
 }, async (t) => {
   const h = refillFixture(t);
   const spawn = h.json(['spawn', '--task', 'T1', '--agent', 'orchestrator'], { env: { REFILL_ORPHAN: '1' } });
-  assert.notEqual(await waitFor(`${h.marker('T1')}.orphan`), null);
+  await waitFor(`${h.marker('T1')}.orphan`);
   const orphan = Number(fs.readFileSync(`${h.marker('T1')}.orphan`, 'utf8'));
   const cursor = String(fs.statSync(path.join(h.state, 'events.jsonl')).size);
-  const waiting = h.runAsync(['wait', '--after', cursor, '--types', 'spawn', '--timeout', '15', '--agent', 'orchestrator']);
+  const waiting = h.runAsync(['wait', '--after', cursor, '--types', 'spawn', '--timeout', '300', '--agent', 'orchestrator']);
   try {
     process.kill(spawn.monitor_pid, 'SIGKILL');
     process.kill(spawn.pid, 'SIGKILL');
     fs.writeFileSync(`${h.marker('T1')}.exited`, '');
-    await new Promise((resolve) => setTimeout(resolve, 2200));
+    await new Promise((resolve) => setTimeout(resolve, 2200)); // wait-allow: observe slot retention across reconciliation polls while the orphan remains alive
     assert.equal(h.readState('tasks.json').tasks[0].claim?.agent, spawn.agent, 'the orphan keeps its worker slot');
     assert.equal(fs.existsSync(h.marker('T3')), false);
   } finally {
@@ -2893,7 +2902,7 @@ test('automation retains an exited worker claim until its lost monitor process g
   const result = await waiting;
   assert.equal(result.code, 0, result.stderr);
   assert.equal(JSON.parse(result.stdout).task, 'T3');
-  assert.notEqual(await waitFor(h.marker('T3')), null);
+  await waitFor(h.marker('T3'));
 });
 
 test('automation reports unchanged dispatch refusals once and retries after the brief changes', async (t) => {
@@ -2901,19 +2910,19 @@ test('automation reports unchanged dispatch refusals once and retries after the 
   for (const id of ['T1', 'T2', 'T3', 'T4']) h.ok(['task', 'update', id, '--status', 'cancelled']);
   h.ok(['task', 'add', '--title', 'Missing brief', '--acceptance', 'works', '--tier', 'easy']);
   const started = path.join(h.base, 'wait-started');
-  const waiter = h.runAsync(['wait', '--types', 'spawn', '--timeout', '15', '--agent', 'orchestrator'],
+  const waiter = h.runAsync(['wait', '--types', 'spawn', '--timeout', '300', '--agent', 'orchestrator'],
     { hooks: { HOOK_WATCH_READY: started } });
-  assert.notEqual(await waitFor(started), null);
+  await waitFor(started);
   for (let i = 0; i < 3; i++) {
     h.ok(['task', 'note', 'T5', `unrelated progress ${i}`]);
-    await new Promise((resolve) => setTimeout(resolve, 1100));
+    await new Promise((resolve) => setTimeout(resolve, 1100)); // wait-allow: observe refusal deduplication across polling turns before changing the brief
   }
   h.ok(['brief', 'set', 'T5', '-'], { input: 'Implement the acceptance.\n' });
   const result = await waiter;
   assert.equal(result.code, 0, result.stderr);
   assert.equal(JSON.parse(result.stdout).task, 'T5');
   assert.equal(result.stderr.match(/has no brief/g)?.length, 1, result.stderr);
-  assert.notEqual(await waitFor(h.marker('T5')), null, 'the changed brief retries dispatch');
+  await waitFor(h.marker('T5'), { what: 'the changed brief retries dispatch' });
 });
 
 test('automation dispatches rework-ready work with the failed review findings', async (t) => {
@@ -2924,7 +2933,7 @@ test('automation dispatches rework-ready work with the failed review findings', 
   h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--sha', h.sha,
     '--fail', '--summary', 'lib/change.js:12 - handle the missing input', '--agent', 'reviewer']);
   h.consume();
-  assert.notEqual(await waitFor(h.marker('T1')), null, 'rework is dispatched without a manual command');
+  await waitFor(h.marker('T1'), { what: 'rework is dispatched without a manual command' });
   const task = h.readState('tasks.json').tasks[0];
   assert.equal(task.status, 'in_progress');
   assert.equal(task.claim.from, 'rework');
@@ -2948,21 +2957,21 @@ for (const trigger of ['exit', 'release --dead', 'merge']) {
       h.saveGithub(github);
     } else {
       h.json(['spawn', '--task', 'T1', '--agent', 'orchestrator']);
-      assert.notEqual(await waitFor(h.marker('T1')), null, 'first worker claims the slot');
+      await waitFor(h.marker('T1'), { what: 'first worker claims the slot' });
       fs.writeFileSync(`${h.marker('T1')}.go`, '');
-      assert.notEqual(await waitFor(`${h.marker('T1')}.exited`), null);
+      await waitFor(`${h.marker('T1')}.exited`);
       if (trigger === 'release --dead') {
         // Foreground observation records the exit before the explicit batch release.
-        h.run(['wait', '--after', '0', '--observe', '--types', 'worker-exited', '--timeout', '5', '--agent', 'orchestrator']);
+        h.run(['wait', '--after', '0', '--observe', '--types', 'worker-exited', '--timeout', '300', '--agent', 'orchestrator']);
         h.ok(['release', '--dead', '--agent', 'orchestrator']);
       }
     }
     const cursor = trigger === 'release --dead' ? String(fs.statSync(path.join(h.state, 'events.jsonl')).size) : '0';
-    const watchers = [h.runAsync(['wait', '--after', cursor, '--task', 'T3', '--types', 'spawn', '--timeout', '15', '--agent', 'orchestrator']),
-      h.runAsync(['wait', '--after', cursor, '--task', 'T3', '--types', 'spawn', '--timeout', '15', '--agent', 'orchestrator'])];
+    const watchers = [h.runAsync(['wait', '--after', cursor, '--task', 'T3', '--types', 'spawn', '--timeout', '300', '--agent', 'orchestrator']),
+      h.runAsync(['wait', '--after', cursor, '--task', 'T3', '--types', 'spawn', '--timeout', '300', '--agent', 'orchestrator'])];
     const results = await Promise.all(watchers);
     assert.ok(results.every((r) => r.code === 0 && JSON.parse(r.stdout).task === 'T3'), JSON.stringify(results));
-    assert.notEqual(await waitFor(h.marker('T3')), null, `the task unblocking T4 takes the free slot: ${JSON.stringify(results)}`);
+    await waitFor(h.marker('T3'), { what: `the task unblocking T4 takes the free slot: ${JSON.stringify(results)}` });
     const spawns = h.logs().filter((e) => e.cmd === 'spawn' && e.detail.role === 'worker');
     assert.deepEqual(spawns.map((e) => e.task), trigger === 'merge' ? ['T3'] : ['T1', 'T3']);
     const st = require('../lib/state').loadState(h.state);
@@ -2988,14 +2997,16 @@ function startupContexts(h, withRules) {
     assert.equal(detail.receives_prompt, true);
     assert.equal(detail.prompt_bytes, Buffer.byteLength(report.prompt));
     assert.equal(detail.prompt_tokens, Math.ceil(detail.prompt_bytes / 4));
-    assert.equal(report.prompt.includes('## House rules'), withRules);
+    assert.equal(report.prompt.includes('## House rules'), detail.rules.length > 0);
     if (withRules) {
       assert.ok(detail.rules.some((r) => r.path === path.join(h.base, 'AGENTS.md') && r.loaded === 'read'));
       for (const rule of detail.rules) assert.ok(report.prompt.includes(rule.path));
     } else {
-      assert.deepEqual(detail.rules, []);
-      assert.equal(detail.rules_bytes, 0);
-      assert.equal(detail.rules_tokens, 0);
+      // A temp root beneath another checkout can inherit that checkout's rules.
+      assert.equal(detail.rules.some((rule) => rule.path === path.join(h.base, 'AGENTS.md')), false);
+      for (const rule of detail.rules) assert.ok(report.prompt.includes(rule.path));
+      assert.equal(detail.rules_bytes, detail.rules.reduce((bytes, rule) => bytes + rule.bytes, 0));
+      assert.equal(detail.rules_tokens, Math.ceil(detail.rules_bytes / 4));
     }
   }
 }
@@ -3038,11 +3049,7 @@ test('supervisor reactions pin unconfigured gates and bypass the real restrictiv
   configureHarness(h);
   h.env.AUTOMATION_POLICY_PROBE = path.join(h.base, 'policy-probe.jsonl');
   h.ok(['spawn', '--task', 'T1', '--wait', '--agent', 'orchestrator']);
-  const deadline = Date.now() + 60000;
-  while (!h.readState('tasks.json').tasks[0].evidence.some((e) => e.type === 'merge' && e.ok)) {
-    if (Date.now() > deadline) throw new Error(JSON.stringify(h.logs().slice(-10)));
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
+  await waitOnRepo(h, () => h.readState('tasks.json').tasks[0].evidence.some((e) => e.type === 'merge' && e.ok));
   const pins = h.logs().filter((e) => e.cmd === 'gates pin');
   assert.deepEqual(pins.map((e) => e.detail.key), ['tests_cmd', 'clean_cmd']);
   assert.ok(pins.every((e) => e.agent === 'orchestrator' && e.detail.authority === 'orchestrator'));
@@ -3092,11 +3099,8 @@ require(require('node:path').resolve('test/value.test.js'));
   // The dispatcher's own gate root, which a gate the supervisor runs later must not keep.
   assert.ok(h.env.TOWER_CRANE_TMP);
   assert.equal((await h.runAsync(['spawn', '--task', 'T1', '--wait', '--agent', 'orchestrator'])).code, 0);
-  const deadline = Date.now() + 60000;
-  while (!h.readState('tasks.json').tasks[0].evidence.some((e) => e.type === 'merge' && e.ok)) {
-    if (Date.now() > deadline) throw new Error(JSON.stringify(h.logs().slice(-10)));
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
+  await waitOnRepo(h, () => h.readState('tasks.json').tasks[0].evidence.some((e) => e.type === 'merge' && e.ok),
+    () => JSON.stringify(h.logs().slice(-10)));
   // The agents ran in their own homes and caches, so the host values below are not theirs.
   const agents = read('agent');
   assert.equal(agents.length, 2);
@@ -3151,11 +3155,8 @@ test('large review dispatch hands revuto findings to the reviewer and an ok that
   ];
   h.saveGithub(state);
   assert.equal((await h.runAsync(['spawn', '--task', 'T1', '--wait', '--agent', 'orchestrator'])).code, 0);
-  const deadline = Date.now() + 60000;
-  while (!h.logs().some((e) => e.cmd === 'spawn exit' && e.detail.role === 'reviewer')) {
-    if (Date.now() > deadline) throw new Error(JSON.stringify(h.logs().slice(-10)));
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
+  await waitOnRepo(h, () => h.logs().some((e) => e.cmd === 'spawn exit' && e.detail.role === 'reviewer'),
+    () => JSON.stringify(h.logs().slice(-10)));
   const review = h.logs().find((e) => e.cmd === 'spawn' && e.detail.role === 'reviewer');
   assert.deepEqual(review.detail.revuto.map((f) => [f.id, f.severity, f.reply]), [[101, 'P1', null], [102, 'P2', 103], [104, null, null]]);
   const brief = fs.readFileSync(path.join(h.state, 'reviews', `T1-${h.sha}.md`), 'utf8');
@@ -3194,11 +3195,8 @@ test('brokered review evidence clears a revuto finding whose file changed since 
   state.comments = [comment(201, before), comment(202, h.sha)];
   h.saveGithub(state);
   assert.equal((await h.runAsync(['spawn', '--task', 'T1', '--wait', '--agent', 'orchestrator'])).code, 0);
-  const deadline = Date.now() + 60000;
-  while (!h.logs().some((e) => e.cmd === 'spawn exit' && e.detail.role === 'reviewer')) {
-    if (Date.now() > deadline) throw new Error(JSON.stringify(h.logs().slice(-10)));
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
+  await waitOnRepo(h, () => h.logs().some((e) => e.cmd === 'spawn exit' && e.detail.role === 'reviewer'),
+    () => JSON.stringify(h.logs().slice(-10)));
   const review = h.logs().find((e) => e.cmd === 'spawn' && e.detail.role === 'reviewer');
   assert.deepEqual(review.detail.revuto.map((f) => [f.id, f.changed]), [[201, true], [202, false]]);
   // The state broker runs evidence with TOWER_CRANE_VIA=broker, where tower-crane reads no repository.
@@ -3306,15 +3304,8 @@ test('revuto replies require an explicit resolution and later discussion reopens
 });
 
 // A poll can read the event log mid-append; that read counts as not yet.
-async function pollUntil(h, what, check) {
-  const ready = () => {
-    try { return check(); } catch (e) { if (e instanceof SyntaxError) return false; throw e; }
-  };
-  const deadline = Date.now() + 60000;
-  while (!ready()) {
-    if (Date.now() > deadline) throw new Error(`${what}: ${JSON.stringify(h.logs().slice(-10))}`);
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
+function pollUntil(h, what, check) {
+  return waitOnRepo(h, check, () => `${what}: ${JSON.stringify(h.logs().slice(-10))}`);
 }
 
 test('a reviewer that exits 1 without a verdict is replaced at the same head', async (t) => {
@@ -3444,12 +3435,8 @@ test('a supervised worker submission runs gates and dispatches the offline revie
   const hold = path.join(h.base, 'worker-hold');
   const spawned = h.runAsync(['spawn', '--task', 'T1', '--wait', '--agent', 'orchestrator'],
     { env: { AUTOMATION_WORKER_HOLD: hold } });
-  const deadline = Date.now() + 60000;
   try {
-    while (!fs.existsSync(hold)) {
-      if (Date.now() > deadline) throw new Error('worker did not submit');
-      await new Promise((resolve) => setTimeout(resolve, 25));
-    }
+    await waitOnRepo(h, () => fs.existsSync(hold));
     h.consume();
     assert.equal(h.logs().filter((e) => e.cmd === 'spawn' && e.detail.role === 'reviewer').length, 0,
       'a worker still running after submit blocks review dispatch');
@@ -3458,11 +3445,7 @@ test('a supervised worker submission runs gates and dispatches the offline revie
     assert.equal((await spawned).code, 0);
   }
   // Reviewer completion has its own CLI command deadline after worker exit.
-  const reviewDeadline = Date.now() + 60000;
-  while (!h.readState('tasks.json').tasks[0].evidence.some((e) => e.type === 'merge' && e.ok)) {
-    if (Date.now() > reviewDeadline) throw new Error(JSON.stringify(h.logs().slice(-10)));
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
+  await waitOnRepo(h, () => h.readState('tasks.json').tasks[0].evidence.some((e) => e.type === 'merge' && e.ok));
   const events = h.logs();
   const review = events.findIndex((e) => e.cmd === 'spawn' && e.detail.role === 'reviewer');
   const exit = events.findIndex((e) => e.cmd === 'spawn exit' && e.detail.role === 'worker');
@@ -3611,7 +3594,7 @@ test('two queued PRs run exactly one full suite each at their turn and none befo
   h.saveGithub(ready);
   // The wait runs both suites in this process: 55s alone and 119s with the
   // whole file running in parallel, so a shorter timeout fails under load.
-  h.ok(['wait', '--types', 'merged', '--task', 'T2', '--timeout', '120', '--agent', 'orchestrator']);
+  h.ok(['wait', '--types', 'merged', '--task', 'T2', '--timeout', '300', '--agent', 'orchestrator']);
   assert.deepEqual(h.github().calls.filter((a) => a[1] === 'merge').map((a) => a[2]), ['7', '8']);
   assert.deepEqual(h.suites().slice(suites), [{ pr7: 'OPEN' }, { pr7: 'MERGED' }],
     'T1 runs its suite before merging; T2 runs its suite only after T1 merged');
@@ -3707,7 +3690,7 @@ test('a merged-head suite timeout stops the queue without reworking an accepted 
   h.ok(['project', 'set', '--tests-timeout-min', '0.05', '--agent', 'orchestrator']);
   fs.appendFileSync(path.join(h.base, 'suite.js'), `
 console.log('# Subtest: test/slow.test.js');
-setTimeout(() => {}, 10000);
+setInterval(() => {}, 1000);
 `);
   h.reviewer('T1', 'reviewer');
   h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--sha', h.sha, '--ok', '--agent', 'reviewer']);
@@ -3841,11 +3824,11 @@ test('a concurrent CI completion retries a skipped head in the next drain pass',
   // records T1's passing CI and requests another queue pass.
   fs.writeFileSync(path.join(h.base, 'during-check.js'), `const fs = require('node:fs');
 fs.writeFileSync(${JSON.stringify(paused)}, '');
-const until = Date.now() + 20000;
+const until = Date.now() + 300000;
 const poll = () => {
   if (fs.existsSync(${JSON.stringify(resume)})) return;
   if (Date.now() > until) throw new Error('queue was not resumed');
-  setTimeout(poll, 25);
+  setTimeout(poll, 25); // wait-allow: probe cadence only; the release signal and hung-test timeout bound this fixture
 };
 poll();
 `);
@@ -3853,7 +3836,7 @@ poll();
   const first = h.runAsync(['ci', 'completed', 'T2', '--sha', h.second, '--agent', 'orchestrator']);
   let result;
   try {
-    assert.notEqual(await waitFor(paused), null, 'T2 holds the queue after T1 is skipped');
+    await waitFor(paused, { what: 'T2 holds the queue after T1 is skipped' });
     const skipped = h.logs().slice(offset).find((e) => e.cmd === 'queue skipped');
     assert.equal(skipped?.task, 'T1');
     assert.match(skipped.detail.reason, /ci: latest ci .* failed/);

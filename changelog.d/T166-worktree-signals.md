@@ -1,0 +1,1 @@
+- Worktree lifecycle readiness uses written-file signals, including empty markers, with suite guards. Batch preparation checks guarded fetch counts and worktree additions instead of elapsed time.

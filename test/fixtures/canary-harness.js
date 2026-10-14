@@ -9,6 +9,7 @@
 const fs = require('node:fs');
 const crypto = require('node:crypto');
 const { processListing } = require('../canary');
+const { writeAtomic } = require('../atomic-file');
 
 module.exports = function canaryHarness(harness) {
   const names = process.env.CANARY_VARS.split(',');
@@ -24,8 +25,8 @@ module.exports = function canaryHarness(harness) {
     process.exit(1);
   }
   if (mode === 'hold') {
-    fs.writeFileSync(`${process.env.CANARY_OUT}.ready`, String(process.pid));
-    setTimeout(() => {}, 30000);
+    writeAtomic(`${process.env.CANARY_OUT}.ready`, String(process.pid));
+    setInterval(() => {}, 1000);
     return;
   }
   console.log(JSON.stringify(harness === 'claude'

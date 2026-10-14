@@ -1,5 +1,7 @@
 'use strict';
 
+const { waitUntil, HUNG_TEST_MS } = require('./signals');
+
 // Drives a page in headless Chrome over the DevTools protocol, for the tests
 // that check what the serve pages do in a browser. Node's own fetch and
 // WebSocket are enough, so it adds no dependency; tests skip when no Chrome
@@ -32,15 +34,7 @@ function findChrome() {
 
 const CHROME = findChrome();
 
-async function until(fn, what, ms = 15000) {
-  const end = Date.now() + ms;
-  for (;;) {
-    const v = await fn();
-    if (v) return v;
-    if (Date.now() > end) throw new Error(`timed out waiting for ${what}`);
-    await new Promise((r) => setTimeout(r, 50));
-  }
-}
+const until = (fn) => waitUntil(fn);
 
 // One Chrome per test process: a start costs seconds of CPU, a tab almost
 // nothing. Each openBrowser call gets its own tab, closed after its test, so
@@ -194,7 +188,7 @@ async function spawnChrome(profile) {
     const tree = chromeTree(proc.pid);
     proc.kill();
     signalTree(tree, 'SIGTERM', proc.pid);
-    const deadline = setTimeout(() => {
+    const deadline = setTimeout(() => { // wait-allow: teardown grace before SIGKILL of Chrome's tree
       proc.kill('SIGKILL');
       signalTree(liveTree(tree), 'SIGKILL', proc.pid);
     }, 5000);
@@ -211,10 +205,10 @@ async function spawnChrome(profile) {
   // next start cold too.
   let port;
   try {
-    port = await until(() => {
+    port = await waitUntil(() => {
       if (failure) throw new Error(failure);
       return fs.existsSync(portFile) && fs.readFileSync(portFile, 'utf8').split('\n')[0];
-    }, 'Chrome to start', 60000);
+    }, { paths: [portFile] });
   } catch (error) {
     try { await stop(); } finally { remove(); }
     throw new Error(`Chrome failed to start (${CHROME}): ${error.message}${stderr ? `\n${stderr.trim()}` : ''}`);
@@ -229,7 +223,7 @@ async function spawnChrome(profile) {
     proc.kill('SIGKILL');
     signalTree(tree, 'SIGKILL', proc.pid);
     const pause = new Int32Array(new SharedArrayBuffer(4));
-    for (const end = Date.now() + 5000; liveTree(tree).size && Date.now() < end;) Atomics.wait(pause, 0, 0, 10);
+    for (const end = Date.now() + 5000; liveTree(tree).size && Date.now() < end;) Atomics.wait(pause, 0, 0, 10); // wait-allow: an exit handler cannot await; killed processes go within milliseconds
     remove();
   };
   process.once('exit', lastResort);
@@ -296,8 +290,8 @@ async function openBrowser(t) {
     // Types into whatever has focus, as a keyboard would: a disabled field
     // cannot hold focus, so nothing lands there.
     type: (text) => send('Input.insertText', { text }),
-    until: (expression, what, ms) => until(() => inPage(expression).catch(() => false), what, ms),
-    restored: (expression, what, ms) => until(() => inPage(`document.documentElement.hasAttribute('data-position-restored') && (${expression})`).catch(() => false), what, ms),
+    until: (expression) => until(() => inPage(expression).catch(() => false)),
+    restored: (expression) => until(() => inPage(`document.documentElement.hasAttribute('data-position-restored') && (${expression})`).catch(() => false)),
     // A served page drops serve's one-time key from the address bar.
     goto: async (url) => {
       await send('Page.navigate', { url });

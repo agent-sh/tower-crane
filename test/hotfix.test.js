@@ -5,6 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { cachedFixture } = require('./helpers');
+const { waitOnRepo } = require('./signals');
 const { gateFixture } = require('./gate-helpers');
 const Reviewer = require('../lib/reviewer');
 
@@ -141,12 +142,8 @@ test('accept runs missing software gates and dispatches one normal reviewer at t
   assert.equal(r.review_pending, true);
   assert.equal(r.sha, h.sha);
   assert.deepEqual(task(h).evidence.map((e) => e.type).sort(), ['ci', 'clean', 'tests']);
-  const deadline = Date.now() + 20000;
-  while (!events(h).some((e) => e.cmd === 'spawn exit' && e.detail.agent === r.reviewer)) {
-    assert.ok(Date.now() < deadline, 'fixture reviewer did not exit');
-    await new Promise((resolve) => setTimeout(resolve, 50));
-  }
-  h.run(['wait', '--task', 'T1', '--timeout', '0.2']);
+  await waitOnRepo(h, () => events(h).some((e) => e.cmd === 'spawn exit' && e.detail.agent === r.reviewer), 'fixture reviewer did not exit');
+  h.run(['wait', '--task', 'T1', '--timeout', '0.2']); // wait-allow: one reaction pass must not dispatch a second reviewer
   const dispatches = events(h).filter((e) => e.cmd === 'spawn' && e.detail.role === 'reviewer');
   assert.equal(dispatches.length, 1);
   assert.equal(dispatches[0].detail.sha, h.sha);
@@ -157,8 +154,9 @@ test('accept runs missing software gates and dispatches one normal reviewer at t
   assert.match(packet, /## Diff[\s\S]*module.exports = 1/);
   assert.match(packet, new RegExp(`Base: ${h.base_sha}`));
   assert.equal(task(h).status, 'submitted');
+  const cursor = String(fs.statSync(path.join(h.state, 'events.jsonl')).size);
   h.ok(['evidence', 'T1', '--type', 'review', '--ok', '--sha', h.sha, '--agent', r.reviewer]);
-  h.run(['wait', '--task', 'T1', '--timeout', '0.2']);
+  h.ok(['wait', '--task', 'T1', '--types', 'accepted', '--after', cursor, '--timeout', '300']);
   assert.equal(task(h).status, 'accepted');
 });
 

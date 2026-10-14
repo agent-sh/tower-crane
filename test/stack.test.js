@@ -1,11 +1,13 @@
 'use strict';
 
+const { waitOnRepo } = require('./signals');
+
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { worker, setup, upper, resubmit } = require('./stack-fixture');
-const { BIN, detachedAlive } = require('./helpers');
+const { BIN } = require('./helpers');
 
 test('submitted dependencies dispatch from the exact dependency head and spawn links PRs bottom to top', (t) => {
   const f = setup(t);
@@ -15,9 +17,8 @@ test('submitted dependencies dispatch from the exact dependency head and spawn l
   assert.equal(f.h.json(['task', 'show', 'T2']).stack.base, f.lower.branch);
   worker(f);
   f.h.ok(['spawn', '--task', 'T2', '--wait'], { env: { TEST_STACK_DEFER_OBSERVE: '1' } });
-  // Linking can finish in a later observer pass; wait before inspecting its GitHub call.
-  const until = Date.now() + 60000;
-  while (!f.h.json(['task', 'show', 'T2']).stack.linked && Date.now() < until) f.h.run(['wait', '--timeout', '1']);
+  // Linking finishes in a later observer pass; wait for its event before inspecting its GitHub call.
+  f.h.ok(['wait', '--task', 'T2', '--types', 'stack link', '--after', '0', '--observe']);
   assert.equal(f.h.json(['task', 'show', 'T2']).stack.linked, true);
   const link = f.read().calls.find((c) => c.args[0] === 'stack' && c.args[1] === 'link');
   assert.ok(link, 'completed stack linking records its GitHub call');
@@ -28,9 +29,9 @@ test('submitted dependencies dispatch from the exact dependency head and spawn l
 const linkCalls = (f) => f.read().calls.filter((c) => c.args[0] === 'stack' && c.args[1] === 'link').length;
 const linkFailures = (f) => fs.readFileSync(path.join(f.h.state, 'events.jsonl'), 'utf8').trim().split('\n')
   .map(JSON.parse).filter((e) => e.cmd === 'stack link failed');
+// The observer pass inside `wait --observe` links the PR; the wait returns on its event.
 const linkedByObserver = (f) => {
-  const until = Date.now() + 60000;
-  while (!f.h.json(['task', 'show', 'T2']).stack.linked && Date.now() < until) f.h.run(['wait', '--timeout', '1']);
+  f.h.ok(['wait', '--task', 'T2', '--types', 'stack link', '--after', '0', '--observe']);
   return f.h.json(['task', 'show', 'T2']).stack.linked;
 };
 
@@ -67,17 +68,16 @@ test('detached spawn links the PR after its worker submits and exits', async (t)
   const f = setup(t);
   worker(f);
   const spawned = f.h.json(['spawn', '--task', 'T2']);
-  // The worker runs git, the CLI and its submit checks; on Windows that takes about 20 seconds,
-  // more on a loaded runner. The monitor links the PR before it exits, so its exit ends the wait.
-  let task = f.h.json(['task', 'show', 'T2']);
-  while (!task.stack?.linked && detachedAlive({ pid: spawned.monitor_pid })) {
-    await new Promise((resolve) => setTimeout(resolve, 100));
-    task = f.h.json(['task', 'show', 'T2']);
-  }
-  task = f.h.json(['task', 'show', 'T2']);
+  // The monitor links the PR before it exits, so its exit ends the wait.
+  const { task, order } = await waitOnRepo(f.h, () => {
+    const task = f.h.json(['task', 'show', 'T2']);
+    if (!task.stack?.linked) return false;
+    // A final observer call can still be publishing the fixture after linking.
+    return { task, order: f.read().order };
+  }, 'the monitor did not link the PR', { alive: spawned.monitor_pid });
   assert.equal(task.stack.linked, true);
   assert.equal(task.status, 'submitted');
-  assert.deepEqual(f.read().order, [11, 12]);
+  assert.deepEqual(order, [11, 12]);
 });
 
 test('a worktree prepared before its dependency was submitted moves onto the dependency head at dispatch', (t) => {
@@ -162,11 +162,7 @@ test('concurrent sibling dispatch on one submitted dependency records a single s
     env: { TEST_STACK_PAUSE_VIEW: '11', TEST_STACK_PAUSE_READY: ready, TEST_STACK_PAUSE_RELEASE: release },
   });
   try {
-    const deadline = performance.now() + 15000;
-    while (!fs.existsSync(ready)) {
-      if (performance.now() > deadline) throw new Error('T3 preparation never read the dependency PR');
-      await new Promise((resolve) => setTimeout(resolve, 20));
-    }
+    await waitOnRepo(f.h, () => fs.existsSync(ready));
     f.h.json(['worktree', 'T2']);
   } finally {
     fs.writeFileSync(release, 'release');

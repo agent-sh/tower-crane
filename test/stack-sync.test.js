@@ -1,5 +1,7 @@
 'use strict';
 
+const { waitOnRepo, fileWritten, HUNG_TEST_MS } = require('./signals');
+
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -8,7 +10,6 @@ const cp = require('node:child_process');
 const { once } = require('node:events');
 const { setup, stacked } = require('./stack-fixture');
 const { BIN } = require('./helpers');
-const { waitFor } = require('./canary');
 
 for (const mode of ['generated', 'mixed', 'unknown', 'unmerged-parent', 'worktree', 'spawn']) {
   const automaticEntry = ['worktree', 'spawn'].includes(mode);
@@ -304,11 +305,7 @@ for (const related of [false, true]) {
       hooks: { HOOK_CLOCK_FILE: clock },
     });
     try {
-      const deadline = performance.now() + 15000;
-      while (!fs.existsSync(ready)) {
-        if (performance.now() > deadline) throw new Error('gh sync never started');
-        await new Promise((resolve) => setTimeout(resolve, 20));
-      }
+      await waitOnRepo(f.h, () => fs.existsSync(ready));
       fs.writeFileSync(clock, String(now + 120000));
       const claimed = f.h.json(['claim', id, '--agent', 'worker-concurrent'], { hooks: { HOOK_CLOCK_FILE: clock } });
       fs.writeFileSync(release, 'release');
@@ -349,11 +346,7 @@ for (const related of [false, true]) {
       hooks: { HOOK_CLOCK_FILE: clock },
     });
     try {
-      const deadline = performance.now() + 15000;
-      while (!fs.existsSync(ready)) {
-        if (performance.now() > deadline) throw new Error('gh link never started');
-        await new Promise((resolve) => setTimeout(resolve, 20));
-      }
+      await waitOnRepo(f.h, () => fs.existsSync(ready));
       fs.writeFileSync(clock, String(now + 120000));
       const opts = { hooks: { HOOK_CLOCK_FILE: clock } };
       if (related) f.h.ok(['rework', id, '--reason', 'another worker takes over'], opts);
@@ -415,27 +408,22 @@ for (const signal of ['SIGTERM', 'SIGINT']) process.on(signal, () => fs.appendFi
   const env = { ...f.h.env, TEST_STACK_SYNC_READY: ready, TEST_STACK_SYNC_RELEASE: release,
     NODE_OPTIONS: `${f.h.env.NODE_OPTIONS} --require=${JSON.stringify(preload)}` };
   const child = cp.spawn(process.execPath, [BIN, 'wait', '--after', '0', '--types', 'never',
-    '--timeout', '60', '--agent', 'orchestrator'], { cwd: f.h.repo, env });
+    '--timeout', '300', '--agent', 'orchestrator'], { cwd: f.h.repo, env });
   let stdout = '', stderr = '';
   child.stdout.on('data', (data) => { stdout += data; });
   child.stderr.on('data', (data) => { stderr += data; });
   const result = once(child, 'close').then(([code]) => ({ code, stdout, stderr }));
-  const bound = setTimeout(() => child.kill('SIGKILL'), 30000);
+  const bound = setTimeout(() => child.kill('SIGKILL'), HUNG_TEST_MS);
   try {
-    assert.notEqual(await waitFor(ready, { ms: 20000 }), null, `automatic maintenance reaches gh stack sync: ${stderr}`);
+    await fileWritten(ready, { alive: child, what: () => `automatic maintenance reaches gh stack sync: ${stderr}` });
     child.kill('SIGTERM');
-    assert.notEqual(await waitFor(observed, { ms: 5000 }), null, 'wait handles the signal while gh stack sync runs');
+    await fileWritten(observed, { alive: child, what: 'wait handles the signal while gh stack sync runs' });
     assert.equal(child.exitCode, null, 'the first signal lets the running sync finish');
     if (forced) child.kill('SIGINT');
     else fs.writeFileSync(release, 'release');
-    const timeout = Symbol('timeout');
-    let deadline;
-    const exited = await Promise.race([result, new Promise((resolve) => {
-      deadline = setTimeout(() => resolve(timeout), 5000);
-    })]);
-    clearTimeout(deadline);
-    assert.notEqual(exited, timeout, forced ? 'the second signal stops gh stack sync without its release'
-      : 'wait exits once the running sync finishes');
+    // The held sync would end only at the gh call's own timeout (lib/stack.js TIMEOUT); the
+    // caller tells the second signal's stop apart from that timeout by the recorded reason.
+    const exited = await result;
     assert.equal(exited.code, 0, JSON.stringify(exited));
     assert.match(exited.stdout, /stopped by SIGTERM/);
     return exited;
@@ -466,6 +454,12 @@ test('a signal during automatic stack maintenance stops it and wait exits', {
       // The sync that ran records its outcome for every member; no later stack work starts.
       assert.deepEqual(syncs.map((e) => e.task).sort(), ['T1', 'T2']);
       assert.equal(syncs.every((e) => e.detail.ok === !forced), true, JSON.stringify(syncs));
+      if (forced) {
+        for (const e of syncs) {
+          assert.match(e.detail.reason, /gate command interrupted/, 'the second signal stopped gh stack sync');
+          assert.doesNotMatch(e.detail.reason, /timed out/, 'the gh timeout did not stop it');
+        }
+      }
       assert.equal(events.some((e) => e.cmd === 'stack sync deferred'), false);
       // The stub records a call when it returns; a killed sync never does.
       const stackCalls = f.read().calls.slice(setupCalls).filter((c) => c.args[0] === 'stack').map((c) => c.args[1]);

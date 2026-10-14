@@ -84,6 +84,17 @@ async function setup(t, trigger = 'exit', range = 'easy..medium', prepare = null
     repo.ok(['brief', 'set', 'T1', '-'], { input: 'Finish the task.\n' });
     configure(repo, trigger);
   });
+  // Harness discovery must use fixture credentials and origin directories.
+  Object.assign(h.env, {
+    USERPROFILE: h.env.HOME,
+    CLAUDE_CONFIG_DIR: path.join(h.env.HOME, '.claude'),
+    CODEX_HOME: path.join(h.env.HOME, '.codex'),
+    PI_CODING_AGENT_DIR: path.join(h.env.HOME, '.pi', 'agent'),
+    GH_CONFIG_DIR: path.join(h.env.HOME, '.config', 'gh'),
+    XDG_CONFIG_HOME: path.join(h.env.HOME, '.config'),
+    XDG_DATA_HOME: path.join(h.env.HOME, '.local', 'share'),
+    OPENCODE_CONFIG_DIR: path.join(h.env.HOME, '.config', 'opencode'),
+  });
   h.attempts = path.join(h.base, 'attempts.json');
   const exits = new Map();
   const sockets = new Set();
@@ -297,7 +308,7 @@ for (const trigger of ['exit', 'preclaim', 'stall', 'review']) {
         '--agent', 'reviewer', '--summary', 'incorrect boundary']);
       const cursor = String(fs.statSync(path.join(h.state, 'events.jsonl')).size);
       const host = await h.runAsync(['wait', '--after', cursor, '--types', 'submitted', '--task', 'T1',
-        '--timeout', '15', '--agent', 'orchestrator']);
+        '--timeout', '300', '--agent', 'orchestrator']);
       assert.equal(host.code, 0, host.stderr || host.stdout);
     }
     await h.until(() => h.readAttempts().length === 2 && h.task().status === 'submitted');
@@ -383,7 +394,7 @@ test('lost-supervisor recovery waits for redirected orphan descendants to stop',
     await Promise.all(signals.map(({ exited }) => exited));
     h.ok(['spend', 'T1', '--from-spawn', spawn.agent]);
     assert.equal(P.processState(child), 'running');
-    const result = h.run(['wait', '--types', 'submitted', '--task', 'T1', '--agent', 'orchestrator', '--timeout', '2']);
+    const result = h.run(['wait', '--types', 'submitted', '--task', 'T1', '--agent', 'orchestrator', '--timeout', '2']); // wait-allow: observe that recovery stays blocked while the orphan is deliberately held alive
     assert.equal(result.code, 2, 'a parent exit must not dispatch while its orphan descendant is alive');
     const waiting = h.json(['recover', 'T1', '--agent', 'orchestrator']);
     assert.match(waiting.waiting, /process group.*still running/i);

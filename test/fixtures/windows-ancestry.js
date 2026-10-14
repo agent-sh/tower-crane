@@ -2,6 +2,7 @@
 
 const cp = require('node:child_process');
 const fs = require('node:fs');
+const { writeAtomic } = require('../atomic-file');
 
 // A loaded provider can supply a snapshot while individual parent lookups
 // time out. Drive the real CLI through that boundary on either platform.
@@ -47,11 +48,11 @@ function Get-CimInstance {
   if (!rows.some((row) => row.ProcessId === process.pid)) {
     rows.unshift({ ProcessId: process.pid, ParentProcessId: process.ppid, Name: 'node.exe',
       CommandLine: `node ${process.argv.slice(1).join(' ')}`, CreationDate: rows[0]?.CreationDate });
-    fs.writeFileSync(process.env.ANCESTRY_ROWS, JSON.stringify(rows));
+    writeAtomic(process.env.ANCESTRY_ROWS, JSON.stringify(rows));
   }
   const at = args.indexOf('-Command') + 1;
   const replaced = [...args];
   replaced[at] = prefix + args[at] + '\n$taskGate.Dispose()';
-  fs.writeFileSync(process.env.ANCESTRY_OPTIONS, JSON.stringify({ timeout: options.timeout }));
+  writeAtomic(process.env.ANCESTRY_OPTIONS, JSON.stringify({ timeout: options.timeout }));
   return exec.call(this, command, replaced, options);
 };
