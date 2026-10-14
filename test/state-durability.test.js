@@ -342,3 +342,63 @@ test('a reader without the lock sees each commit it has the events of while the 
   assert.equal((await writer).code, 0);
   assertConsistent(h);
 });
+
+test('a reader that reads the other files after a commit\'s staged ones never takes a later commit\'s file', (t) => {
+  const h = setup(t);
+  crash(h, 'landed', 'staged note');
+  const [staged] = fs.readdirSync(h.state).filter((name) => /^tasks\.json\.E[0-9a-f-]{36}\.commit$/.test(name));
+  const project = path.join(h.state, 'project.json');
+  const later = { ...foreign('later'), cmd: 'project set', type: 'project set', to: 'orchestrator', task: null, detail: { goal: 'later goal' } };
+  let stagedRead = false;
+  let fired = false;
+  // After the reader used the staged tasks.json, and before it reads
+  // project.json beside it: the commit's rename, then a later commit that
+  // replaces project.json and logs its event.
+  const restore = readingWith(t, (file, text, original) => {
+    if (file === path.join(h.state, staged)) stagedRead = true;
+    if (!stagedRead || fired || file !== project) return;
+    fired = true;
+    fs.renameSync(path.join(h.state, staged), path.join(h.state, 'tasks.json'));
+    const doc = JSON.parse(original(project, 'utf8'));
+    fs.writeFileSync(`${project}.later`, JSON.stringify({ ...doc, goal: 'later goal' }, null, 2) + '\n');
+    fs.renameSync(`${project}.later`, project);
+    fs.appendFileSync(path.join(h.state, 'events.jsonl'), `${JSON.stringify(later)}\n`);
+  });
+  const st = S.loadState(h.state, { fresh: true });
+  restore();
+  assert.ok(fired);
+  assert.equal(st.project.goal, 'later goal', 'the reader read again');
+  assert.ok(st.events.some((e) => e.id === later.id), 'with the event of the commit whose file it shows');
+  assert.deepEqual(st.tasks.tasks[0].notes.map((n) => n.text), ['staged note']);
+});
+
+test('a reader that keeps losing waits only briefly for a held lock, then returns its last read', async (t) => {
+  const h = setup(t);
+  const signal = path.join(h.base, 'holding');
+  const holder = h.runAsync(['task', 'note', 'T1', 'held note'], { hooks: { HOOK_PAUSE_LOCKED: signal } });
+  let read;
+  let replaced = 0;
+  let waited;
+  try {
+    await waitOnRepo(h, () => fs.existsSync(signal), 'the holder takes the lock');
+    const file = path.join(h.state, 'tasks.json');
+    const restore = readingWith(t, (name, text) => {
+      if (name !== file) return;
+      fs.writeFileSync(`${file}.replaced`, text);
+      fs.renameSync(`${file}.replaced`, file);
+      replaced++;
+    });
+    const started = Date.now();
+    read = unlocked(h);
+    waited = Date.now() - started;
+    restore();
+  } finally {
+    fs.writeFileSync(`${signal}.go`, '');
+    assert.equal((await holder).code, 0);
+  }
+  assert.ok(replaced >= 5, `the reader lost ${replaced} reads`);
+  assert.deepEqual(read, { notes: [], logged: [] });
+  // 500 ms for the lock, and the reads around it; a writer would wait 60 s.
+  assert.ok(waited < 10000, `the reader waited ${waited} ms`);
+  assert.deepEqual(unlocked(h).notes, ['held note']);
+});
