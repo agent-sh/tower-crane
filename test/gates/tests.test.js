@@ -341,7 +341,8 @@ test('a broad host-only glob selects tests, excluding fixtures and non-test file
 test('a skipped changed host-only test cannot prove code, and host_env reaches its revert run', async () => {
   const sha = task({
     'lib/add.js': FIX,
-    'test/host-proof.test.js': `require('node:test')('live proof', { skip: process.env.TC_HOST_OPT_IN !== '1' && 'set TC_HOST_OPT_IN=1 to run the live proof' }, () => {
+    'test/host-proof.test.js': `require('node:test')('live proof', { skip: process.env.TC_HOST_OPT_IN !== '1' && 'set TC_HOST_OPT_IN=1 to run the live proof'
+  + (process.env.TC_HOST_TOKEN ? ' ' + 'p'.repeat(150) + process.env.TC_HOST_TOKEN : '') }, () => {
   require('node:assert/strict').equal(require('../lib/add')(1, 2), 3);
 });
 `,
@@ -368,6 +369,14 @@ test('a skipped changed host-only test cannot prove code, and host_env reaches i
   assert.equal(merged.ok, false, merged.summary);
   assert.deepEqual(merged.config_failure, { key: 'tests_host_env' });
   assert.equal(merged.confirmed_failure, undefined);
+  // A secret in a skip reason is redacted before the 200-character cut, so no piece of it reaches the receipt.
+  const secret = 'abcd1234efgh5678ijkl9012mnop';
+  const leaky = await gate.run(ctx(sha, { args: { cmd: suite }, project: { ...project, tests: { ...project.tests, host_env: { TC_HOST_TOKEN: secret } } }, hotfix }));
+  const [reason] = leaky.receipt.host_only.results[0].skip_reasons;
+  assert.equal(reason.length, 200);
+  assert.ok(reason.startsWith(`set TC_HOST_OPT_IN=1 to run the live proof ${'p'.repeat(150)}[redac`), reason);
+  assert.doesNotMatch(reason, /abcd/);
+  assert.doesNotMatch(leaky.summary, /abcd/);
   project.tests.host_env = { TC_HOST_OPT_IN: '1' };
   const ran = await gate.run(ctx(sha, { args: { cmd: suite }, project }));
   assert.equal(ran.ok, true, ran.summary);

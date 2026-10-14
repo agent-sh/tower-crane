@@ -502,7 +502,7 @@ By default a file is a test when it sits under a `test/`, `tests/`, `spec/`, `sp
 
 On Linux, a separate host-only command gets a short `TMPDIR`, `TMP` and `TEMP` of its own when the gate scratch directory is too deep for a live harness's sandbox socket. Claude Code's Linux sandbox listens on `<TMPDIR>/claude-socks-<16 hex>.sock` (or the one byte shorter `claude-http-` name), and socat takes a socket path of at most 108 bytes, so `TMPDIR` must be at most 73 bytes. The short directory is a fresh `tc-XXXXXX` under the user's `~/.cache`, with the home taken from the password database rather than `HOME`, else under `XDG_RUNTIME_DIR`. It is removed when the command ends. When no such directory fits and is writable, the gate refuses before running any command, with a `config_failure` on `tmp_root`. A `TMPDIR` named in `tests.host_env` is used as given. Ordinary suite commands keep the gate scratch.
 
-A tests receipt has `host_only: {run, skipped, unreported, results}` when host-only globs are configured. The first three arrays name files. Each result has `{file, ran, skipped}` with executed and skipped case counts from TAP or Node spec summaries; TODO cases count as skipped. A file with skipped cases also gets `skip_reasons`, up to five distinct reasons of at most 200 characters from its TAP `# SKIP` or spec `﹣ ... # reason` lines, and the refusal for a changed host-only file lists each file's counts and reasons. A file with both executed and skipped cases appears in both arrays. Missing or inconsistent summaries produce null counts and an `unreported` entry, so exit zero alone is not proof. Prove mode rejects a changed host-only file with no reported executed cases. Run-only and test-only diffs still allow skips and report them in the receipt.
+A tests receipt has `host_only: {run, skipped, unreported, results}` when host-only globs are configured. The first three arrays name files. Each result has `{file, ran, skipped}` with executed and skipped case counts from TAP or Node spec summaries; TODO cases count as skipped. A file with skipped cases also gets `skip_reasons`, up to five distinct reasons, each redacted like the gate output and then cut to 200 characters, from its TAP `# SKIP` or spec `﹣ ... # reason` lines, and the refusal for a changed host-only file lists each file's counts and reasons. A file with both executed and skipped cases appears in both arrays. Missing or inconsistent summaries produce null counts and an `unreported` entry, so exit zero alone is not proof. Prove mode rejects a changed host-only file with no reported executed cases. Run-only and test-only diffs still allow skips and report them in the receipt.
 
 The list and tests policy flags also work with `init`. Omitting a flag leaves its field unchanged. Setting a field replaces a non-object `tests` or `ci` section, and clearing removes that malformed section. Object sections keep their other settings; clearing removes the section when it becomes empty. `project set` and `project show` text output print the policy and lists, showing `prove`, `{}` and `false` for absent mode, kind overrides and expensive settings, `default layouts` when `tests.paths` is absent and `[]` when no extra build files or CI apps are configured. Invalid input exits 2 without writing state or events, even when passed alongside valid settings.
 
@@ -546,9 +546,16 @@ association, or without the title or a verdict is refused. A failing posted revi
 the configured proof mode, reverting the landed changes against `base_sha`;
 cleanup scans the same change. CI checks the successful GitHub Actions
 `push` workflows on the recorded base at that commit and their required
-check runs, even when local CI is configured. A required check run that the
-base workflow skipped by its own condition (a pull-request-only job) does
-not apply; one that ran must succeed. PR head and mergeability
+check runs, even when local CI is configured. A required check run that
+the judged base run skipped does not apply only when the skip says nothing
+about the change: the same job also skipped at the merge commit, or the
+job's own `if:` in the workflow file at the judged commit is false for the
+run's event whatever its other terms are (a pull-request-only job such as
+`github.event_name == 'pull_request' && ...`). A job skipped by a path filter
+or by another job's output stays required, so a docs-only later commit
+cannot stand in for code it never tested, and an unreadable workflow file
+keeps the job required. A required job that ran must succeed. The summary
+lists each required name not applied and why. PR head and mergeability
 checks do not apply to a merged PR.
 
 A failed `push` run at the merge commit is a confirmed failure, and one
@@ -560,10 +567,24 @@ commit date when it has none. It then takes the commits with a successful
 first, the merge commit itself included. A later commit counts only when
 GitHub's compare shows it ahead of the merge commit and still on the base.
 At that commit, the newest run of each workflow that was not cancelled must
-be green, and its check runs pass the same judgment. The first commit that
-passes stands for the merge commit. The evidence stays at `merge_sha` and
-records `hotfix_ci: {merge_sha, satisfied_by: {sha, runs: [{id, workflow,
-event, url}]}}`; the summary names the commit and run. A failed scheduled
+be green, and its check runs, read with `filter=all` so a newer cancelled run
+with the same job names cannot hide them, pass the same judgment. The first
+commit that passes stands for the merge commit. That green run vouches for
+the tree at that later commit, not for the merge commit alone: if a commit in
+between fixed or reverted a defect the merge commit brought, CI still passes.
+The tests gate, which runs at the merge commit against its first parent,
+remains the proof for the merge commit itself. The evidence stays at
+`merge_sha` and records `hotfix_ci: {merge_sha, satisfied_by: {sha, runs:
+[{id, workflow, event, url}]}}`; the summary names the commit and run.
+
+Each check looks at no more than five candidate commits; each costs two
+compares and three paginated listings, so a recheck of a pending hotfix
+stays near 25 GitHub calls. A pending result records `hotfix_ci: {merge_sha,
+rejected: [{sha, runs, reason}]}`, the commits it turned down and the ids of
+their green runs, and the summary says how many commits wait for the next
+check. The next check of the same merge commit skips a commit rejected as
+`does not contain the merge commit` or `not on BASE`, and one rejected as
+`not green` unless it has a green run that is not listed. A failed scheduled
 or manual run at the merge commit, or a job that failed before its run was
 cancelled, is still a confirmed failure. Until a later run is green, CI is
 pending, with `not_running` when no full run on the base is queued or

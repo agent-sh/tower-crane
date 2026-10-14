@@ -200,9 +200,13 @@ successful push, scheduled or manual run of the same workflows at the merge
 commit or a later commit on the base that contains it stands for it, and the
 CI evidence names that commit and run in `hotfix_ci`. A failed run or job at
 the merge commit itself still fails; a later green run does not mask it.
-Until a later run is green, CI stays pending. A required job that the base
-workflow skips by its own condition, such as a pull-request-only job, does
-not apply to a hotfix. When a changed host-only test only skipped, the tests
+Until a later run is green, CI stays pending. The later run vouches for the
+tree at its commit; the tests gate still proves the merge commit. A required
+job skipped in that run does not apply only when it also skipped at the merge
+commit or its own `if:` is false for the run's event, such as a
+pull-request-only job; a job a path filter skipped stays required. Each check
+looks at up to five later commits and records the ones it rejected in
+`hotfix_ci.rejected`, so the next check goes on from there. When a changed host-only test only skipped, the tests
 gate names the skip reasons and leaves a `gate_config` inbox item for
 `tests.host_env`; set the opt-ins it names, then run `gates retry ID`. Once
 software gates pass, a counted posted review or normal independent review
