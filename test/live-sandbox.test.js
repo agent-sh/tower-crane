@@ -447,6 +447,94 @@ test('a real codex sandbox starts for a home among 5,000 entries and reads nothi
   assert.equal(seen.state, 'READABLE');
 });
 
+// The probe for both sandboxes: where `command -v` finds git and gh, whether
+// each is a Tower Crane shim, and what a push to another task's branch does.
+// The remote is a port nothing listens on, so a push that gets past the shim
+// fails in git itself and never reaches a server.
+// With inject, the push runs with NODE_OPTIONS asking node to load a file
+// first, which the shim must not do. before runs first, extra after the push.
+// The claude probe leaves it out: a model asked to run it declined
+// (2026-10-14), and the stub test in isolation.test.js covers claude's shim.
+function shimProbe(h, out, { before = '', extra = '', inject = false } = {}) {
+  const dir = path.dirname(out);
+  const repo = path.join(dir, 'shim-repo');
+  for (const args of [['init', '-q', repo], ['-C', repo, 'commit', '-q', '--allow-empty', '-m', 'probe'],
+    ['-C', repo, 'remote', 'add', 'origin', 'https://127.0.0.1:9/agent-sh/tower-crane.git']]) h.git(args);
+  const injected = path.join(dir, 'injected');
+  const evil = path.join(dir, 'evil.cjs');
+  if (inject) fs.writeFileSync(evil, `require("node:fs").writeFileSync(${JSON.stringify(injected)}, "LOADED");\n`);
+  return `const fs=require("fs"),cp=require("child_process");const o={};${before}`
+    + `for(const t of ["git","gh"]){const p=cp.spawnSync("sh",["-c","command -v "+t],{encoding:"utf8"}).stdout.trim();o[t]=p;`
+    + `try{o[t+"Shim"]=fs.readFileSync(p,"utf8").includes("shim.js")}catch(e){o[t+"Shim"]="ERR "+e.code}}`
+    + `const r=cp.spawnSync("git",["push","origin","HEAD:refs/heads/tower-crane/T999-another-task"],{cwd:${JSON.stringify(repo)},encoding:"utf8",env:{...process.env,GIT_TERMINAL_PROMPT:"0"${inject ? `,NODE_OPTIONS:${JSON.stringify(`--require=${evil}`)}` : ''}}});`
+    + `o.push=r.status;o.pushErr=String(r.stderr).trim().split("\\n").pop();o.injected=fs.existsSync(${JSON.stringify(injected)});${extra}fs.writeFileSync(${JSON.stringify(out)},JSON.stringify(o))`;
+}
+
+function assertShims(h, seen, label) {
+  const homes = [h.state, fs.realpathSync(h.state)].map((s) => path.join(s, 'homes') + path.sep);
+  for (const tool of ['git', 'gh']) {
+    assert.ok(homes.some((dir) => seen[tool].startsWith(dir)), `${label}: the first ${tool} on PATH is the agent's, not ${seen[tool]}`);
+    assert.equal(seen[`${tool}Shim`], true, `${label}: ${seen[tool]} is a shim`);
+  }
+  assert.equal(seen.push, 126, `${label}: the shim refused the push: ${seen.pushErr}`);
+  assert.match(seen.pushErr, /^tower-crane: git push.* is not allowed by this agent's agent file$/);
+  assert.equal(seen.injected, false, `${label}: the shim did not load the file NODE_OPTIONS names`);
+}
+
+// Found 2026-10-14 (codex-cli 0.162.1): the codex profile hides homes/, and
+// its read rule for homes/<agent> came before the hide, so the agent's shims
+// were missing in its sandbox: `command -v git` gave /usr/bin/git and every
+// git and gh call skipped the shim policy. Codex cannot reopen a readable
+// path inside a hidden one in any rule order; the shims now sit read-only
+// inside the agent's writable HOME.
+test('in a real codex sandbox the first git and gh on PATH are the agent\'s shims, and the shim refuses a push to another task\'s branch', { skip: realCodexSandbox(), timeout: 300000 }, async (t) => {
+  const h = makeRepo(t);
+  h.init();
+  h.ok(['task', 'add', '--title', 'Shim probe', '--acceptance', 'git and gh are the shims']);
+  h.ok(['brief', 'set', 'T1', '-'], { input: 'shim probe\n' });
+  const out = path.join(results(h), 'shim-probe.json');
+  // The shims sit in the writable HOME, read-only: the agent can neither
+  // change one nor move the directory aside, and the rest of its
+  // homes/<agent>, with the automation key, stays hidden.
+  const extra = `const d=require("path").dirname(require("path").dirname(o.git));`
+    + `try{fs.appendFileSync(o.git,"exit 0\\n");o.edit="WROTE"}catch(e){o.edit="ERR "+e.code}`
+    + `try{fs.writeFileSync(d+"/policy.json","{}");o.policy="WROTE"}catch(e){o.policy="ERR "+e.code}`
+    + `try{fs.renameSync(d,d+"-moved");o.rename="MOVED"}catch(e){o.rename="ERR "+e.code}`
+    + `try{fs.readFileSync(require("path").join(d,"..","..","automation.key"));o.key="READABLE"}catch(e){o.key="ERR "+e.code}`
+    // The residual docs/state.md names: the host's git by its path still runs.
+    + `o.hostGit=cp.spawnSync(${JSON.stringify(require(path.join(ROOT, 'lib', 'shim.js')).findReal('git', ''))},["--version"]).status;`;
+  // A package.json the agent writes in its HOME, above the shims, must not
+  // make them ES modules.
+  const before = `fs.writeFileSync(require("path").join(process.env.HOME,"package.json"),'{"type":"module"}');`;
+  const bin = standInCodex(h, shimProbe(h, out, { before, extra, inject: true }));
+  const r = await h.runAsync(['spawn', '--role', 'small', '--task', 'T1', '--wait'],
+    { env: { ...h.env, PATH: `${bin}${path.delimiter}${h.env.PATH}` } });
+  assert.equal(r.code, 0, `${r.stderr}\n${agentLog(h)}`);
+  assert.ok(fs.existsSync(out), `the probe ran\n${agentLog(h)}`);
+  const seen = JSON.parse(fs.readFileSync(out, 'utf8'));
+  console.log(`codex shim probe: ${JSON.stringify(seen)}`);
+  assertShims(h, seen, 'codex');
+  for (const k of ['edit', 'policy', 'rename', 'key']) assert.match(seen[k], /^ERR /, `codex: ${k}`);
+  assert.equal(seen.hostGit, 0, 'the host git by its path is outside what the shim can hold');
+});
+
+test('in a real claude sandbox the first git and gh on PATH are the agent\'s shims, and the shim refuses a push to another task\'s branch', { skip: process.env.TOWER_CRANE_LIVE_CLAUDE !== '1' && 'set TOWER_CRANE_LIVE_CLAUDE=1 to run against the real claude CLI', timeout: 300000 }, async (t) => {
+  const h = login(makeRepo(t));
+  h.init();
+  h.ok(['task', 'add', '--title', 'Shim probe', '--acceptance', 'git and gh are the shims']);
+  const out = path.join(results(h), 'shim-probe.json');
+  h.ok(['brief', 'set', 'T1', '-'], {
+    input: `Sandbox probe set up by the owner. Run exactly this one command with the Bash tool, then reply with its exit code. Do not use tower-crane.\n\n${node} -e '${shimProbe(h, out)}'\n`,
+  });
+  pinLiveRung(h, 'claude');
+  const r = await h.runAsync(['spawn', '--role', 'small', '--task', 'T1', '--wait']);
+  assert.equal(r.code, 0, `${r.stderr}\n${agentLog(h)}`);
+  assert.ok(fs.existsSync(out), `the command ran\n${agentLog(h)}`);
+  const seen = JSON.parse(fs.readFileSync(out, 'utf8'));
+  console.log(`claude shim probe: ${JSON.stringify(seen)}`);
+  assertShims(h, seen, 'claude');
+});
+
 // codex resolves :tmpdir from the TMPDIR it starts with, and a caller's
 // TMPDIR under the home (~/.cache/tct on the owner's host) holds other
 // tasks' scratch and test fixtures. :slash_tmp is the host's /tmp, shared
@@ -588,8 +676,11 @@ test('a real codex sandbox resolves names, fetches and pushes over https and ins
   for (const args of [['init', '-q', repo], ['-C', repo, 'commit', '-q', '--allow-empty', '-m', 'probe']]) h.git(args);
   // A ref that does not exist on the remote, so the dry run would create it, and nothing is sent.
   const ref = `refs/heads/tower-crane/network-probe-${process.pid}`;
+  // The real git by its path: the agent's shim refuses a push to a URL, and
+  // what is probed here is the network and the handed token, not the policy.
+  const git = require(path.join(ROOT, 'lib', 'shim.js')).findReal('git', '');
   const script = `const fs=require("fs"),cp=require("child_process");const o={};`
-    + `{const r=cp.spawnSync("git",["push","--dry-run","https://github.com/agent-sh/tower-crane.git","HEAD:${ref}"],{cwd:${JSON.stringify(repo)},encoding:"utf8"});o.pushDryRun=r.status;if(r.status!==0)o.pushDryRunErr=String(r.stderr).trim().split("\\n").slice(-2).join(" | ")}`
+    + `{const r=cp.spawnSync(${JSON.stringify(git)},["push","--dry-run","https://github.com/agent-sh/tower-crane.git","HEAD:${ref}"],{cwd:${JSON.stringify(repo)},encoding:"utf8"});o.pushDryRun=r.status;if(r.status!==0)o.pushDryRunErr=String(r.stderr).trim().split("\\n").slice(-2).join(" | ")}`
     + networkProbe(pkg, `fs.writeFileSync(${JSON.stringify(out)},JSON.stringify(o))`);
   const bin = standInCodex(h, script);
   // The owner's home, so spawn finds the gh login to hand over; caches stay in the test.
