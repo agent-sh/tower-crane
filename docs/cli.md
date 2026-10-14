@@ -1051,7 +1051,7 @@ The CLI refuses manual software verdicts, and software receipts require matching
 |---|---|
 | `check ci ID` | for a recorded hotfix, check successful push workflows on its recorded base at the merge commit. Otherwise with `ci.local`, resolve task override, kind mapping or default, run its argv against the merged base and submitted head and record a local receipt; without local CI, verify the PR head and mergeability. Require `ci.required` runs to be present and successful on the submitted sha, require at least one run outside `ci.ignore_apps` and `ci.capped_review` exceptions and all remaining checks green; records `ci` |
 | | |
-| `check clean ID [--cmd CMD]` | run pinned `gates.clean_cmd` at the submitted commit against `base` (the recorded first parent for hotfixes); records `clean`, ok when every check ran and none reported a HIGH finding; timeouts record infrastructure failure |
+| `check clean ID [--cmd CMD]` | run pinned `gates.clean_cmd` at the submitted commit against `base` (the recorded first parent for hotfixes); records `clean`, ok when every check ran and none reported a HIGH finding in the change (a report without diff scope is cut to the changed lines); timeouts record infrastructure failure |
 | | |
 | `check sources ID` | fetch the distinct cited pages from committed `research/ID.json` and verify every quote; records sources evidence; required for research kind on every tier |
 | | |
