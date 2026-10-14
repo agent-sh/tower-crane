@@ -3009,7 +3009,7 @@ for (const trigger of ['exit', 'release --dead', 'merge']) {
     await waitFor(h.marker('T3'), { what: `the task unblocking T4 takes the free slot: ${JSON.stringify(results)}` });
     const spawns = h.logs().filter((e) => e.cmd === 'spawn' && e.detail.role === 'worker');
     assert.deepEqual(spawns.map((e) => e.task), trigger === 'merge' ? ['T3'] : ['T1', 'T3'],
-      `DIAG ${JSON.stringify(h.logs().map((e) => ({ at: e.at, cmd: e.cmd, task: e.task, agent: e.agent, pid: e.pid, d: e.detail && { role: e.detail.role, agent: e.detail.agent, pid: e.detail.pid, reserved: e.detail.reserved, reason: e.detail.reason, attempt: e.detail.attempt, results: e.detail.results } })))}`);
+      JSON.stringify(h.logs().filter((e) => ['spawn', 'claim', 'release', 'spawn exit'].includes(e.cmd)).map((e) => [e.cmd, e.task, e.detail.agent || e.agent])));
     const st = require('../lib/state').loadState(h.state);
     assert.equal(require('../lib/tasks').workerHolders(st, Date.now()).length, 1);
     h.consume();

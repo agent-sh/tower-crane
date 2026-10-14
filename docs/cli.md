@@ -405,7 +405,10 @@ After draining event reactions, the trusted `wait` host releases verified
 dead claims through `release --dead`. Worker exits, releases, rework and confirmed merges refill
 free slots through `spawn --ready`, including ready rework tasks. The same
 worker limit, unblocking-first order, routing, fallback and locked reservations
-apply; concurrent watchers cannot dispatch above the limit. Before counting
+apply; concurrent watchers cannot dispatch above the limit. Worker dispatches,
+batch or single, run one at a time under the state directory's dispatch lock,
+so a watcher never skips a higher-ranked task that another dispatch is still
+preparing and gives its slot to a lower one. Before counting
 capacity, the host clears verified dead reservations under the state lock,
 including reservations from cancelled tasks. Dispatch refusals
 are reported once on stderr per wait while dispatch inputs are unchanged.
