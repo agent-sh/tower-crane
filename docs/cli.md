@@ -415,9 +415,11 @@ wait without `--observe`.
 A worker that exits without submitting is relaunched by the next refill, so
 the refill caps it. The supervisor records each worker exit, and in the same
 write counts the task's worker exits without a submit at its current
-revision since its last submit or cleared owner ask. Exits marked
-`availability_failure` (outages, login failures, supervisor stops), interrupts
-and budget stops do not count. At 3 counted exits the task gets
+revision since its last submit or cleared owner ask. When a monitor dies,
+the observer's `worker-exited` record stands in for its exit and applies the
+same count. Exits marked `availability_failure` (outages, login failures,
+supervisor stops), interrupts, budget stops and sessions that released the
+task for an open decision do not count. At 3 counted exits the task gets
 `needs_owner` naming the count, the last worker and its exit code, so it is
 no longer ready: refill, `spawn --ready` and `spawn --task` skip or refuse it,
 and the write appends a `respawn cap` event. The cap is 3 because the

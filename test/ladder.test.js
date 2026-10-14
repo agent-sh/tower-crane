@@ -517,7 +517,7 @@ test('validate names a worker rung an open task needs when only it cannot start,
   const loggedOut = "process.stderr.write('You are not logged into any GitHub hosts. To log in, run: gh auth login\\n'); process.exit(1);\n";
   const codexOnly = onlyOnPath(h, 'codex-only', { codex: '', gh: loggedOut });
   assert.deepEqual(h.json(['validate'], codexOnly).warnings, [{ task: null, kind: 'gh-auth',
-    message: 'gh auth status failed (You are not logged into any GitHub hosts. To log in, run: gh auth login); workers open PRs with gh: run gh auth login' }]);
+    message: 'gh auth status failed (You are not logged into any GitHub hosts. To log in, run: gh auth login); workers open PRs with gh. If this machine is online, run gh auth login' }]);
   h.ok(['task', 'add', '--title', 'y', '--acceptance', 'a', '--tier', 'hard']);
   const ready = onlyOnPath(h, 'codex-gh', { codex: '', gh: 'process.exit(0);\n' });
   assert.deepEqual(h.json(['validate'], ready).warnings.map((w) => w.message),
