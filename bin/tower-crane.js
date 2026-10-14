@@ -156,6 +156,8 @@ const COMMANDS = [
 
   { section: 'Views', name: 'ci log', pos: ['JOB_ID'], usage: 'JOB_ID [--failed-tests] [--task ID]', summary: "one CI job's log from the task's PR head, written under the task scratch while the run is still going; --failed-tests names the failing tests", flags: { 'failed-tests': bool('also name each failing test and its first error line'), task: str('ID', 'task (default TOWER_CRANE_TASK)') }, description: "fetch the log of job JOB_ID with `gh api repos/R/actions/jobs/JOB_ID/logs` while its run is still going, strip ANSI escapes, write it to `ci-job-JOB_ID.log` in the task scratch and print the path. The job must run on the task's branch head, the PR head the worker pushes, so a job of another branch or an older head is refused. `--failed-tests` also prints each failing test name with its first error line, from node --test (TAP and spec), go test and pytest output. `--task` defaults to TOWER_CRANE_TASK, so a worker reads its own PR through the state broker instead of waiting for the run to finish", run: run('../lib/ci-feedback', 'log') },
 
+  { section: 'Run', name: 'ci resolve', pos: ['COMMENT_ID'], usage: 'COMMENT_ID --reason TEXT [--task ID]', summary: "mark a revuto finding on the task's PR resolved with a [resolved] reply", flags: { reason: str('TEXT', 'how the finding was fixed, or why it does not apply'), task: str('ID', 'task (default TOWER_CRANE_TASK)') }, required: ['reason'], description: "post a reply whose first line is `[resolved]` and whose next lines are `--reason` on revuto's open inline finding COMMENT_ID on the task's PR, then record `ci resolve`. The reason is at most 1000 characters; each `@` in it gets a zero-width joiner so it mentions no one, and the reply ends with `by worker AGENT`, or `by AGENT` for the orchestrator or the owner. The comment must be a top-level revuto finding GitHub still anchors to a line. The next review dispatch reads the reply, and a review held at the task's head is dispatched again. `--task` defaults to TOWER_CRANE_TASK, so a worker resolves a finding on its own PR through the state broker", run: run('../lib/ci-feedback', 'resolve') },
+
   { section: 'Run', name: 'ci webhook', pos: ['FILE'], usage: 'FILE', summary: 'handle completed GitHub check_run, check_suite or workflow_run JSON; - reads stdin', description: "orchestrator or owner: deliver completed GitHub `check_run`, `check_suite` or `workflow_run` JSON; `-` reads stdin. Repository must match. Stale heads and incomplete checks are ignored", run: run('../lib/automation', 'ciWebhook') },
 
   { section: 'Run', name: 'claim', pos: ['ID'], usage: 'ID [--lease MIN]', summary: 'take a ready task for --agent', flags: { lease: int('MIN', 'lease length (default limits.lease_minutes)') }, description: "take a ready task for `--agent`; repeating it as the live claimant renews the lease. Refused if another agent holds it, the task is not ready, a resource lock is held, or the workers limit is reached (live leases and unclaimed worker spawns); consumes that agent's reservation for this task", run: T.claim },
@@ -220,7 +222,7 @@ const COMMANDS = [
 
   { section: 'Run', name: 'release', pos: ['[ID]'], usage: 'ID --reason R [--pr N] | --dead', summary: 'give a claimed task back; it returns to todo or rework', flags: { reason: str('R', 'why'), pr: int('N', 'open pull request the claim opened, linked to the task'), dead: bool('release every claim verified exited, rechecking under the lock') }, description: "`--dead` recovers every claim the shared process detector verifies exited; remote or unobservable processes stay claimed. The worker broker refuses this unscoped batch; workers use `release ID --reason R` on their own task. Otherwise give it back; status returns to its prior `todo` or `rework`. `--pr N` links an open PR, checked as `submit` checks it, so the next worker resumes that PR. Its head branch must be the task's branch, except that a task with no branch, or one moving from a closed or merged PR to N, takes N's head branch. Linking a PR other than the one the task recorded drops its submitted sha, so the next dispatch resumes N's head from origin. A task linked to another open PR keeps that PR and refuses the release until it closes. The branch and PR link stay when the claim is released. A task released while an open decision blocks it can be sent back with `rework` from `todo`. The claimant or the owner (owner-required: the orchestrator's attempt opens a decision); any agent may recover a spawned claim verified exited by the shared detector under the lock. Preserves only pid, log path, exit code and log size in a note and the release event", run: T.release },
 
-  { section: 'Views', name: 'render', summary: 'write sketch.md and sketch.html (self-contained, no network)', description: "write `sketch.md` (Mermaid graph plus tables) and `sketch.html`, the board as a read-only snapshot, from the state as it stands under the lock", run: R.render },
+  { section: 'Views', name: 'render', summary: 'write sketch.md and sketch.html (self-contained, no network)', description: "write `sketch.md` (Mermaid graph plus tables) and `sketch.html`, the board as a read-only snapshot, from the state as it stands when the command starts; a sketch another process already published from later state is kept (`--json` `published: false`)", run: R.render },
 
   { section: 'Run', name: 'renew', pos: ['ID'], usage: 'ID [--lease MIN]', summary: 'extend your lease; an expired one only while the workers limit has room', flags: { lease: int('MIN', 'new lease length from now') }, description: "extend the lease from now; only the claimant. An expired lease must pass the claim checks again (unmet dependency, owner blocker, open decision, resource lock, workers limit), so a refused renewal leaves it expired", run: T.renew },
 
@@ -526,8 +528,16 @@ async function main(argv) {
     };
     // Engine provenance comes from the helper's key, never from TOWER_CRANE_VIA alone.
     ctx.automation = AutomationKey.verify(process.env, automationCredential, ctx.stateDir, identity);
-    require('../lib/orchestrator').command(ctx, cmd.name);
-    const res = await cmd.run(ctx);
+    // A command reads the event log several times: the first read parses it
+    // and later ones only what was appended since.
+    const releaseEvents = ctx.stateDir ? S.retainEvents(ctx.stateDir) : () => {};
+    let res;
+    try {
+      require('../lib/orchestrator').command(ctx, cmd.name);
+      res = await cmd.run(ctx);
+    } finally {
+      releaseEvents();
+    }
     if (res && !res.printed) {
       if (ctx.json) out(JSON.stringify(res.data, null, 2));
       else if (res.text !== undefined) out(res.text);

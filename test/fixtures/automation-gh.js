@@ -76,6 +76,14 @@ if (args[0] === 'pr') {
   save();
   console.error('HTTP 502: Bad Gateway');
   process.exit(1);
+} else if (args[0] === 'api' && args[1] === '--method' && args[2] === 'POST') {
+  // A reply on a review thread: pulls/N/comments/ID/replies with -f body=TEXT.
+  const thread = Number(/\/pulls\/\d+\/comments\/(\d+)\/replies$/.exec(args[3])?.[1]);
+  if (!thread) throw new Error(`unexpected fixture POST ${args[3]}`);
+  const reply = { id: 900 + (state.comments || []).length, in_reply_to_id: thread, user: 'orchestrator-bot',
+    body: args[args.indexOf('-f') + 1].replace(/^body=/, '') };
+  (state.comments ||= []).push(reply);
+  out = JSON.stringify({ id: reply.id, html_url: `https://github.com/acme/demo/pull/7#discussion_r${reply.id}` });
 } else if (args[0] === 'api' && /\/(?:pulls|issues)\/\d+\/comments(?:\?|$)/.test(args[1])) {
   // Already in the shape the caller's --jq filter produces: one comment per line.
   out = (state.comments || []).map((c) => JSON.stringify(c)).join('\n');
