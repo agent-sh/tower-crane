@@ -775,6 +775,122 @@ test('a worker\'s git push goes through its broker to its own task branch on ori
     'the broker keeps its verified cache and removes its other scratch');
 });
 
+// origin at git@github.com: as in a real project. The broker's ssh, the
+// user's own, reaches the fixture's bare repository; the agent's fails as
+// ssh does in a sandbox's user namespace, where root-owned config files
+// appear owned by nobody.
+async function sshOriginFixture(t) {
+  const f = await pushFixture(t);
+  f.h.ok(['project', 'set', '--repo', 'acme/demo', '--agent', 'owner']);
+  f.h.git(['remote', 'set-url', 'origin', 'git@github.com:acme/demo.git']);
+  const ssh = path.join(f.h.base, 'ssh.js');
+  fs.writeFileSync(ssh, `const args = process.argv.slice(2);
+if (args.includes('-G')) process.exit(0);
+const m = /^git-(upload|receive)-pack '(.*)'$/.exec(args[args.length - 1]);
+if (!m || m[2] !== 'acme/demo.git') { process.stderr.write('ssh: unexpected ' + args.join(' ') + '\\n'); process.exit(255); }
+const r = require('node:child_process').spawnSync('git', [m[1] + '-pack', ${JSON.stringify(f.remote)}], { stdio: 'inherit' });
+process.exit(r.status === null ? 1 : r.status);
+`);
+  const sandboxSsh = path.join(f.h.base, 'sandbox-ssh.js');
+  fs.writeFileSync(sandboxSsh, `process.stderr.write('Bad owner or permissions on /etc/ssh/ssh_config.d/20-systemd-ssh-proxy.conf\\n');
+process.exit(255);
+`);
+  const command = (file) => `"${process.execPath.replace(/\\/g, '/')}" "${file.replace(/\\/g, '/')}"`;
+  const saved = process.env.GIT_SSH_COMMAND;
+  process.env.GIT_SSH_COMMAND = command(ssh);
+  t.after(() => {
+    if (saved === undefined) delete process.env.GIT_SSH_COMMAND;
+    else process.env.GIT_SSH_COMMAND = saved;
+  });
+  const shim = (tool, args, opts = {}) => f.shim(tool, args, { ...opts, env: { GIT_SSH_COMMAND: command(sandboxSsh), ...opts.env } });
+  // Another clone moves origin's main, as a merged pull request does.
+  const advance = (file) => {
+    const other = fs.mkdtempSync(path.join(f.h.base, 'other-'));
+    f.h.git(['clone', '-q', f.remote, other]);
+    fs.writeFileSync(path.join(other, file), `${file}\n`);
+    f.h.git(['add', file], other);
+    f.h.git(['commit', '-qm', `add ${file}`], other);
+    f.h.git(['push', '-q', 'origin', 'HEAD:refs/heads/main'], other);
+    return f.h.git(['rev-parse', 'HEAD'], other);
+  };
+  return { ...f, shim, advance };
+}
+
+test('a sandboxed worker whose origin is an ssh URL fetches the base and its task branch through its broker, and only those', async (t) => {
+  const f = await sshOriginFixture(t);
+  const branch = f.task.branch;
+  const tracked = (ref) => {
+    const r = require('node:child_process').spawnSync('git', ['-C', f.wt.path, 'rev-parse', '--verify', '--quiet', ref], { encoding: 'utf8', env: f.h.env });
+    return r.status === 0 ? r.stdout.trim() : '';
+  };
+  const main = f.advance('upstream.txt');
+  assert.notEqual(tracked('refs/remotes/origin/main'), main);
+  const direct = await f.shim('git', ['ls-remote', 'origin']);
+  assert.notEqual(direct.status, 0, 'git in the sandbox cannot reach origin itself');
+  assert.match(direct.stderr, /Bad owner/);
+
+  const fetched = await f.shim('git', ['fetch', 'origin']);
+  assert.equal(fetched.status, 0, fetched.stderr);
+  assert.equal(tracked('refs/remotes/origin/main'), main, 'origin/main is origin\'s main');
+  assert.match(fetched.stderr, /From git@github\.com:acme\/demo\.git/);
+  f.h.git(['merge', '-q', '--no-ff', '--no-edit', 'origin/main'], f.wt.path);
+  assert.equal(fs.readFileSync(path.join(f.wt.path, 'upstream.txt'), 'utf8'), 'upstream.txt\n', 'the fetched objects are whole');
+
+  // The skill's spelling, and a plain fetch with no remote, after origin moves again.
+  const later = f.advance('later.txt');
+  const skill = await f.shim('git', ['fetch', 'origin', '+refs/heads/main:refs/remotes/origin/main']);
+  assert.equal(skill.status, 0, skill.stderr);
+  assert.equal(tracked('refs/remotes/origin/main'), later);
+  const head = fs.readFileSync(path.join(f.h.git(['rev-parse', '--path-format=absolute', '--git-path', 'FETCH_HEAD'], f.wt.path)), 'utf8');
+  assert.equal(head, `${later}\t\tbranch 'main' of git@github.com:acme/demo.git\n`, 'FETCH_HEAD names the fetched branch');
+  const plain = await f.shim('git', ['fetch', '-q']);
+  assert.equal(plain.status, 0, plain.stderr);
+  assert.equal(plain.stderr, '');
+
+  // The task branch, once pushed through the broker over the same ssh URL.
+  const own = f.commit('mine.txt', 'mine\n');
+  const pushed = await f.shim('git', ['push', 'origin', 'HEAD']);
+  assert.equal(pushed.status, 0, pushed.stderr);
+  f.h.git(['update-ref', '-d', `refs/remotes/origin/${branch}`], f.wt.path);
+  const task = await f.shim('git', ['fetch', 'origin', branch]);
+  assert.equal(task.status, 0, task.stderr);
+  assert.equal(tracked(`refs/remotes/origin/${branch}`), own);
+
+  // Another branch on origin stays out of reach, and so do options the broker does not take.
+  f.h.git(['push', '-q', f.remote, `${main}:refs/heads/other`]);
+  for (const args of [['fetch', 'origin', 'other'], ['fetch', 'origin', 'refs/tags/v1'], ['fetch', 'origin', 'main:main'], ['fetch', '--unshallow', 'origin']]) {
+    const r = await f.shim('git', args);
+    assert.notEqual(r.status, 0, args.join(' '));
+    assert.match(r.stderr, /fetches|broker/, args.join(' '));
+  }
+  assert.equal(tracked('refs/remotes/origin/other'), '', 'nothing of another branch was recorded');
+  const refused = await f.raw({ fetch: { branches: ['other'] } });
+  assert.equal(refused.code, 1);
+  assert.match(refused.stderr, new RegExp(`fetches main, ${branch} from origin, not other`));
+
+  // pull cannot reach origin; the shim names the way that can.
+  const pull = await f.shim('git', ['pull']);
+  assert.equal(pull.status, 126);
+  assert.match(pull.stderr, /git fetch origin goes through the broker/);
+});
+
+test('the broker fetches only from the recorded repository, and a local origin is fetched in the sandbox', async (t) => {
+  const f = await pushFixture(t);
+  const r = await f.raw({ fetch: {} });
+  assert.equal(r.code, 1);
+  assert.match(r.stderr, /records no repository/);
+  f.h.ok(['project', 'set', '--repo', 'acme/demo', '--agent', 'owner']);
+  f.h.git(['remote', 'set-url', 'origin', 'https://github.com/acme/other.git']);
+  const other = await f.raw({ fetch: {} });
+  assert.equal(other.code, 1);
+  assert.match(other.stderr, /not the project's repository acme\/demo/);
+  // A path on this machine runs as git's own fetch.
+  f.h.git(['remote', 'set-url', 'origin', f.remote]);
+  const local = await f.shim('git', ['fetch', 'origin']);
+  assert.equal(local.status, 0, local.stderr);
+  assert.doesNotMatch(local.stderr, /tower-crane/);
+});
+
 test('only a role whose agent file pushes can push through the broker, and only to the recorded repository', async (t) => {
   const f = await pushFixture(t, { role: 'reviewer' });
   const sha = f.h.git(['rev-parse', 'HEAD'], f.wt.path);
