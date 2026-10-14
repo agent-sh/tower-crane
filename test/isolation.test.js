@@ -424,7 +424,11 @@ test('research Claude gets native or explicit web MCP tools with worker file and
   assert.ok(native.args[native.args.indexOf('--allowedTools') + 1].includes('WebSearch'));
   assert.ok(native.args[native.args.indexOf('--allowedTools') + 1].includes('WebFetch'));
   assert.deepEqual(filesystem(native), filesystem(worker));
-  assert.deepEqual(native.settings.sandbox.network.allowedDomains, ['*']);
+  // Found 2026-10-14: ['*'], which Claude Code refuses as too broad, left
+  // its proxy no host to allow. The list names GitHub's hosts and npm's.
+  const hosts = native.settings.sandbox.network.allowedDomains;
+  for (const d of ['github.com', 'api.github.com', 'codeload.github.com', 'objects.githubusercontent.com', 'raw.githubusercontent.com', 'uploads.github.com', 'registry.npmjs.org']) assert.ok(hosts.includes(d), d);
+  assert.ok(!hosts.includes('*') && hosts.every(require('../lib/spawn-settings').domainPattern), `every entry is a pattern claude takes: ${hosts}`);
   assert.ok(native.memory.join('\n').includes('Use the network'));
   h.ok(['ladder', 'set', 'research', '--web-mcp', '{"name":"harness-web","command":"node","args":["/configured/server.mjs"]}']);
   spawn(h, u, 'research');

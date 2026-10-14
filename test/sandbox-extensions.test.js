@@ -409,11 +409,80 @@ function writeClaudeStub(bin, out) {
     `#!${process.execPath}`, "'use strict';",
     'const fs = require("node:fs"), path = require("node:path");',
     'const settings = JSON.parse(fs.readFileSync(path.join(process.env.CLAUDE_CONFIG_DIR, "settings.json"), "utf8"));',
-    `fs.writeFileSync(${JSON.stringify(out)}, JSON.stringify({ sandbox: settings.sandbox, env: { XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR, DBUS_SESSION_BUS_ADDRESS: process.env.DBUS_SESSION_BUS_ADDRESS } }));`,
+    `fs.writeFileSync(${JSON.stringify(out)}, JSON.stringify({ sandbox: settings.sandbox, env: { XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR, DBUS_SESSION_BUS_ADDRESS: process.env.DBUS_SESSION_BUS_ADDRESS }, tmp: { TMPDIR: process.env.TMPDIR, TMP: process.env.TMP, TEMP: process.env.TEMP } }));`,
     'console.log("bus probe passed");', '',
   ].join('\n');
   fs.writeFileSync(path.join(bin, 'claude'), stub, { mode: 0o755 });
 }
+
+test('claude: the sandbox allows GitHub, npm, the remotes\' hosts and sandbox.domains, and refuses a pattern claude does not take', { skip: NO_STUBS }, (t) => {
+  // Owner decision 2026-10-14: an explicit list in place of ['*'], which
+  // claude's proxy honors as every host.
+  const h = setup(t, 'claude');
+  const bin = path.join(h.base, 'bin');
+  fs.mkdirSync(bin);
+  const out = path.join(h.base, 'result.json');
+  writeClaudeStub(bin, out);
+  const env = { ...h.env, PATH: `${bin}${path.delimiter}${process.env.PATH}`, CLAUDE_CONFIG_DIR: '' };
+  const wt = h.json(['worktree', 'T1']).path;
+  for (const args of [['remote', 'add', 'mirror', 'https://git.example.org/acme/app.git'], ['remote', 'set-url', '--add', '--push', 'mirror', 'git@push.example.net:acme/app.git'],
+    ['remote', 'add', 'intranet', 'ssh://gitserver/acme/app.git']]) h.git(['-C', wt, ...args]);
+  const domains = () => {
+    releaseExited(h);
+    h.ok(['spawn', '--task', 'T1', '--wait'], { env });
+    return JSON.parse(fs.readFileSync(out, 'utf8')).sandbox.network.allowedDomains;
+  };
+  const base = domains();
+  for (const d of ['github.com', 'api.github.com', 'codeload.github.com', 'objects.githubusercontent.com', 'raw.githubusercontent.com', 'uploads.github.com', 'registry.npmjs.org', 'git.example.org', 'push.example.net']) {
+    assert.ok(base.includes(d), `${d} in ${base}`);
+  }
+  assert.ok(!base.includes('*') && !base.includes('gitserver'), 'no bare *, and no single-label host claude cannot name');
+  for (const bad of ['*.com', 'https://pypi.org', 'pypi', 'a.b:0', '*.*.org']) {
+    const r = h.run(['project', 'set', '--sandbox', JSON.stringify({ domains: [bad] })]);
+    assert.notEqual(r.code, 0, `${bad} is refused`);
+    assert.match(r.stderr, /sandbox\.domains/);
+  }
+  h.ok(['project', 'set', '--sandbox', JSON.stringify({ domains: ['pypi.org', '*.pythonhosted.org'] })]);
+  h.ok(['ladder', 'set', 'medium', '--sandbox', JSON.stringify({ domains: ['proxy.golang.org:443'] })]);
+  const extended = domains();
+  for (const d of ['pypi.org', '*.pythonhosted.org', 'proxy.golang.org:443', 'github.com']) assert.ok(extended.includes(d), `${d}: a rung adds to the project's list`);
+  // * is the explicit opt-in to every host, which claude's proxy honors.
+  h.ok(['ladder', 'set', 'medium', '--sandbox', JSON.stringify({ domains: ['*'] })]);
+  assert.ok(domains().includes('*'));
+});
+
+test('claude: a sandboxed agent gets a temp directory of its own that its commands reach, where claude puts its proxy sockets', { skip: NO_STUBS }, (t) => {
+  // Found 2026-10-14: claude makes its proxy bridge sockets in TMPDIR, and
+  // with the caller's under the home, which the sandbox hides, every https
+  // request from a command failed with "Proxy CONNECT aborted".
+  const h = setup(t, 'claude');
+  const bin = path.join(h.base, 'bin');
+  fs.mkdirSync(bin);
+  const out = path.join(h.base, 'result.json');
+  writeClaudeStub(bin, out);
+  const caller = path.join(h.base, 'caller-tmp');
+  fs.mkdirSync(caller);
+  // A cache root short enough for claude's 73-byte socket bound.
+  const cache = fs.mkdtempSync(path.join(os.homedir(), '.cache', 'tcl-'));
+  t.after(() => fs.rmSync(cache, { recursive: true, force: true }));
+  const spawnSeen = (xdg, fx = h) => {
+    releaseExited(fx);
+    fx.ok(['spawn', '--task', 'T1', '--wait'], { env: { ...fx.env, PATH: `${bin}${path.delimiter}${process.env.PATH}`, CLAUDE_CONFIG_DIR: '', TMPDIR: caller, TMP: caller, TEMP: caller, XDG_CACHE_HOME: xdg } });
+    return JSON.parse(fs.readFileSync(out, 'utf8'));
+  };
+  const seen = spawnSeen(cache);
+  const tmp = seen.tmp.TMPDIR;
+  assert.ok(tmp && tmp !== caller && tmp.startsWith(fs.realpathSync(cache) + path.sep), `the agent's own: ${tmp}`);
+  assert.deepEqual([seen.tmp.TMP, seen.tmp.TEMP], [tmp, tmp]);
+  assert.ok(Buffer.byteLength(path.join(tmp, 'claude-socks-0123456789abcdef.sock')) <= 108, 'claude\'s bridge socket fits');
+  assert.ok(seen.sandbox.filesystem.allowRead.includes(tmp) && seen.sandbox.filesystem.allowWrite.includes(tmp), 'its commands reach the sockets and write claude\'s cwd files there');
+  assert.ok(fs.lstatSync(tmp).isDirectory());
+  // Under a root too deep for the sockets, the caller's TMPDIR stays. A
+  // fresh task, since a worker keeps the scratch its first spawn recorded.
+  const other = setup(t, 'claude');
+  const deep = spawnSeen(path.join(other.base, 'a-cache-root-deep-enough-that-no-socket-path-fits-under-it'), other);
+  assert.equal(deep.tmp.TMPDIR, caller);
+});
 
 test('claude: sandbox.session_bus grants the bus socket, read and write, and off it grants nothing', { skip: NO_STUBS }, (t) => {
   const h = setup(t, 'claude');

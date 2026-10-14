@@ -211,6 +211,27 @@ function networkProbe(npmDir, done) {
 // claude's sandbox has no network of its own: HTTPS goes through its proxy
 // (HTTPS_PROXY), which resolves names, so getent and dns.lookup fail there
 // with /run hidden or not (measured 2026-10-14: getent exit 2, EAI_AGAIN).
+// Part of a probe script: git push --dry-run of repo's HEAD over https to a
+// ref the remote lacks, with the gh token spawn hands the agent, so git
+// authenticates and nothing lands. It runs git itself, not the agent's
+// shim, which refuses a push option to a role whose agent file allows no
+// push: the probe checks the network and the token, not that policy.
+const REAL_GIT = cp.spawnSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).stdout.trim() || 'git';
+function pushProbe(repo) {
+  const ref = `refs/heads/tower-crane/network-probe-${process.pid}`;
+  return `{const r=cp.spawnSync(${JSON.stringify(REAL_GIT)},["push","--dry-run","https://github.com/agent-sh/tower-crane.git","HEAD:${ref}"],{cwd:${JSON.stringify(repo)},encoding:"utf8"});o.pushDryRun=r.status;if(r.status!==0)o.pushDryRunErr=String(r.stderr).trim().split("\\n").slice(-2).join(" | ")}`;
+}
+
+// A cache root short enough that a claude agent's temp directory under it
+// holds claude's proxy bridge sockets (73 bytes, claudeTmp): a test's own
+// root is deeper, and with the caller's TMPDIR hidden no command reaches the
+// proxy. Removed with the test.
+function shortCache(t) {
+  const dir = fs.mkdtempSync(path.join(os.homedir(), '.cache', 'tcl-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  return dir;
+}
+
 function assertNetwork(seen, label) {
   if (!label.startsWith('claude')) {
     assert.equal(seen.getent, 0, `${label}: getent hosts resolves`);
@@ -279,14 +300,14 @@ for (const [harness, rung] of [['claude', 'small'], ['claude', 'easy'], ['codex'
       + `o.npm=run("npm",["install","--no-audit","--no-fund","--cache",${JSON.stringify(path.join(dir, 'npm-cache'))}],${JSON.stringify(pkg)});`
       + `o.test=run("npm",["test"],${JSON.stringify(pkg)});`
       + `o.push=run("git",["push",${JSON.stringify(bare)},"HEAD:refs/heads/probe"],${JSON.stringify(repo)});`
-      + networkProbe(pkg, `fs.writeFileSync(${JSON.stringify(out)},JSON.stringify(o))`);
+      + pushProbe(repo) + networkProbe(pkg, `fs.writeFileSync(${JSON.stringify(out)},JSON.stringify(o))`);
     h.ok(['brief', 'set', 'T1', '-'], {
       // Models declined the probe when it read as reading credentials; it
       // records only whether each read failed, never a file's content.
       input: `Sandbox probe set up by the owner. It checks that your sandbox blocks the user's credential files: each read is expected to fail, and the command records only the error code, never a file's content. It also checks npm, git and the network. Run exactly this one command with your command tool, then reply with its exit code and stop. Do not use tower-crane.\n\n${node} -e '${script}'\n`,
     });
     pinLiveRung(h, harness, rung);
-    const env = { ...h.env, HOME: home, USERPROFILE: home, CLAUDE_CONFIG_DIR: '', CODEX_HOME: '', XDG_CACHE_HOME: path.join(h.base, 'cache') };
+    const env = { ...h.env, HOME: home, USERPROFILE: home, CLAUDE_CONFIG_DIR: '', CODEX_HOME: '', XDG_CACHE_HOME: shortCache(t) };
     const stop = churn(t, h);
     const r = await h.runAsync(['spawn', '--role', rung, '--task', 'T1', '--wait'], { env }).finally(stop);
     // A model that refuses the prompt never runs the command, so the sandbox
@@ -305,6 +326,7 @@ for (const [harness, rung] of [['claude', 'small'], ['claude', 'easy'], ['codex'
     assert.equal(seen.push, 0, 'git push to a local repository runs');
     assert.equal(h.git(['--git-dir', bare, 'rev-parse', 'probe']), h.git(['-C', repo, 'rev-parse', 'HEAD']));
     assertNetwork(seen, `${harness} ${rung}`);
+    assert.equal(seen.pushDryRun, 0, `${harness} ${rung}: git pushes over https with the handed gh token`);
   });
 }
 
@@ -508,10 +530,7 @@ test('a real codex sandbox resolves names, fetches and pushes over https and ins
   fs.writeFileSync(path.join(pkg, 'package.json'), '{"name":"probe","version":"1.0.0","private":true}\n');
   const repo = path.join(dir, 'repo');
   for (const args of [['init', '-q', repo], ['-C', repo, 'commit', '-q', '--allow-empty', '-m', 'probe']]) h.git(args);
-  // A ref that does not exist on the remote, so the dry run would create it, and nothing is sent.
-  const ref = `refs/heads/tower-crane/network-probe-${process.pid}`;
-  const script = `const fs=require("fs"),cp=require("child_process");const o={};`
-    + `{const r=cp.spawnSync("git",["push","--dry-run","https://github.com/agent-sh/tower-crane.git","HEAD:${ref}"],{cwd:${JSON.stringify(repo)},encoding:"utf8"});o.pushDryRun=r.status;if(r.status!==0)o.pushDryRunErr=String(r.stderr).trim().split("\\n").slice(-2).join(" | ")}`
+  const script = `const fs=require("fs"),cp=require("child_process");const o={};` + pushProbe(repo)
     + networkProbe(pkg, `fs.writeFileSync(${JSON.stringify(out)},JSON.stringify(o))`);
   const bin = standInCodex(h, script);
   // The owner's home, so spawn finds the gh login to hand over; caches stay in the test.
@@ -526,3 +545,43 @@ test('a real codex sandbox resolves names, fetches and pushes over https and ins
   assert.equal(seen.pushDryRun, 0, 'git pushes over https with the handed gh token');
 });
 
+
+// A research agent fetches sources with WebFetch, which runs in claude's
+// process and is not gated by the sandbox's host list, and its commands
+// reach GitHub, npm and the hosts sandbox.domains adds on its rung, and no
+// other. Found 2026-10-14: the old ['*'] allowed no host at all.
+test('a real claude research agent fetches any page with WebFetch, and its commands reach GitHub, npm and the rung\'s sandbox.domains', { skip: process.env.TOWER_CRANE_LIVE_CLAUDE !== '1' && 'set TOWER_CRANE_LIVE_CLAUDE=1 to run against the real claude CLI', timeout: 600000 }, async (t) => {
+  const h = makeRepo(t);
+  h.init();
+  h.ok(['task', 'add', '--title', 'Research network probe', '--acceptance', 'the network works for research']);
+  const dir = results(h);
+  const out = path.join(dir, 'research-probe.json');
+  const pkg = path.join(dir, 'pkg');
+  fs.mkdirSync(pkg);
+  fs.writeFileSync(path.join(pkg, 'package.json'), '{"name":"probe","version":"1.0.0","private":true}\n');
+  const repo = path.join(dir, 'repo');
+  for (const args of [['init', '-q', repo], ['-C', repo, 'commit', '-q', '--allow-empty', '-m', 'probe']]) h.git(args);
+  // The page's status and the proxy's answer to CONNECT.
+  const curl = (url) => `cp.spawnSync("curl",["-sS","-o","/dev/null","-w","%{http_code} %{http_connect}","--max-time","30",${JSON.stringify(url)}],{encoding:"utf8"}).stdout`;
+  const script = `const fs=require("fs"),cp=require("child_process");const o={};` + pushProbe(repo)
+    + `o.listed=${curl('https://www.wikipedia.org/')};o.unlisted=${curl('https://pypi.org/')};`
+    + networkProbe(pkg, `fs.writeFileSync(${JSON.stringify(out)},JSON.stringify(o))`);
+  h.ok(['brief', 'set', 'T1', '-'], {
+    input: `Sandbox probe set up by the owner. Do exactly two things, then stop. Do not use tower-crane.\n\n1. Run this one command with your Bash tool:\n\n${node} -e '${script}'\n\n2. Fetch https://www.rfc-editor.org/rfc/rfc9110.html with your WebFetch tool and quote the page's title in your reply.\n`,
+  });
+  pinLiveRung(h, 'claude', 'research');
+  h.ok(['ladder', 'set', 'research', '--sandbox', JSON.stringify({ domains: ['www.wikipedia.org'] })]);
+  const home = os.homedir();
+  const env = { ...h.env, HOME: home, USERPROFILE: home, CLAUDE_CONFIG_DIR: '', XDG_CACHE_HOME: shortCache(t) };
+  const r = await h.runAsync(['spawn', '--role', 'research', '--task', 'T1', '--wait'], { env });
+  assert.equal(r.code, 0, `${r.stderr}\n${agentLog(h)}`);
+  assert.ok(fs.existsSync(out), `the probe ran\n${agentLog(h)}`);
+  const seen = JSON.parse(fs.readFileSync(out, 'utf8'));
+  console.log(`claude research probe: ${JSON.stringify(seen)}`);
+  assertNetwork(seen, 'claude research');
+  assert.equal(seen.pushDryRun, 0, 'git pushes over https with the handed gh token');
+  assert.equal(seen.listed, '200 200', 'a host sandbox.domains adds on the rung is reachable');
+  assert.equal(seen.unlisted, '000 403', 'claude\'s proxy refuses a host on no list');
+  // A host on no list, so only WebFetch, outside the sandbox, reaches it.
+  assert.match(agentLog(h), /HTTP Semantics/, `WebFetch read an arbitrary page\n${agentLog(h)}`);
+});
