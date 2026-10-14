@@ -629,8 +629,10 @@ function waitFindings(text) {
 // Generated fixture scripts in strings and templates are checked too.
 const KILL_CALL = /\bprocess\.kill\s*\(/g;
 const KILL_ALIASES = [
-  // A read that is neither a call nor the interposer's own assignment.
-  /\bprocess\s*(?:\?\.|\.)\s*kill\b(?!\s*\()(?!\s*=(?!=))/g,
+  // A value assigned, passed or returned, as opposed to a call, the
+  // interposer's own assignment or prose that names process.kill.
+  /(?<=(?:[=(,:?[]|=>|&&|\|\||\breturn)\s*)process\s*\??\.\s*kill\b(?!\s*(?:\(|\?\.\s*\(|\.|=(?!=)))/g,
+  /\bprocess\s*\??\.\s*kill\s*\.\s*(?:call|apply|bind)\b/g,
   /\bprocess\s*(?:\?\.\s*)?\[\s*(['"`])kill\1\s*\]/g,
   /\{[^{}]*\bkill\b[^{}]*\}\s*=\s*process\b(?!\s*[.[?])/g,
 ];

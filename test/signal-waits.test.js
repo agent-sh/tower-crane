@@ -426,6 +426,7 @@ test('tests signal only checked pids, so a pid file read before it is written ca
   assert.equal(killPid(process.pid, 0), true);
   // The lint scans this file too, so the calls it judges are assembled here.
   const kill = ['process', 'kill'].join('.');
+  const proc = 'process';
   for (const source of [
     `${kill}(Number(fs.readFileSync(file, 'utf8')), 'SIGKILL');`,
     `try { ${kill}(-Number(fs.readFileSync(out, 'utf8')), 'SIGKILL'); } catch {}`,
@@ -435,9 +436,10 @@ test('tests signal only checked pids, so a pid file read before it is written ca
     // An alias reaches the same call with a pid the check cannot see.
     `const signal = ${kill};\nsignal(Number(fs.readFileSync(file, 'utf8')), 'SIGKILL');`,
     `${kill}.call(process, Number(text), 'SIGKILL');`,
-    `process['kill'](Number(text), 'SIGKILL');`,
-    'process["kill"](pid);',
-    'const { kill: signal } = process;',
+    `${proc}['kill'](Number(text), 'SIGKILL');`,
+    `${proc}["kill"](pid);`,
+    `const { kill: signal } = ${proc};`,
+    `[pid].forEach(${kill});`,
     `fs.writeFileSync(hook, \`const forward = ${kill};\\nforward(Number(process.argv[2]));\`);`,
   ]) {
     assert.equal(killFindings(source).length, 1, source);
@@ -451,13 +453,14 @@ test('tests signal only checked pids, so a pid file read before it is written ca
     `killPid(pid, 'SIGTERM'); // not ${kill}(0), which signals the group`,
     `fs.writeFileSync(script, \`run();\\nstop(); // ${kill}(-pid) would reach the group\\n\`);`,
     `${kill} = function interposed(pid, signal) { return true; };`,
+    `test('the ${kill} interposers forward other pids', () => {});`,
   ]) {
     assert.deepEqual(killFindings(source), [], source);
   }
   assert.deepEqual(killFindings(`const forward = ${kill};`, { aliases: false }), [], 'an interposer keeps the original to forward to');
 });
 
-test('only the named process.kill interposers may hold an alias of it', (t) => {
+test('only the named interposers may hold an alias of the signal call', (t) => {
   const { base } = makeRepo(t);
   const alias = `const forward = ${['process', 'kill'].join('.')};\n`;
   fs.mkdirSync(path.join(base, 'test', 'fixtures'), { recursive: true });
