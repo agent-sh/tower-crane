@@ -7,11 +7,12 @@ const path = require('node:path');
 const { cachedFixture, makeRepo } = require('./helpers');
 const L = require('../lib/ladder');
 const Authority = require('../lib/authority');
+const { readPublished } = require('./atomic-file');
 
 const asOrchestrator = { env: { TOWER_CRANE_AGENT: 'orchestrator' } };
 const decisions = h => h.readState('decisions.json').decisions;
 const audits = h => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse).filter(e => e.cmd === 'setting');
-const config = h => fs.existsSync(h.userConfig) ? fs.readFileSync(h.userConfig, 'utf8') : null;
+const config = h => fs.existsSync(h.userConfig) ? readPublished(h.userConfig, 'utf8') : null;
 
 function setup(t) {
   return cachedFixture(t, 'personal-authority', h => {

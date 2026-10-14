@@ -10,6 +10,7 @@ const zlib = require('node:zlib');
 const { makeRepo, pinRung, PTY_AVAILABLE } = require('./helpers');
 const { gateFixture } = require('./gate-helpers');
 const { shellQuote } = require('../lib/gates/common');
+const { readPublished } = require('./atomic-file');
 
 // A sandboxed worker may write the repository's git directory, so every
 // command its config or hooks name is planted here and none may run in git
@@ -56,7 +57,7 @@ function plant(h) {
   };
   for (const [key, value] of Object.entries(settings)) h.git(['config', key, value]);
   ageLooseObjects(gitDir);
-  return { cmd, ran: () => (fs.existsSync(marker) ? fs.readFileSync(marker, 'utf8').trim().split('\n') : []) };
+  return { cmd, ran: () => (fs.existsSync(marker) ? readPublished(marker, 'utf8').trim().split('\n') : []) };
 }
 
 // gc --auto counts the loose objects in objects/17.
@@ -162,7 +163,7 @@ test('a planted commondir in the common directory stops git the CLI and gates ru
   const script = path.join(h.base, 'planted.js');
   fs.writeFileSync(script, `require('node:fs').appendFileSync(${JSON.stringify(marker)}, process.argv[2] + '\\n');\n`);
   const cmd = (name) => `${shellQuote(process.execPath)} ${shellQuote(script)} ${name}`;
-  const ran = () => (fs.existsSync(marker) ? fs.readFileSync(marker, 'utf8').trim().split('\n') : []);
+  const ran = () => (fs.existsSync(marker) ? readPublished(marker, 'utf8').trim().split('\n') : []);
   const other = path.join(h.base, 'other');
   fs.cpSync(h.repo, other, { recursive: true });
   h.git(['config', 'core.fsmonitor', cmd('fsmonitor')], other);
@@ -215,7 +216,7 @@ function redirectFixture(t) {
   h.ok(['project', 'set', '--tests-cmd', `${shellQuote(process.execPath)} ${shellQuote(script)} tests-cmd`, ...state]);
   h.ok(['task', 'add', '--title', 'Other state', '--acceptance', 'works', ...state]);
   return { h, other, planted: path.join(h.repo, '.git', 'commondir'),
-    ran: () => (fs.existsSync(marker) ? fs.readFileSync(marker, 'utf8').trim().split('\n') : []) };
+    ran: () => (fs.existsSync(marker) ? readPublished(marker, 'utf8').trim().split('\n') : []) };
 }
 
 // The guard reads the files before git does; a commondir that appears in
@@ -390,7 +391,7 @@ test('the caller\'s GIT_SSH and SSH_ASKPASS still run under the command-scope de
   const marker = path.join(h.base, 'caller-ran');
   const script = path.join(h.base, 'caller.js');
   fs.writeFileSync(script, `require('node:fs').appendFileSync(${JSON.stringify(marker)}, process.argv[2] + '\\n');\nconsole.log('x');\n`);
-  const ran = () => (fs.existsSync(marker) ? fs.readFileSync(marker, 'utf8').trim().split('\n') : []);
+  const ran = () => (fs.existsSync(marker) ? readPublished(marker, 'utf8').trim().split('\n') : []);
   const bin = path.join(h.base, 'caller bin');
   fs.mkdirSync(bin);
   const program = (name) => {
@@ -440,7 +441,7 @@ test('a config scan is reused until a file it read changes', (t) => {
   h.git(['worktree', 'add', '-q', '--detach', wt]);
   const trace = path.join(h.base, 'trace');
   const env = { ...h.env, GIT_TRACE: trace };
-  const count = (text) => (fs.existsSync(trace) ? fs.readFileSync(trace, 'utf8').split('\n').filter((l) => l.includes(text)).length : 0);
+  const count = (text) => (fs.existsSync(trace) ? readPublished(trace, 'utf8').split('\n').filter((l) => l.includes(text)).length : 0);
   const scans = () => count('config --list --show-scope');
   const parses = () => count('config --file - --no-includes');
   const { spawnSync } = require('../lib/commands');
@@ -527,7 +528,7 @@ test('conditional includes cannot add a driver the config scan misses', (t) => {
     h.git(['config', `includeIf.${condition}.path`, `${name}.inc`]);
   }
   fs.writeFileSync(path.join(gitDir, 'info', 'attributes'), '*.js filter=gitdir\n*.json filter=branch\nvalue.js filter=branch\n');
-  const ran = () => (fs.existsSync(marker) ? fs.readFileSync(marker, 'utf8').trim().split('\n') : []);
+  const ran = () => (fs.existsSync(marker) ? readPublished(marker, 'utf8').trim().split('\n') : []);
 
   h.ok(['worktree', 'T2', '--agent', 'orchestrator']);
   for (const type of ['tests', 'clean']) {
@@ -676,7 +677,7 @@ function rowRepo(h) {
       h.git(['config', 'lfs.url', LFS_URL]);
       h.git(['config', 'lfs.transfer.maxretries', '1']);
     },
-    ran: () => (fs.existsSync(marker) ? fs.readFileSync(marker, 'utf8').trim().split('\n') : []),
+    ran: () => (fs.existsSync(marker) ? readPublished(marker, 'utf8').trim().split('\n') : []),
     clear: () => fs.rmSync(marker, { force: true }),
   };
 }

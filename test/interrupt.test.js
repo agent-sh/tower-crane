@@ -1,6 +1,7 @@
 'use strict';
 
 const { waitOnRepo, killPid } = require('./signals');
+const { readPublished } = require('./atomic-file');
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -33,6 +34,7 @@ if (!session) {
 ` : ''}
 const task = JSON.parse(cli('task', 'show', 'T1', '--json'));
 if (!task.claim) cli('claim', 'T1');
+// read-published: this harness writes the file in place; nothing replaces it.
 const previous = fs.existsSync(seen) ? JSON.parse(fs.readFileSync(seen)) : [];
 previous.push({ agent: process.env.TOWER_CRANE_AGENT, session, prompt, cwd: process.cwd() });
 fs.writeFileSync(seen, JSON.stringify(previous));
@@ -49,7 +51,7 @@ if (!session) {
   h.ok(['ladder', 'set', 'medium', '--harness', 'command', '--clear', 'profile', '--clear', 'effort',
     '--command', JSON.stringify([process.execPath, script, BIN, seen, '{session}', '{prompt}']),
     '--supervision', JSON.stringify({ retries: 1, backoff_ms: 30000, max_backoff_ms: 30000 })]);
-  h.seen = () => fs.existsSync(seen) ? JSON.parse(fs.readFileSync(seen)) : [];
+  h.seen = () => fs.existsSync(seen) ? JSON.parse(readPublished(seen)) : [];
   h.finish = () => fs.writeFileSync(finish, '');
   return h;
 }

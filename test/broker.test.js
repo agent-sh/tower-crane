@@ -12,6 +12,7 @@ const { stacked } = require('./stack-fixture');
 const B = require('../lib/broker');
 const harnessHooks = require('../lib/harness-hooks');
 const { resolveCommand, parseOptions, GLOBAL } = require('../bin/tower-crane');
+const { readPublished } = require('./atomic-file');
 
 function scratch(t) {
   fs.mkdirSync(TMP_ROOT, { recursive: true });
@@ -275,7 +276,7 @@ test('closing the broker stops the commands it is running and what they started'
     broker?.close();
     for (const [k, v] of Object.entries(saved)) if (v === undefined) delete process.env[k]; else process.env[k] = v;
     // Read the file, not `started`: a test that fails before reading it still leaves them running.
-    const text = pids && fs.existsSync(pids) ? fs.readFileSync(pids, 'utf8') : '';
+    const text = pids && fs.existsSync(pids) ? readPublished(pids, 'utf8') : '';
     const recorded = text ? JSON.parse(text) : [];
     for (const pid of recorded.filter((p) => detachedAlive({ pid: p }))) killPid(pid, 'SIGKILL');
   });
@@ -299,7 +300,7 @@ Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0);
   broker = await B.start(job);
   const answer = B.forward(job.broker, ['task', 'note', 'T1', 'slow'], state).then((r) => ({ r }), (e) => ({ e }));
   const until = (check) => waitUntil(check, { paths: [base], signal: t.signal });
-  await until(() => fs.existsSync(pids) && fs.readFileSync(pids, 'utf8').length > 0, 'the brokered command started');
+  await until(() => fs.existsSync(pids) && readPublished(pids, 'utf8').length > 0, 'the brokered command started');
   started = JSON.parse(fs.readFileSync(pids, 'utf8'));
   broker.close();
   await until(() => started.every((pid) => !detachedAlive({ pid })), 'the command and its own process group stop with the broker');
@@ -351,7 +352,7 @@ for (const name of ['spawnSync', 'execFileSync', 'spawn', 'execFile']) {
   const r = await B.forward(job.broker, ['task', 'note', 'T1', 'brokered'], h.state);
   assert.equal(r.code, 0, r.stderr);
   assert.deepEqual(h.readState('tasks.json').tasks[0].notes.map((n) => [n.agent, n.text]), [['worker-T1-1', 'brokered']]);
-  assert.equal(fs.existsSync(log) ? fs.readFileSync(log, 'utf8') : '', '', 'the broker ran git');
+  assert.equal(fs.existsSync(log) ? readPublished(log, 'utf8') : '', '', 'the broker ran git');
 });
 
 test('a worker cannot have the broker run its tests, its cleanup or git', () => {
@@ -1106,7 +1107,7 @@ test('the broker stops a silent gh and a waiting push when the agent hangs up', 
   const pidFile = path.join(f.h.base, 'gh.pid');
   hostGh(t, path.join(f.h.base, 'silent-bin'), `require('node:fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));\nsetInterval(() => {}, 1000);\n`);
   const gh = shimChild(f, ['gh', 'pr', 'checks']);
-  await waitUntil(() => fs.existsSync(pidFile) && fs.readFileSync(pidFile, 'utf8'), { paths: [pidFile], alive: gh.child, what: () => `gh started\n${gh.stderr()}` });
+  await waitUntil(() => fs.existsSync(pidFile) && readPublished(pidFile, 'utf8'), { paths: [pidFile], alive: gh.child, what: () => `gh started\n${gh.stderr()}` });
   const pid = Number(fs.readFileSync(pidFile, 'utf8'));
   gh.child.kill('SIGKILL');
   await gh.exited;
@@ -1214,7 +1215,7 @@ if (args[0] === 'pr' && args[1] === 'view' && args.includes('number,headRefName,
   delete process.env.GITHUB_TOKEN;
   process.env.SECRET_PROBE = 'host-secret';
   t.after(() => { for (const [k, v] of Object.entries(saved)) if (v === undefined) delete process.env[k]; else process.env[k] = v; });
-  return () => (fs.existsSync(log) ? fs.readFileSync(log, 'utf8').trim().split('\n').map((l) => JSON.parse(l)) : []);
+  return () => (fs.existsSync(log) ? readPublished(log, 'utf8').trim().split('\n').map((l) => JSON.parse(l)) : []);
 }
 
 test('the broker runs gh only with a config directory no agent can write', async (t) => {

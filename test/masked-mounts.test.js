@@ -16,6 +16,7 @@ const path = require('node:path');
 const cp = require('node:child_process');
 const { ROOT, TMP_ROOT } = require('./helpers');
 const Placeholders = require('../lib/claude-sandbox-placeholders');
+const { readPublished } = require('./atomic-file');
 
 const SHIM = path.join(ROOT, 'lib', 'shim.js');
 const BWRAP = process.platform === 'linux'
@@ -128,7 +129,7 @@ function worker(t, src, prepare, { masks = true } = {}) {
         else if (stat.isDirectory() && fs.readdirSync(point).length === 0) fs.rmdirSync(point);
       } catch { /* already gone */ }
     }
-    return { ...r, trace: fs.existsSync(trace) ? fs.readFileSync(trace, 'utf8') : '' };
+    return { ...r, trace: fs.existsSync(trace) ? readPublished(trace, 'utf8') : '' };
   };
   return { wt, run, git: (args) => git(args, wt, sandboxEnv) };
 }

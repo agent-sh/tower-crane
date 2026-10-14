@@ -12,6 +12,7 @@ const os = require('node:os');
 const path = require('node:path');
 const cp = require('node:child_process');
 const { tempRoot } = require('./tmp-root');
+const { readPublished } = require('./atomic-file');
 
 const NAMES = ['google-chrome', 'google-chrome-stable', 'chromium', 'chromium-browser', 'chrome'];
 
@@ -207,7 +208,7 @@ async function spawnChrome(profile) {
   try {
     port = await waitUntil(() => {
       if (failure) throw new Error(failure);
-      return fs.existsSync(portFile) && fs.readFileSync(portFile, 'utf8').split('\n')[0];
+      return fs.existsSync(portFile) && readPublished(portFile, 'utf8').split('\n')[0];
     }, { paths: [portFile] });
   } catch (error) {
     try { await stop(); } finally { remove(); }

@@ -153,12 +153,22 @@ function secondArgument(text, start) {
   return args[1];
 }
 
+// Runs `fn` with process.platform reporting `name`.
+async function onPlatform(name, fn) {
+  const platform = Object.getOwnPropertyDescriptor(process, 'platform');
+  Object.defineProperty(process, 'platform', { ...platform, value: name });
+  try {
+    return await fn();
+  } finally {
+    Object.defineProperty(process, 'platform', platform);
+  }
+}
+
 // Windows refuses to open a file while a rename replaces it or its removal is
 // pending. Runs `read` as on Windows with the first open of `file` refused
 // with `code`, and returns what it read and how many opens were refused.
 async function readRefusedOnce(file, code, read) {
   const { readFileSync } = fs;
-  const platform = Object.getOwnPropertyDescriptor(process, 'platform');
   let refused = 0;
   fs.readFileSync = function refuseOnce(target, ...rest) {
     if (path.resolve(String(target)) === path.resolve(file) && !refused) {
@@ -167,12 +177,10 @@ async function readRefusedOnce(file, code, read) {
     }
     return readFileSync.call(this, target, ...rest);
   };
-  Object.defineProperty(process, 'platform', { ...platform, value: 'win32' });
   try {
-    return { value: await read(), refused };
+    return await onPlatform('win32', async () => ({ value: await read(), refused }));
   } finally {
     fs.readFileSync = readFileSync;
-    Object.defineProperty(process, 'platform', platform);
   }
 }
 
@@ -202,31 +210,91 @@ test('readers of published files read through a Windows sharing refusal', async 
 test('a published read waits out a Windows refusal only', async () => {
   const refused = (code) => ({ readFileSync() { throw Object.assign(new Error(code), { code }); } });
   // Elsewhere a refusal is a real permission error, and a missing file is the caller's answer everywhere.
-  assert.throws(() => readPublished('x', 'utf8', refused('EPERM')), { code: 'EPERM' });
-  const missing = await readRefusedOnce('unused', 'EPERM', () => {
-    try { return readPublished('x', 'utf8', refused('ENOENT')); } catch (error) { return error.code; }
+  for (const platform of ['linux', 'darwin']) {
+    await onPlatform(platform, () => {
+      let calls = 0;
+      const impl = { readFileSync() { calls++; return refused('EPERM').readFileSync(); } };
+      assert.throws(() => readPublished('x', 'utf8', impl), { code: 'EPERM' }, platform);
+      assert.equal(calls, 1, `${platform}: a refusal is not retried`);
+    });
+  }
+  await onPlatform('win32', () => {
+    assert.throws(() => readPublished('x', 'utf8', refused('ENOENT')), { code: 'ENOENT' });
   });
-  assert.equal(missing.value, 'ENOENT');
 });
 
-// A reader that takes a missing file for "not written yet" polls a file some
+// A reader that takes a missing file for "not written yet", by catching
+// ENOENT or by checking existsSync on the same path first, polls a file some
 // process publishes, so it opens it with readPublished. A read whose file no
 // process replaces says why in a `// read-published:` comment on its line or
 // the line before.
+const PLAIN_READ = /(?:^|[^\w.$]|\b(?:fs|real)\.|\)\.)readFileSync\(/g;
+
+// The source of a call's first argument, from the index just past its `(`.
+function firstArgument(text, start) {
+  let depth = 0;
+  for (let i = start; i < text.length; i++) {
+    const c = text[i];
+    if ('([{'.includes(c)) depth++;
+    else if (')]}'.includes(c) && depth-- === 0) return text.slice(start, i).trim();
+    else if (c === ',' && depth === 0) return text.slice(start, i).trim();
+  }
+  return null;
+}
+
+const existsArguments = (line) => [...line.matchAll(/\bexistsSync\(/g)].map((m) => firstArgument(line, m.index + m[0].length));
+
+function unpublishedReads(text) {
+  const lines = text.split('\n');
+  const found = [];
+  lines.forEach((line, i) => {
+    const reads = [...line.matchAll(PLAIN_READ)].map((m) => firstArgument(line, m.index + m[0].length));
+    if (!reads.length) return;
+    const handler = lines.slice(i, i + 3).join('\n');
+    // The guard is on the same line, opens the block the read is in, or is
+    // the condition a continued `?`, `&&` or `||` line completes.
+    const continues = /\{\s*$/.test(lines[i - 1] || '') || /^\s*(?:\?|&&|\|\|)/.test(line);
+    const guarded = [...existsArguments(line), ...(continues ? existsArguments(lines[i - 1]) : [])];
+    const missing = (/\bcatch\b/.test(handler) && /['"]ENOENT['"]/.test(handler)) || reads.some((r) => guarded.includes(r));
+    if (!missing) return;
+    const reason = (l) => /\/\/ read-published: \S/.test(lines[l] || '');
+    if (reason(i) || reason(i - 1)) return;
+    found.push(i + 1);
+  });
+  return found;
+}
+
+test('the published-read lint finds each form of a reader waiting for a file', () => {
+  const flagged = [
+    "try { x = fs.readFileSync(f, 'utf8'); } catch (e) { if (e.code === 'ENOENT') return; throw e; }", // read-published: lint sample
+    "const read = () => fs.existsSync(f) ? JSON.parse(fs.readFileSync(f, 'utf8')) : [];", // read-published: lint sample
+    "if (fs.existsSync(path.join(d, f))) {\n  data = JSON.parse(fs.readFileSync(path.join(d, f), 'utf8'));", // read-published: lint sample
+    "try { x = readFileSync(f); } catch (e) { if (e.code !== 'ENOENT') throw e; }", // read-published: lint sample
+    "try { x = real.readFileSync(f); } catch (e) { if (e.code !== 'ENOENT') throw e; }", // read-published: lint sample
+    "const x = fs.existsSync(f) && require('node:fs').readFileSync(f);", // read-published: lint sample
+    "const x = () => fs.existsSync(f)\n  ? fs.readFileSync(f, 'utf8') : '';", // read-published: lint sample
+  ];
+  for (const text of flagged) assert.equal(unpublishedReads(text).length, 1, text);
+  const clean = [
+    "const x = fs.existsSync(f) ? JSON.parse(readPublished(f, 'utf8')) : [];",
+    "const x = fs.readFileSync(f, 'utf8');",
+    "assert.ok(fs.existsSync(f), fs.readFileSync(log, 'utf8'));", // read-published: lint sample
+    "assert.ok(fs.existsSync(f));\nconst x = fs.readFileSync(f, 'utf8');", // read-published: lint sample
+    "// read-published: appended only.\ntry { x = fs.readFileSync(f); } catch (e) { if (e.code !== 'ENOENT') throw e; }",
+    "try { return impl.readFileSync(f); } catch (e) { if (e.code !== 'ENOENT') throw e; }",
+  ];
+  for (const text of clean) assert.deepEqual(unpublishedReads(text), [], text);
+});
+
 test('test readers that wait for a file open it with readPublished', () => {
   const found = [];
   const files = (dir) => fs.readdirSync(dir, { withFileTypes: true }).flatMap((entry) => entry.isDirectory()
     ? files(path.join(dir, entry.name)) : entry.name.endsWith('.js') ? [path.join(dir, entry.name)] : []);
   for (const file of files(__dirname).sort()) {
     const lines = fs.readFileSync(file, 'utf8').split('\n');
-    lines.forEach((line, i) => {
-      if (!/\bfs\.readFileSync\(/.test(line)) return;
-      const handler = lines.slice(i, i + 3).join('\n');
-      if (!/\bcatch\b/.test(handler) || !/['"]ENOENT['"]/.test(handler)) return;
-      const reason = (l) => /\/\/ read-published: \S/.test(lines[l] || '');
-      if (reason(i) || reason(i - 1)) return;
-      found.push(`${path.relative(path.dirname(__dirname), file)}:${i + 1}: ${line.trim()}`);
-    });
+    for (const line of unpublishedReads(lines.join('\n'))) {
+      found.push(`${path.relative(path.dirname(__dirname), file)}:${line}: ${lines[line - 1].trim()}`);
+    }
   }
   assert.deepEqual(found, [], 'read with readPublished from test/atomic-file.js, or say why no process replaces the file');
 });
