@@ -60,6 +60,56 @@ test('a JSON wait reads through a file a plain write has left half written', asy
   assert.equal(await writer.closed, 0, writer.stderr());
 });
 
+// A holder killed inside its lock leaves a lock naming a dead pid. Waiters
+// that find it at once must still take turns: the takeover lets one of them
+// remove it, and no second waiter removes the lock the first then took.
+test('waiters on a lock left by a dead holder take turns with updateJson', async (t) => {
+  const h = makeRepo(t);
+  const file = path.join(h.base, 'shared.json');
+  const go = path.join(h.base, 'go');
+  const WAITERS = 16;
+  const ROUNDS = 3;
+  const script = path.join(h.base, 'waiter.js');
+  fs.writeFileSync(script, `const fs = require('node:fs');
+const { updateJson } = require(${JSON.stringify(path.join(__dirname, 'atomic-file.js'))});
+const [ready, go, inside] = process.argv.slice(2);
+fs.writeFileSync(ready, '');
+const deadline = Date.now() + 300000;
+while (!fs.existsSync(go) && Date.now() < deadline) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1);
+updateJson(${JSON.stringify(file)}, (d) => {
+  try { fs.writeFileSync(inside, String(process.pid), { flag: 'wx' }); } catch { d.overlaps++; }
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20); // wait-allow: a hold long enough that a second holder meets the first
+  fs.rmSync(inside, { force: true });
+  d.updates++;
+  return d;
+});
+`);
+  fs.writeFileSync(file, JSON.stringify({ updates: 0, overlaps: 0 }));
+  const lockFile = path.join(h.base, '.shared.json.lock');
+  for (let round = 0; round < ROUNDS; round++) {
+    const dead = cp.spawnSync(process.execPath, ['-e', 'process.stdout.write(String(process.pid))'], { encoding: 'utf8' }).stdout;
+    fs.writeFileSync(lockFile, dead);
+    fs.rmSync(go, { force: true });
+    const waiters = Array.from({ length: WAITERS }, (_, i) => {
+      const ready = path.join(h.base, `ready-${round}-${i}`);
+      const child = cp.spawn(process.execPath, [script, ready, go, path.join(h.base, 'inside')], { stdio: ['ignore', 'ignore', 'pipe'] });
+      let stderr = '';
+      child.stderr.on('data', (chunk) => { stderr += chunk; });
+      const closed = new Promise((resolve) => child.once('close', (code) => resolve({ code, stderr })));
+      t.after(async () => { if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL'); await closed; });
+      return { ready, closed };
+    });
+    for (const w of waiters) assert.notEqual(await waitFor(w.ready), null, 'a waiter did not start');
+    fs.writeFileSync(go, '');
+    for (const w of waiters) {
+      const { code, stderr } = await w.closed;
+      assert.equal(code, 0, stderr);
+    }
+  }
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')), { updates: WAITERS * ROUNDS, overlaps: 0 });
+  assert.deepEqual(fs.readdirSync(h.base).filter((name) => name.includes('.lock')), [], 'no lock or takeover file is left');
+});
+
 // A fixture or stub that writes a file with content publishes it with
 // writeAtomic, since a test may poll it. An empty marker signals by existing,
 // and a write no test polls says why in a `// write-atomic:` comment on its line

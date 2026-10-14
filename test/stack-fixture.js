@@ -7,13 +7,13 @@ const test = require('node:test');
 const fs = require('node:fs');
 const path = require('node:path');
 const { makeRepo, copyRepo, repairWorktrees, BIN } = require('./helpers');
-const { writeAtomic } = require('./atomic-file');
+const { updateJson, readPublished } = require('./atomic-file');
 
 function worker(f) {
   const script = path.join(f.h.base, 'worker.js');
   fs.writeFileSync(script, `const fs = require('node:fs');
 const cp = require('node:child_process');
-const { writeAtomic } = require(${JSON.stringify(path.join(__dirname, 'atomic-file.js'))});
+const { updateJson } = require(${JSON.stringify(path.join(__dirname, 'atomic-file.js'))});
 const bin = ${JSON.stringify(BIN)};
 const task = process.env.TOWER_CRANE_TASK;
 const cli = (args) => cp.execFileSync(process.execPath, [bin, ...args], {encoding: 'utf8'});
@@ -25,12 +25,12 @@ git(['add', task + '.txt']);
 git(['commit', '-qm', task]);
 git(['push', 'origin', state.branch]);
 const sha = git(['rev-parse', 'HEAD']);
-const file = process.env.TEST_STACK_DATA;
-const data = JSON.parse(fs.readFileSync(file, 'utf8'));
-data.prs[12] = {number: 12, state: 'OPEN', headRefOid: sha, headRefName: state.branch,
-  baseRefName: state.stack?.base || 'main', isCrossRepository: false, autoMergeRequest: null,
-  mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN'};
-writeAtomic(file, JSON.stringify(data));
+updateJson(process.env.TEST_STACK_DATA, (data) => {
+  data.prs[12] = {number: 12, state: 'OPEN', headRefOid: sha, headRefName: state.branch,
+    baseRefName: state.stack?.base || 'main', isCrossRepository: false, autoMergeRequest: null,
+    mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN'};
+  return data;
+});
 process.stdout.write(cli(['submit', task, '--sha', sha, '--pr', '12']));
 `);
   f.h.ok(['ladder', 'set', 'medium', '--harness', 'command', '--clear', 'model', '--clear', 'profile', '--clear', 'effort',
@@ -93,9 +93,9 @@ const stacked = (t) => copy(t, template('stacked'));
 
 function fixture(h) {
   const file = path.join(h.base, 'github.json');
-  const read = () => JSON.parse(fs.readFileSync(file, 'utf8'));
-  // The gh stub reads this file while commands run; a rename never shows it half written.
-  const write = (fn) => { const d = read(); fn(d); writeAtomic(file, JSON.stringify(d)); };
+  const read = () => JSON.parse(readPublished(file, 'utf8'));
+  // Commands still running call the gh stub, which changes this file under the same lock.
+  const write = (fn) => updateJson(file, (d) => { fn(d); return d; });
   h.env.TEST_STACK_DATA = file;
   h.env.NODE_OPTIONS = `--require=${JSON.stringify(path.join(__dirname, 'fixtures', 'stack-gh.js'))}`;
   const add = (title, dep) => {
