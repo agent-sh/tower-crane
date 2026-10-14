@@ -78,6 +78,8 @@ The base refresh through `e869a37a` keeps main's reviewer crash and note fixture
 
 The base refresh through `aac8e164` keeps main's SIGTERM and SIGINT draining tests. Their wait commands and kill bounds use the suite guard and their readiness files are file signals; the bound that second-signal cancellation beats the merge poll deadline carries a reason. Automation, stack merge and events pass 250 of 250 tests in each of five loaded runs, and the full suite at `179181eb` passes 2297 tests with 34 skipped and no failures.
 
+The base refresh through `5d6c1023` keeps main's Chrome tree teardown and async stack maintenance. The Chrome SIGKILL grace and exit-handler wait carry reasons; the helper-exit and stack-sync signal tests wait on process state and the wait exit. Stack sync, browser startup and board pass 104 of 104 tests in each of five loaded runs, and the full suite at `825abaa3` passes 2319 tests with 37 skipped and no failures.
+
 ## Tools
 
 - `node scripts/test-cost.js [--before DIR] [files...]` measures CPU and wall seconds per file, median of three runs, four files at a time. With `--before`, it measures another checkout interleaved with this one.

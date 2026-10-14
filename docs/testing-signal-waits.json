@@ -28673,5 +28673,124 @@
     },
     "next_base_probe": "Merging ad656627 is conflict-free and the shared wait check passes on that merge tree.",
     "raw_logs": "Task scratch; only relative artifact names and hashes are committed."
+  },
+  "base_5d6c1023_refresh": {
+    "base_head": "5d6c1023",
+    "source": "825abaa3",
+    "changes": [
+      "Main's Chrome tree teardown is kept; its SIGKILL grace and exit-handler wait carry reasons.",
+      "The exit-fallback helper test waits for the helper's exit through waitUntil.",
+      "Main's stack-sync signal test uses the suite guard for its wait and kill bound and awaits the wait exit; without its release the sync never finishes, so the forced exit still proves the second signal stopped it."
+    ],
+    "loaded_command": "node test/run.js --test-concurrency=3 test/stack-sync.test.js test/browser-startup.test.js test/board.test.js",
+    "cpu_load": "Shared 24-core host with other sessions running test suites; one-minute load 8 to 13 during the runs.",
+    "loaded_runs": [
+      {
+        "run": 1,
+        "status": 0,
+        "load_after": [
+          8.73,
+          8.35,
+          8.66
+        ],
+        "log": "loaded9-1.log",
+        "log_sha256": "a6087f83b85cc3d16e5b501fb47b973c27d515c4e4889bccca7faac3228d45b0",
+        "tests": {
+          "tests": 104,
+          "pass": 104,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 0
+        }
+      },
+      {
+        "run": 2,
+        "status": 0,
+        "load_after": [
+          12.81,
+          9.6,
+          9.06
+        ],
+        "log": "loaded9-2.log",
+        "log_sha256": "a627b248ce617a979f09f4e80ee3b819b07a248c71d734351a8d2ce526090abf",
+        "tests": {
+          "tests": 104,
+          "pass": 104,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 0
+        }
+      },
+      {
+        "run": 3,
+        "status": 0,
+        "load_after": [
+          11.68,
+          10.09,
+          9.29
+        ],
+        "log": "loaded9-3.log",
+        "log_sha256": "52d1ad7980ee01e8374d7c7c5e0763d881d879b169b74a8c0850fbda377eec03",
+        "tests": {
+          "tests": 104,
+          "pass": 104,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 0
+        }
+      },
+      {
+        "run": 4,
+        "status": 0,
+        "load_after": [
+          10.35,
+          10.1,
+          9.37
+        ],
+        "log": "loaded9-4.log",
+        "log_sha256": "150d7b8b2404914b04f222441e93f7876ead4df039107fffe95730a40dd440da",
+        "tests": {
+          "tests": 104,
+          "pass": 104,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 0
+        }
+      },
+      {
+        "run": 5,
+        "status": 0,
+        "load_after": [
+          8.91,
+          9.87,
+          9.37
+        ],
+        "log": "loaded9-5.log",
+        "log_sha256": "3b4f8be081bc815f1eabe6525686de50f9a0008fe9c31de533b126ca069b6ee5",
+        "tests": {
+          "tests": 104,
+          "pass": 104,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 0
+        }
+      }
+    ],
+    "full_suite": {
+      "command": "node test/run.js --test-concurrency=3",
+      "source": "825abaa3",
+      "status": 0,
+      "wall": "20m15s",
+      "tests": {
+        "tests": 2356,
+        "pass": 2319,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 37
+      },
+      "log": "full-9.log",
+      "log_sha256": "8759fc867fe1ff2317370a84a5e09454ce2890efb71de2330f2a9fe4bf896c76"
+    },
+    "raw_logs": "Task scratch; only relative artifact names and hashes are committed."
   }
 }
