@@ -49,7 +49,12 @@ function results(h) {
 // What the agent did, for a failure message.
 function agentLog(h) {
   const dir = path.join(h.state, 'logs');
-  return fs.existsSync(dir) ? fs.readdirSync(dir).map((f) => `--- ${f}\n${fs.readFileSync(path.join(dir, f), 'utf8').slice(-4000)}`).join('\n') : 'no agent log';
+  // A claude log ends in one long JSON line; its result is what the model said.
+  const said = (text) => text.split('\n').map((l) => { try { return JSON.parse(l).result; } catch { return undefined; } }).filter((r) => typeof r === 'string').join('\n');
+  return fs.existsSync(dir) ? fs.readdirSync(dir).map((f) => {
+    const text = fs.readFileSync(path.join(dir, f), 'utf8');
+    return `--- ${f}\n${said(text) || text.slice(-4000)}`;
+  }).join('\n') : 'no agent log';
 }
 
 const node = JSON.stringify(process.execPath);
@@ -181,6 +186,43 @@ test('in a real codex sandbox forged state edits fail and the CLI writes through
   assert.deepEqual([event?.agent, event?.via], ['small-T1-1', 'broker']);
 });
 
+// Host sockets under /run that both sandboxes hide: the system bus,
+// snapd, docker (root on the host for a member of its group) and the user's
+// session bus. Found in review 2026-10-14: every one connected from a codex
+// sandbox, and all but the session bus and docker from a claude sandbox.
+const HOST_SOCKETS = ['/run/dbus/system_bus_socket', '/run/snapd.socket', '/run/docker.sock', '/var/run/docker.sock',
+  ...(uid === null ? [] : [`/run/user/${uid}/bus`])].filter((p) => fs.existsSync(p));
+
+// Part of a probe script: what an agent needs from the network, name
+// resolution through the resolver under /run included, and a connect() to
+// each host socket. It fills o and then calls done(), once.
+function networkProbe(npmDir, done) {
+  // A failed step keeps the last line of its stderr, for the failure message.
+  return `const dns=require("dns"),net=require("net");const step=(k,c,a,opt)=>{const r=cp.spawnSync(c,a,{encoding:"utf8",...opt});o[k]=r.status;if(r.status!==0)o[k+"Err"]=String(r.stderr||r.error).trim().split("\\n").pop()};`
+    + `o.proxy=Boolean(process.env.HTTPS_PROXY||process.env.https_proxy);`
+    + `step("getent","getent",["hosts","github.com"]);`
+    + `step("lsRemote","git",["ls-remote","https://github.com/agent-sh/tower-crane.git","HEAD"]);`
+    + `step("npmRegistry","npm",["install","--no-audit","--no-fund","--cache",${JSON.stringify(path.join(npmDir, '.npm-cache'))},"is-number@7.0.0"],{cwd:${JSON.stringify(npmDir)}});`
+    + `const socks=${JSON.stringify(HOST_SOCKETS)};let left=socks.length+1;const fin=()=>{if(--left===0){${done}}};`
+    + `dns.lookup("github.com",(e,a)=>{o.lookup=e?"ERR "+e.code:"OK";fin()});`
+    + `o.sockets={};for(const p of socks)net.connect(p).on("connect",function(){this.destroy();o.sockets[p]="CONNECTED";fin()}).on("error",e=>{o.sockets[p]="ERR "+e.code;fin()});`;
+}
+
+// claude's sandbox has no network of its own: HTTPS goes through its proxy
+// (HTTPS_PROXY), which resolves names, so getent and dns.lookup fail there
+// with /run hidden or not (measured 2026-10-14: getent exit 2, EAI_AGAIN).
+function assertNetwork(seen, label) {
+  if (!label.startsWith('claude')) {
+    assert.equal(seen.getent, 0, `${label}: getent hosts resolves`);
+    assert.equal(seen.lookup, 'OK', `${label}: node dns.lookup resolves`);
+  } else {
+    assert.equal(seen.proxy, true, `${label}: HTTPS goes through claude's proxy`);
+  }
+  assert.equal(seen.lsRemote, 0, `${label}: git fetches over https`);
+  assert.equal(seen.npmRegistry, 0, `${label}: npm installs from the registry`);
+  for (const p of HOST_SOCKETS) assert.match(seen.sockets[p], /^ERR (EACCES|ENOENT|EPERM|ECONNREFUSED)$/, `${label}: ${p} is out of reach`);
+}
+
 // Other test processes add and remove fixtures in the shared temp root all
 // the time. These stand-ins exist when the agent starts and go one by one
 // while it runs, until stop() is called.
@@ -208,15 +250,16 @@ function churn(t, h) {
 // home, and still runs node, npm install and a git push: a small agent, whose
 // worktree is read-only, and a worker. Writes stay in the test's
 // directories: the cache is redirected, and results land in a directory the
-// project's sandbox extension adds. The fixture lives in LIVE_ROOT, so the
-// fixtures other test processes add and remove in the shared temp root
-// meanwhile are none of the agent's business.
+// project's sandbox extension adds. The fixture lives in LIVE_ROOT, apart
+// from the fixtures other test processes add and remove in the shared temp
+// root, and the probe runs while stand-ins there come and go: a sandbox that
+// listed the entries around the worktree would race them.
 for (const [harness, rung] of [['claude', 'small'], ['claude', 'easy'], ['codex', 'small'], ['codex', 'easy']]) {
   const flag = `TOWER_CRANE_LIVE_${harness.toUpperCase()}`;
   test(`a real ${harness} ${rung} sandbox reads nothing in the user's home but what the agent needs`, { skip: process.env[flag] !== '1' && `set ${flag}=1 to run against the real ${harness} CLI`, timeout: 300000 }, async (t) => {
     const h = makeRepo(t, { root: LIVE_ROOT });
     h.init();
-    h.ok(['task', 'add', '--title', 'Home probe', '--acceptance', 'no credential is read']);
+    h.ok(['task', 'add', '--title', 'Home probe', '--acceptance', 'the sandbox blocks every credential read']);
     const home = require('node:os').homedir();
     const secret = path.join(home, `tower-crane-secret-test-${process.pid}`);
     fs.writeFileSync(secret, 'PLANTED-HOME-SECRET\n', { mode: 0o600 });
@@ -236,9 +279,12 @@ for (const [harness, rung] of [['claude', 'small'], ['claude', 'easy'], ['codex'
       + `const run=(c,a,cwd)=>cp.spawnSync(c,a,{cwd,encoding:"utf8"}).status;o.node=process.version;`
       + `o.npm=run("npm",["install","--no-audit","--no-fund","--cache",${JSON.stringify(path.join(dir, 'npm-cache'))}],${JSON.stringify(pkg)});`
       + `o.test=run("npm",["test"],${JSON.stringify(pkg)});`
-      + `o.push=run("git",["push",${JSON.stringify(bare)},"HEAD:refs/heads/probe"],${JSON.stringify(repo)});fs.writeFileSync(${JSON.stringify(out)},JSON.stringify(o))`;
+      + `o.push=run("git",["push",${JSON.stringify(bare)},"HEAD:refs/heads/probe"],${JSON.stringify(repo)});`
+      + networkProbe(pkg, `fs.writeFileSync(${JSON.stringify(out)},JSON.stringify(o))`);
     h.ok(['brief', 'set', 'T1', '-'], {
-      input: `Sandbox probe set up by the owner. Run exactly this one command with your command tool, then reply with its exit code and stop. Do not use tower-crane.\n\n${node} -e '${script}'\n`,
+      // Models declined the probe when it read as reading credentials; it
+      // records only whether each read failed, never a file's content.
+      input: `Sandbox probe set up by the owner. It checks that your sandbox blocks the user's credential files: each read is expected to fail, and the command records only the error code, never a file's content. It also checks npm, git and the network. Run exactly this one command with your command tool, then reply with its exit code and stop. Do not use tower-crane.\n\n${node} -e '${script}'\n`,
     });
     pinLiveRung(h, harness, rung);
     const env = { ...h.env, HOME: home, USERPROFILE: home, CLAUDE_CONFIG_DIR: '', CODEX_HOME: '', XDG_CACHE_HOME: path.join(h.base, 'cache') };
@@ -259,6 +305,84 @@ for (const [harness, rung] of [['claude', 'small'], ['claude', 'easy'], ['codex'
     assert.equal(seen.test, 0, 'npm test runs node --test');
     assert.equal(seen.push, 0, 'git push to a local repository runs');
     assert.equal(h.git(['--git-dir', bare, 'rev-parse', 'probe']), h.git(['-C', repo, 'rev-parse', 'HEAD']));
+    assertNetwork(seen, `${harness} ${rung}`);
+  });
+}
+
+// Files a command could read once the sandbox started: whatever is made in
+// the user's home after spawn, at the top or in a new directory, and in a
+// directory on the way from the home to a read-only worktree, stays hidden.
+// The command writes `ready` and waits for `go`, so the test makes them after
+// the sandbox around that very command is up. claude hides the home whole
+// and codex mounts only the paths its profile names. The fixture lives in
+// LIVE_ROOT, under the home's cache, so a directory on its way from the home
+// is one the agent must not read.
+for (const harness of ['claude', 'codex']) {
+  const flag = `TOWER_CRANE_LIVE_${harness.toUpperCase()}`;
+  test(`a real ${harness} small sandbox hides files made in the user's home after it starts`, { skip: process.env[flag] !== '1' && `set ${flag}=1 to run against the real ${harness} CLI`, timeout: 300000 }, async (t) => {
+    const home = fs.realpathSync(os.homedir());
+    const h = makeRepo(t, { root: LIVE_ROOT });
+    if (!h.base.startsWith(home + path.sep)) {
+      t.skip(`the fixture ${h.base} is outside the home ${home}`);
+      return;
+    }
+    h.init();
+    h.ok(['task', 'add', '--title', 'Late home probe', '--acceptance', 'no late file is read']);
+    const dir = results(h);
+    const ready = path.join(dir, 'ready');
+    const go = path.join(dir, 'go');
+    const out = path.join(dir, 'late-probe.json');
+    const tag = `tower-crane-late-${harness}-${process.pid}`;
+    const targets = {
+      home: path.join(home, tag),
+      newDir: path.join(home, `${tag}-dir`, 'token'),
+      config: path.join(home, '.config', tag, 'token'),
+      onPath: path.join(path.dirname(h.base), tag),
+    };
+    t.after(() => {
+      for (const p of Object.values(targets)) fs.rmSync([home, path.dirname(h.base)].includes(path.dirname(p)) ? p : path.dirname(p), { recursive: true, force: true });
+    });
+    const script = `const fs=require("fs");fs.writeFileSync(${JSON.stringify(ready)},"1");const s=new Int32Array(new SharedArrayBuffer(4));`
+      + `for(let i=0;i<1200&&!fs.existsSync(${JSON.stringify(go)});i++)Atomics.wait(s,0,0,100);const o={go:fs.existsSync(${JSON.stringify(go)})};`
+      + `for(const[k,p]of Object.entries(${JSON.stringify(targets)})){try{fs.readFileSync(p);o[k]="READABLE"}catch(e){o[k]="ERR "+e.code}}`
+      + `try{fs.readdirSync(".");o.worktree="READABLE"}catch(e){o.worktree="ERR "+e.code}fs.writeFileSync(${JSON.stringify(out)},JSON.stringify(o))`;
+    h.ok(['brief', 'set', 'T1', '-'], {
+      input: `Sandbox probe set up by the owner. Run exactly this one command with your command tool, then reply with its exit code and stop. It waits up to two minutes for a signal file; let it finish. Do not use tower-crane.\n\n${node} -e '${script}'\n`,
+    });
+    pinLiveRung(h, harness, 'small');
+    const env = { ...h.env, HOME: home, USERPROFILE: home, CLAUDE_CONFIG_DIR: '', CODEX_HOME: '', XDG_CACHE_HOME: path.join(h.base, 'cache') };
+    let done = false;
+    const run = h.runAsync(['spawn', '--role', 'small', '--task', 'T1', '--wait'], { env }).finally(() => { done = true; });
+    // The command's own signal; the spawn ending first means it never ran.
+    while (!done && !fs.existsSync(ready)) await new Promise((resolve) => setTimeout(resolve, 100));
+    if (fs.existsSync(ready)) {
+      for (const p of Object.values(targets)) {
+        fs.mkdirSync(path.dirname(p), { recursive: true });
+        fs.writeFileSync(p, 'PLANTED-LATE-SECRET\n', { mode: 0o600 });
+      }
+      fs.writeFileSync(go, '1');
+    }
+    const r = await run;
+    if (r.code !== 0 && !fs.existsSync(out) && /"stop_reason":"refusal"/.test(`${r.stderr}\n${agentLog(h)}`)) {
+      t.skip(`${harness} small: the model refused the probe prompt; no sandbox verdict`);
+      return;
+    }
+    assert.equal(r.code, 0, `${r.stderr}\n${agentLog(h)}`);
+    assert.ok(fs.existsSync(out), `the probe ran\n${agentLog(h)}`);
+    const seen = JSON.parse(fs.readFileSync(out, 'utf8'));
+    console.log(`${harness} small late home probe: ${JSON.stringify(seen)}`);
+    assert.equal(seen.go, true, 'the files were made while the command ran');
+    assert.equal(seen.worktree, 'READABLE');
+    for (const k of Object.keys(targets)) assert.match(seen[k], /^ERR /, `${harness} small: ${targets[k]}, made after the sandbox started, is not readable`);
+    // The placeholders claude bound in the read-only worktree are gone again,
+    // and so is the .claude directory they needed.
+    const trees = path.join(h.base, 'repo-worktrees');
+    for (const name of fs.readdirSync(trees).filter((n) => n !== '.git-admin')) {
+      const tree = path.join(trees, name);
+      assert.equal(h.git(['-C', tree, 'status', '--porcelain', '--untracked-files=all']), '', `${name} is left clean`);
+      const left = fs.readdirSync(tree).filter((n) => n.startsWith('.') && n !== '.git' && !fs.existsSync(path.join(h.repo, n)));
+      assert.deepEqual(left, [], `${name} keeps no placeholder directory: ${JSON.stringify(left.map((n) => [n, fs.statSync(path.join(tree, n)).isDirectory() ? fs.readdirSync(path.join(tree, n), { recursive: true }) : 'file']))}`);
+    }
   });
 }
 
@@ -363,3 +487,120 @@ for (const where of ['beside the home', 'in /var/tmp']) {
     assert.ok(!fs.existsSync(path.join(caller, 'written')));
   });
 }
+
+// Found in review 2026-10-14: codex, with network on, does not block
+// connect() on a Unix socket, and the codex profile read /run whole. A codex
+// agent reached the user's session bus and ran a command on the host with
+// `systemd-run --user`, and the docker socket, which is root on the host for
+// a user in the docker group. Like claude's, the codex profile hides the
+// user's runtime directory and the docker and podman sockets. The probe uses
+// the host's real runtime directory; the command it tries only touches a
+// file in the test's directory.
+function hostBus() {
+  const skip = realCodexSandbox();
+  if (skip) return skip;
+  const runtime = process.env.XDG_RUNTIME_DIR || (uid === null ? null : `/run/user/${uid}`);
+  if (!runtime || !fs.existsSync(path.join(runtime, 'bus'))) return 'needs a user session bus';
+  if (cp.spawnSync('systemd-run', ['--version']).status !== 0) return 'needs systemd-run';
+  return false;
+}
+
+function busProbe(h, targets, marker, out) {
+  return `const n=require("net"),f=require("fs"),cp=require("child_process");const o={};const t=${JSON.stringify(targets)};`
+    + `try{o.runtime=f.readdirSync(${JSON.stringify(path.dirname(targets.bus))}).length}catch(e){o.runtime="ERR "+e.code}`
+    + `const r=cp.spawnSync("systemd-run",["--user","--wait","-q","touch",${JSON.stringify(marker)}],{encoding:"utf8"});o.systemdRun=r.error?"ERR "+r.error.code:r.status;`
+    + `let left=Object.keys(t).length;for(const[k,p]of Object.entries(t)){const done=(v)=>{o[k]=v;if(--left===0)f.writeFileSync(${JSON.stringify(out)},JSON.stringify(o))};`
+    + `n.connect(p).on("connect",function(){this.destroy();done("CONNECTED")}).on("error",e=>done("ERR "+e.code))}`;
+}
+
+test('a real codex sandbox cannot reach the session bus or the docker socket, so systemd-run cannot run a host command', { skip: hostBus(), timeout: 300000 }, async (t) => {
+  const h = makeRepo(t);
+  h.init();
+  h.ok(['task', 'add', '--title', 'Bus probe', '--acceptance', 'the host stays out of reach']);
+  h.ok(['brief', 'set', 'T1', '-'], { input: 'bus probe\n' });
+  const runtime = process.env.XDG_RUNTIME_DIR || `/run/user/${uid}`;
+  const targets = { bus: path.join(runtime, 'bus') };
+  for (const p of ['/run/docker.sock', '/var/run/docker.sock']) if (fs.existsSync(p)) targets[p] = p;
+  const marker = path.join(h.base, 'host-command-ran');
+  const out = path.join(results(h), 'bus-probe.json');
+  const bin = standInCodex(h, busProbe(h, targets, marker, out));
+  const r = await h.runAsync(['spawn', '--role', 'small', '--task', 'T1', '--wait'],
+    { env: { ...h.env, PATH: `${bin}${path.delimiter}${h.env.PATH}`, XDG_RUNTIME_DIR: runtime, DBUS_SESSION_BUS_ADDRESS: `unix:path=${targets.bus}` } });
+  assert.equal(r.code, 0, `${r.stderr}\n${agentLog(h)}`);
+  assert.ok(fs.existsSync(out), `the probe ran\n${agentLog(h)}`);
+  const seen = JSON.parse(fs.readFileSync(out, 'utf8'));
+  console.log(`codex bus probe: ${JSON.stringify(seen)}`);
+  assert.equal(fs.existsSync(marker), false, 'systemd-run ran no command on the host');
+  assert.notEqual(seen.systemdRun, 0, 'systemd-run failed');
+  for (const k of Object.keys(targets)) assert.match(seen[k], /^ERR /, `${k} is out of reach`);
+  assert.match(String(seen.runtime), /^ERR /, 'the runtime directory is hidden');
+});
+
+test('a real codex sandbox with sandbox.session_bus connects to the bus socket and nothing else in the runtime directory', { skip: realCodexSandbox(), timeout: 300000 }, async (t) => {
+  const h = makeRepo(t);
+  h.init();
+  h.ok(['task', 'add', '--title', 'Bus grant', '--acceptance', 'only the bus is reachable']);
+  h.ok(['brief', 'set', 'T1', '-'], { input: 'bus grant\n' });
+  // A runtime directory of the test's own, so the probe never touches the
+  // user's session. In /var/tmp, outside the home, an entry of / exposes it
+  // as one does /run/user/<uid>.
+  const runtime = fs.existsSync('/var/tmp') ? fs.mkdtempSync('/var/tmp/tower-crane-runtime-') : path.join(h.base, 'runtime');
+  fs.mkdirSync(runtime, { recursive: true });
+  t.after(() => fs.rmSync(runtime, { recursive: true, force: true }));
+  const servers = [];
+  const listen = async (p) => {
+    const s = net.createServer((c) => { c.on('error', () => {}); c.end(); });
+    await new Promise((resolve) => s.listen(p, resolve));
+    servers.push(s);
+  };
+  t.after(() => { for (const s of servers) s.close(); });
+  const targets = { bus: path.join(runtime, 'bus'), other: path.join(runtime, 'other.sock') };
+  for (const p of Object.values(targets)) await listen(p);
+  const out = path.join(results(h), 'bus-grant.json');
+  h.ok(['project', 'set', '--session-bus', 'true']);
+  const bin = standInCodex(h, busProbe(h, targets, path.join(h.base, 'unused'), out));
+  const r = await h.runAsync(['spawn', '--role', 'small', '--task', 'T1', '--wait'],
+    { env: { ...h.env, PATH: `${bin}${path.delimiter}${h.env.PATH}`, XDG_RUNTIME_DIR: runtime, DBUS_SESSION_BUS_ADDRESS: '' } });
+  assert.equal(r.code, 0, `${r.stderr}\n${agentLog(h)}`);
+  const seen = JSON.parse(fs.readFileSync(out, 'utf8'));
+  console.log(`codex bus grant probe: ${JSON.stringify(seen)}`);
+  assert.equal(seen.bus, 'CONNECTED', 'the granted bus socket is reachable');
+  assert.match(seen.other, /^ERR /, 'another socket in the runtime directory is not');
+});
+
+// /run is hidden whole in both sandboxes but for what an agent needs: the
+// resolver /etc/resolv.conf links to, and the session bus when
+// sandbox.session_bus grants it. In the real codex sandbox, with the
+// owner's gh login handed over as GH_TOKEN, as for a worker: names resolve,
+// git fetches and pushes over https (a dry run, so nothing lands), npm
+// installs from the registry, and no host socket under /run connects.
+test('a real codex sandbox resolves names, fetches and pushes over https and installs from npm, and reaches no host socket under /run', { skip: realCodexSandbox(), timeout: 300000 }, async (t) => {
+  const h = makeRepo(t);
+  h.init();
+  h.ok(['task', 'add', '--title', 'Network probe', '--acceptance', 'the network works, host sockets stay hidden']);
+  h.ok(['brief', 'set', 'T1', '-'], { input: 'network probe\n' });
+  const dir = results(h);
+  const out = path.join(dir, 'network-probe.json');
+  const pkg = path.join(dir, 'pkg');
+  fs.mkdirSync(pkg);
+  fs.writeFileSync(path.join(pkg, 'package.json'), '{"name":"probe","version":"1.0.0","private":true}\n');
+  const repo = path.join(dir, 'repo');
+  for (const args of [['init', '-q', repo], ['-C', repo, 'commit', '-q', '--allow-empty', '-m', 'probe']]) h.git(args);
+  // A ref that does not exist on the remote, so the dry run would create it, and nothing is sent.
+  const ref = `refs/heads/tower-crane/network-probe-${process.pid}`;
+  const script = `const fs=require("fs"),cp=require("child_process");const o={};`
+    + `{const r=cp.spawnSync("git",["push","--dry-run","https://github.com/agent-sh/tower-crane.git","HEAD:${ref}"],{cwd:${JSON.stringify(repo)},encoding:"utf8"});o.pushDryRun=r.status;if(r.status!==0)o.pushDryRunErr=String(r.stderr).trim().split("\\n").slice(-2).join(" | ")}`
+    + networkProbe(pkg, `fs.writeFileSync(${JSON.stringify(out)},JSON.stringify(o))`);
+  const bin = standInCodex(h, script);
+  // The owner's home, so spawn finds the gh login to hand over; caches stay in the test.
+  const home = os.homedir();
+  const r = await h.runAsync(['spawn', '--role', 'small', '--task', 'T1', '--wait'],
+    { env: { ...h.env, HOME: home, USERPROFILE: home, CODEX_HOME: '', XDG_CACHE_HOME: path.join(h.base, 'cache'), PATH: `${bin}${path.delimiter}${h.env.PATH}` } });
+  assert.equal(r.code, 0, `${r.stderr}\n${agentLog(h)}`);
+  assert.ok(fs.existsSync(out), `the probe ran\n${agentLog(h)}`);
+  const seen = JSON.parse(fs.readFileSync(out, 'utf8'));
+  console.log(`codex network probe: ${JSON.stringify(seen)}`);
+  assertNetwork(seen, 'codex');
+  assert.equal(seen.pushDryRun, 0, 'git pushes over https with the handed gh token');
+});
+
