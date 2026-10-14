@@ -485,6 +485,17 @@ run(['release', 'T1', '--reason', ${JSON.stringify(ask ? 'waiting on a decision'
   fs.writeFileSync(worker, script(false));
   for (let i = 0; i < 3; i++) round();
   assert.match(h.readState('tasks.json').tasks[0].needs_owner, /^worker exited without submitting 3 times at revision 1 \(last worker-T1-\d+, code 0\)/);
+  // Only the run that released for the decision is skipped: two earlier
+  // bare exits still count, and the next bare exit is the third.
+  h.ok(['owner-done', 'T1']);
+  const plan = [false, false, true, false];
+  for (const [i, ask] of plan.entries()) {
+    fs.writeFileSync(worker, script(ask));
+    round();
+    const parked = h.readState('tasks.json').tasks[0].needs_owner;
+    if (i < plan.length - 1) assert.equal(parked, null, `run ${i + 1} is under the cap`);
+    else assert.match(parked, /^worker exited without submitting 3 times/);
+  }
 });
 
 test('a worker whose monitor died counts toward the respawn cap through its worker-exited record', { skip: process.platform === 'win32' }, async (t) => {
@@ -494,7 +505,7 @@ test('a worker whose monitor died counts toward the respawn cap through its work
     assert.equal(h.readState('tasks.json').tasks[0].needs_owner, null, `exit ${i - 1} is under the cap`);
     const spawned = await start(t, h);
     const monitor = events().findLast((e) => e.cmd === 'spawn').detail.monitor_pid;
-    process.kill(monitor, 'SIGKILL');
+    killPid(monitor, 'SIGKILL');
     spawned.kill();
     await waitOnRepo(h, () => (h.json(['status']).exited_claims || []).length === 1, 'the killed worker was not reported');
     // Any observer records the exit; spend collection is one.
