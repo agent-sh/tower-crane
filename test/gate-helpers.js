@@ -131,13 +131,18 @@ if (args[0] === 'pr' && args[1] === 'merge') {
 `);
   fs.chmodSync(gh, 0o755);
   if (process.platform === 'win32') {
-    // Windows cannot execute a shebang stub, so route only gh to the same fixture.
+    // Windows cannot execute a shebang stub, so route only gh to the same fixture, both for
+    // synchronous reads and for the asynchronous ones that run alongside them.
     const preload = path.join(tools, 'gh-preload.js');
     fs.writeFileSync(preload, `const cp = require('node:child_process');
 const original = cp.spawnSync;
+const originalSpawn = cp.spawn;
 cp.spawnSync = (command, args, opts) => command === 'gh'
   ? original(process.execPath, [${JSON.stringify(gh)}, ...args], opts)
   : original(command, args, opts);
+cp.spawn = (command, args, opts) => command === 'gh'
+  ? originalSpawn(process.execPath, [${JSON.stringify(gh)}, ...(args || [])], opts)
+  : originalSpawn(command, args, opts);
 `);
     h.env.NODE_OPTIONS = `${h.env.NODE_OPTIONS || ''} --require=${JSON.stringify(preload)}`;
   }

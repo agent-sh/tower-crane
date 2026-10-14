@@ -304,7 +304,7 @@ test('in a browser, a form is read-only while its save waits, so typing then los
     await b.inPage(`${easyModel}.focus()`);
     // A CLI write holds the lock, so the save waits for it.
     const paused = path.join(h.base, `holder-${round}`);
-    const holder = h.runAsync(['task', 'note', 'T1', 'holding the lock'], { hooks: { HOOK_PAUSE_ON: 'tasks.json', HOOK_PAUSED: paused } });
+    const holder = h.runAsync(['task', 'note', 'T1', 'holding the lock'], { hooks: { HOOK_PAUSE_LOCKED: paused } });
     await appeared(paused);
     await b.inPage(`document.querySelector('#ladder-form button[type="submit"]').click()`);
     await b.until(`document.querySelector('#ladder-form button[type="submit"]').textContent === 'Saving...'`, 'the save to start');
