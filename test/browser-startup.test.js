@@ -7,7 +7,7 @@ const os = require('node:os');
 const path = require('node:path');
 const cp = require('node:child_process');
 const { makeRepo, detachedAlive } = require('./helpers');
-const { waitUntil } = require('./signals');
+const { waitUntil, killPid } = require('./signals');
 const { CHROME } = require('./browser');
 
 function attempt(h, chrome, sandbox, tmp = h.base, before = '', close = true) {
@@ -68,7 +68,7 @@ setInterval(() => {}, 1000);
   attempt(h, chrome, '1');
   const closed = JSON.parse(fs.readFileSync(path.join(h.base, 'chrome.json'), 'utf8'));
   assert.ok(closed.cpu >= 200000);
-  assert.throws(() => process.kill(closed.pid, 0), { code: 'ESRCH' });
+  assert.throws(() => killPid(closed.pid, 0), { code: 'ESRCH' });
   assert.deepEqual(fs.readdirSync(h.base).filter((f) => f.startsWith('tower-crane-chrome-')), []);
 });
 

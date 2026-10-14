@@ -9,6 +9,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const D = require('./driver');
 const C = require('./checks');
+const { killPid, killGroup } = require('../signals');
 
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms)); // wait-allow: human benchmark observation windows record absent features on baseline builds and bound the measured outcome
 
@@ -173,7 +174,7 @@ function stubTokens(s) {
   return total;
 }
 
-function killTree(pid) { try { process.kill(-pid, 'SIGKILL'); } catch { /* gone */ } try { process.kill(pid, 'SIGKILL'); } catch { /* gone */ } }
+function killTree(pid) { try { killGroup(pid, 'SIGKILL'); } catch { /* gone */ } try { killPid(pid, 'SIGKILL'); } catch { /* gone */ } }
 
 async function h4(ctx) {
   const { b, T, url, s } = ctx;
@@ -239,7 +240,7 @@ async function h4s(ctx) {
     // A running supervisor keeps its reading fresh; staleness is what the
     // board sees when the supervisor is gone and the agent still runs.
     const phase = await waitFor(() => s.events().find((e) => ['spawn', 'spawn phase'].includes(e.cmd) && e.task === id && e.detail.monitor_pid && s.events().some((x) => x.cmd === 'spend live' && x.task === id && x.detail.tokens)), 20000); // wait-allow: human benchmark observation windows record absent features on baseline builds and bound the measured outcome
-    if (phase) try { process.kill(phase.detail.monitor_pid, 'SIGKILL'); } catch { /* gone */ }
+    if (phase) try { killPid(phase.detail.monitor_pid, 'SIGKILL'); } catch { /* gone */ }
   }
   const want = variant === 'stale' ? /stale/i : /unknown until exit|unavailable/i;
   const text = await waitFor(async () => { const t = await b.call(textOf, T.agentRow(id)); return want.test(t) && t; }, 30000); // wait-allow: human benchmark observation windows record absent features on baseline builds and bound the measured outcome

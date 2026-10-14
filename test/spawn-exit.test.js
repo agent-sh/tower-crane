@@ -1,6 +1,6 @@
 'use strict';
 
-const { waitOnRepo, childExit } = require('./signals');
+const { waitOnRepo, childExit, killPid } = require('./signals');
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -59,7 +59,7 @@ ${wait ? 'process.exit(7);' : 'setInterval(() => {}, 1000);'}
   const kill = () => {
     if (killed) return;
     killed = true;
-    try { process.kill(spawned.pid, 'SIGKILL'); } catch (e) { if (e.code !== 'ESRCH') throw e; }
+    try { killPid(spawned.pid, 'SIGKILL'); } catch (e) { if (e.code !== 'ESRCH') throw e; }
   };
   h.stopWorkers.push(kill);
   const started = await waitOnRepo(h, () => fs.existsSync(marker) && JSON.parse(fs.readFileSync(marker, 'utf8')),
@@ -151,7 +151,7 @@ test('teardown observes a monitor exit recorded after its PID snapshot', {
   fs.writeFileSync(file, JSON.stringify({ ...record, exited: true }));
   h.detached = () => snapshot;
   await h.cleanup();
-  assert.equal(process.kill(child.pid, 0), true, 'teardown killed a reused PID');
+  assert.equal(killPid(child.pid, 0), true, 'teardown killed a reused PID');
 });
 
 test('ordinary teardown waits for a monitor exit even when the wall clock jumps', {
@@ -219,7 +219,7 @@ test('teardown kills a recorded worker and leaves a reused worker PID alone', {
   const reused = start({ recordedAt: Date.now() - 1000 });
   await h.cleanup();
   await childExit(recorded, { what: `teardown did not kill recorded worker ${recorded.pid}` });
-  assert.equal(process.kill(reused.pid, 0), true, 'teardown killed a reused worker PID');
+  assert.equal(killPid(reused.pid, 0), true, 'teardown killed a reused worker PID');
 });
 
 test('teardown waits for OS termination after a monitor marks its exit', async (t) => {

@@ -1,6 +1,6 @@
 'use strict';
 
-const { waitOnRepo } = require('./signals');
+const { waitOnRepo, killPid } = require('./signals');
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -104,7 +104,7 @@ test('interrupt during detached usage collection releases directly without fenci
     assert.equal(next.agent, first.agent);
     assert.equal(events(h).filter((e) => e.cmd === 'spawn phase' && e.detail.phase === 'stopping').length, 0);
   } catch (error) {
-    if (detachedAlive({ pid: first.monitor_pid })) process.kill(first.monitor_pid, 'SIGTERM');
+    if (detachedAlive({ pid: first.monitor_pid })) killPid(first.monitor_pid, 'SIGTERM');
     throw error;
   } finally {
     pause.release();
@@ -134,7 +134,7 @@ test('an interrupt committed while exit hooks are pending is finalized under the
     const next = h.json(['spawn', '--task', 'T1', '--wait']);
     assert.equal(next.resumed, true);
   } catch (error) {
-    if (detachedAlive({ pid: first.monitor_pid })) process.kill(first.monitor_pid, 'SIGTERM');
+    if (detachedAlive({ pid: first.monitor_pid })) killPid(first.monitor_pid, 'SIGTERM');
     throw error;
   } finally {
     pause.release();
@@ -389,7 +389,7 @@ test('a supervisor killed after an interrupt does not wedge the claim or the nex
   const stop = events(h).findLast((e) => e.cmd === 'interrupt');
   assert.equal(stop.detail.phase, 'stopping');
   assert.equal(stop.detail.active, true);
-  const kill = (pid) => { if (detachedAlive({ pid })) process.kill(pid, 'SIGKILL'); };
+  const kill = (pid) => { if (detachedAlive({ pid })) killPid(pid, 'SIGKILL'); };
   kill(first.monitor_pid);
   kill(first.pid);
   kill(child);

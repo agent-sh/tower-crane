@@ -8,8 +8,8 @@ const cp = require('node:child_process');
 const net = require('node:net');
 const { EventEmitter } = require('node:events');
 const { makeRepo, ROOT } = require('./helpers');
-const { fileWritten, eventAppended, childExit, childClosed, portListening, waitUntil } = require('./signals');
-const { waitFindings } = require('../scripts/test-waits');
+const { fileWritten, eventAppended, childExit, childClosed, portListening, waitUntil, killPid, killGroup } = require('./signals');
+const { waitFindings, killFindings } = require('../scripts/test-waits');
 
 test('signal waits observe existing state, atomic writes, complete events, child exits and listening ports', async (t) => {
   const h = makeRepo(t);
@@ -413,4 +413,34 @@ test('child exit is observable while inherited output is held, and close waits f
   }
   assert.equal((await closed).code, 0);
   assert.equal(output, 'final output');
+});
+
+test('tests signal only checked pids, so a pid file read before it is written cannot signal the suite', () => {
+  // Number('') is 0, and signalling 0 reaches the caller's whole process group.
+  for (const pid of [Number(''), 0, -0, -1, NaN, undefined, null, 1.5, '123']) {
+    assert.throws(() => killPid(pid, 0), /refusing to signal pid/, String(pid));
+  }
+  for (const pid of [Number(''), 0, 1, -2, NaN]) {
+    assert.throws(() => killGroup(pid, 0), /refusing to signal pid/, String(pid));
+  }
+  assert.equal(killPid(process.pid, 0), true);
+  // The lint scans this file too, so the calls it judges are assembled here.
+  const kill = ['process', 'kill'].join('.');
+  for (const source of [
+    `${kill}(Number(fs.readFileSync(file, 'utf8')), 'SIGKILL');`,
+    `try { ${kill}(-Number(fs.readFileSync(out, 'utf8')), 'SIGKILL'); } catch {}`,
+    `${kill}(spawn.pid, 'SIGKILL');`,
+    `${kill} (pid, 0);`,
+    `fs.writeFileSync(script, \`${kill}(Number(process.argv[2]), 'SIGTERM');\`);`,
+  ]) {
+    assert.equal(killFindings(source).length, 1, source);
+  }
+  for (const source of [
+    `${kill}(process.pid, 'SIGKILL');`,
+    `fs.writeFileSync(script, '${kill}(process.pid, \\'SIGKILL\\');\\n');`,
+    `// ${kill}(0) signals the group`,
+    'killPid(Number(text), "SIGKILL"); killGroup(child.pid, "SIGKILL");',
+  ]) {
+    assert.deepEqual(killFindings(source), [], source);
+  }
 });

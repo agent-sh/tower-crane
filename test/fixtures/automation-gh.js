@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const cp = require('node:child_process');
 const path = require('node:path');
 const { writeAtomic } = require('../atomic-file');
+const { killPid } = require('../signals');
 const args = process.argv.slice(2);
 const file = process.env.AUTOMATION_GITHUB;
 const state = JSON.parse(fs.readFileSync(file, 'utf8'));
@@ -37,7 +38,7 @@ if (args[0] === 'pr') {
       const events = fs.readFileSync(path.join(state.root, '.tower-crane', 'events.jsonl'), 'utf8')
         .trim().split('\n').map(JSON.parse);
       const executor = events.findLast((e) => e.cmd === 'automation' && e.detail.phase === 'running');
-      process.kill(executor.detail.pid, 'SIGKILL');
+      killPid(executor.detail.pid, 'SIGKILL');
       // The killed executor is the test's CLI call, so the test resumes now.
       // The test reads the file as soon as the executor dies; a second write
       // from this orphaned call could truncate it under that read.

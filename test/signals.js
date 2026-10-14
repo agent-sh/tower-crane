@@ -177,4 +177,23 @@ function portListening(port, host = '127.0.0.1', options) {
   });
 }
 
-module.exports = { HUNG_TEST_MS, waitUntil, waitOnRepo, fileWritten, eventAppended, childExit, childClosed, portListening };
+// A pid a test reads from a file or an event is 0 or NaN when the writer has
+// not finished: Number('') is 0. process.kill(0) signals the test's own
+// process group, which is the whole suite, and -1 every process the user
+// owns. Every test signal to a pid it did not just spawn goes through these,
+// and scripts/test-waits.js rejects a bare process.kill on any other pid.
+function checkedPid(pid, least) {
+  if (!Number.isInteger(pid) || pid < least) throw new Error(`refusing to signal pid ${String(pid)}: not a process id`);
+  return pid;
+}
+
+function killPid(pid, signal = 'SIGTERM') {
+  return process.kill(checkedPid(pid, 1), signal);
+}
+
+// Group 1 would be -1, every process the user can signal.
+function killGroup(pid, signal = 'SIGTERM') {
+  return process.kill(-checkedPid(pid, 2), signal);
+}
+
+module.exports = { HUNG_TEST_MS, waitUntil, waitOnRepo, fileWritten, eventAppended, childExit, childClosed, portListening, killPid, killGroup };

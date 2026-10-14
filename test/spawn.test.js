@@ -418,6 +418,29 @@ test('the prompt is the role skill, brief, task, then how to use tower-crane', (
   assert.ok(p.endsWith('run tower-crane with --agent worker-T1-1 if TOWER_CRANE_AGENT is missing.'));
 });
 
+test('prompts name role skills by their packaged path, since a user worktree has no skills directory', (t) => {
+  const h = setup(t);
+  setRung(h, 'medium', ['--harness', 'opencode', '--model', 'a/b']);
+  const prompt = (rung) => dry(h, rung).argv.find((arg) => arg.includes('## Task'));
+  const relative = /(?<![\\/\w.-])skills[\\/]tower-crane-(?:work|review)[\\/]SKILL\.md/;
+  const packaged = (text, skill) => {
+    const named = new RegExp(`Follow the ${skill} skill \\((.+?SKILL\\.md)\\)`).exec(text);
+    assert.ok(named, `${skill} is named`);
+    assert.ok(path.isAbsolute(named[1]) && fs.existsSync(named[1]), `${named[1]} is an absolute path that exists`);
+  };
+  assert.doesNotMatch(prompt('medium'), relative, 'the embedded work skill points at no worktree path');
+
+  reviewable(h);
+  const review = prompt('review');
+  assert.doesNotMatch(review, relative);
+  packaged(review, 'tower-crane-review');
+
+  h.ok(['rework', 'T1', '--reason', 'Next round']);
+  const rework = prompt('medium');
+  assert.doesNotMatch(rework, relative);
+  packaged(rework, 'tower-crane-work');
+});
+
 test('without an embedded skill the goal leads the prompt, so a brief opening with a dash is never read as a flag', (t) => {
   const h = setup(t);
   setRung(h, 'small', ['--harness', 'opencode', '--model', 'a/b']);

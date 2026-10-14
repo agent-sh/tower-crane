@@ -1,6 +1,6 @@
 'use strict';
 
-const { waitUntil, HUNG_TEST_MS } = require('./signals');
+const { waitUntil, HUNG_TEST_MS, killPid, killGroup } = require('./signals');
 
 const fs = require('node:fs');
 const path = require('node:path');
@@ -474,6 +474,12 @@ function context(t, base, options = {}) {
     },
     run: (args, opts = {}) => fixtureInit(ctx, args, opts, (a, o) => run(a, withHooks(ctx, o))),
     runAsync: (args, opts = {}) => runAsync(args, withHooks(ctx, opts)),
+    // A CLI child the test signals or reads while it runs. Detached processes
+    // it starts, such as a worker dispatch, are recorded, so cleanup stops them.
+    spawnCli: (args, opts = {}) => {
+      const { cwd, env, pre } = withHooks(ctx, opts);
+      return cp.spawn(process.execPath, [...pre, BIN, ...args], { cwd, env });
+    },
     json: (args, opts) => {
       const r = ctx.run([...args, '--json'], opts);
       if (r.code !== 0) throw cliFailure(args, r);
@@ -511,11 +517,12 @@ function context(t, base, options = {}) {
 }
 
 // opts.hooks preloads test/fixtures/hooks.js into the CLI with those HOOK_*
-// variables, acting on this repository's state directory.
+// variables, acting on this repository's state directory. opts.pre adds
+// preloads after it.
 function withHooks(ctx, opts) {
   const env = { ...ctx.env, ...(opts.env || {}) };
   Object.assign(env, { HOOK_STATE: ctx.state, HOOK_PROCESSES_DIR: path.join(ctx.base, 'detached') }, opts.hooks);
-  const pre = ['--require', HOOKS];
+  const pre = ['--require', HOOKS, ...(opts.pre || [])];
   return { cwd: ctx.repo, ...opts, env, pre };
 }
 
@@ -576,7 +583,7 @@ function detachedAlive(child) {
     return Number(BigInt(started) / 10000n - 11644473600000n) <= child.recordedAt + RECORD_TOLERANCE_MS;
   }
   if (child.kind === 'worker' && child.file && !fs.existsSync(child.file)) return false;
-  try { process.kill(child.pid, 0); } catch (e) { if (e.code === 'ESRCH') return false; throw e; }
+  try { killPid(child.pid, 0); } catch (e) { if (e.code === 'ESRCH') return false; throw e; }
   if (process.platform === 'linux') {
     let stat;
     try { stat = fs.readFileSync(`/proc/${child.pid}/stat`, 'utf8'); }
@@ -587,12 +594,26 @@ function detachedAlive(child) {
   return true;
 }
 
+// Linux processes still working inside a fixture, by working directory. A
+// removed directory reads with a " (deleted)" suffix and still counts.
+function processesIn(base) {
+  if (process.platform !== 'linux') return [];
+  const found = [];
+  for (const name of fs.readdirSync('/proc').filter((entry) => /^\d+$/.test(entry))) {
+    let cwd;
+    try { cwd = fs.readlinkSync(`/proc/${name}/cwd`).replace(/ \(deleted\)$/, ''); }
+    catch { continue; } // Exited, a zombie, or not ours to read.
+    if (cwd === base || cwd.startsWith(base + path.sep)) found.push(Number(name));
+  }
+  return found;
+}
+
 function killDetached(child) {
   if (!detachedAlive(child)) return;
   if (process.platform === 'win32') {
     cp.spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore', timeout: 300000 });
   } else {
-    try { process.kill(-child.pid, 'SIGKILL'); } catch (e) { if (e.code !== 'ESRCH') throw e; }
+    try { killGroup(child.pid, 'SIGKILL'); } catch (e) { if (e.code !== 'ESRCH') throw e; }
   }
 }
 
@@ -699,4 +720,4 @@ try {
   }
 }
 
-module.exports = { repairWorktrees, makeRepo, makeProjectRepo, makeTaskRepo, copyRepo, cachedFixture, fixtureLadder, pinRung, pinLiveRung, stubRungs, STUB_RUNG, HARNESS_GUARD, run, runPty, PTY_AVAILABLE, runAsync, BIN, ROOT, HOOKS, real, TMP_ROOT, LIVE_ROOT, detachedAlive };
+module.exports = { repairWorktrees, makeRepo, makeProjectRepo, makeTaskRepo, copyRepo, cachedFixture, fixtureLadder, pinRung, pinLiveRung, stubRungs, STUB_RUNG, HARNESS_GUARD, run, runPty, PTY_AVAILABLE, runAsync, BIN, ROOT, HOOKS, real, TMP_ROOT, LIVE_ROOT, detachedAlive, processesIn };
