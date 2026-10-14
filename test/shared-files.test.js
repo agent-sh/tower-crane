@@ -202,6 +202,26 @@ test('the shared file check rejects bare stdin reads in lib and bin, and points 
   assert.equal(f.check().status, 0, 'lib/util.js is where readStdin reads fd 0');
 });
 
+test('a branch behind its base is checked from the merge base, so newer base fragments are not deletions', (t) => {
+  const f = fixture(t);
+  const start = f.h.git(['rev-parse', 'HEAD']);
+  // The base moves on after the branch was cut: another change lands with its own fragment.
+  f.write('changelog.d/T500.md', '- A change that landed on the base later.\n');
+  f.write('README.md', '# landed later\n');
+  f.h.git(['add', '.']);
+  f.h.git(['commit', '-qm', 'later base change']);
+  const moved = f.h.git(['rev-parse', 'HEAD']);
+  f.h.git(['checkout', '-q', '-b', 'behind', start]);
+  f.change();
+  const r = f.script('check-shared-files.js', ['--base', moved]);
+  assert.equal(r.status, 0, r.stderr);
+  // The branch's own deletion of a fragment from before it was cut still fails.
+  fs.rmSync(path.join(f.h.repo, 'changelog.d/T86.md'));
+  const deleted = f.script('check-shared-files.js', ['--base', moved]);
+  assert.equal(deleted.status, 1);
+  assert.match(deleted.stderr, /changelog\.d\/T86\.md belongs to its original change/);
+});
+
 test('tasks add fragments instead of editing the archive or deleting an existing change', (t) => {
   const f = fixture(t, { crlfProtected: true });
   f.write('README.md', '# changed\n');

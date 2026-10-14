@@ -1,0 +1,1 @@
+- `check:shared --base` compares from the merge base with the base, so a branch behind main no longer reports main's newer changelog fragments as deletions.
