@@ -20,7 +20,7 @@ const noted = (h, text) => ({
   task: h.readState('tasks.json').tasks[0].notes.some((n) => n.text === text),
   event: logged(h).some((e) => e.cmd === 'task note' && e.detail.text === text),
 });
-const leftovers = (h) => fs.readdirSync(h.state).filter((name) => /^(tasks|project|decisions)\.json\./.test(name));
+const leftovers = (h) => fs.readdirSync(h.state).filter((name) => /^((tasks|project|decisions)\.json|commit)\./.test(name));
 
 function crash(h, point, text) {
   const r = h.run(['task', 'note', 'T1', text], { hooks: { HOOK_DIE_COMMIT: point } });
@@ -106,7 +106,9 @@ test('recovery cuts a torn multi-event append off the log, including a final lin
   doc.tasks[0].notes.push({ at: first.at, agent: 'owner', text: 'torn note' });
   doc.last_event = second.id;
   // A power cut kept the first line and all of the second but its newline.
-  fs.writeFileSync(path.join(h.state, `tasks.json.${second.id}.${size}.2.commit`), JSON.stringify(doc, null, 2) + '\n');
+  fs.writeFileSync(path.join(h.state, `tasks.json.${second.id}.commit`), JSON.stringify(doc, null, 2) + '\n');
+  const { dev, ino } = fs.statSync(log);
+  fs.writeFileSync(path.join(h.state, `commit.${second.id}.json`), JSON.stringify({ size, dev, ino, ids: [first.id, second.id] }));
   fs.appendFileSync(log, `${JSON.stringify(first)}\n${JSON.stringify(second)}`);
   h.ok(['task', 'note', 'T1', 'next note']);
   const ids = logged(h).map((e) => e.id);
@@ -116,19 +118,77 @@ test('recovery cuts a torn multi-event append off the log, including a final lin
   assertConsistent(h);
 });
 
-test('an add that failed after its commit point keeps its brief, whatever event the log ends with', (t) => {
+test('an add that failed after its commit point keeps its brief, and only then', (t) => {
   const h = setup(t);
   const doc = h.readState('tasks.json');
   doc.tasks.push({ ...doc.tasks[0], id: 'T2', title: 'Staged', notes: [] });
-  const staged = path.join(h.state, `tasks.json.E${crypto.randomUUID()}.0.2.commit`);
+  const id = `E${crypto.randomUUID()}`;
+  const staged = path.join(h.state, `tasks.json.${id}.commit`);
   fs.writeFileSync(staged, JSON.stringify(doc, null, 2) + '\n');
   const brief = path.join(h.state, 'briefs', 'T2.md');
   fs.mkdirSync(path.dirname(brief), { recursive: true });
   fs.writeFileSync(brief, '# Context\n');
-  // The log ends with T1's add, not T2's: the add's own audit event came last.
+  // The staged commit never logged its last event: the add did not commit.
   T.discardUncommittedBrief(h.state, 'T2');
-  assert.ok(fs.existsSync(brief), 'a staged add keeps its brief');
-  fs.rmSync(staged);
+  assert.equal(fs.existsSync(brief), false, 'a staged add whose last event is not logged loses its brief');
+  fs.writeFileSync(brief, '# Context\n');
+  // Its last event, an audit event after the add's own, is the log's last line.
+  const log = path.join(h.state, 'events.jsonl');
+  fs.appendFileSync(log, `${JSON.stringify({ at: new Date().toISOString(), agent: 'owner', cmd: 'setting', task: 'T2', detail: {}, id, type: 'setting', to: 'orchestrator' })}\n`);
   T.discardUncommittedBrief(h.state, 'T2');
-  assert.equal(fs.existsSync(brief), false, 'an add with no staged copy loses its brief');
+  assert.ok(fs.existsSync(brief), 'a staged add whose last event is logged keeps its brief');
+});
+
+const foreign = (text) => ({ at: new Date().toISOString(), agent: 'owner', cmd: 'msg', task: 'T1', detail: { to: 'worker-a', text },
+  id: `E${crypto.randomUUID()}`, type: 'worker-message', to: 'worker-a' });
+
+test('recovery never cuts events another writer appended after a commit that died before its append', (t) => {
+  const h = setup(t);
+  // task update --tier logs a setting audit event and its own: two events.
+  const r = h.run(['task', 'update', 'T1', '--tier', 'hard'], { hooks: { HOOK_DIE_COMMIT: 'staged' } });
+  assert.notEqual(r.code, 0);
+  // An older tool does not recover; it appends a message as it always did.
+  const msg = foreign('from an older tool');
+  fs.appendFileSync(path.join(h.state, 'events.jsonl'), `${JSON.stringify(msg)}\n`);
+  h.ok(['task', 'note', 'T1', 'next note']);
+  assert.ok(logged(h).some((e) => e.id === msg.id), 'the older tool\'s message is still logged');
+  assert.notEqual(h.readState('tasks.json').tasks[0].tier, 'hard');
+  assertConsistent(h);
+});
+
+test('recovery never cuts a log that was replaced since the commit staged', (t) => {
+  const h = setup(t);
+  const r = h.run(['task', 'update', 'T1', '--tier', 'hard'], { hooks: { HOOK_DIE_COMMIT: 'staged' } });
+  assert.notEqual(r.code, 0);
+  const [manifest] = fs.readdirSync(h.state).filter((name) => /^commit\./.test(name));
+  const { ids } = JSON.parse(fs.readFileSync(path.join(h.state, manifest), 'utf8'));
+  // A restore copies a log in place: a new file whose line carries one of the commit's ids.
+  const log = path.join(h.state, 'events.jsonl');
+  const restored = { ...foreign('restored'), id: ids[0] };
+  fs.writeFileSync(`${log}.restore`, `${fs.readFileSync(log, 'utf8')}${JSON.stringify(restored)}\n`);
+  fs.renameSync(`${log}.restore`, log);
+  h.ok(['task', 'note', 'T1', 'next note']);
+  assert.ok(logged(h).some((e) => e.id === restored.id), 'the restored log keeps its lines');
+});
+
+test('a staged commit that cannot be removed stops the next writer before it appends', (t) => {
+  const h = setup(t);
+  crash(h, 'staged', 'crashed note');
+  const before = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8');
+  const r = h.run(['task', 'note', 'T1', 'blocked note'], { hooks: { HOOK_BUSY_STAGED: '1' } });
+  assert.notEqual(r.code, 0, 'the writer stops');
+  assert.match(r.stderr, /interrupted commit file/);
+  assert.equal(fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8'), before, 'nothing was appended');
+  h.ok(['task', 'note', 'T1', 'next note']);
+  assertConsistent(h);
+});
+
+test('rolling a commit forward syncs the log before it renames the staged files', (t) => {
+  const h = setup(t);
+  crash(h, 'landed', 'crashed note');
+  const trace = path.join(h.base, 'sync-trace');
+  h.ok(['task', 'note', 'T1', 'next note'], { hooks: { HOOK_SYNC_TRACE: trace } });
+  const steps = fs.readFileSync(trace, 'utf8').trim().split('\n');
+  assert.deepEqual(steps.slice(0, 2), ['fsync events.jsonl', 'rename tasks.json']);
+  assert.deepEqual(noted(h, 'crashed note'), { task: true, event: true });
 });
