@@ -476,6 +476,8 @@ test('research Codex explicitly enables live search with worker file and git con
     delete rules[report.home];
     assert.equal(rules[path.join(report.home, '.gitconfig')], 'read', 'git config in HOME stays read-only');
     delete rules[path.join(report.home, '.gitconfig')];
+    assert.equal(rules[path.join(report.home, '.tower-crane-shims')], 'read', 'the shims in HOME stay read-only');
+    delete rules[path.join(report.home, '.tower-crane-shims')];
     delete rules[broker];
     // What lies outside the home is listed as it is at each spawn.
     const home = fs.realpathSync(u.home);
@@ -2069,13 +2071,20 @@ for (const [command, args, opts] of calls) {
   assert.deepEqual(JSON.parse(fs.readFileSync(pushed, 'utf8')), [
     'push', '--no-follow-tags', '--recurse-submodules=no', '-u', 'origin', `HEAD:refs/heads/${branch}`,
   ]);
-  const policy = JSON.parse(fs.readFileSync(path.join(home, 'policy.json'), 'utf8'));
+  // A sandboxed codex agent runs the shims in its HOME, with a copy of the
+  // snapshot's lib; its sandbox hides hook.json, so they record no hook event.
+  const shims = path.join(home, 'home', '.tower-crane-shims');
+  const policy = JSON.parse(fs.readFileSync(path.join(shims, 'policy.json'), 'utf8'));
   assert.equal(policy.branch, branch);
   assert.equal(policy.repo, 'acme/app');
+  assert.equal(policy.hook, null);
+  assert.ok(fs.readFileSync(path.join(shims, 'bin', 'git'), 'utf8').includes(path.join(shims, 'lib', 'shim.js')), 'the git shim runs the copy');
+  assert.equal(fs.readFileSync(path.join(shims, 'lib', 'shim.js'), 'utf8'), fs.readFileSync(path.join(ROOT, 'lib', 'shim.js'), 'utf8'));
   const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
   assert.equal(events.find((e) => e.cmd === 'spawn').detail.tool.sha, toolSha);
-  for (const cmd of ['hook git-push', 'hook pr-created', 'hook report']) {
-    assert.ok(events.some((e) => e.cmd === cmd && e.agent === started.agent), cmd);
+  assert.ok(events.some((e) => e.cmd === 'hook report' && e.agent === started.agent), 'hook report');
+  for (const cmd of ['hook git-push', 'hook pr-created']) {
+    assert.ok(!events.some((e) => e.cmd === cmd && e.agent === started.agent), cmd);
   }
   assert.match(fs.readFileSync(S.progressFile(h.state, started.agent), 'utf8'), /"cmd":"hook progress"/);
 });
@@ -2229,6 +2238,90 @@ test('git and gh allow git commands, local pushes and the role\'s own writes, an
       const ran = u.report().ran;
       const codes = ran.map((r, i) => (probes[i][column] === NET && r.code !== 126 && r.code !== 0 ? NET : r.code));
       assert.deepEqual(codes, probes.map((c) => c[column]), `${harness} ${rung}: ${JSON.stringify(ran.map((r) => r.stderr))}`);
+    }
+  }
+});
+
+// What codex's Linux sandbox shows of a path under a permission profile, as
+// measured with codex-cli 0.162.1 and as codex-rs/linux-sandbox/src/bwrap.rs
+// builds it: every readable path is mounted, then each hidden directory is
+// masked, then each writable path is bound with the readable paths inside it.
+// So a readable path inside a hidden one stays hidden in any rule order, and
+// a writable path inside one shows with what it holds.
+function codexShows(rules, p) {
+  const deepest = (mode) => Object.keys(rules)
+    .filter((q) => !q.startsWith(':') && rules[q] === mode && (p === q || p.startsWith(q + path.sep)))
+    .sort((a, b) => b.length - a.length)[0];
+  const [hidden, writable] = [deepest('none'), deepest('write')];
+  if (writable && (!hidden || writable.length > hidden.length)) return true;
+  return !hidden && Boolean(deepest('read'));
+}
+
+// claude's sandbox mounts each denied directory empty, shallowest first, and
+// remounts the allowed paths inside it.
+function claudeShows(fsRules, p) {
+  const deepest = (list) => (list || []).filter((q) => p === q || p.startsWith(q + path.sep)).sort((a, b) => b.length - a.length)[0];
+  const [denied, allowed] = [deepest(fsRules.denyRead), deepest(fsRules.allowRead)];
+  return !denied || Boolean(allowed && allowed.length > denied.length);
+}
+
+// Found 2026-10-14: codex agents ran the host's git and gh, since the codex
+// profile hid homes/ and the shims in homes/<agent>/bin with it. Every
+// harness's agent finds its shims first on PATH, and a sandboxed one's
+// sandbox shows them.
+test('for every harness the first git and gh on the agent\'s PATH are its shims, and claude and codex sandboxes show them', { skip: NO_STUBS }, (t) => {
+  const { h, u } = setup(t);
+  const probe = path.join(h.base, 'probe');
+  fs.mkdirSync(probe);
+  const script = path.join(probe, 'probe.js');
+  fs.writeFileSync(script, `
+const fs = require('node:fs');
+const path = require('node:path');
+const which = (tool) => String(process.env.PATH || '').split(path.delimiter).filter(Boolean)
+  .map((dir) => path.join(dir, tool)).find((f) => { try { fs.accessSync(f, fs.constants.X_OK); return fs.statSync(f).isFile(); } catch { return false; } }) || null;
+const seen = { git: which('git'), gh: which('gh'), home: process.env.CODEX_HOME || process.env.CLAUDE_CONFIG_DIR || null };
+for (const tool of ['git', 'gh']) seen[tool + 'Text'] = seen[tool] ? fs.readFileSync(seen[tool], 'utf8').slice(0, 4096) : null;
+fs.writeFileSync(process.env.PROBE_OUT, JSON.stringify(seen));
+if (path.basename(process.argv[1]) === 'codex') process.stdout.write(JSON.stringify({ type: 'thread.started', thread_id: 'probe' }) + '\\n');
+`);
+  for (const name of ['claude', 'codex', 'opencode', 'agy', 'pi']) {
+    fs.writeFileSync(path.join(probe, name), `#!${process.execPath}\nrequire(${JSON.stringify(script)});\n`, { mode: 0o755 });
+  }
+  const out = path.join(h.base, 'probe.json');
+  const env = { ...u.env, PATH: `${probe}${path.delimiter}${u.env.PATH}`, PROBE_OUT: out };
+  const rungs = {
+    claude: ['--harness', 'claude', '--model', 'probe'],
+    codex: ['--harness', 'codex', '--model', 'probe'],
+    opencode: ['--harness', 'opencode', '--model', 'fixture/probe'],
+    agy: ['--harness', 'agy', '--model', 'gemini-3-pro'],
+    pi: ['--harness', 'pi', '--model', 'probe'],
+    command: ['--harness', 'command', '--clear', 'model', '--command', JSON.stringify([process.execPath, script, '{prompt}'])],
+  };
+  for (const [harness, args] of Object.entries(rungs)) {
+    h.ok(['ladder', 'set', 'small', ...args, '--clear', 'profile', '--clear', 'effort', '--clear', 'args']);
+    fs.rmSync(out, { force: true });
+    const r = h.run(['spawn', '--role', 'small', '--task', 'T1', '--wait'], { env });
+    assert.equal(r.code, 0, `${harness}: ${r.stderr}`);
+    const seen = JSON.parse(fs.readFileSync(out, 'utf8'));
+    for (const tool of ['git', 'gh']) {
+      assert.ok(seen[tool] && seen[tool].startsWith(path.join(h.state, 'homes') + path.sep), `${harness}: the first ${tool} on PATH is ${seen[tool]}`);
+      assert.match(seen[`${tool}Text`], /shim\.js/, `${harness}: ${seen[tool]} runs the shim`);
+      const policy = /'([^']*policy\.json)'/.exec(seen[`${tool}Text`])?.[1];
+      assert.ok(policy && fs.existsSync(policy), `${harness}: ${tool} names its policy`);
+    }
+    assert.equal(path.dirname(seen.git), path.dirname(seen.gh));
+    const bin = path.dirname(seen.git);
+    if (harness === 'codex') {
+      const rules = TOML.parse(fs.readFileSync(path.join(seen.home, 'config.toml'), 'utf8')).permissions['tower-crane'].filesystem;
+      for (const p of [bin, path.join(bin, 'git'), path.join(path.dirname(bin), 'policy.json'), path.join(path.dirname(bin), 'lib', 'shim.js')]) {
+        assert.ok(codexShows(rules, fs.realpathSync(p)), `codex shows ${p}`);
+      }
+      assert.ok(!codexShows(rules, fs.realpathSync(path.join(h.state, 'homes'))), 'codex hides homes/');
+      assert.ok(!codexShows(rules, fs.realpathSync(path.join(seen.home, 'config.toml'))), 'codex hides the rest of the agent home');
+    }
+    if (harness === 'claude') {
+      const fsRules = JSON.parse(fs.readFileSync(path.join(seen.home, 'settings.json'), 'utf8')).sandbox.filesystem;
+      for (const p of [path.join(bin, 'git'), path.join(path.dirname(bin), 'policy.json')]) assert.ok(claudeShows(fsRules, fs.realpathSync(p)), `claude shows ${p}`);
     }
   }
 });
