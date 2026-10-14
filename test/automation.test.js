@@ -3071,6 +3071,46 @@ test('a dispatch waits for another that is still preparing the first ready task 
   assert.match(secondResult.stdout, /^T1: the workers limit is reached .*holders: T3 /m);
 });
 
+// The test process holds the dispatch lock, as a dispatch that outlasts every wait would.
+function holdDispatchLock(t, h) {
+  const S = require('../lib/state');
+  const dir = path.join(h.state, 'dispatch');
+  fs.mkdirSync(dir, { recursive: true });
+  const lock = S.acquireLock(dir);
+  let held = true;
+  const release = () => { if (held) { held = false; S.releaseLock(lock); } };
+  t.after(release);
+  return release;
+}
+
+test('a batch stops at a dispatch lock that outlasts its wait instead of dispatching lower-ranked tasks', (t) => {
+  const h = refillFixture(t);
+  holdDispatchLock(t, h);
+  const result = h.run(['spawn', '--ready', '--agent', 'orchestrator'], { hooks: { HOOK_DISPATCH_EXPIRE: '1' } });
+  assert.equal(result.code, 1, result.stderr);
+  // T3 unblocks T4, so it is first; T1 and T2 are not tried.
+  assert.deepEqual(result.stdout.trim().split('\n').map((line) => line.split(':')[0]), ['T3'], result.stdout);
+  assert.match(result.stdout, /^T3: worker dispatch is locked by pid \d+/, result.stdout);
+  assert.equal(h.logs().filter((e) => e.cmd === 'spawn').length, 0);
+});
+
+test('a refill retries after a dispatch lock timeout without waiting for other inputs to change', async (t) => {
+  const h = refillFixture(t);
+  const release = holdDispatchLock(t, h);
+  let timedOut = false;
+  const watcher = h.runAsync(['wait', '--after', '0', '--task', 'T3', '--types', 'spawn', '--timeout', '60', '--agent', 'orchestrator'], {
+    hooks: { HOOK_DISPATCH_EXPIRE: '1' },
+    onSpawn: (child) => child.stderr.on('data', (d) => { if (/automation refill: T3: worker dispatch is locked/.test(String(d))) timedOut = true; }),
+  });
+  await waitUntil(() => timedOut, { paths: [h.base], what: 'the refill did not report a dispatch lock timeout' });
+  // Nothing in the state changes from here; only the lock goes away.
+  release();
+  const result = await watcher;
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(JSON.parse(result.stdout).task, 'T3');
+  await waitFor(h.marker('T3'), { what: 'T3 takes the free slot' });
+});
+
 function startupContexts(h, withRules) {
   const startups = h.logs().filter((e) => e.cmd === 'startup');
   assert.deepEqual(startups.map((e) => e.detail.role), ['worker', 'reviewer']);
@@ -3953,4 +3993,3 @@ poll();
   assert.equal(passes.at(-1).detail.blocked, null);
   assert.deepEqual(passes.at(-1).detail.skipped, []);
 });
-

@@ -187,6 +187,12 @@ function initializing(commonDir) {
   });
 }
 
+let monotonicSkew = 0;
+if (env.HOOK_DISPATCH_EXPIRE) {
+  const now = performance.now.bind(performance);
+  Object.defineProperty(performance, 'now', { value: () => now() + monotonicSkew, configurable: true });
+}
+
 function before(name, args) {
   const target = args[0];
   // Stdin is read with readStdin (readSync) or a bare readFileSync(0).
@@ -213,12 +219,15 @@ function before(name, args) {
     && path.basename(target) === 'tower-crane-worktree.lock' && initializing(path.dirname(target)) && first('initializing')) {
     stop(env.HOOK_STOP_INITIALIZING);
   }
-  // HOOK_DISPATCH_WAITING=FILE: created once this process looks inside a
-  // dispatch lock another holds, which only a waiter does.
-  if (env.HOOK_DISPATCH_WAITING && ['readdirSync', 'openSync', 'readFileSync'].includes(name)
-    && under(path.join(STATE, 'dispatch', 'lock'), target) && first('dispatch-waiting')) {
-    real.writeFileSync(env.HOOK_DISPATCH_WAITING, String(process.pid));
+  // Only a waiter looks inside a dispatch lock another process holds.
+  const dispatchLook = ['readdirSync', 'openSync', 'readFileSync'].includes(name) && under(path.join(STATE, 'dispatch', 'lock'), target);
+  // HOOK_DISPATCH_WAITING=FILE: created at this process's first such look.
+  if (env.HOOK_DISPATCH_WAITING && dispatchLook && first('dispatch-waiting')) {
+    writeAtomic(env.HOOK_DISPATCH_WAITING, String(process.pid), undefined, real);
   }
+  // HOOK_DISPATCH_EXPIRE=1: each such look moves this process's monotonic
+  // clock an hour on, so its wait for the dispatch lock ends at that look.
+  if (env.HOOK_DISPATCH_EXPIRE && dispatchLook) monotonicSkew += 3600000;
   // HOOK_JITTER_MS=MS: a random pause of up to MS before each call on the state.
   if (env.HOOK_JITTER_MS && (inState(target) || inState(args[1]))) sleep(Math.floor(Math.random() * Number(env.HOOK_JITTER_MS)));
   // State commits precede board replacement; expose that interval to readers.
