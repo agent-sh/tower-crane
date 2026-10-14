@@ -783,6 +783,9 @@ async function sshOriginFixture(t) {
   const f = await pushFixture(t);
   f.h.ok(['project', 'set', '--repo', 'acme/demo', '--agent', 'owner']);
   f.h.git(['remote', 'set-url', 'origin', 'git@github.com:acme/demo.git']);
+  // Spawn writes the recorded repository into the shim's policy.
+  const policy = path.join(f.h.base, 'shim', 'policy.json');
+  fs.writeFileSync(policy, JSON.stringify({ ...JSON.parse(fs.readFileSync(policy, 'utf8')), repo: 'acme/demo' }));
   const ssh = path.join(f.h.base, 'ssh.js');
   fs.writeFileSync(ssh, `const args = process.argv.slice(2);
 if (args.includes('-G')) process.exit(0);
@@ -874,7 +877,35 @@ test('a sandboxed worker whose origin is an ssh URL fetches the base and its tas
   assert.match(pull.stderr, /git fetch origin goes through the broker/);
 });
 
-test('the broker fetches only from the recorded repository, and a local origin is fetched in the sandbox', async (t) => {
+// A reviewer's git directory is read-only under codex, and a disk can fill:
+// index-pack then exits while the broker still sends the pack. The fetch
+// must fail with index-pack's error, not wait on a drain that never comes
+// and exit 0 with origin's branches unchanged.
+test('a brokered fetch whose pack cannot be indexed fails with the reason', { skip: (process.platform === 'win32' || process.getuid?.() === 0) && 'needs a directory its user cannot write' }, async (t) => {
+  const f = await sshOriginFixture(t);
+  const before = f.h.git(['rev-parse', 'refs/remotes/origin/main'], f.wt.path);
+  // Random bytes do not compress, so the pack is larger than the pipe buffers on the way.
+  const other = fs.mkdtempSync(path.join(f.h.base, 'big-'));
+  f.h.git(['clone', '-q', f.remote, other]);
+  fs.writeFileSync(path.join(other, 'big.bin'), require('node:crypto').randomBytes(768 * 1024));
+  f.h.git(['add', 'big.bin'], other);
+  f.h.git(['commit', '-qm', 'big'], other);
+  f.h.git(['push', '-q', 'origin', 'HEAD:refs/heads/main'], other);
+  const pack = path.join(f.job.dispatch.gitDirs.common, 'objects', 'pack');
+  fs.mkdirSync(pack, { recursive: true });
+  fs.chmodSync(pack, 0o555);
+  let r;
+  try {
+    r = await f.shim('git', ['fetch', 'origin']);
+  } finally {
+    fs.chmodSync(pack, 0o755);
+  }
+  assert.notEqual(r.status, 0, r.stderr);
+  assert.match(r.stderr, /cannot index the pack the broker sent/);
+  assert.equal(f.h.git(['rev-parse', 'refs/remotes/origin/main'], f.wt.path), before, 'origin/main is unchanged');
+});
+
+test('the broker fetches only from the recorded repository, and any other origin is fetched in the sandbox', async (t) => {
   const f = await pushFixture(t);
   const r = await f.raw({ fetch: {} });
   assert.equal(r.code, 1);
@@ -884,11 +915,14 @@ test('the broker fetches only from the recorded repository, and a local origin i
   const other = await f.raw({ fetch: {} });
   assert.equal(other.code, 1);
   assert.match(other.stderr, /not the project's repository acme\/demo/);
-  // A path on this machine runs as git's own fetch.
-  f.h.git(['remote', 'set-url', 'origin', f.remote]);
-  const local = await f.shim('git', ['fetch', 'origin']);
-  assert.equal(local.status, 0, local.stderr);
-  assert.doesNotMatch(local.stderr, /tower-crane/);
+  // Any origin but the recorded repository runs as git's own fetch in the
+  // sandbox: a path on this machine, absolute or relative.
+  for (const url of [f.remote, path.relative(f.wt.path, f.remote)]) {
+    f.h.git(['remote', 'set-url', 'origin', url]);
+    const local = await f.shim('git', ['fetch', 'origin']);
+    assert.equal(local.status, 0, `${url}: ${local.stderr}`);
+    assert.doesNotMatch(local.stderr, /tower-crane/, url);
+  }
 });
 
 test('only a role whose agent file pushes can push through the broker, and only to the recorded repository', async (t) => {
