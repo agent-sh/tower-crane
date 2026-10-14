@@ -255,12 +255,73 @@ test('a reader without the lock never sees staged files whose commit point was n
   doc.last_event = second.id;
   fs.writeFileSync(path.join(h.state, `tasks.json.${second.id}.commit`), JSON.stringify(doc, null, 2) + '\n');
   fs.writeSync(fd, `${JSON.stringify(first)}\n${JSON.stringify(second)}`);
-  fs.closeSync(fd);
   assert.deepEqual(unlocked(h).notes, [], 'a last line without its newline is no commit point');
   // An older tool appended after a commit that reached its log: recovery
   // deletes those staged files, so readers never show them either.
-  fs.appendFileSync(log, `\n${JSON.stringify(foreign('from an older tool'))}\n`);
+  fs.writeSync(fd, `\n${JSON.stringify(foreign('from an older tool'))}\n`);
+  fs.closeSync(fd);
   assert.deepEqual(unlocked(h).notes, []);
+});
+
+// Runs read with fs.readFileSync wrapped by onRead(file, text), as a writer
+// acting between a reader's own file reads would.
+function readingWith(t, onRead) {
+  const read = fs.readFileSync;
+  const restore = () => { fs.readFileSync = read; };
+  t.after(restore);
+  fs.readFileSync = function observed(file, ...args) {
+    const text = read.call(this, file, ...args);
+    if (typeof file === 'string') onRead(path.resolve(file), text, read);
+    return text;
+  };
+  return restore;
+}
+
+test('a reader whose files are renamed into place after it read them reads them again', (t) => {
+  const h = setup(t);
+  crash(h, 'landed', 'renamed note');
+  const staged = fs.readdirSync(h.state).filter((name) => /^(tasks|project|decisions)\.json\.E[0-9a-f-]{36}\.commit$/.test(name));
+  assert.ok(staged.length);
+  let renamed = false;
+  // The renames land after the reader read tasks.json and before it looks for staged files.
+  const restore = readingWith(t, (file) => {
+    if (renamed || file !== path.join(h.state, 'tasks.json')) return;
+    renamed = true;
+    for (const name of staged) fs.renameSync(path.join(h.state, name), path.join(h.state, name.replace(/\.E[0-9a-f-]{36}\.commit$/, '')));
+  });
+  const read = unlocked(h);
+  restore();
+  assert.ok(renamed);
+  assert.deepEqual(read, { notes: ['renamed note'], logged: ['renamed note'] });
+});
+
+test('a reader that keeps losing to renames reads once under the lock', (t) => {
+  const h = setup(t);
+  crash(h, 'landed', 'contended note');
+  const file = path.join(h.state, 'tasks.json');
+  const lock = path.join(h.state, 'lock');
+  let replaced = 0;
+  // Another writer replaces tasks.json during every read made without the lock.
+  const restore = readingWith(t, (read, text, original) => {
+    if (read !== file) return;
+    let mine = false;
+    try {
+      mine = fs.readdirSync(lock).some((name) => JSON.parse(original(path.join(lock, name), 'utf8')).pid === process.pid);
+    } catch {
+      // No lock, or one being replaced: not this process's.
+    }
+    if (mine) return;
+    fs.writeFileSync(`${file}.replaced`, text);
+    fs.renameSync(`${file}.replaced`, file);
+    replaced++;
+  });
+  const read = unlocked(h);
+  restore();
+  assert.ok(replaced >= 5, `the reader lost ${replaced} reads`);
+  // The lock's holder had died; taking it renamed the logged commit into place.
+  assert.deepEqual(read, { notes: ['contended note'], logged: ['contended note'] });
+  assert.equal(fs.existsSync(lock), false, 'the reader released the lock');
+  assertConsistent(h);
 });
 
 test('a reader without the lock sees each commit it has the events of while the writer still renames', async (t) => {
