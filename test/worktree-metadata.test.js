@@ -300,6 +300,15 @@ test('a cleanup keeps placeholders while a live cleanup holds the git directory,
   assert.equal(fs.existsSync(dir), true);
   assert.match(messages.join(''), /another cleanup holds/);
   assert.ok(messages.join('').includes(`remove ${dir} if no cleanup is running`));
+  // From another pid namespace the holder's pid means nothing, but its
+  // namespace still has live processes.
+  if (process.platform === 'linux') {
+    const other = cp.spawnSync(process.execPath, ['--require', HOOKS, '-e',
+      `require(${JSON.stringify(path.join(ROOT, 'lib', 'git-placeholders.js'))}).clearPlaceholders(${JSON.stringify(commonDir)})`],
+    { env: { ...h.env, HOOK_PIDNS: 'pid:[4026511111]', TOWER_CRANE_SANDBOX: '0' }, encoding: 'utf8' });
+    assert.match(other.stderr, /another cleanup holds/);
+    assert.equal(fs.existsSync(lock), true);
+  }
   fs.writeFileSync(`${signal}.go`, '');
   assert.deepEqual(await childExit(holder), { code: 0, signal: null });
 });
@@ -327,20 +336,65 @@ test('a cleanup killed while it holds the git directory leaves nothing that keep
   assert.equal(fs.existsSync(lock), false);
   assert.equal(fs.existsSync(path.join(commonDir, REAP_DIR)), false);
   // A taker killed before its rename leaves its prepared directory; a later
-  // cleanup removes it once its marker names a process that is gone, and keeps
-  // a live taker's.
-  const holder = (pid) => JSON.stringify({ pid, host: os.hostname(), pidns: pidns(), start_ticks: null });
-  const staging = (pid, nonce) => {
+  // cleanup removes it once its marker names a process that is gone, in this
+  // pid namespace or in a sandbox's that has no process left, and keeps a live
+  // taker's.
+  const holder = (pid, ns) => JSON.stringify({ pid, host: os.hostname(), pidns: ns, start_ticks: null });
+  const staging = (pid, nonce, ns = pidns()) => {
     const dir = path.join(commonDir, `${REAP_DIR}.${pid}.${nonce}.new`);
     fs.mkdirSync(dir);
-    fs.writeFileSync(path.join(dir, nonce), holder(pid));
+    fs.writeFileSync(path.join(dir, nonce), holder(pid, ns));
     return dir;
   };
   const dead = staging(killed.pid, '0123456789abcdef');
+  const sandboxed = staging(2, '00112233445566ff', 'pid:[4026599999]');
   const live = staging(process.pid, 'fedcba9876543210');
-  clearPlaceholders(commonDir);
+  const sandbox = process.env.TOWER_CRANE_SANDBOX;
+  process.env.TOWER_CRANE_SANDBOX = '0';
+  try {
+    clearPlaceholders(commonDir);
+  } finally {
+    if (sandbox === undefined) delete process.env.TOWER_CRANE_SANDBOX;
+    else process.env.TOWER_CRANE_SANDBOX = sandbox;
+  }
   assert.equal(fs.existsSync(dead), false);
+  assert.equal(fs.existsSync(sandboxed), process.platform !== 'linux');
   assert.equal(fs.existsSync(live), true);
+});
+
+// A sandboxed agent's shim runs in a pid namespace of its own, so its pid means
+// nothing outside. Once no process is left in that namespace, a cleanup on the
+// host removes its marker; a cleanup inside a sandbox cannot see the host's
+// processes and keeps it.
+test('a cleanup killed inside a command sandbox is judged by its pid namespace', { timeout: 300000 }, (t) => {
+  const h = makeRepo(t);
+  h.init();
+  const commonDir = path.join(h.repo, '.git');
+  cp.spawnSync(...shimGit(h, { HOOK_DIE_REAP: '1', HOOK_PIDNS: 'pid:[4026599999]' }));
+  const dir = path.join(commonDir, REAP_DIR);
+  const [marker] = fs.readdirSync(dir);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(dir, marker), 'utf8')).pidns, 'pid:[4026599999]');
+  const lock = path.join(commonDir, 'config.lock');
+  fs.writeFileSync(lock, '', { mode: 0o444 });
+  const messages = [];
+  t.mock.method(process.stderr, 'write', (chunk) => {
+    messages.push(String(chunk));
+    return true;
+  });
+  onlyProcesses(t, h);
+  const sandbox = process.env.TOWER_CRANE_SANDBOX;
+  t.after(() => {
+    if (sandbox === undefined) delete process.env.TOWER_CRANE_SANDBOX;
+    else process.env.TOWER_CRANE_SANDBOX = sandbox;
+  });
+  if (process.platform === 'linux') {
+    process.env.TOWER_CRANE_SANDBOX = '1';
+    assert.deepEqual(clearPlaceholders(commonDir), []);
+    assert.match(messages.join(''), /another cleanup holds/);
+  }
+  process.env.TOWER_CRANE_SANDBOX = '0';
+  assert.deepEqual(clearPlaceholders(commonDir), process.platform === 'linux' ? [lock] : []);
+  assert.equal(fs.existsSync(dir), process.platform !== 'linux');
 });
 
 // Python makes this process non-dumpable, so its descriptors are unreadable to

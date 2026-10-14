@@ -849,13 +849,18 @@ test('a git shim killed while it cleans up placeholders does not keep the next s
   fs.writeFileSync(policy, JSON.stringify({ gitPush: 'branch', branch: 'task-T1', repo: null, gh: [] }));
   const shimDir = path.join(h.base, 'shim');
   fs.mkdirSync(shimDir);
-  cp.spawnSync(process.execPath, ['--require', HOOKS, path.join(ROOT, 'lib', 'shim.js'), policy, shimDir, 'git', 'status'],
-    { cwd: h.repo, env: { ...h.env, HOOK_STATE: h.state, HOOK_DIE_REAP: '1' } });
-  assert.equal(fs.existsSync(path.join(h.repo, '.git', 'tower-crane-reap')), true, 'the killed shim held the directory');
+  // An empty process table lets the shim take the directory where there is no /proc.
+  const table = fs.mkdtempSync(path.join(h.base, 'proc-'));
   commandRung(h, 'small', [process.execPath, '-e', 'process.exit(0)', '{prompt}']);
-  const started = h.run(['spawn', '--role', 'small', '--task', 'T1', '--wait', '--json']);
-  assert.equal(started.code, 0, started.stderr);
-  assert.equal(JSON.parse(started.stdout).agent, 'small-T1-1');
+  // On the host, and inside an agent's command sandbox, which has a pid namespace of its own.
+  for (const [attempt, hooks] of [[1, {}], [2, { HOOK_PIDNS: 'pid:[4026599999]' }]]) {
+    cp.spawnSync(process.execPath, ['--require', HOOKS, path.join(ROOT, 'lib', 'shim.js'), policy, shimDir, 'git', 'status'],
+      { cwd: h.repo, env: { ...h.env, TOWER_CRANE_PROC: table, HOOK_STATE: h.state, HOOK_DIE_REAP: '1', ...hooks } });
+    assert.equal(fs.existsSync(path.join(h.repo, '.git', 'tower-crane-reap')), true, 'the killed shim held the directory');
+    const started = h.run(['spawn', '--role', 'small', '--task', 'T1', '--wait', '--json']);
+    assert.equal(started.code, 0, started.stderr);
+    assert.equal(JSON.parse(started.stdout).agent, `small-T1-${attempt}`);
+  }
 });
 
 // Everything a spawn could leave behind: state files, events, logs, the
