@@ -186,6 +186,39 @@ test('in a real codex sandbox forged state edits fail and the CLI writes through
   assert.deepEqual([event?.agent, event?.via], ['small-T1-1', 'broker']);
 });
 
+// A project at a deep path: brokers/<agent>/broker.sock is too long for a
+// socket address, and the caller's TMPDIR is under the home, as ~/.cache is
+// in production. claude's sandbox hides the home, so a socket there failed
+// every brokered command with ENOENT; the agent's own temp directory holds
+// it instead. codex brokers over TCP, so its run checks only the deep path.
+for (const harness of ['claude', 'codex']) {
+  const flag = `TOWER_CRANE_LIVE_${harness.toUpperCase()}`;
+  test(`a real ${harness} agent in a project whose broker socket path is too long writes through the broker`, { skip: process.env[flag] !== '1' && `set ${flag}=1 to run against the real ${harness} CLI`, timeout: 300000 }, async (t) => {
+    fs.mkdirSync(LIVE_ROOT, { recursive: true });
+    const deep = fs.mkdtempSync(path.join(LIVE_ROOT, `deep-${'d'.repeat(60)}-`));
+    t.after(() => fs.rmSync(deep, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
+    const h = makeRepo(t, { root: deep });
+    h.init();
+    h.ok(['task', 'add', '--title', 'Deep probe', '--acceptance', 'the broker writes']);
+    assert.ok(Buffer.byteLength(path.join(h.state, 'brokers', 'small-T1-1', 'broker.sock')) > 100, h.state);
+    const cache = shortCache(t);
+    const caller = path.join(cache, 'caller-tmp');
+    fs.mkdirSync(caller);
+    h.ok(['brief', 'set', 'T1', '-'], {
+      input: `Sandbox probe set up by the owner. Run exactly this one command with your command tool, then reply with its exit code and stop.\n\n${node} ${JSON.stringify(BIN)} task note T1 through-the-broker\n`,
+    });
+    pinLiveRung(h, harness);
+    const home = os.homedir();
+    const env = { ...h.env, HOME: home, USERPROFILE: home, CLAUDE_CONFIG_DIR: '', CODEX_HOME: '', XDG_CACHE_HOME: cache, TMPDIR: caller, TMP: caller, TEMP: caller };
+    const r = await h.runAsync(['spawn', '--role', 'small', '--task', 'T1', '--wait'], { env });
+    assert.equal(r.code, 0, `${r.stderr}\n${agentLog(h)}`);
+    const note = h.readState('tasks.json').tasks[0].notes.find((n) => n.text === 'through-the-broker');
+    assert.equal(note?.agent, 'small-T1-1', `the broker wrote it as the spawned agent\n${agentLog(h)}`);
+    const event = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l)).find((e) => e.cmd === 'task note');
+    assert.deepEqual([event?.agent, event?.via], ['small-T1-1', 'broker']);
+  });
+}
+
 // Host sockets under /run that both sandboxes hide: the system bus,
 // snapd, docker (root on the host for a member of its group) and the user's
 // session bus. Found in review 2026-10-14: every one connected from a codex

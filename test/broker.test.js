@@ -366,14 +366,39 @@ test('a worker cannot have the broker run its tests, its cleanup or git', () => 
   for (const role of Object.keys(B.ROLES)) for (const cmd of B.ROLES[role]) assert.ok(!/^(check|worktree|merge|spawn)\b/.test(cmd), `${role}: ${cmd}`);
 });
 
-test('a broker whose temp root is too deep for a socket keeps its socket out of /tmp', { skip: process.platform === 'win32' && 'Windows uses a named pipe' }, async (t) => {
+test('a claude broker whose own directory is too deep listens in the agent\'s own temp directory, which only its sandbox reaches', { skip: process.platform === 'win32' && 'Windows uses a named pipe' }, async (t) => {
+  const h = makeRepo(t);
+  h.init();
+  h.ok(['task', 'add', '--title', 'deep', '--acceptance', 'noted']);
+  // claudeTmp in lib/agents.js: the directory claude's sandbox reads and writes for this agent alone.
+  const tmp = path.join(h.base, 't');
+  if (!require('../lib/gate-tmp').harnessFits(tmp)) return t.skip(`the test root is too deep for an agent temp directory: ${tmp}`);
+  fs.mkdirSync(tmp, { mode: 0o700 });
+  const job = { state: h.state, task: 'T1', agent: 'worker-T1-1', role: 'worker', harness: 'claude', broker_harnesses: ['claude'],
+    agent_tmp: tmp, cwd: h.repo, broker: path.join(h.base, 'w'.repeat(90), B.FILE) };
+  const broker = await B.start(job);
+  let closed = false;
+  t.after(() => closed || broker.close());
+  const { socket } = JSON.parse(fs.readFileSync(job.broker, 'utf8'));
+  assert.equal(socket, path.join(tmp, 'broker.sock'));
+  assert.equal(fs.statSync(socket).mode & 0o777, 0o600);
+  const r = await B.forward(job.broker, ['task', 'note', 'T1', 'from a deep state'], h.state);
+  assert.equal(r.code, 0, r.stderr);
+  assert.deepEqual(h.readState('tasks.json').tasks[0].notes.map((n) => n.text), ['from a deep state']);
+  broker.close();
+  closed = true;
+  assert.equal(fs.existsSync(socket), false, 'closing removes the socket');
+  assert.equal(fs.existsSync(tmp), true, 'closing keeps the agent\'s temp directory');
+});
+
+test('a claude broker with no short temp directory of its own keeps its socket out of the home, which claude\'s sandbox hides', { skip: process.platform === 'win32' && 'Windows uses a named pipe' }, async (t) => {
   const s = scratch(t);
-  // A temp root this deep leaves no room for a Unix socket path under it. The home is the account's,
-  // as in production: a gate or a sandbox can set HOME deep, and then its cache root fits no socket.
-  const deep = path.join(s.base, 'd'.repeat(120));
-  fs.mkdirSync(deep);
+  // The caller's TMPDIR is short and under the home, as ~/.cache/... is in production. The agent's
+  // temp directory is a codex rung's, too long for claude's proxy sockets, so a claude fallback has none.
+  const caller = path.join(s.base, 'tmp');
+  fs.mkdirSync(caller);
   const saved = { TMPDIR: process.env.TMPDIR, HOME: process.env.HOME };
-  process.env.TMPDIR = deep;
+  process.env.TMPDIR = caller;
   process.env.HOME = os.userInfo().homedir;
   t.after(() => {
     for (const key of ['TMPDIR', 'HOME']) {
@@ -381,44 +406,27 @@ test('a broker whose temp root is too deep for a socket keeps its socket out of 
       else process.env[key] = saved[key];
     }
   });
-  const job = { ...s.job, broker_harnesses: ['claude'], broker: path.join(s.base, 'w'.repeat(90), B.FILE) };
+  const codexTmp = path.join(s.base, 'c'.repeat(80));
+  assert.equal(require('../lib/gate-tmp').harnessFits(codexTmp), false);
+  const job = { ...s.job, harness: 'codex', broker_harnesses: ['codex', 'claude'], agent_tmp: codexTmp, broker: path.join(s.base, 'w'.repeat(90), B.FILE) };
   const broker = await B.start(job);
   t.after(() => broker.close());
   const { socket } = JSON.parse(fs.readFileSync(job.broker, 'utf8'));
-  assert.ok(socket.startsWith(path.join(os.homedir(), '.cache', 'tower-crane') + path.sep), socket);
+  for (const home of [os.homedir(), os.userInfo().homedir]) assert.ok(!socket.startsWith(home + path.sep), socket);
+  assert.ok(socket.startsWith('/tmp/tower-crane-'), socket);
+  assert.equal(fs.statSync(path.dirname(socket)).mode & 0o777, 0o700);
 });
 
-test('a broker whose cache root cannot be written tries /tmp next', { skip: process.platform === 'win32' && 'Windows uses a named pipe' }, async (t) => {
+test('a claude broker refuses to start when no socket path its sandbox reaches can be made', { skip: process.platform === 'win32' && 'Windows uses a named pipe' }, async (t) => {
   const s = scratch(t);
-  const deep = path.join(s.base, 'd'.repeat(120));
-  fs.mkdirSync(deep);
-  const savedTmp = process.env.TMPDIR;
-  process.env.TMPDIR = deep;
-  t.after(() => {
-    if (savedTmp === undefined) delete process.env.TMPDIR;
-    else process.env.TMPDIR = savedTmp;
-  });
-  // A short home, so its cache root fits a socket path on any account. The cache root is refused as on a
-  // read-only home, and so is every mkdtemp: nothing is made and nothing is listened on.
-  t.mock.method(os, 'homedir', () => '/h');
-  const cache = path.join('/h', '.cache', 'tower-crane');
   const attempted = [];
-  const readOnly = () => Object.assign(new Error('EROFS: read-only file system'), { code: 'EROFS' });
-  const mkdir = fs.mkdirSync;
-  t.mock.method(fs, 'mkdirSync', (p, options) => {
-    if (p === cache) {
-      attempted.push(p);
-      throw readOnly();
-    }
-    return mkdir(p, options);
-  });
   t.mock.method(fs, 'mkdtempSync', (prefix) => {
     attempted.push(path.dirname(prefix));
-    throw readOnly();
+    throw Object.assign(new Error('EROFS: read-only file system'), { code: 'EROFS' });
   });
   const job = { ...s.job, broker_harnesses: ['claude'], broker: path.join(s.base, 'w'.repeat(90), B.FILE) };
-  await assert.rejects(B.start(job), /no socket path short enough and writable/);
-  assert.deepEqual(attempted, [cache, '/tmp']);
+  await assert.rejects(B.start(job), /no socket path that the agent's sandbox reaches.*XDG_CACHE_HOME/s);
+  assert.deepEqual(attempted, ['/tmp']);
 });
 
 test('a broker for claude and codex routes listens on both, and an agent that cannot use the socket uses TCP', { skip: process.platform === 'win32' && 'Windows uses a named pipe for both' }, async (t) => {
