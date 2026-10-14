@@ -1,6 +1,6 @@
 'use strict';
 
-const { waitUntil, HUNG_TEST_MS } = require('./signals');
+const { waitUntil, HUNG_TEST_MS, killPid } = require('./signals');
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -277,7 +277,7 @@ test('closing the broker stops the commands it is running and what they started'
     // Read the file, not `started`: a test that fails before reading it still leaves them running.
     const text = pids && fs.existsSync(pids) ? fs.readFileSync(pids, 'utf8') : '';
     const recorded = text ? JSON.parse(text) : [];
-    for (const pid of recorded.filter((p) => detachedAlive({ pid: p }))) process.kill(pid, 'SIGKILL');
+    for (const pid of recorded.filter((p) => detachedAlive({ pid: p }))) killPid(pid, 'SIGKILL');
   });
   const { base, state, job } = scratch(t);
   pids = path.join(base, 'pids.json');
@@ -967,7 +967,7 @@ function shimChild(f, args) {
   return { child, exited, stderr: () => stderr };
 }
 
-const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+const alive = (pid) => { try { killPid(pid, 0); return true; } catch { return false; } };
 
 // A Windows named pipe has no half close: libuv closes the whole pipe 50 ms
 // after the writer's shutdown, so an agent that ends its side to mark the end

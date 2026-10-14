@@ -1,6 +1,6 @@
 'use strict';
 
-const { waitOnRepo } = require('./signals');
+const { waitOnRepo, killPid } = require('./signals');
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
@@ -56,7 +56,9 @@ function heldWorker(h) {
   const edited = path.join(h.base, 'edited');
   const script = `
 const fs = require('node:fs');
-fs.writeFileSync(${JSON.stringify(ready)}, String(process.pid));
+// The test signals this pid, so it publishes the file whole.
+fs.writeFileSync(${JSON.stringify(ready + '.tmp')}, String(process.pid));
+fs.renameSync(${JSON.stringify(ready + '.tmp')}, ${JSON.stringify(ready)});
 setInterval(() => {
   if (fs.existsSync(${JSON.stringify(finish)})) {
     fs.writeFileSync(${JSON.stringify(edited)}, 'edit finished');
@@ -283,7 +285,7 @@ test(`${change} drains the supervisor without killing an edit`, async (t) => {
     });
     await waitOnRepo(h, () => /supervision stopped.*worker.*finish/i.test(output),
       () => `supervisor did not report a clean schema stop:\n${output}`);
-    process.kill(Number(fs.readFileSync(worker.ready, 'utf8')), 0);
+    killPid(Number(fs.readFileSync(worker.ready, 'utf8')), 0);
     liveBeforeExit = S.readEvents(h.state).filter((e) => e.cmd === 'spend live');
   } finally {
     fs.writeFileSync(worker.finish, '');

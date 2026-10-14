@@ -618,6 +618,24 @@ function waitFindings(text) {
   return findings;
 }
 
+// A test that signals a pid it read from a file or an event signals its own
+// process group when the read finds the file not yet written: Number('') is
+// 0. Only a process signalling itself may call process.kill directly; every
+// other pid goes through killPid or killGroup in test/signals.js, which
+// refuse anything that is not a process id. Generated fixture scripts in
+// strings and templates are checked too.
+function killFindings(text) {
+  const findings = [];
+  const lines = text.replace(/\r\n/g, '\n').split('\n');
+  for (const match of text.matchAll(/\bprocess\.kill\s*\(/g)) {
+    const index = text.slice(0, match.index).split('\n').length - 1;
+    if (/^\s*(?:\/\/|\*)/.test(lines[index])) continue;
+    const pid = normalizedBudget(callArguments(text, match.index + match[0].lastIndexOf('('))[0] || '');
+    if (pid !== 'process.pid') findings.push({ line: index + 1, reason: `process.kill(${pid}) signals a pid that is not checked` });
+  }
+  return findings;
+}
+
 function checkTestWaits(root) {
   const dir = path.join(root, 'test');
   if (!fs.existsSync(dir)) return;
@@ -625,11 +643,17 @@ function checkTestWaits(root) {
   for (const name of fs.readdirSync(dir, { recursive: true })) {
     if (!name.endsWith('.js')) continue;
     const file = `test/${name.replaceAll('\\', '/')}`;
-    for (const finding of waitFindings(fs.readFileSync(path.join(root, file), 'utf8'))) {
+    const text = fs.readFileSync(path.join(root, file), 'utf8');
+    for (const finding of waitFindings(text)) {
       findings.push(`${file}:${finding.line} ${finding.reason}; use test/signals.js or // wait-allow: reason`);
+    }
+    // The checked helpers themselves are the one place a bare call belongs.
+    if (file === 'test/signals.js') continue;
+    for (const finding of killFindings(text)) {
+      findings.push(`${file}:${finding.line} ${finding.reason}; use killPid or killGroup from test/signals.js`);
     }
   }
   if (findings.length) throw new Error(findings.join('\n'));
 }
 
-module.exports = { waitFindings, checkTestWaits };
+module.exports = { waitFindings, killFindings, checkTestWaits };

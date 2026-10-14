@@ -1,6 +1,6 @@
 'use strict';
 
-const { waitUntil, HUNG_TEST_MS } = require('./signals');
+const { waitUntil, HUNG_TEST_MS, killPid, killGroup } = require('./signals');
 
 const fs = require('node:fs');
 const path = require('node:path');
@@ -583,7 +583,7 @@ function detachedAlive(child) {
     return Number(BigInt(started) / 10000n - 11644473600000n) <= child.recordedAt + RECORD_TOLERANCE_MS;
   }
   if (child.kind === 'worker' && child.file && !fs.existsSync(child.file)) return false;
-  try { process.kill(child.pid, 0); } catch (e) { if (e.code === 'ESRCH') return false; throw e; }
+  try { killPid(child.pid, 0); } catch (e) { if (e.code === 'ESRCH') return false; throw e; }
   if (process.platform === 'linux') {
     let stat;
     try { stat = fs.readFileSync(`/proc/${child.pid}/stat`, 'utf8'); }
@@ -613,7 +613,7 @@ function killDetached(child) {
   if (process.platform === 'win32') {
     cp.spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore', timeout: 300000 });
   } else {
-    try { process.kill(-child.pid, 'SIGKILL'); } catch (e) { if (e.code !== 'ESRCH') throw e; }
+    try { killGroup(child.pid, 'SIGKILL'); } catch (e) { if (e.code !== 'ESRCH') throw e; }
   }
 }
 

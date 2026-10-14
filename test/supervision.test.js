@@ -1,6 +1,6 @@
 'use strict';
 
-const { waitOnRepo } = require('./signals');
+const { waitOnRepo, killPid, killGroup } = require('./signals');
 
 const { test, describe } = require('node:test');
 const assert = require('node:assert/strict');
@@ -1003,9 +1003,9 @@ setInterval(() => {}, 1000);
   const group = await waitOnRepo(h, () => written(pids) && JSON.parse(written(pids)),
     'process group did not start');
   t.after(() => {
-    try { process.kill(-group[0], 'SIGKILL'); } catch (e) { if (e.code !== 'ESRCH') throw e; }
+    try { killGroup(group[0], 'SIGKILL'); } catch (e) { if (e.code !== 'ESRCH') throw e; }
   });
-  process.kill(spawned.monitor_pid, 'SIGTERM');
+  killPid(spawned.monitor_pid, 'SIGTERM');
   await waitOnRepo(h, () => written(terminated + '.parent') && written(terminated + '.child'), 'stop did not send SIGTERM before SIGKILL');
   await waitOnRepo(h, () => group.every((pid) => !detachedAlive({ pid })), 'stop left a process group member alive');
   await waitOnRepo(h, () => !detachedAlive({ pid: spawned.monitor_pid }), 'stopped monitor survived');
@@ -1025,7 +1025,7 @@ test('a rerun waits for previous descendants even when they close their output p
     // Read the file, not a spawn result: a spawn that throws before returning still leaves the group running.
     const recorded = groupFile && fs.existsSync(groupFile) ? JSON.parse(fs.readFileSync(groupFile, 'utf8')) : null;
     if (!recorded) return;
-    try { process.kill(-recorded.parent, 'SIGKILL'); } catch (e) { if (e.code !== 'ESRCH') throw e; }
+    try { killGroup(recorded.parent, 'SIGKILL'); } catch (e) { if (e.code !== 'ESRCH') throw e; }
   });
   const h = setup(t, { failures: 0 });
   groupFile = path.join(h.base, 'previous-group.json');

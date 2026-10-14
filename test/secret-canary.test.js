@@ -1,6 +1,6 @@
 'use strict';
 
-const { waitUntil } = require('./signals');
+const { waitUntil, killPid } = require('./signals');
 
 // A spawn with a unique secret in the rung env, the project env, an env_file
 // and the harness credentials leaves that secret nowhere but the files the
@@ -131,7 +131,7 @@ for (const harness of ['claude', 'codex']) {
     const started = fs.readFileSync(path.join(s.h.state, 'events.jsonl'), 'utf8')
       .trim().split('\n').map((l) => JSON.parse(l)).findLast((e) => e.cmd === 'spawn').detail;
     const monitor = { pid: started.monitor_pid, startTicks: started.monitor_start_ticks };
-    process.kill(monitor.pid, 'SIGTERM');
+    killPid(monitor.pid, 'SIGTERM');
     await waitUntil(() => !detachedAlive(monitor), { signal: t.signal });
     assert.equal(detachedAlive(monitor), false, 'the supervisor stopped');
     assert.deepEqual(s.reports().map((x) => x.listed), [[]]);
@@ -199,7 +199,7 @@ for (const harness of ['claude', 'codex']) {
       .findLast((e) => e.cmd === 'spawn' && e.task === 'T1').detail;
     const monitor = { pid: holderSpawn.monitor_pid, startTicks: holderSpawn.monitor_start_ticks };
     t.after(async () => {
-      try { process.kill(monitor.pid, 'SIGTERM'); } catch { /* already gone */ }
+      try { killPid(monitor.pid, 'SIGTERM'); } catch { /* already gone */ }
         await waitUntil(() => !detachedAlive(monitor), { signal: t.signal });
     });
     const holderHome = path.join(h.state, 'homes', holderSpawn.agent);
