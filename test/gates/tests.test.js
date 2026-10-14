@@ -67,11 +67,11 @@ function task(files, from = 'main') {
   return sha;
 }
 
-function ctx(sha, { kind = 'code', args = {}, project = {} } = {}) {
+function ctx(sha, { kind = 'code', args = {}, project = {}, hotfix = null } = {}) {
   return {
     root,
     worktree: null,
-    task: { id: 'T1', kind, sha, status: 'submitted' },
+    task: { id: 'T1', kind, sha, status: 'submitted', ...(hotfix ? { hotfix } : {}) },
     project: { repo: 'acme/app', base: 'main', gates: { tests_cmd: args.cmd ?? CMD }, ...project },
     args: { cmd: CMD, ...args },
     log() {},
@@ -341,7 +341,8 @@ test('a broad host-only glob selects tests, excluding fixtures and non-test file
 test('a skipped changed host-only test cannot prove code, and host_env reaches its revert run', async () => {
   const sha = task({
     'lib/add.js': FIX,
-    'test/host-proof.test.js': `require('node:test')('live proof', { skip: process.env.TC_HOST_OPT_IN !== '1' }, () => {
+    'test/host-proof.test.js': `require('node:test')('live proof', { skip: process.env.TC_HOST_OPT_IN !== '1' && 'set TC_HOST_OPT_IN=1 to run the live proof'
+  + (process.env.TC_HOST_TOKEN ? ' ' + 'p'.repeat(150) + process.env.TC_HOST_TOKEN : '') }, () => {
   require('node:assert/strict').equal(require('../lib/add')(1, 2), 3);
 });
 `,
@@ -354,8 +355,28 @@ test('a skipped changed host-only test cannot prove code, and host_env reaches i
   const skipped = await gate.run(ctx(sha, { args: { cmd: suite }, project }));
   assert.equal(skipped.ok, false, skipped.summary);
   assert.match(skipped.summary, /changed host-only tests skipped.*do not prove/);
+  // The refusal says how many cases ran and why the rest skipped, so the orchestrator can tell a missing opt-in.
+  assert.match(skipped.summary, /^test\/host-proof\.test\.js: 0 ran, 1 skipped; skipped because: set TC_HOST_OPT_IN=1 to run the live proof$/m);
+  assert.match(skipped.summary, /tests\.host_env gives host-only commands no variables\. Set the opt-ins .* --tests-host-env JSON, then run tower-crane gates retry T1\./);
   assert.deepEqual(skipped.receipt.host_only.run, []);
   assert.deepEqual(skipped.receipt.host_only.skipped, ['test/host-proof.test.js']);
+  assert.deepEqual(skipped.receipt.host_only.results, [{ file: 'test/host-proof.test.js', ran: 0, skipped: 1,
+    skip_reasons: ['set TC_HOST_OPT_IN=1 to run the live proof'] }]);
+  // A worker's task goes back to the worker; a merged hotfix has none, so it waits on tests.host_env.
+  assert.equal(skipped.config_failure, undefined);
+  const hotfix = { merge_sha: sha, base_sha: git(root, 'rev-parse', `${sha}^1`), base: 'main' };
+  const merged = await gate.run(ctx(sha, { args: { cmd: suite }, project, hotfix }));
+  assert.equal(merged.ok, false, merged.summary);
+  assert.deepEqual(merged.config_failure, { key: 'tests_host_env' });
+  assert.equal(merged.confirmed_failure, undefined);
+  // A secret in a skip reason is redacted before the 200-character cut, so no piece of it reaches the receipt.
+  const secret = 'abcd1234efgh5678ijkl9012mnop';
+  const leaky = await gate.run(ctx(sha, { args: { cmd: suite }, project: { ...project, tests: { ...project.tests, host_env: { TC_HOST_TOKEN: secret } } }, hotfix }));
+  const [reason] = leaky.receipt.host_only.results[0].skip_reasons;
+  assert.equal(reason.length, 200);
+  assert.ok(reason.startsWith(`set TC_HOST_OPT_IN=1 to run the live proof ${'p'.repeat(150)}[redac`), reason);
+  assert.doesNotMatch(reason, /abcd/);
+  assert.doesNotMatch(leaky.summary, /abcd/);
   project.tests.host_env = { TC_HOST_OPT_IN: '1' };
   const ran = await gate.run(ctx(sha, { args: { cmd: suite }, project }));
   assert.equal(ran.ok, true, ran.summary);

@@ -199,7 +199,22 @@ dispatches a fresh review of the landed diff.
 
 A trusted watcher also advances the `hotfix` event. Tests and cleanup use
 that merge commit and its first parent, even after main moves. CI requires
-the successful push workflows on the recorded base at that commit. Once
+the successful push workflows on the recorded base at that commit. Main pushes
+share one concurrency group, so on a busy main a newer push cancels the merge
+commit's pending run. When that run was cancelled or never ran, the first
+successful push, scheduled or manual run of the same workflows at the merge
+commit or a later commit on the base that contains it stands for it, and the
+CI evidence names that commit and run in `hotfix_ci`. A failed run or job at
+the merge commit itself still fails; a later green run does not mask it.
+Until a later run is green, CI stays pending. The later run vouches for the
+tree at its commit; the tests gate still proves the merge commit. A required
+job skipped in that run does not apply only when it also skipped at the merge
+commit or its own `if:` is false for the run's event, such as a
+pull-request-only job; a job a path filter skipped stays required. Each check
+looks at up to five later commits and records the ones it rejected in
+`hotfix_ci.rejected`, so the next check goes on from there. When a changed host-only test only skipped, the tests
+gate names the skip reasons and leaves a `gate_config` inbox item for
+`tests.host_env`; set the opt-ins it names, then run `gates retry ID`. Once
 software gates pass, a counted posted review or normal independent review
 of the landed diff decides; call `accept` again after a dispatched verdict if
 no watcher is running. A pass shows `accepted (hotfix)`, and `accept` then
@@ -846,7 +861,7 @@ The Controls page links every row of `tower-crane authority` to its form. Projec
 
 The command parser and handler perform the same validation as the CLI; `Authority.enforce` checks and audits the write. Operational writes return `{ok: true, data, message, version}`. Owner-required writes, including a release of another agent's live claim, return `{ok: true, decision: "D1", message, version}` after opening the shared escalation, without changing the setting. For a request the owner made from Controls, Approve runs the recorded request through the same handler as the owner, consumes the approval once and records `approved_by`; decline makes no setting change. A failed application leaves the approval available for retry, with the refusal shown inline. For an orchestrator's escalation, including an owner's request the orchestrator then asked for too (`repeat_by` on the decision), Approve only records the answer: the orchestrator's refusal told it to run the same command again, and that repeat uses the approval, so the change is made once and no second decision opens. That repeat carries only the owner-required change, so the reply and the page name any other flag of the owner's request that did not apply. A publish request (`ask --setting publish`) is answered the same way, since the orchestrator publishes. A later write uses only an approval the owner asked for from Controls that no orchestrator repeats. While an orchestrator's approval of the same change is pending, a write opens the owner's own confirmation and leaves that approval for the repeat; sending the same publish request again returns `{ok: true, data, message}` naming the existing approval, without using it. Ordinary decisions use the board's existing answer form.
 
-`GET /api/controls` also returns the state `version`. Controls send `x-tower-crane-version` with the page's version; a mismatch returns 409 before the command runs. Unsaved input delays live reloads. Saving disables the submitted form until its reply. When another form holds unsaved input, the page stays and reloads its data from `GET /api/controls`, so selectors that fill a rung, fallback or task value show the saved state and the other form keeps its edits. The JSON API also accepts clients that omit this optional version header.
+`GET /api/controls` also returns the state `version`. Controls send `x-tower-crane-version` with the page's version; a mismatch returns 409 before the command runs. Unsaved input delays live reloads. Saving disables the submitted form until its reply. When another form holds unsaved input, the page stays and reloads its data from `GET /api/controls`, so selectors that fill a rung, fallback or task value show the saved state and the other form keeps its edits. On this in-place path the form stays disabled until that data reload also ends, so the reply never shows before the saved values. The reload gives up after 10 seconds. If it fails or times out, the form shows the save's reply, says the page could not load the saved state, shows the reload notice and is enabled again. The JSON API also accepts clients that omit this optional version header.
 
 `project set --paused REASON` records `limits.paused` and blocks new claims and task dispatches. Running processes and their retries continue until interrupted; `--paused ''` resumes dispatch. Dry-run previews remain available.
 
@@ -1055,7 +1070,7 @@ The CLI refuses manual software verdicts, and software receipts require matching
 <!-- commands:Gates:start -->
 | Command | Does |
 |---|---|
-| `check ci ID` | for a recorded hotfix, check successful push workflows on its recorded base at the merge commit. Otherwise with `ci.local`, resolve task override, kind mapping or default, run its argv against the merged base and submitted head and record a local receipt; without local CI, verify the PR head and mergeability. Require `ci.required` runs to be present and successful on the submitted sha, require at least one run outside `ci.ignore_apps` and `ci.capped_review` exceptions and all remaining checks green; records `ci` |
+| `check ci ID` | for a recorded hotfix, check successful push workflows on its recorded base at the merge commit; when its push run was cancelled or never ran, the first successful push, scheduled or manual run of the same workflows at that commit or a later base commit that contains it stands for it, and `hotfix_ci` names that commit and run. Otherwise with `ci.local`, resolve task override, kind mapping or default, run its argv against the merged base and submitted head and record a local receipt; without local CI, verify the PR head and mergeability. Require `ci.required` runs to be present and successful on the submitted sha, require at least one run outside `ci.ignore_apps` and `ci.capped_review` exceptions and all remaining checks green; records `ci` |
 | | |
 | `check clean ID [--cmd CMD]` | run pinned `gates.clean_cmd` at the submitted commit against `base` (the recorded first parent for hotfixes); records `clean`, ok when every check ran and none reported a HIGH finding; timeouts record infrastructure failure |
 | | |

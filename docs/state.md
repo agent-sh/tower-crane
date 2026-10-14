@@ -511,7 +511,7 @@ By default a file is a test when it sits under a `test/`, `tests/`, `spec/`, `sp
 
 On Linux, a separate host-only command gets a short `TMPDIR`, `TMP` and `TEMP` of its own when the gate scratch directory is too deep for a live harness's sandbox socket. Claude Code's Linux sandbox listens on `<TMPDIR>/claude-socks-<16 hex>.sock` (or the one byte shorter `claude-http-` name), and socat takes a socket path of at most 108 bytes, so `TMPDIR` must be at most 73 bytes. The short directory is a fresh `tc-XXXXXX` under the user's `~/.cache`, with the home taken from the password database rather than `HOME`, else under `XDG_RUNTIME_DIR`. It is removed when the command ends. When no such directory fits and is writable, the gate refuses before running any command, with a `config_failure` on `tmp_root`. A `TMPDIR` named in `tests.host_env` is used as given. Ordinary suite commands keep the gate scratch.
 
-A tests receipt has `host_only: {run, skipped, unreported, results}` when host-only globs are configured. The first three arrays name files. Each result has `{file, ran, skipped}` with executed and skipped case counts from TAP or Node spec summaries; TODO cases count as skipped. A file with both executed and skipped cases appears in both arrays. Missing or inconsistent summaries produce null counts and an `unreported` entry, so exit zero alone is not proof. Prove mode rejects a changed host-only file with no reported executed cases. Run-only and test-only diffs still allow skips and report them in the receipt.
+A tests receipt has `host_only: {run, skipped, unreported, results}` when host-only globs are configured. The first three arrays name files. Each result has `{file, ran, skipped}` with executed and skipped case counts from TAP or Node spec summaries; TODO cases count as skipped. A file with skipped cases also gets `skip_reasons`, up to five distinct reasons, each redacted like the gate output and then cut to 200 characters, from its TAP `# SKIP` or spec `﹣ ... # reason` lines, and the refusal for a changed host-only file lists each file's counts and reasons. A file with both executed and skipped cases appears in both arrays. Missing or inconsistent summaries produce null counts and an `unreported` entry, so exit zero alone is not proof. Prove mode rejects a changed host-only file with no reported executed cases. Run-only and test-only diffs still allow skips and report them in the receipt.
 
 The list and tests policy flags also work with `init`. Omitting a flag leaves its field unchanged. Setting a field replaces a non-object `tests` or `ci` section, and clearing removes that malformed section. Object sections keep their other settings; clearing removes the section when it becomes empty. `project set` and `project show` text output print the policy and lists, showing `prove`, `{}` and `false` for absent mode, kind overrides and expensive settings, `default layouts` when `tests.paths` is absent and `[]` when no extra build files or CI apps are configured. Invalid input exits 2 without writing state or events, even when passed alongside valid settings.
 
@@ -555,8 +555,49 @@ association, or without the title or a verdict is refused. A failing posted revi
 the configured proof mode, reverting the landed changes against `base_sha`;
 cleanup scans the same change. CI checks the successful GitHub Actions
 `push` workflows on the recorded base at that commit and their required
-check runs, even when local CI is configured. PR head and mergeability
-checks do not apply to a merged PR. The normal reviewer receives the landed
+check runs, even when local CI is configured. A required check run that
+the judged base run skipped does not apply only when the skip says nothing
+about the change: the same job also skipped at the merge commit, or the
+job's own `if:` in the workflow file at the judged commit is false for the
+run's event whatever its other terms are (a pull-request-only job such as
+`github.event_name == 'pull_request' && ...`). A job skipped by a path filter
+or by another job's output stays required, so a docs-only later commit
+cannot stand in for code it never tested, and an unreadable workflow file
+keeps the job required. A required job that ran must succeed. The summary
+lists each required name not applied and why. PR head and mergeability
+checks do not apply to a merged PR.
+
+A failed `push` run at the merge commit is a confirmed failure, and one
+still running is pending. When every `push` run there was cancelled (a newer
+push replaced it in the shared main concurrency group) or none ran, CI lists
+the base's workflow runs created since the merge commit's run, or since its
+commit date when it has none. It then takes the commits with a successful
+`push`, `schedule` or `workflow_dispatch` run of the same workflows (of any workflow when none ran there), oldest
+first, the merge commit itself included. A later commit counts only when
+GitHub's compare shows it ahead of the merge commit and still on the base.
+At that commit, the newest run of each workflow that was not cancelled must
+be green, and its check runs, read with `filter=all` so a newer cancelled run
+with the same job names cannot hide them, pass the same judgment. The first
+commit that passes stands for the merge commit. That green run vouches for
+the tree at that later commit, not for the merge commit alone: if a commit in
+between fixed or reverted a defect the merge commit brought, CI still passes.
+The tests gate, which runs at the merge commit against its first parent,
+remains the proof for the merge commit itself. The evidence stays at
+`merge_sha` and records `hotfix_ci: {merge_sha, satisfied_by: {sha, runs:
+[{id, workflow, event, url}]}}`; the summary names the commit and run.
+
+Each check looks at no more than five candidate commits; each costs two
+compares and three paginated listings, so a recheck of a pending hotfix
+stays near 25 GitHub calls. A pending result records `hotfix_ci: {merge_sha,
+rejected: [{sha, runs, reason}]}`, the commits it turned down and the ids of
+their green runs, and the summary says how many commits wait for the next
+check. The next check of the same merge commit skips a commit rejected as
+`does not contain the merge commit` or `not on BASE`, and one rejected as
+`not green` unless it has a green run that is not listed. A failed scheduled
+or manual run at the merge commit, or a job that failed before its run was
+cancelled, is still a confirmed failure. Until a later run is green, CI is
+pending, with `not_running` when no full run on the base is queued or
+running. The normal reviewer receives the landed
 diff against the first parent and records its verdict at the merge commit.
 Waivers cannot accept a hotfix.
 
@@ -580,6 +621,11 @@ refuses it, since its merge stands. Its merge commit stays
 fixed; workers submit the follow-up task.
 Pending CI, observation errors and timeouts keep the hotfix submitted;
 retry its gate when the run completes or the infrastructure recovers.
+When every changed host-only test of a hotfix reported only skipped cases,
+the tests failure carries `config_failure: {key: "tests_host_env"}`: there
+is no worker to fix it, and the host's opt-ins decide. The hotfix stays
+submitted, the inbox shows a `gate_config` item for `tests.host_env`, and
+`gates retry ID` reruns the gate after the orchestrator sets the opt-ins.
 Missing regression coverage and a proof that passes without the hotfix
 are confirmed tests failures.
 
@@ -1315,7 +1361,7 @@ Agy homes place native settings and the rendered `agents/gishra-<job>.md` below 
 
 `inbox` derives a snapshot from one state read and current GitHub observations. It does not change tasks or consume messages. JSON has `items`, live gate `executors` and `gate_queue`, the same queue `status` shows; text ends with the executor count and a `gate queue` line. Each item has a stable `id`, `kind`, nullable `task`, finding data, and `action: {command, argv}`. Text output includes the same findings and command. A ready or rework task without a brief gets `brief_missing` instead of `ready` or `rework_ready`; `brief set` clears it. Kinds include `gate_failed`, `ci_stalled`, `review_failed`, `review_held`, `review_exit_missing`, `review_churn`, `rework_ready`, `ready`, `dead_claim`, `decision`, `accepted_unmerged`, `revuto_failed`, `codeql_alert`, `head_changed`, `main_ci_failed`, `main_ci_flaky`, `message`, `stall`, `decision_answer`, `owner_comment` and `github_error`. Open decisions carry their question and options. A technical decision is answered by the orchestrator under the existing answer authority; an owner-only decision (see the decision rules above: an `escalation`, an `owner_required` reason, a spend, credential or setting kind the owner has not lifted, or a technical decision the owner unmarked) needs the owner's supplied choice. A decision's action argv ends in `<answer>` when the orchestrator answers it and `<owner answer>` when only the owner does. Answered decisions retain their choice, note, author and blocked tasks until acknowledged. Owner task and decision comments retain their text and target until acknowledged; a later comment creates a new item.
 
-`gate_failed` items report the latest audited failure for each software gate (`tests`, `clean`, `sources`, `ci`) at the current head and revision of an unmerged submitted or accepted task. They include the gate name, summary, ref, audited `confirmed_failure` flag and any `test_failure` names and output tail. Confirmed code failures resolve through rework carrying the failure summary and its test names. A change the worker must fix (`worker_failure`) offers rework with the gate summary. Pending checks, observation failures and infrastructure failures offer `check GATE ID`; infrastructure findings also retain their timeout metadata. Stalled CI is not a `gate_failed` item: it is a `ci_stalled` item addressed to the orchestrator with the gate summary and `since`, offering `check ci ID`. A missing or uninstalled pinned command is not a `gate_failed` item: it is a `gate_config` item addressed to the orchestrator, naming `gates.KEY` and offering `project set` with the pinned command, and `gates retry` follows once it is set. A later pass, rework, a new head or revision, or a confirmed merge clears the finding. Failed gates cannot be acknowledged away. On an open mergeable accepted PR, a stale or unconfirmed failed required software gate offers its check command instead of `merge --accepted`; confirmed code failures offer rework instead; after that rerun passes, the inbox advances to the next blocker or merge. Review blockers still require rework.
+`gate_failed` items report the latest audited failure for each software gate (`tests`, `clean`, `sources`, `ci`) at the current head and revision of an unmerged submitted or accepted task. They include the gate name, summary, ref, audited `confirmed_failure` flag and any `test_failure` names and output tail. Confirmed code failures resolve through rework carrying the failure summary and its test names. A change the worker must fix (`worker_failure`) offers rework with the gate summary. Pending checks, observation failures and infrastructure failures offer `check GATE ID`; infrastructure findings also retain their timeout metadata. Stalled CI is not a `gate_failed` item: it is a `ci_stalled` item addressed to the orchestrator with the gate summary and `since`, offering `check ci ID`. A missing or uninstalled pinned command is not a `gate_failed` item: it is a `gate_config` item addressed to the orchestrator, naming `gates.KEY` and offering `project set` with the pinned command, and `gates retry` follows once it is set. A hotfix whose changed host-only tests only skipped gets the same item naming `tests.host_env` and offering `project set --tests-host-env <JSON>`. A later pass, rework, a new head or revision, or a confirmed merge clears the finding. Failed gates cannot be acknowledged away. On an open mergeable accepted PR, a stale or unconfirmed failed required software gate offers its check command instead of `merge --accepted`; confirmed code failures offer rework instead; after that rerun passes, the inbox advances to the next blocker or merge. Review blockers still require rework.
 
 Review findings use the latest eligible failed evidence at the current head and revision. `review_failed.findings` contains the last `Review (Tower Crane` issue comment whose header names that SHA, read from all pages of the linked PR's comments. `finding_count` uses the finding lines or declared count and is null when an unposted summary has no count. `findings_source` names `comment` or `evidence`. A failed linked-comment fetch leaves `findings_complete: false`, the evidence summary and an explicit `github_error`. Unposted reviews without a matching comment retain their full evidence summary. Rework items include the engine reason and readiness blockers. Process observations use the shared PID, host and start identity detector; unknown processes stay live. Accepted PR items include GitHub state, mergeability and the refusal reason. A PR already merged at its accepted head remains an `accepted_unmerged` item with `confirmation: true` and `merge --accepted` until the audited local merge receipt exists. Its obsolete gate and review findings are replaced by that confirmation action. Reading the inbox does not record a merge, and a remotely merged different head still requires rework. Submitted PRs include uncapped, nonignored revuto failures and its inline comments at that head, and open CodeQL alerts from `refs/pull/N/head` and `refs/pull/N/merge`. The PR API resolves the current head, base and synthetic merge commit; both merge parents must match the submitted head and current base before merge-ref alerts count. Alert instances must match the resolved ref and commit. Stale merge parents produce an explicit GitHub error. Duplicate alerts across refs appear once. List endpoints paginate. GitHub errors are explicit findings, never empty success. A moved PR head returns to rework so a worker verifies and resubmits it through the existing claim ownership path.
 
