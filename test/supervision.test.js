@@ -14,6 +14,7 @@ const { makeRepo, makeTaskRepo, pinRung, STUB_RUNG, BIN, HOOKS, detachedAlive } 
 const { gateFixture, gateEvidence } = require('./gate-helpers');
 const bedrockOutage = require('./fixtures/bedrock-outage.json');
 const { errorReader, transient } = require('../lib/spawn-monitor');
+const { readPublished } = require('./atomic-file');
 
 // The lease gate is POSIX-only; on Windows the dispatch records the lease before launch.
 const GATE_SKIP = process.platform === 'win32' && 'the lease gate is POSIX-only';
@@ -33,7 +34,7 @@ const sketches = (h) => ['sketch.md', 'sketch.html'].map((file) => ({
 
 // A file a process writes exists before its content does; a wait on it needs the content.
 function written(file) {
-  try { return fs.readFileSync(file, 'utf8') || null; } catch (e) { if (e.code === 'ENOENT') return null; throw e; }
+  try { return readPublished(file, 'utf8') || null; } catch (e) { if (e.code === 'ENOENT') return null; throw e; }
 }
 
 function controlledBackoff(h) {
@@ -1044,6 +1045,7 @@ if (!fs.existsSync(file)) {
 } else {
   const prior = JSON.parse(fs.readFileSync(file, 'utf8'));
   try {
+    // read-published: the kernel serves /proc; nothing replaces the file.
     const stat = fs.readFileSync('/proc/' + prior.child + '/stat', 'utf8');
     if (!['Z', 'X'].includes(stat.slice(stat.lastIndexOf(')') + 2).split(' ')[0])) process.exit(2);
   } catch (e) { if (e.code !== 'ENOENT') throw e; }

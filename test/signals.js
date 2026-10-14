@@ -3,6 +3,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const net = require('node:net');
+const { readPublished } = require('./atomic-file');
 
 // This is the runner's hung-test backstop, never a readiness budget.
 const HUNG_TEST_MS = 300000;
@@ -103,7 +104,7 @@ function waitUntil(check, { paths = [], signal, subscribe, poll = true, alive, w
 function fileWritten(file, { check = () => true, json = false, ...options } = {}) {
   return waitUntil(() => {
     let text;
-    try { text = fs.readFileSync(file, 'utf8'); }
+    try { text = readPublished(file, 'utf8'); }
     catch (error) { if (error.code === 'ENOENT') return false; throw error; }
     if (!json) return check(text) ? { text } : false;
     let value;

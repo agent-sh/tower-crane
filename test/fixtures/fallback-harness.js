@@ -3,7 +3,7 @@
 const cp = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
-const { writeAtomic } = require('../atomic-file');
+const { writeAtomic, readPublished } = require('../atomic-file');
 
 // Each harness's own record for an expired login, in the shape its CLI prints.
 function authRecord(harness, message) {
@@ -115,7 +115,7 @@ if (path.resolve(process.argv[1] || '') !== __filename) {
   const relogged = Boolean(process.env.TOWER_CRANE_TEST_LOGIN_FLAG) && fs.existsSync(process.env.TOWER_CRANE_TEST_LOGIN_FLAG);
   let attempts;
   try {
-    attempts = JSON.parse(fs.readFileSync(file, 'utf8'));
+    attempts = JSON.parse(readPublished(file, 'utf8'));
   } catch (error) {
     if (error.code !== 'ENOENT') throw error;
     attempts = [];

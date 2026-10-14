@@ -9,6 +9,7 @@ const assert = require('node:assert/strict');
 const test = require('node:test');
 const { createRepoSeed, cleanupRepoSeed } = require('./repo-seed');
 const { tempRoot, liveRoot } = require('./tmp-root');
+const { readPublished } = require('./atomic-file');
 
 const ROOT = path.join(__dirname, '..');
 const BIN = path.join(ROOT, 'bin', 'tower-crane.js');
@@ -105,6 +106,7 @@ function installHarnessGuard() {
 function assertNoHarnessCalls(base) {
   if (!HARNESS_GUARD) return;
   let text;
+  // read-published: the guard appends hits; nothing replaces the file.
   try { text = fs.readFileSync(HARNESS_GUARD.hits, 'utf8'); }
   catch (e) { if (e.code === 'ENOENT') return; throw e; }
   const inside = (p) => typeof p === 'string' && (p === base || p.startsWith(base + path.sep));
@@ -223,7 +225,7 @@ function pinLiveRung(h, harness, rung = 'small') {
 function fixtureInit(ctx, args, opts, call) {
   if (args[0] !== 'init' || ctx.builtin) return call(args, opts);
   let original;
-  try { original = fs.readFileSync(ctx.userConfig, 'utf8'); }
+  try { original = readPublished(ctx.userConfig, 'utf8'); }
   catch (e) { if (e.code !== 'ENOENT') throw e; }
   let user;
   try { user = original === undefined ? {} : JSON.parse(original); }
@@ -424,7 +426,7 @@ function context(t, base, options = {}) {
         const file = path.join(dir, f);
         // hooks.js publishes records atomically; one still incomplete is not recorded yet.
         let record;
-        try { record = JSON.parse(fs.readFileSync(file, 'utf8')); }
+        try { record = JSON.parse(readPublished(file, 'utf8')); }
         catch (e) { if (e.code === 'ENOENT' || e instanceof SyntaxError) return []; throw e; }
         // A monitor's exit listener marks its exit beside its record.
         if (record.kind === 'monitor' && fs.existsSync(path.join(dir, `${record.token || record.pid}.exited`))) record.exited = true;
@@ -452,7 +454,7 @@ function context(t, base, options = {}) {
             for (const agent of fs.readdirSync(brokers, { withFileTypes: true }).filter((entry) => entry.isDirectory())) {
               const file = path.join(brokers, agent.name, 'broker.json');
               let socket;
-              try { ({ socket } = JSON.parse(fs.readFileSync(file, 'utf8'))); }
+              try { ({ socket } = JSON.parse(readPublished(file, 'utf8'))); }
               catch (error) { if (error.code === 'ENOENT' || error instanceof SyntaxError) continue; throw error; }
               if (typeof socket === 'string' && path.basename(socket) === 's' && /^tower-crane-[A-Za-z0-9]{6}$/.test(path.basename(path.dirname(socket)))) {
                 fs.rmSync(path.dirname(socket), { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
@@ -490,7 +492,7 @@ function context(t, base, options = {}) {
       if (r.code !== 0) throw cliFailure(args, r);
       return r.stdout.trim();
     },
-    readState: (file) => JSON.parse(fs.readFileSync(path.join(ctx.state, file), 'utf8')),
+    readState: (file) => JSON.parse(readPublished(path.join(ctx.state, file), 'utf8')),
     // The current revision of a task, for review evidence a test records as a reviewer spawn did not start.
     revision: (id = 'T1') => String(ctx.readState('tasks.json').tasks.find((t) => t.id === id).revision),
     writeState: (file, data) => fs.writeFileSync(path.join(ctx.state, file), JSON.stringify(data, null, 2) + '\n'),
@@ -586,6 +588,7 @@ function detachedAlive(child) {
   try { killPid(child.pid, 0); } catch (e) { if (e.code === 'ESRCH') return false; throw e; }
   if (process.platform === 'linux') {
     let stat;
+    // read-published: the kernel serves /proc; nothing replaces the file.
     try { stat = fs.readFileSync(`/proc/${child.pid}/stat`, 'utf8'); }
     catch (e) { if (['ENOENT', 'ESRCH'].includes(e.code)) return false; throw e; }
     const fields = stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\s+/);
