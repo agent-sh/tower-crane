@@ -405,7 +405,8 @@ test('research Claude gets native or explicit web MCP tools with worker file and
     const { allowRead, ...shared } = report.settings.sandbox.filesystem;
     const ownHome = path.dirname(report.home);
     // Outside the user's home it reopens only the agent's own home and broker directory.
-    assert.deepEqual(allowRead.filter((p) => !p.startsWith(fs.realpathSync(u.home) + path.sep)), [ownHome, path.join(h.state, 'brokers', path.basename(ownHome))]);
+    // And under /run, which it hides, the resolver (runReads).
+    assert.deepEqual(allowRead.filter((p) => !p.startsWith(fs.realpathSync(u.home) + path.sep)), [ownHome, path.join(h.state, 'brokers', path.basename(ownHome)), ...A.runReads(u.env)]);
     assert.ok(shared.denyWrite.includes(h.state));
     // A mask on a path the host lacks leaves a placeholder there, so only existing paths are masked.
     for (const p of [...shared.denyRead, ...shared.denyWrite]) assert.ok(fs.existsSync(p), `${p} is masked but missing`);
@@ -530,9 +531,14 @@ test('a spawned claude agent imports the user\'s global rules by path, loads non
   assert.ok(box.filesystem.denyRead.includes(path.join(h.state, 'homes')), 'other agent homes are hidden, including future spawns');
   assert.ok(box.filesystem.denyRead.includes(path.join(h.state, 'brokers')), 'no agent reads another agent\'s broker token');
   assert.ok(box.filesystem.denyRead.includes(path.join(path.dirname(h.userConfig), 'owner')), 'no agent reads the owner key');
-  assert.deepEqual(box.filesystem.allowRead, [path.join(u.home, '.claude', 'CLAUDE.md'), home, path.join(h.state, 'brokers', started.agent)],
-    'only the user\'s global rules under the home, this dispatch home and its own broker directory are readable');
-  for (const p of ['/var/run/docker.sock', '/run/docker.sock']) assert.equal(box.filesystem.denyRead.includes(p), fs.existsSync(p), p);
+  assert.deepEqual(box.filesystem.allowRead, [path.join(u.home, '.claude', 'CLAUDE.md'), home, path.join(h.state, 'brokers', started.agent), ...A.runReads(u.env)],
+    'only the user\'s global rules under the home, this dispatch home, its own broker directory and the resolver under /run are readable');
+  // /run is hidden whole, with docker's, the buses' and every other host socket in it.
+  for (const p of A.runDirs()) assert.ok(box.filesystem.denyRead.includes(p), p);
+  // /var/run links to /run on most hosts; the sandbox follows the link into the hidden /run.
+  for (const p of ['/var/run/docker.sock', '/run/docker.sock', '/run/dbus/system_bus_socket', '/run/snapd.socket']) {
+    assert.equal(commandsRead(seen, fs.existsSync(p) ? fs.realpathSync(p) : p), false, p);
+  }
   assert.ok(box.filesystem.denyRead.includes(u.home), 'the user\'s home is hidden whole');
   for (const p of [path.join(u.home, '.ssh'), path.join(u.home, '.aws')]) assert.equal(commandsRead(seen, p), false, p);
   assert.match(fs.readFileSync(path.join(h.repo, '.git', 'info', 'exclude'), 'utf8'), /^\.claude\/\.cc-writes\/$/m, 'the sandbox marker is never committed');
