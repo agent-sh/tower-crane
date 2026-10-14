@@ -381,6 +381,80 @@ function bindingScopes(text) {
   return bindingsAt;
 }
 
+// Wall clocks a deadline or an elapsed check can read.
+const CLOCK = String.raw`(?:(?:Date|performance)\.now\(\)|Number\(process\.hrtime\.bigint\(\)\)|process\.hrtime\.bigint\(\)|\+?new Date\(\)(?:\.getTime\(\)|\.valueOf\(\))?)`;
+const SLEEP_CALL = /\b(?:Atomics\.wait|setTimeout|sleep|delay|pause|scheduler\.wait)\s*\(|\b(?:spawnSync|execSync|execFileSync)\s*\(\s*['"`]sleep\b/;
+
+// Loop bodies, with whether a counter bounds the loop. Generated fixture
+// scripts live in string and template literals, so those are read as code too.
+function loops(text, offset = 0, found = []) {
+  const tokens = tokenize(text).filter((token) => token.type !== 'comment');
+  for (const token of tokens) {
+    if (['string', 'template'].includes(token.type) && /\b(?:while|for|do)\b/.test(token.value)) {
+      // Same-length unescaping keeps positions; escaped newlines stay whitespace.
+      const inner = token.value.slice(1, -1).replace(/\\([\s\S])/g, (all, char) => ('nrt'.includes(char) ? '  ' : ` ${char}`));
+      loops(inner, offset + token.start + 1, found);
+    }
+  }
+  const match = new Map();
+  const open = [];
+  for (const [index, token] of tokens.entries()) {
+    if (token.type !== 'punctuation') continue;
+    if ('([{'.includes(token.value)) open.push(index);
+    else if (')]}'.includes(token.value) && open.length) match.set(open.pop(), index);
+  }
+  const counted = (range) => {
+    const ids = new Set();
+    for (let i = 0; i < range.length; i++) {
+      const [a, b, c] = [range[i], range[i + 1], range[i + 2]];
+      if (a.type === 'identifier' && ['+', '-'].includes(b?.value) && [b.value, '='].includes(c?.value)) ids.add(a.value);
+      if (['+', '-'].includes(a.value) && b?.value === a.value && c?.type === 'identifier') ids.add(c.value);
+    }
+    return ids;
+  };
+  const body = (at) => {
+    if (tokens[at]?.value === '{' && match.has(at)) return { from: tokens[at].start, to: tokens[match.get(at)].end };
+    const end = expressionEnd(text, tokens, at);
+    return { from: tokens[at]?.start ?? text.length, to: tokens[end]?.start ?? text.length };
+  };
+  const add = (keyword, header, range, kind) => {
+    const inBody = counted(tokenize(text.slice(range.from, range.to)).filter((token) => token.type !== 'comment'));
+    let condition = header;
+    let counters = counted(header);
+    if (kind === 'for') {
+      const parts = [[]];
+      let depth = 0;
+      for (const token of header) {
+        if ('([{'.includes(token.value)) depth++;
+        else if (')]}'.includes(token.value)) depth--;
+        if (token.value === ';' && !depth) parts.push([]);
+        else parts.at(-1).push(token);
+      }
+      if (parts.length < 3) return;
+      condition = parts[1];
+      counters = new Set([...counted(parts[1]), ...parts[2].filter((token) => token.type === 'identifier').map((token) => token.value)]);
+    }
+    const bounded = condition.some((token) => token.type === 'identifier' && (counters.has(token.value) || inBody.has(token.value)));
+    found.push({ start: offset + keyword.start, from: offset + range.from, to: offset + range.to, bounded });
+  };
+  for (const [index, token] of tokens.entries()) {
+    if (token.type !== 'keyword') continue;
+    if (token.value === 'do' && tokens[index + 1]?.value === '{' && match.has(index + 1)) {
+      const close = match.get(index + 1);
+      if (tokens[close + 1]?.value === 'while' && match.has(close + 2)) {
+        add(token, tokens.slice(close + 3, match.get(close + 2)), body(index + 1), 'while');
+      }
+    } else if (['for', 'while'].includes(token.value) && tokens[index + 1]?.value === '(' && match.has(index + 1)) {
+      // The tail of a do-while has no body of its own.
+      const before = tokens[index - 1];
+      if (before?.value === '}' && [...match].some(([from, to]) => to === index - 1 && tokens[from - 1]?.value === 'do')) continue;
+      const close = match.get(index + 1);
+      add(token, tokens.slice(index + 2, close), body(close + 1), token.value);
+    }
+  }
+  return found;
+}
+
 function waitFindings(text) {
   const findings = [];
   const lines = text.replace(/\r\n/g, '\n').split('\n');
@@ -406,7 +480,7 @@ function waitFindings(text) {
       if (budget > 0 && budget < HUNG_TEST_MS) report(index, 'CLI wait has a readiness budget below the hung-test timeout');
     }
   }
-  for (const match of text.matchAll(/\b(?:Date|performance)\.now\(\)\s*-\s*[\w$.]+\s*\)*\s*[<>]=?|[<>]=?\s*\(*\s*(?:Date|performance)\.now\(\)\s*-\s*[\w$.]+/g)) {
+  for (const match of text.matchAll(new RegExp(String.raw`${CLOCK}\s*-\s*[\w$.]+\s*\)*\s*(?:[*/]\s*[\w$.]+\s*\)*\s*)?[<>]=?|[<>]=?\s*\(*\s*${CLOCK}\s*-\s*[\w$.]+|\bprocess\.hrtime\(\s*[\w$.]+\s*\)(?:\[\d\])?\s*[<>]=?|[<>]=?\s*process\.hrtime\(\s*[\w$.]+\s*\)`, 'g'))) {
     report(text.slice(0, match.index).split('\n').length - 1, 'elapsed wall time is a pass condition');
   }
   for (const match of text.matchAll(/(['"])--(timeout|test-timeout)\1\s*,\s*(['"])([\d.]+)\3/g)) {
@@ -416,14 +490,14 @@ function waitFindings(text) {
     }
   }
   // Assignments and var declarations create the same deadline as const/let.
-  for (const match of text.matchAll(/\b[\w$.]+\s*=\s*(?:Date|performance)\.now\(\)\s*\+\s*/g)) {
+  for (const match of text.matchAll(new RegExp(String.raw`\b[\w$.]+\s*=\s*${CLOCK}\s*\+\s*`, 'g'))) {
     const index = text.slice(0, match.index).split('\n').length - 1;
     const { value } = expressionAt(match.index + match[0].length);
     if (!/^\s*\/\//.test(lines[index]) && !hungBudget(value, bindingsAt(match.index))) {
       report(index, 'readiness deadline below the hung-test timeout');
     }
   }
-  for (const match of text.matchAll(/\b(?:Date|performance)\.now\(\)\s*[<>]=?\s*\(*\s*[\w$.]+\s*\+\s*/g)) {
+  for (const match of text.matchAll(new RegExp(String.raw`${CLOCK}\s*[<>]=?\s*\(*\s*[\w$.]+\s*\+\s*`, 'g'))) {
     const { value } = expressionAt(match.index + match[0].length);
     if (!hungBudget(value, bindingsAt(match.index))) {
       report(text.slice(0, match.index).split('\n').length - 1, 'readiness deadline below the hung-test timeout');
@@ -431,7 +505,7 @@ function waitFindings(text) {
   }
   for (const match of text.matchAll(/\b[\w$.]+\s*\+\s*/g)) {
     const { value, end } = expressionAt(match.index + match[0].length);
-    if (/^\s*\)*\s*[<>]=?\s*(?:Date|performance)\.now\(\)/.test(text.slice(end))
+    if (new RegExp(String.raw`^\s*\)*\s*[<>]=?\s*${CLOCK}`).test(text.slice(end))
       && !hungBudget(value, bindingsAt(match.index))) {
       report(text.slice(0, match.index).split('\n').length - 1, 'readiness deadline below the hung-test timeout');
     }
@@ -447,8 +521,9 @@ function waitFindings(text) {
       report(text.slice(0, match.index).split('\n').length - 1, 'abort signal has a fixed readiness budget');
     }
   }
-  for (const elapsed of text.matchAll(/\b(?:const|let)\s+(\w+)\s*=\s*(?:Date|performance)\.now\(\)\s*-\s*\w+/g)) {
-    const comparisons = new RegExp(`\\b${elapsed[1]}\\s*[<>]=?|[<>]=?\\s*\\(*\\s*${elapsed[1]}\\b`, 'g');
+  for (const elapsed of text.matchAll(new RegExp(String.raw`\b(?:const|let|var)\s+(?:(\w+)|\[\s*(\w+)[^\]]*\])\s*=\s*(?:${CLOCK}\s*-\s*[\w$.]+|process\.hrtime\(\s*[\w$.]+\s*\))`, 'g'))) {
+    const name = elapsed[1] || elapsed[2];
+    const comparisons = new RegExp(`\\b${name}\\s*(?:[*/]\\s*[\\w$.]+\\s*)?[<>]=?|[<>]=?\\s*\\(*\\s*${name}\\b`, 'g');
     for (const match of text.matchAll(comparisons)) {
       report(text.slice(0, match.index).split('\n').length - 1, 'elapsed wall time is a pass condition');
     }
@@ -459,6 +534,39 @@ function waitFindings(text) {
     else {
       const timer = /(?:^|,)\s*setTimeout(?:\s*:\s*([$\w]+))?\s*(?:,|$)/.exec(match[1]);
       if (timer) promiseTimers.add(timer[1] || 'setTimeout');
+    }
+  }
+  for (const match of text.matchAll(/\b(?:const|let|var)\s+([$\w]+)\s*=\s*(?:[$\w]+\.)?promisify\(\s*setTimeout\s*\)/g)) {
+    promiseTimers.add(match[1]);
+  }
+  for (const match of text.matchAll(/\bpromisify\(\s*setTimeout\s*\)\s*\(|\bscheduler\.wait\s*\(/g)) {
+    const args = callArguments(text, match.index + match[0].lastIndexOf('('));
+    if (!hungBudget(args[0] || '', bindingsAt(match.index))) {
+      report(text.slice(0, match.index).split('\n').length - 1, 'timer wait needs a signal or a wait-allow reason');
+    }
+  }
+  // A synchronous sleep that polls inside a loop is a probe cadence: the loop
+  // condition is the signal, and its bounds are checked below. A sleep on its
+  // own lets time stand in for the signal.
+  const loopBodies = loops(text);
+  const polled = (position) => loopBodies.some((loop) => loop.from <= position && position < loop.to);
+  for (const match of text.matchAll(/\bAtomics\.wait\s*\(/g)) {
+    const args = callArguments(text, match.index + match[0].lastIndexOf('('));
+    // Without a timeout the call waits for a notification, which is a signal.
+    if (args.length < 4 || hungBudget(args[3], bindingsAt(match.index)) || polled(match.index)) continue;
+    report(text.slice(0, match.index).split('\n').length - 1, 'sleep needs a signal or a wait-allow reason');
+  }
+  for (const match of text.matchAll(/\b(?:spawnSync|execSync|execFileSync|spawn|exec|execFile)\s*\(\s*(['"`])sleep\b/g)) {
+    if (!polled(match.index)) report(text.slice(0, match.index).split('\n').length - 1, 'sleep needs a signal or a wait-allow reason');
+  }
+  // A counted loop that sleeps is a deadline in disguise, unless each sleep
+  // carries its own reason (paced work, a staggered race).
+  const lineOf = (position) => text.slice(0, position).split('\n').length - 1;
+  for (const loop of loopBodies) {
+    if (!loop.bounded) continue;
+    const sleeps = [...text.slice(loop.from, loop.to).matchAll(new RegExp(SLEEP_CALL.source, 'g'))];
+    if (sleeps.some((sleep) => !allowed(lines[lineOf(loop.from + sleep.index)]))) {
+      report(lineOf(loop.start), 'an iteration count bounds a sleep loop');
     }
   }
   const promisePositions = new Set();

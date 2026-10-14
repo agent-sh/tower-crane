@@ -231,7 +231,7 @@ test('teardown waits for OS termination after a monitor marks its exit', async (
   const monitor = path.join(h.base, 'spawn-monitor.js');
   fs.writeFileSync(monitor, `
 const fs = require('node:fs');
-const sleep = () => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+const sleep = () => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20); // wait-allow: probe cadence of the loops below
 process.once('exit', () => {
   fs.writeFileSync(${JSON.stringify(marked)}, '');
   const deadline = Date.now() + 30000; // wait-allow: hold an exit listener alive to exercise native-process teardown

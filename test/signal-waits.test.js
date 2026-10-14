@@ -321,6 +321,44 @@ test('shared checks reject readiness budgets and require a reason on allowed tim
   assert.equal(run().status, 0);
 });
 
+test('the lint rejects sleeps, counted sleep loops and other clocks, and accepts polls on a signal', () => {
+  for (const source of [
+    'Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 500); if (!ok()) throw new Error("late");', // wait-allow: rejected lint fixture
+    'const sleep = (ms) => Atomics.wait(cell, 0, 0, ms);', // wait-allow: rejected lint fixture
+    'for (let i = 0; i < 1200 && !ok(); i++) Atomics.wait(cell, 0, 0, 100);', // wait-allow: rejected lint fixture
+    'let tries = 0; while (!ok() && tries < 50) { tries++; Atomics.wait(cell, 0, 0, 100); }', // wait-allow: rejected lint fixture
+    'let left = 50; do { Atomics.wait(cell, 0, 0, 100); } while (!ok() && --left > 0);', // wait-allow: rejected lint fixture
+    'const script = `for(let i=0;i<1200&&!fs.existsSync(go);i++)Atomics.wait(s,0,0,100);`;', // wait-allow: rejected lint fixture
+    'cp.spawnSync("sleep", ["1"]); if (!ok()) throw new Error("late");', // wait-allow: rejected lint fixture
+    'execSync("sleep 1");', // wait-allow: rejected lint fixture
+    'const sleep = util.promisify(setTimeout); await sleep(500);', // wait-allow: rejected lint fixture
+    'await promisify(setTimeout)(500);', // wait-allow: rejected lint fixture
+    'await scheduler.wait(500);', // wait-allow: rejected lint fixture
+    'if (process.hrtime.bigint() - start > 5000000000n) throw new Error("late");', // wait-allow: rejected lint fixture
+    'const deadline = process.hrtime.bigint() + 5000000000n;', // wait-allow: rejected lint fixture
+    'const [seconds] = process.hrtime(start); assert.ok(seconds < 5);', // wait-allow: rejected lint fixture
+    'assert.ok(process.hrtime(start)[0] < 5);', // wait-allow: rejected lint fixture
+    'if (new Date() - start > 5000) throw new Error("late");', // wait-allow: rejected lint fixture
+    'const deadline = +new Date() + 5000;', // wait-allow: rejected lint fixture
+    'if ((Date.now() - start) / 1000 > 5) throw new Error("late");', // wait-allow: rejected lint fixture
+  ]) {
+    assert.ok(waitFindings(source).length, source);
+    assert.deepEqual(waitFindings(source.split('\n').map((line) => `${line} // wait-allow: fixture behaviour`).join('\n')), [], source);
+  }
+  for (const source of [
+    'while (!fs.existsSync(go)) Atomics.wait(cell, 0, 0, 10);',
+    'const end = Date.now() + 300000; while (!ok() && Date.now() < end) Atomics.wait(cell, 0, 0, 10);',
+    'while (!ok()) { if (failed()) break; Atomics.wait(cell, 0, 0, 10); }',
+    'do { Atomics.wait(cell, 0, 0, 10); } while (!ok());',
+    'Atomics.wait(cell, 0, 0);',
+    'for (let i = 0; i < items.length; i++) handle(items[i]);',
+    'const script = `while(!fs.existsSync(go))Atomics.wait(s,0,0,100);`;',
+    'while (!fs.existsSync(go)) cp.spawnSync("sleep", ["1"]);',
+    'await scheduler.wait(HUNG_TEST_MS);',
+    'const elapsed = process.hrtime.bigint() - start; report(elapsed);',
+  ]) assert.deepEqual(waitFindings(source), [], source);
+});
+
 test('child exit is observable while inherited output is held, and close waits for its final bytes', {
   skip: process.platform === 'win32' && 'inherited output handles do not survive a forced parent exit',
 }, async (t) => {

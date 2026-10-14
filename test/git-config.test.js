@@ -250,7 +250,7 @@ test('a commondir toggled in a loop never redirects the state lookup', (t) => {
   const toggler = cp.spawn(process.execPath, ['-e', `
 const fs = require('node:fs');
 const [file, named] = process.argv.slice(1);
-const spin = (ms) => { const end = process.hrtime.bigint() + BigInt(ms * 1e6); while (process.hrtime.bigint() < end); };
+const spin = (ms) => { const end = process.hrtime.bigint() + BigInt(ms * 1e6); while (process.hrtime.bigint() < end); }; // wait-allow: paces the toggler; it runs until the test stops it
 const stop = Date.now() + 300000;
 while (Date.now() < stop) {
   try { fs.writeFileSync(file, named + '\\n'); } catch {}

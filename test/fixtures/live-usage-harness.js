@@ -52,7 +52,7 @@ if (path.resolve(process.argv[1] || '') !== __filename) {
       if (typeof file === 'string' && /[\\/]projects[\\/].+\.jsonl$/.test(file)) {
         if (!delayed && process.env.LIVE_READ_DELAY_MS) {
           delayed = true;
-          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Number(process.env.LIVE_READ_DELAY_MS));
+          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Number(process.env.LIVE_READ_DELAY_MS)); // wait-allow: the configured slow read is the fixture's behaviour
         }
         fs.appendFileSync(process.env.LIVE_READS, `${performance.now()}\n`);
       }

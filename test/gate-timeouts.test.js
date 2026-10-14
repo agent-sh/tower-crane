@@ -89,7 +89,7 @@ setTimeout(() => process.exit(0), 10000); // wait-allow: the gate must time out 
 test('a timeout that comes due during a blocked event loop stops only a child with nothing to show', async () => {
   const C = require('../lib/gates/common');
   const run = (script) => C.exec({ exec: C.treeExec }, process.execPath, ['-e', script], { timeout: 300 }); // wait-allow: the gate timeout itself is under test
-  const block = () => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1500);
+  const block = () => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1500); // wait-allow: blocks the event loop past the gate timeout, the condition under test
   const cases = [
     ['exited', "process.stdout.write('done')", (r) => assert.equal(r.stdout, 'done')],
     // More than a pipe buffer: the child cannot exit until the parent reads.

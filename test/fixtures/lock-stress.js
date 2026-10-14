@@ -14,7 +14,7 @@ if (process.env.LOCK_STRESS_AGE_STAGING) {
     if (path.dirname(dir) === process.env.HOOK_STATE && dir.endsWith('.new')) {
       const old = new Date(Date.now() - 120000);
       fs.utimesSync(dir, old, old);
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20); // wait-allow: holds the aged staging directory open for a sweeper to see
     }
     return result;
   };

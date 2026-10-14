@@ -287,7 +287,7 @@ try {
 }
 try {
   fs.appendFileSync(${JSON.stringify(attempts)}, '.');
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ${delay});
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ${delay}); // wait-allow: a slow upload-pack widens the window a concurrent fetch would hit
   const r = cp.spawnSync('git-upload-pack', process.argv.slice(2), { stdio: 'inherit' });
   process.exitCode = r.status === null ? 1 : r.status;
 } finally {

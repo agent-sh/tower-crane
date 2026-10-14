@@ -62,7 +62,7 @@ const cli = (args) => cp.execFileSync(process.execPath, [process.argv[1], ...arg
 const file = process.argv[2];
 const attempts = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : [];
 if (!attempts.length && ${claim}) {
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ${claimDelay});
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ${claimDelay}); // wait-allow: a late claim is the race this fixture sets up
   cli(['claim', 'T1', '--lease', '1']);
 }
 const task = JSON.parse(cli(['task', 'show', 'T1', '--json']));
