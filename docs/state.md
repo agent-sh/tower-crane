@@ -301,6 +301,8 @@ Cost samples use T31's `spend.entries` across all tasks, restricted to native `r
 
 Worktree creation has no added timeout and uses Git's native initialization lock. The CLI unlocks only after checkout and its hooks finish. It refuses to reuse an unfinished locked registration, including one whose CLI died while a Git child survived or before HEAD was written. An unfinished registration for any task refuses the whole batch call; worktrees prepared earlier in the call can remain. There is no automatic recovery by pid or age. After Git and its children finish, inspect the worktree, then run `git worktree unlock <path>` for a complete checkout or `git worktree remove --force <path>` for an incomplete one. Existing branches and completed worktrees are reused offline. If an add later in a batch fails, earlier tasks can remain prepared.
 
+An add that reports a missing `commondir` while a gate's worktree is being removed is retried once after 100 ms. Preparation replans before retrying; unfinished locked registrations remain refused, and a persistent error is reported.
+
 While the registration is still locked, the CLI moves the task worktree's admin directory (HEAD, index, `commondir`) out of the git directory's `worktrees/<name>` to `.git-admin/<name>` under the worktrees root, points the worktree's `.git` file at it and leaves a link at `worktrees/<name>`, so `git worktree list`, `prune` and `remove` still find it. The `.git` file, `commondir` and the link are relative, so moving the project directory, which holds the repository and the worktrees root side by side, keeps the worktree working. The admin directory's `gitdir` is git's own absolute back-pointer, which `git worktree prune` trusts: before each prune (task preparation, gate preparation and cleanup, stack sync) and before `worktree` reads the registrations, the CLI writes it again for each relocated worktree whose `.git` file names its admin directory and whose `commondir` names this repository's git directory, and restores the relative paths and the link. A repository named `r.git` beside `r` shares its worktrees root, and neither relinks the other's worktrees. Moving a new worktree's admin directory, each relink, and gate preparation take the repository's worktree lock, `tower-crane-worktree.lock` in its git directory, so a relink never meets a worktree whose admin directory is moved but not yet linked. A sandboxed agent writes the git directory but not its `worktrees/`, so it cannot write another worktree's admin directory, one added after it started included ([shared git directory](ladder.md#shared-git-directory)). Removal and prune remove the admin directories git emptied. On Windows, whose links need privileges, and when the worktrees root is on another filesystem, the admin directory stays in `worktrees/<name>`. Worktrees created before this layout keep theirs there too.
 
 Task preparation, temporary gate preparation and stack sync run `git worktree prune` before using worktree registrations. Gate commands and the git commands run in the gate worktree, with their hooks, use `TMPDIR`, `TMP` and `TEMP` pointing at a directory inside the gate's temporary parent, which gate cleanup removes with the worktree. A `NODE_COMPILE_CACHE` the caller set points at `node-compile-cache` in that directory. Gate cleanup prunes after every removal attempt, including successful removals. This clears orphan admin directories, including empty read-only `commondir` and `config.worktree` mount points recreated by a sandbox after removal. Git owns admin-file writes and initialization ordering; Tower Crane only moves a task worktree's admin directory, as above, and does not synthesize or repair those files. Prune preserves locked registrations while another checkout or its hooks are running. Before those git calls, and before each git command an agent's shim runs, empty read-only `*.lock` files directly in the git directory, such as `config.lock`, are removed when no process holds them and each removal is logged to stderr. A sandbox leaves such a file where it masks a path the host lacks, so sandbox masks name only paths that exist on the host. Cleanups take turns through `.git/tower-crane-reap`: a cleanup that finds it held waits up to 5 s, then keeps every placeholder and says so on stderr, naming the directory. The directory is never taken over, whatever its age, since its holder may only be paused; a cleanup killed while it holds the directory leaves it, and it is removed by hand. Holders of placeholders are found through `/proc`. A process of the same user whose descriptors cannot be read keeps the file, since it may hold it; a zombie holds nothing. Another user's processes cannot be read, so they are not counted. Without `/proc` nothing is removed.
@@ -958,6 +960,28 @@ every watcher and supervisor. The running receipt in the event log is the
 executor's lease: its terminal receipt releases it on exit, and its PID
 identity releases it when the process dies. Running receipts from other
 hosts do not count against this host's cap.
+SIGTERM or SIGINT to `wait` stops new reservations and gates while its active
+gate finishes and records evidence. The interrupted reaction records
+`phase: "deferred"` with an interruption reason, releasing its executor lease
+before `wait` exits 0. The next startup reconciles the remaining work.
+Signal shutdown prints a final notice containing the signal and the number
+of gates that finished during the drain, distinct from a wake or timeout.
+Conflict sweeps and asynchronous stack conflict processing stop between tasks
+and before a probe requests rework or reserves generated repair. A cancelled
+probe releases its temporary worktree and adds no conflict-error note.
+Failure evidence from a draining gate is retained; automatic retry or rework
+waits for a later reaction.
+PR inspection and gate commands, including Git and GitHub queries, run
+asynchronously so they do not block signal delivery. Forced cancellation
+stops their process trees; temporary worktree removal and pruning still run
+before the executor lease is released.
+A second signal kills the active command tree immediately or cancels its
+source-page fetch. An interrupted software gate records a failure without
+`confirmed_failure`, so it does not trigger a quality climb. `gates retry`
+can rerun that gate.
+Asynchronous stack merge polling and backoff also stop on the second signal,
+recording failed merge evidence. The remote request may still be pending;
+another merge invocation confirms its state.
 `automation queued` records a blocked notification's source, with
 `executors` set to the cap when the cap blocked it rather than another
 executor of the same task. Queued notifications for accepted, unmerged PR
