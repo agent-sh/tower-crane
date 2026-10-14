@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
 const { makeRepo, ROOT, detachedAlive } = require('./helpers');
-const { tempRoot } = require('./tmp-root');
+const { tempRoot, liveRoot } = require('./tmp-root');
 
 test('test temp roots prefer explicit overrides and otherwise use the user cache on each platform', () => {
   const home = path.join(ROOT, 'fixture-home');
@@ -22,6 +22,19 @@ test('test temp roots prefer explicit overrides and otherwise use the user cache
     ['linux', { HOME: home, TOWER_CRANE_TMP: tmp }, tmp],
     ['win32', { USERPROFILE: home, TOWER_CRANE_TMP: tmp, TOWER_CRANE_TEST_TMP: testTmp }, testTmp],
   ]) assert.equal(tempRoot(env, platform), expected);
+});
+
+test('live probes keep their fixtures in a cache directory of their own, beside the churning test temp root', () => {
+  const home = path.join(ROOT, 'fixture-home');
+  const cache = path.join(home, 'custom-cache');
+  const testTmp = path.join(home, 'test-tmp');
+  for (const [platform, env, expected] of [
+    ['linux', { HOME: home }, path.join(home, '.cache', 'tower-crane-live')],
+    ['linux', { HOME: home, XDG_CACHE_HOME: cache }, path.join(cache, 'tower-crane-live')],
+    ['linux', { HOME: home, TOWER_CRANE_TEST_TMP: testTmp }, path.join(home, '.cache', 'tower-crane-live')],
+    ['win32', { USERPROFILE: home, LOCALAPPDATA: cache }, path.join(cache, 'tower-crane-live')],
+    ['win32', { USERPROFILE: home }, path.join(home, 'AppData', 'Local', 'tower-crane-live')],
+  ]) assert.equal(liveRoot(env, platform), expected);
 });
 
 test('repository seeds, test helpers and gate scratch share the cache default and overrides', (t) => {
