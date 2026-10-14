@@ -1235,6 +1235,56 @@ test('the agent\'s pack is quarantined until the checks pass, capped in size, an
   assert.equal(f.remoteRef(`refs/heads/${f.task.branch}`), large);
 });
 
+// The cache lock every push and fetch of the project waits on is freed when
+// an agent stops reading its fetch's pack (idle cap) or reads it too slowly
+// (total cap), and when its push's pack trickles past the total cap.
+test('a fetch or push pack that outlasts its caps frees the cache lock', async (t) => {
+  const f = await sshOriginFixture(t);
+  const G = require('../lib/github-broker');
+  const saved = { ...G.LIMITS };
+  t.after(() => Object.assign(G.LIMITS, saved));
+  const lock = path.join(f.h.state, 'push', 'cache.lock');
+  // Larger than the socket buffers, so the broker's writes wait for a drain.
+  f.advance('big.bin', require('node:crypto').randomBytes(4 << 20));
+  const net = require('node:net');
+  const b = JSON.parse(fs.readFileSync(f.job.broker, 'utf8'));
+  // An agent that sends a fetch and never reads the answer.
+  const silent = () => new Promise((resolve) => {
+    const sock = b.socket ? net.connect(b.socket) : net.connect(b.port, b.host);
+    sock.on('error', () => {});
+    sock.on('connect', () => {
+      sock.pause();
+      sock.write(`${JSON.stringify({ token: b.token, fetch: {} })}\n`);
+      resolve(sock);
+    });
+  });
+  for (const [what, limits] of [['idle', { idleMs: 300, totalMs: saved.totalMs }], ['total', { idleMs: saved.idleMs, totalMs: 500 }]]) {
+    Object.assign(G.LIMITS, limits);
+    const sock = await silent();
+    await waitUntil(() => fs.existsSync(lock), { paths: [path.dirname(lock)], what: `${what}: the fetch takes the lock` });
+    await waitUntil(() => !fs.existsSync(lock), { paths: [path.dirname(lock)], what: `${what}: the cap frees the cache lock` });
+    sock.destroy();
+  }
+  Object.assign(G.LIMITS, saved);
+  // A push whose pack trickles in, a byte at a time, never idle.
+  G.LIMITS.totalMs = 500;
+  const sha = f.commit('slow.txt', 'slow\n');
+  const trickle = () => {
+    const out = new (require('node:stream').PassThrough)();
+    const timer = setInterval(() => out.write(Buffer.from([0x50])), 50); // wait-allow: the fixture's trickle rate, under the idle cap and over the total cap under test
+    out.on('close', () => clearInterval(timer));
+    out.stop = () => { clearInterval(timer); out.destroy(); };
+    return out;
+  };
+  const slow = await f.raw({ push: { sha } }, { pack: trickle });
+  assert.notEqual(slow.code, 0);
+  assert.match(slow.stderr, /took longer than 0 s|took longer than 1 s/);
+  assert.equal(fs.existsSync(lock), false, 'the push freed the cache lock');
+  Object.assign(G.LIMITS, saved);
+  const fetched = await f.shim('git', ['fetch', '-q', 'origin']);
+  assert.equal(fetched.status, 0, fetched.stderr);
+});
+
 // An agent that hangs up is stopped: a gh that prints nothing, and a push
 // still waiting for the cache lock.
 test('the broker stops a silent gh and a waiting push when the agent hangs up', async (t) => {
