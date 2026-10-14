@@ -14,8 +14,10 @@ if (path.basename(process.argv[1] || '') === 'spawn-monitor.js' && process.env.T
     return ticks;
   };
   const read = fs.readFileSync;
+  // A reader between a commit's event append and its renames reads the
+  // staged tasks.json.<event id>.commit in place of tasks.json.
   fs.readFileSync = function sampledRead(file, ...args) {
-    if (typeof file === 'string' && path.basename(file) === 'tasks.json') note('state');
+    if (typeof file === 'string' && /^tasks\.json(\.E[0-9a-f-]{36}\.commit)?$/.test(path.basename(file))) note('state');
     return read.call(this, file, ...args);
   };
   const stat = fs.lstatSync;
