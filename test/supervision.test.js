@@ -1205,7 +1205,9 @@ const fs = require('node:fs');
 const [planted, result, named] = process.argv.slice(1, 4);
 // A write loop, as a worker that fights the removal would run.
 const spin = (ms) => { const until = Date.now() + ms; while (Date.now() < until); }; // wait-allow: paces the planted writes like a worker fighting the removal
-for (let i = 0; i < 300; i++) { fs.writeFileSync(planted, named + '\\n'); spin(5); }
+// Windows refuses to open a file the supervisor is deleting (EPERM).
+const plant = () => { try { fs.writeFileSync(planted, named + '\\n'); } catch (e) { if (e.code !== 'EPERM') throw e; } };
+for (let i = 0; i < 300; i++) { plant(); spin(5); }
 const end = Date.now() + 300000;
 const check = () => {
   if (!fs.existsSync(planted)) fs.writeFileSync(result, 'removed');

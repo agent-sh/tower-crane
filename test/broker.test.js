@@ -969,6 +969,45 @@ function shimChild(f, args) {
 
 const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
 
+// A Windows named pipe has no half close: libuv closes the whole pipe 50 ms
+// after the writer's shutdown, so an agent that ends its side to mark the end
+// of its pack loses the answer. A peer that closes the connection when the
+// agent ends its side stands in for that pipe on every platform.
+test('a push gets its answer over a connection that closes when the agent ends its side, as a Windows named pipe does', async (t) => {
+  const { base } = scratch(t);
+  const net = require('node:net');
+  const socket = process.platform === 'win32' ? `\\\\.\\pipe\\tower-crane-test-${process.pid}-${Date.now()}` : path.join(base, 's');
+  let got = Buffer.alloc(0);
+  let request = null;
+  const framed = Buffer.from([0, 0, 0, 3, ...Buffer.from('abc'), 0, 0, 0, 4, ...Buffer.from('defg'), 0, 0, 0, 0]);
+  const server = net.createServer({ allowHalfOpen: false }, (conn) => {
+    conn.on('error', () => {});
+    conn.on('data', (d) => {
+      got = Buffer.concat([got, d]);
+      if (request === null) {
+        const nl = got.indexOf(10);
+        if (nl < 0) return;
+        request = JSON.parse(got.subarray(0, nl).toString('utf8'));
+        got = got.subarray(nl + 1);
+        conn.write(`${JSON.stringify({ stderr: 'checking\n' })}\n${JSON.stringify({ need: { have: [] } })}\n`);
+      }
+      // The broker checks the push for a while before it answers.
+      if (got.equals(framed)) setTimeout(() => conn.end(`${JSON.stringify({ code: 0 })}\n`), 200); // wait-allow: the fake broker's checking time, so the agent's side must stay open past its own pack
+    });
+  });
+  await new Promise((resolve) => server.listen(socket, resolve));
+  t.after(() => server.close());
+  const file = path.join(base, B.FILE);
+  fs.writeFileSync(file, JSON.stringify({ socket, token: 'k' }));
+  let stderr = '';
+  const pack = () => require('node:stream').Readable.from([Buffer.from('abc'), Buffer.from('defg')]);
+  const code = await B.request(file, { push: { sha: 'a'.repeat(40) } }, { stdout() {}, stderr: (s) => { stderr += s; } }, { pack });
+  assert.equal(code, 0);
+  assert.deepEqual(request, { token: 'k', push: { sha: 'a'.repeat(40) } });
+  assert.equal(stderr, 'checking\n');
+  assert.ok(got.equals(framed), 'the pack arrives in frames, ended by an empty frame');
+});
+
 // index-pack stops at the first object fsck refuses, long before a large
 // pack is read. The agent's push must end with the broker's answer, not wait
 // on a pack-objects blocked on a full pipe, and the broker keeps nothing.
@@ -1064,13 +1103,8 @@ test('the broker stops a silent gh and a waiting push when the agent hangs up', 
   assert.equal(f.remoteRef(`refs/heads/${f.task.branch}`), null, 'the push of an agent that hung up does not run');
 
   f.h.ok(['project', 'set', '--repo', 'acme/demo', '--agent', 'owner']);
-  const bin = path.join(f.h.base, 'silent-bin');
   const pidFile = path.join(f.h.base, 'gh.pid');
-  fs.mkdirSync(bin);
-  fs.writeFileSync(path.join(bin, 'gh'), `#!${process.execPath}\nrequire('node:fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));\nsetInterval(() => {}, 1000);\n`, { mode: 0o755 });
-  const savedPath = process.env.PATH;
-  process.env.PATH = `${bin}${path.delimiter}${savedPath}`;
-  t.after(() => { process.env.PATH = savedPath; });
+  hostGh(t, path.join(f.h.base, 'silent-bin'), `require('node:fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));\nsetInterval(() => {}, 1000);\n`);
   const gh = shimChild(f, ['gh', 'pr', 'checks']);
   await waitUntil(() => fs.existsSync(pidFile) && fs.readFileSync(pidFile, 'utf8'), { paths: [pidFile], alive: gh.child, what: () => `gh started\n${gh.stderr()}` });
   const pid = Number(fs.readFileSync(pidFile, 'utf8'));
@@ -1142,14 +1176,30 @@ test('a sandboxed agent\'s push to another machine from outside its task reposit
   assert.match(remote.stderr, /has no credentials/);
 });
 
+// The gh the broker in this process runs: a script first on PATH. Windows
+// runs no shebang script and finds only gh.exe, so there the broker's spawn
+// of gh runs the script with node instead.
+function hostGh(t, bin, source) {
+  fs.mkdirSync(bin);
+  const script = path.join(bin, 'gh');
+  fs.writeFileSync(script, `#!${process.execPath}\n${source}`, { mode: 0o755 });
+  if (process.platform === 'win32') {
+    const cp = require('node:child_process');
+    const spawn = cp.spawn;
+    cp.spawn = (command, args, opts) => (command === 'gh' ? spawn(process.execPath, [script, ...(args || [])], opts) : spawn(command, args, opts));
+    t.after(() => { cp.spawn = spawn; });
+    return;
+  }
+  const savedPath = process.env.PATH;
+  process.env.PATH = `${bin}${path.delimiter}${savedPath}`;
+  t.after(() => { process.env.PATH = savedPath; });
+}
+
 // A gh on the broker's PATH that logs each call and answers a pull request
 // lookup: number 7 is the task's, 9 another branch's.
 function fakeGh(t, f) {
-  const bin = path.join(f.h.base, 'host-bin');
   const log = path.join(f.h.base, 'gh-calls.jsonl');
-  fs.mkdirSync(bin);
-  fs.writeFileSync(path.join(bin, 'gh'), `#!${process.execPath}
-const fs = require('node:fs');
+  hostGh(t, path.join(f.h.base, 'host-bin'), `const fs = require('node:fs');
 const args = process.argv.slice(2);
 let stdin = '';
 try { stdin = fs.readFileSync(0, 'utf8'); } catch {}
@@ -1158,9 +1208,8 @@ if (args[0] === 'pr' && args[1] === 'view' && args.includes('number,headRefName,
   const sel = args.at(-1);
   console.log(JSON.stringify(sel === '9' || sel === 'other' ? { number: 9, headRefName: 'other', isCrossRepository: false } : { number: 7, headRefName: ${JSON.stringify(f.task.branch)}, isCrossRepository: false }));
 } else console.log('gh ran ' + args.join(' '));
-`, { mode: 0o755 });
-  const saved = { PATH: process.env.PATH, GH_TOKEN: process.env.GH_TOKEN, GITHUB_TOKEN: process.env.GITHUB_TOKEN, SECRET_PROBE: process.env.SECRET_PROBE };
-  process.env.PATH = `${bin}${path.delimiter}${process.env.PATH}`;
+`);
+  const saved = { GH_TOKEN: process.env.GH_TOKEN, GITHUB_TOKEN: process.env.GITHUB_TOKEN, SECRET_PROBE: process.env.SECRET_PROBE };
   delete process.env.GH_TOKEN;
   delete process.env.GITHUB_TOKEN;
   process.env.SECRET_PROBE = 'host-secret';
