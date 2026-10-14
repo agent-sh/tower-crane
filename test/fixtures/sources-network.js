@@ -3,6 +3,7 @@
 // CLI fixtures inject the transport through the gate context. Production has
 // no setting or environment variable that permits private source addresses.
 const gate = require('../../lib/gates/sources');
+const { writeAtomic } = require('../atomic-file');
 const run = gate.run;
 const realFetch = global.fetch;
 const pin = process.env.HOOK_SOURCES_PIN === '1';
@@ -45,13 +46,13 @@ if (pin) {
       const lookup = (hostname, lookupOptions, done) => options.lookup(hostname, lookupOptions, (error, values) => {
         assert.equal(lookupOptions.all, true);
         assert.deepEqual(values, publicAnswers);
-        require('node:fs').writeFileSync(process.env.HOOK_SOURCES_TRACE, JSON.stringify({ lookups, addresses: values }));
+        writeAtomic(process.env.HOOK_SOURCES_TRACE, JSON.stringify({ lookups, addresses: values }));
         // Both connection attempts stay local; the fixture listens only on IPv4.
         done(error, values.map(value => ({ ...value, address: value.family === 6 ? '::1' : '127.0.0.1' })));
       });
       return original(at, { ...options, lookup, autoSelectFamily: true }, callback);
     }
-    require('node:fs').writeFileSync(process.env.HOOK_SOURCES_TRACE, JSON.stringify({ lookups, address, host: url.host }));
+    writeAtomic(process.env.HOOK_SOURCES_TRACE, JSON.stringify({ lookups, address, host: url.host }));
     const at = new URL(url);
     at.host = new URL(process.env.HOOK_SOURCES_ORIGIN).host;
     return original(at, { ...options, lookup: undefined, headers: { ...options.headers, Host: url.host } }, callback);

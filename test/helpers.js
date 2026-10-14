@@ -422,9 +422,10 @@ function context(t, base, options = {}) {
       const dir = path.join(base, 'detached');
       return fs.existsSync(dir) ? fs.readdirSync(dir).filter((f) => f.endsWith('.json')).flatMap((f) => {
         const file = path.join(dir, f);
+        // hooks.js publishes records atomically; one still incomplete is not recorded yet.
         let record;
         try { record = JSON.parse(fs.readFileSync(file, 'utf8')); }
-        catch (e) { if (e.code === 'ENOENT') return []; throw e; }
+        catch (e) { if (e.code === 'ENOENT' || e instanceof SyntaxError) return []; throw e; }
         // A monitor's exit listener marks its exit beside its record.
         if (record.kind === 'monitor' && fs.existsSync(path.join(dir, `${record.token || record.pid}.exited`))) record.exited = true;
         return [{ ...record, file }];

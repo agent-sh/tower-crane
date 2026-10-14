@@ -3,6 +3,7 @@
 const cp = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
+const { writeAtomic } = require('../atomic-file');
 
 // Each harness's own record for an expired login, in the shape its CLI prints.
 function authRecord(harness, message) {
@@ -104,7 +105,7 @@ if (path.resolve(process.argv[1] || '') !== __filename) {
   if (process.env.TOWER_CRANE_TEST_NESTED_DISPATCH && process.env.TOWER_CRANE_AGENT.startsWith('orchestrator-')) {
     const ladder = JSON.parse(cli(['ladder', 'show', '--json']));
     const dispatch = JSON.parse(cli(['spawn', '--task', 'T2', '--wait', '--json']));
-    fs.writeFileSync(process.env.TOWER_CRANE_TEST_NESTED_DISPATCH, JSON.stringify({
+    writeAtomic(process.env.TOWER_CRANE_TEST_NESTED_DISPATCH, JSON.stringify({
       config: process.env.TOWER_CRANE_CONFIG, home: process.env.HOME, ladder, dispatch,
     }));
     process.exit(0);
@@ -152,7 +153,7 @@ if (path.resolve(process.argv[1] || '') !== __filename) {
     ].map((key) => [key, providerEnv[key] || null])) } : {}),
   });
   if (process.env.TOWER_CRANE_TEST_FALLBACK_NOTE) cli(['task', 'note', process.env.TOWER_CRANE_TASK, `${harness} ${model} ${process.env.TOWER_CRANE_RETRY}`]);
-  fs.writeFileSync(file, JSON.stringify(attempts));
+  writeAtomic(file, JSON.stringify(attempts));
   if (harness === 'codex') {
     if (model !== 'first' || process.env.TOWER_CRANE_TEST_FALLBACK_REASON !== 'no-session') {
       console.log(JSON.stringify({ type: 'thread.started', thread_id: model === 'first' ? '11111111-1111-1111-1111-111111111111' : '22222222-2222-2222-2222-222222222222' }));

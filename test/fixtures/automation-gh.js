@@ -3,6 +3,7 @@
 const fs = require('node:fs');
 const cp = require('node:child_process');
 const path = require('node:path');
+const { writeAtomic } = require('../atomic-file');
 const args = process.argv.slice(2);
 const file = process.env.AUTOMATION_GITHUB;
 const state = JSON.parse(fs.readFileSync(file, 'utf8'));
@@ -12,11 +13,7 @@ if (process.env.AUTOMATION_ENV_PROBE) {
   const { HOME, PATH, XDG_CACHE_HOME, TOWER_CRANE_SANDBOX, TOWER_CRANE_AGENT, TOWER_CRANE_TASK } = process.env;
   fs.appendFileSync(process.env.AUTOMATION_ENV_PROBE, JSON.stringify({ args, HOME, PATH, XDG_CACHE_HOME, TOWER_CRANE_SANDBOX, TOWER_CRANE_AGENT, TOWER_CRANE_TASK }) + '\n');
 }
-// Write through a rename so a test reading the file never sees it truncated.
-const save = () => {
-  fs.writeFileSync(`${file}.${process.pid}`, JSON.stringify(state));
-  fs.renameSync(`${file}.${process.pid}`, file);
-};
+const save = () => writeAtomic(file, JSON.stringify(state));
 let out = '';
 if (args[0] === 'pr') {
   const pr = state.prs[args[2]];

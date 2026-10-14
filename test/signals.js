@@ -97,14 +97,20 @@ function waitUntil(check, { paths = [], signal, subscribe, poll = true, alive, w
   });
 }
 
-function fileWritten(file, { check = () => true, ...options } = {}) {
+// With `json`, check and the result take the parsed value. A writer that does
+// not publish through writeAtomic (test/atomic-file.js) can leave the file
+// empty or half written; that is not written yet, so the wait goes on.
+function fileWritten(file, { check = () => true, json = false, ...options } = {}) {
   return waitUntil(() => {
-    try {
-      const text = fs.readFileSync(file, 'utf8');
-      return check(text) ? { text } : false;
-    }
+    let text;
+    try { text = fs.readFileSync(file, 'utf8'); }
     catch (error) { if (error.code === 'ENOENT') return false; throw error; }
-  }, { paths: [file], what: `file written: ${file}`, ...options }).then(({ text }) => text);
+    if (!json) return check(text) ? { text } : false;
+    let value;
+    try { value = JSON.parse(text); }
+    catch (error) { if (error instanceof SyntaxError) return false; throw error; }
+    return check(value) ? { value } : false;
+  }, { paths: [file], what: `file written: ${file}`, ...options }).then((found) => json ? found.value : found.text);
 }
 
 function waitOnRepo(h, check, what, options) {

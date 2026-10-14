@@ -1,7 +1,7 @@
 'use strict';
 
 const cp = require('node:child_process');
-const fs = require('node:fs');
+const { writeAtomic } = require('../atomic-file');
 
 const [cli, readyFile, releaseFile, writerPidFile] = process.argv.slice(2);
 cp.execFileSync(process.execPath, [cli, 'claim', 'T1', '--lease', '1']);
@@ -10,6 +10,7 @@ const writerScript = `
 const fs = require('node:fs');
 const ready = process.argv[1];
 const release = process.argv[2];
+// write-atomic: readiness only; the test takes the writer's pid from the harness's file.
 fs.writeFileSync(ready, String(process.pid));
 const deadline = Date.now() + 300000;
 while (!fs.existsSync(release) && Date.now() < deadline) {
@@ -28,5 +29,5 @@ const writer = cp.spawn(process.execPath, ['-e', writerScript, readyFile, releas
 });
 if (!writer.pid) process.exit(92);
 writer.unref();
-fs.writeFileSync(writerPidFile, String(writer.pid));
+writeAtomic(writerPidFile, String(writer.pid));
 process.exit(2);
