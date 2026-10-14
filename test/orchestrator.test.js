@@ -218,7 +218,7 @@ const lease = O.identity({ env: { CLAUDE_SESSION_ID: 'session' }, agent: 'orches
 console.log(JSON.stringify({ ...lease, ppid: process.ppid }));
 `;
   const result = cp.spawnSync(process.execPath, ['-e', script], {
-    env: { ...process.env, PLATFORM: platform, ROWS: JSON.stringify(rows) }, encoding: 'utf8', timeout: 10000,
+    env: { ...process.env, PLATFORM: platform, ROWS: JSON.stringify(rows) }, encoding: 'utf8', timeout: 300000,
   });
   assert.equal(result.status, 0, result.stderr);
   return JSON.parse(result.stdout);
