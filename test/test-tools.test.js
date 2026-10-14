@@ -194,6 +194,31 @@ test('the test runner emits one capped concurrency value, including repeated and
   }
 });
 
+test('the test runner starts the largest files first and keeps the shard selection by name', (t) => {
+  const h = makeRepo(t);
+  const runner = path.join(ROOT, 'test/run.js');
+  const dir = path.join(h.repo, 'test');
+  fs.mkdirSync(dir, { recursive: true });
+  for (const [name, bytes] of [['a', 10], ['b', 300], ['c', 100], ['d', 300]]) {
+    fs.writeFileSync(path.join(dir, `${name}.test.js`), `// ${'x'.repeat(bytes)}\n`);
+  }
+  const preload = path.join(h.base, 'runner-order.js');
+  fs.writeFileSync(preload, `require('node:child_process').spawnSync = (command, args) => {
+    console.log(JSON.stringify(args));
+    return { status: 0 };
+  };`);
+  const order = (env = {}) => {
+    const r = cp.spawnSync(process.execPath, ['--require', preload, runner, 'test/a.test.js', 'test/b.test.js', 'test/c.test.js', 'test/d.test.js'],
+      { cwd: h.repo, env: { ...h.env, ...env }, encoding: 'utf8' });
+    assert.equal(r.status, 0, r.stderr);
+    return JSON.parse(r.stdout).filter((arg) => !arg.startsWith('--'));
+  };
+  assert.deepEqual(order(), ['test/b.test.js', 'test/d.test.js', 'test/c.test.js', 'test/a.test.js']);
+  // A shard still takes every total-th file by name, then runs its own largest first.
+  assert.deepEqual(order({ TC_TEST_SHARD: '1/2' }), ['test/c.test.js', 'test/a.test.js']);
+  assert.deepEqual(order({ TC_TEST_SHARD: '2/2' }), ['test/b.test.js', 'test/d.test.js']);
+});
+
 test('mutation fallback requires a green baseline in a copy containing all test inputs', (t) => {
   const h = makeRepo(t);
   const write = (file, text) => {
