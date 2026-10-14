@@ -763,7 +763,8 @@ test('a worker\'s git push goes through its broker to its own task branch on ori
   assert.equal(allowed.status, 0, allowed.stderr);
   assert.equal(f.remoteRef(`refs/heads/${branch}`), merged);
   assert.ok(workflow);
-  assert.deepEqual(fs.readdirSync(path.join(f.h.state, 'push')).filter((n) => n !== '.gitignore'), [], 'the broker removes its scratch repositories');
+  assert.deepEqual(fs.readdirSync(path.join(f.h.state, 'push')).filter((n) => n !== '.gitignore'), ['cache.git'],
+    'the broker keeps its verified cache and removes its other scratch');
 });
 
 test('only a role whose agent file pushes can push through the broker, and only to the recorded repository', async (t) => {
@@ -788,6 +789,65 @@ test('only a role whose agent file pushes can push through the broker, and only 
   const other = await w.raw({ push: { sha: commit } });
   assert.match(other.stderr, /not to the project's repository acme\/demo/);
   assert.equal(w.remoteRef(`refs/heads/${w.task.branch}`), null, 'nothing was pushed');
+});
+
+// git trusts a loose object's file name on read, and the task repository's
+// object store is the agent's to write. Here the remote already holds a tree
+// that changes a workflow, the agent's new commit points at it, and the agent
+// rewrites that tree's file in its store to hold the parent's tree. The broker
+// must check the content the remote ends up with, not the rewritten file.
+test('the broker checks a push against verified objects, so a rewritten object in the task repository\'s store hides no workflow change', async (t) => {
+  const f = await pushFixture(t);
+  const cp = require('node:child_process');
+  const zlib = require('node:zlib');
+  const branch = f.task.branch;
+  const base = f.h.git(['rev-parse', 'HEAD'], f.wt.path);
+  f.h.git(['checkout', '-q', '-b', 'side'], f.wt.path);
+  const side = f.commit('.github/workflows/ci.yml', 'on: push\n');
+  f.h.git(['push', '-q', 'origin', 'side'], f.wt.path);
+  f.h.git(['checkout', '-q', branch], f.wt.path);
+  const tree = f.h.git(['rev-parse', `${side}^{tree}`], f.wt.path);
+  const commit = f.h.git(['commit-tree', tree, '-p', base, '-m', 'looks empty'], f.wt.path);
+  const common = f.job.dispatch.gitDirs.common;
+  const loose = path.join(common, 'objects', tree.slice(0, 2), tree.slice(2));
+  assert.ok(fs.existsSync(loose), 'the workflow tree is a loose object in the task repository');
+  const parentTree = cp.execFileSync('git', ['--git-dir', common, 'cat-file', 'tree', `${base}^{tree}`]);
+  fs.chmodSync(loose, 0o644);
+  fs.writeFileSync(loose, zlib.deflateSync(Buffer.concat([Buffer.from(`tree ${parentTree.length}\0`), parentTree])));
+  assert.equal(f.h.git(['diff-tree', '-r', '--name-only', '--no-commit-id', commit], f.wt.path), '', 'diff-tree reads the rewritten tree');
+  const r = await f.raw({ push: { sha: commit } });
+  assert.notEqual(r.code, 0, r.stderr);
+  assert.match(r.stderr, /changes \.github\/workflows\/ci\.yml/);
+  assert.equal(f.remoteRef(`refs/heads/${branch}`), null, 'nothing was pushed');
+});
+
+// GitHub runs local actions from the pushed tree: those under .github/actions
+// and any other directory a workflow names with uses: ./path.
+test('the broker refuses a push that changes a local action a workflow runs, and keeps git tracing out of the agent\'s output', async (t) => {
+  const f = await pushFixture(t);
+  const branch = f.task.branch;
+  f.commit('.github/workflows/ci.yml', 'jobs:\n  a:\n    steps:\n      - uses: "./tools/act"\n      - uses: actions/checkout@v4\n');
+  f.h.git(['push', '-q', 'origin', `HEAD:refs/heads/${branch}`], f.wt.path);
+  const pushedBase = f.h.git(['rev-parse', 'HEAD'], f.wt.path);
+  for (const file of ['.github/actions/setup/action.yml', 'tools/act/action.yml', 'tools/act/action.yaml']) {
+    f.h.git(['reset', '-q', '--hard', pushedBase], f.wt.path);
+    const sha = f.commit(file, 'runs:\n  using: composite\n');
+    const r = await f.raw({ push: { sha } });
+    assert.notEqual(r.code, 0, `${file}: ${r.stderr}`);
+    assert.match(r.stderr, new RegExp(`changes ${file.replace(/\./g, '\\.')}`), file);
+  }
+  assert.equal(f.remoteRef(`refs/heads/${branch}`), pushedBase, 'no action change reached the remote');
+  // An action no workflow runs is an ordinary file. git's tracing stays on
+  // the host.
+  f.h.git(['reset', '-q', '--hard', pushedBase], f.wt.path);
+  const free = f.commit('other/action.yml', 'runs:\n  using: composite\n');
+  const saved = { GIT_TRACE: process.env.GIT_TRACE, GIT_TRACE_PACKET: process.env.GIT_TRACE_PACKET, GIT_CURL_VERBOSE: process.env.GIT_CURL_VERBOSE };
+  Object.assign(process.env, { GIT_TRACE: '1', GIT_TRACE_PACKET: '1', GIT_CURL_VERBOSE: '1' });
+  t.after(() => { for (const [k, v] of Object.entries(saved)) if (v === undefined) delete process.env[k]; else process.env[k] = v; });
+  const ok = await f.raw({ push: { sha: free } });
+  assert.equal(ok.code, 0, ok.stderr);
+  assert.doesNotMatch(ok.stderr, /trace: |packet: /, 'no git trace reaches the agent');
+  assert.equal(f.remoteRef(`refs/heads/${branch}`), free);
 });
 
 test('a sandboxed agent\'s push to another machine from outside its task repository is refused by its shim; a local push runs', async (t) => {
@@ -834,6 +894,25 @@ if (args[0] === 'pr' && args[1] === 'view' && args.includes('number,headRefName,
   t.after(() => { for (const [k, v] of Object.entries(saved)) if (v === undefined) delete process.env[k]; else process.env[k] = v; });
   return () => (fs.existsSync(log) ? fs.readFileSync(log, 'utf8').trim().split('\n').map((l) => JSON.parse(l)) : []);
 }
+
+test('the broker runs gh only with a config directory no agent can write', async (t) => {
+  const f = await pushFixture(t);
+  f.h.ok(['project', 'set', '--repo', 'acme/demo', '--agent', 'owner']);
+  const calls = fakeGh(t, f);
+  const saved = process.env.GH_CONFIG_DIR;
+  t.after(() => { if (saved === undefined) delete process.env.GH_CONFIG_DIR; else process.env.GH_CONFIG_DIR = saved; });
+  for (const dir of [path.join(f.h.state, 'homes', 'worker-T1-1', 'gh'), path.join(f.wt.path, 'gh'), f.h.state]) {
+    process.env.GH_CONFIG_DIR = dir;
+    const r = await f.shim('gh', ['pr', 'view', '--json', 'body']);
+    assert.equal(r.status, 1, `${dir}: ${r.stderr}`);
+    assert.match(r.stderr, /gh's config directory .* is inside .*, which an agent can write/);
+  }
+  assert.equal(calls().length, 0, 'gh never ran');
+  process.env.GH_CONFIG_DIR = path.join(f.h.base, 'user-gh');
+  const r = await f.shim('gh', ['pr', 'view', '--json', 'body']);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(calls().at(-1).env.GH_CONFIG_DIR, path.join(f.h.base, 'user-gh'));
+});
 
 test('a sandboxed worker\'s gh runs through its broker in the project repository, on its own pull request, in an environment without the host\'s variables', async (t) => {
   const f = await pushFixture(t);
