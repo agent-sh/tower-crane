@@ -808,11 +808,9 @@ function assertCredentialProbe(h, seen, label) {
   assert.deepEqual(seen.hits, [], `${label}: no readable file holds the owner's token`);
   assert.deepEqual(seen.fill, { status: seen.fill.status, password: false }, `${label}: no credential helper answers for GitHub`);
   assert.notEqual(seen.hostPush, 0, `${label}: the host git cannot push over https`);
-  // Where the sandbox reaches GitHub, the push fails for want of a
-  // credential. claude's proxy refused every CONNECT on the owner's host on
-  // 2026-10-14 (the home probe's ls-remote and npm install fail the same
-  // way), which proves nothing about credentials, so the other checks carry it.
-  if (seen.lsRemote === 0) assert.match(seen.hostPushErr, /could not read Username|terminal prompts disabled|Authentication failed/, `${label}: ${seen.hostPushErr}`);
+  // The sandbox reaches GitHub, so the push fails for want of a credential.
+  assert.equal(seen.lsRemote, 0, `${label}: git fetches over https`);
+  assert.match(seen.hostPushErr, /could not read Username|terminal prompts disabled|Authentication failed/, `${label}: ${seen.hostPushErr}`);
   assert.match(String(seen.sshAgent), /^(unset|ERR )/, `${label}: the SSH agent is out of reach`);
   assert.equal(seen.commit, 0, `${label}: the probe committed`);
   assert.notEqual(seen.directPush.status, 0, `${label}: the sandbox cannot write origin itself`);
@@ -826,7 +824,8 @@ function assertCredentialProbe(h, seen, label) {
 // repository in the test's directory, outside what the sandbox writes. The
 // fixture stays in the shared temp root: under LIVE_ROOT the broker's socket
 // path is too long for its directory, and claude's sandbox cannot reach the
-// fallback under the temp dir when that is in the home.
+// fallback under the temp dir when that is in the home. So the shared root
+// must be short too (TOWER_CRANE_TEST_TMP=~/.cache/tct fits).
 function credentialFixture(t) {
   const h = makeRepo(t);
   h.init();
@@ -837,9 +836,9 @@ function credentialFixture(t) {
   h.git(['push', '-q', 'origin', 'HEAD:refs/heads/main']);
   const dir = results(h);
   const home = os.homedir();
-  // The owner's home, so spawn finds the gh login it handed over before;
-  // caches stay in the test.
-  const env = { ...h.env, HOME: home, USERPROFILE: home, CLAUDE_CONFIG_DIR: '', CODEX_HOME: '', XDG_CACHE_HOME: path.join(h.base, 'cache') };
+  // The owner's home, so spawn finds the gh login it handed over before. The
+  // cache is short, so a claude agent's temp directory holds its proxy sockets.
+  const env = { ...h.env, HOME: home, USERPROFILE: home, CLAUDE_CONFIG_DIR: '', CODEX_HOME: '', XDG_CACHE_HOME: shortCache(t) };
   return { h, dir, env };
 }
 
