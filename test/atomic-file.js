@@ -75,6 +75,7 @@ function alive(pid) {
 
 // The holder's pid, or null while the file is missing or, on Windows, pending deletion.
 function holderOf(file) {
+  // read-published: a lock is linked into place and removed, never replaced, so a refusal is its removal.
   try { return fs.readFileSync(file, 'utf8'); }
   catch (error) { if (error.code === 'ENOENT' || BUSY.includes(error.code)) return null; throw error; }
 }
