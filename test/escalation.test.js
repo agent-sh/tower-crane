@@ -602,8 +602,11 @@ test('a later eligible passing review supersedes a failure before worker exit', 
   h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--ok', '--sha', sha, '--agent', 'reviewer', '--summary', 'corrected verdict']);
   h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--fail', '--sha', 'abcdef1', '--agent', 'reviewer']);
   h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--fail', '--sha', sha, '--agent', spawn.agent]);
+  const { exited } = await h.exitSignal({ pid: spawn.monitor_pid });
   killPid(spawn.pid, 'SIGKILL');
   await h.until(() => events(h).some((e) => e.cmd === 'spend' && e.detail.source === `spawn:${spawn.agent}`));
+  // The monitor's reactions can still run after the spend, and a climb would come from them.
+  await exited;
   assert.equal(h.json(['task', 'show', 'T1']).tier, 'easy');
   assert.equal(events(h).filter((e) => e.cmd === 'escalate').length, 0);
 });
