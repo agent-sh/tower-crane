@@ -8,7 +8,7 @@ const cp = require('node:child_process');
 const { makeRepo, BIN, HOOKS } = require('./helpers');
 const { CHROME, openBrowser, closeBrowser } = require('./browser');
 const Authority = require('../lib/authority');
-const { waitOnRepo } = require('./signals');
+const { waitOnRepo, waitUntil } = require('./signals');
 
 test.after(closeBrowser);
 
@@ -429,8 +429,9 @@ test('browser controls save limits, approve and decline requests, keep saved val
   await b.send('Emulation.setDeviceMetricsOverride', { width: 1920, height: 1080, deviceScaleFactor: 1, mobile: false });
   await b.goto(keyed);
   await b.until(`document.querySelector('.conn').dataset.conn === 'live'`, 'controls connection');
+  // A user cannot change a disabled control; a form is disabled while it saves.
   async function fill(id, name, value, event = 'input') {
-    await b.inPage(`(() => {const e = document.querySelector('#${id} [name="${name}"]'); e.value=${JSON.stringify(value)}; e.dispatchEvent(new Event('${event}',{bubbles:true}));})()`);
+    await b.inPage(`(() => {const e = document.querySelector('#${id} [name="${name}"]'); if (e.disabled) throw new Error('#${id} ${name} is disabled'); e.value=${JSON.stringify(value)}; e.dispatchEvent(new Event('${event}',{bubbles:true}));})()`);
   }
   const read = (id, name) => b.inPage(`document.querySelector('#${id} [name="${name}"]').value`);
   async function submit(id, condition) {
@@ -486,7 +487,19 @@ test('browser controls save limits, approve and decline requests, keep saved val
   assert.equal(await read('rung', '$value'), 'board-model');
   await fill('task', '$field', 'tier', 'change');
   await fill('task', '$value', 'hard');
+  // With another form holding input, the save then refreshes the selectors'
+  // data. The reply must not read as saved while that refresh is held, or the
+  // next selection loads the tier from before the save.
+  await b.send('Fetch.enable', { patterns: [{ urlPattern: '*/api/controls', requestStage: 'Request' }] });
+  const from = b.seen.length;
+  const paused = (method) => waitUntil(() => b.seen.slice(from).find((m) => m.method === 'Fetch.requestPaused' && m.params.request.method === method),
+    { what: `the controls ${method} request` });
   await b.inPage(`document.querySelector('#task button[type="submit"]').click()`);
+  await b.send('Fetch.continueRequest', { requestId: (await paused('POST')).params.requestId });
+  const refresh = await paused('GET');
+  assert.equal(await b.inPage(`document.querySelector('#task .result').textContent`), 'Saving...');
+  await b.send('Fetch.continueRequest', { requestId: refresh.params.requestId });
+  await b.send('Fetch.disable');
   await b.until(`document.querySelector('#task .result').textContent && document.querySelector('#task .result').textContent !== 'Saving...'`, 'task saved without reload');
   assert.equal(h.readState('tasks.json').tasks[0].tier, 'hard');
   await fill('task', '$field', 'kind', 'change');
