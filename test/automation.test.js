@@ -733,6 +733,11 @@ test('unchanged pending CI is rechecked each minute without new records, and CI 
   now += 25 * 60000;
   fs.writeFileSync(clock, String(now));
   await until(() => ci().at(-1).stalled === true, 'CI that never started stalls after 30 minutes');
+  // The stall record is written mid-run: the recheck that wrote it, and the
+  // reaction its gate event queues, still render the board and read the PR.
+  const stall = h.logs().findLast((e) => e.cmd === 'check ci');
+  const finished = (id) => h.logs().some((e) => e.cmd === 'automation' && e.detail.source === id && e.detail.phase !== 'running');
+  await until(() => [stall.id, ...reconciles().map((e) => e.id)].every(finished), 'the engine finishes the run that recorded the stall');
   assert.equal(ci().length, 2);
   assert.match(ci().at(-1).summary, /Stalled: no CI run has been queued or running at this head since/);
   assert.equal(h.readState('tasks.json').tasks[0].status, 'submitted', 'a stall is not a verdict on the change');
@@ -2814,8 +2819,9 @@ function refillFixture(t) {
 const task = process.env.TOWER_CRANE_TASK;
 cp.execFileSync(process.execPath, [${JSON.stringify(BIN)}, 'claim', task], { stdio: 'pipe' });
 const file = path.join(process.env.AUTOMATION_CONTEXT_DIR, task);
-fs.writeFileSync(file, '');
+// Tests read the prompt once the marker exists, so the marker comes last.
 fs.writeFileSync(file + '.prompt', process.argv[2]);
+fs.writeFileSync(file, '');
 if (process.env.REFILL_ORPHAN) {
   const child = cp.spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
   fs.writeFileSync(file + '.orphan', String(child.pid));
