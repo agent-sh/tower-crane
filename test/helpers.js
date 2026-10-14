@@ -474,6 +474,12 @@ function context(t, base, options = {}) {
     },
     run: (args, opts = {}) => fixtureInit(ctx, args, opts, (a, o) => run(a, withHooks(ctx, o))),
     runAsync: (args, opts = {}) => runAsync(args, withHooks(ctx, opts)),
+    // A CLI child the test signals or reads while it runs. Detached processes
+    // it starts, such as a worker dispatch, are recorded, so cleanup stops them.
+    spawn: (args, opts = {}) => {
+      const { cwd, env, pre } = withHooks(ctx, opts);
+      return cp.spawn(process.execPath, [...pre, BIN, ...args], { cwd, env });
+    },
     json: (args, opts) => {
       const r = ctx.run([...args, '--json'], opts);
       if (r.code !== 0) throw cliFailure(args, r);
@@ -511,11 +517,12 @@ function context(t, base, options = {}) {
 }
 
 // opts.hooks preloads test/fixtures/hooks.js into the CLI with those HOOK_*
-// variables, acting on this repository's state directory.
+// variables, acting on this repository's state directory. opts.pre adds
+// preloads after it.
 function withHooks(ctx, opts) {
   const env = { ...ctx.env, ...(opts.env || {}) };
   Object.assign(env, { HOOK_STATE: ctx.state, HOOK_PROCESSES_DIR: path.join(ctx.base, 'detached') }, opts.hooks);
-  const pre = ['--require', HOOKS];
+  const pre = ['--require', HOOKS, ...(opts.pre || [])];
   return { cwd: ctx.repo, ...opts, env, pre };
 }
 
@@ -585,6 +592,20 @@ function detachedAlive(child) {
     if (['Z', 'X'].includes(fields[0]) || (child.startTicks && fields[19] !== child.startTicks)) return false;
   }
   return true;
+}
+
+// Linux processes still working inside a fixture, by working directory. A
+// removed directory reads with a " (deleted)" suffix and still counts.
+function processesIn(base) {
+  if (process.platform !== 'linux') return [];
+  const found = [];
+  for (const name of fs.readdirSync('/proc').filter((entry) => /^\d+$/.test(entry))) {
+    let cwd;
+    try { cwd = fs.readlinkSync(`/proc/${name}/cwd`).replace(/ \(deleted\)$/, ''); }
+    catch { continue; } // Exited, a zombie, or not ours to read.
+    if (cwd === base || cwd.startsWith(base + path.sep)) found.push(Number(name));
+  }
+  return found;
 }
 
 function killDetached(child) {
@@ -699,4 +720,4 @@ try {
   }
 }
 
-module.exports = { repairWorktrees, makeRepo, makeProjectRepo, makeTaskRepo, copyRepo, cachedFixture, fixtureLadder, pinRung, pinLiveRung, stubRungs, STUB_RUNG, HARNESS_GUARD, run, runPty, PTY_AVAILABLE, runAsync, BIN, ROOT, HOOKS, real, TMP_ROOT, LIVE_ROOT, detachedAlive };
+module.exports = { repairWorktrees, makeRepo, makeProjectRepo, makeTaskRepo, copyRepo, cachedFixture, fixtureLadder, pinRung, pinLiveRung, stubRungs, STUB_RUNG, HARNESS_GUARD, run, runPty, PTY_AVAILABLE, runAsync, BIN, ROOT, HOOKS, real, TMP_ROOT, LIVE_ROOT, detachedAlive, processesIn };

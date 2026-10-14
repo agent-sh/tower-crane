@@ -6,7 +6,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { makeRepo, cachedFixture, stubRungs, BIN, detachedAlive } = require('./helpers');
+const { makeRepo, cachedFixture, stubRungs, BIN, detachedAlive, processesIn } = require('./helpers');
 const { gateFixture, gateEvidence } = require('./gate-helpers');
 const { waitFor } = require('./canary');
 const { shellQuote } = require('../lib/gates/common');
@@ -1679,6 +1679,7 @@ if (${stage === 'trial'}) {
         if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
         await result;
         await h.cleanup();
+        assert.deepEqual(processesIn(h.base), [], 'no process the test started outlives its fixture');
       });
       await waitFor(started, { what: 'the post-merge sweep starts' });
       assert.equal(h.github().prs['7'].state, 'MERGED');
@@ -2011,11 +2012,11 @@ require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'public-http'))}).fet
 });
 `);
       }
-      const child = require('node:child_process').spawn(process.execPath,
-        ['--require', preload, BIN, 'wait', '--after', '0', '--types', 'never',
-          ...(stage === 'follow' ? ['--follow'] : ['--timeout', '300']),
-          ...(stage === 'observe' ? ['--observe'] : []), ...(json && stage !== 'follow' ? ['--json'] : []), '--agent', 'orchestrator'],
-        { cwd: h.repo, env: h.env });
+      // An idle wait host refills worker slots, and cleanup stops the worker it dispatches.
+      const child = h.spawn(['wait', '--after', '0', '--types', 'never',
+        ...(stage === 'follow' ? ['--follow'] : ['--timeout', '300']),
+        ...(stage === 'observe' ? ['--observe'] : []), ...(json && stage !== 'follow' ? ['--json'] : []), '--agent', 'orchestrator'],
+      { pre: ['--require', preload] });
       const started = path.join(h.base, github ? 'github-started' : `suite-started-${heldRun}`);
       let stdout = '';
       let stderr = '';
@@ -2036,6 +2037,7 @@ require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'public-http'))}).fet
           catch (e) { if (e.code !== 'ESRCH') throw e; }
         }
         await h.cleanup();
+        assert.deepEqual(processesIn(h.base), [], 'no process the test started outlives its fixture');
       });
       await waitFor(started, { what: idle ? 'wait is ready' : 'the gate starts' });
       child.kill(signal);
