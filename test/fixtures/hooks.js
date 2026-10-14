@@ -94,6 +94,13 @@ if (env.HOOK_PIDNS) {
   };
 }
 
+// HOOK_HOSTNAME=NAME: this process reports NAME as its host name, as one in a
+// container or a sandbox with a UTS namespace of its own does.
+if (env.HOOK_HOSTNAME) {
+  const os = require('node:os');
+  os.hostname = () => env.HOOK_HOSTNAME;
+}
+
 // HOOK_NO_SH=1: the CLI finds no /bin/sh, as on Windows, so it has no POSIX
 // lease gate and spawns its workers through the launch handshake.
 if (env.HOOK_NO_SH && path.basename(process.argv[1] || '') === 'tower-crane.js') {
