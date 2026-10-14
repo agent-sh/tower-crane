@@ -610,8 +610,28 @@ failures reuse that task instead of creating duplicates. Explicit `rework`
 on a submitted hotfix uses the same follow-up path; an accepted hotfix
 refuses it, since its merge stands. Its merge commit stays
 fixed; workers submit the follow-up task.
+
+Repeating `hotfix ID --pr N [--review URL] [--reason R]` on a cancelled task
+with `hotfix.follow_up` re-records it, for a failure that was not the
+change's. The task moves to `submitted` at a new revision, so the failed
+evidence no longer counts. `hotfix.follow_up` is removed and
+`hotfix.superseded` gains `{follow_up, at, by, reason}`. The follow-up becomes
+`cancelled` with `superseded_by: ID` and a note with the reason, and a
+`hotfix supersede` event records it. The `hotfix` event carries
+`previous_status: "cancelled"` and `superseded: {follow_up, reason}`. A later
+confirmed failure opens a new follow-up. The command is refused while the
+follow-up has a claim or is being retired, and when it has a branch, PR, sha
+or worktree or is submitted or accepted. A follow-up with `needs_owner` needs
+the owner, through `task.cancel_needs_owner`.
+
 Pending CI, observation errors and timeouts keep the hotfix submitted;
 retry its gate when the run completes or the infrastructure recovers.
+The tests gate reruns failing names of a hotfix at `base_sha`, the merge's
+first parent, not at the newest base, which contains the merge. When every
+failing name also fails there, the evidence carries `main_failure` and
+`infrastructure_failure`, the hotfix stays submitted with no follow-up, and
+the inbox offers `check tests ID`. A name that passes at `base_sha` is the
+merge's, even when the newest base still fails it.
 When every changed host-only test of a hotfix reported only skipped cases,
 the tests failure carries `config_failure: {key: "tests_host_env"}`: there
 is no worker to fix it, and the host's opt-ins decide. The hotfix stays
