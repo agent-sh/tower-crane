@@ -1,6 +1,6 @@
 'use strict';
 
-const { waitUntil } = require('./signals');
+const { waitUntil, killPid } = require('./signals');
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -2757,7 +2757,7 @@ if (process.env.TOWER_CRANE_VIA === 'broker' && process.argv.includes('late')) {
     const background = `const cp=require("child_process"),f=require("fs");cp.spawn(process.execPath,${JSON.stringify([BIN, 'task', 'note', 'T1', 'late'])},{detached:true,stdio:"ignore"}).unref();const end=Date.now()+300000;while(!f.existsSync(${JSON.stringify(pidFile)})&&Date.now()<end)Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,50)`;
     let pid = null;
     t.after(() => {
-      if (pid && detachedAlive({ pid })) process.kill(pid, 'SIGKILL');
+      if (pid && detachedAlive({ pid })) killPid(pid, 'SIGKILL');
     });
     isolated(h, 'hard', harness);
     const run = [[process.execPath, BIN, 'task', 'note', 'T1', 'early'], [process.execPath, '-e', background]];

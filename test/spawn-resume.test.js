@@ -1,6 +1,6 @@
 'use strict';
 
-const { HUNG_TEST_MS, waitOnRepo } = require('./signals');
+const { HUNG_TEST_MS, waitOnRepo, killPid } = require('./signals');
 
 const { test, describe } = require('node:test');
 const assert = require('node:assert/strict');
@@ -611,7 +611,7 @@ test('a still-running worker cannot be resumed', async (t) => {
   const ready = path.join(h.base, 'live-ready');
   fs.appendFileSync(script, `\nfs.writeFileSync(${JSON.stringify(ready)}, String(process.pid));\nsetInterval(() => {}, 1000);\n`);
   const first = h.json(['spawn', '--task', 'T1']);
-  t.after(() => { try { process.kill(first.pid, 'SIGKILL'); } catch (e) { if (e.code !== 'ESRCH') throw e; } });
+  t.after(() => { try { killPid(first.pid, 'SIGKILL'); } catch (e) { if (e.code !== 'ESRCH') throw e; } });
   await waitOnRepo(h, () => fs.existsSync(ready) && fs.readFileSync(ready, 'utf8') === String(first.pid));
   sendBack(h);
   const result = h.run(['spawn', '--task', 'T1', '--wait']);

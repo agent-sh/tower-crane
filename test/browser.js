@@ -1,6 +1,6 @@
 'use strict';
 
-const { waitUntil, HUNG_TEST_MS } = require('./signals');
+const { waitUntil, HUNG_TEST_MS, killPid } = require('./signals');
 
 // Drives a page in headless Chrome over the DevTools protocol, for the tests
 // that check what the serve pages do in a browser. Node's own fetch and
@@ -134,7 +134,7 @@ function chromeTree(pid) {
 function signalTree(tree, signal, browser) {
   for (const pid of tree.keys()) {
     if (pid === browser) continue;
-    try { process.kill(pid, signal); } catch { /* It exited since the table was read. */ }
+    try { killPid(pid, signal); } catch { /* It exited since the table was read. */ }
   }
 }
 
