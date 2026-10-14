@@ -697,10 +697,13 @@ async function pushFixture(t, { role = 'worker', title = 'Push' } = {}) {
     const r = require('node:child_process').spawnSync('git', ['--git-dir', remote, 'rev-parse', '--verify', '--quiet', ref], { encoding: 'utf8' });
     return r.status === 0 ? r.stdout.trim() : null;
   };
-  const raw = (payload) => {
+  // What the shim sends: the request, then the pack the broker asks for,
+  // built in the worktree (or by opts.pack, an agent with another view).
+  const raw = (payload, opts = {}) => {
     let stdout = '';
     let stderr = '';
-    return B.request(job.broker, payload, { stdout: (s) => { stdout += s; }, stderr: (s) => { stderr += s; } })
+    const pack = opts.pack || (payload?.push ? require('../lib/shim').packFor('git', ['-C', wt.path], String(payload.push.sha)) : null);
+    return B.request(job.broker, payload, { stdout: (s) => { stdout += s; }, stderr: (s) => { stderr += s; } }, { pack })
       .then((code) => ({ code, stdout, stderr }));
   };
   return { h, wt, task, job, remote, shim, commit, remoteRef, raw };
@@ -819,6 +822,133 @@ test('the broker checks a push against verified objects, so a rewritten object i
   assert.notEqual(r.code, 0, r.stderr);
   assert.match(r.stderr, /changes \.github\/workflows\/ci\.yml/);
   assert.equal(f.remoteRef(`refs/heads/${branch}`), null, 'nothing was pushed');
+});
+
+// The broker reads with the user's permissions, outside the sandbox. An
+// alternates entry the agent writes into the task repository's store could
+// point it at a repository the sandbox hides. Here the agent's pack is built
+// from what its sandbox shows, the store without that entry, and the broker
+// must take the commit from that pack only.
+test('the broker pushes only objects the agent sends, never a repository the task store points it at', async (t) => {
+  const f = await pushFixture(t);
+  const cp = require('node:child_process');
+  const secret = path.join(f.h.base, 'secret');
+  f.h.git(['init', '-q', secret]);
+  fs.writeFileSync(path.join(secret, 'key.txt'), 'not the agent\'s\n');
+  f.h.git(['add', 'key.txt'], secret);
+  f.h.git(['commit', '-qm', 'secret'], secret);
+  const hidden = f.h.git(['rev-parse', 'HEAD'], secret);
+  const common = f.job.dispatch.gitDirs.common;
+  fs.mkdirSync(path.join(common, 'objects', 'info'), { recursive: true });
+  fs.writeFileSync(path.join(common, 'objects', 'info', 'alternates'), `${path.join(secret, '.git', 'objects')}\n`);
+  // The agent's view: the store without the entry its sandbox cannot follow.
+  const view = path.join(f.h.base, 'sandbox-objects');
+  fs.cpSync(path.join(common, 'objects'), view, { recursive: true, filter: (p) => path.basename(p) !== 'alternates' });
+  const pack = (sha) => (have) => {
+    const child = cp.spawn('git', ['-C', f.wt.path, 'pack-objects', '--stdout', '--revs', '--thin', '-q'],
+      { env: { ...process.env, GIT_OBJECT_DIRECTORY: view }, stdio: ['pipe', 'pipe', 'ignore'] });
+    child.stdin.end([sha, ...have.map((h) => `^${h}`)].join('\n') + '\n');
+    return child.stdout;
+  };
+  const r = await f.raw({ push: { sha: hidden } }, { pack: pack(hidden) });
+  assert.notEqual(r.code, 0, r.stderr);
+  assert.match(r.stderr, /not in the task repository/);
+  assert.equal(f.remoteRef(`refs/heads/${f.task.branch}`), null, 'the hidden commit stays off the remote');
+  // The agent's own commit still goes out.
+  fs.rmSync(path.join(common, 'objects', 'info', 'alternates'));
+  const own = f.commit('a.txt', 'a\n');
+  const ok = await f.raw({ push: { sha: own } });
+  assert.equal(ok.code, 0, ok.stderr);
+  assert.equal(f.remoteRef(`refs/heads/${f.task.branch}`), own);
+});
+
+// The cache's object format is the remote's, never what the agent writes in
+// the task repository's config.
+test('the broker\'s cache takes the remote\'s object format and is made again when its own differs', async (t) => {
+  const f = await pushFixture(t);
+  const branch = f.task.branch;
+  const common = f.job.dispatch.gitDirs.common;
+  const cache = path.join(f.h.state, 'push', 'cache.git');
+  // A wrong format in the task config before the first push. The agent's own
+  // git refuses that config, so its pack is built without it.
+  const config = path.join(common, 'config');
+  const clean = fs.readFileSync(config, 'utf8');
+  const first = f.commit('a.txt', 'a\n');
+  const shim = require('../lib/shim');
+  const packed = (sha) => (have) => {
+    fs.writeFileSync(config, clean);
+    return shim.packFor('git', ['-C', f.wt.path], sha)(have);
+  };
+  fs.writeFileSync(config, `${clean}[extensions]\n\tobjectformat = sha256\n`);
+  const r1 = await f.raw({ push: { sha: first } }, { pack: packed(first) });
+  fs.writeFileSync(config, clean);
+  assert.equal(r1.code, 0, r1.stderr);
+  assert.equal(f.remoteRef(`refs/heads/${branch}`), first);
+  // A cache left in another format is made again.
+  fs.rmSync(cache, { recursive: true, force: true });
+  f.h.git(['init', '-q', '--bare', '--object-format=sha256', cache]);
+  const third = f.commit('c.txt', 'c\n');
+  const r3 = await f.raw({ push: { sha: third } });
+  assert.equal(r3.code, 0, r3.stderr);
+  assert.equal(f.remoteRef(`refs/heads/${branch}`), third);
+});
+
+test('the broker\'s cache outlives a git killed while it held a ref lock', async (t) => {
+  const f = await pushFixture(t);
+  const branch = f.task.branch;
+  const cache = path.join(f.h.state, 'push', 'cache.git');
+  const first = f.commit('a.txt', 'a\n');
+  assert.equal((await f.raw({ push: { sha: first } })).code, 0);
+  fs.writeFileSync(path.join(cache, 'refs', 'push', 'task.lock'), '');
+  fs.writeFileSync(path.join(cache, 'refs', 'remotes', 'origin', 'main.lock'), '');
+  for (const file of ['b.txt', 'c.txt']) {
+    const sha = f.commit(file, `${file}\n`);
+    const r = await f.raw({ push: { sha } });
+    assert.equal(r.code, 0, r.stderr);
+    assert.equal(f.remoteRef(`refs/heads/${branch}`), sha);
+  }
+});
+
+// Two pushes wait on a lock whose holder died. The first to look removes it
+// and takes the lock; the second, which read the same dead holder, must not
+// remove the lock the first now holds.
+test('a stale cache lock is broken once, so two waiters never hold the cache together', async (t) => {
+  const G = require('../lib/github-broker');
+  const { base } = scratch(t);
+  const root = path.join(base, 'push');
+  fs.mkdirSync(root);
+  const io = { stderr: () => {}, gone: () => false };
+  const dead = require('node:child_process').spawnSync(process.execPath, ['-e',
+    `require(${JSON.stringify(path.join(ROOT, 'lib', 'github-broker.js'))}).lockCache(${JSON.stringify(root)}, { stderr() {} }).then(() => process.exit(0))`], { encoding: 'utf8' });
+  assert.equal(dead.status, 0, dead.stderr);
+  assert.ok(fs.existsSync(path.join(root, 'cache.lock')), 'the dead holder left its lock');
+  // The second waiter reads the dead holder; before it acts, the first
+  // breaks the lock and takes it.
+  const read = fs.readFileSync;
+  let first = null;
+  let fired = false;
+  fs.readFileSync = function hooked(file, ...rest) {
+    const out = read.call(fs, file, ...rest);
+    if (!fired && String(file).includes('cache.lock')) {
+      fired = true;
+      first = G.lockCache(root, io);
+    }
+    return out;
+  };
+  let second;
+  try {
+    second = G.lockCache(root, io);
+  } finally {
+    fs.readFileSync = read;
+  }
+  assert.ok(first, 'the first waiter ran while the second looked');
+  const releaseFirst = await first;
+  const settled = await Promise.race([second.then(() => 'held'), new Promise((r) => setTimeout(() => r('waiting'), 600))]);
+  assert.equal(settled, 'waiting', 'the second waiter waits while the first holds the lock');
+  releaseFirst();
+  const releaseSecond = await second;
+  releaseSecond();
+  assert.deepEqual(fs.readdirSync(root), [], 'the lock is gone once both released');
 });
 
 // GitHub runs local actions from the pushed tree: those under .github/actions
