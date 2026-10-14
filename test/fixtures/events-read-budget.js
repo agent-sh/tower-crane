@@ -2,6 +2,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
+const { writeAtomic } = require('../atomic-file');
 const handles = new Set();
 let bytes = 0;
 let baseline = 0;
@@ -38,7 +39,7 @@ fs.watch = function (...args) {
   return watch.apply(this, args);
 };
 process.on('exit', () => {
-  fs.writeFileSync(process.env.EVENT_READ_BUDGET, JSON.stringify({ bytes: bytes - baseline, snapshotBytes: snapshotBytes - snapshotBaseline }));
+  writeAtomic(process.env.EVENT_READ_BUDGET, JSON.stringify({ bytes: bytes - baseline, snapshotBytes: snapshotBytes - snapshotBaseline }));
 });
 if (process.connected) process.once('message', (message) => {
   if (message !== 'stop') throw new Error('unexpected meter command');

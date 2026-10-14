@@ -7,6 +7,7 @@ const assert = require('node:assert/strict');
 const test = require('node:test');
 const { createRepoSeed, cleanupRepoSeed } = require('./repo-seed');
 const { tempRoot, liveRoot } = require('./tmp-root');
+const { readWritten } = require('./atomic-file');
 
 const ROOT = path.join(__dirname, '..');
 const BIN = path.join(ROOT, 'bin', 'tower-crane.js');
@@ -422,9 +423,9 @@ function context(t, base, options = {}) {
       const dir = path.join(base, 'detached');
       return fs.existsSync(dir) ? fs.readdirSync(dir).filter((f) => f.endsWith('.json')).flatMap((f) => {
         const file = path.join(dir, f);
-        let record;
-        try { record = JSON.parse(fs.readFileSync(file, 'utf8')); }
-        catch (e) { if (e.code === 'ENOENT') return []; throw e; }
+        // hooks.js publishes records atomically; one still incomplete is not recorded yet.
+        const record = readWritten(file, { json: true });
+        if (record === undefined) return [];
         // A monitor's exit listener marks its exit beside its record.
         if (record.kind === 'monitor' && fs.existsSync(path.join(dir, `${record.token || record.pid}.exited`))) record.exited = true;
         return [{ ...record, file }];

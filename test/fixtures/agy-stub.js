@@ -5,6 +5,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const cp = require('node:child_process');
+const { writeAtomic } = require('../atomic-file');
 const home = os.homedir();
 const config = path.join(home, '.gemini', 'config');
 const cli = path.join(home, '.gemini', 'antigravity-cli');
@@ -32,7 +33,7 @@ const ran = JSON.parse(process.env.STUB_RUN || '[]').map(argv => {
   const result = cp.spawnSync(argv[0], argv.slice(1), { encoding: 'utf8' });
   return { argv, code: result.status, stderr: result.stderr };
 });
-fs.writeFileSync(process.env.STUB_OUT, JSON.stringify({
+writeAtomic(process.env.STUB_OUT, JSON.stringify({
   home, agentFile, agent, args, prompt, requestedContext, memory, settings, mcp, rules, tools, skills, contextBytes, ran,
   sandboxMarker: process.env.TOWER_CRANE_SANDBOX,
   brokered: Boolean(process.env.TOWER_CRANE_BROKER),

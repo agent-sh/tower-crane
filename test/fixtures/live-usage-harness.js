@@ -12,6 +12,7 @@
 const cp = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
+const { writeAtomic } = require('../atomic-file');
 
 if (path.resolve(process.argv[1] || '') !== __filename) {
   if (path.basename(process.argv[1] || '') === 'spawn-monitor.js' && process.env.LIVE_PAUSE_FINAL) {
@@ -88,7 +89,7 @@ if (path.resolve(process.argv[1] || '') !== __filename) {
     file = path.join(env.CODEX_HOME, 'sessions', '2026', '10', '07', `rollout-2026-10-07T00-00-00-${id}.jsonl`);
   }
   if (file) fs.mkdirSync(path.dirname(file), { recursive: true });
-  if (env.LIVE_FILE) fs.writeFileSync(env.LIVE_FILE, file);
+  if (env.LIVE_FILE) writeAtomic(env.LIVE_FILE, file);
   let step = 0;
   const write = (final = false) => {
     step += 1;
@@ -115,7 +116,7 @@ if (path.resolve(process.argv[1] || '') !== __filename) {
           input_tokens: tokens - output, cache_read_input_tokens: 0, output_tokens: output,
         } }));
       }
-      fs.writeFileSync(env.LIVE_DONE, String(step));
+      writeAtomic(env.LIVE_DONE, String(step));
       // A held harness leaves its final record to the periodic sampler.
       if (env.LIVE_FINAL_HOLD) return;
       process.exit(70);
@@ -133,7 +134,7 @@ if (path.resolve(process.argv[1] || '') !== __filename) {
           type: 'result', usage: { input_tokens: step * (per - output), output_tokens: step * output },
         }));
         if (env.LIVE_OUTAGE) console.error('HTTP 503 service unavailable');
-        fs.writeFileSync(env.LIVE_DONE, String(step));
+        writeAtomic(env.LIVE_DONE, String(step));
         process.exit(Number(env.LIVE_EXIT || 0));
       };
       if (env.LIVE_COMPLETE) {

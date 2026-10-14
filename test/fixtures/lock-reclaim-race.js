@@ -11,6 +11,7 @@ fs.renameSync = function reclaimRace(from, to, ...args) {
   fs.mkdirSync(lock, { recursive: true });
   if (process.env.LOCK_RECLAIM_KIND === 'stale') {
     const marker = path.join(lock, '00112233aabbccdd');
+    // write-atomic: a lock marker the CLI reads after this call; a staged file would be a second entry in the lock.
     fs.writeFileSync(marker, JSON.stringify({ pid: 1, host: 'another-host' }));
     const old = new Date(Date.now() - 120000);
     fs.utimesSync(marker, old, old);

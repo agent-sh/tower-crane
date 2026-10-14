@@ -10,6 +10,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const cp = require('node:child_process');
 const assert = require('node:assert/strict');
+const { readWritten } = require('./atomic-file');
 
 function make(labels) {
   return Object.fromEntries(labels.map((label) => [label, `tccanary${label.replace(/\W/g, '')}${crypto.randomBytes(12).toString('hex')}`]));
@@ -81,15 +82,13 @@ function processListing() {
 }
 
 // Empty files signal events; PID markers need content after file creation.
-async function waitFor(file, { ms = 20000, nonempty = false } = {}) {
+// With `json` it returns the parsed value, waiting while a writer that does
+// not publish atomically has left the file empty or half written.
+async function waitFor(file, { ms = 20000, nonempty = false, json = false } = {}) {
   const deadline = Date.now() + ms;
   for (;;) {
-    try {
-      const text = fs.readFileSync(file, 'utf8');
-      if (!nonempty || text) return text;
-    } catch (e) {
-      if (e.code !== 'ENOENT') throw e;
-    }
+    const value = readWritten(file, { json });
+    if (value !== undefined && (json || !nonempty || value)) return value;
     if (Date.now() >= deadline) return null;
     await new Promise((resolve) => setTimeout(resolve, 50));
   }

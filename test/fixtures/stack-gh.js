@@ -10,6 +10,7 @@ let skew = 0;
 Date.now = () => now() + skew;
 const BIN = path.join(__dirname, '..', '..', 'bin', 'tower-crane.js');
 const { ownerKeyFile, ownerProject } = require('../../lib/authority');
+const { writeAtomic } = require('../atomic-file');
 
 if (process.env.TEST_STACK_DEFER_OBSERVE) {
   require('../../lib/stack').observe = () => {};
@@ -17,6 +18,7 @@ if (process.env.TEST_STACK_DEFER_OBSERVE) {
 
 // Holds a gh call open until the test releases it, so another command can run meanwhile.
 function pause(ready, release) {
+  // write-atomic: existence is the signal; no test reads the text.
   fs.writeFileSync(ready, 'ready');
   const deadline = performance.now() + 20000;
   while (!fs.existsSync(release)) {
@@ -32,7 +34,7 @@ cp.spawnSync = function stackGh(command, args, opts) {
   const data = JSON.parse(fs.readFileSync(file, 'utf8'));
   data.calls.push({ args, cwd: opts.cwd });
   const finish = (value = '', status = 0, stderr = '') => {
-    fs.writeFileSync(file, JSON.stringify(data));
+    writeAtomic(file, JSON.stringify(data));
     return { status, stdout: typeof value === 'string' ? value : JSON.stringify(value), stderr };
   };
   const response = (r, fallback = '') => {
@@ -201,6 +203,7 @@ cp.spawnSync = function stackGh(command, args, opts) {
   if (data.unavailable) return finish('', 9, 'Stacked pull requests are not enabled');
   if (args[1] === 'link') {
     if (process.env.TEST_STACK_LINK_READY) {
+      // write-atomic: existence is the signal; no test reads the text.
       fs.writeFileSync(process.env.TEST_STACK_LINK_READY, 'ready');
       const deadline = performance.now() + 20000;
       while (!fs.existsSync(process.env.TEST_STACK_LINK_RELEASE)) {
@@ -242,6 +245,7 @@ cp.spawnSync = function stackGh(command, args, opts) {
   }
   if (args[1] === 'sync') {
     if (process.env.TEST_STACK_SYNC_READY) {
+      // write-atomic: existence is the signal; no test reads the text.
       fs.writeFileSync(process.env.TEST_STACK_SYNC_READY, 'ready');
       const deadline = performance.now() + 20000;
       while (!fs.existsSync(process.env.TEST_STACK_SYNC_RELEASE)) {

@@ -6,6 +6,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const cp = require('node:child_process');
+const { writeAtomic } = require('../atomic-file');
 
 const read = (file) => {
   try { return fs.readFileSync(file, 'utf8'); } catch { return ''; }
@@ -99,12 +100,14 @@ async function main() {
   };
   if (process.env.STUB_REFRESH_AUTH) {
     const replacement = JSON.parse(process.env.STUB_REFRESH_AUTH);
+    // write-atomic: this stub reads the refreshed file back itself; no test polls it.
     fs.writeFileSync(authPath, JSON.stringify(replacement), { mode: 0o600 });
     const refreshed = loadAuth();
     report.refreshedKinds = Object.fromEntries(Object.entries(refreshed).map(([name, value]) => [name, value.type]));
     report.refreshVisible = JSON.stringify(refreshed) === JSON.stringify(replacement);
   }
   if (process.env.STUB_BASH_CANARY) {
+    // write-atomic: the test reads this canary only after the command has exited.
     const script = 'require("node:fs").writeFileSync(process.argv[1], "BASH-CANARY")';
     const input = [process.execPath, '-e', script, '--', process.env.STUB_BASH_CANARY].map((word) => JSON.stringify(word)).join(' ');
     const action = decision(permission, 'bash', input);
@@ -115,7 +118,7 @@ async function main() {
       report.bash.stderr = result.stderr;
     }
   }
-  fs.writeFileSync(process.env.STUB_OUT, JSON.stringify(report));
+  writeAtomic(process.env.STUB_OUT, JSON.stringify(report));
 }
 
 main().catch((error) => { console.error(error); process.exitCode = 1; });

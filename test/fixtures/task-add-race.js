@@ -3,6 +3,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
+const { writeAtomic } = require('../atomic-file');
 
 // TEST_ADD_FAIL=append fails the event append, before the commit point;
 // TEST_ADD_FAIL=rename fails the rename of tasks.json, after it.
@@ -37,7 +38,7 @@ fs.rmdirSync = function addAtLockRelease(dir, ...args) {
       process.env.TEST_ADD_BIN, '--state', state,
       'task', 'add', '--title', 'Different task', '--acceptance', 'no inherited brief',
     ], { env, encoding: 'utf8', timeout: 60000 });
-    fs.writeFileSync(process.env.TEST_ADD_RESULT, JSON.stringify({
+    writeAtomic(process.env.TEST_ADD_RESULT, JSON.stringify({
       status: child.status, stdout: child.stdout, stderr: child.stderr,
       error: child.error?.message,
     }));

@@ -1,6 +1,7 @@
 'use strict';
 
 const fs = require('node:fs');
+const { writeAtomic } = require('../atomic-file');
 const args = process.argv.slice(2);
 const file = process.env.INBOX_GITHUB;
 const data = JSON.parse(fs.readFileSync(file, 'utf8'));
@@ -74,8 +75,7 @@ if (data.fail || data.failEndpoint && args[1]?.includes(data.failEndpoint)) {
     status: data.ci === 'pending' ? 'in_progress' : 'completed', conclusion: data.ci === 'pending' ? null : data.ci || 'success' }];
   if (args[1].includes('/check-runs') && data.revuto) result.push(data.revuto);
 }
-fs.writeFileSync(`${file}.${process.pid}`, JSON.stringify(data));
-fs.renameSync(`${file}.${process.pid}`, file);
+writeAtomic(file, JSON.stringify(data));
 if (Array.isArray(result)) {
   for (const row of result) console.log(JSON.stringify(row));
 } else if (result !== undefined) console.log(JSON.stringify(result));

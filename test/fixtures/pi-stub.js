@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
 const { pathToFileURL } = require('node:url');
+const { writeAtomic } = require('../atomic-file');
 
 const text = (file) => fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
 const json = (file) => JSON.parse(text(file) || '{}');
@@ -46,7 +47,7 @@ async function main() {
     auth: fs.existsSync(path.join(home, 'auth.json')) ? fs.realpathSync(path.join(home, 'auth.json')) : null,
     shims: { git: probe('git', ['push', '--force', 'origin']), gh: probe('gh', ['pr', 'merge']) },
   };
-  fs.writeFileSync(process.env.PI_STUB_OUT, JSON.stringify(report));
+  writeAtomic(process.env.PI_STUB_OUT, JSON.stringify(report));
 }
 
 main().catch((error) => { console.error(error); process.exitCode = 1; });

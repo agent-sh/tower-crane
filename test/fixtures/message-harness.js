@@ -5,6 +5,7 @@ const path = require('node:path');
 const cp = require('node:child_process');
 const { pathToFileURL } = require('node:url');
 const TOML = require('../../lib/toml');
+const { writeAtomic } = require('../atomic-file');
 const BIN = path.join(__dirname, '..', '..', 'bin', 'tower-crane.js');
 
 async function main() {
@@ -37,11 +38,11 @@ async function main() {
   if (harness === 'codex') {
     const sessions = path.join(process.env.CODEX_HOME, 'sessions');
     fs.mkdirSync(sessions, { recursive: true });
-    fs.writeFileSync(path.join(sessions, 'rollout-message-session.jsonl'), '{}\n');
+    writeAtomic(path.join(sessions, 'rollout-message-session.jsonl'), '{}\n');
   }
   event({ type: 'thread.started', thread_id: 'message-session' });
   if (process.env.MESSAGE_RESUME === '1' || process.env.MESSAGE_RETRY === '1' && Number(process.env.TOWER_CRANE_RETRY) > 0) {
-    fs.writeFileSync(process.env.MESSAGE_OUT, JSON.stringify(out));
+    writeAtomic(process.env.MESSAGE_OUT, JSON.stringify(out));
     return;
   }
   fs.writeFileSync(process.env.MESSAGE_READY, '');
@@ -71,7 +72,7 @@ async function main() {
     if (mode === 'submitted') cli('submit', 'T1', '--sha', '50b732a15be40ccb2065cb2ba0e7b366d511b736');
     out.stops = reports.map((last) => hookWith('Stop', { last_assistant_message: last }));
     out.blocked = out.stops.some((stop) => stop.decision === 'block');
-    fs.writeFileSync(process.env.MESSAGE_OUT, JSON.stringify(out));
+    writeAtomic(process.env.MESSAGE_OUT, JSON.stringify(out));
     return;
   }
   if (harness === 'claude' || harness === 'codex' && process.env.MESSAGE_NOTIFY_ONLY !== '1') {
@@ -138,7 +139,7 @@ async function main() {
         out.failedReceipts = receipts();
       }
       await idle('parent');
-      fs.writeFileSync(process.env.MESSAGE_OUT, JSON.stringify(out));
+      writeAtomic(process.env.MESSAGE_OUT, JSON.stringify(out));
       return;
     }
     const output = { output: 'tool result' };
@@ -174,7 +175,7 @@ async function main() {
     run('gh', ['pr', 'create', '--title', 'probe']);
   }
   if (process.env.MESSAGE_SUBMIT === '1') cli('submit', 'T1', '--sha', '50b732a15be40ccb2065cb2ba0e7b366d511b736');
-  fs.writeFileSync(process.env.MESSAGE_OUT, JSON.stringify(out));
+  writeAtomic(process.env.MESSAGE_OUT, JSON.stringify(out));
   if (process.env.MESSAGE_RETRY === '1') process.exitCode = 75;
 }
 
