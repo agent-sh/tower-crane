@@ -3098,7 +3098,7 @@ test('a refill retries after a dispatch lock timeout without waiting for other i
   const h = refillFixture(t);
   const release = holdDispatchLock(t, h);
   let timedOut = false;
-  const watcher = h.runAsync(['wait', '--after', '0', '--task', 'T3', '--types', 'spawn', '--timeout', '60', '--agent', 'orchestrator'], {
+  const watcher = h.runAsync(['wait', '--after', '0', '--task', 'T3', '--types', 'spawn', '--timeout', '60', '--agent', 'orchestrator'], { // wait-allow: a refill that never retries ends by this timeout, the failure the test looks for
     hooks: { HOOK_DISPATCH_EXPIRE: '1' },
     onSpawn: (child) => child.stderr.on('data', (d) => { if (/automation refill: T3: worker dispatch is locked/.test(String(d))) timedOut = true; }),
   });
