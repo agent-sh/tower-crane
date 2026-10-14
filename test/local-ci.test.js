@@ -350,10 +350,14 @@ console.error('FAILING STEP: unit tests, token ' + process.env.CI_FIXTURE_TOKEN)
 // A color escape inside the token hides it from the patterns until the escape is removed.
 const token = process.env.CI_FIXTURE_TOKEN;
 console.log('colored ' + token.slice(0, 4) + '\\x1b[1m' + token.slice(4) + '\\x1b[0m');
+// An OSC hyperlink and a charset escape (tput sgr0) inside the token hide it the same way.
+console.log('osc ' + token.slice(0, 4) + '\\x1b]8;;https://x\\x07' + token.slice(4, 10) + '\\x1b(B' + token.slice(10));
 for (let i = 0; i < 150; i++) console.log('cargo tree line ' + i);
 fs.mkdirSync('.local/checks', { recursive: true });
-fs.writeFileSync('.local/checks/receipt.json', JSON.stringify({ failure_reasons: ['unit tests failed'] }));
+// Like ginza's receipt, which holds every step's full output, including what the log redacts.
+fs.writeFileSync('.local/checks/receipt.json', JSON.stringify({ failure_reasons: ['unit tests failed'], output: 'token ' + token }));
 fs.writeFileSync('.local/checks/extra.json', '{}');
+fs.writeFileSync('.local/checks/blob.json', Buffer.from([0x7b, 0, 0x7d]));
 fs.writeFileSync(path.join(process.env.TMPDIR, 'report.txt'), 'scratch report');
 console.log('Scratch report: ' + path.join(process.env.TMPDIR, 'report.txt'));
 console.log('Local check receipt: ' + path.resolve('.local/checks/receipt.json'));
@@ -378,6 +382,7 @@ process.exit(1);
   assert.doesNotMatch(kept.output_tail, /^step 1: scaffold ok$/m);
   assert.doesNotMatch(kept.output_tail, /^early line 0$/m);
   assert.match(kept.output_tail, /^colored \[redacted:/m);
+  assert.match(kept.output_tail, /^osc \[redacted:/m);
   // The full log holds every line, redacted, under the state directory's logs.
   assert.match(kept.log, /^logs\/ci-T1-[0-9a-f]{10}-[^/]+\/output\.log$/);
   const log = fs.readFileSync(path.join(h.state, kept.log), 'utf8');
@@ -388,16 +393,29 @@ process.exit(1);
   assert.ok(r.stdout.includes(`Full log: ${path.join(h.state, kept.log)}`), r.stdout);
   assert.ok(!r.stdout.includes(token));
   // Printed paths come first, then the globs; a file outside the gate directory is left in place.
+  // Artifacts sit in ci-artifacts/, which every agent sandbox hides, beside the run's log name.
+  const run = path.basename(path.dirname(kept.log));
   const copied = Object.fromEntries(kept.artifacts.map((a) => [path.basename(a.from), a]));
-  assert.deepEqual(Object.keys(copied).sort(), ['extra.json', 'receipt.json', 'report.txt']);
-  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(h.state, copied['receipt.json'].path), 'utf8')), { failure_reasons: ['unit tests failed'] });
+  assert.deepEqual(Object.keys(copied).sort(), ['blob.json', 'extra.json', 'receipt.json', 'report.txt']);
+  for (const a of kept.artifacts) assert.ok(a.path.startsWith(`ci-artifacts/${run}/`), a.path);
+  // Text artifacts get the log's redaction; a binary one is kept as written.
+  const receipt = fs.readFileSync(path.join(h.state, copied['receipt.json'].path), 'utf8');
+  assert.ok(!receipt.includes(token));
+  assert.deepEqual(JSON.parse(receipt), { failure_reasons: ['unit tests failed'], output: 'token [redacted:CI_FIXTURE_TOKEN]' });
+  assert.equal(copied['receipt.json'].redacted, true);
+  assert.equal(copied['receipt.json'].bytes, Buffer.byteLength(receipt));
+  assert.deepEqual(fs.readFileSync(path.join(h.state, copied['blob.json'].path)), Buffer.from([0x7b, 0, 0x7d]));
+  assert.equal(copied['blob.json'].binary, true);
   assert.equal(fs.readFileSync(path.join(h.state, copied['report.txt'].path), 'utf8'), 'scratch report');
-  assert.match(copied['report.txt'].path, /\/artifacts\/TMPDIR\/report\.txt$/);
-  assert.match(copied['extra.json'].path, /\/artifacts\/worktree\/\.local\/checks\/extra\.json$/);
-  assert.equal(copied['receipt.json'].bytes, fs.statSync(path.join(h.state, copied['receipt.json'].path)).size);
+  assert.equal(copied['report.txt'].path, `ci-artifacts/${run}/TMPDIR/report.txt`);
+  assert.equal(copied['extra.json'].path, `ci-artifacts/${run}/worktree/.local/checks/extra.json`);
+  assert.equal(fs.readFileSync(path.join(h.state, 'ci-artifacts', '.gitignore'), 'utf8'), '*\n');
   assert.deepEqual(kept.artifacts_skipped.map((s) => path.basename(s.from)), ['outside.json']);
   assert.match(kept.artifacts_skipped[0].reason, /outside the gate worktree/);
-  assert.match(r.stdout, /Saved artifacts: .*receipt\.json -> /);
+  // The summary reaches worker prompts, so it counts the artifacts and names none.
+  assert.match(r.stdout, /Artifacts: 4 kept for the orchestrator and the owner/);
+  assert.ok(!r.stdout.includes('ci-artifacts'), r.stdout);
+  assert.ok(!e.summary.includes('ci-artifacts'));
   // The gate worktree is still removed.
   assert.deepEqual(fs.readdirSync(h.env.TOWER_CRANE_TMP), []);
   assert.equal(h.git(['worktree', 'list', '--porcelain']).match(/^worktree /gm).length, 1);
@@ -405,13 +423,38 @@ process.exit(1);
   assert.deepEqual(events.findLast((v) => v.cmd === 'check ci').detail.local_ci, kept);
 });
 
-test('a passing local CI keeps its log without a tail', (t) => {
+test('a passing local CI keeps its log without a tail or artifacts', (t) => {
   const h = fixture(t);
+  h.ok(['project', 'set', '--ci-local', JSON.stringify({ command: h.command, timeout: 5, artifacts: ['*.js'] })]);
   const e = h.json(['check', 'ci', 'T1']);
   assert.equal(e.ok, true);
   assert.equal(e.local_ci.output_tail, undefined);
   assert.deepEqual(e.local_ci.artifacts, []);
   assert.ok(fs.existsSync(path.join(h.state, e.local_ci.log)));
+  assert.ok(!fs.existsSync(path.join(h.state, 'ci-artifacts')));
+});
+
+test('local CI keeps the newest five runs of a task and leaves other tasks\' runs', (t) => {
+  const h = fixture(t);
+  const logs = path.join(h.state, 'logs');
+  const store = path.join(h.state, 'ci-artifacts');
+  const old = Date.now() / 1000 - 3600;
+  for (const name of [...Array.from({ length: 6 }, (_, i) => `ci-T1-0123456789-old${i}`), 'ci-T12-0123456789-other']) {
+    for (const dir of [logs, store]) {
+      fs.mkdirSync(path.join(dir, name), { recursive: true });
+      fs.writeFileSync(path.join(dir, name, 'output.log'), name);
+    }
+    // old0 is the oldest; each later one is a minute newer.
+    const at = old + Number(/old(\d)$/.exec(name)?.[1] ?? 0) * 60;
+    fs.utimesSync(path.join(logs, name), at, at);
+  }
+  const e = h.json(['check', 'ci', 'T1']);
+  assert.equal(e.ok, true);
+  const run = path.basename(path.dirname(e.local_ci.log));
+  const left = (dir) => fs.readdirSync(dir).filter((n) => n.startsWith('ci-T1-')).sort();
+  assert.deepEqual(left(logs), [run, 'ci-T1-0123456789-old2', 'ci-T1-0123456789-old3', 'ci-T1-0123456789-old4', 'ci-T1-0123456789-old5'].sort());
+  assert.deepEqual(left(store), ['ci-T1-0123456789-old2', 'ci-T1-0123456789-old3', 'ci-T1-0123456789-old4', 'ci-T1-0123456789-old5']);
+  for (const dir of [logs, store]) assert.ok(fs.existsSync(path.join(dir, 'ci-T12-0123456789-other')));
 });
 
 test('conflicting merged trees fail before running the local command', (t) => {
