@@ -488,7 +488,8 @@ test('browser controls save limits, approve and decline requests, keep saved val
   await fill('task', '$value', 'hard');
   await b.inPage(`document.querySelector('#task button[type="submit"]').click()`);
   await b.until(`document.querySelector('#task .result').textContent && document.querySelector('#task .result').textContent !== 'Saving...'`, 'task saved without reload');
-  assert.equal(h.readState('tasks.json').tasks[0].tier, 'hard');
+  // The save's reply names an error when the server refused it.
+  assert.equal(h.readState('tasks.json').tasks[0].tier, 'hard', await b.inPage(`document.querySelector('#task .result').textContent`));
   await fill('task', '$field', 'kind', 'change');
   await fill('task', '$field', 'tier', 'change');
   assert.equal(await read('task', '$value'), 'hard');
