@@ -88,6 +88,23 @@ for (const base of ['main', 'release/next']) {
   });
 }
 
+// A dispatch prefetches before it waits for the dispatch lock; a dependency
+// can merge on origin in that wait, so a dependent's worktree still starts
+// from the base as it is when the worktree is made.
+test('a dependent task starts from the base as it is under the dispatch lock, not as prefetched', (t) => {
+  const h = setup(t);
+  h.ok(['task', 'add', '--title', 'Dependent', '--acceptance', 'builds on T1', '--dep', 'T1']);
+  const W = require('../lib/worktree');
+  const repo = { root: h.repo, commonDir: path.join(h.repo, '.git') };
+  const st = require('../lib/state').loadState(h.state);
+  const task = st.tasks.tasks.find((x) => x.id === 'T2');
+  const fetched = W.prefetch(repo, st, task);
+  const merged = advance(h, h.upstream, 'merged-dependency.txt');
+  h.git(['push', 'origin', 'main'], h.upstream);
+  const wt = W.create(repo, st, task, undefined, fetched);
+  assert.equal(h.git(['rev-parse', 'HEAD'], wt.path), merged);
+});
+
 test('worktree keeps a local base that is ahead of origin', (t) => {
   const h = setup(t);
   const local = advance(h, h.repo, 'local.txt');
