@@ -13,17 +13,38 @@ const suite = (app, conclusion = 'success', status = 'completed', runs = 1) => (
 // gh --jq prints one JSON value per line, across all pages.
 const lines = (items) => items.map((i) => JSON.stringify(i)).join('\n') + (items.length ? '\n' : '');
 
-function github({ runs = [], suites = [], workflows = [], head = SHA, apiError = null, view = {}, pr } = {}) {
+// `later` maps other commits on the base to their checks (`allRuns`: every check run, where the
+// default list keeps the latest of each name), `branch` lists the base's workflow runs since the
+// merge commit, `compare` maps "from...to" to the compare status GitHub reports and `files` maps a
+// workflow path to its text at any commit.
+function github({ runs = [], suites = [], workflows = [], head = SHA, apiError = null, view = {}, pr,
+  later = {}, branch = [], compare = {}, date = '2026-10-13T20:00:00Z', files = {} } = {}) {
+  const commits = { ...later, [SHA]: { runs, suites, workflows } };
   return fakeExec((args) => {
     if (args[0] === 'pr' && args[1] === 'view') return result(JSON.stringify(pr || { headRefOid: head, mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN', ...view }));
     if (args[0] !== 'api') return null;
-    assert.ok(args.includes('--paginate'), 'every page must be read');
     if (apiError) return result('', 1, apiError);
-    if (args[1] === `repos/${REPO}/commits/${SHA}/check-runs?per_page=100`) return result(lines(runs));
-    if (args[1] === `repos/${REPO}/commits/${SHA}/check-suites?per_page=100`) return result(lines(suites));
-    if (args[1] === `repos/${REPO}/actions/runs?head_sha=${SHA}&per_page=100`) return result(lines(workflows));
+    const compared = args[1].match(new RegExp(`^repos/${REPO}/compare/(\\w+)\\.\\.\\.(\\w+)\\?per_page=1$`));
+    if (compared) return result(`${compare[`${compared[1]}...${compared[2]}`] ?? 'diverged'}\n`);
+    if (args[1] === `repos/${REPO}/commits/${SHA}`) return result(`${date}\n`);
+    const content = args[1].match(new RegExp(`^repos/${REPO}/contents/(.+)\\?ref=\\w+$`));
+    if (content) return files[content[1]] == null ? result('', 1, 'HTTP 404') : result(`${Buffer.from(files[content[1]]).toString('base64')}\n`);
+    assert.ok(args.includes('--paginate'), 'every page must be read');
+    if (args[1] === `repos/${REPO}/actions/runs?branch=main&created=${encodeURIComponent(`>=${branchSince(workflows, date)}`)}&per_page=100`) return result(lines(branch));
+    for (const [sha, at] of Object.entries(commits)) {
+      if (args[1] === `repos/${REPO}/commits/${sha}/check-runs?per_page=100`) return result(lines(at.runs || []));
+      if (args[1] === `repos/${REPO}/commits/${sha}/check-runs?filter=all&per_page=100`) return result(lines(at.allRuns || at.runs || []));
+      if (args[1] === `repos/${REPO}/commits/${sha}/check-suites?per_page=100`) return result(lines(at.suites || []));
+      if (args[1] === `repos/${REPO}/actions/runs?head_sha=${sha}&per_page=100`) return result(lines(at.workflows || []));
+    }
     return null;
   });
+}
+
+// The base listing starts at the merge commit's earliest push run, else at its commit date.
+function branchSince(workflows, date) {
+  return workflows.filter((w) => w.event === 'push' && w.head_branch === 'main' && w.head_sha === SHA)
+    .map((w) => w.created_at).filter(Boolean).sort()[0] || date;
 }
 
 function ctx(gh, task = {}, project = {}) {
@@ -57,6 +78,192 @@ test('hotfix checks only push workflows on the recorded base and merge SHA, incl
   const wrongMerge = await gate.run(ctx(github({ pr: { ...pr, mergeCommit: { oid: OTHER } } }), task));
   assert.equal(wrongMerge.ok, false);
   assert.match(wrongMerge.summary, /no longer matches/);
+});
+
+// A busy main: the merge commit's push run was cancelled when a newer push replaced it in the
+// ci-main-push concurrency group, and later commits on main ran the full workflow.
+const LATER = 'c'.repeat(40);
+const LATEST = 'd'.repeat(40);
+const MERGED_PR = { state: 'MERGED', headRefOid: OTHER, mergeCommit: { oid: SHA }, baseRefName: 'main' };
+const HOTFIX = { pr: 42, hotfix: { merge_sha: SHA, base: 'main' } };
+const workflow = (id, sha, conclusion, extra = {}) => ({ id, name: 'CI', path: '.github/workflows/ci.yml', event: 'push',
+  head_sha: sha, head_branch: 'main', check_suite_id: id + 1000, created_at: `2026-10-13T2${id % 10}:00:00Z`,
+  status: conclusion ? 'completed' : 'in_progress', conclusion, ...extra });
+const jobs = (w, conclusion = 'success') => ({
+  runs: [{ ...run('test (ubuntu-latest)', conclusion), suite: w.check_suite_id }, { ...run('checks (shared files)', 'skipped'), suite: w.check_suite_id }],
+  suites: [{ ...suite('github-actions', w.conclusion === 'success' ? 'success' : w.conclusion, 'completed', 2), id: w.check_suite_id }],
+  workflows: [w],
+});
+// The repository's workflow: the shared-files check runs on pull requests only, the tests on every event.
+const CI_YML = `name: CI
+on: [push, pull_request, schedule, workflow_dispatch]
+jobs:
+  checks:
+    name: checks (shared files)
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+  test:
+    name: test (\${{ matrix.os }})
+    runs-on: \${{ matrix.os }}
+`;
+// A run that a newer push replaced before it started has no jobs.
+function busyMain({ merge = workflow(1, SHA, 'cancelled'), at = [], compare, extra = {}, files = { '.github/workflows/ci.yml': CI_YML } } = {}) {
+  const commits = { [SHA]: !merge ? { runs: [], suites: [], workflows: [] }
+    : merge.conclusion === 'cancelled' ? { ...jobs(merge), runs: [] } : jobs(merge, merge.conclusion === 'success' ? 'success' : 'skipped') };
+  for (const w of at) {
+    const add = jobs(w);
+    const had = commits[w.head_sha] || { runs: [], suites: [], workflows: [] };
+    commits[w.head_sha] = { runs: [...had.runs, ...add.runs], suites: [...had.suites, ...add.suites], workflows: [...had.workflows, w] };
+  }
+  const { [SHA]: mergeChecks, ...later } = commits;
+  return github({ ...mergeChecks, pr: MERGED_PR, later, files, branch: [...(merge ? [merge] : []), ...at],
+    compare: compare ?? { [`${SHA}...${LATER}`]: 'ahead', [`${SHA}...${LATEST}`]: 'ahead', [`${LATER}...main`]: 'ahead', [`${LATEST}...main`]: 'identical' }, ...extra });
+}
+const hotfixCI = (gh, project = {}) => gate.run(ctx(gh, HOTFIX, { ci: { required: ['checks (shared files)', 'test ('] }, ...project }));
+
+test('a hotfix whose merge commit push run was cancelled is judged by the first green full run at a later main commit that contains it', async () => {
+  const red = workflow(2, LATER, 'failure');
+  const green = workflow(3, LATEST, 'success');
+  const r = await hotfixCI(busyMain({ at: [red, green] }));
+  assert.equal(r.ok, true, r.summary);
+  // The evidence stays at the merge commit and names the commit and run that stood for it.
+  assert.equal(r.sha, SHA);
+  assert.deepEqual(r.hotfix_ci, { merge_sha: SHA, satisfied_by: { sha: LATEST, runs: [{ id: 3, workflow: '.github/workflows/ci.yml', event: 'push', url: `https://github.com/${REPO}/actions/runs/3` }] } });
+  assert.match(r.summary, new RegExp(`CI green at ${LATEST.slice(0, 10)}`));
+  assert.match(r.summary, new RegExp(`merge commit ${SHA.slice(0, 10)} was cancelled or never ran; judged at ${LATEST.slice(0, 10)} on main, which contains it`));
+  assert.match(r.summary, /ci\.required skipped in the base run and not applied: checks \(shared files\) \(its job condition is false for push runs\)/);
+  // The earliest green commit wins; a daily or manual run counts like a push.
+  for (const event of ['schedule', 'workflow_dispatch']) {
+    const first = await hotfixCI(busyMain({ at: [workflow(2, LATER, 'success', { event }), green] }));
+    assert.equal(first.ok, true, first.summary);
+    assert.equal(first.hotfix_ci.satisfied_by.sha, LATER);
+    assert.equal(first.hotfix_ci.satisfied_by.runs[0].event, event);
+  }
+  // A scheduled run at the merge commit itself stands for its cancelled push run, without a compare.
+  const same = await hotfixCI(busyMain({ at: [workflow(2, SHA, 'success', { event: 'schedule' })], compare: {} }));
+  assert.equal(same.ok, true, same.summary);
+  assert.equal(same.hotfix_ci.satisfied_by.sha, SHA);
+  assert.match(same.summary, /never ran; judged by \.github\/workflows\/ci\.yml schedule run 2/);
+  // A merge commit with no push run at all (several commits in one push) is judged the same way, from its commit date.
+  const never = await hotfixCI(busyMain({ merge: null, at: [green] }));
+  assert.equal(never.ok, true, never.summary);
+  assert.equal(never.hotfix_ci.satisfied_by.sha, LATEST);
+});
+
+test('a later green run cannot stand for a red merge commit, an unrelated commit or another workflow', async () => {
+  const green = workflow(3, LATEST, 'success');
+  const cases = [
+    ['failed push run at the merge commit', { merge: workflow(1, SHA, 'failure'), at: [green] }, { confirmed_failure: true }, /push workflow not successful/],
+    ['failed job before the cancel', { merge: workflow(1, SHA, 'cancelled'), at: [green], failedJob: true }, { confirmed_failure: true }, /a full workflow run at the merge commit failed/],
+    ['failed scheduled run at the merge commit', { at: [workflow(2, SHA, 'failure', { event: 'schedule' }), green] }, { confirmed_failure: true }, /a full workflow run at the merge commit failed/],
+    ['still running at the merge commit', { merge: workflow(1, SHA, null), at: [green] }, { pending: true }, /push workflow still running/],
+    ['timed out at the merge commit', { merge: workflow(1, SHA, 'timed_out'), at: [green] }, {}, /push workflow not successful/],
+    ['green commit does not contain the merge', { at: [green], compare: { [`${SHA}...${LATEST}`]: 'diverged', [`${LATEST}...main`]: 'identical' } }, { pending: true, not_running: true }, /no successful push, scheduled or manual run/],
+    ['green commit left main', { at: [green], compare: { [`${SHA}...${LATEST}`]: 'ahead', [`${LATEST}...main`]: 'diverged' } }, { pending: true, not_running: true }, /nothing is running on the base/],
+    ['another workflow is green', { at: [{ ...green, path: '.github/workflows/docs.yml', name: 'Docs' }] }, { pending: true, not_running: true }, /\.github\/workflows\/ci\.yml/],
+    ['pull request run on main', { at: [{ ...green, event: 'pull_request' }] }, { pending: true, not_running: true }, /no successful/],
+    ['later runs red or running', { at: [workflow(2, LATER, 'failure'), workflow(3, LATEST, null)] }, { pending: true }, /has finished yet/],
+  ];
+  for (const [label, opts, flags, message] of cases) {
+    const gh = busyMain(opts);
+    if (opts.failedJob) {
+      const base = gh.exec;
+      gh.exec = (cmd, args) => (args[1] === `repos/${REPO}/commits/${SHA}/check-runs?per_page=100`
+        ? result(lines([{ ...run('test (ubuntu-latest)', 'failure'), suite: 1001 }])) : base(cmd, args));
+    }
+    const r = await hotfixCI(gh);
+    assert.equal(r.ok, false, label);
+    assert.equal(r.hotfix_ci?.satisfied_by, undefined, label);
+    assert.match(r.summary, message, `${label}: ${r.summary}`);
+    for (const key of ['confirmed_failure', 'pending', 'not_running']) assert.equal(r[key], flags[key], `${label} ${key}: ${r.summary}`);
+  }
+  // A required job that ran in the base workflow must still succeed there.
+  const gh = busyMain({ at: [green] });
+  const base = gh.exec;
+  gh.exec = (cmd, args) => (args[1] === `repos/${REPO}/commits/${LATEST}/check-runs?filter=all&per_page=100`
+    ? result(lines([{ ...run('test (ubuntu-latest)', 'failure'), suite: 1003 }])) : base(cmd, args));
+  const failedAtLater = await hotfixCI(gh);
+  assert.equal(failedAtLater.ok, false);
+  assert.equal(failedAtLater.pending, true, failedAtLater.summary);
+});
+
+test('a required job a path filter skipped at a later commit stays required; one skipped at the merge commit or by its event condition does not', async () => {
+  // The tests run only when a changes job saw code; the later commit changed docs only.
+  const filtered = CI_YML.replace("    name: test (\${{ matrix.os }})\n", "    name: test (\${{ matrix.os }})\n    if: needs.changes.outputs.code == 'true'\n");
+  const docsOnly = workflow(3, LATEST, 'success');
+  const skippedTests = (gh, sha) => {
+    const base = gh.exec;
+    gh.exec = (cmd, args) => (args[1] === `repos/${REPO}/commits/${sha}/check-runs?${sha === SHA ? '' : 'filter=all&'}per_page=100`
+      ? result(lines([{ ...run('test (ubuntu-latest)', 'skipped'), suite: 1003 }, { ...run('changes'), suite: 1003 },
+        { ...run('checks (shared files)', 'skipped'), suite: 1003 },
+        ...(sha === SHA ? [{ ...run('test (ubuntu-latest)', 'skipped'), suite: 1001 }] : [])]))
+      : base(cmd, args));
+    return gh;
+  };
+  const untested = await hotfixCI(skippedTests(busyMain({ at: [docsOnly], files: { '.github/workflows/ci.yml': filtered } }), LATEST));
+  assert.equal(untested.ok, false, untested.summary);
+  assert.equal(untested.pending, true, untested.summary);
+  assert.equal(untested.hotfix_ci.satisfied_by, undefined);
+  assert.deepEqual(untested.hotfix_ci.rejected.map((x) => x.reason), ['not green']);
+  // The same skip at the merge commit says its change did not touch the tested code either.
+  const mergeSkipped = skippedTests(skippedTests(busyMain({ at: [docsOnly], files: { '.github/workflows/ci.yml': filtered } }), LATEST), SHA);
+  const both = await hotfixCI(mergeSkipped);
+  assert.equal(both.ok, true, both.summary);
+  assert.match(both.summary, /test \( \(skipped at the merge commit too\)/);
+  // A pull-request-only job is told by its condition; without a readable workflow file it stays required.
+  const unread = await hotfixCI(busyMain({ at: [docsOnly], files: {} }));
+  assert.equal(unread.ok, false, unread.summary);
+  assert.equal(unread.pending, true);
+});
+
+test('at a later commit every check run is read, so a newer cancelled run cannot hide an older green suite', async () => {
+  const green = workflow(3, LATEST, 'success');
+  const cancelled = workflow(4, LATEST, 'cancelled', { event: 'workflow_dispatch' });
+  const gh = busyMain({ at: [green] });
+  const base = gh.exec;
+  const newer = [{ ...run('test (ubuntu-latest)', 'cancelled'), suite: 1004 }, { ...run('checks (shared files)', 'cancelled'), suite: 1004 }];
+  gh.exec = (cmd, args) => {
+    // The default list keeps only the latest run of each name: the cancelled ones.
+    if (args[1] === `repos/${REPO}/commits/${LATEST}/check-runs?per_page=100`) return result(lines(newer));
+    if (args[1] === `repos/${REPO}/commits/${LATEST}/check-runs?filter=all&per_page=100`) {
+      return result(lines([...newer, { ...run('test (ubuntu-latest)'), suite: 1003 }, { ...run('checks (shared files)', 'skipped'), suite: 1003 }]));
+    }
+    if (args[1] === `repos/${REPO}/actions/runs?head_sha=${LATEST}&per_page=100`) return result(lines([green, cancelled]));
+    return base(cmd, args);
+  };
+  const r = await hotfixCI(gh);
+  assert.equal(r.ok, true, r.summary);
+  assert.equal(r.hotfix_ci.satisfied_by.runs[0].id, 3);
+});
+
+test('the later-commit scan looks at five commits per check and carries its rejections to the next check', async () => {
+  const shas = ['1', '2', '3', '4', '5', '6', '7'].map((c) => c.repeat(40));
+  const at = shas.map((sha, i) => workflow(10 + i, sha, 'success', { created_at: `2026-10-13T21:0${i}:00Z` }));
+  const compares = (gh) => gh.calls.filter((c) => c[2]?.includes('/compare/')).length;
+  // None of them contains the merge commit (compare reports diverged).
+  const first = busyMain({ at, compare: {} });
+  const r1 = await hotfixCI(first);
+  assert.equal(r1.ok, false);
+  assert.equal(r1.pending, true);
+  assert.equal(r1.not_running, undefined, r1.summary);
+  assert.equal(compares(first), 5);
+  assert.match(r1.summary, /2 more commits with a green run on main wait for the next check/);
+  assert.deepEqual(r1.hotfix_ci.rejected.map((x) => [x.sha, x.reason]), shas.slice(0, 5).map((sha) => [sha, 'does not contain the merge commit']));
+  const evidence = [{ type: 'ci', sha: SHA, revision: 1, hotfix_ci: r1.hotfix_ci }];
+  const second = busyMain({ at, compare: {} });
+  const r2 = await gate.run(ctx(second, { ...HOTFIX, evidence }, { ci: { required: [] } }));
+  assert.equal(compares(second), 2);
+  assert.equal(r2.hotfix_ci.rejected.length, 7);
+  assert.equal(r2.not_running, true, r2.summary);
+  assert.match(r2.summary, /7 later commits with a green run cannot stand for it/);
+  const third = busyMain({ at, compare: {} });
+  await gate.run(ctx(third, { ...HOTFIX, evidence: [...evidence, { type: 'ci', sha: SHA, revision: 1, hotfix_ci: r2.hotfix_ci }] }));
+  assert.equal(compares(third), 0);
+  // A commit rejected as not green is looked at again once it has a new green run.
+  const redLater = { sha: LATEST, runs: [2], reason: 'not green' };
+  const rerun = busyMain({ at: [workflow(3, LATEST, 'success')] });
+  const r4 = await gate.run(ctx(rerun, { ...HOTFIX, evidence: [{ type: 'ci', sha: SHA, hotfix_ci: { merge_sha: SHA, rejected: [redLater] } }] }, { ci: { required: [] } }));
+  assert.equal(r4.ok, true, r4.summary);
 });
 
 test('every run and suite completed, none failed: ok', async () => {
