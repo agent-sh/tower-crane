@@ -419,10 +419,12 @@ test('a spawned replacement can claim after another worker lease expires', async
 
 // Without its state no exit can be recorded and no reaction can follow, so the
 // monitor stops its agent rather than let a paid session run on unrecorded.
-test('a monitor whose state directory is removed stops its agent and exits', { skip: process.platform === 'win32' }, async (t) => {
+// A removal that takes project.json first leaves the monitor no read that
+// fails, so only project.json is removed here.
+test('a monitor whose project state is removed stops its agent and exits', { skip: process.platform === 'win32' }, async (t) => {
   const h = setup(t);
   const spawned = await start(t, h, { lifetimeMs: 30000 });
-  fs.rmSync(h.state, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  fs.unlinkSync(path.join(h.state, 'project.json'));
   await waitOnRepo(h, () => !detachedAlive({ pid: spawned.pid }) && !detachedAlive({ pid: spawned.monitor_pid }),
     'the agent or its monitor outlived the state directory');
   assert.equal(fs.existsSync(`${spawned.marker}.natural`), false, 'the agent ran to its own end');
