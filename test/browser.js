@@ -90,6 +90,60 @@ function createProfile() {
   return create(bases[0]);
 }
 
+// Live processes as pid -> [ppid, start]. An orphan zombie nobody reaps cannot run or write, so
+// zombies are left out. Linux also records the start time, so a reused pid is never taken for one
+// of Chrome's; other Unix systems list the table with ps. Windows keeps a single-process teardown.
+function processTable() {
+  const table = new Map();
+  if (process.platform === 'win32') return table;
+  if (process.platform !== 'linux') {
+    for (const line of cp.execFileSync('ps', ['-A', '-o', 'pid=,ppid=,stat='], { encoding: 'utf8' }).trim().split('\n')) {
+      const [pid, ppid, stat] = line.trim().split(/\s+/);
+      if (!stat.startsWith('Z')) table.set(Number(pid), [Number(ppid), '']);
+    }
+    return table;
+  }
+  for (const name of fs.readdirSync('/proc')) {
+    if (!/^\d+$/.test(name)) continue;
+    let stat;
+    try { stat = fs.readFileSync(`/proc/${name}/stat`, 'utf8'); } catch { continue; }
+    // The executable name can contain spaces and parentheses, so fields start after its last ')'.
+    const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
+    if (!['Z', 'X'].includes(fields[0])) table.set(Number(name), [Number(fields[1]), fields[19]]);
+  }
+  return table;
+}
+
+// Updates a process tree (pid -> start) to its members still alive plus their new descendants.
+function liveTree(tree) {
+  const table = processTable();
+  for (const [pid, start] of tree) if (table.get(pid)?.[1] !== start) tree.delete(pid);
+  for (let grew = true; grew;) {
+    grew = false;
+    for (const [pid, [ppid, start]] of table) {
+      if (tree.has(ppid) && !tree.has(pid)) {
+        tree.set(pid, start);
+        grew = true;
+      }
+    }
+  }
+  return tree;
+}
+
+function chromeTree(pid) {
+  const self = processTable().get(pid);
+  return self ? liveTree(new Map([[pid, self[1]]])) : new Map();
+}
+
+// The browser itself is signalled through its ChildProcess, which knows once it has been reaped and
+// its pid may belong to another process.
+function signalTree(tree, signal, browser) {
+  for (const pid of tree.keys()) {
+    if (pid === browser) continue;
+    try { process.kill(pid, signal); } catch { /* It exited since the table was read. */ }
+  }
+}
+
 // The profile is removed when a start fails at any point, including its own setup; a started browser
 // removes it in close.
 async function launch() {
@@ -132,6 +186,25 @@ async function spawnChrome(profile) {
     resolve();
   }));
   const remove = () => fs.rmSync(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  // Chrome's zygotes, renderers and utility processes outlive the browser process for a moment, and
+  // the network service writes its cache index and state into the profile on its way out, which
+  // recreates a removed profile. Stopping signals the whole tree, read before the browser's exit
+  // orphans it, and the profile is removed only after every process in it has gone.
+  const stop = async () => {
+    const tree = chromeTree(proc.pid);
+    proc.kill();
+    signalTree(tree, 'SIGTERM', proc.pid);
+    const deadline = setTimeout(() => {
+      proc.kill('SIGKILL');
+      signalTree(liveTree(tree), 'SIGKILL', proc.pid);
+    }, 5000);
+    try {
+      await closed;
+      await until(() => liveTree(tree).size === 0, 'Chrome\'s processes to exit');
+    } finally {
+      clearTimeout(deadline);
+    }
+  };
   const portFile = path.join(profile, 'DevToolsActivePort');
   // A first start on a fresh machine builds the font cache, which takes 10 s
   // or more on a busy CI runner; a Chrome killed before it finishes leaves the
@@ -143,29 +216,30 @@ async function spawnChrome(profile) {
       return fs.existsSync(portFile) && fs.readFileSync(portFile, 'utf8').split('\n')[0];
     }, 'Chrome to start', 60000);
   } catch (error) {
-    proc.kill();
-    await closed;
-    remove();
+    try { await stop(); } finally { remove(); }
     throw new Error(`Chrome failed to start (${CHROME}): ${error.message}${stderr ? `\n${stderr.trim()}` : ''}`);
   }
   // File teardown refs and reaps Chrome before the runner records child CPU.
   proc.unref();
   proc.stderr?.unref?.();
+  // An exit handler cannot await, so it kills the tree and blocks until it is gone; a killed
+  // process runs no more code and goes within milliseconds.
   const lastResort = () => {
+    const tree = chromeTree(proc.pid);
     proc.kill('SIGKILL');
+    signalTree(tree, 'SIGKILL', proc.pid);
+    const pause = new Int32Array(new SharedArrayBuffer(4));
+    for (const end = Date.now() + 5000; liveTree(tree).size && Date.now() < end;) Atomics.wait(pause, 0, 0, 10);
     remove();
   };
   process.once('exit', lastResort);
   const close = async () => {
     proc.ref();
     proc.stderr?.ref?.();
-    proc.kill();
-    const deadline = setTimeout(() => proc.kill('SIGKILL'), 5000);
     try {
-      await closed;
-      remove();
+      await stop();
     } finally {
-      clearTimeout(deadline);
+      remove();
       process.removeListener('exit', lastResort);
     }
   };

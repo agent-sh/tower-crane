@@ -340,7 +340,8 @@ test('real Codex worker writes the toolchain lock, receives a private env file, 
   const results = path.join(h.base, 'results');
   fs.mkdirSync(results);
   const out = path.join(results, 'live-result.json');
-  const script = path.join(h.base, 'cargo-probe.js');
+  // Codex mounts nothing beside the home but the paths the project names.
+  const script = path.join(results, 'cargo-probe.js');
   const privateTmp = path.join(h.base, 'agent-tmp');
   fs.mkdirSync(privateTmp, { mode: 0o700 });
   assert.equal(process.platform, 'linux', 'live scope verification requires Linux');
@@ -384,7 +385,7 @@ test('real Codex worker writes the toolchain lock, receives a private env file, 
     '  });',
     '});', '',
   ].join('\n'));
-  h.ok(['project', 'set', '--sandbox', JSON.stringify({ write: [cargo, results] }), '--scope', '{"CPUQuota":"200%","MemoryMax":"8G"}',
+  h.ok(['project', 'set', '--sandbox', JSON.stringify({ write: [cargo, results], read: [rustup] }), '--scope', '{"CPUQuota":"200%","MemoryMax":"8G"}',
     '--env', JSON.stringify({ CARGO_HOME: cargo, RUSTUP_HOME: rustup }), '--env_file', file]);
   h.ok(['ladder', 'set', 'medium', '--harness', 'codex', '--profile', process.env.TOWER_CRANE_LIVE_PROFILE,
     '--clear', 'model', '--clear', 'effort', '--supervision', '{"retries":0}']);

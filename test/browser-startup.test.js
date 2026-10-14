@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const cp = require('node:child_process');
-const { makeRepo } = require('./helpers');
+const { makeRepo, detachedAlive } = require('./helpers');
 const { CHROME } = require('./browser');
 
 function attempt(h, chrome, sandbox, tmp = h.base, before = '', close = true) {
@@ -94,6 +94,65 @@ setInterval(() => {}, 1000);
   attempt(h, chrome, '0', h.base, '', false);
   const { profile } = JSON.parse(fs.readFileSync(path.join(h.base, 'chrome.json'), 'utf8'));
   assert.equal(fs.existsSync(profile), false, 'the exit fallback removes the profile without caller teardown');
+});
+
+// A Chrome stub with a helper process like Chrome's network service, which writes into the profile
+// on its way out and so recreates a profile removed under it. The helper does not hold Chrome's
+// stderr, so the browser's own exit does not wait for it.
+function chromeWithHelper(h) {
+  const helper = path.join(h.base, 'helper.js');
+  fs.writeFileSync(helper, `
+const fs = require('node:fs');
+const path = require('node:path');
+const [profile, report] = process.argv.slice(2);
+const flush = (how) => {
+  fs.mkdirSync(path.join(profile, 'Default'), { recursive: true });
+  fs.writeFileSync(path.join(profile, 'Default', 'Network Persistent State'), '{}');
+  fs.writeFileSync(report, how);
+  process.exit(0);
+};
+process.on('SIGTERM', () => flush('stopped'));
+fs.watch(profile, () => { if (!fs.existsSync(profile)) flush('outlived its profile'); });
+process.stdout.write('ready');
+`);
+  const chrome = path.join(h.base, 'chrome');
+  fs.writeFileSync(chrome, `#!${process.execPath}
+const fs = require('node:fs');
+const path = require('node:path');
+const cp = require('node:child_process');
+const profile = process.argv.find((arg) => arg.startsWith('--user-data-dir=')).slice('--user-data-dir='.length);
+const helper = cp.spawn(process.execPath, [${JSON.stringify(helper)}, profile, ${JSON.stringify(path.join(h.base, 'helper.txt'))}], { stdio: ['ignore', 'pipe', 'ignore'] });
+helper.stdout.once('data', () => {
+  fs.writeFileSync(process.env.CHROME_REPORT, JSON.stringify({ profile, helper: helper.pid }));
+  // An invalid DevTools endpoint makes openBrowser reject after a successful launch.
+  fs.writeFileSync(path.join(profile, 'DevToolsActivePort'), '1\\n');
+});
+setInterval(() => {}, 1000);
+`, { mode: 0o755 });
+  return chrome;
+}
+
+test('teardown stops Chrome\'s helper processes and removes the profile after they exit', {
+  skip: process.platform === 'win32' && 'browser fixture uses a shebang and SIGTERM',
+}, (t) => {
+  const h = makeRepo(t);
+  attempt(h, chromeWithHelper(h), '1');
+  assert.equal(fs.readFileSync(path.join(h.base, 'helper.txt'), 'utf8'), 'stopped', 'the helper flushed before its profile went');
+});
+
+test('the exit fallback kills Chrome\'s helper processes before it removes the profile', {
+  skip: process.platform === 'win32' && 'browser fixture uses a shebang and SIGKILL',
+}, async (t) => {
+  const h = makeRepo(t);
+  attempt(h, chromeWithHelper(h), '1', h.base, '', false);
+  const { profile, helper } = JSON.parse(fs.readFileSync(path.join(h.base, 'chrome.json'), 'utf8'));
+  // A helper left running would recreate the profile, so the check waits for it to end.
+  for (const end = Date.now() + 60000; detachedAlive({ pid: helper });) {
+    assert.ok(Date.now() < end, 'the helper exits');
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  assert.equal(fs.existsSync(profile), false, 'no helper recreated the profile');
+  assert.equal(fs.existsSync(path.join(h.base, 'helper.txt')), false, 'the helper was killed, not left to write');
 });
 
 test('a Chrome profile whose setup fails is removed, and the start rejects', (t) => {
