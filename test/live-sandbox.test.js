@@ -854,11 +854,7 @@ function assertCredentialProbe(h, seen, label) {
 }
 
 // The project records no repository, so origin may be a path here: the bare
-// repository in the test's directory, outside what the sandbox writes. The
-// fixture stays in the shared temp root: under LIVE_ROOT the broker's socket
-// path is too long for its directory, and claude's sandbox cannot reach the
-// fallback under the temp dir when that is in the home. So the shared root
-// must be short too (TOWER_CRANE_TEST_TMP=~/.cache/tct fits).
+// repository in the test's directory, outside what the sandbox writes.
 function credentialFixture(t) {
   const h = makeRepo(t);
   h.init();
