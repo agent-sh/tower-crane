@@ -408,7 +408,9 @@ worker limit, unblocking-first order, routing, fallback and locked reservations
 apply; concurrent watchers cannot dispatch above the limit. Worker dispatches,
 batch or single, run one at a time under the state directory's dispatch lock,
 so a watcher never skips a higher-ranked task that another dispatch is still
-preparing and gives its slot to a lower one. Before counting
+preparing and gives its slot to a lower one. A dispatch lock that outlasts its
+wait (`worker dispatch is locked by ...`) stops the batch at that task and is
+retried on the next pass rather than reported as a refusal. Before counting
 capacity, the host clears verified dead reservations under the state lock,
 including reservations from cancelled tasks. Dispatch refusals
 are reported once on stderr per wait while dispatch inputs are unchanged.
