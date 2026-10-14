@@ -305,10 +305,13 @@ function after(name, args, rawArgs = args) {
   // A placeholder cleanup takes the git directory's tower-crane-reap by
   // creating it or by renaming a prepared directory onto it. Once the first
   // take is done, HOOK_REAP_TAKEN=SIGNAL stops the process there, and
-  // HOOK_DIE_REAP=1 kills it, as a stopped agent's git shim is killed.
+  // HOOK_DIE_REAP=1 kills it, as a stopped agent's git shim is killed;
+  // HOOK_DIE_REAP_AFTER=MS holds the directory that long first, as a shim
+  // does whose sandbox outlives the agent's process group.
   if ((env.HOOK_REAP_TAKEN || env.HOOK_DIE_REAP) && ['mkdirSync', 'renameSync'].includes(name)
     && path.basename(String(name === 'renameSync' ? args[1] : target)) === 'tower-crane-reap' && first('reap')) {
     if (env.HOOK_DIE_REAP) {
+      if (env.HOOK_DIE_REAP_AFTER) sleep(Number(env.HOOK_DIE_REAP_AFTER));
       process.kill(process.pid, 'SIGKILL');
       sleep(5000);
     }
