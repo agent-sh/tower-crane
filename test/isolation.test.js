@@ -523,7 +523,8 @@ test('a spawned claude agent imports the user\'s global rules by path, loads non
   assert.equal(seen.args[seen.args.indexOf('--allowedTools') + 1], 'Bash,Read,Grep,Glob');
   assert.deepEqual([box.enabled, box.failIfUnavailable, box.allowUnsandboxedCommands, box.network.allowAllUnixSockets], [true, true, false, true]);
   assert.deepEqual(box.filesystem.allowWrite, []);
-  assert.deepEqual(box.filesystem.denyWrite.slice(0, 2), [h.state, wt], 'the state is read-only');
+  assert.equal(box.filesystem.denyWrite[0], h.state, 'the state is read-only');
+  assert.ok(box.filesystem.denyWrite.includes(wt), 'the worktree is read-only');
   // claude writes a linked worktree's git directory itself; what runs code stays read-only.
   const common = h.git(['rev-parse', '--path-format=absolute', '--git-common-dir'], wt);
   assert.ok(box.filesystem.denyWrite.includes(path.join(common, 'config')), 'the shared git config is read-only');
@@ -1300,22 +1301,37 @@ test('a PATH directory at the root never opens the root or a directory that hold
   assert.equal(commandsRead({ harness: 'codex', config: { permissions: { 'tower-crane': { filesystem: rules } } } }, path.join(home, '.codex', 'auth.json')), false);
 });
 
-test('a read-only claude worktree under the home has no hidden directory above it', { skip: NO_STUBS }, t => {
-  // Seen 2026-10-13: claude hid the home empty, and inside it could not make
-  // the placeholders it binds over a read-only worktree's dotfiles, so no
-  // command ran. The fixture's base is the home here, so it holds the worktree.
+test('a read-only claude worktree under the home hides the home whole and binds its placeholders before the worktree turns read-only', { skip: NO_STUBS }, t => {
+  // Seen 2026-10-14: a small agent's sandbox hid the entries beside the
+  // worktree's path as they were at spawn, so a file made later in the home
+  // was readable. The home is hidden whole now. claude remounts the worktree
+  // inside it and binds a placeholder over each absent protected dotfile;
+  // bubblewrap cannot make one once the worktree is read-only (seen
+  // 2026-10-13), so each comes before the worktree in denyWrite.
   const { h, u, wt } = setup(t);
   const home = fs.realpathSync(h.base);
-  for (const [rung, hidesHome] of [['small', false], ['hard', true]]) {
+  fs.writeFileSync(path.join(wt, '.bashrc'), '');
+  const present = ClaudeSandboxPlaceholders.present(wt);
+  assert.ok(present.includes('.bashrc') && present.length < ClaudeSandboxPlaceholders.FILES.length);
+  for (const rung of ['small', 'hard']) {
     isolated(h, rung, 'claude');
     spawn(h, u, rung, { HOME: home, USERPROFILE: home });
     const seen = u.report();
-    const deny = seen.settings.sandbox.filesystem.denyRead;
-    assert.equal(deny.includes(home), hidesHome, `${rung}: the home is hidden whole only over a writable worktree`);
-    if (hidesHome) continue;
-    assert.deepEqual(deny.filter((p) => wt === p || wt.startsWith(p + path.sep)), [], `${rung}: nothing above the worktree is hidden`);
+    const box = seen.settings.sandbox.filesystem;
+    assert.ok(box.denyRead.includes(home), `${rung}: the home is hidden whole`);
+    const later = path.join(home, 'made-after-spawn', 'token');
+    assert.equal(commandsRead(seen, later), false, `${rung}: a path made in the home later is hidden`);
     for (const p of [path.join(wt, '.claude', 'settings.local.json'), path.join(h.state, 'tasks.json')]) assert.equal(commandsRead(seen, p), true, `${rung}: ${p} stays readable`);
     for (const p of [path.join(u.home, '.codex', 'auth.json'), path.join(h.base, 'gitconfig')]) assert.equal(commandsRead(seen, p), false, `${rung}: ${p} is hidden`);
+    const at = box.denyWrite.indexOf(wt);
+    if (rung === 'hard') {
+      assert.equal(at, -1, 'a worker writes its worktree');
+      continue;
+    }
+    assert.ok(at > 0, 'the worktree is read-only');
+    const before = box.denyWrite.slice(0, at).filter((p) => p.startsWith(wt + path.sep)).map((p) => path.relative(wt, p).split(path.sep).join('/'));
+    assert.deepEqual(before, ClaudeSandboxPlaceholders.FILES.filter((f) => !present.includes(f)), 'each absent placeholder precedes the worktree');
+    assert.deepEqual(box.denyWrite.slice(at + 1).filter((p) => p.startsWith(wt + path.sep) && ClaudeSandboxPlaceholders.FILES.includes(path.relative(wt, p).split(path.sep).join('/'))), [], 'none follows it');
   }
 });
 
