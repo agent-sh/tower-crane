@@ -116,7 +116,7 @@ A `command` rung runs any other CLI with `{prompt}`, `{brief}`, `{task}` and `{c
 
 ## Model ladder
 
-Every task has a tier: `easy`, `medium`, `hard` or `research`. Kind and size pick it (`S` easy, `M` medium, `L` hard, kind `research` research), and `--tier` overrides it. The ladder maps each tier, and the orchestrator, review and small jobs, to a harness, model and effort. Built-in defaults from [docs/builtin-ladder.json](docs/builtin-ladder.json), with Codex as the default harness:
+Every task has a tier: `easy`, `medium`, `hard` or `research`. Kind and size pick it (kind `research` research, an `S` `docs` task easy, `L` hard, anything else medium), and `--tier` overrides it. The ladder maps each tier, and the orchestrator, review and small jobs, to a harness, model and effort. Built-in defaults from [docs/builtin-ladder.json](docs/builtin-ladder.json), with Codex as the default harness:
 
 | Rung | Runs | Default |
 |---|---|---|
@@ -164,7 +164,7 @@ Not covered yet:
 
 - The orchestrator runs unsandboxed, because it starts the other agents.
 - pi, OpenCode, Antigravity and `command` rungs have no enforced sandbox and write state directly.
-- The shims check `git` and `gh` found on `PATH`; a program called by its absolute path is not checked. Agent commands can read `GH_TOKEN`.
+- The shims check `git` and `gh` found on `PATH`; a program called by its absolute path is not checked. A sandboxed agent holds no GitHub credential: its broker pushes its task branch and runs its gh commands. Unsandboxed agents (opencode, agy, pi, `command`) can read `GH_TOKEN` and the user's login.
 - Network access is open to all domains.
 - Plain files cannot stop a process running as the same user from forging records or reading the owner key.
 

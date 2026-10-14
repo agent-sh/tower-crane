@@ -73,8 +73,10 @@ function setup(t, harness, mode, { big = 0 } = {}) {
   const allow = [path.join(h.state, 'project.json'), h.userConfig, ...sources];
   const reports = () => fs.readFileSync(out, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
   const expected = (names) => Object.fromEntries(Object.entries(values).map(([n, v]) => [n, names.includes(n) ? sha(v) : null]));
-  const primary = expected(['TC_RUNG_SECRET', 'TC_PROJECT_SECRET', 'TC_FILE_SECRET', 'GH_TOKEN', CREDENTIAL[harness], ...Object.keys(bigVars)]);
-  const fallback = expected(['TC_FALLBACK_SECRET', 'TC_PROJECT_SECRET', 'TC_FILE_SECRET', 'GH_TOKEN', CREDENTIAL[harness]]);
+  // The spawning environment's GH_TOKEN never reaches a sandboxed agent: its
+  // broker pushes and runs gh (lib/github-broker.js).
+  const primary = expected(['TC_RUNG_SECRET', 'TC_PROJECT_SECRET', 'TC_FILE_SECRET', CREDENTIAL[harness], ...Object.keys(bigVars)]);
+  const fallback = expected(['TC_FALLBACK_SECRET', 'TC_PROJECT_SECRET', 'TC_FILE_SECRET', CREDENTIAL[harness]]);
   const noLeaks = (...outputs) => {
     const cache = path.join(home, '.cache', 'tower-crane');
     assert.ok(fs.readdirSync(cache).some((d) => fs.existsSync(path.join(cache, d, 'job.json'))), 'the kept job file is scanned');
@@ -184,7 +186,7 @@ for (const harness of ['claude', 'codex']) {
     h.ok(['project', 'set', '--sandbox', JSON.stringify({ write: [results] }), '--env', JSON.stringify({ TC_PROJECT_SECRET: c.project }), '--env_file', envFile]);
     const holder = path.join(h.base, 'holder.js');
     fs.writeFileSync(holder, `require(${JSON.stringify(HARNESS)})('command');\n`);
-    h.ok(['ladder', 'set', 'research', '--harness', 'command', '--command', JSON.stringify([process.execPath, holder]), '--clear', 'model', '--clear', 'profile', '--clear', 'effort', '--clear', 'args',
+    h.ok(['ladder', 'set', 'research', '--harness', 'command', '--command', JSON.stringify([process.execPath, holder, '{prompt}']), '--clear', 'model', '--clear', 'profile', '--clear', 'effort', '--clear', 'args',
       '--env', JSON.stringify({ ROUTE: 'holder', TC_HOLDER_SECRET: c.holder })]);
     const out = path.join(h.base, 'holder.jsonl');
     const held = h.run(['spawn', '--task', 'T1', '--role', 'research'], { env: { ...h.env, TMPDIR: tmp, CANARY_OUT: out, CANARY_MODE: 'hold',
@@ -203,7 +205,8 @@ for (const harness of ['claude', 'codex']) {
     const holderHome = path.join(h.state, 'homes', holderSpawn.agent);
     assert.ok(fs.existsSync(holderHome), 'the holder has a home');
     const result = path.join(results, 'probe.json');
-    const probe = path.join(h.base, 'probe.js');
+    // The project's writable directory: codex mounts nothing else beside the home.
+    const probe = path.join(results, 'probe.js');
     fs.writeFileSync(probe, [
       "'use strict';",
       'const fs = require("node:fs"), cp = require("node:child_process");',

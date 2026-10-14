@@ -71,7 +71,8 @@ const hookCommands = (settings) => Object.values(settings.hooks || {}).flat().fl
 module.exports = function stub(harness) {
   const args = process.argv.slice(2);
   const after = (flag) => (args.includes(flag) ? args[args.indexOf(flag) + 1] : null);
-  const report = { harness, args, ghToken: process.env.GH_TOKEN || null, home: os.homedir(), memory: [], skills: [], hooks: [], mcp: {}, rules: [], auth: null, env: null, ran: [] };
+  const report = { harness, args, ghToken: process.env.GH_TOKEN || null,
+    tokens: ['GH_TOKEN', 'GITHUB_TOKEN', 'GH_ENTERPRISE_TOKEN', 'GITHUB_ENTERPRISE_TOKEN'].filter((k) => process.env[k] !== undefined), home: os.homedir(), memory: [], skills: [], hooks: [], mcp: {}, rules: [], auth: null, env: null, ran: [] };
   const skillsIn = (dir) => {
     try {
       return fs.readdirSync(dir).filter((d) => fs.existsSync(path.join(dir, d, 'SKILL.md')));
@@ -93,6 +94,8 @@ module.exports = function stub(harness) {
     for (const s of sources) report.hooks.push(...hookCommands(json(sourceFiles[s])));
     report.rules = (settings.permissions && settings.permissions.allow) || [];
     report.settings = settings;
+    // claude makes its proxy bridge sockets in the TMPDIR it starts with.
+    report.tmpdir = process.env.TMPDIR || null;
     if (!args.includes('--strict-mcp-config')) Object.assign(report.mcp, json(global).mcpServers || {});
     if (after('--mcp-config')) Object.assign(report.mcp, json(after('--mcp-config')).mcpServers || {});
     report.auth = read(path.join(dir, '.credentials.json'));
@@ -159,6 +162,9 @@ module.exports = function stub(harness) {
     report.mcp = Object.fromEntries(Object.keys(config.mcp_servers || {}).map((k) => [k, true]));
     report.auth = read(path.join(dir, 'auth.json'));
     report.env = read(path.join(dir, '.env'));
+    // codex resolves :tmpdir from the TMPDIR it starts with.
+    report.tmpdir = process.env.TMPDIR || null;
+    report.tmpEnv = { TMP: process.env.TMP || null, TEMP: process.env.TEMP || null, JAVA_TOOL_OPTIONS: process.env.JAVA_TOOL_OPTIONS || null };
     // codex keeps sessions under its home; a resume must find the first one.
     const sessions = path.join(dir, 'sessions');
     report.resumed = args.includes('resume');

@@ -5,7 +5,144 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
-const { makeRepo, ROOT } = require('./helpers');
+const { makeRepo, ROOT, detachedAlive } = require('./helpers');
+const { tempRoot, liveRoot } = require('./tmp-root');
+
+test('test temp roots prefer explicit overrides and otherwise use the user cache on each platform', () => {
+  const home = path.join(ROOT, 'fixture-home');
+  const cache = path.join(home, 'custom-cache');
+  const testTmp = path.join(home, 'test-tmp');
+  const tmp = path.join(home, 'tmp');
+  for (const [platform, env, expected] of [
+    ['linux', { HOME: home }, path.join(home, '.cache', 'tower-crane', 'test-tmp')],
+    ['darwin', { HOME: home }, path.join(home, '.cache', 'tower-crane', 'test-tmp')],
+    ['linux', { HOME: home, XDG_CACHE_HOME: cache }, path.join(cache, 'tower-crane', 'test-tmp')],
+    ['win32', { USERPROFILE: home, LOCALAPPDATA: cache }, path.join(cache, 'tower-crane', 'test-tmp')],
+    ['win32', { USERPROFILE: home }, path.join(home, 'AppData', 'Local', 'tower-crane', 'test-tmp')],
+    ['linux', { HOME: home, TOWER_CRANE_TMP: tmp }, tmp],
+    ['win32', { USERPROFILE: home, TOWER_CRANE_TMP: tmp, TOWER_CRANE_TEST_TMP: testTmp }, testTmp],
+  ]) assert.equal(tempRoot(env, platform), expected);
+});
+
+test('live probes keep their fixtures in a cache directory of their own, beside the churning test temp root', () => {
+  const home = path.join(ROOT, 'fixture-home');
+  const cache = path.join(home, 'custom-cache');
+  const testTmp = path.join(home, 'test-tmp');
+  for (const [platform, env, expected] of [
+    ['linux', { HOME: home }, path.join(home, '.cache', 'tower-crane-live')],
+    ['linux', { HOME: home, XDG_CACHE_HOME: cache }, path.join(cache, 'tower-crane-live')],
+    ['linux', { HOME: home, TOWER_CRANE_TEST_TMP: testTmp }, path.join(home, '.cache', 'tower-crane-live')],
+    ['win32', { USERPROFILE: home, LOCALAPPDATA: cache }, path.join(cache, 'tower-crane-live')],
+    ['win32', { USERPROFILE: home }, path.join(home, 'AppData', 'Local', 'tower-crane-live')],
+  ]) assert.equal(liveRoot(env, platform), expected);
+});
+
+test('repository seeds, test helpers and gate scratch share the cache default and overrides', (t) => {
+  const h = makeRepo(t);
+  const probe = `
+    const fs = require('node:fs');
+    const { TMP_ROOT } = require('./test/helpers');
+    if (!fs.existsSync(TMP_ROOT)) throw new Error('the helper root must exist without global setup');
+    const { createRepoSeed, cleanupRepoSeed } = require('./test/repo-seed');
+    const { scratch } = require('./test/gates/helpers');
+    const seed = createRepoSeed();
+    const gate = scratch('root-probe');
+    try { console.log(JSON.stringify([TMP_ROOT, require('node:path').dirname(seed.base), require('node:path').dirname(gate)])); }
+    finally { cleanupRepoSeed(seed); fs.rmSync(gate, { recursive: true, force: true }); }
+  `;
+  const cache = process.platform === 'win32'
+    ? path.join(h.env.HOME, 'AppData', 'Local')
+    : path.join(h.env.HOME, '.cache');
+  for (const [overrides, expected] of [
+    [{}, path.join(cache, 'tower-crane', 'test-tmp')],
+    [{ TOWER_CRANE_TMP: path.join(h.base, 'tmp') }, path.join(h.base, 'tmp')],
+    [{ TOWER_CRANE_TMP: path.join(h.base, 'tmp'), TOWER_CRANE_TEST_TMP: path.join(h.base, 'test-tmp') }, path.join(h.base, 'test-tmp')],
+  ]) {
+    const env = { ...h.env, USERPROFILE: h.env.HOME, XDG_CACHE_HOME: '', LOCALAPPDATA: '',
+      TOWER_CRANE_TMP: '', TOWER_CRANE_TEST_TMP: '', ...overrides };
+    const result = cp.spawnSync(process.execPath, ['-e', probe], { cwd: ROOT, env, encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(JSON.parse(result.stdout), [expected, expected, expected]);
+  }
+});
+
+for (const [fileTest, finish, status] of [
+  [true, '', 0],
+  [false, '', 0],
+  // These exits skip beforeExit, so only the exit listener can remove the fixture.
+  [false, 'process.exit(3);', 3],
+  [false, "throw new Error('script failed');", 1],
+]) test(`fixtures created without a test context are removed after completion (test=${fileTest}${finish && `, ${finish}`})`, (t) => {
+  const h = makeRepo(t);
+  const output = path.join(h.base, 'fixture.json');
+  const file = path.join(h.base, 'fixture-lifetime.test.js');
+  const body = `
+const test = require('node:test');
+const fs = require('node:fs');
+const { makeRepo } = require(${JSON.stringify(path.join(ROOT, 'test/helpers.js'))});
+const create = () => {
+  const fixture = makeRepo();
+  fs.writeFileSync(${JSON.stringify(output)}, JSON.stringify({ base: fixture.base }));
+};
+${fileTest ? "test('file fixture', create);" : 'create();'}
+${finish}
+`;
+  fs.writeFileSync(file, body);
+  const result = cp.spawnSync(process.execPath, [...(fileTest ? ['--test'] : []), file], {
+    env: { ...h.env, NODE_TEST_CONTEXT: undefined, TOWER_CRANE_TEST_TMP: path.join(h.base, 'scratch') },
+    encoding: 'utf8', timeout: 30000,
+  });
+  assert.equal(result.status, status, result.stderr + result.stdout);
+  const { base } = JSON.parse(fs.readFileSync(output, 'utf8'));
+  assert.equal(fs.existsSync(base), false, 'completion owns fixtures without a per-test context');
+  assert.deepEqual(fs.readdirSync(path.join(h.base, 'scratch')), []);
+});
+
+test('fixture teardown stops a detached process recorded while it stops an earlier one', {
+  skip: process.platform !== 'linux' && 'reads process state from /proc',
+}, async (t) => {
+  const observer = makeRepo(t);
+  const out = path.join(observer.base, 'next-monitor-pid');
+  t.after(() => {
+    try { process.kill(-Number(fs.readFileSync(out, 'utf8')), 'SIGKILL'); } catch { /* already stopped */ }
+  });
+  const h = makeRepo();
+  const records = path.join(h.base, 'detached');
+  fs.mkdirSync(records);
+  const record = (kind, args) => {
+    const child = cp.spawn(process.execPath, args, { detached: true, stdio: 'ignore' });
+    child.unref();
+    fs.writeFileSync(path.join(records, `${child.pid}.json`), JSON.stringify({ pid: child.pid, kind }));
+    return child;
+  };
+  const worker = record('worker', ['-e', 'setInterval(() => {}, 1000)']);
+  // Like a monitor redispatching after its worker ends, this one starts and records the next
+  // monitor only once teardown has stopped the worker.
+  record('monitor', ['-e', `
+const cp = require('node:child_process');
+const fs = require('node:fs');
+const path = require('node:path');
+const [worker, records, out] = process.argv.slice(1);
+const alive = () => {
+  try { return !/^[ZX]/.test(fs.readFileSync('/proc/' + worker + '/stat', 'utf8').split(') ').at(-1)); }
+  catch { return false; }
+};
+const timer = setInterval(() => {
+  if (alive()) return;
+  clearInterval(timer);
+  const next = cp.spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: 'ignore' });
+  fs.writeFileSync(path.join(records, next.pid + '.json'), JSON.stringify({ pid: next.pid, kind: 'monitor' }));
+  fs.writeFileSync(out, String(next.pid));
+  process.exit(0);
+}, 20);
+`, String(worker.pid), records, out]);
+  await h.cleanup();
+  assert.equal(fs.existsSync(h.base), false);
+  const next = { pid: Number(fs.readFileSync(out, 'utf8')), kind: 'monitor' };
+  const deadline = Date.now() + 10000;
+  while (detachedAlive(next) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(detachedAlive(next), false, 'the monitor recorded during teardown outlived it');
+});
 
 test('the test runner emits one capped concurrency value, including repeated and split options', (t) => {
   const h = makeRepo(t);
@@ -40,7 +177,7 @@ test('mutation fallback requires a green baseline in a copy containing all test 
     fs.mkdirSync(path.dirname(target), { recursive: true });
     fs.writeFileSync(target, text);
   };
-  for (const file of ['test/run.js', 'test/global-setup.js', 'test/repo-seed.js']) {
+  for (const file of ['test/run.js', 'test/global-setup.js', 'test/repo-seed.js', 'test/tmp-root.js']) {
     write(file, fs.readFileSync(path.join(ROOT, file), 'utf8'));
   }
   write('test/gates/.keep', '');

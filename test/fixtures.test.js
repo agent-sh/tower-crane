@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
-const { makeRepo, copyRepo, TMP_ROOT, ROOT } = require('./helpers');
+const { makeRepo, copyRepo, TMP_ROOT, ROOT, HARNESS_GUARD } = require('./helpers');
 const { gateFixture, gateEvidence } = require('./gate-helpers');
 
 // Runs f and returns the fixture directories it made, recorded by wrapping mkdtemp.
@@ -81,6 +81,36 @@ require(${JSON.stringify(path.join(ROOT, 'lib/broker.js'))}).start({
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   await h.cleanup();
   assert.equal(fs.existsSync(dir), false, 'the fixture owns the killed broker socket too');
+});
+
+// A rung with no stub resolves its harness from PATH. In a non-live run that
+// must be the guard, and the test that owns the fixture fails at cleanup.
+test('a fixture spawn without a stub reaches the harness guard and fails its test, not a real codex or claude', {
+  skip: !HARNESS_GUARD ? 'a live opt-in lifts the guard' : process.platform === 'win32' && 'the guard self-test runs on POSIX hosts',
+}, async () => {
+  const h = makeRepo();
+  try {
+    const first = (h.env.PATH || h.env.Path).split(path.delimiter)[0];
+    assert.equal(first, HARNESS_GUARD.dir, 'the guard comes first on every fixture PATH');
+    h.init();
+    // The fixture ladder runs medium on codex and hard on claude.
+    for (const [title, tier] of [['Codex', 'medium'], ['Claude', 'hard']]) {
+      const id = h.ok(['task', 'add', '--title', title, '--acceptance', 'works', '--tier', tier]);
+      h.ok(['brief', 'set', id, '-'], { input: `Run ${title}.\n` });
+      h.ok(['spawn', '--task', id, '--agent', 'orchestrator']);
+    }
+    const calls = () => {
+      try { return fs.readFileSync(HARNESS_GUARD.hits, 'utf8').split('\n').slice(0, -1).map((line) => JSON.parse(line)); }
+      catch (e) { if (e.code === 'ENOENT') return []; throw e; }
+    };
+    const mine = () => calls().filter((hit) => hit.state === h.state).map((hit) => hit.name).sort();
+    for (let deadline = Date.now() + 60000; Date.now() < deadline && new Set(mine()).size < 2;) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    assert.deepEqual([...new Set(mine())], ['claude', 'codex']);
+  } finally {
+    await assert.rejects(h.cleanup(), /a non-live test started a real harness instead of a stub:[\s\S]*"name":"(codex|claude)"/);
+  }
 });
 
 test('gate fixture creation and restoration recover from an incomplete native directory copy', (t) => {

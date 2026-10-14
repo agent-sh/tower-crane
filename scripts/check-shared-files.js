@@ -53,7 +53,9 @@ function releaseEdit(root, git, sha) {
 function checkChanges(root, base) {
   const git = (args) => cp.execFileSync('git', args, { cwd: root, encoding: 'utf8', timeout: 30000 });
   const sha = normalizeText(git(['rev-parse', '--verify', `${base}^{commit}`])).trim();
-  const fields = git(['diff', '--name-status', '--no-renames', '-z', sha, '--']).split('\0');
+  // Compare from the merge base: a branch behind its base would otherwise see the base's newer files as deletions.
+  const from = normalizeText(git(['merge-base', sha, 'HEAD'])).trim();
+  const fields = git(['diff', '--name-status', '--no-renames', '-z', from, '--']).split('\0');
   fields.pop();
   for (const file of git(['ls-files', '--others', '--exclude-standard', '-z']).split('\0').filter(Boolean)) {
     fields.push('A', file);

@@ -8,6 +8,10 @@ const file = process.env.AUTOMATION_GITHUB;
 const state = JSON.parse(fs.readFileSync(file, 'utf8'));
 state.calls ||= [];
 state.calls.push(args);
+if (process.env.AUTOMATION_ENV_PROBE) {
+  const { HOME, PATH, XDG_CACHE_HOME, TOWER_CRANE_SANDBOX, TOWER_CRANE_AGENT, TOWER_CRANE_TASK } = process.env;
+  fs.appendFileSync(process.env.AUTOMATION_ENV_PROBE, JSON.stringify({ args, HOME, PATH, XDG_CACHE_HOME, TOWER_CRANE_SANDBOX, TOWER_CRANE_AGENT, TOWER_CRANE_TASK }) + '\n');
+}
 // Write through a rename so a test reading the file never sees it truncated.
 const save = () => {
   fs.writeFileSync(`${file}.${process.pid}`, JSON.stringify(state));
@@ -72,6 +76,14 @@ if (args[0] === 'pr') {
   save();
   console.error('HTTP 502: Bad Gateway');
   process.exit(1);
+} else if (args[0] === 'api' && args[1] === '--method' && args[2] === 'POST') {
+  // A reply on a review thread: pulls/N/comments/ID/replies with -f body=TEXT.
+  const thread = Number(/\/pulls\/\d+\/comments\/(\d+)\/replies$/.exec(args[3])?.[1]);
+  if (!thread) throw new Error(`unexpected fixture POST ${args[3]}`);
+  const reply = { id: 900 + (state.comments || []).length, in_reply_to_id: thread, user: 'orchestrator-bot',
+    body: args[args.indexOf('-f') + 1].replace(/^body=/, '') };
+  (state.comments ||= []).push(reply);
+  out = JSON.stringify({ id: reply.id, html_url: `https://github.com/acme/demo/pull/7#discussion_r${reply.id}` });
 } else if (args[0] === 'api' && /\/(?:pulls|issues)\/\d+\/comments(?:\?|$)/.test(args[1])) {
   // Already in the shape the caller's --jq filter produces: one comment per line.
   out = (state.comments || []).map((c) => JSON.stringify(c)).join('\n');
@@ -79,7 +91,8 @@ if (args[0] === 'pr') {
   const sha = /commits\/([a-f\d]+)/.exec(args[1])?.[1];
   const status = state.ci?.[sha] || 'success';
   const suite = args[1].includes('check-suites');
-  out = JSON.stringify({
+  // 'none' is CI that never started: no check runs or suites at the commit.
+  out = status === 'none' ? '' : JSON.stringify({
     ...(suite ? { id: 1, runs: 1 } : { name: 'test', suite: 1 }),
     app: 'fixture', status: status === 'pending' ? 'in_progress' : 'completed',
     conclusion: status === 'pending' ? null : status,

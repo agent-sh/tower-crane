@@ -50,7 +50,10 @@ test('one orchestrator session holds writes while reads, release, expiry and own
   h.ok(['inbox'], second);
   assert.deepEqual(lease(), held, 'another reader cannot renew the holder');
   h.ok(['status'], first);
-  assert.ok(Date.parse(lease().heartbeat) > Date.parse(held.heartbeat));
+  assert.deepEqual(lease(), held, 'a fresh heartbeat is not renewed');
+  h.ok(['status'], { env: { ...first.env, TOWER_CRANE_TEST_NOW: String(Date.parse(held.heartbeat) + 61000),
+    NODE_OPTIONS: `--require=${JSON.stringify(path.join(__dirname, 'fixtures', 'shifted-clock.js'))}` } });
+  assert.ok(Date.parse(lease().heartbeat) > Date.parse(held.heartbeat), 'a due heartbeat is renewed by a read');
   const releaseDenied = h.run(['orchestrator', 'release'], second);
   assert.equal(releaseDenied.code, 1);
   assert.match(releaseDenied.stderr, /orchestrator lease/);
@@ -77,38 +80,297 @@ test('one orchestrator session holds writes while reads, release, expiry and own
   h.ok(['validate'], second);
 });
 
-test('two live copies of the same harness session cannot both drive the queue', async (t) => {
+test('orchestrator status takes no state lock, and a due renewal never waits for a busy one', (t) => {
+  const h = makeProjectRepo(t);
+  const S = require('../lib/state');
+  const holder = { TOWER_CRANE_AGENT: 'orchestrator', CLAUDE_SESSION_ID: 'holder' };
+  h.ok(['task', 'add', '--title', 'held task', '--acceptance', 'holds the lease'], { env: holder });
+  const lease = () => h.readState('tasks.json').orchestrator_lease;
+  const meter = path.join(h.base, 'locked-reads.json');
+  const preload = (...files) => files.map((f) => `--require=${JSON.stringify(path.join(__dirname, 'fixtures', f))}`).join(' ');
+  const fresh = h.run(['status'], { env: { ...holder, LOCKED_READS: meter, NODE_OPTIONS: preload('locked-reads.js') } });
+  assert.equal(fresh.code, 0, fresh.stderr);
+  assert.equal(JSON.parse(fs.readFileSync(meter, 'utf8')).holdings, 0, 'status with a fresh lease takes no lock');
+  // Age the heartbeat rather than shift the clock: without a start-ticks
+  // identity (Windows, macOS) a shifted clock would make the held lock stale.
+  const doc = h.readState('tasks.json');
+  doc.orchestrator_lease.heartbeat = new Date(Date.now() - 61000).toISOString();
+  h.writeState('tasks.json', doc);
+  const aged = lease();
+  const lock = S.acquireLock(h.state);
+  try {
+    const started = Date.now();
+    const due = h.run(['status'], { env: { ...holder, LOCKED_READS: meter, NODE_OPTIONS: preload('locked-reads.js') } });
+    assert.equal(due.code, 0, due.stderr);
+    assert.ok(Date.now() - started < 30000, 'a read does not wait out the lock bound');
+    assert.equal(JSON.parse(fs.readFileSync(meter, 'utf8')).holdings, 0);
+    assert.deepEqual(lease(), aged, 'a busy lock leaves the renewal to a later command');
+  } finally {
+    S.releaseLock(lock);
+  }
+});
+
+test('without a start-ticks identity, status with a due heartbeat leaves a live writer holding the lock', async (t) => {
+  const h = makeProjectRepo(t);
+  const holder = { TOWER_CRANE_AGENT: 'orchestrator', CLAUDE_SESSION_ID: 'holder' };
+  h.ok(['task', 'add', '--title', 'held task', '--acceptance', 'holds the lease'], { env: holder });
+  const doc = h.readState('tasks.json');
+  doc.orchestrator_lease.heartbeat = new Date(Date.now() - 61000).toISOString();
+  h.writeState('tasks.json', doc);
+  const aged = h.readState('tasks.json').orchestrator_lease;
+  // As on Windows and macOS: the writer's marker has no start ticks.
+  const paused = path.join(h.base, 'writer-holds');
+  const writer = h.runAsync(['task', 'note', 'T1', 'written behind status'], { hooks: { HOOK_PAUSE_LOCKED: paused, HOOK_NO_START_TICKS: '1' } });
+  const end = Date.now() + 20000;
+  while (!fs.existsSync(paused)) {
+    if (Date.now() > end) throw new Error('the writer never took the lock');
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  try {
+    const lock = path.join(h.state, 'lock');
+    const [name] = fs.readdirSync(lock);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(lock, name), 'utf8')).start_ticks, undefined);
+    const meter = path.join(h.base, 'locked-reads.json');
+    const due = h.run(['status'], { env: { ...holder, LOCKED_READS: meter,
+      NODE_OPTIONS: `--require=${JSON.stringify(path.join(__dirname, 'fixtures', 'locked-reads.js'))}` } });
+    assert.equal(due.code, 0, due.stderr);
+    assert.equal(JSON.parse(fs.readFileSync(meter, 'utf8')).holdings, 0, 'status neither waits for nor breaks the live lock');
+    assert.deepEqual(fs.readdirSync(lock), [name], 'the writer still holds its lock');
+    assert.deepEqual(h.readState('tasks.json').orchestrator_lease, aged);
+  } finally {
+    fs.writeFileSync(`${paused}.go`, '');
+  }
+  const done = await writer;
+  assert.equal(done.code, 0, done.stderr);
+  assert.deepEqual(h.readState('tasks.json').tasks[0].notes.map((n) => n.text), ['written behind status']);
+});
+
+test('harness scripts share the lease while rival sessions and resumed live copies refuse writes', async (t) => {
+  const clients = [];
+  const closed = [];
+  // Windows cannot remove the copied harness executable while a client runs.
+  t.after(async () => {
+    clients.forEach((client) => client.kill());
+    await Promise.all(closed);
+  });
   const h = makeProjectRepo(t);
   const env = { ...h.env, TOWER_CRANE_AGENT: 'orchestrator', CLAUDE_SESSION_ID: 'resumed-session' };
-  const clients = [0, 1].map(() => cp.fork(path.join(__dirname, 'fixtures', 'orchestrator-session.js'),
-    [BIN, h.repo], { env, stdio: ['ignore', 'ignore', 'pipe', 'ipc'] }));
-  t.after(() => clients.forEach((client) => client.kill()));
-  const run = (client, args) => new Promise((resolve, reject) => {
+  const script = path.join(h.repo, process.platform === 'win32' ? 'loop.ps1' : 'loop.sh');
+  fs.writeFileSync(script, process.platform === 'win32'
+    ? '$command = $args[0]\n$commandArgs = $args[1..($args.Length - 1)]\n& $command @commandArgs\nexit $LASTEXITCODE\n'
+    : '"$@"\nexit $?\n');
+  // Windows retains the executable name when Node changes its process title.
+  const execPath = process.platform === 'win32' ? path.join(h.repo, 'claude.exe') : process.execPath;
+  if (process.platform === 'win32') fs.copyFileSync(process.execPath, execPath);
+  clients.push(...['resumed-session', 'resumed-session', 'different-session'].map((session) =>
+    cp.fork(path.join(__dirname, 'fixtures', 'orchestrator-session.js'), [BIN, h.repo],
+      { execPath, env: { ...env, CLAUDE_SESSION_ID: session }, stdio: ['ignore', 'ignore', 'pipe', 'ipc'] })));
+  closed.push(...clients.map((client) => new Promise((resolve) => client.once('close', resolve))));
+  const run = (client, args, fromScript = false) => new Promise((resolve, reject) => {
     client.once('error', reject);
     client.once('message', resolve);
-    client.send(args);
+    client.send(fromScript ? { args, script } : args);
   });
   const first = await run(clients[0], ['task', 'add', '--title', 'first copy', '--acceptance', 'one writer']);
   assert.equal(first.code, 0, first.stderr);
   const lease = h.readState('tasks.json').orchestrator_lease;
-  const second = await run(clients[1], ['task', 'add', '--title', 'second copy', '--acceptance', 'refused']);
-  assert.equal(second.code, 1);
-  assert.match(second.stderr, /orchestrator lease.*resumed-session/);
+  assert.equal(lease.pid, clients[0].pid, 'the nearest harness holds the lease');
+  assert.equal(lease.persistent, true, 'the harness, not its per-command script, controls early release');
+  if (process.platform === 'linux') {
+    assert.equal(lease.pidns, fs.readlinkSync('/proc/self/ns/pid'));
+    assert.equal(typeof lease.start_ticks, 'string');
+  }
+  const scripted = await run(clients[0], ['task', 'note', 'T1', 'script under holder'], true);
+  assert.equal(scripted.code, 0, scripted.stderr);
+  assert.equal(h.readState('tasks.json').orchestrator_lease.session_id, lease.session_id);
+  for (const client of clients.slice(1)) {
+    const before = h.readState('tasks.json');
+    const second = await run(client, ['task', 'add', '--title', 'second copy', '--acceptance', 'refused'], true);
+    assert.equal(second.code, 1);
+    assert.match(second.stderr, /orchestrator lease.*resumed-session/);
+    assert.deepEqual(h.readState('tasks.json'), before, 'refused scripts leave state unchanged');
+  }
   assert.equal(h.readState('tasks.json').tasks.length, 1);
   assert.equal((await run(clients[1], ['status'])).code, 0, 'competing process can read');
   assert.equal((await run(clients[0], ['task', 'note', 'T1', 'same live process'])).code, 0);
   assert.equal(h.readState('tasks.json').orchestrator_lease.session_id, lease.session_id);
-  assert.equal((await run(clients[0], ['orchestrator', 'release'])).code, 0);
+  assert.equal((await run(clients[0], ['orchestrator', 'release'], true)).code, 0);
   assert.equal((await run(clients[1], ['task', 'note', 'T1', 'released process replaced'])).code, 0);
 });
 
+test('identity selects the nearest harness or login shell and preserves the caller fallback', () => {
+  const script = `
+const assert = require('node:assert/strict');
+const C = require(${JSON.stringify(path.join(__dirname, '../lib/commands'))});
+const modulePath = ${JSON.stringify(path.join(__dirname, '../lib/orchestrator'))};
+Object.defineProperty(process, 'platform', { value: 'win32' });
+const variants = [
+  ...['claude', 'codex', 'opencode', 'agy', 'pi'].map(name => [name + '.exe', name, true]),
+  ['node.exe', '"C:\\\\Program Files\\\\node.exe" "C:\\\\tools\\\\pi.js"', true],
+  ['node', 'node /tools/node_modules/@anthropic-ai/claude-code/cli.js', true],
+  ['node', 'node /tools/node_modules/@mariozechner/pi-coding-agent/dist/cli.js', true],
+  ['bash', '-bash', true],
+  ['zsh', 'zsh -il', true],
+  ['bash', 'bash -l /tools/script.sh', false],
+  ['bash', 'bash /tools/codex', false],
+  ['powershell.exe', 'powershell.exe -NoProfile', true],
+  ['powershell.exe', 'powershell.exe -NoProfile -File loop.ps1', false],
+  ['node.exe', 'node.exe /tools/script.js codex', false],
+  ['node', 'node /tools/codex/loop.js', false],
+];
+for (const [Name, CommandLine, isHarness] of variants) {
+  const caller = { ProcessId: process.ppid, ParentProcessId: 444444, Name: 'helper.exe',
+    CreationDate: 'helper-start', CommandLine: 'helper.exe' };
+  const candidate = { ProcessId: 444444, ParentProcessId: 555555, Name,
+    CreationDate: 'harness-start', CommandLine };
+  const outer = { ProcessId: 555555, ParentProcessId: 1, Name: 'codex.exe', CreationDate: 'outer-start' };
+  C.execFileSync = () => JSON.stringify([caller, candidate, ...(isHarness ? [outer] : [])]);
+  delete require.cache[require.resolve(modulePath)];
+  const O = require(modulePath);
+  const ctx = { env: { CLAUDE_SESSION_ID: 'session' }, agent: 'orchestrator' };
+  const first = O.identity(ctx);
+  assert.equal(first.pid, isHarness ? candidate.ProcessId : caller.ProcessId, CommandLine);
+  assert.equal(first.persistent, isHarness, CommandLine);
+  const differentId = O.identity({ ...ctx, env: { CLAUDE_SESSION_ID: 'different' } });
+  assert.notEqual(first.session_id, differentId.session_id, CommandLine);
+  if (!isHarness) {
+    const st = { tasks: { orchestrator_lease: { ...first, pid: 2147483647, heartbeat: new Date().toISOString() } },
+      project: { limits: { lease_minutes: 60 } } };
+    assert.equal(O.live(st), true, 'a fallback caller cannot release by exiting: ' + CommandLine);
+    continue;
+  }
+  caller.ProcessId = 666666;
+  // A different intermediate script process still belongs to the nearest harness.
+  const shell = { ProcessId: process.ppid, ParentProcessId: 666666, Name: 'powershell.exe',
+    CreationDate: 'shell-start', CommandLine: 'powershell.exe -File loop.ps1' };
+  C.execFileSync = () => JSON.stringify([shell, caller, candidate, outer]);
+  delete require.cache[require.resolve(modulePath)];
+  assert.deepEqual(require(modulePath).identity(ctx), first, CommandLine);
+  candidate.CreationDate = 'reused-pid-start';
+  delete require.cache[require.resolve(modulePath)];
+  assert.notEqual(require(modulePath).identity(ctx).session_id, first.session_id, CommandLine);
+}
+`;
+  const result = cp.spawnSync(process.execPath, ['-e', script], { encoding: 'utf8', timeout: 10000 });
+  assert.equal(result.status, 0, result.stderr);
+});
+
+// Runs identity() in a child that sees the given process rows; PPID and SELF name the child's own pids.
+function mockedIdentity(platform, rows) {
+  const script = `
+const fs = require('node:fs');
+const C = require(${JSON.stringify(path.join(__dirname, '../lib/commands'))});
+const pids = (value) => value === 'PPID' ? process.ppid : value === 'SELF' ? process.pid : value;
+const rows = JSON.parse(process.env.ROWS).map((row) => Object.fromEntries(Object.entries(row).map(([k, v]) => [k, pids(v)])));
+Object.defineProperty(process, 'platform', { value: process.env.PLATFORM });
+C.execFileSync = () => JSON.stringify(rows);
+const { readFileSync, readlinkSync } = fs;
+const row = (file) => rows.find((r) => file.startsWith('/proc/' + r.ProcessId + '/'));
+fs.readFileSync = (file, ...rest) => {
+  if (typeof file !== 'string' || !file.startsWith('/proc/') || file.startsWith('/proc/self/')) return readFileSync(file, ...rest);
+  const r = row(file);
+  if (!r) throw Object.assign(new Error('no process'), { code: 'ENOENT' });
+  if (file.endsWith('/cmdline')) return r.Args.join('\\0') + '\\0';
+  return r.ProcessId + ' (' + r.Name + ') S ' + r.ParentProcessId + ' 0'.repeat(17) + ' ' + r.CreationDate + ' 0 0';
+};
+fs.readlinkSync = (file, ...rest) => {
+  if (file === '/proc/self/ns/pid') return 'pid:[4026531836]';
+  if (typeof file !== 'string' || !file.startsWith('/proc/')) return readlinkSync(file, ...rest);
+  const r = row(file);
+  if (!r?.Stdin) throw Object.assign(new Error('no descriptor'), { code: 'EACCES' });
+  return r.Stdin;
+};
+const O = require(${JSON.stringify(path.join(__dirname, '../lib/orchestrator'))});
+const lease = O.identity({ env: { CLAUDE_SESSION_ID: 'session' }, agent: 'orchestrator' });
+console.log(JSON.stringify({ ...lease, ppid: process.ppid }));
+`;
+  const result = cp.spawnSync(process.execPath, ['-e', script], {
+    env: { ...process.env, PLATFORM: platform, ROWS: JSON.stringify(rows) }, encoding: 'utf8', timeout: 10000,
+  });
+  assert.equal(result.status, 0, result.stderr);
+  return JSON.parse(result.stdout);
+}
+
+test('session shells are recognized by login or interactive options or a terminal on stdin', () => {
+  for (const [Name, Args, Stdin, session] of [
+    ['bash', ['/bin/bash', '--posix', '--login'], 'pipe:[7]', true],
+    ['bash', ['-bash'], null, true],
+    ['bash', ['bash'], '/dev/pts/3', true],
+    ['zsh', ['zsh'], '/dev/tty2', true],
+    ['fish', ['fish', '--interactive'], null, true],
+    ['bash', ['bash', '--rcfile', 'profile.sh', '-o', 'vi'], '/dev/pts/3', true],
+    ['bash', ['bash'], 'pipe:[42]', false],
+    ['bash', ['bash'], null, false],
+    ['bash', ['bash', '-ci', 'tower-crane task list'], '/dev/pts/3', false],
+    ['bash', ['/bin/bash', '--login', '-c', 'loop'], '/dev/pts/3', false],
+    ['bash', ['bash', '--login', 'loop.sh'], '/dev/pts/3', false],
+  ]) {
+    const label = `${Args.join(' ')} stdin ${Stdin}`;
+    const lease = mockedIdentity('linux', [
+      { ProcessId: 'PPID', ParentProcessId: 444444, Name: 'node', Args: ['node', 'helper.js'], CreationDate: '300' },
+      { ProcessId: 444444, ParentProcessId: 555555, Name, Args, Stdin, CreationDate: '200' },
+      { ProcessId: 555555, ParentProcessId: 1, Name: 'kitty', Args: ['kitty'], CreationDate: '100' },
+    ]);
+    assert.equal(lease.pid, session ? 444444 : lease.ppid, label);
+    assert.equal(lease.persistent, session, label);
+  }
+});
+
+test('Windows command lines keep backslash-escaped quotes inside one argument', () => {
+  const { commandLineArgs } = require('../lib/orchestrator');
+  for (const [line, args] of [
+    ['bash.exe -c -l "cd /x && grep -i \\"a b\\" f"', ['bash.exe', '-c', '-l', 'cd /x && grep -i "a b" f']],
+    ['"C:\\Program Files\\Git\\bin\\bash.exe" --login -i', ['C:\\Program Files\\Git\\bin\\bash.exe', '--login', '-i']],
+    ['node.exe "C:\\a b\\\\" x', ['node.exe', 'C:\\a b\\', 'x']],
+    ['x a\\\\\\"b c\\d', ['x', 'a\\"b', 'c\\d']],
+    ['x "a""b" ""', ['x', 'ab', '']],
+    ['', []],
+    [null, []],
+  ]) assert.deepEqual(commandLineArgs(line), args, String(line));
+  const shell = (CommandLine) => mockedIdentity('win32', [
+    { ProcessId: 'PPID', ParentProcessId: 444444, Name: 'helper.exe', CreationDate: 'helper-start', CommandLine: 'helper.exe' },
+    { ProcessId: 444444, ParentProcessId: 1, Name: 'bash.exe', CreationDate: 'bash-start', CommandLine },
+  ]);
+  const command = shell('bash.exe -c -l "cd /x && grep -i \\"a b\\" f"');
+  assert.equal(command.pid, command.ppid, 'a Git Bash -c shell is a per-command shell');
+  assert.equal(command.persistent, false);
+  const login = shell('"C:\\Program Files\\Git\\bin\\bash.exe" --login -i');
+  assert.equal(login.pid, 444444, 'a Git Bash login shell is a session');
+  assert.equal(login.persistent, true);
+});
+
+test('the Windows ancestor walk stops at a parent created after its child', () => {
+  const walk = (callerStart, harnessStart) => mockedIdentity('win32', [
+    { ProcessId: 'SELF', ParentProcessId: 'PPID', Name: 'node.exe', CreationDate: '500', CommandLine: 'node.exe tower-crane.js' },
+    { ProcessId: 'PPID', ParentProcessId: 444444, Name: 'helper.exe', CreationDate: callerStart, CommandLine: 'helper.exe' },
+    { ProcessId: 444444, ParentProcessId: 1, Name: 'claude.exe', CreationDate: harnessStart, CommandLine: 'claude.exe' },
+  ]);
+  const parent = walk('400', '300');
+  assert.equal(parent.pid, 444444, 'an older harness is the session');
+  assert.equal(parent.persistent, true);
+  const reused = walk('400', '450');
+  assert.equal(reused.pid, reused.ppid, 'a newer process at the dead parent pid is not an ancestor');
+  assert.equal(reused.persistent, false);
+  const callerReused = walk('600', '300');
+  assert.equal(callerReused.pid, callerReused.ppid);
+  assert.equal(callerReused.persistent, false, 'a caller newer than this process breaks the chain at once');
+});
+
 test('a lease whose holder process exited is released at once, including a reused pid', async (t) => {
+  const clients = [];
+  const closed = [];
+  t.after(async () => {
+    clients.forEach((client) => client.kill());
+    await Promise.all(closed);
+  });
   const h = makeProjectRepo(t);
   const env = { ...h.env, TOWER_CRANE_AGENT: 'orchestrator', CLAUDE_SESSION_ID: 'restarted-session' };
+  const execPath = process.platform === 'win32' ? path.join(h.repo, 'claude.exe') : process.execPath;
+  if (process.platform === 'win32') fs.copyFileSync(process.execPath, execPath);
   const fork = () => cp.fork(path.join(__dirname, 'fixtures', 'orchestrator-session.js'),
-    [BIN, h.repo], { env, stdio: ['ignore', 'ignore', 'pipe', 'ipc'] });
-  const clients = [fork(), fork()];
-  t.after(() => clients.forEach((client) => client.kill()));
+    [BIN, h.repo], { execPath, env, stdio: ['ignore', 'ignore', 'pipe', 'ipc'] });
+  clients.push(fork(), fork());
+  closed.push(...clients.map((client) => new Promise((resolve) => client.once('close', resolve))));
   const run = (client, args) => new Promise((resolve, reject) => {
     client.once('error', reject);
     client.once('message', resolve);
@@ -132,12 +394,42 @@ test('a lease whose holder process exited is released at once, including a reuse
     assert.equal((await run(clients[1], ['orchestrator', 'release'])).code, 0);
     assert.equal((await run(clients[0], ['task', 'note', 'T1', 'holder again'])).code, 0);
   }
-  const exited = new Promise((resolve) => clients[0].once('exit', resolve));
   clients[0].kill();
-  await exited;
+  await closed[0];
   const taken = await run(clients[1], ['task', 'note', 'T1', 'dead holder replaced']);
   assert.equal(taken.code, 0, taken.stderr);
   assert.equal(h.readState('tasks.json').orchestrator_lease.pid, clients[1].pid);
+});
+
+test('TOWER_CRANE_VIA=automation in the environment cannot write under another session lease', (t) => {
+  const h = makeProjectRepo(t);
+  const holder = { env: { TOWER_CRANE_AGENT: 'orchestrator', CLAUDE_SESSION_ID: 'holder' } };
+  h.ok(['task', 'add', '--title', 'Held', '--acceptance', 'one writer'], holder);
+  const before = h.readState('tasks.json');
+  const events = () => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8');
+  const log = events();
+  for (const [label, extra] of [
+    ['claim alone', {}],
+    ['wrong key', { TOWER_CRANE_AUTOMATION_KEY: 'guessed' }],
+  ]) {
+    const rival = h.run(['task', 'add', '--title', 'Rival', '--acceptance', 'refused'],
+      { env: { TOWER_CRANE_AGENT: 'orchestrator', CLAUDE_SESSION_ID: 'rival', TOWER_CRANE_VIA: 'automation', ...extra } });
+    assert.equal(rival.code, 1, `${label}: ${rival.stderr}`);
+    assert.match(rival.stderr, /orchestrator lease held by orchestrator session holder/, label);
+    assert.deepEqual(h.readState('tasks.json'), before, label);
+    assert.equal(events(), log, label);
+  }
+  // The holder's own write with the claim still renews its lease and records no engine provenance.
+  // A heartbeat renews once it is a sixtieth of the lease window old, so age it first.
+  const aged = h.readState('tasks.json');
+  aged.orchestrator_lease.heartbeat = new Date(Date.now() - 61000).toISOString();
+  h.writeState('tasks.json', aged);
+  h.ok(['task', 'note', 'T1', 'holder continues'], { env: { ...holder.env, TOWER_CRANE_VIA: 'automation' } });
+  const after = h.readState('tasks.json');
+  assert.equal(after.orchestrator_lease.session_id, before.orchestrator_lease.session_id);
+  assert.notEqual(after.orchestrator_lease.heartbeat, aged.orchestrator_lease.heartbeat);
+  const note = events().trim().split('\n').map(JSON.parse).findLast((e) => e.cmd === 'task note');
+  assert.equal(note.via, undefined);
 });
 
 test('engine lease bindings reject stale work without extending the idle window', () => {
@@ -147,17 +439,18 @@ test('engine lease bindings reject stale work without extending the idle window'
   const expired = { ...old, heartbeat: '2000-01-01T00:00:00.000Z' };
   for (const [label, lease, bound, ok] of [
     ['vacant', null, null, true],
-    ['idle', expired, null, true],
+    ['idle', expired, expired, true],
+    ['native writer arrived and idled out', expired, null, false],
     ['holder', old, old, true],
     ['released', null, old, false],
     ['taken over', replacement, old, false],
-    ['expired during work', expired, old, false],
+    ['expired during work', expired, old, true],
     ['native writer arrived', old, null, false],
   ]) {
     const st = { events: [], project: { limits: { lease_minutes: 60 } }, tasks: { orchestrator_lease: lease } };
     const before = structuredClone(st);
-    const ctx = { agent: 'orchestrator', agentExplicit: true, orchestratorSession: bound,
-      env: { TOWER_CRANE_AGENT: 'orchestrator', TOWER_CRANE_VIA: 'automation' } };
+    const ctx = { agent: 'orchestrator', agentExplicit: true, automation: true, orchestratorSession: bound,
+      env: { TOWER_CRANE_AGENT: 'orchestrator' } };
     if (ok) assert.doesNotThrow(() => O.guard(ctx, st, true), label);
     else assert.throws(() => O.guard(ctx, st, true), /lease changed during automation/, label);
     assert.deepEqual(st, before, label);
@@ -228,8 +521,8 @@ const C = require(${JSON.stringify(path.join(__dirname, '../lib/commands'))});
 Object.defineProperty(process, 'platform', { value: 'win32' });
 C.execFileSync = (command, args, options) => {
   if (command !== 'powershell.exe') throw new Error('unexpected command');
-  const result = [{ ProcessId: process.ppid, ParentProcessId: 1, Name: 'node.exe',
-    CreationDate: 'stable-start', CommandLine: 'node harness' }];
+  const result = [{ ProcessId: process.ppid, ParentProcessId: 1, Name: 'claude.exe',
+    CreationDate: 'stable-start', CommandLine: 'claude harness' }];
   process.send({ timeout: options.timeout });
   return cp.execFileSync(process.execPath, ['-e',
     ${JSON.stringify(`

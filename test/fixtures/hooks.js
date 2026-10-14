@@ -14,6 +14,8 @@ const cp = require('node:child_process');
 const { EventEmitter } = require('node:events');
 
 const env = process.env;
+// Process creation times are on the system clock, which HOOK_CLOCK_FILE replaces below.
+const systemNow = Date.now;
 // The probe child observes the environment passed to Git, then runs real Git.
 if (env.HOOK_GIT_ENV_REPORT && path.basename(process.argv[1] || '') === 'tower-crane.js') {
   const exec = cp.execFileSync;
@@ -66,6 +68,21 @@ if (env.HOOK_KEEP_SPAWN_DIRS) {
   };
 }
 
+// HOOK_NO_START_TICKS=1: this process writes lock markers without a start
+// identity, as on Windows and macOS, so other processes judge its live lock
+// by pid and marker age alone.
+if (env.HOOK_NO_START_TICKS) {
+  const write = fs.writeFileSync;
+  fs.writeFileSync = function markerWithoutStartTicks(file, data, ...args) {
+    if (typeof file === 'string' && /[\\/]lock\.\d+\.[0-9a-f]{16}\.new[\\/][0-9a-f]{16}$/.test(file) && typeof data === 'string') {
+      const marker = JSON.parse(data);
+      delete marker.start_ticks;
+      data = JSON.stringify(marker);
+    }
+    return write.call(this, file, data, ...args);
+  };
+}
+
 // HOOK_PIDNS=ID: this process reports ID as its pid namespace, as a command
 // in a sandbox of its own does.
 if (env.HOOK_PIDNS) {
@@ -106,7 +123,7 @@ if (env.HOOK_WATCH_READY || env.HOOK_NO_WATCH || env.HOOK_SILENT_WATCH) {
 }
 const STATE = env.HOOK_STATE ? path.resolve(env.HOOK_STATE) : null;
 const LOCK = STATE ? path.join(STATE, 'lock') : null;
-const WRAPPED = ['openSync', 'closeSync', 'readFileSync', 'readSync', 'writeFileSync', 'appendFileSync', 'renameSync', 'unlinkSync', 'rmdirSync', 'rmSync', 'linkSync', 'statSync', 'readdirSync', 'mkdirSync', 'existsSync', 'utimesSync'];
+const WRAPPED = ['openSync', 'closeSync', 'readFileSync', 'readSync', 'writeFileSync', 'writeSync', 'appendFileSync', 'fsyncSync', 'renameSync', 'unlinkSync', 'rmdirSync', 'rmSync', 'linkSync', 'statSync', 'readdirSync', 'mkdirSync', 'existsSync', 'utimesSync'];
 // Calls that remove or move what is at their first argument.
 const CHANGES = ['renameSync', 'unlinkSync', 'rmdirSync', 'rmSync', 'linkSync'];
 const BUSY = ['EEXIST', 'ENOTEMPTY', 'ENOTDIR', 'EPERM', 'EACCES'];
@@ -167,17 +184,21 @@ function before(name, args) {
   // before it lets the supervisor launch the harness (the Windows handshake).
   if (env.HOOK_STOP_GO && name === 'writeFileSync' && typeof target === 'string' && path.basename(target) === 'go'
     && path.basename(process.argv[1]) === 'tower-crane.js' && first('go')) stop(env.HOOK_STOP_GO);
+  // HOOK_BUSY_STAGED=1: removing a staged commit file fails with EPERM, as
+  // on Windows while another process holds it open.
+  if (env.HOOK_BUSY_STAGED && name === 'unlinkSync' && inState(target) && /\.commit$/.test(String(target))) {
+    throw Object.assign(new Error(`EPERM: operation not permitted, unlink '${target}'`), { code: 'EPERM' });
+  }
+  // HOOK_FAIL_EVENT_SYNC=1: the first sync of events.jsonl fails with EIO
+  // after its lines are written, as a failing disk reports it.
+  if (env.HOOK_FAIL_EVENT_SYNC && name === 'fsyncSync' && path.resolve(String(target)) === path.join(STATE, 'events.jsonl') && first('event-sync')) {
+    throw Object.assign(new Error('EIO: i/o error, fsync'), { code: 'EIO' });
+  }
   // HOOK_JITTER_MS=MS: a random pause of up to MS before each call on the state.
   if (env.HOOK_JITTER_MS && (inState(target) || inState(args[1]))) sleep(Math.floor(Math.random() * Number(env.HOOK_JITTER_MS)));
   // State commits precede board replacement; expose that interval to readers.
   if (env.HOOK_RENDER_DELAY_MS && name === 'renameSync' && args[1] === path.join(STATE, 'sketch.html')) {
     sleep(Number(env.HOOK_RENDER_DELAY_MS));
-  }
-  // Authentication reads project.json before locking; a dead-holder probe
-  // must kill the process only after its own lock marker has been published.
-  if (env.HOOK_DIE_ON && name === 'readFileSync' && inState(target) && path.basename(target) === env.HOOK_DIE_ON && ownsLock()) {
-    process.kill(process.pid, 'SIGKILL');
-    sleep(5000);
   }
   // HOOK_FAIL_LOCK=FILE: removing or moving anything at or inside the lock
   // fails with EPERM; each attempt adds a byte to FILE.
@@ -189,15 +210,57 @@ function before(name, args) {
   }
 }
 
+// A commit's two durable steps, whatever their order: tasks.json renamed into
+// place, and the event appended to events.jsonl.
+function commitStep(name, args) {
+  if (name === 'renameSync') return path.resolve(String(args[1])) === path.join(STATE, 'tasks.json');
+  return name === 'appendFileSync' && path.resolve(String(args[0])) === path.join(STATE, 'events.jsonl');
+}
+
+// A copy of tasks.json staged beside it, under whatever name a version uses.
+const stagedTasks = (name, args) => name === 'fsyncSync' && path.dirname(path.resolve(String(args[0]))) === STATE
+  && path.basename(String(args[0])).startsWith('tasks.json.');
+
+// The state files whose syncs and moves a durability test follows.
+function traced(p) {
+  const rel = path.relative(STATE, path.resolve(String(p)));
+  return rel === '' ? '.' : /^(tasks\.json|events\.jsonl)/.test(rel) && !rel.includes(path.sep) ? rel : null;
+}
+
 let pendingLockRead;
 function after(name, args, rawArgs = args) {
   const target = args[0];
+  // HOOK_SYNC_TRACE=FILE appends `fsync NAME`, `append NAME` and `rename NAME`
+  // for tasks.json, its staged copies, events.jsonl and the state directory.
+  if (env.HOOK_SYNC_TRACE && ['fsyncSync', 'appendFileSync', 'renameSync'].includes(name)) {
+    const file = traced(name === 'renameSync' ? args[1] : target);
+    if (file) real.appendFileSync(env.HOOK_SYNC_TRACE, `${name.replace('Sync', '').replace('File', '')} ${file.startsWith('tasks.json.') ? 'tasks.json.staged' : file}\n`);
+  }
+  // HOOK_DIE_COMMIT kills the CLI holding the lock inside its commit:
+  // `landed` once the first of its two durable steps is done, `staged` once
+  // a staged copy of tasks.json is synced, before either step.
+  if (env.HOOK_DIE_COMMIT && (env.HOOK_DIE_COMMIT === 'landed' ? commitStep(name, args) : stagedTasks(name, args))
+    && path.basename(process.argv[1]) === 'tower-crane.js' && ownsLock()) {
+    process.kill(process.pid, 'SIGKILL');
+    sleep(5000);
+  }
   if (env.HOOK_STOP_RENDER && name === 'renameSync' && args[1] === path.join(STATE, 'sketch.md')
     && path.basename(process.argv[1]) === 'tower-crane.js' && process.argv.includes('spawn') && first('render')) stop(env.HOOK_STOP_RENDER);
   // HOOK_STOP_STARTED=FILE stops the dispatch after it reads its supervisor's startup receipt,
   // before its spawn is committed, so the supervisor's startup window can close first.
   if (env.HOOK_STOP_STARTED && name === 'rmSync' && path.basename(target) === 'started.json'
     && path.basename(process.argv[1]) === 'tower-crane.js' && first('started')) stop(env.HOOK_STOP_STARTED);
+  // Writers read the state before they take the lock, so a test that needs a
+  // holder stops or kills it as soon as it holds the lock: HOOK_PAUSE_LOCKED=SIGNAL
+  // stops it there, HOOK_DIE_LOCKED=1 leaves the lock to a dead pid.
+  if ((env.HOOK_PAUSE_LOCKED || env.HOOK_DIE_LOCKED) && name === 'renameSync' && path.resolve(String(args[1])) === LOCK
+    && (!env.HOOK_PAUSE_PROCESS || path.basename(process.argv[1]) === env.HOOK_PAUSE_PROCESS) && ownsLock() && first('locked')) {
+    if (env.HOOK_DIE_LOCKED) {
+      process.kill(process.pid, 'SIGKILL');
+      sleep(5000);
+    }
+    stop(env.HOOK_PAUSE_LOCKED);
+  }
   // HOOK_PAUSE_ON=FILE stops at HOOK_PAUSED after its first read; HOOK_PAUSE_PROCESS
   // optionally limits the pause to one executable's basename.
   if (env.HOOK_PAUSE_ON && ['readFileSync', 'readSync'].includes(name) && inState(target) && path.basename(target) === env.HOOK_PAUSE_ON
@@ -212,6 +275,10 @@ function after(name, args, rawArgs = args) {
     pendingLockRead = undefined;
     stop(env.HOOK_STOP_LOCK_READ);
   }
+  // HOOK_STOP_ADMIN_LINK=SIGNAL: stop once a task worktree's .git file names
+  // its relocated admin directory, before the link in worktrees/ is made.
+  if (env.HOOK_STOP_ADMIN_LINK && name === 'writeFileSync' && typeof target === 'string' && path.basename(target) === '.git'
+    && /^gitdir: .*\.git-admin/.test(String(args[1])) && first('admin-link')) stop(env.HOOK_STOP_ADMIN_LINK);
   // HOOK_STOP_LOCK_CHANGE=SIGNAL: stop after the first attempt to remove or
   // move what is at or inside the lock, whether or not it worked.
   if (env.HOOK_STOP_LOCK_CHANGE && CHANGES.includes(name) && inLock(target) && first('lock-change')) stop(env.HOOK_STOP_LOCK_CHANGE);
@@ -449,21 +516,22 @@ if (env.HOOK_USAGE_WRITE_FAIL) {
 }
 
 // Track detached children outside state so teardown can await every collector.
+// A monitor marks its exit in a file of its own, named by the token its record
+// carries: it never rewrites the record a test may be reading, and a marker
+// left by an earlier process with the same pid cannot pass for its exit.
 if (env.HOOK_PROCESSES_DIR) {
   if (path.basename(process.argv[1] || '') === 'spawn-monitor.js') {
+    const token = env.HOOK_PROCESS_TOKEN || String(process.pid);
     process.once('exit', () => {
-      const file = path.join(env.HOOK_PROCESSES_DIR, `${process.pid}.json`);
-      try {
-        const tracked = JSON.parse(real.readFileSync(file, 'utf8'));
-        const tmp = `${file}.exited`;
-        real.writeFileSync(tmp, JSON.stringify({ ...tracked, exited: true }));
-        real.renameSync(tmp, file);
-      } catch (e) { if (e.code !== 'ENOENT') throw e; }
+      real.mkdirSync(env.HOOK_PROCESSES_DIR, { recursive: true });
+      real.writeFileSync(path.join(env.HOOK_PROCESSES_DIR, `${token}.exited`), '');
     });
   }
   const original = cp.spawn;
   cp.spawn = function trackDetached(file, args, options) {
     const monitor = args.some((arg) => path.basename(arg) === 'spawn-monitor.js');
+    const token = monitor && options?.detached ? require('node:crypto').randomUUID() : null;
+    if (token) options = { ...options, env: { ...(options.env || process.env), HOOK_PROCESS_TOKEN: token } };
     if (monitor && Number.isInteger(options?.stdio?.[3])) {
       options = { ...options, env: { ...options.env, HOOK_USAGE_INHERITED_FD: '3' } };
     }
@@ -482,8 +550,6 @@ if (env.HOOK_PROCESSES_DIR) {
     }
     const child = original.call(this, file, args, options);
     if (options?.detached && child.pid) {
-      const startTime = process.platform === 'win32' && monitor
-        ? require('../windows-process').startTime(child.pid) : undefined;
       let startTicks;
       if (process.platform === 'linux') {
         try {
@@ -491,10 +557,16 @@ if (env.HOOK_PROCESSES_DIR) {
           startTicks = stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\s+/)[19];
         } catch { /* A short-lived child may have already exited. */ }
       }
+      // This parent holds the child's handle until its exit is processed, so
+      // a process created after this moment cannot be this child: on Windows
+      // a process with this PID is the child only if it started no later.
+      // No process query runs here: a dispatch spawns its monitor inside the
+      // window the monitor gives it to record the lease.
+      const recordedAt = systemNow();
       real.mkdirSync(env.HOOK_PROCESSES_DIR, { recursive: true });
       const trackedFile = path.join(env.HOOK_PROCESSES_DIR, `${child.pid}.json`);
       real.writeFileSync(trackedFile, JSON.stringify({
-        pid: child.pid, startTicks, startTime,
+        pid: child.pid, startTicks, recordedAt, ...(token ? { token } : {}),
         kind: monitor ? 'monitor' : 'worker',
       }));
       // A reaped Windows PID can immediately belong to another test's CLI.

@@ -55,8 +55,10 @@ use explicit `accept` for review dispatch. `ci completed ID --sha SHA` and
 `ci webhook FILE` receive host completion notifications. A host integration
 must deliver those notifications; Tower Crane does not install a webhook
 listener. Concurrent consumers serialize reactions per task using audited
-event receipts and drain queued notifications. The orchestrator can move a
-task's queued gate work to the front with `gates prioritize` ([state](state.md#eventsjsonl)).
+event receipts and drain queued notifications. Accepted tasks' merges run
+first, in acceptance order. The orchestrator can move a submitted task's
+queued gate work ahead of older submitted work with `gates prioritize`
+([state](state.md#eventsjsonl)).
 Supervisors use the dispatcher's command PATH and an explicit trusted
 authorization context. Unknown mergeability and transport errors remain
 retryable at startup. A remote merge completed before its local receipt
@@ -64,6 +66,14 @@ is recovered through the merge gate's accepted-head confirmation.
 
 Software gates run when no audited evidence exists at the submitted head
 and revision, even if an unaudited entry or a completed reaction remains.
+Hosted CI that is still running or waiting for GitHub's mergeability result
+records `PENDING`. The trusted wait host checks pending CI once per minute
+without needing a completion notification, and records a recheck only when
+its result changed. A completed failure takes precedence over pending runs and
+unknown mergeability. CI with nothing queued or running for 30 minutes, or on
+a closed PR, records `STALLED`: the orchestrator inbox shows it and the
+per-minute recheck stops for that head. Status and the board show the gate
+name with its failed, stalled, pending or missing state.
 They run again when their passing evidence no longer matches its
 inputs, such as the pinned command or tests policy. A failed `tests`, `clean`
 or `ci` gate at a submitted head does not wait for an operator, whether the

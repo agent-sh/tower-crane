@@ -1,0 +1,56 @@
+[
+  {
+    "option": "C-sqlite",
+    "dataset": "live",
+    "writes": 20,
+    "acked": 20,
+    "fsync": 22,
+    "fdatasync": 0,
+    "syncs_per_ack": 1.1
+  },
+  {
+    "option": "D",
+    "dataset": "live",
+    "writes": 20,
+    "acked": 20,
+    "fsync": 0,
+    "fdatasync": 20,
+    "syncs_per_ack": 1
+  },
+  {
+    "option": "B",
+    "dataset": "live",
+    "writes": 20,
+    "acked": 20,
+    "fsync": 100,
+    "fdatasync": 0,
+    "syncs_per_ack": 5
+  },
+  {
+    "option": "A-proto",
+    "dataset": "live",
+    "writes": 20,
+    "acked": 20,
+    "fsync": 30,
+    "fdatasync": 0,
+    "syncs_per_ack": 1.5
+  },
+  {
+    "option": "A-cli",
+    "dataset": "live",
+    "writes": 20,
+    "acked": 20,
+    "fsync": 41,
+    "fdatasync": 0,
+    "syncs_per_ack": 2.05
+  },
+  {
+    "option": "C-files",
+    "dataset": "live",
+    "writes": 20,
+    "acked": 20,
+    "fsync": 20,
+    "fdatasync": 0,
+    "syncs_per_ack": 1
+  }
+]
