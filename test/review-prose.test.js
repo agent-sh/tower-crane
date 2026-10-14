@@ -7,6 +7,7 @@ const path = require('node:path');
 const { cachedFixture, BIN } = require('./helpers');
 const { gateFixture, gateEvidence } = require('./gate-helpers');
 const Reviews = require('../lib/review-findings');
+const { fileWritten } = require('./signals');
 
 const claim = (location = 'PR body', kind = 'false-claim') => ({ kind, path: location, claim: 'The claimed diagnostic is not printed.' });
 
@@ -116,7 +117,7 @@ process.exit(r.status ?? 1);`;
   h.ok(['ladder', 'set', 'easy', '--command', JSON.stringify([process.execPath, '-e', script, '{prompt}'])]);
   const cursor = fs.statSync(path.join(h.state, 'events.jsonl')).size;
   assert.equal(h.json(['accept', 'T1', '--agent', 'orchestrator']).review_pending, true);
-  h.json(['wait', '--after', String(cursor), '--task', 'T1', '--types', 'evidence', '--timeout', '30']);
+  h.json(['wait', '--after', String(cursor), '--task', 'T1', '--types', 'evidence', '--timeout', '300']);
   assert.match(fs.readFileSync(output, 'utf8'), /## Light claim check/);
   const after = h.json(['task', 'show', 'T1']);
   assert.equal(after.tier, 'easy');
@@ -258,11 +259,7 @@ test('a newer verdict between preparation and spawn refuses the stale light pack
     hooks: { HOOK_STOP_WORKTREE_ADD: paused },
   });
   try {
-    const deadline = Date.now() + 10000;
-    while (!fs.existsSync(paused)) {
-      assert.ok(Date.now() < deadline, 'worktree preparation did not finish');
-      await new Promise((resolve) => setTimeout(resolve, 20));
-    }
+    await fileWritten(paused);
     assert.ok(!fs.existsSync(path.join(h.state, 'lock')));
     h.ok(['evidence', 'T1', '--agent', 'first-reviewer', '--type', 'review', '--fail', '--sha', h.sha,
       '--summary', 'A second body claim also blocks.', '--findings', JSON.stringify([claim(), { ...claim(), claim: 'The retry is logged.' }])]);

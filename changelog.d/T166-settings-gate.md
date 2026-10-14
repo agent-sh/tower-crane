@@ -1,0 +1,1 @@
+- CLI test results retain subprocess errors and report invalid settings on failure. Missing local-CI commands use fixture paths instead of the host PATH.

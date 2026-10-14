@@ -14,6 +14,7 @@ const os = require('node:os');
 const path = require('node:path');
 const cp = require('node:child_process');
 const { pinLiveRung, makeRepo, BIN, ROOT, TMP_ROOT, LIVE_ROOT } = require('./helpers');
+const { waitUntil } = require('./signals');
 
 const uid = typeof process.getuid === 'function' ? process.getuid() : null;
 const runDir = uid === null ? null : `/run/user/${uid}`;
@@ -404,7 +405,7 @@ for (const harness of ['claude', 'codex']) {
       for (const p of Object.values(targets)) fs.rmSync([home, path.dirname(h.base)].includes(path.dirname(p)) ? p : path.dirname(p), { recursive: true, force: true });
     });
     const script = `const fs=require("fs");fs.writeFileSync(${JSON.stringify(ready)},"1");const s=new Int32Array(new SharedArrayBuffer(4));`
-      + `for(let i=0;i<1200&&!fs.existsSync(${JSON.stringify(go)});i++)Atomics.wait(s,0,0,100);const o={go:fs.existsSync(${JSON.stringify(go)})};`
+      + `for(let i=0;i<1200&&!fs.existsSync(${JSON.stringify(go)});i++)Atomics.wait(s,0,0,100);const o={go:fs.existsSync(${JSON.stringify(go)})};` // wait-allow: the live agent's command tool stops a command after two minutes (Claude Code's Bash default), so the probe reports before that
       + `for(const[k,p]of Object.entries(${JSON.stringify(targets)})){try{fs.readFileSync(p);o[k]="READABLE"}catch(e){o[k]="ERR "+e.code}}`
       + `try{fs.readdirSync(".");o.worktree="READABLE"}catch(e){o.worktree="ERR "+e.code}fs.writeFileSync(${JSON.stringify(out)},JSON.stringify(o))`;
     h.ok(['brief', 'set', 'T1', '-'], {
@@ -415,7 +416,7 @@ for (const harness of ['claude', 'codex']) {
     let done = false;
     const run = h.runAsync(['spawn', '--role', 'small', '--task', 'T1', '--wait'], { env }).finally(() => { done = true; });
     // The command's own signal; the spawn ending first means it never ran.
-    while (!done && !fs.existsSync(ready)) await new Promise((resolve) => setTimeout(resolve, 100));
+    await waitUntil(() => done || fs.existsSync(ready), { what: 'the sandbox probe command did not start' });
     if (fs.existsSync(ready)) {
       for (const p of Object.values(targets)) {
         fs.mkdirSync(path.dirname(p), { recursive: true });
@@ -456,7 +457,7 @@ for (const harness of ['claude', 'codex']) {
 function realCodexSandbox() {
   if (process.env.TOWER_CRANE_LIVE_CODEX !== '1') return 'set TOWER_CRANE_LIVE_CODEX=1 to run against the real codex CLI';
   if (process.platform !== 'linux') return 'the probe covers the Linux sandbox';
-  const r = cp.spawnSync('codex', ['sandbox', '--', 'true'], { encoding: 'utf8', timeout: 60000, cwd: process.env.TOWER_CRANE_TEST_TMP || undefined });
+  const r = cp.spawnSync('codex', ['sandbox', '--', 'true'], { encoding: 'utf8', timeout: 300000, cwd: process.env.TOWER_CRANE_TEST_TMP || undefined });
   if (r.error?.code === 'ENOENT') return 'codex is not on PATH';
   return r.status === 0 ? false : `codex sandbox does not start here: ${String(r.stderr).trim().split('\n').pop()}`;
 }

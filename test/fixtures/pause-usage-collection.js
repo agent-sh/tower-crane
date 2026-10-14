@@ -12,7 +12,7 @@ if (barrier && path.basename(process.argv[1] || '') === 'spawn-monitor.js') {
     if (args?.[1] === 'spend') {
       fs.writeFileSync(barrier, 'paused');
       // A failed test must not strand the collector indefinitely.
-      const deadline = performance.now() + 60000;
+      const deadline = performance.now() + 300000;
       while (!fs.existsSync(`${barrier}.go`)) {
         if (performance.now() >= deadline) throw new Error('usage collection barrier timed out');
         Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);

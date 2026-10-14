@@ -1,0 +1,1 @@
+- Manual gate-failure observation waits for watcher reconciliation and the rework event. Deliberately hung gate fixtures carry reasons for their timeout probes.

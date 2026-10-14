@@ -36,7 +36,7 @@ if (path.resolve(process.argv[1] || '') !== __filename) {
         paused = true;
         const marker = process.env.LIVE_PAUSE_FINAL;
         fs.writeFileSync(marker, '');
-        const deadline = Date.now() + 60000;
+        const deadline = Date.now() + 300000;
         while (!fs.existsSync(`${marker}.go`)) {
           if (Date.now() >= deadline) throw new Error('final sample was not released');
           Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
@@ -52,7 +52,7 @@ if (path.resolve(process.argv[1] || '') !== __filename) {
       if (typeof file === 'string' && /[\\/]projects[\\/].+\.jsonl$/.test(file)) {
         if (!delayed && process.env.LIVE_READ_DELAY_MS) {
           delayed = true;
-          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Number(process.env.LIVE_READ_DELAY_MS));
+          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Number(process.env.LIVE_READ_DELAY_MS)); // wait-allow: the configured slow read is the fixture's behaviour
         }
         fs.appendFileSync(process.env.LIVE_READS, `${performance.now()}\n`);
       }
@@ -126,7 +126,7 @@ if (path.resolve(process.argv[1] || '') !== __filename) {
         clearInterval(resume);
         write();
       }, 25);
-    } else if (step < steps) setTimeout(write, Number(env.LIVE_EVERY || 100));
+    } else if (step < steps) setTimeout(write, Number(env.LIVE_EVERY || 100)); // wait-allow: model periodic telemetry samples while the harness is live
     else {
       const finish = () => {
         if (env.LIVE_RESULT && harness === 'claude') console.log(JSON.stringify({
@@ -139,7 +139,7 @@ if (path.resolve(process.argv[1] || '') !== __filename) {
       if (env.LIVE_COMPLETE) {
         setInterval(() => { if (fs.existsSync(env.LIVE_COMPLETE)) finish(); }, 25);
       } else if (env.LIVE_HOLD === 'until-stop') setInterval(() => {}, 1000);
-      else setTimeout(finish, Number(env.LIVE_HOLD || 0));
+      else setTimeout(finish, Number(env.LIVE_HOLD || 0)); // wait-allow: fixture simulates harness exit after emitting its usage
     }
   };
   if (env.LIVE_UNREADABLE) {

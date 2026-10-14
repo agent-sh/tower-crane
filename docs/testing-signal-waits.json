@@ -1,0 +1,124 @@
+{
+  "task": "T166",
+  "node": "v26.10.0",
+  "cpu_load_processes": 2,
+  "measurement_file_workers": 4,
+  "note": "Summary of loaded runs per measured test file. Per-run logs, hashes and load samples stay outside the repository.",
+  "mutations": {
+    "caught": 73,
+    "total": 73
+  },
+  "sections": [
+    {
+      "name": "initial",
+      "baseline": "e1acc859",
+      "measured": "92f0209a",
+      "files": [
+        {"file":"test/accept.test.js","before":{"runs":5,"passed":5,"tests":"13/13","median_wall_s":21.9,"sha":"e1acc859"},"after":{"runs":5,"passed":5,"tests":"13/13","median_wall_s":16,"sha":"92f0209a"}},
+        {"file":"test/automation.test.js","before":{"runs":5,"passed":5,"tests":"63/63","median_wall_s":290.5,"sha":"e1acc859"},"after":{"runs":5,"passed":5,"tests":"63/63","median_wall_s":281,"sha":"92f0209a"}},
+        {"file":"test/board.test.js","before":{"runs":5,"passed":5,"tests":"59/59","median_wall_s":64.2,"sha":"e1acc859"},"after":{"runs":5,"passed":5,"tests":"59/59","median_wall_s":47.7,"sha":"92f0209a"}},
+        {"file":"test/broker.test.js","before":{"runs":5,"passed":5,"tests":"16/16","median_wall_s":7.4,"sha":"e1acc859"},"after":{"runs":5,"passed":5,"tests":"16/16","median_wall_s":5.8,"sha":"92f0209a"}},
+        {"file":"test/browser-startup.test.js","before":{"runs":5,"passed":5,"tests":"4/4","median_wall_s":0.9,"sha":"e1acc859"},"after":{"runs":5,"passed":5,"tests":"4/4","median_wall_s":0.6,"sha":"92f0209a"}},
+        {"file":"test/cache-proxy.test.js","before":{"runs":5,"passed":5,"tests":"13/13","median_wall_s":1.3,"sha":"e1acc859"},"after":{"runs":5,"passed":5,"tests":"13/13","median_wall_s":1.1,"sha":"92f0209a"}},
+        {"file":"test/ci-capped-review.test.js","before":{"runs":5,"passed":5,"tests":"9/9","median_wall_s":5.5,"sha":"e1acc859"},"after":{"runs":5,"passed":5,"tests":"9/9","median_wall_s":3.3,"sha":"92f0209a"}},
+        {"file":"test/ci-required.test.js","before":{"runs":5,"passed":5,"tests":"15/15","median_wall_s":10.7,"sha":"e1acc859"},"after":{"runs":5,"passed":5,"tests":"15/15","median_wall_s":8.1,"sha":"92f0209a"}},
+        {"file":"test/epipe.test.js","before":{"runs":5,"passed":5,"tests":"4/4","median_wall_s":0.9,"sha":"e1acc859"},"after":{"runs":5,"passed":5,"tests":"4/4","median_wall_s":0.9,"sha":"92f0209a"}},
+        {"file":"test/escalation.test.js","before":{"runs":5,"passed":5,"tests":"39/39","median_wall_s":87.9,"sha":"e1acc859"},"after":{"runs":5,"passed":5,"tests":"39/39","median_wall_s":86.5,"sha":"92f0209a"}},
+        {"file":"test/events.test.js","before":{"runs":5,"passed":5,"tests":"38/38","median_wall_s":128.6,"sha":"e1acc859"},"after":{"runs":5,"passed":5,"tests":"38/38","median_wall_s":111.3,"sha":"92f0209a"}},
+        {"file":"test/evidence-revision.test.js","before":{"runs":5,"passed":5,"tests":"11/11","median_wall_s":23.5,"sha":"e1acc859"},"after":{"runs":5,"passed":5,"tests":"11/11","median_wall_s":21.4,"sha":"92f0209a"}},
+        {"file":"test/fallback.test.js","before":{"runs":5,"passed":5,"tests":"31/31","median_wall_s":42.2,"sha":"e1acc859"},"after":{"runs":5,"passed":5,"tests":"31/31","median_wall_s":40.3,"sha":"92f0209a"}},
+        {"file":"test/gate-commands.test.js","before":{"runs":5,"passed":5,"tests":"20/20","median_wall_s":13.4,"sha":"e1acc859"},"after":{"runs":5,"passed":5,"tests":"20/20","median_wall_s":15.2,"sha":"92f0209a"}},
+        {"file":"test/gate-timeouts.test.js","before":{"runs":5,"passed":5,"tests":"2/2","median_wall_s":7.4,"sha":"e1acc859"},"after":{"runs":5,"passed":5,"tests":"2/2","median_wall_s":7.5,"sha":"92f0209a"}},
+        {"file":"test/gates.test.js","before":{"runs":5,"passed":5,"tests":"18/18","median_wall_s":21.2,"sha":"e1acc859"},"after":{"runs":5,"passed":5,"tests":"18/18","median_wall_s":29.8,"sha":"92f0209a"}},
+        {"file":"test/gates/tests.test.js","before":{"runs":5,"passed":5,"tests":"36/36","median_wall_s":6.8,"sha":"e1acc859"},"after":{"runs":5,"passed":5,"tests":"36/36","median_wall_s":6.7,"sha":"92f0209a"}},
+        {"file":"test/harness-hooks.test.js","before":{"runs":5,"passed":5,"tests":"21/21","median_wall_s":27,"sha":"e1acc859"},"after":{"runs":5,"passed":5,"tests":"21/21","median_wall_s":22.1,"sha":"92f0209a"}},
+        {"file":"test/identity.test.js","before":{"runs":5,"passed":5,"tests":"25/25","median_wall_s":8.1,"sha":"e1acc859"},"after":{"runs":5,"passed":5,"tests":"25/25","median_wall_s":8.4,"sha":"92f0209a"}},
+        {"file":"test/inbox.test.js","before":{"runs":5,"passed":5,"tests":"23/23","median_wall_s":43.8,"sha":"e1acc859"},"after":{"runs":5,"passed":5,"tests":"23/23","median_wall_s":82.9,"sha":"92f0209a"}},
+        {"file":"test/interrupt.test.js","before":{"runs":5,"passed":5,"tests":"14/14","median_wall_s":49.7,"sha":"e1acc859"},"after":{"runs":5,"passed":5,"tests":"14/14","median_wall_s":100.1,"sha":"92f0209a"}},
+        {"file":"test/isolation.test.js","before":{"runs":5,"passed":5,"tests":"40/40","median_wall_s":110.8,"sha":"e1acc859"},"after":{"runs":5,"passed":5,"tests":"40/40","median_wall_s":150.4,"sha":"92f0209a"}},
+        {"file":"test/live-browser.test.js","before":{"runs":5,"passed":5,"tests":"0/2","median_wall_s":0.2,"sha":"e1acc859"},"after":{"runs":5,"passed":5,"tests":"0/2","median_wall_s":0.2,"sha":"92f0209a"}},
+        {"file":"test/live-spend.test.js","before":{"runs":5,"passed":5,"tests":"33/33","median_wall_s":99.8,"sha":"e1acc859"},"after":{"runs":5,"passed":5,"tests":"33/33","median_wall_s":131.6,"sha":"92f0209a"}},
+        {"file":"test/lock.test.js","before":{"runs":5,"passed":5,"tests":"23/23","median_wall_s":58.1,"sha":"e1acc859"},"after":{"runs":5,"passed":5,"tests":"23/23","median_wall_s":54.9,"sha":"92f0209a"}},
+        {"file":"test/package.test.js","before":{"runs":5,"passed":5,"tests":"2/2","median_wall_s":1.5,"sha":"e1acc859"},"after":{"runs":5,"passed":5,"tests":"2/2","median_wall_s":1.1,"sha":"92f0209a"}},
+        {"file":"test/render.test.js","before":{"runs":5,"passed":5,"tests":"5/5","median_wall_s":4.2,"sha":"e1acc859"},"after":{"runs":5,"passed":5,"tests":"5/5","median_wall_s":11.1,"sha":"92f0209a"}},
+        {"file":"test/reviewer.test.js","before":{"runs":5,"passed":5,"tests":"29/30","median_wall_s":63,"sha":"e1acc859"},"after":{"runs":5,"passed":5,"tests":"29/30","median_wall_s":53.3,"sha":"92f0209a"}},
+        {"file":"test/sandbox-extensions.test.js","before":{"runs":5,"passed":5,"tests":"8/9","median_wall_s":15.2,"sha":"e1acc859"},"after":{"runs":5,"passed":5,"tests":"8/9","median_wall_s":11.7,"sha":"92f0209a"}},
+        {"file":"test/secret-canary.test.js","before":{"runs":5,"passed":5,"tests":"10/12","median_wall_s":9.5,"sha":"e1acc859"},"after":{"runs":5,"passed":5,"tests":"10/12","median_wall_s":10.8,"sha":"92f0209a"}},
+        {"file":"test/settings.test.js","before":{"runs":5,"passed":5,"tests":"5/5","median_wall_s":5.1,"sha":"e1acc859"},"after":{"runs":5,"passed":5,"tests":"5/5","median_wall_s":5.9,"sha":"92f0209a"}},
+        {"file":"test/shared-files.test.js","before":{"runs":5,"passed":5,"tests":"12/12","median_wall_s":7.6,"sha":"e1acc859"},"after":{"runs":5,"passed":5,"tests":"12/12","median_wall_s":7.7,"sha":"92f0209a"}},
+        {"file":"test/signal-waits.test.js","after":{"runs":5,"passed":5,"tests":"4/4","median_wall_s":0.4,"sha":"92f0209a"}},
+        {"file":"test/spawn-exit.test.js","before":{"runs":5,"passed":5,"tests":"11/11","median_wall_s":23.3,"sha":"e1acc859"},"after":{"runs":5,"passed":5,"tests":"12/12","median_wall_s":23,"sha":"92f0209a"}},
+        {"file":"test/spawn-resume.test.js","before":{"runs":5,"passed":5,"tests":"21/21","median_wall_s":45.7,"sha":"e1acc859"},"after":{"runs":5,"passed":5,"tests":"21/21","median_wall_s":44.2,"sha":"92f0209a"}},
+        {"file":"test/spawn.test.js","before":{"runs":5,"passed":5,"tests":"28/28","median_wall_s":25.7,"sha":"e1acc859"},"after":{"runs":5,"passed":5,"tests":"28/28","median_wall_s":24.9,"sha":"92f0209a"}},
+        {"file":"test/stack-sync.test.js","before":{"runs":5,"passed":5,"tests":"20/20","median_wall_s":17.9,"sha":"e1acc859"},"after":{"runs":5,"passed":5,"tests":"20/20","median_wall_s":17.5,"sha":"92f0209a"}},
+        {"file":"test/stack.test.js","before":{"runs":5,"passed":5,"tests":"27/27","median_wall_s":31,"sha":"e1acc859"},"after":{"runs":5,"passed":5,"tests":"27/27","median_wall_s":31.7,"sha":"92f0209a"}},
+        {"file":"test/state-compatibility.test.js","before":{"runs":5,"passed":5,"tests":"11/11","median_wall_s":4.9,"sha":"e1acc859"},"after":{"runs":5,"passed":5,"tests":"11/11","median_wall_s":5.1,"sha":"92f0209a"}},
+        {"file":"test/state-storage.test.js","before":{"runs":5,"passed":5,"tests":"5/5","median_wall_s":2.1,"sha":"e1acc859"},"after":{"runs":5,"passed":5,"tests":"5/5","median_wall_s":2.2,"sha":"92f0209a"}},
+        {"file":"test/supervision.test.js","before":{"runs":5,"passed":5,"tests":"35/35","median_wall_s":86.9,"sha":"e1acc859"},"after":{"runs":5,"passed":5,"tests":"35/35","median_wall_s":82.6,"sha":"92f0209a"}},
+        {"file":"test/task-locks.test.js","before":{"runs":5,"passed":5,"tests":"9/9","median_wall_s":10.3,"sha":"e1acc859"},"after":{"runs":5,"passed":5,"tests":"9/9","median_wall_s":8.8,"sha":"92f0209a"}},
+        {"file":"test/test-tools.test.js","before":{"runs":5,"passed":5,"tests":"2/2","median_wall_s":1.6,"sha":"e1acc859"},"after":{"runs":5,"passed":5,"tests":"2/2","median_wall_s":1.6,"sha":"92f0209a"}},
+        {"file":"test/tests-map.test.js","before":{"runs":5,"passed":5,"tests":"13/13","median_wall_s":15.9,"sha":"e1acc859"},"after":{"runs":5,"passed":5,"tests":"13/13","median_wall_s":16.3,"sha":"92f0209a"}},
+        {"file":"test/usage.test.js","before":{"runs":5,"passed":5,"tests":"24/24","median_wall_s":88.3,"sha":"e1acc859"},"after":{"runs":5,"passed":5,"tests":"24/24","median_wall_s":88.5,"sha":"92f0209a"}},
+        {"file":"test/wakeups.test.js","before":{"runs":5,"passed":5,"tests":"6/6","median_wall_s":5.7,"sha":"e1acc859"},"after":{"runs":5,"passed":5,"tests":"6/6","median_wall_s":5.6,"sha":"92f0209a"}},
+        {"file":"test/worker-slots.test.js","before":{"runs":5,"passed":5,"tests":"16/16","median_wall_s":22.1,"sha":"e1acc859"},"after":{"runs":5,"passed":5,"tests":"16/16","median_wall_s":22.5,"sha":"92f0209a"}},
+        {"file":"test/worktree-metadata.test.js","before":{"runs":5,"passed":5,"tests":"4/4","median_wall_s":2.4,"sha":"e1acc859"},"after":{"runs":5,"passed":5,"tests":"4/4","median_wall_s":2.6,"sha":"92f0209a"}},
+        {"file":"test/worktree.test.js","before":{"runs":5,"passed":5,"tests":"30/30","median_wall_s":51.4,"sha":"e1acc859"},"after":{"runs":5,"passed":5,"tests":"30/30","median_wall_s":51,"sha":"92f0209a"}},
+        {"file":"test/sources.test.js","before":{"runs":5,"passed":5,"tests":"9/9","median_wall_s":14.2,"sha":"e1acc859"},"after":{"runs":5,"passed":5,"tests":"9/9","median_wall_s":14.2,"sha":"92f0209a"}},
+        {"file":"test/agy-isolation.test.js","before":{"runs":5,"passed":5,"tests":"9/9","median_wall_s":11.8,"sha":"e1acc859"},"after":{"runs":5,"passed":5,"tests":"9/9","median_wall_s":24.2,"sha":"92f0209a"}},
+        {"file":"test/claude-provider.test.js","before":{"runs":5,"passed":5,"tests":"12/12","median_wall_s":14.5,"sha":"e1acc859"},"after":{"runs":5,"passed":5,"tests":"12/12","median_wall_s":35.4,"sha":"92f0209a"}},
+        {"file":"test/pi-isolation.test.js","before":{"runs":5,"passed":5,"tests":"3/3","median_wall_s":3.8,"sha":"e1acc859"},"after":{"runs":5,"passed":5,"tests":"3/3","median_wall_s":30.3,"sha":"92f0209a"}}
+      ]
+    },
+    {
+      "name": "main_refresh",
+      "base": "f14f703b",
+      "files": [
+        {"file":"test/model-config.test.js","before-main-refresh":{"runs":5,"passed":5,"tests":"10/10","median_wall_s":1.9,"sha":"f14f703b"},"after-main-refresh":{"runs":5,"passed":5,"tests":"10/10","median_wall_s":1.9,"sha":"613f0eb8"}},
+        {"file":"test/usage.test.js","before-main-refresh":{"runs":5,"passed":5,"tests":"25/25","median_wall_s":90,"sha":"f14f703b"},"after-main-refresh":{"runs":5,"passed":5,"tests":"25/25","median_wall_s":90.1,"sha":"613f0eb8"}}
+      ]
+    },
+    {
+      "name": "conflict_refresh",
+      "base": "d6ec6063",
+      "measured": "cd559206",
+      "files": [
+        {"file":"test/fallback.test.js","before":{"runs":3,"passed":3,"tests":"31/31","median_wall_s":225.8,"sha":"d6ec6063"},"after":{"runs":5,"passed":5,"tests":"31/31","median_wall_s":191.2,"sha":"cd559206"}},
+        {"file":"test/spawn-resume.test.js","before":{"runs":2,"passed":2,"tests":"21/21","median_wall_s":264.1,"sha":"d6ec6063"},"after":{"runs":5,"passed":5,"tests":"21/21","median_wall_s":231.7,"sha":"cd559206"}},
+        {"file":"test/spawn.test.js","before":{"runs":2,"passed":2,"tests":"33/33","median_wall_s":26.7,"sha":"d6ec6063"},"after":{"runs":5,"passed":5,"tests":"33/33","median_wall_s":26.9,"sha":"cd559206"}},
+        {"file":"test/supervision.test.js","before":{"runs":2,"passed":2,"tests":"35/35","median_wall_s":83,"sha":"d6ec6063"},"after":{"runs":5,"passed":5,"tests":"35/35","median_wall_s":82.9,"sha":"cd559206"}},
+        {"file":"test/gates/tests.test.js","before":{"runs":2,"passed":2,"tests":"36/36","median_wall_s":21.2,"sha":"d6ec6063"},"after":{"runs":5,"passed":5,"tests":"36/36","median_wall_s":15.4,"sha":"cd559206"}},
+        {"file":"test/shard.test.js","before":{"runs":5,"passed":5,"tests":"3/3","median_wall_s":0.3,"sha":"d6ec6063"},"after":{"runs":5,"passed":5,"tests":"3/3","median_wall_s":0.3,"sha":"cd559206"}}
+      ]
+    },
+    {
+      "name": "expression_review_fix",
+      "base": "c8a5ed24",
+      "measured": "196cca99",
+      "files": [
+        {"file":"test/signal-waits.test.js","before":{"runs":2,"passed":2,"tests":"4/4","median_wall_s":0.5,"sha":"c8a5ed24"},"after":{"runs":5,"passed":5,"tests":"4/4","median_wall_s":0.6,"sha":"196cca99"}},
+        {"file":"test/state-storage.test.js","before":{"runs":2,"passed":2,"tests":"5/5","median_wall_s":2.5,"sha":"c8a5ed24"},"after":{"runs":5,"passed":5,"tests":"5/5","median_wall_s":2.5,"sha":"196cca99"}},
+        {"file":"test/orchestrator.test.js","before":{"runs":2,"passed":2,"tests":"7/7","median_wall_s":3.1,"sha":"c8a5ed24"},"after":{"runs":5,"passed":5,"tests":"7/7","median_wall_s":3,"sha":"196cca99"}},
+        {"file":"test/automation.test.js","before":{"runs":3,"passed":1,"tests":"67/68","median_wall_s":575.6,"sha":"c8a5ed24"},"after":{"runs":5,"passed":5,"tests":"68/68","median_wall_s":278.8,"sha":"196cca99"}}
+      ]
+    },
+    {
+      "name": "declaration_review_fix",
+      "base": "aa76fd25",
+      "measured": "0bd5bca5",
+      "files": [
+        {"file":"test/board-controls.test.js","after":{"runs":5,"passed":5,"tests":"13/13","median_wall_s":12.6,"sha":"0bd5bca5"}},
+        {"file":"test/events.test.js","after":{"runs":5,"passed":5,"tests":"38/38","median_wall_s":130.9,"sha":"0bd5bca5"}},
+        {"file":"test/fallback.test.js","after":{"runs":5,"passed":5,"tests":"31/31","median_wall_s":48.8,"sha":"0bd5bca5"}},
+        {"file":"test/isolation.test.js","after":{"runs":5,"passed":5,"tests":"70/70","median_wall_s":224,"sha":"0bd5bca5"}},
+        {"file":"test/signal-waits.test.js","after":{"runs":5,"passed":5,"tests":"4/4","median_wall_s":0.6,"sha":"0bd5bca5"}},
+        {"file":"test/supervision.test.js","after":{"runs":5,"passed":5,"tests":"41/41","median_wall_s":108.1,"sha":"0bd5bca5"}},
+        {"file":"test/task-locks.test.js","after":{"runs":5,"passed":5,"tests":"9/9","median_wall_s":7.9,"sha":"0bd5bca5"}},
+        {"file":"test/usage.test.js","after":{"runs":5,"passed":5,"tests":"25/25","median_wall_s":93.1,"sha":"0bd5bca5"}},
+        {"file":"test/worker-slots.test.js","after":{"runs":5,"passed":5,"tests":"20/20","median_wall_s":28.5,"sha":"0bd5bca5"}},
+        {"file":"test/worktree-metadata.test.js","after":{"runs":5,"passed":5,"tests":"11/11","median_wall_s":14.8,"sha":"0bd5bca5"}},
+        {"file":"test/signal-waits.test.js","after":{"runs":5,"passed":5,"tests":"4/4","median_wall_s":0.5,"sha":"fe2d837f"}}
+      ]
+    },
+    {"name":"review_fix_alive_and_sleep_lint","base":"e802471a","measured":"4b4c4205 and a512e4fa","load_1m":"4 to 10","checks":["touched files at 4b4c4205 (19, one run): 432/455 pass, 23 skipped, 0 fail","files merged from main through e802471a (6): 155/180 pass, 25 skipped, 0 fail","full suite at a512e4fa: 2338/2379 pass, 41 skipped, 0 fail","second-signal stack-sync case with force.abort() a no-op: fails (reason timed out after 60000 ms); passes with it","new lint rows: 18 rejected forms, all missed by the previous lint"]}
+  ]
+}

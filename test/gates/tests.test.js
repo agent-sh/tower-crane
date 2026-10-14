@@ -6,6 +6,7 @@ const path = require('path');
 const gate = require('../../lib/gates/tests');
 const { scratch, isolateGit, git, commit, initRepo, worktrees, quote } = require('./helpers');
 const { shellQuote, treeExec, withWorktree } = require('../../lib/gates/common');
+const { waitUntil } = require('../signals');
 
 const NODE = quote(process.execPath);
 const CMD = `${NODE} run-tests.js`;
@@ -454,13 +455,13 @@ test('a timeout stops the command and everything it started', { skip: process.pl
   const marker = path.join(tmp, 'late-write');
   // `; true` keeps the shell alive, so the writer is a grandchild, not the shell itself.
   // The writer would finish long after the gate's own setup, which under host load can take seconds.
-  const cmd = `${NODE} -e "setTimeout(() => require('fs').writeFileSync(process.argv[1], 'x'), 10000)" ${quote(marker)}; true`;
+  const cmd = `${NODE} -e "setTimeout(() => require('fs').writeFileSync(process.argv[1], 'x'), 10000)" ${quote(marker)}; true`; // wait-allow: verify timed-out commands cannot write a delayed marker
   const started = Date.now();
   const r = await gate.run(ctx(sha, { args: { cmd, timeout: 0.01 } }));
   assert.equal(r.ok, false);
   assert.match(r.summary, /timed out/);
-  assert.ok(Date.now() - started < 8000, 'the gate waited for the command instead of stopping it');
-  await new Promise((resolve) => setTimeout(resolve, 11000 - (Date.now() - started)));
+  assert.ok(Date.now() - started < 8000, 'the gate waited for the command instead of stopping it'); // wait-allow: verify the gate terminates the command before its delayed marker write
+  await new Promise((resolve) => setTimeout(resolve, 11000 - (Date.now() - started))); // wait-allow: verify timed-out commands cannot write a delayed marker
   assert.equal(fs.existsSync(marker), false, 'a process the command started outlived the timeout');
   assertCleanedUp();
 });
@@ -468,7 +469,7 @@ test('a timeout stops the command and everything it started', { skip: process.pl
 // A test command whose own fixtures start detached processes moves them into new sessions, out
 // of the gate's process group. One here outlives its parent; the other keeps its parent but
 // runs with a cleared environment.
-test('a command\'s processes in their own sessions stop with it, orphaned or not', { skip: process.platform !== 'linux' }, async () => {
+test('a command\'s processes in their own sessions stop with it, orphaned or not', { skip: process.platform !== 'linux' }, async (t) => {
   const sha = task({ 'lib/add.js': FIX, 'test/add.test.js': ADD_TEST });
   const pids = path.join(tmp, 'session-pids');
   fs.writeFileSync(pids, '');
@@ -479,7 +480,7 @@ const count = () => fs.readFileSync(process.argv[2], 'utf8').split('\\n').length
 const before = count();
 require('child_process').spawn(process.execPath, ['-e', ${JSON.stringify(poller)}, process.argv[2]],
   { detached: true, stdio: 'ignore'${env} }).unref();
-const tick = () => (count() > before ? ${held ? 'setInterval(() => {}, 1000)' : 'process.exit(0)'} : setTimeout(tick, 20));
+const tick = () => (count() > before ? ${held ? 'setInterval(() => {}, 1000)' : 'process.exit(0)'} : setTimeout(tick, 20)); // wait-allow: probe cadence only; the recorded pid is the signal
 tick();
 `;
   const running = (pid) => {
@@ -494,11 +495,10 @@ tick();
     await gate.run(ctx(sha, { args: { cmd, ...(timeout ? { timeout } : {}) } }));
     const started = recorded().slice(before);
     assert.ok(started.length > 0, 'the detached process started');
-    const until = Date.now() + 5000;
-    while (started.some(running) && Date.now() < until) await new Promise((resolve) => setTimeout(resolve, 50));
-    const alive = started.filter(running);
-    for (const pid of alive) process.kill(pid, 'SIGKILL');
-    assert.deepEqual(alive, [], `a detached process outlived a command that ${name}`);
+    t.after(() => { for (const pid of started.filter(running)) process.kill(pid, 'SIGKILL'); });
+    await waitUntil(() => !started.some(running), {
+      what: () => `a detached process outlived a command that ${name}: ${started.filter(running).join(', ')}`,
+    });
     assertCleanedUp();
   }
 });

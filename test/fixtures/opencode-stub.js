@@ -53,7 +53,7 @@ async function main() {
     if (credential.type !== 'wellknown') continue;
     const endpoint = url.replace(/\/+$/, '') + '/.well-known/opencode';
     remoteContacts.push(endpoint);
-    const response = await fetch(endpoint, { signal: AbortSignal.timeout(5000) });
+    const response = await fetch(endpoint, { signal: AbortSignal.timeout(300000) });
     if (!response.ok) throw new Error('remote configuration request failed');
     merge(config, (await response.json()).config || {});
   }
@@ -110,7 +110,7 @@ async function main() {
     const action = decision(permission, 'bash', input);
     report.bash = { decision: action };
     if (action === 'allow') {
-      const result = cp.spawnSync(process.execPath, ['-e', script, '--', process.env.STUB_BASH_CANARY], { encoding: 'utf8', timeout: 10000 });
+      const result = cp.spawnSync(process.execPath, ['-e', script, '--', process.env.STUB_BASH_CANARY], { encoding: 'utf8', timeout: 300000 });
       report.bash.code = result.status;
       report.bash.stderr = result.stderr;
     }

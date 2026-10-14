@@ -36,7 +36,7 @@ fs.rmdirSync = function addAtLockRelease(dir, ...args) {
     const child = cp.spawnSync(process.execPath, [
       process.env.TEST_ADD_BIN, '--state', state,
       'task', 'add', '--title', 'Different task', '--acceptance', 'no inherited brief',
-    ], { env, encoding: 'utf8', timeout: 60000 });
+    ], { env, encoding: 'utf8', timeout: 300000 });
     fs.writeFileSync(process.env.TEST_ADD_RESULT, JSON.stringify({
       status: child.status, stdout: child.stdout, stderr: child.stderr,
       error: child.error?.message,

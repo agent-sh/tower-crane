@@ -37,7 +37,7 @@ process.on('SIGTERM', () => {
   console.log("not ok 1 - test/slow.test.js\\n  ---\\n  error: 'Promise resolution is still pending but the event loop has already resolved'\\n  ...");
   process.exit(1);
 });
-setTimeout(() => process.exit(0), 10000);
+setTimeout(() => process.exit(0), 10000); // wait-allow: the gate must time out before this deliberately slow runner completes
 `);
   const command = `${shellQuote(process.execPath)} ${shellQuote(script)}`;
   h.init(['--tests-mode', 'run-only', '--tests-cmd', command, '--clean-cmd', command,
@@ -88,8 +88,8 @@ setTimeout(() => process.exit(0), 10000);
 // timer can come due while the event loop is blocked, before the child's exit or output is seen.
 test('a timeout that comes due during a blocked event loop stops only a child with nothing to show', async () => {
   const C = require('../lib/gates/common');
-  const run = (script) => C.exec({ exec: C.treeExec }, process.execPath, ['-e', script], { timeout: 300 });
-  const block = () => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1500);
+  const run = (script) => C.exec({ exec: C.treeExec }, process.execPath, ['-e', script], { timeout: 300 }); // wait-allow: the gate timeout itself is under test
+  const block = () => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1500); // wait-allow: blocks the event loop past the gate timeout, the condition under test
   const cases = [
     ['exited', "process.stdout.write('done')", (r) => assert.equal(r.stdout, 'done')],
     // More than a pipe buffer: the child cannot exit until the parent reads.
@@ -103,7 +103,7 @@ test('a timeout that comes due during a blocked event loop stops only a child wi
     assert.equal(r.ok, true, `${what}: ${r.stderr}`);
     check(r);
   }
-  const pending = run('setTimeout(() => {}, 30000)');
+  const pending = run('setTimeout(() => {}, 30000)'); // wait-allow: a child that outlives the gate timeout under test
   block();
   const r = await pending;
   assert.equal(r.timedOut, true);

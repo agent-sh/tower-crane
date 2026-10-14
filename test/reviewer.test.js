@@ -1,5 +1,7 @@
 'use strict';
 
+const { waitOnRepo } = require('./signals');
+
 const { test, describe } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -18,10 +20,25 @@ function rung(h, name, model) {
   pinRung(h, name, { harness: 'opencode', model });
 }
 
+function fixtureHomes(h) {
+  // Reviewer fixtures read their own credentials, not the parent's agent stores.
+  Object.assign(h.env, {
+    USERPROFILE: h.env.HOME,
+    CLAUDE_CONFIG_DIR: path.join(h.env.HOME, '.claude'),
+    CODEX_HOME: path.join(h.env.HOME, '.codex'),
+    PI_CODING_AGENT_DIR: path.join(h.env.HOME, '.pi', 'agent'),
+    GH_CONFIG_DIR: path.join(h.env.HOME, '.config', 'gh'),
+    XDG_CONFIG_HOME: path.join(h.env.HOME, '.config'),
+    XDG_DATA_HOME: path.join(h.env.HOME, '.local', 'share'),
+    OPENCODE_CONFIG_DIR: path.join(h.env.HOME, '.config', 'opencode'),
+  });
+}
+
 // Built once per process for each combination and copied for each test.
 // gated adds passing tests and clean evidence at the submitted sha.
 function setup(t, tier = 'easy', builder = 'other', profile, { gated = false } = {}) {
-  return cachedFixture(t, JSON.stringify([tier, builder, profile ?? null, gated]), (h) => {
+  const h = cachedFixture(t, JSON.stringify([tier, builder, profile ?? null, gated]), (h) => {
+    fixtureHomes(h);
     h.init(['--repo', 'acme/demo']);
     h.ok(['task', 'add', '--title', 'Change', '--acceptance', 'value becomes one', '--tier', tier]);
     h.ok(['brief', 'set', 'T1', '-'], { input: 'BUILDER-HISTORY that the reviewer does not need\n\n## Reviewer\nREVIEWER-ONLY instruction\n\n## Worker\nWORKER-HISTORY that the reviewer does not need\n' });
@@ -57,6 +74,8 @@ function setup(t, tier = 'easy', builder = 'other', profile, { gated = false } =
     if (gated) ready(h);
     return { sha: h.sha, builder: h.builder, reviewEnv: h.reviewEnv };
   });
+  fixtureHomes(h);
+  return h;
 }
 
 function ready(h) {
@@ -246,7 +265,7 @@ console.log(JSON.stringify({ type: 'result', is_error: false, model, usage: { in
   fs.mkdirSync(path.join(caller, '.claude'), { recursive: true });
   const result = h.run(['spawn', '--task', 'T1', '--role', 'review', '--wait'], {
     env: { HOME: caller, CLAUDE_CONFIG_DIR: path.join(caller, '.claude'), XDG_CACHE_HOME: path.join(caller, 'cache'),
-      PATH: bin + path.delimiter + (h.env.PATH || '') }, timeout: 20000 });
+      PATH: bin + path.delimiter + (h.env.PATH || '') } });
   assert.equal(result.code, 0, result.stderr);
   const rows = fs.readFileSync(captures, 'utf8').trim().split('\n').map(JSON.parse);
   assert.deepEqual(rows.map((r) => r.model), ['first', 'second']);
@@ -934,11 +953,7 @@ test('review dispatch refuses a submitted head, configured base or review scope 
       hooks: { HOOK_STOP_REVIEW_DIFF: paused },
     });
     try {
-      const deadline = Date.now() + 10000;
-      while (!fs.existsSync(paused)) {
-        assert.ok(Date.now() < deadline, 'diff preparation did not finish');
-        await new Promise((resolve) => setTimeout(resolve, 20));
-      }
+      await waitOnRepo(h, () => fs.existsSync(paused));
       assert.ok(!fs.existsSync(path.join(h.state, 'lock')), 'diff preparation leaves state writable');
       if (change === 'head') h.ok(['submit', 'T1', '--agent', 'builder', '--sha', next]);
       else if (change === 'base') h.ok(['project', 'set', '--base', 'fixture-change']);
@@ -963,11 +978,7 @@ test('accept runs tests, clean and CI before dispatch, then automation accepts a
   const result = h.json(['accept', 'T1']);
   assert.equal(result.status, 'submitted');
   assert.equal(result.review_pending, true);
-  const deadline = Date.now() + 10000;
-  while (h.readState('tasks.json').tasks[0].status !== 'accepted') {
-    assert.ok(Date.now() < deadline, 'review did not reach automatic acceptance');
-    await new Promise((resolve) => setTimeout(resolve, 30));
-  }
+  await waitOnRepo(h, () => h.readState('tasks.json').tasks[0].status === 'accepted');
   const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
   const dispatch = events.findIndex((e) => e.cmd === 'spawn' && e.detail.role === 'reviewer');
   for (const type of ['tests', 'clean', 'ci']) assert.ok(events.findIndex((e) => e.cmd === `check ${type}` && e.detail.ok) < dispatch);
