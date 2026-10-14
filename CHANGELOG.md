@@ -12,7 +12,8 @@ First release. Tower Crane is a CLI and a Claude Code plugin for handing softwar
 - Rework and brief changes after the first submission start a new task revision, so earlier gate and review evidence stops counting.
 - Settled gate output over 1 KiB moves to `evidence/<task>/`, which keeps `tasks.json` small and writes fast.
 - State writes survive a crash or power loss. The event log is synced before a command returns, and a write logs its events before it renames the files they describe into place. The next lock holder finishes or discards a write whose process died, so a task change never lands without its event. `validate` also reports a `tasks.json` change whose event the log lacks.
-- Reads such as `status` take no lock. Writes parse state before they wait for the lock, and rendering the board runs outside it. `TOWER_CRANE_LOCK_TRACE=FILE` records lock waits and holds.
+- Reads such as `status` take no lock and see a write as soon as its events are in the log. Writes parse state before they wait for the lock, and rendering the board runs outside it. `TOWER_CRANE_LOCK_TRACE=FILE` records lock waits and holds.
+- A corrupt state file names the fix: repair it by hand from `events.jsonl` or restore a backup of the state directory.
 - Older tools keep newer task values, fields and events they do not know. A breaking state change refuses new spawns instead of corrupting state.
 
 ### Agents and harnesses
@@ -25,6 +26,9 @@ First release. Tower Crane is a CLI and a Claude Code plugin for handing softwar
 - A claim is a lease that the supervisor renews while the agent makes progress; an expired lease frees the task. Worker spawns reserve a slot, so a full worker limit refuses dispatch before launch.
 - `interrupt` stops a worker and keeps its uncommitted work for the next dispatch. `release --pr N` hands the task back with its open PR, so the next worker resumes that PR.
 - A resumed worker that overflows its context starts one fresh session on the same route and keeps its claim and worktree.
+- A task whose workers exit 3 times without submitting at one revision is parked for the owner instead of relaunched. Outages, login failures, interrupts and budget stops do not count, and `owner-done` restarts the count. `task show` prints the last worker's log tail.
+- Worker spawn refuses a repository without an `origin` remote. A spawn whose supervisor fails to start says why and keeps its log. A spawn monitor whose state directory is removed stops its agent.
+- `validate` warns when no installed harness can run a worker or reviewer, when an open task's tier cannot start, and when gh is missing or not logged in.
 - Spawn sweeps the homes and broker directories of dead agents, keeping any with an unexpired claim or a live process. Temporary spawn briefs go in your cache directory, not the system temp directory.
 - Design tasks and tasks with `needs: ["browser"]` get your browser MCP kit (`browser-kit set`, playwright by default).
 
@@ -52,7 +56,7 @@ First release. Tower Crane is a CLI and a Claude Code plugin for handing softwar
 - **ci**: the PR head is the submitted commit, GitHub reports it mergeable, and the latest run of each required check passed on it. Superseded runs do not block. Pending CI is rechecked once a minute; CI with nothing queued or running for 30 minutes is stalled and goes to the inbox. Status and the board tell failed, stalled, pending and missing gates apart.
 - **merge**: the PR head still matches the accepted commit, and the gates still pass, when it merges.
 - Gate commands are pinned in project settings, and receipts from other commands or test settings do not count. A missing pin waits as configuration instead of failing the task.
-- An infrastructure failure (a timeout, a killed runner, a cancelled CI run, a test that also fails on the base branch) runs the gate once more. Any other failure sends the task to rework with the failing test names and the output tail.
+- An infrastructure failure (a timeout, a killed runner, a cancelled CI run, a test that also fails on the base branch, a base rerun that was killed or timed out) runs the gate once more. Any other failure sends the task to rework with the failing test names and the output tail.
 - Gate commands leave no processes behind on Linux, detached ones included, and never start a detached `git gc`. Host-only tests get a short `TMPDIR` when the gate scratch is too deep for socket paths.
 - `gates.executors` caps concurrent gate runs on a host (default 2). Merges of accepted tasks take the next free executor ahead of submitted-task gates, in acceptance order. `gates prioritize` moves a submitted task ahead in the queue, and `gates retry` reruns failed gates at the same head. `gates.tests_timeout_min`, `gates.clean_timeout_min` and `gates.tmp_root` set budgets and the scratch location.
 
@@ -60,10 +64,10 @@ First release. Tower Crane is a CLI and a Claude Code plugin for handing softwar
 
 - Review evidence counts only from a reviewer `spawn` dispatched for that task, commit and revision, or from the owner. Other review records stay in the ledger marked as not counting.
 - The reviewer gets the diff, the acceptance and the gate receipts in a fresh context. Selection starts at the task's tier and moves up for a large or risky diff. The review policy's `min_rung` sets the lowest reviewer rung.
-- Open revuto inline findings marked `[P1]` or `[P2]` block an ok review until a reply marks them `[resolved]` or the file changes. `ci resolve` posts that reply. Findings count only from revuto's own logins.
+- revuto is optional; agents skip its steps on a PR without revuto comments or checks. Open revuto inline findings marked `[P1]` or `[P2]` block an ok review until a reply marks them `[resolved]` or the file changes. `ci resolve` posts that reply. Findings count only from revuto's own logins.
 - Reviews separate blocking findings from follow-ups. A re-review carries the failed review's blockers and reads only the change since that review, at no lower rung. A rewritten history or base update resets that scope.
 - A false claim only in the PR body is corrected and checked without a new revision. A fix that touches only changelog fragments gets a light claim check.
-- A reviewer that exits without a verdict does not trigger another at the same head. Review waits for a new head, revision or revuto thread, and the inbox lists a `review_held` item.
+- A reviewer that exits without a verdict does not trigger another at the same head, and after 3 reviewer crashes at one head and revision automation stops replacing them. Review waits for a new head, revision or revuto thread, or for `accept`, and the inbox lists a `review_held` item.
 - `rework --from-review` sends a failed task back with the review's findings in its brief. Tasks that keep failing review show up in the inbox at `review.churn_after` (default 3).
 
 ### Automation, merge and stacks
@@ -74,7 +78,7 @@ First release. Tower Crane is a CLI and a Claude Code plugin for handing softwar
 - `submit --pr` checks the PR's CI and revuto findings at the head before recording it. Workers read failing checks, job logs and code-scanning alerts with `ci checks`, `ci log` and `ci alerts`.
 - `merge` squashes the PR at the accepted head. The merge queue lands accepted PRs in acceptance order and runs the full suite on the merge with the current base only when the head does not already contain it.
 - `hotfix` records a PR already merged outside Tower Crane, runs the gates and review at its merge commit and accepts the task as `accepted (hotfix)`. A confirmed failure opens a follow-up task. `--review URL` counts a clean-context review already posted on the PR.
-- A task can start on a submitted dependency before it merges. Its PR targets the dependency's branch, the chain is linked as a GitHub stack, and the merge lands it bottom up, pinning each accepted head. A stack link that races a task event retries from fresh state, so a worker's PR is linked before its monitor exits.
+- A task can start on a submitted dependency before it merges. Its PR targets the dependency's branch, the chain is linked as a GitHub stack, and the merge lands it bottom up, pinning each accepted head. A stack link is refused only when the chain it read changed, and then retries from fresh state, so a worker's PR is linked before its monitor exits.
 - PR conflicts confined to declared generated files (`tower-crane.generated` in package.json) are regenerated and pushed without a rework round.
 - Task worktrees are tracked and removed on merge or cancel, with uncommitted work saved first. `worktree list` and `worktree prune` show and clean live, stale and orphan worktrees. Moving the project directory keeps them working, and a task branch tracks its namesake on `origin`.
 
@@ -95,5 +99,5 @@ First release. Tower Crane is a CLI and a Claude Code plugin for handing softwar
 
 ### Claude Code plugin
 
-- The plugin adds the `tower-crane`, `tower-crane-work` and `tower-crane-review` skills, five agent files, five commands (`/tower-crane-inbox`, `/tower-crane-spawn-ready`, `/tower-crane-merge-accepted`, `/tower-crane-rework-from-review`, `/tower-crane-release-dead`), the `tower-crane` MCP server and the wakeup mod. It needs the CLI on `PATH`.
+- The plugin adds the `tower-crane`, `tower-crane-work` and `tower-crane-review` skills, five agent files, six commands (`/tower-crane-inbox`, `/tower-crane-spawn-ready`, `/tower-crane-merge-accepted`, `/tower-crane-rework-from-review`, `/tower-crane-release-dead`, and `/tower-crane-watch` from the mod), the `tower-crane` MCP server and the wakeup mod. Agent prompts name the role skills by their path in the installed package. It needs the CLI on `PATH`.
 - `tower-crane --version` prints the installed version.
