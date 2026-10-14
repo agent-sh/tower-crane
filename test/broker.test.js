@@ -1121,7 +1121,7 @@ test('the broker refuses a push that changes a local action a workflow runs, and
     const sha = f.commit(file, 'runs:\n  using: composite\n');
     const r = await f.raw({ push: { sha } });
     assert.notEqual(r.code, 0, `${file}: ${r.stderr}`);
-    assert.match(r.stderr, new RegExp(`changes ${file.replace(/\./g, '\\.')}`), file);
+    assert.ok(r.stderr.includes(`changes ${file}`), `${file}: ${r.stderr}`);
   }
   assert.equal(f.remoteRef(`refs/heads/${branch}`), pushedBase, 'no action change reached the remote');
   // An action no workflow runs is an ordinary file. git's tracing stays on
