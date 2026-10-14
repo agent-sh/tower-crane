@@ -183,6 +183,23 @@ function first(key) {
   return true;
 }
 
+// Whether git's registration of some worktree under commonDir still carries
+// the lock reason worktree creation sets until it is complete.
+function initializing(commonDir) {
+  let names;
+  try { names = real.readdirSync(path.join(commonDir, 'worktrees')); } catch { return false; }
+  return names.some((name) => {
+    try { return real.readFileSync(path.join(commonDir, 'worktrees', name, 'locked'), 'utf8').startsWith('tower-crane: creating worktree'); }
+    catch { return false; }
+  });
+}
+
+let monotonicSkew = 0;
+if (env.HOOK_DISPATCH_EXPIRE) {
+  const now = performance.now.bind(performance);
+  Object.defineProperty(performance, 'now', { value: () => now() + monotonicSkew, configurable: true });
+}
+
 function before(name, args) {
   const target = args[0];
   // Stdin is read with readStdin (readSync) or a bare readFileSync(0).
@@ -203,6 +220,21 @@ function before(name, args) {
   if (env.HOOK_FAIL_EVENT_SYNC && name === 'fsyncSync' && path.resolve(String(target)) === path.join(STATE, 'events.jsonl') && first('event-sync')) {
     throw Object.assign(new Error('EIO: i/o error, fsync'), { code: 'EIO' });
   }
+  // HOOK_STOP_INITIALIZING=SIGNAL: stop before taking the worktree lock while
+  // a task worktree this process added is still registered as initializing.
+  if (env.HOOK_STOP_INITIALIZING && name === 'mkdirSync' && typeof target === 'string'
+    && path.basename(target) === 'tower-crane-worktree.lock' && initializing(path.dirname(target)) && first('initializing')) {
+    stop(env.HOOK_STOP_INITIALIZING);
+  }
+  // Only a waiter looks inside a dispatch lock another process holds.
+  const dispatchLook = ['readdirSync', 'openSync', 'readFileSync'].includes(name) && under(path.join(STATE, 'dispatch', 'lock'), target);
+  // HOOK_DISPATCH_WAITING=FILE: created at this process's first such look.
+  if (env.HOOK_DISPATCH_WAITING && dispatchLook && first('dispatch-waiting')) {
+    writeAtomic(env.HOOK_DISPATCH_WAITING, String(process.pid), undefined, real);
+  }
+  // HOOK_DISPATCH_EXPIRE=1: each such look moves this process's monotonic
+  // clock an hour on, so its wait for the dispatch lock ends at that look.
+  if (env.HOOK_DISPATCH_EXPIRE && dispatchLook) monotonicSkew += 3600000;
   // HOOK_SUPERVISOR_LOCK_AFTER=FILE: a supervisor takes no state lock until
   // FILE exists, so a test can let another process hold the lock first.
   if (env.HOOK_SUPERVISOR_LOCK_AFTER && name === 'mkdirSync' && inState(target) && /^lock\.\d+\.[0-9a-f]+\.new$/.test(path.basename(String(target)))

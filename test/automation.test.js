@@ -14,6 +14,7 @@ const { readPublished } = require('./atomic-file');
 
 const ghStub = path.join(__dirname, 'fixtures', 'automation-gh.js');
 const harness = path.join(__dirname, 'fixtures', 'automation-harness.js');
+const MERGEABILITY_PAUSE = path.join(__dirname, 'fixtures', 'mergeability-pause.js');
 
 function setup(t, { kind = 'code', ci = 'success', repo } = {}) {
   const h = repo || makeRepo(t);
@@ -29,7 +30,9 @@ function setup(t, { kind = 'code', ci = 'success', repo } = {}) {
   const tools = path.join(h.base, 'tools');
   fs.writeFileSync(path.join(tools, 'gh'), `#!/usr/bin/env node\nrequire(${JSON.stringify(ghStub)});\n`);
   fs.chmodSync(path.join(tools, 'gh'), 0o755);
-  delete h.env.NODE_OPTIONS;
+  // The offline GitHub settles at once; automation keeps its UNKNOWN re-reads without their pauses.
+  h.env.NODE_OPTIONS = `--require=${JSON.stringify(MERGEABILITY_PAUSE)}`;
+  h.env.HOOK_MERGEABILITY_PAUSE_MS = '10';
   if (process.platform === 'win32') {
     fs.writeFileSync(path.join(tools, 'gh.cmd'), `@"${process.execPath}" "${ghStub}" %*\r\n`);
     const preload = path.join(h.base, 'offline-gh.js');
@@ -55,7 +58,7 @@ cp.spawnSync=(cmd,args,opts)=>{
   }
   return run(cmd,args,opts);
 };\n`);
-    h.env.NODE_OPTIONS = `--require=${JSON.stringify(preload)}`;
+    h.env.NODE_OPTIONS += ` --require=${JSON.stringify(preload)}`;
   }
   h.env.AUTOMATION_GITHUB = path.join(h.base, 'github.json');
   h.github = () => JSON.parse(fs.readFileSync(h.env.AUTOMATION_GITHUB, 'utf8'));
@@ -3038,13 +3041,81 @@ for (const trigger of ['exit', 'release --dead', 'merge']) {
     assert.ok(results.every((r) => r.code === 0 && JSON.parse(r.stdout).task === 'T3'), JSON.stringify(results));
     await waitFor(h.marker('T3'), { what: `the task unblocking T4 takes the free slot: ${JSON.stringify(results)}` });
     const spawns = h.logs().filter((e) => e.cmd === 'spawn' && e.detail.role === 'worker');
-    assert.deepEqual(spawns.map((e) => e.task), trigger === 'merge' ? ['T3'] : ['T1', 'T3']);
+    assert.deepEqual(spawns.map((e) => e.task), trigger === 'merge' ? ['T3'] : ['T1', 'T3'],
+      JSON.stringify(h.logs().filter((e) => ['spawn', 'claim', 'release', 'spawn exit'].includes(e.cmd)).map((e) => [e.cmd, e.task, e.detail.agent || e.agent])));
     const st = require('../lib/state').loadState(h.state);
     assert.equal(require('../lib/tasks').workerHolders(st, Date.now()).length, 1);
     h.consume();
     assert.equal(h.logs().filter((e) => e.cmd === 'spawn' && e.detail.role === 'worker').length, spawns.length);
   });
 }
+
+test('a dispatch waits for another that is still preparing the first ready task instead of taking its slot', async (t) => {
+  const h = refillFixture(t);
+  h.json(['spawn', '--task', 'T1', '--agent', 'orchestrator']);
+  await waitFor(h.marker('T1'), { what: 'first worker claims the slot' });
+  fs.writeFileSync(`${h.marker('T1')}.go`, '');
+  await waitFor(`${h.marker('T1')}.exited`);
+  h.run(['wait', '--after', '0', '--observe', '--types', 'worker-exited', '--timeout', '300', '--agent', 'orchestrator']);
+  h.ok(['release', '--dead', '--agent', 'orchestrator']);
+  // The first dispatch stops while T3's new worktree is still registered as
+  // initializing, which refuses T3 to any other dispatch.
+  const preparing = path.join(h.base, 'preparing-T3');
+  const first = h.runAsync(['spawn', '--ready', '--agent', 'orchestrator'], { hooks: { HOOK_STOP_INITIALIZING: preparing } });
+  await waitFor(preparing, { what: 'the first dispatch prepares T3' });
+  const waiting = path.join(h.base, 'second-waiting');
+  let secondDone = false;
+  const second = h.runAsync(['spawn', '--ready', '--agent', 'orchestrator'], { hooks: { HOOK_DISPATCH_WAITING: waiting } });
+  second.then(() => { secondDone = true; });
+  await waitUntil(() => fs.existsSync(waiting) || secondDone, { paths: [h.base], what: 'the second dispatch neither waited nor finished' });
+  fs.writeFileSync(`${preparing}.go`, '');
+  const [firstResult, secondResult] = await Promise.all([first, second]);
+  assert.equal(firstResult.code, 0, firstResult.stderr + firstResult.stdout);
+  await waitFor(h.marker('T3'), { what: 'T3 takes the free slot' });
+  const spawns = h.logs().filter((e) => e.cmd === 'spawn' && e.detail.role === 'worker');
+  assert.deepEqual(spawns.map((e) => e.task), ['T1', 'T3'], secondResult.stdout + secondResult.stderr);
+  assert.match(secondResult.stdout, /^T1: the workers limit is reached .*holders: T3 /m);
+});
+
+// The test process holds the dispatch lock, as a dispatch that outlasts every wait would.
+function holdDispatchLock(t, h) {
+  const S = require('../lib/state');
+  const dir = path.join(h.state, 'dispatch');
+  fs.mkdirSync(dir, { recursive: true });
+  const lock = S.acquireLock(dir);
+  let held = true;
+  const release = () => { if (held) { held = false; S.releaseLock(lock); } };
+  t.after(release);
+  return release;
+}
+
+test('a batch stops at a dispatch lock that outlasts its wait instead of dispatching lower-ranked tasks', (t) => {
+  const h = refillFixture(t);
+  holdDispatchLock(t, h);
+  const result = h.run(['spawn', '--ready', '--agent', 'orchestrator'], { hooks: { HOOK_DISPATCH_EXPIRE: '1' } });
+  assert.equal(result.code, 1, result.stderr);
+  // T3 unblocks T4, so it is first; T1 and T2 are not tried.
+  assert.deepEqual(result.stdout.trim().split('\n').map((line) => line.split(':')[0]), ['T3'], result.stdout);
+  assert.match(result.stdout, /^T3: worker dispatch is locked by pid \d+/, result.stdout);
+  assert.equal(h.logs().filter((e) => e.cmd === 'spawn').length, 0);
+});
+
+test('a refill retries after a dispatch lock timeout without waiting for other inputs to change', async (t) => {
+  const h = refillFixture(t);
+  const release = holdDispatchLock(t, h);
+  let timedOut = false;
+  const watcher = h.runAsync(['wait', '--after', '0', '--task', 'T3', '--types', 'spawn', '--timeout', '60', '--agent', 'orchestrator'], { // wait-allow: a refill that never retries ends by this timeout, the failure the test looks for
+    hooks: { HOOK_DISPATCH_EXPIRE: '1' },
+    onSpawn: (child) => child.stderr.on('data', (d) => { if (/automation refill: T3: worker dispatch is locked/.test(String(d))) timedOut = true; }),
+  });
+  await waitUntil(() => timedOut, { paths: [h.base], what: 'the refill did not report a dispatch lock timeout' });
+  // Nothing in the state changes from here; only the lock goes away.
+  release();
+  const result = await watcher;
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(JSON.parse(result.stdout).task, 'T3');
+  await waitFor(h.marker('T3'), { what: 'T3 takes the free slot' });
+});
 
 function startupContexts(h, withRules) {
   const startups = h.logs().filter((e) => e.cmd === 'startup');

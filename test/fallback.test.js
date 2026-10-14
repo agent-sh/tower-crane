@@ -230,6 +230,17 @@ for (const primaryHarness of ['agy', 'claude']) {
 }
 });
 
+// A full local suite on 2026-10-14 (before #287) timed this test out at 300 s
+// and logged nothing else. Its spawn-fallback wait then sat outside the
+// try/finally with no liveness bound, so either the supervisor recorded no
+// `spawn fallback` (it retired between routes: `valid()` false, group cleanup
+// failing after SIGKILL, or a fallback commit that threw) or the waiter missed
+// the event (unlikely: wait polls every second). A state lock timeout in a
+// supervisor tick is retried on the next tick, so it delays and cannot stall
+// on its own. T312 ran this test 68 times under load (60 alone, 8 among the
+// fallback, supervision, escalation, worker-slots and task-locks files) without
+// a stall. Each wait below now fails within seconds of its supervisor's exit,
+// so a repeat names the step that stalled.
 test('rework during a live fallback refuses a second worker until the previous attempt exits', async (t) => {
   const h = setup(t);
   // The fallback worker runs until the test has checked every refusal.

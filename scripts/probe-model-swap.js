@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const cp = require('node:child_process');
+const { suiteTime, reportSuiteTime, DEADLINE_MIN } = require('./suite-time');
 
 const root = path.resolve(__dirname, '..');
 const cache = process.env.TOWER_CRANE_TEST_TMP || path.join(os.homedir(), '.cache', 'tower-crane-tests');
@@ -46,10 +47,12 @@ try {
     const env = { ...process.env, TOWER_CRANE_TEST_TMP: testTmp };
     // Every fixture owns its HOME and cache; a caller's agent cache changes those paths.
     for (const key of ['XDG_CACHE_HOME', 'LOCALAPPDATA', 'TC_TEST_SHARD', 'NODE_TEST_CONTEXT']) delete env[key];
+    const started = performance.now();
     result = cp.spawnSync(process.execPath, [path.join(probe, 'test', 'run.js'),
       '--test-concurrency=3', '--test-reporter=tap'], {
-      cwd: probe, env, stdio: ['ignore', fd, fd], timeout: 45 * 60 * 1000,
+      cwd: probe, env, stdio: ['ignore', fd, fd], timeout: DEADLINE_MIN * 60 * 1000,
     });
+    reportSuiteTime('Model swap probe', suiteTime(performance.now() - started));
     // Validate the same open file the runner wrote, even if its path changes.
     const buffer = Buffer.alloc(fs.fstatSync(fd).size);
     let offset = 0;
@@ -66,7 +69,7 @@ try {
   const expected = 'BUILTIN matches the documented defaults and init fallback';
   // A timed-out run leaves unfinished tests that say nothing about the swap.
   if (result.error?.code === 'ETIMEDOUT') {
-    throw new Error(`the suite did not finish within the 45-minute software-gate deadline (log: ${log})`);
+    throw new Error(`the suite did not finish within the ${DEADLINE_MIN}-minute software-gate deadline (log: ${log})`);
   }
   if (result.error || result.status !== 1 || failures.length !== 1 || failures[0] !== expected) {
     // The log tail can omit an early failure, so retain its complete assertion block.
