@@ -386,3 +386,29 @@ test('only note evidence can default to the submitted sha', (t) => {
   const pinned = h.json(['evidence', 'T1', '--type', 'note', '--ok', '--sha', '5BFCB6F56AB912A009883C798A61298C507DADA4', '--agent', 'r-1']);
   assert.equal(pinned.sha, '5bfcb6f56ab912a009883c798a61298c507dada4');
 });
+
+test('submit refuses commits that add an empty claude sandbox placeholder, and takes a real file by that name', (t) => {
+  const h = makeRepo(t);
+  h.init(['--base', 'main']);
+  h.ok(['task', 'add', '--title', 'Change', '--acceptance', 'it works', '--kind', 'docs']);
+  h.ok(['claim', 'T1', '--agent', 'w-1']);
+  h.git(['checkout', '-q', '-b', 'change']);
+  fs.writeFileSync(path.join(h.repo, '.bashrc'), '');
+  fs.mkdirSync(path.join(h.repo, '.claude'));
+  fs.writeFileSync(path.join(h.repo, '.claude', 'loop.md'), '');
+  fs.appendFileSync(path.join(h.repo, 'README.md'), 'A change.\n');
+  h.git(['add', '-A']);
+  h.git(['commit', '-q', '-m', 'change with placeholders']);
+  const before = events(h);
+  const refused = h.run(['submit', 'T1', '--sha', h.git(['rev-parse', 'HEAD']), '--agent', 'w-1']);
+  assert.equal(refused.code, 1, refused.stdout);
+  assert.match(refused.stderr, /adds \.bashrc, \.claude\/loop\.md as empty files/);
+  assert.equal(h.json(['task', 'show', 'T1']).status, 'in_progress');
+  assert.deepEqual(events(h), before);
+  fs.writeFileSync(path.join(h.repo, '.bashrc'), 'export PROJECT=1\n');
+  h.git(['rm', '-q', '.claude/loop.md']);
+  h.git(['add', '-A']);
+  h.git(['commit', '-q', '-m', 'a real shell config']);
+  const sha = h.git(['rev-parse', 'HEAD']);
+  assert.equal(h.json(['submit', 'T1', '--sha', sha, '--agent', 'w-1']).sha, sha);
+});
