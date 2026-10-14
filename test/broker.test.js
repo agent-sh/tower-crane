@@ -992,7 +992,7 @@ test('a push gets its answer over a connection that closes when the agent ends i
         conn.write(`${JSON.stringify({ stderr: 'checking\n' })}\n${JSON.stringify({ need: { have: [] } })}\n`);
       }
       // The broker checks the push for a while before it answers.
-      if (got.equals(framed)) setTimeout(() => conn.end(`${JSON.stringify({ code: 0 })}\n`), 200);
+      if (got.equals(framed)) setTimeout(() => conn.end(`${JSON.stringify({ code: 0 })}\n`), 200); // wait-allow: the fake broker's checking time, so the agent's side must stay open past its own pack
     });
   });
   await new Promise((resolve) => server.listen(socket, resolve));
