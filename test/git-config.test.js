@@ -402,6 +402,21 @@ test('the caller\'s GIT_SSH and SSH_ASKPASS still run under the command-scope de
 // A scan is a git process of its own, so one per call doubled the cost of
 // every git call; the reuse must still see a worker's edit to any file the
 // scan read, including one only an include names.
+test('the command-scope credential reset keeps the trusted URL-specific helper, so a token helper still answers', (t) => {
+  // Found 2026-10-14: the reset cleared credential.https://github.com.helper,
+  // the helper spawn renders for a sandboxed agent's GH_TOKEN, and the shim
+  // keeps the reset for codex on Linux, which sets no CODEX_SANDBOX.
+  const h = makeRepo(t);
+  const global = path.join(h.base, 'global-gitconfig');
+  fs.writeFileSync(global, '[credential]\n\thelper =\n[credential "https://github.com"]\n\thelper = "!f() { echo username=x-access-token; echo password=probe-token; }; f"\n');
+  const env = { ...process.env, GIT_CONFIG_GLOBAL: global, GIT_CONFIG_NOSYSTEM: '1', GIT_TERMINAL_PROMPT: '0', GIT_ASKPASS: '', SSH_ASKPASS: '' };
+  for (const k of Object.keys(env)) if (/^GIT_CONFIG_(COUNT|KEY_|VALUE_)/.test(k)) delete env[k];
+  const harness = require('../lib/harness-git').harnessEnv(env, h.repo);
+  const r = cp.spawnSync('git', ['credential', 'fill'], { cwd: h.repo, env: harness, input: 'protocol=https\nhost=github.com\n\n', encoding: 'utf8' });
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /^password=probe-token$/m);
+});
+
 test('a config scan is reused until a file it read changes', (t) => {
   const h = makeRepo(t);
   h.init();

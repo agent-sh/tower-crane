@@ -511,7 +511,7 @@ test('a real codex sandbox resolves names, fetches and pushes over https and ins
   // A ref that does not exist on the remote, so the dry run would create it, and nothing is sent.
   const ref = `refs/heads/tower-crane/network-probe-${process.pid}`;
   const script = `const fs=require("fs"),cp=require("child_process");const o={};`
-    + `o.pushDryRun=cp.spawnSync("git",["push","--dry-run","https://github.com/agent-sh/tower-crane.git","HEAD:${ref}"],{cwd:${JSON.stringify(repo)},encoding:"utf8"}).status;`
+    + `{const r=cp.spawnSync("git",["push","--dry-run","https://github.com/agent-sh/tower-crane.git","HEAD:${ref}"],{cwd:${JSON.stringify(repo)},encoding:"utf8"});o.pushDryRun=r.status;if(r.status!==0)o.pushDryRunErr=String(r.stderr).trim().split("\\n").slice(-2).join(" | ")}`
     + networkProbe(pkg, `fs.writeFileSync(${JSON.stringify(out)},JSON.stringify(o))`);
   const bin = standInCodex(h, script);
   // The owner's home, so spawn finds the gh login to hand over; caches stay in the test.
