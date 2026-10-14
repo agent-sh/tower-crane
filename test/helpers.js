@@ -476,7 +476,7 @@ function context(t, base, options = {}) {
     runAsync: (args, opts = {}) => runAsync(args, withHooks(ctx, opts)),
     // A CLI child the test signals or reads while it runs. Detached processes
     // it starts, such as a worker dispatch, are recorded, so cleanup stops them.
-    spawn: (args, opts = {}) => {
+    spawnCli: (args, opts = {}) => {
       const { cwd, env, pre } = withHooks(ctx, opts);
       return cp.spawn(process.execPath, [...pre, BIN, ...args], { cwd, env });
     },

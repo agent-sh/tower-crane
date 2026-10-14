@@ -2013,7 +2013,7 @@ require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'public-http'))}).fet
 `);
       }
       // An idle wait host refills worker slots, and cleanup stops the worker it dispatches.
-      const child = h.spawn(['wait', '--after', '0', '--types', 'never',
+      const child = h.spawnCli(['wait', '--after', '0', '--types', 'never',
         ...(stage === 'follow' ? ['--follow'] : ['--timeout', '300']),
         ...(stage === 'observe' ? ['--observe'] : []), ...(json && stage !== 'follow' ? ['--json'] : []), '--agent', 'orchestrator'],
       { pre: ['--require', preload] });
