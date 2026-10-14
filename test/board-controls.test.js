@@ -525,3 +525,40 @@ test('browser controls save limits, approve and decline requests, keep saved val
   await b.send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
   assert.equal(await b.inPage(`document.documentElement.scrollWidth <= innerWidth`), true);
 });
+
+test('a save whose data reload fails or hangs says it saved, shows the stale notice and frees the form', { skip: !CHROME && 'no Chrome to drive' }, async (t) => {
+  const h = fixture(t);
+  h.init();
+  h.ok(['task', 'add', '--title', 'Tier target', '--acceptance', 'runs']);
+  const { keyed } = await serve(t, h, 'owner', { fetchToken: false });
+  const b = await openBrowser(t);
+  await b.goto(keyed);
+  await b.until(`document.querySelector('.conn').dataset.conn === 'live'`, 'controls connection');
+  const fill = (id, name, value, event = 'input') => b.inPage(`(() => {const e = document.querySelector('#${id} [name="${name}"]'); e.value=${JSON.stringify(value)}; e.dispatchEvent(new Event('${event}',{bubbles:true}));})()`);
+  // Unsaved input in another form keeps the page in place, so a save reloads only its data.
+  await fill('project-workers', 'workers', '7');
+  await fill('task', '$field', 'tier', 'change');
+  await b.send('Fetch.enable', { patterns: [{ urlPattern: '*/api/controls', requestStage: 'Request' }] });
+  async function save(tier, onRefresh) {
+    await fill('task', '$value', tier);
+    const from = b.seen.length;
+    const paused = (method) => waitUntil(() => b.seen.slice(from).find((m) => m.method === 'Fetch.requestPaused' && m.params.request.method === method),
+      { what: `the controls ${method} request` });
+    await b.inPage(`document.querySelector('#task button[type="submit"]').click()`);
+    await b.send('Fetch.continueRequest', { requestId: (await paused('POST')).params.requestId });
+    await onRefresh((await paused('GET')).params.requestId);
+    await b.until(`document.querySelector('#task .result').textContent !== 'Saving...'`, `tier ${tier} reply`);
+    assert.equal(h.readState('tasks.json').tasks[0].tier, tier);
+    assert.deepEqual(await b.inPage(`(() => { const f = document.getElementById('task'), r = f.querySelector('.result');
+      return {text: r.textContent, error: r.classList.contains('error'), disabled: [...f.querySelectorAll('button,input,select')].some(e => e.disabled), stale: !document.getElementById('stale').hidden}; })()`),
+    { text: 'updated T1 The page could not load the saved state, so its selectors may show older values. Reload to see it.', error: false, disabled: false, stale: true });
+  }
+  // The save went through; only the reload of the page's data failed.
+  await save('hard', (requestId) => b.send('Fetch.failRequest', { requestId, errorReason: 'Failed' }));
+  // A reload that never answers is cut off by its timeout. The page's bound is
+  // shortened here so the test does not wait it out.
+  await b.inPage(`(() => { const timeout = AbortSignal.timeout.bind(AbortSignal); AbortSignal.timeout = (ms) => { window.refreshBound = ms; return timeout(100); }; })()`);
+  await save('easy', async () => {});
+  assert.ok(await b.inPage('window.refreshBound > 0'));
+  await b.send('Fetch.disable');
+});
