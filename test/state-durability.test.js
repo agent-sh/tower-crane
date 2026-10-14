@@ -298,12 +298,13 @@ test('a reader whose staged files are renamed into place while it reads keeps th
 });
 
 // Puts a copy of events.jsonl in its place: the reader cannot tell it from a
-// log that another commit changed while it read. The replaced file stays open
-// until the test ends, so the copy never reuses its inode.
-function replaceLog(t, h) {
+// log that another commit changed while it read. A link keeps each replaced
+// file, so the copy never reuses its inode; an open handle would instead stop
+// the rename on Windows.
+let replacedLogs = 0;
+function replaceLog(h) {
   const log = path.join(h.state, 'events.jsonl');
-  const fd = fs.openSync(log, 'r');
-  t.after(() => fs.closeSync(fd));
+  fs.linkSync(log, `${log}.kept-${++replacedLogs}`);
   fs.copyFileSync(log, `${log}.replaced`);
   fs.renameSync(`${log}.replaced`, log);
 }
@@ -324,7 +325,7 @@ test('a reader that keeps losing to commits reads once under the lock', (t) => {
       // No lock, or one being replaced: not this process's.
     }
     if (mine) return;
-    replaceLog(t, h);
+    replaceLog(h);
     replaced++;
   });
   const read = unlocked(h);
@@ -396,7 +397,7 @@ test('a reader that keeps losing waits only briefly for a held lock, then return
     const file = path.join(h.state, 'tasks.json');
     const restore = readingWith(t, (name) => {
       if (name !== file) return;
-      replaceLog(t, h);
+      replaceLog(h);
       replaced++;
     });
     const started = Date.now();
