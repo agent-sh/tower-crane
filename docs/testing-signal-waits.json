@@ -28308,5 +28308,129 @@
       }
     ],
     "raw_logs": "Task scratch; only relative artifact names and hashes are committed."
+  },
+  "base_6e31e590_refresh": {
+    "base_heads": [
+      "b7c53e64",
+      "6e31e590"
+    ],
+    "source": "9a77495a",
+    "changes": [
+      "Main's pending-CI recheck probes wait on the repository signal and fail at once when their waiter ends. One engine waiter ends at its own 10 s timeout, which the test asserts; the other uses the suite guard and ends on a message.",
+      "The stalled-head check gives the engine each simulated minute before asserting no recheck, with a reason.",
+      "Main's prose claim check waits for evidence with the suite guard, and its paused worktree preparation is a file signal.",
+      "The worktree link race waits for the link marker as a file signal; its window that gives an unlocked gate time to prune carries a reason.",
+      "Main's orchestrator identity probes, live sandbox hold and codex probe use the suite subprocess guard."
+    ],
+    "loaded_command": "node test/run.js --test-concurrency=3 test/automation.test.js test/review-prose.test.js test/worktree.test.js test/orchestrator.test.js",
+    "cpu_load": "Shared 24-core host with other sessions running test suites; one-minute load 14 to 26 during the runs.",
+    "loaded_runs": [
+      {
+        "run": 1,
+        "status": 0,
+        "load_after": [
+          26.2,
+          21.69,
+          17.91
+        ],
+        "log": "loaded6-1.log",
+        "log_sha256": "e8ab0707782caac61c4c38e972c5720d1f7473cb909d69d11d96eafe73d92029",
+        "tests": {
+          "tests": 202,
+          "pass": 202,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 0
+        }
+      },
+      {
+        "run": 2,
+        "status": 0,
+        "load_after": [
+          17.51,
+          18.08,
+          17.62
+        ],
+        "log": "loaded6-2.log",
+        "log_sha256": "8740ab5c78a7ba76163c4b609ef04fa54a25045ff0bdac2fd1e08cdb272fb8eb",
+        "tests": {
+          "tests": 202,
+          "pass": 202,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 0
+        }
+      },
+      {
+        "run": 3,
+        "status": 0,
+        "load_after": [
+          14.73,
+          15.72,
+          16.61
+        ],
+        "log": "loaded6-3.log",
+        "log_sha256": "404017ab6b3b5dd819b21c0d49f0ba1d6dedd8b3d0bb3529827a3054852594de",
+        "tests": {
+          "tests": 202,
+          "pass": 202,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 0
+        }
+      },
+      {
+        "run": 4,
+        "status": 0,
+        "load_after": [
+          17.79,
+          16.14,
+          16.22
+        ],
+        "log": "loaded6-4.log",
+        "log_sha256": "fc3c1cb9b5a7f6a45138eb90d1a480a481f4425db58aaf9b61718cac2ef06dc5",
+        "tests": {
+          "tests": 202,
+          "pass": 202,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 0
+        }
+      },
+      {
+        "run": 5,
+        "status": 0,
+        "load_after": [
+          14.89,
+          17.42,
+          17.29
+        ],
+        "log": "loaded6-5.log",
+        "log_sha256": "e7e2ea66b10a5e6c5174f57e00f2d4f04cd0e1718d15195c047b17e8afa9622f",
+        "tests": {
+          "tests": 202,
+          "pass": 202,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 0
+        }
+      }
+    ],
+    "full_suite": {
+      "command": "node test/run.js --test-concurrency=3",
+      "source": "9a77495a",
+      "status": 0,
+      "wall": "16m39s",
+      "tests": {
+        "tests": 2279,
+        "pass": 2252,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 27
+      },
+      "log": "full-6.log",
+      "log_sha256": "b56e1a715e3a7ab83a947b68f3d58b7829bc7e38a254bb85fdf15979c382986c"
+    },
+    "raw_logs": "Task scratch; only relative artifact names and hashes are committed."
   }
 }

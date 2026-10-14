@@ -72,6 +72,8 @@ The base refresh through `3ad4cc4e` keeps main's Windows worker and monitor tear
 
 The base refreshes through `2dc450f3` and `bd5ed7ea` keep main's harness guard, CLI failure details, teardown steps and self-stopping slow suites. Their new readiness loops wait through `waitUntil`, with kill-on-teardown guards where a failure could leave processes; the orphan backstop, teardown grace and probe cadences carry reasons. Fixtures, automation, supervision and the tests gate pass 235 of 235 tests in each of five loaded runs at `194d328b`. The full suite passes at `04f08fc2` (2199 tests, 24 skipped) and at `194d328b` (2205 tests, 25 skipped), with no failures.
 
+The base refreshes through `b7c53e64` and `6e31e590` keep main's pending-CI rechecks, prose claim checks, worktree races and orchestrator identity probes. Their probes wait on repository and file signals and fail at once when their waiter ends. An engine waiter that ends at its own timeout, the stalled-head observation and the unlocked-prune window carry reasons. Automation, review prose, worktree and orchestrator pass 202 of 202 tests in each of five loaded runs, and the full suite at `9a77495a` passes 2252 tests with 27 skipped and no failures.
+
 ## Tools
 
 - `node scripts/test-cost.js [--before DIR] [files...]` measures CPU and wall seconds per file, median of three runs, four files at a time. With `--before`, it measures another checkout interleaved with this one.
