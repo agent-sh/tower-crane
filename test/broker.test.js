@@ -807,10 +807,10 @@ process.exit(255);
   });
   const shim = (tool, args, opts = {}) => f.shim(tool, args, { ...opts, env: { GIT_SSH_COMMAND: command(sandboxSsh), ...opts.env } });
   // Another clone moves origin's main, as a merged pull request does.
-  const advance = (file) => {
+  const advance = (file, content = `${file}\n`) => {
     const other = fs.mkdtempSync(path.join(f.h.base, 'other-'));
     f.h.git(['clone', '-q', f.remote, other]);
-    fs.writeFileSync(path.join(other, file), `${file}\n`);
+    fs.writeFileSync(path.join(other, file), content);
     f.h.git(['add', file], other);
     f.h.git(['commit', '-qm', `add ${file}`], other);
     f.h.git(['push', '-q', 'origin', 'HEAD:refs/heads/main'], other);
@@ -835,6 +835,12 @@ test('a sandboxed worker whose origin is an ssh URL fetches the base and its tas
   const fetched = await f.shim('git', ['fetch', 'origin']);
   assert.equal(fetched.status, 0, fetched.stderr);
   assert.equal(tracked('refs/remotes/origin/main'), main, 'origin/main is origin\'s main');
+  // A pack of a few MiB pauses the connection many times.
+  const big = f.advance('big.bin', require('node:crypto').randomBytes(3 * 1024 * 1024));
+  const large = await f.shim('git', ['fetch', '-q', 'origin']);
+  assert.equal(large.status, 0, large.stderr);
+  assert.equal(tracked('refs/remotes/origin/main'), big);
+  assert.doesNotMatch(large.stderr, /MaxListeners|Warning/);
   assert.match(fetched.stderr, /From git@github\.com:acme\/demo\.git/);
   f.h.git(['merge', '-q', '--no-ff', '--no-edit', 'origin/main'], f.wt.path);
   assert.equal(fs.readFileSync(path.join(f.wt.path, 'upstream.txt'), 'utf8'), 'upstream.txt\n', 'the fetched objects are whole');
