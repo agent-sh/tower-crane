@@ -432,7 +432,7 @@ function loops(text, offset = 0, found = []) {
       }
       if (parts.length < 3) return;
       condition = parts[1];
-      counters = new Set([...counted(parts[1]), ...parts[2].filter((token) => token.type === 'identifier').map((token) => token.value)]);
+      counters = new Set([...counted(parts[1]), ...counted(parts[2])]);
     }
     const bounded = condition.some((token) => token.type === 'identifier' && (counters.has(token.value) || inBody.has(token.value)));
     found.push({ start: offset + keyword.start, from: offset + range.from, to: offset + range.to, bounded });

@@ -367,6 +367,7 @@ test('the lint rejects sleeps, counted sleep loops and other clocks, and accepts
     'do { Atomics.wait(cell, 0, 0, 10); } while (!ok());',
     'Atomics.wait(cell, 0, 0);',
     'for (let i = 0; i < items.length; i++) handle(items[i]);',
+    'for (let node = start; node; node = node.parent) Atomics.wait(cell, 0, 0, 10);',
     'const script = `while(!fs.existsSync(go))Atomics.wait(s,0,0,100);`;',
     'while (!fs.existsSync(go)) cp.spawnSync("sleep", ["1"]);',
     'await scheduler.wait(HUNG_TEST_MS);',
