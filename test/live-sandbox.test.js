@@ -276,6 +276,25 @@ function realCodexSandbox() {
   return r.status === 0 ? false : `codex sandbox does not start here: ${String(r.stderr).trim().split('\n').pop()}`;
 }
 
+// A stand-in codex on PATH for the small rung: it runs the real `codex
+// sandbox` with the profile spawn wrote, in the environment spawn gave it, so
+// the probe script runs in the real sandbox and no model call is made.
+function standInCodex(h, script) {
+  const bin = path.join(h.base, 'bin');
+  fs.mkdirSync(bin);
+  fs.writeFileSync(path.join(bin, 'codex'), `#!${process.execPath}
+const cp = require('node:child_process');
+const path = require('node:path');
+const PATH = process.env.PATH.split(path.delimiter).filter((d) => path.resolve(d) !== ${JSON.stringify(bin)}).join(path.delimiter);
+process.stdout.write(JSON.stringify({ type: 'thread.started', thread_id: 'probe' }) + '\\n');
+const r = cp.spawnSync('codex', ['sandbox', '-c', 'default_permissions="tower-crane"', '--', process.execPath, '-e', ${JSON.stringify(script)}], { env: { ...process.env, PATH }, encoding: 'utf8' });
+process.stderr.write(r.stderr || '');
+process.exit(r.status ?? 1);
+`, { mode: 0o755 });
+  h.ok(['ladder', 'set', 'small', '--harness', 'codex', '--model', 'probe', '--clear', 'profile', '--clear', 'effort', '--clear', 'args']);
+  return bin;
+}
+
 test('a real codex sandbox starts for a home among 5,000 entries and reads nothing beside it but what the agent needs', { skip: realCodexSandbox(), timeout: 300000 }, async (t) => {
   const h = makeRepo(t);
   h.init();
@@ -291,23 +310,9 @@ test('a real codex sandbox starts for a home among 5,000 entries and reads nothi
   const out = path.join(results(h), 'wide-probe.json');
   const targets = { secret, beside: path.join(h.base, 'entry-0'), worktree: '.', state: path.join(h.state, 'tasks.json') };
   const script = `const fs=require("fs");const o={node:process.version};for(const[k,p]of Object.entries(${JSON.stringify(targets)})){try{const s=fs.statSync(p);if(s.isDirectory())fs.readdirSync(p);else fs.readFileSync(p);o[k]="READABLE"}catch(e){o[k]="ERR "+e.code}}fs.writeFileSync(${JSON.stringify(out)},JSON.stringify(o))`;
-  const bin = path.join(h.base, 'bin');
-  fs.mkdirSync(bin);
-  fs.writeFileSync(path.join(bin, 'codex'), `#!${process.execPath}
-const cp = require('node:child_process');
-const path = require('node:path');
-const PATH = process.env.PATH.split(path.delimiter).filter((d) => path.resolve(d) !== ${JSON.stringify(bin)}).join(path.delimiter);
-process.stdout.write(JSON.stringify({ type: 'thread.started', thread_id: 'probe' }) + '\\n');
-const r = cp.spawnSync('codex', ['sandbox', '-c', 'default_permissions="tower-crane"', '--', process.execPath, '-e', ${JSON.stringify(script)}], { env: { ...process.env, PATH }, encoding: 'utf8' });
-process.stderr.write(r.stderr || '');
-process.exit(r.status ?? 1);
-`, { mode: 0o755 });
-  h.ok(['ladder', 'set', 'small', '--harness', 'codex', '--model', 'probe', '--clear', 'profile', '--clear', 'effort', '--clear', 'args']);
-  // Temp is writable in codex's sandbox, so it must not hold the home here.
-  const tmp = path.join(h.base, 'agent-tmp');
-  fs.mkdirSync(tmp);
+  const bin = standInCodex(h, script);
   const r = await h.runAsync(['spawn', '--role', 'small', '--task', 'T1', '--wait'],
-    { env: { ...h.env, PATH: `${bin}${path.delimiter}${h.env.PATH}`, TMPDIR: tmp, TMP: tmp, TEMP: tmp } });
+    { env: { ...h.env, PATH: `${bin}${path.delimiter}${h.env.PATH}` } });
   assert.equal(r.code, 0, `${r.stderr}\n${agentLog(h)}`);
   assert.ok(fs.existsSync(out), `the probe ran\n${agentLog(h)}`);
   const seen = JSON.parse(fs.readFileSync(out, 'utf8'));
@@ -317,3 +322,44 @@ process.exit(r.status ?? 1);
   assert.equal(seen.worktree, 'READABLE');
   assert.equal(seen.state, 'READABLE');
 });
+
+// codex resolves :tmpdir from the TMPDIR it starts with, and a caller's
+// TMPDIR under the home (~/.cache/tct on the owner's host) holds other
+// tasks' scratch and test fixtures. :slash_tmp is the host's /tmp, shared
+// with every other process. The agent gets a temp directory of its own and
+// no /tmp: it starts with TMPDIR naming its own, which node, mktemp, Python,
+// git and Unix sockets honor. One caller TMPDIR is beside the home, the other
+// in /var/tmp, which the entry /var of / would expose.
+for (const where of ['beside the home', 'in /var/tmp']) {
+  test(`a real codex sandbox cannot read or write the caller's TMPDIR ${where} or /tmp, only a temp directory of its own`, { skip: realCodexSandbox() || (where === 'in /var/tmp' && !fs.existsSync('/var/tmp') && 'needs /var/tmp'), timeout: 300000 }, async (t) => {
+    const h = makeRepo(t);
+    h.init();
+    h.ok(['task', 'add', '--title', 'Temp probe', '--acceptance', 'the caller temp stays hidden']);
+    h.ok(['brief', 'set', 'T1', '-'], { input: 'temp probe\n' });
+    const caller = where === 'in /var/tmp' ? fs.mkdtempSync('/var/tmp/tower-crane-caller-') : path.join(h.base, 'caller-tmp');
+    t.after(() => { if (where === 'in /var/tmp') fs.rmSync(caller, { recursive: true, force: true }); });
+    const planted = path.join(caller, 'other-task', 'fixture.txt');
+    fs.mkdirSync(path.dirname(planted), { recursive: true });
+    fs.writeFileSync(planted, 'PLANTED-TMP\n');
+    const out = path.join(results(h), 'tmp-probe.json');
+    const script = `const fs=require("fs"),os=require("os"),p=require("path");const o={tmpdir:process.env.TMPDIR||null};`
+      + `try{o.read=fs.readFileSync(${JSON.stringify(planted)},"utf8").trim()}catch(e){o.read="ERR "+e.code}`
+      + `try{fs.writeFileSync(${JSON.stringify(path.join(caller, 'written'))},"x");o.callerWrite="WROTE"}catch(e){o.callerWrite="ERR "+e.code}`
+      + `try{const d=fs.mkdtempSync(p.join(os.tmpdir(),"probe-"));fs.writeFileSync(p.join(d,"f"),"x");o.ownWrite=fs.readFileSync(p.join(d,"f"),"utf8")}catch(e){o.ownWrite="ERR "+e.code}`
+      + `try{const d=fs.mkdtempSync("/tmp/tower-crane-probe-");fs.rmdirSync(d);o.slashTmp="WROTE"}catch(e){o.slashTmp="ERR "+e.code}`
+      + `fs.writeFileSync(${JSON.stringify(out)},JSON.stringify(o))`;
+    const bin = standInCodex(h, script);
+    const r = await h.runAsync(['spawn', '--role', 'small', '--task', 'T1', '--wait'],
+      { env: { ...h.env, PATH: `${bin}${path.delimiter}${h.env.PATH}`, TMPDIR: caller, TMP: caller, TEMP: caller } });
+    assert.equal(r.code, 0, `${r.stderr}\n${agentLog(h)}`);
+    assert.ok(fs.existsSync(out), `the probe ran\n${agentLog(h)}`);
+    const seen = JSON.parse(fs.readFileSync(out, 'utf8'));
+    console.log(`codex temp probe: ${JSON.stringify(seen)}`);
+    assert.match(seen.read, /^ERR /, 'the caller\'s TMPDIR is not readable');
+    assert.match(seen.callerWrite, /^ERR /, 'the caller\'s TMPDIR is not writable');
+    assert.equal(seen.ownWrite, 'x', 'the agent writes its own temp directory');
+    assert.ok(seen.tmpdir && seen.tmpdir !== caller && !seen.tmpdir.startsWith(caller + path.sep), `TMPDIR is the agent's own: ${seen.tmpdir}`);
+    assert.match(seen.slashTmp, /^ERR /, 'the host /tmp is not writable');
+    assert.ok(!fs.existsSync(path.join(caller, 'written')));
+  });
+}

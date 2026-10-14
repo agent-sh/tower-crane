@@ -65,7 +65,7 @@ const waitForFile = (file) => fileWritten(file, { check: (text) => text.length >
 
 // A write that is killed while it holds the lock, leaving the lock to a dead pid.
 function killHolder(h) {
-  const r = h.run(['task', 'add', '--title', 'never written', '--acceptance', 'x'], { hooks: { HOOK_DIE_ON: 'project.json' } });
+  const r = h.run(['task', 'add', '--title', 'never written', '--acceptance', 'x'], { hooks: { HOOK_DIE_LOCKED: '1' } });
   assert.notEqual(r.code, 0, 'the holder was killed');
   assert.ok(fs.existsSync(path.join(h.state, 'lock')), 'the dead holder left its lock');
 }
@@ -211,7 +211,7 @@ test('a held lock makes a write wait its bound, then exit 3 without writing', as
   const pausedFile = path.join(h.base, 'paused');
   const go = `${pausedFile}.go`;
   const holder = h.runAsync(['task', 'add', '--title', 'holder', '--acceptance', 'a'], {
-    hooks: { HOOK_PAUSE_ON: 'tasks.json', HOOK_PAUSED: pausedFile },
+    hooks: { HOOK_PAUSE_LOCKED: pausedFile },
   });
   await waitForFile(pausedFile);
   const holderPid = fs.readFileSync(pausedFile, 'utf8');
@@ -233,6 +233,44 @@ test('a held lock makes a write wait its bound, then exit 3 without writing', as
   assert.equal(done.code, 0, done.stderr);
   assert.deepEqual(h.readState('tasks.json').tasks.map((x) => x.title), ['holder'], 'the holder kept its lock and wrote');
   assert.ok(!fs.existsSync(path.join(h.state, 'lock')), 'the lock is released after the write');
+});
+
+test('a write reads under the lock only the events appended since its own read, and renders outside it', (t) => {
+  const h = makeRepo(t);
+  h.init();
+  h.ok(['task', 'add', '--title', 'first', '--acceptance', 'a']);
+  const log = path.join(h.state, 'events.jsonl');
+  const line = JSON.stringify({ at: new Date().toISOString(), agent: 'owner', cmd: 'task note', task: 'T1', detail: { text: 'x'.repeat(1024) } }) + '\n';
+  fs.appendFileSync(log, line.repeat(2048));
+  const size = fs.statSync(log).size;
+  const meter = path.join(h.base, 'locked-reads.json');
+  h.ok(['task', 'note', 'T1', 'one more note'], {
+    env: { LOCKED_READS: meter, NODE_OPTIONS: `--require=${JSON.stringify(path.join(__dirname, 'fixtures', 'locked-reads.js'))}` },
+  });
+  const reads = JSON.parse(fs.readFileSync(meter, 'utf8'));
+  assert.ok(reads.holdings >= 1, 'the write took the lock');
+  assert.ok(reads.lockedBytes < 4096, `read ${reads.lockedBytes} of ${size} log bytes under the lock`);
+  assert.match(fs.readFileSync(path.join(h.state, 'sketch.md'), 'utf8'), /first/);
+});
+
+test('without a start-ticks identity, a waiter keeps a live holder\'s lock and writes as soon as it is released', async (t) => {
+  const h = makeRepo(t);
+  h.init();
+  h.ok(['task', 'add', '--title', 'first', '--acceptance', 'a']);
+  const paused = path.join(h.base, 'holder');
+  // As on Windows and macOS: the holder's marker has no start ticks.
+  const holder = h.runAsync(['task', 'note', 'T1', 'holder'], { hooks: { HOOK_PAUSE_LOCKED: paused, HOOK_NO_START_TICKS: '1' } });
+  await waitForFile(paused);
+  const waiter = h.runAsync(['task', 'note', 'T1', 'waiter']);
+  await new Promise((resolve) => setTimeout(resolve, 500)); // wait-allow: give the waiter time to try the live lock before checking it held
+  assert.ok(fs.existsSync(path.join(h.state, 'lock')), 'the waiter did not break the live lock');
+  const released = Date.now();
+  fs.writeFileSync(`${paused}.go`, '');
+  const [a, b] = await Promise.all([holder, waiter]);
+  assert.equal(a.code, 0, a.stderr);
+  assert.equal(b.code, 0, b.stderr);
+  assert.ok(Date.now() - released < 20000, 'the waiter wrote after the release, within its bound'); // wait-allow: verify the production lock-retry bound
+  assert.deepEqual(h.readState('tasks.json').tasks[0].notes.map((n) => n.text), ['holder', 'waiter']);
 });
 
 test('a stale lock is broken: its holder is gone, or it is older than 60 s', (t) => {
@@ -275,8 +313,8 @@ test('a writer that saw a dead lock before another broke it cannot share the loc
     hooks: { HOOK_STOP_LOCK_READ: signal('x-read'), HOOK_STOP_LOCK_CHANGE: signal('x-change') },
   });
   await waitForFile(signal('x-read'));
-  // Y breaks the dead lock, takes it, and stops inside its write after reading tasks.json.
-  const y = h.runAsync(['task', 'add', '--title', 'Y', '--acceptance', 'a'], { hooks: { HOOK_PAUSE_ON: 'tasks.json', HOOK_PAUSED: signal('y-holds') } });
+  // Y breaks the dead lock, takes it, and stops as soon as it holds it.
+  const y = h.runAsync(['task', 'add', '--title', 'Y', '--acceptance', 'a'], { hooks: { HOOK_PAUSE_LOCKED: signal('y-holds') } });
   let z;
   try {
     await waitForFile(signal('y-holds'));
@@ -312,7 +350,7 @@ test('a holder in another pid namespace keeps its lock, so no write is lost and 
   h.ok(['task', 'add', '--title', 'worker task', '--acceptance', 'a']);
   const paused = path.join(h.base, 'note-holds');
   const note = h.runAsync(['task', 'note', 'T1', 'worker progress'], {
-    hooks: { HOOK_PAUSE_ON: 'tasks.json', HOOK_PAUSED: paused, HOOK_PIDNS: 'pid:[4026500001]' },
+    hooks: { HOOK_PAUSE_LOCKED: paused, HOOK_PIDNS: 'pid:[4026500001]' },
   });
   let add;
   try {

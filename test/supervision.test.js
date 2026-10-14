@@ -754,7 +754,7 @@ test('a state-lock timeout preserves the pending retry without spending another 
   h.json(['spawn', '--task', 'T1']);
   await waitOnRepo(h, () => h.json(['task', 'show', 'T1']).run?.phase === 'retrying', 'retry was not scheduled');
   const paused = path.join(h.base, 'holder');
-  const holder = h.runAsync(['task', 'note', 'T1', 'hold state lock'], { hooks: { HOOK_PAUSE_ON: 'tasks.json', HOOK_PAUSED: paused } });
+  const holder = h.runAsync(['task', 'note', 'T1', 'hold state lock'], { hooks: { HOOK_PAUSE_LOCKED: paused } });
   try {
     await waitOnRepo(h, () => fs.existsSync(paused), 'holder did not acquire the lock');
     await new Promise((resolve) => setTimeout(resolve, 17000)); // wait-allow: hold the lock beyond the production state-lock timeout

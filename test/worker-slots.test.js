@@ -361,13 +361,25 @@ for (const cmd of ['spawn exit', 'worker-exited']) {
     const { spawned, release } = await pausedSpawn(h, 'T1');
     const receipt = path.join(h.base, 'exit-receipt.json');
     const hook = path.join(h.base, 'exit-receipt.js');
+    // The receipt shows in whole-log reads and, once per reader, in appended-event reads.
     fs.writeFileSync(hook, `
 const fs = require('node:fs');
 const read = fs.readFileSync;
+const line = () => JSON.stringify(JSON.parse(read.call(fs, ${JSON.stringify(receipt)}, 'utf8')));
 fs.readFileSync = function(file, ...args) {
   const value = read.call(this, file, ...args);
   if (!String(file).endsWith('events.jsonl') || typeof value !== 'string') return value;
-  return value + JSON.stringify(JSON.parse(read.call(this, ${JSON.stringify(receipt)}, 'utf8'))) + '\\n';
+  return value + line() + '\\n';
+};
+const { EventReader } = require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'event-reader.js'))});
+const tail = EventReader.prototype.read;
+EventReader.prototype.read = function() {
+  const batch = tail.call(this);
+  if (this.file.endsWith('events.jsonl') && !this.receipt) {
+    this.receipt = true;
+    batch.rows.push(this.parse(line(), batch.offset));
+  }
+  return batch;
 };
 `);
     const detail = { agent: spawned.agent, pid: spawned.pid, code: 0 };

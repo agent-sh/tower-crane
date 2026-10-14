@@ -76,7 +76,7 @@ test('driven CLI failures distinguish killed children from failed spawns', (t) =
   h.init();
   assert.throws(() => h.json(['task', 'show', 'T1'], { cwd: path.join(h.base, 'missing') }), /error ENOENT/, 'a failed spawn reports its OS error');
   if (process.platform !== 'win32') {
-    assert.throws(() => h.ok(['task', 'add', '--title', 'Killed write', '--acceptance', 'a'], { hooks: { HOOK_DIE_ON: 'tasks.json' } }), /signal SIGKILL/, 'a child killed while holding the lock reports its signal');
+    assert.throws(() => h.ok(['task', 'add', '--title', 'Killed write', '--acceptance', 'a'], { hooks: { HOOK_DIE_LOCKED: '1' } }), /signal SIGKILL/, 'a child killed while holding the lock reports its signal');
   }
 });
 
