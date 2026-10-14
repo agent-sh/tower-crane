@@ -410,11 +410,130 @@ function writeClaudeStub(bin, out) {
     `#!${process.execPath}`, "'use strict';",
     'const fs = require("node:fs"), path = require("node:path");',
     'const settings = JSON.parse(fs.readFileSync(path.join(process.env.CLAUDE_CONFIG_DIR, "settings.json"), "utf8"));',
-    `fs.writeFileSync(${JSON.stringify(out)}, JSON.stringify({ sandbox: settings.sandbox, env: { XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR, DBUS_SESSION_BUS_ADDRESS: process.env.DBUS_SESSION_BUS_ADDRESS } }));`,
+    `fs.writeFileSync(${JSON.stringify(out)}, JSON.stringify({ sandbox: settings.sandbox, env: { XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR, DBUS_SESSION_BUS_ADDRESS: process.env.DBUS_SESSION_BUS_ADDRESS }, tmp: { TMPDIR: process.env.TMPDIR, TMP: process.env.TMP, TEMP: process.env.TEMP } }));`,
     'console.log("bus probe passed");', '',
   ].join('\n');
   fs.writeFileSync(path.join(bin, 'claude'), stub, { mode: 0o755 });
 }
+
+test('claude: the sandbox allows GitHub, npm and sandbox.domains, names the remotes it leaves out, and refuses a pattern claude does not take', { skip: NO_STUBS }, (t) => {
+  // Owner decision 2026-10-14: an explicit list in place of ['*'], which
+  // claude's proxy honors as every host.
+  const h = setup(t, 'claude');
+  const bin = path.join(h.base, 'bin');
+  fs.mkdirSync(bin);
+  const out = path.join(h.base, 'result.json');
+  writeClaudeStub(bin, out);
+  const env = { ...h.env, PATH: `${bin}${path.delimiter}${process.env.PATH}`, CLAUDE_CONFIG_DIR: '' };
+  const wt = h.json(['worktree', 'T1']).path;
+  // A remote never widens the list: the orchestrator can add one without
+  // the owner. A loopback or tailnet remote, listed as a bare name, would
+  // open every port and service on that host to the agent's commands.
+  for (const args of [['remote', 'add', 'mirror', 'https://git.example.org/acme/app.git'], ['remote', 'set-url', '--add', '--push', 'mirror', 'git@push.example.net:acme/app.git'],
+    ['remote', 'add', 'intranet', 'ssh://gitserver/acme/app.git'], ['remote', 'add', 'local', 'http://localhost:8300/acme/app.git'],
+    ['remote', 'add', 'tailnet', 'http://100.64.0.10:7447/git'], ['remote', 'add', 'v6', 'http://[::1]:8080/app.git'],
+    ['remote', 'add', 'lan', 'https://192.168.1.20:8443/app.git'], ['remote', 'add', 'plain', 'http://plain.example.com/app.git']]) h.git(['-C', wt, ...args]);
+  const spawned = () => {
+    releaseExited(h);
+    const stdout = h.ok(['spawn', '--task', 'T1', '--wait'], { env });
+    return { domains: JSON.parse(fs.readFileSync(out, 'utf8')).sandbox.network.allowedDomains, stdout };
+  };
+  const base = spawned();
+  for (const d of ['github.com', 'api.github.com', 'codeload.github.com', 'objects.githubusercontent.com', 'raw.githubusercontent.com', 'uploads.github.com', 'registry.npmjs.org']) {
+    assert.ok(base.domains.includes(d), `${d} in ${base.domains}`);
+  }
+  for (const host of ['*', 'git.example.org', 'push.example.net', 'gitserver', 'localhost', '100.64.0.10', '[::1]', '192.168.1.20']) {
+    assert.ok(!base.domains.some((d) => d === host || d.startsWith(`${host}:`)), `${host} stays out of ${base.domains}`);
+  }
+  // Each one left out is named, with its port (an https or http URL's
+  // default when it names none) and what kind of address it is.
+  for (const named of ['git.example.org:443', 'plain.example.com:80', 'push.example.net', 'gitserver (single-label', 'localhost:8300 (loopback)', '100.64.0.10:7447 (shared address space',
+    '[::1]:8080 (loopback)', '192.168.1.20:8443 (private address)']) assert.ok(base.stdout.includes(named), `${named} in the notice: ${base.stdout}`);
+  const spawnEvent = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l)).findLast((e) => e.cmd === 'spawn');
+  assert.ok(spawnEvent.detail.notices?.some((n) => n.includes('localhost:8300')), 'the spawn event records the notice');
+  for (const bad of ['*.com', 'https://pypi.org', 'pypi', 'a.b:0', '*.*.org', 'github.com:080', 'github.com:65536', '2001:db8::1:443', '::1',
+    '*.co.uk', '*.github.io', '*.amazonaws.com', '*.s3.amazonaws.com']) {
+    const r = h.run(['project', 'set', '--sandbox', JSON.stringify({ domains: [bad] })]);
+    assert.notEqual(r.code, 0, `${bad} is refused`);
+    assert.match(r.stderr, /sandbox\.domains/);
+  }
+  assert.match(h.run(['project', 'set', '--sandbox', JSON.stringify({ domains: ['*.co.uk'] })]).stderr, /co\.uk, a suffix many owners share/);
+  h.ok(['project', 'set', '--sandbox', JSON.stringify({ domains: ['pypi.org', '*.pythonhosted.org', 'git.example.org:443', 'plain.example.com:80', '100.64.0.10:7447', '[2001:db8::1]:443'] })]);
+  h.ok(['ladder', 'set', 'medium', '--sandbox', JSON.stringify({ domains: ['proxy.golang.org:443'] })]);
+  const extended = spawned();
+  for (const d of ['pypi.org', '*.pythonhosted.org', 'proxy.golang.org:443', 'github.com', 'git.example.org:443', '100.64.0.10:7447']) assert.ok(extended.domains.includes(d), `${d}: a rung adds to the project's list`);
+  // What the owner listed is no longer named, host:443 covering a portless
+  // https remote and host:80 a portless http one; the rest still is.
+  assert.ok(!extended.stdout.includes('git.example.org') && !extended.stdout.includes('plain.example.com') && !extended.stdout.includes('100.64.0.10'), extended.stdout);
+  assert.ok(extended.stdout.includes('localhost:8300 (loopback)'), extended.stdout);
+  // * is the explicit opt-in to every host, which claude's proxy honors, and then nothing is left out.
+  h.ok(['ladder', 'set', 'medium', '--sandbox', JSON.stringify({ domains: ['*'] })]);
+  const all = spawned();
+  assert.ok(all.domains.includes('*'));
+  assert.ok(!all.stdout.includes('remote host'), all.stdout);
+});
+
+test('host patterns match Claude Code 2.1.296: ports 1 to 65535 without a leading zero, IPv6 only in brackets, no wildcard over a shared suffix', () => {
+  const Settings = require('../lib/spawn-settings');
+  for (const ok of ['*', 'github.com', 'github.com:443', 'a.b:65535', 'localhost', 'localhost:8300', '[::1]', '[2001:db8::1]:443', '*.example.com', '*.pythonhosted.org', '100.64.0.10:7447', '*.githubusercontent.com']) {
+    assert.equal(Settings.domainPattern(ok), true, ok);
+  }
+  for (const bad of ['github.com:080', 'github.com:0', 'github.com:65536', 'github.com:', '2001:db8::1:443', '::1', '[::1]:080', '[::1]:', '*.com', '*.*.org', 'pypi', 'https://pypi.org', 'a.b/c', '',
+    // Only ASCII names: a fullwidth letter or colon, a zero-width space, an
+    // ideographic full stop, # or @ never reaches the shared-suffix check.
+    '\uff47ithub.com', 'github.com\uff1a443', 'git\u200bhub.com', 'github\u3002com', '*.github\u3002io', 'evil.com#.github.com', 'user@github.com',
+    'git hub.com', '[fe80::1%25eth0]', '[::1 ]']) {
+    assert.equal(Settings.domainPattern(bad), false, bad);
+  }
+  for (const shared of ['*.co.uk', '*.com.au', '*.github.io', '*.amazonaws.com', '*.s3.us-east-1.amazonaws.com', '*.vercel.app:443', '*.googleapis.com', '*.storage.googleapis.com', '*.oast.fun', '*.me.uk', '*.blogspot.co.uk']) {
+    assert.equal(Settings.domainProblems([shared]).length, 1, shared);
+  }
+  assert.deepEqual(Settings.domainProblems(['*.example.co.uk', '*.pythonhosted.org', 'bucket.s3.amazonaws.com']), []);
+  // Coverage follows the proxy: a port-free pattern any port, *. names under it but not itself.
+  const list = ['github.com', '*.example.org', 'git.example.net:8443'];
+  for (const [entry, covered] of [['github.com:22', true], ['github.com', true], ['a.example.org', true], ['example.org', false],
+    ['git.example.net:8443', true], ['git.example.net', false], ['git.example.net:443', false], ['localhost:8300', false]]) {
+    assert.equal(Settings.domainCovered(list, entry), covered, entry);
+  }
+  assert.equal(Settings.domainCovered(['*'], 'localhost:8300'), true);
+});
+
+test('claude: a sandboxed agent gets a temp directory of its own that its commands reach, where claude puts its proxy sockets', { skip: NO_STUBS }, (t) => {
+  // Found 2026-10-14: claude makes its proxy bridge sockets in TMPDIR, and
+  // with the caller's under the home, which the sandbox hides, every https
+  // request from a command failed with "Proxy CONNECT aborted".
+  const h = setup(t, 'claude');
+  const bin = path.join(h.base, 'bin');
+  fs.mkdirSync(bin);
+  const out = path.join(h.base, 'result.json');
+  writeClaudeStub(bin, out);
+  const caller = path.join(h.base, 'caller-tmp');
+  fs.mkdirSync(caller);
+  // A cache root short enough for claude's 73-byte socket bound.
+  const cache = fs.mkdtempSync(path.join(os.homedir(), '.cache', 'tcl-'));
+  t.after(() => fs.rmSync(cache, { recursive: true, force: true }));
+  const spawnSeen = (xdg, fx = h) => {
+    releaseExited(fx);
+    const stdout = fx.ok(['spawn', '--task', 'T1', '--wait'], { env: { ...fx.env, PATH: `${bin}${path.delimiter}${process.env.PATH}`, CLAUDE_CONFIG_DIR: '', TMPDIR: caller, TMP: caller, TEMP: caller, XDG_CACHE_HOME: xdg } });
+    return { ...JSON.parse(fs.readFileSync(out, 'utf8')), stdout };
+  };
+  const seen = spawnSeen(cache);
+  const tmp = seen.tmp.TMPDIR;
+  assert.ok(tmp && tmp !== caller && tmp.startsWith(fs.realpathSync(cache) + path.sep), `the agent's own: ${tmp}`);
+  assert.deepEqual([seen.tmp.TMP, seen.tmp.TEMP], [tmp, tmp]);
+  assert.ok(Buffer.byteLength(path.join(tmp, 'claude-socks-0123456789abcdef.sock')) <= 108, 'claude\'s bridge socket fits');
+  assert.ok(seen.sandbox.filesystem.allowRead.includes(tmp) && seen.sandbox.filesystem.allowWrite.includes(tmp), 'its commands reach the sockets and write claude\'s cwd files there');
+  assert.ok(fs.lstatSync(tmp).isDirectory());
+  assert.ok(!seen.stdout.includes('TMPDIR'), seen.stdout);
+  // Under a root too deep for the sockets, the caller's TMPDIR stays, and
+  // spawn says so: under the home the agent's https fails, and under /tmp
+  // other agents' proxy sockets are in reach. A fresh task, since a worker
+  // keeps the scratch its first spawn recorded.
+  const other = setup(t, 'claude');
+  const deep = spawnSeen(path.join(other.base, 'a-cache-root-deep-enough-that-no-socket-path-fits-under-it'), other);
+  assert.equal(deep.tmp.TMPDIR, caller);
+  assert.ok(deep.stdout.includes(`keeps the caller's TMPDIR ${caller}`), deep.stdout);
+});
 
 test('claude: sandbox.session_bus grants the bus socket, read and write, and off it grants nothing', { skip: NO_STUBS }, (t) => {
   const h = setup(t, 'claude');
