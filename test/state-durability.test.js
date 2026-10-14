@@ -98,7 +98,9 @@ test('a commit whose log sync fails after its lines are written keeps its change
 test('recovery cuts a torn multi-event append off the log, including a final line missing only its newline', (t) => {
   const h = setup(t);
   const log = path.join(h.state, 'events.jsonl');
-  const size = fs.statSync(log).size;
+  // One descriptor for the stat and the torn append, so the file measured is the file written.
+  const fd = fs.openSync(log, 'a');
+  const { size, dev, ino } = fs.fstatSync(fd);
   const event = (cmd, detail) => ({ at: new Date().toISOString(), agent: 'owner', cmd, task: 'T1', detail, id: `E${crypto.randomUUID()}`, type: cmd, to: 'orchestrator' });
   const first = event('task note', { text: 'torn note' });
   const second = event('evidence', { type: 'note', ok: true });
@@ -107,9 +109,9 @@ test('recovery cuts a torn multi-event append off the log, including a final lin
   doc.last_event = second.id;
   // A power cut kept the first line and all of the second but its newline.
   fs.writeFileSync(path.join(h.state, `tasks.json.${second.id}.commit`), JSON.stringify(doc, null, 2) + '\n');
-  const { dev, ino } = fs.statSync(log);
   fs.writeFileSync(path.join(h.state, `commit.${second.id}.json`), JSON.stringify({ size, dev, ino, ids: [first.id, second.id] }));
-  fs.appendFileSync(log, `${JSON.stringify(first)}\n${JSON.stringify(second)}`);
+  fs.writeSync(fd, `${JSON.stringify(first)}\n${JSON.stringify(second)}`);
+  fs.closeSync(fd);
   h.ok(['task', 'note', 'T1', 'next note']);
   const ids = logged(h).map((e) => e.id);
   assert.ok(!ids.includes(first.id) && !ids.includes(second.id), 'the torn commit left no event');
@@ -130,13 +132,13 @@ test('an add that failed after its commit point keeps its brief, and only then',
   fs.writeFileSync(brief, '# Context\n');
   // The staged commit never logged its last event: the add did not commit.
   T.discardUncommittedBrief(h.state, 'T2');
-  assert.equal(fs.existsSync(brief), false, 'a staged add whose last event is not logged loses its brief');
+  assert.throws(() => fs.readFileSync(brief), { code: 'ENOENT' }, 'a staged add whose last event is not logged loses its brief');
   fs.writeFileSync(brief, '# Context\n');
   // Its last event, an audit event after the add's own, is the log's last line.
   const log = path.join(h.state, 'events.jsonl');
   fs.appendFileSync(log, `${JSON.stringify({ at: new Date().toISOString(), agent: 'owner', cmd: 'setting', task: 'T2', detail: {}, id, type: 'setting', to: 'orchestrator' })}\n`);
   T.discardUncommittedBrief(h.state, 'T2');
-  assert.ok(fs.existsSync(brief), 'a staged add whose last event is logged keeps its brief');
+  assert.equal(fs.readFileSync(brief, 'utf8'), '# Context\n', 'a staged add whose last event is logged keeps its brief');
 });
 
 const foreign = (text) => ({ at: new Date().toISOString(), agent: 'owner', cmd: 'msg', task: 'T1', detail: { to: 'worker-a', text },
@@ -196,7 +198,9 @@ test('rolling a commit forward syncs the log before it renames the staged files'
 test('a torn last line cut before its own id is cut off, even when its detail names another event', (t) => {
   const h = setup(t);
   const log = path.join(h.state, 'events.jsonl');
-  const size = fs.statSync(log).size;
+  // One descriptor for the stat and the torn append, so the file measured is the file written.
+  const fd = fs.openSync(log, 'a');
+  const { size, dev, ino } = fs.fstatSync(fd);
   const event = (cmd, detail) => ({ at: new Date().toISOString(), agent: 'owner', cmd, task: 'T1', detail, id: `E${crypto.randomUUID()}`, type: cmd, to: 'orchestrator' });
   const first = event('task note', { text: 'torn note' });
   const second = event('evidence', { type: 'note', ok: true, ref: { id: `E${crypto.randomUUID()}` } });
@@ -204,10 +208,10 @@ test('a torn last line cut before its own id is cut off, even when its detail na
   doc.tasks[0].notes.push({ at: first.at, agent: 'owner', text: 'torn note' });
   doc.last_event = second.id;
   fs.writeFileSync(path.join(h.state, `tasks.json.${second.id}.commit`), JSON.stringify(doc, null, 2) + '\n');
-  const { dev, ino } = fs.statSync(log);
   fs.writeFileSync(path.join(h.state, `commit.${second.id}.json`), JSON.stringify({ size, dev, ino, ids: [first.id, second.id] }));
   const line = JSON.stringify(second);
-  fs.appendFileSync(log, `${JSON.stringify(first)}\n${line.slice(0, line.indexOf(',"id":"'))}`);
+  fs.writeSync(fd, `${JSON.stringify(first)}\n${line.slice(0, line.indexOf(',"id":"'))}`);
+  fs.closeSync(fd);
   h.ok(['task', 'note', 'T1', 'next note']);
   assert.ok(!logged(h).some((e) => e.id === first.id), 'the torn commit left no event');
   assert.equal(fs.readFileSync(log, 'utf8').includes(second.detail.ref.id), false, 'the torn line is gone');
