@@ -155,3 +155,11 @@ jobs:
       - name: Show probe failures
         if: failure()
         run: tail -n 300 "$RUNNER_TEMP/tower-crane-model-swap/model-swap-probe.tap"
+      # The TAP keeps every test's duration, so a slow trend can be traced to its tests.
+      - name: Save model swap TAP
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: model-swap-tap
+          path: ${{ runner.temp }}/tower-crane-model-swap/model-swap-probe.tap
+          if-no-files-found: warn
