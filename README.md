@@ -26,7 +26,7 @@ Tower Crane moves those steps out of the model:
 
 ## Quick start
 
-You need Node 24 or newer, git, an authenticated `gh`, a GitHub repository with an `origin` remote, the harness CLIs your ladder names (`claude` and `codex` by default) and, for code tasks, a cleanup tool for the clean gate ([deslop](https://github.com/agent-sh/deslop) on `PATH`, or `TOWER_CRANE_CLEAN_CMD`). Use deslop 2.0 or newer, the diff-scoped rewrite (agent-sh/deslop `main` until 2.0 is released): it reads only the change against `--base`. The agentsys deslop plugin 5.x ignores `--base` and scans the whole repository; the gate then judges only findings on the lines the change touches and names this fix.
+You need Node 24 or newer, git, an authenticated `gh`, a GitHub repository with an `origin` remote, the harness CLIs your ladder names (`claude` and `codex` by default) and, for code tasks, a cleanup tool for the clean gate ([deslop](https://github.com/agent-sh/deslop) on `PATH`, or `TOWER_CRANE_CLEAN_CMD`). Use the diff-scoped deslop rewrite, agent-sh/deslop `main` from commit e669dbc: it reads only the change against `--base`, and its `--json` report carries `"scope": "diff"`. The old agentsys deslop plugin has the same plugin version, 5.5.0, but ignores `--base` and scans the whole repository; its report has no `scope`. The gate then judges only findings on the lines the change touches and names this fix.
 
 Install the CLI and check it runs:
 

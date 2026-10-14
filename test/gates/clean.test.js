@@ -11,10 +11,15 @@ isolateGit(tmp);
 process.env.TOWER_CRANE_TMP = path.join(tmp, 'tower-crane-tmp');
 fs.mkdirSync(process.env.TOWER_CRANE_TMP);
 const root = path.join(tmp, 'repo');
-const base = initRepo(root, { 'lib/a.js': 'module.exports = 1;\n', 'lib/c.js': 'one\ntwo\nthree\nfour\n', 'src/main.rs': 'fn main() {\n    dbg!(1);\n}\n' });
+const base = initRepo(root, { 'lib/a.js': 'module.exports = 1;\n', 'lib/c.js': 'one\ntwo\nthree\nfour\nfive\nsix\n', 'src/main.rs': 'fn main() {\n    dbg!(1);\n}\n' });
 git(root, 'checkout', '-q', '-b', 'task');
-// The change touches lib/a.js and line 3 of lib/c.js; src/main.rs is the base's.
-const sha = commit(root, { 'lib/a.js': 'module.exports = 2;\n', 'lib/c.js': 'one\ntwo\nTHREE\nfour\n' });
+// The change touches lib/a.js and lines 2, 3 and 5 of lib/c.js; src/main.rs is the base's. Line 2
+// reads `++ two`, which the patch shows as `+++ two`, the shape of a file header.
+const sha = commit(root, { 'lib/a.js': 'module.exports = 2;\n', 'lib/c.js': 'one\n++ two\nTHREE\nfour\nFIVE\nsix\n' });
+// Settings a worker can write that would widen the changed lines (hunks fused over line 4) or drop
+// them (lib/c.js diffed as binary).
+git(root, 'config', 'diff.interHunkContext', '3');
+fs.writeFileSync(path.join(root, '.git', 'info', 'attributes'), 'lib/c.js -diff\n');
 git(root, 'checkout', '-q', 'main');
 
 // Stands in for deslop: records how it was called and prints the report it is given.
@@ -27,7 +32,7 @@ fs.writeFileSync(process.env.FAKE_CLEAN_LOG, JSON.stringify({ dir, rest, head, t
 if (process.env.FAKE_CLEAN_MODE === 'crash') { console.error('cannot read the repository'); process.exit(1); }
 if (process.env.FAKE_CLEAN_MODE === 'kill') process.kill(process.pid, 'SIGKILL');
 if (process.env.FAKE_CLEAN_MODE === 'text') { console.log('deslop: 2 findings'); process.exit(0); }
-// The deslop plugin 5.x: a "findings" list from the whole repository, exit 2 on a critical one.
+// The old deslop plugin: a "findings" list from the whole repository, exit 2 on a critical one.
 if (process.env.FAKE_CLEAN_MODE === 'old') {
   console.log(JSON.stringify({ findings: [{ file: 'src/main.rs', line: 2, severity: 'critical', patternName: 'debug print' }], summary: { bySeverity: { critical: 1 } } }, null, 2));
   process.exit(Number(process.env.FAKE_CLEAN_EXIT || 2));
@@ -177,18 +182,20 @@ test('a tool that scans the whole repository: only findings on the lines the cha
   assert.match(clean.summary, /no findings in the change/);
   assert.match(clean.summary, /Out of scope, not judged \(3, outside the files and lines \w+\.\.\w+ changes\): src\/main\.rs:2 \(high\), lib\/c\.js:1 \(high\)/);
   assert.match(clean.summary, /every finding is outside the change/);
-  assert.match(clean.summary, /deslop 2\.0 or newer, the diff-scoped rewrite/);
+  assert.match(clean.summary, /the diff-scoped deslop rewrite \(agent-sh\/deslop main from commit e669dbc; its --json report carries "scope": "diff"/);
   assert.doesNotMatch(clean.summary, /HIGH/);
 
   // Findings on the changed line, by relative or absolute path, or naming the changed file as a whole, are judged.
   report([...outside, item('high', 'debug-print', 'lib/c.js', 3, 'changed line'), item('high', 'debug-print', '$DIR/lib/c.js', 3, 'changed line by absolute path'),
+    item('high', 'debug-print', './lib/c.js', 5, 'changed line after a +++ body line'), item('high', 'debug-print', 'lib/c.js', 4, 'untouched line between hunks'),
     item('review', 'no-caller', 'lib/a.js', 0, 'nothing calls a')], { scope: 'repo' });
   const dirty = await gate.run(ctx());
   assert.equal(dirty.ok, false);
   assert.equal(dirty.confirmed_failure, true);
-  assert.match(dirty.summary, /high 2, review 1 in the change/);
-  assert.match(dirty.summary, /HIGH \(2\):\n- lib\/c\.js:3 changed line\n- lib\/c\.js:3 changed line by absolute path\n/);
-  assert.match(dirty.summary, /3 of 6 findings are outside the change/);
+  assert.match(dirty.summary, /high 3, review 1 in the change/);
+  assert.match(dirty.summary, /HIGH \(3\):\n- lib\/c\.js:3 changed line\n- lib\/c\.js:3 changed line by absolute path\n- lib\/c\.js:5 changed line after a \+\+\+ body line\n/);
+  assert.match(dirty.summary, /4 of 8 findings are outside the change/);
+  assert.match(dirty.summary, /lib\/c\.js:4 \(high\)/);
   assert.doesNotMatch(dirty.summary, /- src\/main\.rs/);
 
   // A tool that declares diff scope tied each finding to the change itself (a stale mention in an untouched file), so none is dropped.
@@ -197,23 +204,30 @@ test('a tool that scans the whole repository: only findings on the lines the cha
   assert.equal(scoped.ok, false);
   assert.match(scoped.summary, /HIGH \(3\):\n- src\/main\.rs:2 Debug print/);
   assert.doesNotMatch(scoped.summary, /Out of scope|no diff scope/);
+
+  // A capped report without diff scope may hide a finding in the change past the cap.
+  report(outside, { scope: undefined, total: 40 });
+  const capped = await gate.run(ctx());
+  assert.equal(capped.ok, false);
+  assert.equal(capped.infrastructure_failure, true);
+  assert.match(capped.summary, /listed 3 of 40 findings and reports no diff scope, so findings in the change may be past its cap/);
   assertCleanedUp();
 });
 
-test('the deslop plugin 5.x output: not ok whatever its exit status, naming the diff-scoped deslop', async () => {
+test('the old deslop plugin output: not ok whatever its exit status, naming the diff-scoped deslop', async () => {
   process.env.TOWER_CRANE_CLEAN_CMD = fakeCmd;
   process.env.FAKE_CLEAN_MODE = 'old';
   const failed = await gate.run(ctx());
   assert.equal(failed.ok, false);
   assert.match(failed.summary, /failed: exit 2/);
-  assert.match(failed.summary, /deslop plugin 5\.x's, which ignores --base/);
-  assert.match(failed.summary, /deslop 2\.0 or newer, the diff-scoped rewrite/);
+  assert.match(failed.summary, /old deslop plugin's \(a "findings" list, no "scope"\), which ignores --base/);
+  assert.match(failed.summary, /the diff-scoped deslop rewrite/);
   assert.deepEqual(failed.config_failure, { key: 'clean_cmd' });
   process.env.FAKE_CLEAN_EXIT = '0';
   const passed = await gate.run(ctx());
   assert.equal(passed.ok, false);
-  assert.match(passed.summary, /"findings" list, the deslop plugin 5\.x's output, which ignores --base/);
-  assert.match(passed.summary, /deslop 2\.0 or newer/);
+  assert.match(passed.summary, /"findings" list, the old deslop plugin's output, which ignores --base/);
+  assert.match(passed.summary, /the diff-scoped deslop rewrite/);
   assert.deepEqual(passed.config_failure, { key: 'clean_cmd' });
   assertCleanedUp();
 });
