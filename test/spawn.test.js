@@ -419,20 +419,16 @@ test('the prompt is the role skill, brief, task, then how to use tower-crane', (
   assert.ok(p.endsWith('run tower-crane with --agent worker-T1-1 if TOWER_CRANE_AGENT is missing.'));
 });
 
-test('prompts name role skills in the agent\'s own tool snapshot, since a user worktree has no skills directory', (t) => {
+test('prompts name role skills in the state directory\'s skill store, since a user worktree has no skills directory', (t) => {
   const h = setup(t);
   setRung(h, 'medium', ['--harness', 'opencode', '--model', 'a/b']);
-  let home;
-  const prompt = (rung) => {
-    const out = dry(h, rung);
-    home = out.home.path;
-    return out.argv.find((arg) => arg.includes('## Task'));
-  };
+  const store = A.skillStore({}, h.state).dir;
+  const prompt = (rung) => dry(h, rung).argv.find((arg) => arg.includes('## Task'));
   const relative = /(?<![\\/\w.-])skills[\\/]tower-crane-(?:work|review)[\\/]SKILL\.md/;
   const packaged = (text, skill) => {
     const named = new RegExp(`Follow the ${skill} skill \\((.+?SKILL\\.md)\\)`).exec(text);
     assert.ok(named, `${skill} is named`);
-    assert.equal(named[1], path.join(home, 'tool', 'skills', skill, 'SKILL.md'), 'the copy in the agent\'s home, which the spawn builds');
+    assert.equal(named[1], path.join(store, skill, 'SKILL.md'), 'the copy in the state directory, which the spawn makes');
   };
   assert.doesNotMatch(prompt('medium'), relative, 'the embedded work skill points at no worktree path');
 
@@ -548,8 +544,8 @@ test('pi rungs load the tower-crane skill for workers and reviewers when it is i
   for (const rung of ['easy', 'medium', 'review', 'small']) setRung(h, rung, ['--model', 'm']);
   h.ok(['ladder', 'harness', 'pi']);
   const at = (argv) => argv.slice(argv.indexOf('--skill'), argv.indexOf('--skill') + 2);
-  // The copy in the agent's own tool snapshot, which the spawn makes from the plugin root.
-  const own = (out, skill) => ['--skill', path.join(out.home.path, 'tool', 'skills', skill)];
+  // The copy in the state directory's skill store, which the spawn makes from the plugin root.
+  const own = (out, skill) => ['--skill', path.join(A.skillStore(env, h.state).dir, skill)];
   const workerOut = dry(h, 'medium', env);
   const reviewerOut = dry(h, 'review', env);
   const easyOut = dry(h, 'easy', env);

@@ -1026,9 +1026,11 @@ test('a spawned codex agent is pointed at the user\'s global rules, loads none o
 });
 
 // Automation dispatches from inside a worker's monitor, so its package root is
-// that worker's tool snapshot, removed when the worker exits. A path into it,
-// or into any root but the agent's own home, can be gone when the agent reads it.
-test('every skill path a worker, reviewer or researcher is told to read is in its own home at launch, also when a worker\'s snapshot dispatches it', { skip: NO_STUBS }, (t) => {
+// that worker's tool snapshot, removed when the worker exits. Skill paths name
+// the state directory's skill store instead, which no exit removes and which,
+// unlike homes/, the claude and codex sandboxes can read
+// (test/live-sandbox.test.js reads it from inside them).
+test('every skill path a worker, reviewer or researcher is told to read is in the state directory\'s skill store at launch and after, also when a worker\'s snapshot dispatches it', { skip: NO_STUBS }, (t) => {
   const { h, u } = setup(t);
   fs.mkdirSync(path.join(u.home, '.cache'), { recursive: true });
   fs.writeFileSync(path.join(h.base, 'bin', 'opencode'), `#!${process.execPath}\nrequire(${JSON.stringify(STUB)})("opencode");\n`, { mode: 0o755 });
@@ -1038,22 +1040,23 @@ test('every skill path a worker, reviewer or researcher is told to read is in it
     assert.equal(r.code ?? r.status, 0, r.stderr);
     return JSON.parse(r.stdout);
   };
-  const ownPaths = (harness, role, started) => {
-    const home = fs.realpathSync(path.join(h.state, 'homes', started.agent));
+  const named = new Set();
+  const ownPaths = (harness, role) => {
+    const store = path.join(fs.realpathSync(h.state), 'skills') + path.sep;
     const seen = u.report();
-    const named = [...seen.skillPaths, ...seen.skillLinks];
     assert.ok(seen.skillPaths.length, `${harness} ${role}: names its skill`);
     if (harness !== 'claude') assert.ok(seen.skillLinks.length, `${harness} ${role}: links its skill in its home`);
-    for (const { file, real: at } of named) {
+    for (const { file, real: at } of [...seen.skillPaths, ...seen.skillLinks]) {
       assert.ok(at, `${harness} ${role}: ${file} exists at launch`);
-      assert.ok(at.startsWith(home + path.sep), `${harness} ${role}: ${file} resolves to ${at}, inside its own home ${home}`);
+      assert.ok(at.startsWith(store), `${harness} ${role}: ${file} resolves to ${at}, in the skill store ${store}, not a home or the dispatcher's package`);
+      named.add(at);
     }
   };
   for (const harness of ['claude', 'codex', 'opencode']) {
     const model = { claude: ['--model', 'fixture-large', '--clear', 'profile'], codex: ['--profile', 'fixture-main', '--clear', 'model'], opencode: ['--model', 'fixture/probe', '--clear', 'profile'] }[harness];
     for (const rung of ['medium', 'review', 'research']) h.ok(['ladder', 'set', rung, '--harness', harness, ...model, '--clear', 'effort', '--clear', 'args']);
     const worker = spawn(h, u, 'medium');
-    ownPaths(harness, 'worker', worker);
+    ownPaths(harness, 'worker');
     // A copy, since the next dispatch prunes the exited worker's home it would run from.
     const snapshot = path.join(h.base, `${harness}-worker-snapshot`);
     fs.cpSync(worker.tool.path, snapshot, { recursive: true });
@@ -1062,10 +1065,14 @@ test('every skill path a worker, reviewer or researcher is told to read is in it
     h.ok(['task', 'update', 'T1', '--kind', 'docs']);
     h.ok(['claim', 'T1', '--agent', 'builder']);
     h.ok(['submit', 'T1', '--sha', h.git(['rev-parse', 'HEAD']), '--agent', 'builder']);
-    ownPaths(harness, 'reviewer', fromSnapshot(snapshot, 'review'));
+    fromSnapshot(snapshot, 'review');
+    ownPaths(harness, 'reviewer');
     h.ok(['rework', 'T1', '--reason', 'probe the research rung']);
-    ownPaths(harness, 'researcher', fromSnapshot(snapshot, 'research'));
+    fromSnapshot(snapshot, 'research');
+    ownPaths(harness, 'researcher');
   }
+  // Later spawns pruned the exited agents' homes; what they were told to read stays.
+  for (const file of named) assert.ok(fs.existsSync(file), `${file} outlives the agents that were told to read it`);
 });
 
 test('every spawn gets a fresh home, and an exited agent\'s home is removed', { skip: NO_STUBS }, (t) => {
