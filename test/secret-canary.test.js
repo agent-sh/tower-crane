@@ -75,8 +75,10 @@ function setup(t, harness, mode, { big = 0 } = {}) {
   const allow = [path.join(h.state, 'project.json'), h.userConfig, ...sources];
   const reports = () => fs.readFileSync(out, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
   const expected = (names) => Object.fromEntries(Object.entries(values).map(([n, v]) => [n, names.includes(n) ? sha(v) : null]));
-  const primary = expected(['TC_RUNG_SECRET', 'TC_PROJECT_SECRET', 'TC_FILE_SECRET', 'GH_TOKEN', CREDENTIAL[harness], ...Object.keys(bigVars)]);
-  const fallback = expected(['TC_FALLBACK_SECRET', 'TC_PROJECT_SECRET', 'TC_FILE_SECRET', 'GH_TOKEN', CREDENTIAL[harness]]);
+  // The spawning environment's GH_TOKEN never reaches a sandboxed agent: its
+  // broker pushes and runs gh (lib/github-broker.js).
+  const primary = expected(['TC_RUNG_SECRET', 'TC_PROJECT_SECRET', 'TC_FILE_SECRET', CREDENTIAL[harness], ...Object.keys(bigVars)]);
+  const fallback = expected(['TC_FALLBACK_SECRET', 'TC_PROJECT_SECRET', 'TC_FILE_SECRET', CREDENTIAL[harness]]);
   const noLeaks = (...outputs) => {
     const cache = path.join(home, '.cache', 'tower-crane');
     assert.ok(fs.readdirSync(cache).some((d) => fs.existsSync(path.join(cache, d, 'job.json'))), 'the kept job file is scanned');

@@ -1,0 +1,899 @@
+{
+ "gh": "gh version 2.102.0 (2026-09-30)",
+ "commands": {
+  "auth status": {
+   "active": {
+    "short": "a",
+    "value": null
+   },
+   "hostname": {
+    "short": "h",
+    "value": "string"
+   },
+   "jq": {
+    "value": "expression"
+   },
+   "json": {
+    "value": "fields"
+   },
+   "show-token": {
+    "short": "t",
+    "value": null
+   },
+   "template": {
+    "value": "string"
+   },
+   "help": {
+    "value": null
+   }
+  },
+  "issue list": {
+   "app": {
+    "value": "string"
+   },
+   "assignee": {
+    "short": "a",
+    "value": "string"
+   },
+   "author": {
+    "short": "A",
+    "value": "string"
+   },
+   "jq": {
+    "short": "q",
+    "value": "expression"
+   },
+   "json": {
+    "value": "fields"
+   },
+   "label": {
+    "short": "l",
+    "value": "strings"
+   },
+   "limit": {
+    "short": "L",
+    "value": "int"
+   },
+   "mention": {
+    "value": "string"
+   },
+   "milestone": {
+    "short": "m",
+    "value": "string"
+   },
+   "search": {
+    "short": "S",
+    "value": "query"
+   },
+   "state": {
+    "short": "s",
+    "value": "string"
+   },
+   "template": {
+    "short": "t",
+    "value": "string"
+   },
+   "type": {
+    "value": "name"
+   },
+   "web": {
+    "short": "w",
+    "value": null
+   },
+   "help": {
+    "value": null
+   },
+   "repo": {
+    "short": "R",
+    "value": "[HOST/]OWNER/REPO"
+   }
+  },
+  "issue view": {
+   "comments": {
+    "short": "c",
+    "value": null
+   },
+   "jq": {
+    "short": "q",
+    "value": "expression"
+   },
+   "json": {
+    "value": "fields"
+   },
+   "template": {
+    "short": "t",
+    "value": "string"
+   },
+   "web": {
+    "short": "w",
+    "value": null
+   },
+   "help": {
+    "value": null
+   },
+   "repo": {
+    "short": "R",
+    "value": "[HOST/]OWNER/REPO"
+   }
+  },
+  "label list": {
+   "jq": {
+    "short": "q",
+    "value": "expression"
+   },
+   "json": {
+    "value": "fields"
+   },
+   "limit": {
+    "short": "L",
+    "value": "int"
+   },
+   "order": {
+    "value": "string"
+   },
+   "search": {
+    "short": "S",
+    "value": "string"
+   },
+   "sort": {
+    "value": "string"
+   },
+   "template": {
+    "short": "t",
+    "value": "string"
+   },
+   "web": {
+    "short": "w",
+    "value": null
+   },
+   "help": {
+    "value": null
+   },
+   "repo": {
+    "short": "R",
+    "value": "[HOST/]OWNER/REPO"
+   }
+  },
+  "pr checks": {
+   "fail-fast": {
+    "value": null
+   },
+   "interval": {
+    "short": "i",
+    "value": "int"
+   },
+   "jq": {
+    "short": "q",
+    "value": "expression"
+   },
+   "json": {
+    "value": "fields"
+   },
+   "required": {
+    "value": null
+   },
+   "template": {
+    "short": "t",
+    "value": "string"
+   },
+   "watch": {
+    "value": null
+   },
+   "web": {
+    "short": "w",
+    "value": null
+   },
+   "help": {
+    "value": null
+   },
+   "repo": {
+    "short": "R",
+    "value": "[HOST/]OWNER/REPO"
+   }
+  },
+  "pr close": {
+   "comment": {
+    "short": "c",
+    "value": "string"
+   },
+   "delete-branch": {
+    "short": "d",
+    "value": null
+   },
+   "help": {
+    "value": null
+   },
+   "repo": {
+    "short": "R",
+    "value": "[HOST/]OWNER/REPO"
+   }
+  },
+  "pr comment": {
+   "attach": {
+    "value": "file"
+   },
+   "body": {
+    "short": "b",
+    "value": "text"
+   },
+   "body-file": {
+    "short": "F",
+    "value": "file"
+   },
+   "create-if-none": {
+    "value": null
+   },
+   "delete-last": {
+    "value": null
+   },
+   "edit-last": {
+    "value": null
+   },
+   "editor": {
+    "short": "e",
+    "value": null
+   },
+   "web": {
+    "short": "w",
+    "value": null
+   },
+   "yes": {
+    "value": null
+   },
+   "help": {
+    "value": null
+   },
+   "repo": {
+    "short": "R",
+    "value": "[HOST/]OWNER/REPO"
+   }
+  },
+  "pr create": {
+   "assignee": {
+    "short": "a",
+    "value": "login"
+   },
+   "attach": {
+    "value": "file"
+   },
+   "base": {
+    "short": "B",
+    "value": "branch"
+   },
+   "body": {
+    "short": "b",
+    "value": "string"
+   },
+   "body-file": {
+    "short": "F",
+    "value": "file"
+   },
+   "draft": {
+    "short": "d",
+    "value": null
+   },
+   "dry-run": {
+    "value": null
+   },
+   "editor": {
+    "short": "e",
+    "value": null
+   },
+   "fill": {
+    "short": "f",
+    "value": null
+   },
+   "fill-first": {
+    "value": null
+   },
+   "fill-verbose": {
+    "value": null
+   },
+   "head": {
+    "short": "H",
+    "value": "branch"
+   },
+   "label": {
+    "short": "l",
+    "value": "name"
+   },
+   "milestone": {
+    "short": "m",
+    "value": "name"
+   },
+   "no-maintainer-edit": {
+    "value": null
+   },
+   "project": {
+    "short": "p",
+    "value": "title"
+   },
+   "recover": {
+    "value": "string"
+   },
+   "reviewer": {
+    "short": "r",
+    "value": "handle"
+   },
+   "template": {
+    "short": "T",
+    "value": "file"
+   },
+   "title": {
+    "short": "t",
+    "value": "string"
+   },
+   "web": {
+    "short": "w",
+    "value": null
+   },
+   "help": {
+    "value": null
+   },
+   "repo": {
+    "short": "R",
+    "value": "[HOST/]OWNER/REPO"
+   }
+  },
+  "pr diff": {
+   "allow-escape-sequences": {
+    "value": null
+   },
+   "color": {
+    "value": "string"
+   },
+   "exclude": {
+    "short": "e",
+    "value": "patterns"
+   },
+   "name-only": {
+    "value": null
+   },
+   "patch": {
+    "value": null
+   },
+   "web": {
+    "short": "w",
+    "value": null
+   },
+   "help": {
+    "value": null
+   },
+   "repo": {
+    "short": "R",
+    "value": "[HOST/]OWNER/REPO"
+   }
+  },
+  "pr edit": {
+   "add-assignee": {
+    "value": "login"
+   },
+   "add-label": {
+    "value": "name"
+   },
+   "add-project": {
+    "value": "title"
+   },
+   "add-reviewer": {
+    "value": "login"
+   },
+   "attach": {
+    "value": "file"
+   },
+   "base": {
+    "short": "B",
+    "value": "branch"
+   },
+   "body": {
+    "short": "b",
+    "value": "string"
+   },
+   "body-file": {
+    "short": "F",
+    "value": "file"
+   },
+   "milestone": {
+    "short": "m",
+    "value": "name"
+   },
+   "remove-assignee": {
+    "value": "login"
+   },
+   "remove-label": {
+    "value": "name"
+   },
+   "remove-milestone": {
+    "value": null
+   },
+   "remove-project": {
+    "value": "title"
+   },
+   "remove-reviewer": {
+    "value": "login"
+   },
+   "title": {
+    "short": "t",
+    "value": "string"
+   },
+   "help": {
+    "value": null
+   },
+   "repo": {
+    "short": "R",
+    "value": "[HOST/]OWNER/REPO"
+   }
+  },
+  "pr list": {
+   "app": {
+    "value": "string"
+   },
+   "assignee": {
+    "short": "a",
+    "value": "string"
+   },
+   "author": {
+    "short": "A",
+    "value": "string"
+   },
+   "base": {
+    "short": "B",
+    "value": "string"
+   },
+   "draft": {
+    "short": "d",
+    "value": null
+   },
+   "head": {
+    "short": "H",
+    "value": "string"
+   },
+   "jq": {
+    "short": "q",
+    "value": "expression"
+   },
+   "json": {
+    "value": "fields"
+   },
+   "label": {
+    "short": "l",
+    "value": "strings"
+   },
+   "limit": {
+    "short": "L",
+    "value": "int"
+   },
+   "search": {
+    "short": "S",
+    "value": "query"
+   },
+   "state": {
+    "short": "s",
+    "value": "string"
+   },
+   "template": {
+    "short": "t",
+    "value": "string"
+   },
+   "web": {
+    "short": "w",
+    "value": null
+   },
+   "help": {
+    "value": null
+   },
+   "repo": {
+    "short": "R",
+    "value": "[HOST/]OWNER/REPO"
+   }
+  },
+  "pr merge": {
+   "admin": {
+    "value": null
+   },
+   "author-email": {
+    "short": "A",
+    "value": "text"
+   },
+   "auto": {
+    "value": null
+   },
+   "body": {
+    "short": "b",
+    "value": "text"
+   },
+   "body-file": {
+    "short": "F",
+    "value": "file"
+   },
+   "delete-branch": {
+    "short": "d",
+    "value": null
+   },
+   "disable-auto": {
+    "value": null
+   },
+   "match-head-commit": {
+    "value": "SHA"
+   },
+   "merge": {
+    "short": "m",
+    "value": null
+   },
+   "rebase": {
+    "short": "r",
+    "value": null
+   },
+   "squash": {
+    "short": "s",
+    "value": null
+   },
+   "subject": {
+    "short": "t",
+    "value": "text"
+   },
+   "help": {
+    "value": null
+   },
+   "repo": {
+    "short": "R",
+    "value": "[HOST/]OWNER/REPO"
+   }
+  },
+  "pr ready": {
+   "undo": {
+    "value": null
+   },
+   "help": {
+    "value": null
+   },
+   "repo": {
+    "short": "R",
+    "value": "[HOST/]OWNER/REPO"
+   }
+  },
+  "pr reopen": {
+   "comment": {
+    "short": "c",
+    "value": "string"
+   },
+   "help": {
+    "value": null
+   },
+   "repo": {
+    "short": "R",
+    "value": "[HOST/]OWNER/REPO"
+   }
+  },
+  "pr review": {
+   "approve": {
+    "short": "a",
+    "value": null
+   },
+   "body": {
+    "short": "b",
+    "value": "string"
+   },
+   "body-file": {
+    "short": "F",
+    "value": "file"
+   },
+   "comment": {
+    "short": "c",
+    "value": null
+   },
+   "request-changes": {
+    "short": "r",
+    "value": null
+   },
+   "help": {
+    "value": null
+   },
+   "repo": {
+    "short": "R",
+    "value": "[HOST/]OWNER/REPO"
+   }
+  },
+  "pr status": {
+   "conflict-status": {
+    "short": "c",
+    "value": null
+   },
+   "jq": {
+    "short": "q",
+    "value": "expression"
+   },
+   "json": {
+    "value": "fields"
+   },
+   "template": {
+    "short": "t",
+    "value": "string"
+   },
+   "help": {
+    "value": null
+   },
+   "repo": {
+    "short": "R",
+    "value": "[HOST/]OWNER/REPO"
+   }
+  },
+  "pr view": {
+   "comments": {
+    "short": "c",
+    "value": null
+   },
+   "jq": {
+    "short": "q",
+    "value": "expression"
+   },
+   "json": {
+    "value": "fields"
+   },
+   "template": {
+    "short": "t",
+    "value": "string"
+   },
+   "web": {
+    "short": "w",
+    "value": null
+   },
+   "help": {
+    "value": null
+   },
+   "repo": {
+    "short": "R",
+    "value": "[HOST/]OWNER/REPO"
+   }
+  },
+  "release list": {
+   "exclude-drafts": {
+    "value": null
+   },
+   "exclude-pre-releases": {
+    "value": null
+   },
+   "jq": {
+    "short": "q",
+    "value": "expression"
+   },
+   "json": {
+    "value": "fields"
+   },
+   "limit": {
+    "short": "L",
+    "value": "int"
+   },
+   "order": {
+    "short": "O",
+    "value": "string"
+   },
+   "template": {
+    "short": "t",
+    "value": "string"
+   },
+   "help": {
+    "value": null
+   },
+   "repo": {
+    "short": "R",
+    "value": "[HOST/]OWNER/REPO"
+   }
+  },
+  "release view": {
+   "jq": {
+    "short": "q",
+    "value": "expression"
+   },
+   "json": {
+    "value": "fields"
+   },
+   "template": {
+    "short": "t",
+    "value": "string"
+   },
+   "web": {
+    "short": "w",
+    "value": null
+   },
+   "help": {
+    "value": null
+   },
+   "repo": {
+    "short": "R",
+    "value": "[HOST/]OWNER/REPO"
+   }
+  },
+  "repo view": {
+   "branch": {
+    "short": "b",
+    "value": "string"
+   },
+   "jq": {
+    "short": "q",
+    "value": "expression"
+   },
+   "json": {
+    "value": "fields"
+   },
+   "template": {
+    "short": "t",
+    "value": "string"
+   },
+   "web": {
+    "short": "w",
+    "value": null
+   },
+   "help": {
+    "value": null
+   }
+  },
+  "run list": {
+   "all": {
+    "short": "a",
+    "value": null
+   },
+   "branch": {
+    "short": "b",
+    "value": "string"
+   },
+   "commit": {
+    "short": "c",
+    "value": "SHA"
+   },
+   "created": {
+    "value": "date"
+   },
+   "event": {
+    "short": "e",
+    "value": "event"
+   },
+   "jq": {
+    "short": "q",
+    "value": "expression"
+   },
+   "json": {
+    "value": "fields"
+   },
+   "limit": {
+    "short": "L",
+    "value": "int"
+   },
+   "status": {
+    "short": "s",
+    "value": "string"
+   },
+   "template": {
+    "short": "t",
+    "value": "string"
+   },
+   "user": {
+    "short": "u",
+    "value": "string"
+   },
+   "workflow": {
+    "short": "w",
+    "value": "string"
+   },
+   "help": {
+    "value": null
+   },
+   "repo": {
+    "short": "R",
+    "value": "[HOST/]OWNER/REPO"
+   }
+  },
+  "run view": {
+   "attempt": {
+    "short": "a",
+    "value": "uint"
+   },
+   "exit-status": {
+    "value": null
+   },
+   "job": {
+    "short": "j",
+    "value": "string"
+   },
+   "jq": {
+    "short": "q",
+    "value": "expression"
+   },
+   "json": {
+    "value": "fields"
+   },
+   "log": {
+    "value": null
+   },
+   "log-failed": {
+    "value": null
+   },
+   "template": {
+    "short": "t",
+    "value": "string"
+   },
+   "verbose": {
+    "short": "v",
+    "value": null
+   },
+   "web": {
+    "short": "w",
+    "value": null
+   },
+   "help": {
+    "value": null
+   },
+   "repo": {
+    "short": "R",
+    "value": "[HOST/]OWNER/REPO"
+   }
+  },
+  "run watch": {
+   "compact": {
+    "value": null
+   },
+   "exit-status": {
+    "value": null
+   },
+   "interval": {
+    "short": "i",
+    "value": "int"
+   },
+   "help": {
+    "value": null
+   },
+   "repo": {
+    "short": "R",
+    "value": "[HOST/]OWNER/REPO"
+   }
+  },
+  "workflow list": {
+   "all": {
+    "short": "a",
+    "value": null
+   },
+   "jq": {
+    "short": "q",
+    "value": "expression"
+   },
+   "json": {
+    "value": "fields"
+   },
+   "limit": {
+    "short": "L",
+    "value": "int"
+   },
+   "template": {
+    "short": "t",
+    "value": "string"
+   },
+   "help": {
+    "value": null
+   },
+   "repo": {
+    "short": "R",
+    "value": "[HOST/]OWNER/REPO"
+   }
+  },
+  "workflow view": {
+   "ref": {
+    "short": "r",
+    "value": "string"
+   },
+   "web": {
+    "short": "w",
+    "value": null
+   },
+   "yaml": {
+    "short": "y",
+    "value": null
+   },
+   "help": {
+    "value": null
+   },
+   "repo": {
+    "short": "R",
+    "value": "[HOST/]OWNER/REPO"
+   }
+  }
+ }
+}

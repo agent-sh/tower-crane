@@ -246,14 +246,20 @@ function networkProbe(npmDir, done) {
 // (HTTPS_PROXY), which resolves names, so getent and dns.lookup fail there
 // with /run hidden or not (measured 2026-10-14: getent exit 2, EAI_AGAIN).
 // Part of a probe script: git push --dry-run of repo's HEAD over https to a
-// ref the remote lacks, with the gh token spawn hands the agent, so git
-// authenticates and nothing lands. It runs git itself, not the agent's
-// shim, which refuses a push option to a role whose agent file allows no
-// push: the probe checks the network and the token, not that policy.
+// ref the remote lacks, without a terminal to prompt on. It runs git itself,
+// not the agent's shim, which sends a push to the broker: the probe checks
+// that the sandbox holds no credential, so the push fails for want of one
+// and nothing would land.
 const REAL_GIT = require(path.join(ROOT, 'lib', 'shim.js')).findReal('git', '') || 'git';
 function pushProbe(repo) {
   const ref = `refs/heads/tower-crane/network-probe-${process.pid}`;
-  return `{const r=cp.spawnSync(${JSON.stringify(REAL_GIT)},["push","--dry-run","https://github.com/agent-sh/tower-crane.git","HEAD:${ref}"],{cwd:${JSON.stringify(repo)},encoding:"utf8"});o.pushDryRun=r.status;if(r.status!==0)o.pushDryRunErr=String(r.stderr).trim().split("\\n").slice(-2).join(" | ")}`;
+  return `{const r=cp.spawnSync(${JSON.stringify(REAL_GIT)},["push","--dry-run","https://github.com/agent-sh/tower-crane.git","HEAD:${ref}"],{cwd:${JSON.stringify(repo)},encoding:"utf8",env:{...process.env,GIT_TERMINAL_PROMPT:"0"}});o.pushDryRun=r.status;if(r.status!==0)o.pushDryRunErr=String(r.stderr).trim().split("\\n").slice(-2).join(" | ")}`;
+}
+
+// A sandboxed agent reaches GitHub over https and has nothing to push with.
+function assertNoPushCredential(seen, label) {
+  assert.notEqual(seen.pushDryRun, 0, `${label}: the host git has no credential to push over https`);
+  assert.match(seen.pushDryRunErr, /could not read Username|terminal prompts disabled|Authentication failed/, `${label}: ${seen.pushDryRunErr}`);
 }
 
 // A cache root short enough that a claude agent's temp directory under it
@@ -361,7 +367,7 @@ for (const [harness, rung] of [['claude', 'small'], ['claude', 'easy'], ['codex'
     assert.equal(seen.push, 0, 'git push to a local repository runs');
     assert.equal(h.git(['--git-dir', bare, 'rev-parse', 'probe']), h.git(['-C', repo, 'rev-parse', 'HEAD']));
     assertNetwork(seen, `${harness} ${rung}`);
-    assert.equal(seen.pushDryRun, 0, `${harness} ${rung}: git pushes over https with the handed gh token`);
+    assertNoPushCredential(seen, `${harness} ${rung}`);
   });
 }
 
@@ -459,7 +465,7 @@ function realCodexSandbox() {
 // A stand-in codex on PATH for the small rung: it runs the real `codex
 // sandbox` with the profile spawn wrote, in the environment spawn gave it, so
 // the probe script runs in the real sandbox and no model call is made.
-function standInCodex(h, script) {
+function standInCodex(h, script, rung = 'small') {
   const bin = path.join(h.base, 'bin');
   fs.mkdirSync(bin);
   fs.writeFileSync(path.join(bin, 'codex'), `#!${process.execPath}
@@ -471,7 +477,7 @@ const r = cp.spawnSync('codex', ['sandbox', '-c', 'default_permissions="tower-cr
 process.stderr.write(r.stderr || '');
 process.exit(r.status ?? 1);
 `, { mode: 0o755 });
-  h.ok(['ladder', 'set', 'small', '--harness', 'codex', '--model', 'probe', '--clear', 'profile', '--clear', 'effort', '--clear', 'args']);
+  h.ok(['ladder', 'set', rung, '--harness', 'codex', '--model', 'probe', '--clear', 'profile', '--clear', 'effort', '--clear', 'args']);
   return bin;
 }
 
@@ -714,13 +720,14 @@ test('a real codex sandbox with sandbox.session_bus connects to the bus socket a
 
 // /run is hidden whole in both sandboxes but for what an agent needs: the
 // resolver /etc/resolv.conf links to, and the session bus when
-// sandbox.session_bus grants it. In the real codex sandbox, with the
-// owner's gh login handed over as GH_TOKEN, as for a worker: names resolve,
-// git fetches and pushes over https (a dry run, so nothing lands), npm
-// installs from the registry, and no host socket under /run connects.
-test('a real codex sandbox resolves names, fetches and pushes over https and installs from npm, and reaches no host socket under /run', { skip: realCodexSandbox(), timeout: 300000 }, async (t) => {
+// sandbox.session_bus grants it. In the real codex sandbox, started by a
+// user with a gh login: names resolve, git fetches over https, npm installs
+// from the registry, and no host socket under /run connects. The agent holds
+// no token, so the host's git cannot push over https (a dry run, so nothing
+// would land), while gh reads through the broker.
+test('a real codex sandbox resolves names, fetches over https, reads GitHub through its broker and installs from npm, and reaches no host socket under /run', { skip: realCodexSandbox(), timeout: 300000 }, async (t) => {
   const h = makeRepo(t);
-  h.init();
+  h.init(['--repo', 'agent-sh/tower-crane']);
   h.ok(['task', 'add', '--title', 'Network probe', '--acceptance', 'the network works, host sockets stay hidden']);
   h.ok(['brief', 'set', 'T1', '-'], { input: 'network probe\n' });
   const dir = results(h);
@@ -731,6 +738,7 @@ test('a real codex sandbox resolves names, fetches and pushes over https and ins
   const repo = path.join(dir, 'repo');
   for (const args of [['init', '-q', repo], ['-C', repo, 'commit', '-q', '--allow-empty', '-m', 'probe']]) h.git(args);
   const script = `const fs=require("fs"),cp=require("child_process");const o={};` + pushProbe(repo)
+    + `{const r=cp.spawnSync("gh",["repo","view","--json","nameWithOwner"],{encoding:"utf8"});o.ghView=r.status;o.ghOut=String(r.stdout).trim();if(r.status!==0)o.ghErr=String(r.stderr).trim()}`
     + networkProbe(pkg, `fs.writeFileSync(${JSON.stringify(out)},JSON.stringify(o))`);
   const bin = standInCodex(h, script);
   // The owner's home, so spawn finds the gh login to hand over; caches stay in the test.
@@ -742,9 +750,160 @@ test('a real codex sandbox resolves names, fetches and pushes over https and ins
   const seen = JSON.parse(fs.readFileSync(out, 'utf8'));
   console.log(`codex network probe: ${JSON.stringify(seen)}`);
   assertNetwork(seen, 'codex');
-  assert.equal(seen.pushDryRun, 0, 'git pushes over https with the handed gh token');
+  assertNoPushCredential(seen, 'codex');
+  assert.equal(seen.ghView, 0, `gh reads through the broker: ${seen.ghErr}`);
+  assert.deepEqual(JSON.parse(seen.ghOut), { nameWithOwner: 'agent-sh/tower-crane' });
 });
 
+
+// The token the owner's gh holds, as a hash: the probe looks for any GitHub
+// token in what it can read and compares hashes, so the token itself never
+// enters a prompt, a script or a transcript.
+function ownerTokenHash() {
+  const r = cp.spawnSync('gh', ['auth', 'token'], { encoding: 'utf8', env: { ...process.env, HOME: os.homedir() } });
+  const token = r.status === 0 ? r.stdout.trim() : '';
+  return token ? require('node:crypto').createHash('sha256').update(token).digest('hex') : null;
+}
+
+// A worker in a real sandbox, spawned by a user whose gh is logged in: no
+// GitHub token in its environment, in any file it can read (its HOME, the
+// state directory, its git config, every /proc environ it sees) or from a
+// git credential helper; the host's git cannot push over https; the SSH
+// agent is out of reach. Its push through the git shim goes to its broker
+// and lands on its task branch of origin, a bare repository its sandbox
+// cannot write, and a push to another task's branch is refused.
+function credentialProbe(h, dir, tokenHash) {
+  const out = path.join(dir, 'credential-probe.json');
+  const file = path.join(dir, 'credential-probe.js');
+  const git = require(path.join(ROOT, 'lib', 'shim.js')).findReal('git', '');
+  const ref = `refs/heads/tower-crane/credential-probe-${process.pid}`;
+  fs.writeFileSync(file, `'use strict';
+const fs = require('node:fs'), path = require('node:path'), cp = require('node:child_process'), net = require('node:net'), crypto = require('node:crypto');
+const o = {};
+const TOKEN = /gh[opusr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,}/g;
+const hash = (t) => crypto.createHash('sha256').update(t).digest('hex');
+o.env = ['GH_TOKEN', 'GITHUB_TOKEN', 'GH_ENTERPRISE_TOKEN', 'GITHUB_ENTERPRISE_TOKEN'].filter((k) => process.env[k] !== undefined);
+o.hits = [];
+o.scanned = 0;
+const scan = (p, depth) => {
+  let st;
+  try { st = fs.statSync(p); } catch { return; }
+  if (st.isDirectory()) {
+    if (depth <= 0) return;
+    let names = [];
+    try { names = fs.readdirSync(p); } catch { return; }
+    for (const n of names) scan(path.join(p, n), depth - 1);
+    return;
+  }
+  if (!st.isFile() || st.size > 4 << 20) return;
+  let text;
+  try { text = fs.readFileSync(p, 'latin1'); } catch { return; }
+  o.scanned++;
+  for (const m of text.match(TOKEN) || []) if (hash(m) === ${JSON.stringify(tokenHash)}) o.hits.push(p);
+};
+let pids = [];
+try { pids = fs.readdirSync('/proc').filter((n) => /^\\d+$/.test(n)); } catch {}
+for (const pid of pids) scan('/proc/' + pid + '/environ', 1);
+for (const p of [process.env.HOME, process.env.GIT_CONFIG_GLOBAL, ${JSON.stringify(h.state)}, path.dirname(process.env.TOWER_CRANE_BROKER || '/nonexistent')]) if (p) scan(p, 8);
+const common = cp.spawnSync('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'], { encoding: 'utf8' }).stdout.trim();
+if (common) scan(path.join(common, 'config'), 1);
+const fill = cp.spawnSync(${JSON.stringify(git)}, ['credential', 'fill'], { input: 'protocol=https\\nhost=github.com\\n\\n', encoding: 'utf8', env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } });
+o.fill = { status: fill.status, password: /^password=/m.test(fill.stdout || '') };
+o.lsRemote = cp.spawnSync(${JSON.stringify(git)}, ['ls-remote', 'https://github.com/agent-sh/tower-crane.git', 'HEAD'], { encoding: 'utf8', env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } }).status;
+const host = cp.spawnSync(${JSON.stringify(git)}, ['push', '--dry-run', 'https://github.com/agent-sh/tower-crane.git', 'HEAD:${ref}'], { encoding: 'utf8', env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } });
+o.hostPush = host.status;
+o.hostPushErr = String(host.stderr).trim().split('\\n').slice(-2).join(' | ');
+const branch = cp.spawnSync('git', ['branch', '--show-current'], { encoding: 'utf8' }).stdout.trim();
+fs.writeFileSync('credential-probe.txt', 'pushed by the broker\\n');
+const run = (cmd, args) => { const r = cp.spawnSync(cmd, args, { encoding: 'utf8', env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } }); return { status: r.status, err: String(r.stderr).trim().split('\\n').slice(-2).join(' | ') }; };
+run('git', ['add', 'credential-probe.txt']);
+o.commit = run('git', ['-c', 'user.name=probe', '-c', 'user.email=probe@example.invalid', 'commit', '-q', '-m', 'credential probe']).status;
+o.head = cp.spawnSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim();
+o.directPush = run(${JSON.stringify(git)}, ['push', 'origin', 'HEAD:refs/heads/' + branch]);
+o.brokerPush = run('git', ['push', 'origin', 'HEAD']);
+o.otherBranch = run('git', ['push', 'origin', 'HEAD:refs/heads/tower-crane/T999-another-task']);
+const sock = process.env.SSH_AUTH_SOCK;
+const done = () => fs.writeFileSync(${JSON.stringify(out)}, JSON.stringify(o));
+if (!sock) { o.sshAgent = 'unset'; done(); }
+else net.connect(sock).on('connect', function () { this.destroy(); o.sshAgent = 'CONNECTED'; done(); }).on('error', (e) => { o.sshAgent = 'ERR ' + e.code; done(); });
+`);
+  return { file, out };
+}
+
+function assertCredentialProbe(h, seen, label) {
+  const branch = h.readState('tasks.json').tasks[0].branch;
+  const remote = path.join(h.base, 'remote.git');
+  const remoteRef = (ref) => {
+    const r = cp.spawnSync('git', ['--git-dir', remote, 'rev-parse', '--verify', '--quiet', ref], { encoding: 'utf8' });
+    return r.status === 0 ? r.stdout.trim() : null;
+  };
+  assert.deepEqual(seen.env, [], `${label}: no GitHub token variable`);
+  assert.ok(seen.scanned > 10, `${label}: the probe read files (${seen.scanned})`);
+  assert.deepEqual(seen.hits, [], `${label}: no readable file holds the owner's token`);
+  assert.deepEqual(seen.fill, { status: seen.fill.status, password: false }, `${label}: no credential helper answers for GitHub`);
+  assert.notEqual(seen.hostPush, 0, `${label}: the host git cannot push over https`);
+  // The sandbox reaches GitHub, so the push fails for want of a credential.
+  assert.equal(seen.lsRemote, 0, `${label}: git fetches over https`);
+  assert.match(seen.hostPushErr, /could not read Username|terminal prompts disabled|Authentication failed/, `${label}: ${seen.hostPushErr}`);
+  assert.match(String(seen.sshAgent), /^(unset|ERR )/, `${label}: the SSH agent is out of reach`);
+  assert.equal(seen.commit, 0, `${label}: the probe committed`);
+  assert.notEqual(seen.directPush.status, 0, `${label}: the sandbox cannot write origin itself`);
+  assert.equal(seen.brokerPush.status, 0, `${label}: the shim's push through the broker: ${seen.brokerPush.err}`);
+  assert.equal(remoteRef(`refs/heads/${branch}`), seen.head, `${label}: the broker pushed the task branch`);
+  assert.equal(seen.otherBranch.status, 126, `${label}: ${seen.otherBranch.err}`);
+  assert.equal(remoteRef('refs/heads/tower-crane/T999-another-task'), null, `${label}: no other branch`);
+}
+
+// The project records no repository, so origin may be a path here: the bare
+// repository in the test's directory, outside what the sandbox writes.
+function credentialFixture(t) {
+  const h = makeRepo(t);
+  h.init();
+  h.ok(['task', 'add', '--title', 'Credential probe', '--acceptance', 'no GitHub credential in the sandbox; pushes go through the broker']);
+  const remote = path.join(h.base, 'remote.git');
+  h.git(['init', '-q', '--bare', remote]);
+  h.git(['remote', 'add', 'origin', remote]);
+  h.git(['push', '-q', 'origin', 'HEAD:refs/heads/main']);
+  const dir = results(h);
+  const home = os.homedir();
+  // The owner's home, so spawn finds the gh login it handed over before. The
+  // cache is short, so a claude agent's temp directory holds its proxy sockets.
+  const env = { ...h.env, HOME: home, USERPROFILE: home, CLAUDE_CONFIG_DIR: '', CODEX_HOME: '', XDG_CACHE_HOME: shortCache(t) };
+  return { h, dir, env };
+}
+
+test('a real codex worker sandbox holds no GitHub credential, and its push goes through its broker to its own branch only', { skip: realCodexSandbox() || (!ownerTokenHash() && 'needs a gh login'), timeout: 300000 }, async (t) => {
+  const { h, dir, env } = credentialFixture(t);
+  h.ok(['brief', 'set', 'T1', '-'], { input: 'credential probe\n' });
+  const probe = credentialProbe(h, dir, ownerTokenHash());
+  const bin = standInCodex(h, fs.readFileSync(probe.file, 'utf8'), 'easy');
+  const r = await h.runAsync(['spawn', '--role', 'easy', '--task', 'T1', '--wait'], { env: { ...env, PATH: `${bin}${path.delimiter}${env.PATH}` } });
+  assert.equal(r.code, 0, `${r.stderr}\n${agentLog(h)}`);
+  assert.ok(fs.existsSync(probe.out), `the probe ran\n${agentLog(h)}`);
+  const seen = JSON.parse(fs.readFileSync(probe.out, 'utf8'));
+  console.log(`codex credential probe: ${JSON.stringify(seen)}`);
+  assertCredentialProbe(h, seen, 'codex');
+});
+
+test('a real claude worker sandbox holds no GitHub credential, and its push goes through its broker to its own branch only', { skip: (process.env.TOWER_CRANE_LIVE_CLAUDE !== '1' && 'set TOWER_CRANE_LIVE_CLAUDE=1 to run against the real claude CLI') || (!ownerTokenHash() && 'needs a gh login'), timeout: 300000 }, async (t) => {
+  const { h, dir, env } = credentialFixture(t);
+  const probe = credentialProbe(h, dir, ownerTokenHash());
+  h.ok(['brief', 'set', 'T1', '-'], {
+    // It records only whether each check passed, never a credential.
+    input: `Sandbox probe set up by the owner. It checks that your sandbox holds no GitHub credential and that your push goes through the Tower Crane broker; it records only pass or fail for each check, never a credential. Run exactly this one command with the Bash tool, then reply with its exit code and stop. Do not use tower-crane, do not open a pull request, do not push anything yourself.\n\n${node} ${JSON.stringify(probe.file)}\n`,
+  });
+  pinLiveRung(h, 'claude', 'easy');
+  const r = await h.runAsync(['spawn', '--role', 'easy', '--task', 'T1', '--wait'], { env });
+  if (r.code !== 0 && !fs.existsSync(probe.out) && /"stop_reason":"refusal"/.test(`${r.stderr}\n${agentLog(h)}`)) {
+    t.skip('claude: the model refused the probe prompt; no sandbox verdict');
+    return;
+  }
+  assert.equal(r.code, 0, `${r.stderr}\n${agentLog(h)}`);
+  assert.ok(fs.existsSync(probe.out), `the probe ran\n${agentLog(h)}`);
+  const seen = JSON.parse(fs.readFileSync(probe.out, 'utf8'));
+  console.log(`claude credential probe: ${JSON.stringify(seen)}`);
+  assertCredentialProbe(h, seen, 'claude');
+});
 
 // A research agent fetches sources with WebFetch, which runs in claude's
 // process and is not gated by the sandbox's host list, and its commands
@@ -779,7 +938,7 @@ test('a real claude research agent fetches any page with WebFetch, and its comma
   const seen = JSON.parse(fs.readFileSync(out, 'utf8'));
   console.log(`claude research probe: ${JSON.stringify(seen)}`);
   assertNetwork(seen, 'claude research');
-  assert.equal(seen.pushDryRun, 0, 'git pushes over https with the handed gh token');
+  assertNoPushCredential(seen, 'claude research');
   assert.equal(seen.listed, '200 200', 'a host sandbox.domains adds on the rung is reachable');
   assert.equal(seen.unlisted, '000 403', 'claude\'s proxy refuses a host on no list');
   // A host on no list, so only WebFetch, outside the sandbox, reaches it.
