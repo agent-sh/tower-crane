@@ -24,18 +24,43 @@ test('submitted dependencies dispatch from the exact dependency head and spawn l
   assert.deepEqual(link.args, ['stack', 'link', '11', '12', '--base', 'main']);
 });
 
-test('a task event during the link\'s GitHub call refuses the link, and the next observer pass links the PR', (t) => {
+// Snapshot-compare refusals for unrelated events are retried at once from fresh state.
+const linkCalls = (f) => f.read().calls.filter((c) => c.args[0] === 'stack' && c.args[1] === 'link').length;
+const linkFailures = (f) => fs.readFileSync(path.join(f.h.state, 'events.jsonl'), 'utf8').trim().split('\n')
+  .map(JSON.parse).filter((e) => e.cmd === 'stack link failed');
+const linkedByObserver = (f) => {
+  const until = Date.now() + 60000;
+  while (!f.h.json(['task', 'show', 'T2']).stack.linked && Date.now() < until) f.h.run(['wait', '--timeout', '1']);
+  return f.h.json(['task', 'show', 'T2']).stack.linked;
+};
+
+test('a task event during the link\'s GitHub call is retried from fresh state and links the PR in the same pass', (t) => {
   const f = setup(t);
   worker(f);
   f.write((d) => { d.during = { 'stack link': [['task', 'note', 'T2', 'racing note', '--agent', 'worker-T2']] }; });
   f.h.ok(['spawn', '--task', 'T2', '--wait']);
-  assert.match(fs.readFileSync(path.join(f.h.repo, '.tower-crane', 'events.jsonl'), 'utf8'), /"cmd":"stack link failed"/);
-  // The next observer pass links the PR once nothing races it. That pass can be the spawn's own, so
-  // the state after spawn is not fixed; a single `wait` can also end before its pass does, so wait
-  // in a bounded loop as the first case does.
-  const until = Date.now() + 60000;
-  while (!f.h.json(['task', 'show', 'T2']).stack.linked && Date.now() < until) f.h.run(['wait', '--timeout', '1']);
-  assert.equal(f.h.json(['task', 'show', 'T2']).stack.linked, true);
+  assert.equal(linkedByObserver(f), true);
+  assert.deepEqual(linkFailures(f), [], 'the refused first attempt is retried, not recorded as a failure');
+  assert.ok(linkCalls(f) >= 2, 'the retry links once more with fresh state');
+});
+
+test('a link that keeps racing task events records its failure, and the next observer pass links the PR', (t) => {
+  const f = setup(t);
+  worker(f);
+  const racing = path.join(f.h.base, 'racing');
+  fs.writeFileSync(racing, '');
+  f.write((d) => {
+    d.during = { 'stack link': [['task', 'note', 'T2', 'racing note', '--agent', 'worker-T2']] };
+    // Every attempt races, whichever observer makes it, until the marker goes.
+    d.duringWhile = { 'stack link': racing };
+  });
+  f.h.ok(['spawn', '--task', 'T2', '--wait']);
+  const failures = linkFailures(f);
+  assert.equal(failures.length, 1, JSON.stringify(failures));
+  assert.match(failures[0].detail.reason, /state changed during stack link/);
+  assert.ok(linkCalls(f) >= 5, 'each of the five attempts called gh stack link');
+  fs.unlinkSync(racing);
+  assert.equal(linkedByObserver(f), true);
 });
 
 test('detached spawn links the PR after its worker submits and exits', async (t) => {
