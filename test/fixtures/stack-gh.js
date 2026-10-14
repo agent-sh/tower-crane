@@ -10,7 +10,7 @@ let skew = 0;
 Date.now = () => now() + skew;
 const BIN = path.join(__dirname, '..', '..', 'bin', 'tower-crane.js');
 const { ownerKeyFile, ownerProject } = require('../../lib/authority');
-const { writeAtomic } = require('../atomic-file');
+const { updateJson } = require('../atomic-file');
 
 if (process.env.TEST_STACK_DEFER_OBSERVE) {
   require('../../lib/stack').observe = () => {};
@@ -27,14 +27,34 @@ function pause(ready, release) {
   }
 }
 
+// Other processes call gh while this call runs: a spawned reviewer reads a PR while
+// an observer links the stack. Writing back the copy this call read would undo their
+// changes, so only what this call changed lands on the file as it is now. Plain
+// objects merge per key and any other value is replaced.
+function applyChanges(before, after, current) {
+  const plain = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
+  for (const key of new Set([...Object.keys(before), ...Object.keys(after)])) {
+    if (plain(before[key]) && plain(after[key]) && plain(current[key])) applyChanges(before[key], after[key], current[key]);
+    else if (JSON.stringify(before[key]) === JSON.stringify(after[key])) continue;
+    else if (after[key] === undefined) delete current[key];
+    else current[key] = after[key];
+  }
+  return current;
+}
+
 // Only GitHub is stubbed. Worktrees, commits, fetches and the bare remote are real.
 cp.spawnSync = function stackGh(command, args, opts) {
   if (command !== 'gh' || !process.env.TEST_STACK_DATA) return original(command, args, opts);
   const file = process.env.TEST_STACK_DATA;
-  const data = JSON.parse(fs.readFileSync(file, 'utf8'));
+  const read = fs.readFileSync(file, 'utf8');
+  const data = JSON.parse(read);
   data.calls.push({ args, cwd: opts.cwd });
   const finish = (value = '', status = 0, stderr = '') => {
-    writeAtomic(file, JSON.stringify(data));
+    updateJson(file, (current) => {
+      const before = JSON.parse(read);
+      current.calls.push(...data.calls.slice(before.calls.length));
+      return applyChanges({ ...before, calls: null }, { ...data, calls: null }, current);
+    });
     return { status, stdout: typeof value === 'string' ? value : JSON.stringify(value), stderr };
   };
   const response = (r, fallback = '') => {

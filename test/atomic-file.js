@@ -42,4 +42,46 @@ function writeAtomic(file, data, options, impl = fs) {
   }
 }
 
-module.exports = { writeAtomic };
+// A JSON file that several processes read, change and write back, such as a
+// gh stub's state, loses a change when one process writes a copy it read
+// before another process's write. updateJson runs fn on the current value
+// under an exclusive lock file and publishes its result with writeAtomic.
+// fn must not start a process that updates the same file.
+const LOCK_WAIT_MS = 30000;
+
+function alive(pid) {
+  try { require('./signals').killPid(pid, 0); return true; }
+  catch (error) { return error.code === 'EPERM'; }
+}
+
+function lock(file) {
+  const lockFile = path.join(path.dirname(file), `.${path.basename(file)}.lock`);
+  const deadline = Date.now() + LOCK_WAIT_MS; // wait-allow: bounds a lock held by a stuck process, not a readiness wait
+  for (;;) {
+    try {
+      fs.writeFileSync(lockFile, String(process.pid), { flag: 'wx' });
+      return () => fs.rmSync(lockFile, { force: true });
+    } catch (error) {
+      if (error.code !== 'EEXIST') throw error;
+    }
+    let holder = '';
+    try { holder = fs.readFileSync(lockFile, 'utf8'); } catch { /* Released meanwhile. */ }
+    // A test can kill a holder. An empty file is a holder between its create and its pid write.
+    if (/^\d+$/.test(holder) && !alive(Number(holder))) fs.rmSync(lockFile, { force: true });
+    else if (Date.now() > deadline) throw new Error(`${lockFile} is still held by pid ${holder || 'unknown'}`);
+    else Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2); // wait-allow: retry cadence of a held lock
+  }
+}
+
+function updateJson(file, fn) {
+  const release = lock(file);
+  try {
+    const value = fn(JSON.parse(fs.readFileSync(file, 'utf8')));
+    writeAtomic(file, JSON.stringify(value));
+    return value;
+  } finally {
+    release();
+  }
+}
+
+module.exports = { writeAtomic, updateJson };
