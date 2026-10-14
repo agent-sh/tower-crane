@@ -4,6 +4,32 @@ const fs = require('node:fs');
 const args = process.argv.slice(2);
 const file = process.env.INBOX_GITHUB;
 const data = JSON.parse(fs.readFileSync(file, 'utf8'));
+// Base CI reads run alongside the PR reads, so they only append to their own call log
+// and never rewrite the shared file a concurrent PR read updates.
+if (/^repos\/[^/]+\/[^/]+\/actions\//.test(args[1] || '')) {
+  fs.appendFileSync(`${file}.actions`, `${JSON.stringify(args)}\n`);
+  const endpoint = args[1];
+  const id = endpoint.split('/')[5];
+  const print = (rows) => { for (const row of rows) console.log(JSON.stringify(row)); };
+  if (data.fail || data.failActions) {
+    console.error('GitHub unavailable');
+    process.exitCode = 1;
+  } else if (endpoint.includes('/actions/runs?')) print(data.main_runs || []);
+  else if (endpoint.includes('/actions/workflows')) {
+    print(data.workflows || [...new Set((data.main_runs || []).map((r) => r.workflow_id))].map((w) => ({ id: w, state: 'active' })));
+  } else if (/\/actions\/runs\/\d+\/attempts\/\d+\/jobs/.test(endpoint)) print(data.jobs?.[`${id}/${endpoint.split('/')[7]}`] || data.jobs?.[id] || []);
+  else if (/\/actions\/jobs\/\d+\/logs$/.test(endpoint)) {
+    const text = data.logs?.[id];
+    if (text === undefined) {
+      console.error('HTTP 410: logs expired');
+      process.exitCode = 1;
+    } else if (/[\x00-\x08\x0b-\x1f\x7f-\x9f]/.test(text) && !args.includes('--allow-escape-sequences')) {
+      console.error('the response contains terminal escape sequences; pass --allow-escape-sequences to output it anyway');
+      process.exitCode = 1;
+    } else process.stdout.write(text);
+  }
+  return;
+}
 data.calls.push(args);
 let result;
 if (data.fail || data.failEndpoint && args[1]?.includes(data.failEndpoint)) {
