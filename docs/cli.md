@@ -378,10 +378,11 @@ replaced automatically: the next reaction holds dispatch
 until the head, the revision or a revuto thread on the PR changes, records
 one `review held` event naming the reviewer's last report or note, and
 lists a `review_held` inbox item whose `accept ID` dispatches again.
-A reviewer that crashes (nonzero code or a signal) is replaced, up to 3
-crashes at one head and revision; the third holds dispatch the same way,
-with a `review held` reason naming the count, the last reviewer, its exit
-and its log. Outages, interrupts and budget stops do not count.
+A reviewer that crashes (nonzero code or a signal), whose supervisor fails,
+or whose monitor dies without a receipt is replaced, up to 3 such ends at one
+head and revision; the third holds dispatch the same way, with a
+`review held` reason naming the count, the reviewer that ended last, how it
+ended and its log. Outages, interrupts and budget stops do not count.
 Failed independent review at the current submitted head and revision sends
 the task to rework through `rework --from-review`, with the full findings
 and comment link in its reason and brief. Findings all in the PR body are

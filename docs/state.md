@@ -917,7 +917,12 @@ cover those. Crashes are capped: once 3 reviewers dispatched at the current
 head and revision have exited with a nonzero code or a signal and no review
 evidence there, the last one holds dispatch the same way. Exits marked
 `availability_failure` and reviewers stopped by an `interrupt` or a
-`budget stop` do not count. While the reviewer's process is gone, its
+`budget stop` do not count. A supervisor failure does count: its `spawn exit`
+carries `supervisor_failed: true` beside `availability_failure`, since the
+tool failed, not the provider. So does a dispatch with no receipt whose
+monitor is no longer running; one whose monitor still runs is skipped, since
+its receipt decides. At the cap a missing receipt is still reported with
+`review exit missing`, and dispatch is then held. While the reviewer's process is gone, its
 monitor is observed running and no receipt exists, no reviewer is dispatched;
 the reaction to the receipt decides. That wait ends when the dispatch has not
 been seen for the rung's `supervision.max_backoff_ms` plus 7 s of group
@@ -935,9 +940,9 @@ later reaction and on a `ci resolve` event), or when the orchestrator runs
 is the reviewer's last report, note or message (null when it left none),
 `revuto` names the blocking findings its dispatch recorded and `exit` holds
 the receipt's code and signal. A hold at the crash cap adds `failures`
-(the count), `cap` and `agents`, and its `reason` names the count, the last
-reviewer, its exit and its log, and says that `accept ID` dispatches the next
-reviewer. The event wakes the orchestrator.
+(the count), `cap` and `agents`, and its `reason` names the count, the held
+reviewer (the one that ended last), how it ended and its log, and says that
+`accept ID` dispatches the next reviewer. The event wakes the orchestrator.
 Tests, cleanup and source verification run when the submitted PR head
 matches, even with unknown mergeability. CI, review dispatch and merging
 retain their mergeability guards.

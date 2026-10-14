@@ -59,6 +59,21 @@ test('a settings change during the link\'s GitHub call is retried from fresh sta
   assert.deepEqual(linkFailures(f), [], 'the refused first attempt is retried, not recorded as a failure');
 });
 
+// The link reads each chain member's status, head, branch, PR, stack record
+// and merge state. A rework of the lower task during the link's GitHub call
+// changes one of them, so the first apply is refused and the retry links.
+test('a chain member\'s rework during the link\'s GitHub call refuses the first apply, and the retry links the PR', (t) => {
+  const f = setup(t);
+  worker(f);
+  f.write((d) => { d.during = { 'stack link': [['rework', 'T1', '--reason', 'racing rework {nonce}']] }; });
+  f.h.ok(['spawn', '--task', 'T2', '--wait']);
+  assert.equal(linkedByObserver(f), true);
+  assert.equal(f.h.json(['task', 'show', 'T1']).status, 'rework');
+  const links = f.read().calls.filter((c) => c.args[0] === 'stack' && c.args[1] === 'link');
+  assert.equal(links.length, 2, 'the refused first link is retried once');
+  assert.deepEqual(linkFailures(f), []);
+});
+
 test('a link that keeps racing settings changes records its failure, and the next observer pass links the PR', (t) => {
   const f = setup(t);
   worker(f);
