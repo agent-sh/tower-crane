@@ -9,7 +9,7 @@ const net = require('node:net');
 const { EventEmitter } = require('node:events');
 const { makeRepo, ROOT } = require('./helpers');
 const { fileWritten, eventAppended, childExit, childClosed, portListening, waitUntil, killPid, killGroup } = require('./signals');
-const { waitFindings, killFindings } = require('../scripts/test-waits');
+const { waitFindings, killFindings, checkTestWaits } = require('../scripts/test-waits');
 
 test('signal waits observe existing state, atomic writes, complete events, child exits and listening ports', async (t) => {
   const h = makeRepo(t);
@@ -432,6 +432,13 @@ test('tests signal only checked pids, so a pid file read before it is written ca
     `${kill}(spawn.pid, 'SIGKILL');`,
     `${kill} (pid, 0);`,
     `fs.writeFileSync(script, \`${kill}(Number(process.argv[2]), 'SIGTERM');\`);`,
+    // An alias reaches the same call with a pid the check cannot see.
+    `const signal = ${kill};\nsignal(Number(fs.readFileSync(file, 'utf8')), 'SIGKILL');`,
+    `${kill}.call(process, Number(text), 'SIGKILL');`,
+    `process['kill'](Number(text), 'SIGKILL');`,
+    'process["kill"](pid);',
+    'const { kill: signal } = process;',
+    `fs.writeFileSync(hook, \`const forward = ${kill};\\nforward(Number(process.argv[2]));\`);`,
   ]) {
     assert.equal(killFindings(source).length, 1, source);
   }
@@ -440,7 +447,25 @@ test('tests signal only checked pids, so a pid file read before it is written ca
     `fs.writeFileSync(script, '${kill}(process.pid, \\'SIGKILL\\');\\n');`,
     `// ${kill}(0) signals the group`,
     'killPid(Number(text), "SIGKILL"); killGroup(child.pid, "SIGKILL");',
+    // Prose after the code on the same line is not a call.
+    `killPid(pid, 'SIGTERM'); // not ${kill}(0), which signals the group`,
+    `fs.writeFileSync(script, \`run();\\nstop(); // ${kill}(-pid) would reach the group\\n\`);`,
+    `${kill} = function interposed(pid, signal) { return true; };`,
   ]) {
     assert.deepEqual(killFindings(source), [], source);
   }
+  assert.deepEqual(killFindings(`const forward = ${kill};`, { aliases: false }), [], 'an interposer keeps the original to forward to');
+});
+
+test('only the named process.kill interposers may hold an alias of it', (t) => {
+  const { base } = makeRepo(t);
+  const alias = `const forward = ${['process', 'kill'].join('.')};\n`;
+  fs.mkdirSync(path.join(base, 'test', 'fixtures'), { recursive: true });
+  fs.writeFileSync(path.join(base, 'test', 'fixtures', 'hooks.js'), alias);
+  fs.writeFileSync(path.join(base, 'test', 'fixtures', 'other.js'), alias);
+  assert.throws(() => checkTestWaits(base), (error) => {
+    assert.match(error.message, /^test\/fixtures\/other\.js:1 `const forward = process\.kill;` aliases process\.kill/);
+    assert.doesNotMatch(error.message, /hooks\.js/);
+    return true;
+  });
 });

@@ -622,19 +622,56 @@ function waitFindings(text) {
 // process group when the read finds the file not yet written: Number('') is
 // 0. Only a process signalling itself may call process.kill directly; every
 // other pid goes through killPid or killGroup in test/signals.js, which
-// refuse anything that is not a process id. Generated fixture scripts in
-// strings and templates are checked too.
-function killFindings(text) {
+// refuse anything that is not a process id. An alias of process.kill
+// (`const kill = process.kill`, `process['kill']`, `process.kill.call`)
+// reaches the same call with a pid this check cannot see, so it counts too,
+// except in the fixtures that interpose on process.kill (KILL_INTERPOSERS).
+// Generated fixture scripts in strings and templates are checked too.
+const KILL_CALL = /\bprocess\.kill\s*\(/g;
+const KILL_ALIASES = [
+  // A read that is neither a call nor the interposer's own assignment.
+  /\bprocess\s*(?:\?\.|\.)\s*kill\b(?!\s*\()(?!\s*=(?!=))/g,
+  /\bprocess\s*(?:\?\.\s*)?\[\s*(['"`])kill\1\s*\]/g,
+  /\{[^{}]*\bkill\b[^{}]*\}\s*=\s*process\b(?!\s*[.[?])/g,
+];
+
+function killFindings(text, { aliases = true } = {}) {
   const findings = [];
   const lines = text.replace(/\r\n/g, '\n').split('\n');
-  for (const match of text.matchAll(/\bprocess\.kill\s*\(/g)) {
-    const index = text.slice(0, match.index).split('\n').length - 1;
-    if (/^\s*(?:\/\/|\*)/.test(lines[index])) continue;
+  const tokens = tokenize(text);
+  const lineOf = (position) => text.slice(0, position).split('\n').length - 1;
+  // A comment in the code, or a `//` before the call on the same line of a
+  // generated script, holds prose about process.kill, not a call.
+  const commented = (position) => {
+    const index = lineOf(position);
+    if (/^\s*(?:\/\/|\*)/.test(lines[index])) return true;
+    const token = tokens.find((t) => t.start <= position && position < t.end);
+    if (!token) return false;
+    if (token.type === 'comment') return true;
+    if (token.type !== 'string' && token.type !== 'template') return false;
+    const from = Math.max(token.start + 1, text.lastIndexOf('\n', position - 1) + 1);
+    const fragment = text.slice(from, position);
+    return tokenize(fragment).some((t) => t.type === 'comment' && t.end === fragment.length);
+  };
+  for (const match of text.matchAll(KILL_CALL)) {
+    if (commented(match.index)) continue;
     const pid = normalizedBudget(callArguments(text, match.index + match[0].lastIndexOf('('))[0] || '');
-    if (pid !== 'process.pid') findings.push({ line: index + 1, reason: `process.kill(${pid}) signals a pid that is not checked` });
+    if (pid !== 'process.pid') findings.push({ line: lineOf(match.index) + 1, reason: `process.kill(${pid}) signals a pid that is not checked` });
   }
-  return findings;
+  if (!aliases) return findings;
+  for (const pattern of KILL_ALIASES) {
+    for (const match of text.matchAll(pattern)) {
+      if (commented(match.index)) continue;
+      const index = lineOf(match.index);
+      findings.push({ line: index + 1, reason: `\`${lines[index].trim().slice(0, 80)}\` aliases process.kill, so the pids it receives are not checked` });
+    }
+  }
+  return findings.sort((a, b) => a.line - b.line);
 }
+
+// These replace process.kill to fake what a pid probe observes and forward
+// every other call to the original, which they must hold as an alias.
+const KILL_INTERPOSERS = new Set(['test/fixtures/hooks.js', 'test/fixtures/monitor-clock.js', 'test/spawn-resume.test.js']);
 
 function checkTestWaits(root) {
   const dir = path.join(root, 'test');
@@ -649,7 +686,7 @@ function checkTestWaits(root) {
     }
     // The checked helpers themselves are the one place a bare call belongs.
     if (file === 'test/signals.js') continue;
-    for (const finding of killFindings(text)) {
+    for (const finding of killFindings(text, { aliases: !KILL_INTERPOSERS.has(file) })) {
       findings.push(`${file}:${finding.line} ${finding.reason}; use killPid or killGroup from test/signals.js`);
     }
   }
