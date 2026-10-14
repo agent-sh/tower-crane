@@ -442,6 +442,23 @@ test('prompts name role skills by their packaged path, since a user worktree has
   packaged(rework, 'tower-crane-work');
 });
 
+test('a prompt that names a role skill warns when the plugin root lacks it', (t) => {
+  const h = setup(t);
+  // A command rung neither embeds nor loads the skill, so only the named path can warn.
+  commandRung(h, 'medium', [process.execPath, '-e', 'process.exit(0)', '{prompt}']);
+  reviewable(h);
+  h.ok(['rework', 'T1', '--reason', 'Next round']);
+  const plugin = path.join(h.base, 'no-work-skill');
+  writeSkill(plugin, 'tower-crane-review', 'review body');
+  const result = h.run(['spawn', '--role', 'medium', '--task', 'T1', '--dry-run', '--json'], {
+    env: { TOWER_CRANE_PLUGIN_ROOT: plugin },
+  });
+  assert.equal(result.code, 0, result.stderr);
+  const missing = path.join(plugin, 'skills', 'tower-crane-work', 'SKILL.md');
+  assert.ok(JSON.parse(result.stdout).argv.some((arg) => arg.includes(`Follow the tower-crane-work skill (${missing})`)), 'the prompt names the file');
+  assert.ok(result.stderr.includes(`role skill ${missing} is missing`), result.stderr);
+});
+
 test('without an embedded skill the goal leads the prompt, so a brief opening with a dash is never read as a flag', (t) => {
   const h = setup(t);
   setRung(h, 'small', ['--harness', 'opencode', '--model', 'a/b']);

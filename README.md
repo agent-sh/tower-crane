@@ -125,7 +125,7 @@ Every task has a tier: `easy`, `medium`, `hard` or `research`. Kind and size pic
 | `orchestrator` | planning, briefs, dispatch, gates, merges | Claude, `opus`, effort high |
 | `easy` | `S` `docs` tasks | Claude, `claude-haiku-5-5`, effort high |
 | `medium` | every other task that is not `L` or research | Codex, profile `sol`, effort high |
-| `hard` | `L` tasks | Claude, `opus`, effort medium |
+| `hard` | `L` tasks other than research | Claude, `opus`, effort medium |
 | `research` | research tasks | Claude, `opus`, effort high |
 | `review` | fallback reviewer | Claude, `claude-haiku-5-5`, effort high |
 | `small` | mechanical checks | Claude, `claude-haiku-5-5`, effort high |

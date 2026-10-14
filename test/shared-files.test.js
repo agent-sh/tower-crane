@@ -296,6 +296,19 @@ test('this repository keeps generated rows and its fragment instructions local',
   assert.match(rules, /npm run check:shared -- --base origin\/BASE/);
 });
 
+// The work skill inlines the review skill's blocking list, since a user's
+// worktree has no skills directory to point at; the two copies must agree.
+test('the work skill inlines the review skill\'s blocking list word for word', () => {
+  const skill = (name) => readText(path.join(ROOT, 'skills', name, 'SKILL.md'));
+  const section = /^## What blocks\n\n[^\n]*\n\n((?:- [^\n]*\n)+)/m.exec(skill('tower-crane-review'));
+  assert.ok(section, 'the review skill has a bulleted What blocks list');
+  const review = section[1].trim().split('\n').map((line) => line.slice(2).replace(/[;.]$/, ''));
+  const inline = /These block: (.+?)\. Everything else is a follow-up\./.exec(skill('tower-crane-work'));
+  assert.ok(inline, 'the work skill inlines the list as "These block: ... Everything else is a follow-up."');
+  assert.ok(review.length >= 5, `found ${review.length} blocking rules`);
+  assert.deepEqual(inline[1].split('; '), review);
+});
+
 test('CRLF source, docs, fragments and archive use the same canonical text in real commands', (t) => {
   const f = fixture(t);
   f.change();
