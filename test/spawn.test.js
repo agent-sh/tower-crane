@@ -10,7 +10,7 @@ const net = require('node:net');
 const cp = require('node:child_process');
 const { once } = require('node:events');
 const { pathToFileURL } = require('node:url');
-const { cachedFixture, pinRung, real, BIN, ROOT, PTY_AVAILABLE, makeTaskRepo } = require('./helpers');
+const { cachedFixture, pinRung, real, BIN, ROOT, HOOKS, PTY_AVAILABLE, makeTaskRepo } = require('./helpers');
 const stack = require('./stack-fixture');
 const A = require('../lib/agents');
 const S = require('../lib/state');
@@ -836,6 +836,26 @@ test('spawn in the background detaches, logs output and numbers agents', async (
   const noBrief = h.run(['spawn', '--role', 'small', '--task', 'T2', '--dry-run']);
   assert.equal(noBrief.code, 1);
   assert.match(noBrief.stderr, /T2 has no brief; write one with tower-crane brief set T2/);
+});
+
+// An agent's git runs through its shim, which cleans up placeholders in the
+// git directory first; stopping the agent kills its process group, shim
+// included. A supervisor runs its own git through the agent's shims before it
+// reports its start, so a directory the killed shim left held made every
+// later supervisor miss its startup window.
+test('a git shim killed while it cleans up placeholders does not keep the next supervisor from starting', (t) => {
+  const h = setup(t);
+  const policy = path.join(h.base, 'policy.json');
+  fs.writeFileSync(policy, JSON.stringify({ gitPush: 'branch', branch: 'task-T1', repo: null, gh: [] }));
+  const shimDir = path.join(h.base, 'shim');
+  fs.mkdirSync(shimDir);
+  cp.spawnSync(process.execPath, ['--require', HOOKS, path.join(ROOT, 'lib', 'shim.js'), policy, shimDir, 'git', 'status'],
+    { cwd: h.repo, env: { ...h.env, HOOK_STATE: h.state, HOOK_DIE_REAP: '1' } });
+  assert.equal(fs.existsSync(path.join(h.repo, '.git', 'tower-crane-reap')), true, 'the killed shim held the directory');
+  commandRung(h, 'small', [process.execPath, '-e', 'process.exit(0)', '{prompt}']);
+  const started = h.run(['spawn', '--role', 'small', '--task', 'T1', '--wait', '--json']);
+  assert.equal(started.code, 0, started.stderr);
+  assert.equal(JSON.parse(started.stdout).agent, 'small-T1-1');
 });
 
 // Everything a spawn could leave behind: state files, events, logs, the

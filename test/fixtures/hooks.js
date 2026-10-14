@@ -281,6 +281,18 @@ function after(name, args, rawArgs = args) {
   // its relocated admin directory, before the link in worktrees/ is made.
   if (env.HOOK_STOP_ADMIN_LINK && name === 'writeFileSync' && typeof target === 'string' && path.basename(target) === '.git'
     && /^gitdir: .*\.git-admin/.test(String(args[1])) && first('admin-link')) stop(env.HOOK_STOP_ADMIN_LINK);
+  // A placeholder cleanup takes the git directory's tower-crane-reap by
+  // creating it or by renaming a prepared directory onto it. Once the first
+  // take is done, HOOK_REAP_TAKEN=SIGNAL stops the process there, and
+  // HOOK_DIE_REAP=1 kills it, as a stopped agent's git shim is killed.
+  if ((env.HOOK_REAP_TAKEN || env.HOOK_DIE_REAP) && ['mkdirSync', 'renameSync'].includes(name)
+    && path.basename(String(name === 'renameSync' ? args[1] : target)) === 'tower-crane-reap' && first('reap')) {
+    if (env.HOOK_DIE_REAP) {
+      process.kill(process.pid, 'SIGKILL');
+      sleep(5000);
+    }
+    stop(env.HOOK_REAP_TAKEN);
+  }
   // HOOK_STOP_LOCK_CHANGE=SIGNAL: stop after the first attempt to remove or
   // move what is at or inside the lock, whether or not it worked.
   if (env.HOOK_STOP_LOCK_CHANGE && CHANGES.includes(name) && inLock(target) && first('lock-change')) stop(env.HOOK_STOP_LOCK_CHANGE);
