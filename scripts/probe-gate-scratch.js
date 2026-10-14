@@ -8,6 +8,11 @@ const cp = require('node:child_process');
 const ROOT = path.resolve(__dirname, '..');
 const BIN = path.join(ROOT, 'bin', 'tower-crane.js');
 
+// The gate bounds each suite run. A failing head runs the suite again on the
+// base for the failing names, so the probe outlasts two runs and still gets
+// the gate's report naming the failures.
+const TESTS_MIN = 45;
+
 function contents(root) {
   return fs.readdirSync(root, { recursive: true }).sort();
 }
@@ -39,7 +44,7 @@ function probe({ root = ROOT, cache, command, environment = process.env } = {}) 
   const call = (args, agent = 'orchestrator') => {
     const argv = [BIN, ...args, '--agent', agent, '--state', state, '--json'];
     const out = cp.spawnSync(process.execPath, argv, {
-      cwd: root, env, encoding: 'utf8', timeout: 46 * 60 * 1000, maxBuffer: 16 << 20,
+      cwd: root, env, encoding: 'utf8', timeout: (2 * TESTS_MIN + 2) * 60 * 1000, maxBuffer: 16 << 20,
     });
     if (out.error) throw out.error;
     const data = out.stdout.trim() ? JSON.parse(out.stdout) : null;
@@ -52,7 +57,7 @@ function probe({ root = ROOT, cache, command, environment = process.env } = {}) 
     for (const dir of [outer, gates]) fs.mkdirSync(dir);
     result.sha = cp.execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, env, encoding: 'utf8' }).trim();
     call(['init', '--name', 'Gate scratch proof', '--goal', 'Measure full-gate scratch cleanup',
-      '--tests-mode', 'run-only', '--tests-cmd', command, '--tests-timeout-min', '45']);
+      '--tests-mode', 'run-only', '--tests-cmd', command, '--tests-timeout-min', String(TESTS_MIN)]);
     const task = call(['task', 'add', '--title', 'Gate scratch proof', '--acceptance', 'Scratch is removed']).data;
     const id = task.id;
     call(['claim', id], 'scratch-proof-worker');

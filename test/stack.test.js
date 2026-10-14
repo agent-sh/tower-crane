@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { worker, setup, upper, resubmit } = require('./stack-fixture');
-const { BIN } = require('./helpers');
+const { BIN, detachedAlive } = require('./helpers');
 
 test('submitted dependencies dispatch from the exact dependency head and spawn links PRs bottom to top', (t) => {
   const f = setup(t);
@@ -41,15 +41,15 @@ test('a task event during the link\'s GitHub call refuses the link, and the next
 test('detached spawn links the PR after its worker submits and exits', async (t) => {
   const f = setup(t);
   worker(f);
-  f.h.ok(['spawn', '--task', 'T2']);
-  // The worker runs git, the CLI and its submit checks; on Windows that takes about 20 seconds.
-  const until = Date.now() + 60000;
-  let task;
-  do {
-    task = f.h.json(['task', 'show', 'T2']);
-    if (task.stack?.linked) break;
+  const spawned = f.h.json(['spawn', '--task', 'T2']);
+  // The worker runs git, the CLI and its submit checks; on Windows that takes about 20 seconds,
+  // more on a loaded runner. The monitor links the PR before it exits, so its exit ends the wait.
+  let task = f.h.json(['task', 'show', 'T2']);
+  while (!task.stack?.linked && detachedAlive({ pid: spawned.monitor_pid })) {
     await new Promise((resolve) => setTimeout(resolve, 100));
-  } while (Date.now() < until);
+    task = f.h.json(['task', 'show', 'T2']);
+  }
+  task = f.h.json(['task', 'show', 'T2']);
   assert.equal(task.stack.linked, true);
   assert.equal(task.status, 'submitted');
   assert.deepEqual(f.read().order, [11, 12]);
