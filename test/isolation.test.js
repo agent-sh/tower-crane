@@ -426,7 +426,11 @@ test('research Claude gets native or explicit web MCP tools with worker file and
   assert.ok(native.args[native.args.indexOf('--allowedTools') + 1].includes('WebSearch'));
   assert.ok(native.args[native.args.indexOf('--allowedTools') + 1].includes('WebFetch'));
   assert.deepEqual(filesystem(native), filesystem(worker));
-  assert.deepEqual(native.settings.sandbox.network.allowedDomains, ['*']);
+  // Found 2026-10-14: ['*'], which Claude Code refuses as too broad, left
+  // its proxy no host to allow. The list names GitHub's hosts and npm's.
+  const hosts = native.settings.sandbox.network.allowedDomains;
+  for (const d of ['github.com', 'api.github.com', 'codeload.github.com', 'objects.githubusercontent.com', 'raw.githubusercontent.com', 'uploads.github.com', 'registry.npmjs.org']) assert.ok(hosts.includes(d), d);
+  assert.ok(!hosts.includes('*') && hosts.every(require('../lib/spawn-settings').domainPattern), `every entry is a pattern claude takes: ${hosts}`);
   assert.ok(native.memory.join('\n').includes('Use the network'));
   h.ok(['ladder', 'set', 'research', '--web-mcp', '{"name":"harness-web","command":"node","args":["/configured/server.mjs"]}']);
   spawn(h, u, 'research');
@@ -478,6 +482,8 @@ test('research Codex explicitly enables live search with worker file and git con
     delete rules[report.home];
     assert.equal(rules[path.join(report.home, '.gitconfig')], 'read', 'git config in HOME stays read-only');
     delete rules[path.join(report.home, '.gitconfig')];
+    assert.equal(rules[path.join(report.home, '.tower-crane-shims')], 'read', 'the shims in HOME stay read-only');
+    delete rules[path.join(report.home, '.tower-crane-shims')];
     delete rules[broker];
     // What lies outside the home is listed as it is at each spawn.
     const home = fs.realpathSync(u.home);
@@ -525,7 +531,8 @@ test('a spawned claude agent imports the user\'s global rules by path, loads non
   const box = seen.settings.sandbox;
   assert.equal(seen.args[seen.args.indexOf('--allowedTools') + 1], 'Bash,Read,Grep,Glob');
   assert.deepEqual([box.enabled, box.failIfUnavailable, box.allowUnsandboxedCommands, box.network.allowAllUnixSockets], [true, true, false, true]);
-  assert.deepEqual(box.filesystem.allowWrite, []);
+  // Nothing but its own temp directory, where claude puts its proxy sockets (claudeTmp).
+  assert.deepEqual(box.filesystem.allowWrite.filter((w) => w !== seen.tmpdir), []);
   assert.equal(box.filesystem.denyWrite[0], h.state, 'the state is read-only');
   assert.ok(box.filesystem.denyWrite.includes(wt), 'the worktree is read-only');
   // claude writes a linked worktree's git directory itself; what runs code stays read-only.
@@ -534,8 +541,8 @@ test('a spawned claude agent imports the user\'s global rules by path, loads non
   assert.ok(box.filesystem.denyRead.includes(path.join(h.state, 'homes')), 'other agent homes are hidden, including future spawns');
   assert.ok(box.filesystem.denyRead.includes(path.join(h.state, 'brokers')), 'no agent reads another agent\'s broker token');
   assert.ok(box.filesystem.denyRead.includes(path.join(path.dirname(h.userConfig), 'owner')), 'no agent reads the owner key');
-  assert.deepEqual(box.filesystem.allowRead, [path.join(u.home, '.claude', 'CLAUDE.md'), home, path.join(h.state, 'brokers', started.agent), ...A.runReads(u.env)],
-    'only the user\'s global rules under the home, this dispatch home, its own broker directory and the resolver under /run are readable');
+  assert.deepEqual(box.filesystem.allowRead.filter((p) => p !== seen.tmpdir), [path.join(u.home, '.claude', 'CLAUDE.md'), home, path.join(h.state, 'brokers', started.agent), ...A.runReads(u.env)],
+    'only the user\'s global rules under the home, this dispatch home, its own broker directory, the resolver under /run and its own temp directory are readable');
   // /run is hidden whole, with docker's, the buses' and every other host socket in it.
   for (const p of A.runDirs()) assert.ok(box.filesystem.denyRead.includes(p), p);
   // /var/run links to /run on most hosts; the sandbox follows the link into the hidden /run.
@@ -1982,12 +1989,13 @@ test('worker and reviewer sandboxes write a cache of their own, never the user c
       for (const w of writes) {
         for (const p of forbidden) assert.ok(!contains(w, p), `${seen.harness} ${rung}: ${w} grants a write on ${p}`);
       }
-      // Besides it, codex writes its temp directory, which is the short
-      // tc/<12 hex> under the cache root when tmp in the cache is too long (codexTmp).
-      const own = writes.filter((w) => contains(root, w) && !(seen.harness === 'codex' && w === seen.tmpdir));
+      // Besides it, codex and claude write their temp directory, which is the
+      // short tc/<12 hex> under the cache root when tmp in the cache is too
+      // long (codexTmp, claudeTmp).
+      const own = writes.filter((w) => contains(root, w) && w !== seen.tmpdir);
       assert.equal(own.length, 1, `${seen.harness} ${rung}: one directory under the cache root: ${JSON.stringify(own)}`);
-      if (seen.harness === 'codex' && !contains(own[0], seen.tmpdir)) {
-        assert.match(seen.tmpdir, /[\\/]tc[\\/][0-9a-f]{12}$/, `${rung}: the codex temp directory is its own`);
+      if (writes.includes(seen.tmpdir) && !contains(own[0], seen.tmpdir)) {
+        assert.match(seen.tmpdir, /[\\/]tc[\\/][0-9a-f]{12}$/, `${seen.harness} ${rung}: the temp directory is its own`);
       }
       assert.ok(contains(path.join(fs.realpathSync(root), 'tower-crane', rung === 'review' ? 'agents' : 'tasks'), own[0]) && path.basename(own[0]) === (rung === 'review' ? started.agent : 'T1'), own[0]);
       assert.ok(fs.statSync(own[0]).isDirectory(), 'the granted cache exists');
@@ -2005,7 +2013,9 @@ test('a spawn from a supervisor running in another agent\'s env gets a cache of 
   const inherited = path.join(root, 'tower-crane', 'agents', '22cd04e4ddaf', 'worker-T93-6');
   spawn(h, u, 'hard', { XDG_CACHE_HOME: inherited });
   const real = fs.realpathSync(root);
-  const own = u.report().settings.sandbox.filesystem.allowWrite.filter((w) => w === real || w.startsWith(real + path.sep));
+  const seen = u.report();
+  // Besides it, claude writes its own temp directory (claudeTmp).
+  const own = seen.settings.sandbox.filesystem.allowWrite.filter((w) => (w === real || w.startsWith(real + path.sep)) && w !== seen.tmpdir);
   assert.equal(own.length, 1, `one directory under the cache root: ${JSON.stringify(own)}`);
   // Worker scratch is keyed by task, whatever the inherited agent cache was.
   assert.equal(path.dirname(path.dirname(own[0])), path.join(real, 'tower-crane', 'tasks'), own[0]);
@@ -2143,13 +2153,20 @@ for (const [command, args, opts] of calls) {
   assert.deepEqual(JSON.parse(fs.readFileSync(pushed, 'utf8')), [
     'push', '--no-follow-tags', '--recurse-submodules=no', '-u', 'origin', `HEAD:refs/heads/${branch}`,
   ]);
-  const policy = JSON.parse(fs.readFileSync(path.join(home, 'policy.json'), 'utf8'));
+  // A sandboxed codex agent runs the shims in its HOME, with a copy of the
+  // snapshot's lib; its sandbox hides hook.json, so they record no hook event.
+  const shims = path.join(home, 'home', '.tower-crane-shims');
+  const policy = JSON.parse(fs.readFileSync(path.join(shims, 'policy.json'), 'utf8'));
   assert.equal(policy.branch, branch);
   assert.equal(policy.repo, 'acme/app');
+  assert.equal(policy.hook, null);
+  assert.ok(fs.readFileSync(path.join(shims, 'bin', 'git'), 'utf8').includes(path.join(shims, 'lib', 'shim.js')), 'the git shim runs the copy');
+  assert.equal(fs.readFileSync(path.join(shims, 'lib', 'shim.js'), 'utf8'), fs.readFileSync(path.join(ROOT, 'lib', 'shim.js'), 'utf8'));
   const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
   assert.equal(events.find((e) => e.cmd === 'spawn').detail.tool.sha, toolSha);
-  for (const cmd of ['hook git-push', 'hook pr-created', 'hook report']) {
-    assert.ok(events.some((e) => e.cmd === cmd && e.agent === started.agent), cmd);
+  assert.ok(events.some((e) => e.cmd === 'hook report' && e.agent === started.agent), 'hook report');
+  for (const cmd of ['hook git-push', 'hook pr-created']) {
+    assert.ok(!events.some((e) => e.cmd === cmd && e.agent === started.agent), cmd);
   }
   assert.match(fs.readFileSync(S.progressFile(h.state, started.agent), 'utf8'), /"cmd":"hook progress"/);
 });
@@ -2303,6 +2320,108 @@ test('git and gh allow git commands, local pushes and the role\'s own writes, an
       const ran = u.report().ran;
       const codes = ran.map((r, i) => (probes[i][column] === NET && r.code !== 126 && r.code !== 0 ? NET : r.code));
       assert.deepEqual(codes, probes.map((c) => c[column]), `${harness} ${rung}: ${JSON.stringify(ran.map((r) => r.stderr))}`);
+    }
+  }
+});
+
+// What codex's Linux sandbox shows of a path under a permission profile, as
+// measured with codex-cli 0.162.1 and as codex-rs/linux-sandbox/src/bwrap.rs
+// builds it: every readable path is mounted, then each hidden directory is
+// masked, then each writable path is bound with the readable paths inside it.
+// So a readable path inside a hidden one stays hidden in any rule order, and
+// a writable path inside one shows with what it holds.
+function codexShows(rules, p) {
+  const deepest = (mode) => Object.keys(rules)
+    .filter((q) => !q.startsWith(':') && rules[q] === mode && (p === q || p.startsWith(q + path.sep)))
+    .sort((a, b) => b.length - a.length)[0];
+  const [hidden, writable] = [deepest('none'), deepest('write')];
+  if (writable && (!hidden || writable.length > hidden.length)) return true;
+  return !hidden && Boolean(deepest('read'));
+}
+
+// claude's sandbox mounts each denied directory empty, shallowest first, and
+// remounts the allowed paths inside it.
+function claudeShows(fsRules, p) {
+  const deepest = (list) => (list || []).filter((q) => p === q || p.startsWith(q + path.sep)).sort((a, b) => b.length - a.length)[0];
+  const [denied, allowed] = [deepest(fsRules.denyRead), deepest(fsRules.allowRead)];
+  return !denied || Boolean(allowed && allowed.length > denied.length);
+}
+
+// Found 2026-10-14: codex agents ran the host's git and gh, since the codex
+// profile hid homes/ and the shims in homes/<agent>/bin with it. Every
+// harness's agent finds its shims first on PATH, and a sandboxed one's
+// sandbox shows them. The stubs run outside any sandbox, so the sandbox check
+// models each one's mount order (codexShows, claudeShows); the live probes in
+// live-sandbox.test.js are the evidence from the real sandboxes. Each shim
+// runs in a project whose package.json says "type": "module", and with
+// NODE_OPTIONS asking node to require a file first: the shim still runs as
+// CommonJS and never loads the file.
+test('for every harness the first git and gh on the agent\'s PATH are its shims, and claude and codex sandboxes show them', { skip: NO_STUBS }, (t) => {
+  const { h, u } = setup(t);
+  fs.writeFileSync(path.join(h.repo, 'package.json'), '{"type":"module"}\n');
+  h.git(['add', 'package.json']);
+  h.git(['commit', '-q', '-m', 'an ES module project']);
+  const injected = path.join(h.base, 'injected');
+  const evil = path.join(h.base, 'evil.cjs');
+  fs.writeFileSync(evil, `require('node:fs').writeFileSync(${JSON.stringify(injected)}, process.argv.join(' '));\n`);
+  const probe = path.join(h.base, 'probe');
+  fs.mkdirSync(probe);
+  const script = path.join(probe, 'probe.js');
+  fs.writeFileSync(script, `
+const fs = require('node:fs');
+const path = require('node:path');
+const which = (tool) => String(process.env.PATH || '').split(path.delimiter).filter(Boolean)
+  .map((dir) => path.join(dir, tool)).find((f) => { try { fs.accessSync(f, fs.constants.X_OK); return fs.statSync(f).isFile(); } catch { return false; } }) || null;
+const seen = { git: which('git'), gh: which('gh'), home: process.env.CODEX_HOME || process.env.CLAUDE_CONFIG_DIR || null };
+for (const tool of ['git', 'gh']) seen[tool + 'Text'] = seen[tool] ? fs.readFileSync(seen[tool], 'utf8').slice(0, 4096) : null;
+fs.writeFileSync(process.env.PROBE_OUT, JSON.stringify(seen));
+if (path.basename(process.argv[1]) === 'codex') process.stdout.write(JSON.stringify({ type: 'thread.started', thread_id: 'probe' }) + '\\n');
+`);
+  for (const name of ['claude', 'codex', 'opencode', 'agy', 'pi']) {
+    fs.writeFileSync(path.join(probe, name), `#!${process.execPath}\nrequire(${JSON.stringify(script)});\n`, { mode: 0o755 });
+  }
+  const out = path.join(h.base, 'probe.json');
+  const env = { ...u.env, PATH: `${probe}${path.delimiter}${u.env.PATH}`, PROBE_OUT: out };
+  const rungs = {
+    claude: ['--harness', 'claude', '--model', 'probe'],
+    codex: ['--harness', 'codex', '--model', 'probe'],
+    opencode: ['--harness', 'opencode', '--model', 'fixture/probe'],
+    agy: ['--harness', 'agy', '--model', 'gemini-3-pro'],
+    pi: ['--harness', 'pi', '--model', 'probe'],
+    command: ['--harness', 'command', '--clear', 'model', '--command', JSON.stringify([process.execPath, script, '{prompt}'])],
+  };
+  for (const [harness, args] of Object.entries(rungs)) {
+    h.ok(['ladder', 'set', 'small', ...args, '--clear', 'profile', '--clear', 'effort', '--clear', 'args']);
+    fs.rmSync(out, { force: true });
+    const r = h.run(['spawn', '--role', 'small', '--task', 'T1', '--wait'], { env });
+    assert.equal(r.code, 0, `${harness}: ${r.stderr}`);
+    const seen = JSON.parse(fs.readFileSync(out, 'utf8'));
+    for (const tool of ['git', 'gh']) {
+      assert.ok(seen[tool] && seen[tool].startsWith(path.join(h.state, 'homes') + path.sep), `${harness}: the first ${tool} on PATH is ${seen[tool]}`);
+      assert.match(seen[`${tool}Text`], /shim\.js/, `${harness}: ${seen[tool]} runs the shim`);
+      const policy = /'([^']*policy\.json)'/.exec(seen[`${tool}Text`])?.[1];
+      assert.ok(policy && fs.existsSync(policy), `${harness}: ${tool} names its policy`);
+    }
+    assert.equal(path.dirname(seen.git), path.dirname(seen.gh));
+    const bin = path.dirname(seen.git);
+    for (const tool of ['git', 'gh']) {
+      const ran = cp.spawnSync(path.join(bin, tool), tool === 'git' ? ['version'] : ['auth', 'status'], { cwd: h.repo, encoding: 'utf8',
+        env: { ...env, NODE_OPTIONS: `--require=${evil}`, NODE_PATH: path.join(h.base, 'planted-modules') } });
+      assert.doesNotMatch(String(ran.stderr), /require is not defined|ERR_REQUIRE|ES module/, `${harness}: ${tool} runs as CommonJS`);
+      if (tool === 'git') assert.equal(ran.status, 0, `${harness}: git version through the shim: ${ran.stderr}`);
+      assert.equal(fs.existsSync(injected), false, `${harness}: ${tool} loaded NODE_OPTIONS's file`);
+    }
+    if (harness === 'codex') {
+      const rules = TOML.parse(fs.readFileSync(path.join(seen.home, 'config.toml'), 'utf8')).permissions['tower-crane'].filesystem;
+      for (const p of [bin, path.join(bin, 'git'), path.join(path.dirname(bin), 'policy.json'), path.join(path.dirname(bin), 'lib', 'shim.js')]) {
+        assert.ok(codexShows(rules, fs.realpathSync(p)), `codex shows ${p}`);
+      }
+      assert.ok(!codexShows(rules, fs.realpathSync(path.join(h.state, 'homes'))), 'codex hides homes/');
+      assert.ok(!codexShows(rules, fs.realpathSync(path.join(seen.home, 'config.toml'))), 'codex hides the rest of the agent home');
+    }
+    if (harness === 'claude') {
+      const fsRules = JSON.parse(fs.readFileSync(path.join(seen.home, 'settings.json'), 'utf8')).sandbox.filesystem;
+      for (const p of [path.join(bin, 'git'), path.join(path.dirname(bin), 'policy.json')]) assert.ok(claudeShows(fsRules, fs.realpathSync(p)), `claude shows ${p}`);
     }
   }
 });

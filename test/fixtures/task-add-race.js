@@ -4,15 +4,23 @@ const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
 
+// TEST_ADD_FAIL=append fails the event append, before the commit point;
+// TEST_ADD_FAIL=rename fails the rename of tasks.json, after it.
 const state = process.env.TEST_ADD_STATE;
 const rename = fs.renameSync;
+const open = fs.openSync;
 let failed = false;
+const fail = (what) => {
+  failed = true;
+  throw Object.assign(new Error(`injected ${what} write failure`), { code: 'EIO' });
+};
 fs.renameSync = function failTaskWrite(source, target, ...args) {
-  if (!failed && target === path.join(state, 'tasks.json')) {
-    failed = true;
-    throw Object.assign(new Error('injected tasks.json write failure'), { code: 'EIO' });
-  }
+  if (!failed && process.env.TEST_ADD_FAIL === 'rename' && target === path.join(state, 'tasks.json')) fail('tasks.json');
   return rename.call(this, source, target, ...args);
+};
+fs.openSync = function failEventAppend(file, flags, ...args) {
+  if (!failed && process.env.TEST_ADD_FAIL === 'append' && file === path.join(state, 'events.jsonl') && flags === 'a+') fail('events.jsonl');
+  return open.call(this, file, flags, ...args);
 };
 
 const rmdir = fs.rmdirSync;

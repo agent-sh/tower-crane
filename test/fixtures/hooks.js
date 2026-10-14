@@ -123,7 +123,7 @@ if (env.HOOK_WATCH_READY || env.HOOK_NO_WATCH || env.HOOK_SILENT_WATCH) {
 }
 const STATE = env.HOOK_STATE ? path.resolve(env.HOOK_STATE) : null;
 const LOCK = STATE ? path.join(STATE, 'lock') : null;
-const WRAPPED = ['openSync', 'closeSync', 'readFileSync', 'readSync', 'writeFileSync', 'appendFileSync', 'renameSync', 'unlinkSync', 'rmdirSync', 'rmSync', 'linkSync', 'statSync', 'readdirSync', 'mkdirSync', 'existsSync', 'utimesSync'];
+const WRAPPED = ['openSync', 'closeSync', 'readFileSync', 'readSync', 'writeFileSync', 'writeSync', 'appendFileSync', 'fsyncSync', 'renameSync', 'unlinkSync', 'rmdirSync', 'rmSync', 'linkSync', 'statSync', 'readdirSync', 'mkdirSync', 'existsSync', 'utimesSync'];
 // Calls that remove or move what is at their first argument.
 const CHANGES = ['renameSync', 'unlinkSync', 'rmdirSync', 'rmSync', 'linkSync'];
 const BUSY = ['EEXIST', 'ENOTEMPTY', 'ENOTDIR', 'EPERM', 'EACCES'];
@@ -184,6 +184,16 @@ function before(name, args) {
   // before it lets the supervisor launch the harness (the Windows handshake).
   if (env.HOOK_STOP_GO && name === 'writeFileSync' && typeof target === 'string' && path.basename(target) === 'go'
     && path.basename(process.argv[1]) === 'tower-crane.js' && first('go')) stop(env.HOOK_STOP_GO);
+  // HOOK_BUSY_STAGED=1: removing a staged commit file fails with EPERM, as
+  // on Windows while another process holds it open.
+  if (env.HOOK_BUSY_STAGED && name === 'unlinkSync' && inState(target) && /\.commit$/.test(String(target))) {
+    throw Object.assign(new Error(`EPERM: operation not permitted, unlink '${target}'`), { code: 'EPERM' });
+  }
+  // HOOK_FAIL_EVENT_SYNC=1: the first sync of events.jsonl fails with EIO
+  // after its lines are written, as a failing disk reports it.
+  if (env.HOOK_FAIL_EVENT_SYNC && name === 'fsyncSync' && path.resolve(String(target)) === path.join(STATE, 'events.jsonl') && first('event-sync')) {
+    throw Object.assign(new Error('EIO: i/o error, fsync'), { code: 'EIO' });
+  }
   // HOOK_JITTER_MS=MS: a random pause of up to MS before each call on the state.
   if (env.HOOK_JITTER_MS && (inState(target) || inState(args[1]))) sleep(Math.floor(Math.random() * Number(env.HOOK_JITTER_MS)));
   // State commits precede board replacement; expose that interval to readers.
@@ -200,9 +210,40 @@ function before(name, args) {
   }
 }
 
+// A commit's two durable steps, whatever their order: tasks.json renamed into
+// place, and the event appended to events.jsonl.
+function commitStep(name, args) {
+  if (name === 'renameSync') return path.resolve(String(args[1])) === path.join(STATE, 'tasks.json');
+  return name === 'appendFileSync' && path.resolve(String(args[0])) === path.join(STATE, 'events.jsonl');
+}
+
+// A copy of tasks.json staged beside it, under whatever name a version uses.
+const stagedTasks = (name, args) => name === 'fsyncSync' && path.dirname(path.resolve(String(args[0]))) === STATE
+  && path.basename(String(args[0])).startsWith('tasks.json.');
+
+// The state files whose syncs and moves a durability test follows.
+function traced(p) {
+  const rel = path.relative(STATE, path.resolve(String(p)));
+  return rel === '' ? '.' : /^(tasks\.json|events\.jsonl)/.test(rel) && !rel.includes(path.sep) ? rel : null;
+}
+
 let pendingLockRead;
 function after(name, args, rawArgs = args) {
   const target = args[0];
+  // HOOK_SYNC_TRACE=FILE appends `fsync NAME`, `append NAME` and `rename NAME`
+  // for tasks.json, its staged copies, events.jsonl and the state directory.
+  if (env.HOOK_SYNC_TRACE && ['fsyncSync', 'appendFileSync', 'renameSync'].includes(name)) {
+    const file = traced(name === 'renameSync' ? args[1] : target);
+    if (file) real.appendFileSync(env.HOOK_SYNC_TRACE, `${name.replace('Sync', '').replace('File', '')} ${file.startsWith('tasks.json.') ? 'tasks.json.staged' : file}\n`);
+  }
+  // HOOK_DIE_COMMIT kills the CLI holding the lock inside its commit:
+  // `landed` once the first of its two durable steps is done, `staged` once
+  // a staged copy of tasks.json is synced, before either step.
+  if (env.HOOK_DIE_COMMIT && (env.HOOK_DIE_COMMIT === 'landed' ? commitStep(name, args) : stagedTasks(name, args))
+    && path.basename(process.argv[1]) === 'tower-crane.js' && ownsLock()) {
+    process.kill(process.pid, 'SIGKILL');
+    sleep(5000);
+  }
   if (env.HOOK_STOP_RENDER && name === 'renameSync' && args[1] === path.join(STATE, 'sketch.md')
     && path.basename(process.argv[1]) === 'tower-crane.js' && process.argv.includes('spawn') && first('render')) stop(env.HOOK_STOP_RENDER);
   // HOOK_STOP_STARTED=FILE stops the dispatch after it reads its supervisor's startup receipt,

@@ -1,13 +1,16 @@
 'use strict';
 
-const { waitOnRepo } = require('./signals');
+const { waitOnRepo, HUNG_TEST_MS } = require('./signals');
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const cp = require('node:child_process');
+const { once } = require('node:events');
 const { setup, stacked } = require('./stack-fixture');
 const { BIN } = require('./helpers');
+const { waitFor } = require('./canary');
 
 for (const mode of ['generated', 'mixed', 'unknown', 'unmerged-parent', 'worktree', 'spawn']) {
   const automaticEntry = ['worktree', 'spawn'].includes(mode);
@@ -391,4 +394,71 @@ test('stack sync refuses live workers and dirty worktrees without invoking gh sy
   f.h.ok(['claim', 'T2', '--agent', 'worker-live']);
   assert.match(f.h.run(['stack', 'sync', 'T2']).stderr, /live worker/);
   assert.equal(f.read().calls.some((c) => c.args[1] === 'sync'), false);
+});
+
+// Runs wait until automatic stack maintenance holds its gh stack sync, then signals it.
+// The preload records each signal wait's event loop handles; a blocking sync delays it.
+async function signalDuringSync(t, f, { forced }) {
+  const ready = path.join(f.h.base, 'sync-ready');
+  const release = path.join(f.h.base, 'sync-release');
+  const observed = path.join(f.h.base, 'signal-observed');
+  const preload = path.join(f.h.base, 'signal-observer.js');
+  fs.writeFileSync(preload, `const fs = require('node:fs');
+for (const signal of ['SIGTERM', 'SIGINT']) process.on(signal, () => fs.appendFileSync(${JSON.stringify(observed)}, signal + '\\n'));
+`);
+  const env = { ...f.h.env, TEST_STACK_SYNC_READY: ready, TEST_STACK_SYNC_RELEASE: release,
+    NODE_OPTIONS: `${f.h.env.NODE_OPTIONS} --require=${JSON.stringify(preload)}` };
+  const child = cp.spawn(process.execPath, [BIN, 'wait', '--after', '0', '--types', 'never',
+    '--timeout', '300', '--agent', 'orchestrator'], { cwd: f.h.repo, env });
+  let stdout = '', stderr = '';
+  child.stdout.on('data', (data) => { stdout += data; });
+  child.stderr.on('data', (data) => { stderr += data; });
+  const result = once(child, 'close').then(([code]) => ({ code, stdout, stderr }));
+  const bound = setTimeout(() => child.kill('SIGKILL'), HUNG_TEST_MS);
+  try {
+    assert.notEqual(await waitFor(ready), null, `automatic maintenance reaches gh stack sync: ${stderr}`);
+    child.kill('SIGTERM');
+    assert.notEqual(await waitFor(observed), null, 'wait handles the signal while gh stack sync runs');
+    assert.equal(child.exitCode, null, 'the first signal lets the running sync finish');
+    if (forced) child.kill('SIGINT');
+    else fs.writeFileSync(release, 'release');
+    // Without its release the sync never finishes, so a forced exit proves the second signal stopped it.
+    const exited = await result;
+    assert.equal(exited.code, 0, JSON.stringify(exited));
+    assert.match(exited.stdout, /stopped by SIGTERM/);
+    return exited;
+  } finally {
+    clearTimeout(bound);
+    fs.writeFileSync(release, 'release');
+    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+    await result;
+  }
+}
+
+test('a signal during automatic stack maintenance stops it and wait exits', {
+  skip: process.platform === 'win32' ? 'Windows child.kill does not deliver POSIX signals' : false,
+}, async (t) => {
+  for (const forced of [false, true]) {
+    await t.test(forced ? 'second signal' : 'drain', async (t) => {
+      const f = stacked(t);
+      // Merging an independent task moves main, so the post-merge refresh syncs the idle stack.
+      const id = f.add('independent');
+      const wt = f.h.json(['worktree', id]);
+      f.submit(id, 13, wt);
+      f.accept(id);
+      const setupCalls = f.read().calls.length;
+      await signalDuringSync(t, f, { forced });
+      const events = fs.readFileSync(path.join(f.h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+      assert.equal(f.h.json(['task', 'show', id]).evidence.findLast((e) => e.type === 'merge')?.ok, true, 'the merge before maintenance stands');
+      const syncs = events.filter((e) => e.cmd === 'stack sync');
+      // The sync that ran records its outcome for every member; no later stack work starts.
+      assert.deepEqual(syncs.map((e) => e.task).sort(), ['T1', 'T2']);
+      assert.equal(syncs.every((e) => e.detail.ok === !forced), true, JSON.stringify(syncs));
+      assert.equal(events.some((e) => e.cmd === 'stack sync deferred'), false);
+      // The stub records a call when it returns; a killed sync never does.
+      const stackCalls = f.read().calls.slice(setupCalls).filter((c) => c.args[0] === 'stack').map((c) => c.args[1]);
+      assert.deepEqual(stackCalls, forced ? ['checkout'] : ['checkout', 'sync']);
+      assert.equal(events.findLast((e) => e.cmd === 'automation').detail.phase, 'deferred');
+    });
+  }
 });
