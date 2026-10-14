@@ -50,6 +50,8 @@ cp.spawnSync = function stackGh(command, args, opts) {
   const data = JSON.parse(read);
   data.calls.push({ args, cwd: opts.cwd });
   const finish = (value = '', status = 0, stderr = '') => {
+    // data.delayMs models a slow GitHub: every call takes that long to answer.
+    if (data.delayMs) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, data.delayMs); // wait-allow: models GitHub's response time, not a readiness wait
     updateJson(file, (current) => {
       const before = JSON.parse(read);
       current.calls.push(...data.calls.slice(before.calls.length));
@@ -70,8 +72,10 @@ cp.spawnSync = function stackGh(command, args, opts) {
   for (const cli of (racing && data.during?.[key]) || []) {
     const project = ownerProject(path.join(data.repo, '.tower-crane'));
     const env = { ...process.env, TOWER_CRANE_OWNER_KEY: fs.readFileSync(ownerKeyFile(project), 'utf8').trim() };
-    // {pid} names the CLI process making this gh call, so a test can count each observer's attempts.
-    const r = original(process.execPath, [BIN, ...cli.map((arg) => arg.replaceAll('{pid}', String(process.pid)))], { cwd: data.repo, env, encoding: 'utf8' });
+    // {pid} names the CLI process making this gh call, so a test can count each observer's attempts;
+    // {nonce} is new on every call, so a racing write changes state each time.
+    const fill = (arg) => arg.replaceAll('{pid}', String(process.pid)).replaceAll('{nonce}', require('node:crypto').randomUUID());
+    const r = original(process.execPath, [BIN, ...cli.map(fill)], { cwd: data.repo, env, encoding: 'utf8' });
     if (r.status !== 0) throw new Error(`tower-crane ${cli.join(' ')} failed: ${r.stderr}`);
   }
   if (data.during && !(data.duringWhile?.[key] && fs.existsSync(data.duringWhile[key]))) delete data.during[key];

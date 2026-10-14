@@ -34,9 +34,12 @@ function setup(t) {
   return h;
 }
 
-async function start(t, h, { claim = true, submit = false, wait = false, env = {} } = {}) {
+// lifetimeMs ends the stand-in on its own after that long, leaving a .natural
+// file beside its marker, so a test can tell that end from being stopped.
+async function start(t, h, { claim = true, submit = false, wait = false, env = {}, lifetimeMs = 0 } = {}) {
   const marker = path.join(h.base, `started-${Date.now()}.json`);
   const worker = path.join(h.base, 'worker.js');
+  const ending = lifetimeMs ? `setTimeout(() => { fs.writeFileSync(process.argv[3] + '.natural', ''); process.exit(0); }, ${lifetimeMs});` : 'setInterval(() => {}, 1000);'; // wait-allow: the stand-in's own end, which a test tells apart from being stopped
   const script = `
 const fs = require('node:fs');
 const cp = require('node:child_process');
@@ -48,7 +51,7 @@ fs.writeSync(2, ${JSON.stringify(PRIVATE_LOG + '\n')});
 ${submit ? "cp.execFileSync(process.execPath, [process.argv[2], 'submit', task, '--sha', '50b732a15be40ccb2065cb2ba0e7b366d511b736']);" : ''}
 fs.writeFileSync(process.argv[3] + '.tmp', JSON.stringify({ agent: process.env.TOWER_CRANE_AGENT, pid: process.pid }));
 fs.renameSync(process.argv[3] + '.tmp', process.argv[3]);
-${wait ? 'process.exit(7);' : 'setInterval(() => {}, 1000);'}
+${wait ? 'process.exit(7);' : ending}
 `;
   fs.writeFileSync(worker, script);
   h.ok(['ladder', 'set', 'easy', '--harness', 'command', '--command', JSON.stringify([process.execPath, worker, BIN, marker, '{prompt}']),
@@ -65,7 +68,7 @@ ${wait ? 'process.exit(7);' : 'setInterval(() => {}, 1000);'}
   const started = await waitOnRepo(h, () => fs.existsSync(marker) && JSON.parse(fs.readFileSync(marker, 'utf8')),
     'stand-in did not claim the task');
   assert.deepEqual(started, { agent: spawned.agent, pid: spawned.pid });
-  return { ...spawned, kill };
+  return { ...spawned, kill, marker };
 }
 
 test('a killed spawned claimant is reported with its log tail and released for recovery', async (t) => {
@@ -413,6 +416,19 @@ test('a spawned replacement can claim after another worker lease expires', async
   spawned.kill();
   await waitOnRepo(h, () => (h.json(['status']).exited_claims || []).length === 1, 'replacement exit was not reported');
   assert.equal(h.json(['ready']).exited_claims[0].pid, spawned.pid);
+});
+
+// Without its state no exit can be recorded and no reaction can follow, so the
+// monitor stops its agent rather than let a paid session run on unrecorded.
+// A removal that takes project.json first leaves the monitor no read that
+// fails, so only project.json is removed here.
+test('a monitor whose project state is removed stops its agent and exits', { skip: process.platform === 'win32' }, async (t) => {
+  const h = setup(t);
+  const spawned = await start(t, h, { lifetimeMs: 30000 });
+  fs.unlinkSync(path.join(h.state, 'project.json'));
+  await waitOnRepo(h, () => !detachedAlive({ pid: spawned.pid }) && !detachedAlive({ pid: spawned.monitor_pid }),
+    'the agent or its monitor outlived the state directory');
+  assert.equal(fs.existsSync(`${spawned.marker}.natural`), false, 'the agent ran to its own end');
 });
 
 test('a worker that keeps exiting without a submit is parked for the owner at the respawn cap', async (t) => {
