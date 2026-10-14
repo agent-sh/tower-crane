@@ -192,8 +192,11 @@ while (!fs.existsSync(${JSON.stringify(addRelease)})) {
       assert.ok(fs.readFileSync(path.join(admin, 'gitdir'), 'utf8').trim());
       assert.ok(fs.readFileSync(path.join(admin, 'HEAD'), 'utf8').trim());
       // A task worktree's admin directory moved out of worktrees/; commondir is relative to where it is now.
+      // On Windows it stays where git put it, and git writes the relative path with forward slashes.
       const real = fs.realpathSync.native(admin);
-      assert.equal(fs.readFileSync(path.join(admin, 'commondir'), 'utf8').trim(), path.relative(real, fs.realpathSync.native(path.join(h.repo, '.git'))));
+      const named = fs.readFileSync(path.join(admin, 'commondir'), 'utf8').trim();
+      assert.equal(path.isAbsolute(named), false, named);
+      assert.equal(fs.realpathSync.native(path.resolve(real, named)), fs.realpathSync.native(path.join(h.repo, '.git')));
     }
   } finally {
     fs.writeFileSync(release, '');

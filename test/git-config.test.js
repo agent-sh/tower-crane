@@ -254,7 +254,16 @@ while (Date.now() < stop) {
   try { fs.unlinkSync(file); } catch {}
   spin(1);
 }`, planted, path.join(other, '.git')], { stdio: 'ignore' });
-  t.after(() => { toggler.kill(); fs.rmSync(planted, { force: true }); });
+  // The toggler stops before the fixture goes: fs.rmSync skips what a concurrent
+  // unlink removed under it and returns without error, leaving the rest behind.
+  h.teardown.push(async () => {
+    const exited = new Promise((resolve) => toggler.once('exit', resolve));
+    if (toggler.exitCode === null && toggler.signalCode === null) {
+      toggler.kill();
+      await exited;
+    }
+    fs.rmSync(planted, { force: true });
+  });
   const seen = { other: 0, refused: 0, own: 0 };
   // Before the confirm, about one run in ten read the other state; 150 runs
   // miss that with odds near 1e-6.
