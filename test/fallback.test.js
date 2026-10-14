@@ -87,7 +87,8 @@ for (const explicit of [false, true]) {
     assert.deepEqual(fallback.sandbox, primary.sandbox);
     assert.deepEqual(fallback.policy, primary.policy);
     assert.equal(fallback.policy.gitPush, 'branch');
-    assert.deepEqual(fallback.sandbox.network.allowedDomains, ['*']);
+    // No bare *, which claude refuses as too broad and then allows no host.
+    assert.ok(fallback.sandbox.network.allowedDomains.includes('github.com') && !fallback.sandbox.network.allowedDomains.includes('*'));
   });
 }
 

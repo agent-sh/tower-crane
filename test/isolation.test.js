@@ -427,7 +427,11 @@ test('research Claude gets native or explicit web MCP tools with worker file and
   assert.ok(native.args[native.args.indexOf('--allowedTools') + 1].includes('WebSearch'));
   assert.ok(native.args[native.args.indexOf('--allowedTools') + 1].includes('WebFetch'));
   assert.deepEqual(filesystem(native), filesystem(worker));
-  assert.deepEqual(native.settings.sandbox.network.allowedDomains, ['*']);
+  // Found 2026-10-14: ['*'], which Claude Code refuses as too broad, left
+  // its proxy no host to allow. The list names GitHub's hosts and npm's.
+  const hosts = native.settings.sandbox.network.allowedDomains;
+  for (const d of ['github.com', 'api.github.com', 'codeload.github.com', 'objects.githubusercontent.com', 'raw.githubusercontent.com', 'uploads.github.com', 'registry.npmjs.org']) assert.ok(hosts.includes(d), d);
+  assert.ok(!hosts.includes('*') && hosts.every(require('../lib/spawn-settings').domainPattern), `every entry is a pattern claude takes: ${hosts}`);
   assert.ok(native.memory.join('\n').includes('Use the network'));
   h.ok(['ladder', 'set', 'research', '--web-mcp', '{"name":"harness-web","command":"node","args":["/configured/server.mjs"]}']);
   spawn(h, u, 'research');
@@ -528,7 +532,8 @@ test('a spawned claude agent imports the user\'s global rules by path, loads non
   const box = seen.settings.sandbox;
   assert.equal(seen.args[seen.args.indexOf('--allowedTools') + 1], 'Bash,Read,Grep,Glob');
   assert.deepEqual([box.enabled, box.failIfUnavailable, box.allowUnsandboxedCommands, box.network.allowAllUnixSockets], [true, true, false, true]);
-  assert.deepEqual(box.filesystem.allowWrite, []);
+  // Nothing but its own temp directory, where claude puts its proxy sockets (claudeTmp).
+  assert.deepEqual(box.filesystem.allowWrite.filter((w) => w !== seen.tmpdir), []);
   assert.equal(box.filesystem.denyWrite[0], h.state, 'the state is read-only');
   assert.ok(box.filesystem.denyWrite.includes(wt), 'the worktree is read-only');
   // claude writes a linked worktree's git directory itself; what runs code stays read-only.
@@ -537,8 +542,8 @@ test('a spawned claude agent imports the user\'s global rules by path, loads non
   assert.ok(box.filesystem.denyRead.includes(path.join(h.state, 'homes')), 'other agent homes are hidden, including future spawns');
   assert.ok(box.filesystem.denyRead.includes(path.join(h.state, 'brokers')), 'no agent reads another agent\'s broker token');
   assert.ok(box.filesystem.denyRead.includes(path.join(path.dirname(h.userConfig), 'owner')), 'no agent reads the owner key');
-  assert.deepEqual(box.filesystem.allowRead, [path.join(u.home, '.claude', 'CLAUDE.md'), home, path.join(h.state, 'brokers', started.agent), ...A.runReads(u.env)],
-    'only the user\'s global rules under the home, this dispatch home, its own broker directory and the resolver under /run are readable');
+  assert.deepEqual(box.filesystem.allowRead.filter((p) => p !== seen.tmpdir), [path.join(u.home, '.claude', 'CLAUDE.md'), home, path.join(h.state, 'brokers', started.agent), ...A.runReads(u.env)],
+    'only the user\'s global rules under the home, this dispatch home, its own broker directory, the resolver under /run and its own temp directory are readable');
   // /run is hidden whole, with docker's, the buses' and every other host socket in it.
   for (const p of A.runDirs()) assert.ok(box.filesystem.denyRead.includes(p), p);
   // /var/run links to /run on most hosts; the sandbox follows the link into the hidden /run.
@@ -1994,12 +1999,13 @@ test('worker and reviewer sandboxes write a cache of their own, never the user c
       for (const w of writes) {
         for (const p of forbidden) assert.ok(!contains(w, p), `${seen.harness} ${rung}: ${w} grants a write on ${p}`);
       }
-      // Besides it, codex writes its temp directory, which is the short
-      // tc/<12 hex> under the cache root when tmp in the cache is too long (codexTmp).
-      const own = writes.filter((w) => contains(root, w) && !(seen.harness === 'codex' && w === seen.tmpdir));
+      // Besides it, codex and claude write their temp directory, which is the
+      // short tc/<12 hex> under the cache root when tmp in the cache is too
+      // long (codexTmp, claudeTmp).
+      const own = writes.filter((w) => contains(root, w) && w !== seen.tmpdir);
       assert.equal(own.length, 1, `${seen.harness} ${rung}: one directory under the cache root: ${JSON.stringify(own)}`);
-      if (seen.harness === 'codex' && !contains(own[0], seen.tmpdir)) {
-        assert.match(seen.tmpdir, /[\\/]tc[\\/][0-9a-f]{12}$/, `${rung}: the codex temp directory is its own`);
+      if (writes.includes(seen.tmpdir) && !contains(own[0], seen.tmpdir)) {
+        assert.match(seen.tmpdir, /[\\/]tc[\\/][0-9a-f]{12}$/, `${seen.harness} ${rung}: the temp directory is its own`);
       }
       assert.ok(contains(path.join(fs.realpathSync(root), 'tower-crane', rung === 'review' ? 'agents' : 'tasks'), own[0]) && path.basename(own[0]) === (rung === 'review' ? started.agent : 'T1'), own[0]);
       assert.ok(fs.statSync(own[0]).isDirectory(), 'the granted cache exists');
@@ -2017,7 +2023,9 @@ test('a spawn from a supervisor running in another agent\'s env gets a cache of 
   const inherited = path.join(root, 'tower-crane', 'agents', '22cd04e4ddaf', 'worker-T93-6');
   spawn(h, u, 'hard', { XDG_CACHE_HOME: inherited });
   const real = fs.realpathSync(root);
-  const own = u.report().settings.sandbox.filesystem.allowWrite.filter((w) => w === real || w.startsWith(real + path.sep));
+  const seen = u.report();
+  // Besides it, claude writes its own temp directory (claudeTmp).
+  const own = seen.settings.sandbox.filesystem.allowWrite.filter((w) => (w === real || w.startsWith(real + path.sep)) && w !== seen.tmpdir);
   assert.equal(own.length, 1, `one directory under the cache root: ${JSON.stringify(own)}`);
   // Worker scratch is keyed by task, whatever the inherited agent cache was.
   assert.equal(path.dirname(path.dirname(own[0])), path.join(real, 'tower-crane', 'tasks'), own[0]);
