@@ -467,7 +467,7 @@ test('claude: sandbox.session_bus grants the bus socket, read and write, and off
 // agent reached the user's session bus, and through it ran host commands with
 // systemd-run --user, and the docker socket. test/live-sandbox.test.js runs
 // both against the real codex sandbox.
-test('codex: the profile hides the runtime directory and container sockets, and sandbox.session_bus reopens the bus alone', { skip: (NO_STUBS || !fs.existsSync('/var/tmp')) && 'needs /var/tmp' }, (t) => {
+test('codex: the profile hides /run but the resolver, and a runtime directory elsewhere, and sandbox.session_bus reopens the bus alone', { skip: (NO_STUBS || !fs.existsSync('/var/tmp')) && 'needs /var/tmp' }, (t) => {
   const h = setup(t, 'codex');
   const bin = path.join(h.base, 'bin');
   fs.mkdirSync(bin);
@@ -493,11 +493,17 @@ test('codex: the profile hides the runtime directory and container sockets, and 
     return { rules: TOML.parse(seen.config).permissions['tower-crane'].filesystem, env: seen.env };
   };
   const uid = process.getuid();
+  // Whether a rule mounts p: codex mounts only what its rules name.
+  const mounted = (rules, p) => Object.entries(rules).some(([r, a]) => !r.startsWith(':') && a !== 'none' && (p === r || p.startsWith(`${r}/`)))
+    && !Object.entries(rules).some(([r, a]) => a === 'none' && (p === r || p.startsWith(`${r}/`)));
   const off = spawnSeen();
   assert.equal(off.rules[runtime], 'none', 'the runtime directory is hidden');
-  for (const p of [`/run/user/${uid}`, '/run/docker.sock', '/var/run/docker.sock', '/run/podman'].filter((p) => fs.existsSync(p))) {
-    assert.equal(off.rules[fs.realpathSync(p)], 'none', `${p} is hidden`);
+  // /run is no rule, so nothing in it is mounted but the resolver.
+  for (const p of [`/run/user/${uid}/bus`, '/run/docker.sock', '/var/run/docker.sock', '/run/dbus/system_bus_socket', '/run/snapd.socket']) {
+    assert.equal(mounted(off.rules, fs.existsSync(p) ? fs.realpathSync(p) : p), false, `${p} is hidden`);
   }
+  for (const p of ['/run', '/var/run']) assert.equal(off.rules[p], undefined, `${p} is not mounted`);
+  if (fs.existsSync('/run/systemd/resolve')) assert.equal(off.rules['/run/systemd/resolve'], 'read', 'the resolver stays');
   assert.equal(off.rules[bus], undefined, 'off by default: no bus grant');
   assert.equal(off.env.DBUS_SESSION_BUS_ADDRESS, '');
 
