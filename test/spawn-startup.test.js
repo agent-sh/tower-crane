@@ -73,7 +73,7 @@ test('a supervisor that stalls before it reports says so and keeps its log', (t)
 const cp = require('node:child_process');
 cp.spawnSync = () => {
   process.stderr.write('planted: waiting on git\\n');
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 30000);
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 30000); // wait-allow: a git call that outlasts the startup window
   throw new Error('unreachable');
 };`);
   const failed = h.run(['spawn', '--role', 'small', '--task', 'T1'], { env });
