@@ -108,7 +108,7 @@ Reproduce the affected rows with `node scripts/test-cost.js --runs 3 --jobs 2 --
 | `test/settings.test.js` | Settings view edits ladder and tiers through the CLI with the page token | 4.9 | 7.1 | 4.3 | 6.8 |
 | `test/ready.test.js` | ready ordering and status summary | 5.7 | 32.1 | 5.7 | 30.6 |
 | `test/browser-kit.test.js` | browser kit user setting, needs round trip, rework before capability change | 5.0 | 19.3 | 5.0 | 14.9 |
-| `test/broker.test.js` | state broker authorization: role commands, own identity, own task, token, no git, shutdown | 4.5 | 13.7 | 4.6 | 15.7 |
+| `test/broker.test.js` | state broker authorization: role commands, own identity, own task, token, no git, shutdown; role instructions against the allowlist; scoped sandbox wait | 4.5 | 13.7 | 4.6 | 15.7 |
 | `test/render.test.js` | sketch render on every write, render lock, serve reload | 4.2 | 14.8 | 4.2 | 18.5 |
 | `test/json.test.js` | --json output parses for every command | 4.0 | 10.1 | 4.0 | 10.7 |
 | `test/gates/clean.test.js` | cleanup gate: HIGH findings, incomplete scans, unpinned tool | 3.1 | 8.3 | 3.1 | 8.7 |

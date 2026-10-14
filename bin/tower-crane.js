@@ -516,6 +516,9 @@ async function main(argv) {
         return res.code;
       }
     }
+    if (process.env.TOWER_CRANE_BROKER && cmd.name === 'wait' && require('../lib/broker').serves(process.env.TOWER_CRANE_BROKER, locate())) {
+      require('../lib/broker').scopeWait(own, identity, process.env);
+    }
     const ctx = {
       cwd: process.cwd(),
       env: process.env,
