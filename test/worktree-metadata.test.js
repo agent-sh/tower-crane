@@ -62,6 +62,49 @@ test('preparation prunes empty sandbox admin placeholders without removing a loc
   assert.equal(h.git(['worktree', 'list', '--porcelain']).match(/^worktree /gm).length, 2);
 });
 
+test('preparation retries a disappearing gate commondir once and reports persistent failure', async (t) => {
+  for (const persistent of [false, true]) {
+    await t.test(persistent ? 'persistent error is reported' : 'transient removal is retried', (t) => {
+      const h = makeRepo(t);
+      h.init();
+      h.ok(['task', 'add', '--title', 'Prepared', '--acceptance', 'valid registration']);
+      const attempts = path.join(h.base, 'add-attempts');
+      const preload = path.join(h.base, 'retiring-gate.js');
+      fs.writeFileSync(preload, `
+const fs = require('node:fs'), cp = require('node:child_process');
+const run = cp.execFileSync;
+cp.execFileSync = function retiringGate(command, args, options) {
+  if (command === 'git' && args[0] === 'worktree' && args[1] === 'add') {
+    const previous = fs.existsSync(${JSON.stringify(attempts)}) ? fs.readFileSync(${JSON.stringify(attempts)}, 'utf8') : '';
+    fs.appendFileSync(${JSON.stringify(attempts)}, '.');
+    if (${persistent} || !previous) {
+      const error = new Error('retiring worktree metadata');
+      error.stderr = 'fatal: failed to read .git/worktrees/wt/commondir: Success\\n';
+      throw error;
+    }
+  }
+  return run.call(this, command, args, options);
+};
+`);
+      const result = h.run(['worktree', 'T1', '--json'], {
+        env: { NODE_OPTIONS: `--require=${JSON.stringify(preload)}` },
+      });
+      assert.equal(fs.readFileSync(attempts, 'utf8'), '..', 'the add is retried exactly once');
+      if (persistent) {
+        assert.equal(result.code, 1);
+        assert.match(result.stderr, /failed to read .*commondir/);
+        assert.equal(h.readState('tasks.json').tasks[0].branch, null);
+        assert.equal(h.git(['worktree', 'list', '--porcelain']).match(/^worktree /gm).length, 1);
+      } else {
+        assert.equal(result.code, 0, result.stderr);
+        const wt = JSON.parse(result.stdout);
+        assert.equal(h.git(['rev-parse', 'HEAD'], wt.path), h.git(['rev-parse', 'main']));
+        assert.equal(h.git(['worktree', 'list', '--porcelain']).match(/^worktree /gm).length, 2);
+      }
+    });
+  }
+});
+
 for (const code of [0, 1]) {
   test(`gate cleanup prunes sandbox admin placeholders after a command exits ${code}`, (t) => {
     const h = makeRepo(t);

@@ -4,6 +4,11 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const cp = require('node:child_process');
+const { once } = require('node:events');
+const { BIN } = require('./helpers');
+const { waitFor } = require('./canary');
+const { HUNG_TEST_MS } = require('./signals');
 const { setup, stacked } = require('./stack-fixture');
 
 // Every merge request the stub received, as 'pr N' for gh pr merge, 'async N' for
@@ -14,6 +19,72 @@ const merges = (f) => f.read().calls.flatMap((c) => {
   return post ? [{ route: `async ${post[1]}`, args: c.args }] : [];
 });
 const routes = (f) => merges(f).map((m) => m.route);
+
+test('wait cancels an asynchronous stack merge query or backoff on the second signal', {
+  skip: process.platform === 'win32' ? 'Windows child.kill does not deliver POSIX signals' : false,
+}, async (t) => {
+  for (const stage of ['query', 'backoff']) {
+    await t.test(stage, async (t) => {
+      const f = stacked(t);
+      f.accept('T1');
+      f.accept('T2');
+      const poll = path.join(f.h.base, 'poll-ready');
+      const sleeping = path.join(f.h.base, 'backoff-ready');
+      const observed = path.join(f.h.base, 'signal-observed');
+      const preload = path.join(f.h.base, 'poll-observer.js');
+      // Hold a poll delay at its configured maximum to test cancellation while sleeping.
+      fs.writeFileSync(preload, `
+const fs = require('node:fs'), timers = require('node:timers/promises');
+const timeout = global.setTimeout, delay = timers.setTimeout;
+const pause = (ms) => {
+  if (ms !== 1000 || !fs.existsSync(${JSON.stringify(poll)})) return ms;
+  fs.writeFileSync(${JSON.stringify(sleeping)}, '');
+  return 10000;
+};
+global.setTimeout = (fn, ms, ...args) => timeout(fn, pause(ms), ...args);
+timers.setTimeout = (ms, ...args) => delay(pause(ms), ...args);
+for (const signal of ['SIGTERM', 'SIGINT']) process.on(signal, () => fs.appendFileSync(${JSON.stringify(observed)}, signal + '\\n'));
+`);
+      const env = { ...f.h.env, TEST_STACK_POLL_READY: poll,
+        NODE_OPTIONS: `${f.h.env.NODE_OPTIONS} --require=${JSON.stringify(preload)}`,
+        ...(stage === 'query' ? { TEST_STACK_POLL_RELEASE: path.join(f.h.base, 'unused-release') } : {}) };
+      const child = cp.spawn(process.execPath, [BIN, 'wait', '--after', '0', '--types', 'never',
+        '--timeout', '300', '--agent', 'orchestrator'], { cwd: f.h.repo, env });
+      let stdout = '', stderr = '';
+      child.stdout.on('data', (data) => { stdout += data; });
+      child.stderr.on('data', (data) => { stderr += data; });
+      const result = once(child, 'close').then(([code]) => ({ code, stdout, stderr }));
+      const bound = setTimeout(() => child.kill('SIGKILL'), HUNG_TEST_MS);
+      try {
+        assert.notEqual(await waitFor(stage === 'query' ? poll : sleeping), null, 'the merge reaches its poll');
+        child.kill('SIGTERM');
+        assert.notEqual(await waitFor(observed), null, 'wait starts draining');
+        assert.equal(child.exitCode, null, 'the first signal drains the active merge');
+        child.kill('SIGINT');
+        const timeout = Symbol('timeout');
+        let deadline;
+        const exited = await Promise.race([result, new Promise((resolve) => {
+          deadline = setTimeout(() => resolve(timeout), 3000); // wait-allow: cancellation must beat the merge's 10 s poll deadline
+        })]);
+        clearTimeout(deadline);
+        assert.notEqual(exited, timeout, 'the second signal cancels the merge without waiting for its poll deadline');
+        assert.equal(exited.code, 0, JSON.stringify(exited));
+        assert.match(exited.stdout, /stopped by SIGTERM after draining 0 gates/);
+        assert.deepEqual(routes(f), ['async 11'], 'the upper merge never starts');
+        const task = f.h.json(['task', 'show', 'T2']);
+        assert.equal(task.evidence.findLast((entry) => entry.type === 'merge').ok, false, 'interrupted merge is retryable');
+        const events = fs.readFileSync(path.join(f.h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+        assert.equal(events.findLast((event) => event.cmd === 'automation').detail.phase, 'deferred');
+        assert.equal(f.read().prs[11].state, 'OPEN');
+        assert.equal(f.read().prs[12].state, 'OPEN');
+      } finally {
+        clearTimeout(bound);
+        if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+        await result;
+      }
+    });
+  }
+});
 
 function confirmLower(f) {
   f.accept('T1');

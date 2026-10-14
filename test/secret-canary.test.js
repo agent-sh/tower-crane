@@ -185,7 +185,7 @@ for (const harness of ['claude', 'codex']) {
     h.ok(['project', 'set', '--sandbox', JSON.stringify({ write: [results] }), '--env', JSON.stringify({ TC_PROJECT_SECRET: c.project }), '--env_file', envFile]);
     const holder = path.join(h.base, 'holder.js');
     fs.writeFileSync(holder, `require(${JSON.stringify(HARNESS)})('command');\n`);
-    h.ok(['ladder', 'set', 'research', '--harness', 'command', '--command', JSON.stringify([process.execPath, holder]), '--clear', 'model', '--clear', 'profile', '--clear', 'effort', '--clear', 'args',
+    h.ok(['ladder', 'set', 'research', '--harness', 'command', '--command', JSON.stringify([process.execPath, holder, '{prompt}']), '--clear', 'model', '--clear', 'profile', '--clear', 'effort', '--clear', 'args',
       '--env', JSON.stringify({ ROUTE: 'holder', TC_HOLDER_SECRET: c.holder })]);
     const out = path.join(h.base, 'holder.jsonl');
     const held = h.run(['spawn', '--task', 'T1', '--role', 'research'], { env: { ...h.env, TMPDIR: tmp, CANARY_OUT: out, CANARY_MODE: 'hold',
@@ -203,7 +203,8 @@ for (const harness of ['claude', 'codex']) {
     const holderHome = path.join(h.state, 'homes', holderSpawn.agent);
     assert.ok(fs.existsSync(holderHome), 'the holder has a home');
     const result = path.join(results, 'probe.json');
-    const probe = path.join(h.base, 'probe.js');
+    // The project's writable directory: codex mounts nothing else beside the home.
+    const probe = path.join(results, 'probe.js');
     fs.writeFileSync(probe, [
       "'use strict';",
       'const fs = require("node:fs"), cp = require("node:child_process");',

@@ -286,7 +286,10 @@ for (const follow of [false, true]) for (const smaller of [false, true]) {
       const [code] = await reader.closed;
       assert.equal(code, 0);
     }
-    assert.deepEqual(reader.lines().filter((row) => row.type !== 'ready').map((row) => row.id), [id]);
+    const rows = reader.lines().filter((row) => row.type !== 'ready');
+    // stop() delivers SIGTERM; a follower ends with its signal stop notice, not a wake.
+    if (follow) assert.deepEqual(rows.pop(), { reason: 'signal', signal: 'SIGTERM', drained: 0 });
+    assert.deepEqual(rows.map((row) => row.id), [id]);
   });
 }
 

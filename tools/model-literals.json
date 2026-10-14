@@ -60,6 +60,16 @@
     "reason": "Relative import of the Claude sandbox placeholder module"
   },
   {
+    "path": "lib/spawn.js",
+    "text": "claude-sandbox-placeholders",
+    "reason": "Relative import of the Claude sandbox placeholder module"
+  },
+  {
+    "path": "lib/tasks.js",
+    "text": "claude-sandbox-placeholders",
+    "reason": "Relative import of the Claude sandbox placeholder module"
+  },
+  {
     "path": "lib/tasks.js",
     "text": "claude-provider",
     "reason": "Relative import of the Claude provider routing module"
