@@ -7,6 +7,7 @@ const path = require('node:path');
 const { makeRepo, fixtureLadder, ROOT, TMP_ROOT } = require('./helpers');
 const A = require('../lib/agents');
 const L = require('../lib/ladder');
+const { findExecutable } = require('../lib/spawn');
 
 test('every ladder harness declares its sandbox capabilities', () => {
   assert.deepEqual(Object.keys(A.CAPABILITIES).sort(), [...L.HARNESSES].sort());
@@ -26,6 +27,9 @@ function writeUser(h, doc) {
 
 const projectText = (h) => fs.readFileSync(path.join(h.state, 'project.json'), 'utf8');
 const events = (h) => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+// validate also warns about this machine (harness programs, gh login); these
+// tests are about reviewer selection only.
+const reviewWarnings = (data) => data.warnings.filter((w) => w.kind === 'review-unavailable');
 
 test('BUILTIN matches the documented defaults and init fallback', (t) => {
   const h = makeRepo(t, { builtin: true });
@@ -446,17 +450,17 @@ test('validate does not warn when review uses the task tier model', (t) => {
   const h = makeRepo(t);
   h.init();
   h.ok(['task', 'add', '--title', 'x', '--acceptance', 'a', '--kind', 'docs', '--size', 'S']);
-  assert.deepEqual(h.json(['validate']).warnings, [], 'easy runs fixture-light and review runs fixture-main');
+  assert.deepEqual(reviewWarnings(h.json(['validate'])), [], 'easy runs fixture-light and review runs fixture-main');
   h.ok(['task', 'add', '--title', 'y', '--acceptance', 'a']);
   const r = h.run(['validate']);
   assert.equal(r.code, 0, r.stderr);
   assert.match(r.stdout, /^plan ok: 2 tasks/);
   const data = h.json(['validate']);
-  assert.deepEqual([data.ok, data.warnings], [true, []]);
+  assert.deepEqual([data.ok, reviewWarnings(data)], [true, []]);
   h.ok(['ladder', 'set', 'review', '--harness', 'claude', '--model', 'fixture-large', '--clear', 'profile']);
-  assert.deepEqual(h.json(['validate']).warnings, []);
+  assert.deepEqual(reviewWarnings(h.json(['validate'])), []);
   h.ok(['task', 'update', 'T1', '--tier', 'hard']);
-  assert.deepEqual(h.json(['validate']).warnings, [], 'a clean-context reviewer may use the builder model');
+  assert.deepEqual(reviewWarnings(h.json(['validate'])), [], 'a clean-context reviewer may use the builder model');
 });
 
 test('validate allows identical Codex profile and explicit model identities', (t) => {
@@ -467,13 +471,57 @@ test('validate allows identical Codex profile and explicit model identities', (t
   h.ok(['ladder', 'set', 'easy', '--model', 'same-model', '--profile', 'author-profile']);
   h.ok(['ladder', 'set', 'review', '--model', 'same-model', '--profile', 'review-profile']);
   for (const tier of ['medium', 'hard', 'research']) h.ok(['ladder', 'set', tier, '--model', 'same-model', '--clear', 'profile']);
-  assert.deepEqual(h.json(['validate']).warnings, []);
+  assert.deepEqual(reviewWarnings(h.json(['validate'])), []);
   h.ok(['ladder', 'set', 'review', '--model', 'other-model']);
-  assert.deepEqual(h.json(['validate']).warnings, [], 'different explicit models differ whatever the profiles');
+  assert.deepEqual(reviewWarnings(h.json(['validate'])), [], 'different explicit models differ whatever the profiles');
   h.ok(['ladder', 'set', 'easy', '--clear', 'model']);
   h.ok(['ladder', 'set', 'review', '--clear', 'model', '--profile', 'author-profile']);
   for (const tier of ['medium', 'hard', 'research']) h.ok(['ladder', 'set', tier, '--harness', 'codex', '--profile', 'author-profile', '--clear', 'model']);
-  assert.deepEqual(h.json(['validate']).warnings, [], 'shared profiles are allowed');
+  assert.deepEqual(reviewWarnings(h.json(['validate'])), [], 'shared profiles are allowed');
+});
+
+// A directory holding git and the named stand-ins, used as the whole PATH.
+function onlyOnPath(h, name, programs) {
+  const dir = path.join(h.base, name);
+  fs.mkdirSync(dir, { recursive: true });
+  const git = findExecutable('git', h.repo, true, process.env);
+  fs.writeFileSync(path.join(dir, 'git'), `#!/bin/sh\nexec '${git}' "$@"\n`, { mode: 0o755 });
+  for (const [program, script] of Object.entries(programs)) {
+    const file = path.join(dir, `${program}.js`);
+    fs.writeFileSync(file, script);
+    fs.writeFileSync(path.join(dir, program), `#!/bin/sh\nexec '${process.execPath}' '${file}' "$@"\n`, { mode: 0o755 });
+  }
+  const key = Object.keys(h.env).find((k) => k.toUpperCase() === 'PATH') || 'PATH';
+  return { env: { [key]: dir } };
+}
+
+// The stand-ins are shell scripts; Windows runs neither them nor a .cmd without a shell.
+test('validate warns when no harness on PATH can run a worker or reviewer, and when gh cannot run', { skip: process.platform === 'win32' }, (t) => {
+  const h = makeRepo(t);
+  h.init();
+  h.ok(['task', 'add', '--title', 'x', '--acceptance', 'a', '--kind', 'docs', '--size', 'S']);
+  const r = h.run(['validate'], onlyOnPath(h, 'empty', {}));
+  assert.equal(r.code, 0, r.stderr);
+  assert.match(r.stdout, /^plan ok: 1 tasks$/m);
+  assert.match(r.stdout, /^warning: no harness on PATH can run a worker: easy needs codex, medium needs codex, hard needs claude, research needs claude$/m);
+  assert.match(r.stdout, /^warning: no harness on PATH can run a reviewer: review needs codex, easy needs codex, medium needs codex, hard needs claude, research needs claude$/m);
+  assert.match(r.stdout, /^warning: gh is not on PATH; workers open PRs with it: install the GitHub CLI and run gh auth login$/m);
+  const kinds = h.json(['validate'], onlyOnPath(h, 'empty', {})).warnings.map((w) => w.kind);
+  assert.deepEqual(kinds, ['worker-harness', 'reviewer-harness', 'gh-auth']);
+});
+
+test('validate names a worker rung an open task needs when only it cannot start, and a failed gh login', { skip: process.platform === 'win32' }, (t) => {
+  const h = makeRepo(t);
+  h.init();
+  h.ok(['task', 'add', '--title', 'x', '--acceptance', 'a', '--kind', 'docs', '--size', 'S']);
+  const loggedOut = "process.stderr.write('You are not logged into any GitHub hosts. To log in, run: gh auth login\\n'); process.exit(1);\n";
+  const codexOnly = onlyOnPath(h, 'codex-only', { codex: '', gh: loggedOut });
+  assert.deepEqual(h.json(['validate'], codexOnly).warnings, [{ task: null, kind: 'gh-auth',
+    message: 'gh auth status failed (You are not logged into any GitHub hosts. To log in, run: gh auth login); workers open PRs with gh: run gh auth login' }]);
+  h.ok(['task', 'add', '--title', 'y', '--acceptance', 'a', '--tier', 'hard']);
+  const ready = onlyOnPath(h, 'codex-gh', { codex: '', gh: 'process.exit(0);\n' });
+  assert.deepEqual(h.json(['validate'], ready).warnings.map((w) => w.message),
+    ['ladder hard cannot start a worker for T2: hard needs claude on PATH']);
 });
 
 test('switching from Codex to agy refuses inherited Codex flags until explicitly cleared', t => {

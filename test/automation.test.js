@@ -137,7 +137,7 @@ fs.writeFileSync('generated.txt', rows + '\\n');
     const baseTip = h.git(['rev-parse', 'HEAD']);
     const remote = path.join(h.base, 'origin.git');
     h.git(['init', '--bare', remote]);
-    h.git(['remote', 'add', 'origin', remote]);
+    h.git(['remote', 'set-url', 'origin', remote]);
     h.git(['push', 'origin', 'main', 'fixture-change']);
     h.git(['switch', 'fixture-change']);
     const state = h.github();

@@ -89,7 +89,7 @@ cp.spawnSync = function(command, args, opts) {
 function originFixture(h) {
   h.origin = path.join(h.base, 'origin.git');
   h.git(['init', '--bare', '-q', h.origin]);
-  h.git(['remote', 'add', 'origin', h.origin]);
+  h.git(['remote', 'set-url', 'origin', h.origin]);
   h.git(['push', 'origin', 'main']);
   h.upstream = path.join(h.base, 'upstream');
   h.git(['clone', '-q', h.origin, h.upstream]);

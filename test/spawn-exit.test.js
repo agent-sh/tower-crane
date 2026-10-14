@@ -414,3 +414,49 @@ test('a spawned replacement can claim after another worker lease expires', async
   await waitOnRepo(h, () => (h.json(['status']).exited_claims || []).length === 1, 'replacement exit was not reported');
   assert.equal(h.json(['ready']).exited_claims[0].pid, spawned.pid);
 });
+
+test('a worker that keeps exiting without a submit is parked for the owner at the respawn cap', async (t) => {
+  const h = setup(t);
+  const worker = path.join(h.base, 'quits.js');
+  fs.writeFileSync(worker, "process.stderr.write('stub harness gave up\\n'); process.exit(1);\n");
+  h.ok(['ladder', 'set', 'easy', '--harness', 'command', '--command', JSON.stringify([process.execPath, worker, '{prompt}']),
+    '--clear', 'profile', '--clear', 'effort']);
+  const spawns = () => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse)
+    .filter((e) => e.cmd === 'spawn').length;
+  // As the wait host does: recover the dead claim, then dispatch again.
+  const spawnOnce = () => {
+    if (h.readState('tasks.json').tasks[0].claim) h.ok(['release', '--dead']);
+    const before = spawns();
+    const r = h.run(['spawn', '--task', 'T1', '--wait']);
+    assert.equal(r.code, 1, r.stderr);
+    assert.equal(spawns(), before + 1, r.stderr);
+  };
+  for (let i = 1; i < 3; i++) {
+    spawnOnce();
+    assert.equal(h.readState('tasks.json').tasks[0].needs_owner, null, `exit ${i} is under the cap`);
+  }
+  spawnOnce();
+  const task = h.readState('tasks.json').tasks[0];
+  assert.match(task.needs_owner, /^worker exited without submitting 3 times at revision 1 \(last worker-T1-\d+, code 1\)/);
+  const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  const park = events.filter((e) => e.cmd === 'respawn cap');
+  assert.equal(park.length, 1);
+  assert.deepEqual([park[0].detail.cap, park[0].detail.exits, park[0].detail.revision], [3, 3, 1]);
+  // Dispatch skips the parked task, and asking for it by name is refused.
+  h.ok(['release', '--dead']);
+  assert.deepEqual(h.json(['ready']).ready, []);
+  h.run(['spawn', '--ready']);
+  assert.equal(spawns(), 3, 'spawn --ready skips the parked task');
+  const named = h.run(['spawn', '--task', 'T1']);
+  assert.equal(named.code, 1);
+  assert.match(named.stderr, /needs owner: worker exited without submitting 3 times/);
+  // task show reads the log tail from the file; state holds none of it.
+  assert.match(h.ok(['task', 'show', 'T1']), /last worker log: .*\n {2}tail \(last 20 lines, at most 8192 bytes\):\n {4}stub harness gave up/);
+  for (const file of ['tasks.json', 'events.jsonl']) {
+    assert.ok(!fs.readFileSync(path.join(h.state, file), 'utf8').includes('stub harness gave up'), `${file} holds log text`);
+  }
+  // owner-done clears the ask and starts the count again.
+  h.ok(['owner-done', 'T1']);
+  spawnOnce();
+  assert.equal(h.readState('tasks.json').tasks[0].needs_owner, null, 'the count restarts after owner-done');
+});

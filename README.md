@@ -95,7 +95,7 @@ stateDiagram-v2
 
 **Gates and review.** `accept` runs the software gates the task's kind needs, records their command receipts as evidence, and counts only evidence that has a matching audit event. When they pass, it dispatches a reviewer. Review selection starts at the task's tier and moves up for a large or risky diff. The reviewer gets the diff, the acceptance and the gate results in a fresh context. `rework --from-review` sends a failed task back with the review's findings in its brief. A task given a tier range climbs one rung after a confirmed failure.
 
-**Automation.** The orchestrator's `tower-crane wait` runs the software reactions itself: gates after a submit, review once gates pass, accept after a passing review, and the merge queue. Agents spend tokens on code and judgment, not on polling ([docs/automation.md](docs/automation.md)).
+**Automation.** The orchestrator's `tower-crane wait` runs the software reactions itself: gates after a submit, review once gates pass, accept after a passing review, and the merge queue. It also fills free worker slots with ready tasks, so a running `wait` starts model sessions; `wait --observe` watches without dispatching. A task whose workers exit three times without submitting is parked for the owner instead of relaunched. Agents spend tokens on code and judgment, not on polling ([docs/automation.md](docs/automation.md)).
 
 **Stacks.** A task can start on a submitted dependency before it merges. Its PR targets the dependency's branch, the chain is linked as a GitHub stack, and the merge gate lands it bottom up, pinning each accepted head. See [docs/state.md](docs/state.md), [docs/cli.md](docs/cli.md#run) and `tower-crane stack --help`.
 

@@ -1019,3 +1019,20 @@ test('a spawn refuses a worktree whose .git file names a git directory of anothe
   rewrite(original);
   assert.equal(h.run(['spawn', '--task', 'T1', '--dry-run', '--json']).code, 0);
 });
+
+test('a worker spawn in a repository without origin is refused before its worktree or harness starts', (t) => {
+  const h = setup(t);
+  const marker = path.join(h.base, 'harness-started');
+  commandRung(h, 'medium', [process.execPath, '-e', `require('node:fs').writeFileSync(${JSON.stringify(marker)}, '')`]);
+  h.git(['remote', 'remove', 'origin']);
+  const before = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8');
+  const r = h.run(['spawn', '--task', 'T1']);
+  assert.equal(r.code, 1, r.stdout);
+  assert.match(r.stderr, /this repository has no origin remote; workers push their task branch to origin and open the PR there\. Add it with git remote add origin URL, then spawn again/);
+  assert.equal(fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8'), before, 'no state was written');
+  assert.equal(h.readState('tasks.json').tasks[0].worktree, undefined);
+  assert.ok(!fs.existsSync(marker), 'the harness did not start');
+  assert.equal(h.git(['worktree', 'list', '--porcelain']).split('\n').filter((l) => l.startsWith('worktree ')).length, 1);
+  // A dry run still previews the command, on the rung the marker belongs to.
+  assert.equal(h.json(['spawn', '--task', 'T1', '--dry-run']).rung, 'medium');
+});

@@ -521,7 +521,7 @@ function shimProbe(h, out, { before = '', extra = '', inject = false } = {}) {
   const dir = path.dirname(out);
   const repo = path.join(dir, 'shim-repo');
   for (const args of [['init', '-q', repo], ['-C', repo, 'commit', '-q', '--allow-empty', '-m', 'probe'],
-    ['-C', repo, 'remote', 'add', 'origin', 'https://127.0.0.1:9/agent-sh/tower-crane.git']]) h.git(args);
+    ['-C', repo, 'remote', 'set-url', 'origin', 'https://127.0.0.1:9/agent-sh/tower-crane.git']]) h.git(args);
   const injected = path.join(dir, 'injected');
   const evil = path.join(dir, 'evil.cjs');
   if (inject) fs.writeFileSync(evil, `require("node:fs").writeFileSync(${JSON.stringify(injected)}, "LOADED");\n`);
@@ -862,7 +862,7 @@ function credentialFixture(t) {
   h.ok(['task', 'add', '--title', 'Credential probe', '--acceptance', 'no GitHub credential in the sandbox; pushes go through the broker']);
   const remote = path.join(h.base, 'remote.git');
   h.git(['init', '-q', '--bare', remote]);
-  h.git(['remote', 'add', 'origin', remote]);
+  h.git(['remote', 'set-url', 'origin', remote]);
   h.git(['push', '-q', 'origin', 'HEAD:refs/heads/main']);
   const dir = results(h);
   const home = os.homedir();
