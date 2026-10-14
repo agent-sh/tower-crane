@@ -187,6 +187,9 @@ function releaseExited(h) {
 
 function spawn(h, u, role, env = {}, opts = {}) {
   releaseExited(h);
+  // The probes relaunch one task's worker many times on purpose; the owner
+  // lifts the respawn cap each stand-in's exit without a submit counts toward.
+  if (h.readState('tasks.json').tasks[0].needs_owner?.startsWith('worker exited without submitting')) h.ok(['owner-done', 'T1']);
   // A submitted task goes back for rework before its next worker is dispatched.
   if (['easy', 'medium', 'hard', 'research'].includes(role) && h.readState('tasks.json').tasks[0].status === 'submitted') {
     h.ok(['rework', 'T1', '--reason', 'dispatch the next worker']);

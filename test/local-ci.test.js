@@ -14,6 +14,9 @@ function fixture(t, script) {
 }
 
 function build(h, script) {
+  // No worker runs here, so the gates check a base with no origin remote,
+  // the local branch; originFixture adds one.
+  h.git(['remote', 'remove', 'origin']);
   h.env.TOWER_CRANE_TMP = path.join(h.base, 'gate-tmp');
   h.log = path.join(h.base, 'check.json');
   h.command = [process.execPath, 'ci.js', h.log, 'literal argument; $(exit 1)'];
@@ -89,7 +92,7 @@ cp.spawnSync = function(command, args, opts) {
 function originFixture(h) {
   h.origin = path.join(h.base, 'origin.git');
   h.git(['init', '--bare', '-q', h.origin]);
-  h.git(['remote', 'set-url', 'origin', h.origin]);
+  h.git(['remote', h.git(['remote']).split('\n').includes('origin') ? 'set-url' : 'add', 'origin', h.origin]);
   h.git(['push', 'origin', 'main']);
   h.upstream = path.join(h.base, 'upstream');
   h.git(['clone', '-q', h.origin, h.upstream]);

@@ -1164,7 +1164,7 @@ test('a sandboxed agent\'s push to another machine from outside its task reposit
   f.h.git(['commit', '-q', '--allow-empty', '-m', 'x'], other);
   const bare = path.join(f.h.base, 'other.git');
   f.h.git(['init', '-q', '--bare', bare]);
-  f.h.git(['remote', 'set-url', 'origin', 'https://github.com/acme/demo.git'], other);
+  f.h.git(['remote', 'add', 'origin', 'https://github.com/acme/demo.git'], other);
   // The recorded repository, which origin here names: the shim's checks
   // pass, and only the missing credentials remain.
   const policy = path.join(f.h.base, 'shim', 'policy.json');

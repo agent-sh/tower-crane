@@ -521,7 +521,7 @@ function shimProbe(h, out, { before = '', extra = '', inject = false } = {}) {
   const dir = path.dirname(out);
   const repo = path.join(dir, 'shim-repo');
   for (const args of [['init', '-q', repo], ['-C', repo, 'commit', '-q', '--allow-empty', '-m', 'probe'],
-    ['-C', repo, 'remote', 'set-url', 'origin', 'https://127.0.0.1:9/agent-sh/tower-crane.git']]) h.git(args);
+    ['-C', repo, 'remote', 'add', 'origin', 'https://127.0.0.1:9/agent-sh/tower-crane.git']]) h.git(args);
   const injected = path.join(dir, 'injected');
   const evil = path.join(dir, 'evil.cjs');
   if (inject) fs.writeFileSync(evil, `require("node:fs").writeFileSync(${JSON.stringify(injected)}, "LOADED");\n`);
