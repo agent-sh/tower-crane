@@ -1025,6 +1025,49 @@ test('a spawned codex agent is pointed at the user\'s global rules, loads none o
   noSecretsCopied(h);
 });
 
+// Automation dispatches from inside a worker's monitor, so its package root is
+// that worker's tool snapshot, removed when the worker exits. A path into it,
+// or into any root but the agent's own home, can be gone when the agent reads it.
+test('every skill path a worker, reviewer or researcher is told to read is in its own home at launch, also when a worker\'s snapshot dispatches it', { skip: NO_STUBS }, (t) => {
+  const { h, u } = setup(t);
+  fs.mkdirSync(path.join(u.home, '.cache'), { recursive: true });
+  fs.writeFileSync(path.join(h.base, 'bin', 'opencode'), `#!${process.execPath}\nrequire(${JSON.stringify(STUB)})("opencode");\n`, { mode: 0o755 });
+  const fromSnapshot = (tool, role) => {
+    const r = cp.spawnSync(process.execPath, [path.join(tool, 'bin', 'tower-crane.js'), 'spawn', '--role', role, '--task', 'T1', '--wait', '--json'],
+      { cwd: h.repo, env: { ...h.env, ...u.env }, encoding: 'utf8' });
+    assert.equal(r.code ?? r.status, 0, r.stderr);
+    return JSON.parse(r.stdout);
+  };
+  const ownPaths = (harness, role, started) => {
+    const home = fs.realpathSync(path.join(h.state, 'homes', started.agent));
+    const seen = u.report();
+    const named = [...seen.skillPaths, ...seen.skillLinks];
+    assert.ok(seen.skillPaths.length, `${harness} ${role}: names its skill`);
+    if (harness !== 'claude') assert.ok(seen.skillLinks.length, `${harness} ${role}: links its skill in its home`);
+    for (const { file, real: at } of named) {
+      assert.ok(at, `${harness} ${role}: ${file} exists at launch`);
+      assert.ok(at.startsWith(home + path.sep), `${harness} ${role}: ${file} resolves to ${at}, inside its own home ${home}`);
+    }
+  };
+  for (const harness of ['claude', 'codex', 'opencode']) {
+    const model = { claude: ['--model', 'fixture-large', '--clear', 'profile'], codex: ['--profile', 'fixture-main', '--clear', 'model'], opencode: ['--model', 'fixture/probe', '--clear', 'profile'] }[harness];
+    for (const rung of ['medium', 'review', 'research']) h.ok(['ladder', 'set', rung, '--harness', harness, ...model, '--clear', 'effort', '--clear', 'args']);
+    const worker = spawn(h, u, 'medium');
+    ownPaths(harness, 'worker', worker);
+    // A copy, since the next dispatch prunes the exited worker's home it would run from.
+    const snapshot = path.join(h.base, `${harness}-worker-snapshot`);
+    fs.cpSync(worker.tool.path, snapshot, { recursive: true });
+    releaseExited(h);
+    if (h.readState('tasks.json').tasks[0].needs_owner) h.ok(['owner-done', 'T1']);
+    h.ok(['task', 'update', 'T1', '--kind', 'docs']);
+    h.ok(['claim', 'T1', '--agent', 'builder']);
+    h.ok(['submit', 'T1', '--sha', h.git(['rev-parse', 'HEAD']), '--agent', 'builder']);
+    ownPaths(harness, 'reviewer', fromSnapshot(snapshot, 'review'));
+    h.ok(['rework', 'T1', '--reason', 'probe the research rung']);
+    ownPaths(harness, 'researcher', fromSnapshot(snapshot, 'research'));
+  }
+});
+
 test('every spawn gets a fresh home, and an exited agent\'s home is removed', { skip: NO_STUBS }, (t) => {
   const { h, u } = setup(t);
   for (const harness of ['claude', 'codex']) {

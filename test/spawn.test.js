@@ -419,15 +419,20 @@ test('the prompt is the role skill, brief, task, then how to use tower-crane', (
   assert.ok(p.endsWith('run tower-crane with --agent worker-T1-1 if TOWER_CRANE_AGENT is missing.'));
 });
 
-test('prompts name role skills by their packaged path, since a user worktree has no skills directory', (t) => {
+test('prompts name role skills in the agent\'s own tool snapshot, since a user worktree has no skills directory', (t) => {
   const h = setup(t);
   setRung(h, 'medium', ['--harness', 'opencode', '--model', 'a/b']);
-  const prompt = (rung) => dry(h, rung).argv.find((arg) => arg.includes('## Task'));
+  let home;
+  const prompt = (rung) => {
+    const out = dry(h, rung);
+    home = out.home.path;
+    return out.argv.find((arg) => arg.includes('## Task'));
+  };
   const relative = /(?<![\\/\w.-])skills[\\/]tower-crane-(?:work|review)[\\/]SKILL\.md/;
   const packaged = (text, skill) => {
     const named = new RegExp(`Follow the ${skill} skill \\((.+?SKILL\\.md)\\)`).exec(text);
     assert.ok(named, `${skill} is named`);
-    assert.ok(path.isAbsolute(named[1]) && fs.existsSync(named[1]), `${named[1]} is an absolute path that exists`);
+    assert.equal(named[1], path.join(home, 'tool', 'skills', skill, 'SKILL.md'), 'the copy in the agent\'s home, which the spawn builds');
   };
   assert.doesNotMatch(prompt('medium'), relative, 'the embedded work skill points at no worktree path');
 
@@ -455,7 +460,7 @@ test('a prompt that names a role skill warns when the plugin root lacks it', (t)
   });
   assert.equal(result.code, 0, result.stderr);
   const missing = path.join(plugin, 'skills', 'tower-crane-work', 'SKILL.md');
-  assert.ok(JSON.parse(result.stdout).argv.some((arg) => arg.includes(`Follow the tower-crane-work skill (${missing})`)), 'the prompt names the file');
+  assert.ok(JSON.parse(result.stdout).argv.some((arg) => arg.includes('Follow the tower-crane-work skill and submit')), 'the prompt names the skill without a path that would not exist');
   assert.ok(result.stderr.includes(`role skill ${missing} is missing`), result.stderr);
 });
 
@@ -543,11 +548,16 @@ test('pi rungs load the tower-crane skill for workers and reviewers when it is i
   for (const rung of ['easy', 'medium', 'review', 'small']) setRung(h, rung, ['--model', 'm']);
   h.ok(['ladder', 'harness', 'pi']);
   const at = (argv) => argv.slice(argv.indexOf('--skill'), argv.indexOf('--skill') + 2);
-  const worker = dry(h, 'medium', env).argv;
-  const reviewer = dry(h, 'review', env).argv;
-  assert.deepEqual(at(worker), ['--skill', path.join(plugin, 'skills', 'tower-crane-work')]);
-  assert.deepEqual(at(dry(h, 'easy', env).argv), ['--skill', path.join(plugin, 'skills', 'tower-crane-work')]);
-  assert.deepEqual(at(reviewer), ['--skill', path.join(plugin, 'skills', 'tower-crane-review')]);
+  // The copy in the agent's own tool snapshot, which the spawn makes from the plugin root.
+  const own = (out, skill) => ['--skill', path.join(out.home.path, 'tool', 'skills', skill)];
+  const workerOut = dry(h, 'medium', env);
+  const reviewerOut = dry(h, 'review', env);
+  const easyOut = dry(h, 'easy', env);
+  const worker = workerOut.argv;
+  const reviewer = reviewerOut.argv;
+  assert.deepEqual(at(worker), own(workerOut, 'tower-crane-work'));
+  assert.deepEqual(at(easyOut.argv), own(easyOut, 'tower-crane-work'));
+  assert.deepEqual(at(reviewer), own(reviewerOut, 'tower-crane-review'));
   assert.ok(!worker.find((arg) => arg.includes('## Task')).includes('PI_WORK_SKILL_MUST_NOT_BE_EMBEDDED'));
   assert.ok(!reviewer.find((arg) => arg.includes('## Task')).includes('PI_REVIEW_SKILL_MUST_NOT_BE_EMBEDDED'));
   assert.ok(!dry(h, 'small', env).argv.includes('--skill'), 'other rungs get no skill');

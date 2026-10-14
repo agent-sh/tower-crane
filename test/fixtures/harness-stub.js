@@ -179,6 +179,22 @@ module.exports = function stub(harness) {
   } else {
     report.prompt = args.find((a) => a.includes('## Task')) || null;
   }
+  // Every absolute SKILL.md path the agent is told to read, in its argv or
+  // the instruction files in its home, and the skills linked in that home,
+  // each with where it resolves at launch.
+  const own = process.env.TOWER_CRANE_HOOK ? path.dirname(process.env.TOWER_CRANE_HOOK) : null;
+  const realOf = (file) => {
+    try { return fs.realpathSync(file); } catch { return null; }
+  };
+  const told = [...args, ...(own ? [...['CLAUDE.md', 'system.md', 'AGENTS.md'].map((f) => read(path.join(own, f))), ...files(path.join(own, 'agents'), '.md')] : [])]
+    .filter(Boolean).join('\n');
+  report.skillPaths = [...new Set(told.match(/(?<![\w.~-])\/[^\s()'"`]*?SKILL\.md/g) || [])].map((file) => ({ file, real: realOf(file) }));
+  report.skillLinks = own ? (() => {
+    try {
+      return fs.readdirSync(path.join(own, 'skills')).filter((d) => !d.startsWith('.'))
+        .map((d) => ({ file: path.join(own, 'skills', d, 'SKILL.md'), real: realOf(path.join(own, 'skills', d, 'SKILL.md')) }));
+    } catch { return []; }
+  })() : [];
   for (const argv of JSON.parse(process.env.STUB_RUN || '[]')) {
     const r = cp.spawnSync(argv[0], argv.slice(1), { encoding: 'utf8' });
     report.ran.push({ argv, code: r.status, stderr: r.stderr });
