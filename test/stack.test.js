@@ -133,7 +133,7 @@ test('under a slow GitHub, reviewers that keep failing stop at the cap and the l
   await waitOnRepo(f.h, () => !supervised(), 'monitors kept running after the review hold');
   assert.equal(reviewers().length, REVIEW_EXIT_CAP);
   assert.equal(held.detail.failures, REVIEW_EXIT_CAP);
-  assert.match(held.detail.reason, /reviewers exited without a verdict 3 times at this head and revision \(last reviewer-T2-3, code 1, log .+\); fix the cause, then accept T2/);
+  assert.match(held.detail.reason, /reviewers ended without a verdict 3 times at this head and revision; the last, reviewer-T2-3, ended with code 1 \(log .+\); fix the cause, then accept T2/);
   const task = f.h.json(['task', 'show', 'T2']);
   assert.equal(task.status, 'submitted');
   assert.equal(task.stack.linked, true);
