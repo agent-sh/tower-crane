@@ -145,7 +145,7 @@ test('serve exits 1 when its port is taken', async (t) => {
   try {
     const port = taken.address().port;
     const started = Date.now();
-    const r = h.run(['serve', '--port', String(port)], { timeout: 15000 });
+    const r = h.run(['serve', '--port', String(port)]);
     assert.equal(r.code, 1, `exit ${r.code} (signal ${r.signal}) after ${Date.now() - started} ms: ${r.stderr}`);
     assert.match(r.stderr, new RegExp(`port ${port} is in use`));
   } finally {

@@ -89,9 +89,9 @@ test('interrupt during detached usage collection releases directly without fenci
   const pause = pauseExit(h, 'collect');
   const first = h.json(['spawn', '--task', 'T1'], pause.opts);
   try {
-    await waitOnRepo(h, () => events(h).some((e) => e.cmd === 'spawn session'), 'worker did not record its session');
+    await waitOnRepo(h, () => events(h).some((e) => e.cmd === 'spawn session'), 'worker did not record its session', { alive: first.monitor_pid });
     h.finish();
-    await waitOnRepo(h, () => fs.existsSync(pause.paused), 'usage collection did not pause');
+    await waitOnRepo(h, () => fs.existsSync(pause.paused), 'usage collection did not pause', { alive: first.monitor_pid });
     assert.equal(detachedAlive({ pid: first.monitor_pid }), true);
     assert.equal(h.json(['task', 'show', 'T1']).run.active, false);
     h.ok(['interrupt', 'T1']);
@@ -118,13 +118,13 @@ test('an interrupt committed while exit hooks are pending is finalized under the
   const pause = pauseExit(h, 'hook');
   const first = h.json(['spawn', '--task', 'T1'], pause.opts);
   try {
-    await waitOnRepo(h, () => events(h).some((e) => e.cmd === 'spawn session'), 'worker did not record its session');
+    await waitOnRepo(h, () => events(h).some((e) => e.cmd === 'spawn session'), 'worker did not record its session', { alive: first.monitor_pid });
     h.finish();
-    await waitOnRepo(h, () => fs.existsSync(pause.paused), 'exit hook did not pause');
+    await waitOnRepo(h, () => fs.existsSync(pause.paused), 'exit hook did not pause', { alive: first.monitor_pid });
     h.ok(['interrupt', 'T1']);
     assert.equal(h.json(['task', 'show', 'T1']).run.phase, 'stopping');
     pause.release();
-    await waitOnRepo(h, () => events(h).some((e) => e.cmd === 'spawn exit'), 'exit finalization did not record its receipt');
+    await waitOnRepo(h, () => events(h).some((e) => e.cmd === 'spawn exit'), 'exit finalization did not record its receipt', { alive: first.monitor_pid });
     assert.equal(h.json(['task', 'show', 'T1']).run.phase, 'stopped');
     assert.equal(h.json(['task', 'show', 'T1']).run.active, false);
     await waitOnRepo(h, () => !detachedAlive({ pid: first.monitor_pid }), 'exit finalization did not finish');
@@ -145,7 +145,7 @@ for (const fresh of [false, true]) {
   test(`submission and rework end an earlier interrupt for ${fresh ? 'fresh' : 'resumed'} dispatch`, async (t) => {
     const h = setup(t);
     const first = h.json(['spawn', '--task', 'T1']);
-    await waitOnRepo(h, () => events(h).some((e) => e.cmd === 'spawn session'), 'worker did not record its session');
+    await waitOnRepo(h, () => events(h).some((e) => e.cmd === 'spawn session'), 'worker did not record its session', { alive: first.monitor_pid });
     h.ok(['interrupt', 'T1']);
     await waitOnRepo(h, () => !detachedAlive({ pid: first.monitor_pid }), 'interrupted monitor did not finish');
     h.ok(['claim', 'T1', '--agent', first.agent]);
@@ -175,7 +175,7 @@ for (const fresh of [false, true]) {
 test('interrupting a rework run keeps its failed review feedback for the next dispatch, resumed or fresh', async (t) => {
   const h = setup(t);
   const first = h.json(['spawn', '--task', 'T1']);
-  await waitOnRepo(h, () => events(h).some((e) => e.cmd === 'spawn session'), 'worker did not record its session');
+  await waitOnRepo(h, () => events(h).some((e) => e.cmd === 'spawn session'), 'worker did not record its session', { alive: first.monitor_pid });
   h.ok(['interrupt', 'T1']);
   await waitOnRepo(h, () => !detachedAlive({ pid: first.monitor_pid }), 'interrupted monitor did not finish');
   h.ok(['claim', 'T1', '--agent', first.agent]);
@@ -187,7 +187,7 @@ test('interrupting a rework run keeps its failed review feedback for the next di
   // A new route starts the rework run fresh, so it stays alive until it is interrupted.
   h.ok(['ladder', 'set', 'medium', '--args', '["new-route"]']);
   const rework = h.json(['spawn', '--task', 'T1']);
-  await waitOnRepo(h, () => events(h).some((e) => e.cmd === 'spawn session' && e.detail.agent === rework.agent), 'rework run did not record its session');
+  await waitOnRepo(h, () => events(h).some((e) => e.cmd === 'spawn session' && e.detail.agent === rework.agent), 'rework run did not record its session', { alive: rework.monitor_pid });
   h.ok(['interrupt', 'T1']);
   await waitOnRepo(h, () => !detachedAlive({ pid: rework.monitor_pid }), 'interrupted rework monitor did not finish');
   const feedback = (dry) => {
@@ -212,7 +212,7 @@ test('interrupting a rework run keeps its failed review feedback for the next di
 test('interrupt stops supervision, preserves dirty work and resumes the original worker without rework', async (t) => {
   const h = setup(t);
   const first = h.json(['spawn', '--task', 'T1']);
-  await waitOnRepo(h, () => events(h).some((e) => e.cmd === 'spawn session'), 'worker did not record its session');
+  await waitOnRepo(h, () => events(h).some((e) => e.cmd === 'spawn session'), 'worker did not record its session', { alive: first.monitor_pid });
   const workerTracked = () => h.detached().some((child) => child.kind === 'worker' && child.pid === first.pid);
   assert.equal(workerTracked(), true);
   const before = h.json(['task', 'show', 'T1']);
@@ -289,7 +289,7 @@ test('live requirements need an authorized interrupt; metadata and unchanged req
 test('live capability changes require interrupt, unchanged needs keep the claim and resume reads current needs', async (t) => {
   const h = setup(t);
   const first = h.json(['spawn', '--task', 'T1']);
-  await waitOnRepo(h, () => events(h).some((e) => e.cmd === 'spawn session'), 'worker did not record its session');
+  await waitOnRepo(h, () => events(h).some((e) => e.cmd === 'spawn session'), 'worker did not record its session', { alive: first.monitor_pid });
   assert.match(h.seen()[0].prompt, /"needs":\s*\[\]/);
   const before = h.json(['task', 'show', 'T1']);
   const refused = h.run(['task', 'update', 'T1', '--needs', '["browser"]']);

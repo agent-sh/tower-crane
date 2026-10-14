@@ -1,6 +1,6 @@
 'use strict';
 
-const { waitOnRepo, HUNG_TEST_MS } = require('./signals');
+const { waitOnRepo, fileWritten, HUNG_TEST_MS } = require('./signals');
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -10,7 +10,6 @@ const cp = require('node:child_process');
 const { once } = require('node:events');
 const { setup, stacked } = require('./stack-fixture');
 const { BIN } = require('./helpers');
-const { waitFor } = require('./canary');
 
 for (const mode of ['generated', 'mixed', 'unknown', 'unmerged-parent', 'worktree', 'spawn']) {
   const automaticEntry = ['worktree', 'spawn'].includes(mode);
@@ -416,13 +415,14 @@ for (const signal of ['SIGTERM', 'SIGINT']) process.on(signal, () => fs.appendFi
   const result = once(child, 'close').then(([code]) => ({ code, stdout, stderr }));
   const bound = setTimeout(() => child.kill('SIGKILL'), HUNG_TEST_MS);
   try {
-    assert.notEqual(await waitFor(ready), null, `automatic maintenance reaches gh stack sync: ${stderr}`);
+    await fileWritten(ready, { alive: child, what: () => `automatic maintenance reaches gh stack sync: ${stderr}` });
     child.kill('SIGTERM');
-    assert.notEqual(await waitFor(observed), null, 'wait handles the signal while gh stack sync runs');
+    await fileWritten(observed, { alive: child, what: 'wait handles the signal while gh stack sync runs' });
     assert.equal(child.exitCode, null, 'the first signal lets the running sync finish');
     if (forced) child.kill('SIGINT');
     else fs.writeFileSync(release, 'release');
-    // Without its release the sync never finishes, so a forced exit proves the second signal stopped it.
+    // The held sync would end only at the gh call's own timeout (lib/stack.js TIMEOUT); the
+    // caller tells the second signal's stop apart from that timeout by the recorded reason.
     const exited = await result;
     assert.equal(exited.code, 0, JSON.stringify(exited));
     assert.match(exited.stdout, /stopped by SIGTERM/);
@@ -454,6 +454,12 @@ test('a signal during automatic stack maintenance stops it and wait exits', {
       // The sync that ran records its outcome for every member; no later stack work starts.
       assert.deepEqual(syncs.map((e) => e.task).sort(), ['T1', 'T2']);
       assert.equal(syncs.every((e) => e.detail.ok === !forced), true, JSON.stringify(syncs));
+      if (forced) {
+        for (const e of syncs) {
+          assert.match(e.detail.reason, /gate command interrupted/, 'the second signal stopped gh stack sync');
+          assert.doesNotMatch(e.detail.reason, /timed out/, 'the gh timeout did not stop it');
+        }
+      }
       assert.equal(events.some((e) => e.cmd === 'stack sync deferred'), false);
       // The stub records a call when it returns; a killed sync never does.
       const stackCalls = f.read().calls.slice(setupCalls).filter((c) => c.args[0] === 'stack').map((c) => c.args[1]);

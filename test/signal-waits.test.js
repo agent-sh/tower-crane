@@ -57,6 +57,21 @@ test('signal waits observe existing state, atomic writes, complete events, child
   await assert.rejects(waitUntil(() => { throw new Error('probe failed'); }), /probe failed/);
 });
 
+test('a wait on a held process fails once the process exits, after a last check of the condition', async (t) => {
+  const h = makeRepo(t);
+  const never = path.join(h.base, 'never');
+  await assert.rejects(fileWritten(never, { alive: cp.spawn(process.execPath, ['-e', '']), what: 'never written' }),
+    /never written: the process exited first/);
+  // A process that writes and then exits still satisfies the wait.
+  const late = path.join(h.base, 'late');
+  const writer = cp.spawn(process.execPath, ['-e', `require('node:fs').writeFileSync(${JSON.stringify(late)}, 'x')`]);
+  await childExit(writer);
+  assert.equal(await fileWritten(late, { alive: writer, poll: false }), 'x');
+  await assert.rejects(waitUntil(() => false, { alive: writer.pid, what: 'pid wait' }), /pid wait: the process exited first/);
+  await assert.rejects(waitUntil(() => false, { alive: () => false }), /the process exited first/);
+  assert.equal(await waitUntil(() => 'ready', { alive: () => false }), 'ready');
+});
+
 test('file probes recover when a recursive watcher cannot access restricted fixture tools', async (t) => {
   const h = makeRepo(t);
   for (const mode of ['throw', 'error']) {

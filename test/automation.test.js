@@ -6,7 +6,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { makeRepo, cachedFixture, stubRungs, BIN } = require('./helpers');
+const { makeRepo, cachedFixture, stubRungs, BIN, detachedAlive } = require('./helpers');
 const { gateFixture, gateEvidence } = require('./gate-helpers');
 const { waitFor } = require('./canary');
 const { shellQuote } = require('../lib/gates/common');
@@ -874,7 +874,7 @@ global.Date = class extends RealDate {
         { env: { ...env, CLAUDE_SESSION_ID: 'engine-waiter' } })
       : h.runAsync(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator'], { env });
     try {
-      assert.notEqual(await waitFor(stalled), null, 'automation did not start its gate');
+      await waitFor(stalled, { what: 'automation did not start its gate' });
       if (mode === 'late') {
         assert.deepEqual(h.readState('tasks.json').orchestrator_lease, holder, 'an owner waiter keeps the holder heartbeat');
         // The holder wakes on the submit; its first read renews its own heartbeat.
@@ -1416,7 +1416,7 @@ test('a local CI command killed by a signal retries once and reworks when the re
   h.ok(['project', 'set', '--ci-local', JSON.stringify({ command: [process.execPath, script], timeout: 5 })]);
   h.submit();
   h.consume();
-  assert.notEqual(await waitFor(h.marker('T1')), null, 'the refill claims the reworked task before it is inspected');
+  await waitFor(h.marker('T1'), { what: 'the refill claims the reworked task before it is inspected' });
   assert.equal(h.logs().filter((e) => e.cmd === 'check ci').length, 2, 'the killed run runs once more, and no third time');
   const task = h.readState('tasks.json').tasks[0];
   assert.deepEqual(task.evidence.filter((e) => e.type === 'ci').map((e) => e.runner_crash === true), [true, true]);
@@ -1485,7 +1485,7 @@ test('a test that also fails on main reworks without a quality climb on a task w
   h.submit();
   h.consume();
   assert.equal(h.logs().filter((e) => e.cmd === 'check tests').length, 2, 'the failure that also fails on main runs once more');
-  assert.notEqual(await waitFor(h.marker('T1')), null, 'the refill claims the reworked task');
+  await waitFor(h.marker('T1'), { what: 'the refill claims the reworked task' });
   const task = h.readState('tasks.json').tasks[0];
   // The worker holds its claim so the test checks settlement after refill, without racing it.
   assert.equal(task.status, 'in_progress');
@@ -1680,11 +1680,11 @@ if (${stage === 'trial'}) {
         await result;
         await h.cleanup();
       });
-      assert.notEqual(await waitFor(started), null, 'the post-merge sweep starts');
+      await waitFor(started, { what: 'the post-merge sweep starts' });
       assert.equal(h.github().prs['7'].state, 'MERGED');
       const before = h.readState('tasks.json').tasks.slice(1);
       child.kill('SIGTERM');
-      assert.notEqual(await waitFor(observed), null, 'wait observes the signal during the sweep');
+      await waitFor(observed, { what: 'wait observes the signal during the sweep' });
       const count = fs.readFileSync(calls, 'utf8').trim().split('\n').length;
       if (forced) child.kill('SIGTERM');
       else fs.writeFileSync(release, '');
@@ -2037,12 +2037,12 @@ require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'public-http'))}).fet
         }
         await h.cleanup();
       });
-      assert.notEqual(await waitFor(started), null, idle ? 'wait is ready' : 'the gate starts');
+      await waitFor(started, { what: idle ? 'wait is ready' : 'the gate starts' });
       child.kill(signal);
       if (github) {
-        assert.notEqual(await waitFor(observed), null, 'the held GitHub command does not block signal delivery');
+        await waitFor(observed, { what: 'the held GitHub command does not block signal delivery' });
       }
-      assert.notEqual(await waitFor(observed), null, 'the wait process receives the signal');
+      await waitFor(observed, { what: 'the wait process receives the signal' });
       if (!idle) assert.equal(child.exitCode, null, 'the running gate still holds wait open');
       if (forced) {
         child.kill(github ? 'SIGINT' : signal);
@@ -2243,7 +2243,7 @@ poll();
     h.ok(['submit', id, '--sha', h.sha, '--agent', 'worker']);
   }
   const holder = h.runAsync(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
-  assert.notEqual(await waitFor(path.join(h.base, 'stalled')), null, 'the first executor starts');
+  await waitFor(path.join(h.base, 'stalled'), { what: 'the first executor starts' });
   h.consume();
   assert.notEqual((await holder).code, 2, 'the stalled executor is killed');
   assert.ok(h.logs().some((e) => e.cmd === 'automation queued' && e.task === 'T2' && e.detail.executors === 1));
@@ -2307,7 +2307,7 @@ test('accepted merges take the next executor in acceptance order before queued s
   const holder = h.runAsync(['wait', '--after', String(offset), '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
   let text, queue;
   try {
-    assert.notEqual(await waitFor(stalled), null, 'T1 holds the only executor');
+    await waitFor(stalled, { what: 'T1 holds the only executor' });
     const after = fs.statSync(events).size;
     for (const id of ['T2', 'T3']) {
       h.ok(['claim', id, '--agent', 'worker']);
@@ -2360,7 +2360,7 @@ test('gates prioritize runs the last queued task first; status and inbox show th
   h.ok(['claim', 'T1', '--agent', 'worker']);
   h.ok(['submit', 'T1', '--sha', h.sha, '--agent', 'worker']);
   const holder = h.runAsync(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
-  assert.notEqual(await waitFor(stalled), null, 'the first executor starts');
+  await waitFor(stalled, { what: 'the first executor starts' });
   const offset = fs.statSync(events).size;
   for (const id of ['T2', 'T3', 'T4']) {
     h.ok(['claim', id, '--agent', 'worker']);
@@ -2432,7 +2432,7 @@ test('a request moves only the reactions queued when it was made', async (t) => 
   h.ok(['claim', 'T1', '--agent', 'worker']);
   h.ok(['submit', 'T1', '--sha', h.sha, '--agent', 'worker']);
   const holder = h.runAsync(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
-  assert.notEqual(await waitFor(stalled), null, 'the first executor starts');
+  await waitFor(stalled, { what: 'the first executor starts' });
   const offset = fs.statSync(events).size;
   for (const id of ['T2', 'T3']) {
     h.ok(['claim', id, '--agent', 'worker']);
@@ -2465,7 +2465,7 @@ test('a reaction that is running is not queued: status and prioritize leave it o
   h.ok(['claim', 'T1', '--agent', 'worker']);
   h.ok(['submit', 'T1', '--sha', h.sha, '--agent', 'worker']);
   const holder = h.runAsync(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
-  assert.notEqual(await waitFor(run(1).stalled), null, 'the first executor starts');
+  await waitFor(run(1).stalled, { what: 'the first executor starts' });
   const offset = fs.statSync(events).size;
   for (const id of ['T2', 'T3']) {
     h.ok(['claim', id, '--agent', 'worker']);
@@ -2474,7 +2474,7 @@ test('a reaction that is running is not queued: status and prioritize leave it o
   h.run(['wait', '--after', String(offset), '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
 
   fs.writeFileSync(run(1).release, '');
-  assert.notEqual(await waitFor(run(2).stalled), null, 'T2 takes the executor next');
+  await waitFor(run(2).stalled, { what: 'T2 takes the executor next' });
   const text = h.ok(['status']);
   assert.match(text, /^gate running: T2$/m);
   assert.match(text, /^gate queue: T3$/m, 'T2 is running, so only T3 waits');
@@ -2483,7 +2483,7 @@ test('a reaction that is running is not queued: status and prioritize leave it o
   assert.match(refused.stderr, /no queued gate work/);
 
   fs.writeFileSync(run(2).release, '');
-  assert.notEqual(await waitFor(run(3).stalled), null, 'T3 runs last');
+  await waitFor(run(3).stalled, { what: 'T3 runs last' });
   fs.writeFileSync(run(3).release, '');
   assert.equal((await holder).code, 2, 'the held executor finishes and drains the queue');
   const started = h.logs().filter((e) => e.cmd === 'automation' && e.detail.phase === 'running').map((e) => e.task);
@@ -2498,7 +2498,7 @@ test('a follow-up queued behind a live reaction can be prioritized and runs firs
   h.ok(['claim', 'T1', '--agent', 'worker']);
   h.ok(['submit', 'T1', '--sha', h.sha, '--agent', 'worker']);
   const holder = h.runAsync(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
-  assert.notEqual(await waitFor(stalled), null, 'the first executor starts');
+  await waitFor(stalled, { what: 'the first executor starts' });
   const offset = fs.statSync(events).size;
   // T1 has a live reaction, so T2 and then T1's CI completion queue behind it.
   h.ok(['claim', 'T2', '--agent', 'worker']);
@@ -2533,12 +2533,12 @@ test('status shows a blocked follow-up apart from the queue the next free execut
   h.ok(['claim', 'T1', '--agent', 'worker']);
   h.ok(['submit', 'T1', '--sha', h.sha, '--agent', 'worker']);
   const first = h.runAsync(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
-  assert.notEqual(await waitFor(run(1).stalled), null, 'T1 takes the first executor');
+  await waitFor(run(1).stalled, { what: 'T1 takes the first executor' });
   const offset = fs.statSync(events).size;
   h.ok(['claim', 'T2', '--agent', 'worker']);
   h.ok(['submit', 'T2', '--sha', h.sha, '--agent', 'worker']);
   const second = h.runAsync(['wait', '--after', String(offset), '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
-  assert.notEqual(await waitFor(run(2).stalled), null, 'T2 takes the second executor');
+  await waitFor(run(2).stalled, { what: 'T2 takes the second executor' });
 
   const queued = fs.statSync(events).size;
   h.ok(['claim', 'T3', '--agent', 'worker']);
@@ -2554,7 +2554,7 @@ test('status shows a blocked follow-up apart from the queue the next free execut
   assert.deepEqual([queue.running, queue.queued.map((q) => q.id), queue.blocked.map((q) => q.id)], [['T1', 'T2'], ['T3'], ['T1']]);
 
   fs.writeFileSync(run(2).release, '');
-  assert.notEqual(await waitFor(run(3).stalled), null, 'T3 takes the freed executor before the blocked follow-up');
+  await waitFor(run(3).stalled, { what: 'T3 takes the freed executor before the blocked follow-up' });
   const started = () => h.logs().filter((e) => e.cmd === 'automation' && e.detail.phase === 'running').map((e) => e.task);
   assert.deepEqual(started(), ['T1', 'T2', 'T3'], 'the blocked follow-up has not started');
   assert.match(h.ok(['status']), /^gate queue: none; blocked behind their running reactions: T1 \(prioritized: CI follow-up first\)$/m);
@@ -2845,8 +2845,13 @@ poll();
   t.after(async () => {
     const ids = h.readState('tasks.json').tasks.map((task) => task.id);
     for (const id of ids) fs.writeFileSync(`${h.marker(id)}.go`, '');
+    // A worker a test killed never writes its exit marker; its gone process ends the wait.
     for (const id of ids) {
-      if (fs.existsSync(h.marker(id))) await waitFor(`${h.marker(id)}.exited`);
+      const pid = h.logs().findLast((e) => e.cmd === 'spawn' && e.task === id)?.detail.pid;
+      if (!fs.existsSync(h.marker(id)) || !pid) continue;
+      await waitUntil(() => fs.existsSync(`${h.marker(id)}.exited`) || !detachedAlive({ pid }), {
+        paths: [path.dirname(h.marker(id))], what: `refill worker ${id} did not exit`,
+      });
     }
     await h.cleanup();
   });
@@ -2867,7 +2872,7 @@ test('a ranged review recovery refusal does not stop unrelated gates or worker r
   assert.equal(result.code, 0, result.stderr);
   assert.equal(JSON.parse(result.stdout).task, 'T3');
   assert.match(result.stderr, /linked review comment does not identify/);
-  assert.notEqual(await waitFor(h.marker('T3')), null);
+  await waitFor(h.marker('T3'));
   assert.ok(h.logs().some((e) => e.task === 'T2' && e.cmd === 'check tests'),
     'the unrelated submission still runs its software gates');
   const task = h.readState('tasks.json').tasks[0];
@@ -2880,7 +2885,7 @@ test('automation retains an exited worker claim until its lost monitor process g
 }, async (t) => {
   const h = refillFixture(t);
   const spawn = h.json(['spawn', '--task', 'T1', '--agent', 'orchestrator'], { env: { REFILL_ORPHAN: '1' } });
-  assert.notEqual(await waitFor(`${h.marker('T1')}.orphan`), null);
+  await waitFor(`${h.marker('T1')}.orphan`);
   const orphan = Number(fs.readFileSync(`${h.marker('T1')}.orphan`, 'utf8'));
   const cursor = String(fs.statSync(path.join(h.state, 'events.jsonl')).size);
   const waiting = h.runAsync(['wait', '--after', cursor, '--types', 'spawn', '--timeout', '300', '--agent', 'orchestrator']);
@@ -2897,7 +2902,7 @@ test('automation retains an exited worker claim until its lost monitor process g
   const result = await waiting;
   assert.equal(result.code, 0, result.stderr);
   assert.equal(JSON.parse(result.stdout).task, 'T3');
-  assert.notEqual(await waitFor(h.marker('T3')), null);
+  await waitFor(h.marker('T3'));
 });
 
 test('automation reports unchanged dispatch refusals once and retries after the brief changes', async (t) => {
@@ -2907,7 +2912,7 @@ test('automation reports unchanged dispatch refusals once and retries after the 
   const started = path.join(h.base, 'wait-started');
   const waiter = h.runAsync(['wait', '--types', 'spawn', '--timeout', '300', '--agent', 'orchestrator'],
     { hooks: { HOOK_WATCH_READY: started } });
-  assert.notEqual(await waitFor(started), null);
+  await waitFor(started);
   for (let i = 0; i < 3; i++) {
     h.ok(['task', 'note', 'T5', `unrelated progress ${i}`]);
     await new Promise((resolve) => setTimeout(resolve, 1100)); // wait-allow: observe refusal deduplication across polling turns before changing the brief
@@ -2917,7 +2922,7 @@ test('automation reports unchanged dispatch refusals once and retries after the 
   assert.equal(result.code, 0, result.stderr);
   assert.equal(JSON.parse(result.stdout).task, 'T5');
   assert.equal(result.stderr.match(/has no brief/g)?.length, 1, result.stderr);
-  assert.notEqual(await waitFor(h.marker('T5')), null, 'the changed brief retries dispatch');
+  await waitFor(h.marker('T5'), { what: 'the changed brief retries dispatch' });
 });
 
 test('automation dispatches rework-ready work with the failed review findings', async (t) => {
@@ -2928,7 +2933,7 @@ test('automation dispatches rework-ready work with the failed review findings', 
   h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--sha', h.sha,
     '--fail', '--summary', 'lib/change.js:12 - handle the missing input', '--agent', 'reviewer']);
   h.consume();
-  assert.notEqual(await waitFor(h.marker('T1')), null, 'rework is dispatched without a manual command');
+  await waitFor(h.marker('T1'), { what: 'rework is dispatched without a manual command' });
   const task = h.readState('tasks.json').tasks[0];
   assert.equal(task.status, 'in_progress');
   assert.equal(task.claim.from, 'rework');
@@ -2952,9 +2957,9 @@ for (const trigger of ['exit', 'release --dead', 'merge']) {
       h.saveGithub(github);
     } else {
       h.json(['spawn', '--task', 'T1', '--agent', 'orchestrator']);
-      assert.notEqual(await waitFor(h.marker('T1')), null, 'first worker claims the slot');
+      await waitFor(h.marker('T1'), { what: 'first worker claims the slot' });
       fs.writeFileSync(`${h.marker('T1')}.go`, '');
-      assert.notEqual(await waitFor(`${h.marker('T1')}.exited`), null);
+      await waitFor(`${h.marker('T1')}.exited`);
       if (trigger === 'release --dead') {
         // Foreground observation records the exit before the explicit batch release.
         h.run(['wait', '--after', '0', '--observe', '--types', 'worker-exited', '--timeout', '300', '--agent', 'orchestrator']);
@@ -2966,7 +2971,7 @@ for (const trigger of ['exit', 'release --dead', 'merge']) {
       h.runAsync(['wait', '--after', cursor, '--task', 'T3', '--types', 'spawn', '--timeout', '300', '--agent', 'orchestrator'])];
     const results = await Promise.all(watchers);
     assert.ok(results.every((r) => r.code === 0 && JSON.parse(r.stdout).task === 'T3'), JSON.stringify(results));
-    assert.notEqual(await waitFor(h.marker('T3')), null, `the task unblocking T4 takes the free slot: ${JSON.stringify(results)}`);
+    await waitFor(h.marker('T3'), { what: `the task unblocking T4 takes the free slot: ${JSON.stringify(results)}` });
     const spawns = h.logs().filter((e) => e.cmd === 'spawn' && e.detail.role === 'worker');
     assert.deepEqual(spawns.map((e) => e.task), trigger === 'merge' ? ['T3'] : ['T1', 'T3']);
     const st = require('../lib/state').loadState(h.state);
@@ -3831,7 +3836,7 @@ poll();
   const first = h.runAsync(['ci', 'completed', 'T2', '--sha', h.second, '--agent', 'orchestrator']);
   let result;
   try {
-    assert.notEqual(await waitFor(paused), null, 'T2 holds the queue after T1 is skipped');
+    await waitFor(paused, { what: 'T2 holds the queue after T1 is skipped' });
     const skipped = h.logs().slice(offset).find((e) => e.cmd === 'queue skipped');
     assert.equal(skipped?.task, 'T1');
     assert.match(skipped.detail.reason, /ci: latest ci .* failed/);

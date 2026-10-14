@@ -26,7 +26,6 @@ for (const kind of ['stale', 'empty']) {
         NODE_OPTIONS: `--require=${JSON.stringify(SHORT_WAIT)} --require=${JSON.stringify(fixture)}`,
         HOOK_STATE: h.state, LOCK_RECLAIM_KIND: kind, LOCK_RECLAIM_ATTEMPTS: attempts,
       },
-      timeout: 5000,
     });
     assert.equal(result.code, 3, result.stderr);
     const count = fs.readFileSync(attempts, 'utf8').length;
@@ -519,7 +518,6 @@ test('continuous staging cleanup times out with exit 3 and bounded backoff', (t)
       NODE_OPTIONS: `--require=${JSON.stringify(SHORT_WAIT)} --require=${JSON.stringify(hook)}`,
       LOCK_RACE_POINT: 'write', LOCK_RACE_ATTEMPTS: attempts, LOCK_RACE_ALWAYS: '1',
     },
-    timeout: 25000,
   });
   const waited = Date.now() - started; // wait-allow: verify stale or dead locks are broken without waiting for the live-holder timeout
   assert.equal(result.code, 3, result.stderr);
@@ -545,7 +543,7 @@ test('a stale lock that cannot be removed still times out with exit 3', (t) => {
   const started = Date.now();
   const r = h.run(['task', 'add', '--title', 'A', '--acceptance', 'a'], {
     env: { NODE_OPTIONS: `--require=${JSON.stringify(SHORT_WAIT)}` },
-    hooks: { HOOK_FAIL_LOCK: attempts, HOOK_DEAD_PID: String(marker.pid) }, timeout: 25000,
+    hooks: { HOOK_FAIL_LOCK: attempts, HOOK_DEAD_PID: String(marker.pid) },
   });
   const waited = Date.now() - started; // wait-allow: verify stale or dead locks are broken without waiting for the live-holder timeout
   assert.equal(r.code, 3, `exit ${r.code} (signal ${r.signal}) after ${waited} ms: ${r.stderr}`);

@@ -56,9 +56,9 @@ for (const signal of ['SIGTERM', 'SIGINT']) process.on(signal, () => fs.appendFi
       const result = once(child, 'close').then(([code]) => ({ code, stdout, stderr }));
       const bound = setTimeout(() => child.kill('SIGKILL'), HUNG_TEST_MS);
       try {
-        assert.notEqual(await waitFor(stage === 'query' ? poll : sleeping), null, 'the merge reaches its poll');
+        await waitFor(stage === 'query' ? poll : sleeping, { what: 'the merge reaches its poll' });
         child.kill('SIGTERM');
-        assert.notEqual(await waitFor(observed), null, 'wait starts draining');
+        await waitFor(observed, { what: 'wait starts draining' });
         assert.equal(child.exitCode, null, 'the first signal drains the active merge');
         child.kill('SIGINT');
         const timeout = Symbol('timeout');

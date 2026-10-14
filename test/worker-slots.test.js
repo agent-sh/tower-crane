@@ -33,7 +33,7 @@ function setup(t, workers = 1, tasks = 3) {
 async function pausedSpawn(h, task) {
   const paused = path.join(h.base, `paused-${task}`);
   const spawned = h.json(['spawn', '--task', task], { hooks: { HOOK_PAUSE_ON: 'events.jsonl', HOOK_PAUSE_PROCESS: 'spawn-monitor.js', HOOK_PAUSED: paused } });
-  await waitOnRepo(h, () => fs.existsSync(paused), 'supervisor did not pause');
+  await waitOnRepo(h, () => fs.existsSync(paused), 'supervisor did not pause', { alive: spawned.monitor_pid });
   return { spawned, release: () => fs.writeFileSync(`${paused}.go`, '') };
 }
 
@@ -111,7 +111,7 @@ test('concurrent dispatch reserves the last slot until claim and does not double
   const task = winner.agent.includes('T1') ? 'T1' : 'T2';
   const loser = task === 'T1' ? 'T2' : 'T1';
   assert.match(results.find((r) => r.code !== 0).stderr, new RegExp(`${task}.*${winner.agent}`));
-  await waitOnRepo(h, () => fs.existsSync(path.join(h.base, `${task}.started`)), 'worker did not start');
+  await waitOnRepo(h, () => fs.existsSync(path.join(h.base, `${task}.started`)), 'worker did not start', { alive: winner.monitor_pid });
   assert.ok(!fs.existsSync(path.join(h.base, `${loser}.started`)));
   assert.equal(events(h).filter((e) => e.cmd === 'spawn').length, 1);
   const claim = h.run(['claim', 'T3', '--agent', 'manual']);
@@ -130,14 +130,14 @@ test('a started worker holds its lease against strangers until its own claim ren
   controlledHarness(h);
   h.ok(['claim', 'T3', '--agent', 'manual']);
   const spawned = h.json(['spawn', '--task', 'T1']);
-  await waitOnRepo(h, () => fs.existsSync(path.join(h.base, 'T1.started')), 'worker did not start');
+  await waitOnRepo(h, () => fs.existsSync(path.join(h.base, 'T1.started')), 'worker did not start', { alive: spawned.monitor_pid });
   const stranger = h.run(['claim', 'T1', '--agent', 'stranger']);
   assert.equal(stranger.code, 1, stranger.stderr);
   assert.match(stranger.stderr, /T1.*worker-T1-1/);
   fs.writeFileSync(path.join(h.base, 'T1.claim'), '');
   // The harness writes its result non-atomically, so readiness is a complete record.
   const claimed = path.join(h.base, 'T1.claimed');
-  const claim = await waitOnRepo(h, () => fs.existsSync(claimed) && JSON.parse(fs.readFileSync(claimed, 'utf8')), 'worker did not claim');
+  const claim = await waitOnRepo(h, () => fs.existsSync(claimed) && JSON.parse(fs.readFileSync(claimed, 'utf8')), 'worker did not claim', { alive: spawned.monitor_pid });
   assert.equal(claim.code, 0, claim.stderr);
   assert.equal(h.readState('tasks.json').tasks[0].claim.agent, spawned.agent);
   assert.equal(h.run(['claim', 'T2', '--agent', 'another']).code, 1);
@@ -152,10 +152,10 @@ test('a failed launch holds no slot, and an exited worker frees its slot once re
   assert.equal(events(h).filter((e) => e.cmd === 'spawn').length, 0);
   const spawned = h.json(['spawn', '--task', 'T1']);
   assert.equal(spawned.agent, 'worker-T1-1');
-  await waitOnRepo(h, () => fs.existsSync(path.join(h.base, 'T1.started')), 'worker did not start');
+  await waitOnRepo(h, () => fs.existsSync(path.join(h.base, 'T1.started')), 'worker did not start', { alive: spawned.monitor_pid });
   assert.equal(h.run(['claim', 'T2', '--agent', 'manual']).code, 1);
   fs.writeFileSync(path.join(h.base, 'T1.exit'), '');
-  await waitOnRepo(h, () => events(h).some((e) => e.cmd === 'spawn exit' && e.detail.agent === spawned.agent), 'exit was not recorded');
+  await waitOnRepo(h, () => events(h).some((e) => e.cmd === 'spawn exit' && e.detail.agent === spawned.agent), 'exit was not recorded', { alive: spawned.monitor_pid });
   assert.equal(h.run(['claim', 'T2', '--agent', 'manual']).code, 1, 'an exited worker keeps its lease until released');
   h.ok(['release', 'T1', '--agent', spawned.agent, '--reason', 'worker exited']);
   h.ok(['claim', 'T2', '--agent', 'manual']);
@@ -257,8 +257,8 @@ test('reviewer dispatch is unaffected when worker reservations fill the limit', 
   h.ok(['claim', 'T2', '--agent', 'builder']);
   h.ok(['submit', 'T2', '--sha', h.git(['rev-parse', 'HEAD']), '--agent', 'builder']);
   controlledHarness(h);
-  h.json(['spawn', '--task', 'T1']);
-  await waitOnRepo(h, () => fs.existsSync(path.join(h.base, 'T1.started')), 'worker did not start');
+  const spawned = h.json(['spawn', '--task', 'T1']);
+  await waitOnRepo(h, () => fs.existsSync(path.join(h.base, 'T1.started')), 'worker did not start', { alive: spawned.monitor_pid });
   fs.writeFileSync(path.join(h.base, 'T2.exit'), '');
   const reviewer = h.json(['spawn', '--task', 'T2', '--role', 'review', '--wait']);
   assert.equal(reviewer.role, 'reviewer');
@@ -295,14 +295,14 @@ test('a retrying worker keeps its slot through backoff and expired-lease renewal
   controlledHarness(h);
   h.ok(['ladder', 'set', 'easy', '--supervision', JSON.stringify({ retries: 1, backoff_ms: 3000, max_backoff_ms: 3000 })]);
   const spawned = h.json(['spawn', '--task', 'T1'], { env: { SLOT_RETRY: '1' } });
-  await waitOnRepo(h, () => events(h).some((e) => e.cmd === 'spawn phase' && e.detail.phase === 'retrying'), 'worker did not enter backoff');
+  await waitOnRepo(h, () => events(h).some((e) => e.cmd === 'spawn phase' && e.detail.phase === 'retrying'), 'worker did not enter backoff', { alive: spawned.monitor_pid });
   const renew = h.run(['renew', 'T3', '--agent', 'expired']);
   assert.equal(renew.code, 1, renew.stderr);
   assert.match(renew.stderr, /T1.*worker-T1-1.*lease/);
   const refused = h.run(['spawn', '--task', 'T2']);
   assert.equal(refused.code, 1, refused.stderr);
   assert.match(refused.stderr, /T1.*worker-T1-1.*lease/);
-  await waitOnRepo(h, () => events(h).some((e) => e.cmd === 'spawn retry'), 'worker did not retry');
+  await waitOnRepo(h, () => events(h).some((e) => e.cmd === 'spawn retry'), 'worker did not retry', { alive: spawned.monitor_pid });
   h.ok(['claim', 'T1', '--agent', spawned.agent]);
   assert.equal(h.run(['claim', 'T2', '--agent', 'manual']).code, 1);
   h.ok(['release', 'T1', '--agent', spawned.agent, '--reason', 'slot returned']);
@@ -329,7 +329,7 @@ test('an expired pre-claim holds the only slot before supervision can renew', as
     const spawned = h.json(['spawn', '--task', 'T1'], {
       hooks: { HOOK_PAUSE_ON: 'tasks.json', HOOK_PAUSE_PROCESS: 'spawn-monitor.js', HOOK_PAUSED: paused },
     });
-    await waitOnRepo(h, () => fs.existsSync(paused), 'supervisor did not pause before renewal');
+    await waitOnRepo(h, () => fs.existsSync(paused), 'supervisor did not pause before renewal', { alive: spawned.monitor_pid });
     const rivals = await Promise.all([
       h.runAsync(['claim', 'T2', '--agent', 'rival']),
       h.runAsync(['spawn', '--task', 'T3']),

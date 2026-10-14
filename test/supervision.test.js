@@ -103,7 +103,7 @@ else { const check = () => {
   h.ok(['ladder', 'set', 'easy', '--harness', 'command', '--command', JSON.stringify([process.execPath, '-e', script, BIN, h.attempts, '{prompt}']),
     '--clear', 'profile', '--clear', 'effort', '--supervision',
     JSON.stringify({ retries: 2, backoff_ms: 150, max_backoff_ms: 1000, stall_ms: 60000, ...config })]);
-  h.spawn = (role, timeout = 15000) => h.run(['spawn', '--task', 'T1', ...(role ? ['--role', role] : []), '--wait', '--json'], { env, timeout });
+  h.spawn = (role) => h.run(['spawn', '--task', 'T1', ...(role ? ['--role', role] : []), '--wait', '--json'], { env });
   h.readAttempts = () => fs.existsSync(h.attempts) ? JSON.parse(fs.readFileSync(h.attempts, 'utf8')) : [];
   return h;
 }
@@ -493,7 +493,6 @@ test('an expired previous claim does not stop supervision before a slow replacem
   const clock = path.join(__dirname, 'fixtures', 'clock.js').replace(/\\/g, '/');
   const result = h.run(['spawn', '--task', 'T1', '--wait'], {
     env: { NODE_OPTIONS: `--require "${clock}"`, TOWER_CRANE_TEST_NOW: String(Date.parse(previous.until) + 1) },
-    timeout: 15000,
   });
   assert.equal(result.code, 0, result.stderr);
   assert.equal(h.readAttempts().length, 2);
@@ -708,7 +707,7 @@ test('a spawn reads no other task\'s stored evidence, so a missing evidence file
 test('a worker spawned behind a live lease held by another agent never starts and says why', (t) => {
   const h = setup(t, { claim: false, failures: 0 });
   h.ok(['claim', 'T1', '--agent', 'holder']);
-  const result = h.spawn(undefined, 20000);
+  const result = h.spawn();
   assert.equal(result.code, 1, result.stderr);
   assert.match(result.stderr, /T1 is claimed by holder until/);
   assert.equal(h.readAttempts().length, 0, 'the harness never started');
@@ -722,7 +721,7 @@ test('a supervisor stop stays blocked with its reason when its harness exits 0 o
     "process.on('SIGTERM', () => process.exit(0)); setInterval(() => {}, 1000);", '{prompt}'])]);
   // The blocked stop climbs the range to medium, which must not reach a real codex.
   pinRung(h, 'medium', STUB_RUNG);
-  const result = h.spawn(undefined, 30000);
+  const result = h.spawn();
   assert.equal(result.code, 1, result.stderr);
   // The climb's medium attempt runs on after the wait returns and records phases of its own.
   const first = log(h).find((e) => e.cmd === 'spawn').detail.agent;
@@ -865,7 +864,6 @@ for (const harness of ['claude', 'codex']) {
         PATH: bin + path.delimiter + (h.env.PATH || h.env.Path || ''),
         NODE_OPTIONS: `--require "${stub}"`, TOWER_CRANE_TEST_SUPERVISION_FILE: attemptsFile,
       },
-      timeout: 15000,
     });
     assert.equal(result.code, 0, result.stderr);
     const [first, second] = JSON.parse(fs.readFileSync(attemptsFile, 'utf8'));
@@ -1054,7 +1052,7 @@ if (!fs.existsSync(file)) {
 `;
   h.ok(['ladder', 'set', 'easy', '--command', JSON.stringify([process.execPath, '-e', script, BIN, groupFile, '{prompt}'])]);
   // The rerun waits out the previous child's SIGTERM grace, so allow for a loaded machine.
-  const result = h.spawn(undefined, 60000);
+  const result = h.spawn();
   assert.equal(result.code, 0, result.stderr);
   assert.equal(log(h).filter((e) => e.cmd === 'spawn retry').length, 1);
 });

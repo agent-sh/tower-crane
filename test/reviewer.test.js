@@ -265,7 +265,7 @@ console.log(JSON.stringify({ type: 'result', is_error: false, model, usage: { in
   fs.mkdirSync(path.join(caller, '.claude'), { recursive: true });
   const result = h.run(['spawn', '--task', 'T1', '--role', 'review', '--wait'], {
     env: { HOME: caller, CLAUDE_CONFIG_DIR: path.join(caller, '.claude'), XDG_CACHE_HOME: path.join(caller, 'cache'),
-      PATH: bin + path.delimiter + (h.env.PATH || '') }, timeout: 20000 });
+      PATH: bin + path.delimiter + (h.env.PATH || '') } });
   assert.equal(result.code, 0, result.stderr);
   const rows = fs.readFileSync(captures, 'utf8').trim().split('\n').map(JSON.parse);
   assert.deepEqual(rows.map((r) => r.model), ['first', 'second']);

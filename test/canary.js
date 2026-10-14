@@ -83,7 +83,8 @@ function processListing() {
 }
 
 // Empty files signal events; PID markers need content after file creation.
-const waitFor = (file, { nonempty = false } = {}) => fileWritten(file, { check: (text) => !nonempty || text });
+// `what` names a wait that fails at the hung-test guard, or early once `alive` exits.
+const waitFor = (file, { nonempty = false, ...options } = {}) => fileWritten(file, { ...options, check: (text) => !nonempty || text });
 
 function assertNoHits(hits, what) {
   assert.deepEqual(hits.map((h) => `${h.label} in ${h.where}`), [], `secret canaries leaked into ${what}`);

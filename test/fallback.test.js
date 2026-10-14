@@ -426,7 +426,7 @@ for (const harness of ['claude', 'codex']) {
       h.ok(['brief', 'set', 'T2', '-'], { input: 'Dispatch with personal fallback routes.\n' });
       const nested = path.join(h.base, 'nested.json');
       const result = h.run(['spawn', '--task', 'T1', '--role', 'orchestrator', '--wait'], {
-        env: { ...h.spawnEnv, TOWER_CRANE_TEST_NESTED_DISPATCH: nested }, timeout: 25000,
+        env: { ...h.spawnEnv, TOWER_CRANE_TEST_NESTED_DISPATCH: nested },
       });
       assert.equal(result.code, 0, result.stderr);
       const seen = JSON.parse(fs.readFileSync(nested, 'utf8'));
