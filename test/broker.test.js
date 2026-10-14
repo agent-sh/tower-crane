@@ -528,7 +528,7 @@ test('a worker resolves a remote-only abbreviation before forwarding it to the b
   const origin = path.join(h.base, 'origin.git');
   const upstream = path.join(h.base, 'upstream');
   h.git(['init', '--bare', '-q', origin]);
-  h.git(['remote', 'add', 'origin', origin]);
+  h.git(['remote', 'set-url', 'origin', origin]);
   h.git(['push', 'origin', 'main']);
   h.git(['clone', '-q', '--branch', 'main', origin, upstream]);
   h.git(['checkout', '-q', '-b', 'remote-change'], upstream);
@@ -670,7 +670,7 @@ async function pushFixture(t, { role = 'worker', title = 'Push' } = {}) {
   h.ok(['task', 'add', '--title', title, '--acceptance', 'pushes through the broker']);
   const remote = path.join(h.base, 'remote.git');
   h.git(['init', '-q', '--bare', remote]);
-  h.git(['remote', 'add', 'origin', remote]);
+  h.git(['remote', 'set-url', 'origin', remote]);
   h.git(['push', '-q', 'origin', 'HEAD:refs/heads/main']);
   const wt = h.json(['worktree', 'T1']);
   const task = h.readState('tasks.json').tasks[0];

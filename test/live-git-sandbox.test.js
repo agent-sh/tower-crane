@@ -73,7 +73,7 @@ function fixture(t) {
   const h = makeRepo(t);
   const origin = path.join(h.base, 'origin.git');
   h.git(['init', '--bare', '-q', origin]);
-  h.git(['remote', 'add', 'origin', origin]);
+  h.git(['remote', 'set-url', 'origin', origin]);
   h.git(['push', 'origin', 'main']);
   h.init();
   h.ok(['task', 'add', '--title', 'Git probe', '--acceptance', 'the shared git directory stays read-only']);

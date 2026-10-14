@@ -115,7 +115,7 @@ test('git the CLI and gates run takes no command from repository config or hooks
   h.ok(['submit', 'T2', '--sha', sha, '--agent', 'worker-2'], { env });
   assert.deepEqual(ran(), []);
 
-  h.git(['remote', 'add', 'origin', 'ssh://git@127.0.0.1:9/acme/demo.git']);
+  h.git(['remote', 'set-url', 'origin', 'ssh://git@127.0.0.1:9/acme/demo.git']);
   assert.match(h.run(['worktree', 'T3', '--agent', 'orchestrator'], { env }).stderr, /git fetch origin main failed/);
   assert.deepEqual(ran(), []);
 
@@ -398,7 +398,7 @@ test('the caller\'s GIT_SSH and SSH_ASKPASS still run under the command-scope de
     fs.writeFileSync(file, `#!/bin/sh\nexec ${shellQuote(process.execPath)} ${shellQuote(script)} ${name}\n`, { mode: 0o755 });
     return file;
   };
-  h.git(['remote', 'add', 'origin', 'ssh://git@127.0.0.1:9/acme/demo.git']);
+  h.git(['remote', 'set-url', 'origin', 'ssh://git@127.0.0.1:9/acme/demo.git']);
   const { spawnSync } = require('../lib/commands');
   // h.env carries no GIT_ variable of the caller's.
   const base = h.env;
@@ -480,7 +480,7 @@ test('repository git proxies cannot run before command-scope overrides', (t) => 
   const proxy = path.join(h.base, 'proxy');
   fs.writeFileSync(proxy, `#!/bin/sh\nexec ${shellQuote(process.execPath)} ${shellQuote(script)} "$@"\n`, { mode: 0o755 });
   h.git(['config', 'core.gitProxy', proxy]);
-  h.git(['remote', 'add', 'origin', 'git://127.0.0.1:9/acme/demo.git']);
+  h.git(['remote', 'set-url', 'origin', 'git://127.0.0.1:9/acme/demo.git']);
 
   const result = h.run(['worktree', 'T1', '--agent', 'orchestrator']);
   assert.match(result.stderr, /git fetch origin main failed/);
@@ -569,22 +569,22 @@ const ROWS = [
     r.change('main\n'); r.git(['commit', '-qam', 'main']);
     r.attributes('* merge=tc'); r.set('merge.tc.driver', r.cmd('merge-driver'));
   } },
-  { name: 'core.sshCommand', run: ['fetch', 'origin'], plant: (r) => { r.git(['remote', 'add', 'origin', SSH_ORIGIN]); r.set('core.sshCommand', r.cmd('ssh-command')); } },
+  { name: 'core.sshCommand', run: ['fetch', 'origin'], plant: (r) => { r.git(['remote', 'set-url', 'origin', SSH_ORIGIN]); r.set('core.sshCommand', r.cmd('ssh-command')); } },
   { name: 'GIT_SSH_COMMAND', run: ['fetch', 'origin'], caller: 'caller-ssh-command', plant: (r) => {
-    r.git(['remote', 'add', 'origin', SSH_ORIGIN]); r.set('core.sshCommand', r.cmd('ssh-command'));
+    r.git(['remote', 'set-url', 'origin', SSH_ORIGIN]); r.set('core.sshCommand', r.cmd('ssh-command'));
     return { GIT_SSH_COMMAND: r.cmd('caller-ssh-command') };
   } },
   { name: 'GIT_SSH', run: ['fetch', 'origin'], caller: 'caller-ssh', plant: (r) => {
-    r.git(['remote', 'add', 'origin', SSH_ORIGIN]); r.set('core.sshCommand', r.cmd('ssh-command'));
+    r.git(['remote', 'set-url', 'origin', SSH_ORIGIN]); r.set('core.sshCommand', r.cmd('ssh-command'));
     return { GIT_SSH: r.program('caller-ssh') };
   } },
   { name: 'credential.helper', run: ['fetch', 'origin'], plant: async (r, t) => {
-    r.git(['remote', 'add', 'origin', `http://127.0.0.1:${await unauthorizedServer(t)}/acme/demo.git`]);
+    r.git(['remote', 'set-url', 'origin', `http://127.0.0.1:${await unauthorizedServer(t)}/acme/demo.git`]);
     r.set('credential.helper', `!${r.cmd('credential-helper')}`);
   } },
   { name: 'credential.<url>.helper', run: ['fetch', 'origin'], plant: async (r, t) => {
     const url = `http://127.0.0.1:${await unauthorizedServer(t)}`;
-    r.git(['remote', 'add', 'origin', `${url}/acme/demo.git`]);
+    r.git(['remote', 'set-url', 'origin', `${url}/acme/demo.git`]);
     r.set(`credential.${url}.helper`, `!${r.cmd('credential-url-helper')}`);
   } },
   { name: 'gpg.program', run: COMMIT, plant: (r) => { r.set('commit.gpgSign', 'true'); r.set('gpg.program', r.program('gpg-program')); } },
@@ -598,24 +598,24 @@ const ROWS = [
   // The user allows the helper protocol, so only the alias is the repository's.
   { name: 'alias.remote-<name> through a <name>:: URL', run: ['fetch', 'origin'], plant: (r) => {
     r.trust('protocol.tcx.allow', 'always');
-    r.git(['remote', 'add', 'origin', 'tcx::anything']); r.set('alias.remote-tcx', `!${r.cmd('helper-alias')}`);
+    r.git(['remote', 'set-url', 'origin', 'tcx::anything']); r.set('alias.remote-tcx', `!${r.cmd('helper-alias')}`);
   } },
   { name: 'alias.remote-<name> through remote.<r>.vcs', run: ['fetch', 'origin'], plant: (r) => {
     r.trust('protocol.tcy.allow', 'always');
-    r.git(['remote', 'add', 'origin', 'https://127.0.0.1:9/acme/demo.git']); r.set('remote.origin.vcs', 'tcy');
+    r.git(['remote', 'set-url', 'origin', 'https://127.0.0.1:9/acme/demo.git']); r.set('remote.origin.vcs', 'tcy');
     r.set('alias.remote-tcy', `!${r.cmd('vcs-alias')}`);
   } },
   { name: 'protocol.ext.allow', run: ['fetch', 'origin'], plant: (r) => {
     const ext = [process.execPath, r.script, 'ext-command'].map((a) => a.replace(/%/g, '%%').replace(/ /g, '% ')).join(' ');
-    r.git(['remote', 'add', 'origin', `ext::${ext}`]); r.set('protocol.ext.allow', 'always');
+    r.git(['remote', 'set-url', 'origin', `ext::${ext}`]); r.set('protocol.ext.allow', 'always');
   } },
   // A helper the user installed, which git allows only for a typed URL.
   { name: 'protocol.allow', run: ['fetch', 'origin'], plant: (r) => {
-    r.git(['remote', 'add', 'origin', 'tcz::anything']); r.set('protocol.allow', 'always');
+    r.git(['remote', 'set-url', 'origin', 'tcz::anything']); r.set('protocol.allow', 'always');
     return { PATH: r.helper('tcz') };
   } },
   { name: 'protocol.<name>.allow', run: ['fetch', 'origin'], plant: (r) => {
-    r.git(['remote', 'add', 'origin', 'tcz::anything']); r.set('protocol.tcz.allow', 'always');
+    r.git(['remote', 'set-url', 'origin', 'tcz::anything']); r.set('protocol.tcz.allow', 'always');
     return { PATH: r.helper('tcz') };
   } },
   // git pages only to a terminal.

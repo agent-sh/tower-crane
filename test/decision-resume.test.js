@@ -148,7 +148,7 @@ test('a worker released with a PR whose branch exists only on origin resumes tha
   h.git(['clone', '-q', '--bare', h.repo, origin]);
   h.git(['switch', '-q', 'main']);
   h.git(['branch', '-D', 'tower-crane/T1']);
-  h.git(['remote', 'add', 'origin', origin]);
+  h.git(['remote', 'set-url', 'origin', origin]);
 
   h.env.FIXTURE_PR_HEAD_7 = 'tower-crane/T1';
   h.env.FIXTURE_PR_STATE_7 = 'OPEN';
@@ -190,7 +190,7 @@ test('a rework moved to a replacement PR starts from that PR head, not the submi
   h.git(['clone', '-q', '--bare', h.repo, origin]);
   h.git(['switch', '-q', 'main']);
   h.git(['branch', '-D', 'tower-crane/T1-retry']);
-  h.git(['remote', 'add', 'origin', origin]);
+  h.git(['remote', 'set-url', 'origin', origin]);
   h.env.FIXTURE_PR_HEAD_9 = 'tower-crane/T1-retry';
   h.env.FIXTURE_PR_STATE_9 = 'OPEN';
 
