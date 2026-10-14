@@ -7,6 +7,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { makeRepo, makeProjectRepo, makeTaskRepo } = require('./helpers');
+const { readPublished } = require('./atomic-file');
 const A = require('../lib/agents');
 const windowsConcurrency = process.platform === 'win32' ? 2 : false;
 
@@ -60,7 +61,7 @@ function setup(t, { reason = 'outage', primaryHarness = 'codex', nextHarness = '
     ...(chain ? { TOWER_CRANE_TEST_FALLBACK_CHAIN: '1' } : {}),
   };
   h.spawn = () => h.run(['spawn', '--task', 'T1', '--wait'], { env: h.spawnEnv });
-  h.attempts = () => JSON.parse(fs.readFileSync(h.file, 'utf8'));
+  h.attempts = () => JSON.parse(readPublished(h.file, 'utf8'));
   return h;
 }
 
@@ -235,21 +236,20 @@ test('rework during a live fallback refuses a second worker until the previous a
   const finish = path.join(h.base, 'finish-fallback');
   const cursor = events(h).at(-1).id;
   const waiting = h.runAsync(['wait', '--observe', '--after', cursor, '--types', 'spawn-fallback', '--timeout', WAIT_TIMEOUT_S]);
-  h.json(['spawn', '--task', 'T1'], {
+  let wake;
+  waiting.then((result) => { wake = result; });
+  const spawned = h.json(['spawn', '--task', 'T1'], {
     env: { ...h.spawnEnv, TOWER_CRANE_TEST_FALLBACK_FINISH: finish },
   });
-  const wake = await waiting;
-  assert.equal(wake.code, 0, wake.stderr);
-  // The harness truncates and rewrites attempts.json between fallback routes.
-  await waitOnRepo(h, () => {
-    try {
-      return h.attempts().length === 4;
-    } catch (error) {
-      if (error instanceof SyntaxError) return false;
-      throw error;
-    }
-  }, 'fallback worker did not start');
+  // The supervisor runs until the fallback worker finishes, so each wait
+  // fails as soon as it is gone, and any failure releases the worker.
+  const alive = spawned.monitor_pid;
+  assert.ok(alive, JSON.stringify(spawned));
   try {
+    await waitOnRepo(h, () => wake, 'the spawn-fallback wait did not return', { alive });
+    assert.equal(wake.code, 0, wake.stderr);
+    // The harness publishes attempts.json by rename after each attempt.
+    await waitOnRepo(h, () => h.attempts().length === 4, 'fallback worker did not start', { alive });
     h.ok(['submit', 'T1', '--agent', 'worker-T1-1', '--sha', '50b732a15be40ccb2065cb2ba0e7b366d511b736']);
     h.ok(['rework', 'T1', '--reason', 'fix while worker is finishing']);
     for (const flags of [['--dry-run'], []]) {
@@ -260,7 +260,7 @@ test('rework during a live fallback refuses a second worker until the previous a
     assert.equal(events(h).filter((e) => e.cmd === 'spawn').length, 1);
     assert.equal(h.attempts().length, 4);
   } finally { fs.writeFileSync(finish, ''); }
-  await waitOnRepo(h, () => events(h).some((e) => e.cmd === 'spawn exit'), 'fallback worker did not exit');
+  await waitOnRepo(h, () => events(h).some((e) => e.cmd === 'spawn exit'), 'fallback worker did not exit', { alive });
   const preview = h.json(['spawn', '--task', 'T1', '--dry-run'], { env: h.spawnEnv });
   assert.equal(preview.resumed, false);
 });

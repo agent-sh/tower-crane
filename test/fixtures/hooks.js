@@ -12,7 +12,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
 const { EventEmitter } = require('node:events');
-const { writeAtomic } = require('../atomic-file');
+const { writeAtomic, readPublished } = require('../atomic-file');
 
 const env = process.env;
 // Process creation times are on the system clock, which HOOK_CLOCK_FILE replaces below.
@@ -94,6 +94,13 @@ if (env.HOOK_PIDNS) {
   };
 }
 
+// HOOK_HOSTNAME=NAME: this process reports NAME as its host name, as one in a
+// container or a sandbox with a UTS namespace of its own does.
+if (env.HOOK_HOSTNAME) {
+  const os = require('node:os');
+  os.hostname = () => env.HOOK_HOSTNAME;
+}
+
 // HOOK_NO_SH=1: the CLI finds no /bin/sh, as on Windows, so it has no POSIX
 // lease gate and spawns its workers through the launch handshake.
 if (env.HOOK_NO_SH && path.basename(process.argv[1] || '') === 'tower-crane.js') {
@@ -140,7 +147,7 @@ const inLock = (p) => under(LOCK, p);
 function ownsLock() {
   try {
     return real.readdirSync(LOCK).some((name) =>
-      JSON.parse(real.readFileSync(path.join(LOCK, name), 'utf8')).pid === process.pid);
+      JSON.parse(readPublished(path.join(LOCK, name), 'utf8', real)).pid === process.pid);
   } catch (error) {
     if (['ENOENT', 'ENOTDIR'].includes(error.code)) return false;
     throw error;
@@ -196,6 +203,13 @@ function before(name, args) {
   if (env.HOOK_FAIL_EVENT_SYNC && name === 'fsyncSync' && path.resolve(String(target)) === path.join(STATE, 'events.jsonl') && first('event-sync')) {
     throw Object.assign(new Error('EIO: i/o error, fsync'), { code: 'EIO' });
   }
+  // HOOK_SUPERVISOR_LOCK_AFTER=FILE: a supervisor takes no state lock until
+  // FILE exists, so a test can let another process hold the lock first.
+  if (env.HOOK_SUPERVISOR_LOCK_AFTER && name === 'mkdirSync' && inState(target) && /^lock\.\d+\.[0-9a-f]+\.new$/.test(path.basename(String(target)))
+    && path.basename(process.argv[1] || '') === 'spawn-monitor.js') {
+    const end = Date.now() + 300000;
+    while (!real.existsSync(env.HOOK_SUPERVISOR_LOCK_AFTER) && Date.now() < end) sleep(10);
+  }
   // HOOK_JITTER_MS=MS: a random pause of up to MS before each call on the state.
   if (env.HOOK_JITTER_MS && (inState(target) || inState(args[1]))) sleep(Math.floor(Math.random() * Number(env.HOOK_JITTER_MS)));
   // State commits precede board replacement; expose that interval to readers.
@@ -246,6 +260,13 @@ function after(name, args, rawArgs = args) {
     process.kill(process.pid, 'SIGKILL');
     sleep(5000);
   }
+  // HOOK_COMMIT_DELAY_MS=MS: a lock holder pauses MS after its events reach
+  // the log while a staged commit file waits to be renamed into place, so
+  // readers without the lock meet the log ahead of the files.
+  if (env.HOOK_COMMIT_DELAY_MS && name === 'fsyncSync' && path.resolve(String(target)) === path.join(STATE, 'events.jsonl')
+    && real.readdirSync(STATE).some((file) => /\.json\.E[0-9a-f-]{36}\.commit$/.test(file)) && ownsLock()) {
+    sleep(Number(env.HOOK_COMMIT_DELAY_MS));
+  }
   if (env.HOOK_STOP_RENDER && name === 'renameSync' && args[1] === path.join(STATE, 'sketch.md')
     && path.basename(process.argv[1]) === 'tower-crane.js' && process.argv.includes('spawn') && first('render')) stop(env.HOOK_STOP_RENDER);
   // HOOK_STOP_STARTED=FILE stops the dispatch after it reads its supervisor's startup receipt,
@@ -281,6 +302,18 @@ function after(name, args, rawArgs = args) {
   // its relocated admin directory, before the link in worktrees/ is made.
   if (env.HOOK_STOP_ADMIN_LINK && name === 'writeFileSync' && typeof target === 'string' && path.basename(target) === '.git'
     && /^gitdir: .*\.git-admin/.test(String(args[1])) && first('admin-link')) stop(env.HOOK_STOP_ADMIN_LINK);
+  // A placeholder cleanup takes the git directory's tower-crane-reap by
+  // creating it or by renaming a prepared directory onto it. Once the first
+  // take is done, HOOK_REAP_TAKEN=SIGNAL stops the process there, and
+  // HOOK_DIE_REAP=1 kills it, as a stopped agent's git shim is killed.
+  if ((env.HOOK_REAP_TAKEN || env.HOOK_DIE_REAP) && ['mkdirSync', 'renameSync'].includes(name)
+    && path.basename(String(name === 'renameSync' ? args[1] : target)) === 'tower-crane-reap' && first('reap')) {
+    if (env.HOOK_DIE_REAP) {
+      process.kill(process.pid, 'SIGKILL');
+      sleep(5000);
+    }
+    stop(env.HOOK_REAP_TAKEN);
+  }
   // HOOK_STOP_LOCK_CHANGE=SIGNAL: stop after the first attempt to remove or
   // move what is at or inside the lock, whether or not it worked.
   if (env.HOOK_STOP_LOCK_CHANGE && CHANGES.includes(name) && inLock(target) && first('lock-change')) stop(env.HOOK_STOP_LOCK_CHANGE);

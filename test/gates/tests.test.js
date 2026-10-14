@@ -6,7 +6,7 @@ const path = require('path');
 const gate = require('../../lib/gates/tests');
 const { scratch, isolateGit, git, commit, initRepo, worktrees, quote } = require('./helpers');
 const { shellQuote, treeExec, withWorktree } = require('../../lib/gates/common');
-const { waitUntil } = require('../signals');
+const { waitUntil, killPid } = require('../signals');
 
 const NODE = quote(process.execPath);
 const CMD = `${NODE} run-tests.js`;
@@ -34,6 +34,7 @@ process.exit(failed ? 1 : 0);
 const path = require('path');
 for (const file of process.argv.slice(2)) {
   const p = path.join(__dirname, file);
+  // read-published: a build file in the gate's checkout; no process replaces it during the run.
   if (!fs.existsSync(p) || !fs.readFileSync(p, 'utf8').includes('fixture-task-head')) {
     console.error('stale build file: ' + file);
     process.exit(2);
@@ -48,6 +49,7 @@ require('./run-tests.js');
 const FIX = 'module.exports = (a, b) => a + b;\n';
 const ADD_TEST = "require('assert').strictEqual(require('../lib/add')(1, 2), 3);\n";
 const MUL_TEST = "require('assert').strictEqual(require('../lib/mul')(3, 3), 9);\n";
+const { readPublished } = require('../atomic-file');
 
 const tmp = scratch('gates-tests');
 isolateGit(tmp);
@@ -495,7 +497,7 @@ tick();
     await gate.run(ctx(sha, { args: { cmd, ...(timeout ? { timeout } : {}) } }));
     const started = recorded().slice(before);
     assert.ok(started.length > 0, 'the detached process started');
-    t.after(() => { for (const pid of started.filter(running)) process.kill(pid, 'SIGKILL'); });
+    t.after(() => { for (const pid of started.filter(running)) killPid(pid, 'SIGKILL'); });
     await waitUntil(() => !started.some(running), {
       what: () => `a detached process outlived a command that ${name}: ${started.filter(running).join(', ')}`,
     });
@@ -757,7 +759,7 @@ test('the tests policy decides how many times the suite runs', async () => {
     fs.rmSync(marker, { force: true });
     const r = await gate.run(ctx(sha, { args: { cmd }, project: { tests, gates: { tests_cmd: cmd, tests_proof_cmd: scoped } } }));
     assert.equal(r.ok, true, `${name}: ${r.summary}`);
-    assert.equal(fs.existsSync(marker) ? fs.readFileSync(marker, 'utf8').trim().split('\n').length : 0, runs, name);
+    assert.equal(fs.existsSync(marker) ? readPublished(marker, 'utf8').trim().split('\n').length : 0, runs, name);
     if (runs === 0) assert.match(r.summary, /mode none/);
     if (tests.expensive && runs === 1) {
       assert.match(r.summary, /scoped proof/);

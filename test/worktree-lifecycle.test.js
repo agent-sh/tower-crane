@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { cachedFixture } = require('./helpers');
 const { gateFixture, gateEvidence } = require('./gate-helpers');
-const { fileWritten } = require('./signals');
+const { fileWritten, killPid } = require('./signals');
 
 function setup(t, accepted = false) {
   return cachedFixture(t, accepted ? 'accepted' : 'tasks', (h) => {
@@ -572,7 +572,7 @@ test('an exited orphan remover holds no resources and its next prune discards th
     await fileWritten(paused);
     const reservation = h.readState('tasks.json').orphan_retirements?.[0];
     assert.equal(reservation?.path, wt.path);
-    process.kill(reservation.pid, 'SIGKILL');
+    killPid(reservation.pid, 'SIGKILL');
     await prune;
     h.ok(['claim', 'T1', '--agent', 'adopter']);
     h.ok(['submit', 'T1', '--sha', h.git(['rev-parse', 'HEAD']), '--branch', wt.branch, '--agent', 'adopter']);

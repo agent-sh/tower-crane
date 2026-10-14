@@ -1,6 +1,6 @@
 'use strict';
 
-const { waitOnRepo } = require('./signals');
+const { waitOnRepo, killPid, killGroup } = require('./signals');
 
 const { test, describe } = require('node:test');
 const assert = require('node:assert/strict');
@@ -14,6 +14,7 @@ const { makeRepo, makeTaskRepo, pinRung, STUB_RUNG, BIN, HOOKS, detachedAlive } 
 const { gateFixture, gateEvidence } = require('./gate-helpers');
 const bedrockOutage = require('./fixtures/bedrock-outage.json');
 const { errorReader, transient } = require('../lib/spawn-monitor');
+const { readPublished } = require('./atomic-file');
 
 // The lease gate is POSIX-only; on Windows the dispatch records the lease before launch.
 const GATE_SKIP = process.platform === 'win32' && 'the lease gate is POSIX-only';
@@ -33,7 +34,7 @@ const sketches = (h) => ['sketch.md', 'sketch.html'].map((file) => ({
 
 // A file a process writes exists before its content does; a wait on it needs the content.
 function written(file) {
-  try { return fs.readFileSync(file, 'utf8') || null; } catch (e) { if (e.code === 'ENOENT') return null; throw e; }
+  try { return readPublished(file, 'utf8') || null; } catch (e) { if (e.code === 'ENOENT') return null; throw e; }
 }
 
 function controlledBackoff(h) {
@@ -60,7 +61,7 @@ const fs = require('node:fs');
 const cp = require('node:child_process');
 const cli = (args) => cp.execFileSync(process.execPath, [process.argv[1], ...args], { encoding: 'utf8' });
 const file = process.argv[2];
-const attempts = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : [];
+const attempts = fs.existsSync(file) ? JSON.parse(require(${JSON.stringify(path.join(__dirname, 'atomic-file.js'))}).readPublished(file, 'utf8')) : [];
 if (!attempts.length && ${claim}) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ${claimDelay}); // wait-allow: a late claim is the race this fixture sets up
   cli(['claim', 'T1', '--lease', '1']);
@@ -104,7 +105,7 @@ else { const check = () => {
     '--clear', 'profile', '--clear', 'effort', '--supervision',
     JSON.stringify({ retries: 2, backoff_ms: 150, max_backoff_ms: 1000, stall_ms: 60000, ...config })]);
   h.spawn = (role) => h.run(['spawn', '--task', 'T1', ...(role ? ['--role', role] : []), '--wait', '--json'], { env });
-  h.readAttempts = () => fs.existsSync(h.attempts) ? JSON.parse(fs.readFileSync(h.attempts, 'utf8')) : [];
+  h.readAttempts = () => fs.existsSync(h.attempts) ? JSON.parse(readPublished(h.attempts, 'utf8')) : [];
   return h;
 }
 
@@ -796,7 +797,7 @@ test('descendant CPU activity postpones stall while paths remain quiet', { skip:
       && phase() === 'running', 'CPU stub did not start');
     const stalls = log(h).filter((e) => e.cmd === 'stall').length;
     const samples = () => fs.existsSync(audit)
-      ? fs.readFileSync(audit, 'utf8').split('\n').slice(0, -1).map(JSON.parse).filter((s) => s.kind === 'cpu') : [];
+      ? readPublished(audit, 'utf8').split('\n').slice(0, -1).map(JSON.parse).filter((s) => s.kind === 'cpu') : [];
     const count = samples().length;
     await waitOnRepo(h, () => {
       const active = samples().slice(count);
@@ -944,7 +945,7 @@ test('quiet supervision samples state and progress paths on a seconds-scale inte
   h.json(['spawn', '--task', 'T1'], { env: {
     NODE_OPTIONS: `--require "${hook}"`, TOWER_CRANE_TEST_SAMPLES: audit,
   } });
-  const read = () => fs.existsSync(audit) ? fs.readFileSync(audit, 'utf8').split('\n').slice(0, -1).map(JSON.parse) : [];
+  const read = () => fs.existsSync(audit) ? readPublished(audit, 'utf8').split('\n').slice(0, -1).map(JSON.parse) : [];
   try {
     await waitOnRepo(h, () => fs.existsSync(h.attempts), 'quiet worker did not finish claiming');
     await waitOnRepo(h, () => read().filter((sample) => sample.kind === 'path').length >= 2, 'quiet sampling did not start');
@@ -977,7 +978,7 @@ test('Windows natural exits do not send taskkill to an exited or reused pid', (t
   } });
   if (result.code !== 0) {
     const exit = log(h).findLast((event) => event.cmd === 'spawn exit');
-    const output = exit?.detail.log && fs.existsSync(exit.detail.log) ? fs.readFileSync(exit.detail.log, 'utf8') : '';
+    const output = exit?.detail.log && fs.existsSync(exit.detail.log) ? readPublished(exit.detail.log, 'utf8') : '';
     assert.fail(result.stderr + result.stdout + output + JSON.stringify(exit));
   }
   assert.equal(fs.existsSync(audit), false, 'taskkill can target a new process after the harness pid is released');
@@ -1003,9 +1004,9 @@ setInterval(() => {}, 1000);
   const group = await waitOnRepo(h, () => written(pids) && JSON.parse(written(pids)),
     'process group did not start');
   t.after(() => {
-    try { process.kill(-group[0], 'SIGKILL'); } catch (e) { if (e.code !== 'ESRCH') throw e; }
+    try { killGroup(group[0], 'SIGKILL'); } catch (e) { if (e.code !== 'ESRCH') throw e; }
   });
-  process.kill(spawned.monitor_pid, 'SIGTERM');
+  killPid(spawned.monitor_pid, 'SIGTERM');
   await waitOnRepo(h, () => written(terminated + '.parent') && written(terminated + '.child'), 'stop did not send SIGTERM before SIGKILL');
   await waitOnRepo(h, () => group.every((pid) => !detachedAlive({ pid })), 'stop left a process group member alive');
   await waitOnRepo(h, () => !detachedAlive({ pid: spawned.monitor_pid }), 'stopped monitor survived');
@@ -1023,9 +1024,9 @@ test('a rerun waits for previous descendants even when they close their output p
   let groupFile;
   t.after(() => {
     // Read the file, not a spawn result: a spawn that throws before returning still leaves the group running.
-    const recorded = groupFile && fs.existsSync(groupFile) ? JSON.parse(fs.readFileSync(groupFile, 'utf8')) : null;
+    const recorded = groupFile && fs.existsSync(groupFile) ? JSON.parse(readPublished(groupFile, 'utf8')) : null;
     if (!recorded) return;
-    try { process.kill(-recorded.parent, 'SIGKILL'); } catch (e) { if (e.code !== 'ESRCH') throw e; }
+    try { killGroup(recorded.parent, 'SIGKILL'); } catch (e) { if (e.code !== 'ESRCH') throw e; }
   });
   const h = setup(t, { failures: 0 });
   groupFile = path.join(h.base, 'previous-group.json');
@@ -1044,6 +1045,7 @@ if (!fs.existsSync(file)) {
 } else {
   const prior = JSON.parse(fs.readFileSync(file, 'utf8'));
   try {
+    // read-published: the kernel serves /proc; nothing replaces the file.
     const stat = fs.readFileSync('/proc/' + prior.child + '/stat', 'utf8');
     if (!['Z', 'X'].includes(stat.slice(stat.lastIndexOf(')') + 2).split(' ')[0])) process.exit(2);
   } catch (e) { if (e.code !== 'ENOENT') throw e; }
@@ -1060,7 +1062,9 @@ if (!fs.existsSync(file)) {
 test('a worker waits for its lease while the dispatch CLI is blocked rendering, then its output is durable', { skip: GATE_SKIP }, async (t) => {
   const h = setup(t, { error: 'outage', claim: false });
   const paused = path.join(h.base, 'render-paused');
-  const completed = h.runAsync(['spawn', '--task', 'T1', '--wait', '--json'], { hooks: { HOOK_STOP_RENDER: paused } });
+  // The dispatch releases the lock between its spawn commit and its render's
+  // publish; the supervisor's claim waits until the render holds it again.
+  const completed = h.runAsync(['spawn', '--task', 'T1', '--wait', '--json'], { hooks: { HOOK_STOP_RENDER: paused, HOOK_SUPERVISOR_LOCK_AFTER: paused } });
   let result;
   try {
     await waitOnRepo(h, () => fs.existsSync(paused), 'dispatch did not pause after committing its spawn');
@@ -1220,7 +1224,7 @@ check();
   h.ok(['ladder', 'set', 'easy', '--harness', 'command', '--command', JSON.stringify([process.execPath, '-e', script, planted, result, named, '{prompt}']),
     '--clear', 'profile', '--clear', 'effort', '--supervision', JSON.stringify({ retries: 0 })]);
   const r = h.run(['spawn', '--task', 'T1', '--wait', '--json']);
-  assert.equal(fs.existsSync(result) && fs.readFileSync(result, 'utf8'), 'removed', r.stderr);
+  assert.equal(fs.existsSync(result) && readPublished(result, 'utf8'), 'removed', r.stderr);
   assert.equal(fs.existsSync(planted), false);
   const removed = log(h).filter((e) => e.cmd === 'commondir removed');
   // About 1.5 s of writes: one event per sample interval and one at exit.

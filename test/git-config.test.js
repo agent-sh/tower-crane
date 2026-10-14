@@ -10,6 +10,7 @@ const zlib = require('node:zlib');
 const { makeRepo, pinRung, PTY_AVAILABLE } = require('./helpers');
 const { gateFixture } = require('./gate-helpers');
 const { shellQuote } = require('../lib/gates/common');
+const { readPublished } = require('./atomic-file');
 
 // A sandboxed worker may write the repository's git directory, so every
 // command its config or hooks name is planted here and none may run in git
@@ -56,7 +57,7 @@ function plant(h) {
   };
   for (const [key, value] of Object.entries(settings)) h.git(['config', key, value]);
   ageLooseObjects(gitDir);
-  return { cmd, ran: () => (fs.existsSync(marker) ? fs.readFileSync(marker, 'utf8').trim().split('\n') : []) };
+  return { cmd, ran: () => (fs.existsSync(marker) ? readPublished(marker, 'utf8').trim().split('\n') : []) };
 }
 
 // gc --auto counts the loose objects in objects/17.
@@ -115,7 +116,7 @@ test('git the CLI and gates run takes no command from repository config or hooks
   h.ok(['submit', 'T2', '--sha', sha, '--agent', 'worker-2'], { env });
   assert.deepEqual(ran(), []);
 
-  h.git(['remote', 'add', 'origin', 'ssh://git@127.0.0.1:9/acme/demo.git']);
+  h.git(['remote', 'set-url', 'origin', 'ssh://git@127.0.0.1:9/acme/demo.git']);
   assert.match(h.run(['worktree', 'T3', '--agent', 'orchestrator'], { env }).stderr, /git fetch origin main failed/);
   assert.deepEqual(ran(), []);
 
@@ -162,7 +163,7 @@ test('a planted commondir in the common directory stops git the CLI and gates ru
   const script = path.join(h.base, 'planted.js');
   fs.writeFileSync(script, `require('node:fs').appendFileSync(${JSON.stringify(marker)}, process.argv[2] + '\\n');\n`);
   const cmd = (name) => `${shellQuote(process.execPath)} ${shellQuote(script)} ${name}`;
-  const ran = () => (fs.existsSync(marker) ? fs.readFileSync(marker, 'utf8').trim().split('\n') : []);
+  const ran = () => (fs.existsSync(marker) ? readPublished(marker, 'utf8').trim().split('\n') : []);
   const other = path.join(h.base, 'other');
   fs.cpSync(h.repo, other, { recursive: true });
   h.git(['config', 'core.fsmonitor', cmd('fsmonitor')], other);
@@ -215,7 +216,7 @@ function redirectFixture(t) {
   h.ok(['project', 'set', '--tests-cmd', `${shellQuote(process.execPath)} ${shellQuote(script)} tests-cmd`, ...state]);
   h.ok(['task', 'add', '--title', 'Other state', '--acceptance', 'works', ...state]);
   return { h, other, planted: path.join(h.repo, '.git', 'commondir'),
-    ran: () => (fs.existsSync(marker) ? fs.readFileSync(marker, 'utf8').trim().split('\n') : []) };
+    ran: () => (fs.existsSync(marker) ? readPublished(marker, 'utf8').trim().split('\n') : []) };
 }
 
 // The guard reads the files before git does; a commondir that appears in
@@ -390,7 +391,7 @@ test('the caller\'s GIT_SSH and SSH_ASKPASS still run under the command-scope de
   const marker = path.join(h.base, 'caller-ran');
   const script = path.join(h.base, 'caller.js');
   fs.writeFileSync(script, `require('node:fs').appendFileSync(${JSON.stringify(marker)}, process.argv[2] + '\\n');\nconsole.log('x');\n`);
-  const ran = () => (fs.existsSync(marker) ? fs.readFileSync(marker, 'utf8').trim().split('\n') : []);
+  const ran = () => (fs.existsSync(marker) ? readPublished(marker, 'utf8').trim().split('\n') : []);
   const bin = path.join(h.base, 'caller bin');
   fs.mkdirSync(bin);
   const program = (name) => {
@@ -398,7 +399,7 @@ test('the caller\'s GIT_SSH and SSH_ASKPASS still run under the command-scope de
     fs.writeFileSync(file, `#!/bin/sh\nexec ${shellQuote(process.execPath)} ${shellQuote(script)} ${name}\n`, { mode: 0o755 });
     return file;
   };
-  h.git(['remote', 'add', 'origin', 'ssh://git@127.0.0.1:9/acme/demo.git']);
+  h.git(['remote', 'set-url', 'origin', 'ssh://git@127.0.0.1:9/acme/demo.git']);
   const { spawnSync } = require('../lib/commands');
   // h.env carries no GIT_ variable of the caller's.
   const base = h.env;
@@ -440,7 +441,7 @@ test('a config scan is reused until a file it read changes', (t) => {
   h.git(['worktree', 'add', '-q', '--detach', wt]);
   const trace = path.join(h.base, 'trace');
   const env = { ...h.env, GIT_TRACE: trace };
-  const count = (text) => (fs.existsSync(trace) ? fs.readFileSync(trace, 'utf8').split('\n').filter((l) => l.includes(text)).length : 0);
+  const count = (text) => (fs.existsSync(trace) ? readPublished(trace, 'utf8').split('\n').filter((l) => l.includes(text)).length : 0);
   const scans = () => count('config --list --show-scope');
   const parses = () => count('config --file - --no-includes');
   const { spawnSync } = require('../lib/commands');
@@ -480,7 +481,7 @@ test('repository git proxies cannot run before command-scope overrides', (t) => 
   const proxy = path.join(h.base, 'proxy');
   fs.writeFileSync(proxy, `#!/bin/sh\nexec ${shellQuote(process.execPath)} ${shellQuote(script)} "$@"\n`, { mode: 0o755 });
   h.git(['config', 'core.gitProxy', proxy]);
-  h.git(['remote', 'add', 'origin', 'git://127.0.0.1:9/acme/demo.git']);
+  h.git(['remote', 'set-url', 'origin', 'git://127.0.0.1:9/acme/demo.git']);
 
   const result = h.run(['worktree', 'T1', '--agent', 'orchestrator']);
   assert.match(result.stderr, /git fetch origin main failed/);
@@ -527,7 +528,7 @@ test('conditional includes cannot add a driver the config scan misses', (t) => {
     h.git(['config', `includeIf.${condition}.path`, `${name}.inc`]);
   }
   fs.writeFileSync(path.join(gitDir, 'info', 'attributes'), '*.js filter=gitdir\n*.json filter=branch\nvalue.js filter=branch\n');
-  const ran = () => (fs.existsSync(marker) ? fs.readFileSync(marker, 'utf8').trim().split('\n') : []);
+  const ran = () => (fs.existsSync(marker) ? readPublished(marker, 'utf8').trim().split('\n') : []);
 
   h.ok(['worktree', 'T2', '--agent', 'orchestrator']);
   for (const type of ['tests', 'clean']) {
@@ -569,22 +570,22 @@ const ROWS = [
     r.change('main\n'); r.git(['commit', '-qam', 'main']);
     r.attributes('* merge=tc'); r.set('merge.tc.driver', r.cmd('merge-driver'));
   } },
-  { name: 'core.sshCommand', run: ['fetch', 'origin'], plant: (r) => { r.git(['remote', 'add', 'origin', SSH_ORIGIN]); r.set('core.sshCommand', r.cmd('ssh-command')); } },
+  { name: 'core.sshCommand', run: ['fetch', 'origin'], plant: (r) => { r.git(['remote', 'set-url', 'origin', SSH_ORIGIN]); r.set('core.sshCommand', r.cmd('ssh-command')); } },
   { name: 'GIT_SSH_COMMAND', run: ['fetch', 'origin'], caller: 'caller-ssh-command', plant: (r) => {
-    r.git(['remote', 'add', 'origin', SSH_ORIGIN]); r.set('core.sshCommand', r.cmd('ssh-command'));
+    r.git(['remote', 'set-url', 'origin', SSH_ORIGIN]); r.set('core.sshCommand', r.cmd('ssh-command'));
     return { GIT_SSH_COMMAND: r.cmd('caller-ssh-command') };
   } },
   { name: 'GIT_SSH', run: ['fetch', 'origin'], caller: 'caller-ssh', plant: (r) => {
-    r.git(['remote', 'add', 'origin', SSH_ORIGIN]); r.set('core.sshCommand', r.cmd('ssh-command'));
+    r.git(['remote', 'set-url', 'origin', SSH_ORIGIN]); r.set('core.sshCommand', r.cmd('ssh-command'));
     return { GIT_SSH: r.program('caller-ssh') };
   } },
   { name: 'credential.helper', run: ['fetch', 'origin'], plant: async (r, t) => {
-    r.git(['remote', 'add', 'origin', `http://127.0.0.1:${await unauthorizedServer(t)}/acme/demo.git`]);
+    r.git(['remote', 'set-url', 'origin', `http://127.0.0.1:${await unauthorizedServer(t)}/acme/demo.git`]);
     r.set('credential.helper', `!${r.cmd('credential-helper')}`);
   } },
   { name: 'credential.<url>.helper', run: ['fetch', 'origin'], plant: async (r, t) => {
     const url = `http://127.0.0.1:${await unauthorizedServer(t)}`;
-    r.git(['remote', 'add', 'origin', `${url}/acme/demo.git`]);
+    r.git(['remote', 'set-url', 'origin', `${url}/acme/demo.git`]);
     r.set(`credential.${url}.helper`, `!${r.cmd('credential-url-helper')}`);
   } },
   { name: 'gpg.program', run: COMMIT, plant: (r) => { r.set('commit.gpgSign', 'true'); r.set('gpg.program', r.program('gpg-program')); } },
@@ -598,24 +599,24 @@ const ROWS = [
   // The user allows the helper protocol, so only the alias is the repository's.
   { name: 'alias.remote-<name> through a <name>:: URL', run: ['fetch', 'origin'], plant: (r) => {
     r.trust('protocol.tcx.allow', 'always');
-    r.git(['remote', 'add', 'origin', 'tcx::anything']); r.set('alias.remote-tcx', `!${r.cmd('helper-alias')}`);
+    r.git(['remote', 'set-url', 'origin', 'tcx::anything']); r.set('alias.remote-tcx', `!${r.cmd('helper-alias')}`);
   } },
   { name: 'alias.remote-<name> through remote.<r>.vcs', run: ['fetch', 'origin'], plant: (r) => {
     r.trust('protocol.tcy.allow', 'always');
-    r.git(['remote', 'add', 'origin', 'https://127.0.0.1:9/acme/demo.git']); r.set('remote.origin.vcs', 'tcy');
+    r.git(['remote', 'set-url', 'origin', 'https://127.0.0.1:9/acme/demo.git']); r.set('remote.origin.vcs', 'tcy');
     r.set('alias.remote-tcy', `!${r.cmd('vcs-alias')}`);
   } },
   { name: 'protocol.ext.allow', run: ['fetch', 'origin'], plant: (r) => {
     const ext = [process.execPath, r.script, 'ext-command'].map((a) => a.replace(/%/g, '%%').replace(/ /g, '% ')).join(' ');
-    r.git(['remote', 'add', 'origin', `ext::${ext}`]); r.set('protocol.ext.allow', 'always');
+    r.git(['remote', 'set-url', 'origin', `ext::${ext}`]); r.set('protocol.ext.allow', 'always');
   } },
   // A helper the user installed, which git allows only for a typed URL.
   { name: 'protocol.allow', run: ['fetch', 'origin'], plant: (r) => {
-    r.git(['remote', 'add', 'origin', 'tcz::anything']); r.set('protocol.allow', 'always');
+    r.git(['remote', 'set-url', 'origin', 'tcz::anything']); r.set('protocol.allow', 'always');
     return { PATH: r.helper('tcz') };
   } },
   { name: 'protocol.<name>.allow', run: ['fetch', 'origin'], plant: (r) => {
-    r.git(['remote', 'add', 'origin', 'tcz::anything']); r.set('protocol.tcz.allow', 'always');
+    r.git(['remote', 'set-url', 'origin', 'tcz::anything']); r.set('protocol.tcz.allow', 'always');
     return { PATH: r.helper('tcz') };
   } },
   // git pages only to a terminal.
@@ -676,7 +677,7 @@ function rowRepo(h) {
       h.git(['config', 'lfs.url', LFS_URL]);
       h.git(['config', 'lfs.transfer.maxretries', '1']);
     },
-    ran: () => (fs.existsSync(marker) ? fs.readFileSync(marker, 'utf8').trim().split('\n') : []),
+    ran: () => (fs.existsSync(marker) ? readPublished(marker, 'utf8').trim().split('\n') : []),
     clear: () => fs.rmSync(marker, { force: true }),
   };
 }

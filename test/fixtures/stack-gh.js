@@ -10,7 +10,7 @@ let skew = 0;
 Date.now = () => now() + skew;
 const BIN = path.join(__dirname, '..', '..', 'bin', 'tower-crane.js');
 const { ownerKeyFile, ownerProject } = require('../../lib/authority');
-const { writeAtomic } = require('../atomic-file');
+const { updateJson, readPublished } = require('../atomic-file');
 
 if (process.env.TEST_STACK_DEFER_OBSERVE) {
   require('../../lib/stack').observe = () => {};
@@ -27,14 +27,36 @@ function pause(ready, release) {
   }
 }
 
+// Other processes call gh while this call runs: a spawned reviewer reads a PR while
+// an observer links the stack. Writing back the copy this call read would undo their
+// changes, so only what this call changed lands on the file as it is now. Plain
+// objects merge per key and any other value is replaced.
+function applyChanges(before, after, current) {
+  const plain = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
+  for (const key of new Set([...Object.keys(before), ...Object.keys(after)])) {
+    if (plain(before[key]) && plain(after[key]) && plain(current[key])) applyChanges(before[key], after[key], current[key]);
+    else if (JSON.stringify(before[key]) === JSON.stringify(after[key])) continue;
+    else if (after[key] === undefined) delete current[key];
+    else current[key] = after[key];
+  }
+  return current;
+}
+
 // Only GitHub is stubbed. Worktrees, commits, fetches and the bare remote are real.
 cp.spawnSync = function stackGh(command, args, opts) {
   if (command !== 'gh' || !process.env.TEST_STACK_DATA) return original(command, args, opts);
   const file = process.env.TEST_STACK_DATA;
-  const data = JSON.parse(fs.readFileSync(file, 'utf8'));
+  const read = readPublished(file, 'utf8');
+  const data = JSON.parse(read);
   data.calls.push({ args, cwd: opts.cwd });
   const finish = (value = '', status = 0, stderr = '') => {
-    writeAtomic(file, JSON.stringify(data));
+    // data.delayMs models a slow GitHub: every call takes that long to answer.
+    if (data.delayMs) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, data.delayMs); // wait-allow: models GitHub's response time, not a readiness wait
+    updateJson(file, (current) => {
+      const before = JSON.parse(read);
+      current.calls.push(...data.calls.slice(before.calls.length));
+      return applyChanges({ ...before, calls: null }, { ...data, calls: null }, current);
+    });
     return { status, stdout: typeof value === 'string' ? value : JSON.stringify(value), stderr };
   };
   const response = (r, fallback = '') => {
@@ -50,8 +72,10 @@ cp.spawnSync = function stackGh(command, args, opts) {
   for (const cli of (racing && data.during?.[key]) || []) {
     const project = ownerProject(path.join(data.repo, '.tower-crane'));
     const env = { ...process.env, TOWER_CRANE_OWNER_KEY: fs.readFileSync(ownerKeyFile(project), 'utf8').trim() };
-    // {pid} names the CLI process making this gh call, so a test can count each observer's attempts.
-    const r = original(process.execPath, [BIN, ...cli.map((arg) => arg.replaceAll('{pid}', String(process.pid)))], { cwd: data.repo, env, encoding: 'utf8' });
+    // {pid} names the CLI process making this gh call, so a test can count each observer's attempts;
+    // {nonce} is new on every call, so a racing write changes state each time.
+    const fill = (arg) => arg.replaceAll('{pid}', String(process.pid)).replaceAll('{nonce}', require('node:crypto').randomUUID());
+    const r = original(process.execPath, [BIN, ...cli.map(fill)], { cwd: data.repo, env, encoding: 'utf8' });
     if (r.status !== 0) throw new Error(`tower-crane ${cli.join(' ')} failed: ${r.stderr}`);
   }
   if (data.during && !(data.duringWhile?.[key] && fs.existsSync(data.duringWhile[key]))) delete data.during[key];

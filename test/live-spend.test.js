@@ -451,13 +451,14 @@ for (const partialLog of [false, true]) {
       LIVE_STEPS: partialLog ? '2' : '1', LIVE_HOLD: 'until-stop', LIVE_FILE: location,
       ...(partialLog ? { LIVE_LOG_PREFIX: '1' } : {}),
     }) });
-    await until(t, h, () => events(h).some((e) => e.cmd === 'spend live' && e.detail.tokens === tokens), 'initial usage was not recorded');
+    // A commit logs its events before it renames tasks.json, so these waits
+    // read the task file that the next lock-free read sees, not the log.
+    await until(t, h, () => liveEntries(h).some((e) => e.tokens === tokens), 'initial usage was not recorded');
     const before = h.json(['task', 'show', 'T1']).spend;
     const file = fs.readFileSync(location, 'utf8');
     const data = fs.readFileSync(file);
-    const readings = events(h).filter((e) => e.cmd === 'spend live').length;
     fs.unlinkSync(file);
-    await until(t, h, () => events(h).filter((e) => e.cmd === 'spend live').length > readings, 'missing telemetry was not observed');
+    await until(t, h, () => liveEntries(h)[0]?.live.state === 'stale', 'missing telemetry was not observed');
     const missing = h.json(['task', 'show', 'T1']).spend;
     for (const key of ['tokens', 'input', 'cached', 'output']) assert.equal(missing[key], before[key], key);
     assert.equal(missing.entries[0].at, before.entries[0].at, 'missing data cannot refresh the last measured usage');

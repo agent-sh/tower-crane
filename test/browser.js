@@ -1,6 +1,6 @@
 'use strict';
 
-const { waitUntil, HUNG_TEST_MS } = require('./signals');
+const { waitUntil, HUNG_TEST_MS, killPid } = require('./signals');
 
 // Drives a page in headless Chrome over the DevTools protocol, for the tests
 // that check what the serve pages do in a browser. Node's own fetch and
@@ -12,6 +12,7 @@ const os = require('node:os');
 const path = require('node:path');
 const cp = require('node:child_process');
 const { tempRoot } = require('./tmp-root');
+const { readPublished } = require('./atomic-file');
 
 const NAMES = ['google-chrome', 'google-chrome-stable', 'chromium', 'chromium-browser', 'chrome'];
 
@@ -134,7 +135,7 @@ function chromeTree(pid) {
 function signalTree(tree, signal, browser) {
   for (const pid of tree.keys()) {
     if (pid === browser) continue;
-    try { process.kill(pid, signal); } catch { /* It exited since the table was read. */ }
+    try { killPid(pid, signal); } catch { /* It exited since the table was read. */ }
   }
 }
 
@@ -207,7 +208,7 @@ async function spawnChrome(profile) {
   try {
     port = await waitUntil(() => {
       if (failure) throw new Error(failure);
-      return fs.existsSync(portFile) && fs.readFileSync(portFile, 'utf8').split('\n')[0];
+      return fs.existsSync(portFile) && readPublished(portFile, 'utf8').split('\n')[0];
     }, { paths: [portFile] });
   } catch (error) {
     try { await stop(); } finally { remove(); }

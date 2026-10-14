@@ -1,15 +1,16 @@
 'use strict';
 
-const { HUNG_TEST_MS, waitOnRepo, waitUntil, fileWritten } = require('./signals');
+const { HUNG_TEST_MS, waitOnRepo, waitUntil, fileWritten, killPid } = require('./signals');
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { makeRepo, cachedFixture, stubRungs, BIN, detachedAlive } = require('./helpers');
+const { makeRepo, cachedFixture, stubRungs, BIN, detachedAlive, processesIn } = require('./helpers');
 const { gateFixture, gateEvidence } = require('./gate-helpers');
 const { waitFor } = require('./canary');
 const { shellQuote } = require('../lib/gates/common');
+const { readPublished } = require('./atomic-file');
 
 const ghStub = path.join(__dirname, 'fixtures', 'automation-gh.js');
 const harness = path.join(__dirname, 'fixtures', 'automation-harness.js');
@@ -137,7 +138,7 @@ fs.writeFileSync('generated.txt', rows + '\\n');
     const baseTip = h.git(['rev-parse', 'HEAD']);
     const remote = path.join(h.base, 'origin.git');
     h.git(['init', '--bare', remote]);
-    h.git(['remote', 'add', 'origin', remote]);
+    h.git(['remote', 'set-url', 'origin', remote]);
     h.git(['push', 'origin', 'main', 'fixture-change']);
     h.git(['switch', 'fixture-change']);
     const state = h.github();
@@ -733,6 +734,14 @@ test('unchanged pending CI is rechecked each minute without new records, and CI 
   now += 25 * 60000;
   fs.writeFileSync(clock, String(now));
   await until(() => ci().at(-1).stalled === true, 'CI that never started stalls after 30 minutes');
+  // The stall record is written mid-run: the recheck that wrote it, and the
+  // reaction its gate event queues, still render the board and read the PR.
+  const stall = h.logs().findLast((e) => e.cmd === 'check ci');
+  const outcome = (id) => h.logs().findLast((e) => e.cmd === 'automation' && e.detail.source === id && e.detail.phase !== 'running')?.detail.phase;
+  let sources = [];
+  await until(() => (sources = [stall.id, ...reconciles().map((e) => e.id)]).every(outcome), 'the engine finishes the run that recorded the stall');
+  // A reaction that failed also finishes; it must not pass for one that worked.
+  for (const id of sources) assert.ok(['done', 'deferred'].includes(outcome(id)), `the reaction to ${id} ended ${outcome(id)}`);
   assert.equal(ci().length, 2);
   assert.match(ci().at(-1).summary, /Stalled: no CI run has been queued or running at this head since/);
   assert.equal(h.readState('tasks.json').tasks[0].status, 'submitted', 'a stall is not a verdict on the change');
@@ -852,7 +861,7 @@ global.Date = class extends RealDate {
   constructor(...args) { super(...(args.length ? args : [Date.now()])); }
   static now() {
     return fs.existsSync(${JSON.stringify(clock)})
-      ? Number(fs.readFileSync(${JSON.stringify(clock)}, 'utf8')) : RealDate.now();
+      ? Number(fs.readFileSync(${JSON.stringify(clock)}, 'utf8')) : RealDate.now(); // read-published: the test writes the clock in place.
   }
 };
 `);
@@ -1452,6 +1461,55 @@ test('a test that also fails on main retries once, then reworks with the main fa
   assert.match(h.logs().findLast((e) => e.cmd === 'rework').detail.reason, /^tests failed at [0-9a-f]+: .*Also fails on main at [0-9a-f]+: known base failure/s);
 });
 
+test('a test failure whose base rerun is killed is not confirmed, retries once and reports the unchecked base', { skip: process.platform === 'win32' }, (t) => {
+  const h = setup(t, { ci: 'pending' });
+  const script = path.join(h.base, 'base-killed.js');
+  // Fails by name at the submitted head, where value.js is 1, and is killed on the base, where it is 0.
+  fs.writeFileSync(script, "const fs = require('node:fs');\nif (!fs.readFileSync('value.js', 'utf8').includes('1')) process.kill(process.pid, 'SIGKILL');\nconsole.log('# Subtest: test/sum.test.js');\nconsole.log('not ok 1 - sums two numbers');\nprocess.exit(1);\n");
+  h.ok(['project', 'set', '--tests-cmd', `node ${shellQuote(script)}`, '--tests-mode', 'run-only']);
+  h.submit();
+  h.consume();
+  assert.equal(h.logs().filter((e) => e.cmd === 'check tests').length, 2, 'a killed base rerun runs once more, and no third time');
+  const task = h.readState('tasks.json').tasks[0];
+  const runs = task.evidence.filter((e) => e.type === 'tests');
+  assert.deepEqual(runs.map((e) => [e.confirmed_failure, e.main_failure]), [[undefined, undefined], [undefined, undefined]],
+    'the base never said which names fail there, so the failure is not confirmed');
+  for (const run of runs) {
+    assert.match(run.base_rerun_killed.base, /^[0-9a-f]+$/);
+    assert.ok(run.base_rerun_killed.signal === 'SIGKILL' || run.base_rerun_killed.status === 137, JSON.stringify(run.base_rerun_killed));
+  }
+  assert.deepEqual(h.logs().filter((e) => e.cmd === 'check tests').map((e) => e.detail.base_rerun_killed), runs.map((e) => e.base_rerun_killed),
+    'the audit event carries the same flag as the evidence');
+  assertReworked(h, task);
+  assert.match(h.logs().findLast((e) => e.cmd === 'rework').detail.reason,
+    /Base rerun at [0-9a-f]+ was killed \((?:SIGKILL|exit 137)\); shared failures were not checked\./);
+});
+
+test('a test failure whose base rerun times out is not confirmed, retries once and reports the unchecked base', (t) => {
+  const h = setup(t, { ci: 'pending' });
+  const script = path.join(h.base, 'base-hangs.js');
+  // Fails by name at the submitted head, where value.js is 1, and outlives the gate deadline on the base, where it is 0.
+  fs.writeFileSync(script, "const fs = require('node:fs');\nif (!fs.readFileSync('value.js', 'utf8').includes('1')) setTimeout(() => {}, 60000);\n" // wait-allow: outlive the gate deadline on the base
+    + "else {\n  console.log('# Subtest: test/sum.test.js');\n  console.log('not ok 1 - sums two numbers');\n  process.exit(1);\n}\n");
+  h.ok(['project', 'set', '--tests-cmd', `node ${shellQuote(script)}`, '--tests-mode', 'run-only', '--tests-timeout-min', '0.05']);
+  h.submit();
+  h.consume();
+  assert.equal(h.logs().filter((e) => e.cmd === 'check tests').length, 2, 'a timed-out base rerun runs once more, and no third time');
+  const task = h.readState('tasks.json').tasks[0];
+  const runs = task.evidence.filter((e) => e.type === 'tests');
+  assert.deepEqual(runs.map((e) => [e.confirmed_failure, e.main_failure, e.infrastructure_failure]), [[undefined, undefined, undefined], [undefined, undefined, undefined]],
+    'the base never said which names fail there, so the failure is not confirmed');
+  for (const run of runs) {
+    assert.match(run.base_rerun_timed_out.base, /^[0-9a-f]+$/);
+    assert.equal(run.base_rerun_timed_out.minutes, 0.05);
+  }
+  assert.deepEqual(h.logs().filter((e) => e.cmd === 'check tests').map((e) => e.detail.base_rerun_timed_out), runs.map((e) => e.base_rerun_timed_out),
+    'the audit event carries the same flag as the evidence');
+  assertReworked(h, task);
+  assert.match(h.logs().findLast((e) => e.cmd === 'rework').detail.reason,
+    /Base rerun at [0-9a-f]+ timed out after 0\.05 min; shared failures were not checked\./);
+});
+
 test('a test gate that fails by hand while the watcher runs reworks, not left submitted', async (t) => {
   const h = setup(t, { ci: 'pending' });
   const flag = path.join(h.base, 'broken');
@@ -1650,6 +1708,7 @@ if (${stage === 'trial'}) {
   const C = require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'gates', 'common'))}), git = C.git;
   C.git = async (...args) => {
     const result = await git(...args);
+    // read-published: the gh stub appends calls; nothing replaces the file.
     const log = fs.existsSync(${JSON.stringify(calls)}) ? fs.readFileSync(${JSON.stringify(calls)}, 'utf8') : '';
     if (args[2][0] === 'merge' && args[2].includes('--no-commit') && log.includes('["pr","view","9"')) {
       fs.writeFileSync(${JSON.stringify(started)}, '');
@@ -1679,6 +1738,7 @@ if (${stage === 'trial'}) {
         if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
         await result;
         await h.cleanup();
+        assert.deepEqual(processesIn(h.base), [], 'no process the test started outlives its fixture');
       });
       await waitFor(started, { what: 'the post-merge sweep starts' });
       assert.equal(h.github().prs['7'].state, 'MERGED');
@@ -1889,7 +1949,7 @@ const crash = ${JSON.stringify(crash ? path.join(h.base, 'crashed') : null)};
 if (crash && !fs.existsSync(crash)) {
   fs.writeFileSync(crash, '');
   const events = fs.readFileSync(${JSON.stringify(path.join(h.state, 'events.jsonl'))}, 'utf8').trim().split('\\n').map(JSON.parse);
-  process.kill(events.findLast((e) => e.cmd === 'automation' && e.detail.phase === 'running').detail.pid, 'SIGKILL');
+  require(${JSON.stringify(path.join(__dirname, 'signals'))}).killPid(events.findLast((e) => e.cmd === 'automation' && e.detail.phase === 'running').detail.pid, 'SIGKILL');
 }
 const finish = () => { fs.appendFileSync(${JSON.stringify(runs)}, '-\\n'); process.exitCode = ${fail ? 1 : 0}; };
 const release = ${JSON.stringify(release)};
@@ -1918,7 +1978,7 @@ if (release) {
   return () => {
     let now = 0;
     let peak = 0;
-    const marks = fs.existsSync(runs) ? fs.readFileSync(runs, 'utf8').trim().split('\n') : [];
+    const marks = fs.existsSync(runs) ? readPublished(runs, 'utf8').trim().split('\n') : [];
     for (const mark of marks) peak = Math.max(peak, now += mark === '+' ? 1 : -1);
     return { starts: marks.filter((m) => m === '+').length, peak };
   };
@@ -1971,7 +2031,8 @@ const held = ${JSON.stringify(stage)} === 'pr'
   ? args[0] === 'pr' && args[1] === 'view'
   : args[0] === 'api' && args[1].includes('check-runs');
 if (held) {
-  fs.writeFileSync(${JSON.stringify(path.join(h.base, 'github-started'))}, String(process.pid));
+  // Teardown signals this pid, so it must never read the file empty.
+  require(${JSON.stringify(path.join(__dirname, 'atomic-file'))}).writeAtomic(${JSON.stringify(path.join(h.base, 'github-started'))}, String(process.pid));
   const poll = () => {
     if (fs.existsSync(${JSON.stringify(release)})) require(${JSON.stringify(ghStub)});
     else setTimeout(poll, 25); // wait-allow: probe cadence only; the release file is the signal
@@ -2011,11 +2072,11 @@ require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'public-http'))}).fet
 });
 `);
       }
-      const child = require('node:child_process').spawn(process.execPath,
-        ['--require', preload, BIN, 'wait', '--after', '0', '--types', 'never',
-          ...(stage === 'follow' ? ['--follow'] : ['--timeout', '300']),
-          ...(stage === 'observe' ? ['--observe'] : []), ...(json && stage !== 'follow' ? ['--json'] : []), '--agent', 'orchestrator'],
-        { cwd: h.repo, env: h.env });
+      // An idle wait host refills worker slots, and cleanup stops the worker it dispatches.
+      const child = h.spawnCli(['wait', '--after', '0', '--types', 'never',
+        ...(stage === 'follow' ? ['--follow'] : ['--timeout', '300']),
+        ...(stage === 'observe' ? ['--observe'] : []), ...(json && stage !== 'follow' ? ['--json'] : []), '--agent', 'orchestrator'],
+      { pre: ['--require', preload] });
       const started = path.join(h.base, github ? 'github-started' : `suite-started-${heldRun}`);
       let stdout = '';
       let stderr = '';
@@ -2032,10 +2093,11 @@ require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'public-http'))}).fet
         if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
         await result;
         if (github && fs.existsSync(started)) {
-          try { process.kill(Number(fs.readFileSync(started, 'utf8')), 'SIGKILL'); }
+          try { killPid(Number(readPublished(started, 'utf8')), 'SIGKILL'); }
           catch (e) { if (e.code !== 'ESRCH') throw e; }
         }
         await h.cleanup();
+        assert.deepEqual(processesIn(h.base), [], 'no process the test started outlives its fixture');
       });
       await waitFor(started, { what: idle ? 'wait is ready' : 'the gate starts' });
       child.kill(signal);
@@ -2116,7 +2178,7 @@ function slowSuiteRunning(pid) {
   if (process.platform === 'linux') {
     try { return !/^\S+ \(.*\) [ZX]/.test(fs.readFileSync(`/proc/${pid}/stat`, 'utf8')); } catch { return false; }
   }
-  try { process.kill(pid, 0); return true; } catch { return false; }
+  try { killPid(pid, 0); return true; } catch { return false; }
 }
 
 async function stopSlowSuites(h, release) {
@@ -2127,7 +2189,7 @@ async function stopSlowSuites(h, release) {
   const until = Date.now() + 5000; // wait-allow: teardown grace before killing released suites
   while (pids.some(slowSuiteRunning) && Date.now() < until) await new Promise((resolve) => setTimeout(resolve, 50)); // wait-allow: teardown grace before killing released suites
   for (const pid of pids.filter(slowSuiteRunning)) {
-    try { process.kill(pid, 'SIGKILL'); } catch { /* It exited meanwhile. */ }
+    try { killPid(pid, 'SIGKILL'); } catch { /* It exited meanwhile. */ }
   }
 }
 
@@ -2185,11 +2247,11 @@ test('slow suites stop when their fixture is removed before they are released', 
       '--timeout', '300', '--agent', 'orchestrator']));
   let pids = [];
   // A failed wait below must not leave the suites polling after the test.
-  t.after(() => { for (const pid of pids.filter(slowSuiteRunning)) process.kill(pid, 'SIGKILL'); });
+  t.after(() => { for (const pid of pids.filter(slowSuiteRunning)) killPid(pid, 'SIGKILL'); });
   await waitUntil(() => (pids = slowSuitePids(h)).length >= 2, { what: 'two executors start' });
   assert.equal(pids.length, 2, 'two executors start');
   for (const e of h.logs().filter((e) => e.cmd === 'automation' && e.detail.phase === 'running')) {
-    try { process.kill(e.detail.pid, 'SIGKILL'); } catch { /* It exited already. */ }
+    try { killPid(e.detail.pid, 'SIGKILL'); } catch { /* It exited already. */ }
   }
   await Promise.all(watchers);
   // Windows cannot remove the fixture while the suites and their shells work
@@ -2227,7 +2289,7 @@ const until = Date.now() + 300000;
 const poll = () => {
   const log = read();
   if (log.some((e) => e.cmd === 'automation queued' && e.task === 'T2') || Date.now() > until) {
-    process.kill(log.findLast((e) => e.cmd === 'automation' && e.detail.phase === 'running').detail.pid, 'SIGKILL');
+    require(${JSON.stringify(path.join(__dirname, 'signals'))}).killPid(log.findLast((e) => e.cmd === 'automation' && e.detail.phase === 'running').detail.pid, 'SIGKILL');
     process.exit(1);
   }
   setTimeout(poll, 50); // wait-allow: probe cadence only; the release signal and hung-test timeout bound this fixture
@@ -2412,6 +2474,7 @@ function stepSuite(h, { executors = 1 } = {}) {
 const path = require('node:path');
 const base = ${JSON.stringify(h.base)};
 const counter = path.join(base, 'runs');
+// read-published: one suite run at a time writes the counter in place; nothing replaces it.
 const n = (fs.existsSync(counter) ? Number(fs.readFileSync(counter, 'utf8')) : 0) + 1;
 fs.writeFileSync(counter, String(n));
 fs.writeFileSync(path.join(base, 'stalled-' + n), '');
@@ -2812,11 +2875,13 @@ function refillFixture(t) {
 const task = process.env.TOWER_CRANE_TASK;
 cp.execFileSync(process.execPath, [${JSON.stringify(BIN)}, 'claim', task], { stdio: 'pipe' });
 const file = path.join(process.env.AUTOMATION_CONTEXT_DIR, task);
-fs.writeFileSync(file, '');
+// Tests read the prompt once the marker exists, so the marker comes last.
 fs.writeFileSync(file + '.prompt', process.argv[2]);
+fs.writeFileSync(file, '');
 if (process.env.REFILL_ORPHAN) {
   const child = cp.spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
-  fs.writeFileSync(file + '.orphan', String(child.pid));
+  // The test signals this pid, so it must never read the file empty.
+  require(${JSON.stringify(path.join(__dirname, 'atomic-file'))}).writeAtomic(file + '.orphan', String(child.pid));
 }
 const poll = () => fs.existsSync(file + '.go') ? fs.writeFileSync(file + '.exited', '') : setTimeout(poll, 25); // wait-allow: probe cadence only; the finish file releases the worker
 poll();
@@ -2885,19 +2950,19 @@ test('automation retains an exited worker claim until its lost monitor process g
 }, async (t) => {
   const h = refillFixture(t);
   const spawn = h.json(['spawn', '--task', 'T1', '--agent', 'orchestrator'], { env: { REFILL_ORPHAN: '1' } });
-  await waitFor(`${h.marker('T1')}.orphan`);
+  await waitFor(`${h.marker('T1')}.orphan`, { nonempty: true });
   const orphan = Number(fs.readFileSync(`${h.marker('T1')}.orphan`, 'utf8'));
   const cursor = String(fs.statSync(path.join(h.state, 'events.jsonl')).size);
   const waiting = h.runAsync(['wait', '--after', cursor, '--types', 'spawn', '--timeout', '300', '--agent', 'orchestrator']);
   try {
-    process.kill(spawn.monitor_pid, 'SIGKILL');
-    process.kill(spawn.pid, 'SIGKILL');
+    killPid(spawn.monitor_pid, 'SIGKILL');
+    killPid(spawn.pid, 'SIGKILL');
     fs.writeFileSync(`${h.marker('T1')}.exited`, '');
     await new Promise((resolve) => setTimeout(resolve, 2200)); // wait-allow: observe slot retention across reconciliation polls while the orphan remains alive
     assert.equal(h.readState('tasks.json').tasks[0].claim?.agent, spawn.agent, 'the orphan keeps its worker slot');
     assert.equal(fs.existsSync(h.marker('T3')), false);
   } finally {
-    try { process.kill(orphan, 'SIGKILL'); } catch (e) { if (e.code !== 'ESRCH') throw e; }
+    try { killPid(orphan, 'SIGKILL'); } catch (e) { if (e.code !== 'ESRCH') throw e; }
   }
   const result = await waiting;
   assert.equal(result.code, 0, result.stderr);
@@ -3066,7 +3131,7 @@ test('gates and merges a supervisor runs keep the host environment, not its agen
   // Git reads ~/.gitconfig as the global file: a home's config is the user's.
   delete h.env.GIT_CONFIG_GLOBAL;
   const probe = (name) => path.join(h.base, `${name}.jsonl`);
-  const read = (name) => (fs.existsSync(probe(name)) ? fs.readFileSync(probe(name), 'utf8').trim().split('\n').map(JSON.parse) : []);
+  const read = (name) => (fs.existsSync(probe(name)) ? readPublished(probe(name), 'utf8').trim().split('\n').map(JSON.parse) : []);
   // Each agent writes a global git config in its own home, which runs a hook on checkout.
   const hooks = path.join(h.base, 'planted-hooks');
   fs.mkdirSync(hooks);
@@ -3108,7 +3173,7 @@ require(require('node:path').resolve('test/value.test.js'));
     assert.ok(agent.HOME.startsWith(path.join(h.state, 'homes')), agent.HOME);
     assert.notEqual(agent.XDG_CACHE_HOME, h.env.XDG_CACHE_HOME);
   }
-  const planted = fs.existsSync(probe('planted-hook')) ? fs.readFileSync(probe('planted-hook'), 'utf8') : '';
+  const planted = fs.existsSync(probe('planted-hook')) ? readPublished(probe('planted-hook'), 'utf8') : '';
   assert.equal(planted, '', 'no gate git ran a hook from an agent home');
   const host = (seen) => {
     assert.equal(seen.HOME, h.env.HOME);
@@ -3369,7 +3434,7 @@ test('a reviewer that exits without a verdict is not respawned at that head unti
   const held = () => h.logs().filter((e) => e.cmd === 'review held');
   const until = (what, check) => pollUntil(h, what, check);
   const gone = (pid) => {
-    try { process.kill(pid, 0); return false; } catch { return true; }
+    try { killPid(pid, 0); return false; } catch { return true; }
   };
   // The reaction to a reviewer's exit is where automation used to dispatch the
   // next reviewer; its monitor finishes before the orchestrator acts again.
@@ -3502,7 +3567,7 @@ for (const f of fs.readdirSync('test')) if (f.endsWith('.test.js')) require(path
 `);
   h.ok(['project', 'set', '--tests-cmd', `${shellQuote(process.execPath)} ${shellQuote(suite)}`]);
   h.suites = () => (fs.existsSync(h.suiteLog)
-    ? fs.readFileSync(h.suiteLog, 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse) : []);
+    ? readPublished(h.suiteLog, 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse) : []);
   h.moveMain = (file = 'README.md', text = 'Independent base update.\n') => {
     h.git(['switch', '-q', 'main']);
     fs.appendFileSync(path.join(h.repo, file), text);
@@ -3862,4 +3927,25 @@ poll();
   assert.equal(passes.at(-1).detail.phase, 'done');
   assert.equal(passes.at(-1).detail.blocked, null);
   assert.deepEqual(passes.at(-1).detail.skipped, []);
+});
+
+test('a submit the wait host reads before its files are renamed still runs the gates', async (t) => {
+  const h = setup(t);
+  h.ok(['claim', 'T1', '--agent', 'worker']);
+  const started = path.join(h.base, 'wait-started');
+  const waiter = h.runAsync(['wait', '--types', 'worker-message', '--timeout', '300', '--agent', 'orchestrator'],
+    { hooks: { HOOK_WATCH_READY: started } });
+  t.after(() => waiter);
+  await waitFor(started);
+  // The worker's commit pauses after its events reach the log, before
+  // tasks.json moves to submitted, which the host reads in that window.
+  h.ok(['submit', 'T1', '--sha', h.sha, '--pr', '7', '--agent', 'worker'], { hooks: { HOOK_COMMIT_DELAY_MS: '2000' } });
+  const submit = h.logs().findLast((e) => e.cmd === 'submit');
+  // The host handles the submit before it wakes on a message logged after it.
+  h.ok(['msg', '--to', 'orchestrator', '--task', 'T1', 'done', '--agent', 'w-1']);
+  assert.equal((await waiter).code, 0);
+  const receipts = h.logs().filter((e) => e.cmd === 'automation' && e.detail.source === submit.id);
+  assert.equal(receipts.at(-1)?.detail.phase, 'done', 'the host reacted to the submit');
+  const tests = h.readState('tasks.json').tasks[0].evidence.filter((e) => e.type === 'tests');
+  assert.equal(tests.length, 1, 'and ran its gates');
 });

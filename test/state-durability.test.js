@@ -7,6 +7,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { cachedFixture } = require('./helpers');
 const T = require('../lib/tasks');
+const { waitOnRepo } = require('./signals');
 
 function setup(t) {
   return cachedFixture(t, 'durability', (h) => {
@@ -217,4 +218,199 @@ test('a torn last line cut before its own id is cut off, even when its detail na
   assert.equal(fs.readFileSync(log, 'utf8').includes(second.detail.ref.id), false, 'the torn line is gone');
   assert.deepEqual(noted(h, 'torn note'), { task: false, event: false });
   assertConsistent(h);
+});
+
+// What a reader without the lock gets: the notes in tasks.json and the note
+// events in the log, read as loadState reads them.
+const S = require('../lib/state');
+const unlocked = (h) => {
+  const st = S.loadState(h.state, { fresh: true });
+  return { notes: st.tasks.tasks[0].notes.map((n) => n.text), logged: st.events.filter((e) => e.cmd === 'task note').map((e) => e.detail.text) };
+};
+
+test('a reader without the lock sees a commit whose holder died after its commit point, before recovery renames it', (t) => {
+  const h = setup(t);
+  crash(h, 'landed', 'crashed note');
+  assert.ok(fs.readdirSync(h.state).some((name) => /^tasks\.json\.E.*\.commit$/.test(name)), 'the staged tasks.json waits for the next lock holder');
+  assert.deepEqual(unlocked(h), { notes: ['crashed note'], logged: ['crashed note'] });
+  assert.deepEqual(h.json(['task', 'show', 'T1']).notes.map((n) => n.text), ['crashed note']);
+  h.ok(['task', 'note', 'T1', 'next note']);
+  assert.deepEqual(unlocked(h).notes, ['crashed note', 'next note']);
+  assertConsistent(h);
+});
+
+test('a reader without the lock never sees staged files whose commit point was not reached', (t) => {
+  const h = setup(t);
+  crash(h, 'staged', 'unlogged note');
+  assert.ok(fs.readdirSync(h.state).some((name) => /^tasks\.json\.E.*\.commit$/.test(name)), 'the dead writer left its staged copy');
+  assert.deepEqual(unlocked(h), { notes: [], logged: [] });
+  // A torn append: the commit's first event is a whole line, its last lacks the newline.
+  const log = path.join(h.state, 'events.jsonl');
+  const fd = fs.openSync(log, 'a');
+  const event = (text) => ({ at: new Date().toISOString(), agent: 'owner', cmd: 'task note', task: 'T1', detail: { text }, id: `E${crypto.randomUUID()}`, type: 'task note', to: 'orchestrator' });
+  const first = event('torn first');
+  const second = event('torn last');
+  const doc = h.readState('tasks.json');
+  doc.tasks[0].notes.push({ at: first.at, agent: 'owner', text: 'torn first' }, { at: second.at, agent: 'owner', text: 'torn last' });
+  doc.last_event = second.id;
+  fs.writeFileSync(path.join(h.state, `tasks.json.${second.id}.commit`), JSON.stringify(doc, null, 2) + '\n');
+  fs.writeSync(fd, `${JSON.stringify(first)}\n${JSON.stringify(second)}`);
+  assert.deepEqual(unlocked(h).notes, [], 'a last line without its newline is no commit point');
+  // An older tool appended after a commit that reached its log: recovery
+  // deletes those staged files, so readers never show them either.
+  fs.writeSync(fd, `\n${JSON.stringify(foreign('from an older tool'))}\n`);
+  fs.closeSync(fd);
+  assert.deepEqual(unlocked(h).notes, []);
+});
+
+// Runs read with fs.readFileSync wrapped by onRead(file, text, read), as a
+// writer acting between a reader's own file reads would; `before` calls it
+// ahead of the read, without the text.
+function readingWith(t, onRead, { before = false } = {}) {
+  const read = fs.readFileSync;
+  const restore = () => { fs.readFileSync = read; };
+  t.after(restore);
+  fs.readFileSync = function observed(file, ...args) {
+    if (before && typeof file === 'string') onRead(path.resolve(file), undefined, read);
+    const text = read.call(this, file, ...args);
+    if (!before && typeof file === 'string') onRead(path.resolve(file), text, read);
+    return text;
+  };
+  return restore;
+}
+
+test('a reader whose staged files are renamed into place while it reads keeps that commit\'s state', (t) => {
+  const h = setup(t);
+  crash(h, 'landed', 'renamed note');
+  const staged = fs.readdirSync(h.state).filter((name) => /^(tasks|project|decisions)\.json\.E[0-9a-f-]{36}\.commit$/.test(name));
+  assert.ok(staged.length);
+  let renamed = false;
+  // The renames land after the reader read the staged tasks.json, before it reads the rest.
+  const restore = readingWith(t, (file) => {
+    if (renamed || !staged.some((name) => file === path.join(h.state, name))) return;
+    renamed = true;
+    for (const name of staged) fs.renameSync(path.join(h.state, name), path.join(h.state, name.replace(/\.E[0-9a-f-]{36}\.commit$/, '')));
+  });
+  const read = unlocked(h);
+  restore();
+  assert.ok(renamed);
+  assert.deepEqual(read, { notes: ['renamed note'], logged: ['renamed note'] });
+});
+
+// Puts a copy of events.jsonl in its place: the reader cannot tell it from a
+// log that another commit changed while it read. A link keeps each replaced
+// file, so the copy never reuses its inode; an open handle would instead stop
+// the rename on Windows.
+let replacedLogs = 0;
+function replaceLog(h) {
+  const log = path.join(h.state, 'events.jsonl');
+  fs.linkSync(log, `${log}.kept-${++replacedLogs}`);
+  fs.copyFileSync(log, `${log}.replaced`);
+  fs.renameSync(`${log}.replaced`, log);
+}
+
+test('a reader that keeps losing to commits reads once under the lock', (t) => {
+  const h = setup(t);
+  crash(h, 'landed', 'contended note');
+  const file = path.join(h.state, 'project.json');
+  const lock = path.join(h.state, 'lock');
+  let replaced = 0;
+  // The log changes during every read of project.json made without the lock.
+  const restore = readingWith(t, (read, text, original) => {
+    if (read !== file) return;
+    let mine = false;
+    try {
+      mine = fs.readdirSync(lock).some((name) => JSON.parse(original(path.join(lock, name), 'utf8')).pid === process.pid);
+    } catch {
+      // No lock, or one being replaced: not this process's.
+    }
+    if (mine) return;
+    replaceLog(h);
+    replaced++;
+  });
+  const read = unlocked(h);
+  restore();
+  assert.ok(replaced >= 5, `the reader lost ${replaced} reads`);
+  // The lock's holder had died; taking it renamed the logged commit into place.
+  assert.deepEqual(read, { notes: ['contended note'], logged: ['contended note'] });
+  assert.equal(fs.existsSync(lock), false, 'the reader released the lock');
+  assertConsistent(h);
+});
+
+test('a reader without the lock sees each commit it has the events of while the writer still renames', async (t) => {
+  const h = setup(t);
+  const writer = h.runAsync(['task', 'note', 'T1', 'live note'], { hooks: { HOOK_COMMIT_DELAY_MS: '3000' } });
+  let seen = null;
+  let staged = false;
+  await waitOnRepo(h, () => {
+    const read = unlocked(h);
+    if (!read.logged.includes('live note')) return false;
+    // Still staged after the read: tasks.json was the old file throughout it.
+    staged = fs.readdirSync(h.state).some((name) => /^tasks\.json\.E.*\.commit$/.test(name));
+    seen = read;
+    return true;
+  }, 'the writer logs its note');
+  assert.ok(staged, 'the reader read inside the window');
+  assert.deepEqual(seen, { notes: ['live note'], logged: ['live note'] });
+  assert.equal((await writer).code, 0);
+  assertConsistent(h);
+});
+
+test('a reader that reads the other files after a commit\'s staged ones never takes a later commit\'s file', (t) => {
+  const h = setup(t);
+  crash(h, 'landed', 'staged note');
+  const [staged] = fs.readdirSync(h.state).filter((name) => /^tasks\.json\.E[0-9a-f-]{36}\.commit$/.test(name));
+  const project = path.join(h.state, 'project.json');
+  const later = { ...foreign('later'), cmd: 'project set', type: 'project set', to: 'orchestrator', task: null, detail: { goal: 'later goal' } };
+  let stagedRead = false;
+  let fired = false;
+  // After the reader used the staged tasks.json, and before it reads
+  // project.json beside it: the commit's rename, then a later commit that
+  // replaces project.json and logs its event.
+  const restore = readingWith(t, (file, text, original) => {
+    if (file === path.join(h.state, staged)) stagedRead = true;
+    if (!stagedRead || fired || file !== project) return;
+    fired = true;
+    fs.renameSync(path.join(h.state, staged), path.join(h.state, 'tasks.json'));
+    const doc = JSON.parse(original(project, 'utf8'));
+    fs.writeFileSync(`${project}.later`, JSON.stringify({ ...doc, goal: 'later goal' }, null, 2) + '\n');
+    fs.renameSync(`${project}.later`, project);
+    fs.appendFileSync(path.join(h.state, 'events.jsonl'), `${JSON.stringify(later)}\n`);
+  }, { before: true });
+  const st = S.loadState(h.state, { fresh: true });
+  restore();
+  assert.ok(fired);
+  assert.equal(st.project.goal, 'later goal');
+  assert.ok(st.events.some((e) => e.id === later.id), 'the reader read again, with the event of the commit whose file it shows');
+  assert.deepEqual(st.tasks.tasks[0].notes.map((n) => n.text), ['staged note']);
+});
+
+test('a reader that keeps losing waits only briefly for a held lock, then returns its last read', async (t) => {
+  const h = setup(t);
+  const signal = path.join(h.base, 'holding');
+  const holder = h.runAsync(['task', 'note', 'T1', 'held note'], { hooks: { HOOK_PAUSE_LOCKED: signal } });
+  let read;
+  let replaced = 0;
+  let waited;
+  try {
+    await waitOnRepo(h, () => fs.existsSync(signal), 'the holder takes the lock');
+    const file = path.join(h.state, 'tasks.json');
+    const restore = readingWith(t, (name) => {
+      if (name !== file) return;
+      replaceLog(h);
+      replaced++;
+    });
+    const started = Date.now();
+    read = unlocked(h);
+    waited = Date.now() - started;
+    restore();
+  } finally {
+    fs.writeFileSync(`${signal}.go`, '');
+    assert.equal((await holder).code, 0);
+  }
+  assert.ok(replaced >= 5, `the reader lost ${replaced} reads`);
+  assert.deepEqual(read, { notes: [], logged: [] });
+  // 500 ms for the lock, and the reads around it; a writer would wait 60 s.
+  assert.ok(waited < 10000, `the reader waited ${waited} ms`);
+  assert.deepEqual(unlocked(h).notes, ['held note']);
 });

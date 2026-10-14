@@ -7,7 +7,7 @@ const path = require('node:path');
 const cp = require('node:child_process');
 const { pathToFileURL } = require('node:url');
 const { makeRepo, BIN } = require('./helpers');
-const { waitUntil, waitOnRepo } = require('./signals');
+const { waitUntil, waitOnRepo, killPid } = require('./signals');
 const { CHROME, openBrowser, closeBrowser } = require('./browser');
 test.after(closeBrowser);
 const { gateFixture, gateEvidence } = require('./gate-helpers');
@@ -1363,7 +1363,7 @@ test('an open board draws a live reading stale once it stops arriving, with no s
     await b.until(`document.querySelector('.conn').dataset.conn === 'live' && !!document.querySelector('[data-key="agent-T1"] [data-live-state="live"]')`, 'the live reading on the row');
     // The supervisor goes away and the agent keeps running: no reading, no write.
     const monitor = log(h).find((e) => e.cmd === 'spawn' && e.task === 'T1').detail.monitor_pid;
-    process.kill(monitor, 'SIGKILL');
+    killPid(monitor, 'SIGKILL');
     const events = log(h).length;
     await b.until(`!!document.querySelector('[data-key="agent-T1"] [data-live-state="stale"]') && !!document.querySelector('#queue [data-key="runaway-T1-stale"]')`, 'the stale reading and its Now item');
     assert.equal(log(h).length, events, 'nothing was written: the page aged the reading itself');

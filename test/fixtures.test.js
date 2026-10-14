@@ -101,6 +101,7 @@ test('a fixture spawn without a stub reaches the harness guard and fails its tes
       h.ok(['spawn', '--task', id, '--agent', 'orchestrator']);
     }
     const calls = () => {
+      // read-published: the guard appends hits; nothing replaces the file.
       try { return fs.readFileSync(HARNESS_GUARD.hits, 'utf8').split('\n').slice(0, -1).map((line) => JSON.parse(line)); }
       catch (e) { if (e.code === 'ENOENT') return []; throw e; }
     };

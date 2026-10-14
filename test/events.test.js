@@ -1,6 +1,6 @@
 'use strict';
 
-const { fileWritten, eventAppended, HUNG_TEST_MS } = require('./signals');
+const { fileWritten, eventAppended, HUNG_TEST_MS, killPid } = require('./signals');
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -27,7 +27,7 @@ function setup(t, flags = []) {
   h.workerPids = [];
   t.after(async () => {
     for (const pid of h.workerPids) {
-      try { process.kill(pid, 'SIGKILL'); } catch (e) { if (e.code !== 'ESRCH') throw e; }
+      try { killPid(pid, 'SIGKILL'); } catch (e) { if (e.code !== 'ESRCH') throw e; }
     }
     for (const { p } of h.children) {
       if (p.exitCode === null && p.signalCode === null) p.kill();
@@ -398,7 +398,7 @@ setInterval(() => {}, 1000);\n`);
   await created(claimed);
   assert.equal(h.run(['release', 'T1', '--reason', 'recover', '--agent', 'orchestrator']).code, 1, 'another agent cannot release a live worker');
   const [a, b] = await Promise.all([waiting(t, h, { automation: false, args: ['--types', 'worker-exited'] }), waiting(t, h, { automation: false, args: ['--types', 'worker-exited'] })]);
-  process.kill(spawned.pid, 'SIGKILL');
+  killPid(spawned.pid, 'SIGKILL');
   h.workerPids.length = 0;
   const [ea, eb] = await Promise.all([event(a, 'worker-exited'), event(b, 'worker-exited')]);
   assert.equal(ea.id, eb.id);
@@ -461,7 +461,7 @@ setInterval(() => {}, 1000);\n`);
     assert.equal(result.code, command === 'wait' ? 2 : 0, result.stderr || result.stdout);
     assert.equal(log(h).filter((e) => e.type === 'worker-exited' && e.task === 'T1').length, 0);
     assert.equal(h.readState('tasks.json').tasks[0].claim.agent, live.agent);
-    assert.doesNotThrow(() => process.kill(live.pid, 0), 'the hidden worker is still alive');
+    assert.doesNotThrow(() => killPid(live.pid, 0), 'the hidden worker is still alive');
   });
 }
 

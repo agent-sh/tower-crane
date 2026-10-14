@@ -1,6 +1,7 @@
 'use strict';
 
-const { waitOnRepo } = require('./signals');
+const { waitOnRepo, killPid, killGroup } = require('./signals');
+const { readPublished } = require('./atomic-file');
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -40,9 +41,9 @@ async function pausedSpawn(h, task) {
 // The monitor dies first so it cannot record the exit, then the worker's processes.
 // Windows has no group to signal; the harness's tree goes with taskkill.
 function killWorker(spawned) {
-  process.kill(spawned.monitor_pid, 'SIGKILL');
+  killPid(spawned.monitor_pid, 'SIGKILL');
   if (process.platform === 'win32') cp.spawnSync('taskkill', ['/PID', String(spawned.pid), '/T', '/F'], { stdio: 'ignore' });
-  else process.kill(-spawned.pid, 'SIGKILL');
+  else killGroup(spawned.pid, 'SIGKILL');
 }
 
 function workerGone(spawned) {
@@ -137,7 +138,7 @@ test('a started worker holds its lease against strangers until its own claim ren
   fs.writeFileSync(path.join(h.base, 'T1.claim'), '');
   // The harness writes its result non-atomically, so readiness is a complete record.
   const claimed = path.join(h.base, 'T1.claimed');
-  const claim = await waitOnRepo(h, () => fs.existsSync(claimed) && JSON.parse(fs.readFileSync(claimed, 'utf8')), 'worker did not claim', { alive: spawned.monitor_pid });
+  const claim = await waitOnRepo(h, () => fs.existsSync(claimed) && JSON.parse(readPublished(claimed, 'utf8')), 'worker did not claim', { alive: spawned.monitor_pid });
   assert.equal(claim.code, 0, claim.stderr);
   assert.equal(h.readState('tasks.json').tasks[0].claim.agent, spawned.agent);
   assert.equal(h.run(['claim', 'T2', '--agent', 'another']).code, 1);
@@ -184,7 +185,7 @@ test('a group probe without /proc proves exit only once the group is empty', { s
   const exited = cp.spawn(process.execPath, ['-e', ''], { detached: true, stdio: 'ignore' });
   await once(exited, 'exit');
   const live = cp.spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { detached: true, stdio: 'ignore' }); // wait-allow: keep a process group alive until the empty-group probe is verified
-  t.after(() => { try { process.kill(-live.pid, 'SIGKILL'); } catch { /* already gone */ } });
+  t.after(() => { try { killGroup(live.pid, 'SIGKILL'); } catch { /* already gone */ } });
   const real = Object.getOwnPropertyDescriptor(process, 'platform');
   Object.defineProperty(process, 'platform', { value: 'darwin' });
   try {
@@ -427,7 +428,7 @@ test('sandboxed claims and expired renewals cannot discard hidden live reservati
       assert.equal(r.code, 1, r.stderr);
       assert.match(r.stderr, /T1.*worker-T1-1.*reservation/);
     }
-    assert.doesNotThrow(() => process.kill(spawned.pid, 0), 'the hidden worker is still alive');
+    assert.doesNotThrow(() => killPid(spawned.pid, 0), 'the hidden worker is still alive');
     h.ok(['claim', 'T1', '--agent', spawned.agent], hidden);
     assert.equal(h.readState('tasks.json').tasks[0].claim.agent, spawned.agent);
     assert.equal(events(h).filter((e) => e.cmd === 'spawn').length, 1);

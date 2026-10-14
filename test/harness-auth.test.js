@@ -6,6 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { makeTaskRepo } = require('./helpers');
 const { waitOnRepo } = require('./signals');
+const { readPublished } = require('./atomic-file');
 
 const events = (h) => {
   const text = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8');
@@ -77,7 +78,7 @@ function setup(t, { tier = 'easy', tasks = ['T1'], fallbacks = [] } = {}) {
   h.spawnTask = (id, env = h.spawnEnv) => h.run(['spawn', '--task', id, '--wait'], { env });
   // The shifted clock stamps events and reads intervals on one clock, so a pause can age past its probe interval.
   h.later = (minutes) => ({ ...h.spawnEnv, NODE_OPTIONS: `${h.spawnEnv.NODE_OPTIONS} --require "${clock}"`, TOWER_CRANE_TEST_NOW: String(Date.now() + minutes * 60000) });
-  h.attempts = () => (fs.existsSync(h.file) ? JSON.parse(fs.readFileSync(h.file, 'utf8')) : []);
+  h.attempts = () => (fs.existsSync(h.file) ? JSON.parse(readPublished(h.file, 'utf8')) : []);
   return h;
 }
 

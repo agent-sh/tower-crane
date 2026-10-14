@@ -7,6 +7,7 @@ const path = require('node:path');
 const cp = require('node:child_process');
 const { makeRepo, ROOT, detachedAlive } = require('./helpers');
 const { tempRoot, liveRoot } = require('./tmp-root');
+const { killGroup } = require('./signals');
 
 test('test temp roots prefer explicit overrides and otherwise use the user cache on each platform', () => {
   const home = path.join(ROOT, 'fixture-home');
@@ -104,7 +105,7 @@ test('fixture teardown stops a detached process recorded while it stops an earli
   const observer = makeRepo(t);
   const out = path.join(observer.base, 'next-monitor-pid');
   t.after(() => {
-    try { process.kill(-Number(fs.readFileSync(out, 'utf8')), 'SIGKILL'); } catch { /* already stopped */ }
+    try { killGroup(Number(fs.readFileSync(out, 'utf8')), 'SIGKILL'); } catch { /* already stopped */ }
   });
   const h = makeRepo();
   const records = path.join(h.base, 'detached');
@@ -132,7 +133,9 @@ const timer = setInterval(() => {
   clearInterval(timer);
   const next = cp.spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: 'ignore' });
   fs.writeFileSync(path.join(records, next.pid + '.json'), JSON.stringify({ pid: next.pid, kind: 'monitor' }));
-  fs.writeFileSync(out, String(next.pid));
+  // The test signals this pid, so it publishes the file whole.
+  fs.writeFileSync(out + '.tmp', String(next.pid));
+  fs.renameSync(out + '.tmp', out);
   process.exit(0);
 }, 20);
 `, String(worker.pid), records, out]);
@@ -198,7 +201,7 @@ test('mutation fallback requires a green baseline in a copy containing all test 
     fs.mkdirSync(path.dirname(target), { recursive: true });
     fs.writeFileSync(target, text);
   };
-  for (const file of ['test/run.js', 'test/signals.js', 'test/global-setup.js', 'test/repo-seed.js', 'test/tmp-root.js']) {
+  for (const file of ['test/run.js', 'test/signals.js', 'test/atomic-file.js', 'test/global-setup.js', 'test/repo-seed.js', 'test/tmp-root.js']) {
     write(file, fs.readFileSync(path.join(ROOT, file), 'utf8'));
   }
   write('test/gates/.keep', '');

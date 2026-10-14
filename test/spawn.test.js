@@ -10,10 +10,11 @@ const net = require('node:net');
 const cp = require('node:child_process');
 const { once } = require('node:events');
 const { pathToFileURL } = require('node:url');
-const { cachedFixture, pinRung, real, BIN, ROOT, PTY_AVAILABLE, makeTaskRepo } = require('./helpers');
+const { cachedFixture, pinRung, real, BIN, ROOT, HOOKS, PTY_AVAILABLE, makeTaskRepo } = require('./helpers');
 const stack = require('./stack-fixture');
 const A = require('../lib/agents');
 const S = require('../lib/state');
+const { readPublished } = require('./atomic-file');
 const SHORT_WAIT = path.join(__dirname, 'fixtures', 'lock-wait.js');
 
 function setup(t) {
@@ -418,6 +419,29 @@ test('the prompt is the role skill, brief, task, then how to use tower-crane', (
   assert.ok(p.endsWith('run tower-crane with --agent worker-T1-1 if TOWER_CRANE_AGENT is missing.'));
 });
 
+test('prompts name role skills by their packaged path, since a user worktree has no skills directory', (t) => {
+  const h = setup(t);
+  setRung(h, 'medium', ['--harness', 'opencode', '--model', 'a/b']);
+  const prompt = (rung) => dry(h, rung).argv.find((arg) => arg.includes('## Task'));
+  const relative = /(?<![\\/\w.-])skills[\\/]tower-crane-(?:work|review)[\\/]SKILL\.md/;
+  const packaged = (text, skill) => {
+    const named = new RegExp(`Follow the ${skill} skill \\((.+?SKILL\\.md)\\)`).exec(text);
+    assert.ok(named, `${skill} is named`);
+    assert.ok(path.isAbsolute(named[1]) && fs.existsSync(named[1]), `${named[1]} is an absolute path that exists`);
+  };
+  assert.doesNotMatch(prompt('medium'), relative, 'the embedded work skill points at no worktree path');
+
+  reviewable(h);
+  const review = prompt('review');
+  assert.doesNotMatch(review, relative);
+  packaged(review, 'tower-crane-review');
+
+  h.ok(['rework', 'T1', '--reason', 'Next round']);
+  const rework = prompt('medium');
+  assert.doesNotMatch(rework, relative);
+  packaged(rework, 'tower-crane-work');
+});
+
 test('without an embedded skill the goal leads the prompt, so a brief opening with a dash is never read as a flag', (t) => {
   const h = setup(t);
   setRung(h, 'small', ['--harness', 'opencode', '--model', 'a/b']);
@@ -800,7 +824,7 @@ test('spawn in the background detaches, logs output and numbers agents', async (
   assert.equal(real(path.dirname(started.log)), real(path.join(h.state, 'logs')));
   assert.equal(path.basename(started.log), 'T1-small-T1-1.log');
   if (process.platform !== 'win32') assert.equal(fs.statSync(started.log).mode & 0o777, 0o600);
-  await waitOnRepo(h, () => (fs.existsSync(started.log) && fs.readFileSync(started.log, 'utf8').includes('hello')));
+  await waitOnRepo(h, () => (fs.existsSync(started.log) && readPublished(started.log, 'utf8').includes('hello')));
   assert.match(fs.readFileSync(started.log, 'utf8'), /hello from small-T1-1/);
   assert.equal(h.json(['spawn', '--role', 'small', '--task', 'T1', '--dry-run']).agent, 'small-T1-2');
 
@@ -815,10 +839,57 @@ test('spawn in the background detaches, logs output and numbers agents', async (
   assert.match(noBrief.stderr, /T2 has no brief; write one with tower-crane brief set T2/);
 });
 
+// An agent's git runs through its shim, which cleans up placeholders in the
+// git directory first; stopping the agent kills its process group, shim
+// included. A supervisor runs its own git through the agent's shims before it
+// reports its start, so a directory the killed shim left held made every
+// later supervisor miss its startup window.
+test('a git shim killed while it cleans up placeholders does not keep the next supervisor from starting', (t) => {
+  const h = setup(t);
+  const policy = path.join(h.base, 'policy.json');
+  fs.writeFileSync(policy, JSON.stringify({ gitPush: 'branch', branch: 'task-T1', repo: null, gh: [] }));
+  const shimDir = path.join(h.base, 'shim');
+  fs.mkdirSync(shimDir);
+  // An empty process table lets the shim take the directory where there is no /proc.
+  const table = fs.mkdtempSync(path.join(h.base, 'proc-'));
+  commandRung(h, 'small', [process.execPath, '-e', 'process.exit(0)', '{prompt}']);
+  // On the host, and inside an agent's command sandbox, which has a pid namespace of its own.
+  for (const [attempt, hooks] of [[1, {}], [2, { HOOK_PIDNS: 'pid:[4026599999]' }]]) {
+    cp.spawnSync(process.execPath, ['--require', HOOKS, path.join(ROOT, 'lib', 'shim.js'), policy, shimDir, 'git', 'status'],
+      { cwd: h.repo, env: { ...h.env, TOWER_CRANE_PROC: table, HOOK_STATE: h.state, HOOK_DIE_REAP: '1', ...hooks } });
+    assert.equal(fs.existsSync(path.join(h.repo, '.git', 'tower-crane-reap')), true, 'the killed shim held the directory');
+    const started = h.run(['spawn', '--role', 'small', '--task', 'T1', '--wait', '--json']);
+    assert.equal(started.code, 0, started.stderr);
+    assert.equal(JSON.parse(started.stdout).agent, `small-T1-${attempt}`);
+  }
+});
+
+// Only a cleanup outside every command sandbox judges a marker from a
+// sandbox's pid namespace. A stopped sandboxed agent's shim leaves one, and
+// until a host cleanup ran, every git call of every other sandboxed agent
+// waited 5 s on it. The supervisor is on the host when its agent's group ends.
+test('a supervisor clears the git directory a git shim in its agent\'s sandbox died holding', { skip: process.platform !== 'linux' && 'pid namespaces are Linux only' }, (t) => {
+  const h = setup(t);
+  for (const mark of ['TOWER_CRANE_SANDBOX', 'SANDBOX_RUNTIME', 'CODEX_SANDBOX']) delete h.env[mark];
+  const policy = path.join(h.base, 'policy.json');
+  fs.writeFileSync(policy, JSON.stringify({ gitPush: 'branch', branch: 'task-T1', repo: null, gh: [] }));
+  const shimDir = path.join(h.base, 'shim');
+  fs.mkdirSync(shimDir);
+  // The agent is a git call through its shim, killed once it holds the directory.
+  commandRung(h, 'small', ['env', 'HOOK_DIE_REAP=1', 'HOOK_PIDNS=pid:[4026599999]', 'TOWER_CRANE_SANDBOX=1', `HOOK_STATE=${h.state}`,
+    process.execPath, '--require', HOOKS, path.join(ROOT, 'lib', 'shim.js'), policy, shimDir, 'git', 'status', '--short', '{prompt}']);
+  const r = h.run(['spawn', '--role', 'small', '--task', 'T1', '--wait', '--json']);
+  assert.notEqual(r.code, 0, 'the agent was killed');
+  const dir = path.join(h.repo, '.git', 'tower-crane-reap');
+  const marker = fs.existsSync(dir) ? fs.readdirSync(dir) : [];
+  assert.deepEqual(marker, [], marker.length ? fs.readFileSync(path.join(dir, marker[0]), 'utf8') : '');
+  assert.equal(fs.existsSync(dir), false);
+});
+
 // Everything a spawn could leave behind: state files, events, logs, the
 // worktree and its branch.
 function footprint(h) {
-  const read = (f) => (fs.existsSync(path.join(h.state, f)) ? fs.readFileSync(path.join(h.state, f), 'utf8') : null);
+  const read = (f) => (fs.existsSync(path.join(h.state, f)) ? readPublished(path.join(h.state, f), 'utf8') : null);
   return {
     tasks: read('tasks.json'),
     events: read('events.jsonl'),
@@ -1018,4 +1089,21 @@ test('a spawn refuses a worktree whose .git file names a git directory of anothe
   }
   rewrite(original);
   assert.equal(h.run(['spawn', '--task', 'T1', '--dry-run', '--json']).code, 0);
+});
+
+test('a worker spawn in a repository without origin is refused before its worktree or harness starts', (t) => {
+  const h = setup(t);
+  const marker = path.join(h.base, 'harness-started');
+  commandRung(h, 'medium', [process.execPath, '-e', `require('node:fs').writeFileSync(${JSON.stringify(marker)}, '')`]);
+  h.git(['remote', 'remove', 'origin']);
+  const before = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8');
+  const r = h.run(['spawn', '--task', 'T1']);
+  assert.equal(r.code, 1, r.stdout);
+  assert.match(r.stderr, /this repository has no origin remote; workers push their task branch to origin and open the PR there\. Add it with git remote add origin URL, then spawn again/);
+  assert.equal(fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8'), before, 'no state was written');
+  assert.equal(h.readState('tasks.json').tasks[0].worktree, undefined);
+  assert.ok(!fs.existsSync(marker), 'the harness did not start');
+  assert.equal(h.git(['worktree', 'list', '--porcelain']).split('\n').filter((l) => l.startsWith('worktree ')).length, 1);
+  // A dry run still previews the command, on the rung the marker belongs to.
+  assert.equal(h.json(['spawn', '--task', 'T1', '--dry-run']).rung, 'medium');
 });

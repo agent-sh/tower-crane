@@ -1,6 +1,6 @@
 'use strict';
 
-const { waitUntil, HUNG_TEST_MS } = require('./signals');
+const { waitUntil, HUNG_TEST_MS, killPid, killGroup } = require('./signals');
 
 const fs = require('node:fs');
 const path = require('node:path');
@@ -9,6 +9,7 @@ const assert = require('node:assert/strict');
 const test = require('node:test');
 const { createRepoSeed, cleanupRepoSeed } = require('./repo-seed');
 const { tempRoot, liveRoot } = require('./tmp-root');
+const { readPublished } = require('./atomic-file');
 
 const ROOT = path.join(__dirname, '..');
 const BIN = path.join(ROOT, 'bin', 'tower-crane.js');
@@ -105,6 +106,7 @@ function installHarnessGuard() {
 function assertNoHarnessCalls(base) {
   if (!HARNESS_GUARD) return;
   let text;
+  // read-published: the guard appends hits; nothing replaces the file.
   try { text = fs.readFileSync(HARNESS_GUARD.hits, 'utf8'); }
   catch (e) { if (e.code === 'ENOENT') return; throw e; }
   const inside = (p) => typeof p === 'string' && (p === base || p.startsWith(base + path.sep));
@@ -223,7 +225,7 @@ function pinLiveRung(h, harness, rung = 'small') {
 function fixtureInit(ctx, args, opts, call) {
   if (args[0] !== 'init' || ctx.builtin) return call(args, opts);
   let original;
-  try { original = fs.readFileSync(ctx.userConfig, 'utf8'); }
+  try { original = readPublished(ctx.userConfig, 'utf8'); }
   catch (e) { if (e.code !== 'ENOENT') throw e; }
   let user;
   try { user = original === undefined ? {} : JSON.parse(original); }
@@ -424,7 +426,7 @@ function context(t, base, options = {}) {
         const file = path.join(dir, f);
         // hooks.js publishes records atomically; one still incomplete is not recorded yet.
         let record;
-        try { record = JSON.parse(fs.readFileSync(file, 'utf8')); }
+        try { record = JSON.parse(readPublished(file, 'utf8')); }
         catch (e) { if (e.code === 'ENOENT' || e instanceof SyntaxError) return []; throw e; }
         // A monitor's exit listener marks its exit beside its record.
         if (record.kind === 'monitor' && fs.existsSync(path.join(dir, `${record.token || record.pid}.exited`))) record.exited = true;
@@ -452,7 +454,7 @@ function context(t, base, options = {}) {
             for (const agent of fs.readdirSync(brokers, { withFileTypes: true }).filter((entry) => entry.isDirectory())) {
               const file = path.join(brokers, agent.name, 'broker.json');
               let socket;
-              try { ({ socket } = JSON.parse(fs.readFileSync(file, 'utf8'))); }
+              try { ({ socket } = JSON.parse(readPublished(file, 'utf8'))); }
               catch (error) { if (error.code === 'ENOENT' || error instanceof SyntaxError) continue; throw error; }
               if (typeof socket === 'string' && path.basename(socket) === 's' && /^tower-crane-[A-Za-z0-9]{6}$/.test(path.basename(path.dirname(socket)))) {
                 fs.rmSync(path.dirname(socket), { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
@@ -474,6 +476,12 @@ function context(t, base, options = {}) {
     },
     run: (args, opts = {}) => fixtureInit(ctx, args, opts, (a, o) => run(a, withHooks(ctx, o))),
     runAsync: (args, opts = {}) => runAsync(args, withHooks(ctx, opts)),
+    // A CLI child the test signals or reads while it runs. Detached processes
+    // it starts, such as a worker dispatch, are recorded, so cleanup stops them.
+    spawnCli: (args, opts = {}) => {
+      const { cwd, env, pre } = withHooks(ctx, opts);
+      return cp.spawn(process.execPath, [...pre, BIN, ...args], { cwd, env });
+    },
     json: (args, opts) => {
       const r = ctx.run([...args, '--json'], opts);
       if (r.code !== 0) throw cliFailure(args, r);
@@ -484,7 +492,7 @@ function context(t, base, options = {}) {
       if (r.code !== 0) throw cliFailure(args, r);
       return r.stdout.trim();
     },
-    readState: (file) => JSON.parse(fs.readFileSync(path.join(ctx.state, file), 'utf8')),
+    readState: (file) => JSON.parse(readPublished(path.join(ctx.state, file), 'utf8')),
     // The current revision of a task, for review evidence a test records as a reviewer spawn did not start.
     revision: (id = 'T1') => String(ctx.readState('tasks.json').tasks.find((t) => t.id === id).revision),
     writeState: (file, data) => fs.writeFileSync(path.join(ctx.state, file), JSON.stringify(data, null, 2) + '\n'),
@@ -511,11 +519,12 @@ function context(t, base, options = {}) {
 }
 
 // opts.hooks preloads test/fixtures/hooks.js into the CLI with those HOOK_*
-// variables, acting on this repository's state directory.
+// variables, acting on this repository's state directory. opts.pre adds
+// preloads after it.
 function withHooks(ctx, opts) {
   const env = { ...ctx.env, ...(opts.env || {}) };
   Object.assign(env, { HOOK_STATE: ctx.state, HOOK_PROCESSES_DIR: path.join(ctx.base, 'detached') }, opts.hooks);
-  const pre = ['--require', HOOKS];
+  const pre = ['--require', HOOKS, ...(opts.pre || [])];
   return { cwd: ctx.repo, ...opts, env, pre };
 }
 
@@ -576,9 +585,10 @@ function detachedAlive(child) {
     return Number(BigInt(started) / 10000n - 11644473600000n) <= child.recordedAt + RECORD_TOLERANCE_MS;
   }
   if (child.kind === 'worker' && child.file && !fs.existsSync(child.file)) return false;
-  try { process.kill(child.pid, 0); } catch (e) { if (e.code === 'ESRCH') return false; throw e; }
+  try { killPid(child.pid, 0); } catch (e) { if (e.code === 'ESRCH') return false; throw e; }
   if (process.platform === 'linux') {
     let stat;
+    // read-published: the kernel serves /proc; nothing replaces the file.
     try { stat = fs.readFileSync(`/proc/${child.pid}/stat`, 'utf8'); }
     catch (e) { if (['ENOENT', 'ESRCH'].includes(e.code)) return false; throw e; }
     const fields = stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\s+/);
@@ -587,12 +597,26 @@ function detachedAlive(child) {
   return true;
 }
 
+// Linux processes still working inside a fixture, by working directory. A
+// removed directory reads with a " (deleted)" suffix and still counts.
+function processesIn(base) {
+  if (process.platform !== 'linux') return [];
+  const found = [];
+  for (const name of fs.readdirSync('/proc').filter((entry) => /^\d+$/.test(entry))) {
+    let cwd;
+    try { cwd = fs.readlinkSync(`/proc/${name}/cwd`).replace(/ \(deleted\)$/, ''); }
+    catch { continue; } // Exited, a zombie, or not ours to read.
+    if (cwd === base || cwd.startsWith(base + path.sep)) found.push(Number(name));
+  }
+  return found;
+}
+
 function killDetached(child) {
   if (!detachedAlive(child)) return;
   if (process.platform === 'win32') {
     cp.spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore', timeout: 300000 });
   } else {
-    try { process.kill(-child.pid, 'SIGKILL'); } catch (e) { if (e.code !== 'ESRCH') throw e; }
+    try { killGroup(child.pid, 'SIGKILL'); } catch (e) { if (e.code !== 'ESRCH') throw e; }
   }
 }
 
@@ -699,4 +723,4 @@ try {
   }
 }
 
-module.exports = { repairWorktrees, makeRepo, makeProjectRepo, makeTaskRepo, copyRepo, cachedFixture, fixtureLadder, pinRung, pinLiveRung, stubRungs, STUB_RUNG, HARNESS_GUARD, run, runPty, PTY_AVAILABLE, runAsync, BIN, ROOT, HOOKS, real, TMP_ROOT, LIVE_ROOT, detachedAlive };
+module.exports = { repairWorktrees, makeRepo, makeProjectRepo, makeTaskRepo, copyRepo, cachedFixture, fixtureLadder, pinRung, pinLiveRung, stubRungs, STUB_RUNG, HARNESS_GUARD, run, runPty, PTY_AVAILABLE, runAsync, BIN, ROOT, HOOKS, real, TMP_ROOT, LIVE_ROOT, detachedAlive, processesIn };

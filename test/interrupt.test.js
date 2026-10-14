@@ -1,6 +1,7 @@
 'use strict';
 
-const { waitOnRepo } = require('./signals');
+const { waitOnRepo, killPid } = require('./signals');
+const { readPublished } = require('./atomic-file');
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -33,6 +34,7 @@ if (!session) {
 ` : ''}
 const task = JSON.parse(cli('task', 'show', 'T1', '--json'));
 if (!task.claim) cli('claim', 'T1');
+// read-published: this harness writes the file in place; nothing replaces it.
 const previous = fs.existsSync(seen) ? JSON.parse(fs.readFileSync(seen)) : [];
 previous.push({ agent: process.env.TOWER_CRANE_AGENT, session, prompt, cwd: process.cwd() });
 fs.writeFileSync(seen, JSON.stringify(previous));
@@ -49,7 +51,7 @@ if (!session) {
   h.ok(['ladder', 'set', 'medium', '--harness', 'command', '--clear', 'profile', '--clear', 'effort',
     '--command', JSON.stringify([process.execPath, script, BIN, seen, '{session}', '{prompt}']),
     '--supervision', JSON.stringify({ retries: 1, backoff_ms: 30000, max_backoff_ms: 30000 })]);
-  h.seen = () => fs.existsSync(seen) ? JSON.parse(fs.readFileSync(seen)) : [];
+  h.seen = () => fs.existsSync(seen) ? JSON.parse(readPublished(seen)) : [];
   h.finish = () => fs.writeFileSync(finish, '');
   return h;
 }
@@ -104,7 +106,7 @@ test('interrupt during detached usage collection releases directly without fenci
     assert.equal(next.agent, first.agent);
     assert.equal(events(h).filter((e) => e.cmd === 'spawn phase' && e.detail.phase === 'stopping').length, 0);
   } catch (error) {
-    if (detachedAlive({ pid: first.monitor_pid })) process.kill(first.monitor_pid, 'SIGTERM');
+    if (detachedAlive({ pid: first.monitor_pid })) killPid(first.monitor_pid, 'SIGTERM');
     throw error;
   } finally {
     pause.release();
@@ -134,7 +136,7 @@ test('an interrupt committed while exit hooks are pending is finalized under the
     const next = h.json(['spawn', '--task', 'T1', '--wait']);
     assert.equal(next.resumed, true);
   } catch (error) {
-    if (detachedAlive({ pid: first.monitor_pid })) process.kill(first.monitor_pid, 'SIGTERM');
+    if (detachedAlive({ pid: first.monitor_pid })) killPid(first.monitor_pid, 'SIGTERM');
     throw error;
   } finally {
     pause.release();
@@ -389,7 +391,7 @@ test('a supervisor killed after an interrupt does not wedge the claim or the nex
   const stop = events(h).findLast((e) => e.cmd === 'interrupt');
   assert.equal(stop.detail.phase, 'stopping');
   assert.equal(stop.detail.active, true);
-  const kill = (pid) => { if (detachedAlive({ pid })) process.kill(pid, 'SIGKILL'); };
+  const kill = (pid) => { if (detachedAlive({ pid })) killPid(pid, 'SIGKILL'); };
   kill(first.monitor_pid);
   kill(first.pid);
   kill(child);

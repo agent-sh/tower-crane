@@ -8,6 +8,8 @@ const net = require('node:net');
 const path = require('node:path');
 const { cachedFixture, pinRung, detachedAlive, BIN } = require('./helpers');
 const { gateFixture } = require('./gate-helpers');
+const { killPid, killGroup } = require('./signals');
+const { readPublished } = require('./atomic-file');
 
 const events = (h) => require('../lib/state').readEvents(h.state);
 const preloadOption = (file) => `--require ${JSON.stringify(file)}`;
@@ -41,7 +43,7 @@ const fs = require('node:fs');
 const cp = require('node:child_process');
 const cli = (args) => cp.execFileSync(process.execPath, [process.argv[1], ...args], { encoding: 'utf8' });
 ${index === 0 && trigger === 'preclaim' ? '' : "cli(['claim', 'T1']);"}
-const attempts = fs.existsSync(process.argv[2]) ? JSON.parse(fs.readFileSync(process.argv[2])) : [];
+const attempts = fs.existsSync(process.argv[2]) ? JSON.parse(require(${JSON.stringify(path.join(__dirname, 'atomic-file.js'))}).readPublished(process.argv[2])) : [];
 attempts.push({ rung: '${rung}', agent: process.env.TOWER_CRANE_AGENT, session: process.env.TOWER_CRANE_SESSION,
   previous: process.argv[3], cwd: process.cwd() });
 // Readers and fs.watch can briefly prevent replacing an existing file on Windows.
@@ -144,7 +146,7 @@ if (process.execArgv.includes('-e') && process.env.TOWER_CRANE_SESSION
       const log = exit?.detail.log;
       throw new Error(`Unexpected escalation ceiling: ${ceiling.question}\n`
         + `Worker ${exit?.agent}: exit ${exit?.detail.code}, signal ${exit?.detail.signal}, log ${log}\n`
-        + (log && fs.existsSync(log) ? fs.readFileSync(log, 'utf8') : 'No worker log'));
+        + (log && fs.existsSync(log) ? readPublished(log, 'utf8') : 'No worker log'));
     }
     return false;
   });
@@ -165,7 +167,7 @@ if (process.execArgv.includes('-e') && process.env.TOWER_CRANE_SESSION
         if (process.platform === 'win32') {
           cp.spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore' });
         } else {
-          try { process.kill(-child.pid, 'SIGKILL'); }
+          try { killGroup(child.pid, 'SIGKILL'); }
           catch (error) { if (error.code !== 'ESRCH') throw error; }
         }
         await exited;
@@ -179,7 +181,7 @@ if (process.execArgv.includes('-e') && process.env.TOWER_CRANE_SESSION
   if (prepare) prepare(h);
   // Gate preparation can change HEAD after the cached ladder was built.
   fs.writeFileSync(h.attempts + '.sha', h.git(['rev-parse', 'HEAD']));
-  h.readAttempts = () => fs.existsSync(h.attempts) ? JSON.parse(fs.readFileSync(h.attempts)) : [];
+  h.readAttempts = () => fs.existsSync(h.attempts) ? JSON.parse(readPublished(h.attempts)) : [];
   return h;
 }
 
@@ -368,8 +370,8 @@ test('wait recovers a verified worker exit after its supervisor is lost', {
   const spawn = h.json(['spawn', '--task', 'T1']);
   await h.until(() => h.readAttempts().length === 1);
   const signals = await Promise.all([spawn.monitor_pid, spawn.pid].map((pid) => h.exitSignal({ pid })));
-  process.kill(spawn.monitor_pid, 'SIGKILL');
-  process.kill(spawn.pid, 'SIGKILL');
+  killPid(spawn.monitor_pid, 'SIGKILL');
+  killPid(spawn.pid, 'SIGKILL');
   await Promise.all(signals.map(({ exited }) => exited));
   const observed = await h.runAsync(['wait', '--after', '0', '--types', 'worker-exited', '--agent', 'orchestrator']);
   assert.equal(observed.code, 0, observed.stderr || observed.stdout);
@@ -389,8 +391,8 @@ test('lost-supervisor recovery waits for redirected orphan descendants to stop',
   const child = { pid, ...P.identity(pid) };
   try {
     const signals = await Promise.all([spawn.monitor_pid, spawn.pid].map((pid) => h.exitSignal({ pid })));
-    process.kill(spawn.monitor_pid, 'SIGKILL');
-    process.kill(spawn.pid, 'SIGKILL');
+    killPid(spawn.monitor_pid, 'SIGKILL');
+    killPid(spawn.pid, 'SIGKILL');
     await Promise.all(signals.map(({ exited }) => exited));
     h.ok(['spend', 'T1', '--from-spawn', spawn.agent]);
     assert.equal(P.processState(child), 'running');
@@ -403,14 +405,14 @@ test('lost-supervisor recovery waits for redirected orphan descendants to stop',
     assert.equal(events(h).filter((e) => e.cmd === 'spawn exit' && e.detail.agent === spawn.agent).length, 0);
     assert.ok(events(h).some((e) => e.cmd === 'recover waiting' && /process group/.test(e.detail.reason)));
     const { exited } = await h.exitSignal(child);
-    process.kill(child.pid, 'SIGKILL');
+    killPid(child.pid, 'SIGKILL');
     await exited;
     const submitted = await h.runAsync(['wait', '--types', 'submitted', '--task', 'T1', '--agent', 'orchestrator']);
     assert.equal(submitted.code, 0, submitted.stderr || submitted.stdout);
     assert.deepEqual(h.readAttempts().map((a) => a.rung), ['easy', 'medium']);
     assert.equal(events(h).filter((e) => e.cmd === 'worker-exited').length, 1);
   } finally {
-    if (P.processState(child) !== 'exited') process.kill(child.pid, 'SIGKILL');
+    if (P.processState(child) !== 'exited') killPid(child.pid, 'SIGKILL');
   }
 });
 
@@ -601,8 +603,11 @@ test('a later eligible passing review supersedes a failure before worker exit', 
   h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--ok', '--sha', sha, '--agent', 'reviewer', '--summary', 'corrected verdict']);
   h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--fail', '--sha', 'abcdef1', '--agent', 'reviewer']);
   h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--fail', '--sha', sha, '--agent', spawn.agent]);
-  process.kill(spawn.pid, 'SIGKILL');
+  const { exited } = await h.exitSignal({ pid: spawn.monitor_pid });
+  killPid(spawn.pid, 'SIGKILL');
   await h.until(() => events(h).some((e) => e.cmd === 'spend' && e.detail.source === `spawn:${spawn.agent}`));
+  // The monitor's reactions can still run after the spend, and a climb would come from them.
+  await exited;
   assert.equal(h.json(['task', 'show', 'T1']).tier, 'easy');
   assert.equal(events(h).filter((e) => e.cmd === 'escalate').length, 0);
 });
@@ -616,8 +621,8 @@ for (const prior of ['spent', 'lock-timeout']) {
     const spawn = h.json(['spawn', '--task', 'T1']);
     await h.until(() => h.readAttempts().length === 1);
     const signals = await Promise.all([spawn.monitor_pid, spawn.pid].map((pid) => h.exitSignal({ pid })));
-    process.kill(spawn.monitor_pid, 'SIGKILL');
-    process.kill(spawn.pid, 'SIGKILL');
+    killPid(spawn.monitor_pid, 'SIGKILL');
+    killPid(spawn.pid, 'SIGKILL');
     await Promise.all(signals.map(({ exited }) => exited));
     const opts = {};
     if (prior === 'spent') {
@@ -649,7 +654,7 @@ test('a sandboxed reviewer waits for a hidden live worker to exit before climbin
   });
   assert.equal(h.json(['task', 'show', 'T1']).tier, 'easy');
   assert.equal(events(h).filter((e) => e.cmd === 'escalate').length, 0);
-  process.kill(spawn.pid, 'SIGKILL');
+  killPid(spawn.pid, 'SIGKILL');
   await h.until(() => {
     const task = h.task();
     return task.status === 'submitted' && task.tier === 'medium' && h.readAttempts().length === 2;

@@ -49,8 +49,11 @@ function noFileSecrets(dir) {
 
 // An exited worker keeps its lease until the orchestrator releases it, so each dispatch releases the last one.
 function releaseExited(h) {
-  const claim = h.json(['task', 'show', 'T1']).claim;
-  if (claim) h.ok(['release', 'T1', '--agent', claim.agent, '--reason', 'worker exited']);
+  const task = h.json(['task', 'show', 'T1']);
+  if (task.claim) h.ok(['release', 'T1', '--agent', task.claim.agent, '--reason', 'worker exited']);
+  // These probes relaunch one task's worker on purpose; the owner lifts the
+  // respawn cap each stand-in's exit without a submit counts toward.
+  if (task.needs_owner?.startsWith('worker exited without submitting')) h.ok(['owner-done', 'T1']);
 }
 
 test('project and rung spawn settings require explicit owner identity, including unchanged and cleared fields', (t) => {

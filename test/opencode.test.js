@@ -465,6 +465,22 @@ test('opencode worker headless Bash allows task commands, shim paths, tests and 
   assert.ok(!Object.values(f.report().permission.bash).includes('ask'));
 });
 
+test('opencode allows Tower Crane repository scripts only in a project that has them', { skip: NO_STUBS }, (t) => {
+  const scripts = ['scripts/check-shared-files.js', 'scripts/cli-docs.js'];
+  const probes = scripts.map((script) => ['bash', `node ${script} --check`]);
+  const bare = setup(t);
+  spawn(bare, { STUB_PROBES: JSON.stringify(probes) });
+  assert.deepEqual(bare.report().probes, ['deny', 'deny'], 'a user project has no such scripts');
+
+  const own = setup(t);
+  for (const script of scripts) {
+    fs.mkdirSync(path.join(own.h.repo, path.dirname(script)), { recursive: true });
+    fs.writeFileSync(path.join(own.h.repo, script), '\n');
+  }
+  spawn(own, { STUB_PROBES: JSON.stringify(probes) });
+  assert.deepEqual(own.report().probes, ['allow', 'allow']);
+});
+
 test('native opencode headless worker runs claim, git and tests and denies an unlisted command', {
   skip: !process.env.TOWER_CRANE_NATIVE_OPENCODE && 'set TOWER_CRANE_NATIVE_OPENCODE to the installed executable',
   timeout: 300000,

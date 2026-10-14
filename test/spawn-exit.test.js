@@ -1,6 +1,7 @@
 'use strict';
 
-const { waitOnRepo, childExit } = require('./signals');
+const { waitOnRepo, childExit, killPid } = require('./signals');
+const { readPublished } = require('./atomic-file');
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -34,9 +35,12 @@ function setup(t) {
   return h;
 }
 
-async function start(t, h, { claim = true, submit = false, wait = false, env = {} } = {}) {
+// lifetimeMs ends the stand-in on its own after that long, leaving a .natural
+// file beside its marker, so a test can tell that end from being stopped.
+async function start(t, h, { claim = true, submit = false, wait = false, env = {}, lifetimeMs = 0 } = {}) {
   const marker = path.join(h.base, `started-${Date.now()}.json`);
   const worker = path.join(h.base, 'worker.js');
+  const ending = lifetimeMs ? `setTimeout(() => { fs.writeFileSync(process.argv[3] + '.natural', ''); process.exit(0); }, ${lifetimeMs});` : 'setInterval(() => {}, 1000);'; // wait-allow: the stand-in's own end, which a test tells apart from being stopped
   const script = `
 const fs = require('node:fs');
 const cp = require('node:child_process');
@@ -48,7 +52,7 @@ fs.writeSync(2, ${JSON.stringify(PRIVATE_LOG + '\n')});
 ${submit ? "cp.execFileSync(process.execPath, [process.argv[2], 'submit', task, '--sha', '50b732a15be40ccb2065cb2ba0e7b366d511b736']);" : ''}
 fs.writeFileSync(process.argv[3] + '.tmp', JSON.stringify({ agent: process.env.TOWER_CRANE_AGENT, pid: process.pid }));
 fs.renameSync(process.argv[3] + '.tmp', process.argv[3]);
-${wait ? 'process.exit(7);' : 'setInterval(() => {}, 1000);'}
+${wait ? 'process.exit(7);' : ending}
 `;
   fs.writeFileSync(worker, script);
   h.ok(['ladder', 'set', 'easy', '--harness', 'command', '--command', JSON.stringify([process.execPath, worker, BIN, marker, '{prompt}']),
@@ -59,13 +63,13 @@ ${wait ? 'process.exit(7);' : 'setInterval(() => {}, 1000);'}
   const kill = () => {
     if (killed) return;
     killed = true;
-    try { process.kill(spawned.pid, 'SIGKILL'); } catch (e) { if (e.code !== 'ESRCH') throw e; }
+    try { killPid(spawned.pid, 'SIGKILL'); } catch (e) { if (e.code !== 'ESRCH') throw e; }
   };
   h.stopWorkers.push(kill);
-  const started = await waitOnRepo(h, () => fs.existsSync(marker) && JSON.parse(fs.readFileSync(marker, 'utf8')),
+  const started = await waitOnRepo(h, () => fs.existsSync(marker) && JSON.parse(readPublished(marker, 'utf8')),
     'stand-in did not claim the task');
   assert.deepEqual(started, { agent: spawned.agent, pid: spawned.pid });
-  return { ...spawned, kill };
+  return { ...spawned, kill, marker };
 }
 
 test('a killed spawned claimant is reported with its log tail and released for recovery', async (t) => {
@@ -151,7 +155,7 @@ test('teardown observes a monitor exit recorded after its PID snapshot', {
   fs.writeFileSync(file, JSON.stringify({ ...record, exited: true }));
   h.detached = () => snapshot;
   await h.cleanup();
-  assert.equal(process.kill(child.pid, 0), true, 'teardown killed a reused PID');
+  assert.equal(killPid(child.pid, 0), true, 'teardown killed a reused PID');
 });
 
 test('ordinary teardown waits for a monitor exit even when the wall clock jumps', {
@@ -219,7 +223,7 @@ test('teardown kills a recorded worker and leaves a reused worker PID alone', {
   const reused = start({ recordedAt: Date.now() - 1000 });
   await h.cleanup();
   await childExit(recorded, { what: `teardown did not kill recorded worker ${recorded.pid}` });
-  assert.equal(process.kill(reused.pid, 0), true, 'teardown killed a reused worker PID');
+  assert.equal(killPid(reused.pid, 0), true, 'teardown killed a reused worker PID');
 });
 
 test('teardown waits for OS termination after a monitor marks its exit', async (t) => {
@@ -413,4 +417,119 @@ test('a spawned replacement can claim after another worker lease expires', async
   spawned.kill();
   await waitOnRepo(h, () => (h.json(['status']).exited_claims || []).length === 1, 'replacement exit was not reported');
   assert.equal(h.json(['ready']).exited_claims[0].pid, spawned.pid);
+});
+
+// Without its state no exit can be recorded and no reaction can follow, so the
+// monitor stops its agent rather than let a paid session run on unrecorded.
+// A removal that takes project.json first leaves the monitor no read that
+// fails, so only project.json is removed here.
+test('a monitor whose project state is removed stops its agent and exits', { skip: process.platform === 'win32' }, async (t) => {
+  const h = setup(t);
+  const spawned = await start(t, h, { lifetimeMs: 30000 });
+  fs.unlinkSync(path.join(h.state, 'project.json'));
+  await waitOnRepo(h, () => !detachedAlive({ pid: spawned.pid }) && !detachedAlive({ pid: spawned.monitor_pid }),
+    'the agent or its monitor outlived the state directory');
+  assert.equal(fs.existsSync(`${spawned.marker}.natural`), false, 'the agent ran to its own end');
+});
+
+test('a worker that keeps exiting without a submit is parked for the owner at the respawn cap', async (t) => {
+  const h = setup(t);
+  const worker = path.join(h.base, 'quits.js');
+  fs.writeFileSync(worker, "process.stderr.write('stub harness gave up\\n'); process.exit(1);\n");
+  h.ok(['ladder', 'set', 'easy', '--harness', 'command', '--command', JSON.stringify([process.execPath, worker, '{prompt}']),
+    '--clear', 'profile', '--clear', 'effort']);
+  const spawns = () => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse)
+    .filter((e) => e.cmd === 'spawn').length;
+  // As the wait host does: recover the dead claim, then dispatch again.
+  const spawnOnce = () => {
+    if (h.readState('tasks.json').tasks[0].claim) h.ok(['release', '--dead']);
+    const before = spawns();
+    const r = h.run(['spawn', '--task', 'T1', '--wait']);
+    assert.equal(r.code, 1, r.stderr);
+    assert.equal(spawns(), before + 1, r.stderr);
+  };
+  for (let i = 1; i < 3; i++) {
+    spawnOnce();
+    assert.equal(h.readState('tasks.json').tasks[0].needs_owner, null, `exit ${i} is under the cap`);
+  }
+  spawnOnce();
+  const task = h.readState('tasks.json').tasks[0];
+  assert.match(task.needs_owner, /^worker exited without submitting 3 times at revision 1 \(last worker-T1-\d+, code 1\)/);
+  const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  const park = events.filter((e) => e.cmd === 'respawn cap');
+  assert.equal(park.length, 1);
+  assert.deepEqual([park[0].detail.cap, park[0].detail.exits, park[0].detail.revision], [3, 3, 1]);
+  // Dispatch skips the parked task, and asking for it by name is refused.
+  h.ok(['release', '--dead']);
+  assert.deepEqual(h.json(['ready']).ready, []);
+  h.run(['spawn', '--ready']);
+  assert.equal(spawns(), 3, 'spawn --ready skips the parked task');
+  const named = h.run(['spawn', '--task', 'T1']);
+  assert.equal(named.code, 1);
+  assert.match(named.stderr, /needs owner: worker exited without submitting 3 times/);
+  // task show reads the log tail from the file; state holds none of it.
+  assert.match(h.ok(['task', 'show', 'T1']), /last worker log: .*\n {2}tail \(last 20 lines, at most 8192 bytes\):\n {4}stub harness gave up/);
+  for (const file of ['tasks.json', 'events.jsonl']) {
+    assert.ok(!fs.readFileSync(path.join(h.state, file), 'utf8').includes('stub harness gave up'), `${file} holds log text`);
+  }
+  // owner-done clears the ask and starts the count again.
+  h.ok(['owner-done', 'T1']);
+  spawnOnce();
+  assert.equal(h.readState('tasks.json').tasks[0].needs_owner, null, 'the count restarts after owner-done');
+});
+
+test('a session that releases the task for an open decision does not count toward the respawn cap; a bare release does', async (t) => {
+  const h = setup(t);
+  const worker = path.join(h.base, 'asks.js');
+  const script = (ask) => `
+const cp = require('node:child_process');
+const run = (args) => cp.execFileSync(process.execPath, [${JSON.stringify(BIN)}, ...args], { stdio: 'ignore' });
+${ask ? "run(['ask', '--kind', 'technical', '--question', 'which? ' + Date.now(), '--option', 'A', '--option', 'B', '--blocks', 'T1']);" : ''}
+run(['release', 'T1', '--reason', ${JSON.stringify(ask ? 'waiting on a decision' : 'giving up')}]);
+`;
+  h.ok(['ladder', 'set', 'easy', '--harness', 'command', '--command', JSON.stringify([process.execPath, worker, '{prompt}']),
+    '--clear', 'profile', '--clear', 'effort']);
+  const round = () => {
+    const r = h.run(['spawn', '--task', 'T1', '--wait']);
+    assert.equal(r.code, 0, r.stderr);
+    for (const d of h.readState('decisions.json').decisions.filter((x) => x.status === 'open')) {
+      h.ok(['answer', d.id, '--choice', 'A', '--agent', 'orchestrator']);
+    }
+  };
+  fs.writeFileSync(worker, script(true));
+  for (let i = 0; i < 3; i++) round();
+  assert.equal(h.readState('tasks.json').tasks[0].needs_owner, null, 'three decision releases park nothing');
+  fs.writeFileSync(worker, script(false));
+  for (let i = 0; i < 3; i++) round();
+  assert.match(h.readState('tasks.json').tasks[0].needs_owner, /^worker exited without submitting 3 times at revision 1 \(last worker-T1-\d+, code 0\)/);
+  // Only the run that released for the decision is skipped: two earlier
+  // bare exits still count, and the next bare exit is the third.
+  h.ok(['owner-done', 'T1']);
+  const plan = [false, false, true, false];
+  for (const [i, ask] of plan.entries()) {
+    fs.writeFileSync(worker, script(ask));
+    round();
+    const parked = h.readState('tasks.json').tasks[0].needs_owner;
+    if (i < plan.length - 1) assert.equal(parked, null, `run ${i + 1} is under the cap`);
+    else assert.match(parked, /^worker exited without submitting 3 times/);
+  }
+});
+
+test('a worker whose monitor died counts toward the respawn cap through its worker-exited record', { skip: process.platform === 'win32' }, async (t) => {
+  const h = setup(t);
+  const events = () => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  for (let i = 1; i <= 3; i++) {
+    assert.equal(h.readState('tasks.json').tasks[0].needs_owner, null, `exit ${i - 1} is under the cap`);
+    const spawned = await start(t, h);
+    const monitor = events().findLast((e) => e.cmd === 'spawn').detail.monitor_pid;
+    killPid(monitor, 'SIGKILL');
+    spawned.kill();
+    await waitOnRepo(h, () => (h.json(['status']).exited_claims || []).length === 1, 'the killed worker was not reported');
+    // Any observer records the exit; spend collection is one.
+    h.ok(['spend', 'T1', '--from-spawn', spawned.agent]);
+    assert.ok(events().some((e) => e.cmd === 'worker-exited' && e.detail.agent === spawned.agent));
+    assert.ok(!events().some((e) => e.cmd === 'spawn exit' && e.detail.agent === spawned.agent && 'code' in e.detail), 'the dead monitor recorded no exit');
+    h.ok(['release', 'T1', '--reason', 'recover killed worker', '--agent', 'another-worker']);
+  }
+  assert.match(h.readState('tasks.json').tasks[0].needs_owner, /^worker exited without submitting 3 times at revision 1/);
 });

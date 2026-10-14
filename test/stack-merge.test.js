@@ -10,6 +10,7 @@ const { BIN } = require('./helpers');
 const { waitFor } = require('./canary');
 const { HUNG_TEST_MS } = require('./signals');
 const { setup, stacked } = require('./stack-fixture');
+const { readPublished } = require('./atomic-file');
 
 // Every merge request the stub received, as 'pr N' for gh pr merge, 'async N' for
 // GitHub's asynchronous merge API and 'stack N' for gh stack merge.
@@ -930,7 +931,7 @@ function queued(t) {
   f.acceptCode = (id) => f.h.ok(['accept', id, '--waive', 'tests', '--waive', 'clean', '--waive', 'review', '--waive', 'ci',
     '--reason', 'offline stack fixture']);
   f.consume = () => f.h.run(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
-  f.suites = () => (fs.existsSync(log) ? fs.readFileSync(log, 'utf8').trim().split('\n').map(JSON.parse) : [])
+  f.suites = () => (fs.existsSync(log) ? readPublished(log, 'utf8').trim().split('\n').map(JSON.parse) : [])
     .filter((files) => files.includes('moved.txt'));
   f.checks = () => fs.readFileSync(path.join(f.h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse)
     .filter((e) => e.cmd === 'head check');
