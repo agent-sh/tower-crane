@@ -2356,9 +2356,20 @@ function claudeShows(fsRules, p) {
 // Found 2026-10-14: codex agents ran the host's git and gh, since the codex
 // profile hid homes/ and the shims in homes/<agent>/bin with it. Every
 // harness's agent finds its shims first on PATH, and a sandboxed one's
-// sandbox shows them.
+// sandbox shows them. The stubs run outside any sandbox, so the sandbox check
+// models each one's mount order (codexShows, claudeShows); the live probes in
+// live-sandbox.test.js are the evidence from the real sandboxes. Each shim
+// runs in a project whose package.json says "type": "module", and with
+// NODE_OPTIONS asking node to require a file first: the shim still runs as
+// CommonJS and never loads the file.
 test('for every harness the first git and gh on the agent\'s PATH are its shims, and claude and codex sandboxes show them', { skip: NO_STUBS }, (t) => {
   const { h, u } = setup(t);
+  fs.writeFileSync(path.join(h.repo, 'package.json'), '{"type":"module"}\n');
+  h.git(['add', 'package.json']);
+  h.git(['commit', '-q', '-m', 'an ES module project']);
+  const injected = path.join(h.base, 'injected');
+  const evil = path.join(h.base, 'evil.cjs');
+  fs.writeFileSync(evil, `require('node:fs').writeFileSync(${JSON.stringify(injected)}, process.argv.join(' '));\n`);
   const probe = path.join(h.base, 'probe');
   fs.mkdirSync(probe);
   const script = path.join(probe, 'probe.js');
@@ -2399,6 +2410,13 @@ if (path.basename(process.argv[1]) === 'codex') process.stdout.write(JSON.string
     }
     assert.equal(path.dirname(seen.git), path.dirname(seen.gh));
     const bin = path.dirname(seen.git);
+    for (const tool of ['git', 'gh']) {
+      const ran = cp.spawnSync(path.join(bin, tool), tool === 'git' ? ['version'] : ['auth', 'status'], { cwd: h.repo, encoding: 'utf8',
+        env: { ...env, NODE_OPTIONS: `--require=${evil}`, NODE_PATH: path.join(h.base, 'planted-modules') } });
+      assert.doesNotMatch(String(ran.stderr), /require is not defined|ERR_REQUIRE|ES module/, `${harness}: ${tool} runs as CommonJS`);
+      if (tool === 'git') assert.equal(ran.status, 0, `${harness}: git version through the shim: ${ran.stderr}`);
+      assert.equal(fs.existsSync(injected), false, `${harness}: ${tool} loaded NODE_OPTIONS's file`);
+    }
     if (harness === 'codex') {
       const rules = TOML.parse(fs.readFileSync(path.join(seen.home, 'config.toml'), 'utf8')).permissions['tower-crane'].filesystem;
       for (const p of [bin, path.join(bin, 'git'), path.join(path.dirname(bin), 'policy.json'), path.join(path.dirname(bin), 'lib', 'shim.js')]) {
