@@ -16,9 +16,12 @@ const lines = (items) => items.map((i) => JSON.stringify(i)).join('\n') + (items
 // `later` maps other commits on the base to their checks (`allRuns`: every check run, where the
 // default list keeps the latest of each name), `branch` lists the base's workflow runs since the
 // merge commit, `compare` maps "from...to" to the compare status GitHub reports and `files` maps a
-// workflow path to its text at any commit.
+// workflow path to its text at any commit. `history` lists the commits the merge commit contains,
+// newest first, `earlier` the base's runs of its workflow before it, `runJobs` maps a run id to its
+// jobs and `logs` a job id to the failing test names its log reports.
 function github({ runs = [], suites = [], workflows = [], head = SHA, apiError = null, view = {}, pr,
-  later = {}, branch = [], compare = {}, date = '2026-10-13T20:00:00Z', files = {} } = {}) {
+  later = {}, branch = [], compare = {}, date = '2026-10-13T20:00:00Z', files = {},
+  history = [], earlier = [], runJobs = {}, logs = {} } = {}) {
   const commits = { ...later, [SHA]: { runs, suites, workflows } };
   return fakeExec((args) => {
     if (args[0] === 'pr' && args[1] === 'view') return result(JSON.stringify(pr || { headRefOid: head, mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN', ...view }));
@@ -29,6 +32,13 @@ function github({ runs = [], suites = [], workflows = [], head = SHA, apiError =
     if (args[1] === `repos/${REPO}/commits/${SHA}`) return result(`${date}\n`);
     const content = args[1].match(new RegExp(`^repos/${REPO}/contents/(.+)\\?ref=\\w+$`));
     if (content) return files[content[1]] == null ? result('', 1, 'HTTP 404') : result(`${Buffer.from(files[content[1]]).toString('base64')}\n`);
+    if (args[1] === `repos/${REPO}/commits?sha=${SHA}&per_page=100`) return result(lines([SHA, ...history]));
+    if (args[1].startsWith(`repos/${REPO}/actions/workflows/ci.yml/runs?branch=main&created=${encodeURIComponent('<=')}`)) return result(lines(earlier));
+    const jobsOf = args[1].match(new RegExp(`^repos/${REPO}/actions/runs/(\\d+)/jobs\\?filter=latest&per_page=100$`));
+    if (jobsOf) return result(lines(runJobs[jobsOf[1]] || []));
+    const log = args[1].match(new RegExp(`^repos/${REPO}/actions/jobs/(\\w+)/logs$`));
+    if (log) return logs[log[1]] === null ? result('', 1, 'HTTP 410: logs expired')
+      : result((logs[log[1]] || []).map((t, i) => `2026-10-13T20:00:00.0000000Z not ok ${i + 1} - ${t}`).join('\n'));
     assert.ok(args.includes('--paginate'), 'every page must be read');
     if (args[1] === `repos/${REPO}/actions/runs?branch=main&created=${encodeURIComponent(`>=${branchSince(workflows, date)}`)}&per_page=100`) return result(lines(branch));
     for (const [sha, at] of Object.entries(commits)) {
@@ -264,6 +274,112 @@ test('the later-commit scan looks at five commits per check and carries its reje
   const rerun = busyMain({ at: [workflow(3, LATEST, 'success')] });
   const r4 = await gate.run(ctx(rerun, { ...HOTFIX, evidence: [{ type: 'ci', sha: SHA, hotfix_ci: { merge_sha: SHA, rejected: [redLater] } }] }, { ci: { required: [] } }));
   assert.equal(r4.ok, true, r4.summary);
+});
+
+const PARENT = 'e'.repeat(40);
+const OLDER = 'f'.repeat(40);
+const ELSEWHERE = '9'.repeat(40);
+// A merge commit whose push run failed. `failing` are its failed jobs as [job id, name, failing tests],
+// `earlier` the base's runs of the workflow before it as [run, [[job id, name, tests]...]], newest
+// first, and `history` the commits the merge commit contains.
+function redMerge({ failing, earlier = [], history = [PARENT, OLDER], at = [], evidence } = {}) {
+  const merge = workflow(1, SHA, 'failure');
+  const logs = {};
+  const runJobs = {};
+  for (const [id, , tests] of failing) logs[id] = tests;
+  for (const [w, jobsOf] of earlier) {
+    runJobs[w.id] = jobsOf.map(([id, name]) => ({ id, name, conclusion: 'failure' }));
+    for (const [id, , tests] of jobsOf) logs[id] = tests;
+  }
+  const gh = busyMain({ merge, at, extra: { history, earlier: earlier.map(([w]) => w), runJobs, logs } });
+  const base = gh.exec;
+  gh.exec = (cmd, args) => (args[1] === `repos/${REPO}/commits/${SHA}/check-runs?per_page=100`
+    ? result(lines(failing.map(([id, name]) => ({ id, ...run(name, 'failure'), suite: 1001 })))) : base(cmd, args));
+  return gate.run(ctx(gh, { ...HOTFIX, ...(evidence ? { evidence } : {}) }, { ci: { required: ['checks (shared files)', 'test ('] } })).then((r) => ({ r, gh }));
+}
+const earlierRun = (id, sha, conclusion, hour) => workflow(id, sha, conclusion, { created_at: `2026-10-13T${hour}:00:00Z` });
+const reads = (gh, part) => gh.calls.filter((c) => c[2]?.includes(part)).length;
+
+test('a failure the base already had before the merge commit is main_red: CI waits for a later green run as for a cancelled one', async () => {
+  // The parent's run failed the same test in another shard; tests move between shards as files are added.
+  const parentRun = earlierRun(5, PARENT, 'failure', 19);
+  const earlier = [[parentRun, [[601, 'test (windows-latest, shard 2/3)', ['locks hold', 'other test']]]]];
+  const failing = [[501, 'test (windows-latest, shard 3/3)', ['locks hold']]];
+  const { r: waiting } = await redMerge({ failing, earlier });
+  assert.equal(waiting.ok, false);
+  assert.equal(waiting.confirmed_failure, undefined, waiting.summary);
+  assert.equal(waiting.pending, true, waiting.summary);
+  assert.equal(waiting.not_running, true);
+  const failure = waiting.hotfix_ci.failure;
+  assert.equal(failure.classification, 'main_red');
+  assert.deepEqual(failure.runs[0].parent_run, { id: 5, sha: PARENT, event: 'push', conclusion: 'failure', url: `https://github.com/${REPO}/actions/runs/5` });
+  assert.deepEqual(failure.runs[0].jobs, [{ name: 'test (windows-latest, shard 3/3)', id: 501, tests: ['locks hold'], failed_before: { run: 5, sha: PARENT, url: `https://github.com/${REPO}/actions/runs/5` } }]);
+  assert.match(waiting.summary, /failed only where main was already red \(main_red\)/);
+  assert.match(waiting.summary, /failed only as main already failed \(parent run 5 at eeeeeeeeee failure\): test \(windows-latest, shard 3\/3\) \[locks hold\] in run 5/);
+  // A later green run on main that contains the merge commit stands for it, and the evidence keeps the classification.
+  const { r: green } = await redMerge({ failing, earlier, at: [workflow(3, LATEST, 'success')] });
+  assert.equal(green.ok, true, green.summary);
+  assert.equal(green.hotfix_ci.satisfied_by.sha, LATEST);
+  assert.equal(green.hotfix_ci.failure.classification, 'main_red');
+  assert.match(green.summary, /merge commit aaaaaaaaaa failed only where main was already red \(main_red\); judged at dddddddddd/);
+  // The next check of the same failed run reuses the recorded classification without reading logs again.
+  const { r: again, gh } = await redMerge({ failing, earlier, evidence: [{ type: 'ci', sha: SHA, revision: 1, hotfix_ci: waiting.hotfix_ci }] });
+  assert.equal(again.hotfix_ci.failure.classification, 'main_red');
+  assert.equal(reads(gh, '/logs'), 0);
+  assert.equal(reads(gh, '/actions/workflows/'), 0);
+});
+
+test('a known flaky failure in an earlier base run is main_red; a cancelled or uncontained run counts for nothing', async () => {
+  // The parent's run was cancelled by a newer push and the grandparent's was green; an older run failed
+  // the proof job, whose log names no test, so the job name decides.
+  const earlier = [
+    [earlierRun(16, PARENT, 'cancelled', 19), []],
+    [earlierRun(15, OLDER, 'success', 18), []],
+    [earlierRun(14, ELSEWHERE, 'failure', 17), [[701, 'test (ubuntu-latest, shard 1/3)', ['racy test']]]],
+    [earlierRun(13, OLDER, 'failure', 16), [[602, 'complete gate scratch cleanup proof', []]]],
+  ];
+  const { r, gh } = await redMerge({ failing: [[502, 'complete gate scratch cleanup proof', []]], earlier, at: [workflow(3, LATEST, 'success')] });
+  assert.equal(r.ok, true, r.summary);
+  const [record] = r.hotfix_ci.failure.runs;
+  assert.equal(record.parent_run.id, 15, 'the nearest run that judged a contained commit');
+  assert.equal(record.earlier_runs, 2);
+  assert.equal(record.jobs[0].failed_before.run, 13);
+  // A green earlier run has no failed job to read.
+  assert.equal(reads(gh, '/actions/runs/15/jobs'), 0);
+  // The same racy test in a run at a commit the merge commit does not contain does not count.
+  const { r: racy } = await redMerge({ failing: [[503, 'test (ubuntu-latest, shard 2/3)', ['racy test']]], earlier, at: [workflow(3, LATEST, 'success')] });
+  assert.equal(racy.ok, false);
+  assert.equal(racy.confirmed_failure, true, racy.summary);
+});
+
+test('a failure new at the merge commit stays a confirmed failure, with the parent run in its evidence', async () => {
+  const parentRun = earlierRun(5, PARENT, 'success', 19);
+  const olderRun = earlierRun(4, OLDER, 'failure', 18);
+  const cases = [
+    ['parent green, the test never failed before', [[parentRun, []], [olderRun, [[601, 'test (windows-latest, shard 3/3)', ['another test']]]]]],
+    ['the same job failed before with other tests', [[earlierRun(5, PARENT, 'failure', 19), [[601, 'test (windows-latest, shard 3/3)', ['another test']]]]]],
+    ['no earlier run on the base', []],
+  ];
+  for (const [label, earlier] of cases) {
+    const { r } = await redMerge({ failing: [[501, 'test (windows-latest, shard 3/3)', ['new test']]], earlier, at: [workflow(3, LATEST, 'success')] });
+    assert.equal(r.ok, false, label);
+    assert.equal(r.confirmed_failure, true, `${label}: ${r.summary}`);
+    assert.equal(r.pending, undefined, label);
+    assert.equal(r.hotfix_ci.satisfied_by, undefined, label);
+    const failure = r.hotfix_ci.failure;
+    assert.equal(failure.classification, 'confirmed', label);
+    assert.equal(failure.runs[0].jobs[0].failed_before, null, label);
+    assert.equal(failure.runs[0].parent_run?.id, earlier.length ? 5 : undefined, label);
+    assert.match(r.summary, /push workflow not successful\n.*has failures new at the merge commit, not in the \d earlier main runs? read \((parent run 5 at eeeeeeeeee (success|failure)|no earlier main run read)\): test \(windows-latest, shard 3\/3\) \[new test\]/, label);
+  }
+  // One new failure among old ones still confirms; an unreadable log falls back to the job name.
+  const earlier = [[earlierRun(5, PARENT, 'failure', 19), [[601, 'test (windows-latest, shard 3/3)', ['old test']]]]];
+  const { r: mixed } = await redMerge({ failing: [[501, 'test (windows-latest, shard 3/3)', ['old test']], [502, 'test (ubuntu-latest, shard 1/3)', ['new test']]], earlier });
+  assert.equal(mixed.confirmed_failure, true, mixed.summary);
+  assert.deepEqual(mixed.hotfix_ci.failure.runs[0].jobs.map((j) => j.failed_before?.run ?? null), [5, null]);
+  const { r: expired } = await redMerge({ failing: [[501, 'test (windows-latest, shard 3/3)', null]], earlier, at: [workflow(3, LATEST, 'success')] });
+  assert.equal(expired.ok, true, expired.summary);
+  assert.equal(expired.hotfix_ci.failure.runs[0].jobs[0].log_error, true);
 });
 
 test('every run and suite completed, none failed: ok', async () => {

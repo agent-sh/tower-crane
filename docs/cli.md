@@ -200,7 +200,15 @@ successful push, scheduled or manual run of the same workflows at the merge
 commit or a later commit on the base that contains it stands for it, and the
 CI evidence names that commit and run in `hotfix_ci`. A failed run or job at
 the merge commit itself still fails; a later green run does not mask it.
-Until a later run is green, CI stays pending. The later run vouches for the
+The exception is a base that was already red: when every failed job there
+failed the same way (the same failing test names, or the same job name when
+its log names none) in an earlier run of the workflow on the base, among the
+last 30 completed runs at commits the merge commit contains, the failure is
+`main_red` and CI waits for a later green run as for a cancelled one. The
+evidence records `hotfix_ci.failure` with the classification, the parent run
+(the nearest earlier run, the first parent's unless it was cancelled) and,
+for each failed job, the earlier run that failed it. A failure new at the
+merge commit stays confirmed. Until a later run is green, CI stays pending. The later run vouches for the
 tree at its commit; the tests gate still proves the merge commit. A required
 job skipped in that run does not apply only when it also skipped at the merge
 commit or its own `if:` is false for the run's event, such as a
@@ -1064,7 +1072,7 @@ The CLI refuses manual software verdicts, and software receipts require matching
 <!-- commands:Gates:start -->
 | Command | Does |
 |---|---|
-| `check ci ID` | for a recorded hotfix, check successful push workflows on its recorded base at the merge commit; when its push run was cancelled or never ran, the first successful push, scheduled or manual run of the same workflows at that commit or a later base commit that contains it stands for it, and `hotfix_ci` names that commit and run. Otherwise with `ci.local`, resolve task override, kind mapping or default, run its argv against the merged base and submitted head and record a local receipt; without local CI, verify the PR head and mergeability. Require `ci.required` runs to be present and successful on the submitted sha, require at least one run outside `ci.ignore_apps` and `ci.capped_review` exceptions and all remaining checks green; records `ci` |
+| `check ci ID` | for a recorded hotfix, check successful push workflows on its recorded base at the merge commit; when its push run was cancelled or never ran, the first successful push, scheduled or manual run of the same workflows at that commit or a later base commit that contains it stands for it, and `hotfix_ci` names that commit and run. A failure there that the base already had in an earlier run (`main_red`, recorded in `hotfix_ci.failure` with the parent run) waits the same way; a new failure is confirmed. Otherwise with `ci.local`, resolve task override, kind mapping or default, run its argv against the merged base and submitted head and record a local receipt; without local CI, verify the PR head and mergeability. Require `ci.required` runs to be present and successful on the submitted sha, require at least one run outside `ci.ignore_apps` and `ci.capped_review` exceptions and all remaining checks green; records `ci` |
 | | |
 | `check clean ID [--cmd CMD]` | run pinned `gates.clean_cmd` at the submitted commit against `base` (the recorded first parent for hotfixes); records `clean`, ok when every check ran and none reported a HIGH finding; timeouts record infrastructure failure |
 | | |
