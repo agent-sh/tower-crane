@@ -536,22 +536,27 @@ test('switching from Codex to agy drops inherited Codex flags and names them', t
 });
 
 test('moving a rung to another harness drops the model and fields the old harness chose', (t) => {
-  const h = makeRepo(t, { builtin: true });
+  // The rungs name a configured Claude alias, so the model swap proof still
+  // moves a Claude model off Claude.
+  const alias = Object.keys(L.BUILTIN.claude_aliases)[0];
+  const claudeRung = { harness: 'claude', model: alias, effort: 'high' };
+  const h = makeRepo(t);
+  h.initLadder = { easy: claudeRung, review: claudeRung, small: claudeRung, medium: { profile: 'sol', effort: 'high' } };
   h.init();
-  // The field report: a claude/haiku rung moved to codex kept claude-haiku-5-5.
+  // The field report: a claude/haiku rung moved to codex kept its Claude model.
   const out = h.run(['ladder', 'set', 'easy', '--harness', 'codex', '--profile', 'sol', '--effort', 'medium', '--json']);
   assert.equal(out.code, 0, out.stderr);
   const data = JSON.parse(out.stdout);
-  assert.deepEqual(data.dropped, { model: 'claude-haiku-5-5' });
+  assert.deepEqual(data.dropped, { model: alias });
   assert.equal(data.model, undefined);
   assert.deepEqual(h.readState('project.json').ladder.easy, { harness: 'codex', profile: 'sol', effort: 'medium' });
   const ev = events(h).filter((e) => e.cmd === 'ladder set').pop();
-  assert.deepEqual(ev.detail, { rung: 'easy', harness: 'codex', profile: 'sol', effort: 'medium', dropped: { model: 'claude-haiku-5-5' } });
+  assert.deepEqual(ev.detail, { rung: 'easy', harness: 'codex', profile: 'sol', effort: 'medium', dropped: { model: alias } });
   assert.ok(events(h).some((e) => e.cmd === 'setting' && e.detail.settings['ladder.model']), 'the dropped field is audited as changed');
 
   // A model named in the same edit stays, even one the drop would remove.
-  h.ok(['ladder', 'set', 'small', '--harness', 'codex', '--model', 'claude-haiku-5-5']);
-  assert.equal(h.readState('project.json').ladder.small.model, 'claude-haiku-5-5');
+  h.ok(['ladder', 'set', 'small', '--harness', 'codex', '--model', alias]);
+  assert.equal(h.readState('project.json').ladder.small.model, alias);
 
   // Following the default through --clear harness moves the rung too.
   h.ok(['ladder', 'set', 'review', '--clear', 'harness', '--profile', 'sol']);
@@ -564,8 +569,8 @@ test('moving a rung to another harness drops the model and fields the old harnes
   assert.equal(refused.code, 1);
   assert.match(refused.stderr, /ladder medium \(claude\): needs a model; ladder medium: moving from codex to claude would drop profile sol, which does not fit claude, so name what the rung runs on claude/);
   assert.equal(projectText(h), before);
-  h.ok(['ladder', 'set', 'medium', '--harness', 'claude', '--model', 'sonnet']);
-  assert.deepEqual(h.readState('project.json').ladder.medium, { harness: 'claude', model: 'sonnet', effort: 'high' });
+  h.ok(['ladder', 'set', 'medium', '--harness', 'claude', '--model', alias]);
+  assert.deepEqual(h.readState('project.json').ladder.medium, { harness: 'claude', model: alias, effort: 'high' });
 
   // A new default harness does not edit the rungs that follow it, so it
   // refuses one whose model cannot run there.
@@ -576,12 +581,13 @@ test('moving a rung to another harness drops the model and fields the old harnes
 });
 
 test('harnessDrops keeps what fits the new harness and returns the rest', () => {
+  const alias = Object.keys(L.BUILTIN.claude_aliases)[0];
   const rung = { model: 'claude-haiku-5-5', effort: 'high', supervision: { retries: 1 }, env: { A: '1' } };
   for (const [r, h, dropped] of [
     [rung, 'codex', { model: 'claude-haiku-5-5' }],
     [rung, 'claude', {}],
     [rung, 'pi', {}],
-    [{ model: 'haiku' }, 'pi', { model: 'haiku' }],
+    [{ model: alias }, 'pi', { model: alias }],
     [{ model: 'global.anthropic.claude-fable-5-1' }, 'codex', { model: 'global.anthropic.claude-fable-5-1' }],
     [{ model: 'gpt-5.5' }, 'claude', { model: 'gpt-5.5' }],
     [{ model: 'openai.gpt-oss-120b' }, 'claude', { model: 'openai.gpt-oss-120b' }],
