@@ -764,6 +764,55 @@ process.exit(r.status ?? 1);`;
   }
 });
 
+test('a fallback full re-review keeps the failed review rung and lists its blockers', (t) => {
+  for (const variant of ['amend', 'gone', 'rebase']) {
+    const h = setup(t, 'easy', 'other', undefined, { gated: true });
+    const findings = JSON.stringify([{ kind: 'acceptance', path: 'value.js', claim: 'PRIOR_BLOCKER_CLAIM' }]);
+    const script = `const cp = require('node:child_process');
+const r = cp.spawnSync(process.execPath, [${JSON.stringify(BIN)}, 'evidence', 'T1', '--type', 'review', '--fail', '--sha', ${JSON.stringify(h.sha)}, '--summary', 'PRIOR_BLOCKER_SUMMARY', '--findings', ${JSON.stringify(findings)}], {env: process.env});
+process.exit(r.status ?? 1);`;
+    for (const name of ['easy', 'medium', 'hard', 'research', 'review']) {
+      h.ok(['ladder', 'set', name, '--harness', 'command', '--clear', 'model', '--clear', 'profile',
+        '--clear', 'provider', '--clear', 'effort', '--command', JSON.stringify([process.execPath, '-e', script, '{prompt}'])]);
+    }
+    // The risk glob puts the first review on hard; without it the change alone stays easy.
+    h.ok(['project', 'set', '--review-policy', JSON.stringify({ risk_paths: ['value.js'] })]);
+    const reviewedSha = h.sha;
+    assert.equal(h.json(['spawn', '--task', 'T1', '--role', 'review', '--wait']).review_rung, 'hard');
+    h.ok(['project', 'set', '--review-policy', 'null']);
+    if (h.readState('tasks.json').tasks[0].status !== 'rework') h.ok(['rework', '--from-review', 'T1']);
+    if (variant === 'rebase') {
+      h.git(['switch', 'main']);
+      fs.writeFileSync(path.join(h.repo, 'upstream.md'), 'An upstream change.\n');
+      h.git(['add', 'upstream.md']);
+      h.git(['commit', '-qm', 'advance the base']);
+      h.git(['switch', 'fixture-change']);
+      h.git(['rebase', '-q', 'main']);
+    }
+    h.ok(['claim', 'T1', '--agent', 'builder']);
+    fs.writeFileSync(path.join(h.repo, 'correction.md'), 'The value becomes one.\n');
+    h.git(['add', 'correction.md']);
+    h.git(variant === 'rebase' ? ['commit', '-qm', 'explain the value'] : ['commit', '-q', '--amend', '-m', 'change with explanation']);
+    h.sha = h.git(['rev-parse', 'HEAD']);
+    if (variant === 'gone') {
+      h.git(['reflog', 'expire', '--expire=now', '--all']);
+      h.git(['gc', '-q', '--prune=now']);
+      assert.throws(() => h.git(['cat-file', '-e', `${reviewedSha}^{commit}`]), 'the reviewed commit must be gone for this test');
+    }
+    h.ok(['submit', 'T1', '--agent', 'builder', '--sha', h.sha]);
+    ready(h);
+    const out = choice(h);
+    const prompt = out.argv.find((arg) => arg.includes('## Task'));
+    assert.match(prompt, /## Review scope\n\nFull review/, variant);
+    assert.match(prompt, variant === 'gone' ? /no longer in the repository/ : /not an ancestor|base advanced/, variant);
+    assert.equal(out.review_rung, 'hard', variant);
+    assert.ok(prompt.includes(`It follows a failed review by reviewer-T1-1 at ${reviewedSha}`), variant);
+    assert.match(prompt, /Unresolved prior blockers still block/, variant);
+    assert.match(prompt, /PRIOR_BLOCKER_SUMMARY/, variant);
+    assert.match(prompt, /PRIOR_BLOCKER_CLAIM/, variant);
+  }
+});
+
 test('a rework whose reviewed sha is gone gets a full review instead of a refusal', (t) => {
   const h = setup(t, 'easy', 'other', undefined, { gated: true });
   const reviewedSha = h.sha;
