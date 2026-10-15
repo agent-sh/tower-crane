@@ -366,7 +366,9 @@ fs.writeFileSync(path.join(process.env.TMPDIR, 'report.txt'), 'scratch report');
 console.log('Scratch report: ' + path.join(process.env.TMPDIR, 'report.txt'));
 console.log('Local check receipt: ' + path.resolve('.local/checks/receipt.json'));
 console.log('Local check receipt: ' + path.resolve('..', '..', '..', 'outside.json'));
-process.exit(1);
+// Not process.exit(1): node's stdout to the gate is a socket that holds about 170 writes, and
+// when the gate has not read yet node queues the rest, which an explicit exit drops.
+process.exitCode = 1;
 `);
   const token = `ghp_${'a1'.repeat(18)}`;
   h.env.CI_FIXTURE_TOKEN = token;
