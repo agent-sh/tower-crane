@@ -108,21 +108,63 @@ test('automation joins the local CI run a manual check holds instead of starting
   assert.ok(logs(h).some((e) => e.cmd === 'automation' && e.via === 'automation'), 'the reaction ran');
 });
 
-test('a run past its deadline is refused with its owner, and a dead holder leaves the gate to the caller', (t) => {
+// A hand-written lease held by this test process, which the test then ends.
+function holderFixture(t, overrides = {}) {
   const h = fixture(t);
   fs.writeFileSync(h.release, '');
   const task = h.readState('tasks.json').tasks[0];
-  const lease = (pid, source) => ({ at: new Date(Date.now() - 600000).toISOString(), agent: 'orchestrator', via: 'automation', cmd: 'gate run', task: 'T1',
-    detail: { type: 'ci', sha: task.sha, revision: task.revision, source, phase: 'running', deadline: new Date(Date.now() - 1000).toISOString(), pid, host: os.hostname() } });
-  const append = (e) => fs.appendFileSync(path.join(h.state, 'events.jsonl'), `${JSON.stringify(e)}\n`);
-  append(lease(process.pid, 'gate:live'));
-  const refused = h.run(['check', 'ci', 'T1']);
-  assert.equal(refused.code, 1);
-  assert.match(refused.stderr, new RegExp(`ci is already running at [0-9a-f]+ \\(revision ${task.revision}\\) by orchestrator via automation, pid ${process.pid} on ${os.hostname()}, started .*passed its deadline`));
-  assert.equal(runs(h), 0);
-  append({ at: new Date().toISOString(), agent: 'orchestrator', cmd: 'gate run', task: 'T1', detail: { source: 'gate:live', phase: 'error', error: null } });
-  const dead = cp.spawnSync(process.execPath, ['-e', '']).pid;
-  append(lease(dead, 'gate:dead'));
-  h.ok(['check', 'ci', 'T1']);
+  h.append = (e) => fs.appendFileSync(path.join(h.state, 'events.jsonl'), `${JSON.stringify(e)}\n`);
+  h.lease = (source, detail = {}) => h.append({ at: new Date(Date.now() - 600000).toISOString(), agent: 'orchestrator', via: 'automation', cmd: 'gate run', task: 'T1',
+    detail: { type: 'ci', sha: task.sha, revision: task.revision, source, phase: 'running', deadline: new Date(Date.now() + 600000).toISOString(),
+      pid: process.pid, ...require('../lib/processes').identity(process.pid), ...overrides, ...detail } });
+  h.end = (source, detail) => h.append({ at: new Date().toISOString(), agent: 'orchestrator', via: 'automation', cmd: 'gate run', task: 'T1',
+    detail: { type: 'ci', sha: task.sha, revision: task.revision, source, ...detail } });
+  // Starts a joiner and resolves once it reports joining, with its result promise.
+  h.join = async (args) => {
+    let stderr = '';
+    let child;
+    const result = h.runAsync(args, { onSpawn: (c) => { child = c; c.stderr.on('data', (d) => { stderr += d; }); } });
+    await waitUntil(() => /joining the ci run/.test(stderr), { alive: child, what: () => `the joiner reports joining: ${stderr}` });
+    return { result, stderr: () => stderr };
+  };
+  return { h, task };
+}
+
+test('a joiner keeps waiting on a holder proven alive past its deadline, then runs the gate when the holder ends without evidence',
+  { skip: process.platform !== 'linux' && 'only Linux start ticks prove a holder alive' }, async (t) => {
+    const { h } = holderFixture(t);
+    h.lease('gate:slow', { deadline: new Date(Date.now() - 1000).toISOString() });
+    const joiner = await h.join(['check', 'ci', 'T1']);
+    h.end('gate:slow', { phase: 'error', error: 'holder stopped' });
+    const r = await joiner.result;
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(r.stderr, /ended without usable evidence; running the gate here/);
+    assert.equal(runs(h), 1);
+  });
+
+test('an unobservable holder past its deadline counts as ended: the caller says so and runs the gate', (t) => {
+  const { h } = holderFixture(t, { host: 'another-host', deadline: new Date(Date.now() - 1000).toISOString() });
+  h.lease('gate:elsewhere');
+  const r = h.run(['check', 'ci', 'T1']);
+  assert.equal(r.code, 0, r.stderr);
+  assert.match(r.stderr, /the ci run by orchestrator via automation, pid \d+ on another-host, started .* cannot be observed and passed its deadline .*; treating it as ended and running the gate here/);
   assert.equal(runs(h), 1);
+  assert.deepEqual(logs(h).findLast((e) => e.cmd === 'gate run' && e.detail.phase === 'running').detail.replaces, ['gate:elsewhere']);
+  // A holder whose process has exited is skipped without a deadline.
+  h.lease('gate:dead', { pid: cp.spawnSync(process.execPath, ['-e', '']).pid, start_ticks: undefined });
+  h.ok(['check', 'ci', 'T1']);
+  assert.equal(runs(h), 2);
+});
+
+test('a joiner that receives evidence from a run interrupted by wait shutdown runs the gate itself', async (t) => {
+  const { h } = holderFixture(t);
+  h.ok(['check', 'ci', 'T1']);
+  const recorded = ciEvidence(h).at(-1);
+  h.lease('gate:drained');
+  const joiner = await h.join(['check', 'ci', 'T1']);
+  h.end('gate:drained', { phase: 'done', evidence_at: recorded.at, interrupted: true });
+  const r = await joiner.result;
+  assert.equal(r.code, 0, r.stderr);
+  assert.match(r.stderr, /ended without usable evidence \(interrupted by wait shutdown\); running the gate here/);
+  assert.equal(runs(h), 2, 'the joiner ran its own CI instead of taking the interrupted result');
 });
