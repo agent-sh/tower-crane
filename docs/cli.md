@@ -26,6 +26,8 @@ Use `project set --budget-hours null` or `--budget-tokens null` to remove a proj
 
 For personal fallbacks, the owner writes the whole replacement list. A write of the requested list retires its approval even if only an operational field differs or the list is unchanged; the audit still describes the actual field changes. A different file, rung or replacement list does not satisfy the request.
 
+A fallback route that carries authority (a grant, an unsandboxed or `command` harness, `web_mcp`, `mcp` or a non-built-in tool) counts only as `ladder set --fallbacks` wrote it at that position: spawn skips a route another edit of the user file put there or changed, with a notice, and `ladder show` lists it with the command that approves it. Routes that only name a model, profile, provider or effort on a sandboxed harness need no approval ([Authority](state.md#fallback-route-grants)).
+
 Personal fallback grants are compared only with the previous personal routes, never a project's primary. Routes that inherit their harness are checked across compatible harnesses; switching between inherited and explicit harness selection needs any new reach grants approved. An explicit sandboxed harness avoids dependence on another project's primary. Once a personal grant exists, model tuning remains operational.
 
 Owner primary-ladder writes settle matching reach requests for the tools, harness and arguments they write, including grants already present. Owner task-kind writes likewise settle a pending downgrade request after the kind has changed, including a repeated kind value. This retirement does not change which edits are operational or owner-required.
