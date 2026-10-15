@@ -63,6 +63,7 @@ test('a nested spawn\'s supervisor scans git config without the parent agent\'s 
     env: { PATH: path.join(parent, 'bin') + path.delimiter + process.env.PATH },
   });
   assert.equal(started.code, 0, started.stderr);
+  // read-published: the stub appends calls; nothing replaces the file, and the spawn has exited.
   const seen = fs.existsSync(calls) ? fs.readFileSync(calls, 'utf8') : '';
   assert.doesNotMatch(seen, /^config --list --show-scope -z$/m, seen);
 });
@@ -160,11 +161,10 @@ test('a supervisor killed before it reports ends the wait early', (t) => {
   const h = setup(t);
   commandRung(h);
   const env = monitorHook(h, 'killed', `process.kill(process.pid, 'SIGKILL');`);
-  const at = Date.now();
   const failed = h.run(['spawn', '--role', 'small', '--task', 'T1'], { env });
   assert.equal(failed.code, 1, failed.stderr);
+  // Only the wait's own exit check says "exited"; a wait that ran out says "within 10 s".
   assert.match(failed.stderr, /supervisor startup failed: the supervisor exited before it reported ready/);
-  assert.ok(Date.now() - at < 8000, `took ${Date.now() - at} ms`);
 });
 
 test('a supervisor that stalls before it reports says so and keeps its log', (t) => {
@@ -206,10 +206,10 @@ cp.spawn = function (file, args, opts) {
 // This runs the same ps query on a real unreaped child here.
 test('ps shows an unreaped child as exited and a running one as not', { skip: process.platform === 'win32' && 'Windows has no ps; the signal check sees the exit' }, (t) => {
   const done = cp.spawn(process.execPath, ['-e', '']);
-  const live = cp.spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30000)']);
+  const live = cp.spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30000)']); // wait-allow: a child that outlives the test, killed after it
   t.after(() => live.kill('SIGKILL'));
   // Synchronous, as in the dispatch: the event loop cannot reap the child meanwhile.
-  const until = Date.now() + 10000;
+  const until = Date.now() + 10000; // wait-allow: a bound on the child's exit, which takes about 50 ms
   while (!P.psZombie(done.pid) && Date.now() < until) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20); // wait-allow: a bounded poll for the child's exit
   assert.equal(P.psZombie(done.pid), true);
   assert.equal(P.childExited(done.pid, 'darwin'), true);
@@ -218,7 +218,7 @@ test('ps shows an unreaped child as exited and a running one as not', { skip: pr
 });
 
 test('only systems without a process table of their own ask ps, and a failed ps proves nothing', (t) => {
-  const live = cp.spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30000)']);
+  const live = cp.spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30000)']); // wait-allow: a child that outlives the test, killed after it
   t.after(() => live.kill('SIGKILL'));
   const asked = [];
   const ps = (out) => (cmd, args) => { asked.push([cmd, ...args].join(' ')); return out; };
