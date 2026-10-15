@@ -2968,7 +2968,8 @@ function refillFixture(t) {
   const h = cachedFixture(null, 'automation-refill', (repo) => {
     const h = setup(null, { ci: 'pending', repo });
     configureHarness(h);
-    h.ok(['project', 'set', '--workers', '1']);
+    // Refill dispatches a gate rework at once here; the restore hold has its own tests.
+    h.ok(['project', 'set', '--workers', '1', '--rework-hold-min', '0']);
     for (const id of ['T2', 'T3', 'T4']) {
       h.ok(['task', 'add', '--title', id, '--acceptance', 'works', '--tier', 'easy',
         ...(id === 'T4' ? ['--dep', 'T3'] : [])]);
@@ -4130,13 +4131,13 @@ test('the refill hold ends at the rework time plus gates.rework_hold_min and onl
     detail: { sha, previous_revision: 1, revision: 2, gate: 'ci' } }] };
   const task = { id: 'T1', status: 'rework', revision: 2, sha, claim: null };
   const start = Date.parse(at);
-  assert.equal(Hold.until(st, task, start + 60000), '2026-10-15T00:05:00.000Z');
-  assert.equal(Hold.until(st, task, start + 5 * 60000), null, 'refill proceeds once the window ends');
-  assert.equal(Hold.until({ ...st, project: { gates: { rework_hold_min: 0 } } }, task, start), null, 'zero disables the hold');
-  assert.equal(Hold.until({ ...st, project: { gates: { rework_hold_min: 0.5 } } }, task, start + 20000), '2026-10-15T00:00:30.000Z');
-  assert.equal(Hold.until(st, { ...task, revision: 3 }, start), null, 'a task that can no longer be restored is not held');
+  assert.equal(Hold.holdEnd(st, task, start + 60000), '2026-10-15T00:05:00.000Z');
+  assert.equal(Hold.holdEnd(st, task, start + 5 * 60000), null, 'refill proceeds once the window ends');
+  assert.equal(Hold.holdEnd({ ...st, project: { gates: { rework_hold_min: 0 } } }, task, start), null, 'zero disables the hold');
+  assert.equal(Hold.holdEnd({ ...st, project: { gates: { rework_hold_min: 0.5 } } }, task, start + 20000), '2026-10-15T00:00:30.000Z');
+  assert.equal(Hold.holdEnd(st, { ...task, revision: 3 }, start), null, 'a task that can no longer be restored is not held');
   const person = { ...st, events: [{ ...st.events[0], detail: { sha, previous_revision: 1, revision: 2 } }] };
-  assert.equal(Hold.until(person, task, start), null, 'a rework without a gate is not held');
+  assert.equal(Hold.holdEnd(person, task, start), null, 'a rework without a gate is not held');
   assert.deepEqual(Hold.errors({ rework_hold_min: -1 }).length, 1);
 });
 
