@@ -458,10 +458,42 @@ test('a marker from another pid namespace is judged by its holder, not by what e
   assert.equal(fs.existsSync(live), true);
 });
 
+// A process whose pid namespace link cannot be read, such as a root
+// container's, can have the innermost pid of a dead holder's marker. Only the
+// exact start keeps the marker for it when the marker has no offset to place
+// one by: one from 0.1.0, or from a holder that could not read its offset.
+test('a marker without an offset is not kept by an unreadable process with its pid', { skip: (process.platform !== 'linux' || process.geteuid() === 0) && 'needs a namespace link this user cannot read', timeout: 300000 }, (t) => {
+  const h = makeRepo(t);
+  h.init();
+  const commonDir = path.join(h.repo, '.git');
+  const dir = path.join(commonDir, REAP_DIR);
+  const table = fs.mkdtempSync(path.join(h.base, 'proc-'));
+  const other = path.join(table, '5555');
+  fs.mkdirSync(path.join(other, 'ns'), { recursive: true });
+  fs.writeFileSync(path.join(other, 'status'), 'Name:\tcontainer\nState:\tS (sleeping)\nNSpid:\t5555\t924\n');
+  fs.writeFileSync(path.join(other, 'stat'), `5555 (container) ${['S', ...Array(18).fill('0'), '777'].join(' ')} 0 0\n`);
+  fs.chmodSync(path.join(other, 'ns'), 0);
+  // Readable again before the repository's own cleanup removes the table.
+  try {
+    const env = { HOOK_PIDNS: 'pid:[4026511111]', TOWER_CRANE_SANDBOX: '0', TOWER_CRANE_PROC: table };
+    for (const offset of [{}, { boottime_offset_ns: null }, { boottime_offset_ns: '0' }]) {
+      plantMarker(commonDir, { pid: 924, pidns: 'pid:[4026599999]', start_ticks: '1', ...offset });
+      const r = judge(h, commonDir, env);
+      assert.doesNotMatch(r.stderr, /another cleanup holds/, JSON.stringify(offset));
+      assert.equal(fs.existsSync(dir), false, JSON.stringify(offset));
+    }
+    // The exact start still keeps it.
+    plantMarker(commonDir, { pid: 924, pidns: 'pid:[4026599999]', start_ticks: '777' });
+    assert.match(judge(h, commonDir, env).stderr, /another cleanup holds/);
+  } finally {
+    fs.chmodSync(path.join(other, 'ns'), 0o755);
+  }
+});
+
 const UNSHARE = process.platform === 'linux' && cp.spawnSync('unshare', ['-Urpf', '--mount-proc', 'true'], { stdio: 'ignore' }).status === 0;
 
 // The holder sits in a real pid namespace of its own, under a host name of its
-// own, as a shim in claude's command sandbox does.
+// own, as a shim in a sandbox that names its own host does.
 test('a cleanup on the host keeps the directory while a cleanup in a sandbox of its own holds it', { skip: !UNSHARE && 'needs unshare for a pid namespace', timeout: 300000 }, async (t) => {
   const h = makeRepo(t);
   h.init();
@@ -487,6 +519,52 @@ test('a cleanup on the host keeps the directory while a cleanup in a sandbox of 
   assert.equal(fs.existsSync(path.join(dir, marker)), true);
   fs.writeFileSync(`${signal}.go`, '');
   assert.deepEqual(await childExit(holder), { code: 0, signal: null });
+});
+
+const UNSHARE_TIME = UNSHARE && cp.spawnSync('unshare', ['-Urpf', '-T', '--boottime', '1', '--mount-proc', 'true'], { stdio: 'ignore' }).status === 0;
+const BOOTTIME = 100000;
+
+// /proc shows start times shifted by the reader's time namespace, so a holder
+// under unshare -T records a start 100000 s later than the host reads for it.
+// It is alive in this pid namespace and in one of its own, and a marker from
+// before offsets were recorded is kept too, since its holder is in another time
+// namespace. Once the holder is gone, its marker is gone.
+test('a cleanup keeps the directory while a holder in a time namespace of its own holds it', { skip: !UNSHARE_TIME && 'needs unshare for a time namespace', timeout: 300000 }, async (t) => {
+  for (const pidNamespace of [[], ['-pf', '--mount-proc']]) {
+    const h = makeRepo(t);
+    h.init();
+    const commonDir = path.join(h.repo, '.git');
+    const dir = path.join(commonDir, REAP_DIR);
+    const signal = path.join(h.base, 'reap-taken');
+    const [node, args, opts] = shimGit(h, { HOOK_REAP_TAKEN: signal });
+    const holder = cp.spawn('unshare', ['-Ur', ...pidNamespace, '-T', '--boottime', String(BOOTTIME), node, ...args], { ...opts, stdio: 'ignore' });
+    t.after(() => holder.kill('SIGKILL'));
+    await fileWritten(signal);
+    const [nonce] = fs.readdirSync(dir);
+    const marker = path.join(dir, nonce);
+    const recorded = JSON.parse(fs.readFileSync(marker, 'utf8'));
+    assert.equal(recorded.boottime_offset_ns, String(BOOTTIME * 1e9));
+    const messages = [];
+    const write = t.mock.method(process.stderr, 'write', (chunk) => {
+      messages.push(String(chunk));
+      return true;
+    });
+    sandboxMarks(t, {});
+    const name = pidNamespace.length ? 'own pid namespace' : 'this pid namespace';
+    assert.deepEqual(clearPlaceholders(commonDir, { waitMs: 0 }), [], name);
+    assert.match(messages.join(''), /another cleanup holds/, name);
+    assert.equal(fs.existsSync(marker), true, name);
+    const { boottime_offset_ns: _, ...older } = recorded;
+    fs.writeFileSync(marker, JSON.stringify(older));
+    assert.deepEqual(clearPlaceholders(commonDir, { waitMs: 0 }), [], `${name}, no offset recorded`);
+    assert.equal(fs.existsSync(marker), true, `${name}, no offset recorded`);
+    write.mock.restore();
+    fs.writeFileSync(`${signal}.go`, '');
+    assert.deepEqual(await childExit(holder), { code: 0, signal: null });
+    plantMarker(commonDir, recorded, nonce);
+    clearPlaceholders(commonDir, { waitMs: 0 });
+    assert.equal(fs.existsSync(dir), false, `${name}: a holder that is gone`);
+  }
 });
 
 // claude's sandbox sets SANDBOX_RUNTIME=1 and codex's sets CODEX_SANDBOX in the
@@ -519,9 +597,9 @@ test('a cleanup that claude or codex marks as sandboxed keeps a marker from anot
 
 // A devcontainer or a docker container on the same repository runs on this
 // kernel, with this boot id and a host name of its own, and does not see the
-// host's processes. A sandbox can name its own host too (claude's names it
-// localhost), and only a cleanup in the initial pid namespace sees every
-// process on the kernel.
+// host's processes. A sandbox can name its own host too (claude's project-hook
+// sandbox names it localhost), and only a cleanup in the initial pid namespace
+// sees every process on the kernel.
 test('a marker from another host name on this boot is judged only from the initial pid namespace', { skip: !BOOT_ID && 'needs a boot id', timeout: 300000 }, (t) => {
   const h = makeRepo(t);
   h.init();

@@ -7,7 +7,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { TMP_ROOT, ROOT, detachedAlive, makeRepo } = require('./helpers');
+const { TMP_ROOT, ROOT, detachedAlive, makeRepo, stubRungs } = require('./helpers');
 const { stacked } = require('./stack-fixture');
 const B = require('../lib/broker');
 const harnessHooks = require('../lib/harness-hooks');
@@ -775,6 +775,162 @@ test('a worker\'s git push goes through its broker to its own task branch on ori
     'the broker keeps its verified cache and removes its other scratch');
 });
 
+// origin at git@github.com: as in a real project. The broker's ssh, the
+// user's own, reaches the fixture's bare repository; the agent's fails as
+// ssh does in a sandbox's user namespace, where root-owned config files
+// appear owned by nobody.
+async function sshOriginFixture(t) {
+  const f = await pushFixture(t);
+  f.h.ok(['project', 'set', '--repo', 'acme/demo', '--agent', 'owner']);
+  f.h.git(['remote', 'set-url', 'origin', 'git@github.com:acme/demo.git']);
+  // Spawn writes the recorded repository into the shim's policy.
+  const policy = path.join(f.h.base, 'shim', 'policy.json');
+  fs.writeFileSync(policy, JSON.stringify({ ...JSON.parse(fs.readFileSync(policy, 'utf8')), repo: 'acme/demo' }));
+  const ssh = path.join(f.h.base, 'ssh.js');
+  fs.writeFileSync(ssh, `const args = process.argv.slice(2);
+if (args.includes('-G')) process.exit(0);
+const m = /^git-(upload|receive)-pack '(.*)'$/.exec(args[args.length - 1]);
+if (!m || m[2] !== 'acme/demo.git') { process.stderr.write('ssh: unexpected ' + args.join(' ') + '\\n'); process.exit(255); }
+const r = require('node:child_process').spawnSync('git', [m[1] + '-pack', ${JSON.stringify(f.remote)}], { stdio: 'inherit' });
+process.exit(r.status === null ? 1 : r.status);
+`);
+  const sandboxSsh = path.join(f.h.base, 'sandbox-ssh.js');
+  fs.writeFileSync(sandboxSsh, `process.stderr.write('Bad owner or permissions on /etc/ssh/ssh_config.d/20-systemd-ssh-proxy.conf\\n');
+process.exit(255);
+`);
+  const command = (file) => `"${process.execPath.replace(/\\/g, '/')}" "${file.replace(/\\/g, '/')}"`;
+  const saved = process.env.GIT_SSH_COMMAND;
+  process.env.GIT_SSH_COMMAND = command(ssh);
+  t.after(() => {
+    if (saved === undefined) delete process.env.GIT_SSH_COMMAND;
+    else process.env.GIT_SSH_COMMAND = saved;
+  });
+  const shim = (tool, args, opts = {}) => f.shim(tool, args, { ...opts, env: { GIT_SSH_COMMAND: command(sandboxSsh), ...opts.env } });
+  // Another clone moves origin's main, as a merged pull request does.
+  const advance = (file, content = `${file}\n`) => {
+    const other = fs.mkdtempSync(path.join(f.h.base, 'other-'));
+    f.h.git(['clone', '-q', f.remote, other]);
+    fs.writeFileSync(path.join(other, file), content);
+    f.h.git(['add', file], other);
+    f.h.git(['commit', '-qm', `add ${file}`], other);
+    f.h.git(['push', '-q', 'origin', 'HEAD:refs/heads/main'], other);
+    return f.h.git(['rev-parse', 'HEAD'], other);
+  };
+  return { ...f, shim, advance };
+}
+
+test('a sandboxed worker whose origin is an ssh URL fetches the base and its task branch through its broker, and only those', async (t) => {
+  const f = await sshOriginFixture(t);
+  const branch = f.task.branch;
+  const tracked = (ref) => {
+    const r = require('node:child_process').spawnSync('git', ['-C', f.wt.path, 'rev-parse', '--verify', '--quiet', ref], { encoding: 'utf8', env: f.h.env });
+    return r.status === 0 ? r.stdout.trim() : '';
+  };
+  const main = f.advance('upstream.txt');
+  assert.notEqual(tracked('refs/remotes/origin/main'), main);
+  const direct = await f.shim('git', ['ls-remote', 'origin']);
+  assert.notEqual(direct.status, 0, 'git in the sandbox cannot reach origin itself');
+  assert.match(direct.stderr, /Bad owner/);
+
+  const fetched = await f.shim('git', ['fetch', 'origin']);
+  assert.equal(fetched.status, 0, fetched.stderr);
+  assert.equal(tracked('refs/remotes/origin/main'), main, 'origin/main is origin\'s main');
+  // A pack of a few MiB pauses the connection many times.
+  const big = f.advance('big.bin', require('node:crypto').randomBytes(3 * 1024 * 1024));
+  const large = await f.shim('git', ['fetch', '-q', 'origin']);
+  assert.equal(large.status, 0, large.stderr);
+  assert.equal(tracked('refs/remotes/origin/main'), big);
+  assert.doesNotMatch(large.stderr, /MaxListeners|Warning/);
+  assert.match(fetched.stderr, /From git@github\.com:acme\/demo\.git/);
+  f.h.git(['merge', '-q', '--no-ff', '--no-edit', 'origin/main'], f.wt.path);
+  assert.equal(fs.readFileSync(path.join(f.wt.path, 'upstream.txt'), 'utf8'), 'upstream.txt\n', 'the fetched objects are whole');
+
+  // The skill's spelling, and a plain fetch with no remote, after origin moves again.
+  const later = f.advance('later.txt');
+  const skill = await f.shim('git', ['fetch', 'origin', '+refs/heads/main:refs/remotes/origin/main']);
+  assert.equal(skill.status, 0, skill.stderr);
+  assert.equal(tracked('refs/remotes/origin/main'), later);
+  const head = fs.readFileSync(path.join(f.h.git(['rev-parse', '--path-format=absolute', '--git-path', 'FETCH_HEAD'], f.wt.path)), 'utf8');
+  assert.equal(head, `${later}\t\tbranch 'main' of git@github.com:acme/demo.git\n`, 'FETCH_HEAD names the fetched branch');
+  const plain = await f.shim('git', ['fetch', '-q']);
+  assert.equal(plain.status, 0, plain.stderr);
+  assert.equal(plain.stderr, '');
+
+  // The task branch, once pushed through the broker over the same ssh URL.
+  const own = f.commit('mine.txt', 'mine\n');
+  const pushed = await f.shim('git', ['push', 'origin', 'HEAD']);
+  assert.equal(pushed.status, 0, pushed.stderr);
+  f.h.git(['update-ref', '-d', `refs/remotes/origin/${branch}`], f.wt.path);
+  const task = await f.shim('git', ['fetch', 'origin', branch]);
+  assert.equal(task.status, 0, task.stderr);
+  assert.equal(tracked(`refs/remotes/origin/${branch}`), own);
+
+  // Another branch on origin stays out of reach, and so do options the broker does not take.
+  f.h.git(['push', '-q', f.remote, `${main}:refs/heads/other`]);
+  for (const args of [['fetch', 'origin', 'other'], ['fetch', 'origin', 'refs/tags/v1'], ['fetch', 'origin', 'main:main'], ['fetch', '--unshallow', 'origin']]) {
+    const r = await f.shim('git', args);
+    assert.notEqual(r.status, 0, args.join(' '));
+    assert.match(r.stderr, /fetches|broker/, args.join(' '));
+  }
+  assert.equal(tracked('refs/remotes/origin/other'), '', 'nothing of another branch was recorded');
+  const refused = await f.raw({ fetch: { branches: ['other'] } });
+  assert.equal(refused.code, 1);
+  assert.match(refused.stderr, new RegExp(`fetches main, ${branch} from origin, not other`));
+
+  // pull cannot reach origin; the shim names the way that can.
+  const pull = await f.shim('git', ['pull']);
+  assert.equal(pull.status, 126);
+  assert.match(pull.stderr, /git fetch origin goes through the broker/);
+});
+
+// A reviewer's git directory is read-only under codex, and a disk can fill:
+// index-pack then exits while the broker still sends the pack. The fetch
+// must fail with index-pack's error, not wait on a drain that never comes
+// and exit 0 with origin's branches unchanged.
+test('a brokered fetch whose pack cannot be indexed fails with the reason', { skip: (process.platform === 'win32' || process.getuid?.() === 0) && 'needs a directory its user cannot write' }, async (t) => {
+  const f = await sshOriginFixture(t);
+  const before = f.h.git(['rev-parse', 'refs/remotes/origin/main'], f.wt.path);
+  // Random bytes do not compress, so the pack is larger than the pipe buffers on the way.
+  const other = fs.mkdtempSync(path.join(f.h.base, 'big-'));
+  f.h.git(['clone', '-q', f.remote, other]);
+  fs.writeFileSync(path.join(other, 'big.bin'), require('node:crypto').randomBytes(768 * 1024));
+  f.h.git(['add', 'big.bin'], other);
+  f.h.git(['commit', '-qm', 'big'], other);
+  f.h.git(['push', '-q', 'origin', 'HEAD:refs/heads/main'], other);
+  const pack = path.join(f.job.dispatch.gitDirs.common, 'objects', 'pack');
+  fs.mkdirSync(pack, { recursive: true });
+  fs.chmodSync(pack, 0o555);
+  let r;
+  try {
+    r = await f.shim('git', ['fetch', 'origin']);
+  } finally {
+    fs.chmodSync(pack, 0o755);
+  }
+  assert.notEqual(r.status, 0, r.stderr);
+  assert.match(r.stderr, /cannot index the pack the broker sent/);
+  assert.equal(f.h.git(['rev-parse', 'refs/remotes/origin/main'], f.wt.path), before, 'origin/main is unchanged');
+});
+
+test('the broker fetches only from the recorded repository, and any other origin is fetched in the sandbox', async (t) => {
+  const f = await pushFixture(t);
+  const r = await f.raw({ fetch: {} });
+  assert.equal(r.code, 1);
+  assert.match(r.stderr, /records no repository/);
+  f.h.ok(['project', 'set', '--repo', 'acme/demo', '--agent', 'owner']);
+  f.h.git(['remote', 'set-url', 'origin', 'https://github.com/acme/other.git']);
+  const other = await f.raw({ fetch: {} });
+  assert.equal(other.code, 1);
+  assert.match(other.stderr, /not the project's repository acme\/demo/);
+  // Any origin but the recorded repository runs as git's own fetch in the
+  // sandbox: a path on this machine, absolute or relative.
+  for (const url of [f.remote, path.relative(f.wt.path, f.remote)]) {
+    f.h.git(['remote', 'set-url', 'origin', url]);
+    const local = await f.shim('git', ['fetch', 'origin']);
+    assert.equal(local.status, 0, `${url}: ${local.stderr}`);
+    assert.doesNotMatch(local.stderr, /tower-crane/, url);
+  }
+});
+
 test('only a role whose agent file pushes can push through the broker, and only to the recorded repository', async (t) => {
   const f = await pushFixture(t, { role: 'reviewer' });
   const sha = f.h.git(['rev-parse', 'HEAD'], f.wt.path);
@@ -1079,6 +1235,56 @@ test('the agent\'s pack is quarantined until the checks pass, capped in size, an
   assert.equal(f.remoteRef(`refs/heads/${f.task.branch}`), large);
 });
 
+// The cache lock every push and fetch of the project waits on is freed when
+// an agent stops reading its fetch's pack (idle cap) or reads it too slowly
+// (total cap), and when its push's pack trickles past the total cap.
+test('a fetch or push pack that outlasts its caps frees the cache lock', async (t) => {
+  const f = await sshOriginFixture(t);
+  const G = require('../lib/github-broker');
+  const saved = { ...G.LIMITS };
+  t.after(() => Object.assign(G.LIMITS, saved));
+  const lock = path.join(f.h.state, 'push', 'cache.lock');
+  // Larger than the socket buffers, so the broker's writes wait for a drain.
+  f.advance('big.bin', require('node:crypto').randomBytes(4 << 20));
+  const net = require('node:net');
+  const b = JSON.parse(fs.readFileSync(f.job.broker, 'utf8'));
+  // An agent that sends a fetch and never reads the answer.
+  const silent = () => new Promise((resolve) => {
+    const sock = b.socket ? net.connect(b.socket) : net.connect(b.port, b.host);
+    sock.on('error', () => {});
+    sock.on('connect', () => {
+      sock.pause();
+      sock.write(`${JSON.stringify({ token: b.token, fetch: {} })}\n`);
+      resolve(sock);
+    });
+  });
+  for (const [what, limits] of [['idle', { idleMs: 300, totalMs: saved.totalMs }], ['total', { idleMs: saved.idleMs, totalMs: 500 }]]) {
+    Object.assign(G.LIMITS, limits);
+    const sock = await silent();
+    await waitUntil(() => fs.existsSync(lock), { paths: [path.dirname(lock)], what: `${what}: the fetch takes the lock` });
+    await waitUntil(() => !fs.existsSync(lock), { paths: [path.dirname(lock)], what: `${what}: the cap frees the cache lock` });
+    sock.destroy();
+  }
+  Object.assign(G.LIMITS, saved);
+  // A push whose pack trickles in, a byte at a time, never idle.
+  G.LIMITS.totalMs = 500;
+  const sha = f.commit('slow.txt', 'slow\n');
+  const trickle = () => {
+    const out = new (require('node:stream').PassThrough)();
+    const timer = setInterval(() => out.write(Buffer.from([0x50])), 50); // wait-allow: the fixture's trickle rate, under the idle cap and over the total cap under test
+    out.on('close', () => clearInterval(timer));
+    out.stop = () => { clearInterval(timer); out.destroy(); };
+    return out;
+  };
+  const slow = await f.raw({ push: { sha } }, { pack: trickle });
+  assert.notEqual(slow.code, 0);
+  assert.match(slow.stderr, /took longer than 0 s|took longer than 1 s/);
+  assert.equal(fs.existsSync(lock), false, 'the push freed the cache lock');
+  Object.assign(G.LIMITS, saved);
+  const fetched = await f.shim('git', ['fetch', '-q', 'origin']);
+  assert.equal(fetched.status, 0, fetched.stderr);
+});
+
 // An agent that hangs up is stopped: a gh that prints nothing, and a push
 // still waiting for the cache lock.
 test('the broker stops a silent gh and a waiting push when the agent hangs up', async (t) => {
@@ -1313,4 +1519,212 @@ test('gh arguments parse as gh does: clusters, attached values and "--", and an 
   assert.throws(() => G.parseGh(['pr', 'view', '--draft']), /no flag --draft/);
   assert.throws(() => G.parseGh(['pr', 'create', '--title']), /needs a value/);
   assert.throws(() => G.parseGh(['--repo', 'x', 'pr', 'view']), /not available/);
+});
+
+// Each sandboxed role's instructions, and the broker role its agent runs as:
+// the researcher is a worker on the research rung. A .js file is prompt text
+// built in code; its comment lines are skipped.
+const ROLE_FILES = {
+  'skills/tower-crane-work/SKILL.md': 'worker',
+  'agents/tower-crane-worker.md': 'worker',
+  'agents/tower-crane-researcher.md': 'worker',
+  'lib/harness-hooks.js': 'worker',
+  'skills/tower-crane-review/SKILL.md': 'reviewer',
+  'agents/tower-crane-reviewer.md': 'reviewer',
+  'agents/tower-crane-small.md': 'small',
+};
+// A line that names a command another role runs, without telling this role
+// to run it: the file, the command and text on that same line.
+const OTHER_ROLE = [
+  ['skills/tower-crane-work/SKILL.md', 'stack sync', "Stack refresh runs through the orchestrator's `tower-crane stack sync`"],
+  ['skills/tower-crane-review/SKILL.md', 'spawn', 'A reviewer that `tower-crane spawn` did not start'],
+  ['skills/tower-crane-review/SKILL.md', 'ci resolve', 'The worker or the orchestrator closes the finding'],
+];
+const SCOPE = { TOWER_CRANE_TASK: 'T1', TOWER_CRANE_AGENT: 'worker-T1-1' };
+
+// The code in a file, as [start, text] regions: fenced blocks (``` or ~~~)
+// and inline spans, which may wrap across lines but not a paragraph break,
+// in markdown; every line but comments in JavaScript.
+function codeRegions(text, js) {
+  if (js) {
+    let at = 0;
+    return text.split('\n').map((line) => { const r = [at, line]; at += line.length + 1; return r; }).filter(([, line]) => !/^\s*\/\//.test(line));
+  }
+  const regions = [];
+  const masked = text.replace(/^(```|~~~)[^\n]*\n([\s\S]*?)^\1[^\n]*$/gm, (m, fence, body, offset) => {
+    regions.push([offset + m.indexOf('\n') + 1, body]);
+    return ' '.repeat(m.length);
+  });
+  for (const m of masked.matchAll(/`((?:[^`\n]|\n(?![ \t]*\n))+)`/g)) regions.push([m.index + 1, m[1].replace(/\n/g, ' ')]);
+  return regions;
+}
+
+// Each tower-crane command a region shows: its name, the source line, and
+// its arguments up to a shell separator, the next tower-crane or the end of a
+// fenced line, cut where the command's own syntax ends (prose after it).
+function commandMentions(text, js = false) {
+  const { resolveCommand: resolve } = require('../bin/tower-crane');
+  const out = [];
+  for (const [start, region] of codeRegions(text, js)) {
+    for (const m of region.matchAll(/(?<![\w-])tower-crane(?![\w-])/g)) {
+      const at = start + m.index;
+      const line = text.slice(text.lastIndexOf('\n', at) + 1, text.indexOf('\n', at) < 0 ? text.length : text.indexOf('\n', at));
+      const rest = region.slice(m.index + m[0].length).split(/\n|&&|\|\||;|\||(?<![\w-])tower-crane(?![\w-])/)[0];
+      const words = rest.trim().split(/\s+/).filter(Boolean);
+      let r;
+      try { r = resolve(words); } catch (e) { r = { error: e.message }; }
+      if (!r.cmd) {
+        out.push({ name: `unknown: tower-crane ${rest.trim()} (${r.error || 'no command'})`, line });
+        continue;
+      }
+      const pos = r.cmd.pos || [];
+      const args = [];
+      let positionals = 0;
+      for (let i = 0; i < r.rest.length; i++) {
+        const tok = r.rest[i].replace(/[),.]+$/, '');
+        if (tok.startsWith('--')) {
+          const spec = { ...(r.cmd.flags || {}), ...GLOBAL }[tok.slice(2).split('=')[0]];
+          args.push(tok);
+          if (spec && spec.type !== 'bool' && !tok.includes('=') && i + 1 < r.rest.length) args.push(r.rest[++i].replace(/[),.]+$/, ''));
+        } else if (pos[0] === 'ID...' || positionals < pos.length) {
+          args.push(tok);
+          positionals++;
+        } else break;
+      }
+      out.push({ name: r.cmd.name, line, lead: r.lead, args, cmd: r.cmd });
+    }
+  }
+  return out;
+}
+
+// A wait mention as the agent would run it, placeholders filled, through the
+// scope its sandbox applies.
+function scopedWait(mention) {
+  const fill = (t) => t.replace(/^(<id>|<task id>|ID|\$\{task\.id\})$/, SCOPE.TOWER_CRANE_TASK)
+    .replace(/^(<name>|NAME)$/, SCOPE.TOWER_CRANE_AGENT).replace(/^(SEC|<sec>)$/, '60');
+  const { flags } = parseOptions([...mention.lead, ...mention.args].map(fill), { ...(mention.cmd.flags || {}), ...GLOBAL }, 'wait');
+  B.scopeWait(flags, flags.agent ?? SCOPE.TOWER_CRANE_AGENT, SCOPE);
+}
+
+test('the command extractor finds every tower-crane command in code and checks the wait scope', () => {
+  const names = (text, js) => commandMentions(text, js).map((m) => m.name);
+  assert.deepEqual(names('Run `tower-crane task show T1 && tower-crane spend T1` now.'), ['task show', 'spend']);
+  assert.deepEqual(names('~~~sh\ntower-crane claim T1 --agent a\ntower-crane submit T1\n~~~\n'), ['claim', 'submit']);
+  assert.deepEqual(names('```\ntower-crane renew T1; tower-crane release T1 --reason x\n```\n'), ['renew', 'release']);
+  assert.deepEqual(names('Wait with `tower-crane wait --task <id>\n--timeout SEC` and go on.'), ['wait']);
+  assert.deepEqual(names('Prose tower-crane check is not code.\n\n`a`\n\n`tower-crane spawn`'), ['spawn']);
+  assert.deepEqual(names('// tower-crane check in a comment\nconst s = `(tower-crane wait --task ${task.id} --timeout SEC exits 2)`;', true), ['wait']);
+  const wait = (text) => commandMentions(text, true).find((m) => m.name === 'wait');
+  assert.deepEqual(wait('`(tower-crane wait --task ${task.id} --timeout SEC exits 2 on timeout)`').args, ['--task', '${task.id}', '--timeout', 'SEC']);
+  assert.doesNotThrow(() => scopedWait(wait('tower-crane wait --task <id> --agent <name> --timeout SEC')));
+  for (const [text, why] of [
+    ['tower-crane wait --task <id> --follow', /--follow is the orchestrator's/],
+    ['tower-crane wait --task <id>', /waits with a bound/],
+    ['tower-crane wait --task T9 --timeout SEC', /works on T1 only/],
+    ['tower-crane wait --task <id> --timeout SEC --for owner', /not owner/],
+  ]) assert.throws(() => scopedWait(wait(text)), why, text);
+});
+
+test('every tower-crane command a sandboxed role is told to run is one its broker allows or a read it runs itself', () => {
+  const seen = new Set();
+  for (const [file, role] of Object.entries(ROLE_FILES)) {
+    const mentions = commandMentions(fs.readFileSync(path.join(ROOT, file), 'utf8'), file.endsWith('.js'));
+    const exempt = (m) => OTHER_ROLE.some(([f, name, text]) => {
+      const hit = f === file && name === m.name && m.line.includes(text);
+      if (hit) seen.add(`${f} ${name}`);
+      return hit;
+    });
+    const refused = mentions.filter((m) => !exempt(m) && !B.READS.has(m.name) && !B.ROLES[role].includes(m.name));
+    assert.deepEqual(refused.map((m) => `${m.name}: ${m.line.trim().slice(0, 120)}`), [], `${file} tells a sandboxed ${role} to run commands its broker refuses`);
+    // A bare command name refers to the command; one with arguments is a call to run.
+    for (const m of mentions.filter((x) => x.name === 'wait' && x.args.length)) assert.doesNotThrow(() => scopedWait(m), `${file}: ${m.line.trim()}`);
+  }
+  assert.deepEqual(OTHER_ROLE.filter(([f, name]) => !seen.has(`${f} ${name}`)), [], 'every exemption still matches its line');
+  const work = commandMentions(fs.readFileSync(path.join(ROOT, 'skills/tower-crane-work/SKILL.md'), 'utf8'));
+  assert.ok(work.some((m) => m.name === 'wait' && m.args.includes('--timeout')));
+  const hooks = commandMentions(fs.readFileSync(path.join(ROOT, 'lib/harness-hooks.js'), 'utf8'), true);
+  assert.ok(hooks.some((m) => m.name === 'wait' && m.args.includes('--timeout')), 'the hook prompt is checked');
+});
+
+// Every path, mode-free, and file content under dir.
+function treeHash(dir) {
+  const hash = require('node:crypto').createHash('sha256');
+  const walk = (rel) => {
+    for (const e of fs.readdirSync(path.join(dir, rel), { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+      const p = path.join(rel, e.name);
+      if (e.isDirectory()) { hash.update(`d ${p}\n`); walk(p); }
+      else if (e.isSymbolicLink()) hash.update(`l ${p} ${fs.readlinkSync(path.join(dir, p))}\n`);
+      else hash.update(`f ${p}\n`).update(fs.readFileSync(path.join(dir, p)));
+    }
+  };
+  walk('');
+  return hash.digest('hex');
+}
+
+// Makes every directory and file under dir read-only, as the agent's sandbox
+// leaves the state; returns the restore.
+function readOnly(dir) {
+  const modes = [];
+  const walk = (p) => {
+    const st = fs.lstatSync(p);
+    if (st.isSymbolicLink()) return;
+    modes.push([p, st.mode & 0o7777]);
+    if (st.isDirectory()) for (const name of fs.readdirSync(p)) walk(path.join(p, name));
+    fs.chmodSync(p, st.isDirectory() ? 0o555 : 0o444);
+  };
+  walk(dir);
+  return () => { for (const [p, mode] of modes.reverse()) fs.chmodSync(p, mode); };
+}
+
+test('a sandboxed agent waits in its sandbox on its own task, bounded and without writing the state', async (t) => {
+  const h = makeRepo(t);
+  // Work an orchestrator's wait would act on: a ready task with a brief that
+  // its refill dispatches, so a wait that leaks the orchestrator's role writes.
+  stubRungs(h);
+  h.init();
+  h.ok(['task', 'add', '--title', 'one', '--acceptance', 'noted']);
+  h.ok(['task', 'add', '--title', 'two', '--acceptance', 'noted']);
+  h.ok(['brief', 'set', 'T2', '-'], { input: '# Two\n\nDo two.\n' });
+  const offset = fs.statSync(path.join(h.state, 'events.jsonl')).size;
+  h.ok(['msg', '--to', 'worker-T1-1', '--task', 'T1', 'rebase on main', '--agent', 'orchestrator']);
+  assert.ok(h.json(['ready']).ready.some((x) => x.id === 'T2'), 'T2 is ready for a refill to dispatch');
+  const job = { state: h.state, task: 'T1', agent: 'worker-T1-1', role: 'worker', cwd: h.repo, broker: path.join(h.base, 'brokers', 'worker-T1-1', B.FILE) };
+  const broker = await B.start(job);
+  t.after(() => broker.close());
+  const env = { ...broker.env, TOWER_CRANE_AGENT: job.agent, TOWER_CRANE_TASK: job.task };
+  const wait = (args) => h.runAsync(['wait', ...args], { env });
+  // Refused waits never start, and the message is already published.
+  const bound = String(HUNG_TEST_MS / 1000);
+  const before = treeHash(h.state);
+  // Writable first, so a leaked write shows in the tree; then read-only, as
+  // the sandbox runs it, where a leaked write is an error on stderr.
+  for (const sandboxed of [false, true]) {
+    const restore = sandboxed ? readOnly(h.state) : () => {};
+    try {
+      const woke = await wait(['--task', 'T1', '--after', String(offset), '--timeout', bound]);
+      assert.equal(woke.code, 0, woke.stderr);
+      assert.equal(woke.stderr, '');
+      assert.equal(JSON.parse(woke.stdout).cmd, 'msg', 'the message to the worker wakes it');
+      const timedOut = await wait(['--timeout', '0.1']); // wait-allow: verify the CLI timeout contract with already-published state
+      assert.equal(timedOut.code, 2, timedOut.stderr);
+      assert.equal(timedOut.stderr, '');
+      assert.equal(JSON.parse(timedOut.stdout).type, 'timeout');
+      for (const [args, why] of [
+        [['--task', 'T2', '--timeout', bound], /works on T1 only, not T2/],
+        [['--task', 'T1'], /waits with a bound: --timeout SEC/],
+        [['--task', 'T1', '--follow'], /wait --follow is the orchestrator's/],
+        [['--task', 'T1', '--timeout', bound, '--observe'], /wait --observe is the orchestrator's/],
+        [['--task', 'T1', '--timeout', bound, '--inbox'], /wait --inbox is the orchestrator's/],
+        [['--task', 'T1', '--timeout', bound, '--for', 'reviewer-T1-1'], /own messages or the orchestrator's, not reviewer-T1-1/],
+        [['--task', 'T1', '--timeout', bound, '--agent', 'orchestrator'], /worker-T1-1 cannot wait as orchestrator/],
+      ]) {
+        const r = await wait(args);
+        assert.equal(r.code, 1, `${args.join(' ')}: ${r.stderr}`);
+        assert.match(r.stderr, why);
+      }
+    } finally {
+      restore();
+    }
+    assert.equal(treeHash(h.state), before, `the ${sandboxed ? 'read-only' : 'writable'} waits wrote nothing under the state directory`);
+  }
 });

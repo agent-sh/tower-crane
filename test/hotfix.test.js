@@ -8,6 +8,7 @@ const { cachedFixture } = require('./helpers');
 const { waitOnRepo } = require('./signals');
 const { gateFixture, retireRevision } = require('./gate-helpers');
 const Reviewer = require('../lib/reviewer');
+const { shellQuote } = require('../lib/gates/common');
 
 function fixture(t) {
   return cachedFixture(t, 'merged-hotfix', (h) => {
@@ -24,11 +25,15 @@ function fixture(t) {
     fs.writeFileSync(path.join(h.repo, 'later.txt'), 'another task\n');
     h.git(['add', '.']);
     h.git(['commit', '-qm', 'later main change']);
+    const later = h.git(['rev-parse', 'HEAD']);
     const gh = path.join(h.base, 'tools', 'gh');
     fs.writeFileSync(gh, `#!/usr/bin/env node
 const args = process.argv.slice(2);
 const sha = ${JSON.stringify(sha)};
 const head = ${JSON.stringify(head)};
+const later = ${JSON.stringify(later)};
+// FIXTURE_MERGE_RUN=cancelled: a newer push replaced the merge commit's run, and the later main commit ran green.
+const mergeRun = process.env.FIXTURE_MERGE_RUN;
 const ok = process.env.FIXTURE_GATE_OK !== '0';
 if (process.env.FIXTURE_GH_ERROR) { console.error('fixture gh observation error'); process.exit(1); }
 if (args[0] === 'pr' && args[1] === 'merge') { console.error('fixture: a merged hotfix must not merge again'); process.exit(3); }
@@ -42,20 +47,30 @@ if (args[0] === 'pr') {
     html_url: 'https://github.com/acme/demo/pull/42#issuecomment-' + args[1].split('/').pop(),
     issue_url: 'https://api.github.com/repos/acme/demo/issues/' + (process.env.FIXTURE_REVIEW_PR || '42'),
     body: process.env.FIXTURE_REVIEW_BODY || ''}));
+} else if (args[1] === 'repos/acme/demo/commits/' + sha) {
+  console.log('2026-10-13T19:59:00Z');
+} else if (args[1].includes('/compare/')) {
+  const [from, to] = args[1].split('/compare/')[1].split('?')[0].split('...');
+  console.log(from === sha && to === later ? 'ahead' : from === later && to === 'main' ? 'identical' : 'diverged');
 } else if (args[1].includes('/check-runs')) {
-  console.log(JSON.stringify({id: 1, name: 'test (linux)', app: 'github-actions', suite: 10,
-    status: 'completed', conclusion: ok ? 'success' : 'failure'}));
+  const atLater = args[1].includes(later);
+  console.log(JSON.stringify({id: atLater ? 2 : 1, name: 'test (linux)', app: 'github-actions', suite: atLater ? 11 : 10,
+    status: 'completed', conclusion: mergeRun && !atLater ? 'skipped' : ok ? 'success' : 'failure'}));
 } else if (args[1].includes('/check-suites')) {
-  console.log(JSON.stringify({id: 10, app: 'github-actions', runs: 1,
-    status: 'completed', conclusion: ok ? 'success' : 'failure'}));
+  const atLater = args[1].includes(later);
+  console.log(JSON.stringify({id: atLater ? 11 : 10, app: 'github-actions', runs: 1,
+    status: 'completed', conclusion: mergeRun && !atLater ? mergeRun : ok ? 'success' : 'failure'}));
 } else if (args[1].includes('/actions/runs')) {
-  console.log(JSON.stringify({id: 20, name: 'CI', path: 'ci.yml', head_sha: sha, head_branch: 'main',
+  const run = {id: 20, name: 'CI', path: 'ci.yml', head_sha: sha, head_branch: 'main', created_at: '2026-10-13T20:00:00Z',
     event: process.env.FIXTURE_EVENT || 'push', check_suite_id: 10,
-    status: process.env.FIXTURE_WORKFLOW_STATUS || 'completed', conclusion: ok ? 'success' : 'failure'}));
+    status: process.env.FIXTURE_WORKFLOW_STATUS || 'completed', conclusion: mergeRun || (ok ? 'success' : 'failure')};
+  const next = {...run, id: 21, head_sha: later, check_suite_id: 11, created_at: '2026-10-13T20:10:00Z', conclusion: ok ? 'success' : 'failure'};
+  if (args[1].includes('branch=main')) console.log(JSON.stringify(run) + '\\n' + JSON.stringify(next));
+  else console.log(JSON.stringify(args[1].includes(later) ? next : run));
 }
 `);
     h.ok(['project', 'set', '--ci-required', '["test ("]']);
-    return { sha, head, base_sha: base };
+    return { sha, head, base_sha: base, later };
   });
 }
 
@@ -203,13 +218,61 @@ test('hotfix CI requires push run on main, and acceptance permits no gate waiver
   record(h);
   const ci = h.run(['check', 'ci', 'T1'], { env: { FIXTURE_EVENT: 'pull_request' } });
   assert.equal(ci.code, 1);
-  assert.match(ci.stdout, /no matching push workflow/);
+  assert.match(ci.stdout, /push workflow run was cancelled or never ran, and no successful push, scheduled or manual run/);
   assert.equal(task(h).status, 'submitted');
   const fresh = fixture(t);
   record(fresh);
   const r = fresh.run(['accept', 'T1', '--waive', 'review', '--reason', 'skip']);
   assert.equal(r.code, 1);
   assert.match(r.stderr, /hotfix acceptance requires every gate/);
+});
+
+test('a merge commit whose push run a newer push cancelled is accepted on the green run of a later main commit, recorded in evidence', (t) => {
+  const h = fixture(t);
+  record(h);
+  // The later commit is red too: the hotfix waits, since a cancelled run judged nothing.
+  const red = h.run(['check', 'ci', 'T1'], { env: { FIXTURE_MERGE_RUN: 'cancelled', FIXTURE_GATE_OK: '0' } });
+  assert.equal(red.code, 1);
+  assert.equal(task(h).evidence.at(-1).pending, true);
+  assert.equal(task(h).hotfix.follow_up, undefined);
+  h.ok(['check', 'ci', 'T1'], { env: { FIXTURE_MERGE_RUN: 'cancelled' } });
+  const ci = task(h).evidence.at(-1);
+  assert.equal(ci.ok, true, ci.summary);
+  assert.equal(ci.sha, h.sha);
+  assert.deepEqual(ci.hotfix_ci, { merge_sha: h.sha, satisfied_by: { sha: h.later,
+    runs: [{ id: 21, workflow: 'ci.yml', event: 'push', url: 'https://github.com/acme/demo/actions/runs/21' }] } });
+  assert.match(ci.summary, new RegExp(`judged at ${h.later.slice(0, 10)} on main, which contains it`));
+  const event = events(h).findLast((e) => e.cmd === 'check ci');
+  assert.deepEqual(event.detail.hotfix_ci, ci.hotfix_ci);
+  // A failed run at the merge commit itself is a verdict, whatever ran later.
+  const failed = fixture(t);
+  record(failed);
+  const r = failed.run(['check', 'ci', 'T1'], { env: { FIXTURE_MERGE_RUN: 'failure' } });
+  assert.equal(r.code, 1);
+  assert.equal(task(failed).evidence.at(-1).confirmed_failure, true);
+  assert.ok(task(failed).hotfix.follow_up);
+});
+
+test('a hotfix whose changed host-only test only skipped waits on tests.host_env in the inbox, without a follow-up', (t) => {
+  const h = fixture(t);
+  record(h);
+  // The host run of the changed test reports one case, skipped for a missing opt-in.
+  const skipper = path.join(h.base, 'tools', 'skip-live.js');
+  fs.writeFileSync(skipper, ['TAP version 13', 'ok 1 - live probe # SKIP set FIXTURE_LIVE=1 to run the live probe', '1..1',
+    '# tests 1', '# pass 0', '# fail 0', '# skipped 1'].map((l) => `console.log(${JSON.stringify(l)});`).join('\n'));
+  h.ok(['project', 'set', '--tests-proof-cmd', `node ${shellQuote(skipper)} {tests}`, '--tests-host-only', '["test/value.test.js"]']);
+  const r = h.run(['check', 'tests', 'T1']);
+  assert.equal(r.code, 1);
+  const tests = task(h).evidence.at(-1);
+  assert.deepEqual(tests.config_failure, { key: 'tests_host_env' });
+  assert.match(tests.summary, /test\/value\.test\.js: 0 ran, 1 skipped; skipped because: set FIXTURE_LIVE=1 to run the live probe/);
+  assert.deepEqual(tests.receipt.host_only.results[0].skip_reasons, ['set FIXTURE_LIVE=1 to run the live probe']);
+  const item = h.json(['inbox', '--agent', 'orchestrator']).items.find((i) => i.kind === 'gate_config');
+  assert.equal(item.setting, 'tests.host_env');
+  assert.deepEqual(item.action.argv, ['project', 'set', '--tests-host-env', '<JSON>']);
+  assert.equal(item.then, 'gates retry T1');
+  assert.equal(task(h).status, 'submitted');
+  assert.equal(task(h).hotfix.follow_up, undefined);
 });
 
 test('pending CI and observation errors keep the hotfix submitted and can be retried', (t) => {
