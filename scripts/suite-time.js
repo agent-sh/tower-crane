@@ -55,7 +55,10 @@ function projectFile(root, env) {
   return path.join(path.basename(dir) === '.git' ? path.dirname(dir) : dir, '.tower-crane', 'project.json');
 }
 
-function checkSuiteDeadline(root, env = process.env) {
+// The workflow is shared, so its drift fails. The project settings are each
+// clone's own: a contributor may run the gate with another timeout, so a
+// difference there only warns.
+function checkSuiteDeadline(root, env = process.env, warn = (line) => console.error(line)) {
   const found = [];
   const workflow = readText(path.join(root, '.github', 'workflows', 'ci.yml'));
   for (const [job, minutes] of Object.entries(JOB_TIMEOUTS)) {
@@ -69,7 +72,7 @@ function checkSuiteDeadline(root, env = process.env) {
     const configured = JSON.parse(readText(file)).gates?.tests_timeout_min;
     // An unset timeout is a project that has not adopted the suite deadline.
     if (configured != null && configured !== DEADLINE_MIN) {
-      found.push(`the project's gates.tests_timeout_min is ${configured} min but DEADLINE_MIN in scripts/suite-time.js is ${DEADLINE_MIN}; change them together (project set --tests-timeout-min)`);
+      warn(`warning: the project's gates.tests_timeout_min is ${configured} min but DEADLINE_MIN in scripts/suite-time.js is ${DEADLINE_MIN}; change them together (project set --tests-timeout-min)`);
     }
   }
   if (found.length) throw new Error(found.join('\n'));

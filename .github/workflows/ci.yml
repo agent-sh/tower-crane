@@ -43,8 +43,8 @@ jobs:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
     runs-on: ${{ matrix.os }}
     # test/run.js splits shards by measured file time (test/durations.json): 20 to 27 minutes on
-    # Windows and 9 to 13 on Linux, so the 45-minute bound only stops a hung job. The runner still
-    # bounds each test independently.
+    # Windows and 9 to 13 on Linux. This is a per-shard hang limit, not the suite deadline in
+    # scripts/suite-time.js; the runner still bounds each test independently.
     timeout-minutes: 45
     strategy:
       fail-fast: false

@@ -202,7 +202,7 @@ test('the shared file check rejects bare stdin reads in lib and bin, and points 
   assert.equal(f.check().status, 0, 'lib/util.js is where readStdin reads fd 0');
 });
 
-test('the suite deadline sets the proof job timeouts and must match the configured tests gate timeout', (t) => {
+test('the suite deadline sets the proof job timeouts and warns when the configured tests gate timeout differs', (t) => {
   const { DEADLINE_MIN } = require('../scripts/suite-time');
   const f = fixture(t);
   f.change();
@@ -223,10 +223,12 @@ test('the suite deadline sets the proof job timeouts and must match the configur
   const configure = (minutes) => fs.writeFileSync(project, JSON.stringify({ gates: { tests_timeout_min: minutes } }));
   configure(30);
   const local = f.check();
-  assert.equal(local.status, 1);
-  assert.match(local.stderr, new RegExp(`gates\\.tests_timeout_min is 30 min but DEADLINE_MIN in scripts/suite-time\\.js is ${DEADLINE_MIN}`));
+  assert.equal(local.status, 0, 'a clone\'s own gate timeout does not fail the shared check');
+  assert.match(local.stderr, new RegExp(`^warning: the project's gates\\.tests_timeout_min is 30 min but DEADLINE_MIN in scripts/suite-time\\.js is ${DEADLINE_MIN}`, 'm'));
   configure(DEADLINE_MIN);
-  assert.equal(f.check().status, 0);
+  const matched = f.check();
+  assert.equal(matched.status, 0);
+  assert.doesNotMatch(matched.stderr, /tests_timeout_min/);
   configure(null);
   assert.equal(f.check().status, 0, 'a project without a configured timeout has not adopted the deadline');
 });
