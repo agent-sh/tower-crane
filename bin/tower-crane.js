@@ -7,7 +7,8 @@ let outputPipeClosed = false;
 for (const stream of [process.stdout, process.stderr]) {
   let broken = false;
   stream.on('error', (error) => {
-    if (error.code === 'EPIPE') {
+    // libuv reports a pipe whose reader is gone as EPIPE, or EOF on Windows.
+    if (['EPIPE', 'EOF'].includes(error.code)) {
       broken = true;
       stream.destroy();
       if (!outputPipeClosed) {
