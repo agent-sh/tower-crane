@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.1.2 (2026-10-15)
+
+### Agents and sandboxes
+
+- `spawn --wait` and the supervisor no longer wait forever when a process the agent started, such as a dev server or a watcher, keeps the harness output open after the harness exits. Five seconds after the harness and its group stop, the supervisor stops the processes it can trace to that harness, keeps the output it read, records them as `output_held` in the `spawn exit` event, and finishes. It never stops a Tower Crane supervisor, the process that started one, or anything under one, so tasks an agent dispatched keep running.
+- On Windows, spawn no longer fails when Windows briefly refuses to rename the freshly copied skill store (EPERM while a scanner or the indexer holds the new files). The rename is retried for up to 2 s, as state writes are. The same retry covers the rename that keeps a failed start's log and the broker's move of an agent's pack into its push cache.
+- A failed start's log no longer blocks later spawns of the task with `EEXIST: log already exists`. When no running spawn can own it, spawn moves it to a `-startup-failed-<time>.log` name, says so on stderr, and starts.
+
+### State
+
+- On Windows, state reads and existence checks wait out a sharing refusal (EPERM, EACCES or EBUSY) for up to 2 s, as state writes already did. Before, a supervisor whose periodic read met a rename in progress failed with `supervisor failed: EPERM` and stopped its worker mid-edit. Other platforms still fail at once.
+
 ## 0.1.1 (2026-10-15)
 
 ### Agents and sandboxes
