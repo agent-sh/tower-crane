@@ -13,7 +13,7 @@ const net = require('node:net');
 const os = require('node:os');
 const path = require('node:path');
 const cp = require('node:child_process');
-const { pinLiveRung, makeRepo, BIN, ROOT, TMP_ROOT, LIVE_ROOT } = require('./helpers');
+const { pinLiveRung, makeRepo, dispatch, BIN, ROOT, TMP_ROOT, LIVE_ROOT } = require('./helpers');
 const { waitUntil } = require('./signals');
 const A = require('../lib/agents');
 
@@ -107,36 +107,64 @@ test('a sandboxed claude command cannot connect to a unix socket in a denied dir
   assert.equal(connections, 0, 'nothing reached the socket');
 });
 
-test('in a real claude sandbox with sandbox.session_bus, a command connects to the bus socket', { skip: process.env.TOWER_CRANE_LIVE_CLAUDE !== '1' && 'set TOWER_CRANE_LIVE_CLAUDE=1 to run against the real claude CLI', timeout: 300000 }, async (t) => {
+// The runtime directory stays denied but the bus socket, so a socket made
+// there while the command runs is out of reach.
+test('in a real claude sandbox with sandbox.session_bus, a command connects to the bus socket and not to a socket made in the runtime directory after spawn', { skip: process.env.TOWER_CRANE_LIVE_CLAUDE !== '1' && 'set TOWER_CRANE_LIVE_CLAUDE=1 to run against the real claude CLI', timeout: 300000 }, async (t) => {
   const h = login(makeRepo(t));
   h.init();
   h.ok(['task', 'add', '--title', 'Bus probe', '--acceptance', 'bus reachable']);
-  // The bus is a socket in a runtime directory of the test's own, so the probe never touches the user's session.
-  const runtime = path.join(h.base, 'runtime');
-  fs.mkdirSync(runtime);
+  // The bus is a socket in a runtime directory of the test's own, so the
+  // probe never touches the user's session. In /var/tmp, outside the home,
+  // which the sandbox denies whole, so only the runtime rules hide it.
+  const runtime = fs.existsSync('/var/tmp') ? fs.mkdtempSync('/var/tmp/tower-crane-runtime-') : path.join(h.base, 'runtime');
+  fs.mkdirSync(runtime, { recursive: true });
+  t.after(() => fs.rmSync(runtime, { recursive: true, force: true }));
   const sock = path.join(runtime, 'bus');
-  const probe = path.join(results(h), 'bus-probe');
-  let connections = 0;
-  const server = net.createServer((c) => {
-    connections++;
-    c.on('error', () => {});
-    c.end();
-  });
-  await new Promise((resolve) => server.listen(sock, resolve));
-  t.after(() => server.close());
-  const script = `const n=require("net"),f=require("fs");n.connect(${JSON.stringify(sock)}).on("connect",()=>{f.writeFileSync(${JSON.stringify(probe)},"CONNECTED");process.exit(0)}).on("error",e=>{f.writeFileSync(${JSON.stringify(probe)},"ERR "+e.code);process.exit(1)})`;
+  const late = path.join(runtime, 'late.sock');
+  const dir = results(h);
+  const probe = path.join(dir, 'bus-probe.json');
+  const ready = path.join(dir, 'ready');
+  const go = path.join(dir, 'go');
+  const connections = { bus: 0, late: 0 };
+  const servers = [];
+  const listen = async (p, k) => {
+    const s = net.createServer((c) => { connections[k]++; c.on('error', () => {}); c.end(); });
+    await new Promise((resolve) => s.listen(p, resolve));
+    servers.push(s);
+  };
+  t.after(() => { for (const s of servers) s.close(); });
+  await listen(sock, 'bus');
+  const targets = { bus: sock, late };
+  const script = `const n=require("net"),f=require("fs");f.writeFileSync(${JSON.stringify(ready)},"1");const s=new Int32Array(new SharedArrayBuffer(4));`
+    + `for(let i=0;i<1200&&!f.existsSync(${JSON.stringify(go)});i++)Atomics.wait(s,0,0,100);const o={};let left=2;` // wait-allow: the live agent's command tool stops a command after two minutes, so the probe reports before that
+    + `for(const[k,p]of Object.entries(${JSON.stringify(targets)})){const done=(v)=>{o[k]=v;if(--left===0){f.writeFileSync(${JSON.stringify(probe)},JSON.stringify(o));process.exit(0)}};`
+    + `n.connect(p).on("connect",function(){this.destroy();done("CONNECTED")}).on("error",e=>done("ERR "+e.code))}`;
   h.ok(['project', 'set', '--session-bus', 'true']);
   h.ok(['brief', 'set', 'T1', '-'], {
-    input: `Sandbox probe set up by the owner. Run exactly this one command with the Bash tool, then reply with its exit code. Do not use tower-crane.\n\n${node} -e '${script}'\n`,
+    input: `Sandbox probe set up by the owner. Run exactly this one command with the Bash tool, then reply with its exit code. It waits up to two minutes for a signal file; let it finish. Do not use tower-crane.\n\n${node} -e '${script}'\n`,
   });
   pinLiveRung(h, 'claude');
-  const r = await h.runAsync(['spawn', '--role', 'small', '--task', 'T1', '--wait'], {
+  // dispatch ends the wait when the spawn exits and kills the spawn when the
+  // test aborts. The command's own signal; the spawn ending first means it
+  // never ran, which the assertions below report with the agent's log.
+  const d = dispatch(t, h, {
+    args: ['spawn', '--role', 'small', '--task', 'T1', '--wait'],
     env: { ...h.env, XDG_RUNTIME_DIR: runtime, DBUS_SESSION_BUS_ADDRESS: `unix:path=${sock}` },
   });
+  await d.until(() => fs.existsSync(ready), 'the bus probe command did not start').catch(() => {});
+  if (fs.existsSync(ready)) {
+    await listen(late, 'late');
+    fs.writeFileSync(go, '1');
+  }
+  const r = await d.run;
   assert.equal(r.code, 0, `${r.stderr}\n${agentLog(h)}`);
   assert.ok(fs.existsSync(probe), `the command ran\n${agentLog(h)}`);
-  assert.equal(fs.readFileSync(probe, 'utf8'), 'CONNECTED', `the command reached the bus socket\n${agentLog(h)}`);
-  assert.ok(connections >= 1, 'the socket accepted the command');
+  const seen = JSON.parse(fs.readFileSync(probe, 'utf8'));
+  console.log(`claude bus grant probe: ${JSON.stringify(seen)}`);
+  assert.equal(seen.bus, 'CONNECTED', `the command reached the bus socket\n${agentLog(h)}`);
+  assert.ok(connections.bus >= 1, 'the socket accepted the command');
+  assert.match(seen.late, /^ERR /, 'a socket made in the runtime directory after spawn is out of reach');
+  assert.equal(connections.late, 0, 'nothing reached the late socket');
 });
 
 test('in a real claude sandbox a forged state edit fails and the CLI writes through the broker', { skip: process.env.TOWER_CRANE_LIVE_CLAUDE !== '1' && 'set TOWER_CRANE_LIVE_CLAUDE=1 to run against the real claude CLI', timeout: 300000 }, async (t) => {
@@ -220,6 +248,48 @@ for (const harness of ['claude', 'codex']) {
     assert.deepEqual([event?.agent, event?.via], ['small-T1-1', 'broker']);
   });
 }
+
+// Found in the T276 review: claude and its sandboxed commands shared one
+// temp directory, <TMPDIR>/claude-<uid>, where claude also keeps its own
+// per-user files (prompts, plugin staging, task output) and reads them back,
+// so a command could plant files there. claude's own files now go under
+// CLAUDE_CODE_TMPDIR in the agent's home, which its commands read and
+// cannot write; the commands keep a TMPDIR of their own, and https through
+// the proxy sockets in claude's TMPDIR still works. claude tells its
+// commands where its own directory is in CLAUDE_CODE_TMPDIR.
+// Without XDG_RUNTIME_DIR, as on macOS, this fixture's state path is too
+// deep for claude's messaging socket under the home, and claude's own
+// directory moves beside its TMPDIR, inside the hidden home.
+for (const runtime of ['with', 'without']) test(`a real claude agent's commands write their own TMPDIR and cannot write claude's own temp files, ${runtime} XDG_RUNTIME_DIR`, { skip: process.env.TOWER_CRANE_LIVE_CLAUDE !== '1' && 'set TOWER_CRANE_LIVE_CLAUDE=1 to run against the real claude CLI', timeout: 300000 }, async (t) => {
+  const h = makeRepo(t, { root: LIVE_ROOT });
+  h.init();
+  h.ok(['task', 'add', '--title', 'Temp probe', '--acceptance', 'claude\'s temp files stay its own']);
+  const out = path.join(results(h), 'claude-tmp-probe.json');
+  const script = `const fs=require("fs"),os=require("os"),p=require("path"),cp=require("child_process");`
+    + `const o={tmpdir:process.env.TMPDIR||null,own:process.env.CLAUDE_CODE_TMPDIR||null};`
+    + `try{const d=fs.mkdtempSync(p.join(os.tmpdir(),"probe-"));fs.writeFileSync(p.join(d,"f"),"x");o.commandsWrite=fs.readFileSync(p.join(d,"f"),"utf8")}catch(e){o.commandsWrite="ERR "+e.code}`
+    + `try{fs.writeFileSync(p.join(o.own,"claude-prompt-planted.md"),"planted");o.ownWrite="WROTE"}catch(e){o.ownWrite="ERR "+e.code}`
+    + `o.lsRemote=cp.spawnSync("git",["ls-remote","https://github.com/agent-sh/tower-crane.git","HEAD"],{encoding:"utf8",env:{...process.env,GIT_TERMINAL_PROMPT:"0"}}).status;`
+    + `fs.writeFileSync(${JSON.stringify(out)},JSON.stringify(o))`;
+  h.ok(['brief', 'set', 'T1', '-'], {
+    input: `Sandbox probe set up by the owner. It checks where your commands may write temporary files. Run exactly this one command with your command tool, then reply with its exit code and stop. Do not use tower-crane.\n\n${node} -e '${script}'\n`,
+  });
+  pinLiveRung(h, 'claude');
+  const userHome = os.homedir();
+  const env = { ...h.env, HOME: userHome, USERPROFILE: userHome, CLAUDE_CONFIG_DIR: '', XDG_CACHE_HOME: shortCache(t),
+    ...(runtime === 'with' ? {} : { XDG_RUNTIME_DIR: '' }) };
+  const r = await h.runAsync(['spawn', '--role', 'small', '--task', 'T1', '--wait'], { env });
+  assert.equal(r.code, 0, `${r.stderr}\n${agentLog(h)}`);
+  assert.ok(fs.existsSync(out), `the probe ran\n${agentLog(h)}`);
+  const seen = JSON.parse(fs.readFileSync(out, 'utf8'));
+  console.log(`claude temp probe: ${JSON.stringify(seen)}`);
+  assert.equal(seen.commandsWrite, 'x', 'the commands write their own TMPDIR');
+  assert.equal(seen.lsRemote, 0, 'https through claude\'s proxy sockets still works');
+  assert.notEqual(seen.own, seen.tmpdir, 'claude\'s own temp files are not in the commands\' TMPDIR');
+  const where = runtime === 'with' ? path.join(fs.realpathSync(h.state), 'homes', 'small-T1-1') + path.sep : `${path.dirname(seen.tmpdir)}-own`;
+  assert.ok(seen.own.startsWith(where), `claude's own temp files are in ${where}: ${seen.own}`);
+  assert.match(seen.ownWrite, /^ERR /, 'the commands cannot write claude\'s own temp files');
+});
 
 // Host sockets under /run that both sandboxes hide: the system bus,
 // snapd, docker (root on the host for a member of its group) and the user's
@@ -466,7 +536,9 @@ function realCodexSandbox() {
 // A stand-in codex on PATH for the small rung: it runs the real `codex
 // sandbox` with the profile spawn wrote, in the environment spawn gave it, so
 // the probe script runs in the real sandbox and no model call is made.
-function standInCodex(h, script, rung = 'small') {
+// before, when given, runs on the host after spawn wrote the profile and
+// calls run() to start the sandbox.
+function standInCodex(h, script, rung = 'small', before = 'run()') {
   const bin = path.join(h.base, 'bin');
   fs.mkdirSync(bin);
   fs.writeFileSync(path.join(bin, 'codex'), `#!${process.execPath}
@@ -474,9 +546,12 @@ const cp = require('node:child_process');
 const path = require('node:path');
 const PATH = process.env.PATH.split(path.delimiter).filter((d) => path.resolve(d) !== ${JSON.stringify(bin)}).join(path.delimiter);
 process.stdout.write(JSON.stringify({ type: 'thread.started', thread_id: 'probe' }) + '\\n');
-const r = cp.spawnSync('codex', ['sandbox', '-c', 'default_permissions="tower-crane"', '--', process.execPath, '-e', ${JSON.stringify(script)}], { env: { ...process.env, PATH }, encoding: 'utf8' });
-process.stderr.write(r.stderr || '');
-process.exit(r.status ?? 1);
+function run() {
+  const r = cp.spawnSync('codex', ['sandbox', '-c', 'default_permissions="tower-crane"', '--', process.execPath, '-e', ${JSON.stringify(script)}], { env: { ...process.env, PATH }, encoding: 'utf8' });
+  process.stderr.write(r.stderr || '');
+  process.exit(r.status ?? 1);
+}
+${before};
 `, { mode: 0o755 });
   h.ok(['ladder', 'set', rung, '--harness', 'codex', '--model', 'probe', '--clear', 'profile', '--clear', 'effort', '--clear', 'args']);
   return bin;
@@ -782,7 +857,10 @@ test('a real codex sandbox cannot reach the session bus or the docker socket, so
   assert.match(String(seen.runtime), /^ERR /, 'the runtime directory is hidden');
 });
 
-test('a real codex sandbox with sandbox.session_bus connects to the bus socket and nothing else in the runtime directory', { skip: realCodexSandbox(), timeout: 300000 }, async (t) => {
+// The runtime directory is not mounted, only the bus socket, so a socket
+// made there after spawn, here by the stand-in on the host just before the
+// sandbox starts, is out of reach too.
+test('a real codex sandbox with sandbox.session_bus connects to the bus socket and nothing else in the runtime directory, even a socket made after spawn', { skip: realCodexSandbox(), timeout: 300000 }, async (t) => {
   const h = makeRepo(t);
   h.init();
   h.ok(['task', 'add', '--title', 'Bus grant', '--acceptance', 'only the bus is reachable']);
@@ -790,9 +868,14 @@ test('a real codex sandbox with sandbox.session_bus connects to the bus socket a
   // A runtime directory of the test's own, so the probe never touches the
   // user's session. In /var/tmp, outside the home, an entry of / exposes it
   // as one does /run/user/<uid>.
-  const runtime = fs.existsSync('/var/tmp') ? fs.mkdtempSync('/var/tmp/tower-crane-runtime-') : path.join(h.base, 'runtime');
+  // One level down, so the directory on the way is the test's own: an
+  // entry named with DEL there, which TOML forbids raw, must not break the
+  // profile codex reads.
+  const way = fs.existsSync('/var/tmp') ? fs.mkdtempSync('/var/tmp/tower-crane-runtime-') : path.join(h.base, 'runtime');
+  const runtime = path.join(way, 'rt');
   fs.mkdirSync(runtime, { recursive: true });
-  t.after(() => fs.rmSync(runtime, { recursive: true, force: true }));
+  t.after(() => fs.rmSync(way, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(way, 'del\x7f'));
   const servers = [];
   const listen = async (p) => {
     const s = net.createServer((c) => { c.on('error', () => {}); c.end(); });
@@ -802,16 +885,23 @@ test('a real codex sandbox with sandbox.session_bus connects to the bus socket a
   t.after(() => { for (const s of servers) s.close(); });
   const targets = { bus: path.join(runtime, 'bus'), other: path.join(runtime, 'other.sock') };
   for (const p of Object.values(targets)) await listen(p);
+  targets.late = path.join(runtime, 'late.sock');
+  // A listening socket takes a connection into its backlog while the
+  // stand-in waits on the sandbox.
+  const late = `require('node:net').createServer(() => {}).listen(${JSON.stringify(targets.late)}, run)`;
   const out = path.join(results(h), 'bus-grant.json');
   h.ok(['project', 'set', '--session-bus', 'true']);
-  const bin = standInCodex(h, busProbe(h, targets, path.join(h.base, 'unused'), out));
+  const bin = standInCodex(h, busProbe(h, targets, path.join(h.base, 'unused'), out), 'small', late);
   const r = await h.runAsync(['spawn', '--role', 'small', '--task', 'T1', '--wait'],
     { env: { ...h.env, PATH: `${bin}${path.delimiter}${h.env.PATH}`, XDG_RUNTIME_DIR: runtime, DBUS_SESSION_BUS_ADDRESS: '' } });
   assert.equal(r.code, 0, `${r.stderr}\n${agentLog(h)}`);
   const seen = JSON.parse(fs.readFileSync(out, 'utf8'));
   console.log(`codex bus grant probe: ${JSON.stringify(seen)}`);
+  assert.ok(fs.existsSync(targets.late), 'the stand-in made the late socket');
   assert.equal(seen.bus, 'CONNECTED', 'the granted bus socket is reachable');
   assert.match(seen.other, /^ERR /, 'another socket in the runtime directory is not');
+  assert.match(seen.late, /^ERR /, 'nor is a socket made there after spawn');
+  assert.equal(seen.runtime, 1, 'the runtime directory shows the bus socket alone');
 });
 
 // /run is hidden whole in both sandboxes but for what an agent needs: the

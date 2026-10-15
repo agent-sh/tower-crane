@@ -158,6 +158,8 @@ if (path.resolve(process.argv[1] || '') !== __filename) {
   });
   if (process.env.TOWER_CRANE_TEST_FALLBACK_NOTE) cli(['task', 'note', process.env.TOWER_CRANE_TASK, `${harness} ${model} ${process.env.TOWER_CRANE_RETRY}`]);
   writeAtomic(file, JSON.stringify(attempts));
+  // Edits a file while the primary runs, after dispatch read it.
+  if (model === 'first' && process.env.TOWER_CRANE_TEST_FALLBACK_TOUCH) fs.appendFileSync(process.env.TOWER_CRANE_TEST_FALLBACK_TOUCH, 'CHANGED_AFTER_DISPATCH=1\n');
   if (harness === 'codex') {
     if (model !== 'first' || process.env.TOWER_CRANE_TEST_FALLBACK_REASON !== 'no-session') {
       console.log(JSON.stringify({ type: 'thread.started', thread_id: model === 'first' ? '11111111-1111-1111-1111-111111111111' : '22222222-2222-2222-2222-222222222222' }));

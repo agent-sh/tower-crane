@@ -4,7 +4,7 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { makeTaskRepo } = require('./helpers');
+const { makeTaskRepo, ownerFallbacks } = require('./helpers');
 const { waitOnRepo } = require('./signals');
 const { readPublished } = require('./atomic-file');
 
@@ -63,10 +63,7 @@ function setup(t, { tier = 'easy', tasks = ['T1'], fallbacks = [] } = {}) {
   fs.writeFileSync(path.join(bin, exe('codex')), process.platform === 'win32' ? ''
     : `#!${process.execPath}\nconst ok = ${logged};\nif (process.argv[2] === 'login') { console.log('Logged in using ChatGPT'); process.exit(0); }\nif (ok) console.log(JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1 } }));\nelse console.error('Failed to refresh token: Your access token could not be refreshed. Please log out and sign in again.');\nprocess.exitCode = ok ? 0 : 1;\n`, { mode: 0o755 });
   h.ok(['ladder', 'set', 'easy', '--harness', 'claude', '--model', 'first', '--clear', 'profile', '--clear', 'effort', '--supervision', JSON.stringify(supervision)]);
-  h.fallbacks = (routes) => {
-    fs.mkdirSync(path.dirname(h.userConfig), { recursive: true });
-    fs.writeFileSync(h.userConfig, JSON.stringify({ ladder: { easy: { fallbacks: routes } } }));
-  };
+  h.fallbacks = (routes) => ownerFallbacks(h, 'easy', routes);
   if (fallbacks.length) h.fallbacks(fallbacks);
   h.file = path.join(h.base, 'attempts.json');
   h.spawnEnv = {

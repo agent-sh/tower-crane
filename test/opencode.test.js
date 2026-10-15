@@ -7,7 +7,7 @@ const path = require('node:path');
 const cp = require('node:child_process');
 const http = require('node:http');
 const { promisify } = require('node:util');
-const { makeRepo } = require('./helpers');
+const { makeRepo, ownerFallbacks } = require('./helpers');
 const { fileWritten: waitForFile } = require('./signals');
 const A = require('../lib/agents');
 const S = require('../lib/state');
@@ -387,10 +387,7 @@ test('a fallback into opencode receives filtered auth instead of restoring remot
     fixture: { type: 'api', key: 'API-SECRET-CANARY' },
   };
   fs.writeFileSync(path.join(f.home, '.local', 'share', 'opencode', 'auth.json'), JSON.stringify(auth));
-  fs.mkdirSync(path.dirname(f.h.userConfig), { recursive: true });
-  fs.writeFileSync(f.h.userConfig, JSON.stringify({
-    ladder: { medium: { fallbacks: [{ harness: 'opencode', model: 'fixture/model' }] } },
-  }));
+  ownerFallbacks(f.h, 'medium', [{ harness: 'opencode', model: 'fixture/model' }]);
   const command = [process.execPath, '-e',
     'console.log(JSON.stringify({type:"turn.failed",error:{message:"HTTP 503 service unavailable"}}));process.exit(1)', '{prompt}'];
   f.h.ok(['ladder', 'set', 'medium', '--harness', 'command', '--command', JSON.stringify(command),

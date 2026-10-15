@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
-const { makeProjectRepo, BIN } = require('./helpers');
+const { makeProjectRepo, BIN, PTY_AVAILABLE } = require('./helpers');
 const { HUNG_TEST_MS, fileWritten } = require('./signals');
 
 test('authority and benchmark readers neither compete with a holder nor acquire a vacant lease', (t) => {
@@ -405,12 +405,12 @@ test('TOWER_CRANE_VIA=automation in the environment cannot write under another s
   const before = h.readState('tasks.json');
   const events = () => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8');
   const log = events();
-  for (const [label, extra] of [
+  for (const [label, extra, input] of [
     ['claim alone', {}],
-    ['wrong key', { TOWER_CRANE_AUTOMATION_KEY: 'guessed' }],
+    ['wrong key', { TOWER_CRANE_AUTOMATION_KEY_FD: '0' }, 'guessed\n'],
   ]) {
     const rival = h.run(['task', 'add', '--title', 'Rival', '--acceptance', 'refused'],
-      { env: { TOWER_CRANE_AGENT: 'orchestrator', CLAUDE_SESSION_ID: 'rival', TOWER_CRANE_VIA: 'automation', ...extra } });
+      { input, env: { TOWER_CRANE_AGENT: 'orchestrator', CLAUDE_SESSION_ID: 'rival', TOWER_CRANE_VIA: 'automation', ...extra } });
     assert.equal(rival.code, 1, `${label}: ${rival.stderr}`);
     assert.match(rival.stderr, /orchestrator lease held by orchestrator session holder/, label);
     assert.deepEqual(h.readState('tasks.json'), before, label);
@@ -427,6 +427,35 @@ test('TOWER_CRANE_VIA=automation in the environment cannot write under another s
   assert.notEqual(after.orchestrator_lease.heartbeat, aged.orchestrator_lease.heartbeat);
   const note = events().trim().split('\n').map(JSON.parse).findLast((e) => e.cmd === 'task note');
   assert.equal(note.via, undefined);
+});
+
+test('a key line longer than any key is refused, not dropped into the command input', (t) => {
+  const h = makeProjectRepo(t);
+  const holder = { env: { TOWER_CRANE_AGENT: 'orchestrator', CLAUDE_SESSION_ID: 'holder' } };
+  h.ok(['task', 'add', '--title', 'Held', '--acceptance', 'one writer'], holder);
+  const log = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8');
+  const long = h.run(['task', 'note', 'T1', 'from a long line'], { input: `${'a'.repeat(300)}\n`,
+    env: { ...holder.env, TOWER_CRANE_VIA: 'automation', TOWER_CRANE_AUTOMATION_KEY_FD: '0' } });
+  assert.equal(long.code, 1, long.stderr);
+  assert.match(long.stderr, /automation key line on descriptor 0 is longer than 256 bytes/);
+  assert.equal(fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8'), log);
+});
+
+// script gives the CLI a terminal on stdin; the open pipe to script means no
+// end of input ever reaches it, as in an interactive shell.
+test('a key marker leaked into a terminal neither reads nor waits on it', { skip: !PTY_AVAILABLE && 'needs script(1)' }, async (t) => {
+  const h = makeProjectRepo(t);
+  const command = [process.execPath, BIN, '--version'].map((s) => `'${s.replace(/'/g, "'\\''")}'`).join(' ');
+  const child = cp.spawn('script', ['-qec', command, '/dev/null'], {
+    env: { ...h.env, TOWER_CRANE_VIA: 'automation', TOWER_CRANE_AUTOMATION_KEY_FD: '0' }, stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  t.after(() => child.kill('SIGKILL'));
+  let out = '';
+  child.stdout.on('data', (d) => { out += d; });
+  const closed = new Promise((resolve) => child.once('close', (code) => resolve(code)));
+  const deadline = new Promise((resolve) => setTimeout(resolve, 60000, 'timeout')); // wait-allow: bounds a CLI that blocks on its terminal, the failure under test
+  assert.equal(await Promise.race([closed, deadline]), 0, `the CLI waited on its terminal; output: ${out}`);
+  assert.ok(out.includes(require('../package.json').version), `--version printed: ${out}`);
 });
 
 test('engine lease bindings reject stale work without extending the idle window', () => {

@@ -1824,10 +1824,10 @@ if (process.env.STUB_FAIL_HARNESS === ${JSON.stringify(harness)}) {
       const fallback = primary === 'claude' ? 'codex' : 'claude';
       isolated(h, 'hard', primary);
       h.ok(['ladder', 'set', 'hard', '--supervision', '{"retries":0,"backoff_ms":10,"max_backoff_ms":10}']);
-      fs.mkdirSync(path.dirname(h.userConfig), { recursive: true });
-      fs.writeFileSync(h.userConfig, JSON.stringify({ ladder: { hard: { fallbacks: [{
+      // A fallback's env is a grant only the owner's ladder set makes.
+      h.ok(['ladder', 'set', 'hard', '--fallbacks', JSON.stringify([{
         harness: fallback, model: 'second', ...(source === 'literal' ? { env: { GH_CONFIG_DIR: selected } } : {}),
-      }] } } }));
+      }])]);
       fs.rmSync(reports, { force: true });
       spawn(h, u, 'hard', { GH_CONFIG_DIR: original, STUB_FAIL_HARNESS: primary,
         STUB_RUN: JSON.stringify([['gh', 'pr', 'view', '1']]) });
@@ -2845,6 +2845,77 @@ test('a sandboxed role cannot write the state directory itself', () => {
   for (const job of ['worker', 'researcher', 'reviewer', 'small']) assert.ok(!A.load(job).writeOutside.includes('state'), job);
 });
 
+test('a sandboxed role cannot write the worktrees root, which holds the admin directories', () => {
+  const text = fs.readFileSync(A.file('worker'), 'utf8').replace(/^writeOutside:(\r?\n)/m, 'writeOutside:$1  - worktrees$1');
+  assert.match(text, /- worktrees/);
+  assert.throws(() => A.parse(text, 'worker.md'), /worktrees needs sandbox: false/);
+  for (const job of ['worker', 'researcher', 'reviewer', 'small']) assert.ok(!A.load(job).writeOutside.includes('worktrees'), job);
+  assert.ok(A.load('orchestrator').writeOutside.includes('worktrees') && !A.load('orchestrator').sandbox);
+});
+
+// A project's sandbox.write would reopen the worktree lock in the state
+// directory, or every admin directory in the worktrees root.
+test('spawn refuses a sandbox.write path over the state directory or the worktrees root', { skip: NO_STUBS }, (t) => {
+  const { h, u, wt } = setup(t);
+  const root = path.dirname(wt);
+  const cases = [
+    // Holding the state directory, it holds the agent homes too, which an earlier check names.
+    [h.base, /sandbox\.write path .* holds /],
+    [path.join(h.state, 'worktree'), /is inside the state directory/],
+    [root, /holds the worktrees root/],
+  ];
+  for (const harness of ['claude', 'codex']) {
+    isolated(h, 'hard', harness);
+    for (const [dir, why] of cases) {
+      h.ok(['project', 'set', '--sandbox', JSON.stringify({ write: [dir] })]);
+      const r = h.run(['spawn', '--role', 'hard', '--task', 'T1', '--dry-run'], { env: u.env });
+      assert.notEqual(r.code, 0, `${harness} ${dir}`);
+      assert.match(r.stderr, why, `${harness} ${dir}`);
+    }
+    h.ok(['project', 'set', '--sandbox', JSON.stringify({ write: [path.join(h.base, 'elsewhere')] })]);
+    const r = h.run(['spawn', '--role', 'hard', '--task', 'T1', '--dry-run'], { env: u.env });
+    assert.equal(r.code, 0, `${harness}: ${r.stderr}`);
+  }
+});
+
+// Whether a sandboxed command may write file under the rendered rules. claude
+// writes its working directory, the common directory of a linked worktree and
+// allowWrite, and denyWrite wins over each. codex writes where the nearest
+// rule above the file says write, its workspace root included.
+function commandsWrite(seen, cwd, common, file) {
+  const under = (p, dir) => p === dir || p.startsWith(dir.endsWith(path.sep) ? dir : dir + path.sep);
+  if (seen.harness === 'claude') {
+    const box = seen.settings.sandbox.filesystem;
+    return [cwd, common, ...box.allowWrite].some((p) => under(file, p)) && !box.denyWrite.some((p) => under(file, p));
+  }
+  const profile = seen.config.permissions['tower-crane'].filesystem;
+  const rules = Object.entries(profile).filter(([, access]) => typeof access === 'string')
+    .flatMap(([p, access]) => codexTargets(seen, p).map((target) => [target, access]));
+  rules.push([cwd, profile[':workspace_roots']['.']]);
+  const nearest = rules.filter(([p]) => under(file, p)).sort((a, b) => b[0].length - a[0].length)[0];
+  return nearest?.[1] === 'write';
+}
+
+// The worktree lock (lib/worktree.js underWorktreeLock) moved out of the git
+// directory, which a sandboxed worker writes, to the state directory.
+test('no sandboxed claude or codex role can write the worktree lock, as every worker could write its old place', { skip: NO_STUBS }, (t) => {
+  const { h, u, wt } = setup(t);
+  const real = (p) => fs.realpathSync.native(p);
+  const common = real(path.join(h.repo, '.git'));
+  const lock = path.join(real(h.state), 'worktree', 'lock');
+  const legacy = path.join(common, 'tower-crane-worktree.lock');
+  for (const harness of ['claude', 'codex']) {
+    for (const rung of ['hard', 'review', 'research', 'small']) {
+      isolated(h, rung, harness);
+      spawn(h, u, rung);
+      const seen = u.report();
+      assert.equal(commandsWrite(seen, real(wt), common, lock), false, `${harness} ${rung}: the lock is read-only`);
+      assert.equal(commandsWrite(seen, real(wt), common, path.join(real(path.dirname(wt)), '.git-admin', 'other')), false, `${harness} ${rung}: other admin directories are read-only`);
+      if (rung === 'hard') assert.equal(commandsWrite(seen, real(wt), common, legacy), true, `${harness}: a worker writes the old lock path`);
+    }
+  }
+});
+
 test('a sandboxed agent gets no gh token, from the keyring or the spawning environment, and its gh runs on the host with the user\'s config', { skip: NO_STUBS }, (t) => {
   const { h, u } = setup(t);
   for (const harness of ['claude', 'codex']) {
@@ -3074,4 +3145,44 @@ test('each role has an agent file that states its tools, MCP servers, skills, we
   assert.deepEqual(TOML.parse(TOML.stringify(doc)), doc);
   // Prefixed integers keep their base.
   assert.deepEqual({ ...TOML.parse('o = 0o17\nx = 0x1F\nb = 0b101\nd = 1_000\n') }, { o: 15, x: 31, b: 5, d: 1000 });
+});
+
+// TOML forbids every control character raw in a basic string but tab, DEL
+// included. A path codex's profile names can hold any of them, and one raw
+// DEL made codex reject the whole config.
+test('TOML strings and keys escape every control character TOML forbids raw, DEL included', () => {
+  const forbidden = /[\x00-\x08\x0a-\x1f\x7f]/;
+  for (let c = 0; c < 0x80; c++) {
+    if (c >= 0x20 && c < 0x7f) continue;
+    const ch = String.fromCharCode(c);
+    const doc = { [`/var/tmp/a${ch}b`]: `v${ch}w` };
+    const text = TOML.stringify({ t: doc });
+    for (const line of text.split('\n')) assert.doesNotMatch(line, forbidden, `U+${c.toString(16).padStart(4, '0')} stays escaped`);
+    assert.deepEqual({ ...TOML.parse(text).t }, doc, `U+${c.toString(16).padStart(4, '0')} reads back`);
+  }
+  assert.throws(() => TOML.stringify({ k: 'a\ud800b' }), /lone surrogate/);
+  assert.deepEqual({ ...TOML.parse(TOML.stringify({ k: 'a\u{1f600}b' })) }, { k: 'a\u{1f600}b' });
+});
+
+// readAround lists the entries of the directories on the way to a runtime
+// directory, and codex binds each again for every command, following a link.
+// An entry stays listed only when nobody but root and the user can swap it.
+test('the codex profile lists an entry beside the runtime directory only when nobody else can turn it into a link', () => {
+  const me = 1000;
+  const st = (uid, mode, link = false) => ({ uid, mode, isSymbolicLink: () => link });
+  const dir = 0o40755, sticky = 0o41777, open = 0o40777, group = 0o40775, file = 0o100644;
+  const cases = [
+    ['root directory, root entry', st(0, dir), st(0, file), true],
+    ['root directory, own entry', st(0, dir), st(me, file), true],
+    ['sticky world-writable directory, own entry', st(0, sticky), st(me, dir), true],
+    ['sticky world-writable directory, root entry', st(0, sticky), st(0, dir), true],
+    ['sticky world-writable directory, another user\'s entry', st(0, sticky), st(1001, dir), false],
+    ['root directory, another user\'s entry', st(0, dir), st(1001, file), false],
+    ['world-writable directory without the sticky bit', st(0, open), st(0, file), false],
+    ['group-writable directory without the sticky bit', st(0, group), st(me, file), false],
+    ['another user\'s directory', st(1001, dir), st(me, file), false],
+    ['a link', st(0, dir), st(me, 0o120777, true), false],
+    ['an unreadable directory', null, st(me, file), false],
+  ];
+  for (const [what, parent, entry, listed] of cases) assert.equal(A.steadyEntry(parent, entry, me), listed, what);
 });

@@ -209,7 +209,16 @@ for (const harness of ['claude', 'codex']) {
     await started(() => fs.existsSync(ready + '.stop'), ended, 'the Stop hook');
     fs.writeFileSync(ready + '.stop.go', '');
     // Stop finds nothing pending and holds until the owner answers.
-    await new Promise((resolve) => setTimeout(resolve, 300)); // wait-allow: let Stop enter its pending-answer wait before publishing the answer
+    if (process.platform === 'linux') {
+      // The hold's wait lives as long as the idle; its initial environment
+      // stays readable in /proc for that whole time.
+      const pid = await waitOnRepo(h, () => holdWait(h.state), 'the Stop hold wait --inbox');
+      // read-published: the kernel serves /proc; nothing replaces the file.
+      const environ = fs.readFileSync(`/proc/${pid}/environ`, 'utf8').split('\0');
+      const key = fs.readFileSync(path.join(home, 'automation.key'), 'utf8').trim();
+      assert.ok(environ.includes('TOWER_CRANE_VIA=automation'), 'the hold wait runs for the engine');
+      assert.ok(!environ.some((entry) => entry.includes(key)), 'the automation key is not in the hold wait environment');
+    } else await new Promise((resolve) => setTimeout(resolve, 300)); // wait-allow: let Stop enter its pending-answer wait before publishing the answer
     h.ok(['answer', 'D1', '--choice', 'yes', '--note', 'private owner note', '--agent', 'owner']);
     const answer = log(h).findLast((e) => e.cmd === 'answer').id;
     const result = await run;
@@ -220,9 +229,23 @@ for (const harness of ['claude', 'codex']) {
     assert.equal(seen.blocked, true, 'Stop must block with the answer');
     assert.match(stop.reason, new RegExp(`${answer}: decision-answer D1 from owner`));
     idOnly(JSON.stringify(seen.turns), ['private worker report', 'private owner note']);
-    const delivered = log(h).filter((e) => e.cmd === 'hook inbox' && e.agent === 'orchestrator-T1-1').flatMap((e) => e.detail.messages);
+    const inbox = log(h).filter((e) => e.cmd === 'hook inbox' && e.agent === 'orchestrator-T1-1');
+    const delivered = inbox.flatMap((e) => e.detail.messages);
     assert.ok(delivered.includes(message) && delivered.includes(answer));
+    assert.ok(inbox.every((e) => e.via === 'automation'), 'the bridge presents the key on stdin');
   });
+}
+
+// The pid of the Stop hold's wait --inbox for this state, from /proc.
+function holdWait(state) {
+  for (const name of fs.readdirSync('/proc')) {
+    if (!/^\d+$/.test(name)) continue;
+    let argv;
+    // read-published: the kernel serves /proc; nothing replaces the file.
+    try { argv = fs.readFileSync(`/proc/${name}/cmdline`, 'utf8').split('\0'); } catch { continue; }
+    if (argv.includes('wait') && argv.includes('--inbox') && argv.includes(state) && !argv.includes('--observe')) return Number(name);
+  }
+  return null;
 }
 
 // A stand-in for the engine's $ with real child processes, so the mod runs
