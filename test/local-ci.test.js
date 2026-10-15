@@ -115,7 +115,11 @@ test('local CI runs argv on the merged tree and records audited evidence without
   const entries = require('node:child_process').execFileSync('git', ['ls-tree', '-r', '-z', tree], { cwd: h.repo });
   assert.equal(e.receipt.source_digest, crypto.createHash('sha256').update(entries).digest('hex'));
   const trace = JSON.parse(fs.readFileSync(h.log, 'utf8'));
-  assert.equal(trace.head, h.sha);
+  // HEAD is a commit of the merged tree with the base and the head as parents, and no ref names it.
+  assert.equal(trace.head, e.receipt.merge_sha);
+  assert.equal(h.git(['rev-parse', `${trace.head}^{tree}`]), tree);
+  assert.equal(h.git(['rev-list', '--parents', '-n', '1', trace.head]), `${trace.head} ${h.baseSha} ${h.sha}`);
+  assert.equal(h.git(['for-each-ref', '--contains', trace.head]), '');
   assert.equal(trace.argument, h.command[3]);
   assert.ok(trace.cwd.startsWith(h.env.TOWER_CRANE_TMP));
   assert.ok(!fs.existsSync(trace.cwd), 'temporary merged worktree removed');
@@ -659,6 +663,22 @@ test('malformed task override fails local CI closed before command execution', (
   assert.equal(r.code, 1);
   assert.match(r.stdout, /invalid.*override/);
   assert.ok(!fs.existsSync(h.log));
+});
+
+test('local CI runs on a clean checkout of the merge, so a clean-tree check passes', (t) => {
+  // Shaped like ginza's tools/check.py working_tree_clean.
+  const h = fixture(t, `
+const cp = require('node:child_process');
+cp.execFileSync('git', ['diff', '--quiet', 'HEAD']);
+cp.execFileSync('git', ['diff', '--cached', '--quiet']);
+if (cp.execFileSync('git', ['status', '--porcelain'], {encoding: 'utf8'}) !== '') process.exit(3);
+`);
+  const e = h.json(['check', 'ci', 'T1', '--agent', 'checker']);
+  assert.equal(e.ok, true, e.summary);
+  assert.equal(e.receipt.exit, 0);
+  assert.equal(e.receipt.head_sha, h.sha);
+  // The same base and head give the same merge commit.
+  assert.equal(h.json(['check', 'ci', 'T1', '--agent', 'checker']).receipt.merge_sha, e.receipt.merge_sha);
 });
 
 test('tracked changes made by a successful local check cannot pass', (t) => {
