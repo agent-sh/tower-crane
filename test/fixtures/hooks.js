@@ -253,8 +253,10 @@ function before(name, args) {
   }
   // HOOK_STOP_INITIALIZING=SIGNAL: stop before taking the worktree lock while
   // a task worktree this process added is still registered as initializing.
+  // The lock is in the worktrees root, `<repo>-worktrees` beside `<repo>/.git`.
   if (env.HOOK_STOP_INITIALIZING && name === 'mkdirSync' && typeof target === 'string'
-    && path.basename(target) === 'tower-crane-worktree.lock' && initializing(path.dirname(target)) && first('initializing')) {
+    && path.basename(target) === 'tower-crane-worktree.lock' && path.basename(path.dirname(target)).endsWith('-worktrees')
+    && initializing(path.join(path.dirname(target).replace(/-worktrees$/, ''), '.git')) && first('initializing')) {
     stop(env.HOOK_STOP_INITIALIZING);
   }
   // Only a waiter looks inside a dispatch lock another process holds.

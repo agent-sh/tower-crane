@@ -640,6 +640,71 @@ test('a gate that prepares while a task worktree is being created waits until it
   assert.doesNotMatch(h.git(['worktree', 'list', '--porcelain']), /^locked/m, 'no registration is left locked');
 });
 
+// A sandboxed worker writes the repository's git directory, where Tower Crane
+// 0.1.2 and earlier took the worktree lock; one it leaves there must stall
+// nothing (the sandboxes' write lists: test/isolation.test.js).
+test('a worktree lock planted in the git directory stalls neither relink nor gate preparation', async (t) => {
+  const h = makeRepo(t);
+  h.init();
+  h.ok(['task', 'add', '--title', 'Planted', '--acceptance', 'not needed']);
+  const planted = path.join(h.repo, '.git', 'tower-crane-worktree.lock');
+  fs.mkdirSync(planted);
+  const r = h.run(['worktree', 'T1', '--json']);
+  assert.equal(r.code, 0, r.stderr);
+  assert.ok(fs.existsSync(JSON.parse(r.stdout).path));
+  assert.match(r.stderr, /tower-crane-worktree\.lock exists; Tower Crane 0\.1\.2 and earlier take the worktree lock there/, 'an older version\'s lock is reported, not raced silently');
+  assert.ok(fs.existsSync(planted), 'a lock this process did not make is left alone');
+  const g = await gate(h, h.repo, h.git(['rev-parse', 'HEAD']));
+  assert.equal(g.code, 0, g.stderr + g.stdout);
+});
+
+// While a newer process holds the lock, an older one that still takes it in
+// the git directory finds it held there too.
+test('a worktree lock holder also holds the old lock path for older versions while it works', { skip: process.platform === 'win32' && 'links need privileges on Windows' }, async (t) => {
+  const h = makeRepo(t);
+  h.init();
+  h.ok(['task', 'add', '--title', 'Mirror', '--acceptance', 'not needed']);
+  const signal = path.join(h.base, 'admin-link');
+  const creating = runAsync(['worktree', 'T1', '--json'], { cwd: h.repo, pre: ['--require', HOOKS],
+    env: { ...h.env, HOOK_STATE: h.state, HOOK_STOP_ADMIN_LINK: signal } });
+  await fileWritten(signal);
+  const legacy = path.join(h.repo, '.git', 'tower-crane-worktree.lock');
+  assert.ok(fs.existsSync(legacy), 'the old path is held during the admin move');
+  fs.writeFileSync(`${signal}.go`, '');
+  const created = await creating;
+  assert.equal(created.code, 0, created.stderr);
+  assert.doesNotMatch(created.stderr, /no longer waits/);
+  assert.equal(fs.existsSync(legacy), false, 'released with the lock');
+});
+
+// Removal empties the admin directory a relink writes, so cancelling a task
+// waits for the lock a relink holds, and both wait on the one in the worktrees
+// root, which no sandboxed agent writes.
+test('removing a task worktree and relinking wait for the worktree lock in the worktrees root', async (t) => {
+  const h = makeRepo(t);
+  h.init();
+  for (const title of ['Cancelled', 'Next']) h.ok(['task', 'add', '--title', title, '--acceptance', 'not needed']);
+  const wt = h.json(['worktree', 'T1']);
+  const common = fs.realpathSync.native(path.join(h.repo, '.git'));
+  const lock = path.join(`${path.dirname(common)}-worktrees`, 'tower-crane-worktree.lock');
+  fs.mkdirSync(lock);
+  const cancelling = runAsync(['task', 'update', 'T1', '--status', 'cancelled'], { cwd: h.repo, env: h.env });
+  const relinking = runAsync(['worktree', 'T2', '--json'], { cwd: h.repo, env: h.env });
+  let done = 0;
+  for (const p of [cancelling, relinking]) p.then(() => { done++; });
+  // Without the lock both finish now; with it, both wait.
+  for (const end = Date.now() + 3000; !done && Date.now() < end;) await new Promise((r) => setTimeout(r, 20)); // wait-allow: give an unlocked removal and relink time to finish before the lock is released
+  assert.equal(done, 0, 'neither finished while the lock was held');
+  assert.ok(fs.existsSync(wt.path), 'the worktree is not removed under a held lock');
+  fs.rmdirSync(lock);
+  const [cancelled, relinked] = await Promise.all([cancelling, relinking]);
+  assert.equal(cancelled.code, 0, cancelled.stderr);
+  assert.equal(relinked.code, 0, relinked.stderr);
+  assert.equal(fs.existsSync(wt.path), false, 'removed once the lock is free');
+  assert.ok(fs.existsSync(JSON.parse(relinked.stdout).path));
+  assert.equal(fs.existsSync(lock), false);
+});
+
 // `p/r` and `p/r.git` share `p/r-worktrees`, so a relink from one must leave
 // the other's relocated admin directories alone.
 test('a repository that shares the worktrees root does not relink the other repository\'s task worktrees', { skip: process.platform === 'win32' && 'links need privileges on Windows' }, (t) => {

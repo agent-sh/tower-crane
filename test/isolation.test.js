@@ -2842,6 +2842,53 @@ test('a sandboxed role cannot write the state directory itself', () => {
   for (const job of ['worker', 'researcher', 'reviewer', 'small']) assert.ok(!A.load(job).writeOutside.includes('state'), job);
 });
 
+test('a sandboxed role cannot write the worktrees root, which holds the worktree lock', () => {
+  const text = fs.readFileSync(A.file('worker'), 'utf8').replace(/^writeOutside:(\r?\n)/m, 'writeOutside:$1  - worktrees$1');
+  assert.match(text, /- worktrees/);
+  assert.throws(() => A.parse(text, 'worker.md'), /worktrees needs sandbox: false/);
+  for (const job of ['worker', 'researcher', 'reviewer', 'small']) assert.ok(!A.load(job).writeOutside.includes('worktrees'), job);
+  assert.ok(A.load('orchestrator').writeOutside.includes('worktrees') && !A.load('orchestrator').sandbox);
+});
+
+// Whether a sandboxed command may write file under the rendered rules. claude
+// writes its working directory, the common directory of a linked worktree and
+// allowWrite, and denyWrite wins over each. codex writes where the nearest
+// rule above the file says write, its workspace root included.
+function commandsWrite(seen, cwd, common, file) {
+  const under = (p, dir) => p === dir || p.startsWith(dir.endsWith(path.sep) ? dir : dir + path.sep);
+  if (seen.harness === 'claude') {
+    const box = seen.settings.sandbox.filesystem;
+    return [cwd, common, ...box.allowWrite].some((p) => under(file, p)) && !box.denyWrite.some((p) => under(file, p));
+  }
+  const profile = seen.config.permissions['tower-crane'].filesystem;
+  const rules = Object.entries(profile).filter(([, access]) => typeof access === 'string')
+    .flatMap(([p, access]) => codexTargets(seen, p).map((target) => [target, access]));
+  rules.push([cwd, profile[':workspace_roots']['.']]);
+  const nearest = rules.filter(([p]) => under(file, p)).sort((a, b) => b[0].length - a[0].length)[0];
+  return nearest?.[1] === 'write';
+}
+
+// The worktree lock (lib/worktree.js underWorktreeLock) moved out of the git
+// directory, which a sandboxed worker writes, to the worktrees root.
+test('no sandboxed claude or codex role can write the worktree lock, as every worker could write its old place', { skip: NO_STUBS }, (t) => {
+  const { h, u, wt } = setup(t);
+  const real = (p) => fs.realpathSync.native(p);
+  const common = real(path.join(h.repo, '.git'));
+  const lock = path.join(real(path.dirname(wt)), 'tower-crane-worktree.lock');
+  assert.equal(path.basename(path.dirname(lock)), `${path.basename(h.repo)}-worktrees`);
+  const legacy = path.join(common, 'tower-crane-worktree.lock');
+  for (const harness of ['claude', 'codex']) {
+    for (const rung of ['hard', 'review', 'research', 'small']) {
+      isolated(h, rung, harness);
+      spawn(h, u, rung);
+      const seen = u.report();
+      assert.equal(commandsWrite(seen, real(wt), common, lock), false, `${harness} ${rung}: the lock is read-only`);
+      assert.equal(commandsWrite(seen, real(wt), common, path.join(path.dirname(lock), '.git-admin', 'other')), false, `${harness} ${rung}: other admin directories are read-only`);
+      if (rung === 'hard') assert.equal(commandsWrite(seen, real(wt), common, legacy), true, `${harness}: a worker writes the old lock path`);
+    }
+  }
+});
+
 test('a sandboxed agent gets no gh token, from the keyring or the spawning environment, and its gh runs on the host with the user\'s config', { skip: NO_STUBS }, (t) => {
   const { h, u } = setup(t);
   for (const harness of ['claude', 'codex']) {
