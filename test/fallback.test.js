@@ -430,6 +430,30 @@ test('an approved env_file counts only with the content the owner approved', (t)
   h.spawn();
   assert.deepEqual(h.attempts().map((a) => [a.model, a.env]), [['first', 'primary']], 'the edited env_file is not the approved one');
   assert.ok(h.json(['ladder', 'show']).problems.some((p) => p.includes('carries env_file, which the owner has not approved')));
+
+  // Edited after dispatch, while the primary runs: the supervisor reads the
+  // file again at the switch and refuses the route.
+  fs.writeFileSync(envFile, 'ROUTE_ENV=fallback\n');
+  h.ok(['ladder', 'set', 'easy', '--fallbacks', JSON.stringify(routes)]);
+  h.spawnEnv.TOWER_CRANE_TEST_FALLBACK_TOUCH = envFile;
+  h.ok(['task', 'add', '--title', 'Touched', '--tier', 'easy', '--acceptance', 'touched']);
+  h.ok(['brief', 'set', 'T2', '-'], { input: 'Complete the original task brief.\n' });
+  h.spawnEnv.TOWER_CRANE_TEST_FALLBACK_FILE = h.file = path.join(h.base, 'attempts-T2.json');
+  const run = h.run(['spawn', '--task', 'T2', '--wait'], { env: h.spawnEnv });
+  assert.deepEqual(h.attempts().map((a) => [a.model, a.env]), [['first', 'primary']], 'the file changed after dispatch is not the approved one');
+  assert.match(run.stderr, /skipping fallback 1: .*changed since the owner approved/);
+});
+
+// Found in the T284 re-review: a pinned route that inherits its harness
+// follows the primary, which the orchestrator may move among sandboxed
+// harnesses without the owner. The approval is for the harness it resolved to.
+test('a pinned route that inherits its harness is not approved on another harness', (t) => {
+  const h = setup(t, { primaryHarness: 'claude', nextHarness: 'claude', reason: 'refusal' });
+  h.ok(['ladder', 'set', 'easy', '--fallbacks', JSON.stringify([{ model: 'second', env: { ROUTE_ENV: 'fallback' } }])]);
+  assert.ok(!h.json(['ladder', 'show']).problems.some((p) => p.includes('has not approved')));
+  h.ok(['ladder', 'set', 'easy', '--harness', 'codex'], { env: { TOWER_CRANE_AGENT: 'orchestrator' } });
+  const problems = h.json(['ladder', 'show']).problems;
+  assert.ok(problems.some((p) => p.startsWith('easy fallback 1') && p.includes('carries env, which the owner has not approved')), problems.join('\n'));
 });
 
 for (const reason of ['outage', 'refusal']) {
