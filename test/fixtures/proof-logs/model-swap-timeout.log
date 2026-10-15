@@ -1,0 +1,66 @@
+2026-10-13T03:35:12.1861241Z ##[group]Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+2026-10-13T03:35:12.1861761Z with:
+2026-10-13T03:35:12.1861997Z   fetch-depth: 0
+2026-10-13T03:35:15.7985533Z  * [new branch]      tower-crane/T155-sandbox-masks-on-tracked-files-never-bre -> origin/tower-crane/T155-sandbox-masks-on-tracked-files-never-bre
+2026-10-13T03:35:15.7986634Z  * [new branch]      tower-crane/T166-tests-wait-on-signals-not-wall-clock-dea -> origin/tower-crane/T166-tests-wait-on-signals-not-wall-clock-dea
+2026-10-13T03:35:15.7987689Z  * [new branch]      tower-crane/T177-a-failed-software-gate-never-sits-idle-o -> origin/tower-crane/T177-a-failed-software-gate-never-sits-idle-o
+2026-10-13T03:35:15.7988878Z  * [new branch]      tower-crane/T186-worktrees-are-tracked-in-state-visible-m -> origin/tower-crane/T186-worktrees-are-tracked-in-state-visible-m
+2026-10-13T03:35:15.8800105Z ##[endgroup]
+2026-10-13T03:35:15.8837236Z [command]/usr/bin/git log -1 --format=%H
+2026-10-13T03:35:15.8857231Z c26563bdcd4b11c551dc650b7096feea9e4a8f61
+2026-10-13T03:35:23.5890507Z ##[group]Run node scripts/probe-model-swap.js
+2026-10-13T03:35:23.5890810Z [36;1mnode scripts/probe-model-swap.js[0m
+2026-10-13T03:35:23.6174933Z shell: /usr/bin/bash -e {0}
+2026-10-13T03:35:23.6175390Z env:
+2026-10-13T03:35:23.6175604Z   TOWER_CRANE_TEST_TMP: /home/runner/work/_temp/tower-crane-model-swap
+2026-10-13T03:35:23.6175852Z ##[endgroup]
+2026-10-13T03:49:00.3055653Z Probe log: /home/runner/work/_temp/tower-crane-model-swap/model-swap-probe.tap
+2026-10-13T03:49:00.3058659Z not ok 836 - BUILTIN matches the documented defaults and init fallback
+2026-10-13T03:49:00.3059249Z not ok 1423 - two preparations overlap a gate removal without pruning their initializing registrations
+2026-10-13T03:49:00.3059644Z # tests 1601
+2026-10-13T03:49:00.3059834Z # pass 1583
+2026-10-13T03:49:00.3060008Z # fail 2
+2026-10-13T03:49:00.3060184Z # skipped 16
+2026-10-13T03:49:00.3074853Z # Subtest: two preparations overlap a gate removal without pruning their initializing registrations
+2026-10-13T03:49:00.3075374Z not ok 1423 - two preparations overlap a gate removal without pruning their initializing registrations
+2026-10-13T03:49:00.3075645Z   ---
+2026-10-13T03:49:00.3075786Z   duration_ms: 15782.786
+2026-10-13T03:49:00.3075953Z   type: 'test'
+2026-10-13T03:49:00.3076267Z   location: '/home/runner/work/_temp/tower-crane-model-swap/model-swap-dy23gk/test/worktree-metadata.test.js:91:1'
+2026-10-13T03:49:00.3076592Z   failureType: 'testCodeFailure'
+2026-10-13T03:49:00.3076985Z   error: 'waiting for /home/runner/work/_temp/tower-crane-model-swap/model-swap-tmp-oKYbri/tower-crane-MsOLiS/T3-second-ready'
+2026-10-13T03:49:00.3077336Z   code: 'ERR_ASSERTION'
+2026-10-13T03:49:00.3077473Z   name: 'AssertionError'
+2026-10-13T03:49:00.3077607Z   expected: true
+2026-10-13T03:49:00.3077729Z   actual: false
+2026-10-13T03:49:00.3077848Z   operator: '=='
+2026-10-13T03:49:00.3077968Z   stack: |-
+2026-10-13T03:49:00.3078285Z     waitFor (/home/runner/work/_temp/tower-crane-model-swap/model-swap-dy23gk/test/worktree-metadata.test.js:86:12)
+2026-10-13T03:49:00.3078617Z     async Promise.all (index 1)
+2026-10-13T03:49:00.3079003Z     async TestContext.<anonymous> (/home/runner/work/_temp/tower-crane-model-swap/model-swap-dy23gk/test/worktree-metadata.test.js:128:5)
+2026-10-13T03:49:00.3079404Z     async Test.run (node:internal/test_runner/test:1409:7)
+2026-10-13T03:49:00.3079686Z     async Test.processPendingSubtests (node:internal/test_runner/test:974:7)
+2026-10-13T03:49:00.6075186Z   ...
+2026-10-13T03:49:00.6075696Z /home/runner/work/tower-crane/tower-crane/scripts/probe-model-swap.js:77
+2026-10-13T03:49:00.6076275Z     throw new Error(`expected only "${expected}" to fail: ${JSON.stringify(failures)}; ${result.error || ''}`);
+2026-10-13T03:49:00.6076677Z     ^
+2026-10-13T03:49:00.6076775Z 
+2026-10-13T03:49:00.6077681Z Error: expected only "BUILTIN matches the documented defaults and init fallback" to fail: ["BUILTIN matches the documented defaults and init fallback","two preparations overlap a gate removal without pruning their initializing registrations"]; 
+2026-10-13T03:49:00.6078766Z     at Object.<anonymous> (/home/runner/work/tower-crane/tower-crane/scripts/probe-model-swap.js:77:11)
+2026-10-13T03:49:00.6079279Z     at Module._compile (node:internal/modules/cjs/loader:1968:14)
+2026-10-13T03:49:00.6079674Z     at Object..js (node:internal/modules/cjs/loader:2108:10)
+2026-10-13T03:49:00.6080040Z     at Module.load (node:internal/modules/cjs/loader:1690:32)
+2026-10-13T03:49:00.6080401Z     at Module._load (node:internal/modules/cjs/loader:1480:12)
+2026-10-13T03:49:00.6080786Z     at wrapModuleLoad (node:internal/modules/cjs/loader:261:19)
+2026-10-13T03:49:00.6081260Z     at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:171:5)
+2026-10-13T03:49:00.6081696Z     at node:internal/main/run_main_module:33:47
+2026-10-13T03:49:00.6081882Z 
+2026-10-13T03:49:00.6081968Z Node.js v26.11.1
+2026-10-13T03:49:00.6122142Z ##[error]Process completed with exit code 1.
+2026-10-13T03:49:00.6162060Z ##[group]Run tail -n 300 "$RUNNER_TEMP/tower-crane-model-swap/model-swap-probe.tap"
+2026-10-13T03:49:00.6162605Z [36;1mtail -n 300 "$RUNNER_TEMP/tower-crane-model-swap/model-swap-probe.tap"[0m
+2026-10-13T03:49:00.6216313Z shell: /usr/bin/bash -e {0}
+2026-10-13T03:49:00.6216466Z ##[endgroup]
+2026-10-13T03:49:00.6302575Z # Subtest: historical worker spawns from the 2026-10-07 log hold no slot for a sandboxed claim
+2026-10-13T03:49:00.6303206Z ok 1416 - historical worker spawns from the 2026-10-07 log hold no slot for a sandboxed claim
+2026-10-13T03:49:00.6303452Z   ---

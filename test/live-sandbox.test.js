@@ -15,6 +15,7 @@ const path = require('node:path');
 const cp = require('node:child_process');
 const { pinLiveRung, makeRepo, BIN, ROOT, TMP_ROOT, LIVE_ROOT } = require('./helpers');
 const { waitUntil } = require('./signals');
+const A = require('../lib/agents');
 
 const uid = typeof process.getuid === 'function' ? process.getuid() : null;
 const runDir = uid === null ? null : `/run/user/${uid}`;
@@ -549,6 +550,101 @@ function assertShims(h, seen, label) {
 // git and gh call skipped the shim policy. Codex cannot reopen a readable
 // path inside a hidden one in any rule order; the shims now sit read-only
 // inside the agent's writable HOME.
+// Found 2026-10-15 (T326): skill paths under homes/<agent>/ exist on the host
+// but neither sandbox shows them, even to their own agent: claude's Read
+// deny for homes/** has no exception, and codex hides homes/ whatever its
+// read rules say. Every SKILL.md path an agent is told to read is in the
+// state directory's skill store, which both open read-only.
+const SKILL_PATHS = /(?<![\w.~-])\/[^\s()'"`]*?SKILL\.md/g;
+
+// A submitted docs task with passing gates, so a reviewer can be dispatched.
+function submitted(h) {
+  h.ok(['task', 'update', 'T1', '--kind', 'docs']);
+  h.ok(['claim', 'T1', '--agent', 'builder']);
+  h.ok(['submit', 'T1', '--sha', h.git(['rev-parse', 'HEAD']), '--agent', 'builder']);
+}
+
+test('in a real codex sandbox a worker and a reviewer read every SKILL.md path they are told to read', { skip: realCodexSandbox(), timeout: 300000 }, async (t) => {
+  const h = makeRepo(t);
+  h.init();
+  h.ok(['task', 'add', '--title', 'Skill probe', '--acceptance', 'skills are readable']);
+  h.ok(['brief', 'set', 'T1', '-'], { input: 'skill probe\n' });
+  const dir = results(h);
+  // The stand-in collects the paths outside the sandbox, from the home's
+  // AGENTS.md and the prompt, then reads each with the real `codex sandbox`.
+  const bin = path.join(h.base, 'bin');
+  fs.mkdirSync(bin);
+  fs.writeFileSync(path.join(bin, 'codex'), `#!${process.execPath}
+const cp = require('node:child_process');
+const fs = require('node:fs');
+const path = require('node:path');
+const PATH = process.env.PATH.split(path.delimiter).filter((d) => path.resolve(d) !== ${JSON.stringify(bin)}).join(path.delimiter);
+process.stdout.write(JSON.stringify({ type: 'thread.started', thread_id: 'probe' }) + '\\n');
+const told = [fs.readFileSync(path.join(process.env.CODEX_HOME, 'AGENTS.md'), 'utf8'), ...process.argv.slice(2)].join('\\n');
+const files = [...new Set(told.match(${SKILL_PATHS.toString()}) || [])];
+const out = path.join(${JSON.stringify(dir)}, process.env.TOWER_CRANE_AGENT + '.json');
+const script = 'const fs=require("fs");const o={};for(const p of ' + JSON.stringify(files) + '){try{o[p]=fs.readFileSync(p,"utf8").length?"READABLE":"EMPTY"}catch(e){o[p]="ERR "+e.code}}fs.writeFileSync(' + JSON.stringify(out) + ',JSON.stringify(o))';
+const r = cp.spawnSync('codex', ['sandbox', '-c', 'default_permissions="tower-crane"', '--', process.execPath, '-e', script], { env: { ...process.env, PATH }, encoding: 'utf8' });
+process.stderr.write(r.stderr || '');
+process.exit(r.status ?? 1);
+`, { mode: 0o755 });
+  for (const rung of ['medium', 'review']) h.ok(['ladder', 'set', rung, '--harness', 'codex', '--model', 'probe', '--clear', 'profile', '--clear', 'effort', '--clear', 'args']);
+  const env = { ...h.env, PATH: `${bin}${path.delimiter}${h.env.PATH}` };
+  const run = async (role, agent) => {
+    const r = await h.runAsync(['spawn', '--role', role, '--task', 'T1', '--wait'], { env });
+    assert.equal(r.code, 0, `${r.stderr}\n${agentLog(h)}`);
+    const out = path.join(dir, `${agent}.json`);
+    assert.ok(fs.existsSync(out), `the ${agent} probe ran\n${agentLog(h)}`);
+    const seen = JSON.parse(fs.readFileSync(out, 'utf8'));
+    console.log(`codex ${agent} skill probe: ${JSON.stringify(seen)}`);
+    assert.ok(Object.keys(seen).length, `${agent} is told to read a skill`);
+    for (const [file, result] of Object.entries(seen)) assert.equal(result, 'READABLE', `${agent}: ${file} inside its sandbox`);
+  };
+  await run('medium', 'worker-T1-1');
+  const claim = h.readState('tasks.json').tasks[0].claim;
+  if (claim) h.ok(['release', 'T1', '--agent', claim.agent, '--reason', 'probe exited']);
+  if (h.readState('tasks.json').tasks[0].needs_owner) h.ok(['owner-done', 'T1']);
+  submitted(h);
+  await run('review', 'reviewer-T1-1');
+});
+
+// Runs the real claude CLI with a model call: the worker reads the skill path
+// its home instructions name with claude's own Read tool, whose deny rules
+// the bash sandbox does not apply, and with Bash. A token beside the stored
+// SKILL.md, never in the prompt, shows which reads returned the file.
+test('in a real claude sandbox a worker reads the SKILL.md path it is told to read with the Read tool and with Bash', { skip: process.env.TOWER_CRANE_LIVE_CLAUDE !== '1' && 'set TOWER_CRANE_LIVE_CLAUDE=1 to run against the real claude CLI', timeout: 400000 }, async (t) => {
+  const h = login(makeRepo(t));
+  h.init();
+  h.ok(['task', 'add', '--title', 'Skill read probe', '--acceptance', 'reports']);
+  const dir = results(h);
+  const store = A.skillStore(h.env, h.state).dir;
+  fs.cpSync(path.join(ROOT, 'skills'), store, { recursive: true });
+  const token = `SKILL-PROBE-${process.pid}-${Date.now()}`;
+  fs.writeFileSync(path.join(store, 'tower-crane-work', 'PROBE.txt'), `${token}\n`);
+  const bash = path.join(dir, 'bash.txt');
+  h.ok(['brief', 'set', 'T1', '-'], {
+    input: 'Read-permission probe set up by the owner. Do not use tower-crane, do not claim, do not edit anything in the worktree.\n'
+      + '1. Your home instructions contain a line "Skill tower-crane-work: read and follow <PATH>". Call the Read tool on that exact <PATH>.\n'
+      + '2. Call the Read tool on PROBE.txt in the same directory as <PATH>. It holds one token.\n'
+      + `3. With the Bash tool, run: cat <directory of PATH>/PROBE.txt > ${bash}\n`
+      + 'Reply with one line: READ=<the token step 2 returned, or its exact error text>. Then stop.\n',
+  });
+  pinLiveRung(h, 'claude', 'medium');
+  const r = await h.runAsync(['spawn', '--task', 'T1', '--wait']);
+  assert.equal(r.code, 0, `${r.stderr}\n${agentLog(h)}`);
+  const log = fs.readdirSync(path.join(h.state, 'logs')).map((f) => fs.readFileSync(path.join(h.state, 'logs', f), 'utf8')).join('\n');
+  const said = log.split('\n').flatMap((l) => { try { return [JSON.parse(l)]; } catch { return []; } }).filter((j) => typeof j.result === 'string');
+  assert.ok(said.length, `claude finished\n${agentLog(h)}`);
+  const last = said.at(-1);
+  console.log(`claude skill probe: ${last.result}; denials ${JSON.stringify(last.permission_denials || [])}`);
+  assert.deepEqual((last.permission_denials || []).filter((d) => d.tool_name === 'Read'), [], 'no Read was denied');
+  assert.ok(last.result.includes(`READ=${token}`), `the Read tool returned the stored file\n${agentLog(h)}`);
+  assert.equal(fs.existsSync(bash) && fs.readFileSync(bash, 'utf8').trim(), token, `Bash read the stored file\n${agentLog(h)}`); // read-published: the agent's cat wrote it and exited before spawn --wait returned
+  const home = fs.readdirSync(path.join(h.state, 'homes')).find((d) => d.startsWith('worker-'));
+  const named = fs.readFileSync(path.join(h.state, 'homes', home, 'CLAUDE.md'), 'utf8').match(SKILL_PATHS) || [];
+  assert.deepEqual(named, [path.join(store, 'tower-crane-work', 'SKILL.md')], 'the home names the stored skill');
+});
+
 test('in a real codex sandbox the first git and gh on PATH are the agent\'s shims, and the shim refuses a push to another task\'s branch', { skip: realCodexSandbox(), timeout: 300000 }, async (t) => {
   const h = makeRepo(t);
   h.init();

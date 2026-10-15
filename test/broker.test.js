@@ -1562,8 +1562,11 @@ function codeRegions(text, js) {
 // Each tower-crane command a region shows: its name, the source line, and
 // its arguments up to a shell separator, the next tower-crane or the end of a
 // fenced line, cut where the command's own syntax ends (prose after it).
+// CRLF text (a Windows checkout) reads as LF, so a blank line stays a
+// paragraph break and a code span cannot run across it.
 function commandMentions(text, js = false) {
   const { resolveCommand: resolve } = require('../bin/tower-crane');
+  text = text.replace(/\r\n?/g, '\n');
   const out = [];
   for (const [start, region] of codeRegions(text, js)) {
     for (const m of region.matchAll(/(?<![\w-])tower-crane(?![\w-])/g)) {
@@ -1613,6 +1616,9 @@ test('the command extractor finds every tower-crane command in code and checks t
   assert.deepEqual(names('```\ntower-crane renew T1; tower-crane release T1 --reason x\n```\n'), ['renew', 'release']);
   assert.deepEqual(names('Wait with `tower-crane wait --task <id>\n--timeout SEC` and go on.'), ['wait']);
   assert.deepEqual(names('Prose tower-crane check is not code.\n\n`a`\n\n`tower-crane spawn`'), ['spawn']);
+  assert.deepEqual(names('One stray ` here.\r\n\r\nRun `tower-crane spawn` now.\r\n'), ['spawn'], 'a CRLF blank line ends a paragraph');
+  assert.deepEqual(names('~~~sh\r\ntower-crane claim T1 --agent a\r\n~~~\r\n'), ['claim']);
+  assert.deepEqual(commandMentions('Run `tower-crane spawn` now.\r\n')[0].line, 'Run `tower-crane spawn` now.');
   assert.deepEqual(names('// tower-crane check in a comment\nconst s = `(tower-crane wait --task ${task.id} --timeout SEC exits 2)`;', true), ['wait']);
   const wait = (text) => commandMentions(text, true).find((m) => m.name === 'wait');
   assert.deepEqual(wait('`(tower-crane wait --task ${task.id} --timeout SEC exits 2 on timeout)`').args, ['--task', '${task.id}', '--timeout', 'SEC']);

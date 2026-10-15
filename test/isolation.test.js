@@ -1027,6 +1027,56 @@ test('a spawned codex agent is pointed at the user\'s global rules, loads none o
   noSecretsCopied(h);
 });
 
+// Automation dispatches from inside a worker's monitor, so its package root is
+// that worker's tool snapshot, removed when the worker exits. Skill paths name
+// the state directory's skill store instead, which no exit removes and which,
+// unlike homes/, the claude and codex sandboxes can read
+// (test/live-sandbox.test.js reads it from inside them).
+test('every skill path a worker, reviewer or researcher is told to read is in the state directory\'s skill store at launch and after, also when a worker\'s snapshot dispatches it', { skip: NO_STUBS }, (t) => {
+  const { h, u } = setup(t);
+  fs.mkdirSync(path.join(u.home, '.cache'), { recursive: true });
+  fs.writeFileSync(path.join(h.base, 'bin', 'opencode'), `#!${process.execPath}\nrequire(${JSON.stringify(STUB)})("opencode");\n`, { mode: 0o755 });
+  const fromSnapshot = (tool, role) => {
+    const r = cp.spawnSync(process.execPath, [path.join(tool, 'bin', 'tower-crane.js'), 'spawn', '--role', role, '--task', 'T1', '--wait', '--json'],
+      { cwd: h.repo, env: { ...h.env, ...u.env }, encoding: 'utf8' });
+    assert.equal(r.code ?? r.status, 0, r.stderr);
+    return JSON.parse(r.stdout);
+  };
+  const named = new Set();
+  const ownPaths = (harness, role) => {
+    const store = path.join(fs.realpathSync(h.state), 'skills') + path.sep;
+    const seen = u.report();
+    assert.ok(seen.skillPaths.length, `${harness} ${role}: names its skill`);
+    if (harness !== 'claude') assert.ok(seen.skillLinks.length, `${harness} ${role}: links its skill in its home`);
+    for (const { file, real: at } of [...seen.skillPaths, ...seen.skillLinks]) {
+      assert.ok(at, `${harness} ${role}: ${file} exists at launch`);
+      assert.ok(at.startsWith(store), `${harness} ${role}: ${file} resolves to ${at}, in the skill store ${store}, not a home or the dispatcher's package`);
+      named.add(at);
+    }
+  };
+  for (const harness of ['claude', 'codex', 'opencode']) {
+    const model = { claude: ['--model', 'fixture-large', '--clear', 'profile'], codex: ['--profile', 'fixture-main', '--clear', 'model'], opencode: ['--model', 'fixture/probe', '--clear', 'profile'] }[harness];
+    for (const rung of ['medium', 'review', 'research']) h.ok(['ladder', 'set', rung, '--harness', harness, ...model, '--clear', 'effort', '--clear', 'args']);
+    const worker = spawn(h, u, 'medium');
+    ownPaths(harness, 'worker');
+    // A copy, since the next dispatch prunes the exited worker's home it would run from.
+    const snapshot = path.join(h.base, `${harness}-worker-snapshot`);
+    fs.cpSync(worker.tool.path, snapshot, { recursive: true });
+    releaseExited(h);
+    if (h.readState('tasks.json').tasks[0].needs_owner) h.ok(['owner-done', 'T1']);
+    h.ok(['task', 'update', 'T1', '--kind', 'docs']);
+    h.ok(['claim', 'T1', '--agent', 'builder']);
+    h.ok(['submit', 'T1', '--sha', h.git(['rev-parse', 'HEAD']), '--agent', 'builder']);
+    fromSnapshot(snapshot, 'review');
+    ownPaths(harness, 'reviewer');
+    h.ok(['rework', 'T1', '--reason', 'probe the research rung']);
+    fromSnapshot(snapshot, 'research');
+    ownPaths(harness, 'researcher');
+  }
+  // Later spawns pruned the exited agents' homes; what they were told to read stays.
+  for (const file of named) assert.ok(fs.existsSync(file), `${file} outlives the agents that were told to read it`);
+});
+
 test('every spawn gets a fresh home, and an exited agent\'s home is removed', { skip: NO_STUBS }, (t) => {
   const { h, u } = setup(t);
   for (const harness of ['claude', 'codex']) {
@@ -3016,4 +3066,6 @@ test('each role has an agent file that states its tools, MCP servers, skills, we
   // The parsed config the codex filter works on survives a round trip.
   const doc = TOML.parse('a = 1\n[b]\nc = { d = [1, "x"] }\n');
   assert.deepEqual(TOML.parse(TOML.stringify(doc)), doc);
+  // Prefixed integers keep their base.
+  assert.deepEqual({ ...TOML.parse('o = 0o17\nx = 0x1F\nb = 0b101\nd = 1_000\n') }, { o: 15, x: 31, b: 5, d: 1000 });
 });
