@@ -965,6 +965,8 @@ test('unbound projects spawn workers and reviewers with owner-key denials but st
     const env = { TOWER_CRANE_AGENT: 'orchestrator', TOWER_CRANE_CONFIG: callerConfig };
     const configDir = callerConfig ? path.dirname(callerConfig) : path.join(u.home, '.config', 'tower-crane');
     const ownerDir = path.join(configDir, 'owner');
+    // The fixture keeps its own owner key in the home's default directory.
+    fs.rmSync(ownerDir, { recursive: true, force: true });
     assert.equal(fs.existsSync(ownerDir), false);
     for (const role of ['hard', 'review']) {
       if (role === 'review') {
@@ -1252,7 +1254,8 @@ test('claude and codex sandboxes deny the user\'s home except the paths the agen
   const secrets = HOME_SECRETS.map((p) => path.join(u.home, p));
   for (const f of secrets.filter((f) => !fs.existsSync(f))) {
     fs.mkdirSync(path.dirname(f), { recursive: true });
-    fs.writeFileSync(f, `${SECRET}-HOME\n`);
+    // The fixture's user file is the one in the home, so the CLI still reads it.
+    fs.writeFileSync(f, f === h.userConfig ? JSON.stringify({ secret: `${SECRET}-HOME` }) : `${SECRET}-HOME\n`);
   }
   // A project names a tool directory under the home its agents need.
   const tool = path.join(u.home, 'tools', 'bin', 'tool.sh');
