@@ -207,9 +207,10 @@ the past 7 days, in the same job once the shard is set aside and with the
 same first error line, the failure is `main_red` and CI waits for a later
 green run as for a cancelled one. A test in the hotfix's diff counts only at
 the parent run (the nearest earlier run, the first parent's unless it was
-cancelled). A job that names no failing test counts only for a proof, probe,
-check or lint job with the same name and error line; a timed out or
-cancelled job never counts. The evidence records `hotfix_ci.failure` with
+cancelled), and so does a test failing with a generic error such as a
+timeout. A job that names no failing test counts only for a proof, probe,
+check or lint job that failed at the parent run with the same error line from
+its failing step; a timed out or cancelled job never counts. The evidence records `hotfix_ci.failure` with
 the classification, the parent run and, per failing test, the earlier run,
 job and error line that matched it. A failure new at the
 merge commit stays confirmed. Until a later run is green, CI stays pending. The later run vouches for the

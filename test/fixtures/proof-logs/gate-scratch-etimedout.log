@@ -1,0 +1,63 @@
+2026-10-14T01:33:03.3691502Z ##[group]Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+2026-10-14T01:33:03.3692321Z with:
+2026-10-14T01:33:13.6730646Z ##[group]Environment details
+2026-10-14T01:33:13.9051085Z node: v26.11.1
+2026-10-14T01:33:13.9051448Z npm: 11.20.0
+2026-10-14T01:33:13.9051727Z yarn: 1.22.22
+2026-10-14T01:33:13.9052403Z ##[endgroup]
+2026-10-14T01:33:13.9270263Z ##[group]Run node scripts/probe-gate-scratch.js
+2026-10-14T01:33:13.9270657Z [36;1mnode scripts/probe-gate-scratch.js[0m
+2026-10-14T01:33:13.9864758Z shell: /usr/bin/bash -e {0}
+2026-10-14T01:33:13.9865029Z env:
+2026-10-14T01:33:13.9865311Z   TOWER_CRANE_TEST_TMP: /home/runner/.cache/tower-crane-gate-proof
+2026-10-14T01:33:13.9865743Z   TOWER_CRANE_PROOF_OUTPUT: /home/runner/work/_temp/gate-scratch-proof.json
+2026-10-14T01:33:13.9866073Z ##[endgroup]
+2026-10-14T02:19:15.1327307Z /home/runner/work/tower-crane/tower-crane/scripts/probe-gate-scratch.js:44
+2026-10-14T02:19:15.1328054Z     if (out.error) throw out.error;
+2026-10-14T02:19:15.1328384Z                    ^
+2026-10-14T02:19:15.1328543Z 
+2026-10-14T02:19:15.1328898Z Error: spawnSync /opt/hostedtoolcache/node/26.11.1/x64/bin/node ETIMEDOUT
+2026-10-14T02:19:15.1329479Z     at Object.spawnSync (node:internal/child_process:1175:20)
+2026-10-14T02:19:15.1329944Z     at Object.spawnSync (node:child_process:974:24)
+2026-10-14T02:19:15.1330655Z     at call (/home/runner/work/tower-crane/tower-crane/scripts/probe-gate-scratch.js:41:20)
+2026-10-14T02:19:15.1331458Z     at probe (/home/runner/work/tower-crane/tower-crane/scripts/probe-gate-scratch.js:62:21)
+2026-10-14T02:19:15.1332432Z     at Object.<anonymous> (/home/runner/work/tower-crane/tower-crane/scripts/probe-gate-scratch.js:86:18)
+2026-10-14T02:19:15.1333351Z     at Module._compile (node:internal/modules/cjs/loader:1968:14)
+2026-10-14T02:19:15.1333921Z     at Object..js (node:internal/modules/cjs/loader:2108:10)
+2026-10-14T02:19:15.1334430Z     at Module.load (node:internal/modules/cjs/loader:1690:32)
+2026-10-14T02:19:15.1334962Z     at Module._load (node:internal/modules/cjs/loader:1480:12)
+2026-10-14T02:19:15.1335504Z     at wrapModuleLoad (node:internal/modules/cjs/loader:261:19) {
+2026-10-14T02:19:15.1335954Z   errno: -110,
+2026-10-14T02:19:15.1336220Z   code: 'ETIMEDOUT',
+2026-10-14T02:19:15.1336670Z   syscall: 'spawnSync /opt/hostedtoolcache/node/26.11.1/x64/bin/node',
+2026-10-14T02:19:15.1337227Z   path: '/opt/hostedtoolcache/node/26.11.1/x64/bin/node',
+2026-10-14T02:19:15.1337639Z   spawnargs: [
+2026-10-14T02:19:15.1338442Z     '/home/runner/work/tower-crane/tower-crane/bin/tower-crane.js',
+2026-10-14T02:19:15.1338855Z     'check',
+2026-10-14T02:19:15.1339090Z     'tests',
+2026-10-14T02:19:15.1339324Z     'T1',
+2026-10-14T02:19:15.1339545Z     '--agent',
+2026-10-14T02:19:15.1339911Z     'orchestrator',
+2026-10-14T02:19:15.1340227Z     '--state',
+2026-10-14T02:19:15.1340784Z     '/home/runner/.cache/tower-crane-gate-proof/gate-scratch-proof-jsiN4h/state',
+2026-10-14T02:19:15.1341303Z     '--json'
+2026-10-14T02:19:15.1341560Z   ]
+2026-10-14T02:19:15.1341789Z }
+2026-10-14T02:19:15.1341913Z 
+2026-10-14T02:19:15.1342026Z Node.js v26.11.1
+2026-10-14T02:19:15.1365055Z ##[error]Process completed with exit code 1.
+2026-10-14T02:19:15.1440575Z ##[group]Run actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+2026-10-14T02:19:15.1440925Z with:
+2026-10-14T02:19:15.1441104Z   name: gate-scratch-proof
+2026-10-14T02:19:15.1441356Z   path: /home/runner/work/_temp/gate-scratch-proof.json
+2026-10-14T02:19:15.1441641Z   if-no-files-found: error
+2026-10-14T02:19:15.1441831Z   compression-level: 6
+2026-10-14T02:19:15.1442012Z   overwrite: false
+2026-10-14T02:19:15.1442188Z   include-hidden-files: false
+2026-10-14T02:19:15.1442388Z ##[endgroup]
+2026-10-14T02:19:15.2892610Z (node:778869) [DEP0040] DeprecationWarning: The `punycode` module is deprecated. Please use a userland alternative instead.
+2026-10-14T02:19:15.2893911Z (Use `node --trace-deprecation ...` to show where the warning was created)
+2026-10-14T02:19:15.2918737Z ##[error]No files were found with the provided path: /home/runner/work/_temp/gate-scratch-proof.json. No artifacts will be uploaded.
+2026-10-14T02:19:15.3161798Z Post job cleanup.
+2026-10-14T02:19:15.3822169Z [command]/usr/bin/git version
+2026-10-14T02:19:15.3858735Z git version 2.55.0

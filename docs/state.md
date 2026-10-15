@@ -583,15 +583,24 @@ added, but a test that failed only in a proof job that runs the whole suite,
 or on another runner, says nothing. The first error line is the one
 `ci log --failed-tests` reads under the failure, with the values line added
 when it is only a header (an assertion's `strictly equal:`, a diff, a TAP
-YAML block), compared without scratch paths, times, dates, long numbers and
-any data dump after the message. A failing suite that only repeats its
+YAML block), compared without scratch directories (a path keeps its last
+segment), times, dates, long numbers and any data dump after the message. An
+error of a generic shape (a timeout, a wait for a path, a data dump, or no
+word after its last colon but placeholders and operators, such as
+`<n> !== <n>`) can be two different failures, so it counts only at the parent
+run. A failing suite that only repeats its
 failed child counts with its child. A test whose name is in a hunk of the
 merge commit's diff counts only when the parent run failed it the same way.
 Test names also come from a gate receipt the log prints as JSON (its
 `test_failure.names` and `output_tail`), as the gate scratch proof does. A
 job whose log names no test is explained only when its name marks a proof,
-probe, check or lint job and an earlier run failed the job of that name with
-the same first error line; a test job that names no failing test (a failed
+probe, check or lint job and the parent run failed the job of that name with
+the same error line. That line comes from the failing step's own output:
+between the step's header group and its `##[error]Process completed` line,
+skipping a source line node prints above a caret, the caret and stack frames.
+Another step's lines (the checkout's git output, an upload step's echoed
+`if-no-files-found: error`) never count, and a failing step with no error
+line leaves the job unexplained; a test job that names no failing test (a failed
 setup step, a crashed runner) is not. A timed out or cancelled job is never
 explained. A job log at the merge commit that cannot be read is an
 observation error (`infrastructure_failure`). Any failure left unexplained
