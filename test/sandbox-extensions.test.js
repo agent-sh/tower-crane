@@ -419,13 +419,13 @@ test('real Codex worker writes the toolchain lock, receives a private env file, 
   assert.ok(!result.stdout.includes(SECRET_KEY) && !result.stderr.includes(SECRET));
 });
 
-// A claude stub that writes the sandbox settings and the env its spawn gave it to out.
+// A claude stub that writes the settings, its sandbox apart, and the env its spawn gave it to out.
 function writeClaudeStub(bin, out) {
   const stub = [
     `#!${process.execPath}`, "'use strict';",
     'const fs = require("node:fs"), path = require("node:path");',
     'const settings = JSON.parse(fs.readFileSync(path.join(process.env.CLAUDE_CONFIG_DIR, "settings.json"), "utf8"));',
-    `fs.writeFileSync(${JSON.stringify(out)}, JSON.stringify({ sandbox: settings.sandbox, env: { XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR, DBUS_SESSION_BUS_ADDRESS: process.env.DBUS_SESSION_BUS_ADDRESS }, tmp: { TMPDIR: process.env.TMPDIR, TMP: process.env.TMP, TEMP: process.env.TEMP } }));`,
+    `fs.writeFileSync(${JSON.stringify(out)}, JSON.stringify({ sandbox: settings.sandbox, settings, env: { XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR, DBUS_SESSION_BUS_ADDRESS: process.env.DBUS_SESSION_BUS_ADDRESS }, tmp: { TMPDIR: process.env.TMPDIR, TMP: process.env.TMP, TEMP: process.env.TEMP } }));`,
     'console.log("bus probe passed");', '',
   ].join('\n');
   fs.writeFileSync(path.join(bin, 'claude'), stub, { mode: 0o755 });
@@ -448,44 +448,55 @@ test('claude: the sandbox allows GitHub, npm and sandbox.domains, names the remo
     ['remote', 'add', 'intranet', 'ssh://gitserver/acme/app.git'], ['remote', 'add', 'local', 'http://localhost:8300/acme/app.git'],
     ['remote', 'add', 'tailnet', 'http://100.64.0.10:7447/git'], ['remote', 'add', 'v6', 'http://[::1]:8080/app.git'],
     ['remote', 'add', 'lan', 'https://192.168.1.20:8443/app.git'], ['remote', 'add', 'plain', 'http://plain.example.com/app.git']]) h.git(['-C', wt, ...args]);
+  // Each message carries the whole spawn output and the settings claude got,
+  // so a failure under load says what differed.
   const spawned = () => {
     releaseExited(h);
     const stdout = h.ok(['spawn', '--task', 'T1', '--wait'], { env });
-    return { domains: JSON.parse(fs.readFileSync(out, 'utf8')).sandbox.network.allowedDomains, stdout };
+    const result = JSON.parse(fs.readFileSync(out, 'utf8'));
+    const seen = `spawn stdout:\n${stdout}\nclaude settings:\n${JSON.stringify(result.settings, null, 2)}`;
+    return { domains: result.sandbox.network.allowedDomains, stdout, seen };
   };
   const base = spawned();
   for (const d of ['github.com', 'api.github.com', 'codeload.github.com', 'objects.githubusercontent.com', 'raw.githubusercontent.com', 'uploads.github.com', 'registry.npmjs.org']) {
-    assert.ok(base.domains.includes(d), `${d} in ${base.domains}`);
+    assert.ok(base.domains.includes(d), `${d} in the allowed domains\n${base.seen}`);
   }
   for (const host of ['*', 'git.example.org', 'push.example.net', 'gitserver', 'localhost', '100.64.0.10', '[::1]', '192.168.1.20']) {
-    assert.ok(!base.domains.some((d) => d === host || d.startsWith(`${host}:`)), `${host} stays out of ${base.domains}`);
+    assert.ok(!base.domains.some((d) => d === host || d.startsWith(`${host}:`)), `${host} stays out of the allowed domains\n${base.seen}`);
   }
   // Each one left out is named, with its port (an https or http URL's
   // default when it names none) and what kind of address it is.
   for (const named of ['git.example.org:443', 'plain.example.com:80', 'push.example.net', 'gitserver (single-label', 'localhost:8300 (loopback)', '100.64.0.10:7447 (shared address space',
-    '[::1]:8080 (loopback)', '192.168.1.20:8443 (private address)']) assert.ok(base.stdout.includes(named), `${named} in the notice: ${base.stdout}`);
+    '[::1]:8080 (loopback)', '192.168.1.20:8443 (private address)']) assert.ok(base.stdout.includes(named), `${named} in the notice\n${base.seen}`);
   const spawnEvent = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l)).findLast((e) => e.cmd === 'spawn');
-  assert.ok(spawnEvent.detail.notices?.some((n) => n.includes('localhost:8300')), 'the spawn event records the notice');
+  assert.ok(spawnEvent.detail.notices?.some((n) => n.includes('localhost:8300')), `the spawn event records the notice: ${JSON.stringify(spawnEvent)}`);
+  // The whole result of a refusal: a CLI killed by a signal, or never
+  // started, also exits nonzero with nothing on stderr.
+  const refused = (domains) => {
+    const r = h.run(['project', 'set', '--sandbox', JSON.stringify({ domains })]);
+    return { ...r, seen: `project set --sandbox ${JSON.stringify({ domains })}: ${JSON.stringify({ code: r.code, signal: r.signal, error: r.error, stdout: r.stdout, stderr: r.stderr })}` };
+  };
   for (const bad of ['*.com', 'https://pypi.org', 'pypi', 'a.b:0', '*.*.org', 'github.com:080', 'github.com:65536', '2001:db8::1:443', '::1',
     '*.co.uk', '*.github.io', '*.amazonaws.com', '*.s3.amazonaws.com']) {
-    const r = h.run(['project', 'set', '--sandbox', JSON.stringify({ domains: [bad] })]);
-    assert.notEqual(r.code, 0, `${bad} is refused`);
-    assert.match(r.stderr, /sandbox\.domains/);
+    const r = refused([bad]);
+    assert.notEqual(r.code, 0, `${bad} is refused: ${r.seen}`);
+    assert.match(r.stderr, /sandbox\.domains/, r.seen);
   }
-  assert.match(h.run(['project', 'set', '--sandbox', JSON.stringify({ domains: ['*.co.uk'] })]).stderr, /co\.uk, a suffix many owners share/);
+  const shared = refused(['*.co.uk']);
+  assert.match(shared.stderr, /co\.uk, a suffix many owners share/, shared.seen);
   h.ok(['project', 'set', '--sandbox', JSON.stringify({ domains: ['pypi.org', '*.pythonhosted.org', 'git.example.org:443', 'plain.example.com:80', '100.64.0.10:7447', '[2001:db8::1]:443'] })]);
   h.ok(['ladder', 'set', 'medium', '--sandbox', JSON.stringify({ domains: ['proxy.golang.org:443'] })]);
   const extended = spawned();
-  for (const d of ['pypi.org', '*.pythonhosted.org', 'proxy.golang.org:443', 'github.com', 'git.example.org:443', '100.64.0.10:7447']) assert.ok(extended.domains.includes(d), `${d}: a rung adds to the project's list`);
+  for (const d of ['pypi.org', '*.pythonhosted.org', 'proxy.golang.org:443', 'github.com', 'git.example.org:443', '100.64.0.10:7447']) assert.ok(extended.domains.includes(d), `${d}: a rung adds to the project's list\n${extended.seen}`);
   // What the owner listed is no longer named, host:443 covering a portless
   // https remote and host:80 a portless http one; the rest still is.
-  assert.ok(!extended.stdout.includes('git.example.org') && !extended.stdout.includes('plain.example.com') && !extended.stdout.includes('100.64.0.10'), extended.stdout);
-  assert.ok(extended.stdout.includes('localhost:8300 (loopback)'), extended.stdout);
+  assert.ok(!extended.stdout.includes('git.example.org') && !extended.stdout.includes('plain.example.com') && !extended.stdout.includes('100.64.0.10'), extended.seen);
+  assert.ok(extended.stdout.includes('localhost:8300 (loopback)'), extended.seen);
   // * is the explicit opt-in to every host, which claude's proxy honors, and then nothing is left out.
   h.ok(['ladder', 'set', 'medium', '--sandbox', JSON.stringify({ domains: ['*'] })]);
   const all = spawned();
-  assert.ok(all.domains.includes('*'));
-  assert.ok(!all.stdout.includes('remote host'), all.stdout);
+  assert.ok(all.domains.includes('*'), all.seen);
+  assert.ok(!all.stdout.includes('remote host'), all.seen);
 });
 
 test('host patterns match Claude Code 2.1.296: ports 1 to 65535 without a leading zero, IPv6 only in brackets, no wildcard over a shared suffix', () => {
