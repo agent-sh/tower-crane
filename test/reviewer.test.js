@@ -778,6 +778,7 @@ process.exit(r.status ?? 1);`;
     // The risk glob puts the first review on hard; without it the change alone stays easy.
     h.ok(['project', 'set', '--review-policy', JSON.stringify({ risk_paths: ['value.js'] })]);
     const reviewedSha = h.sha;
+    const reviewedRevision = Number(h.revision('T1'));
     assert.equal(h.json(['spawn', '--task', 'T1', '--role', 'review', '--wait']).review_rung, 'hard');
     h.ok(['project', 'set', '--review-policy', 'null']);
     if (h.readState('tasks.json').tasks[0].status !== 'rework') h.ok(['rework', '--from-review', 'T1']);
@@ -810,6 +811,14 @@ process.exit(r.status ?? 1);`;
     assert.match(prompt, /Unresolved prior blockers still block/, variant);
     assert.match(prompt, /PRIOR_BLOCKER_SUMMARY/, variant);
     assert.match(prompt, /PRIOR_BLOCKER_CLAIM/, variant);
+    commandReviewer(h, path.join(h.base, `fallback-${variant}.txt`));
+    const dispatched = h.json(['spawn', '--task', 'T1', '--role', 'review', '--wait']);
+    assert.equal(dispatched.review_rung, 'hard', variant);
+    const event = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse)
+      .findLast((e) => e.cmd === 'spawn' && e.detail.role === 'reviewer');
+    assert.equal(event.detail.review_scope, null, variant);
+    assert.deepEqual(event.detail.review_floor, { sha: reviewedSha, revision: reviewedRevision, agent: 'reviewer-T1-1',
+      review_rung: 'hard', review_level: 'hard' }, variant);
   }
 });
 
