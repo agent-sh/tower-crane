@@ -3072,3 +3072,43 @@ test('each role has an agent file that states its tools, MCP servers, skills, we
   // Prefixed integers keep their base.
   assert.deepEqual({ ...TOML.parse('o = 0o17\nx = 0x1F\nb = 0b101\nd = 1_000\n') }, { o: 15, x: 31, b: 5, d: 1000 });
 });
+
+// TOML forbids every control character raw in a basic string but tab, DEL
+// included. A path codex's profile names can hold any of them, and one raw
+// DEL made codex reject the whole config.
+test('TOML strings and keys escape every control character TOML forbids raw, DEL included', () => {
+  const forbidden = /[\x00-\x08\x0a-\x1f\x7f]/;
+  for (let c = 0; c < 0x80; c++) {
+    if (c >= 0x20 && c < 0x7f) continue;
+    const ch = String.fromCharCode(c);
+    const doc = { [`/var/tmp/a${ch}b`]: `v${ch}w` };
+    const text = TOML.stringify({ t: doc });
+    for (const line of text.split('\n')) assert.doesNotMatch(line, forbidden, `U+${c.toString(16).padStart(4, '0')} stays escaped`);
+    assert.deepEqual({ ...TOML.parse(text).t }, doc, `U+${c.toString(16).padStart(4, '0')} reads back`);
+  }
+  assert.throws(() => TOML.stringify({ k: 'a\ud800b' }), /lone surrogate/);
+  assert.deepEqual({ ...TOML.parse(TOML.stringify({ k: 'a\u{1f600}b' })) }, { k: 'a\u{1f600}b' });
+});
+
+// readAround lists the entries of the directories on the way to a runtime
+// directory, and codex binds each again for every command, following a link.
+// An entry stays listed only when nobody but root and the user can swap it.
+test('the codex profile lists an entry beside the runtime directory only when nobody else can turn it into a link', () => {
+  const me = 1000;
+  const st = (uid, mode, link = false) => ({ uid, mode, isSymbolicLink: () => link });
+  const dir = 0o40755, sticky = 0o41777, open = 0o40777, group = 0o40775, file = 0o100644;
+  const cases = [
+    ['root directory, root entry', st(0, dir), st(0, file), true],
+    ['root directory, own entry', st(0, dir), st(me, file), true],
+    ['sticky world-writable directory, own entry', st(0, sticky), st(me, dir), true],
+    ['sticky world-writable directory, root entry', st(0, sticky), st(0, dir), true],
+    ['sticky world-writable directory, another user\'s entry', st(0, sticky), st(1001, dir), false],
+    ['root directory, another user\'s entry', st(0, dir), st(1001, file), false],
+    ['world-writable directory without the sticky bit', st(0, open), st(0, file), false],
+    ['group-writable directory without the sticky bit', st(0, group), st(me, file), false],
+    ['another user\'s directory', st(1001, dir), st(me, file), false],
+    ['a link', st(0, dir), st(me, 0o120777, true), false],
+    ['an unreadable directory', null, st(me, file), false],
+  ];
+  for (const [what, parent, entry, listed] of cases) assert.equal(A.steadyEntry(parent, entry, me), listed, what);
+});
