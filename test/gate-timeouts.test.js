@@ -111,3 +111,62 @@ test('a timeout that comes due during a blocked event loop stops only a child wi
   assert.match(failure, /^gh api runs failed: timed out after 300 ms \(status=/);
   assert.doesNotMatch(failure, /"id"/);
 });
+
+// A runner killed at its deadline often stops mid-line, and both streams can end that way.
+test('unfinished lines end on lines of their own, and the timeout snapshot keeps only whole lines', async () => {
+  const C = require('../lib/gates/common');
+  const partial = "process.stdout.write('# Subtest: test/slow.js'); process.stderr.write('stderr partial');";
+  const exited = await C.exec({ exec: C.treeExec }, process.execPath, ['-e', `${partial} process.exitCode = 1;`], {});
+  assert.deepEqual(exited.output.split('\n').sort(), ['# Subtest: test/slow.js', 'stderr partial']);
+  // The rest of a token arrives during the shutdown grace: the snapshot must not keep its first half.
+  const token = 'ghp_T361Head' + 'T361TailBody01234567';
+  const hung = `process.stdout.write('# Subtest: test/slow.js\\ntoken ${token.slice(0, 12)}');
+process.on('SIGTERM', () => { process.stdout.write('${token.slice(12)}\\n'); process.exit(1); });
+setTimeout(() => {}, 60000);`; // wait-allow: a child that outlives the gate timeout under test
+  const r = await C.exec({ exec: C.treeExec }, process.execPath, ['-e', hung], { timeout: 3000 }); // wait-allow: the gate timeout itself is under test
+  assert.equal(r.timedOut, true);
+  assert.equal(r.timeoutOutput, '# Subtest: test/slow.js\n');
+  if (process.platform !== 'win32') assert.match(r.output, new RegExp(`^token ${token}$`, 'm'));
+  const failure = require('../lib/gate-timeouts').failure(r, 1, 'node slow.js');
+  assert.deepEqual(failure.timeout.running_files, ['test/slow.js']);
+  assert.ok(!JSON.stringify(failure).includes('T361Head'), JSON.stringify(failure));
+});
+
+// A line longer than twice the kept length is cut somewhere in its middle, where a secret may sit.
+test('a line longer than the kept tail is omitted, never kept from an arbitrary character', async () => {
+  const C = require('../lib/gates/common');
+  const script = `const fs = require('node:fs');
+fs.writeSync(1, 'key ghp_' + 'C'.repeat(90));
+Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 300); // wait-allow: the gate must read the first part of the line on its own, the condition under test
+fs.writeSync(1, 'C'.repeat(10) + ' end\\n');`;
+  const r = await C.exec({ exec: C.treeExec }, process.execPath, ['-e', script], { keep: 40 });
+  assert.equal(r.ok, true, r.stderr);
+  for (const text of [r.output, r.stdout]) {
+    assert.ok(!text.includes('CCCCCCCCCC'), text);
+    assert.match(text, /\[overlong line omitted\]/);
+  }
+  // A cut that falls on a line start keeps that line.
+  assert.equal(C.keepTail('ab\ncd\nef', 5), 'cd\nef');
+  assert.equal(C.keepTail('ab\ncdef\n', 6), 'cdef\n');
+  assert.equal(C.keepTail('abcdefgh', 3), '[overlong line omitted]');
+});
+
+// Searching everything a stream holds again on each chunk makes a long line quadratic.
+test('a stream without newlines is joined in linear work', async () => {
+  const C = require('../lib/gates/common');
+  const size = 8 << 20;
+  let scanned = 0;
+  const original = { indexOf: String.prototype.indexOf, lastIndexOf: String.prototype.lastIndexOf };
+  for (const name of Object.keys(original)) {
+    String.prototype[name] = function (...args) { scanned += this.length; return original[name].apply(this, args); };
+  }
+  let r;
+  try {
+    r = await C.exec({ exec: C.treeExec }, process.execPath, ['-e', `process.stdout.write('x'.repeat(${size}))`], {});
+  } finally {
+    Object.assign(String.prototype, original);
+  }
+  assert.equal(r.ok, true, r.stderr);
+  assert.equal(r.output.length, size);
+  assert.ok(scanned < 4 * size, `searched ${scanned} characters for ${size} written`);
+});
