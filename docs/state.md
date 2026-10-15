@@ -141,6 +141,7 @@ Workers, reviewers and every other identity are refused both. For an operational
 | `task.interrupt` | operational | `interrupt ID`, and `task update --interrupt` on a live claim whose requirements change |
 | `task.needs_owner` | operational | `owner-done`; `task update --needs-owner` clearing or replacing an existing reason |
 | `task.cancel_needs_owner` | owner-required | `task update --status cancelled` on a task with an owner ask (`needs_owner`) |
+| `hotfix.rerecord_review` | owner-required | `hotfix ID` re-recording a cancelled hotfix whose follow-up a failed independent review opened, or one whose failure is not recorded |
 | `waive.review` | operational | `accept --waive review` when the reviewer is capped or down at the submitted head: a `check ci` there recorded a capped review run (`ci.capped_review`, kept as `capped_review` on the evidence), or a review spawn there exited without a verdict |
 | `merge.admin` | owner-required | `project set --merge-admin` |
 | `decision_delegation` | owner-required | `project set --decision-delegation` |
@@ -590,7 +591,8 @@ cancelled, is still a confirmed failure. Until a later run is green, CI is
 pending, with `not_running` when no full run on the base is queued or
 running. The normal reviewer receives the landed
 diff against the first parent and records its verdict at the merge commit.
-Waivers cannot accept a hotfix.
+Waivers cannot accept a hotfix, with one exception below: the owner's
+`--waive tests` for tests that already fail at the merge's first parent.
 
 A pass stores status `accepted`, displays `accepted (hotfix)`, and emits an
 `accept` event with `hotfix: true`, the PR and a reason saying it merged
@@ -615,14 +617,19 @@ Repeating `hotfix ID --pr N [--review URL] [--reason R]` on a cancelled task
 with `hotfix.follow_up` re-records it, for a failure that was not the
 change's. The task moves to `submitted` at a new revision, so the failed
 evidence no longer counts. `hotfix.follow_up` is removed and
-`hotfix.superseded` gains `{follow_up, at, by, reason}`. The follow-up becomes
+`hotfix.superseded` gains `{follow_up, gate, at, by, reason}`. The follow-up becomes
 `cancelled` with `superseded_by: ID` and a note with the reason, and a
 `hotfix supersede` event records it. The `hotfix` event carries
 `previous_status: "cancelled"` and `superseded: {follow_up, reason}`. A later
 confirmed failure opens a new follow-up. The command is refused while the
 follow-up has a claim or is being retired, and when it has a branch, PR, sha
 or worktree or is submitted or accepted. A follow-up with `needs_owner` needs
-the owner, through `task.cancel_needs_owner`.
+the owner, through `task.cancel_needs_owner`. A follow-up records the gate
+that opened it in `hotfix.follow_up_gate` and the `hotfix rework` event's
+`gate` (`rework` for an explicit send-back); older ones are read from the
+event's reason. When that gate is `review` or unknown, the re-record needs
+the owner, through `hotfix.rerecord_review`. `--reason` on a record that is
+not a re-record is refused.
 
 Pending CI, observation errors and timeouts keep the hotfix submitted;
 retry its gate when the run completes or the infrastructure recovers.
@@ -631,7 +638,12 @@ first parent, not at the newest base, which contains the merge. When every
 failing name also fails there, the evidence carries `main_failure` and
 `infrastructure_failure`, the hotfix stays submitted with no follow-up, and
 the inbox offers `check tests ID`. A name that passes at `base_sha` is the
-merge's, even when the newest base still fails it.
+merge's, even when the newest base still fails it. Without `base_sha` the
+rerun uses the merge's first parent. A failure that predates the merge fails
+on every rerun; the owner can `accept ID --waive tests --reason R` while the
+latest tests evidence at the current head and revision has `main_failure` at
+`base_sha`. Any other waiver of a hotfix is refused. The waived evidence and
+the `accept` event carry `base_failure: {base_sha, names}`.
 When every changed host-only test of a hotfix reported only skipped cases,
 the tests failure carries `config_failure: {key: "tests_host_env"}`: there
 is no worker to fix it, and the host's opt-ins decide. The hotfix stays

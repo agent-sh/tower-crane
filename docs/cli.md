@@ -221,8 +221,8 @@ CI and infrastructure errors stay submitted: rerun the gate with `check ci ID`
 (or `check tests ID`, `check clean ID`), or let `ci completed` rerun CI, then
 `accept` again. A tests failure whose every failing name also fails at the
 merge's first parent is infrastructure too: the hotfix stays submitted and
-opens no follow-up. The newest main contains the merge, so it is not the
-comparison.
+opens no follow-up; rerun `check tests ID` when the environment recovers.
+The newest main contains the merge, so it is not the comparison.
 
 When the failure that cancelled a hotfix was not the change's, such as main
 red at the merge commit, record the same PR again:
@@ -232,12 +232,26 @@ tower-crane hotfix T166 --pr 163 --reason 'main was red on Windows shards at the
 tower-crane accept T166 --agent orchestrator
 ```
 
+Re-recording alone does not change what the gates see. When the push run at
+the merge commit is still red, `accept` reads that same run and opens a new
+follow-up. Rerun that CI first, or record the re-record once the CI gate
+classifies main-wide red as not the change's (T349).
+
 The task returns to `submitted` at a new revision, so the old failure no
 longer counts and `accept` runs the gates again. The follow-up is cancelled
 with `superseded_by` naming the task and the reason in its notes. A follow-up
 that is claimed, or has a branch, PR or commit of its own, is refused: finish
 or cancel it instead. Dropping a follow-up that carries an owner ask is
-owner-required, the same as `task update --status cancelled`. An accepted hotfix cannot be sent back with `rework`. See
+owner-required, the same as `task update --status cancelled`. So is dropping
+one opened by a failed independent review, or one whose failure is not
+recorded (`hotfix.rerecord_review`): `--reason` cannot set aside a review
+verdict. `--reason` is refused on any other record.
+
+A tests failure that already failed at the merge's first parent fails there
+on every rerun, since both commits are fixed. The owner ends it with
+`accept ID --waive tests --reason R`. That is the only waiver a hotfix takes,
+and only while every failing name also fails at the first parent; the waived
+evidence and the `accept` event record it as `base_failure: {base_sha, names}`. An accepted hotfix cannot be sent back with `rework`. See
 [state.md](state.md#already-merged-hotfixes) for fields and counts.
 
 ## Run
@@ -343,7 +357,7 @@ Before constructing an agent home, spawn also sweeps orphan `brokers/<agent>/` d
 | | |
 | `hook ACTION --binding FILE [--payload JSON\|-]` | deliver harness messages and record activity under the home identity |
 | | |
-| `hotfix ID --pr N [--sha SHA] [--review URL] [--reason R]` | orchestrator or owner: verify the PR merged into the project base (at SHA when given, else its merge commit), record its merge and first parent (squash or merge-commit merges only; a multi-commit rebase merge is refused), and move the task (todo, rework, submitted or cancelled, without a claim) to submitted with a new revision. `--review` takes the exact PR comment URL or id of a review by an OWNER, MEMBER or COLLABORATOR, whose first line is `Review (native, clean context)` or `Review (Tower Crane, clean context)`, whose `SHA:` is the merged PR head, and whose `Verdict: pass\|fail` line or `Blocking findings` section decides it; it is recorded as review evidence at the merge commit. Run `accept ID` to check tests, clean and push CI at that merge commit, dispatch independent review of the landed diff unless a posted review counts, accept, and confirm the merge as merge evidence without merging again. Every gate must pass, without waivers. Acceptance displays `accepted (hotfix)` and records that it merged before its gates. A confirmed software failure or failed review cancels the historical task and creates a separate rework task for a follow-up PR against the project base. When that failure was not the change's, recording the same PR again re-records the cancelled task: it returns to submitted at a new revision, and the follow-up is cancelled with `superseded_by` and `--reason` (owner-required when the follow-up has an owner ask). A follow-up that is claimed or has a branch, PR or commit is refused. Pending checks, infrastructure errors and tests whose every failing name also fails at the merge's first parent remain submitted for a gate retry with `check GATE ID`. An accepted hotfix refuses `rework`. Repeating the same record preserves receipts |
+| `hotfix ID --pr N [--sha SHA] [--review URL] [--reason R]` | orchestrator or owner: verify the PR merged into the project base (at SHA when given, else its merge commit), record its merge and first parent (squash or merge-commit merges only; a multi-commit rebase merge is refused), and move the task (todo, rework, submitted or cancelled, without a claim) to submitted with a new revision. `--review` takes the exact PR comment URL or id of a review by an OWNER, MEMBER or COLLABORATOR, whose first line is `Review (native, clean context)` or `Review (Tower Crane, clean context)`, whose `SHA:` is the merged PR head, and whose `Verdict: pass\|fail` line or `Blocking findings` section decides it; it is recorded as review evidence at the merge commit. Run `accept ID` to check tests, clean and push CI at that merge commit, dispatch independent review of the landed diff unless a posted review counts, accept, and confirm the merge as merge evidence without merging again. Every gate must pass, without waivers, except the owner's `--waive tests` for tests that also fail at the merge's first parent. Acceptance displays `accepted (hotfix)` and records that it merged before its gates. A confirmed software failure or failed review cancels the historical task and creates a separate rework task for a follow-up PR against the project base. When that failure was not the change's, recording the same PR again re-records the cancelled task: it returns to submitted at a new revision, and the follow-up is cancelled with `superseded_by` and `--reason` (owner-required when the follow-up has an owner ask). A follow-up that is claimed or has a branch, PR or commit is refused; one opened by a failed review needs the owner, and `--reason` on any other record is refused. Pending checks, infrastructure errors and tests whose every failing name also fails at the merge's first parent remain submitted for a gate retry with `check GATE ID`. An accepted hotfix refuses `rework`. Repeating the same record preserves receipts |
 | | |
 | `interrupt ID [--needs-owner REASON]` | owner or orchestrator only: stop the live agent through its supervisor and release the claim to its prior `todo` or `rework`. The revision, branch, evidence and dirty worktree stay, so the next dispatch resumes the work (Codex warm resume, or a fresh Claude worker in the same worktree). `--needs-owner REASON` sets the owner ask in the write that releases the claim, so the task waits until `owner-done`; the event's `reason` and `needs_owner` carry REASON, and replacing a different ask is audited as `task.needs_owner`. The board's Stop sends it. Distinct from `rework`, which sends a submitted task back with a reason, and from a requirements edit, which bumps the revision |
 | | |
