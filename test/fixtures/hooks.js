@@ -253,9 +253,10 @@ function before(name, args) {
   }
   // HOOK_STOP_INITIALIZING=SIGNAL: stop before taking the worktree lock while
   // a task worktree this process added is still registered as initializing.
-  // The lock is in the worktrees root, `<repo>-worktrees` beside `<repo>/.git`.
+  // The lock is in the worktrees root, `<repo>-worktrees` beside `<repo>/.git`,
+  // and taking it starts with the mkdir of its staging directory there.
   if (env.HOOK_STOP_INITIALIZING && name === 'mkdirSync' && typeof target === 'string'
-    && path.basename(target) === 'tower-crane-worktree.lock' && path.basename(path.dirname(target)).endsWith('-worktrees')
+    && /^tower-crane-worktree\.lock\.\d+\.[0-9a-f]+\.new$/.test(path.basename(target)) && path.basename(path.dirname(target)).endsWith('-worktrees')
     && initializing(path.join(path.dirname(target).replace(/-worktrees$/, ''), '.git')) && first('initializing')) {
     stop(env.HOOK_STOP_INITIALIZING);
   }
