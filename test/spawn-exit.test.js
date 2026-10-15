@@ -447,6 +447,60 @@ test('the Windows tree of an exited harness keeps only processes it started', ()
   assert.deepEqual(windowsTree([], 10, 1000, 2000), []);
 });
 
+// Windows PowerShell on Windows; elsewhere PowerShell 7 when it is installed
+// (GitHub's Ubuntu runners have it), which runs the same script.
+const POWERSHELL = process.platform === 'win32' ? 'powershell.exe'
+  : cp.spawnSync('pwsh', ['-NoProfile', '-NonInteractive', '-Command', 'exit 0'], { stdio: 'ignore', timeout: 300000 }).status === 0 ? 'pwsh' : null;
+
+test('the Windows stop takes one target, skips a target that is gone and leaves a reused pid alone', {
+  skip: !POWERSHELL && 'no PowerShell',
+}, async (t) => {
+  const { windowsStop } = require('../lib/processes');
+  const execFile = (file, args, options, callback) => cp.execFile(POWERSHELL, args, options, callback);
+  const started = [];
+  t.after(() => {
+    for (const child of started) {
+      if (child.exitCode === null && child.signalCode === null) killPid(child.pid, 'SIGKILL');
+    }
+  });
+  const start = () => {
+    const child = cp.spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore', windowsHide: true }); // wait-allow: a process that runs until it is stopped
+    started.push(child);
+    return child;
+  };
+  const startTime = (pid) => Number(cp.execFileSync(POWERSHELL, ['-NoProfile', '-NonInteractive', '-Command',
+    `([DateTimeOffset](Get-Process -Id ${pid}).StartTime.ToUniversalTime()).ToUnixTimeMilliseconds()`], { encoding: 'utf8', timeout: 300000 }).trim());
+  // One target: a list PowerShell would unroll to two numbers.
+  const lone = start();
+  assert.deepEqual(await windowsStop(execFile, [{ pid: lone.pid, start: startTime(lone.pid) }], 300000),
+    [{ pid: lone.pid, outcome: 'stopped' }]);
+  await childExit(lone, { signal: t.signal });
+  // The last target exited before its turn; the one before it still stops.
+  const kept = start();
+  const gone = start();
+  const goneStart = startTime(gone.pid);
+  killPid(gone.pid, 'SIGKILL');
+  await childExit(gone, { signal: t.signal });
+  const reused = start();
+  assert.deepEqual(await windowsStop(execFile, [
+    { pid: kept.pid, start: startTime(kept.pid) },
+    { pid: reused.pid, start: startTime(reused.pid) - 5000 },
+    { pid: gone.pid, start: goneStart },
+  ], 300000), [
+    { pid: kept.pid, outcome: 'stopped' },
+    { pid: reused.pid, outcome: 'reused' },
+    { pid: gone.pid, outcome: 'gone' },
+  ]);
+  await childExit(kept, { signal: t.signal });
+  assert.equal(reused.exitCode === null && reused.signalCode === null, true, 'a pid with another creation time was stopped');
+});
+
+test('a launch keeps an outer gate run marker and drops an outer spawn run marker', () => {
+  const { cleanAgentEnv } = require('../lib/spawn-settings');
+  assert.deepEqual(cleanAgentEnv({ TOWERCRANE_SPAWN_RUN_1_ab: '1', TOWERCRANE_GATE_RUN_2_cd: '1', KEEP: 'x' }),
+    { TOWERCRANE_GATE_RUN_2_cd: '1', KEEP: 'x' });
+});
+
 test('a missing log does not hide an exited claimant', async (t) => {
   const h = setup(t);
   const spawned = await start(t, h);
