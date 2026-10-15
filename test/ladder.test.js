@@ -541,7 +541,7 @@ test('moving a rung to another harness drops the model and fields the old harnes
   const alias = Object.keys(L.BUILTIN.claude_aliases)[0];
   const claudeRung = { harness: 'claude', model: alias, effort: 'high' };
   const h = makeRepo(t);
-  h.initLadder = { easy: claudeRung, review: claudeRung, medium: { profile: 'sol', effort: 'high' } };
+  h.initLadder = { easy: claudeRung, review: claudeRung, small: claudeRung, medium: { profile: 'sol', effort: 'high' } };
   h.init();
   // The field report: a claude/haiku rung moved to codex kept its Claude model.
   const out = h.run(['ladder', 'set', 'easy', '--harness', 'codex', '--profile', 'sol', '--effort', 'medium', '--json']);
