@@ -6,8 +6,7 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const cp = require('node:child_process');
-const { makeTaskRepo, BIN, HOOKS } = require('./helpers');
+const { makeTaskRepo, dispatch } = require('./helpers');
 const S = require('../lib/state');
 
 const writeState = (h, file, value) => S.writeAtomic(path.join(h.state, file), S.json(value));
@@ -251,19 +250,17 @@ for (const change of ['schema bump', 'unknown current task status', 'unknown blo
 test(`${change} drains the supervisor without killing an edit`, async (t) => {
   const h = fixture(t);
   const worker = heldWorker(h);
-  let output = '';
-  const child = cp.spawn(process.execPath, ['--require', HOOKS, BIN, 'spawn', '--task', 'T1', '--wait', '--json'], {
-    cwd: h.repo, env: { ...h.env, HOOK_STATE: h.state, HOOK_PROCESSES_DIR: path.join(h.base, 'detached') },
-  });
-  child.stdout.resume();
-  child.stderr.on('data', (data) => { output += data; });
-  const running = new Promise((resolve) => child.on('close', (code) => resolve({ code, stderr: output })));
+  // The supervisor's first state read and stat after the change are refused
+  // once, as a Windows reader is while a writer renames a file into place.
+  const busy = path.join(h.base, 'busy-read');
+  const { run: running, until, signal, output } = dispatch(t, h, { hooks: { HOOK_BUSY_READ: busy } });
   let liveBeforeExit;
   try {
-    await waitOnRepo(h, () => fs.existsSync(worker.ready), 'worker did not start');
+    await signal(worker.ready);
     // The harness can report ready before dispatch commits. Future writers
     // must wait for that lock and publish complete files, as the CLI does.
     S.withLock(h.state, () => {
+      fs.writeFileSync(busy, '');
       if (change === 'schema bump') {
         const project = h.readState('project.json');
         project.schema_version = 2;
@@ -283,8 +280,7 @@ test(`${change} drains the supervisor without killing an edit`, async (t) => {
         }) + '\n');
       }
     });
-    await waitOnRepo(h, () => /supervision stopped.*worker.*finish/i.test(output),
-      () => `supervisor did not report a clean schema stop:\n${output}`);
+    await until(() => /supervision stopped.*worker.*finish/i.test(output()), 'the supervisor reports a clean schema stop');
     killPid(Number(fs.readFileSync(worker.ready, 'utf8')), 0);
     liveBeforeExit = S.readEvents(h.state).filter((e) => e.cmd === 'spend live');
   } finally {
