@@ -101,6 +101,24 @@ can link the existing failure instead of fixing unrelated code. A failure of a
 confirmed quality check on a task with a tier range is escalation's: it sends
 the task back with a climb, as before. `gates retry ID` reruns a failed gate at unchanged inputs, such as after an infrastructure cause is fixed.
 
+A gate can fail for a cause outside the code that it cannot classify, such as
+local CI exiting 1 because the gate temporary root was on a full `/tmp`. That
+reads as a code failure and reworks at once; retrying it at once would fail the
+same way, since the environment is still broken. Once the orchestrator fixes the
+cause, `gates retry ID --from-rework` undoes that rework without a worker round.
+It returns the task to submitted at the revision it was submitted at, so that
+revision's passing evidence and any review count again, reruns the failed gates
+while it holds the task's reaction slot, and settles them as a reaction would.
+A gate that still fails reworks at a new revision. It refuses a rework that came
+from a review or a person, a revision or kind change since the rework, a worker
+claim or submission since, a pending quality climb, and a moved PR or branch
+head, checked again once it holds the reaction slot. The inbox `rework_ready`
+item names the command when it would succeed. Automatic refill holds such a
+task for `gates.rework_hold_min` minutes (default 5) after the rework, since
+the same wait pass would otherwise dispatch a worker at once; `spawn --ready`
+by hand does not wait. [State](state.md)
+explains why the revision goes back instead of carrying evidence forward.
+
 Failures remain visible in gate receipts and task notes. Conflicting PRs
 return to rework with a file list. Unknown mergeability, failed transport,
 pending CI, moved heads and missing review never authorize a merge.

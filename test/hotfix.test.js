@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { cachedFixture } = require('./helpers');
 const { waitOnRepo } = require('./signals');
-const { gateFixture } = require('./gate-helpers');
+const { gateFixture, retireRevision } = require('./gate-helpers');
 const Reviewer = require('../lib/reviewer');
 const { shellQuote } = require('../lib/gates/common');
 
@@ -421,6 +421,12 @@ test('a multi-commit rebase merge is refused because its first parent is an earl
   assert.equal(single.hotfix.base_sha, h.base_sha);
 });
 
+test('a hotfix record skips a revision a restore retired', (t) => {
+  const h = fixture(t);
+  retireRevision(h, 'T1', task(h).revision + 1);
+  assert.equal(record(h).revision, 3);
+});
+
 const ORCHESTRATOR = { env: { TOWER_CRANE_AGENT: 'orchestrator' } };
 
 // A follow-up opened before the failing gate was recorded on it: its gate is read from the event's reason.
@@ -627,4 +633,12 @@ test('a hotfix without a recorded first parent reruns failing tests at the merge
   assert.deepEqual(tests.main_failure, { base: h.base_sha.slice(0, 10), names: ['known base failure'] });
   assert.equal(tests.infrastructure_failure, true);
   assert.equal(task(h).hotfix.follow_up, undefined);
+});
+
+test('a hotfix re-record skips a revision a restore retired', (t) => {
+  const h = fixture(t);
+  const before = falseFailure(h);
+  retireRevision(h, 'T1', before.revision + 1);
+  h.ok(['hotfix', 'T1', '--pr', '42', '--sha', h.sha, '--reason', 'main was red at the merge commit']);
+  assert.equal(task(h).revision, before.revision + 2, 'the re-record skips the retired number');
 });
