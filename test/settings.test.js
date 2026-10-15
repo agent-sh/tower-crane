@@ -101,7 +101,7 @@ test('the Settings view edits the ladder and task tiers only with the page token
 
     const invalid = await request(ladder, { method: 'POST', headers: { 'x-tower-crane-token': token }, body: ladderBody(loaded, { rungs: { easy: { harness: 'pi', model: '', profile: 'fixture-light', effort: 'medium' } } }) });
     assert.equal(invalid.status, 400);
-    assert.match(invalid.json.error, /^ladder easy \(pi\): profile applies only to codex, needs a model$/);
+    assert.match(invalid.json.error, /^ladder easy \(pi\): needs a model; ladder easy: moving from codex to pi would drop profile fixture-light, which does not fit pi, so name what the rung runs on pi$/);
     const badArgs = await request(ladder, { method: 'POST', headers: { 'x-tower-crane-token': token }, body: ladderBody(loaded, { rungs: { small: { args: 'not json' } } }) });
     assert.equal(badArgs.status, 400);
     assert.match(badArgs.json.error, /^ladder small: args must be a JSON array of strings/);
@@ -135,6 +135,32 @@ test('the Settings view edits the ladder and task tiers only with the page token
     const tierEv = events(h).filter((e) => e.cmd === 'task update').pop();
     assert.deepEqual([tierEv.task, tierEv.detail], ['T1', { tier: 'hard', via: 'serve' }]);
     assert.match((await request(`${s.url}settings`)).text, /Last change: T1 tier hard by owner from serve/);
+  } finally {
+    await s.stop();
+  }
+});
+
+test('a Settings save that moves a rung to another harness drops the fields the page sent unchanged that do not fit it', async (t) => {
+  const h = makeRepo(t);
+  h.init();
+  h.ok(['ladder', 'set', 'hard', '--model', 'claude-haiku-5-5']);
+  const s = await startServe(h);
+  try {
+    const token = tokenOf((await request(s.keyed('settings'))).text);
+    const loaded = await loadedOf(s.url);
+    // The page sends every field of the row, the old model included.
+    const row = { harness: 'codex', model: 'claude-haiku-5-5', profile: 'fixture-main', provider: '', effort: 'high', args: '', command: '' };
+    const r = await request(`${s.url}api/ladder`, { method: 'POST', headers: { 'x-tower-crane-token': token }, body: ladderBody(loaded, { rungs: { hard: row } }) });
+    assert.equal(r.status, 200, r.text);
+    assert.deepEqual(r.json.dropped, ['ladder hard: moving from claude to codex dropped model claude-haiku-5-5, which does not fit codex']);
+    assert.deepEqual(h.readState('project.json').ladder.hard, { harness: 'codex', profile: 'fixture-main', effort: 'high' });
+    assert.match((await request(`${s.url}settings`)).text, /Last change: ladder set hard \(dropped model claude-haiku-5-5, which did not fit codex\) by owner from serve/);
+    // A model the page changed is named, so it stays.
+    const again = await loadedOf(s.url);
+    const named = await request(`${s.url}api/ladder`, { method: 'POST', headers: { 'x-tower-crane-token': token }, body: ladderBody(again, { rungs: { hard: { ...row, harness: 'claude', model: 'claude-opus-5-5', profile: '' } } }) });
+    assert.equal(named.status, 200, named.text);
+    assert.equal(named.json.dropped, undefined);
+    assert.deepEqual(h.readState('project.json').ladder.hard, { harness: 'claude', model: 'claude-opus-5-5', effort: 'high' });
   } finally {
     await s.stop();
   }

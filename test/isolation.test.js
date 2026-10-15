@@ -2943,10 +2943,13 @@ test('a rung opts back in to a named tool and MCP server, shown by spawn --dry-r
   const r = h.run(['spawn', '--role', 'small', '--task', 'T1', '--dry-run'], { env: u.env });
   assert.equal(r.code, 1);
   assert.match(r.stderr, /opts in MCP server missing, but .*config\.toml defines no \[mcp_servers\.missing\]/);
-  const pi = h.run(['ladder', 'set', 'small', '--harness', 'pi', '--model', 'x', '--clear', 'profile']);
-  assert.equal(pi.code, 1);
-  assert.match(pi.stderr, /MCP opt-ins are unsupported on pi/);
-  assert.match(pi.stderr, /pi tools must be built-ins/);
+  // Moving to pi drops the codex opt-ins; named on pi, they are refused.
+  const pi = h.ok(['ladder', 'set', 'small', '--harness', 'pi', '--model', 'x', '--clear', 'profile']);
+  assert.match(pi, /^ladder small: moving from codex to pi dropped tools \["web_search","multi_agent"\], mcp \["missing"\], which do not fit pi$/m);
+  const named = h.run(['ladder', 'set', 'small', '--tools', '["web_search"]', '--mcp', '["planted"]']);
+  assert.equal(named.code, 1);
+  assert.match(named.stderr, /MCP opt-ins are unsupported on pi/);
+  assert.match(named.stderr, /pi tools must be built-ins/);
 });
 
 test('only the orchestrator or the owner widens a rung, a command needs the owner, and args hold only allowlisted flags', (t) => {
