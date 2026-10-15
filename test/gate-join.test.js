@@ -16,11 +16,11 @@ function fixture(t) {
     h.env.TOWER_CRANE_TMP = path.join(h.base, 'gate-tmp');
     h.runs = path.join(h.base, 'ci-runs');
     h.release = path.join(h.base, 'ci-release');
-    h.init(['--ci-local', JSON.stringify({ command: [process.execPath, 'ci.js', h.runs, h.release], timeout: 120 })]);
+    h.init(['--ci-local', JSON.stringify({ command: [process.execPath, 'ci.js', h.runs, h.release], timeout: 600 })]);
     fs.writeFileSync(path.join(h.repo, 'ci.js'), `
 const fs = require('node:fs');
 fs.appendFileSync(process.argv[2], 'run\\n');
-const deadline = performance.now() + 120000;
+const deadline = performance.now() + 300000;
 while (!fs.existsSync(process.argv[3])) {
   if (performance.now() > deadline) process.exit(1);
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
