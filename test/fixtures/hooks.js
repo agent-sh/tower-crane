@@ -215,6 +215,13 @@ function before(name, args) {
   if (env.HOOK_BUSY_STAGED && name === 'unlinkSync' && inState(target) && /\.commit$/.test(String(target))) {
     throw Object.assign(new Error(`EPERM: operation not permitted, unlink '${target}'`), { code: 'EPERM' });
   }
+  // HOOK_BUSY_READ=FILE: once FILE exists, the supervisor's next read of a
+  // state file fails with EPERM, as on Windows while another process renames
+  // a new copy over it.
+  if (env.HOOK_BUSY_READ && name === 'readFileSync' && inState(target) && ['project.json', 'tasks.json', 'decisions.json'].includes(path.basename(String(target)))
+    && path.basename(process.argv[1] || '') === 'spawn-monitor.js' && real.existsSync(env.HOOK_BUSY_READ) && first('busy-read')) {
+    throw Object.assign(new Error(`EPERM: operation not permitted, open '${target}'`), { code: 'EPERM' });
+  }
   // HOOK_FAIL_EVENT_SYNC=1: the first sync of events.jsonl fails with EIO
   // after its lines are written, as a failing disk reports it.
   if (env.HOOK_FAIL_EVENT_SYNC && name === 'fsyncSync' && path.resolve(String(target)) === path.join(STATE, 'events.jsonl') && first('event-sync')) {
