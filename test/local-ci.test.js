@@ -681,6 +681,40 @@ if (cp.execFileSync('git', ['status', '--porcelain'], {encoding: 'utf8'}) !== ''
   assert.equal(h.json(['check', 'ci', 'T1', '--agent', 'checker']).receipt.merge_sha, e.receipt.merge_sha);
 });
 
+test('a signed base under log.showSignature still gives the merge commit its time', (t) => {
+  const h = fixture(t);
+  h.git(['config', 'log.showSignature', 'true']);
+  // A signature header is enough: git reports its verification before the commit's own fields.
+  const body = `tree ${h.git(['rev-parse', 'main^{tree}'])}\nparent ${h.baseSha}\n`
+    + 'author a <a@example.com> 1700000000 +0000\ncommitter a <a@example.com> 1700000000 +0000\n'
+    + 'gpgsig -----BEGIN SSH SIGNATURE-----\n U1NIU0lH\n -----END SSH SIGNATURE-----\n\nsigned base\n';
+  const signed = require('node:child_process').execFileSync('git', ['hash-object', '-t', 'commit', '-w', '--stdin'],
+    { cwd: h.repo, env: h.env, input: body, encoding: 'utf8' }).trim();
+  h.git(['update-ref', 'refs/heads/main', signed]);
+  assert.match(h.git(['show', '-s', '--format=%ct', signed]), /signature/i, 'the fixture shows a signature line');
+  const e = h.json(['check', 'ci', 'T1', '--agent', 'checker']);
+  assert.equal(e.ok, true, e.summary);
+  assert.equal(e.receipt.base_sha, signed);
+});
+
+test('the merge reads .gitattributes from the head, so its merge drivers apply', (t) => {
+  const h = fixture(t);
+  h.git(['switch', '-q', 'local-change']);
+  fs.writeFileSync(path.join(h.repo, '.gitattributes'), 'notes.txt merge=union\n');
+  fs.writeFileSync(path.join(h.repo, 'notes.txt'), 'head\n');
+  h.git(['add', '.']);
+  h.git(['commit', '-qm', 'head notes']);
+  const head = h.git(['rev-parse', 'HEAD']);
+  h.git(['switch', '-q', 'main']);
+  fs.writeFileSync(path.join(h.repo, 'notes.txt'), 'base\n');
+  h.git(['add', '.']);
+  h.git(['commit', '-qm', 'base notes']);
+  h.ok(['submit', 'T1', '--agent', 'worker', '--sha', head]);
+  const e = h.json(['check', 'ci', 'T1', '--agent', 'checker']);
+  assert.equal(e.ok, true, e.summary);
+  assert.deepEqual(h.git(['show', `${e.receipt.tree_hash}:notes.txt`]).split('\n').sort(), ['base', 'head']);
+});
+
 test('tracked changes made by a successful local check cannot pass', (t) => {
   const h = fixture(t, "require('node:fs').writeFileSync('head.txt', 'changed\\n');\n");
   const r = h.run(['check', 'ci', 'T1']);
