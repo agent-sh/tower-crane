@@ -2224,7 +2224,7 @@ for (const [command, args, opts] of calls) {
   assert.equal(started.tool.path, path.join(home, 'tool'));
   assert.deepEqual(JSON.parse(fs.readFileSync(path.join(home, 'tool.json'), 'utf8')), started.tool);
   assert.deepEqual(JSON.parse(fs.readFileSync(pushed, 'utf8')), [
-    'push', '--no-verify', '--no-follow-tags', '--recurse-submodules=no', 'https://github.com/acme/app.git', `${h.git(['rev-parse', 'HEAD'], wt)}:refs/heads/${branch}`,
+    'push', '--progress', '--no-verify', '--no-follow-tags', '--recurse-submodules=no', 'https://github.com/acme/app.git', `${h.git(['rev-parse', 'HEAD'], wt)}:refs/heads/${branch}`,
   ]);
   // A sandboxed codex agent runs the shims in its HOME, with a copy of the
   // snapshot's lib; its sandbox hides hook.json, so they record no hook event.
