@@ -746,7 +746,7 @@ test('codex: the profile hides /run but the resolver, and a runtime directory el
 // codex's :minimal mounts /usr and /etc whole, so a runtime directory there
 // cannot be left out; spawn cannot place a bus socket there in a test, so
 // the check runs in process.
-test('codex: sandbox.session_bus refuses a runtime directory a writable rule or a system directory mounts whole', () => {
+test('codex: sandbox.session_bus refuses a runtime directory a writable rule or a system directory mounts whole', { skip: process.platform !== 'linux' && 'the session bus grant and its POSIX paths are Linux only' }, () => {
   const cases = [
     ['under a writable rule', '/var/tmp/x/rt', { '/var/tmp/x': 'write' }, [], /lies in \/var\/tmp\/x, which the codex sandbox writes/],
     ['a writable rule itself', '/var/tmp/x/rt', { '/var/tmp/x/rt': 'write' }, [], /lies in \/var\/tmp\/x\/rt, which the codex sandbox writes/],
