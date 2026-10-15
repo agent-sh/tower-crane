@@ -770,4 +770,18 @@ try {
   }
 }
 
-module.exports = { repairWorktrees, makeRepo, makeProjectRepo, makeTaskRepo, copyRepo, cachedFixture, fixtureLadder, pinRung, pinLiveRung, stubRungs, STUB_RUNG, HARNESS_GUARD, run, runPty, PTY_AVAILABLE, runAsync, dispatch, BIN, ROOT, HOOKS, real, TMP_ROOT, LIVE_ROOT, detachedAlive, processesIn };
+// Personal fallbacks as a fixture's owner sets them: written to the user
+// file, and, when a route carries authority (lib/route-grants.js), written
+// again through ladder set as the owner, which pins it. A route carrying
+// authority that only the file holds is skipped at spawn.
+const UNSANDBOXED = ['agy', 'opencode', 'pi', 'command'];
+const AUTHORITY = ['command', 'args', 'tools', 'mcp', 'web_mcp', 'sandbox', 'env', 'env_file', 'scope'];
+function ownerFallbacks(h, rung, routes) {
+  fs.mkdirSync(path.dirname(h.userConfig), { recursive: true });
+  fs.writeFileSync(h.userConfig, JSON.stringify({ ladder: { [rung]: { fallbacks: routes } } }));
+  if (Array.isArray(routes) && routes.some((r) => r && typeof r === 'object' && (UNSANDBOXED.includes(r.harness) || AUTHORITY.some((k) => r[k] !== undefined)))) {
+    h.ok(['ladder', 'set', rung, '--fallbacks', JSON.stringify(routes)]);
+  }
+}
+
+module.exports = { ownerFallbacks, repairWorktrees, makeRepo, makeProjectRepo, makeTaskRepo, copyRepo, cachedFixture, fixtureLadder, pinRung, pinLiveRung, stubRungs, STUB_RUNG, HARNESS_GUARD, run, runPty, PTY_AVAILABLE, runAsync, dispatch, BIN, ROOT, HOOKS, real, TMP_ROOT, LIVE_ROOT, detachedAlive, processesIn };

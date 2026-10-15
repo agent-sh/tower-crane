@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
-const { cachedFixture, BIN, ROOT, TMP_ROOT } = require('./helpers');
+const { cachedFixture, ownerFallbacks, BIN, ROOT, TMP_ROOT } = require('./helpers');
 
 function auditCli(run, timings, now) {
   return (args, options = {}) => {
@@ -112,12 +112,7 @@ function setup(t) {
     'ladder', 'set', 'hard', '--provider', provider, '--model', model,
     '--supervision', '{"retries":1,"backoff_ms":10,"max_backoff_ms":10,"stall_ms":60000}',
   ]);
-  h.fallbacks = (routes) => {
-    // A route's env or env_file is a grant only the owner's ladder set makes.
-    if (routes.some((r) => r.env || r.env_file)) return h.ok(['ladder', 'set', 'hard', '--fallbacks', JSON.stringify(routes)]);
-    fs.mkdirSync(path.dirname(h.userConfig), { recursive: true });
-    fs.writeFileSync(h.userConfig, JSON.stringify({ ladder: { hard: { fallbacks: routes } } }));
-  };
+  h.fallbacks = (routes) => ownerFallbacks(h, 'hard', routes);
   h.login = () => fs.writeFileSync(path.join(claude, '.credentials.json'), 'stub login, never parsed\n');
   h.aws = () => {
     fs.writeFileSync(path.join(aws, 'config'), '[profile personal]\nregion = eu-west-1\n');

@@ -529,9 +529,9 @@ test('claude: a sandboxed agent gets a temp directory of its own that its comman
   // A cache root short enough for claude's 73-byte socket bound.
   const cache = fs.mkdtempSync(path.join(os.homedir(), '.cache', 'tcl-'));
   t.after(() => fs.rmSync(cache, { recursive: true, force: true }));
-  const spawnSeen = (xdg, fx = h) => {
+  const spawnSeen = (xdg, fx = h, extra = {}) => {
     releaseExited(fx);
-    const stdout = fx.ok(['spawn', '--task', 'T1', '--wait'], { env: { ...fx.env, PATH: `${bin}${path.delimiter}${process.env.PATH}`, CLAUDE_CONFIG_DIR: '', TMPDIR: caller, TMP: caller, TEMP: caller, XDG_CACHE_HOME: xdg } });
+    const stdout = fx.ok(['spawn', '--task', 'T1', '--wait'], { env: { ...fx.env, PATH: `${bin}${path.delimiter}${process.env.PATH}`, CLAUDE_CONFIG_DIR: '', TMPDIR: caller, TMP: caller, TEMP: caller, XDG_CACHE_HOME: xdg, ...extra } });
     return { ...JSON.parse(fs.readFileSync(out, 'utf8')), stdout };
   };
   const seen = spawnSeen(cache);
@@ -545,12 +545,27 @@ test('claude: a sandboxed agent gets a temp directory of its own that its comman
   // claude's own temp files go under CLAUDE_CODE_TMPDIR in the agent's home,
   // which the commands read and never write, long enough (over 44 bytes with
   // claude-<uid>) that claude gives the commands <TMPDIR>/claude-<uid> instead.
-  const own = seen.tmp.CLAUDE_CODE_TMPDIR;
-  const homes = path.join(fs.realpathSync(h.state), 'homes') + path.sep;
-  assert.ok(own && (own.startsWith(homes) || own.startsWith(path.join(h.state, 'homes') + path.sep)), `in the agent's home: ${own}`);
-  assert.ok(Buffer.byteLength(path.join(own, `claude-${process.getuid()}`)) > 44, own);
-  assert.ok(!allowWrite.some((d) => own === d || own.startsWith(d + path.sep)), `its commands cannot write claude's own temp files: ${allowWrite}`);
-  assert.ok(fs.lstatSync(own).isDirectory());
+  const ownOf = (s) => {
+    const own = s.tmp.CLAUDE_CODE_TMPDIR;
+    assert.ok(own, 'CLAUDE_CODE_TMPDIR is set');
+    assert.ok(Buffer.byteLength(path.join(own, `claude-${process.getuid()}`)) > 44, own);
+    const fs2 = s.sandbox.filesystem;
+    assert.ok(!fs2.allowWrite.some((d) => own === d || own.startsWith(d + path.sep)), `its commands cannot write claude's own temp files: ${fs2.allowWrite}`);
+    assert.ok(fs2.denyWrite.includes(own) && fs2.allowRead.includes(own), 'a read-only bind covers the per-user directory claude itself binds writable');
+    assert.ok(fs.lstatSync(own).isDirectory());
+    return own;
+  };
+  const own = ownOf(seen);
+  const homes = [fs.realpathSync(h.state), h.state].map((d) => path.join(d, 'homes') + path.sep);
+  assert.ok(homes.some((d) => own.startsWith(d)), `in the agent's home: ${own}`);
+  // Without XDG_RUNTIME_DIR, as on macOS, claude's messaging socket goes
+  // under CLAUDE_CODE_TMPDIR and must stay within 103 bytes, or every claude
+  // of the user shares /tmp/cc-socks-<uid>. This state path is too deep for
+  // that, so the directory moves beside claude's TMPDIR.
+  const bare = spawnSeen(cache, h, { XDG_RUNTIME_DIR: '' });
+  const short = ownOf(bare);
+  assert.ok(Buffer.byteLength(path.join(short, 'cc-socks', '4194304.sock')) <= 103, short);
+  assert.ok(short.startsWith(`${bare.tmp.TMPDIR}-own`), `beside claude's TMPDIR: ${short}`);
   assert.ok(!seen.stdout.includes('TMPDIR'), seen.stdout);
   // Under a root too deep for the sockets, the caller's TMPDIR stays, and
   // spawn says so: under the home the agent's https fails, and under /tmp

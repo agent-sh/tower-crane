@@ -229,7 +229,10 @@ for (const harness of ['claude', 'codex']) {
 // cannot write; the commands keep a TMPDIR of their own, and https through
 // the proxy sockets in claude's TMPDIR still works. claude tells its
 // commands where its own directory is in CLAUDE_CODE_TMPDIR.
-test('a real claude agent\'s commands write their own TMPDIR and cannot write claude\'s own temp files', { skip: process.env.TOWER_CRANE_LIVE_CLAUDE !== '1' && 'set TOWER_CRANE_LIVE_CLAUDE=1 to run against the real claude CLI', timeout: 300000 }, async (t) => {
+// Without XDG_RUNTIME_DIR, as on macOS, this fixture's state path is too
+// deep for claude's messaging socket under the home, and claude's own
+// directory moves beside its TMPDIR, inside the hidden home.
+for (const runtime of ['with', 'without']) test(`a real claude agent's commands write their own TMPDIR and cannot write claude's own temp files, ${runtime} XDG_RUNTIME_DIR`, { skip: process.env.TOWER_CRANE_LIVE_CLAUDE !== '1' && 'set TOWER_CRANE_LIVE_CLAUDE=1 to run against the real claude CLI', timeout: 300000 }, async (t) => {
   const h = makeRepo(t, { root: LIVE_ROOT });
   h.init();
   h.ok(['task', 'add', '--title', 'Temp probe', '--acceptance', 'claude\'s temp files stay its own']);
@@ -245,7 +248,8 @@ test('a real claude agent\'s commands write their own TMPDIR and cannot write cl
   });
   pinLiveRung(h, 'claude');
   const userHome = os.homedir();
-  const env = { ...h.env, HOME: userHome, USERPROFILE: userHome, CLAUDE_CONFIG_DIR: '', XDG_CACHE_HOME: shortCache(t) };
+  const env = { ...h.env, HOME: userHome, USERPROFILE: userHome, CLAUDE_CONFIG_DIR: '', XDG_CACHE_HOME: shortCache(t),
+    ...(runtime === 'with' ? {} : { XDG_RUNTIME_DIR: '' }) };
   const r = await h.runAsync(['spawn', '--role', 'small', '--task', 'T1', '--wait'], { env });
   assert.equal(r.code, 0, `${r.stderr}\n${agentLog(h)}`);
   assert.ok(fs.existsSync(out), `the probe ran\n${agentLog(h)}`);
@@ -254,7 +258,8 @@ test('a real claude agent\'s commands write their own TMPDIR and cannot write cl
   assert.equal(seen.commandsWrite, 'x', 'the commands write their own TMPDIR');
   assert.equal(seen.lsRemote, 0, 'https through claude\'s proxy sockets still works');
   assert.notEqual(seen.own, seen.tmpdir, 'claude\'s own temp files are not in the commands\' TMPDIR');
-  assert.ok(seen.own.startsWith(path.join(fs.realpathSync(h.state), 'homes', 'small-T1-1') + path.sep), `claude's own temp files are in the agent's home: ${seen.own}`);
+  const where = runtime === 'with' ? path.join(fs.realpathSync(h.state), 'homes', 'small-T1-1') + path.sep : `${path.dirname(seen.tmpdir)}-own`;
+  assert.ok(seen.own.startsWith(where), `claude's own temp files are in ${where}: ${seen.own}`);
   assert.match(seen.ownWrite, /^ERR /, 'the commands cannot write claude\'s own temp files');
 });
 

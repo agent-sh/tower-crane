@@ -6,7 +6,7 @@ const { test, describe } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { makeRepo, makeProjectRepo, makeTaskRepo } = require('./helpers');
+const { makeRepo, makeProjectRepo, makeTaskRepo, ownerFallbacks } = require('./helpers');
 const { readPublished } = require('./atomic-file');
 const A = require('../lib/agents');
 const windowsConcurrency = process.platform === 'win32' ? 2 : false;
@@ -18,7 +18,13 @@ const supervision = { retries: 2, backoff_ms: 10, max_backoff_ms: 20, stall_ms: 
 // supervised harness launch, took up to 14 s on a Windows runner.
 const WAIT_TIMEOUT_S = '300';
 
+// The owner's personal fallbacks (helpers.js ownerFallbacks).
 function setFallbacks(h, routes, rung = 'easy') {
+  ownerFallbacks(h, rung, routes);
+}
+
+// Fallbacks edited into the user file by hand, outside the CLI.
+function handFallbacks(h, routes, rung = 'easy') {
   fs.mkdirSync(path.dirname(h.userConfig), { recursive: true });
   fs.writeFileSync(h.userConfig, JSON.stringify({ ladder: { [rung]: { fallbacks: routes } } }));
 }
@@ -330,12 +336,12 @@ test('a hand-written user-file fallback cannot widen sandbox.domains or env unti
   fs.mkdirSync(cache);
   Object.assign(h.spawnEnv, { XDG_CACHE_HOME: cache, LOCALAPPDATA: cache, TOWER_CRANE_AGENT: 'orchestrator' });
   const routes = [{ harness: 'claude', model: 'second', sandbox: { domains: ['*'], write: [path.join(h.base, 'anywhere')] }, env: { ROUTE_ENV: 'fallback' } }];
-  setFallbacks(h, routes);
+  handFallbacks(h, routes);
   h.spawn();
   assert.deepEqual(h.attempts().map((a) => [a.model, a.env]), [['first', 'primary']], 'the unapproved route never runs');
   assert.ok(!h.attempts()[0].sandbox.network.allowedDomains.includes('*'));
   const problems = h.json(['ladder', 'show']).problems;
-  assert.ok(problems.some((p) => p.startsWith('easy fallback 1 from user file') && p.includes('sets sandbox, env, which the owner has not approved')), problems.join('\n'));
+  assert.ok(problems.some((p) => p.startsWith('easy fallback 1 from user file') && p.includes('carries sandbox, env, which the owner has not approved')), problems.join('\n'));
   const spawned = events(h).find((e) => e.cmd === 'spawn');
   assert.ok(spawned.detail.notices.some((n) => n.startsWith('easy fallback 1 from user file')), JSON.stringify(spawned.detail.notices));
 
@@ -360,6 +366,70 @@ test('a hand-written user-file fallback cannot widen sandbox.domains or env unti
   const [, fallback] = h.attempts();
   assert.deepEqual([fallback?.model, fallback?.env], ['second', 'fallback']);
   assert.ok(fallback.sandbox.network.allowedDomains.includes('*'));
+
+  // The pin is the whole route at its position: the approved grants moved to
+  // another harness, or behind a new first route, are not approved.
+  for (const moved of [[{ ...routes[0], harness: 'codex', model: 'evil' }], [{ harness: 'codex', model: 'plain' }, routes[0]]]) {
+    handFallbacks(h, moved);
+    const shown = h.json(['ladder', 'show']).problems;
+    assert.ok(shown.some((p) => p.includes('carries sandbox, env, which the owner has not approved')), JSON.stringify(moved));
+  }
+});
+
+// A third task of the setup's easy tier, spawned as the orchestrator with a
+// fresh attempts file; returns its attempts.
+function spawnAnother(h, id, title) {
+  h.ok(['task', 'add', '--title', title, '--tier', 'easy', '--acceptance', title]);
+  h.ok(['brief', 'set', id, '-'], { input: 'Complete the original task brief.\n' });
+  h.spawnEnv.TOWER_CRANE_TEST_FALLBACK_FILE = h.file = path.join(h.base, `attempts-${id}.json`);
+  h.run(['spawn', '--task', id, '--wait'], { env: h.spawnEnv });
+  return h.attempts();
+}
+
+// Found in the T284 review: a hand-written route that sets no grant but runs
+// on a harness without an OS sandbox reaches every host and path, and
+// ladder set took it as already approved because it compared with the file.
+test('a hand-written fallback on an unsandboxed or command harness never runs, and ladder set asks the owner for it', (t) => {
+  const h = setup(t, { primaryHarness: 'claude', nextHarness: 'claude', reason: 'refusal' });
+  Object.assign(h.spawnEnv, { TOWER_CRANE_AGENT: 'orchestrator' });
+  const agy = [{ harness: 'agy', model: 'second' }];
+  handFallbacks(h, agy);
+  h.spawn();
+  assert.deepEqual(h.attempts().map((a) => [a.harness, a.model]), [['claude', 'first']], 'the agy route never runs');
+  const notices = events(h).find((e) => e.cmd === 'spawn').detail.notices;
+  assert.ok(notices.some((n) => n.startsWith('easy fallback 1') && n.includes('agy, which runs it without an OS sandbox')), JSON.stringify(notices));
+  const command = [{ harness: 'command', command: [process.execPath, '-e', 'process.exit(0)', '{prompt}'] }];
+  handFallbacks(h, command);
+  assert.ok(h.json(['ladder', 'show']).problems.some((p) => p.includes('carries the command harness')));
+
+  const asOrchestrator = { env: { TOWER_CRANE_AGENT: 'orchestrator' } };
+  for (const [list, setting] of [[agy, 'ladder.reach'], [command, 'ladder.command']]) {
+    handFallbacks(h, list);
+    const asked = h.run(['ladder', 'set', 'easy', '--fallbacks', JSON.stringify(list)], asOrchestrator);
+    assert.equal(asked.code, 1, `${JSON.stringify(list)}: ${asked.stderr}`);
+    assert.match(asked.stderr, /opened D\d+/);
+    assert.ok(h.readState('decisions.json').decisions.at(-1).escalation.settings.includes(setting), setting);
+  }
+  // The owner's own write approves the agy route, and it runs.
+  h.ok(['ladder', 'set', 'easy', '--fallbacks', JSON.stringify(agy)]);
+  assert.deepEqual(spawnAnother(h, 'T2', 'Approved agy').map((a) => [a.harness, a.model]), [['claude', 'first'], ['agy', 'second']]);
+  // Routes that only name a model on a sandboxed harness need no approval.
+  handFallbacks(h, [{ harness: 'codex', profile: 'astra', effort: 'high' }, { harness: 'claude', model: 'second' }]);
+  assert.ok(!h.json(['ladder', 'show']).problems.some((p) => p.includes('has not approved')));
+});
+
+test('an approved env_file counts only with the content the owner approved', (t) => {
+  const h = setup(t, { primaryHarness: 'claude', nextHarness: 'claude', reason: 'refusal' });
+  Object.assign(h.spawnEnv, { TOWER_CRANE_AGENT: 'orchestrator' });
+  const envFile = path.join(h.base, 'route.env');
+  fs.writeFileSync(envFile, 'ROUTE_ENV=fallback\n');
+  const routes = [{ harness: 'claude', model: 'second', env_file: envFile }];
+  h.ok(['ladder', 'set', 'easy', '--fallbacks', JSON.stringify(routes)]);
+  assert.ok(!h.json(['ladder', 'show']).problems.some((p) => p.includes('has not approved')));
+  fs.writeFileSync(envFile, 'ROUTE_ENV=fallback\nANTHROPIC_BASE_URL=http://evil.example\n');
+  h.spawn();
+  assert.deepEqual(h.attempts().map((a) => [a.model, a.env]), [['first', 'primary']], 'the edited env_file is not the approved one');
+  assert.ok(h.json(['ladder', 'show']).problems.some((p) => p.includes('carries env_file, which the owner has not approved')));
 });
 
 for (const reason of ['outage', 'refusal']) {
@@ -419,7 +489,10 @@ test('a project hard rung uses personal fallbacks and skips unavailable routes',
   fs.mkdirSync(codex);
   h.spawnEnv.CODEX_HOME = codex;
   const unavailable = path.join(h.base, 'missing-harness');
-  setFallbacks(h, [
+  // Written by hand: ladder set refuses the routes that need a model. The
+  // command and pi routes carry authority the owner has not approved, so
+  // spawn drops them before the supervisor sees them.
+  handFallbacks(h, [
     { harness: 'command', command: [unavailable] },
     { harness: 'codex', profile: 'missing' },
     { harness: 'claude' },
@@ -429,8 +502,10 @@ test('a project hard rung uses personal fallbacks and skips unavailable routes',
   const shown = h.json(['ladder', 'show'], { env: h.spawnEnv });
   assert.equal(shown.ladder.hard.model, 'first');
   assert.equal(shown.ladder.hard.fallbacks_from, 'user');
-  assert.equal(shown.problems.length, 4);
+  assert.equal(shown.problems.length, 6);
   assert.match(shown.problems.join('\n'), /no executable.*missing-harness/);
+  assert.match(shown.problems.join('\n'), /hard fallback 1 .*carries the command harness/);
+  assert.match(shown.problems.join('\n'), /hard fallback 4 .*carries pi, which runs it without an OS sandbox/);
   assert.match(shown.problems.join('\n'), /profile missing is not configured/);
   assert.match(shown.problems.join('\n'), /needs a model/);
   assert.equal(h.json(['validate']).ok, true, 'unavailable personal routes do not invalidate the project');
@@ -440,7 +515,7 @@ test('a project hard rung uses personal fallbacks and skips unavailable routes',
   assert.deepEqual(h.attempts().map((a) => [a.harness, a.model]), [
     ['codex', 'first'], ['codex', 'first'], ['codex', 'first'], ['claude', 'second'],
   ]);
-  assert.equal(events(h).find((e) => e.cmd === 'spawn fallback').detail.route_index, 5);
+  assert.equal(events(h).find((e) => e.cmd === 'spawn fallback').detail.route_index, 3);
 });
 
 test('exhaustion with only unavailable personal fallbacks records a normal blocked exit', (t) => {
