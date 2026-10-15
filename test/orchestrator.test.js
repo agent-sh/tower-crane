@@ -455,7 +455,7 @@ test('a key marker leaked into a terminal neither reads nor waits on it', { skip
   const closed = new Promise((resolve) => child.once('close', (code) => resolve(code)));
   const deadline = new Promise((resolve) => setTimeout(resolve, 60000, 'timeout')); // wait-allow: bounds a CLI that blocks on its terminal, the failure under test
   assert.equal(await Promise.race([closed, deadline]), 0, `the CLI waited on its terminal; output: ${out}`);
-  assert.match(out, new RegExp(require('../package.json').version.replace(/\./g, '\\.')));
+  assert.ok(out.includes(require('../package.json').version), `--version printed: ${out}`);
 });
 
 test('engine lease bindings reject stale work without extending the idle window', () => {
