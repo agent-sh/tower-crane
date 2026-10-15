@@ -43,7 +43,7 @@ while (!fs.existsSync(process.argv[3])) {
   });
 }
 
-const runs = (h) => (fs.existsSync(h.runs) ? fs.readFileSync(h.runs, 'utf8').split('\n').filter(Boolean).length : 0);
+const runs = (h) => (fs.existsSync(h.runs) ? fs.readFileSync(h.runs, 'utf8').split('\n').filter(Boolean).length : 0); // read-published: the fake CI only appends lines, never replaces the file
 const logs = (h) => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
 const ciEvidence = (h) => h.readState('tasks.json').tasks[0].evidence.filter((e) => e.type === 'ci');
 
