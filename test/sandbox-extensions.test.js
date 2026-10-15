@@ -616,7 +616,11 @@ test('codex: the profile hides /run but the resolver, and a runtime directory el
   // Outside the home, an entry of / exposes it as one does /run/user/<uid>.
   // The stub never connects, so empty files stand in for the sockets.
   const runtime = fs.realpathSync(fs.mkdtempSync('/var/tmp/tower-crane-runtime-'));
-  t.after(() => fs.rmSync(runtime, { recursive: true, force: true }));
+  const beside = fs.realpathSync(fs.mkdtempSync('/var/tmp/tower-crane-beside-'));
+  t.after(() => {
+    fs.rmSync(runtime, { recursive: true, force: true });
+    fs.rmSync(beside, { recursive: true, force: true });
+  });
   fs.mkdirSync(path.join(runtime, 'systemd'));
   const bus = path.join(runtime, 'bus');
   for (const f of [bus, path.join(runtime, 'systemd', 'private'), path.join(runtime, 'openssh_agent')]) fs.writeFileSync(f, '');
@@ -645,8 +649,14 @@ test('codex: the profile hides /run but the resolver, and a runtime directory el
   h.ok(['project', 'set', '--session-bus', 'true']);
   const on = spawnSeen();
   assert.equal(on.rules[bus], 'read', 'the bus socket is reachable: a readable rule mounts it');
-  assert.equal(on.rules[runtime], undefined, 'the runtime directory itself stays, since codex cannot reopen a path inside a hidden one');
-  for (const p of ['systemd', 'openssh_agent']) assert.equal(on.rules[path.join(runtime, p)], 'none', `${p} stays hidden, the user manager socket included`);
+  assert.equal(mounted(on.rules, bus), true, 'the bus socket is mounted');
+  // codex cannot reopen a path inside a hidden one, so the runtime directory
+  // is left unmounted, and the bus socket is mounted alone.
+  for (const p of ['systemd/private', 'openssh_agent', 'made-after-spawn.sock']) assert.equal(mounted(on.rules, path.join(runtime, p)), false, `${p} is not mounted`);
+  assert.equal(on.rules['/var'], undefined, '/var is not mounted whole');
+  assert.equal(mounted(on.rules, path.join(path.dirname(runtime), 'made-after-spawn')), false, 'nor is a later entry beside the runtime directory');
+  assert.equal(mounted(on.rules, beside), true, 'a directory beside it stays readable');
+  for (const p of ['/var/lib', '/var/cache']) if (fs.existsSync(p) && !fs.lstatSync(p).isSymbolicLink()) assert.equal(mounted(on.rules, p), true, `${p} stays readable`);
   assert.deepEqual(on.env, { XDG_RUNTIME_DIR: runtime, DBUS_SESSION_BUS_ADDRESS: `unix:path=${bus}` });
 });
 
