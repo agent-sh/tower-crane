@@ -611,7 +611,7 @@ test('codex: the profile hides /run but the resolver, and a runtime directory el
   fs.writeFileSync(path.join(bin, 'codex'), [
     `#!${process.execPath}`, "'use strict';",
     'const fs = require("node:fs"), path = require("node:path");',
-    `fs.writeFileSync(${JSON.stringify(out)}, JSON.stringify({ config: fs.readFileSync(path.join(process.env.CODEX_HOME, "config.toml"), "utf8"), env: { XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR, DBUS_SESSION_BUS_ADDRESS: process.env.DBUS_SESSION_BUS_ADDRESS } }));`,
+    `fs.writeFileSync(${JSON.stringify(out)}, JSON.stringify({ cwd: process.cwd(), config: fs.readFileSync(path.join(process.env.CODEX_HOME, "config.toml"), "utf8"), env: { XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR, DBUS_SESSION_BUS_ADDRESS: process.env.DBUS_SESSION_BUS_ADDRESS } }));`,
     'console.log(JSON.stringify({ type: "thread.started", thread_id: "bus" }));', '',
   ].join('\n'), { mode: 0o755 });
   // Outside the home, an entry of / exposes it as one does /run/user/<uid>.
@@ -639,9 +639,9 @@ test('codex: the profile hides /run but the resolver, and a runtime directory el
     const seen = JSON.parse(fs.readFileSync(out, 'utf8'));
     return { rules: TOML.parse(seen.config).permissions['tower-crane'].filesystem, env: seen.env, config: seen.config };
   };
-  const refused = () => {
+  const refused = (spawnEnv = env) => {
     releaseExited(h);
-    const r = h.run(['spawn', '--task', 'T1', '--wait'], { env });
+    const r = h.run(['spawn', '--task', 'T1', '--wait'], { env: spawnEnv });
     assert.notEqual(r.code, 0, 'spawn refuses');
     return r.stderr;
   };
@@ -693,6 +693,16 @@ test('codex: the profile hides /run but the resolver, and a runtime directory el
   assert.ok(written.includes(`${runtime} lies in ${way}, which the codex sandbox writes`), written);
   h.ok(['project', 'set', '--sandbox', JSON.stringify({ session_bus: true })]);
   assert.equal(spawnSeen().rules[bus], 'read', 'without it the bus is granted again');
+
+  // The worktree is the workspace root, which codex mounts whole.
+  const worktree = fs.realpathSync(JSON.parse(fs.readFileSync(out, 'utf8')).cwd);
+  const inside = path.join(worktree, '.runtime');
+  fs.mkdirSync(inside);
+  fs.writeFileSync(path.join(inside, 'bus'), '');
+  const inWorktree = refused({ ...env, XDG_RUNTIME_DIR: inside });
+  assert.match(inWorktree, /sandbox\.session_bus/);
+  assert.ok(inWorktree.includes(`${inside} lies in the agent's worktree ${worktree}`), inWorktree);
+  fs.rmSync(inside, { recursive: true });
 });
 
 // codex's :minimal mounts /usr and /etc whole, so a runtime directory there
@@ -706,9 +716,11 @@ test('codex: sandbox.session_bus refuses a runtime directory a writable rule or 
     ['under /etc', '/etc/rt', {}, ['/usr', '/etc'], /lies in \/etc, which the codex sandbox mounts whole/],
     ['under a readable rule', '/var/tmp/x/rt', { '/var': 'read' }, ['/usr', '/etc'], null],
     ['under /run', '/run/user/1000', {}, ['/usr', '/etc'], null],
+    ['in the agent\'s worktree', '/w/T1/.rt', { '/var': 'read' }, ['/usr', '/etc'], /lies in the agent's worktree \/w\/T1, which the codex sandbox mounts whole/, '/w/T1'],
+    ['beside the agent\'s worktree', '/w/T1-rt', {}, ['/usr', '/etc'], null, '/w/T1'],
   ];
-  for (const [what, dir, rules, system, refusal] of cases) {
-    const why = A.wholeMount(dir, rules, system);
+  for (const [what, dir, rules, system, refusal, worktree = '/w/T9'] of cases) {
+    const why = A.wholeMount(dir, rules, system, worktree);
     if (refusal) assert.match(why, refusal, what);
     else assert.equal(why, null, what);
   }
