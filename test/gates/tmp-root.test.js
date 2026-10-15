@@ -3,9 +3,11 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
+const cp = require('node:child_process');
+const os = require('node:os');
 const { makeRepo } = require('../helpers');
+const gateTmp = require('../../lib/gate-tmp');
 const { shellQuote } = require('../../lib/gates/common');
 
 test('gates.tmp_root holds the worktrees of check tests, ci and clean, and status names it; TOWER_CRANE_TMP overrides it', (t) => {
@@ -70,13 +72,70 @@ if (gate === 'clean') console.log(JSON.stringify({ items: [] }));
   statusRoot(override, 'TOWER_CRANE_TMP');
   delete h.env.TOWER_CRANE_TMP;
 
-  // Unset, the gates use the OS temporary directory again.
+  // Unset, the gates use tc/g under the user's cache, not the OS temporary directory: /tmp is
+  // often a RAM-backed tmpfs, and some suites refuse to run there. The fixture's cache is deep,
+  // so the root may come from the account's own cache, where the scratch path still fits.
   h.ok(['project', 'set', '--tmp-root', 'null', '--agent', 'orchestrator']);
   assert.match(h.ok(['project', 'show']), /gates\.tmp_root: null/);
-  statusRoot(os.tmpdir(), 'system');
+  const cache = gateTmp.resolve({}, h.env);
+  assert.equal(cache.source, 'cache');
+  assert.equal(path.basename(cache.root), 'g');
+  assert.ok(gateTmp.scratchFits(cache.root), cache.root);
+  statusRoot(cache.root, 'cache');
   const defaulted = h.run(['check', 'clean', 'T1', '--agent', 'orchestrator']);
   assert.equal(defaulted.code, 0, defaulted.stdout + defaulted.stderr);
-  assert.ok(ranLog().at(-1).cwd.startsWith(`${fs.realpathSync.native(os.tmpdir())}${path.sep}`));
+  const ran = ranLog().at(-1).cwd;
+  assert.ok(ran.startsWith(`${fs.realpathSync.native(cache.root)}${path.sep}`), ran);
+  assert.ok(Buffer.byteLength(path.join(path.dirname(ran), 'tmp')) <= 62, ran);
+  assert.ok(!fs.existsSync(path.dirname(ran)));
   evidence = h.readState('tasks.json').tasks[0].evidence;
-  assert.equal(evidence.findLast((e) => e.type === 'clean').tmp_root, os.tmpdir());
+  assert.equal(evidence.findLast((e) => e.type === 'clean').tmp_root, cache.root);
+});
+
+// Full Chromium aborts with "Socket path too long" under a TMPDIR over 62 bytes.
+test('the default gate root keeps the scratch TMPDIR within 62 bytes', () => {
+  const env = (cache) => (process.platform === 'win32' ? { LOCALAPPDATA: cache } : { XDG_CACHE_HOME: cache });
+  const short = path.join(path.parse(process.cwd()).root, 'c');
+  assert.deepEqual(gateTmp.resolve({}, env(short)), { root: path.join(short, 'tc', 'g'), source: 'cache' });
+  assert.equal(Buffer.byteLength(gateTmp.scratchPath(path.join(short, 'tc', 'g'))), Buffer.byteLength(short) + 28);
+  const deep = path.join(path.parse(process.cwd()).root, 'd'.repeat(80));
+  const fallback = gateTmp.resolve({}, env(deep));
+  assert.ok(!fallback.root.startsWith(deep), fallback.root);
+  assert.ok(Buffer.byteLength(gateTmp.scratchPath(fallback.root)) <= gateTmp.GATE_TMPDIR_MAX, fallback.root);
+  assert.equal(gateTmp.GATE_TMPDIR_MAX, 62);
+});
+
+test('a gate removes stale gate directories whose owner is gone and keeps the rest', (t) => {
+  const h = makeRepo(t);
+  delete h.env.TOWER_CRANE_TMP;
+  const root = path.join(h.base, 'scratch');
+  fs.mkdirSync(root);
+  h.init(['--clean-cmd', `${shellQuote(process.execPath)} -e "console.log(JSON.stringify({items: []}))"`, '--tmp-root', root]);
+  h.ok(['task', 'add', '--title', 'Sweep', '--acceptance', 'stale gate directories go']);
+  h.ok(['claim', 'T1', '--agent', 'worker']);
+  h.ok(['submit', 'T1', '--sha', h.git(['rev-parse', 'HEAD']), '--agent', 'worker']);
+  // A pid that has exited: spawnSync waits for it and reaps it.
+  const dead = cp.spawnSync(process.execPath, ['-e', '']).pid;
+  const hour = 60 * 60000;
+  const dirs = {
+    // Owner gone and older than the 20-minute default budget: removed.
+    'tower-crane-dead01': { pid: dead, host: os.hostname(), started: Date.now() - hour },
+    // Owner gone but younger than the budget: kept.
+    'tower-crane-young1': { pid: dead, host: os.hostname(), started: Date.now() },
+    // Owner alive: kept.
+    'tower-crane-live01': { pid: process.pid, host: os.hostname(), started: Date.now() - hour },
+    // Another host's gate: kept.
+    'tower-crane-host01': { pid: dead, host: `${os.hostname()}-other`, started: Date.now() - hour },
+    // No owner file: an older Tower Crane's gate, kept.
+    'tower-crane-nomark': null,
+    'unrelated-dir': { pid: dead, host: os.hostname(), started: Date.now() - hour },
+  };
+  for (const [name, owner] of Object.entries(dirs)) {
+    fs.mkdirSync(path.join(root, name, 'wt'), { recursive: true });
+    if (owner) fs.writeFileSync(path.join(root, name, 'owner.json'), JSON.stringify(owner));
+  }
+  const r = h.run(['check', 'clean', 'T1', '--agent', 'orchestrator']);
+  assert.equal(r.code, 0, r.stdout + r.stderr);
+  assert.deepEqual(fs.readdirSync(root).sort(), Object.keys(dirs).filter((n) => n !== 'tower-crane-dead01').sort());
+  assert.match(r.stderr, /removed stale gate directory .*tower-crane-dead01/);
 });

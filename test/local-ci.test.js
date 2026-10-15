@@ -338,6 +338,125 @@ test('failed, missing and timed out local commands record failure and clean thei
   }
 });
 
+test('a failed local CI keeps a redacted output tail, its full log and the artifacts it names', (t) => {
+  // Shaped like ginza's tools/check.py: the failing step prints early, later steps print after
+  // it, and the receipt it writes inside the gate worktree is named on the last line.
+  const h = fixture(t, `
+const fs = require('node:fs');
+const path = require('node:path');
+console.log('step 1: scaffold ok');
+for (let i = 0; i < 300; i++) console.log('early line ' + i);
+console.error('FAILING STEP: unit tests, token ' + process.env.CI_FIXTURE_TOKEN);
+// A color escape inside the token hides it from the patterns until the escape is removed.
+const token = process.env.CI_FIXTURE_TOKEN;
+console.log('colored ' + token.slice(0, 4) + '\\x1b[1m' + token.slice(4) + '\\x1b[0m');
+// An OSC hyperlink and a charset escape (tput sgr0) inside the token hide it the same way.
+console.log('osc ' + token.slice(0, 4) + '\\x1b]8;;https://x\\x07' + token.slice(4, 10) + '\\x1b(B' + token.slice(10));
+for (let i = 0; i < 150; i++) console.log('cargo tree line ' + i);
+fs.mkdirSync('.local/checks', { recursive: true });
+// Like ginza's receipt, which holds every step's full output, including what the log redacts.
+fs.writeFileSync('.local/checks/receipt.json', JSON.stringify({ failure_reasons: ['unit tests failed'], output: 'token ' + token }));
+fs.writeFileSync('.local/checks/extra.json', '{}');
+fs.writeFileSync('.local/checks/blob.json', Buffer.from([0x7b, 0, 0x7d]));
+fs.writeFileSync(path.join(process.env.TMPDIR, 'report.txt'), 'scratch report');
+console.log('Scratch report: ' + path.join(process.env.TMPDIR, 'report.txt'));
+console.log('Local check receipt: ' + path.resolve('.local/checks/receipt.json'));
+console.log('Local check receipt: ' + path.resolve('..', '..', '..', 'outside.json'));
+process.exit(1);
+`);
+  const token = `ghp_${'a1'.repeat(18)}`;
+  h.env.CI_FIXTURE_TOKEN = token;
+  fs.writeFileSync(path.join(h.env.TOWER_CRANE_TMP, '..', 'outside.json'), '{}');
+  h.ok(['project', 'set', '--ci-local', JSON.stringify({ command: h.command, timeout: 30,
+    artifacts: ['.local/checks/*.json'], artifact_pattern: '^(?:Local check receipt|Scratch report): (.+)$' })]);
+  const r = h.run(['check', 'ci', 'T1']);
+  assert.equal(r.code, 1, r.stdout + r.stderr);
+  const e = h.readState('tasks.json').tasks[0].evidence.at(-1);
+  assert.equal(e.ok, false);
+  assert.equal(e.confirmed_failure, true);
+  const kept = e.local_ci;
+  // The tail reaches back past 150 later lines to the failing step, with the token redacted.
+  assert.match(kept.output_tail, /FAILING STEP: unit tests, token \[redacted:/);
+  assert.ok(!kept.output_tail.includes(token));
+  assert.ok(kept.output_tail.split('\n').length <= 200);
+  assert.doesNotMatch(kept.output_tail, /^step 1: scaffold ok$/m);
+  assert.doesNotMatch(kept.output_tail, /^early line 0$/m);
+  assert.match(kept.output_tail, /^colored \[redacted:/m);
+  assert.match(kept.output_tail, /^osc \[redacted:/m);
+  // The full log holds every line, redacted, under the state directory's logs.
+  assert.match(kept.log, /^logs\/ci-T1-[0-9a-f]{10}-[^/]+\/output\.log$/);
+  const log = fs.readFileSync(path.join(h.state, kept.log), 'utf8');
+  assert.match(log, /^step 1: scaffold ok$/m);
+  assert.match(log, /^early line 0$/m);
+  assert.match(log, /^cargo tree line 149$/m);
+  assert.ok(!log.includes(token));
+  assert.ok(r.stdout.includes(`Full log: ${path.join(h.state, kept.log)}`), r.stdout);
+  assert.ok(!r.stdout.includes(token));
+  // Printed paths come first, then the globs; a file outside the gate directory is left in place.
+  // Artifacts sit in ci-artifacts/, which every agent sandbox hides, beside the run's log name.
+  const run = path.basename(path.dirname(kept.log));
+  const copied = Object.fromEntries(kept.artifacts.map((a) => [path.basename(a.from), a]));
+  assert.deepEqual(Object.keys(copied).sort(), ['blob.json', 'extra.json', 'receipt.json', 'report.txt']);
+  for (const a of kept.artifacts) assert.ok(a.path.startsWith(`ci-artifacts/${run}/`), a.path);
+  // Text artifacts get the log's redaction; a binary one is kept as written.
+  const receipt = fs.readFileSync(path.join(h.state, copied['receipt.json'].path), 'utf8');
+  assert.ok(!receipt.includes(token));
+  assert.deepEqual(JSON.parse(receipt), { failure_reasons: ['unit tests failed'], output: 'token [redacted:CI_FIXTURE_TOKEN]' });
+  assert.equal(copied['receipt.json'].redacted, true);
+  assert.equal(copied['receipt.json'].bytes, Buffer.byteLength(receipt));
+  assert.deepEqual(fs.readFileSync(path.join(h.state, copied['blob.json'].path)), Buffer.from([0x7b, 0, 0x7d]));
+  assert.equal(copied['blob.json'].binary, true);
+  assert.equal(fs.readFileSync(path.join(h.state, copied['report.txt'].path), 'utf8'), 'scratch report');
+  assert.equal(copied['report.txt'].path, `ci-artifacts/${run}/TMPDIR/report.txt`);
+  assert.equal(copied['extra.json'].path, `ci-artifacts/${run}/worktree/.local/checks/extra.json`);
+  assert.equal(fs.readFileSync(path.join(h.state, 'ci-artifacts', '.gitignore'), 'utf8'), '*\n');
+  assert.deepEqual(kept.artifacts_skipped.map((s) => path.basename(s.from)), ['outside.json']);
+  assert.match(kept.artifacts_skipped[0].reason, /outside the gate worktree/);
+  // The summary reaches worker prompts, so it counts the artifacts and names none.
+  assert.match(r.stdout, /Artifacts: 4 kept for the orchestrator and the owner/);
+  assert.ok(!r.stdout.includes('ci-artifacts'), r.stdout);
+  assert.ok(!e.summary.includes('ci-artifacts'));
+  // The gate worktree is still removed.
+  assert.deepEqual(fs.readdirSync(h.env.TOWER_CRANE_TMP), []);
+  assert.equal(h.git(['worktree', 'list', '--porcelain']).match(/^worktree /gm).length, 1);
+  const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  assert.deepEqual(events.findLast((v) => v.cmd === 'check ci').detail.local_ci, kept);
+});
+
+test('a passing local CI keeps its log without a tail or artifacts', (t) => {
+  const h = fixture(t);
+  h.ok(['project', 'set', '--ci-local', JSON.stringify({ command: h.command, timeout: 5, artifacts: ['*.js'] })]);
+  const e = h.json(['check', 'ci', 'T1']);
+  assert.equal(e.ok, true);
+  assert.equal(e.local_ci.output_tail, undefined);
+  assert.deepEqual(e.local_ci.artifacts, []);
+  assert.ok(fs.existsSync(path.join(h.state, e.local_ci.log)));
+  assert.ok(!fs.existsSync(path.join(h.state, 'ci-artifacts')));
+});
+
+test('local CI keeps the newest five runs of a task and leaves other tasks\' runs', (t) => {
+  const h = fixture(t);
+  const logs = path.join(h.state, 'logs');
+  const store = path.join(h.state, 'ci-artifacts');
+  const old = Date.now() / 1000 - 3600;
+  for (const name of [...Array.from({ length: 6 }, (_, i) => `ci-T1-0123456789-old${i}`), 'ci-T12-0123456789-other']) {
+    for (const dir of [logs, store]) {
+      fs.mkdirSync(path.join(dir, name), { recursive: true });
+      fs.writeFileSync(path.join(dir, name, 'output.log'), name);
+    }
+    // old0 is the oldest; each later one is a minute newer.
+    const at = old + Number(/old(\d)$/.exec(name)?.[1] ?? 0) * 60;
+    fs.utimesSync(path.join(logs, name), at, at);
+  }
+  const e = h.json(['check', 'ci', 'T1']);
+  assert.equal(e.ok, true);
+  const run = path.basename(path.dirname(e.local_ci.log));
+  const left = (dir) => fs.readdirSync(dir).filter((n) => n.startsWith('ci-T1-')).sort();
+  assert.deepEqual(left(logs), [run, 'ci-T1-0123456789-old2', 'ci-T1-0123456789-old3', 'ci-T1-0123456789-old4', 'ci-T1-0123456789-old5'].sort());
+  assert.deepEqual(left(store), ['ci-T1-0123456789-old2', 'ci-T1-0123456789-old3', 'ci-T1-0123456789-old4', 'ci-T1-0123456789-old5']);
+  for (const dir of [logs, store]) assert.ok(fs.existsSync(path.join(dir, 'ci-T12-0123456789-other')));
+});
+
 test('conflicting merged trees fail before running the local command', (t) => {
   const h = fixture(t);
   fs.writeFileSync(path.join(h.repo, 'head.txt'), 'conflict\n');
@@ -574,7 +693,9 @@ test('project settings validate local argv and timeout, preserve CI siblings and
   const original = h.readState('project.json');
   for (const local of ['{', '[]', '{}', '{"command":[],"timeout":1}', '{"command":[""],"timeout":1}',
     '{"command":["node",2],"timeout":1}', '{"command":["node"]}', '{"command":["node"],"timeout":0}',
-    '{"command":["node"],"timeout":"1"}']) {
+    '{"command":["node"],"timeout":"1"}', '{"command":["node"],"timeout":1,"artifacts":["/abs/*.json"]}',
+    '{"command":["node"],"timeout":1,"artifacts":["../up/*.json"]}', '{"command":["node"],"timeout":1,"artifacts":".local"}',
+    '{"command":["node"],"timeout":1,"artifact_pattern":"("}', '{"command":["node"],"timeout":1,"artifact_pattern":""}']) {
     const r = h.run(['project', 'set', '--ci-local', local]);
     assert.equal(r.code, 2, JSON.stringify({ local, ...r }));
     assert.match(r.stderr, /--ci-local/);

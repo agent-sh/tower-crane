@@ -775,6 +775,162 @@ test('a worker\'s git push goes through its broker to its own task branch on ori
     'the broker keeps its verified cache and removes its other scratch');
 });
 
+// origin at git@github.com: as in a real project. The broker's ssh, the
+// user's own, reaches the fixture's bare repository; the agent's fails as
+// ssh does in a sandbox's user namespace, where root-owned config files
+// appear owned by nobody.
+async function sshOriginFixture(t) {
+  const f = await pushFixture(t);
+  f.h.ok(['project', 'set', '--repo', 'acme/demo', '--agent', 'owner']);
+  f.h.git(['remote', 'set-url', 'origin', 'git@github.com:acme/demo.git']);
+  // Spawn writes the recorded repository into the shim's policy.
+  const policy = path.join(f.h.base, 'shim', 'policy.json');
+  fs.writeFileSync(policy, JSON.stringify({ ...JSON.parse(fs.readFileSync(policy, 'utf8')), repo: 'acme/demo' }));
+  const ssh = path.join(f.h.base, 'ssh.js');
+  fs.writeFileSync(ssh, `const args = process.argv.slice(2);
+if (args.includes('-G')) process.exit(0);
+const m = /^git-(upload|receive)-pack '(.*)'$/.exec(args[args.length - 1]);
+if (!m || m[2] !== 'acme/demo.git') { process.stderr.write('ssh: unexpected ' + args.join(' ') + '\\n'); process.exit(255); }
+const r = require('node:child_process').spawnSync('git', [m[1] + '-pack', ${JSON.stringify(f.remote)}], { stdio: 'inherit' });
+process.exit(r.status === null ? 1 : r.status);
+`);
+  const sandboxSsh = path.join(f.h.base, 'sandbox-ssh.js');
+  fs.writeFileSync(sandboxSsh, `process.stderr.write('Bad owner or permissions on /etc/ssh/ssh_config.d/20-systemd-ssh-proxy.conf\\n');
+process.exit(255);
+`);
+  const command = (file) => `"${process.execPath.replace(/\\/g, '/')}" "${file.replace(/\\/g, '/')}"`;
+  const saved = process.env.GIT_SSH_COMMAND;
+  process.env.GIT_SSH_COMMAND = command(ssh);
+  t.after(() => {
+    if (saved === undefined) delete process.env.GIT_SSH_COMMAND;
+    else process.env.GIT_SSH_COMMAND = saved;
+  });
+  const shim = (tool, args, opts = {}) => f.shim(tool, args, { ...opts, env: { GIT_SSH_COMMAND: command(sandboxSsh), ...opts.env } });
+  // Another clone moves origin's main, as a merged pull request does.
+  const advance = (file, content = `${file}\n`) => {
+    const other = fs.mkdtempSync(path.join(f.h.base, 'other-'));
+    f.h.git(['clone', '-q', f.remote, other]);
+    fs.writeFileSync(path.join(other, file), content);
+    f.h.git(['add', file], other);
+    f.h.git(['commit', '-qm', `add ${file}`], other);
+    f.h.git(['push', '-q', 'origin', 'HEAD:refs/heads/main'], other);
+    return f.h.git(['rev-parse', 'HEAD'], other);
+  };
+  return { ...f, shim, advance };
+}
+
+test('a sandboxed worker whose origin is an ssh URL fetches the base and its task branch through its broker, and only those', async (t) => {
+  const f = await sshOriginFixture(t);
+  const branch = f.task.branch;
+  const tracked = (ref) => {
+    const r = require('node:child_process').spawnSync('git', ['-C', f.wt.path, 'rev-parse', '--verify', '--quiet', ref], { encoding: 'utf8', env: f.h.env });
+    return r.status === 0 ? r.stdout.trim() : '';
+  };
+  const main = f.advance('upstream.txt');
+  assert.notEqual(tracked('refs/remotes/origin/main'), main);
+  const direct = await f.shim('git', ['ls-remote', 'origin']);
+  assert.notEqual(direct.status, 0, 'git in the sandbox cannot reach origin itself');
+  assert.match(direct.stderr, /Bad owner/);
+
+  const fetched = await f.shim('git', ['fetch', 'origin']);
+  assert.equal(fetched.status, 0, fetched.stderr);
+  assert.equal(tracked('refs/remotes/origin/main'), main, 'origin/main is origin\'s main');
+  // A pack of a few MiB pauses the connection many times.
+  const big = f.advance('big.bin', require('node:crypto').randomBytes(3 * 1024 * 1024));
+  const large = await f.shim('git', ['fetch', '-q', 'origin']);
+  assert.equal(large.status, 0, large.stderr);
+  assert.equal(tracked('refs/remotes/origin/main'), big);
+  assert.doesNotMatch(large.stderr, /MaxListeners|Warning/);
+  assert.match(fetched.stderr, /From git@github\.com:acme\/demo\.git/);
+  f.h.git(['merge', '-q', '--no-ff', '--no-edit', 'origin/main'], f.wt.path);
+  assert.equal(fs.readFileSync(path.join(f.wt.path, 'upstream.txt'), 'utf8'), 'upstream.txt\n', 'the fetched objects are whole');
+
+  // The skill's spelling, and a plain fetch with no remote, after origin moves again.
+  const later = f.advance('later.txt');
+  const skill = await f.shim('git', ['fetch', 'origin', '+refs/heads/main:refs/remotes/origin/main']);
+  assert.equal(skill.status, 0, skill.stderr);
+  assert.equal(tracked('refs/remotes/origin/main'), later);
+  const head = fs.readFileSync(path.join(f.h.git(['rev-parse', '--path-format=absolute', '--git-path', 'FETCH_HEAD'], f.wt.path)), 'utf8');
+  assert.equal(head, `${later}\t\tbranch 'main' of git@github.com:acme/demo.git\n`, 'FETCH_HEAD names the fetched branch');
+  const plain = await f.shim('git', ['fetch', '-q']);
+  assert.equal(plain.status, 0, plain.stderr);
+  assert.equal(plain.stderr, '');
+
+  // The task branch, once pushed through the broker over the same ssh URL.
+  const own = f.commit('mine.txt', 'mine\n');
+  const pushed = await f.shim('git', ['push', 'origin', 'HEAD']);
+  assert.equal(pushed.status, 0, pushed.stderr);
+  f.h.git(['update-ref', '-d', `refs/remotes/origin/${branch}`], f.wt.path);
+  const task = await f.shim('git', ['fetch', 'origin', branch]);
+  assert.equal(task.status, 0, task.stderr);
+  assert.equal(tracked(`refs/remotes/origin/${branch}`), own);
+
+  // Another branch on origin stays out of reach, and so do options the broker does not take.
+  f.h.git(['push', '-q', f.remote, `${main}:refs/heads/other`]);
+  for (const args of [['fetch', 'origin', 'other'], ['fetch', 'origin', 'refs/tags/v1'], ['fetch', 'origin', 'main:main'], ['fetch', '--unshallow', 'origin']]) {
+    const r = await f.shim('git', args);
+    assert.notEqual(r.status, 0, args.join(' '));
+    assert.match(r.stderr, /fetches|broker/, args.join(' '));
+  }
+  assert.equal(tracked('refs/remotes/origin/other'), '', 'nothing of another branch was recorded');
+  const refused = await f.raw({ fetch: { branches: ['other'] } });
+  assert.equal(refused.code, 1);
+  assert.match(refused.stderr, new RegExp(`fetches main, ${branch} from origin, not other`));
+
+  // pull cannot reach origin; the shim names the way that can.
+  const pull = await f.shim('git', ['pull']);
+  assert.equal(pull.status, 126);
+  assert.match(pull.stderr, /git fetch origin goes through the broker/);
+});
+
+// A reviewer's git directory is read-only under codex, and a disk can fill:
+// index-pack then exits while the broker still sends the pack. The fetch
+// must fail with index-pack's error, not wait on a drain that never comes
+// and exit 0 with origin's branches unchanged.
+test('a brokered fetch whose pack cannot be indexed fails with the reason', { skip: (process.platform === 'win32' || process.getuid?.() === 0) && 'needs a directory its user cannot write' }, async (t) => {
+  const f = await sshOriginFixture(t);
+  const before = f.h.git(['rev-parse', 'refs/remotes/origin/main'], f.wt.path);
+  // Random bytes do not compress, so the pack is larger than the pipe buffers on the way.
+  const other = fs.mkdtempSync(path.join(f.h.base, 'big-'));
+  f.h.git(['clone', '-q', f.remote, other]);
+  fs.writeFileSync(path.join(other, 'big.bin'), require('node:crypto').randomBytes(768 * 1024));
+  f.h.git(['add', 'big.bin'], other);
+  f.h.git(['commit', '-qm', 'big'], other);
+  f.h.git(['push', '-q', 'origin', 'HEAD:refs/heads/main'], other);
+  const pack = path.join(f.job.dispatch.gitDirs.common, 'objects', 'pack');
+  fs.mkdirSync(pack, { recursive: true });
+  fs.chmodSync(pack, 0o555);
+  let r;
+  try {
+    r = await f.shim('git', ['fetch', 'origin']);
+  } finally {
+    fs.chmodSync(pack, 0o755);
+  }
+  assert.notEqual(r.status, 0, r.stderr);
+  assert.match(r.stderr, /cannot index the pack the broker sent/);
+  assert.equal(f.h.git(['rev-parse', 'refs/remotes/origin/main'], f.wt.path), before, 'origin/main is unchanged');
+});
+
+test('the broker fetches only from the recorded repository, and any other origin is fetched in the sandbox', async (t) => {
+  const f = await pushFixture(t);
+  const r = await f.raw({ fetch: {} });
+  assert.equal(r.code, 1);
+  assert.match(r.stderr, /records no repository/);
+  f.h.ok(['project', 'set', '--repo', 'acme/demo', '--agent', 'owner']);
+  f.h.git(['remote', 'set-url', 'origin', 'https://github.com/acme/other.git']);
+  const other = await f.raw({ fetch: {} });
+  assert.equal(other.code, 1);
+  assert.match(other.stderr, /not the project's repository acme\/demo/);
+  // Any origin but the recorded repository runs as git's own fetch in the
+  // sandbox: a path on this machine, absolute or relative.
+  for (const url of [f.remote, path.relative(f.wt.path, f.remote)]) {
+    f.h.git(['remote', 'set-url', 'origin', url]);
+    const local = await f.shim('git', ['fetch', 'origin']);
+    assert.equal(local.status, 0, `${url}: ${local.stderr}`);
+    assert.doesNotMatch(local.stderr, /tower-crane/, url);
+  }
+});
+
 test('only a role whose agent file pushes can push through the broker, and only to the recorded repository', async (t) => {
   const f = await pushFixture(t, { role: 'reviewer' });
   const sha = f.h.git(['rev-parse', 'HEAD'], f.wt.path);
@@ -1077,6 +1233,56 @@ test('the agent\'s pack is quarantined until the checks pass, capped in size, an
   const ok = await f.raw({ push: { sha: large } });
   assert.equal(ok.code, 0, ok.stderr);
   assert.equal(f.remoteRef(`refs/heads/${f.task.branch}`), large);
+});
+
+// The cache lock every push and fetch of the project waits on is freed when
+// an agent stops reading its fetch's pack (idle cap) or reads it too slowly
+// (total cap), and when its push's pack trickles past the total cap.
+test('a fetch or push pack that outlasts its caps frees the cache lock', async (t) => {
+  const f = await sshOriginFixture(t);
+  const G = require('../lib/github-broker');
+  const saved = { ...G.LIMITS };
+  t.after(() => Object.assign(G.LIMITS, saved));
+  const lock = path.join(f.h.state, 'push', 'cache.lock');
+  // Larger than the socket buffers, so the broker's writes wait for a drain.
+  f.advance('big.bin', require('node:crypto').randomBytes(4 << 20));
+  const net = require('node:net');
+  const b = JSON.parse(fs.readFileSync(f.job.broker, 'utf8'));
+  // An agent that sends a fetch and never reads the answer.
+  const silent = () => new Promise((resolve) => {
+    const sock = b.socket ? net.connect(b.socket) : net.connect(b.port, b.host);
+    sock.on('error', () => {});
+    sock.on('connect', () => {
+      sock.pause();
+      sock.write(`${JSON.stringify({ token: b.token, fetch: {} })}\n`);
+      resolve(sock);
+    });
+  });
+  for (const [what, limits] of [['idle', { idleMs: 300, totalMs: saved.totalMs }], ['total', { idleMs: saved.idleMs, totalMs: 500 }]]) {
+    Object.assign(G.LIMITS, limits);
+    const sock = await silent();
+    await waitUntil(() => fs.existsSync(lock), { paths: [path.dirname(lock)], what: `${what}: the fetch takes the lock` });
+    await waitUntil(() => !fs.existsSync(lock), { paths: [path.dirname(lock)], what: `${what}: the cap frees the cache lock` });
+    sock.destroy();
+  }
+  Object.assign(G.LIMITS, saved);
+  // A push whose pack trickles in, a byte at a time, never idle.
+  G.LIMITS.totalMs = 500;
+  const sha = f.commit('slow.txt', 'slow\n');
+  const trickle = () => {
+    const out = new (require('node:stream').PassThrough)();
+    const timer = setInterval(() => out.write(Buffer.from([0x50])), 50); // wait-allow: the fixture's trickle rate, under the idle cap and over the total cap under test
+    out.on('close', () => clearInterval(timer));
+    out.stop = () => { clearInterval(timer); out.destroy(); };
+    return out;
+  };
+  const slow = await f.raw({ push: { sha } }, { pack: trickle });
+  assert.notEqual(slow.code, 0);
+  assert.match(slow.stderr, /took longer than 0 s|took longer than 1 s/);
+  assert.equal(fs.existsSync(lock), false, 'the push freed the cache lock');
+  Object.assign(G.LIMITS, saved);
+  const fetched = await f.shim('git', ['fetch', '-q', 'origin']);
+  assert.equal(fetched.status, 0, fetched.stderr);
 });
 
 // An agent that hangs up is stopped: a gh that prints nothing, and a push

@@ -8,6 +8,7 @@ const crypto = require('node:crypto');
 const { cachedFixture } = require('./helpers');
 const T = require('../lib/tasks');
 const { waitOnRepo } = require('./signals');
+const { sleepSync } = require('../lib/util');
 
 function setup(t) {
   return cachedFixture(t, 'durability', (h) => {
@@ -383,6 +384,95 @@ test('a reader that reads the other files after a commit\'s staged ones never ta
   assert.equal(st.project.goal, 'later goal');
   assert.ok(st.events.some((e) => e.id === later.id), 'the reader read again, with the event of the commit whose file it shows');
   assert.deepEqual(st.tasks.tasks[0].notes.map((n) => n.text), ['staged note']);
+});
+
+const noteEvent = (text) => ({ at: new Date().toISOString(), agent: 'owner', cmd: 'task note', task: 'T1', detail: { text }, id: `E${crypto.randomUUID()}`, type: 'owner-comment', to: 'orchestrator' });
+
+// A crashed append left a fragment exactly as long as the next commit's line.
+// Returns the step that plays recovery cutting it off the same file and that
+// commit appending its line and renaming tasks.json.
+function tornTail(h) {
+  const log = path.join(h.state, 'events.jsonl');
+  const tasks = path.join(h.state, 'tasks.json');
+  const next = noteEvent('next note');
+  const line = `${JSON.stringify(next)}\n`;
+  const base = fs.statSync(log).size;
+  fs.appendFileSync(log, JSON.stringify(noteEvent('F'.repeat(400))).slice(0, line.length));
+  return (read = fs.readFileSync) => {
+    fs.truncateSync(log, base);
+    fs.appendFileSync(log, line);
+    const doc = JSON.parse(read(tasks, 'utf8'));
+    doc.tasks[0].notes.push({ at: next.at, agent: 'owner', text: 'next note' });
+    doc.last_event = next.id;
+    fs.writeFileSync(`${tasks}.next`, JSON.stringify(doc, null, 2) + '\n');
+    fs.renameSync(`${tasks}.next`, tasks);
+    assert.equal(fs.statSync(log).size, base + line.length, 'the log kept its size');
+  };
+}
+
+// The cut and the append land after the reader read the log, before it reads tasks.json.
+function cutWhileReading(t, h, mode) {
+  const tasks = path.join(h.state, 'tasks.json');
+  const cut = tornTail(h);
+  if (mode === 'retained') t.after(S.retainEvents(h.state));
+  let fired = false;
+  const restore = readingWith(t, (file, text, original) => {
+    if (fired || file !== tasks) return;
+    fired = true;
+    cut(original);
+  }, { before: true });
+  const read = unlocked(h);
+  restore();
+  assert.ok(fired);
+  return read;
+}
+
+for (const mode of ['fresh', 'retained']) {
+  test(`a ${mode} reader sees a torn tail cut and an append of the same size as a changed log`, (t) => {
+    const h = setup(t);
+    assert.deepEqual(cutWhileReading(t, h, mode), { notes: ['next note'], logged: ['next note'] });
+    // A retained reader also keeps the next commit after the one it missed.
+    h.ok(['task', 'note', 'T1', 'later note']);
+    assert.deepEqual(unlocked(h), { notes: ['next note', 'later note'], logged: ['next note', 'later note'] });
+  });
+
+  // Times from another machine's clock, or times the filesystem never moves,
+  // look settled to this one: only the last line can tell.
+  test(`a ${mode} reader on a filesystem not known to be local checks the last line whatever the log's times`, { skip: process.platform !== 'linux' && 'only Linux reports a filesystem type' }, (t) => {
+    const h = setup(t);
+    const log = path.join(h.state, 'events.jsonl');
+    const { statfsSync, statSync, fstatSync, openSync, closeSync } = fs;
+    const frozen = Date.now() - 60000.5;
+    const logFds = new Set();
+    const freeze = (st) => Object.assign(st, { mtimeMs: frozen, ctimeMs: frozen });
+    fs.statfsSync = (dir, ...args) => ({ ...statfsSync(dir, ...args), type: 0x6969 });
+    fs.openSync = (file, ...args) => {
+      const fd = openSync(file, ...args);
+      if (path.resolve(String(file)) === log) logFds.add(fd);
+      return fd;
+    };
+    fs.closeSync = (fd) => { logFds.delete(fd); return closeSync(fd); };
+    fs.statSync = (file, ...args) => { const st = statSync(file, ...args); return st && path.resolve(String(file)) === log ? freeze(st) : st; };
+    fs.fstatSync = (fd, ...args) => { const st = fstatSync(fd, ...args); return logFds.has(fd) ? freeze(st) : st; };
+    t.after(() => Object.assign(fs, { statfsSync, statSync, fstatSync, openSync, closeSync }));
+    assert.deepEqual(cutWhileReading(t, h, mode), { notes: ['next note'], logged: ['next note'] });
+  });
+}
+
+test('a plain read of retained events after a cut and an equal-size append never vouches for the old last line', (t) => {
+  const h = setup(t);
+  t.after(S.retainEvents(h.state));
+  S.loadState(h.state);
+  const cut = tornTail(h);
+  // Each step lands at least one timestamp step after the one before, so the
+  // log's times read as settled.
+  sleepSync(30);
+  assert.deepEqual(unlocked(h), { notes: [], logged: [] }, 'the retained reader read the fragment');
+  cut();
+  sleepSync(30);
+  S.readEvents(h.state);
+  sleepSync(30);
+  assert.deepEqual(unlocked(h), { notes: ['next note'], logged: ['next note'] });
 });
 
 test('a reader that keeps losing waits only briefly for a held lock, then returns its last read', async (t) => {
