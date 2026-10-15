@@ -192,7 +192,7 @@ Not covered yet:
 
 ## Status
 
-0.1.0 is the first release, on npm as `@agent-sh/tower-crane`. [CHANGELOG.md](CHANGELOG.md) lists what it does.
+0.1.1 is the latest release, on npm as `@agent-sh/tower-crane`; 0.1.0 was the first. [CHANGELOG.md](CHANGELOG.md) lists what each release does.
 
 Works today: the state and the CLI, the software gates, independent review dispatch, stacks, the merge queue, spawn on all five harnesses with isolated homes on four of them, sandboxes and the state broker on Claude Code and Codex, the board, and the Claude Code plugin. This repository is built with it.
 
