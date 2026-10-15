@@ -700,6 +700,9 @@ function createProxy(opts) {
     let target;
     try {
       target = new URL(base + req.url);
+      // An absolute-form request target such as `http://host/x` appended to a base
+      // without a port changes the host, so a request is only sent to the base's origin.
+      if (target.origin !== new URL(base).origin) throw new Error('request leaves the upstream origin');
     } catch (error) {
       entry.status = 400;
       entry.error = 'invalid request path';
