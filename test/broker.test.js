@@ -1195,6 +1195,29 @@ test('a pack the broker refuses partway ends the agent\'s push at once and leave
     'nothing of the refused pack is in the cache');
 });
 
+// index-pack has just written the pack, and Windows refuses its move into the
+// cache for a moment while a scanner holds it.
+test('the broker waits out a refused move of the agent\'s pack into its cache', async (t) => {
+  const f = await pushFixture(t);
+  const sha = f.commit('a.txt', 'a\n');
+  const cache = path.join(f.h.state, 'push', 'cache.git');
+  const rename = fs.renameSync;
+  let refused = 0;
+  fs.renameSync = function busyPack(from, to, ...rest) {
+    if (!refused && String(to).startsWith(cache + path.sep) && String(to).endsWith('.pack')) {
+      refused++;
+      throw Object.assign(new Error(`EPERM: operation not permitted, rename '${from}' -> '${to}'`), { code: 'EPERM' });
+    }
+    return rename.call(this, from, to, ...rest);
+  };
+  t.after(() => { fs.renameSync = rename; });
+  const r = await f.raw({ push: { sha } });
+  fs.renameSync = rename;
+  assert.equal(refused, 1, 'the move of the pack was refused once');
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(f.remoteRef(`refs/heads/${f.task.branch}`), sha);
+});
+
 // A push refused after its pack was indexed leaves none of its objects; the
 // pack has a size cap and an idle limit, after which the cache lock is free.
 test('the agent\'s pack is quarantined until the checks pass, capped in size, and dropped when it stalls', async (t) => {

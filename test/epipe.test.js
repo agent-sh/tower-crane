@@ -44,6 +44,28 @@ test('a closed stdout pipe exits quietly after completing the state write', asyn
   assert.equal(h.readState('tasks.json').tasks[0].title, title);
 });
 
+test('a stdout pipe that reports EOF, as Windows does for a reader that is gone, exits quietly after the state write', async (t) => {
+  const h = makeRepo(t);
+  h.init();
+  const hook = path.join(__dirname, 'fixtures', 'stdout-eof.js').replace(/\\/g, '/');
+  const child = cp.spawn(process.execPath, [BIN, 'plan', 'import', '-', '--json'], {
+    cwd: h.repo,
+    env: { ...h.env, NODE_OPTIONS: `--require "${hook}"` },
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  const exited = waitForExit(child);
+  let stderr = '';
+  child.stderr.setEncoding('utf8');
+  child.stderr.on('data', (chunk) => { stderr += chunk; });
+  child.stdout.resume();
+  child.stdin.end(JSON.stringify([{ title: 'written before the pipe broke', acceptance: ['ready'] }]));
+  const result = await exited;
+  assert.equal(result.signal, null);
+  assert.equal(result.code, 0, stderr);
+  assert.doesNotMatch(stderr, /write EOF|Unhandled 'error' event/);
+  assert.equal(h.readState('tasks.json').tasks[0].title, 'written before the pipe broke');
+});
+
 test('a closed stderr pipe preserves the command exit code', async (t) => {
   const h = makeRepo(t);
   const child = cp.spawn(process.execPath, [BIN, 'task'], {
