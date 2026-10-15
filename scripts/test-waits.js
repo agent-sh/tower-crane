@@ -671,9 +671,10 @@ function killFindings(text, { aliases = true } = {}) {
   return findings.sort((a, b) => a.line - b.line);
 }
 
-// These replace process.kill to fake what a pid probe observes and forward
-// every other call to the original, which they must hold as an alias.
-const KILL_INTERPOSERS = new Set(['test/fixtures/hooks.js', 'test/fixtures/monitor-clock.js', 'test/spawn-resume.test.js']);
+// These replace process.kill to fake what a pid probe observes or when a signal
+// lands, and forward every other call to the original, which they must hold as
+// an alias.
+const KILL_INTERPOSERS = new Set(['test/fixtures/hooks.js', 'test/fixtures/monitor-clock.js', 'test/fixtures/slow-group-kill.js', 'test/spawn-resume.test.js']);
 
 function checkTestWaits(root) {
   const dir = path.join(root, 'test');

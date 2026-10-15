@@ -1098,9 +1098,12 @@ test('foreground exit waits until the retained stdout pipe has been captured', a
   h.ok(['ladder', 'set', 'easy', '--command', JSON.stringify([
     process.execPath, fixture, BIN, writerReady, writerRelease, writerPidFile, '{prompt}',
   ])]);
+  // The supervisor stops a holder five seconds after the harness exits; this
+  // test pins the wait before that, which a slow machine can outlast.
   const completed = h.runAsync(['spawn', '--task', 'T1', '--wait', '--json'], {
     env: {
       NODE_OPTIONS: `--require "${hook}"`,
+      TOWER_CRANE_TEST_HOLD_OUTPUT_RELEASE: '1',
     },
   });
   let result;

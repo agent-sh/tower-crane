@@ -7,6 +7,15 @@ const { writeAtomic } = require('../atomic-file');
 
 const entry = path.basename(process.argv[1] || '');
 
+// Holds back the output release deadline, so a test can watch the supervisor
+// wait on a retained pipe however long the machine takes to show it.
+if (entry === 'spawn-monitor.js' && process.env.TOWER_CRANE_TEST_HOLD_OUTPUT_RELEASE) {
+  const schedule = global.setTimeout;
+  global.setTimeout = function heldRelease(fn, ms, ...args) {
+    return schedule(fn, fn?.name === 'outputReleaseDeadline' ? 2147483647 : ms, ...args);
+  };
+}
+
 if (entry === 'tower-crane.js' && process.env.TOWER_CRANE_TEST_MONITOR_ARGV) {
   const original = cp.spawn;
   cp.spawn = function captureMonitorArgv(file, args, options) {

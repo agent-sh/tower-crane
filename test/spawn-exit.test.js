@@ -309,6 +309,257 @@ test('foreground exits without submit are reported from their recorded exit', as
   assertNoLogText(h);
 });
 
+// Linux and Windows stop a process outside the group that holds the output;
+// other systems only close the pipes.
+const TRACES_HOLDERS = ['linux', 'win32'].includes(process.platform);
+
+// A harness stand-in that leaves processes behind and exits. holder: a process
+// in a session of its own (outside the process group the monitor stops; Windows
+// has no group at all) that inherits the harness output, like a dev server or
+// a watcher. Its own end, a minute away, bounds the run when nothing stops it.
+// member: a process in the group that inherits the output and ignores SIGTERM.
+// bystander: a process outside the group that does not hold the output.
+// nested: the harness dispatches T2 before it exits, as an orchestrator does;
+// 'wait' leaves that dispatch running as a detached spawn --wait, the
+// supervisor's parent, outside the group.
+function leaver(h, { holder = false, member = false, bystander = false, nested = false, env = {} } = {}) {
+  const files = { holder: path.join(h.base, 'holder.json'), member: path.join(h.base, 'member.json'),
+    bystander: path.join(h.base, 'bystander.json'), nested: path.join(h.base, 'nested.json'), finish: path.join(h.base, 'nested.finish') };
+  const child = (signals) => `
+const fs = require('node:fs');
+${signals ? "process.on('SIGTERM', () => {});" : ''}
+fs.writeSync(1, 'child started\\n');
+fs.writeFileSync(process.argv[1] + '.tmp', JSON.stringify({ pid: process.pid }));
+fs.renameSync(process.argv[1] + '.tmp', process.argv[1]);
+setTimeout(() => { fs.writeFileSync(process.argv[1] + '.natural', ''); process.exit(0); }, 60000); // wait-allow: the child's own end bounds a run that nothing stops
+`;
+  const worker = path.join(h.base, 'leaver.js');
+  fs.writeFileSync(worker, `
+const fs = require('node:fs');
+const cp = require('node:child_process');
+const [bin, files] = [process.argv[2], JSON.parse(process.argv[3])];
+cp.execFileSync(process.execPath, [bin, 'claim', process.env.TOWER_CRANE_TASK]);
+const start = (file, script, options) => {
+  cp.spawn(process.execPath, ['-e', script, file], { windowsHide: true, ...options }).unref();
+  while (!fs.existsSync(file)) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20); // wait-allow: the harness exits only once its children run
+};
+if (${!!nested}) {
+  const env = { ...process.env, TOWER_CRANE_AGENT: 'orchestrator' };
+  for (const key of ['TOWER_CRANE_TASK', 'TOWER_CRANE_HOOK', 'TOWER_CRANE_SESSION']) delete env[key];
+  if (${JSON.stringify(nested)} === 'wait') {
+    cp.spawn(process.execPath, [bin, 'spawn', '--role', 'medium', '--task', 'T2', '--wait'], { env, detached: true, stdio: 'ignore', windowsHide: true }).unref();
+  } else {
+    cp.execFileSync(process.execPath, [bin, 'spawn', '--role', 'medium', '--task', 'T2', '--json'], { env, stdio: ['ignore', 'ignore', 'inherit'] });
+  }
+  while (!fs.existsSync(files.nested)) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20); // wait-allow: the nested harness reports its pid
+}
+if (${holder}) start(files.holder, ${JSON.stringify(child(false))}, { detached: true, stdio: ['ignore', 'inherit', 'inherit'] });
+if (${member}) start(files.member, ${JSON.stringify(child(true))}, { stdio: ['ignore', 'inherit', 'inherit'] });
+if (${bystander}) start(files.bystander, ${JSON.stringify(child(false))}, { detached: true, stdio: 'ignore' });
+fs.writeSync(1, 'harness done\\n');
+`);
+  h.ok(['ladder', 'set', 'easy', '--harness', 'command', '--command', JSON.stringify([process.execPath, worker, BIN, JSON.stringify(files), '{prompt}']),
+    '--clear', 'profile', '--clear', 'effort']);
+  if (nested) {
+    const inner = path.join(h.base, 'nested.js');
+    fs.writeFileSync(inner, `
+const fs = require('node:fs');
+fs.writeFileSync(process.argv[2] + '.tmp', JSON.stringify({ pid: process.pid }));
+fs.renameSync(process.argv[2] + '.tmp', process.argv[2]);
+setInterval(() => { if (fs.existsSync(process.argv[3])) { fs.writeSync(1, 'nested done\\n'); process.exit(0); } }, 25); // wait-allow: the nested harness runs until the test lets it end
+`);
+    h.ok(['task', 'add', '--title', 'Nested task', '--tier', 'medium', '--acceptance', 'runs beside T1']);
+    h.ok(['brief', 'set', 'T2', '-'], { input: 'Work on T2.\n' });
+    h.ok(['ladder', 'set', 'medium', '--harness', 'command', '--command', JSON.stringify([process.execPath, inner, files.nested, files.finish, '{prompt}']),
+      '--clear', 'profile', '--clear', 'effort']);
+  }
+  h.stopWorkers.push(() => {
+    fs.writeFileSync(files.finish, '');
+    for (const file of [files.holder, files.member, files.bystander]) {
+      if (!fs.existsSync(file)) continue;
+      try { killPid(JSON.parse(readPublished(file, 'utf8')).pid, 'SIGKILL'); } catch (e) { if (e.code !== 'ESRCH') throw e; }
+    }
+  });
+  const pid = (file) => JSON.parse(readPublished(file, 'utf8')).pid;
+  const result = h.run(['spawn', '--role', 'easy', '--task', 'T1', '--wait'], { env });
+  const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  const exit = events.findLast((e) => e.cmd === 'spawn exit' && e.task === 'T1');
+  return { result, files, pid, events, exit };
+}
+
+test('a descendant that keeps the harness output open is stopped and spawn --wait finishes', async (t) => {
+  const h = setup(t);
+  const { result, files, pid, exit } = leaver(h, { holder: true });
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(fs.existsSync(files.holder + '.natural'), false, 'spawn --wait waited for the holder to end on its own');
+  assert.match(result.stdout, /child started/);
+  assert.match(result.stdout, /harness done/);
+  assert.match(result.stderr, /output stayed open/, JSON.stringify({ stdout: result.stdout, exit: exit.detail }));
+  assert.equal(exit.detail.code, 0);
+  if (TRACES_HOLDERS) {
+    assert.equal(detachedAlive({ pid: pid(files.holder) }), false, 'the descendant holding the output still runs');
+    assert.deepEqual(exit.detail.output_held.pids, [pid(files.holder)]);
+  } else {
+    // Nothing outside the group is claimed stopped where none can be traced.
+    assert.deepEqual(exit.detail.output_held.pids, []);
+  }
+});
+
+test('a group member that ignores SIGTERM is not an output holder, and processes outside the group stay', {
+  skip: process.platform === 'win32' && 'POSIX process groups',
+}, async (t) => {
+  const h = setup(t);
+  // The member outlives the harness by the five-second group grace and then a
+  // second more, so the group is still there when that grace ends.
+  const hook = path.join(__dirname, 'fixtures', 'slow-group-kill.js').replace(/\\/g, '/');
+  const { result, files, pid, exit } = leaver(h, { member: true, bystander: true,
+    env: { NODE_OPTIONS: `--require "${hook}"`, TOWER_CRANE_TEST_SLOW_GROUP_KILL: '1000' } });
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(fs.existsSync(files.member + '.natural'), false, 'the group member ended on its own');
+  assert.equal(detachedAlive({ pid: pid(files.member) }), false, 'SIGKILL did not reach the group member');
+  assert.doesNotMatch(result.stderr, /output stayed open/);
+  assert.equal(exit.detail.output_held, undefined);
+  assert.equal(detachedAlive({ pid: pid(files.bystander) }), true, 'a process that held no output was stopped');
+});
+
+for (const nested of [true, 'wait']) {
+test(`a task an agent dispatches survives the output release of the agent that started it${nested === 'wait' ? ', with its dispatch left running' : ''}`, async (t) => {
+  const h = setup(t);
+  const { result, files, pid, events, exit } = leaver(h, { holder: true, nested });
+  assert.equal(result.code, 0, result.stderr);
+  const spawned = events.findLast((e) => e.cmd === 'spawn' && e.task === 'T2').detail;
+  const inner = { pid: pid(files.nested), ...(process.platform === 'win32' ? {} : { startTicks: spawned.start_ticks }) };
+  const why = () => JSON.stringify({ stderr: result.stderr, t1: exit.detail,
+    t2: fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse).filter((e) => e.task === 'T2').map((e) => [e.cmd, e.detail.phase, e.detail.reason]),
+    log: fs.existsSync(spawned.log) ? readPublished(spawned.log, 'utf8').slice(-2000) : null });
+  assert.equal(detachedAlive(inner), true, `the nested harness was stopped: ${why()}`);
+  assert.equal(detachedAlive({ pid: spawned.monitor_pid }), true, `the nested supervisor was stopped: ${why()}`);
+  assert.ok(exit.detail.output_held, `no output release: ${why()}`);
+  for (const stopped of exit.detail.output_held.pids) assert.ok(![inner.pid, spawned.monitor_pid].includes(stopped), JSON.stringify(exit.detail.output_held));
+  fs.writeFileSync(files.finish, '');
+  await waitOnRepo(h, () => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse)
+    .some((e) => e.cmd === 'spawn exit' && e.task === 'T2'), 'the nested task did not finish');
+});
+}
+
+test('the Windows tree of an exited harness keeps only processes it started', () => {
+  const { windowsTree } = require('../lib/processes');
+  // Harness pid 10 ran from 1000 to 2000; pid 10 was then reused at 5000.
+  const rows = [
+    { pid: 11, parent: 10, start: 1500 }, // its child, still running
+    { pid: 12, parent: 11, start: 3000 }, // started by that child after the harness exited
+    { pid: 13, parent: 10, start: 800 }, // a child of an earlier pid 10
+    { pid: 14, parent: 10, start: 5100 }, // a child of the process that reused pid 10
+    { pid: 15, parent: 14, start: 5200 },
+    { pid: 16, parent: 11, start: 1200 }, // names pid 11 but started before it: an earlier pid 11's child
+    { pid: 17, parent: 99, start: 1600 }, // a grandchild whose parent already exited
+    { pid: 18, parent: 10, start: 2050 }, // a child within the clock allowance of the observed exit
+  ];
+  assert.deepEqual(windowsTree(rows, 10, 1000, 2000).map((r) => r.pid), [11, 18, 12]);
+  assert.deepEqual(windowsTree([], 10, 1000, 2000), []);
+});
+
+// Windows PowerShell on Windows; elsewhere PowerShell 7 when it is installed
+// (GitHub's Ubuntu runners have it), which runs the same script.
+const POWERSHELL = process.platform === 'win32' ? 'powershell.exe'
+  : cp.spawnSync('pwsh', ['-NoProfile', '-NonInteractive', '-Command', 'exit 0'], { stdio: 'ignore', timeout: 300000 }).status === 0 ? 'pwsh' : null;
+
+test('the Windows stop takes one target, skips a target that is gone and leaves a reused pid alone', {
+  skip: !POWERSHELL && 'no PowerShell',
+}, async (t) => {
+  const { windowsStop } = require('../lib/processes');
+  const execFile = (file, args, options, callback) => cp.execFile(POWERSHELL, args, options, callback);
+  const started = [];
+  t.after(() => {
+    for (const child of started) {
+      if (child.exitCode === null && child.signalCode === null) killPid(child.pid, 'SIGKILL');
+    }
+  });
+  const start = () => {
+    const child = cp.spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore', windowsHide: true }); // wait-allow: a process that runs until it is stopped
+    started.push(child);
+    return child;
+  };
+  const startTime = (pid) => Number(cp.execFileSync(POWERSHELL, ['-NoProfile', '-NonInteractive', '-Command',
+    `([DateTimeOffset](Get-Process -Id ${pid}).StartTime.ToUniversalTime()).ToUnixTimeMilliseconds()`], { encoding: 'utf8', timeout: 300000 }).trim());
+  // One target: a list PowerShell would unroll to two numbers.
+  const lone = start();
+  assert.deepEqual(await windowsStop(execFile, [{ pid: lone.pid, start: startTime(lone.pid) }], 300000),
+    [{ pid: lone.pid, outcome: 'stopped' }]);
+  await childExit(lone, { signal: t.signal });
+  // The last target exited before its turn; the one before it still stops.
+  const kept = start();
+  const gone = start();
+  const goneStart = startTime(gone.pid);
+  killPid(gone.pid, 'SIGKILL');
+  await childExit(gone, { signal: t.signal });
+  const reused = start();
+  assert.deepEqual(await windowsStop(execFile, [
+    { pid: kept.pid, start: startTime(kept.pid) },
+    { pid: reused.pid, start: startTime(reused.pid) - 5000 },
+    { pid: gone.pid, start: goneStart },
+  ], 300000), [
+    { pid: kept.pid, outcome: 'stopped' },
+    { pid: reused.pid, outcome: 'reused' },
+    { pid: gone.pid, outcome: 'gone' },
+  ]);
+  await childExit(kept, { signal: t.signal });
+  assert.equal(reused.exitCode === null && reused.signalCode === null, true, 'a pid with another creation time was stopped');
+});
+
+test('the Windows stop splits a long target list into calls that fit a Windows command line', async () => {
+  const { windowsStop } = require('../lib/processes');
+  const lengths = [];
+  // Stands in for PowerShell: reads the targets back from the encoded script.
+  const execFile = (file, args, options, callback) => {
+    lengths.push([file, ...args].join(' ').length);
+    const script = Buffer.from(args.at(-1), 'base64').toString('utf16le');
+    const list = /^\$t = @\(([\d,]*)\)$/m.exec(script)[1].split(',');
+    const out = [];
+    for (let i = 0; i < list.length; i += 2) out.push(`${list[i]} gone`);
+    callback(null, out.join('\n'));
+  };
+  // The widest pids and creation times a target can have.
+  const targets = Array.from({ length: 1000 }, (_, i) => ({ pid: 4294967295 - i, start: 9999999999999 }));
+  const outcomes = await windowsStop(execFile, targets, 300000);
+  assert.deepEqual(outcomes, targets.map((target) => ({ pid: target.pid, outcome: 'gone' })));
+  assert.ok(lengths.length > 1, 'a thousand targets went in one call');
+  for (const length of lengths) assert.ok(length < 32767, `a command line of ${length} characters`);
+});
+
+test('the Windows tree of an exited harness spares a supervisor, what runs below it and its parent', () => {
+  const { windowsTree } = require('../lib/processes');
+  const rows = [
+    { pid: 11, parent: 10, start: 1500 }, // a foreground dispatch the harness left running
+    { pid: 12, parent: 11, start: 1600, supervisor: true }, // the supervisor in that dispatch's job
+    { pid: 13, parent: 12, start: 1700 }, // that supervisor's harness
+    { pid: 14, parent: 10, start: 1550 }, // a holder
+    { pid: 15, parent: 10, start: 1560, supervisor: true }, // a supervisor the harness started itself
+    { pid: 16, parent: 15, start: 1570 },
+  ];
+  assert.deepEqual(windowsTree(rows, 10, 1000, 2000).map((r) => r.pid), [14]);
+});
+
+test('a supervisor is known by its command line in every shape Windows shows it', () => {
+  const { supervisorCommand } = require('../lib/processes');
+  for (const command of [
+    // As a Windows CI runner launched one.
+    '"C:\\hostedtoolcache\\windows\\node\\26.12.0\\x64\\node.exe" D:\\a\\tower-crane\\tower-crane\\lib\\spawn-monitor.js D:\\a\\_temp\\tower-crane-tests\\tower-crane-EdyGw4\\repo\\.tower-crane\\cache\\spawn-1\\job.json',
+    '"C:\\Program Files\\nodejs\\node.exe" --max-old-space-size=4096 "C:\\Users\\a b\\tool\\lib\\spawn-monitor.js" "C:\\Users\\a b\\job.json"',
+    'node C:/tool/lib/SPAWN-MONITOR.JS job.json',
+    'node spawn-monitor.js',
+  ]) assert.equal(supervisorCommand(command), true, command);
+  for (const command of ['node my-spawn-monitor.js', 'node spawn-monitor.jsx', 'node C:\\tool\\bin\\tower-crane.js spawn --wait', '', null]) {
+    assert.equal(supervisorCommand(command), false, String(command));
+  }
+});
+
+test('a launch keeps an outer gate run marker and drops an outer spawn run marker', () => {
+  const { cleanAgentEnv } = require('../lib/spawn-settings');
+  assert.deepEqual(cleanAgentEnv({ TOWERCRANE_SPAWN_RUN_1_ab: '1', TOWERCRANE_GATE_RUN_2_cd: '1', KEEP: 'x' }),
+    { TOWERCRANE_GATE_RUN_2_cd: '1', KEEP: 'x' });
+});
+
 test('a missing log does not hide an exited claimant', async (t) => {
   const h = setup(t);
   const spawned = await start(t, h);
