@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.1.2 (2026-10-15)
+
+### Agents and sandboxes
+
+- `spawn --wait` and the supervisor no longer wait forever when a process the agent started, such as a dev server or a watcher, keeps the harness output open after the harness exits. Five seconds after the harness and its group stop, the supervisor stops the processes it can trace to that harness on Linux and Windows, keeps the output it read, records them as `output_held` in the `spawn exit` event, and finishes. Elsewhere it closes the output without stopping them. It never stops a Tower Crane supervisor or anything under one, so tasks an agent dispatched keep running.
+- The CLI and the supervisor treat a Windows `EOF` write error like `EPIPE`, so a command whose output reader is gone no longer crashes.
+- On Windows, spawn no longer fails when the freshly copied skill store cannot be renamed for a moment (EPERM while a scanner or the indexer holds the new files). The rename is retried for up to 2 s, as state writes are. The same retry covers the rename that keeps a failed start's log and the broker's move of an agent's pack into its push cache. A log that still cannot be renamed stays under the agent's log name, and spawn reports the startup failure and that path instead of EPERM.
+- A failed start's log no longer blocks later spawns of the task with `EEXIST: log already exists`. When no running spawn can own it, spawn moves it to a `-startup-failed-<time>.log` name, says so on stderr, and starts.
+
+### State
+
+- On Windows, state reads and existence checks wait out a sharing refusal (EPERM, EACCES or EBUSY) for up to 2 s, as state writes already did. Before, a CLI read without the lock failed outright, a refused existence check looked like a removed state directory, and a supervisor whose periodic read met a rename in progress failed with `supervisor failed: EPERM` and stopped its worker mid-edit. Other platforms still fail at once.
+
 ## 0.1.1 (2026-10-15)
 
 ### Agents and sandboxes
