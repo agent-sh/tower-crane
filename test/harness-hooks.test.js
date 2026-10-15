@@ -1,6 +1,6 @@
 'use strict';
 
-const { fileWritten } = require('./signals');
+const { fileWritten, killGroup } = require('./signals');
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -15,20 +15,36 @@ const STUB = path.join(__dirname, 'fixtures', 'message-harness.js');
 const events = (h) => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
 
 // spawn --wait in the background. The harness signals through files, and only
-// after spawn launched it, so a wait for a signal ends when spawn exits first
-// and names spawn's output: a failed start must not read as a hung test.
-function dispatch(h, opts = {}) {
+// after spawn launched it, so a wait for a signal ends once spawn's streams
+// close and names all of spawn's output: a failed start must not read as a
+// hung test. A spawn still running when the runner aborts the test (its
+// timeout) prints its output and is stopped, so a hang at `await run` names
+// what spawn was doing too.
+function dispatch(t, h, opts = {}) {
   let child;
   let output = '';
+  let closed = false;
   const run = h.runAsync(['spawn', '--task', 'T1', '--wait', '--json'], {
     ...opts,
+    detached: true,
     onSpawn: (c) => {
       child = c;
       for (const stream of [c.stdout, c.stderr]) stream.on('data', (d) => { output += d; });
+      c.on('close', () => { closed = true; });
     },
   });
+  const abort = () => {
+    if (closed) return;
+    process.stderr.write(`spawn --wait (pid ${child.pid}) still running when the test was aborted (${t.signal.reason?.message || t.signal.reason}); spawn output so far: ${output.trim() || '(none)'}\n`);
+    if (process.platform === 'win32') cp.spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore', timeout: 300000 });
+    else {
+      try { killGroup(child.pid, 'SIGKILL'); } catch (e) { if (e.code !== 'ESRCH') throw e; }
+    }
+  };
+  t.signal.addEventListener('abort', abort, { once: true });
+  run.then(() => t.signal.removeEventListener('abort', abort));
   const signal = (file) => fileWritten(file, {
-    alive: child,
+    alive: () => !closed,
     what: () => `harness signal ${path.basename(file)} during spawn --wait; spawn output: ${output.trim() || '(none)'}`,
   });
   return { run, signal };
@@ -70,7 +86,7 @@ for (const route of ['claude', 'codex', 'codex-notify', 'pi', 'opencode', 'agy',
     const harness = route === 'codex-notify' ? 'codex' : route;
     const { h, ready, out } = setup(t, harness);
     if (route === 'codex-notify') h.env.MESSAGE_NOTIFY_ONLY = '1';
-    const { run, signal } = dispatch(h);
+    const { run, signal } = dispatch(t, h);
     await signal(ready);
     if (harness === 'claude') {
       const settings = JSON.parse(fs.readFileSync(path.join(h.state, 'homes', 'worker-T1-1', 'settings.json')));
@@ -149,7 +165,7 @@ test('successful push and PR creation publish events, and submitted stops retain
   } else {
     fs.writeFileSync(path.join(bin, 'gh'), `#!${process.execPath}\nrequire(${JSON.stringify(script)});\n`, { mode: 0o755 });
   }
-  const { run, signal } = dispatch(h, {
+  const { run, signal } = dispatch(t, h, {
     env: { MESSAGE_COMMANDS: '1', MESSAGE_REMOTE: remote, MESSAGE_SUBMIT: '1' },
   });
   await signal(ready);
@@ -169,7 +185,7 @@ test('successful push and PR creation publish events, and submitted stops retain
 
 test('R1: a push or PR event recorded with no command is marked as an unverified hint', async (t) => {
   const { h, ready } = setup(t, 'command');
-  const { run, signal } = dispatch(h);
+  const { run, signal } = dispatch(t, h);
   await signal(ready);
   fs.writeFileSync(ready + '.go', '');
   assert.equal((await run).code, 0);
@@ -184,7 +200,7 @@ test('R1: a push or PR event recorded with no command is marked as an unverified
 
 test('the bridge refuses path-selected bindings and another dispatch identity', async (t) => {
   const { h, ready } = setup(t, 'command');
-  const { run, signal } = dispatch(h);
+  const { run, signal } = dispatch(t, h);
   await signal(ready);
   fs.writeFileSync(ready + '.go', '');
   assert.equal((await run).code, 0);
@@ -213,7 +229,7 @@ test('the bridge refuses path-selected bindings and another dispatch identity', 
 
 test('the hook bridge reads hook input from a non-blocking stdin pipe', { skip: process.platform === 'win32' && 'needs a FIFO' }, async (t) => {
   const { h, ready } = setup(t, 'command');
-  const { run, signal } = dispatch(h);
+  const { run, signal } = dispatch(t, h);
   await signal(ready);
   fs.writeFileSync(ready + '.go', '');
   assert.equal((await run).code, 0);
@@ -254,7 +270,7 @@ test('the hook bridge reads hook input from a non-blocking stdin pipe', { skip: 
 for (const probe of ['sessions', 'reject', 'error']) {
   test(`OpenCode ${probe}: idle delivers only to the dispatch session and retains failed prompts`, async (t) => {
     const { h, ready, out } = setup(t, 'opencode');
-    const { run, signal } = dispatch(h, {
+    const { run, signal } = dispatch(t, h, {
       env: { MESSAGE_OPENCODE_PROBE: probe },
     });
     await signal(ready);
@@ -283,7 +299,7 @@ for (const probe of ['sessions', 'reject', 'error']) {
 test('transient resumes inject queued messages without a worker checking its inbox', async (t) => {
   const { h, ready, out } = setup(t, 'command');
   h.ok(['ladder', 'set', 'easy', '--supervision', JSON.stringify({ retries: 1, backoff_ms: 100, max_backoff_ms: 100 })]);
-  const { run, signal } = dispatch(h, { env: { MESSAGE_RETRY: '1' } });
+  const { run, signal } = dispatch(t, h, { env: { MESSAGE_RETRY: '1' } });
   await signal(ready);
   h.ok(['msg', '--to', 'worker-T1-1', 'resume with this correction', '--agent', 'orchestrator']);
   fs.writeFileSync(ready + '.go', '');
@@ -319,7 +335,7 @@ for (const [mode, heldAt, note] of HEADLESS) {
   const expected = heldAt >= 0 ? 'holds the unsubmitted worker once, in the foreground' : 'does not hold';
   test(`headless claude ${mode}: Stop ${expected}`, async (t) => {
     const { h, ready, out } = setup(t, 'claude');
-    const { run, signal } = dispatch(h, { env: { MESSAGE_HEADLESS: mode } });
+    const { run, signal } = dispatch(t, h, { env: { MESSAGE_HEADLESS: mode } });
     await signal(ready);
     fs.writeFileSync(ready + '.go', '');
     const result = await run;
