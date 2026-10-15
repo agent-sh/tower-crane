@@ -120,6 +120,8 @@ test('the npm package ships the plugin and loads pi skills through its CLI', (t)
   for (const [rung, skill] of [['medium', 'tower-crane-work'], ['review', 'tower-crane-review']]) {
     cli(['ladder', 'set', rung, '--harness', 'pi', '--model', 'provider/fixture-model', '--clear', 'profile', '--clear', 'effort']);
     const out = JSON.parse(cli(['spawn', '--role', rung, '--task', 'T1', '--dry-run', '--json']));
-    assert.equal(out.argv[out.argv.indexOf('--skill') + 1], path.join(installed, 'skills', skill));
+    // The installed package's skills, copied into the state directory's skill store at launch.
+    const store = require(path.join(installed, 'lib', 'agents.js')).skillStore({}, h.state).dir;
+    assert.equal(out.argv[out.argv.indexOf('--skill') + 1], path.join(store, skill));
   }
 });

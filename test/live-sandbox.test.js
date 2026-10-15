@@ -639,7 +639,7 @@ test('in a real claude sandbox a worker reads the SKILL.md path it is told to re
   console.log(`claude skill probe: ${last.result}; denials ${JSON.stringify(last.permission_denials || [])}`);
   assert.deepEqual((last.permission_denials || []).filter((d) => d.tool_name === 'Read'), [], 'no Read was denied');
   assert.ok(last.result.includes(`READ=${token}`), `the Read tool returned the stored file\n${agentLog(h)}`);
-  assert.equal(fs.existsSync(bash) && fs.readFileSync(bash, 'utf8').trim(), token, `Bash read the stored file\n${agentLog(h)}`);
+  assert.equal(fs.existsSync(bash) && fs.readFileSync(bash, 'utf8').trim(), token, `Bash read the stored file\n${agentLog(h)}`); // read-published: the agent's cat wrote it and exited before spawn --wait returned
   const home = fs.readdirSync(path.join(h.state, 'homes')).find((d) => d.startsWith('worker-'));
   const named = fs.readFileSync(path.join(h.state, 'homes', home, 'CLAUDE.md'), 'utf8').match(SKILL_PATHS) || [];
   assert.deepEqual(named, [path.join(store, 'tower-crane-work', 'SKILL.md')], 'the home names the stored skill');
