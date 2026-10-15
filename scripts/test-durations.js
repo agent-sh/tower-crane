@@ -8,7 +8,8 @@
 //
 // It reads the `npm test` step of every `test (<os>, node <n>, shard <i>/<n>)` job,
 // sums each top-level test's reported duration into the file that defines the test
-// title, and averages a file over the jobs that ran it. Titles come from the test
+// title, and averages a file over the jobs that ran it. Files the runs did not measure,
+// such as those of a failed shard, keep their old time. Titles come from the test
 // files in this checkout, so the table follows files that were split or renamed
 // since the run. Each platform gets its own table: Windows and Linux differ in
 // which files are slow. Needs `gh` signed in with read access to the repository.
@@ -148,18 +149,44 @@ function main(runs) {
       for (const [file, s] of Object.entries(times)) (platform[file] ||= []).push(s);
     }
   }
-  const table = {};
-  for (const platform of Object.keys(samples).sort()) {
-    table[platform] = Object.fromEntries(Object.entries(samples[platform]).sort(([a], [b]) => a.localeCompare(b))
-      .map(([file, list]) => [file, Math.round(10 * list.reduce((a, b) => a + b, 0) / list.length) / 10]));
-  }
-  if (!Object.keys(table).length) {
+  if (!Object.keys(samples).length) {
     console.error('no successful test jobs in those runs');
     process.exit(1);
+  }
+  const before = fs.existsSync(OUT) ? JSON.parse(fs.readFileSync(OUT, 'utf8')) : {};
+  const { testFiles } = require(path.join(ROOT, 'test', 'run.js'));
+  const { table, changes } = mergeTable(before, samples, testFiles());
+  for (const [platform, c] of Object.entries(changes)) {
+    console.error(`${platform}: ${c.measured.length} measured`);
+    for (const [label, list] of [['kept their old time', c.kept], ['new', c.added], ['gone from the checkout', c.dropped]]) {
+      if (list.length) console.error(`  ${label}: ${list.join(' ')}`);
+    }
   }
   fs.writeFileSync(OUT, `${JSON.stringify(table, null, 2)}\n`);
   console.error(`wrote ${path.relative(ROOT, OUT)}`);
 }
 
+// The new table: each measured file gets the mean of its samples, a file the runs did not
+// measure (its shard failed, say) keeps its old time, and only files no longer in FILES go.
+function mergeTable(before, samples, files) {
+  const present = new Set(files);
+  const table = {};
+  const changes = {};
+  for (const platform of [...new Set([...Object.keys(before), ...Object.keys(samples)])].sort()) {
+    const old = before[platform] || {};
+    const measured = Object.fromEntries(Object.entries(samples[platform] || {}).filter(([file]) => present.has(file))
+      .map(([file, list]) => [file, Math.round(10 * list.reduce((a, b) => a + b, 0) / list.length) / 10]));
+    const merged = { ...Object.fromEntries(Object.entries(old).filter(([file]) => present.has(file))), ...measured };
+    table[platform] = Object.fromEntries(Object.entries(merged).sort(([a], [b]) => a.localeCompare(b)));
+    changes[platform] = {
+      measured: Object.keys(measured).sort(),
+      kept: Object.keys(old).filter((file) => present.has(file) && !(file in measured)).sort(),
+      added: Object.keys(measured).filter((file) => !(file in old)).sort(),
+      dropped: Object.keys(old).filter((file) => !present.has(file)).sort(),
+    };
+  }
+  return { table, changes };
+}
+
 if (require.main === module) main(process.argv.slice(2));
-module.exports = { declarations, results, fileTimes, titles };
+module.exports = { declarations, results, fileTimes, titles, mergeTable };

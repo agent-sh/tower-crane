@@ -66,6 +66,7 @@
   "test/automation-helpers.js": ["test/automation-dispatch.test.js","test/automation-gates.test.js","test/automation.test.js"],
   "test/browser.js": ["test/board.test.js","test/live-browser.test.js","test/settings.test.js"],
   "test/canary.js": ["test/automation-dispatch.test.js","test/automation-gates.test.js","test/automation.test.js","test/secret-canary.test.js"],
+  "test/durations.json": ["test/shard.test.js"],
   "test/fixtures/automation-gh.js": ["test/automation-dispatch.test.js","test/automation-gates.test.js","test/automation.test.js"],
   "test/fixtures/automation-harness.js": ["test/automation-dispatch.test.js","test/automation-gates.test.js","test/automation.test.js"],
   "test/fixtures/bedrock-outage.json": ["test/supervision.test.js"],

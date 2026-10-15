@@ -7,7 +7,7 @@ const cp = require('node:child_process');
 const { ROOT } = require('./helpers');
 const { HUNG_TEST_MS } = require('./signals');
 const { testFiles, shardFiles, fileDurations } = require('./run');
-const { declarations, fileTimes } = require('../scripts/test-durations');
+const { declarations, fileTimes, mergeTable } = require('../scripts/test-durations');
 
 const FIXTURES = ['a', 'b', 'c', 'd'].map((name) => path.join('test', 'fixtures', 'shard', `${name}.test.js`));
 
@@ -106,4 +106,18 @@ test('TC_TEST_SHARD makes the runner run only the files of the shard it names', 
   const invalid = run('4/3');
   assert.equal(invalid.status, 1);
   assert.match(invalid.stderr, /TC_TEST_SHARD requires INDEX\/TOTAL/);
+});
+
+test('a durations refresh from a run with a failed shard keeps the old times of the files it did not measure', () => {
+  const before = { linux: { 'test/a.test.js': 10, 'test/b.test.js': 20, 'test/gone.test.js': 5 }, win32: { 'test/a.test.js': 30 } };
+  // Only the shard with a.test.js and the new c.test.js succeeded, on Linux only.
+  const samples = { linux: { 'test/a.test.js': [12, 14], 'test/c.test.js': [3] } };
+  const { table, changes } = mergeTable(before, samples, ['test/a.test.js', 'test/b.test.js', 'test/c.test.js']);
+  assert.deepEqual(table, {
+    linux: { 'test/a.test.js': 13, 'test/b.test.js': 20, 'test/c.test.js': 3 },
+    win32: { 'test/a.test.js': 30 },
+  });
+  assert.deepEqual(changes.linux, { measured: ['test/a.test.js', 'test/c.test.js'], kept: ['test/b.test.js'],
+    added: ['test/c.test.js'], dropped: ['test/gone.test.js'] });
+  assert.deepEqual(changes.win32, { measured: [], kept: ['test/a.test.js'], added: [], dropped: [] });
 });
