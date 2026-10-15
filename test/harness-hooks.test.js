@@ -14,7 +14,25 @@ const S = require('../lib/state');
 const STUB = path.join(__dirname, 'fixtures', 'message-harness.js');
 const events = (h) => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
 
-const until = (file) => fileWritten(file);
+// spawn --wait in the background. The harness signals through files, and only
+// after spawn launched it, so a wait for a signal ends when spawn exits first
+// and names spawn's output: a failed start must not read as a hung test.
+function dispatch(h, opts = {}) {
+  let child;
+  let output = '';
+  const run = h.runAsync(['spawn', '--task', 'T1', '--wait', '--json'], {
+    ...opts,
+    onSpawn: (c) => {
+      child = c;
+      for (const stream of [c.stdout, c.stderr]) stream.on('data', (d) => { output += d; });
+    },
+  });
+  const signal = (file) => fileWritten(file, {
+    alive: child,
+    what: () => `harness signal ${path.basename(file)} during spawn --wait; spawn output: ${output.trim() || '(none)'}`,
+  });
+  return { run, signal };
+}
 
 // Built once per process for each harness and copied for each test.
 function setup(t, harness) {
@@ -52,8 +70,8 @@ for (const route of ['claude', 'codex', 'codex-notify', 'pi', 'opencode', 'agy',
     const harness = route === 'codex-notify' ? 'codex' : route;
     const { h, ready, out } = setup(t, harness);
     if (route === 'codex-notify') h.env.MESSAGE_NOTIFY_ONLY = '1';
-    const run = h.runAsync(['spawn', '--task', 'T1', '--wait', '--json']);
-    await until(ready);
+    const { run, signal } = dispatch(h);
+    await signal(ready);
     if (harness === 'claude') {
       const settings = JSON.parse(fs.readFileSync(path.join(h.state, 'homes', 'worker-T1-1', 'settings.json')));
       for (const event of ['UserPromptSubmit', 'PostToolUse', 'Stop']) {
@@ -64,7 +82,7 @@ for (const route of ['claude', 'codex', 'codex-notify', 'pi', 'opencode', 'agy',
     fs.writeFileSync(ready + '.go', '');
     const live = ['claude', 'codex', 'pi', 'opencode'].includes(harness) && route !== 'codex-notify';
     if (live) {
-      await until(ready + '.stop');
+      await signal(ready + '.stop');
       h.ok(['msg', '--to', 'worker-T1-1', 'finish this correction', '--agent', 'orchestrator']);
       fs.writeFileSync(ready + '.stop.go', '');
     }
@@ -131,10 +149,10 @@ test('successful push and PR creation publish events, and submitted stops retain
   } else {
     fs.writeFileSync(path.join(bin, 'gh'), `#!${process.execPath}\nrequire(${JSON.stringify(script)});\n`, { mode: 0o755 });
   }
-  const run = h.runAsync(['spawn', '--task', 'T1', '--wait', '--json'], {
+  const { run, signal } = dispatch(h, {
     env: { MESSAGE_COMMANDS: '1', MESSAGE_REMOTE: remote, MESSAGE_SUBMIT: '1' },
   });
-  await until(ready);
+  await signal(ready);
   fs.writeFileSync(ready + '.go', '');
   const result = await run;
   assert.equal(result.code, 0, result.stderr);
@@ -151,8 +169,8 @@ test('successful push and PR creation publish events, and submitted stops retain
 
 test('R1: a push or PR event recorded with no command is marked as an unverified hint', async (t) => {
   const { h, ready } = setup(t, 'command');
-  const run = h.runAsync(['spawn', '--task', 'T1', '--wait', '--json']);
-  await until(ready);
+  const { run, signal } = dispatch(h);
+  await signal(ready);
   fs.writeFileSync(ready + '.go', '');
   assert.equal((await run).code, 0);
   // The worker's own binding, and no push or PR made: the shim never ran.
@@ -166,8 +184,8 @@ test('R1: a push or PR event recorded with no command is marked as an unverified
 
 test('the bridge refuses path-selected bindings and another dispatch identity', async (t) => {
   const { h, ready } = setup(t, 'command');
-  const run = h.runAsync(['spawn', '--task', 'T1', '--wait', '--json']);
-  await until(ready);
+  const { run, signal } = dispatch(h);
+  await signal(ready);
   fs.writeFileSync(ready + '.go', '');
   assert.equal((await run).code, 0);
   const bridge = path.join(__dirname, '..', 'lib', 'hook-bridge.js');
@@ -195,8 +213,8 @@ test('the bridge refuses path-selected bindings and another dispatch identity', 
 
 test('the hook bridge reads hook input from a non-blocking stdin pipe', { skip: process.platform === 'win32' && 'needs a FIFO' }, async (t) => {
   const { h, ready } = setup(t, 'command');
-  const run = h.runAsync(['spawn', '--task', 'T1', '--wait', '--json']);
-  await until(ready);
+  const { run, signal } = dispatch(h);
+  await signal(ready);
   fs.writeFileSync(ready + '.go', '');
   assert.equal((await run).code, 0);
   h.ok(['msg', '--to', 'worker-T1-1', 'pipe delivered message', '--agent', 'orchestrator']);
@@ -223,7 +241,7 @@ test('the hook bridge reads hook input from a non-blocking stdin pipe', { skip: 
   child.stdout.setEncoding('utf8').on('data', (chunk) => { out += chunk; });
   child.stderr.setEncoding('utf8').on('data', (chunk) => { err += chunk; });
   // Deliver input only once the bridge is reading, so an empty read is seen.
-  await until(marker);
+  await fileWritten(marker, { alive: child, what: () => `the hook bridge reads stdin; bridge stderr: ${err.trim() || '(none)'}` });
   fs.writeSync(writer, JSON.stringify({ hook_event_name: 'UserPromptSubmit' }));
   fs.closeSync(writer);
   const [code] = await closed;
@@ -236,10 +254,10 @@ test('the hook bridge reads hook input from a non-blocking stdin pipe', { skip: 
 for (const probe of ['sessions', 'reject', 'error']) {
   test(`OpenCode ${probe}: idle delivers only to the dispatch session and retains failed prompts`, async (t) => {
     const { h, ready, out } = setup(t, 'opencode');
-    const run = h.runAsync(['spawn', '--task', 'T1', '--wait', '--json'], {
+    const { run, signal } = dispatch(h, {
       env: { MESSAGE_OPENCODE_PROBE: probe },
     });
-    await until(ready);
+    await signal(ready);
     h.ok(['msg', '--to', 'worker-T1-1', 'pending parent message', '--agent', 'orchestrator']);
     fs.writeFileSync(ready + '.go', '');
     const result = await run;
@@ -265,8 +283,8 @@ for (const probe of ['sessions', 'reject', 'error']) {
 test('transient resumes inject queued messages without a worker checking its inbox', async (t) => {
   const { h, ready, out } = setup(t, 'command');
   h.ok(['ladder', 'set', 'easy', '--supervision', JSON.stringify({ retries: 1, backoff_ms: 100, max_backoff_ms: 100 })]);
-  const run = h.runAsync(['spawn', '--task', 'T1', '--wait', '--json'], { env: { MESSAGE_RETRY: '1' } });
-  await until(ready);
+  const { run, signal } = dispatch(h, { env: { MESSAGE_RETRY: '1' } });
+  await signal(ready);
   h.ok(['msg', '--to', 'worker-T1-1', 'resume with this correction', '--agent', 'orchestrator']);
   fs.writeFileSync(ready + '.go', '');
   const result = await run;
@@ -301,8 +319,8 @@ for (const [mode, heldAt, note] of HEADLESS) {
   const expected = heldAt >= 0 ? 'holds the unsubmitted worker once, in the foreground' : 'does not hold';
   test(`headless claude ${mode}: Stop ${expected}`, async (t) => {
     const { h, ready, out } = setup(t, 'claude');
-    const run = h.runAsync(['spawn', '--task', 'T1', '--wait', '--json'], { env: { MESSAGE_HEADLESS: mode } });
-    await until(ready);
+    const { run, signal } = dispatch(h, { env: { MESSAGE_HEADLESS: mode } });
+    await signal(ready);
     fs.writeFileSync(ready + '.go', '');
     const result = await run;
     assert.equal(result.code, 0, result.stderr);
