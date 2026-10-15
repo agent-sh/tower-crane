@@ -560,32 +560,62 @@ checks do not apply to a merged PR.
 
 A failed `push` run at the merge commit is a confirmed failure, unless the
 base was already red there, and one still running is pending. A failure is
-`main_red` when every failed job of every failed full run at the merge commit
-(the `push` run, a scheduled or manual run, or a job that failed before its
-run was cancelled) failed the same way in an earlier run of the same workflow
-on the base, at a commit the merge commit contains. CI reads the merge
-commit's last 100 ancestors and that workflow's base runs created up to the
-failed run, and keeps the last 30 that completed without being cancelled,
-the window the inbox also judges the base by. The newest is the parent run:
-the first parent's, or the nearest earlier one when the concurrency group
-cancelled it. A failure the parent run shares says the base was red; one
-seen only in an older run of the window is a known flaky job. The same way
-means every failing test the job's log names (`ci log --failed-tests`
-parsing) failed in some job of the earlier run, since a test moves between
-shards as files are added; a job whose log names no test, such as a proof
-script, or whose log cannot be read, needs a failed job of the same name. A
-failure new at the merge commit, such as a test that passed in the parent run
-and every earlier run read, stays a confirmed failure, and so does a failed run
-with no failed job to compare. CI treats a `main_red` run like a cancelled
-one, below: a later green run that contains the merge commit must stand for
-it, so `main_red` never passes a hotfix on its own. The evidence records
-`hotfix_ci.failure: {classification, runs: [{id, workflow, event, attempt,
-conclusion, url, parent_run: {id, sha, event, conclusion, url} | null,
-earlier_runs, jobs: [{name, id, tests, tests_total?, log_error?,
-failed_before: {run, sha, url} | null}]}]}`, with `classification`
-`main_red` or `confirmed`, and the summary names the parent run and each new
-failure. A later check of the same failed run attempts reuses a recorded
-`main_red` and reads no logs again.
+`main_red` only with evidence that the base failed the same way before the
+change. CI compares every job that did not pass in every failed full run at
+the merge commit (the `push` run, a scheduled or manual run, or a push run
+cancelled after a job failed) with earlier runs of the same workflow on the
+base at commits the merge commit contains. It reads the merge commit's last
+100 ancestors and that workflow's base runs created in the 7 days up to the
+failed run, and keeps the last 30 that completed without being cancelled:
+the inbox judges the base by the same 30 runs, and a failure older than a
+week says little about the base at the merge commit, while the daily
+scheduled run still puts seven runs in that week on a quiet base. The newest
+is the parent run: the first parent's, or the nearest earlier one when the
+concurrency group cancelled it. A failure the parent run shares says the
+base was red; one seen only in an older run of the window is a known flaky
+test.
+
+A failed job is explained when each failing test its log names failed in an
+earlier run in a job of the same kind with the same first error line. The
+same kind is the same job name once its shard number is set aside, so the
+same runner label and matrix; a test moves between shards as files are
+added, but a test that failed only in a proof job that runs the whole suite,
+or on another runner, says nothing. The first error line is the one
+`ci log --failed-tests` reads under the failure, with the values line added
+when it is only a header (an assertion's `strictly equal:`, a diff, a TAP
+YAML block), compared without scratch paths, times, dates, long numbers and
+any data dump after the message. A failing suite that only repeats its
+failed child counts with its child. A test whose name is in a hunk of the
+merge commit's diff counts only when the parent run failed it the same way.
+Test names also come from a gate receipt the log prints as JSON (its
+`test_failure.names` and `output_tail`), as the gate scratch proof does. A
+job whose log names no test is explained only when its name marks a proof,
+probe, check or lint job and an earlier run failed the job of that name with
+the same first error line; a test job that names no failing test (a failed
+setup step, a crashed runner) is not. A timed out or cancelled job is never
+explained. A job log at the merge commit that cannot be read is an
+observation error (`infrastructure_failure`). Any failure left unexplained
+keeps the run a confirmed failure, and so does a failed run with no failed
+job to compare. CI treats a `main_red` run like a cancelled one, below: a
+later green run that contains the merge commit must stand for it, so
+`main_red` never passes a hotfix on its own.
+
+The evidence records `hotfix_ci.failure: {classification, runs: [{id,
+workflow, event, attempt, conclusion, url, parent_run: {id, sha, event,
+conclusion, url} | null, earlier_runs, jobs: [{name, id, conclusion,
+explained, error?, failed_before?, tests: [{name, error, file?, touched,
+failed_before}], tests_total?}]}]}`, with `classification` `main_red` or
+`confirmed`. `failed_before` is `{run, sha, url, job, job_id, error}`: the
+earlier run, its job and that job's error line, so the match can be checked
+after the logs expire. `error` and `failed_before` on a job are set when its
+log names no test; `tests` keeps the first 20. The summary names the parent
+run and each failure new at the merge commit. A later check of the same
+failed run attempts reuses the recorded classification and reads no logs
+again. The alternative of treating failures in jobs or tests unrelated to the
+hotfix's changed files as `main_red` is deliberately not implemented: the
+suites are integration tests that a change to any library file can break, and
+a test file the hotfix edited can still fail for a reason the base already
+had.
 
 When every `push` run there was cancelled (a newer
 push replaced it in the shared main concurrency group), failed as `main_red`, or none ran, CI lists
