@@ -556,9 +556,11 @@ function runPty(args, { cwd, env, timeout = HUNG_TEST_MS } = {}) {
   return { code: r.status, stdout: r.stdout || '', stderr: r.stderr || '', signal: r.signal };
 }
 
-function runAsync(args, { cwd, env, pre = [], onSpawn } = {}) {
+// `detached` makes the CLI lead its own process group on POSIX, so a test can
+// stop it and the children it shares that group with.
+function runAsync(args, { cwd, env, pre = [], onSpawn, detached = false } = {}) {
   return new Promise((resolve) => {
-    const child = cp.spawn(process.execPath, [...pre, BIN, ...args], { cwd, env });
+    const child = cp.spawn(process.execPath, [...pre, BIN, ...args], { cwd, env, detached: detached && process.platform !== 'win32' });
     let stdout = '';
     let stderr = '';
     child.stdout.on('data', (d) => (stdout += d));
@@ -566,6 +568,51 @@ function runAsync(args, { cwd, env, pre = [], onSpawn } = {}) {
     child.on('close', (code) => resolve({ code, stdout, stderr }));
     onSpawn?.(child);
   });
+}
+
+// A dispatch in the background (spawn --wait by default) whose waits end as
+// soon as it exits: a dispatch that failed or stopped early must not read as a
+// hung test, so each wait's error names all of the dispatch's output. A
+// dispatch still running when the runner aborts the test (its timeout) prints
+// the waits still pending and its output, and its process tree is stopped.
+// `until(check, what)` waits for a condition, `signal(file)` for a file.
+function dispatch(t, h, { args = ['spawn', '--task', 'T1', '--wait', '--json'], ...opts } = {}) {
+  let child;
+  let output = '';
+  let closed = false;
+  const pending = new Set();
+  const run = h.runAsync(args, {
+    ...opts,
+    detached: true,
+    onSpawn: (c) => {
+      child = c;
+      for (const stream of [c.stdout, c.stderr]) stream.on('data', (d) => { output += d; });
+      c.on('close', () => { closed = true; });
+    },
+  });
+  const shown = () => output.trim() || '(none)';
+  const abort = () => {
+    if (closed) return;
+    const waits = pending.size ? [...pending].join('; ') : '(none: the test awaited the dispatch exit)';
+    process.stderr.write(`${args.join(' ')} (pid ${child.pid}) still running when the test was aborted (${t.signal.reason?.message || t.signal.reason}); pending waits: ${waits}; dispatch output so far: ${shown()}\n`);
+    if (process.platform === 'win32') cp.spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore', timeout: HUNG_TEST_MS });
+    else {
+      try { killGroup(child.pid, 'SIGKILL'); } catch (e) { if (e.code !== 'ESRCH') throw e; }
+    }
+  };
+  t.signal.addEventListener('abort', abort, { once: true });
+  run.then(() => t.signal.removeEventListener('abort', abort));
+  const until = (check, what) => {
+    pending.add(what);
+    return waitUntil(check, {
+      paths: [h.base], alive: () => !closed,
+      what: () => `${what} during ${args.join(' ')}; dispatch output: ${shown()}`,
+    }).finally(() => pending.delete(what));
+  };
+  const signal = (file) => until(() => {
+    try { return readPublished(file, 'utf8'); } catch (e) { if (e.code === 'ENOENT') return false; throw e; }
+  }, `signal ${path.basename(file)}`);
+  return { run, until, signal, output: () => output };
 }
 
 const real = (p) => fs.realpathSync.native(p);
@@ -723,4 +770,4 @@ try {
   }
 }
 
-module.exports = { repairWorktrees, makeRepo, makeProjectRepo, makeTaskRepo, copyRepo, cachedFixture, fixtureLadder, pinRung, pinLiveRung, stubRungs, STUB_RUNG, HARNESS_GUARD, run, runPty, PTY_AVAILABLE, runAsync, BIN, ROOT, HOOKS, real, TMP_ROOT, LIVE_ROOT, detachedAlive, processesIn };
+module.exports = { repairWorktrees, makeRepo, makeProjectRepo, makeTaskRepo, copyRepo, cachedFixture, fixtureLadder, pinRung, pinLiveRung, stubRungs, STUB_RUNG, HARNESS_GUARD, run, runPty, PTY_AVAILABLE, runAsync, dispatch, BIN, ROOT, HOOKS, real, TMP_ROOT, LIVE_ROOT, detachedAlive, processesIn };

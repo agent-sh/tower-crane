@@ -142,8 +142,8 @@ const MUTANTS = [
     from: 'const refused = files.filter((file) => !isFile(path.resolve(root, file)));', to: 'const refused = [];', tests: ['test/host-only.test.js'] },
   // spawn and supervisor
   { id: 'supervisor-writes-after-incompatible-state', area: 'spawn/supervisor', file: 'lib/spawn-monitor.js',
-    from: "if (committed && !incompatible && fs.existsSync(path.join(spawn.state, 'project.json'))) sampleUsage(true);",
-    to: "if (committed && fs.existsSync(path.join(spawn.state, 'project.json'))) sampleUsage(true);", tests: ['test/state-compatibility.test.js'] },
+    from: "if (committed && !incompatible && S.fileExists(path.join(spawn.state, 'project.json'))) sampleUsage(true);",
+    to: "if (committed && S.fileExists(path.join(spawn.state, 'project.json'))) sampleUsage(true);", tests: ['test/state-compatibility.test.js'] },
   { id: 'spawn-moves-live-agent-log', area: 'spawn/supervisor', file: 'lib/spawn.js',
     from: '  if (live) return false;\n', to: '', tests: ['test/spawn-resume.test.js'] },
   { id: 'supervisor-retries-permanent-exit', area: 'spawn/supervisor', file: 'lib/spawn-monitor.js',

@@ -169,3 +169,24 @@ test('historical progress in the event log keeps its bytes but leaves state snap
   assert.ok(events.some((e) => e.cmd === 'task note' && e.detail.text?.includes('hook progress')));
   assert.equal(cp.spawnSync(process.execPath, [BIN, 'status', '--state', h.state], { env: h.env, encoding: 'utf8' }).status, 0);
 });
+
+// Windows refuses to open a file while another process renames a new copy
+// over it, so a state read waits that out. Elsewhere EPERM and EACCES are a
+// permission failure no wait ends, and the read fails on its first refusal.
+test('a state read refused with a sharing code is retried only on Windows', (t) => {
+  const file = path.join(fs.mkdtempSync(path.join(require('./tmp-root').tempRoot(), 'sharing-')), 'tasks.json');
+  t.after(() => fs.rmSync(path.dirname(file), { recursive: true, force: true }));
+  fs.writeFileSync(file, '{"version":1}');
+  const read = fs.readFileSync;
+  for (const code of ['EPERM', 'EACCES', 'EBUSY']) {
+    let refused = 0;
+    t.mock.method(fs, 'readFileSync', (...args) => {
+      if (args[0] === file && refused++ === 0) throw Object.assign(new Error(`${code}: refused`), { code });
+      return read(...args);
+    });
+    if (process.platform === 'win32') assert.deepEqual(S.readJson(file), { version: 1 }, code);
+    else assert.throws(() => S.readJson(file), { code }, code);
+    assert.equal(refused, process.platform === 'win32' ? 2 : 1, `${code} reads`);
+    fs.readFileSync.mock.restore();
+  }
+});
