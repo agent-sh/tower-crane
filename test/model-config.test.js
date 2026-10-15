@@ -8,6 +8,7 @@ const cp = require('node:child_process');
 const { ROOT, makeRepo, makeProjectRepo, makeTaskRepo, cachedFixture, fixtureLadder } = require('./helpers');
 
 const { modelSelections } = require('../scripts/check-model-config');
+const { DEADLINE_MIN } = require('../scripts/suite-time');
 
 test('cached fixtures pin their ladder and keep copies independent', (t) => {
   const tasks = [{ args: ['--title', 'Cached task', '--acceptance', 'pinned model'], brief: 'cached brief\n' }];
@@ -67,7 +68,7 @@ cp.spawnSync = function (command, args, options) {
       LOCALAPPDATA: 'caller-cache', TC_TEST_SHARD: '1/3', GITHUB_STEP_SUMMARY: summary }, encoding: 'utf8', timeout: 300000 });
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /Model swap probe passed/);
-  assert.match(result.stdout, /^Model swap probe: suite wall time \d+\.\d min, \d+% of the 45-minute software-gate deadline$/m);
+  assert.match(result.stdout, new RegExp(`^Model swap probe: suite wall time \\d+\\.\\d min, \\d+% of the ${DEADLINE_MIN}-minute software-gate deadline$`, 'm'));
   assert.match(fs.readFileSync(summary, 'utf8'), /^Model swap probe: suite wall time /);
   assert.equal(fs.readFileSync(path.join(cache, 'model-swap-probe.tap'), 'utf8'), 'not ok 1 - replaced log\n');
   const failed = cp.spawnSync(process.execPath, ['--require', hook, path.join(ROOT, 'scripts', 'probe-model-swap.js')],

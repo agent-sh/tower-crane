@@ -122,7 +122,8 @@ jobs:
     # PRs skip the proofs; main pushes, daily and manual runs keep them.
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
-    # A failing head reruns the suite on the base: two 45-minute gate runs and setup.
+    # A failing head reruns the suite on the base: two runs at the suite deadline and setup.
+    # check:shared holds this to scripts/suite-time.js.
     timeout-minutes: 100
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -148,7 +149,8 @@ jobs:
     # PRs skip the proofs; main pushes, daily and manual runs keep them.
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
-    # Leave setup time outside the probe's 45-minute software-gate deadline.
+    # Leave setup time outside the probe's software-gate deadline; check:shared holds this to
+    # scripts/suite-time.js.
     timeout-minutes: 50
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

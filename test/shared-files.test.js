@@ -11,7 +11,7 @@ const { readText, escapeTableCell } = require('../scripts/text');
 function fixture(t, { crlfProtected = false, windowsCheckout = false } = {}) {
   const h = makeRepo(t);
   if (windowsCheckout) h.git(['config', 'core.autocrlf', 'true']);
-  for (const name of ['bin', 'lib', 'scripts', 'docs', 'changelog.d']) {
+  for (const name of ['bin', 'lib', 'scripts', 'docs', 'changelog.d', '.github']) {
     fs.cpSync(path.join(ROOT, name), path.join(h.repo, name), { recursive: true });
   }
   fs.copyFileSync(path.join(ROOT, 'CHANGELOG.md'), path.join(h.repo, 'CHANGELOG.md'));
@@ -200,6 +200,35 @@ test('the shared file check rejects bare stdin reads in lib and bin, and points 
   assert.equal(f.check().status, 0);
   f.write('lib/util.js', f.read('lib/util.js') + "\nconst raw = require('node:fs').readFileSync(0, 'utf8');\n");
   assert.equal(f.check().status, 0, 'lib/util.js is where readStdin reads fd 0');
+});
+
+test('the suite deadline sets the proof job timeouts and must match the configured tests gate timeout', (t) => {
+  const { DEADLINE_MIN } = require('../scripts/suite-time');
+  const f = fixture(t);
+  f.change();
+  assert.equal(f.check().status, 0);
+  const workflow = f.read('.github/workflows/ci.yml');
+  const timeout = (job) => Number(new RegExp(`\\n  ${job}:\\n(?:    .*\\n|\\s*\\n)*?    timeout-minutes: (\\d+)`).exec(workflow)[1]);
+  assert.equal(timeout('model-swap'), DEADLINE_MIN + 5);
+  assert.equal(timeout('gate-scratch'), 2 * DEADLINE_MIN + 10);
+  f.write('.github/workflows/ci.yml', workflow.replace(`    timeout-minutes: ${DEADLINE_MIN + 5}\n`, '    timeout-minutes: 60\n'));
+  const drifted = f.check();
+  assert.equal(drifted.status, 1);
+  assert.match(drifted.stderr, new RegExp(`job model-swap has timeout-minutes 60; DEADLINE_MIN ${DEADLINE_MIN} in scripts/suite-time.js sets it to ${DEADLINE_MIN + 5}`));
+  f.write('.github/workflows/ci.yml', workflow);
+  const state = path.join(f.h.repo, '.tower-crane');
+  fs.mkdirSync(state, { recursive: true });
+  const project = path.join(state, 'project.json');
+  const before = fs.existsSync(project) ? JSON.parse(fs.readFileSync(project, 'utf8')) : {};
+  const configure = (minutes) => fs.writeFileSync(project, JSON.stringify({ ...before, gates: { ...before.gates, tests_timeout_min: minutes } }));
+  configure(30);
+  const local = f.check();
+  assert.equal(local.status, 1);
+  assert.match(local.stderr, new RegExp(`gates\\.tests_timeout_min is 30 min but DEADLINE_MIN in scripts/suite-time\\.js is ${DEADLINE_MIN}`));
+  configure(DEADLINE_MIN);
+  assert.equal(f.check().status, 0);
+  configure(null);
+  assert.equal(f.check().status, 0, 'a project without a configured timeout has not adopted the deadline');
 });
 
 test('a branch behind its base is checked from the merge base, so newer base fragments are not deletions', (t) => {
