@@ -3784,9 +3784,33 @@ test('main moves: a mergeable PR keeps its evidence and merges after one head-of
   assert.equal(h.suites().length - suites, 1);
   const checks = headChecks(h);
   assert.deepEqual(checks.map((e) => [e.task, e.detail.ok, e.detail.base_sha]), [['T1', true, h.git(['rev-parse', 'main'])]]);
-  assert.ok(checks[0].detail.commands.some((c) => c.args.includes('merge')));
+  assert.ok(checks[0].detail.commands.some((c) => c.args.includes('merge-tree')));
   h.consume();
   assert.equal(headChecks(h).length, 1, 'a repeated reaction does not run the suite again');
+});
+
+test('the head check runs the suite on a clean checkout of the merge', (t) => {
+  const h = queueFixture(t);
+  h.moveMain();
+  // A suite that requires a clean tree, as ginza's tools/check.py does.
+  const log = path.join(h.base, 'clean-check.json');
+  fs.writeFileSync(path.join(h.base, 'during-check.js'), `const cp = require('node:child_process');
+const git = (...a) => cp.execFileSync('git', a, { encoding: 'utf8' }).trim();
+require('node:fs').writeFileSync(${JSON.stringify(log)}, JSON.stringify({ status: git('status', '--porcelain'),
+  head: git('rev-parse', 'HEAD'), parents: git('rev-list', '--parents', '-n', '1', 'HEAD') }));
+git('diff', '--quiet', 'HEAD');
+git('diff', '--cached', '--quiet');
+if (git('status', '--porcelain') !== '') process.exit(3);
+`);
+  h.reviewer('T1', 'reviewer');
+  h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--sha', h.sha, '--ok', '--agent', 'reviewer']);
+  h.consume();
+  assert.deepEqual(headChecks(h).map((e) => [e.task, e.detail.ok]), [['T1', true]], JSON.stringify(headChecks(h).map((e) => e.detail.summary)));
+  assert.equal(h.github().prs['7'].state, 'MERGED');
+  const seen = JSON.parse(fs.readFileSync(log, 'utf8'));
+  assert.equal(seen.status, '');
+  assert.equal(seen.parents, `${seen.head} ${h.git(['rev-parse', 'main'])} ${h.sha}`);
+  assert.equal(h.git(['for-each-ref', '--contains', seen.head]), '', 'no ref names the merge commit');
 });
 
 test('the head of the line that turns CONFLICTING goes to rework with its files and the next PR merges', (t) => {

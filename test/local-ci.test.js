@@ -115,7 +115,11 @@ test('local CI runs argv on the merged tree and records audited evidence without
   const entries = require('node:child_process').execFileSync('git', ['ls-tree', '-r', '-z', tree], { cwd: h.repo });
   assert.equal(e.receipt.source_digest, crypto.createHash('sha256').update(entries).digest('hex'));
   const trace = JSON.parse(fs.readFileSync(h.log, 'utf8'));
-  assert.equal(trace.head, h.sha);
+  // HEAD is a commit of the merged tree with the base and the head as parents, and no ref names it.
+  assert.equal(trace.head, e.receipt.merge_sha);
+  assert.equal(h.git(['rev-parse', `${trace.head}^{tree}`]), tree);
+  assert.equal(h.git(['rev-list', '--parents', '-n', '1', trace.head]), `${trace.head} ${h.baseSha} ${h.sha}`);
+  assert.equal(h.git(['for-each-ref', '--contains', trace.head]), '');
   assert.equal(trace.argument, h.command[3]);
   assert.ok(trace.cwd.startsWith(h.env.TOWER_CRANE_TMP));
   assert.ok(!fs.existsSync(trace.cwd), 'temporary merged worktree removed');
@@ -659,6 +663,56 @@ test('malformed task override fails local CI closed before command execution', (
   assert.equal(r.code, 1);
   assert.match(r.stdout, /invalid.*override/);
   assert.ok(!fs.existsSync(h.log));
+});
+
+test('local CI runs on a clean checkout of the merge, so a clean-tree check passes', (t) => {
+  // Shaped like ginza's tools/check.py working_tree_clean.
+  const h = fixture(t, `
+const cp = require('node:child_process');
+cp.execFileSync('git', ['diff', '--quiet', 'HEAD']);
+cp.execFileSync('git', ['diff', '--cached', '--quiet']);
+if (cp.execFileSync('git', ['status', '--porcelain'], {encoding: 'utf8'}) !== '') process.exit(3);
+`);
+  const e = h.json(['check', 'ci', 'T1', '--agent', 'checker']);
+  assert.equal(e.ok, true, e.summary);
+  assert.equal(e.receipt.exit, 0);
+  assert.equal(e.receipt.head_sha, h.sha);
+  // The same base and head give the same merge commit.
+  assert.equal(h.json(['check', 'ci', 'T1', '--agent', 'checker']).receipt.merge_sha, e.receipt.merge_sha);
+});
+
+test('a signed base under log.showSignature still gives the merge commit its time', (t) => {
+  const h = fixture(t);
+  h.git(['config', 'log.showSignature', 'true']);
+  // A signature header is enough: git reports its verification before the commit's own fields.
+  const body = `tree ${h.git(['rev-parse', 'main^{tree}'])}\nparent ${h.baseSha}\n`
+    + 'author a <a@example.com> 1700000000 +0000\ncommitter a <a@example.com> 1700000000 +0000\n'
+    + 'gpgsig -----BEGIN SSH SIGNATURE-----\n U1NIU0lH\n -----END SSH SIGNATURE-----\n\nsigned base\n';
+  const signed = require('node:child_process').execFileSync('git', ['hash-object', '-t', 'commit', '-w', '--stdin'],
+    { cwd: h.repo, env: h.env, input: body, encoding: 'utf8' }).trim();
+  h.git(['update-ref', 'refs/heads/main', signed]);
+  assert.match(h.git(['show', '-s', '--format=%ct', signed]), /signature/i, 'the fixture shows a signature line');
+  const e = h.json(['check', 'ci', 'T1', '--agent', 'checker']);
+  assert.equal(e.ok, true, e.summary);
+  assert.equal(e.receipt.base_sha, signed);
+});
+
+test('the merge reads .gitattributes from the head, so its merge drivers apply', (t) => {
+  const h = fixture(t);
+  h.git(['switch', '-q', 'local-change']);
+  fs.writeFileSync(path.join(h.repo, '.gitattributes'), 'notes.txt merge=union\n');
+  fs.writeFileSync(path.join(h.repo, 'notes.txt'), 'head\n');
+  h.git(['add', '.']);
+  h.git(['commit', '-qm', 'head notes']);
+  const head = h.git(['rev-parse', 'HEAD']);
+  h.git(['switch', '-q', 'main']);
+  fs.writeFileSync(path.join(h.repo, 'notes.txt'), 'base\n');
+  h.git(['add', '.']);
+  h.git(['commit', '-qm', 'base notes']);
+  h.ok(['submit', 'T1', '--agent', 'worker', '--sha', head]);
+  const e = h.json(['check', 'ci', 'T1', '--agent', 'checker']);
+  assert.equal(e.ok, true, e.summary);
+  assert.deepEqual(h.git(['show', `${e.receipt.tree_hash}:notes.txt`]).split('\n').sort(), ['base', 'head']);
 });
 
 test('tracked changes made by a successful local check cannot pass', (t) => {
