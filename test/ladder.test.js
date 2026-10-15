@@ -94,7 +94,7 @@ test('research web MCP settings persist in user defaults and refuse other rungs 
     ['easy', '--web-mcp', JSON.stringify(server)],
     ['research', '--web-mcp', JSON.stringify({ ...server, env: { TOKEN: 'secret' } })],
     ['research', '--mcp', '["other"]'],
-    ['research', '--harness', 'codex'],
+    ['research', '--harness', 'codex', '--web-mcp', JSON.stringify(server)],
   ]) assert.notEqual(h.run(['ladder', 'set', ...args]).code, 0);
   h.ok(['ladder', 'set', 'research', '--clear', 'web_mcp']);
   assert.equal(h.json(['ladder', 'show']).ladder.research.web_mcp, undefined);
@@ -524,18 +524,80 @@ test('validate names a worker rung an open task needs when only it cannot start,
     ['ladder hard cannot start a worker for T2: hard needs claude on PATH']);
 });
 
-test('switching from Codex to agy refuses inherited Codex flags until explicitly cleared', t => {
+test('switching from Codex to agy drops inherited Codex flags and names them', t => {
   const h = makeRepo(t);
   h.init();
   h.ok(['ladder', 'set', 'hard', '--harness', 'codex', '--model', 'fixture',
     '--clear', 'profile', '--args', '["--skip-git-repo-check"]']);
-  const before = h.readState('project.json');
-  const refused = h.run(['ladder', 'set', 'hard', '--harness', 'agy', '--model', 'fixture-large']);
-  assert.notEqual(refused.code, 0);
-  assert.match(refused.stderr, /args may only use.*refused --skip-git-repo-check/);
-  assert.deepEqual(h.readState('project.json'), before);
-  h.ok(['ladder', 'set', 'hard', '--harness', 'agy', '--model', 'fixture-large', '--clear', 'args']);
+  const out = h.ok(['ladder', 'set', 'hard', '--harness', 'agy', '--model', 'fixture-large']);
+  assert.match(out, /^ladder hard: moving from codex to agy dropped args \["--skip-git-repo-check"\], which does not fit agy$/m);
+  assert.deepEqual(h.readState('project.json').ladder.hard, { harness: 'agy', model: 'fixture-large', effort: 'high' });
   assert.equal(h.json(['ladder', 'show']).ladder.hard.harness, 'agy');
+});
+
+test('moving a rung to another harness drops the model and fields the old harness chose', (t) => {
+  const h = makeRepo(t, { builtin: true });
+  h.init();
+  // The field report: a claude/haiku rung moved to codex kept claude-haiku-5-5.
+  const out = h.run(['ladder', 'set', 'easy', '--harness', 'codex', '--profile', 'sol', '--effort', 'medium', '--json']);
+  assert.equal(out.code, 0, out.stderr);
+  const data = JSON.parse(out.stdout);
+  assert.deepEqual(data.dropped, { model: 'claude-haiku-5-5' });
+  assert.equal(data.model, undefined);
+  assert.deepEqual(h.readState('project.json').ladder.easy, { harness: 'codex', profile: 'sol', effort: 'medium' });
+  const ev = events(h).filter((e) => e.cmd === 'ladder set').pop();
+  assert.deepEqual(ev.detail, { rung: 'easy', harness: 'codex', profile: 'sol', effort: 'medium', dropped: { model: 'claude-haiku-5-5' } });
+  assert.ok(events(h).some((e) => e.cmd === 'setting' && e.detail.settings['ladder.model']), 'the dropped field is audited as changed');
+
+  // A model named in the same edit stays, even one the drop would remove.
+  h.ok(['ladder', 'set', 'small', '--harness', 'codex', '--model', 'claude-haiku-5-5']);
+  assert.equal(h.readState('project.json').ladder.small.model, 'claude-haiku-5-5');
+
+  // Following the default through --clear harness moves the rung too.
+  h.ok(['ladder', 'set', 'review', '--clear', 'harness', '--profile', 'sol']);
+  assert.deepEqual(h.readState('project.json').ladder.review, { profile: 'sol', effort: 'high' });
+
+  // codex to claude drops the profile; a rung left with nothing to run is
+  // refused, naming what the move would drop.
+  const before = projectText(h);
+  const refused = h.run(['ladder', 'set', 'medium', '--harness', 'claude']);
+  assert.equal(refused.code, 1);
+  assert.match(refused.stderr, /ladder medium \(claude\): needs a model; ladder medium: moving from codex to claude would drop profile sol, which does not fit claude, so name what the rung runs on claude/);
+  assert.equal(projectText(h), before);
+  h.ok(['ladder', 'set', 'medium', '--harness', 'claude', '--model', 'sonnet']);
+  assert.deepEqual(h.readState('project.json').ladder.medium, { harness: 'claude', model: 'sonnet', effort: 'high' });
+
+  // A new default harness does not edit the rungs that follow it, so it
+  // refuses one whose model cannot run there.
+  h.ok(['ladder', 'set', 'research', '--clear', 'harness', '--model', 'gpt-5-codex']);
+  const stuck = h.run(['ladder', 'harness', 'claude']);
+  assert.equal(stuck.code, 1);
+  assert.match(stuck.stderr, /ladder research \(claude, the default harness\): model gpt-5-codex does not run on claude/);
+});
+
+test('harnessDrops keeps what fits the new harness and returns the rest', () => {
+  const rung = { model: 'claude-haiku-5-5', effort: 'high', supervision: { retries: 1 }, env: { A: '1' } };
+  for (const [r, h, dropped] of [
+    [rung, 'codex', { model: 'claude-haiku-5-5' }],
+    [rung, 'claude', {}],
+    [rung, 'pi', {}],
+    [{ model: 'haiku' }, 'pi', { model: 'haiku' }],
+    [{ model: 'global.anthropic.claude-fable-5-1' }, 'codex', { model: 'global.anthropic.claude-fable-5-1' }],
+    [{ model: 'gpt-5.5' }, 'claude', { model: 'gpt-5.5' }],
+    [{ model: 'openai.gpt-oss-120b' }, 'claude', { model: 'openai.gpt-oss-120b' }],
+    [{ model: 'gemini-3-pro' }, 'codex', { model: 'gemini-3-pro' }],
+    [{ model: 'fixture-large' }, 'claude', {}],
+    [{ model: 'fixture-large', effort: 'high' }, 'command', { model: 'fixture-large', effort: 'high' }],
+    [{ profile: 'sol', effort: 'xhigh' }, 'agy', { profile: 'sol', effort: 'xhigh' }],
+    [{ provider: 'bedrock' }, 'codex', { provider: 'bedrock' }],
+    [{ provider: 'custom' }, 'claude', { provider: 'custom' }],
+    [{ effort: 'off' }, 'opencode', {}],
+    [{ args: ['--verbose'] }, 'codex', { args: ['--verbose'] }],
+    [{ command: ['x'] }, 'claude', { command: ['x'] }],
+    [{ tools: ['WebSearch'] }, 'pi', { tools: ['WebSearch'] }],
+    [{ tools: ['read'], mcp: ['m'] }, 'pi', { mcp: ['m'] }],
+    [{ web_mcp: { name: 'w', command: 'c' } }, 'codex', { web_mcp: { name: 'w', command: 'c' } }],
+  ]) assert.deepEqual(L.harnessDrops(r, h), dropped, `${JSON.stringify(r)} on ${h}`);
 });
 
 test('pricing identity drops Claude provider, context and Bedrock version suffixes', () => {
