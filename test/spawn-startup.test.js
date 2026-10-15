@@ -65,7 +65,32 @@ test('a nested spawn\'s supervisor scans git config without the parent agent\'s 
   assert.equal(started.code, 0, started.stderr);
   // read-published: the stub appends calls; nothing replaces the file, and the spawn has exited.
   const seen = fs.existsSync(calls) ? fs.readFileSync(calls, 'utf8') : '';
-  assert.doesNotMatch(seen, /^config --list --show-scope -z$/m, seen);
+  // The supervisor's later git calls act for the parent and still go through its shim.
+  assert.match(seen, /^worktree list/m, 'the stub records supervisor calls');
+  assert.doesNotMatch(seen, /^config --list/m, seen);
+  assert.doesNotMatch(seen, /^rev-parse --path-format=absolute/m, seen);
+});
+
+// With every PATH directory a parent agent's shims, dropping them all left an
+// empty PATH, and git was then looked up in the current directory: the
+// agent's worktree, which the agent writes.
+test('a nested spawn whose whole PATH is the parent\'s shims does not run a git from the worktree', { skip: process.platform === 'win32' && 'the parent shim stub is a shell script' }, (t) => {
+  const h = setup(t);
+  commandRung(h);
+  const realGit = process.env.PATH.split(path.delimiter).map((dir) => path.join(dir, 'git'))
+    .find((file) => { try { fs.accessSync(file, fs.constants.X_OK); return fs.statSync(file).isFile(); } catch { return false; } });
+  const parent = path.join(h.base, 'parent-home');
+  fs.mkdirSync(path.join(parent, 'bin'), { recursive: true });
+  fs.writeFileSync(path.join(parent, '.tower-crane-origin.json'), '{}\n');
+  const q = (s) => `'${s.replace(/'/g, "'\\''")}'`;
+  fs.writeFileSync(path.join(parent, 'bin', 'git'), `#!/bin/sh\nexec ${q(realGit)} "$@"\n`, { mode: 0o755 });
+  const ran = path.join(h.base, 'worktree-git-ran');
+  fs.writeFileSync(path.join(h.repo, 'git'), `#!/bin/sh\necho "$*" >> ${q(ran)}\nexit 1\n`, { mode: 0o755 });
+  h.git(['add', 'git']);
+  h.git(['commit', '-q', '-m', 'a git in the checkout']);
+  const started = h.run(['spawn', '--role', 'small', '--task', 'T1', '--wait', '--json'], { env: { PATH: path.join(parent, 'bin') } });
+  assert.equal(started.code, 0, started.stderr);
+  assert.equal(fs.existsSync(ran), false, fs.existsSync(ran) ? fs.readFileSync(ran, 'utf8') : '');
 });
 
 test('a supervisor that exits before it reports names its exit code and keeps its log', (t) => {
@@ -153,6 +178,32 @@ cp.spawnSync = () => {
   const fresh = after.filter((name) => name.startsWith('T1-') && !old.includes(name));
   assert.equal(fresh.length, 1, after.join(', '));
   assert.deepEqual(after, [...old.slice(2), fresh[0], other].sort());
+});
+
+// A rename keeps the mtime, so a log moved aside from an older start was the
+// oldest one and went in the same prune whose message named it.
+test('a log moved aside is kept by the prune that follows it', (t) => {
+  const h = setup(t);
+  commandRung(h);
+  const dir = path.join(h.state, 'logs');
+  fs.mkdirSync(dir, { recursive: true });
+  const stale = path.join(dir, 'T1-small-T1-1.log');
+  fs.writeFileSync(stale, 'an earlier failed start\n');
+  fs.utimesSync(stale, new Date(Date.UTC(2026, 0, 1)), new Date(Date.UTC(2026, 0, 1)));
+  const newer = [];
+  for (let i = 0; i < 5; i++) {
+    const name = `T1-small-T1-2-startup-failed-2026-02-0${i + 1}T00-00-00-000Z.log`;
+    fs.writeFileSync(path.join(dir, name), `failure ${i}\n`);
+    const at = new Date(Date.UTC(2026, 1, i + 1));
+    fs.utimesSync(path.join(dir, name), at, at);
+    newer.push(name);
+  }
+  const started = h.run(['spawn', '--role', 'small', '--task', 'T1', '--wait', '--json']);
+  assert.equal(started.code, 0, started.stderr);
+  const aside = started.stderr.match(/left by a start that failed before it was recorded, to (.+)\n/)?.[1];
+  assert.ok(aside, started.stderr);
+  assert.equal(fs.readFileSync(aside, 'utf8'), 'an earlier failed start\n');
+  assert.deepEqual(logs(h).filter((name) => name.includes('-startup-failed-')).sort(), [...newer.slice(1), path.basename(aside)].sort());
 });
 
 // The wait for the supervisor's report blocks the event loop, so only the
