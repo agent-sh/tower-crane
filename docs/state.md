@@ -141,7 +141,7 @@ Workers, reviewers and every other identity are refused both. For an operational
 | `task.interrupt` | operational | `interrupt ID`, and `task update --interrupt` on a live claim whose requirements change |
 | `task.needs_owner` | operational | `owner-done`; `task update --needs-owner` clearing or replacing an existing reason |
 | `task.cancel_needs_owner` | owner-required | `task update --status cancelled` on a task with an owner ask (`needs_owner`) |
-| `hotfix.rerecord_review` | owner-required | `hotfix ID` re-recording a cancelled hotfix whose follow-up a failed independent review opened, or one whose failure is not recorded |
+| `task.rerecord_review` | owner-required | `hotfix ID` re-recording a cancelled hotfix whose follow-up a failed independent review opened, or one whose failure is not recorded |
 | `waive.review` | operational | `accept --waive review` when the reviewer is capped or down at the submitted head: a `check ci` there recorded a capped review run (`ci.capped_review`, kept as `capped_review` on the evidence), or a review spawn there exited without a verdict |
 | `merge.admin` | owner-required | `project set --merge-admin` |
 | `decision_delegation` | owner-required | `project set --decision-delegation` |
@@ -628,7 +628,7 @@ the owner, through `task.cancel_needs_owner`. A follow-up records the gate
 that opened it in `hotfix.follow_up_gate` and the `hotfix rework` event's
 `gate` (`rework` for an explicit send-back); older ones are read from the
 event's reason. When that gate is `review` or unknown, the re-record needs
-the owner, through `hotfix.rerecord_review`. `--reason` on a record that is
+the owner, through `task.rerecord_review`. `--reason` on a record that is
 not a re-record is refused.
 
 Pending CI, observation errors and timeouts keep the hotfix submitted;

@@ -244,7 +244,7 @@ that is claimed, or has a branch, PR or commit of its own, is refused: finish
 or cancel it instead. Dropping a follow-up that carries an owner ask is
 owner-required, the same as `task update --status cancelled`. So is dropping
 one opened by a failed independent review, or one whose failure is not
-recorded (`hotfix.rerecord_review`): `--reason` cannot set aside a review
+recorded (`task.rerecord_review`): `--reason` cannot set aside a review
 verdict. `--reason` is refused on any other record.
 
 A tests failure that already failed at the merge's first parent fails there

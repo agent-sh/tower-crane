@@ -541,12 +541,12 @@ test('setting aside a failed independent review by re-recording is owner-require
   const args = ['hotfix', 'T1', '--pr', '42', '--reason', 'the reviewer was wrong'];
   const asked = h.run(args, ORCHESTRATOR);
   assert.equal(asked.code, 1, asked.stdout);
-  assert.match(asked.stderr, /hotfix\.rerecord_review is owner-required; opened D1/);
+  assert.match(asked.stderr, /task\.rerecord_review is owner-required; opened D1/);
   assert.equal(task(h).status, 'cancelled');
   assert.equal(task(h, 'T2').status, 'rework');
   // The gate is read from an older follow-up's event reason the same way.
   legacyFollowUp(h);
-  assert.match(h.run(args, ORCHESTRATOR).stderr, /hotfix\.rerecord_review is owner-required; .*D1/);
+  assert.match(h.run(args, ORCHESTRATOR).stderr, /task\.rerecord_review is owner-required; .*D1/);
   h.ok(args);
   assert.equal(task(h).status, 'submitted');
   assert.equal(task(h).hotfix.superseded[0].gate, 'review');
