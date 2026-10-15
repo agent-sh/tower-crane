@@ -153,7 +153,12 @@ function main(runs) {
     console.error('no successful test jobs in those runs');
     process.exit(1);
   }
-  const before = fs.existsSync(OUT) ? JSON.parse(fs.readFileSync(OUT, 'utf8')) : {};
+  let before = {};
+  try {
+    before = JSON.parse(fs.readFileSync(OUT, 'utf8'));
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+  }
   const { testFiles } = require(path.join(ROOT, 'test', 'run.js'));
   const { table, changes } = mergeTable(before, samples, testFiles());
   for (const [platform, c] of Object.entries(changes)) {
