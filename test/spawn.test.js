@@ -909,6 +909,35 @@ test('a supervisor clears the git directory a git shim in its agent\'s sandbox d
   assert.equal(fs.existsSync(dir), false);
 });
 
+// claude's command sandbox runs in a session of its own, so a shim in it is
+// outside the agent's process group and dies only when the sandbox is torn
+// down after the group ends. The supervisor tries again while that lags.
+test('a supervisor clears the git directory a git shim held a moment past its agent\'s group', { skip: process.platform !== 'linux' && 'needs /proc to judge the holder' }, (t) => {
+  const h = setup(t);
+  for (const mark of ['TOWER_CRANE_SANDBOX', 'SANDBOX_RUNTIME', 'CODEX_SANDBOX']) delete h.env[mark];
+  const policy = path.join(h.base, 'policy.json');
+  fs.writeFileSync(policy, JSON.stringify({ gitPush: 'branch', branch: 'task-T1', repo: null, gh: [] }));
+  const shimDir = path.join(h.base, 'shim');
+  fs.mkdirSync(shimDir);
+  const dir = path.join(h.repo, '.git', 'tower-crane-reap');
+  // The agent starts the shim in a session of its own and exits once the shim
+  // holds the directory; the shim holds it 400 ms longer, then is killed.
+  const agent = path.join(h.base, 'agent.js');
+  fs.writeFileSync(agent, `
+const cp = require('node:child_process'), fs = require('node:fs');
+const shim = cp.spawn(process.execPath, ${JSON.stringify(['--require', HOOKS, path.join(ROOT, 'lib', 'shim.js'), policy, shimDir, 'git', 'status', '--short'])},
+  { detached: true, stdio: 'ignore', env: { ...process.env, HOOK_DIE_REAP: '1', HOOK_DIE_REAP_AFTER: '400', HOOK_STATE: ${JSON.stringify(h.state)} } });
+shim.unref();
+const end = Date.now() + 300000;
+while (!fs.existsSync(${JSON.stringify(dir)}) && Date.now() < end) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
+`);
+  commandRung(h, 'small', [process.execPath, agent, '{prompt}']);
+  h.run(['spawn', '--role', 'small', '--task', 'T1', '--wait', '--json']);
+  const marker = fs.existsSync(dir) ? fs.readdirSync(dir) : [];
+  assert.deepEqual(marker, [], marker.length ? fs.readFileSync(path.join(dir, marker[0]), 'utf8') : '');
+  assert.equal(fs.existsSync(dir), false);
+});
+
 // Everything a spawn could leave behind: state files, events, logs, the
 // worktree and its branch.
 function footprint(h) {

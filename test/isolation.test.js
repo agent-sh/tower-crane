@@ -478,6 +478,7 @@ test('research Codex explicitly enables live search with worker file and git con
     const broker = path.join(h.state, 'brokers', path.basename(ownHome));
     assert.equal(rules[h.state], 'read');
     assert.equal(rules[path.join(h.state, 'brokers')], 'none');
+    assert.equal(rules[path.join(h.state, 'ci-artifacts')], 'none', 'no agent reads unredacted local CI artifacts');
     assert.equal(rules[broker], 'write');
     assert.equal(rules[path.join(path.dirname(h.userConfig), 'owner')], 'none', 'no agent reads the owner key');
     for (const [p, mode] of Object.entries(rules)) if (mode === 'none') assert.ok(fs.existsSync(p), `${p} is masked but missing`);
@@ -547,6 +548,7 @@ test('a spawned claude agent imports the user\'s global rules by path, loads non
   assert.ok(box.filesystem.denyWrite.includes(path.join(common, 'config')), 'the shared git config is read-only');
   assert.ok(box.filesystem.denyRead.includes(path.join(h.state, 'homes')), 'other agent homes are hidden, including future spawns');
   assert.ok(box.filesystem.denyRead.includes(path.join(h.state, 'brokers')), 'no agent reads another agent\'s broker token');
+  assert.ok(box.filesystem.denyRead.includes(path.join(h.state, 'ci-artifacts')), 'no agent reads unredacted local CI artifacts');
   assert.ok(box.filesystem.denyRead.includes(path.join(path.dirname(h.userConfig), 'owner')), 'no agent reads the owner key');
   assert.deepEqual(box.filesystem.allowRead.filter((p) => p !== seen.tmpdir), [path.join(u.home, '.claude', 'CLAUDE.md'), home, path.join(h.state, 'brokers', started.agent), ...A.runReads(u.env)],
     'only the user\'s global rules under the home, this dispatch home, its own broker directory, the resolver under /run and its own temp directory are readable');
@@ -1909,6 +1911,7 @@ test('a codex agent writes only where its agent file says; a worker writes its g
     assert.equal(started.codex_home, sessionRoot);
     assert.equal(fs.readlinkSync(path.join(h.state, 'homes', started.agent, 'sessions')), path.join(sessionRoot, 'sessions'));
     assert.equal(rules[path.join(h.state, 'brokers')], 'none', `${rung}: no agent reads another agent's broker token`);
+    assert.equal(rules[path.join(h.state, 'ci-artifacts')], 'none', `${rung}: no agent reads unredacted local CI artifacts`);
     assert.equal(rules[path.join(h.state, 'brokers', started.agent)], 'write', `${rung}: its own broker directory is visible`);
     assert.equal(rules[path.join(home, 'home')], 'write', `${rung}: its HOME is writable`);
     // Codex mounts every readable path, then hides each 'none' directory,

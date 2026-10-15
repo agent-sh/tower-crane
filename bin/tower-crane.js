@@ -65,7 +65,7 @@ const SETTINGS = {
   executors: int('N', 'operational (orchestrator or owner): automation executors running gates at once on this host (default 2)'),
   'tests-timeout-min': str('MIN', 'operational (orchestrator or owner): positive minutes per test command (default 20); null restores default'),
   'clean-timeout-min': str('MIN', 'operational (orchestrator or owner): positive minutes per cleanup command (default 20); null restores default'),
-  'tmp-root': str('DIR', 'operational (orchestrator or owner): absolute directory where check tests, check ci and check clean build worktrees and scratch (default the OS temp directory; TOWER_CRANE_TMP overrides it); null restores default'),
+  'tmp-root': str('DIR', 'operational (orchestrator or owner): absolute directory where check tests, check ci and check clean build worktrees and scratch (default tc/g under the user cache directory, not the OS temp directory; TOWER_CRANE_TMP overrides it); null restores default'),
   'tests-paths': str('JSON', 'operational (orchestrator or owner): non-empty array of test path globs; null restores default layouts'),
   'tests-keep': str('JSON', 'operational (orchestrator or owner): extra build file globs to keep at submitted sha; [] or null restores defaults'),
   'tests-host-only': str('JSON', 'operational (orchestrator or owner): test file globs a sandboxed worker cannot run, listed in its brief; the tests gate runs them on the host; [] or null clears them'),
@@ -140,9 +140,9 @@ const COMMANDS = [
 
   { section: 'Plan', name: 'browser-kit show', summary: 'show the user browser kit MCP server list (default playwright)', description: "show the user's browser kit MCP server list, default `[\"playwright\"]`, and its config file", run: run('../lib/browser-kit', 'show') },
 
-  { section: 'Gates', name: 'check ci', pos: ['ID'], usage: 'ID', summary: 'configured local CI on the merged tree, or GitHub checks on the submitted sha; records ci', description: "for a recorded hotfix, check successful push workflows on its recorded base at the merge commit. Otherwise with `ci.local`, resolve task override, kind mapping or default, run its argv against the merged base and submitted head and record a local receipt; without local CI, verify the PR head and mergeability. Require `ci.required` runs to be present and successful on the submitted sha, require at least one run outside `ci.ignore_apps` and `ci.capped_review` exceptions and all remaining checks green; records `ci`", run: gate('ci') },
+  { section: 'Gates', name: 'check ci', pos: ['ID'], usage: 'ID', summary: 'configured local CI on the merged tree, or GitHub checks on the submitted sha; records ci', description: "for a recorded hotfix, check successful push workflows on its recorded base at the merge commit; when its push run was cancelled or never ran, the first successful push, scheduled or manual run of the same workflows at that commit or a later base commit that contains it stands for it, and `hotfix_ci` names that commit and run. Otherwise with `ci.local`, resolve task override, kind mapping or default, run its argv against the merged base and submitted head and record a local receipt; without local CI, verify the PR head and mergeability. Require `ci.required` runs to be present and successful on the submitted sha, require at least one run outside `ci.ignore_apps` and `ci.capped_review` exceptions and all remaining checks green; records `ci`", run: gate('ci') },
 
-  { section: 'Gates', name: 'check clean', pos: ['ID'], usage: 'ID [--cmd CMD]', flags: { cmd: str('CMD', 'must match pinned gates.clean_cmd; omit to use it') }, summary: 'cleanup tool on the task branch against base reports no HIGH finding; records clean', description: "run pinned `gates.clean_cmd` at the submitted commit against `base` (the recorded first parent for hotfixes); records `clean`, ok when every check ran and none reported a HIGH finding; timeouts record infrastructure failure", run: gate('clean') },
+  { section: 'Gates', name: 'check clean', pos: ['ID'], usage: 'ID [--cmd CMD]', flags: { cmd: str('CMD', 'must match pinned gates.clean_cmd; omit to use it') }, summary: 'cleanup tool on the task branch against base reports no HIGH finding; records clean', description: "run pinned `gates.clean_cmd` at the submitted commit against `base` (the recorded first parent for hotfixes); records `clean`, ok when every check ran and none reported a HIGH finding in the change (a report without diff scope is cut to the changed lines); timeouts record infrastructure failure", run: gate('clean') },
 
   { section: 'Gates', name: 'check sources', pos: ['ID'], usage: 'ID', summary: 'fetch distinct cited pages and verify every quoted claim in research/ID.json at submitted sha; records sources', description: "fetch the distinct cited pages from committed `research/ID.json` and verify every quote; records sources evidence; required for research kind on every tier", run: gate('sources') },
 
@@ -515,6 +515,9 @@ async function main(argv) {
         process.stderr.write(res.stderr || '');
         return res.code;
       }
+    }
+    if (process.env.TOWER_CRANE_BROKER && cmd.name === 'wait' && require('../lib/broker').serves(process.env.TOWER_CRANE_BROKER, locate())) {
+      require('../lib/broker').scopeWait(own, identity, process.env);
     }
     const ctx = {
       cwd: process.cwd(),
