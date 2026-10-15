@@ -165,6 +165,11 @@
     "reason": "Captured npm package file listing"
   },
   {
+    "path": "test/durations.json",
+    "text": "claude-provider.test.js",
+    "reason": "Test filename in the measured shard durations"
+  },
+  {
     "path": "tools/tests-map.json",
     "text": "claude-provider.test.js",
     "reason": "Module or fixture filename in the test coverage map"
