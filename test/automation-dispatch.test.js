@@ -313,11 +313,12 @@ test('a dispatch waits for another that is still preparing the first ready task 
 // The test process holds the dispatch lock, as a dispatch that outlasts every wait would.
 function holdDispatchLock(t, h) {
   const S = require('../lib/state');
-  const dir = path.join(h.state, 'dispatch');
-  fs.mkdirSync(dir, { recursive: true });
-  const lock = S.acquireLock(dir);
+  const dir = path.join(h.state, 'dispatch', 'lock');
+  fs.mkdirSync(path.dirname(dir), { recursive: true });
+  const lock = S.tryMarkedLock(dir, { keepLive: true });
+  assert.ok(lock, 'the dispatch lock is free');
   let held = true;
-  const release = () => { if (held) { held = false; S.releaseLock(lock); } };
+  const release = () => { if (held) { held = false; S.releaseMarkedLock(lock); } };
   t.after(release);
   return release;
 }
@@ -333,21 +334,81 @@ test('a batch stops at a dispatch lock that outlasts its wait instead of dispatc
   assert.equal(h.logs().filter((e) => e.cmd === 'spawn').length, 0);
 });
 
-test('a refill retries after a dispatch lock timeout without waiting for other inputs to change', async (t) => {
+// macOS and Windows record no start time, and a dispatch can hold the lock
+// past 60 s: a live holder on this host keeps it whatever its marker's age.
+test('a live dispatch lock holder without a start time keeps the lock past 60 s', (t) => {
+  const h = refillFixture(t);
+  const os = require('node:os');
+  const S = require('../lib/state');
+  const dir = path.join(h.state, 'dispatch', 'lock');
+  fs.mkdirSync(dir, { recursive: true });
+  let pidns = null;
+  let boot = null;
+  try { pidns = fs.readlinkSync('/proc/self/ns/pid'); } catch { /* not Linux */ }
+  try { boot = fs.readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim() || null; } catch { /* not Linux */ }
+  const nonce = 'a1b2c3d4e5f60718';
+  const file = path.join(dir, nonce);
+  fs.writeFileSync(file, JSON.stringify({ pid: process.pid, host: os.hostname(), boot_id: boot, pidns, at: new Date().toISOString(), nonce }));
+  const old = new Date(Date.now() - 5 * 60000);
+  fs.utimesSync(file, old, old);
+  t.after(() => S.releaseMarkedLock({ dir, nonce, file }));
+  const result = h.run(['spawn', '--ready', '--agent', 'orchestrator'], { hooks: { HOOK_DISPATCH_EXPIRE: '1' } });
+  assert.equal(result.code, 1, result.stderr + result.stdout);
+  assert.match(result.stdout, new RegExp(`^T3: worker dispatch is locked by pid ${process.pid} `), result.stdout);
+  assert.ok(fs.existsSync(file), 'the live holder keeps its marker');
+  assert.equal(h.logs().filter((e) => e.cmd === 'spawn').length, 0);
+});
+
+test('a refill at a held dispatch lock retries on the next pass without waiting for other inputs to change', async (t) => {
   const h = refillFixture(t);
   const release = holdDispatchLock(t, h);
-  let timedOut = false;
+  const looked = path.join(h.base, 'dispatch-looked');
   const watcher = h.runAsync(['wait', '--after', '0', '--task', 'T3', '--types', 'spawn', '--timeout', '60', '--agent', 'orchestrator'], { // wait-allow: a refill that never retries ends by this timeout, the failure the test looks for
-    hooks: { HOOK_DISPATCH_EXPIRE: '1' },
-    onSpawn: (child) => child.stderr.on('data', (d) => { if (/automation refill: T3: worker dispatch is locked/.test(String(d))) timedOut = true; }),
+    hooks: { HOOK_DISPATCH_WAITING: looked },
   });
-  await waitUntil(() => timedOut, { paths: [h.base], what: 'the refill did not report a dispatch lock timeout' });
+  await waitFor(looked, { what: 'the refill looks at the held dispatch lock' });
+  assert.equal(h.logs().filter((e) => e.cmd === 'spawn').length, 0, 'nothing is dispatched while the lock is held');
   // Nothing in the state changes from here; only the lock goes away.
   release();
   const result = await watcher;
   assert.equal(result.code, 0, result.stderr);
   assert.equal(JSON.parse(result.stdout).task, 'T3');
   await waitFor(h.marker('T3'), { what: 'T3 takes the free slot' });
+});
+
+// The wait host runs its reactions and signal handlers on one event loop, so
+// a refill that waited for another dispatch would hold both until it gave up.
+test('the wait host serves events and drains a signal while another dispatch holds the dispatch lock', async (t) => {
+  const h = refillFixture(t);
+  holdDispatchLock(t, h);
+  const looked = path.join(h.base, 'dispatch-looked');
+  let child;
+  let closed = false;
+  let out = '';
+  const host = h.runAsync(['wait', '--follow', '--types', 'worker-message', '--agent', 'orchestrator'], {
+    hooks: { HOOK_DISPATCH_WAITING: looked },
+    onSpawn: (c) => {
+      child = c;
+      c.stdout.on('data', (d) => { out += d; });
+      c.on('close', () => { closed = true; });
+    },
+  });
+  t.after(() => { if (!closed) child.kill('SIGKILL'); });
+  const rows = () => out.split('\n').filter(Boolean).map((line) => JSON.parse(line));
+  await waitFor(looked, { what: 'the refill looks at the held dispatch lock' });
+  const sent = Date.now();
+  h.ok(['msg', '--to', 'orchestrator', 'still there?']);
+  await waitUntil(() => rows().some((row) => row.type === 'worker-message'), { paths: [h.base], alive: () => !closed, what: 'the host reports the message' });
+  assert.ok(Date.now() - sent < 30000, `the message waited ${Date.now() - sent} ms behind the dispatch lock`); // wait-allow: a host blocked on the lock answers only after its 140 s wait, the failure this bound looks for
+  assert.equal(h.logs().filter((e) => e.cmd === 'spawn').length, 0, 'nothing is dispatched while the lock is held');
+  // Windows ends a process at any signal, with no drain to observe.
+  if (process.platform === 'win32') return;
+  const signalled = Date.now();
+  child.kill('SIGTERM');
+  const result = await host;
+  assert.ok(Date.now() - signalled < 30000, `the drain took ${Date.now() - signalled} ms`); // wait-allow: the same bound for the signal drain
+  assert.equal(result.code, 0, result.stderr);
+  assert.deepEqual(rows().at(-1), { reason: 'signal', signal: 'SIGTERM', drained: 0 });
 });
 
 function startupContexts(h, withRules) {
