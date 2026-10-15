@@ -215,6 +215,13 @@ function before(name, args) {
   if (env.HOOK_BUSY_STAGED && name === 'unlinkSync' && inState(target) && /\.commit$/.test(String(target))) {
     throw Object.assign(new Error(`EPERM: operation not permitted, unlink '${target}'`), { code: 'EPERM' });
   }
+  // HOOK_BUSY_RENAME=PATTERN: the first rename onto a name in the state
+  // directory that matches PATTERN fails once with EPERM, as on Windows while
+  // a scanner or the indexer holds the files just written.
+  if (env.HOOK_BUSY_RENAME && name === 'renameSync' && inState(args[1])
+    && new RegExp(env.HOOK_BUSY_RENAME).test(path.basename(String(args[1]))) && first('busy-rename')) {
+    throw Object.assign(new Error(`EPERM: operation not permitted, rename '${target}' -> '${args[1]}'`), { code: 'EPERM' });
+  }
   // HOOK_FAIL_EVENT_SYNC=1: the first sync of events.jsonl fails with EIO
   // after its lines are written, as a failing disk reports it.
   if (env.HOOK_FAIL_EVENT_SYNC && name === 'fsyncSync' && path.resolve(String(target)) === path.join(STATE, 'events.jsonl') && first('event-sync')) {

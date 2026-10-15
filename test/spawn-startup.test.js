@@ -50,7 +50,9 @@ cp.spawnSync = () => {
   process.stderr.write('planted: git is broken on this host\\n');
   throw new Error('planted git failure');
 };`);
-  const failed = h.run(['spawn', '--role', 'small', '--task', 'T1'], { env });
+  // The first rename of the log is refused, as Windows does while the
+  // supervisor's handle or a scanner's lingers; the failure is still reported.
+  const failed = h.run(['spawn', '--role', 'small', '--task', 'T1'], { env, hooks: { HOOK_BUSY_RENAME: '-startup-failed-' } });
   assert.equal(failed.code, 1, failed.stderr);
   assert.match(failed.stderr, /supervisor startup failed: the supervisor exited with code 1 before it reported ready: planted git failure/);
   assert.doesNotMatch(failed.stderr, /installed and on PATH/);

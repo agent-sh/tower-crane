@@ -443,6 +443,20 @@ test('prompts name role skills in the state directory\'s skill store, since a us
   packaged(rework, 'tower-crane-work');
 });
 
+// Windows refuses the rename of a freshly copied tree for a moment while a
+// scanner holds its files (CI run 38702275511), which failed the agent's start.
+test('spawn waits out a refused rename of the skill store it just copied', (t) => {
+  const h = setup(t);
+  const out = path.join(h.base, 'ran.txt');
+  commandRung(h, 'medium', [process.execPath, '-e', 'require("node:fs").writeFileSync(process.argv[1], "ran")', out]);
+  const store = A.skillStore({}, h.state).dir;
+  const r = h.run(['spawn', '--task', 'T1', '--wait'], { hooks: { HOOK_BUSY_RENAME: `^${path.basename(store)}$` } });
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(fs.readFileSync(out, 'utf8'), 'ran');
+  assert.ok(fs.existsSync(path.join(store, 'tower-crane-work', 'SKILL.md')));
+  assert.deepEqual(fs.readdirSync(path.dirname(store)).sort(), ['.gitignore', path.basename(store)], 'the temporary copy is gone');
+});
+
 test('a prompt that names a role skill warns when the plugin root lacks it', (t) => {
   const h = setup(t);
   // A command rung neither embeds nor loads the skill, so only the named path can warn.
