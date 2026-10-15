@@ -42,8 +42,9 @@ jobs:
     name: test (${{ matrix.os }}, node ${{ matrix.node }}, shard ${{ matrix.shard }})
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
     runs-on: ${{ matrix.os }}
-    # Full CLI suites use the same 45-minute bound as the software tests gate.
-    # The runner still bounds each test independently.
+    # test/run.js splits shards by measured file time (test/durations.json): about 20 minutes on
+    # Windows and 10 on Linux, so the 45-minute bound only stops a hung job. The runner still
+    # bounds each test independently.
     timeout-minutes: 45
     strategy:
       fail-fast: false
@@ -64,8 +65,28 @@ jobs:
       - run: npm run check:shared
         env:
           TOWER_CRANE_CHANGE_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+      - run: npm test
+        env:
+          TOWER_CRANE_TEST_TMP: ${{ runner.temp }}/tower-crane-tests
+          TC_TEST_SHARD: ${{ matrix.shard }}
+
+  # Flake repeats for Windows-only races. They run in their own job so the test shards keep
+  # an even, measured share of the suite.
+  repeats:
+    name: repeat (windows-latest, node 26)
+    if: github.event_name != 'pull_request'
+    runs-on: windows-latest
+    # The authority files take about 15 minutes for ten passes and the other loops about 4.
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 26
+      # First in the job, so its first pass makes the runner's first PowerShell CIM snapshot.
       - name: Repeat Claude Code mod wakeup twenty times
-        if: github.event_name != 'pull_request' && matrix.os == 'windows-latest' && matrix.shard == '2/3'
         shell: pwsh
         run: |
           foreach ($attempt in 1..20) {
@@ -75,12 +96,7 @@ jobs:
           }
         env:
           TOWER_CRANE_TEST_TMP: ${{ runner.temp }}/tower-crane-tests
-      - run: npm test
-        env:
-          TOWER_CRANE_TEST_TMP: ${{ runner.temp }}/tower-crane-tests
-          TC_TEST_SHARD: ${{ matrix.shard }}
       - name: Repeat Claude interrupted native worker ten times
-        if: github.event_name != 'pull_request' && matrix.os == 'windows-latest' && matrix.shard == '1/3'
         shell: pwsh
         run: |
           foreach ($attempt in 1..10) {
@@ -90,24 +106,16 @@ jobs:
           }
         env:
           TOWER_CRANE_TEST_TMP: ${{ runner.temp }}/tower-crane-tests
-      - name: Repeat owner authority and board approval shard ten times
-        if: github.event_name != 'pull_request' && matrix.os == 'windows-latest'
+      - name: Repeat owner authority and board approval files ten times
         shell: pwsh
         run: |
-          $files = node -e "const r=require('./test/run.js'); const [i,n]=process.env.TC_TEST_SHARD.split('/').map(Number); const affected=new Set(['test/authority.test.js','test/approval-context.test.js','test/board-controls.test.js','test/windows-ancestry.test.js']); console.log(r.shardFiles(r.testFiles(),i,n).filter(f=>affected.has(f)).join(' '))"
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          if ([string]::IsNullOrWhiteSpace($files)) { exit 0 }
-          $selected = $files.Trim().Split(' ')
-          # The selected files already belong to this shard.
-          Remove-Item Env:TC_TEST_SHARD
           foreach ($attempt in 1..10) {
-            Write-Host "Owner authority and board approval shard: pass $attempt/10 ($files)"
-            npm test -- @selected
+            Write-Host "Owner authority and board approval files: pass $attempt/10"
+            npm test -- test/authority.test.js test/approval-context.test.js test/board-controls.test.js test/windows-ancestry.test.js
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
         env:
           TOWER_CRANE_TEST_TMP: ${{ runner.temp }}/tower-crane-tests
-          TC_TEST_SHARD: ${{ matrix.shard }}
 
   gate-scratch:
     name: complete gate scratch cleanup proof

@@ -6,11 +6,12 @@ const path = require('node:path');
 const cp = require('node:child_process');
 const { ROOT } = require('./helpers');
 const { HUNG_TEST_MS } = require('./signals');
-const { testFiles, shardFiles } = require('./run');
+const { testFiles, shardFiles, fileDurations } = require('./run');
+const { declarations, fileTimes } = require('../scripts/test-durations');
 
 const FIXTURES = ['a', 'b', 'c', 'd'].map((name) => path.join('test', 'fixtures', 'shard', `${name}.test.js`));
 
-test('shardFiles takes every total-th file of the sorted list', () => {
+test('shardFiles splits files of equal or unknown time like every total-th file of the sorted list', () => {
   const list = ['e', 'c', 'a', 'd', 'b'];
   assert.deepEqual(shardFiles(list, 1, 1), ['a', 'b', 'c', 'd', 'e']);
   assert.deepEqual(shardFiles(list, 1, 2), ['a', 'c', 'e']);
@@ -20,13 +21,71 @@ test('shardFiles takes every total-th file of the sorted list', () => {
   assert.deepEqual(list, ['e', 'c', 'a', 'd', 'b'], 'the input is not reordered');
 });
 
+test('shardFiles gives each shard an equal share of the measured time', () => {
+  const durations = { a: 10, b: 1, c: 1, d: 1, e: 7 };
+  const files = ['e', 'd', 'c', 'b', 'a'];
+  // Every other file would put a, c and e (18 s) against b and d (2 s).
+  assert.deepEqual(shardFiles(files, 1, 2, durations), ['a']);
+  assert.deepEqual(shardFiles(files, 2, 2, durations), ['b', 'c', 'd', 'e']);
+  // A file the table does not list counts as its median file, 2 s here.
+  const known = { a: 9, b: 1, c: 2 };
+  assert.deepEqual(shardFiles(['a', 'b', 'c', 'new'], 1, 2, known), ['a']);
+  assert.deepEqual(shardFiles(['a', 'b', 'c', 'new'], 2, 2, known), ['b', 'c', 'new']);
+  assert.deepEqual(shardFiles(['x', 'y'], 1, 2, {}), ['x'], 'an empty table splits like equal times');
+});
+
 test('every shard count covers the real suite with each file in exactly one shard', () => {
   const files = testFiles();
-  for (const total of [1, 2, 3, 4]) {
-    const shards = Array.from({ length: total }, (_, i) => shardFiles(files, i + 1, total));
-    assert.deepEqual(shards.flat().sort(), files, `${total} shards run every file once`);
-    for (const shard of shards) assert.ok(shard.length > 0, `${total} shards leave none empty`);
+  for (const platform of ['linux', 'win32', 'darwin']) {
+    for (const total of [1, 2, 3, 4]) {
+      const shards = Array.from({ length: total }, (_, i) => shardFiles(files, i + 1, total, fileDurations(platform)));
+      assert.deepEqual(shards.flat().sort(), files, `${platform}: ${total} shards run every file once`);
+      for (const shard of shards) assert.ok(shard.length > 0, `${platform}: ${total} shards leave none empty`);
+    }
   }
+});
+
+test('the checked-in durations split each CI platform into three shards within a tenth of each other', () => {
+  const files = testFiles();
+  for (const platform of ['linux', 'win32']) {
+    const durations = fileDurations(platform);
+    assert.ok(Object.keys(durations).length > files.length / 2, `${platform} has measured times`);
+    const known = Object.values(durations).sort((a, b) => a - b);
+    const cost = (file) => durations[file] ?? known[Math.floor(known.length / 2)];
+    const loads = [1, 2, 3].map((i) => shardFiles(files, i, 3, durations).reduce((sum, file) => sum + cost(file), 0));
+    const mean = loads.reduce((a, b) => a + b, 0) / 3;
+    assert.ok(Math.max(...loads) <= mean * 1.1, `${platform} shard seconds ${loads.map(Math.round).join(', ')}`);
+  }
+});
+
+test('the durations refresh maps each logged title to the file that declares it', () => {
+  const declared = [
+    ...declarations('test/a.test.js', "test('plain title', () => {});\nfor (const n of [1, 2]) test(`case ${n} of a`, () => {});\n"
+      + "describe('suite of a', () => { test('inner', () => {}); });\n"),
+    ...declarations('test/b.test.js', "test(failing ? 'b fails' : `b passes on ${platform}`, { skip: false }, () => {});\n"
+      + "test(`case ${n} of ${'a'}`, () => {});\n"),
+  ];
+  const log = [
+    '2026-10-15T09:41:54.3802186Z ##[group]Run npm run check:shared',
+    '2026-10-15T09:41:54.4802186Z ✔ plain title (9000ms)',
+    '2026-10-15T09:41:54.5802186Z ##[group]Run npm test',
+    '2026-10-15T09:41:55.0000000Z ✔ plain title (1000ms)',
+    '2026-10-15T09:41:55.0000000Z ✔ case 1 of a (2000ms)',
+    '2026-10-15T09:41:55.0000000Z ✖ case 2 of a (3000ms)',
+    '2026-10-15T09:41:55.0000000Z   ✔ inner (500ms)',
+    '2026-10-15T09:41:55.0000000Z ✔ suite of a (4000ms)',
+    '2026-10-15T09:41:55.0000000Z ✔ b passes on win32 (5000ms)',
+    '2026-10-15T09:41:55.0000000Z ﹣ b fails (1ms) # SKIP',
+    '2026-10-15T09:41:55.0000000Z ✔ a title no file declares (7000ms)',
+    '2026-10-15T09:41:56.0000000Z ✖ failing tests:',
+    '2026-10-15T09:41:56.0000000Z ✖ case 2 of a (3000ms)',
+    '2026-10-15T09:41:57.0000000Z ##[group]Run foreach ($attempt in 1..10) {',
+    '2026-10-15T09:41:57.0000000Z ✔ plain title (9000ms)',
+  ].join('\r\n');
+  const { times, unmatched } = fileTimes(log, declared);
+  // `case ${n} of a` in a.test.js has more literal text than b.test.js's `case ${n} of ${'a'}`.
+  assert.deepEqual(times, { 'test/a.test.js': 10, 'test/b.test.js': 5.001 });
+  assert.equal(unmatched, 7);
 });
 
 test('TC_TEST_SHARD makes the runner run only the files of the shard it names', () => {

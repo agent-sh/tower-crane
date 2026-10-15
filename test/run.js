@@ -16,13 +16,34 @@ function testFiles() {
     ...fs.readdirSync(path.join(__dirname, 'gates')).filter((file) => file.endsWith('.test.js')).map((file) => `test/gates/${file}`),
   ].sort();
 }
-// Shard INDEX of TOTAL takes every TOTAL-th file of the sorted list. The runner
-// owns the split, so every Node version runs the same files in each shard.
-function shardFiles(files, index, total) {
-  return [...files].sort().filter((_, i) => i % total === index - 1);
+// Seconds each file's tests took in CI on this platform, from test/durations.json.
+// scripts/test-durations.js refreshes the table from CI logs. A platform without a
+// table of its own uses the Linux one.
+function fileDurations(platform = process.platform) {
+  const table = JSON.parse(fs.readFileSync(path.join(__dirname, 'durations.json'), 'utf8'));
+  return table[platform] || table.linux || {};
+}
+// Shard INDEX of TOTAL gets an equal share of the measured time: the longest file
+// goes to the shard with the least time so far. A file the table does not list,
+// such as a new one, counts as the table's median file. The runner owns the split
+// and it depends only on the file list and the table, so every Node version on a
+// platform runs the same files in each shard.
+function shardFiles(files, index, total, durations = fileDurations()) {
+  const known = Object.values(durations).filter((s) => Number.isFinite(s) && s >= 0).sort((a, b) => a - b);
+  const fallback = known.length ? known[Math.floor(known.length / 2)] : 1;
+  const cost = (file) => (Number.isFinite(durations[file]) && durations[file] >= 0 ? durations[file] : fallback);
+  const order = [...files].sort().sort((a, b) => cost(b) - cost(a));
+  const loads = Array(total).fill(0);
+  const shards = Array.from({ length: total }, () => []);
+  for (const file of order) {
+    const lightest = loads.indexOf(Math.min(...loads));
+    loads[lightest] += cost(file);
+    shards[lightest].push(file);
+  }
+  return (shards[index - 1] || []).sort();
 }
 if (require.main !== module) {
-  module.exports = { testFiles, shardFiles };
+  module.exports = { testFiles, shardFiles, fileDurations };
   return;
 }
 

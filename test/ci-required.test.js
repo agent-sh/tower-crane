@@ -79,7 +79,7 @@ test('pull requests run CI for every base, with main pushes, daily and manual fu
   assert.match(workflow, /^ {2}workflow_dispatch:\s*$/m);
 });
 
-test('same-repo PRs run the shared check, fork PRs the Windows shards; other events run all nine shards, proofs and repeats', () => {
+test('same-repo PRs run the shared check, fork PRs the Windows shards; other events run all nine shards, proofs and the repeat job', () => {
   const workflow = readWorkflow(path.resolve(__dirname, '..'));
   assert.deepEqual(jobNames(workflowMatrix(workflow, 'pull_request')), REQUIRED.filter((name) => name.includes('windows-latest')));
   for (const event of ['push', 'schedule', 'workflow_dispatch']) {
@@ -103,10 +103,15 @@ test('same-repo PRs run the shared check, fork PRs the Windows shards; other eve
     assert.match(job, /^ {4}if: github\.event_name != 'pull_request'$/m, `${id} skips pull requests`);
     assert.match(job, /- run: node scripts\/probe-/);
   }
-  // Flake repeat loops cost hosted Windows time on every PR; they run after merge and daily.
-  const repeats = [...testJob.matchAll(/- name: Repeat [^\n]+\n {8}if: ([^\n]+)/g)].map((m) => m[1]);
-  assert.equal(repeats.length, 3);
-  for (const condition of repeats) assert.match(condition, /^github\.event_name != 'pull_request' && /);
+  // Flake repeat loops cost hosted Windows time on every PR; they run after merge and daily, in
+  // their own job so the shards keep the share of the suite test/run.js measured for them.
+  assert.doesNotMatch(testJob, /- name: Repeat /, 'the test shards run no repeat loops');
+  const repeatJob = workflow.split('\n  repeats:\n')[1].split(/\n {2}[\w-]+:\n/)[0];
+  assert.match(repeatJob, /^ {4}if: github\.event_name != 'pull_request'$/m, 'the repeats skip pull requests');
+  assert.match(repeatJob, /^ {4}runs-on: windows-latest$/m);
+  const repeats = [...repeatJob.matchAll(/- name: (Repeat [^\n]+)/g)].map((m) => m[1]);
+  assert.deepEqual(repeats, ['Repeat Claude Code mod wakeup twenty times', 'Repeat Claude interrupted native worker ten times',
+    'Repeat owner authority and board approval files ten times'], 'the wakeup loop runs first, on a fresh runner');
   // GitHub keeps one running and one pending run per group, and a newer run replaces the pending one.
   // Main pushes share a group so only the newest pending head waits; scheduled and manual runs stay unique.
   assert.match(workflow, /^concurrency:\n {2}group: \$\{\{ github\.event_name == 'pull_request' && format\('ci-pr-\{0\}', github\.event\.pull_request\.number\) \|\| github\.event_name == 'push' && 'ci-main-push' \|\| format\('ci-run-\{0\}', github\.run_id\) \}\}\n {2}cancel-in-progress: \$\{\{ github\.event_name == 'pull_request' \}\}\n/m,
