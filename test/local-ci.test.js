@@ -438,6 +438,42 @@ test('a passing local CI keeps its log without a tail or artifacts', (t) => {
   assert.ok(!fs.existsSync(path.join(h.state, 'ci-artifacts')));
 });
 
+test('local CI joins stdout and stderr by whole lines, so a stderr line cannot split a secret', (t) => {
+  // Like a Python or cargo step writing to pipes: stdout flushes a block that ends inside a token,
+  // stderr reports the failure before the rest of that line arrives, and both end without a newline.
+  const h = fixture(t, `
+const fs = require('node:fs');
+const pause = () => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 300); // wait-allow: the gate must read each write before the other stream writes, the condition under test
+const token = process.env.CI_FIXTURE_TOKEN;
+fs.writeSync(1, 'line 1\\nline 2\\ntoken ' + token.slice(0, 12));
+pause();
+fs.writeSync(2, '! FAILING STEP: unit tests\\n');
+pause();
+fs.writeSync(1, token.slice(12) + ' end\\nline 3\\n');
+fs.writeSync(1, 'unfinished out');
+fs.writeSync(2, 'unfinished err');
+process.exit(1);
+`);
+  const token = 'ghp_T361Head' + 'T361TailBody01234567';
+  h.env.CI_FIXTURE_TOKEN = token;
+  const r = h.run(['check', 'ci', 'T1']);
+  assert.equal(r.code, 1, r.stdout + r.stderr);
+  const e = h.readState('tasks.json').tasks[0].evidence.at(-1);
+  const log = fs.readFileSync(path.join(h.state, e.local_ci.log), 'utf8');
+  for (const text of [log, e.local_ci.output_tail]) {
+    assert.match(text, /^token \[redacted:CI_FIXTURE_TOKEN\] end$/m, text);
+    assert.match(text, /^! FAILING STEP: unit tests$/m, text);
+    assert.match(text, /^unfinished out$/m, text);
+    assert.match(text, /^unfinished err$/m, text);
+    // Each line of one stream keeps its place; the stderr line comes where its newline arrived.
+    const at = ['line 2', '! FAILING STEP', 'token [redacted', 'line 3'].map((s) => text.indexOf(s));
+    assert.deepEqual([...at].sort((a, b) => a - b), at, text);
+  }
+  const stored = [log, r.stdout, r.stderr, JSON.stringify(e), fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8')].join('\n');
+  assert.ok(!stored.includes('T361Head'), 'the first half of the token leaked');
+  assert.ok(!stored.includes('T361TailBody'), 'the second half of the token leaked');
+});
+
 test('local CI keeps the newest five runs of a task and leaves other tasks\' runs', (t) => {
   const h = fixture(t);
   const logs = path.join(h.state, 'logs');

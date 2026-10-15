@@ -111,3 +111,16 @@ test('a timeout that comes due during a blocked event loop stops only a child wi
   assert.match(failure, /^gh api runs failed: timed out after 300 ms \(status=/);
   assert.doesNotMatch(failure, /"id"/);
 });
+
+// A runner killed at its deadline often stops mid-line, and both streams can end that way.
+test('unfinished lines of stdout and stderr end on lines of their own, in the output and the timeout snapshot', async () => {
+  const C = require('../lib/gates/common');
+  const partial = "process.stdout.write('# Subtest: test/slow.js'); process.stderr.write('stderr partial');";
+  const exited = await C.exec({ exec: C.treeExec }, process.execPath, ['-e', `${partial} process.exitCode = 1;`], {});
+  assert.deepEqual(exited.output.split('\n').sort(), ['# Subtest: test/slow.js', 'stderr partial']);
+  const hung = `${partial} setTimeout(() => {}, 60000);`; // wait-allow: a child that outlives the gate timeout under test
+  const r = await C.exec({ exec: C.treeExec }, process.execPath, ['-e', hung], { timeout: 3000 }); // wait-allow: the gate timeout itself is under test
+  assert.equal(r.timedOut, true);
+  assert.deepEqual(r.timeoutOutput.trim().split('\n').sort(), ['# Subtest: test/slow.js', 'stderr partial']);
+  assert.deepEqual(require('../lib/gate-timeouts').runningFiles(r.timeoutOutput, r.output), ['test/slow.js']);
+});
