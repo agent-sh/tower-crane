@@ -658,6 +658,23 @@ test('a worktree lock planted in the git directory stalls neither relink nor gat
   assert.equal(g.code, 0, g.stderr + g.stdout);
 });
 
+// A newer holder killed inside the lock leaves the old path with its marker,
+// which the next holder clears without a notice.
+test('the old lock path a killed newer holder left is cleared by its marker', (t) => {
+  const h = makeRepo(t);
+  h.init();
+  h.ok(['task', 'add', '--title', 'Killed', '--acceptance', 'not needed']);
+  const legacy = path.join(h.repo, '.git', 'tower-crane-worktree.lock');
+  const state = path.join(__dirname, '..', 'lib', 'state');
+  const left = cp.spawnSync(process.execPath, ['-e', `if (!require(${JSON.stringify(state)}).mkdirMarkedLock(process.argv[1])) process.exit(1)`, legacy]);
+  assert.equal(left.status, 0, String(left.stderr));
+  assert.equal(fs.readdirSync(legacy).length, 1);
+  const r = h.run(['worktree', 'T1', '--json']);
+  assert.equal(r.code, 0, r.stderr);
+  assert.doesNotMatch(r.stderr, /no longer waits/);
+  assert.equal(fs.existsSync(legacy), false);
+});
+
 // While a newer process holds the lock, an older one that still takes it in
 // the git directory finds it held there too.
 test('a worktree lock holder also holds the old lock path for older versions while it works', { skip: process.platform === 'win32' && 'links need privileges on Windows' }, async (t) => {
@@ -687,7 +704,10 @@ test('removing a task worktree and relinking wait for the worktree lock in the w
   const wt = h.json(['worktree', 'T1']);
   const common = fs.realpathSync.native(path.join(h.repo, '.git'));
   const lock = path.join(`${path.dirname(common)}-worktrees`, 'tower-crane-worktree.lock');
-  fs.mkdirSync(lock);
+  // This live process holds it, with its marker inside, as a gate would.
+  const S = require('../lib/state');
+  const held = S.tryMarkedLock(lock);
+  assert.ok(held);
   const cancelling = runAsync(['task', 'update', 'T1', '--status', 'cancelled'], { cwd: h.repo, env: h.env });
   const relinking = runAsync(['worktree', 'T2', '--json'], { cwd: h.repo, env: h.env });
   let done = 0;
@@ -696,7 +716,7 @@ test('removing a task worktree and relinking wait for the worktree lock in the w
   for (const end = Date.now() + 3000; !done && Date.now() < end;) await new Promise((r) => setTimeout(r, 20)); // wait-allow: give an unlocked removal and relink time to finish before the lock is released
   assert.equal(done, 0, 'neither finished while the lock was held');
   assert.ok(fs.existsSync(wt.path), 'the worktree is not removed under a held lock');
-  fs.rmdirSync(lock);
+  S.releaseMarkedLock(held);
   const [cancelled, relinked] = await Promise.all([cancelling, relinking]);
   assert.equal(cancelled.code, 0, cancelled.stderr);
   assert.equal(relinked.code, 0, relinked.stderr);
