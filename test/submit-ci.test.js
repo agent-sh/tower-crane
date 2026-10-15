@@ -37,53 +37,88 @@ function fixture(t) {
   });
 }
 
-// Submits T1 with PR 7 while the stubbed GitHub reports `data` for the head.
-function submitPr(h, data, extra = []) {
+// Runs the CLI while the stubbed GitHub reports `data` for the head.
+function withGithub(h, data, args) {
   const file = path.join(h.base, 'github.json');
   fs.writeFileSync(file, JSON.stringify({ sha: h.sha, ...data }));
-  return cp.spawnSync(process.execPath, ['--require', github, BIN, 'submit', 'T1', '--agent', 'worker',
-    '--sha', h.sha, '--pr', '7', ...extra], {
-    cwd: h.repo, env: { ...h.env, TEST_GITHUB: file, TEST_OWNER_KEY: h.env.TOWER_CRANE_OWNER_KEY }, encoding: 'utf8', timeout: 300000,
+  return cp.spawnSync(process.execPath, ['--require', github, BIN, ...args], {
+    cwd: h.repo, env: { ...h.env, TEST_GITHUB: file }, encoding: 'utf8', timeout: 300000,
   });
 }
+
+// Submits T1 with PR 7 while the stubbed GitHub reports `data` for the head.
+function submitPr(h, data, extra = []) {
+  return withGithub(h, data, ['submit', 'T1', '--agent', 'worker', '--sha', h.sha, '--pr', '7', ...extra]);
+}
+
+// The orchestrator's `check ci T1` while the stubbed GitHub reports `data`.
+function checkCi(h, data) {
+  return withGithub(h, data, ['check', 'ci', 'T1', '--agent', 'orchestrator']);
+}
+
+function ciEvidence(h) {
+  return h.readState('tasks.json').tasks[0].evidence.filter((e) => e.type === 'ci');
+}
+
+const PENDING = {
+  runs: [checkRun('build'), checkRun('test (ubuntu-latest)', { status: 'in_progress', conclusion: null })],
+  suites: [suite(1, { status: 'in_progress', conclusion: null })],
+};
+const WINDOWS_LOG = [
+  'test (windows-latest)\tRun tests\t2026-10-09T10:00:00.1234567Z ok 1 - runs fine',
+  'test (windows-latest)\tRun tests\t2026-10-09T10:00:01.0000000Z \x1b[31mnot ok 4 - quoted paths keep their backslashes\x1b[0m',
+  'test (windows-latest)\tRun tests\t2026-10-09T10:00:01.1000000Z   \x1b]8;;https://example.test\x07AssertionError\x1b]8;;\x1b\\: expected C:\\repo\\lib\x00\x07\x1b',
+].join('\n');
 
 function status(h) {
   return h.readState('tasks.json').tasks[0].status;
 }
 
-function allowPending(h) {
-  const brief = path.join(h.base, 'brief.md');
-  fs.writeFileSync(brief, '# T1\n\n## Shared\n\nforce-ci-pending: allowed\n');
-  h.ok(['brief', 'set', 'T1', '--file', brief]);
-}
-
-test('a pending required check refuses the submit and names the jobs still running', (t) => {
+test('a pending required check does not refuse: submit records the head and check ci later records the result', (t) => {
   const h = fixture(t);
-  const r = submitPr(h, {
-    runs: [checkRun('build'), checkRun('test (ubuntu-latest)', { status: 'in_progress', conclusion: null })],
-    suites: [suite(1, { status: 'in_progress', conclusion: null })],
-  });
-  assert.equal(r.status, 1, r.stderr);
-  assert.match(r.stderr, /CI is still running at \w+ in acme\/app: wait for CI to finish, then submit again\./);
-  assert.match(r.stderr, /pending: test \(ubuntu-latest\) \(in_progress\)/);
-  assert.match(r.stderr, /tower-crane ci checks T1/);
-  assert.equal(status(h), 'in_progress');
+  const r = submitPr(h, PENDING);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /submitted T1 at \w{7}/);
+  assert.match(r.stdout, /CI still running at \w+ in acme\/app: test \(ubuntu-latest\) \(in_progress\), github-actions suite \(in_progress\)\. The head is submitted and tower-crane check ci waits for these checks on the host; a failure comes back as rework with the failing jobs and their first failing lines\. Do not wait for CI\./);
+  assert.equal(status(h), 'submitted');
+  assert.ok(h.readState('tasks.json').tasks[0].notes.some((n) => n.text === 'submitted with CI pending: test (ubuntu-latest) (in_progress), github-actions suite (in_progress)'));
+
+  const waiting = checkCi(h, PENDING);
+  assert.equal(waiting.status, 1, waiting.stderr);
+  assert.deepEqual(ciEvidence(h).map((e) => [e.ok, e.pending === true]), [[false, true]]);
+  assert.equal(status(h), 'submitted');
+
+  const green = checkCi(h, { runs: [checkRun('build'), checkRun('test (ubuntu-latest)')], suites: [suite(1)] });
+  assert.equal(green.status, 0, green.stderr);
+  assert.deepEqual(ciEvidence(h).map((e) => [e.ok, e.pending === true]), [[false, true], [true, false]]);
+  assert.match(ciEvidence(h).at(-1).summary, /^CI green at \w+ in acme\/app/);
 });
 
-test('a failing check refuses with its job and the first failing lines of the log, even when pending is forced', (t) => {
+test('after a pending submit, a failing job reaches the ci gate summary with the first failing lines of its log', (t) => {
   const h = fixture(t);
-  allowPending(h);
-  const log = [
-    'test (windows-latest)\tRun tests\t2026-10-09T10:00:00.1234567Z ok 1 - runs fine',
-    'test (windows-latest)\tRun tests\t2026-10-09T10:00:01.0000000Z \x1b[31mnot ok 4 - quoted paths keep their backslashes\x1b[0m',
-    'test (windows-latest)\tRun tests\t2026-10-09T10:00:01.1000000Z   \x1b]8;;https://example.test\x07AssertionError\x1b]8;;\x1b\\: expected C:\\repo\\lib\x00\x07\x1b',
-  ].join('\n');
+  assert.equal(submitPr(h, PENDING).status, 0);
+  const r = checkCi(h, {
+    runs: [checkRun('build'), checkRun('test (windows-latest)', { conclusion: 'failure', url: JOB_LOG })],
+    suites: [suite(1, { conclusion: 'failure' })],
+    logs: { 456: WINDOWS_LOG },
+  });
+  assert.equal(r.status, 1, r.stderr);
+  const failed = ciEvidence(h).at(-1);
+  assert.equal(failed.ok, false);
+  assert.equal(failed.pending, undefined);
+  assert.equal(failed.confirmed_failure, true);
+  assert.match(failed.summary, /failing: test \(windows-latest\) \(failure\)\ntest \(windows-latest\) log:\n {2}not ok 4 - quoted paths keep their backslashes\n {4}AssertionError: expected C:\\repo\\lib/);
+  assert.doesNotMatch(failed.summary, /ok 1 - runs fine|2026-10-09T10/);
+});
+
+test('a failing check refuses with its job and the first failing lines of the log, even while other checks are running', (t) => {
+  const h = fixture(t);
   const data = {
     runs: [checkRun('test (windows-latest)', { conclusion: 'failure', url: JOB_LOG }), checkRun('test (ubuntu-latest)', { status: 'in_progress', conclusion: null })],
     suites: [suite(1, { conclusion: 'failure' })],
-    logs: { 456: log },
+    logs: { 456: WINDOWS_LOG },
   };
-  const r = submitPr(h, data, ['--force-ci-pending']);
+  const r = submitPr(h, data);
   assert.equal(r.status, 1, r.stderr);
   assert.match(r.stderr, /CI failed at \w+ in acme\/app: fix the failing checks, push, and submit again\./);
   assert.match(r.stderr, /failing: test \(windows-latest\) \(failure\)/);
@@ -168,72 +203,22 @@ test('a shimmed agent whose gh policy refuses gh api submits with a notice that 
   assert.equal(status(h), 'submitted');
 });
 
-test('--force-ci-pending submits past pending checks only when the brief allows it', (t) => {
+test('a failing revuto check refuses the submit while CI is still running', (t) => {
   const h = fixture(t);
-  const data = {
-    runs: [checkRun('test (ubuntu-latest)', { status: 'queued', conclusion: null })],
-    suites: [suite(1, { status: 'queued', conclusion: null, runs: 1 })],
-  };
-  const refused = submitPr(h, data, ['--force-ci-pending']);
-  assert.equal(refused.status, 1, refused.stderr);
-  assert.match(refused.stderr, /T1's brief does not allow --force-ci-pending/);
-  assert.equal(status(h), 'in_progress');
-
-  allowPending(h);
-  const forced = submitPr(h, data, ['--force-ci-pending']);
-  assert.equal(forced.status, 0, forced.stderr);
-  assert.match(forced.stdout, /CI still pending at \w+, submitted with --force-ci-pending \(the brief allows it\): test \(ubuntu-latest\) \(queued\)/);
-  assert.equal(status(h), 'submitted');
-});
-
-test('--force-ci-pending is refused when the brief revokes the allowance while the checks are read', (t) => {
-  const h = fixture(t);
-  allowPending(h);
-  const revoked = path.join(h.base, 'revoked.md');
-  fs.writeFileSync(revoked, '# T1\n\n## Shared\n\nWait for CI to finish before submitting.\n');
+  const revuto = checkRun('Revuto', {
+    app: 'revuto-review', conclusion: 'failure', suite: 2,
+    output: { title: 'Revuto requested changes', summary: '2 findings' },
+  });
   const r = submitPr(h, {
-    runs: [checkRun('test (ubuntu-latest)', { status: 'queued', conclusion: null })],
-    suites: [suite(1, { status: 'queued', conclusion: null, runs: 1 })],
-    briefSet: revoked,
-  }, ['--force-ci-pending']);
+    runs: [checkRun('test (ubuntu-latest)', { status: 'in_progress', conclusion: null }), revuto],
+    suites: [suite(1, { status: 'in_progress', conclusion: null }), suite(2, { app: 'revuto-review', conclusion: 'failure', runs: 1 })],
+    comments: [comment(11, { line: 12, body: '**[P1]** Quoted paths break on Windows.' })],
+  });
   assert.equal(r.status, 1, r.stderr);
-  assert.match(r.stderr, /T1's brief does not allow --force-ci-pending/);
-  assert.equal(status(h), 'in_progress');
-});
-
-test('a quoted force-ci-pending line in a fenced block does not allow the override', (t) => {
-  const h = fixture(t);
-  const brief = path.join(h.base, 'brief.md');
-  fs.writeFileSync(brief, [
-    '# T1', '', '## Shared', '',
-    'Do not use --force-ci-pending for this task. The block below is only an example of the setting, not approval.', '',
-    '```text', 'force-ci-pending: allowed', '```', '',
-  ].join('\n'));
-  h.ok(['brief', 'set', 'T1', '--file', brief]);
-  const r = submitPr(h, {
-    runs: [checkRun('test (ubuntu-latest)', { status: 'queued', conclusion: null })],
-    suites: [suite(1, { status: 'queued', conclusion: null, runs: 1 })],
-  }, ['--force-ci-pending']);
-  assert.equal(r.status, 1, r.stderr);
-  assert.match(r.stderr, /T1's brief does not allow --force-ci-pending/);
-  assert.equal(status(h), 'in_progress');
-});
-
-test('a quoted force-ci-pending line in an HTML comment does not allow the override', (t) => {
-  const h = fixture(t);
-  const brief = path.join(h.base, 'brief.md');
-  fs.writeFileSync(brief, [
-    '# T1', '', '## Shared', '',
-    'Do not use --force-ci-pending. Wait for CI to finish.', '',
-    '<!-- Hidden example only, not approval:', 'force-ci-pending: allowed', '-->', '',
-  ].join('\n'));
-  h.ok(['brief', 'set', 'T1', '--file', brief]);
-  const r = submitPr(h, {
-    runs: [checkRun('test (ubuntu-latest)', { status: 'queued', conclusion: null })],
-    suites: [suite(1, { status: 'queued', conclusion: null, runs: 1 })],
-  }, ['--force-ci-pending']);
-  assert.equal(r.status, 1, r.stderr);
-  assert.match(r.stderr, /T1's brief does not allow --force-ci-pending/);
+  assert.match(r.stderr, /CI failed at \w+ in acme\/app: fix the failing checks, push, and submit again\./);
+  assert.match(r.stderr, /failing: Revuto \(failure\)/);
+  assert.match(r.stderr, /not completed: test \(ubuntu-latest\) \(in_progress\)/);
+  assert.match(r.stderr, /revuto left 1 open inline finding on PR #7/);
   assert.equal(status(h), 'in_progress');
 });
 

@@ -1304,7 +1304,11 @@ At a submitted head, an ordinary failed `tests`, `clean` or `ci` verdict reworks
 Infrastructure failures retry once before rework. A configuration failure waits
 for its command to be pinned, while later software gates still collect missing
 evidence and settle any independent failure. Pending CI waits for completion.
-Hosted CI records `pending: true` while current runs or suites are incomplete,
+A worker's `submit` records a head whose checks are still running, so this wait
+happens here on the host and not in the worker. A hosted CI failure summary
+names the failing jobs and prints the first failing lines of the first three
+job logs (the command that reads each other one), and the rework reason
+carries that summary to the worker. Hosted CI records `pending: true` while current runs or suites are incomplete,
 required runs have not appeared, or GitHub is computing mergeability. It
 prints `PENDING` and does not consume an infrastructure retry. The checks are
 read even while mergeability is UNKNOWN, so completed failures take precedence
