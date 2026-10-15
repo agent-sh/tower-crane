@@ -556,9 +556,11 @@ function runPty(args, { cwd, env, timeout = HUNG_TEST_MS } = {}) {
   return { code: r.status, stdout: r.stdout || '', stderr: r.stderr || '', signal: r.signal };
 }
 
-function runAsync(args, { cwd, env, pre = [], onSpawn } = {}) {
+// `detached` makes the CLI lead its own process group on POSIX, so a test can
+// stop it and the children it shares that group with.
+function runAsync(args, { cwd, env, pre = [], onSpawn, detached = false } = {}) {
   return new Promise((resolve) => {
-    const child = cp.spawn(process.execPath, [...pre, BIN, ...args], { cwd, env });
+    const child = cp.spawn(process.execPath, [...pre, BIN, ...args], { cwd, env, detached: detached && process.platform !== 'win32' });
     let stdout = '';
     let stderr = '';
     child.stdout.on('data', (d) => (stdout += d));
