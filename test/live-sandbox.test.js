@@ -13,7 +13,7 @@ const net = require('node:net');
 const os = require('node:os');
 const path = require('node:path');
 const cp = require('node:child_process');
-const { pinLiveRung, makeRepo, BIN, ROOT, TMP_ROOT, LIVE_ROOT } = require('./helpers');
+const { pinLiveRung, makeRepo, dispatch, BIN, ROOT, TMP_ROOT, LIVE_ROOT } = require('./helpers');
 const { waitUntil } = require('./signals');
 const A = require('../lib/agents');
 
@@ -144,17 +144,19 @@ test('in a real claude sandbox with sandbox.session_bus, a command connects to t
     input: `Sandbox probe set up by the owner. Run exactly this one command with the Bash tool, then reply with its exit code. It waits up to two minutes for a signal file; let it finish. Do not use tower-crane.\n\n${node} -e '${script}'\n`,
   });
   pinLiveRung(h, 'claude');
-  let done = false;
-  const run = h.runAsync(['spawn', '--role', 'small', '--task', 'T1', '--wait'], {
+  // dispatch ends the wait when the spawn exits and kills the spawn when the
+  // test aborts. The command's own signal; the spawn ending first means it
+  // never ran, which the assertions below report with the agent's log.
+  const d = dispatch(t, h, {
+    args: ['spawn', '--role', 'small', '--task', 'T1', '--wait'],
     env: { ...h.env, XDG_RUNTIME_DIR: runtime, DBUS_SESSION_BUS_ADDRESS: `unix:path=${sock}` },
-  }).finally(() => { done = true; });
-  // The command's own signal; the spawn ending first means it never ran.
-  await waitUntil(() => done || fs.existsSync(ready), { what: 'the bus probe command did not start' });
+  });
+  await d.until(() => fs.existsSync(ready), 'the bus probe command did not start').catch(() => {});
   if (fs.existsSync(ready)) {
     await listen(late, 'late');
     fs.writeFileSync(go, '1');
   }
-  const r = await run;
+  const r = await d.run;
   assert.equal(r.code, 0, `${r.stderr}\n${agentLog(h)}`);
   assert.ok(fs.existsSync(probe), `the command ran\n${agentLog(h)}`);
   const seen = JSON.parse(fs.readFileSync(probe, 'utf8'));
@@ -824,9 +826,14 @@ test('a real codex sandbox with sandbox.session_bus connects to the bus socket a
   // A runtime directory of the test's own, so the probe never touches the
   // user's session. In /var/tmp, outside the home, an entry of / exposes it
   // as one does /run/user/<uid>.
-  const runtime = fs.existsSync('/var/tmp') ? fs.mkdtempSync('/var/tmp/tower-crane-runtime-') : path.join(h.base, 'runtime');
+  // One level down, so the directory on the way is the test's own: an
+  // entry named with DEL there, which TOML forbids raw, must not break the
+  // profile codex reads.
+  const way = fs.existsSync('/var/tmp') ? fs.mkdtempSync('/var/tmp/tower-crane-runtime-') : path.join(h.base, 'runtime');
+  const runtime = path.join(way, 'rt');
   fs.mkdirSync(runtime, { recursive: true });
-  t.after(() => fs.rmSync(runtime, { recursive: true, force: true }));
+  t.after(() => fs.rmSync(way, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(way, 'del\x7f'));
   const servers = [];
   const listen = async (p) => {
     const s = net.createServer((c) => { c.on('error', () => {}); c.end(); });
