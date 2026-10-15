@@ -430,8 +430,8 @@ async function main(argv) {
   const ownerCredential = process.env.TOWER_CRANE_OWNER_KEY;
   delete process.env.TOWER_CRANE_OWNER_KEY;
   const AutomationKey = require('../lib/automation-key');
-  const automationCredential = process.env[AutomationKey.ENV];
-  delete process.env[AutomationKey.ENV];
+  // A helper writes its key on stdin before any input the command reads.
+  const automationCredential = AutomationKey.take(process.env);
   const out = (s) => process.stdout.write(s.endsWith('\n') ? s : `${s}\n`);
   let resolved;
   let jsonOut = argv.includes('--json');

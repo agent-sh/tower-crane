@@ -405,12 +405,12 @@ test('TOWER_CRANE_VIA=automation in the environment cannot write under another s
   const before = h.readState('tasks.json');
   const events = () => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8');
   const log = events();
-  for (const [label, extra] of [
+  for (const [label, extra, input] of [
     ['claim alone', {}],
-    ['wrong key', { TOWER_CRANE_AUTOMATION_KEY: 'guessed' }],
+    ['wrong key', { TOWER_CRANE_AUTOMATION_KEY_FD: '0' }, 'guessed\n'],
   ]) {
     const rival = h.run(['task', 'add', '--title', 'Rival', '--acceptance', 'refused'],
-      { env: { TOWER_CRANE_AGENT: 'orchestrator', CLAUDE_SESSION_ID: 'rival', TOWER_CRANE_VIA: 'automation', ...extra } });
+      { input, env: { TOWER_CRANE_AGENT: 'orchestrator', CLAUDE_SESSION_ID: 'rival', TOWER_CRANE_VIA: 'automation', ...extra } });
     assert.equal(rival.code, 1, `${label}: ${rival.stderr}`);
     assert.match(rival.stderr, /orchestrator lease held by orchestrator session holder/, label);
     assert.deepEqual(h.readState('tasks.json'), before, label);
