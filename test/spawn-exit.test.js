@@ -309,6 +309,68 @@ test('foreground exits without submit are reported from their recorded exit', as
   assertNoLogText(h);
 });
 
+// An agent can leave a dev server or a watcher running that inherited the
+// harness's output. On POSIX this one starts a session of its own, outside the
+// process group the monitor stops; Windows has no group at all. The holder's
+// own end, a minute away, bounds the run when nothing stops it.
+test('a descendant that keeps the harness output open is stopped and spawn --wait finishes', async (t) => {
+  const h = setup(t);
+  const marker = path.join(h.base, 'holder.json');
+  const worker = path.join(h.base, 'holder-worker.js');
+  const holder = `
+const fs = require('node:fs');
+fs.writeSync(1, 'holder started\\n');
+fs.writeFileSync(process.argv[1] + '.tmp', JSON.stringify({ pid: process.pid }));
+fs.renameSync(process.argv[1] + '.tmp', process.argv[1]);
+setTimeout(() => { fs.writeFileSync(process.argv[1] + '.natural', ''); process.exit(0); }, 60000); // wait-allow: the holder's own end bounds a run that nothing stops
+`;
+  fs.writeFileSync(worker, `
+const fs = require('node:fs');
+const cp = require('node:child_process');
+cp.execFileSync(process.execPath, [process.argv[2], 'claim', process.env.TOWER_CRANE_TASK]);
+const holder = cp.spawn(process.execPath, ['-e', ${JSON.stringify(holder)}, process.argv[3]],
+  { detached: true, stdio: ['ignore', 'inherit', 'inherit'], windowsHide: true });
+holder.unref();
+while (!fs.existsSync(process.argv[3])) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20); // wait-allow: the harness exits only once its holder runs
+fs.writeSync(1, 'harness done\\n');
+`);
+  h.ok(['ladder', 'set', 'easy', '--harness', 'command', '--command', JSON.stringify([process.execPath, worker, BIN, marker, '{prompt}']),
+    '--clear', 'profile', '--clear', 'effort']);
+  h.stopWorkers.push(() => {
+    if (!fs.existsSync(marker)) return;
+    try { killPid(JSON.parse(readPublished(marker, 'utf8')).pid, 'SIGKILL'); } catch (e) { if (e.code !== 'ESRCH') throw e; }
+  });
+  const result = h.run(['spawn', '--role', 'easy', '--task', 'T1', '--wait']);
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(fs.existsSync(marker + '.natural'), false, 'spawn --wait waited for the holder to end on its own');
+  assert.match(result.stdout, /holder started/);
+  assert.match(result.stdout, /harness done/);
+  assert.match(result.stderr, /output stayed open/);
+  const { pid } = JSON.parse(readPublished(marker, 'utf8'));
+  assert.equal(detachedAlive({ pid }), false, 'the descendant holding the output still runs');
+  const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  const exitEvent = events.findLast((e) => e.cmd === 'spawn exit');
+  assert.equal(exitEvent.detail.code, 0);
+  assert.deepEqual(exitEvent.detail.output_held.pids, [pid]);
+});
+
+test('the Windows tree of an exited harness keeps only processes it started', () => {
+  const { windowsTree } = require('../lib/processes');
+  // Harness pid 10 ran from 1000 to 2000; pid 10 was then reused at 5000.
+  const rows = [
+    { pid: 11, parent: 10, start: 1500 }, // its child, still running
+    { pid: 12, parent: 11, start: 3000 }, // started by that child after the harness exited
+    { pid: 13, parent: 10, start: 800 }, // a child of an earlier pid 10
+    { pid: 14, parent: 10, start: 5100 }, // a child of the process that reused pid 10
+    { pid: 15, parent: 14, start: 5200 },
+    { pid: 16, parent: 11, start: 1200 }, // names pid 11 but started before it: an earlier pid 11's child
+    { pid: 17, parent: 99, start: 1600 }, // a grandchild whose parent already exited
+    { pid: 18, parent: 10, start: 2050 }, // a child within the clock allowance of the observed exit
+  ];
+  assert.deepEqual(windowsTree(rows, 10, 1000, 2000), [11, 18, 12]);
+  assert.deepEqual(windowsTree([], 10, 1000, 2000), []);
+});
+
 test('a missing log does not hide an exited claimant', async (t) => {
   const h = setup(t);
   const spawned = await start(t, h);
