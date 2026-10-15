@@ -1174,7 +1174,8 @@ The host delivers completion hints directly or through `ci webhook`
 with GitHub check-run, check-suite or workflow-run JSON. The repository
 must match, and only completed checks at active submitted heads count.
 The hint triggers a new CI gate query; payload conclusions do not produce
-evidence. There is no CI polling loop or webhook listener.
+evidence. No webhook listener is installed; pending CI without a hint is
+rechecked once a minute by the trusted `wait` watcher, as described below.
 
 `automation` events record `{source, phase}` keyed by the triggering event
 ID, or a stable digest for older records without IDs.
@@ -1307,8 +1308,8 @@ evidence and settle any independent failure. Pending CI waits for completion.
 A worker's `submit` records a head whose checks are still running, so this wait
 happens here on the host and not in the worker. A hosted CI failure summary
 names the failing jobs and prints the first failing lines of the first three
-job logs (the command that reads each other one), and the rework reason
-carries that summary to the worker. Hosted CI records `pending: true` while current runs or suites are incomplete,
+job logs (the command that reads each other one), redacted as the tests gate
+redacts its output, and the rework reason carries that summary to the worker. Hosted CI records `pending: true` while current runs or suites are incomplete,
 required runs have not appeared, or GitHub is computing mergeability. It
 prints `PENDING` and does not consume an infrastructure retry. The checks are
 read even while mergeability is UNKNOWN, so completed failures take precedence
@@ -1321,7 +1322,10 @@ pending result has the same summary, flags, ref and CI policy at the same head
 and revision records no evidence and no `check ci` event; the earlier entry
 stays the receipt. Pending CI with nothing queued or running for 30 minutes at
 the same head and revision, counted from the first such entry, records
-`stalled: true` and prints `STALLED`. GitHub creates check runs within a minute
+`stalled: true` and prints `STALLED`. So does CI whose checks stay queued or
+running with the same pending summary for 30 minutes, counted from the entry
+that recorded that summary: an app run that crashed after it opened, or a job
+no runner picks up, which GitHub does not time out soon. GitHub creates check runs within a minute
 or two of a push and computes mergeability in seconds, so the window is about
 15 times the normal delay. A PR closed without merging stalls at once. A stall
 is not a verdict on the change: the task stays submitted, no retry is used, and

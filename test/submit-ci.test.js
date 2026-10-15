@@ -19,7 +19,7 @@ function suite(id, extra = {}) {
 }
 
 function comment(id, extra = {}) {
-  return { id, in_reply_to_id: null, path: 'lib/x.js', line: 12, body: 'finding', user: 'revuto-review[bot]', ...extra };
+  return { id, in_reply_to_id: null, path: 'lib/x.js', line: 12, body: 'finding', user: 'revuto-review[bot]', original_commit_id: null, ...extra };
 }
 
 function fixture(t) {
@@ -38,11 +38,11 @@ function fixture(t) {
 }
 
 // Runs the CLI while the stubbed GitHub reports `data` for the head.
-function withGithub(h, data, args) {
+function withGithub(h, data, args, env = {}) {
   const file = path.join(h.base, 'github.json');
   fs.writeFileSync(file, JSON.stringify({ sha: h.sha, ...data }));
   return cp.spawnSync(process.execPath, ['--require', github, BIN, ...args], {
-    cwd: h.repo, env: { ...h.env, TEST_GITHUB: file }, encoding: 'utf8', timeout: 300000,
+    cwd: h.repo, env: { ...h.env, ...env, TEST_GITHUB: file }, encoding: 'utf8', timeout: 300000,
   });
 }
 
@@ -52,8 +52,8 @@ function submitPr(h, data, extra = []) {
 }
 
 // The orchestrator's `check ci T1` while the stubbed GitHub reports `data`.
-function checkCi(h, data) {
-  return withGithub(h, data, ['check', 'ci', 'T1', '--agent', 'orchestrator']);
+function checkCi(h, data, env) {
+  return withGithub(h, data, ['check', 'ci', 'T1', '--agent', 'orchestrator'], env);
 }
 
 function ciEvidence(h) {
@@ -151,7 +151,7 @@ test('revuto findings print with file, line and body; only a latest [resolved] r
     runs: [checkRun('test (ubuntu-latest)'), checkRun('test (windows-latest)')],
     suites: [suite(1)],
     comments: [
-      comment(11, { line: 12, body: '**[P1]** Quoted paths break on Windows.' }),
+      comment(11, { line: 12, body: '**[P3]** Quoted paths break on Windows.' }),
       comment(12, { line: 30, body: 'Answered finding' }),
       comment(13, { in_reply_to_id: 12, user: 'worker-T1', body: '[resolved]\nfixed in the next commit' }),
       comment(14, { line: 40, body: 'Question finding' }),
@@ -163,7 +163,7 @@ test('revuto findings print with file, line and body; only a latest [resolved] r
     ],
   });
   assert.equal(r.status, 0, r.stderr);
-  assert.match(r.stdout, /revuto left 3 open inline findings on PR #7 \(listed for you; they do not block the submit\):\n {2}lib\/x\.js:12\n {4}\*\*\[P1\]\*\* Quoted paths break on Windows\.\n {2}lib\/x\.js:40\n {4}Question finding\n {2}lib\/x\.js:50\n {4}Reopened finding/);
+  assert.match(r.stdout, /revuto left 3 open inline findings on PR #7 \(listed for you; a \[P1\]\/\[P2\] one blocks the submit until its path changes after the comment or it has a \[resolved\] reply\):\n {2}lib\/x\.js:12\n {4}\*\*\[P3\]\*\* Quoted paths break on Windows\.\n {2}lib\/x\.js:40\n {4}Question finding\n {2}lib\/x\.js:50\n {4}Reopened finding/);
   assert.doesNotMatch(r.stdout, /Answered finding|a human comment/);
   assert.equal(status(h), 'submitted');
 });
@@ -173,13 +173,13 @@ test('--json carries the CI report as ci_report, findings included', (t) => {
   const r = submitPr(h, {
     runs: [checkRun('test (ubuntu-latest)')],
     suites: [suite(1)],
-    comments: [comment(11, { line: 12, body: '**[P1]** Quoted paths break on Windows.' })],
+    comments: [comment(11, { line: 12, body: '**[P3]** Quoted paths break on Windows.' })],
   }, ['--json']);
   assert.equal(r.status, 0, r.stderr);
   const data = JSON.parse(r.stdout);
   assert.equal(data.status, 'submitted');
   assert.match(data.ci_report, /revuto left 1 open inline finding on PR #7/);
-  assert.match(data.ci_report, /lib\/x\.js:12\n {4}\*\*\[P1\]\*\* Quoted paths break on Windows\./);
+  assert.match(data.ci_report, /lib\/x\.js:12\n {4}\*\*\[P3\]\*\* Quoted paths break on Windows\./);
 });
 
 test('a PR that conflicts with its base refuses the submit, even with a failing required check', (t) => {
@@ -201,6 +201,52 @@ test('a shimmed agent whose gh policy refuses gh api submits with a notice that 
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /CI at \w+ in acme\/app was not checked: this agent's gh policy refuses gh api/);
   assert.equal(status(h), 'submitted');
+});
+
+test('a [P1]/[P2] revuto finding with no change at its path and no [resolved] reply refuses the submit, as review ok would', (t) => {
+  const h = fixture(t);
+  // The findings were left on the fixture head; the submitted head changes lib/x.js after them.
+  fs.mkdirSync(path.join(h.repo, 'lib'), { recursive: true });
+  fs.writeFileSync(path.join(h.repo, 'lib', 'x.js'), 'module.exports = 1;\n');
+  h.git(['add', 'lib/x.js']);
+  h.git(['commit', '-q', '-m', 'fix x']);
+  const head = h.git(['rev-parse', 'HEAD']);
+  const findings = [
+    comment(11, { path: 'lib/x.js', body: '**[P1]** Quoted paths break.', original_commit_id: h.sha }),
+    comment(12, { path: 'lib/y.js', line: 7, body: '**[P2]** Missing check.', original_commit_id: h.sha }),
+    comment(13, { path: 'lib/y.js', line: 9, body: 'A nit.', original_commit_id: h.sha }),
+  ];
+  // Checks are still running: the refusal does not wait for them or for more findings.
+  const data = { sha: head, ...PENDING, comments: findings };
+  const submit = (d) => withGithub(h, d, ['submit', 'T1', '--agent', 'worker', '--sha', head, '--pr', '7']);
+  const r = submit(data);
+  assert.equal(r.status, 1, r.stderr);
+  assert.match(r.stderr, /revuto's finding \[P2\] lib\/y\.js:7 \(comment 12\) on PR #7 has no code change at its path since the comment and no \[resolved\] reply/);
+  assert.match(r.stderr, /tower-crane ci resolve <comment id>/);
+  assert.doesNotMatch(r.stderr, /\(comment 11\)|\(comment 13\)/);
+  assert.equal(status(h), 'in_progress');
+
+  const resolved = submit({ ...data, comments: [...findings, comment(14, { in_reply_to_id: 12, user: 'worker-T1', body: '[resolved]\nnot reachable here' })] });
+  assert.equal(resolved.status, 0, resolved.stderr);
+  assert.equal(status(h), 'submitted');
+});
+
+test('the ci gate redacts secrets in the log excerpt and prints no log for a skipped required check', (t) => {
+  const h = fixture(t);
+  assert.equal(submitPr(h, PENDING).status, 0);
+  const secret = 'abcd1234efgh5678ijkl9012';
+  const token = `ghp_${'A1'.repeat(18)}`;
+  const r = checkCi(h, {
+    runs: [checkRun('test (windows-latest)', { conclusion: 'failure', url: JOB_LOG }),
+      checkRun('test (ubuntu-latest)', { conclusion: 'skipped', url: 'https://github.com/acme/app/actions/runs/9/job/457' })],
+    suites: [suite(1, { conclusion: 'failure' })],
+    logs: { 456: `test (windows-latest)\tRun tests\t2026-10-09T10:00:01.0Z not ok 4 - login with ${token} and ${secret}` },
+  }, { DEPLOY_API_KEY: secret });
+  assert.equal(r.status, 1, r.stderr);
+  const failed = ciEvidence(h).at(-1);
+  assert.match(failed.summary, /test \(windows-latest\) log:\n {2}not ok 4 - login with \[redacted:GITHUB_TOKEN\] and \[redacted:DEPLOY_API_KEY\]/);
+  assert.doesNotMatch(JSON.stringify(h.readState('tasks.json')), new RegExp(`${secret}|${token}`));
+  assert.doesNotMatch(failed.summary, /test \(ubuntu-latest\) log|log unavailable/);
 });
 
 test('a failing revuto check refuses the submit while CI is still running', (t) => {
