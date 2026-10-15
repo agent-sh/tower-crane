@@ -219,8 +219,8 @@ test('the suite deadline sets the proof job timeouts and must match the configur
   const state = path.join(f.h.repo, '.tower-crane');
   fs.mkdirSync(state, { recursive: true });
   const project = path.join(state, 'project.json');
-  const before = fs.existsSync(project) ? JSON.parse(fs.readFileSync(project, 'utf8')) : {};
-  const configure = (minutes) => fs.writeFileSync(project, JSON.stringify({ ...before, gates: { ...before.gates, tests_timeout_min: minutes } }));
+  // Only the gates block matters to the check; the fixture runs no CLI command on this state.
+  const configure = (minutes) => fs.writeFileSync(project, JSON.stringify({ gates: { tests_timeout_min: minutes } }));
   configure(30);
   const local = f.check();
   assert.equal(local.status, 1);
