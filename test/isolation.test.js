@@ -2842,12 +2842,37 @@ test('a sandboxed role cannot write the state directory itself', () => {
   for (const job of ['worker', 'researcher', 'reviewer', 'small']) assert.ok(!A.load(job).writeOutside.includes('state'), job);
 });
 
-test('a sandboxed role cannot write the worktrees root, which holds the worktree lock', () => {
+test('a sandboxed role cannot write the worktrees root, which holds the admin directories', () => {
   const text = fs.readFileSync(A.file('worker'), 'utf8').replace(/^writeOutside:(\r?\n)/m, 'writeOutside:$1  - worktrees$1');
   assert.match(text, /- worktrees/);
   assert.throws(() => A.parse(text, 'worker.md'), /worktrees needs sandbox: false/);
   for (const job of ['worker', 'researcher', 'reviewer', 'small']) assert.ok(!A.load(job).writeOutside.includes('worktrees'), job);
   assert.ok(A.load('orchestrator').writeOutside.includes('worktrees') && !A.load('orchestrator').sandbox);
+});
+
+// A project's sandbox.write would reopen the worktree lock in the state
+// directory, or every admin directory in the worktrees root.
+test('spawn refuses a sandbox.write path over the state directory or the worktrees root', { skip: NO_STUBS }, (t) => {
+  const { h, u, wt } = setup(t);
+  const root = path.dirname(wt);
+  const cases = [
+    // Holding the state directory, it holds the agent homes too, which an earlier check names.
+    [h.base, /sandbox\.write path .* holds /],
+    [path.join(h.state, 'worktree'), /is inside the state directory/],
+    [root, /holds the worktrees root/],
+  ];
+  for (const harness of ['claude', 'codex']) {
+    isolated(h, 'hard', harness);
+    for (const [dir, why] of cases) {
+      h.ok(['project', 'set', '--sandbox', JSON.stringify({ write: [dir] })]);
+      const r = h.run(['spawn', '--role', 'hard', '--task', 'T1', '--dry-run'], { env: u.env });
+      assert.notEqual(r.code, 0, `${harness} ${dir}`);
+      assert.match(r.stderr, why, `${harness} ${dir}`);
+    }
+    h.ok(['project', 'set', '--sandbox', JSON.stringify({ write: [path.join(h.base, 'elsewhere')] })]);
+    const r = h.run(['spawn', '--role', 'hard', '--task', 'T1', '--dry-run'], { env: u.env });
+    assert.equal(r.code, 0, `${harness}: ${r.stderr}`);
+  }
 });
 
 // Whether a sandboxed command may write file under the rendered rules. claude
@@ -2869,13 +2894,12 @@ function commandsWrite(seen, cwd, common, file) {
 }
 
 // The worktree lock (lib/worktree.js underWorktreeLock) moved out of the git
-// directory, which a sandboxed worker writes, to the worktrees root.
+// directory, which a sandboxed worker writes, to the state directory.
 test('no sandboxed claude or codex role can write the worktree lock, as every worker could write its old place', { skip: NO_STUBS }, (t) => {
   const { h, u, wt } = setup(t);
   const real = (p) => fs.realpathSync.native(p);
   const common = real(path.join(h.repo, '.git'));
-  const lock = path.join(real(path.dirname(wt)), 'tower-crane-worktree.lock');
-  assert.equal(path.basename(path.dirname(lock)), `${path.basename(h.repo)}-worktrees`);
+  const lock = path.join(real(h.state), 'worktree', 'lock');
   const legacy = path.join(common, 'tower-crane-worktree.lock');
   for (const harness of ['claude', 'codex']) {
     for (const rung of ['hard', 'review', 'research', 'small']) {
@@ -2883,7 +2907,7 @@ test('no sandboxed claude or codex role can write the worktree lock, as every wo
       spawn(h, u, rung);
       const seen = u.report();
       assert.equal(commandsWrite(seen, real(wt), common, lock), false, `${harness} ${rung}: the lock is read-only`);
-      assert.equal(commandsWrite(seen, real(wt), common, path.join(path.dirname(lock), '.git-admin', 'other')), false, `${harness} ${rung}: other admin directories are read-only`);
+      assert.equal(commandsWrite(seen, real(wt), common, path.join(real(path.dirname(wt)), '.git-admin', 'other')), false, `${harness} ${rung}: other admin directories are read-only`);
       if (rung === 'hard') assert.equal(commandsWrite(seen, real(wt), common, legacy), true, `${harness}: a worker writes the old lock path`);
     }
   }

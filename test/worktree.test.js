@@ -697,15 +697,41 @@ test('a worktree lock holder also holds the old lock path for older versions whi
 // Removal empties the admin directory a relink writes, so cancelling a task
 // waits for the lock a relink holds, and both wait on the one in the worktrees
 // root, which no sandboxed agent writes.
-test('removing a task worktree and relinking wait for the worktree lock in the worktrees root', async (t) => {
+// A marker as a live holder writes it, from this process; `extra` overrides fields.
+function holdLock(lock, extra = {}) {
+  const os = require('node:os');
+  fs.mkdirSync(lock, { recursive: true });
+  const nonce = 'a1b2c3d4e5f60718';
+  let pidns = null;
+  let boot = null;
+  try { pidns = fs.readlinkSync('/proc/self/ns/pid'); } catch { /* not Linux */ }
+  try { boot = fs.readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim() || null; } catch { /* not Linux */ }
+  const file = path.join(lock, nonce);
+  fs.writeFileSync(file, JSON.stringify({ pid: process.pid, host: os.hostname(), boot_id: boot, pidns, at: new Date().toISOString(), nonce, ...extra }));
+  return { dir: lock, nonce, file };
+}
+
+// Both wait while the lock is held, then finish once it is released.
+async function waitsForLock(h, held, runs) {
+  const S = require('../lib/state');
+  let done = 0;
+  for (const p of runs) p.then(() => { done++; });
+  // Without the lock they finish now; with it, they wait.
+  for (const end = Date.now() + 3000; !done && Date.now() < end;) await new Promise((r) => setTimeout(r, 20)); // wait-allow: give an unlocked command time to finish before the lock is released
+  const waited = done === 0;
+  S.releaseMarkedLock(held);
+  return { waited, results: await Promise.all(runs) };
+}
+
+test('removing a task worktree and relinking wait for the worktree lock in the state directory', async (t) => {
   const h = makeRepo(t);
   h.init();
   for (const title of ['Cancelled', 'Next']) h.ok(['task', 'add', '--title', title, '--acceptance', 'not needed']);
   const wt = h.json(['worktree', 'T1']);
-  const common = fs.realpathSync.native(path.join(h.repo, '.git'));
-  const lock = path.join(`${path.dirname(common)}-worktrees`, 'tower-crane-worktree.lock');
+  const lock = path.join(fs.realpathSync.native(h.state), 'worktree', 'lock');
   // This live process holds it, with its marker inside, as a gate would.
   const S = require('../lib/state');
+  fs.mkdirSync(path.dirname(lock), { recursive: true });
   const held = S.tryMarkedLock(lock);
   assert.ok(held);
   const cancelling = runAsync(['task', 'update', 'T1', '--status', 'cancelled'], { cwd: h.repo, env: h.env });
@@ -723,6 +749,99 @@ test('removing a task worktree and relinking wait for the worktree lock in the w
   assert.equal(fs.existsSync(wt.path), false, 'removed once the lock is free');
   assert.ok(fs.existsSync(JSON.parse(relinked.stdout).path));
   assert.equal(fs.existsSync(lock), false);
+});
+
+// macOS and Windows record no start time, and a long gate add or remove can
+// hold the lock past 60 s: a live holder on this host keeps it whatever its age.
+test('a live holder keeps the worktree lock past 60 s without a start time', async (t) => {
+  const h = makeRepo(t);
+  h.init();
+  h.ok(['task', 'add', '--title', 'Old holder', '--acceptance', 'not needed']);
+  const held = holdLock(path.join(fs.realpathSync.native(h.state), 'worktree', 'lock'));
+  const old = new Date(Date.now() - 5 * 60000);
+  fs.utimesSync(held.file, old, old);
+  const { waited, results: [r] } = await waitsForLock(h, held, [runAsync(['worktree', 'T1', '--json'], { cwd: h.repo, env: h.env })]);
+  assert.ok(waited, 'a live holder without a start time is not taken over');
+  assert.equal(r.code, 0, r.stderr);
+});
+
+// A holder in another pid namespace cannot be judged by its pid: it keeps the
+// lock while it touches its marker, and loses it 60 s after it stops.
+test('a holder in another pid namespace keeps the worktree lock only while it refreshes its marker', (t) => {
+  const h = makeRepo(t);
+  const S = require('../lib/state');
+  const lock = path.join(h.base, 'locks', 'lock');
+  const held = holdLock(lock, { pidns: 'pid:[1]', pid: 1 });
+  assert.equal(S.tryMarkedLock(lock, { keepLive: true }), null, 'a fresh marker is kept');
+  const old = new Date(Date.now() - 2 * 60000);
+  fs.utimesSync(held.file, old, old);
+  S.refreshMarkedLock(held);
+  assert.equal(S.tryMarkedLock(lock, { keepLive: true }), null, 'a refreshed marker is kept');
+  fs.utimesSync(held.file, old, old);
+  // One attempt clears the stale marker; the next takes the lock.
+  const taken = S.tryMarkedLock(lock, { keepLive: true }) || S.tryMarkedLock(lock, { keepLive: true });
+  assert.ok(taken, 'one that stopped refreshing is taken over');
+  S.releaseMarkedLock(taken);
+});
+
+// A gate in a project without task worktrees needs no worktrees root, and the
+// repository's parent may not be writable (a container with the repo at /app).
+test('gate preparation creates no worktrees root and runs when the repository\'s parent is read-only', { skip: (process.platform === 'win32' || process.getuid?.() === 0) && 'permission bits do not bind' }, async (t) => {
+  const h = makeRepo(t);
+  h.init();
+  const sha = h.git(['rev-parse', 'HEAD']);
+  const first = await gate(h, h.repo, sha);
+  assert.equal(first.code, 0, first.stderr + first.stdout);
+  assert.equal(fs.existsSync(path.join(h.base, 'repo-worktrees')), false, 'no worktrees root beside the repository');
+  fs.chmodSync(h.base, 0o555);
+  let again;
+  try { again = await gate(h, h.repo, sha); } finally { fs.chmodSync(h.base, 0o755); }
+  assert.equal(again.code, 0, again.stderr + again.stdout);
+});
+
+// A submodule's git directory is in the superproject's, which the
+// superproject's workers write; the lock is in the project's state directory.
+test('a project in a submodule takes the worktree lock in its state directory, not in the superproject\'s git directory', async (t) => {
+  const h = makeRepo(t);
+  const sub = path.join(h.base, 'sub-origin');
+  h.git(['init', '-q', '-b', 'main', sub]);
+  h.git(['commit', '-q', '--allow-empty', '-m', 'sub'], sub);
+  h.git(['-c', 'protocol.file.allow=always', 'submodule', 'add', '-q', sub, 'sub']);
+  h.git(['commit', '-q', '-m', 'add sub']);
+  const cwd = path.join(h.repo, 'sub');
+  const state = path.join(h.base, 'sub-state');
+  const env = { ...h.env, TOWER_CRANE_STATE: state };
+  const ok = (args) => { const r = run(args, { cwd, env }); assert.equal(r.code, 0, r.stderr); return r; };
+  ok(['init', '--name', 'sub', '--goal', 'g']);
+  ok(['task', 'add', '--title', 'In sub', '--acceptance', 'not needed']);
+  const S = require('../lib/state');
+  const lock = path.join(fs.realpathSync.native(state), 'worktree', 'lock');
+  fs.mkdirSync(path.dirname(lock), { recursive: true });
+  const held = S.tryMarkedLock(lock);
+  assert.ok(held);
+  const { waited, results: [r] } = await waitsForLock(h, held, [runAsync(['worktree', 'T1', '--json'], { cwd, env })]);
+  assert.ok(waited, 'the relink waits for the lock in the state directory');
+  assert.equal(r.code, 0, r.stderr);
+  const superGit = path.join(h.repo, '.git');
+  const found = [];
+  const walk = (dir) => { for (const e of fs.readdirSync(dir, { withFileTypes: true })) { if (e.name.startsWith('tower-crane-worktree')) found.push(path.join(dir, e.name)); else if (e.isDirectory() && !e.isSymbolicLink()) walk(path.join(dir, e.name)); } };
+  walk(superGit);
+  assert.deepEqual(found, [], 'no lock under the superproject\'s git directory');
+});
+
+// Only a directory already at the old path is an older holder's; a git
+// directory that refuses the mkdir is not.
+test('the old lock path notice needs a directory there, not another mkdir failure', (t) => {
+  const W = require('../lib/worktree');
+  const h = makeRepo(t);
+  const missing = path.join(h.base, 'no-such-git-dir');
+  const written = [];
+  const write = process.stderr.write;
+  process.stderr.write = (chunk, ...rest) => { written.push(String(chunk)); return true; };
+  let held;
+  try { held = W.legacyHold(missing); } finally { process.stderr.write = write; }
+  assert.equal(held, null);
+  assert.deepEqual(written.filter((w) => /no longer waits/.test(w)), []);
 });
 
 // `p/r` and `p/r.git` share `p/r-worktrees`, so a relink from one must leave
