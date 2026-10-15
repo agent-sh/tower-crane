@@ -350,7 +350,10 @@ const fs = require('node:fs');
 const path = require('node:path');
 console.log('step 1: scaffold ok');
 for (let i = 0; i < 300; i++) console.log('early line ' + i);
-console.error('FAILING STEP: unit tests, token ' + process.env.CI_FIXTURE_TOKEN);
+// stdout: the gate reads stdout and stderr from two sockets and joins them in arrival order, so
+// a stderr line can land hundreds of stdout lines from where it was written.
+console.log('FAILING STEP: unit tests, token ' + process.env.CI_FIXTURE_TOKEN);
+console.error('stderr token ' + process.env.CI_FIXTURE_TOKEN);
 // A color escape inside the token hides it from the patterns until the escape is removed.
 const token = process.env.CI_FIXTURE_TOKEN;
 console.log('colored ' + token.slice(0, 4) + '\\x1b[1m' + token.slice(4) + '\\x1b[0m');
@@ -366,7 +369,9 @@ fs.writeFileSync(path.join(process.env.TMPDIR, 'report.txt'), 'scratch report');
 console.log('Scratch report: ' + path.join(process.env.TMPDIR, 'report.txt'));
 console.log('Local check receipt: ' + path.resolve('.local/checks/receipt.json'));
 console.log('Local check receipt: ' + path.resolve('..', '..', '..', 'outside.json'));
-process.exit(1);
+// Not process.exit(1): node's stdout to the gate is a socket that holds about 170 writes, and
+// when the gate has not read yet node queues the rest, which an explicit exit drops.
+process.exitCode = 1;
 `);
   const token = `ghp_${'a1'.repeat(18)}`;
   h.env.CI_FIXTURE_TOKEN = token;
@@ -393,6 +398,7 @@ process.exit(1);
   assert.match(log, /^step 1: scaffold ok$/m);
   assert.match(log, /^early line 0$/m);
   assert.match(log, /^cargo tree line 149$/m);
+  assert.match(log, /^stderr token \[redacted:/m);
   assert.ok(!log.includes(token));
   assert.ok(r.stdout.includes(`Full log: ${path.join(h.state, kept.log)}`), r.stdout);
   assert.ok(!r.stdout.includes(token));
