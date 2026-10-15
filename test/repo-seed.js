@@ -84,4 +84,11 @@ function cleanupRepoSeed(seed) {
   fs.rmSync(seed.base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 }
 
-module.exports = { createRepoSeed, cleanupRepoSeed };
+// Global git config for every test repository. Auto-maintenance that a commit,
+// merge or fetch starts runs in the foreground, so no git outlives the command
+// and writes or prunes a fixture while its cleanup removes it. Git 2.54 and
+// later repack after a commit that leaves 100 loose objects (2.56 raised it to
+// 6700), which a fixture copying the repository's sources passes.
+const FOREGROUND_MAINTENANCE = '[gc]\n\tautoDetach = false\n[maintenance]\n\tautoDetach = false\n';
+
+module.exports = { createRepoSeed, cleanupRepoSeed, FOREGROUND_MAINTENANCE };

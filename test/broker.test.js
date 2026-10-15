@@ -1288,7 +1288,12 @@ test('a fetch or push pack that outlasts its caps frees the cache lock', async (
 // A remote that stops answering, as over a dropped network, while the
 // broker's own git talks to it under the cache lock: its ls-remote, fetch
 // and push each end at the idle cap with the ssh they started, the agent
-// gets the reason, and the lock is free for the next push or fetch.
+// gets the reason, and the lock is free for the next push or fetch. Only the
+// git command each step stalls runs under the short cap. The healthy fetch
+// the broker runs before every push, and the healthy steps, keep the default
+// cap: their silent phases (starting sh, node and the remote's git through
+// the ssh below, index-pack, the connectivity check) outlasted a 300 ms cap
+// on Windows runners.
 test('the broker\'s ls-remote, fetch and push to a stalled remote end at the idle cap and free the cache lock', async (t) => {
   const f = await sshOriginFixture(t);
   const G = require('../lib/github-broker');
@@ -1314,10 +1319,22 @@ if (m[1] === process.argv[2]) {
   const using = (service) => {
     process.env.GIT_SSH_COMMAND = `"${process.execPath.replace(/\\/g, '/')}" "${ssh.replace(/\\/g, '/')}" ${service}`;
   };
-  const deadline = (p, what) => Promise.race([p, new Promise((resolve, reject) => setTimeout(() => reject(new Error(`${what}: the broker still waits on the stalled remote`)), 30000))]); // wait-allow: a 300 ms idle cap ends each stall; without it the broker waits forever
-  const stalled = async (service, payload, what) => {
+  // The broker reads LIMITS.idleMs as it starts each git, so the cap is set
+  // per command: 2 s, long enough for the stalling ssh to start and record
+  // its pid, for the one named by capped, and the default for the rest.
+  const childProcess = require('node:child_process');
+  const spawn = childProcess.spawn;
+  let capped = null;
+  childProcess.spawn = function (command, args, ...rest) {
+    if (command === 'git' && Array.isArray(args)) G.LIMITS.idleMs = capped && args.includes(capped) ? 2000 : saved.idleMs;
+    return spawn.call(this, command, args, ...rest);
+  };
+  t.after(() => { childProcess.spawn = spawn; });
+  const deadline = (p, what) => Promise.race([p, new Promise((resolve, reject) => setTimeout(() => reject(new Error(`${what}: the broker still waits on the stalled remote`)), 30000))]); // wait-allow: a 2 s idle cap ends each stall; without it the broker waits forever
+  const stalled = async (service, command, payload, what) => {
     using(service);
-    const r = await deadline(f.raw(payload), what);
+    capped = command;
+    const r = await deadline(f.raw(payload), what).finally(() => { capped = null; });
     assert.equal(r.code, 1, `${what}: ${r.stderr}`);
     assert.match(r.stderr, new RegExp(`${what.replace(/[.\\]/g, '\\$&')} stalled for \\d+ s; the broker stopped it and freed the cache lock`));
     assert.equal(fs.existsSync(lock), false, `${what}: the cache lock is free`);
@@ -1326,15 +1343,14 @@ if (m[1] === process.argv[2]) {
     await waitUntil(() => stuck.every((pid) => !alive(pid)), { what: `${what}: the broker stopped the ssh its git started` });
     fs.rmSync(pids);
   };
-  G.LIMITS.idleMs = 300;
   // The first use reads the remote's object format with ls-remote.
-  await stalled('upload', { fetch: {} }, 'the broker\'s ls-remote of git@github.com:acme/demo.git');
+  await stalled('upload', 'ls-remote', { fetch: {} }, 'the broker\'s ls-remote of git@github.com:acme/demo.git');
   using('none');
   const first = await f.raw({ fetch: {} });
   assert.equal(first.code, 0, first.stderr);
-  await stalled('upload', { fetch: {} }, 'the broker\'s fetch from git@github.com:acme/demo.git');
+  await stalled('upload', 'fetch', { fetch: {} }, 'the broker\'s fetch from git@github.com:acme/demo.git');
   const sha = f.commit('stalled.txt', 'stalled\n');
-  await stalled('receive', { push: { sha } }, 'the broker\'s push to git@github.com:acme/demo.git');
+  await stalled('receive', 'push', { push: { sha } }, 'the broker\'s push to git@github.com:acme/demo.git');
   assert.equal(f.remoteRef(`refs/heads/${f.task.branch}`), null);
   // With the remote answering again, the next push takes the lock and runs.
   using('none');

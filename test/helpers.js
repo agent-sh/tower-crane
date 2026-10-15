@@ -7,7 +7,7 @@ const path = require('node:path');
 const cp = require('node:child_process');
 const assert = require('node:assert/strict');
 const test = require('node:test');
-const { createRepoSeed, cleanupRepoSeed } = require('./repo-seed');
+const { createRepoSeed, cleanupRepoSeed, FOREGROUND_MAINTENANCE } = require('./repo-seed');
 const { tempRoot, liveRoot } = require('./tmp-root');
 const { readPublished } = require('./atomic-file');
 
@@ -283,7 +283,7 @@ function makeRepoFromSeed(t, seedRepo, options = {}) {
   return fixtureDir((base) => {
     fs.writeFileSync(
       path.join(base, 'gitconfig'),
-      '[user]\n\tname = tower-crane test\n\temail = test@example.invalid\n[init]\n\tdefaultBranch = main\n[commit]\n\tgpgsign = false\n[core]\n\tautocrlf = false\n',
+      '[user]\n\tname = tower-crane test\n\temail = test@example.invalid\n[init]\n\tdefaultBranch = main\n[commit]\n\tgpgsign = false\n[core]\n\tautocrlf = false\n' + FOREGROUND_MAINTENANCE,
     );
     const env = baseEnv(base);
     const repo = path.join(base, 'repo');
@@ -556,9 +556,11 @@ function runPty(args, { cwd, env, timeout = HUNG_TEST_MS } = {}) {
   return { code: r.status, stdout: r.stdout || '', stderr: r.stderr || '', signal: r.signal };
 }
 
-function runAsync(args, { cwd, env, pre = [], onSpawn } = {}) {
+// `detached` makes the CLI lead its own process group on POSIX, so a test can
+// stop it and the children it shares that group with.
+function runAsync(args, { cwd, env, pre = [], onSpawn, detached = false } = {}) {
   return new Promise((resolve) => {
-    const child = cp.spawn(process.execPath, [...pre, BIN, ...args], { cwd, env });
+    const child = cp.spawn(process.execPath, [...pre, BIN, ...args], { cwd, env, detached: detached && process.platform !== 'win32' });
     let stdout = '';
     let stderr = '';
     child.stdout.on('data', (d) => (stdout += d));

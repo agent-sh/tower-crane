@@ -32,6 +32,9 @@ fs.writeFileSync(process.env.FAKE_CLEAN_LOG, JSON.stringify({ dir, rest, head, t
 if (process.env.FAKE_CLEAN_MODE === 'crash') { console.error('cannot read the repository'); process.exit(1); }
 if (process.env.FAKE_CLEAN_MODE === 'kill') process.kill(process.pid, 'SIGKILL');
 if (process.env.FAKE_CLEAN_MODE === 'text') { console.log('deslop: 2 findings'); process.exit(0); }
+if (process.env.FAKE_CLEAN_MODE === 'leak') { console.error('cannot scan, token ' + process.env.CLEAN_FIXTURE_TOKEN); process.exit(1); }
+// A key that straddles the 200-character cut of the output the summary quotes.
+if (process.env.FAKE_CLEAN_MODE === 'leak-text') { console.log('x'.repeat(190) + ' sk-' + 'T361CleanBody0123456789'); process.exit(0); }
 // The old deslop plugin: a "findings" list from the whole repository, exit 2 on a critical one.
 if (process.env.FAKE_CLEAN_MODE === 'old') {
   console.log(JSON.stringify({ findings: [{ file: 'src/main.rs', line: 2, severity: 'critical', patternName: 'debug print' }], summary: { bySeverity: { critical: 1 } } }, null, 2));
@@ -55,7 +58,7 @@ function restore(...keys) {
   }
 }
 test.beforeEach(() => {
-  for (const k of ['TOWER_CRANE_CLEAN_CMD', 'FAKE_CLEAN_MODE', 'FAKE_CLEAN_VIA', 'FAKE_CLEAN_EXIT']) delete process.env[k];
+  for (const k of ['TOWER_CRANE_CLEAN_CMD', 'FAKE_CLEAN_MODE', 'FAKE_CLEAN_VIA', 'FAKE_CLEAN_EXIT', 'CLEAN_FIXTURE_TOKEN']) delete process.env[k];
   restore('PATH', 'HOME', 'USERPROFILE');
   process.env.FAKE_CLEAN_LOG = logFile;
   process.env.FAKE_CLEAN_REPORT = reportFile;
@@ -168,6 +171,22 @@ test('a tool that fails or prints no JSON: not ok', async () => {
   const text = await gate.run(ctx());
   assert.equal(text.ok, false);
   assert.match(text.summary, /did not print JSON/);
+  assertCleanedUp();
+});
+
+test('a failing or non-JSON tool\'s output is redacted before the summary cuts it', async () => {
+  process.env.TOWER_CRANE_CLEAN_CMD = fakeCmd;
+  process.env.CLEAN_FIXTURE_TOKEN = 'T361CleanSecret0123456789abc';
+  process.env.FAKE_CLEAN_MODE = 'leak';
+  const failed = await gate.run(ctx());
+  assert.equal(failed.ok, false);
+  assert.match(failed.summary, /cannot scan, token \[redacted:CLEAN_FIXTURE_TOKEN\]/);
+  assert.ok(!failed.summary.includes('T361CleanSecret'), failed.summary);
+  process.env.FAKE_CLEAN_MODE = 'leak-text';
+  const text = await gate.run(ctx());
+  assert.equal(text.ok, false);
+  assert.match(text.summary, /did not print JSON/);
+  assert.ok(!text.summary.includes('T361C'), text.summary);
   assertCleanedUp();
 });
 
