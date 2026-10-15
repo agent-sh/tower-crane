@@ -7,6 +7,7 @@ const path = require('node:path');
 const os = require('node:os');
 const { makeRepo, cachedFixture } = require('./helpers');
 const TOML = require('../lib/toml');
+const A = require('../lib/agents');
 
 const NO_STUBS = process.platform === 'win32' && 'harness stubs are shebang scripts';
 const SECRET_KEY = 'TC_PRIVATE_ENV_FILE_KEY';
@@ -621,14 +622,25 @@ test('codex: the profile hides /run but the resolver, and a runtime directory el
   fs.writeFileSync(path.join(bin, 'codex'), [
     `#!${process.execPath}`, "'use strict';",
     'const fs = require("node:fs"), path = require("node:path");',
-    `fs.writeFileSync(${JSON.stringify(out)}, JSON.stringify({ config: fs.readFileSync(path.join(process.env.CODEX_HOME, "config.toml"), "utf8"), env: { XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR, DBUS_SESSION_BUS_ADDRESS: process.env.DBUS_SESSION_BUS_ADDRESS } }));`,
+    `fs.writeFileSync(${JSON.stringify(out)}, JSON.stringify({ cwd: process.cwd(), config: fs.readFileSync(path.join(process.env.CODEX_HOME, "config.toml"), "utf8"), env: { XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR, DBUS_SESSION_BUS_ADDRESS: process.env.DBUS_SESSION_BUS_ADDRESS } }));`,
     'console.log(JSON.stringify({ type: "thread.started", thread_id: "bus" }));', '',
   ].join('\n'), { mode: 0o755 });
   // Outside the home, an entry of / exposes it as one does /run/user/<uid>.
   // The stub never connects, so empty files stand in for the sockets.
-  const runtime = fs.realpathSync(fs.mkdtempSync('/var/tmp/tower-crane-runtime-'));
-  t.after(() => fs.rmSync(runtime, { recursive: true, force: true }));
-  fs.mkdirSync(path.join(runtime, 'systemd'));
+  // The runtime directory sits one level down, so the directory on the way
+  // is the test's own and holds what the profile must handle there.
+  const way = fs.realpathSync(fs.mkdtempSync('/var/tmp/tower-crane-runtime-'));
+  const runtime = path.join(way, 'rt');
+  const beside = fs.realpathSync(fs.mkdtempSync('/var/tmp/tower-crane-beside-'));
+  t.after(() => {
+    fs.rmSync(way, { recursive: true, force: true });
+    fs.rmSync(beside, { recursive: true, force: true });
+  });
+  fs.mkdirSync(path.join(runtime, 'systemd'), { recursive: true });
+  // A name with DEL, which TOML forbids raw, and a link, which codex would follow.
+  const del = path.join(way, 'del\x7f');
+  fs.mkdirSync(del);
+  fs.symlinkSync(h.base, path.join(way, 'link'));
   const bus = path.join(runtime, 'bus');
   for (const f of [bus, path.join(runtime, 'systemd', 'private'), path.join(runtime, 'openssh_agent')]) fs.writeFileSync(f, '');
   const env = { ...h.env, XDG_RUNTIME_DIR: runtime, DBUS_SESSION_BUS_ADDRESS: '', PATH: `${bin}${path.delimiter}${process.env.PATH}`, CODEX_HOME: '' };
@@ -636,7 +648,13 @@ test('codex: the profile hides /run but the resolver, and a runtime directory el
     releaseExited(h);
     h.ok(['spawn', '--task', 'T1', '--wait'], { env });
     const seen = JSON.parse(fs.readFileSync(out, 'utf8'));
-    return { rules: TOML.parse(seen.config).permissions['tower-crane'].filesystem, env: seen.env };
+    return { rules: TOML.parse(seen.config).permissions['tower-crane'].filesystem, env: seen.env, config: seen.config };
+  };
+  const refused = (spawnEnv = env) => {
+    releaseExited(h);
+    const r = h.run(['spawn', '--task', 'T1', '--wait'], { env: spawnEnv });
+    assert.notEqual(r.code, 0, 'spawn refuses');
+    return r.stderr;
   };
   const uid = process.getuid();
   // Whether a rule mounts p: codex mounts only what its rules name.
@@ -656,9 +674,67 @@ test('codex: the profile hides /run but the resolver, and a runtime directory el
   h.ok(['project', 'set', '--session-bus', 'true']);
   const on = spawnSeen();
   assert.equal(on.rules[bus], 'read', 'the bus socket is reachable: a readable rule mounts it');
-  assert.equal(on.rules[runtime], undefined, 'the runtime directory itself stays, since codex cannot reopen a path inside a hidden one');
-  for (const p of ['systemd', 'openssh_agent']) assert.equal(on.rules[path.join(runtime, p)], 'none', `${p} stays hidden, the user manager socket included`);
+  assert.equal(mounted(on.rules, bus), true, 'the bus socket is mounted');
+  // codex cannot reopen a path inside a hidden one, so the runtime directory
+  // is left unmounted, and the bus socket is mounted alone.
+  for (const p of ['systemd/private', 'openssh_agent', 'made-after-spawn.sock']) assert.equal(mounted(on.rules, path.join(runtime, p)), false, `${p} is not mounted`);
+  assert.equal(on.rules['/var'], undefined, '/var is not mounted whole');
+  assert.equal(mounted(on.rules, path.join(way, 'made-after-spawn')), false, 'nor is a later entry on the way to the runtime directory');
+  assert.equal(mounted(on.rules, path.join('/var/tmp', 'made-after-spawn')), false, 'or in /var/tmp');
+  assert.equal(mounted(on.rules, beside), true, 'a directory beside it stays readable');
+  for (const p of ['/var/lib', '/var/cache']) if (fs.existsSync(p) && !fs.lstatSync(p).isSymbolicLink()) assert.equal(mounted(on.rules, p), true, `${p} stays readable`);
+  assert.equal(on.rules[del], 'read', 'an entry named with DEL is listed');
+  assert.doesNotMatch(on.config, /\x7f/, 'and written escaped, since TOML forbids DEL raw');
+  assert.equal(mounted(on.rules, path.join(way, 'link')), false, 'a link is never listed: codex would follow it');
   assert.deepEqual(on.env, { XDG_RUNTIME_DIR: runtime, DBUS_SESSION_BUS_ADDRESS: `unix:path=${bus}` });
+
+  // Each entry on the way is a rule, and codex takes the profile as one
+  // argument of at most 128 KiB: spawn refuses and names the directory.
+  const many = 700;
+  for (let i = 0; i < many; i++) fs.writeFileSync(path.join(way, `${String(i).padStart(4, '0')}-${'x'.repeat(180)}`), '');
+  const tooMany = refused();
+  assert.match(tooMany, /sandbox\.session_bus/);
+  assert.ok(tooMany.includes(`${way} holds ${many + 1}`), `names the directory and its count: ${tooMany}`);
+  for (const name of fs.readdirSync(way)) if (name.endsWith('x'.repeat(180))) fs.rmSync(path.join(way, name));
+
+  // A writable rule mounts the runtime directory whole.
+  h.ok(['project', 'set', '--sandbox', JSON.stringify({ write: [way], session_bus: true })]);
+  const written = refused();
+  assert.match(written, /sandbox\.session_bus/);
+  assert.ok(written.includes(`${runtime} lies in ${way}, which the codex sandbox writes`), written);
+  h.ok(['project', 'set', '--sandbox', JSON.stringify({ session_bus: true })]);
+  assert.equal(spawnSeen().rules[bus], 'read', 'without it the bus is granted again');
+
+  // The worktree is the workspace root, which codex mounts whole.
+  const worktree = fs.realpathSync(JSON.parse(fs.readFileSync(out, 'utf8')).cwd);
+  const inside = path.join(worktree, '.runtime');
+  fs.mkdirSync(inside);
+  fs.writeFileSync(path.join(inside, 'bus'), '');
+  const inWorktree = refused({ ...env, XDG_RUNTIME_DIR: inside });
+  assert.match(inWorktree, /sandbox\.session_bus/);
+  assert.ok(inWorktree.includes(`${inside} lies in the agent's worktree ${worktree}`), inWorktree);
+  fs.rmSync(inside, { recursive: true });
+});
+
+// codex's :minimal mounts /usr and /etc whole, so a runtime directory there
+// cannot be left out; spawn cannot place a bus socket there in a test, so
+// the check runs in process.
+test('codex: sandbox.session_bus refuses a runtime directory a writable rule or a system directory mounts whole', () => {
+  const cases = [
+    ['under a writable rule', '/var/tmp/x/rt', { '/var/tmp/x': 'write' }, [], /lies in \/var\/tmp\/x, which the codex sandbox writes/],
+    ['a writable rule itself', '/var/tmp/x/rt', { '/var/tmp/x/rt': 'write' }, [], /lies in \/var\/tmp\/x\/rt, which the codex sandbox writes/],
+    ['under /usr', '/usr/local/rt', { '/usr/local': 'read' }, ['/usr', '/etc'], /lies in \/usr, which the codex sandbox mounts whole/],
+    ['under /etc', '/etc/rt', {}, ['/usr', '/etc'], /lies in \/etc, which the codex sandbox mounts whole/],
+    ['under a readable rule', '/var/tmp/x/rt', { '/var': 'read' }, ['/usr', '/etc'], null],
+    ['under /run', '/run/user/1000', {}, ['/usr', '/etc'], null],
+    ['in the agent\'s worktree', '/w/T1/.rt', { '/var': 'read' }, ['/usr', '/etc'], /lies in the agent's worktree \/w\/T1, which the codex sandbox mounts whole/, '/w/T1'],
+    ['beside the agent\'s worktree', '/w/T1-rt', {}, ['/usr', '/etc'], null, '/w/T1'],
+  ];
+  for (const [what, dir, rules, system, refusal, worktree = '/w/T9'] of cases) {
+    const why = A.wholeMount(dir, rules, system, worktree);
+    if (refusal) assert.match(why, refusal, what);
+    else assert.equal(why, null, what);
+  }
 });
 
 test('claude: sandbox.session_bus grants the sockets the worker env names, even when the spawning env names none', { skip: NO_STUBS }, (t) => {
