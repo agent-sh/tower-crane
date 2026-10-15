@@ -411,6 +411,67 @@ test('the wait host serves events and drains a signal while another dispatch hol
   assert.deepEqual(rows().at(-1), { reason: 'signal', signal: 'SIGTERM', drained: 0 });
 });
 
+// A holder in another pid namespace counts as gone 60 s after its marker last
+// changed, and a dispatch can wait that long for the worktree lock under the
+// dispatch lock, synchronously, which holds every timer.
+test('a dispatch keeps its dispatch lock marker fresh while it waits for the worktree lock, and traces the holding', async (t) => {
+  const h = refillFixture(t);
+  const S = require('../lib/state');
+  const dir = path.join(h.state, 'dispatch', 'lock');
+  const trace = path.join(h.base, 'lock-trace.jsonl');
+  const worktreeLock = path.join(fs.realpathSync.native(h.state), 'worktree', 'lock');
+  fs.mkdirSync(path.dirname(worktreeLock), { recursive: true });
+  const held = S.tryMarkedLock(worktreeLock, { keepLive: true });
+  assert.ok(held, 'the worktree lock is free');
+  let worktreeHeld = true;
+  const releaseWorktree = () => { if (worktreeHeld) { worktreeHeld = false; S.releaseMarkedLock(held); } };
+  t.after(releaseWorktree);
+  let closed = false;
+  const run = h.runAsync(['spawn', '--ready', '--agent', 'orchestrator'], {
+    env: { TOWER_CRANE_LOCK_TRACE: trace },
+    onSpawn: (c) => c.on('close', () => { closed = true; }),
+  });
+  const marker = () => { try { return fs.readdirSync(dir).map((name) => path.join(dir, name))[0] || null; } catch { return null; } };
+  await waitUntil(() => marker(), { paths: [h.state], alive: () => !closed, what: 'the dispatch takes its lock' });
+  const file = marker();
+  const old = new Date(Date.now() - 5 * 60000);
+  fs.utimesSync(file, old, old);
+  const fresh = () => { try { return Date.now() - fs.statSync(file).mtimeMs < 60000; } catch { return false; } };
+  await waitUntil(fresh, { paths: [h.state], alive: () => !closed, what: 'the waiting dispatch touches its marker' });
+  releaseWorktree();
+  const result = await run;
+  assert.equal(result.code, 0, result.stderr + result.stdout);
+  const holdings = fs.readFileSync(trace, 'utf8').trim().split('\n').map((line) => JSON.parse(line)).filter((row) => row.label === 'dispatch');
+  assert.equal(holdings.length, 1, 'one dispatch holding is traced');
+  assert.ok(holdings[0].hold_ms >= 10000, `held ${holdings[0].hold_ms} ms across the worktree lock wait`);
+});
+
+// A gone holder's marker that cannot be removed stays until a person acts.
+test('the wait host reports a dispatch lock it cannot clear once, not on every pass', { skip: (process.platform === 'win32' || process.getuid?.() === 0) && 'permission bits do not bind' }, async (t) => {
+  const h = refillFixture(t);
+  const os = require('node:os');
+  const cp = require('node:child_process');
+  const dir = path.join(h.state, 'dispatch', 'lock');
+  fs.mkdirSync(dir, { recursive: true });
+  const gone = cp.spawnSync(process.execPath, ['-e', 'process.stdout.write(String(process.pid))'], { encoding: 'utf8' });
+  const nonce = 'a1b2c3d4e5f60718';
+  fs.writeFileSync(path.join(dir, nonce), JSON.stringify({ pid: Number(gone.stdout), host: os.hostname(), at: new Date().toISOString(), nonce }));
+  const old = new Date(Date.now() - 5 * 60000);
+  fs.utimesSync(path.join(dir, nonce), old, old);
+  fs.chmodSync(dir, 0o555);
+  let result;
+  try {
+    result = await h.runAsync(['wait', '--types', 'spawn', '--timeout', '5', '--agent', 'orchestrator']); // wait-allow: the refill passes in this window are what the test counts
+  } finally {
+    // Before the fixture's cleanup, which removes the directory.
+    fs.chmodSync(dir, 0o755);
+  }
+  assert.equal(result.code, 2, result.stderr);
+  const reports = result.stderr.split('\n').filter((line) => /automation refill: .*worker dispatch is locked by pid \d+ .*which is gone, but its lock could not be removed/.test(line));
+  assert.equal(reports.length, 1, result.stderr);
+  assert.equal(h.logs().filter((e) => e.cmd === 'spawn').length, 0);
+});
+
 function startupContexts(h, withRules) {
   const startups = h.logs().filter((e) => e.cmd === 'startup');
   assert.deepEqual(startups.map((e) => e.detail.role), ['worker', 'reviewer']);

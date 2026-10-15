@@ -479,9 +479,9 @@ so a watcher never skips a higher-ranked task that another dispatch is still
 preparing and gives its slot to a lower one. A dispatch lock that outlasts its
 wait (`worker dispatch is locked by ...`) stops the batch at that task and is
 retried on the next pass rather than reported as a refusal. The host does not
-wait for the lock: a refill that finds another dispatch holding it, or loses
-the one try, is deferred to the next pass, so events and signals keep reaching
-the host ([Dispatch lock](state.md#dispatch-lock)). Before counting
+wait for the lock: a refill or a recovered climb that finds another dispatch
+holding it, or loses the one try, is deferred to the next pass, so events and
+signals keep reaching the host ([Dispatch lock](state.md#dispatch-lock)). Before counting
 capacity, the host clears verified dead reservations under the state lock,
 including reservations from cancelled tasks. Dispatch refusals
 are reported once on stderr per wait while dispatch inputs are unchanged.
