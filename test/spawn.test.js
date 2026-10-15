@@ -839,7 +839,9 @@ if (process.argv[1].endsWith('spawn-monitor.js')) {
   assert.deepEqual(fs.readdirSync(tempRoot), []);
 });
 
-test('background spawn refuses occupied log names without writing or recording a spawn', (t) => {
+// A plain file there is a failed start's log, which the spawn moves aside
+// (spawn-startup.test.js); a link or a directory is not.
+test('background spawn refuses a log name held by a link or a directory without writing or recording a spawn', (t) => {
   for (const linked of [false, true]) {
     const h = setup(t);
     commandRung(h, 'small', [process.execPath, '-e', 'console.log("agent output")']);
@@ -856,7 +858,8 @@ test('background spawn refuses occupied log names without writing or recording a
         throw e;
       }
     } else {
-      fs.writeFileSync(log, 'preserve this log\n');
+      fs.mkdirSync(log);
+      fs.writeFileSync(path.join(log, 'kept'), 'preserve this log\n');
     }
     const tasks = fs.readFileSync(path.join(h.state, 'tasks.json'), 'utf8');
     const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8');
@@ -864,7 +867,7 @@ test('background spawn refuses occupied log names without writing or recording a
     assert.notEqual(result.code, 0, result.stdout);
     assert.match(result.stderr, /log already exists/);
     assert.equal(fs.readFileSync(target, 'utf8'), 'preserve this file\n');
-    assert.equal(fs.readFileSync(log, 'utf8'), linked ? 'preserve this file\n' : 'preserve this log\n');
+    assert.equal(fs.readFileSync(linked ? log : path.join(log, 'kept'), 'utf8'), linked ? 'preserve this file\n' : 'preserve this log\n');
     assert.equal(fs.readFileSync(path.join(h.state, 'tasks.json'), 'utf8'), tasks);
     assert.equal(fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8'), events);
   }

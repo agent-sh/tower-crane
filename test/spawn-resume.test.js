@@ -589,7 +589,8 @@ test('a pre-launch fallback failure restores the old claim and permits retry', (
   fs.unlinkSync(path.join(first.codex_home, 'sessions', 'rollout-test-worker-session-1.jsonl'));
 
   const occupiedLog = path.join(h.state, 'logs', 'T1-worker-T1-2.log');
-  fs.writeFileSync(occupiedLog, 'preserve this log\n');
+  // A directory, since a plain file there would be moved aside as a failed start's log.
+  fs.mkdirSync(occupiedLog);
   const failed = h.run(['spawn', '--task', 'T1', '--wait']);
   assert.equal(failed.code, 1);
   assert.match(failed.stderr, /EEXIST: log already exists/);
@@ -598,9 +599,9 @@ test('a pre-launch fallback failure restores the old claim and permits retry', (
   const rollback = afterFailure.findLast((e) => e.cmd === 'claim' && e.task === 'T1' && e.detail.rollback);
   assert.deepEqual([rollback.detail.holder, rollback.detail.restored_from], [first.agent, 'worker-T1-2']);
   assert.ok(!afterFailure.some((e) => e.cmd === 'spawn' && e.task === 'T1' && e.detail.agent === 'worker-T1-2'));
-  assert.equal(fs.readFileSync(occupiedLog, 'utf8'), 'preserve this log\n');
+  assert.ok(fs.statSync(occupiedLog).isDirectory());
 
-  fs.unlinkSync(occupiedLog);
+  fs.rmdirSync(occupiedLog);
   const retry = h.json(['spawn', '--task', 'T1', '--wait']);
   assert.equal(retry.agent, 'worker-T1-2');
   assert.equal(retry.resumed, false);
