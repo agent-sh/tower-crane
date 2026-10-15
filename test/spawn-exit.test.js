@@ -309,49 +309,121 @@ test('foreground exits without submit are reported from their recorded exit', as
   assertNoLogText(h);
 });
 
-// An agent can leave a dev server or a watcher running that inherited the
-// harness's output. On POSIX this one starts a session of its own, outside the
-// process group the monitor stops; Windows has no group at all. The holder's
-// own end, a minute away, bounds the run when nothing stops it.
-test('a descendant that keeps the harness output open is stopped and spawn --wait finishes', async (t) => {
-  const h = setup(t);
-  const marker = path.join(h.base, 'holder.json');
-  const worker = path.join(h.base, 'holder-worker.js');
-  const holder = `
+// Linux and Windows stop a process outside the group that holds the output;
+// other systems only close the pipes.
+const TRACES_HOLDERS = ['linux', 'win32'].includes(process.platform);
+
+// A harness stand-in that leaves processes behind and exits. holder: a process
+// in a session of its own (outside the process group the monitor stops; Windows
+// has no group at all) that inherits the harness output, like a dev server or
+// a watcher. Its own end, a minute away, bounds the run when nothing stops it.
+// member: a process in the group that inherits the output and ignores SIGTERM.
+// bystander: a process outside the group that does not hold the output.
+// nested: the harness dispatches T2 before it exits, as an orchestrator does.
+function leaver(h, { holder = false, member = false, bystander = false, nested = false } = {}) {
+  const files = { holder: path.join(h.base, 'holder.json'), member: path.join(h.base, 'member.json'),
+    bystander: path.join(h.base, 'bystander.json'), nested: path.join(h.base, 'nested.json'), finish: path.join(h.base, 'nested.finish') };
+  const child = (signals) => `
 const fs = require('node:fs');
-fs.writeSync(1, 'holder started\\n');
+${signals ? "process.on('SIGTERM', () => {});" : ''}
+fs.writeSync(1, 'child started\\n');
 fs.writeFileSync(process.argv[1] + '.tmp', JSON.stringify({ pid: process.pid }));
 fs.renameSync(process.argv[1] + '.tmp', process.argv[1]);
-setTimeout(() => { fs.writeFileSync(process.argv[1] + '.natural', ''); process.exit(0); }, 60000); // wait-allow: the holder's own end bounds a run that nothing stops
+setTimeout(() => { fs.writeFileSync(process.argv[1] + '.natural', ''); process.exit(0); }, 60000); // wait-allow: the child's own end bounds a run that nothing stops
 `;
+  const worker = path.join(h.base, 'leaver.js');
   fs.writeFileSync(worker, `
 const fs = require('node:fs');
 const cp = require('node:child_process');
-cp.execFileSync(process.execPath, [process.argv[2], 'claim', process.env.TOWER_CRANE_TASK]);
-const holder = cp.spawn(process.execPath, ['-e', ${JSON.stringify(holder)}, process.argv[3]],
-  { detached: true, stdio: ['ignore', 'inherit', 'inherit'], windowsHide: true });
-holder.unref();
-while (!fs.existsSync(process.argv[3])) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20); // wait-allow: the harness exits only once its holder runs
+const [bin, files] = [process.argv[2], JSON.parse(process.argv[3])];
+cp.execFileSync(process.execPath, [bin, 'claim', process.env.TOWER_CRANE_TASK]);
+const start = (file, script, options) => {
+  cp.spawn(process.execPath, ['-e', script, file], { windowsHide: true, ...options }).unref();
+  while (!fs.existsSync(file)) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20); // wait-allow: the harness exits only once its children run
+};
+if (${nested}) {
+  const env = { ...process.env, TOWER_CRANE_AGENT: 'orchestrator' };
+  for (const key of ['TOWER_CRANE_TASK', 'TOWER_CRANE_HOOK', 'TOWER_CRANE_SESSION']) delete env[key];
+  cp.execFileSync(process.execPath, [bin, 'spawn', '--role', 'medium', '--task', 'T2', '--json'], { env, stdio: ['ignore', 'ignore', 'inherit'] });
+  while (!fs.existsSync(files.nested)) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20); // wait-allow: the nested harness reports its pid
+}
+if (${holder}) start(files.holder, ${JSON.stringify(child(false))}, { detached: true, stdio: ['ignore', 'inherit', 'inherit'] });
+if (${member}) start(files.member, ${JSON.stringify(child(true))}, { stdio: ['ignore', 'inherit', 'inherit'] });
+if (${bystander}) start(files.bystander, ${JSON.stringify(child(false))}, { detached: true, stdio: 'ignore' });
 fs.writeSync(1, 'harness done\\n');
 `);
-  h.ok(['ladder', 'set', 'easy', '--harness', 'command', '--command', JSON.stringify([process.execPath, worker, BIN, marker, '{prompt}']),
+  h.ok(['ladder', 'set', 'easy', '--harness', 'command', '--command', JSON.stringify([process.execPath, worker, BIN, JSON.stringify(files), '{prompt}']),
     '--clear', 'profile', '--clear', 'effort']);
+  if (nested) {
+    const inner = path.join(h.base, 'nested.js');
+    fs.writeFileSync(inner, `
+const fs = require('node:fs');
+fs.writeFileSync(process.argv[2] + '.tmp', JSON.stringify({ pid: process.pid }));
+fs.renameSync(process.argv[2] + '.tmp', process.argv[2]);
+setInterval(() => { if (fs.existsSync(process.argv[3])) process.exit(0); }, 25); // wait-allow: the nested harness runs until the test lets it end
+`);
+    h.ok(['task', 'add', '--title', 'Nested task', '--tier', 'medium', '--acceptance', 'runs beside T1']);
+    h.ok(['brief', 'set', 'T2', '-'], { input: 'Work on T2.\n' });
+    h.ok(['ladder', 'set', 'medium', '--harness', 'command', '--command', JSON.stringify([process.execPath, inner, files.nested, files.finish, '{prompt}']),
+      '--clear', 'profile', '--clear', 'effort']);
+  }
   h.stopWorkers.push(() => {
-    if (!fs.existsSync(marker)) return;
-    try { killPid(JSON.parse(readPublished(marker, 'utf8')).pid, 'SIGKILL'); } catch (e) { if (e.code !== 'ESRCH') throw e; }
+    fs.writeFileSync(files.finish, '');
+    for (const file of [files.holder, files.member, files.bystander]) {
+      if (!fs.existsSync(file)) continue;
+      try { killPid(JSON.parse(readPublished(file, 'utf8')).pid, 'SIGKILL'); } catch (e) { if (e.code !== 'ESRCH') throw e; }
+    }
   });
+  const pid = (file) => JSON.parse(readPublished(file, 'utf8')).pid;
   const result = h.run(['spawn', '--role', 'easy', '--task', 'T1', '--wait']);
+  const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  const exit = events.findLast((e) => e.cmd === 'spawn exit' && e.task === 'T1');
+  return { result, files, pid, events, exit };
+}
+
+test('a descendant that keeps the harness output open is stopped and spawn --wait finishes', async (t) => {
+  const h = setup(t);
+  const { result, files, pid, exit } = leaver(h, { holder: true });
   assert.equal(result.code, 0, result.stderr);
-  assert.equal(fs.existsSync(marker + '.natural'), false, 'spawn --wait waited for the holder to end on its own');
-  assert.match(result.stdout, /holder started/);
+  assert.equal(fs.existsSync(files.holder + '.natural'), false, 'spawn --wait waited for the holder to end on its own');
+  assert.match(result.stdout, /child started/);
   assert.match(result.stdout, /harness done/);
   assert.match(result.stderr, /output stayed open/);
-  const { pid } = JSON.parse(readPublished(marker, 'utf8'));
-  assert.equal(detachedAlive({ pid }), false, 'the descendant holding the output still runs');
-  const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
-  const exitEvent = events.findLast((e) => e.cmd === 'spawn exit');
-  assert.equal(exitEvent.detail.code, 0);
-  assert.deepEqual(exitEvent.detail.output_held.pids, [pid]);
+  assert.equal(exit.detail.code, 0);
+  if (TRACES_HOLDERS) {
+    assert.equal(detachedAlive({ pid: pid(files.holder) }), false, 'the descendant holding the output still runs');
+    assert.deepEqual(exit.detail.output_held.pids, [pid(files.holder)]);
+  } else {
+    // Nothing outside the group is claimed stopped where none can be traced.
+    assert.deepEqual(exit.detail.output_held.pids, []);
+  }
+});
+
+test('a group member that ignores SIGTERM is not an output holder, and processes outside the group stay', {
+  skip: process.platform === 'win32' && 'POSIX process groups',
+}, async (t) => {
+  const h = setup(t);
+  const { result, files, pid, exit } = leaver(h, { member: true, bystander: true });
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(fs.existsSync(files.member + '.natural'), false, 'the group member ended on its own');
+  assert.equal(detachedAlive({ pid: pid(files.member) }), false, 'SIGKILL did not reach the group member');
+  assert.doesNotMatch(result.stderr, /output stayed open/);
+  assert.equal(exit.detail.output_held, undefined);
+  assert.equal(detachedAlive({ pid: pid(files.bystander) }), true, 'a process that held no output was stopped');
+});
+
+test('a task an agent dispatches survives the output release of the agent that started it', async (t) => {
+  const h = setup(t);
+  const { result, files, pid, events, exit } = leaver(h, { holder: true, nested: true });
+  assert.equal(result.code, 0, result.stderr);
+  const nested = events.findLast((e) => e.cmd === 'spawn' && e.task === 'T2').detail;
+  const inner = { pid: pid(files.nested), ...(process.platform === 'win32' ? {} : { startTicks: nested.start_ticks }) };
+  assert.equal(detachedAlive(inner), true, 'the nested harness was stopped');
+  assert.equal(detachedAlive({ pid: nested.monitor_pid }), true, 'the nested supervisor was stopped');
+  for (const stopped of exit.detail.output_held.pids) assert.ok(![inner.pid, nested.monitor_pid].includes(stopped), JSON.stringify(exit.detail.output_held));
+  fs.writeFileSync(files.finish, '');
+  await waitOnRepo(h, () => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse)
+    .some((e) => e.cmd === 'spawn exit' && e.task === 'T2'), 'the nested task did not finish');
 });
 
 test('the Windows tree of an exited harness keeps only processes it started', () => {
@@ -367,7 +439,7 @@ test('the Windows tree of an exited harness keeps only processes it started', ()
     { pid: 17, parent: 99, start: 1600 }, // a grandchild whose parent already exited
     { pid: 18, parent: 10, start: 2050 }, // a child within the clock allowance of the observed exit
   ];
-  assert.deepEqual(windowsTree(rows, 10, 1000, 2000), [11, 18, 12]);
+  assert.deepEqual(windowsTree(rows, 10, 1000, 2000).map((r) => r.pid), [11, 18, 12]);
   assert.deepEqual(windowsTree([], 10, 1000, 2000), []);
 });
 
