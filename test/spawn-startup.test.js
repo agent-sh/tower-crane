@@ -50,7 +50,9 @@ cp.spawnSync = () => {
   process.stderr.write('planted: git is broken on this host\\n');
   throw new Error('planted git failure');
 };`);
-  const failed = h.run(['spawn', '--role', 'small', '--task', 'T1'], { env });
+  // The first rename of the log is refused, as Windows does while the
+  // supervisor's handle or a scanner's lingers; the failure is still reported.
+  const failed = h.run(['spawn', '--role', 'small', '--task', 'T1'], { env, hooks: { HOOK_BUSY_RENAME: '-startup-failed-' } });
   assert.equal(failed.code, 1, failed.stderr);
   assert.match(failed.stderr, /supervisor startup failed: the supervisor exited with code 1 before it reported ready: planted git failure/);
   assert.doesNotMatch(failed.stderr, /installed and on PATH/);
@@ -64,6 +66,34 @@ cp.spawnSync = () => {
   const next = h.run(['spawn', '--role', 'small', '--task', 'T1', '--wait', '--json']);
   assert.equal(next.code, 0, next.stderr);
   assert.equal(JSON.parse(next.stdout).agent, 'small-T1-1');
+});
+
+test('a failed start whose log rename stays refused reports the failure and keeps the log under its own name, which the next spawn moves aside', (t) => {
+  const h = setup(t);
+  commandRung(h);
+  const env = monitorHook(h, 'git-fails-held-log', `
+const cp = require('node:child_process');
+cp.spawnSync = () => {
+  process.stderr.write('planted: git is broken on this host\\n');
+  throw new Error('planted git failure');
+};`);
+  const failed = h.run(['spawn', '--role', 'small', '--task', 'T1'], { env, hooks: { HOOK_BUSY_RENAME: '-startup-failed-', HOOK_BUSY_RENAME_TIMES: '0' } });
+  assert.equal(failed.code, 1, failed.stderr);
+  assert.match(failed.stderr, /supervisor startup failed: the supervisor exited with code 1 before it reported ready: planted git failure/);
+  assert.doesNotMatch(failed.stderr, /EPERM/);
+  assert.deepEqual(logs(h), ['T1-small-T1-1.log']);
+  assert.ok(failed.stderr.includes(`The supervisor log is kept at ${path.join(h.state, 'logs', 'T1-small-T1-1.log')}`), failed.stderr);
+  assert.match(failed.stderr, /it ends:\n(.*\n)*planted: git is broken on this host/);
+  // A failed start records no spawn, so the next one is the same agent with the same log name.
+  const next = h.run(['spawn', '--role', 'small', '--task', 'T1', '--wait', '--json']);
+  assert.equal(next.code, 0, next.stderr);
+  assert.equal(JSON.parse(next.stdout).agent, 'small-T1-1');
+  assert.match(next.stderr, /tower-crane: moved .*T1-small-T1-1\.log, left by a start that failed before it was recorded, to .*T1-small-T1-1-startup-failed-.+\.log\n/);
+  const kept = logs(h).sort();
+  assert.equal(kept.length, 2, kept.join(', '));
+  assert.match(kept[0], /^T1-small-T1-1-startup-failed-.+\.log$/);
+  assert.equal(kept[1], 'T1-small-T1-1.log');
+  assert.match(fs.readFileSync(path.join(h.state, 'logs', kept[0]), 'utf8'), /planted: git is broken on this host/);
 });
 
 test('a supervisor that stalls before it reports says so and keeps its log', (t) => {
