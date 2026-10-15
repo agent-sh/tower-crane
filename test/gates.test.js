@@ -426,6 +426,33 @@ test('a token that straddles the output tail cut is redacted, not kept as a frag
   assert.equal(output.includes(body), false, 'the token body leaked past the output tail cut');
 });
 
+test('a stderr line written while stdout is mid-token cannot split the token past redaction', (t) => {
+  const h = makeRepo(t);
+  // stdout flushes a block that ends inside the token; stderr writes before the rest arrives.
+  const script = `const fs = require('node:fs');
+const pause = () => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 300); // wait-allow: the gate must read each write before the other stream writes, the condition under test
+fs.writeSync(1, 'key sk-T36');
+pause();
+fs.writeSync(2, '! not ok 1 - split\\n');
+pause();
+fs.writeSync(1, '1HeadT361TailBody0123 end\\n');
+process.exit(1);
+`;
+  const sha = manifestTask(h, { submitted: { 'print-split.js': script } });
+  submitTestsFixture(h, sha);
+  h.ok(['project', 'set', '--tests-mode', 'run-only', '--tests-cmd', `${shellQuote(process.execPath)} print-split.js`]);
+  const result = h.run(['check', 'tests', 'T1', '--agent', 'checker']);
+  assert.equal(result.code, 1, result.stdout + result.stderr);
+
+  const evidence = h.readState('tasks.json').tasks[0].evidence.at(-1);
+  assert.match(evidence.test_failure.output_tail, /^! not ok 1 - split$/m);
+  assert.match(evidence.test_failure.output_tail, /^key \[redacted:API_KEY\] end$/m);
+  const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8');
+  const output = [result.stdout, result.stderr, JSON.stringify(evidence), events, h.ok(['task', 'show', 'T1'])].join('\n');
+  assert.equal(output.includes('sk-T36'), false, 'the first half of the token leaked');
+  assert.equal(output.includes('T361TailBody'), false, 'the second half of the token leaked');
+});
+
 test('tests evidence stores its mode in the audit event and stops counting when the policy changes', (t) => {
   const h = makeRepo(t);
   const sha = manifestTask(h, { submitted: {} });
