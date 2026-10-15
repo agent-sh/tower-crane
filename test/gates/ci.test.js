@@ -16,9 +16,13 @@ const lines = (items) => items.map((i) => JSON.stringify(i)).join('\n') + (items
 // `later` maps other commits on the base to their checks (`allRuns`: every check run, where the
 // default list keeps the latest of each name), `branch` lists the base's workflow runs since the
 // merge commit, `compare` maps "from...to" to the compare status GitHub reports and `files` maps a
-// workflow path to its text at any commit.
+// workflow path to its text at any commit. `history` lists the commits the merge commit contains,
+// newest first, `earlier` the base's runs of its workflow before it, `runJobs` maps a run id to its
+// jobs, `logs` a job id to its log text (null when it cannot be read) and `patches` are the hunks of
+// the merge commit's diff.
 function github({ runs = [], suites = [], workflows = [], head = SHA, apiError = null, view = {}, pr,
-  later = {}, branch = [], compare = {}, date = '2026-10-13T20:00:00Z', files = {} } = {}) {
+  later = {}, branch = [], compare = {}, date = '2026-10-13T20:00:00Z', files = {},
+  history = [], earlier = [], runJobs = {}, logs = {}, patches = [] } = {}) {
   const commits = { ...later, [SHA]: { runs, suites, workflows } };
   return fakeExec((args) => {
     if (args[0] === 'pr' && args[1] === 'view') return result(JSON.stringify(pr || { headRefOid: head, mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN', ...view }));
@@ -29,6 +33,13 @@ function github({ runs = [], suites = [], workflows = [], head = SHA, apiError =
     if (args[1] === `repos/${REPO}/commits/${SHA}`) return result(`${date}\n`);
     const content = args[1].match(new RegExp(`^repos/${REPO}/contents/(.+)\\?ref=\\w+$`));
     if (content) return files[content[1]] == null ? result('', 1, 'HTTP 404') : result(`${Buffer.from(files[content[1]]).toString('base64')}\n`);
+    if (args[1] === `repos/${REPO}/commits?sha=${SHA}&per_page=100`) return result(lines([SHA, ...history]));
+    if (args[1].startsWith(`repos/${REPO}/actions/workflows/ci.yml/runs?branch=main&created=`)) return result(lines(earlier));
+    const jobsOf = args[1].match(new RegExp(`^repos/${REPO}/actions/runs/(\\d+)/jobs\\?filter=latest&per_page=100$`));
+    if (jobsOf) return result(lines(runJobs[jobsOf[1]] || []));
+    const log = args[1].match(new RegExp(`^repos/${REPO}/actions/jobs/(\\w+)/logs$`));
+    if (log) return logs[log[1]] === null ? result('', 1, 'HTTP 410: logs expired') : result(logs[log[1]] || '');
+    if (args[1] === `repos/${REPO}/commits/${SHA}?per_page=100`) return result(lines(patches.map((patch, i) => ({ filename: `f${i}.js`, patch }))));
     assert.ok(args.includes('--paginate'), 'every page must be read');
     if (args[1] === `repos/${REPO}/actions/runs?branch=main&created=${encodeURIComponent(`>=${branchSince(workflows, date)}`)}&per_page=100`) return result(lines(branch));
     for (const [sha, at] of Object.entries(commits)) {
@@ -264,6 +275,260 @@ test('the later-commit scan looks at five commits per check and carries its reje
   const rerun = busyMain({ at: [workflow(3, LATEST, 'success')] });
   const r4 = await gate.run(ctx(rerun, { ...HOTFIX, evidence: [{ type: 'ci', sha: SHA, hotfix_ci: { merge_sha: SHA, rejected: [redLater] } }] }, { ci: { required: [] } }));
   assert.equal(r4.ok, true, r4.summary);
+});
+
+const PARENT = 'e'.repeat(40);
+const OLDER = 'f'.repeat(40);
+const ELSEWHERE = '9'.repeat(40);
+// A job log as the runner prints it: node:test failures, each with its error line, then the step's
+// error. `tests` are [name, error] pairs; `error` is the line a log without tests fails on.
+// Like a real job log it has every step: the checkout's git output and a later upload step's echoed
+// inputs, which carry error words that say nothing about the failure.
+const jobLog = (tests = [], error = null) => [
+  '##[group]Run actions/checkout@v7', '##[endgroup]', ' * [new branch]      tower-crane/T177-a-failed-gate -> origin/tower-crane/T177-a-failed-gate',
+  '##[group]Run npm test', 'npm test', 'shell: /usr/bin/bash -e {0}', '##[endgroup]',
+  ...tests.flatMap(([name, err], i) => [`not ok ${i + 1} - ${name}`, `  ${err}`]),
+  ...(error ? [error] : []),
+  '##[error]Process completed with exit code 1.',
+  '##[group]Run actions/upload-artifact@v4', 'with:', '  if-no-files-found: error', '##[endgroup]',
+].map((line, i) => `2026-10-13T20:00:${String(i).padStart(2, '0')}.1234567Z ${line}`).join('\n');
+const proofLog = (name) => require('node:fs').readFileSync(require('node:path').join(__dirname, '..', 'fixtures', 'proof-logs', name), 'utf8');
+// A merge commit whose push run failed. `failing` are its jobs that did not pass as {id, name, tests,
+// error, conclusion}, `earlier` the base's runs of the workflow before it as [run, [{id, name, tests,
+// error}...]], newest first, and `history` the commits the merge commit contains.
+function redMerge({ failing, earlier = [], history = [PARENT, OLDER], at = [], evidence, patches = [] } = {}) {
+  const merge = workflow(1, SHA, 'failure');
+  const logs = {};
+  const runJobs = {};
+  for (const j of failing) logs[j.id] = j.log === null ? null : j.log ?? jobLog(j.tests, j.error);
+  for (const [w, jobsOf] of earlier) {
+    runJobs[w.id] = jobsOf.map(({ id, name }) => ({ id, name, conclusion: 'failure' }));
+    for (const j of jobsOf) logs[j.id] = j.log ?? jobLog(j.tests, j.error);
+  }
+  const gh = busyMain({ merge, at, extra: { history, earlier: earlier.map(([w]) => w), runJobs, logs, patches } });
+  const base = gh.exec;
+  gh.exec = (cmd, args) => (args[1] === `repos/${REPO}/commits/${SHA}/check-runs?per_page=100`
+    ? result(lines(failing.map((j) => ({ id: j.id, ...run(j.name, j.conclusion || 'failure'), suite: 1001 })))) : base(cmd, args));
+  return gate.run(ctx(gh, { ...HOTFIX, ...(evidence ? { evidence } : {}) }, { ci: { required: ['checks (shared files)', 'test ('] } })).then((r) => ({ r, gh }));
+}
+const earlierRun = (id, sha, conclusion, hour) => workflow(id, sha, conclusion, { created_at: `2026-10-13T${hour}:00:00Z` });
+const reads = (gh, part) => gh.calls.filter((c) => c[2]?.includes(part)).length;
+const GREEN_LATER = workflow(3, LATEST, 'success');
+const WIN3 = 'test (windows-latest, shard 3/3)';
+
+test('a failure the base already had before the merge commit is main_red: CI waits for a later green run as for a cancelled one', async () => {
+  // The parent's run failed the same test with the same error in another shard of the same job;
+  // tests move between shards as files are added. Scratch paths and times differ per run.
+  const parentRun = earlierRun(5, PARENT, 'failure', 19);
+  const earlier = [[parentRun, [{ id: 601, name: 'test (windows-latest, shard 2/3)', tests: [['locks hold', 'Error: lock held at C:\\a\\_temp\\tc-Ab12\\lock after 5000ms'], ['other test', 'Error: other']] }]]];
+  const failing = [{ id: 501, name: WIN3, tests: [['locks hold', 'Error: lock held at C:\\a\\_temp\\tc-Zz98\\lock after 7000ms']] }];
+  const { r: waiting } = await redMerge({ failing, earlier });
+  assert.equal(waiting.ok, false);
+  assert.equal(waiting.confirmed_failure, undefined, waiting.summary);
+  assert.equal(waiting.pending, true, waiting.summary);
+  assert.equal(waiting.not_running, true);
+  const failure = waiting.hotfix_ci.failure;
+  assert.equal(failure.classification, 'main_red');
+  assert.deepEqual(failure.runs[0].parent_run, { id: 5, sha: PARENT, event: 'push', conclusion: 'failure', url: `https://github.com/${REPO}/actions/runs/5` });
+  assert.deepEqual(failure.runs[0].jobs, [{ name: WIN3, id: 501, conclusion: 'failure', explained: true, tests: [{
+    name: 'locks hold', error: 'Error: lock held at C:\\a\\_temp\\tc-Zz98\\lock after 7000ms', touched: false,
+    failed_before: { run: 5, sha: PARENT, url: `https://github.com/${REPO}/actions/runs/5`, job: 'test (windows-latest, shard 2/3)', job_id: 601, error: 'Error: lock held at C:\\a\\_temp\\tc-Ab12\\lock after 5000ms' },
+  }] }]);
+  assert.match(waiting.summary, /failed only where main was already red \(main_red\)/);
+  assert.match(waiting.summary, /failed only as main already failed \(parent run 5 at eeeeeeeeee failure\): test \(windows-latest, shard 3\/3\) \[locks hold\] in run 5/);
+  // A later green run on main that contains the merge commit stands for it, and the evidence keeps the classification.
+  const { r: green } = await redMerge({ failing, earlier, at: [GREEN_LATER] });
+  assert.equal(green.ok, true, green.summary);
+  assert.equal(green.hotfix_ci.satisfied_by.sha, LATEST);
+  assert.equal(green.hotfix_ci.failure.classification, 'main_red');
+  assert.match(green.summary, /merge commit aaaaaaaaaa failed only where main was already red \(main_red\); judged at dddddddddd/);
+  // A test the change touched counts at the parent run.
+  const { r: touched } = await redMerge({ failing, earlier, at: [GREEN_LATER], patches: ["@@ -1 +1 @@\n-test('locks hold', () => {})\n+test('locks hold', () => { lock() })"] });
+  assert.equal(touched.ok, true, touched.summary);
+  assert.equal(touched.hotfix_ci.failure.runs[0].jobs[0].tests[0].touched, true);
+  // The next check of the same failed run reuses the recorded classification without reading logs again.
+  const { r: again, gh } = await redMerge({ failing, earlier, evidence: [{ type: 'ci', sha: SHA, revision: 1, hotfix_ci: waiting.hotfix_ci }] });
+  assert.equal(again.hotfix_ci.failure.classification, 'main_red');
+  assert.equal(reads(gh, '/logs'), 0);
+  assert.equal(reads(gh, '/actions/workflows/'), 0);
+});
+
+test('a known flaky failure in an older base run is main_red only in the same job with the same error; a cancelled or uncontained run counts for nothing', async () => {
+  // The parent's run was cancelled by a newer push and the grandparent's was green. An older run
+  // failed the same test the same way in the same job.
+  const flaky = { id: 701, name: 'test (ubuntu-latest, shard 1/3)', tests: [['racy test', 'AssertionError [ERR_ASSERTION]: 2 !== 0']] };
+  const proof = { id: 602, name: 'complete gate scratch cleanup proof', tests: [], error: 'Error: gate scratch left 3 directories' };
+  const window = (older) => [
+    [earlierRun(16, PARENT, 'cancelled', 19), []],
+    [earlierRun(15, OLDER, 'success', 18), []],
+    [earlierRun(14, ELSEWHERE, 'failure', 17), [{ ...flaky, id: 801 }]],
+    [earlierRun(13, OLDER, 'failure', 16), older],
+  ];
+  const merge = { id: 503, name: 'test (ubuntu-latest, shard 2/3)', tests: flaky.tests };
+  const { r, gh } = await redMerge({ failing: [merge], earlier: window([flaky]), at: [GREEN_LATER] });
+  assert.equal(r.ok, true, r.summary);
+  const [record] = r.hotfix_ci.failure.runs;
+  assert.equal(record.parent_run.id, 15, 'the nearest run that judged a contained commit');
+  assert.equal(record.earlier_runs, 2);
+  // The window reaches back seven days before the failed run.
+  assert.ok(gh.calls.some((c) => c[2].includes(`created=${encodeURIComponent('2026-10-06T21:00:00Z..2026-10-13T21:00:00Z')}&`)));
+  assert.equal(record.jobs[0].tests[0].failed_before.run, 13);
+  assert.equal(reads(gh, '/actions/runs/15/jobs'), 0, 'a green run has no failed job to read');
+  assert.equal(reads(gh, '/actions/runs/14/jobs'), 0, 'a run at a commit the merge commit does not contain is not read');
+  // A proof job, which names no test, needs the parent run to have failed the job of that name with
+  // the same error line from its failing step; an older run's failure does not count.
+  const atParent = (older) => [[earlierRun(15, PARENT, 'failure', 18), older]];
+  const { r: proofRed } = await redMerge({ failing: [{ ...proof, id: 502 }], earlier: atParent([proof]), at: [GREEN_LATER] });
+  assert.equal(proofRed.ok, true, proofRed.summary);
+  assert.deepEqual(proofRed.hotfix_ci.failure.runs[0].jobs[0].failed_before, { run: 15, sha: PARENT, url: `https://github.com/${REPO}/actions/runs/15`, job: proof.name, job_id: 602, error: proof.error });
+  // A test failing with a generic error (a timeout, a wait for a path, a dump) also counts only at the parent run.
+  const hung = { ...flaky, tests: [['racy test', 'Error: test timed out after 300000ms']] };
+  const { r: hungParent } = await redMerge({ failing: [{ ...merge, tests: [['racy test', 'Error: test timed out after 120000ms']] }], earlier: atParent([hung]), at: [GREEN_LATER] });
+  assert.equal(hungParent.ok, true, hungParent.summary);
+  const confirmed = [
+    ['the proof job failed the same way only in an older run', [proof], { ...proof, id: 502 }],
+    ['a generic error only in an older run', [hung], { ...merge, tests: [['racy test', 'Error: test timed out after 120000ms']] }],
+    // The same test failed only in a proof job that runs the whole suite, or on another runner.
+    ['the same test in another job', [{ ...flaky, name: 'complete model swap proof' }], merge],
+    ['the same test on another runner', [{ ...flaky, name: 'test (windows-latest, shard 1/3)' }], merge],
+    ['the same test with another error', [{ ...flaky, tests: [['racy test', "AssertionError [ERR_ASSERTION]: '../..' !== '..\\\\..'"]] }], merge],
+    ['the proof job with another error', [{ ...proof, error: 'Error: probe timed out' }], { ...proof, id: 502 }],
+  ];
+  for (const [label, older, failing] of confirmed) {
+    const { r: c } = await redMerge({ failing: [failing], earlier: window(older), at: [GREEN_LATER] });
+    assert.equal(c.ok, false, label);
+    assert.equal(c.confirmed_failure, true, `${label}: ${c.summary}`);
+    assert.equal(c.hotfix_ci.failure.classification, 'confirmed', label);
+  }
+  // A test the change touched counts only at the parent run, not in an older one.
+  const { r: touched } = await redMerge({ failing: [merge], earlier: window([flaky]), at: [GREEN_LATER], patches: ["+test('racy test', async () => {"] });
+  assert.equal(touched.confirmed_failure, true, touched.summary);
+  assert.equal(touched.hotfix_ci.failure.runs[0].jobs[0].tests[0].touched, true);
+});
+
+test('a proof job compares the error line of its failing step in real runner logs, never step boilerplate', async () => {
+  const name = 'complete gate scratch cleanup proof';
+  // A cleanup leak prints its receipt with no error line; the upload step after it echoes
+  // `if-no-files-found: error`. Two such failures, even at the parent run, prove nothing.
+  const leak = proofLog('gate-scratch-leak.log');
+  const parentLeak = [[earlierRun(15, PARENT, 'failure', 18), [{ id: 602, name, tests: [], log: leak }]]];
+  const { r: leaked } = await redMerge({ failing: [{ id: 502, name, tests: [], log: leak }], earlier: parentLeak, at: [GREEN_LATER] });
+  assert.equal(leaked.confirmed_failure, true, leaked.summary);
+  assert.equal(leaked.hotfix_ci.failure.runs[0].jobs[0].error, null);
+  // A probe that timed out prints node's source and caret lines above the error; the error itself
+  // decides, and as a timeout it counts only at the parent run.
+  const timeout = proofLog('gate-scratch-etimedout.log');
+  const { r: parentTimeout } = await redMerge({ failing: [{ id: 502, name, tests: [], log: timeout }],
+    earlier: [[earlierRun(15, PARENT, 'failure', 18), [{ id: 602, name, tests: [], log: timeout }]]], at: [GREEN_LATER] });
+  assert.equal(parentTimeout.ok, true, parentTimeout.summary);
+  assert.equal(parentTimeout.hotfix_ci.failure.runs[0].jobs[0].error, 'Error: spawnSync /opt/hostedtoolcache/node/26.11.1/x64/bin/node ETIMEDOUT');
+  const { r: olderTimeout } = await redMerge({ failing: [{ id: 502, name, tests: [], log: timeout }],
+    earlier: [[earlierRun(15, PARENT, 'success', 18), []], [earlierRun(13, OLDER, 'failure', 16), [{ id: 602, name, tests: [], log: timeout }]]], at: [GREEN_LATER] });
+  assert.equal(olderTimeout.confirmed_failure, true, olderTimeout.summary);
+  // Read in process: the model swap proof's failing step waits for a fixture file, a generic error,
+  // and the checkout's `[new branch] ...-failed-...` line is not taken.
+  const MainRed = require('../../lib/gates/main-red');
+  const swap = MainRed.firstError(proofLog('model-swap-timeout.log'));
+  assert.match(swap, /^error: 'waiting for \/home\/runner\/work\/_temp\/.*\/T3-second-ready'$/);
+  assert.equal(MainRed.generic(swap), true);
+  assert.equal(MainRed.normalize(swap), "error: 'waiting for <path>/T3-second-ready'");
+  assert.notEqual(MainRed.normalize(swap), MainRed.normalize("error: 'waiting for /tmp/t/T3-first-ready'"));
+  assert.equal(MainRed.firstError(leak), null);
+  assert.equal(MainRed.generic('AssertionError [ERR_ASSERTION]: Expected values to be strictly equal: 8416 !== 123457'), true);
+  assert.equal(MainRed.generic('AssertionError [ERR_ASSERTION]: Expected values to be strictly equal: 2 !== 0'), false);
+  assert.equal(MainRed.generic('AssertionError [ERR_ASSERTION]: no harness starts before its lease'), false);
+});
+
+test('a failure new at the merge commit stays a confirmed failure, with the parent run in its evidence', async () => {
+  const parentRun = earlierRun(5, PARENT, 'success', 19);
+  const olderRun = earlierRun(4, OLDER, 'failure', 18);
+  const cases = [
+    ['parent green, the test never failed before', [[parentRun, []], [olderRun, [{ id: 601, name: WIN3, tests: [['another test', 'Error: x']] }]]]],
+    ['the same job failed before with other tests', [[earlierRun(5, PARENT, 'failure', 19), [{ id: 601, name: WIN3, tests: [['another test', 'Error: x']] }]]]],
+    ['no earlier run on the base', []],
+  ];
+  for (const [label, earlier] of cases) {
+    const { r } = await redMerge({ failing: [{ id: 501, name: WIN3, tests: [['new test', 'Error: new']] }], earlier, at: [GREEN_LATER] });
+    assert.equal(r.ok, false, label);
+    assert.equal(r.confirmed_failure, true, `${label}: ${r.summary}`);
+    assert.equal(r.pending, undefined, label);
+    assert.equal(r.hotfix_ci.satisfied_by, undefined, label);
+    const failure = r.hotfix_ci.failure;
+    assert.equal(failure.classification, 'confirmed', label);
+    assert.equal(failure.runs[0].jobs[0].tests[0].failed_before, null, label);
+    assert.equal(failure.runs[0].parent_run?.id, earlier.length ? 5 : undefined, label);
+    assert.match(r.summary, /push workflow not successful\n.*has failures new at the merge commit, not failed the same way in the \d earlier main runs? read \((parent run 5 at eeeeeeeeee (success|failure)|no earlier main run read)\): test \(windows-latest, shard 3\/3\) \[new test\]/, label);
+  }
+  const old = { id: 601, name: WIN3, tests: [['old test', 'Error: old']] };
+  const earlier = [[earlierRun(5, PARENT, 'failure', 19), [old, { id: 602, name: 'test (ubuntu-latest, shard 1/3)', tests: [], error: 'npm ERR! code E1' }]]];
+  const oldAtMerge = { id: 501, name: WIN3, tests: old.tests };
+  // One new failure among old ones still confirms; so does a timed out or cancelled job beside an old failure.
+  const { r: mixed } = await redMerge({ failing: [oldAtMerge, { id: 502, name: 'test (ubuntu-latest, shard 1/3)', tests: [['new test', 'Error: new']] }], earlier });
+  assert.equal(mixed.confirmed_failure, true, mixed.summary);
+  assert.deepEqual(mixed.hotfix_ci.failure.runs[0].jobs.map((j) => j.explained), [true, false]);
+  for (const conclusion of ['timed_out', 'cancelled']) {
+    const { r: hung } = await redMerge({ failing: [oldAtMerge, { id: 503, name: 'test (ubuntu-latest, shard 2/3)', conclusion }], earlier, at: [GREEN_LATER] });
+    assert.equal(hung.confirmed_failure, true, `${conclusion}: ${hung.summary}`);
+    assert.match(hung.summary, new RegExp(`test \\(ubuntu-latest, shard 2/3\\) \\(${conclusion}\\)`));
+  }
+  // A test job whose log names no failing test proves nothing, even when the same job failed before the same way.
+  const { r: unnamed } = await redMerge({ failing: [{ id: 504, name: 'test (ubuntu-latest, shard 1/3)', tests: [], error: 'npm ERR! code E1' }], earlier, at: [GREEN_LATER] });
+  assert.equal(unnamed.confirmed_failure, true, unnamed.summary);
+  assert.match(unnamed.summary, /test \(ubuntu-latest, shard 1\/3\) \(names no failing test\)/);
+  // A confirmed classification is reused on the next check of the same run attempt.
+  const { r: again, gh } = await redMerge({ failing: [oldAtMerge, { id: 502, name: 'test (ubuntu-latest, shard 1/3)', tests: [['new test', 'Error: new']] }], earlier,
+    evidence: [{ type: 'ci', sha: SHA, revision: 1, hotfix_ci: mixed.hotfix_ci }] });
+  assert.equal(again.confirmed_failure, true);
+  assert.equal(reads(gh, '/logs'), 0);
+  // A merge commit job log that cannot be read is an observation error, retried, not a verdict.
+  const { r: unread } = await redMerge({ failing: [{ ...oldAtMerge, log: null }], earlier, at: [GREEN_LATER] });
+  assert.equal(unread.ok, false);
+  assert.equal(unread.infrastructure_failure, true, unread.summary);
+  assert.equal(unread.confirmed_failure, undefined);
+});
+
+test('failing tests and their first error lines are read from runner logs, gate receipts printed as JSON included', () => {
+  const MainRed = require('../../lib/gates/main-red');
+  const stamp = (lines) => lines.map((l, i) => `2026-10-14T00:31:32.60${String(i).padStart(5, '0')}Z ${l}`).join('\n');
+  // The spec reporter prints a failure twice; on Windows the in-place copy can have no error, and the
+  // summary's generic assertion header has the values on the next line.
+  const spec = MainRed.parseLog(stamp([
+    '✖ two preparations overlap (6108.3279ms)',
+    '✔ another test (1.2ms)',
+    '✖ failing tests:',
+    'test at test\\stack.test.js:10:1',
+    '✖ detached spawn links the PR (12ms)',
+    '  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:',
+    '  ',
+    '  false !== true',
+    'test at test\\worktree-metadata.test.js:91:1',
+    '✖ two preparations overlap (6108.3279ms)',
+    '  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:',
+    '',
+    "  '../..' !== '..\\\\..'",
+  ]));
+  assert.deepEqual(spec, [
+    { name: 'two preparations overlap', error: "AssertionError [ERR_ASSERTION]: Expected values to be strictly equal: '../..' !== '..\\\\..'", file: 'test/worktree-metadata.test.js' },
+    { name: 'detached spawn links the PR', error: 'AssertionError [ERR_ASSERTION]: Expected values to be strictly equal: false !== true', file: 'test/stack.test.js' },
+  ]);
+  // The gate scratch proof prints the tests gate's receipt: its failing test names and output tail.
+  const tail = ['✔ ok test (1ms)', '✖ failing tests:', '', 'test at test/automation.test.js:2930:1', '✖ automation dispatches rework (2872.4ms)',
+    "  Error: ENOENT: no such file or directory, open '/home/runner/.cache/gate-proof-V3qL5l/context/T1.prompt'"].join('\n');
+  const receipt = MainRed.parseLog(stamp(['{', '    "test_failure": {', '      "names": [', '        "automation dispatches rework",', '        "listed only"', '      ],',
+    `      "output_tail": ${JSON.stringify(tail)}`, '    }', '}']));
+  assert.deepEqual(receipt, [
+    { name: 'automation dispatches rework', error: "Error: ENOENT: no such file or directory, open '/home/runner/.cache/gate-proof-V3qL5l/context/T1.prompt'", file: 'test/automation.test.js' },
+    { name: 'listed only', error: null },
+  ]);
+  // Scratch paths, times, dates and long numbers do not tell two failures apart; the values do.
+  assert.equal(MainRed.normalize("Error: ENOENT: open '/home/runner/.cache/gate-proof-V3qL5l/x' at 2026-10-14T02:43:42.069Z after 12ms pid 6256"),
+    MainRed.normalize("Error: ENOENT: open '/home/runner/.cache/gate-proof-Qq81zz/x' at 2026-10-15T01:00:00.000Z after 7ms pid 10104"));
+  assert.notEqual(MainRed.normalize("Expected values to be strictly equal: '../..' !== '..\\\\..'"), MainRed.normalize('Expected values to be strictly equal: false !== true'));
+  assert.equal(MainRed.normalize('Error: replacement reviewer: [{"at":"2026-10-14T02:43:42.069Z","source":"E3c8"}]'), MainRed.normalize('Error: replacement reviewer: [{"at":"2026-10-14T05:07:06.158Z","source":"Ed3e"}]'));
+  // A TAP YAML block and a diff keep their values.
+  const tap = MainRed.parseLog(stamp(['not ok 3 - detached spawn links the PR', '  ---', '  error: |-', '    Expected values to be strictly equal:', '    + actual - expected', '', "    + 'exit 1'", "    - 'no progress'", '  ...']));
+  assert.deepEqual(tap, [{ name: 'detached spawn links the PR', error: "error: |- Expected values to be strictly equal: + actual - expected + 'exit 1' - 'no progress'" }]);
+  assert.equal(MainRed.slot('test (windows-latest, node 26, shard 3/3)'), 'test (windows-latest, node 26)');
 });
 
 test('every run and suite completed, none failed: ok', async () => {

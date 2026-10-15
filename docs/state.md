@@ -575,9 +575,76 @@ keeps the job required. A required job that ran must succeed. The summary
 lists each required name not applied and why. PR head and mergeability
 checks do not apply to a merged PR.
 
-A failed `push` run at the merge commit is a confirmed failure, and one
-still running is pending. When every `push` run there was cancelled (a newer
-push replaced it in the shared main concurrency group) or none ran, CI lists
+A failed `push` run at the merge commit is a confirmed failure, unless the
+base was already red there, and one still running is pending. A failure is
+`main_red` only with evidence that the base failed the same way before the
+change. CI compares every job that did not pass in every failed full run at
+the merge commit (the `push` run, a scheduled or manual run, or a push run
+cancelled after a job failed) with earlier runs of the same workflow on the
+base at commits the merge commit contains. It reads the merge commit's last
+100 ancestors and that workflow's base runs created in the 7 days up to the
+failed run, and keeps the last 30 that completed without being cancelled:
+the inbox judges the base by the same 30 runs, and a failure older than a
+week says little about the base at the merge commit, while the daily
+scheduled run still puts seven runs in that week on a quiet base. The newest
+is the parent run: the first parent's, or the nearest earlier one when the
+concurrency group cancelled it. A failure the parent run shares says the
+base was red; one seen only in an older run of the window is a known flaky
+test.
+
+A failed job is explained when each failing test its log names failed in an
+earlier run in a job of the same kind with the same first error line. The
+same kind is the same job name once its shard number is set aside, so the
+same runner label and matrix; a test moves between shards as files are
+added, but a test that failed only in a proof job that runs the whole suite,
+or on another runner, says nothing. The first error line is the one
+`ci log --failed-tests` reads under the failure, with the values line added
+when it is only a header (an assertion's `strictly equal:`, a diff, a TAP
+YAML block), compared without scratch directories (a path keeps its last
+segment), times, dates, long numbers and any data dump after the message. An
+error of a generic shape (a timeout, a wait for a path, a data dump, or no
+word after its last colon but placeholders and operators, such as
+`<n> !== <n>`) can be two different failures, so it counts only at the parent
+run. A failing suite that only repeats its
+failed child counts with its child. A test whose name is in a hunk of the
+merge commit's diff counts only when the parent run failed it the same way.
+Test names also come from a gate receipt the log prints as JSON (its
+`test_failure.names` and `output_tail`), as the gate scratch proof does. A
+job whose log names no test is explained only when its name marks a proof,
+probe, check or lint job and the parent run failed the job of that name with
+the same error line. That line comes from the failing step's own output:
+between the step's header group and its `##[error]Process completed` line,
+skipping a source line node prints above a caret, the caret and stack frames.
+Another step's lines (the checkout's git output, an upload step's echoed
+`if-no-files-found: error`) never count, and a failing step with no error
+line leaves the job unexplained; a test job that names no failing test (a failed
+setup step, a crashed runner) is not. A timed out or cancelled job is never
+explained. A job log at the merge commit that cannot be read is an
+observation error (`infrastructure_failure`). Any failure left unexplained
+keeps the run a confirmed failure, and so does a failed run with no failed
+job to compare. CI treats a `main_red` run like a cancelled one, below: a
+later green run that contains the merge commit must stand for it, so
+`main_red` never passes a hotfix on its own.
+
+The evidence records `hotfix_ci.failure: {classification, runs: [{id,
+workflow, event, attempt, conclusion, url, parent_run: {id, sha, event,
+conclusion, url} | null, earlier_runs, jobs: [{name, id, conclusion,
+explained, error?, failed_before?, tests: [{name, error, file?, touched,
+failed_before}], tests_total?}]}]}`, with `classification` `main_red` or
+`confirmed`. `failed_before` is `{run, sha, url, job, job_id, error}`: the
+earlier run, its job and that job's error line, so the match can be checked
+after the logs expire. `error` and `failed_before` on a job are set when its
+log names no test; `tests` keeps the first 20. The summary names the parent
+run and each failure new at the merge commit. A later check of the same
+failed run attempts reuses the recorded classification and reads no logs
+again. The alternative of treating failures in jobs or tests unrelated to the
+hotfix's changed files as `main_red` is deliberately not implemented: the
+suites are integration tests that a change to any library file can break, and
+a test file the hotfix edited can still fail for a reason the base already
+had.
+
+When every `push` run there was cancelled (a newer
+push replaced it in the shared main concurrency group), failed as `main_red`, or none ran, CI lists
 the base's workflow runs created since the merge commit's run, or since its
 commit date when it has none. It then takes the commits with a successful
 `push`, `schedule` or `workflow_dispatch` run of the same workflows (of any workflow when none ran there), oldest
@@ -603,7 +670,7 @@ check. The next check of the same merge commit skips a commit rejected as
 `does not contain the merge commit` or `not on BASE`, and one rejected as
 `not green` unless it has a green run that is not listed. A failed scheduled
 or manual run at the merge commit, or a job that failed before its run was
-cancelled, is still a confirmed failure. Until a later run is green, CI is
+cancelled, is still a confirmed failure unless it is `main_red`. Until a later run is green, CI is
 pending, with `not_running` when no full run on the base is queued or
 running. The normal reviewer receives the landed
 diff against the first parent and records its verdict at the merge commit.
@@ -726,7 +793,7 @@ The format is additive within schema 1. A pinned older tool reads and preserves 
 - `submitted_by`: the agent that submitted the current `sha`. Submission clears `claim`; while the task is `submitted`, only this agent can replace the submitted head.
 - `sha`: null before submission and after a release moves the task to another PR, then the full lowercase commit SHA: 40 characters for SHA-1, 64 for SHA-256. Full IDs are accepted as given without a local lookup, since the commit may exist only in another checkout. Abbreviations are resolved by `submit` with `git rev-parse --verify <sha>^{commit}` in the task repository, first locally and then after fetching the supplied or recorded task branch from origin. A prefix that remains unknown or ambiguous, or resolves to a non-commit object, is refused. Sandboxed workers resolve before forwarding to the host broker, which accepts only the full SHA and runs no Git. Legacy abbreviated submitted SHAs remain stored as written and match evidence and active reviewer dispatches by prefix on read.
 - `evidence`: entries `{ "type", "ok", "sha", "agent", "at", "summary", "ref", "revision" }`, plus `"waived": true` on an owner waiver and `"via": "broker"` on evidence the state broker recorded for the agent it names (provenance, not proof: an unsandboxed process can write the same). Types: `tests`, `clean`, `sources`, `review`, `ci`, `merge`, `note`. Review evidence requires `--sha` for the commit reviewed. A spawned reviewer's verdict carries its dispatch revision, even when the brief, acceptance or rework changes the task before the verdict arrives. Review evidence from a reviewer spawn did not start carries the `--revision` it names, which is required and may not exceed the current revision. Other manual evidence records `--revision` when given and the current revision otherwise; `note` can default to the submitted sha. Software gates record the sha and revision they checked.
-- `evidence.confirmed_failure`: optional boolean, emitted as true by tests, clean and CI runners when the check confirms a failed attempt. Unavailable test commands do not set it: shell exits 126/127, Windows exit 9009, or exit 1 with only cmd.exe's missing-command diagnostic. Failed-test output accompanied by that diagnostic still confirms a failure. CI sets it for completed uncapped failing runs, including a failing sibling of a capped review. Missing or pending required checks do not hide a completed uncapped failure in another run. Capped reviews alone, queued or pending runs, missing runs and observation errors do not set it. The same optional field appears in the gate event's `detail` and must match for audited software evidence to count. Legacy evidence without the field remains valid but supplies no confirmed-failure escalation signal.
+- `evidence.confirmed_failure`: optional boolean, emitted as true by tests, clean and CI runners when the check confirms a failed attempt. Unavailable test commands do not set it: shell exits 126/127, Windows exit 9009, or exit 1 with only cmd.exe's missing-command diagnostic. Failed-test output accompanied by that diagnostic still confirms a failure. CI sets it for completed uncapped failing runs, including a failing sibling of a capped review, except a hotfix's `main_red` failure at its merge commit ([Already-merged hotfixes](#already-merged-hotfixes)). Missing or pending required checks do not hide a completed uncapped failure in another run. Capped reviews alone, queued or pending runs, missing runs and observation errors do not set it. The same optional field appears in the gate event's `detail` and must match for audited software evidence to count. Legacy evidence without the field remains valid but supplies no confirmed-failure escalation signal.
 
 - `revision`: incremented when acceptance, dependencies or capabilities (`needs`) change, on every `rework` including automatic quality escalation, and when `brief set` changes the brief after the first submission. Identical brief writes and brief edits before the first submission do not increment it. Evidence recorded against an older revision stays in the audit trail and does not count, even when the submitted sha is unchanged. An accepted task's brief, acceptance, dependencies, capabilities and kind cannot change; send it back with `rework` first. A refused brief change leaves the brief, task and audit log unchanged.
 - `spend`: `{ "minutes", "tokens", "input"?, "cached"?, "output"?, "entries"? }`. Existing `{ "minutes", "tokens" }` files keep loading. Totals increase under the state lock. Token counts are non-negative safe integers. `input` includes cache reads and writes, `cached` is the cache-read subset of input, and `output` includes reasoning when reported. Do not add `cached` to `tokens` again. A total-only report increases `tokens` without inventing a breakdown; aggregate breakdown fields sum only the reports that supply them.
