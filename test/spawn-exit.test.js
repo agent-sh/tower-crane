@@ -320,7 +320,7 @@ const TRACES_HOLDERS = ['linux', 'win32'].includes(process.platform);
 // member: a process in the group that inherits the output and ignores SIGTERM.
 // bystander: a process outside the group that does not hold the output.
 // nested: the harness dispatches T2 before it exits, as an orchestrator does.
-function leaver(h, { holder = false, member = false, bystander = false, nested = false } = {}) {
+function leaver(h, { holder = false, member = false, bystander = false, nested = false, env = {} } = {}) {
   const files = { holder: path.join(h.base, 'holder.json'), member: path.join(h.base, 'member.json'),
     bystander: path.join(h.base, 'bystander.json'), nested: path.join(h.base, 'nested.json'), finish: path.join(h.base, 'nested.finish') };
   const child = (signals) => `
@@ -375,7 +375,7 @@ setInterval(() => { if (fs.existsSync(process.argv[3])) process.exit(0); }, 25);
     }
   });
   const pid = (file) => JSON.parse(readPublished(file, 'utf8')).pid;
-  const result = h.run(['spawn', '--role', 'easy', '--task', 'T1', '--wait']);
+  const result = h.run(['spawn', '--role', 'easy', '--task', 'T1', '--wait'], { env });
   const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
   const exit = events.findLast((e) => e.cmd === 'spawn exit' && e.task === 'T1');
   return { result, files, pid, events, exit };
@@ -403,7 +403,11 @@ test('a group member that ignores SIGTERM is not an output holder, and processes
   skip: process.platform === 'win32' && 'POSIX process groups',
 }, async (t) => {
   const h = setup(t);
-  const { result, files, pid, exit } = leaver(h, { member: true, bystander: true });
+  // The member outlives the harness by the five-second group grace and then a
+  // second more, so the group is still there when that grace ends.
+  const hook = path.join(__dirname, 'fixtures', 'slow-group-kill.js').replace(/\\/g, '/');
+  const { result, files, pid, exit } = leaver(h, { member: true, bystander: true,
+    env: { NODE_OPTIONS: `--require "${hook}"`, TOWER_CRANE_TEST_SLOW_GROUP_KILL: '1000' } });
   assert.equal(result.code, 0, result.stderr);
   assert.equal(fs.existsSync(files.member + '.natural'), false, 'the group member ended on its own');
   assert.equal(detachedAlive({ pid: pid(files.member) }), false, 'SIGKILL did not reach the group member');
