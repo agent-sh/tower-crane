@@ -5,6 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
+const crypto = require('node:crypto');
 const { makeRepo, copyRepo, TMP_ROOT, ROOT, HARNESS_GUARD } = require('./helpers');
 const { gateFixture, gateEvidence } = require('./gate-helpers');
 const { waitUntil } = require('./signals');
@@ -51,6 +52,31 @@ test('a fresh fixture whose setup fails leaves no temp directory behind', (t) =>
   }
   assert.equal(made.length, 1);
   assert.equal(fs.existsSync(made[0]), false, made[0]);
+});
+
+// Detached, the repack and prune that a commit starts outlive the commit and
+// delete loose objects while fixture cleanup removes the directory, which
+// leaves the fixture behind. Git 2.54 and later start one after any commit
+// that leaves 100 loose objects; gc.auto=1 with three in objects/17 makes the
+// gc task due on every version.
+test('auto-maintenance a fixture commit starts has finished when the commit returns', (t) => {
+  const h = makeRepo(t);
+  h.git(['config', 'gc.auto', '1']);
+  h.git(['config', 'maintenance.gc.enabled', 'true']);
+  const bucket = [];
+  for (let i = 0; bucket.length < 3; i++) {
+    const body = `due ${i}\n`;
+    const id = crypto.createHash('sha1').update(`blob ${Buffer.byteLength(body)}\0${body}`).digest('hex');
+    if (!id.startsWith('17')) continue;
+    fs.writeFileSync(path.join(h.repo, `due-${i}.txt`), body);
+    bucket.push(id);
+  }
+  h.git(['add', '.']);
+  h.git(['commit', '-qm', 'due maintenance']);
+  const dir = path.join(h.repo, '.git', 'objects', '17');
+  const loose = fs.existsSync(dir) ? fs.readdirSync(dir) : [];
+  assert.deepEqual(loose, [], 'the commit returned before its maintenance packed and pruned the loose objects');
+  for (const id of bucket) assert.equal(h.git(['cat-file', '-t', id]), 'blob');
 });
 
 test('fixture cleanup removes a broker socket left by a killed monitor', {

@@ -15,6 +15,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
 const { ROOT, TMP_ROOT } = require('./helpers');
+const { FOREGROUND_MAINTENANCE } = require('./repo-seed');
 const Placeholders = require('../lib/claude-sandbox-placeholders');
 const { readPublished } = require('./atomic-file');
 
@@ -26,7 +27,7 @@ const skip = !BWRAP && 'needs bubblewrap, the mount tool Claude uses on Linux';
 const root = BWRAP ? fs.mkdtempSync(path.join(TMP_ROOT, 'masked-mounts-')) : null;
 if (root) process.once('exit', () => fs.rmSync(root, { recursive: true, force: true }));
 const gitconfig = root && path.join(root, 'gitconfig');
-if (root) fs.writeFileSync(gitconfig, '[user]\n\tname = agent\n\temail = agent@example.test\n');
+if (root) fs.writeFileSync(gitconfig, '[user]\n\tname = agent\n\temail = agent@example.test\n' + FOREGROUND_MAINTENANCE);
 const baseEnv = () => {
   const env = { ...process.env, GIT_CONFIG_GLOBAL: gitconfig, GIT_CONFIG_NOSYSTEM: '1', HOME: root };
   for (const k of Object.keys(env)) {
