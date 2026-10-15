@@ -457,6 +457,24 @@ test('spawn waits out a refused rename of the skill store it just copied', (t) =
   assert.deepEqual(fs.readdirSync(path.dirname(store)).sort(), ['.gitignore', path.basename(store)], 'the temporary copy is gone');
 });
 
+// Windows refuses a rename onto an existing directory, so the loser of a race
+// to publish the store sees EPERM; the store is there, so it stops at once.
+test('spawn takes a skill store another dispatch published first without waiting on its own rename', (t) => {
+  const h = setup(t);
+  const out = path.join(h.base, 'ran.txt');
+  commandRung(h, 'medium', [process.execPath, '-e', 'require("node:fs").writeFileSync(process.argv[1], "ran")', out]);
+  const store = A.skillStore({}, h.state).dir;
+  const refusals = path.join(h.base, 'refusals.txt');
+  const r = h.run(['spawn', '--task', 'T1', '--wait'], {
+    hooks: { HOOK_BUSY_RENAME: `^${path.basename(store)}$`, HOOK_BUSY_RENAME_TIMES: '0', HOOK_BUSY_RENAME_PUBLISHED: '1', HOOK_BUSY_RENAME_LOG: refusals },
+  });
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(fs.readFileSync(out, 'utf8'), 'ran');
+  assert.equal(fs.readFileSync(refusals, 'utf8'), `${store}\n`, 'one refused rename, no retries');
+  assert.ok(fs.existsSync(path.join(store, 'tower-crane-work', 'SKILL.md')));
+  assert.deepEqual(fs.readdirSync(path.dirname(store)).sort(), ['.gitignore', path.basename(store)], 'the temporary copy is gone');
+});
+
 test('a prompt that names a role skill warns when the plugin root lacks it', (t) => {
   const h = setup(t);
   // A command rung neither embeds nor loads the skill, so only the named path can warn.

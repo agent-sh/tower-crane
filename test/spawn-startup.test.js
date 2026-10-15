@@ -68,6 +68,24 @@ cp.spawnSync = () => {
   assert.equal(JSON.parse(next.stdout).agent, 'small-T1-1');
 });
 
+test('a failed start whose log rename stays refused reports the failure and keeps the log under its own name', (t) => {
+  const h = setup(t);
+  commandRung(h);
+  const env = monitorHook(h, 'git-fails-held-log', `
+const cp = require('node:child_process');
+cp.spawnSync = () => {
+  process.stderr.write('planted: git is broken on this host\\n');
+  throw new Error('planted git failure');
+};`);
+  const failed = h.run(['spawn', '--role', 'small', '--task', 'T1'], { env, hooks: { HOOK_BUSY_RENAME: '-startup-failed-', HOOK_BUSY_RENAME_TIMES: '0' } });
+  assert.equal(failed.code, 1, failed.stderr);
+  assert.match(failed.stderr, /supervisor startup failed: the supervisor exited with code 1 before it reported ready: planted git failure/);
+  assert.doesNotMatch(failed.stderr, /EPERM/);
+  assert.deepEqual(logs(h), ['T1-small-T1-1.log']);
+  assert.ok(failed.stderr.includes(`The supervisor log is kept at ${path.join(h.state, 'logs', 'T1-small-T1-1.log')}`), failed.stderr);
+  assert.match(failed.stderr, /it ends:\n(.*\n)*planted: git is broken on this host/);
+});
+
 test('a supervisor that stalls before it reports says so and keeps its log', (t) => {
   const h = setup(t);
   commandRung(h);

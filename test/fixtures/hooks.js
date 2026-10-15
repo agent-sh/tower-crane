@@ -176,6 +176,7 @@ function barrier() {
 }
 
 const once = {};
+let busyRenames = 0;
 const descriptors = new Map();
 function first(key) {
   if (once[key]) return false;
@@ -216,11 +217,21 @@ function before(name, args) {
     throw Object.assign(new Error(`EPERM: operation not permitted, unlink '${target}'`), { code: 'EPERM' });
   }
   // HOOK_BUSY_RENAME=PATTERN: the first rename onto a name in the state
-  // directory that matches PATTERN fails once with EPERM, as on Windows while
-  // a scanner or the indexer holds the files just written.
+  // directory that matches PATTERN fails with EPERM, as on Windows while a
+  // scanner or the indexer holds the files just written. With
+  // HOOK_BUSY_RENAME_TIMES=N the first N fail (0: every one). With
+  // HOOK_BUSY_RENAME_PUBLISHED=1 a copy of the source is at the destination
+  // before each refusal, as when another process published it first, which
+  // Windows also refuses. HOOK_BUSY_RENAME_LOG=FILE gets a line per refusal.
   if (env.HOOK_BUSY_RENAME && name === 'renameSync' && inState(args[1])
-    && new RegExp(env.HOOK_BUSY_RENAME).test(path.basename(String(args[1]))) && first('busy-rename')) {
-    throw Object.assign(new Error(`EPERM: operation not permitted, rename '${target}' -> '${args[1]}'`), { code: 'EPERM' });
+    && new RegExp(env.HOOK_BUSY_RENAME).test(path.basename(String(args[1])))) {
+    const times = Number(env.HOOK_BUSY_RENAME_TIMES || 1);
+    busyRenames++;
+    if (!times || busyRenames <= times) {
+      if (env.HOOK_BUSY_RENAME_PUBLISHED && !real.existsSync(args[1])) fs.cpSync(target, args[1], { recursive: true });
+      if (env.HOOK_BUSY_RENAME_LOG) real.appendFileSync(env.HOOK_BUSY_RENAME_LOG, `${args[1]}\n`);
+      throw Object.assign(new Error(`EPERM: operation not permitted, rename '${target}' -> '${args[1]}'`), { code: 'EPERM' });
+    }
   }
   // HOOK_FAIL_EVENT_SYNC=1: the first sync of events.jsonl fails with EIO
   // after its lines are written, as a failing disk reports it.
