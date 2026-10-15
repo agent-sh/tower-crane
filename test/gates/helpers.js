@@ -5,6 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('child_process');
 const { tempRoot } = require('../tmp-root');
+const { FOREGROUND_MAINTENANCE } = require('../repo-seed');
 
 // A scratch directory under the test temp root, removed by the caller.
 function scratch(prefix) {
@@ -16,7 +17,7 @@ function scratch(prefix) {
 // Keeps the user's global config (signing, hooks, default branch) out of the fixtures.
 function isolateGit(dir) {
   const cfg = path.join(dir, 'gitconfig');
-  fs.writeFileSync(cfg, '');
+  fs.writeFileSync(cfg, FOREGROUND_MAINTENANCE);
   Object.assign(process.env, {
     GIT_CONFIG_GLOBAL: cfg,
     GIT_CONFIG_NOSYSTEM: '1',

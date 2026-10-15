@@ -8,7 +8,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
-const { createRepoSeed } = require('../repo-seed');
+const { createRepoSeed, FOREGROUND_MAINTENANCE } = require('../repo-seed');
 
 const HOOKS = path.join(__dirname, '..', 'fixtures', 'hooks.js');
 const STUB = path.join(__dirname, '..', 'fixtures', 'live-usage-harness.js');
@@ -47,7 +47,7 @@ class Scratch {
     this.repo = path.join(this.base, 'repo');
     fs.renameSync(seed.repo, this.repo);
     fs.rmSync(seed.base, { recursive: true, force: true });
-    fs.writeFileSync(path.join(this.base, 'gitconfig'), '[user]\n\tname = bench\n\temail = bench@example.invalid\n[init]\n\tdefaultBranch = main\n[commit]\n\tgpgsign = false\n');
+    fs.writeFileSync(path.join(this.base, 'gitconfig'), '[user]\n\tname = bench\n\temail = bench@example.invalid\n[init]\n\tdefaultBranch = main\n[commit]\n\tgpgsign = false\n' + FOREGROUND_MAINTENANCE);
     this.state = path.join(this.repo, '.tower-crane');
     this.env = cleanEnv(this.base);
     this.clock = path.join(this.base, 'clock');

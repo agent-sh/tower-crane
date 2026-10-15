@@ -7,7 +7,7 @@ const path = require('node:path');
 const cp = require('node:child_process');
 const assert = require('node:assert/strict');
 const test = require('node:test');
-const { createRepoSeed, cleanupRepoSeed } = require('./repo-seed');
+const { createRepoSeed, cleanupRepoSeed, FOREGROUND_MAINTENANCE } = require('./repo-seed');
 const { tempRoot, liveRoot } = require('./tmp-root');
 const { readPublished } = require('./atomic-file');
 
@@ -283,7 +283,7 @@ function makeRepoFromSeed(t, seedRepo, options = {}) {
   return fixtureDir((base) => {
     fs.writeFileSync(
       path.join(base, 'gitconfig'),
-      '[user]\n\tname = tower-crane test\n\temail = test@example.invalid\n[init]\n\tdefaultBranch = main\n[commit]\n\tgpgsign = false\n[core]\n\tautocrlf = false\n',
+      '[user]\n\tname = tower-crane test\n\temail = test@example.invalid\n[init]\n\tdefaultBranch = main\n[commit]\n\tgpgsign = false\n[core]\n\tautocrlf = false\n' + FOREGROUND_MAINTENANCE,
     );
     const env = baseEnv(base);
     const repo = path.join(base, 'repo');

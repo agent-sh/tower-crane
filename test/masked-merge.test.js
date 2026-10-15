@@ -6,6 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
 const { ROOT, TMP_ROOT } = require('./helpers');
+const { FOREGROUND_MAINTENANCE } = require('./repo-seed');
 const { isMasked, MASKED_DIRS } = require('../lib/masked-merge');
 const { FILES: SANDBOX_PATHS } = require('../lib/claude-sandbox-placeholders');
 
@@ -75,7 +76,7 @@ function fixture(t, { base, task, main }, { masks = true, source } = {}) {
     fs.rmSync(root, { recursive: true, force: true });
   });
   const gitconfig = path.join(root, 'gitconfig');
-  fs.writeFileSync(gitconfig, '[user]\n\tname = agent\n\temail = agent@example.test\n');
+  fs.writeFileSync(gitconfig, '[user]\n\tname = agent\n\temail = agent@example.test\n' + FOREGROUND_MAINTENANCE);
   const env = { ...process.env, GIT_CONFIG_GLOBAL: gitconfig, GIT_CONFIG_NOSYSTEM: '1', HOME: root };
   for (const k of Object.keys(env)) if (k.startsWith('TOWER_CRANE_') || (k.startsWith('GIT_') && !k.startsWith('GIT_CONFIG_'))) delete env[k];
   // A sandbox passes its own git config this way; its excludes file hides masked paths, so the fixture's repositories must not see it.
