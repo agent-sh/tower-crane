@@ -635,7 +635,10 @@ Gate evidence belongs to the submitted sha, so a base move alone reruns no
 gate. The fail-before proof reruns only for a new head. Before merging, the
 head runs the pinned `gates.tests_cmd` once on the merge of `project.base`'s
 current tip into its top task's head, which for a stack carries every task
-in the entry, never on a stacked task's lower branch. It first trial-merges
+in the entry, never on a stacked task's lower branch. The suite runs on a
+clean checkout of a commit of that merge, with the tip and the head as
+parents, made like the local CI merge commit ([state](state.md)); no ref
+names it. It first trial-merges
 each task bottom up and sends the lowest conflicting one to rework with its
 files. The suite is skipped when the head already contains that tip or an
 earlier `head check` covered the same head, revision, base tip and command.
