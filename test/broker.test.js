@@ -1319,7 +1319,7 @@ if (m[1] === process.argv[2]) {
     using(service);
     const r = await deadline(f.raw(payload), what);
     assert.equal(r.code, 1, `${what}: ${r.stderr}`);
-    assert.match(r.stderr, new RegExp(`${what} stalled for \\d+ s; the broker stopped it and freed the cache lock`));
+    assert.match(r.stderr, new RegExp(`${what.replace(/[.\\]/g, '\\$&')} stalled for \\d+ s; the broker stopped it and freed the cache lock`));
     assert.equal(fs.existsSync(lock), false, `${what}: the cache lock is free`);
     const stuck = fs.readFileSync(pids, 'utf8').split('\n').filter(Boolean).map(Number);
     assert.ok(stuck.length, `${what}: the stalling ssh ran`);
@@ -1328,13 +1328,13 @@ if (m[1] === process.argv[2]) {
   };
   G.LIMITS.idleMs = 300;
   // The first use reads the remote's object format with ls-remote.
-  await stalled('upload', { fetch: {} }, 'the broker\'s ls-remote of git@github\\.com:acme/demo\\.git');
+  await stalled('upload', { fetch: {} }, 'the broker\'s ls-remote of git@github.com:acme/demo.git');
   using('none');
   const first = await f.raw({ fetch: {} });
   assert.equal(first.code, 0, first.stderr);
-  await stalled('upload', { fetch: {} }, 'the broker\'s fetch from git@github\\.com:acme/demo\\.git');
+  await stalled('upload', { fetch: {} }, 'the broker\'s fetch from git@github.com:acme/demo.git');
   const sha = f.commit('stalled.txt', 'stalled\n');
-  await stalled('receive', { push: { sha } }, 'the broker\'s push to git@github\\.com:acme/demo\\.git');
+  await stalled('receive', { push: { sha } }, 'the broker\'s push to git@github.com:acme/demo.git');
   assert.equal(f.remoteRef(`refs/heads/${f.task.branch}`), null);
   // With the remote answering again, the next push takes the lock and runs.
   using('none');
