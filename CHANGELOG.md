@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.1.1 (2026-10-15)
+
+### Agents and sandboxes
+
+- A sandboxed agent can fetch from an ssh or private https origin. Its `git fetch origin` goes through its state broker, which fetches with your login on the host and returns the base, the stacked base and the task branch. `git pull` from such an origin is refused with the fetch-then-merge steps that work.
+- A sandboxed worker or reviewer can run `tower-crane wait` again, as the role skills tell it to. The wait is scoped to its own task and bounded by `--timeout`; `--follow`, `--observe` and `--inbox` stay the orchestrator's.
+- The broker's own fetches and pushes stop after 10 minutes without output or an hour in all, so a remote that stops answering no longer holds the project's cache lock.
+- Every skill path an agent is given names a copy in the state directory's skill store, which never goes away and which claude and codex sandboxes can read. A reviewer dispatched from a worker's monitor no longer gets a path that vanished when the worker exited. A prompt that names a missing role skill warns.
+- Worker dispatches take slots one at a time under a dispatch lock, so concurrent refills keep the readiness order.
+- `ladder set` and the Settings page drop the fields a rung's old harness chose when the rung moves to another harness, and print what they dropped. `ladder harness` refuses a rung that follows the default when its model cannot run on the new harness.
+
+### Gates
+
+- `check clean` judges only the change. When the cleanup tool's report has no diff scope, findings outside the lines the change touches are listed as out of scope and fail nothing, with a note naming the diff-scoped deslop.
+- A tests, clean or local CI gate runs once per task, head and revision. A manual `accept`, `check` or `gates retry` that reaches a gate already running joins that run and uses its evidence instead of starting a second copy.
+- Local CI and the merge line's head check run on a clean checkout of a commit that merges the head with the base, so scripts that require a clean tree pass.
+- A local CI run keeps its full output in `logs/` under the state directory, redacted, and a failure records the last 200 lines. `ci.local.artifacts` and `ci.local.artifact_pattern` name files, such as a check receipt, that a failed run copies out of the gate worktree.
+- Gate worktrees and scratch default to `tc/g` under your cache directory instead of the system temp directory, which is often RAM-backed. Gates remove leftover directories whose owner is gone.
+- `gates retry ID --from-rework` undoes an automatic rework of a failed `tests`, `clean` or `ci` gate once a cause outside the code is fixed. The task returns to its submitted revision, its passing evidence and review count again, and only the failed gates rerun. Automatic refill holds such a rework for `gates.rework_hold_min` minutes (default 5) before it dispatches a worker.
+
+### Hotfix
+
+- Hotfix CI no longer confirms a failure the base already had at the merge commit. It is `main_red`, and CI waits for a later green run that contains the merge.
+- When the merge commit's push run was cancelled or never ran, hotfix CI accepts the first green run of the same workflows at a later main commit that contains it. A required job the workflow skips for that event no longer fails it.
+- A hotfix tests failure that also fails at the merge's first parent is infrastructure: the hotfix stays submitted and opens no follow-up. The owner can accept it with `--waive tests`.
+- `hotfix ID --pr N --reason R` re-records a hotfix cancelled by a failure that was not the change's, and cancels its follow-up.
+- The tests gate lists each changed host-only test file's ran and skipped counts and skip reasons. A hotfix whose host-only tests only skipped waits on `tests.host_env` in the inbox.
+
+### State and board
+
+- A reader without the lock also checks that the event log still ends with the line it read, so it never returns a write's files without its events.
+- A Controls save on the board gives up its data reload after 10 seconds and frees the form, and a failed reload no longer reads as a failed save.
+
 ## 0.1.0 (2026-10-14)
 
 First release. Tower Crane is a CLI and a Claude Code plugin for handing software work to coding agents. An orchestrator plans the work into tasks, spawns a worker per task in its own worktree and sandbox, has each change reviewed by an agent that did not write it, and merges it once software gates pass. Install with `npm install -g @agent-sh/tower-crane`; Node 24 or newer.
