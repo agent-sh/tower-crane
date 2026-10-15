@@ -51,8 +51,8 @@ function plant(h) {
     'gpg.ssh.defaultKeyCommand': keyCommand.replace(/\\/g, '/'),
     // With loose objects past gc.auto, a fetch or commit runs auto-maintenance
     // in the foreground, whose gc task prunes and runs this hook. Git 2.54
-    // made geometric the default maintenance strategy, which has no gc task,
-    // so the repository turns that task back on.
+    // and later default to the geometric strategy, which has no gc task and
+    // from 2.56 ignores a few loose objects, so the repository enables it.
     'gc.auto': '1',
     'gc.autoDetach': 'false',
     'maintenance.gc.enabled': 'true',
@@ -596,7 +596,9 @@ const ROWS = [
     r.set('commit.gpgSign', 'true'); r.set('gpg.format', 'ssh'); r.set('gpg.ssh.defaultKeyCommand', r.program('gpg-key-command').replace(/\\/g, '/'));
   } },
   // Git 2.54 and later default to the geometric maintenance strategy, which
-  // has no gc task, so the repository enables it; older git runs it anyway.
+  // has no gc task. Its repack reached the hook through a cruft pack until
+  // git 2.56 raised maintenance.geometric-repack.auto from 100 to 6700 loose
+  // objects. The enabled gc task honors gc.auto on every version.
   { name: 'gc.recentObjectsHook', run: COMMIT, plant: (r) => {
     ageLooseObjects(r.gitDir);
     r.set('gc.auto', '1'); r.set('gc.autoDetach', 'false'); r.set('maintenance.gc.enabled', 'true');
