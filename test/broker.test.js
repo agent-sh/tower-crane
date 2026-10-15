@@ -1285,6 +1285,64 @@ test('a fetch or push pack that outlasts its caps frees the cache lock', async (
   assert.equal(fetched.status, 0, fetched.stderr);
 });
 
+// A remote that stops answering, as over a dropped network, while the
+// broker's own git talks to it under the cache lock: its ls-remote, fetch
+// and push each end at the idle cap with the ssh they started, the agent
+// gets the reason, and the lock is free for the next push or fetch.
+test('the broker\'s ls-remote, fetch and push to a stalled remote end at the idle cap and free the cache lock', async (t) => {
+  const f = await sshOriginFixture(t);
+  const G = require('../lib/github-broker');
+  const saved = { ...G.LIMITS };
+  t.after(() => Object.assign(G.LIMITS, saved));
+  const lock = path.join(f.h.state, 'push', 'cache.lock');
+  const pids = path.join(f.h.base, 'stalled-ssh.pids');
+  const ssh = path.join(f.h.base, 'stalling-ssh.js');
+  // Serves the fixture's remote as ssh would, but never answers the
+  // service named by its first argument.
+  fs.writeFileSync(ssh, `const args = process.argv.slice(3);
+if (args.includes('-G')) process.exit(0);
+const m = /^git-(upload|receive)-pack '(.*)'$/.exec(args[args.length - 1]);
+if (!m || m[2] !== 'acme/demo.git') { process.stderr.write('ssh: unexpected ' + args.join(' ') + '\\n'); process.exit(255); }
+if (m[1] === process.argv[2]) {
+  require('node:fs').appendFileSync(${JSON.stringify(pids)}, process.pid + '\\n');
+  setInterval(() => {}, 1e9);
+} else {
+  const r = require('node:child_process').spawnSync('git', [m[1] + '-pack', ${JSON.stringify(f.remote)}], { stdio: 'inherit' });
+  process.exit(r.status === null ? 1 : r.status);
+}
+`);
+  const using = (service) => {
+    process.env.GIT_SSH_COMMAND = `"${process.execPath.replace(/\\/g, '/')}" "${ssh.replace(/\\/g, '/')}" ${service}`;
+  };
+  const deadline = (p, what) => Promise.race([p, new Promise((resolve, reject) => setTimeout(() => reject(new Error(`${what}: the broker still waits on the stalled remote`)), 30000))]); // wait-allow: a 300 ms idle cap ends each stall; without it the broker waits forever
+  const stalled = async (service, payload, what) => {
+    using(service);
+    const r = await deadline(f.raw(payload), what);
+    assert.equal(r.code, 1, `${what}: ${r.stderr}`);
+    assert.match(r.stderr, new RegExp(`${what} stalled for \\d+ s; the broker stopped it and freed the cache lock`));
+    assert.equal(fs.existsSync(lock), false, `${what}: the cache lock is free`);
+    const stuck = fs.readFileSync(pids, 'utf8').split('\n').filter(Boolean).map(Number);
+    assert.ok(stuck.length, `${what}: the stalling ssh ran`);
+    await waitUntil(() => stuck.every((pid) => !alive(pid)), { what: `${what}: the broker stopped the ssh its git started` });
+    fs.rmSync(pids);
+  };
+  G.LIMITS.idleMs = 300;
+  // The first use reads the remote's object format with ls-remote.
+  await stalled('upload', { fetch: {} }, 'the broker\'s ls-remote of git@github\\.com:acme/demo\\.git');
+  using('none');
+  const first = await f.raw({ fetch: {} });
+  assert.equal(first.code, 0, first.stderr);
+  await stalled('upload', { fetch: {} }, 'the broker\'s fetch from git@github\\.com:acme/demo\\.git');
+  const sha = f.commit('stalled.txt', 'stalled\n');
+  await stalled('receive', { push: { sha } }, 'the broker\'s push to git@github\\.com:acme/demo\\.git');
+  assert.equal(f.remoteRef(`refs/heads/${f.task.branch}`), null);
+  // With the remote answering again, the next push takes the lock and runs.
+  using('none');
+  const pushed = await f.raw({ push: { sha } });
+  assert.equal(pushed.code, 0, pushed.stderr);
+  assert.equal(f.remoteRef(`refs/heads/${f.task.branch}`), sha);
+});
+
 // An agent that hangs up is stopped: a gh that prints nothing, and a push
 // still waiting for the cache lock.
 test('the broker stops a silent gh and a waiting push when the agent hangs up', async (t) => {
