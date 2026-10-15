@@ -250,8 +250,8 @@ for (const change of ['schema bump', 'unknown current task status', 'unknown blo
 test(`${change} drains the supervisor without killing an edit`, async (t) => {
   const h = fixture(t);
   const worker = heldWorker(h);
-  // The supervisor's first state read after the change is refused once, as a
-  // Windows reader is while a writer renames a file into place.
+  // The supervisor's first state read and stat after the change are refused
+  // once, as a Windows reader is while a writer renames a file into place.
   const busy = path.join(h.base, 'busy-read');
   const { run: running, until, signal, output } = dispatch(t, h, { hooks: { HOOK_BUSY_READ: busy } });
   let liveBeforeExit;
