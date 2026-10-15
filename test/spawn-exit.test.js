@@ -394,7 +394,7 @@ test('a descendant that keeps the harness output open is stopped and spawn --wai
   assert.equal(fs.existsSync(files.holder + '.natural'), false, 'spawn --wait waited for the holder to end on its own');
   assert.match(result.stdout, /child started/);
   assert.match(result.stdout, /harness done/);
-  assert.match(result.stderr, /output stayed open/);
+  assert.match(result.stderr, /output stayed open/, JSON.stringify({ stdout: result.stdout, exit: exit.detail }));
   assert.equal(exit.detail.code, 0);
   if (TRACES_HOLDERS) {
     assert.equal(detachedAlive({ pid: pid(files.holder) }), false, 'the descendant holding the output still runs');
@@ -429,8 +429,12 @@ test(`a task an agent dispatches survives the output release of the agent that s
   assert.equal(result.code, 0, result.stderr);
   const spawned = events.findLast((e) => e.cmd === 'spawn' && e.task === 'T2').detail;
   const inner = { pid: pid(files.nested), ...(process.platform === 'win32' ? {} : { startTicks: spawned.start_ticks }) };
-  assert.equal(detachedAlive(inner), true, 'the nested harness was stopped');
-  assert.equal(detachedAlive({ pid: spawned.monitor_pid }), true, 'the nested supervisor was stopped');
+  const why = () => JSON.stringify({ stderr: result.stderr, t1: exit.detail,
+    t2: fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse).filter((e) => e.task === 'T2').map((e) => [e.cmd, e.detail.phase, e.detail.reason]),
+    log: fs.existsSync(spawned.log) ? fs.readFileSync(spawned.log, 'utf8').slice(-2000) : null });
+  assert.equal(detachedAlive(inner), true, `the nested harness was stopped: ${why()}`);
+  assert.equal(detachedAlive({ pid: spawned.monitor_pid }), true, `the nested supervisor was stopped: ${why()}`);
+  assert.ok(exit.detail.output_held, `no output release: ${why()}`);
   for (const stopped of exit.detail.output_held.pids) assert.ok(![inner.pid, spawned.monitor_pid].includes(stopped), JSON.stringify(exit.detail.output_held));
   fs.writeFileSync(files.finish, '');
   await waitOnRepo(h, () => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse)
