@@ -425,7 +425,7 @@ function writeClaudeStub(bin, out) {
     `#!${process.execPath}`, "'use strict';",
     'const fs = require("node:fs"), path = require("node:path");',
     'const settings = JSON.parse(fs.readFileSync(path.join(process.env.CLAUDE_CONFIG_DIR, "settings.json"), "utf8"));',
-    `fs.writeFileSync(${JSON.stringify(out)}, JSON.stringify({ sandbox: settings.sandbox, env: { XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR, DBUS_SESSION_BUS_ADDRESS: process.env.DBUS_SESSION_BUS_ADDRESS }, tmp: { TMPDIR: process.env.TMPDIR, TMP: process.env.TMP, TEMP: process.env.TEMP } }));`,
+    `fs.writeFileSync(${JSON.stringify(out)}, JSON.stringify({ sandbox: settings.sandbox, env: { XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR, DBUS_SESSION_BUS_ADDRESS: process.env.DBUS_SESSION_BUS_ADDRESS }, tmp: { TMPDIR: process.env.TMPDIR, TMP: process.env.TMP, TEMP: process.env.TEMP, CLAUDE_CODE_TMPDIR: process.env.CLAUDE_CODE_TMPDIR } }));`,
     'console.log("bus probe passed");', '',
   ].join('\n');
   fs.writeFileSync(path.join(bin, 'claude'), stub, { mode: 0o755 });
@@ -513,10 +513,12 @@ test('host patterns match Claude Code 2.1.296: ports 1 to 65535 without a leadin
   assert.equal(Settings.domainCovered(['*'], 'localhost:8300'), true);
 });
 
-test('claude: a sandboxed agent gets a temp directory of its own that its commands reach, where claude puts its proxy sockets', { skip: NO_STUBS }, (t) => {
+test('claude: a sandboxed agent gets a temp directory of its own that its commands reach, where claude puts its proxy sockets, and claude keeps its own temp files apart', { skip: NO_STUBS }, (t) => {
   // Found 2026-10-14: claude makes its proxy bridge sockets in TMPDIR, and
   // with the caller's under the home, which the sandbox hides, every https
-  // request from a command failed with "Proxy CONNECT aborted".
+  // request from a command failed with "Proxy CONNECT aborted". Found in the
+  // T276 review: claude keeps its own temp files in <TMPDIR>/claude-<uid>,
+  // the directory its commands write, and reads them back.
   const h = setup(t, 'claude');
   const bin = path.join(h.base, 'bin');
   fs.mkdirSync(bin);
@@ -537,8 +539,18 @@ test('claude: a sandboxed agent gets a temp directory of its own that its comman
   assert.ok(tmp && tmp !== caller && tmp.startsWith(fs.realpathSync(cache) + path.sep), `the agent's own: ${tmp}`);
   assert.deepEqual([seen.tmp.TMP, seen.tmp.TEMP], [tmp, tmp]);
   assert.ok(Buffer.byteLength(path.join(tmp, 'claude-socks-0123456789abcdef.sock')) <= 108, 'claude\'s bridge socket fits');
-  assert.ok(seen.sandbox.filesystem.allowRead.includes(tmp) && seen.sandbox.filesystem.allowWrite.includes(tmp), 'its commands reach the sockets and write claude\'s cwd files there');
+  const { allowRead, allowWrite } = seen.sandbox.filesystem;
+  assert.ok(allowRead.includes(tmp) && allowWrite.includes(tmp), 'its commands reach the sockets and write their temp files there');
   assert.ok(fs.lstatSync(tmp).isDirectory());
+  // claude's own temp files go under CLAUDE_CODE_TMPDIR in the agent's home,
+  // which the commands read and never write, long enough (over 44 bytes with
+  // claude-<uid>) that claude gives the commands <TMPDIR>/claude-<uid> instead.
+  const own = seen.tmp.CLAUDE_CODE_TMPDIR;
+  const homes = path.join(fs.realpathSync(h.state), 'homes') + path.sep;
+  assert.ok(own && (own.startsWith(homes) || own.startsWith(path.join(h.state, 'homes') + path.sep)), `in the agent's home: ${own}`);
+  assert.ok(Buffer.byteLength(path.join(own, `claude-${process.getuid()}`)) > 44, own);
+  assert.ok(!allowWrite.some((d) => own === d || own.startsWith(d + path.sep)), `its commands cannot write claude's own temp files: ${allowWrite}`);
+  assert.ok(fs.lstatSync(own).isDirectory());
   assert.ok(!seen.stdout.includes('TMPDIR'), seen.stdout);
   // Under a root too deep for the sockets, the caller's TMPDIR stays, and
   // spawn says so: under the home the agent's https fails, and under /tmp

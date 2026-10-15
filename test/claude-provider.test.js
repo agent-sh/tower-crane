@@ -113,6 +113,8 @@ function setup(t) {
     '--supervision', '{"retries":1,"backoff_ms":10,"max_backoff_ms":10,"stall_ms":60000}',
   ]);
   h.fallbacks = (routes) => {
+    // A route's env or env_file is a grant only the owner's ladder set makes.
+    if (routes.some((r) => r.env || r.env_file)) return h.ok(['ladder', 'set', 'hard', '--fallbacks', JSON.stringify(routes)]);
     fs.mkdirSync(path.dirname(h.userConfig), { recursive: true });
     fs.writeFileSync(h.userConfig, JSON.stringify({ ladder: { hard: { fallbacks: routes } } }));
   };

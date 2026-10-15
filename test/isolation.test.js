@@ -1821,10 +1821,10 @@ if (process.env.STUB_FAIL_HARNESS === ${JSON.stringify(harness)}) {
       const fallback = primary === 'claude' ? 'codex' : 'claude';
       isolated(h, 'hard', primary);
       h.ok(['ladder', 'set', 'hard', '--supervision', '{"retries":0,"backoff_ms":10,"max_backoff_ms":10}']);
-      fs.mkdirSync(path.dirname(h.userConfig), { recursive: true });
-      fs.writeFileSync(h.userConfig, JSON.stringify({ ladder: { hard: { fallbacks: [{
+      // A fallback's env is a grant only the owner's ladder set makes.
+      h.ok(['ladder', 'set', 'hard', '--fallbacks', JSON.stringify([{
         harness: fallback, model: 'second', ...(source === 'literal' ? { env: { GH_CONFIG_DIR: selected } } : {}),
-      }] } } }));
+      }])]);
       fs.rmSync(reports, { force: true });
       spawn(h, u, 'hard', { GH_CONFIG_DIR: original, STUB_FAIL_HARNESS: primary,
         STUB_RUN: JSON.stringify([['gh', 'pr', 'view', '1']]) });

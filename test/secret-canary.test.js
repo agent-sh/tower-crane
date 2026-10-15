@@ -48,9 +48,9 @@ function setup(t, harness, mode, { big = 0 } = {}) {
     ...(harness === 'codex' ? ['--profile', 'fixture-main', '--clear', 'model'] : ['--model', 'fixture-large', '--clear', 'profile']),
     '--clear', 'effort', '--clear', 'args', '--supervision', '{"retries":0,"backoff_ms":1}',
     '--env', JSON.stringify({ ROUTE: 'primary', TC_RUNG_SECRET: c.rung })]);
-  // Fallbacks are personal: the user file holds them, and their env.
-  fs.mkdirSync(path.dirname(h.userConfig), { recursive: true });
-  fs.writeFileSync(h.userConfig, JSON.stringify({ ladder: { medium: { fallbacks: [{ harness, ...route, env: { ROUTE: 'fallback', TC_FALLBACK_SECRET: c.fallback } }] } } }));
+  // Fallbacks are personal: the user file holds them, and their env. The
+  // owner writes that env through ladder set, which pins only its hash.
+  h.ok(['ladder', 'set', 'medium', '--fallbacks', JSON.stringify([{ harness, ...route, env: { ROUTE: 'fallback', TC_FALLBACK_SECRET: c.fallback } }])]);
   h.ok(['project', 'set', '--env', JSON.stringify({ TC_PROJECT_SECRET: c.project }), '--env_file', '~/secrets.env']);
   if (big) {
     // Too long for ladder set's argv; the owner writes project.json instead.

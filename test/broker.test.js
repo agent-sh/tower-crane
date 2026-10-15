@@ -1480,6 +1480,28 @@ test('a sandboxed agent\'s push to another machine from outside its task reposit
   assert.match(remote.stderr, /has no credentials/);
 });
 
+// spawn reads the remote hosts without the system config (agents.js
+// remoteHosts), so the shim's git reads none either, even when the agent
+// drops GIT_CONFIG_NOSYSTEM from its environment: a system insteadOf here
+// turns the remote into a path on this machine.
+test('a sandboxed agent\'s git reads the remote hosts without the system config', async (t) => {
+  const f = await pushFixture(t);
+  const other = path.join(f.h.base, 'other');
+  f.h.git(['init', '-q', other]);
+  f.h.git(['commit', '-q', '--allow-empty', '-m', 'x'], other);
+  const bare = path.join(f.h.base, 'other.git');
+  f.h.git(['init', '-q', '--bare', bare]);
+  f.h.git(['remote', 'add', 'origin', 'https://github.com/acme/demo.git'], other);
+  const system = path.join(f.h.base, 'system-gitconfig');
+  fs.writeFileSync(system, `[url "${bare.replace(/\\/g, '/')}"]\n\tinsteadOf = https://github.com/acme/demo.git\n`);
+  const env = { GIT_CONFIG_SYSTEM: system, GIT_CONFIG_NOSYSTEM: undefined };
+  const url = await f.shim('git', ['ls-remote', '--get-url', 'origin'], { cwd: other, env });
+  assert.equal(url.stdout.trim(), 'https://github.com/acme/demo.git', url.stderr);
+  const push = await f.shim('git', ['push', 'origin', 'HEAD:refs/heads/x'], { cwd: other, env });
+  assert.equal(push.status, 126, push.stderr);
+  assert.equal(f.h.git(['--git-dir', bare, 'for-each-ref']).trim(), '', 'nothing reached the path the system config names');
+});
+
 // The gh the broker in this process runs: a script first on PATH. Windows
 // runs no shebang script and finds only gh.exe, so there the broker's spawn
 // of gh runs the script with node instead.

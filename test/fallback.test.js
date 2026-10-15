@@ -52,7 +52,8 @@ function setup(t, { reason = 'outage', primaryHarness = 'codex', nextHarness = '
   h.ok(['ladder', 'set', rung, '--harness', primaryHarness, '--model', 'first', '--clear', 'profile', '--clear', 'effort',
     '--env', '{"ROUTE_ENV":"primary","NODE_TEST_WORKER_ID":"outer-worker"}', '--supervision', JSON.stringify(supervision),
     ...(webMcp ? ['--web-mcp', JSON.stringify(webMcp)] : [])]);
-  setFallbacks(h, routes, rung);
+  // The fallback env is a grant: the owner writes it through ladder set.
+  h.ok(['ladder', 'set', rung, '--fallbacks', JSON.stringify(routes)]);
   h.file = path.join(h.base, 'attempts.json');
   h.spawnEnv = {
     PATH: bin + path.delimiter + (h.env.PATH || h.env.Path || ''), GH_TOKEN: '', GITHUB_TOKEN: '',
@@ -318,6 +319,47 @@ test('an outage before session creation reruns fresh within the same budget befo
   const receipts = events(h).filter((e) => e.cmd === 'spawn session');
   assert.equal(receipts.length, 1);
   assert.equal(receipts[0].detail.route_index, 1);
+});
+
+// Found in the T276 review: a fallback route written into the user file by
+// hand, as the unsandboxed orchestrator can, gave its claude agent every
+// host ('*') and its own env with no owner decision.
+test('a hand-written user-file fallback cannot widen sandbox.domains or env until the owner writes it', (t) => {
+  const h = setup(t, { primaryHarness: 'claude', nextHarness: 'claude', reason: 'refusal' });
+  const cache = path.join(h.base, 'cache');
+  fs.mkdirSync(cache);
+  Object.assign(h.spawnEnv, { XDG_CACHE_HOME: cache, LOCALAPPDATA: cache, TOWER_CRANE_AGENT: 'orchestrator' });
+  const routes = [{ harness: 'claude', model: 'second', sandbox: { domains: ['*'], write: [path.join(h.base, 'anywhere')] }, env: { ROUTE_ENV: 'fallback' } }];
+  setFallbacks(h, routes);
+  h.spawn();
+  assert.deepEqual(h.attempts().map((a) => [a.model, a.env]), [['first', 'primary']], 'the unapproved route never runs');
+  assert.ok(!h.attempts()[0].sandbox.network.allowedDomains.includes('*'));
+  const problems = h.json(['ladder', 'show']).problems;
+  assert.ok(problems.some((p) => p.startsWith('easy fallback 1 from user file') && p.includes('sets sandbox, env, which the owner has not approved')), problems.join('\n'));
+  const spawned = events(h).find((e) => e.cmd === 'spawn');
+  assert.ok(spawned.detail.notices.some((n) => n.startsWith('easy fallback 1 from user file')), JSON.stringify(spawned.detail.notices));
+
+  // The same list through the CLI is a grant the owner has not made, though
+  // the file already holds it.
+  const args = ['ladder', 'set', 'easy', '--fallbacks', JSON.stringify(routes)];
+  const asked = h.run(args, { env: { TOWER_CRANE_AGENT: 'orchestrator' } });
+  assert.equal(asked.code, 1, asked.stderr);
+  assert.match(asked.stderr, /opened D1/);
+  assert.deepEqual([...h.readState('decisions.json').decisions[0].escalation.settings].sort(), ['env', 'sandbox']);
+  h.ok(['answer', 'D1', '--choice', 'approve']);
+  h.ok(args, { env: { TOWER_CRANE_AGENT: 'orchestrator' } });
+  assert.ok(!h.json(['ladder', 'show']).problems.some((p) => p.includes('has not approved')));
+  const pins = JSON.parse(fs.readFileSync(path.join(h.readState('project.json').owner_config_dir, 'owner', 'route-grants.json'), 'utf8'));
+  assert.ok(!JSON.stringify(pins).includes('fallback'), 'the pin holds hashes, not the values');
+
+  // Approved, the route runs with its grants.
+  h.ok(['task', 'add', '--title', 'Second', '--tier', 'easy', '--acceptance', 'approved fallback']);
+  h.ok(['brief', 'set', 'T2', '-'], { input: 'Complete the original task brief.\n' });
+  h.spawnEnv.TOWER_CRANE_TEST_FALLBACK_FILE = h.file = path.join(h.base, 'attempts-2.json');
+  h.run(['spawn', '--task', 'T2', '--wait'], { env: h.spawnEnv });
+  const [, fallback] = h.attempts();
+  assert.deepEqual([fallback?.model, fallback?.env], ['second', 'fallback']);
+  assert.ok(fallback.sandbox.network.allowedDomains.includes('*'));
 });
 
 for (const reason of ['outage', 'refusal']) {

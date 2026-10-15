@@ -221,6 +221,43 @@ for (const harness of ['claude', 'codex']) {
   });
 }
 
+// Found in the T276 review: claude and its sandboxed commands shared one
+// temp directory, <TMPDIR>/claude-<uid>, where claude also keeps its own
+// per-user files (prompts, plugin staging, task output) and reads them back,
+// so a command could plant files there. claude's own files now go under
+// CLAUDE_CODE_TMPDIR in the agent's home, which its commands read and
+// cannot write; the commands keep a TMPDIR of their own, and https through
+// the proxy sockets in claude's TMPDIR still works. claude tells its
+// commands where its own directory is in CLAUDE_CODE_TMPDIR.
+test('a real claude agent\'s commands write their own TMPDIR and cannot write claude\'s own temp files', { skip: process.env.TOWER_CRANE_LIVE_CLAUDE !== '1' && 'set TOWER_CRANE_LIVE_CLAUDE=1 to run against the real claude CLI', timeout: 300000 }, async (t) => {
+  const h = makeRepo(t, { root: LIVE_ROOT });
+  h.init();
+  h.ok(['task', 'add', '--title', 'Temp probe', '--acceptance', 'claude\'s temp files stay its own']);
+  const out = path.join(results(h), 'claude-tmp-probe.json');
+  const script = `const fs=require("fs"),os=require("os"),p=require("path"),cp=require("child_process");`
+    + `const o={tmpdir:process.env.TMPDIR||null,own:process.env.CLAUDE_CODE_TMPDIR||null};`
+    + `try{const d=fs.mkdtempSync(p.join(os.tmpdir(),"probe-"));fs.writeFileSync(p.join(d,"f"),"x");o.commandsWrite=fs.readFileSync(p.join(d,"f"),"utf8")}catch(e){o.commandsWrite="ERR "+e.code}`
+    + `try{fs.writeFileSync(p.join(o.own,"claude-prompt-planted.md"),"planted");o.ownWrite="WROTE"}catch(e){o.ownWrite="ERR "+e.code}`
+    + `o.lsRemote=cp.spawnSync("git",["ls-remote","https://github.com/agent-sh/tower-crane.git","HEAD"],{encoding:"utf8",env:{...process.env,GIT_TERMINAL_PROMPT:"0"}}).status;`
+    + `fs.writeFileSync(${JSON.stringify(out)},JSON.stringify(o))`;
+  h.ok(['brief', 'set', 'T1', '-'], {
+    input: `Sandbox probe set up by the owner. It checks where your commands may write temporary files. Run exactly this one command with your command tool, then reply with its exit code and stop. Do not use tower-crane.\n\n${node} -e '${script}'\n`,
+  });
+  pinLiveRung(h, 'claude');
+  const userHome = os.homedir();
+  const env = { ...h.env, HOME: userHome, USERPROFILE: userHome, CLAUDE_CONFIG_DIR: '', XDG_CACHE_HOME: shortCache(t) };
+  const r = await h.runAsync(['spawn', '--role', 'small', '--task', 'T1', '--wait'], { env });
+  assert.equal(r.code, 0, `${r.stderr}\n${agentLog(h)}`);
+  assert.ok(fs.existsSync(out), `the probe ran\n${agentLog(h)}`);
+  const seen = JSON.parse(fs.readFileSync(out, 'utf8'));
+  console.log(`claude temp probe: ${JSON.stringify(seen)}`);
+  assert.equal(seen.commandsWrite, 'x', 'the commands write their own TMPDIR');
+  assert.equal(seen.lsRemote, 0, 'https through claude\'s proxy sockets still works');
+  assert.notEqual(seen.own, seen.tmpdir, 'claude\'s own temp files are not in the commands\' TMPDIR');
+  assert.ok(seen.own.startsWith(path.join(fs.realpathSync(h.state), 'homes', 'small-T1-1') + path.sep), `claude's own temp files are in the agent's home: ${seen.own}`);
+  assert.match(seen.ownWrite, /^ERR /, 'the commands cannot write claude\'s own temp files');
+});
+
 // Host sockets under /run that both sandboxes hide: the system bus,
 // snapd, docker (root on the host for a member of its group) and the user's
 // session bus. Found in review 2026-10-14: every one connected from a codex
