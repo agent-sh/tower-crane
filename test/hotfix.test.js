@@ -426,3 +426,219 @@ test('a hotfix record skips a revision a restore retired', (t) => {
   retireRevision(h, 'T1', task(h).revision + 1);
   assert.equal(record(h).revision, 3);
 });
+
+const ORCHESTRATOR = { env: { TOWER_CRANE_AGENT: 'orchestrator' } };
+
+// A follow-up opened before the failing gate was recorded on it: its gate is read from the event's reason.
+function legacyFollowUp(h) {
+  const tasks = h.readState('tasks.json');
+  delete tasks.tasks.find((x) => x.id === 'T1').hotfix.follow_up_gate;
+  h.writeState('tasks.json', tasks);
+  const file = path.join(h.state, 'events.jsonl');
+  fs.writeFileSync(file, events(h).map((e) => {
+    if (e.cmd === 'hotfix rework') delete e.detail.gate;
+    return `${JSON.stringify(e)}\n`;
+  }).join(''));
+}
+
+// Main was red at the merge commit for reasons of its own: the CI gate failed the hotfix and opened a follow-up.
+function falseFailure(h) {
+  record(h);
+  const r = h.run(['check', 'ci', 'T1'], { env: { FIXTURE_MERGE_RUN: 'failure' } });
+  assert.equal(r.code, 1);
+  assert.equal(task(h).status, 'cancelled');
+  assert.equal(task(h).hotfix.follow_up, 'T2');
+  return task(h);
+}
+
+test('recording the same PR again supersedes a false-failure follow-up and lets accept take the new revision', (t) => {
+  const h = fixture(t);
+  const before = falseFailure(h);
+  assert.equal(before.hotfix.follow_up_gate, 'ci');
+  legacyFollowUp(h);
+  const refused = h.run(['hotfix', 'T1', '--pr', '42', '--sha', h.sha, '--agent', 'worker']);
+  assert.equal(refused.code, 1);
+  assert.match(refused.stderr, /orchestrator or owner/);
+  assert.equal(task(h).status, 'cancelled');
+  // A CI follow-up recorded before T285 is still the orchestrator's to re-record.
+  const r = h.run(['hotfix', 'T1', '--pr', '42', '--sha', h.sha, '--reason', 'main was red on Windows shards at the merge commit'], ORCHESTRATOR);
+  assert.equal(r.code, 0, r.stderr);
+  assert.match(r.stdout, /re-recorded at .*follow-up T2 cancelled as superseded, revision 3/);
+  const again = task(h);
+  assert.equal(again.status, 'submitted');
+  assert.equal(again.revision, before.revision + 1);
+  assert.equal(again.sha, h.sha);
+  assert.equal(again.hotfix.follow_up, undefined);
+  assert.deepEqual(again.hotfix.superseded.map((s) => [s.follow_up, s.gate, s.reason]), [['T2', 'ci', 'main was red on Windows shards at the merge commit']]);
+  assert.equal(again.hotfix.follow_up_gate, undefined);
+  const follow = task(h, 'T2');
+  assert.equal(follow.status, 'cancelled');
+  assert.equal(follow.superseded_by, 'T1');
+  assert.match(follow.notes.at(-1).text, /Superseded by T1: main was red/);
+  const recorded = events(h).filter((e) => e.cmd === 'hotfix' && e.task === 'T1');
+  assert.equal(recorded.length, 2);
+  assert.deepEqual([recorded[1].detail.revision, recorded[1].detail.previous_status, recorded[1].detail.superseded.follow_up], [3, 'cancelled', 'T2']);
+  assert.ok(events(h).some((e) => e.cmd === 'hotfix supersede' && e.task === 'T2' && e.detail.superseded_by === 'T1'));
+  const { describeEvent } = require('../lib/board/model');
+  assert.match(describeEvent(recorded[0]), /^T1 hotfix PR #42 merged before its gates/);
+  assert.match(describeEvent(recorded[1]), /^T1 hotfix PR #42 re-recorded at [0-9a-f]{7}, superseding follow-up T2: main was red/);
+  // --reason belongs to a re-record; a repeated record of a submitted hotfix refuses it rather than dropping it.
+  const stray = h.run(['hotfix', 'T1', '--pr', '42', '--sha', h.sha, '--reason', 'ignored']);
+  assert.equal(stray.code, 1);
+  assert.match(stray.stderr, /--reason applies only to re-recording/);
+  // The old CI failure was at revision 2; repeating the record keeps the new revision and its receipts.
+  assert.equal(h.json(['task', 'show', 'T1']).gates.gates.find((g) => g.type === 'ci').ok, false);
+  const repeated = record(h);
+  assert.deepEqual([repeated.status, repeated.revision, repeated.hotfix], [again.status, again.revision, again.hotfix]);
+  assert.equal(events(h).filter((e) => e.cmd === 'hotfix' && e.task === 'T1').length, 2);
+  for (const name of ['tests', 'clean', 'ci']) h.ok(['check', name, 'T1']);
+  verdict(h, true);
+  assert.match(h.ok(['accept', 'T1']), /accepted \(hotfix\)/);
+  assert.equal(task(h).status, 'accepted');
+  assert.equal(h.readState('tasks.json').tasks.length, 2);
+});
+
+test('a re-record is refused while the follow-up is claimed or has work of its own', (t) => {
+  const claimed = fixture(t);
+  const first = claimed.run(['hotfix', 'T1', '--pr', '42', '--sha', claimed.sha, '--reason', 'not a re-record']);
+  assert.equal(first.code, 1);
+  assert.match(first.stderr, /--reason applies only to re-recording a cancelled hotfix/);
+  assert.equal(task(claimed).hotfix, undefined);
+  falseFailure(claimed);
+  claimed.ok(['claim', 'T2', '--agent', 'w-1']);
+  const r = claimed.run(['hotfix', 'T1', '--pr', '42', '--sha', claimed.sha]);
+  assert.equal(r.code, 1);
+  assert.match(r.stderr, /follow-up T2 is claimed/);
+  assert.equal(task(claimed).status, 'cancelled');
+  assert.equal(task(claimed, 'T2').status, 'in_progress');
+  const worked = fixture(t);
+  falseFailure(worked);
+  const tasks = worked.readState('tasks.json');
+  Object.assign(tasks.tasks.find((x) => x.id === 'T2'), { branch: 'tower-crane/T2-rework', sha: worked.head, pr: 43 });
+  worked.writeState('tasks.json', tasks);
+  const w = worked.run(['hotfix', 'T1', '--pr', '42', '--sha', worked.sha]);
+  assert.equal(w.code, 1);
+  assert.match(w.stderr, /follow-up T2 has its own work \(rework, PR #43, branch tower-crane\/T2-rework\)/);
+  assert.equal(task(worked).status, 'cancelled');
+  assert.equal(task(worked, 'T2').status, 'rework');
+});
+
+test('dropping a follow-up that carries an owner ask is owner-required', (t) => {
+  const h = fixture(t);
+  falseFailure(h);
+  h.ok(['task', 'update', 'T2', '--needs-owner', 'owner decides: cancel or keep']);
+  const args = ['hotfix', 'T1', '--pr', '42', '--sha', h.sha];
+  const asked = h.run(args, ORCHESTRATOR);
+  assert.equal(asked.code, 1, asked.stdout);
+  assert.match(asked.stderr, /task\.cancel_needs_owner is owner-required; opened D1/);
+  assert.equal(task(h).status, 'cancelled');
+  assert.equal(task(h, 'T2').status, 'rework');
+  h.ok(args);
+  assert.equal(task(h).status, 'submitted');
+  assert.equal(task(h, 'T2').status, 'cancelled');
+});
+
+test('setting aside a failed independent review by re-recording is owner-required', (t) => {
+  const h = fixture(t);
+  const failing = h.run(['hotfix', 'T1', '--pr', '42', '--review', REVIEW_URL],
+    { env: { FIXTURE_REVIEW_BODY: posted(h.head, 'fail', '1. value.js:1 - the value is wrong') } });
+  assert.equal(failing.code, 1);
+  assert.equal(task(h).hotfix.follow_up_gate, 'review');
+  const args = ['hotfix', 'T1', '--pr', '42', '--reason', 'the reviewer was wrong'];
+  const asked = h.run(args, ORCHESTRATOR);
+  assert.equal(asked.code, 1, asked.stdout);
+  assert.match(asked.stderr, /task\.rerecord_review is owner-required; opened D1/);
+  assert.equal(task(h).status, 'cancelled');
+  assert.equal(task(h, 'T2').status, 'rework');
+  // The gate is read from an older follow-up's event reason the same way.
+  legacyFollowUp(h);
+  assert.match(h.run(args, ORCHESTRATOR).stderr, /task\.rerecord_review is owner-required; .*D1/);
+  h.ok(args);
+  assert.equal(task(h).status, 'submitted');
+  assert.equal(task(h).hotfix.superseded[0].gate, 'review');
+  assert.equal(task(h, 'T2').status, 'cancelled');
+});
+
+test('a hotfix test that also fails at the merge first parent is infrastructure, and only the owner waives it', (t) => {
+  const h = fixture(t);
+  record(h);
+  const shared = path.join(h.base, 'shared-failure.js');
+  fs.writeFileSync(shared, "console.log('# Subtest: test/known.test.js');\nconsole.log('not ok 1 - known base failure');\nprocess.exit(1);\n");
+  h.ok(['project', 'set', '--tests-cmd', `node ${shellQuote(shared)}`, '--tests-mode', 'run-only']);
+  const r = h.run(['check', 'tests', 'T1']);
+  assert.equal(r.code, 1);
+  const tests = task(h).evidence.at(-1);
+  assert.equal(tests.infrastructure_failure, true);
+  assert.equal(tests.confirmed_failure, undefined);
+  assert.deepEqual(tests.main_failure, { base: h.base_sha.slice(0, 10), names: ['known base failure'] });
+  assert.match(tests.summary, new RegExp(`Also fails on main at ${h.base_sha.slice(0, 10)}, the merge's first parent: known base failure. Infrastructure`));
+  assert.match(tests.summary, /Rerun tower-crane check tests T1 when the environment recovers/);
+  assert.match(tests.summary, /the owner can accept with tower-crane accept T1 --waive tests --reason R/);
+  assert.doesNotMatch(tests.summary, /gates retry/);
+  assert.equal(task(h).status, 'submitted');
+  assert.equal(task(h).hotfix.follow_up, undefined);
+  const item = h.json(['inbox', '--agent', 'orchestrator']).items.find((i) => i.kind === 'gate_failed' && i.gate === 'tests');
+  assert.equal(item.infrastructure_failure, true);
+  assert.deepEqual(item.action.argv, ['check', 'tests', 'T1']);
+  assert.equal(h.run(['accept', 'T1']).code, 1);
+  assert.equal(task(h).status, 'submitted');
+  assert.equal(task(h).hotfix.follow_up, undefined);
+  assert.equal(h.readState('tasks.json').tasks.length, 1);
+  // Both commits are fixed, so a failure that predates the merge never clears: the owner waives tests, and only tests.
+  h.ok(['check', 'clean', 'T1']);
+  h.ok(['check', 'ci', 'T1']);
+  verdict(h, true);
+  const clean = h.run(['accept', 'T1', '--waive', 'clean', '--reason', 'no']);
+  assert.equal(clean.code, 1);
+  assert.match(clean.stderr, /only waiver is the owner's --waive tests/);
+  const asked = h.run(['accept', 'T1', '--waive', 'tests', '--reason', 'fails before the merge'], ORCHESTRATOR);
+  assert.equal(asked.code, 1);
+  assert.match(asked.stderr, /waive\.tests is owner-required/);
+  assert.match(h.ok(['accept', 'T1', '--waive', 'tests', '--reason', 'fails before the merge']), /accepted \(hotfix\) T1/);
+  const waived = task(h).evidence.find((e) => e.type === 'tests' && e.waived);
+  assert.deepEqual(waived.base_failure, { base_sha: h.base_sha, names: ['known base failure'] });
+  const accepted = events(h).findLast((e) => e.cmd === 'accept');
+  assert.deepEqual(accepted.detail.base_failure, waived.base_failure);
+  assert.match(require('../lib/board/model').describeEvent(accepted), /with tests waived, failing at the merge's first parent/);
+});
+
+test('a hotfix tests failure the merge did not cause cannot be waived, and one the merge broke is its own while main still fails', (t) => {
+  const h = fixture(t);
+  record(h);
+  h.ok(['project', 'set', '--tests-mode', 'run-only']);
+  const early = h.run(['accept', 'T1', '--waive', 'tests', '--reason', 'no failure yet']);
+  assert.equal(early.code, 1);
+  assert.match(early.stderr, /only waiver is the owner's --waive tests/);
+  // The merge broke this test, and main after the merge still fails it: the first parent passes, so it is the merge's.
+  const broken = path.join(h.base, 'merge-broke.js');
+  fs.writeFileSync(broken, "if (require(require('node:path').resolve('value.js')) === 1) { console.log('# Subtest: test/value.test.js');\nconsole.log('not ok 1 - value stays zero'); process.exit(1); }\n");
+  h.ok(['project', 'set', '--tests-cmd', `node ${shellQuote(broken)}`]);
+  const own = h.run(['check', 'tests', 'T1']);
+  assert.equal(own.code, 1);
+  assert.equal(task(h).status, 'cancelled');
+  assert.equal(task(h, task(h).hotfix.follow_up).status, 'rework');
+});
+
+test('a hotfix without a recorded first parent reruns failing tests at the merge commit\'s first parent', (t) => {
+  const h = fixture(t);
+  record(h);
+  const tasks = h.readState('tasks.json');
+  delete tasks.tasks[0].hotfix.base_sha;
+  h.writeState('tasks.json', tasks);
+  const shared = path.join(h.base, 'shared-failure.js');
+  fs.writeFileSync(shared, "console.log('# Subtest: test/known.test.js');\nconsole.log('not ok 1 - known base failure');\nprocess.exit(1);\n");
+  h.ok(['project', 'set', '--tests-cmd', `node ${shellQuote(shared)}`, '--tests-mode', 'run-only']);
+  assert.equal(h.run(['check', 'tests', 'T1']).code, 1);
+  const tests = task(h).evidence.at(-1);
+  assert.deepEqual(tests.main_failure, { base: h.base_sha.slice(0, 10), names: ['known base failure'] });
+  assert.equal(tests.infrastructure_failure, true);
+  assert.equal(task(h).hotfix.follow_up, undefined);
+});
+
+test('a hotfix re-record skips a revision a restore retired', (t) => {
+  const h = fixture(t);
+  const before = falseFailure(h);
+  retireRevision(h, 'T1', before.revision + 1);
+  h.ok(['hotfix', 'T1', '--pr', '42', '--sha', h.sha, '--reason', 'main was red at the merge commit']);
+  assert.equal(task(h).revision, before.revision + 2, 'the re-record skips the retired number');
+});
