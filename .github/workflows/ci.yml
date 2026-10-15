@@ -42,8 +42,8 @@ jobs:
     name: test (${{ matrix.os }}, node ${{ matrix.node }}, shard ${{ matrix.shard }})
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
     runs-on: ${{ matrix.os }}
-    # test/run.js splits shards by measured file time (test/durations.json): about 20 minutes on
-    # Windows and 10 on Linux, so the 45-minute bound only stops a hung job. The runner still
+    # test/run.js splits shards by measured file time (test/durations.json): 20 to 27 minutes on
+    # Windows and 9 to 13 on Linux, so the 45-minute bound only stops a hung job. The runner still
     # bounds each test independently.
     timeout-minutes: 45
     strategy:
@@ -76,7 +76,7 @@ jobs:
     name: repeat (windows-latest, node 26)
     if: github.event_name != 'pull_request'
     runs-on: windows-latest
-    # The authority files take about 15 minutes for ten passes and the other loops about 4.
+    # About 20 to 25 minutes: ten passes of the authority files take about 16.
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
