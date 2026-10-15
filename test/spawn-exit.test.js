@@ -431,7 +431,7 @@ test(`a task an agent dispatches survives the output release of the agent that s
   const inner = { pid: pid(files.nested), ...(process.platform === 'win32' ? {} : { startTicks: spawned.start_ticks }) };
   const why = () => JSON.stringify({ stderr: result.stderr, t1: exit.detail,
     t2: fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse).filter((e) => e.task === 'T2').map((e) => [e.cmd, e.detail.phase, e.detail.reason]),
-    log: fs.existsSync(spawned.log) ? fs.readFileSync(spawned.log, 'utf8').slice(-2000) : null });
+    log: fs.existsSync(spawned.log) ? readPublished(spawned.log, 'utf8').slice(-2000) : null });
   assert.equal(detachedAlive(inner), true, `the nested harness was stopped: ${why()}`);
   assert.equal(detachedAlive({ pid: spawned.monitor_pid }), true, `the nested supervisor was stopped: ${why()}`);
   assert.ok(exit.detail.output_held, `no output release: ${why()}`);
@@ -527,14 +527,31 @@ test('the Windows stop splits a long target list into calls that fit a Windows c
   for (const length of lengths) assert.ok(length < 32767, `a command line of ${length} characters`);
 });
 
-test('the Windows tree of an exited harness stops at a supervisor', () => {
+test('the Windows tree of an exited harness spares a supervisor, what runs below it and its parent', () => {
   const { windowsTree } = require('../lib/processes');
   const rows = [
-    { pid: 11, parent: 10, start: 1500 }, // a dispatch the harness left running
-    { pid: 12, parent: 11, start: 1600, supervisor: true }, // the supervisor it started
+    { pid: 11, parent: 10, start: 1500 }, // a foreground dispatch the harness left running
+    { pid: 12, parent: 11, start: 1600, supervisor: true }, // the supervisor in that dispatch's job
     { pid: 13, parent: 12, start: 1700 }, // that supervisor's harness
+    { pid: 14, parent: 10, start: 1550 }, // a holder
+    { pid: 15, parent: 10, start: 1560, supervisor: true }, // a supervisor the harness started itself
+    { pid: 16, parent: 15, start: 1570 },
   ];
-  assert.deepEqual(windowsTree(rows, 10, 1000, 2000).map((r) => r.pid), [11]);
+  assert.deepEqual(windowsTree(rows, 10, 1000, 2000).map((r) => r.pid), [14]);
+});
+
+test('a supervisor is known by its command line in every shape Windows shows it', () => {
+  const { supervisorCommand } = require('../lib/processes');
+  for (const command of [
+    // As a Windows CI runner launched one.
+    '"C:\\hostedtoolcache\\windows\\node\\26.12.0\\x64\\node.exe" D:\\a\\tower-crane\\tower-crane\\lib\\spawn-monitor.js D:\\a\\_temp\\tower-crane-tests\\tower-crane-EdyGw4\\repo\\.tower-crane\\cache\\spawn-1\\job.json',
+    '"C:\\Program Files\\nodejs\\node.exe" --max-old-space-size=4096 "C:\\Users\\a b\\tool\\lib\\spawn-monitor.js" "C:\\Users\\a b\\job.json"',
+    'node C:/tool/lib/SPAWN-MONITOR.JS job.json',
+    'node spawn-monitor.js',
+  ]) assert.equal(supervisorCommand(command), true, command);
+  for (const command of ['node my-spawn-monitor.js', 'node spawn-monitor.jsx', 'node C:\\tool\\bin\\tower-crane.js spawn --wait', '', null]) {
+    assert.equal(supervisorCommand(command), false, String(command));
+  }
 });
 
 test('a launch keeps an outer gate run marker and drops an outer spawn run marker', () => {
