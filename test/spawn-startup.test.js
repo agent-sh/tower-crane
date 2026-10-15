@@ -89,8 +89,11 @@ test('a nested spawn whose whole PATH is the parent\'s shims does not run a git 
   h.git(['add', 'git']);
   h.git(['commit', '-q', '-m', 'a git in the checkout']);
   const started = h.run(['spawn', '--role', 'small', '--task', 'T1', '--wait', '--json'], { env: { PATH: path.join(parent, 'bin') } });
-  assert.equal(started.code, 0, started.stderr);
+  // read-published: the planted git appends; nothing replaces the file, and the spawn has exited.
   assert.equal(fs.existsSync(ran), false, fs.existsSync(ran) ? fs.readFileSync(ran, 'utf8') : '');
+  // With no host git left, the scan cannot read the config and the start is refused.
+  assert.equal(started.code, 1, started.stderr);
+  assert.match(started.stderr, /exited with code 1 before it reported ready: cannot read git configuration safely/);
 });
 
 test('a supervisor that exits before it reports names its exit code and keeps its log', (t) => {
