@@ -88,6 +88,7 @@ cp.spawnSync = () => {
   const next = h.run(['spawn', '--role', 'small', '--task', 'T1', '--wait', '--json']);
   assert.equal(next.code, 0, next.stderr);
   assert.equal(JSON.parse(next.stdout).agent, 'small-T1-1');
+  assert.match(next.stderr, /tower-crane: moved .*T1-small-T1-1\.log, left by a start that failed before it was recorded, to .*T1-small-T1-1-startup-failed-.+\.log\n/);
   const kept = logs(h).sort();
   assert.equal(kept.length, 2, kept.join(', '));
   assert.match(kept[0], /^T1-small-T1-1-startup-failed-.+\.log$/);

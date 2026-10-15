@@ -767,6 +767,33 @@ test('an expired resumed claim needs room and keeps its original since', (t) => 
   assert.ok(Date.parse(after.until) > Number(fs.readFileSync(clock, 'utf8')));
 });
 
+// A failed resume start records no spawn, so the next resume takes the same
+// attempt log name. The log there is moved aside only when no recorded spawn
+// of the agent may still be running; from another host its processes are unknown.
+test('a resume moves an earlier start\'s attempt log aside only once no recorded spawn of the agent may still run', (t) => {
+  const { h } = setup(t);
+  const first = h.json(['spawn', '--task', 'T1', '--wait']);
+  sendBack(h);
+  const logs = path.dirname(first.log);
+  const log = path.join(logs, `T1-${first.agent}-attempt-2.log`);
+  fs.writeFileSync(log, 'an earlier start\n');
+  const audit = events(h);
+  const refused = h.run(['spawn', '--task', 'T1', '--wait'], { hooks: { HOOK_HOSTNAME: 'another-host' } });
+  assert.equal(refused.code, 1, refused.stderr);
+  assert.match(refused.stderr, /EEXIST: log already exists/);
+  assert.equal(fs.readFileSync(log, 'utf8'), 'an earlier start\n');
+  assert.deepEqual(fs.readdirSync(logs).filter((n) => n.includes('startup-failed')), []);
+  assert.ok(!events(h).slice(audit.length).some((e) => e.cmd === 'spawn'));
+
+  const next = h.run(['spawn', '--task', 'T1', '--wait', '--json']);
+  assert.equal(next.code, 0, next.stderr);
+  assert.equal(JSON.parse(next.stdout).resumed, true);
+  const aside = fs.readdirSync(logs).filter((n) => n.includes('startup-failed'));
+  assert.equal(aside.length, 1, aside.join(', '));
+  assert.equal(fs.readFileSync(path.join(logs, aside[0]), 'utf8'), 'an earlier start\n');
+  assert.ok(next.stderr.includes(`tower-crane: moved ${log}, left by a start that failed before it was recorded, to ${path.join(logs, aside[0])}\n`), next.stderr);
+});
+
 test('a failed resume launch leaves the task, claim and receipts unchanged', (t) => {
   const { h } = setup(t);
   h.json(['spawn', '--task', 'T1', '--wait']);

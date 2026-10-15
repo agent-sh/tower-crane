@@ -144,6 +144,8 @@ const MUTANTS = [
   { id: 'supervisor-writes-after-incompatible-state', area: 'spawn/supervisor', file: 'lib/spawn-monitor.js',
     from: "if (committed && !incompatible && fs.existsSync(path.join(spawn.state, 'project.json'))) sampleUsage(true);",
     to: "if (committed && fs.existsSync(path.join(spawn.state, 'project.json'))) sampleUsage(true);", tests: ['test/state-compatibility.test.js'] },
+  { id: 'spawn-moves-live-agent-log', area: 'spawn/supervisor', file: 'lib/spawn.js',
+    from: '  if (live) return false;\n', to: '', tests: ['test/spawn-resume.test.js'] },
   { id: 'supervisor-retries-permanent-exit', area: 'spawn/supervisor', file: 'lib/spawn-monitor.js',
     from: '  if (code === 0) return false;\n  return providerError;', to: '  if (code === 0) return false;\n  return true;', tests: ['test/supervision.test.js'] },
   { id: 'supervisor-extra-retry', area: 'spawn/supervisor', file: 'lib/spawn-monitor.js',
