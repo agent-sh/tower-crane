@@ -3066,4 +3066,6 @@ test('each role has an agent file that states its tools, MCP servers, skills, we
   // The parsed config the codex filter works on survives a round trip.
   const doc = TOML.parse('a = 1\n[b]\nc = { d = [1, "x"] }\n');
   assert.deepEqual(TOML.parse(TOML.stringify(doc)), doc);
+  // Prefixed integers keep their base.
+  assert.deepEqual({ ...TOML.parse('o = 0o17\nx = 0x1F\nb = 0b101\nd = 1_000\n') }, { o: 15, x: 31, b: 5, d: 1000 });
 });
