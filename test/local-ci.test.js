@@ -468,6 +468,7 @@ test('gate output loses terminal escapes, and an unterminated string ends at its
     ['lone ESC before DEL, ESC and non-ASCII', 'a\x1b\x7f.\x1b\x1b\x7f,\x1béb', 'a.,éb'],
     ['C0 and C1 controls go; tab and newline stay', '(\x00\x08\x0b\x7f\x85)\tc\n', '()\tc\n'],
     ['a control run between word characters leaves a space', 'ab\x00cd\x7f\x85ef_\x1b\x7fg', 'ab cd ef_ g'],
+    ['a control run inside a token shape goes', `ghp_${'a'.repeat(10)}\x1b\x7f${'b'.repeat(10)}\x00 next`, `ghp_${'a'.repeat(10)}${'b'.repeat(10)} next`],
     ['a CR ends a line and CRLF is LF', 'get 10%\rget 50%\r\nnext\r\r\nlast\r', 'get 10%\nget 50%\nnext\nlast'],
   ];
   for (const [name, input, expected] of cases) assert.equal(stripEscapes(input), expected, name);
@@ -490,11 +491,16 @@ test('a removed control keeps the word boundary token shapes are found by', () =
   const github = `ghp_${'d4'.repeat(18)}`;
   const aws = `AKIA${'E5'.repeat(8)}`;
   for (const [input, expected] of [
+    // Joined, the controls inside a token would hide it; split at them, a boundary would.
+    [`${github.slice(0, 8)}\x1b\x7f${github.slice(8)}`, '[redacted:GITHUB_TOKEN]'],
     [`Downloading\r${github}`, 'Downloading\n[redacted:GITHUB_TOKEN]'],
     [`${aws}\rDONE`, '[redacted:AWS_ACCESS_KEY_ID]\nDONE'],
     [`x\b${github}`, 'x [redacted:GITHUB_TOKEN]'],
     [`${aws}\x00DONE`, '[redacted:AWS_ACCESS_KEY_ID] DONE'],
   ]) assert.equal(redact(stripEscapes(input)), expected, JSON.stringify(input));
+  // The token stays whole for the redactor, which labels an environment value by its variable.
+  const env = createRedactor([['FIXTURE_TOKEN', github]]);
+  assert.equal(env(stripEscapes(`a ${github.slice(0, 8)}\x00${github.slice(8)}`)), 'a [redacted:FIXTURE_TOKEN]');
 });
 
 test('a passing local CI keeps its log without a tail or artifacts', (t) => {

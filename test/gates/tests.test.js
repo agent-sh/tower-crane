@@ -295,7 +295,7 @@ test('host skip reasons lose terminal escapes before they are redacted and cut',
   const redact = createRedactor([['HOST_TOKEN', token]]);
   const output = [
     'ok 1 - live # SKIP \x1b]8;;https://example.test\x07set TC_HOST_OPT_IN=1\x1b]8;;\x07',
-    `ok 2 - token # SKIP token ${token.slice(0, 6)}\x1b]0;t\x07${token.slice(6, 12)}\x1b(B${token.slice(12)}`,
+    `ok 2 - token # SKIP token ${token.slice(0, 6)}\x1b]0;t\x07${token.slice(6, 12)}\x1b\x7f${token.slice(12)}`,
   ].join('\n');
   assert.deepEqual(gate.skipReasons({ output }, redact), ['set TC_HOST_OPT_IN=1', 'token [redacted:HOST_TOKEN]']);
 });
