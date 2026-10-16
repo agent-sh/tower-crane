@@ -592,10 +592,13 @@ test('revuto findings on bracketed paths require a change to the literal file', 
   const state = h.github();
   state.prs['7'].headRefOid = h.sha;
   state.ci[h.sha] = 'success';
-  state.comments = [{ id: 401, in_reply_to_id: null, path: 'routes/[id].js', line: 1,
-    body: '[P1] The dynamic route is still broken.', user: 'revuto-review[bot]', original_commit_id: commented }];
   h.saveGithub(state);
   h.submit();
+  // Revuto posts after the submit: one already on the PR would refuse it, as review ok does.
+  const posted = h.github();
+  posted.comments = [{ id: 401, in_reply_to_id: null, path: 'routes/[id].js', line: 1,
+    body: '[P1] The dynamic route is still broken.', user: 'revuto-review[bot]', original_commit_id: commented }];
+  h.saveGithub(posted);
   for (const type of ['tests', 'clean', 'ci']) gateEvidence(h, type, 'orchestrator');
   const first = await h.runAsync(['spawn', '--role', 'review', '--task', 'T1', '--wait', '--agent', 'orchestrator']);
   assert.equal(first.code, 1, first.stdout + first.stderr);
@@ -628,11 +631,15 @@ test('revuto findings on bracketed paths require a change to the literal file', 
 test('revuto replies require an explicit resolution and later discussion reopens the finding', async (t) => {
   const h = setup(t);
   configureHarness(h);
-  const state = h.github();
   const before = h.git(['rev-parse', `${h.sha}^`]);
   const finding = (id, commit = h.sha) => ({ id, in_reply_to_id: null, path: 'value.js', line: 1,
     body: `[P1] finding ${id}`, user: 'revuto-review[bot]', original_commit_id: commit });
   const reply = (id, thread, body) => ({ id, in_reply_to_id: thread, user: 'worker', body });
+  // A tracked worker lets automatic reactions dispatch another reviewer after
+  // a refused verdict; this test controls both snapshots with native submission.
+  h.submit();
+  // Revuto posts after the submit: open [P1] findings already on the PR would refuse it, as review ok does.
+  const state = h.github();
   state.comments = [
     finding(301), reply(311, 301, 'I can still reproduce this. This is not fixed.'),
     finding(302), reply(312, 302, '[resolved]\nFixed by the guard above.'),
@@ -642,9 +649,6 @@ test('revuto replies require an explicit resolution and later discussion reopens
     finding(306), reply(316, 306, '> [resolved]\nThis is a quote, not a resolution.'),
   ];
   h.saveGithub(state);
-  // A tracked worker lets automatic reactions dispatch another reviewer after
-  // a refused verdict; this test controls both snapshots with native submission.
-  h.submit();
   for (const type of ['tests', 'clean', 'ci']) gateEvidence(h, type, 'orchestrator');
   const first = await h.runAsync(['spawn', '--role', 'review', '--task', 'T1', '--wait', '--agent', 'orchestrator']);
   assert.equal(first.code, 1, first.stdout + first.stderr);

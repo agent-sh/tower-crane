@@ -68,7 +68,7 @@ cp.spawnSync=(cmd,args,opts)=>{
   h.ok(['brief', 'set', 'T1', '-'], { input: '# Change\n\nImplement the acceptance.\n' });
   h.submit = (id = 'T1', sha = h.sha, pr = '7') => {
     h.ok(['claim', id, '--agent', 'worker']);
-    // A worker's submit refuses pending or failing CI (T149), so the head is submitted while its
+    // A worker's submit refuses failing CI (T149), so the head is submitted while its
     // CI reads green. The CI the test set returns before any reaction runs.
     const before = h.github();
     const ciAtSubmit = before.ci[sha];
@@ -154,7 +154,7 @@ poll();
   h.saveGithub = (state) => fs.writeFileSync(h.env.AUTOMATION_GITHUB, JSON.stringify(state));
   h.submit = (id = 'T1', agent = 'worker') => {
     h.ok(['claim', id, '--agent', agent]);
-    // A worker's submit refuses pending or failing CI (T149), so the head is submitted while its
+    // A worker's submit refuses failing CI (T149), so the head is submitted while its
     // CI reads green. The CI the test set returns after the submit.
     const before = h.github();
     const ciAtSubmit = before.ci[h.sha];
