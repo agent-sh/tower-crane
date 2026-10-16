@@ -137,7 +137,8 @@ test('an init by anyone but the owner records the default owner_config_dir, not 
 
 test('an orchestrator init leaves out what only the owner grants from the user file; the owner init copies it', (t) => {
   const h = makeRepo(t, { builtin: true });
-  const builtin = require('../docs/builtin-ladder.json');
+  // The defaults init falls back to, so the model swap probe swaps them too.
+  const builtin = require('../lib/ladder').BUILTIN;
   const as = (agent, extra = []) => h.run(['init', '--name', 'demo', '--goal', 'g', ...extra], { env: { TOWER_CRANE_AGENT: agent } });
   const write = (doc) => {
     fs.mkdirSync(path.dirname(h.userConfig), { recursive: true });
