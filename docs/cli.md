@@ -670,8 +670,9 @@ gate's own guards.
 The host's webhook or job integration can deliver CI completion with
 `ci webhook` or `ci completed`. Without one, the trusted `wait` watcher
 rechecks pending CI once a minute until it finishes or stalls: 30 minutes
-with nothing running or nothing started, or a check in progress past GitHub's
-6-hour job limit ([state](state.md)); no webhook listener is installed. The notification's conclusion is never evidence: the
+with nothing queued or running, a check queued past GitHub's 24-hour queue
+limit, or a check in progress past its 6-hour job limit ([state](state.md)).
+A stall only flags the inbox. No webhook listener is installed. The notification's conclusion is never evidence: the
 CI gate queries GitHub at the current submitted head. A pending or failing
 gate remains failing until an explicit retry or another completion. `gates
 retry ID` is the explicit retry for failed software gates: it reruns them at

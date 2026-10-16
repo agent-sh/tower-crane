@@ -215,6 +215,8 @@ test('a [P1]/[P2] revuto finding with no change at its path and no [resolved] re
     comment(11, { path: 'lib/x.js', body: '**[P1]** Quoted paths break.', original_commit_id: h.sha }),
     comment(12, { path: 'lib/y.js', line: 7, body: '**[P2]** Missing check.', original_commit_id: h.sha }),
     comment(13, { path: 'lib/y.js', line: 9, body: 'A nit.', original_commit_id: h.sha }),
+    // Review ok matches revuto's login exactly; a login that only contains the name is not revuto.
+    comment(15, { path: 'lib/y.js', line: 3, body: '**[P1]** Not revuto.', user: 'my-revuto-fan', original_commit_id: h.sha }),
   ];
   // Checks are still running: the refusal does not wait for them or for more findings.
   const data = { sha: head, ...PENDING, comments: findings };
@@ -223,12 +225,21 @@ test('a [P1]/[P2] revuto finding with no change at its path and no [resolved] re
   assert.equal(r.status, 1, r.stderr);
   assert.match(r.stderr, /revuto's finding \[P2\] lib\/y\.js:7 \(comment 12\) on PR #7 has no code change at its path since the comment and no \[resolved\] reply/);
   assert.match(r.stderr, /tower-crane ci resolve <comment id>/);
-  assert.doesNotMatch(r.stderr, /\(comment 11\)|\(comment 13\)/);
+  assert.doesNotMatch(r.stderr, /\(comment 11\)|\(comment 13\)|\(comment 15\)|Not revuto/);
   assert.equal(status(h), 'in_progress');
 
   const resolved = submit({ ...data, comments: [...findings, comment(14, { in_reply_to_id: 12, user: 'worker-T1', body: '[resolved]\nnot reachable here' })] });
   assert.equal(resolved.status, 0, resolved.stderr);
   assert.equal(status(h), 'submitted');
+});
+
+test('a [P1] finding left on a commit git cannot read refuses with the fetch or ci resolve hint', (t) => {
+  const h = fixture(t);
+  const r = submitPr(h, { ...PENDING, comments: [comment(21, { body: '**[P1]** Broken.', original_commit_id: 'f'.repeat(40) })] });
+  assert.equal(r.status, 1, r.stderr);
+  assert.match(r.stderr, /revuto's finding \[P1\] lib\/x\.js:12 \(comment 21\)/);
+  assert.match(r.stderr, /git could not read the commit that finding was left on \(comment 21 at ffffffffff\), so its path counts as unchanged\. Fetch the PR's earlier heads with git fetch origin, or close the finding with tower-crane ci resolve\./);
+  assert.equal(status(h), 'in_progress');
 });
 
 test('the ci gate redacts secrets in the log excerpt and prints no log for a skipped required check', (t) => {
