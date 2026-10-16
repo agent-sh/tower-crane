@@ -53,11 +53,27 @@ function roots() {
   return ROOTS;
 }
 
-const inside = (root, p) => {
-  if (typeof p !== 'string') return false;
-  const rel = path.relative(path.resolve(root), path.resolve(p));
+// The real path of p's nearest existing ancestor, with the rest appended: a
+// root may be a link (the model swap probe links a short root to the real
+// one), while fixtures and working directories are real paths.
+function canonical(p) {
+  const rest = [];
+  let dir = path.resolve(p);
+  for (;;) {
+    try { return path.join(fs.realpathSync.native(dir), ...rest.reverse()); } catch {}
+    const parent = path.dirname(dir);
+    if (parent === dir) return path.resolve(p);
+    rest.push(path.basename(dir));
+    dir = parent;
+  }
+}
+
+const within = (root, p) => {
+  const rel = path.relative(root, p);
   return rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel);
 };
+const inside = (root, p) => typeof p === 'string'
+  && (within(path.resolve(root), path.resolve(p)) || within(canonical(root), canonical(p)));
 
 const ownHits = [];
 function check(file) {
@@ -89,7 +105,7 @@ function assertNoUserConfigLeaks(base) {
   catch (e) { if (e.code === 'ENOENT') return; throw e; }
   // A line still being written has no newline yet; the next check reads it.
   const found = text.split('\n').slice(0, -1).map((line, i) => ({ i, hit: JSON.parse(line) }))
-    .filter(({ i, hit }) => !reported.has(i) && (!base || base === hit.cwd || inside(base, hit.cwd) || inside(base, hit.home)));
+    .filter(({ i, hit }) => !reported.has(i) && (!base || canonical(base) === canonical(hit.cwd) || inside(base, hit.cwd) || inside(base, hit.home)));
   for (const { i } of found) reported.add(i);
   if (found.length) throw new Error(found.map(({ hit }) => `${hit.message}\n(pid ${hit.pid}, cwd ${hit.cwd})\n${hit.stack}`).join('\n'));
 }

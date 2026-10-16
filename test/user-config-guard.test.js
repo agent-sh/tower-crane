@@ -22,6 +22,7 @@ const OUTSIDE_HOME = path.dirname(path.dirname(path.dirname(OUTSIDE)));
 // Runs a script with the guard preloaded and the given root as the only one.
 function guarded(t, script, env) {
   const root = fs.mkdtempSync(path.join(TMP_ROOT, 'user-config-guard-'));
+  t.after(() => fs.rmSync(`${root}-link`, { force: true }));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const inside = path.join(root, 'home', '.config', 'tower-crane', 'config.json');
   const r = cp.spawnSync(process.execPath, ['--require', GUARD, '-e', script], {
@@ -51,6 +52,12 @@ test('a ladder call that resolves the user file outside the test roots fails the
   for (const [name, env] of [
     ['an explicit file in the root', ({ inside }) => ({ TOWER_CRANE_CONFIG: inside })],
     ['the default file under a home in the root', () => ({})],
+    // The model swap probe's root is a link to the directory its fixtures report by real path.
+    ['a real path under a root given as a link', ({ root, inside }) => {
+      const link = `${root}-link`;
+      fs.symlinkSync(root, link, process.platform === 'win32' ? 'junction' : 'dir');
+      return { TC_USER_CONFIG_ROOTS: link, TOWER_CRANE_CONFIG: inside };
+    }],
   ]) {
     const r = guarded(t, swallowed('L.resolve({}, process.env)'), env);
     assert.equal(r.code, 0, `${name}: ${r.stderr}`);
