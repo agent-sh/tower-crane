@@ -406,21 +406,23 @@ test('stack sync refuses a worktree left in an operation that git status does no
   const patch = path.join(f.h.base, 'applied.mbox');
   fs.writeFileSync(patch, git('format-patch', '-1', '--stdout', 'HEAD').stdout);
   const operations = [
-    ['rebase', () => git('rebase', '--exec', 'false', 'HEAD~1'), ['rebase', '--abort']],
-    ['merge', () => git('merge', '--no-ff', '--no-commit', same()), ['merge', '--abort']],
     ['cherry-pick', () => git('cherry-pick', same()), ['cherry-pick', '--abort']],
     ['revert', () => git('revert', '--no-commit', same()), ['revert', '--abort']],
     ['am', () => git('am', patch), ['am', '--abort']],
     ['bisect', () => git('bisect', 'start', 'HEAD', 'HEAD~2'), ['bisect', 'reset']],
+    ['rebase', () => git('rebase', '--exec', 'false', 'HEAD~1'), ['rebase', '--abort']],
+    ['merge', () => git('merge', '--no-ff', '--no-commit', same()), ['merge', '--abort']],
   ];
   for (const [operation, start, abort] of operations) {
     start();
     assert.equal(f.h.git(['status', '--porcelain'], wt.path), '', operation);
-    const refused = f.h.run(['stack', 'sync', 'T2']).stderr;
-    assert.ok(refused.includes(`T2: worktree ${wt.path} has a ${operation} in progress`), `${operation}: ${refused}`);
+    const r = f.h.run(['stack', 'sync', 'T2']);
+    // Detection first: the sync is refused and names the operation.
+    assert.equal(f.read().calls.some((c) => c.args[1] === 'sync'), false, `${operation}: gh stack sync ran`);
+    assert.match(r.stderr, new RegExp(`\\ba ${operation} in progress\\b`), operation);
+    assert.ok(r.stderr.includes(`T2: worktree ${wt.path} has a ${operation} in progress; finish or abort it there`), r.stderr);
     assert.equal(git(...abort).status, 0, operation);
   }
-  assert.equal(f.read().calls.some((c) => c.args[1] === 'sync'), false);
 });
 
 // The refresh defers a stack whose member worktree is mid-rebase, and the
