@@ -1293,16 +1293,24 @@ test('a broker tells a shim from before framed packs why its push failed', async
   assert.equal(f.remoteRef(`refs/heads/${f.task.branch}`), null);
 });
 
-// The body takes less than one frame here, so the read that brings the
-// whole pack and its end frame asks the connection to wait for a drain that
-// an ended body never emits. The agent then hangs up while the broker's git
-// push waits in the remote's pre-receive hook: the broker must see it and
-// stop the push.
+// The read that brings the whole pack and its end frame finds the body
+// full, so it asks the connection to wait for a drain that an ended body
+// never emits. The agent then hangs up while the broker's git push waits in
+// the remote's pre-receive hook: the broker must see it and stop the push.
+// A body fills only when index-pack falls behind the socket, which depends
+// on the platform's pipe sizes and read boundaries, so the body the broker
+// makes for this push reports itself full on every write.
 test('a broker whose agent sent its whole pack in one read sees the agent hang up during the push', async (t) => {
   const f = await pushFixture(t);
   const stream = require('node:stream');
-  const hwm = stream.getDefaultHighWaterMark(false);
-  t.after(() => stream.setDefaultHighWaterMark(false, hwm));
+  const real = stream.PassThrough;
+  t.after(() => { stream.PassThrough = real; });
+  class Full extends real {
+    write(...args) {
+      super.write(...args);
+      return false;
+    }
+  }
   const lock = path.join(f.h.state, 'push', 'cache.lock');
   const started = path.join(f.h.base, 'hook-started');
   const release = path.join(f.h.base, 'hook-release');
@@ -1314,12 +1322,14 @@ test('a broker whose agent sent its whole pack in one read sees the agent hang u
   t.after(() => { try { fs.writeFileSync(release, ''); } catch {} });
   const sha = f.commit('a.txt', 'a\n');
   let sock = null;
-  // Applies to the body the broker makes when it reads the request line.
-  stream.setDefaultHighWaterMark(false, 1);
-  const done = handPush(f, sha, (have) => {
-    stream.setDefaultHighWaterMark(false, hwm);
-    return [Buffer.concat([B.frame(packOf(f, sha, have)), B.frame(Buffer.alloc(0))])];
-  }, { socket: (s) => { sock = s; } });
+  // Only the next PassThrough, the body the broker makes when it reads the
+  // request line.
+  stream.PassThrough = function PassThrough(...args) {
+    stream.PassThrough = real;
+    return new Full(...args);
+  };
+  const done = handPush(f, sha, (have) => [Buffer.concat([B.frame(packOf(f, sha, have)), B.frame(Buffer.alloc(0))])],
+    { socket: (s) => { sock = s; } });
   await waitUntil(() => fs.existsSync(started), { paths: [f.h.base], what: 'the broker\'s push reaches the remote\'s hook' });
   sock.destroy();
   await done;
