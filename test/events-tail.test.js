@@ -358,6 +358,14 @@ function tornCommit(h, first) {
   return { size, after: size + Buffer.byteLength(line) };
 }
 
+// Whether offset lies in the one recorded cut's range, where only cursors
+// taken before the cut move back.
+function inCut(h, offset) {
+  const { cuts } = require('../lib/event-reader').readCuts(path.join(h.state, 'events.jsonl'));
+  assert.equal(cuts.length, 1);
+  return cuts[0].size < offset && offset <= cuts[0].from;
+}
+
 // Longer than the torn bytes, so the log grows past where readers stopped.
 const LONG = `after the cut ${'x'.repeat(400)}`;
 
@@ -384,6 +392,67 @@ test('a wait cursor inside bytes recovery cut off reads the events appended sinc
   const r = h.run(['wait', '--agent', 'orchestrator', '--after', String(after), '--types', 'worker-message', '--timeout', '5']); // wait-allow: the event is already logged, so wait returns at once
   assert.equal(r.code, 0, r.stderr);
   assert.equal(JSON.parse(r.stdout).detail.text, LONG);
+});
+
+test('a wait re-armed with the cursor it returned after a cut times out, then wakes for the next event', (t) => {
+  const h = cutFixture();
+  t.after(h.cleanup);
+  const { after } = tornCommit(h, message('worker', 'orchestrator', 'torn first'));
+  // Shorter than the cut bytes, so the offset wait returns for it lies in the cut range.
+  h.ok(['msg', '--agent', 'worker', '--to', 'orchestrator', 'short']);
+  const wait = (cursor, timeout) => h.run(['wait', '--agent', 'orchestrator', '--after', String(cursor), '--types', 'worker-message', '--timeout', timeout]); // wait-allow: each event is logged before the wait starts, or the wait must reach its timeout
+  const first = JSON.parse(wait(after, '5').stdout);
+  assert.equal(first.detail.text, 'short');
+  assert.ok(inCut(h, first.offset), `offset ${first.offset} is inside the cut range`);
+  const again = wait(first.offset, '0.5');
+  assert.equal(again.code, 2, `the wait returned ${again.stdout}`);
+  h.ok(['msg', '--agent', 'worker', '--to', 'orchestrator', 'later']);
+  assert.equal(JSON.parse(wait(first.offset, '5').stdout).detail.text, 'later');
+});
+
+test('a holder killed after its cut and before recording it leaves the record to the next holder', (t) => {
+  const h = cutFixture();
+  t.after(h.cleanup);
+  const log = path.join(h.state, 'events.jsonl');
+  const reader = new EventReader(log);
+  reader.read();
+  const { size } = tornCommit(h, message('owner', 'orchestrator', 'torn first'));
+  assert.deepEqual(reader.read().rows.map((e) => e.detail.text), ['torn first']);
+  const r = h.run(['msg', '--to', 'orchestrator', 'never sent'], { hooks: { HOOK_DIE_RECORDING_CUT: '1' } });
+  assert.notEqual(r.code, 0, 'the holder was killed');
+  assert.equal(fs.statSync(log).size, size, 'the log was cut');
+  h.ok(['msg', '--to', 'orchestrator', LONG]);
+  const batch = reader.read();
+  assert.deepEqual(batch.rows.map((e) => e.detail.text), [LONG]);
+  assert.equal(batch.cut, size);
+});
+
+test('a torn cut record does not swallow the next one', (t) => {
+  const h = cutFixture();
+  t.after(h.cleanup);
+  const log = path.join(h.state, 'events.jsonl');
+  fs.writeFileSync(path.join(h.state, 'events.cuts.jsonl'), '{"at":"2026-10-16T00:00:00.000Z","si');
+  const reader = new EventReader(log);
+  reader.read();
+  const { size } = tornCommit(h, message('owner', 'orchestrator', 'torn first'));
+  reader.read();
+  h.ok(['msg', '--to', 'orchestrator', LONG]);
+  const batch = reader.read();
+  assert.deepEqual(batch.rows.map((e) => e.detail.text), [LONG]);
+  assert.equal(batch.cut, size);
+});
+
+test('a reader started from a cursor goes back for a cut recorded after the cursor was taken', (t) => {
+  const h = cutFixture();
+  t.after(h.cleanup);
+  const log = path.join(h.state, 'events.jsonl');
+  const { size, after } = tornCommit(h, message('owner', 'orchestrator', 'torn first'));
+  const cuts = require('../lib/event-reader').cutsSize(log);
+  h.ok(['msg', '--to', 'orchestrator', LONG]);
+  const reader = new EventReader(log, { after, cuts });
+  const batch = reader.read();
+  assert.deepEqual(batch.rows.map((e) => e.detail.text), [LONG]);
+  assert.equal(batch.cut, size);
 });
 
 test('served messages after a cursor inside bytes recovery cut off include the messages appended since', async (t) => {
@@ -416,6 +485,10 @@ test('served messages after a cursor inside bytes recovery cut off include the m
   assert.deepEqual(next.messages.map((m) => m.detail.text), ['short']);
   const all = await (await fetch(new URL('/api/messages?after=0', url))).json();
   assert.deepEqual(all.messages.map((m) => m.detail.text), ['before the cut', 'short'], 'the cut message is gone');
+  // The cursor handed out after the cut stays where it is.
+  assert.ok(inCut(h, next.cursor), `cursor ${next.cursor} is inside the cut range`);
+  const after = await (await fetch(new URL(`/api/messages?after=${next.cursor}`, url))).json();
+  assert.deepEqual(after.messages, []);
   // The page is woken for it too.
   await server.until(() => output.includes(next.messages[0].id));
 });

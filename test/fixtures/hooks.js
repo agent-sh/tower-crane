@@ -254,6 +254,13 @@ function before(name, args) {
     windowsSharing();
     throw Object.assign(new Error(`EPERM: operation not permitted, ${name === 'statSync' ? 'stat' : 'open'} '${target}'`), { code: 'EPERM' });
   }
+  // HOOK_DIE_RECORDING_CUT=1: a lock holder is killed as it opens
+  // events.cuts.jsonl, after recovery cut the log and before it recorded the cut.
+  if (env.HOOK_DIE_RECORDING_CUT && name === 'openSync' && inState(target) && path.basename(String(target)) === 'events.cuts.jsonl'
+    && args[1] === 'a+' && path.basename(process.argv[1]) === 'tower-crane.js' && ownsLock()) {
+    process.kill(process.pid, 'SIGKILL');
+    sleep(5000);
+  }
   // HOOK_FAIL_EVENT_SYNC=1: the first sync of events.jsonl fails with EIO
   // after its lines are written, as a failing disk reports it.
   if (env.HOOK_FAIL_EVENT_SYNC && name === 'fsyncSync' && path.resolve(String(target)) === path.join(STATE, 'events.jsonl') && first('event-sync')) {
