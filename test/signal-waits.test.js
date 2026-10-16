@@ -441,6 +441,11 @@ test('tests signal only checked pids, so a pid file read before it is written ca
     `const { kill: signal } = ${proc};`,
     `[pid].forEach(${kill});`,
     `fs.writeFileSync(hook, \`const forward = ${kill};\\nforward(Number(process.argv[2]));\`);`,
+    // Optional chaining reaches the same call.
+    `${proc}?.kill(Number(text));`,
+    `${kill}?.(Number(text), 'SIGKILL');`,
+    `${proc}?.kill?.(0);`,
+    `const signal = ${proc}?.kill;`,
   ]) {
     assert.equal(killFindings(source).length, 1, source);
   }
@@ -454,21 +459,57 @@ test('tests signal only checked pids, so a pid file read before it is written ca
     `fs.writeFileSync(script, \`run();\\nstop(); // ${kill}(-pid) would reach the group\\n\`);`,
     `${kill} = function interposed(pid, signal) { return true; };`,
     `test('the ${kill} interposers forward other pids', () => {});`,
+    // A comparison holds no alias.
+    `if (${kill} === original) return;`,
+    `if (original !== ${kill}) restore();`,
+    `assert.equal(${kill}, original);`,
+    `assert.notStrictEqual(original, ${kill}, 'restored');`,
+    `Object.is(${kill}, original);`,
+    // Quoted prose and another object's process are not calls.
+    `throw new Error('do not call ${kill}(0), which signals the group');`,
+    `log("never ${kill}(-pid) from a test");`,
+    `child.${kill}(pid);`,
   ]) {
     assert.deepEqual(killFindings(source), [], source);
   }
-  assert.deepEqual(killFindings(`const forward = ${kill};`, { aliases: false }), [], 'an interposer keeps the original to forward to');
 });
 
-test('only the named interposers may hold an alias of the signal call', (t) => {
+test('an interposer may hold process.kill only to forward its own pid and signal', () => {
+  // The lint scans this file too, so the sources it judges are assembled here.
+  const kill = ['process', 'kill'].join('.');
+  const proc = 'process';
+  const hold = `const kill = ${kill};\n${kill} = function probe(pid, signal) {\n  if (pid === 7 && signal === 0) return true;\n  return kill.call(this, pid, signal);\n};\n`;
+  const late = `const kill = ${kill};\n${kill} = function probe(pid, signal) {\n  queueMicrotask(() => { try { kill.call(process, pid, signal); } catch {} });\n};\n`;
+  assert.deepEqual(killFindings(hold, { interposer: true }), []);
+  assert.deepEqual(killFindings(late, { interposer: true }), []);
+  assert.deepEqual(killFindings(`fs.writeFileSync(hook, \`\n${hold}\`);`, { interposer: true }), [], 'a generated interposer');
+  assert.deepEqual(killFindings(hold).map((f) => f.line), [1], 'a file not named as an interposer may not hold one');
+  for (const [extra, line] of [
+    [`${proc}['kill'](0);`, 6],
+    [`kill.call(process, 0, 'SIGKILL');`, 6],
+    ['kill(Number(text));', 6],
+    ['[pid].forEach(kill);', 6],
+    [`${kill} = function again(pid, signal) {\n  return kill.call(this, 0, signal);\n};`, 7],
+  ]) {
+    assert.deepEqual(killFindings(hold + extra, { interposer: true }).map((f) => f.line), [line], extra);
+  }
+  const apart = `const kill = ${kill};\nconst read = fs.readFileSync;\n${kill} = function probe(pid, signal) {\n  return kill.call(this, pid, signal);\n};\n`;
+  assert.deepEqual(killFindings(apart, { interposer: true }).map((f) => f.line), [1],
+    'the replacement must follow the held original at once');
+});
+
+test('only the named interposers may hold an alias of the signal call, and only on its line', (t) => {
   const { base } = makeRepo(t);
-  const alias = `const forward = ${['process', 'kill'].join('.')};\n`;
+  const kill = ['process', 'kill'].join('.');
+  const alias = `const forward = ${kill};\n${kill} = function probe(pid, signal) {\n  return forward.call(this, pid, signal);\n};\n`;
   fs.mkdirSync(path.join(base, 'test', 'fixtures'), { recursive: true });
-  fs.writeFileSync(path.join(base, 'test', 'fixtures', 'hooks.js'), alias);
+  fs.writeFileSync(path.join(base, 'test', 'fixtures', 'hooks.js'), `${alias}${['process', "['kill']"].join('')}(0);\n`);
   fs.writeFileSync(path.join(base, 'test', 'fixtures', 'other.js'), alias);
   assert.throws(() => checkTestWaits(base), (error) => {
-    assert.match(error.message, /^test\/fixtures\/other\.js:1 `const forward = process\.kill;` aliases process\.kill/);
-    assert.doesNotMatch(error.message, /hooks\.js/);
+    const lines = error.message.split('\n');
+    assert.equal(lines.length, 2, error.message);
+    assert.match(lines[0], /^test\/fixtures\/hooks\.js:5 `process\['kill'\]\(0\);` aliases process\.kill/);
+    assert.match(lines[1], /^test\/fixtures\/other\.js:1 `const forward = process\.kill;` aliases process\.kill/);
     return true;
   });
 });

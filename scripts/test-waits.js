@@ -624,27 +624,49 @@ function waitFindings(text) {
 // other pid goes through killPid or killGroup in test/signals.js, which
 // refuse anything that is not a process id. An alias of process.kill
 // (`const kill = process.kill`, `process['kill']`, `process.kill.call`)
-// reaches the same call with a pid this check cannot see, so it counts too,
-// except in the fixtures that interpose on process.kill (KILL_INTERPOSERS).
+// reaches the same call with a pid this check cannot see, so it counts too.
 // Generated fixture scripts in strings and templates are checked too.
-const KILL_CALL = /\bprocess\.kill\s*\(/g;
+//
+// `child.process` is another object's member, not this process.
+const PROCESS = String.raw`(?<![\w$]|(?<!\bglobalThis\s*)\.\s*)process`;
+// Optional chaining reaches the same call: `process?.kill(0)`, `process.kill?.(0)`.
+const KILL_CALL = new RegExp(String.raw`${PROCESS}\s*\??\.\s*kill\s*(?:\?\.\s*)?\(`, 'g');
 const KILL_ALIASES = [
-  // A value assigned, passed or returned, as opposed to a call, the
-  // interposer's own assignment or prose that names process.kill.
-  /(?<=(?:[=(,:?[]|=>|&&|\|\||\breturn)\s*)process\s*\??\.\s*kill\b(?!\s*(?:\(|\?\.\s*\(|\.|=(?!=)))/g,
-  /\bprocess\s*\??\.\s*kill\s*\.\s*(?:call|apply|bind)\b/g,
-  /\bprocess\s*(?:\?\.\s*)?\[\s*(['"`])kill\1\s*\]/g,
+  // A value assigned, passed or returned, as opposed to a call, a member, a
+  // comparison, the interposer's own assignment or prose that names it.
+  new RegExp(String.raw`(?<=(?:(?<![=!<>])=|[(,:?[]|=>|&&|\|\||\breturn)\s*)${PROCESS}\s*\??\.\s*kill\b(?!\s*(?:\(|\?\.|\.|=|!=))`, 'g'),
+  new RegExp(String.raw`${PROCESS}\s*\??\.\s*kill\s*\??\.\s*(?:call|apply|bind)\b`, 'g'),
+  new RegExp(String.raw`${PROCESS}\s*(?:\?\.\s*)?\[\s*(['"\`])kill\1\s*\]`, 'g'),
   /\{[^{}]*\bkill\b[^{}]*\}\s*=\s*process\b(?!\s*[.[?])/g,
 ];
+// An argument of an assertion or Object.is is compared, not called.
+const COMPARED = /(?:\bassert(?:\s*\.\s*\w+)?|\bObject\s*\.\s*is)\s*\(\s*(?:[^(),;]*,\s*)?$/;
+// Inside a string, generated code starts a statement or an expression; prose
+// has a word or a quote before the name.
+const CODE_BEFORE = /(?:^|[;{}()[,=!&|]|=>|\\n|\$\{|\b(?:return|await|void|else|do|const|let|var))\s*$/;
+// A fixture that fakes a pid probe holds the original to forward every other
+// call: `const kill = process.kill;` and, as the next statement, the
+// replacement. Only that line may alias process.kill, and the alias may only
+// forward the replacement's own pid and signal from inside it.
+const INTERPOSER = /\b(?:const|let|var)\s+([$A-Z_a-z][$\w]*)\s*=\s*(process\s*\.\s*kill)\s*;\s*process\s*\.\s*kill\s*=\s*function\b[^(]*\(\s*([$A-Z_a-z][$\w]*)\s*,\s*([$A-Z_a-z][$\w]*)\s*\)\s*\{/dg;
 
-function killFindings(text, { aliases = true } = {}) {
+function blockEnd(text, open) {
+  let depth = 0;
+  for (let i = open; i < text.length; i++) {
+    if (text[i] === '{') depth++;
+    else if (text[i] === '}' && --depth === 0) return i;
+  }
+  return text.length;
+}
+
+function killFindings(text, { interposer = false } = {}) {
   const findings = [];
   const lines = text.replace(/\r\n/g, '\n').split('\n');
   const tokens = tokenize(text);
   const lineOf = (position) => text.slice(0, position).split('\n').length - 1;
-  // A comment in the code, or a `//` before the call on the same line of a
-  // generated script, holds prose about process.kill, not a call.
-  const commented = (position) => {
+  // A comment in the code, a `//` before the name on the same line of a
+  // generated script, or a quoted sentence holds prose about process.kill.
+  const prose = (position) => {
     const index = lineOf(position);
     if (/^\s*(?:\/\/|\*)/.test(lines[index])) return true;
     const token = tokens.find((t) => t.start <= position && position < t.end);
@@ -653,27 +675,51 @@ function killFindings(text, { aliases = true } = {}) {
     if (token.type !== 'string' && token.type !== 'template') return false;
     const from = Math.max(token.start + 1, text.lastIndexOf('\n', position - 1) + 1);
     const fragment = text.slice(from, position);
-    return tokenize(fragment).some((t) => t.type === 'comment' && t.end === fragment.length);
+    if (tokenize(fragment).some((t) => t.type === 'comment' && t.end === fragment.length)) return true;
+    return !CODE_BEFORE.test(fragment);
   };
+  const aliasing = (index) => `\`${lines[index].trim().slice(0, 80)}\` aliases process.kill, so the pids it receives are not checked`;
   for (const match of text.matchAll(KILL_CALL)) {
-    if (commented(match.index)) continue;
-    const pid = normalizedBudget(callArguments(text, match.index + match[0].lastIndexOf('('))[0] || '');
+    if (prose(match.index)) continue;
+    const pid = normalizedBudget(callArguments(text, match.index + match[0].length - 1)[0] || '');
     if (pid !== 'process.pid') findings.push({ line: lineOf(match.index) + 1, reason: `process.kill(${pid}) signals a pid that is not checked` });
   }
-  if (!aliases) return findings;
+  const interposers = interposer ? [...text.matchAll(INTERPOSER)].map((match) => ({
+    alias: match[1],
+    declared: match.indices[1][0],
+    original: match.indices[2][0],
+    params: [match[3], match[4]],
+    body: [match.index + match[0].length - 1, blockEnd(text, match.index + match[0].length - 1)],
+  })) : [];
+  const exempt = new Set(interposers.map((i) => i.original));
   for (const pattern of KILL_ALIASES) {
     for (const match of text.matchAll(pattern)) {
-      if (commented(match.index)) continue;
-      const index = lineOf(match.index);
-      findings.push({ line: index + 1, reason: `\`${lines[index].trim().slice(0, 80)}\` aliases process.kill, so the pids it receives are not checked` });
+      if (exempt.has(match.index) || prose(match.index)) continue;
+      const before = text.slice(Math.max(0, match.index - 200), match.index);
+      if (COMPARED.test(before) && /^\s*[,)]/.test(text.slice(match.index + match[0].length))) continue;
+      findings.push({ line: lineOf(match.index) + 1, reason: aliasing(lineOf(match.index)) });
+    }
+  }
+  // The held original is process.kill under another name: any use but the
+  // interposer forwarding its own arguments signals a pid nothing checked.
+  for (const alias of new Set(interposers.map((i) => i.alias))) {
+    const own = interposers.filter((i) => i.alias === alias);
+    const name = alias.replace(/\$/g, '\\$');
+    for (const use of text.matchAll(new RegExp(String.raw`(?<![\w$.'"\`])${name}(?![\w$'"\`])(?!\s*:(?!:))`, 'g'))) {
+      if (own.some((i) => i.declared === use.index) || prose(use.index)) continue;
+      const forwards = own.some((i) => i.body[0] < use.index && use.index < i.body[1]
+        && new RegExp(String.raw`^${name}\s*\.\s*call\s*\(\s*(?:this|process)\s*,\s*${i.params[0]}\s*,\s*${i.params[1]}\s*\)`).test(text.slice(use.index)));
+      if (forwards) continue;
+      const index = lineOf(use.index);
+      findings.push({ line: index + 1, reason: `\`${lines[index].trim().slice(0, 80)}\` uses ${alias}, the held process.kill, outside its interposer, so the pids it receives are not checked` });
     }
   }
   return findings.sort((a, b) => a.line - b.line);
 }
 
 // These replace process.kill to fake what a pid probe observes or when a signal
-// lands, and forward every other call to the original, which they must hold as
-// an alias.
+// lands, and forward every other call to the original. Only their interposer
+// declarations may alias it; see INTERPOSER.
 const KILL_INTERPOSERS = new Set(['test/fixtures/hooks.js', 'test/fixtures/monitor-clock.js', 'test/fixtures/slow-group-kill.js', 'test/spawn-resume.test.js']);
 
 function checkTestWaits(root) {
@@ -689,7 +735,7 @@ function checkTestWaits(root) {
     }
     // The checked helpers themselves are the one place a bare call belongs.
     if (file === 'test/signals.js') continue;
-    for (const finding of killFindings(text, { aliases: !KILL_INTERPOSERS.has(file) })) {
+    for (const finding of killFindings(text, { interposer: KILL_INTERPOSERS.has(file) })) {
       findings.push(`${file}:${finding.line} ${finding.reason}; use killPid or killGroup from test/signals.js`);
     }
   }
