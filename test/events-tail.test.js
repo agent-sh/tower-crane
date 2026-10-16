@@ -8,7 +8,7 @@ const cp = require('node:child_process');
 const { EventEmitter, once } = require('node:events');
 const { cachedFixture, useFixtureUserFile, HOOKS, BIN } = require('./helpers');
 const { HUNG_TEST_MS } = require('./signals');
-const { EventReader, cutsSize, readCuts } = require('../lib/event-reader');
+const { EventReader, cutsSize, readCuts, cutBack } = require('../lib/event-reader');
 const S = require('../lib/state');
 const T = require('../lib/tasks');
 const hooksPath = HOOKS.replace(/\\/g, '/');
@@ -594,4 +594,29 @@ test('a cut an older tool finished recovering is recorded late, and only a reade
   assert.deepEqual(read.rows.map((e) => e.detail.text), ['after the older tool']);
   assert.equal(read.cut, undefined);
   assert.deepEqual(fs.readdirSync(h.state).filter((name) => name.startsWith('cut.')), []);
+});
+
+test('a cut recorded while a reader reads the log after it is in the cursor the reader hands out', (t) => {
+  const h = cutFixture();
+  t.after(h.cleanup);
+  const log = path.join(h.state, 'events.jsonl');
+  const first = message('worker', 'orchestrator', 'torn first');
+  const reader = new EventReader(log);
+  reader.read();
+  tornCommit(h, first);
+  // Recovery cuts the torn append and the next line lands after the
+  // reader checked the cuts file and before it reads the log.
+  const readSync = fs.readSync;
+  let id;
+  fs.readSync = function (...args) {
+    fs.readSync = readSync;
+    recover(h);
+    id = sameEnd(h, first);
+    return readSync.apply(this, args);
+  };
+  t.after(() => { fs.readSync = readSync; });
+  const batch = reader.read();
+  assert.deepEqual(batch.rows.map((e) => e.id), [id]);
+  assert.equal(reader.cuts, cutsSize(log));
+  assert.equal(cutBack(log, batch.offset, reader.cuts), batch.offset, 'the cursor does not move back over the event it was handed out after');
 });
