@@ -294,12 +294,12 @@ test('a holder without start ticks, past one command budget but inside its plann
   let stderr = '';
   let child;
   const joiner = h.runAsync(['check', 'tests', 'T1', '--json'], { onSpawn: (c) => { child = c; c.stderr.on('data', (d) => { stderr += d; }); } });
-  await waitUntil(() => /joining the tests run/.test(stderr), { alive: child, what: () => `the joiner reports joining: ${stderr}` });
+  await waitUntil(() => /joining the tests run.*\n/.test(stderr), { alive: child, what: () => `the joiner reports joining: ${stderr}` });
   // The wait can last hours, so the joiner says until when.
   const ends = new Date(at + span).toISOString();
-  await waitUntil(() => stderr.includes(`it cannot be observed, so it counts as ended at its deadline ${ends}, in `), { alive: child, what: () => `the joiner names the deadline: ${stderr}` });
-  assert.match(stderr, /in (\d+) min/);
-  const minutes = Number(/, in (\d+) min/.exec(stderr)[1]);
+  const note = /joining the tests run.*/.exec(stderr)[0];
+  assert.ok(note.includes(`it cannot be observed, so it counts as ended at its deadline ${ends}, in `), note);
+  const minutes = Number(/, in (\d+) min$/.exec(note)[1]);
   assert.ok(Math.abs(minutes - (span - 2 * MINUTES * 60000) / 60000) <= 1, `${minutes} min until the deadline`);
   append({ ...first, at: new Date().toISOString(), detail: { type: 'tests', sha: first.detail.sha, revision: first.detail.revision, source: 'gate:mac', phase: 'done', evidence_at: evidence.at } });
   const r = await joiner;
