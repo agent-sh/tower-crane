@@ -7,6 +7,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
+const crypto = require('node:crypto');
 const { EventEmitter, once } = require('node:events');
 const { pathToFileURL } = require('node:url');
 const { makeRepo, stubRungs, BIN, ROOT } = require('./helpers');
@@ -113,6 +114,45 @@ test('wait --follow streams id-only lines and event prints the content', async (
   assert.equal(shown.detail.text, 'private worker text');
   assert.equal(h.run(['event', 'Enope', '--agent', 'orchestrator']).code, 2);
 });
+
+// Recovery cuts a crashed commit's lines off the log: its torn last line, or
+// whole lines too. The next commit can append exactly as many bytes, so the
+// log keeps its size and inode. A follower that read the cut lines still
+// delivers that commit's event.
+for (const cut of ['a torn line', 'a whole line and a torn line']) {
+  test(`a follower delivers an event appended after recovery cuts ${cut} it read, at the same size`, async (t) => {
+    const h = setup(t);
+    const file = path.join(h.state, 'events.jsonl');
+    const p = cp.spawn(process.execPath, [BIN, 'wait', '--observe', '--follow', '--agent', 'orchestrator'], { cwd: h.repo, env: h.env });
+    t.after(() => p.kill());
+    let out = '';
+    p.stdout.on('data', (d) => { out += d; });
+    const ids = () => out.split('\n').filter(Boolean).map((line) => JSON.parse(line).id).filter(Boolean);
+    await readyLine(p);
+    const note = (text) => ({ at: new Date().toISOString(), agent: 'owner', cmd: 'task note', task: 'T1', detail: { text }, id: `E${crypto.randomUUID()}`, type: 'owner-comment', to: 'orchestrator' });
+    const line = (e) => `${JSON.stringify(e)}\n`;
+    const base = size(h);
+    const crashed = note('crashed commit');
+    fs.appendFileSync(file, line(crashed) + JSON.stringify(note('t'.repeat(400))).slice(0, 300));
+    await waitOnRepo(h, () => ids().includes(crashed.id), 'the crashed commit\'s whole line');
+    const from = cut === 'a torn line' ? base + Buffer.byteLength(line(crashed)) : base;
+    const end = size(h);
+    const next = note('');
+    next.detail.text = 'n'.repeat(end - from - Buffer.byteLength(line(next)));
+    const fd = fs.openSync(file, 'r+');
+    try {
+      fs.ftruncateSync(fd, from);
+      fs.writeSync(fd, line(next), from);
+    } finally {
+      fs.closeSync(fd);
+    }
+    assert.equal(size(h), end, 'the log kept its size');
+    const later = note('later');
+    fs.appendFileSync(file, line(later));
+    await waitOnRepo(h, () => ids().includes(later.id), 'the event after the cut commit');
+    assert.deepEqual(ids(), [crashed.id, next.id, later.id]);
+  });
+}
 
 // The Claude Code mod arms its follower at now on session start. A cold
 // discovery takes seconds; what is written meanwhile must still arrive.
