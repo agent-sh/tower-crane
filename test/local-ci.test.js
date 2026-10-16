@@ -664,6 +664,217 @@ test('restoring redaction markers is linear in their count', () => {
   assert.equal(redact.bytes(binary).body, binary);
 });
 
+test('a token prefix before 16 MiB of token characters is redacted whole in linear work', () => {
+  const { createRedactor } = require('../lib/gates/common');
+  const redact = createRedactor([['FIXTURE_TOKEN', `ghp_${'d4'.repeat(18)}`]]);
+  const size = 16 << 20;
+  // The token shapes ran as backtracking regular expressions, which threw a RangeError (maximum
+  // call stack size exceeded) from about 8 MiB of run: the gate crashed instead of redacting. The
+  // NUL byte sends the text through the control cleanup's token search too.
+  const cases = [
+    [`ghp_${'aB3'.repeat(size / 3)}`, '[redacted:GITHUB_TOKEN]'],
+    [`sk-${'ab-'.repeat(size / 3)}z`, '[redacted:API_KEY]'],
+    [`Authorization: Bearer ${'Zy9'.repeat(size / 3)}`, 'Authorization: Bearer [redacted:AUTHORIZATION]'],
+    [`ghp_${'aB3'.repeat(size / 3)}_tail`, '[redacted:GITHUB_TOKEN]_tail'],
+  ];
+  // Counting character reads shows the scans read each character a bounded number of times,
+  // without timing them.
+  const charCodeAt = String.prototype.charCodeAt;
+  let reads = 0;
+  String.prototype.charCodeAt = function (i) {
+    reads++;
+    return charCodeAt.call(this, i);
+  };
+  try {
+    for (const [token, expected] of cases) {
+      const input = `\x00pre ${token} post`;
+      reads = 0;
+      assert.equal(redact(redact.strip(input)), `pre ${expected} post`, token.slice(0, 24));
+      const out = redact.bytes(Buffer.from(input, 'latin1'));
+      assert.equal(out.missed, undefined, token.slice(0, 24));
+      assert.equal(out.body.toString('latin1'), `\x00pre ${expected} post`, token.slice(0, 24));
+      assert.ok(reads <= 16 * input.length, `${reads} character reads for ${input.length} characters`);
+    }
+  } finally {
+    String.prototype.charCodeAt = charCodeAt;
+  }
+});
+
+test('a token run glued to more word characters is redacted whole, and the word after it stays', () => {
+  const { createRedactor } = require('../lib/gates/common');
+  const redact = createRedactor([]);
+  const github = `ghp_${'d4'.repeat(18)}`;
+  const aws = `AKIA${'E5'.repeat(8)}`;
+  const slack = `xoxb-1234567890-1234567890-${'AbCd'.repeat(6)}`;
+  // Without a word boundary after the run, the shapes skipped these and left the whole secret, or,
+  // for the Slack token, stopped at its last dash and left the secret part.
+  for (const [input, expected] of [
+    [`${github}_suffix`, '[redacted:GITHUB_TOKEN]_suffix'],
+    [`${github}_${github}`, '[redacted:GITHUB_TOKEN]_ghp_d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4'],
+    [`${aws}abc`, '[redacted:AWS_ACCESS_KEY_ID]abc'],
+    // An AWS key id is 20 characters, so a longer run keeps its tail.
+    [`${aws}XYZ`, '[redacted:AWS_ACCESS_KEY_ID]XYZ'],
+    [`${aws}_2`, '[redacted:AWS_ACCESS_KEY_ID]_2'],
+    [`${slack}_x`, '[redacted:SLACK_TOKEN]_x'],
+    [`xoxb-${'ab'.repeat(5)}_x`, '[redacted:SLACK_TOKEN]_x'],
+    // Shorter than the shape's minimum, a glued run is not a token.
+    [`ghp_${'a'.repeat(19)}_x`, `ghp_${'a'.repeat(19)}_x`],
+  ]) {
+    assert.equal(redact(`key=${input} end`), `key=${expected} end`, input);
+    const out = redact.bytes(Buffer.from(`\x00key=${input} end`, 'latin1'));
+    assert.equal(out.missed, undefined, input);
+    assert.equal(out.body.toString('latin1'), `\x00key=${expected} end`, input);
+  }
+  // A control inside a glued run goes, so the token is redacted whole; one at the token's end stays
+  // a boundary. Without that, `ghp_ABCD\rEFGH..._x` became two lines that no shape matches. The
+  // bytes cannot be redacted in place there, so the binary file is missed.
+  // binary is the redacted file, or null when it is missed.
+  for (const [input, expected, binary] of [
+    [`ghp_${'a'.repeat(10)}\r${'b'.repeat(26)}_suffix`, '[redacted:GITHUB_TOKEN]_suffix', null],
+    [`ghp_ABCD\rEFGH${'c'.repeat(32)}_x`, '[redacted:GITHUB_TOKEN]_x', null],
+    [`ghp_ABCD\x00EFGH${'c'.repeat(32)}_x`, '[redacted:GITHUB_TOKEN]_x', null],
+    [`${slack.slice(0, 20)}\r${slack.slice(20)}_x`, '[redacted:SLACK_TOKEN]_x', null],
+    [`${aws.slice(0, 8)}\r${aws.slice(8)}XYZ`, '[redacted:AWS_ACCESS_KEY_ID]XYZ', null],
+    [`${github}\x00_x`, '[redacted:GITHUB_TOKEN] _x', '[redacted:GITHUB_TOKEN]\x00_x'],
+    [`${aws}\rDONE`, '[redacted:AWS_ACCESS_KEY_ID]\nDONE', '[redacted:AWS_ACCESS_KEY_ID]\rDONE'],
+    [`${aws}\x00DONE`, '[redacted:AWS_ACCESS_KEY_ID] DONE', '[redacted:AWS_ACCESS_KEY_ID]\x00DONE'],
+  ]) {
+    assert.equal(redact(redact.strip(`key=${input} end`)), `key=${expected} end`, JSON.stringify(input));
+    const out = redact.bytes(Buffer.from(`\x00key=${input} end`, 'latin1'));
+    if (binary === null) assert.match(out.missed || '', /^a secret as /, JSON.stringify(input));
+    else assert.equal(out.body?.toString('latin1'), `\x00key=${binary} end`, JSON.stringify(input));
+  }
+});
+
+// The old token expressions, safe on short inputs, as the reference for the scans.
+const OLD_SHAPES = [
+  ['\\bgh[pousr]_', 'A-Za-z0-9', 20, Infinity, ''],
+  ['\\bgithub_pat_', 'A-Za-z0-9_', 20, Infinity, ''],
+  ['\\bsk-', 'A-Za-z0-9_-', 8, Infinity, 'i'],
+  ['\\b(?:AKIA|ASIA)', '0-9A-Z', 16, 16, ''],
+  ['\\bxox[a-z]-', 'A-Za-z0-9-', 10, Infinity, 'i'],
+].map(([lead, body, min, max, flags]) => ({
+  old: new RegExp(`${lead}[${body}]{${min},${max === Infinity ? '' : max}}\\b`, `g${flags}`),
+  run: new RegExp(`^${lead}[${body}]{${min},}$`, flags),
+}));
+const OLD_HEADER = /(\bauthorization:\s*(?:(?:bearer|basic|token)\s+)?)\S+/gi;
+// A seeded generator (mulberry32), so a failure names an input that reproduces.
+const seeded = (seed) => (n) => {
+  seed = (seed + 0x6d2b79f5) | 0;
+  let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+  t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+  return ((t ^ (t >>> 14)) >>> 0) % n;
+};
+const wide = [0xe9, 0x17f, 0xa0, 0x2003, 0x3000, 0xfeff, 0x2028, 0x85].map((c) => String.fromCharCode(c));
+const TOKEN_PIECES = ['ghp_', 'gho_', 'ghs_', 'ghu_', 'ghr_', 'ghx_', 'GHP_', 'github_pat_', 'github_pat_11ABC_',
+  'sk-', 'SK-', 'Sk-', 'sk-proj-', 'sk-ant-api03-', 'AKIA', 'ASIA', 'akia', 'ASIAPACIFIC', 'xoxb-', 'xoxa-', 'xoxp-',
+  'xoxr-', 'XoXs-', 'XOXP-', 'xox-', 'authorization:', 'Authorization: ', 'AUTHORIZATION:', 'Authorization:\t',
+  'Bearer ', 'BEARER\t', 'bearer', 'Basic ', 'Token ', 'token\t', 'a', 'B', '7', 'Z', '_', '-', ' ', '\n', '.', ':',
+  '=', '"', '/', 'IOSFODNN', 'EXAMPLE7', 'AKIAIOSFODNN7EXAMPLE', 'ASIAQWERTYUIOP123456', 'aaaaaaaa',
+  'A1B2C3D4E5F6G7H8', 'xyz0123456789', 'a-a-a-a-', 'Q_q_Q_', ...wide];
+
+test('token shapes find every token the old regular expressions found', () => {
+  // Strict scans find exactly the old matches. The default scans find each of them again, ending
+  // where it ended unless the run is glued to a word character, and find more only for a glued run.
+  const { TOKEN_SHAPES } = require('../lib/ci-log-text');
+  const next = seeded(1);
+  let glued = 0;
+  for (let k = 0; k < 20000; k++) {
+    let text = '';
+    for (let i = 1 + next(14); i > 0; i--) text += TOKEN_PIECES[next(TOKEN_PIECES.length)];
+    OLD_SHAPES.forEach(({ old, run }, i) => {
+      const found = TOKEN_SHAPES[i].find(text);
+      const isGlued = ([at, , end]) => run.test(text.slice(at, end)) && /\w/.test(text[end] ?? '');
+      const before = [...text.matchAll(old)].map((m) => [m.index, m.index, m.index + m[0].length]);
+      assert.deepEqual(TOKEN_SHAPES[i].find(text, 'strict'), before, `${JSON.stringify(text)} shape ${i}`);
+      for (const [at, , end] of before) {
+        const now = found.find(([a]) => a === at);
+        assert.ok(now && (now[2] === end || (now[2] > end && isGlued(now))), `${JSON.stringify(text)} shape ${i}`);
+      }
+      for (const match of found) {
+        if (before.some(([a, , b]) => a === match[0] && b === match[2])) continue;
+        assert.ok(isGlued(match), `${JSON.stringify(text)} shape ${i} ${match}`);
+        glued++;
+      }
+    });
+    const auth = [...text.matchAll(OLD_HEADER)].map((m) => [m.index, m.index + m[1].length, m.index + m[0].length]);
+    assert.deepEqual(TOKEN_SHAPES[5].find(text, 'strict'), auth, JSON.stringify(text));
+  }
+  assert.ok(glued > 0, 'no glued run was generated');
+});
+
+test('every shape is found in the same text, and a control before a token keeps it apart', () => {
+  const { createRedactor } = require('../lib/gates/common');
+  const redact = createRedactor([]);
+  const key = 'AKIAIOSFODNN7EXAMPLE';
+  // binary is the redacted file, or null when it is missed.
+  for (const [input, expected, binary] of [
+    // Replaced one shape at a time, the API key's replacement took the header word, and the header's
+    // value stayed.
+    ['sk-authorization: s3cr3tvalue', '[redacted:API_KEY]: [redacted:AUTHORIZATION]', '[redacted:API_KEY]: [redacted:AUTHORIZATION]'],
+    [`AUTHORIZATION:${key}xoxp-AUTHORIZATION:xoxp-Token`, 'AUTHORIZATION:[redacted:AUTHORIZATION]', 'AUTHORIZATION:[redacted:AUTHORIZATION]'],
+    // A header right after a glued AWS key, and a header as another header's value.
+    [`${key}AUTHORIZATION: Bearer s3cr3tvalue`, '[redacted:AWS_ACCESS_KEY_ID]AUTHORIZATION: Bearer [redacted:AUTHORIZATION]', '[redacted:AWS_ACCESS_KEY_ID]AUTHORIZATION: Bearer [redacted:AUTHORIZATION]'],
+    ['Authorization: Authorization: s3cr3tvalue', 'Authorization: [redacted:AUTHORIZATION] [redacted:AUTHORIZATION]', 'Authorization: [redacted:AUTHORIZATION] [redacted:AUTHORIZATION]'],
+    // Joined across the carriage return, the AWS shape took the header, or a Slack run hid the key
+    // after it.
+    ['Region ASIAPACIFIC\rAUTHORIZATION: Bearer s3cr3tvalue', 'Region ASIAPACIFIC\nAUTHORIZATION: Bearer [redacted:AUTHORIZATION]', null],
+    [`xoxb-ASIAQWERTYUIOP123456a\r${key}_x`, '[redacted:SLACK_TOKEN]\n[redacted:AWS_ACCESS_KEY_ID]_x', null],
+  ]) {
+    assert.equal(redact(redact.strip(`key=${input} end`)), `key=${expected} end`, JSON.stringify(input));
+    const out = redact.bytes(Buffer.from(`\x00key=${input} end`, 'latin1'));
+    if (binary === null) assert.match(out.missed || '', /^a secret as /, JSON.stringify(input));
+    else assert.equal(out.body?.toString('latin1'), `\x00key=${binary} end`, JSON.stringify(input));
+  }
+});
+
+test('no token the old expressions find in any reading of the input survives redaction', () => {
+  // Random lines of token prefixes, headers, word pieces, escapes and controls. Every token or
+  // header value of 8 or more characters that the old expressions find in the text with its
+  // escapes removed and its controls removed, made newlines or made spaces, or in the cleaned text,
+  // must be gone from the redacted text: it may show there only as often as some reading has it
+  // outside the tokens found, since the same characters can be a token in one reading and plain
+  // text in another. A header word given as another header's value is a header, also when an escape
+  // took its first letter (`\x1bAUTHORIZATION:`).
+  // A binary copy must hold none found in its bytes.
+  const { createRedactor } = require('../lib/gates/common');
+  const redact = createRedactor([]);
+  const pieces = [...TOKEN_PIECES, '\r', '\v', '\f', '\x00', '\x7f', '\x08', '\x1b', '\x1b[31m', '\x1b[0m', '\x9b'];
+  const escapes = /(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]|\x1b[ -/]*[0-~]/g;
+  const controls = /[\x00-\x08\x0b-\x1f\x7f-\x9f]/g;
+  // Each secret found once per position, as `position:secret`.
+  const secrets = (view) => {
+    const out = OLD_SHAPES.flatMap(({ old }) => [...view.matchAll(old)].map((m) => `${m.index}:${m[0]}`));
+    for (const m of view.matchAll(OLD_HEADER)) {
+      const value = m[0].slice(m[1].length);
+      if (!'authorization:'.endsWith(value.toLowerCase())) out.push(`${m.index + m[1].length}:${value}`);
+    }
+    return [...new Set(out)].map((s) => s.slice(s.indexOf(':') + 1)).filter((s) => s.length >= 8);
+  };
+  const count = (text, part) => text.split(part).length - 1;
+  const gone = (views, out, what) => {
+    const found = views.map(secrets);
+    for (const secret of new Set(found.flat())) {
+      const kept = Math.max(...views.map((view, i) => count(view, secret) - found[i].filter((s) => s === secret).length));
+      assert.ok(count(out, secret) <= kept, `${what} ${JSON.stringify(secret)}`);
+    }
+  };
+  const next = seeded(7);
+  for (let k = 0; k < 20000; k++) {
+    let text = '';
+    for (let i = 1 + next(20); i > 0; i--) text += pieces[next(pieces.length)];
+    const cleaned = redact.strip(text);
+    const out = redact(cleaned);
+    const bare = text.replace(escapes, '');
+    gone([cleaned, bare.replace(controls, ''), bare.replace(controls, '\n'), bare.replace(controls, ' ')], out, `${JSON.stringify(text)} kept`);
+    const bytes = Buffer.from(text, 'latin1');
+    const copy = redact.bytes(bytes);
+    if (copy.missed) continue;
+    const raw = bytes.toString('latin1');
+    gone([raw], copy.body.toString('latin1'), `${JSON.stringify(text)} copied`);
+  }
+});
+
 test('a passing local CI keeps its log without a tail or artifacts', (t) => {
   const h = fixture(t);
   h.ok(['project', 'set', '--ci-local', JSON.stringify({ command: h.command, timeout: 5, artifacts: ['*.js'] })]);
