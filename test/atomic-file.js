@@ -65,7 +65,9 @@ function readPublished(file, options, impl = fs) {
 // gh stub's state, loses a change when one process writes a copy it read
 // before another process's write. updateJson runs fn on the current value
 // under an exclusive lock file and publishes its result with writeAtomic.
-// fn must not start a process that updates the same file.
+// fn must not start a process that updates the same file. A file that a
+// fixture creates on its first write passes `missing`, the value fn gets
+// while the file does not exist yet.
 const LOCK_WAIT_MS = 30000;
 
 function alive(pid) {
@@ -137,10 +139,16 @@ function lock(file) {
   }
 }
 
-function updateJson(file, fn) {
+function updateJson(file, fn, missing) {
   const release = lock(file);
   try {
-    const value = fn(JSON.parse(readPublished(file, 'utf8')));
+    let current;
+    try { current = JSON.parse(readPublished(file, 'utf8')); }
+    catch (error) {
+      if (error.code !== 'ENOENT' || missing === undefined) throw error;
+      current = structuredClone(missing);
+    }
+    const value = fn(current);
     writeAtomic(file, JSON.stringify(value));
     return value;
   } finally {

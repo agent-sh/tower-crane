@@ -674,8 +674,37 @@ test('a spawned replacement can claim after another worker lease expires', async
   assert.equal(h.readState('tasks.json').tasks[0].claim.agent, spawned.agent);
   assert.deepEqual(h.json(['status']).exited_claims, []);
   spawned.kill();
-  await waitOnRepo(h, () => (h.json(['status']).exited_claims || []).length === 1, 'replacement exit was not reported');
+  // Until the supervisor records the attempt inactive, only a pid probe tells
+  // the exit, and Windows can hand that pid to another process between views.
+  const ended = () => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse)
+    .some((e) => e.cmd === 'spawn phase' && e.detail.active === false && e.detail.agent === spawned.agent);
+  await waitOnRepo(h, () => ended() && (h.json(['status']).exited_claims || []).length === 1, 'replacement exit was not reported');
   assert.equal(h.json(['ready']).exited_claims[0].pid, spawned.pid);
+});
+
+test('an attempt the supervisor recorded inactive stays exited when its pid is live again', async (t) => {
+  const h = setup(t);
+  const agent = 'worker-T1-1';
+  h.ok(['claim', 'T1', '--agent', agent]);
+  // A process without a recorded start time at the spawn's pid, as Windows
+  // records spawns, stands for the pid reused after the harness exited.
+  const reused = cp.spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' }); // wait-allow: the stand-in lives until the test stops it
+  t.after(() => reused.kill('SIGKILL'));
+  const record = (cmd, detail) => fs.appendFileSync(path.join(h.state, 'events.jsonl'), `${JSON.stringify({
+    at: new Date().toISOString(), agent: 'orchestrator', cmd, task: 'T1',
+    detail: { role: 'worker', agent, pid: reused.pid, host: require('node:os').hostname(), attempt: 1, log: null, ...detail },
+  })}\n`);
+  record('spawn', {});
+  const views = () => [['status'], ['ready'], ['ready', '--all']].map((args) => h.json(args).exited_claims.map((c) => c.pid));
+  assert.deepEqual(views(), [[], [], []], 'a live pid reads as a running harness');
+  // A queued retry is still the supervisor's attempt, not an exit.
+  record('spawn phase', { phase: 'retrying', active: true, retry: 1 });
+  assert.deepEqual(views(), [[], [], []]);
+  // Another attempt's record proves nothing about this one.
+  record('spawn phase', { phase: 'waiting', active: false, retry: 1, attempt: 2 });
+  assert.deepEqual(views(), [[], [], []]);
+  record('spawn phase', { phase: 'waiting', active: false, retry: 1 });
+  assert.deepEqual(views(), [[reused.pid], [reused.pid], [reused.pid]]);
 });
 
 // Without its state no exit can be recorded and no reaction can follow, so the

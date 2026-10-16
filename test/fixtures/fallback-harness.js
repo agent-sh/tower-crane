@@ -3,7 +3,7 @@
 const cp = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
-const { writeAtomic, readPublished } = require('../atomic-file');
+const { writeAtomic, readPublished, updateJson } = require('../atomic-file');
 
 // Each harness's own record for an expired login, in the shape its CLI prints.
 function authRecord(harness, message) {
@@ -117,6 +117,7 @@ if (path.resolve(process.argv[1] || '') !== __filename) {
   // A login flag file stands for a completed re-login: the primary route then works, unless the login is broken despite it.
   // Read before the attempt is recorded: a test removes the flag as soon as it sees the attempt.
   const relogged = Boolean(process.env.TOWER_CRANE_TEST_LOGIN_FLAG) && fs.existsSync(process.env.TOWER_CRANE_TEST_LOGIN_FLAG);
+  // The first attempt claims the task. The record is built from CLI calls outside the lock and appended under it.
   let attempts;
   try {
     attempts = JSON.parse(readPublished(file, 'utf8'));
@@ -144,7 +145,7 @@ if (path.resolve(process.argv[1] || '') !== __filename) {
     sandbox: JSON.parse(fs.readFileSync(path.join(claudeHome, 'settings.json'), 'utf8')).sandbox,
     policy: JSON.parse(fs.readFileSync(path.join(claudeHome, 'policy.json'), 'utf8')),
   } : {};
-  attempts.push({
+  const attempt = {
     harness, model, args, session: process.env.TOWER_CRANE_SESSION, retry: process.env.TOWER_CRANE_RETRY,
     agent: process.env.TOWER_CRANE_AGENT, claim,
     env: process.env.ROUTE_ENV || null, broker: Boolean(process.env.TOWER_CRANE_BROKER),
@@ -155,9 +156,9 @@ if (path.resolve(process.argv[1] || '') !== __filename) {
       'CLAUDE_CODE_USE_ANTHROPIC_AWS', 'CLAUDE_CODE_USE_GATEWAY', 'CLAUDE_CODE_USE_MANTLE',
       'ANTHROPIC_MODEL', 'AWS_PROFILE', 'AWS_REGION', 'AWS_CONFIG_FILE', 'AWS_SHARED_CREDENTIALS_FILE',
     ].map((key) => [key, providerEnv[key] || null])) } : {}),
-  });
+  };
   if (process.env.TOWER_CRANE_TEST_FALLBACK_NOTE) cli(['task', 'note', process.env.TOWER_CRANE_TASK, `${harness} ${model} ${process.env.TOWER_CRANE_RETRY}`]);
-  writeAtomic(file, JSON.stringify(attempts));
+  updateJson(file, (list) => [...list, attempt], []);
   // Edits a file while the primary runs, after dispatch read it.
   if (model === 'first' && process.env.TOWER_CRANE_TEST_FALLBACK_TOUCH) fs.appendFileSync(process.env.TOWER_CRANE_TEST_FALLBACK_TOUCH, 'CHANGED_AFTER_DISPATCH=1\n');
   if (harness === 'codex') {
