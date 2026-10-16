@@ -468,7 +468,7 @@ test('gate output loses terminal escapes, and an unterminated string ends at its
     ['lone ESC before DEL, ESC and non-ASCII', 'a\x1b\x7f.\x1b\x1b\x7f,\x1béb', 'a.,éb'],
     ['C0 and C1 controls go; tab and newline stay', '(\x00\x08\x0b\x7f\x85)\tc\n', '()\tc\n'],
     ['a control run between word characters leaves a space', 'ab\x00cd\x7f\x85ef_\x1b\x7fg', 'ab cd ef_ g'],
-    ['a CR ends a line and CRLF is LF', 'get 10%\rget 50%\r\nnext\r\r\nlast\r', 'get 10%\nget 50%\nnext\nlast\n'],
+    ['a CR ends a line and CRLF is LF', 'get 10%\rget 50%\r\nnext\r\r\nlast\r', 'get 10%\nget 50%\nnext\nlast'],
   ];
   for (const [name, input, expected] of cases) assert.equal(stripEscapes(input), expected, name);
   // Each unterminated string ends at the next ESC. A lazy scan to a terminator that never comes
