@@ -129,6 +129,34 @@ test('event tail buffers partial UTF-8 bytes and resets history only on truncati
   assert.deepEqual(reader.read().rows.map((e) => e.cmd), ['recreate']);
 });
 
+test('a reset counts restored history across reads, and events newer than the reader has seen are new', (t) => {
+  const h = cachedFixture(t, 'reader', (h) => h.init());
+  const file = path.join(h.base, 'restore.jsonl');
+  const line = (at, text) => JSON.stringify({ at, cmd: 'msg', detail: { text } }) + '\n';
+  const history = [line('2026-01-01T00:00:00.000Z', 'one'), line('2026-01-01T00:00:01.000Z', 'two')];
+  fs.writeFileSync(file, history.join(''));
+  const reader = new EventReader(file);
+  assert.equal(reader.read().restored, 0);
+  const texts = (batch) => batch.rows.slice(batch.restored).map((e) => e.detail.text);
+  // A copy over the log: truncated in place, then written in pieces.
+  fs.truncateSync(file, 0);
+  assert.deepEqual(reader.read(), { rows: [], offset: 0, reset: true, restored: 0 });
+  for (const row of history) {
+    fs.appendFileSync(file, row);
+    const batch = reader.read();
+    assert.deepEqual([batch.reset, batch.restored, texts(batch)], [false, 1, []]);
+  }
+  const fresh = line(new Date(Date.now() + 60000).toISOString(), 'new');
+  fs.appendFileSync(file, fresh);
+  assert.deepEqual(texts(reader.read()), ['new']);
+  // Moved away and copied back, with a newer event in the same read.
+  fs.renameSync(file, file + '.away');
+  assert.deepEqual(reader.read(), { rows: [], offset: 0, reset: true, restored: 0 });
+  fs.writeFileSync(file, history.join('') + fresh + line(new Date(Date.now() + 120000).toISOString(), 'newer'));
+  const batch = reader.read();
+  assert.deepEqual([batch.reset, batch.restored, texts(batch)], [false, 3, ['newer']]);
+});
+
 test('retained state history keeps snapshots independent and does not duplicate local writes', (t) => {
   const h = cachedFixture(t, 'reader', (h) => h.init());
   const release = S.retainEvents(h.state);
@@ -258,12 +286,29 @@ function resetReader(t, h, args) {
   return { child, notices, changes, closed, stop, until, lines };
 }
 
-function restoreLog(h, smaller) {
+// How a restore puts the old log back: an atomic rename, a copy that
+// truncates in place and then writes (`cp backup events.jsonl`), or a move
+// away and a copy back. The last two reach the reader in more than one read.
+const RESTORES = ['rename', 'truncate', 'remove'];
+
+async function restoreLog(h, reader, { smaller = false, how = 'rename' } = {}) {
   const file = path.join(h.state, 'events.jsonl');
   const original = fs.readFileSync(file, 'utf8');
   const restored = smaller ? original.trimEnd().split('\n').slice(0, -1).join('\n') + '\n' : original;
-  fs.writeFileSync(file + '.restore', restored);
-  fs.renameSync(file + '.restore', file);
+  let seen = reader.notices.length;
+  const read = (probe) => reader.until(() => reader.notices.slice(seen).some(probe));
+  if (how === 'rename') {
+    fs.writeFileSync(file + '.restore', restored);
+    fs.renameSync(file + '.restore', file);
+  } else {
+    // The reader sees the log empty or gone before the history comes back.
+    if (how === 'truncate') fs.truncateSync(file, 0);
+    else fs.renameSync(file, file + '.away');
+    await read((notice) => notice.reset);
+    seen = reader.notices.length;
+    fs.appendFileSync(file, restored);
+  }
+  await read((notice) => notice.offset === Buffer.byteLength(restored) && (how !== 'rename' || notice.reset));
   return restored.trimEnd().split('\n').map(JSON.parse).filter((row) => row.cmd === 'msg').map((row) => row.detail.text);
 }
 
@@ -272,14 +317,15 @@ function appendAfterRestore(h) {
   return JSON.parse(fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trimEnd().split('\n').at(-1)).id;
 }
 
-for (const follow of [false, true]) for (const smaller of [false, true]) {
-  test(`restored history does not wake wait (follow: ${follow}, smaller: ${smaller})`, async (t) => {
+const restoreCases = [...[false, true].map((smaller) => ({ smaller, how: 'rename' })),
+  ...RESTORES.slice(1).map((how) => ({ smaller: false, how })), { smaller: true, how: 'truncate' }];
+for (const follow of [false, true]) for (const { smaller, how } of restoreCases) {
+  test(`restored history does not wake wait (follow: ${follow}, smaller: ${smaller}, restore: ${how})`, async (t) => {
     const h = restoreFixture();
     const reader = resetReader(t, h, ['wait', '--observe', '--agent', 'orchestrator',
       ...(follow ? ['--follow'] : ['--timeout', '300'])]);
     await reader.until(() => reader.notices.some((notice) => !notice.reset));
-    restoreLog(h, smaller);
-    await reader.until(() => reader.notices.some((notice) => notice.reset));
+    await restoreLog(h, reader, { smaller, how });
     const id = appendAfterRestore(h);
     if (follow) {
       await reader.until(() => reader.lines().some((row) => row.id === id));
@@ -295,8 +341,8 @@ for (const follow of [false, true]) for (const smaller of [false, true]) {
   });
 }
 
-for (const smaller of [false, true]) {
-  test(`restored owner history stays queryable without SSE replay (smaller: ${smaller})`, async (t) => {
+for (const { smaller, how } of restoreCases) {
+  test(`restored owner history stays queryable without SSE replay (smaller: ${smaller}, restore: ${how})`, async (t) => {
     const h = restoreFixture();
     const server = resetReader(t, h, ['serve', '--agent', 'viewer', '--port', '0', '--json']);
     const { url } = await server.until(() => server.lines()[0]);
@@ -318,10 +364,9 @@ for (const smaller of [false, true]) {
     })();
     t.after(async () => { controller.abort(); await drained; });
     await server.until(() => output.includes(': connected'));
-    const history = restoreLog(h, smaller);
+    const history = await restoreLog(h, server, { smaller, how });
     const restored = await fetch(new URL('/api/messages?after=0', url));
     assert.deepEqual((await restored.json()).messages.map((row) => row.detail.text), history);
-    await server.until(() => server.notices.some((notice) => notice.reset));
     const id = appendAfterRestore(h);
     await server.until(() => output.includes(id));
     controller.abort();
