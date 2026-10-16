@@ -7,7 +7,7 @@ const { test, describe } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { makeRepo, makeTaskRepo, BIN, detachedAlive } = require('./helpers');
+const { makeRepo, makeTaskRepo, BIN, detachedAlive, TMP_ROOT } = require('./helpers');
 const Sessions = require('../lib/spawn-session');
 const windowsConcurrency = process.platform === 'win32' ? 2 : false;
 
@@ -792,6 +792,118 @@ test('a resume moves an earlier start\'s attempt log aside only once no recorded
   assert.equal(aside.length, 1, aside.join(', '));
   assert.equal(fs.readFileSync(path.join(logs, aside[0]), 'utf8'), 'an earlier start\n');
   assert.ok(next.stderr.includes(`tower-crane: moved ${log}, left by a start that failed before it was recorded, to ${path.join(logs, aside[0])}\n`), next.stderr);
+});
+
+// Windows records no start time with a pid and reuses a freed pid within
+// seconds, so the guard above asks Windows when the process now at a recorded
+// pid was created. These run that path in process with a stand-in for
+// PowerShell, on live pids that the signal check cannot tell apart from the
+// recorded processes.
+const FILETIME_UNIX_EPOCH = 116444736000000000n;
+const filetime = (ms) => String(BigInt(ms) * 10000n + FILETIME_UNIX_EPOCH);
+const powershellStub = (asked, lines, result = {}) => (cmd, args, options) => {
+  const script = Buffer.from(args.at(-1), 'base64').toString('utf16le');
+  asked.push({ cmd, pids: script.match(/@\(([^)]*)\)/)[1], script, timeout: options.timeout });
+  return { status: 0, stdout: lines.map((line) => `${line}\r\n`).join(''), ...result };
+};
+
+test('a recorded spawn whose pids Windows gave to processes created after it counts as gone', (t) => {
+  const P = require('../lib/processes');
+  const os = require('node:os');
+  const cp = require('node:child_process');
+  const live = cp.spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: 'ignore', windowsHide: true }); // wait-allow: a process group that runs until the test kills it
+  t.after(() => killPid(live.pid, 'SIGKILL'));
+  const at = Date.parse('2026-10-16T11:00:00.000Z');
+  const detail = { host: os.hostname(), pid: live.pid, monitor_pid: process.pid };
+  assert.deepEqual(P.spawnPids(detail), [process.pid, live.pid]);
+  const after = at + 5000;
+  // Creation times come from UTC FILETIMEs, never from a local time.
+  const asked = [];
+  const created = P.windowsCreated([process.pid, live.pid], 5000,
+    powershellStub(asked, [`${process.pid} ${filetime(after)}`, `${live.pid} ${filetime(after + 1)}`, `4 ${filetime(after)}`, 'Access is denied.']));
+  assert.deepEqual([...created], [[process.pid, after], [live.pid, after + 1]]);
+  assert.equal(asked.length, 1);
+  assert.equal(asked[0].cmd, 'powershell.exe');
+  assert.equal(asked[0].pids, `${process.pid},${live.pid}`);
+  assert.equal(asked[0].timeout, 5000);
+  assert.match(asked[0].script, /StartTime\.ToFileTimeUtc\(\)/);
+  assert.doesNotMatch(asked[0].script, /CreationDate|ToUniversalTime/);
+  assert.equal(P.spawnGone(detail, at, created, 'win32'), true);
+  // A process created before the event was recorded, or within the clock
+  // allowance after it, may be the recorded one.
+  assert.equal(P.spawnGone(detail, at, new Map([[live.pid, after], [process.pid, at - 5000]]), 'win32'), false);
+  assert.equal(P.spawnGone(detail, at, new Map([[live.pid, after], [process.pid, at + 50]]), 'win32'), false);
+  // A spawn recorded at 02:45 CEST on 2026-10-25, the first pass of the hour
+  // Europe repeats, whose supervisor started at 02:30 CEST (00:30 UTC). A
+  // local 02:30 read as standard time is 01:30 UTC, after the event, and would
+  // call the running spawn gone; its FILETIME keeps it running.
+  const dst = Date.parse('2026-10-25T00:45:00.000Z');
+  const firstPass = P.windowsCreated([process.pid, live.pid], 5000,
+    powershellStub([], [`${process.pid} ${filetime(Date.parse('2026-10-25T00:30:00.000Z'))}`, `${live.pid} ${filetime(dst + 5000)}`]));
+  assert.equal(P.spawnGone(detail, dst, firstPass, 'win32'), false);
+  // A time PowerShell did not report, or a PowerShell that failed, proves nothing.
+  assert.equal(P.spawnGone(detail, at, new Map([[live.pid, after]]), 'win32'), false);
+  assert.deepEqual([...P.windowsCreated([process.pid], 5000, powershellStub([], [`${process.pid} ${filetime(after)}`], { status: 1 }))], []);
+  assert.deepEqual([...P.windowsCreated([process.pid], 5000, powershellStub([], [`${process.pid} ${filetime(after)}`], { error: new Error('spawnSync powershell.exe ETIMEDOUT') }))], []);
+  assert.equal(P.spawnGone(detail, NaN, created, 'win32'), false);
+  // Another host's pids, and systems with a start time of their own, take no creation time.
+  assert.equal(P.spawnGone({ ...detail, host: 'another-host' }, at, created, 'win32'), false);
+  if (process.platform !== 'win32') assert.equal(P.spawnGone(detail, at, created, process.platform), false);
+  // Exited processes need no creation time.
+  const done = cp.spawnSync(process.execPath, ['-e', ''], { windowsHide: true });
+  assert.deepEqual(P.spawnPids({ host: os.hostname(), pid: done.pid, monitor_pid: done.pid }), []);
+  assert.equal(P.spawnGone({ host: os.hostname(), pid: done.pid, monitor_pid: done.pid }, at, new Map(), 'win32'), true);
+});
+
+// Windows PowerShell on Windows; on Linux PowerShell 7 when it is installed
+// (GitHub's Ubuntu runners have it), which runs the same script.
+const POWERSHELL = process.platform === 'win32' ? 'powershell.exe'
+  : process.platform === 'linux' && require('node:child_process').spawnSync('pwsh', ['-NoProfile', '-NonInteractive', '-Command', 'exit 0'], { stdio: 'ignore', timeout: 300000 }).status === 0 ? 'pwsh' : null;
+
+test('PowerShell reads a running process\'s creation time as UTC epoch ms', {
+  skip: !POWERSHELL && 'no PowerShell',
+}, (t) => {
+  const P = require('../lib/processes');
+  const cp = require('node:child_process');
+  const from = Date.now();
+  const live = cp.spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore', windowsHide: true }); // wait-allow: a process that runs until the test kills it
+  t.after(() => killPid(live.pid, 'SIGKILL'));
+  const to = Date.now();
+  const created = P.windowsCreated([live.pid, 2147483644], 300000, (cmd, args, options) => cp.spawnSync(POWERSHELL, args, options));
+  assert.deepEqual([...created.keys()], [live.pid]);
+  // Linux reads the start in clock ticks from a boot time PowerShell derives itself.
+  assert.ok(created.get(live.pid) >= from - 1000 && created.get(live.pid) <= to + 1000, `${created.get(live.pid)} not in ${from}..${to}`);
+});
+
+test('Windows reads the creation times for every recorded spawn of the task in one call, and only when a failed start left a log', (t) => {
+  const { recordedCreated } = require('../lib/spawn');
+  const os = require('node:os');
+  const cp = require('node:child_process');
+  const live = cp.spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: 'ignore', windowsHide: true }); // wait-allow: a process group that runs until the test kills it
+  t.after(() => killPid(live.pid, 'SIGKILL'));
+  fs.mkdirSync(TMP_ROOT, { recursive: true });
+  const logs = fs.mkdtempSync(path.join(TMP_ROOT, 'tower-crane-created-'));
+  t.after(() => fs.rmSync(logs, { recursive: true, force: true }));
+  const host = os.hostname();
+  const done = cp.spawnSync(process.execPath, ['-e', ''], { windowsHide: true });
+  const st = { events: [
+    { cmd: 'spawn', task: 'T1', at: '2026-10-16T11:00:00.000Z', detail: { agent: 'worker-T1-1', host, pid: live.pid, monitor_pid: process.pid, log: path.join(logs, 'T1-worker-T1-1.log') } },
+    { cmd: 'spawn', task: 'T1', at: '2026-10-16T11:05:00.000Z', detail: { agent: 'worker-T1-2', host, pid: done.pid, monitor_pid: live.pid, log: path.join(logs, 'T1-worker-T1-2.log') } },
+    { cmd: 'spawn', task: 'T2', at: '2026-10-16T11:05:00.000Z', detail: { agent: 'worker-T2-1', host, pid: process.ppid, monitor_pid: process.ppid, log: path.join(logs, 'T2-worker-T2-1.log') } },
+  ] };
+  fs.writeFileSync(path.join(logs, 'T1-worker-T1-1.log'), 'recorded\n');
+  fs.writeFileSync(path.join(logs, 'T1-worker-T1-1-startup-failed-2026-10-16T11-01-00-000Z.log'), 'kept\n');
+  fs.writeFileSync(path.join(logs, 'T2-worker-T2-1-attempt-2.log'), 'another task\n');
+  const asked = [];
+  const stub = powershellStub(asked, [`${live.pid} ${filetime(Date.now())}`]);
+  assert.deepEqual([...recordedCreated(logs, st, 'T1', 'win32', stub)], []);
+  fs.writeFileSync(path.join(logs, 'T1-worker-T1-2-attempt-2.log'), 'an earlier start\n');
+  assert.deepEqual([...recordedCreated(logs, st, 'T1', 'linux', stub)], []);
+  assert.deepEqual(asked, []);
+  assert.equal(recordedCreated(logs, st, 'T1', 'win32', stub).has(live.pid), true);
+  assert.equal(asked.length, 1);
+  assert.deepEqual(asked[0].pids.split(',').map(Number).sort((a, b) => a - b), [process.pid, live.pid].sort((a, b) => a - b));
+  assert.ok(asked[0].timeout <= 5000, String(asked[0].timeout));
 });
 
 test('a failed resume launch leaves the task, claim and receipts unchanged', (t) => {
