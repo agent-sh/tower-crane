@@ -129,6 +129,78 @@ test('event tail buffers partial UTF-8 bytes and resets history only on truncati
   assert.deepEqual(reader.read().rows.map((e) => e.cmd), ['recreate']);
 });
 
+// Event lines as the CLI writes them, with an `at` a test chooses, so a
+// writer's clock can be behind or step back.
+function eventLine(at, text) {
+  return JSON.stringify({ at, cmd: 'msg', detail: { text }, id: `E${require('node:crypto').randomUUID()}` }) + '\n';
+}
+
+function restoreReader(t, name, lines) {
+  const h = cachedFixture(t, 'reader', (h) => h.init());
+  const file = path.join(h.base, name);
+  fs.writeFileSync(file, lines.join(''));
+  const reader = new EventReader(file, { restores: true });
+  const texts = (batch) => batch.rows.filter((e) => !batch.restored.has(e)).map((e) => e.detail.text);
+  return { file, reader, texts };
+}
+
+const minutes = (n) => new Date(Date.now() + n * 60000).toISOString();
+
+test('a restore over several reads is history by event id, and an event from a clock behind is new', (t) => {
+  // Written across a clock step back: the newest `at` is not on the last line.
+  const history = [eventLine(minutes(5), 'one'), eventLine(minutes(0), 'two')];
+  const { file, reader, texts } = restoreReader(t, 'restore.jsonl', history);
+  assert.deepEqual(texts(reader.read()), ['one', 'two']);
+  // A copy over the log: truncated in place, then written in pieces.
+  fs.truncateSync(file, 0);
+  const emptied = reader.read();
+  assert.deepEqual([emptied.reset, emptied.rows, emptied.restored.size], [true, [], 0]);
+  for (const row of history) {
+    fs.appendFileSync(file, row);
+    const batch = reader.read();
+    assert.deepEqual([batch.reset, batch.restored.size, texts(batch)], [false, 1, []]);
+  }
+  fs.appendFileSync(file, eventLine(minutes(-60), 'behind'));
+  assert.deepEqual(texts(reader.read()), ['behind']);
+  // Moved away and copied back, with a new event in the same read.
+  fs.renameSync(file, file + '.away');
+  assert.equal(reader.read().reset, true);
+  fs.writeFileSync(file, fs.readFileSync(file + '.away', 'utf8') + eventLine(minutes(-120), 'new'));
+  const batch = reader.read();
+  assert.deepEqual([batch.reset, batch.restored.size, texts(batch)], [false, 3, ['new']]);
+});
+
+test('a restore right after a recorded cut is history, not a replay since the start', (t) => {
+  const kept = [eventLine(minutes(1), 'one'), eventLine(minutes(2), 'two')];
+  const torn = eventLine(minutes(3), 'torn');
+  const { file, reader, texts } = restoreReader(t, 'events.jsonl', [...kept, torn]);
+  assert.deepEqual(texts(reader.read()), ['one', 'two', 'torn']);
+  const size = Buffer.byteLength(kept.join(''));
+  fs.truncateSync(file, size);
+  fs.appendFileSync(path.join(path.dirname(file), 'events.cuts.jsonl'),
+    JSON.stringify({ at: minutes(0), size, from: size + Buffer.byteLength(torn), ends: [size + Buffer.byteLength(torn)] }) + '\n');
+  const cut = reader.read();
+  assert.deepEqual([cut.cut, cut.rows], [size, []]);
+  fs.truncateSync(file, 0);
+  assert.equal(reader.read().reset, true);
+  fs.appendFileSync(file, kept.join('') + eventLine(minutes(-60), 'new'));
+  assert.deepEqual(texts(reader.read()), ['new']);
+});
+
+test('history before a start cursor is restored up to the start line, then a clock behind still wakes', (t) => {
+  const before = [eventLine(minutes(-10), 'old one'), eventLine(minutes(10), 'old two')];
+  const h = cachedFixture(t, 'reader', (h) => h.init());
+  const file = path.join(h.base, 'cursor.jsonl');
+  fs.writeFileSync(file, before.join(''));
+  const reader = new EventReader(file, { after: Buffer.byteLength(before.join('')), restores: true });
+  assert.deepEqual(reader.read().rows, []);
+  fs.writeFileSync(file + '.restore', before.join('') + eventLine(minutes(-60), 'behind'));
+  fs.renameSync(file + '.restore', file);
+  const batch = reader.read();
+  assert.deepEqual([batch.reset, batch.restored.size, batch.rows.filter((e) => !batch.restored.has(e)).map((e) => e.detail.text)],
+    [true, 2, ['behind']]);
+});
+
 test('retained state history keeps snapshots independent and does not duplicate local writes', (t) => {
   const h = cachedFixture(t, 'reader', (h) => h.init());
   const release = S.retainEvents(h.state);
@@ -258,31 +330,60 @@ function resetReader(t, h, args) {
   return { child, notices, changes, closed, stop, until, lines };
 }
 
-function restoreLog(h, smaller) {
+// How a restore puts the old log back: an atomic rename, a copy that
+// truncates in place and then writes (`cp backup events.jsonl`), or a move
+// away and a copy back. The last two reach the reader in more than one read.
+const RESTORES = ['rename', 'truncate', 'remove'];
+
+async function restoreLog(h, reader, { smaller = false, how = 'rename' } = {}) {
   const file = path.join(h.state, 'events.jsonl');
   const original = fs.readFileSync(file, 'utf8');
   const restored = smaller ? original.trimEnd().split('\n').slice(0, -1).join('\n') + '\n' : original;
-  fs.writeFileSync(file + '.restore', restored);
-  fs.renameSync(file + '.restore', file);
+  let seen = reader.notices.length;
+  const read = (probe) => reader.until(() => reader.notices.slice(seen).some(probe));
+  if (how === 'rename') {
+    fs.writeFileSync(file + '.restore', restored);
+    fs.renameSync(file + '.restore', file);
+  } else {
+    // The reader sees the log empty or gone before the history comes back.
+    if (how === 'truncate') fs.truncateSync(file, 0);
+    else fs.renameSync(file, file + '.away');
+    await read((notice) => notice.reset);
+    seen = reader.notices.length;
+    fs.appendFileSync(file, restored);
+  }
+  await read((notice) => notice.offset === Buffer.byteLength(restored) && (how !== 'rename' || notice.reset));
   return restored.trimEnd().split('\n').map(JSON.parse).filter((row) => row.cmd === 'msg').map((row) => row.detail.text);
 }
 
-function appendAfterRestore(h) {
-  h.ok(['msg', '--to', 'orchestrator', 'after restore']);
-  return JSON.parse(fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trimEnd().split('\n').at(-1)).id;
+const clockBehind = path.join(__dirname, 'fixtures', 'clock-behind.js');
+
+// New events after a restore: one from a writer whose clock is behind every
+// restored record and the reader's start, then one from this host's clock.
+// An older, smaller backup lacks the line the reader started after, so only
+// the writer's clock is left to tell its history from new events there.
+function appendAfterRestore(h, behind) {
+  const ids = [];
+  for (const pre of [...(behind ? [['--require', clockBehind]] : []), []]) {
+    h.ok(['msg', '--to', 'orchestrator', 'after restore'], { pre, env: { CLOCK_BEHIND_MS: '600000' } });
+    ids.push(JSON.parse(fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trimEnd().split('\n').at(-1)));
+  }
+  if (behind) assert.ok(Date.parse(ids[1].at) - Date.parse(ids[0].at) > 300000, 'the first writer\'s clock must be behind');
+  return ids.map((e) => e.id);
 }
 
-for (const follow of [false, true]) for (const smaller of [false, true]) {
-  test(`restored history does not wake wait (follow: ${follow}, smaller: ${smaller})`, async (t) => {
+const restoreCases = [...[false, true].map((smaller) => ({ smaller, how: 'rename' })),
+  ...RESTORES.slice(1).map((how) => ({ smaller: false, how })), { smaller: true, how: 'truncate' }];
+for (const follow of [false, true]) for (const { smaller, how } of restoreCases) {
+  test(`restored history does not wake wait (follow: ${follow}, smaller: ${smaller}, restore: ${how})`, async (t) => {
     const h = restoreFixture();
     const reader = resetReader(t, h, ['wait', '--observe', '--agent', 'orchestrator',
       ...(follow ? ['--follow'] : ['--timeout', '300'])]);
     await reader.until(() => reader.notices.some((notice) => !notice.reset));
-    restoreLog(h, smaller);
-    await reader.until(() => reader.notices.some((notice) => notice.reset));
-    const id = appendAfterRestore(h);
+    await restoreLog(h, reader, { smaller, how });
+    const ids = appendAfterRestore(h, !smaller);
     if (follow) {
-      await reader.until(() => reader.lines().some((row) => row.id === id));
+      await reader.until(() => reader.lines().some((row) => row.id === ids.at(-1)));
       await reader.stop();
     } else {
       const [code] = await reader.closed;
@@ -291,12 +392,13 @@ for (const follow of [false, true]) for (const smaller of [false, true]) {
     const rows = reader.lines().filter((row) => row.type !== 'ready');
     // stop() delivers SIGTERM; a follower ends with its signal stop notice, not a wake.
     if (follow) assert.deepEqual(rows.pop(), { reason: 'signal', signal: 'SIGTERM', drained: 0 });
-    assert.deepEqual(rows.map((row) => row.id), [id]);
+    // A plain wait returns with the first.
+    assert.deepEqual(rows.map((row) => row.id), follow ? ids : ids.slice(0, 1));
   });
 }
 
-for (const smaller of [false, true]) {
-  test(`restored owner history stays queryable without SSE replay (smaller: ${smaller})`, async (t) => {
+for (const { smaller, how } of restoreCases) {
+  test(`restored owner history stays queryable without SSE replay (smaller: ${smaller}, restore: ${how})`, async (t) => {
     const h = restoreFixture();
     const server = resetReader(t, h, ['serve', '--agent', 'viewer', '--port', '0', '--json']);
     const { url } = await server.until(() => server.lines()[0]);
@@ -318,18 +420,18 @@ for (const smaller of [false, true]) {
     })();
     t.after(async () => { controller.abort(); await drained; });
     await server.until(() => output.includes(': connected'));
-    const history = restoreLog(h, smaller);
+    const history = await restoreLog(h, server, { smaller, how });
     const restored = await fetch(new URL('/api/messages?after=0', url));
     assert.deepEqual((await restored.json()).messages.map((row) => row.detail.text), history);
-    await server.until(() => server.notices.some((notice) => notice.reset));
-    const id = appendAfterRestore(h);
-    await server.until(() => output.includes(id));
+    // Serve reads from the start, so every restored record is one it read.
+    const ids = appendAfterRestore(h, true);
+    await server.until(() => output.includes(ids.at(-1)));
     controller.abort();
     await drained;
     await server.stop();
     const wakes = output.split('\n\n').filter((block) => block.startsWith('event: wake'))
       .map((block) => JSON.parse(block.split('data: ')[1]));
-    assert.deepEqual(wakes.map((wake) => wake.id), [id]);
+    assert.deepEqual(wakes.map((wake) => wake.id), ids);
   });
 }
 
