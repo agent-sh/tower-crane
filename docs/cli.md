@@ -757,7 +757,7 @@ An orchestrator still requires both technical settings when listed in `answerers
 
 ## Event wakeups
 
-`wait` and the automation it hosts tail `events.jsonl` while running. Idle fallback checks do not reread historical event bytes or unchanged validated state snapshots. Partial lines stay buffered. Truncating, replacing or removing the log rebuilds retained history from its beginning. Active waits do not replay restored records, whether the restore renames a file into place, copies over the log or moves it away and back: a record written no later than the newest event the wait had seen, or than its start, is history. Newer records wake as usual. Byte cursors belong to one log, so restart clients with a fresh cursor after replacing it. The automation, and a `task show` or `status` run after `wait` returns, see the state change of the event that woke it: a read without the lock includes a logged commit whose files are still being renamed into place ([Durability and write order](state.md#durability-and-write-order)).
+`wait` and the automation it hosts tail `events.jsonl` while running. Idle fallback checks do not reread historical event bytes or unchanged validated state snapshots. Partial lines stay buffered. Truncating, replacing or removing the log rebuilds retained history from its beginning. Active waits do not replay restored records, whether the restore renames a file into place, copies over the log or moves it away and back. A wait tells them by event id: a record it read since it started is history, and so is one from before its cursor up to the line that ended there. Other records wake, whatever the clock of the process that wrote them. Only a restore of an older backup that lacks that line falls back to time, counting records written no later than the wait's start as history. Byte cursors belong to one log, so restart clients with a fresh cursor after replacing it. The automation, and a `task show` or `status` run after `wait` returns, see the state change of the event that woke it: a read without the lock includes a logged commit whose files are still being renamed into place ([Durability and write order](state.md#durability-and-write-order)).
 
 The orchestrator does not run a waiter of its own. Its harness delivers events into the session (table below); `tower-crane wait` is the interface underneath and the fallback for a harness with nothing better.
 
@@ -890,7 +890,7 @@ The Settings view (`/settings`) edits the default harness, every rung and each t
 
 ### serve endpoints
 
-The server tails the event log for reloads and owner messages, and retains history for repeated page and message requests. Its directory watch has a one-second fallback check even when no watch error occurs. A replaced, truncated or removed log rebuilds queryable message history. SSE does not wake for restored messages, however the restore writes the file; messages newer than the newest event the server had seen wake as usual.
+The server tails the event log for reloads and owner messages, and retains history for repeated page and message requests. Its directory watch has a one-second fallback check even when no watch error occurs. A replaced, truncated or removed log rebuilds queryable message history. SSE does not wake for restored messages, however the restore writes the file: the server read every message since the log began and tells them by event id. Other messages wake as usual.
 
 | Method and path | Does |
 |---|---|
