@@ -447,7 +447,7 @@ process.exitCode = 1;
   assert.equal(fs.readFileSync(path.join(h.state, 'ci-artifacts', '.gitignore'), 'utf8'), '*\n');
   assert.deepEqual(kept.artifacts_skipped.map((s) => path.basename(s.from)), ['outside.json', 'utf16.json']);
   assert.match(kept.artifacts_skipped[0].reason, /outside the gate worktree/);
-  assert.match(kept.artifacts_skipped[1].reason, /secret split by control bytes/);
+  assert.match(kept.artifacts_skipped[1].reason, /^binary, and a secret as .+ that exact byte redaction cannot remove$/);
   // The summary reaches worker prompts, so it counts the artifacts and names none.
   assert.match(r.stdout, /Artifacts: 6 kept for the orchestrator and the owner/);
   assert.ok(!r.stdout.includes('ci-artifacts'), r.stdout);
@@ -516,19 +516,68 @@ test('a removed control keeps the word boundary token shapes are found by', () =
   assert.equal(env(env.strip('pre abcdefghij\x00012345\r6789xyz post')), 'pre [redacted:PLAIN_SECRET] post');
 });
 
-test('byte-level redaction matches values as UTF-8 bytes and token shapes, and keeps every other byte', () => {
+test('a binary artifact is redacted at its exact bytes, or missed when a secret shows only in another view', () => {
   const { createRedactor } = require('../lib/gates/common');
   const github = `ghp_${'d4'.repeat(18)}`;
-  const redact = createRedactor([['FIXTURE_PASSWORD', 'p\u00e4ss-\u20ac-0123456789abcdefgh']]);
+  const aws = `AKIA${'E5'.repeat(8)}`;
+  const value = 'p\u00e4ss-\u20ac-0123456789abcdefgh';
+  const redact = createRedactor([['FIXTURE_PASSWORD', value]]);
   const bytes = (...parts) => Buffer.concat(parts.map((p) => (Buffer.isBuffer(p) ? p : Buffer.from(p, 'utf8'))));
   const junk = Buffer.from([0xff, 0x00, 0xe9, 0x80, 0x1b]);
+  const every = Buffer.from(Array.from({ length: 512 }, (_, i) => i % 256));
   for (const [input, expected] of [
-    [bytes(junk, 'p\u00e4ss-\u20ac-0123456789abcdefgh', junk), bytes(junk, '[redacted:FIXTURE_PASSWORD]', junk)],
+    [bytes(junk, value, junk), bytes(junk, '[redacted:FIXTURE_PASSWORD]', junk)],
     [bytes(junk, github, junk), bytes(junk, '[redacted:GITHUB_TOKEN]', junk)],
+    [bytes(junk, '"', github, '", "', aws, '"'), bytes(junk, '"[redacted:GITHUB_TOKEN]", "[redacted:AWS_ACCESS_KEY_ID]"')],
     [bytes('Authorization: Bearer ', junk, 'x y'), bytes('Authorization: Bearer [redacted:AUTHORIZATION] y')],
     [bytes(junk, '[redacted:GITHUB_TOKEN]', junk), bytes(junk, '[redacted:GITHUB_TOKEN]', junk)],
-    [Buffer.from(Array.from({ length: 256 }, (_, i) => i)), Buffer.from(Array.from({ length: 256 }, (_, i) => i))],
-  ]) assert.deepEqual(redact.bytes(input), expected, input.toString('hex'));
+    [every, every],
+  ]) {
+    const out = redact.bytes(input);
+    assert.equal(out.missed, undefined, input.toString('hex'));
+    assert.deepEqual(out.body, expected, input.toString('hex'));
+  }
+  const utf16 = (text, big) => {
+    const b = Buffer.from(text, 'utf16le');
+    return big ? b.swap16() : b;
+  };
+  // Most of these show in the bytes once NULs and escapes go; a non-ASCII value needs a UTF-16 view.
+  const ANY = /^a secret as /;
+  for (const [name, input, view] of [
+    // 0x90 and 0x98 bytes here are halves of characters, not 8-bit string introducers.
+    ['an arrow before a UTF-16 token', utf16(`{"t": "\u2190 ${github}"}`), ANY],
+    ['a CJK character before a UTF-16 token', utf16(`\u9019 ${github}`), ANY],
+    ['a UTF-16BE token', utf16(`x ${github}`, true), ANY],
+    ['a UTF-16 token at an odd offset', bytes(Buffer.from([0xff]), utf16(` ${github}`)), ANY],
+    ['a color escape inside a UTF-16 token', utf16(`${github.slice(0, 8)}\x1b[32m${github.slice(8)}`), ANY],
+    ['a non-ASCII environment value in UTF-16', utf16(`v=${value}`), /as UTF-16LE/],
+    ['AWS key split by an escape', bytes(Buffer.from([0xff]), ` ${aws.slice(0, 8)}\x1b[1m${aws.slice(8)}\x00DONE`), ANY],
+    ['a token tail after a carriage return', bytes(junk, `${github.slice(0, 26)}\r${github.slice(26)}`), ANY],
+    ['a UTF-8 character with a 0x98 byte before a split token', bytes(junk, `\u662f ${github.slice(0, 8)}\x1b[1m${github.slice(8)}`), ANY],
+    ['a split environment value', bytes(junk, `${value.slice(0, 5)}\r${value.slice(5)}`), ANY],
+  ]) assert.match(redact.bytes(input).missed || '', view, name);
+});
+
+test('restoring redaction markers is linear in their count', () => {
+  const { createRedactor } = require('../lib/gates/common');
+  const redact = createRedactor([['FIXTURE_TOKEN', `ghp_${'d4'.repeat(18)}`]]);
+  const text = '[redacted:A] '.repeat(Math.ceil((1 << 20) / 13));
+  // A split and join of the whole text per marker took minutes for these 1 MiB. Counting the
+  // whole-text splits shows the passes without timing them.
+  const split = String.prototype.split;
+  let passes = 0;
+  String.prototype.split = function (...args) {
+    if (this.length >= text.length) passes++;
+    return split.apply(this, args);
+  };
+  try {
+    assert.equal(redact(`${text}ghp_${'d4'.repeat(18)}`), `${text}[redacted:FIXTURE_TOKEN]`);
+  } finally {
+    String.prototype.split = split;
+  }
+  assert.ok(passes <= 1, `${passes} passes`);
+  const binary = Buffer.from(`\x00${text}`, 'latin1');
+  assert.equal(redact.bytes(binary).body, binary);
 });
 
 test('a passing local CI keeps its log without a tail or artifacts', (t) => {
