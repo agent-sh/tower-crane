@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { cachedFixture } = require('./helpers');
 const { probe } = require('../scripts/probe-gate-scratch');
-const { suiteTime, reportSuiteTime } = require('../scripts/suite-time');
+const { suiteTime, reportSuiteTime, DEADLINE_MIN } = require('../scripts/suite-time');
 
 function fixture(t) {
   return cachedFixture(t, 'scratch-proof', (h) => {
@@ -35,8 +35,8 @@ test('the gate proof measures caller contents and the actual removed parent', (t
   assert.deepEqual(result.gate_root_after, []);
   assert.equal(result.gate_parents.length, 1);
   assert.equal(result.gate_parents[0].removed, true);
-  assert.equal(result.suite_time.deadline_min, 45);
-  assert.ok(result.suite_time.wall_ms > 0 && result.suite_time.wall_ms < 45 * 60000);
+  assert.equal(result.suite_time.deadline_min, DEADLINE_MIN);
+  assert.ok(result.suite_time.wall_ms > 0 && result.suite_time.wall_ms < DEADLINE_MIN * 60000);
   assert.equal(result.suite_time.warn, false);
 });
 
@@ -48,7 +48,7 @@ test('suite time warns on GitHub past 75% of the deadline and records each run i
     assert.equal(time.warn, warn, `${minutes} min`);
     const lines = [];
     reportSuiteTime('Proof', time, { env: { GITHUB_STEP_SUMMARY: summary }, write: (line) => lines.push(line) });
-    assert.match(lines[0], new RegExp(`^Proof: suite wall time ${minutes.toFixed(1)} min, \\d+% of the 45-minute software-gate deadline$`));
+    assert.match(lines[0], new RegExp(`^Proof: suite wall time ${minutes.toFixed(1)} min, \\d+% of the ${DEADLINE_MIN}-minute software-gate deadline$`));
     assert.equal(lines.length, warn ? 2 : 1);
     if (warn) assert.match(lines[1], /^::warning title=Suite time::Proof: suite wall time .* over the 75% warning line$/);
   }
