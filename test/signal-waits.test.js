@@ -446,6 +446,22 @@ test('tests signal only checked pids, so a pid file read before it is written ca
     `${kill}?.(Number(text), 'SIGKILL');`,
     `${proc}?.kill?.(0);`,
     `const signal = ${proc}?.kill;`,
+    // Code inside a template interpolation or a generated script, whatever operator comes before.
+    `const s = \`\${x ? ${kill}(pid) : ''}\`;`,
+    `const s = \`\${typeof ${kill}(pid)}\`;`,
+    `fs.writeFileSync(f, 'const ok = pid ? ${kill}(pid) : 0;');`,
+    `fs.writeFileSync(f, 'module.exports = { stop: ${kill}(pid) };');`,
+    `fs.writeFileSync(f, 'a + ${kill}(n)');`,
+    `fs.writeFileSync(f, 'switch (n) { case 1: ${kill}(n); }');`,
+    `fs.writeFileSync(f, 'run()\\n${kill}(n)');`,
+    // Only a comparing assertion compares.
+    `assert.doesNotThrow(${kill});`,
+    // Other ways to reach the same call.
+    `const { kill } = globalThis.${proc};`,
+    `const p = ${proc};\np.kill(Number(text));`,
+    `const p = ${proc};\np?.['kill'](pid);`,
+    `${proc}[name](0);`,
+    `${proc}[\`kill\`](0);`,
   ]) {
     assert.equal(killFindings(source).length, 1, source);
   }
@@ -469,6 +485,9 @@ test('tests signal only checked pids, so a pid file read before it is written ca
     `throw new Error('do not call ${kill}(0), which signals the group');`,
     `log("never ${kill}(-pid) from a test");`,
     `child.${kill}(pid);`,
+    `log(\`never ${kill}(-pid) \${'here'}\`);`,
+    `const p = ${proc};\np.kill(p.pid, 'SIGKILL');\nconst home = p.env.HOME;`,
+    `const home = ${proc}['env'].HOME;`,
   ]) {
     assert.deepEqual(killFindings(source), [], source);
   }
@@ -493,6 +512,18 @@ test('an interposer may hold process.kill only to forward its own pid and signal
   ]) {
     assert.deepEqual(killFindings(hold + extra, { interposer: true }).map((f) => f.line), [line], extra);
   }
+  const body = (lines) => `const kill = ${kill};\n${kill} = function probe(pid, signal) {\n${lines}\n};\n`;
+  assert.deepEqual(killFindings(body('  pid = 0;\n  return kill.call(this, pid, signal);'), { interposer: true }).map((f) => f.line), [4],
+    'a forward of a changed pid is not a forward');
+  assert.deepEqual(killFindings(body("  if (pid === 7) log('}');\n  return kill.call(this, pid, signal);"), { interposer: true }), [],
+    'a brace in a string does not end the replacement');
+  assert.deepEqual(killFindings(body("  log('{');\n  return kill.call(this, pid, signal);")
+    + 'function other(pid, signal) {\n  return kill.call(this, pid, signal);\n}\n', { interposer: true }).map((f) => f.line), [7],
+  'a brace in a string does not stretch the replacement over the next function');
+  // Another binding named like the alias is another value.
+  assert.deepEqual(killFindings(`${hold}function relay(kill) { return kill(); }\nconst stop = (kill) => kill.now();\n[1].map(kill => kill + 1);\n`,
+    { interposer: true }), []);
+  assert.deepEqual(killFindings(`if (env.X) {\n  ${hold}}\nfunction later(pid) { const kill = signals.kill; kill(pid); }\n`, { interposer: true }), []);
   const apart = `const kill = ${kill};\nconst read = fs.readFileSync;\n${kill} = function probe(pid, signal) {\n  return kill.call(this, pid, signal);\n};\n`;
   assert.deepEqual(killFindings(apart, { interposer: true }).map((f) => f.line), [1],
     'the replacement must follow the held original at once');
