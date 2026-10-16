@@ -677,11 +677,15 @@ test('a queued check stalls only past the 24-hour queue limit, a started one pas
     assert.equal((await gate.run(ctx(queued(), { revision: 1, evidence: [e] }))).stalled, undefined);
   }
   // An Actions job's workflow run gives its creation time, with no earlier evidence needed.
-  const workflow = (minutes) => [{ id: 5, name: 'ci', path: '.github/workflows/ci.yml', workflow_id: 1, event: 'pull_request', head_sha: SHA,
-    head_branch: 'change', check_suite_id: 77, status: 'queued', conclusion: null, run_attempt: 1, created_at: ago(minutes) }];
-  const actions = (minutes) => checks({ status: 'queued', suite: 77 }, workflow(minutes));
+  const workflow = (minutes, extra = {}) => [{ id: 5, name: 'ci', path: '.github/workflows/ci.yml', workflow_id: 1, event: 'pull_request', head_sha: SHA,
+    head_branch: 'change', check_suite_id: 77, status: 'queued', conclusion: null, run_attempt: 1, created_at: ago(minutes), ...extra }];
+  const actions = (minutes, extra) => checks({ status: 'queued', suite: 77 }, workflow(minutes, extra));
   assert.equal((await gate.run(ctx(actions(23 * 60), { revision: 1, evidence: [] }))).stalled, undefined);
   assert.equal((await gate.run(ctx(actions(24 * 60 + 31), { revision: 1, evidence: [] }))).stalled, true);
+  // A re-run keeps the run's created_at; its attempt's run_started_at is when the job queued again.
+  const rerun = actions(3 * 24 * 60, { run_attempt: 2, run_started_at: ago(10) });
+  assert.equal((await gate.run(ctx(rerun, { revision: 1, evidence: [] }))).stalled, undefined, 'a job re-run on an old head is not stalled');
+  assert.equal((await gate.run(ctx(actions(3 * 24 * 60, { run_attempt: 2, run_started_at: ago(24 * 60 + 31) }), { revision: 1, evidence: [] }))).stalled, true);
 
   // This repository's own jobs run 20 to 45 minutes in progress with no status change.
   const running = (minutes) => checks({ status: 'in_progress', started_at: ago(minutes) });

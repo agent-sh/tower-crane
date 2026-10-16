@@ -1324,8 +1324,9 @@ stays the receipt. Pending CI with nothing queued or running for 30 minutes at
 the same head and revision, counted from the first such entry, records
 `stalled: true` and prints `STALLED`. Checks that are queued or running wait
 much longer. A check queued without starting stalls past GitHub's 24-hour
-queue limit plus 30 minutes, counted from its workflow run's `created_at` for
-an Actions job and otherwise from the entry that recorded the same pending
+queue limit plus 30 minutes, counted for an Actions job from the later of its
+workflow run's `created_at` and `run_started_at` (a re-run keeps `created_at`
+and starts a new attempt), and otherwise from the entry that recorded the same pending
 summary: a job no runner will pick up. Jobs queued behind other PRs on busy or
 self-hosted runners are healthy. A check in progress stalls past GitHub's
 6-hour job limit plus 30 minutes from its `started_at` (from the unchanged
