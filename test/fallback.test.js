@@ -545,6 +545,40 @@ test('route pins key on the canonical user file, and a pin written under a spell
   assert.equal(open(folded, 'medium'), 0);
 });
 
+// Found in the T376 review: a clear that emptied the canonical entry deleted
+// it, so an old spelling the fold missed, a link that named another file at
+// the clear, was read again once the link came back.
+test('a cleared rung stays cleared through an old spelling that named another file at the clear', (t) => {
+  const dir = fs.realpathSync.native(fs.mkdtempSync(path.join(tempRoot(), 'tower-crane-route-pins-')));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const project = { owner_config_dir: path.join(dir, 'owner-dir') };
+  const [a, b] = ['a', 'b'].map((d) => path.join(dir, d));
+  for (const d of [a, b]) {
+    fs.mkdirSync(d);
+    fs.writeFileSync(path.join(d, 'c.json'), '{}');
+  }
+  const base = { home: dir, cwd: dir };
+  const routes = [{ harness: 'claude', model: 'second', env: { ROUTE_ENV: 'fallback' } }];
+  const open = (file) => RouteGrants.unapproved(project, file, 'easy', routes, ['claude'], base).length;
+  // A link L, simulated so the test runs where links need a privilege.
+  const link = path.join(dir, 'L');
+  let target = a;
+  const native = fs.realpathSync.native;
+  fs.realpathSync.native = (p, ...rest) => native(String(p).startsWith(link) ? target + String(p).slice(link.length) : p, ...rest);
+  t.after(() => { fs.realpathSync.native = native; });
+  const spelled = path.join(link, 'c.json');
+
+  // An earlier version pinned the route under L/c.json while L named a.
+  fs.mkdirSync(path.dirname(RouteGrants.file(project)), { recursive: true });
+  fs.writeFileSync(RouteGrants.file(project), JSON.stringify({ version: 1, files: { [spelled]: { easy: [RouteGrants.hash(routes[0], base, 'claude')] } } }));
+  assert.equal(open(spelled), 0);
+  target = b;
+  RouteGrants.pin(project, path.join(a, 'c.json'), 'easy', [], ['claude'], base);
+  assert.deepEqual(RouteGrants.read(project)[path.join(a, 'c.json')], {}, 'the cleared file keeps an empty canonical entry');
+  target = a;
+  assert.equal(open(spelled), 1, 'the cleared pin does not come back through L');
+});
+
 for (const reason of ['outage', 'refusal']) {
   test(`exhausted ${reason} fallback leaves a blocked claim and records the final route exit`, (t) => {
     const h = setup(t, { reason, chain: true });
