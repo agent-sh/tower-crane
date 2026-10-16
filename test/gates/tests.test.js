@@ -284,7 +284,20 @@ test('host case counts distinguish TAP, spec, all skips and unreported output', 
     ['# tests 1\n# pass 0\n# fail 0\n# skipped 0\n# todo 1\n', { ran: 0, skipped: 1 }],
     ['ok host.test.js\n', { ran: null, skipped: null }],
     ['# tests 2\n# pass 1\n# fail 0\n# skipped 0\n', { ran: null, skipped: null }],
+    // A reporter that links or titles its summary lines still gives its counts.
+    ['\x1b]8;;file:///x\x07ℹ tests 2\x1b]8;;\x07\nℹ pass 1\nℹ fail 0\n\x9d0;t\x9cℹ skipped 1\n', { ran: 1, skipped: 1 }],
   ]) assert.deepEqual(gate.hostCounts({ output }), expected, output);
+});
+
+test('host skip reasons lose terminal escapes before they are redacted and cut', () => {
+  const { createRedactor } = require('../../lib/gates/common');
+  const token = `ghp_${'b2'.repeat(18)}`;
+  const redact = createRedactor([['HOST_TOKEN', token]]);
+  const output = [
+    'ok 1 - live # SKIP \x1b]8;;https://example.test\x07set TC_HOST_OPT_IN=1\x1b]8;;\x07',
+    `ok 2 - token # SKIP token ${token.slice(0, 6)}\x1b]0;t\x07${token.slice(6, 12)}\x1b\x7f${token.slice(12)}`,
+  ].join('\n');
+  assert.deepEqual(gate.skipReasons({ output }, redact), ['set TC_HOST_OPT_IN=1', 'token [redacted:HOST_TOKEN]']);
 });
 
 test('default host test formats exclude data; explicit paths support other formats', () => {
