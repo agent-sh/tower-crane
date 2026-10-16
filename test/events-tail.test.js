@@ -361,7 +361,7 @@ function tornCommit(h, first) {
 // Whether offset lies in the one recorded cut's range, where only cursors
 // taken before the cut move back.
 function inCut(h, offset) {
-  const { cuts } = require('../lib/event-reader').readCuts(path.join(h.state, 'events.jsonl'));
+  const cuts = fs.readFileSync(path.join(h.state, 'events.cuts.jsonl'), 'utf8').trim().split('\n').map((line) => JSON.parse(line));
   assert.equal(cuts.length, 1);
   return cuts[0].size < offset && offset <= cuts[0].from;
 }
@@ -431,11 +431,12 @@ test('a torn cut record does not swallow the next one', (t) => {
   const h = cutFixture();
   t.after(h.cleanup);
   const log = path.join(h.state, 'events.jsonl');
-  fs.writeFileSync(path.join(h.state, 'events.cuts.jsonl'), '{"at":"2026-10-16T00:00:00.000Z","si');
   const reader = new EventReader(log);
   reader.read();
   const { size } = tornCommit(h, message('owner', 'orchestrator', 'torn first'));
   reader.read();
+  // A record torn by a power cut, after the reader last read.
+  fs.writeFileSync(path.join(h.state, 'events.cuts.jsonl'), '{"at":"2026-10-16T00:00:00.000Z","si');
   h.ok(['msg', '--to', 'orchestrator', LONG]);
   const batch = reader.read();
   assert.deepEqual(batch.rows.map((e) => e.detail.text), [LONG]);

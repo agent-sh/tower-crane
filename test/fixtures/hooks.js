@@ -257,7 +257,7 @@ function before(name, args) {
   // HOOK_DIE_RECORDING_CUT=1: a lock holder is killed as it opens
   // events.cuts.jsonl, after recovery cut the log and before it recorded the cut.
   if (env.HOOK_DIE_RECORDING_CUT && name === 'openSync' && inState(target) && path.basename(String(target)) === 'events.cuts.jsonl'
-    && args[1] === 'a+' && path.basename(process.argv[1]) === 'tower-crane.js' && ownsLock()) {
+    && /^a/.test(String(args[1])) && path.basename(process.argv[1]) === 'tower-crane.js' && ownsLock()) {
     process.kill(process.pid, 'SIGKILL');
     sleep(5000);
   }
