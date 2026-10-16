@@ -1338,9 +1338,14 @@ test('a broker whose agent sent its whole pack in one read sees the agent hang u
     { socket: (s) => { sock = s; } });
   await waitUntil(() => fs.existsSync(started), { paths: [f.h.base], what: 'the broker\'s push reaches the remote\'s hook' });
   sock.end(Buffer.from('after the end frame'));
-  await done;
-  await waitUntil(() => !fs.existsSync(lock), { paths: [path.dirname(lock)], what: 'the push ends and frees the cache lock' });
+  // A broker that missed the hang-up holds the cache lock in the hook until
+  // the release file appears, so the wait is bounded and then releases it.
+  const bound = AbortSignal.timeout(20000); // wait-allow: a broker that missed the hang-up never stops the push; the bound turns that into a prompt failure
+  const stopped = await waitUntil(() => !fs.existsSync(lock), { paths: [path.dirname(lock)], signal: bound, what: 'the push ends and frees the cache lock' })
+    .then(() => true, () => false);
   fs.writeFileSync(release, '');
+  await done;
+  assert.ok(stopped, 'the broker saw the agent hang up and stopped its push within 20 s');
   assert.equal(f.remoteRef(`refs/heads/${f.task.branch}`), null, 'the push of an agent that hung up was stopped');
 });
 
