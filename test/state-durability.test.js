@@ -512,6 +512,33 @@ for (const mode of ['fresh', 'retained']) {
   });
 }
 
+// macOS and Windows filesystems cannot be mounted here, so their checks run
+// against what each platform would report.
+test('the read fast path counts only local disks: Linux by filesystem type, macOS by the root\'s type, Windows by drive path', () => {
+  const { localDir } = require('../lib/event-reader');
+  // macOS numbers filesystem types in the order it registers them: APFS
+  // need not have the same number on two machines.
+  const mac = (apfs, dirType) => ({ platform: 'darwin', statfsType: (dir) => (dir === '/' ? apfs : dirType) });
+  const win = (real) => ({ platform: 'win32', realpath: () => real });
+  const linux = (type) => ({ platform: 'linux', statfsType: () => type });
+  const failing = (platform) => ({ platform, statfsType() { throw new Error('EIO'); }, realpath() { throw new Error('EIO'); } });
+  for (const [probe, local, what] of [
+    [linux(0xEF53), true, 'ext4'],
+    [linux(0x6969), false, 'NFS on Linux'],
+    [failing('linux'), false, 'a Linux statfs that fails'],
+    [mac(26, 26), true, 'APFS, as the root'],
+    [mac(19, 19), true, 'APFS registered under another number'],
+    [mac(26, 31), false, 'SMB, NFS or FUSE: another type than the root'],
+    [mac(26, 17), false, 'HFS+'],
+    [failing('darwin'), false, 'a macOS statfs that fails'],
+    [win('C:\\Users\\alice\\repo\\.tower-crane'), true, 'a local drive'],
+    [win('\\\\nas\\share\\repo\\.tower-crane'), false, 'a UNC share, or a mapped drive that resolves to one'],
+    [win('//nas/share/repo'), false, 'a UNC share with forward slashes'],
+    [failing('win32'), false, 'a path that does not resolve'],
+    [{ platform: 'freebsd' }, false, 'a platform without a check'],
+  ]) assert.equal(localDir('/state', probe), local, what);
+});
+
 test('a plain read of retained events after a cut and an equal-size append never vouches for the old last line', (t) => {
   const h = setup(t);
   t.after(S.retainEvents(h.state));
