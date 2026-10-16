@@ -597,7 +597,7 @@ function windowsLock(t) {
   const windowsCreated = P.windowsCreated;
   const times = new Map([[process.pid, 5]]);
   const w = { dir, pid: child.pid, times, reads: 0 };
-  const forget = () => { S.processCreated?.cache.clear(); S.processCreated?.gone.clear(); };
+  const forget = () => { S.processCreated?.cache.clear(); S.processCreated?.gone?.clear(); };
   Object.defineProperty(process, 'platform', { ...platform, value: 'win32' });
   P.windowsCreated = (pids) => {
     w.reads++;
