@@ -420,6 +420,42 @@ test('a pending climb at a held dispatch lock stalls neither the wait host nor i
   assert.deepEqual(h.readAttempts().map((a) => a.rung), ['easy', 'medium']);
 });
 
+// A drain can arrive while wait's recovery awaits one task, before it reaches
+// the next climb's dispatch. That spawn refuses, so the climb stays pending
+// and wait still exits with its signal report rather than an error.
+test('a drain during wait\'s recovery leaves the climb pending and wait reports the signal', {
+  skip: process.platform === 'win32' ? 'Windows process.kill does not deliver POSIX signals' : false,
+}, async (t) => {
+  const h = await setup(t);
+  const command = h.readState('project.json').ladder.medium.command;
+  h.ok(['ladder', 'set', 'medium', '--command', JSON.stringify([path.join(h.base, 'missing-worker')])]);
+  h.ok(['spawn', '--task', 'T1']);
+  await h.until(() => h.task().escalation_pending === true);
+  h.ok(['ladder', 'set', 'medium', '--command', JSON.stringify(command)]);
+  const attempts = h.readAttempts().length;
+  const preload = path.join(h.base, 'drain-during-recovery.js');
+  // The first recovery call signals wait, then awaits as an earlier recovery's
+  // agent startup would, so the drain lands before the climb's dispatch.
+  fs.writeFileSync(preload, `const E = require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'escalation.js'))});
+const recover = E.recover;
+let first = true;
+E.recover = async (ctx) => {
+  if (first) {
+    first = false;
+    process.kill(process.pid, 'SIGTERM');
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+  return recover(ctx);
+};
+`);
+  const r = await h.runAsync(['wait', '--follow', '--types', 'worker-message', '--agent', 'orchestrator'], { pre: ['--require', preload] });
+  assert.equal(r.code, 0, r.stderr);
+  assert.deepEqual(JSON.parse(r.stdout.trim().split('\n').at(-1)), { reason: 'signal', signal: 'SIGTERM', drained: 0 });
+  assert.doesNotMatch(r.stderr, /Error: wait interrupted/);
+  assert.equal(h.task().escalation_pending, true, 'the climb waits for the next wait');
+  assert.equal(h.readAttempts().length, attempts, 'no agent starts during the drain');
+});
+
 test('wait recovers a verified worker exit after its supervisor is lost', {
   skip: process.platform !== 'linux' && 'independent POSIX worker and monitor termination',
 }, async (t) => {
