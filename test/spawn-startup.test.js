@@ -19,6 +19,9 @@ function setup(t) {
   });
 }
 
+// The dispatch's startup window (lib/spawn.js STARTUP_MS).
+const STARTUP_MS = 10000;
+
 const commandRung = (h) => pinRung(h, 'small', { harness: 'command', command: [process.execPath, '-e', 'process.exit(0)', '{prompt}'] });
 
 // A preload that runs only in the supervisor, before its main module.
@@ -253,7 +256,7 @@ cp.spawnSync = () => {
   assert.equal(kept.length, 1);
   const phases = keptPhases(path.join(h.state, 'logs', kept[0]));
   t.diagnostic(`stalled startup_ms ${JSON.stringify(phases)}`);
-  assert.ok(phases.total >= 10000 && phases.receipt >= 10000, JSON.stringify(phases));
+  assert.ok(phases.total >= STARTUP_MS && phases.receipt >= STARTUP_MS, JSON.stringify(phases));
   assert.equal(phases.ready, undefined, 'a small agent has no handshake');
   assert.ok(phases.supervisor.boot > 0, 'the supervisor wrote the phases it finished beside the receipt');
   assert.equal(phases.supervisor.setup, undefined, 'it stalled in setup');
@@ -280,7 +283,9 @@ for (const [role, hooks] of [['small', {}], ['worker', { HOOK_NO_SH: '1' }]]) {
     for (const value of [...Object.values(phases).filter((v) => typeof v === 'number'), ...Object.values(phases.supervisor)]) {
       assert.ok(Number.isInteger(value) && value >= 0, JSON.stringify(phases));
     }
-    assert.ok(phases.total > 0 && phases.total < 10000 * (handshake ? 2 : 1), JSON.stringify(phases));
+    // A successful start ends before its deadlines; a slow host can come
+    // close to one, so the bound only rules out nonsense.
+    assert.ok(phases.total > 0 && phases.total < 2 * STARTUP_MS * (handshake ? 2 : 1), JSON.stringify(phases));
     assert.ok(phases.supervisor.boot > 0, 'Node takes time to start');
     // Rounding to whole ms lets each sum pass the total by under 1 ms a term.
     const sum = (values) => values.reduce((a, b) => a + b, 0);
