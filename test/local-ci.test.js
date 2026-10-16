@@ -544,10 +544,16 @@ test('a token that escapes take part of and split, or that a line break splits, 
     ['a stray ESC takes the first character', `a \x1b${head}\x1b[1m${tail} b`, 'a [redacted:X] b'],
     ['a word before the stray ESC', `a\x1b${head}\x1b[1m${tail}`, 'a [redacted:X]'],
     ['ESC ( takes the first character', `\x1b(${head}\x1b[1m${tail}`, '[redacted:X]'],
-    ['a charset escape splits it too', `\x1b${head}\x1b(B${tail}`, '[redacted:GITHUB_TOKEN]'],
+    ['a charset escape splits it too', `\x1b${head}\x1b(B${tail}`, '[redacted:X]'],
     ['an unterminated OSC takes the head', `\x1b]0;title ${head}\x1b[1m${tail}\nnext`, '[redacted:X]\nnext'],
     ['a newline splits the token', `key ${github.slice(0, 10)}\n${github.slice(10)} done`, 'key [redacted:X] done'],
     ['CRLF splits the token', `key ${github.slice(0, 10)}\r\n${github.slice(10)} done`, 'key [redacted:X] done'],
+    // A removed line break is a word boundary: the lines around the token do not glue onto it.
+    ['a word line before a token split across lines', `token is\n${github.slice(0, 14)}\n${github.slice(14)} ok`, 'token is\n[redacted:X] ok'],
+    ['a split token whose tail ends its line', `key ${github.slice(0, 10)}\n${github.slice(10)}\nnext`, 'key [redacted:X]\nnext'],
+    // ESC [ right before a token reads as a CSI whose final byte is the token's first letter.
+    ['ESC [ takes the first character', `x \x1b[${github} y`, 'x [redacted:X] y'],
+    ['ESC [ takes the first character of a split token', `x \x1b[${head}\x1b[1m${tail} y`, 'x [redacted:X] y'],
     // Kept as they were: a token that ends its line keeps the next line's first word, a header
     // value ends at its line, and an escape's final byte after a token does not change its label.
     ['a token ends its line', `token ${github}\nnext line`, 'token [redacted:X]\nnext line'],
@@ -557,8 +563,24 @@ test('a token that escapes take part of and split, or that a line break splits, 
     assert.equal(env(env.strip(input)), expected.replaceAll('[redacted:X]', '[redacted:FIXTURE_TOKEN]'), name);
     assert.equal(plain(plain.strip(input)), expected.replaceAll('[redacted:X]', '[redacted:GITHUB_TOKEN]'), name);
   }
-  // A fixed-length shape keeps its word boundary when it is joined back.
+  // A fixed-length shape keeps its word boundary when it is joined back, with a line after it too.
   assert.equal(plain(plain.strip(`k=${aws.slice(0, 9)}\n${aws.slice(9)}\n`)), 'k=[redacted:AWS_ACCESS_KEY_ID]\n');
+  assert.equal(plain(plain.strip(`id=${aws.slice(0, 9)}\n${aws.slice(9)}\nnext line`)), 'id=[redacted:AWS_ACCESS_KEY_ID]\nnext line');
+  // An environment value is redacted however escapes and line breaks split it: here a stray ESC
+  // takes one of its characters, a real two-character escape sits in it and a line break splits it.
+  const value = 'Zq9Xw8Vu7Ts6Rq5Po4Nm3Lk2Ji1Hg0';
+  const values = createRedactor([['MY_SECRET', value]]);
+  for (const input of [
+    `v=${value[0]}\x1b${value.slice(1, 4)}\n${value.slice(4)} end`,
+    `v=${value[0]}\x1bM${value.slice(1, 5)}\x1b(${value.slice(5)} end`,
+    `v=${value.slice(0, 3)}\x1b7${value.slice(3, 9)}\r\n\x1b[1m${value.slice(9)} end`,
+  ]) assert.equal(values(values.strip(input)), 'v=[redacted:MY_SECRET] end', JSON.stringify(input));
+  // A join takes a bounded run: a short prefix before many lines of token characters takes a few
+  // of them, not the rest of the text.
+  const lines = `sk-ab\n${'cd\n'.repeat(20000)}`;
+  const joined = plain(plain.strip(lines));
+  assert.ok(joined.startsWith('[redacted:API_KEY]\ncd\n'), joined.slice(0, 40));
+  assert.ok(joined.split('\n').length > 19990);
 });
 
 test('a binary artifact is redacted at its exact bytes, or missed when a secret shows only in another view', () => {
@@ -612,7 +634,11 @@ test('a binary artifact is redacted at its exact bytes, or missed when a secret 
     ['an unterminated OSC takes a split token\'s head', bytes(nul, `\x1b]0;t ${github.slice(0, 8)}\x1b[1m${github.slice(8)}\n`), /gently/],
     ['a token split across lines', bytes(nul, `${github.slice(0, 10)}\n${github.slice(10)}`), /line breaks removed/],
     ['a token split by CRLF', bytes(nul, `${github.slice(0, 10)}\r\n${github.slice(10)}`), /line breaks removed/],
-    ['an environment value split across lines', bytes(nul, `${value.slice(0, 5)}\n${value.slice(5)}`), /line breaks removed/],
+    ['an environment value split across lines', bytes(nul, `${value.slice(0, 5)}\n${value.slice(5)}`), /inside an environment value/],
+    ['an environment value split by a stray and a real escape', bytes(nul, `${value.slice(0, 1)}\x1bM${value.slice(1, 5)}\x1b(${value.slice(5)}`), /inside an environment value/],
+    ['an AWS key split across lines before a word line', bytes(nul, `id=${aws.slice(0, 9)}\n${aws.slice(9)}\nnext line`), /line breaks removed/],
+    ['a word line before a token split across lines', bytes(nul, `token is\n${github.slice(0, 14)}\n${github.slice(14)} ok`), /line breaks removed/],
+    ['ESC [ takes a split token\'s first character', bytes(nul, `x \x1b[${github.slice(0, 8)}\x1b[1m${github.slice(8)}`), /gently/],
   ]) assert.match(redact.bytes(input).missed || '', view, name);
 });
 
