@@ -1130,12 +1130,13 @@ const alive = (pid) => { try { killPid(pid, 0); return true; } catch { return fa
 // after the writer's shutdown, so an agent that ends its side to mark the end
 // of its pack loses the answer. A peer that closes the connection when the
 // agent ends its side stands in for that pipe on every platform.
-test('a push gets its answer over a connection that closes when the agent ends its side, as a Windows named pipe does', async (t) => {
+test('a push gets its answer over a connection that closes when the agent ends its side, as a Windows named pipe does, and an empty chunk of its pack ends nothing', async (t) => {
   const { base } = scratch(t);
   const net = require('node:net');
   const socket = process.platform === 'win32' ? `\\\\.\\pipe\\tower-crane-test-${process.pid}-${Date.now()}` : path.join(base, 's');
   let got = Buffer.alloc(0);
   let request = null;
+  let answered = false;
   const framed = Buffer.from([0, 0, 0, 3, ...Buffer.from('abc'), 0, 0, 0, 4, ...Buffer.from('defg'), 0, 0, 0, 0]);
   const server = net.createServer({ allowHalfOpen: false }, (conn) => {
     conn.on('error', () => {});
@@ -1146,10 +1147,12 @@ test('a push gets its answer over a connection that closes when the agent ends i
         if (nl < 0) return;
         request = JSON.parse(got.subarray(0, nl).toString('utf8'));
         got = got.subarray(nl + 1);
-        conn.write(`${JSON.stringify({ stderr: 'checking\n' })}\n${JSON.stringify({ need: { have: [] } })}\n`);
+        conn.write(`${JSON.stringify({ stderr: 'checking\n' })}\n${JSON.stringify({ need: { have: [], framed: true } })}\n`);
       }
       // The broker checks the push for a while before it answers.
-      if (got.equals(framed)) setTimeout(() => conn.end(`${JSON.stringify({ code: 0 })}\n`), 200); // wait-allow: the fake broker's checking time, so the agent's side must stay open past its own pack
+      if (got.length < framed.length || answered) return;
+      answered = true;
+      setTimeout(() => conn.end(`${JSON.stringify({ code: 0 })}\n`), 200); // wait-allow: the fake broker's checking time, so the agent's side must stay open past its own pack
     });
   });
   await new Promise((resolve) => server.listen(socket, resolve));
@@ -1157,12 +1160,156 @@ test('a push gets its answer over a connection that closes when the agent ends i
   const file = path.join(base, B.FILE);
   fs.writeFileSync(file, JSON.stringify({ socket, token: 'k' }));
   let stderr = '';
-  const pack = () => require('node:stream').Readable.from([Buffer.from('abc'), Buffer.from('defg')]);
+  const pack = () => require('node:stream').Readable.from([Buffer.from('abc'), Buffer.alloc(0), Buffer.from('defg')]);
   const code = await B.request(file, { push: { sha: 'a'.repeat(40) } }, { stdout() {}, stderr: (s) => { stderr += s; } }, { pack });
   assert.equal(code, 0);
   assert.deepEqual(request, { token: 'k', push: { sha: 'a'.repeat(40) } });
   assert.equal(stderr, 'checking\n');
   assert.ok(got.equals(framed), 'the pack arrives in frames, ended by an empty frame');
+});
+
+// A body that cannot take a whole frame asks the connection to wait for its
+// drain, but once the end frame came in the same read no drain comes, and a
+// connection paused for it would miss the agent's hang-up during the checks
+// and the push.
+test('the broker\'s unframing never waits on a body the end frame has ended', () => {
+  const { PassThrough } = require('node:stream');
+  const body = new PassThrough({ highWaterMark: 4 });
+  const unframe = B.frames(body);
+  const room = unframe(Buffer.concat([B.frame(Buffer.from('abcdefgh')), B.frame(Buffer.alloc(0))]));
+  assert.equal(body.writableEnded, true, 'the empty frame ended the body');
+  assert.equal(room, true, 'an ended body never asks the connection to wait');
+  // A full body that has not ended still asks it to wait.
+  const open = new PassThrough({ highWaterMark: 4 });
+  assert.equal(B.frames(open)(B.frame(Buffer.from('abcdefgh'))), false);
+});
+
+// An agent that speaks the push protocol by hand: it sends the request
+// line and, when the broker asks for the pack, writes what send(have)
+// returns, each buffer as one write; end then ends its side, as a shim from
+// before frames did. Resolves with the answer's code (null without one), its
+// stderr and the {need} the broker sent.
+function handPush(f, sha, send, { end = false } = {}) {
+  const net = require('node:net');
+  const b = JSON.parse(fs.readFileSync(f.job.broker, 'utf8'));
+  return new Promise((resolve) => {
+    const sock = b.socket ? net.connect({ path: b.socket, allowHalfOpen: true }) : net.connect({ port: b.port, host: b.host, allowHalfOpen: true });
+    let buf = '';
+    let code = null;
+    let stderr = '';
+    let need = null;
+    sock.setEncoding('utf8');
+    sock.on('error', () => {});
+    sock.on('connect', () => sock.write(`${JSON.stringify({ token: b.token, push: { sha } })}\n`));
+    sock.on('data', (d) => {
+      buf += d;
+      for (let nl = buf.indexOf('\n'); nl >= 0; nl = buf.indexOf('\n')) {
+        const msg = JSON.parse(buf.slice(0, nl));
+        buf = buf.slice(nl + 1);
+        if (msg.code !== undefined) code = msg.code;
+        else if (typeof msg.stderr === 'string') stderr += msg.stderr;
+        else if (msg.need && !need) {
+          need = msg.need;
+          for (const part of send(need.have)) sock.write(part);
+          if (end) sock.end();
+        }
+      }
+    });
+    sock.on('end', () => sock.destroy());
+    sock.on('close', () => resolve({ code, stderr, need }));
+  });
+}
+
+// The pack the shim would send for sha, whole, as one buffer.
+function packOf(f, sha, have) {
+  return require('node:child_process').execFileSync('git', ['pack-objects', '--stdout', '--revs', '--thin', '--delta-base-offset', '-q'],
+    { cwd: f.wt.path, input: [sha, ...have.map((h) => `^${h}`)].map((l) => `${l}\n`).join('') });
+}
+
+// Bad frames from an agent's own client: none allocates by its claimed
+// length, a frame or header that stops short is ended by the idle limit, and
+// each leaves the cache lock free and the branch unpushed. A pack index-pack
+// reads whole needs no more, and bytes after the end frame are dropped.
+test('the broker refuses bad frames from the agent and frees the cache lock', async (t) => {
+  const f = await pushFixture(t);
+  const G = require('../lib/github-broker');
+  const saved = { ...G.LIMITS };
+  t.after(() => Object.assign(G.LIMITS, saved));
+  const lock = path.join(f.h.state, 'push', 'cache.lock');
+  const branch = `refs/heads/${f.task.branch}`;
+  const head = (n) => {
+    const b = Buffer.alloc(4);
+    b.writeUInt32BE(n);
+    return b;
+  };
+  const sha = f.commit('a.txt', 'a\n');
+  const refused = async (what, send) => {
+    const started = Date.now();
+    const r = await handPush(f, sha, send);
+    assert.notEqual(r.code, null, `${what}: the broker answered\n${r.stderr}`);
+    assert.notEqual(r.code, 0, `${what}: refused`);
+    assert.equal(r.need.framed, true, `${what}: the broker asks for frames`);
+    assert.equal(fs.existsSync(lock), false, `${what}: the cache lock is free`);
+    assert.equal(f.remoteRef(branch), null, `${what}: nothing was pushed`);
+    return { ...r, ms: Date.now() - started };
+  };
+  // A length near 4 GiB followed by 1 MB that is no pack: index-pack refuses
+  // its first bytes and nothing was held for the length.
+  const oversized = await refused('oversized length', () => [head(0xFFFFFFF0), Buffer.alloc(1 << 20, 0x41)]);
+  assert.match(oversized.stderr, /signature|not in the task repository/);
+  G.LIMITS.idleMs = 500;
+  const partial = await refused('partial header', () => [Buffer.from([0, 0])]);
+  assert.match(partial.stderr, /stalled/);
+  const short = await refused('length past the data', (have) => [head(1 << 20), packOf(f, sha, have).subarray(0, 12)]);
+  assert.match(short.stderr, /stalled/);
+  for (const r of [partial, short]) assert.ok(r.ms < 10000, 'the idle limit ended the push'); // wait-allow: the 500 ms idle limit under test ends the push long before any other limit
+  G.LIMITS.idleMs = saved.idleMs;
+  // The whole pack with no end frame: index-pack stops at the pack's
+  // trailer, so the push has every object it checks and goes through.
+  const whole = await handPush(f, sha, (have) => [B.frame(packOf(f, sha, have))]);
+  assert.equal(whole.code, 0, whole.stderr);
+  assert.equal(f.remoteRef(branch), sha);
+  // Bytes after the end frame are dropped.
+  const next = f.commit('b.txt', 'b\n');
+  const trailing = await handPush(f, next, (have) => [Buffer.concat([B.frame(packOf(f, next, have)), B.frame(Buffer.alloc(0)), Buffer.from('trailing bytes')])]);
+  assert.equal(trailing.code, 0, trailing.stderr);
+  assert.equal(f.remoteRef(branch), next);
+  assert.equal(fs.existsSync(lock), false);
+});
+
+// During an upgrade a running broker and a new shim, or the reverse, are
+// from either side of the change to frames. Both report that, not a broken
+// pack.
+test('a shim and a broker from either side of the change to frames say so', async (t) => {
+  const f = await pushFixture(t);
+  const sha = f.commit('a.txt', 'a\n');
+  // A shim from before frames sends the bare pack and ends its side.
+  const old = await handPush(f, sha, (have) => [packOf(f, sha, have)], { end: true });
+  assert.notEqual(old.code, null, 'the old shim gets the answer');
+  assert.notEqual(old.code, 0);
+  assert.match(old.stderr, /different Tower Crane versions/);
+  assert.equal(f.remoteRef(`refs/heads/${f.task.branch}`), null);
+  // A broker from before frames asks with no framed flag.
+  const { base } = scratch(t);
+  const net = require('node:net');
+  const socket = process.platform === 'win32' ? `\\\\.\\pipe\\tower-crane-test-old-${process.pid}-${Date.now()}` : path.join(base, 's');
+  const server = net.createServer((conn) => {
+    conn.on('error', () => {});
+    let asked = false;
+    conn.on('data', () => {
+      // It reads the bytes after its {need} as a bare pack, which a frame's
+      // length does not start.
+      if (asked) conn.end(`${JSON.stringify({ stderr: 'tower-crane: pack signature mismatch\n' })}\n${JSON.stringify({ code: 1 })}\n`);
+      else conn.write(`${JSON.stringify({ need: { have: [] } })}\n`);
+      asked = true;
+    });
+  });
+  await new Promise((resolve) => server.listen(socket, resolve));
+  t.after(() => server.close());
+  const file = path.join(base, B.FILE);
+  fs.writeFileSync(file, JSON.stringify({ socket, token: 'k' }));
+  const pack = () => require('node:stream').Readable.from([Buffer.from('PACK')]);
+  await assert.rejects(B.request(file, { push: { sha: 'a'.repeat(40) } }, { stdout() {}, stderr() {} }, { pack }), /different Tower Crane versions/);
 });
 
 // index-pack stops at the first object fsck refuses, long before a large
