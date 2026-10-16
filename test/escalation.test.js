@@ -443,7 +443,7 @@ E.recover = async (ctx) => {
   if (first) {
     first = false;
     process.kill(process.pid, 'SIGTERM');
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    await new Promise((resolve) => setTimeout(resolve, 200)); // wait-allow: stands in for an earlier recovery's agent startup, not a readiness wait
   }
   return recover(ctx);
 };
