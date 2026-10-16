@@ -320,6 +320,18 @@ for (const provider of ['anthropic', 'bedrock']) {
 
 test('Bedrock env_file readiness is deferred without reading the file during a dry run', (t) => {
   const h = setup(t);
+  // A cache root as short as a user's own gives claude its short temp directories
+  // (claudeTmp), whose planning asks for the worker's environment. Under the
+  // fixture's deeper root the preview skipped that step, so only runs with a short
+  // test root saw a preview read the file.
+  if (process.platform !== 'win32') {
+    fs.mkdirSync(path.join(require('node:os').homedir(), '.cache'), { recursive: true });
+    const cache = fs.mkdtempSync(path.join(require('node:os').homedir(), '.cache', 'tc-test-'));
+    t.after(() => fs.rmSync(cache, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
+    const short = path.join(cache, 'tc', '0'.repeat(12));
+    assert.ok(Buffer.byteLength(short) <= require('../lib/gate-tmp').HARNESS_TMPDIR_MAX, `${short} fits claude's proxy sockets`);
+    h.env.XDG_CACHE_HOME = cache;
+  }
   h.primary('bedrock');
   const file = path.join(h.base, 'provider.env');
   h.ok(['project', 'set', '--env_file', file]);
