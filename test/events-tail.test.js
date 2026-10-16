@@ -722,3 +722,40 @@ test('a cut recorded while a reader reads the log after it is in the cursor the 
   assert.equal(reader.cuts, cutsSize(log));
   assert.equal(cutBack(log, batch.offset, reader.cuts), batch.offset, 'the cursor does not move back over the event it was handed out after');
 });
+
+test('a cut recorded during a read that starts past it sends the reader back for the line before its start', (t) => {
+  const h = cutFixture();
+  t.after(h.cleanup);
+  const log = path.join(h.state, 'events.jsonl');
+  const first = message('worker', 'orchestrator', 'torn first');
+  const second = message('worker', 'orchestrator', 'torn second');
+  const reader = new EventReader(log);
+  reader.read();
+  // A commit's append torn in two writes: the reader reads its first line
+  // before the fragment of the second lands.
+  const { size, dev, ino } = fs.statSync(log);
+  fs.writeFileSync(path.join(h.state, `tasks.json.${second.id}.commit`), fs.readFileSync(path.join(h.state, 'tasks.json')));
+  fs.writeFileSync(path.join(h.state, `commit.${second.id}.json`), JSON.stringify({ size, dev, ino, ids: [first.id, second.id] }));
+  fs.appendFileSync(log, `${JSON.stringify(first)}\n`);
+  assert.deepEqual(reader.read().rows.map((e) => e.detail.text), ['torn first']);
+  fs.appendFileSync(log, JSON.stringify(second).slice(0, 60));
+  // Line x ends where the fragment did; y follows it.
+  const x = { ...first, id: `E${require('node:crypto').randomUUID()}`, detail: { ...first.detail, text: `torn first${'x'.repeat(60)}` } };
+  const y = message('worker', 'orchestrator', 'after x');
+  // Recovery cuts both writes off and x and y land after the reader checked
+  // the cuts file and before it reads the fragment's span.
+  const readSync = fs.readSync;
+  fs.readSync = function (...args) {
+    fs.readSync = readSync;
+    recover(h);
+    fs.appendFileSync(log, `${JSON.stringify(x)}\n${JSON.stringify(y)}\n`);
+    return readSync.apply(this, args);
+  };
+  t.after(() => { fs.readSync = readSync; });
+  const during = reader.read();
+  const next = reader.read();
+  assert.equal(next.cut, size);
+  const texts = [...during.rows, ...next.rows].map((e) => e.detail.text);
+  assert.ok(texts.includes(x.detail.text), `x was read: ${JSON.stringify(texts)}`);
+  assert.ok(texts.includes('after x'));
+});
