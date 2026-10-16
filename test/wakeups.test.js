@@ -152,16 +152,36 @@ for (const started of ['before the crash', 'after the crash and before recovery'
     h.ok(['msg', '--to', 'orchestrator', 'sizes the next message', '--agent', 'worker']);
     const extra = overhead(h);
     const early = started === 'before the crash';
-    // Marks the follower's own read of the log through the crashed bytes.
+    // Marks the follower's own read of the log through the crashed bytes, and
+    // holds its next read while `hold` exists, so it reads the log only once
+    // recovery has cut and the next commit has appended.
     const read = path.join(h.base, 'read-through');
+    const hold = path.join(h.base, 'hold-reads');
     const preload = path.join(h.base, 'read-mark.js');
     fs.writeFileSync(preload, `'use strict';
 const fs = require('node:fs');
 const path = require('node:path');
 const log = ${JSON.stringify(log)};
+const hold = ${JSON.stringify(hold)};
+const cell = new Int32Array(new SharedArrayBuffer(4));
 const fds = new Set();
 const { openSync, closeSync, readSync } = fs;
-fs.openSync = function (file, ...args) { const fd = openSync.call(this, file, ...args); if (path.resolve(String(file)) === log) fds.add(fd); return fd; };
+// Only the wait's own reader: EventReader.read called from events.js.
+const waitRead = () => {
+  const frames = new Error().stack.split('\\n');
+  const i = frames.findIndex((line) => line.includes('event-reader.js'));
+  return i !== -1 && /[\\\\/]lib[\\\\/]events\\.js/.test(frames[i + 1] || '');
+};
+fs.openSync = function (file, ...args) {
+  const ours = path.resolve(String(file)) === log;
+  if (ours && fs.existsSync(hold) && waitRead()) {
+    const deadline = Date.now() + 300000;
+    while (fs.existsSync(hold) && Date.now() < deadline) Atomics.wait(cell, 0, 0, 20);
+  }
+  const fd = openSync.call(this, file, ...args);
+  if (ours) fds.add(fd);
+  return fd;
+};
 fs.closeSync = function (fd) { fds.delete(fd); return closeSync.call(this, fd); };
 fs.readSync = function (fd, buffer, offset, length, position) {
   const n = readSync.call(this, fd, buffer, offset, length, position);
@@ -193,8 +213,10 @@ fs.readSync = function (fd, buffer, offset, length, position) {
       await waitOnRepo(h, () => fs.existsSync(read), 'the follower\'s read of the torn line');
     }
     const end = size(h);
+    fs.writeFileSync(hold, '');
     h.ok(['msg', '--to', 'orchestrator', 'n'.repeat(cut - extra), '--agent', 'worker']);
     assert.equal(size(h), end, 'recovery cut the crashed lines and the next message took their place');
+    fs.rmSync(hold);
     const next = JSON.parse(fs.readFileSync(log, 'utf8').trim().split('\n').at(-1)).id;
     // A reader resuming mid-line loses the first line it reads, never the second.
     h.ok(['msg', '--to', 'orchestrator', 'later', '--agent', 'worker']);
