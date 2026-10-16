@@ -215,6 +215,9 @@ test('the suite deadline sets the proof job timeouts and warns when the configur
   const drifted = f.check();
   assert.equal(drifted.status, 1);
   assert.match(drifted.stderr, new RegExp(`job model-swap has timeout-minutes 60; DEADLINE_MIN ${DEADLINE_MIN} in scripts/suite-time.js sets it to ${DEADLINE_MIN + 5}`));
+  fs.rmSync(path.join(f.h.repo, '.github'), { recursive: true });
+  assert.equal(f.check().status, 0, 'a tree without its workflows has no proof jobs to check');
+  fs.mkdirSync(path.join(f.h.repo, '.github', 'workflows'), { recursive: true });
   f.write('.github/workflows/ci.yml', workflow);
   const state = path.join(f.h.repo, '.tower-crane');
   fs.mkdirSync(state, { recursive: true });
@@ -315,9 +318,12 @@ test('release assembly is deterministic and leaves the archive and fragments unc
 });
 
 test('this repository keeps generated rows and its fragment instructions local', () => {
+  // The caller's own Tower Crane state is not this check's input: point it at a directory with no settings.
   const r = cp.spawnSync(process.execPath, [path.join(ROOT, 'scripts', 'check-shared-files.js')],
-    { cwd: ROOT, encoding: 'utf8', env: { ...process.env, TOWER_CRANE_CHANGE_BASE: '' }, timeout: 300000 });
+    { cwd: ROOT, encoding: 'utf8', timeout: 300000,
+      env: { ...process.env, TOWER_CRANE_CHANGE_BASE: '', TOWER_CRANE_STATE: path.join(ROOT, 'test', 'no-state') } });
   assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.stderr, '');
   const skill = fs.readFileSync(path.join(ROOT, 'skills', 'tower-crane-work', 'SKILL.md'), 'utf8');
   assert.match(skill, /update the changelog the repository's way/);
   assert.doesNotMatch(skill, /changelog\.d|COMMANDS|check:shared|docs:generate/);

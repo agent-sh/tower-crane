@@ -60,8 +60,10 @@ function projectFile(root, env) {
 // difference there only warns.
 function checkSuiteDeadline(root, env = process.env, warn = (line) => console.error(line)) {
   const found = [];
-  const workflow = readText(path.join(root, '.github', 'workflows', 'ci.yml'));
-  for (const [job, minutes] of Object.entries(JOB_TIMEOUTS)) {
+  const ci = path.join(root, '.github', 'workflows', 'ci.yml');
+  // A copy of the tree without its workflows, as test fixtures make, has no jobs to hold.
+  const workflow = fs.existsSync(ci) ? readText(ci) : null;
+  for (const [job, minutes] of workflow === null ? [] : Object.entries(JOB_TIMEOUTS)) {
     const actual = jobTimeout(workflow, job);
     if (actual !== String(minutes)) {
       found.push(`.github/workflows/ci.yml job ${job} has timeout-minutes ${actual ?? 'unset'}; DEADLINE_MIN ${DEADLINE_MIN} in scripts/suite-time.js sets it to ${minutes}`);
