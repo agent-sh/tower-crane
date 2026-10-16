@@ -1,0 +1,1 @@
+- The test wait lint rejects a shell loop in a test's script that counts iterations and sleeps, as it already did for JavaScript loops.

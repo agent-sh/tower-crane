@@ -1302,7 +1302,9 @@ test('a broker tells a shim from before framed packs why its push failed', async
 // front of that end.
 // A body fills only when index-pack falls behind the socket, which depends
 // on the platform's pipe sizes and read boundaries, so the body the broker
-// makes for this push reports itself full on every write.
+// makes for this push reports itself full on every write. Like a real body
+// it drains on a later tick unless it has ended, so a pack that comes in two
+// reads still reaches the end frame.
 test('a broker whose agent sent its whole pack in one read sees the agent hang up during the push', async (t) => {
   const f = await pushFixture(t);
   const stream = require('node:stream');
@@ -1311,6 +1313,7 @@ test('a broker whose agent sent its whole pack in one read sees the agent hang u
   class Full extends real {
     write(...args) {
       super.write(...args);
+      process.nextTick(() => this.writableEnded || this.emit('drain'));
       return false;
     }
   }
@@ -1318,10 +1321,10 @@ test('a broker whose agent sent its whole pack in one read sees the agent hang u
   const started = path.join(f.h.base, 'hook-started');
   const release = path.join(f.h.base, 'hook-release');
   const slash = (p) => p.replace(/\\/g, '/');
-  // Bounded, so a broker that misses the hang-up still finishes the push.
+  // It waits for the release file, or for the fixture to be removed when the
+  // test ends; the runner's hung-test timeout is the backstop.
   fs.writeFileSync(path.join(f.remote, 'hooks', 'pre-receive'),
-    `#!/bin/sh\n: > '${slash(started)}'\ni=0\nwhile [ ! -f '${slash(release)}' ] && [ $i -lt 300 ]; do sleep 0.1; i=$((i+1)); done\n`, { mode: 0o755 });
-  // The fixture may be gone by then, and with it what the hook waits on.
+    `#!/bin/sh\n: > '${slash(started)}'\nwhile [ ! -f '${slash(release)}' ] && [ -d '${slash(f.h.base)}' ]; do sleep 0.1; done\n`, { mode: 0o755 });
   t.after(() => { try { fs.writeFileSync(release, ''); } catch {} });
   const sha = f.commit('a.txt', 'a\n');
   let sock = null;

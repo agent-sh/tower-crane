@@ -569,6 +569,11 @@ function waitFindings(text) {
       report(lineOf(loop.start), 'an iteration count bounds a sleep loop');
     }
   }
+  // The same in a shell script a test writes: a while or until loop whose
+  // condition compares a counter and whose body sleeps.
+  for (const match of text.matchAll(/\b(?:while|until)\b[^\n]*?-(?:lt|le|gt|ge)\b[^\n]*?\bdo\b[^\n]*?\bsleep\s+[\d.]/g)) {
+    report(lineOf(match.index), 'an iteration count bounds a sleep loop');
+  }
   const promisePositions = new Set();
   for (const timer of promiseTimers) {
     const escaped = timer.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
