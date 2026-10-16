@@ -559,6 +559,8 @@ test('a token that escapes take part of and split, or that a line break splits, 
     ['a token ends its line', `token ${github}\nnext line`, 'token [redacted:X]\nnext line'],
     ['a charset reset after the token', `\x1b[31m${github}\x1b(B\x1b[m`, '[redacted:X]'],
     ['a header value ends at its line', 'Authorization: Bearer abc\nAccept: */*', 'Authorization: Bearer [redacted:AUTHORIZATION]\nAccept: */*'],
+    // A line break never falls inside a token prefix: `s` then a line `K-...` is no API key.
+    ['a prefix split by a line break', 'run 0.3 s\nK-long_async rc 1', 'run 0.3 s\nK-long_async rc 1'],
   ]) {
     assert.equal(env(env.strip(input)), expected.replaceAll('[redacted:X]', '[redacted:FIXTURE_TOKEN]'), name);
     assert.equal(plain(plain.strip(input)), expected.replaceAll('[redacted:X]', '[redacted:GITHUB_TOKEN]'), name);
@@ -602,6 +604,7 @@ test('a binary artifact is redacted at its exact bytes, or missed when a secret 
     // A token that ends its line, and a charset reset after a token, are redacted in place.
     [bytes(nul, github, '\nnext\n'), bytes(nul, '[redacted:GITHUB_TOKEN]\nnext\n')],
     [bytes(nul, `"${github}\x1b(B\x1b[m"`), bytes(nul, '"[redacted:GITHUB_TOKEN]\x1b(B\x1b[m"')],
+    [bytes(nul, 'run 0.3 s\nK-long_async rc 1'), bytes(nul, 'run 0.3 s\nK-long_async rc 1')],
     [every, every],
   ]) {
     const out = redact.bytes(input);
