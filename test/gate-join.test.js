@@ -233,10 +233,33 @@ test('the planned commands of a tests run cover each mode, expensive proof and h
   }
   const project = { gates: { tests_timeout_min: 2, clean_timeout_min: 3 }, tests: { expensive: true }, ci: { local: { command: ['ci'], timeout: 90 } } };
   const task = { kind: 'code', sha: 'abc' };
-  assert.equal(Runs.budgetMs({}, project, null, task, 'tests'), 4 * 120000);
-  assert.equal(Runs.budgetMs({ flags: { timeout: '1' } }, project, null, task, 'tests'), 4 * 60000, 'a --timeout override sets each command budget');
-  assert.equal(Runs.budgetMs({}, project, null, task, 'clean'), 180000, 'clean runs one command');
-  assert.equal(Runs.budgetMs({}, project, null, task, 'ci'), 90000, 'local CI runs one command');
+  // Each planned command gets its timeout and a minute for the metadata queries around it.
+  assert.equal(Runs.budgetMs({}, project, null, task, 'tests'), 4 * (120000 + 60000));
+  assert.equal(Runs.budgetMs({ flags: { timeout: '1' } }, project, null, task, 'tests'), 4 * (60000 + 60000), 'a --timeout override sets each command budget');
+  assert.equal(Runs.budgetMs({}, project, null, task, 'clean'), 180000 + 60000, 'clean runs one command');
+  assert.equal(Runs.budgetMs({}, project, null, task, 'ci'), 90000 + 60000, 'local CI runs one command');
+  assert.equal(Runs.budgetMs({}, { tests: { mode: 'none' } }, null, task, 'tests'), 60000, 'a run with no command keeps the metadata minute');
+});
+
+// A git listing that fails would count no host-only file and leave the deadline three commands
+// short per file, so the count falls back to the matching files in the checkout on disk.
+test('host-only files are counted from the checkout when git cannot list them twice', (t) => {
+  const { hostFileCount } = require('../lib/gates/tests');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'host-count-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  for (const file of ['test/host/a.test.js', 'test/host/deep/b.test.js', 'test/host/notes.md', 'test/plain.test.js', 'node_modules/test/host/c.test.js']) {
+    fs.mkdirSync(path.dirname(path.join(root, file)), { recursive: true });
+    fs.writeFileSync(path.join(root, file), '');
+  }
+  const project = { tests: { host_only: ['test/host/**', '**/x.host.test.js'] } };
+  const calls = [];
+  const failing = (args) => { calls.push(args); return { status: null, error: new Error('timed out'), stdout: '' }; };
+  assert.equal(hostFileCount(project, root, 'abc', failing), 2);
+  assert.equal(calls.length, 2, 'the listing is retried once before the fallback');
+  // A listing that succeeds on the retry is used as is.
+  let tries = 0;
+  const flaky = () => (++tries === 1 ? { status: 128, stdout: '' } : { status: 0, stdout: 'test/host/a.test.js\0test/host/z.test.js\0test/host/c.test.js\0' });
+  assert.equal(hostFileCount(project, root, 'abc', flaky), 3);
 });
 
 test('a tests run leases until every command it may start could have used its full timeout', (t) => {
@@ -247,7 +270,7 @@ test('a tests run leases until every command it may start could have used its fu
   // Head and scoped proof each with the host-only file, then the reverted run, which fails at its first command.
   assert.equal(runs(h), 5, 'one passing run starts five timed commands');
   const lease = testLeases(h).find((e) => e.detail.phase === 'running');
-  const planned = 7 * MINUTES * 60000 + 60000;
+  const planned = 7 * (MINUTES * 60000 + 60000);
   const held = Date.parse(lease.detail.deadline) - Date.parse(lease.at);
   assert.ok(Math.abs(held - planned) < 5000, `deadline ${held} ms after the start, want ${planned}`);
 });
@@ -272,6 +295,12 @@ test('a holder without start ticks, past one command budget but inside its plann
   let child;
   const joiner = h.runAsync(['check', 'tests', 'T1', '--json'], { onSpawn: (c) => { child = c; c.stderr.on('data', (d) => { stderr += d; }); } });
   await waitUntil(() => /joining the tests run/.test(stderr), { alive: child, what: () => `the joiner reports joining: ${stderr}` });
+  // The wait can last hours, so the joiner says until when.
+  const ends = new Date(at + span).toISOString();
+  await waitUntil(() => stderr.includes(`it cannot be observed, so it counts as ended at its deadline ${ends}, in `), { alive: child, what: () => `the joiner names the deadline: ${stderr}` });
+  assert.match(stderr, /in (\d+) min/);
+  const minutes = Number(/, in (\d+) min/.exec(stderr)[1]);
+  assert.ok(Math.abs(minutes - (span - 2 * MINUTES * 60000) / 60000) <= 1, `${minutes} min until the deadline`);
   append({ ...first, at: new Date().toISOString(), detail: { type: 'tests', sha: first.detail.sha, revision: first.detail.revision, source: 'gate:mac', phase: 'done', evidence_at: evidence.at } });
   const r = await joiner;
   assert.equal(r.code, 0, r.stderr);
