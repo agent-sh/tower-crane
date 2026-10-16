@@ -359,12 +359,18 @@ const token = process.env.CI_FIXTURE_TOKEN;
 console.log('colored ' + token.slice(0, 4) + '\\x1b[1m' + token.slice(4) + '\\x1b[0m');
 // An OSC hyperlink and a charset escape (tput sgr0) inside the token hide it the same way.
 console.log('osc ' + token.slice(0, 4) + '\\x1b]8;;https://x\\x07' + token.slice(4, 10) + '\\x1b(B' + token.slice(10));
+// An OSC without its terminator ends at its line, so it cannot remove lines up to a later BEL.
+console.log('unterminated \\x1b]8;;https://x');
+console.log('after the unterminated escape');
+console.log('title \\x1b]0;t\\x07set');
 for (let i = 0; i < 150; i++) console.log('cargo tree line ' + i);
 fs.mkdirSync('.local/checks', { recursive: true });
 // Like ginza's receipt, which holds every step's full output, including what the log redacts.
 fs.writeFileSync('.local/checks/receipt.json', JSON.stringify({ failure_reasons: ['unit tests failed'], output: 'token ' + token }));
 fs.writeFileSync('.local/checks/extra.json', '{}');
 fs.writeFileSync('.local/checks/blob.json', Buffer.from([0x7b, 0, 0x7d]));
+// Latin-1 text: invalid UTF-8 without a NUL byte.
+fs.writeFileSync('.local/checks/latin1.json', Buffer.from('{"caf\\xe9": "' + token + '"}', 'latin1'));
 fs.writeFileSync(path.join(process.env.TMPDIR, 'report.txt'), 'scratch report');
 console.log('Scratch report: ' + path.join(process.env.TMPDIR, 'report.txt'));
 console.log('Local check receipt: ' + path.resolve('.local/checks/receipt.json'));
@@ -399,6 +405,7 @@ process.exitCode = 1;
   assert.match(log, /^early line 0$/m);
   assert.match(log, /^cargo tree line 149$/m);
   assert.match(log, /^stderr token \[redacted:/m);
+  assert.match(log, /^unterminated \nafter the unterminated escape\ntitle set$/m);
   assert.ok(!log.includes(token));
   assert.ok(r.stdout.includes(`Full log: ${path.join(h.state, kept.log)}`), r.stdout);
   assert.ok(!r.stdout.includes(token));
@@ -406,7 +413,7 @@ process.exitCode = 1;
   // Artifacts sit in ci-artifacts/, which every agent sandbox hides, beside the run's log name.
   const run = path.basename(path.dirname(kept.log));
   const copied = Object.fromEntries(kept.artifacts.map((a) => [path.basename(a.from), a]));
-  assert.deepEqual(Object.keys(copied).sort(), ['blob.json', 'extra.json', 'receipt.json', 'report.txt']);
+  assert.deepEqual(Object.keys(copied).sort(), ['blob.json', 'extra.json', 'latin1.json', 'receipt.json', 'report.txt']);
   for (const a of kept.artifacts) assert.ok(a.path.startsWith(`ci-artifacts/${run}/`), a.path);
   // Text artifacts get the log's redaction; a binary one is kept as written.
   const receipt = fs.readFileSync(path.join(h.state, copied['receipt.json'].path), 'utf8');
@@ -416,6 +423,10 @@ process.exitCode = 1;
   assert.equal(copied['receipt.json'].bytes, Buffer.byteLength(receipt));
   assert.deepEqual(fs.readFileSync(path.join(h.state, copied['blob.json'].path)), Buffer.from([0x7b, 0, 0x7d]));
   assert.equal(copied['blob.json'].binary, true);
+  // Decoding invalid UTF-8 would replace its bytes with U+FFFD, so it is binary and kept as written.
+  assert.deepEqual(fs.readFileSync(path.join(h.state, copied['latin1.json'].path)), Buffer.from(`{"caf\xe9": "${token}"}`, 'latin1'));
+  assert.equal(copied['latin1.json'].binary, true);
+  assert.equal(copied['latin1.json'].redacted, undefined);
   assert.equal(fs.readFileSync(path.join(h.state, copied['report.txt'].path), 'utf8'), 'scratch report');
   assert.equal(copied['report.txt'].path, `ci-artifacts/${run}/TMPDIR/report.txt`);
   assert.equal(copied['extra.json'].path, `ci-artifacts/${run}/worktree/.local/checks/extra.json`);
@@ -423,7 +434,7 @@ process.exitCode = 1;
   assert.deepEqual(kept.artifacts_skipped.map((s) => path.basename(s.from)), ['outside.json']);
   assert.match(kept.artifacts_skipped[0].reason, /outside the gate worktree/);
   // The summary reaches worker prompts, so it counts the artifacts and names none.
-  assert.match(r.stdout, /Artifacts: 4 kept for the orchestrator and the owner/);
+  assert.match(r.stdout, /Artifacts: 5 kept for the orchestrator and the owner/);
   assert.ok(!r.stdout.includes('ci-artifacts'), r.stdout);
   assert.ok(!e.summary.includes('ci-artifacts'));
   // The gate worktree is still removed.
@@ -431,6 +442,27 @@ process.exitCode = 1;
   assert.equal(h.git(['worktree', 'list', '--porcelain']).match(/^worktree /gm).length, 1);
   const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
   assert.deepEqual(events.findLast((v) => v.cmd === 'check ci').detail.local_ci, kept);
+});
+
+test('gate output loses terminal escapes, and an unterminated string ends at its line', () => {
+  const { stripEscapes } = require('../lib/gates/common');
+  const cases = [
+    ['CSI', 'a\x1b[31mred\x1b[0m', 'ared'],
+    ['C1 CSI', '\x9b31mred\x9b0m', 'red'],
+    ['OSC BEL', '\x1b]0;title\x07text', 'text'],
+    ['OSC ST', '\x1b]8;;https://x\x1b\\link\x1b]8;;\x1b\\', 'link'],
+    ['charset', 'a\x1b(Bb', 'ab'],
+    ['DCS', 'a\x1bPq#0\x1b\\b', 'ab'],
+    ['OSC to the line end', 'a\x1b]8;;https://x\nkept\n\x1b]0;t\x07b', 'a\nkept\nb'],
+    ['DCS to the line end', 'a\x1bPq\nkept\x1b\\b', 'a\nkeptb'],
+    ['OSC up to the next escape', 'a\x1b]8;;x\x1b[1mb', 'ab'],
+  ];
+  for (const [name, input, expected] of cases) assert.equal(stripEscapes(input), expected, name);
+  // A lazy scan to the next terminator made 100000 unterminated strings take about 20 seconds.
+  const many = '\x1b]x'.repeat(100000);
+  const started = process.hrtime.bigint();
+  assert.equal(stripEscapes(many), '');
+  assert.ok(process.hrtime.bigint() - started < 2_000_000_000n);
 });
 
 test('a passing local CI keeps its log without a tail or artifacts', (t) => {

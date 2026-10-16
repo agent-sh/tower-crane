@@ -236,7 +236,8 @@ test('failed tests evidence names the failing tests when the spec reporter is co
   const sha = manifestTask(h, { submitted: {
     'test/failure.test.js': `const test = require('node:test');
 const assert = require('node:assert/strict');
-test('colored regression failure', () => {
+// A hyperlink around the name, as a reporter that links tests to their files prints it.
+test('\\x1b]8;;file:///test/failure.test.js\\x07colored regression failure\\x1b]8;;\\x07', () => {
   assert.equal('actual', 'expected');
 });
 `,
