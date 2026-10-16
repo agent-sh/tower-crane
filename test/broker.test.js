@@ -1131,6 +1131,7 @@ const alive = (pid) => { try { killPid(pid, 0); return true; } catch { return fa
 // of its pack loses the answer. A peer that closes the connection when the
 // agent ends its side stands in for that pipe on every platform.
 test('a push gets its answer over a connection that closes when the agent ends its side, as a Windows named pipe does, and an empty chunk of its pack ends nothing', async (t) => {
+  // The {need} of every broker release names no framing; each reads frames.
   const { base } = scratch(t);
   const net = require('node:net');
   const socket = process.platform === 'win32' ? `\\\\.\\pipe\\tower-crane-test-${process.pid}-${Date.now()}` : path.join(base, 's');
@@ -1147,7 +1148,7 @@ test('a push gets its answer over a connection that closes when the agent ends i
         if (nl < 0) return;
         request = JSON.parse(got.subarray(0, nl).toString('utf8'));
         got = got.subarray(nl + 1);
-        conn.write(`${JSON.stringify({ stderr: 'checking\n' })}\n${JSON.stringify({ need: { have: [], framed: true } })}\n`);
+        conn.write(`${JSON.stringify({ stderr: 'checking\n' })}\n${JSON.stringify({ need: { have: [] } })}\n`);
       }
       // The broker checks the push for a while before it answers.
       if (got.length < framed.length || answered) return;
@@ -1187,9 +1188,10 @@ test('the broker\'s unframing never waits on a body the end frame has ended', ()
 // An agent that speaks the push protocol by hand: it sends the request
 // line and, when the broker asks for the pack, writes what send(have)
 // returns, each buffer as one write; end then ends its side, as a shim from
-// before frames did. Resolves with the answer's code (null without one), its
-// stderr and the {need} the broker sent.
-function handPush(f, sha, send, { end = false } = {}) {
+// before frames did, and socket receives the connection. Resolves with the
+// answer's code (null without one), its stderr and the {need} the broker
+// sent.
+function handPush(f, sha, send, { end = false, socket = () => {} } = {}) {
   const net = require('node:net');
   const b = JSON.parse(fs.readFileSync(f.job.broker, 'utf8'));
   return new Promise((resolve) => {
@@ -1198,6 +1200,7 @@ function handPush(f, sha, send, { end = false } = {}) {
     let code = null;
     let stderr = '';
     let need = null;
+    socket(sock);
     sock.setEncoding('utf8');
     sock.on('error', () => {});
     sock.on('connect', () => sock.write(`${JSON.stringify({ token: b.token, push: { sha } })}\n`));
@@ -1248,7 +1251,6 @@ test('the broker refuses bad frames from the agent and frees the cache lock', as
     const r = await handPush(f, sha, send);
     assert.notEqual(r.code, null, `${what}: the broker answered\n${r.stderr}`);
     assert.notEqual(r.code, 0, `${what}: refused`);
-    assert.equal(r.need.framed, true, `${what}: the broker asks for frames`);
     assert.equal(fs.existsSync(lock), false, `${what}: the cache lock is free`);
     assert.equal(f.remoteRef(branch), null, `${what}: nothing was pushed`);
     return { ...r, ms: Date.now() - started };
@@ -1277,39 +1279,53 @@ test('the broker refuses bad frames from the agent and frees the cache lock', as
   assert.equal(fs.existsSync(lock), false);
 });
 
-// During an upgrade a running broker and a new shim, or the reverse, are
-// from either side of the change to frames. Both report that, not a broken
-// pack.
-test('a shim and a broker from either side of the change to frames say so', async (t) => {
+// Every release frames the pack, and a spawn's shims and broker run one
+// copy of the tool, so only a shim from a snapshot before framed packs sends
+// a bare one. Its broker says so, not "pack signature mismatch", and the
+// shim, which ends its side after its pack, still gets that answer.
+test('a broker tells a shim from before framed packs why its push failed', async (t) => {
   const f = await pushFixture(t);
   const sha = f.commit('a.txt', 'a\n');
-  // A shim from before frames sends the bare pack and ends its side.
   const old = await handPush(f, sha, (have) => [packOf(f, sha, have)], { end: true });
   assert.notEqual(old.code, null, 'the old shim gets the answer');
   assert.notEqual(old.code, 0);
-  assert.match(old.stderr, /different Tower Crane versions/);
+  assert.match(old.stderr, /sent its pack unframed, as a Tower Crane snapshot from before framed packs \(T291\) does/);
   assert.equal(f.remoteRef(`refs/heads/${f.task.branch}`), null);
-  // A broker from before frames asks with no framed flag.
-  const { base } = scratch(t);
-  const net = require('node:net');
-  const socket = process.platform === 'win32' ? `\\\\.\\pipe\\tower-crane-test-old-${process.pid}-${Date.now()}` : path.join(base, 's');
-  const server = net.createServer((conn) => {
-    conn.on('error', () => {});
-    let asked = false;
-    conn.on('data', () => {
-      // It reads the bytes after its {need} as a bare pack, which a frame's
-      // length does not start.
-      if (asked) conn.end(`${JSON.stringify({ stderr: 'tower-crane: pack signature mismatch\n' })}\n${JSON.stringify({ code: 1 })}\n`);
-      else conn.write(`${JSON.stringify({ need: { have: [] } })}\n`);
-      asked = true;
-    });
-  });
-  await new Promise((resolve) => server.listen(socket, resolve));
-  t.after(() => server.close());
-  const file = path.join(base, B.FILE);
-  fs.writeFileSync(file, JSON.stringify({ socket, token: 'k' }));
-  const pack = () => require('node:stream').Readable.from([Buffer.from('PACK')]);
-  await assert.rejects(B.request(file, { push: { sha: 'a'.repeat(40) } }, { stdout() {}, stderr() {} }, { pack }), /different Tower Crane versions/);
+});
+
+// The body takes less than one frame here, so the read that brings the
+// whole pack and its end frame asks the connection to wait for a drain that
+// an ended body never emits. The agent then hangs up while the broker's git
+// push waits in the remote's pre-receive hook: the broker must see it and
+// stop the push.
+test('a broker whose agent sent its whole pack in one read sees the agent hang up during the push', async (t) => {
+  const f = await pushFixture(t);
+  const stream = require('node:stream');
+  const hwm = stream.getDefaultHighWaterMark(false);
+  t.after(() => stream.setDefaultHighWaterMark(false, hwm));
+  const lock = path.join(f.h.state, 'push', 'cache.lock');
+  const started = path.join(f.h.base, 'hook-started');
+  const release = path.join(f.h.base, 'hook-release');
+  const slash = (p) => p.replace(/\\/g, '/');
+  // Bounded, so a broker that misses the hang-up still finishes the push.
+  fs.writeFileSync(path.join(f.remote, 'hooks', 'pre-receive'),
+    `#!/bin/sh\n: > '${slash(started)}'\ni=0\nwhile [ ! -f '${slash(release)}' ] && [ $i -lt 300 ]; do sleep 0.1; i=$((i+1)); done\n`, { mode: 0o755 });
+  // The fixture may be gone by then, and with it what the hook waits on.
+  t.after(() => { try { fs.writeFileSync(release, ''); } catch {} });
+  const sha = f.commit('a.txt', 'a\n');
+  let sock = null;
+  // Applies to the body the broker makes when it reads the request line.
+  stream.setDefaultHighWaterMark(false, 1);
+  const done = handPush(f, sha, (have) => {
+    stream.setDefaultHighWaterMark(false, hwm);
+    return [Buffer.concat([B.frame(packOf(f, sha, have)), B.frame(Buffer.alloc(0))])];
+  }, { socket: (s) => { sock = s; } });
+  await waitUntil(() => fs.existsSync(started), { paths: [f.h.base], what: 'the broker\'s push reaches the remote\'s hook' });
+  sock.destroy();
+  await done;
+  await waitUntil(() => !fs.existsSync(lock), { paths: [path.dirname(lock)], what: 'the push ends and frees the cache lock' });
+  fs.writeFileSync(release, '');
+  assert.equal(f.remoteRef(`refs/heads/${f.task.branch}`), null, 'the push of an agent that hung up was stopped');
 });
 
 // index-pack stops at the first object fsck refuses, long before a large
