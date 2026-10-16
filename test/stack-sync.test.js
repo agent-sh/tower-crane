@@ -8,7 +8,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
 const { once } = require('node:events');
-const { setup, stacked } = require('./stack-fixture');
+const { setup, stacked, worker } = require('./stack-fixture');
 const { BIN } = require('./helpers');
 
 for (const mode of ['generated', 'mixed', 'unknown', 'unmerged-parent', 'worktree', 'spawn']) {
@@ -395,6 +395,23 @@ test('stack sync refuses live workers and dirty worktrees without invoking gh sy
   assert.equal(f.read().calls.some((c) => c.args[1] === 'sync'), false);
 });
 
+// A gh stack sync killed mid-rebase leaves a rebase that git status does not
+// report. A stopped exec and an uncommitted merge with no changes do the same.
+test('stack sync refuses a worktree left in a rebase or merge that git status does not show', (t) => {
+  const f = stacked(t);
+  const { wt } = f.upper;
+  const git = (args) => cp.spawnSync('git', args, { cwd: wt.path, env: f.h.env, encoding: 'utf8' });
+  assert.notEqual(git(['rebase', '--exec', 'false', 'HEAD~1']).status, 0);
+  assert.equal(f.h.git(['status', '--porcelain'], wt.path), '');
+  assert.match(f.h.run(['stack', 'sync', 'T2']).stderr, /T2: stack operation needs a worktree without a rebase in progress/);
+  assert.equal(git(['rebase', '--abort']).status, 0);
+  const side = f.h.git(['commit-tree', 'HEAD^{tree}', '-p', 'HEAD', '-m', 'same tree'], wt.path);
+  assert.equal(git(['merge', '--no-ff', '--no-commit', side]).status, 0);
+  assert.equal(f.h.git(['status', '--porcelain'], wt.path), '');
+  assert.match(f.h.run(['stack', 'sync', 'T2']).stderr, /T2: stack operation needs a worktree without a merge in progress/);
+  assert.equal(f.read().calls.some((c) => c.args[1] === 'sync'), false);
+});
+
 // Runs wait until automatic stack maintenance holds its gh stack sync, then signals it.
 // The preload records each signal wait's event loop handles; a blocking sync delays it.
 async function signalDuringSync(t, f, { forced }) {
@@ -467,4 +484,26 @@ test('a signal during automatic stack maintenance stops it and wait exits', {
       assert.equal(events.findLast((e) => e.cmd === 'automation').detail.phase, 'deferred');
     });
   }
+});
+
+// Refill dispatches the stacked rework, and its spawn refreshes the stack
+// first. A drain during that refresh stops it, so no worker may start on the
+// unrefreshed stack; the spawn records why and the next wait dispatches it.
+test('a drain during spawn\'s stack refresh records a deferral and starts no worker', {
+  skip: process.platform === 'win32' ? 'Windows child.kill does not deliver POSIX signals' : false,
+}, async (t) => {
+  const f = stacked(t);
+  worker(f);
+  f.h.ok(['rework', 'T2', '--reason', 'more upper work']);
+  // Main moves outside any merge, so only the spawn's refresh syncs the stack.
+  f.h.git(['commit', '--allow-empty', '-qm', 'main moved']);
+  f.h.git(['push', 'origin', 'main']);
+  await signalDuringSync(t, f, { forced: false });
+  const events = fs.readFileSync(path.join(f.h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  assert.deepEqual(events.filter((e) => e.cmd === 'stack sync').map((e) => e.task).sort(), ['T1', 'T2'], 'the running sync finished');
+  assert.equal(events.some((e) => e.cmd === 'spawn' && e.task === 'T2'), false, 'no worker starts on the unrefreshed stack');
+  const deferred = events.filter((e) => e.cmd === 'stack sync deferred' && e.task === 'T2');
+  assert.equal(deferred.length, 1, JSON.stringify(deferred));
+  assert.match(deferred[0].detail.reason, /wait stopped before the stack refresh finished/);
+  assert.equal(f.h.json(['task', 'show', 'T2']).status, 'rework');
 });
