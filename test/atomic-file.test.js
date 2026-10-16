@@ -153,6 +153,67 @@ function secondArgument(text, start) {
   return args[1];
 }
 
+// A fixture that reads a whole file and writes its own copy back drops what
+// a concurrent fixture process wrote between the two: gh stubs and harness
+// stubs run once per call, often side by side. Such a fixture changes the
+// file with updateJson from test/atomic-file.js, which holds a lock across
+// the read and the write. A write back that no other process races says why
+// in a `// update-json: reason` comment on its line or the line before.
+const WHOLE_READ = /\b(?:readFile(?:Sync)?|readPublished)\(/g;
+const WHOLE_WRITE = /\b(?:writeFile(?:Sync)?|writeAtomic)\(/g;
+
+function writeBacks(text) {
+  const lines = text.split('\n');
+  // A path held in a constant or variable names the same file as its value.
+  const names = new Map([...text.matchAll(/\b(?:const|let|var)\s+(\w+)\s*=\s*([^;\n]+)/g)].map((m) => [m[1], m[2].trim()]));
+  const target = (at) => {
+    const arg = firstArgument(text, at);
+    return names.get(arg) ?? arg;
+  };
+  const reads = [...text.matchAll(WHOLE_READ)].map((m) => ({ at: m.index, file: target(m.index + m[0].length) }));
+  const found = [];
+  for (const m of text.matchAll(WHOLE_WRITE)) {
+    const file = target(m.index + m[0].length);
+    if (!reads.some((r) => r.at < m.index && r.file === file)) continue;
+    const line = text.slice(0, m.index).split('\n').length - 1;
+    const reason = (l) => /\/\/ update-json: \S/.test(lines[l] || '');
+    if (reason(line) || reason(line - 1)) continue;
+    found.push(line + 1);
+  }
+  return found;
+}
+
+test('the write-back lint finds a fixture that writes back the file it read', () => {
+  const flagged = [
+    "const data = JSON.parse(fs.readFileSync(file, 'utf8'));\ndata.calls.push(args);\nwriteAtomic(file, JSON.stringify(data));",
+    "const rows = JSON.parse(readPublished(process.env.ROWS, 'utf8'));\nfs.writeFileSync(process.env.ROWS, JSON.stringify(rows));",
+    "const file = process.env.GH;\nconst state = JSON.parse(fs.readFileSync(process.env.GH, 'utf8'));\nconst save = () => writeAtomic(file, JSON.stringify(state));",
+    "const s = JSON.parse(real.readFileSync(f));\nreal.writeFileSync(f, JSON.stringify(s));",
+  ];
+  for (const text of flagged) assert.equal(writeBacks(text).length, 1, text);
+  const clean = [
+    "updateJson(file, (data) => { data.calls.push(args); return data; });",
+    "const data = JSON.parse(readPublished(file, 'utf8'));\nupdateJson(file, (d) => d);",
+    "const data = JSON.parse(fs.readFileSync(input, 'utf8'));\nwriteAtomic(output, JSON.stringify(data));",
+    "writeAtomic(file, '{}');\nconst data = JSON.parse(readPublished(file, 'utf8'));",
+    "const x = fs.readFileSync(f);\n// update-json: only this process writes f.\nfs.writeFileSync(f, x);",
+  ];
+  for (const text of clean) assert.deepEqual(writeBacks(text), [], text);
+});
+
+test('fixtures change a file they read only through updateJson', () => {
+  const found = [];
+  const files = (dir) => fs.readdirSync(dir, { withFileTypes: true }).flatMap((entry) => entry.isDirectory()
+    ? files(path.join(dir, entry.name)) : entry.name.endsWith('.js') ? [path.join(dir, entry.name)] : []);
+  for (const file of files(FIXTURES).sort()) {
+    const lines = fs.readFileSync(file, 'utf8').split('\n');
+    for (const line of writeBacks(lines.join('\n'))) {
+      found.push(`${path.relative(path.dirname(__dirname), file)}:${line}: ${lines[line - 1].trim()}`);
+    }
+  }
+  assert.deepEqual(found, [], 'change the file with updateJson from test/atomic-file.js, or say why no other process writes it');
+});
+
 // Runs `fn` with process.platform reporting `name`.
 async function onPlatform(name, fn) {
   const platform = Object.getOwnPropertyDescriptor(process, 'platform');

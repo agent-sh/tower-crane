@@ -1,9 +1,8 @@
 'use strict';
 
 const cp = require('node:child_process');
-const fs = require('node:fs');
 const path = require('node:path');
-const { writeAtomic, readPublished } = require('../atomic-file');
+const { updateJson } = require('../atomic-file');
 
 if (path.resolve(process.argv[1] || '') !== __filename) {
   const spawn = cp.spawn;
@@ -21,12 +20,13 @@ if (path.resolve(process.argv[1] || '') !== __filename) {
   const harness = process.argv[2];
   const args = process.argv.slice(3);
   const file = process.env.TOWER_CRANE_TEST_SUPERVISION_FILE;
-  const attempts = fs.existsSync(file) ? JSON.parse(readPublished(file, 'utf8')) : [];
-  if (!attempts.length) {
-    cp.execFileSync(process.execPath, [path.join(__dirname, '..', '..', 'bin', 'tower-crane.js'), 'claim', process.env.TOWER_CRANE_TASK], { stdio: 'ignore' });
-  }
-  attempts.push({ harness, args, agent: process.env.TOWER_CRANE_AGENT });
-  writeAtomic(file, JSON.stringify(attempts));
+  // The claim runs under the lock: it starts no harness, and a concurrent first attempt then sees this one.
+  const attempts = updateJson(file, (list) => {
+    if (!list.length) {
+      cp.execFileSync(process.execPath, [path.join(__dirname, '..', '..', 'bin', 'tower-crane.js'), 'claim', process.env.TOWER_CRANE_TASK], { stdio: 'ignore' });
+    }
+    return [...list, { harness, args, agent: process.env.TOWER_CRANE_AGENT }];
+  }, []);
   if (harness === 'codex') console.log(JSON.stringify({ type: 'thread.started', thread_id: '01a11297-1067-7831-a3bc-2c04eac9aaef' }));
   if (attempts.length === 1) {
     if (harness === 'claude' && process.platform !== 'win32') process.kill(process.pid, 'SIGTERM');
