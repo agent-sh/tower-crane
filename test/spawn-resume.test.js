@@ -794,6 +794,46 @@ test('a resume moves an earlier start\'s attempt log aside only once no recorded
   assert.ok(next.stderr.includes(`tower-crane: moved ${log}, left by a start that failed before it was recorded, to ${path.join(logs, aside[0])}\n`), next.stderr);
 });
 
+// Windows records no start time with a pid and reuses a freed pid within
+// seconds, so the guard above asks Windows when the process now at a recorded
+// pid was created. This runs that path in process with a stand-in for
+// PowerShell, on live pids that the signal check cannot tell apart from the
+// recorded processes.
+test('a recorded spawn whose pids Windows gave to processes created after it counts as gone', (t) => {
+  const P = require('../lib/processes');
+  const os = require('node:os');
+  const cp = require('node:child_process');
+  const live = cp.spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: 'ignore', windowsHide: true }); // wait-allow: a process group that runs until the test kills it
+  t.after(() => killPid(live.pid, 'SIGKILL'));
+  const at = Date.parse('2026-10-16T11:00:00.000Z');
+  const detail = { host: os.hostname(), pid: live.pid, monitor_pid: process.pid };
+  const asked = [];
+  const powershell = (starts, result = {}) => (cmd, args) => {
+    asked.push([cmd, Buffer.from(args.at(-1), 'base64').toString('utf16le').match(/Starts @\(([^)]*)\)/)[1]]);
+    return { status: 0, stdout: Object.entries(starts).map(([pid, start]) => `${pid} ${start}\r\n`).join(''), ...result };
+  };
+  const after = at + 5000;
+  assert.equal(P.spawnGone(detail, at, 'win32', powershell({ [live.pid]: after, [process.pid]: after })), true);
+  assert.deepEqual(asked, [['powershell.exe', `${process.pid},${live.pid}`]]);
+  // A process created before the event was recorded may be the recorded one.
+  assert.equal(P.spawnGone(detail, at, 'win32', powershell({ [live.pid]: after, [process.pid]: at - 5000 })), false);
+  // Within the clock allowance of the event time.
+  assert.equal(P.spawnGone(detail, at, 'win32', powershell({ [live.pid]: after, [process.pid]: at + 50 })), false);
+  // A time PowerShell did not report, or a PowerShell that failed, proves nothing.
+  assert.equal(P.spawnGone(detail, at, 'win32', powershell({ [live.pid]: after })), false);
+  assert.equal(P.spawnGone(detail, at, 'win32', powershell({}, { status: 1 })), false);
+  assert.equal(P.spawnGone(detail, at, 'win32', powershell({}, { error: new Error('spawnSync powershell.exe ETIMEDOUT') })), false);
+  assert.equal(P.spawnGone(detail, NaN, 'win32', powershell({ [live.pid]: after, [process.pid]: after })), false);
+  asked.length = 0;
+  // Another host's pids, and systems with a start time of their own, are not asked about.
+  assert.equal(P.spawnGone({ ...detail, host: 'another-host' }, at, 'win32', powershell({ [live.pid]: after, [process.pid]: after })), false);
+  if (process.platform !== 'win32') assert.equal(P.spawnGone(detail, at, process.platform, powershell({ [live.pid]: after, [process.pid]: after })), false);
+  // Exited processes need no creation time.
+  const done = cp.spawnSync(process.execPath, ['-e', ''], { windowsHide: true });
+  assert.equal(P.spawnGone({ host: os.hostname(), pid: done.pid, monitor_pid: done.pid }, at, 'win32', powershell({})), true);
+  assert.deepEqual(asked, []);
+});
+
 test('a failed resume launch leaves the task, claim and receipts unchanged', (t) => {
   const { h } = setup(t);
   h.json(['spawn', '--task', 'T1', '--wait']);
