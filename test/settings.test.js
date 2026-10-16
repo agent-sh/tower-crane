@@ -187,6 +187,8 @@ test('in a browser, a save that moves several rungs lists every drop, and the la
   const told = await b.inPage(`[window.firstLoad === true, Array.prototype.map.call(document.querySelectorAll('#ladder-told li'), function (li) { return li.textContent; })]`);
   assert.deepEqual(told, [true, ['hard', 'research'].map((n) => `ladder ${n}: moving from claude to codex dropped model ${alias}, which does not fit codex`)]);
   for (const n of ['hard', 'research']) assert.deepEqual(h.readState('project.json').ladder[n], { harness: 'codex', profile: 'fixture-main', effort: n === 'hard' ? 'high' : 'max' });
+  // The page did not reload, so the save's reply refreshed the line.
+  assert.match(await b.inPage(`document.getElementById('last-change').textContent`), new RegExp(`^Last change: ladder set hard \\(dropped model ${alias}, which did not fit codex\\), ladder set research`));
   const page = (await request(`${s.url}settings`)).text;
   assert.match(page, new RegExp(`Last change: ladder set hard \\(dropped model ${alias}, which did not fit codex\\), ladder set research \\(dropped model ${alias}, which did not fit codex\\) by owner from serve`));
 });

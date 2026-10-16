@@ -447,6 +447,19 @@ test('an approved env_file counts only with the content the owner approved', (t)
 // Found in the T284 re-review: a pinned route that inherits its harness
 // follows the primary, which the orchestrator may move among sandboxed
 // harnesses without the owner. The approval is for the harness it resolved to.
+// T355 review: the model check skipped routes that name their own harness,
+// which may reach another vendor's model through a proxy and ran before.
+test('spawn skips an inherited route whose model its rung\'s harness cannot run, and runs one that names its harness', (t) => {
+  const h = setup(t, { primaryHarness: 'codex', reason: 'refusal' });
+  handFallbacks(h, [{ model: 'claude-fixture-large' }, { harness: 'codex', model: 'claude-fixture-large' }]);
+  h.spawn();
+  assert.deepEqual(h.attempts().map((a) => a.model), ['first', 'claude-fixture-large']);
+  const spawned = events(h).find((e) => e.cmd === 'spawn');
+  assert.ok(spawned.detail.notices.includes(`easy fallback 1 from user file ${h.userConfig} follows the rung's harness, where model claude-fixture-large does not run on codex; skipped`), JSON.stringify(spawned.detail.notices));
+  const problems = h.json(['ladder', 'show']).problems;
+  assert.ok(!problems.some((p) => p.startsWith('easy fallback 2')), problems.join('\n'));
+});
+
 test('a pinned route that inherits its harness is not approved on another harness', (t) => {
   const h = setup(t, { primaryHarness: 'claude', nextHarness: 'claude', reason: 'refusal' });
   h.ok(['ladder', 'set', 'easy', '--fallbacks', JSON.stringify([{ model: 'second', env: { ROUTE_ENV: 'fallback' } }])]);
