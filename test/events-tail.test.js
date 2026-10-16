@@ -330,3 +330,92 @@ for (const smaller of [false, true]) {
     assert.deepEqual(wakes.map((wake) => wake.id), [id]);
   });
 }
+
+function cutFixture() {
+  return cachedFixture(null, 'cut-events', (h) => {
+    h.init();
+    h.ok(['msg', '--to', 'orchestrator', 'before the cut']);
+  });
+}
+
+const message = (agent, to, text) => ({ at: new Date().toISOString(), agent, cmd: 'msg', task: null, detail: { to, text },
+  id: `E${require('node:crypto').randomUUID()}`, type: 'worker-message', to });
+
+// A commit that died in the middle of its append: its staged tasks.json and
+// manifest are on disk, and the log holds its first line whole and the start
+// of its second. The next lock holder cuts both off. Returns the log's
+// length before the commit and the offset after its first line.
+function tornCommit(h, first) {
+  const log = path.join(h.state, 'events.jsonl');
+  const second = message(first.agent, first.to, 'torn second');
+  const fd = fs.openSync(log, 'a');
+  const { size, dev, ino } = fs.fstatSync(fd);
+  fs.writeFileSync(path.join(h.state, `tasks.json.${second.id}.commit`), fs.readFileSync(path.join(h.state, 'tasks.json')));
+  fs.writeFileSync(path.join(h.state, `commit.${second.id}.json`), JSON.stringify({ size, dev, ino, ids: [first.id, second.id] }));
+  const line = `${JSON.stringify(first)}\n`;
+  fs.writeSync(fd, `${line}${JSON.stringify(second).slice(0, 60)}`);
+  fs.closeSync(fd);
+  return { size, after: size + Buffer.byteLength(line) };
+}
+
+// Longer than the torn bytes, so the log grows past where readers stopped.
+const LONG = `after the cut ${'x'.repeat(400)}`;
+
+test('an event reader that read a torn commit resumes where recovery cut it and reads what was appended after', (t) => {
+  const h = cutFixture();
+  t.after(h.cleanup);
+  const reader = new EventReader(path.join(h.state, 'events.jsonl'));
+  reader.read();
+  const { size } = tornCommit(h, message('owner', 'orchestrator', 'torn first'));
+  assert.deepEqual(reader.read().rows.map((e) => e.detail.text), ['torn first']);
+  h.ok(['msg', '--to', 'orchestrator', LONG]);
+  const batch = reader.read();
+  assert.equal(batch.cut, size);
+  assert.equal(batch.reset, false);
+  assert.deepEqual(batch.rows.map((e) => e.detail.text), [LONG]);
+  assert.equal(reader.offset, fs.statSync(path.join(h.state, 'events.jsonl')).size);
+});
+
+test('a wait cursor inside bytes recovery cut off reads the events appended since', (t) => {
+  const h = cutFixture();
+  t.after(h.cleanup);
+  const { after } = tornCommit(h, message('worker', 'orchestrator', 'torn first'));
+  h.ok(['msg', '--agent', 'worker', '--to', 'orchestrator', LONG]);
+  const r = h.run(['wait', '--agent', 'orchestrator', '--after', String(after), '--types', 'worker-message', '--timeout', '5']); // wait-allow: the event is already logged, so wait returns at once
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(JSON.parse(r.stdout).detail.text, LONG);
+});
+
+test('served messages after a cursor inside bytes recovery cut off include the messages appended since', async (t) => {
+  const h = cutFixture();
+  const server = resetReader(t, h, ['serve', '--agent', 'viewer', '--port', '0', '--json']);
+  const { url } = await server.until(() => server.lines()[0]);
+  const controller = new AbortController();
+  const stream = (await fetch(new URL('/events', url), { signal: controller.signal })).body.getReader();
+  let output = '';
+  const drained = (async () => {
+    try {
+      for (;;) {
+        const { value, done } = await stream.read();
+        if (done) return;
+        output += Buffer.from(value).toString('utf8');
+        server.changes.emit('change');
+      }
+    } catch (error) {
+      if (!controller.signal.aborted) throw error;
+    }
+  })();
+  t.after(async () => { controller.abort(); await drained; });
+  await server.until(() => output.includes(': connected'));
+  tornCommit(h, message('w-1', 'owner', 'torn first'));
+  const first = await (await fetch(new URL('/api/messages', url))).json();
+  assert.deepEqual(first.messages.map((m) => m.detail.text), ['before the cut', 'torn first']);
+  // Shorter than the cut bytes: it ends before offsets the page was woken for.
+  h.ok(['msg', '--to', 'owner', 'short', '--agent', 'w-1']);
+  const next = await (await fetch(new URL(`/api/messages?after=${first.cursor}`, url))).json();
+  assert.deepEqual(next.messages.map((m) => m.detail.text), ['short']);
+  const all = await (await fetch(new URL('/api/messages?after=0', url))).json();
+  assert.deepEqual(all.messages.map((m) => m.detail.text), ['before the cut', 'short'], 'the cut message is gone');
+  // The page is woken for it too.
+  await server.until(() => output.includes(next.messages[0].id));
+});

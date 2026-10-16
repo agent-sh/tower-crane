@@ -178,6 +178,14 @@ function barrier() {
 const once = {};
 let busyRenames = 0;
 const descriptors = new Map();
+// The loaded state module treats EPERM as Windows does, as a sharing refusal.
+function windowsSharing() {
+  for (const m of Object.values(require.cache)) {
+    const busy = m.filename.endsWith(path.join('lib', 'state.js')) && m.exports.SHARING_BUSY;
+    if (Array.isArray(busy) && !busy.includes('EPERM')) busy.push('EPERM');
+  }
+}
+
 function first(key) {
   if (once[key]) return false;
   once[key] = true;
@@ -223,11 +231,14 @@ function before(name, args) {
   // HOOK_BUSY_RENAME_PUBLISHED=1 a copy of the source is at the destination
   // before each refusal, as when another process published it first, which
   // Windows also refuses. HOOK_BUSY_RENAME_LOG=FILE gets a line per refusal.
+  // HOOK_SHARING_BUSY=1 with it: the state module takes these refusals as
+  // Windows does, as another process holding the file open.
   if (env.HOOK_BUSY_RENAME && name === 'renameSync' && inState(args[1])
     && new RegExp(env.HOOK_BUSY_RENAME).test(path.basename(String(args[1])))) {
     const times = Number(env.HOOK_BUSY_RENAME_TIMES || 1);
     busyRenames++;
     if (!times || busyRenames <= times) {
+      if (env.HOOK_SHARING_BUSY) windowsSharing();
       if (env.HOOK_BUSY_RENAME_PUBLISHED && !real.existsSync(args[1])) fs.cpSync(target, args[1], { recursive: true });
       if (env.HOOK_BUSY_RENAME_LOG) real.appendFileSync(env.HOOK_BUSY_RENAME_LOG, `${args[1]}\n`);
       throw Object.assign(new Error(`EPERM: operation not permitted, rename '${target}' -> '${args[1]}'`), { code: 'EPERM' });
@@ -240,10 +251,7 @@ function before(name, args) {
   if (env.HOOK_BUSY_READ && ['readFileSync', 'statSync'].includes(name) && inState(target)
     && ['project.json', 'tasks.json', 'decisions.json', 'events.jsonl'].includes(path.basename(String(target)))
     && path.basename(process.argv[1] || '') === 'spawn-monitor.js' && real.existsSync(env.HOOK_BUSY_READ) && first(`busy-${name}`)) {
-    for (const m of Object.values(require.cache)) {
-      const busy = m.filename.endsWith(path.join('lib', 'state.js')) && m.exports.SHARING_BUSY;
-      if (Array.isArray(busy) && !busy.includes('EPERM')) busy.push('EPERM');
-    }
+    windowsSharing();
     throw Object.assign(new Error(`EPERM: operation not permitted, ${name === 'statSync' ? 'stat' : 'open'} '${target}'`), { code: 'EPERM' });
   }
   // HOOK_FAIL_EVENT_SYNC=1: the first sync of events.jsonl fails with EIO
