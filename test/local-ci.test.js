@@ -562,12 +562,12 @@ test('restoring redaction markers is linear in their count', () => {
   const { createRedactor } = require('../lib/gates/common');
   const redact = createRedactor([['FIXTURE_TOKEN', `ghp_${'d4'.repeat(18)}`]]);
   const text = '[redacted:A] '.repeat(Math.ceil((1 << 20) / 13));
-  // A split and join of the whole text per marker took minutes for these 1 MiB. Counting the
-  // whole-text splits shows the passes without timing them.
+  // A split and join of the whole text per marker took minutes for these 1 MiB. Counting splits of
+  // the text, at least the size it has with markers in place, shows the passes without timing them.
   const split = String.prototype.split;
   let passes = 0;
   String.prototype.split = function (...args) {
-    if (this.length >= text.length) passes++;
+    if (this.length >= text.length / 4) passes++;
     return split.apply(this, args);
   };
   try {
