@@ -23,6 +23,7 @@ const OUTSIDE_HOME = path.dirname(path.dirname(path.dirname(OUTSIDE)));
 function guarded(t, script, env) {
   const root = fs.mkdtempSync(path.join(TMP_ROOT, 'user-config-guard-'));
   t.after(() => fs.rmSync(`${root}-link`, { force: true }));
+  t.after(() => fs.rmSync(`${root}-decoy`, { recursive: true, force: true }));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const inside = path.join(root, 'home', '.config', 'tower-crane', 'config.json');
   const r = cp.spawnSync(process.execPath, ['--require', GUARD, '-e', script], {
@@ -43,6 +44,20 @@ test('a ladder call that resolves the user file outside the test roots fails the
     ['the exported userFile', 'L.userFile(process.env)', () => ({ TOWER_CRANE_CONFIG: OUTSIDE })],
     ['resolve with the default file under a home outside the roots', 'L.resolve({}, process.env)', () => homeEnv(OUTSIDE_HOME)],
   ];
+  // A link inside the root that leads outside it: the file's real path decides.
+  const decoy = ({ root }) => {
+    fs.mkdirSync(`${root}-decoy`);
+    fs.mkdirSync(path.join(root, 'home', '.config'), { recursive: true });
+    fs.symlinkSync(`${root}-decoy`, path.join(root, 'home', '.config', 'tower-crane'), process.platform === 'win32' ? 'junction' : 'dir');
+  };
+  for (const [name, env] of [
+    ['an explicit file through a link to a decoy outside the root', (ctx) => { decoy(ctx); return { TOWER_CRANE_CONFIG: ctx.inside }; }],
+    ['the default file through a link to a decoy outside the root', (ctx) => { decoy(ctx); return {}; }],
+  ]) {
+    const r = guarded(t, swallowed('L.resolve({}, process.env)'), env);
+    assert.equal(r.code, 1, `${name}: ${r.stderr}`);
+    assert.match(r.stderr, /a test resolved the user config outside the fixture root/, name);
+  }
   for (const [name, call, env] of cases) {
     const r = guarded(t, swallowed(call), env);
     assert.equal(r.code, 1, `${name}: ${r.stderr}`);

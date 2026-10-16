@@ -74,8 +74,8 @@ const within = (root, p) => {
   const rel = path.relative(root, p);
   return rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel);
 };
-const inside = (root, p) => typeof p === 'string'
-  && (within(path.resolve(root), path.resolve(p)) || within(canonical(root), canonical(p)));
+// Real paths only: a link inside a root that leads outside it is outside.
+const inside = (root, p) => typeof p === 'string' && within(canonical(root), canonical(p));
 
 const ownHits = [];
 function check(file) {
