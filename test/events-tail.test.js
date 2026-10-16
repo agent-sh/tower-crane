@@ -47,7 +47,7 @@ test('served pages and owner message requests reuse history on a 50 MiB log', as
   const meter = path.join(h.base, 'board-read-budget.json');
   const child = cp.spawn(process.execPath, [BIN, 'serve', '--agent', 'viewer', '--port', '0', '--json'], {
     cwd: h.repo,
-    env: { ...h.env, EVENT_READ_BUDGET: meter, NODE_OPTIONS: `--require "${hooksPath}" --require "${budgetPath}"` },
+    env: { ...h.env, EVENT_READ_BUDGET: meter, NODE_OPTIONS: `${h.env.NODE_OPTIONS} --require "${hooksPath}" --require "${budgetPath}"` },
     stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
   });
   const closed = once(child, 'close');
@@ -224,7 +224,7 @@ function resetReader(t, h, args) {
   let output = '';
   let stderr = '';
   const child = cp.spawn(process.execPath, [BIN, ...args], {
-    cwd: h.repo, env: { ...h.env, NODE_OPTIONS: `--require "${hooksPath}" --require "${resetPath}"` },
+    cwd: h.repo, env: { ...h.env, NODE_OPTIONS: `${h.env.NODE_OPTIONS} --require "${hooksPath}" --require "${resetPath}"` },
     stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
   });
   const closed = once(child, 'close');

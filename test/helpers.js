@@ -161,8 +161,8 @@ function baseEnv(home) {
   // the owner's real ones do.
   env.TC_ACCOUNT_HOME = env.HOME;
   env.NODE_OPTIONS = withAccountHome(env.NODE_OPTIONS);
-  // The hook also loads fixtures/user-config-guard.js, which fails a CLI
-  // whose user file lies outside the roots this test process owns.
+  // The hook also loads fixtures/user-config-guard.js, which records a CLI
+  // whose user file lies outside the roots this test process fixed at load.
   env[UserConfigGuard.ROOTS_ENV] = UserConfigGuard.roots().join(path.delimiter);
   env.TOWER_CRANE_CONFIG = path.join(env.HOME, '.config', 'tower-crane', 'config.json');
   fs.mkdirSync(path.join(env.HOME, '.config', 'tower-crane', 'owner'), { recursive: true });
@@ -533,6 +533,7 @@ function context(t, base, options = {}) {
         assert.fail(`fixture ${base} outlived its cleanup: ${fs.readdirSync(base, { recursive: true }).slice(0, 10).join(', ')}`);
       }
       assertNoHarnessCalls(base);
+      UserConfigGuard.assertNoUserConfigLeaks(base);
     },
     run: (args, opts = {}) => fixtureInit(ctx, args, opts, (a, o) => run(a, withHooks(ctx, o))),
     runAsync: (args, opts = {}) => runAsync(args, withHooks(ctx, opts)),

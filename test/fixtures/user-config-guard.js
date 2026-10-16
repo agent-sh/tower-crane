@@ -8,52 +8,90 @@
 // on its own, and fixtures/account-home.js brings it into every CLI baseEnv
 // starts.
 //
-// The roots are TC_USER_CONFIG_ROOTS (baseEnv passes the test process's roots
-// to its children) or the test temp and live roots. lib/ladder.js calls its
-// own userFile directly (readUser, resolve), so wrapping the export would miss
-// those reads: the guard renames the function as the module compiles and
-// declares a checking userFile in its place, which every caller then reaches.
+// The roots are fixed when the guard loads: TC_USER_CONFIG_ROOTS when a parent
+// passed them, else the test temp and live roots of that moment. Gate tests
+// move TOWER_CRANE_TMP, which tempRoot prefers, after placing their fixture
+// user file; roots read at each check would shrink to that subdirectory.
+// The guard puts them in process.env, so every child gets the same ones.
+//
+// lib/ladder.js calls its own userFile directly (readUser, resolve), so
+// wrapping the export would miss those reads: the guard renames the function
+// as this checkout's lib/ladder.js compiles and declares a checking userFile
+// in its place, which every caller then reaches.
+//
+// A CLI may exit nonzero by design, or run detached, so its own exit code
+// does not prove a leak was seen. Every process appends what it finds to the
+// hits file of the test process that owns it (TC_USER_CONFIG_HITS): fixture
+// cleanup fails the test whose fixture made the call, and the test file
+// fails at exit on any hit left.
 
+const fs = require('node:fs');
 const Module = require('node:module');
 const path = require('node:path');
 const { tempRoot, liveRoot } = require('../tmp-root');
 
-const LADDER = path.join('lib', 'ladder.js');
 const ROOTS_ENV = 'TC_USER_CONFIG_ROOTS';
+const HITS_ENV = 'TC_USER_CONFIG_HITS';
 const PATCHED = Symbol.for('tower-crane.user-config-guard');
 const DECLARATION = 'function userFile(env = process.env) {';
+const LADDER = path.join(path.dirname(path.dirname(__dirname)), 'lib', 'ladder.js');
 
-function roots(env = process.env) {
-  const given = env[ROOTS_ENV];
-  return given ? given.split(path.delimiter).filter(Boolean) : [tempRoot(env), liveRoot(env)];
+const ROOTS = process.env[ROOTS_ENV]
+  ? process.env[ROOTS_ENV].split(path.delimiter).filter(Boolean)
+  : [tempRoot(), liveRoot()].map((root) => path.resolve(root));
+process.env[ROOTS_ENV] = ROOTS.join(path.delimiter);
+
+// A test file, or a process no test file started, owns a hits file; a CLI
+// appends to the one its test process passed down.
+const OWNER = !!process.env.NODE_TEST_CONTEXT || !process.env[HITS_ENV];
+if (OWNER) {
+  process.env[HITS_ENV] = path.join(ROOTS[0], `tower-crane-user-config-hits-${process.pid}-${Math.random().toString(36).slice(2)}.jsonl`);
+}
+const HITS = process.env[HITS_ENV];
+
+function roots() {
+  return ROOTS;
 }
 
-const found = [];
-let reported = 0;
+const inside = (root, p) => {
+  if (typeof p !== 'string') return false;
+  const rel = path.relative(path.resolve(root), path.resolve(p));
+  return rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel);
+};
 
+const ownHits = [];
 function check(file) {
+  if (ROOTS.some((root) => inside(root, file))) return file;
   const resolved = path.resolve(file);
-  const inside = roots().some((root) => {
-    const rel = path.relative(path.resolve(root), resolved);
-    return rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel);
-  });
-  if (inside) return file;
-  const message = `a test resolved the user config outside the fixture root (${roots().join(', ')}): ${resolved}`;
+  const message = `a test resolved the user config outside the fixture root (${ROOTS.join(', ')}): ${resolved}`;
   // Deep enough to reach the test that called lib/, past the lib frames.
   const limit = Error.stackTraceLimit;
   Error.stackTraceLimit = 40;
   const stack = new Error().stack;
   Error.stackTraceLimit = limit;
-  found.push(`${message}\n${stack.split('\n').slice(2).filter((line) => !line.includes('(node:')).join('\n')}`);
+  const hit = { message, cwd: process.cwd(), home: process.env.TC_ACCOUNT_HOME, pid: process.pid,
+    stack: stack.split('\n').slice(2).filter((line) => !line.includes('(node:')).join('\n') };
+  ownHits.push(message);
+  fs.mkdirSync(path.dirname(HITS), { recursive: true });
+  fs.appendFileSync(HITS, JSON.stringify(hit) + '\n');
   throw new Error(message);
 }
 
-// Throws on violations not yet reported, so a process whose code caught the
-// first throw (the board draws a broken ladder as an error) still fails.
-function assertNoUserConfigLeaks() {
-  const fresh = found.slice(reported);
-  reported = found.length;
-  if (fresh.length) throw new Error(fresh.join('\n'));
+const reported = new Set();
+// Throws on hits not yet reported: with `base`, only those a process in that
+// fixture made (by working directory or account home), so the test that owns
+// the fixture fails; without it, every one left.
+function assertNoUserConfigLeaks(base) {
+  if (!OWNER) return;
+  let text;
+  // read-published: processes append hits; nothing replaces the file.
+  try { text = fs.readFileSync(HITS, 'utf8'); }
+  catch (e) { if (e.code === 'ENOENT') return; throw e; }
+  // A line still being written has no newline yet; the next check reads it.
+  const found = text.split('\n').slice(0, -1).map((line, i) => ({ i, hit: JSON.parse(line) }))
+    .filter(({ i, hit }) => !reported.has(i) && (!base || base === hit.cwd || inside(base, hit.cwd) || inside(base, hit.home)));
+  for (const { i } of found) reported.add(i);
+  if (found.length) throw new Error(found.map(({ hit }) => `${hit.message}\n(pid ${hit.pid}, cwd ${hit.cwd})\n${hit.stack}`).join('\n'));
 }
 
 // The source keeps its line numbers, so stack traces still point at
@@ -68,9 +106,12 @@ function guardLadder(source, filename) {
 
 if (!Module[PATCHED]) {
   Module[PATCHED] = true;
+  // Module filenames are real paths; a checkout reached through a link still matches.
+  let ladder = LADDER;
+  try { ladder = fs.realpathSync.native(LADDER); } catch {}
   const compile = Module.prototype._compile;
   Module.prototype._compile = function (content, filename, ...rest) {
-    const source = typeof filename === 'string' && filename.endsWith(path.sep + LADDER) ? guardLadder(content, filename) : content;
+    const source = filename === ladder || filename === LADDER ? guardLadder(content, filename) : content;
     return compile.call(this, source, filename, ...rest);
   };
 
@@ -79,12 +120,15 @@ if (!Module[PATCHED]) {
   // The runner fails a file whose process exits nonzero.
   process.once('exit', () => {
     try {
-      assertNoUserConfigLeaks();
+      if (OWNER) assertNoUserConfigLeaks();
+      else if (ownHits.length) throw new Error(ownHits.join('\n'));
     } catch (error) {
       console.error(error.message);
       process.exitCode ||= 1;
+    } finally {
+      if (OWNER) fs.rmSync(HITS, { force: true });
     }
   });
 }
 
-module.exports = { ROOTS_ENV, roots, check, assertNoUserConfigLeaks };
+module.exports = { ROOTS_ENV, HITS_ENV, roots, check, assertNoUserConfigLeaks };

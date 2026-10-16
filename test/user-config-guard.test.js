@@ -15,6 +15,10 @@ const LADDER = path.join(ROOT, 'lib', 'ladder.js');
 // Never created: the guard refuses before any read.
 const OUTSIDE = path.join(path.parse(TMP_ROOT).root, 'tower-crane-guard-outside', 'config.json');
 
+// os.homedir() reads HOME, or USERPROFILE on Windows.
+const homeEnv = (home) => ({ HOME: home, USERPROFILE: home });
+const OUTSIDE_HOME = path.dirname(path.dirname(path.dirname(OUTSIDE)));
+
 // Runs a script with the guard preloaded and the given root as the only one.
 function guarded(t, script, env) {
   const root = fs.mkdtempSync(path.join(TMP_ROOT, 'user-config-guard-'));
@@ -22,7 +26,7 @@ function guarded(t, script, env) {
   const inside = path.join(root, 'home', '.config', 'tower-crane', 'config.json');
   const r = cp.spawnSync(process.execPath, ['--require', GUARD, '-e', script], {
     encoding: 'utf8',
-    env: { PATH: process.env.PATH, TC_USER_CONFIG_ROOTS: root, HOME: path.join(root, 'home'), ...env({ root, inside }) },
+    env: { ...process.env, NODE_TEST_CONTEXT: '', TOWER_CRANE_CONFIG: '', TC_USER_CONFIG_HITS: '', TC_USER_CONFIG_ROOTS: root, ...homeEnv(path.join(root, 'home')), ...env({ root, inside }) },
   });
   return { code: r.status, stderr: r.stderr };
 }
@@ -36,13 +40,13 @@ test('a ladder call that resolves the user file outside the test roots fails the
     ['readUser with an explicit file', 'L.readUser(process.env)', () => ({ TOWER_CRANE_CONFIG: OUTSIDE })],
     ['check with an explicit file', 'L.check({}, process.env)', () => ({ TOWER_CRANE_CONFIG: OUTSIDE })],
     ['the exported userFile', 'L.userFile(process.env)', () => ({ TOWER_CRANE_CONFIG: OUTSIDE })],
-    ['resolve with the default file under a home outside the roots', 'L.resolve({}, process.env)', () => ({ HOME: path.dirname(path.dirname(path.dirname(OUTSIDE))) })],
+    ['resolve with the default file under a home outside the roots', 'L.resolve({}, process.env)', () => homeEnv(OUTSIDE_HOME)],
   ];
   for (const [name, call, env] of cases) {
     const r = guarded(t, swallowed(call), env);
     assert.equal(r.code, 1, `${name}: ${r.stderr}`);
     assert.match(r.stderr, /a test resolved the user config outside the fixture root/, name);
-    assert.ok(r.stderr.includes(path.resolve(name.includes('default') ? path.join(path.dirname(path.dirname(path.dirname(OUTSIDE))), '.config', 'tower-crane', 'config.json') : OUTSIDE)), name);
+    assert.ok(r.stderr.includes(name.includes('default') ? path.join(OUTSIDE_HOME, '.config', 'tower-crane', 'config.json') : OUTSIDE), name);
   }
   for (const [name, env] of [
     ['an explicit file in the root', ({ inside }) => ({ TOWER_CRANE_CONFIG: inside })],
@@ -53,12 +57,14 @@ test('a ladder call that resolves the user file outside the test roots fails the
   }
 });
 
-test('a CLI a test runs fails when its user file lies outside the test roots', (t) => {
-  const h = makeRepo(t);
+test('a CLI a test runs fails, and fails its fixture cleanup, when its user file lies outside the test roots', async () => {
+  const h = makeRepo(null);
   h.init();
-  // The board view draws a broken ladder as an error, so only the exit check fails it.
+  h.ok(['status']);
+  // The board view draws a broken ladder as an error, so only the exit check fails the CLI.
   const r = h.run(['status'], { env: { TOWER_CRANE_CONFIG: OUTSIDE } });
   assert.equal(r.code, 1, r.stderr);
   assert.match(r.stderr, /a test resolved the user config outside the fixture root/);
-  h.ok(['status']);
+  // A test that expects a nonzero exit, or never waits for the CLI, still fails at cleanup.
+  await assert.rejects(h.cleanup(), (error) => error.message.includes('a test resolved the user config outside the fixture root') && error.message.includes(OUTSIDE));
 });
