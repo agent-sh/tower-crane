@@ -8,7 +8,7 @@ const net = require('node:net');
 const path = require('node:path');
 const { cachedFixture, pinRung, detachedAlive, BIN } = require('./helpers');
 const { gateFixture } = require('./gate-helpers');
-const { killPid, killGroup } = require('./signals');
+const { killPid, killGroup, waitUntil } = require('./signals');
 const { readPublished } = require('./atomic-file');
 
 const events = (h) => require('../lib/state').readEvents(h.state);
@@ -361,6 +361,63 @@ test('a refused climb stays pending and concurrent recovery dispatches only one 
   await h.until(() => h.task().status === 'submitted');
   assert.deepEqual(h.readAttempts().map((a) => a.rung), ['easy', 'medium']);
   assert.equal(events(h).filter((e) => e.cmd === 'escalate').length, 1);
+});
+
+// The wait host's recovery dispatches a pending climb with one try at the
+// dispatch lock: another dispatch holding it must not stall the host's events
+// or its signal drain, and the next pass dispatches the climb once it is free.
+test('a pending climb at a held dispatch lock stalls neither the wait host nor its signal drain', async (t) => {
+  const h = await setup(t);
+  const S = require('../lib/state');
+  const command = h.readState('project.json').ladder.medium.command;
+  h.ok(['ladder', 'set', 'medium', '--command', JSON.stringify([path.join(h.base, 'missing-worker')])]);
+  h.ok(['spawn', '--task', 'T1']);
+  await h.until(() => h.task().escalation_pending === true);
+  h.ok(['ladder', 'set', 'medium', '--command', JSON.stringify(command)]);
+  const dir = path.join(h.state, 'dispatch', 'lock');
+  fs.mkdirSync(path.dirname(dir), { recursive: true });
+  const held = S.tryMarkedLock(dir, { keepLive: true });
+  assert.ok(held, 'the dispatch lock is free');
+  let free = false;
+  const release = () => { if (!free) { free = true; S.releaseMarkedLock(held); } };
+  t.after(release);
+  const looked = path.join(h.base, 'dispatch-looked');
+  let child;
+  let closed = false;
+  let out = '';
+  const host = h.runAsync(['wait', '--follow', '--types', 'worker-message', '--agent', 'orchestrator'], {
+    hooks: { HOOK_DISPATCH_WAITING: looked },
+    onSpawn: (c) => {
+      child = c;
+      c.stdout.on('data', (d) => { out += d; });
+      c.on('close', () => { closed = true; });
+    },
+  });
+  t.after(() => { if (!closed) child.kill('SIGKILL'); });
+  const rows = () => out.split('\n').filter(Boolean).map((line) => JSON.parse(line));
+  await waitUntil(() => fs.existsSync(looked), { paths: [h.base], alive: () => !closed, what: 'the host looks at the held dispatch lock' });
+  const sent = Date.now();
+  h.ok(['msg', '--to', 'orchestrator', 'still there?']);
+  await waitUntil(() => rows().some((row) => row.type === 'worker-message'), { paths: [h.base], alive: () => !closed, what: 'the host reports the message' });
+  assert.ok(Date.now() - sent < 30000, `the message waited ${Date.now() - sent} ms behind the dispatch lock`); // wait-allow: a host blocked on the lock answers only after its 140 s wait, the failure this bound looks for
+  assert.equal(h.task().escalation_pending, true, 'the climb stays pending while the lock is held');
+  assert.equal(h.readAttempts().length, 1);
+  if (process.platform !== 'win32') {
+    const signalled = Date.now();
+    child.kill('SIGTERM');
+    const result = await host;
+    assert.ok(Date.now() - signalled < 30000, `the drain took ${Date.now() - signalled} ms`); // wait-allow: the same bound for the signal drain
+    assert.equal(result.code, 0, result.stderr);
+    assert.deepEqual(rows().at(-1), { reason: 'signal', signal: 'SIGTERM', drained: 0 });
+  } else {
+    child.kill();
+    await host;
+  }
+  release();
+  const submitted = await h.runAsync(['wait', '--types', 'submitted', '--task', 'T1', '--agent', 'orchestrator']);
+  assert.equal(submitted.code, 0, submitted.stderr || submitted.stdout);
+  await h.until(() => h.readAttempts().length === 2 && h.task().status === 'submitted');
+  assert.deepEqual(h.readAttempts().map((a) => a.rung), ['easy', 'medium']);
 });
 
 test('wait recovers a verified worker exit after its supervisor is lost', {
