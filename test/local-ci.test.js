@@ -372,9 +372,12 @@ fs.writeFileSync('.local/checks/receipt.json', JSON.stringify({ failure_reasons:
 fs.writeFileSync('.local/checks/extra.json', '{}');
 // A colored receipt: the escape inside the token would hide it from the patterns.
 fs.writeFileSync('.local/checks/colored.json', '{"output": "\\x1b[32m' + token.slice(0, 4) + '\\x1b[1m' + token.slice(4) + '\\x1b[0m"}');
-fs.writeFileSync('.local/checks/blob.json', Buffer.from([0x7b, 0, 0x7d]));
-// Latin-1 text: invalid UTF-8 without a NUL byte.
-fs.writeFileSync('.local/checks/latin1.json', Buffer.from('{"caf\\xe9": "' + token + '"}', 'latin1'));
+// Every byte value, twice: no secret, so it must come out byte for byte.
+fs.writeFileSync('.local/checks/blob.json', Buffer.from(Array.from({ length: 512 }, (_, i) => i % 256)));
+// Latin-1 text: invalid UTF-8 without a NUL byte, holding the environment's token and another token shape.
+fs.writeFileSync('.local/checks/latin1.json', Buffer.from('{"caf\\xe9": "' + token + '", "other": "ghp_' + 'e5'.repeat(18) + '"}', 'latin1'));
+// UTF-16 puts a NUL between the token's characters, where no byte-level match finds it.
+fs.writeFileSync('.local/checks/utf16.json', Buffer.from('{"t": "' + token + '"}', 'utf16le'));
 fs.writeFileSync(path.join(process.env.TMPDIR, 'report.txt'), 'scratch report');
 console.log('Scratch report: ' + path.join(process.env.TMPDIR, 'report.txt'));
 console.log('Local check receipt: ' + path.resolve('.local/checks/receipt.json'));
@@ -420,7 +423,7 @@ process.exitCode = 1;
   const copied = Object.fromEntries(kept.artifacts.map((a) => [path.basename(a.from), a]));
   assert.deepEqual(Object.keys(copied).sort(), ['blob.json', 'colored.json', 'extra.json', 'latin1.json', 'receipt.json', 'report.txt']);
   for (const a of kept.artifacts) assert.ok(a.path.startsWith(`ci-artifacts/${run}/`), a.path);
-  // Text artifacts get the log's redaction; a binary one is kept as written.
+  // Text artifacts get the log's redaction; a binary one is redacted at the byte level.
   const receipt = fs.readFileSync(path.join(h.state, copied['receipt.json'].path), 'utf8');
   assert.ok(!receipt.includes(token));
   assert.deepEqual(JSON.parse(receipt), { failure_reasons: ['unit tests failed'], output: 'token [redacted:CI_FIXTURE_TOKEN]' });
@@ -428,18 +431,23 @@ process.exitCode = 1;
   assert.equal(copied['receipt.json'].bytes, Buffer.byteLength(receipt));
   assert.equal(fs.readFileSync(path.join(h.state, copied['colored.json'].path), 'utf8'), '{"output": "[redacted:CI_FIXTURE_TOKEN]"}');
   assert.equal(copied['colored.json'].redacted, true);
-  assert.deepEqual(fs.readFileSync(path.join(h.state, copied['blob.json'].path)), Buffer.from([0x7b, 0, 0x7d]));
+  assert.deepEqual(fs.readFileSync(path.join(h.state, copied['blob.json'].path)), Buffer.from(Array.from({ length: 512 }, (_, i) => i % 256)));
   assert.equal(copied['blob.json'].binary, true);
-  // Decoding invalid UTF-8 would replace its bytes with U+FFFD, so it is binary and kept as written.
-  assert.deepEqual(fs.readFileSync(path.join(h.state, copied['latin1.json'].path)), Buffer.from(`{"caf\xe9": "${token}"}`, 'latin1'));
+  assert.equal(copied['blob.json'].redacted, undefined);
+  // Decoding invalid UTF-8 would replace its bytes with U+FFFD, so it is binary: the environment
+  // value and the token shape are redacted in place and every other byte stays as written.
+  const latin1 = Buffer.from('{"caf\xe9": "[redacted:CI_FIXTURE_TOKEN]", "other": "[redacted:GITHUB_TOKEN]"}', 'latin1');
+  assert.deepEqual(fs.readFileSync(path.join(h.state, copied['latin1.json'].path)), latin1);
   assert.equal(copied['latin1.json'].binary, true);
-  assert.equal(copied['latin1.json'].redacted, undefined);
+  assert.equal(copied['latin1.json'].redacted, true);
+  assert.equal(copied['latin1.json'].bytes, latin1.length);
   assert.equal(fs.readFileSync(path.join(h.state, copied['report.txt'].path), 'utf8'), 'scratch report');
   assert.equal(copied['report.txt'].path, `ci-artifacts/${run}/TMPDIR/report.txt`);
   assert.equal(copied['extra.json'].path, `ci-artifacts/${run}/worktree/.local/checks/extra.json`);
   assert.equal(fs.readFileSync(path.join(h.state, 'ci-artifacts', '.gitignore'), 'utf8'), '*\n');
-  assert.deepEqual(kept.artifacts_skipped.map((s) => path.basename(s.from)), ['outside.json']);
+  assert.deepEqual(kept.artifacts_skipped.map((s) => path.basename(s.from)), ['outside.json', 'utf16.json']);
   assert.match(kept.artifacts_skipped[0].reason, /outside the gate worktree/);
+  assert.match(kept.artifacts_skipped[1].reason, /secret split by control bytes/);
   // The summary reaches worker prompts, so it counts the artifacts and names none.
   assert.match(r.stdout, /Artifacts: 6 kept for the orchestrator and the owner/);
   assert.ok(!r.stdout.includes('ci-artifacts'), r.stdout);
@@ -506,6 +514,21 @@ test('a removed control keeps the word boundary token shapes are found by', () =
   // A value with no token shape stays whole when the redactor cleans the text: its controls go,
   // a carriage return included.
   assert.equal(env(env.strip('pre abcdefghij\x00012345\r6789xyz post')), 'pre [redacted:PLAIN_SECRET] post');
+});
+
+test('byte-level redaction matches values as UTF-8 bytes and token shapes, and keeps every other byte', () => {
+  const { createRedactor } = require('../lib/gates/common');
+  const github = `ghp_${'d4'.repeat(18)}`;
+  const redact = createRedactor([['FIXTURE_PASSWORD', 'p\u00e4ss-\u20ac-0123456789abcdefgh']]);
+  const bytes = (...parts) => Buffer.concat(parts.map((p) => (Buffer.isBuffer(p) ? p : Buffer.from(p, 'utf8'))));
+  const junk = Buffer.from([0xff, 0x00, 0xe9, 0x80, 0x1b]);
+  for (const [input, expected] of [
+    [bytes(junk, 'p\u00e4ss-\u20ac-0123456789abcdefgh', junk), bytes(junk, '[redacted:FIXTURE_PASSWORD]', junk)],
+    [bytes(junk, github, junk), bytes(junk, '[redacted:GITHUB_TOKEN]', junk)],
+    [bytes('Authorization: Bearer ', junk, 'x y'), bytes('Authorization: Bearer [redacted:AUTHORIZATION] y')],
+    [bytes(junk, '[redacted:GITHUB_TOKEN]', junk), bytes(junk, '[redacted:GITHUB_TOKEN]', junk)],
+    [Buffer.from(Array.from({ length: 256 }, (_, i) => i)), Buffer.from(Array.from({ length: 256 }, (_, i) => i))],
+  ]) assert.deepEqual(redact.bytes(input), expected, input.toString('hex'));
 });
 
 test('a passing local CI keeps its log without a tail or artifacts', (t) => {
