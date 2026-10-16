@@ -580,6 +580,41 @@ test('restoring redaction markers is linear in their count', () => {
   assert.equal(redact.bytes(binary).body, binary);
 });
 
+test('a token prefix before 16 MiB of token characters is redacted whole in linear work', () => {
+  const { createRedactor } = require('../lib/gates/common');
+  const redact = createRedactor([['FIXTURE_TOKEN', `ghp_${'d4'.repeat(18)}`]]);
+  const size = 16 << 20;
+  // The token shapes ran as backtracking regular expressions, which threw a RangeError (maximum
+  // call stack size exceeded) from about 8 MiB of run: the gate crashed instead of redacting. The
+  // NUL byte sends the text through the control cleanup's token search too.
+  const cases = [
+    [`ghp_${'aB3'.repeat(size / 3)}`, '[redacted:GITHUB_TOKEN]'],
+    [`sk-${'ab-'.repeat(size / 3)}z`, '[redacted:API_KEY]'],
+    [`Authorization: Bearer ${'Zy9'.repeat(size / 3)}`, 'Authorization: Bearer [redacted:AUTHORIZATION]'],
+  ];
+  // Counting character reads shows the scans read each character a bounded number of times,
+  // without timing them.
+  const charCodeAt = String.prototype.charCodeAt;
+  let reads = 0;
+  String.prototype.charCodeAt = function (i) {
+    reads++;
+    return charCodeAt.call(this, i);
+  };
+  try {
+    for (const [token, expected] of cases) {
+      const input = `\x00pre ${token} post`;
+      reads = 0;
+      assert.equal(redact(redact.strip(input)), `pre ${expected} post`, token.slice(0, 24));
+      const out = redact.bytes(Buffer.from(input, 'latin1'));
+      assert.equal(out.missed, undefined, token.slice(0, 24));
+      assert.equal(out.body.toString('latin1'), `\x00pre ${expected} post`, token.slice(0, 24));
+      assert.ok(reads <= 16 * input.length, `${reads} character reads for ${input.length} characters`);
+    }
+  } finally {
+    String.prototype.charCodeAt = charCodeAt;
+  }
+});
+
 test('a passing local CI keeps its log without a tail or artifacts', (t) => {
   const h = fixture(t);
   h.ok(['project', 'set', '--ci-local', JSON.stringify({ command: h.command, timeout: 5, artifacts: ['*.js'] })]);
