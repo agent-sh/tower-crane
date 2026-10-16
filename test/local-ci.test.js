@@ -363,6 +363,8 @@ console.log('osc ' + token.slice(0, 4) + '\\x1b]8;;https://x\\x07' + token.slice
 console.log('unterminated \\x1b]8;;https://x');
 console.log('after the unterminated escape');
 console.log('title \\x1b]0;t\\x07set');
+// A progress redraw right before a token that is not in the environment: the token shape still matches.
+console.log('Downloading\\rghp_' + 'd4'.repeat(18));
 for (let i = 0; i < 150; i++) console.log('cargo tree line ' + i);
 fs.mkdirSync('.local/checks', { recursive: true });
 // Like ginza's receipt, which holds every step's full output, including what the log redacts.
@@ -407,7 +409,8 @@ process.exitCode = 1;
   assert.match(log, /^early line 0$/m);
   assert.match(log, /^cargo tree line 149$/m);
   assert.match(log, /^stderr token \[redacted:/m);
-  assert.match(log, /^unterminated \nafter the unterminated escape\ntitle set$/m);
+  assert.match(log, /^unterminated \nafter the unterminated escape\ntitle set\nDownloading\n\[redacted:GITHUB_TOKEN\]$/m);
+  assert.ok(!log.includes('ghp_d4'), log);
   assert.ok(!log.includes(token));
   assert.ok(r.stdout.includes(`Full log: ${path.join(h.state, kept.log)}`), r.stdout);
   assert.ok(!r.stdout.includes(token));
@@ -462,8 +465,10 @@ test('gate output loses terminal escapes, and an unterminated string ends at its
     ['OSC up to the next escape', 'a\x1b]8;;x\x1b[1mb', 'ab'],
     ['8-bit ST ends an OSC', '\x1b]8;;url\x9clink\x1b]8;;\x9c rest', 'link rest'],
     ['C1 OSC and DCS', 'a\x9d0;t\x9cb\x90q\x9cc', 'abc'],
-    ['lone ESC before DEL, ESC and non-ASCII', 'ghp_\x1b\x7fAB\x1b\x1b\x7fC\x1béD', 'ghp_ABCéD'],
-    ['C0, CR and C1 controls; tab and newline stay', 'a\x00\x08\r\x0b\x7f\x85b\tc\r\n', 'ab\tc\n'],
+    ['lone ESC before DEL, ESC and non-ASCII', 'a\x1b\x7f.\x1b\x1b\x7f,\x1béb', 'a.,éb'],
+    ['C0 and C1 controls go; tab and newline stay', '(\x00\x08\x0b\x7f\x85)\tc\n', '()\tc\n'],
+    ['a control run between word characters leaves a space', 'ab\x00cd\x7f\x85ef_\x1b\x7fg', 'ab cd ef_ g'],
+    ['a CR ends a line and CRLF is LF', 'get 10%\rget 50%\r\nnext\r\r\nlast\r', 'get 10%\nget 50%\nnext\nlast\n'],
   ];
   for (const [name, input, expected] of cases) assert.equal(stripEscapes(input), expected, name);
   // Each unterminated string ends at the next ESC. A lazy scan to a terminator that never comes
@@ -477,6 +482,19 @@ test('gate output loses terminal escapes, and an unterminated string ends at its
     ['CSI without a final byte', ('\x1b[' + '0'.repeat(98)).repeat(million / 100), '0'.repeat(98 * million / 100)],
     ['ESC runs', '\x1b'.repeat(million), ''],
   ]) assert.equal(stripEscapes(input), expected, name);
+});
+
+test('a removed control keeps the word boundary token shapes are found by', () => {
+  const { stripEscapes, createRedactor } = require('../lib/gates/common');
+  const redact = createRedactor([]);
+  const github = `ghp_${'d4'.repeat(18)}`;
+  const aws = `AKIA${'E5'.repeat(8)}`;
+  for (const [input, expected] of [
+    [`Downloading\r${github}`, 'Downloading\n[redacted:GITHUB_TOKEN]'],
+    [`${aws}\rDONE`, '[redacted:AWS_ACCESS_KEY_ID]\nDONE'],
+    [`x\b${github}`, 'x [redacted:GITHUB_TOKEN]'],
+    [`${aws}\x00DONE`, '[redacted:AWS_ACCESS_KEY_ID] DONE'],
+  ]) assert.equal(redact(stripEscapes(input)), expected, JSON.stringify(input));
 });
 
 test('a passing local CI keeps its log without a tail or artifacts', (t) => {

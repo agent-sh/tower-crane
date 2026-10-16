@@ -40,7 +40,7 @@ test('CI log cleanup preserves text, tabs and newlines while removing terminal c
     ['OSC ST', '\x1b]8;;https://example.test\x1b\\link\x1b]8;;\x1b\\', 'link'],
     ['C1 CSI', '\x9b31mred\x9b0m', 'red'],
     ['bare ESC', 'text\x1b\n', 'text\n'],
-    ['C0, DEL and C1', 'a\x00\x07\x08\x0b\x0c\x0e\x1f\x7f\x80b\r\n', 'ab\n'],
+    ['C0, DEL and C1', 'a\x00\x07\x08\x0b\x0c\x0e\x1f\x7f\x80b\r\n', 'a b\n'],
     ['layout and Unicode', '\t✖ тест\n', '\t✖ тест\n'],
   ];
   for (const [name, input, expected] of cases) assert.equal(stripEscapes(input), expected, name);
