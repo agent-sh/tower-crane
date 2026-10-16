@@ -28,6 +28,14 @@ function monitorHook(h, name, body) {
   return { NODE_OPTIONS: `--require "${file.replace(/\\/g, '/')}"` };
 }
 
+// The last line of a kept startup-failed log: the phases the start finished.
+function keptPhases(file) {
+  const last = fs.readFileSync(file, 'utf8').trimEnd().split('\n').pop();
+  const match = /^tower-crane: startup phases in ms: (\{.*\})$/.exec(last);
+  assert.ok(match, `the kept log does not end with its startup phases: ${last}`);
+  return JSON.parse(match[1]);
+}
+
 const logs = (h) => (fs.existsSync(path.join(h.state, 'logs')) ? fs.readdirSync(path.join(h.state, 'logs')) : []);
 
 // The supervisor reads git config for the harness before it reports. That
@@ -117,6 +125,10 @@ cp.spawnSync = () => {
   assert.match(fs.readFileSync(path.join(h.state, 'logs', kept[0]), 'utf8'), /planted: git is broken on this host/);
   assert.ok(failed.stderr.includes(`The supervisor log is kept at ${path.join(h.state, 'logs', kept[0])}`), failed.stderr);
   assert.match(failed.stderr, /it ends:\n(.*\n)*planted: git is broken on this host/);
+  const phases = keptPhases(path.join(h.state, 'logs', kept[0]));
+  assert.ok(phases.total >= phases.receipt && phases.receipt >= 0, JSON.stringify(phases));
+  assert.ok(phases.supervisor.boot > 0, 'the exit receipt carries the phases the supervisor finished');
+  assert.equal(phases.supervisor.launch, undefined);
   // The kept log frees the agent's own log name for the next spawn.
   const next = h.run(['spawn', '--role', 'small', '--task', 'T1', '--wait', '--json']);
   assert.equal(next.code, 0, next.stderr);
@@ -221,13 +233,14 @@ test('a supervisor killed before it reports ends the wait early', (t) => {
   assert.match(failed.stderr, /supervisor startup failed: the supervisor exited before it reported ready/);
 });
 
-test('a supervisor that stalls before it reports says so and keeps its log', (t) => {
+// A start that runs out of time is the one the phases explain, so its log is
+// kept even when the supervisor wrote nothing.
+test('a supervisor that stalls silently before it reports says so and keeps a log of the phases it finished', (t) => {
   const h = setup(t);
   commandRung(h);
   const env = monitorHook(h, 'git-stalls', `
 const cp = require('node:child_process');
 cp.spawnSync = () => {
-  process.stderr.write('planted: waiting on git\\n');
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 30000); // wait-allow: a git call that outlasts the startup window
   throw new Error('unreachable');
 };`);
@@ -235,9 +248,46 @@ cp.spawnSync = () => {
   assert.equal(failed.code, 1, failed.stderr);
   assert.match(failed.stderr, /supervisor startup failed: the supervisor did not report ready within 10 s/);
   assert.doesNotMatch(failed.stderr, /installed and on PATH/);
-  assert.match(failed.stderr, /The supervisor log is kept at .*; it ends:\nplanted: waiting on git/);
-  assert.equal(logs(h).length, 1);
+  assert.match(failed.stderr, /The supervisor log is kept at .*; it ends:\ntower-crane: startup phases in ms: \{/);
+  const kept = logs(h);
+  assert.equal(kept.length, 1);
+  const phases = keptPhases(path.join(h.state, 'logs', kept[0]));
+  t.diagnostic(`stalled startup_ms ${JSON.stringify(phases)}`);
+  assert.ok(phases.total >= 10000 && phases.receipt >= 10000, JSON.stringify(phases));
+  assert.equal(phases.ready, undefined, 'a small agent has no handshake');
+  assert.ok(phases.supervisor.boot > 0, 'the supervisor wrote the phases it finished beside the receipt');
+  assert.equal(phases.supervisor.setup, undefined, 'it stalled in setup');
 });
+
+// Each recorded phase is a whole number of ms within the dispatch's own
+// window. A worker without the lease gate, as on Windows, also records its
+// handshake. The diagnostic puts each platform's timings in the CI log.
+for (const [role, hooks] of [['small', {}], ['worker', { HOOK_NO_SH: '1' }]]) {
+  test(`a ${role} spawn records how long each startup phase took`, (t) => {
+    const h = setup(t);
+    const rung = role === 'small' ? 'small' : h.json(['spawn', '--task', 'T1', '--dry-run']).rung;
+    pinRung(h, rung, { harness: 'command', command: [process.execPath, '-e', 'process.exit(0)', '{prompt}'] });
+    const started = h.run(['spawn', ...(role === 'small' ? ['--role', 'small'] : []), '--task', 'T1', '--wait', '--json'], { hooks });
+    assert.equal(started.code, 0, started.stderr);
+    const event = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse)
+      .find((e) => e.cmd === 'spawn' && e.detail.role === role);
+    const phases = event.detail.startup_ms;
+    t.diagnostic(`${process.platform} ${role} startup_ms ${JSON.stringify(phases)}`);
+    const handshake = role === 'worker';
+    const supervisorKeys = handshake ? ['boot', 'setup', 'go_wait', 'launch'] : ['boot', 'setup', 'launch'];
+    assert.deepEqual(Object.keys(phases).sort(), [...(handshake ? ['lease', 'ready'] : []), 'receipt', 'supervisor', 'total'].sort());
+    assert.deepEqual(Object.keys(phases.supervisor).sort(), supervisorKeys.sort());
+    for (const value of [...Object.values(phases).filter((v) => typeof v === 'number'), ...Object.values(phases.supervisor)]) {
+      assert.ok(Number.isInteger(value) && value >= 0, JSON.stringify(phases));
+    }
+    assert.ok(phases.total > 0 && phases.total < 10000 * (handshake ? 2 : 1), JSON.stringify(phases));
+    assert.ok(phases.supervisor.boot > 0, 'Node takes time to start');
+    // Rounding to whole ms lets each sum pass the total by under 1 ms a term.
+    const sum = (values) => values.reduce((a, b) => a + b, 0);
+    assert.ok(sum([phases.ready || 0, phases.lease || 0, phases.receipt]) <= phases.total + 3, JSON.stringify(phases));
+    assert.ok(sum(Object.values(phases.supervisor)) <= phases.total + 4, 'the supervisor runs inside the dispatch window');
+  });
+}
 
 test('a harness the supervisor cannot find is reported as a PATH problem, with nothing kept', (t) => {
   const h = setup(t);
