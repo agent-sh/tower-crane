@@ -467,7 +467,9 @@ test('gate output loses terminal escapes, and an unterminated string ends at its
     ['C1 OSC and DCS', 'a\x9d0;t\x9cb\x90q\x9cc', 'abc'],
     ['lone ESC before DEL, ESC and non-ASCII', 'a\x1b\x7f.\x1b\x1b\x7f,\x1béb', 'a.,éb'],
     ['C0 and C1 controls go; tab and newline stay', '(\x00\x08\x0b\x7f\x85)\tc\n', '()\tc\n'],
-    ['a control run between word characters leaves a space', 'ab\x00cd\x7f\x85ef_\x1b\x7fg', 'ab cd ef_ g'],
+    ['a control run between word characters goes', 'ab\x00cd\x7f\x85ef_\x1b\x7fg', 'abcdef_g'],
+    // A Windows tool's UTF-16 output read as UTF-8: a NUL after every character.
+    ['UTF-16 text', [...'Forbidden (403).\n'].map((c) => `${c}\x00`).join(''), 'Forbidden (403).\n'],
     ['a control run inside a token shape goes', `ghp_${'a'.repeat(10)}\x1b\x7f${'b'.repeat(10)}\x00 next`, `ghp_${'a'.repeat(10)}${'b'.repeat(10)} next`],
     ['a CR ends a line and CRLF is LF', 'get 10%\rget 50%\r\nnext\r\r\nlast\r', 'get 10%\nget 50%\nnext\nlast'],
   ];
@@ -499,8 +501,11 @@ test('a removed control keeps the word boundary token shapes are found by', () =
     [`${aws}\x00DONE`, '[redacted:AWS_ACCESS_KEY_ID] DONE'],
   ]) assert.equal(redact(stripEscapes(input)), expected, JSON.stringify(input));
   // The token stays whole for the redactor, which labels an environment value by its variable.
-  const env = createRedactor([['FIXTURE_TOKEN', github]]);
+  const env = createRedactor([['FIXTURE_TOKEN', github], ['PLAIN_SECRET', 'abcdefghij0123456789xyz']]);
   assert.equal(env(stripEscapes(`a ${github.slice(0, 8)}\x00${github.slice(8)}`)), 'a [redacted:FIXTURE_TOKEN]');
+  // A value with no token shape stays whole when the redactor cleans the text: its controls go,
+  // a carriage return included.
+  assert.equal(env(env.strip('pre abcdefghij\x00012345\r6789xyz post')), 'pre [redacted:PLAIN_SECRET] post');
 });
 
 test('a passing local CI keeps its log without a tail or artifacts', (t) => {
