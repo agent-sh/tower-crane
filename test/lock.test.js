@@ -592,7 +592,8 @@ function windowsLock(t) {
   const h = makeRepo(t);
   const dir = path.join(h.base, 'locks', 'lock');
   fs.mkdirSync(path.dirname(dir), { recursive: true });
-  const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 120000)'], { stdio: 'ignore' });
+  // Alive until its stdin closes or it is killed.
+  const child = spawn(process.execPath, ['-e', 'process.stdin.resume()'], { stdio: ['pipe', 'ignore', 'ignore'] });
   const platform = Object.getOwnPropertyDescriptor(process, 'platform');
   const windowsCreated = P.windowsCreated;
   const times = new Map([[process.pid, 5]]);
