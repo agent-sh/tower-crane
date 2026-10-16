@@ -14,6 +14,8 @@
 const Module = require('node:module');
 const path = require('node:path');
 
+require('./user-config-guard');
+
 const AUTHORITY = path.join('lib', 'authority.js');
 const load = Module._load;
 Module._load = function (request, parent, ...rest) {

@@ -6,6 +6,8 @@ const path = require('path');
 const { spawnSync } = require('child_process');
 const { tempRoot } = require('../tmp-root');
 const { FOREGROUND_MAINTENANCE } = require('../repo-seed');
+// Fails a gate test that resolves the user's real ladder file, also when run without test/run.js.
+require('../fixtures/user-config-guard');
 
 // A scratch directory under the test temp root, removed by the caller.
 function scratch(prefix) {
@@ -26,6 +28,12 @@ function isolateGit(dir) {
     GIT_COMMITTER_NAME: 'tower-crane test',
     GIT_COMMITTER_EMAIL: 'test@example.invalid',
   });
+}
+
+// Gates call lib/ladder.js in the test process, which would read the user's
+// real ladder file; this names one in the fixture, absent unless a test writes it.
+function isolateUserFile(dir) {
+  process.env.TOWER_CRANE_CONFIG = path.join(dir, 'home', '.config', 'tower-crane', 'config.json');
 }
 
 function git(cwd, ...args) {
@@ -83,4 +91,4 @@ function fakeExec(handler) {
   return { exec, calls };
 }
 
-module.exports = { scratch, isolateGit, git, commit, initRepo, worktrees, quote, result, fakeExec };
+module.exports = { scratch, isolateGit, isolateUserFile, git, commit, initRepo, worktrees, quote, result, fakeExec };

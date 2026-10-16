@@ -4,10 +4,11 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
 const gate = require('../../lib/gates/clean');
-const { scratch, isolateGit, git, commit, initRepo, worktrees, quote } = require('./helpers');
+const { scratch, isolateGit, isolateUserFile, git, commit, initRepo, worktrees, quote } = require('./helpers');
 
 const tmp = scratch('gates-clean');
 isolateGit(tmp);
+isolateUserFile(tmp);
 process.env.TOWER_CRANE_TMP = path.join(tmp, 'tower-crane-tmp');
 fs.mkdirSync(process.env.TOWER_CRANE_TMP);
 const root = path.join(tmp, 'repo');

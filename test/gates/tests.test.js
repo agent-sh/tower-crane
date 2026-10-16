@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
 const gate = require('../../lib/gates/tests');
-const { scratch, isolateGit, git, commit, initRepo, worktrees, quote } = require('./helpers');
+const { scratch, isolateGit, isolateUserFile, git, commit, initRepo, worktrees, quote } = require('./helpers');
 const { detachedAlive } = require('../helpers');
 const { shellQuote, treeExec, withWorktree } = require('../../lib/gates/common');
 const { waitUntil, killPid } = require('../signals');
@@ -54,6 +54,7 @@ const { readPublished } = require('../atomic-file');
 
 const tmp = scratch('gates-tests');
 isolateGit(tmp);
+isolateUserFile(tmp);
 process.env.TOWER_CRANE_TMP = path.join(tmp, 'tower-crane-tmp');
 fs.mkdirSync(process.env.TOWER_CRANE_TMP);
 const root = path.join(tmp, 'repo');

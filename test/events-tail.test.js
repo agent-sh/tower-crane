@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
 const { EventEmitter, once } = require('node:events');
-const { cachedFixture, HOOKS, BIN } = require('./helpers');
+const { cachedFixture, useFixtureUserFile, HOOKS, BIN } = require('./helpers');
 const { HUNG_TEST_MS } = require('./signals');
 const { EventReader } = require('../lib/event-reader');
 const S = require('../lib/state');
@@ -133,6 +133,7 @@ test('retained state history keeps snapshots independent and does not duplicate 
   const h = cachedFixture(t, 'reader', (h) => h.init());
   const release = S.retainEvents(h.state);
   t.after(release);
+  useFixtureUserFile(t, h);
   const before = S.readEvents(h.state);
   const ctx = { stateDir: h.state, agent: 'owner', env: h.env, flags: {}, pos: [] };
   S.mutate(ctx, 'msg', (st, emit) => {
@@ -189,6 +190,7 @@ test('idle reservation checks reuse history while expiry and appended claims rem
 test('orchestrator lease writes leave frozen retained snapshots unchanged', (t) => {
   const h = cachedFixture(t, 'reader', (h) => h.init());
   t.after(S.retainEvents(h.state));
+  useFixtureUserFile(t, h);
   const freeze = (value) => {
     if (value && typeof value === 'object' && !Object.isFrozen(value)) {
       Object.freeze(value);
