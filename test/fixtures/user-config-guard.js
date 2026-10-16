@@ -20,8 +20,9 @@
 // in its place, which every caller then reaches.
 //
 // A CLI may exit nonzero by design, or run detached, so its own exit code
-// does not prove a leak was seen. Every process appends what it finds to the
-// hits file of the test process that owns it (TC_USER_CONFIG_HITS): fixture
+// does not prove a leak was seen. Every process writes what it finds to a
+// file of its own in the hits directory of the test process that owns it
+// (TC_USER_CONFIG_HITS), so concurrent writers never share a file: fixture
 // cleanup fails the test whose fixture made the call, and the test file
 // fails at exit on any hit left.
 
@@ -45,9 +46,10 @@ process.env[ROOTS_ENV] = ROOTS.join(path.delimiter);
 // appends to the one its test process passed down.
 const OWNER = !!process.env.NODE_TEST_CONTEXT || !process.env[HITS_ENV];
 if (OWNER) {
-  process.env[HITS_ENV] = path.join(ROOTS[0], `tower-crane-user-config-hits-${process.pid}-${Math.random().toString(36).slice(2)}.jsonl`);
+  process.env[HITS_ENV] = path.join(ROOTS[0], `tower-crane-user-config-hits-${process.pid}-${Math.random().toString(36).slice(2)}`);
 }
 const HITS = process.env[HITS_ENV];
+const OWN_FILE = `${process.pid}-${Math.random().toString(36).slice(2)}.jsonl`;
 
 function roots() {
   return ROOTS;
@@ -88,8 +90,8 @@ function check(file) {
   const hit = { message, cwd: process.cwd(), home: process.env.TC_ACCOUNT_HOME, pid: process.pid,
     stack: stack.split('\n').slice(2).filter((line) => !line.includes('(node:')).join('\n') };
   ownHits.push(message);
-  fs.mkdirSync(path.dirname(HITS), { recursive: true });
-  fs.appendFileSync(HITS, JSON.stringify(hit) + '\n');
+  fs.mkdirSync(HITS, { recursive: true });
+  fs.appendFileSync(path.join(HITS, OWN_FILE), JSON.stringify(hit) + '\n');
   throw new Error(message);
 }
 
@@ -99,12 +101,13 @@ const reported = new Set();
 // the fixture fails; without it, every one left.
 function assertNoUserConfigLeaks(base) {
   if (!OWNER) return;
-  let text;
-  // read-published: processes append hits; nothing replaces the file.
-  try { text = fs.readFileSync(HITS, 'utf8'); }
+  let names;
+  try { names = fs.readdirSync(HITS).sort(); }
   catch (e) { if (e.code === 'ENOENT') return; throw e; }
+  // read-published: each process appends to its own file; nothing replaces one.
   // A line still being written has no newline yet; the next check reads it.
-  const found = text.split('\n').slice(0, -1).map((line, i) => ({ i, hit: JSON.parse(line) }))
+  const found = names.flatMap((name) => fs.readFileSync(path.join(HITS, name), 'utf8').split('\n').slice(0, -1)
+    .map((line, n) => ({ i: `${name}:${n}`, hit: JSON.parse(line) })))
     .filter(({ i, hit }) => !reported.has(i) && (!base || canonical(base) === canonical(hit.cwd) || inside(base, hit.cwd) || inside(base, hit.home)));
   for (const { i } of found) reported.add(i);
   if (found.length) throw new Error(found.map(({ hit }) => `${hit.message}\n(pid ${hit.pid}, cwd ${hit.cwd})\n${hit.stack}`).join('\n'));
@@ -142,7 +145,7 @@ if (!Module[PATCHED]) {
       console.error(error.message);
       process.exitCode ||= 1;
     } finally {
-      if (OWNER) fs.rmSync(HITS, { force: true });
+      if (OWNER) fs.rmSync(HITS, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     }
   });
 }

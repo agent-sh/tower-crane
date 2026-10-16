@@ -58,6 +58,12 @@ test('a ladder call that resolves the user file outside the test roots fails the
       fs.symlinkSync(root, link, process.platform === 'win32' ? 'junction' : 'dir');
       return { TC_USER_CONFIG_ROOTS: link, TOWER_CRANE_CONFIG: inside };
     }],
+    // With no roots passed down, the guard takes TOWER_CRANE_TEST_TMP, here a link.
+    ['a real path under a TOWER_CRANE_TEST_TMP given as a link', ({ root, inside }) => {
+      const link = `${root}-link`;
+      fs.symlinkSync(root, link, process.platform === 'win32' ? 'junction' : 'dir');
+      return { TC_USER_CONFIG_ROOTS: '', TOWER_CRANE_TEST_TMP: link, TOWER_CRANE_TMP: '', TOWER_CRANE_CONFIG: inside };
+    }],
   ]) {
     const r = guarded(t, swallowed('L.resolve({}, process.env)'), env);
     assert.equal(r.code, 0, `${name}: ${r.stderr}`);
