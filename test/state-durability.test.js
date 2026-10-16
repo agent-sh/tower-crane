@@ -563,11 +563,11 @@ test('a reader that keeps losing waits only briefly for a held lock, then return
 // files exactly as they were when this was called.
 function sameKeys(t, h) {
   const { statSync } = fs;
-  const frozen = new Map(['project.json', 'tasks.json', 'decisions.json'].map((name) => {
+  const was = new Map(['project.json', 'tasks.json', 'decisions.json'].map((name) => {
     const file = path.resolve(h.state, name);
     return [file, statSync(file)];
   }));
-  fs.statSync = (file, ...args) => frozen.get(path.resolve(String(file))) ?? statSync(file, ...args);
+  fs.statSync = (file, ...args) => was.get(path.resolve(String(file))) ?? statSync(file, ...args);
   t.after(() => { fs.statSync = statSync; });
 }
 

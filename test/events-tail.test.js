@@ -370,9 +370,9 @@ test('an event reader that read a torn commit resumes where recovery cut it and 
   assert.deepEqual(reader.read().rows.map((e) => e.detail.text), ['torn first']);
   h.ok(['msg', '--to', 'orchestrator', LONG]);
   const batch = reader.read();
+  assert.deepEqual(batch.rows.map((e) => e.detail.text), [LONG]);
   assert.equal(batch.cut, size);
   assert.equal(batch.reset, false);
-  assert.deepEqual(batch.rows.map((e) => e.detail.text), [LONG]);
   assert.equal(reader.offset, fs.statSync(path.join(h.state, 'events.jsonl')).size);
 });
 
