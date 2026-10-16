@@ -553,3 +553,50 @@ test('a stale lock that cannot be removed still times out with exit 3', (t) => {
   assert.ok(tries >= 5 && tries <= 400, `${tries} removal attempts: it backs off between them`);
   assert.equal(h.readState('tasks.json').tasks.length, 0);
 });
+
+// Windows refuses to delete a file a scanner holds open. A holder whose own
+// marker outlives its release must not keep the lock for as long as it runs,
+// as a live holder on this host otherwise does.
+test('a marked lock whose marker its holder could not delete is freed by that holder\'s next look', (t) => {
+  const h = makeRepo(t);
+  const dir = path.join(h.base, 'locks', 'lock');
+  fs.mkdirSync(path.dirname(dir), { recursive: true });
+  const lock = S.tryMarkedLock(dir, { keepLive: true });
+  assert.ok(lock);
+  const unlink = fs.unlinkSync;
+  let busy = true;
+  fs.unlinkSync = (file) => {
+    if (busy && file === lock.file) throw Object.assign(new Error(`EPERM: operation not permitted, unlink '${file}'`), { code: 'EPERM' });
+    return unlink(file);
+  };
+  t.after(() => { fs.unlinkSync = unlink; });
+  S.releaseMarkedLock(lock);
+  assert.ok(fs.existsSync(lock.file), 'the deletion failed');
+  // Still undeletable: reported as a gone holder's marker, not a live holder.
+  const seen = S.clearStaleLock(dir, true);
+  assert.equal(seen.holder, null);
+  assert.equal(seen.stuck.code, 'EPERM');
+  busy = false;
+  const again = S.tryMarkedLock(dir, { keepLive: true }) || S.tryMarkedLock(dir, { keepLive: true });
+  assert.ok(again, 'the released marker is deleted and the lock taken');
+  S.releaseMarkedLock(again);
+  assert.equal(fs.existsSync(dir), false);
+});
+
+// Hooks run inside every synchronous wait, so one must not fail or recurse
+// into the wait it runs in.
+test('a failing or sleeping sleep hook does not break the wait it runs in', () => {
+  const U = require('../lib/util');
+  let calls = 0;
+  const failing = () => { throw new Error('hook failed'); };
+  const sleeping = () => { calls++; U.sleepSync(1); };
+  U.sleepHooks.add(failing);
+  U.sleepHooks.add(sleeping);
+  try {
+    U.sleepSync(1);
+  } finally {
+    U.sleepHooks.delete(failing);
+    U.sleepHooks.delete(sleeping);
+  }
+  assert.equal(calls, 1, 'a sleep inside a hook runs no hooks');
+});
