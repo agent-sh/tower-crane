@@ -640,6 +640,25 @@ test('a token run glued to more word characters is redacted whole, and the word 
     assert.equal(out.missed, undefined, input);
     assert.equal(out.body.toString('latin1'), `\x00key=${expected} end`, input);
   }
+  // A control inside a glued run goes, so the token is redacted whole; one at the token's end stays
+  // a boundary. Without that, `ghp_ABCD\rEFGH..._x` became two lines that no shape matches. The
+  // bytes cannot be redacted in place there, so the binary file is missed.
+  // binary is the redacted file, or null when it is missed.
+  for (const [input, expected, binary] of [
+    [`ghp_${'a'.repeat(10)}\r${'b'.repeat(26)}_suffix`, '[redacted:GITHUB_TOKEN]_suffix', null],
+    [`ghp_ABCD\rEFGH${'c'.repeat(32)}_x`, '[redacted:GITHUB_TOKEN]_x', null],
+    [`ghp_ABCD\x00EFGH${'c'.repeat(32)}_x`, '[redacted:GITHUB_TOKEN]_x', null],
+    [`${slack.slice(0, 20)}\r${slack.slice(20)}_x`, '[redacted:SLACK_TOKEN]_x', null],
+    [`${aws.slice(0, 8)}\r${aws.slice(8)}XYZ`, '[redacted:AWS_ACCESS_KEY_ID]', null],
+    [`${github}\x00_x`, '[redacted:GITHUB_TOKEN] _x', '[redacted:GITHUB_TOKEN]\x00_x'],
+    [`${aws}\rDONE`, '[redacted:AWS_ACCESS_KEY_ID]\nDONE', '[redacted:AWS_ACCESS_KEY_ID]\rDONE'],
+    [`${aws}\x00DONE`, '[redacted:AWS_ACCESS_KEY_ID] DONE', '[redacted:AWS_ACCESS_KEY_ID]\x00DONE'],
+  ]) {
+    assert.equal(redact(redact.strip(`key=${input} end`)), `key=${expected} end`, JSON.stringify(input));
+    const out = redact.bytes(Buffer.from(`\x00key=${input} end`, 'latin1'));
+    if (binary === null) assert.match(out.missed || '', /^a secret as /, JSON.stringify(input));
+    else assert.equal(out.body?.toString('latin1'), `\x00key=${binary} end`, JSON.stringify(input));
+  }
 });
 
 test('token shapes find every token the old regular expressions found', () => {
@@ -666,9 +685,10 @@ test('token shapes find every token the old regular expressions found', () => {
     shapes.forEach(({ old }, i) => { out = out.replace(old, `[redacted:${labels[i]}]`); });
     return out.replace(header, '$1[redacted:AUTHORIZATION]');
   };
-  const pieces = ['ghp_', 'gho_', 'github_pat_', 'sk-', 'SK-', 'AKIA', 'ASIA', 'xoxb-', 'XOXP-', 'authorization:',
-    'Authorization: ', 'Bearer ', 'basic', 'token\t', 'a', 'B', '7', 'Z', '_', '-', ' ', '\n', '.', 'é', ' ',
-    'aaaaaaaa', 'A1B2C3D4E5F6G7H8', 'xyz0123456789', 'a-a-a-a-'];
+  const pieces = ['ghp_', 'gho_', 'ghs_', 'ghu_', 'ghr_', 'github_pat_', 'sk-', 'SK-', 'AKIA', 'ASIA', 'xoxb-', 'XOXP-',
+    'xoxa-', 'xoxr-', 'XoXs-', 'authorization:', 'Authorization: ', 'AUTHORIZATION:', 'Bearer ', 'BEARER ', 'Token ',
+    'basic', 'token\t', 'a', 'B', '7', 'Z', '_', '-', ' ', '\n', '.', '\u00e9', '\u00a0', '\u2003', '\u3000', '\ufeff',
+    '\u2028', '\u0085', 'aaaaaaaa', 'A1B2C3D4E5F6G7H8', 'xyz0123456789', 'a-a-a-a-'];
   let seed = 1;
   const next = (n) => {
     seed = (seed * 1103515245 + 12345) & 0x7fffffff;
@@ -687,7 +707,11 @@ test('token shapes find every token the old regular expressions found', () => {
         return !!m && !body.test(after) && (/\w/.test(after) || m[1].length > max);
       };
       const before = [...text.matchAll(old)].map((m) => [m.index, m.index, m.index + m[0].length]);
-      assert.deepEqual(TOKEN_SHAPES[i].find(text, true), before, `${JSON.stringify(text)} shape ${i}`);
+      assert.deepEqual(TOKEN_SHAPES[i].find(text, 'strict'), before, `${JSON.stringify(text)} shape ${i}`);
+      // The cleanup's join mode differs only in ending a run longer than max where the token ends.
+      // The one bounded shape, an AWS key, has a 4-character prefix.
+      const joined = found.map(([at, start, end]) => [at, start, Math.min(end, at + 4 + max)]);
+      assert.deepEqual(TOKEN_SHAPES[i].find(text, 'join'), joined, `${JSON.stringify(text)} shape ${i} join`);
       for (const [at, , end] of before) {
         const now = found.find(([a]) => a === at);
         assert.ok(now && (now[2] === end || (now[2] > end && isGlued(now))), `${JSON.stringify(text)} shape ${i}`);
