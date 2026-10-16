@@ -115,45 +115,93 @@ test('wait --follow streams id-only lines and event prints the content', async (
   assert.equal(h.run(['event', 'Enope', '--agent', 'orchestrator']).code, 2);
 });
 
-// Recovery cuts a crashed commit's lines off the log: its torn last line, or
-// whole lines too. The next commit can append exactly as many bytes, so the
-// log keeps its size and inode. A follower that read the cut lines still
-// delivers that commit's event.
-for (const cut of ['a torn line', 'a whole line and a torn line']) {
-  test(`a follower delivers an event appended after recovery cuts ${cut} it read, at the same size`, async (t) => {
+// A commit that died in its append left its first line whole and the start
+// of its second, with its staged tasks.json and manifest. The next lock
+// holder cuts both lines off and appends its own. Returns the crashed line's
+// event and the number of bytes the cut removes.
+function tornCommit(h) {
+  const message = (text) => ({ at: new Date().toISOString(), agent: 'worker', cmd: 'msg', task: null, detail: { to: 'orchestrator', text },
+    id: `E${crypto.randomUUID()}`, type: 'worker-message', to: 'orchestrator' });
+  const first = message('crashed first');
+  const second = message(`crashed second ${'s'.repeat(300)}`);
+  const fd = fs.openSync(path.join(h.state, 'events.jsonl'), 'a');
+  const { size, dev, ino } = fs.fstatSync(fd);
+  fs.writeFileSync(path.join(h.state, `tasks.json.${second.id}.commit`), fs.readFileSync(path.join(h.state, 'tasks.json')));
+  fs.writeFileSync(path.join(h.state, `commit.${second.id}.json`), JSON.stringify({ size, dev, ino, ids: [first.id, second.id] }));
+  const torn = `${JSON.stringify(first)}\n${JSON.stringify(second).slice(0, 200)}`;
+  fs.writeSync(fd, torn);
+  fs.closeSync(fd);
+  return { first, cut: Buffer.byteLength(torn) };
+}
+
+// The bytes a worker message's log line takes besides its text, from the
+// last message the worker sent.
+function overhead(h) {
+  const raw = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').at(-1);
+  return Buffer.byteLength(raw) + 1 - Buffer.byteLength(JSON.parse(raw).detail.text);
+}
+
+// Recovery cuts a crashed commit's lines off the log, and the next commit can
+// append exactly as many bytes, so the log keeps its size and inode. A
+// follower delivers that commit's event whether it read the crashed lines
+// from before the crash or started after it, with its cursor inside them.
+for (const started of ['before the crash', 'after the crash and before recovery']) {
+  test(`a follower started ${started} delivers the event appended after recovery cuts the crashed lines, at the same size`, async (t) => {
     const h = setup(t);
-    const file = path.join(h.state, 'events.jsonl');
-    const p = cp.spawn(process.execPath, [BIN, 'wait', '--observe', '--follow', '--agent', 'orchestrator'], { cwd: h.repo, env: h.env });
-    t.after(() => p.kill());
-    let out = '';
-    p.stdout.on('data', (d) => { out += d; });
-    const ids = () => out.split('\n').filter(Boolean).map((line) => JSON.parse(line).id).filter(Boolean);
-    await readyLine(p);
-    const note = (text) => ({ at: new Date().toISOString(), agent: 'owner', cmd: 'task note', task: 'T1', detail: { text }, id: `E${crypto.randomUUID()}`, type: 'owner-comment', to: 'orchestrator' });
-    const line = (e) => `${JSON.stringify(e)}\n`;
-    const base = size(h);
-    const crashed = note('crashed commit');
-    fs.appendFileSync(file, line(crashed) + JSON.stringify(note('t'.repeat(400))).slice(0, 300));
-    await waitOnRepo(h, () => ids().includes(crashed.id), 'the crashed commit\'s whole line');
-    const from = cut === 'a torn line' ? base + Buffer.byteLength(line(crashed)) : base;
-    const end = size(h);
-    const next = note('');
-    next.detail.text = 'n'.repeat(end - from - Buffer.byteLength(line(next)));
-    const fd = fs.openSync(file, 'r+');
-    try {
-      fs.ftruncateSync(fd, from);
-      fs.writeSync(fd, line(next), from);
-    } finally {
-      fs.closeSync(fd);
+    const log = path.join(h.state, 'events.jsonl');
+    h.ok(['msg', '--to', 'orchestrator', 'sizes the next message', '--agent', 'worker']);
+    const extra = overhead(h);
+    const early = started === 'before the crash';
+    // Marks the follower's own read of the log through the crashed bytes.
+    const read = path.join(h.base, 'read-through');
+    const preload = path.join(h.base, 'read-mark.js');
+    fs.writeFileSync(preload, `'use strict';
+const fs = require('node:fs');
+const path = require('node:path');
+const log = ${JSON.stringify(log)};
+const fds = new Set();
+const { openSync, closeSync, readSync } = fs;
+fs.openSync = function (file, ...args) { const fd = openSync.call(this, file, ...args); if (path.resolve(String(file)) === log) fds.add(fd); return fd; };
+fs.closeSync = function (fd) { fds.delete(fd); return closeSync.call(this, fd); };
+fs.readSync = function (fd, buffer, offset, length, position) {
+  const n = readSync.call(this, fd, buffer, offset, length, position);
+  const from = Number(process.env.READ_FROM || -1);
+  if (fds.has(fd) && position === from && position + n === Number(process.env.READ_END)) fs.writeFileSync(${JSON.stringify(read)}, '');
+  return n;
+};
+`);
+    const follow = (env = {}) => {
+      const p = cp.spawn(process.execPath, ['--require', preload, BIN, 'wait', '--observe', '--follow', '--agent', 'orchestrator'], { cwd: h.repo, env: { ...h.env, ...env } });
+      t.after(() => p.kill());
+      let out = '';
+      p.stdout.on('data', (d) => { out += d; });
+      return { p, ids: () => out.split('\n').filter(Boolean).map((line) => JSON.parse(line).id).filter(Boolean) };
+    };
+    let f;
+    if (early) {
+      f = follow();
+      await readyLine(f.p);
     }
-    assert.equal(size(h), end, 'the log kept its size');
+    const base = size(h);
+    const { first, cut } = tornCommit(h);
+    if (early) {
+      await waitOnRepo(h, () => f.ids().includes(first.id), 'the crashed commit\'s whole line');
+    } else {
+      // The cursor is the end of the crashed commit's whole line.
+      f = follow({ READ_FROM: String(base + Buffer.byteLength(`${JSON.stringify(first)}\n`)), READ_END: String(base + cut) });
+      await readyLine(f.p);
+      await waitOnRepo(h, () => fs.existsSync(read), 'the follower\'s read of the torn line');
+    }
+    const end = size(h);
+    h.ok(['msg', '--to', 'orchestrator', 'n'.repeat(cut - extra), '--agent', 'worker']);
+    assert.equal(size(h), end, 'recovery cut the crashed lines and the next message took their place');
+    const next = JSON.parse(fs.readFileSync(log, 'utf8').trim().split('\n').at(-1)).id;
     // A reader resuming mid-line loses the first line it reads, never the second.
-    const later = note('later');
-    const last = note('last');
-    fs.appendFileSync(file, line(later));
-    fs.appendFileSync(file, line(last));
-    await waitOnRepo(h, () => ids().includes(last.id), 'the events after the cut commit');
-    assert.deepEqual(ids(), [crashed.id, next.id, later.id, last.id]);
+    h.ok(['msg', '--to', 'orchestrator', 'later', '--agent', 'worker']);
+    h.ok(['msg', '--to', 'orchestrator', 'last', '--agent', 'worker']);
+    const [later, last] = fs.readFileSync(log, 'utf8').trim().split('\n').slice(-2).map((line) => JSON.parse(line).id);
+    await waitOnRepo(h, () => f.ids().includes(last), 'the events after the cut');
+    assert.deepEqual(f.ids(), [...(early ? [first.id] : []), next, later, last]);
   });
 }
 

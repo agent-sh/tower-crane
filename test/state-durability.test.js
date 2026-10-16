@@ -197,6 +197,59 @@ test('rolling a commit forward syncs the log before it renames the staged files'
   assert.deepEqual(noted(h, 'crashed note'), { task: true, event: true });
 });
 
+const SHORT_WAIT = path.join(__dirname, 'fixtures', 'lock-wait.js');
+
+test('a recovery rename another process holds open reports the busy code, and a later writer finishes it', (t) => {
+  const h = setup(t);
+  crash(h, 'landed', 'crashed note');
+  // Every rename onto tasks.json is refused past the 2 s retry, as Windows
+  // refuses one while a scanner holds the file.
+  const r = h.run(['task', 'note', 'T1', 'blocked note'], {
+    env: { NODE_OPTIONS: `--require=${JSON.stringify(SHORT_WAIT)}` },
+    hooks: { HOOK_BUSY_RENAME: '^tasks\\.json$', HOOK_BUSY_RENAME_TIMES: '0', HOOK_SHARING_BUSY: '1' },
+  });
+  assert.equal(r.code, 3, r.stderr);
+  assert.match(r.stderr, /holds an interrupted commit's file open/);
+  assert.deepEqual(noted(h, 'blocked note'), { task: false, event: false });
+  h.ok(['task', 'note', 'T1', 'next note']);
+  assert.deepEqual(noted(h, 'crashed note'), { task: true, event: true });
+  assertConsistent(h);
+});
+
+test('a writer sweeps the temp files dead writers left, and keeps a live writer\'s or a recent one', (t) => {
+  const h = setup(t);
+  const old = (Date.now() - 120000) / 1000;
+  const tmp = (pid, hex, age) => {
+    const file = path.join(h.state, `tasks.json.${pid}.${hex}.tmp`);
+    fs.writeFileSync(file, '{}');
+    if (age) fs.utimesSync(file, age, age);
+    return file;
+  };
+  // No pid on Linux, macOS or Windows reaches 2^31 - 2.
+  const dead = tmp(2147483646, '0123abcd', old);
+  const recent = tmp(2147483646, '4567cdef', null);
+  const live = tmp(process.pid, '89ab0123', old);
+  h.ok(['task', 'note', 'T1', 'next note']);
+  assert.equal(fs.existsSync(dead), false, 'the dead writer\'s temp file is swept');
+  assert.ok(fs.existsSync(recent), 'a recent one may belong to a writer in another pid namespace');
+  assert.ok(fs.existsSync(live));
+});
+
+test('recovery leaves a newer schema\'s staged commit alone and refuses, as reads do', (t) => {
+  const h = setup(t);
+  crash(h, 'staged', 'newer tool note');
+  const staged = leftovers(h);
+  assert.ok(staged.length >= 2, `staged files: ${staged}`);
+  const project = h.readState('project.json');
+  fs.writeFileSync(path.join(h.state, 'project.json'), JSON.stringify({ ...project, schema_version: 2 }, null, 2) + '\n');
+  for (const args of [['task', 'note', 'T1', 'older tool note'], ['validate']]) {
+    const r = h.run(args);
+    assert.notEqual(r.code, 0, args.join(' '));
+    assert.match(r.stderr, /state schema 2 is incompatible/);
+    assert.deepEqual(leftovers(h), staged, `${args[0]} left the newer tool's commit as it was`);
+  }
+});
+
 test('a torn last line cut before its own id is cut off, even when its detail names another event', (t) => {
   const h = setup(t);
   const log = path.join(h.state, 'events.jsonl');
@@ -530,4 +583,71 @@ test('a reader that keeps losing waits only briefly for a held lock, then return
   // 500 ms for the lock, and the reads around it; a writer would wait 60 s.
   assert.ok(waited < 10000, `the reader waited ${waited} ms`);
   assert.deepEqual(unlocked(h).notes, ['held note']);
+});
+
+// A commit's new file can reuse the old one's inode, and on a coarse clock its
+// size and times too (ext4 within one tick): statSync then reports the state
+// files exactly as they were when this was called.
+function sameKeys(t, h) {
+  const { statSync } = fs;
+  const was = new Map(['project.json', 'tasks.json', 'decisions.json'].map((name) => {
+    const file = path.resolve(h.state, name);
+    return [file, statSync(file)];
+  }));
+  fs.statSync = (file, ...args) => was.get(path.resolve(String(file))) ?? statSync(file, ...args);
+  t.after(() => { fs.statSync = statSync; });
+}
+
+test('a retained snapshot whose files look unchanged is not kept with the events of a later commit', (t) => {
+  const h = setup(t);
+  t.after(S.retainEvents(h.state));
+  assert.deepEqual(unlocked(h), { notes: [], logged: [] });
+  S.loadState(h.state);
+  sameKeys(t, h);
+  h.ok(['task', 'note', 'T1', 'next note']);
+  const st = S.loadState(h.state);
+  assert.ok(st.events.some((e) => e.detail?.text === 'next note'));
+  assert.deepEqual(st.tasks.tasks[0].notes.map((n) => n.text), ['next note'], 'the files are not behind the events');
+});
+
+test('a write whose prepared files look unchanged under the lock keeps a commit that landed while it waited', (t) => {
+  const h = setup(t);
+  sameKeys(t, h);
+  const lock = path.resolve(h.state, 'lock');
+  const { renameSync } = fs;
+  let landed = false;
+  // The other commit lands after this write parsed the files, before it takes the lock.
+  fs.renameSync = (from, to, ...args) => {
+    if (!landed && path.resolve(String(to)) === lock) {
+      landed = true;
+      h.ok(['task', 'note', 'T1', 'other note']);
+    }
+    return renameSync(from, to, ...args);
+  };
+  t.after(() => { fs.renameSync = renameSync; });
+  S.mutate({ stateDir: h.state, agent: 'owner', env: {}, flags: {} }, 'task note', (st, emit) => {
+    st.tasks.tasks[0].notes.push({ at: new Date().toISOString(), agent: 'owner', text: 'my note' });
+    emit('T1', { text: 'my note' });
+  });
+  assert.ok(landed);
+  assert.deepEqual(h.readState('tasks.json').tasks[0].notes.map((n) => n.text), ['other note', 'my note']);
+});
+
+test('a sketch stamped with torn bytes that recovery then cut off gives way to the next write\'s', (t) => {
+  const h = setup(t);
+  const log = path.join(h.state, 'events.jsonl');
+  const fd = fs.openSync(log, 'a');
+  const { size, dev, ino } = fs.fstatSync(fd);
+  const first = noteEvent('t'.repeat(3000));
+  const second = noteEvent('torn second');
+  fs.writeFileSync(path.join(h.state, `tasks.json.${second.id}.commit`), fs.readFileSync(path.join(h.state, 'tasks.json')));
+  fs.writeFileSync(path.join(h.state, `commit.${second.id}.json`), JSON.stringify({ size, dev, ino, ids: [first.id, second.id] }));
+  fs.writeSync(fd, `${JSON.stringify(first)}\n${JSON.stringify(second).slice(0, 60)}`);
+  fs.closeSync(fd);
+  // render stamps the log with the torn bytes, then its lock cuts them off.
+  assert.equal(JSON.parse(h.ok(['render', '--json'])).published, true);
+  assert.ok(fs.statSync(log).size === size);
+  h.ok(['task', 'add', '--title', 'After the cut', '--acceptance', 'shown']);
+  assert.ok(fs.statSync(log).size < size + 3000, 'the next write left the log shorter than the stamp');
+  assert.match(fs.readFileSync(path.join(h.state, 'sketch.md'), 'utf8'), /After the cut/);
 });
