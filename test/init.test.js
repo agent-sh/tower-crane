@@ -4,7 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { makeRepo, run } = require('./helpers');
+const { makeRepo, run, ownerDirsOutside, ACCOUNT_HOME } = require('./helpers');
 
 test('init creates the state files and excludes them from git', (t) => {
   const h = makeRepo(t);
@@ -112,4 +112,115 @@ test('help lists every command and per-command help works', (t) => {
   const version = h.run(['--version']);
   assert.equal(version.code, 0, version.stderr);
   assert.equal(version.stdout.trim(), require('../package.json').version);
+});
+
+// The account's home is the fixture's (fixtures/account-home.js), so this is
+// the default owner_config_dir inside the fixture, never the developer's.
+const defaultOwnerDir = (h) => fs.realpathSync.native(path.join(h.env.HOME, '.config', 'tower-crane'));
+
+test('an init by anyone but the owner records the default owner_config_dir, not the folder TOWER_CRANE_CONFIG names', (t) => {
+  const h = makeRepo(t, { builtin: true });
+  const evil = path.join(h.base, 'evil');
+  fs.mkdirSync(path.join(evil, 'owner'), { recursive: true });
+  fs.writeFileSync(path.join(evil, 'owner', 'key'), 'attacker-key\n');
+  const config = path.join(evil, 'config.json');
+  const r = h.run(['init', '--name', 'demo', '--goal', 'g'], { env: { TOWER_CRANE_AGENT: 'orchestrator', TOWER_CRANE_CONFIG: config } });
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(h.readState('project.json').owner_config_dir, defaultOwnerDir(h));
+  assert.match(r.stdout, /notice: owner_config_dir is the default .*only the owner's init at a terminal records another/);
+  // The key the orchestrator planted next to its config file is not the owner's.
+  const probe = h.run(['project', 'set', '--merge-admin', 'true'], { env: { TOWER_CRANE_AGENT: 'owner', TOWER_CRANE_OWNER_KEY: 'attacker-key', TOWER_CRANE_CONFIG: config } });
+  assert.equal(probe.code, 1, probe.stdout);
+  assert.match(probe.stderr, /owner identity needs a process the owner runs/);
+  assert.equal(h.readState('project.json').merge?.admin, undefined);
+});
+
+test('an orchestrator init leaves out what only the owner grants from the user file; the owner init copies it', (t) => {
+  const h = makeRepo(t, { builtin: true });
+  const builtin = require('../docs/builtin-ladder.json');
+  const as = (agent, extra = []) => h.run(['init', '--name', 'demo', '--goal', 'g', ...extra], { env: { TOWER_CRANE_AGENT: agent } });
+  const write = (doc) => {
+    fs.mkdirSync(path.dirname(h.userConfig), { recursive: true });
+    fs.writeFileSync(h.userConfig, JSON.stringify(doc));
+  };
+
+  // The owner's ordinary file: personal fallbacks, no grants.
+  write({ harness: 'codex', ladder: { hard: { fallbacks: [{ harness: 'codex', profile: 'astra', effort: 'high' }, { harness: 'claude', model: 'fable', effort: 'high' }] } } });
+  const plain = as('orchestrator', ['--state', path.join(h.base, 'plain')]);
+  assert.equal(plain.code, 0, plain.stderr);
+  assert.doesNotMatch(plain.stdout, /left out|outside its sandbox|as a command/);
+
+  const grants = {
+    medium: { profile: 'sol', effort: 'high', sandbox: { domains: ['*'] }, env: { PROBE: '1' }, env_file: path.join(h.base, 'secrets.env'), scope: { MemoryMax: '8G' } },
+    hard: { harness: 'opencode', model: 'x/y' },
+    easy: { harness: 'command', command: [process.execPath, '-e', 'process.exit(1)', '{prompt}'] },
+    review: { harness: 'claude', model: 'haiku', tools: ['Edit'] },
+  };
+  write({ harness: 'codex', ladder: grants });
+  const r = as('orchestrator');
+  assert.equal(r.code, 0, r.stderr);
+  const ladder = h.readState('project.json').ladder;
+  assert.deepEqual(ladder.medium, { profile: 'sol', effort: 'high' });
+  assert.deepEqual(ladder.hard, { ...builtin.ladder.hard });
+  assert.deepEqual(ladder.easy, { ...builtin.ladder.easy });
+  assert.deepEqual(ladder.review, { harness: 'claude', model: 'haiku' });
+  assert.match(r.stdout, /notice: ladder medium: init left out sandbox, env, env_file, scope from the user file/);
+  assert.match(r.stdout, /notice: ladder hard: the user file runs it on opencode outside its sandbox/);
+  assert.match(r.stdout, /notice: ladder easy: the user file runs it as a command/);
+  assert.match(r.stdout, /notice: ladder review: init left out tools Edit/);
+  const init = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l)).find((e) => e.cmd === 'init');
+  assert.deepEqual(init.detail.withheld.map((w) => w.rung).sort(), ['easy', 'hard', 'medium', 'review']);
+
+  // A default harness outside the sandbox reaches every rung that follows it.
+  write({ harness: 'opencode', ladder: { medium: { model: 'x/y' } } });
+  const followed = as('orchestrator', ['--state', path.join(h.base, 'followed')]);
+  assert.equal(followed.code, 0, followed.stderr);
+  const medium = JSON.parse(fs.readFileSync(path.join(h.base, 'followed', 'project.json'), 'utf8')).ladder.medium;
+  assert.deepEqual(medium, { harness: builtin.harness, ...builtin.ladder.medium });
+
+  write({ harness: 'codex', ladder: grants });
+  const owner = as('owner', ['--state', path.join(h.base, 'owned')]);
+  assert.equal(owner.code, 0, owner.stderr);
+  assert.doesNotMatch(owner.stdout, /notice:/);
+  const owned = JSON.parse(fs.readFileSync(path.join(h.base, 'owned', 'project.json'), 'utf8')).ladder;
+  for (const name of Object.keys(grants)) assert.deepEqual(owned[name], grants[name], name);
+});
+
+test('a headless owner init checks the key in the default owner_config_dir, not one beside the file TOWER_CRANE_CONFIG names', (t) => {
+  const h = makeRepo(t, { builtin: true });
+  const evil = path.join(h.base, 'evil');
+  fs.mkdirSync(path.join(evil, 'owner'), { recursive: true });
+  fs.writeFileSync(path.join(evil, 'owner', 'key'), 'attacker-key\n');
+  const config = path.join(evil, 'config.json');
+  fs.writeFileSync(config, JSON.stringify({ harness: 'codex', ladder: { medium: { profile: 'sol', effort: 'high', sandbox: { domains: ['*'] }, env: { PROBE: '1' } } } }));
+  const planted = h.run(['init', '--name', 'demo', '--goal', 'g', '--agent', 'owner'], { env: { TOWER_CRANE_OWNER_KEY: 'attacker-key', TOWER_CRANE_CONFIG: config } });
+  assert.equal(planted.code, 1, planted.stdout);
+  assert.match(planted.stderr, /TOWER_CRANE_OWNER_KEY does not match the key in .*\.config.tower-crane.owner.key/);
+  assert.ok(!fs.existsSync(path.join(h.state, 'project.json')), 'the planted key made no project');
+  // The owner's own key still inits headless, bound to the default directory,
+  // and the owner's init takes the file's grants.
+  const owner = h.run(['init', '--name', 'demo', '--goal', 'g', '--agent', 'owner'], { env: { TOWER_CRANE_CONFIG: config } });
+  assert.equal(owner.code, 0, owner.stderr);
+  const project = h.readState('project.json');
+  assert.equal(project.owner_config_dir, defaultOwnerDir(h));
+  assert.deepEqual(project.ladder.medium.env, { PROBE: '1' });
+  assert.match(owner.stdout, /notice: owner_config_dir is the default/);
+  const again = h.run(['init', '--name', 'demo', '--goal', 'g'], { env: { TOWER_CRANE_AGENT: 'orchestrator' } });
+  assert.equal(again.code, 1);
+  assert.match(again.stderr, /already exists/);
+});
+
+test('tests bind the default owner_config_dir inside the fixture, and the fixture guard names one outside', (t) => {
+  const h = makeRepo(t, { builtin: true });
+  h.ok(['init', '--name', 'demo', '--goal', 'g'], { env: { TOWER_CRANE_AGENT: 'orchestrator', NODE_OPTIONS: '--no-warnings' } });
+  const bound = h.readState('project.json').owner_config_dir;
+  assert.ok(bound.startsWith(h.base + path.sep), bound);
+  assert.match(h.env.NODE_OPTIONS, new RegExp(path.basename(ACCOUNT_HOME).replace('.', '\\.')));
+  assert.deepEqual(ownerDirsOutside(h.base), []);
+  const stray = path.join(h.base, 'stray');
+  fs.mkdirSync(stray);
+  fs.writeFileSync(path.join(stray, 'project.json'), JSON.stringify({ owner_config_dir: path.join(path.parse(h.base).root, 'elsewhere', '.config', 'tower-crane') }));
+  assert.equal(ownerDirsOutside(h.base).length, 1);
+  assert.equal(ownerDirsOutside(h.base, h.base).length, 1);
+  fs.rmSync(stray, { recursive: true });
 });
