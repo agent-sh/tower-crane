@@ -461,38 +461,23 @@ for (const mode of ['fresh', 'retained']) {
 
 // macOS and Windows filesystems cannot be mounted here, so their checks run
 // against what each platform would report.
-test('the read fast path counts only local disks: Linux and macOS by filesystem type, Windows by drive path', () => {
-  const { localDir, parseMounts } = require('../lib/event-reader');
-  const mount = [
-    '/dev/disk3s1s1 on / (apfs, sealed, local, read-only, journaled)',
-    '/dev/disk3s5 on /System/Volumes/Data (apfs, local, journaled, nobrowse)',
-    'map auto_home on /System/Volumes/Data/home (autofs, automounted, nobrowse)',
-    '//alice@nas/share on /Volumes/share (smbfs, nodev, nosuid, mounted by alice)',
-    'nas:/export on /Volumes/nfs (nfs, nodev, nosuid, mounted by alice)',
-    '/dev/disk5s1 on /Volumes/Old Disk (hfs, local, nodev, nosuid, journaled)',
-    'fuse-t:/repo on /Volumes/repo on fuse (nfs, nodev, nosuid, mounted by alice)',
-  ].join('\n');
-  assert.deepEqual(parseMounts(mount).map((m) => [m.point, m.type]), [
-    ['/', 'apfs'], ['/System/Volumes/Data', 'apfs'], ['/System/Volumes/Data/home', 'autofs'], ['/Volumes/share', 'smbfs'],
-    ['/Volumes/nfs', 'nfs'], ['/Volumes/Old Disk', 'hfs'], ['/Volumes/repo on fuse', 'nfs'],
-  ]);
-  const mac = (real) => ({ platform: 'darwin', realpath: () => real, mounts: () => parseMounts(mount) });
+test('the read fast path counts only local disks: Linux by filesystem type, macOS by the root\'s type, Windows by drive path', () => {
+  const { localDir } = require('../lib/event-reader');
+  // macOS numbers filesystem types in the order it registers them: APFS
+  // need not have the same number on two machines.
+  const mac = (apfs, dirType) => ({ platform: 'darwin', statfsType: (dir) => (dir === '/' ? apfs : dirType) });
   const win = (real) => ({ platform: 'win32', realpath: () => real });
   const linux = (type) => ({ platform: 'linux', statfsType: () => type });
-  const failing = (platform) => ({ platform, statfsType() { throw new Error('EIO'); }, realpath() { throw new Error('EIO'); }, mounts() { throw new Error('ENOENT'); } });
+  const failing = (platform) => ({ platform, statfsType() { throw new Error('EIO'); }, realpath() { throw new Error('EIO'); } });
   for (const [probe, local, what] of [
     [linux(0xEF53), true, 'ext4'],
     [linux(0x6969), false, 'NFS on Linux'],
     [failing('linux'), false, 'a Linux statfs that fails'],
-    [mac('/Users/alice/repo/.tower-crane'), true, 'APFS under /'],
-    [mac('/System/Volumes/Data/home/alice/repo'), false, 'an autofs home'],
-    [mac('/Volumes/share/repo/.tower-crane'), false, 'SMB'],
-    [mac('/Volumes/shared/repo'), true, 'a sibling of a share, on /'],
-    [mac('/Volumes/nfs'), false, 'the NFS mount point itself'],
-    [mac('/Volumes/Old Disk/repo'), true, 'HFS+'],
-    [mac('/Volumes/repo on fuse/x'), false, 'a FUSE mount reported as nfs'],
-    [{ ...mac('/x'), mounts: () => [] }, false, 'no mount listed'],
-    [failing('darwin'), false, 'a mount listing that fails'],
+    [mac(26, 26), true, 'APFS, as the root'],
+    [mac(19, 19), true, 'APFS registered under another number'],
+    [mac(26, 31), false, 'SMB, NFS or FUSE: another type than the root'],
+    [mac(26, 17), false, 'HFS+'],
+    [failing('darwin'), false, 'a macOS statfs that fails'],
     [win('C:\\Users\\alice\\repo\\.tower-crane'), true, 'a local drive'],
     [win('\\\\nas\\share\\repo\\.tower-crane'), false, 'a UNC share, or a mapped drive that resolves to one'],
     [win('//nas/share/repo'), false, 'a UNC share with forward slashes'],
