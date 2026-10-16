@@ -9,6 +9,8 @@ const path = require('node:path');
 const { makeRepo, makeProjectRepo, makeTaskRepo, ownerFallbacks } = require('./helpers');
 const { readPublished } = require('./atomic-file');
 const A = require('../lib/agents');
+const RouteGrants = require('../lib/route-grants');
+const { tempRoot } = require('./tmp-root');
 const windowsConcurrency = process.platform === 'win32' ? 2 : false;
 
 const events = (h) => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
@@ -475,6 +477,72 @@ test('a pinned route that inherits its harness is not approved on another harnes
   h.ok(['ladder', 'set', 'easy', '--harness', 'codex'], { env: { TOWER_CRANE_AGENT: 'orchestrator' } });
   const problems = h.json(['ladder', 'show']).problems;
   assert.ok(problems.some((p) => p.startsWith('easy fallback 1') && p.includes('carries env, which the owner has not approved')), problems.join('\n'));
+});
+
+// Pins keyed on the user file as spelled: a route the owner approved through
+// one path to the file was skipped when spawn reached the file by another.
+// A link moved to another file after the approval must not carry the pin
+// with it. Creating links needs a privilege on Windows, so the in-process
+// test below covers the other spellings there.
+test('a route approved through one spelling of the user file runs through another, and a link moved to another file finds no pin', { skip: process.platform === 'win32' }, (t) => {
+  const h = setup(t, { primaryHarness: 'claude', nextHarness: 'claude', reason: 'refusal' });
+  const cache = path.join(h.base, 'cache');
+  fs.mkdirSync(cache);
+  Object.assign(h.spawnEnv, { XDG_CACHE_HOME: cache, LOCALAPPDATA: cache, TOWER_CRANE_AGENT: 'orchestrator' });
+  // setup approved the route through the real path; spawn names it through a link.
+  const link = path.join(h.base, 'config-link');
+  fs.symlinkSync(path.dirname(h.userConfig), link, 'dir');
+  h.spawnEnv.TOWER_CRANE_CONFIG = path.join(link, path.basename(h.userConfig));
+  h.spawn();
+  assert.deepEqual(h.attempts().map((a) => [a.model, a.env]), [['first', 'primary'], ['second', 'fallback']]);
+  const notices = events(h).find((e) => e.cmd === 'spawn').detail.notices || [];
+  assert.ok(!notices.some((n) => n.includes('has not approved')), JSON.stringify(notices));
+
+  // The same routes in another file, which the link now names, were never approved.
+  const other = path.join(h.base, 'other-config');
+  fs.mkdirSync(other);
+  fs.copyFileSync(h.userConfig, path.join(other, path.basename(h.userConfig)));
+  fs.rmSync(link);
+  fs.symlinkSync(other, link, 'dir');
+  assert.deepEqual(spawnAnother(h, 'T2', 'Moved link').map((a) => a.model), ['first']);
+  const moved = events(h).findLast((e) => e.cmd === 'spawn').detail.notices;
+  assert.ok(moved.some((n) => n.startsWith(`easy fallback 1 from user file ${h.spawnEnv.TOWER_CRANE_CONFIG}`) && n.includes('has not approved')), JSON.stringify(moved));
+});
+
+test('route pins key on the canonical user file, and a pin written under a spelling counts for it until the next write folds it in', (t) => {
+  const dir = fs.realpathSync.native(fs.mkdtempSync(path.join(tempRoot(), 'tower-crane-route-pins-')));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const project = { owner_config_dir: path.join(dir, 'owner-dir') };
+  const real = path.join(dir, 'cfg', 'config.json');
+  fs.mkdirSync(path.dirname(real));
+  fs.writeFileSync(real, '{}');
+  const base = { home: dir, cwd: dir };
+  const routes = [{ harness: 'claude', model: 'second', env: { ROUTE_ENV: 'fallback' } }];
+  const open = (file, rung = 'easy') => RouteGrants.unapproved(project, file, rung, routes, ['claude'], base).length;
+  // A case-insensitive filesystem, simulated: realpath gives the stored case
+  // of any spelling under dir.
+  const native = fs.realpathSync.native;
+  fs.realpathSync.native = (p, ...rest) => native(String(p).startsWith(dir) ? dir + String(p).slice(dir.length).toLowerCase() : p, ...rest);
+  t.after(() => { fs.realpathSync.native = native; });
+  const folded = path.join(dir, 'CFG', 'Config.json');
+
+  RouteGrants.pin(project, folded, 'easy', routes, ['claude'], base);
+  assert.deepEqual(Object.keys(RouteGrants.read(project)), [real]);
+  assert.equal(open(real), 0, 'approved through one case, found through another');
+  const elsewhere = path.join(dir, 'cfg2', 'config.json');
+  assert.equal(open(elsewhere), 1, 'another file with the same routes has no pin');
+
+  // A pin an earlier version keyed on the spelling still counts for that spelling.
+  const sha = RouteGrants.hash(routes[0], base, 'claude');
+  fs.writeFileSync(RouteGrants.file(project), JSON.stringify({ version: 1, files: { [folded]: { easy: [sha], medium: [sha] } } }));
+  assert.equal(open(folded), 0);
+  assert.equal(open(folded, 'medium'), 0);
+  // The next write moves it under the canonical key, and the rung it cleared
+  // stays cleared through the old spelling.
+  RouteGrants.pin(project, real, 'easy', [], ['claude'], base);
+  assert.deepEqual(RouteGrants.read(project), { [real]: { medium: [sha] } });
+  assert.equal(open(folded), 1);
+  assert.equal(open(folded, 'medium'), 0);
 });
 
 for (const reason of ['outage', 'refusal']) {
