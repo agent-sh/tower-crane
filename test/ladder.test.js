@@ -693,6 +693,12 @@ test('inheritedMisfits judges only routes that follow the rung, and not one that
     ['codex', { harness: 'codex', model: 'claude-fixture-large' }, null],
     ['codex', { model: 'claude-fixture-large', env: { OPENAI_BASE_URL: 'http://127.0.0.1:4000' } }, null],
     ['codex', { model: 'claude-fixture-large', env_file: '~/.proxy.env' }, null],
+    // A variable that is not a provider endpoint says nothing about the model.
+    ['codex', { model: 'claude-fixture-large', env: { GITHUB_BASE_URL: 'https://ghe.example' } }, ['model claude-fixture-large does not run on codex']],
+    ['claude', { model: 'gpt-fixture-mini', env: { ANTHROPIC_BEDROCK_BASE_URL: 'https://proxy.example' } }, null],
+    // A proxy does not change which tool names the harness takes.
+    ['codex', { model: 'claude-fixture-large', tools: ['WebFetch'], env: { OPENAI_BASE_URL: 'http://127.0.0.1:4000' } }, ['codex does not know tool WebFetch']],
+    ['codex', { model: 'claude-fixture-large', tools: ['WebFetch'], env_file: '~/.proxy.env' }, ['codex does not know tool WebFetch']],
     ['claude', { model: 'gpt-fixture-mini', env: { ANTHROPIC_BASE_URL: 'http://127.0.0.1:4000' } }, null],
     ['claude', { model: 'gpt-fixture-mini', env: { ROUTE: '1' } }, ['model gpt-fixture-mini does not run on claude']],
     ['claude', { model: 'fixture-large', tools: ['WebFetch'] }, null],
