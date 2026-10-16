@@ -620,12 +620,16 @@ test('a second wait signal during the base rerun records base_rerun_killed, and 
   const release = path.join(h.base, 'base-release');
   const script = path.join(h.base, 'base-held.js');
   // Fails by name at the submitted head, where value.js is 1, and holds the base rerun, where it is 0, until released.
+  // The script finds its files next to itself, so no test value is spliced into its code.
   fs.writeFileSync(script, `const fs = require('node:fs');
+const path = require('node:path');
 if (!fs.readFileSync('value.js', 'utf8').includes('1')) {
-  // The test reads this pid after the rerun is killed, so it must never read the file empty.
-  require(${JSON.stringify(path.join(__dirname, 'atomic-file'))}).writeAtomic(${JSON.stringify(started)}, String(process.pid));
-  const until = Date.now() + ${HUNG_TEST_MS}; // wait-allow: an orphaned rerun stops itself; the release file is its signal
-  const poll = () => fs.existsSync(${JSON.stringify(release)}) || Date.now() > until ? process.exit(0) : setTimeout(poll, 25); // wait-allow: probe cadence only; the release file is the signal
+  // The test reads this pid after the rerun is killed, so it is renamed into place, never read empty.
+  const started = path.join(__dirname, 'base-started');
+  fs.writeFileSync(started + '.tmp', String(process.pid));
+  fs.renameSync(started + '.tmp', started);
+  const until = Date.now() + 300000; // wait-allow: an orphaned rerun stops itself; the release file is its signal
+  const poll = () => fs.existsSync(path.join(__dirname, 'base-release')) || Date.now() > until ? process.exit(0) : setTimeout(poll, 25); // wait-allow: probe cadence only; the release file is the signal
   poll();
 } else {
   console.log('# Subtest: test/sum.test.js');
@@ -638,7 +642,7 @@ if (!fs.readFileSync('value.js', 'utf8').includes('1')) {
   const observed = path.join(h.base, 'signal-observed');
   const preload = path.join(h.base, 'signal-observer.js');
   // A receipt synchronizes the test with the first signal before it sends the second.
-  fs.writeFileSync(preload, `process.on('SIGTERM', () => require('node:fs').appendFileSync(${JSON.stringify(observed)}, 'SIGTERM\\n'));\n`);
+  fs.writeFileSync(preload, "process.on('SIGTERM', () => require('node:fs').appendFileSync(require('node:path').join(__dirname, 'signal-observed'), 'SIGTERM\\n'));\n");
   const child = h.spawnCli(['wait', '--after', '0', '--types', 'never', '--timeout', '300', '--agent', 'orchestrator'],
     { pre: ['--require', preload] });
   let stdout = '';

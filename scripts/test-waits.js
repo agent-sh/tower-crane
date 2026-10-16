@@ -627,9 +627,11 @@ function waitFindings(text) {
 // process itself reaches the same call with a pid this check cannot see, so it
 // counts too. Generated fixture scripts in strings and templates are checked too.
 //
-// `child.process` is another object's member, not this process. A `\n`
+// `child.process` is another object's member, not this process, while
+// `global.process`, `globalThis?.process` and a spread `...process` are. A `\n`
 // escape in a generated script ends a line.
-const PROCESS = String.raw`(?<!(?<!\\)[\w$]|(?<!\bglobalThis\s*)\.\s*)process`;
+const GLOBAL = String.raw`(?:global(?:This)?\s*\??\.\s*)?`;
+const PROCESS = String.raw`(?<!(?<!\\)[\w$]|(?<!(?:\bglobal(?:This)?\s*\??|\.\.))\.\s*)process`;
 // Optional chaining reaches the same call: `process?.kill(0)`, `process.kill?.(0)`.
 const KILL_CALL = new RegExp(String.raw`${PROCESS}\s*\??\.\s*kill\s*(?:\?\.\s*)?\(`, 'g');
 // A computed member that spells out 'kill', or whose key the check cannot read.
@@ -640,10 +642,10 @@ const KILL_ALIASES = [
   new RegExp(String.raw`(?<=(?:(?<![=!<>])=|[(,:?[]|=>|&&|\|\||\breturn)\s*)${PROCESS}\s*\??\.\s*kill\b(?!\s*(?:\(|\?\.|\.|=|!=))`, 'g'),
   new RegExp(String.raw`${PROCESS}\s*\??\.\s*kill\s*\??\.\s*(?:call|apply|bind)\b`, 'g'),
   new RegExp(PROCESS + COMPUTED, 'g'),
-  /\{[^{}]*\bkill\b[^{}]*\}\s*=\s*(?:globalThis\s*\.\s*)?process\b(?!\s*[.[?])/g,
+  new RegExp(String.raw`\{[^{}]*\bkill\b[^{}]*\}\s*=\s*${GLOBAL}process\b(?!\s*[.[?])`, 'g'),
 ];
 // `const p = process;` makes p.kill the same call.
-const PROCESS_ALIAS = /\b(?:const|let|var)\s+([$A-Z_a-z][$\w]*)\s*=\s*(?:globalThis\s*\.\s*)?process\s*(?=[;,)\n]|$)/g;
+const PROCESS_ALIAS = new RegExp(String.raw`\b(?:const|let|var)\s+([$A-Z_a-z][$\w]*)\s*=\s*${GLOBAL}process\s*(?=[;,)\n]|$)`, 'g');
 // An argument of a comparing assertion or Object.is is compared, not called.
 const COMPARED = /(?:\bassert(?:\s*\.\s*strict)?\s*\.\s*(?:equal|strictEqual|notEqual|notStrictEqual|deepEqual|deepStrictEqual|notDeepEqual|notDeepStrictEqual)|\bObject\s*\.\s*is)\s*\(\s*(?:[^(),;]*,\s*)?$/;
 // Inside a string, a sentence has a word before the name; generated code has
@@ -658,7 +660,7 @@ const KEYWORDS = new Set(['async', 'await', 'case', 'catch', 'class', 'const', '
 // forward the replacement's own, unchanged pid and signal from inside it.
 const INTERPOSER = /\b(?:const|let|var)\s+([$A-Z_a-z][$\w]*)\s*=\s*(process\s*\.\s*kill)\s*;\s*process\s*\.\s*kill\s*=\s*function\b[^(]*\(\s*([$A-Z_a-z][$\w]*)\s*,\s*([$A-Z_a-z][$\w]*)\s*\)\s*\{/dg;
 
-const escaped = (name) => name.replace(/\$/g, '\\$');
+const escaped = (name) => name.replace(/[\\^$.*+?()[\]{}|]/g, '\\$&');
 
 // The index of the bracket that closes the one at `from`, or from any other
 // position, of the first bracket that closes an enclosing one. Literals and
@@ -717,20 +719,37 @@ function tokenAt(text, tokens, position) {
   return token;
 }
 
+// The parameters of a list, split at its top-level commas.
+function parameters(list) {
+  const params = [''];
+  let depth = 0;
+  for (const char of list) {
+    if ('{[('.includes(char)) depth++;
+    else if ('}])'.includes(char)) depth--;
+    if (char === ',' && depth === 0) params.push('');
+    else params[params.length - 1] += char;
+  }
+  return params;
+}
+
 // Ranges where a function parameter or a nested declaration rebinds `name`
-// between `from` and `to`, so a use there is another value.
-function rebound(text, name, from, to, own) {
+// between `from` and `to`, so a use there is another value. A match inside a
+// comment or a literal (`literal`) rebinds nothing.
+function rebound(text, name, from, to, own, literal = () => false) {
   const id = escaped(name);
-  const binds = (params) => new RegExp(String.raw`(?<![\w$.])${id}(?![\w$])`).test(params);
+  // A default value after `=` is a use, and a destructuring key before `:` names no binding.
+  const binds = (list) => parameters(list).some((param) => new RegExp(String.raw`(?<![\w$.])${id}(?![\w$])(?!\s*:)`)
+    .test(param.split(/=(?![=>])/)[0]));
   const ranges = [];
   const scope = text.slice(0, to);
-  for (const m of scope.slice(from).matchAll(/\b(function\b[^(]*|catch\s*|(?<![\w$.])(?!(?:if|for|while|switch|with|catch|function)\b)[$A-Z_a-z][$\w]*\s*)\(([^()]*)\)\s*\{/g)) {
+  const code = (m) => !literal(from + m.index);
+  for (const m of [...scope.slice(from).matchAll(/\b(function\b[^(]*|catch\s*|(?<![\w$.])(?!(?:if|for|while|switch|with|catch|function)\b)[$A-Z_a-z][$\w]*\s*)\(([^()]*)\)\s*\{/g)].filter(code)) {
     if (binds(m[2])) ranges.push([from + m.index, closing(text, from + m.index + m[0].length - 1)]);
   }
-  for (const m of scope.slice(from).matchAll(new RegExp(String.raw`(?:\(([^()]*)\)|(?<![\w$.])(${id}))\s*=>`, 'g'))) {
+  for (const m of [...scope.slice(from).matchAll(new RegExp(String.raw`(?:\(([^()]*)\)|(?<![\w$.])(${id}))\s*=>`, 'g'))].filter(code)) {
     if (m[2] || binds(m[1])) ranges.push([from + m.index, arrowEnd(text, from + m.index + m[0].length)]);
   }
-  for (const m of scope.slice(from).matchAll(new RegExp(String.raw`\b(?:const|let|var)\s+${id}(?![\w$])`, 'g'))) {
+  for (const m of [...scope.slice(from).matchAll(new RegExp(String.raw`\b(?:const|let|var)\s+${id}(?![\w$])`, 'g'))].filter(code)) {
     const at = from + m.index;
     if (!own.includes(at + m[0].length - name.length)) ranges.push([at, closing(text, at, to)]);
   }
@@ -772,15 +791,33 @@ function killFindings(text, { interposer = false } = {}) {
   const interposers = interposer ? [...text.matchAll(INTERPOSER)].map((match) => {
     const open = match.index + match[0].length - 1;
     const body = [open, closing(text, open)];
-    const reassigned = [match[3], match[4]].some((param) => {
+    const assign = String.raw`(?:[-+*/%&|^]|\*\*|<<|>>>?|&&|\|\||\?\?)?=(?![=>])`;
+    const changed = (param) => {
       const p = escaped(param);
-      return new RegExp(String.raw`(?<![\w$.])${p}\s*(?:[-+*/%&|^]|\*\*|<<|>>>?|&&|\|\||\?\?)?=(?![=>])|(?:\+\+|--)\s*${p}(?![\w$])|(?<![\w$.])${p}\s*(?:\+\+|--)|\b(?:const|let|var)\s+${p}(?![\w$])`)
-        .test(text.slice(body[0], body[1]));
-    });
-    // A generated script ends at its closing backtick at the latest.
+      return new RegExp([
+        String.raw`(?<![\w$.])${p}\s*${assign}`, String.raw`(?:\+\+|--)\s*${p}(?![\w$])`, String.raw`(?<![\w$.])${p}\s*(?:\+\+|--)`,
+        String.raw`\b(?:const|let|var)\s+${p}(?![\w$])`, String.raw`\bfor\s*\(\s*${p}\s+(?:of|in)\b`,
+        // A destructuring assignment such as `[pid] = [0]` or `({ pid } = o)`.
+        String.raw`[[{][^;]*?(?<![\w$.])${p}(?![\w$])[^;]*?[\]}]\s*=(?![=>])`,
+      ].join('|')).test(text.slice(body[0], body[1]));
+    };
+    // A sloppy-mode script changes a parameter through `arguments` too.
+    const reassigned = [match[3], match[4]].some(changed)
+      || new RegExp(String.raw`\barguments\s*\[[^\]]*\]\s*${assign}`).test(text.slice(body[0], body[1]));
+    // The alias is the same value in its whole block, above the declaration
+    // too. A generated script holds its own blocks and ends at its closing backtick.
     const script = tokens.find((t) => t.type === 'template' && t.start < match.index && match.index < t.end);
+    const base = script ? script.start + 1 : 0;
+    const openers = [];
+    for (const token of tokenize(text.slice(0, match.index), base)) {
+      if (token.type !== 'punctuation') continue;
+      if ('{(['.includes(token.value)) openers.push(token.start);
+      else if ('})]'.includes(token.value)) openers.pop();
+    }
+    const literals = (script ? tokenize(text.slice(0, script.end - 1), base) : tokens)
+      .filter((t) => ['comment', 'string', 'template', 'regex'].includes(t.type));
     return { alias: match[1], declared: match.indices[1][0], original: match.indices[2][0], params: [match[3], match[4]],
-      body, reassigned, scope: [match.index, closing(text, match.index, script ? script.end - 1 : text.length)] };
+      body, reassigned, literals, scope: [openers.at(-1) ?? base, closing(text, match.index, script ? script.end - 1 : text.length)] };
   }) : [];
   const exempt = new Set(interposers.map((i) => i.original));
   for (const pattern of KILL_ALIASES) {
@@ -805,12 +842,18 @@ function killFindings(text, { interposer = false } = {}) {
   for (const alias of new Set(interposers.map((i) => i.alias))) {
     const own = interposers.filter((i) => i.alias === alias);
     const id = escaped(alias);
-    const shadows = own.flatMap((i) => rebound(text, alias, i.scope[0], i.scope[1], own.map((o) => o.declared)));
-    for (const use of text.matchAll(new RegExp(String.raw`(?<![\w$.'"\`])${id}(?![\w$'"\`])(?!\s*:(?!:))`, 'g'))) {
+    const shadows = own.flatMap((i) => rebound(text, alias, i.scope[0], i.scope[1], own.map((o) => o.declared),
+      (position) => i.literals.some((t) => t.start <= position && position < t.end)));
+    const inside = (ranges, position) => ranges.some(([from, to]) => from <= position && position < to);
+    for (const use of text.matchAll(new RegExp(String.raw`(?<![\w$.'"\`])${id}(?![\w$'"\`])`, 'g'))) {
       const owners = own.filter((i) => i.scope[0] <= use.index && use.index < i.scope[1]);
       if (!owners.length || owners.some((i) => i.declared === use.index)) continue;
-      if (shadows.some(([from, to]) => from <= use.index && use.index < to) || prose(use.index)) continue;
+      // An object key (`{ kill: x }`) names no binding; a ternary branch or a case label does.
+      if (/[{,]\s*$/.test(text.slice(Math.max(0, use.index - 80), use.index)) && /^\s*:(?!:)/.test(text.slice(use.index + alias.length))) continue;
+      if (inside(shadows, use.index) || prose(use.index)) continue;
+      // An inner function with its own pid or signal forwards another value.
       const forwards = owners.some((i) => !i.reassigned && i.body[0] < use.index && use.index < i.body[1]
+        && !inside(i.params.flatMap((param) => rebound(text, param, i.body[0] + 1, i.body[1], [])), use.index)
         && new RegExp(String.raw`^${id}\s*\.\s*call\s*\(\s*(?:this|process)\s*,\s*${escaped(i.params[0])}\s*,\s*${escaped(i.params[1])}\s*\)`).test(text.slice(use.index)));
       if (!forwards) report(use.index, `uses ${alias}, the held process.kill, other than to forward the interposer's own pid and signal`);
     }

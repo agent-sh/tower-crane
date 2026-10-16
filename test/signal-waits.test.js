@@ -462,6 +462,12 @@ test('tests signal only checked pids, so a pid file read before it is written ca
     `const p = ${proc};\np?.['kill'](pid);`,
     `${proc}[name](0);`,
     `${proc}[\`kill\`](0);`,
+    // The global object's process and a spread reach this process.
+    `global.${kill}(pid);`,
+    `globalThis?.${kill}(0);`,
+    `f(...${kill}(pid));`,
+    `fs.writeFileSync(f, 'f(...${kill}(pid))');`,
+    `const { kill } = global.${proc};`,
   ]) {
     assert.equal(killFindings(source).length, 1, source);
   }
@@ -520,6 +526,31 @@ test('an interposer may hold process.kill only to forward its own pid and signal
   assert.deepEqual(killFindings(body("  log('{');\n  return kill.call(this, pid, signal);")
     + 'function other(pid, signal) {\n  return kill.call(this, pid, signal);\n}\n', { interposer: true }).map((f) => f.line), [7],
   'a brace in a string does not stretch the replacement over the next function');
+  for (const [lines, line] of [
+    ['  [pid] = [0];\n  return kill.call(this, pid, signal);', 4],
+    ['  ({ pid } = options);\n  return kill.call(this, pid, signal);', 4],
+    ['  for (pid of [0]) break;\n  return kill.call(this, pid, signal);', 4],
+    ['  arguments[0] = 0;\n  return kill.call(this, pid, signal);', 4],
+    ['  function inner(pid) { return kill.call(this, pid, signal); }\n  return inner(0);', 3],
+  ]) {
+    assert.deepEqual(killFindings(body(lines), { interposer: true }).map((f) => f.line), [line], lines);
+  }
+  for (const [extra, line] of [
+    // A default value uses the alias; it binds another name.
+    ['function f(a = kill) { return a(0); }', 6],
+    ['((a = kill) => a(0))();', 6],
+    // A declaration in a comment or a string rebinds nothing.
+    ['// const kill holds the original\nkill(0);', 7],
+    ["log('let kill');\nkill(0);", 7],
+    // A ternary branch and a case label are uses, not object keys.
+    ['const f = c ? kill : noop;', 6],
+    ['switch (x) { case kill: break; }', 6],
+  ]) {
+    assert.deepEqual(killFindings(hold + extra, { interposer: true }).map((f) => f.line), [line], extra);
+  }
+  assert.deepEqual(killFindings(`${hold}const o = { kill: 1, other: 2 };\n`, { interposer: true }), [], 'an object key is not a use');
+  assert.deepEqual(killFindings(`if (x) {\n  function later() { return kill(0); }\n  ${hold}}\n`, { interposer: true }).map((f) => f.line), [2],
+    'a function declared above the interposer in its block sees the same alias');
   // Another binding named like the alias is another value.
   assert.deepEqual(killFindings(`${hold}function relay(kill) { return kill(); }\nconst stop = (kill) => kill.now();\n[1].map(kill => kill + 1);\n`,
     { interposer: true }), []);
