@@ -457,13 +457,15 @@ for (const [launch, hooks] of [['the lease gate', {}], ['the launch handshake', 
     });
     try {
       await waitOnRepo(h, () => h.readAttempts().length === 1, 'worker did not claim');
+      const bumped = log(h).length;
       fs.writeFileSync(clockFile, String(now + 40000));
       await waitOnRepo(h, () => log(h).some((e) => e.cmd === 'renew'), 'live worker lease was not renewed');
       // The worker's claim renames tasks.json after its event lands. A
       // supervisor that read the old tasks.json in that window kept the
       // project-default lease until its next own write, the live usage sample
-      // 30 s later; the renewal passed only after that wait.
-      const cmds = log(h).map((e) => e.cmd);
+      // 30 s later; the renewal passed only after that wait. A sample logged
+      // before the clock bump is a slow host's start, not that wait.
+      const cmds = log(h).slice(bumped).map((e) => e.cmd);
       assert.ok(!cmds.includes('spend live') || cmds.indexOf('renew') < cmds.indexOf('spend live'),
         `the renewal waited for an unrelated write: ${cmds.join(', ')}`);
       const task = h.json(['task', 'show', 'T1']);

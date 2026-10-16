@@ -24,13 +24,19 @@ function cleanEnv(base) {
   env.TOWER_CRANE_AGENT = 'owner';
   env.GIT_CONFIG_GLOBAL = path.join(base, 'gitconfig');
   env.GIT_CONFIG_NOSYSTEM = '1';
-  env.TOWER_CRANE_CONFIG = path.join(base, 'user-config', 'config.json');
-  // Owner writes without a terminal present the owner key, as the tests do.
-  fs.mkdirSync(path.join(base, 'user-config', 'owner'), { recursive: true });
-  fs.writeFileSync(path.join(base, 'user-config', 'owner', 'key'), 'bench-owner-key\n');
-  env.TOWER_CRANE_OWNER_KEY = 'bench-owner-key';
   // Spawns keep caches under HOME; the scratch state gets one of its own.
   env.HOME = path.join(base, 'home');
+  // The account's home is the scratch's too, so init binds the owner key
+  // here and never the developer's (test/fixtures/account-home.js).
+  env.TC_ACCOUNT_HOME = env.HOME;
+  const hook = `--require "${path.join(__dirname, '..', 'fixtures', 'account-home.js').replace(/\\/g, '/')}"`;
+  env.NODE_OPTIONS = env.NODE_OPTIONS ? `${hook} ${env.NODE_OPTIONS}` : hook;
+  const dir = path.join(env.HOME, '.config', 'tower-crane');
+  env.TOWER_CRANE_CONFIG = path.join(dir, 'config.json');
+  // Owner writes without a terminal present the owner key, as the tests do.
+  fs.mkdirSync(path.join(dir, 'owner'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'owner', 'key'), 'bench-owner-key\n');
+  env.TOWER_CRANE_OWNER_KEY = 'bench-owner-key';
   env.XDG_CACHE_HOME = path.join(base, 'home', '.cache');
   fs.mkdirSync(env.XDG_CACHE_HOME, { recursive: true });
   return env;

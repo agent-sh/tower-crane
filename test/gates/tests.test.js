@@ -5,6 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const gate = require('../../lib/gates/tests');
 const { scratch, isolateGit, git, commit, initRepo, worktrees, quote } = require('./helpers');
+const { detachedAlive } = require('../helpers');
 const { shellQuote, treeExec, withWorktree } = require('../../lib/gates/common');
 const { waitUntil, killPid } = require('../signals');
 
@@ -473,11 +474,8 @@ test('commits the task inherited from origin/<base> are not its change', async (
   }
 });
 
-// A pid that is gone or a zombie; Linux and macOS reap orphans promptly.
-function running(pid) {
-  try { killPid(pid, 0); } catch (e) { if (e.code === 'ESRCH') return false; throw e; }
-  try { return !/^\S+ \(.*\) [ZX] /.test(fs.readFileSync(`/proc/${pid}/stat`, 'utf8')); } catch { return true; }
-}
+// A zombie counts as gone; Linux and macOS reap orphans promptly.
+const running = (pid) => detachedAlive({ pid });
 
 test('a timeout stops the command and everything it started', { skip: process.platform === 'win32' }, async () => {
   const sha = task({ 'lib/add.js': FIX, 'test/add.test.js': ADD_TEST });
@@ -523,9 +521,6 @@ require('child_process').spawn(process.execPath, ['-e', ${JSON.stringify(poller)
 const tick = () => (count() > before ? ${held ? 'setInterval(() => {}, 1000)' : 'process.exit(0)'} : setTimeout(tick, 20)); // wait-allow: probe cadence only; the recorded pid is the signal
 tick();
 `;
-  const running = (pid) => {
-    try { return !/^\S+ \(.*\) [ZX]/.test(fs.readFileSync(`/proc/${pid}/stat`, 'utf8')); } catch { return false; }
-  };
   for (const [name, script, timeout] of [['exited', starter('', false), undefined], ['timed out', starter(', env: {}', true), 0.05]]) {
     const file = path.join(tmp, 'session-starter.js');
     fs.writeFileSync(file, script);

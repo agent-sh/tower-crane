@@ -74,7 +74,7 @@ fs.writeFileSync('generated.txt', rows + '\\n');
   };
   h.submit = () => {
     h.ok(['claim', 'T1', '--agent', 'worker']);
-    // A worker's submit refuses pending CI and unknown mergeability (T149), so the head is submitted while GitHub reads it green and mergeable; the test's state returns before any reaction runs.
+    // A worker's submit refuses failing CI (T149) and these tests judge CI only in the gates, so the head is submitted while GitHub reads it green and mergeable; the test's state returns before any reaction runs.
     const before = h.github();
     const ciAtSubmit = before.ci[h.sha];
     const mergeAtSubmit = { mergeable: before.prs['7'].mergeable, mergeStateStatus: before.prs['7'].mergeStateStatus };
@@ -789,7 +789,7 @@ global.Date = class extends RealDate {
     // A late reaction starts under the expired record; an owner waiter cannot renew it.
     if (mode === 'late') expire();
     h.ok(['claim', 'T1', '--agent', 'worker'], { env });
-    // Submit refuses pending CI; the gates still see it pending afterwards.
+    // The submit reads green CI; the gates see it pending afterwards.
     const github = () => JSON.parse(fs.readFileSync(h.env.AUTOMATION_GITHUB, 'utf8'));
     const ci = (state) => fs.writeFileSync(h.env.AUTOMATION_GITHUB, JSON.stringify({ ...github(), ci: { [h.sha]: state } }));
     ci('success');

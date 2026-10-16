@@ -37,9 +37,9 @@ are commands recorded in the log, not estimates of model turns.
 
 T34 implements submission gates, CI refresh, conflict rework and automatic
 merge through existing CLI commands and the event watcher. It adds no
-daemon or polling loop. CI completion is delivered to the CLI by an
-external notification; its payload is a hint to query GitHub, never gate
-evidence.
+daemon. CI completion can reach the CLI as an external notification, whose
+payload is a hint to query GitHub, never gate evidence; without one, the
+watcher rechecks pending CI once a minute until it finishes or stalls.
 
 The trusted `wait` watcher consumes submissions and catches up active PRs
 on startup through fresh reconciliation requests. Completed reaction

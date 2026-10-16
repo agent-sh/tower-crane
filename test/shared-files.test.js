@@ -11,7 +11,7 @@ const { readText, escapeTableCell } = require('../scripts/text');
 function fixture(t, { crlfProtected = false, windowsCheckout = false } = {}) {
   const h = makeRepo(t);
   if (windowsCheckout) h.git(['config', 'core.autocrlf', 'true']);
-  for (const name of ['bin', 'lib', 'scripts', 'docs', 'changelog.d']) {
+  for (const name of ['bin', 'lib', 'scripts', 'docs', 'changelog.d', '.github']) {
     fs.cpSync(path.join(ROOT, name), path.join(h.repo, name), { recursive: true });
   }
   fs.copyFileSync(path.join(ROOT, 'CHANGELOG.md'), path.join(h.repo, 'CHANGELOG.md'));
@@ -202,6 +202,40 @@ test('the shared file check rejects bare stdin reads in lib and bin, and points 
   assert.equal(f.check().status, 0, 'lib/util.js is where readStdin reads fd 0');
 });
 
+test('the suite deadline sets the proof job timeouts and warns when the configured tests gate timeout differs', (t) => {
+  const { DEADLINE_MIN } = require('../scripts/suite-time');
+  const f = fixture(t);
+  f.change();
+  assert.equal(f.check().status, 0);
+  const workflow = f.read('.github/workflows/ci.yml');
+  const timeout = (job) => Number(new RegExp(`\\n  ${job}:\\n(?:    .*\\n|\\s*\\n)*?    timeout-minutes: (\\d+)`).exec(workflow)[1]);
+  assert.equal(timeout('model-swap'), DEADLINE_MIN + 5);
+  assert.equal(timeout('gate-scratch'), 2 * DEADLINE_MIN + 10);
+  f.write('.github/workflows/ci.yml', workflow.replace(`    timeout-minutes: ${DEADLINE_MIN + 5}\n`, '    timeout-minutes: 60\n'));
+  const drifted = f.check();
+  assert.equal(drifted.status, 1);
+  assert.match(drifted.stderr, new RegExp(`job model-swap has timeout-minutes 60; DEADLINE_MIN ${DEADLINE_MIN} in scripts/suite-time.js sets it to ${DEADLINE_MIN + 5}`));
+  fs.rmSync(path.join(f.h.repo, '.github'), { recursive: true });
+  assert.equal(f.check().status, 0, 'a tree without its workflows has no proof jobs to check');
+  fs.mkdirSync(path.join(f.h.repo, '.github', 'workflows'), { recursive: true });
+  f.write('.github/workflows/ci.yml', workflow);
+  const state = path.join(f.h.repo, '.tower-crane');
+  fs.mkdirSync(state, { recursive: true });
+  const project = path.join(state, 'project.json');
+  // Only the gates block matters to the check; the fixture runs no CLI command on this state.
+  const configure = (minutes) => fs.writeFileSync(project, JSON.stringify({ gates: { tests_timeout_min: minutes } }));
+  configure(30);
+  const local = f.check();
+  assert.equal(local.status, 0, 'a clone\'s own gate timeout does not fail the shared check');
+  assert.match(local.stderr, new RegExp(`^warning: the project's gates\\.tests_timeout_min is 30 min but DEADLINE_MIN in scripts/suite-time\\.js is ${DEADLINE_MIN}`, 'm'));
+  configure(DEADLINE_MIN);
+  const matched = f.check();
+  assert.equal(matched.status, 0);
+  assert.doesNotMatch(matched.stderr, /tests_timeout_min/);
+  configure(null);
+  assert.equal(f.check().status, 0, 'a project without a configured timeout has not adopted the deadline');
+});
+
 test('a branch behind its base is checked from the merge base, so newer base fragments are not deletions', (t) => {
   const f = fixture(t);
   const start = f.h.git(['rev-parse', 'HEAD']);
@@ -284,9 +318,12 @@ test('release assembly is deterministic and leaves the archive and fragments unc
 });
 
 test('this repository keeps generated rows and its fragment instructions local', () => {
+  // The caller's own Tower Crane state is not this check's input: point it at a directory with no settings.
   const r = cp.spawnSync(process.execPath, [path.join(ROOT, 'scripts', 'check-shared-files.js')],
-    { cwd: ROOT, encoding: 'utf8', env: { ...process.env, TOWER_CRANE_CHANGE_BASE: '' }, timeout: 300000 });
+    { cwd: ROOT, encoding: 'utf8', timeout: 300000,
+      env: { ...process.env, TOWER_CRANE_CHANGE_BASE: '', TOWER_CRANE_STATE: path.join(ROOT, 'test', 'no-state') } });
   assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.stderr, '');
   const skill = fs.readFileSync(path.join(ROOT, 'skills', 'tower-crane-work', 'SKILL.md'), 'utf8');
   assert.match(skill, /update the changelog the repository's way/);
   assert.doesNotMatch(skill, /changelog\.d|COMMANDS|check:shared|docs:generate/);

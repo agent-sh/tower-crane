@@ -14,6 +14,8 @@ const { readPublished } = require('./atomic-file');
 const ROOT = path.join(__dirname, '..');
 const BIN = path.join(ROOT, 'bin', 'tower-crane.js');
 const HOOKS = path.join(__dirname, 'fixtures', 'hooks.js');
+const ACCOUNT_HOME = path.join(__dirname, 'fixtures', 'account-home.js');
+const ACCOUNT_HOME_OPTION = `--require "${ACCOUNT_HOME.replace(/\\/g, '/')}"`;
 const TMP_ROOT = tempRoot();
 const LIVE_ROOT = liveRoot();
 const SHARED_REPO_SEED = process.env.TC_TEST_REPO_SEED;
@@ -150,12 +152,18 @@ function baseEnv(home) {
   env.TOWER_CRANE_AGENT = 'owner';
   env.GIT_CONFIG_GLOBAL = path.join(home, 'gitconfig');
   env.GIT_CONFIG_NOSYSTEM = '1';
-  env.TOWER_CRANE_CONFIG = path.join(home, 'user-config', 'config.json');
-  fs.mkdirSync(path.join(home, 'user-config', 'owner'), { recursive: true });
-  fs.writeFileSync(path.join(home, 'user-config', 'owner', 'key'), `${OWNER_KEY}\n`);
-  env.TOWER_CRANE_OWNER_KEY = OWNER_KEY;
   // spawn keeps receipts under the user's cache, which is not the tests' to write.
   env.HOME = path.join(home, 'home');
+  // The account's home, where init finds the default owner_config_dir, is the
+  // fixture's too (fixtures/account-home.js), so no test reads or binds the
+  // developer's ~/.config/tower-crane. The user file and owner key sit where
+  // the owner's real ones do.
+  env.TC_ACCOUNT_HOME = env.HOME;
+  env.NODE_OPTIONS = withAccountHome(env.NODE_OPTIONS);
+  env.TOWER_CRANE_CONFIG = path.join(env.HOME, '.config', 'tower-crane', 'config.json');
+  fs.mkdirSync(path.join(env.HOME, '.config', 'tower-crane', 'owner'), { recursive: true });
+  fs.writeFileSync(path.join(env.HOME, '.config', 'tower-crane', 'owner', 'key'), `${OWNER_KEY}\n`);
+  env.TOWER_CRANE_OWNER_KEY = OWNER_KEY;
   env.USERPROFILE = env.HOME;
   env.LOCALAPPDATA = path.join(env.HOME, 'AppData', 'Local');
   env.XDG_CACHE_HOME = path.join(env.HOME, '.cache');
@@ -166,6 +174,37 @@ function baseEnv(home) {
   // cannot leave them in the shared temporary directory.
   env.TOWER_CRANE_TMP = path.join(home, 'gate-tmp');
   return env;
+}
+
+// NODE_OPTIONS with the account home hook first, whatever else a test adds.
+function withAccountHome(options) {
+  const rest = String(options ?? '').replace(ACCOUNT_HOME_OPTION, '').trim();
+  return rest ? `${ACCOUNT_HOME_OPTION} ${rest}` : ACCOUNT_HOME_OPTION;
+}
+
+// The owner_config_dir of every project.json in a fixture that lies outside
+// the root the fixtures live in: a CLI that ran without
+// fixtures/account-home.js bound it to the real account's home. A copied
+// template keeps its template's binding, a fixture under the same root.
+// Values no CLI records (relative, or with NUL bytes) are a test's own.
+function ownerDirsOutside(base, root = path.dirname(base)) {
+  const found = [];
+  const walk = (dir, depth) => {
+    let entries;
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const e of entries) {
+      const p = path.join(dir, e.name);
+      if (e.isDirectory() && depth < 4 && !['.git', 'node_modules', 'homes', 'brokers'].includes(e.name)) walk(p, depth + 1);
+      else if (e.isFile() && e.name === 'project.json') {
+        let dirOf;
+        try { dirOf = JSON.parse(fs.readFileSync(p, 'utf8')).owner_config_dir; } catch { continue; }
+        if (typeof dirOf !== 'string' || !path.isAbsolute(dirOf) || dirOf.includes('\0')) continue;
+        if (!dirOf.startsWith(root + path.sep)) found.push(`${p}: ${dirOf}`);
+      }
+    }
+  };
+  walk(base, 0);
+  return found;
 }
 
 function git(args, cwd, env) {
@@ -390,7 +429,8 @@ function cachedFixture(t, key, build) {
   for (const [k, v] of Object.entries(from.env)) if (typeof v === 'string') h.env[k] = rewrite(v);
   h.env.HOME = path.join(h.base, 'home');
   h.env.GIT_CONFIG_GLOBAL = path.join(h.base, 'gitconfig');
-  h.env.TOWER_CRANE_CONFIG = path.join(h.base, 'user-config', 'config.json');
+  h.env.TOWER_CRANE_CONFIG = path.join(h.env.HOME, '.config', 'tower-crane', 'config.json');
+  h.env.TC_ACCOUNT_HOME = h.env.HOME;
   if (from.gateSettings) h.gateSettings = from.gateSettings.map(rewrite);
   repairWorktrees(h);
   return Object.assign(h, JSON.parse(rewrite(JSON.stringify(template.fields))));
@@ -436,6 +476,7 @@ function context(t, base, options = {}) {
     // Steps that must run before the directory goes, such as stopping processes that poll in it.
     teardown: [],
     cleanup: async ({ monitorGraceMs } = {}) => {
+      let strayOwnerDirs = [];
       const seen = new Set();
       try {
         try {
@@ -462,6 +503,7 @@ function context(t, base, options = {}) {
             }
           }
         } finally {
+          strayOwnerDirs = ownerDirsOutside(base);
           fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
           // rmSync returns without error when an entry vanished under it, leaving the rest;
           // a second pass removes those. What a process still running keeps writing is a leak.
@@ -469,6 +511,7 @@ function context(t, base, options = {}) {
           fileFixtures.delete(ctx);
         }
       }
+      assert.deepEqual(strayOwnerDirs, [], 'a CLI in this fixture bound a project to an owner_config_dir outside it');
       if (fs.existsSync(base)) {
         assert.fail(`fixture ${base} outlived its cleanup: ${fs.readdirSync(base, { recursive: true }).slice(0, 10).join(', ')}`);
       }
@@ -523,6 +566,7 @@ function context(t, base, options = {}) {
 // preloads after it.
 function withHooks(ctx, opts) {
   const env = { ...ctx.env, ...(opts.env || {}) };
+  env.NODE_OPTIONS = withAccountHome(env.NODE_OPTIONS);
   Object.assign(env, { HOOK_STATE: ctx.state, HOOK_PROCESSES_DIR: path.join(ctx.base, 'detached') }, opts.hooks);
   const pre = ['--require', HOOKS, ...(opts.pre || [])];
   return { cwd: ctx.repo, ...opts, env, pre };
@@ -784,4 +828,4 @@ function ownerFallbacks(h, rung, routes) {
   }
 }
 
-module.exports = { ownerFallbacks, repairWorktrees, makeRepo, makeProjectRepo, makeTaskRepo, copyRepo, cachedFixture, fixtureLadder, pinRung, pinLiveRung, stubRungs, STUB_RUNG, HARNESS_GUARD, run, runPty, PTY_AVAILABLE, runAsync, dispatch, BIN, ROOT, HOOKS, real, TMP_ROOT, LIVE_ROOT, detachedAlive, processesIn };
+module.exports = { ownerFallbacks, ownerDirsOutside, ACCOUNT_HOME, repairWorktrees, makeRepo, makeProjectRepo, makeTaskRepo, copyRepo, cachedFixture, fixtureLadder, pinRung, pinLiveRung, stubRungs, STUB_RUNG, HARNESS_GUARD, run, runPty, PTY_AVAILABLE, runAsync, dispatch, BIN, ROOT, HOOKS, real, TMP_ROOT, LIVE_ROOT, detachedAlive, processesIn };
