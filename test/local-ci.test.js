@@ -558,6 +558,40 @@ test('a binary artifact is redacted at its exact bytes, or missed when a secret 
   ]) assert.match(redact.bytes(input).missed || '', view, name);
 });
 
+test('a binary artifact is scanned without a map per byte, and as UTF-16 only when it could hold it', () => {
+  const { createRedactor } = require('../lib/gates/common');
+  const github = `ghp_${'d4'.repeat(18)}`;
+  const redact = createRedactor([['FIXTURE_PASSWORD', 'hunter2-secret-value']]);
+  const text = Buffer.from(`${'build ok\n'.repeat(1 << 16)}${github} \x1b[1mdone\n`);
+  // A 64 MiB file peaked at 1.4 GiB: two 4-byte source maps per byte once a secret showed, and four
+  // UTF-16 copies of a file that had no NUL byte. Arrays over a shared buffer allocate nothing.
+  const big = [];
+  const saved = { Int32Array, Uint16Array };
+  for (const [name, Base] of Object.entries(saved)) {
+    globalThis[name] = class extends Base {
+      constructor(...args) {
+        super(...args);
+        if (!(args[0] instanceof ArrayBuffer) && this.length >= text.length / 8) big.push(`${name}(${this.length})`);
+      }
+    };
+  }
+  try {
+    for (const head of [0xff, 0x00]) {
+      const out = redact.bytes(Buffer.concat([Buffer.from([head]), text]));
+      assert.equal(out.missed, undefined);
+      assert.match(out.body.toString('latin1'), /\n\[redacted:GITHUB_TOKEN\] \x1b\[1mdone\n$/);
+    }
+  } finally {
+    Object.assign(globalThis, saved);
+  }
+  assert.deepEqual(big, []);
+  // A value with no ASCII character has no NUL byte in UTF-16, so a non-ASCII value keeps those views.
+  const value = '中文密码中文';
+  const wide = Buffer.from(value, 'utf16le');
+  assert.equal(wide.includes(0), false);
+  assert.match(createRedactor([['FIXTURE_PASSWORD', value]]).bytes(Buffer.concat([Buffer.from([0xff]), wide])).missed || '', /as UTF-16LE from its second byte/);
+});
+
 test('restoring redaction markers is linear in their count', () => {
   const { createRedactor } = require('../lib/gates/common');
   const redact = createRedactor([['FIXTURE_TOKEN', `ghp_${'d4'.repeat(18)}`]]);
