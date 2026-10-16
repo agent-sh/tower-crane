@@ -202,7 +202,11 @@ const C = require(${JSON.stringify(path.join(__dirname, '../lib/commands'))});
 const modulePath = ${JSON.stringify(path.join(__dirname, '../lib/orchestrator'))};
 Object.defineProperty(process, 'platform', { value: 'win32' });
 const variants = [
-  ...['claude', 'codex', 'opencode', 'agy', 'pi'].map(name => [name + '.exe', name, true]),
+  ...['claude', 'codex', 'opencode', 'agy', 'pi', 'gemini', 'aider', 'goose', 'cursor-agent'].map(name => [name + '.exe', name, true]),
+  ['node', 'node --max-old-space-size=8192 /tools/node_modules/@google/gemini-cli/dist/index.js', true],
+  ['python3', 'python3 /home/u/.local/bin/aider', true],
+  ['python3.12', 'python3.12 -m aider --model x', true],
+  ['python3', 'python3 /tools/script.py aider', false],
   ['node.exe', '"C:\\\\Program Files\\\\node.exe" "C:\\\\tools\\\\pi.js"', true],
   ['node', 'node /tools/node_modules/@anthropic-ai/claude-code/cli.js', true],
   ['node', 'node /tools/node_modules/@mariozechner/pi-coding-agent/dist/cli.js', true],
@@ -258,9 +262,12 @@ function mockedIdentity(platform, rows) {
 const fs = require('node:fs');
 const C = require(${JSON.stringify(path.join(__dirname, '../lib/commands'))});
 const pids = (value) => value === 'PPID' ? process.ppid : value === 'SELF' ? process.pid : value;
-const rows = JSON.parse(process.env.ROWS).map((row) => Object.fromEntries(Object.entries(row).map(([k, v]) => [k, pids(v)])));
+const raw = JSON.parse(process.env.ROWS);
+// A string is recorded ps output, with PPID and SELF in place of pids.
+const rows = typeof raw === 'string' ? raw.replace(/\\b(PPID|SELF)\\b/g, pids)
+  : raw.map((row) => Object.fromEntries(Object.entries(row).map(([k, v]) => [k, pids(v)])));
 Object.defineProperty(process, 'platform', { value: process.env.PLATFORM });
-C.execFileSync = () => JSON.stringify(rows);
+C.execFileSync = () => typeof rows === 'string' ? rows : JSON.stringify(rows);
 const { readFileSync, readlinkSync } = fs;
 const row = (file) => rows.find((r) => file.startsWith('/proc/' + r.ProcessId + '/'));
 fs.readFileSync = (file, ...rest) => {
@@ -295,6 +302,11 @@ test('session shells are recognized by login or interactive options or a termina
     ['bash', ['bash'], '/dev/pts/3', true],
     ['zsh', ['zsh'], '/dev/tty2', true],
     ['fish', ['fish', '--interactive'], null, true],
+    ['fish', ['fish', '-i', '-C', 'source x'], null, true],
+    ['fish', ['fish', '-iC', 'source x'], null, true],
+    ['fish', ['fish', '-Csource x'], '/dev/pts/3', true],
+    ['fish', ['fish', '-C', 'source x', 'loop.fish'], '/dev/pts/3', false],
+    ['bash', ['bash', '-C', '-l'], null, true],
     ['bash', ['bash', '--rcfile', 'profile.sh', '-o', 'vi'], '/dev/pts/3', true],
     ['bash', ['bash'], 'pipe:[42]', false],
     ['bash', ['bash'], null, false],
@@ -320,7 +332,14 @@ test('Windows command lines keep backslash-escaped quotes inside one argument', 
     ['"C:\\Program Files\\Git\\bin\\bash.exe" --login -i', ['C:\\Program Files\\Git\\bin\\bash.exe', '--login', '-i']],
     ['node.exe "C:\\a b\\\\" x', ['node.exe', 'C:\\a b\\', 'x']],
     ['x a\\\\\\"b c\\d', ['x', 'a\\"b', 'c\\d']],
-    ['x "a""b" ""', ['x', 'ab', '']],
+    ['bash.exe -c -l "cd /x && \\"grep -i x\\""', ['bash.exe', '-c', '-l', 'cd /x && "grep -i x"']],
+    ['x "a""b"', ['x', 'a"b']],
+    // The doubled quote also ends the quoted run, so the next quote opens one.
+    ['x "a""b" c', ['x', 'a"b c']],
+    ['x "" c', ['x', '', 'c']],
+    ['x "a""b c" d', ['x', 'a"b', 'c d']],
+    ['x """', ['x', '"']],
+    ['x a"""b c"', ['x', 'a"b', 'c']],
     ['', []],
     [null, []],
   ]) assert.deepEqual(commandLineArgs(line), args, String(line));
@@ -328,12 +347,32 @@ test('Windows command lines keep backslash-escaped quotes inside one argument', 
     { ProcessId: 'PPID', ParentProcessId: 444444, Name: 'helper.exe', CreationDate: 'helper-start', CommandLine: 'helper.exe' },
     { ProcessId: 444444, ParentProcessId: 1, Name: 'bash.exe', CreationDate: 'bash-start', CommandLine },
   ]);
-  const command = shell('bash.exe -c -l "cd /x && grep -i \\"a b\\" f"');
+  // Splitting on every quote would leave -i as an option after the command string.
+  const command = shell('bash.exe -c -l "cd /x && \\"grep -i x\\""');
   assert.equal(command.pid, command.ppid, 'a Git Bash -c shell is a per-command shell');
   assert.equal(command.persistent, false);
   const login = shell('"C:\\Program Files\\Git\\bin\\bash.exe" --login -i');
   assert.equal(login.pid, 444444, 'a Git Bash login shell is a session');
   assert.equal(login.persistent, true);
+});
+
+// macOS ps sample in the shape Terminal.app produces: login starts the user's
+// shell with a leading '-', and ps prints that name as both comm and args.
+const MACOS_PS = `    1     0 /sbin/launchd    /sbin/launchd
+  611     1 /System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal /System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal
+  614   611 login            login -pf avi
+444444   614 -zsh             -zsh
+ PPID 444444 /bin/bash        /bin/bash /Users/avi/bin/loop.sh
+ SELF  PPID node             node /usr/local/bin/tower-crane task note T1 x
+`;
+
+test('a macOS login shell whose ps name is -zsh is a session shell', () => {
+  const lease = mockedIdentity('darwin', MACOS_PS);
+  assert.equal(lease.pid, 444444, 'the -zsh login shell is the session');
+  assert.equal(lease.persistent, true);
+  const command = mockedIdentity('darwin', MACOS_PS.replace('-zsh             -zsh', '/bin/zsh         /bin/zsh -c loop'));
+  assert.equal(command.pid, command.ppid, 'a -c zsh is a per-command shell');
+  assert.equal(command.persistent, false);
 });
 
 test('the Windows ancestor walk stops at a parent created after its child', () => {
