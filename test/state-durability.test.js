@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const { cachedFixture } = require('./helpers');
+const { cachedFixture, useFixtureUserFile } = require('./helpers');
 const T = require('../lib/tasks');
 const { waitOnRepo } = require('./signals');
 const { sleepSync } = require('../lib/util');
@@ -625,6 +625,8 @@ test('a write whose prepared files look unchanged under the lock keeps a commit 
     return renameSync(from, to, ...args);
   };
   t.after(() => { fs.renameSync = renameSync; });
+  // The write redraws the board in this process, which resolves the user file.
+  useFixtureUserFile(t, h);
   S.mutate({ stateDir: h.state, agent: 'owner', env: {}, flags: {} }, 'task note', (st, emit) => {
     st.tasks.tasks[0].notes.push({ at: new Date().toISOString(), agent: 'owner', text: 'my note' });
     emit('T1', { text: 'my note' });
