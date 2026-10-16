@@ -464,6 +464,8 @@ test('the Claude Code mod pushes a decision answer and a worker message into the
   assert.match(pushed, new RegExp(`${answer}: decision-answer D1 from owner`));
   assert.match(pushed, new RegExp(`${message}: worker-message T1 from worker`));
   assert.match(pushed, /tower-crane inbox/);
+  // The cursor carries the cuts file's length, so it resumes exactly across a recovery cut.
+  assert.match(pushed, /Cursor: \d+:\d+\./);
   idOnly(pushed, ['private owner note', 'private worker text', 'later']);
 
   // A steer joins a running turn; one the turn never read is pushed after it.
@@ -484,6 +486,9 @@ test('the Claude Code mod pushes a decision answer and a worker message into the
   idOnly(cc.seen.prompts.join('\n'), ['private concurrent worker text', 'private steer text']);
   idOnly(cc.seen.appended.join('\n'), ['private steer text']);
   assert.deepEqual(cc.seen.toasts, []);
+  // Armed again without a cursor, the watch resumes from the last line's, cuts included.
+  const rearmed = await cc.fire('tool.call', { tool: 'mcp__tower-crane__watch', tool_use_id: 'u2', agent: 'orchestrator' });
+  assert.match(rearmed.result, /after \d+:\d+ into/);
 });
 
 test('serve carries owner messages to the orchestrator and its replies back with content-free wakes', async (t) => {

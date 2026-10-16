@@ -8,7 +8,7 @@ const cp = require('node:child_process');
 const { EventEmitter, once } = require('node:events');
 const { cachedFixture, useFixtureUserFile, HOOKS, BIN } = require('./helpers');
 const { HUNG_TEST_MS } = require('./signals');
-const { EventReader } = require('../lib/event-reader');
+const { EventReader, cutsSize, readCuts, cutBack } = require('../lib/event-reader');
 const S = require('../lib/state');
 const T = require('../lib/tasks');
 const hooksPath = HOOKS.replace(/\\/g, '/');
@@ -596,4 +596,166 @@ test('served messages after a cursor inside bytes recovery cut off include the m
   assert.deepEqual(after.messages, []);
   // The page is woken for it too.
   await server.until(() => output.includes(next.messages[0].id));
+});
+
+// Lock recovery by a holder that logs nothing, so the test appends next.
+const recover = (h) => S.withLock(h.state, () => {});
+
+// A line as long as first, appended after the cut, so it ends where first
+// ended before recovery cut it off.
+function sameEnd(h, first) {
+  const line = { ...first, id: `E${require('node:crypto').randomUUID()}` };
+  fs.appendFileSync(path.join(h.state, 'events.jsonl'), `${JSON.stringify(line)}\n`);
+  return line.id;
+}
+
+test('a wait cursor that carries the cuts goes back for a cut even where a new line ends at its offset', (t) => {
+  const h = cutFixture();
+  t.after(h.cleanup);
+  const log = path.join(h.state, 'events.jsonl');
+  const first = message('worker', 'orchestrator', 'torn first');
+  const cuts = cutsSize(log);
+  const { after } = tornCommit(h, first);
+  recover(h);
+  const id = sameEnd(h, first);
+  assert.equal(fs.statSync(log).size, after, 'the new line ends where the cut one did');
+  const wait = (cursor, timeout) => h.run(['wait', '--agent', 'orchestrator', '--after', cursor, '--types', 'worker-message', '--timeout', timeout]); // wait-allow: the event is logged before the first wait starts; the second must reach its timeout
+  const woke = wait(`${after}:${cuts}`, '5');
+  assert.equal(woke.code, 0, woke.stderr);
+  const e = JSON.parse(woke.stdout);
+  assert.equal(e.id, id);
+  assert.equal(e.cursor, `${after}:${cutsSize(log)}`);
+  const again = wait(e.cursor, '0.5');
+  assert.equal(again.code, 2, `the wait returned ${again.stdout}`);
+  assert.equal(JSON.parse(again.stdout).cursor, e.cursor);
+});
+
+test('served messages after a cursor with its cuts include a message whose line ends where a cut one did', async (t) => {
+  const h = cutFixture();
+  const log = path.join(h.state, 'events.jsonl');
+  const server = resetReader(t, h, ['serve', '--agent', 'viewer', '--port', '0', '--json']);
+  const { url } = await server.until(() => server.lines()[0]);
+  const first = message('w-1', 'owner', 'torn first');
+  const before = await (await fetch(new URL('/api/messages', url))).json();
+  const { after } = tornCommit(h, first);
+  recover(h);
+  const id = sameEnd(h, first);
+  const next = await (await fetch(new URL(`/api/messages?after=${after}&cuts=${before.cuts}`, url))).json();
+  assert.deepEqual(next.messages.map((m) => m.id), [id]);
+  assert.equal(next.cuts, cutsSize(log));
+  const again = await (await fetch(new URL(`/api/messages?after=${next.cursor}&cuts=${next.cuts}`, url))).json();
+  assert.deepEqual(again.messages, []);
+});
+
+test('recovery records two cuts of the same length at the same place, so a reader goes back for the second', (t) => {
+  const h = cutFixture();
+  t.after(h.cleanup);
+  const log = path.join(h.state, 'events.jsonl');
+  const reader = new EventReader(log);
+  reader.read();
+  const { size } = tornCommit(h, message('owner', 'orchestrator', 'torn first'));
+  recover(h);
+  tornCommit(h, message('owner', 'orchestrator', 'torn first'));
+  assert.deepEqual(reader.read().rows.map((e) => e.detail.text), ['torn first']);
+  recover(h);
+  h.ok(['msg', '--to', 'orchestrator', LONG]);
+  const batch = reader.read();
+  assert.deepEqual(batch.rows.map((e) => e.detail.text), [LONG]);
+  assert.equal(batch.cut, size);
+  assert.equal(readCuts(log).cuts.length, 2);
+});
+
+test('a cut an older tool finished recovering is recorded late, and only a reader that read the cut bytes goes back', (t) => {
+  const h = cutFixture();
+  t.after(h.cleanup);
+  const log = path.join(h.state, 'events.jsonl');
+  const reader = new EventReader(log);
+  reader.read();
+  const { size } = tornCommit(h, message('owner', 'orchestrator', 'torn first'));
+  assert.deepEqual(reader.read().rows.map((e) => e.detail.text), ['torn first']);
+  const r = h.run(['msg', '--to', 'orchestrator', 'never sent'], { hooks: { HOOK_DIE_RECORDING_CUT: '1' } });
+  assert.notEqual(r.code, 0, 'the holder was killed');
+  assert.equal(fs.statSync(log).size, size, 'the log was cut');
+  // A tool from before cut records finishes the recovery its way: it removes
+  // the staged files and the manifest, then appends its own event.
+  for (const name of fs.readdirSync(h.state)) {
+    if (/^(tasks\.json\.E[0-9a-f-]+\.commit|commit\.E[0-9a-f-]+\.json)$/.test(name)) fs.unlinkSync(path.join(h.state, name));
+  }
+  fs.appendFileSync(log, `${JSON.stringify(message('worker', 'orchestrator', LONG))}\n`);
+  // This reader read the older tool's event, never the cut bytes.
+  const later = new EventReader(log);
+  assert.deepEqual(later.read().rows.map((e) => e.detail.text).slice(-1), [LONG]);
+  h.ok(['msg', '--to', 'orchestrator', 'after the older tool']);
+  const recorded = readCuts(log).cuts;
+  assert.equal(recorded.length, 1);
+  assert.equal(recorded[0].late, true);
+  const batch = reader.read();
+  assert.deepEqual(batch.rows.map((e) => e.detail.text), [LONG, 'after the older tool']);
+  assert.equal(batch.cut, size);
+  const read = later.read();
+  assert.deepEqual(read.rows.map((e) => e.detail.text), ['after the older tool']);
+  assert.equal(read.cut, undefined);
+  assert.deepEqual(fs.readdirSync(h.state).filter((name) => name.startsWith('cut.')), []);
+});
+
+test('a cut recorded while a reader reads the log after it is in the cursor the reader hands out', (t) => {
+  const h = cutFixture();
+  t.after(h.cleanup);
+  const log = path.join(h.state, 'events.jsonl');
+  const first = message('worker', 'orchestrator', 'torn first');
+  const reader = new EventReader(log);
+  reader.read();
+  tornCommit(h, first);
+  // Recovery cuts the torn append and the next line lands after the
+  // reader checked the cuts file and before it reads the log.
+  const readSync = fs.readSync;
+  let id;
+  fs.readSync = function (...args) {
+    fs.readSync = readSync;
+    recover(h);
+    id = sameEnd(h, first);
+    return readSync.apply(this, args);
+  };
+  t.after(() => { fs.readSync = readSync; });
+  const batch = reader.read();
+  assert.deepEqual(batch.rows.map((e) => e.id), [id]);
+  assert.equal(reader.cuts, cutsSize(log));
+  assert.equal(cutBack(log, batch.offset, reader.cuts), batch.offset, 'the cursor does not move back over the event it was handed out after');
+});
+
+test('a cut recorded during a read that starts past it sends the reader back for the line before its start', (t) => {
+  const h = cutFixture();
+  t.after(h.cleanup);
+  const log = path.join(h.state, 'events.jsonl');
+  const first = message('worker', 'orchestrator', 'torn first');
+  const second = message('worker', 'orchestrator', 'torn second');
+  const reader = new EventReader(log);
+  reader.read();
+  // A commit's append torn in two writes: the reader reads its first line
+  // before the fragment of the second lands.
+  const { size, dev, ino } = fs.statSync(log);
+  fs.writeFileSync(path.join(h.state, `tasks.json.${second.id}.commit`), fs.readFileSync(path.join(h.state, 'tasks.json')));
+  fs.writeFileSync(path.join(h.state, `commit.${second.id}.json`), JSON.stringify({ size, dev, ino, ids: [first.id, second.id] }));
+  fs.appendFileSync(log, `${JSON.stringify(first)}\n`);
+  assert.deepEqual(reader.read().rows.map((e) => e.detail.text), ['torn first']);
+  fs.appendFileSync(log, JSON.stringify(second).slice(0, 60));
+  // Line x ends where the fragment did; y follows it.
+  const x = { ...first, id: `E${require('node:crypto').randomUUID()}`, detail: { ...first.detail, text: `torn first${'x'.repeat(60)}` } };
+  const y = message('worker', 'orchestrator', 'after x');
+  // Recovery cuts both writes off and x and y land after the reader checked
+  // the cuts file and before it reads the fragment's span.
+  const readSync = fs.readSync;
+  fs.readSync = function (...args) {
+    fs.readSync = readSync;
+    recover(h);
+    fs.appendFileSync(log, `${JSON.stringify(x)}\n${JSON.stringify(y)}\n`);
+    return readSync.apply(this, args);
+  };
+  t.after(() => { fs.readSync = readSync; });
+  const during = reader.read();
+  const next = reader.read();
+  assert.equal(next.cut, size);
+  const texts = [...during.rows, ...next.rows].map((e) => e.detail.text);
+  assert.ok(texts.includes(x.detail.text), `x was read: ${JSON.stringify(texts)}`);
+  assert.ok(texts.includes('after x'));
 });

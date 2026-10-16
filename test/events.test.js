@@ -429,7 +429,7 @@ const r = cp.spawnSync(process.execPath, [${JSON.stringify(BIN)}, ...args], { en
   h.ok(['spawn', '--task', 'T1', '--wait']);
   const r = h.run(['wait', '--agent', 'orchestrator', '--types', 'worker-exited', '--timeout', '0.1']); // wait-allow: verify the CLI observation, filtering or timeout contract with already-published state
   assert.equal(r.code, 2);
-  assert.deepEqual(JSON.parse(r.stdout), { type: 'timeout', offset: fs.statSync(path.join(h.state, 'events.jsonl')).size });
+  assert.deepEqual(JSON.parse(r.stdout), timeoutAt(h));
 });
 
 for (const command of ['wait', 'spend']) {
@@ -593,7 +593,7 @@ test('an observer waiting for the state lock does not block its timeout', async 
   const before = performance.now();
   const r = h.run(['wait', '--agent', 'orchestrator', '--types', 'stall', '--timeout', '0.1'], { hooks }); // wait-allow: verify the CLI observation, filtering or timeout contract with already-published state
   assert.equal(r.code, 2, r.stderr);
-  assert.deepEqual(JSON.parse(r.stdout), { type: 'timeout', offset: fs.statSync(path.join(h.state, 'events.jsonl')).size });
+  assert.deepEqual(JSON.parse(r.stdout), timeoutAt(h));
   assert.ok(performance.now() - before < 2000, 'timeout is not held by the lock retry deadline'); // wait-allow: verify the CLI timeout is independent of state-lock contention
   const existing = h.run(['wait', '--agent', 'orchestrator', '--observe', '--after', '0',
     '--types', 'worker-message', '--timeout', '0'], { hooks });
@@ -625,14 +625,20 @@ test('startup reconciliation with an active PR does not hold a timeout behind th
   }
 });
 
+// A timeout at the log's end, with no cut recorded.
+function timeoutAt(h) {
+  const size = fs.statSync(path.join(h.state, 'events.jsonl')).size;
+  return { type: 'timeout', offset: size, cursor: `${size}:0` };
+}
+
 test('timeout and invalid cursors have bounded exits and default now ignores history', async (t) => {
   const h = setup(t);
   h.ok(['msg', '--to', 'orchestrator', 'already handled']);
   const r = h.run(['wait', '--observe', '--agent', 'orchestrator', '--timeout', '0.05', '--json']); // wait-allow: verify the CLI observation, filtering or timeout contract with already-published state
   assert.equal(r.code, 2);
-  assert.deepEqual(JSON.parse(r.stdout), { type: 'timeout', offset: fs.statSync(path.join(h.state, 'events.jsonl')).size });
+  assert.deepEqual(JSON.parse(r.stdout), timeoutAt(h));
   assert.equal(r.stderr, '');
-  for (const args of [['--timeout', '-1'], ['--after', 'unknown'], ['--after', '1'], ['--after', '999999999'], ['--types', ','], ['--for', '']]) {
+  for (const args of [['--timeout', '-1'], ['--after', 'unknown'], ['--after', '1'], ['--after', '999999999'], ['--after', '0:1'], ['--after', '0:x'], ['--types', ','], ['--for', '']]) {
     assert.equal(h.run(['wait', ...args]).code, 2, args.join(' '));
   }
 });

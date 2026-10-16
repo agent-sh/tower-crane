@@ -13,7 +13,7 @@ function notice(rows, agent) {
   return [
     `Tower Crane: ${rows.length} new event${rows.length === 1 ? '' : 's'} for ${agent}.`,
     ...lines,
-    `Run \`tower-crane inbox\` for findings and resolving commands.${last?.offset ? ` Cursor: ${last.offset}.` : ''}`,
+    `Run \`tower-crane inbox\` for findings and resolving commands.${last?.offset ? ` Cursor: ${last.cursor ?? last.offset}.` : ''}`,
   ].join('\n')
 }
 
@@ -71,7 +71,10 @@ async function follow($, current, child) {
         } catch {
           continue
         }
-        if (typeof w.offset === 'number') current.cursor = String(w.offset)
+        // OFFSET:CUTS resumes exactly across a lock recovery's cut; a plain
+        // offset comes from an older CLI.
+        if (typeof w.cursor === 'string') current.cursor = w.cursor
+        else if (typeof w.offset === 'number') current.cursor = String(w.offset)
         if (w.type !== 'ready' && w.id) await deliver($, w)
       }
     }
@@ -105,7 +108,7 @@ export function register(on) {
       inputSchema: {
         type: 'object',
         properties: {
-          after: { type: 'string', description: 'cursor from tower-crane wait --timeout 0, or an event id (default: now, or where the last watch stopped)' },
+          after: { type: 'string', description: 'the cursor field from tower-crane wait --timeout 0 (OFFSET:CUTS), a byte offset, or an event id (default: now, or where the last watch stopped)' },
           agent: { type: 'string', description: 'identity to wake (default TOWER_CRANE_AGENT, else orchestrator)' },
           state: { type: 'string', description: 'state directory (default TOWER_CRANE_STATE or the one found from the working directory)' },
         },
