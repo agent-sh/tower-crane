@@ -147,10 +147,13 @@ for (const cut of ['a torn line', 'a whole line and a torn line']) {
       fs.closeSync(fd);
     }
     assert.equal(size(h), end, 'the log kept its size');
+    // A reader resuming mid-line loses the first line it reads, never the second.
     const later = note('later');
+    const last = note('last');
     fs.appendFileSync(file, line(later));
-    await waitOnRepo(h, () => ids().includes(later.id), 'the event after the cut commit');
-    assert.deepEqual(ids(), [crashed.id, next.id, later.id]);
+    fs.appendFileSync(file, line(last));
+    await waitOnRepo(h, () => ids().includes(last.id), 'the events after the cut commit');
+    assert.deepEqual(ids(), [crashed.id, next.id, later.id, last.id]);
   });
 }
 
