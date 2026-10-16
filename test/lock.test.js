@@ -583,6 +583,91 @@ test('a marked lock whose marker its holder could not delete is freed by that ho
   assert.equal(fs.existsSync(dir), false);
 });
 
+// Windows records no start ticks and gives a killed holder's pid to a new
+// process within seconds; the creation time in the marker tells them apart.
+// This plays Windows: the platform reads win32, a table stands in for the
+// PowerShell read, and a live child's pid is the holder's.
+function windowsLock(t) {
+  const P = require('../lib/processes');
+  const h = makeRepo(t);
+  const dir = path.join(h.base, 'locks', 'lock');
+  fs.mkdirSync(path.dirname(dir), { recursive: true });
+  // Alive until its stdin closes or it is killed.
+  const child = spawn(process.execPath, ['-e', 'process.stdin.resume()'], { stdio: ['pipe', 'ignore', 'ignore'] });
+  const platform = Object.getOwnPropertyDescriptor(process, 'platform');
+  const windowsCreated = P.windowsCreated;
+  const times = new Map([[process.pid, 5]]);
+  const w = { dir, pid: child.pid, times, reads: 0 };
+  const forget = () => { S.processCreated?.cache.clear(); S.processCreated?.gone?.clear(); };
+  Object.defineProperty(process, 'platform', { ...platform, value: 'win32' });
+  P.windowsCreated = (pids) => {
+    w.reads++;
+    return new Map(pids.filter((pid) => Number.isFinite(times.get(pid))).map((pid) => [pid, times.get(pid)]));
+  };
+  forget();
+  t.after(() => {
+    Object.defineProperty(process, 'platform', platform);
+    P.windowsCreated = windowsCreated;
+    forget();
+    child.kill();
+  });
+  w.take = () => S.tryMarkedLock(dir, { keepLive: true }) || S.tryMarkedLock(dir, { keepLive: true });
+  // The marker now names the child as a holder created at `created`.
+  w.hold = (lock, created) => {
+    const m = JSON.parse(fs.readFileSync(lock.file, 'utf8'));
+    fs.writeFileSync(lock.file, JSON.stringify({ ...m, pid: child.pid, created }));
+  };
+  // A waiter's look; `fresh` is a waiter that has read no times yet.
+  w.look = (fresh = false) => {
+    if (fresh) forget();
+    return S.clearStaleLock(dir, true).holder?.pid ?? null;
+  };
+  return w;
+}
+
+test('a marked lock whose holder\'s pid now belongs to a process created at another time is freed', (t) => {
+  const w = windowsLock(t);
+  const lock = w.take();
+  assert.ok(lock);
+  assert.equal(JSON.parse(fs.readFileSync(lock.file, 'utf8')).created, 5, 'the marker records the holder\'s creation time');
+  w.hold(lock, 1000);
+  w.times.set(w.pid, 1000);
+  // Same time: the holder itself, kept; a waiter's further looks read it once.
+  assert.equal(w.look(true), w.pid);
+  const reads = w.reads;
+  assert.equal(w.look(), w.pid);
+  assert.equal(w.look(), w.pid);
+  assert.equal(w.reads, reads, 'a waiter reads a kept holder\'s time once');
+  // Unreadable: kept, as a live holder was before markers carried the time.
+  w.times.delete(w.pid);
+  assert.equal(w.look(true), w.pid);
+  // Another time: the pid went to a new process, and the lock is free.
+  w.times.set(w.pid, 2000);
+  assert.equal(w.look(true), null);
+  assert.equal(fs.existsSync(w.dir), false, 'the gone holder\'s lock is removed');
+  const again = w.take();
+  assert.ok(again, 'the next taker gets it');
+  S.releaseMarkedLock(again);
+});
+
+// A waiter read the holder's time; the holder died, and the process Windows
+// gave its pid to took the same lock and wrote its own time. The waiter's
+// earlier read is of the dead holder and must not free the new one's lock.
+test('a waiter\'s earlier read of a dead holder\'s time does not free the lock of the process that took its pid', (t) => {
+  const w = windowsLock(t);
+  const lock = w.take();
+  assert.ok(lock);
+  w.hold(lock, 1000);
+  w.times.set(w.pid, 1000);
+  assert.equal(w.look(true), w.pid, 'the first holder is kept');
+  w.times.set(w.pid, 2000);
+  w.hold(lock, 2000);
+  assert.equal(w.look(), w.pid, 'the new holder is kept');
+  assert.ok(fs.existsSync(lock.file), 'its marker is still there');
+  w.hold(lock, 1000);
+  assert.equal(w.look(), null, 'a marker of the dead holder is freed');
+});
+
 // Hooks run inside every synchronous wait, so one must not fail or recurse
 // into the wait it runs in.
 test('a failing or sleeping sleep hook does not break the wait it runs in', () => {
