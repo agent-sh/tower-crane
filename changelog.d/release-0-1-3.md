@@ -1,0 +1,1 @@
+- Release 0.1.3. The package and plugin metadata say 0.1.3, and the README status names it as the latest release.
