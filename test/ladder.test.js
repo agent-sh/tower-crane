@@ -580,6 +580,67 @@ test('moving a rung to another harness drops the model and fields the old harnes
   assert.match(stuck.stderr, /ladder research \(claude, the default harness\): model gpt-5-codex does not run on claude/);
 });
 
+test('a harness move drops tools the new harness does not know and names the personal fallbacks that follow it', (t) => {
+  const h = makeRepo(t);
+  h.init();
+  // Claude ids by name: the model swap proof leaves no Claude release in the defaults.
+  writeUser(h, { ladder: {
+    hard: { fallbacks: [{ model: 'claude-fixture-large' }, { model: 'fixture-large', tools: ['WebFetch'] }] },
+    research: { fallbacks: [{ model: 'gpt-fixture-mini' }, { harness: 'codex', model: 'gpt-fixture-mini' }] },
+  } });
+  const user = fs.readFileSync(h.userConfig, 'utf8');
+
+  // The review's case: codex exits on --enable WebFetch.
+  h.ok(['ladder', 'set', 'hard', '--tools', '["WebFetch"]']);
+  const moved = h.run(['ladder', 'set', 'hard', '--harness', 'codex', '--profile', 'fixture-main', '--json']);
+  assert.equal(moved.code, 0, moved.stderr);
+  const data = JSON.parse(moved.stdout);
+  assert.deepEqual(data.dropped, { tools: ['WebFetch'] });
+  assert.equal(h.readState('project.json').ladder.hard.tools, undefined);
+  assert.deepEqual(data.notices, [
+    `hard fallback 1 from user file ${h.userConfig} follows the rung to codex, where model claude-fixture-large does not run on codex; spawn skips it until the route names its harness or what codex runs`,
+    `hard fallback 2 from user file ${h.userConfig} follows the rung to codex, where codex does not know tool WebFetch; spawn skips it until the route names its harness or what codex runs`,
+  ]);
+  assert.equal(fs.readFileSync(h.userConfig, 'utf8'), user, 'the user file is not edited');
+  const show = h.json(['ladder', 'show']).problems.filter((p) => p.startsWith('hard fallback'));
+  // Named for what cannot run, not for an approval that would start codex with --enable WebFetch.
+  assert.deepEqual(show, [
+    `hard fallback 1 from user file ${h.userConfig} follows the rung's harness, where model claude-fixture-large does not run on codex; skipped`,
+    `hard fallback 2 from user file ${h.userConfig} follows the rung's harness, where codex does not know tool WebFetch; skipped`,
+  ]);
+
+  // A rung that follows the default is not edited, so a tool the new default
+  // does not know refuses the move.
+  for (const n of ['easy', 'medium', 'review', 'small']) h.ok(['ladder', 'set', n, '--harness', 'codex']);
+  h.ok(['ladder', 'set', 'research', '--clear', 'harness', '--model', 'fixture-large', '--tools', '["web_search"]']);
+  const before = projectText(h);
+  const stuck = h.run(['ladder', 'harness', 'claude']);
+  assert.equal(stuck.code, 1, stuck.stdout);
+  assert.match(stuck.stderr, /ladder research \(claude, the default harness\): claude does not know tool web_search/);
+  assert.equal(projectText(h), before);
+
+  // Its fallback that follows it is named; the one with its own harness is not.
+  h.ok(['ladder', 'set', 'research', '--clear', 'tools']);
+  const out = h.ok(['ladder', 'harness', 'claude']);
+  assert.match(out, new RegExp(`^notice: research fallback 1 from user file .* follows the rung to claude, where model gpt-fixture-mini does not run on claude;`, 'm'));
+  assert.doesNotMatch(out, /research fallback 2/);
+});
+
+test('a move to a codex profile with a custom provider keeps a Claude model it can serve', (t) => {
+  const h = makeRepo(t);
+  h.init();
+  fs.mkdirSync(path.join(h.env.HOME, '.codex'), { recursive: true });
+  fs.writeFileSync(path.join(h.env.HOME, '.codex', 'config.toml'), '[profiles.router]\nmodel_provider = "openrouter"\n');
+  h.ok(['ladder', 'set', 'hard', '--model', 'anthropic/claude-fixture-large']);
+  const kept = h.json(['ladder', 'set', 'hard', '--harness', 'codex', '--profile', 'router']);
+  assert.equal(kept.dropped, undefined);
+  assert.equal(h.readState('project.json').ladder.hard.model, 'anthropic/claude-fixture-large');
+  // The OpenAI route cannot serve it, so the move drops it there.
+  h.ok(['ladder', 'set', 'research', '--model', 'anthropic/claude-fixture-large']);
+  const off = h.json(['ladder', 'set', 'research', '--harness', 'codex', '--profile', 'fixture-main']);
+  assert.deepEqual(off.dropped, { model: 'anthropic/claude-fixture-large' });
+});
+
 test('harnessDrops keeps what fits the new harness and returns the rest', () => {
   const alias = Object.keys(L.BUILTIN.claude_aliases)[0];
   const rung = { model: 'claude-haiku-5-5', effort: 'high', supervision: { retries: 1 }, env: { A: '1' } };
@@ -603,7 +664,70 @@ test('harnessDrops keeps what fits the new harness and returns the rest', () => 
     [{ tools: ['WebSearch'] }, 'pi', { tools: ['WebSearch'] }],
     [{ tools: ['read'], mcp: ['m'] }, 'pi', { mcp: ['m'] }],
     [{ web_mcp: { name: 'w', command: 'c' } }, 'codex', { web_mcp: { name: 'w', command: 'c' } }],
+    // Tool names are judged one by one against what the new harness knows.
+    [{ tools: ['WebFetch', 'web_search'] }, 'codex', { tools: ['WebFetch'] }],
+    [{ tools: ['web_search', 'memories'] }, 'claude', { tools: ['web_search', 'memories'] }],
+    [{ tools: ['WebSearch', 'Bash(git log:*)', 'mcp__docs'] }, 'claude', {}],
+    [{ tools: ['WebFetch'] }, 'opencode', {}],
+    [{ tools: ['web_search'] }, 'agy', { tools: ['web_search'] }],
+    // A context suffix keeps an alias an alias.
+    [{ model: `${alias}[1m]` }, 'codex', { model: `${alias}[1m]` }],
+    [{ model: `${alias}[1m]` }, 'claude', {}],
+    // An application inference profile id is opaque, even one that starts like an o-series id.
+    [{ model: 'arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/o3k2abc' }, 'claude', {}],
+    [{ model: 'o3k2abc' }, 'claude', {}],
+    // An ARN that names its model keeps the model's vendor.
+    [{ model: 'arn:aws:bedrock:us-east-1::foundation-model/openai.gpt-oss-120b-1:0' }, 'claude', { model: 'arn:aws:bedrock:us-east-1::foundation-model/openai.gpt-oss-120b-1:0' }],
+    [{ model: 'arn:aws:bedrock:us-east-1:123456789012:inference-profile/global.anthropic.claude-fixture-large-v1:0' }, 'codex', { model: 'arn:aws:bedrock:us-east-1:123456789012:inference-profile/global.anthropic.claude-fixture-large-v1:0' }],
+    [{ model: 'arn:aws:bedrock:us-east-1:123456789012:inference-profile/global.anthropic.claude-fixture-large-v1:0' }, 'claude', {}],
+    [{ model: 'o4-mini' }, 'claude', { model: 'o4-mini' }],
+    [{ model: 'openai.o3' }, 'claude', { model: 'openai.o3' }],
   ]) assert.deepEqual(L.harnessDrops(r, h), dropped, `${JSON.stringify(r)} on ${h}`);
+});
+
+test('inheritedMisfits judges only routes that follow the rung, and not one that may use a proxy', () => {
+  const layers = (harness, fallbacks) => ({ ladder: { easy: { harness, fallbacks } } });
+  for (const [harness, route, why] of [
+    ['codex', { model: 'claude-fixture-large' }, ['model claude-fixture-large does not run on codex']],
+    ['codex', { model: 'claude-fixture-large', tools: ['WebFetch', 'web_search'] }, ['model claude-fixture-large does not run on codex', 'codex does not know tool WebFetch']],
+    ['codex', { harness: 'codex', model: 'claude-fixture-large' }, null],
+    ['codex', { model: 'claude-fixture-large', env: { OPENAI_BASE_URL: 'http://127.0.0.1:4000' } }, null],
+    ['codex', { model: 'claude-fixture-large', env_file: '~/.proxy.env' }, null],
+    // A variable that is not a provider endpoint says nothing about the model.
+    ['codex', { model: 'claude-fixture-large', env: { GITHUB_BASE_URL: 'https://ghe.example' } }, ['model claude-fixture-large does not run on codex']],
+    ['claude', { model: 'gpt-fixture-mini', env: { ANTHROPIC_BEDROCK_BASE_URL: 'https://proxy.example' } }, null],
+    // A proxy does not change which tool names the harness takes.
+    ['codex', { model: 'claude-fixture-large', tools: ['WebFetch'], env: { OPENAI_BASE_URL: 'http://127.0.0.1:4000' } }, ['codex does not know tool WebFetch']],
+    ['codex', { model: 'claude-fixture-large', tools: ['WebFetch'], env_file: '~/.proxy.env' }, ['codex does not know tool WebFetch']],
+    ['claude', { model: 'gpt-fixture-mini', env: { ANTHROPIC_BASE_URL: 'http://127.0.0.1:4000' } }, null],
+    ['claude', { model: 'gpt-fixture-mini', env: { ROUTE: '1' } }, ['model gpt-fixture-mini does not run on claude']],
+    ['claude', { model: 'fixture-large', tools: ['WebFetch'] }, null],
+  ]) {
+    assert.deepEqual(L.inheritedMisfits(layers(harness, [route]), 'easy', {}), why ? [{ route: 1, why }] : [], JSON.stringify(route));
+  }
+});
+
+test('a codex route keeps another vendor\'s model only when its provider is a custom one', (t) => {
+  // Claude by its name, not a configured release: the model swap proof
+  // replaces those with ids of no known vendor.
+  const release = 'claude-fixture-large';
+  const base = fs.mkdtempSync(path.join(TMP_ROOT, 'codex-custom-'));
+  t.after(() => fs.rmSync(base, { recursive: true, force: true }));
+  for (const [name, config, rung, fits] of [
+    ['default OpenAI', '', {}, false],
+    ['global custom provider', 'model_provider = "openrouter"', {}, true],
+    ['custom profile', '[profiles.router]\nmodel_provider = "litellm"', { profile: 'router' }, true],
+    ['other profile', '[profiles.router]\nmodel_provider = "litellm"', { profile: 'sol' }, false],
+    ['override', '', { args: ['-c', 'model_provider=openrouter'] }, true],
+    ['local server', 'model_provider = "ollama"', {}, false],
+  ]) {
+    const home = path.join(base, name);
+    fs.mkdirSync(home);
+    fs.writeFileSync(path.join(home, 'config.toml'), config);
+    for (const model of [`anthropic/${release}`, release]) {
+      assert.equal(L.modelFits(model, 'codex', rung, {}, { codex: home }), fits, `${name}: ${model}`);
+    }
+  }
 });
 
 test('pricing identity drops Claude provider, context and Bedrock version suffixes', () => {

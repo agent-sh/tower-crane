@@ -444,6 +444,27 @@ test('an approved env_file counts only with the content the owner approved', (t)
   assert.match(run.stderr, /skipping fallback 1: .*changed since the owner approved/);
 });
 
+// T355 review: the model check skipped routes that name their own harness,
+// which may reach another vendor's model through a proxy and ran before.
+test('spawn skips an inherited route whose model its rung\'s harness cannot run, runs one that names its harness, and lists skips in route order', (t) => {
+  const h = setup(t, { primaryHarness: 'codex', reason: 'refusal' });
+  // Route 1 carries env the owner has not approved; route 2 follows codex with a Claude model.
+  handFallbacks(h, [{ harness: 'claude', model: 'second', env: { ROUTE_ENV: 'fallback' } },
+    { model: 'claude-fixture-large' }, { harness: 'codex', model: 'claude-fixture-large' }]);
+  h.spawn();
+  assert.deepEqual(h.attempts().map((a) => a.model), ['first', 'claude-fixture-large']);
+  const notices = events(h).find((e) => e.cmd === 'spawn').detail.notices;
+  const first = notices.findIndex((n) => n.startsWith('easy fallback 1 '));
+  const second = notices.indexOf(`easy fallback 2 from user file ${h.userConfig} follows the rung's harness, where model claude-fixture-large does not run on codex; skipped`);
+  assert.ok(first !== -1 && second > first, JSON.stringify(notices));
+  // ladder show looks for each route's harness on PATH as spawn does. The
+  // fixture's stubs are on the spawn PATH; the harness guard's .cmd shims,
+  // which Windows lookup skips as non-npm shims, are not a harness there.
+  const problems = h.json(['ladder', 'show'], { env: { PATH: h.spawnEnv.PATH } }).problems.filter((p) => p.startsWith('easy fallback'));
+  assert.ok(problems.length >= 2 && problems[0].startsWith('easy fallback 1 ') && problems.findIndex((p) => p.startsWith('easy fallback 2 ')) > 0, problems.join('\n'));
+  assert.ok(!problems.some((p) => p.startsWith('easy fallback 3')), problems.join('\n'));
+});
+
 // Found in the T284 re-review: a pinned route that inherits its harness
 // follows the primary, which the orchestrator may move among sandboxed
 // harnesses without the owner. The approval is for the harness it resolved to.
