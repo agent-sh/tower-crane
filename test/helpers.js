@@ -10,6 +10,7 @@ const test = require('node:test');
 const { createRepoSeed, cleanupRepoSeed, FOREGROUND_MAINTENANCE } = require('./repo-seed');
 const { tempRoot, liveRoot } = require('./tmp-root');
 const { readPublished } = require('./atomic-file');
+const UserConfigGuard = require('./fixtures/user-config-guard');
 
 const ROOT = path.join(__dirname, '..');
 const BIN = path.join(ROOT, 'bin', 'tower-crane.js');
@@ -160,6 +161,9 @@ function baseEnv(home) {
   // the owner's real ones do.
   env.TC_ACCOUNT_HOME = env.HOME;
   env.NODE_OPTIONS = withAccountHome(env.NODE_OPTIONS);
+  // The hook also loads fixtures/user-config-guard.js, which records a CLI
+  // whose user file lies outside the roots this test process fixed at load.
+  env[UserConfigGuard.ROOTS_ENV] = UserConfigGuard.roots().join(path.delimiter);
   env.TOWER_CRANE_CONFIG = path.join(env.HOME, '.config', 'tower-crane', 'config.json');
   fs.mkdirSync(path.join(env.HOME, '.config', 'tower-crane', 'owner'), { recursive: true });
   fs.writeFileSync(path.join(env.HOME, '.config', 'tower-crane', 'owner', 'key'), `${OWNER_KEY}\n`);
@@ -174,6 +178,19 @@ function baseEnv(home) {
   // cannot leave them in the shared temporary directory.
   env.TOWER_CRANE_TMP = path.join(home, 'gate-tmp');
   return env;
+}
+
+// Lib code a test calls in its own process reads the user file named in
+// process.env, by default the developer's real ~/.config/tower-crane/config.json.
+// This points it at the fixture's user file, the one baseEnv gives the CLIs,
+// until the test ends.
+function useFixtureUserFile(t, h) {
+  const saved = process.env.TOWER_CRANE_CONFIG;
+  process.env.TOWER_CRANE_CONFIG = h.env.TOWER_CRANE_CONFIG;
+  t.after(() => {
+    if (saved === undefined) delete process.env.TOWER_CRANE_CONFIG;
+    else process.env.TOWER_CRANE_CONFIG = saved;
+  });
 }
 
 // NODE_OPTIONS with the account home hook first, whatever else a test adds.
@@ -516,6 +533,7 @@ function context(t, base, options = {}) {
         assert.fail(`fixture ${base} outlived its cleanup: ${fs.readdirSync(base, { recursive: true }).slice(0, 10).join(', ')}`);
       }
       assertNoHarnessCalls(base);
+      UserConfigGuard.assertNoUserConfigLeaks(base);
     },
     run: (args, opts = {}) => fixtureInit(ctx, args, opts, (a, o) => run(a, withHooks(ctx, o))),
     runAsync: (args, opts = {}) => runAsync(args, withHooks(ctx, opts)),
@@ -828,4 +846,4 @@ function ownerFallbacks(h, rung, routes) {
   }
 }
 
-module.exports = { ownerFallbacks, ownerDirsOutside, ACCOUNT_HOME, repairWorktrees, makeRepo, makeProjectRepo, makeTaskRepo, copyRepo, cachedFixture, fixtureLadder, pinRung, pinLiveRung, stubRungs, STUB_RUNG, HARNESS_GUARD, run, runPty, PTY_AVAILABLE, runAsync, dispatch, BIN, ROOT, HOOKS, real, TMP_ROOT, LIVE_ROOT, detachedAlive, processesIn };
+module.exports = { useFixtureUserFile, ownerFallbacks, ownerDirsOutside, ACCOUNT_HOME, repairWorktrees, makeRepo, makeProjectRepo, makeTaskRepo, copyRepo, cachedFixture, fixtureLadder, pinRung, pinLiveRung, stubRungs, STUB_RUNG, HARNESS_GUARD, run, runPty, PTY_AVAILABLE, runAsync, dispatch, BIN, ROOT, HOOKS, real, TMP_ROOT, LIVE_ROOT, detachedAlive, processesIn };

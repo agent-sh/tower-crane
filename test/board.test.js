@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
 const { pathToFileURL } = require('node:url');
-const { makeRepo, BIN } = require('./helpers');
+const { makeRepo, useFixtureUserFile, BIN } = require('./helpers');
 const { waitUntil, waitOnRepo, killPid } = require('./signals');
 const { CHROME, openBrowser, closeBrowser } = require('./browser');
 test.after(closeBrowser);
@@ -1382,6 +1382,7 @@ test('the board shows a refused brokered message as trouble, without its text', 
   t.after(() => broker.close());
   const refused = await B.forward(job.broker, ['msg', '--to', 'worker-T1-1', 'text the board must not show'], h.state);
   assert.equal(refused.code, 1, refused.stderr);
+  useFixtureUserFile(t, h);
   const board = require('../lib/board/model').build(require('../lib/state').loadState(h.state));
   const item = board.history.find((e) => e.cmd === 'msg refused');
   assert.deepEqual([item.kind, item.tone], ['trouble', 'fault']);
@@ -1393,6 +1394,7 @@ test('the board marks a ready task without a brief until its brief is written', 
   const h = makeRepo(t);
   h.init();
   h.ok(['task', 'add', '--title', 'briefless', '--acceptance', 'marked']);
+  useFixtureUserFile(t, h);
   const marks = () => {
     const st = require('../lib/state').loadState(h.state);
     return [require('../lib/board/model').build(st).ready.map((r) => r.brief), require('../lib/render').renderHtml(st).includes('no brief')];

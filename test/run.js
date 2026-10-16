@@ -71,6 +71,8 @@ const args = [
   // A hung test fails after five minutes, about three times the slowest test
   // measured on a loaded machine, instead of holding CI to its job timeout.
   `--test-timeout=${HUNG_TEST_MS}`, '--test-force-exit',
+  // Every test file fails when it resolves the user's real ladder file.
+  `--require=${path.join(__dirname, 'fixtures', 'user-config-guard.js')}`,
   ...flags,
 ];
 let list = files.length ? files : testFiles();
