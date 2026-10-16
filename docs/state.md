@@ -1322,10 +1322,14 @@ pending result has the same summary, flags, ref and CI policy at the same head
 and revision records no evidence and no `check ci` event; the earlier entry
 stays the receipt. Pending CI with nothing queued or running for 30 minutes at
 the same head and revision, counted from the first such entry, records
-`stalled: true` and prints `STALLED`. So does CI whose checks stay queued or
-running with the same pending summary for 30 minutes, counted from the entry
-that recorded that summary: an app run that crashed after it opened, or a job
-no runner picks up, which GitHub does not time out soon. GitHub creates check runs within a minute
+`stalled: true` and prints `STALLED`. So does CI whose checks stay queued
+without starting, with the same pending summary, for 30 minutes counted from
+the entry that recorded that summary: a job no runner picks up. A check in
+progress stalls only once it has run past GitHub's 6-hour job limit plus 30
+minutes from its `started_at` (from the unchanged summary when GitHub gives no
+start), such as an app run that crashed after it opened; jobs that run 20 to 45
+minutes with no status change are healthy. Workflow `timeout-minutes` is not
+read. GitHub creates check runs within a minute
 or two of a push and computes mergeability in seconds, so the window is about
 15 times the normal delay. A PR closed without merging stalls at once. A stall
 is not a verdict on the change: the task stays submitted, no retry is used, and

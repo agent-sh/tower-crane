@@ -653,24 +653,36 @@ test('CI with nothing queued or running for 30 minutes at the head stalls', asyn
   assert.equal(running.stalled, undefined);
 });
 
-test('checks queued or running unchanged for 30 minutes at the head stall', async () => {
-  const stuck = () => github({ runs: [...GREEN_RUNS, run('Revuto', null, 'in_progress', 'revuto-review')], suites: GREEN_SUITES });
-  const first = await gate.run(ctx(stuck(), { revision: 1, evidence: [] }));
+test('a check queued without starting for 30 minutes stalls; a started one only past the 6-hour job limit', async () => {
+  const ago = (minutes) => new Date(Date.now() - minutes * 60000).toISOString();
+  const checks = (extra) => github({ runs: [...GREEN_RUNS, { ...run('test (windows)', null, extra.status), ...extra }], suites: GREEN_SUITES });
+  const queued = () => checks({ status: 'queued' });
+  const first = await gate.run(ctx(queued(), { revision: 1, evidence: [] }));
   assert.equal(first.pending, true);
   assert.equal(first.not_running, undefined);
   assert.equal(first.stalled, undefined);
   const seen = (minutes, extra = {}) => ({ type: 'ci', ok: false, pending: true, sha: SHA, revision: 1, summary: first.summary,
-    at: new Date(Date.now() - minutes * 60000).toISOString(), ...extra });
-  assert.equal((await gate.run(ctx(stuck(), { revision: 1, evidence: [seen(29)] }))).stalled, undefined);
-  const old = await gate.run(ctx(stuck(), { revision: 1, evidence: [seen(31)] }));
+    at: ago(minutes), ...extra });
+  assert.equal((await gate.run(ctx(queued(), { revision: 1, evidence: [seen(29)] }))).stalled, undefined);
+  const old = await gate.run(ctx(queued(), { revision: 1, evidence: [seen(31)] }));
   assert.equal(old.stalled, true);
   assert.equal(old.pending, true);
-  assert.match(old.summary, /Stalled: the checks above have been queued or running unchanged at this head since/);
-  // A change in what is running, another head or revision, or a recorded stall restarts the window.
+  assert.match(old.summary, /Stalled: the checks above have been queued without starting at this head since/);
+  // A change in what is waiting, another head or revision, or a recorded stall restarts the window.
   for (const e of [seen(31, { summary: 'CI not green: not completed: e2e (queued)' }), seen(31, { revision: 0 }),
     seen(31, { sha: 'b'.repeat(40) }), seen(31, { stalled: true }), seen(31, { not_running: true })]) {
-    assert.equal((await gate.run(ctx(stuck(), { revision: 1, evidence: [e] }))).stalled, undefined);
+    assert.equal((await gate.run(ctx(queued(), { revision: 1, evidence: [e] }))).stalled, undefined);
   }
+
+  // This repository's own jobs run 20 to 45 minutes in progress with no status change.
+  const running = (minutes) => checks({ status: 'in_progress', started_at: ago(minutes) });
+  const long = await gate.run(ctx(running(45), { revision: 1, evidence: [seen(45, { summary: (await gate.run(ctx(running(45), { revision: 1, evidence: [] }))).summary })] }));
+  assert.equal(long.pending, true);
+  assert.equal(long.stalled, undefined, 'a healthy long job is not stalled');
+  assert.equal((await gate.run(ctx(running(6 * 60), { revision: 1, evidence: [] }))).stalled, undefined);
+  const dead = await gate.run(ctx(running(6 * 60 + 31), { revision: 1, evidence: [] }));
+  assert.equal(dead.stalled, true);
+  assert.match(dead.summary, /Stalled: a check has been in progress at this head since .*past GitHub's 6-hour job limit/);
 });
 
 test('a completed failed suite takes precedence over required queued jobs', async () => {
