@@ -396,20 +396,49 @@ test('stack sync refuses live workers and dirty worktrees without invoking gh sy
 });
 
 // A gh stack sync killed mid-rebase leaves a rebase that git status does not
-// report. A stopped exec and an uncommitted merge with no changes do the same.
-test('stack sync refuses a worktree left in a rebase or merge that git status does not show', (t) => {
+// report. Each operation here stops the same way, with a clean tree; rebase,
+// am and bisect also detach HEAD, so git names no branch for the worktree.
+test('stack sync refuses a worktree left in an operation that git status does not show', (t) => {
   const f = stacked(t);
   const { wt } = f.upper;
-  const git = (args) => cp.spawnSync('git', args, { cwd: wt.path, env: f.h.env, encoding: 'utf8' });
-  assert.notEqual(git(['rebase', '--exec', 'false', 'HEAD~1']).status, 0);
-  assert.equal(f.h.git(['status', '--porcelain'], wt.path), '');
-  assert.match(f.h.run(['stack', 'sync', 'T2']).stderr, /T2: stack operation needs a worktree without a rebase in progress/);
-  assert.equal(git(['rebase', '--abort']).status, 0);
-  const side = f.h.git(['commit-tree', 'HEAD^{tree}', '-p', 'HEAD', '-m', 'same tree'], wt.path);
-  assert.equal(git(['merge', '--no-ff', '--no-commit', side]).status, 0);
-  assert.equal(f.h.git(['status', '--porcelain'], wt.path), '');
-  assert.match(f.h.run(['stack', 'sync', 'T2']).stderr, /T2: stack operation needs a worktree without a merge in progress/);
+  const git = (...args) => cp.spawnSync('git', args, { cwd: wt.path, env: f.h.env, encoding: 'utf8' });
+  const same = () => f.h.git(['commit-tree', 'HEAD^{tree}', '-p', 'HEAD', '-m', 'same tree'], wt.path);
+  const patch = path.join(f.h.base, 'applied.mbox');
+  fs.writeFileSync(patch, git('format-patch', '-1', '--stdout', 'HEAD').stdout);
+  const operations = [
+    ['rebase', () => git('rebase', '--exec', 'false', 'HEAD~1'), ['rebase', '--abort']],
+    ['merge', () => git('merge', '--no-ff', '--no-commit', same()), ['merge', '--abort']],
+    ['cherry-pick', () => git('cherry-pick', same()), ['cherry-pick', '--abort']],
+    ['revert', () => git('revert', '--no-commit', same()), ['revert', '--abort']],
+    ['am', () => git('am', patch), ['am', '--abort']],
+    ['bisect', () => git('bisect', 'start', 'HEAD', 'HEAD~2'), ['bisect', 'reset']],
+  ];
+  for (const [operation, start, abort] of operations) {
+    start();
+    assert.equal(f.h.git(['status', '--porcelain'], wt.path), '', operation);
+    const refused = f.h.run(['stack', 'sync', 'T2']).stderr;
+    assert.ok(refused.includes(`T2: worktree ${wt.path} has a ${operation} in progress`), `${operation}: ${refused}`);
+    assert.equal(git(...abort).status, 0, operation);
+  }
   assert.equal(f.read().calls.some((c) => c.args[1] === 'sync'), false);
+});
+
+// The refresh defers a stack whose member worktree is mid-rebase, and the
+// spawn of that task refuses with the same reason rather than a git error.
+test('spawn of a task whose worktree is mid-rebase refuses with the refresh deferral reason', (t) => {
+  const f = stacked(t);
+  worker(f);
+  const { wt } = f.upper;
+  f.h.ok(['rework', 'T2', '--reason', 'more upper work']);
+  f.h.git(['commit', '--allow-empty', '-qm', 'main moved']);
+  f.h.git(['push', 'origin', 'main']);
+  assert.notEqual(cp.spawnSync('git', ['rebase', '--exec', 'false', 'HEAD~1'], { cwd: wt.path, env: f.h.env }).status, 0);
+  const refused = f.h.run(['spawn', '--task', 'T2']).stderr;
+  const reason = `T2: worktree ${wt.path} has a rebase in progress; finish or abort it there`;
+  assert.ok(refused.includes(reason), refused);
+  const events = fs.readFileSync(path.join(f.h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  assert.equal(events.findLast((e) => e.cmd === 'stack sync deferred')?.detail.reason, reason);
+  assert.equal(events.some((e) => e.cmd === 'spawn' && e.task === 'T2'), false);
 });
 
 // Runs wait until automatic stack maintenance holds its gh stack sync, then signals it.
@@ -489,12 +518,15 @@ test('a signal during automatic stack maintenance stops it and wait exits', {
 // Refill dispatches the stacked rework, and its spawn refreshes the stack
 // first. A drain during that refresh stops it, so no worker may start on the
 // unrefreshed stack; the spawn records why and the next wait dispatches it.
-test('a drain during spawn\'s stack refresh records a deferral and starts no worker', {
+// The rest of the refill batch waits for the next wait too.
+test('a drain during spawn\'s stack refresh records a deferral and starts no worker, for it or the rest of the batch', {
   skip: process.platform === 'win32' ? 'Windows child.kill does not deliver POSIX signals' : false,
 }, async (t) => {
   const f = stacked(t);
   worker(f);
   f.h.ok(['rework', 'T2', '--reason', 'more upper work']);
+  // A ready task with no stack ranks after T2; the drain must not hand it T2's slot.
+  const other = f.add('independent');
   // Main moves outside any merge, so only the spawn's refresh syncs the stack.
   f.h.git(['commit', '--allow-empty', '-qm', 'main moved']);
   f.h.git(['push', 'origin', 'main']);
@@ -502,6 +534,7 @@ test('a drain during spawn\'s stack refresh records a deferral and starts no wor
   const events = fs.readFileSync(path.join(f.h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
   assert.deepEqual(events.filter((e) => e.cmd === 'stack sync').map((e) => e.task).sort(), ['T1', 'T2'], 'the running sync finished');
   assert.equal(events.some((e) => e.cmd === 'spawn' && e.task === 'T2'), false, 'no worker starts on the unrefreshed stack');
+  assert.equal(events.some((e) => e.cmd === 'spawn' && e.task === other), false, 'no worker starts during the drain');
   const deferred = events.filter((e) => e.cmd === 'stack sync deferred' && e.task === 'T2');
   assert.equal(deferred.length, 1, JSON.stringify(deferred));
   assert.match(deferred[0].detail.reason, /wait stopped before the stack refresh finished/);
