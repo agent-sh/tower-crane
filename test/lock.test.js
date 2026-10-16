@@ -583,6 +583,48 @@ test('a marked lock whose marker its holder could not delete is freed by that ho
   assert.equal(fs.existsSync(dir), false);
 });
 
+// Windows records no start ticks and gives a killed holder's pid to a new
+// process within seconds. The creation time in the marker tells them apart; a
+// stand-in for the PowerShell read plays Windows here.
+test('a marked lock whose holder\'s pid now belongs to a process created at another time is freed', (t) => {
+  const h = makeRepo(t);
+  const dir = path.join(h.base, 'locks', 'lock');
+  fs.mkdirSync(path.dirname(dir), { recursive: true });
+  const read = S.processCreated.read;
+  let now = 1000;
+  let reads = 0;
+  S.processCreated.read = (pid) => { reads++; return pid === process.pid ? now : null; };
+  S.processCreated.cache.clear();
+  t.after(() => { S.processCreated.read = read; S.processCreated.cache.clear(); });
+  const take = () => S.tryMarkedLock(dir, { keepLive: true }) || S.tryMarkedLock(dir, { keepLive: true });
+  const look = (time) => {
+    now = time;
+    S.processCreated.cache.clear();
+    return S.clearStaleLock(dir, true);
+  };
+
+  const lock = take();
+  assert.ok(lock);
+  assert.equal(JSON.parse(fs.readFileSync(lock.file, 'utf8')).created, 1000, 'the marker records the holder\'s creation time');
+  // Same time: the holder itself, kept; a waiter's further looks read it once.
+  assert.equal(look(1000).holder?.pid, process.pid);
+  reads = 0;
+  assert.equal(S.clearStaleLock(dir, true).holder?.pid, process.pid);
+  assert.equal(S.clearStaleLock(dir, true).holder?.pid, process.pid);
+  assert.equal(reads, 0, 'the time is cached per pid');
+  // Unreadable: kept, as a live holder was before markers carried the time.
+  assert.equal(look(null).holder?.pid, process.pid);
+  assert.ok(fs.existsSync(lock.file));
+  // Another time: the pid was reused, and the lock is free at once.
+  const reused = look(2000);
+  assert.equal(reused.holder, null);
+  assert.equal(fs.existsSync(dir), false, 'the gone holder\'s lock is removed');
+  now = 2000;
+  const again = take();
+  assert.ok(again, 'the next taker gets it');
+  S.releaseMarkedLock(again);
+});
+
 // Hooks run inside every synchronous wait, so one must not fail or recurse
 // into the wait it runs in.
 test('a failing or sleeping sleep hook does not break the wait it runs in', () => {
