@@ -457,7 +457,10 @@ test('spawn skips an inherited route whose model its rung\'s harness cannot run,
   const first = notices.findIndex((n) => n.startsWith('easy fallback 1 '));
   const second = notices.indexOf(`easy fallback 2 from user file ${h.userConfig} follows the rung's harness, where model claude-fixture-large does not run on codex; skipped`);
   assert.ok(first !== -1 && second > first, JSON.stringify(notices));
-  const problems = h.json(['ladder', 'show']).problems.filter((p) => p.startsWith('easy fallback'));
+  // ladder show looks for each route's harness on PATH as spawn does. The
+  // fixture's stubs are on the spawn PATH; the harness guard's .cmd shims,
+  // which Windows lookup skips as non-npm shims, are not a harness there.
+  const problems = h.json(['ladder', 'show'], { env: { PATH: h.spawnEnv.PATH } }).problems.filter((p) => p.startsWith('easy fallback'));
   assert.ok(problems.length >= 2 && problems[0].startsWith('easy fallback 1 ') && problems.findIndex((p) => p.startsWith('easy fallback 2 ')) > 0, problems.join('\n'));
   assert.ok(!problems.some((p) => p.startsWith('easy fallback 3')), problems.join('\n'));
 });
