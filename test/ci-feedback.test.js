@@ -7,7 +7,7 @@ const path = require('node:path');
 const { cachedFixture } = require('./helpers');
 const B = require('../lib/broker');
 const { failingTests } = require('../lib/ci-feedback');
-const { cleanLog } = require('../lib/ci-log-text');
+const { stripEscapes } = require('../lib/ci-log-text');
 const { ghDenied } = require('../lib/shim');
 
 // GitHub stamps every line of a job log.
@@ -43,7 +43,7 @@ test('CI log cleanup preserves text, tabs and newlines while removing terminal c
     ['C0, DEL and C1', 'a\x00\x07\x08\x0b\x0c\x0e\x1f\x7f\x80b\r\n', 'ab\n'],
     ['layout and Unicode', '\t✖ тест\n', '\t✖ тест\n'],
   ];
-  for (const [name, input, expected] of cases) assert.equal(cleanLog(input), expected, name);
+  for (const [name, input, expected] of cases) assert.equal(stripEscapes(input), expected, name);
 });
 
 test('gh log flag preserves the existing shim policy', () => {

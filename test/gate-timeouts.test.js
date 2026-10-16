@@ -21,10 +21,18 @@ test('timeout validation and runner interruption formats', () => {
     ['', '# Interrupted while running: test/slow.js at test/slow.js:1:1\n', ['test/slow.js']],
     ['', "test at test/done.js:5:1\n✖ assertion\nError: bad\n\ntest at test/slow.js:1:1\n✖ test/slow.js\n  'Promise resolution is still pending but the event loop has already resolved'\n", ['test/slow.js']],
     ['', '\x1b[31m⚠ pending (test/slow.js:1:1)\x1b[39m\n', ['test/slow.js']],
+    ['', '\x1b]8;;file:///test/slow.js\x07⚠ pending (test/slow.js:1:1)\x1b]8;;\x07\n', ['test/slow.js']],
+    ['\x1b]0;suite\x07# Subtest: test/slow.js\n', '', ['test/slow.js']],
     ['working\n', 'terminated\n', []],
     ["test at test/old.js:1:1\n'Promise resolution is still pending but the event loop has already resolved'\n",
       '⚠ test/slow.js (test/slow.js:1:1)\n', ['test/slow.js']],
   ]) assert.deepEqual(timeouts.runningFiles(before, after), files);
+  // The timeout tail loses escapes before redaction, so one inside a token cannot hide it.
+  const token = `ghp_${'c3'.repeat(18)}`;
+  const { createRedactor } = require('../lib/gates/common');
+  const run = { timeoutOutput: `working\ntoken ${token.slice(0, 8)}\x1b]8;;x\x07${token.slice(8)}\n`, output: '' };
+  const tail = timeouts.failure(run, 1, 'cmd', '', createRedactor([['TIMEOUT_TOKEN', token]])).timeout.output_tail;
+  assert.equal(tail, 'working\ntoken [redacted:TIMEOUT_TOKEN]');
 });
 
 test('gate timeouts are operational settings and record infrastructure failure through the CLI', (t) => {

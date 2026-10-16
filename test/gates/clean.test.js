@@ -34,6 +34,9 @@ if (process.env.FAKE_CLEAN_MODE === 'crash') { console.error('cannot read the re
 if (process.env.FAKE_CLEAN_MODE === 'kill') process.kill(process.pid, 'SIGKILL');
 if (process.env.FAKE_CLEAN_MODE === 'text') { console.log('deslop: 2 findings'); process.exit(0); }
 if (process.env.FAKE_CLEAN_MODE === 'leak') { console.error('cannot scan, token ' + process.env.CLEAN_FIXTURE_TOKEN); process.exit(1); }
+// A token split by an escape, which hides it from the patterns until the escape goes.
+if (process.env.FAKE_CLEAN_MODE === 'leak-osc') { const t = process.env.CLEAN_FIXTURE_TOKEN; console.error('cannot scan, hyperlinked ' + t.slice(0, 6) + '\\x1b]8;;https://x\\x07' + t.slice(6) + '\\x1b]8;;\\x07'); process.exit(1); }
+if (process.env.FAKE_CLEAN_MODE === 'leak-osc-text') { console.log('colored sk-T361\\x1b[1mCleanBody0123456789\\x1b[0m'); process.exit(0); }
 // A key that straddles the 200-character cut of the output the summary quotes.
 if (process.env.FAKE_CLEAN_MODE === 'leak-text') { console.log('x'.repeat(190) + ' sk-' + 'T361CleanBody0123456789'); process.exit(0); }
 // The old deslop plugin: a "findings" list from the whole repository, exit 2 on a critical one.
@@ -188,6 +191,17 @@ test('a failing or non-JSON tool\'s output is redacted before the summary cuts i
   assert.equal(text.ok, false);
   assert.match(text.summary, /did not print JSON/);
   assert.ok(!text.summary.includes('T361C'), text.summary);
+  // An escape inside the token hides it from the patterns, so the output loses escapes first.
+  process.env.FAKE_CLEAN_MODE = 'leak-osc';
+  const linked = await gate.run(ctx());
+  assert.equal(linked.ok, false);
+  assert.match(linked.summary, /cannot scan, hyperlinked \[redacted:CLEAN_FIXTURE_TOKEN\]$/m);
+  assert.ok(!linked.summary.includes('\x1b'), linked.summary);
+  process.env.FAKE_CLEAN_MODE = 'leak-osc-text';
+  const colored = await gate.run(ctx());
+  assert.equal(colored.ok, false);
+  assert.match(colored.summary, /Output starts: colored \[redacted:API_KEY\]/);
+  assert.ok(!colored.summary.includes('CleanBody'), colored.summary);
   assertCleanedUp();
 });
 
