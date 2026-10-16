@@ -7,7 +7,9 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const cp = require('node:child_process');
 const { cachedFixture, pinRung } = require('./helpers');
+const P = require('../lib/processes');
 
 function setup(t) {
   return cachedFixture(t, 'task', (h) => {
@@ -39,6 +41,59 @@ test('a held placeholder cleanup directory does not keep the supervisor from sta
   const started = h.run(['spawn', '--role', 'small', '--task', 'T1', '--wait', '--json']);
   assert.equal(started.code, 0, started.stderr);
   assert.equal(JSON.parse(started.stdout).agent, 'small-T1-1');
+});
+
+// A spawn inside another agent inherits that agent's PATH, which starts with
+// its git shim. The supervisor's config scan skipped only its own agent's
+// shims, so it still ran the parent's, with the same placeholder wait.
+test('a nested spawn\'s supervisor scans git config without the parent agent\'s shim', { skip: process.platform === 'win32' && 'the parent shim stub is a shell script' }, (t) => {
+  const h = setup(t);
+  commandRung(h);
+  const realGit = process.env.PATH.split(path.delimiter).map((dir) => path.join(dir, 'git'))
+    .find((file) => { try { fs.accessSync(file, fs.constants.X_OK); return fs.statSync(file).isFile(); } catch { return false; } });
+  assert.ok(realGit, 'git on PATH');
+  // A parent agent's shim directory: bin/ beside the origin mark of its home.
+  const parent = path.join(h.base, 'parent-home');
+  fs.mkdirSync(path.join(parent, 'bin'), { recursive: true });
+  fs.writeFileSync(path.join(parent, '.tower-crane-origin.json'), '{}\n');
+  const calls = path.join(h.base, 'parent-shim-calls');
+  const q = (s) => `'${s.replace(/'/g, "'\\''")}'`;
+  fs.writeFileSync(path.join(parent, 'bin', 'git'), `#!/bin/sh\nif [ -n "$TOWERCRANE_SUPERVISOR" ]; then printf '%s\\n' "$*" >> ${q(calls)}; fi\nexec ${q(realGit)} "$@"\n`, { mode: 0o755 });
+  const started = h.run(['spawn', '--role', 'small', '--task', 'T1', '--wait', '--json'], {
+    env: { PATH: path.join(parent, 'bin') + path.delimiter + process.env.PATH },
+  });
+  assert.equal(started.code, 0, started.stderr);
+  // read-published: the stub appends calls; nothing replaces the file, and the spawn has exited.
+  const seen = fs.existsSync(calls) ? fs.readFileSync(calls, 'utf8') : '';
+  // The supervisor's later git calls act for the parent and still go through its shim.
+  assert.match(seen, /^worktree list/m, 'the stub records supervisor calls');
+  assert.doesNotMatch(seen, /^config --list/m, seen);
+  assert.doesNotMatch(seen, /^rev-parse --path-format=absolute/m, seen);
+});
+
+// With every PATH directory a parent agent's shims, dropping them all left an
+// empty PATH, and git was then looked up in the current directory: the
+// agent's worktree, which the agent writes.
+test('a nested spawn whose whole PATH is the parent\'s shims does not run a git from the worktree', { skip: process.platform === 'win32' && 'the parent shim stub is a shell script' }, (t) => {
+  const h = setup(t);
+  commandRung(h);
+  const realGit = process.env.PATH.split(path.delimiter).map((dir) => path.join(dir, 'git'))
+    .find((file) => { try { fs.accessSync(file, fs.constants.X_OK); return fs.statSync(file).isFile(); } catch { return false; } });
+  const parent = path.join(h.base, 'parent-home');
+  fs.mkdirSync(path.join(parent, 'bin'), { recursive: true });
+  fs.writeFileSync(path.join(parent, '.tower-crane-origin.json'), '{}\n');
+  const q = (s) => `'${s.replace(/'/g, "'\\''")}'`;
+  fs.writeFileSync(path.join(parent, 'bin', 'git'), `#!/bin/sh\nexec ${q(realGit)} "$@"\n`, { mode: 0o755 });
+  const ran = path.join(h.base, 'worktree-git-ran');
+  fs.writeFileSync(path.join(h.repo, 'git'), `#!/bin/sh\necho "$*" >> ${q(ran)}\nexit 1\n`, { mode: 0o755 });
+  h.git(['add', 'git']);
+  h.git(['commit', '-q', '-m', 'a git in the checkout']);
+  const started = h.run(['spawn', '--role', 'small', '--task', 'T1', '--wait', '--json'], { env: { PATH: path.join(parent, 'bin') } });
+  // read-published: the planted git appends; nothing replaces the file, and the spawn has exited.
+  assert.equal(fs.existsSync(ran), false, fs.existsSync(ran) ? fs.readFileSync(ran, 'utf8') : '');
+  // With no host git left, the scan cannot read the config and the start is refused.
+  assert.equal(started.code, 1, started.stderr);
+  assert.match(started.stderr, /exited with code 1 before it reported ready: cannot read git configuration safely/);
 });
 
 test('a supervisor that exits before it reports names its exit code and keeps its log', (t) => {
@@ -96,6 +151,76 @@ cp.spawnSync = () => {
   assert.match(fs.readFileSync(path.join(h.state, 'logs', kept[0]), 'utf8'), /planted: git is broken on this host/);
 });
 
+// Each failed start keeps a log; a task whose start keeps failing must not
+// fill logs/ with them.
+test('a failed start keeps the task\'s newest startup-failed logs and removes older ones', (t) => {
+  const h = setup(t);
+  commandRung(h);
+  const dir = path.join(h.state, 'logs');
+  fs.mkdirSync(dir, { recursive: true });
+  const old = [];
+  for (let i = 0; i < 6; i++) {
+    const name = `T1-small-T1-1-startup-failed-2026-01-0${i + 1}T00-00-00-000Z.log`;
+    fs.writeFileSync(path.join(dir, name), `old failure ${i}\n`);
+    const at = new Date(Date.UTC(2026, 0, i + 1));
+    fs.utimesSync(path.join(dir, name), at, at);
+    old.push(name);
+  }
+  const other = 'T2-small-T2-1-startup-failed-2026-01-01T00-00-00-000Z.log';
+  fs.writeFileSync(path.join(dir, other), 'another task\n');
+  fs.utimesSync(path.join(dir, other), new Date(0), new Date(0));
+  const env = monitorHook(h, 'git-fails-prune', `
+const cp = require('node:child_process');
+cp.spawnSync = () => {
+  process.stderr.write('planted: git is broken on this host\\n');
+  throw new Error('planted git failure');
+};`);
+  const failed = h.run(['spawn', '--role', 'small', '--task', 'T1'], { env });
+  assert.equal(failed.code, 1, failed.stderr);
+  const after = logs(h).sort();
+  const fresh = after.filter((name) => name.startsWith('T1-') && !old.includes(name));
+  assert.equal(fresh.length, 1, after.join(', '));
+  assert.deepEqual(after, [...old.slice(2), fresh[0], other].sort());
+});
+
+// A rename keeps the mtime, so a log moved aside from an older start was the
+// oldest one and went in the same prune whose message named it.
+test('a log moved aside is kept by the prune that follows it', (t) => {
+  const h = setup(t);
+  commandRung(h);
+  const dir = path.join(h.state, 'logs');
+  fs.mkdirSync(dir, { recursive: true });
+  const stale = path.join(dir, 'T1-small-T1-1.log');
+  fs.writeFileSync(stale, 'an earlier failed start\n');
+  fs.utimesSync(stale, new Date(Date.UTC(2026, 0, 1)), new Date(Date.UTC(2026, 0, 1)));
+  const newer = [];
+  for (let i = 0; i < 5; i++) {
+    const name = `T1-small-T1-2-startup-failed-2026-02-0${i + 1}T00-00-00-000Z.log`;
+    fs.writeFileSync(path.join(dir, name), `failure ${i}\n`);
+    const at = new Date(Date.UTC(2026, 1, i + 1));
+    fs.utimesSync(path.join(dir, name), at, at);
+    newer.push(name);
+  }
+  const started = h.run(['spawn', '--role', 'small', '--task', 'T1', '--wait', '--json']);
+  assert.equal(started.code, 0, started.stderr);
+  const aside = started.stderr.match(/left by a start that failed before it was recorded, to (.+)\n/)?.[1];
+  assert.ok(aside, started.stderr);
+  assert.equal(fs.readFileSync(aside, 'utf8'), 'an earlier failed start\n');
+  assert.deepEqual(logs(h).filter((name) => name.includes('-startup-failed-')).sort(), [...newer.slice(1), path.basename(aside)].sort());
+});
+
+// The wait for the supervisor's report blocks the event loop, so only the
+// process table shows that the supervisor is gone.
+test('a supervisor killed before it reports ends the wait early', (t) => {
+  const h = setup(t);
+  commandRung(h);
+  const env = monitorHook(h, 'killed', `process.kill(process.pid, 'SIGKILL');`);
+  const failed = h.run(['spawn', '--role', 'small', '--task', 'T1'], { env });
+  assert.equal(failed.code, 1, failed.stderr);
+  // Only the wait's own exit check says "exited"; a wait that ran out says "within 10 s".
+  assert.match(failed.stderr, /supervisor startup failed: the supervisor exited before it reported ready/);
+});
+
 test('a supervisor that stalls before it reports says so and keeps its log', (t) => {
   const h = setup(t);
   commandRung(h);
@@ -128,4 +253,36 @@ cp.spawn = function (file, args, opts) {
   assert.match(failed.stderr, /could not start .*: spawn .*missing-harness ENOENT; check that it is installed and on PATH/);
   assert.doesNotMatch(failed.stderr, /supervisor startup failed|log is kept/);
   assert.deepEqual(logs(h), []);
+});
+
+// macOS has no /proc, and an exited child that the blocked event loop has not
+// reaped still takes signals there, so the dispatch asks ps for its state.
+// This runs the same ps query on a real unreaped child here.
+test('ps shows an unreaped child as exited and a running one as not', { skip: process.platform === 'win32' && 'Windows has no ps; the signal check sees the exit' }, (t) => {
+  const done = cp.spawn(process.execPath, ['-e', '']);
+  const live = cp.spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30000)']); // wait-allow: a child that outlives the test, killed after it
+  t.after(() => live.kill('SIGKILL'));
+  // Synchronous, as in the dispatch: the event loop cannot reap the child meanwhile.
+  const until = Date.now() + 10000; // wait-allow: a bound on the child's exit, which takes about 50 ms
+  while (!P.psZombie(done.pid) && Date.now() < until) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20); // wait-allow: a bounded poll for the child's exit
+  assert.equal(P.psZombie(done.pid), true);
+  assert.equal(P.childExited(done.pid, 'darwin'), true);
+  assert.equal(P.psZombie(live.pid), false);
+  assert.equal(P.childExited(live.pid, 'darwin'), false);
+});
+
+test('only systems without a process table of their own ask ps, and a failed ps proves nothing', (t) => {
+  const live = cp.spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30000)']); // wait-allow: a child that outlives the test, killed after it
+  t.after(() => live.kill('SIGKILL'));
+  const asked = [];
+  const ps = (out) => (cmd, args) => { asked.push([cmd, ...args].join(' ')); return out; };
+  assert.equal(P.childExited(live.pid, 'darwin', ps({ status: 0, stdout: 'Z+\n' })), true);
+  assert.deepEqual(asked, [`ps -o stat= -p ${live.pid}`]);
+  assert.equal(P.childExited(live.pid, 'freebsd', ps({ status: 0, stdout: 'S\n' })), false);
+  assert.equal(P.childExited(live.pid, 'darwin', ps({ error: new Error('spawnSync ps ETIMEDOUT') })), false);
+  assert.equal(P.childExited(live.pid, 'darwin', ps({ status: 1, stdout: '' })), false);
+  asked.length = 0;
+  assert.equal(P.childExited(live.pid, 'linux', ps({ status: 0, stdout: 'Z\n' })), false);
+  assert.equal(P.childExited(live.pid, 'win32', ps({ status: 0, stdout: 'Z\n' })), false);
+  assert.deepEqual(asked, []);
 });
