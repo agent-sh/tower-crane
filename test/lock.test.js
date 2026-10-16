@@ -584,45 +584,87 @@ test('a marked lock whose marker its holder could not delete is freed by that ho
 });
 
 // Windows records no start ticks and gives a killed holder's pid to a new
-// process within seconds. The creation time in the marker tells them apart; a
-// stand-in for the PowerShell read plays Windows here.
-test('a marked lock whose holder\'s pid now belongs to a process created at another time is freed', (t) => {
+// process within seconds; the creation time in the marker tells them apart.
+// This plays Windows: the platform reads win32, a table stands in for the
+// PowerShell read, and a live child's pid is the holder's.
+function windowsLock(t) {
+  const P = require('../lib/processes');
   const h = makeRepo(t);
   const dir = path.join(h.base, 'locks', 'lock');
   fs.mkdirSync(path.dirname(dir), { recursive: true });
-  const read = S.processCreated.read;
-  let now = 1000;
-  let reads = 0;
-  S.processCreated.read = (pid) => { reads++; return pid === process.pid ? now : null; };
-  S.processCreated.cache.clear();
-  t.after(() => { S.processCreated.read = read; S.processCreated.cache.clear(); });
-  const take = () => S.tryMarkedLock(dir, { keepLive: true }) || S.tryMarkedLock(dir, { keepLive: true });
-  const look = (time) => {
-    now = time;
-    S.processCreated.cache.clear();
-    return S.clearStaleLock(dir, true);
+  const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 120000)'], { stdio: 'ignore' });
+  const platform = Object.getOwnPropertyDescriptor(process, 'platform');
+  const windowsCreated = P.windowsCreated;
+  const times = new Map([[process.pid, 5]]);
+  const w = { dir, pid: child.pid, times, reads: 0 };
+  const forget = () => { S.processCreated?.cache.clear(); S.processCreated?.gone.clear(); };
+  Object.defineProperty(process, 'platform', { ...platform, value: 'win32' });
+  P.windowsCreated = (pids) => {
+    w.reads++;
+    return new Map(pids.filter((pid) => Number.isFinite(times.get(pid))).map((pid) => [pid, times.get(pid)]));
   };
+  forget();
+  t.after(() => {
+    Object.defineProperty(process, 'platform', platform);
+    P.windowsCreated = windowsCreated;
+    forget();
+    child.kill();
+  });
+  w.take = () => S.tryMarkedLock(dir, { keepLive: true }) || S.tryMarkedLock(dir, { keepLive: true });
+  // The marker now names the child as a holder created at `created`.
+  w.hold = (lock, created) => {
+    const m = JSON.parse(fs.readFileSync(lock.file, 'utf8'));
+    fs.writeFileSync(lock.file, JSON.stringify({ ...m, pid: child.pid, created }));
+  };
+  // A waiter's look; `fresh` is a waiter that has read no times yet.
+  w.look = (fresh = false) => {
+    if (fresh) forget();
+    return S.clearStaleLock(dir, true).holder?.pid ?? null;
+  };
+  return w;
+}
 
-  const lock = take();
+test('a marked lock whose holder\'s pid now belongs to a process created at another time is freed', (t) => {
+  const w = windowsLock(t);
+  const lock = w.take();
   assert.ok(lock);
-  assert.equal(JSON.parse(fs.readFileSync(lock.file, 'utf8')).created, 1000, 'the marker records the holder\'s creation time');
+  assert.equal(JSON.parse(fs.readFileSync(lock.file, 'utf8')).created, 5, 'the marker records the holder\'s creation time');
+  w.hold(lock, 1000);
+  w.times.set(w.pid, 1000);
   // Same time: the holder itself, kept; a waiter's further looks read it once.
-  assert.equal(look(1000).holder?.pid, process.pid);
-  reads = 0;
-  assert.equal(S.clearStaleLock(dir, true).holder?.pid, process.pid);
-  assert.equal(S.clearStaleLock(dir, true).holder?.pid, process.pid);
-  assert.equal(reads, 0, 'the time is cached per pid');
+  assert.equal(w.look(true), w.pid);
+  const reads = w.reads;
+  assert.equal(w.look(), w.pid);
+  assert.equal(w.look(), w.pid);
+  assert.equal(w.reads, reads, 'a waiter reads a kept holder\'s time once');
   // Unreadable: kept, as a live holder was before markers carried the time.
-  assert.equal(look(null).holder?.pid, process.pid);
-  assert.ok(fs.existsSync(lock.file));
-  // Another time: the pid was reused, and the lock is free at once.
-  const reused = look(2000);
-  assert.equal(reused.holder, null);
-  assert.equal(fs.existsSync(dir), false, 'the gone holder\'s lock is removed');
-  now = 2000;
-  const again = take();
+  w.times.delete(w.pid);
+  assert.equal(w.look(true), w.pid);
+  // Another time: the pid went to a new process, and the lock is free.
+  w.times.set(w.pid, 2000);
+  assert.equal(w.look(true), null);
+  assert.equal(fs.existsSync(w.dir), false, 'the gone holder\'s lock is removed');
+  const again = w.take();
   assert.ok(again, 'the next taker gets it');
   S.releaseMarkedLock(again);
+});
+
+// A waiter read the holder's time; the holder died, and the process Windows
+// gave its pid to took the same lock and wrote its own time. The waiter's
+// earlier read is of the dead holder and must not free the new one's lock.
+test('a waiter\'s earlier read of a dead holder\'s time does not free the lock of the process that took its pid', (t) => {
+  const w = windowsLock(t);
+  const lock = w.take();
+  assert.ok(lock);
+  w.hold(lock, 1000);
+  w.times.set(w.pid, 1000);
+  assert.equal(w.look(true), w.pid, 'the first holder is kept');
+  w.times.set(w.pid, 2000);
+  w.hold(lock, 2000);
+  assert.equal(w.look(), w.pid, 'the new holder is kept');
+  assert.ok(fs.existsSync(lock.file), 'its marker is still there');
+  w.hold(lock, 1000);
+  assert.equal(w.look(), null, 'a marker of the dead holder is freed');
 });
 
 // Hooks run inside every synchronous wait, so one must not fail or recurse
