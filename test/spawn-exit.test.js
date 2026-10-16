@@ -459,15 +459,16 @@ test('the Windows tree of an exited harness keeps only processes it started', ()
   assert.deepEqual(windowsTree([], 10, 1000, 2000), []);
 });
 
-// Windows PowerShell on Windows; elsewhere PowerShell 7 when it is installed
-// (GitHub's Ubuntu runners have it), which runs the same script.
+// Windows PowerShell on Windows; on Linux PowerShell 7 when it is installed
+// (GitHub's Ubuntu runners have it), which runs the same script and reads
+// creation times from /proc.
 const POWERSHELL = process.platform === 'win32' ? 'powershell.exe'
-  : cp.spawnSync('pwsh', ['-NoProfile', '-NonInteractive', '-Command', 'exit 0'], { stdio: 'ignore', timeout: 300000 }).status === 0 ? 'pwsh' : null;
+  : process.platform === 'linux' && cp.spawnSync('pwsh', ['-NoProfile', '-NonInteractive', '-Command', 'exit 0'], { stdio: 'ignore', timeout: 300000 }).status === 0 ? 'pwsh' : null;
 
 test('the Windows stop takes one target, skips a target that is gone and leaves a reused pid alone', {
   skip: !POWERSHELL && 'no PowerShell',
 }, async (t) => {
-  const { windowsStop } = require('../lib/processes');
+  const { windowsStop, windowsStarts, windowsProcesses } = require('../lib/processes');
   const execFile = (file, args, options, callback) => cp.execFile(POWERSHELL, args, options, callback);
   const started = [];
   t.after(() => {
@@ -480,23 +481,30 @@ test('the Windows stop takes one target, skips a target that is gone and leaves 
     started.push(child);
     return child;
   };
-  const startTime = (pid) => Number(cp.execFileSync(POWERSHELL, ['-NoProfile', '-NonInteractive', '-Command',
-    `([DateTimeOffset](Get-Process -Id ${pid}).StartTime.ToUniversalTime()).ToUnixTimeMilliseconds()`], { encoding: 'utf8', timeout: 300000 }).trim());
+  // Each time comes from a PowerShell process of its own, as the snapshot's
+  // does, so a reading that differs between processes fails here.
+  const startTime = async (pid) => (await windowsStarts(execFile, [pid], 300000)).get(pid);
   // One target: a list PowerShell would unroll to two numbers.
   const lone = start();
-  assert.deepEqual(await windowsStop(execFile, [{ pid: lone.pid, start: startTime(lone.pid) }], 300000),
+  const loneStart = await startTime(lone.pid);
+  assert.equal(Number.isSafeInteger(loneStart), true, `no creation time for ${lone.pid}`);
+  if (process.platform === 'win32') {
+    // The snapshot the stop takes its targets from reads the same time.
+    assert.equal((await windowsProcesses(execFile, 300000)).find((r) => r.pid === lone.pid)?.start, loneStart);
+  }
+  assert.deepEqual(await windowsStop(execFile, [{ pid: lone.pid, start: loneStart }], 300000),
     [{ pid: lone.pid, outcome: 'stopped' }]);
   await childExit(lone, { signal: t.signal });
   // The last target exited before its turn; the one before it still stops.
   const kept = start();
   const gone = start();
-  const goneStart = startTime(gone.pid);
+  const goneStart = await startTime(gone.pid);
   killPid(gone.pid, 'SIGKILL');
   await childExit(gone, { signal: t.signal });
   const reused = start();
   assert.deepEqual(await windowsStop(execFile, [
-    { pid: kept.pid, start: startTime(kept.pid) },
-    { pid: reused.pid, start: startTime(reused.pid) - 5000 },
+    { pid: kept.pid, start: await startTime(kept.pid) },
+    { pid: reused.pid, start: await startTime(reused.pid) - 5000 },
     { pid: gone.pid, start: goneStart },
   ], 300000), [
     { pid: kept.pid, outcome: 'stopped' },
