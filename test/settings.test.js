@@ -9,6 +9,7 @@ const path = require('node:path');
 const http = require('node:http');
 const cp = require('node:child_process');
 const { makeRepo, BIN } = require('./helpers');
+const L = require('../lib/ladder');
 const { CHROME, openBrowser, closeBrowser } = require('./browser');
 test.after(closeBrowser);
 
@@ -164,6 +165,32 @@ test('a Settings save that moves a rung to another harness drops the fields the 
   } finally {
     await s.stop();
   }
+});
+
+test('in a browser, a save that moves several rungs lists every drop, and the last-change line names each rung', { skip: !CHROME && 'no Chrome to drive' }, async (t) => {
+  const alias = Object.keys(L.BUILTIN.claude_aliases)[0];
+  const h = makeRepo(t);
+  h.init();
+  for (const n of ['hard', 'research']) h.ok(['ladder', 'set', n, '--model', alias]);
+  const s = await startServe(h);
+  t.after(() => s.stop());
+  const b = await openBrowser(t);
+  await b.goto(s.keyed('settings'));
+  await b.inPage('window.firstLoad = true');
+  const set = (rung, name, value, event) => b.inPage(`(function (el) { el.value = ${JSON.stringify(value)}; el.dispatchEvent(new Event(${JSON.stringify(event)}, { bubbles: true })); })(document.querySelector('tr[data-rung="${rung}"] [name="${name}"]'))`);
+  for (const n of ['hard', 'research']) {
+    await set(n, 'harness', 'codex', 'change');
+    await set(n, 'profile', 'fixture-main', 'input');
+  }
+  await b.inPage(`document.querySelector('#ladder-form button[type="submit"]').click()`);
+  await b.until(`document.querySelectorAll('#ladder-told li').length === 2`, 'the drops to be listed');
+  const told = await b.inPage(`[window.firstLoad === true, Array.prototype.map.call(document.querySelectorAll('#ladder-told li'), function (li) { return li.textContent; })]`);
+  assert.deepEqual(told, [true, ['hard', 'research'].map((n) => `ladder ${n}: moving from claude to codex dropped model ${alias}, which does not fit codex`)]);
+  for (const n of ['hard', 'research']) assert.deepEqual(h.readState('project.json').ladder[n], { harness: 'codex', profile: 'fixture-main', effort: n === 'hard' ? 'high' : 'max' });
+  // The page did not reload, so the save's reply refreshed the line.
+  assert.match(await b.inPage(`document.getElementById('last-change').textContent`), new RegExp(`^Last change: ladder set hard \\(dropped model ${alias}, which did not fit codex\\), ladder set research`));
+  const page = (await request(`${s.url}settings`)).text;
+  assert.match(page, new RegExp(`Last change: ladder set hard \\(dropped model ${alias}, which did not fit codex\\), ladder set research \\(dropped model ${alias}, which did not fit codex\\) by owner from serve`));
 });
 
 // Review finding F4: a local client read the token from a page and answered
