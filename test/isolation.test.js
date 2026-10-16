@@ -7,7 +7,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
-const { makeRepo, ROOT, BIN, detachedAlive } = require('./helpers');
+const { makeRepo, shortCacheRoot, ROOT, BIN, detachedAlive } = require('./helpers');
 const A = require('../lib/agents');
 const S = require('../lib/state');
 const TOML = require('../lib/toml');
@@ -1444,9 +1444,9 @@ test('a codex agent\'s temp directory fits a browser\'s singleton socket when it
   const { h, u } = setup(t);
   isolated(h, 'review', 'codex');
   // A cache root of 46 bytes or less, as /home/<user>/.cache is for a user name of up to 34 letters.
-  const root = fs.mkdtempSync(path.join(require('node:os').homedir(), '.cache', 'tc-test-'));
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-  assert.ok(Buffer.byteLength(root) <= 46, `${root} is short enough for this check`);
+  // Made after the fixture, so it is removed after the fixture's agents stop.
+  const root = shortCacheRoot(t, 46);
+  if (!root) return t.skip('no writable cache root of at most 46 bytes');
   spawn(h, u, 'review', { XDG_CACHE_HOME: root });
   const tmp = u.report().tmpdir;
   assert.ok(Buffer.byteLength(tmp) <= 62, `${tmp} is ${Buffer.byteLength(tmp)} bytes`);
