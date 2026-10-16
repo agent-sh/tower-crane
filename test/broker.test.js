@@ -1295,8 +1295,11 @@ test('a broker tells a shim from before framed packs why its push failed', async
 
 // The read that brings the whole pack and its end frame finds the body
 // full, so it asks the connection to wait for a drain that an ended body
-// never emits. The agent then hangs up while the broker's git push waits in
-// the remote's pre-receive hook: the broker must see it and stop the push.
+// never emits. The agent then sends a few more bytes and hangs up while the
+// broker's git push waits in the remote's pre-receive hook: the broker must
+// see it and stop the push. A paused connection still reports the end of an
+// agent that sent nothing more, but bytes after the end frame sit unread in
+// front of that end.
 // A body fills only when index-pack falls behind the socket, which depends
 // on the platform's pipe sizes and read boundaries, so the body the broker
 // makes for this push reports itself full on every write.
@@ -1331,7 +1334,7 @@ test('a broker whose agent sent its whole pack in one read sees the agent hang u
   const done = handPush(f, sha, (have) => [Buffer.concat([B.frame(packOf(f, sha, have)), B.frame(Buffer.alloc(0))])],
     { socket: (s) => { sock = s; } });
   await waitUntil(() => fs.existsSync(started), { paths: [f.h.base], what: 'the broker\'s push reaches the remote\'s hook' });
-  sock.destroy();
+  sock.end(Buffer.from('after the end frame'));
   await done;
   await waitUntil(() => !fs.existsSync(lock), { paths: [path.dirname(lock)], what: 'the push ends and frees the cache lock' });
   fs.writeFileSync(release, '');
