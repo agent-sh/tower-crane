@@ -560,7 +560,9 @@ are operational: the orchestrator or owner can change them without a setting
 approval. There is no unlimited value.
 
 Defaults read physical host memory and the smallest `memory.max` and `pids.max`
-along the caller's cgroup v2 ancestry, including the shared slice. Half of that
+along the caller's cgroup v2 ancestry, including the shared slice. Tower Crane
+attempt cgroups are excluded from this sizing so nesting does not repeatedly
+divide defaults; their limits still constrain descendants in the kernel. Half of that
 capacity is reserved for other sessions. The remaining half is divided by
 `ceil(availableParallelism / 4)`, at least one slot, allowing four logical CPUs
 per concurrent activity. TasksMax is further capped at 256 threads/processes to

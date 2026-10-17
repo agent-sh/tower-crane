@@ -45,6 +45,17 @@ test('defaults reserve half the effective slice capacity', () => {
   assert.ok(d.tasks_max > 0);
 });
 
+test('nested attempt caps do not recursively shrink project defaults', () => {
+  const slice = '/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/agents.slice';
+  const own = 'tower-crane-123-0123456789abcdef.scope';
+  for (const [input, expected] of [
+    [`${slice}/${own}/runner`, slice],
+    [`${slice}/${own}/nested-${own}/runner`, slice],
+    [`${slice}/external.scope/nested-${own}/runner`, `${slice}/external.scope`],
+    [`${slice}/external.scope`, `${slice}/external.scope`],
+  ]) assert.equal(C.budgetGroup(input), expected);
+});
+
 test('fake harness nested launches and detached grandchildren retain containment', async (t) => {
   const h = fixture(t);
   const file = path.join(h.base, 'nested.jsonl');
