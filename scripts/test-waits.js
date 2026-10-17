@@ -408,13 +408,95 @@ const shellCode = (body) => body.replace(SHELL_TEXT, (text) => (text.startsWith(
 // point into the test file: a newline escape ends a line, a tab separates.
 const shellText = (value) => value.replace(/\\([\s\S])/g, (all, char) => (char === 'n' || char === 'r' ? ' \n' : char === 't' ? '  ' : ` ${char}`));
 
+// Where the quote or command substitution opening at `i` ends, past its
+// closing character, or -1 when nothing closes it. Quotes and substitutions
+// nest inside a double quote, a backtick or a $(...).
+function shellQuoteEnd(s, i) {
+  if (s[i] === "'") {
+    const end = s.indexOf("'", i + 1);
+    return end < 0 ? -1 : end + 1;
+  }
+  const sub = s[i] === '$';
+  const close = sub ? ')' : s[i];
+  let depth = 0;
+  for (let j = i + (sub ? 2 : 1); j < s.length; j++) {
+    const c = s[j];
+    if (c === '\\') j++;
+    else if (c === close && !depth) return j + 1;
+    else if (sub && c === '(') depth++;
+    else if (sub && c === ')') depth--;
+    else if ((c === '$' && s[j + 1] === '(') || (c === '`' && close !== '`') || (close !== '"' && (c === '"' || c === "'"))) {
+      const end = shellQuoteEnd(s, j);
+      if (end < 0) return -1;
+      j = end - 1;
+    }
+  }
+  return -1;
+}
+
+const HEREDOC = /<<-?[ \t]*(?:'[ \t]*([^'\n]*?)[ \t]*'|"[ \t]*([^"\n]*?)[ \t]*"|\\?([\w.-]+))/y;
+
+// The text a script holds outside its code: quoted strings, comments and
+// heredoc bodies, as [start, end, nested] where nested says whether the span
+// can be a script of its own (sh -c '...', eval "...", sh <<EOF). An
+// unclosed quote or heredoc is read as code.
+function shellSpans(s) {
+  const spans = [];
+  const pending = [];
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (c === '\\') i++;
+    else if (c === '\n' && pending.length) {
+      let at = i + 1;
+      for (const word of pending.splice(0)) {
+        let line = at;
+        let end = -1;
+        for (;;) {
+          const eol = s.indexOf('\n', line);
+          const stop = eol < 0 ? s.length : eol;
+          if (s.slice(line, stop).trim() === word) { end = stop; break; }
+          if (eol < 0) break;
+          line = eol + 1;
+        }
+        if (end < 0) break;
+        spans.push([at, end, true]);
+        at = end + 1;
+      }
+      i = at - 1;
+    } else if (c === '#' && (i === 0 || /[\s;&|()]/.test(s[i - 1]))) {
+      const eol = s.indexOf('\n', i);
+      const end = eol < 0 ? s.length : eol;
+      spans.push([i + 1, end, false]);
+      i = end - 1;
+    } else if (c === '<' && s[i + 1] === '<' && s[i + 2] !== '<') {
+      HEREDOC.lastIndex = i;
+      const m = HEREDOC.exec(s);
+      if (m) { pending.push(m[1] ?? m[2] ?? m[3]); i = HEREDOC.lastIndex - 1; }
+    } else if (c === "'" || c === '"') {
+      const end = shellQuoteEnd(s, i);
+      if (end > 0) { spans.push([i + 1, end - 1, true]); i = end - 1; }
+    }
+  }
+  return spans;
+}
+
 // Shell loops a test writes that a counter bounds around a sleep: a for loop
 // over seq, a brace range, a fixed list of numbers or a C-style header, or a
 // while or until loop comparing a variable its body counts, in its condition
-// or in a test before a break in the body.
+// or in a test before a break in the body. Loop words in quoted text, a
+// comment or a heredoc neither open nor close a loop around them; a span
+// that holds a whole loop is read as a script of its own.
 function shellCounted(script) {
   const found = [];
   const open = [];
+  let words = '';
+  let last = 0;
+  for (const [start, end, nested] of shellSpans(script)) {
+    words += script.slice(last, start) + ' '.repeat(end - start);
+    last = end;
+    if (nested) for (const at of shellCounted(script.slice(start, end))) found.push(start + at);
+  }
+  words += script.slice(last);
   const check = (loop, body) => {
     if (!SHELL_SLEEP.test(shellCode(body))) return;
     let counted;
@@ -429,7 +511,7 @@ function shellCounted(script) {
     }
     if (counted) found.push(loop.at);
   };
-  for (const word of script.matchAll(SHELL_LOOP_WORD)) {
+  for (const word of words.matchAll(SHELL_LOOP_WORD)) {
     const [keyword] = word;
     if (keyword === 'do') {
       const loop = open.findLast((candidate) => candidate.body === undefined);
