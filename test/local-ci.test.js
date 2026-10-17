@@ -559,13 +559,19 @@ test('a token that escapes take part of and split, or that a line break splits, 
     ['a token ends its line', `token ${github}\nnext line`, 'token [redacted:X]\nnext line'],
     ['a charset reset after the token', `\x1b[31m${github}\x1b(B\x1b[m`, '[redacted:X]'],
     ['a header value ends at its line', 'Authorization: Bearer abc\nAccept: */*', 'Authorization: Bearer [redacted:AUTHORIZATION]\nAccept: */*'],
-    // A line break never falls inside a token prefix: `s` then a line `K-...` is no API key.
-    ['a prefix split by a line break', 'run 0.3 s\nK-long_async rc 1', 'run 0.3 s\nK-long_async rc 1'],
+    // A line break inside a token prefix joins with two of its characters before the break or
+    // three after it: `s` then a line `K-...` is no API key.
+    ['a one-letter word before a line `K-`', 'run 0.3 s\nK-long_async rc 1', 'run 0.3 s\nK-long_async rc 1'],
+    ['a line break after a token\'s first letter', `xx ${github[0]}\n${github.slice(1)} y`, 'xx [redacted:X] y'],
+    ['a line break inside a token prefix', `xx ${github.slice(0, 2)}\r\n${github.slice(2)}\nnext`, 'xx [redacted:X]\nnext'],
   ]) {
     assert.equal(env(env.strip(input)), expected.replaceAll('[redacted:X]', '[redacted:FIXTURE_TOKEN]'), name);
     assert.equal(plain(plain.strip(input)), expected.replaceAll('[redacted:X]', '[redacted:GITHUB_TOKEN]'), name);
   }
   // A fixed-length shape keeps its word boundary when it is joined back, with a line after it too.
+  assert.equal(plain(plain.strip(`token is\n${aws[0]}\n${aws.slice(1)}\nnext`)), 'token is\n[redacted:AWS_ACCESS_KEY_ID]\nnext');
+  // Two line breaks inside a prefix, or a blank line, join nothing.
+  for (const input of [`x g\nh\np_${github.slice(4)}`, `x g\n\nhp_${github.slice(4)}`, 'run s\nk-means_clustering']) assert.equal(plain(plain.strip(input)), input);
   assert.equal(plain(plain.strip(`k=${aws.slice(0, 9)}\n${aws.slice(9)}\n`)), 'k=[redacted:AWS_ACCESS_KEY_ID]\n');
   assert.equal(plain(plain.strip(`id=${aws.slice(0, 9)}\n${aws.slice(9)}\nnext line`)), 'id=[redacted:AWS_ACCESS_KEY_ID]\nnext line');
   // An environment value is redacted however escapes and line breaks split it: here a stray ESC
@@ -641,6 +647,7 @@ test('a binary artifact is redacted at its exact bytes, or missed when a secret 
     ['an environment value split by a stray and a real escape', bytes(nul, `${value.slice(0, 1)}\x1bM${value.slice(1, 5)}\x1b(${value.slice(5)}`), /inside an environment value/],
     ['an AWS key split across lines before a word line', bytes(nul, `id=${aws.slice(0, 9)}\n${aws.slice(9)}\nnext line`), /line breaks removed/],
     ['a word line before a token split across lines', bytes(nul, `token is\n${github.slice(0, 14)}\n${github.slice(14)} ok`), /line breaks removed/],
+    ['a line break inside a token prefix', bytes(nul, `xx ${github[0]}\n${github.slice(1)} y`), /line breaks removed/],
     ['ESC [ takes a split token\'s first character', bytes(nul, `x \x1b[${github.slice(0, 8)}\x1b[1m${github.slice(8)}`), /gently/],
   ]) assert.match(redact.bytes(input).missed || '', view, name);
 });
@@ -677,6 +684,30 @@ test('a binary artifact is scanned without a map per byte, and as UTF-16 only wh
   const wide = Buffer.from(value, 'utf16le');
   assert.equal(wide.includes(0), false);
   assert.match(createRedactor([['FIXTURE_PASSWORD', value]]).bytes(Buffer.concat([Buffer.from([0xff]), wide])).missed || '', /as UTF-16LE from its second byte/);
+});
+
+test('a binary artifact is read across lines a window at a time', () => {
+  const { createRedactor } = require('../lib/gates/common');
+  const redact = createRedactor([]);
+  // A copy without line breaks and a map of every line peaked at 1.4 GiB for 64 MiB of short lines
+  // after a token prefix; a window holds a few thousand of them.
+  const text = Buffer.from(`\x00sk-ab\n${'cd\n'.repeat(1 << 19)}`, 'latin1');
+  const big = [];
+  const Saved = Int32Array;
+  globalThis.Int32Array = class extends Saved {
+    constructor(...args) {
+      super(...args);
+      if (!(args[0] instanceof ArrayBuffer) && this.length >= text.length / 8) big.push(this.length);
+    }
+  };
+  let out;
+  try {
+    out = redact.bytes(text);
+  } finally {
+    globalThis.Int32Array = Saved;
+  }
+  assert.match(out.missed || '', /line breaks removed/);
+  assert.deepEqual(big, []);
 });
 
 test('restoring redaction markers is linear in their count', () => {
