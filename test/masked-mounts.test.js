@@ -257,12 +257,31 @@ test('without the masked move, plain git stops at the mounts the table uses', { 
   }
 });
 
+// What a sandboxed holder runs until the test tells it to go: it also ends
+// when the test process is gone, whose files may be gone with it, and after
+// 60 s whatever happens, so a failed or cancelled test leaves no holder.
+const holdUntil = (go) => `i=0; while [ ! -e ${go} ] && [ -e /proc/${process.pid} ] && [ $i -lt 3000 ]; do sleep 0.02; i=$((i+1)); done;`; // wait-allow: a sandboxed shell has no signal helper; the caps end a holder the test left
+
+// Tells every holder of a test to go, whether the test passed, failed or was
+// cancelled, and ends the processes it started.
+function releaseHolders(t, dir, groups = []) {
+  t.after(() => {
+    try { fs.writeFileSync(path.join(dir, 'go'), ''); } catch { /* the directory is gone, and the holders see the test end */ }
+    for (const child of groups) {
+      if (child.exitCode === null && child.signalCode === null) {
+        try { killGroup(child.pid, 'SIGKILL'); } catch { /* already gone */ }
+      }
+    }
+  });
+}
+
 // Unlinking a mount point on the host detaches the bind in the sandbox's own
 // mount namespace, and the sandboxed command can then write the name. A
 // reviewer or small spawn sweeps the worktree while the task's worker may
 // still run commands there.
-test('the spawn sweep keeps a placeholder a live sandbox binds over, and takes it once that sandbox exits', { skip }, async () => {
+test('the spawn sweep keeps a placeholder a live sandbox binds over, and takes it once that sandbox exits', { skip }, async (t) => {
   const dir = fs.mkdtempSync(path.join(root, 'live-bind-'));
+  releaseHolders(t, dir);
   const wt = path.join(dir, 'wt');
   fs.mkdirSync(wt);
   const env = baseEnv();
@@ -270,8 +289,8 @@ test('the spawn sweep keeps a placeholder a live sandbox binds over, and takes i
   const file = path.join(wt, '.bashrc');
   const ready = path.join(dir, 'ready');
   const go = path.join(dir, 'go');
-  const script = 'touch "$1"; while [ ! -e "$2" ]; do sleep 0.02; done; if (echo planted > .bashrc) 2>/dev/null; then echo wrote; else echo refused; fi';
-  const box = cp.spawn('bwrap', ['--dev-bind', '/', '/', '--ro-bind', '/dev/null', file, '--chdir', wt, '--', 'sh', '-c', script, 'sh', ready, go], { stdio: ['ignore', 'pipe', 'inherit'] });
+  const script = `touch "$1"; ${holdUntil('"$2"')} if (echo planted > .bashrc) 2>/dev/null; then echo wrote; else echo refused; fi`;
+  const box = cp.spawn('bwrap', ['--die-with-parent', '--dev-bind', '/', '/', '--ro-bind', '/dev/null', file, '--chdir', wt, '--', 'sh', '-c', script, 'sh', ready, go], { stdio: ['ignore', 'pipe', 'inherit'] });
   let out = '';
   box.stdout.on('data', (chunk) => { out += chunk; });
   try {
@@ -290,12 +309,12 @@ test('the spawn sweep keeps a placeholder a live sandbox binds over, and takes i
 });
 
 // A sandbox that binds over an existing placeholder of the worktree and,
-// once told to go, tries to write it. Bounded: it goes by itself after 60 s.
+// once told to go, tries to write it (holdUntil bounds it).
 function holdScript(dir) {
   const script = path.join(dir, 'hold.sh');
   fs.writeFileSync(script, [
     'exec bwrap --dev-bind / / --ro-bind /dev/null "$1/.bashrc" --chdir "$1" -- sh -c \'',
-    'touch "$1/ready"; i=0; while [ ! -e "$1/go" ] && [ $i -lt 3000 ]; do sleep 0.02; i=$((i+1)); done;', // wait-allow: the sandboxed shell has no signal helper; the cap ends a holder the test left
+    `touch "$1/ready"; ${holdUntil('"$1/go"')}`,
     'if (echo planted > .bashrc) 2>/dev/null; then echo wrote; else echo refused; fi\' sh "$2"',
     '',
   ].join('\n'));
@@ -314,8 +333,9 @@ function staleWorktree(dir, env) {
 
 // The sweep reads git's index before it removes anything; a command another
 // agent starts meanwhile binds over a name the sweep is about to remove.
-test('a sandbox that binds a stale placeholder while the sweep reads the index keeps its bind', { skip }, async () => {
+test('a sandbox that binds a stale placeholder while the sweep reads the index keeps its bind', { skip }, async (t) => {
   const dir = fs.mkdtempSync(path.join(root, 'late-bind-'));
+  releaseHolders(t, dir);
   const env = baseEnv();
   const { wt, file } = staleWorktree(dir, env);
   const hold = holdScript(dir);
@@ -328,7 +348,7 @@ test('a sandbox that binds a stale placeholder while the sweep reads the index k
     `if [ ! -e "${dir}/started" ]; then`,
     `  touch "${dir}/started"`,
     `  sh "${hold}" "${wt}" "${dir}" > "${dir}/out" 2>&1 &`,
-    `  i=0; while [ ! -e "${dir}/ready" ] && [ $i -lt 500 ]; do sleep 0.02; i=$((i+1)); done`, // wait-allow: the sweep's git blocks the test's event loop, so the shell waits for the bind
+    `  i=0; while [ ! -e "${dir}/ready" ] && [ -e /proc/${process.pid} ] && [ $i -lt 500 ]; do sleep 0.02; i=$((i+1)); done`, // wait-allow: the sweep's git blocks the test's event loop, so the shell waits for the bind
     'fi',
     `exec "${realGit}" "$@"`,
     '',
@@ -350,11 +370,12 @@ test('a sandbox that binds a stale placeholder while the sweep reads the index k
 
 // After an agent exits, its monitor removes the placeholders its sandbox
 // left; another agent's sandbox can still bind over the same names.
-test('the cleanup after an agent exits keeps a placeholder another live sandbox binds over', { skip }, async () => {
+test('the cleanup after an agent exits keeps a placeholder another live sandbox binds over', { skip }, async (t) => {
   const dir = fs.mkdtempSync(path.join(root, 'exit-bind-'));
   const env = baseEnv();
   const { wt, file } = staleWorktree(dir, env);
-  const box = cp.spawn('sh', [holdScript(dir), wt, dir], { stdio: ['ignore', 'pipe', 'inherit'] });
+  const box = cp.spawn('sh', [holdScript(dir), wt, dir], { stdio: ['ignore', 'pipe', 'inherit'], detached: true });
+  releaseHolders(t, dir, [box]);
   let out = '';
   box.stdout.on('data', (chunk) => { out += chunk; });
   let result;
@@ -377,9 +398,10 @@ test('the cleanup after an agent exits keeps a placeholder another live sandbox 
 // process's mountinfo is a FIFO that a helper fills. The helper starts a
 // sandbox that binds an empty directory over .claude/hooks, and answers the
 // first read with no mounts, as a read just before the bind would, and each
-// later one with the sandbox's real table. rmdir under a bind detaches it,
+// later one with the sandbox's real table. A sentinel marks each answer, so
+// the test fails unless both reads happened. rmdir under a bind detaches it,
 // and the sandbox could then make .claude/hooks/h, a hook that runs outside it.
-test('a directory placeholder bound after the first mount read keeps its bind', { skip }, async () => {
+test('a directory placeholder bound after the first mount read keeps its bind', { skip }, async (t) => {
   const dir = fs.mkdtempSync(path.join(root, 'dir-bind-'));
   const wt = path.join(dir, 'wt');
   const hooks = path.join(wt, '.claude', 'hooks');
@@ -395,14 +417,16 @@ test('a directory placeholder bound after the first mount read keeps its bind', 
   fs.writeFileSync(helper, [
     // Its own session, so ending the helper's group leaves the sandbox to answer.
     'setsid bwrap --dev-bind / / --ro-bind "$3" "$4" --chdir "$2" -- sh -c \'',
-    'echo $$ > "$1/pid.new"; mv "$1/pid.new" "$1/pid"; i=0; while [ ! -e "$1/go" ] && [ $i -lt 3000 ]; do sleep 0.02; i=$((i+1)); done;', // wait-allow: the sandboxed shell has no signal helper; the cap ends a holder the test left
+    `echo $$ > "$1/pid.new"; mv "$1/pid.new" "$1/pid"; ${holdUntil('"$1/go"')}`,
     'if (mkdir -p .claude/hooks && echo planted > .claude/hooks/h) 2>/dev/null; then echo wrote; else echo refused; fi\' sh "$1" > "$1/out" 2>&1 &',
-    'i=0; while [ ! -e "$1/pid" ] && [ $i -lt 500 ]; do sleep 0.02; i=$((i+1)); done', // wait-allow: the removal blocks the test's event loop, so the helper waits for the bind
-    ': > "$5"',
-    'while :; do cat "/proc/$(cat "$1/pid")/mountinfo" > "$5"; done',
+    `i=0; while [ ! -e "$1/pid" ] && [ -e /proc/${process.pid} ] && [ $i -lt 500 ]; do sleep 0.02; i=$((i+1)); done`, // wait-allow: the removal blocks the test's event loop, so the helper waits for the bind
+    // Each sentinel is made once a reader has the FIFO open.
+    '{ touch "$1/first-read"; } > "$5"',
+    'n=0; while [ $n -lt 8 ]; do { touch "$1/second-read"; cat "/proc/$(cat "$1/pid")/mountinfo"; } > "$5"; n=$((n+1)); done',
     '',
   ].join('\n'));
   const fill = cp.spawn('sh', [helper, dir, wt, empty, hooks, fifo], { stdio: 'ignore', detached: true });
+  releaseHolders(t, dir, [fill]);
   let result;
   try {
     await waitUntil(() => fs.existsSync(path.join(dir, 'pid')), { paths: [dir], alive: fill, what: 'the sandbox has its bind' });
@@ -419,7 +443,9 @@ test('a directory placeholder bound after the first mount read keeps its bind', 
     try { killGroup(fill.pid, 'SIGKILL'); } catch { /* already gone */ }
   }
   const out = await fileWritten(path.join(dir, 'out'), { check: (text) => /wrote|refused/.test(text) });
+  assert.ok(fs.existsSync(path.join(dir, 'first-read')), 'the removal read the mount tables before the bind showed');
   assert.equal(out.trim(), 'refused', 'the sandbox still cannot write into the name');
+  assert.ok(fs.existsSync(path.join(dir, 'second-read')), 'the removal read the mount tables again before it removed the name');
   assert.deepEqual(result.removed, []);
   assert.deepEqual(result.held, [{ relative: '.claude/hooks', why: 'mounted' }]);
   assert.equal(fs.existsSync(path.join(hooks, 'h')), false);
