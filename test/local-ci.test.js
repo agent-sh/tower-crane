@@ -831,6 +831,32 @@ test('a value found by reading its own characters as escape bytes yields to the 
   }
 });
 
+test('the text redactor redacts what reading escapes only as a terminal does redacts', () => {
+  const { createRedactor } = require('../lib/gates/common');
+  const flat = (out) => out.replace(/[\x00-\x1f\x7f-\x9f]/g, '');
+  const longest = (out, value) => {
+    for (let w = value.length; w > 0; w--) for (let i = 0; i + w <= value.length; i++) if (flat(out).includes(value.slice(i, i + w))) return w;
+    return 0;
+  };
+  // A value whose characters an escape takes in one reading joins up across a line break in the
+  // other: the terminal reading shows 16 of its characters, and no more may show.
+  const value = 'CG8f9JH2DMB1rIfUBY8UioDg8';
+  const env = createRedactor([['SECRET_0', value]]);
+  const joined = env(env.strip(`github_pat_\n${value}C\n\x1bG8f9JH2DMB1rIfUBY\x1b[8UioDg8`));
+  assert.ok(longest(joined, value) <= 16, joined);
+  // A header value the terminal reading redacts whole keeps its tail hidden after a value found in it.
+  const header = createRedactor([['SECRET_0', 'HLyexBO69tGX73hs3OSW3']]);
+  const out = header(header.strip('ASIAAXGDD9ECDI6JTPS\n7\x1b];\x1b\\AuThOrIzAtIoN:HLyexBO69t\x9b;GX73hs3OSW3github_p'));
+  assert.ok(!flat(out).includes('github_p'), out);
+  // Mapped, as the joined output of two streams reads it, the same characters stay redacted.
+  const view = header.stripMapped('ASIAAXGDD9ECDI6JTPS\n7\x1b];\x1b\\AuThOrIzAtIoN:HLyexBO69t\x9b;GX73hs3OSW3github_p');
+  assert.equal(header(view.text), out);
+  for (let i = 0; i < view.text.length; i++) {
+    const [a, b] = view.at(i);
+    assert.ok(a <= b && (i === 0 || view.at(i - 1)[0] <= a), `at(${i})`);
+  }
+});
+
 test('a binary artifact is read across lines a window at a time', () => {
   const { createRedactor } = require('../lib/gates/common');
   const redact = createRedactor([]);
