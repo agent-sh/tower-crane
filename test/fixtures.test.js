@@ -6,9 +6,9 @@ const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
 const crypto = require('node:crypto');
-const { makeRepo, copyRepo, TMP_ROOT, ROOT, HARNESS_GUARD } = require('./helpers');
+const { makeRepo, copyRepo, shortCacheRoot, TMP_ROOT, ROOT, HARNESS_GUARD, processesIn, assertNoProcessesIn } = require('./helpers');
 const { gateFixture, gateEvidence } = require('./gate-helpers');
-const { waitUntil } = require('./signals');
+const { waitUntil, childExit } = require('./signals');
 
 // Runs f and returns the fixture directories it made, recorded by wrapping mkdtemp.
 function recordFixtureDirs(f) {
@@ -52,6 +52,109 @@ test('a fresh fixture whose setup fails leaves no temp directory behind', (t) =>
   }
   assert.equal(made.length, 1);
   assert.equal(fs.existsSync(made[0]), false, made[0]);
+});
+
+// shortCacheRoot reads the account's home from the password database, so the
+// test stands a fake home in for it and runs the helper with a recording context.
+function withAccountHome(home, f) {
+  const os = require('node:os');
+  const saved = { userInfo: os.userInfo, runtime: process.env.XDG_RUNTIME_DIR };
+  os.userInfo = () => ({ ...saved.userInfo(), homedir: home });
+  delete process.env.XDG_RUNTIME_DIR;
+  const ctx = { hooks: [], notes: [], after(fn) { this.hooks.push(fn); }, diagnostic(msg) { this.notes.push(msg); } };
+  try {
+    return { root: f(ctx), ctx };
+  } finally {
+    os.userInfo = saved.userInfo;
+    if (saved.runtime !== undefined) process.env.XDG_RUNTIME_DIR = saved.runtime;
+  }
+}
+
+test('shortCacheRoot measures the real path of a linked cache and never makes a missing one', { skip: process.platform === 'win32' && 'links need privileges on Windows' }, (t) => {
+  const base = fs.mkdtempSync(path.join(TMP_ROOT, 'short-cache-'));
+  t.after(() => fs.rmSync(base, { recursive: true, force: true }));
+  // A ~/.cache that links to a longer directory: short as named, too long once resolved.
+  const linked = path.join(base, 'linked');
+  const target = path.join(base, 'target-'.padEnd(80, 'x'));
+  fs.mkdirSync(linked);
+  fs.mkdirSync(target);
+  fs.symlinkSync(target, path.join(linked, '.cache'));
+  const fits = Buffer.byteLength(path.join(linked, '.cache', 'tc-test-XXXXXX'));
+  const long = withAccountHome(linked, (ctx) => shortCacheRoot(ctx, fits));
+  assert.equal(long.root, null, 'the resolved cache is too long');
+  assert.equal(long.ctx.notes.length, 1, 'the skip is reported');
+  assert.match(long.ctx.notes[0], /resolves to .*target-x/);
+  assert.deepEqual(fs.readdirSync(target), [], 'nothing is made under the long target');
+  // No ~/.cache: the helper passes the base over and says so, making nothing.
+  const bare = path.join(base, 'bare');
+  fs.mkdirSync(bare);
+  const missing = withAccountHome(bare, (ctx) => shortCacheRoot(ctx, 4096));
+  assert.equal(missing.root, null);
+  assert.equal(missing.ctx.notes.length, 1, 'the missing cache is reported');
+  assert.match(missing.ctx.notes[0], /not made here/);
+  assert.deepEqual(fs.readdirSync(bare), [], 'no cache is made');
+  // A ~/.cache link to a missing directory is reported as such.
+  const dangling = path.join(base, 'dangling');
+  fs.mkdirSync(dangling);
+  fs.symlinkSync(path.join(base, 'gone'), path.join(dangling, '.cache'));
+  const broken = withAccountHome(dangling, (ctx) => shortCacheRoot(ctx, 4096));
+  assert.equal(broken.root, null);
+  assert.equal(broken.ctx.notes.length, 1);
+  assert.match(broken.ctx.notes[0], /link to a missing directory/);
+  assert.equal(fs.existsSync(path.join(base, 'gone')), false, 'the link target is not made');
+  // An existing ~/.cache gives a root there, and only the root goes after the test.
+  fs.mkdirSync(path.join(bare, '.cache'));
+  const kept = withAccountHome(bare, (ctx) => shortCacheRoot(ctx, 4096));
+  assert.ok(kept.root && kept.root.startsWith(path.join(bare, '.cache') + path.sep), kept.root);
+  assert.equal(fs.existsSync(kept.root), true);
+  for (const hook of kept.ctx.hooks) hook();
+  assert.deepEqual(fs.readdirSync(path.join(bare, '.cache')), [], 'the existing cache stays, without the root');
+});
+
+// Linux CI alone runs /proc; the lsof variants stand in for macOS, where the
+// leak check would otherwise pass without looking.
+test('the fixture process probe uses lsof off Linux and reports a skip where nothing probes', async (t) => {
+  const base = fs.realpathSync(fs.mkdtempSync(path.join(TMP_ROOT, 'probe-')));
+  const inside = path.join(base, 'inside');
+  const sibling = `${base}-sibling`;
+  fs.mkdirSync(inside);
+  fs.mkdirSync(sibling);
+  const children = [];
+  // One hook, children first: hooks run in the order added, and Windows refuses
+  // to remove a directory that a running process has as its working directory.
+  t.after(async () => {
+    try {
+      for (const child of children) if (child.exitCode === null && child.signalCode === null) child.kill();
+      await Promise.all(children.map((child) => childExit(child)));
+    } finally {
+      for (const dir of [base, sibling]) fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    }
+  });
+  const hold = async (cwd) => {
+    const child = cp.spawn(process.execPath, ['-e', 'process.stdin.resume()'], { cwd, stdio: ['pipe', 'ignore', 'ignore'] });
+    await new Promise((resolve, reject) => { child.once('spawn', resolve); child.once('error', reject); });
+    children.push(child);
+    return child;
+  };
+  const held = await hold(inside);
+  await hold(sibling);
+  const lsofRuns = cp.spawnSync('lsof', ['-v'], { stdio: 'ignore' }).error === undefined;
+  for (const platform of ['linux', ...(lsofRuns ? ['darwin', 'freebsd'] : [])]) {
+    if (platform === 'linux' && process.platform !== 'linux') continue;
+    assert.deepEqual(processesIn(base, { platform }), { pids: [held.pid] }, platform);
+  }
+  // macOS lsof adds an f line per file; a removed directory may carry the deleted suffix.
+  const lsof = () => ({ status: 1, stdout: `p11\nfcwd\nn${inside}\np12\nfcwd\nn${sibling}\np13\nfcwd\nn${base} (deleted)\np14\nfcwd\nn/\n` });
+  assert.deepEqual(processesIn(base, { platform: 'darwin', lsof }), { pids: [11, 13] });
+  const missing = () => ({ error: Object.assign(new Error('spawnSync lsof ENOENT'), { code: 'ENOENT' }) });
+  assert.deepEqual(processesIn(base, { platform: 'darwin', lsof: missing }), { skip: 'lsof did not run: ENOENT' });
+  assert.deepEqual(processesIn(base, { platform: 'darwin', lsof: () => ({ status: 1, stdout: '' }) }), { skip: 'lsof listed nothing (exit 1)' });
+  assert.deepEqual(processesIn(base, { platform: 'win32' }), { skip: 'Windows has no working-directory probe' });
+  const notes = [];
+  assertNoProcessesIn({ diagnostic: (note) => notes.push(note) }, base, { platform: 'win32' });
+  assert.deepEqual(notes, ['process leak check skipped: Windows has no working-directory probe']);
+  assert.throws(() => assertNoProcessesIn({ diagnostic: (note) => notes.push(note) }, base, { platform: 'darwin', lsof }),
+    /no process the test started outlives its fixture/);
 });
 
 // Detached, the repack and prune that a commit starts outlive the commit and

@@ -346,6 +346,58 @@ test('the lint rejects sleeps, counted sleep loops and other clocks, and accepts
     'const script = `for(let i=0;i<1200&&!fs.existsSync(go);i++)Atomics.wait(s,0,0,100);`;', // wait-allow: rejected lint fixture
     'cp.spawnSync("sleep", ["1"]); if (!ok()) throw new Error("late");', // wait-allow: rejected lint fixture
     'execSync("sleep 1");', // wait-allow: rejected lint fixture
+    'const hook = `while [ ! -f go ] && [ $i -lt 300 ]; do sleep 0.1; i=$((i+1)); done`;', // wait-allow: rejected lint fixture
+    'const hook = `#!/bin/sh\\ni=0\\nwhile [ ! -f go ] && [ $i -lt 300 ]; do sleep 0.1; i=$((i+1)); done\\n`;', // wait-allow: rejected lint fixture
+    'const hook = `#!/bin/sh\\nn=0\\nuntil [ -f go ] || [ "$n" -ge 50 ]; do sleep 0.1; n=$((n + 1)); done\\n`;', // wait-allow: rejected lint fixture
+    'const hook = `for i in $(seq 50); do [ -f go ] && break; sleep 0.1; done`;', // wait-allow: rejected lint fixture
+    'const hook = `for i in 1 2 3 4 5; do [ -f go ] && break; sleep 1; done`;', // wait-allow: rejected lint fixture
+    'const hook = `for i in {1..50}; do [ -f go ] && break; sleep 0.1; done`;', // wait-allow: rejected lint fixture
+    'const hook = `i=0\nwhile [ ! -f go ] && [ $i -lt 300 ]\ndo\n  sleep 0.1\n  i=$((i+1))\ndone\n`;', // wait-allow: rejected lint fixture
+    'const hook = `i=0\\n\\twhile [ ! -f go ] && [ $i -lt 300 ]; do sleep 0.1; i=$((i+1)); done`;', // wait-allow: rejected lint fixture
+    'const hook = `for i in 1 2 3 4 5\\ndo [ -f go ] && break; sleep 1; done`;', // wait-allow: rejected lint fixture
+    'const hook = `for ((i = 0; i < 50; i++)); do [ -f go ] && break; sleep 0.1; done`;', // wait-allow: rejected lint fixture
+    'const hook = `while [ ! -f go ] && [ $i -lt 300 ]; do sleep 0.1; i=\\`expr $i + 1\\`; done`;', // wait-allow: rejected lint fixture
+    'const hook = `while [ ! -f go ] && [ $i -lt 300 ]; do sleep $d; i=$((i+1)); done`;', // wait-allow: rejected lint fixture
+    'const hook = `i=0; while true; do [ -f go ] && break; i=$((i+1)); [ $i -ge 50 ] && break; sleep 0.1; done`;', // wait-allow: rejected lint fixture
+    "const hook = 'i=0\\nwhile [ $i -lt 5 ]; do\\n' + '  sleep 1\\n  i=$((i+1))\\ndone\\n';", // wait-allow: rejected lint fixture
+    // A helper hides its sleep from the loop that calls it, even with a reason of its own.
+    'const nap = (ms) => Atomics.wait(cell, 0, 0, ms); // wait-allow: cadence\nfor (let i = 0; i < 50 && !ok(); i++) nap(100);', // wait-allow: rejected lint fixture
+    'function nap(ms) { Atomics.wait(cell, 0, 0, ms); } // wait-allow: cadence\nlet n = 0; while (!ok() && n < 50) { n++; nap(100); }', // wait-allow: rejected lint fixture
+    // A loop with no bound in its header can end on a count in its body.
+    'let i = 0; while (true) { if (ok() || ++i > 40) break; Atomics.wait(cell, 0, 0, 100); }', // wait-allow: rejected lint fixture
+    'for (let i = 0;; i++) { if (i > 40) break; Atomics.wait(cell, 0, 0, 100); }', // wait-allow: rejected lint fixture
+    "cp.spawnSync('sh', ['-c', 'sleep 2']); if (!ok()) throw new Error('late');", // wait-allow: rejected lint fixture
+    "cp.execSync(\"sh -c 'sleep 2'\");", // wait-allow: rejected lint fixture
+    // A loop keyword after a case pattern, !, time or an interpolation, and a sleep by path or through command.
+    'const hook = `case $x in a) while [ $i -lt 5 ]; do sleep 1; i=$((i+1)); done;; esac`;', // wait-allow: rejected lint fixture
+    'const hook = `! while [ $i -lt 5 ]; do sleep 1; i=$((i+1)); done`;', // wait-allow: rejected lint fixture
+    'const hook = `time while [ $i -lt 5 ]; do sleep 1; i=$((i+1)); done`;', // wait-allow: rejected lint fixture
+    'const hook = `${x} while [ $i -lt 5 ]; do sleep 1; i=$((i+1)); done`;', // wait-allow: rejected lint fixture
+    'const hook = `while [ $i -lt 5 ]; do /bin/sleep 1; i=$((i+1)); done`;', // wait-allow: rejected lint fixture
+    'const hook = `while [ $i -lt 5 ]; do command sleep 1; i=$((i+1)); done`;', // wait-allow: rejected lint fixture
+    // A script split around an operand the check cannot read, or joined from an array of lines.
+    "const hook = 'while [ $i -lt 5 ]; do sleep 1; i=$((i+1));' + x + 'done';", // wait-allow: rejected lint fixture
+    "const hook = 'while [ $i -lt 5 ]; do' + x + 'sleep 1; i=$((i+1)); done';", // wait-allow: rejected lint fixture
+    "const hook = ['while [ $i -lt 5 ]; do', 'sleep 1', 'i=$((i+1))', 'done'].join('\\n');", // wait-allow: rejected lint fixture
+    // A loop word inside a header is text, not a loop of its own.
+    'const hook = `i=0; while ! grep -q "ready for" log && [ $i -lt 50 ]; do sleep 0.1; i=$((i+1)); done`;', // wait-allow: rejected lint fixture
+    'const hook = `until [ -f go ] || [ $n -ge 5 ] || echo while; do sleep 1; n=$((n+1)); done`;', // wait-allow: rejected lint fixture
+    "function run() { cp.spawnSync('sh', ['-c', 'sleep 1']); } // wait-allow: cadence\nfor (let i = 0; i < 3 && !ok(); i++) run();", // wait-allow: rejected lint fixture
+    // A loop word in a comment or an echo before a counted loop opens no loop.
+    'const hook = `#!/bin/sh\\n# wait for the go file\\ni=0\\nwhile [ $i -lt 50 ]; do sleep 0.1; i=$((i+1)); done\\n`;', // wait-allow: rejected lint fixture
+    'const hook = `echo "waiting for go"; i=0; while [ $i -lt 50 ]; do sleep 0.1; i=$((i+1)); done`;', // wait-allow: rejected lint fixture
+    'const hook = `echo "sleep until ready" >&2\\nfor i in $(seq 50); do [ -f go ] && break; sleep 0.1; done`;', // wait-allow: rejected lint fixture
+    // A loop word in quoted text, a comment or a heredoc neither opens nor closes the loop around it.
+    'const hook = `for i in 1 2 3; do echo "(step) done"; sleep 1; done`;', // wait-allow: rejected lint fixture
+    "const hook = `for i in 1 2 3; do echo 'a; done'; sleep 1; done`;", // wait-allow: rejected lint fixture
+    'const hook = `i=0; while ! grep -q "(x) for" log && [ $i -lt 50 ]; do sleep 0.1; i=$((i+1)); done`;', // wait-allow: rejected lint fixture
+    'const hook = `for i in 1 2 3; do\\ncat > f <<EOF\\ndone\\nEOF\\nsleep 1\\ndone`;', // wait-allow: rejected lint fixture
+    'const hook = `for i in 1 2 3; do # x; done\\nsleep 1\\ndone`;', // wait-allow: rejected lint fixture
+    "const hook = `sh -c 'for i in 1 2 3; do sleep 1; done'`;", // wait-allow: rejected lint fixture
+    // An echo's command substitution runs, and a helper's sleep may take a quoted or interpolated operand.
+    'const hook = `for i in 1 2 3; do echo $(sleep 1); done`;', // wait-allow: rejected lint fixture
+    "function nap() { cp.spawnSync('sh', ['-c', 'sleep \"$d\"']); } // wait-allow: cadence\nfor (let i = 0; i < 3 && !ok(); i++) nap();", // wait-allow: rejected lint fixture
+    "const hook = [\n'while [ $i -lt 5 ]; do',\n'  sleep 1',\n'  i=$((i+1))',\n'done'].join('\\n');", // wait-allow: rejected lint fixture
     'const sleep = util.promisify(setTimeout); await sleep(500);', // wait-allow: rejected lint fixture
     'await promisify(setTimeout)(500);', // wait-allow: rejected lint fixture
     'await scheduler.wait(500);', // wait-allow: rejected lint fixture
@@ -370,6 +422,27 @@ test('the lint rejects sleeps, counted sleep loops and other clocks, and accepts
     'for (let node = start; node; node = node.parent) Atomics.wait(cell, 0, 0, 10);',
     'const script = `while(!fs.existsSync(go))Atomics.wait(s,0,0,100);`;',
     'while (!fs.existsSync(go)) cp.spawnSync("sleep", ["1"]);',
+    'const hook = `while [ ! -f go ] && [ -d dir ]; do sleep 0.1; done`;',
+    'const hook = `#!/bin/sh\\nwhile [ "$(wc -l < f)" -lt 2 ]; do sleep 0.1; done\\n`;',
+    'const hook = `for f in a b; do touch $f; done; while [ ! -f go ]; do sleep 0.1; done`;',
+    // A counted loop that does not sleep ends at its own done.
+    'const hook = `for i in $(seq 5); do echo $i; done; while [ ! -f go ]; do sleep 0.1; done`;',
+    'const hook = `for i in 1 2 3; do echo $i; done; while [ ! -f go ]; do sleep 0.1; done`;',
+    "cp.spawnSync('sh', ['-c', 'while [ ! -f go ]; do sleep 0.1; done']);",
+    'while (true) { if (ok()) break; Atomics.wait(cell, 0, 0, 10); }',
+    'function waitGo() { while (!ok()) Atomics.wait(cell, 0, 0, 10); }\nfor (let i = 0; i < 3; i++) waitGo();',
+    // A return in a function the if block defines does not leave the loop.
+    'let n = 0; while (!ok()) { n++; if (n > 3) { list.forEach((x) => { return x; }); } Atomics.wait(cell, 0, 0, 10); }',
+    // A sh -c helper sleeps only when its command does.
+    "const sh = (cmd) => cp.spawnSync('sh', ['-c', cmd]);\nfor (let i = 0; i < 3; i++) sh('git commit -qm x');",
+    "function run() { cp.spawnSync('sh', ['-c', 'echo ok']); }\nfor (let i = 0; i < 3; i++) run();",
+    // Echoed text, a comment and an option are not sleeps.
+    'const hook = `for i in 1 2 3; do echo "sleep 1"; done`;',
+    'const hook = `for i in 1 2 3; do touch f # sleep 1\ndone`;',
+    'const hook = `for i in 1 2 3; do tool --sleep 1; done`;',
+    // A whole loop in quoted text or a heredoc is read on its own.
+    'const hook = `cat <<EOF\\nfor i in 1 2 3; do echo; done\\nEOF\\nwhile [ ! -f go ]; do sleep 0.1; done`;',
+    'const hook = `while [ ! -f go ]; do echo "done"; sleep 0.1; done; for i in 1 2; do echo; done`;',
     'await scheduler.wait(HUNG_TEST_MS);',
     'const elapsed = process.hrtime.bigint() - start; report(elapsed);',
   ]) assert.deepEqual(waitFindings(source), [], source);
@@ -441,6 +514,39 @@ test('tests signal only checked pids, so a pid file read before it is written ca
     `const { kill: signal } = ${proc};`,
     `[pid].forEach(${kill});`,
     `fs.writeFileSync(hook, \`const forward = ${kill};\\nforward(Number(process.argv[2]));\`);`,
+    // Optional chaining reaches the same call.
+    `${proc}?.kill(Number(text));`,
+    `${kill}?.(Number(text), 'SIGKILL');`,
+    `${proc}?.kill?.(0);`,
+    `const signal = ${proc}?.kill;`,
+    // Code inside a template interpolation or a generated script, whatever operator comes before.
+    `const s = \`\${x ? ${kill}(pid) : ''}\`;`,
+    `const s = \`\${typeof ${kill}(pid)}\`;`,
+    `fs.writeFileSync(f, 'const ok = pid ? ${kill}(pid) : 0;');`,
+    `fs.writeFileSync(f, 'module.exports = { stop: ${kill}(pid) };');`,
+    `fs.writeFileSync(f, 'a + ${kill}(n)');`,
+    `fs.writeFileSync(f, 'switch (n) { case 1: ${kill}(n); }');`,
+    `fs.writeFileSync(f, 'run()\\n${kill}(n)');`,
+    // Only a comparing assertion compares.
+    `assert.doesNotThrow(${kill});`,
+    // Other ways to reach the same call.
+    `const { kill } = globalThis.${proc};`,
+    `const p = ${proc};\np.kill(Number(text));`,
+    `const p = ${proc};\np?.['kill'](pid);`,
+    `${proc}[name](0);`,
+    `${proc}[\`kill\`](0);`,
+    // The global object's process and a spread reach this process.
+    `global.${kill}(pid);`,
+    `globalThis?.${kill}(0);`,
+    `f(...${kill}(pid));`,
+    `fs.writeFileSync(f, 'f(...${kill}(pid))');`,
+    `const { kill } = global.${proc};`,
+    `const k = global.${kill};`,
+    `const k = globalThis?.${kill};`,
+    // An escape ends the previous line of a generated script.
+    `fs.writeFileSync(f, 'x;\\nglobal.${kill}(pid)');`,
+    `fs.writeFileSync(f, 'x;\\tglobal.${kill}(pid)');`,
+    `fs.writeFileSync(f, \`x;\\nglobalThis.${kill}(pid)\`);`,
   ]) {
     assert.equal(killFindings(source).length, 1, source);
   }
@@ -454,21 +560,106 @@ test('tests signal only checked pids, so a pid file read before it is written ca
     `fs.writeFileSync(script, \`run();\\nstop(); // ${kill}(-pid) would reach the group\\n\`);`,
     `${kill} = function interposed(pid, signal) { return true; };`,
     `test('the ${kill} interposers forward other pids', () => {});`,
+    // A comparison holds no alias.
+    `if (${kill} === original) return;`,
+    `if (original !== ${kill}) restore();`,
+    `assert.equal(${kill}, original);`,
+    `assert.equal(global.${kill}, original);`,
+    `Object.is(global.${kill}, k);`,
+    `assert.notStrictEqual(original, ${kill}, 'restored');`,
+    `Object.is(${kill}, original);`,
+    // Quoted prose and another object's process are not calls.
+    `throw new Error('do not call ${kill}(0), which signals the group');`,
+    `log("never ${kill}(-pid) from a test");`,
+    `child.${kill}(pid);`,
+    `log(\`never ${kill}(-pid) \${'here'}\`);`,
+    `const p = ${proc};\np.kill(p.pid, 'SIGKILL');\nconst home = p.env.HOME;`,
+    `const home = ${proc}['env'].HOME;`,
   ]) {
     assert.deepEqual(killFindings(source), [], source);
   }
-  assert.deepEqual(killFindings(`const forward = ${kill};`, { aliases: false }), [], 'an interposer keeps the original to forward to');
 });
 
-test('only the named interposers may hold an alias of the signal call', (t) => {
+test('an interposer may hold process.kill only to forward its own pid and signal', () => {
+  // The lint scans this file too, so the sources it judges are assembled here.
+  const kill = ['process', 'kill'].join('.');
+  const proc = 'process';
+  const hold = `const kill = ${kill};\n${kill} = function probe(pid, signal) {\n  if (pid === 7 && signal === 0) return true;\n  return kill.call(this, pid, signal);\n};\n`;
+  const late = `const kill = ${kill};\n${kill} = function probe(pid, signal) {\n  queueMicrotask(() => { try { kill.call(process, pid, signal); } catch {} });\n};\n`;
+  assert.deepEqual(killFindings(hold, { interposer: true }), []);
+  assert.deepEqual(killFindings(late, { interposer: true }), []);
+  assert.deepEqual(killFindings(`fs.writeFileSync(hook, \`\n${hold}\`);`, { interposer: true }), [], 'a generated interposer');
+  assert.deepEqual(killFindings(hold).map((f) => f.line), [1], 'a file not named as an interposer may not hold one');
+  for (const [extra, line] of [
+    [`${proc}['kill'](0);`, 6],
+    [`kill.call(process, 0, 'SIGKILL');`, 6],
+    ['kill(Number(text));', 6],
+    ['[pid].forEach(kill);', 6],
+    [`${kill} = function again(pid, signal) {\n  return kill.call(this, 0, signal);\n};`, 7],
+  ]) {
+    assert.deepEqual(killFindings(hold + extra, { interposer: true }).map((f) => f.line), [line], extra);
+  }
+  const body = (lines) => `const kill = ${kill};\n${kill} = function probe(pid, signal) {\n${lines}\n};\n`;
+  assert.deepEqual(killFindings(body('  pid = 0;\n  return kill.call(this, pid, signal);'), { interposer: true }).map((f) => f.line), [4],
+    'a forward of a changed pid is not a forward');
+  assert.deepEqual(killFindings(body("  if (pid === 7) log('}');\n  return kill.call(this, pid, signal);"), { interposer: true }), [],
+    'a brace in a string does not end the replacement');
+  assert.deepEqual(killFindings(body('  calls[pid] = signal;\n  return kill.call(this, pid, signal);'), { interposer: true }), [],
+    'a write to another object keyed by the pid leaves the pid unchanged');
+  assert.deepEqual(killFindings(`fs.writeFileSync(hook, \`kill(0);\n${hold}\`);`, { interposer: true }).map((f) => f.line), [1],
+    'a use at the start of a generated script');
+  assert.deepEqual(killFindings(body("  log('{');\n  return kill.call(this, pid, signal);")
+    + 'function other(pid, signal) {\n  return kill.call(this, pid, signal);\n}\n', { interposer: true }).map((f) => f.line), [7],
+  'a brace in a string does not stretch the replacement over the next function');
+  for (const [lines, line] of [
+    ['  [pid] = [0];\n  return kill.call(this, pid, signal);', 4],
+    ['  ({ pid } = options);\n  return kill.call(this, pid, signal);', 4],
+    ['  for (pid of [0]) break;\n  return kill.call(this, pid, signal);', 4],
+    ['  arguments[0] = 0;\n  return kill.call(this, pid, signal);', 4],
+    ['  arguments[0]++;\n  return kill.call(this, pid, signal);', 4],
+    ['  if (x) [pid] = [0];\n  return kill.call(this, pid, signal);', 4],
+    ['  Object.assign(arguments, [0]);\n  return kill.call(this, pid, signal);', 4],
+    ['  function inner(pid) { return kill.call(this, pid, signal); }\n  return inner(0);', 3],
+  ]) {
+    assert.deepEqual(killFindings(body(lines), { interposer: true }).map((f) => f.line), [line], lines);
+  }
+  for (const [extra, line] of [
+    // A default value uses the alias; it binds another name.
+    ['function f(a = kill) { return a(0); }', 6],
+    ['((a = kill) => a(0))();', 6],
+    // A declaration in a comment or a string rebinds nothing.
+    ['// const kill holds the original\nkill(0);', 7],
+    ["log('let kill');\nkill(0);", 7],
+    // A ternary branch and a case label are uses, not object keys.
+    ['const f = c ? kill : noop;', 6],
+    ['switch (x) { case kill: break; }', 6],
+  ]) {
+    assert.deepEqual(killFindings(hold + extra, { interposer: true }).map((f) => f.line), [line], extra);
+  }
+  assert.deepEqual(killFindings(`${hold}const o = { kill: 1, other: 2 };\n`, { interposer: true }), [], 'an object key is not a use');
+  assert.deepEqual(killFindings(`if (x) {\n  function later() { return kill(0); }\n  ${hold}}\n`, { interposer: true }).map((f) => f.line), [2],
+    'a function declared above the interposer in its block sees the same alias');
+  // Another binding named like the alias is another value.
+  assert.deepEqual(killFindings(`${hold}function relay(kill) { return kill(); }\nconst stop = (kill) => kill.now();\n[1].map(kill => kill + 1);\n`,
+    { interposer: true }), []);
+  assert.deepEqual(killFindings(`if (env.X) {\n  ${hold}}\nfunction later(pid) { const kill = signals.kill; kill(pid); }\n`, { interposer: true }), []);
+  const apart = `const kill = ${kill};\nconst read = fs.readFileSync;\n${kill} = function probe(pid, signal) {\n  return kill.call(this, pid, signal);\n};\n`;
+  assert.deepEqual(killFindings(apart, { interposer: true }).map((f) => f.line), [1],
+    'the replacement must follow the held original at once');
+});
+
+test('only the named interposers may hold an alias of the signal call, and only on its line', (t) => {
   const { base } = makeRepo(t);
-  const alias = `const forward = ${['process', 'kill'].join('.')};\n`;
+  const kill = ['process', 'kill'].join('.');
+  const alias = `const forward = ${kill};\n${kill} = function probe(pid, signal) {\n  return forward.call(this, pid, signal);\n};\n`;
   fs.mkdirSync(path.join(base, 'test', 'fixtures'), { recursive: true });
-  fs.writeFileSync(path.join(base, 'test', 'fixtures', 'hooks.js'), alias);
+  fs.writeFileSync(path.join(base, 'test', 'fixtures', 'hooks.js'), `${alias}${['process', "['kill']"].join('')}(0);\n`);
   fs.writeFileSync(path.join(base, 'test', 'fixtures', 'other.js'), alias);
   assert.throws(() => checkTestWaits(base), (error) => {
-    assert.match(error.message, /^test\/fixtures\/other\.js:1 `const forward = process\.kill;` aliases process\.kill/);
-    assert.doesNotMatch(error.message, /hooks\.js/);
+    const lines = error.message.split('\n');
+    assert.equal(lines.length, 2, error.message);
+    assert.match(lines[0], /^test\/fixtures\/hooks\.js:5 `process\['kill'\]\(0\);` aliases process\.kill/);
+    assert.match(lines[1], /^test\/fixtures\/other\.js:1 `const forward = process\.kill;` aliases process\.kill/);
     return true;
   });
 });

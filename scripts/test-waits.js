@@ -22,9 +22,9 @@ function allowed(line) {
 }
 
 // Keep literal bodies opaque so their delimiters cannot split a call or a
-// declaration. Template interpolations use the same lexer recursively.
-function tokenize(text, from = 0) {
-  const tokens = [];
+// declaration. Template interpolations use the same lexer recursively. A
+// caller that needs only the tokens up to a bracket stops the scan there.
+function* scan(text, from = 0) {
   let position = from;
   const quotedEnd = (quote) => {
     position++;
@@ -104,17 +104,20 @@ function tokenize(text, from = 0) {
   while (position < text.length) {
     const token = read(previous);
     if (!token) break;
-    tokens.push(token);
+    yield token;
     if (token.type !== 'comment') previous = token;
   }
-  return tokens;
 }
+
+const tokenize = (text, from = 0) => [...scan(text, from)];
 
 function callArguments(text, start) {
   const args = [];
   const stack = [')'];
   let from = start + 1;
-  for (const token of tokenize(text, start).slice(1)) {
+  let first = true;
+  for (const token of scan(text, start)) {
+    if (first) { first = false; continue; }
     if (token.type !== 'punctuation') continue;
     const char = token.value;
     if ('([{'.includes(char)) stack.push({ '(': ')', '[': ']', '{': '}' }[char]);
@@ -383,14 +386,173 @@ function bindingScopes(text) {
 
 // Wall clocks a deadline or an elapsed check can read.
 const CLOCK = String.raw`(?:(?:Date|performance)\.now\(\)|Number\(process\.hrtime\.bigint\(\)\)|process\.hrtime\.bigint\(\)|\+?new Date\(\)(?:\.getTime\(\)|\.valueOf\(\))?)`;
-const SLEEP_CALL = /\b(?:Atomics\.wait|setTimeout|sleep|delay|pause|scheduler\.wait)\s*\(|\b(?:spawnSync|execSync|execFileSync)\s*\(\s*['"`]sleep\b/;
+const SHELL = String.raw`(['"\`])(?:[\w./-]*\/)?(?:ba|da|k|z)?sh\1\s*,\s*\[\s*(['"\`])-c\2\s*,\s*`;
+const SLEEP_CALL = new RegExp(String.raw`\b(?:Atomics\.wait|setTimeout|sleep|delay|pause|scheduler\.wait)\s*\(|\b(?:spawnSync|execSync|execFileSync)\s*\(\s*['"\`]sleep\b`
+  + String.raw`|\b(?:spawnSync|execFileSync)\s*\(\s*${SHELL}['"\`][^'"\`]*\bsleep\s`);
+// A shell command at a command position: the start, after a separator, or
+// after a keyword that begins a command list.
+const SHELL_COMMAND = String.raw`(?<=(?:^|[\n;&|({])[ \t]*|\b(?:then|do|else)[ \t]+)`;
+// Loop words at a command position, which also follows a case pattern's ),
+// an interpolation's }, ! and time. A loop word in a comment, an echo or a
+// grep argument is text.
+const SHELL_LOOP_WORD = new RegExp(String.raw`(?<=(?:^|[\n;&|(){}!])[ \t]*|\b(?:then|do|else|time)[ \t]+)(?:while|until|for|do|done)\b`, 'g');
+// Any sleep word in a loop body counts, also /bin/sleep or command sleep,
+// but not an option such as --sleep, an echo's text or a comment.
+const SHELL_SLEEP = /(?<![\w-])sleep[ \t]+[^\s;&|]/;
+const SHELL_TEXT = /(?<!\w)(?:echo|printf)\b[^;&|\n]*|(?<![^\s;&|(])#[^\n]*/g;
+// An echo's command substitutions still run.
+const shellCode = (body) => body.replace(SHELL_TEXT, (text) => (text.startsWith('#') ? ''
+  : (text.match(/\$\([^()]*\)?|`[^`]*`?/g) || []).join(' ')));
+
+// A script with its escapes resolved, of the same length so positions still
+// point into the test file: a newline escape ends a line, a tab separates.
+const shellText = (value) => value.replace(/\\([\s\S])/g, (all, char) => (char === 'n' || char === 'r' ? ' \n' : char === 't' ? '  ' : ` ${char}`));
+
+// Where the quote or command substitution opening at `i` ends, past its
+// closing character, or -1 when nothing closes it. Quotes and substitutions
+// nest inside a double quote, a backtick or a $(...).
+function shellQuoteEnd(s, i) {
+  if (s[i] === "'") {
+    const end = s.indexOf("'", i + 1);
+    return end < 0 ? -1 : end + 1;
+  }
+  const sub = s[i] === '$';
+  const close = sub ? ')' : s[i];
+  let depth = 0;
+  for (let j = i + (sub ? 2 : 1); j < s.length; j++) {
+    const c = s[j];
+    if (c === '\\') j++;
+    else if (c === close && !depth) return j + 1;
+    else if (sub && c === '(') depth++;
+    else if (sub && c === ')') depth--;
+    else if ((c === '$' && s[j + 1] === '(') || (c === '`' && close !== '`') || (close !== '"' && (c === '"' || c === "'"))) {
+      const end = shellQuoteEnd(s, j);
+      if (end < 0) return -1;
+      j = end - 1;
+    }
+  }
+  return -1;
+}
+
+const HEREDOC = /<<-?[ \t]*(?:'[ \t]*([^'\n]*?)[ \t]*'|"[ \t]*([^"\n]*?)[ \t]*"|\\?([\w.-]+))/y;
+
+// The text a script holds outside its code: quoted strings, comments and
+// heredoc bodies, as [start, end, nested] where nested says whether the span
+// can be a script of its own (sh -c '...', eval "...", sh <<EOF). An
+// unclosed quote or heredoc is read as code.
+function shellSpans(s) {
+  const spans = [];
+  const pending = [];
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (c === '\\') i++;
+    else if (c === '\n' && pending.length) {
+      let at = i + 1;
+      for (const word of pending.splice(0)) {
+        let line = at;
+        let end = -1;
+        for (;;) {
+          const eol = s.indexOf('\n', line);
+          const stop = eol < 0 ? s.length : eol;
+          if (s.slice(line, stop).trim() === word) { end = stop; break; }
+          if (eol < 0) break;
+          line = eol + 1;
+        }
+        if (end < 0) break;
+        spans.push([at, end, true]);
+        at = end + 1;
+      }
+      i = at - 1;
+    } else if (c === '#' && (i === 0 || /[\s;&|()]/.test(s[i - 1]))) {
+      const eol = s.indexOf('\n', i);
+      const end = eol < 0 ? s.length : eol;
+      spans.push([i + 1, end, false]);
+      i = end - 1;
+    } else if (c === '<' && s[i + 1] === '<' && s[i + 2] !== '<') {
+      HEREDOC.lastIndex = i;
+      const m = HEREDOC.exec(s);
+      if (m) { pending.push(m[1] ?? m[2] ?? m[3]); i = HEREDOC.lastIndex - 1; }
+    } else if (c === "'" || c === '"') {
+      const end = shellQuoteEnd(s, i);
+      if (end > 0) { spans.push([i + 1, end - 1, true]); i = end - 1; }
+    }
+  }
+  return spans;
+}
+
+// Shell loops a test writes that a counter bounds around a sleep: a for loop
+// over seq, a brace range, a fixed list of numbers or a C-style header, or a
+// while or until loop comparing a variable its body counts, in its condition
+// or in a test before a break in the body. Loop words in quoted text, a
+// comment or a heredoc neither open nor close a loop around them; a span
+// that holds a whole loop is read as a script of its own.
+function shellCounted(script) {
+  const found = [];
+  const open = [];
+  let words = '';
+  let last = 0;
+  for (const [start, end, nested] of shellSpans(script)) {
+    words += script.slice(last, start) + ' '.repeat(end - start);
+    last = end;
+    if (nested) for (const at of shellCounted(script.slice(start, end))) found.push(start + at);
+  }
+  words += script.slice(last);
+  const check = (loop, body) => {
+    if (!SHELL_SLEEP.test(shellCode(body))) return;
+    let counted;
+    if (loop.keyword === 'for') {
+      counted = /^\s*\(\([^;]*;[^;]*[<>][^;]*;/.test(loop.header)
+        || /^\s+[A-Z_a-z]\w*\s+in\s+(?:\$\(\s*seq\b|`\s*seq\b|\{-?\d+\.\.-?\d+(?:\.\.-?\d+)?\}|-?\d+(?:\s+-?\d+)+\s*;?\s*$)/.test(loop.header);
+    } else {
+      const compared = (text) => [...text.matchAll(/\$\{?(\w+)\}?"?\s+-(?:lt|le|gt|ge|eq)\b|-(?:lt|le|gt|ge|eq)\s+"?\$\{?(\w+)|\(\(\s*(\w+)\s*(?:[<>]|==)/g)]
+        .map((m) => m[1] || m[2] || m[3]);
+      const names = [...compared(loop.header), ...(/\b(?:break|exit|return)\b/.test(body) ? compared(body) : [])];
+      counted = names.some((name) => new RegExp(String.raw`\b${name}=\s*(?:\$\(\(|\$\(\s*expr\b|\`\s*expr\b)|\(\(\s*(?:\+\+|--)?\s*${name}\s*(?:\+\+|--|[-+]=)|\(\(\s*(?:\+\+|--)\s*${name}\b|\blet\s+["']?${name}\b`).test(body));
+    }
+    if (counted) found.push(loop.at);
+  };
+  for (const word of words.matchAll(SHELL_LOOP_WORD)) {
+    const [keyword] = word;
+    if (keyword === 'do') {
+      const loop = open.findLast((candidate) => candidate.body === undefined);
+      if (loop) { loop.header = script.slice(loop.at + loop.keyword.length, word.index); loop.body = word.index + 2; }
+    } else if (keyword === 'done') {
+      const index = open.findLastIndex((candidate) => candidate.body !== undefined);
+      if (index < 0) continue;
+      const [loop] = open.splice(index, 1);
+      check(loop, script.slice(loop.body, word.index));
+    } else open.push({ keyword, at: word.index });
+  }
+  // A loop whose done is in code the check cannot read runs to the end.
+  for (const loop of open) if (loop.body !== undefined) check(loop, script.slice(loop.body));
+  return found;
+}
+
+// Whether a script sleeps outside any loop, where nothing polls a signal.
+function shellBareSleep(script) {
+  const wrapped = /^\s*(?:[\w./-]*\/)?(?:ba|da|k|z)?sh\s+-c\s+(['"])([\s\S]*)\1\s*$/.exec(script);
+  let depth = 0;
+  for (const word of (wrapped ? wrapped[2] : script).matchAll(new RegExp(String.raw`${SHELL_COMMAND}(?:(?:do|done)\b|sleep[ \t]+[^\s;&|])`, 'g'))) {
+    if (word[0] === 'do') depth++;
+    else if (word[0] === 'done') depth = Math.max(0, depth - 1);
+    else if (!depth) return true;
+  }
+  return false;
+}
+
+// A synchronous sleep a helper function can hide: Atomics.wait with a
+// timeout, a sleep command, or a promise that only a timer resolves.
+// A sh -c helper sleeps only when its command literal holds a bare sleep.
+const HELPER_SLEEP = new RegExp(String.raw`\bAtomics\.wait\s*\(|\b(?:spawnSync|execSync|execFileSync)\s*\(\s*(?:['"\`]sleep\b|${SHELL}(['"\`])((?:\\[\s\S]|(?!\3)[^\\])*)\3)`
+  + String.raw`|\bnew\s+Promise\s*\(\s*(?:async\s*)?\(?\s*([$\w]+)[^)=]*\)?\s*=>\s*\{?\s*setTimeout\s*\(\s*\5\s*,`, 'g');
 
 // Loop bodies, with whether a counter bounds the loop. Generated fixture
 // scripts live in string and template literals, so those are read as code too.
-function loops(text, offset = 0, found = []) {
+function loops(text, offset = 0, found = Object.assign([], { shell: [], helpers: new Set() })) {
   const tokens = tokenize(text).filter((token) => token.type !== 'comment');
+  const literal = (token) => ['string', 'template'].includes(token?.type);
   for (const token of tokens) {
-    if (['string', 'template'].includes(token.type) && /\b(?:while|for|do)\b/.test(token.value)) {
+    if (literal(token) && /\b(?:while|for|do)\b/.test(token.value)) {
       // Same-length unescaping keeps positions; escaped newlines stay whitespace.
       const inner = token.value.slice(1, -1).replace(/\\([\s\S])/g, (all, char) => ('nrt'.includes(char) ? '  ' : ` ${char}`));
       loops(inner, offset + token.start + 1, found);
@@ -402,6 +564,61 @@ function loops(text, offset = 0, found = []) {
     if (token.type !== 'punctuation') continue;
     if ('([{'.includes(token.value)) open.push(index);
     else if (')]}'.includes(token.value) && open.length) match.set(open.pop(), index);
+  }
+  // A shell script can be one literal, a + chain whose other operands the
+  // check cannot read, or an array of lines that a join puts together.
+  const operandEnd = (j) => {
+    while (j < tokens.length) {
+      const { type, value } = tokens[j];
+      if (type === 'punctuation' && match.has(j) && '([{'.includes(value)) j = match.get(j) + 1;
+      else if (type === 'punctuation' && [',', ';', ')', ']', '}', '+', '?', ':'].includes(value)) break;
+      else j++;
+    }
+    return j;
+  };
+  const chain = (i) => {
+    const parts = [i];
+    let j = i + 1;
+    while (tokens[j]?.value === '+') {
+      if (literal(tokens[j + 1])) { parts.push(j + 1); j += 2; continue; }
+      const k = operandEnd(j + 1);
+      if (tokens[k]?.value !== '+') break;
+      parts.push(' ');
+      j = k;
+    }
+    return { parts, end: j };
+  };
+  const used = new Set();
+  for (let i = 0; i < tokens.length; i++) {
+    if (!literal(tokens[i]) || used.has(i)) continue;
+    const close = tokens[i - 1]?.value === '[' ? match.get(i - 1) : undefined;
+    let parts;
+    if (close !== undefined && tokens[close + 1]?.value === '.' && tokens[close + 2]?.value === 'join' && tokens[close + 3]?.value === '(') {
+      parts = [];
+      for (let j = i; j < close;) {
+        if (literal(tokens[j])) {
+          const next = chain(j);
+          parts.push(...next.parts);
+          j = next.end;
+        }
+        j = operandEnd(j);
+        if (tokens[j]?.value === ',') { parts.push('\n'); j++; } else break;
+      }
+    } else parts = chain(i).parts;
+    for (const part of parts) if (typeof part === 'number') used.add(part);
+    // A newline escape can run into the keyword, so no word boundary before it.
+    if (!parts.some((part) => typeof part === 'number' && /do\b/.test(tokens[part].value))) continue;
+    let script = '';
+    const starts = [];
+    for (const part of parts) {
+      if (typeof part === 'string') { script += part; continue; }
+      starts.push([script.length, offset + tokens[part].start + 1]);
+      script += shellText(tokens[part].value.slice(1, -1));
+    }
+    for (const at of shellCounted(script)) {
+      const [from, start] = starts.findLast(([position]) => position <= at);
+      found.shell.push(start + at - from);
+    }
   }
   const counted = (range) => {
     const ids = new Set();
@@ -417,8 +634,44 @@ function loops(text, offset = 0, found = []) {
     const end = expressionEnd(text, tokens, at);
     return { from: tokens[at]?.start ?? text.length, to: tokens[end]?.start ?? text.length };
   };
+  // A loop with no bound in its header can still end on a count: an if in
+  // its body that tests a counter and breaks, returns or throws.
+  const exits = (range, inBody) => {
+    for (let i = 0; i < range.length; i++) {
+      if (range[i].value !== 'if' || range[i + 1]?.value !== '(') continue;
+      let j = i + 1;
+      for (let depth = 0; j < range.length; j++) {
+        if ('([{'.includes(range[j].value)) depth++;
+        else if (')]}'.includes(range[j].value) && --depth === 0) break;
+      }
+      const condition = range.slice(i + 2, j);
+      const ids = new Set([...inBody, ...counted(condition)]);
+      if (!condition.some((token) => token.type === 'identifier' && ids.has(token.value))) continue;
+      let k = j + 1;
+      if (range[k]?.value === '{') {
+        // A return in a function the block defines leaves that function only.
+        let inner = 0;
+        const functions = [];
+        for (let depth = 0; k < range.length; k++) {
+          const { value } = range[k];
+          if (value === 'function' || (value === '>' && range[k - 1]?.value === '=' && range[k + 1]?.value === '{')) inner = 1;
+          if (!functions.length && ['break', 'return', 'throw'].includes(value)) return true;
+          if (value === '{') {
+            depth++;
+            if (inner) functions.push(depth);
+            inner = 0;
+          } else if (value === '}') {
+            if (functions.at(-1) === depth) functions.pop();
+            if (--depth === 0) break;
+          }
+        }
+      } else if (['break', 'return', 'throw'].includes(range[k]?.value)) return true;
+    }
+    return false;
+  };
   const add = (keyword, header, range, kind) => {
-    const inBody = counted(tokenize(text.slice(range.from, range.to)).filter((token) => token.type !== 'comment'));
+    const bodyTokens = tokenize(text.slice(range.from, range.to)).filter((token) => token.type !== 'comment');
+    const inBody = counted(bodyTokens);
     let condition = header;
     let counters = counted(header);
     if (kind === 'for') {
@@ -434,7 +687,8 @@ function loops(text, offset = 0, found = []) {
       condition = parts[1];
       counters = new Set([...counted(parts[1]), ...counted(parts[2])]);
     }
-    const bounded = condition.some((token) => token.type === 'identifier' && (counters.has(token.value) || inBody.has(token.value)));
+    const bounded = condition.some((token) => token.type === 'identifier' && (counters.has(token.value) || inBody.has(token.value)))
+      || exits(bodyTokens, new Set([...inBody, ...counters]));
     found.push({ start: offset + keyword.start, from: offset + range.from, to: offset + range.to, bounded });
   };
   for (const [index, token] of tokens.entries()) {
@@ -450,6 +704,39 @@ function loops(text, offset = 0, found = []) {
       if (before?.value === '}' && [...match].some(([from, to]) => to === index - 1 && tokens[from - 1]?.value === 'do')) continue;
       const close = match.get(index + 1);
       add(token, tokens.slice(index + 2, close), body(close + 1), token.value);
+    }
+  }
+  // A named function whose sleep no loop of its own polls is a sleep
+  // wherever it is called.
+  const sleeps = [...text.matchAll(HELPER_SLEEP)].filter((m) => (m[4] === undefined || shellBareSleep(shellText(m[4])))
+    && (!m[0].startsWith('Atomics') || callArguments(text, m.index + m[0].length - 1).length >= 4));
+  if (sleeps.length) {
+    for (const [index, token] of tokens.entries()) {
+      let name;
+      let at;
+      if (token.value === 'function' && tokens[index + 1]?.type === 'identifier' && tokens[index + 2]?.value === '(') {
+        name = tokens[index + 1].value;
+        at = index + 2;
+      } else if (['const', 'let', 'var'].includes(token.value) && tokens[index + 1]?.type === 'identifier' && tokens[index + 2]?.value === '=') {
+        name = tokens[index + 1].value;
+        at = index + 3;
+        if (tokens[at]?.value === 'async') at++;
+        if (tokens[at]?.value === 'function') at += tokens[at + 1]?.type === 'identifier' ? 2 : 1;
+        else if (tokens[at]?.type === 'identifier' && tokens[at + 1]?.value === '=' && tokens[at + 2]?.value === '>') {
+          at += 1;
+        } else if (tokens[at]?.value !== '(') continue;
+      } else continue;
+      let start;
+      if (tokens[at]?.value === '(' && match.has(at)) {
+        const close = match.get(at);
+        start = tokens[close + 1]?.value === '{' ? close + 1
+          : tokens[close + 1]?.value === '=' && tokens[close + 2]?.value === '>' ? close + 3 : -1;
+      } else if (tokens[at]?.value === '=' && tokens[at + 1]?.value === '>') start = at + 2;
+      if (!(start >= 0) || !tokens[start]) continue;
+      const range = body(start);
+      const inside = (position) => found.some((loop) => offset + range.from <= loop.from && loop.to <= offset + range.to
+        && loop.from <= offset + position && offset + position < loop.to);
+      if (sleeps.some((m) => range.from <= m.index && m.index < range.to && !inside(m.index))) found.helpers.add(name);
     }
   }
   return found;
@@ -559,16 +846,27 @@ function waitFindings(text) {
   for (const match of text.matchAll(/\b(?:spawnSync|execSync|execFileSync|spawn|exec|execFile)\s*\(\s*(['"`])sleep\b/g)) {
     if (!polled(match.index)) report(text.slice(0, match.index).split('\n').length - 1, 'sleep needs a signal or a wait-allow reason');
   }
+  // A sleep the shell runs: a command string, or a script after sh -c.
+  const scripts = new RegExp(String.raw`\b(?:(?:spawnSync|execFileSync|spawn|execFile)\s*\(\s*${SHELL}|(?:execSync|exec)\s*\(\s*)(['"\`])((?:\\[\s\S]|(?!\3)[^\\])*)\3`, 'g');
+  for (const match of text.matchAll(scripts)) {
+    if (!(match[1] === undefined && /^sleep\b/.test(match[4])) && shellBareSleep(shellText(match[4])) && !polled(match.index)) {
+      report(text.slice(0, match.index).split('\n').length - 1, 'sleep needs a signal or a wait-allow reason');
+    }
+  }
   // A counted loop that sleeps is a deadline in disguise, unless each sleep
   // carries its own reason (paced work, a staggered race).
   const lineOf = (position) => text.slice(0, position).split('\n').length - 1;
+  const helpers = [...loopBodies.helpers].map(escaped);
+  const sleepCall = new RegExp(SLEEP_CALL.source + (helpers.length ? String.raw`|(?<![\w$.])(?:${helpers.join('|')})\s*\(` : ''), 'g');
   for (const loop of loopBodies) {
     if (!loop.bounded) continue;
-    const sleeps = [...text.slice(loop.from, loop.to).matchAll(new RegExp(SLEEP_CALL.source, 'g'))];
+    const sleeps = [...text.slice(loop.from, loop.to).matchAll(sleepCall)];
     if (sleeps.some((sleep) => !allowed(lines[lineOf(loop.from + sleep.index)]))) {
       report(lineOf(loop.start), 'an iteration count bounds a sleep loop');
     }
   }
+  // The same in a shell script a test writes.
+  for (const at of new Set(loopBodies.shell)) report(lineOf(at), 'an iteration count bounds a sleep loop');
   const promisePositions = new Set();
   for (const timer of promiseTimers) {
     const escaped = timer.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -623,57 +921,255 @@ function waitFindings(text) {
 // 0. Only a process signalling itself may call process.kill directly; every
 // other pid goes through killPid or killGroup in test/signals.js, which
 // refuse anything that is not a process id. An alias of process.kill
-// (`const kill = process.kill`, `process['kill']`, `process.kill.call`)
-// reaches the same call with a pid this check cannot see, so it counts too,
-// except in the fixtures that interpose on process.kill (KILL_INTERPOSERS).
-// Generated fixture scripts in strings and templates are checked too.
-const KILL_CALL = /\bprocess\.kill\s*\(/g;
+// (`const kill = process.kill`, `process['kill']`, `process.kill.call`) or of
+// process itself reaches the same call with a pid this check cannot see, so it
+// counts too. Generated fixture scripts in strings and templates are checked too.
+//
+// `child.process` is another object's member, not this process, while
+// `global.process`, `globalThis?.process` and a spread `...process` are. A `\n`
+// escape in a generated script ends a line.
+const GLOBAL = String.raw`(?:global(?:This)?\s*\??\.\s*)?`;
+const PROCESS = String.raw`(?<!(?<!\\)[\w$]|(?<!(?:(?<!(?<!\\)[\w$])global(?:This)?\s*\??|\.\.))\.\s*)process`;
+// Optional chaining reaches the same call: `process?.kill(0)`, `process.kill?.(0)`.
+const KILL_CALL = new RegExp(String.raw`${PROCESS}\s*\??\.\s*kill\s*(?:\?\.\s*)?\(`, 'g');
+// A computed member that spells out 'kill', or whose key the check cannot read.
+const COMPUTED = String.raw`\s*(?:\?\.\s*)?\[\s*(?:(?<quote>['"\`])kill\k<quote>\s*\]|(?!['"]))`;
 const KILL_ALIASES = [
-  // A value assigned, passed or returned, as opposed to a call, the
-  // interposer's own assignment or prose that names process.kill.
-  /(?<=(?:[=(,:?[]|=>|&&|\|\||\breturn)\s*)process\s*\??\.\s*kill\b(?!\s*(?:\(|\?\.\s*\(|\.|=(?!=)))/g,
-  /\bprocess\s*\??\.\s*kill\s*\.\s*(?:call|apply|bind)\b/g,
-  /\bprocess\s*(?:\?\.\s*)?\[\s*(['"`])kill\1\s*\]/g,
-  /\{[^{}]*\bkill\b[^{}]*\}\s*=\s*process\b(?!\s*[.[?])/g,
+  // A value assigned, passed or returned, as opposed to a call, a member, a
+  // comparison, the interposer's own assignment or prose that names it.
+  new RegExp(String.raw`(?<=(?:(?<![=!<>])=|[(,:?[]|=>|&&|\|\||\breturn)\s*${GLOBAL})${PROCESS}\s*\??\.\s*kill\b(?!\s*(?:\(|\?\.|\.|=|!=))`, 'g'),
+  new RegExp(String.raw`${PROCESS}\s*\??\.\s*kill\s*\??\.\s*(?:call|apply|bind)\b`, 'g'),
+  new RegExp(PROCESS + COMPUTED, 'g'),
+  new RegExp(String.raw`\{[^{}]*\bkill\b[^{}]*\}\s*=\s*${GLOBAL}process\b(?!\s*[.[?])`, 'g'),
 ];
+// `const p = process;` makes p.kill the same call.
+const PROCESS_ALIAS = new RegExp(String.raw`\b(?:const|let|var)\s+([$A-Z_a-z][$\w]*)\s*=\s*${GLOBAL}process\s*(?=[;,)\n]|$)`, 'g');
+// An argument of a comparing assertion or Object.is is compared, not called.
+const COMPARED = /(?:\bassert(?:\s*\.\s*strict)?\s*\.\s*(?:equal|strictEqual|notEqual|notStrictEqual|deepEqual|deepStrictEqual|notDeepEqual|notDeepStrictEqual)|\bObject\s*\.\s*is)\s*\(\s*(?:[^(),;]*,\s*)?$/;
+// Inside a string, a sentence has a word before the name; generated code has
+// an operator, a delimiter or a keyword there.
+const PROSE_WORD = /(?:^|[^$\w.\\])([$A-Z_a-z][$\w]*)\s*$/;
+const KEYWORDS = new Set(['async', 'await', 'case', 'catch', 'class', 'const', 'default', 'delete', 'do', 'else', 'export',
+  'extends', 'finally', 'for', 'function', 'if', 'import', 'in', 'instanceof', 'let', 'new', 'of', 'return', 'switch',
+  'throw', 'try', 'typeof', 'var', 'void', 'while', 'with', 'yield']);
+// A fixture that fakes a pid probe holds the original to forward every other
+// call: `const kill = process.kill;` and, as the next statement, the
+// replacement. Only that line may alias process.kill, and the alias may only
+// forward the replacement's own, unchanged pid and signal from inside it.
+const INTERPOSER = /\b(?:const|let|var)\s+([$A-Z_a-z][$\w]*)\s*=\s*(process\s*\.\s*kill)\s*;\s*process\s*\.\s*kill\s*=\s*function\b[^(]*\(\s*([$A-Z_a-z][$\w]*)\s*,\s*([$A-Z_a-z][$\w]*)\s*\)\s*\{/dg;
 
-function killFindings(text, { aliases = true } = {}) {
+const escaped = (name) => name.replace(/[\\^$.*+?()[\]{}|]/g, '\\$&');
+
+// The index of the bracket that closes the one at `from`, or from any other
+// position, of the first bracket that closes an enclosing one. Literals and
+// comments are tokens, so their braces do not count.
+function closing(text, from, limit = text.length) {
+  const opener = '{(['.includes(text[from]);
+  let depth = 0;
+  for (const token of scan(text.slice(0, limit), from)) {
+    if (token.type !== 'punctuation') continue;
+    if ('{(['.includes(token.value)) depth++;
+    else if ('})]'.includes(token.value) && (opener ? --depth === 0 : --depth < 0)) return token.start;
+  }
+  return limit;
+}
+
+// Where an arrow function starting its body at `from` ends: its block, or the
+// expression up to the first delimiter outside brackets.
+function arrowEnd(text, from) {
+  const body = text.slice(from).search(/\S/) + from;
+  if (text[body] === '{') return closing(text, body);
+  let depth = 0;
+  for (const token of scan(text, body)) {
+    if (token.type !== 'punctuation') continue;
+    if ('{(['.includes(token.value)) depth++;
+    else if ('})]'.includes(token.value) && --depth < 0) return token.start;
+    else if (depth === 0 && [',', ';'].includes(token.value)) return token.start;
+  }
+  return text.length;
+}
+
+// The `${...}` span of a template that holds a position, as [start, end).
+function interpolation(text, token, position) {
+  let i = token.start + 1;
+  while (i < Math.min(position, token.end)) {
+    if (text[i] === '\\') { i += 2; continue; }
+    if (text.startsWith('${', i)) {
+      const end = closing(text, i + 1, token.end);
+      if (position < end) return [i + 2, end];
+      i = end + 1;
+      continue;
+    }
+    i++;
+  }
+  return null;
+}
+
+// The innermost token holding a position. An interpolation is code the test
+// runs, so the search goes on inside it.
+function tokenAt(text, tokens, position) {
+  let token = tokens.find((t) => t.start <= position && position < t.end);
+  while (token?.type === 'template') {
+    const span = interpolation(text, token, position);
+    if (!span) return token;
+    token = tokenize(text.slice(0, span[1]), span[0]).find((t) => t.start <= position && position < t.end);
+  }
+  return token;
+}
+
+// The parameters of a list, split at its top-level commas.
+function parameters(list) {
+  const params = [''];
+  let depth = 0;
+  for (const char of list) {
+    if ('{[('.includes(char)) depth++;
+    else if ('}])'.includes(char)) depth--;
+    if (char === ',' && depth === 0) params.push('');
+    else params[params.length - 1] += char;
+  }
+  return params;
+}
+
+// Ranges where a function parameter or a nested declaration rebinds `name`
+// between `from` and `to`, so a use there is another value. A match inside a
+// comment or a literal (`literal`) rebinds nothing.
+function rebound(text, name, from, to, own, literal = () => false) {
+  const id = escaped(name);
+  // A default value after `=` is a use, and a destructuring key before `:` names no binding.
+  const binds = (list) => parameters(list).some((param) => new RegExp(String.raw`(?<![\w$.])${id}(?![\w$])(?!\s*:)`)
+    .test(param.split(/=(?![=>])/)[0]));
+  const ranges = [];
+  const scope = text.slice(0, to);
+  const code = (m) => !literal(from + m.index);
+  for (const m of [...scope.slice(from).matchAll(/\b(function\b[^(]*|catch\s*|(?<![\w$.])(?!(?:if|for|while|switch|with|catch|function)\b)[$A-Z_a-z][$\w]*\s*)\(([^()]*)\)\s*\{/g)].filter(code)) {
+    if (binds(m[2])) ranges.push([from + m.index, closing(text, from + m.index + m[0].length - 1)]);
+  }
+  for (const m of [...scope.slice(from).matchAll(new RegExp(String.raw`(?:\(([^()]*)\)|(?<![\w$.])(${id}))\s*=>`, 'g'))].filter(code)) {
+    if (m[2] || binds(m[1])) ranges.push([from + m.index, arrowEnd(text, from + m.index + m[0].length)]);
+  }
+  for (const m of [...scope.slice(from).matchAll(new RegExp(String.raw`\b(?:const|let|var)\s+${id}(?![\w$])`, 'g'))].filter(code)) {
+    const at = from + m.index;
+    if (!own.includes(at + m[0].length - name.length)) ranges.push([at, closing(text, at, to)]);
+  }
+  return ranges;
+}
+
+function killFindings(text, { interposer = false } = {}) {
   const findings = [];
   const lines = text.replace(/\r\n/g, '\n').split('\n');
   const tokens = tokenize(text);
   const lineOf = (position) => text.slice(0, position).split('\n').length - 1;
-  // A comment in the code, or a `//` before the call on the same line of a
-  // generated script, holds prose about process.kill, not a call.
-  const commented = (position) => {
-    const index = lineOf(position);
-    if (/^\s*(?:\/\/|\*)/.test(lines[index])) return true;
-    const token = tokens.find((t) => t.start <= position && position < t.end);
+  // A comment in the code, a `//` before the name on the same line of a
+  // generated script, or a quoted sentence holds prose about process.kill.
+  const prose = (position) => {
+    if (/^\s*(?:\/\/|\*)/.test(lines[lineOf(position)])) return true;
+    const token = tokenAt(text, tokens, position);
     if (!token) return false;
     if (token.type === 'comment') return true;
     if (token.type !== 'string' && token.type !== 'template') return false;
     const from = Math.max(token.start + 1, text.lastIndexOf('\n', position - 1) + 1);
     const fragment = text.slice(from, position);
-    return tokenize(fragment).some((t) => t.type === 'comment' && t.end === fragment.length);
+    if (tokenize(fragment).some((t) => t.type === 'comment' && t.end === fragment.length)) return true;
+    const word = PROSE_WORD.exec(fragment);
+    return !!word && !KEYWORDS.has(word[1]);
   };
+  const report = (position, what) => {
+    const index = lineOf(position);
+    findings.push({ line: index + 1, reason: `\`${lines[index].trim().slice(0, 80)}\` ${what}, so the pids it receives are not checked` });
+  };
+  const ownPid = (open, names) => names.includes(normalizedBudget(callArguments(text, open)[0] || ''));
   for (const match of text.matchAll(KILL_CALL)) {
-    if (commented(match.index)) continue;
-    const pid = normalizedBudget(callArguments(text, match.index + match[0].lastIndexOf('('))[0] || '');
-    if (pid !== 'process.pid') findings.push({ line: lineOf(match.index) + 1, reason: `process.kill(${pid}) signals a pid that is not checked` });
+    if (prose(match.index)) continue;
+    const open = match.index + match[0].length - 1;
+    if (!ownPid(open, ['process.pid'])) {
+      const pid = normalizedBudget(callArguments(text, open)[0] || '');
+      findings.push({ line: lineOf(match.index) + 1, reason: `process.kill(${pid}) signals a pid that is not checked` });
+    }
   }
-  if (!aliases) return findings;
+  const interposers = interposer ? [...text.matchAll(INTERPOSER)].map((match) => {
+    const open = match.index + match[0].length - 1;
+    const body = [open, closing(text, open)];
+    const assign = String.raw`(?:[-+*/%&|^]|\*\*|<<|>>>?|&&|\|\||\?\?)?=(?![=>])`;
+    const changed = (param) => {
+      const p = escaped(param);
+      return new RegExp([
+        String.raw`(?<![\w$.])${p}\s*${assign}`, String.raw`(?:\+\+|--)\s*${p}(?![\w$])`, String.raw`(?<![\w$.])${p}\s*(?:\+\+|--)`,
+        String.raw`\b(?:const|let|var)\s+${p}(?![\w$])`, String.raw`\bfor\s*\(\s*${p}\s+(?:of|in)\b`,
+        // A destructuring assignment such as `[pid] = [0]` or `({ pid } = o)`.
+        // A computed member such as `calls[pid] = signal` writes another object.
+        String.raw`(?<![\w$\]]\s*)[[{][^;[\]{}]*?(?<![\w$.])${p}(?![\w$])[^;[\]{}]*?[\]}][\s\]}]*=(?![=>])`,
+      ].join('|')).test(text.slice(body[0], body[1]));
+    };
+    // A sloppy-mode script changes a parameter through `arguments` too: by
+    // an element write, an increment, or a call that writes its elements.
+    const reassigned = [match[3], match[4]].some(changed)
+      || new RegExp([String.raw`\barguments\s*\[[^\]]*\]\s*(?:${assign}|\+\+|--)`, String.raw`(?:\+\+|--)\s*arguments\s*\[`,
+        String.raw`\b(?:Object\s*\.\s*(?:assign|defineProperty|defineProperties)|Reflect\s*\.\s*(?:set|defineProperty))\s*\(\s*arguments\b`,
+        String.raw`\.\s*(?:splice|fill|copyWithin|reverse|sort|shift|unshift|pop|push)\s*\.\s*(?:call|apply)\s*\(\s*arguments\b`].join('|'))
+        .test(text.slice(body[0], body[1]));
+    // The alias is the same value in its whole block, above the declaration
+    // too. A generated script holds its own blocks and ends at its closing backtick.
+    const script = tokens.find((t) => t.type === 'template' && t.start < match.index && match.index < t.end);
+    const base = script ? script.start + 1 : 0;
+    const openers = [];
+    for (const token of tokenize(text.slice(0, match.index), base)) {
+      if (token.type !== 'punctuation') continue;
+      if ('{(['.includes(token.value)) openers.push(token.start);
+      else if ('})]'.includes(token.value)) openers.pop();
+    }
+    const literals = (script ? tokenize(text.slice(0, script.end - 1), base) : tokens)
+      .filter((t) => ['comment', 'string', 'template', 'regex'].includes(t.type));
+    return { alias: match[1], declared: match.indices[1][0], original: match.indices[2][0], params: [match[3], match[4]],
+      body, reassigned, literals, scope: [openers.at(-1) ?? base, closing(text, match.index, script ? script.end - 1 : text.length)] };
+  }) : [];
+  const exempt = new Set(interposers.map((i) => i.original));
   for (const pattern of KILL_ALIASES) {
     for (const match of text.matchAll(pattern)) {
-      if (commented(match.index)) continue;
-      const index = lineOf(match.index);
-      findings.push({ line: index + 1, reason: `\`${lines[index].trim().slice(0, 80)}\` aliases process.kill, so the pids it receives are not checked` });
+      if (exempt.has(match.index) || prose(match.index)) continue;
+      // A global prefix belongs to the compared value, as in assert.equal(global.process.kill, k).
+      const before = text.slice(Math.max(0, match.index - 200), match.index).replace(/\bglobal(?:This)?\s*\??\.\s*$/, '');
+      if (COMPARED.test(before) && /^\s*[,)]/.test(text.slice(match.index + match[0].length))) continue;
+      report(match.index, 'aliases process.kill');
+    }
+  }
+  for (const alias of new Set([...text.matchAll(PROCESS_ALIAS)].map((m) => m[1]).filter((name) => name !== 'process'))) {
+    const id = escaped(alias);
+    for (const use of text.matchAll(new RegExp(String.raw`(?<![\w$.])${id}(?:\s*\??\.\s*kill\b(\s*(?:\?\.\s*)?\()?|${COMPUTED})`, 'g'))) {
+      if (prose(use.index)) continue;
+      if (use[1] && ownPid(use.index + use[0].length - 1, ['process.pid', `${alias}.pid`])) continue;
+      report(use.index, `uses ${alias}, an alias of process, to reach process.kill`);
+    }
+  }
+  // The held original is process.kill under another name: any use in its
+  // scope but the interposer forwarding its own arguments signals a pid
+  // nothing checked.
+  for (const alias of new Set(interposers.map((i) => i.alias))) {
+    const own = interposers.filter((i) => i.alias === alias);
+    const id = escaped(alias);
+    const shadows = own.flatMap((i) => rebound(text, alias, i.scope[0], i.scope[1], own.map((o) => o.declared),
+      (position) => i.literals.some((t) => t.start <= position && position < t.end)));
+    const inside = (ranges, position) => ranges.some(([from, to]) => from <= position && position < to);
+    // A name that ends a string, as in 'kill', is text; one that begins a
+    // generated script, as in `kill(0);`, is a use.
+    for (const use of text.matchAll(new RegExp(String.raw`(?<![\w$.])${id}(?![\w$'"\`])`, 'g'))) {
+      const owners = own.filter((i) => i.scope[0] <= use.index && use.index < i.scope[1]);
+      if (!owners.length || owners.some((i) => i.declared === use.index)) continue;
+      // An object key (`{ kill: x }`) names no binding; a ternary branch or a case label does.
+      if (/[{,]\s*$/.test(text.slice(Math.max(0, use.index - 80), use.index)) && /^\s*:(?!:)/.test(text.slice(use.index + alias.length))) continue;
+      if (inside(shadows, use.index) || prose(use.index)) continue;
+      // An inner function with its own pid or signal forwards another value.
+      const forwards = owners.some((i) => !i.reassigned && i.body[0] < use.index && use.index < i.body[1]
+        && !inside(i.params.flatMap((param) => rebound(text, param, i.body[0] + 1, i.body[1], [])), use.index)
+        && new RegExp(String.raw`^${id}\s*\.\s*call\s*\(\s*(?:this|process)\s*,\s*${escaped(i.params[0])}\s*,\s*${escaped(i.params[1])}\s*\)`).test(text.slice(use.index)));
+      if (!forwards) report(use.index, `uses ${alias}, the held process.kill, other than to forward the interposer's own pid and signal`);
     }
   }
   return findings.sort((a, b) => a.line - b.line);
 }
 
 // These replace process.kill to fake what a pid probe observes or when a signal
-// lands, and forward every other call to the original, which they must hold as
-// an alias.
+// lands, and forward every other call to the original. Only their interposer
+// declarations may alias it; see INTERPOSER.
 const KILL_INTERPOSERS = new Set(['test/fixtures/hooks.js', 'test/fixtures/monitor-clock.js', 'test/fixtures/slow-group-kill.js', 'test/spawn-resume.test.js']);
 
 function checkTestWaits(root) {
@@ -689,7 +1185,7 @@ function checkTestWaits(root) {
     }
     // The checked helpers themselves are the one place a bare call belongs.
     if (file === 'test/signals.js') continue;
-    for (const finding of killFindings(text, { aliases: !KILL_INTERPOSERS.has(file) })) {
+    for (const finding of killFindings(text, { interposer: KILL_INTERPOSERS.has(file) })) {
       findings.push(`${file}:${finding.line} ${finding.reason}; use killPid or killGroup from test/signals.js`);
     }
   }

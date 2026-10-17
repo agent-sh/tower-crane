@@ -1,6 +1,6 @@
 'use strict';
 
-const { fileWritten, waitOnRepo } = require('./signals');
+const { fileWritten, waitOnRepo, killGroup } = require('./signals');
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -10,7 +10,7 @@ const net = require('node:net');
 const cp = require('node:child_process');
 const { once } = require('node:events');
 const { pathToFileURL } = require('node:url');
-const { cachedFixture, pinRung, real, BIN, ROOT, HOOKS, PTY_AVAILABLE, makeTaskRepo } = require('./helpers');
+const { cachedFixture, pinRung, pluginRoot, real, BIN, ROOT, HOOKS, PTY_AVAILABLE, makeTaskRepo } = require('./helpers');
 const stack = require('./stack-fixture');
 const A = require('../lib/agents');
 const S = require('../lib/state');
@@ -101,6 +101,67 @@ test('the dead-agent sweep removes orphan brokers and keeps live claims, process
       at: new Date().toISOString(), cmd: 'spawn', agent: 'owner', task: 'T2', detail: { agent, role: 'worker', ...processInfo },
     }) + '\n');
   }
+  // A harness that exited and left a process in its group: that process can still write the
+  // agent's home and broker directory, so neither is walked while it runs. Windows has no groups.
+  const grouped = process.platform !== 'win32';
+  const stale = (agent) => path.join(h.state, 'brokers', `.stale-${agent}-0123456789ab`);
+  if (grouped) {
+    const leader = cp.spawn(process.execPath, ['-e',
+      "const c = require('node:child_process').spawn(process.execPath, ['-e', 'setTimeout(() => {}, 120000)'], { stdio: 'ignore' }); process.stdout.write(c.pid + '\\n', () => process.exit(0))"], // wait-allow: the member only idles until the test kills its group
+    { detached: true, stdio: ['ignore', 'pipe', 'ignore'] });
+    const [left] = await once(leader.stdout, 'data');
+    assert.ok(Number(String(left).trim()) > 0, 'the group keeps a member');
+    t.after(() => { try { killGroup(leader.pid, 'SIGKILL'); } catch {} });
+    if (leader.exitCode === null) await once(leader, 'exit');
+    plant('worker-group-left', { socket });
+    fs.mkdirSync(path.join(h.state, 'homes', 'worker-group-left'), { recursive: true });
+    fs.writeFileSync(path.join(h.state, 'homes', 'worker-group-left', 'note'), 'the agent\'s');
+    fs.appendFileSync(path.join(h.state, 'events.jsonl'), JSON.stringify({
+      at: new Date().toISOString(), cmd: 'spawn', agent: 'owner', task: 'T2',
+      detail: { agent: 'worker-group-left', role: 'worker', pid: leader.pid, host: require('node:os').hostname() },
+    }) + '\n');
+  }
+  // A spawn whose harness pid now names a later group leader: the recorded group emptied before
+  // Linux gave that pid out again, so the agent is gone.
+  const reused = process.platform === 'linux';
+  if (reused) {
+    const later = cp.spawn(process.execPath, ['-e', 'setTimeout(() => {}, 120000)'], { detached: true, stdio: 'ignore' }); // wait-allow: the later group leader only idles until the test kills its group
+    t.after(() => { try { killGroup(later.pid, 'SIGKILL'); } catch {} });
+    plant('worker-group-reused', { socket });
+    fs.mkdirSync(path.join(h.state, 'homes', 'worker-group-reused'), { recursive: true });
+    fs.appendFileSync(path.join(h.state, 'events.jsonl'), JSON.stringify({
+      at: new Date().toISOString(), cmd: 'spawn', agent: 'owner', task: 'T2',
+      detail: { agent: 'worker-group-reused', role: 'worker', pid: later.pid, host: require('node:os').hostname(), start_ticks: '1' },
+    }) + '\n');
+  }
+  // A harness that exited after starting a process in a session of its own (setsid): its group is
+  // empty, and only the launch's marker, which the process inherited, names it as the agent's.
+  // Only Linux reads another process's environment.
+  const marked = process.platform === 'linux';
+  if (marked) {
+    const mark = `TOWERCRANE_SPAWN_RUN_${process.pid}_0123456789ab`;
+    const leader = cp.spawn(process.execPath, ['-e',
+      "const c = require('node:child_process').spawn(process.execPath, ['-e', 'setTimeout(() => {}, 120000)'], { detached: true, stdio: 'ignore' }); process.stdout.write(c.pid + '\\n', () => process.exit(0))"], // wait-allow: the session leader only idles until the test kills it
+    { detached: true, stdio: ['ignore', 'pipe', 'ignore'], env: { ...process.env, [mark]: '1' } });
+    const [line] = await once(leader.stdout, 'data');
+    const left = Number(String(line).trim());
+    assert.ok(left > 0, 'the harness left a process in a session of its own');
+    t.after(() => { try { killGroup(left, 'SIGKILL'); } catch {} });
+    if (leader.exitCode === null) await once(leader, 'exit');
+    plant('worker-setsid-left', { socket });
+    fs.mkdirSync(path.join(h.state, 'homes', 'worker-setsid-left'), { recursive: true });
+    fs.writeFileSync(path.join(h.state, 'homes', 'worker-setsid-left', 'note'), 'the agent\'s');
+    fs.appendFileSync(path.join(h.state, 'events.jsonl'), JSON.stringify({
+      at: new Date().toISOString(), cmd: 'spawn', agent: 'owner', task: 'T2',
+      detail: { agent: 'worker-setsid-left', role: 'worker', pid: leader.pid, host: require('node:os').hostname(), run_mark: mark },
+    }) + '\n');
+  }
+  const kept = [...(grouped ? ['worker-group-left'] : []), ...(marked ? ['worker-setsid-left'] : [])];
+  // Broker directories that closing renamed aside, holding what an agent wrote there.
+  for (const agent of ['worker-orphan', 'worker-live-process', 'worker-live-claim', ...kept]) {
+    fs.mkdirSync(path.join(stale(agent), 'sub'), { recursive: true });
+    fs.writeFileSync(path.join(stale(agent), 'sub', 'f'), 'agent');
+  }
   const bin = path.join(h.base, 'bin');
   fs.mkdirSync(bin);
   fs.writeFileSync(path.join(bin, `codex${process.platform === 'win32' ? '.exe' : ''}`), '', { mode: 0o755 });
@@ -111,8 +172,18 @@ test('the dead-agent sweep removes orphan brokers and keeps live claims, process
   assert.equal(out.code, 0, out.stderr);
   assert.equal(fs.existsSync(brokerDir('worker-orphan')), false, 'broker with no home, claim or process and a dead socket is swept');
   assert.equal(fs.existsSync(brokerDir('worker-orphan-tcp')), false, 'a dead TCP-only broker is swept');
-  for (const agent of ['worker-live-claim', 'worker-live-process', 'worker-live-monitor', 'worker-unknown-process', 'worker-live-socket', 'worker-uncertain']) {
+  for (const agent of ['worker-live-claim', 'worker-live-process', 'worker-live-monitor', 'worker-unknown-process', 'worker-live-socket', 'worker-uncertain', ...kept]) {
     assert.ok(fs.existsSync(path.join(brokerDir(agent), 'broker.json')), `${agent} is kept`);
+  }
+  if (grouped) assert.ok(fs.existsSync(path.join(h.state, 'homes', 'worker-group-left', 'note')), 'a home whose group still runs is kept');
+  if (marked) assert.ok(fs.existsSync(path.join(h.state, 'homes', 'worker-setsid-left', 'note')), 'a home whose marked process left the group is kept');
+  if (reused) {
+    assert.equal(fs.existsSync(path.join(h.state, 'homes', 'worker-group-reused')), false, 'a home whose group pid was given out again is removed');
+    assert.equal(fs.existsSync(brokerDir('worker-group-reused')), false, 'and so is its broker directory');
+  }
+  assert.equal(fs.existsSync(stale('worker-orphan')), false, 'a gone agent\'s broker directory set aside is removed');
+  for (const agent of ['worker-live-process', 'worker-live-claim', ...kept]) {
+    assert.ok(fs.existsSync(path.join(stale(agent), 'sub', 'f')), `${agent}'s broker directory set aside is kept`);
   }
 });
 
@@ -201,6 +272,7 @@ test('design tasks with an unconfigured kit still dispatch on supported harnesse
 });
 
 function writeSkill(plugin, name, body) {
+  pluginRoot(plugin);
   const file = path.join(plugin, 'skills', name, 'SKILL.md');
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, `---\nname: ${name}\ndescription: fixture frontmatter\n---\n${body}\n`);
@@ -261,7 +333,7 @@ test('spawn --dry-run builds each harness command', (t) => {
     [['--harness', 'pi', '--model', 'provider/fixture-model', '--provider', 'openai', '--effort', 'xhigh', '--args', '["--no-session"]'], (p, s) => ['pi', '-p', p, '--mode', 'json', '--model', 'provider/fixture-model', '--provider', 'openai', '--thinking', 'xhigh', ...piOwn(s), '--no-session']],
   ];
   const empty = path.join(h.base, 'no-plugin');
-  fs.mkdirSync(empty);
+  pluginRoot(empty);
   for (const [flags, expected] of cases) {
     setRung(h, 'small', flags);
     const out = dry(h, 'small', { TOWER_CRANE_PLUGIN_ROOT: empty });
@@ -348,7 +420,7 @@ test('spawn embeds the role skill in the system context for isolated reviewers a
 
 test('spawn warns when a role SKILL.md is missing', (t) => {
   const h = setup(t);
-  const plugin = path.join(h.base, 'incomplete-plugin');
+  const plugin = pluginRoot(path.join(h.base, 'incomplete-plugin'));
   fs.mkdirSync(path.join(plugin, 'skills', 'tower-crane-work'), { recursive: true });
   setRung(h, 'medium', ['--harness', 'opencode', '--model', 'a/b']);
 
@@ -590,10 +662,10 @@ test('pi rungs load the tower-crane skill for workers and reviewers when it is i
   assert.ok(!reviewer.find((arg) => arg.includes('## Task')).includes('PI_REVIEW_SKILL_MUST_NOT_BE_EMBEDDED'));
   assert.ok(!dry(h, 'small', env).argv.includes('--skill'), 'other rungs get no skill');
   const missing = path.join(h.base, 'empty-plugin');
-  fs.mkdirSync(missing);
+  pluginRoot(missing);
   assert.ok(!dry(h, 'medium', { TOWER_CRANE_PLUGIN_ROOT: missing }).argv.includes('--skill'), 'no skill when it is not installed');
 
-  const incomplete = path.join(h.base, 'incomplete-plugin');
+  const incomplete = pluginRoot(path.join(h.base, 'incomplete-plugin'));
   fs.mkdirSync(path.join(incomplete, 'skills', 'tower-crane-work'), { recursive: true });
   const warning = h.run(['spawn', '--role', 'medium', '--task', 'T1', '--dry-run', '--json'], {
     env: { TOWER_CRANE_PLUGIN_ROOT: incomplete },

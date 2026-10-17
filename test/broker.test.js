@@ -299,7 +299,7 @@ Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0);
 
   broker = await B.start(job);
   const answer = B.forward(job.broker, ['task', 'note', 'T1', 'slow'], state).then((r) => ({ r }), (e) => ({ e }));
-  const until = (check) => waitUntil(check, { paths: [base], signal: t.signal });
+  const until = (check, what) => waitUntil(check, { paths: [base], signal: t.signal, what });
   await until(() => fs.existsSync(pids) && readPublished(pids, 'utf8').length > 0, 'the brokered command started');
   started = JSON.parse(fs.readFileSync(pids, 'utf8'));
   broker.close();
@@ -424,6 +424,227 @@ test('a claude broker refuses to start when no socket path its sandbox reaches c
   const job = { ...s.job, broker_harnesses: ['claude'], broker: path.join(s.base, 'w'.repeat(90), B.FILE) };
   await assert.rejects(B.start(job), /no socket path that the agent's sandbox reaches.*XDG_CACHE_HOME/s);
   assert.deepEqual(attempted, ['/tmp']);
+  assert.equal(fs.existsSync(path.dirname(job.broker)), false, 'the refused start leaves no broker directory');
+});
+
+// A /tmp socket directory as a broker's start makes it, its mkdtemp mocked to plant `s` in its way.
+function blockedFallback(t) {
+  const made = [];
+  const { mkdtempSync: mkdtemp, rmSync: rm } = fs;
+  t.mock.method(fs, 'mkdtempSync', (...args) => {
+    const dir = mkdtemp(...args);
+    made.push(dir);
+    // Something in the way of the socket makes listen fail.
+    fs.mkdirSync(path.join(dir, 's'));
+    return dir;
+  });
+  t.after(() => made.forEach((dir) => rm(dir, { recursive: true, force: true })));
+  return made;
+}
+
+test('a broker removes the /tmp socket directory it made when it cannot listen there', { skip: process.platform === 'win32' && 'Windows uses a named pipe' }, async (t) => {
+  const s = scratch(t);
+  const made = blockedFallback(t);
+  const job = { ...s.job, broker_harnesses: ['claude'], broker: path.join(s.base, 'w'.repeat(90), B.FILE) };
+  await assert.rejects(B.start(job), /EADDRINUSE/);
+  assert.equal(made.length, 1);
+  assert.ok(made[0].startsWith('/tmp/tower-crane-'), made[0]);
+  assert.equal(fs.existsSync(made[0]), false, 'the failed start leaves no directory in /tmp');
+  assert.equal(fs.existsSync(path.dirname(job.broker)), false, 'nor the broker directory it made');
+});
+
+test('a broker start that cannot listen and cannot clean up reports the listen error with the cleanup error attached', { skip: process.platform === 'win32' && 'Windows uses a named pipe' }, async (t) => {
+  const s = scratch(t);
+  const made = blockedFallback(t);
+  const rmdirSync = fs.rmdirSync;
+  t.mock.method(fs, 'rmdirSync', (p, ...rest) => {
+    if (made.includes(p)) throw Object.assign(new Error(`EBUSY: resource busy, rmdir '${p}'`), { code: 'EBUSY' });
+    return rmdirSync(p, ...rest);
+  });
+  const job = { ...s.job, broker_harnesses: ['claude'], broker: path.join(s.base, 'w'.repeat(90), B.FILE) };
+  await assert.rejects(B.start(job), (e) => {
+    assert.equal(e.code, 'EADDRINUSE');
+    assert.match(e.message, /EADDRINUSE.*cleaning up after it failed: EBUSY/s);
+    assert.equal(e.cleanup?.code, 'EBUSY');
+    return true;
+  });
+  assert.equal(fs.existsSync(path.dirname(job.broker)), false, 'the other cleanup steps still ran');
+});
+
+test('a broker start sweeps /tmp socket directories of killed brokers and keeps every other one', { skip: (process.platform === 'win32' || typeof process.getuid !== 'function') && 'Windows uses a named pipe' }, async (t) => {
+  const s = scratch(t);
+  const net = require('node:net');
+  const planted = [];
+  const plant = (prefix = 'tower-crane-') => {
+    const dir = fs.mkdtempSync(path.join('/tmp', prefix));
+    planted.push(dir);
+    return dir;
+  };
+  t.after(() => planted.forEach((dir) => fs.rmSync(dir, { recursive: true, force: true })));
+  const old = Date.now() - 10 * 60_000;
+  const age = (dir) => {
+    fs.utimesSync(dir, old / 1000, old / 1000);
+    return dir;
+  };
+  // A broker's monitor SIGKILLed while it listened: its socket file stays and refuses connections.
+  let deadPid;
+  const killed = (dir) => {
+    const r = require('node:child_process').spawnSync(process.execPath, ['-e', "require('node:net').createServer().listen(process.argv[1], () => process.kill(process.pid, 'SIGKILL'))", path.join(dir, 's')]);
+    assert.equal(r.signal, 'SIGKILL');
+    assert.ok(fs.lstatSync(path.join(dir, 's')).isSocket());
+    deadPid = r.pid;
+    return dir;
+  };
+  const record = (dir, owner) => {
+    fs.writeFileSync(path.join(dir, 'owner.json'), JSON.stringify({ host: os.hostname(), started: old, ...owner }));
+    return dir;
+  };
+  const self = require('../lib/processes').identity(process.pid);
+  // Made by an older Tower Crane, with no owner record: its socket's refusal is the proof.
+  const legacyDead = age(killed(plant()));
+  const legacyYoung = killed(plant());
+  const live = plant();
+  const server = await new Promise((resolve) => { const srv = net.createServer().listen(path.join(live, 's'), () => resolve(srv)); });
+  t.after(() => server.close());
+  age(live);
+  const starting = age(plant());
+  const shared = killed(plant());
+  fs.writeFileSync(path.join(shared, 'other'), 'not the broker\'s');
+  age(shared);
+  const foreign = age(killed(plant('tower-crane-other-')));
+  // Made by this version: the owner record decides, not the socket.
+  const ownerGone = age(record(killed(plant()), { pid: deadPid }));
+  const ownerGoneUnbound = age(record(plant(), { pid: deadPid }));
+  const ownerLive = age(record(killed(plant()), { pid: process.pid, ...self }));
+  const ownerGoneYoung = age(record(killed(plant()), { pid: deadPid, started: Date.now() }));
+  const ownerElsewhere = age(record(killed(plant()), { pid: deadPid, host: `not-${os.hostname()}` }));
+  // A record reached through a link is not the broker's: the link is not followed.
+  const ownerLinked = killed(plant());
+  const target = path.join(s.base, 'owner-target.json');
+  fs.writeFileSync(target, JSON.stringify({ pid: deadPid, host: os.hostname(), started: old }));
+  fs.symlinkSync(target, path.join(ownerLinked, 'owner.json'));
+  age(ownerLinked);
+  const reused = process.platform === 'linux' ? [age(record(killed(plant()), { pid: process.pid, host: os.hostname(), start_ticks: '1' }))] : [];
+  const broker = await B.start({ ...s.job, broker_harnesses: ['claude'], broker: path.join(s.base, 'brokers', 'worker-T1-1', B.FILE) });
+  t.after(() => broker.close());
+  for (const dir of [legacyDead, ownerGone, ownerGoneUnbound, ...reused]) assert.equal(fs.existsSync(dir), false, `a killed broker's ${dir} is swept`);
+  for (const dir of [legacyYoung, live, starting, shared, foreign, ownerLive, ownerGoneYoung, ownerElsewhere, ownerLinked]) assert.equal(fs.existsSync(dir), true, `${dir} stays`);
+  assert.ok(fs.lstatSync(path.join(live, 's')).isSocket(), 'the live broker keeps its socket');
+  assert.ok(fs.lstatSync(path.join(ownerLive, 's')).isSocket(), 'a live owner keeps a socket that refuses connections');
+});
+
+test('a FIFO planted as an owner record does not block a broker start', { skip: (process.platform === 'win32' || typeof process.getuid !== 'function') && 'Windows has no FIFOs in /tmp' }, (t) => {
+  const s = scratch(t);
+  const cp = require('node:child_process');
+  const dir = fs.mkdtempSync(path.join('/tmp', 'tower-crane-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const fifo = path.join(dir, 'owner.json');
+  const made = cp.spawnSync('mkfifo', [fifo]);
+  if (made.status !== 0) return t.skip('mkfifo is unavailable');
+  const old = (Date.now() - 10 * 60_000) / 1000;
+  fs.utimesSync(dir, old, old);
+  // Opening a FIFO with no writer blocks, so the start runs in a child with a bound.
+  const job = { ...s.job, broker_harnesses: ['claude'], broker: path.join(s.base, 'brokers', 'worker-T1-1', B.FILE) };
+  const r = cp.spawnSync(process.execPath, ['-e', "require(process.argv[1]).start(JSON.parse(process.argv[2])).then((b) => { b.close(); process.stdout.write('started') })",
+    path.join(ROOT, 'lib', 'broker.js'), JSON.stringify(job)], { encoding: 'utf8', timeout: 20000, killSignal: 'SIGKILL' }); // wait-allow: a blocked FIFO open never returns, so the bound turns that hang into this test's failure
+  assert.equal(r.signal, null, 'the start finished within its bound');
+  assert.equal(r.stdout, 'started', r.stderr);
+  assert.ok(fs.lstatSync(fifo).isFIFO(), 'a record that is not a file is not the broker\'s: the directory stays');
+});
+
+test('a broker that falls back to /tmp names its monitor in an owner record', { skip: process.platform === 'win32' && 'Windows uses a named pipe' }, async (t) => {
+  const s = scratch(t);
+  const job = { ...s.job, broker_harnesses: ['claude'], broker: path.join(s.base, 'w'.repeat(90), B.FILE) };
+  const before = Date.now();
+  const broker = await B.start(job);
+  const after = Date.now();
+  t.after(() => broker.close());
+  const { socket } = JSON.parse(fs.readFileSync(job.broker, 'utf8'));
+  const owner = JSON.parse(fs.readFileSync(path.join(path.dirname(socket), 'owner.json'), 'utf8'));
+  assert.equal(owner.pid, process.pid);
+  assert.equal(owner.host, os.hostname());
+  assert.ok(owner.started >= before && owner.started <= after, `${owner.started} is the start's time`);
+  assert.equal(require('../lib/processes').processState(owner), 'running');
+});
+
+test('what the agent leaves at its broker.sock breaks neither the next spawn nor the broker\'s close, and the broker never walks it', { skip: process.platform === 'win32' && 'Windows uses a named pipe' }, async (t) => {
+  const s = scratch(t);
+  const tmp = path.join(s.base, 't');
+  if (!require('../lib/gate-tmp').harnessFits(tmp)) return t.skip(`the test root is too deep for an agent temp directory: ${tmp}`);
+  const sock = path.join(tmp, 'broker.sock');
+  const stale = () => fs.readdirSync(tmp).filter((n) => n.startsWith('broker.sock.stale-'));
+  const job = { ...s.job, broker_harnesses: ['claude'], agent_tmp: tmp, broker: path.join(s.base, 'w'.repeat(90), B.FILE) };
+  // A tree the agent wrote is renamed aside whole, in the agent's own temp directory.
+  fs.mkdirSync(path.join(sock, 'inside'), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(sock, 'inside', 'f'), 'x');
+  let broker = await B.start(job);
+  let closed = false;
+  t.after(() => closed || broker.close());
+  assert.equal(JSON.parse(fs.readFileSync(job.broker, 'utf8')).socket, sock);
+  assert.ok(fs.lstatSync(sock).isSocket(), 'the broker listens where the directory was');
+  assert.equal(stale().length, 1);
+  assert.equal(fs.readFileSync(path.join(tmp, stale()[0], 'inside', 'f'), 'utf8'), 'x', 'the tree is moved, not walked');
+  // The agent swaps its socket for a link to a directory outside while the broker runs.
+  const outside = path.join(s.base, 'outside');
+  fs.mkdirSync(outside);
+  fs.writeFileSync(path.join(outside, 'keep'), 'k');
+  fs.rmSync(sock);
+  fs.symlinkSync(outside, sock);
+  broker.close();
+  closed = true;
+  assert.equal(fs.existsSync(sock) || fs.lstatSync(sock, { throwIfNoEntry: false }) !== undefined, false, 'closing removes the link');
+  assert.equal(fs.readFileSync(path.join(outside, 'keep'), 'utf8'), 'k', 'and nothing it points to');
+  assert.equal(fs.existsSync(path.dirname(job.broker)), false, 'and still removes the broker directory');
+  // An empty directory there is removed.
+  fs.mkdirSync(sock);
+  broker = await B.start(job);
+  closed = false;
+  assert.ok(fs.lstatSync(sock).isSocket());
+  assert.equal(stale().length, 1, 'an empty directory is removed, not renamed aside');
+  // One that can be neither removed nor renamed refuses the spawn with the reason and leaves no broker directory.
+  broker.close();
+  closed = true;
+  fs.mkdirSync(path.join(sock, 'inside'), { recursive: true });
+  t.mock.method(fs, 'renameSync', () => { throw Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' }); });
+  await assert.rejects(B.start(job), /cannot clear .*broker\.sock, which is in the way of the broker socket \(EACCES\)/);
+  assert.equal(fs.existsSync(path.dirname(job.broker)), false, 'the refused start leaves no broker directory');
+  assert.ok(fs.existsSync(path.join(sock, 'inside')), 'and does not walk the tree');
+});
+
+test('closing never walks a broker directory the agent wrote: what else is there is moved aside whole, links unfollowed', async (t) => {
+  const s = scratch(t);
+  const brokers = path.join(s.base, 'brokers');
+  // A codex agent's sandbox writes its own broker directory.
+  const job = { ...s.job, harness: 'codex', broker_harnesses: ['codex'], broker: path.join(brokers, 'worker-T1-1', B.FILE) };
+  const broker = await B.start(job);
+  let closed = false;
+  t.after(() => closed || broker.close());
+  const where = path.dirname(job.broker);
+  fs.mkdirSync(path.join(where, 'sub'));
+  fs.writeFileSync(path.join(where, 'sub', 'f'), 'agent');
+  const outside = path.join(s.base, 'outside');
+  fs.mkdirSync(outside);
+  fs.writeFileSync(path.join(outside, 'keep'), 'k');
+  fs.symlinkSync(outside, path.join(where, 'link'));
+  const notices = [];
+  const write = process.stderr.write;
+  t.mock.method(process.stderr, 'write', (chunk, ...rest) => {
+    if (String(chunk).includes('the broker left')) notices.push(String(chunk));
+    else return write.call(process.stderr, chunk, ...rest);
+    return true;
+  });
+  broker.close();
+  closed = true;
+  assert.equal(fs.existsSync(where), false, 'the broker directory is gone from its name');
+  const aside = fs.readdirSync(brokers).filter((n) => n.startsWith('.stale-worker-T1-1-'));
+  assert.equal(aside.length, 1, fs.readdirSync(brokers).join(' '));
+  const moved = path.join(brokers, aside[0]);
+  assert.deepEqual(fs.readdirSync(moved).sort(), ['link', 'sub'], 'what the broker wrote is removed, the rest moved whole');
+  assert.equal(fs.readFileSync(path.join(moved, 'sub', 'f'), 'utf8'), 'agent');
+  assert.ok(fs.lstatSync(path.join(moved, 'link')).isSymbolicLink());
+  assert.deepEqual(fs.readdirSync(outside), ['keep'], 'the link\'s target is kept');
+  assert.equal(notices.length, 1);
+  assert.match(notices[0], new RegExp(`left ${where.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} as ${moved.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
 });
 
 test('a broker for claude and codex routes listens on both, and an agent that cannot use the socket uses TCP', { skip: process.platform === 'win32' && 'Windows uses a named pipe for both' }, async (t) => {
@@ -1130,12 +1351,14 @@ const alive = (pid) => { try { killPid(pid, 0); return true; } catch { return fa
 // after the writer's shutdown, so an agent that ends its side to mark the end
 // of its pack loses the answer. A peer that closes the connection when the
 // agent ends its side stands in for that pipe on every platform.
-test('a push gets its answer over a connection that closes when the agent ends its side, as a Windows named pipe does', async (t) => {
+test('a push gets its answer over a connection that closes when the agent ends its side, as a Windows named pipe does, and an empty chunk of its pack ends nothing', async (t) => {
+  // The {need} of every broker release names no framing; each reads frames.
   const { base } = scratch(t);
   const net = require('node:net');
   const socket = process.platform === 'win32' ? `\\\\.\\pipe\\tower-crane-test-${process.pid}-${Date.now()}` : path.join(base, 's');
   let got = Buffer.alloc(0);
   let request = null;
+  let answered = false;
   const framed = Buffer.from([0, 0, 0, 3, ...Buffer.from('abc'), 0, 0, 0, 4, ...Buffer.from('defg'), 0, 0, 0, 0]);
   const server = net.createServer({ allowHalfOpen: false }, (conn) => {
     conn.on('error', () => {});
@@ -1149,7 +1372,9 @@ test('a push gets its answer over a connection that closes when the agent ends i
         conn.write(`${JSON.stringify({ stderr: 'checking\n' })}\n${JSON.stringify({ need: { have: [] } })}\n`);
       }
       // The broker checks the push for a while before it answers.
-      if (got.equals(framed)) setTimeout(() => conn.end(`${JSON.stringify({ code: 0 })}\n`), 200); // wait-allow: the fake broker's checking time, so the agent's side must stay open past its own pack
+      if (got.length < framed.length || answered) return;
+      answered = true;
+      setTimeout(() => conn.end(`${JSON.stringify({ code: 0 })}\n`), 200); // wait-allow: the fake broker's checking time, so the agent's side must stay open past its own pack
     });
   });
   await new Promise((resolve) => server.listen(socket, resolve));
@@ -1157,12 +1382,195 @@ test('a push gets its answer over a connection that closes when the agent ends i
   const file = path.join(base, B.FILE);
   fs.writeFileSync(file, JSON.stringify({ socket, token: 'k' }));
   let stderr = '';
-  const pack = () => require('node:stream').Readable.from([Buffer.from('abc'), Buffer.from('defg')]);
+  const pack = () => require('node:stream').Readable.from([Buffer.from('abc'), Buffer.alloc(0), Buffer.from('defg')]);
   const code = await B.request(file, { push: { sha: 'a'.repeat(40) } }, { stdout() {}, stderr: (s) => { stderr += s; } }, { pack });
   assert.equal(code, 0);
   assert.deepEqual(request, { token: 'k', push: { sha: 'a'.repeat(40) } });
   assert.equal(stderr, 'checking\n');
   assert.ok(got.equals(framed), 'the pack arrives in frames, ended by an empty frame');
+});
+
+// A body that cannot take a whole frame asks the connection to wait for its
+// drain, but once the end frame came in the same read no drain comes, and a
+// connection paused for it would miss the agent's hang-up during the checks
+// and the push.
+test('the broker\'s unframing never waits on a body the end frame has ended', () => {
+  const { PassThrough } = require('node:stream');
+  const body = new PassThrough({ highWaterMark: 4 });
+  const unframe = B.frames(body);
+  const room = unframe(Buffer.concat([B.frame(Buffer.from('abcdefgh')), B.frame(Buffer.alloc(0))]));
+  assert.equal(body.writableEnded, true, 'the empty frame ended the body');
+  assert.equal(room, true, 'an ended body never asks the connection to wait');
+  // A full body that has not ended still asks it to wait.
+  const open = new PassThrough({ highWaterMark: 4 });
+  assert.equal(B.frames(open)(B.frame(Buffer.from('abcdefgh'))), false);
+});
+
+// An agent that speaks the push protocol by hand: it sends the request
+// line and, when the broker asks for the pack, writes what send(have)
+// returns, each buffer as one write; end then ends its side, as a shim from
+// before frames did, and socket receives the connection. Resolves with the
+// answer's code (null without one), its stderr and the {need} the broker
+// sent.
+function handPush(f, sha, send, { end = false, socket = () => {} } = {}) {
+  const net = require('node:net');
+  const b = JSON.parse(fs.readFileSync(f.job.broker, 'utf8'));
+  return new Promise((resolve) => {
+    const sock = b.socket ? net.connect({ path: b.socket, allowHalfOpen: true }) : net.connect({ port: b.port, host: b.host, allowHalfOpen: true });
+    let buf = '';
+    let code = null;
+    let stderr = '';
+    let need = null;
+    socket(sock);
+    sock.setEncoding('utf8');
+    sock.on('error', () => {});
+    sock.on('connect', () => sock.write(`${JSON.stringify({ token: b.token, push: { sha } })}\n`));
+    sock.on('data', (d) => {
+      buf += d;
+      for (let nl = buf.indexOf('\n'); nl >= 0; nl = buf.indexOf('\n')) {
+        const msg = JSON.parse(buf.slice(0, nl));
+        buf = buf.slice(nl + 1);
+        if (msg.code !== undefined) code = msg.code;
+        else if (typeof msg.stderr === 'string') stderr += msg.stderr;
+        else if (msg.need && !need) {
+          need = msg.need;
+          for (const part of send(need.have)) sock.write(part);
+          if (end) sock.end();
+        }
+      }
+    });
+    sock.on('end', () => sock.destroy());
+    sock.on('close', () => resolve({ code, stderr, need }));
+  });
+}
+
+// The pack the shim would send for sha, whole, as one buffer.
+function packOf(f, sha, have) {
+  return require('node:child_process').execFileSync('git', ['pack-objects', '--stdout', '--revs', '--thin', '--delta-base-offset', '-q'],
+    { cwd: f.wt.path, input: [sha, ...have.map((h) => `^${h}`)].map((l) => `${l}\n`).join('') });
+}
+
+// Bad frames from an agent's own client: none allocates by its claimed
+// length, a frame or header that stops short is ended by the idle limit, and
+// each leaves the cache lock free and the branch unpushed. A pack index-pack
+// reads whole needs no more, and bytes after the end frame are dropped.
+test('the broker refuses bad frames from the agent and frees the cache lock', async (t) => {
+  const f = await pushFixture(t);
+  const G = require('../lib/github-broker');
+  const saved = { ...G.LIMITS };
+  t.after(() => Object.assign(G.LIMITS, saved));
+  const lock = path.join(f.h.state, 'push', 'cache.lock');
+  const branch = `refs/heads/${f.task.branch}`;
+  const head = (n) => {
+    const b = Buffer.alloc(4);
+    b.writeUInt32BE(n);
+    return b;
+  };
+  const sha = f.commit('a.txt', 'a\n');
+  const refused = async (what, send) => {
+    const started = Date.now();
+    const r = await handPush(f, sha, send);
+    assert.notEqual(r.code, null, `${what}: the broker answered\n${r.stderr}`);
+    assert.notEqual(r.code, 0, `${what}: refused`);
+    assert.equal(fs.existsSync(lock), false, `${what}: the cache lock is free`);
+    assert.equal(f.remoteRef(branch), null, `${what}: nothing was pushed`);
+    return { ...r, ms: Date.now() - started };
+  };
+  // A length near 4 GiB followed by 1 MB that is no pack: index-pack refuses
+  // its first bytes and nothing was held for the length.
+  const oversized = await refused('oversized length', () => [head(0xFFFFFFF0), Buffer.alloc(1 << 20, 0x41)]);
+  assert.match(oversized.stderr, /signature|not in the task repository/);
+  G.LIMITS.idleMs = 500;
+  const partial = await refused('partial header', () => [Buffer.from([0, 0])]);
+  assert.match(partial.stderr, /stalled/);
+  const short = await refused('length past the data', (have) => [head(1 << 20), packOf(f, sha, have).subarray(0, 12)]);
+  assert.match(short.stderr, /stalled/);
+  for (const r of [partial, short]) assert.ok(r.ms < 10000, 'the idle limit ended the push'); // wait-allow: the 500 ms idle limit under test ends the push long before any other limit
+  G.LIMITS.idleMs = saved.idleMs;
+  // The whole pack with no end frame: index-pack stops at the pack's
+  // trailer, so the push has every object it checks and goes through.
+  const whole = await handPush(f, sha, (have) => [B.frame(packOf(f, sha, have))]);
+  assert.equal(whole.code, 0, whole.stderr);
+  assert.equal(f.remoteRef(branch), sha);
+  // Bytes after the end frame are dropped.
+  const next = f.commit('b.txt', 'b\n');
+  const trailing = await handPush(f, next, (have) => [Buffer.concat([B.frame(packOf(f, next, have)), B.frame(Buffer.alloc(0)), Buffer.from('trailing bytes')])]);
+  assert.equal(trailing.code, 0, trailing.stderr);
+  assert.equal(f.remoteRef(branch), next);
+  assert.equal(fs.existsSync(lock), false);
+});
+
+// Every release frames the pack, and a spawn's shims and broker run one
+// copy of the tool, so only a shim from a snapshot before framed packs sends
+// a bare one. Its broker says so, not "pack signature mismatch", and the
+// shim, which ends its side after its pack, still gets that answer.
+test('a broker tells a shim from before framed packs why its push failed', async (t) => {
+  const f = await pushFixture(t);
+  const sha = f.commit('a.txt', 'a\n');
+  const old = await handPush(f, sha, (have) => [packOf(f, sha, have)], { end: true });
+  assert.notEqual(old.code, null, 'the old shim gets the answer');
+  assert.notEqual(old.code, 0);
+  assert.match(old.stderr, /sent its pack unframed, as a Tower Crane snapshot from before framed packs \(T291\) does/);
+  assert.equal(f.remoteRef(`refs/heads/${f.task.branch}`), null);
+});
+
+// The read that brings the whole pack and its end frame finds the body
+// full, so it asks the connection to wait for a drain that an ended body
+// never emits. The agent then sends a few more bytes and hangs up while the
+// broker's git push waits in the remote's pre-receive hook: the broker must
+// see it and stop the push. A paused connection still reports the end of an
+// agent that sent nothing more, but bytes after the end frame sit unread in
+// front of that end.
+// A body fills only when index-pack falls behind the socket, which depends
+// on the platform's pipe sizes and read boundaries, so the body the broker
+// makes for this push reports itself full on every write. Like a real body
+// it drains on a later tick unless it has ended, so a pack that comes in two
+// reads still reaches the end frame.
+test('a broker whose agent sent its whole pack in one read sees the agent hang up during the push', async (t) => {
+  const f = await pushFixture(t);
+  const stream = require('node:stream');
+  const real = stream.PassThrough;
+  t.after(() => { stream.PassThrough = real; });
+  class Full extends real {
+    write(...args) {
+      super.write(...args);
+      process.nextTick(() => this.writableEnded || this.emit('drain'));
+      return false;
+    }
+  }
+  const lock = path.join(f.h.state, 'push', 'cache.lock');
+  const started = path.join(f.h.base, 'hook-started');
+  const release = path.join(f.h.base, 'hook-release');
+  const slash = (p) => p.replace(/\\/g, '/');
+  // It waits for the release file, or for the fixture to be removed when the
+  // test ends. The push runs in a process group of its own, so a cancelled
+  // test run would leave it waiting: on POSIX it also stops once this test
+  // process is gone (Git for Windows' kill does not see a Windows pid).
+  const tester = process.platform === 'win32' ? '' : ` && kill -0 ${process.pid} 2>/dev/null`;
+  fs.writeFileSync(path.join(f.remote, 'hooks', 'pre-receive'),
+    `#!/bin/sh\n: > '${slash(started)}'\nwhile [ ! -f '${slash(release)}' ] && [ -d '${slash(f.h.base)}' ]${tester}; do sleep 0.1; done\n`, { mode: 0o755 });
+  t.after(() => { try { fs.writeFileSync(release, ''); } catch {} });
+  const sha = f.commit('a.txt', 'a\n');
+  let sock = null;
+  // Only the next PassThrough, the body the broker makes when it reads the
+  // request line.
+  stream.PassThrough = function PassThrough(...args) {
+    stream.PassThrough = real;
+    return new Full(...args);
+  };
+  const done = handPush(f, sha, (have) => [Buffer.concat([B.frame(packOf(f, sha, have)), B.frame(Buffer.alloc(0))])],
+    { socket: (s) => { sock = s; } });
+  await waitUntil(() => fs.existsSync(started), { paths: [f.h.base], what: 'the broker\'s push reaches the remote\'s hook' });
+  sock.end(Buffer.from('after the end frame'));
+  // A broker that missed the hang-up holds the cache lock in the hook until
+  // the release file appears, so the wait is bounded and then releases it.
+  const bound = AbortSignal.timeout(20000); // wait-allow: a broker that missed the hang-up never stops the push; the bound turns that into a prompt failure
+  const stopped = await waitUntil(() => !fs.existsSync(lock), { paths: [path.dirname(lock)], signal: bound, what: 'the push ends and frees the cache lock' })
+    .then(() => true, () => false);
+  fs.writeFileSync(release, '');
+  await done;
+  assert.ok(stopped, 'the broker saw the agent hang up and stopped its push within 20 s');
+  assert.equal(f.remoteRef(`refs/heads/${f.task.branch}`), null, 'the push of an agent that hung up was stopped');
 });
 
 // index-pack stops at the first object fsck refuses, long before a large

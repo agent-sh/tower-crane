@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { HUNG_TEST_MS, waitOnRepo, waitUntil, fileWritten, killPid } = require('./signals');
-const { cachedFixture, BIN, processesIn } = require('./helpers');
+const { cachedFixture, assertNoProcessesIn } = require('./helpers');
 const { gateEvidence } = require('./gate-helpers');
 const { waitFor } = require('./canary');
 const { shellQuote } = require('../lib/gates/common');
@@ -612,6 +612,87 @@ test('a test failure whose base rerun times out is not confirmed, retries once a
     /Base rerun at [0-9a-f]+ timed out after 0\.05 min; shared failures were not checked\./);
 });
 
+test('a second wait signal during the base rerun records base_rerun_killed, and the next wait retries once', {
+  skip: process.platform === 'win32' ? 'Windows child.kill does not deliver POSIX signals' : false,
+}, async (t) => {
+  const h = setup(t, { ci: 'pending' });
+  const started = path.join(h.base, 'base-started');
+  const release = path.join(h.base, 'base-release');
+  const script = path.join(h.base, 'base-held.js');
+  // Fails by name at the submitted head, where value.js is 1, and holds the base rerun, where it is 0, until released.
+  // The script finds its files next to itself, so no test value is spliced into its code.
+  fs.writeFileSync(script, `const fs = require('node:fs');
+const path = require('node:path');
+if (!fs.readFileSync('value.js', 'utf8').includes('1')) {
+  // The test reads this pid after the rerun is killed, so it is renamed into place, never read empty.
+  const started = path.join(__dirname, 'base-started');
+  fs.writeFileSync(started + '.tmp', String(process.pid));
+  fs.renameSync(started + '.tmp', started);
+  const until = Date.now() + ${HUNG_TEST_MS}; // wait-allow: an orphaned rerun stops itself; the release file is its signal
+  const poll = () => fs.existsSync(path.join(__dirname, 'base-release')) || Date.now() > until ? process.exit(0) : setTimeout(poll, 25); // wait-allow: probe cadence only; the release file is the signal
+  poll();
+} else {
+  console.log('# Subtest: test/sum.test.js');
+  console.log('not ok 1 - sums two numbers');
+  process.exit(1);
+}
+`);
+  h.ok(['project', 'set', '--tests-cmd', `node ${shellQuote(script)}`, '--tests-mode', 'run-only']);
+  h.submit();
+  const observed = path.join(h.base, 'signal-observed');
+  const preload = path.join(h.base, 'signal-observer.js');
+  // A receipt synchronizes the test with the first signal before it sends the second.
+  fs.writeFileSync(preload, "process.on('SIGTERM', () => require('node:fs').appendFileSync(require('node:path').join(__dirname, 'signal-observed'), 'SIGTERM\\n'));\n");
+  const child = h.spawnCli(['wait', '--after', '0', '--types', 'never', '--timeout', '300', '--agent', 'orchestrator'],
+    { pre: ['--require', preload] });
+  let stdout = '';
+  let stderr = '';
+  child.stdout.on('data', (chunk) => { stdout += chunk; });
+  child.stderr.on('data', (chunk) => { stderr += chunk; });
+  const result = new Promise((resolve, reject) => {
+    child.on('error', reject);
+    child.on('close', (code, signal) => resolve({ code, signal, stdout, stderr }));
+  });
+  const timer = setTimeout(() => child.kill('SIGKILL'), HUNG_TEST_MS);
+  // Fixture cleanup runs these first, while the fixture still exists.
+  h.teardown.push(async () => {
+    clearTimeout(timer);
+    fs.writeFileSync(release, '');
+    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+    await result;
+  });
+  await waitFor(started, { nonempty: true, what: 'the base rerun starts' });
+  child.kill('SIGTERM');
+  await waitFor(observed, { what: 'wait receives the first signal' });
+  assert.equal(child.exitCode, null, 'the base rerun still holds wait open');
+  child.kill('SIGTERM');
+  const exit = await result;
+  assert.equal(exit.code, 0, JSON.stringify(exit));
+  assert.match(exit.stdout, /stopped by SIGTERM after draining 0 gates/);
+  const pid = Number(readPublished(started, 'utf8'));
+  assert.equal(require('../lib/processes').processState({ pid }), 'exited', 'the second signal kills the base rerun');
+  const first = h.readState('tasks.json').tasks[0];
+  assert.equal(first.status, 'submitted', 'shutdown leaves the interrupted gate for the next wait');
+  const killed = first.evidence.filter((e) => e.type === 'tests');
+  assert.equal(killed.length, 1);
+  assert.equal(killed[0].confirmed_failure, undefined, 'the base never said which names fail there');
+  assert.match(killed[0].base_rerun_killed.base, /^[0-9a-f]+$/);
+  assert.equal(killed[0].base_rerun_killed.signal, 'SIGKILL');
+  assert.deepEqual(h.logs().filter((e) => e.cmd === 'check tests').map((e) => e.detail.base_rerun_killed), [killed[0].base_rerun_killed],
+    'the audit event carries the same flag as the evidence');
+
+  // The retry's base rerun finishes and passes, so the head's failure is confirmed and reworks.
+  fs.writeFileSync(release, '');
+  h.consume();
+  assert.equal(h.logs().filter((e) => e.cmd === 'check tests').length, 2, 'the killed base rerun runs once more, and no third time');
+  const task = h.readState('tasks.json').tasks[0];
+  const runs = task.evidence.filter((e) => e.type === 'tests');
+  assert.equal(runs[1].sha, runs[0].sha, 'the retry runs at the same head');
+  assert.equal(runs[1].base_rerun_killed, undefined);
+  assert.ok(runs[1].confirmed_failure, 'the base passed, so the failure is the head\'s own');
+  assertReworked(h, task);
+});
+
 test('a test gate that fails by hand while the watcher runs reworks, not left submitted', async (t) => {
   const h = setup(t, { ci: 'pending' });
   const flag = path.join(h.base, 'broken');
@@ -924,9 +1005,9 @@ if (${stage === 'trial'}) {
   };
 }
 `);
-      const child = require('node:child_process').spawn(process.execPath,
-        ['--require', preload, BIN, 'wait', '--after', String(cursor), '--types', 'never', '--timeout', '300', '--agent', 'orchestrator'],
-        { cwd: h.repo, env: h.env });
+      // Cleanup stops any worker this wait host dispatches, should the fixture ever unpause.
+      const child = h.spawnCli(['wait', '--after', String(cursor), '--types', 'never', '--timeout', '300', '--agent', 'orchestrator'],
+        { pre: ['--require', preload] });
       let stdout = '', stderr = '';
       child.stdout.on('data', (chunk) => { stdout += chunk; });
       child.stderr.on('data', (chunk) => { stderr += chunk; });
@@ -941,7 +1022,7 @@ if (${stage === 'trial'}) {
         if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
         await result;
         await h.cleanup();
-        assert.deepEqual(processesIn(h.base), [], 'no process the test started outlives its fixture');
+        assertNoProcessesIn(t, h.base);
       });
       await waitFor(started, { what: 'the post-merge sweep starts' });
       assert.equal(h.github().prs['7'].state, 'MERGED');
@@ -1300,7 +1381,7 @@ require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'public-http'))}).fet
           catch (e) { if (e.code !== 'ESRCH') throw e; }
         }
         await h.cleanup();
-        assert.deepEqual(processesIn(h.base), [], 'no process the test started outlives its fixture');
+        assertNoProcessesIn(t, h.base);
       });
       await waitFor(started, { what: idle ? 'wait is ready' : 'the gate starts' });
       child.kill(signal);

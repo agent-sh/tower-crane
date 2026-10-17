@@ -6,7 +6,7 @@ const path = require('path');
 const gate = require('../../lib/gates/tests');
 const { scratch, isolateGit, isolateUserFile, git, commit, initRepo, worktrees, quote } = require('./helpers');
 const { detachedAlive } = require('../helpers');
-const { shellQuote, treeExec, withWorktree } = require('../../lib/gates/common');
+const { shellQuote, treeExec, withWorktree, createRedactor, redactJoined } = require('../../lib/gates/common');
 const { waitUntil, killPid } = require('../signals');
 
 const NODE = quote(process.execPath);
@@ -249,6 +249,64 @@ test('a host-only failure on the base keeps its opt-in and command for retry cla
     assert.deepEqual(r.receipt.host_only.run, ['test/host-known.test.js']);
     assertCleanedUp();
   }
+});
+
+test('joined redaction keeps a split token redacted across streams, a piece keeps its line ending, and ranges stay apart', () => {
+  const token = `ghp_${'A1b2C3d4E5'.repeat(4)}`;
+  for (const eol of ['\n', '\r\n']) {
+    const runs = [
+      { stream: 'out', text: `split ${token.slice(0, 14)}${eol}` },
+      { stream: 'err', text: `not ok 3 - flaky${eol}` },
+      { stream: 'out', text: `${token.slice(14)} tail${eol}` },
+    ];
+    const out = redactJoined({ output: runs.map((r) => r.text).join(''), runs }, createRedactor([]));
+    assert.equal(out, 'split [redacted:GITHUB_TOKEN]\nnot ok 3 - flaky\n[redacted:GITHUB_TOKEN] tail\n', JSON.stringify(eol));
+  }
+  // A token split between the streams on adjacent lines of the joined output stays one redacted
+  // secret, as the joined text alone redacts it.
+  const env = `ghp_${'a1'.repeat(18)}`;
+  const cross = [
+    { stream: 'out', text: `cross ${env.slice(0, 20)}\n` },
+    { stream: 'err', text: `${env.slice(20)} (stderr)\n` },
+    { stream: 'out', text: '-- after the split\n' },
+  ];
+  assert.equal(redactJoined({ output: cross.map((r) => r.text).join(''), runs: cross }, createRedactor([['CI_FIXTURE_TOKEN', env]])),
+    'cross [redacted:CI_FIXTURE_TOKEN] (stderr)\n-- after the split\n');
+  // A header running to the end of the text holds the environment value as its last piece.
+  const value = 'Z0000ABCDEFGHJKLMNPQRSTUV7';
+  const ranges = createRedactor([['S_TOKEN', value]]).ranges(`x Authorization: Bearer ${value}`);
+  assert.ok(ranges.length > 0);
+  for (let i = 1; i < ranges.length; i++) assert.ok(ranges[i - 1].b <= ranges[i].a, JSON.stringify(ranges));
+});
+
+test('a host-only failure redacts a token its stdout wrapped around a stderr line', async () => {
+  const token = `ghp_${'c3'.repeat(18)}`;
+  // In process, so the file's own stdout and stderr reach the gate as two streams; the pauses let
+  // the gate read each write on its own.
+  const sha = task({
+    'test/host-split.test.js': `const pause = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); // wait-allow: the gate sends the fixture no signal when it has read a write
+console.log('split ' + process.env.TC_SPLIT_TOKEN.slice(0, 10));
+pause(100);
+console.error('between the halves');
+pause(100);
+console.log(process.env.TC_SPLIT_TOKEN.slice(10) + ' tail');
+require('node:test')('host split failure', () => require('node:assert/strict').fail('host failure'));
+`,
+  });
+  const ordinary = `${NODE} --test test/mul.test.js`;
+  const r = await gate.run(ctx(sha, {
+    args: { cmd: ordinary },
+    project: {
+      tests: { mode: 'run-only', host_only: ['test/host-split.test.js'], host_env: { TC_SPLIT_TOKEN: token } },
+      gates: { tests_cmd: ordinary, tests_proof_cmd: `${NODE} --test --test-isolation=none {tests}` },
+    },
+  }));
+  assert.equal(r.ok, false);
+  assert.deepEqual(r.test_failure.names, ['host split failure']);
+  const tail = r.test_failure.output_tail;
+  assert.ok(!/(?:c3){4}/.test(tail), tail);
+  assert.match(tail.replace(/^between the halves\n/m, ''), /^split \[redacted:TC_SPLIT_TOKEN\](?:\n\[redacted:TC_SPLIT_TOKEN\])? tail$/m);
+  assertCleanedUp();
 });
 
 test('missing host-only command pins report the proof command configuration', async () => {

@@ -295,6 +295,13 @@ test('failed test diagnostics redact process, project, rung and env_file secrets
   const testFile = `const test = require('node:test');
 const assert = require('node:assert/strict');
 const report = [process.env.T83_PROCESS_TOKEN, ${literals.map((value) => JSON.stringify(value)).join(', ')}].join(' ');
+// The token wrapped onto two stdout lines with a stderr line between them, each read on its own.
+const pause = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); // wait-allow: the gate sends the fixture no signal when it has read a write
+console.log('split ' + process.env.T83_PROCESS_TOKEN.slice(0, 12));
+pause(100);
+console.error('between the halves');
+pause(100);
+console.log(process.env.T83_PROCESS_TOKEN.slice(12) + ' tail');
 test('failure ' + process.env.T83_PROCESS_TOKEN, () => {
   console.log(report);
   assert.fail('fixture failure');
@@ -309,7 +316,8 @@ test('failure ' + process.env.T83_PROCESS_TOKEN, () => {
     if (key.startsWith('NODE_TEST_')) delete h.env[key];
   }
 
-  const cmd = `${shellQuote(process.execPath)} --test --test-reporter=tap test/failure.test.js`;
+  // In process, so the fixture's own stdout and stderr reach the gate as two streams.
+  const cmd = `${shellQuote(process.execPath)} --test --test-isolation=none --test-reporter=tap test/failure.test.js`;
   h.ok(['project', 'set', '--tests-mode', 'run-only', '--tests-cmd', cmd]);
   const result = h.run(['check', 'tests', 'T1', '--agent', 'checker', '--json'], {
     env: { T83_PROCESS_TOKEN: canaries.process },
@@ -317,6 +325,10 @@ test('failure ' + process.env.T83_PROCESS_TOKEN, () => {
   assert.equal(result.code, 1, result.stderr + result.stdout);
 
   const evidence = h.readState('tasks.json').tasks[0].evidence.at(-1);
+  // Each stream's own text is read for secrets too, so the stderr line between the halves leaves
+  // both redacted.
+  assert.match(evidence.test_failure.output_tail, /^between the halves$/m);
+  assert.match(evidence.test_failure.output_tail.replace(/^between the halves\n/m, ''), /^split \[redacted:T83_PROCESS_TOKEN\](?:\n\[redacted:T83_PROCESS_TOKEN\])? tail$/m);
   assert.ok(evidence.test_failure.names.some((name) => name.includes('[redacted:T83_PROCESS_TOKEN]')));
   assert.ok(evidence.test_failure.output_tail.includes('[redacted:T83_PROCESS_TOKEN]'));
   assert.ok(evidence.summary.includes('[redacted:T83_PROCESS_TOKEN]'));

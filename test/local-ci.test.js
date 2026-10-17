@@ -349,6 +349,14 @@ test('a failed local CI keeps a redacted output tail, its full log and the artif
 const fs = require('node:fs');
 const path = require('node:path');
 console.log('step 1: scaffold ok');
+// A token wrapped onto two stdout lines with a stderr line written between them. The pauses let
+// the gate read each write on its own, so the stderr line arrives between the halves.
+const pause = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); // wait-allow: the gate sends the fixture no signal when it has read a write
+console.log('split ' + process.env.CI_FIXTURE_TOKEN.slice(0, 10));
+pause(100);
+console.error('between the halves');
+pause(100);
+console.log(process.env.CI_FIXTURE_TOKEN.slice(10) + ' tail');
 for (let i = 0; i < 300; i++) console.log('early line ' + i);
 // stdout: the gate reads stdout and stderr from two sockets and joins them in arrival order, so
 // a stderr line can land hundreds of stdout lines from where it was written.
@@ -365,6 +373,12 @@ console.log('after the unterminated escape');
 console.log('title \\x1b]0;t\\x07set');
 // A progress redraw right before a token that is not in the environment: the token shape still matches.
 console.log('Downloading\\rghp_' + 'd4'.repeat(18));
+// A stray ESC takes the token's first character, and an unterminated OSC its head, while a second
+// escape splits it; a line break splits another.
+console.log('stray \\x1b' + token.slice(0, 8) + '\\x1b[1m' + token.slice(8));
+console.log('osc head \\x1b]0;t ' + token.slice(0, 8) + '\\x1b[1m' + token.slice(8));
+console.log('wrapped ' + token.slice(0, 10));
+console.log(token.slice(10) + ' end');
 for (let i = 0; i < 150; i++) console.log('cargo tree line ' + i);
 fs.mkdirSync('.local/checks', { recursive: true });
 // Like ginza's receipt, which holds every step's full output, including what the log redacts.
@@ -372,6 +386,10 @@ fs.writeFileSync('.local/checks/receipt.json', JSON.stringify({ failure_reasons:
 fs.writeFileSync('.local/checks/extra.json', '{}');
 // A colored receipt: the escape inside the token would hide it from the patterns.
 fs.writeFileSync('.local/checks/colored.json', '{"output": "\\x1b[32m' + token.slice(0, 4) + '\\x1b[1m' + token.slice(4) + '\\x1b[0m"}');
+// The same splits in a text artifact and a binary one.
+const split = '\\x1b(' + token.slice(0, 8) + '\\x1b[1m' + token.slice(8) + ' \\x1b]0;t ' + token.slice(0, 8) + '\\x1b[1m' + token.slice(8) + '\\n' + token.slice(0, 10) + '\\n' + token.slice(10);
+fs.writeFileSync('.local/checks/split.json', split);
+fs.writeFileSync('.local/checks/split-binary.json', '\\x00' + split);
 // Every byte value, twice: no secret, so it must come out byte for byte.
 fs.writeFileSync('.local/checks/blob.json', Buffer.from(Array.from({ length: 512 }, (_, i) => i % 256)));
 // Latin-1 text: invalid UTF-8 without a NUL byte, holding the environment's token and another token shape.
@@ -411,8 +429,20 @@ process.exitCode = 1;
   assert.match(log, /^step 1: scaffold ok$/m);
   assert.match(log, /^early line 0$/m);
   assert.match(log, /^cargo tree line 149$/m);
-  assert.match(log, /^stderr token \[redacted:/m);
-  assert.match(log, /^unterminated \nafter the unterminated escape\ntitle set\nDownloading\n\[redacted:GITHUB_TOKEN\]$/m);
+  assert.equal(log.match(/^stderr token \[redacted:CI_FIXTURE_TOKEN\]$/gm)?.length, 1, log);
+  // Lines keep their order only within a stream (docs/state.md), so a stderr line can land
+  // between any two stdout lines; runs of stdout lines are checked without them.
+  const stdoutLog = log.split('\n').filter((line) => !/^(?:stderr token |between the halves$)/.test(line)).join('\n');
+  // Each stream's own text is read for secrets too, so a stderr line read between a token's
+  // halves leaves both redacted, each on its own line.
+  assert.match(log, /^between the halves$/m);
+  assert.match(stdoutLog, /^split \[redacted:CI_FIXTURE_TOKEN\](?:\n\[redacted:CI_FIXTURE_TOKEN\])? tail$/m);
+  assert.match(stdoutLog, /^unterminated \nafter the unterminated escape\ntitle set\nDownloading\n\[redacted:GITHUB_TOKEN\]$/m);
+  // The stderr line can also land between the halves of the wrapped token; each half is then
+  // redacted on its own line.
+  assert.match(stdoutLog, /^stray \[redacted:CI_FIXTURE_TOKEN\]\nosc head \[redacted:CI_FIXTURE_TOKEN\]\nwrapped \[redacted:CI_FIXTURE_TOKEN\](?:\n\[redacted:CI_FIXTURE_TOKEN\])? end$/m);
+  assert.doesNotMatch(log, /(?:a1){4}/);
+  assert.doesNotMatch(kept.output_tail, /(?:a1){4}/);
   assert.ok(!log.includes('ghp_d4'), log);
   assert.ok(!log.includes(token));
   assert.ok(r.stdout.includes(`Full log: ${path.join(h.state, kept.log)}`), r.stdout);
@@ -421,7 +451,7 @@ process.exitCode = 1;
   // Artifacts sit in ci-artifacts/, which every agent sandbox hides, beside the run's log name.
   const run = path.basename(path.dirname(kept.log));
   const copied = Object.fromEntries(kept.artifacts.map((a) => [path.basename(a.from), a]));
-  assert.deepEqual(Object.keys(copied).sort(), ['blob.json', 'colored.json', 'extra.json', 'latin1.json', 'receipt.json', 'report.txt']);
+  assert.deepEqual(Object.keys(copied).sort(), ['blob.json', 'colored.json', 'extra.json', 'latin1.json', 'receipt.json', 'report.txt', 'split.json']);
   for (const a of kept.artifacts) assert.ok(a.path.startsWith(`ci-artifacts/${run}/`), a.path);
   // Text artifacts get the log's redaction; a binary one is redacted at the byte level.
   const receipt = fs.readFileSync(path.join(h.state, copied['receipt.json'].path), 'utf8');
@@ -431,6 +461,7 @@ process.exitCode = 1;
   assert.equal(copied['receipt.json'].bytes, Buffer.byteLength(receipt));
   assert.equal(fs.readFileSync(path.join(h.state, copied['colored.json'].path), 'utf8'), '{"output": "[redacted:CI_FIXTURE_TOKEN]"}');
   assert.equal(copied['colored.json'].redacted, true);
+  assert.equal(fs.readFileSync(path.join(h.state, copied['split.json'].path), 'utf8'), '[redacted:CI_FIXTURE_TOKEN] [redacted:CI_FIXTURE_TOKEN]\n[redacted:CI_FIXTURE_TOKEN]');
   assert.deepEqual(fs.readFileSync(path.join(h.state, copied['blob.json'].path)), Buffer.from(Array.from({ length: 512 }, (_, i) => i % 256)));
   assert.equal(copied['blob.json'].binary, true);
   assert.equal(copied['blob.json'].redacted, undefined);
@@ -445,11 +476,12 @@ process.exitCode = 1;
   assert.equal(copied['report.txt'].path, `ci-artifacts/${run}/TMPDIR/report.txt`);
   assert.equal(copied['extra.json'].path, `ci-artifacts/${run}/worktree/.local/checks/extra.json`);
   assert.equal(fs.readFileSync(path.join(h.state, 'ci-artifacts', '.gitignore'), 'utf8'), '*\n');
-  assert.deepEqual(kept.artifacts_skipped.map((s) => path.basename(s.from)), ['outside.json', 'utf16.json']);
+  assert.deepEqual(kept.artifacts_skipped.map((s) => path.basename(s.from)), ['outside.json', 'split-binary.json', 'utf16.json']);
   assert.match(kept.artifacts_skipped[0].reason, /outside the gate worktree/);
-  assert.match(kept.artifacts_skipped[1].reason, /^binary, and a secret as .+ that exact byte redaction cannot remove$/);
+  assert.match(kept.artifacts_skipped[1].reason, /^binary, and a secret as bytes with escapes removed gently that exact byte redaction cannot remove$/);
+  assert.match(kept.artifacts_skipped[2].reason, /^binary, and a secret as .+ that exact byte redaction cannot remove$/);
   // The summary reaches worker prompts, so it counts the artifacts and names none.
-  assert.match(r.stdout, /Artifacts: 6 kept for the orchestrator and the owner/);
+  assert.match(r.stdout, /Artifacts: 7 kept for the orchestrator and the owner/);
   assert.ok(!r.stdout.includes('ci-artifacts'), r.stdout);
   assert.ok(!e.summary.includes('ci-artifacts'));
   // The gate worktree is still removed.
@@ -516,6 +548,90 @@ test('a removed control keeps the word boundary token shapes are found by', () =
   assert.equal(env(env.strip('pre abcdefghij\x00012345\r6789xyz post')), 'pre [redacted:PLAIN_SECRET] post');
 });
 
+test('a token that escapes take part of and split, or that a line break splits, is redacted whole', () => {
+  const { createRedactor } = require('../lib/gates/common');
+  const github = 'ghp_Ab1Cd2Ef3Gh4Ij5Kl6Mn7Op8Qr9St0Uv1Wx2';
+  const aws = `AKIA${'E5'.repeat(8)}`;
+  const env = createRedactor([['FIXTURE_TOKEN', github]]);
+  const plain = createRedactor([]);
+  const head = github.slice(0, 8);
+  const tail = github.slice(8);
+  for (const [name, input, expected] of [
+    // A terminal reads ESC g as one escape, so the cleanup loses the token's first character.
+    ['a stray ESC takes the first character', `a \x1b${head}\x1b[1m${tail} b`, 'a [redacted:X] b'],
+    ['a word before the stray ESC', `a\x1b${head}\x1b[1m${tail}`, 'a [redacted:X]'],
+    ['ESC ( takes the first character', `\x1b(${head}\x1b[1m${tail}`, '[redacted:X]'],
+    ['a charset escape splits it too', `\x1b${head}\x1b(B${tail}`, '[redacted:X]'],
+    ['an unterminated OSC takes the head', `\x1b]0;title ${head}\x1b[1m${tail}\nnext`, '[redacted:X]\nnext'],
+    ['a newline splits the token', `key ${github.slice(0, 10)}\n${github.slice(10)} done`, 'key [redacted:X] done'],
+    ['CRLF splits the token', `key ${github.slice(0, 10)}\r\n${github.slice(10)} done`, 'key [redacted:X] done'],
+    // A removed line break is a word boundary: the lines around the token do not glue onto it.
+    ['a word line before a token split across lines', `token is\n${github.slice(0, 14)}\n${github.slice(14)} ok`, 'token is\n[redacted:X] ok'],
+    ['a split token whose tail ends its line', `key ${github.slice(0, 10)}\n${github.slice(10)}\nnext`, 'key [redacted:X]\nnext'],
+    // ESC [ right before a token reads as a CSI whose final byte is the token's first letter.
+    ['ESC [ takes the first character', `x \x1b[${github} y`, 'x [redacted:X] y'],
+    ['ESC [ takes the first character of a split token', `x \x1b[${head}\x1b[1m${tail} y`, 'x [redacted:X] y'],
+    // Kept as they were: a token that ends its line keeps the next line's first word, a header
+    // value ends at its line, and an escape's final byte after a token does not change its label.
+    ['a token ends its line', `token ${github}\nnext line`, 'token [redacted:X]\nnext line'],
+    ['a charset reset after the token', `\x1b[31m${github}\x1b(B\x1b[m`, '[redacted:X]'],
+    ['a header value ends at its line', 'Authorization: Bearer abc\nAccept: */*', 'Authorization: Bearer [redacted:AUTHORIZATION]\nAccept: */*'],
+    // A line break inside a token prefix joins with two of its characters before the break or
+    // three after it: `s` then a line `K-...` is no API key.
+    ['a one-letter word before a line `K-`', 'run 0.3 s\nK-long_async rc 1', 'run 0.3 s\nK-long_async rc 1'],
+    ['a line break after a token\'s first letter', `xx ${github[0]}\n${github.slice(1)} y`, 'xx [redacted:X] y'],
+    ['a line break inside a token prefix', `xx ${github.slice(0, 2)}\r\n${github.slice(2)}\nnext`, 'xx [redacted:X]\nnext'],
+  ]) {
+    assert.equal(env(env.strip(input)), expected.replaceAll('[redacted:X]', '[redacted:FIXTURE_TOKEN]'), name);
+    assert.equal(plain(plain.strip(input)), expected.replaceAll('[redacted:X]', '[redacted:GITHUB_TOKEN]'), name);
+  }
+  // A fixed-length shape keeps its word boundary when it is joined back, with a line after it too.
+  assert.equal(plain(plain.strip(`token is\n${aws[0]}\n${aws.slice(1)}\nnext`)), 'token is\n[redacted:AWS_ACCESS_KEY_ID]\nnext');
+  // A token whose prefix a line break splits is not put back over another secret: its joined text
+  // would cut an environment value an escape splits, or a token the cleaned text shows.
+  const overlap = createRedactor([['MY_SECRET', 'Wx2Zq9Xw8Vu7Ts6']]);
+  assert.equal(overlap(overlap.strip(`xx g\n${github.slice(1)}Zq9\x1b=Xw8Vu7Ts6 y`)), `xx g\n${github.slice(1, -3)}[redacted:MY_SECRET] y`);
+  assert.equal(plain(plain.strip('id=xox\nb-l2SorrmC\n0FhbP-gho_3uN9vAEJTHvInLGgsXGIqgB5 y')), 'id=xox\nb-l2SorrmC\n0FhbP-[redacted:GITHUB_TOKEN] y');
+  // Nor over a token or header a view recovers after an escape takes its first character.
+  for (const [input, secret] of [
+    [`x g\n${github.slice(1, 26)}\x1bsk-proj-abcdefghijklmnop ok`, 'abcdefghijklmnop'],
+    [`x g\n${github.slice(1, 26)}\x1bxoxb-1234567890-abcdef ok`, '1234567890-abcdef'],
+    [`log g\n${github.slice(1, 26)}\x1bAuthorization: Bearer s3cr3tvalue123 ok`, 's3cr3tvalue123'],
+    ['AS\nIAPACIFIC\x1bAUTHORIZATION: Bearer test-value', 'test-value'],
+  ]) assert.ok(!plain(plain.strip(input)).includes(secret), JSON.stringify(input));
+  // Nor over a token the redactor finds once the environment value glued before it is redacted.
+  const glued = createRedactor([['MY_SECRET', 'AGVCLyB0UqFWaWBjHoW2KwhAm1']]);
+  assert.equal(glued(glued.strip('x AGVCLyB0UqFWaWBjHoW2KwhAm1ghs_QEXOi2e7ePqMbY\x1bAx0JI5\x1bghs\n_Dgm6eT6p3sOC76q8NN6NDZi2pLzL4XLEvA27RHpV\n')), 'x [redacted:MY_SECRET][redacted:GITHUB_TOKEN]\n_Dgm6eT6p3sOC76q8NN6NDZi2pLzL4XLEvA27RHpV\n');
+  // The same with the value split by a line break or an escape, which the cleaned text does not show whole.
+  for (const split of ['\n', '\x1b(']) {
+    assert.equal(glued(glued.strip(`x AGVCLyB0Uq${split}FWaWBjHoW2KwhAm1ghs_QEXOi2e7ePqMbY\x1bAx0JI5\x1bghs\n_Dgm6eT6p3sOC76q8NN6NDZi2pLzL4XLEvA27RHpV\n`)), 'x [redacted:MY_SECRET] [redacted:GITHUB_TOKEN]\n_Dgm6eT6p3sOC76q8NN6NDZi2pLzL4XLEvA27RHpV\n', JSON.stringify(split));
+  }
+  // Two secrets put back next to each other keep one space between them.
+  assert.equal(plain(plain.strip(`x g\n${github.slice(1, 26)}\x1bsk-proj-abcdefghijklmnop ok`)), 'x [redacted:GITHUB_TOKEN] [redacted:API_KEY] ok');
+  // Split tokens next to each other go back apart, each from the view it was found in, so a
+  // fixed-length shape does not take the next one's first character.
+  assert.equal(plain(plain.strip('\n\nAK\nIA658PUUFDAL0P\n\x1b[31mR4\x1bXO\nAK\x1b[m\nIAKDXEI\rU3ZNV9O\x1bI3EQ=x')), '\n\n[redacted:AWS_ACCESS_KEY_ID] [redacted:AWS_ACCESS_KEY_ID]=x');
+  // Two line breaks inside a prefix, or a blank line, join nothing.
+  for (const input of [`x g\nh\np_${github.slice(4)}`, `x g\n\nhp_${github.slice(4)}`, 'run s\nk-means_clustering']) assert.equal(plain(plain.strip(input)), input);
+  assert.equal(plain(plain.strip(`k=${aws.slice(0, 9)}\n${aws.slice(9)}\n`)), 'k=[redacted:AWS_ACCESS_KEY_ID]\n');
+  assert.equal(plain(plain.strip(`id=${aws.slice(0, 9)}\n${aws.slice(9)}\nnext line`)), 'id=[redacted:AWS_ACCESS_KEY_ID]\nnext line');
+  // An environment value is redacted however escapes and line breaks split it: here a stray ESC
+  // takes one of its characters, a real two-character escape sits in it and a line break splits it.
+  const value = 'Zq9Xw8Vu7Ts6Rq5Po4Nm3Lk2Ji1Hg0';
+  const values = createRedactor([['MY_SECRET', value]]);
+  for (const input of [
+    `v=${value[0]}\x1b${value.slice(1, 4)}\n${value.slice(4)} end`,
+    `v=${value[0]}\x1bM${value.slice(1, 5)}\x1b(${value.slice(5)} end`,
+    `v=${value.slice(0, 3)}\x1b7${value.slice(3, 9)}\r\n\x1b[1m${value.slice(9)} end`,
+  ]) assert.equal(values(values.strip(input)), 'v=[redacted:MY_SECRET] end', JSON.stringify(input));
+  // A join takes a bounded run: a short prefix before many lines of token characters takes a few
+  // of them, not the rest of the text.
+  const lines = `sk-ab\n${'cd\n'.repeat(20000)}`;
+  const joined = plain(plain.strip(lines));
+  assert.ok(joined.startsWith('[redacted:API_KEY]\ncd\n'), joined.slice(0, 40));
+  assert.ok(joined.split('\n').length > 19990);
+});
+
 test('a binary artifact is redacted at its exact bytes, or missed when a secret shows only in another view', () => {
   const { createRedactor } = require('../lib/gates/common');
   const github = `ghp_${'d4'.repeat(18)}`;
@@ -524,6 +640,7 @@ test('a binary artifact is redacted at its exact bytes, or missed when a secret 
   const redact = createRedactor([['FIXTURE_PASSWORD', value]]);
   const bytes = (...parts) => Buffer.concat(parts.map((p) => (Buffer.isBuffer(p) ? p : Buffer.from(p, 'utf8'))));
   const junk = Buffer.from([0xff, 0x00, 0xe9, 0x80, 0x1b]);
+  const nul = Buffer.from([0xff, 0x00]);
   const every = Buffer.from(Array.from({ length: 512 }, (_, i) => i % 256));
   for (const [input, expected] of [
     [bytes(junk, value, junk), bytes(junk, '[redacted:FIXTURE_PASSWORD]', junk)],
@@ -531,6 +648,10 @@ test('a binary artifact is redacted at its exact bytes, or missed when a secret 
     [bytes(junk, '"', github, '", "', aws, '"'), bytes(junk, '"[redacted:GITHUB_TOKEN]", "[redacted:AWS_ACCESS_KEY_ID]"')],
     [bytes('Authorization: Bearer ', junk, 'x y'), bytes('Authorization: Bearer [redacted:AUTHORIZATION] y')],
     [bytes(junk, '[redacted:GITHUB_TOKEN]', junk), bytes(junk, '[redacted:GITHUB_TOKEN]', junk)],
+    // A token that ends its line, and a charset reset after a token, are redacted in place.
+    [bytes(nul, github, '\nnext\n'), bytes(nul, '[redacted:GITHUB_TOKEN]\nnext\n')],
+    [bytes(nul, `"${github}\x1b(B\x1b[m"`), bytes(nul, '"[redacted:GITHUB_TOKEN]\x1b(B\x1b[m"')],
+    [bytes(nul, 'run 0.3 s\nK-long_async rc 1'), bytes(nul, 'run 0.3 s\nK-long_async rc 1')],
     [every, every],
   ]) {
     const out = redact.bytes(input);
@@ -555,7 +676,114 @@ test('a binary artifact is redacted at its exact bytes, or missed when a secret 
     ['a token tail after a carriage return', bytes(junk, `${github.slice(0, 26)}\r${github.slice(26)}`), ANY],
     ['a UTF-8 character with a 0x98 byte before a split token', bytes(junk, `\u662f ${github.slice(0, 8)}\x1b[1m${github.slice(8)}`), ANY],
     ['a split environment value', bytes(junk, `${value.slice(0, 5)}\r${value.slice(5)}`), ANY],
+    // Escape removal takes a character from these tokens, so only a gentle view shows them whole.
+    ['a stray ESC takes a split token\'s first character', bytes(nul, `\x1b${github.slice(0, 8)}\x1b[1m${github.slice(8)}`), /gently/],
+    ['ESC ( takes a split token\'s first character', bytes(nul, `\x1b(${github.slice(0, 8)}\x1b[1m${github.slice(8)}`), /gently/],
+    ['a stray ESC takes the first character of a token a charset escape splits', bytes(nul, `\x1b${github.slice(0, 8)}\x1b(B${github.slice(8)}`), /gently and joined/],
+    ['a word before a stray ESC that takes a split token\'s first character', bytes(nul, `x\x1b${github.slice(0, 8)}\x1b[1m${github.slice(8)}`), /gently/],
+    ['an unterminated OSC takes a split token\'s head', bytes(nul, `\x1b]0;t ${github.slice(0, 8)}\x1b[1m${github.slice(8)}\n`), /gently/],
+    ['a token split across lines', bytes(nul, `${github.slice(0, 10)}\n${github.slice(10)}`), /line breaks removed/],
+    ['a token split by CRLF', bytes(nul, `${github.slice(0, 10)}\r\n${github.slice(10)}`), /line breaks removed/],
+    ['an environment value split across lines', bytes(nul, `${value.slice(0, 5)}\n${value.slice(5)}`), /inside an environment value/],
+    ['an environment value split by a stray and a real escape', bytes(nul, `${value.slice(0, 1)}\x1bM${value.slice(1, 5)}\x1b(${value.slice(5)}`), /inside an environment value/],
+    ['an AWS key split across lines before a word line', bytes(nul, `id=${aws.slice(0, 9)}\n${aws.slice(9)}\nnext line`), /line breaks removed/],
+    ['a word line before a token split across lines', bytes(nul, `token is\n${github.slice(0, 14)}\n${github.slice(14)} ok`), /line breaks removed/],
+    ['a line break inside a token prefix', bytes(nul, `xx ${github[0]}\n${github.slice(1)} y`), /line breaks removed/],
+    ['ESC [ takes a split token\'s first character', bytes(nul, `x \x1b[${github.slice(0, 8)}\x1b[1m${github.slice(8)}`), /gently/],
   ]) assert.match(redact.bytes(input).missed || '', view, name);
+});
+
+test('a binary artifact is scanned without a map per byte, and as UTF-16 only when it could hold it', () => {
+  const { createRedactor } = require('../lib/gates/common');
+  const github = `ghp_${'d4'.repeat(18)}`;
+  const redact = createRedactor([['FIXTURE_PASSWORD', 'hunter2-secret-value']]);
+  const text = Buffer.from(`${'build ok\n'.repeat(1 << 16)}${github} \x1b[1mdone\n`);
+  // A 64 MiB file peaked at 1.4 GiB: two 4-byte source maps per byte once a secret showed, and four
+  // UTF-16 copies of a file that had no NUL byte. Arrays over a shared buffer allocate nothing.
+  const big = [];
+  const saved = { Int32Array, Uint16Array };
+  for (const [name, Base] of Object.entries(saved)) {
+    globalThis[name] = class extends Base {
+      constructor(...args) {
+        super(...args);
+        if (!(args[0] instanceof ArrayBuffer) && this.length >= text.length / 8) big.push(`${name}(${this.length})`);
+      }
+    };
+  }
+  try {
+    for (const head of [0xff, 0x00]) {
+      const out = redact.bytes(Buffer.concat([Buffer.from([head]), text]));
+      assert.equal(out.missed, undefined);
+      assert.match(out.body.toString('latin1'), /\n\[redacted:GITHUB_TOKEN\] \x1b\[1mdone\n$/);
+    }
+  } finally {
+    Object.assign(globalThis, saved);
+  }
+  assert.deepEqual(big, []);
+  // A value with no ASCII character has no NUL byte in UTF-16, so a non-ASCII value keeps those views.
+  const value = '中文密码中文';
+  const wide = Buffer.from(value, 'utf16le');
+  assert.equal(wide.includes(0), false);
+  assert.match(createRedactor([['FIXTURE_PASSWORD', value]]).bytes(Buffer.concat([Buffer.from([0xff]), wide])).missed || '', /as UTF-16LE from its second byte/);
+  // An empty buffer has no unit from its second byte; that view threw on a negative length.
+  assert.deepEqual(createRedactor([['FIXTURE_PASSWORD', value]]).bytes(Buffer.alloc(0)), { body: Buffer.alloc(0) });
+});
+
+test('dense overlapping environment values in a binary artifact merge as they are found', () => {
+  const { createRedactor } = require('../lib/gates/common');
+  // Both values occur at every other byte of a run of `a1`. 64 MiB of it made 67M spans, one per
+  // occurrence, and ran out of memory at 7 GB. Arrays over a shared buffer allocate nothing.
+  const redact = createRedactor([['SECRET_A', 'a1'.repeat(10)], ['SECRET_B', 'a1'.repeat(11)]]);
+  const run = 'a1'.repeat(1 << 19);
+  const big = [];
+  const saved = { Int32Array, Uint32Array };
+  for (const [name, Base] of Object.entries(saved)) {
+    globalThis[name] = class extends Base {
+      constructor(...args) {
+        super(...args);
+        if (!(args[0] instanceof ArrayBuffer) && this.length >= run.length / 8) big.push(`${name}(${this.length})`);
+      }
+    };
+  }
+  try {
+    // The charset escape keeps its final byte in the gentle views, which then run too.
+    for (const [input, expected] of [
+      [`\x00${run}`, '\x00[redacted:SECRET_B]'],
+      [`\x00\x1b(B${run}`, '\x00\x1b(B[redacted:SECRET_B]'],
+      [`\x00${run} \x1b(B ${run}\n`, '\x00[redacted:SECRET_B] \x1b(B [redacted:SECRET_B]\n'],
+    ]) {
+      const out = redact.bytes(Buffer.from(input, 'latin1'));
+      assert.equal(out.missed, undefined);
+      assert.equal(out.body.toString('latin1'), expected);
+    }
+  } finally {
+    Object.assign(globalThis, saved);
+  }
+  assert.deepEqual(big, []);
+});
+
+test('a binary artifact is read across lines a window at a time', () => {
+  const { createRedactor } = require('../lib/gates/common');
+  const redact = createRedactor([]);
+  // A copy without line breaks and a map of every line peaked at 1.4 GiB for 64 MiB of short lines
+  // after a token prefix; a window holds a few thousand of them.
+  const text = Buffer.from(`\x00sk-ab\n${'cd\n'.repeat(1 << 19)}`, 'latin1');
+  const big = [];
+  const Saved = Int32Array;
+  globalThis.Int32Array = class extends Saved {
+    constructor(...args) {
+      super(...args);
+      if (!(args[0] instanceof ArrayBuffer) && this.length >= text.length / 8) big.push(this.length);
+    }
+  };
+  let out;
+  try {
+    out = redact.bytes(text);
+  } finally {
+    globalThis.Int32Array = Saved;
+  }
+  assert.match(out.missed || '', /line breaks removed/);
+  assert.deepEqual(big, []);
 });
 
 test('restoring redaction markers is linear in their count', () => {
@@ -578,6 +806,217 @@ test('restoring redaction markers is linear in their count', () => {
   assert.ok(passes <= 1, `${passes} passes`);
   const binary = Buffer.from(`\x00${text}`, 'latin1');
   assert.equal(redact.bytes(binary).body, binary);
+});
+
+test('a token prefix before 16 MiB of token characters is redacted whole in linear work', () => {
+  const { createRedactor } = require('../lib/gates/common');
+  const redact = createRedactor([['FIXTURE_TOKEN', `ghp_${'d4'.repeat(18)}`]]);
+  const size = 16 << 20;
+  // The token shapes ran as backtracking regular expressions, which threw a RangeError (maximum
+  // call stack size exceeded) from about 8 MiB of run: the gate crashed instead of redacting. The
+  // NUL byte sends the text through the control cleanup's token search too.
+  const cases = [
+    [`ghp_${'aB3'.repeat(size / 3)}`, '[redacted:GITHUB_TOKEN]'],
+    [`sk-${'ab-'.repeat(size / 3)}z`, '[redacted:API_KEY]'],
+    [`Authorization: Bearer ${'Zy9'.repeat(size / 3)}`, 'Authorization: Bearer [redacted:AUTHORIZATION]'],
+    [`ghp_${'aB3'.repeat(size / 3)}_tail`, '[redacted:GITHUB_TOKEN]_tail'],
+  ];
+  // Counting character reads shows the scans read each character a bounded number of times,
+  // without timing them.
+  const charCodeAt = String.prototype.charCodeAt;
+  let reads = 0;
+  String.prototype.charCodeAt = function (i) {
+    reads++;
+    return charCodeAt.call(this, i);
+  };
+  try {
+    for (const [token, expected] of cases) {
+      const input = `\x00pre ${token} post`;
+      reads = 0;
+      assert.equal(redact(redact.strip(input)), `pre ${expected} post`, token.slice(0, 24));
+      const out = redact.bytes(Buffer.from(input, 'latin1'));
+      assert.equal(out.missed, undefined, token.slice(0, 24));
+      assert.equal(out.body.toString('latin1'), `\x00pre ${expected} post`, token.slice(0, 24));
+      assert.ok(reads <= 16 * input.length, `${reads} character reads for ${input.length} characters`);
+    }
+  } finally {
+    String.prototype.charCodeAt = charCodeAt;
+  }
+});
+
+test('a token run glued to more word characters is redacted whole, and the word after it stays', () => {
+  const { createRedactor } = require('../lib/gates/common');
+  const redact = createRedactor([]);
+  const github = `ghp_${'d4'.repeat(18)}`;
+  const aws = `AKIA${'E5'.repeat(8)}`;
+  const slack = `xoxb-1234567890-1234567890-${'AbCd'.repeat(6)}`;
+  // Without a word boundary after the run, the shapes skipped these and left the whole secret, or,
+  // for the Slack token, stopped at its last dash and left the secret part.
+  for (const [input, expected] of [
+    [`${github}_suffix`, '[redacted:GITHUB_TOKEN]_suffix'],
+    [`${github}_${github}`, '[redacted:GITHUB_TOKEN]_ghp_d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4'],
+    [`${aws}abc`, '[redacted:AWS_ACCESS_KEY_ID]abc'],
+    // An AWS key id is 20 characters, so a longer run keeps its tail.
+    [`${aws}XYZ`, '[redacted:AWS_ACCESS_KEY_ID]XYZ'],
+    [`${aws}_2`, '[redacted:AWS_ACCESS_KEY_ID]_2'],
+    [`${slack}_x`, '[redacted:SLACK_TOKEN]_x'],
+    [`xoxb-${'ab'.repeat(5)}_x`, '[redacted:SLACK_TOKEN]_x'],
+    // Shorter than the shape's minimum, a glued run is not a token.
+    [`ghp_${'a'.repeat(19)}_x`, `ghp_${'a'.repeat(19)}_x`],
+  ]) {
+    assert.equal(redact(`key=${input} end`), `key=${expected} end`, input);
+    const out = redact.bytes(Buffer.from(`\x00key=${input} end`, 'latin1'));
+    assert.equal(out.missed, undefined, input);
+    assert.equal(out.body.toString('latin1'), `\x00key=${expected} end`, input);
+  }
+  // A control inside a glued run goes, so the token is redacted whole; one at the token's end stays
+  // a boundary. Without that, `ghp_ABCD\rEFGH..._x` became two lines that no shape matches. The
+  // bytes cannot be redacted in place there, so the binary file is missed.
+  // binary is the redacted file, or null when it is missed.
+  for (const [input, expected, binary] of [
+    [`ghp_${'a'.repeat(10)}\r${'b'.repeat(26)}_suffix`, '[redacted:GITHUB_TOKEN]_suffix', null],
+    [`ghp_ABCD\rEFGH${'c'.repeat(32)}_x`, '[redacted:GITHUB_TOKEN]_x', null],
+    [`ghp_ABCD\x00EFGH${'c'.repeat(32)}_x`, '[redacted:GITHUB_TOKEN]_x', null],
+    [`${slack.slice(0, 20)}\r${slack.slice(20)}_x`, '[redacted:SLACK_TOKEN]_x', null],
+    [`${aws.slice(0, 8)}\r${aws.slice(8)}XYZ`, '[redacted:AWS_ACCESS_KEY_ID]XYZ', null],
+    [`${github}\x00_x`, '[redacted:GITHUB_TOKEN] _x', '[redacted:GITHUB_TOKEN]\x00_x'],
+    [`${aws}\rDONE`, '[redacted:AWS_ACCESS_KEY_ID]\nDONE', '[redacted:AWS_ACCESS_KEY_ID]\rDONE'],
+    [`${aws}\x00DONE`, '[redacted:AWS_ACCESS_KEY_ID] DONE', '[redacted:AWS_ACCESS_KEY_ID]\x00DONE'],
+  ]) {
+    assert.equal(redact(redact.strip(`key=${input} end`)), `key=${expected} end`, JSON.stringify(input));
+    const out = redact.bytes(Buffer.from(`\x00key=${input} end`, 'latin1'));
+    if (binary === null) assert.match(out.missed || '', /^a secret as /, JSON.stringify(input));
+    else assert.equal(out.body?.toString('latin1'), `\x00key=${binary} end`, JSON.stringify(input));
+  }
+});
+
+// The old token expressions, safe on short inputs, as the reference for the scans.
+const OLD_SHAPES = [
+  ['\\bgh[pousr]_', 'A-Za-z0-9', 20, Infinity, ''],
+  ['\\bgithub_pat_', 'A-Za-z0-9_', 20, Infinity, ''],
+  ['\\bsk-', 'A-Za-z0-9_-', 8, Infinity, 'i'],
+  ['\\b(?:AKIA|ASIA)', '0-9A-Z', 16, 16, ''],
+  ['\\bxox[a-z]-', 'A-Za-z0-9-', 10, Infinity, 'i'],
+].map(([lead, body, min, max, flags]) => ({
+  old: new RegExp(`${lead}[${body}]{${min},${max === Infinity ? '' : max}}\\b`, `g${flags}`),
+  run: new RegExp(`^${lead}[${body}]{${min},}$`, flags),
+}));
+const OLD_HEADER = /(\bauthorization:\s*(?:(?:bearer|basic|token)\s+)?)\S+/gi;
+// A seeded generator (mulberry32), so a failure names an input that reproduces.
+const seeded = (seed) => (n) => {
+  seed = (seed + 0x6d2b79f5) | 0;
+  let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+  t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+  return ((t ^ (t >>> 14)) >>> 0) % n;
+};
+const wide = [0xe9, 0x17f, 0xa0, 0x2003, 0x3000, 0xfeff, 0x2028, 0x85].map((c) => String.fromCharCode(c));
+const TOKEN_PIECES = ['ghp_', 'gho_', 'ghs_', 'ghu_', 'ghr_', 'ghx_', 'GHP_', 'github_pat_', 'github_pat_11ABC_',
+  'sk-', 'SK-', 'Sk-', 'sk-proj-', 'sk-ant-api03-', 'AKIA', 'ASIA', 'akia', 'ASIAPACIFIC', 'xoxb-', 'xoxa-', 'xoxp-',
+  'xoxr-', 'XoXs-', 'XOXP-', 'xox-', 'authorization:', 'Authorization: ', 'AUTHORIZATION:', 'Authorization:\t',
+  'Bearer ', 'BEARER\t', 'bearer', 'Basic ', 'Token ', 'token\t', 'a', 'B', '7', 'Z', '_', '-', ' ', '\n', '.', ':',
+  '=', '"', '/', 'IOSFODNN', 'EXAMPLE7', 'AKIAIOSFODNN7EXAMPLE', 'ASIAQWERTYUIOP123456', 'aaaaaaaa',
+  'A1B2C3D4E5F6G7H8', 'xyz0123456789', 'a-a-a-a-', 'Q_q_Q_', ...wide];
+
+test('token shapes find every token the old regular expressions found', () => {
+  // Strict scans find exactly the old matches. The default scans find each of them again, ending
+  // where it ended unless the run is glued to a word character, and find more only for a glued run.
+  const { TOKEN_SHAPES } = require('../lib/ci-log-text');
+  const next = seeded(1);
+  let glued = 0;
+  for (let k = 0; k < 20000; k++) {
+    let text = '';
+    for (let i = 1 + next(14); i > 0; i--) text += TOKEN_PIECES[next(TOKEN_PIECES.length)];
+    OLD_SHAPES.forEach(({ old, run }, i) => {
+      const found = TOKEN_SHAPES[i].find(text);
+      const isGlued = ([at, , end]) => run.test(text.slice(at, end)) && /\w/.test(text[end] ?? '');
+      const before = [...text.matchAll(old)].map((m) => [m.index, m.index, m.index + m[0].length]);
+      assert.deepEqual(TOKEN_SHAPES[i].find(text, 'strict'), before, `${JSON.stringify(text)} shape ${i}`);
+      for (const [at, , end] of before) {
+        const now = found.find(([a]) => a === at);
+        assert.ok(now && (now[2] === end || (now[2] > end && isGlued(now))), `${JSON.stringify(text)} shape ${i}`);
+      }
+      for (const match of found) {
+        if (before.some(([a, , b]) => a === match[0] && b === match[2])) continue;
+        assert.ok(isGlued(match), `${JSON.stringify(text)} shape ${i} ${match}`);
+        glued++;
+      }
+    });
+    const auth = [...text.matchAll(OLD_HEADER)].map((m) => [m.index, m.index + m[1].length, m.index + m[0].length]);
+    assert.deepEqual(TOKEN_SHAPES[5].find(text, 'strict'), auth, JSON.stringify(text));
+  }
+  assert.ok(glued > 0, 'no glued run was generated');
+});
+
+test('every shape is found in the same text, and a control before a token keeps it apart', () => {
+  const { createRedactor } = require('../lib/gates/common');
+  const redact = createRedactor([]);
+  const key = 'AKIAIOSFODNN7EXAMPLE';
+  // binary is the redacted file, or null when it is missed.
+  for (const [input, expected, binary] of [
+    // Replaced one shape at a time, the API key's replacement took the header word, and the header's
+    // value stayed.
+    ['sk-authorization: s3cr3tvalue', '[redacted:API_KEY]: [redacted:AUTHORIZATION]', '[redacted:API_KEY]: [redacted:AUTHORIZATION]'],
+    [`AUTHORIZATION:${key}xoxp-AUTHORIZATION:xoxp-Token`, 'AUTHORIZATION:[redacted:AUTHORIZATION]', 'AUTHORIZATION:[redacted:AUTHORIZATION]'],
+    // A header right after a glued AWS key, and a header as another header's value.
+    [`${key}AUTHORIZATION: Bearer s3cr3tvalue`, '[redacted:AWS_ACCESS_KEY_ID]AUTHORIZATION: Bearer [redacted:AUTHORIZATION]', '[redacted:AWS_ACCESS_KEY_ID]AUTHORIZATION: Bearer [redacted:AUTHORIZATION]'],
+    ['Authorization: Authorization: s3cr3tvalue', 'Authorization: [redacted:AUTHORIZATION] [redacted:AUTHORIZATION]', 'Authorization: [redacted:AUTHORIZATION] [redacted:AUTHORIZATION]'],
+    // Joined across the carriage return, the AWS shape took the header, or a Slack run hid the key
+    // after it.
+    ['Region ASIAPACIFIC\rAUTHORIZATION: Bearer s3cr3tvalue', 'Region ASIAPACIFIC\nAUTHORIZATION: Bearer [redacted:AUTHORIZATION]', null],
+    [`xoxb-ASIAQWERTYUIOP123456a\r${key}_x`, '[redacted:SLACK_TOKEN]\n[redacted:AWS_ACCESS_KEY_ID]_x', null],
+  ]) {
+    assert.equal(redact(redact.strip(`key=${input} end`)), `key=${expected} end`, JSON.stringify(input));
+    const out = redact.bytes(Buffer.from(`\x00key=${input} end`, 'latin1'));
+    if (binary === null) assert.match(out.missed || '', /^a secret as /, JSON.stringify(input));
+    else assert.equal(out.body?.toString('latin1'), `\x00key=${binary} end`, JSON.stringify(input));
+  }
+});
+
+test('no token the old expressions find in any reading of the input survives redaction', () => {
+  // Random lines of token prefixes, headers, word pieces, escapes and controls. Every token or
+  // header value of 8 or more characters that the old expressions find in the text with its
+  // escapes removed and its controls removed, made newlines or made spaces, or in the cleaned text,
+  // must be gone from the redacted text: it may show there only as often as some reading has it
+  // outside the tokens found, since the same characters can be a token in one reading and plain
+  // text in another. A header word given as another header's value is a header, also when an escape
+  // took its first letter (`\x1bAUTHORIZATION:`).
+  // A binary copy must hold none found in its bytes.
+  const { createRedactor } = require('../lib/gates/common');
+  const redact = createRedactor([]);
+  const pieces = [...TOKEN_PIECES, '\r', '\v', '\f', '\x00', '\x7f', '\x08', '\x1b', '\x1b[31m', '\x1b[0m', '\x9b'];
+  const escapes = /(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]|\x1b[ -/]*[0-~]/g;
+  const controls = /[\x00-\x08\x0b-\x1f\x7f-\x9f]/g;
+  // Each secret found once per position, as `position:secret`.
+  const secrets = (view) => {
+    const out = OLD_SHAPES.flatMap(({ old }) => [...view.matchAll(old)].map((m) => `${m.index}:${m[0]}`));
+    for (const m of view.matchAll(OLD_HEADER)) {
+      const value = m[0].slice(m[1].length);
+      if (!'authorization:'.endsWith(value.toLowerCase())) out.push(`${m.index + m[1].length}:${value}`);
+    }
+    return [...new Set(out)].map((s) => s.slice(s.indexOf(':') + 1)).filter((s) => s.length >= 8);
+  };
+  const count = (text, part) => text.split(part).length - 1;
+  const gone = (views, out, what) => {
+    const found = views.map(secrets);
+    for (const secret of new Set(found.flat())) {
+      const kept = Math.max(...views.map((view, i) => count(view, secret) - found[i].filter((s) => s === secret).length));
+      assert.ok(count(out, secret) <= kept, `${what} ${JSON.stringify(secret)}`);
+    }
+  };
+  const next = seeded(7);
+  for (let k = 0; k < 20000; k++) {
+    let text = '';
+    for (let i = 1 + next(20); i > 0; i--) text += pieces[next(pieces.length)];
+    const cleaned = redact.strip(text);
+    const out = redact(cleaned);
+    const bare = text.replace(escapes, '');
+    gone([cleaned, bare.replace(controls, ''), bare.replace(controls, '\n'), bare.replace(controls, ' ')], out, `${JSON.stringify(text)} kept`);
+    const bytes = Buffer.from(text, 'latin1');
+    const copy = redact.bytes(bytes);
+    if (copy.missed) continue;
+    const raw = bytes.toString('latin1');
+    gone([raw], copy.body.toString('latin1'), `${JSON.stringify(text)} copied`);
+  }
 });
 
 test('a passing local CI keeps its log without a tail or artifacts', (t) => {

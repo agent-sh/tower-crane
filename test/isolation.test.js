@@ -7,7 +7,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
-const { makeRepo, ROOT, BIN, detachedAlive } = require('./helpers');
+const { makeRepo, pluginRoot, shortCacheRoot, ROOT, BIN, detachedAlive } = require('./helpers');
 const A = require('../lib/agents');
 const S = require('../lib/state');
 const TOML = require('../lib/toml');
@@ -637,9 +637,17 @@ test('a spawn sweeps placeholders an earlier agent left, and keeps the worktree\
   fs.mkdirSync(path.join(wt, '.claude', '.cc-writes'));
   fs.mkdirSync(path.join(wt, '.vscode'));
   fs.writeFileSync(path.join(wt, '.vscode', 'settings.json'), '{}\n');
-  spawn(h, u, 'small');
+  // A shared settings directory linked in is the worktree's own, and no
+  // warning about it repeats at every spawn.
+  const shared = path.join(h.base, 'shared-idea');
+  fs.mkdirSync(shared);
+  fs.symlinkSync(shared, path.join(wt, '.idea'), 'dir');
+  const r = h.run(['spawn', '--role', 'small', '--task', 'T1', '--wait', '--json'], { env: u.env });
+  assert.equal(r.code, 0, r.stderr);
+  assert.doesNotMatch(r.stderr, /could not remove stale Claude sandbox placeholder/);
   for (const name of [...stale, '.claude/agents', '.claude/.cc-writes']) assert.equal(fs.existsSync(path.join(wt, name)), false, `stale ${name} is swept`);
   for (const name of ['.zshrc', '.profile', '.vscode/settings.json', '.claude/settings.json']) assert.equal(fs.existsSync(path.join(wt, name)), true, `${name} stays`);
+  assert.equal(fs.lstatSync(path.join(wt, '.idea')).isSymbolicLink(), true, 'the linked .idea stays');
   const exclude = fs.readFileSync(path.join(h.state, 'homes', fs.readdirSync(path.join(h.state, 'homes')).find((n) => n.startsWith('small-')), 'sandbox-git-exclude'), 'utf8').split('\n');
   assert.ok(exclude.includes('/.bashrc'), 'a swept name is excluded again');
 });
@@ -1444,9 +1452,9 @@ test('a codex agent\'s temp directory fits a browser\'s singleton socket when it
   const { h, u } = setup(t);
   isolated(h, 'review', 'codex');
   // A cache root of 46 bytes or less, as /home/<user>/.cache is for a user name of up to 34 letters.
-  const root = fs.mkdtempSync(path.join(require('node:os').homedir(), '.cache', 'tc-test-'));
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-  assert.ok(Buffer.byteLength(root) <= 46, `${root} is short enough for this check`);
+  // Made after the fixture, so it is removed after the fixture's agents stop.
+  const root = shortCacheRoot(t, 46);
+  if (!root) return t.skip('no writable cache root of at most 46 bytes');
   spawn(h, u, 'review', { XDG_CACHE_HOME: root });
   const tmp = u.report().tmpdir;
   assert.ok(Buffer.byteLength(tmp) <= 62, `${tmp} is ${Buffer.byteLength(tmp)} bytes`);
@@ -1614,6 +1622,27 @@ test('an agent of another project reads the Tower Crane code in the checkout, ne
       for (const p of open) assert.equal(commandsRead(seen, p), true, `${harness} ${rung}: ${path.relative(checkout, p)} is readable`);
     }
   }
+});
+
+test('TOWER_CRANE_PLUGIN_ROOT opens only a Tower Crane checkout or plugin, never the home or another directory', { skip: NO_STUBS }, t => {
+  // A plugin root at the home would open ~/bin, ~/lib and ~/package.json.
+  const { h, u } = setup(t);
+  isolated(h, 'small', 'claude');
+  const other = path.join(u.home, 'projects');
+  fs.mkdirSync(path.join(other, 'lib'), { recursive: true });
+  for (const [root, why] of [[u.home, /is the user's home/], [path.dirname(u.home), /holds the user's home/], [other, /is not a Tower Crane checkout or plugin/]]) {
+    const r = h.run(['spawn', '--role', 'small', '--task', 'T1', '--wait', '--json'], { env: { ...u.env, TOWER_CRANE_PLUGIN_ROOT: root } });
+    assert.notEqual(r.code, 0, `${root}: ${r.stdout}`);
+    assert.match(r.stderr, why);
+    assert.match(r.stderr, /TOWER_CRANE_PLUGIN_ROOT/);
+  }
+  const plugin = pluginRoot(path.join(u.home, 'plugin'));
+  for (const dir of ['bin', 'skills']) fs.mkdirSync(path.join(plugin, dir));
+  fs.mkdirSync(path.join(plugin, '.tower-crane'));
+  spawn(h, u, 'small', { TOWER_CRANE_PLUGIN_ROOT: plugin });
+  const seen = u.report();
+  assert.equal(commandsRead(seen, path.join(fs.realpathSync(plugin), 'bin')), true, 'the plugin\'s code is readable');
+  assert.equal(commandsRead(seen, path.join(fs.realpathSync(plugin), '.tower-crane')), false, 'the rest of the plugin root is hidden');
 });
 
 test('node installs and harness programs under the home stay readable; other installs there do not', { skip: NO_STUBS }, t => {

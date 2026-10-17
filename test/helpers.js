@@ -706,18 +706,49 @@ function detachedAlive(child) {
   return true;
 }
 
-// Linux processes still working inside a fixture, by working directory. A
-// removed directory reads with a " (deleted)" suffix and still counts.
-function processesIn(base) {
-  if (process.platform !== 'linux') return [];
-  const found = [];
-  for (const name of fs.readdirSync('/proc').filter((entry) => /^\d+$/.test(entry))) {
-    let cwd;
-    try { cwd = fs.readlinkSync(`/proc/${name}/cwd`).replace(/ \(deleted\)$/, ''); }
-    catch { continue; } // Exited, a zombie, or not ours to read.
-    if (cwd === base || cwd.startsWith(base + path.sep)) found.push(Number(name));
+// Processes still working inside a fixture, by working directory: /proc on
+// Linux, lsof on macOS and other POSIX systems. A removed directory reads with
+// a " (deleted)" suffix and still counts. Where no probe works, as on Windows,
+// the result names why instead of passing an empty list as a clean check.
+function processesIn(base, { platform = process.platform, lsof = runLsof } = {}) {
+  const inBase = (cwd) => {
+    cwd = cwd.replace(/ \(deleted\)$/, '');
+    return cwd === base || cwd.startsWith(base + path.sep);
+  };
+  if (platform === 'linux') {
+    const pids = [];
+    for (const name of fs.readdirSync('/proc').filter((entry) => /^\d+$/.test(entry))) {
+      let cwd;
+      try { cwd = fs.readlinkSync(`/proc/${name}/cwd`); }
+      catch { continue; } // Exited, a zombie, or not ours to read.
+      if (inBase(cwd)) pids.push(Number(name));
+    }
+    return { pids };
   }
-  return found;
+  if (platform === 'win32') return { skip: 'Windows has no working-directory probe' };
+  const r = lsof();
+  if (r.error) return { skip: `lsof did not run: ${r.error.code || r.error.message}` };
+  // lsof exits 1 when it could not read some process; its own process always lists a cwd.
+  if (!r.stdout) return { skip: `lsof listed nothing (exit ${r.status})` };
+  const pids = new Set();
+  let pid = null;
+  for (const line of r.stdout.split('\n')) {
+    if (line[0] === 'p') pid = Number(line.slice(1));
+    else if (line[0] === 'n' && pid !== null && inBase(line.slice(1))) pids.add(pid);
+  }
+  return { pids: [...pids] };
+}
+
+function runLsof() {
+  return cp.spawnSync('lsof', ['-n', '-P', '-w', '-d', 'cwd', '-F', 'pn'], { encoding: 'utf8', timeout: HUNG_TEST_MS });
+}
+
+// Fails when a process the test started still works inside its fixture after
+// cleanup. A system without a probe reports the check as skipped.
+function assertNoProcessesIn(t, base, opts) {
+  const found = processesIn(base, opts);
+  if (found.skip) t.diagnostic(`process leak check skipped: ${found.skip}`);
+  else assert.deepEqual(found.pids, [], 'no process the test started outlives its fixture');
 }
 
 function killDetached(child) {
@@ -846,4 +877,54 @@ function ownerFallbacks(h, rung, routes) {
   }
 }
 
-module.exports = { useFixtureUserFile, ownerFallbacks, ownerDirsOutside, ACCOUNT_HOME, repairWorktrees, makeRepo, makeProjectRepo, makeTaskRepo, copyRepo, cachedFixture, fixtureLadder, pinRung, pinLiveRung, stubRungs, STUB_RUNG, HARNESS_GUARD, run, runPty, PTY_AVAILABLE, runAsync, dispatch, BIN, ROOT, HOOKS, real, TMP_ROOT, LIVE_ROOT, detachedAlive, processesIn };
+// A fresh cache root of at most maxBytes, as short as a user's own ~/.cache, for
+// tests of claude's and codex's short temp directories. Fixture roots are too
+// deep for them. The bases are gate-tmp's: the account's ~/.cache from the
+// password database, since HOME can name a deep sandbox home, then
+// XDG_RUNTIME_DIR. The length is the real path's, since the CLI names its
+// short directories from the resolved cache (codexTmp). A missing base is
+// passed over, not made: removing a ~/.cache made here could race another
+// file's gate between shortBase and harnessTmp. Each base passed over for its
+// link or its absence is reported. Null when no base is short enough and
+// writable; the directory goes when the test ends.
+function shortCacheRoot(t, maxBytes) {
+  for (const base of require('../lib/gate-tmp').shortBases()) {
+    let real;
+    try {
+      real = fs.realpathSync(base);
+    } catch (err) {
+      let link = false;
+      try {
+        link = fs.lstatSync(base).isSymbolicLink();
+      } catch {
+        // Nothing at base.
+      }
+      t.diagnostic(link ? `${base} is a link to a missing directory` : `${base} cannot be resolved (${err.code}); it is not made here`);
+      continue;
+    }
+    const bytes = Buffer.byteLength(path.join(real, 'tc-test-XXXXXX'));
+    if (bytes > maxBytes) {
+      if (real !== base) t.diagnostic(`${base} resolves to ${real}, whose tc-test-XXXXXX root is ${bytes} bytes, more than ${maxBytes}`);
+      continue;
+    }
+    let root;
+    try {
+      root = fs.mkdtempSync(path.join(base, 'tc-test-'));
+    } catch {
+      continue;
+    }
+    t.after(() => fs.rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
+    return root;
+  }
+  return null;
+}
+
+// A directory TOWER_CRANE_PLUGIN_ROOT can name: spawn opens only a Tower Crane
+// checkout or plugin, told by its package.json.
+function pluginRoot(dir) {
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name: require('../package.json').name }) + '\n');
+  return dir;
+}
+
+module.exports = { pluginRoot, shortCacheRoot, useFixtureUserFile, ownerFallbacks, ownerDirsOutside, ACCOUNT_HOME, repairWorktrees, makeRepo, makeProjectRepo, makeTaskRepo, copyRepo, cachedFixture, fixtureLadder, pinRung, pinLiveRung, stubRungs, STUB_RUNG, HARNESS_GUARD, run, runPty, PTY_AVAILABLE, runAsync, dispatch, BIN, ROOT, HOOKS, real, TMP_ROOT, LIVE_ROOT, detachedAlive, processesIn, assertNoProcessesIn };
