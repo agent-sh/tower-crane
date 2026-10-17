@@ -139,3 +139,12 @@ test('watchdog removes a Linux detached child even when its parent exits between
   const pid = Number(readPublished(file, 'utf8'));
   assert.equal(detachedAlive({ pid }), false, 'an orphan cannot outlive its mutation run');
 });
+
+test('an unavailable systemd manager is an infrastructure failure rather than a mutant kill', { skip: process.platform !== 'linux' }, async (t) => {
+  const h = makeRepo(t);
+  await assert.rejects(runContained(process.execPath, ['-e', ''], {
+    cwd: h.repo, limit: 48, scope: true, timeout: 5000,
+    env: { ...h.env, XDG_RUNTIME_DIR: path.join(h.base, 'no-runtime'),
+      DBUS_SESSION_BUS_ADDRESS: `unix:path=${path.join(h.base, 'no-bus')}` },
+  }), error => error.code === 'ENOENT' || /cannot launch mutant systemd scope/.test(error.message));
+});

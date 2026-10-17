@@ -474,6 +474,10 @@ async function runContained(command, argv, { cwd, env = process.env, limit = 512
       await new Promise(resolve => setTimeout(resolve, 25));
     }
     if (inspectionError) throw inspectionError;
+    if (scope && !reason && result.status !== 0
+      && /^Failed to (?:connect .*bus|start transient scope|create bus connection|find executable|resolve executable|execute)/m.test(output)) {
+      throw new Error(`cannot launch mutant systemd scope:\n${output}`);
+    }
     return { ...result, reason, output, peak };
   } finally {
     clearInterval(timer);
