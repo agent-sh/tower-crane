@@ -595,8 +595,19 @@ blocked reason and containment settings; status and the inbox show that reason.
 Gate command failures put the reason in their summary and receipt/event where
 applicable. The whole attempt is stopped; an unrelated scope is left running.
 
-On macOS, Windows, Linux without cgroup v2, or Linux without a reachable user
-manager, a watchdog polls process count and total RSS on a 100 ms cadence,
+On macOS, Windows, Linux without cgroup v2, Linux without a reachable user
+manager, or an inherited scope without writable delegated controllers,
+the executable launches directly with a watchdog. An existing parent cgroup
+continues to enforce its aggregate cap. The launcher never creates a sibling
+scope to escape an inherited scope that cannot delegate.
+
+Fixture CLI environments (`TC_ACCOUNT_HOME`) and Node test workers launch
+without a new wrapper, preserving fixture preloads, process ids and caller
+spawn options. Dedicated containment tests set
+`TOWER_CRANE_TEST_CONTAINMENT=1` to exercise real enforcement explicitly.
+The independent capped test scope remains their safety fence.
+
+The fallback watchdog polls process count and total RSS on a 100 ms cadence,
 skipping overlapping snapshots. Platform snapshot commands have a two second
 deadline. Linux
 reads `/proc`, macOS uses `ps`, and Windows uses PowerShell process snapshots.

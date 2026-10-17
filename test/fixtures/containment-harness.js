@@ -50,7 +50,7 @@ if (mode === 'nested-limit' || mode === 'nested-memory') {
     const spawn = n === 0 ? C.spawn : cp.spawn;
     const child = spawn(process.execPath, [__filename, mode, file, String(n + 1)], {
       stdio: 'inherit', detached: true, resources: { tasks_max: 64, memory_max_bytes: 512 * 1024 * 1024 },
-      ...(n === 0 ? { env: { PATH: process.env.PATH } } : {}),
+      ...(n === 0 ? { env: { PATH: process.env.PATH, TOWER_CRANE_TEST_CONTAINMENT: '1' } } : {}),
     });
     child.on('error', () => process.exitCode = 1);
     child.on('exit', (code) => process.exitCode = code);

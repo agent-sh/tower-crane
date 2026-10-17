@@ -4,23 +4,23 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const cp = require('node:child_process');
 const { cachedFixture } = require('./helpers');
 const { gateFixture } = require('./gate-helpers');
 const C = require('../lib/containment');
 const G = require('../lib/gates/common');
 const HARNESS = path.join(__dirname, 'fixtures', 'containment-harness.js');
+process.env.TOWER_CRANE_TEST_CONTAINMENT = '1';
 const memory = 512 * 1024 * 1024;
-const systemd = process.platform === 'linux' && fs.existsSync('/sys/fs/cgroup/cgroup.controllers')
-  && cp.spawnSync('systemctl', ['--user', 'show-environment'],
-  { stdio: 'ignore', timeout: 2000 }).status === 0; // wait-allow: match the launcher's bounded user-manager probe
+const systemd = C.canScope();
 
 function fixture(t) {
-  return cachedFixture(t, 'containment', (h) => {
+  const h = cachedFixture(t, 'containment', (h) => {
     h.init(['--tasks-max', '64', '--memory-max-bytes', String(memory)]);
     h.ok(['task', 'add', '--title', 'Bound fake agent', '--acceptance', 'contained', '--tier', 'easy']);
     h.ok(['brief', 'set', 'T1', '-'], { input: 'Finite fake harness.\n' });
   });
+  h.env.TOWER_CRANE_TEST_CONTAINMENT = '1';
+  return h;
 }
 
 test('resource settings are persisted, validated and operational', (t) => {
@@ -54,6 +54,34 @@ test('nested attempt caps do not recursively shrink project defaults', () => {
     [`${slice}/external.scope/nested-${own}/runner`, `${slice}/external.scope`],
     [`${slice}/external.scope`, `${slice}/external.scope`],
   ]) assert.equal(C.budgetGroup(input), expected);
+});
+
+test('scope placement keeps the caller slice, including custom fences', () => {
+  for (const [group, slice] of [
+    ['/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/agents.slice/session.scope', 'agents.slice'],
+    ['/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/test-fence.slice/runner.scope/runner', 'test-fence.slice'],
+  ]) assert.equal(C.callerSlice(group), slice);
+  assert.throws(() => C.callerSlice('/sys/fs/cgroup/no-slice/runner'), /no systemd slice/);
+});
+
+test('ordinary fixture launches preserve hooks and spawn options without containment', async () => {
+  const h = fixture();
+  const env = { ...h.env };
+  delete env.TOWER_CRANE_TEST_CONTAINMENT;
+  const child = C.spawn(process.execPath, ['-e', 'console.log("fixture")'], {
+    env, stdio: ['ignore', 'pipe', 'pipe'], detached: false,
+    resources: { tasks_max: 1, memory_max_bytes: 1 },
+  });
+  assert.equal(child.containment, undefined);
+  const output = [];
+  child.stdout.on('data', (data) => output.push(data));
+  const status = await new Promise((resolve, reject) => {
+    child.once('close', resolve);
+    child.once('error', reject);
+  });
+  assert.equal(status, 0);
+  assert.equal(Buffer.concat(output).toString(), 'fixture\n');
+  await h.cleanup();
 });
 
 test('local cgroup events distinguish a child cap from the parent cap', (t) => {
@@ -94,6 +122,10 @@ test('fake harness nested launches and detached grandchildren retain containment
   const records = fs.readFileSync(file, 'utf8').trim().split('\n').map(JSON.parse);
   assert.equal(records.length, 3);
   if (result.containment.backend === 'cgroup') {
+    const parent = C.currentGroup().split('/');
+    const slice = parent.findLastIndex((name) => name.endsWith('.slice'));
+    const fence = parent.slice(0, slice + 1).join('/') + '/';
+    assert.ok(result.containment.group.startsWith(fence), result.containment.group);
     assert.equal(records[0].inherited, result.containment.group);
     assert.ok(records[1].inherited.startsWith(records[0].inherited + path.sep));
     for (const record of records) assert.ok(record.group.startsWith(records[0].inherited + path.sep), JSON.stringify(record));
@@ -202,6 +234,7 @@ test('CLI cleanup records a capped gate command and names its failure', (t) => {
     h.ok(['project', 'set', '--clean-cmd',
       [process.execPath, HARNESS, 'storm', 'unused'].map(G.shellQuote).join(' ')]);
   });
+  h.env.TOWER_CRANE_TEST_CONTAINMENT = '1';
   const result = h.run(['check', 'clean', 'T1', '--json'],
     { env: { TOWER_CRANE_CLEAN_CMD: '' } });
   assert.equal(result.code, 1, result.stderr);
