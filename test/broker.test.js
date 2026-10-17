@@ -424,12 +424,13 @@ test('a claude broker refuses to start when no socket path its sandbox reaches c
   const job = { ...s.job, broker_harnesses: ['claude'], broker: path.join(s.base, 'w'.repeat(90), B.FILE) };
   await assert.rejects(B.start(job), /no socket path that the agent's sandbox reaches.*XDG_CACHE_HOME/s);
   assert.deepEqual(attempted, ['/tmp']);
+  assert.equal(fs.existsSync(path.dirname(job.broker)), false, 'the refused start leaves no broker directory');
 });
 
-test('a broker removes the /tmp socket directory it made when it cannot listen there', { skip: process.platform === 'win32' && 'Windows uses a named pipe' }, async (t) => {
-  const s = scratch(t);
+// A /tmp socket directory as a broker's start makes it, its mkdtemp mocked to plant `s` in its way.
+function blockedFallback(t) {
   const made = [];
-  const mkdtemp = fs.mkdtempSync;
+  const { mkdtempSync: mkdtemp, rmSync: rm } = fs;
   t.mock.method(fs, 'mkdtempSync', (...args) => {
     const dir = mkdtemp(...args);
     made.push(dir);
@@ -437,7 +438,13 @@ test('a broker removes the /tmp socket directory it made when it cannot listen t
     fs.mkdirSync(path.join(dir, 's'));
     return dir;
   });
-  t.after(() => made.forEach((dir) => fs.rmSync(dir, { recursive: true, force: true })));
+  t.after(() => made.forEach((dir) => rm(dir, { recursive: true, force: true })));
+  return made;
+}
+
+test('a broker removes the /tmp socket directory it made when it cannot listen there', { skip: process.platform === 'win32' && 'Windows uses a named pipe' }, async (t) => {
+  const s = scratch(t);
+  const made = blockedFallback(t);
   const job = { ...s.job, broker_harnesses: ['claude'], broker: path.join(s.base, 'w'.repeat(90), B.FILE) };
   await assert.rejects(B.start(job), /EADDRINUSE/);
   assert.equal(made.length, 1);
@@ -446,8 +453,27 @@ test('a broker removes the /tmp socket directory it made when it cannot listen t
   assert.equal(fs.existsSync(path.dirname(job.broker)), false, 'nor the broker directory it made');
 });
 
+test('a broker start that cannot listen and cannot clean up reports the listen error with the cleanup error attached', { skip: process.platform === 'win32' && 'Windows uses a named pipe' }, async (t) => {
+  const s = scratch(t);
+  const made = blockedFallback(t);
+  const rmSync = fs.rmSync;
+  t.mock.method(fs, 'rmSync', (p, ...rest) => {
+    if (made.includes(p)) throw Object.assign(new Error(`EBUSY: resource busy, rm '${p}'`), { code: 'EBUSY' });
+    return rmSync(p, ...rest);
+  });
+  const job = { ...s.job, broker_harnesses: ['claude'], broker: path.join(s.base, 'w'.repeat(90), B.FILE) };
+  await assert.rejects(B.start(job), (e) => {
+    assert.equal(e.code, 'EADDRINUSE');
+    assert.match(e.message, /EADDRINUSE.*cleaning up after it failed: EBUSY/s);
+    assert.equal(e.cleanup?.code, 'EBUSY');
+    return true;
+  });
+  assert.equal(fs.existsSync(path.dirname(job.broker)), false, 'the other cleanup steps still ran');
+});
+
 test('a broker start sweeps /tmp socket directories of killed brokers and keeps every other one', { skip: (process.platform === 'win32' || typeof process.getuid !== 'function') && 'Windows uses a named pipe' }, async (t) => {
   const s = scratch(t);
+  const net = require('node:net');
   const planted = [];
   const plant = (prefix = 'tower-crane-') => {
     const dir = fs.mkdtempSync(path.join('/tmp', prefix));
@@ -455,49 +481,107 @@ test('a broker start sweeps /tmp socket directories of killed brokers and keeps 
     return dir;
   };
   t.after(() => planted.forEach((dir) => fs.rmSync(dir, { recursive: true, force: true })));
+  const old = Date.now() - 10 * 60_000;
+  const age = (dir) => {
+    fs.utimesSync(dir, old / 1000, old / 1000);
+    return dir;
+  };
   // A broker's monitor SIGKILLed while it listened: its socket file stays and refuses connections.
+  let deadPid;
   const killed = (dir) => {
     const r = require('node:child_process').spawnSync(process.execPath, ['-e', "require('node:net').createServer().listen(process.argv[1], () => process.kill(process.pid, 'SIGKILL'))", path.join(dir, 's')]);
     assert.equal(r.signal, 'SIGKILL');
     assert.ok(fs.lstatSync(path.join(dir, 's')).isSocket());
+    deadPid = r.pid;
     return dir;
   };
-  const dead = [killed(plant()), killed(plant())];
+  const record = (dir, owner) => {
+    fs.writeFileSync(path.join(dir, 'owner.json'), JSON.stringify({ host: os.hostname(), started: old, ...owner }));
+    return dir;
+  };
+  const self = require('../lib/processes').identity(process.pid);
+  // Made by an older Tower Crane, with no owner record: its socket's refusal is the proof.
+  const legacyDead = age(killed(plant()));
+  const legacyYoung = killed(plant());
   const live = plant();
-  const server = await new Promise((resolve) => { const srv = require('node:net').createServer().listen(path.join(live, 's'), () => resolve(srv)); });
+  const server = await new Promise((resolve) => { const srv = net.createServer().listen(path.join(live, 's'), () => resolve(srv)); });
   t.after(() => server.close());
-  const starting = plant();
+  age(live);
+  const starting = age(plant());
   const shared = killed(plant());
   fs.writeFileSync(path.join(shared, 'other'), 'not the broker\'s');
-  const foreign = killed(plant('tower-crane-other-'));
+  age(shared);
+  const foreign = age(killed(plant('tower-crane-other-')));
+  // Made by this version: the owner record decides, not the socket.
+  const ownerGone = age(record(killed(plant()), { pid: deadPid }));
+  const ownerGoneUnbound = age(record(plant(), { pid: deadPid }));
+  const ownerLive = age(record(killed(plant()), { pid: process.pid, ...self }));
+  const ownerGoneYoung = age(record(killed(plant()), { pid: deadPid, started: Date.now() }));
+  const ownerElsewhere = age(record(killed(plant()), { pid: deadPid, host: `not-${os.hostname()}` }));
+  const reused = process.platform === 'linux' ? [age(record(killed(plant()), { pid: process.pid, host: os.hostname(), start_ticks: '1' }))] : [];
   const broker = await B.start({ ...s.job, broker_harnesses: ['claude'], broker: path.join(s.base, 'brokers', 'worker-T1-1', B.FILE) });
   t.after(() => broker.close());
-  for (const dir of dead) assert.equal(fs.existsSync(dir), false, `a killed broker's ${dir} is swept`);
-  for (const dir of [live, starting, shared, foreign]) assert.equal(fs.existsSync(dir), true, `${dir} stays`);
+  for (const dir of [legacyDead, ownerGone, ownerGoneUnbound, ...reused]) assert.equal(fs.existsSync(dir), false, `a killed broker's ${dir} is swept`);
+  for (const dir of [legacyYoung, live, starting, shared, foreign, ownerLive, ownerGoneYoung, ownerElsewhere]) assert.equal(fs.existsSync(dir), true, `${dir} stays`);
   assert.ok(fs.lstatSync(path.join(live, 's')).isSocket(), 'the live broker keeps its socket');
+  assert.ok(fs.lstatSync(path.join(ownerLive, 's')).isSocket(), 'a live owner keeps a socket that refuses connections');
 });
 
-test('a directory the agent leaves at its broker.sock breaks neither the next spawn nor the broker\'s close', { skip: process.platform === 'win32' && 'Windows uses a named pipe' }, async (t) => {
+test('a broker that falls back to /tmp names its monitor in an owner record', { skip: process.platform === 'win32' && 'Windows uses a named pipe' }, async (t) => {
+  const s = scratch(t);
+  const job = { ...s.job, broker_harnesses: ['claude'], broker: path.join(s.base, 'w'.repeat(90), B.FILE) };
+  const broker = await B.start(job);
+  t.after(() => broker.close());
+  const { socket } = JSON.parse(fs.readFileSync(job.broker, 'utf8'));
+  const owner = JSON.parse(fs.readFileSync(path.join(path.dirname(socket), 'owner.json'), 'utf8'));
+  assert.equal(owner.pid, process.pid);
+  assert.equal(owner.host, os.hostname());
+  assert.ok(Math.abs(Date.now() - owner.started) < 60_000);
+  assert.equal(require('../lib/processes').processState(owner), 'running');
+});
+
+test('what the agent leaves at its broker.sock breaks neither the next spawn nor the broker\'s close, and the broker never walks it', { skip: process.platform === 'win32' && 'Windows uses a named pipe' }, async (t) => {
   const s = scratch(t);
   const tmp = path.join(s.base, 't');
   if (!require('../lib/gate-tmp').harnessFits(tmp)) return t.skip(`the test root is too deep for an agent temp directory: ${tmp}`);
   const sock = path.join(tmp, 'broker.sock');
+  const stale = () => fs.readdirSync(tmp).filter((n) => n.startsWith('broker.sock.stale-'));
+  const job = { ...s.job, broker_harnesses: ['claude'], agent_tmp: tmp, broker: path.join(s.base, 'w'.repeat(90), B.FILE) };
+  // A tree the agent wrote is renamed aside whole, in the agent's own temp directory.
   fs.mkdirSync(path.join(sock, 'inside'), { recursive: true, mode: 0o700 });
   fs.writeFileSync(path.join(sock, 'inside', 'f'), 'x');
-  const job = { ...s.job, broker_harnesses: ['claude'], agent_tmp: tmp, broker: path.join(s.base, 'w'.repeat(90), B.FILE) };
-  const broker = await B.start(job);
+  let broker = await B.start(job);
   let closed = false;
   t.after(() => closed || broker.close());
   assert.equal(JSON.parse(fs.readFileSync(job.broker, 'utf8')).socket, sock);
   assert.ok(fs.lstatSync(sock).isSocket(), 'the broker listens where the directory was');
-  // The agent swaps its socket for a directory while the broker runs.
+  assert.equal(stale().length, 1);
+  assert.equal(fs.readFileSync(path.join(tmp, stale()[0], 'inside', 'f'), 'utf8'), 'x', 'the tree is moved, not walked');
+  // The agent swaps its socket for a link to a directory outside while the broker runs.
+  const outside = path.join(s.base, 'outside');
+  fs.mkdirSync(outside);
+  fs.writeFileSync(path.join(outside, 'keep'), 'k');
   fs.rmSync(sock);
-  fs.mkdirSync(path.join(sock, 'inside'), { recursive: true });
+  fs.symlinkSync(outside, sock);
   broker.close();
   closed = true;
-  assert.equal(fs.existsSync(sock), false, 'closing removes the directory at the socket path');
+  assert.equal(fs.existsSync(sock) || fs.lstatSync(sock, { throwIfNoEntry: false }) !== undefined, false, 'closing removes the link');
+  assert.equal(fs.readFileSync(path.join(outside, 'keep'), 'utf8'), 'k', 'and nothing it points to');
   assert.equal(fs.existsSync(path.dirname(job.broker)), false, 'and still removes the broker directory');
-  assert.equal(fs.existsSync(tmp), true, 'and keeps the agent\'s temp directory');
+  // An empty directory there is removed.
+  fs.mkdirSync(sock);
+  broker = await B.start(job);
+  closed = false;
+  assert.ok(fs.lstatSync(sock).isSocket());
+  assert.equal(stale().length, 1, 'an empty directory is removed, not renamed aside');
+  // One that can be neither removed nor renamed refuses the spawn with the reason and leaves no broker directory.
+  broker.close();
+  closed = true;
+  fs.mkdirSync(path.join(sock, 'inside'), { recursive: true });
+  t.mock.method(fs, 'renameSync', () => { throw Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' }); });
+  await assert.rejects(B.start(job), /cannot clear .*broker\.sock, which is in the way of the broker socket \(EACCES\)/);
+  assert.equal(fs.existsSync(path.dirname(job.broker)), false, 'the refused start leaves no broker directory');
+  assert.ok(fs.existsSync(path.join(sock, 'inside')), 'and does not walk the tree');
 });
 
 test('a broker for claude and codex routes listens on both, and an agent that cannot use the socket uses TCP', { skip: process.platform === 'win32' && 'Windows uses a named pipe for both' }, async (t) => {
