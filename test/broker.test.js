@@ -456,10 +456,10 @@ test('a broker removes the /tmp socket directory it made when it cannot listen t
 test('a broker start that cannot listen and cannot clean up reports the listen error with the cleanup error attached', { skip: process.platform === 'win32' && 'Windows uses a named pipe' }, async (t) => {
   const s = scratch(t);
   const made = blockedFallback(t);
-  const rmSync = fs.rmSync;
-  t.mock.method(fs, 'rmSync', (p, ...rest) => {
-    if (made.includes(p)) throw Object.assign(new Error(`EBUSY: resource busy, rm '${p}'`), { code: 'EBUSY' });
-    return rmSync(p, ...rest);
+  const rmdirSync = fs.rmdirSync;
+  t.mock.method(fs, 'rmdirSync', (p, ...rest) => {
+    if (made.includes(p)) throw Object.assign(new Error(`EBUSY: resource busy, rmdir '${p}'`), { code: 'EBUSY' });
+    return rmdirSync(p, ...rest);
   });
   const job = { ...s.job, broker_harnesses: ['claude'], broker: path.join(s.base, 'w'.repeat(90), B.FILE) };
   await assert.rejects(B.start(job), (e) => {
@@ -584,6 +584,42 @@ test('what the agent leaves at its broker.sock breaks neither the next spawn nor
   await assert.rejects(B.start(job), /cannot clear .*broker\.sock, which is in the way of the broker socket \(EACCES\)/);
   assert.equal(fs.existsSync(path.dirname(job.broker)), false, 'the refused start leaves no broker directory');
   assert.ok(fs.existsSync(path.join(sock, 'inside')), 'and does not walk the tree');
+});
+
+test('closing never walks a broker directory the agent wrote: what else is there is moved aside whole, links unfollowed', async (t) => {
+  const s = scratch(t);
+  const brokers = path.join(s.base, 'brokers');
+  // A codex agent's sandbox writes its own broker directory.
+  const job = { ...s.job, harness: 'codex', broker_harnesses: ['codex'], broker: path.join(brokers, 'worker-T1-1', B.FILE) };
+  const broker = await B.start(job);
+  let closed = false;
+  t.after(() => closed || broker.close());
+  const where = path.dirname(job.broker);
+  fs.mkdirSync(path.join(where, 'sub'));
+  fs.writeFileSync(path.join(where, 'sub', 'f'), 'agent');
+  const outside = path.join(s.base, 'outside');
+  fs.mkdirSync(outside);
+  fs.writeFileSync(path.join(outside, 'keep'), 'k');
+  fs.symlinkSync(outside, path.join(where, 'link'));
+  const notices = [];
+  const write = process.stderr.write;
+  t.mock.method(process.stderr, 'write', (chunk, ...rest) => {
+    if (String(chunk).includes('the broker left')) notices.push(String(chunk));
+    else return write.call(process.stderr, chunk, ...rest);
+    return true;
+  });
+  broker.close();
+  closed = true;
+  assert.equal(fs.existsSync(where), false, 'the broker directory is gone from its name');
+  const aside = fs.readdirSync(brokers).filter((n) => n.startsWith('.stale-worker-T1-1-'));
+  assert.equal(aside.length, 1, fs.readdirSync(brokers).join(' '));
+  const moved = path.join(brokers, aside[0]);
+  assert.deepEqual(fs.readdirSync(moved).sort(), ['link', 'sub'], 'what the broker wrote is removed, the rest moved whole');
+  assert.equal(fs.readFileSync(path.join(moved, 'sub', 'f'), 'utf8'), 'agent');
+  assert.ok(fs.lstatSync(path.join(moved, 'link')).isSymbolicLink());
+  assert.deepEqual(fs.readdirSync(outside), ['keep'], 'the link\'s target is kept');
+  assert.equal(notices.length, 1);
+  assert.match(notices[0], new RegExp(`left ${where.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} as ${moved.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
 });
 
 test('a broker for claude and codex routes listens on both, and an agent that cannot use the socket uses TCP', { skip: process.platform === 'win32' && 'Windows uses a named pipe for both' }, async (t) => {
