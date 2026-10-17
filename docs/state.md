@@ -220,7 +220,7 @@ A command returns only after its writes are on disk. The event append to `events
 
 A commit that changes `project.json`, `tasks.json` or `decisions.json` and logs events writes in this order:
 
-1. `commit.<id>.json` is written in the state directory, where `<id>` is the id of the commit's last event. It records the device, inode and byte length of `events.jsonl` before the append and the ids of all the commit's events. Each changed file is written in full and synced as `<name>.json.<id>.commit`. The directory is synced.
+1. `commit.<id>.json` is written in the state directory, where `<id>` is the id of the commit's last event. It records the device, inode and byte length of `events.jsonl` before the append and the ids of all the commit's events. The inode is in `ino` as a JSON number, as released tools write and read it, and in `ino_exact` as a decimal string. A number rounds Windows file ids past 2^53, so recovery compares `ino_exact` when the manifest has it and `ino` otherwise. Each changed file is written in full and synced as `<name>.json.<id>.commit`. The directory is synced.
 2. The events are appended to `events.jsonl` and the log is synced. This is the commit point.
 3. Each staged file is renamed over its target, the directory is synced and `commit.<id>.json` is removed.
 

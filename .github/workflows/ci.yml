@@ -76,8 +76,8 @@ jobs:
     name: repeat (windows-latest, node 26)
     if: github.event_name != 'pull_request'
     runs-on: windows-latest
-    # About 20 to 25 minutes: ten passes of the authority files take about 16.
-    timeout-minutes: 45
+    # About 25 to 35 minutes: ten passes of the authority files take about 16.
+    timeout-minutes: 55
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -102,6 +102,16 @@ jobs:
           foreach ($attempt in 1..10) {
             Write-Host "Claude interrupted native worker: pass $attempt/10"
             npm test -- test/spawn-resume.test.js --test-name-pattern="claude interrupted native worker keeps dirty files and collects usage before redispatch"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+        env:
+          TOWER_CRANE_TEST_TMP: ${{ runner.temp }}/tower-crane-tests
+      - name: Repeat lock-free reader and torn recovery tests thirty times
+        shell: pwsh
+        run: |
+          foreach ($attempt in 1..30) {
+            Write-Host "Lock-free reader and torn recovery: pass $attempt/30"
+            npm test -- test/state-durability.test.js --test-name-pattern="keeps losing" --test-name-pattern="file ids pass" --test-name-pattern="torn"
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
         env:

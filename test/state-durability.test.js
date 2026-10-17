@@ -9,6 +9,15 @@ const { cachedFixture, useFixtureUserFile } = require('./helpers');
 const T = require('../lib/tasks');
 const { waitOnRepo } = require('./signals');
 const { sleepSync } = require('../lib/util');
+const { windowsFileIds } = require('./fixtures/windows-file-ids');
+
+// Simulated Windows file ids, past 2^53, in this process for the rest of the
+// test and in each CLI the returned options run.
+const WINDOWS_IDS = path.join(__dirname, 'fixtures', 'windows-file-ids.js');
+function windowsIds(t) {
+  t.after(windowsFileIds());
+  return { pre: ['--require', WINDOWS_IDS], env: { TOWER_CRANE_TEST_WINDOWS_IDS: '1' } };
+}
 
 function setup(t) {
   return cachedFixture(t, 'durability', (h) => {
@@ -97,8 +106,9 @@ test('a commit whose log sync fails after its lines are written keeps its change
   assertConsistent(h);
 });
 
-test('recovery cuts a torn multi-event append off the log, including a final line missing only its newline', (t) => {
+function tornMultiEvent(t, { windows = false } = {}) {
   const h = setup(t);
+  const cli = windows ? windowsIds(t) : {};
   const log = path.join(h.state, 'events.jsonl');
   // One descriptor for the stat and the torn append, so the file measured is the file written.
   const fd = fs.openSync(log, 'a');
@@ -114,13 +124,38 @@ test('recovery cuts a torn multi-event append off the log, including a final lin
   fs.writeFileSync(path.join(h.state, `commit.${second.id}.json`), JSON.stringify({ size, dev, ino, ids: [first.id, second.id] }));
   fs.writeSync(fd, `${JSON.stringify(first)}\n${JSON.stringify(second)}`);
   fs.closeSync(fd);
-  h.ok(['task', 'note', 'T1', 'next note']);
+  h.ok(['task', 'note', 'T1', 'next note'], cli);
   const ids = logged(h).map((e) => e.id);
   assert.ok(!ids.includes(first.id) && !ids.includes(second.id), 'the torn commit left no event');
   assert.deepEqual(noted(h, 'torn note'), { task: false, event: false });
   assert.deepEqual(noted(h, 'next note'), { task: true, event: true });
   assertConsistent(h);
-});
+}
+
+test('recovery cuts a torn multi-event append off the log, including a final line missing only its newline', (t) => tornMultiEvent(t));
+
+// A tool through 0.1.2 wrote the inode as a Number only, rounded past 2^53.
+test('recovery cuts a torn append that a 0.1.2 manifest describes when file ids pass 2^53, as on Windows', (t) => tornMultiEvent(t, { windows: true }));
+
+// What a tool through 0.1.2 checks before it cuts: the manifest's dev and ino
+// equal the log's Number stat. A manifest without them would leave the torn
+// lines to such a tool.
+function manifestFor012(t, { windows = false } = {}) {
+  const h = setup(t);
+  const cli = windows ? windowsIds(t) : {};
+  const r = h.run(['task', 'note', 'T1', 'torn note'], { ...cli, hooks: { HOOK_DIE_COMMIT: 'staged' } });
+  assert.notEqual(r.code, 0, 'the writer was killed');
+  const [name] = fs.readdirSync(h.state).filter((n) => /^commit\..*\.json$/.test(n));
+  const manifest = JSON.parse(fs.readFileSync(path.join(h.state, name), 'utf8'));
+  const now = fs.statSync(path.join(h.state, 'events.jsonl'));
+  assert.equal(typeof manifest.ino, 'number');
+  assert.ok(manifest.dev === now.dev && manifest.ino === now.ino, `0.1.2 would skip the cut: ${JSON.stringify(manifest)}`);
+  assert.equal(manifest.ino_exact, String(fs.statSync(path.join(h.state, 'events.jsonl'), { bigint: true }).ino));
+}
+
+test('a commit manifest keeps the Number inode a 0.1.2 tool compares before it cuts', (t) => manifestFor012(t));
+
+test('a commit manifest keeps the Number inode a 0.1.2 tool compares when file ids pass 2^53, as on Windows', (t) => manifestFor012(t, { windows: true }));
 
 test('an add that failed after its commit point keeps its brief, and only then', (t) => {
   const h = setup(t);
@@ -363,27 +398,10 @@ function replaceLog(h) {
   fs.renameSync(`${log}.replaced`, log);
 }
 
-// File ids as Windows reports them: NTFS puts a sequence number in the top
-// 16 bits, so ids run past 2^53. Node then rounds a Number stat's ino, and
-// neighbouring files share one value; a bigint stat keeps the exact id.
-function windowsFileIds(t) {
-  const base = 2n ** 63n;
-  const originals = { statSync: fs.statSync, fstatSync: fs.fstatSync, lstatSync: fs.lstatSync };
-  const restore = () => Object.assign(fs, originals);
-  t.after(restore);
-  for (const [name, original] of Object.entries(originals)) {
-    fs[name] = function windowsIds(...args) {
-      const st = original.apply(this, args);
-      if (st) st.ino = typeof st.ino === 'bigint' ? base + st.ino : Number(base + BigInt(st.ino));
-      return st;
-    };
-  }
-  return restore;
-}
-
-function readerKeepsLosing(t, { ids = null } = {}) {
+function readerKeepsLosing(t, { ids = false } = {}) {
   const h = setup(t);
-  const restoreIds = ids ? ids(t) : () => {};
+  const restoreIds = ids ? windowsFileIds() : () => {};
+  t.after(restoreIds);
   crash(h, 'landed', 'contended note');
   const file = path.join(h.state, 'project.json');
   const lock = path.join(h.state, 'lock');
@@ -413,7 +431,7 @@ function readerKeepsLosing(t, { ids = null } = {}) {
 
 test('a reader that keeps losing to commits reads once under the lock', (t) => readerKeepsLosing(t));
 
-test('a reader tells a replaced log from the one it read when file ids pass 2^53, as on Windows', (t) => readerKeepsLosing(t, { ids: windowsFileIds }));
+test('a reader tells a replaced log from the one it read when file ids pass 2^53, as on Windows', (t) => readerKeepsLosing(t, { ids: true }));
 
 test('a reader without the lock sees each commit it has the events of while the writer still renames', async (t) => {
   const h = setup(t);
