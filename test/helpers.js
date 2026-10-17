@@ -846,4 +846,26 @@ function ownerFallbacks(h, rung, routes) {
   }
 }
 
-module.exports = { useFixtureUserFile, ownerFallbacks, ownerDirsOutside, ACCOUNT_HOME, repairWorktrees, makeRepo, makeProjectRepo, makeTaskRepo, copyRepo, cachedFixture, fixtureLadder, pinRung, pinLiveRung, stubRungs, STUB_RUNG, HARNESS_GUARD, run, runPty, PTY_AVAILABLE, runAsync, dispatch, BIN, ROOT, HOOKS, real, TMP_ROOT, LIVE_ROOT, detachedAlive, processesIn };
+// A fresh cache root of at most maxBytes, as short as a user's own ~/.cache, for
+// tests of claude's and codex's short temp directories. Fixture roots are too
+// deep for them. The bases are gate-tmp's: the account's ~/.cache from the
+// password database, since HOME can name a deep sandbox home, then
+// XDG_RUNTIME_DIR. Null when no base is short enough and writable; the
+// directory goes when the test ends.
+function shortCacheRoot(t, maxBytes) {
+  for (const base of require('../lib/gate-tmp').shortBases()) {
+    if (Buffer.byteLength(path.join(base, 'tc-test-XXXXXX')) > maxBytes) continue;
+    let root;
+    try {
+      fs.mkdirSync(base, { recursive: true });
+      root = fs.mkdtempSync(path.join(base, 'tc-test-'));
+    } catch {
+      continue;
+    }
+    t.after(() => fs.rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
+    return root;
+  }
+  return null;
+}
+
+module.exports = { shortCacheRoot, useFixtureUserFile, ownerFallbacks, ownerDirsOutside, ACCOUNT_HOME, repairWorktrees, makeRepo, makeProjectRepo, makeTaskRepo, copyRepo, cachedFixture, fixtureLadder, pinRung, pinLiveRung, stubRungs, STUB_RUNG, HARNESS_GUARD, run, runPty, PTY_AVAILABLE, runAsync, dispatch, BIN, ROOT, HOOKS, real, TMP_ROOT, LIVE_ROOT, detachedAlive, processesIn };
