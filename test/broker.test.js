@@ -518,11 +518,17 @@ test('a broker start sweeps /tmp socket directories of killed brokers and keeps 
   const ownerLive = age(record(killed(plant()), { pid: process.pid, ...self }));
   const ownerGoneYoung = age(record(killed(plant()), { pid: deadPid, started: Date.now() }));
   const ownerElsewhere = age(record(killed(plant()), { pid: deadPid, host: `not-${os.hostname()}` }));
+  // A record reached through a link is not the broker's: the link is not followed.
+  const ownerLinked = killed(plant());
+  const target = path.join(s.base, 'owner-target.json');
+  fs.writeFileSync(target, JSON.stringify({ pid: deadPid, host: os.hostname(), started: old }));
+  fs.symlinkSync(target, path.join(ownerLinked, 'owner.json'));
+  age(ownerLinked);
   const reused = process.platform === 'linux' ? [age(record(killed(plant()), { pid: process.pid, host: os.hostname(), start_ticks: '1' }))] : [];
   const broker = await B.start({ ...s.job, broker_harnesses: ['claude'], broker: path.join(s.base, 'brokers', 'worker-T1-1', B.FILE) });
   t.after(() => broker.close());
   for (const dir of [legacyDead, ownerGone, ownerGoneUnbound, ...reused]) assert.equal(fs.existsSync(dir), false, `a killed broker's ${dir} is swept`);
-  for (const dir of [legacyYoung, live, starting, shared, foreign, ownerLive, ownerGoneYoung, ownerElsewhere]) assert.equal(fs.existsSync(dir), true, `${dir} stays`);
+  for (const dir of [legacyYoung, live, starting, shared, foreign, ownerLive, ownerGoneYoung, ownerElsewhere, ownerLinked]) assert.equal(fs.existsSync(dir), true, `${dir} stays`);
   assert.ok(fs.lstatSync(path.join(live, 's')).isSocket(), 'the live broker keeps its socket');
   assert.ok(fs.lstatSync(path.join(ownerLive, 's')).isSocket(), 'a live owner keeps a socket that refuses connections');
 });
