@@ -107,7 +107,7 @@ test('the dead-agent sweep removes orphan brokers and keeps live claims, process
   const stale = (agent) => path.join(h.state, 'brokers', `.stale-${agent}-0123456789ab`);
   if (grouped) {
     const leader = cp.spawn(process.execPath, ['-e',
-      "const c = require('node:child_process').spawn(process.execPath, ['-e', 'setTimeout(() => {}, 120000)'], { stdio: 'ignore' }); process.stdout.write(c.pid + '\\n', () => process.exit(0))"],
+      "const c = require('node:child_process').spawn(process.execPath, ['-e', 'setTimeout(() => {}, 120000)'], { stdio: 'ignore' }); process.stdout.write(c.pid + '\\n', () => process.exit(0))"], // wait-allow: the member only idles until the test kills its group
     { detached: true, stdio: ['ignore', 'pipe', 'ignore'] });
     const [left] = await once(leader.stdout, 'data');
     assert.ok(Number(String(left).trim()) > 0, 'the group keeps a member');
