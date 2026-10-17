@@ -134,8 +134,31 @@ test('the dead-agent sweep removes orphan brokers and keeps live claims, process
       detail: { agent: 'worker-group-reused', role: 'worker', pid: later.pid, host: require('node:os').hostname(), start_ticks: '1' },
     }) + '\n');
   }
+  // A harness that exited after starting a process in a session of its own (setsid): its group is
+  // empty, and only the launch's marker, which the process inherited, names it as the agent's.
+  // Only Linux reads another process's environment.
+  const marked = process.platform === 'linux';
+  if (marked) {
+    const mark = `TOWERCRANE_SPAWN_RUN_${process.pid}_0123456789ab`;
+    const leader = cp.spawn(process.execPath, ['-e',
+      "const c = require('node:child_process').spawn(process.execPath, ['-e', 'setTimeout(() => {}, 120000)'], { detached: true, stdio: 'ignore' }); process.stdout.write(c.pid + '\\n', () => process.exit(0))"], // wait-allow: the session leader only idles until the test kills it
+    { detached: true, stdio: ['ignore', 'pipe', 'ignore'], env: { ...process.env, [mark]: '1' } });
+    const [line] = await once(leader.stdout, 'data');
+    const left = Number(String(line).trim());
+    assert.ok(left > 0, 'the harness left a process in a session of its own');
+    t.after(() => { try { killGroup(left, 'SIGKILL'); } catch {} });
+    if (leader.exitCode === null) await once(leader, 'exit');
+    plant('worker-setsid-left', { socket });
+    fs.mkdirSync(path.join(h.state, 'homes', 'worker-setsid-left'), { recursive: true });
+    fs.writeFileSync(path.join(h.state, 'homes', 'worker-setsid-left', 'note'), 'the agent\'s');
+    fs.appendFileSync(path.join(h.state, 'events.jsonl'), JSON.stringify({
+      at: new Date().toISOString(), cmd: 'spawn', agent: 'owner', task: 'T2',
+      detail: { agent: 'worker-setsid-left', role: 'worker', pid: leader.pid, host: require('node:os').hostname(), run_mark: mark },
+    }) + '\n');
+  }
+  const kept = [...(grouped ? ['worker-group-left'] : []), ...(marked ? ['worker-setsid-left'] : [])];
   // Broker directories that closing renamed aside, holding what an agent wrote there.
-  for (const agent of ['worker-orphan', 'worker-live-process', 'worker-live-claim', ...(grouped ? ['worker-group-left'] : [])]) {
+  for (const agent of ['worker-orphan', 'worker-live-process', 'worker-live-claim', ...kept]) {
     fs.mkdirSync(path.join(stale(agent), 'sub'), { recursive: true });
     fs.writeFileSync(path.join(stale(agent), 'sub', 'f'), 'agent');
   }
@@ -149,16 +172,17 @@ test('the dead-agent sweep removes orphan brokers and keeps live claims, process
   assert.equal(out.code, 0, out.stderr);
   assert.equal(fs.existsSync(brokerDir('worker-orphan')), false, 'broker with no home, claim or process and a dead socket is swept');
   assert.equal(fs.existsSync(brokerDir('worker-orphan-tcp')), false, 'a dead TCP-only broker is swept');
-  for (const agent of ['worker-live-claim', 'worker-live-process', 'worker-live-monitor', 'worker-unknown-process', 'worker-live-socket', 'worker-uncertain', ...(grouped ? ['worker-group-left'] : [])]) {
+  for (const agent of ['worker-live-claim', 'worker-live-process', 'worker-live-monitor', 'worker-unknown-process', 'worker-live-socket', 'worker-uncertain', ...kept]) {
     assert.ok(fs.existsSync(path.join(brokerDir(agent), 'broker.json')), `${agent} is kept`);
   }
   if (grouped) assert.ok(fs.existsSync(path.join(h.state, 'homes', 'worker-group-left', 'note')), 'a home whose group still runs is kept');
+  if (marked) assert.ok(fs.existsSync(path.join(h.state, 'homes', 'worker-setsid-left', 'note')), 'a home whose marked process left the group is kept');
   if (reused) {
     assert.equal(fs.existsSync(path.join(h.state, 'homes', 'worker-group-reused')), false, 'a home whose group pid was given out again is removed');
     assert.equal(fs.existsSync(brokerDir('worker-group-reused')), false, 'and so is its broker directory');
   }
   assert.equal(fs.existsSync(stale('worker-orphan')), false, 'a gone agent\'s broker directory set aside is removed');
-  for (const agent of ['worker-live-process', 'worker-live-claim', ...(grouped ? ['worker-group-left'] : [])]) {
+  for (const agent of ['worker-live-process', 'worker-live-claim', ...kept]) {
     assert.ok(fs.existsSync(path.join(stale(agent), 'sub', 'f')), `${agent}'s broker directory set aside is kept`);
   }
 });
