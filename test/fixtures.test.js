@@ -119,14 +119,21 @@ test('the fixture process probe uses lsof off Linux and reports a skip where not
   const sibling = `${base}-sibling`;
   fs.mkdirSync(inside);
   fs.mkdirSync(sibling);
-  t.after(() => {
-    fs.rmSync(base, { recursive: true, force: true });
-    fs.rmSync(sibling, { recursive: true, force: true });
+  const children = [];
+  // One hook, children first: hooks run in the order added, and Windows refuses
+  // to remove a directory that a running process has as its working directory.
+  t.after(async () => {
+    try {
+      for (const child of children) if (child.exitCode === null && child.signalCode === null) child.kill();
+      await Promise.all(children.map((child) => childExit(child)));
+    } finally {
+      for (const dir of [base, sibling]) fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    }
   });
   const hold = async (cwd) => {
     const child = cp.spawn(process.execPath, ['-e', 'process.stdin.resume()'], { cwd, stdio: ['pipe', 'ignore', 'ignore'] });
     await new Promise((resolve, reject) => { child.once('spawn', resolve); child.once('error', reject); });
-    t.after(async () => { child.stdin.end(); await childExit(child); });
+    children.push(child);
     return child;
   };
   const held = await hold(inside);
