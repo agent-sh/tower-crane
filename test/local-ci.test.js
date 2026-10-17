@@ -585,6 +585,10 @@ test('a token that escapes take part of and split, or that a line break splits, 
   // Nor over a token the redactor finds once the environment value glued before it is redacted.
   const glued = createRedactor([['MY_SECRET', 'AGVCLyB0UqFWaWBjHoW2KwhAm1']]);
   assert.equal(glued(glued.strip('x AGVCLyB0UqFWaWBjHoW2KwhAm1ghs_QEXOi2e7ePqMbY\x1bAx0JI5\x1bghs\n_Dgm6eT6p3sOC76q8NN6NDZi2pLzL4XLEvA27RHpV\n')), 'x [redacted:MY_SECRET][redacted:GITHUB_TOKEN]\n_Dgm6eT6p3sOC76q8NN6NDZi2pLzL4XLEvA27RHpV\n');
+  // The same with the value split by a line break or an escape, which the cleaned text does not show whole.
+  for (const split of ['\n', '\x1b(']) {
+    assert.equal(glued(glued.strip(`x AGVCLyB0Uq${split}FWaWBjHoW2KwhAm1ghs_QEXOi2e7ePqMbY\x1bAx0JI5\x1bghs\n_Dgm6eT6p3sOC76q8NN6NDZi2pLzL4XLEvA27RHpV\n`)), 'x [redacted:MY_SECRET] [redacted:GITHUB_TOKEN]\n_Dgm6eT6p3sOC76q8NN6NDZi2pLzL4XLEvA27RHpV\n', JSON.stringify(split));
+  }
   // Two secrets put back next to each other keep one space between them.
   assert.equal(plain(plain.strip(`x g\n${github.slice(1, 26)}\x1bsk-proj-abcdefghijklmnop ok`)), 'x [redacted:GITHUB_TOKEN] [redacted:API_KEY] ok');
   // Split tokens next to each other go back apart, each from the view it was found in, so a
