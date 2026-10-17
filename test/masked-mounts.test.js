@@ -18,7 +18,7 @@ const { ROOT, TMP_ROOT } = require('./helpers');
 const { FOREGROUND_MAINTENANCE } = require('./repo-seed');
 const Placeholders = require('../lib/claude-sandbox-placeholders');
 const { readPublished } = require('./atomic-file');
-const { waitUntil, childClosed, fileWritten } = require('./signals');
+const { waitUntil, childClosed, fileWritten, killGroup } = require('./signals');
 
 const SHIM = path.join(ROOT, 'lib', 'shim.js');
 const BWRAP = process.platform === 'linux'
@@ -344,7 +344,7 @@ test('a sandbox that binds a stale placeholder while the sweep reads the index k
   assert.equal(out.trim(), 'refused', 'the sandbox still cannot write the name');
   assert.deepEqual(result.removed, []);
   assert.deepEqual(result.held, [{ relative: '.bashrc', why: 'mounted' }]);
-  assert.match(Placeholders.heldLine(result.held, 'stale Claude sandbox placeholders'), /kept stale Claude sandbox placeholders \.bashrc: a live sandbox binds over them/);
+  assert.match(Placeholders.heldLine(result.held, 'stale Claude sandbox placeholders'), /kept stale Claude sandbox placeholders \.bashrc: a live sandbox binds over it, and removing a bound name would let that sandbox write it/);
   assert.equal(fs.readFileSync(file, 'utf8'), '');
 });
 
@@ -370,4 +370,60 @@ test('the cleanup after an agent exits keeps a placeholder another live sandbox 
   assert.deepEqual(result.held, [{ relative: '.bashrc', why: 'mounted' }]);
   assert.equal(fs.readFileSync(file, 'utf8'), '');
   assert.deepEqual(Placeholders.remove(wt, []).removed, ['.bashrc'], 'with the sandbox gone the placeholder goes');
+});
+
+// A bind that lands between the removal's read of the mount tables and its
+// rmdir. The process table the removal reads is the test's own: its one
+// process's mountinfo is a FIFO that a helper fills. The helper starts a
+// sandbox that binds an empty directory over .claude/hooks, and answers the
+// first read with no mounts, as a read just before the bind would, and each
+// later one with the sandbox's real table. rmdir under a bind detaches it,
+// and the sandbox could then make .claude/hooks/h, a hook that runs outside it.
+test('a directory placeholder bound after the first mount read keeps its bind', { skip }, async () => {
+  const dir = fs.mkdtempSync(path.join(root, 'dir-bind-'));
+  const wt = path.join(dir, 'wt');
+  const hooks = path.join(wt, '.claude', 'hooks');
+  fs.mkdirSync(hooks, { recursive: true });
+  const empty = path.join(dir, 'empty');
+  fs.mkdirSync(empty);
+  const proc = path.join(dir, 'proc');
+  fs.mkdirSync(path.join(proc, '1', 'ns'), { recursive: true });
+  fs.symlinkSync('mnt:[1]', path.join(proc, '1', 'ns', 'mnt'));
+  const fifo = path.join(proc, '1', 'mountinfo');
+  assert.equal(cp.spawnSync('mkfifo', [fifo]).status, 0);
+  const helper = path.join(dir, 'helper.sh');
+  fs.writeFileSync(helper, [
+    // Its own session, so ending the helper's group leaves the sandbox to answer.
+    'setsid bwrap --dev-bind / / --ro-bind "$3" "$4" --chdir "$2" -- sh -c \'',
+    'echo $$ > "$1/pid.new"; mv "$1/pid.new" "$1/pid"; i=0; while [ ! -e "$1/go" ] && [ $i -lt 3000 ]; do sleep 0.02; i=$((i+1)); done;', // wait-allow: the sandboxed shell has no signal helper; the cap ends a holder the test left
+    'if (mkdir -p .claude/hooks && echo planted > .claude/hooks/h) 2>/dev/null; then echo wrote; else echo refused; fi\' sh "$1" > "$1/out" 2>&1 &',
+    'i=0; while [ ! -e "$1/pid" ] && [ $i -lt 500 ]; do sleep 0.02; i=$((i+1)); done', // wait-allow: the removal blocks the test's event loop, so the helper waits for the bind
+    ': > "$5"',
+    'while :; do cat "/proc/$(cat "$1/pid")/mountinfo" > "$5"; done',
+    '',
+  ].join('\n'));
+  const fill = cp.spawn('sh', [helper, dir, wt, empty, hooks, fifo], { stdio: 'ignore', detached: true });
+  let result;
+  try {
+    await waitUntil(() => fs.existsSync(path.join(dir, 'pid')), { paths: [dir], alive: fill, what: 'the sandbox has its bind' });
+    const was = process.env.TOWER_CRANE_PROC;
+    process.env.TOWER_CRANE_PROC = proc;
+    try {
+      result = Placeholders.remove(wt, ['.claude']);
+    } finally {
+      if (was === undefined) delete process.env.TOWER_CRANE_PROC;
+      else process.env.TOWER_CRANE_PROC = was;
+    }
+  } finally {
+    fs.writeFileSync(path.join(dir, 'go'), '');
+    try { killGroup(fill.pid, 'SIGKILL'); } catch { /* already gone */ }
+  }
+  const out = await fileWritten(path.join(dir, 'out'), { check: (text) => /wrote|refused/.test(text) });
+  assert.equal(out.trim(), 'refused', 'the sandbox still cannot write into the name');
+  assert.deepEqual(result.removed, []);
+  assert.deepEqual(result.held, [{ relative: '.claude/hooks', why: 'mounted' }]);
+  assert.equal(fs.existsSync(path.join(hooks, 'h')), false);
+  assert.deepEqual(fs.readdirSync(path.join(wt, '.claude')), ['hooks'], 'the directory is back under its name');
+  assert.match(Placeholders.heldLine([{ relative: '.vscode', why: 'unknown' }, { relative: '.idea', why: 'unknown' }], 'placeholders'),
+    /kept placeholders \.vscode, \.idea: a mount table of this user's processes could not be read, so a sandbox may bind over them$/m);
 });
