@@ -591,7 +591,9 @@ Gate command failures put the reason in their summary and receipt/event where
 applicable. The whole attempt is stopped; an unrelated scope is left running.
 
 On macOS, Windows, Linux without cgroup v2, or Linux without a reachable user
-manager, a watchdog samples process count and total RSS every 100 ms. Linux
+manager, a watchdog polls process count and total RSS on a 100 ms cadence,
+skipping overlapping snapshots. Platform snapshot commands have a two second
+deadline. Linux
 reads `/proc`, macOS uses `ps`, and Windows uses PowerShell process snapshots.
 It tracks the process group/tree and previously observed descendants across
 detachment, and stops them on a cap or sampling failure

@@ -11,7 +11,8 @@ const C = require('../lib/containment');
 const G = require('../lib/gates/common');
 const HARNESS = path.join(__dirname, 'fixtures', 'containment-harness.js');
 const memory = 512 * 1024 * 1024;
-const systemd = process.platform === 'linux' && cp.spawnSync('systemctl', ['--user', 'show-environment'],
+const systemd = process.platform === 'linux' && fs.existsSync('/sys/fs/cgroup/cgroup.controllers')
+  && cp.spawnSync('systemctl', ['--user', 'show-environment'],
   { stdio: 'ignore', timeout: 2000 }).status === 0; // wait-allow: match the launcher's bounded user-manager probe
 
 function fixture(t) {
