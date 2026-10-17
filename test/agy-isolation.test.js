@@ -1,6 +1,7 @@
 'use strict';
 
 const test = require('node:test');
+const StateFiles = require('./state-files');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -155,7 +156,7 @@ test('agy excludes planted user context from startup, requested rules and file g
   assert.ok(!fs.existsSync(path.join(seen.home, '.gemini', 'antigravity-cli', 'plugins')));
   assert.ok(seen.skills.every(s => s.endsWith('tower-crane-work')));
   assert.equal(seen.ran[0].code, 0, seen.ran[0].stderr);
-  const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line));
+  const events = StateFiles.logText(h.state).trim().split('\n').map(line => JSON.parse(line));
   assert.ok(events.some(e => e.cmd === 'task note' && e.agent === spawned.agent && !e.via));
   const startup = events.find(e => e.cmd === 'startup').detail;
   assert.equal(startup.instructions_file, seen.agentFile);

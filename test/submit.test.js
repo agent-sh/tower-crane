@@ -1,6 +1,7 @@
 'use strict';
 
 const test = require('node:test');
+const StateFiles = require('./state-files');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -8,7 +9,7 @@ const { makeRepo } = require('./helpers');
 const { gateFixture, gateEvidence } = require('./gate-helpers');
 
 function events(h) {
-  return fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map((line) => JSON.parse(line));
+  return StateFiles.logText(h.state).trim().split('\n').map((line) => JSON.parse(line));
 }
 
 function pass(h, type, agent, sha) {
@@ -86,16 +87,15 @@ test('a legacy short submitted sha reuses its full-sha reviewer and recognizes i
   const spawn = { at: new Date().toISOString(), agent: 'orchestrator', cmd: 'spawn', task: 'T1',
     detail: { agent: 'r-1', role: 'reviewer', rung: 'review', sha, revision, pid: process.pid, attempt: 1,
       ...require('../lib/processes').identity(process.pid) } };
-  const log = path.join(h.state, 'events.jsonl');
-  fs.appendFileSync(log, `${JSON.stringify(spawn)}\n`);
+  h.appendEvents([spawn]);
   const pending = h.json(['accept', 'T1']);
   assert.equal(pending.review_pending, true);
   assert.equal(pending.reviewer, 'r-1');
   const duplicate = h.run(['spawn', '--task', 'T1', '--role', 'review']);
   assert.equal(duplicate.code, 1);
   assert.match(duplicate.stderr, /reviewer is still running/);
-  fs.appendFileSync(log, `${JSON.stringify({ at: spawn.at, agent: 'orchestrator', cmd: 'spawn exit', task: 'T1',
-    detail: { agent: 'r-1', pid: process.pid, attempt: 1, code: 0 } })}\n`);
+  h.appendEvents([{ at: spawn.at, agent: 'orchestrator', cmd: 'spawn exit', task: 'T1',
+    detail: { agent: 'r-1', pid: process.pid, attempt: 1, code: 0 } }]);
   h.ok(['evidence', 'T1', '--type', 'review', '--fail', '--sha', sha, '--agent', 'r-1',
     '--summary', 'lib/value.js:1 - Check null before dereferencing']);
   const failed = h.json(['task', 'show', 'T1']).gates.gates.find((g) => g.type === 'review');

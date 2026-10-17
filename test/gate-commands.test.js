@@ -1,6 +1,7 @@
 'use strict';
 
 const { waitOnRepo } = require('./signals');
+const StateFiles = require('./state-files');
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -30,7 +31,7 @@ function pin(h) {
 }
 
 const shown = (h, type) => h.json(['task', 'show', 'T1']).gates.gates.find((g) => g.type === type);
-const events = (h) => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+const events = (h) => StateFiles.logText(h.state).trim().split('\n').map(JSON.parse);
 
 test('unpinned agent commands cannot execute a shell payload', (t) => {
   const { h } = fixture(t);

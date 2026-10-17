@@ -1,6 +1,7 @@
 'use strict';
 
 const test = require('node:test');
+const StateFiles = require('./state-files');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -131,7 +132,7 @@ function setup(t) {
 }
 
 function assertRetry(h) {
-  const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  const events = StateFiles.logText(h.state).trim().split('\n').map(JSON.parse);
   const retries = events.filter((e) => e.cmd === 'spawn phase' && e.detail.phase === 'retrying');
   assert.deepEqual(retries.map((e) => [e.detail.retry, e.detail.backoff_ms]), [[1, 0]]);
   assert.equal(events.filter((e) => e.cmd === 'spawn retry').length, 1);
@@ -191,7 +192,7 @@ for (const [provider, other, model, plain] of [
     assert.deepEqual(entries.map((e) => [e.provider, e.model, e.tokens]), attempts.map((a) => [a.provider, a.model, 24]));
     h.ok(['spend', 'T1', '--from-spawn', 'worker-T1-1']);
     assert.deepEqual(h.json(['task', 'show', 'T1']).spend.entries, entries);
-    const stateText = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8');
+    const stateText = StateFiles.logText(h.state);
     assert.match(stateText, /provider outage after 1 retries/);
     assert.equal(stateText.includes('stub credentials'), false);
     assert.equal(stateText.includes('stub login'), false);
@@ -228,7 +229,7 @@ test('ladder show marks missing Claude provider config and the supervisor skips 
   assert.deepEqual(h.attempts().map((a) => a.provider), ['anthropic', 'anthropic']);
   assert.deepEqual(h.attempts().map((a) => a.retry), ['0', '1']);
   assertRetry(h);
-  const ev = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  const ev = StateFiles.logText(h.state).trim().split('\n').map(JSON.parse);
   assert.equal(ev.find((e) => e.cmd === 'spawn fallback').detail.route_index, 2);
 });
 
@@ -343,7 +344,7 @@ test('Bedrock env_file readiness is deferred without reading the file during a d
   const result = h.run(['spawn', '--task', 'T1', '--wait']);
   assert.equal(result.code, 0, result.stderr);
   assert.equal(h.attempts()[0].provider_env.AWS_REGION, 'eu-west-1');
-  const stored = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8')
+  const stored = StateFiles.logText(h.state)
     + fs.readFileSync(path.join(h.state, 'homes', 'worker-T1-1', 'settings.json'), 'utf8');
   assert.equal(stored.includes('stub-secret-file-value'), false);
 });

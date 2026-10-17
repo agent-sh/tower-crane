@@ -1,6 +1,7 @@
 'use strict';
 
 const { waitOnRepo, fileWritten, HUNG_TEST_MS } = require('./signals');
+const StateFiles = require('./state-files');
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -94,14 +95,14 @@ fs.writeFileSync(file,fs.readFileSync(file,'utf8').replace(/(<!-- commands:Run:s
       assert.equal(current.sha, upper);
       assert.equal(h.git(['status', '--porcelain'], wt.path), '');
       assert.equal(f.read().calls.some((c) => c.args[0] === 'stack' && c.args[1] === 'sync'), false);
-      const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+      const events = StateFiles.logText(h.state).trim().split('\n').map(JSON.parse);
       assert.equal(events.some((e) => e.task === id && e.cmd === 'spawn' && e.detail.role === 'worker'), false);
       return;
     }
     f.accept('T1');
     h.ok(['merge', 'T1']);
     const task = h.json(['task', 'show', id]);
-    const events = () => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+    const events = () => StateFiles.logText(h.state).trim().split('\n').map(JSON.parse);
     assert.equal(f.read().calls.some((c) => c.args[0] === 'stack' && c.args[1] === 'sync'), false);
     if (mode === 'unmerged-parent') {
       assert.equal(task.status, 'submitted');
@@ -156,7 +157,7 @@ test('an open stack conflict preserves lower review context across repeated rewo
   assert.equal(f.h.json(['task', 'show', 'T2']).status, 'rework');
   assert.equal(task.revision, before.revision + 1);
   assert.deepEqual(task.evidence, before.evidence);
-  const rework = fs.readFileSync(path.join(f.h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse)
+  const rework = StateFiles.logText(f.h.state).trim().split('\n').map(JSON.parse)
     .findLast(e => e.cmd === 'rework' && e.task === 'T1');
   assert.equal(rework.detail.previous_revision, before.revision);
   assert.equal(rework.detail.revision, task.revision);
@@ -183,7 +184,7 @@ require('node:fs').writeFileSync(process.argv[1], process.argv[2]);
   assert.ok(held.revision > task.revision, 'the retried conflict preserves review context through worker dispatch');
   assert.deepEqual(held.evidence, before.evidence);
   assert.equal(held.gates.ok, false);
-  const retried = fs.readFileSync(path.join(f.h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse)
+  const retried = StateFiles.logText(f.h.state).trim().split('\n').map(JSON.parse)
     .filter(e => e.cmd === 'rework' && e.task === 'T1');
   assert.ok(retried.length > 1);
   assert.ok(retried.every(e => e.detail.previous_revision === before.revision));
@@ -191,7 +192,7 @@ require('node:fs').writeFileSync(process.argv[1], process.argv[2]);
   const clock = path.join(f.h.base, 'expired-claim-clock');
   fs.writeFileSync(clock, String(Date.parse(held.claim.until) + 1));
   assert.equal(f.h.run(['stack', 'sync', 'T2'], { hooks: { HOOK_CLOCK_FILE: clock } }).code, 1);
-  const afterExpiry = fs.readFileSync(path.join(f.h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse)
+  const afterExpiry = StateFiles.logText(f.h.state).trim().split('\n').map(JSON.parse)
     .findLast(e => e.cmd === 'rework' && e.task === 'T1');
   assert.equal(afterExpiry.detail.previous_revision, before.revision);
   f.h.ok(['claim', 'T1', '--agent', spawned.agent]);
@@ -222,7 +223,7 @@ for (const stage of ['checkout', 'sync']) {
     assert.deepEqual(f.h.json(['task', 'show', 'T2']), before);
     assert.equal(f.h.json(['task', 'show', 'T1']).status, 'submitted');
     assert.equal(f.h.ok(['brief', 'get', 'T2']), brief);
-    const events = fs.readFileSync(path.join(f.h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+    const events = StateFiles.logText(f.h.state).trim().split('\n').map(JSON.parse);
     const event = events.findLast((e) => e.cmd === 'stack sync' && e.task === 'T2');
     assert.equal(event.detail.ok, false);
     assert.equal(event.detail.reason, reason);
@@ -317,7 +318,7 @@ for (const related of [false, true]) {
         assert.equal(result.code, 1);
         assert.match(result.stderr, /changed during stack sync/);
         assert.deepEqual(task.stack, claimed.stack);
-        const events = fs.readFileSync(path.join(f.h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+        const events = StateFiles.logText(f.h.state).trim().split('\n').map(JSON.parse);
         assert.equal(events.some((e) => e.cmd === 'stack sync'), false, 'a stale sync result must not be recorded');
       } else {
         assert.equal(result.code, 0, result.stderr);
@@ -438,7 +439,7 @@ test('spawn of a task whose worktree is mid-rebase refuses with the refresh defe
   const refused = f.h.run(['spawn', '--task', 'T2']).stderr;
   const reason = `T2: worktree ${wt.path} has a rebase in progress; finish or abort it there`;
   assert.ok(refused.includes(reason), refused);
-  const events = fs.readFileSync(path.join(f.h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  const events = StateFiles.logText(f.h.state).trim().split('\n').map(JSON.parse);
   assert.equal(events.findLast((e) => e.cmd === 'stack sync deferred')?.detail.reason, reason);
   assert.equal(events.some((e) => e.cmd === 'spawn' && e.task === 'T2'), false);
 });
@@ -503,7 +504,7 @@ test('a signal during automatic stack maintenance stops it and wait exits', {
       f.accept(id);
       const setupCalls = f.read().calls.length;
       await signalDuringSync(t, f, { forced });
-      const events = fs.readFileSync(path.join(f.h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+      const events = StateFiles.logText(f.h.state).trim().split('\n').map(JSON.parse);
       assert.equal(f.h.json(['task', 'show', id]).evidence.findLast((e) => e.type === 'merge')?.ok, true, 'the merge before maintenance stands');
       const syncs = events.filter((e) => e.cmd === 'stack sync');
       // The sync that ran records its outcome for every member; no later stack work starts.
@@ -540,7 +541,7 @@ test('a drain during spawn\'s stack refresh records a deferral and starts no wor
   f.h.git(['commit', '--allow-empty', '-qm', 'main moved']);
   f.h.git(['push', 'origin', 'main']);
   await signalDuringSync(t, f, { forced: false });
-  const events = fs.readFileSync(path.join(f.h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  const events = StateFiles.logText(f.h.state).trim().split('\n').map(JSON.parse);
   assert.deepEqual(events.filter((e) => e.cmd === 'stack sync').map((e) => e.task).sort(), ['T1', 'T2'], 'the running sync finished');
   assert.equal(events.some((e) => e.cmd === 'spawn' && e.task === 'T2'), false, 'no worker starts on the unrefreshed stack');
   assert.equal(events.some((e) => e.cmd === 'spawn' && e.task === other), false, 'no worker starts during the drain');

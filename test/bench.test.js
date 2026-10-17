@@ -1,6 +1,7 @@
 'use strict';
 
 const test = require('node:test');
+const StateFiles = require('./state-files');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -21,7 +22,7 @@ function recordedHistory(h, records) {
     if (summary !== undefined) evidence.push({ ...detail, agent: 'orchestrator', revision: 1, at: new Date(time).toISOString(), summary });
     return { task: 'T1', cmd, detail, agent: 'orchestrator', at: new Date(time + 3).toISOString() };
   });
-  fs.appendFileSync(path.join(h.state, 'events.jsonl'), events.map((e) => JSON.stringify(e)).join('\n') + '\n');
+  StateFiles.appendLog(h.state, events.map((e) => JSON.stringify(e)).join('\n') + '\n');
   const doc = h.readState('tasks.json');
   doc.tasks[0].evidence = evidence;
   h.writeState('tasks.json', doc);
@@ -198,7 +199,7 @@ function history(h) {
   gate('T3', 'ci', B, false, `CI not green at ${B.slice(0, 10)} in o/r:\nnot completed: lint (queued)`);
   gate('T3', 'ci', B, false, `CI not green at ${B.slice(0, 10)} in o/r:\nfailing: lint (failure)`);
   ev('T3', 'submit', { sha: C });
-  fs.appendFileSync(path.join(h.state, 'events.jsonl'), lines.map((l) => JSON.stringify(l)).join('\n') + '\n');
+  StateFiles.appendLog(h.state, lines.map((l) => JSON.stringify(l)).join('\n') + '\n');
   const doc = h.readState('tasks.json');
   for (const task of doc.tasks) task.evidence = evidence[task.id];
   h.writeState('tasks.json', doc);
@@ -270,7 +271,7 @@ test('bench tokens reports accepted-task tokens and cost by rung and escalation 
   const spend = (task, rung, model, tokens, cached) => h.ok(['spend', task, '--tokens', String(tokens), '--input', String(tokens - 10),
     '--cached', String(cached), '--output', '10', '--rung', rung, '--model', model, '--harness', 'codex', '--agent', `${rung}-${task}`]);
   const spawn = (task, rung) => JSON.stringify({ at: '2026-10-07T00:00:00Z', agent: 'orchestrator', cmd: 'spawn', task, detail: { role: 'worker', rung, agent: `${rung}-${task}` } });
-  fs.appendFileSync(path.join(h.state, 'events.jsonl'), [spawn('T1', 'easy'), spawn('T1', 'easy'), spawn('T1', 'medium'), spawn('T2', 'medium')].join('\n') + '\n');
+  StateFiles.appendLog(h.state, [spawn('T1', 'easy'), spawn('T1', 'easy'), spawn('T1', 'medium'), spawn('T2', 'medium')].join('\n') + '\n');
   spend('T1', 'easy', light, 1000010, 0);
   spend('T1', 'medium', main, 3000010, 2000000);
   spend('T1', 'review', main, 500010, 0);
@@ -324,7 +325,7 @@ test('bench excludes accepted tasks missing worker, reviewer or resumed-session 
   }
   events.push({ at: '2026-10-07T00:01:00Z', cmd: 'spawn', task: 'T4',
     detail: { agent: 'worker-T4', role: 'worker', rung: 'easy', resumed: true, attempt: 2 } });
-  fs.appendFileSync(path.join(h.state, 'events.jsonl'), events.map((e) => JSON.stringify(e)).join('\n') + '\n');
+  StateFiles.appendLog(h.state, events.map((e) => JSON.stringify(e)).join('\n') + '\n');
   const doc = h.readState('tasks.json');
   for (const task of doc.tasks) {
     task.status = 'accepted';
@@ -352,7 +353,7 @@ test('bench excludes accepted tasks missing worker, reviewer or resumed-session 
     ['spawn retry', { route_index: 1, retry: 1, fresh: true }],
     ['spawn retry', { route_index: 1, retry: 2, fresh: false }],
   ].map(([cmd, detail]) => ({ cmd, task: 'T3', at: '2026-10-07T00:00:20Z', detail: { agent: 'worker-T3', ...detail } }));
-  fs.appendFileSync(path.join(h.state, 'events.jsonl'), routes.map((e) => JSON.stringify(e)).join('\n') + '\n');
+  StateFiles.appendLog(h.state, routes.map((e) => JSON.stringify(e)).join('\n') + '\n');
   result = h.json(['bench', 'tokens']);
   const missing = result.tasks.find((row) => row.id === 'T3').missing_spawns;
   assert.deepEqual(missing, ['spawn:worker-T3:route:1', 'spawn:worker-T3:route:1:retry:0', 'spawn:worker-T3:route:1:retry:1']);
@@ -435,7 +436,7 @@ test('bench tokens excludes live worker and reviewer usage from every median unt
     at: '2026-10-07T00:00:00Z', cmd: 'spawn', task: 'T1',
     detail: { agent: `${role}-T1`, role, rung: role === 'worker' ? 'medium' : 'review' },
   }));
-  fs.appendFileSync(path.join(h.state, 'events.jsonl'), dispatches.map((e) => JSON.stringify(e)).join('\n') + '\n');
+  StateFiles.appendLog(h.state, dispatches.map((e) => JSON.stringify(e)).join('\n') + '\n');
   const doc = h.readState('tasks.json');
   const task = doc.tasks[0];
   task.status = 'accepted';

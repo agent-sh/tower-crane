@@ -440,10 +440,12 @@ function cachedFixture(t, key, build) {
     }
     for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
       if (e.isDirectory()) walk(path.join(dir, e.name));
-      else if (e.isFile()) fix(path.join(dir, e.name));
+      // The database is binary; its text is rewritten below.
+      else if (e.isFile() && !StateFiles.DB_FILES.has(e.name)) fix(path.join(dir, e.name));
     }
   };
   walk(h.base);
+  StateFiles.rewriteState(h.state, rewrite);
   for (const [k, v] of Object.entries(from.env)) if (typeof v === 'string') h.env[k] = rewrite(v);
   h.env.HOME = path.join(h.base, 'home');
   h.env.GIT_CONFIG_GLOBAL = path.join(h.base, 'gitconfig');
@@ -522,6 +524,9 @@ function context(t, base, options = {}) {
           }
         } finally {
           strayOwnerDirs = ownerDirsOutside(base);
+          // A lib call this test made in its own process may still hold the
+          // fixture's database open, which Windows refuses to remove.
+          require('../lib/db').closeAll();
           fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
           // rmSync returns without error when an entry vanished under it, leaving the rest;
           // a second pass removes those. What a process still running keeps writing is a leak.

@@ -1,6 +1,7 @@
 'use strict';
 
 const test = require('node:test');
+const StateFiles = require('./state-files');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -35,7 +36,7 @@ function reviewedTask(t, kind = 'docs') {
 // so the test records the fresh review only after that reaction finished.
 async function reviewSettled(h) {
   return waitOnRepo(h, () => {
-    const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').split('\n').slice(0, -1).filter(Boolean).map(JSON.parse);
+    const events = StateFiles.logText(h.state).split('\n').slice(0, -1).filter(Boolean).map(JSON.parse);
     const exit = events.findLast((e) => e.cmd === 'spawn exit' && e.detail.role === 'reviewer');
     return exit && events.some((e) => e.cmd === 'automation' && e.detail.source === exit.id && e.detail.phase === 'done');
   }, 'dispatched reviewer did not settle');
@@ -91,7 +92,7 @@ test('an accepted brief needs explicit rework before edits, and dependents wait 
   h.ok(['task', 'add', '--title', 'Uses the link', '--acceptance', 'uses the accepted link', '--kind', 'docs', '--dep', 'T1']);
   h.ok(['brief', 'set', 'T1', '-'], { input: 'Check the link.\n' });
   const state = h.readState('tasks.json');
-  const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8');
+  const events = StateFiles.logText(h.state);
   for (const agent of ['orchestrator', 'owner']) {
     const changed = h.run(['brief', 'set', 'T1', '-', '--agent', agent], { input: 'Check the link and log errors.\n' });
     assert.equal(changed.code, 1, 'accepted requirements must stay reviewed until explicit rework');
@@ -102,7 +103,7 @@ test('an accepted brief needs explicit rework before edits, and dependents wait 
   delete state.orchestrator_lease.heartbeat;
   delete after.orchestrator_lease.heartbeat;
   assert.deepEqual(after, state);
-  assert.equal(fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8'), events);
+  assert.equal(StateFiles.logText(h.state), events);
   assert.equal(h.ok(['brief', 'get', 'T1']), 'Check the link.');
   const accepted = h.json(['task', 'show', 'T1']);
   assert.equal(accepted.status, 'accepted');
@@ -187,7 +188,7 @@ setTimeout(() => process.exit(2), 300000).unref();
     for (const rung of ['easy', 'medium', 'hard', 'research', 'review']) {
       h.ok(['ladder', 'set', rung, '--command', JSON.stringify([process.execPath, '-e', script, '{prompt}'])]);
     }
-    const after = fs.statSync(path.join(h.state, 'events.jsonl')).size;
+    const after = StateFiles.logEnd(h.state);
     const running = h.runAsync(['spawn', '--role', 'review', '--task', 'T1', '--wait']);
     let dispatched;
     let completion;

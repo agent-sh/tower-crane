@@ -1,6 +1,7 @@
 'use strict';
 
 const test = require('node:test');
+const StateFiles = require('./state-files');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -61,15 +62,15 @@ test('project and rung spawn settings require explicit owner identity, including
   const h = setup(t);
   const changes = [['--sandbox', '{"write":["~/.cargo"]}'], ['--env', '{"CARGO_HOME":"/toolchain"}'], ['--env_file', '/private.env'], ['--scope', '{"CPUQuota":"200%","MemoryMax":"8G"}']];
   for (const flags of changes) {
-    const before = fs.readFileSync(path.join(h.state, 'project.json'), 'utf8');
-    const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8');
+    const before = StateFiles.docText(h.state, 'project.json');
+    const events = StateFiles.logText(h.state);
     for (const cmd of [['project', 'set'], ['ladder', 'set', 'medium']]) {
       const r = h.run([...cmd, ...flags, '--agent', 'worker-T1-1']);
       assert.equal(r.code, 1, r.stderr);
       assert.match(r.stderr, /only the owner/);
     }
-    assert.equal(fs.readFileSync(path.join(h.state, 'project.json'), 'utf8'), before);
-    assert.equal(fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8'), events);
+    assert.equal(StateFiles.docText(h.state, 'project.json'), before);
+    assert.equal(StateFiles.logText(h.state), events);
     h.ok(['project', 'set', ...flags]);
     h.ok(['ladder', 'set', 'medium', ...flags]);
     assert.equal(h.run(['project', 'set', ...flags, '--agent', 'worker-T1-1']).code, 1);
@@ -91,10 +92,10 @@ test('spawn settings reject invalid shapes and reserved identities without parti
     ['--sandbox', '{"user_bus":true}'], ['--scope', '[]'], ['--scope', '{"CPUQuota":200}'],
     ['--scope', '{"--bad":"value"}'], ['--scope', '{"MemoryMax":""}'], ['--scope', '{"MemoryMax":"8G\\n"}'],
   ]) {
-    const before = fs.readFileSync(path.join(h.state, 'project.json'), 'utf8');
+    const before = StateFiles.docText(h.state, 'project.json');
     assert.equal(h.run(['project', 'set', '--name', 'changed', ...flags]).code, 2, flags.join(' '));
     assert.equal(h.run(['ladder', 'set', 'medium', ...flags]).code, 2, flags.join(' '));
-    assert.equal(fs.readFileSync(path.join(h.state, 'project.json'), 'utf8'), before);
+    assert.equal(StateFiles.docText(h.state, 'project.json'), before);
   }
 });
 
@@ -304,12 +305,12 @@ fs.statSync = function(file, ...args) {
   fs.writeFileSync(harness, `#!${process.execPath}\nprocess.exit(0);\n`, { mode: 0o755 });
   h.ok(['ladder', 'set', 'medium', '--harness', 'command', '--command', JSON.stringify([process.execPath, harness, '{prompt}']), '--clear', 'profile']);
   h.ok(['project', 'set', '--scope', '{"CPUQuota":"200%"}']);
-  const before = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8');
+  const before = StateFiles.logText(h.state);
   releaseExited(h);
   const result = h.run(['spawn', '--task', 'T1', '--wait'], { env: { NODE_OPTIONS: `--require ${JSON.stringify(missing)}` } });
   assert.equal(result.code, 1, result.stderr);
   assert.match(result.stderr, /scope requires.*systemd-run|scope requires Linux/);
-  assert.equal(fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8'), before);
+  assert.equal(StateFiles.logText(h.state), before);
   assert.equal(h.json(['task', 'show', 'T1']).branch, null);
 });
 
@@ -469,7 +470,7 @@ test('claude: the sandbox allows GitHub, npm and sandbox.domains, names the remo
   // default when it names none) and what kind of address it is.
   for (const named of ['git.example.org:443', 'plain.example.com:80', 'push.example.net', 'gitserver (single-label', 'localhost:8300 (loopback)', '100.64.0.10:7447 (shared address space',
     '[::1]:8080 (loopback)', '192.168.1.20:8443 (private address)']) assert.ok(base.stdout.includes(named), `${named} in the notice\n${base.seen}`);
-  const spawnEvent = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l)).findLast((e) => e.cmd === 'spawn');
+  const spawnEvent = StateFiles.logText(h.state).trim().split('\n').map((l) => JSON.parse(l)).findLast((e) => e.cmd === 'spawn');
   assert.ok(spawnEvent.detail.notices?.some((n) => n.includes('localhost:8300')), `the spawn event records the notice: ${JSON.stringify(spawnEvent)}`);
   // The whole result of a refusal: a CLI killed by a signal, or never
   // started, also exits nonzero with nothing on stderr.
@@ -634,7 +635,7 @@ test('claude: sandbox.session_bus grants the bus socket, read and write, and off
 
   h.ok(['project', 'set', '--session-bus', 'false']);
   assert.ok(!spawnSeen().sandbox.filesystem.allowRead.includes(bus), 'false turns the grant off again');
-  assert.equal(JSON.parse(fs.readFileSync(path.join(h.state, 'project.json'), 'utf8')).sandbox, undefined);
+  assert.equal(JSON.parse(StateFiles.docText(h.state, 'project.json')).sandbox, undefined);
 });
 
 // Found in review 2026-10-14: the codex profile read /run whole, so a codex

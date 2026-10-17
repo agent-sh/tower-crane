@@ -1,6 +1,7 @@
 'use strict';
 
 const test = require('node:test');
+const StateFiles = require('./state-files');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -25,8 +26,8 @@ function writeUser(h, doc) {
   fs.writeFileSync(h.userConfig, typeof doc === 'string' ? doc : JSON.stringify(doc, null, 2));
 }
 
-const projectText = (h) => fs.readFileSync(path.join(h.state, 'project.json'), 'utf8');
-const events = (h) => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+const projectText = (h) => StateFiles.docText(h.state, 'project.json');
+const events = (h) => StateFiles.logText(h.state).trim().split('\n').map((l) => JSON.parse(l));
 // validate also warns about this machine (harness programs, gh login); these
 // tests are about reviewer selection only.
 const reviewWarnings = (data) => data.warnings.filter((w) => w.kind === 'review-unavailable');
@@ -155,7 +156,7 @@ test('ladder save-user makes the project ladder the default for new projects', (
 
   const other = path.join(h.base, 'second-state');
   h.ok(['init', '--name', 'second', '--goal', 'g', '--state', other]);
-  assert.equal(JSON.parse(fs.readFileSync(path.join(other, 'project.json'), 'utf8')).ladder.hard.model, 'fixture-secondary');
+  assert.equal(JSON.parse(StateFiles.docText(other, 'project.json')).ladder.hard.model, 'fixture-secondary');
 
   // A ladder that cannot run is not saved over the user file.
   const saved1 = fs.readFileSync(h.userConfig, 'utf8');
@@ -205,7 +206,7 @@ test('personal hard fallbacks overlay project rungs and stay out of project writ
   assert.deepEqual(JSON.parse(fs.readFileSync(h.userConfig, 'utf8')).ladder.hard.fallbacks, fallbacks);
   const other = path.join(h.base, 'second-state');
   h.ok(['init', '--name', 'second', '--goal', 'g', '--state', other]);
-  assert.equal(JSON.parse(fs.readFileSync(path.join(other, 'project.json'), 'utf8')).ladder.hard.fallbacks, undefined);
+  assert.equal(JSON.parse(StateFiles.docText(other, 'project.json')).ladder.hard.fallbacks, undefined);
   assert.deepEqual(h.json(['ladder', 'show', '--state', other]).ladder.hard.fallbacks, fallbacks);
   writeUser(h, { ladder: { hard: { fallbacks: [] } } });
   assert.deepEqual(h.json(['ladder', 'show']).ladder.hard.fallbacks, []);

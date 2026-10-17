@@ -1,6 +1,7 @@
 'use strict';
 
 const { fileWritten, eventAppended, HUNG_TEST_MS, killPid } = require('./signals');
+const StateFiles = require('./state-files');
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -13,7 +14,7 @@ const { cachedFixture, BIN, HOOKS, ROOT } = require('./helpers');
 const { gateFixture, gateEvidence } = require('./gate-helpers');
 
 function log(h) {
-  const raw = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8');
+  const raw = StateFiles.logText(h.state);
   // A concurrent append becomes readable only when its final newline arrives.
   return raw.slice(0, raw.lastIndexOf('\n') + 1).split('\n').filter(Boolean).map(JSON.parse);
 }
@@ -237,7 +238,7 @@ test('a manual merge racing the merge queue under another task\'s reaction: one 
       h.ok(['accept', id, '--agent', 'owner', '--reason', 'race fixture',
         ...['tests', 'clean', 'review', 'ci'].flatMap((type) => ['--waive', type])]);
     }
-    const after = String(fs.statSync(path.join(h.state, 'events.jsonl')).size);
+    const after = String(StateFiles.logEnd(h.state));
     // State call jitter spreads the two merges over each other's checks.
     const jitter = { HOOK_JITTER_MS: '15' };
     const automatic = child(t, h, ['wait', '--agent', 'orchestrator', '--after', after, '--task', upper, '--types', 'merged', '--timeout', '300'], jitter);
@@ -291,7 +292,7 @@ test('a manual merge racing an automatic merge of the same task: one merges, the
     // keeps a manual merge that finishes before the waiter starts visible.
     // Odd rounds start together; even rounds stagger the manual merge, so
     // either side reaches GitHub first.
-    const after = String(fs.statSync(path.join(h.state, 'events.jsonl')).size);
+    const after = String(StateFiles.logEnd(h.state));
     const automatic = child(t, h, ['wait', '--agent', 'orchestrator', '--after', after, '--task', id, '--types', 'merged', '--timeout', '300']);
     await new Promise((resolve) => setTimeout(resolve, i % 2 ? 0 : (i % 10) * 20)); // wait-allow: stagger concurrent operations to exercise both race orderings
     const manual = await h.runAsync(['merge', id]);
@@ -484,7 +485,7 @@ test('exit observers include attempts for spawns recorded without an attempt fie
   h.ok(['brief', 'set', 'T1', '-'], { input: 'stand-in\n' });
   commandWorker(h, [process.execPath, '-e', 'process.exit(0)', '{prompt}']);
   h.json(['spawn', '--task', 'T1', '--wait']);
-  const cursor = fs.statSync(path.join(h.state, 'events.jsonl')).size;
+  const cursor = StateFiles.logEnd(h.state);
   const hook = path.join(h.base, 'older-spawn.js');
   fs.writeFileSync(hook, `
 const fs = require('node:fs');
@@ -627,7 +628,7 @@ test('startup reconciliation with an active PR does not hold a timeout behind th
 
 // A timeout at the log's end, with no cut recorded.
 function timeoutAt(h) {
-  const size = fs.statSync(path.join(h.state, 'events.jsonl')).size;
+  const size = StateFiles.logEnd(h.state);
   return { type: 'timeout', offset: size, cursor: `${size}:0` };
 }
 
@@ -650,7 +651,7 @@ test('startup takes a current cursor before reading state and retains events dur
   assert.equal(snapshot.code, 2, snapshot.stderr);
   const cursor = JSON.parse(snapshot.stdout);
   assert.equal(cursor.type, 'timeout');
-  assert.equal(cursor.offset, fs.statSync(path.join(h.state, 'events.jsonl')).size);
+  assert.equal(cursor.offset, StateFiles.logEnd(h.state));
   h.json(['status']);
   h.ok(['task', 'note', 'T1', 'during state reconciliation']);
   const r = h.run(['wait', '--agent', 'orchestrator', '--after', String(cursor.offset), '--timeout', '0.1']); // wait-allow: verify the CLI observation, filtering or timeout contract with already-published state
@@ -665,19 +666,19 @@ test('startup snapshots leave stale leases for the subsequent blocking wait to o
   fs.writeFileSync(clock, String(start));
   h.ok(['claim', 'T1', '--lease', '1', '--agent', 'worker'], { hooks });
   fs.writeFileSync(clock, String(start + 60001));
-  const before = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8');
+  const before = StateFiles.logText(h.state);
   const snapshot = h.run(['wait', '--agent', 'orchestrator', '--timeout', '0'], { hooks });
   assert.equal(snapshot.code, 2, snapshot.stderr || snapshot.stdout);
   const cursor = JSON.parse(snapshot.stdout);
   assert.equal(cursor.type, 'timeout');
-  assert.equal(fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8'), before);
+  assert.equal(StateFiles.logText(h.state), before);
   const r = h.run(['wait', '--agent', 'orchestrator', '--after', String(cursor.offset), '--types', 'stall', '--timeout', '0.1'], { hooks }); // wait-allow: verify the CLI observation, filtering or timeout contract with already-published state
   assert.equal((await event(Promise.resolve(r), 'stall')).agent, 'orchestrator');
 });
 
 test('wait skips its own writes and advances timeout cursors past filtered events', async (t) => {
   const h = setup(t);
-  const after = fs.statSync(path.join(h.state, 'events.jsonl')).size;
+  const after = StateFiles.logEnd(h.state);
   h.ok(['task', 'note', 'T1', 'own progress', '--agent', 'orchestrator']);
   h.ok(['msg', '--to', 'orchestrator', 'own message', '--agent', 'orchestrator']);
   h.ok(['msg', '--to', 'someone-else', 'other recipient', '--agent', 'worker']);
@@ -685,7 +686,7 @@ test('wait skips its own writes and advances timeout cursors past filtered event
   assert.equal(r.code, 2, r.stdout || r.stderr);
   const cursor = JSON.parse(r.stdout);
   assert.equal(cursor.type, 'timeout');
-  assert.equal(cursor.offset, fs.statSync(path.join(h.state, 'events.jsonl')).size);
+  assert.equal(cursor.offset, StateFiles.logEnd(h.state));
   h.ok(['msg', '--to', 'orchestrator', '--task', 'T1', 'worker result', '--agent', 'worker']);
   const result = h.run(['wait', '--agent', 'orchestrator', '--after', String(cursor.offset), '--timeout', '0.1']); // wait-allow: verify the CLI observation, filtering or timeout contract with already-published state
   assert.equal((await event(Promise.resolve(result), 'worker-message')).detail.text, 'worker result');
@@ -737,7 +738,7 @@ test('non-owner serve hides owner forms and refuses all owner write routes', asy
   const page = await (await fetch(url)).text();
   const token = /<meta name="tower-crane-token" content="([0-9a-f]{48})?">/.exec(page)[1] || '';
   assert.doesNotMatch(page, /data-api="\/api\/(?:tasks|decisions)\//);
-  const before = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8');
+  const before = StateFiles.logText(h.state);
   for (const [route, body] of [
     ['tasks/T1/comments', { text: 'forged task comment' }],
     ['decisions/D1/comments', { text: 'forged decision comment' }],
@@ -753,7 +754,7 @@ test('non-owner serve hides owner forms and refuses all owner write routes', asy
   }
   assert.equal(h.readState('tasks.json').tasks[0].needs_owner, 'access');
   assert.equal(h.readState('decisions.json').decisions[0].status, 'open');
-  assert.equal(fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8'), before);
+  assert.equal(StateFiles.logText(h.state), before);
 });
 
 for (const agent of ['orchestrator', 'owner']) {

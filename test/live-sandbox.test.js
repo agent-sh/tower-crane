@@ -7,6 +7,7 @@
 // sandbox denies, even with the socket filter off.
 
 const test = require('node:test');
+const StateFiles = require('./state-files');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const net = require('node:net');
@@ -244,7 +245,7 @@ for (const harness of ['claude', 'codex']) {
     assert.equal(r.code, 0, `${r.stderr}\n${agentLog(h)}`);
     const note = h.readState('tasks.json').tasks[0].notes.find((n) => n.text === 'through-the-broker');
     assert.equal(note?.agent, 'small-T1-1', `the broker wrote it as the spawned agent\n${agentLog(h)}`);
-    const event = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l)).find((e) => e.cmd === 'task note');
+    const event = StateFiles.logText(h.state).trim().split('\n').map((l) => JSON.parse(l)).find((e) => e.cmd === 'task note');
     assert.deepEqual([event?.agent, event?.via], ['small-T1-1', 'broker']);
   });
 }

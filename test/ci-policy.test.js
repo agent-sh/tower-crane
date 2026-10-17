@@ -1,6 +1,7 @@
 'use strict';
 
 const test = require('node:test');
+const StateFiles = require('./state-files');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -25,7 +26,7 @@ function fixture(t) {
 
 const latest = (h) => h.readState('tasks.json').tasks[0].evidence.findLast((e) => e.type === 'ci');
 const ciGate = (h) => h.json(['task', 'show', 'T1']).gates.gates.find((g) => g.type === 'ci');
-const events = (h) => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+const events = (h) => StateFiles.logText(h.state).trim().split('\n').map(JSON.parse);
 const EMPTY = { required: [], ignore_apps: [], capped_review: [] };
 
 test('setting required jobs invalidates a hosted pass until CI is checked again', (t) => {

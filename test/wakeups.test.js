@@ -1,6 +1,7 @@
 'use strict';
 
 const { HUNG_TEST_MS, waitOnRepo, waitUntil } = require('./signals');
+const StateFiles = require('./state-files');
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -14,8 +15,8 @@ const { makeRepo, stubRungs, BIN, ROOT } = require('./helpers');
 
 const STUB = path.join(__dirname, 'fixtures', 'message-harness.js');
 const MOD = path.join(ROOT, 'hooks', 'tower-crane.mjs');
-const log = (h) => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
-const size = (h) => fs.statSync(path.join(h.state, 'events.jsonl')).size;
+const log = (h) => StateFiles.logText(h.state).trim().split('\n').map(JSON.parse);
+const size = (h) => StateFiles.logEnd(h.state);
 
 // An orchestrator follower prints its ready line only after the lease's
 // process discovery. On Windows that is a PowerShell CIM snapshot, which takes
@@ -137,7 +138,7 @@ function tornCommit(h) {
 // The bytes a worker message's log line takes besides its text, from the
 // last message the worker sent.
 function overhead(h) {
-  const raw = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').at(-1);
+  const raw = StateFiles.logText(h.state).trim().split('\n').at(-1);
   return Buffer.byteLength(raw) + 1 - Buffer.byteLength(JSON.parse(raw).detail.text);
 }
 

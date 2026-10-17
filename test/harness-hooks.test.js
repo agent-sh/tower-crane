@@ -1,6 +1,7 @@
 'use strict';
 
 const { fileWritten, killGroup } = require('./signals');
+const StateFiles = require('./state-files');
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -12,7 +13,7 @@ const { cachedFixture, BIN } = require('./helpers');
 const S = require('../lib/state');
 
 const STUB = path.join(__dirname, 'fixtures', 'message-harness.js');
-const events = (h) => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+const events = (h) => StateFiles.logText(h.state).trim().split('\n').map(JSON.parse);
 
 // spawn --wait in the background. The harness signals through files, and only
 // after spawn launched it, so a wait for a signal ends once spawn's streams
@@ -127,13 +128,13 @@ for (const route of ['claude', 'codex', 'codex-notify', 'pi', 'opencode', 'agy',
     assert.match(audit.findLast((e) => e.cmd === 'hook stop').detail.report, new RegExp(`last report from ${harness}`));
     for (const e of audit.filter((e) => e.cmd.startsWith('hook '))) assert.equal(e.agent, 'worker-T1-1');
     const binding = path.join(h.state, 'homes', 'worker-T1-1', 'hook.json');
-    const before = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8');
+    const before = StateFiles.logText(h.state);
     for (const agent of ['owner', 'another-worker']) {
       const denied = h.run(['hook', 'tool', '--binding', binding, '--agent', agent]);
       assert.equal(denied.code, 1, denied.stderr);
       assert.match(denied.stderr, /identity/);
     }
-    assert.equal(fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8'), before);
+    assert.equal(StateFiles.logText(h.state), before);
     const bridge = cp.spawnSync(process.execPath, [
       path.join(__dirname, '..', 'lib', 'hook-bridge.js'), 'codex',
       JSON.stringify({ agent: 'owner', task: 'T999', 'last-assistant-message': 'bound notification' }),
@@ -206,7 +207,7 @@ test('the bridge refuses path-selected bindings and another dispatch identity', 
   assert.equal((await run).code, 0);
   const bridge = path.join(__dirname, '..', 'lib', 'hook-bridge.js');
   const binding = path.join(h.state, 'homes', 'worker-T1-1', 'hook.json');
-  const before = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8');
+  const before = StateFiles.logText(h.state);
   const env = { ...h.env, TOWER_CRANE_AGENT: 'reviewer-T1-1', TOWER_CRANE_STATE: h.state, TOWER_CRANE_HOOK: binding };
   for (const args of [
     [bridge, binding, 'codex', JSON.stringify({ 'last-assistant-message': 'forged report' })],
@@ -215,7 +216,7 @@ test('the bridge refuses path-selected bindings and another dispatch identity', 
   ]) {
     const result = cp.spawnSync(process.execPath, args, { env, encoding: 'utf8' });
     assert.notEqual(result.status, 0, 'another dispatch must not use the worker binding');
-    assert.equal(fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8'), before);
+    assert.equal(StateFiles.logText(h.state), before);
   }
   // A binding located in the caller's own home must still match the caller.
   const own = JSON.parse(fs.readFileSync(binding));
@@ -224,7 +225,7 @@ test('the bridge refuses path-selected bindings and another dispatch identity', 
     env: { ...env, TOWER_CRANE_AGENT: 'worker-T1-1' }, encoding: 'utf8',
   });
   assert.notEqual(mismatch.status, 0);
-  assert.equal(fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8'), before);
+  assert.equal(StateFiles.logText(h.state), before);
 });
 
 test('the hook bridge reads hook input from a non-blocking stdin pipe', { skip: process.platform === 'win32' && 'needs a FIFO' }, async (t) => {

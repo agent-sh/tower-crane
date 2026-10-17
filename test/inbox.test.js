@@ -1,6 +1,7 @@
 'use strict';
 
 const { waitOnRepo } = require('./signals');
+const StateFiles = require('./state-files');
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -39,7 +40,7 @@ function setup(t) {
     h.ok(['submit', id, '--sha', h.sha, ...(pr ? ['--pr', String(pr)] : []), '--agent', `worker-${id}`]);
   };
   h.inbox = () => h.json(['inbox', '--agent', 'orchestrator']);
-  h.logs = () => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  h.logs = () => StateFiles.logText(h.state).trim().split('\n').map(JSON.parse);
   return h;
 }
 
@@ -47,7 +48,7 @@ function setup(t) {
 // starts. All task transitions and the resolving actions use the real CLI.
 function event(h, task, cmd, detail, agent = 'orchestrator') {
   const e = { id: `fixture-${h.logs().length}`, at: new Date().toISOString(), cmd, agent, task, detail };
-  fs.appendFileSync(path.join(h.state, 'events.jsonl'), `${JSON.stringify(e)}\n`);
+  StateFiles.appendLog(h.state, `${JSON.stringify(e)}\n`);
 }
 
 test('one fixture exposes every inbox kind and resolving commands clear their conditions', async (t) => {
@@ -251,12 +252,12 @@ test('MCP tools retain identity, expose actions and reject argument overrides', 
 test('new inbox items wake through wait and unchanged snapshots do not wake twice', (t) => {
   const h = setup(t);
   h.add('Ready');
-  const before = fs.statSync(path.join(h.state, 'events.jsonl')).size;
+  const before = StateFiles.logEnd(h.state);
   const args = ['wait', '--inbox', '--observe', '--after', String(before), '--types', 'inbox item', '--timeout', '0.2', '--agent', 'orchestrator']; // wait-allow: verify the CLI observation, filtering or timeout contract with already-published state
   const wake = h.run(args);
   assert.equal(wake.code, 0, wake.stderr);
   assert.equal(JSON.parse(wake.stdout).detail.item, 'ready:T1');
-  const after = fs.statSync(path.join(h.state, 'events.jsonl')).size;
+  const after = StateFiles.logEnd(h.state);
   args[args.indexOf('--after') + 1] = String(after);
   assert.equal(h.run(args).code, 2);
 });
@@ -411,7 +412,7 @@ test('GitHub-only findings wake the watcher and endpoint failures retain other f
   const h = setup(t);
   const id = h.add('Remote review');
   h.submit(id, 8);
-  const after = () => String(fs.statSync(path.join(h.state, 'events.jsonl')).size);
+  const after = () => String(StateFiles.logEnd(h.state));
   const wait = () => h.run(['wait', '--inbox', '--observe', '--after', after(), '--types', 'inbox item', '--timeout', '0.1', '--agent', 'orchestrator']); // wait-allow: verify the CLI observation, filtering or timeout contract with already-published state
   assert.equal(wait().code, 2);
   const github = h.github();

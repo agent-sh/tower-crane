@@ -1,6 +1,7 @@
 'use strict';
 
 const test = require('node:test');
+const StateFiles = require('./state-files');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -115,7 +116,7 @@ if (!fs.readFileSync(${JSON.stringify(body)}, 'utf8').includes('records a reason
 const r = cp.spawnSync(process.execPath, ${JSON.stringify([BIN, 'evidence', 'T1', '--type', 'review', '--ok', '--sha', h.sha, '--summary', 'Corrected claim checked.'])}, {env: process.env});
 process.exit(r.status ?? 1);`;
   h.ok(['ladder', 'set', 'easy', '--command', JSON.stringify([process.execPath, '-e', script, '{prompt}'])]);
-  const cursor = fs.statSync(path.join(h.state, 'events.jsonl')).size;
+  const cursor = StateFiles.logEnd(h.state);
   assert.equal(h.json(['accept', 'T1', '--agent', 'orchestrator']).review_pending, true);
   h.json(['wait', '--after', String(cursor), '--task', 'T1', '--types', 'evidence', '--timeout', '300']);
   assert.match(fs.readFileSync(output, 'utf8'), /## Light claim check/);

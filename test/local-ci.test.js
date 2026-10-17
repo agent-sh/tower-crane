@@ -1,6 +1,7 @@
 'use strict';
 
 const test = require('node:test');
+const StateFiles = require('./state-files');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -126,7 +127,7 @@ test('local CI runs argv on the merged tree and records audited evidence without
   assert.equal(h.git(['worktree', 'list', '--porcelain']).match(/^worktree /gm).length, 1);
   assert.equal(fs.readFileSync(path.join(h.repo, 'head.txt'), 'utf8'), 'old\n');
   assert.ok(e.commands.some((c) => c.command === h.command[0] && c.status === 0));
-  const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  const events = StateFiles.logText(h.state).trim().split('\n').map(JSON.parse);
   assert.deepEqual(events.findLast((v) => v.cmd === 'check ci').detail.receipt, e.receipt);
   assert.equal(h.json(['task', 'show', 'T1']).gates.ok, true);
   h.ok(['accept', 'T1']);
@@ -487,7 +488,7 @@ process.exitCode = 1;
   // The gate worktree is still removed.
   assert.deepEqual(fs.readdirSync(h.env.TOWER_CRANE_TMP), []);
   assert.equal(h.git(['worktree', 'list', '--porcelain']).match(/^worktree /gm).length, 1);
-  const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  const events = StateFiles.logText(h.state).trim().split('\n').map(JSON.parse);
   assert.deepEqual(events.findLast((v) => v.cmd === 'check ci').detail.local_ci, kept);
 });
 
@@ -1179,7 +1180,7 @@ process.exit(1);
     const at = ['line 2', '! FAILING STEP', 'token [redacted', 'line 3'].map((s) => text.indexOf(s));
     assert.deepEqual([...at].sort((a, b) => a - b), at, text);
   }
-  const stored = [log, r.stdout, r.stderr, JSON.stringify(e), fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8')].join('\n');
+  const stored = [log, r.stdout, r.stderr, JSON.stringify(e), StateFiles.logText(h.state)].join('\n');
   assert.ok(!stored.includes('T361Head'), 'the first half of the token leaked');
   assert.ok(!stored.includes('T361TailBody'), 'the second half of the token leaked');
 });
@@ -1258,7 +1259,7 @@ test('local CI selects kind args, replacement commands and the default with audi
     assert.deepEqual(e.receipt.command, command);
     assert.equal(e.receipt.timeout, timeout);
     assert.deepEqual(JSON.parse(fs.readFileSync(h.log, 'utf8')), command.slice(3));
-    const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+    const events = StateFiles.logText(h.state).trim().split('\n').map(JSON.parse);
     assert.deepEqual(events.findLast((v) => v.cmd === 'check ci').detail.receipt, e.receipt);
     const gates = h.json(['task', 'show', 'T1']).gates;
     assert.equal(gates.gates.find(g => g.type === 'ci').ok, true);
@@ -1277,12 +1278,12 @@ test('changing kind, which can select a different local CI variant, is the orche
   // A submitted task refuses any kind change, so the kind moves while it waits for rework.
   h.ok(['rework', 'T1', '--reason', 'retier the local check', '--agent', 'owner']);
   const tasks = h.readState('tasks.json');
-  const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8');
+  const events = StateFiles.logText(h.state);
   const denied = h.run(['task', 'update', 'T1', '--kind', 'ops', '--agent', 'worker']);
   assert.equal(denied.code, 1, denied.stderr);
   assert.match(denied.stderr, /only the orchestrator or the owner/);
   assert.deepEqual(h.readState('tasks.json'), tasks);
-  assert.equal(fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8'), events);
+  assert.equal(StateFiles.logText(h.state), events);
 
   const override = { args: ['--custom'] };
   h.ok(['task', 'update', 'T1', '--ci-local', JSON.stringify(override)]);
@@ -1365,7 +1366,7 @@ test('local CI variant settings validate atomically and task overrides require e
   const h = fixture(t);
   const project = h.readState('project.json');
   const tasks = h.readState('tasks.json');
-  const audit = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8');
+  const audit = StateFiles.logText(h.state);
   const invalid = [null, [], {}, { args: 'x' }, { args: [2] }, { args: ['\0'] },
     { command: [] }, { command: [' '] }, { command: ['node', '\0'] },
     { command: ['node'], args: [] }, { args: [], timeout: 0 },
@@ -1393,7 +1394,7 @@ test('local CI variant settings validate atomically and task overrides require e
       assert.deepEqual(h.readState('tasks.json'), tasks);
     }
   }
-  assert.equal(fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8'), audit);
+  assert.equal(StateFiles.logText(h.state), audit);
   assert.match(h.ok(['task', 'update', '--help']), /--ci-local JSON/);
 });
 

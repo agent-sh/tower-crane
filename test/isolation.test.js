@@ -1,6 +1,7 @@
 'use strict';
 
 const { waitUntil, killPid } = require('./signals');
+const StateFiles = require('./state-files');
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -2267,7 +2268,7 @@ for (const [command, args, opts] of calls) {
   assert.equal(policy.hook, null);
   assert.ok(fs.readFileSync(path.join(shims, 'bin', 'git'), 'utf8').includes(path.join(shims, 'lib', 'shim.js')), 'the git shim runs the copy');
   assert.equal(fs.readFileSync(path.join(shims, 'lib', 'shim.js'), 'utf8'), fs.readFileSync(path.join(ROOT, 'lib', 'shim.js'), 'utf8'));
-  const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  const events = StateFiles.logText(h.state).trim().split('\n').map(JSON.parse);
   assert.equal(events.find((e) => e.cmd === 'spawn').detail.tool.sha, toolSha);
   assert.ok(events.some((e) => e.cmd === 'hook report' && e.agent === started.agent), 'hook report');
   for (const cmd of ['hook git-push', 'hook pr-created']) {
@@ -2818,7 +2819,7 @@ test('a sandboxed agent changes the state only through its spawn\'s broker: as i
   assert.deepEqual(t1.evidence, []);
   assert.deepEqual(t2.notes, []);
   assert.deepEqual(h.readState('project.json').tests, tests);
-  const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+  const events = StateFiles.logText(h.state).trim().split('\n').map((l) => JSON.parse(l));
   assert.deepEqual(events.filter((e) => e.via === 'broker').map((e) => [e.cmd, e.agent, e.task]),
     [...noted.flatMap((a) => [['task note', a, 'T1'], ['hook report', a, 'T1'], ['task note', a, 'T1']]), ['claim', worker, 'T1']], 'only brokered changes, each as its agent');
   assert.deepEqual(events.filter((e) => e.via === 'automation' && ['hook stop', 'msg'].includes(e.cmd))

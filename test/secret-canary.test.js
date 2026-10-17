@@ -1,6 +1,7 @@
 'use strict';
 
 const { waitUntil, killPid } = require('./signals');
+const StateFiles = require('./state-files');
 
 // A spawn with a unique secret in the rung env, the project env, an env_file
 // and the harness credentials leaves that secret nowhere but the files the
@@ -128,7 +129,7 @@ for (const harness of ['claude', 'codex']) {
     assert.deepEqual(Object.keys(JSON.parse(r.stdout).route.env), ['ROUTE', 'TC_RUNG_SECRET']);
     assert.ok(await ready, 'the agent started');
     canary.assertNoHits(canary.scanText(canary.processListing(), s.c, 'the process listing'), 'a process listing');
-    const started = fs.readFileSync(path.join(s.h.state, 'events.jsonl'), 'utf8')
+    const started = StateFiles.logText(s.h.state)
       .trim().split('\n').map((l) => JSON.parse(l)).findLast((e) => e.cmd === 'spawn').detail;
     const monitor = { pid: started.monitor_pid, startTicks: started.monitor_start_ticks };
     killPid(monitor.pid, 'SIGTERM');
@@ -195,7 +196,7 @@ for (const harness of ['claude', 'codex']) {
     assert.equal(held.code, 0, held.stderr);
     const holderPid = Number(await canary.waitFor(`${out}.ready`, { nonempty: true }));
     assert.ok(holderPid, 'the holder started');
-    const holderSpawn = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l))
+    const holderSpawn = StateFiles.logText(h.state).trim().split('\n').map((l) => JSON.parse(l))
       .findLast((e) => e.cmd === 'spawn' && e.task === 'T1').detail;
     const monitor = { pid: holderSpawn.monitor_pid, startTicks: holderSpawn.monitor_start_ticks };
     t.after(async () => {
@@ -231,7 +232,7 @@ for (const harness of ['claude', 'codex']) {
     assert.equal(r.code, 0, r.stderr);
     const seen = JSON.parse(fs.readFileSync(result, 'utf8'));
     assert.match(String(seen.home), /^ERR /, 'the holder home is readable from the other agent\'s sandbox');
-    const agent = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l))
+    const agent = StateFiles.logText(h.state).trim().split('\n').map((l) => JSON.parse(l))
       .findLast((e) => e.cmd === 'spawn' && e.task === 'T2').detail.agent;
     const transcripts = harness === 'claude' ? path.join(h.state, 'homes', agent, 'projects') : path.join(h.state, 'homes', '.codex', agent, 'sessions');
     assert.ok(fs.existsSync(transcripts) && fs.readdirSync(transcripts).length, `${transcripts} holds the agent's transcript`);

@@ -324,6 +324,30 @@ function traced(p) {
   return rel === '' ? '.' : /^(tasks\.json|events\.jsonl)/.test(rel) && !rel.includes(path.sep) ? rel : null;
 }
 
+// The database's reads and writes pass named steps (lib/db.js STEP): `read`
+// after a snapshot, `events` after events are read, `commit` before a write
+// commits and `committed` after. HOOK_PAUSE_ON names the file a file layout
+// read: tasks.json, decisions.json or project.json is a snapshot, events.jsonl
+// an events read. HOOK_DIE_COMMIT=staged kills a lock holder before its
+// commit, `landed` right after it.
+const STEP_OF = { 'tasks.json': 'read', 'decisions.json': 'read', 'project.json': 'read', 'events.jsonl': 'events' };
+if (STATE) {
+  process.on('tower-crane:state-step', (step, dir) => {
+    if (path.resolve(String(dir)) !== STATE) return;
+    if (env.HOOK_PAUSE_ON && STEP_OF[env.HOOK_PAUSE_ON] === step
+      && (!env.HOOK_PAUSE_PROCESS || path.basename(process.argv[1]) === env.HOOK_PAUSE_PROCESS) && first('pause')) stop(env.HOOK_PAUSED);
+    // HOOK_FAIL_COMMIT=1: the first commit fails before it lands, as a failing disk reports it.
+    if (env.HOOK_FAIL_COMMIT && step === 'commit' && first('fail-commit')) {
+      throw Object.assign(new Error('injected commit failure: disk I/O error'), { code: 'EIO' });
+    }
+    if (env.HOOK_DIE_COMMIT && step === (env.HOOK_DIE_COMMIT === 'landed' ? 'committed' : 'commit')
+      && path.basename(process.argv[1]) === 'tower-crane.js' && ownsLock()) {
+      process.kill(process.pid, 'SIGKILL');
+      sleep(5000);
+    }
+  });
+}
+
 let pendingLockRead;
 function after(name, args, rawArgs = args) {
   const target = args[0];
@@ -333,11 +357,19 @@ function after(name, args, rawArgs = args) {
     const file = traced(name === 'renameSync' ? args[1] : target);
     if (file) real.appendFileSync(env.HOOK_SYNC_TRACE, `${name.replace('Sync', '').replace('File', '')} ${file.startsWith('tasks.json.') ? 'tasks.json.staged' : file}\n`);
   }
-  // HOOK_DIE_COMMIT kills the CLI holding the lock inside its commit:
-  // `landed` once the first of its two durable steps is done, `staged` once
-  // a staged copy of tasks.json is synced, before either step.
+  // The same kill in a file layout commit, as a 0.1 tool makes it: `landed`
+  // once the first of its two durable steps is done, `staged` once a staged
+  // copy of tasks.json is synced, before either step.
   if (env.HOOK_DIE_COMMIT && (env.HOOK_DIE_COMMIT === 'landed' ? commitStep(name, args) : stagedTasks(name, args))
     && path.basename(process.argv[1]) === 'tower-crane.js' && ownsLock()) {
+    process.kill(process.pid, 'SIGKILL');
+    sleep(5000);
+  }
+  // HOOK_DIE_AFTER_RENAME=NAME: the CLI is killed right after it renames a
+  // file onto NAME in the state directory, as a migration's last steps do:
+  // state.db once the database is in place, project.json once its marker is.
+  if (env.HOOK_DIE_AFTER_RENAME && name === 'renameSync' && path.resolve(String(args[1])) === path.join(STATE, env.HOOK_DIE_AFTER_RENAME)
+    && path.basename(process.argv[1]) === 'tower-crane.js') {
     process.kill(process.pid, 'SIGKILL');
     sleep(5000);
   }
@@ -365,9 +397,10 @@ function after(name, args, rawArgs = args) {
     }
     stop(env.HOOK_PAUSE_LOCKED);
   }
-  // HOOK_PAUSE_ON=FILE stops at HOOK_PAUSED after its first read; HOOK_PAUSE_PROCESS
-  // optionally limits the pause to one executable's basename.
-  if (env.HOOK_PAUSE_ON && ['readFileSync', 'readSync'].includes(name) && inState(target) && path.basename(target) === env.HOOK_PAUSE_ON
+  // HOOK_PAUSE_ON=FILE stops at HOOK_PAUSED after its first read of a file
+  // the database does not hold; HOOK_PAUSE_PROCESS optionally limits the
+  // pause to one executable's basename.
+  if (env.HOOK_PAUSE_ON && !STEP_OF[env.HOOK_PAUSE_ON] && ['readFileSync', 'readSync'].includes(name) && inState(target) && path.basename(target) === env.HOOK_PAUSE_ON
     && (!env.HOOK_PAUSE_PROCESS || path.basename(process.argv[1]) === env.HOOK_PAUSE_PROCESS) && first('pause')) stop(env.HOOK_PAUSED);
   // Windows keeps an unlinked marker pending deletion until its reader closes
   // it. Pause with the snapshot, without keeping the lock directory open.

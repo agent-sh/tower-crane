@@ -1,6 +1,7 @@
 'use strict';
 
 const test = require('node:test');
+const StateFiles = require('./state-files');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -304,7 +305,7 @@ test('opencode excludes credential-triggered remote instructions, plugins and MC
     fs.closeSync(source);
   }
   const visible = JSON.stringify(preview) + result.stdout
-    + fs.readFileSync(path.join(f.h.state, 'events.jsonl'), 'utf8')
+    + StateFiles.logText(f.h.state)
     + fs.readFileSync(path.join(path.dirname(report.home), 'opencode.json'), 'utf8');
   assert.ok(!visible.includes('SECRET-CANARY'));
   releaseStub(f);
@@ -375,7 +376,7 @@ for (const change of ['tier', 'ladder']) {
     assert.ok(!report.memory.join('').includes('RACE-REMOTE-INSTRUCTION'));
     assert.ok(!report.config.plugin.includes('race-remote-plugin'));
     assert.deepEqual(report.mcp, {});
-    const events = fs.readFileSync(path.join(f.h.state, 'events.jsonl'), 'utf8');
+    const events = StateFiles.logText(f.h.state);
     assert.ok(!(result.stdout + events).includes('RACE-SECRET'));
   });
 }
@@ -396,7 +397,7 @@ test('a fallback into opencode receives filtered auth instead of restoring remot
   const report = f.report();
   assert.deepEqual(report.authKinds, { fixture: 'api' });
   assert.deepEqual(report.remoteContacts, []);
-  const events = fs.readFileSync(path.join(f.h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  const events = StateFiles.logText(f.h.state).trim().split('\n').map(JSON.parse);
   assert.ok(events.some((event) => event.cmd === 'spawn fallback' && event.detail.harness === 'opencode'));
   assert.ok(!JSON.stringify(events).includes('SECRET-CANARY'));
 });
@@ -419,7 +420,7 @@ test('opencode renders worker path, web, skill, git and gh permission decisions'
   assert.ok(preview.startup.instructions_file.endsWith('/agents/gishra-worker.md'));
   assert.ok(preview.startup.rules.some((rule) => rule.path === path.join(f.global, 'AGENTS.md')));
   assert.ok(preview.startup.rules.every((rule) => rule.loaded === 'read'));
-  const events = fs.readFileSync(path.join(f.h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  const events = StateFiles.logText(f.h.state).trim().split('\n').map(JSON.parse);
   const receipt = events.findLast((event) => event.cmd === 'startup').detail;
   assert.ok(receipt.rules.every((rule) => rule.loaded === 'read'));
   assert.match(preview.argv.find((arg) => arg.includes('## Task')), /REPO-RULE|AGENTS\.md/);
@@ -576,7 +577,7 @@ process.exit(result.status ?? 1);
     assert.equal(tools[index].metadata.exit, 0, JSON.stringify(tools[index]));
   }
   assert.equal(tools.at(-1).status, 'error', JSON.stringify(tools.at(-1)));
-  const audit = fs.readFileSync(path.join(f.h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  const audit = StateFiles.logText(f.h.state).trim().split('\n').map(JSON.parse);
   const worktree = fs.realpathSync(audit.findLast((event) => event.cmd === 'spawn').detail.cwd);
   assert.notEqual(worktree, fs.realpathSync(f.h.repo));
   assert.equal(tools[1].output.trim(), worktree);

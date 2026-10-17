@@ -24,7 +24,7 @@ async function main() {
     });
     fs.appendFileSync(process.env.AUTOMATION_POLICY_PROBE, JSON.stringify({ path: process.env.PATH || process.env.Path, denials }) + '\n');
   }
-  const taskState = JSON.parse(fs.readFileSync(path.join(process.env.TOWER_CRANE_STATE, 'tasks.json'), 'utf8'))
+  const taskState = require('../state-files').readDoc(process.env.TOWER_CRANE_STATE, 'tasks.json')
     .tasks.find((t) => t.id === task);
   if (mode === 'worker' || mode === 'auto' && taskState.status !== 'submitted') {
     run(['claim', task]);

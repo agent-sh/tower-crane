@@ -1,6 +1,7 @@
 'use strict';
 
 const test = require('node:test');
+const StateFiles = require('./state-files');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -81,7 +82,7 @@ function reconciledFixture(t) {
     h.consume();
     return { sha: h.sha };
   });
-  h.logs = () => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  h.logs = () => StateFiles.logText(h.state).trim().split('\n').map(JSON.parse);
   h.reconcile = () => h.run(['wait', '--types', 'never', '--timeout', '0.01', '--agent', 'orchestrator']); // wait-allow: end the idle observation after startup reconciliation; assertions read state after the CLI exits
   return h;
 }
@@ -103,7 +104,7 @@ for (const reaction of ['submit', 'reconcile']) {
       // finished before clean and CI. Startup must settle that failure into rework.
       assert.equal(h.run(['check', 'tests', 'T1', '--agent', 'orchestrator']).code, 1);
       const source = h.logs().findLast((e) => e.cmd === 'submit').id;
-      fs.appendFileSync(path.join(h.state, 'events.jsonl'), JSON.stringify({
+      StateFiles.appendLog(h.state, JSON.stringify({
         at: new Date().toISOString(), agent: 'orchestrator', cmd: 'automation', task: 'T1',
         detail: { source, phase: 'done' },
       }) + '\n');
@@ -157,7 +158,7 @@ for (const obsolete of ['revision', 'sha']) {
         // A completed submit reaction must not suppress startup reconciliation.
         const events = h.logs();
         const source = events.findLast((e) => e.cmd === 'submit').id;
-        fs.appendFileSync(path.join(h.state, 'events.jsonl'), JSON.stringify({
+        StateFiles.appendLog(h.state, JSON.stringify({
           at: new Date().toISOString(), agent: 'orchestrator', cmd: 'automation', task: 'T1',
           detail: { source, phase: 'done' },
         }) + '\n');
@@ -185,7 +186,7 @@ for (const entries of ['absent', 'unaudited pass', 'unaudited failure']) {
     const task = tasks.tasks[0];
     if (entries === 'absent') task.evidence = [];
     else for (const entry of task.evidence) entry.ok = entries === 'unaudited pass';
-    fs.writeFileSync(path.join(h.state, 'tasks.json'), JSON.stringify(tasks));
+    StateFiles.writeDocText(h.state, 'tasks.json', JSON.stringify(tasks));
     const events = h.logs().filter((e) => !['check tests', 'check clean', 'check ci'].includes(e.cmd));
     fs.writeFileSync(path.join(h.state, 'events.jsonl'), events.map((e) => JSON.stringify(e) + '\n').join(''));
     const before = h.json(['task', 'show', 'T1']);
@@ -703,7 +704,7 @@ test('a test gate that fails by hand while the watcher runs reworks, not left su
   h.consume();
   const finished = () => h.logs().filter((e) => e.cmd === 'automation' && e.detail.phase === 'done').length;
   const before = finished();
-  const offset = fs.statSync(path.join(h.state, 'events.jsonl')).size;
+  const offset = StateFiles.logEnd(h.state);
   const watcher = h.runAsync(['wait', '--after', String(offset), '--types', 'rework', '--timeout', '300', '--agent', 'orchestrator']);
   // The watcher's startup reconcile settles the submission first; the failure comes after it.
   await waitOnRepo(h, () => finished() > before, 'the watcher reconciles the submission');
@@ -1037,7 +1038,7 @@ if (${stage === 'trial'}) {
       assert.match(exit.stdout, /stopped by SIGTERM after draining 0 gates/);
       assert.equal(fs.readFileSync(calls, 'utf8').trim().split('\n').length, count, 'no further PR inspection starts');
       assert.deepEqual(h.readState('tasks.json').tasks.slice(1), before, 'no conflict note, rework or generated repair changes another task');
-      const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+      const events = StateFiles.logText(h.state).trim().split('\n').map(JSON.parse);
       assert.equal(events.findLast((e) => e.cmd === 'automation').detail.phase, 'deferred');
       assert.equal(events.some((e) => e.cmd === 'automation' && e.task !== 'T1' && e.detail.phase === 'running'), false, 'no repair executor is claimed');
       assert.equal(h.git(['worktree', 'list', '--porcelain']).match(/^worktree /gm).length, 1);
@@ -1296,7 +1297,7 @@ test('wait drains on either signal without starting another gate, and a second s
         }
         return { sha: h.sha };
       });
-      h.logs = () => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+      h.logs = () => StateFiles.logText(h.state).trim().split('\n').map(JSON.parse);
       const release = path.join(h.base, 'release-suite');
       const heldRun = proof ? 2 : 1;
       const runs = idle ? null : slowSuite(h, { executors: 1, release, hold: heldRun, pr: github, fail: stage === 'failure' });

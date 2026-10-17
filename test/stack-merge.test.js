@@ -1,6 +1,7 @@
 'use strict';
 
 const test = require('node:test');
+const StateFiles = require('./state-files');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -74,7 +75,7 @@ for (const signal of ['SIGTERM', 'SIGINT']) process.on(signal, () => fs.appendFi
         assert.deepEqual(routes(f), ['async 11'], 'the upper merge never starts');
         const task = f.h.json(['task', 'show', 'T2']);
         assert.equal(task.evidence.findLast((entry) => entry.type === 'merge').ok, false, 'interrupted merge is retryable');
-        const events = fs.readFileSync(path.join(f.h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+        const events = StateFiles.logText(f.h.state).trim().split('\n').map(JSON.parse);
         assert.equal(events.findLast((event) => event.cmd === 'automation').detail.phase, 'deferred');
         assert.equal(f.read().prs[11].state, 'OPEN');
         assert.equal(f.read().prs[12].state, 'OPEN');
@@ -654,7 +655,7 @@ test('a stack member stopping during the final head checks does not stop the sta
   f.h.ok(['merge', 'T2']);
   assert.deepEqual(routes(f), ['async 11', 'async 12']);
   // The stop emits its own orchestrator notice; the merge passed with that notice in the log.
-  const log = fs.readFileSync(path.join(f.h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  const log = StateFiles.logText(f.h.state).trim().split('\n').map(JSON.parse);
   assert.ok(log.some((e) => e.cmd === 'hook stop' && e.agent === 'worker-T2'));
   assert.ok(log.some((e) => e.cmd === 'msg' && e.agent === 'worker-T2' && e.detail.to === 'orchestrator'));
 });
@@ -933,7 +934,7 @@ function queued(t) {
   f.consume = () => f.h.run(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
   f.suites = () => (fs.existsSync(log) ? readPublished(log, 'utf8').trim().split('\n').map(JSON.parse) : [])
     .filter((files) => files.includes('moved.txt'));
-  f.checks = () => fs.readFileSync(path.join(f.h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse)
+  f.checks = () => StateFiles.logText(f.h.state).trim().split('\n').map(JSON.parse)
     .filter((e) => e.cmd === 'head check');
   f.merges = () => routes(f);
   return f;

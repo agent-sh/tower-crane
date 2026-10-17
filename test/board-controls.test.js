@@ -1,6 +1,7 @@
 'use strict';
 
 const test = require('node:test');
+const StateFiles = require('./state-files');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -49,7 +50,7 @@ async function serve(t, h, agent = 'owner', { fetchToken = true } = {}) {
 }
 
 const request = (command, flags = {}, pos = []) => ({ command, flags, pos });
-const events = (h) => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+const events = (h) => StateFiles.logText(h.state).trim().split('\n').map(JSON.parse);
 const audits = (h) => events(h).filter((e) => e.cmd === 'setting');
 const decisions = (h) => h.readState('decisions.json').decisions;
 const as = (agent) => ({ env: { TOWER_CRANE_AGENT: agent } });

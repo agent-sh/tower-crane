@@ -1,13 +1,14 @@
 'use strict';
 
 const test = require('node:test');
+const StateFiles = require('./state-files');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { makeRepo, runPty, PTY_AVAILABLE } = require('./helpers');
 
 function events(h) {
-  return fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  return StateFiles.logText(h.state).trim().split('\n').map(JSON.parse);
 }
 
 test('only the owner or a named agent can answer, and the answer event records its rule', (t) => {

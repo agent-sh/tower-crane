@@ -1,6 +1,7 @@
 'use strict';
 
 const test = require('node:test');
+const StateFiles = require('./state-files');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -76,7 +77,7 @@ setTimeout(() => process.exit(0), 10000); // wait-allow: the gate must time out 
     assert.match(evidence.summary, /timed out after 0\.05 min/);
     assert.doesNotMatch(evidence.summary, /Failing tests|Make the tests pass|Promise resolution/);
     assert.equal(task.status, 'submitted');
-    const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+    const events = StateFiles.logText(h.state).trim().split('\n').map(JSON.parse);
     const audit = events.findLast((e) => e.cmd === `check ${type}`);
     assert.equal(audit.detail.infrastructure_failure, true);
     assert.deepEqual(audit.detail.timeout, evidence.timeout);

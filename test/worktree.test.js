@@ -1,6 +1,7 @@
 'use strict';
 
 const { fileWritten, childExit } = require('./signals');
+const StateFiles = require('./state-files');
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -153,12 +154,12 @@ test('worktree refreshes origin even when its configured fetch excludes the base
 test('worktree refuses a failed origin fetch without recording or creating a task branch', (t) => {
   const h = setup(t);
   fs.renameSync(h.origin, `${h.origin}.offline`);
-  const before = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8');
+  const before = StateFiles.logText(h.state);
   const r = h.run(['worktree', 'T1']);
   assert.equal(r.code, 1);
   assert.match(r.stderr, /git fetch origin main failed/);
   assert.equal(h.json(['task', 'show', 'T1']).branch, null);
-  assert.equal(fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8'), before);
+  assert.equal(StateFiles.logText(h.state), before);
   assert.equal(h.git(['branch', '--list', 'tower-crane/*']), '');
   assert.equal(h.git(['worktree', 'list', '--porcelain']).match(/^worktree /gm).length, 1);
 });
@@ -181,12 +182,12 @@ test('worktree uses a local base missing from origin instead of its stale tracki
 test('worktree refuses a base missing both locally and on origin without writing state', (t) => {
   const h = setup(t);
   h.ok(['project', 'set', '--base', 'missing']);
-  const before = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8');
+  const before = StateFiles.logText(h.state);
   const r = h.run(['worktree', 'T1']);
   assert.equal(r.code, 1);
   assert.match(r.stderr, /base branch missing is not in this repository/);
   assert.equal(h.json(['task', 'show', 'T1']).branch, null);
-  assert.equal(fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8'), before);
+  assert.equal(StateFiles.logText(h.state), before);
   assert.equal(h.git(['branch', '--list', 'tower-crane/*']), '');
 });
 
@@ -195,7 +196,7 @@ test('worktree refuses a locked tracking ref that does not match the origin tip'
   const stale = h.git(['rev-parse', 'origin/main']);
   advance(h, h.upstream, 'remote.txt');
   h.git(['push', 'origin', 'main'], h.upstream);
-  const before = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8');
+  const before = StateFiles.logText(h.state);
   fs.writeFileSync(path.join(h.repo, '.git', 'refs', 'remotes', 'origin', 'main.lock'), '');
 
   const r = h.run(['worktree', 'T1']);
@@ -203,7 +204,7 @@ test('worktree refuses a locked tracking ref that does not match the origin tip'
   assert.match(r.stderr, /git fetch origin main failed/);
   assert.equal(h.git(['rev-parse', 'origin/main']), stale);
   assert.equal(h.json(['task', 'show', 'T1']).branch, null);
-  assert.equal(fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8'), before);
+  assert.equal(StateFiles.logText(h.state), before);
   assert.equal(h.git(['branch', '--list', 'tower-crane/*']), '');
 });
 
@@ -234,7 +235,7 @@ process.exit(r.status === null ? 1 : r.status);
     const quote = (s) => `'${s.replace(/'/g, "'\\''")}'`;
     // The CLI's git takes upload-pack only from the user's own config.
     h.git(['config', '--global', 'remote.origin.uploadpack', `${quote(process.execPath)} ${quote(uploadPack)}`]);
-    const before = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8');
+    const before = StateFiles.logText(h.state);
     const result = h.run(['worktree', 'T1', '--json']);
     if (recovered) {
       assert.equal(result.code, 0, result.stderr);
@@ -244,7 +245,7 @@ process.exit(r.status === null ? 1 : r.status);
       assert.equal(result.code, 1, result.stdout);
       assert.match(result.stderr, /git fetch origin main failed/);
       assert.equal(h.git(['rev-parse', 'origin/main']), stale);
-      assert.equal(fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8'), before);
+      assert.equal(StateFiles.logText(h.state), before);
       assert.equal(h.json(['task', 'show', 'T1']).branch, null);
       assert.equal(h.git(['branch', '--list', 'tower-crane/*']), '');
     }
@@ -273,7 +274,7 @@ for (const error of ['lock', 'incorrect old value provided', 'fatal: unpack-obje
     const h = setup(t);
     advance(h, h.upstream, 'remote.txt');
     h.git(['push', 'origin', 'main'], h.upstream);
-    const before = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8');
+    const before = StateFiles.logText(h.state);
     const attempts = path.join(h.base, 'fetch-attempts');
     const r = h.run(['worktree', 'T1'], {
       hooks: { HOOK_FETCH_ERROR: error, HOOK_FETCH_ALWAYS: '1', HOOK_FETCH_ATTEMPTS: attempts },
@@ -282,7 +283,7 @@ for (const error of ['lock', 'incorrect old value provided', 'fatal: unpack-obje
     assert.match(r.stderr, /git fetch origin main failed/);
     assert.equal(fs.readFileSync(attempts, 'utf8'), error.includes('unpack-objects') ? '.' : '..');
     assert.equal(h.json(['task', 'show', 'T1']).branch, null);
-    assert.equal(fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8'), before);
+    assert.equal(StateFiles.logText(h.state), before);
     assert.equal(h.git(['branch', '--list', 'tower-crane/*']), '');
     assert.equal(h.json(['worktree', 'T1']).created, true, 'the failed call permits a later preparation');
   });
@@ -370,7 +371,7 @@ test('a later dispatch fetches again even when the previous fetch did not move t
 for (const hooks of [{ HOOK_ADD_ERROR: 'ETIMEDOUT' }, { HOOK_DIE_WORKTREE_ADD: '1' }]) {
   test(`an interrupted add cannot be reused without inspection: ${Object.keys(hooks)[0]}`, (t) => {
     const h = setup(t);
-    const before = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8');
+    const before = StateFiles.logText(h.state);
     const r = h.run(['worktree', 'T1'], { hooks });
     assert.notEqual(r.code, 0, r.stderr);
     const retry = h.run(['worktree', 'T1']);
@@ -379,7 +380,7 @@ for (const hooks of [{ HOOK_ADD_ERROR: 'ETIMEDOUT' }, { HOOK_DIE_WORKTREE_ADD: '
     assert.match(retry.stderr, /git worktree unlock <path>/);
     assert.match(retry.stderr, /git worktree remove --force <path>/);
     assert.equal(h.json(['task', 'show', 'T1']).branch, null);
-    assert.equal(fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8'), before);
+    assert.equal(StateFiles.logText(h.state), before);
     const dir = path.join(h.base, 'repo-worktrees', 'T1-fresh-base');
     assert.equal(h.git(['status', '--porcelain'], dir), '');
     h.git(['worktree', 'unlock', dir]);
@@ -442,14 +443,14 @@ test('a registration interrupted before HEAD exists is refused without deleting 
   fs.writeFileSync(path.join(dir, '.git'), `gitdir: ${admin}\n`);
   fs.writeFileSync(path.join(admin, 'gitdir'), path.join(dir, '.git') + '\n');
   fs.writeFileSync(path.join(admin, 'locked'), 'initializing');
-  const before = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8');
+  const before = StateFiles.logText(h.state);
   for (let i = 0; i < 2; i++) {
     const retry = h.run(['worktree', 'T1']);
     assert.equal(retry.code, 1, retry.stderr);
     assert.match(retry.stderr, /unfinished|incomplete|exists and is not a worktree/);
   }
   assert.ok(fs.existsSync(path.join(admin, 'locked')));
-  assert.equal(fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8'), before);
+  assert.equal(StateFiles.logText(h.state), before);
 });
 
 test('a rework recreated after a newer submission from another checkout starts from that submission, not a stale tracking ref', (t) => {
@@ -523,7 +524,7 @@ test('cancelling removes clean, dirty and missing worktrees, saving dirty files'
   assert.ok(!h.registers(dirty.path), 'git forgets the dirty worktree');
   assert.ok(!h.registers(clean.path), 'git forgets the removed worktree');
   assert.ok(!h.registers(gone.path), 'prune clears the registration of a missing directory');
-  const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  const events = StateFiles.logText(h.state).trim().split('\n').map(JSON.parse);
   const saved = events.find((e) => e.cmd === 'worktree removed' && e.task === 'T2').detail.saved;
   assert.equal(fs.readFileSync(path.join(saved, 'files', 'notes.txt'), 'utf8'), 'unfinished\n');
 });
@@ -877,7 +878,7 @@ test('cancelling keeps a worktree that git still has locked', (t) => {
 
   assert.ok(fs.existsSync(wt.path), 'the locked worktree stays');
   assert.ok(h.registers(wt.path), 'git still registers it');
-  const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  const events = StateFiles.logText(h.state).trim().split('\n').map(JSON.parse);
   const kept = events.find((e) => e.cmd === 'worktree kept');
   assert.equal(kept.task, 'T1');
   assert.equal(kept.detail.reason, 'worktree is locked');
@@ -891,7 +892,7 @@ test('cancelling keeps a worktree while its worker process is still running', (t
   const exited = h.json(['worktree', 'T2']);
   // This test process is alive; 999999 is a pid that has exited.
   for (const [task, pid] of [['T1', process.pid], ['T2', 999999]]) {
-    fs.appendFileSync(path.join(h.state, 'events.jsonl'), `${JSON.stringify({
+    StateFiles.appendLog(h.state, `${JSON.stringify({
       at: new Date().toISOString(), agent: 'orchestrator', cmd: 'spawn', task,
       detail: { agent: 'w-1', role: 'worker', rung: 'easy', pid, attempt: 1 },
     })}\n`);
@@ -901,7 +902,7 @@ test('cancelling keeps a worktree while its worker process is still running', (t
 
   assert.ok(fs.existsSync(live.path), 'the worktree of a running worker stays');
   assert.ok(!fs.existsSync(exited.path), 'the worktree of an exited worker is removed');
-  const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  const events = StateFiles.logText(h.state).trim().split('\n').map(JSON.parse);
   const kept = events.find((e) => e.cmd === 'worktree kept');
   assert.equal(kept.task, 'T1');
   assert.equal(kept.detail.reason, 'an agent is still running on the task');
@@ -915,7 +916,7 @@ test('cancelling keeps a worktree while the monitor of an exited reviewer still 
   const at = new Date().toISOString();
   // The reviewer process has exited; its monitor, this test's parent, is alive and runs in the worktree.
   const detail = { agent: 'r-1', role: 'reviewer', rung: 'review', pid: 999999, attempt: 1 };
-  fs.appendFileSync(path.join(h.state, 'events.jsonl'), [
+  StateFiles.appendLog(h.state, [
     { at, agent: 'orchestrator', cmd: 'spawn', task: 'T1', detail },
     { at, agent: 'orchestrator', cmd: 'spawn phase', task: 'T1', detail: { ...detail, phase: 'running', monitor_pid: process.ppid, active: true } },
   ].map((e) => `${JSON.stringify(e)}\n`).join(''));
@@ -923,7 +924,7 @@ test('cancelling keeps a worktree while the monitor of an exited reviewer still 
   h.ok(['task', 'update', 'T1', '--status', 'cancelled']);
 
   assert.ok(fs.existsSync(wt.path), 'the worktree stays while its monitor runs');
-  const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  const events = StateFiles.logText(h.state).trim().split('\n').map(JSON.parse);
   const kept = events.find((e) => e.cmd === 'worktree kept');
   assert.equal(kept.task, 'T1');
   assert.equal(kept.detail.reason, 'an agent is still running on the task');
@@ -949,7 +950,7 @@ test('cancelling does not remove a checkout that a symlink moves outside the wor
 
   const checkout = path.join(outside, 'pool', path.basename(wt.path));
   assert.ok(fs.existsSync(checkout), 'the checkout outside the worktrees root stays');
-  const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  const events = StateFiles.logText(h.state).trim().split('\n').map(JSON.parse);
   const kept = events.find((e) => e.cmd === 'worktree kept');
   assert.equal(kept.task, 'T1');
   assert.equal(kept.detail.reason, 'its real location is not under the worktrees root');

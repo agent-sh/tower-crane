@@ -1,6 +1,7 @@
 'use strict';
 
 const { waitOnRepo } = require('./signals');
+const StateFiles = require('./state-files');
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -33,13 +34,13 @@ test('submitted dependencies dispatch from the exact dependency head and spawn l
 // serializes.
 const racingNotes = (f) => {
   const byObserver = new Map();
-  for (const e of fs.readFileSync(path.join(f.h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse)) {
+  for (const e of StateFiles.logText(f.h.state).trim().split('\n').map(JSON.parse)) {
     const pid = e.cmd === 'task note' && /^racing note from (\d+)$/.exec(e.detail?.text)?.[1];
     if (pid) byObserver.set(pid, (byObserver.get(pid) || 0) + 1);
   }
   return byObserver;
 };
-const linkFailures = (f) => fs.readFileSync(path.join(f.h.state, 'events.jsonl'), 'utf8').trim().split('\n')
+const linkFailures = (f) => StateFiles.logText(f.h.state).trim().split('\n')
   .map(JSON.parse).filter((e) => e.cmd === 'stack link failed');
 // The observer pass inside `wait --observe` links the PR; the wait returns on its event.
 const linkedByObserver = (f) => {
@@ -119,7 +120,7 @@ test('under a slow GitHub, reviewers that keep failing stop at the cap and the l
   f.write((d) => { d.delayMs = 300; });
   const spawned = f.h.json(['spawn', '--task', 'T2']);
   // Monitors append while this reads; the record after the last newline may be partial.
-  const events = () => fs.readFileSync(path.join(f.h.state, 'events.jsonl'), 'utf8').split('\n').slice(0, -1).map(JSON.parse);
+  const events = () => StateFiles.logText(f.h.state).split('\n').slice(0, -1).map(JSON.parse);
   const reviewers = () => events().filter((e) => e.cmd === 'spawn' && e.detail.role === 'reviewer');
   const monitors = () => [spawned.monitor_pid, ...reviewers().map((e) => e.detail.monitor_pid)];
   const supervised = () => monitors().some((pid) => detachedAlive({ pid }));
@@ -278,7 +279,7 @@ test('spawn refuses with claim readiness when a submitted dependency returns to 
   const spawn = f.h.run(['spawn', '--task', 'T2', '--wait']);
   assert.equal(spawn.code, 1);
   assert.ok(spawn.stderr.includes(claim.stderr.trim().replace(/^tower-crane: /, '')), spawn.stderr);
-  const events = fs.readFileSync(path.join(f.h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  const events = StateFiles.logText(f.h.state).trim().split('\n').map(JSON.parse);
   assert.equal(events.some((event) => event.cmd === 'spawn' && event.task === 'T2'), false);
   assert.equal(f.h.json(['task', 'show', 'T2']).status, 'todo');
 });

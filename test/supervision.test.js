@@ -1,6 +1,7 @@
 'use strict';
 
 const { waitOnRepo, killPid, killGroup } = require('./signals');
+const StateFiles = require('./state-files');
 
 const { test, describe } = require('node:test');
 const assert = require('node:assert/strict');
@@ -23,7 +24,7 @@ const NO_SH = { HOOK_NO_SH: '1' };
 const windowsConcurrency = process.platform === 'win32' ? 2 : false;
 const S = require('../lib/state');
 
-const log = (h) => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+const log = (h) => StateFiles.logText(h.state).trim().split('\n').map(JSON.parse);
 const sketches = (h) => ['sketch.md', 'sketch.html'].map((file) => ({
   file, text: fs.readFileSync(path.join(h.state, file), 'utf8'),
 }));
@@ -629,7 +630,7 @@ test('a schema bump before the supervisor first reads state stops its worker beh
   await waitOnRepo(h, () => fs.existsSync(paused), 'supervisor did not pause');
   // The lease gate waits on its supervisor, and this supervisor can no longer read the state.
   S.withLock(h.state, () => {
-    const project = JSON.parse(fs.readFileSync(path.join(h.state, 'project.json'), 'utf8'));
+    const project = JSON.parse(StateFiles.docText(h.state, 'project.json'));
     project.schema_version = 2;
     S.writeAtomic(path.join(h.state, 'project.json'), S.json(project));
   });
@@ -637,7 +638,7 @@ test('a schema bump before the supervisor first reads state stops its worker beh
   await waitOnRepo(h, () => !detachedAlive({ pid: spawned.monitor_pid }), 'supervisor kept waiting behind its gate');
   assert.equal(detachedAlive({ pid: spawned.pid }), false, 'the gate was stopped with its supervisor');
   assert.equal(h.readAttempts().length, 0, 'the worker never started');
-  const tasks = JSON.parse(fs.readFileSync(path.join(h.state, 'tasks.json'), 'utf8')).tasks;
+  const tasks = JSON.parse(StateFiles.docText(h.state, 'tasks.json')).tasks;
   assert.equal(tasks.find((task) => task.id === 'T1').claim, null, 'no lease was taken');
 });
 
@@ -676,7 +677,7 @@ test('a worker without the lease gate whose supervisor stops waiting for its lea
   let result;
   try {
     await waitOnRepo(h, () => fs.existsSync(paused), 'dispatch did not pause before launching its worker');
-    const claim = JSON.parse(fs.readFileSync(path.join(h.state, 'tasks.json'), 'utf8')).tasks.find((task) => task.id === 'T1').claim;
+    const claim = JSON.parse(StateFiles.docText(h.state, 'tasks.json')).tasks.find((task) => task.id === 'T1').claim;
     assert.match(claim?.agent || '', /^worker-T1-/, 'the lease is on disk while the supervisor waits');
     assert.equal(h.readAttempts().length, 0, 'no harness runs before go');
     // The supervisor's wait for go closes while the paused dispatch holds the state lock.
@@ -688,7 +689,7 @@ test('a worker without the lease gate whose supervisor stops waiting for its lea
   assert.notEqual(result.code, 0, result.stderr);
   assert.match(result.stderr, /did not start: no lease: it was not recorded within 10 s/);
   assert.equal(h.readAttempts().length, 0, 'the worker never started');
-  const task = JSON.parse(fs.readFileSync(path.join(h.state, 'tasks.json'), 'utf8')).tasks.find((x) => x.id === 'T1');
+  const task = JSON.parse(StateFiles.docText(h.state, 'tasks.json')).tasks.find((x) => x.id === 'T1');
   assert.equal(task.claim, null, 'the lease is rolled back');
   assert.equal(task.status, 'todo');
   assert.equal(task.branch, null, 'the rest of the failed spawn is not recorded either');

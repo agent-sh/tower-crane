@@ -1,6 +1,7 @@
 'use strict';
 
 const { fileWritten } = require('./signals');
+const StateFiles = require('./state-files');
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -13,7 +14,7 @@ const SHORT_WAIT = path.join(__dirname, 'fixtures', 'lock-wait.js');
 const S = require('../lib/state');
 const B = require('../lib/broker');
 
-const events = (h) => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+const events = (h) => StateFiles.logText(h.state).trim().split('\n').map((l) => JSON.parse(l));
 
 for (const kind of ['stale', 'empty']) {
   test(`continuous ${kind} lock reclaims respect the deadline and backoff`, (t) => {

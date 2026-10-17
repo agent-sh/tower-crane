@@ -1,6 +1,7 @@
 'use strict';
 
 const test = require('node:test');
+const StateFiles = require('./state-files');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -442,7 +443,7 @@ test('TOWER_CRANE_VIA=automation in the environment cannot write under another s
   const holder = { env: { TOWER_CRANE_AGENT: 'orchestrator', CLAUDE_SESSION_ID: 'holder' } };
   h.ok(['task', 'add', '--title', 'Held', '--acceptance', 'one writer'], holder);
   const before = h.readState('tasks.json');
-  const events = () => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8');
+  const events = () => StateFiles.logText(h.state);
   const log = events();
   for (const [label, extra, input] of [
     ['claim alone', {}],
@@ -472,12 +473,12 @@ test('a key line longer than any key is refused, not dropped into the command in
   const h = makeProjectRepo(t);
   const holder = { env: { TOWER_CRANE_AGENT: 'orchestrator', CLAUDE_SESSION_ID: 'holder' } };
   h.ok(['task', 'add', '--title', 'Held', '--acceptance', 'one writer'], holder);
-  const log = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8');
+  const log = StateFiles.logText(h.state);
   const long = h.run(['task', 'note', 'T1', 'from a long line'], { input: `${'a'.repeat(300)}\n`,
     env: { ...holder.env, TOWER_CRANE_VIA: 'automation', TOWER_CRANE_AUTOMATION_KEY_FD: '0' } });
   assert.equal(long.code, 1, long.stderr);
   assert.match(long.stderr, /automation key line on descriptor 0 is longer than 256 bytes/);
-  assert.equal(fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8'), log);
+  assert.equal(StateFiles.logText(h.state), log);
 });
 
 // script gives the CLI a terminal on stdin; the open pipe to script means no

@@ -1,6 +1,7 @@
 'use strict';
 
 const { test } = require('node:test');
+const StateFiles = require('./state-files');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -9,7 +10,7 @@ const { waitOnRepo } = require('./signals');
 const { readPublished } = require('./atomic-file');
 
 const events = (h) => {
-  const text = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8');
+  const text = StateFiles.logText(h.state);
   return text.slice(0, text.lastIndexOf('\n') + 1).split('\n').filter(Boolean).map(JSON.parse);
 };
 const fixture = path.join(__dirname, 'fixtures', 'fallback-harness.js').replace(/\\/g, '/');

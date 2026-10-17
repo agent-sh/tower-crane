@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { shellQuote } = require('../lib/gates/common');
 const { TMP_ROOT } = require('./helpers');
+const StateFiles = require('./state-files');
 
 let gateRepoSeed;
 
@@ -187,7 +188,7 @@ function changeKind(h, kind) {
 // Appends the restore event gates retry --from-rework records, retiring
 // revision `from`, so a test can check that the next bump skips it.
 function retireRevision(h, id, from) {
-  fs.appendFileSync(path.join(h.state, 'events.jsonl'), `${JSON.stringify({ at: new Date().toISOString(), agent: 'orchestrator',
+  StateFiles.appendLog(h.state, `${JSON.stringify({ at: new Date().toISOString(), agent: 'orchestrator',
     cmd: 'restore', task: id, detail: { from_revision: from, revision: from - 1 }, id: `E${require('node:crypto').randomUUID()}`,
     type: 'restore', to: 'orchestrator' })}\n`);
 }

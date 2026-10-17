@@ -1,6 +1,7 @@
 'use strict';
 
 const { fileWritten, waitOnRepo, killGroup } = require('./signals');
+const StateFiles = require('./state-files');
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -97,7 +98,7 @@ test('the dead-agent sweep removes orphan brokers and keeps live claims, process
     ['worker-live-monitor', { pid: 2147483647, ...identity, monitor_pid: process.pid, monitor_start_ticks: identity.start_ticks }],
     ['worker-unknown-process', { pid: process.pid, host: 'another-host' }],
   ]) {
-    fs.appendFileSync(path.join(h.state, 'events.jsonl'), JSON.stringify({
+    StateFiles.appendLog(h.state, JSON.stringify({
       at: new Date().toISOString(), cmd: 'spawn', agent: 'owner', task: 'T2', detail: { agent, role: 'worker', ...processInfo },
     }) + '\n');
   }
@@ -116,7 +117,7 @@ test('the dead-agent sweep removes orphan brokers and keeps live claims, process
     plant('worker-group-left', { socket });
     fs.mkdirSync(path.join(h.state, 'homes', 'worker-group-left'), { recursive: true });
     fs.writeFileSync(path.join(h.state, 'homes', 'worker-group-left', 'note'), 'the agent\'s');
-    fs.appendFileSync(path.join(h.state, 'events.jsonl'), JSON.stringify({
+    StateFiles.appendLog(h.state, JSON.stringify({
       at: new Date().toISOString(), cmd: 'spawn', agent: 'owner', task: 'T2',
       detail: { agent: 'worker-group-left', role: 'worker', pid: leader.pid, host: require('node:os').hostname() },
     }) + '\n');
@@ -129,7 +130,7 @@ test('the dead-agent sweep removes orphan brokers and keeps live claims, process
     t.after(() => { try { killGroup(later.pid, 'SIGKILL'); } catch {} });
     plant('worker-group-reused', { socket });
     fs.mkdirSync(path.join(h.state, 'homes', 'worker-group-reused'), { recursive: true });
-    fs.appendFileSync(path.join(h.state, 'events.jsonl'), JSON.stringify({
+    StateFiles.appendLog(h.state, JSON.stringify({
       at: new Date().toISOString(), cmd: 'spawn', agent: 'owner', task: 'T2',
       detail: { agent: 'worker-group-reused', role: 'worker', pid: later.pid, host: require('node:os').hostname(), start_ticks: '1' },
     }) + '\n');
@@ -151,7 +152,7 @@ test('the dead-agent sweep removes orphan brokers and keeps live claims, process
     plant('worker-setsid-left', { socket });
     fs.mkdirSync(path.join(h.state, 'homes', 'worker-setsid-left'), { recursive: true });
     fs.writeFileSync(path.join(h.state, 'homes', 'worker-setsid-left', 'note'), 'the agent\'s');
-    fs.appendFileSync(path.join(h.state, 'events.jsonl'), JSON.stringify({
+    StateFiles.appendLog(h.state, JSON.stringify({
       at: new Date().toISOString(), cmd: 'spawn', agent: 'owner', task: 'T2',
       detail: { agent: 'worker-setsid-left', role: 'worker', pid: leader.pid, host: require('node:os').hostname(), run_mark: mark },
     }) + '\n');
@@ -203,7 +204,7 @@ for (const harness of ['claude', 'codex', 'opencode', 'agy', 'pi']) {
         HOOK_USAGE_FILE: path.join(__dirname, 'fixtures', 'usage', 'codex-stream.jsonl') },
     });
     assert.equal(out.code, 0);
-    const event = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n')
+    const event = StateFiles.logText(h.state).trim().split('\n')
       .map(JSON.parse).find(e => e.cmd === 'spawn');
     assert.equal(event.detail.harness, harness);
     assert.equal(event.detail.route.model, model);
@@ -233,7 +234,7 @@ test('design tasks dispatch without a kit on unsupported worker, review and smal
   assert.match(started.browser_kit.warning, /command.*without it/);
   const recorded = h.readState('tasks.json');
   assert.equal(recorded.tasks[0].kind, 'design');
-  const event = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse).find((e) => e.cmd === 'spawn');
+  const event = StateFiles.logText(h.state).trim().split('\n').map(JSON.parse).find((e) => e.cmd === 'spawn');
   assert.deepEqual(event.detail.browser_kit, started.browser_kit);
 });
 
@@ -602,7 +603,7 @@ process.exit(r.status === null ? 1 : r.status);
     stderr: 'tower-crane: no agent: pass --agent NAME or set TOWER_CRANE_AGENT\n',
   });
   assert.deepEqual(h.readState('tasks.json').tasks[0].evidence, []);
-  const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map((line) => JSON.parse(line));
+  const events = StateFiles.logText(h.state).trim().split('\n').map((line) => JSON.parse(line));
   assert.ok(!events.some((e) => e.cmd === 'evidence'));
 });
 
@@ -635,7 +636,7 @@ process.exit(r.code === null ? 99 : r.code);
   const task = h.readState('tasks.json').tasks[1];
   assert.equal(task.needs_owner, 'approve access');
   assert.deepEqual(task.notes, []);
-  const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map((line) => JSON.parse(line));
+  const events = StateFiles.logText(h.state).trim().split('\n').map((line) => JSON.parse(line));
   assert.ok(!events.some((e) => e.cmd === 'owner-done'));
 });
 
@@ -697,7 +698,7 @@ test('spawn --wait runs the command rung in the task worktree with the tower-cra
   assert.ok(!fs.existsSync(seen.brief), 'the temporary brief copy is removed after exit');
   assert.match(seen.prompt, /^P:## Goal\n[\s\S]*\n- start from the webhook handler/);
   assert.deepEqual([real(seen.env.s), seen.env.t, seen.env.a], [real(h.state), 'T1', 'worker-T1-1']);
-  const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+  const events = StateFiles.logText(h.state).trim().split('\n').map((l) => JSON.parse(l));
   const spawnEv = events.find((e) => e.cmd === 'spawn');
   assert.equal(spawnEv.detail.agent, 'worker-T1-1');
   assert.equal(spawnEv.detail.rung, 'medium');
@@ -933,15 +934,15 @@ test('background spawn refuses a log name held by a link or a directory without 
       fs.mkdirSync(log);
       fs.writeFileSync(path.join(log, 'kept'), 'preserve this log\n');
     }
-    const tasks = fs.readFileSync(path.join(h.state, 'tasks.json'), 'utf8');
-    const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8');
+    const tasks = StateFiles.docText(h.state, 'tasks.json');
+    const events = StateFiles.logText(h.state);
     const result = h.run(['spawn', '--role', 'small', '--task', 'T1', '--json']);
     assert.notEqual(result.code, 0, result.stdout);
     assert.match(result.stderr, /log already exists/);
     assert.equal(fs.readFileSync(target, 'utf8'), 'preserve this file\n');
     assert.equal(fs.readFileSync(linked ? log : path.join(log, 'kept'), 'utf8'), linked ? 'preserve this file\n' : 'preserve this log\n');
-    assert.equal(fs.readFileSync(path.join(h.state, 'tasks.json'), 'utf8'), tasks);
-    assert.equal(fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8'), events);
+    assert.equal(StateFiles.docText(h.state, 'tasks.json'), tasks);
+    assert.equal(StateFiles.logText(h.state), events);
   }
 });
 
@@ -1183,7 +1184,7 @@ test('spawn runs the rung of the tier and ladder it finds under the lock, not th
   assert.equal(r.code, 0, r.stderr);
   assert.equal(fs.readFileSync(out, 'utf8'), 'hard, changed');
   assert.equal(JSON.parse(r.stdout).rung, 'hard');
-  const ev = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l)).find((e) => e.cmd === 'spawn');
+  const ev = StateFiles.logText(h.state).trim().split('\n').map((l) => JSON.parse(l)).find((e) => e.cmd === 'spawn');
   assert.deepEqual([ev.detail.rung, ev.detail.agent], ['hard', 'worker-T1-1']);
 
   // A rung that broke in the meantime is refused under the lock, and nothing
@@ -1200,7 +1201,7 @@ test('spawn runs the rung of the tier and ladder it finds under the lock, not th
   assert.equal(rb.code, 1);
   assert.match(rb.stderr, /could not start .*no-such-program: no executable file by that name; install it, or fix the rung with tower-crane ladder set hard/);
   assert.ok(!fs.existsSync(out));
-  const spawns = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l)).filter((e) => e.cmd === 'spawn');
+  const spawns = StateFiles.logText(h.state).trim().split('\n').map((l) => JSON.parse(l)).filter((e) => e.cmd === 'spawn');
   assert.equal(spawns.length, 1);
 });
 
@@ -1255,11 +1256,11 @@ test('a worker spawn in a repository without origin is refused before its worktr
   const marker = path.join(h.base, 'harness-started');
   commandRung(h, 'medium', [process.execPath, '-e', `require('node:fs').writeFileSync(${JSON.stringify(marker)}, '')`]);
   h.git(['remote', 'remove', 'origin']);
-  const before = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8');
+  const before = StateFiles.logText(h.state);
   const r = h.run(['spawn', '--task', 'T1']);
   assert.equal(r.code, 1, r.stdout);
   assert.match(r.stderr, /this repository has no origin remote; workers push their task branch to origin and open the PR there\. Add it with git remote add origin URL, then spawn again/);
-  assert.equal(fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8'), before, 'no state was written');
+  assert.equal(StateFiles.logText(h.state), before, 'no state was written');
   assert.equal(h.readState('tasks.json').tasks[0].worktree, undefined);
   assert.ok(!fs.existsSync(marker), 'the harness did not start');
   assert.equal(h.git(['worktree', 'list', '--porcelain']).split('\n').filter((l) => l.startsWith('worktree ')).length, 1);

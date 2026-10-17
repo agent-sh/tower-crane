@@ -1,6 +1,7 @@
 'use strict';
 
 const test = require('node:test');
+const StateFiles = require('./state-files');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -25,8 +26,8 @@ const ALL = ['tests', 'clean', 'ci'];
 
 test('manual software evidence is refused for either verdict and every agent without writing state', (t) => {
   const h = setup(t);
-  const before = fs.readFileSync(path.join(h.state, 'tasks.json'), 'utf8');
-  const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8');
+  const before = StateFiles.docText(h.state, 'tasks.json');
+  const events = StateFiles.logText(h.state);
   // Every type and agent, alternating the verdict and an explicit sha.
   for (const [i, type] of ['tests', 'clean', 'ci', 'merge'].entries()) {
     for (const [j, agent] of ['worker', 'reviewer', 'owner'].entries()) {
@@ -37,8 +38,8 @@ test('manual software evidence is refused for either verdict and every agent wit
       assert.match(r.stderr, /only tower-crane (check|merge)/);
     }
   }
-  assert.equal(fs.readFileSync(path.join(h.state, 'tasks.json'), 'utf8'), before);
-  assert.equal(fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8'), events);
+  assert.equal(StateFiles.docText(h.state, 'tasks.json'), before);
+  assert.equal(StateFiles.logText(h.state), events);
   h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'note', '--ok', '--agent', 'worker']);
 });
 
@@ -227,7 +228,7 @@ test('real gate commands record their source and executed commands, including me
   assert.ok(ci.some((c) => c.command === 'gh' && c.args[1].includes('/check-runs')));
   const merge = evidence.find((e) => e.type === 'merge').commands;
   assert.ok(merge.some((c) => c.command === 'gh' && c.args.includes('--match-head-commit') && c.args.includes(h.env.FIXTURE_SHA)));
-  const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  const events = StateFiles.logText(h.state).trim().split('\n').map(JSON.parse);
   for (const e of evidence.filter((e) => e.source)) {
     const event = events.find((event) => event.cmd === e.source);
     assert.equal(event.task, 'T1');

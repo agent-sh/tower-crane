@@ -136,7 +136,7 @@ if (path.resolve(process.argv[1] || '') !== __filename) {
   if (!attempts.length) cli(['claim', process.env.TOWER_CRANE_TASK]);
   // Claim assertions need the real record, without another CLI per attempt.
   const claim = providerTest
-    ? JSON.parse(fs.readFileSync(path.join(process.env.TOWER_CRANE_STATE, 'tasks.json'), 'utf8'))
+    ? require('../state-files').readDoc(process.env.TOWER_CRANE_STATE, 'tasks.json')
       .tasks.find((task) => task.id === process.env.TOWER_CRANE_TASK).claim
     : JSON.parse(cli(['task', 'show', process.env.TOWER_CRANE_TASK, '--json'])).claim;
   const claudeHome = process.env.CLAUDE_CONFIG_DIR;

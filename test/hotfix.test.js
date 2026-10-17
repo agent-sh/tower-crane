@@ -1,6 +1,7 @@
 'use strict';
 
 const test = require('node:test');
+const StateFiles = require('./state-files');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -75,7 +76,7 @@ if (args[0] === 'pr') {
 }
 
 const record = (h, opts) => h.json(['hotfix', 'T1', '--pr', '42', '--sha', h.sha], opts);
-const events = (h) => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+const events = (h) => StateFiles.logText(h.state).trim().split('\n').map(JSON.parse);
 const task = (h, id = 'T1') => h.readState('tasks.json').tasks.find((t) => t.id === id);
 const verdict = (h, ok, agent = 'independent') => {
   h.reviewer('T1', agent);
@@ -169,7 +170,7 @@ test('accept runs missing software gates and dispatches one normal reviewer at t
   assert.match(packet, /## Diff[\s\S]*module.exports = 1/);
   assert.match(packet, new RegExp(`Base: ${h.base_sha}`));
   assert.equal(task(h).status, 'submitted');
-  const cursor = String(fs.statSync(path.join(h.state, 'events.jsonl')).size);
+  const cursor = String(StateFiles.logEnd(h.state));
   h.ok(['evidence', 'T1', '--type', 'review', '--ok', '--sha', h.sha, '--agent', r.reviewer]);
   h.ok(['wait', '--task', 'T1', '--types', 'accepted', '--after', cursor, '--timeout', '300']);
   assert.equal(task(h).status, 'accepted');

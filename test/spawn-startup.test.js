@@ -4,6 +4,7 @@
 // supervisor's own start from waiting on the agent's git shims.
 
 const test = require('node:test');
+const StateFiles = require('./state-files');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -272,7 +273,7 @@ for (const [role, hooks] of [['small', {}], ['worker', { HOOK_NO_SH: '1' }]]) {
     pinRung(h, rung, { harness: 'command', command: [process.execPath, '-e', 'process.exit(0)', '{prompt}'] });
     const started = h.run(['spawn', ...(role === 'small' ? ['--role', 'small'] : []), '--task', 'T1', '--wait', '--json'], { hooks });
     assert.equal(started.code, 0, started.stderr);
-    const event = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse)
+    const event = StateFiles.logText(h.state).trim().split('\n').map(JSON.parse)
       .find((e) => e.cmd === 'spawn' && e.detail.role === role);
     const phases = event.detail.startup_ms;
     t.diagnostic(`${process.platform} ${role} startup_ms ${JSON.stringify(phases)}`);

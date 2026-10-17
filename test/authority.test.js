@@ -1,6 +1,7 @@
 'use strict';
 
 const test = require('node:test');
+const StateFiles = require('./state-files');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -9,7 +10,7 @@ const { gateFixture } = require('./gate-helpers');
 const A = require('../lib/agents');
 const L = require('../lib/ladder');
 
-const events = (h) => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+const events = (h) => StateFiles.logText(h.state).trim().split('\n').map(JSON.parse);
 const as = (agent) => ({ env: { TOWER_CRANE_AGENT: agent } });
 
 // Refused settings can renew the session heartbeat without changing tasks.
@@ -21,7 +22,7 @@ function tasks(h) {
 
 // A spawn record as spawn writes it, so an agent name has a recorded role.
 function recordSpawn(h, agent, role) {
-  fs.appendFileSync(path.join(h.state, 'events.jsonl'), `${JSON.stringify({
+  StateFiles.appendLog(h.state, `${JSON.stringify({
     at: new Date().toISOString(), agent: 'owner', cmd: 'spawn', task: 'T1', detail: { agent, role, rung: role === 'orchestrator' ? 'orchestrator' : 'hard', pid: 1 },
   })}\n`);
 }

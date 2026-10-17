@@ -1,6 +1,7 @@
 'use strict';
 
 const test = require('node:test');
+const StateFiles = require('./state-files');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -69,7 +70,7 @@ test('a claude spawn imports the user rules and the repository chain by path, an
     [path.join(rel, 'CLAUDE.md'), 'project', 'harness'],
     [path.join(rel, 'docs', 'extra.md'), 'import', 'harness'],
   ];
-  const startup = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse).filter((e) => e.cmd === 'startup');
+  const startup = StateFiles.logText(h.state).trim().split('\n').map(JSON.parse).filter((e) => e.cmd === 'startup');
   assert.equal(startup.length, 1, 'one startup receipt');
   assert.deepEqual(ours(h, startup[0].detail.rules), expected);
   assert.equal(startup[0].detail.goal, 'prove the engine');
@@ -96,7 +97,7 @@ test('a codex spawn is told to read the rules its harness does not load, and its
   const seen = report();
   const wt = JSON.parse(r.stdout).cwd;
   const rel = path.relative(h.base, wt);
-  const startup = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse).find((e) => e.cmd === 'startup');
+  const startup = StateFiles.logText(h.state).trim().split('\n').map(JSON.parse).find((e) => e.cmd === 'startup');
   assert.deepEqual(ours(h, startup.detail.rules), [
     [path.join('home', '.codex', 'AGENTS.md'), 'global', 'read'],
     ['AGENTS.md', 'project', 'read'],
@@ -146,7 +147,7 @@ for (const harness of ['opencode', 'pi']) {
       assert.ok(prompt.includes(`- ${file} (global, read it)`), file);
     }
     h.json(['spawn', '--role', 'small', '--task', 'T1', '--wait'], { env });
-    const receipt = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse).find((e) => e.cmd === 'startup').detail;
+    const receipt = StateFiles.logText(h.state).trim().split('\n').map(JSON.parse).find((e) => e.cmd === 'startup').detail;
     for (const file of globals) {
       assert.ok(receipt.rules.some((f) => f.path === file && f.loaded === 'read'));
       assert.ok(report().prompt.includes(`- ${file} (global, read it)`));
@@ -218,7 +219,7 @@ test('codex prefers AGENTS.override.md in each directory and receipts match what
   h.git(['commit', '-q', '-m', 'override']);
   rung(h, 'codex');
   const r = h.json(['spawn', '--role', 'small', '--task', 'T1', '--wait'], { env });
-  const rules = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse).find((e) => e.cmd === 'startup').detail.rules;
+  const rules = StateFiles.logText(h.state).trim().split('\n').map(JSON.parse).find((e) => e.cmd === 'startup').detail.rules;
   for (const [dir, loaded] of [[path.join(home, '.codex'), 'read'], [h.base, 'read'], [r.cwd, 'harness']]) {
     assert.ok(rules.some((f) => f.path === path.join(dir, 'AGENTS.override.md') && f.loaded === loaded), dir);
     assert.ok(!rules.some((f) => f.path === path.join(dir, 'AGENTS.md')), dir);
@@ -235,7 +236,7 @@ test('claude imports rule paths with spaces and follows quoted and escaped neste
   fs.writeFileSync(path.join(dir, 'escaped rules.md'), 'ESCAPED-SPACES\n');
   rung(h, 'claude');
   h.json(['spawn', '--role', 'small', '--task', 'T1', '--wait'], { env: { ...env, CLAUDE_CONFIG_DIR: dir } });
-  const startup = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse).find((e) => e.cmd === 'startup').detail;
+  const startup = StateFiles.logText(h.state).trim().split('\n').map(JSON.parse).find((e) => e.cmd === 'startup').detail;
   for (const name of ['CLAUDE.md', 'quoted rules.md', 'escaped rules.md']) assert.ok(startup.rules.some((f) => f.path === path.join(dir, name) && f.loaded === 'harness'), name);
   for (const text of ['GLOBAL-SPACES', 'QUOTED-SPACES', 'ESCAPED-SPACES']) assert.ok(report().memory.join('\n').includes(text), text);
 });
@@ -252,7 +253,7 @@ test('claude imports tab-bearing rule paths and its receipt matches the loaded m
   fs.writeFileSync(shared, 'SHARED-TABS\n');
   rung(h, 'claude');
   h.json(['spawn', '--role', 'small', '--task', 'T1', '--wait'], { env: { ...env, CLAUDE_CONFIG_DIR: dir } });
-  const receipt = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse).find((e) => e.cmd === 'startup').detail;
+  const receipt = StateFiles.logText(h.state).trim().split('\n').map(JSON.parse).find((e) => e.cmd === 'startup').detail;
   const seen = report();
   for (const file of [global, nested, shared]) {
     assert.ok(receipt.rules.some((f) => f.path === file && f.loaded === 'harness'), file);
@@ -269,7 +270,7 @@ test('claude receipts account for the generated home import when applying the fi
   h.git(['commit', '-q', '-m', 'deep imports']);
   rung(h, 'claude');
   const r = h.json(['spawn', '--role', 'small', '--task', 'T1', '--wait'], { env });
-  const rules = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse).find((e) => e.cmd === 'startup').detail.rules;
+  const rules = StateFiles.logText(h.state).trim().split('\n').map(JSON.parse).find((e) => e.cmd === 'startup').detail.rules;
   const deepest = path.join(r.cwd, 'docs', 'depth5.md');
   assert.ok(rules.some((f) => f.path === deepest && f.loaded === 'read'));
   assert.ok(report().prompt.includes(`- ${deepest} (import, read it)`));
@@ -285,7 +286,7 @@ test('claude marks a rule path that cannot fit on an import line for reading', {
   rung(h, 'claude');
   h.json(['spawn', '--role', 'small', '--task', 'T1', '--wait'], { env: { ...env, CLAUDE_CONFIG_DIR: dir } });
   const file = path.join(dir, 'CLAUDE.md');
-  const receipt = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse).find((e) => e.cmd === 'startup').detail;
+  const receipt = StateFiles.logText(h.state).trim().split('\n').map(JSON.parse).find((e) => e.cmd === 'startup').detail;
   assert.ok(receipt.rules.some((f) => f.path === file && f.loaded === 'read'));
   assert.ok(report().prompt.includes(`- ${file} (global, read it)`));
   assert.ok(!report().memory.join('\n').includes('READ-NEWLINE-RULE'));
@@ -315,7 +316,7 @@ test('a command adapter without an instruction placeholder is refused before sta
     assert.match(r.stderr, /command.*\{prompt\}.*\{brief\}.*house rules/, mode);
   }
   assert.ok(!fs.existsSync(marker), 'the adapter never starts');
-  const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  const events = StateFiles.logText(h.state).trim().split('\n').map(JSON.parse);
   assert.ok(!events.some((e) => e.cmd === 'startup' || e.cmd === 'spawn'), 'no receipt claims the rules were delivered');
 });
 
@@ -339,7 +340,7 @@ test('the scope gate flags submitted changes outside the paths the brief and acc
   const r = h.run(['submit', 'T1', '--sha', sha, '--agent', 'builder'], { cwd: wt });
   assert.equal(r.code, 0, r.stderr);
   assert.match(r.stdout, /scope: 2 changed files outside the paths the brief and acceptance name \(lib\/, docs\/guide\.md\): README\.md, other\/b\.js/);
-  const event = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse).findLast((e) => e.cmd === 'submit');
+  const event = StateFiles.logText(h.state).trim().split('\n').map(JSON.parse).findLast((e) => e.cmd === 'submit');
   assert.deepEqual(event.detail.scope, { basis: 'named', named: ['lib/', 'docs/guide.md'], outside: ['README.md', 'other/b.js'] });
   const task = h.readState('tasks.json').tasks[0];
   assert.ok(task.notes.some((n) => n.text.startsWith('scope: 2 changed files outside')), 'the orchestrator sees it in the task notes');

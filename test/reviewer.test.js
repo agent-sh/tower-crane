@@ -1,6 +1,7 @@
 'use strict';
 
 const { waitOnRepo } = require('./signals');
+const StateFiles = require('./state-files');
 
 const { test, describe } = require('node:test');
 const assert = require('node:assert/strict');
@@ -685,7 +686,7 @@ test('a rework review dispatch checks prior blockers and only the diff since the
   assert.match(sameHead, /## Review scope\n\nRe-review/);
   assert.ok(!sameHead.includes('diff --git'), 'a repeat review at the same sha has no new diff');
   const task = h.readState('tasks.json').tasks[0];
-  const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  const events = StateFiles.logText(h.state).trim().split('\n').map(JSON.parse);
   const recorded = events.findLast((e) => e.cmd === 'evidence' && e.detail.type === 'review');
   recorded.at = new Date(Date.parse(task.evidence.at(-1).at) + 1).toISOString();
   assert.equal(require('../lib/reviewer').reReview({ events }, task).sha, reviewedSha,
@@ -719,7 +720,7 @@ test('a rework review dispatch checks prior blockers and only the diff since the
   assert.ok(!packet.includes('UNTRUSTED_FINDING'));
   assert.equal(dispatched.review_scope.sha, reviewedSha);
   assert.equal(dispatched.review_scope.revision, Number(reviewedRevision));
-  const event = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse)
+  const event = StateFiles.logText(h.state).trim().split('\n').map(JSON.parse)
     .findLast((e) => e.cmd === 'spawn' && e.detail.role === 'reviewer');
   assert.deepEqual(event.detail.review_scope, dispatched.review_scope);
 });
@@ -814,7 +815,7 @@ process.exit(r.status ?? 1);`;
     commandReviewer(h, path.join(h.base, `fallback-${variant}.txt`));
     const dispatched = h.json(['spawn', '--task', 'T1', '--role', 'review', '--wait']);
     assert.equal(dispatched.review_rung, 'hard', variant);
-    const event = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse)
+    const event = StateFiles.logText(h.state).trim().split('\n').map(JSON.parse)
       .findLast((e) => e.cmd === 'spawn' && e.detail.role === 'reviewer');
     assert.equal(event.detail.review_scope, null, variant);
     assert.deepEqual(event.detail.review_floor, { sha: reviewedSha, revision: reviewedRevision, agent: 'reviewer-T1-1',
@@ -972,7 +973,7 @@ test('real Claude reviewers expose first-turn cache reads and writes across work
     assert.ok(result?.result?.includes('CACHE_PROBE_OK'), log.slice(-2000));
     const usage = result.usage;
     assert.ok(usage, 'Claude returned usage');
-    const startup = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse)
+    const startup = StateFiles.logText(h.state).trim().split('\n').map(JSON.parse)
       .findLast((e) => e.cmd === 'startup' && e.detail.agent === launch.agent);
     rows.push({ task, agent: launch.agent, system_bytes: startup.detail.system_bytes,
       model: result.modelUsage, usage, total_cost_usd: result.total_cost_usd });
@@ -1023,7 +1024,7 @@ test('review dispatch refuses a submitted head, configured base or review scope 
     const result = await running;
     assert.equal(result.code, 1, result.stderr);
     assert.match(result.stderr, /changed.*diff.*retry/i);
-    const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+    const events = StateFiles.logText(h.state).trim().split('\n').map(JSON.parse);
     assert.ok(!events.some((e) => e.cmd === 'spawn' && e.detail.agent !== 'first-reviewer'));
     assert.ok(!fs.existsSync(path.join(h.state, 'reviews')), 'a stale packet is never written');
   }
@@ -1038,7 +1039,7 @@ test('accept runs tests, clean and CI before dispatch, then automation accepts a
   assert.equal(result.status, 'submitted');
   assert.equal(result.review_pending, true);
   await waitOnRepo(h, () => h.readState('tasks.json').tasks[0].status === 'accepted');
-  const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  const events = StateFiles.logText(h.state).trim().split('\n').map(JSON.parse);
   const dispatch = events.findIndex((e) => e.cmd === 'spawn' && e.detail.role === 'reviewer');
   for (const type of ['tests', 'clean', 'ci']) assert.ok(events.findIndex((e) => e.cmd === `check ${type}` && e.detail.ok) < dispatch);
   assert.match(fs.readFileSync(out, 'utf8'), /Gate results/);
@@ -1056,7 +1057,7 @@ test('a failed automatic gate never starts a reviewer', (t) => {
   const failed = h.run(['accept', 'T1', '--cmd', 'node -e "process.exit(1)"']);
   assert.equal(failed.code, 1);
   assert.ok(!fs.existsSync(out));
-  assert.ok(!fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').includes('"cmd":"spawn"'));
+  assert.ok(!StateFiles.logText(h.state).includes('"cmd":"spawn"'));
   assert.equal(h.readState('tasks.json').tasks[0].evidence[0].type, 'tests');
 });
 

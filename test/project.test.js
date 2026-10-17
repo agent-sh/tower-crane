@@ -1,6 +1,7 @@
 'use strict';
 
 const test = require('node:test');
+const StateFiles = require('./state-files');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -34,7 +35,7 @@ test('project set stores, replaces and clears test paths and ignored CI apps', (
   assert.deepEqual(set, { ...original, tests: { paths }, ci: { ignore_apps: apps } });
   assert.deepEqual(h.json(['project', 'show']), set);
   assert.deepEqual(h.readState('project.json'), set);
-  const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  const events = StateFiles.logText(h.state).trim().split('\n').map(JSON.parse);
   assert.equal(events.at(-1).cmd, 'project set');
   assert.equal(events.at(-1).agent, 'owner');
   assert.deepEqual(events.at(-1).detail, { 'tests-paths': JSON.stringify(paths), 'ci-ignore-apps': JSON.stringify(apps) });
@@ -124,7 +125,7 @@ test('required CI names and prefixes are stored, printed, replaced and cleared t
   const set = h.json(['project', 'set', '--ci-required', '["test (windows-latest, node 24)"]']);
   assert.deepEqual(set.ci, { required: ['test (windows-latest, node 24)'], ignore_apps: ['claude'] });
   assert.deepEqual(h.readState('project.json'), set);
-  const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  const events = StateFiles.logText(h.state).trim().split('\n').map(JSON.parse);
   assert.deepEqual(events.at(-1).detail, { 'ci-required': '["test (windows-latest, node 24)"]' });
   assert.deepEqual(h.json(['project', 'set', '--ci-required', '[]']).ci, { required: [], ignore_apps: ['claude'] });
   assert.deepEqual(h.json(['project', 'set', '--ci-required', 'null']).ci, { ignore_apps: ['claude'] });
@@ -141,7 +142,7 @@ test('tests.keep is configured through init and project set without replacing te
   const set = h.json(['project', 'set', '--tests-keep', '["setup.py"]']);
   assert.deepEqual(set.tests, { paths: ['qa/'], keep: ['setup.py'] });
   assert.deepEqual(h.readState('project.json').tests, set.tests);
-  const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  const events = StateFiles.logText(h.state).trim().split('\n').map(JSON.parse);
   assert.deepEqual(events.at(-1).detail, { 'tests-keep': '["setup.py"]' });
   assert.deepEqual(h.json(['project', 'set', '--tests-paths', 'null']).tests, { keep: ['setup.py'] });
   assert.deepEqual(h.json(['project', 'set', '--tests-keep', '[]']).tests, { keep: [] });
@@ -242,7 +243,7 @@ test('test modes, kind overrides and expensive suites can be set, replaced and c
   const set = h.json(['project', 'set', '--tests-mode', 'prove', '--tests-by-kind', '{"code":"run-only"}', '--tests-expensive', 'false']);
   assert.deepEqual(set.tests, { mode: 'prove', by_kind: { code: 'run-only' }, expensive: false, keep: ['Makefile'] });
   assert.deepEqual(h.readState('project.json'), set);
-  const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  const events = StateFiles.logText(h.state).trim().split('\n').map(JSON.parse);
   assert.deepEqual(events.at(-1).detail, {
     'tests-mode': 'prove', 'tests-by-kind': '{"code":"run-only"}', 'tests-expensive': 'false',
   });

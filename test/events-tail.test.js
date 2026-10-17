@@ -1,6 +1,7 @@
 'use strict';
 
 const test = require('node:test');
+const StateFiles = require('./state-files');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -366,7 +367,7 @@ function appendAfterRestore(h, behind) {
   const ids = [];
   for (const pre of [...(behind ? [['--require', clockBehind]] : []), []]) {
     h.ok(['msg', '--to', 'orchestrator', 'after restore'], { pre, env: { CLOCK_BEHIND_MS: '600000' } });
-    ids.push(JSON.parse(fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trimEnd().split('\n').at(-1)));
+    ids.push(JSON.parse(StateFiles.logText(h.state).trimEnd().split('\n').at(-1)));
   }
   if (behind) assert.ok(Date.parse(ids[1].at) - Date.parse(ids[0].at) > 300000, 'the first writer\'s clock must be behind');
   return ids.map((e) => e.id);
@@ -485,7 +486,7 @@ test('an event reader that read a torn commit resumes where recovery cut it and 
   assert.deepEqual(batch.rows.map((e) => e.detail.text), [LONG]);
   assert.equal(batch.cut, size);
   assert.equal(batch.reset, false);
-  assert.equal(reader.offset, fs.statSync(path.join(h.state, 'events.jsonl')).size);
+  assert.equal(reader.offset, StateFiles.logEnd(h.state));
 });
 
 test('a wait cursor inside bytes recovery cut off reads the events appended since', (t) => {
@@ -605,7 +606,7 @@ const recover = (h) => S.withLock(h.state, () => {});
 // ended before recovery cut it off.
 function sameEnd(h, first) {
   const line = { ...first, id: `E${require('node:crypto').randomUUID()}` };
-  fs.appendFileSync(path.join(h.state, 'events.jsonl'), `${JSON.stringify(line)}\n`);
+  StateFiles.appendLog(h.state, `${JSON.stringify(line)}\n`);
   return line.id;
 }
 

@@ -1,6 +1,7 @@
 'use strict';
 
 const { waitOnRepo } = require('./signals');
+const StateFiles = require('./state-files');
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -38,7 +39,7 @@ function silentReviewer(h) {
 
 // A detached monitor may be mid-append; its line is whole on the next read.
 const events = (h) => {
-  const text = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8');
+  const text = StateFiles.logText(h.state);
   return text.slice(0, text.lastIndexOf('\n') + 1).trim().split('\n').map(JSON.parse);
 };
 const reviewerSpawns = (h) => events(h).filter((e) => e.cmd === 'spawn' && e.task === 'T1' && e.detail.role === 'reviewer');
@@ -137,7 +138,7 @@ test('an accepted task keeps its acceptance, dependencies and kind until it is s
   h.ok(['accept', 'T1']);
   h.ok(['task', 'add', '--title', 'Uses the change', '--acceptance', 'b', '--dep', 'T1']);
   h.ok(['task', 'add', '--title', 'Unrelated', '--acceptance', 'c']);
-  const before = fs.readFileSync(path.join(h.state, 'tasks.json'), 'utf8');
+  const before = StateFiles.docText(h.state, 'tasks.json');
   for (const [flags, what] of [
     [['--acceptance', 'a new unmet criterion'], 'acceptance'],
     [['--dep', 'T3'], 'dependencies'],
@@ -149,7 +150,7 @@ test('an accepted task keeps its acceptance, dependencies and kind until it is s
   const kind = h.run(['task', 'update', 'T1', '--kind', 'docs']);
   assert.equal(kind.code, 1, kind.stderr);
   assert.match(kind.stderr, /on a submitted or accepted task is refused; rework the task first/);
-  assert.equal(fs.readFileSync(path.join(h.state, 'tasks.json'), 'utf8'), before, 'a refused update writes nothing');
+  assert.equal(StateFiles.docText(h.state, 'tasks.json'), before, 'a refused update writes nothing');
   const t1 = h.json(['task', 'show', 'T1']);
   assert.deepEqual([t1.status, t1.revision, t1.gates.ok], ['accepted', 1, true]);
 
@@ -200,7 +201,7 @@ test('review evidence counts only from a reviewer spawned for that head and revi
   h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--ok', '--sha', h.sha, '--agent', 'r-other-sha']);
   const worker = { at: new Date().toISOString(), agent: 'orchestrator', cmd: 'spawn', task: 'T1',
     detail: { agent: 'worker-T1-9', role: 'worker', sha: h.sha, revision: 1, pid: 999999, attempt: 1 } };
-  fs.appendFileSync(path.join(h.state, 'events.jsonl'), `${JSON.stringify(worker)}\n`);
+  StateFiles.appendLog(h.state, `${JSON.stringify(worker)}\n`);
   h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--ok', '--sha', h.sha, '--agent', 'worker-T1-9']);
   assert.match(h.json(['task', 'show', 'T1']).gates.missing.join('; '), /review by made-up-reviewer, r-other-sha, worker-T1-9 does not count/);
 
@@ -250,7 +251,7 @@ function reviewerDown(h) {
   const { revision } = h.readState('tasks.json').tasks[0];
   const at = new Date().toISOString();
   const detail = { agent: 'r-9', role: 'reviewer', rung: 'review', sha: h.sha, revision, pid: 999999, attempt: 1 };
-  fs.appendFileSync(path.join(h.state, 'events.jsonl'), [
+  StateFiles.appendLog(h.state, [
     { at, agent: 'orchestrator', cmd: 'spawn', task: 'T1', detail },
     { at, agent: 'orchestrator', cmd: 'spawn exit', task: 'T1', detail: { agent: 'r-9', pid: 999999, attempt: 1, code: 1 } },
   ].map((e) => `${JSON.stringify(e)}\n`).join(''));

@@ -1,6 +1,7 @@
 'use strict';
 
 const test = require('node:test');
+const StateFiles = require('./state-files');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -503,7 +504,7 @@ test('failed orphan removal clears its reservation and allows later adoption', (
   const result = h.json(['worktree', 'prune', '--orphans']);
   assert.equal(result.outcomes[0].removed, false);
   assert.match(result.outcomes[0].reason, /locked/);
-  const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  const events = StateFiles.logText(h.state).trim().split('\n').map(JSON.parse);
   const reserved = events.findLast((e) => e.cmd === 'worktree orphan retiring');
   assert.equal(reserved?.detail.path, wt.path);
   assert.equal(reserved?.detail.branch, wt.branch);

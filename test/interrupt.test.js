@@ -1,6 +1,7 @@
 'use strict';
 
 const { waitOnRepo, killPid } = require('./signals');
+const StateFiles = require('./state-files');
 const { readPublished } = require('./atomic-file');
 
 const test = require('node:test');
@@ -10,7 +11,7 @@ const path = require('node:path');
 const { makeRepo, BIN, detachedAlive } = require('./helpers');
 
 // Pollers can read while a writer is appending the final record.
-const events = (h) => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').split('\n').slice(0, -1).filter(Boolean).map(JSON.parse);
+const events = (h) => StateFiles.logText(h.state).split('\n').slice(0, -1).filter(Boolean).map(JSON.parse);
 
 function setup(t, retry = false, stubborn = false) {
   const h = makeRepo(t);

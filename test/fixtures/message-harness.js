@@ -123,8 +123,7 @@ async function main() {
     event({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: 'last report from pi' }] } });
   } else if (harness === 'opencode') {
     const idle = (sessionID) => plugin.event({ event: { type: 'session.idle', properties: { sessionID } } });
-    const receipts = () => fs.readFileSync(path.join(process.env.TOWER_CRANE_STATE, 'events.jsonl'), 'utf8')
-      .trim().split('\n').map(JSON.parse).filter((e) => e.cmd === 'hook inbox').flatMap((e) => e.detail.messages).length;
+    const receipts = () => require('../state-files').readEvents(process.env.TOWER_CRANE_STATE).filter((e) => e.cmd === 'hook inbox').flatMap((e) => e.detail.messages).length;
     if (probe) {
       if (probe === 'sessions') {
         await idle('unrelated');

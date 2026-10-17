@@ -1,6 +1,7 @@
 'use strict';
 
 const test = require('node:test');
+const StateFiles = require('./state-files');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -69,7 +70,7 @@ async function withServers(fn) {
 
 const tokenOf = (page) => /<meta name="tower-crane-token" content="([0-9a-f]{48})?">/.exec(page)[1] || '';
 const post = (url, token, body) => fetch(url, { method: 'POST', headers: { 'content-type': 'application/json', 'x-tower-crane-token': token }, body: JSON.stringify(body) });
-const log = (h) => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+const log = (h) => StateFiles.logText(h.state).trim().split('\n').map((l) => JSON.parse(l));
 
 test('driven CLI failures distinguish killed children from failed spawns', (t) => {
   const h = makeRepo(t);
@@ -1242,7 +1243,7 @@ test('runaway rules: status and the board flag the same claim, from the project\
   assert.match(page(), /data-key="agent-T11"[\s\S]*?in the queue: spend/, 'the row keeps a marker');
   // Once the agent has exited, the queue says stuck, not runaway, and the row agrees.
   const at = new Date().toISOString();
-  fs.appendFileSync(path.join(h.state, 'events.jsonl'), [
+  StateFiles.appendLog(h.state, [
     { at, agent: 'orchestrator', cmd: 'spawn', task: 'T11', detail: { agent: 'w-x', role: 'worker', rung: 'easy', pid: 999999, attempt: 1 } },
     { at, agent: 'orchestrator', cmd: 'spawn exit', task: 'T11', detail: { agent: 'w-x', pid: 999999, attempt: 1, code: 1 } },
   ].map((e) => `${JSON.stringify(e)}\n`).join(''));

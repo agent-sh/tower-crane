@@ -1,6 +1,7 @@
 'use strict';
 
 const { waitOnRepo } = require('./signals');
+const StateFiles = require('./state-files');
 
 const { test, describe } = require('node:test');
 const assert = require('node:assert/strict');
@@ -13,7 +14,7 @@ const RouteGrants = require('../lib/route-grants');
 const { tempRoot } = require('./tmp-root');
 const windowsConcurrency = process.platform === 'win32' ? 2 : false;
 
-const events = (h) => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+const events = (h) => StateFiles.logText(h.state).trim().split('\n').map(JSON.parse);
 const supervision = { retries: 2, backoff_ms: 10, max_backoff_ms: 20, stall_ms: 60000 };
 // A waiter blocks until its event arrives. The runner's per-test timeout
 // (test/run.js) is its only bound: three attempts and a route switch, each a

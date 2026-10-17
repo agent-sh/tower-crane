@@ -1,6 +1,7 @@
 'use strict';
 
 const test = require('node:test');
+const StateFiles = require('./state-files');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -188,7 +189,7 @@ test('automation retains an exited worker claim until its lost monitor process g
   const spawn = h.json(['spawn', '--task', 'T1', '--agent', 'orchestrator'], { env: { REFILL_ORPHAN: '1' } });
   await waitFor(`${h.marker('T1')}.orphan`, { nonempty: true });
   const orphan = Number(fs.readFileSync(`${h.marker('T1')}.orphan`, 'utf8'));
-  const cursor = String(fs.statSync(path.join(h.state, 'events.jsonl')).size);
+  const cursor = String(StateFiles.logEnd(h.state));
   const waiting = h.runAsync(['wait', '--after', cursor, '--types', 'spawn', '--timeout', '300', '--agent', 'orchestrator']);
   try {
     killPid(spawn.monitor_pid, 'SIGKILL');
@@ -267,7 +268,7 @@ for (const trigger of ['exit', 'release --dead', 'merge']) {
         h.ok(['release', '--dead', '--agent', 'orchestrator']);
       }
     }
-    const cursor = trigger === 'release --dead' ? String(fs.statSync(path.join(h.state, 'events.jsonl')).size) : '0';
+    const cursor = trigger === 'release --dead' ? String(StateFiles.logEnd(h.state)) : '0';
     const watchers = [h.runAsync(['wait', '--after', cursor, '--task', 'T3', '--types', 'spawn', '--timeout', '300', '--agent', 'orchestrator']),
       h.runAsync(['wait', '--after', cursor, '--task', 'T3', '--types', 'spawn', '--timeout', '300', '--agent', 'orchestrator'])];
     const results = await Promise.all(watchers);
@@ -825,7 +826,7 @@ test('a reviewer whose monitor never records its exit is replaced after the rece
   const at = new Date().toISOString();
   // The worker exited; the reviewer's process is gone, and its monitor (this
   // test process) runs on without writing the reviewer's spawn exit.
-  fs.appendFileSync(path.join(h.state, 'events.jsonl'), [
+  StateFiles.appendLog(h.state, [
     { at, agent: 'orchestrator', cmd: 'spawn', task: 'T1', detail: { agent: 'worker', role: 'worker', sha: task.sha, revision: task.revision, pid: 999998, attempt: 1 } },
     { at, agent: 'orchestrator', cmd: 'spawn exit', task: 'T1', detail: { agent: 'worker', pid: 999998, attempt: 1, code: 0 } },
     { at, agent: 'orchestrator', cmd: 'spawn', task: 'T1', detail: { agent: 'reviewer-T1-9', role: 'reviewer', rung: 'review',

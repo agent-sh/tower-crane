@@ -1,6 +1,7 @@
 'use strict';
 
 const { waitOnRepo, killPid, killGroup } = require('./signals');
+const StateFiles = require('./state-files');
 const { readPublished } = require('./atomic-file');
 
 const test = require('node:test');
@@ -15,7 +16,7 @@ const P = require('../lib/processes');
 // A Windows worker spawn records its lease before its harness starts, so it never reserves a slot.
 const RESERVES = process.platform === 'win32' && 'a Windows worker spawn holds a lease, never a reservation';
 
-const events = (h) => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+const events = (h) => StateFiles.logText(h.state).trim().split('\n').map(JSON.parse);
 
 function setup(t, workers = 1, tasks = 3) {
   return cachedFixture(t, `${workers}:${tasks}`, (h) => {
@@ -87,14 +88,14 @@ test('five held worker slots refuse dispatch before process, home or spend', (t)
     env: { PATH: bin + path.delimiter + (h.env.PATH || h.env.Path || ''), CODEX_HOME: path.join(h.base, 'codex') },
     hooks: { HOOK_USAGE_HARNESS: 'codex', HOOK_USAGE_FILE: path.join(__dirname, 'fixtures', 'usage', 'codex-stream.jsonl') },
   };
-  const beforeTasks = fs.readFileSync(path.join(h.state, 'tasks.json'), 'utf8');
+  const beforeTasks = StateFiles.docText(h.state, 'tasks.json');
   const beforeEvents = events(h);
   for (const role of [[], ['--role', 'easy']]) {
     const r = h.run(['spawn', '--task', 'T6', ...role, '--wait'], opts);
     assert.equal(r.code, 1, r.stderr);
     assert.match(r.stderr, /workers limit is reached/);
     for (let i = 1; i <= 5; i++) assert.match(r.stderr, new RegExp(`T${i}.*held-${i}`));
-    assert.equal(fs.readFileSync(path.join(h.state, 'tasks.json'), 'utf8'), beforeTasks);
+    assert.equal(StateFiles.docText(h.state, 'tasks.json'), beforeTasks);
     assert.deepEqual(events(h), beforeEvents);
     assert.equal(h.detached().length, 0, 'no harness starts');
     assert.ok(!fs.existsSync(path.join(h.state, 'homes')), 'no home is written');
@@ -492,7 +493,7 @@ function monitorLog(h, records) {
     at: new Date(now - ago * 1000).toISOString(), agent: cmd === 'claim' ? detail.agent : 'owner', cmd, task,
     detail: { role: 'worker', attempt: 1, ...detail },
   }));
-  fs.appendFileSync(path.join(h.state, 'events.jsonl'), lines.join('\n') + '\n');
+  StateFiles.appendLog(h.state, lines.join('\n') + '\n');
   return { hooks: { HOOK_HIDDEN_PIDS: JSON.stringify([424201, 424202, 424203]) } };
 }
 

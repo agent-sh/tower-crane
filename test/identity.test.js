@@ -1,6 +1,7 @@
 'use strict';
 
 const { waitOnRepo } = require('./signals');
+const StateFiles = require('./state-files');
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -11,7 +12,7 @@ const { makeRepo, cachedFixture, runPty, PTY_AVAILABLE, BIN, HOOKS } = require('
 
 const noAgent = { TOWER_CRANE_AGENT: undefined };
 const message = 'tower-crane: no agent: pass --agent NAME or set TOWER_CRANE_AGENT\n';
-const events = (h) => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8');
+const events = (h) => StateFiles.logText(h.state);
 const withoutTowerCrane = (env) => Object.fromEntries(Object.entries(env).filter(([key]) => !key.startsWith('TOWER_CRANE_')));
 const terminal = (h, args, env = {}) => runPty([...args, '--state', h.state], { cwd: h.repo, env: { ...withoutTowerCrane(h.env), ...env } });
 

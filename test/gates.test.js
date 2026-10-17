@@ -1,6 +1,7 @@
 'use strict';
 
 const test = require('node:test');
+const StateFiles = require('./state-files');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
@@ -171,7 +172,7 @@ test('a fixture-only diff runs the pinned head suite once and audits its run-onl
   assert.match(evidence.summary, /run-only \(test-only diff\)/);
   assert.equal(evidence.commands.filter((command) => command.command !== 'git').length, 1);
   assert.deepEqual(h.readState('tasks.json').tasks[0].evidence.at(-1).receipt, evidence.receipt);
-  const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  const events = StateFiles.logText(h.state).trim().split('\n').map(JSON.parse);
   assert.deepEqual(events.at(-1).detail.receipt, evidence.receipt);
   assert.equal(h.json(['task', 'show', 'T1']).gates.gates.find((gate) => gate.type === 'tests').ok, true);
 });
@@ -225,7 +226,7 @@ test('named regression failure', () => {
     assert.match(result.stdout, /named regression failure/);
     assert.match(result.stdout, /tail marker/);
 
-    const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8')
+    const events = StateFiles.logText(h.state)
       .trim().split('\n').map(JSON.parse);
     assert.deepEqual(events.at(-1).detail.test_failure, evidence.test_failure);
   }
@@ -340,7 +341,7 @@ test('failure ' + process.env.T83_PROCESS_TOKEN, () => {
     assert.ok(evidence.test_failure.output_tail.includes(`[redacted:${label}]`), label);
   }
 
-  const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8');
+  const events = StateFiles.logText(h.state);
   const taskText = h.ok(['task', 'show', 'T1']);
   const taskJson = JSON.stringify(h.json(['task', 'show', 'T1']));
   const output = [result.stdout, result.stderr, JSON.stringify(evidence), events, taskText, taskJson].join('\n');
@@ -434,7 +435,7 @@ test('a token that straddles the output tail cut is redacted, not kept as a frag
   const evidence = h.readState('tasks.json').tasks[0].evidence.at(-1);
   assert.match(evidence.test_failure.output_tail, /\[redacted:API_KEY\]/);
   assert.ok(evidence.test_failure.output_tail.length <= 8192);
-  const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8');
+  const events = StateFiles.logText(h.state);
   const output = [result.stdout, result.stderr, JSON.stringify(evidence), events, h.ok(['task', 'show', 'T1'])].join('\n');
   assert.equal(output.includes(body), false, 'the token body leaked past the output tail cut');
 });
@@ -460,7 +461,7 @@ process.exit(1);
   const evidence = h.readState('tasks.json').tasks[0].evidence.at(-1);
   assert.match(evidence.test_failure.output_tail, /^! not ok 1 - split$/m);
   assert.match(evidence.test_failure.output_tail, /^key \[redacted:API_KEY\] end$/m);
-  const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8');
+  const events = StateFiles.logText(h.state);
   const output = [result.stdout, result.stderr, JSON.stringify(evidence), events, h.ok(['task', 'show', 'T1'])].join('\n');
   assert.equal(output.includes('sk-T36'), false, 'the first half of the token leaked');
   assert.equal(output.includes('T361TailBody'), false, 'the second half of the token leaked');
@@ -473,7 +474,7 @@ test('tests evidence stores its mode in the audit event and stops counting when 
   h.ok(['project', 'set', '--tests-mode', 'none']);
   const skipped = h.json(['check', 'tests', 'T1']);
   assert.equal(skipped.tests_mode, 'none');
-  const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  const events = StateFiles.logText(h.state).trim().split('\n').map(JSON.parse);
   assert.equal(events.at(-1).detail.tests_mode, 'none');
   const testsGate = () => h.json(['task', 'show', 'T1']).gates.gates.find((g) => g.type === 'tests');
   assert.equal(testsGate().ok, true);
@@ -497,7 +498,7 @@ test('tests evidence stores its mode in the audit event and stops counting when 
   assert.equal(testsGate().ok, false, 'a mode edited without its matching audit event is untrusted');
   delete tasks.tasks[0].evidence.at(-1).tests_mode;
   h.writeState('tasks.json', tasks);
-  const audit = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  const audit = StateFiles.logText(h.state).trim().split('\n').map(JSON.parse);
   delete audit.findLast((e) => e.cmd === 'check tests').detail.tests_mode;
   fs.writeFileSync(path.join(h.state, 'events.jsonl'), audit.map(JSON.stringify).join('\n') + '\n');
   assert.equal(testsGate().ok, false);
@@ -647,7 +648,7 @@ test('a gate run from a fixture keeps its temp directory under the fixture', (t)
 });
 
 function readEvents(h) {
-  return fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  return StateFiles.logText(h.state).trim().split('\n').map(JSON.parse);
 }
 
 // An accepted task whose worktree the CLI made; merge is the only step left.

@@ -1,13 +1,14 @@
 'use strict';
 
 const test = require('node:test');
+const StateFiles = require('./state-files');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { makeRepo, BIN } = require('./helpers');
 const { gateFixture } = require('./gate-helpers');
 
-const events = (h) => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map((line) => JSON.parse(line));
+const events = (h) => StateFiles.logText(h.state).trim().split('\n').map((line) => JSON.parse(line));
 const task = (h, id) => h.readState('tasks.json').tasks.find((t) => t.id === id);
 const ready = (h) => h.json(['ready']).ready.map((t) => [t.id, t.status]);
 

@@ -16,7 +16,7 @@ test('concurrent claims on one task: exactly one wins', async (t) => {
   const task = h.readState('tasks.json').tasks[0];
   assert.equal(task.status, 'in_progress');
   assert.equal(task.claim.agent, winners[0][1]);
-  const events = require('node:fs').readFileSync(require('node:path').join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+  const events = h.events();
   assert.equal(events.filter((e) => e.cmd === 'claim').length, 1);
 });
 

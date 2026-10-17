@@ -1,6 +1,7 @@
 'use strict';
 
 const { HUNG_TEST_MS, waitOnRepo, killPid } = require('./signals');
+const StateFiles = require('./state-files');
 const { readPublished } = require('./atomic-file');
 
 const { test, describe } = require('node:test');
@@ -11,7 +12,7 @@ const { makeRepo, makeTaskRepo, BIN, detachedAlive, TMP_ROOT } = require('./help
 const Sessions = require('../lib/spawn-session');
 const windowsConcurrency = process.platform === 'win32' ? 2 : false;
 
-const events = (h) => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+const events = (h) => StateFiles.logText(h.state).trim().split('\n').map(JSON.parse);
 
 describe('spawn resume integration cases', { concurrency: windowsConcurrency }, () => {
 test('isolated Codex session lookup matches the recorded rollout id', (t) => {
@@ -155,7 +156,7 @@ for (const harness of ['codex', 'claude']) {
     await waitOnRepo(h, () => fs.readFileSync(first.log, 'utf8').includes('"usage"'));
     fs.writeFileSync(path.join(first.cwd, 'README.md'), '# native unfinished work\n');
     fs.writeFileSync(path.join(first.cwd, 'unfinished.txt'), 'keep native edits\n');
-    const after = String(fs.statSync(path.join(h.state, 'events.jsonl')).size);
+    const after = String(StateFiles.logEnd(h.state));
     // Model Windows startup consuming the session deadline before interruption.
     // The shutdown wait must use completion receipts independently of that clock.
     const clockBeforeInterrupt = Date.now();
@@ -221,11 +222,11 @@ for (const format of ['codex', 'claude']) {
     h.ok(['task', 'update', 'T1', '--acceptance', 'rework resumes with the revised acceptance']);
     h.ok(['evidence', 'T1', '--type', 'review', '--fail', '--sha', '50b732a15be40ccb2065cb2ba0e7b366d511b736', '--revision', h.revision('T1'), '--agent', 'later-reviewer',
       '--summary', 'Unrelated later revision']);
-    const before = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8');
+    const before = StateFiles.logText(h.state);
     const dry = h.json(['spawn', '--task', 'T1', '--dry-run']);
     assert.equal(dry.resumed, true);
     assert.equal(dry.agent, first.agent);
-    assert.equal(fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8'), before);
+    assert.equal(StateFiles.logText(h.state), before);
     const next = h.json(['spawn', '--task', 'T1', '--wait']);
     assert.equal(next.agent, first.agent);
     assert.equal(next.cwd, first.cwd);
@@ -298,12 +299,12 @@ test('a changed harness or moved worktree starts fresh with the failed review no
       cwd = path.join(h.base, 'moved-worker');
       h.git(['worktree', 'move', first.cwd, cwd]);
     }
-    const before = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8');
+    const before = StateFiles.logText(h.state);
     const dry = h.json(['spawn', '--task', 'T1', '--dry-run']);
     assert.equal(dry.resumed, false);
     assert.equal(dry.session_id, null);
     assert.equal(dry.agent, 'worker-T1-2');
-    assert.equal(fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8'), before);
+    assert.equal(StateFiles.logText(h.state), before);
     const next = h.json(['spawn', '--task', 'T1', '--wait']);
     assert.equal(next.resumed, false);
     assert.equal(next.agent, 'worker-T1-2');

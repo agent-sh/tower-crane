@@ -23,8 +23,7 @@ updateJson(file, (state) => {
   return state;
 });
 if (crash) {
-  const events = fs.readFileSync(path.join(crash, '.tower-crane', 'events.jsonl'), 'utf8')
-    .trim().split('\n').map(JSON.parse);
+  const events = require('../state-files').readEvents(path.join(crash, '.tower-crane'));
   const executor = events.findLast((e) => e.cmd === 'automation' && e.detail.phase === 'running');
   killPid(executor.detail.pid, 'SIGKILL');
   // The killed executor is the test's CLI call, so the test resumes now.

@@ -1,6 +1,7 @@
 'use strict';
 
 const test = require('node:test');
+const StateFiles = require('./state-files');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -169,7 +170,7 @@ test('an orchestrator init leaves out what only the owner grants from the user f
   assert.match(r.stdout, /notice: ladder hard: the user file runs it on opencode outside its sandbox/);
   assert.match(r.stdout, /notice: ladder easy: the user file runs it as a command/);
   assert.match(r.stdout, /notice: ladder review: init left out tools Edit/);
-  const init = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l)).find((e) => e.cmd === 'init');
+  const init = StateFiles.logText(h.state).trim().split('\n').map((l) => JSON.parse(l)).find((e) => e.cmd === 'init');
   assert.deepEqual(init.detail.withheld.map((w) => w.rung).sort(), ['easy', 'hard', 'medium', 'review']);
 
   // A default harness outside the sandbox reaches every rung that follows it.
@@ -220,7 +221,7 @@ test('tests bind the default owner_config_dir inside the fixture, and the fixtur
   assert.deepEqual(ownerDirsOutside(h.base), []);
   const stray = path.join(h.base, 'stray');
   fs.mkdirSync(stray);
-  fs.writeFileSync(path.join(stray, 'project.json'), JSON.stringify({ owner_config_dir: path.join(path.parse(h.base).root, 'elsewhere', '.config', 'tower-crane') }));
+  StateFiles.writeDocText(stray, 'project.json', JSON.stringify({ owner_config_dir: path.join(path.parse(h.base).root, 'elsewhere', '.config', 'tower-crane') }));
   assert.equal(ownerDirsOutside(h.base).length, 1);
   assert.equal(ownerDirsOutside(h.base, h.base).length, 1);
   fs.rmSync(stray, { recursive: true });

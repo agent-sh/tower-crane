@@ -1,6 +1,7 @@
 'use strict';
 
 const { waitOnRepo, killPid } = require('./signals');
+const StateFiles = require('./state-files');
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
@@ -45,7 +46,7 @@ function futureState(h) {
   });
   const event = { at: new Date().toISOString(), cmd: 'future command', type: 'future-event',
     task: 'T2', agent: 'future-tool', detail: { opaque: true }, future_field: ['unchanged'] };
-  fs.appendFileSync(path.join(h.state, 'events.jsonl'), JSON.stringify(event) + '\n');
+  StateFiles.appendLog(h.state, JSON.stringify(event) + '\n');
   return { task: tasks.tasks[1], event };
 }
 
@@ -85,7 +86,7 @@ test('additive state stays readable and survives unrelated CLI writes', (t) => {
   assert.equal(decisions.decisions[1].status, 'superseded');
   assert.equal(decisions.decisions[1].answer_rule, 'future-rule');
   assert.deepEqual(decisions.decisions[1].future_field, { by: 'D3' });
-  assert.ok(fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').includes(JSON.stringify(future.event)));
+  assert.ok(StateFiles.logText(h.state).includes(JSON.stringify(future.event)));
   const refused = h.run(['spawn', '--task', 'T2', '--dry-run']);
   assert.equal(refused.code, 1);
   assert.match(refused.stderr, /T2.*unsupported.*(status|kind|tier)/);
@@ -110,7 +111,7 @@ test('a supervised worker survives additive state from a newer tool', async (t) 
     h.ok(['claim', 'T1', '--agent', 'worker-T1-1', '--lease', '1']);
     S.withLock(h.state, () => futureState(h));
     // The shortened lease and future event force a state read and renewal.
-    await waitOnRepo(h, () => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8')
+    await waitOnRepo(h, () => StateFiles.logText(h.state)
       .split('\n').some((line) => line && JSON.parse(line).cmd === 'renew'), 'supervisor did not renew through the new state');
   } finally {
     fs.writeFileSync(worker.finish, '');
@@ -275,7 +276,7 @@ test(`${change} drains the supervisor without killing an edit`, async (t) => {
             id: 'D1', question: 'Future blocker?', status: 'future-pending', blocks: ['T1'],
           }] });
         }
-        fs.appendFileSync(path.join(h.state, 'events.jsonl'), JSON.stringify({
+        StateFiles.appendLog(h.state, JSON.stringify({
           at: new Date().toISOString(), cmd: 'future pause', task: 'T1', detail: {},
         }) + '\n');
       }
