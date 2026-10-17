@@ -706,18 +706,49 @@ function detachedAlive(child) {
   return true;
 }
 
-// Linux processes still working inside a fixture, by working directory. A
-// removed directory reads with a " (deleted)" suffix and still counts.
-function processesIn(base) {
-  if (process.platform !== 'linux') return [];
-  const found = [];
-  for (const name of fs.readdirSync('/proc').filter((entry) => /^\d+$/.test(entry))) {
-    let cwd;
-    try { cwd = fs.readlinkSync(`/proc/${name}/cwd`).replace(/ \(deleted\)$/, ''); }
-    catch { continue; } // Exited, a zombie, or not ours to read.
-    if (cwd === base || cwd.startsWith(base + path.sep)) found.push(Number(name));
+// Processes still working inside a fixture, by working directory: /proc on
+// Linux, lsof on macOS and other POSIX systems. A removed directory reads with
+// a " (deleted)" suffix and still counts. Where no probe works, as on Windows,
+// the result names why instead of passing an empty list as a clean check.
+function processesIn(base, { platform = process.platform, lsof = runLsof } = {}) {
+  const inBase = (cwd) => {
+    cwd = cwd.replace(/ \(deleted\)$/, '');
+    return cwd === base || cwd.startsWith(base + path.sep);
+  };
+  if (platform === 'linux') {
+    const pids = [];
+    for (const name of fs.readdirSync('/proc').filter((entry) => /^\d+$/.test(entry))) {
+      let cwd;
+      try { cwd = fs.readlinkSync(`/proc/${name}/cwd`); }
+      catch { continue; } // Exited, a zombie, or not ours to read.
+      if (inBase(cwd)) pids.push(Number(name));
+    }
+    return { pids };
   }
-  return found;
+  if (platform === 'win32') return { skip: 'Windows has no working-directory probe' };
+  const r = lsof();
+  if (r.error) return { skip: `lsof did not run: ${r.error.code || r.error.message}` };
+  // lsof exits 1 when it could not read some process; its own process always lists a cwd.
+  if (!r.stdout) return { skip: `lsof listed nothing (exit ${r.status})` };
+  const pids = new Set();
+  let pid = null;
+  for (const line of r.stdout.split('\n')) {
+    if (line[0] === 'p') pid = Number(line.slice(1));
+    else if (line[0] === 'n' && pid !== null && inBase(line.slice(1))) pids.add(pid);
+  }
+  return { pids: [...pids] };
+}
+
+function runLsof() {
+  return cp.spawnSync('lsof', ['-n', '-P', '-w', '-d', 'cwd', '-F', 'pn'], { encoding: 'utf8', timeout: HUNG_TEST_MS });
+}
+
+// Fails when a process the test started still works inside its fixture after
+// cleanup. A system without a probe reports the check as skipped.
+function assertNoProcessesIn(t, base, opts) {
+  const found = processesIn(base, opts);
+  if (found.skip) t.diagnostic(`process leak check skipped: ${found.skip}`);
+  else assert.deepEqual(found.pids, [], 'no process the test started outlives its fixture');
 }
 
 function killDetached(child) {
@@ -868,4 +899,4 @@ function shortCacheRoot(t, maxBytes) {
   return null;
 }
 
-module.exports = { shortCacheRoot, useFixtureUserFile, ownerFallbacks, ownerDirsOutside, ACCOUNT_HOME, repairWorktrees, makeRepo, makeProjectRepo, makeTaskRepo, copyRepo, cachedFixture, fixtureLadder, pinRung, pinLiveRung, stubRungs, STUB_RUNG, HARNESS_GUARD, run, runPty, PTY_AVAILABLE, runAsync, dispatch, BIN, ROOT, HOOKS, real, TMP_ROOT, LIVE_ROOT, detachedAlive, processesIn };
+module.exports = { shortCacheRoot, useFixtureUserFile, ownerFallbacks, ownerDirsOutside, ACCOUNT_HOME, repairWorktrees, makeRepo, makeProjectRepo, makeTaskRepo, copyRepo, cachedFixture, fixtureLadder, pinRung, pinLiveRung, stubRungs, STUB_RUNG, HARNESS_GUARD, run, runPty, PTY_AVAILABLE, runAsync, dispatch, BIN, ROOT, HOOKS, real, TMP_ROOT, LIVE_ROOT, detachedAlive, processesIn, assertNoProcessesIn };

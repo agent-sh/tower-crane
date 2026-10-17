@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { HUNG_TEST_MS, waitOnRepo, waitUntil, fileWritten, killPid } = require('./signals');
-const { cachedFixture, BIN, processesIn } = require('./helpers');
+const { cachedFixture, assertNoProcessesIn } = require('./helpers');
 const { gateEvidence } = require('./gate-helpers');
 const { waitFor } = require('./canary');
 const { shellQuote } = require('../lib/gates/common');
@@ -1005,9 +1005,9 @@ if (${stage === 'trial'}) {
   };
 }
 `);
-      const child = require('node:child_process').spawn(process.execPath,
-        ['--require', preload, BIN, 'wait', '--after', String(cursor), '--types', 'never', '--timeout', '300', '--agent', 'orchestrator'],
-        { cwd: h.repo, env: h.env });
+      // Cleanup stops any worker this wait host dispatches, should the fixture ever unpause.
+      const child = h.spawnCli(['wait', '--after', String(cursor), '--types', 'never', '--timeout', '300', '--agent', 'orchestrator'],
+        { pre: ['--require', preload] });
       let stdout = '', stderr = '';
       child.stdout.on('data', (chunk) => { stdout += chunk; });
       child.stderr.on('data', (chunk) => { stderr += chunk; });
@@ -1022,7 +1022,7 @@ if (${stage === 'trial'}) {
         if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
         await result;
         await h.cleanup();
-        assert.deepEqual(processesIn(h.base), [], 'no process the test started outlives its fixture');
+        assertNoProcessesIn(t, h.base);
       });
       await waitFor(started, { what: 'the post-merge sweep starts' });
       assert.equal(h.github().prs['7'].state, 'MERGED');
@@ -1381,7 +1381,7 @@ require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'public-http'))}).fet
           catch (e) { if (e.code !== 'ESRCH') throw e; }
         }
         await h.cleanup();
-        assert.deepEqual(processesIn(h.base), [], 'no process the test started outlives its fixture');
+        assertNoProcessesIn(t, h.base);
       });
       await waitFor(started, { what: idle ? 'wait is ready' : 'the gate starts' });
       child.kill(signal);
