@@ -762,6 +762,124 @@ test('dense overlapping environment values in a binary artifact merge as they ar
   assert.deepEqual(big, []);
 });
 
+test('an environment value is redacted however an escape splits it, and a header an escape glues on keeps its value hidden', () => {
+  const { createRedactor } = require('../lib/gates/common');
+  const shows = (out, secret) => Array.from({ length: secret.length - 5 }, (_, i) => secret.slice(i, i + 6)).some((w) => out.replace(/[\x00-\x1f\x7f-\x9f]/g, '').includes(w));
+  const value = 'm.SQhCuRiP7Puvr5-jZYLEMzpy';
+  const env = createRedactor([['MY_SECRET', value]]);
+  // A line-split token whose tail is the head of a value that a real two-character escape splits.
+  const tail = createRedactor([['MY_SECRET', 'jXNogNs9XVM82r2']]);
+  assert.equal(tail(tail.strip('ghp_5j63\nJyejyrqtFRVIndoXPk4KhSudBJNTpPdjXNog\x1b=Ns9XVM82r2 key')), '[redacted:GITHUB_TOKEN] [redacted:MY_SECRET] key');
+  for (const input of [
+    // `ESC [` reads the value's next character, or its digits and the character after, as a CSI.
+    `v ${value.slice(0, 6)}\x1b[${value.slice(6)} end`,
+    `v ${value.slice(0, 6)}\x1b[1;${value.slice(6)} end`,
+    `v ${value.slice(0, 10)}\x1b[${value.slice(10)} end`,
+    // An escape's intermediate byte is the value's own `.`, and the value goes on in an OSC body.
+    `v ${value.slice(0, 1)}\x1b(${value.slice(1)} end`,
+    `v ${value.slice(0, 1)}\x1b]0;t ${value.slice(1)} end`,
+  ]) {
+    assert.ok(!shows(env(env.strip(input)), value), JSON.stringify(input));
+    assert.ok(env.bytes(Buffer.from(`\x00${input}`, 'latin1')).missed, JSON.stringify(input));
+  }
+  // A token that a real two-character escape and a line break both split is not copied.
+  assert.match(createRedactor([]).bytes(Buffer.from('ghp_Ab3dEf\x1b(B6hIj9kLm2nO\np5qRs8tUv1wXy4zAb7d\0', 'latin1')).missed || '', /line breaks removed/);
+  // A token glued to a header by an escape the cleanup removes takes the header word no more.
+  const plain = createRedactor([]);
+  const github = 'ghp_Ab1Cd2Ef3Gh4Ij5Kl6Mn7Op8Qr9St0Uv1Wx2';
+  for (const input of [
+    'z xoxa-ab\ncdefghij\x1b(B\x1b[1mAuthorization: Bearer sekrit-value',
+    `z ${github}\x1b[0mAuthorization: Bearer sekrit-value`,
+    `z ${github.slice(0, 9)}\r\n${github.slice(9)}\x1b7authorization: token sekrit-value`,
+    // A token whole before its line break keeps its tail, glued by the escape to the header.
+    `z ${github.slice(0, -1)}\n${github.slice(-1)}\x1b(BAUTHORIZATION: Basic sekrit-value`,
+  ]) {
+    assert.ok(!plain(plain.strip(input)).includes('sekrit'), JSON.stringify(input));
+    const binary = plain.bytes(Buffer.from(`\x00${input}`, 'latin1'));
+    assert.ok(binary.missed || !binary.body.toString('latin1').includes('sekrit'), JSON.stringify(input));
+  }
+});
+
+test('a value found by reading its own characters as escape bytes yields to the secret next to it', () => {
+  const { createRedactor } = require('../lib/gates/common');
+  // The longest run of each value's characters the redacted text shows: a reading that completes
+  // one value through an escape's final or a string's body once took the next value's first
+  // character, or a token's, and that secret then went unredacted.
+  const longest = (out, value) => {
+    const flat = out.replace(/[\x00-\x1f\x7f-\x9f]/g, '');
+    for (let w = value.length; w > 0; w--) for (let i = 0; i + w <= value.length; i++) if (flat.includes(value.slice(i, i + w))) return w;
+    return 0;
+  };
+  for (const [input, values, shown] of [
+    ["MXqy66Mp)n4ON[RpY;U[blM\u001b];9oS[tUd6\u001bMXqy66Mp)n4ON[RpY;U[blM9oS[tUd6", ["MXqy66Mp)n4ON[RpY;U[blM9oS[tUd6"], [22]],
+    ["NUaymyOGww31eUrQ1ew9DN\u001b]NRq3j5\u001bNUaymyOGww31eUrQ1ew9DNRq3j5", ["NUaymyOGww31eUrQ1ew9DNRq3j5"], [21]],
+    ["z.-5944266\u001b[1485051.5-2-..;\u001b_1\u001b;cqBv9kHeu4SduMI3)v1P9", ["z.-59442661485051.5-2-..;1",";cqBv9kHeu4SduMI3)v1P9"], [24,1]],
+    ["t\u009b(1RFDj3fjaueLt\u001bPnRLsRjwB5\u001bt1RFDj3fjaueLtnRLsRjwB5", ["t1RFDj3fjaueLtnRLsRjwB5"], [12]],
+    ["d.9i_2.AwBMs\u001bAPs3A5A\u001b_2d.9i_\u009c2.AwBMsAPs3A5A2", ["d.9i_2.AwBMsAPs3A5A2"], [1]],
+    ["Zi\\KtUcLu9Dt!Z\u009d;y39VSNzoOvdB8\u001bZi\\KtUcLu9Dt!Zy39VSNzoOvdB8", ["Zi\\KtUcLu9Dt!Zy39VSNzoOvdB8"], [13]],
+    [";TROJ-;P\u009b;\u009dlyevZK5\u001b;TROJ-;PlyevZK5", [";TROJ-;PlyevZK5"], [8]],
+    ["ghs_Ts11bZC0Zq7aHV\u001bw\u001bP\u001by1WKo\n\u001b1", ["1bZC0Zq7aHVwy1WKo1"], [1]],
+    ["jPvnOM.aFSqiQ\u009d;3\u001bQLXKA72OYA8@#rY3hX7B4Suwpcn9", ["jPvnOM.aFSqiQ3","QLXKA72OYA8@#rY3hX7B4Suwpcn9"], [12,1]],
+    ["fVf\u009d;Kfi89wxZZwvvF7oA5\u001bfVfKfi89wxZZwv\u009bmvF7oA5", ["fVfKfi89wxZZwvvF7oA5"], [2]],
+    ["byfLZlhUtC2ZZDTVFSF6GWb\u009d;47K1\u001bbyfLZlhUtC2ZZDTVFSF6GWb47K1", ["byfLZlhUtC2ZZDTVFSF6GWb47K1"], [22]],
+    ["E6M0@v\u001b[onU5kWEd\u001bXLClsTi!d0\u001bdpF!GANsVQ6d92lmWHU@ec1NM#V8", ["dpF!GANsVQ6d92lmWHU@ec1NM#V8","E6M0@vonU5kWEdLClsTi!d0"], [1,6]],
+    ["ASIAAXGDD9ECDI6JTPS\n7\u001b];\u001b\\AuThOrIzAtIoN:HLyexBO69t\u009b;GX73hs3OSW3github_p", ["HLyexBO69tGX73hs3OSW3"], [1]],
+  ]) {
+    const redact = createRedactor(values.map((v, i) => [`SECRET_${i}`, v]));
+    const out = redact(redact.strip(input));
+    values.forEach((v, i) => assert.ok(longest(out, v) <= shown[i], `${JSON.stringify(input)} shows ${longest(out, v)} of ${v}`));
+  }
+});
+
+test('the text redactor redacts what reading escapes only as a terminal does redacts', () => {
+  const { createRedactor } = require('../lib/gates/common');
+  const flat = (out) => out.replace(/[\x00-\x1f\x7f-\x9f]/g, '');
+  const longest = (out, value) => {
+    for (let w = value.length; w > 0; w--) for (let i = 0; i + w <= value.length; i++) if (flat(out).includes(value.slice(i, i + w))) return w;
+    return 0;
+  };
+  // A value whose characters an escape takes in one reading joins up across a line break in the
+  // other: the terminal reading shows 16 of its characters, and no more may show.
+  const value = 'CG8f9JH2DMB1rIfUBY8UioDg8';
+  const env = createRedactor([['SECRET_0', value]]);
+  const joined = env(env.strip(`github_pat_\n${value}C\n\x1bG8f9JH2DMB1rIfUBY\x1b[8UioDg8`));
+  assert.ok(longest(joined, value) <= 16, joined);
+  // A header value the terminal reading redacts whole keeps its tail hidden after a value found in it.
+  const header = createRedactor([['SECRET_0', 'HLyexBO69tGX73hs3OSW3']]);
+  const out = header(header.strip('ASIAAXGDD9ECDI6JTPS\n7\x1b];\x1b\\AuThOrIzAtIoN:HLyexBO69t\x9b;GX73hs3OSW3github_p'));
+  assert.ok(!flat(out).includes('github_p'), out);
+  // Mapped, as the joined output of two streams reads it, the same characters stay redacted.
+  const view = header.stripMapped('ASIAAXGDD9ECDI6JTPS\n7\x1b];\x1b\\AuThOrIzAtIoN:HLyexBO69t\x9b;GX73hs3OSW3github_p');
+  assert.equal(header(view.text), out);
+  for (let i = 0; i < view.text.length; i++) {
+    const [a, b] = view.at(i);
+    assert.ok(a <= b && (i === 0 || view.at(i - 1)[0] <= a), `at(${i})`);
+  }
+});
+
+test('glued headers on one long line are read once each, and a long glued header value stays redacted', () => {
+  const { createRedactor } = require('../lib/gates/common');
+  const redact = createRedactor([]);
+  // The value runs on past what a fixed window read, and its tail showed.
+  const long = redact(redact.strip(`x\x1b[0mAuthorization: Bearer ${'a'.repeat(5000)} end`));
+  assert.ok(!long.includes('aaaaaaaaa'), long.slice(0, 200));
+  // Read to the line's end once per header, a line of them took minutes: the characters read for
+  // the headers stay a small multiple of the line. Joined once per header, a line of headers with
+  // no space between them overflowed a string.
+  const { gluedHeaders } = require('../lib/escape-views');
+  const { shapeMatches } = require('../lib/ci-log-text');
+  const size = 4 << 20;
+  for (const unit of ['w\x1b[mAuthorization: Bearer abc ', 'w\x1b(Bauthorization:', 'word\x1b[1mAuthorization:']) {
+    const line = unit.repeat(Math.ceil((1 << 20) / unit.length));
+    let read = 0;
+    const found = gluedHeaders(line, (t) => { read += t.length; return shapeMatches(t); });
+    assert.ok(found.length > 0 && read < 4 * line.length, `${JSON.stringify(unit)} read ${read} characters for ${line.length}`);
+    const text = unit.repeat(Math.ceil(size / unit.length));
+    assert.ok(!redact(redact.strip(text)).includes('abc'), JSON.stringify(unit));
+    assert.ok(redact.bytes(Buffer.from(`\0${text}`, 'latin1')).missed, JSON.stringify(unit));
+  }
+});
+
 test('a binary artifact is read across lines a window at a time', () => {
   const { createRedactor } = require('../lib/gates/common');
   const redact = createRedactor([]);
