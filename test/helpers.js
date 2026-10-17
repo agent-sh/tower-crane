@@ -881,14 +881,34 @@ function ownerFallbacks(h, rung, routes) {
 // tests of claude's and codex's short temp directories. Fixture roots are too
 // deep for them. The bases are gate-tmp's: the account's ~/.cache from the
 // password database, since HOME can name a deep sandbox home, then
-// XDG_RUNTIME_DIR. Null when no base is short enough and writable; the
-// directory goes when the test ends.
+// XDG_RUNTIME_DIR. The length is the real path's, since the CLI names its
+// short directories from the resolved cache (codexTmp). A missing base is
+// passed over, not made: removing a ~/.cache made here could race another
+// file's gate between shortBase and harnessTmp. Each base passed over for its
+// link or its absence is reported. Null when no base is short enough and
+// writable; the directory goes when the test ends.
 function shortCacheRoot(t, maxBytes) {
   for (const base of require('../lib/gate-tmp').shortBases()) {
-    if (Buffer.byteLength(path.join(base, 'tc-test-XXXXXX')) > maxBytes) continue;
+    let real;
+    try {
+      real = fs.realpathSync(base);
+    } catch (err) {
+      let link = false;
+      try {
+        link = fs.lstatSync(base).isSymbolicLink();
+      } catch {
+        // Nothing at base.
+      }
+      t.diagnostic(link ? `${base} is a link to a missing directory` : `${base} cannot be resolved (${err.code}); it is not made here`);
+      continue;
+    }
+    const bytes = Buffer.byteLength(path.join(real, 'tc-test-XXXXXX'));
+    if (bytes > maxBytes) {
+      if (real !== base) t.diagnostic(`${base} resolves to ${real}, whose tc-test-XXXXXX root is ${bytes} bytes, more than ${maxBytes}`);
+      continue;
+    }
     let root;
     try {
-      fs.mkdirSync(base, { recursive: true });
       root = fs.mkdtempSync(path.join(base, 'tc-test-'));
     } catch {
       continue;

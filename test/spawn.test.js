@@ -1,6 +1,6 @@
 'use strict';
 
-const { fileWritten, waitOnRepo } = require('./signals');
+const { fileWritten, waitOnRepo, killGroup } = require('./signals');
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -101,6 +101,44 @@ test('the dead-agent sweep removes orphan brokers and keeps live claims, process
       at: new Date().toISOString(), cmd: 'spawn', agent: 'owner', task: 'T2', detail: { agent, role: 'worker', ...processInfo },
     }) + '\n');
   }
+  // A harness that exited and left a process in its group: that process can still write the
+  // agent's home and broker directory, so neither is walked while it runs. Windows has no groups.
+  const grouped = process.platform !== 'win32';
+  const stale = (agent) => path.join(h.state, 'brokers', `.stale-${agent}-0123456789ab`);
+  if (grouped) {
+    const leader = cp.spawn(process.execPath, ['-e',
+      "const c = require('node:child_process').spawn(process.execPath, ['-e', 'setTimeout(() => {}, 120000)'], { stdio: 'ignore' }); process.stdout.write(c.pid + '\\n', () => process.exit(0))"], // wait-allow: the member only idles until the test kills its group
+    { detached: true, stdio: ['ignore', 'pipe', 'ignore'] });
+    const [left] = await once(leader.stdout, 'data');
+    assert.ok(Number(String(left).trim()) > 0, 'the group keeps a member');
+    t.after(() => { try { killGroup(leader.pid, 'SIGKILL'); } catch {} });
+    if (leader.exitCode === null) await once(leader, 'exit');
+    plant('worker-group-left', { socket });
+    fs.mkdirSync(path.join(h.state, 'homes', 'worker-group-left'), { recursive: true });
+    fs.writeFileSync(path.join(h.state, 'homes', 'worker-group-left', 'note'), 'the agent\'s');
+    fs.appendFileSync(path.join(h.state, 'events.jsonl'), JSON.stringify({
+      at: new Date().toISOString(), cmd: 'spawn', agent: 'owner', task: 'T2',
+      detail: { agent: 'worker-group-left', role: 'worker', pid: leader.pid, host: require('node:os').hostname() },
+    }) + '\n');
+  }
+  // A spawn whose harness pid now names a later group leader: the recorded group emptied before
+  // Linux gave that pid out again, so the agent is gone.
+  const reused = process.platform === 'linux';
+  if (reused) {
+    const later = cp.spawn(process.execPath, ['-e', 'setTimeout(() => {}, 120000)'], { detached: true, stdio: 'ignore' }); // wait-allow: the later group leader only idles until the test kills its group
+    t.after(() => { try { killGroup(later.pid, 'SIGKILL'); } catch {} });
+    plant('worker-group-reused', { socket });
+    fs.mkdirSync(path.join(h.state, 'homes', 'worker-group-reused'), { recursive: true });
+    fs.appendFileSync(path.join(h.state, 'events.jsonl'), JSON.stringify({
+      at: new Date().toISOString(), cmd: 'spawn', agent: 'owner', task: 'T2',
+      detail: { agent: 'worker-group-reused', role: 'worker', pid: later.pid, host: require('node:os').hostname(), start_ticks: '1' },
+    }) + '\n');
+  }
+  // Broker directories that closing renamed aside, holding what an agent wrote there.
+  for (const agent of ['worker-orphan', 'worker-live-process', 'worker-live-claim', ...(grouped ? ['worker-group-left'] : [])]) {
+    fs.mkdirSync(path.join(stale(agent), 'sub'), { recursive: true });
+    fs.writeFileSync(path.join(stale(agent), 'sub', 'f'), 'agent');
+  }
   const bin = path.join(h.base, 'bin');
   fs.mkdirSync(bin);
   fs.writeFileSync(path.join(bin, `codex${process.platform === 'win32' ? '.exe' : ''}`), '', { mode: 0o755 });
@@ -111,8 +149,17 @@ test('the dead-agent sweep removes orphan brokers and keeps live claims, process
   assert.equal(out.code, 0, out.stderr);
   assert.equal(fs.existsSync(brokerDir('worker-orphan')), false, 'broker with no home, claim or process and a dead socket is swept');
   assert.equal(fs.existsSync(brokerDir('worker-orphan-tcp')), false, 'a dead TCP-only broker is swept');
-  for (const agent of ['worker-live-claim', 'worker-live-process', 'worker-live-monitor', 'worker-unknown-process', 'worker-live-socket', 'worker-uncertain']) {
+  for (const agent of ['worker-live-claim', 'worker-live-process', 'worker-live-monitor', 'worker-unknown-process', 'worker-live-socket', 'worker-uncertain', ...(grouped ? ['worker-group-left'] : [])]) {
     assert.ok(fs.existsSync(path.join(brokerDir(agent), 'broker.json')), `${agent} is kept`);
+  }
+  if (grouped) assert.ok(fs.existsSync(path.join(h.state, 'homes', 'worker-group-left', 'note')), 'a home whose group still runs is kept');
+  if (reused) {
+    assert.equal(fs.existsSync(path.join(h.state, 'homes', 'worker-group-reused')), false, 'a home whose group pid was given out again is removed');
+    assert.equal(fs.existsSync(brokerDir('worker-group-reused')), false, 'and so is its broker directory');
+  }
+  assert.equal(fs.existsSync(stale('worker-orphan')), false, 'a gone agent\'s broker directory set aside is removed');
+  for (const agent of ['worker-live-process', 'worker-live-claim', ...(grouped ? ['worker-group-left'] : [])]) {
+    assert.ok(fs.existsSync(path.join(stale(agent), 'sub', 'f')), `${agent}'s broker directory set aside is kept`);
   }
 });
 

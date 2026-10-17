@@ -196,6 +196,18 @@ test('a group probe without /proc proves exit only once the group is empty', { s
   }
 });
 
+test('a group whose leader pid now names a later process reads as exited', { skip: process.platform !== 'linux' && 'start times come from /proc' }, async (t) => {
+  // Linux hands out no pid a group still uses, so the leader's pid at another start time is a new group.
+  const live = cp.spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { detached: true, stdio: 'ignore' }); // wait-allow: keep a process group alive while its start time is compared
+  t.after(() => { try { killGroup(live.pid, 'SIGKILL'); } catch { /* already gone */ } });
+  const { start_ticks } = P.identity(live.pid);
+  assert.ok(start_ticks);
+  assert.equal(P.processGroupState({ pid: live.pid, start_ticks }), 'running');
+  assert.equal(P.processGroupState({ pid: live.pid }), 'running', 'no recorded start time proves nothing');
+  assert.equal(P.processGroupState({ pid: live.pid, start_ticks: String(Number(start_ticks) + 1) }), 'exited');
+  assert.equal(P.processGroupState({ pid: live.pid, pgid: live.pid, start_ticks: '1' }), 'exited');
+});
+
 test('on Windows the harness process stands for its group in the exit probe', { skip: process.platform !== 'win32' && 'POSIX probes the process group' }, async (t) => {
   const exited = cp.spawn(process.execPath, ['-e', ''], { stdio: 'ignore' });
   await once(exited, 'exit');

@@ -118,7 +118,6 @@
         {"file":"test/worktree-metadata.test.js","after":{"runs":5,"passed":5,"tests":"11/11","median_wall_s":14.8,"sha":"0bd5bca5"}},
         {"file":"test/signal-waits.test.js","after":{"runs":5,"passed":5,"tests":"4/4","median_wall_s":0.5,"sha":"fe2d837f"}}
       ]
-    },
-    {"name":"review_fix_alive_and_sleep_lint","base":"e802471a","measured":"4b4c4205 and a512e4fa","load_1m":"4 to 10","checks":["touched files at 4b4c4205 (19, one run): 432/455 pass, 23 skipped, 0 fail","files merged from main through e802471a (6): 155/180 pass, 25 skipped, 0 fail","full suite at a512e4fa: 2338/2379 pass, 41 skipped, 0 fail","second-signal stack-sync case with force.abort() a no-op: fails (reason timed out after 60000 ms); passes with it","new lint rows: 18 rejected forms, all missed by the previous lint"]}
+    }
   ]
 }
