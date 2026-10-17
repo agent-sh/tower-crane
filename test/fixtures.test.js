@@ -70,7 +70,7 @@ function withAccountHome(home, f) {
   }
 }
 
-test('shortCacheRoot measures the real path of a linked cache and leaves no cache it made', { skip: process.platform === 'win32' && 'links need privileges on Windows' }, (t) => {
+test('shortCacheRoot measures the real path of a linked cache and never makes a missing one', { skip: process.platform === 'win32' && 'links need privileges on Windows' }, (t) => {
   const base = fs.mkdtempSync(path.join(TMP_ROOT, 'short-cache-'));
   t.after(() => fs.rmSync(base, { recursive: true, force: true }));
   // A ~/.cache that links to a longer directory: short as named, too long once resolved.
@@ -85,19 +85,30 @@ test('shortCacheRoot measures the real path of a linked cache and leaves no cach
   assert.equal(long.ctx.notes.length, 1, 'the skip is reported');
   assert.match(long.ctx.notes[0], /resolves to .*target-x/);
   assert.deepEqual(fs.readdirSync(target), [], 'nothing is made under the long target');
-  // No ~/.cache yet: the helper makes one for the root and removes both after the test.
+  // No ~/.cache: the helper passes the base over and says so, making nothing.
   const bare = path.join(base, 'bare');
   fs.mkdirSync(bare);
-  const made = withAccountHome(bare, (ctx) => shortCacheRoot(ctx, 4096));
-  assert.ok(made.root && made.root.startsWith(path.join(bare, '.cache') + path.sep), made.root);
-  assert.equal(fs.existsSync(made.root), true);
-  for (const hook of made.ctx.hooks) hook();
-  assert.deepEqual(fs.readdirSync(bare), [], 'the cache the helper made is gone');
-  // A ~/.cache that was there stays, with only the root removed.
+  const missing = withAccountHome(bare, (ctx) => shortCacheRoot(ctx, 4096));
+  assert.equal(missing.root, null);
+  assert.equal(missing.ctx.notes.length, 1, 'the missing cache is reported');
+  assert.match(missing.ctx.notes[0], /not made here/);
+  assert.deepEqual(fs.readdirSync(bare), [], 'no cache is made');
+  // A ~/.cache link to a missing directory is reported as such.
+  const dangling = path.join(base, 'dangling');
+  fs.mkdirSync(dangling);
+  fs.symlinkSync(path.join(base, 'gone'), path.join(dangling, '.cache'));
+  const broken = withAccountHome(dangling, (ctx) => shortCacheRoot(ctx, 4096));
+  assert.equal(broken.root, null);
+  assert.equal(broken.ctx.notes.length, 1);
+  assert.match(broken.ctx.notes[0], /link to a missing directory/);
+  assert.equal(fs.existsSync(path.join(base, 'gone')), false, 'the link target is not made');
+  // An existing ~/.cache gives a root there, and only the root goes after the test.
   fs.mkdirSync(path.join(bare, '.cache'));
   const kept = withAccountHome(bare, (ctx) => shortCacheRoot(ctx, 4096));
+  assert.ok(kept.root && kept.root.startsWith(path.join(bare, '.cache') + path.sep), kept.root);
+  assert.equal(fs.existsSync(kept.root), true);
   for (const hook of kept.ctx.hooks) hook();
-  assert.deepEqual(fs.readdirSync(path.join(bare, '.cache')), [], 'the existing cache stays');
+  assert.deepEqual(fs.readdirSync(path.join(bare, '.cache')), [], 'the existing cache stays, without the root');
 });
 
 // Linux CI alone runs /proc; the lsof variants stand in for macOS, where the
