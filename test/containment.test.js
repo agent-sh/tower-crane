@@ -56,6 +56,33 @@ test('nested attempt caps do not recursively shrink project defaults', () => {
   ]) assert.equal(C.budgetGroup(input), expected);
 });
 
+test('local cgroup events distinguish a child cap from the parent cap', (t) => {
+  const h = fixture(t);
+  const group = path.join(h.base, 'cgroup-events');
+  fs.mkdirSync(group);
+  for (const [file, text] of [
+    ['pids.events', 'max 1\n'], ['pids.events.local', 'max 0\n'],
+    ['memory.events', 'oom_kill 1\n'], ['memory.events.local', 'oom 0\noom_group_kill 0\n'],
+  ]) fs.writeFileSync(path.join(group, file), text);
+  assert.equal(C.limitReason(group, { tasks: 0, memory: 0 }), null);
+  fs.writeFileSync(path.join(group, 'memory.events.local'), 'oom 1\noom_group_kill 1\n');
+  assert.equal(C.limitReason(group, { tasks: 0, memory: 0 }), 'resource-memory-max');
+});
+
+test('nested cap failures leave the parent running when local events are available', async () => {
+  for (const [mode, reason] of [['nested-limit', 'resource-tasks-max'], ['nested-memory', 'resource-memory-max']]) {
+    const localEvents = !systemd || fs.existsSync(path.join(C.currentGroup(),
+      mode === 'nested-limit' ? 'pids.events.local' : 'memory.events.local'));
+    const result = await G.treeExec(process.execPath, [HARNESS, mode, 'unused'], {
+      resources: { tasks_max: 128, memory_max_bytes: memory }, timeout: 10000, // wait-allow: finite nested cap probe deadline
+    });
+    if (!localEvents && result.resource_reason === reason) continue;
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.resource_reason, undefined, result.stderr);
+    assert.ok(result.stdout.includes(`child: ${reason}\nparent-survived`), result.stdout + result.stderr);
+  }
+});
+
 test('fake harness nested launches and detached grandchildren retain containment', async (t) => {
   const h = fixture(t);
   const file = path.join(h.base, 'nested.jsonl');
@@ -71,6 +98,33 @@ test('fake harness nested launches and detached grandchildren retain containment
     assert.ok(records[1].inherited.startsWith(records[0].inherited + path.sep));
     for (const record of records) assert.ok(record.group.startsWith(records[0].inherited + path.sep), JSON.stringify(record));
   } else assert.equal(result.containment.backend, 'watchdog');
+});
+
+test('Node preloads run once inside the launched command containment', async (t) => {
+  const h = fixture(t);
+  const preload = path.join(h.base, 'preload.js');
+  const log = path.join(h.base, 'preload.jsonl');
+  fs.writeFileSync(preload, `
+const fs = require('node:fs');
+const C = require(${JSON.stringify(require.resolve('../lib/containment'))});
+fs.appendFileSync(process.env.CONTAINMENT_PRELOAD_LOG, JSON.stringify({
+  group: process.platform === 'linux' ? C.currentGroup() : null,
+  inherited: process.env[C.MARK] || null,
+  bootstrap: process.env.TOWER_CRANE_CONTAINMENT_NODE_OPTIONS || null,
+}) + '\\n');
+`);
+  const result = await G.treeExec(process.execPath, ['-e', 'console.log("loaded")'], {
+    env: { ...process.env, NODE_OPTIONS: `--require ${JSON.stringify(preload)}`, CONTAINMENT_PRELOAD_LOG: log },
+    resources: { tasks_max: 64, memory_max_bytes: memory },
+  });
+  assert.equal(result.status, 0, result.stderr);
+  const records = fs.readFileSync(log, 'utf8').trim().split('\n').map(JSON.parse);
+  assert.equal(records.length, 1);
+  assert.equal(records[0].bootstrap, null);
+  if (result.containment.backend === 'cgroup') {
+    assert.equal(records[0].inherited, result.containment.group);
+    assert.ok(records[0].group.startsWith(result.containment.group + path.sep));
+  }
 });
 
 test('finite nested fork storm fails the gate command and leaves another attempt running', async (t) => {
@@ -138,4 +192,5 @@ test('CLI cleanup records a capped gate command and names its failure', (t) => {
   assert.equal(gate.resource_reason, 'resource-tasks-max');
   const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
   assert.ok(events.some((e) => e.detail.resource_reason === 'resource-tasks-max'));
+  assert.match(h.ok(['inbox']), /resource-tasks-max/);
 });

@@ -10,7 +10,18 @@ function hold() {
   setTimeout(() => process.exit(0), 3000); // wait-allow: finite fake harness lifetime
 }
 
-if (mode === 'nested-storm') {
+if (mode === 'nested-limit' || mode === 'nested-memory') {
+  const memory = mode === 'nested-memory';
+  const child = C.spawn(process.execPath, [__filename, memory ? 'memory' : 'storm', file], {
+    stdio: 'inherit', resources: { tasks_max: memory ? 64 : process.env[C.MARK] ? 32 : 4,
+      memory_max_bytes: (memory ? 96 : 512) * 1024 * 1024 },
+  });
+  child.on('error', () => process.exitCode = 1);
+  child.on('exit', () => {
+    process.stdout.write(`child: ${child.resourceReason}\nparent-survived\n`);
+    setTimeout(() => {}, 300); // wait-allow: allow the parent's resource monitor to observe the child cap event
+  });
+} else if (mode === 'nested-storm') {
   const child = C.spawn(process.execPath, [__filename, 'storm', file], {
     stdio: 'inherit', resources: { tasks_max: 128, memory_max_bytes: 512 * 1024 * 1024 },
   });

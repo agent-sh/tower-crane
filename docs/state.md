@@ -557,7 +557,7 @@ reviewer, small agent and orchestrator, and each tests, proof, clean or local CI
 command. `init` records the defaults in `project.json`; older projects resolve
 missing fields at launch. `project show` prints the resolved limits. Both settings
 are operational: the orchestrator or owner can change them without a setting
-approval. There is no unlimited value.
+approval. Changes apply to subsequent launches. There is no unlimited value.
 
 Defaults read physical host memory and the smallest `memory.max` and `pids.max`
 along the caller's cgroup v2 ancestry, including the shared slice. Tower Crane
@@ -585,7 +585,10 @@ properties take precedence, and `scope: {}` only clears optional properties.
 Failure to set up a scope or delegated child fails the launch with
 `resource-scope-failed`; it never silently falls back after selecting cgroups.
 
-The monitor observes `pids.events` and `memory.events`. A denied fork fails the
+The monitor observes `pids.events` and `memory.events`, using local event files
+where available so a child's smaller cap does not fail its healthy parent.
+Older kernels without local event files may propagate a child cap failure to
+its parent attempt. A denied fork fails the
 attempt with `resource-tasks-max`, even if its harness ignores the fork error.
 A cgroup OOM fails it with `resource-memory-max`. Spawn phase events store the
 blocked reason and containment settings; status and the inbox show that reason.
