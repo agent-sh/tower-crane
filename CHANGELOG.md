@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.3 (2026-10-16)
+## 0.1.3 (2026-10-17)
 
 ### Security
 
@@ -12,7 +12,17 @@
 - The worktree lock moved from the repository's git directory to `worktree/lock` in the state directory. A sandboxed worker can write the git directory, so it could hold the old lock to stall gates, dispatch and prune for a minute, or delete a held one. Spawn refuses a `sandbox.write` path inside the state directory or one that holds the state directory or the worktrees root, and refuses an agent file with `sandbox: true` and `writeOutside: worktrees`.
 - A sandboxed claude agent gets `CLAUDE_CODE_TMPDIR` apart from its commands' `TMPDIR`, so its commands can read but not write the files claude keeps there (prompts, plugin staging, task output). Before, they shared one directory, and a command could plant files that claude read back.
 - A binary local CI artifact, one with a NUL byte or invalid UTF-8, is redacted at the byte level and no longer decoded. Environment secrets, matched by their UTF-8 bytes, and token shapes become ASCII `[redacted:NAME]` markers, and every other byte stays as written. Before, a file with a NUL byte was kept unredacted, and one with invalid UTF-8 was decoded, its invalid bytes becoming U+FFFD.
-- A binary artifact is not copied when a secret shows that exact byte matches cannot remove: in UTF-16 text read either way and at either byte alignment, or once escapes and controls are removed. Its skipped entry names the view.
+- A binary artifact is not copied when a secret shows that exact byte matches cannot remove: in UTF-16 text read either way and at either byte alignment, once escapes and controls are removed, or across line breaks. Its skipped entry names the view.
+- Token shapes (`ghp_`, `sk-`, AWS and Slack keys, `Authorization` values) are found by a scan that reads each character a bounded number of times, so a run of any length is redacted whole. Before, a prefix followed by about 8 MiB of token characters threw a RangeError, and the tests, clean and local CI gates crashed instead of redacting their output.
+- A token glued to more word characters is redacted whole and the word after it stays. Before, `ghp_<token>_backup` kept the whole token. A carriage return or other control inside a glued token no longer splits it, while one at a token's end still ends it. An AWS key ends at its 20th character.
+- Every token shape is searched in the same text and overlapping matches are redacted once. Before, `sk-authorization: s3cr3tvalue` kept `s3cr3tvalue`.
+- A token split by escapes, such as a stray ESC, `ESC (`, `ESC [` or an unterminated OSC with a second escape inside it, or by a line break, is redacted in the local CI log, its tail and text artifacts. A line break may also split the token's prefix: `g` at a line's end and `hp_...` on the next line is redacted. Such a break joins only with at least two of the prefix's characters before it or three after it, so `0.3 s` then a line `K-long_async` stays text. A binary artifact holding such a token is not copied.
+- An environment value is found with escapes, controls and line breaks between its characters, each escape read both as an escape and as text. Two splits still leave part of a value: a bare `ESC [` whose next character reads as the escape's final byte, and an escape inside a value that sits next to a token a line break splits. A token a line break splits, glued to an `Authorization` header by a two-character escape, also leaves the header's value. docs/state.md lists these and the other known misses.
+- Local CI and the tests gate's failure tail, host-only commands included, also read stdout and stderr each on its own for secrets. Before, a token wrapped onto two stdout lines with a stderr line read between the halves was stored unredacted.
+- Scanning a 64 MiB binary local CI artifact stays under about 460 MiB, also when it is dense with overlapping matches, NUL-separated tokens or line-split tokens. The UTF-16 views run only when the file has a NUL byte or an environment value is not ASCII.
+- A sandbox placeholder that a live sandbox binds over is no longer removed by the sweep before a claude spawn or the cleanup after an agent exits. Removing it detached the bind, and another agent of the task could then write `.bashrc` or another protected name. Each removal reads every process's mount table before and after it moves the name aside, and keeps the name when one has a mount there or a table cannot be read.
+- A sandboxed spawn refuses a `TOWER_CRANE_PLUGIN_ROOT` that is the home, holds it, or has no `package.json` naming `@agent-sh/tower-crane`. Set to the home, it opened `~/bin`, `~/lib` and `~/package.json` to the agent.
+- Closing a broker no longer deletes its broker directory recursively. A codex agent writes that directory, and a link it swapped in during the walk could lead the delete outside. The broker removes only the entries it wrote, without following links, and renames a directory with anything else in it to `brokers/.stale-<agent>-<random>`. Something an agent leaves at `broker.sock` is removed, renamed aside or unlinked without being walked, and no longer fails later spawns.
 - A brokered agent's git shim sets `GIT_CONFIG_NOSYSTEM=1`, so the remote URLs it checks and the git it runs skip the system config.
 - With `sandbox.session_bus` on, a codex agent whose runtime directory lies outside `/run` under a readable path, such as `/var/tmp`, sees only the bus socket there. Before, spawn hid the directory's other entries one by one, so a socket made there later was reachable. The listed entries leave out links and entries another user could swap for a link. Spawn refuses the setting when the list would push the codex profile past the 128 KiB codex can pass its sandbox. Before, codex failed with "Argument list too long". Spawn also refuses the setting for a codex worker whose runtime directory lies in a `sandbox.write` path, in its worktree, or under `/usr` or `/etc`.
 
@@ -27,6 +37,11 @@
 - `wait` cursors are `OFFSET:CUTS`. Plain offsets and event ids still work as `--after`.
 - Gate output and local CI logs turn a carriage return into a newline, CRLF into one, and drop other control characters, NUL included.
 - A holder of the new worktree lock also takes the old path while it is free, so an older Tower Crane process still running waits for it. A lock already at the old path is not waited for; each process that finds it prints a notice naming it. Remove it once older processes have stopped.
+- A sandboxed spawn needs `TOWER_CRANE_PLUGIN_ROOT`, when set, to be a Tower Crane runtime: a directory whose `package.json` names `@agent-sh/tower-crane`, not the home or a directory that holds it. Point it at a checkout or the installed package, or unset it.
+- A broker's `/tmp/tower-crane-XXXXXX` socket directory now holds `owner.json` with the monitor's pid, host and start time. A broker start removes this user's such directories older than a minute whose owner on this host has exited or whose pid names a later process. A directory a 0.1.2 broker made has no record and goes only when it holds nothing but a socket that refuses connections, so a broker still running keeps its own.
+- Commit manifests keep `ino` and add `ino_exact`, the exact inode as a string. Recovery compares `ino_exact` when it is there, so 0.1.2 and 0.1.3 finish each other's torn commits.
+- A spawn's shims and broker run one copy of the tool, so an upgrade during a run does not mix them. Shims from 0.1.0 through 0.1.2 frame their packs as 0.1.3 does. A shim from a snapshot before 0.1.0 now hears that it and the broker come from different snapshots instead of "pack signature mismatch".
+- Off Windows, `spawn` and `spawn phase` events record `run_mark`, the agent's launch marker. On Linux a dead agent's home and broker directory stay until no process carrying one of its markers runs, so a process that left with `setsid` holds them until it exits.
 
 ### CI and submit
 
@@ -63,6 +78,12 @@
 - A spawn inside another agent no longer runs that agent's git shim for its supervisor's config scan, which could make the start miss its 10 s window. Empty PATH entries are skipped, and a PATH with nothing left refuses the start instead of finding git in the agent's worktree.
 - Where there is no `/proc`, as on macOS, dispatch asks `ps` every 100 ms whether a supervisor that has not reported has exited, instead of waiting out the 10 s.
 - The codex config escapes DEL (U+007F) in strings and keys. A path holding it made codex reject the whole config.
+- `spawn --dry-run` no longer reads a claude rung's `env_file`. With a short cache root, as a user's own `~/.cache` is, a missing or unreadable file failed the preview.
+- A dead agent's home and broker directory are removed only once its monitor, its harness and every process left in the harness's process group have exited. Before, a process the agent left behind could still write the tree while it was deleted. `brokers/.stale-<agent>-<random>` directories go once their agent is gone.
+- On Linux, a process group whose leader's pid now names a process that started later reads as exited. A dead agent's home and broker directory, and a dead worker's reservation, no longer stay behind when the pid is given out again.
+- A broker start removes the `/tmp/tower-crane-XXXXXX` socket directories that killed spawn monitors left behind. A start that cannot listen removes the directories it made, and a failed cleanup no longer hides the error that caused it. A FIFO planted as a broker's `owner.json` no longer blocks later broker starts.
+- An agent that hung up while the broker checked or pushed its commit is seen when the last pack frame and the end frame arrive in one read. Before, the push still ran.
+- The spawn sweep no longer warns at every spawn about a symlink by a sandbox placeholder name. The submit refusal for an empty placeholder-named file says that a real file by that name needs content.
 
 ### Locks and dispatch
 
@@ -71,6 +92,12 @@
 - A dispatch lock whose gone holder's marker cannot be removed is reported once per wait, not on every pass. `TOWER_CRANE_LOCK_TRACE` records dispatch lock holdings again, labelled `dispatch`.
 - The worktree lock holds its holder's marker, as the state lock does. The next process that wants a killed holder's lock clears it. A live holder on the same host and pid namespace keeps it whatever its age; a holder elsewhere counts as gone 60 s after its marker last changed, and gates under automation refresh theirs every 10 s. The lock is per state directory, so two projects on one repository do not exclude each other.
 - Removing a task worktree (cancel, retirement, `worktree prune`) and each prune run under the worktree lock, so a relink no longer writes into an admin directory git is emptying. Preparing a worktree that a retirement is removing is refused at once.
+- The orchestrator lease recognizes more session ancestors. A macOS login shell that `ps` names `-zsh` counts as a session shell, and so does `fish -i -C 'source x'`. `gemini`, `aider`, `goose` and `cursor-agent` count as harnesses, including Node and Python entrypoints. Other agent CLIs share their terminal shell's lease.
+
+### Stacks
+
+- Stack sync and refresh defer, with a reason naming it, when a member worktree has a rebase, merge, cherry-pick, revert, `git am` or `git bisect` in progress. A `gh stack sync` killed by a second signal or its timeout could leave a rebase that `git status` does not show, and the worker got that state. A spawn of such a task refuses with the same reason instead of git's "already used by worktree" error.
+- A drain during a spawn's stack refresh inside `wait` starts no agent and stops the rest of the refill batch. The spawn records `stack sync deferred`, and the next `wait` refreshes the stack and dispatches it. A drain that reaches a climb dispatch in recovery leaves the climb pending, and `wait` still exits 0.
 
 ### State and events
 
@@ -90,6 +117,8 @@
 - `status` and `ready` count a claim as exited once its supervisor records the attempt inactive, before any pid probe, so a reused harness pid no longer makes them disagree.
 - Releasing output holders compares each process's creation time with the snapshot exactly, from one CIM reading on both sides taken while the stop holds every target's handle, instead of matching .NET's StartTime within 1 ms. A target that exits after its creation time is read is reported `gone`, not `stopped`.
 - A process whose own lock marker could not be deleted on release, while a scanner holds it, retries the deletion at its next look instead of keeping the lock for as long as it runs.
+- Lock-free readers notice a log replaced while they read. They compared file ids as Numbers, which round past 2^53, so a replaced log could pass for the one they read. Git lock and sandbox placeholder cleanup, the board's reload signature and the spawn monitor's state signature compare exact file ids too.
+- Command lines follow CommandLineToArgvW for runs of quotes: `"a""b"` is `a"b`.
 
 ## 0.1.2 (2026-10-15)
 
