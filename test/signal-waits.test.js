@@ -387,6 +387,13 @@ test('the lint rejects sleeps, counted sleep loops and other clocks, and accepts
     'const hook = `#!/bin/sh\\n# wait for the go file\\ni=0\\nwhile [ $i -lt 50 ]; do sleep 0.1; i=$((i+1)); done\\n`;', // wait-allow: rejected lint fixture
     'const hook = `echo "waiting for go"; i=0; while [ $i -lt 50 ]; do sleep 0.1; i=$((i+1)); done`;', // wait-allow: rejected lint fixture
     'const hook = `echo "sleep until ready" >&2\\nfor i in $(seq 50); do [ -f go ] && break; sleep 0.1; done`;', // wait-allow: rejected lint fixture
+    // A loop word in quoted text, a comment or a heredoc neither opens nor closes the loop around it.
+    'const hook = `for i in 1 2 3; do echo "(step) done"; sleep 1; done`;', // wait-allow: rejected lint fixture
+    "const hook = `for i in 1 2 3; do echo 'a; done'; sleep 1; done`;", // wait-allow: rejected lint fixture
+    'const hook = `i=0; while ! grep -q "(x) for" log && [ $i -lt 50 ]; do sleep 0.1; i=$((i+1)); done`;', // wait-allow: rejected lint fixture
+    'const hook = `for i in 1 2 3; do\\ncat > f <<EOF\\ndone\\nEOF\\nsleep 1\\ndone`;', // wait-allow: rejected lint fixture
+    'const hook = `for i in 1 2 3; do # x; done\\nsleep 1\\ndone`;', // wait-allow: rejected lint fixture
+    "const hook = `sh -c 'for i in 1 2 3; do sleep 1; done'`;", // wait-allow: rejected lint fixture
     // An echo's command substitution runs, and a helper's sleep may take a quoted or interpolated operand.
     'const hook = `for i in 1 2 3; do echo $(sleep 1); done`;', // wait-allow: rejected lint fixture
     "function nap() { cp.spawnSync('sh', ['-c', 'sleep \"$d\"']); } // wait-allow: cadence\nfor (let i = 0; i < 3 && !ok(); i++) nap();", // wait-allow: rejected lint fixture
@@ -433,6 +440,9 @@ test('the lint rejects sleeps, counted sleep loops and other clocks, and accepts
     'const hook = `for i in 1 2 3; do echo "sleep 1"; done`;',
     'const hook = `for i in 1 2 3; do touch f # sleep 1\ndone`;',
     'const hook = `for i in 1 2 3; do tool --sleep 1; done`;',
+    // A whole loop in quoted text or a heredoc is read on its own.
+    'const hook = `cat <<EOF\\nfor i in 1 2 3; do echo; done\\nEOF\\nwhile [ ! -f go ]; do sleep 0.1; done`;',
+    'const hook = `while [ ! -f go ]; do echo "done"; sleep 0.1; done; for i in 1 2; do echo; done`;',
     'await scheduler.wait(HUNG_TEST_MS);',
     'const elapsed = process.hrtime.bigint() - start; report(elapsed);',
   ]) assert.deepEqual(waitFindings(source), [], source);
