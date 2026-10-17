@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
-const { cachedFixture, BIN, ROOT } = require('./helpers');
+const { cachedFixture, ownerFallbacks, shortCacheRoot, BIN, ROOT, TMP_ROOT } = require('./helpers');
 
 function auditCli(run, timings, now) {
   return (args, options = {}) => {
@@ -34,6 +34,8 @@ function auditCli(run, timings, now) {
 }
 
 const L = require('../lib/ladder');
+const P = require('../lib/claude-provider');
+const { readPublished } = require('./atomic-file');
 
 // Read the alias table rather than naming a release, so a swap of the shipped
 // table changes no test.
@@ -56,7 +58,7 @@ function setup(t) {
   const commands = [];
   h.profiles = () => {
     const file = h.env.TOWER_CRANE_TEST_PROVIDER_TRACE;
-    return file && fs.existsSync(file) ? fs.readFileSync(file, 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse) : [];
+    return file && fs.existsSync(file) ? readPublished(file, 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse) : [];
   };
   t.after(async () => {
     try {
@@ -110,10 +112,7 @@ function setup(t) {
     'ladder', 'set', 'hard', '--provider', provider, '--model', model,
     '--supervision', '{"retries":1,"backoff_ms":10,"max_backoff_ms":10,"stall_ms":60000}',
   ]);
-  h.fallbacks = (routes) => {
-    fs.mkdirSync(path.dirname(h.userConfig), { recursive: true });
-    fs.writeFileSync(h.userConfig, JSON.stringify({ ladder: { hard: { fallbacks: routes } } }));
-  };
+  h.fallbacks = (routes) => ownerFallbacks(h, 'hard', routes);
   h.login = () => fs.writeFileSync(path.join(claude, '.credentials.json'), 'stub login, never parsed\n');
   h.aws = () => {
     fs.writeFileSync(path.join(aws, 'config'), '[profile personal]\nregion = eu-west-1\n');
@@ -152,6 +151,9 @@ for (const [provider, other, model, plain] of [
     h.login();
     h.aws();
     h.env.CLAUDE_CODE_USE_VERTEX = '1';
+    h.env.CLAUDE_CODE_USE_ANTHROPIC_AWS = '1';
+    h.env.CLAUDE_CODE_USE_GATEWAY = '1';
+    h.env.CLAUDE_CODE_USE_MANTLE = '1';
     h.env.ANTHROPIC_API_KEY = 'stub-secret-env-value';
     h.env.TOWER_CRANE_TEST_FAIL_PROVIDER = provider;
     h.primary(provider, model);
@@ -173,6 +175,10 @@ for (const [provider, other, model, plain] of [
       assert.deepEqual(attempt.claim, attempts[0].claim);
       assert.equal(attempt.provider_env.CLAUDE_CODE_USE_VERTEX, '0');
       assert.equal(attempt.provider_env.CLAUDE_CODE_USE_FOUNDRY, '0');
+      assert.equal(attempt.provider_env.CLAUDE_CODE_USE_ANTHROPIC_AWS, '0');
+      assert.equal(attempt.provider_env.CLAUDE_CODE_USE_GATEWAY, '0');
+      // Mantle is a Bedrock endpoint, so only the first-party pin turns it off.
+      assert.equal(attempt.provider_env.CLAUDE_CODE_USE_MANTLE, attempt.provider === 'bedrock' ? '1' : '0');
       assert.equal(attempt.provider_env.ANTHROPIC_MODEL, attempt.model);
       if (attempt.provider === 'bedrock') {
         assert.equal(attempt.provider_env.AWS_PROFILE, 'personal');
@@ -200,8 +206,9 @@ for (const [provider, other, model, plain] of [
     assert.deepEqual(pinned, events.find((e) => e.cmd === 'spawn').detail.tool, 'provider fallback keeps the original runtime');
     const providerFile = path.relative(ROOT, require.resolve('../lib/claude-provider'));
     assert.ok(fs.existsSync(path.join(pinned.path, providerFile)));
-    for (const event of Object.values(JSON.parse(generated).hooks)) {
-      assert.ok(event[0].hooks[0].command.includes(path.join(pinned.path, 'lib', 'hook-bridge.js')));
+    for (const [name, event] of Object.entries(JSON.parse(generated).hooks)) {
+      const script = name === 'PreToolUse' ? 'read-guard.js' : 'hook-bridge.js';
+      assert.ok(event[0].hooks[0].command.includes(path.join(pinned.path, 'lib', script)), name);
     }
   });
 }
@@ -313,6 +320,15 @@ for (const provider of ['anthropic', 'bedrock']) {
 
 test('Bedrock env_file readiness is deferred without reading the file during a dry run', (t) => {
   const h = setup(t);
+  // A cache root as short as a user's own gives claude its short temp directories
+  // (claudeTmp), whose planning asks for the worker's environment. Under the
+  // fixture's deeper root the preview skipped that step, so only runs with a short
+  // test root saw a preview read the file. Where no short root can be made, the
+  // rest of the test still runs on the fixture's cache.
+  const cache = process.platform === 'win32' ? null
+    : shortCacheRoot(t, require('../lib/gate-tmp').HARNESS_TMPDIR_MAX - Buffer.byteLength(path.join(path.sep, 'tc', '0'.repeat(12))));
+  if (cache) h.env.XDG_CACHE_HOME = cache;
+  else t.diagnostic('no cache root short enough for claudeTmp; the dry run skips claudeOwnTmp here');
   h.primary('bedrock');
   const file = path.join(h.base, 'provider.env');
   h.ok(['project', 'set', '--env_file', file]);
@@ -361,3 +377,35 @@ for (const source of ['project env', 'rung env', 'env_file']) {
     assert.equal(h.attempts()[2].provider_env.AWS_REGION, 'eu-west-1');
   });
 }
+
+test('a Bedrock switch in the user settings file bills a rung that names no provider as api', (t) => {
+  const base = fs.realpathSync.native(fs.mkdtempSync(path.join(TMP_ROOT, 'claude-provider-billing-')));
+  t.after(() => fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
+  const from = { claude: { dir: path.join(base, 'claude') } };
+  fs.mkdirSync(from.claude.dir, { recursive: true });
+  fs.writeFileSync(path.join(from.claude.dir, 'settings.json'), JSON.stringify({ env: { CLAUDE_CODE_USE_BEDROCK: '1' } }));
+  assert.equal(L.billing({ harness: 'claude' }, {}), 'subscription', 'the launch environment alone does not show the route');
+  assert.equal(L.billing({ harness: 'claude' }, P.routedEnv({}, from)), 'api');
+});
+
+test('Claude billing follows Claude Code credential precedence on the first-party route', (t) => {
+  const base = fs.realpathSync.native(fs.mkdtempSync(path.join(TMP_ROOT, 'claude-provider-helper-')));
+  t.after(() => fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
+  const from = { claude: { dir: path.join(base, 'claude') } };
+  fs.mkdirSync(from.claude.dir, { recursive: true });
+  assert.equal(L.billing({ harness: 'claude' }, {}, from), 'subscription', 'no settings file is a login');
+  fs.writeFileSync(path.join(from.claude.dir, 'settings.json'), JSON.stringify({ apiKeyHelper: 'print-key' }));
+  for (const rung of [{ harness: 'claude' }, { harness: 'claude', provider: 'anthropic' }]) {
+    assert.equal(L.billing(rung, P.routedEnv({}, from), from), 'api');
+    // apiKeyHelper ranks above a long-lived OAuth token.
+    assert.equal(L.billing(rung, P.routedEnv({ CLAUDE_CODE_OAUTH_TOKEN: 'fixture' }, from), from), 'api');
+  }
+  fs.writeFileSync(path.join(from.claude.dir, 'settings.json'), '{}');
+  const profile = { ANTHROPIC_PROFILE: 'fixture' };
+  const federation = { ANTHROPIC_FEDERATION_RULE_ID: 'fixture', ANTHROPIC_ORGANIZATION_ID: 'fixture' };
+  assert.equal(L.billing({ harness: 'claude' }, { CLAUDE_CODE_OAUTH_TOKEN: 'fixture' }, from), 'subscription');
+  assert.equal(L.billing({ harness: 'claude' }, profile, from), 'api', 'a named profile is a Console login');
+  assert.equal(L.billing({ harness: 'claude' }, federation, from), 'api', 'federation credentials are a Console login');
+  assert.equal(L.billing({ harness: 'claude' }, { ANTHROPIC_FEDERATION_RULE_ID: 'fixture' }, from), 'subscription', 'federation needs both variables');
+  assert.equal(L.billing({ harness: 'claude' }, { ...profile, CLAUDE_CODE_OAUTH_TOKEN: 'fixture' }, from), 'subscription', 'an OAuth token ranks above profiles');
+});

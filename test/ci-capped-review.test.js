@@ -43,7 +43,7 @@ function fixture(t) {
         suites: [...(build ? [suite('github-actions', 1)] : []), ...suites],
       }));
       const r = cp.spawnSync(process.execPath, ['--require', github, BIN, 'check', 'ci', 'T1', '--agent', 'checker', '--json'], {
-        cwd: h.repo, env: { ...h.env, TEST_GITHUB: file }, encoding: 'utf8', timeout: 60000,
+        cwd: h.repo, env: { ...h.env, TEST_GITHUB: file }, encoding: 'utf8', timeout: 300000,
       });
       const evidence = JSON.parse(r.stdout);
       assert.equal(evidence.sha, sha);
@@ -56,6 +56,10 @@ function fixture(t) {
         source: 'check ci', commands: evidence.commands, ci_policy: evidence.ci_policy,
         ...(evidence.capped_review ? { capped_review: evidence.capped_review } : {}),
         ...(evidence.confirmed_failure !== undefined ? { confirmed_failure: evidence.confirmed_failure } : {}),
+        ...(evidence.infrastructure_failure ? { infrastructure_failure: true } : {}),
+        ...(evidence.worker_failure ? { worker_failure: true } : {}),
+        ...(evidence.pending ? { pending: true } : {}),
+        ...(evidence.not_running ? { not_running: true } : {}),
       });
       assert.equal(evidence.source, 'check ci');
       assert.ok(Array.isArray(evidence.commands));

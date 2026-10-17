@@ -42,7 +42,7 @@ function cliCopy(h) {
       });
       let stderr = '';
       p.stderr.on('data', (d) => { stderr += d; });
-      return { result: new Promise((resolve) => p.on('close', (code) => resolve({ code, stderr }))) };
+      return { child: p, result: new Promise((resolve) => p.on('close', (code) => resolve({ code, stderr }))) };
     },
   };
 }
@@ -53,6 +53,7 @@ module.exports = {
   async run(ctx) {
     fs.writeFileSync(process.env.GATE_OUT, JSON.stringify({ root: ctx.root, worktree: ctx.worktree, task: ctx.task.id, sha: ctx.task.sha, args: ctx.args, base: ctx.project.base }));
     ctx.log('fake gate ran');
+    await ctx.exec(process.execPath, ['-e', 'process.exit(0)']);
     return { ok: process.env.GATE_OK === '1', summary: 'fake gate', ref: 'run-1', sha: process.env.GATE_SHA || undefined };
   },
 };
@@ -235,7 +236,8 @@ test('failed tests evidence names the failing tests when the spec reporter is co
   const sha = manifestTask(h, { submitted: {
     'test/failure.test.js': `const test = require('node:test');
 const assert = require('node:assert/strict');
-test('colored regression failure', () => {
+// A hyperlink around the name, as a reporter that links tests to their files prints it.
+test('\\x1b]8;;file:///test/failure.test.js\\x07colored regression failure\\x1b]8;;\\x07', () => {
   assert.equal('actual', 'expected');
 });
 `,
@@ -251,8 +253,8 @@ test('colored regression failure', () => {
 
   const evidence = h.readState('tasks.json').tasks[0].evidence.at(-1);
   assert.equal(evidence.test_failure.names.length, 1);
-  assert.match(evidence.test_failure.names[0], /^colored regression failure \(/);
-  assert.match(evidence.summary, /Failing tests:\n- colored regression failure \(/);
+  assert.equal(evidence.test_failure.names[0], 'colored regression failure');
+  assert.match(evidence.summary, /Failing tests:\n- colored regression failure\n/);
   assert.equal(evidence.test_failure.output_tail.includes('\u001b'), false);
   assert.match(result.stdout, /colored regression failure/);
 });
@@ -293,6 +295,13 @@ test('failed test diagnostics redact process, project, rung and env_file secrets
   const testFile = `const test = require('node:test');
 const assert = require('node:assert/strict');
 const report = [process.env.T83_PROCESS_TOKEN, ${literals.map((value) => JSON.stringify(value)).join(', ')}].join(' ');
+// The token wrapped onto two stdout lines with a stderr line between them, each read on its own.
+const pause = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); // wait-allow: the gate sends the fixture no signal when it has read a write
+console.log('split ' + process.env.T83_PROCESS_TOKEN.slice(0, 12));
+pause(100);
+console.error('between the halves');
+pause(100);
+console.log(process.env.T83_PROCESS_TOKEN.slice(12) + ' tail');
 test('failure ' + process.env.T83_PROCESS_TOKEN, () => {
   console.log(report);
   assert.fail('fixture failure');
@@ -307,7 +316,8 @@ test('failure ' + process.env.T83_PROCESS_TOKEN, () => {
     if (key.startsWith('NODE_TEST_')) delete h.env[key];
   }
 
-  const cmd = `${shellQuote(process.execPath)} --test --test-reporter=tap test/failure.test.js`;
+  // In process, so the fixture's own stdout and stderr reach the gate as two streams.
+  const cmd = `${shellQuote(process.execPath)} --test --test-isolation=none --test-reporter=tap test/failure.test.js`;
   h.ok(['project', 'set', '--tests-mode', 'run-only', '--tests-cmd', cmd]);
   const result = h.run(['check', 'tests', 'T1', '--agent', 'checker', '--json'], {
     env: { T83_PROCESS_TOKEN: canaries.process },
@@ -315,6 +325,10 @@ test('failure ' + process.env.T83_PROCESS_TOKEN, () => {
   assert.equal(result.code, 1, result.stderr + result.stdout);
 
   const evidence = h.readState('tasks.json').tasks[0].evidence.at(-1);
+  // Each stream's own text is read for secrets too, so the stderr line between the halves leaves
+  // both redacted.
+  assert.match(evidence.test_failure.output_tail, /^between the halves$/m);
+  assert.match(evidence.test_failure.output_tail.replace(/^between the halves\n/m, ''), /^split \[redacted:T83_PROCESS_TOKEN\](?:\n\[redacted:T83_PROCESS_TOKEN\])? tail$/m);
   assert.ok(evidence.test_failure.names.some((name) => name.includes('[redacted:T83_PROCESS_TOKEN]')));
   assert.ok(evidence.test_failure.output_tail.includes('[redacted:T83_PROCESS_TOKEN]'));
   assert.ok(evidence.summary.includes('[redacted:T83_PROCESS_TOKEN]'));
@@ -423,6 +437,33 @@ test('a token that straddles the output tail cut is redacted, not kept as a frag
   const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8');
   const output = [result.stdout, result.stderr, JSON.stringify(evidence), events, h.ok(['task', 'show', 'T1'])].join('\n');
   assert.equal(output.includes(body), false, 'the token body leaked past the output tail cut');
+});
+
+test('a stderr line written while stdout is mid-token cannot split the token past redaction', (t) => {
+  const h = makeRepo(t);
+  // stdout flushes a block that ends inside the token; stderr writes before the rest arrives.
+  const script = `const fs = require('node:fs');
+const pause = () => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 300); // wait-allow: the gate must read each write before the other stream writes, the condition under test
+fs.writeSync(1, 'key sk-T36');
+pause();
+fs.writeSync(2, '! not ok 1 - split\\n');
+pause();
+fs.writeSync(1, '1HeadT361TailBody0123 end\\n');
+process.exit(1);
+`;
+  const sha = manifestTask(h, { submitted: { 'print-split.js': script } });
+  submitTestsFixture(h, sha);
+  h.ok(['project', 'set', '--tests-mode', 'run-only', '--tests-cmd', `${shellQuote(process.execPath)} print-split.js`]);
+  const result = h.run(['check', 'tests', 'T1', '--agent', 'checker']);
+  assert.equal(result.code, 1, result.stdout + result.stderr);
+
+  const evidence = h.readState('tasks.json').tasks[0].evidence.at(-1);
+  assert.match(evidence.test_failure.output_tail, /^! not ok 1 - split$/m);
+  assert.match(evidence.test_failure.output_tail, /^key \[redacted:API_KEY\] end$/m);
+  const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8');
+  const output = [result.stdout, result.stderr, JSON.stringify(evidence), events, h.ok(['task', 'show', 'T1'])].join('\n');
+  assert.equal(output.includes('sk-T36'), false, 'the first half of the token leaked');
+  assert.equal(output.includes('T361TailBody'), false, 'the second half of the token leaked');
 });
 
 test('tests evidence stores its mode in the audit event and stops counting when the policy changes', (t) => {
@@ -640,7 +681,7 @@ test('merge removes the merged task worktree and records it', (t) => {
   assert.equal(removed.detail.removed, true);
 });
 
-test('merge keeps a worktree with uncommitted changes and says why', (t) => {
+test('merge saves uncommitted changes and removes the worktree', (t) => {
   const h = makeRepo(t);
   h.init();
   const wt = acceptedWithWorktree(h);
@@ -651,14 +692,14 @@ test('merge keeps a worktree with uncommitted changes and says why', (t) => {
 
   const merged = cli.run(['merge', 'T1'], { GATE_OUT: path.join(h.base, 'gate.json'), GATE_OK: '1' });
   assert.equal(merged.code, 0, merged.stderr);
-  assert.equal(fs.readFileSync(path.join(wt.path, 'notes.txt'), 'utf8'), 'unfinished\n');
-  assert.ok(h.registers(wt.path), 'git still registers it');
-  const kept = readEvents(h).find((e) => e.cmd === 'worktree kept');
-  assert.equal(kept.task, 'T1');
-  assert.equal(kept.detail.reason, 'uncommitted changes');
+  assert.ok(!fs.existsSync(wt.path));
+  assert.ok(!h.registers(wt.path));
+  const removed = readEvents(h).find((e) => e.cmd === 'worktree removed');
+  assert.equal(removed.task, 'T1');
+  assert.equal(fs.readFileSync(path.join(removed.detail.saved, 'files', 'notes.txt'), 'utf8'), 'unfinished\n');
 });
 
-test('merge keeps the worktree while merge.keep_branch is set', (t) => {
+test('merge retires local worktrees even when remote branches are kept', (t) => {
   const h = makeRepo(t);
   h.init(['--merge-keep-branch', 'true']);
   const wt = acceptedWithWorktree(h);
@@ -668,9 +709,9 @@ test('merge keeps the worktree while merge.keep_branch is set', (t) => {
 
   const merged = cli.run(['merge', 'T1'], { GATE_OUT: path.join(h.base, 'gate.json'), GATE_OK: '1' });
   assert.equal(merged.code, 0, merged.stderr);
-  assert.ok(fs.existsSync(wt.path), 'the worktree stays for its branch');
-  const kept = readEvents(h).find((e) => e.cmd === 'worktree kept');
-  assert.equal(kept.detail.reason, 'merge.keep_branch is set');
+  assert.ok(!fs.existsSync(wt.path));
+  assert.equal(h.git(['branch', '--list', wt.branch]), '');
+  assert.equal(readEvents(h).find((e) => e.cmd === 'worktree removed').task, 'T1');
 });
 
 test('a task sent back and claimed after merge looked at its worktree keeps the worktree', async (t) => {
@@ -686,7 +727,7 @@ test('a task sent back and claimed after merge looked at its worktree keeps the 
   const merge = cli.start(['merge', 'T1'], {
     GATE_OUT: path.join(h.base, 'gate.json'), GATE_OK: '1', HOOK_STOP_WORKTREE_STATUS: paused,
   });
-  assert.ok(await waitFor(paused), 'merge reached its first look at the worktree');
+  await waitFor(paused, { nonempty: true, what: 'merge reached its first look at the worktree', alive: merge.child });
   const sent = await h.runAsync(['rework', 'T1', '--reason', 'racing the merge']);
   const claimed = await h.runAsync(['claim', 'T1', '--agent', 'w-2']);
   fs.writeFileSync(`${paused}.go`, '');
@@ -718,7 +759,7 @@ test('a merge of an older head keeps the worktree of a newer accepted head', asy
   const merge = cli.start(['merge', 'T1'], {
     GATE_OUT: path.join(h.base, 'gate.json'), GATE_OK: '1', HOOK_STOP_WORKTREE_STATUS: paused,
   });
-  assert.ok(await waitFor(paused), 'merge reached its first look at the worktree');
+  await waitFor(paused, { nonempty: true, what: 'merge reached its first look at the worktree', alive: merge.child });
   h.ok(['rework', 'T1', '--reason', 'newer head']);
   h.ok(['claim', 'T1', '--agent', 'w-2']);
   h.git(['commit', '-q', '--allow-empty', '-m', 'newer head'], wt.path);
@@ -758,7 +799,7 @@ test('merge refuses rework and claim while it removes the task worktree', async 
   const merge = cli.start(['merge', 'T1'], {
     GATE_OUT: path.join(h.base, 'gate.json'), GATE_OK: '1', HOOK_STOP_WORKTREE_REMOVE: paused,
   });
-  assert.ok(await waitFor(paused), 'merge reached git worktree remove');
+  await waitFor(paused, { nonempty: true, what: 'merge reached git worktree remove', alive: merge.child });
   const sent = await h.runAsync(['rework', 'T1', '--reason', 'racing the removal']);
   const claimed = await h.runAsync(['claim', 'T1', '--agent', 'w-2']);
   fs.writeFileSync(`${paused}.go`, '');

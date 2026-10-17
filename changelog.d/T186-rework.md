@@ -1,0 +1,1 @@
+- Validate the current retained branch head before retrying deletion and link new recovery bundles to earlier dirty saves. Check live worktree ownership under the lock that reserves its path and branch, and block conflicting task transitions while removal is active. Verify partial stack merges preserve their open upper branches and worktrees.

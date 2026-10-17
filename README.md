@@ -3,6 +3,7 @@
   <p><strong>Hand agents an issue or a whole project. Software keeps the plan, the gates and the merge.</strong></p>
   <p>
     <a href="https://github.com/agent-sh/tower-crane/actions/workflows/ci.yml"><img src="https://github.com/agent-sh/tower-crane/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+    <a href="https://www.npmjs.com/package/@agent-sh/tower-crane"><img src="https://img.shields.io/npm/v/@agent-sh/tower-crane.svg" alt="npm"></a>
     <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-64748B.svg" alt="License: MIT"></a>
   </p>
 </div>
@@ -25,13 +26,13 @@ Tower Crane moves those steps out of the model:
 
 ## Quick start
 
-You need Node 24 or newer, git, an authenticated `gh`, a GitHub repository with an `origin` remote, the harness CLIs your ladder names (`claude` and `codex` by default) and, for code tasks, a cleanup tool for the clean gate ([deslop](https://github.com/agent-sh/deslop) on `PATH`, or `TOWER_CRANE_CLEAN_CMD`).
+You need Node 24 or newer, git, an authenticated `gh`, a GitHub repository with an `origin` remote, the harness CLIs your ladder names (`claude` and `codex` by default) and, for code tasks, a cleanup tool for the clean gate ([deslop](https://github.com/agent-sh/deslop) on `PATH`, or `TOWER_CRANE_CLEAN_CMD`). Use the diff-scoped deslop rewrite, agent-sh/deslop `main` from commit e669dbc: it reads only the change against `--base`, and its `--json` report carries `"scope": "diff"`. The old agentsys deslop plugin has the same plugin version, 5.5.0, but ignores `--base` and scans the whole repository; its report has no `scope`. The gate then judges only findings on the lines the change touches and names this fix.
 
-Install from source (npm is not published yet, see [Install](#install)):
+Install the CLI and check it runs:
 
 ```sh
-git clone https://github.com/agent-sh/tower-crane.git
-npm install -g ./tower-crane
+npm install -g @agent-sh/tower-crane
+tower-crane --version
 ```
 
 Tower Crane records who runs each command. In these steps you act as the orchestrator:
@@ -52,7 +53,7 @@ tower-crane merge T1
 What each step does:
 
 1. `init` writes `.tower-crane/project.json` with the default ladder and adds the directory to `.git/info/exclude`.
-2. `task add` prints `T1`. Size `S` puts it on the `easy` rung.
+2. `task add` prints `T1`. Its kind defaults to `code`, so it runs on the `medium` rung even at size `S`. Only an `S` `docs` task goes to `easy`.
 3. `brief set` stores the context the worker gets.
 4. `spawn --dry-run` prints the agent file, the house rules and the exact command it would run. `spawn` runs it: a worker in a new worktree, which claims the task, commits, opens a PR and submits its head.
 5. `serve` opens the board at `http://127.0.0.1:4747/`.
@@ -65,11 +66,13 @@ To let an agent do all of this, install the Claude Code plugin and hand the `tow
 
 | Channel | Command | State |
 |---|---|---|
-| From source | `git clone https://github.com/agent-sh/tower-crane.git` then `npm install -g ./tower-crane` | works |
-| Claude Code plugin | `/plugin marketplace add agent-sh/tower-crane` then `/plugin install tower-crane@tower-crane` | works; the plugin still needs the CLI on `PATH` |
-| npm | `npm install -g @agentsys/tower-crane` | not published yet |
+| npm | `npm install -g @agent-sh/tower-crane` | the CLI |
+| Claude Code plugin | `/plugin marketplace add agent-sh/tower-crane` then `/plugin install tower-crane@tower-crane` | the skills, agents, commands, MCP server and mod; needs the CLI on `PATH` |
+| From source | `git clone https://github.com/agent-sh/tower-crane.git` then `npm install -g ./tower-crane` | the CLI at `main` |
 
-The CLI has no npm dependencies. The plugin adds the orchestrator, work and review skills, five agent files, five commands (`/tower-crane-inbox`, `/tower-crane-spawn-ready`, `/tower-crane-merge-accepted`, `/tower-crane-rework-from-review`, `/tower-crane-release-dead`), the `tower-crane` MCP server with inbox and batch tools, and a Claude Code mod (`hooks/tower-crane.mjs`) that wakes the orchestrator on new events.
+The CLI has no npm dependencies. The plugin adds the orchestrator, work and review skills, five agent files, six commands, the `tower-crane` MCP server with inbox and batch tools, and a Claude Code mod (`hooks/tower-crane.mjs`) that wakes the orchestrator on new events. Five commands are files in `commands/` (`/tower-crane-inbox`, `/tower-crane-spawn-ready`, `/tower-crane-merge-accepted`, `/tower-crane-rework-from-review`, `/tower-crane-release-dead`); the mod registers the sixth, `/tower-crane-watch`, which arms its event follower.
+
+[revuto](https://github.com/avifenesh/revuto) is optional. It is a local PR reviewer that posts inline findings and a `revuto-review` check on your PRs; install it with `npm i -g revuto` and follow its README to point it at your repository. When it reviews your PRs, workers fix or resolve its findings before submit and reviewers get them in their packet. Without it, the PR has no revuto comments or check, the skills skip their revuto steps, and nothing waits for it.
 
 ## How it works
 
@@ -95,7 +98,7 @@ stateDiagram-v2
 
 **Gates and review.** `accept` runs the software gates the task's kind needs, records their command receipts as evidence, and counts only evidence that has a matching audit event. When they pass, it dispatches a reviewer. Review selection starts at the task's tier and moves up for a large or risky diff. The reviewer gets the diff, the acceptance and the gate results in a fresh context. `rework --from-review` sends a failed task back with the review's findings in its brief. A task given a tier range climbs one rung after a confirmed failure.
 
-**Automation.** The orchestrator's `tower-crane wait` runs the software reactions itself: gates after a submit, review once gates pass, accept after a passing review, and the merge queue. Agents spend tokens on code and judgment, not on polling ([docs/automation.md](docs/automation.md)).
+**Automation.** The orchestrator's `tower-crane wait` runs the software reactions itself: gates after a submit, review once gates pass, accept after a passing review, and the merge queue. It also fills free worker slots with ready tasks, so a running `wait` starts model sessions; `wait --observe` watches without dispatching. A task whose workers exit three times without submitting is parked for the owner instead of relaunched. Agents spend tokens on code and judgment, not on polling ([docs/automation.md](docs/automation.md)).
 
 **Stacks.** A task can start on a submitted dependency before it merges. Its PR targets the dependency's branch, the chain is linked as a GitHub stack, and the merge gate lands it bottom up, pinning each accepted head. See [docs/state.md](docs/state.md), [docs/cli.md](docs/cli.md#run) and `tower-crane stack --help`.
 
@@ -115,14 +118,14 @@ A `command` rung runs any other CLI with `{prompt}`, `{brief}`, `{task}` and `{c
 
 ## Model ladder
 
-Every task has a tier: `easy`, `medium`, `hard` or `research`. Kind and size pick it (`S` easy, `M` medium, `L` hard, kind `research` research), and `--tier` overrides it. The ladder maps each tier, and the orchestrator, review and small jobs, to a harness, model and effort. Built-in defaults from [docs/builtin-ladder.json](docs/builtin-ladder.json), with Codex as the default harness:
+Every task has a tier: `easy`, `medium`, `hard` or `research`. Kind and size pick it (kind `research` research, an `S` `docs` task easy, `L` hard, anything else medium), and `--tier` overrides it. The ladder maps each tier, and the orchestrator, review and small jobs, to a harness, model and effort. Built-in defaults from [docs/builtin-ladder.json](docs/builtin-ladder.json), with Codex as the default harness:
 
 | Rung | Runs | Default |
 |---|---|---|
 | `orchestrator` | planning, briefs, dispatch, gates, merges | Claude, `opus`, effort high |
-| `easy` | `S` tasks | Claude, `claude-haiku-5-5`, effort high |
-| `medium` | `M` tasks | Codex, profile `sol`, effort high |
-| `hard` | `L` tasks | Claude, `opus`, effort medium |
+| `easy` | `S` `docs` tasks | Claude, `claude-haiku-5-5`, effort high |
+| `medium` | every other task that is not `L` or research | Codex, profile `sol`, effort high |
+| `hard` | `L` tasks other than research | Claude, `opus`, effort medium |
 | `research` | research tasks | Claude, `opus`, effort high |
 | `review` | fallback reviewer | Claude, `claude-haiku-5-5`, effort high |
 | `small` | mechanical checks | Claude, `claude-haiku-5-5`, effort high |
@@ -138,15 +141,15 @@ Every task has a tier: `easy`, `medium`, `hard` or `research`. Kind and size pic
 - **review**: an independent reviewer passed this commit and revision.
 - **merge**: the PR head still matches the accepted commit, and the gates still pass, when it merges.
 
-On this repository's own history, gate failures were mostly right: precision 83.3% for tests and 93.3% for CI. A passing gate still misses most problems that review or CI find later: the tests gate's recall is 26.0%. Labels and method are in [docs/bench.md](docs/bench.md#gates).
+On this repository's own history, gate failures were mostly right: precision 83.3% for tests and 93.3% for CI. A passing gate still misses most problems that review or CI find later: the tests gate's recall is 26.0%. Labels and method are in [docs/bench.md](https://github.com/agent-sh/tower-crane/blob/main/docs/bench.md#gates).
 
 ## Board
 
-`tower-crane serve` shows the board on `127.0.0.1`, live over server-sent events. It answers two questions first: is work moving, and does anything need you. Run as `tower-crane serve --agent owner` at a terminal where `TOWER_CRANE_AGENT` is unset, it also answers decisions, takes comments, sends work back and edits the ladder. It never accepts, merges or waives a gate. `tower-crane render` writes the same board as a static `sketch.html` that loads nothing from the network.
+`tower-crane serve` shows the board on `127.0.0.1`, live over server-sent events. It answers two questions first: is work moving, and does anything need you. Run as `tower-crane serve --agent owner` at a terminal where `TOWER_CRANE_AGENT` is unset, it also answers decisions, takes comments, sends work back and edits the ladder. Its Controls view accepts a task with gate waivers, and an owner-required waiver opens a decision first. It never merges. `tower-crane render` writes the same board as a static `sketch.html` that loads nothing from the network.
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/images/board-dark.png">
-  <img src="docs/images/board-light.png" alt="The Tower Crane board for this repository's own run: decisions waiting for the owner, workers with their phase and lease, and ready tasks ordered by what they unblock" width="960">
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/agent-sh/tower-crane/main/docs/images/board-dark.png">
+  <img src="https://raw.githubusercontent.com/agent-sh/tower-crane/main/docs/images/board-light.png" alt="The Tower Crane board for this repository's own run: decisions waiting for the owner, workers with their phase and lease, and ready tasks ordered by what they unblock" width="960">
 </picture>
 
 This repository's own run, served by `tower-crane serve` at 1600x1000, light and dark theme. Design notes are in [docs/design.md](docs/design.md).
@@ -163,7 +166,7 @@ Not covered yet:
 
 - The orchestrator runs unsandboxed, because it starts the other agents.
 - pi, OpenCode, Antigravity and `command` rungs have no enforced sandbox and write state directly.
-- The shims check `git` and `gh` found on `PATH`; a program called by its absolute path is not checked. Agent commands can read `GH_TOKEN`.
+- The shims check `git` and `gh` found on `PATH`; a program called by its absolute path is not checked. A sandboxed agent holds no GitHub credential: its broker pushes its task branch and runs its gh commands. Unsandboxed agents (opencode, agy, pi, `command`) can read `GH_TOKEN` and the user's login.
 - Network access is open to all domains.
 - Plain files cannot stop a process running as the same user from forging records or reading the owner key.
 
@@ -189,30 +192,29 @@ Not covered yet:
 
 ## Status
 
-Version 0.1 is in progress. It is not on npm yet.
+0.1.3 is the latest release, on npm as `@agent-sh/tower-crane`; 0.1.0 was the first. [CHANGELOG.md](CHANGELOG.md) lists what each release does.
 
 Works today: the state and the CLI, the software gates, independent review dispatch, stacks, the merge queue, spawn on all five harnesses with isolated homes on four of them, sandboxes and the state broker on Claude Code and Codex, the board, and the Claude Code plugin. This repository is built with it.
 
 Next:
 
-- Publish `@agentsys/tower-crane` to npm and tag the 0.1 release.
 - Board controls for the authority settings that are CLI only today.
 - Permission renderers and isolated homes for OpenCode.
 - Native enforcement and message delivery for Antigravity.
 
 ## Contributing
 
-Tower Crane is built with Tower Crane. The orchestrator plans each change as a task, a spawned worker opens the PR, a clean-context reviewer posts the review, and `tower-crane merge` lands it after the gates pass. In the [2026-10-08 snapshot](docs/bench.md#results), the median accepted task used 16.16M tokens (68 tasks with complete records) and cost $3.55 (the 60 of them with priced usage).
+Tower Crane is built with Tower Crane. The orchestrator plans each change as a task, a spawned worker opens the PR, a clean-context reviewer posts the review, and `tower-crane merge` lands it after the gates pass. In the [2026-10-08 snapshot](https://github.com/agent-sh/tower-crane/blob/main/docs/bench.md#results), the median accepted task used 16.16M tokens (68 tasks with complete records) and cost $3.55 (the 60 of them with priced usage).
 
 To contribute by hand:
 
 - Node 24 or newer, CommonJS, no npm dependencies.
-- Tests are integration tests that run the real CLI on a temporary git repository. A fix comes with a test that fails without it. Run only the files you touch: `npm test -- test/claim.test.js`. Set `TOWER_CRANE_TEST_TMP` to keep temp files off `/tmp`. [docs/testing.md](docs/testing.md) has the rest, including `node scripts/mutants.js`.
-- Add `changelog.d/<task-or-pr>.md` for each change and leave `CHANGELOG.md` alone.
+- Tests are integration tests that run the real CLI on a temporary git repository. A fix comes with a test that fails without it. Run only the files you touch: `npm test -- test/claim.test.js`. Set `TOWER_CRANE_TEST_TMP` to keep temp files off `/tmp`. [docs/testing.md](https://github.com/agent-sh/tower-crane/blob/main/docs/testing.md) has the rest, including `node scripts/mutants.js`.
+- Add `changelog.d/<task-or-pr>.md` for each change and leave `CHANGELOG.md` alone; a release writes its section ([changelog.d/README.md](https://github.com/agent-sh/tower-crane/blob/main/changelog.d/README.md)).
 - After changing a command in `bin/tower-crane.js`, run `npm run docs:generate`.
 - Before opening a PR, run `npm run check:shared -- --base origin/main`.
 
-Rules for agents and people working here are in [AGENTS.md](AGENTS.md).
+Rules for agents and people working here are in [AGENTS.md](https://github.com/agent-sh/tower-crane/blob/main/AGENTS.md).
 
 ## License
 

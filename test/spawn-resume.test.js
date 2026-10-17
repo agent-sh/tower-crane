@@ -1,10 +1,13 @@
 'use strict';
 
+const { HUNG_TEST_MS, waitOnRepo, killPid } = require('./signals');
+const { readPublished } = require('./atomic-file');
+
 const { test, describe } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { makeRepo, makeTaskRepo, BIN, detachedAlive } = require('./helpers');
+const { makeRepo, makeTaskRepo, BIN, detachedAlive, TMP_ROOT } = require('./helpers');
 const Sessions = require('../lib/spawn-session');
 const windowsConcurrency = process.platform === 'win32' ? 2 : false;
 
@@ -28,6 +31,17 @@ function setup(t, format = 'codex', session = true) {
     args: ['--title', 'Resume worker', '--acceptance', 'rework resumes'],
     brief: 'Implement the acceptance.\n',
   }]);
+  // Harness discovery must use fixture credentials and origin directories.
+  Object.assign(h.env, {
+    USERPROFILE: h.env.HOME,
+    CLAUDE_CONFIG_DIR: path.join(h.env.HOME, '.claude'),
+    CODEX_HOME: path.join(h.env.HOME, '.codex'),
+    PI_CODING_AGENT_DIR: path.join(h.env.HOME, '.pi', 'agent'),
+    GH_CONFIG_DIR: path.join(h.env.HOME, '.config', 'gh'),
+    XDG_CONFIG_HOME: path.join(h.env.HOME, '.config'),
+    XDG_DATA_HOME: path.join(h.env.HOME, '.local', 'share'),
+    OPENCODE_CONFIG_DIR: path.join(h.env.HOME, '.config', 'opencode'),
+  });
   const script = path.join(h.base, 'harness.js');
   const seen = path.join(h.base, 'seen.json');
   fs.writeFileSync(script, `
@@ -57,7 +71,7 @@ if (enabled === 'true') {
       : { input_tokens: 100, cached_input_tokens: 20, output_tokens: 10 } }));
   }
 }
-if (process.env.RESUME_EXIT_DELAY) setTimeout(() => {}, Number(process.env.RESUME_EXIT_DELAY));
+if (process.env.RESUME_EXIT_DELAY) setTimeout(() => {}, Number(process.env.RESUME_EXIT_DELAY)); // wait-allow: fixture injects exit delay to exercise resume while finalization is pending
 `);
   h.ok(['ladder', 'set', 'medium', '--harness', 'command', '--clear', 'profile', '--clear', 'effort',
     '--command', JSON.stringify([process.execPath, script, BIN, seen, '{session}', '{prompt}', format, String(session)])]);
@@ -135,31 +149,24 @@ for (const harness of ['codex', 'claude']) {
     nativeHarness(h, script, seen, harness);
     h.env.RESUME_EXIT_DELAY = '60000';
     const first = h.json(['spawn', '--task', 'T1']);
-    const deadline = Date.now() + 15000;
-    while (!events(h).some((e) => e.cmd === 'spawn session')) {
-      assert.ok(Date.now() < deadline, 'session not recorded');
-      await new Promise((resolve) => setTimeout(resolve, 25));
-    }
+    await waitOnRepo(h, () => events(h).some((e) => e.cmd === 'spawn session'));
     // Claude's session id is assigned before launch, so the session event does not show that the agent
     // printed anything. Wait for its usage to reach the log, so the interrupt keeps that usage.
-    const logged = Date.now() + 15000;
-    while (!fs.readFileSync(first.log, 'utf8').includes('"usage"')) {
-      assert.ok(Date.now() < logged, 'usage not logged');
-      await new Promise((resolve) => setTimeout(resolve, 25));
-    }
+    await waitOnRepo(h, () => fs.readFileSync(first.log, 'utf8').includes('"usage"'));
     fs.writeFileSync(path.join(first.cwd, 'README.md'), '# native unfinished work\n');
     fs.writeFileSync(path.join(first.cwd, 'unfinished.txt'), 'keep native edits\n');
     const after = String(fs.statSync(path.join(h.state, 'events.jsonl')).size);
     // Model Windows startup consuming the session deadline before interruption.
     // The shutdown wait must use completion receipts independently of that clock.
-    const startupClock = t.mock.method(Date, 'now', () => deadline + 1);
+    const clockBeforeInterrupt = Date.now();
+    const startupClock = t.mock.method(Date, 'now', () => clockBeforeInterrupt + HUNG_TEST_MS + 1);
     let spent;
     try {
       h.ok(['interrupt', 'T1', '--agent', 'orchestrator']);
       // Final spend follows pipe closure, process cleanup and the stopped phase.
       // Capture the cursor before interrupt so a fast exit cannot be missed.
       spent = h.json(['wait', '--after', after, '--task', 'T1', '--types', 'spend',
-        '--observe', '--timeout', '15', '--agent', 'orchestrator']);
+        '--observe', '--timeout', '300', '--agent', 'orchestrator']);
     } finally {
       startupClock.mock.restore();
     }
@@ -245,12 +252,8 @@ for (const format of ['codex', 'claude']) {
 test('a detached command harness records its session and resumes with a separate attempt log', async (t) => {
   const { h } = setup(t);
   const first = h.json(['spawn', '--task', 'T1'], { env: { RESUME_EXIT_DELAY: '2000' } });
-  const deadline = Date.now() + 10000;
-  while (!events(h).some((e) => e.cmd === 'spawn session')) {
-    if (Date.now() > deadline) throw new Error('session was not recorded');
-    await new Promise((resolve) => setTimeout(resolve, 50));
-  }
-  const exit = h.json(['wait', '--after', '0', '--task', 'T1', '--types', 'worker-exited', '--observe', '--timeout', '10']);
+  await waitOnRepo(h, () => events(h).some((e) => e.cmd === 'spawn session'));
+  const exit = h.json(['wait', '--observe', '--after', '0', '--task', 'T1', '--types', 'worker-exited', '--timeout', '300']);
   assert.equal(exit.detail.agent, first.agent);
   assert.equal(exit.detail.pid, first.pid);
   sendBack(h);
@@ -443,6 +446,139 @@ test('a missing isolated codex rollout falls back to a fresh worker and records 
   assert.equal(first.agent, 'worker-T1-1');
 });
 
+for (const format of ['codex', 'claude', 'native-codex']) {
+  for (const freshOverflow of [false, true]) {
+    test(`${format} resumed context overflow retries fresh once${freshOverflow ? ' even if fresh also overflows' : ''}`, (t) => {
+      const { h, script } = setup(t, format);
+      const calls = path.join(h.base, 'calls.jsonl');
+      const error = format !== 'claude'
+        ? { type: 'turn.failed', error: { message: "Codex ran out of room in the model's context window. Start a new thread or clear earlier history before retrying." } }
+        : { type: 'result', is_error: true, errors: ['Prompt is too long'], subtype: 'error_during_execution' };
+      fs.writeFileSync(script, `
+const fs = require('node:fs');
+const cp = require('node:child_process');
+const [bin, out, prior, prompt, format] = process.argv.slice(2);
+const task = JSON.parse(cp.execFileSync(process.execPath, [bin, 'task', 'show', 'T1', '--json'], { encoding: 'utf8' }));
+fs.appendFileSync(${JSON.stringify(calls)}, JSON.stringify({ prior, prompt, cwd: process.cwd(), agent: process.env.TOWER_CRANE_AGENT, claim: task.claim }) + '\\n');
+if (prior || (${freshOverflow} && prompt.includes('## Rework'))) {
+  console.log(JSON.stringify(${JSON.stringify(error)}));
+  process.exit(1);
+}
+console.log(JSON.stringify({ type: 'thread.started', thread_id: prompt.includes('## Rework') ? 'fresh-session-2' : 'worker-session-1' }));
+console.log(JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 10, cached_input_tokens: 2, output_tokens: 1 } }));
+`);
+      if (format === 'native-codex') {
+        nativeHarness(h, script, path.join(h.base, 'seen.json'), 'codex');
+        fs.mkdirSync(h.env.CODEX_HOME, { recursive: true });
+        fs.writeFileSync(path.join(h.env.CODEX_HOME, 'config.toml'), '[profiles.fixture-main]\nmodel = "fixture-large"\n');
+      }
+      const first = h.json(['spawn', '--task', 'T1', '--wait']);
+      sendBack(h);
+      h.ok(['claim', 'T1', '--agent', first.agent]);
+      const claim = h.json(['task', 'show', 'T1']).claim;
+      const result = h.run(['spawn', '--task', 'T1', '--wait', '--json']);
+      assert.equal(result.code, freshOverflow ? 1 : 0, result.stderr);
+      const inputs = fs.readFileSync(calls, 'utf8').trim().split('\n').map(JSON.parse);
+      assert.equal(inputs.length, 3, 'one resumed invocation and exactly one fresh retry');
+      assert.equal(inputs[1].prior, 'worker-session-1');
+      assert.equal(inputs[2].prior, '');
+      assert.equal(inputs[2].agent, first.agent);
+      assert.equal(inputs[2].cwd, first.cwd);
+      assert.deepEqual(inputs[2].claim, claim);
+      assert.match(inputs[2].prompt, /Project goal: prove the engine/);
+      if (format === 'native-codex') assert.match(inputs[2].prompt, /## Role instructions: tower-crane-work/);
+      assert.match(inputs[2].prompt, /## Task/);
+      assert.match(inputs[2].prompt, /Implement the acceptance/);
+      assert.match(inputs[2].prompt, /Add the worktree guard/);
+      assert.match(inputs[2].prompt, /Missing worktree validation/);
+      assert.match(inputs[2].prompt, /review-receipt/);
+      assert.deepEqual(h.json(['task', 'show', 'T1']).claim, claim);
+      const fallbacks = events(h).filter((e) => e.cmd === 'spawn fallback');
+      assert.equal(fallbacks.length, 1);
+      assert.equal(fallbacks[0].detail.reason, 'session context overflow');
+      assert.equal(fallbacks[0].detail.previous.session_id, 'worker-session-1');
+      assert.equal(fallbacks[0].detail.previous.overflowed, true);
+      assert.equal(fallbacks[0].detail.route_index, 0);
+      assert.equal(fallbacks[0].detail.fresh, true);
+      assert.equal(events(h).filter((e) => e.cmd === 'spawn retry').length, 0);
+      const audit = events(h);
+      const prior = audit.findLast((e) => e.cmd === 'spawn').detail;
+      const candidate = { cmd: 'spawn', task: 'T1', detail: {
+        ...prior, attempt: prior.attempt + 1, session_id: 'worker-session-1', pid: 999999999,
+      } };
+      const history = [...audit, candidate, { cmd: 'spawn exit', task: 'T1', detail: candidate.detail }];
+      const policy = { job: 'worker', task: { id: 'T1', status: 'rework', submitted_by: first.agent },
+        rung: prior.route, rungName: prior.rung };
+      assert.equal(Sessions.eligible(policy, first.cwd, history), null, 'overflowed ids stay excluded in later attempts');
+      assert.equal(Sessions.eligible(policy, first.cwd, history.filter((e) => e.cmd !== 'spawn fallback')).id,
+        'worker-session-1', 'the overflow marker is what excludes the id');
+      assert.equal(Sessions.eligible(policy, first.cwd, [
+        ...history.filter((e) => e.cmd !== 'spawn fallback'),
+        { cmd: 'spawn exit', task: 'T1', detail: { ...candidate.detail, overflowed: true } },
+      ]), null, 'an overflow exit excludes the session even without a fallback');
+      if (freshOverflow) assert.equal(audit.findLast((e) => e.cmd === 'spawn exit').detail.overflowed, true);
+      const spend = h.json(['task', 'show', 'T1']).spend;
+      const freshUsage = spend.entries.find((e) => e.source === `spawn:${first.agent}:attempt:2:retry:0`);
+      assert.ok(freshUsage, 'fresh fallback has a separate usage receipt');
+      assert.equal(freshUsage.live, undefined, 'exit collection finalizes fresh fallback usage');
+      if (!freshOverflow && format === 'native-codex') assert.equal(freshUsage.tokens, 11);
+      h.ok(['spend', 'T1', '--from-spawn', first.agent]);
+      assert.deepEqual(h.json(['task', 'show', 'T1']).spend, spend, 'collection cannot double count fallback usage');
+      h.ok(['submit', 'T1', '--sha', 'cfed4d76efd3afe887bbbfc7f62c7d94158e3255', '--agent', first.agent]);
+      h.ok(['rework', 'T1', '--reason', 'Next round']);
+      assert.equal(h.json(['spawn', '--task', 'T1', '--dry-run']).resumed, false);
+    });
+  }
+}
+
+test('a resumed overflow recovered by the harness completes without a fresh retry', (t) => {
+  const { h, script } = setup(t, 'claude');
+  const calls = path.join(h.base, 'recovered-calls.jsonl');
+  fs.writeFileSync(script, `
+const fs = require('node:fs');
+const [bin, out, prior] = process.argv.slice(2);
+fs.appendFileSync(${JSON.stringify(calls)}, JSON.stringify({ prior }) + '\\n');
+if (prior) {
+  console.log(JSON.stringify({ type: 'assistant', isApiErrorMessage: true, message: { content: [{ type: 'text', text: 'Prompt is too long' }] } }));
+}
+console.log(JSON.stringify({ type: 'result', session_id: prior || 'worker-session-1', is_error: false }));
+`);
+  h.json(['spawn', '--task', 'T1', '--wait']);
+  sendBack(h);
+  assert.equal(h.run(['spawn', '--task', 'T1', '--wait']).code, 0);
+  assert.equal(fs.readFileSync(calls, 'utf8').trim().split('\n').length, 2);
+  const audit = events(h);
+  assert.equal(audit.filter((e) => e.cmd === 'spawn fallback').length, 0);
+  assert.equal(audit.findLast((e) => e.cmd === 'spawn exit').detail.overflowed, undefined);
+  assert.equal(audit.findLast((e) => e.cmd === 'spawn phase').detail.phase, 'waiting');
+});
+
+test('a fresh native Claude outage retry that overflows blocks without another fresh retry', (t) => {
+  const { h, script, seen } = setup(t, 'claude');
+  nativeHarness(h, script, seen, 'claude');
+  const calls = path.join(h.base, 'claude-calls.json');
+  fs.writeFileSync(script, `
+const fs = require('node:fs');
+const file = ${JSON.stringify(calls)};
+// read-published: this stub writes the file in place; nothing replaces it.
+const calls = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : [];
+calls.push(process.argv.slice(2));
+fs.writeFileSync(file, JSON.stringify(calls));
+console.log(JSON.stringify({ type: 'result', is_error: true, errors: [calls.length === 1 ? 'HTTP 503 service unavailable' : 'Prompt is too long'] }));
+process.exit(1);
+`);
+  h.ok(['ladder', 'set', 'medium', '--supervision', JSON.stringify({
+    retries: 1, backoff_ms: 10, max_backoff_ms: 10, stall_ms: 60000,
+  })]);
+  const result = h.run(['spawn', '--task', 'T1', '--wait']);
+  assert.equal(result.code, 1);
+  assert.equal(JSON.parse(fs.readFileSync(calls, 'utf8')).length, 2);
+  const audit = events(h);
+  assert.equal(audit.filter((e) => e.cmd === 'spawn retry').length, 1);
+  assert.equal(audit.filter((e) => e.cmd === 'spawn fallback').length, 0);
+  assert.equal(audit.findLast((e) => e.cmd === 'spawn exit').detail.overflowed, true);
+});
+
 test('a pre-launch fallback failure restores the old claim and permits retry', (t) => {
   const { h, script, seen } = setup(t, 'codex');
   nativeHarness(h, script, seen, 'codex');
@@ -453,7 +589,8 @@ test('a pre-launch fallback failure restores the old claim and permits retry', (
   fs.unlinkSync(path.join(first.codex_home, 'sessions', 'rollout-test-worker-session-1.jsonl'));
 
   const occupiedLog = path.join(h.state, 'logs', 'T1-worker-T1-2.log');
-  fs.writeFileSync(occupiedLog, 'preserve this log\n');
+  // A directory, since a plain file there would be moved aside as a failed start's log.
+  fs.mkdirSync(occupiedLog);
   const failed = h.run(['spawn', '--task', 'T1', '--wait']);
   assert.equal(failed.code, 1);
   assert.match(failed.stderr, /EEXIST: log already exists/);
@@ -462,9 +599,9 @@ test('a pre-launch fallback failure restores the old claim and permits retry', (
   const rollback = afterFailure.findLast((e) => e.cmd === 'claim' && e.task === 'T1' && e.detail.rollback);
   assert.deepEqual([rollback.detail.holder, rollback.detail.restored_from], [first.agent, 'worker-T1-2']);
   assert.ok(!afterFailure.some((e) => e.cmd === 'spawn' && e.task === 'T1' && e.detail.agent === 'worker-T1-2'));
-  assert.equal(fs.readFileSync(occupiedLog, 'utf8'), 'preserve this log\n');
+  assert.ok(fs.statSync(occupiedLog).isDirectory());
 
-  fs.unlinkSync(occupiedLog);
+  fs.rmdirSync(occupiedLog);
   const retry = h.json(['spawn', '--task', 'T1', '--wait']);
   assert.equal(retry.agent, 'worker-T1-2');
   assert.equal(retry.resumed, false);
@@ -477,12 +614,8 @@ test('a still-running worker cannot be resumed', async (t) => {
   const ready = path.join(h.base, 'live-ready');
   fs.appendFileSync(script, `\nfs.writeFileSync(${JSON.stringify(ready)}, String(process.pid));\nsetInterval(() => {}, 1000);\n`);
   const first = h.json(['spawn', '--task', 'T1']);
-  t.after(() => { try { process.kill(first.pid, 'SIGKILL'); } catch (e) { if (e.code !== 'ESRCH') throw e; } });
-  const deadline = Date.now() + 10000;
-  while (!fs.existsSync(ready) || fs.readFileSync(ready, 'utf8') !== String(first.pid)) {
-    if (Date.now() > deadline) throw new Error('worker did not start');
-    await new Promise((resolve) => setTimeout(resolve, 50));
-  }
+  t.after(() => { try { killPid(first.pid, 'SIGKILL'); } catch (e) { if (e.code !== 'ESRCH') throw e; } });
+  await waitOnRepo(h, () => fs.existsSync(ready) && readPublished(ready, 'utf8') === String(first.pid));
   sendBack(h);
   const result = h.run(['spawn', '--task', 'T1', '--wait']);
   assert.equal(result.code, 1, result.stderr);
@@ -576,11 +709,7 @@ test('an earlier attempt exit cannot collect or resume a live attempt with a reu
   const ready = path.join(h.base, 'live-ready');
   fs.appendFileSync(script, `\nfs.writeFileSync(${JSON.stringify(ready)}, String(process.pid));\nsetInterval(() => {}, 1000);\n`);
   const live = h.json(['spawn', '--task', 'T1']);
-  const deadline = Date.now() + 10000;
-  while (!fs.existsSync(ready) || fs.readFileSync(ready, 'utf8') !== String(live.pid)) {
-    if (Date.now() > deadline) throw new Error('resumed worker did not start');
-    await new Promise((resolve) => setTimeout(resolve, 50));
-  }
+  await waitOnRepo(h, () => fs.existsSync(ready) && readPublished(ready, 'utf8') === String(live.pid));
   h.ok(['submit', 'T1', '--sha', 'cfed4d76efd3afe887bbbfc7f62c7d94158e3255', '--agent', live.agent]);
   h.ok(['rework', 'T1', '--reason', 'Finish next attempt']);
   const hook = path.join(h.base, 'reused-spawn.js');
@@ -636,6 +765,145 @@ test('an expired resumed claim needs room and keeps its original since', (t) => 
   assert.equal(after.agent, before.agent);
   assert.equal(after.since, before.since);
   assert.ok(Date.parse(after.until) > Number(fs.readFileSync(clock, 'utf8')));
+});
+
+// A failed resume start records no spawn, so the next resume takes the same
+// attempt log name. The log there is moved aside only when no recorded spawn
+// of the agent may still be running; from another host its processes are unknown.
+test('a resume moves an earlier start\'s attempt log aside only once no recorded spawn of the agent may still run', (t) => {
+  const { h } = setup(t);
+  const first = h.json(['spawn', '--task', 'T1', '--wait']);
+  sendBack(h);
+  const logs = path.dirname(first.log);
+  const log = path.join(logs, `T1-${first.agent}-attempt-2.log`);
+  fs.writeFileSync(log, 'an earlier start\n');
+  const audit = events(h);
+  const refused = h.run(['spawn', '--task', 'T1', '--wait'], { hooks: { HOOK_HOSTNAME: 'another-host' } });
+  assert.equal(refused.code, 1, refused.stderr);
+  assert.match(refused.stderr, /EEXIST: log already exists/);
+  assert.equal(fs.readFileSync(log, 'utf8'), 'an earlier start\n');
+  assert.deepEqual(fs.readdirSync(logs).filter((n) => n.includes('startup-failed')), []);
+  assert.ok(!events(h).slice(audit.length).some((e) => e.cmd === 'spawn'));
+
+  const next = h.run(['spawn', '--task', 'T1', '--wait', '--json']);
+  assert.equal(next.code, 0, next.stderr);
+  assert.equal(JSON.parse(next.stdout).resumed, true);
+  const aside = fs.readdirSync(logs).filter((n) => n.includes('startup-failed'));
+  assert.equal(aside.length, 1, aside.join(', '));
+  assert.equal(fs.readFileSync(path.join(logs, aside[0]), 'utf8'), 'an earlier start\n');
+  assert.ok(next.stderr.includes(`tower-crane: moved ${log}, left by a start that failed before it was recorded, to ${path.join(logs, aside[0])}\n`), next.stderr);
+});
+
+// Windows records no start time with a pid and reuses a freed pid within
+// seconds, so the guard above asks Windows when the process now at a recorded
+// pid was created. These run that path in process with a stand-in for
+// PowerShell, on live pids that the signal check cannot tell apart from the
+// recorded processes.
+const FILETIME_UNIX_EPOCH = 116444736000000000n;
+const filetime = (ms) => String(BigInt(ms) * 10000n + FILETIME_UNIX_EPOCH);
+const powershellStub = (asked, lines, result = {}) => (cmd, args, options) => {
+  const script = Buffer.from(args.at(-1), 'base64').toString('utf16le');
+  asked.push({ cmd, pids: script.match(/@\(([^)]*)\)/)[1], script, timeout: options.timeout });
+  return { status: 0, stdout: lines.map((line) => `${line}\r\n`).join(''), ...result };
+};
+
+test('a recorded spawn whose pids Windows gave to processes created after it counts as gone', (t) => {
+  const P = require('../lib/processes');
+  const os = require('node:os');
+  const cp = require('node:child_process');
+  const live = cp.spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: 'ignore', windowsHide: true }); // wait-allow: a process group that runs until the test kills it
+  t.after(() => killPid(live.pid, 'SIGKILL'));
+  const at = Date.parse('2026-10-16T11:00:00.000Z');
+  const detail = { host: os.hostname(), pid: live.pid, monitor_pid: process.pid };
+  assert.deepEqual(P.spawnPids(detail), [process.pid, live.pid]);
+  const after = at + 5000;
+  // Creation times come from UTC FILETIMEs, never from a local time.
+  const asked = [];
+  const created = P.windowsCreated([process.pid, live.pid], 5000,
+    powershellStub(asked, [`${process.pid} ${filetime(after)}`, `${live.pid} ${filetime(after + 1)}`, `4 ${filetime(after)}`, 'Access is denied.']));
+  assert.deepEqual([...created], [[process.pid, after], [live.pid, after + 1]]);
+  assert.equal(asked.length, 1);
+  assert.equal(asked[0].cmd, 'powershell.exe');
+  assert.equal(asked[0].pids, `${process.pid},${live.pid}`);
+  assert.equal(asked[0].timeout, 5000);
+  assert.match(asked[0].script, /StartTime\.ToFileTimeUtc\(\)/);
+  assert.doesNotMatch(asked[0].script, /CreationDate|ToUniversalTime/);
+  assert.equal(P.spawnGone(detail, at, created, 'win32'), true);
+  // A process created before the event was recorded, or within the clock
+  // allowance after it, may be the recorded one.
+  assert.equal(P.spawnGone(detail, at, new Map([[live.pid, after], [process.pid, at - 5000]]), 'win32'), false);
+  assert.equal(P.spawnGone(detail, at, new Map([[live.pid, after], [process.pid, at + 50]]), 'win32'), false);
+  // A spawn recorded at 02:45 CEST on 2026-10-25, the first pass of the hour
+  // Europe repeats, whose supervisor started at 02:30 CEST (00:30 UTC). A
+  // local 02:30 read as standard time is 01:30 UTC, after the event, and would
+  // call the running spawn gone; its FILETIME keeps it running.
+  const dst = Date.parse('2026-10-25T00:45:00.000Z');
+  const firstPass = P.windowsCreated([process.pid, live.pid], 5000,
+    powershellStub([], [`${process.pid} ${filetime(Date.parse('2026-10-25T00:30:00.000Z'))}`, `${live.pid} ${filetime(dst + 5000)}`]));
+  assert.equal(P.spawnGone(detail, dst, firstPass, 'win32'), false);
+  // A time PowerShell did not report, or a PowerShell that failed, proves nothing.
+  assert.equal(P.spawnGone(detail, at, new Map([[live.pid, after]]), 'win32'), false);
+  assert.deepEqual([...P.windowsCreated([process.pid], 5000, powershellStub([], [`${process.pid} ${filetime(after)}`], { status: 1 }))], []);
+  assert.deepEqual([...P.windowsCreated([process.pid], 5000, powershellStub([], [`${process.pid} ${filetime(after)}`], { error: new Error('spawnSync powershell.exe ETIMEDOUT') }))], []);
+  assert.equal(P.spawnGone(detail, NaN, created, 'win32'), false);
+  // Another host's pids, and systems with a start time of their own, take no creation time.
+  assert.equal(P.spawnGone({ ...detail, host: 'another-host' }, at, created, 'win32'), false);
+  if (process.platform !== 'win32') assert.equal(P.spawnGone(detail, at, created, process.platform), false);
+  // Exited processes need no creation time.
+  const done = cp.spawnSync(process.execPath, ['-e', ''], { windowsHide: true });
+  assert.deepEqual(P.spawnPids({ host: os.hostname(), pid: done.pid, monitor_pid: done.pid }), []);
+  assert.equal(P.spawnGone({ host: os.hostname(), pid: done.pid, monitor_pid: done.pid }, at, new Map(), 'win32'), true);
+});
+
+// Windows PowerShell on Windows; on Linux PowerShell 7 when it is installed
+// (GitHub's Ubuntu runners have it), which runs the same script.
+const POWERSHELL = process.platform === 'win32' ? 'powershell.exe'
+  : process.platform === 'linux' && require('node:child_process').spawnSync('pwsh', ['-NoProfile', '-NonInteractive', '-Command', 'exit 0'], { stdio: 'ignore', timeout: 300000 }).status === 0 ? 'pwsh' : null;
+
+test('PowerShell reads a running process\'s creation time as UTC epoch ms', {
+  skip: !POWERSHELL && 'no PowerShell',
+}, (t) => {
+  const P = require('../lib/processes');
+  const cp = require('node:child_process');
+  const from = Date.now();
+  const live = cp.spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore', windowsHide: true }); // wait-allow: a process that runs until the test kills it
+  t.after(() => killPid(live.pid, 'SIGKILL'));
+  const to = Date.now();
+  const created = P.windowsCreated([live.pid, 2147483644], 300000, (cmd, args, options) => cp.spawnSync(POWERSHELL, args, options));
+  assert.deepEqual([...created.keys()], [live.pid]);
+  // Linux reads the start in clock ticks from a boot time PowerShell derives itself.
+  assert.ok(created.get(live.pid) >= from - 1000 && created.get(live.pid) <= to + 1000, `${created.get(live.pid)} not in ${from}..${to}`);
+});
+
+test('Windows reads the creation times for every recorded spawn of the task in one call, and only when a failed start left a log', (t) => {
+  const { recordedCreated } = require('../lib/spawn');
+  const os = require('node:os');
+  const cp = require('node:child_process');
+  const live = cp.spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: 'ignore', windowsHide: true }); // wait-allow: a process group that runs until the test kills it
+  t.after(() => killPid(live.pid, 'SIGKILL'));
+  fs.mkdirSync(TMP_ROOT, { recursive: true });
+  const logs = fs.mkdtempSync(path.join(TMP_ROOT, 'tower-crane-created-'));
+  t.after(() => fs.rmSync(logs, { recursive: true, force: true }));
+  const host = os.hostname();
+  const done = cp.spawnSync(process.execPath, ['-e', ''], { windowsHide: true });
+  const st = { events: [
+    { cmd: 'spawn', task: 'T1', at: '2026-10-16T11:00:00.000Z', detail: { agent: 'worker-T1-1', host, pid: live.pid, monitor_pid: process.pid, log: path.join(logs, 'T1-worker-T1-1.log') } },
+    { cmd: 'spawn', task: 'T1', at: '2026-10-16T11:05:00.000Z', detail: { agent: 'worker-T1-2', host, pid: done.pid, monitor_pid: live.pid, log: path.join(logs, 'T1-worker-T1-2.log') } },
+    { cmd: 'spawn', task: 'T2', at: '2026-10-16T11:05:00.000Z', detail: { agent: 'worker-T2-1', host, pid: process.ppid, monitor_pid: process.ppid, log: path.join(logs, 'T2-worker-T2-1.log') } },
+  ] };
+  fs.writeFileSync(path.join(logs, 'T1-worker-T1-1.log'), 'recorded\n');
+  fs.writeFileSync(path.join(logs, 'T1-worker-T1-1-startup-failed-2026-10-16T11-01-00-000Z.log'), 'kept\n');
+  fs.writeFileSync(path.join(logs, 'T2-worker-T2-1-attempt-2.log'), 'another task\n');
+  const asked = [];
+  const stub = powershellStub(asked, [`${live.pid} ${filetime(Date.now())}`]);
+  assert.deepEqual([...recordedCreated(logs, st, 'T1', 'win32', stub)], []);
+  fs.writeFileSync(path.join(logs, 'T1-worker-T1-2-attempt-2.log'), 'an earlier start\n');
+  assert.deepEqual([...recordedCreated(logs, st, 'T1', 'linux', stub)], []);
+  assert.deepEqual(asked, []);
+  assert.equal(recordedCreated(logs, st, 'T1', 'win32', stub).has(live.pid), true);
+  assert.equal(asked.length, 1);
+  assert.deepEqual(asked[0].pids.split(',').map(Number).sort((a, b) => a - b), [process.pid, live.pid].sort((a, b) => a - b));
+  assert.ok(asked[0].timeout <= 5000, String(asked[0].timeout));
 });
 
 test('a failed resume launch leaves the task, claim and receipts unchanged', (t) => {

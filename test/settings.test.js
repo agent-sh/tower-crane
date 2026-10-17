@@ -1,5 +1,7 @@
 'use strict';
 
+const { fileWritten } = require('./signals');
+
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -7,6 +9,7 @@ const path = require('node:path');
 const http = require('node:http');
 const cp = require('node:child_process');
 const { makeRepo, BIN } = require('./helpers');
+const L = require('../lib/ladder');
 const { CHROME, openBrowser, closeBrowser } = require('./browser');
 test.after(closeBrowser);
 
@@ -99,7 +102,7 @@ test('the Settings view edits the ladder and task tiers only with the page token
 
     const invalid = await request(ladder, { method: 'POST', headers: { 'x-tower-crane-token': token }, body: ladderBody(loaded, { rungs: { easy: { harness: 'pi', model: '', profile: 'fixture-light', effort: 'medium' } } }) });
     assert.equal(invalid.status, 400);
-    assert.match(invalid.json.error, /^ladder easy \(pi\): profile applies only to codex, needs a model$/);
+    assert.match(invalid.json.error, /^ladder easy \(pi\): needs a model; ladder easy: moving from codex to pi would drop profile fixture-light, which does not fit pi, so name what the rung runs on pi$/);
     const badArgs = await request(ladder, { method: 'POST', headers: { 'x-tower-crane-token': token }, body: ladderBody(loaded, { rungs: { small: { args: 'not json' } } }) });
     assert.equal(badArgs.status, 400);
     assert.match(badArgs.json.error, /^ladder small: args must be a JSON array of strings/);
@@ -136,6 +139,58 @@ test('the Settings view edits the ladder and task tiers only with the page token
   } finally {
     await s.stop();
   }
+});
+
+test('a Settings save that moves a rung to another harness drops the fields the page sent unchanged that do not fit it', async (t) => {
+  const h = makeRepo(t);
+  h.init();
+  h.ok(['ladder', 'set', 'hard', '--model', 'claude-haiku-5-5']);
+  const s = await startServe(h);
+  try {
+    const token = tokenOf((await request(s.keyed('settings'))).text);
+    const loaded = await loadedOf(s.url);
+    // The page sends every field of the row, the old model included.
+    const row = { harness: 'codex', model: 'claude-haiku-5-5', profile: 'fixture-main', provider: '', effort: 'high', args: '', command: '' };
+    const r = await request(`${s.url}api/ladder`, { method: 'POST', headers: { 'x-tower-crane-token': token }, body: ladderBody(loaded, { rungs: { hard: row } }) });
+    assert.equal(r.status, 200, r.text);
+    assert.deepEqual(r.json.dropped, ['ladder hard: moving from claude to codex dropped model claude-haiku-5-5, which does not fit codex']);
+    assert.deepEqual(h.readState('project.json').ladder.hard, { harness: 'codex', profile: 'fixture-main', effort: 'high' });
+    assert.match((await request(`${s.url}settings`)).text, /Last change: ladder set hard \(dropped model claude-haiku-5-5, which did not fit codex\) by owner from serve/);
+    // A model the page changed is named, so it stays.
+    const again = await loadedOf(s.url);
+    const named = await request(`${s.url}api/ladder`, { method: 'POST', headers: { 'x-tower-crane-token': token }, body: ladderBody(again, { rungs: { hard: { ...row, harness: 'claude', model: 'claude-opus-5-5', profile: '' } } }) });
+    assert.equal(named.status, 200, named.text);
+    assert.equal(named.json.dropped, undefined);
+    assert.deepEqual(h.readState('project.json').ladder.hard, { harness: 'claude', model: 'claude-opus-5-5', effort: 'high' });
+  } finally {
+    await s.stop();
+  }
+});
+
+test('in a browser, a save that moves several rungs lists every drop, and the last-change line names each rung', { skip: !CHROME && 'no Chrome to drive' }, async (t) => {
+  const alias = Object.keys(L.BUILTIN.claude_aliases)[0];
+  const h = makeRepo(t);
+  h.init();
+  for (const n of ['hard', 'research']) h.ok(['ladder', 'set', n, '--model', alias]);
+  const s = await startServe(h);
+  t.after(() => s.stop());
+  const b = await openBrowser(t);
+  await b.goto(s.keyed('settings'));
+  await b.inPage('window.firstLoad = true');
+  const set = (rung, name, value, event) => b.inPage(`(function (el) { el.value = ${JSON.stringify(value)}; el.dispatchEvent(new Event(${JSON.stringify(event)}, { bubbles: true })); })(document.querySelector('tr[data-rung="${rung}"] [name="${name}"]'))`);
+  for (const n of ['hard', 'research']) {
+    await set(n, 'harness', 'codex', 'change');
+    await set(n, 'profile', 'fixture-main', 'input');
+  }
+  await b.inPage(`document.querySelector('#ladder-form button[type="submit"]').click()`);
+  await b.until(`document.querySelectorAll('#ladder-told li').length === 2`, 'the drops to be listed');
+  const told = await b.inPage(`[window.firstLoad === true, Array.prototype.map.call(document.querySelectorAll('#ladder-told li'), function (li) { return li.textContent; })]`);
+  assert.deepEqual(told, [true, ['hard', 'research'].map((n) => `ladder ${n}: moving from claude to codex dropped model ${alias}, which does not fit codex`)]);
+  for (const n of ['hard', 'research']) assert.deepEqual(h.readState('project.json').ladder[n], { harness: 'codex', profile: 'fixture-main', effort: n === 'hard' ? 'high' : 'max' });
+  // The page did not reload, so the save's reply refreshed the line.
+  assert.match(await b.inPage(`document.getElementById('last-change').textContent`), new RegExp(`^Last change: ladder set hard \\(dropped model ${alias}, which did not fit codex\\), ladder set research`));
+  const page = (await request(`${s.url}settings`)).text;
+  assert.match(page, new RegExp(`Last change: ladder set hard \\(dropped model ${alias}, which did not fit codex\\), ladder set research \\(dropped model ${alias}, which did not fit codex\\) by owner from serve`));
 });
 
 // Review finding F4: a local client read the token from a page and answered
@@ -246,7 +301,7 @@ test("in a browser, saving one form keeps the other form's unsaved edits, and a 
   const set = (el, value, event) => b.inPage(`(function (el) { el.value = ${JSON.stringify(value)}; el.dispatchEvent(new Event(${JSON.stringify(event)}, { bubbles: true })); })(${el})`);
   const click = (form) => b.inPage(`document.querySelector('#${form} button[type="submit"]').click()`);
   const saved = (form) => `document.querySelector('#${form} .msg').textContent.startsWith('Saved.') || (!window.firstLoad && document.documentElement.hasAttribute('data-position-restored'))`;
-  const settle = () => new Promise((r) => setTimeout(r, 800));
+  const settle = () => new Promise((r) => setTimeout(r, 800)); // wait-allow: observe delayed SSE and restoration frames after save before checking retained edits
   await b.inPage('window.firstLoad = true');
 
   await set(easyEffort, 'high', 'input');
@@ -287,13 +342,7 @@ test('in a browser, a form is read-only while its save waits, so typing then los
   const easyEffort = `document.querySelector('tr[data-rung="easy"] input[name="effort"]')`;
   const tierSelect = `document.querySelector('tr[data-task="T1"] select')`;
   const set = (el, value, event) => b.inPage(`(function (el) { el.value = ${JSON.stringify(value)}; el.dispatchEvent(new Event(${JSON.stringify(event)}, { bubbles: true })); })(${el})`);
-  const appeared = async (file) => {
-    const end = Date.now() + 15000;
-    while (!fs.existsSync(file)) {
-      if (Date.now() > end) throw new Error(`${file} never appeared`);
-      await new Promise((r) => setTimeout(r, 20));
-    }
-  };
+  const appeared = (file) => fileWritten(file, { check: () => true });
 
   // otherDirty: with an unsaved tier the saved form is updated in place,
   // without one the page reloads; both must keep what the person typed.
@@ -304,7 +353,7 @@ test('in a browser, a form is read-only while its save waits, so typing then los
     await b.inPage(`${easyModel}.focus()`);
     // A CLI write holds the lock, so the save waits for it.
     const paused = path.join(h.base, `holder-${round}`);
-    const holder = h.runAsync(['task', 'note', 'T1', 'holding the lock'], { hooks: { HOOK_PAUSE_ON: 'tasks.json', HOOK_PAUSED: paused } });
+    const holder = h.runAsync(['task', 'note', 'T1', 'holding the lock'], { hooks: { HOOK_PAUSE_LOCKED: paused } });
     await appeared(paused);
     await b.inPage(`document.querySelector('#ladder-form button[type="submit"]').click()`);
     await b.until(`document.querySelector('#ladder-form button[type="submit"]').textContent === 'Saving...'`, 'the save to start');
@@ -314,7 +363,7 @@ test('in a browser, a form is read-only while its save waits, so typing then los
     fs.writeFileSync(`${paused}.go`, '');
     assert.equal((await holder).code, 0);
     await b.until(`document.readyState === 'complete' && !document.querySelector('#ladder-form[aria-busy]') && ${easyModel} && !${easyModel}.disabled && (${otherDirty} || document.documentElement.hasAttribute('data-position-restored'))`, 'the save to finish');
-    await new Promise((r) => setTimeout(r, 300));
+    await new Promise((r) => setTimeout(r, 300)); // wait-allow: observe delayed SSE and restoration frames after save before checking retained edits
     assert.equal(h.readState('project.json').ladder.easy.effort, round === 1 ? 'high' : 'low');
     assert.equal(await b.inPage(`${easyModel}.value`), typed, `round ${round}: what was typed during the save is still there`);
     assert.equal(typed, '', 'the read-only field took no input');

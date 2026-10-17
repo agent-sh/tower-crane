@@ -1,15 +1,18 @@
 'use strict';
 
+const { waitUntil, killPid } = require('./signals');
+
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
-const { makeRepo, ROOT, BIN, detachedAlive } = require('./helpers');
+const { makeRepo, pluginRoot, shortCacheRoot, ROOT, BIN, detachedAlive } = require('./helpers');
 const A = require('../lib/agents');
 const S = require('../lib/state');
 const TOML = require('../lib/toml');
 const ClaudeSandboxPlaceholders = require('../lib/claude-sandbox-placeholders');
+const { readPublished } = require('./atomic-file');
 
 const STUB = path.join(__dirname, 'fixtures', 'harness-stub.js');
 // The stubs are scripts started through a shebang; Windows starts only .exe
@@ -32,7 +35,7 @@ const TRACKED_SETTINGS = '.claude/settings.json';
 // A user home holding what must never reach a tower-crane agent: memory and
 // instruction files, hooks, an MCP server, approved-command rules, and
 // credentials that must reach it only through a link.
-function plant(h) {
+function plant(h, branch = null) {
   const home = path.join(h.base, 'home');
   const put = (rel, text) => {
     fs.mkdirSync(path.dirname(path.join(home, rel)), { recursive: true });
@@ -74,15 +77,18 @@ function plant(h) {
   for (const name of ['claude', 'codex']) {
     fs.writeFileSync(path.join(bin, name), `#!${process.execPath}\nrequire(${JSON.stringify(STUB)})(${JSON.stringify(name)});\n`, { mode: 0o755 });
   }
-  // gh is not on every CI runner; this one stands in for the real program
-  // the agent's gh shim hands allowed calls to.
-  // Like a gh whose login is in the system keyring: `auth token` answers
-  // outside a sandbox, and a write without GH_TOKEN gets the 401 a sandboxed
-  // agent got when the keyring was out of its reach.
+  // gh is not on every CI runner; this one stands in for the real program a
+  // sandboxed agent's broker runs on the host. Like a gh whose login is in
+  // the system keyring: `auth token` answers, and a call made with a token
+  // in its environment is refused, since no agent should hold one. Pull
+  // request 1 is the task's own; 2 is from another branch.
   fs.writeFileSync(path.join(bin, 'gh'), [
     '#!/bin/sh',
     'if [ "$1" = auth ] && [ "$2" = token ]; then echo stub-gh-token; exit 0; fi',
-    'if [ "$1" = pr ] && [ "$2" = comment ] && [ "$GH_TOKEN" != stub-gh-token ]; then echo "HTTP 401: Requires authentication" >&2; exit 1; fi',
+    'if [ -n "$GH_TOKEN" ]; then echo "fixture gh: a token in the environment" >&2; exit 1; fi',
+    'if [ "$1" = pr ] && [ "$2" = view ] && [ "$4" = --json ] && [ "$5" = number,headRefName,isCrossRepository ]; then',
+    `  if [ "$7" = 2 ]; then echo '{"number":2,"headRefName":"other","isCrossRepository":false}'; else echo '{"number":1,"headRefName":${JSON.stringify(branch || '')},"isCrossRepository":false}'; fi; exit 0`,
+    'fi',
     'echo fake gh', '',
   ].join('\n'), { mode: 0o755 });
   // A test nested inside an agent must not cycle through the parent and
@@ -141,7 +147,7 @@ function setup(t) {
   h.ok(['brief', 'set', 'T1', '-'], { input: 'probe\n' });
   const wt = h.json(['worktree', 'T1']).path;
   fs.writeFileSync(path.join(wt, '.claude', 'settings.local.json'), JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'command', command: 'planted-local-hook' }] }] } }));
-  return { h, u: plant(h), wt };
+  return { h, u: plant(h, h.git(['branch', '--show-current'], wt)), wt };
 }
 
 function isolateGitEnvironment(h, u) {
@@ -182,6 +188,9 @@ function releaseExited(h) {
 
 function spawn(h, u, role, env = {}, opts = {}) {
   releaseExited(h);
+  // The probes relaunch one task's worker many times on purpose; the owner
+  // lifts the respawn cap each stand-in's exit without a submit counts toward.
+  if (h.readState('tasks.json').tasks[0].needs_owner?.startsWith('worker exited without submitting')) h.ok(['owner-done', 'T1']);
   // A submitted task goes back for rework before its next worker is dispatched.
   if (['easy', 'medium', 'hard', 'research'].includes(role) && h.readState('tasks.json').tasks[0].status === 'submitted') {
     h.ok(['rework', 'T1', '--reason', 'dispatch the next worker']);
@@ -384,12 +393,14 @@ test('a codex spawn on Bedrock starts with the region from the user config', { s
   assert.deepEqual(config.model_providers, PROVIDERS_KEPT);
   const profile = TOML.parse(fs.readFileSync(path.join(home, 'fixture-main.config.toml'), 'utf8'));
   assert.deepEqual(JSON.parse(JSON.stringify(profile.model_providers)), PROVIDERS_KEPT);
-  // An installed codex also loads the generated home with the spawn's -c
-  // overrides, so a field it refuses fails here instead of at dispatch.
+  // With TOWER_CRANE_LIVE_CODEX=1 the installed codex also loads the generated
+  // home with the spawn's -c overrides, so a field it refuses fails here
+  // instead of at dispatch. A non-live run never starts the real harness.
+  if (process.env.TOWER_CRANE_LIVE_CODEX !== '1') return t.diagnostic('set TOWER_CRANE_LIVE_CODEX=1 to load this home in the installed codex');
   const version = cp.spawnSync('codex', ['--version'], { encoding: 'utf8' });
   if (version.status !== 0) return t.diagnostic('codex is not installed; the stub alone checked startup');
   const overrides = spawned.flatMap((a, i) => (spawned[i - 1] === '-c' ? ['-c', a] : []));
-  const r = cp.spawnSync('codex', [...overrides, 'features', 'list'], { encoding: 'utf8', env: { ...process.env, CODEX_HOME: home }, timeout: 60000 });
+  const r = cp.spawnSync('codex', [...overrides, 'features', 'list'], { encoding: 'utf8', env: { ...process.env, CODEX_HOME: home }, timeout: 300000 });
   assert.equal(r.status, 0, `codex refused the generated config: ${r.stderr}`);
 });
 
@@ -402,7 +413,9 @@ test('research Claude gets native or explicit web MCP tools with worker file and
   const filesystem = report => {
     const { allowRead, ...shared } = report.settings.sandbox.filesystem;
     const ownHome = path.dirname(report.home);
-    assert.deepEqual(allowRead, [ownHome, path.join(h.state, 'brokers', path.basename(ownHome))]);
+    // Outside the user's home it reopens only the agent's own home and broker directory.
+    // And under /run, which it hides, the resolver (runReads).
+    assert.deepEqual(allowRead.filter((p) => !p.startsWith(fs.realpathSync(u.home) + path.sep)), [ownHome, path.join(h.state, 'brokers', path.basename(ownHome)), ...A.runReads(u.env)]);
     assert.ok(shared.denyWrite.includes(h.state));
     // A mask on a path the host lacks leaves a placeholder there, so only existing paths are masked.
     for (const p of [...shared.denyRead, ...shared.denyWrite]) assert.ok(fs.existsSync(p), `${p} is masked but missing`);
@@ -420,7 +433,11 @@ test('research Claude gets native or explicit web MCP tools with worker file and
   assert.ok(native.args[native.args.indexOf('--allowedTools') + 1].includes('WebSearch'));
   assert.ok(native.args[native.args.indexOf('--allowedTools') + 1].includes('WebFetch'));
   assert.deepEqual(filesystem(native), filesystem(worker));
-  assert.deepEqual(native.settings.sandbox.network.allowedDomains, ['*']);
+  // Found 2026-10-14: ['*'], which Claude Code refuses as too broad, left
+  // its proxy no host to allow. The list names GitHub's hosts and npm's.
+  const hosts = native.settings.sandbox.network.allowedDomains;
+  for (const d of ['github.com', 'api.github.com', 'codeload.github.com', 'objects.githubusercontent.com', 'raw.githubusercontent.com', 'uploads.github.com', 'registry.npmjs.org']) assert.ok(hosts.includes(d), d);
+  assert.ok(!hosts.includes('*') && hosts.every(require('../lib/spawn-settings').domainPattern), `every entry is a pattern claude takes: ${hosts}`);
   assert.ok(native.memory.join('\n').includes('Use the network'));
   h.ok(['ladder', 'set', 'research', '--web-mcp', '{"name":"harness-web","command":"node","args":["/configured/server.mjs"]}']);
   spawn(h, u, 'research');
@@ -461,6 +478,7 @@ test('research Codex explicitly enables live search with worker file and git con
     const broker = path.join(h.state, 'brokers', path.basename(ownHome));
     assert.equal(rules[h.state], 'read');
     assert.equal(rules[path.join(h.state, 'brokers')], 'none');
+    assert.equal(rules[path.join(h.state, 'ci-artifacts')], 'none', 'no agent reads unredacted local CI artifacts');
     assert.equal(rules[broker], 'write');
     assert.equal(rules[path.join(path.dirname(h.userConfig), 'owner')], 'none', 'no agent reads the owner key');
     for (const [p, mode] of Object.entries(rules)) if (mode === 'none') assert.ok(fs.existsSync(p), `${p} is masked but missing`);
@@ -470,7 +488,15 @@ test('research Codex explicitly enables live search with worker file and git con
     delete rules[ownHome];
     delete rules[sessions];
     delete rules[report.home];
+    assert.equal(rules[path.join(report.home, '.gitconfig')], 'read', 'git config in HOME stays read-only');
+    delete rules[path.join(report.home, '.gitconfig')];
+    assert.equal(rules[path.join(report.home, '.tower-crane-shims')], 'read', 'the shims in HOME stay read-only');
+    delete rules[path.join(report.home, '.tower-crane-shims')];
     delete rules[broker];
+    // What lies outside the home is listed as it is at each spawn.
+    const home = fs.realpathSync(u.home);
+    const above = (dir) => home.startsWith(dir.endsWith(path.sep) ? dir : dir + path.sep);
+    for (const k of Object.keys(rules)) if (above(path.dirname(k)) && !above(k)) delete rules[k];
   }
   assert.deepEqual(researchFs, workerFs);
   assert.deepEqual(researcher.rules, worker.rules);
@@ -492,7 +518,7 @@ test('a spawned claude agent imports the user\'s global rules by path, loads non
   assert.ok(instructions.split('\n').includes(`@${path.join(u.home, '.claude', 'CLAUDE.md')}`), 'the user\'s global rules are imported by path');
   assert.ok(!instructions.includes('PLANTED-MEMORY'), 'their text is not copied');
   assert.ok(seen.memory.join('\n').includes('PLANTED-MEMORY'), 'claude loads the user\'s global rules through the import');
-  assert.deepEqual(Object.keys(seen.settings.hooks).sort(), ['PostToolUse', 'Stop', 'UserPromptSubmit']);
+  assert.deepEqual(Object.keys(seen.settings.hooks).sort(), ['PostToolUse', 'PreToolUse', 'Stop', 'UserPromptSubmit']);
   assert.ok(!JSON.stringify(seen.hooks).includes('planted'), 'no user, project or local hooks');
   assert.deepEqual(seen.mcp, {}, 'no MCP server');
   assert.deepEqual(seen.rules, [], 'no approved-command rules');
@@ -513,13 +539,27 @@ test('a spawned claude agent imports the user\'s global rules by path, loads non
   const box = seen.settings.sandbox;
   assert.equal(seen.args[seen.args.indexOf('--allowedTools') + 1], 'Bash,Read,Grep,Glob');
   assert.deepEqual([box.enabled, box.failIfUnavailable, box.allowUnsandboxedCommands, box.network.allowAllUnixSockets], [true, true, false, true]);
-  assert.deepEqual(box.filesystem.allowWrite, []);
-  assert.deepEqual(box.filesystem.denyWrite, [h.state, wt], 'the state is read-only');
+  // Nothing but its own temp directory, where claude puts its proxy sockets (claudeTmp).
+  assert.deepEqual(box.filesystem.allowWrite.filter((w) => w !== seen.tmpdir), []);
+  assert.equal(box.filesystem.denyWrite[0], h.state, 'the state is read-only');
+  assert.ok(box.filesystem.denyWrite.includes(wt), 'the worktree is read-only');
+  // claude writes a linked worktree's git directory itself; what runs code stays read-only.
+  const common = h.git(['rev-parse', '--path-format=absolute', '--git-common-dir'], wt);
+  assert.ok(box.filesystem.denyWrite.includes(path.join(common, 'config')), 'the shared git config is read-only');
   assert.ok(box.filesystem.denyRead.includes(path.join(h.state, 'homes')), 'other agent homes are hidden, including future spawns');
   assert.ok(box.filesystem.denyRead.includes(path.join(h.state, 'brokers')), 'no agent reads another agent\'s broker token');
+  assert.ok(box.filesystem.denyRead.includes(path.join(h.state, 'ci-artifacts')), 'no agent reads unredacted local CI artifacts');
   assert.ok(box.filesystem.denyRead.includes(path.join(path.dirname(h.userConfig), 'owner')), 'no agent reads the owner key');
-  assert.deepEqual(box.filesystem.allowRead, [home, path.join(h.state, 'brokers', started.agent)], 'only this dispatch home and its own broker directory are readable');
-  for (const p of ['/var/run/docker.sock', '/run/docker.sock', path.join(u.home, '.ssh'), path.join(u.home, '.aws')]) assert.equal(box.filesystem.denyRead.includes(p), fs.existsSync(p), p);
+  assert.deepEqual(box.filesystem.allowRead.filter((p) => p !== seen.tmpdir), [path.join(u.home, '.claude', 'CLAUDE.md'), home, path.join(h.state, 'brokers', started.agent), ...A.runReads(u.env)],
+    'only the user\'s global rules under the home, this dispatch home, its own broker directory, the resolver under /run and its own temp directory are readable');
+  // /run is hidden whole, with docker's, the buses' and every other host socket in it.
+  for (const p of A.runDirs()) assert.ok(box.filesystem.denyRead.includes(p), p);
+  // /var/run links to /run on most hosts; the sandbox follows the link into the hidden /run.
+  for (const p of ['/var/run/docker.sock', '/run/docker.sock', '/run/dbus/system_bus_socket', '/run/snapd.socket']) {
+    assert.equal(commandsRead(seen, fs.existsSync(p) ? fs.realpathSync(p) : p), false, p);
+  }
+  assert.ok(box.filesystem.denyRead.includes(u.home), 'the user\'s home is hidden whole');
+  for (const p of [path.join(u.home, '.ssh'), path.join(u.home, '.aws')]) assert.equal(commandsRead(seen, p), false, p);
   assert.match(fs.readFileSync(path.join(h.repo, '.git', 'info', 'exclude'), 'utf8'), /^\.claude\/\.cc-writes\/$/m, 'the sandbox marker is never committed');
   assert.equal(fs.readFileSync(path.join(h.state, 'homes', '.gitignore'), 'utf8'), '*\n');
   noSecretsCopied(h);
@@ -531,7 +571,7 @@ test('a sandboxed claude removes its ignored cwd placeholders after exit', { ski
   isolated(h, 'small', 'claude');
   fs.rmSync(path.join(wt, '.claude', 'settings.local.json'));
   const gitignoreFile = path.join(h.repo, '.gitignore');
-  const gitignore = fs.existsSync(gitignoreFile) ? fs.readFileSync(gitignoreFile, 'utf8') : null;
+  const gitignore = fs.existsSync(gitignoreFile) ? readPublished(gitignoreFile, 'utf8') : null;
   const globalIgnore = path.join(xdg, 'git', 'ignore');
   fs.mkdirSync(path.dirname(globalIgnore), { recursive: true });
   fs.writeFileSync(globalIgnore, 'globally-ignored/\n');
@@ -556,7 +596,7 @@ test('a sandboxed claude removes its ignored cwd placeholders after exit', { ski
   for (const pattern of ClaudeSandboxPlaceholders.IGNORE_PATTERNS) {
     assert.ok(!excludes.includes(pattern), `${pattern} is not left in shared git info/exclude`);
   }
-  assert.equal(fs.existsSync(gitignoreFile) ? fs.readFileSync(gitignoreFile, 'utf8') : null, gitignore, 'the repository .gitignore is unchanged');
+  assert.equal(fs.existsSync(gitignoreFile) ? readPublished(gitignoreFile, 'utf8') : null, gitignore, 'the repository .gitignore is unchanged');
 
   const other = path.join(h.base, 'other-worktree');
   h.git(['worktree', 'add', '--detach', other, 'main']);
@@ -566,6 +606,50 @@ test('a sandboxed claude removes its ignored cwd placeholders after exit', { ski
     fs.writeFileSync(path.join(cwd, '.claude', 'agents', 'x.md'), 'a real project agent\n');
     assert.equal(status(cwd), '?? .bashrc\n?? .claude/agents/x.md');
   }
+});
+
+test('a sandboxed claude removes the .claude directory its placeholders made', { skip: NO_STUBS }, (t) => {
+  const { h, u, wt } = setup(t);
+  isolated(h, 'small', 'claude');
+  fs.rmSync(path.join(wt, '.claude'), { recursive: true });
+  spawn(h, u, 'small', { STUB_CLAUDE_SANDBOX_PLACEHOLDERS: JSON.stringify(SANDBOX_MOUNTS) });
+  assert.equal(u.report().placeholderGitStatus.code, 0, 'the placeholders were made');
+  assert.equal(fs.existsSync(path.join(wt, '.claude')), false, '.claude is gone after exit');
+  for (const name of SANDBOX_MOUNTS.filter((n) => !n.includes('/'))) assert.equal(fs.existsSync(path.join(wt, name)), false, `${name} is gone after exit`);
+});
+
+test('a spawn sweeps placeholders an earlier agent left, and keeps the worktree\'s own files by those names', { skip: NO_STUBS }, (t) => {
+  // An agent whose monitor died before its cleanup leaves empty read-only
+  // files; the next spawn would take them for the worktree's own, leave them
+  // out of its exclude file, and a worker could commit them.
+  const { h, u, wt } = setup(t);
+  isolated(h, 'small', 'claude');
+  fs.writeFileSync(path.join(wt, '.zshrc'), '');
+  h.git(['add', '.zshrc'], wt);
+  h.git(['commit', '-q', '-m', 'an empty zshrc of the project'], wt);
+  const stale = ['.bashrc', '.gitconfig', '.claude/loop.md'];
+  for (const name of [...stale, '.zshrc']) {
+    fs.writeFileSync(path.join(wt, name), '');
+    fs.chmodSync(path.join(wt, name), 0o444);
+  }
+  fs.writeFileSync(path.join(wt, '.profile'), '');
+  fs.mkdirSync(path.join(wt, '.claude', 'agents'));
+  fs.mkdirSync(path.join(wt, '.claude', '.cc-writes'));
+  fs.mkdirSync(path.join(wt, '.vscode'));
+  fs.writeFileSync(path.join(wt, '.vscode', 'settings.json'), '{}\n');
+  // A shared settings directory linked in is the worktree's own, and no
+  // warning about it repeats at every spawn.
+  const shared = path.join(h.base, 'shared-idea');
+  fs.mkdirSync(shared);
+  fs.symlinkSync(shared, path.join(wt, '.idea'), 'dir');
+  const r = h.run(['spawn', '--role', 'small', '--task', 'T1', '--wait', '--json'], { env: u.env });
+  assert.equal(r.code, 0, r.stderr);
+  assert.doesNotMatch(r.stderr, /could not remove stale Claude sandbox placeholder/);
+  for (const name of [...stale, '.claude/agents', '.claude/.cc-writes']) assert.equal(fs.existsSync(path.join(wt, name)), false, `stale ${name} is swept`);
+  for (const name of ['.zshrc', '.profile', '.vscode/settings.json', '.claude/settings.json']) assert.equal(fs.existsSync(path.join(wt, name)), true, `${name} stays`);
+  assert.equal(fs.lstatSync(path.join(wt, '.idea')).isSymbolicLink(), true, 'the linked .idea stays');
+  const exclude = fs.readFileSync(path.join(h.state, 'homes', fs.readdirSync(path.join(h.state, 'homes')).find((n) => n.startsWith('small-')), 'sandbox-git-exclude'), 'utf8').split('\n');
+  assert.ok(exclude.includes('/.bashrc'), 'a swept name is excluded again');
 });
 
 test('the agent honors its worktree\'s own core.excludesFile, not the main checkout\'s', { skip: NO_STUBS }, (t) => {
@@ -591,14 +675,16 @@ test('the agent honors its worktree\'s own core.excludesFile, not the main check
   assert.deepEqual(u.report().placeholderGitStatus, { code: 0, stdout: '?? main-ignored/data\n', stderr: '' }, 'the worktree\'s excludes hide its ignored directory and the main checkout\'s do not reach it');
 });
 
-test('sandbox cleanup preserves and reports a pre-existing empty read-only file with a placeholder name', { skip: NO_STUBS }, (t) => {
+test('an untracked empty read-only file with a placeholder name is a stale placeholder: swept, excluded and never reported', { skip: NO_STUBS }, (t) => {
+  // Nothing tells it from a placeholder an earlier agent left, and kept as
+  // the worktree's own it would stay out of the exclude file.
   const { h, u, wt } = setup(t);
   const { global } = isolateGitEnvironment(h, u);
   isolated(h, 'small', 'claude');
   fs.rmSync(path.join(wt, '.claude', 'settings.local.json'));
-  const realFile = path.join(wt, '.bash_profile');
-  fs.writeFileSync(realFile, '');
-  fs.chmodSync(realFile, 0o444);
+  const stale = path.join(wt, '.bash_profile');
+  fs.writeFileSync(stale, '');
+  fs.chmodSync(stale, 0o444);
   const globalIgnore = path.join(h.base, 'explicit-global-ignore');
   fs.writeFileSync(globalIgnore, 'explicitly-ignored/\n');
   fs.mkdirSync(path.join(wt, 'explicitly-ignored'));
@@ -612,14 +698,11 @@ test('sandbox cleanup preserves and reports a pre-existing empty read-only file 
     STUB_CLAUDE_SANDBOX_PLACEHOLDERS: JSON.stringify(CLAUDE_SANDBOX_PLACEHOLDERS),
   });
   const seen = u.report();
-  assert.deepEqual(seen.placeholderGitStatus, { code: 0, stdout: '?? .bash_profile\n', stderr: '' });
-  assert.equal(fs.existsSync(realFile), true, 'the existing file remains');
-  assert.equal(fs.statSync(realFile).size, 0, 'the existing file stays empty');
-  assert.equal(fs.statSync(realFile).mode & 0o222, 0, 'the existing file keeps its read-only mode');
-  for (const relative of CLAUDE_SANDBOX_PLACEHOLDERS.filter((name) => name !== '.bash_profile' && name !== TRACKED_SETTINGS)) {
+  assert.deepEqual(seen.placeholderGitStatus, { code: 0, stdout: '', stderr: '' });
+  for (const relative of CLAUDE_SANDBOX_PLACEHOLDERS.filter((name) => name !== TRACKED_SETTINGS)) {
     assert.equal(fs.existsSync(path.join(wt, relative)), false, `${relative} placeholder is removed`);
   }
-  assert.equal(status(started.cwd), '?? .bash_profile');
+  assert.equal(status(started.cwd), '');
   assert.equal(u.env.GIT_CONFIG_GLOBAL, global, 'Git uses the test-only global config');
 });
 
@@ -890,6 +973,8 @@ test('unbound projects spawn workers and reviewers with owner-key denials but st
     const env = { TOWER_CRANE_AGENT: 'orchestrator', TOWER_CRANE_CONFIG: callerConfig };
     const configDir = callerConfig ? path.dirname(callerConfig) : path.join(u.home, '.config', 'tower-crane');
     const ownerDir = path.join(configDir, 'owner');
+    // The fixture keeps its own owner key in the home's default directory.
+    fs.rmSync(ownerDir, { recursive: true, force: true });
     assert.equal(fs.existsSync(ownerDir), false);
     for (const role of ['hard', 'review']) {
       if (role === 'review') {
@@ -908,7 +993,7 @@ test('unbound projects spawn workers and reviewers with owner-key denials but st
           assert.ok(seen.settings.permissions.deny.includes(`${tool}(/${posix}/**)`));
         }
       } else {
-        assert.equal(seen.config.permissions['tower-crane'].filesystem[ownerDir], 'none');
+        assert.equal(commandsRead(seen, path.join(ownerDir, 'key')), false, 'the owner key directory is hidden');
       }
       assert.equal(h.readState('project.json').owner_config_dir, undefined);
     }
@@ -945,10 +1030,61 @@ test('a spawned codex agent is pointed at the user\'s global rules, loads none o
   assert.equal(fs.statSync(path.join(home, 'config.toml')).mode & 0o777, 0o600);
   assert.equal(seen.home, path.join(home, 'home'), 'HOME is the agent\'s own');
   assert.deepEqual(seen.skills, [], 'no user skill from ~/.agents/skills, and the small role has none of its own');
-  assert.equal(fs.readlinkSync(path.join(home, 'home', '.gitconfig')), path.join(u.home, '.gitconfig'), 'git config is linked into its HOME');
+  assert.ok(!fs.lstatSync(path.join(home, 'home', '.gitconfig')).isSymbolicLink(), 'git config is rendered into its HOME, not linked to a file its sandbox hides');
+  assert.equal(seen.config.permissions['tower-crane'].filesystem[path.join(home, 'home', '.gitconfig')], 'read', 'the copy in its writable HOME is read-only');
   spawn(h, u, 'review');
   assert.deepEqual(u.report().skills, ['tower-crane-review'], 'the reviewer gets its own skill only');
   noSecretsCopied(h);
+});
+
+// Automation dispatches from inside a worker's monitor, so its package root is
+// that worker's tool snapshot, removed when the worker exits. Skill paths name
+// the state directory's skill store instead, which no exit removes and which,
+// unlike homes/, the claude and codex sandboxes can read
+// (test/live-sandbox.test.js reads it from inside them).
+test('every skill path a worker, reviewer or researcher is told to read is in the state directory\'s skill store at launch and after, also when a worker\'s snapshot dispatches it', { skip: NO_STUBS }, (t) => {
+  const { h, u } = setup(t);
+  fs.mkdirSync(path.join(u.home, '.cache'), { recursive: true });
+  fs.writeFileSync(path.join(h.base, 'bin', 'opencode'), `#!${process.execPath}\nrequire(${JSON.stringify(STUB)})("opencode");\n`, { mode: 0o755 });
+  const fromSnapshot = (tool, role) => {
+    const r = cp.spawnSync(process.execPath, [path.join(tool, 'bin', 'tower-crane.js'), 'spawn', '--role', role, '--task', 'T1', '--wait', '--json'],
+      { cwd: h.repo, env: { ...h.env, ...u.env }, encoding: 'utf8' });
+    assert.equal(r.code ?? r.status, 0, r.stderr);
+    return JSON.parse(r.stdout);
+  };
+  const named = new Set();
+  const ownPaths = (harness, role) => {
+    const store = path.join(fs.realpathSync(h.state), 'skills') + path.sep;
+    const seen = u.report();
+    assert.ok(seen.skillPaths.length, `${harness} ${role}: names its skill`);
+    if (harness !== 'claude') assert.ok(seen.skillLinks.length, `${harness} ${role}: links its skill in its home`);
+    for (const { file, real: at } of [...seen.skillPaths, ...seen.skillLinks]) {
+      assert.ok(at, `${harness} ${role}: ${file} exists at launch`);
+      assert.ok(at.startsWith(store), `${harness} ${role}: ${file} resolves to ${at}, in the skill store ${store}, not a home or the dispatcher's package`);
+      named.add(at);
+    }
+  };
+  for (const harness of ['claude', 'codex', 'opencode']) {
+    const model = { claude: ['--model', 'fixture-large', '--clear', 'profile'], codex: ['--profile', 'fixture-main', '--clear', 'model'], opencode: ['--model', 'fixture/probe', '--clear', 'profile'] }[harness];
+    for (const rung of ['medium', 'review', 'research']) h.ok(['ladder', 'set', rung, '--harness', harness, ...model, '--clear', 'effort', '--clear', 'args']);
+    const worker = spawn(h, u, 'medium');
+    ownPaths(harness, 'worker');
+    // A copy, since the next dispatch prunes the exited worker's home it would run from.
+    const snapshot = path.join(h.base, `${harness}-worker-snapshot`);
+    fs.cpSync(worker.tool.path, snapshot, { recursive: true });
+    releaseExited(h);
+    if (h.readState('tasks.json').tasks[0].needs_owner) h.ok(['owner-done', 'T1']);
+    h.ok(['task', 'update', 'T1', '--kind', 'docs']);
+    h.ok(['claim', 'T1', '--agent', 'builder']);
+    h.ok(['submit', 'T1', '--sha', h.git(['rev-parse', 'HEAD']), '--agent', 'builder']);
+    fromSnapshot(snapshot, 'review');
+    ownPaths(harness, 'reviewer');
+    h.ok(['rework', 'T1', '--reason', 'probe the research rung']);
+    fromSnapshot(snapshot, 'research');
+    ownPaths(harness, 'researcher');
+  }
+  // Later spawns pruned the exited agents' homes; what they were told to read stays.
+  for (const file of named) assert.ok(fs.existsSync(file), `${file} outlives the agents that were told to read it`);
 });
 
 test('every spawn gets a fresh home, and an exited agent\'s home is removed', { skip: NO_STUBS }, (t) => {
@@ -1078,118 +1214,592 @@ test('browser spawns use the original user kit through a nested isolated home an
   assert.deepEqual(h.json(['spawn', '--role', 'small', '--task', 'T1', '--dry-run'], { env: { ...u.env, TOWER_CRANE_CONFIG: '', ...orchestrator } }).home.mcp, []);
 });
 
-test('claude and codex sandboxes hide the user\'s credential stores and keep the agent\'s home, house rules and gh token', { skip: NO_STUBS }, (t) => {
-  const { h, u } = setup(t);
-  const stores = ['.config/gh/hosts.yml', '.claude/.credentials.json', '.claude/settings.json', '.claude.json', '.codex/auth.json',
-    '.codex/.env', '.codex/config.toml', '.docker/config.json', '.npmrc', '.pypirc', '.config/pip/pip.conf', '.pip/pip.conf',
-    '.cargo/credentials', '.cargo/credentials.toml', '.netrc',
-    '.git-credentials', '.config/git/credentials', '.kube/config', '.config/gcloud/credentials.db', '.azure/msal_token_cache.json',
-    '.ssh/id_ed25519', '.aws/credentials'].map((p) => path.join(u.home, p));
-  for (const f of stores.filter((f) => !fs.existsSync(f))) {
-    fs.mkdirSync(path.dirname(f), { recursive: true });
-    fs.writeFileSync(f, `${SECRET}-STORE\n`);
+// Whether the agent's commands can read file, as each sandbox decides it.
+// claude mounts each denied directory empty, shallowest first, and remounts
+// the allowed paths inside it, so the deepest entry naming the path wins.
+// codex starts from an empty root and mounts only the paths its rules name
+// (the fixture's home is no system directory): readable paths, then each
+// 'none' path hidden, then the writable ones, so only a writable rule inside
+// a hidden path reopens it. A special path stands for what codex resolves it
+// to: :root for /, :minimal for the system directories, :tmpdir for the
+// TMPDIR codex started with, :slash_tmp for /tmp.
+const CODEX_MINIMAL = ['/bin', '/sbin', '/usr', '/etc', '/lib', '/lib64', '/nix/store', '/run/current-system/sw'];
+function codexTargets(seen, p) {
+  if (!p.startsWith(':')) return [p];
+  if (p === ':root') return [path.parse(process.cwd()).root];
+  if (p === ':minimal') return CODEX_MINIMAL;
+  if (p === ':tmpdir') return seen.tmpdir && path.isAbsolute(seen.tmpdir) ? [seen.tmpdir] : [];
+  if (p === ':slash_tmp') return ['/tmp'];
+  return [];
+}
+
+function commandsRead(seen, file) {
+  const under = (p, dir) => p === dir || p.startsWith(dir.endsWith(path.sep) ? dir : dir + path.sep);
+  if (seen.harness === 'claude') {
+    const box = seen.settings.sandbox.filesystem;
+    const entries = [...box.denyRead.map((p) => [p, 0]), ...box.allowRead.map((p) => [p, 1])]
+      .filter(([p]) => under(file, p)).sort((a, b) => a[0].length - b[0].length || a[1] - b[1]);
+    return entries.length === 0 || entries.at(-1)[1] === 1;
   }
-  const under = (p, dirs) => dirs.some((d) => p === d || p.startsWith(d + path.sep));
+  const profile = seen.config.permissions['tower-crane'].filesystem;
+  const rules = Object.entries(profile).filter(([, access]) => typeof access === 'string')
+    .flatMap(([p, access]) => codexTargets(seen, p).map((target) => [target, access]));
+  const named = (access) => rules.filter(([, a]) => access(a)).map(([p]) => p);
+  const hidden = named((a) => a === 'none');
+  const writable = named((a) => a === 'write');
+  return named((a) => a !== 'none').some((p) => under(file, p))
+    && !hidden.some((dir) => under(file, dir) && !writable.some((w) => under(w, dir) && under(file, w)));
+}
+
+// What T106's credential table missed, with no entry for any of it now: an
+// arbitrary dotfile, an env-pointed file, OpenCode and Azure logins.
+const HOME_SECRETS = ['.config/gh/hosts.yml', '.claude/.credentials.json', '.codex/auth.json', '.aws/credentials',
+  '.docker/config.json', '.npmrc', '.netrc', 'secret-test', '.local/share/opencode/auth.json', '.azure/msal_token_cache.json',
+  '.config/tower-crane/config.json', '.sometool/token', 'custom/aws-credentials'];
+
+test('claude and codex sandboxes deny the user\'s home except the paths the agent needs', { skip: NO_STUBS }, (t) => {
+  const { h, u, wt } = setup(t);
+  const secrets = HOME_SECRETS.map((p) => path.join(u.home, p));
+  for (const f of secrets.filter((f) => !fs.existsSync(f))) {
+    fs.mkdirSync(path.dirname(f), { recursive: true });
+    // The fixture's user file is the one in the home, so the CLI still reads it.
+    fs.writeFileSync(f, f === h.userConfig ? JSON.stringify({ secret: `${SECRET}-HOME` }) : `${SECRET}-HOME\n`);
+  }
+  // A project names a tool directory under the home its agents need.
+  const tool = path.join(u.home, 'tools', 'bin', 'tool.sh');
+  fs.mkdirSync(path.dirname(tool), { recursive: true });
+  fs.writeFileSync(tool, '#!/bin/sh\n');
+  h.ok(['project', 'set', '--sandbox', JSON.stringify({ read: ['~/tools'] })]);
+  const env = { AWS_SHARED_CREDENTIALS_FILE: path.join(u.home, 'custom', 'aws-credentials') };
   for (const harness of ['claude', 'codex']) {
     isolated(h, 'hard', harness);
-    const started = spawn(h, u, 'hard');
+    const rule = path.join(u.home, harness === 'claude' ? '.claude/CLAUDE.md' : '.codex/AGENTS.md');
+    const open = [tool, rule, path.join(wt, '.claude', 'settings.local.json')];
+    const started = spawn(h, u, 'hard', { ...env, STUB_READ: JSON.stringify([...secrets, ...open]) });
     const seen = u.report();
-    const home = path.join(h.state, 'homes', started.agent);
-    // The house rules files the prompt names, ~/.claude/CLAUDE.md or
-    // ~/.codex/AGENTS.md, stay readable inside their hidden store.
-    const rules = path.join(u.home, harness === 'claude' ? '.claude/CLAUDE.md' : '.codex/AGENTS.md');
-    let hidden;
+    for (const f of secrets) assert.equal(commandsRead(seen, f), false, `${harness}: ${path.relative(u.home, f)} is hidden`);
+    const scratch = h.readState('tasks.json').tasks[0].scratch;
+    assert.ok(scratch.startsWith(u.home + path.sep), 'the task scratch is under the home');
+    for (const p of [...open, scratch, path.join(h.state, 'tasks.json'), path.join(h.state, 'brokers', started.agent, 'broker.json')]) {
+      assert.equal(commandsRead(seen, p), true, `${harness}: ${p} stays readable`);
+    }
+    assert.equal(commandsRead(seen, path.join(h.state, 'brokers', 'worker-T9-1', 'broker.json')), false, `${harness}: another agent's token is hidden`);
     if (harness === 'claude') {
-      const box = seen.settings.sandbox.filesystem;
-      // Read, Grep and Glob ignore the sandbox and obey Read deny rules.
-      const reads = seen.settings.permissions.deny.filter((r) => r.startsWith('Read(//')).map((r) => r.slice(6, -1).replace(/\/\*\*$/, ''));
-      hidden = (p) => under(p, box.denyRead) && !under(p, box.allowRead) && under(p, reads);
-      assert.ok(under(path.join(home, 'home'), box.allowRead), 'claude: its own home is reopened');
-      assert.ok(under(path.join(home, 'home'), reads), 'claude: file tools deny homes while Bash reopens its own');
+      // A file made in the home after spawn is hidden too: the home is denied whole.
+      assert.ok(seen.settings.sandbox.filesystem.denyRead.includes(fs.realpathSync(u.home)));
+      for (const r of seen.reads) assert.equal(r.denied, !open.includes(r.file), `claude ${r.tool} ${r.file}`);
     } else {
-      const fsRules = seen.config.permissions['tower-crane'].filesystem;
-      const none = Object.keys(fsRules).filter((k) => fsRules[k] === 'none');
-      const write = Object.keys(fsRules).filter((k) => fsRules[k] === 'write');
-      // A writable rule under a hidden directory is the only way back in.
-      hidden = (p) => none.some((d) => under(p, [d]) && !write.some((w) => w.startsWith(d + path.sep) && under(p, [w])));
-      assert.equal(fsRules[home], 'read', 'codex: its own home is readable');
+      const rules = seen.config.permissions['tower-crane'].filesystem;
+      assert.equal(rules[':root'], undefined, 'codex: nothing is read through the root');
+      assert.equal(rules[':minimal'], 'read', 'codex: the system directories come from :minimal');
+      const none = Object.keys(rules).filter((p) => rules[p] === 'none');
+      assert.deepEqual(none.filter((p) => none.some((d) => p !== d && p.startsWith(d + path.sep))), [], 'codex: no hidden path inside another');
     }
-    for (const f of stores) assert.ok(hidden(f), `${harness}: ${path.relative(u.home, f)} is hidden`);
-    for (const p of [rules, path.join(home, 'home', '.gitconfig'), path.join(h.state, 'brokers', started.agent, 'broker.json')]) {
-      assert.ok(!hidden(p), `${harness}: ${p} stays readable`);
-    }
-    assert.equal(seen.ghToken, 'stub-gh-token', `${harness}: gh gets its token`);
-    assert.ok(!fs.existsSync(path.join(home, 'home', '.config', 'gh')), `${harness}: gh reads GH_TOKEN, not a config it may not read`);
-    assert.equal(fs.readlinkSync(path.join(home, 'home', '.gitconfig')), path.join(u.home, '.gitconfig'));
   }
 });
 
-function assertCredentialsHidden(seen, files) {
-  const under = (file, directory) => file === directory || file.startsWith(directory + path.sep);
-  const hidden = file => {
-    if (seen.harness === 'claude') {
-      const box = seen.settings.sandbox.filesystem;
-      return box.denyRead.some(dir => under(file, dir)
-        && ['Read', 'Grep', 'Glob'].every(tool =>
-          seen.settings.permissions.deny.includes(`${tool}(/${dir})`)
-          && seen.settings.permissions.deny.includes(`${tool}(/${dir}/**)`)))
-        && !box.allowRead.some(dir => under(file, dir));
-    }
-    const rules = seen.config.permissions['tower-crane'].filesystem;
-    return Object.keys(rules).some(dir => rules[dir] === 'none' && under(file, dir)
-      && !Object.keys(rules).some(write => rules[write] === 'write' && under(write, dir) && under(file, write)));
-  };
-  assert.deepEqual(files.flatMap(file => [path.resolve(file), fs.realpathSync(file)]).filter(file => !hidden(file)), [],
-    `${seen.harness}: credential paths must be denied by the sandbox and file tools`);
-}
-
-test('codex never names a hidden path inside another hidden directory', { skip: NO_STUBS }, t => {
+test('claude and codex keep a link inside a hidden directory and its target hidden; codex names no hidden path inside another', { skip: NO_STUBS }, t => {
   // Seen 2026-10-12: ~/.claude/debug/latest links to a file in the same hidden
-  // store, and Codex's bwrap could not mount over it inside the masked parent.
+  // directory, and Codex's bwrap could not mount over it inside the masked parent.
   const { h, u } = setup(t);
   const debug = path.join(u.home, '.claude', 'debug');
   fs.mkdirSync(debug, { recursive: true });
   fs.writeFileSync(path.join(debug, 'session.txt'), 'log\n');
   fs.symlinkSync(path.join(debug, 'session.txt'), path.join(debug, 'latest'));
-  isolated(h, 'medium', 'codex');
-  const started = spawn(h, u, 'medium');
-  const config = TOML.parse(fs.readFileSync(path.join(h.state, 'homes', started.agent, 'config.toml'), 'utf8'));
-  const rules = config.permissions['tower-crane'].filesystem;
-  const hidden = Object.keys(rules).filter(p => rules[p] === 'none');
-  assert.ok(hidden.includes(fs.realpathSync(path.join(u.home, '.claude'))), 'the store itself stays hidden');
-  const nested = hidden.filter(p => hidden.some(dir => p !== dir && p.startsWith(dir + path.sep)));
-  assert.deepEqual(nested, [], 'no hidden path is named inside a hidden directory');
+  const project = h.readState('project.json');
+  const secrets = [path.join(debug, 'latest'), path.join(debug, 'session.txt'), path.join(u.home, '.config', 'tower-crane', 'owner', 'key')];
+  for (const harness of ['claude', 'codex']) {
+    h.writeState('project.json', project);
+    isolated(h, 'small', harness);
+    // The owner key directory sits inside ~/.config.
+    const { owner_config_dir: _, ...unbound } = project;
+    h.writeState('project.json', unbound);
+    spawn(h, u, 'small', { TOWER_CRANE_AGENT: 'orchestrator', TOWER_CRANE_CONFIG: '' });
+    const seen = u.report();
+    for (const p of secrets) assert.equal(commandsRead(seen, p), false, `${harness}: ${p} stays hidden`);
+    if (harness === 'codex') {
+      const rules = seen.config.permissions['tower-crane'].filesystem;
+      const hidden = Object.keys(rules).filter(p => rules[p] === 'none');
+      const nested = hidden.filter(p => hidden.some(dir => p !== dir && p.startsWith(dir + path.sep)));
+      assert.deepEqual(nested, [], 'no hidden path is named inside a hidden directory');
+    }
+  }
 });
 
-test('a hidden store link to the harness program leaves it runnable; other programs stay hidden', { skip: NO_STUBS }, t => {
-  // Seen 2026-10-12: ~/.codex/tmp/arg0/*/codex-linux-sandbox links to the codex
-  // binary, and hiding that target stopped every Codex worker from starting.
+test('a project sandbox path inside a hidden credential store, or a writable one holding it, refuses dispatch', { skip: NO_STUBS }, t => {
+  // A path inside a hidden store reopens what lies under it: codex mounts
+  // writable paths after hidden ones, and claude remounts an allowed path
+  // inside a denied one. A writable path holding a store keeps it masked for
+  // the run, but in codex the agent can rename a directory between the two
+  // and so move the store out from under the next spawn's mask.
+  const { h, u } = setup(t);
+  const owner = path.join(path.dirname(h.userConfig), 'owner');
+  const refused = [
+    ['write', path.join(h.state, 'brokers', 'worker-T9-1'), 'is inside'],
+    ['write', path.join(h.state, 'homes', 'worker-T9-1', 'home', '.aws'), 'is inside'],
+    ['read', owner, 'is inside'],
+    ['write', h.state, 'holds'],
+    ['write', path.dirname(owner), 'holds'],
+  ];
+  for (const [field, p, why] of refused) {
+    fs.mkdirSync(p, { recursive: true });
+    h.ok(['project', 'set', '--sandbox', JSON.stringify({ [field]: [p] })]);
+    for (const harness of ['claude', 'codex']) {
+      isolated(h, 'hard', harness);
+      fs.rmSync(u.out, { force: true });
+      const r = h.run(['spawn', '--role', 'hard', '--task', 'T1', '--wait', '--json'], { env: u.env });
+      assert.notEqual(r.code, 0, `${harness}: sandbox.${field} ${p} must refuse dispatch`);
+      assert.match(r.stderr, new RegExp(`sandbox\\.${field} path .* ${why} .* which the sandbox hides because it holds credentials`));
+      assert.ok(!fs.existsSync(u.out), `${harness}: the harness must not start`);
+    }
+  }
+  // A readable path holding a store keeps it hidden: the deeper mask wins.
+  h.ok(['project', 'set', '--sandbox', JSON.stringify({ read: [h.state, path.dirname(owner)] })]);
+  for (const harness of ['claude', 'codex']) {
+    isolated(h, 'hard', harness);
+    spawn(h, u, 'hard');
+    const seen = u.report();
+    for (const f of [path.join(owner, 'key'), path.join(h.state, 'brokers', 'worker-T9-1', 'broker.json')]) {
+      assert.equal(commandsRead(seen, f), false, `${harness}: ${f} stays hidden under a readable parent`);
+    }
+  }
+});
+
+test('a codex agent\'s temp directory is its own, never the caller\'s TMPDIR or /tmp', { skip: NO_STUBS }, t => {
+  // Found in review 2026-10-13: codex resolves :tmpdir from the TMPDIR it
+  // starts with, so with the caller's TMPDIR under the home (~/.cache/tct
+  // here) every codex agent read and wrote other tasks' scratch and fixtures.
+  // :slash_tmp gave it the host's /tmp, which every other process shares.
+  const { h, u } = setup(t);
+  const caller = path.join(u.home, '.cache', 'tct');
+  const planted = path.join(caller, 'other-task', 'fixture.txt');
+  fs.mkdirSync(path.dirname(planted), { recursive: true });
+  fs.writeFileSync(planted, `${SECRET}-TMP\n`);
+  for (const rung of ['small', 'hard', 'review']) {
+    isolated(h, rung, 'codex');
+    spawn(h, u, rung, { TMPDIR: caller, TMP: caller, TEMP: caller });
+    const seen = u.report();
+    const rules = seen.config.permissions['tower-crane'].filesystem;
+    assert.equal(commandsRead(seen, planted), false, `${rung}: the caller's TMPDIR stays hidden`);
+    assert.equal(commandsRead(seen, '/tmp/another-session/scratch.txt'), false, `${rung}: the host's /tmp stays hidden`);
+    assert.ok(seen.tmpdir && !seen.tmpdir.startsWith(caller), `${rung}: codex starts with a TMPDIR of its own, not ${seen.tmpdir}`);
+    // Found in review 2026-10-14: on Windows codex and programs read TMP and TEMP, not TMPDIR.
+    assert.deepEqual([seen.tmpEnv.TMP, seen.tmpEnv.TEMP], [seen.tmpdir, seen.tmpdir], `${rung}: TMP and TEMP name the same directory`);
+    assert.equal(seen.tmpEnv.JAVA_TOOL_OPTIONS, `-Djava.io.tmpdir=${seen.tmpdir}`, `${rung}: the JVM uses it too`);
+    const writes = Object.keys(rules).filter((p) => rules[p] === 'write' && !p.startsWith(':'));
+    assert.ok(writes.some((w) => seen.tmpdir === w || seen.tmpdir.startsWith(w + path.sep)), `${rung}: the agent writes its own temp directory`);
+    assert.ok(fs.lstatSync(seen.tmpdir).isDirectory(), `${rung}: the temp directory exists before codex starts`);
+    if (rung === 'hard') {
+      // A worker's is in its task scratch, or, when that path is too long for
+      // a browser's singleton socket, the short directory kept for it.
+      const scratch = h.readState('tasks.json').tasks[0].scratch;
+      const long = Buffer.byteLength(path.join(scratch, 'tmp')) > 62;
+      if (long) assert.match(seen.tmpdir, /[\\/]tc[\\/][0-9a-f]{12}$/, 'a long scratch path gets the short temp directory');
+      else assert.equal(seen.tmpdir, path.join(scratch, 'tmp'));
+    }
+  }
+});
+
+test('a codex worker\'s temp directory replaces a file or link an earlier attempt left there, and goes with its scratch', { skip: NO_STUBS }, t => {
+  // Found in review 2026-10-14: mkdirSync threw EEXIST on a file or a
+  // dangling link, so the next worker spawn for the task failed.
+  const { h, u } = setup(t);
+  isolated(h, 'hard', 'codex');
+  spawn(h, u, 'hard');
+  const tmp = u.report().tmpdir;
+  // Found in review 2026-10-14: against a lib/ that passes the caller's
+  // TMPDIR this was the runner's own temp directory, which the loop below
+  // removes. Only a path in the fixture is touched.
+  assert.ok(tmp && [h.base, fs.realpathSync(h.base)].some((b) => tmp.startsWith(b + path.sep)), `the temp directory is in the fixture: ${tmp}`);
+  const outside = path.join(u.home, '.ssh');
+  fs.mkdirSync(outside, { recursive: true });
+  for (const plant of [() => fs.writeFileSync(tmp, 'x'), () => fs.symlinkSync(path.join(u.home, 'gone'), tmp), () => fs.symlinkSync(outside, tmp)]) {
+    fs.rmSync(tmp, { recursive: true, force: true });
+    plant();
+    spawn(h, u, 'hard');
+    assert.equal(u.report().tmpdir, tmp);
+    const st = fs.lstatSync(tmp);
+    assert.ok(st.isDirectory() && !st.isSymbolicLink(), 'a directory of its own replaced what was there');
+    assert.ok(fs.existsSync(outside), 'a link is removed, never followed');
+  }
+  const scratch = h.readState('tasks.json').tasks[0].scratch;
+  A.removeTaskCache({ scratch });
+  assert.ok(!fs.existsSync(scratch) && !fs.existsSync(tmp), 'removing the scratch removes the temp directory');
+});
+
+test('a codex agent\'s short temp directory is named from the resolved cache, so it goes with a cache behind a link', { skip: NO_STUBS }, t => {
+  // Found in review 2026-10-14: spawn named it from the resolved cache path
+  // and removal from the recorded one, so a cache root behind a link
+  // (/home -> /var/home on Fedora Atomic) leaked it.
+  const { h, u } = setup(t);
+  const real = path.join(h.base, 'real-cache');
+  const linked = path.join(h.base, 'c');
+  fs.mkdirSync(real);
+  fs.symlinkSync(real, linked, 'dir');
+  isolated(h, 'hard', 'codex');
+  spawn(h, u, 'hard', { XDG_CACHE_HOME: linked });
+  const tmp = u.report().tmpdir;
+  const scratch = h.readState('tasks.json').tasks[0].scratch;
+  assert.ok(tmp.startsWith(fs.realpathSync(real) + path.sep), `made under the resolved root: ${tmp}`);
+  assert.ok(fs.lstatSync(tmp).isDirectory());
+  A.removeTaskCache({ scratch });
+  assert.ok(!fs.existsSync(tmp), 'removing the scratch through the link removes the temp directory');
+});
+
+test('a codex agent\'s temp directory fits a browser\'s singleton socket when its cache root is short enough', { skip: NO_STUBS }, t => {
+  // Found in review 2026-10-14: the short fallback had no length check, and
+  // ran 98 to 104 bytes under a fixture's root.
+  const { h, u } = setup(t);
+  isolated(h, 'review', 'codex');
+  // A cache root of 46 bytes or less, as /home/<user>/.cache is for a user name of up to 34 letters.
+  // Made after the fixture, so it is removed after the fixture's agents stop.
+  const root = shortCacheRoot(t, 46);
+  if (!root) return t.skip('no writable cache root of at most 46 bytes');
+  spawn(h, u, 'review', { XDG_CACHE_HOME: root });
+  const tmp = u.report().tmpdir;
+  assert.ok(Buffer.byteLength(tmp) <= 62, `${tmp} is ${Buffer.byteLength(tmp)} bytes`);
+  assert.ok(tmp.startsWith(fs.realpathSync(root) + path.sep), tmp);
+});
+
+test('the project\'s env and env_file cannot move a codex agent\'s temp directory', { skip: NO_STUBS }, t => {
+  // Found in review 2026-10-14: spawn applies the project's env after the
+  // harness's, so it overrode TMPDIR, TMP, TEMP and JAVA_TOOL_OPTIONS.
+  const { h, u } = setup(t);
+  const elsewhere = path.join(u.home, '.cache', 'tct');
+  fs.mkdirSync(elsewhere, { recursive: true });
+  const file = path.join(h.base, 'agent.env');
+  fs.writeFileSync(file, `TMP=${elsewhere}\nTEMP=${elsewhere}\n`);
+  h.ok(['project', 'set', '--env', JSON.stringify({ TMPDIR: elsewhere, JAVA_TOOL_OPTIONS: `-Xss2m -Djava.io.tmpdir=${elsewhere}` }), '--env_file', file]);
+  isolated(h, 'small', 'codex');
+  spawn(h, u, 'small');
+  const seen = u.report();
+  assert.ok(seen.tmpdir && !seen.tmpdir.startsWith(elsewhere), `TMPDIR is the agent's own: ${seen.tmpdir}`);
+  assert.deepEqual([seen.tmpEnv.TMP, seen.tmpEnv.TEMP], [seen.tmpdir, seen.tmpdir]);
+  assert.equal(seen.tmpEnv.JAVA_TOOL_OPTIONS, `-Xss2m -Djava.io.tmpdir=${seen.tmpdir}`, 'the project\'s other options stay');
+  assert.equal(commandsRead(seen, path.join(elsewhere, 'x')), false, 'the directory the project names stays hidden');
+});
+
+test('a codex agent cannot read a caller TMPDIR outside the home that an entry of / exposes', { skip: (NO_STUBS || !fs.existsSync('/var/tmp')) && 'needs /var/tmp' }, t => {
+  // Found in review 2026-10-14: /var/tmp on Linux, or /var/folders through
+  // /private on macOS, stayed readable through the entry of / that holds it.
+  const { h, u } = setup(t);
+  const caller = fs.mkdtempSync('/var/tmp/tower-crane-caller-');
+  t.after(() => fs.rmSync(caller, { recursive: true, force: true }));
+  const planted = path.join(caller, 'other-task', 'fixture.txt');
+  fs.mkdirSync(path.dirname(planted), { recursive: true });
+  fs.writeFileSync(planted, `${SECRET}-TMP\n`);
+  for (const rung of ['small', 'review']) {
+    isolated(h, rung, 'codex');
+    spawn(h, u, rung, { TMPDIR: caller });
+    const seen = u.report();
+    assert.equal(commandsRead(seen, planted), false, `${rung}: the caller's TMPDIR in /var/tmp stays hidden`);
+    assert.equal(commandsRead(seen, '/var/tmp/another/file'), true, `${rung}: the rest of /var/tmp stays as it was`);
+  }
+});
+
+test('codex names the same rules however many entries the home holds', { skip: NO_STUBS }, t => {
+  // Seen 2026-10-13: a rule per hidden entry of a large ~/.cache made codex's
+  // profile, which it passes its sandbox as one argument, too long to exec.
+  const { h, u } = setup(t);
+  isolated(h, 'small', 'codex');
+  // Rules outside the fixture's home name what holds it in the real filesystem.
+  const home = fs.realpathSync(u.home);
+  const rules = () => {
+    const started = spawn(h, u, 'small');
+    return Object.keys(TOML.parse(fs.readFileSync(path.join(h.state, 'homes', started.agent, 'config.toml'), 'utf8'))
+      .permissions['tower-crane'].filesystem).filter((p) => p.startsWith(home + path.sep)).length;
+  };
+  const before = rules();
+  for (const dir of [u.home, path.join(u.home, '.cache')]) {
+    fs.mkdirSync(dir, { recursive: true });
+    for (let i = 0; i < 50; i++) fs.writeFileSync(path.join(dir, `entry-${i}`), '');
+  }
+  assert.equal(rules(), before);
+});
+
+// The profile as codex hands it to its sandbox: one JSON argument with an
+// entry per rule. Linux caps one argument at MAX_ARG_STRLEN, 32 pages or
+// 131072 bytes with its terminating NUL; the 2,143-rule profile seen on
+// 2026-10-13 passed 200 KB and failed to exec.
+const MAX_ARG_STRLEN = 32 * 4096;
+function codexProfileArg(rules) {
+  const entry = (p, access) => ({ path: p.startsWith(':') ? { type: 'special', value: { kind: p.slice(1) } } : { type: 'path', path: p },
+    access: access === 'none' ? 'deny' : access });
+  const entries = Object.entries(rules).flatMap(([p, access]) => typeof access === 'string' ? [entry(p, access)]
+    : Object.entries(access).map(([sub, a]) => entry(`${p}/${sub}`, a)));
+  return JSON.stringify({ type: 'managed', file_system: { type: 'restricted', entries }, network: 'enabled' });
+}
+
+test('codex keeps its profile under the argument limit however many entries the home and the directories above it hold', { skip: NO_STUBS }, t => {
+  // Seen 2026-10-13: a home in a test's temp directory under ~/.cache made
+  // codex name every entry of ~/.cache, and it failed with "Argument list too
+  // long (os error 7)". /home on a shared host is the same shape.
   const { h, u, wt } = setup(t);
-  const codex = require(path.join(ROOT, 'lib', 'spawn')).findExecutable('codex', wt, true, u.env);
-  assert.ok(codex, 'the codex stub is on PATH');
-  const helper = path.join(h.base, 'dotfiles', 'api-key-helper');
-  fs.mkdirSync(path.dirname(helper), { recursive: true });
-  fs.writeFileSync(helper, '#!/bin/sh\necho LINKED-SECRET\n', { mode: 0o755 });
-  const arg0 = path.join(u.home, '.codex', 'tmp', 'arg0', 'codex-arg0X');
-  fs.mkdirSync(arg0, { recursive: true });
-  fs.symlinkSync(codex, path.join(arg0, 'codex-linux-sandbox'));
-  fs.symlinkSync(helper, path.join(arg0, 'helper'));
-  // A wrapper on PATH can hide the install; the codex package's binary still counts.
-  const vendored = path.join(h.base, 'npm', 'node_modules', '@openai', 'codex', 'node_modules', '@openai', 'codex-linux-x64', 'vendor', 'codex');
+  isolated(h, 'small', 'codex');
+  const rules = () => {
+    const started = spawn(h, u, 'small');
+    return TOML.parse(fs.readFileSync(path.join(h.state, 'homes', started.agent, 'config.toml'), 'utf8')).permissions['tower-crane'].filesystem;
+  };
+  const before = Object.keys(rules()).length;
+  const beside = path.join(h.base, 'entry-0');
+  for (const dir of [u.home, h.base]) {
+    for (let i = 0; i < 5000; i++) fs.mkdirSync(path.join(dir, `entry-${i}`));
+  }
+  const after = rules();
+  assert.equal(Object.keys(after).length, before, 'no rule per entry');
+  const bytes = Buffer.byteLength(codexProfileArg(after)) + 1;
+  t.diagnostic(`codex profile: ${Object.keys(after).length} rules, ${bytes} bytes`);
+  assert.ok(bytes < MAX_ARG_STRLEN, `the profile argument is ${bytes} bytes`);
+  // What sits beside the home is hidden; what the agent needs there is named.
+  const seen = { harness: 'codex', config: { permissions: { 'tower-crane': { filesystem: after } } } };
+  assert.equal(commandsRead(seen, beside), false, 'an entry beside the home is hidden');
+  for (const p of [path.join(h.state, 'tasks.json'), wt, path.join(h.repo, '.git', 'HEAD')]) assert.equal(commandsRead(seen, p), true, `${p} stays readable`);
+});
+
+test('a PATH directory at the root never opens the root or a directory that holds the home to codex', { skip: NO_STUBS }, t => {
+  // Seen in review 2026-10-13: /opt on PATH named its parent, /, and codex
+  // mounted the whole filesystem, the home with it.
+  const { h, u } = setup(t);
+  isolated(h, 'small', 'codex');
+  const home = fs.realpathSync(u.home);
+  const started = spawn(h, u, 'small', { PATH: `${u.env.PATH}${path.delimiter}/usr${path.delimiter}${path.dirname(home)}` });
+  const rules = TOML.parse(fs.readFileSync(path.join(h.state, 'homes', started.agent, 'config.toml'), 'utf8')).permissions['tower-crane'].filesystem;
+  const holders = Object.keys(rules).filter((p) => !p.startsWith(':') && rules[p] !== 'none' && (p === path.parse(p).root || home.startsWith(p.endsWith(path.sep) ? p : p + path.sep)));
+  assert.deepEqual(holders, [], 'no rule opens a directory that holds the home');
+  assert.equal(commandsRead({ harness: 'codex', config: { permissions: { 'tower-crane': { filesystem: rules } } } }, path.join(home, '.codex', 'auth.json')), false);
+});
+
+test('a read-only claude worktree under the home hides the home whole and binds its placeholders before the worktree turns read-only', { skip: NO_STUBS }, t => {
+  // A file made in the home after spawn must stay hidden, so the home is
+  // hidden whole. claude remounts the worktree inside it and binds a
+  // placeholder over each absent protected dotfile; bubblewrap cannot make
+  // one once the worktree is read-only, so each comes before the worktree
+  // in denyWrite.
+  const { h, u, wt } = setup(t);
+  const home = fs.realpathSync(h.base);
+  fs.writeFileSync(path.join(wt, '.bashrc'), '');
+  const present = ClaudeSandboxPlaceholders.present(wt);
+  assert.ok(present.includes('.bashrc') && present.length < ClaudeSandboxPlaceholders.FILES.length);
+  for (const rung of ['small', 'hard']) {
+    isolated(h, rung, 'claude');
+    spawn(h, u, rung, { HOME: home, USERPROFILE: home });
+    const seen = u.report();
+    const box = seen.settings.sandbox.filesystem;
+    assert.ok(box.denyRead.includes(home), `${rung}: the home is hidden whole`);
+    const later = path.join(home, 'made-after-spawn', 'token');
+    assert.equal(commandsRead(seen, later), false, `${rung}: a path made in the home later is hidden`);
+    for (const p of [path.join(wt, '.claude', 'settings.local.json'), path.join(h.state, 'tasks.json')]) assert.equal(commandsRead(seen, p), true, `${rung}: ${p} stays readable`);
+    for (const p of [path.join(u.home, '.codex', 'auth.json'), path.join(h.base, 'gitconfig')]) assert.equal(commandsRead(seen, p), false, `${rung}: ${p} is hidden`);
+    const at = box.denyWrite.indexOf(wt);
+    if (rung === 'hard') {
+      assert.equal(at, -1, 'a worker writes its worktree');
+      continue;
+    }
+    assert.ok(at > 0, 'the worktree is read-only');
+    const before = box.denyWrite.slice(0, at).filter((p) => p.startsWith(wt + path.sep)).map((p) => path.relative(wt, p).split(path.sep).join('/'));
+    assert.deepEqual(before, ClaudeSandboxPlaceholders.FILES.filter((f) => !present.includes(f)), 'each absent placeholder precedes the worktree');
+    assert.deepEqual(box.denyWrite.slice(at + 1).filter((p) => p.startsWith(wt + path.sep) && ClaudeSandboxPlaceholders.FILES.includes(path.relative(wt, p).split(path.sep).join('/'))), [], 'none follows it');
+  }
+});
+
+test('an agent of another project reads the Tower Crane code in the checkout, never its state, brokers or homes', { skip: NO_STUBS }, t => {
+  // The checkout the CLI runs from can hold its own project's state, whose
+  // brokers/ holds tokens and homes/ links to the user's credentials. The
+  // home here holds the checkout, as ~ holds ~/projects/<checkout>.
+  const { h, u } = setup(t);
+  const home = fs.realpathSync(path.dirname(ROOT));
+  const checkout = fs.realpathSync(ROOT);
+  const hidden = ['.tower-crane/brokers/orchestrator/broker.json', '.tower-crane/homes/worker-T1-1/.credentials.json', '.tower-crane/tasks.json', '.git/config']
+    .map((p) => path.join(checkout, ...p.split('/')));
+  const open = ['bin/tower-crane.js', 'lib/agents.js', 'skills/tower-crane-work/SKILL.md', 'agents/tower-crane-small.md', 'standards/default.md', 'package.json']
+    .map((p) => path.join(checkout, ...p.split('/')));
+  for (const harness of ['claude', 'codex']) {
+    for (const rung of ['small', 'hard']) {
+      isolated(h, rung, harness);
+      spawn(h, u, rung, { HOME: home, USERPROFILE: home });
+      const seen = u.report();
+      for (const p of hidden) assert.equal(commandsRead(seen, p), false, `${harness} ${rung}: ${path.relative(checkout, p)} is hidden`);
+      for (const p of open) assert.equal(commandsRead(seen, p), true, `${harness} ${rung}: ${path.relative(checkout, p)} is readable`);
+    }
+  }
+});
+
+test('TOWER_CRANE_PLUGIN_ROOT opens only a Tower Crane checkout or plugin, never the home or another directory', { skip: NO_STUBS }, t => {
+  // A plugin root at the home would open ~/bin, ~/lib and ~/package.json.
+  const { h, u } = setup(t);
+  isolated(h, 'small', 'claude');
+  const other = path.join(u.home, 'projects');
+  fs.mkdirSync(path.join(other, 'lib'), { recursive: true });
+  for (const [root, why] of [[u.home, /is the user's home/], [path.dirname(u.home), /holds the user's home/], [other, /is not a Tower Crane checkout or plugin/]]) {
+    const r = h.run(['spawn', '--role', 'small', '--task', 'T1', '--wait', '--json'], { env: { ...u.env, TOWER_CRANE_PLUGIN_ROOT: root } });
+    assert.notEqual(r.code, 0, `${root}: ${r.stdout}`);
+    assert.match(r.stderr, why);
+    assert.match(r.stderr, /TOWER_CRANE_PLUGIN_ROOT/);
+  }
+  const plugin = pluginRoot(path.join(u.home, 'plugin'));
+  for (const dir of ['bin', 'skills']) fs.mkdirSync(path.join(plugin, dir));
+  fs.mkdirSync(path.join(plugin, '.tower-crane'));
+  spawn(h, u, 'small', { TOWER_CRANE_PLUGIN_ROOT: plugin });
+  const seen = u.report();
+  assert.equal(commandsRead(seen, path.join(fs.realpathSync(plugin), 'bin')), true, 'the plugin\'s code is readable');
+  assert.equal(commandsRead(seen, path.join(fs.realpathSync(plugin), '.tower-crane')), false, 'the rest of the plugin root is hidden');
+});
+
+test('node installs and harness programs under the home stay readable; other installs there do not', { skip: NO_STUBS }, t => {
+  // Seen 2026-10-12: codex runs its own binary inside its sandbox through a
+  // link in its home, and hiding it stopped every Codex worker from starting.
+  const { h, u } = setup(t);
+  const prefix = path.join(u.home, '.nvm', 'versions', 'node', 'v0');
+  const other = path.join(u.home, '.nvm', 'versions', 'node', 'v1', 'bin', 'node');
+  for (const node of [path.join(prefix, 'bin', 'node'), other]) {
+    fs.mkdirSync(path.dirname(node), { recursive: true });
+    fs.writeFileSync(node, '#!/bin/sh\n', { mode: 0o755 });
+  }
+  const vendored = path.join(prefix, 'lib', 'node_modules', '@openai', 'codex', 'vendor', 'codex');
   fs.mkdirSync(path.dirname(vendored), { recursive: true });
   fs.writeFileSync(vendored, '#!/bin/sh\n', { mode: 0o755 });
-  fs.symlinkSync(vendored, path.join(arg0, 'codex-execve-wrapper'));
-  // A store split by a kept rule file hides its children one by one.
-  const direct = path.join(u.home, '.claude', 'codex-link');
-  fs.symlinkSync(codex, direct);
-  isolated(h, 'medium', 'codex');
-  const started = spawn(h, u, 'medium');
-  const config = TOML.parse(fs.readFileSync(path.join(h.state, 'homes', started.agent, 'config.toml'), 'utf8'));
-  const rules = config.permissions['tower-crane'].filesystem;
-  assert.notEqual(rules[fs.realpathSync(codex)], 'none', 'the harness program stays runnable');
-  assert.notEqual(rules[fs.realpathSync(vendored)], 'none', 'the codex package binary stays runnable');
-  assert.equal(rules[fs.realpathSync(helper)], 'none', 'a script that prints a secret stays hidden');
-  assert.equal(rules[direct], undefined, 'a harness link directly in a store is not masked');
+  // A harness installed under the home on PATH, outside any node install.
+  const tools = path.join(u.home, 'tools-bin');
+  fs.mkdirSync(tools, { recursive: true });
+  fs.writeFileSync(path.join(tools, 'opencode'), '#!/bin/sh\n', { mode: 0o755 });
+  // A node in ~/.local/bin opens that directory, never ~/.local/share.
+  const local = path.join(u.home, '.local', 'bin', 'node');
+  const share = path.join(u.home, '.local', 'share', 'opencode', 'auth.json');
+  for (const [file, text] of [[local, '#!/bin/sh\n'], [share, `${SECRET}-LOCAL\n`]]) {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, text, { mode: 0o755 });
+  }
+  // The node installs last on PATH, so the real node keeps running the stubs.
+  const env = { PATH: [tools, u.env.PATH, path.join(prefix, 'bin'), path.dirname(local)].join(path.delimiter) };
+  for (const harness of ['claude', 'codex']) {
+    isolated(h, 'medium', harness);
+    spawn(h, u, 'medium', env);
+    const seen = u.report();
+    for (const p of [vendored, path.join(prefix, 'bin', 'node'), path.join(tools, 'opencode'), local]) {
+      assert.equal(commandsRead(seen, p), true, `${harness}: ${p} is readable`);
+    }
+    assert.equal(commandsRead(seen, other), false, `${harness}: a node install not on PATH stays hidden`);
+    assert.equal(commandsRead(seen, share), false, `${harness}: a node in ~/.local/bin leaves ~/.local/share hidden`);
+  }
+});
+
+test('a sandbox read path that is the whole home refuses dispatch', { skip: NO_STUBS }, t => {
+  const { h, u } = setup(t);
+  h.ok(['project', 'set', '--sandbox', JSON.stringify({ read: ['~'] })]);
+  for (const harness of ['claude', 'codex']) {
+    isolated(h, 'hard', harness);
+    fs.rmSync(u.out, { force: true });
+    const refused = h.run(['spawn', '--role', 'hard', '--task', 'T1', '--wait', '--json'], { env: u.env });
+    assert.notEqual(refused.code, 0, `${harness}: reading the whole home must refuse dispatch`);
+    assert.match(refused.stderr, /sandbox path .* is the user's home/);
+    assert.ok(!fs.existsSync(u.out), 'the harness must not start');
+  }
+  // A directory that holds the home would open all of it: / mounts the whole
+  // filesystem in codex's sandbox.
+  for (const read of ['/', path.dirname(u.home)]) {
+    h.ok(['project', 'set', '--sandbox', JSON.stringify({ read: [read] })]);
+    for (const harness of ['claude', 'codex']) {
+      isolated(h, 'hard', harness);
+      fs.rmSync(u.out, { force: true });
+      const refused = h.run(['spawn', '--role', 'hard', '--task', 'T1', '--wait', '--json'], { env: u.env });
+      assert.notEqual(refused.code, 0, `${harness}: reading ${read} must refuse dispatch`);
+      assert.match(refused.stderr, /sandbox path .* holds the user's home/);
+      assert.ok(!fs.existsSync(u.out), 'the harness must not start');
+    }
+  }
+  assert.notEqual(h.run(['project', 'set', '--sandbox', JSON.stringify({ read: 'tools' })]).code, 0, 'sandbox.read must be a list of paths');
+});
+
+test('repository imports of files under the home the agent may not read refuse startup', { skip: NO_STUBS }, (t) => {
+  const { h, u, wt } = setup(t);
+  const docker = path.join(u.home, '.docker', 'config.json');
+  fs.mkdirSync(path.dirname(docker), { recursive: true });
+  fs.writeFileSync(docker, '{"auths":{"example":{"auth":"IMPORT-SECRET"}}}\n');
+  const auth = path.join(u.home, '.codex', 'auth.json');
+  const alias = path.join(wt, 'credential-import.md');
+  fs.symlinkSync(auth, alias);
+  for (const harness of ['claude', 'codex']) {
+    isolated(h, 'hard', harness);
+    for (const file of [auth, docker, alias]) {
+      fs.writeFileSync(path.join(wt, 'AGENTS.md'), `@${file}\n`);
+      if (file === alias) {
+        // A global rule importing the repository's file does not make its imports the user's.
+        const global = path.join(u.home, harness === 'claude' ? '.claude/CLAUDE.md' : '.codex/AGENTS.md');
+        fs.appendFileSync(global, `@${path.join(wt, 'AGENTS.md')}\n`);
+      }
+      for (const mode of ['--dry-run', '--wait']) {
+        const r = h.run(['spawn', '--task', 'T1', '--role', 'hard', mode], { env: u.env });
+        assert.notEqual(r.code, 0, `${harness}: ${file} must not load into the harness`);
+        assert.match(r.stderr, /house rule .* is under the user's home outside the agent's readable paths/);
+        assert.doesNotMatch(r.stdout + r.stderr, /IMPORT-SECRET|PLANTED-SECRET/);
+        assert.ok(!fs.existsSync(u.out), 'refuse before starting the harness');
+      }
+    }
+    fs.rmSync(path.join(wt, 'AGENTS.md'));
+  }
+  // The user's own global rules may import a file under the home; it stays readable.
+  const notes = path.join(u.home, 'notes', 'rules.md');
+  fs.mkdirSync(path.dirname(notes), { recursive: true });
+  fs.writeFileSync(notes, 'USER-NOTES\n');
+  fs.writeFileSync(path.join(u.home, '.claude', 'CLAUDE.md'), `PLANTED-MEMORY\n@${notes}\n`);
+  isolated(h, 'hard', 'claude');
+  spawn(h, u, 'hard');
+  assert.equal(commandsRead(u.report(), notes), true, 'a global rule import stays readable');
+});
+
+test('a sandboxed agent runs with the user\'s git settings but none of their credential helpers, and no helper answers for GitHub', { skip: NO_STUBS }, (t) => {
+  const { h, u } = setup(t);
+  const { global } = isolateGitEnvironment(h, u);
+  const included = path.join(h.base, 'included.gitconfig');
+  fs.writeFileSync(included, '[alias]\n\tst = status\n[credential "https://example.com"]\n\thelper = store\n');
+  const ignore = path.join(u.home, 'global.gitignore');
+  fs.writeFileSync(ignore, '*.planted\n');
+  fs.writeFileSync(global, [
+    '[user]', '\tname = Planted User', '\temail = planted@example.com',
+    '[credential]', '\thelper = cache --timeout=3600',
+    '[http "https://github.com/"]', '\textraHeader = AUTHORIZATION: bearer HEADER-SECRET',
+    '[core]', '\texcludesFile = ~/global.gitignore',
+    '[include]', `\tpath = ${included}`,
+    // Secrets git keeps outside credential.*: a URL's userinfo and a mail password.
+    '[url "https://x:URL-SECRET@github.com/"]', '\tinsteadOf = https://github.com/',
+    '[url "ssh://git@example.com/"]', '\tinsteadOf = https://example.com/',
+    '[http]', '\tproxy = http://u:PROXY-SECRET@proxy.example:8080',
+    '[sendemail]', '\tsmtpPass = SMTP-SECRET', '',
+  ].join('\n'));
+  const git = require(path.join(ROOT, 'lib', 'shim.js')).findReal('git', '');
+  for (const harness of ['claude', 'codex']) {
+    isolated(h, 'hard', harness);
+    const started = spawn(h, u, 'hard');
+    const seen = u.report();
+    const rendered = path.join(h.state, 'homes', started.agent, 'home', '.gitconfig');
+    // O_NOFOLLOW refuses a link, so one open proves the file is the agent's own.
+    const fd = fs.openSync(rendered, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+    let text;
+    try {
+      assert.equal(fs.fstatSync(fd).isFile(), true, `${harness}: the agent's git config is its own file`);
+      text = fs.readFileSync(fd, 'utf8');
+    } finally { fs.closeSync(fd); }
+    assert.doesNotMatch(text, /HEADER-SECRET|cache --timeout|helper = "?store/, 'no credential helper or auth header');
+    assert.doesNotMatch(text, /URL-SECRET|PROXY-SECRET|SMTP-SECRET/, 'no URL userinfo or mail password');
+    const gitEnv = { ...h.env, GIT_CONFIG_GLOBAL: rendered, GIT_CONFIG_NOSYSTEM: '1', GIT_TERMINAL_PROMPT: '0' };
+    const get = (key) => cp.spawnSync(git, ['config', '--global', '--get', key], { env: gitEnv, encoding: 'utf8' }).stdout.trim();
+    assert.equal(get('user.name'), 'Planted User');
+    assert.equal(get('alias.st'), 'status', 'included files are flattened in');
+    assert.equal(get('core.excludesfile'), ignore);
+    assert.equal(get('url.ssh://git@example.com/.insteadof'), 'https://example.com/', 'a user name in an ssh URL stays');
+    assert.equal(get('http.proxy'), 'http://proxy.example:8080');
+    assert.equal(commandsRead(seen, ignore), true, `${harness}: the excludes file it names stays readable`);
+    // A token an agent finds, or sets, in its environment reaches no helper:
+    // the agent's pushes go through its broker (lib/github-broker.js).
+    const fill = (host) => cp.spawnSync(git, ['credential', 'fill'], {
+      env: { ...gitEnv, GH_TOKEN: 'found-token', GITHUB_TOKEN: 'found-token' }, input: `protocol=https\nhost=${host}\n\n`, encoding: 'utf8', cwd: h.base,
+    });
+    for (const host of ['github.com', 'example.com']) {
+      const filled = fill(host);
+      assert.notEqual(filled.status, 0, `${harness}: ${host} gets no credential`);
+      assert.doesNotMatch(filled.stdout, /password=/, `${harness}: ${host}`);
+    }
+  }
 });
 
 test('harness roots cover an npm package, never a whole bin directory', { skip: process.platform === 'win32' && 'shebang bins' }, t => {
@@ -1205,94 +1815,7 @@ test('harness roots cover an npm package, never a whole bin directory', { skip: 
   assert.deepEqual(roots.sort(), [fs.realpathSync(path.join(bin, 'claude')), fs.realpathSync(pkg)].sort());
 });
 
-test('credential symlinks hide their targets and cannot import them into startup', { skip: NO_STUBS }, t => {
-  const { h, u, wt } = setup(t);
-  const outside = path.join(h.base, 'outside-credentials');
-  fs.mkdirSync(path.join(outside, 'directory'), { recursive: true });
-  const links = ['.claude/.credentials.json', '.codex/auth.json', '.docker/nested/token'];
-  const files = [];
-  for (const [index, name] of links.entries()) {
-    const target = path.join(outside, `credential-${index}.json`);
-    const link = path.join(u.home, name);
-    fs.writeFileSync(target, '{"token":"LINKED-CREDENTIAL"}\n');
-    fs.mkdirSync(path.dirname(link), { recursive: true });
-    fs.rmSync(link, { force: true });
-    fs.symlinkSync(target, link);
-    files.push(link, target);
-  }
-  const nested = path.join(outside, 'nested-token');
-  fs.writeFileSync(nested, 'LINKED-CREDENTIAL\n');
-  fs.symlinkSync(nested, path.join(outside, 'directory', 'token'));
-  fs.symlinkSync(path.join(outside, 'directory'), path.join(u.home, '.docker', 'directory'));
-  fs.symlinkSync(path.join(u.home, '.docker'), path.join(u.home, '.docker', 'cycle'));
-  files.push(nested, path.join(u.home, '.docker', 'directory', 'token'));
-  fs.mkdirSync(path.join(outside, 'alias-parent'));
-  fs.mkdirSync(path.join(outside, 'relative-store'));
-  const relativeToken = path.join(outside, 'relative-token');
-  fs.writeFileSync(relativeToken, 'LINKED-CREDENTIAL\n');
-  fs.symlinkSync('../relative-token', path.join(outside, 'relative-store', 'token'));
-  fs.symlinkSync('../relative-store', path.join(outside, 'alias-parent', 'store'));
-  const parentLink = path.join(u.home, 'linked-parent');
-  fs.symlinkSync(path.join(outside, 'alias-parent'), parentLink);
-  const dockerConfig = path.join(parentLink, 'store');
-  files.push(relativeToken, path.join(dockerConfig, 'token'));
-  for (const harness of ['claude', 'codex']) {
-    isolated(h, 'hard', harness);
-    const env = { ...u.env, DOCKER_CONFIG: dockerConfig };
-    spawn(h, u, 'hard', { ...env, STUB_READ: JSON.stringify(files) });
-    const seen = u.report();
-    assertCredentialsHidden(seen, files);
-    if (harness === 'claude') assert.ok(seen.reads.every(read => read.denied), 'file tools refuse aliases and targets');
-    fs.rmSync(u.out);
-    for (const file of files) {
-      fs.writeFileSync(path.join(wt, 'AGENTS.md'), `@${file}\n`);
-      const refused = h.run(['spawn', '--role', 'hard', '--task', 'T1', '--wait'], { env });
-      assert.notEqual(refused.code, 0, `${harness}: credential import ${file} must fail`);
-      assert.match(refused.stderr, /house rule.*credential store/i);
-      assert.ok(!fs.existsSync(u.out), 'refuse before loading a credential into the harness');
-      assert.doesNotMatch(refused.stdout + refused.stderr, /LINKED-CREDENTIAL/);
-    }
-    fs.rmSync(path.join(wt, 'AGENTS.md'));
-  }
-});
-
-test('credential settings overlays retain every original credential location', { skip: NO_STUBS }, t => {
-  const { h, u } = setup(t);
-  const locations = label => {
-    const root = path.join(h.base, label);
-    const env = {
-      DOCKER_CONFIG: path.join(root, 'docker'), GH_CONFIG_DIR: path.join(root, 'gh'),
-      CARGO_HOME: path.join(root, 'cargo'), XDG_CONFIG_HOME: path.join(root, 'xdg'),
-      CLOUDSDK_CONFIG: path.join(root, 'gcloud'), AZURE_CONFIG_DIR: path.join(root, 'azure'),
-      NPM_CONFIG_USERCONFIG: path.join(root, 'npmrc'), PIP_CONFIG_FILE: path.join(root, 'pip.conf'),
-      AWS_SHARED_CREDENTIALS_FILE: path.join(root, 'aws'), KUBECONFIG: [path.join(root, 'kube-1'), path.join(root, 'kube-2')].join(path.delimiter),
-    };
-    const files = ['docker/config.json', 'gh/hosts.yml', 'cargo/credentials.toml', 'xdg/git/credentials',
-      'gcloud/credentials.db', 'azure/token.json', 'npmrc', 'pip.conf', 'aws', 'kube-1', 'kube-2'].map(file => path.join(root, file));
-    for (const file of files) {
-      fs.mkdirSync(path.dirname(file), { recursive: true });
-      fs.writeFileSync(file, 'LAYER-CREDENTIAL\n');
-    }
-    return { env, files };
-  };
-  const original = locations('original'), project = locations('project'), file = locations('file'),
-    rung = locations('rung'), fallback = locations('fallback');
-  const envFile = path.join(h.base, 'credential-layers.env');
-  fs.writeFileSync(envFile, Object.entries(file.env).map(([key, value]) => `${key}=${JSON.stringify(value)}`).join('\n'));
-  h.ok(['project', 'set', '--env', JSON.stringify(project.env), '--env_file', envFile]);
-  for (const harness of ['claude', 'codex']) {
-    isolated(h, 'hard', harness);
-    h.ok(['ladder', 'set', 'hard', '--env', JSON.stringify(rung.env)]);
-    fs.mkdirSync(path.dirname(h.userConfig), { recursive: true });
-    fs.writeFileSync(h.userConfig, JSON.stringify({ ladder: { hard: { fallbacks: [{
-      harness, model: 'second', env: fallback.env,
-    }] } } }));
-    spawn(h, u, 'hard', original.env);
-    assertCredentialsHidden(u.report(), [original, project, file, rung, fallback].flatMap(layer => layer.files));
-  }
-});
-
-test('gh config isolation survives settings on initial and fallback launches', { skip: NO_STUBS }, t => {
+test('gh config isolation survives settings on initial and fallback launches, and the agent\'s gh runs on the host with the user\'s config', { skip: NO_STUBS }, t => {
   const { h, u } = setup(t);
   const reports = path.join(h.base, 'gh-launches.jsonl');
   const original = path.join(h.base, 'original-gh');
@@ -1305,17 +1828,19 @@ if (process.argv[2] === 'auth') {
   if (process.env.GH_CONFIG_DIR !== ${JSON.stringify(original)}) process.exit(1);
   console.log('stub-gh-token');
 } else {
-  if (process.env.GH_CONFIG_DIR !== path.join(process.env.HOME, '.config', 'gh')) {
-    console.error('permission denied reading gh config'); process.exit(1);
+  // The broker's gh, on the host: the user's own config, and no token.
+  if (process.env.GH_CONFIG_DIR !== ${JSON.stringify(original)}) {
+    console.error('not the gh config of the user'); process.exit(1);
   }
-  if (process.env.GH_TOKEN !== 'stub-gh-token') process.exit(1);
+  if (process.env.GH_TOKEN) process.exit(1);
 }
 `);
   for (const harness of ['claude', 'codex']) fs.writeFileSync(path.join(h.base, 'bin', harness), `#!${process.execPath}
 const fs = require('node:fs');
 require(${JSON.stringify(STUB)})(${JSON.stringify(harness)});
 const report = JSON.parse(fs.readFileSync(process.env.STUB_OUT, 'utf8'));
-fs.appendFileSync(${JSON.stringify(reports)}, JSON.stringify({ harness: report.harness, ran: report.ran, token: report.ghToken }) + '\\n');
+fs.appendFileSync(${JSON.stringify(reports)}, JSON.stringify({ harness: report.harness, ran: report.ran, token: report.ghToken,
+  config: process.env.GH_CONFIG_DIR, home: process.env.HOME }) + '\\n');
 if (process.env.STUB_FAIL_HARNESS === ${JSON.stringify(harness)}) {
   console.error('HTTP 503 service unavailable'); process.exit(1);
 }
@@ -1328,520 +1853,47 @@ if (process.env.STUB_FAIL_HARNESS === ${JSON.stringify(harness)}) {
       const fallback = primary === 'claude' ? 'codex' : 'claude';
       isolated(h, 'hard', primary);
       h.ok(['ladder', 'set', 'hard', '--supervision', '{"retries":0,"backoff_ms":10,"max_backoff_ms":10}']);
-      fs.mkdirSync(path.dirname(h.userConfig), { recursive: true });
-      fs.writeFileSync(h.userConfig, JSON.stringify({ ladder: { hard: { fallbacks: [{
+      // A fallback's env is a grant only the owner's ladder set makes.
+      h.ok(['ladder', 'set', 'hard', '--fallbacks', JSON.stringify([{
         harness: fallback, model: 'second', ...(source === 'literal' ? { env: { GH_CONFIG_DIR: selected } } : {}),
-      }] } } }));
+      }])]);
       fs.rmSync(reports, { force: true });
       spawn(h, u, 'hard', { GH_CONFIG_DIR: original, STUB_FAIL_HARNESS: primary,
         STUB_RUN: JSON.stringify([['gh', 'pr', 'view', '1']]) });
       const seen = fs.readFileSync(reports, 'utf8').trim().split('\n').map(JSON.parse);
       assert.deepEqual(seen.map(report => report.harness), [primary, fallback]);
       for (const report of seen) {
-        assert.equal(report.token, 'stub-gh-token');
+        assert.equal(report.token, null, `${source} ${report.harness}: the agent holds no gh token`);
+        assert.equal(report.config, path.join(report.home, '.config', 'gh'), `${source} ${report.harness}: the agent's gh config is its own`);
         assert.equal(report.ran[0].code, 0, `${source} ${report.harness}: ${report.ran[0].stderr}`);
       }
     }
   }
 });
 
-for (const source of ['claude', 'codex']) {
-  test(`${source} harness configuration credential paths remain denied`, { skip: NO_STUBS }, t => {
-    const { h, u, wt } = setup(t);
-    const root = path.join(h.base, `${source}-provider-files`);
-    fs.mkdirSync(root);
-    const files = ['credentials', 'config', 'previous-config'].map(file => path.join(root, file));
-    for (const file of files) fs.writeFileSync(file, '[default]\nregion = us-east-1\n');
-    if (source === 'claude') {
-      const config = path.join(u.home, '.claude', 'settings.json');
-      const settings = JSON.parse(fs.readFileSync(config, 'utf8'));
-      Object.assign(settings.env, { AWS_SHARED_CREDENTIALS_FILE: files[0], AWS_CONFIG_FILE: files[1] });
-      fs.writeFileSync(config, JSON.stringify(settings));
-    } else {
-      fs.writeFileSync(path.join(u.home, '.codex', '.env'), [
-        `PROVIDER_FILES=${JSON.stringify(root)}`,
-        'export AWS_SHARED_CREDENTIALS_FILE="${PROVIDER_FILES}/credentials" # provider file',
-        `AWS_CONFIG_FILE='${files[2]}'`,
-        `AWS_CONFIG_FILE="${files[1]}"`,
-        'PROVIDER_TOKEN=HARNESS-ENV-SECRET',
-        '',
-      ].join('\n'));
-    }
-    // Both sandboxes protect every user harness's stores.
-    for (const harness of ['claude', 'codex']) {
-      isolated(h, 'hard', harness);
-      spawn(h, u, 'hard', { STUB_READ: JSON.stringify(source === 'claude' ? files.slice(0, 2) : files) });
-      const seen = u.report();
-      assertCredentialsHidden(seen, source === 'claude' ? files.slice(0, 2) : files);
-      if (harness === 'claude') assert.ok(seen.reads.every(read => read.denied));
-      for (const file of walk(h.state)) assert.ok(!fs.readFileSync(file, 'utf8').includes('HARNESS-ENV-SECRET'), 'dotenv secrets are not copied');
-      fs.writeFileSync(path.join(wt, 'AGENTS.md'), `@${files[0]}\n`);
-      const refused = h.run(['spawn', '--role', 'hard', '--task', 'T1', '--dry-run'], { env: u.env });
-      assert.notEqual(refused.code, 0, 'harness-config credential imports refuse startup');
-      assert.match(refused.stderr, /house rule.*credential store/i);
-      fs.rmSync(path.join(wt, 'AGENTS.md'));
-    }
-  });
-}
-
-test('resolved Bedrock credential paths are denied at their delivered locations', { skip: NO_STUBS }, t => {
+test('a brokered ci log runs the host gh, not the agent\'s gh shim that refuses gh api', { skip: NO_STUBS }, t => {
   const { h, u } = setup(t);
-  const root = path.join(h.base, 'resolved-provider');
-  fs.mkdirSync(root);
-  const credentials = path.join(root, 'credentials'), config = path.join(root, 'config');
-  fs.writeFileSync(credentials, '[default]\naws_access_key_id = synthetic\n');
-  fs.writeFileSync(config, '[default]\nregion = us-east-1\n');
   isolated(h, 'hard', 'claude');
-  h.ok(['ladder', 'set', 'hard', '--provider', 'bedrock']);
-  spawn(h, u, 'hard', {
-    AWS_SHARED_CREDENTIALS_FILE: path.relative(h.repo, credentials),
-    AWS_CONFIG_FILE: path.relative(h.repo, config),
-    STUB_RUN: JSON.stringify([[process.execPath, '-e',
-      'process.stderr.write(JSON.stringify([process.env.AWS_SHARED_CREDENTIALS_FILE, process.env.AWS_CONFIG_FILE]))']]),
-  });
-  const seen = u.report();
-  assert.deepEqual(JSON.parse(seen.ran[0].stderr), [credentials, config]);
-  assertCredentialsHidden(seen, [credentials, config]);
-});
-
-test('parent-relative credential stores stay hidden on initial and fallback launches', { skip: NO_STUBS }, t => {
-  const { h, u, wt } = setup(t);
-  const caller = path.join(h.repo, 'caller');
-  const reports = path.join(h.base, 'relative-stores.jsonl');
-  fs.mkdirSync(caller);
-  const files = [caller, wt].flatMap(root => ['relative-gh/hosts.yml', 'relative-docker/config.json', 'relative-aws', 'kube-a', 'kube-b']
-    .map(file => path.join(root, file)));
-  // Relative harness homes name the caller's stores, and so do the
-  // credential paths their settings.json and .env select.
-  const harnessFiles = ['custom-claude/.credentials.json', 'custom-codex/auth.json'].map(file => path.join(caller, file));
-  const selectedFiles = ['claude-settings-docker/config.json', 'codex-env-aws'].map(file => path.join(h.base, file));
-  files.push(...harnessFiles, ...selectedFiles);
-  for (const file of files) {
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    fs.writeFileSync(file, 'SYNTHETIC-PARENT-STORE\n');
-  }
-  fs.writeFileSync(path.join(caller, 'custom-claude', 'settings.json'),
-    JSON.stringify({ env: { DOCKER_CONFIG: path.dirname(selectedFiles[0]) } }));
-  fs.writeFileSync(path.join(caller, 'custom-codex', '.env'), `AWS_SHARED_CREDENTIALS_FILE=${selectedFiles[1]}\n`);
-  fs.writeFileSync(path.join(h.base, 'bin', 'gh'), `#!${process.execPath}
-const fs = require('node:fs'), path = require('node:path');
-if (process.argv[2] === 'auth') {
-  if (fs.readFileSync(path.join(process.env.GH_CONFIG_DIR, 'hosts.yml'), 'utf8') !== 'SYNTHETIC-PARENT-STORE\\n') process.exit(1);
-  console.log('stub-gh-token');
-} else if (process.env.GH_TOKEN !== 'stub-gh-token' || process.env.GH_CONFIG_DIR !== path.join(process.env.HOME, '.config', 'gh')) {
-  process.exit(1);
-}
-`);
-  for (const harness of ['claude', 'codex']) fs.writeFileSync(path.join(h.base, 'bin', harness), `#!${process.execPath}
-const fs = require('node:fs');
-require(${JSON.stringify(STUB)})(${JSON.stringify(harness)});
-fs.appendFileSync(${JSON.stringify(reports)}, fs.readFileSync(process.env.STUB_OUT, 'utf8') + '\\n');
-if (process.env.STUB_FAIL_HARNESS === ${JSON.stringify(harness)}) {
-  console.error('HTTP 503 service unavailable'); process.exit(1);
-}
-`);
-  for (const primary of ['claude', 'codex']) {
-    const fallback = primary === 'claude' ? 'codex' : 'claude';
-    isolated(h, 'hard', primary);
-    h.ok(['ladder', 'set', 'hard', '--supervision', '{"retries":0,"backoff_ms":10,"max_backoff_ms":10}']);
-    fs.mkdirSync(path.dirname(h.userConfig), { recursive: true });
-    fs.writeFileSync(h.userConfig, JSON.stringify({ ladder: { hard: { fallbacks: [{ harness: fallback, model: 'second' }] } } }));
-    fs.rmSync(reports, { force: true });
-    spawn(h, u, 'hard', {
-      GH_CONFIG_DIR: 'relative-gh', DOCKER_CONFIG: 'relative-docker', AWS_SHARED_CREDENTIALS_FILE: 'relative-aws',
-      KUBECONFIG: ['kube-a', 'kube-b'].join(path.delimiter), STUB_FAIL_HARNESS: primary,
-      CLAUDE_CONFIG_DIR: 'custom-claude', CODEX_HOME: 'custom-codex',
-      STUB_RUN: JSON.stringify([['gh', 'pr', 'view', '1']]),
-    }, { cwd: caller });
-    const seen = fs.readFileSync(reports, 'utf8').trim().split('\n').map(JSON.parse);
-    assert.deepEqual(seen.map(report => report.harness), [primary, fallback]);
-    for (const report of seen) {
-      assert.equal(report.ghToken, 'stub-gh-token', 'the parent token lookup succeeded');
-      assert.equal(report.ran[0].code, 0, 'the handed token works');
-      assertCredentialsHidden(report, files);
-    }
-  }
-});
-
-test('every configured env_file keeps its credential paths hidden on initial and fallback launches', { skip: NO_STUBS }, t => {
-  const { h, u } = setup(t);
-  const reports = path.join(h.base, 'route-env-files.jsonl');
-  // The rung and the fallback route each override the project file, so
-  // no launch selects it; it still names a store the user configured.
-  const files = ['project', 'primary', 'route'].map(label => path.join(h.base, `${label}-aws-creds`));
-  for (const [index, file] of files.entries()) {
-    fs.writeFileSync(file, '[default]\naws_access_key_id = synthetic\n');
-    fs.writeFileSync(path.join(h.base, `${['project', 'primary', 'route'][index]}.env`), `AWS_SHARED_CREDENTIALS_FILE=${JSON.stringify(file)}\n`);
-  }
-  for (const harness of ['claude', 'codex']) fs.writeFileSync(path.join(h.base, 'bin', harness), `#!${process.execPath}
-const fs = require('node:fs');
-require(${JSON.stringify(STUB)})(${JSON.stringify(harness)});
-fs.appendFileSync(${JSON.stringify(reports)}, fs.readFileSync(process.env.STUB_OUT, 'utf8') + '\\n');
-if (process.env.STUB_FAIL_HARNESS === ${JSON.stringify(harness)}) {
-  console.error('HTTP 503 service unavailable'); process.exit(1);
-}
-`);
-  h.ok(['project', 'set', '--env_file', path.join(h.base, 'project.env')]);
-  for (const primary of ['claude', 'codex']) {
-    const fallback = primary === 'claude' ? 'codex' : 'claude';
-    isolated(h, 'hard', primary);
-    h.ok(['ladder', 'set', 'hard', '--env_file', path.join(h.base, 'primary.env'),
-      '--supervision', '{"retries":0,"backoff_ms":10,"max_backoff_ms":10}']);
-    fs.mkdirSync(path.dirname(h.userConfig), { recursive: true });
-    fs.writeFileSync(h.userConfig, JSON.stringify({ ladder: { hard: { fallbacks: [{
-      harness: fallback, model: 'second', env_file: path.join(h.base, 'route.env'),
-    }] } } }));
-    fs.rmSync(reports, { force: true });
-    spawn(h, u, 'hard', { STUB_FAIL_HARNESS: primary });
-    const seen = fs.readFileSync(reports, 'utf8').trim().split('\n').map(JSON.parse);
-    assert.deepEqual(seen.map(report => report.harness), [primary, fallback]);
-    for (const report of seen) assertCredentialsHidden(report, files);
-  }
-});
-
-test('Google credential file overrides stay hidden across environment sources', { skip: NO_STUBS }, t => {
-  const { h, u, wt } = setup(t);
-  const sources = ['inherited', 'project', 'rung', 'file', 'claude', 'codex'].map(label => {
-    const env = Object.fromEntries(['GOOGLE_APPLICATION_CREDENTIALS', 'CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE'].map(key => {
-      const file = path.join(h.base, `${label}-${key}.json`);
-      fs.writeFileSync(file, '{"type":"service_account","private_key":"SYNTHETIC-GOOGLE-KEY"}\n');
-      return [key, file];
-    }));
-    return env;
-  });
-  const [inherited, project, rung, file, claude, codex] = sources;
-  const envFile = path.join(h.base, 'google.env');
-  const text = env => Object.entries(env).map(([key, value]) => `${key}=${JSON.stringify(value)}`).join('\n') + '\n';
-  fs.writeFileSync(envFile, text(file));
-  fs.writeFileSync(path.join(u.home, '.codex', '.env'), text(codex));
-  const settingsFile = path.join(u.home, '.claude', 'settings.json');
-  const settings = JSON.parse(fs.readFileSync(settingsFile, 'utf8'));
-  Object.assign(settings.env, claude);
-  fs.writeFileSync(settingsFile, JSON.stringify(settings));
-  h.ok(['project', 'set', '--env', JSON.stringify(project), '--env_file', envFile]);
-  const files = sources.flatMap(env => Object.values(env));
-  for (const harness of ['claude', 'codex']) {
-    isolated(h, 'hard', harness);
-    h.ok(['ladder', 'set', 'hard', '--env', JSON.stringify(rung)]);
-    spawn(h, u, 'hard', { ...inherited, STUB_READ: JSON.stringify(files) });
-    assertCredentialsHidden(u.report(), files);
-    if (harness === 'claude') assert.ok(u.report().reads.every(read => read.denied));
-    for (const credential of Object.values(inherited)) {
-      fs.writeFileSync(path.join(wt, 'AGENTS.md'), `@${credential}\n`);
-      const refused = h.run(['spawn', '--role', 'hard', '--task', 'T1', '--dry-run'], { env: { ...u.env, ...inherited } });
-      assert.notEqual(refused.code, 0, 'Google credential imports must be refused');
-      assert.match(refused.stderr, /house rule.*credential store/i);
-    }
-    fs.rmSync(path.join(wt, 'AGENTS.md'));
-  }
-});
-
-test('OpenCode credential files stay hidden at default and selected data homes', { skip: NO_STUBS }, async t => {
-  const { h, u, wt } = setup(t);
-  const names = ['auth.json', 'mcp-auth.json'];
-  const files = [];
-  const put = root => {
-    const dir = path.join(root, 'opencode');
-    fs.mkdirSync(dir, { recursive: true });
-    for (const name of names) {
-      const file = path.join(dir, name);
-      fs.writeFileSync(file, '{"token":"SYNTHETIC-OPENCODE-CREDENTIAL"}\n');
-      files.push(file);
-    }
-  };
-  put(path.join(u.home, '.local', 'share'));
-  const sources = ['inherited', 'project', 'rung', 'file', 'claude', 'codex'].map(label => {
-    const root = label === 'inherited' ? 'owner-data'
-      : label === 'project' ? '~/project-data' : path.join(h.base, `${label}-data`);
-    for (const dir of new Set([path.resolve(h.repo, root), path.resolve(wt, root)])) put(dir);
-    if (root.startsWith('~/')) put(path.join(u.home, root.slice(2)));
-    return { XDG_DATA_HOME: root };
-  });
-  const [inherited, project, rung, file, claude, codex] = sources;
-  // A selected directory alias must protect the real files as well.
-  const alias = path.join(h.base, 'data-alias');
-  fs.symlinkSync(rung.XDG_DATA_HOME, alias, 'dir');
-  rung.XDG_DATA_HOME = alias;
-  files.push(...names.map(name => path.join(alias, 'opencode', name)));
-  const text = env => `XDG_DATA_HOME=${JSON.stringify(env.XDG_DATA_HOME)}\n`;
-  const envFile = path.join(h.base, 'opencode-sources.env');
-  fs.writeFileSync(envFile, text(file));
-  fs.writeFileSync(path.join(u.home, '.codex', '.env'), text(codex));
-  const settingsFile = path.join(u.home, '.claude', 'settings.json');
-  const settings = JSON.parse(fs.readFileSync(settingsFile, 'utf8'));
-  Object.assign(settings.env, claude);
-  fs.writeFileSync(settingsFile, JSON.stringify(settings));
-  h.ok(['project', 'set', '--env', JSON.stringify(project), '--env_file', envFile]);
-  for (const harness of ['claude', 'codex']) await t.test(harness, () => {
-    isolated(h, 'hard', harness);
-    h.ok(['ladder', 'set', 'hard', '--env', JSON.stringify(rung)]);
-    spawn(h, u, 'hard', { ...inherited, STUB_READ: JSON.stringify(files) });
-    assertCredentialsHidden(u.report(), files);
-    if (harness === 'claude') assert.ok(u.report().reads.every(read => read.denied));
-    for (const credential of [files[0], path.join(h.repo, 'owner-data', 'opencode', 'auth.json'),
-      path.join(wt, '~', 'project-data', 'opencode', 'mcp-auth.json')]) {
-      fs.writeFileSync(path.join(wt, 'AGENTS.md'), `@${credential}\n`);
-      try {
-        const refused = h.run(['spawn', '--role', 'hard', '--task', 'T1', '--dry-run'], { env: { ...u.env, ...inherited } });
-        assert.notEqual(refused.code, 0, 'OpenCode credential imports must be refused');
-        assert.match(refused.stderr, /house rule.*credential store/i);
-      } finally { fs.rmSync(path.join(wt, 'AGENTS.md')); }
-    }
-  });
-});
-
-test('harness token and key files stay hidden across environment sources', { skip: NO_STUBS }, async t => {
-  const { h, u, wt } = setup(t);
-  const keys = ['AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE', 'AZURE_FEDERATED_TOKEN_FILE',
-    'AZURE_CLIENT_CERTIFICATE_PATH', 'CLAUDE_CODE_CLIENT_KEY'];
-  const sources = ['inherited', 'project', 'rung', 'file', 'claude', 'codex'].map(label =>
-    Object.fromEntries(keys.map(key => {
-      const file = path.join(h.base, `${label}-${key}`);
-      fs.writeFileSync(file, 'SYNTHETIC-HARNESS-CREDENTIAL\n');
-      return [key, file];
-    })));
-  const [inherited, project, rung, file, claude, codex] = sources;
-  const text = env => Object.entries(env).map(([key, value]) => `${key}=${JSON.stringify(value)}`).join('\n') + '\n';
-  const envFile = path.join(h.base, 'harness-credentials.env');
-  fs.writeFileSync(envFile, text(file));
-  fs.writeFileSync(path.join(u.home, '.codex', '.env'), text(codex));
-  const settingsFile = path.join(u.home, '.claude', 'settings.json');
-  const settings = JSON.parse(fs.readFileSync(settingsFile, 'utf8'));
-  Object.assign(settings.env, claude);
-  fs.writeFileSync(settingsFile, JSON.stringify(settings));
-  h.ok(['project', 'set', '--env', JSON.stringify(project), '--env_file', envFile]);
-  const files = sources.flatMap(env => Object.values(env));
-  for (const harness of ['claude', 'codex']) await t.test(harness, () => {
-    isolated(h, 'hard', harness);
-    h.ok(['ladder', 'set', 'hard', '--env', JSON.stringify(rung)]);
-    spawn(h, u, 'hard', { ...inherited, STUB_READ: JSON.stringify(files) });
-    assertCredentialsHidden(u.report(), files);
-    if (harness === 'claude') assert.ok(u.report().reads.every(read => read.denied));
-    for (const credential of Object.values(inherited)) {
-      fs.writeFileSync(path.join(wt, 'AGENTS.md'), `@${credential}\n`);
-      try {
-        const refused = h.run(['spawn', '--role', 'hard', '--task', 'T1', '--dry-run'], { env: { ...u.env, ...inherited } });
-        assert.notEqual(refused.code, 0, 'harness credential imports must be refused');
-        assert.match(refused.stderr, /house rule.*credential store/i);
-      } finally { fs.rmSync(path.join(wt, 'AGENTS.md')); }
-    }
-  });
-});
-
-test('web identity tokens stay hidden across environment sources', { skip: NO_STUBS }, t => {
-  const { h, u, wt } = setup(t);
-  const sources = ['inherited', 'project', 'rung', 'file', 'claude', 'codex'].map(label => {
-    const file = path.join(h.base, `${label}-web-identity`);
-    fs.writeFileSync(file, 'SYNTHETIC-WEB-IDENTITY-TOKEN\n');
-    return { AWS_WEB_IDENTITY_TOKEN_FILE: file };
-  });
-  const [inherited, project, rung, file, claude, codex] = sources;
-  const text = env => `AWS_WEB_IDENTITY_TOKEN_FILE=${JSON.stringify(env.AWS_WEB_IDENTITY_TOKEN_FILE)}\n`;
-  const envFile = path.join(h.base, 'web-identity.env');
-  fs.writeFileSync(envFile, text(file));
-  fs.writeFileSync(path.join(u.home, '.codex', '.env'), text(codex));
-  const settingsFile = path.join(u.home, '.claude', 'settings.json');
-  const settings = JSON.parse(fs.readFileSync(settingsFile, 'utf8'));
-  Object.assign(settings.env, claude);
-  fs.writeFileSync(settingsFile, JSON.stringify(settings));
-  h.ok(['project', 'set', '--env', JSON.stringify(project), '--env_file', envFile]);
-  const files = sources.map(env => env.AWS_WEB_IDENTITY_TOKEN_FILE);
-  for (const harness of ['claude', 'codex']) {
-    isolated(h, 'hard', harness);
-    h.ok(['ladder', 'set', 'hard', '--env', JSON.stringify(rung)]);
-    spawn(h, u, 'hard', { ...inherited, STUB_READ: JSON.stringify(files) });
-    assertCredentialsHidden(u.report(), files);
-    if (harness === 'claude') assert.ok(u.report().reads.every(read => read.denied));
-    fs.writeFileSync(path.join(wt, 'AGENTS.md'), `@${inherited.AWS_WEB_IDENTITY_TOKEN_FILE}\n`);
-    const refused = h.run(['spawn', '--role', 'hard', '--task', 'T1', '--dry-run'], { env: { ...u.env, ...inherited } });
-    assert.notEqual(refused.code, 0, 'web identity token imports must be refused');
-    assert.match(refused.stderr, /house rule.*credential store/i);
-    fs.rmSync(path.join(wt, 'AGENTS.md'));
-  }
-});
-
-test('credential stores equal to required runtime directories refuse dispatch', { skip: NO_STUBS }, t => {
-  const { h, u, wt } = setup(t);
-  fs.writeFileSync(path.join(wt, 'config.json'), '{"auths":{"example":{"auth":"SYNTHETIC-DOCKER-TOKEN"}}}\n');
-  const alias = path.join(h.base, 'worktree-alias');
-  fs.symlinkSync(wt, alias, 'dir');
-  for (const harness of ['claude', 'codex']) {
-    isolated(h, 'hard', harness);
-    for (const store of [wt, alias, h.state]) {
-      fs.rmSync(u.out, { force: true });
-      const refused = h.run(['spawn', '--role', 'hard', '--task', 'T1', '--wait', '--json'], {
-        env: { ...u.env, DOCKER_CONFIG: store },
-      });
-      assert.notEqual(refused.code, 0, `${harness}: ${store} must refuse dispatch`);
-      assert.match(refused.stderr, /credential store.*required.*path/i);
-      assert.ok(!fs.existsSync(u.out), 'the harness must not start');
-    }
-    spawn(h, u, 'hard');
-    assert.equal(u.report().harness, harness, 'a refused dispatch leaves the worktree usable');
-  }
-});
-
-test('AWS profile web identity tokens stay hidden and cannot be imported', { skip: NO_STUBS }, async t => {
-  const { h, u, wt } = setup(t);
-  const files = [];
-  const profileFile = (file, label) => {
-    const token = path.join(h.base, `${label}-profile-token.jwt`);
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    fs.writeFileSync(token, 'SYNTHETIC-PROFILE-TOKEN\n');
-    const comment = label === 'default' ? ' # deployment token' : '\t; deployment token';
-    fs.writeFileSync(file, `[default]\nregion = us-east-1\nrole_arn = arn:aws:iam::123456789012:role/test\nweb_identity_token_file = ${token}${comment}\n`);
-    files.push(token);
-    return file;
-  };
-  profileFile(path.join(u.home, '.aws', 'config'), 'default');
-  profileFile(path.join(u.home, '.aws', 'credentials'), 'shared-default');
-  const sources = ['inherited', 'project', 'rung', 'file', 'claude', 'codex'].map(label => ({
-    AWS_CONFIG_FILE: profileFile(path.join(h.base, `${label}-aws-config`), label),
+  const branch = h.readState('tasks.json').tasks[0].branch;
+  const sha = h.git(['rev-parse', 'HEAD']);
+  const data = path.join(h.base, 'ci-feedback.json');
+  fs.writeFileSync(data, JSON.stringify({
+    jobs: { 42: { id: 42, name: 'test', head_branch: branch, head_sha: sha } },
+    refs: { [`heads/${branch}`]: { ref: `refs/heads/${branch}`, object: { sha } } },
+    logs: { 42: 'not ok 1 - read through the broker\n' },
+    alerts: {},
   }));
-  const [inherited, project, rung, file, claude, codex] = sources;
-  // Named profiles and relative tokens must retain both caller and child paths.
-  const relativeToken = 'relative profile#token;literal.jwt';
-  for (const dir of [h.repo, wt]) {
-    fs.writeFileSync(path.join(dir, relativeToken), 'SYNTHETIC-PROFILE-TOKEN\n');
-    files.push(path.join(dir, relativeToken));
-  }
-  fs.appendFileSync(inherited.AWS_CONFIG_FILE, `[profile named]\nweb_identity_token_file = ${relativeToken}\n`);
-  const text = env => `AWS_CONFIG_FILE=${JSON.stringify(env.AWS_CONFIG_FILE)}\n`;
-  const envFile = path.join(h.base, 'profile-sources.env');
-  fs.writeFileSync(envFile, text(file));
-  fs.writeFileSync(path.join(u.home, '.codex', '.env'), text(codex));
-  const settingsFile = path.join(u.home, '.claude', 'settings.json');
-  const settings = JSON.parse(fs.readFileSync(settingsFile, 'utf8'));
-  Object.assign(settings.env, claude);
-  fs.writeFileSync(settingsFile, JSON.stringify(settings));
-  h.ok(['project', 'set', '--env', JSON.stringify(project), '--env_file', envFile]);
-  for (const harness of ['claude', 'codex']) await t.test(harness, () => {
-    isolated(h, 'hard', harness);
-    h.ok(['ladder', 'set', 'hard', '--env', JSON.stringify(rung)]);
-    spawn(h, u, 'hard', { ...inherited, AWS_PROFILE: 'named', STUB_READ: JSON.stringify(files) });
-    assertCredentialsHidden(u.report(), files);
-    if (harness === 'claude') assert.ok(u.report().reads.every(read => read.denied));
-    fs.writeFileSync(path.join(wt, 'AGENTS.md'), `@${files[0]}\n`);
-    try {
-      const refused = h.run(['spawn', '--role', 'hard', '--task', 'T1', '--dry-run'], { env: { ...u.env, ...inherited } });
-      assert.notEqual(refused.code, 0, 'profile token imports must be refused');
-      assert.match(refused.stderr, /house rule.*credential store/i);
-    } finally { fs.rmSync(path.join(wt, 'AGENTS.md')); }
-  });
-});
-
-test('nested credential links to required runtime directories refuse dispatch', { skip: NO_STUBS }, async t => {
-  const { h, u, wt } = setup(t);
-  fs.writeFileSync(path.join(wt, 'cached-token.json'), '{"accessToken":"SYNTHETIC-CACHED-TOKEN"}\n');
-  const link = path.join(u.home, '.aws', 'sso', 'cache');
-  fs.mkdirSync(path.dirname(link), { recursive: true });
-  const alias = path.join(h.base, 'runtime-alias');
-  fs.symlinkSync(wt, alias, 'dir');
-  for (const rule of ['.claude/CLAUDE.md', '.codex/AGENTS.md']) {
-    const from = path.join(u.home, rule), target = path.join(h.base, path.basename(rule));
-    fs.renameSync(from, target);
-    fs.symlinkSync(target, from);
-  }
-  for (const harness of ['claude', 'codex']) await t.test(harness, () => {
-    isolated(h, 'hard', harness);
-    for (const target of [wt, alias, h.state]) {
-      fs.symlinkSync(path.relative(path.dirname(link), target), link, 'dir');
-      fs.rmSync(u.out, { force: true });
-      try {
-        const refused = h.run(['spawn', '--role', 'hard', '--task', 'T1', '--wait', '--json'], { env: u.env });
-        assert.notEqual(refused.code, 0, `${harness}: nested link to ${target} must refuse dispatch`);
-        assert.match(refused.stderr, /credential store.*required.*path/i);
-        assert.ok(!fs.existsSync(u.out), 'the harness must not start');
-      } finally { fs.rmSync(link); }
-    }
-    spawn(h, u, 'hard');
-    assert.equal(u.report().harness, harness, 'removing the link restores safe dispatch');
-  });
-});
-
-test('repository imports cannot authorize credential reads or send credentials to a harness', { skip: NO_STUBS }, (t) => {
-  const { h, u, wt } = setup(t);
-  const docker = path.join(u.home, '.docker', 'config.json');
-  fs.mkdirSync(path.dirname(docker), { recursive: true });
-  fs.writeFileSync(docker, '{"auths":{"example":{"auth":"IMPORT-SECRET"}}}\n');
-  const auth = path.join(u.home, '.codex', 'auth.json');
-  const alias = path.join(wt, 'credential-import.md');
-  fs.symlinkSync(auth, alias);
-  for (const harness of ['claude', 'codex']) {
-    isolated(h, 'hard', harness);
-    for (const file of [auth, docker, alias]) {
-      fs.writeFileSync(path.join(wt, 'AGENTS.md'), `@${file}\n`);
-      if (file === alias) {
-        const global = path.join(u.home, harness === 'claude' ? '.claude/CLAUDE.md' : '.codex/AGENTS.md');
-        fs.appendFileSync(global, `@${path.join(wt, 'AGENTS.md')}\n`);
-      }
-      for (const mode of ['--dry-run', '--wait']) {
-        const r = h.run(['spawn', '--task', 'T1', '--role', 'hard', mode], { env: u.env });
-        assert.notEqual(r.code, 0, `${harness}: ${file} must not become an authorized rule`);
-        assert.match(r.stderr, /house rule.*credential store/i);
-        assert.doesNotMatch(r.stdout + r.stderr, /IMPORT-SECRET|PLANTED-SECRET/);
-        assert.ok(!fs.existsSync(u.out), 'refuse before starting the harness');
-      }
-    }
-  }
-});
-
-test('credential location overrides are denied in both harnesses', { skip: NO_STUBS }, (t) => {
-  const { h, u, wt } = setup(t);
-  const root = path.join(h.base, 'selected-credentials');
-  const env = {
-    DOCKER_CONFIG: path.join(root, 'docker'),
-    CARGO_HOME: path.join(root, 'cargo'),
-    KUBECONFIG: [path.join(root, 'kube-one'), '', path.relative(wt, path.join(root, 'kube-two'))].join(path.delimiter),
-    CLOUDSDK_CONFIG: path.join(root, 'gcloud'),
-    AZURE_CONFIG_DIR: path.join(root, 'azure'),
-    NPM_CONFIG_USERCONFIG: path.join(root, 'npmrc'),
-    npm_config_userconfig: path.join(root, 'npmrc-lower'),
-    PIP_CONFIG_FILE: path.join(root, 'pip.conf'),
-    AWS_SHARED_CREDENTIALS_FILE: path.join(root, 'aws-credentials'),
-    AWS_CONFIG_FILE: path.join(root, 'aws-config'),
-  };
-  const files = ['docker/config.json', 'cargo/credentials', 'cargo/credentials.toml', 'kube-one', 'kube-two',
-    'gcloud/credentials.db', 'azure/msal_token_cache.json', 'npmrc', 'npmrc-lower', 'pip.conf', 'aws-credentials', 'aws-config']
-    .map(file => path.join(root, file));
-  for (const file of files) {
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    fs.writeFileSync(file, 'OVERRIDE-SECRET\n');
-  }
-  // A selected directory may be a symlink; deny its real target too.
-  env.DOCKER_CONFIG = path.join(root, 'docker-link');
-  fs.symlinkSync(path.join(root, 'docker'), env.DOCKER_CONFIG);
-  const envFile = path.join(h.base, 'credential-paths.env');
-  fs.writeFileSync(envFile, Object.entries(env).map(([key, value]) => `${key}=${JSON.stringify(value)}`).join('\n'));
-  for (const source of ['inherited', 'literal', 'file']) {
-    if (source === 'literal') h.ok(['project', 'set', '--env', JSON.stringify(env)]);
-    if (source === 'file') h.ok(['project', 'set', '--env', '{}', '--env_file', envFile]);
-    for (const harness of ['claude', 'codex']) {
-      isolated(h, 'hard', harness);
-      spawn(h, u, 'hard', source === 'inherited' ? env : {});
-      assertCredentialsHidden(u.report(), files);
-    }
-  }
-});
-
-test('Tower Crane, Pi and Agy credential stores and selected locations are denied', { skip: NO_STUBS }, (t) => {
-  const { h, u } = setup(t);
-  const selected = path.join(h.base, 'selected-harness-config');
-  const env = { TOWER_CRANE_CONFIG: path.join(selected, 'tower-crane.json'), PI_CODING_AGENT_DIR: path.join(selected, 'pi') };
-  const files = [path.join(u.home, '.config', 'tower-crane', 'config.json'),
-    path.join(u.home, '.pi', 'agent', 'auth.json'), path.join(u.home, '.pi', 'agent', 'models.json'),
-    env.TOWER_CRANE_CONFIG, path.join(env.PI_CODING_AGENT_DIR, 'auth.json'), path.join(env.PI_CODING_AGENT_DIR, 'models.json'),
-    path.join(selected, 'gemini', 'antigravity', 'mcp_oauth_tokens.json')];
-  for (const file of files) {
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    fs.writeFileSync(file, '{}\n');
-  }
-  fs.symlinkSync(path.join(selected, 'gemini'), path.join(u.home, '.gemini'));
-  for (const harness of ['claude', 'codex']) {
-    isolated(h, 'hard', harness);
-    spawn(h, u, 'hard', env);
-    assertCredentialsHidden(u.report(), [...files, path.join(u.home, '.gemini', 'antigravity', 'mcp_oauth_tokens.json')]);
-  }
+  // The host gh: the plant's keyring login, and the CI feedback endpoints.
+  fs.writeFileSync(path.join(h.base, 'bin', 'gh'), `#!${process.execPath}
+if (process.argv[2] === 'auth' && process.argv[3] === 'token') console.log('stub-gh-token');
+else require(${JSON.stringify(path.join(__dirname, 'fixtures', 'ci-feedback-gh.js'))});
+`, { mode: 0o755 });
+  // The agent's PATH starts with its home's gh shim, which refuses gh api.
+  spawn(h, u, 'hard', { CI_FEEDBACK_GH: data, STUB_RUN: JSON.stringify([[process.execPath, BIN, 'ci', 'log', '42']]) });
+  const seen = u.report();
+  assert.equal(seen.ran[0].code, 0, seen.ran[0].stderr);
+  const scratch = h.readState('tasks.json').tasks[0].scratch;
+  assert.equal(fs.readFileSync(path.join(scratch, 'ci-job-42.log'), 'utf8'), 'not ok 1 - read through the broker\n');
 });
 
 test('a codex agent writes only where its agent file says; a worker writes its git metadata, reviewer and small checks cannot write the worktree', { skip: NO_STUBS }, (t) => {
@@ -1850,15 +1902,39 @@ test('a codex agent writes only where its agent file says; a worker writes its g
   // git directory and its worktree's admin directory inside it.
   const common = fs.realpathSync(h.git(['rev-parse', '--path-format=absolute', '--git-common-dir'], wt));
   const own = fs.realpathSync(h.git(['rev-parse', '--path-format=absolute', '--git-dir'], wt));
+  // A submodule named lib/a keeps its git directory in modules/lib/a.
+  const mod = path.join(common, 'modules', 'lib', 'a');
+  fs.mkdirSync(mod, { recursive: true });
+  fs.writeFileSync(path.join(mod, 'HEAD'), 'ref: refs/heads/main\n');
+  fs.writeFileSync(path.join(mod, 'config'), '');
+  fs.rmSync(path.join(common, 'info'), { recursive: true, force: true });
+  // What makes git outside the sandbox run commands, or read another config,
+  // stays read-only though the git directory around it is writable.
+  const guarded = [path.join(common, 'config'), path.join(common, 'config.worktree'), path.join(common, 'hooks'), path.join(common, 'info'),
+    path.join(common, 'remotes'), path.join(common, 'branches'),
+    path.join(mod, 'config'), path.join(mod, 'hooks'), path.join(own, 'config.worktree'), path.join(own, 'commondir'), path.join(own, 'gitdir'),
+    path.join(fs.realpathSync(wt), '.git')];
+  const globalSeen = [process.execPath, '-e', 'process.stderr.write(String(process.env.GIT_CONFIG_GLOBAL))'];
   for (const [rung, worktree] of [['hard', 'write'], ['review', 'read'], ['small', 'read']]) {
     isolated(h, rung, 'codex');
-    const started = spawn(h, u, rung);
+    const started = spawn(h, u, rung, { STUB_RUN: JSON.stringify([globalSeen]) });
     const home = path.join(h.state, 'homes', started.agent);
-    const { config } = u.report();
+    const { config, ran } = u.report();
     const rules = config.permissions['tower-crane'].filesystem;
-    for (const d of [common, own]) assert.equal(rules[d], worktree === 'write' ? 'write' : undefined, `${rung}: ${d}`);
+    for (const d of [common, own]) assert.equal(rules[d], worktree, `${rung}: ${d}`);
+    for (const p of guarded) assert.equal(rules[p], worktree === 'write' ? 'read' : undefined, `${rung}: ${p}`);
+    // The global config git reads, in the sandbox too: the rendered config
+    // (lib/git-config.js) in the state directory, which the agent reads and
+    // never writes; a codex agent writes its HOME, where the copy is read-only.
+    const global = path.join(h.state, 'gitconfig', started.agent);
+    assert.equal(ran[0].stderr, global, `${rung}: GIT_CONFIG_GLOBAL`);
+    assert.equal(fs.readFileSync(global, 'utf8'), fs.readFileSync(path.join(home, 'home', '.gitconfig'), 'utf8'), rung);
+    assert.match(fs.readFileSync(global, 'utf8'), /\[credential\]\n\thelper = ""\n$/, `${rung}: the rendered config clears every credential helper`);
+    assert.doesNotMatch(fs.readFileSync(global, 'utf8'), /credential "https:\/\/github\.com"|GH_TOKEN/, `${rung}: no helper answers for GitHub`);
+    assert.equal(rules[path.join(home, 'home', '.gitconfig')], 'read', `${rung}: the copy in its HOME`);
+    assert.equal(rules[path.join(common, 'worktrees')], worktree === 'write' ? 'read' : undefined, `${rung}: other worktrees' admin directories`);
     assert.deepEqual(rules[':workspace_roots'], { '.': worktree }, rung);
-    assert.equal(rules[':root'], 'read', rung);
+    assert.equal(rules[':minimal'], 'read', rung);
     assert.equal(rules[h.state], 'read', `${rung}: the state is read-only; the broker writes it`);
     assert.equal(rules[path.join(h.state, 'homes')], 'none', `${rung}: other agent homes are hidden, including future spawns`);
     assert.equal(rules[home], 'read', `${rung}: its generated home remains readable`);
@@ -1867,6 +1943,7 @@ test('a codex agent writes only where its agent file says; a worker writes its g
     assert.equal(started.codex_home, sessionRoot);
     assert.equal(fs.readlinkSync(path.join(h.state, 'homes', started.agent, 'sessions')), path.join(sessionRoot, 'sessions'));
     assert.equal(rules[path.join(h.state, 'brokers')], 'none', `${rung}: no agent reads another agent's broker token`);
+    assert.equal(rules[path.join(h.state, 'ci-artifacts')], 'none', `${rung}: no agent reads unredacted local CI artifacts`);
     assert.equal(rules[path.join(h.state, 'brokers', started.agent)], 'write', `${rung}: its own broker directory is visible`);
     assert.equal(rules[path.join(home, 'home')], 'write', `${rung}: its HOME is writable`);
     // Codex mounts every readable path, then hides each 'none' directory,
@@ -1885,11 +1962,106 @@ test('a codex agent writes only where its agent file says; a worker writes its g
   }
   // The codex loop left T1 submitted; a worker needs a task it can claim.
   h.ok(['rework', 'T1', '--reason', 'probe the claude rungs']);
+  // Other worktrees' admin directories, whose commondir and config.worktree
+  // decide which config git reads there, are read-only, including one added
+  // later: the task worktree's own lives outside worktrees/. claude adds a
+  // linked worktree's common directory to its sandbox's writes itself, so a
+  // read-only role gets the same carve-outs.
+  assert.equal(path.dirname(own), path.join(path.dirname(fs.realpathSync(wt)), '.git-admin'));
+  const worktrees = path.join(common, 'worktrees');
   for (const [rung, writes] of [['hard', true], ['small', false]]) {
     isolated(h, rung, 'claude');
     spawn(h, u, rung);
-    const allow = u.report().settings.sandbox.filesystem.allowWrite;
+    const { allowWrite: allow, denyWrite: deny } = u.report().settings.sandbox.filesystem;
     for (const d of [common, own]) assert.equal(allow.includes(d), writes, `claude ${rung}: ${d}`);
+    for (const p of [...guarded, worktrees]) assert.ok(deny.includes(p), `claude ${rung}: ${p}`);
+    assert.ok(!deny.some((p) => own === p || own.startsWith(p + path.sep)), `claude ${rung}: its own admin directory stays writable`);
+  }
+  // Each guarded path exists, so no sandbox masks it with a placeholder.
+  for (const p of guarded) assert.ok(fs.existsSync(p), p);
+  assert.ok(fs.statSync(path.join(common, 'info')).isDirectory());
+});
+
+test('a link planted at a protected git path refuses the spawn and leaves its target untouched', { skip: NO_STUBS || (process.platform === 'win32' && 'symlinks need privileges on Windows') }, (t) => {
+  const { h, u, wt } = setup(t);
+  const common = h.git(['rev-parse', '--path-format=absolute', '--git-common-dir'], wt);
+  // A sandbox would protect the target and leave the link to be swapped.
+  const target = path.join(h.base, 'elsewhere');
+  fs.writeFileSync(target, 'untouched\n');
+  fs.symlinkSync(target, path.join(common, 'config.worktree'));
+  for (const harness of ['claude', 'codex']) {
+    isolated(h, 'hard', harness);
+    const r = h.run(['spawn', '--role', 'hard', '--task', 'T1', '--wait', '--json'], { env: u.env });
+    assert.notEqual(r.code, 0, harness);
+    assert.match(r.stderr, /config\.worktree is a link; a sandbox cannot keep it read-only/, harness);
+    assert.equal(fs.readFileSync(target, 'utf8'), 'untouched\n', harness);
+    assert.ok(fs.lstatSync(path.join(common, 'config.worktree')).isSymbolicLink(), harness);
+  }
+});
+
+test('a sandboxed harness\'s own git runs no command the shared config, hooks, nested repo or the agent\'s HOME name; the agent\'s sandboxed git still runs hooks and drivers', { skip: NO_STUBS }, (t) => {
+  const { h, u, wt } = setup(t);
+  fs.writeFileSync(path.join(wt, 'f.txt'), 'one\n');
+  fs.writeFileSync(path.join(wt, 'g.txt'), 'one\n');
+  h.git(['add', 'f.txt', 'g.txt'], wt);
+  h.git(['commit', '-qm', 'f'], wt);
+  const sub = path.join(wt, 'sub');
+  h.git(['init', '-q', sub]);
+  fs.writeFileSync(path.join(sub, 'f.txt'), 'one\n');
+  h.git(['add', 'f.txt'], sub);
+  h.git(['commit', '-qm', 'sub'], sub);
+  h.git(['add', 'sub'], wt);
+  h.git(['commit', '-qm', 'gitlink'], wt);
+  // What a worker could have planted in the shared git directory.
+  const common = h.git(['rev-parse', '--path-format=absolute', '--git-common-dir'], wt);
+  // Each marks only a run under the spawned harness, whose environment alone
+  // has TOWER_CRANE_SESSION: Tower Crane's own git and this test's are out of scope here.
+  const mark = (name) => path.join(h.base, `ran-${name}`);
+  const touch = (name) => `[ -z "$TOWER_CRANE_SESSION" ] || touch '${mark(name)}'`;
+  h.git(['config', 'core.fsmonitor', `${touch('fsmonitor')}; false`], wt);
+  h.git(['config', 'filter.planted.clean', `${touch('filter')}; cat`], wt);
+  fs.writeFileSync(path.join(common, 'info', 'attributes'), 'f.txt filter=planted\ng.txt filter=home\n');
+  fs.writeFileSync(path.join(common, 'hooks', 'post-checkout'), `#!/bin/sh\n${touch('hook')}\n`, { mode: 0o755 });
+  const marks = ['fsmonitor', 'filter', 'hook', 'home', 'submodule'];
+  // A codex agent writes its HOME, so after launch it can swap the linked
+  // ~/.gitconfig for one that names a driver the scan never saw.
+  const homeConfig = `const fs = require('node:fs'); const f = require('node:path').join(require('node:os').homedir(), '.gitconfig');
+fs.rmSync(f, { force: true }); fs.writeFileSync(f, ${JSON.stringify(`[filter "home"]
+	clean = ${touch('home')}; cat
+`)});`;
+  // A nested repository is writable even when the shared git config is not.
+  // Plant its driver after launch, beyond the harness's initial config scan.
+  const subConfig = `const fs = require('node:fs');
+fs.appendFileSync(${JSON.stringify(path.join(sub, '.git', 'config'))}, ${JSON.stringify(`[filter "nested"]
+	clean = ${touch('submodule')}; cat
+`)});
+fs.writeFileSync(${JSON.stringify(path.join(sub, '.gitattributes'))}, 'f.txt filter=nested\\n');
+fs.writeFileSync(${JSON.stringify(path.join(sub, 'f.txt'))}, 'two\\n');`;
+  // A command the agent runs, as its sandbox marks it: the repository's hooks
+  // run there, and background gc stays off.
+  const agent = path.join(h.base, 'agent.json');
+  const inSandbox = `const cp = require('node:child_process'); const fs = require('node:fs');
+const env = { ...process.env, SANDBOX_RUNTIME: '1' };
+cp.execFileSync('git', ['checkout', '-q', '-b', 'probe-agent'], { env });
+cp.execFileSync('git', ['status', '--porcelain'], { env });
+const gc = cp.execFileSync('git', ['config', 'gc.auto'], { env, encoding: 'utf8' }).trim();
+fs.writeFileSync(${JSON.stringify(agent)}, JSON.stringify({ hook: fs.existsSync(${JSON.stringify(mark('hook'))}), submodule: fs.existsSync(${JSON.stringify(mark('submodule'))}), gc }));`;
+  for (const harness of ['claude', 'codex']) {
+    for (const m of marks) fs.rmSync(mark(m), { force: true });
+    // Same size, so status must hash the content through the clean filter.
+    for (const f of ['f.txt', 'g.txt']) fs.writeFileSync(path.join(wt, f), harness === 'claude' ? 'two\n' : 'six\n');
+    isolated(h, 'hard', harness);
+    const run = [[process.execPath, '-e', homeConfig], [process.execPath, '-e', subConfig], ['git', 'status', '--porcelain'], ['git', 'checkout', '-q', '-b', `probe-${harness}`], ['git', 'checkout', '-q', '-']];
+    // Like the owner's own session, with no GIT_CONFIG_GLOBAL of its own.
+    spawn(h, u, 'hard', { STUB_RUN: JSON.stringify(run), GIT_CONFIG_GLOBAL: undefined });
+    const seen = u.report();
+    for (const r of seen.ran) assert.equal(r.code, 0, `${harness}: ${r.argv.join(' ')}: ${r.stderr}`);
+    assert.deepEqual(marks.filter((m) => fs.existsSync(mark(m))), [], `${harness}: the harness's git ran a planted command`);
+    spawn(h, u, 'hard', { STUB_RUN: JSON.stringify([[process.execPath, '-e', inSandbox]]) });
+    assert.equal(u.report().ran[0].code, 0, u.report().ran[0].stderr);
+    assert.deepEqual(JSON.parse(fs.readFileSync(agent, 'utf8')), { hook: true, submodule: true, gc: '0' }, harness);
+    h.git(['checkout', '-q', '-'], wt);
+    for (const b of [`probe-${harness}`, 'probe-agent']) h.git(['branch', '-D', b], wt);
   }
 });
 
@@ -1918,8 +2090,14 @@ test('worker and reviewer sandboxes write a cache of their own, never the user c
       for (const w of writes) {
         for (const p of forbidden) assert.ok(!contains(w, p), `${seen.harness} ${rung}: ${w} grants a write on ${p}`);
       }
-      const own = writes.filter((w) => contains(root, w));
+      // Besides it, codex and claude write their temp directory, which is the
+      // short tc/<12 hex> under the cache root when tmp in the cache is too
+      // long (codexTmp, claudeTmp).
+      const own = writes.filter((w) => contains(root, w) && w !== seen.tmpdir);
       assert.equal(own.length, 1, `${seen.harness} ${rung}: one directory under the cache root: ${JSON.stringify(own)}`);
+      if (writes.includes(seen.tmpdir) && !contains(own[0], seen.tmpdir)) {
+        assert.match(seen.tmpdir, /[\\/]tc[\\/][0-9a-f]{12}$/, `${seen.harness} ${rung}: the temp directory is its own`);
+      }
       assert.ok(contains(path.join(fs.realpathSync(root), 'tower-crane', rung === 'review' ? 'agents' : 'tasks'), own[0]) && path.basename(own[0]) === (rung === 'review' ? started.agent : 'T1'), own[0]);
       assert.ok(fs.statSync(own[0]).isDirectory(), 'the granted cache exists');
       assert.deepEqual(JSON.parse(seen.ran[0].stderr), [own[0], ...['go-build', 'go-mod', 'npm'].map((d) => path.join(own[0], d))], `${seen.harness} ${rung}: tool caches point at the agent cache`);
@@ -1936,7 +2114,9 @@ test('a spawn from a supervisor running in another agent\'s env gets a cache of 
   const inherited = path.join(root, 'tower-crane', 'agents', '22cd04e4ddaf', 'worker-T93-6');
   spawn(h, u, 'hard', { XDG_CACHE_HOME: inherited });
   const real = fs.realpathSync(root);
-  const own = u.report().settings.sandbox.filesystem.allowWrite.filter((w) => w === real || w.startsWith(real + path.sep));
+  const seen = u.report();
+  // Besides it, claude writes its own temp directory (claudeTmp).
+  const own = seen.settings.sandbox.filesystem.allowWrite.filter((w) => (w === real || w.startsWith(real + path.sep)) && w !== seen.tmpdir);
   assert.equal(own.length, 1, `one directory under the cache root: ${JSON.stringify(own)}`);
   // Worker scratch is keyed by task, whatever the inherited agent cache was.
   assert.equal(path.dirname(path.dirname(own[0])), path.join(real, 'tower-crane', 'tasks'), own[0]);
@@ -1992,12 +2172,10 @@ test('cancel removes worker task scratch with read-only module trees alongside t
   t.after(() => {
     for (const p of [path.dirname(mod), mod]) try { fs.chmodSync(p, 0o700); } catch {}
   });
-  // setup plants an untracked local settings file; retirement must keep dirty worktrees and their scratch.
+  const settings = fs.readFileSync(path.join(wt, '.claude', 'settings.local.json'), 'utf8');
   h.ok(['task', 'update', 'T1', '--status', 'cancelled'], { env: u.env });
-  assert.ok(fs.existsSync(wt));
-  assert.ok(fs.existsSync(cache));
-  fs.rmSync(path.join(wt, '.claude', 'settings.local.json'));
-  h.ok(['task', 'update', 'T1', '--status', 'cancelled'], { env: u.env });
+  const saved = h.json(['task', 'show', 'T1']).worktree.saved;
+  assert.equal(fs.readFileSync(path.join(saved, 'files', '.claude', 'settings.local.json'), 'utf8'), settings);
   assert.ok(!fs.existsSync(wt));
   assert.ok(!fs.existsSync(cache), `${first.agent}'s task scratch is removed`);
   assert.equal(h.json(['task', 'show', 'T1']).scratch, undefined);
@@ -2006,7 +2184,7 @@ test('cancel removes worker task scratch with read-only module trees alongside t
 test('a live spawn keeps its git, gh, hooks and policy on its recorded tool after a checkout upgrade', { skip: NO_STUBS }, (t) => {
   const { h, u, wt } = setup(t);
   isolated(h, 'medium', 'codex');
-  h.git(['remote', 'add', 'origin', 'https://github.com/acme/app.git']);
+  h.git(['remote', 'set-url', 'origin', 'https://github.com/acme/app.git']);
   const checkout = path.join(h.base, 'tool-checkout');
   for (const name of ['bin', 'lib', 'agents', 'skills', 'standards', 'package.json']) {
     fs.cpSync(path.join(ROOT, name), path.join(checkout, name), { recursive: true });
@@ -2016,14 +2194,17 @@ test('a live spawn keeps its git, gh, hooks and policy on its recorded tool afte
   h.git(['commit', '-qm', 'stub tool version'], checkout);
   const toolSha = h.git(['rev-parse', 'HEAD'], checkout);
   const pushed = path.join(h.base, 'pushed.json');
+  // The broker's git, on the host, reaches GitHub: the fixture records its
+  // push and answers its fetch of the remote's branches with none.
   fs.writeFileSync(path.join(h.base, 'bin', 'git'), `#!${process.execPath}
 const fs = require('node:fs');
 const cp = require('node:child_process');
 const args = process.argv.slice(2);
-if (args[0] === 'push') {
-  fs.writeFileSync(${JSON.stringify(pushed)}, JSON.stringify(args));
+if (args[2] === 'push') {
+  fs.writeFileSync(${JSON.stringify(pushed)}, JSON.stringify(args.slice(2)));
   process.exit(0);
 }
+if (args[2] === 'fetch') process.exit(0);
 const r = cp.spawnSync('git', args, { env: { ...process.env, PATH: ${JSON.stringify(process.env.PATH)} }, stdio: 'inherit' });
 process.exit(r.status ?? 1);
 `, { mode: 0o755 });
@@ -2057,7 +2238,7 @@ for (const [command, args, opts] of calls) {
   const result = cp.spawnSync(process.execPath, [
     path.join(checkout, 'bin', 'tower-crane.js'), 'spawn', '--task', 'T1', '--wait', '--json',
   ], {
-    cwd: h.repo, encoding: 'utf8', timeout: 60000,
+    cwd: h.repo, encoding: 'utf8', timeout: 300000,
     env: { ...u.env, STUB_RUN: JSON.stringify([
       [process.execPath, '-e', upgrade],
       ['git', 'push', '-u', 'origin', `HEAD:refs/heads/${branch}`],
@@ -2066,7 +2247,8 @@ for (const [command, args, opts] of calls) {
     ]) },
   });
   assert.equal(result.status, 0, result.stderr);
-  assert.deepEqual(u.report().ran.map((r) => [r.code, r.stderr]), [[0, ''], [0, ''], [0, ''], [0, '']]);
+  assert.deepEqual(u.report().ran.map((r) => [r.code, r.stderr]), [[0, ''],
+    [0, `tower-crane: the broker pushes ${h.git(['rev-parse', 'HEAD'], wt).slice(0, 12)} to ${branch} on https://github.com/acme/app.git\n`], [0, ''], [0, '']]);
   const started = JSON.parse(result.stdout);
   assert.equal(started.tool.sha, toolSha);
   assert.notEqual(h.git(['rev-parse', 'HEAD'], checkout), toolSha);
@@ -2074,24 +2256,47 @@ for (const [command, args, opts] of calls) {
   assert.equal(started.tool.path, path.join(home, 'tool'));
   assert.deepEqual(JSON.parse(fs.readFileSync(path.join(home, 'tool.json'), 'utf8')), started.tool);
   assert.deepEqual(JSON.parse(fs.readFileSync(pushed, 'utf8')), [
-    'push', '--no-follow-tags', '--recurse-submodules=no', '-u', 'origin', `HEAD:refs/heads/${branch}`,
+    'push', '--progress', '--no-verify', '--no-follow-tags', '--recurse-submodules=no', 'https://github.com/acme/app.git', `${h.git(['rev-parse', 'HEAD'], wt)}:refs/heads/${branch}`,
   ]);
-  const policy = JSON.parse(fs.readFileSync(path.join(home, 'policy.json'), 'utf8'));
+  // A sandboxed codex agent runs the shims in its HOME, with a copy of the
+  // snapshot's lib; its sandbox hides hook.json, so they record no hook event.
+  const shims = path.join(home, 'home', '.tower-crane-shims');
+  const policy = JSON.parse(fs.readFileSync(path.join(shims, 'policy.json'), 'utf8'));
   assert.equal(policy.branch, branch);
   assert.equal(policy.repo, 'acme/app');
+  assert.equal(policy.hook, null);
+  assert.ok(fs.readFileSync(path.join(shims, 'bin', 'git'), 'utf8').includes(path.join(shims, 'lib', 'shim.js')), 'the git shim runs the copy');
+  assert.equal(fs.readFileSync(path.join(shims, 'lib', 'shim.js'), 'utf8'), fs.readFileSync(path.join(ROOT, 'lib', 'shim.js'), 'utf8'));
   const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
   assert.equal(events.find((e) => e.cmd === 'spawn').detail.tool.sha, toolSha);
-  for (const cmd of ['hook git-push', 'hook pr-created', 'hook report']) {
-    assert.ok(events.some((e) => e.cmd === cmd && e.agent === started.agent), cmd);
+  assert.ok(events.some((e) => e.cmd === 'hook report' && e.agent === started.agent), 'hook report');
+  for (const cmd of ['hook git-push', 'hook pr-created']) {
+    assert.ok(!events.some((e) => e.cmd === cmd && e.agent === started.agent), cmd);
   }
   assert.match(fs.readFileSync(S.progressFile(h.state, started.agent), 'utf8'), /"cmd":"hook progress"/);
+});
+
+test('a claude sandboxed worker has policy masks, so its shim plumbs merges of the paths the sandbox masks', { skip: NO_STUBS }, (t) => {
+  const { h, u } = setup(t);
+  isolated(h, 'medium', 'claude');
+  spawn(h, u, 'medium');
+  const policy = JSON.parse(fs.readFileSync(path.join(h.state, 'homes', 'worker-T1-1', 'policy.json'), 'utf8'));
+  assert.equal(policy.masks, true);
+});
+
+test('a codex sandboxed worker has no policy masks: the mask list is claude\'s', { skip: NO_STUBS }, (t) => {
+  const { h, u } = setup(t);
+  isolated(h, 'medium', 'codex');
+  spawn(h, u, 'medium');
+  const policy = JSON.parse(fs.readFileSync(path.join(h.state, 'homes', 'worker-T1-1', 'policy.json'), 'utf8'));
+  assert.equal(policy.masks, false);
 });
 
 test('the shim migrates a pre-T112 policy using recorded state and refuses unbound migrations', { skip: NO_STUBS }, (t) => {
   const { h, u, wt } = setup(t);
   isolated(h, 'medium', 'codex');
   spawn(h, u, 'medium');
-  h.git(['remote', 'add', 'origin', 'https://github.com/acme/app.git']);
+  h.git(['remote', 'set-url', 'origin', 'https://github.com/acme/app.git']);
   const home = path.join(h.state, 'homes', 'worker-T1-1');
   // Generated by policy() and worker frontmatter at e034a4325677ada9d0752a1acee60483acfd8849, the parent of T112.
   const historical = fs.readFileSync(path.join(__dirname, 'fixtures', 'policy-pre-T112.json'), 'utf8').replace('@HOME@/hook.json', path.join(home, 'hook.json').replaceAll('\\', '\\\\'));
@@ -2102,7 +2307,7 @@ test('the shim migrates a pre-T112 policy using recorded state and refuses unbou
     ...u.env, PATH: `${path.join(home, 'bin')}${path.delimiter}${u.env.PATH}`,
     TOWER_CRANE_STATE: h.state, TOWER_CRANE_TASK: 'T1', TOWER_CRANE_AGENT: 'worker-T1-1',
   };
-  const run = (args, extra = {}) => cp.spawnSync('git', args, { cwd: wt, env: { ...env, ...extra }, encoding: 'utf8', timeout: 10000 });
+  const run = (args, extra = {}) => cp.spawnSync('git', args, { cwd: wt, env: { ...env, ...extra }, encoding: 'utf8', timeout: 300000 });
   const allowed = run(['push', '-u', 'origin', `HEAD:refs/heads/${branch}`]);
   assert.equal(allowed.status, 1, allowed.stderr);
   assert.match(allowed.stderr, /fixture remote unavailable/);
@@ -2134,12 +2339,12 @@ test('the shim migrates a pre-T112 policy using recorded state and refuses unbou
   const remote = run(['push', '-u', 'origin', `HEAD:refs/heads/${branch}`]);
   assert.equal(remote.status, 126);
   assert.match(remote.stderr, /git push outside the recorded origin repository/);
-  const read = cp.spawnSync('gh', ['pr', 'view'], { cwd: wt, env, encoding: 'utf8', timeout: 10000 });
+  const read = cp.spawnSync('gh', ['pr', 'view'], { cwd: wt, env, encoding: 'utf8', timeout: 300000 });
   assert.notEqual(read.status, 126, read.stderr);
   assert.doesNotMatch(read.stderr, /tower-crane:/);
   fs.writeFileSync(policyFile, '{}\n');
   assert.equal(run(['push', '-u', 'origin', `HEAD:refs/heads/${branch}`]).status, 126, 'missing permissions default to deny');
-  const gh = cp.spawnSync('gh', ['pr', 'create'], { cwd: wt, env, encoding: 'utf8', timeout: 10000 });
+  const gh = cp.spawnSync('gh', ['pr', 'create'], { cwd: wt, env, encoding: 'utf8', timeout: 300000 });
   assert.equal(gh.status, 126, gh.stderr);
 });
 
@@ -2151,7 +2356,7 @@ test('git and gh allow git commands, local pushes and the role\'s own writes, an
   h.git(['init', '-q', '--bare', local]);
   // A remote on another machine; nothing listens there, so a push the shim
   // lets through fails in git itself, not with the shim's 126.
-  h.git(['remote', 'add', 'origin', 'https://github.com/acme/app.git']);
+  h.git(['remote', 'set-url', 'origin', 'https://github.com/acme/app.git']);
   const NET = 'net';
   const cases = [
     [['git', 'status'], 0, 0],
@@ -2224,13 +2429,115 @@ test('git and gh allow git commands, local pushes and the role\'s own writes, an
   }
 });
 
+// What codex's Linux sandbox shows of a path under a permission profile, as
+// measured with codex-cli 0.162.1 and as codex-rs/linux-sandbox/src/bwrap.rs
+// builds it: every readable path is mounted, then each hidden directory is
+// masked, then each writable path is bound with the readable paths inside it.
+// So a readable path inside a hidden one stays hidden in any rule order, and
+// a writable path inside one shows with what it holds.
+function codexShows(rules, p) {
+  const deepest = (mode) => Object.keys(rules)
+    .filter((q) => !q.startsWith(':') && rules[q] === mode && (p === q || p.startsWith(q + path.sep)))
+    .sort((a, b) => b.length - a.length)[0];
+  const [hidden, writable] = [deepest('none'), deepest('write')];
+  if (writable && (!hidden || writable.length > hidden.length)) return true;
+  return !hidden && Boolean(deepest('read'));
+}
+
+// claude's sandbox mounts each denied directory empty, shallowest first, and
+// remounts the allowed paths inside it.
+function claudeShows(fsRules, p) {
+  const deepest = (list) => (list || []).filter((q) => p === q || p.startsWith(q + path.sep)).sort((a, b) => b.length - a.length)[0];
+  const [denied, allowed] = [deepest(fsRules.denyRead), deepest(fsRules.allowRead)];
+  return !denied || Boolean(allowed && allowed.length > denied.length);
+}
+
+// Found 2026-10-14: codex agents ran the host's git and gh, since the codex
+// profile hid homes/ and the shims in homes/<agent>/bin with it. Every
+// harness's agent finds its shims first on PATH, and a sandboxed one's
+// sandbox shows them. The stubs run outside any sandbox, so the sandbox check
+// models each one's mount order (codexShows, claudeShows); the live probes in
+// live-sandbox.test.js are the evidence from the real sandboxes. Each shim
+// runs in a project whose package.json says "type": "module", and with
+// NODE_OPTIONS asking node to require a file first: the shim still runs as
+// CommonJS and never loads the file.
+test('for every harness the first git and gh on the agent\'s PATH are its shims, and claude and codex sandboxes show them', { skip: NO_STUBS }, (t) => {
+  const { h, u } = setup(t);
+  fs.writeFileSync(path.join(h.repo, 'package.json'), '{"type":"module"}\n');
+  h.git(['add', 'package.json']);
+  h.git(['commit', '-q', '-m', 'an ES module project']);
+  const injected = path.join(h.base, 'injected');
+  const evil = path.join(h.base, 'evil.cjs');
+  fs.writeFileSync(evil, `require('node:fs').writeFileSync(${JSON.stringify(injected)}, process.argv.join(' '));\n`);
+  const probe = path.join(h.base, 'probe');
+  fs.mkdirSync(probe);
+  const script = path.join(probe, 'probe.js');
+  fs.writeFileSync(script, `
+const fs = require('node:fs');
+const path = require('node:path');
+const which = (tool) => String(process.env.PATH || '').split(path.delimiter).filter(Boolean)
+  .map((dir) => path.join(dir, tool)).find((f) => { try { fs.accessSync(f, fs.constants.X_OK); return fs.statSync(f).isFile(); } catch { return false; } }) || null;
+const seen = { git: which('git'), gh: which('gh'), home: process.env.CODEX_HOME || process.env.CLAUDE_CONFIG_DIR || null };
+for (const tool of ['git', 'gh']) seen[tool + 'Text'] = seen[tool] ? fs.readFileSync(seen[tool], 'utf8').slice(0, 4096) : null;
+fs.writeFileSync(process.env.PROBE_OUT, JSON.stringify(seen));
+if (path.basename(process.argv[1]) === 'codex') process.stdout.write(JSON.stringify({ type: 'thread.started', thread_id: 'probe' }) + '\\n');
+`);
+  for (const name of ['claude', 'codex', 'opencode', 'agy', 'pi']) {
+    fs.writeFileSync(path.join(probe, name), `#!${process.execPath}\nrequire(${JSON.stringify(script)});\n`, { mode: 0o755 });
+  }
+  const out = path.join(h.base, 'probe.json');
+  const env = { ...u.env, PATH: `${probe}${path.delimiter}${u.env.PATH}`, PROBE_OUT: out };
+  const rungs = {
+    claude: ['--harness', 'claude', '--model', 'probe'],
+    codex: ['--harness', 'codex', '--model', 'probe'],
+    opencode: ['--harness', 'opencode', '--model', 'fixture/probe'],
+    agy: ['--harness', 'agy', '--model', 'gemini-3-pro'],
+    pi: ['--harness', 'pi', '--model', 'probe'],
+    command: ['--harness', 'command', '--clear', 'model', '--command', JSON.stringify([process.execPath, script, '{prompt}'])],
+  };
+  for (const [harness, args] of Object.entries(rungs)) {
+    h.ok(['ladder', 'set', 'small', ...args, '--clear', 'profile', '--clear', 'effort', '--clear', 'args']);
+    fs.rmSync(out, { force: true });
+    const r = h.run(['spawn', '--role', 'small', '--task', 'T1', '--wait'], { env });
+    assert.equal(r.code, 0, `${harness}: ${r.stderr}`);
+    const seen = JSON.parse(fs.readFileSync(out, 'utf8'));
+    for (const tool of ['git', 'gh']) {
+      assert.ok(seen[tool] && seen[tool].startsWith(path.join(h.state, 'homes') + path.sep), `${harness}: the first ${tool} on PATH is ${seen[tool]}`);
+      assert.match(seen[`${tool}Text`], /shim\.js/, `${harness}: ${seen[tool]} runs the shim`);
+      const policy = /'([^']*policy\.json)'/.exec(seen[`${tool}Text`])?.[1];
+      assert.ok(policy && fs.existsSync(policy), `${harness}: ${tool} names its policy`);
+    }
+    assert.equal(path.dirname(seen.git), path.dirname(seen.gh));
+    const bin = path.dirname(seen.git);
+    for (const tool of ['git', 'gh']) {
+      const ran = cp.spawnSync(path.join(bin, tool), tool === 'git' ? ['version'] : ['auth', 'status'], { cwd: h.repo, encoding: 'utf8',
+        env: { ...env, NODE_OPTIONS: `--require=${evil}`, NODE_PATH: path.join(h.base, 'planted-modules') } });
+      assert.doesNotMatch(String(ran.stderr), /require is not defined|ERR_REQUIRE|ES module/, `${harness}: ${tool} runs as CommonJS`);
+      if (tool === 'git') assert.equal(ran.status, 0, `${harness}: git version through the shim: ${ran.stderr}`);
+      assert.equal(fs.existsSync(injected), false, `${harness}: ${tool} loaded NODE_OPTIONS's file`);
+    }
+    if (harness === 'codex') {
+      const rules = TOML.parse(fs.readFileSync(path.join(seen.home, 'config.toml'), 'utf8')).permissions['tower-crane'].filesystem;
+      for (const p of [bin, path.join(bin, 'git'), path.join(path.dirname(bin), 'policy.json'), path.join(path.dirname(bin), 'lib', 'shim.js')]) {
+        assert.ok(codexShows(rules, fs.realpathSync(p)), `codex shows ${p}`);
+      }
+      assert.ok(!codexShows(rules, fs.realpathSync(path.join(h.state, 'homes'))), 'codex hides homes/');
+      assert.ok(!codexShows(rules, fs.realpathSync(path.join(seen.home, 'config.toml'))), 'codex hides the rest of the agent home');
+    }
+    if (harness === 'claude') {
+      const fsRules = JSON.parse(fs.readFileSync(path.join(seen.home, 'settings.json'), 'utf8')).sandbox.filesystem;
+      for (const p of [path.join(bin, 'git'), path.join(path.dirname(bin), 'policy.json')]) assert.ok(claudeShows(fsRules, fs.realpathSync(p)), `claude shows ${p}`);
+    }
+  }
+});
+
 test('remote pushes publish only the task branch, including configured and implicit destinations', (t) => {
   const h = makeRepo(t);
   h.init(['--repo', 'acme/app']);
   h.ok(['task', 'add', '--title', 'Publish', '--acceptance', 'only this branch']);
   const { path: wt, branch } = h.json(['worktree', 'T1']);
   const own = `refs/heads/${branch}`;
-  h.git(['remote', 'add', 'origin', 'https://github.com/acme/app.git']);
+  h.git(['remote', 'set-url', 'origin', 'https://github.com/acme/app.git']);
   h.git(['remote', 'add', 'elsewhere', 'https://github.com/acme/app.git']);
   h.git(['config', `branch.${branch}.remote`, 'origin']);
   h.git(['config', `branch.${branch}.merge`, own]);
@@ -2326,7 +2633,7 @@ test('push destinations are qualified with the recorded task branch without sheb
   h.init(['--repo', 'acme/app']);
   h.ok(['task', 'add', '--title', 'Publish', '--acceptance', 'only this branch']);
   const { path: wt, branch } = h.json(['worktree', 'T1']);
-  h.git(['remote', 'add', 'origin', 'https://github.com/acme/app.git']);
+  h.git(['remote', 'set-url', 'origin', 'https://github.com/acme/app.git']);
   const script = `
 const { gitDenied } = require(process.argv[1]);
 const cp = require('node:child_process');
@@ -2362,7 +2669,11 @@ test('an isolated Codex worker can publish its task branch with an allow rule an
   const { h, u, wt } = setup(t);
   const remote = path.join(h.base, 'publish.git');
   h.git(['init', '-q', '--bare', remote]);
-  h.git(['remote', 'add', 'origin', remote]);
+  // origin is the recorded GitHub repository; the user's own git config
+  // rewrites it to the bare repository here, as the user's credentials would
+  // reach GitHub. The broker pushes with the user's config.
+  h.git(['remote', 'set-url', 'origin', 'https://github.com/acme/app.git']);
+  fs.appendFileSync(u.env.GIT_CONFIG_GLOBAL, `[url "${remote}"]\n\tinsteadOf = https://github.com/acme/app.git\n`);
   const branch = h.git(['branch', '--show-current'], wt);
   isolated(h, 'hard', 'codex');
   spawn(h, u, 'hard', { STUB_RUN: JSON.stringify([
@@ -2372,7 +2683,8 @@ test('an isolated Codex worker can publish its task branch with an allow rule an
   const seen = u.report();
   assert.match(seen.rules.join('\n'), /pattern = \["git", "push"\],\n {4}decision = "allow"/);
   assert.match(seen.rules.join('\n'), /pattern = \["git", "push", "--force"\],\n {4}decision = "forbidden"/);
-  assert.deepEqual(seen.ran.map((r) => r.code), [0, 126]);
+  assert.deepEqual(seen.ran.map((r) => r.code), [0, 126], JSON.stringify(seen.ran.map((r) => r.stderr)));
+  assert.match(seen.ran[0].stderr, /the broker pushes/);
   assert.equal(h.git(['--git-dir', remote, 'rev-parse', `refs/heads/${branch}`]), h.git(['rev-parse', 'HEAD'], wt));
   spawn(h, u, 'review');
   assert.doesNotMatch(u.report().rules.join('\n'), /decision = "allow"/);
@@ -2515,7 +2827,7 @@ test('a sandboxed agent changes the state only through its spawn\'s broker: as i
   assert.deepEqual(events.filter((e) => e.cmd === 'hook report').map((e) => e.detail.report), noted.map(() => 'hooked'), 'the hook payload came through stdin');
 });
 
-test('a brokered command still running when its agent exits is killed, and spawn --wait returns', { skip: NO_STUBS, timeout: 120000 }, async (t) => {
+test('a brokered command still running when its agent exits is killed, and spawn --wait returns', { skip: NO_STUBS, timeout: 300000 }, async (t) => {
   const { h, u } = setup(t);
   // Stands in for a slow brokered command: preloaded into every node process
   // the spawn starts, it holds only the CLI the broker runs for the note
@@ -2531,10 +2843,10 @@ if (process.env.TOWER_CRANE_VIA === 'broker' && process.argv.includes('late')) {
     const pidFile = path.join(h.base, `${harness}-late.pid`);
     // The agent leaves the note waiting in the background and exits once the
     // broker is running it.
-    const background = `const cp=require("child_process"),f=require("fs");cp.spawn(process.execPath,${JSON.stringify([BIN, 'task', 'note', 'T1', 'late'])},{detached:true,stdio:"ignore"}).unref();const end=Date.now()+30000;while(!f.existsSync(${JSON.stringify(pidFile)})&&Date.now()<end)Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,50)`;
+    const background = `const cp=require("child_process"),f=require("fs");cp.spawn(process.execPath,${JSON.stringify([BIN, 'task', 'note', 'T1', 'late'])},{detached:true,stdio:"ignore"}).unref();const end=Date.now()+300000;while(!f.existsSync(${JSON.stringify(pidFile)})&&Date.now()<end)Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,50)`;
     let pid = null;
     t.after(() => {
-      if (pid && detachedAlive({ pid })) process.kill(pid, 'SIGKILL');
+      if (pid && detachedAlive({ pid })) killPid(pid, 'SIGKILL');
     });
     isolated(h, 'hard', harness);
     const run = [[process.execPath, BIN, 'task', 'note', 'T1', 'early'], [process.execPath, '-e', background]];
@@ -2543,12 +2855,11 @@ if (process.env.TOWER_CRANE_VIA === 'broker' && process.argv.includes('late')) {
     releaseExited(h);
     const r = await h.runAsync(['spawn', '--role', 'hard', '--task', 'T1', '--wait', '--json'], { env });
     assert.equal(r.code, 0, r.stderr);
-    assert.ok(Date.now() - started < 60000, `${harness}: spawn --wait returned`);
+    assert.ok(Date.now() - started < 60000, `${harness}: spawn --wait returned`); // wait-allow: verify broker shutdown stops a held subprocess promptly
     assert.deepEqual(u.report().ran.map((x) => x.code), [0, 0], JSON.stringify(u.report().ran.map((x) => x.stderr)));
     assert.ok(fs.existsSync(pidFile), `${harness}: the broker ran the late note`);
     pid = Number(fs.readFileSync(pidFile, 'utf8'));
-    const deadline = Date.now() + 10000;
-    while (detachedAlive({ pid }) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 50));
+    await waitUntil(() => !detachedAlive({ pid }), { signal: t.signal });
     assert.ok(!detachedAlive({ pid }), `${harness}: the brokered command stopped with the broker`);
   }
   const notes = h.readState('tasks.json').tasks[0].notes.map((n) => n.text).filter((text) => ['early', 'late'].includes(text));
@@ -2563,20 +2874,96 @@ test('a sandboxed role cannot write the state directory itself', () => {
   for (const job of ['worker', 'researcher', 'reviewer', 'small']) assert.ok(!A.load(job).writeOutside.includes('state'), job);
 });
 
-test('a gh token in the spawning environment passes through, and the keyring is asked only without one', { skip: NO_STUBS }, (t) => {
+test('a sandboxed role cannot write the worktrees root, which holds the admin directories', () => {
+  const text = fs.readFileSync(A.file('worker'), 'utf8').replace(/^writeOutside:(\r?\n)/m, 'writeOutside:$1  - worktrees$1');
+  assert.match(text, /- worktrees/);
+  assert.throws(() => A.parse(text, 'worker.md'), /worktrees needs sandbox: false/);
+  for (const job of ['worker', 'researcher', 'reviewer', 'small']) assert.ok(!A.load(job).writeOutside.includes('worktrees'), job);
+  assert.ok(A.load('orchestrator').writeOutside.includes('worktrees') && !A.load('orchestrator').sandbox);
+});
+
+// A project's sandbox.write would reopen the worktree lock in the state
+// directory, or every admin directory in the worktrees root.
+test('spawn refuses a sandbox.write path over the state directory or the worktrees root', { skip: NO_STUBS }, (t) => {
+  const { h, u, wt } = setup(t);
+  const root = path.dirname(wt);
+  const cases = [
+    // Holding the state directory, it holds the agent homes too, which an earlier check names.
+    [h.base, /sandbox\.write path .* holds /],
+    [path.join(h.state, 'worktree'), /is inside the state directory/],
+    [root, /holds the worktrees root/],
+  ];
+  for (const harness of ['claude', 'codex']) {
+    isolated(h, 'hard', harness);
+    for (const [dir, why] of cases) {
+      h.ok(['project', 'set', '--sandbox', JSON.stringify({ write: [dir] })]);
+      const r = h.run(['spawn', '--role', 'hard', '--task', 'T1', '--dry-run'], { env: u.env });
+      assert.notEqual(r.code, 0, `${harness} ${dir}`);
+      assert.match(r.stderr, why, `${harness} ${dir}`);
+    }
+    h.ok(['project', 'set', '--sandbox', JSON.stringify({ write: [path.join(h.base, 'elsewhere')] })]);
+    const r = h.run(['spawn', '--role', 'hard', '--task', 'T1', '--dry-run'], { env: u.env });
+    assert.equal(r.code, 0, `${harness}: ${r.stderr}`);
+  }
+});
+
+// Whether a sandboxed command may write file under the rendered rules. claude
+// writes its working directory, the common directory of a linked worktree and
+// allowWrite, and denyWrite wins over each. codex writes where the nearest
+// rule above the file says write, its workspace root included.
+function commandsWrite(seen, cwd, common, file) {
+  const under = (p, dir) => p === dir || p.startsWith(dir.endsWith(path.sep) ? dir : dir + path.sep);
+  if (seen.harness === 'claude') {
+    const box = seen.settings.sandbox.filesystem;
+    return [cwd, common, ...box.allowWrite].some((p) => under(file, p)) && !box.denyWrite.some((p) => under(file, p));
+  }
+  const profile = seen.config.permissions['tower-crane'].filesystem;
+  const rules = Object.entries(profile).filter(([, access]) => typeof access === 'string')
+    .flatMap(([p, access]) => codexTargets(seen, p).map((target) => [target, access]));
+  rules.push([cwd, profile[':workspace_roots']['.']]);
+  const nearest = rules.filter(([p]) => under(file, p)).sort((a, b) => b[0].length - a[0].length)[0];
+  return nearest?.[1] === 'write';
+}
+
+// The worktree lock (lib/worktree.js underWorktreeLock) moved out of the git
+// directory, which a sandboxed worker writes, to the state directory.
+test('no sandboxed claude or codex role can write the worktree lock, as every worker could write its old place', { skip: NO_STUBS }, (t) => {
+  const { h, u, wt } = setup(t);
+  const real = (p) => fs.realpathSync.native(p);
+  const common = real(path.join(h.repo, '.git'));
+  const lock = path.join(real(h.state), 'worktree', 'lock');
+  const legacy = path.join(common, 'tower-crane-worktree.lock');
+  for (const harness of ['claude', 'codex']) {
+    for (const rung of ['hard', 'review', 'research', 'small']) {
+      isolated(h, rung, harness);
+      spawn(h, u, rung);
+      const seen = u.report();
+      assert.equal(commandsWrite(seen, real(wt), common, lock), false, `${harness} ${rung}: the lock is read-only`);
+      assert.equal(commandsWrite(seen, real(wt), common, path.join(real(path.dirname(wt)), '.git-admin', 'other')), false, `${harness} ${rung}: other admin directories are read-only`);
+      if (rung === 'hard') assert.equal(commandsWrite(seen, real(wt), common, legacy), true, `${harness}: a worker writes the old lock path`);
+    }
+  }
+});
+
+test('a sandboxed agent gets no gh token, from the keyring or the spawning environment, and its gh runs on the host with the user\'s config', { skip: NO_STUBS }, (t) => {
   const { h, u } = setup(t);
   for (const harness of ['claude', 'codex']) {
     isolated(h, 'medium', harness);
     spawn(h, u, 'review');
-    assert.equal(u.report().ghToken, 'stub-gh-token', `${harness}: the keyring's token`);
-    spawn(h, u, 'review', { GH_TOKEN: 'spawner-token' });
-    assert.equal(u.report().ghToken, 'spawner-token', `${harness}: the spawner's own token`);
-    spawn(h, u, 'review', { GITHUB_TOKEN: 'spawner-github-token' });
-    assert.equal(u.report().ghToken, null, `${harness}: GITHUB_TOKEN is left for gh to read`);
+    assert.equal(u.report().ghToken, null, `${harness}: no token from the keyring`);
+    for (const name of ['GH_TOKEN', 'GITHUB_TOKEN', 'GH_ENTERPRISE_TOKEN', 'GITHUB_ENTERPRISE_TOKEN']) {
+      spawn(h, u, 'review', { [name]: 'spawner-token' });
+      assert.deepEqual(u.report().tokens, [], `${harness}: no ${name} from the spawner`);
+    }
+    // Nor from the project's env, which the owner sets for every agent.
+    h.ok(['project', 'set', '--env', JSON.stringify({ GH_TOKEN: 'project-token' })]);
+    spawn(h, u, 'review');
+    assert.deepEqual(u.report().tokens, [], `${harness}: no token from the project env`);
+    h.ok(['project', 'set', '--env', '{}']);
   }
 });
 
-test('sandboxed gh uses its handed token when the user selects a custom config directory', { skip: NO_STUBS }, (t) => {
+test('sandboxed gh runs on the host with the user\'s custom config directory, which the agent cannot read', { skip: NO_STUBS }, (t) => {
   const { h, u } = setup(t);
   const custom = path.join(u.home, 'custom-config');
   fs.mkdirSync(path.join(custom, 'gh'), { recursive: true });
@@ -2584,16 +2971,9 @@ test('sandboxed gh uses its handed token when the user selects a custom config d
 const path = require('node:path');
 const env = process.env;
 const config = env.GH_CONFIG_DIR || path.join(env.XDG_CONFIG_HOME || path.join(env.HOME, '.config'), 'gh');
-if (process.argv[2] === 'auth' && process.argv[3] === 'token') {
-  if (!config.startsWith(${JSON.stringify(custom)} + path.sep)) process.exit(1);
-  console.log('stub-gh-token');
-} else {
-  if (config.startsWith(${JSON.stringify(custom)} + path.sep)) {
-    process.stderr.write('permission denied reading gh config');
-    process.exit(1);
-  }
-  if (env.GH_TOKEN !== 'stub-gh-token') process.exit(1);
-  if (config !== path.join(env.HOME, '.config', 'gh')) process.exit(1);
+if (!config.startsWith(${JSON.stringify(custom)} + path.sep) || env.GH_TOKEN) {
+  process.stderr.write('not the gh login of the user');
+  process.exit(1);
 }
 `);
   for (const harness of ['claude', 'codex']) {
@@ -2602,10 +2982,8 @@ if (process.argv[2] === 'auth' && process.argv[3] === 'token') {
       spawn(h, u, 'hard', { ...customEnv, STUB_RUN: JSON.stringify([['gh', 'pr', 'view', '1']]) });
       const seen = u.report();
       assert.equal(seen.ran[0].code, 0, `${harness}: ${seen.ran[0].stderr}`);
-      assert.equal(seen.ghToken, 'stub-gh-token', 'the parent reads the token from the original config');
-      const hidden = harness === 'claude' ? seen.settings.sandbox.filesystem.denyRead
-        : Object.keys(seen.config.permissions['tower-crane'].filesystem).filter((p) => seen.config.permissions['tower-crane'].filesystem[p] === 'none');
-      assert.ok(hidden.includes(path.join(custom, 'gh')), `${harness}: the original gh config stays hidden`);
+      assert.equal(seen.ghToken, null, `${harness}: the agent holds no token`);
+      assert.equal(commandsRead(seen, path.join(custom, 'gh')), false, `${harness}: the original gh config stays hidden`);
     }
   }
 });
@@ -2677,7 +3055,7 @@ test('a spawn started inside another agent links to the user\'s own files, so re
   const inside = { CLAUDE_CONFIG_DIR: parent, HOME: path.join(parent, 'home'), USERPROFILE: path.join(parent, 'home') };
   const child = path.join(h.state, 'homes', spawn(h, u, 'small', inside).agent);
   for (const f of ['.credentials.json']) assert.equal(fs.readlinkSync(path.join(child, f)), path.join(u.home, '.claude', f), f);
-  assert.equal(fs.readlinkSync(path.join(child, 'home', '.gitconfig')), path.join(u.home, '.gitconfig'));
+  assert.ok(!fs.lstatSync(path.join(child, 'home', '.gitconfig')).isSymbolicLink(), 'git config is the home\'s own file');
   const helper = JSON.parse(fs.readFileSync(path.join(child, 'settings.json'), 'utf8')).apiKeyHelper;
   assert.ok(helper.includes(path.join(u.home, '.claude', 'settings.json')), 'the helper reads the user\'s settings');
   fs.rmSync(parent, { recursive: true, force: true });
@@ -2718,10 +3096,13 @@ test('a rung opts back in to a named tool and MCP server, shown by spawn --dry-r
   const r = h.run(['spawn', '--role', 'small', '--task', 'T1', '--dry-run'], { env: u.env });
   assert.equal(r.code, 1);
   assert.match(r.stderr, /opts in MCP server missing, but .*config\.toml defines no \[mcp_servers\.missing\]/);
-  const pi = h.run(['ladder', 'set', 'small', '--harness', 'pi', '--model', 'x', '--clear', 'profile']);
-  assert.equal(pi.code, 1);
-  assert.match(pi.stderr, /MCP opt-ins are unsupported on pi/);
-  assert.match(pi.stderr, /pi tools must be built-ins/);
+  // Moving to pi drops the codex opt-ins; named on pi, they are refused.
+  const pi = h.ok(['ladder', 'set', 'small', '--harness', 'pi', '--model', 'x', '--clear', 'profile']);
+  assert.match(pi, /^ladder small: moving from codex to pi dropped tools \["web_search","multi_agent"\], mcp \["missing"\], which do not fit pi$/m);
+  const named = h.run(['ladder', 'set', 'small', '--tools', '["web_search"]', '--mcp', '["planted"]']);
+  assert.equal(named.code, 1);
+  assert.match(named.stderr, /MCP opt-ins are unsupported on pi/);
+  assert.match(named.stderr, /pi tools must be built-ins/);
 });
 
 test('only the orchestrator or the owner widens a rung, a command needs the owner, and args hold only allowlisted flags', (t) => {
@@ -2791,4 +3172,46 @@ test('each role has an agent file that states its tools, MCP servers, skills, we
   // The parsed config the codex filter works on survives a round trip.
   const doc = TOML.parse('a = 1\n[b]\nc = { d = [1, "x"] }\n');
   assert.deepEqual(TOML.parse(TOML.stringify(doc)), doc);
+  // Prefixed integers keep their base.
+  assert.deepEqual({ ...TOML.parse('o = 0o17\nx = 0x1F\nb = 0b101\nd = 1_000\n') }, { o: 15, x: 31, b: 5, d: 1000 });
+});
+
+// TOML forbids every control character raw in a basic string but tab, DEL
+// included. A path codex's profile names can hold any of them, and one raw
+// DEL made codex reject the whole config.
+test('TOML strings and keys escape every control character TOML forbids raw, DEL included', () => {
+  const forbidden = /[\x00-\x08\x0a-\x1f\x7f]/;
+  for (let c = 0; c < 0x80; c++) {
+    if (c >= 0x20 && c < 0x7f) continue;
+    const ch = String.fromCharCode(c);
+    const doc = { [`/var/tmp/a${ch}b`]: `v${ch}w` };
+    const text = TOML.stringify({ t: doc });
+    for (const line of text.split('\n')) assert.doesNotMatch(line, forbidden, `U+${c.toString(16).padStart(4, '0')} stays escaped`);
+    assert.deepEqual({ ...TOML.parse(text).t }, doc, `U+${c.toString(16).padStart(4, '0')} reads back`);
+  }
+  assert.throws(() => TOML.stringify({ k: 'a\ud800b' }), /lone surrogate/);
+  assert.deepEqual({ ...TOML.parse(TOML.stringify({ k: 'a\u{1f600}b' })) }, { k: 'a\u{1f600}b' });
+});
+
+// readAround lists the entries of the directories on the way to a runtime
+// directory, and codex binds each again for every command, following a link.
+// An entry stays listed only when nobody but root and the user can swap it.
+test('the codex profile lists an entry beside the runtime directory only when nobody else can turn it into a link', () => {
+  const me = 1000;
+  const st = (uid, mode, link = false) => ({ uid, mode, isSymbolicLink: () => link });
+  const dir = 0o40755, sticky = 0o41777, open = 0o40777, group = 0o40775, file = 0o100644;
+  const cases = [
+    ['root directory, root entry', st(0, dir), st(0, file), true],
+    ['root directory, own entry', st(0, dir), st(me, file), true],
+    ['sticky world-writable directory, own entry', st(0, sticky), st(me, dir), true],
+    ['sticky world-writable directory, root entry', st(0, sticky), st(0, dir), true],
+    ['sticky world-writable directory, another user\'s entry', st(0, sticky), st(1001, dir), false],
+    ['root directory, another user\'s entry', st(0, dir), st(1001, file), false],
+    ['world-writable directory without the sticky bit', st(0, open), st(0, file), false],
+    ['group-writable directory without the sticky bit', st(0, group), st(me, file), false],
+    ['another user\'s directory', st(1001, dir), st(me, file), false],
+    ['a link', st(0, dir), st(me, 0o120777, true), false],
+    ['an unreadable directory', null, st(me, file), false],
+  ];
+  for (const [what, parent, entry, listed] of cases) assert.equal(A.steadyEntry(parent, entry, me), listed, what);
 });

@@ -1,0 +1,1 @@
+- Executor-capacity tests wait for gate evidence and file signals with suite-guarded watchers. The task-add race fixture uses the suite subprocess guard.

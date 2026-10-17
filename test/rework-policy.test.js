@@ -82,6 +82,22 @@ test('only a scope ruling or explicit closed acceptance clears the repeated-revi
   h.ok(['claim', 'T1', '--agent', 'worker']);
 });
 
+test('structured blockers survive rework and trigger the gate without summary locations', (t) => {
+  const h = setup(t);
+  h.ok(['task', 'note', 'T1', 'Replace retry state', '--kind', 'scope-ruling', '--agent', 'orchestrator']);
+  for (const [digit, file] of [['c', './lib/hidden.js'], ['d', 'lib\\hidden.js']]) {
+    h.ok(['claim', 'T1', '--agent', 'worker']);
+    h.ok(['submit', 'T1', '--sha', digit.repeat(40), '--agent', 'worker']);
+    h.ok(['evidence', 'T1', '--type', 'review', '--fail', '--sha', digit.repeat(40),
+      '--revision', h.revision(), '--summary', 'One blocking defect',
+      '--findings', JSON.stringify([{ kind: 'defect', path: file, claim: 'duplicate delivery' }])]);
+    h.ok(['rework', '--from-review', 'T1', '--agent', 'orchestrator']);
+  }
+  const blocked = h.run(['claim', 'T1', '--agent', 'worker']);
+  assert.equal(blocked.code, 1);
+  assert.match(blocked.stderr, /lib\/hidden\.js.*two failed reviews/);
+});
+
 test('blocking areas handle markdown, path variants and follow-ups', () => {
   const cases = [
     ['summary', '2 blockers: lib/retry.js:12 - duplicate; lib/store.js:8 - missing key', ['lib/retry.js', 'lib/store.js']],
@@ -110,6 +126,11 @@ test('blocking areas handle markdown, path variants and follow-ups', () => {
     ['no paths', '2 blocking findings, missing retry guards', []],
   ];
   for (const [name, body, expected] of cases) assert.deepEqual(Reviews.areas(body), expected, name);
+  assert.deepEqual(Reviews.areas('summary cites lib/other.js:2', [
+    { kind: 'defect', path: './lib/retry.js', claim: 'duplicate' },
+    { kind: 'defect', path: 'lib\\retry.js', claim: 'variant' },
+    { kind: 'false-claim', path: 'PR body', claim: 'overstated' },
+  ]), ['PR body', 'lib/retry.js']);
 });
 
 test('review failure counting distinguishes areas, verdicts, revisions and authorized reviewers', () => {
@@ -131,6 +152,11 @@ test('review failure counting distinguishes areas, verdicts, revisions and autho
     ['late old reviews after ruling', [failure('lib/a.js'), failure('lib/a.js', 2)], [], 0, 3],
     ['parsed areas preserved', [failure('lib/a.js', 1, undefined, { areas: ['lib/hidden.js'] }),
       failure('lib/b.js', 2, undefined, { areas: ['lib/hidden.js'] })], ['lib/hidden.js']],
+    ['structured findings preserved', [failure('lib/a.js', 1, undefined, {
+      findings: [{ kind: 'defect', path: './lib/hidden.js', claim: 'one' }],
+    }), failure('lib/b.js', 2, undefined, {
+      findings: [{ kind: 'defect', path: 'lib\\hidden.js', claim: 'two' }],
+    })], ['lib/hidden.js']],
   ];
   for (const [name, evidence, expected, cutoff, revision] of cases) {
     const task = { id: 'T1', evidence };

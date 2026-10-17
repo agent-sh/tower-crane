@@ -7,6 +7,7 @@ const path = require('node:path');
 const cp = require('node:child_process');
 const { cachedFixture, BIN, HOOKS } = require('./helpers');
 const { CHROME, openBrowser, closeBrowser } = require('./browser');
+const { waitOnRepo } = require('./signals');
 
 test.after(closeBrowser);
 
@@ -16,29 +17,12 @@ const recordedSpend = (h) => h.readState('tasks.json').tasks[0].spend;
 const liveEntries = (h) => (recordedSpend(h).entries || []).filter((e) => e.live);
 
 function until(t, h, fn, message, stream) {
-  return new Promise((resolve, reject) => {
-    let done = false;
-    const watchers = [h.state, h.base].map((dir) => fs.watch(dir, check));
-    const abort = () => finish(new Error(message, { cause: t.signal.reason }));
-    function finish(error) {
-      if (done) return;
-      done = true;
-      for (const watcher of watchers) watcher.close();
-      stream?.off('data', check);
-      t.signal.removeEventListener('abort', abort);
-      if (error) reject(error);
-      else resolve();
-    }
-    function check() {
-      if (done) return;
-      try { if (fn()) finish(); }
-      catch (error) { finish(error); }
-    }
-    for (const watcher of watchers) watcher.once('error', finish);
-    stream?.on('data', check);
-    t.signal.addEventListener('abort', abort, { once: true });
-    if (t.signal.aborted) abort();
-    else check();
+  return waitOnRepo(h, fn, message, {
+    signal: t.signal,
+    subscribe: stream && ((probe) => {
+      stream.on('data', probe);
+      return () => stream.off('data', probe);
+    }),
   });
 }
 
@@ -100,8 +84,9 @@ for (const [harness, next] of [['claude', 'retry'], ['codex', 'retry'], ['claude
 test('sub-second usage requests obey the sampling floor and unchanged readings write once', async (t) => {
   const h = setup(t, 'claude', { usage_ms: 1 });
   const reads = path.join(h.base, 'reads');
-  h.json(['spawn', '--task', 'T1'], { env: h.liveEnv({ LIVE_STEPS: '1', LIVE_HOLD: 'until-stop', LIVE_READS: reads, LIVE_NO_CLAIM: '1' }) });
-  await until(t, h, () => h.readState('tasks.json').tasks[0].spend.tokens === 1000, 'initial usage was not recorded');
+  h.json(['spawn', '--task', 'T1'], { env: h.liveEnv({ LIVE_STEPS: '1', LIVE_HOLD: 'until-stop', LIVE_READS: reads, LIVE_READ_DELAY_MS: '250', LIVE_NO_CLAIM: '1' }) });
+  await until(t, h, () => events(h).some((e) => e.cmd === 'spend live' && e.detail.tokens === 1000),
+    'initial usage was not recorded');
   const readTimes = () => fs.readFileSync(reads, 'utf8').trim().split('\n').map(Number);
   await until(t, h, () => readTimes().length >= 3, 'the supervisor did not keep sampling');
   const samples = events(h).filter((e) => e.cmd === 'spend live' && e.detail.tokens === 1000);
@@ -113,7 +98,7 @@ test('sub-second usage requests obey the sampling floor and unchanged readings w
   assert.equal(events(h).filter((e) => e.cmd === 'spend live' && e.detail.tokens === 1000).length, 1);
   const times = readTimes();
   assert.ok(times.length >= 2, 'the supervisor still samples an unchanged file');
-  for (let i = 1; i < times.length; i++) assert.ok(times[i] - times[i - 1] >= 950, `reads were ${times[i] - times[i - 1]}ms apart`);
+  for (let i = 1; i < times.length; i++) assert.ok(times[i] - times[i - 1] >= 950, `reads were ${times[i] - times[i - 1]}ms apart`); // wait-allow: verify the production sampling floor
 });
 
 test('an initial read error records unavailable telemetry with only its error class', async (t) => {
@@ -261,6 +246,7 @@ test('final session usage repairs spend collected before submitted supervisor re
   h.ok(['task', 'update', 'T1', '--budget-tokens', '1500']);
   const spawned = h.json(['spawn', '--task', 'T1'], { env: h.liveEnv({
     LIVE_STEPS: '1', LIVE_HOLD: 'until-stop', LIVE_FINISH: finish, LIVE_LOG_PREFIX: '1', LIVE_PAUSE_FINAL: paused,
+    LIVE_FINAL_UNSAMPLED: '1',
   }) });
   try {
     await until(t, h, () => liveEntries(h).some((e) => e.tokens === 1000), 'initial usage was not recorded');
@@ -284,6 +270,41 @@ test('final session usage repairs spend collected before submitted supervisor re
   assert.ok(events(h).some((e) => e.cmd === 'budget stop'), 'reconciled usage still enforces the budget');
   h.ok(['spend', 'T1', '--from-spawn', spawned.agent]);
   assert.equal(h.json(['task', 'show', 'T1']).spend.tokens, 2000, 'recollection preserves the reconciled total');
+});
+
+test('a periodic sample that crosses the budget after submit keeps early collection behind the supervisor', async (t) => {
+  const h = setup(t, 'claude');
+  const finish = path.join(h.base, 'finish');
+  const paused = path.join(h.base, 'final-paused');
+  h.ok(['task', 'update', 'T1', '--budget-tokens', '1500']);
+  const spawned = h.json(['spawn', '--task', 'T1'], { env: h.liveEnv({
+    LIVE_STEPS: '1', LIVE_HOLD: 'until-stop', LIVE_FINISH: finish, LIVE_LOG_PREFIX: '1', LIVE_PAUSE_FINAL: paused,
+    LIVE_FINAL_HOLD: '1',
+  }) });
+  try {
+    await until(t, h, () => liveEntries(h).some((e) => e.tokens === 1000), 'initial usage was not recorded');
+    h.ok(['submit', 'T1', '--agent', spawned.agent, '--sha', h.git(['rev-parse', 'HEAD'])]);
+    fs.writeFileSync(finish, '');
+    // The harness holds after its final record, so a periodic sample reads it before any exit.
+    await until(t, h, () => events(h).some((e) => e.cmd === 'budget stop'), 'the live sample did not stop the budget');
+    await until(t, h, () => fs.existsSync(paused), 'the supervisor did not pause before its final read');
+    const early = h.run(['spend', 'T1', '--from-spawn', spawned.agent]);
+    assert.equal(early.code, 1);
+    assert.match(early.stderr, new RegExp(`${spawned.agent} is still supervised`));
+    assert.equal(recordedSpend(h).tokens, 2000, 'the live reading stays until the supervisor reconciles');
+  } finally {
+    fs.writeFileSync(`${paused}.go`, '');
+  }
+  await until(t, h, () => exited(h, spawned.agent), 'the supervisor did not finish reconciliation');
+  await until(t, h, () => recordedSpend(h).entries?.every((e) => !e.live), 'exit usage was not finalized');
+  const final = h.json(['task', 'show', 'T1']);
+  assert.equal(final.spend.tokens, 2000);
+  assert.equal(final.spend.entries.length, 1);
+  assert.equal(final.spend.entries[0].live, undefined);
+  assert.equal(final.run.active, false, 'the closed budget stop leaves no supervised phase');
+  assert.equal(events(h).filter((e) => e.cmd === 'budget stop').length, 1);
+  h.ok(['spend', 'T1', '--from-spawn', spawned.agent]);
+  assert.equal(h.json(['task', 'show', 'T1']).spend.tokens, 2000);
 });
 
 for (const tokens of [1500, 0]) {
@@ -430,13 +451,14 @@ for (const partialLog of [false, true]) {
       LIVE_STEPS: partialLog ? '2' : '1', LIVE_HOLD: 'until-stop', LIVE_FILE: location,
       ...(partialLog ? { LIVE_LOG_PREFIX: '1' } : {}),
     }) });
-    await until(t, h, () => events(h).some((e) => e.cmd === 'spend live' && e.detail.tokens === tokens), 'initial usage was not recorded');
+    // A commit logs its events before it renames tasks.json, so these waits
+    // read the task file that the next lock-free read sees, not the log.
+    await until(t, h, () => liveEntries(h).some((e) => e.tokens === tokens), 'initial usage was not recorded');
     const before = h.json(['task', 'show', 'T1']).spend;
     const file = fs.readFileSync(location, 'utf8');
     const data = fs.readFileSync(file);
-    const readings = events(h).filter((e) => e.cmd === 'spend live').length;
     fs.unlinkSync(file);
-    await until(t, h, () => events(h).filter((e) => e.cmd === 'spend live').length > readings, 'missing telemetry was not observed');
+    await until(t, h, () => liveEntries(h)[0]?.live.state === 'stale', 'missing telemetry was not observed');
     const missing = h.json(['task', 'show', 'T1']).spend;
     for (const key of ['tokens', 'input', 'cached', 'output']) assert.equal(missing[key], before[key], key);
     assert.equal(missing.entries[0].at, before.entries[0].at, 'missing data cannot refresh the last measured usage');

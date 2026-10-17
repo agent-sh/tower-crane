@@ -1,0 +1,1 @@
+- Fall back to the requested browser-test root when the account cache cannot allocate a Chrome profile.

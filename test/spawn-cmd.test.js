@@ -5,7 +5,8 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const Spawn = require('../lib/spawn');
-const { makeRepo } = require('./helpers');
+const { makeRepo, dispatch } = require('./helpers');
+const { readPublished } = require('./atomic-file');
 
 function npmShim(dir, prefix = '%dp0%') {
   const script = path.join(dir, 'node_modules', '@fixture', 'harness', 'bin', 'echo.cjs');
@@ -66,4 +67,53 @@ test('CLI spawn preserves the full multiline prompt, using an npm .cmd harness o
   const echoed = result.stdout.split('\n').find((line) => line.startsWith('{"argv":'));
   assert.ok(echoed, result.stdout);
   assert.deepEqual(JSON.parse(echoed).argv, expected);
+});
+
+test('spawned agents drop the dispatcher session ids and engine provenance', (t) => {
+  const h = makeRepo(t);
+  h.init();
+  h.ok(['task', 'add', '--title', 'Session env', '--acceptance', 'agent env names its own session']);
+  h.ok(['brief', 'set', 'T1', '-'], { input: 'print the inherited session variables\n' });
+  const script = path.join(h.base, 'env.cjs');
+  const names = ['CLAUDE_SESSION_ID', 'CLAUDE_CODE_SESSION_ID', 'CODEX_THREAD_ID', 'CODEX_SESSION_ID', 'TOWER_CRANE_VIA', 'TOWER_CRANE_AUTOMATION_KEY_FD'];
+  fs.writeFileSync(script, `console.log('ENV ' + JSON.stringify(${JSON.stringify(names)}.filter((k) => process.env[k] !== undefined)));\n`);
+  const command = JSON.stringify([process.execPath, script, '{prompt}']);
+  const clear = ['--clear', 'model', '--clear', 'profile', '--clear', 'provider', '--clear', 'effort', '--clear', 'args'];
+  h.ok(['ladder', 'set', 'medium', '--harness', 'command', '--command', command, ...clear]);
+  const env = Object.fromEntries(names.map((k) => [k, 'dispatcher']));
+  const result = h.run(['spawn', '--task', 'T1', '--wait'], { env });
+  assert.equal(result.code, 0, result.stderr);
+  const line = result.stdout.split('\n').find((l) => l.startsWith('ENV '));
+  assert.ok(line, result.stdout);
+  assert.deepEqual(JSON.parse(line.slice(4)), []);
+});
+
+// The hook bridge and the supervisor read the key whenever they start a CLI
+// child, so a home build can race one. The preload holds the build's key write
+// halfway, where a reader of the key finds what a racing helper would.
+test('a home build publishes the automation key whole, never empty or half written', async (t) => {
+  const h = makeRepo(t);
+  h.init();
+  h.ok(['task', 'add', '--title', 'Key write', '--acceptance', 'the key appears whole']);
+  h.ok(['brief', 'set', 'T1', '-'], { input: 'exit\n' });
+  const script = path.join(h.base, 'exit.cjs');
+  fs.writeFileSync(script, '\n');
+  h.ok(['ladder', 'set', 'medium', '--harness', 'command', '--command', JSON.stringify([process.execPath, script, '{prompt}']),
+    '--clear', 'model', '--clear', 'profile', '--clear', 'provider', '--clear', 'effort', '--clear', 'args']);
+  const key = path.join(h.state, 'homes', 'worker-T1-1', 'automation.key');
+  const { run, until } = dispatch(t, h, {
+    args: ['spawn', '--task', 'T1', '--wait'],
+    pre: ['--require', path.join(__dirname, 'fixtures', 'partial-write.js')],
+    env: { PARTIAL_WRITE_TARGET: key },
+  });
+  await until(() => fs.existsSync(`${key}.half`), 'the key write held halfway');
+  let seen = null;
+  try { seen = readPublished(key, 'utf8'); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+  assert.ok(seen === null || /^[0-9a-f]{64}\n$/.test(seen), `a helper read ${JSON.stringify(seen)} mid-write`);
+  fs.writeFileSync(`${key}.finish`, '');
+  const result = await run;
+  assert.equal(result.code, 0, result.stderr);
+  assert.match(fs.readFileSync(key, 'utf8'), /^[0-9a-f]{64}\n$/);
+  if (process.platform !== 'win32') assert.equal(fs.statSync(key).mode & 0o777, 0o600);
+  assert.deepEqual(fs.readdirSync(path.dirname(key)).filter((name) => name.startsWith('.automation.key.')), [], 'no staged key is left behind');
 });

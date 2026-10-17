@@ -8,6 +8,7 @@ const cp = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { HUNG_TEST_MS } = require('./signals');
 
 function testFiles() {
   return [
@@ -15,13 +16,34 @@ function testFiles() {
     ...fs.readdirSync(path.join(__dirname, 'gates')).filter((file) => file.endsWith('.test.js')).map((file) => `test/gates/${file}`),
   ].sort();
 }
-// Shard INDEX of TOTAL takes every TOTAL-th file of the sorted list. The runner
-// owns the split, so every Node version runs the same files in each shard.
-function shardFiles(files, index, total) {
-  return [...files].sort().filter((_, i) => i % total === index - 1);
+// Seconds each file's tests took in CI on this platform, from test/durations.json.
+// scripts/test-durations.js refreshes the table from CI logs. A platform without a
+// table of its own uses the Linux one.
+function fileDurations(platform = process.platform) {
+  const table = JSON.parse(fs.readFileSync(path.join(__dirname, 'durations.json'), 'utf8'));
+  return table[platform] || table.linux || {};
+}
+// Shard INDEX of TOTAL gets an equal share of the measured time: the longest file
+// goes to the shard with the least time so far. A file the table does not list,
+// such as a new one, counts as the table's median file. The runner owns the split
+// and it depends only on the file list and the table, so every Node version on a
+// platform runs the same files in each shard.
+function shardFiles(files, index, total, durations = fileDurations()) {
+  const known = Object.values(durations).filter((s) => Number.isFinite(s) && s >= 0).sort((a, b) => a - b);
+  const fallback = known.length ? known[Math.floor(known.length / 2)] : 1;
+  const cost = (file) => (Number.isFinite(durations[file]) && durations[file] >= 0 ? durations[file] : fallback);
+  const order = [...files].sort().sort((a, b) => cost(b) - cost(a));
+  const loads = Array(total).fill(0);
+  const shards = Array.from({ length: total }, () => []);
+  for (const file of order) {
+    const lightest = loads.indexOf(Math.min(...loads));
+    loads[lightest] += cost(file);
+    shards[lightest].push(file);
+  }
+  return (shards[index - 1] || []).sort();
 }
 if (require.main !== module) {
-  module.exports = { testFiles, shardFiles };
+  module.exports = { testFiles, shardFiles, fileDurations };
   return;
 }
 
@@ -48,10 +70,18 @@ const args = [
   `--test-global-setup=${path.join(__dirname, 'global-setup.js')}`,
   // A hung test fails after five minutes, about three times the slowest test
   // measured on a loaded machine, instead of holding CI to its job timeout.
-  '--test-timeout=300000', '--test-force-exit',
+  `--test-timeout=${HUNG_TEST_MS}`, '--test-force-exit',
+  // Every test file fails when it resolves the user's real ladder file.
+  `--require=${path.join(__dirname, 'fixtures', 'user-config-guard.js')}`,
   ...flags,
 ];
 let list = files.length ? files : testFiles();
+// The gate runs host-only files separately with their opt-in environment.
+const excluded = JSON.parse(process.env.TOWER_CRANE_TEST_EXCLUDE || '[]');
+if (excluded.length) {
+  const matchers = excluded.map(require('../lib/gates/tests').globToRegExp);
+  list = list.filter((file) => !matchers.some((re) => re.test(path.relative(process.cwd(), path.resolve(file)).split(path.sep).join('/'))));
+}
 const shard = process.env.TC_TEST_SHARD;
 if (shard) {
   const match = /^([1-9]\d*)\/([1-9]\d*)$/.exec(shard);
@@ -63,7 +93,7 @@ if (shard) {
 }
 // Node would run its default pattern, the whole tree, when given no files.
 if (!list.length) {
-  console.log(`TC_TEST_SHARD ${shard} has no test files`);
+  console.log(shard ? `TC_TEST_SHARD ${shard} has no test files` : 'No selected test files remain after exclusions');
   return;
 }
 // A sandboxed run skips tests.host_only files; the tests gate runs them on the host. Only a sandbox

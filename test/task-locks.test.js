@@ -1,13 +1,27 @@
 'use strict';
 
+const { waitOnRepo } = require('./signals');
+
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { makeRepo, cachedFixture } = require('./helpers');
 
-const events = (h) => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+// A concurrent writer can leave its last audit line unfinished while a scheduling probe reads it.
+const events = (h) => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').split('\n').slice(0, -1).filter(Boolean).map(JSON.parse);
 const snapshot = (h) => ['tasks.json', 'events.jsonl'].map((file) => fs.readFileSync(path.join(h.state, file), 'utf8'));
+
+test('hardware scheduling observations wait for the complete audit line', (t) => {
+  const h = makeRepo(t);
+  h.init();
+  const before = events(h);
+  const file = path.join(h.state, 'events.jsonl');
+  fs.appendFileSync(file, '{"cmd":"claim","task":"T1"');
+  assert.deepEqual(events(h), before);
+  fs.appendFileSync(file, '}\n');
+  assert.deepEqual(events(h).at(-1), { cmd: 'claim', task: 'T1' });
+});
 
 function setup(t) {
   return cachedFixture(t, 'labs', (h) => {
@@ -23,14 +37,6 @@ function setup(t) {
     doc.tasks[2].locks = ['gpu/1'];
     h.writeState('tasks.json', doc);
   });
-}
-
-async function until(fn, message) {
-  const deadline = Date.now() + 10000;
-  while (!fn()) {
-    if (Date.now() >= deadline) assert.fail(message);
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
 }
 
 function controlledHarness(h) {
@@ -203,7 +209,7 @@ test('concurrent dispatch reserves hardware until the lease, then release frees 
   const id = winner.agent.includes('T1') ? 'T1' : 'T2';
   const loser = id === 'T1' ? 'T2' : 'T1';
   assert.match(results.find((r) => r.code !== 0).stderr, new RegExp(`lab/rdma.*${id}.*${winner.agent}`));
-  await until(() => fs.existsSync(path.join(h.base, `${id}.started`)), 'worker did not start');
+  await waitOnRepo(h, () => fs.existsSync(path.join(h.base, `${id}.started`)), 'worker did not start');
   assert.ok(!fs.existsSync(path.join(h.base, `${loser}.started`)));
   assert.equal(events(h).filter((e) => e.cmd === 'spawn').length, 1);
   assert.ok(!h.json(['ready']).ready.some((x) => x.id === loser));
@@ -219,7 +225,7 @@ test('concurrent dispatch reserves hardware until the lease, then release frees 
     assert.deepEqual(snapshot(h), before);
   }
   fs.writeFileSync(path.join(h.base, `${id}.exit`), '');
-  await until(() => events(h).some((e) => e.cmd === 'spawn exit' && e.detail.agent === winner.agent), 'exit was not recorded');
+  await waitOnRepo(h, () => events(h).some((e) => e.cmd === 'spawn exit' && e.detail.agent === winner.agent), 'exit was not recorded');
   assert.equal(h.run(['claim', loser, '--agent', 'rival']).code, 1, 'an exited worker keeps its lock until released');
   h.ok(['release', id, '--agent', winner.agent, '--reason', 'worker exited']);
   h.ok(['claim', loser, '--agent', 'rival']);
@@ -233,7 +239,7 @@ test('claim consumes its own hardware reservation and a failed launch holds no l
   assert.equal(events(h).filter((e) => e.cmd === 'spawn').length, 0);
   assert.ok(h.json(['ready']).ready.some((x) => x.id === 'T2'));
   const spawned = h.json(['spawn', '--task', 'T1']);
-  await until(() => fs.existsSync(path.join(h.base, 'T1.started')), 'worker did not start');
+  await waitOnRepo(h, () => fs.existsSync(path.join(h.base, 'T1.started')), 'worker did not start');
   h.ok(['claim', 'T1', '--agent', spawned.agent], { hooks: { HOOK_HIDDEN_PIDS: JSON.stringify([spawned.pid]) } });
   const blocked = h.run(['claim', 'T2', '--agent', 'rival']);
   assert.equal(blocked.code, 1, blocked.stderr);

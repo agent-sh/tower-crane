@@ -1,5 +1,7 @@
 'use strict';
 
+const { waitOnRepo } = require('./signals');
+
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -124,7 +126,7 @@ test('one fixture exposes every inbox kind and resolving commands clear their co
   assert.equal(merges.length, 1);
   assert.equal(merges[0][merges[0].indexOf('--match-head-commit') + 1], h.sha);
   const worker = path.join(h.base, 'worker.js');
-  fs.writeFileSync(worker, 'setTimeout(() => {}, 60000);\n');
+  fs.writeFileSync(worker, 'setInterval(() => {}, 1000);\n');
   h.ok(['ladder', 'set', 'medium', '--harness', 'command', '--command', JSON.stringify([process.execPath, worker, '{prompt}']), '--clear', 'profile', '--clear', 'effort']);
   const dispatch = h.run(['spawn', '--ready', '--agent', 'orchestrator', '--json']);
   assert.equal(dispatch.code, 0, dispatch.stdout + dispatch.stderr);
@@ -206,7 +208,7 @@ test('ready dispatch respects worker slots and unobservable processes cannot be 
   delete before.orchestrator_lease;
   assert.deepEqual(after, before);
   const worker = path.join(h.base, 'worker.js');
-  fs.writeFileSync(worker, 'setTimeout(() => {}, 60000);\n');
+  fs.writeFileSync(worker, 'setInterval(() => {}, 1000);\n');
   h.ok(['ladder', 'set', 'medium', '--harness', 'command', '--command', JSON.stringify([process.execPath, worker, '{prompt}']), '--clear', 'profile', '--clear', 'effort']);
   const dispatch = h.run(['spawn', '--ready', '--agent', 'orchestrator', '--json']);
   assert.equal(dispatch.code, 0, dispatch.stdout + dispatch.stderr);
@@ -250,7 +252,7 @@ test('new inbox items wake through wait and unchanged snapshots do not wake twic
   const h = setup(t);
   h.add('Ready');
   const before = fs.statSync(path.join(h.state, 'events.jsonl')).size;
-  const args = ['wait', '--inbox', '--observe', '--after', String(before), '--types', 'inbox item', '--timeout', '0.2', '--agent', 'orchestrator'];
+  const args = ['wait', '--inbox', '--observe', '--after', String(before), '--types', 'inbox item', '--timeout', '0.2', '--agent', 'orchestrator']; // wait-allow: verify the CLI observation, filtering or timeout contract with already-published state
   const wake = h.run(args);
   assert.equal(wake.code, 0, wake.stderr);
   assert.equal(JSON.parse(wake.stdout).detail.item, 'ready:T1');
@@ -341,11 +343,7 @@ test('accepted batch waits for the queue, merges capped and crashed revuto check
     return result;
   });
   try {
-    const deadline = Date.now() + 10000;
-    while (!h.logs().some((e) => e.cmd === 'merge queue' && e.detail.phase === 'requested')) {
-      assert.ok(Date.now() < deadline, 'batch requested the busy queue');
-      await new Promise((resolve) => setTimeout(resolve, 20));
-    }
+    await waitOnRepo(h, () => h.logs().some((e) => e.cmd === 'merge queue' && e.detail.phase === 'requested'));
     assert.equal(settled, false, 'batch waits until the queue is released');
     assert.equal(h.github().calls.filter((a) => a[1] === 'merge').length, 0);
   } finally {
@@ -414,7 +412,7 @@ test('GitHub-only findings wake the watcher and endpoint failures retain other f
   const id = h.add('Remote review');
   h.submit(id, 8);
   const after = () => String(fs.statSync(path.join(h.state, 'events.jsonl')).size);
-  const wait = () => h.run(['wait', '--inbox', '--observe', '--after', after(), '--types', 'inbox item', '--timeout', '0.1', '--agent', 'orchestrator']);
+  const wait = () => h.run(['wait', '--inbox', '--observe', '--after', after(), '--types', 'inbox item', '--timeout', '0.1', '--agent', 'orchestrator']); // wait-allow: verify the CLI observation, filtering or timeout contract with already-published state
   assert.equal(wait().code, 2);
   const github = h.github();
   github.revuto = { name: 'review', app: { slug: 'revuto-review' }, status: 'completed', conclusion: 'failure', output: { summary: 'Bounds check missing' } };
@@ -462,7 +460,7 @@ test('verified workers cannot use orchestrator inbox or batch tools', (t) => {
   assert.equal(result.code, 0, result.stderr);
   assert.equal(JSON.parse(result.stdout).result.isError, true);
   assert.deepEqual(h.logs(), before);
-  const wait = h.run(['wait', '--inbox', '--observe', '--after', 'now', '--timeout', '0.01', '--agent', env.TOWER_CRANE_AGENT], { env });
+  const wait = h.run(['wait', '--inbox', '--observe', '--after', 'now', '--timeout', '0.01', '--agent', env.TOWER_CRANE_AGENT], { env }); // wait-allow: verify the CLI observation, filtering or timeout contract with already-published state
   assert.equal(wait.code, 2, wait.stderr);
   assert.deepEqual(h.logs(), before, 'a worker observer emits no inbox notifications');
 });
@@ -538,7 +536,8 @@ test('MCP discovery works before project initialization and tool errors remain J
     { id: 4, method: 'ping' },
   ].map((r) => JSON.stringify({ jsonrpc: '2.0', ...r })).join('\n') + '\n';
   for (const cwd of [h.repo, h.base]) {
-    const result = h.run(['mcp', '--agent', 'orchestrator'], { cwd, input });
+    // A temp root inside another checkout must not discover that project's state.
+    const result = h.run(['mcp', '--agent', 'orchestrator'], { cwd, input, env: { TOWER_CRANE_STATE: h.state } });
     assert.equal(result.code, 0, result.stderr);
     const replies = result.stdout.trim().split('\n').map(JSON.parse);
     assert.deepEqual(replies.map((r) => r.id), [1, 2, 3, 4]);
@@ -555,7 +554,7 @@ test('current failed software gates expose diagnostics and commands that clear t
   for (const key of Object.keys(h.env)) if (key.startsWith('NODE_TEST_')) delete h.env[key];
   const id = h.add('Software gate failures', 'code');
   const script = path.join(h.base, 'failing.test.js');
-  fs.writeFileSync(script, "require('node:test')('rejects invalid gate inputs', () => require('node:assert/strict').equal(process.env.INBOX_TEST_OK, '1'));\n");
+  fs.writeFileSync(script, "if (!require('node:fs').readFileSync('value.js', 'utf8').includes('1')) process.exit(0);\nrequire('node:test')('rejects invalid gate inputs', () => require('node:assert/strict').equal(process.env.INBOX_TEST_OK, '1'));\n");
   h.ok(['project', 'set', '--tests-mode', 'run-only', '--tests-cmd',
     [process.execPath, '--test', script].map(shellQuote).join(' ')]);
   h.submit(id, 7);
@@ -810,4 +809,114 @@ test('review rework rechecks the verdict after fetching comments outside the sta
   assert.equal(task.status, 'submitted');
   assert.equal(task.evidence.findLast((e) => e.type === 'review').ok, true);
   assert.equal(fs.readFileSync(path.join(h.state, 'briefs', `${id}.md`), 'utf8'), original);
+});
+
+test('a red push or schedule run on the base shows in inbox and status until a later green run of its workflow', (t) => {
+  const h = setup(t);
+  const run = (id, number, event, status, conclusion, attempt = 1) => ({ id, run_number: number, run_attempt: attempt, workflow_id: 11,
+    name: 'CI', path: '.github/workflows/ci.yml', event, status, conclusion, head_sha: h.sha, html_url: `https://github.com/acme/demo/actions/runs/${id}` });
+  const job = (id, name, conclusion) => ({ id, name, status: 'completed', conclusion, html_url: `https://github.com/acme/demo/actions/runs/1/job/${id}` });
+  const linux = 'test (ubuntu-latest, node 26, shard 1/3)';
+  const test = 'resolves a linux path';
+  // The runner echoes step commands in color, so a real job log carries escape sequences.
+  const log = (name) => ['\x1b[36;1mnpm test\x1b[0m', 'TAP version 13', 'ok 1 - reads the config', `\x1b[31mnot ok 2 - ${name}\x1b[0m`, '  ---',
+    "  error: 'expected /tmp/a to equal /tmp/b'", '  ...', '1..2']
+    .map((line, i) => `2026-10-13T03:20:0${i}.0000000Z ${line}`).join('\n') + '\n';
+  const github = h.github();
+  github.main_runs = [run(1001, 50, 'push', 'completed', 'failure')];
+  github.jobs = { 1001: [job(501, linux, 'failure'), job(502, 'test (windows-latest, node 26, shard 1/3)', 'success')] };
+  github.logs = { 501: log(test) };
+  h.save(github);
+  const cache = path.join(h.state, 'main-ci-cache.json');
+  // A read younger than a minute is reused; each step here stands for a later minute.
+  const red = (expire = true) => {
+    if (expire) fs.rmSync(cache, { force: true });
+    return h.inbox().items.filter((i) => i.kind.startsWith('main_ci_'));
+  };
+  const actionCalls = () => {
+    try { return fs.readFileSync(`${h.env.INBOX_GITHUB}.actions`, 'utf8').trim().split('\n').length; } catch { return 0; }
+  };
+  const mainEvents = () => h.logs().filter((e) => e.cmd === 'main ci').length;
+
+  const [failed] = red();
+  assert.equal(failed.kind, 'main_ci_failed', JSON.stringify(red()));
+  assert.equal(failed.id, 'main_ci_failed:project:11');
+  assert.deepEqual(failed.jobs.map((j) => [j.name, j.conclusion, j.tests.map((x) => x.name)]), [[linux, 'failure', [test]]]);
+  assert.match(failed.reason, /CI run 1001 attempt 1 \(push at .+\): failure/);
+  assert.deepEqual(failed.action.argv, ['task', 'add', '--title', 'Fix main CI: CI (workflow 11), red since run 1001', '--kind', 'code',
+    '--acceptance', 'CI on main is green']);
+  const status = h.ok(['status']);
+  assert.match(status, /main ci red: CI run 1001 attempt 1 \(push at /);
+  assert.ok(status.includes(`${linux}: failure; failing tests: ${test}`), status);
+  assert.equal(h.json(['status']).main_ci_red[0].jobs[0].tests[0].error, "error: 'expected /tmp/a to equal /tmp/b'");
+  // Within a minute the last read is reused without GitHub calls; an unchanged red run is not recorded again.
+  const calls = actionCalls();
+  assert.equal(red(false).length, 1);
+  assert.equal(actionCalls(), calls);
+  red();
+  assert.equal(mainEvents(), 1);
+  // Only an open task on this base's fix prefix with the whole workflow token is the fix task.
+  for (const title of ['Notes on workflow 11 runners', 'Fix release CI: CI (workflow 11), red since run 9', 'Fix main CI: CI (workflow 110)']) {
+    h.ok(['task', 'add', '--title', title, '--kind', 'code', '--acceptance', 'works']);
+  }
+  assert.equal(red()[0].action.argv[1], 'add');
+  h.ok([...failed.action.argv, '--agent', 'orchestrator']);
+  const fix = h.json(['task', 'list']).find((x) => x.title === 'Fix main CI: CI (workflow 11), red since run 1001');
+  assert.deepEqual(red()[0].action.argv, ['task', 'show', fix.id]);
+
+  // Main stays red across a merge: the next push fails the same test. The fix task covers it, and it is not flaky.
+  github.main_runs.unshift(run(1002, 51, 'push', 'completed', 'failure'));
+  github.jobs[1002] = [job(504, linux, 'failure')];
+  github.logs[504] = log(test);
+  h.save(github);
+  assert.deepEqual(red().map((i) => [i.kind, i.run, i.action.argv]), [['main_ci_failed', 1002, ['task', 'show', fix.id]]]);
+  // A rerun keeps the run red while it runs, and a failing second attempt is the same run, not a flaky repeat.
+  github.main_runs[0] = run(1002, 51, 'push', 'in_progress', null, 2);
+  h.save(github);
+  assert.deepEqual(red().map((i) => [i.kind, i.run, i.attempt]), [['main_ci_failed', 1002, 1]]);
+  github.main_runs[0] = run(1002, 51, 'push', 'completed', 'failure', 2);
+  h.save(github);
+  assert.deepEqual(red().map((i) => [i.kind, i.run, i.attempt]), [['main_ci_failed', 1002, 2]]);
+
+  // A later green run of the workflow clears it, a manual dispatch at the same head included.
+  github.main_runs.unshift(run(1003, 52, 'workflow_dispatch', 'completed', 'success'));
+  h.save(github);
+  assert.deepEqual(red(), []);
+  assert.doesNotMatch(h.ok(['status']), /ci red/);
+
+  // A cancelled run with a newer run of its workflow was superseded and is not red.
+  github.main_runs.unshift(run(1005, 54, 'push', 'in_progress', null), run(1004, 53, 'push', 'completed', 'cancelled'));
+  h.save(github);
+  assert.deepEqual(red(), []);
+  assert.doesNotMatch(h.ok(['status']), /ci red/);
+
+  // Without a newer run, a cancelled run is not green.
+  github.main_runs.shift();
+  github.jobs[1004] = [job(503, linux, 'cancelled')];
+  h.save(github);
+  const [cancelled] = red();
+  assert.equal(cancelled.conclusion, 'cancelled');
+  assert.equal(cancelled.jobs[0].name, linux);
+  assert.match(cancelled.jobs[0].log_error, /logs expired/);
+  assert.match(h.ok(['status']), /main ci red: CI run 1004 attempt 1 \(push at .+\): cancelled/);
+
+  // The same test failing after a green run is a flaky-test item.
+  github.main_runs.unshift(run(1006, 55, 'push', 'completed', 'failure'));
+  github.jobs[1006] = [job(506, linux, 'failure')];
+  github.logs[506] = log(test);
+  h.save(github);
+  const flaky = red().find((i) => i.kind === 'main_ci_flaky');
+  assert.deepEqual([flaky.test, flaky.run, flaky.earlier_runs], [test, 1006, [1001, 1002]]);
+  assert.deepEqual(flaky.action.argv, ['task', 'add', '--title', `Flaky test on main CI: ${test}`, '--kind', 'code',
+    '--acceptance', `${test} passes repeatably on main`]);
+  h.ok([...flaky.action.argv, '--agent', 'orchestrator']);
+  const flakyTask = h.json(['task', 'list']).find((x) => x.title === `Flaky test on main CI: ${test}`);
+  assert.deepEqual(red().find((i) => i.kind === 'main_ci_flaky').action.argv, ['task', 'show', flakyTask.id]);
+
+  // Recorded runs belong to their base; another base starts clean.
+  h.ok(['project', 'set', '--base', 'release', '--agent', 'orchestrator']);
+  github.main_runs = [];
+  h.save(github);
+  assert.doesNotMatch(h.ok(['status']), /ci red/);
+  assert.deepEqual(red(), []);
 });

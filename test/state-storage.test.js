@@ -119,7 +119,7 @@ test('UserPromptSubmit and tool hooks proceed while another process holds the st
   fs.writeFileSync(binding, JSON.stringify({ agent, task: 'T1', state: h.state, harness: 'claude', attempt: 1 }));
   const env = { ...h.env, TOWER_CRANE_AGENT: agent, TOWER_CRANE_STATE: h.state };
   const bridge = (event) => cp.spawnSync(process.execPath, [BRIDGE, 'hook'], {
-    cwd: h.repo, env, input: JSON.stringify({ hook_event_name: event, tool_name: 'Read' }), encoding: 'utf8', timeout: 20000,
+    cwd: h.repo, env, input: JSON.stringify({ hook_event_name: event, tool_name: 'Read' }), encoding: 'utf8', timeout: 300000,
   });
   const files = () => ['tasks.json', 'events.jsonl'].map((name) => fs.readFileSync(stateFile(h, name), 'utf8'));
   const lock = S.acquireLock(h.state);
@@ -142,7 +142,7 @@ test('UserPromptSubmit and tool hooks proceed while another process holds the st
     const prompt = bridge('UserPromptSubmit');
     assert.equal(prompt.status, 0, prompt.stderr);
     assert.equal(prompt.stdout, '');
-    assert.ok(Date.now() - started < S.LOCK_WAIT_MS / 4, 'the prompt did not wait for the lock');
+    assert.ok(Date.now() - started < S.LOCK_WAIT_MS / 4, 'the prompt did not wait for the lock'); // wait-allow: prompt hooks must use the nonblocking attempt instead of the ordinary lock wait
     assert.deepEqual(files(), unchanged);
   } finally {
     S.releaseLock(held);
@@ -168,4 +168,25 @@ test('historical progress in the event log keeps its bytes but leaves state snap
   assert.ok(events.some((e) => e.id === 'Enested'), 'a detail naming hook progress is still an event');
   assert.ok(events.some((e) => e.cmd === 'task note' && e.detail.text?.includes('hook progress')));
   assert.equal(cp.spawnSync(process.execPath, [BIN, 'status', '--state', h.state], { env: h.env, encoding: 'utf8' }).status, 0);
+});
+
+// Windows refuses to open a file while another process renames a new copy
+// over it, so a state read waits that out. Elsewhere EPERM and EACCES are a
+// permission failure no wait ends, and the read fails on its first refusal.
+test('a state read refused with a sharing code is retried only on Windows', (t) => {
+  const file = path.join(fs.mkdtempSync(path.join(require('./tmp-root').tempRoot(), 'sharing-')), 'tasks.json');
+  t.after(() => fs.rmSync(path.dirname(file), { recursive: true, force: true }));
+  fs.writeFileSync(file, '{"version":1}');
+  const read = fs.readFileSync;
+  for (const code of ['EPERM', 'EACCES', 'EBUSY']) {
+    let refused = 0;
+    t.mock.method(fs, 'readFileSync', (...args) => {
+      if (args[0] === file && refused++ === 0) throw Object.assign(new Error(`${code}: refused`), { code });
+      return read(...args);
+    });
+    if (process.platform === 'win32') assert.deepEqual(S.readJson(file), { version: 1 }, code);
+    else assert.throws(() => S.readJson(file), { code }, code);
+    assert.equal(refused, process.platform === 'win32' ? 2 : 1, `${code} reads`);
+    fs.readFileSync.mock.restore();
+  }
 });

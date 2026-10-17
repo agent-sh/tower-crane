@@ -265,7 +265,7 @@ test('bench tokens reports accepted-task tokens and cost by rung and escalation 
   const pinned = fixtureLadder().ladder;
   const light = pinned.easy.model || pinned.easy.profile;
   const main = pinned.medium.model || pinned.medium.profile;
-  const extended = `${main}[1m]`;
+  const unpriced = 'fixture-unpriced-review';
   for (const title of ['climbed', 'direct', 'open']) h.ok(['task', 'add', '--title', title, '--acceptance', 'done']);
   const spend = (task, rung, model, tokens, cached) => h.ok(['spend', task, '--tokens', String(tokens), '--input', String(tokens - 10),
     '--cached', String(cached), '--output', '10', '--rung', rung, '--model', model, '--harness', 'codex', '--agent', `${rung}-${task}`]);
@@ -275,7 +275,7 @@ test('bench tokens reports accepted-task tokens and cost by rung and escalation 
   spend('T1', 'medium', main, 3000010, 2000000);
   spend('T1', 'review', main, 500010, 0);
   spend('T2', 'medium', main, 2000010, 0);
-  spend('T2', 'review', extended, 100010, 0);
+  spend('T2', 'review', unpriced, 100010, 0);
   spend('T3', 'easy', light, 7000010, 0);
   // Minute-only manual records are not missing telemetry.
   h.ok(['spend', 'T2', '--minutes', '5']);
@@ -291,7 +291,7 @@ test('bench tokens reports accepted-task tokens and cost by rung and escalation 
   assert.deepEqual([r.accepted, r.complete], [2, 2]);
   assert.equal(r.all_tasks_tokens, 13600060, 'spend on unaccepted tasks counts toward the cost of accepted ones');
   assert.equal(r.tokens_per_accepted, 6800030);
-  assert.deepEqual(r.unpriced_models, { [extended]: 1 }, 'the 1M-context id needs its own price row');
+  assert.deepEqual(r.unpriced_models, { [unpriced]: 1 }, 'a model without a price row is named');
   assert.equal(r.by_path.medium.priced_tasks, 0);
   assert.deepEqual(Object.keys(r.by_path), ['easy>medium', 'medium']);
   assert.equal(r.by_path['easy>medium'].median_tokens, 4500030);
@@ -306,7 +306,7 @@ test('bench tokens reports accepted-task tokens and cost by rung and escalation 
   const text = h.ok(['bench', 'tokens']);
   assert.match(text, /accepted tasks: 2, with complete token records: 2/);
   assert.match(text, /easy>medium\s+1\s+4\.50M/);
-  assert.ok(text.includes(`unpriced entries by model: ${extended} 1`), text);
+  assert.ok(text.includes(`unpriced entries by model: ${unpriced} 1`), text);
 });
 
 test('bench excludes accepted tasks missing worker, reviewer or resumed-session usage from medians', (t) => {
@@ -348,13 +348,14 @@ test('bench excludes accepted tasks missing worker, reviewer or resumed-session 
   assert.equal(result.complete, 2);
   const routes = [
     ['spawn fallback', { route_index: 1 }],
+    ['spawn fallback', { route_index: 1, retry: 0, fresh: true }],
     ['spawn retry', { route_index: 1, retry: 1, fresh: true }],
     ['spawn retry', { route_index: 1, retry: 2, fresh: false }],
   ].map(([cmd, detail]) => ({ cmd, task: 'T3', at: '2026-10-07T00:00:20Z', detail: { agent: 'worker-T3', ...detail } }));
   fs.appendFileSync(path.join(h.state, 'events.jsonl'), routes.map((e) => JSON.stringify(e)).join('\n') + '\n');
   result = h.json(['bench', 'tokens']);
   const missing = result.tasks.find((row) => row.id === 'T3').missing_spawns;
-  assert.deepEqual(missing, ['spawn:worker-T3:route:1', 'spawn:worker-T3:route:1:retry:1']);
+  assert.deepEqual(missing, ['spawn:worker-T3:route:1', 'spawn:worker-T3:route:1:retry:0', 'spawn:worker-T3:route:1:retry:1']);
   assert.equal(result.complete, 1, 'resumable retries share usage; fresh routes need their own records');
   const updated = h.readState('tasks.json');
   for (const source of missing) updated.tasks[2].spend.entries.push({

@@ -4,9 +4,15 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const cp = require('node:child_process');
+const { suiteTime, reportSuiteTime, DEADLINE_MIN } = require('./suite-time');
 
 const ROOT = path.resolve(__dirname, '..');
 const BIN = path.join(ROOT, 'bin', 'tower-crane.js');
+
+// The gate bounds each suite run. A failing head runs the suite again on the
+// base for the failing names, so the probe outlasts two runs and still gets
+// the gate's report naming the failures.
+const TESTS_MIN = DEADLINE_MIN;
 
 function contents(root) {
   return fs.readdirSync(root, { recursive: true }).sort();
@@ -39,7 +45,7 @@ function probe({ root = ROOT, cache, command, environment = process.env } = {}) 
   const call = (args, agent = 'orchestrator') => {
     const argv = [BIN, ...args, '--agent', agent, '--state', state, '--json'];
     const out = cp.spawnSync(process.execPath, argv, {
-      cwd: root, env, encoding: 'utf8', timeout: 46 * 60 * 1000, maxBuffer: 16 << 20,
+      cwd: root, env, encoding: 'utf8', timeout: (2 * TESTS_MIN + 2) * 60 * 1000, maxBuffer: 16 << 20,
     });
     if (out.error) throw out.error;
     const data = out.stdout.trim() ? JSON.parse(out.stdout) : null;
@@ -52,14 +58,18 @@ function probe({ root = ROOT, cache, command, environment = process.env } = {}) 
     for (const dir of [outer, gates]) fs.mkdirSync(dir);
     result.sha = cp.execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, env, encoding: 'utf8' }).trim();
     call(['init', '--name', 'Gate scratch proof', '--goal', 'Measure full-gate scratch cleanup',
-      '--tests-mode', 'run-only', '--tests-cmd', command, '--tests-timeout-min', '45']);
+      '--tests-mode', 'run-only', '--tests-cmd', command, '--tests-timeout-min', String(TESTS_MIN)]);
     const task = call(['task', 'add', '--title', 'Gate scratch proof', '--acceptance', 'Scratch is removed']).data;
     const id = task.id;
     call(['claim', id], 'scratch-proof-worker');
     call(['submit', id, '--sha', result.sha], 'scratch-proof-worker');
     result.outer_before = contents(outer);
     result.gate_root_before = contents(gates);
+    const started = performance.now();
     const checked = call(['check', 'tests', id]);
+    // A passing head runs the suite once, so this is its wall time; a failing
+    // head adds the base rerun, and the proof fails anyway.
+    result.suite_time = suiteTime(performance.now() - started);
     result.gate = checked.data;
     result.exit = checked.status;
     result.stderr = checked.stderr;
@@ -90,6 +100,7 @@ if (require.main === module) {
   fs.writeFileSync(file, JSON.stringify(result, null, 2) + '\n');
   console.log(JSON.stringify(result, null, 2));
   console.log(`Gate scratch proof: ${file}`);
+  if (result.suite_time) reportSuiteTime('Gate scratch proof', result.suite_time);
   if (!result.ok) process.exitCode = 1;
 }
 
