@@ -18,6 +18,8 @@ On POSIX, Chrome profiles whose paths exceed its socket limits use a private dir
 
 Outside PRs, the `repeat (windows-latest, node 26)` job runs the Windows flake repeats in its own runner, so they do not unbalance the test shards. It runs the Claude interrupted native worker case ten consecutive times, stopping on the first failure. The case waits for final usage through `wait --types spend --observe` and checks the supervisor's stopped phase and exit receipt before redispatch. Its parent clock models startup consuming the session deadline, so shutdown completion must be independent of that deadline.
 
+The repeat job runs the lock-free reader and torn recovery tests of `state-durability.test.js` thirty consecutive times. Windows file ids run past 2^53, so these tests catch an identity that a Number rounds, and they run there with real ids.
+
 The repeat job also runs the owner-authority and board-approval files ten consecutive times: `authority.test.js`, `approval-context.test.js`, `board-controls.test.js` and `windows-ancestry.test.js`. The Windows ancestry regression releases a held CIM snapshot through a native event and waits for the CLI's close signal. It verifies one provider query, transient-shell skipping and bounded ancestry output even with a large unrelated command line. Repetitions run the submitted code without loading ancestry code from the PR base.
 
 The same file also runs a CLI authority regression on either platform with a provider fixture that refuses individual parent lookups. It reproduces the `ETIMEDOUT` refusal with the old discovery code and reaches the owner-required decision with snapshot discovery, so the Linux tests gate can prove the change too.
