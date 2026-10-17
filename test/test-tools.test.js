@@ -210,6 +210,13 @@ test('mutation fallback requires a green baseline in a copy containing all test 
     return true;
   };\n`);
   write('test/stack-merge.test.js', `require('node:test')('scoped survivor', () => {});\n`);
+  write('test/mutants.test.js', `
+    require('node:test')('pristine mutation anchors', () => {
+      require('node:assert/strict').match(
+        require('node:fs').readFileSync('lib/gates/merge.js', 'utf8'),
+        /t.status !== 'accepted'/);
+    });
+  `);
   const inputs = ['.github/workflows/ci.yml', 'AGENTS.md', 'hooks/hook.js'];
   for (const file of inputs) write(file, 'copied input\n');
   const baseline = `

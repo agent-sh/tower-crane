@@ -94,9 +94,11 @@ function checkChanges(root, base) {
 function main(args) {
   let root = path.join(__dirname, '..');
   let base = process.env.TOWER_CRANE_CHANGE_BASE;
+  let mutants = false;
   for (let i = 0; i < args.length; i++) {
+    if (args[i] === '--mutants') { mutants = true; continue; }
     if (!['--root', '--base'].includes(args[i]) || !args[i + 1]) {
-      throw new Error('usage: node scripts/check-shared-files.js [--root DIR] [--base SHA]');
+      throw new Error('usage: node scripts/check-shared-files.js [--root DIR] [--base SHA] [--mutants]');
     }
     if (args[i] === '--root') root = path.resolve(args[++i]);
     else base = args[++i];
@@ -105,7 +107,8 @@ function main(args) {
   checkStdinReads(root);
   checkTestWaits(root);
   checkSuiteDeadline(root);
-  checkMutants(root);
+  // Mutation scoring runs shared checks on deliberately changed code.
+  if (mutants) checkMutants(root);
   fragments(root);
   if (base && !/^0+$/.test(base)) checkChanges(root, base);
 }

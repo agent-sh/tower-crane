@@ -142,6 +142,8 @@ What is left is mostly the CLI's own cost: every call starts Node and loads the 
 
 `npm run check:shared` checks that every mutant's target text occurs exactly once in its file. Missing and duplicate targets fail before tests run, including drift in a mutant outside a scoped selection. `node scripts/mutants.js --check` runs only that validation; `--root DIR` checks another checkout and `--only ID,ID` selects targets. Both the check and mutation runner normalize CRLF source to LF before matching multiline anchors.
 
+The npm command opts into anchor validation with `check-shared-files.js --mutants`. Ordinary shared-check fixtures run without that flag, and mutation full-suite fallback excludes `test/mutants.test.js`: checking pristine anchors after planting a bug would score a survivor as caught without testing its behavior.
+
 | area | bugs | examples |
 | --- | ---: | --- |
 | gates | 8 | tests pass without the change, a deleted test counts, a cancelled CI run is green, a HIGH finding passes clean, loopback is a public source, evidence counts without its audit event, the submitter's own review counts, evidence from an old revision counts |

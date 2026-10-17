@@ -3,8 +3,8 @@
 
 // Plants each bug below in a scratch copy of the repository and runs the test
 // files named for it; a mutant is caught when that run fails. A mutant the
-// named files miss is run against the whole suite before it counts as missed,
-// so the score is the suite's, and the file lists only make it cheap.
+// named files miss is run against the suite before it counts as missed, except
+// for the pristine-anchor check, which cannot score a deliberately planted bug.
 //
 //   node scripts/mutants.js [--root DIR] [--jobs 4] [--only ID,ID] [--no-full] [--skip PATTERN]
 //   node scripts/mutants.js --check [--root DIR] [--only ID,ID]
@@ -334,7 +334,9 @@ function runTests(files) {
   return r.status === 0;
 }
 
-const allFiles = () => require(path.join(copy, 'test', 'run.js')).testFiles();
+// Anchor validation checks the pristine catalog, not behavior under a planted bug.
+const allFiles = () => require(path.join(copy, 'test', 'run.js')).testFiles()
+  .filter((file) => file !== 'test/mutants.test.js');
 
 let caught = 0;
 try {

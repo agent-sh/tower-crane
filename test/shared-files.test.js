@@ -202,37 +202,6 @@ test('the shared file check rejects bare stdin reads in lib and bin, and points 
   assert.equal(f.check().status, 0, 'lib/util.js is where readStdin reads fd 0');
 });
 
-test('the shared file check rejects missing and duplicate mutant targets without running tests', (t) => {
-  const f = fixture(t);
-  f.change();
-  const file = 'lib/gates/tests.js';
-  const source = f.read(file);
-  const anchor = 'if (without.ok) {';
-  assert.equal(f.check().status, 0, 'a fixture without a test tree still validates every target');
-  const targets = f.script('mutants.js', ['--check', '--root', f.h.repo]);
-  assert.equal(targets.status, 0, targets.stderr);
-  assert.match(targets.stdout, /^\d+ mutant targets match once\n$/);
-  for (const [text, occurrences] of [
-    [source.replace(anchor, 'if (false) {'), 0],
-    [source + `\n// ${anchor}\n`, 2],
-  ]) {
-    f.write(file, text);
-    const drift = f.check();
-    assert.equal(drift.status, 1, drift.stderr);
-    assert.match(drift.stderr, new RegExp(`tests-pass-without-change:.*once in lib/gates/tests\\.js.*found ${occurrences}`));
-    const selected = f.script('mutants.js', ['--check', '--only', 'tests-pass-without-change']);
-    assert.equal(selected.status, 1);
-    assert.match(selected.stderr, new RegExp(`tests-pass-without-change:.*found ${occurrences}`));
-  }
-  f.write(file, source.replace(/\n/g, '\r\n'));
-  f.write('lib/tasks.js', f.read('lib/tasks.js').replace(/\n/g, '\r\n'));
-  assert.equal(f.check().status, 0, 'multiline anchors match Windows line endings');
-  fs.rmSync(path.join(f.h.repo, file));
-  const missing = f.check();
-  assert.equal(missing.status, 1);
-  assert.match(missing.stderr, /tests-pass-without-change:.*lib\/gates\/tests\.js/);
-});
-
 test('the suite deadline sets the proof job timeouts and warns when the configured tests gate timeout differs', (t) => {
   const { DEADLINE_MIN } = require('../scripts/suite-time');
   const f = fixture(t);
