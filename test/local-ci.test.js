@@ -349,6 +349,14 @@ test('a failed local CI keeps a redacted output tail, its full log and the artif
 const fs = require('node:fs');
 const path = require('node:path');
 console.log('step 1: scaffold ok');
+// A token wrapped onto two stdout lines with a stderr line written between them. The pauses let
+// the gate read each write on its own, so the stderr line arrives between the halves.
+const pause = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); // wait-allow: the gate sends the fixture no signal when it has read a write
+console.log('split ' + process.env.CI_FIXTURE_TOKEN.slice(0, 10));
+pause(100);
+console.error('between the halves');
+pause(100);
+console.log(process.env.CI_FIXTURE_TOKEN.slice(10) + ' tail');
 for (let i = 0; i < 300; i++) console.log('early line ' + i);
 // stdout: the gate reads stdout and stderr from two sockets and joins them in arrival order, so
 // a stderr line can land hundreds of stdout lines from where it was written.
@@ -421,9 +429,18 @@ process.exitCode = 1;
   assert.match(log, /^step 1: scaffold ok$/m);
   assert.match(log, /^early line 0$/m);
   assert.match(log, /^cargo tree line 149$/m);
-  assert.match(log, /^stderr token \[redacted:/m);
-  assert.match(log, /^unterminated \nafter the unterminated escape\ntitle set\nDownloading\n\[redacted:GITHUB_TOKEN\]$/m);
-  assert.match(log, /^stray \[redacted:CI_FIXTURE_TOKEN\]\nosc head \[redacted:CI_FIXTURE_TOKEN\]\nwrapped \[redacted:CI_FIXTURE_TOKEN\] end$/m);
+  assert.equal(log.match(/^stderr token \[redacted:CI_FIXTURE_TOKEN\]$/gm)?.length, 1, log);
+  // Lines keep their order only within a stream (docs/state.md), so a stderr line can land
+  // between any two stdout lines; runs of stdout lines are checked without them.
+  const stdoutLog = log.split('\n').filter((line) => !/^(?:stderr token |between the halves$)/.test(line)).join('\n');
+  // Each stream's own text is read for secrets too, so a stderr line read between a token's
+  // halves leaves both redacted, each on its own line.
+  assert.match(log, /^between the halves$/m);
+  assert.match(stdoutLog, /^split \[redacted:CI_FIXTURE_TOKEN\](?:\n\[redacted:CI_FIXTURE_TOKEN\])? tail$/m);
+  assert.match(stdoutLog, /^unterminated \nafter the unterminated escape\ntitle set\nDownloading\n\[redacted:GITHUB_TOKEN\]$/m);
+  // The stderr line can also land between the halves of the wrapped token; each half is then
+  // redacted on its own line.
+  assert.match(stdoutLog, /^stray \[redacted:CI_FIXTURE_TOKEN\]\nosc head \[redacted:CI_FIXTURE_TOKEN\]\nwrapped \[redacted:CI_FIXTURE_TOKEN\](?:\n\[redacted:CI_FIXTURE_TOKEN\])? end$/m);
   assert.doesNotMatch(log, /(?:a1){4}/);
   assert.doesNotMatch(kept.output_tail, /(?:a1){4}/);
   assert.ok(!log.includes('ghp_d4'), log);
