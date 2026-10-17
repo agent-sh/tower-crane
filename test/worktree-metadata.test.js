@@ -11,6 +11,7 @@ const os = require('node:os');
 const { makeRepo, ROOT, HOOKS } = require('./helpers');
 const { shellQuote } = require('../lib/gates/common');
 const { clearPlaceholders, REAP_DIR, REAP_WAIT_MS } = require('../lib/git-placeholders');
+const { windowsFileIds, BASE } = require('./fixtures/windows-file-ids');
 
 function orphan(h, name = 'orphan') {
   const dir = path.join(h.repo, '.git', 'worktrees', name);
@@ -33,11 +34,13 @@ function procTable(h, pids = []) {
 // Points the holder check at a process table for the rest of the test.
 function onlyProcesses(t, h, pids = []) {
   const previous = process.env.TOWER_CRANE_PROC;
-  process.env.TOWER_CRANE_PROC = procTable(h, pids);
+  const table = procTable(h, pids);
+  process.env.TOWER_CRANE_PROC = table;
   t.after(() => {
     if (previous === undefined) delete process.env.TOWER_CRANE_PROC;
     else process.env.TOWER_CRANE_PROC = previous;
   });
+  return table;
 }
 
 function gateTask(h, script) {
@@ -225,6 +228,33 @@ test('a sandboxed git push clears an empty read-only lock placeholder that would
   assert.match(push.stderr, /removed empty read-only placeholder .*config\.lock/);
   assert.equal(fs.existsSync(lock), false);
   assert.equal(h.git(['config', '--get', 'branch.task-T1.remote']), remote);
+});
+
+test('a placeholder is removed while a process holds another file whose id rounds to the same Number, as on Windows', { skip: !fs.existsSync('/proc/self') && 'needs /proc to take the directory' }, (t) => {
+  const h = makeRepo(t);
+  h.init();
+  const lock = path.join(h.repo, '.git', 'config.lock');
+  fs.writeFileSync(lock, '', { mode: 0o444 });
+  const other = path.join(h.base, 'other-file');
+  fs.writeFileSync(other, '');
+  // One process, holding the other file open.
+  const table = onlyProcesses(t, h);
+  fs.mkdirSync(path.join(table, '4194304', 'fd'), { recursive: true });
+  fs.symlinkSync(other, path.join(table, '4194304', 'fd', '3'));
+  // The lock gets 2^63 and the other file the next id: a Number rounds both to
+  // 2^63, a bigint keeps them apart. Every other file sits far from both.
+  const lockIno = fs.lstatSync(lock, { bigint: true }).ino;
+  const otherIno = fs.lstatSync(other, { bigint: true }).ino;
+  t.after(windowsFileIds((ino) => {
+    if (ino === lockIno) return BASE;
+    if (ino === otherIno) return BASE + 1n;
+    return BASE + 2n ** 32n + ino;
+  }));
+  const ids = [lock, other].map((file) => fs.lstatSync(file, { bigint: true }).ino);
+  assert.notEqual(ids[0], ids[1]);
+  assert.equal(Number(ids[0]), Number(ids[1]));
+  assert.deepEqual(clearPlaceholders(path.join(h.repo, '.git')), [lock]);
+  assert.equal(fs.existsSync(lock), false);
 });
 
 test('a sandboxed git call outside any repository runs without a placeholder cleanup', (t) => {
