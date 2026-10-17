@@ -53,8 +53,11 @@ test('the stop line, the stop order and the learned unit size', () => {
   assert.equal(G.overStop(reading({ used: 9.4 }), s), null);
   assert.match(G.overStop(reading({ used: 9.5 }), s), /tests\.slice has 9\.5 GiB of 10\.0 GiB in use, at or past the 95% stop line/);
   assert.match(G.overStop(reading({ full: 10 }), s), /memory pressure: full avg10 10% is at or over the 10% stop line/);
-  const units = [unit('worker', 1), unit('worker', 5), unit('tests', 2), unit('suite', 4), unit('reviewer', 3), unit('orchestrator', 9), unit('clean', 6, { stop: { at: 'x' } })];
-  // Gates and suites first, then reviewers, then workers, newest first in each; never the orchestrator or a unit already stopping.
+  const bound = { bound: true };
+  const units = [unit('worker', 1, bound), unit('worker', 5, bound), unit('worker', 7), unit('tests', 2), unit('suite', 4), unit('reviewer', 3, bound),
+    unit('orchestrator', 9, bound), unit('clean', 6, { stop: { at: 'x' } })];
+  // Gates and suites first, then reviewers, then workers, newest first in each; never the orchestrator,
+  // a unit already stopping, or an agent whose dispatch has not yet handed it to its supervisor.
   assert.deepEqual(G.victims(registry(units)).map((u) => u.id), ['suite-4', 'tests-2', 'reviewer-3', 'worker-5', 'worker-1']);
   const peak = (gib, project = '/p') => ({ kind: 'worker', project, peak: gib * GiB });
   assert.equal(G.expected(registry([], [], []), '/p', 'worker', s), 1536 * 1024 * 1024, 'no history: the configured size');
@@ -241,12 +244,13 @@ test('past the stop line the newest worker stops first, and processes Tower Cran
   const alive = (pid) => { try { killPid(pid, 0); return true; } catch { return false; } };
   writeHost(host, { limit: 10, used: 9.7 });
   await waitOnRepo(h, () => !alive(newer.monitor_pid), 'the newer worker\'s supervisor stops');
-  assert.ok(alive(older.monitor_pid), 'the older worker keeps running');
+  // The host stays past the line, so once the newer one has exited the older one stops too.
+  await waitOnRepo(h, () => !alive(older.monitor_pid), 'then the older worker\'s supervisor stops');
   assert.ok(alive(outside.pid), 'a process Tower Crane did not start is never signalled');
   await waitOnRepo(h, () => events(h).some((e) => e.task === 'T2' && e.cmd === 'spawn phase'
     && /^supervisor stopped by the host governor: memory: tests\.slice has 9\.7 GiB/.test(e.detail.reason || '')), 'the supervisor records why it stopped');
   const stops = h.json(['status']).governor.stops;
-  assert.deepEqual(stops.map((x) => [x.task, x.kind]), [['T2', 'worker']]);
+  assert.deepEqual(stops.map((x) => [x.task, x.kind, x.agent]), [['T2', 'worker', newer.agent], ['T1', 'worker', older.agent]], 'newest first');
   assert.match(h.ok(['status']), /governor stopped: T2 worker \(\S+\) at \S+: memory: tests\.slice has 9\.7 GiB of 10\.0 GiB in use, at or past the 95% stop line/);
 
   // Once there is room the stopped task is dispatched again in its kept worktree.

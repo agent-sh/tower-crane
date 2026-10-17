@@ -561,7 +561,7 @@ A unit is one piece of work the governor admits and measures:
 
 | Kind | Admitted by | Held by | Stopped how |
 | --- | --- | --- | --- |
-| `worker`, `reviewer`, `orchestrator` | `spawn` (also `spawn --ready`, automatic refill, review dispatch), before the supervisor starts | the agent's supervisor, from its launch | SIGTERM to the supervisor, which stops its harness and records the exit; the orchestrator is never stopped |
+| `worker`, `reviewer`, `small`, `orchestrator` | `spawn` (also `spawn --ready`, automatic refill, review dispatch), before the supervisor starts | the agent's supervisor, from its launch | SIGTERM to the supervisor, which stops its harness and records the exit; the orchestrator is never stopped |
 | `tests`, `clean`, `ci` (local CI only) | `check tests`, `check clean`, `check ci` with `ci.local`, and the reactions and `accept` that run them | the process running the gate | its own process aborts the gate on its next probe; SIGTERM to the gate's command groups when it has not ended ten seconds after the stop and the stop line is still crossed |
 | `suite` | the merge queue's merged-head suite, once the suite will run | the process running the queue | as a gate |
 
@@ -594,7 +594,7 @@ Pressure defers as well: memory `some` avg10 at or over `psi_memory_defer`, CPU 
 
 ### Stopping
 
-Past the stop line, Tower Crane stops its own work: any level's use at or over `stop_at * limit`, or memory `full` avg10 at or over `psi_memory_stop`. It stops one unit at a time: the next only once the stopped one's processes have exited and its memory shows as freed, or five seconds after the stop, while the line is still crossed. The order is gates and suites first, then reviewers, then workers, the newest started first within each: a gate reruns from its inputs, a reviewer starts its review again, and a worker loses its session's context, so the newest of a class loses the least. Orchestrators are never stopped: they run the loop that resumes the rest.
+Past the stop line, Tower Crane stops its own work: any level's use at or over `stop_at * limit`, or memory `full` avg10 at or over `psi_memory_stop`. It stops one unit at a time: the next only once the stopped one's processes have exited and its memory shows as freed, or five seconds after the stop, while the line is still crossed. The order is gates and suites first, then reviewers and small agents, then workers, the newest started first within each: a gate reruns from its inputs, a reviewer or small agent starts its job again, and a worker loses its session's context, so the newest of a class loses the least. Orchestrators are never stopped: they run the loop that resumes the rest.
 
 The governor signals only processes the registry recorded when Tower Crane started them, and only while their start time (Linux `start_ticks`) still matches, so a reused pid is left alone; every other process on the host, and every session in the slice, is never touched. A stopped worker or reviewer records `spawn phase` `blocked` with reason `supervisor stopped by the host governor: REASON` and a `spawn exit` marked `availability_failure`, so neither the respawn cap nor the reviewer cap counts it. Its claim is released as a dead claim and its worktree kept; the next dispatch, by `spawn` or a wait's refill once there is room, resumes the task there. A stopped gate or suite records no verdict: its command reports `TASK: tests gate stopped by the host governor: REASON; it runs again once there is room`, and its reaction is deferred and retried.
 
@@ -621,7 +621,7 @@ Where it shows:
 | `psi_cpu_defer` | 60 | runnable tasks waited for a CPU 60% of the time; this host idles at 2 to 8% |
 | `load_defer` | 2 | twice as many runnable or blocked tasks as cores; the fork storms of 2026-10-17 reached 16 to 24 times the cores |
 | `others_window_min` | 30 | other sessions' test runs and builds repeat within minutes; on 2026-10-17 two of them peaked near 11 GiB and came back |
-| `expected_mb` | `worker` 1536, `reviewer` 1024, `orchestrator` 1024, `tests` 2048, `clean` 1024, `ci` 2048, `suite` 2048 | starting sizes, replaced by measured peaks once three exist: on 2026-10-17 the scope holding an orchestrator, two workers and their tools used 3.0 GiB (peak 3.5 GiB); a full suite at test concurrency 3 runs about six Node processes and their git commands |
+| `expected_mb` | `worker` 1536, `reviewer` 1024, `small` 1024, `orchestrator` 1024, `tests` 2048, `clean` 1024, `ci` 2048, `suite` 2048 | starting sizes, replaced by measured peaks once three exist: on 2026-10-17 the scope holding an orchestrator, two workers and their tools used 3.0 GiB (peak 3.5 GiB); a full suite at test concurrency 3 runs about six Node processes and their git commands |
 
 ### Registry
 
