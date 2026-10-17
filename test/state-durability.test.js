@@ -363,8 +363,27 @@ function replaceLog(h) {
   fs.renameSync(`${log}.replaced`, log);
 }
 
-test('a reader that keeps losing to commits reads once under the lock', (t) => {
+// File ids as Windows reports them: NTFS puts a sequence number in the top
+// 16 bits, so ids run past 2^53. Node then rounds a Number stat's ino, and
+// neighbouring files share one value; a bigint stat keeps the exact id.
+function windowsFileIds(t) {
+  const base = 2n ** 63n;
+  const originals = { statSync: fs.statSync, fstatSync: fs.fstatSync, lstatSync: fs.lstatSync };
+  const restore = () => Object.assign(fs, originals);
+  t.after(restore);
+  for (const [name, original] of Object.entries(originals)) {
+    fs[name] = function windowsIds(...args) {
+      const st = original.apply(this, args);
+      if (st) st.ino = typeof st.ino === 'bigint' ? base + st.ino : Number(base + BigInt(st.ino));
+      return st;
+    };
+  }
+  return restore;
+}
+
+function readerKeepsLosing(t, { ids = null } = {}) {
   const h = setup(t);
+  const restoreIds = ids ? ids(t) : () => {};
   crash(h, 'landed', 'contended note');
   const file = path.join(h.state, 'project.json');
   const lock = path.join(h.state, 'lock');
@@ -384,12 +403,17 @@ test('a reader that keeps losing to commits reads once under the lock', (t) => {
   });
   const read = unlocked(h);
   restore();
+  restoreIds();
   assert.ok(replaced >= 5, `the reader lost ${replaced} reads`);
   // The lock's holder had died; taking it renamed the logged commit into place.
   assert.deepEqual(read, { notes: ['contended note'], logged: ['contended note'] });
   assert.equal(fs.existsSync(lock), false, 'the reader released the lock');
   assertConsistent(h);
-});
+}
+
+test('a reader that keeps losing to commits reads once under the lock', (t) => readerKeepsLosing(t));
+
+test('a reader tells a replaced log from the one it read when file ids pass 2^53, as on Windows', (t) => readerKeepsLosing(t, { ids: windowsFileIds }));
 
 test('a reader without the lock sees each commit it has the events of while the writer still renames', async (t) => {
   const h = setup(t);
