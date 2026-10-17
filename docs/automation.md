@@ -37,9 +37,9 @@ are commands recorded in the log, not estimates of model turns.
 
 T34 implements submission gates, CI refresh, conflict rework and automatic
 merge through existing CLI commands and the event watcher. It adds no
-daemon or polling loop. CI completion is delivered to the CLI by an
-external notification; its payload is a hint to query GitHub, never gate
-evidence.
+daemon. CI completion can reach the CLI as an external notification, whose
+payload is a hint to query GitHub, never gate evidence; without one, the
+watcher rechecks pending CI once a minute until it finishes or stalls.
 
 The trusted `wait` watcher consumes submissions and catches up active PRs
 on startup through fresh reconciliation requests. Completed reaction
@@ -55,8 +55,10 @@ use explicit `accept` for review dispatch. `ci completed ID --sha SHA` and
 `ci webhook FILE` receive host completion notifications. A host integration
 must deliver those notifications; Tower Crane does not install a webhook
 listener. Concurrent consumers serialize reactions per task using audited
-event receipts and drain queued notifications. The orchestrator can move a
-task's queued gate work to the front with `gates prioritize` ([state](state.md#eventsjsonl)).
+event receipts and drain queued notifications. Accepted tasks' merges run
+first, in acceptance order. The orchestrator can move a submitted task's
+queued gate work ahead of older submitted work with `gates prioritize`
+([state](state.md#eventsjsonl)).
 Supervisors use the dispatcher's command PATH and an explicit trusted
 authorization context. Unknown mergeability and transport errors remain
 retryable at startup. A remote merge completed before its local receipt
@@ -64,10 +66,58 @@ is recovered through the merge gate's accepted-head confirmation.
 
 Software gates run when no audited evidence exists at the submitted head
 and revision, even if an unaudited entry or a completed reaction remains.
+Hosted CI that is still running or waiting for GitHub's mergeability result
+records `PENDING`. The trusted wait host checks pending CI once per minute
+without needing a completion notification, and records a recheck only when
+its result changed. A completed failure takes precedence over pending runs and
+unknown mergeability. CI with nothing queued or running for 30 minutes, or on
+a closed PR, records `STALLED`: the orchestrator inbox shows it and the
+per-minute recheck stops for that head. Status and the board show the gate
+name with its failed, stalled, pending or missing state.
 They run again when their passing evidence no longer matches its
-inputs, such as the pinned command or tests policy. An audited failed gate waits for `gates retry ID` at
-unchanged inputs; an infrastructure failure a later fix removed is the case
-it serves.
+inputs, such as the pinned command or tests policy. A failed `tests`, `clean`
+or `ci` gate at a submitted head does not wait for an operator, whether the
+run came from a reaction, a `check` run by hand or `gates retry`. Each failure
+is classified by what it says about the change:
+
+- Infrastructure runs once more at the same head, and a second failure reworks.
+  That covers a timeout, a runner killed by a signal, a CI run that timed out,
+  was cancelled or never started, a cleanup scan with checks that did not run,
+  and a test that also fails on the base branch (`main` in the project, local
+  or `origin`, whichever is newer).
+- A change the worker must fix reworks at once: no test covers the change, it
+  has no changes against the base, a test or cleanup command fails, or a
+  required CI run is not successful.
+- A missing or uninstalled pinned command is project configuration. Its receipt
+  waits for the command to be pinned, and the inbox shows a `gate_config` item
+  addressed to the orchestrator that names the setting. Later software gates
+  still run and settle any independent failure. If they pass or remain pending,
+  the task stays submitted for the configuration fix.
+- A pending CI run waits for CI.
+
+A rework names the failing tests and their output tail. When the failing tests
+also fail on the base branch, the rework says so with their names, so the worker
+can link the existing failure instead of fixing unrelated code. A failure of a
+confirmed quality check on a task with a tier range is escalation's: it sends
+the task back with a climb, as before. `gates retry ID` reruns a failed gate at unchanged inputs, such as after an infrastructure cause is fixed.
+
+A gate can fail for a cause outside the code that it cannot classify, such as
+local CI exiting 1 because the gate temporary root was on a full `/tmp`. That
+reads as a code failure and reworks at once; retrying it at once would fail the
+same way, since the environment is still broken. Once the orchestrator fixes the
+cause, `gates retry ID --from-rework` undoes that rework without a worker round.
+It returns the task to submitted at the revision it was submitted at, so that
+revision's passing evidence and any review count again, reruns the failed gates
+while it holds the task's reaction slot, and settles them as a reaction would.
+A gate that still fails reworks at a new revision. It refuses a rework that came
+from a review or a person, a revision or kind change since the rework, a worker
+claim or submission since, a pending quality climb, and a moved PR or branch
+head, checked again once it holds the reaction slot. The inbox `rework_ready`
+item names the command when it would succeed. Automatic refill holds such a
+task for `gates.rework_hold_min` minutes (default 5) after the rework, since
+the same wait pass would otherwise dispatch a worker at once; `spawn --ready`
+by hand does not wait. [State](state.md)
+explains why the revision goes back instead of carrying evidence forward.
 
 Failures remain visible in gate receipts and task notes. Conflicting PRs
 return to rework with a file list. Unknown mergeability, failed transport,

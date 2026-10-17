@@ -2,13 +2,16 @@
 // Fixtures for the gate tests: scratch directories, git repositories isolated from the user's
 // git config, and a fake gh for the gates that talk to GitHub.
 const fs = require('fs');
-const os = require('os');
 const path = require('path');
 const { spawnSync } = require('child_process');
+const { tempRoot } = require('../tmp-root');
+const { FOREGROUND_MAINTENANCE } = require('../repo-seed');
+// Fails a gate test that resolves the user's real ladder file, also when run without test/run.js.
+require('../fixtures/user-config-guard');
 
-// A scratch directory under TOWER_CRANE_TEST_TMP (or the system temp dir), removed by the caller.
+// A scratch directory under the test temp root, removed by the caller.
 function scratch(prefix) {
-  const base = process.env.TOWER_CRANE_TEST_TMP || os.tmpdir();
+  const base = tempRoot();
   fs.mkdirSync(base, { recursive: true });
   return fs.mkdtempSync(path.join(base, `${prefix}-`));
 }
@@ -16,7 +19,7 @@ function scratch(prefix) {
 // Keeps the user's global config (signing, hooks, default branch) out of the fixtures.
 function isolateGit(dir) {
   const cfg = path.join(dir, 'gitconfig');
-  fs.writeFileSync(cfg, '');
+  fs.writeFileSync(cfg, FOREGROUND_MAINTENANCE);
   Object.assign(process.env, {
     GIT_CONFIG_GLOBAL: cfg,
     GIT_CONFIG_NOSYSTEM: '1',
@@ -25,6 +28,12 @@ function isolateGit(dir) {
     GIT_COMMITTER_NAME: 'tower-crane test',
     GIT_COMMITTER_EMAIL: 'test@example.invalid',
   });
+}
+
+// Gates call lib/ladder.js in the test process, which would read the user's
+// real ladder file; this names one in the fixture, absent unless a test writes it.
+function isolateUserFile(dir) {
+  process.env.TOWER_CRANE_CONFIG = path.join(dir, 'home', '.config', 'tower-crane', 'config.json');
 }
 
 function git(cwd, ...args) {
@@ -82,4 +91,4 @@ function fakeExec(handler) {
   return { exec, calls };
 }
 
-module.exports = { scratch, isolateGit, git, commit, initRepo, worktrees, quote, result, fakeExec };
+module.exports = { scratch, isolateGit, isolateUserFile, git, commit, initRepo, worktrees, quote, result, fakeExec };

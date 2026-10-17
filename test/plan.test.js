@@ -4,7 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { makeRepo } = require('./helpers');
+const { makeRepo, BIN } = require('./helpers');
 
 test('task add stores the task with defaults and refuses bad input', (t) => {
   const h = makeRepo(t);
@@ -235,4 +235,74 @@ test('brief set warns when a reviewer section has no worker section', (t) => {
   });
   assert.equal(missingWorker.code, 0, missingWorker.stderr);
   assert.match(missingWorker.stderr, /Reviewer section.*without a .*Worker section/i);
+});
+
+test('task add --brief writes the brief in the same command and refuses an unreadable file before adding', (t) => {
+  const h = makeRepo(t);
+  h.init();
+  const file = path.join(h.base, 'brief.md');
+  fs.writeFileSync(file, '# Context\n\nFrom the add.\n');
+  assert.equal(h.ok(['task', 'add', '--title', 'Briefed', '--acceptance', 'brief lands', '--brief', file]), 'T1');
+  assert.equal(fs.readFileSync(path.join(h.state, 'briefs', 'T1.md'), 'utf8'), '# Context\n\nFrom the add.\n');
+  assert.equal(h.ok(['brief', 'get', 'T1']), '# Context\n\nFrom the add.');
+  assert.doesNotMatch(fs.readFileSync(path.join(h.state, 'sketch.md'), 'utf8'), /no brief/, 'the sketch renders the brief the add wrote');
+
+  const missing = h.run(['task', 'add', '--title', 'Lost', '--acceptance', 'never added', '--brief', path.join(h.base, 'absent.md')]);
+  assert.equal(missing.code, 1);
+  assert.match(missing.stderr, /cannot read/);
+  assert.equal(h.readState('tasks.json').tasks.length, 1);
+  assert.equal(fs.existsSync(path.join(h.state, 'briefs', 'T2.md')), false);
+});
+
+test('task add whose audit append fails adds nothing and keeps no brief', { skip: process.platform === 'win32' || process.getuid?.() === 0 }, (t) => {
+  const h = makeRepo(t);
+  h.init();
+  const file = path.join(h.base, 'brief.md');
+  fs.writeFileSync(file, '# Context\n\nFrom a failed audit.\n');
+  // The event append is the commit point, so a failed append commits nothing.
+  fs.chmodSync(path.join(h.state, 'events.jsonl'), 0o400);
+  const audit = h.run(['task', 'add', '--title', 'Lost', '--acceptance', 'nothing stays', '--brief', file]);
+  fs.chmodSync(path.join(h.state, 'events.jsonl'), 0o644);
+  assert.equal(audit.code, 1);
+  assert.deepEqual(h.readState('tasks.json').tasks, []);
+  assert.equal(fs.existsSync(path.join(h.state, 'briefs', 'T1.md')), false);
+  assert.deepEqual(fs.readdirSync(h.state).filter((name) => name.startsWith('tasks.json.')), []);
+});
+
+function racedAdd(h, fail) {
+  const file = path.join(h.base, 'brief.md');
+  fs.writeFileSync(file, '# Context\n\nRaced.\n');
+  const receipt = path.join(h.base, 'replacement.json');
+  const preload = path.join(__dirname, 'fixtures', 'task-add-race.js');
+  const refused = h.run(['task', 'add', '--title', 'Raced', '--acceptance', 'raced', '--brief', file], {
+    env: {
+      NODE_OPTIONS: `--require=${JSON.stringify(preload)}`,
+      TEST_ADD_STATE: h.state, TEST_ADD_BIN: BIN, TEST_ADD_RESULT: receipt, TEST_ADD_FAIL: fail,
+      TEST_ADD_OWNER_KEY: h.env.TOWER_CRANE_OWNER_KEY,
+    },
+  });
+  assert.equal(refused.code, 1);
+  assert.match(refused.stderr, /injected .* write failure/);
+  const replacement = JSON.parse(fs.readFileSync(receipt, 'utf8'));
+  assert.equal(replacement.status, 0, JSON.stringify(replacement));
+  return replacement.stdout.trim();
+}
+
+test('task add removes an uncommitted brief before a concurrent add reuses its id', (t) => {
+  const h = makeRepo(t);
+  h.init();
+  assert.equal(racedAdd(h, 'append'), 'T1');
+  assert.deepEqual(h.readState('tasks.json').tasks.map((task) => task.title), ['Different task']);
+  assert.equal(fs.existsSync(path.join(h.state, 'briefs', 'T1.md')), false);
+  const missing = h.run(['brief', 'get', 'T1']);
+  assert.equal(missing.code, 1);
+  assert.match(missing.stderr, /T1 has no brief/);
+});
+
+test('task add that fails after logging its event keeps its task and brief, completed by the next writer', (t) => {
+  const h = makeRepo(t);
+  h.init();
+  assert.equal(racedAdd(h, 'rename'), 'T2');
+  assert.deepEqual(h.readState('tasks.json').tasks.map((task) => task.title), ['Raced', 'Different task']);
+  assert.equal(h.ok(['brief', 'get', 'T1']), '# Context\n\nRaced.');
 });

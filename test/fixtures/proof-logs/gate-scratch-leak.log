@@ -1,0 +1,64 @@
+2026-10-14T02:19:22.1440403Z ##[group]Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+2026-10-14T02:19:22.1441540Z with:
+2026-10-14T02:19:30.9593540Z ##[group]Environment details
+2026-10-14T02:19:31.1732543Z node: v26.11.1
+2026-10-14T02:19:31.1733062Z npm: 11.20.0
+2026-10-14T02:19:31.1733596Z yarn: 1.22.22
+2026-10-14T02:19:31.1734855Z ##[endgroup]
+2026-10-14T02:19:31.1955752Z ##[group]Run node scripts/probe-gate-scratch.js
+2026-10-14T02:19:31.1956224Z [36;1mnode scripts/probe-gate-scratch.js[0m
+2026-10-14T02:19:31.2212188Z shell: /usr/bin/bash -e {0}
+2026-10-14T02:19:31.2212497Z env:
+2026-10-14T02:19:31.2212826Z   TOWER_CRANE_TEST_TMP: /home/runner/.cache/tower-crane-gate-proof
+2026-10-14T02:19:31.2213385Z   TOWER_CRANE_PROOF_OUTPUT: /home/runner/work/_temp/gate-scratch-proof.json
+2026-10-14T02:19:31.2214093Z ##[endgroup]
+2026-10-14T02:45:49.0296263Z {
+2026-10-14T02:45:49.0296881Z   "command": "node test/run.js --test-concurrency=3",
+2026-10-14T02:45:49.0317420Z   "root": "/home/runner/work/tower-crane/tower-crane",
+2026-10-14T02:45:49.0318450Z   "outer": "/home/runner/.cache/tower-crane-gate-proof/gate-scratch-proof-oXshF9/outer",
+2026-10-14T02:45:49.0400908Z     "tower-crane-tqkMhd/repo/.git/logs/refs/heads",
+2026-10-14T02:45:49.0401350Z     "tower-crane-tqkMhd/repo/.git/logs/refs/heads/fixture-change",
+2026-10-14T02:45:49.0401806Z     "tower-crane-tqkMhd/repo/.git/logs/refs/heads/main",
+2026-10-14T02:45:49.0402171Z     "tower-crane-tqkMhd/repo/.git/refs",
+2026-10-14T02:45:49.0402506Z     "tower-crane-tqkMhd/repo/.git/refs/heads",
+2026-10-14T02:45:49.0402910Z     "tower-crane-tqkMhd/repo/.git/refs/heads/fixture-change",
+2026-10-14T02:45:49.0403322Z     "tower-crane-tqkMhd/repo/.git/refs/heads/main",
+2026-10-14T02:45:49.0403691Z     "tower-crane-tqkMhd/repo/.git/refs/remotes",
+2026-10-14T02:45:49.0404383Z     "tower-crane-tqkMhd/repo/.git/refs/remotes/origin",
+2026-10-14T02:45:49.0404775Z     "tower-crane-tqkMhd/repo/.git/refs/tags",
+2026-10-14T02:45:49.0405113Z     "tower-crane-tqkMhd/repo/README.md",
+2026-10-14T02:45:49.0405441Z     "tower-crane-tqkMhd/repo/value.js"
+2026-10-14T02:45:49.0405710Z   ],
+2026-10-14T02:45:49.0405907Z   "gate_parents": [
+2026-10-14T02:45:49.0406117Z     {
+2026-10-14T02:45:49.0406644Z       "path": "/home/runner/.cache/tower-crane-gate-proof/gate-scratch-proof-oXshF9/gates/tower-crane-124tff",
+2026-10-14T02:45:49.0407168Z       "removed": true
+2026-10-14T02:45:49.0407382Z     }
+2026-10-14T02:45:49.0407565Z   ],
+2026-10-14T02:45:49.0407760Z   "cleanup_ok": false,
+2026-10-14T02:45:49.0407984Z   "ok": false,
+2026-10-14T02:45:49.0408243Z   "finished_at": "2026-10-14T02:45:49.015Z"
+2026-10-14T02:45:49.0408518Z }
+2026-10-14T02:45:49.0408926Z Gate scratch proof: /home/runner/work/_temp/gate-scratch-proof.json
+2026-10-14T02:45:49.0421489Z ##[error]Process completed with exit code 1.
+2026-10-14T02:45:49.0511254Z ##[group]Run actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+2026-10-14T02:45:49.0511755Z with:
+2026-10-14T02:45:49.0511982Z   name: gate-scratch-proof
+2026-10-14T02:45:49.0512288Z   path: /home/runner/work/_temp/gate-scratch-proof.json
+2026-10-14T02:45:49.0512615Z   if-no-files-found: error
+2026-10-14T02:45:49.0512853Z   compression-level: 6
+2026-10-14T02:45:49.0513070Z   overwrite: false
+2026-10-14T02:45:49.0513303Z   include-hidden-files: false
+2026-10-14T02:45:49.0513538Z ##[endgroup]
+2026-10-14T02:45:49.2166485Z (node:407796) [DEP0040] DeprecationWarning: The `punycode` module is deprecated. Please use a userland alternative instead.
+2026-10-14T02:45:49.2167582Z (Use `node --trace-deprecation ...` to show where the warning was created)
+2026-10-14T02:45:49.2212094Z With the provided path, there will be 1 file uploaded
+2026-10-14T02:45:49.2217553Z Artifact name is valid!
+2026-10-14T02:45:49.2218328Z Root directory input is valid!
+2026-10-14T02:45:49.4689097Z Beginning upload of artifact content to blob storage
+2026-10-14T02:45:49.4880136Z (node:407796) [DEP0169] DeprecationWarning: `url.parse()` behavior is not standardized and prone to errors that have security implications. Use the WHATWG URL API instead. CVEs are not issued for `url.parse()` vulnerabilities.
+2026-10-14T02:45:49.6119374Z Uploaded bytes 1756
+2026-10-14T02:45:49.6487761Z Finished uploading artifact content to blob storage!
+2026-10-14T02:45:49.6489218Z SHA256 digest of uploaded artifact zip is d625bb76a6d6a43aa84e798ea74d7d3ac96de0ba9203071f235a8f774c9db32b
+2026-10-14T02:45:49.6490287Z Finalizing artifact upload
+2026-10-14T02:45:49.9009847Z Artifact gate-scratch-proof.zip successfully finalized. Artifact ID 11865913796

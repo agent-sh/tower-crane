@@ -14,7 +14,7 @@ if (process.env.LOCK_STRESS_AGE_STAGING) {
     if (path.dirname(dir) === process.env.HOOK_STATE && dir.endsWith('.new')) {
       const old = new Date(Date.now() - 120000);
       fs.utimesSync(dir, old, old);
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20); // wait-allow: holds the aged staging directory open for a sweeper to see
     }
     return result;
   };
@@ -23,12 +23,8 @@ if (process.env.LOCK_STRESS_AGE_STAGING) {
 async function run() {
   const barrier = process.env.LOCK_STRESS_BARRIER;
   fs.writeFileSync(path.join(barrier, String(process.pid)), '');
-  const deadline = performance.now() + 20000;
-  while (!fs.existsSync(path.join(barrier, 'go'))) {
-    if (performance.now() >= deadline) throw new Error('lock stress barrier timed out');
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
-  const end = performance.now() + 3000;
+  await require('../signals').fileWritten(path.join(barrier, 'go'), { check: () => true });
+  const end = performance.now() + 3000; // wait-allow: limit the amount of stress work; barrier readiness uses a file signal
   let writes = 0;
   do {
     const code = await main(['task', 'note', 'T1', `${process.pid}:${writes}`]);

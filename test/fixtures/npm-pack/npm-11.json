@@ -1,13 +1,13 @@
 [
   {
-    "id": "@agentsys/tower-crane@0.1.0",
-    "name": "@agentsys/tower-crane",
+    "id": "@agent-sh/tower-crane@0.1.0",
+    "name": "@agent-sh/tower-crane",
     "version": "0.1.0",
     "size": 1853418,
     "unpackedSize": 2822282,
     "shasum": "ec704c16ad6a54f120a97b59c9f6ed8014e587ea",
     "integrity": "sha512-TBLxv+BgRsPF/ZN3tUQBX0ze1wk3pdaPW1PYZbf4Yblrq5f2wdVpkmBDoYKumKC1bReD7ciOyYYLhTJSdkiRNw==",
-    "filename": "agentsys-tower-crane-0.1.0.tgz",
+    "filename": "agent-sh-tower-crane-0.1.0.tgz",
     "files": [
       {
         "path": ".claude-plugin/marketplace.json",

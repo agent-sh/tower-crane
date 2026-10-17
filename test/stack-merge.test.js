@@ -4,7 +4,13 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const cp = require('node:child_process');
+const { once } = require('node:events');
+const { BIN } = require('./helpers');
+const { waitFor } = require('./canary');
+const { HUNG_TEST_MS } = require('./signals');
 const { setup, stacked } = require('./stack-fixture');
+const { readPublished } = require('./atomic-file');
 
 // Every merge request the stub received, as 'pr N' for gh pr merge, 'async N' for
 // GitHub's asynchronous merge API and 'stack N' for gh stack merge.
@@ -14,6 +20,72 @@ const merges = (f) => f.read().calls.flatMap((c) => {
   return post ? [{ route: `async ${post[1]}`, args: c.args }] : [];
 });
 const routes = (f) => merges(f).map((m) => m.route);
+
+test('wait cancels an asynchronous stack merge query or backoff on the second signal', {
+  skip: process.platform === 'win32' ? 'Windows child.kill does not deliver POSIX signals' : false,
+}, async (t) => {
+  for (const stage of ['query', 'backoff']) {
+    await t.test(stage, async (t) => {
+      const f = stacked(t);
+      f.accept('T1');
+      f.accept('T2');
+      const poll = path.join(f.h.base, 'poll-ready');
+      const sleeping = path.join(f.h.base, 'backoff-ready');
+      const observed = path.join(f.h.base, 'signal-observed');
+      const preload = path.join(f.h.base, 'poll-observer.js');
+      // Hold a poll delay at its configured maximum to test cancellation while sleeping.
+      fs.writeFileSync(preload, `
+const fs = require('node:fs'), timers = require('node:timers/promises');
+const timeout = global.setTimeout, delay = timers.setTimeout;
+const pause = (ms) => {
+  if (ms !== 1000 || !fs.existsSync(${JSON.stringify(poll)})) return ms;
+  fs.writeFileSync(${JSON.stringify(sleeping)}, '');
+  return 10000;
+};
+global.setTimeout = (fn, ms, ...args) => timeout(fn, pause(ms), ...args);
+timers.setTimeout = (ms, ...args) => delay(pause(ms), ...args);
+for (const signal of ['SIGTERM', 'SIGINT']) process.on(signal, () => fs.appendFileSync(${JSON.stringify(observed)}, signal + '\\n'));
+`);
+      const env = { ...f.h.env, TEST_STACK_POLL_READY: poll,
+        NODE_OPTIONS: `${f.h.env.NODE_OPTIONS} --require=${JSON.stringify(preload)}`,
+        ...(stage === 'query' ? { TEST_STACK_POLL_RELEASE: path.join(f.h.base, 'unused-release') } : {}) };
+      const child = cp.spawn(process.execPath, [BIN, 'wait', '--after', '0', '--types', 'never',
+        '--timeout', '300', '--agent', 'orchestrator'], { cwd: f.h.repo, env });
+      let stdout = '', stderr = '';
+      child.stdout.on('data', (data) => { stdout += data; });
+      child.stderr.on('data', (data) => { stderr += data; });
+      const result = once(child, 'close').then(([code]) => ({ code, stdout, stderr }));
+      const bound = setTimeout(() => child.kill('SIGKILL'), HUNG_TEST_MS);
+      try {
+        await waitFor(stage === 'query' ? poll : sleeping, { what: 'the merge reaches its poll' });
+        child.kill('SIGTERM');
+        await waitFor(observed, { what: 'wait starts draining' });
+        assert.equal(child.exitCode, null, 'the first signal drains the active merge');
+        child.kill('SIGINT');
+        const timeout = Symbol('timeout');
+        let deadline;
+        const exited = await Promise.race([result, new Promise((resolve) => {
+          deadline = setTimeout(() => resolve(timeout), 3000); // wait-allow: cancellation must beat the merge's 10 s poll deadline
+        })]);
+        clearTimeout(deadline);
+        assert.notEqual(exited, timeout, 'the second signal cancels the merge without waiting for its poll deadline');
+        assert.equal(exited.code, 0, JSON.stringify(exited));
+        assert.match(exited.stdout, /stopped by SIGTERM after draining 0 gates/);
+        assert.deepEqual(routes(f), ['async 11'], 'the upper merge never starts');
+        const task = f.h.json(['task', 'show', 'T2']);
+        assert.equal(task.evidence.findLast((entry) => entry.type === 'merge').ok, false, 'interrupted merge is retryable');
+        const events = fs.readFileSync(path.join(f.h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+        assert.equal(events.findLast((event) => event.cmd === 'automation').detail.phase, 'deferred');
+        assert.equal(f.read().prs[11].state, 'OPEN');
+        assert.equal(f.read().prs[12].state, 'OPEN');
+      } finally {
+        clearTimeout(bound);
+        if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+        await result;
+      }
+    });
+  }
+});
 
 function confirmLower(f) {
   f.accept('T1');
@@ -71,6 +143,17 @@ for (const command of ['sync', 'unstack']) {
 
 test('a stale local stack uses the single PR merge path after confirming its lower merge', (t) => {
   const f = stacked(t);
+  // The review dry run reads fixture credentials instead of its parent's agent home.
+  Object.assign(f.h.env, {
+    USERPROFILE: f.h.env.HOME,
+    CLAUDE_CONFIG_DIR: path.join(f.h.env.HOME, '.claude'),
+    CODEX_HOME: path.join(f.h.env.HOME, '.codex'),
+    PI_CODING_AGENT_DIR: path.join(f.h.env.HOME, '.pi', 'agent'),
+    GH_CONFIG_DIR: path.join(f.h.env.HOME, '.config', 'gh'),
+    XDG_CONFIG_HOME: path.join(f.h.env.HOME, '.config'),
+    XDG_DATA_HOME: path.join(f.h.env.HOME, '.local', 'share'),
+    OPENCODE_CONFIG_DIR: path.join(f.h.env.HOME, '.config', 'opencode'),
+  });
   confirmLower(f);
   assert.equal(f.h.json(['task', 'show', 'T2']).stack, undefined);
   assert.equal(f.h.json(['task', 'list']).find((t) => t.id === 'T2').stack, undefined);
@@ -132,7 +215,7 @@ test('a stack that adds then modifies the same file merges without changing acce
     assert.equal(f.h.git(['merge-base', head, 'origin/main']), head);
   }
   assert.equal(f.h.git(['show', 'origin/main:T1.txt']), 'T2 modified T1');
-  assert.equal(f.h.git(['rev-parse', wt.branch]), upper);
+  assert.equal(f.h.git(['branch', '--list', wt.branch]), '', 'the merged local branch is removed');
   assert.ok(!fs.existsSync(wt.path), 'the merged task worktree is removed');
   for (const id of ['T1', 'T2']) assert.equal(f.h.json(['task', 'show', id]).evidence.findLast((e) => e.type === 'merge').ok, true);
 });
@@ -194,7 +277,8 @@ test('an unlinked dependent targets main and merges normally when its lower PR m
   const sha = f.h.git(['rev-parse', 'HEAD'], wt.path);
   f.write((d) => {
     d.prs[12] = { number: 12, state: 'OPEN', headRefOid: sha, headRefName: wt.branch,
-      baseRefName: f.lower.branch, isCrossRepository: false, autoMergeRequest: null };
+      baseRefName: f.lower.branch, isCrossRepository: false, autoMergeRequest: null,
+      mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' };
   });
   f.accept('T1');
   f.h.ok(['merge', 'T1']);
@@ -246,7 +330,9 @@ test('stack merge rechecks every accepted head and records evidence for all merg
     assert.ok(evidence.commands.some((c) => c.args[0] === 'api' && c.args.includes(`expected_head_sha=${head}`)));
     assert.match(task.phase?.label || f.h.ok(['task', 'show', id]), /merged/);
   }
-  const upper = f.h.git(['rev-parse', 'HEAD'], f.h.json(['worktree', 'T2']).path);
+  const upper = f.upper.sha;
+  assert.equal(f.h.git(['branch', '--list', f.upper.wt.branch]), '', 'the merged upper branch is removed');
+  assert.ok(!fs.existsSync(f.upper.wt.path), 'the merged upper worktree is removed');
   assert.equal(f.h.git(['merge-base', upper, 'origin/main']), upper);
   assert.equal(f.h.git(['rev-parse', 'origin/main^{tree}']), f.h.git(['rev-parse', `${upper}^{tree}`]));
   f.write((d) => { d.linked = false; });
@@ -437,6 +523,12 @@ test('a refused upper merge retains lower evidence and retries without merging t
   assert.equal(f.h.json(['task', 'show', 'T1']).evidence.findLast((e) => e.type === 'merge').ok, true);
   assert.equal(f.read().prs[12].baseRefName, 'main');
   assert.equal(f.read().prs[12].state, 'OPEN');
+  assert.ok(fs.existsSync(f.upper.wt.path), 'a partial merge keeps the open upper checkout');
+  assert.equal(f.h.git(['rev-parse', f.upper.wt.branch]), f.upper.sha, 'a partial merge keeps the upper branch');
+  assert.equal(f.h.json(['worktree', 'list']).worktrees.find((w) => w.task === 'T2').state, 'live');
+  f.h.ok(['worktree', 'prune']);
+  assert.ok(fs.existsSync(f.upper.wt.path), 'prune keeps the still-open upper task');
+  assert.equal(f.h.git(['rev-parse', f.upper.wt.branch]), f.upper.sha);
   f.write((d) => { delete d.refuseMergePr; });
   f.h.ok(['merge', 'T2']);
   assert.deepEqual(routes(f), ['async 11', 'async 12', 'pr 12', 'async 12']);
@@ -822,7 +914,9 @@ function queued(t) {
   const suite = path.join(f.h.base, 'suite.js');
   fs.writeFileSync(suite, `require('node:fs').appendFileSync(${JSON.stringify(log)}, JSON.stringify(
   ['T1.txt', 'T2.txt', 'moved.txt'].filter((f) => require('node:fs').existsSync(f))) + '\\n');\n`);
-  f.h.ok(['project', 'set', '--tests-cmd', `${shellQuote(process.execPath)} ${shellQuote(suite)}`]);
+  // Each change adds only a text file, which prove would refuse without a test. Run-only runs the suite at the head
+  // instead; the suite log keeps only the head checks, the runs that merge in main's moved.txt.
+  f.h.ok(['project', 'set', '--tests-cmd', `${shellQuote(process.execPath)} ${shellQuote(suite)}`, '--tests-mode', 'run-only']);
   // The shared stack template submits docs tasks, and a submitted task's kind
   // cannot change, so these copies are written as code tasks.
   const tasks = f.h.readState('tasks.json');
@@ -837,7 +931,8 @@ function queued(t) {
   f.acceptCode = (id) => f.h.ok(['accept', id, '--waive', 'tests', '--waive', 'clean', '--waive', 'review', '--waive', 'ci',
     '--reason', 'offline stack fixture']);
   f.consume = () => f.h.run(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
-  f.suites = () => (fs.existsSync(log) ? fs.readFileSync(log, 'utf8').trim().split('\n').map(JSON.parse) : []);
+  f.suites = () => (fs.existsSync(log) ? readPublished(log, 'utf8').trim().split('\n').map(JSON.parse) : [])
+    .filter((files) => files.includes('moved.txt'));
   f.checks = () => fs.readFileSync(path.join(f.h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse)
     .filter((e) => e.cmd === 'head check');
   f.merges = () => routes(f);

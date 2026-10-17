@@ -1,0 +1,1 @@
+- Fixture teardown, event-tail readers, stack linking and package probes wait on process, event and file signals with the suite guard. The worker-slot lease test reads a complete claim record instead of the first visible write.

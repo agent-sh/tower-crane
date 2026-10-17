@@ -6,7 +6,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
 const { pathToFileURL } = require('node:url');
-const { makeRepo, BIN } = require('./helpers');
+const { makeRepo, useFixtureUserFile, BIN } = require('./helpers');
+const { waitUntil, waitOnRepo, killPid } = require('./signals');
 const { CHROME, openBrowser, closeBrowser } = require('./browser');
 test.after(closeBrowser);
 const { gateFixture, gateEvidence } = require('./gate-helpers');
@@ -69,6 +70,15 @@ async function withServers(fn) {
 const tokenOf = (page) => /<meta name="tower-crane-token" content="([0-9a-f]{48})?">/.exec(page)[1] || '';
 const post = (url, token, body) => fetch(url, { method: 'POST', headers: { 'content-type': 'application/json', 'x-tower-crane-token': token }, body: JSON.stringify(body) });
 const log = (h) => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+
+test('driven CLI failures distinguish killed children from failed spawns', (t) => {
+  const h = makeRepo(t);
+  h.init();
+  assert.throws(() => h.json(['task', 'show', 'T1'], { cwd: path.join(h.base, 'missing') }), /error ENOENT/, 'a failed spawn reports its OS error');
+  if (process.platform !== 'win32') {
+    assert.throws(() => h.ok(['task', 'add', '--title', 'Killed write', '--acceptance', 'a'], { hooks: { HOOK_DIE_LOCKED: '1' } }), /signal SIGKILL/, 'a child killed while holding the lock reports its signal');
+  }
+});
 
 test('blocker rows and repeated mentions have distinct identities without breaking serve', async (t) => {
   const h = makeRepo(t);
@@ -292,10 +302,8 @@ test('the snapshot page timer runs without errors when there is no live source',
   // Virtual time runs the page's 5 s refresh timer twice without a real wait.
   const expired = b.seen.length;
   await b.send('Emulation.setVirtualTimePolicy', { policy: 'advance', budget: 11000 });
-  for (const end = Date.now() + 15000; !b.seen.slice(expired).some((m) => m.method === 'Emulation.virtualTimeBudgetExpired');) {
-    assert.ok(Date.now() < end, 'virtual time passed');
-    await new Promise((resolve) => setTimeout(resolve, 50));
-  }
+  await waitUntil(() => b.seen.slice(expired).some((m) => m.method === 'Emulation.virtualTimeBudgetExpired'),
+    { what: 'virtual time passed', signal: t.signal });
   const thrown = b.seen.filter((m) => m.method === 'Runtime.exceptionThrown').map((m) => m.params.exceptionDetails.exception?.description || m.params.exceptionDetails.text);
   assert.deepEqual(thrown, [], 'no uncaught page errors');
 });
@@ -424,15 +432,15 @@ test('in a browser, Enter in a decision note answers the recommended option and 
     };
     const before = log(h).length;
     await enter('D2', 'after the load test');
-    await new Promise((resolve) => setTimeout(resolve, 800));
+    await new Promise((resolve) => setTimeout(resolve, 800)); // wait-allow: observe that Enter without a recommendation makes no write after browser handlers settle
     assert.equal(h.readState('decisions.json').decisions[1].status, 'open', 'without a recommendation Enter answers nothing');
     assert.equal(log(h).length, before);
     await enter('D1', 'history must survive restarts');
     // D2's typed note holds the queue's redraw, so read the state, not the page.
-    for (let i = 0; i < 100 && h.readState('decisions.json').decisions[0].status === 'open'; i++) await new Promise((resolve) => setTimeout(resolve, 100));
+    await waitOnRepo(h, () => h.readState('decisions.json').decisions[0].status !== 'open', 'the recommended answer');
     const d1 = h.readState('decisions.json').decisions[0];
     assert.deepEqual([d1.status, d1.answer, d1.note], ['answered', 'postgres', 'history must survive restarts']);
-    await new Promise((resolve) => setTimeout(resolve, 800));
+    await new Promise((resolve) => setTimeout(resolve, 800)); // wait-allow: verify that the completed answer produces no duplicate form submission
     assert.equal(await b.inPage(`(document.querySelector('form[data-api="/api/decisions/D1/answer"] output') || {}).textContent || ''`), '', 'the form sends once: no second, empty post is refused');
 
     // A refused write keeps its message through the redraw that follows it,
@@ -442,7 +450,7 @@ test('in a browser, Enter in a decision note answers the recommended option and 
     const out = `document.querySelector('form[data-api="/api/decisions/D2/answer"] output').textContent`;
     await b.inPage(`(() => { const x = document.querySelector('form[data-api="/api/decisions/D2/answer"] button[value="friday"]'); x.value = 'sunday'; x.click(); })()`);
     await b.until(`/must be one of/.test(${out})`, 'the refusal');
-    await new Promise((resolve) => setTimeout(resolve, 2500));
+    await new Promise((resolve) => setTimeout(resolve, 2500)); // wait-allow: verify that the refusal remains visible across the scheduled redraw
     assert.match(await b.inPage(out), /must be one of/, 'the refusal is still shown after the redraw');
     await b.inPage(`document.querySelector('form[data-api="/api/decisions/D2/answer"] input[name="note"]').focus()`);
     await b.send('Input.insertText', { text: 'x' });
@@ -656,7 +664,7 @@ test('every view keeps disclosures, event identity, focus and scroll through liv
     await b.send('Page.addScriptToEvaluateOnNewDocument', { source: `
       if (location.pathname.endsWith('/settings')) {
         const frame = window.requestAnimationFrame.bind(window);
-        window.requestAnimationFrame = (callback) => setTimeout(() => frame(callback), 300);
+        window.requestAnimationFrame = (callback) => setTimeout(() => frame(callback), 300); // wait-allow: delay the injected animation frame to exercise restoration before paint
       }
     ` });
     for (const width of [1280, 390]) {
@@ -1089,11 +1097,7 @@ test('in a browser, opening Message on an agent row puts the cursor in its field
     const key = { key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 };
     await b.send('Input.dispatchKeyEvent', { type: 'keyDown', ...key, text: '\r' });
     await b.send('Input.dispatchKeyEvent', { type: 'keyUp', ...key });
-    let msg = null;
-    for (let i = 0; i < 100 && !msg; i++) {
-      msg = log(h).find((e) => e.cmd === 'msg' && e.agent === 'owner');
-      if (!msg) await new Promise((resolve) => setTimeout(resolve, 100));
-    }
+    const msg = await waitOnRepo(h, () => log(h).find((e) => e.cmd === 'msg' && e.agent === 'owner'), 'Enter sent the message');
     assert.ok(msg, 'Enter sent the message');
     assert.deepEqual([msg.task, msg.detail.to, msg.detail.text], ['T1', 'w-1', 'split the API part first']);
   });
@@ -1344,12 +1348,14 @@ test('an open board draws a live reading stale once it stops arriving, with no s
   // Spawn caches under HOME; this one keeps them in the scratch directory.
   const home = path.join(h.base, 'home');
   fs.mkdirSync(path.join(home, '.cache'), { recursive: true });
-  h.json(['spawn', '--task', 'T1'], { env: { HOME: home, XDG_CACHE_HOME: path.join(home, '.cache'), PATH: bin + path.delimiter + h.env.PATH, NODE_OPTIONS: `--require "${stub}"`, LIVE_STEPS: '2', LIVE_STEP_TOKENS: '700', LIVE_HOLD: '60000', LIVE_DONE: path.join(h.base, 'done') } });
-  const end = Date.now() + 20000;
-  while (!h.json(['status']).spend.live.some((l) => l.tokens === 1400)) {
-    assert.ok(Date.now() < end, 'live usage was not read');
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
+  // Inherited harness homes carry origin markers; resolve only this fixture's home.
+  const env = { HOME: home, USERPROFILE: home, XDG_CACHE_HOME: path.join(home, '.cache'),
+    CLAUDE_CONFIG_DIR: path.join(home, '.claude'), CODEX_HOME: path.join(home, '.codex'),
+    PI_CODING_AGENT_DIR: path.join(home, '.pi', 'agent'), GH_CONFIG_DIR: path.join(home, '.config', 'gh'),
+    XDG_CONFIG_HOME: path.join(home, '.config'), XDG_DATA_HOME: path.join(home, '.local', 'share'),
+    OPENCODE_CONFIG_DIR: path.join(home, '.config', 'opencode') };
+  h.json(['spawn', '--task', 'T1'], { env: { ...env, PATH: bin + path.delimiter + h.env.PATH, NODE_OPTIONS: `--require "${stub}"`, LIVE_STEPS: '2', LIVE_STEP_TOKENS: '700', LIVE_HOLD: '60000', LIVE_DONE: path.join(h.base, 'done') } });
+  await waitOnRepo(h, () => h.json(['status']).spend.live.some((l) => l.tokens === 1400), 'live usage was not read');
   await withServers(async (servers) => {
     const url = await startServe(servers, h, 'viewer');
     const b = await openBrowser(t);
@@ -1357,9 +1363,9 @@ test('an open board draws a live reading stale once it stops arriving, with no s
     await b.until(`document.querySelector('.conn').dataset.conn === 'live' && !!document.querySelector('[data-key="agent-T1"] [data-live-state="live"]')`, 'the live reading on the row');
     // The supervisor goes away and the agent keeps running: no reading, no write.
     const monitor = log(h).find((e) => e.cmd === 'spawn' && e.task === 'T1').detail.monitor_pid;
-    process.kill(monitor, 'SIGKILL');
+    killPid(monitor, 'SIGKILL');
     const events = log(h).length;
-    await b.until(`!!document.querySelector('[data-key="agent-T1"] [data-live-state="stale"]') && !!document.querySelector('#queue [data-key="runaway-T1-stale"]')`, 'the stale reading and its Now item', 30000);
+    await b.until(`!!document.querySelector('[data-key="agent-T1"] [data-live-state="stale"]') && !!document.querySelector('#queue [data-key="runaway-T1-stale"]')`, 'the stale reading and its Now item');
     assert.equal(log(h).length, events, 'nothing was written: the page aged the reading itself');
     assert.match(await b.inPage(`document.querySelector('h1[data-status]').textContent`), /1 not counted/);
     assert.doesNotMatch(await b.inPage(`document.querySelector('[data-key="agent-T1"] [data-usage]').textContent`), /(^|\s)0 tokens/, 'never drawn as zero');
@@ -1376,9 +1382,24 @@ test('the board shows a refused brokered message as trouble, without its text', 
   t.after(() => broker.close());
   const refused = await B.forward(job.broker, ['msg', '--to', 'worker-T1-1', 'text the board must not show'], h.state);
   assert.equal(refused.code, 1, refused.stderr);
+  useFixtureUserFile(t, h);
   const board = require('../lib/board/model').build(require('../lib/state').loadState(h.state));
   const item = board.history.find((e) => e.cmd === 'msg refused');
   assert.deepEqual([item.kind, item.tone], ['trouble', 'fault']);
   assert.match(item.text, /worker-T2-1 tried to message worker-T1-1; the broker refused it/);
   assert.ok(!JSON.stringify(board).includes('text the board must not show'), 'the board never shows the refused text');
+});
+
+test('the board marks a ready task without a brief until its brief is written', (t) => {
+  const h = makeRepo(t);
+  h.init();
+  h.ok(['task', 'add', '--title', 'briefless', '--acceptance', 'marked']);
+  useFixtureUserFile(t, h);
+  const marks = () => {
+    const st = require('../lib/state').loadState(h.state);
+    return [require('../lib/board/model').build(st).ready.map((r) => r.brief), require('../lib/render').renderHtml(st).includes('no brief')];
+  };
+  assert.deepEqual(marks(), [[false], true]);
+  h.ok(['brief', 'set', 'T1', '-'], { input: 'Context.\n' });
+  assert.deepEqual(marks(), [[true], false]);
 });

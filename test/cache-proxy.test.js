@@ -1,5 +1,7 @@
 'use strict';
 
+const { fileWritten } = require('./signals');
+
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const cp = require('node:child_process');
@@ -98,14 +100,11 @@ async function start(t, args = []) {
     return Buffer.from(await response.arrayBuffer());
   };
   const entries = async n => {
-    for (let i = 0; i < 100; i++) {
-      const lines = fs.existsSync(log) ? fs.readFileSync(log, 'utf8').split('\n').filter(Boolean) : [];
-      if (lines.length >= n) return { lines: lines.map(l => JSON.parse(l)), text: lines.join('\n') };
-      await new Promise(r => setTimeout(r, 20));
-    }
-    throw new Error(`log has fewer than ${n} entries`);
+    await fileWritten(log, { check: text => text.trim().split('\n').filter(Boolean).length >= n });
+    const lines = fs.readFileSync(log, 'utf8').split('\n').filter(Boolean);
+    return { lines: lines.map(l => JSON.parse(l)), text: lines.join('\n') };
   };
-  return { send, entries, received };
+  return { send, entries, received, port };
 }
 
 const SYSTEM = 'You are a reviewer. '.repeat(20);
@@ -154,6 +153,23 @@ test('a body the proxy cannot analyze is forwarded unchanged and the proxy keeps
   assert.deepEqual(proxy.received[0].body, odd);
   assert.match(lines[0].analysis_error, /\S/);
   assert.equal(lines[1].status, 200);
+});
+
+test('an absolute-form request target is refused instead of changing the upstream host', async (t) => {
+  // Appended to a base without a port, `http://x/` turns the host 127.0.0.1 into 127.0.0.1http.
+  const proxy = await start(t, ['--mantle', 'http://127.0.0.1']);
+  const status = await new Promise((resolve, reject) => {
+    const req = http.request({ host: '127.0.0.1', port: proxy.port, method: 'GET', path: 'http://example.invalid/x' }, res => {
+      res.resume();
+      resolve(res.statusCode);
+    });
+    req.on('error', reject);
+    req.end();
+  });
+  assert.equal(status, 400);
+  const { lines } = await proxy.entries(1);
+  assert.equal(lines[0].error, 'invalid request path');
+  assert.equal(proxy.received.length, 0);
 });
 
 test('a codex fork takes the prompt_cache_key of the request it extends', async (t) => {

@@ -6,8 +6,11 @@ const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
 const { makeRepo, BIN, HOOKS } = require('./helpers');
-const { CHROME, openBrowser } = require('./browser');
+const { CHROME, openBrowser, closeBrowser } = require('./browser');
 const Authority = require('../lib/authority');
+const { waitOnRepo, waitUntil } = require('./signals');
+
+test.after(closeBrowser);
 
 function fixture(t) {
   const h = makeRepo();
@@ -344,13 +347,7 @@ test('the board pauses dispatch, interrupts a real supervised fixture and delega
   assert.match(h.run(['spawn', '--task', 'T1']).stderr, /project paused/);
   h.ok(['project', 'set', '--paused', '']);
   const run = h.json(['spawn', '--task', 'T1']);
-  async function until(fn) {
-    const deadline = Date.now() + 15000;
-    while (!fn()) {
-      assert.ok(Date.now() < deadline, 'fixture process completed the transition');
-      await new Promise((resolve) => setTimeout(resolve, 25));
-    }
-  }
+  const until = (fn) => waitOnRepo(h, fn, "fixture process completed the transition");
   await until(() => h.readState('tasks.json').tasks[0].claim);
   const { post } = await serve(t, h);
   const stopped = await post(request('interrupt', {}, ['T1']));
@@ -432,8 +429,9 @@ test('browser controls save limits, approve and decline requests, keep saved val
   await b.send('Emulation.setDeviceMetricsOverride', { width: 1920, height: 1080, deviceScaleFactor: 1, mobile: false });
   await b.goto(keyed);
   await b.until(`document.querySelector('.conn').dataset.conn === 'live'`, 'controls connection');
+  // A user cannot change a disabled control; a form is disabled while it saves.
   async function fill(id, name, value, event = 'input') {
-    await b.inPage(`(() => {const e = document.querySelector('#${id} [name="${name}"]'); e.value=${JSON.stringify(value)}; e.dispatchEvent(new Event('${event}',{bubbles:true}));})()`);
+    await b.inPage(`(() => {const e = document.querySelector('#${id} [name="${name}"]'); if (e.disabled) throw new Error('#${id} ${name} is disabled'); e.value=${JSON.stringify(value)}; e.dispatchEvent(new Event('${event}',{bubbles:true}));})()`);
   }
   const read = (id, name) => b.inPage(`document.querySelector('#${id} [name="${name}"]').value`);
   async function submit(id, condition) {
@@ -489,9 +487,22 @@ test('browser controls save limits, approve and decline requests, keep saved val
   assert.equal(await read('rung', '$value'), 'board-model');
   await fill('task', '$field', 'tier', 'change');
   await fill('task', '$value', 'hard');
+  // With another form holding input, the save then refreshes the selectors'
+  // data. The reply must not read as saved while that refresh is held, or the
+  // next selection loads the tier from before the save.
+  await b.send('Fetch.enable', { patterns: [{ urlPattern: '*/api/controls', requestStage: 'Request' }] });
+  const from = b.seen.length;
+  const paused = (method) => waitUntil(() => b.seen.slice(from).find((m) => m.method === 'Fetch.requestPaused' && m.params.request.method === method),
+    { what: `the controls ${method} request` });
   await b.inPage(`document.querySelector('#task button[type="submit"]').click()`);
+  await b.send('Fetch.continueRequest', { requestId: (await paused('POST')).params.requestId });
+  const refresh = await paused('GET');
+  assert.equal(await b.inPage(`document.querySelector('#task .result').textContent`), 'Saving...');
+  await b.send('Fetch.continueRequest', { requestId: refresh.params.requestId });
+  await b.send('Fetch.disable');
   await b.until(`document.querySelector('#task .result').textContent && document.querySelector('#task .result').textContent !== 'Saving...'`, 'task saved without reload');
-  assert.equal(h.readState('tasks.json').tasks[0].tier, 'hard');
+  // The save's reply names an error when the server refused it.
+  assert.equal(h.readState('tasks.json').tasks[0].tier, 'hard', await b.inPage(`document.querySelector('#task .result').textContent`));
   await fill('task', '$field', 'kind', 'change');
   await fill('task', '$field', 'tier', 'change');
   assert.equal(await read('task', '$value'), 'hard');
@@ -513,4 +524,59 @@ test('browser controls save limits, approve and decline requests, keep saved val
   await b.goto(url + 'controls');
   await b.send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
   assert.equal(await b.inPage(`document.documentElement.scrollWidth <= innerWidth`), true);
+});
+
+test('a save whose data reload fails or hangs says it saved, shows the stale notice, frees the form and refuses a save from the old data', { skip: !CHROME && 'no Chrome to drive' }, async (t) => {
+  const h = fixture(t);
+  h.init();
+  h.ok(['task', 'add', '--title', 'Tier target', '--acceptance', 'runs']);
+  h.ok(['task', 'update', 'T1', '--tier', 'medium']);
+  const { keyed } = await serve(t, h, 'owner', { fetchToken: false });
+  const b = await openBrowser(t);
+  await b.goto(keyed);
+  await b.until(`document.querySelector('.conn').dataset.conn === 'live'`, 'controls connection');
+  const fill = (id, name, value, event = 'input') => b.inPage(`(() => {const e = document.querySelector('#${id} [name="${name}"]'); e.value=${JSON.stringify(value)}; e.dispatchEvent(new Event('${event}',{bubbles:true}));})()`);
+  const reply = () => b.inPage(`(() => { const f = document.getElementById('task'), r = f.querySelector('.result');
+    return {text: r.textContent, error: r.classList.contains('error'), disabled: [...f.querySelectorAll('button,input,select')].some(e => e.disabled), stale: !document.getElementById('stale').hidden}; })()`);
+  // Unsaved input in another form keeps the page in place, so a save reloads only its data.
+  async function edit() {
+    await fill('project-workers', 'workers', '7');
+    await fill('task', '$field', 'tier', 'change');
+  }
+  async function save(tier, onRefresh) {
+    await fill('task', '$value', tier);
+    await b.send('Fetch.enable', { patterns: [{ urlPattern: '*/api/controls', requestStage: 'Request' }] });
+    const from = b.seen.length;
+    const paused = (method) => waitUntil(() => b.seen.slice(from).find((m) => m.method === 'Fetch.requestPaused' && m.params.request.method === method),
+      { what: `the controls ${method} request` });
+    await b.inPage(`document.querySelector('#task button[type="submit"]').click()`);
+    await b.send('Fetch.continueRequest', { requestId: (await paused('POST')).params.requestId });
+    await onRefresh((await paused('GET')).params.requestId);
+    await b.until(`document.querySelector('#task .result').textContent !== 'Saving...'`, `tier ${tier} reply`);
+    await b.send('Fetch.disable');
+    assert.equal(h.readState('tasks.json').tasks[0].tier, tier);
+    assert.deepEqual(await reply(),
+      { text: 'updated T1 The page could not load the saved state, so its selectors may show older values. Reload to see it.', error: false, disabled: false, stale: true });
+  }
+  await edit();
+  // The save went through; only the reload of the page's data failed.
+  await save('hard', (requestId) => b.send('Fetch.failRequest', { requestId, errorReason: 'Failed' }));
+  // The selectors still load the data from before that save, so saving what
+  // they show is refused rather than writing the old tier back.
+  await fill('task', '$field', 'kind', 'change');
+  await fill('task', '$field', 'tier', 'change');
+  assert.equal(await b.inPage(`document.querySelector('#task [name="$value"]').value`), 'medium');
+  await b.inPage(`document.querySelector('#task button[type="submit"]').click()`);
+  await b.until(`!['', 'Saving...'].includes(document.querySelector('#task .result').textContent)`, 'stale save reply');
+  assert.deepEqual(await reply(), { text: 'The state changed while you were editing. Reload before saving.', error: true, disabled: false, stale: true });
+  assert.equal(h.readState('tasks.json').tasks[0].tier, 'hard');
+  await b.inPage(`window.beforeReload = true; document.getElementById('reload').click()`);
+  await b.restored(`!window.beforeReload`, 'reloaded controls');
+  await edit();
+  // A reload that never answers is cut off by its timeout. The page's bound is
+  // shortened so the test does not wait it out, yet stays long enough that the
+  // request reaches interception on a loaded machine before it aborts.
+  await b.inPage(`(() => { const timeout = AbortSignal.timeout.bind(AbortSignal); AbortSignal.timeout = (ms) => { window.refreshBound = ms; return timeout(1000); }; })()`);
+  await save('easy', async () => {});
+  assert.ok(await b.inPage('window.refreshBound > 0'));
 });

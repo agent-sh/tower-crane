@@ -1,5 +1,7 @@
 'use strict';
 
+const { childClosed, waitOnRepo } = require('./signals');
+
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -7,30 +9,10 @@ const cp = require('node:child_process');
 const path = require('node:path');
 const { makeRepo, BIN } = require('./helpers');
 
-function waitForExit(child, timeoutMs = 10000) {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
-      child.kill();
-      reject(new Error(`tower-crane did not exit within ${timeoutMs} ms`));
-    }, timeoutMs);
-    child.once('error', (error) => {
-      clearTimeout(timer);
-      reject(error);
-    });
-    child.once('close', (code, signal) => {
-      clearTimeout(timer);
-      resolve({ code, signal });
-    });
-  });
-}
+const waitForExit = childClosed;
 
-async function waitForImportedTitle(h, title) {
-  const deadline = Date.now() + 10000;
-  while (Date.now() < deadline) {
-    if (h.readState('tasks.json').tasks.some((task) => task.title === title)) return;
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
-  assert.fail('the plan import did not finish its state write');
+function waitForImportedTitle(h, title) {
+  return waitOnRepo(h, () => h.readState('tasks.json').tasks.some((task) => task.title === title));
 }
 
 test('a closed stdout pipe exits quietly after completing the state write', async (t) => {
@@ -60,6 +42,28 @@ test('a closed stdout pipe exits quietly after completing the state write', asyn
   assert.equal(result.code, 0, stderr);
   assert.doesNotMatch(stderr, /write EPIPE|Unhandled 'error' event/);
   assert.equal(h.readState('tasks.json').tasks[0].title, title);
+});
+
+test('a stdout pipe that reports EOF, as Windows does for a reader that is gone, exits quietly after the state write', async (t) => {
+  const h = makeRepo(t);
+  h.init();
+  const hook = path.join(__dirname, 'fixtures', 'stdout-eof.js').replace(/\\/g, '/');
+  const child = cp.spawn(process.execPath, [BIN, 'plan', 'import', '-', '--json'], {
+    cwd: h.repo,
+    env: { ...h.env, NODE_OPTIONS: `--require "${hook}"` },
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  const exited = waitForExit(child);
+  let stderr = '';
+  child.stderr.setEncoding('utf8');
+  child.stderr.on('data', (chunk) => { stderr += chunk; });
+  child.stdout.resume();
+  child.stdin.end(JSON.stringify([{ title: 'written before the pipe broke', acceptance: ['ready'] }]));
+  const result = await exited;
+  assert.equal(result.signal, null);
+  assert.equal(result.code, 0, stderr);
+  assert.doesNotMatch(stderr, /write EOF|Unhandled 'error' event/);
+  assert.equal(h.readState('tasks.json').tasks[0].title, 'written before the pipe broke');
 });
 
 test('a closed stderr pipe preserves the command exit code', async (t) => {
@@ -94,7 +98,7 @@ test('a closed stderr pipe does not truncate large stdout output', async (t) => 
   child.once('spawn', () => child.stderr.destroy());
   child.stdin.end(JSON.stringify([{ title, acceptance: ['ready'] }]));
   await waitForImportedTitle(h, title);
-  await new Promise((resolve) => setTimeout(resolve, 100));
+  await new Promise((resolve) => setTimeout(resolve, 100)); // wait-allow: keep stdout undrained to exercise pipe backpressure after the state write
   const exitedBeforeDrain = child.exitCode !== null;
 
   let stdout = '';
@@ -117,7 +121,7 @@ test('serve stops when its stdout pipe closes', async (t) => {
     env: h.env,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
-  const exited = waitForExit(child, 3000);
+  const exited = waitForExit(child);
   let stderr = '';
   child.stderr.setEncoding('utf8');
   child.stderr.on('data', (chunk) => { stderr += chunk; });

@@ -1,0 +1,2 @@
+- Synchronize missing-log recovery assertions with the monitor's exit receipt.
+- Use the runner's existing per-test deadline for fallback exit receipts after Windows completion exceeded the shorter helper deadline.

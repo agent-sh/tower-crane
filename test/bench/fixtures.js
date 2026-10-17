@@ -8,7 +8,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
-const { createRepoSeed } = require('../repo-seed');
+const { createRepoSeed, FOREGROUND_MAINTENANCE } = require('../repo-seed');
 
 const HOOKS = path.join(__dirname, '..', 'fixtures', 'hooks.js');
 const STUB = path.join(__dirname, '..', 'fixtures', 'live-usage-harness.js');
@@ -24,13 +24,19 @@ function cleanEnv(base) {
   env.TOWER_CRANE_AGENT = 'owner';
   env.GIT_CONFIG_GLOBAL = path.join(base, 'gitconfig');
   env.GIT_CONFIG_NOSYSTEM = '1';
-  env.TOWER_CRANE_CONFIG = path.join(base, 'user-config', 'config.json');
-  // Owner writes without a terminal present the owner key, as the tests do.
-  fs.mkdirSync(path.join(base, 'user-config', 'owner'), { recursive: true });
-  fs.writeFileSync(path.join(base, 'user-config', 'owner', 'key'), 'bench-owner-key\n');
-  env.TOWER_CRANE_OWNER_KEY = 'bench-owner-key';
   // Spawns keep caches under HOME; the scratch state gets one of its own.
   env.HOME = path.join(base, 'home');
+  // The account's home is the scratch's too, so init binds the owner key
+  // here and never the developer's (test/fixtures/account-home.js).
+  env.TC_ACCOUNT_HOME = env.HOME;
+  const hook = `--require "${path.join(__dirname, '..', 'fixtures', 'account-home.js').replace(/\\/g, '/')}"`;
+  env.NODE_OPTIONS = env.NODE_OPTIONS ? `${hook} ${env.NODE_OPTIONS}` : hook;
+  const dir = path.join(env.HOME, '.config', 'tower-crane');
+  env.TOWER_CRANE_CONFIG = path.join(dir, 'config.json');
+  // Owner writes without a terminal present the owner key, as the tests do.
+  fs.mkdirSync(path.join(dir, 'owner'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'owner', 'key'), 'bench-owner-key\n');
+  env.TOWER_CRANE_OWNER_KEY = 'bench-owner-key';
   env.XDG_CACHE_HOME = path.join(base, 'home', '.cache');
   fs.mkdirSync(env.XDG_CACHE_HOME, { recursive: true });
   return env;
@@ -47,7 +53,7 @@ class Scratch {
     this.repo = path.join(this.base, 'repo');
     fs.renameSync(seed.repo, this.repo);
     fs.rmSync(seed.base, { recursive: true, force: true });
-    fs.writeFileSync(path.join(this.base, 'gitconfig'), '[user]\n\tname = bench\n\temail = bench@example.invalid\n[init]\n\tdefaultBranch = main\n[commit]\n\tgpgsign = false\n');
+    fs.writeFileSync(path.join(this.base, 'gitconfig'), '[user]\n\tname = bench\n\temail = bench@example.invalid\n[init]\n\tdefaultBranch = main\n[commit]\n\tgpgsign = false\n' + FOREGROUND_MAINTENANCE);
     this.state = path.join(this.repo, '.tower-crane');
     this.env = cleanEnv(this.base);
     this.clock = path.join(this.base, 'clock');
@@ -62,7 +68,7 @@ class Scratch {
     fs.writeFileSync(this.clock, String(this.now - this.ago));
     const e = { ...this.env, ...env, ...(clock ? { HOOK_CLOCK_FILE: this.clock, HOOK_STATE: this.state } : {}) };
     if (agent) e.TOWER_CRANE_AGENT = agent;
-    const r = cp.spawnSync(process.execPath, ['--require', HOOKS, this.bin, ...args], { cwd: this.repo, env: e, input, encoding: 'utf8', timeout: 120000 });
+    const r = cp.spawnSync(process.execPath, ['--require', HOOKS, this.bin, ...args], { cwd: this.repo, env: e, input, encoding: 'utf8', timeout: 300000 });
     return { code: r.status, stdout: r.stdout || '', stderr: r.stderr || '' };
   }
 

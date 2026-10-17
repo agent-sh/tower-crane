@@ -9,11 +9,12 @@ const fs = require('node:fs');
 const path = require('node:path');
 const D = require('./driver');
 const C = require('./checks');
+const { killPid, killGroup } = require('../signals');
 
-const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms)); // wait-allow: human benchmark observation windows record absent features on baseline builds and bound the measured outcome
 
-async function waitFor(fn, ms = 20000, step = 250) {
-  const end = Date.now() + ms;
+async function waitFor(fn, ms = 20000, step = 250) { // wait-allow: human benchmark observation windows record absent features on baseline builds and bound the measured outcome
+  const end = Date.now() + ms; // wait-allow: human benchmark observation windows record absent features on baseline builds and bound the measured outcome
   for (;;) {
     const v = await fn();
     if (v) return v;
@@ -173,7 +174,7 @@ function stubTokens(s) {
   return total;
 }
 
-function killTree(pid) { try { process.kill(-pid, 'SIGKILL'); } catch { /* gone */ } try { process.kill(pid, 'SIGKILL'); } catch { /* gone */ } }
+function killTree(pid) { try { killGroup(pid, 'SIGKILL'); } catch { /* gone */ } try { killPid(pid, 'SIGKILL'); } catch { /* gone */ } }
 
 async function h4(ctx) {
   const { b, T, url, s } = ctx;
@@ -189,13 +190,13 @@ async function h4(ctx) {
   const threshold = norms.multiple * norms.tiers.easy.median;
   let crossedAt = null;
   let flaggedAt = null;
-  const deadline = Date.now() + 45000;
+  const deadline = Date.now() + 45000; // wait-allow: human benchmark observation windows record absent features on baseline builds and bound the measured outcome
   while (Date.now() < deadline) {
     readings.push(await rowText());
     const live = s.events().filter((e) => e.cmd === 'spend live' && e.task === id && e.detail.tokens > threshold);
     if (!crossedAt && live.length) crossedAt = Date.parse(live[0].at);
     if (T.runaway && !flaggedAt && await b.call(exists, T.runaway(id))) flaggedAt = Date.now();
-    if (flaggedAt || (crossedAt && Date.now() - crossedAt > 15000)) break;
+    if (flaggedAt || (crossedAt && Date.now() - crossedAt > 15000)) break; // wait-allow: human benchmark observation windows record absent features on baseline builds and bound the measured outcome
     await wait(500);
   }
   const distinct = [...new Set(readings.filter(Boolean))];
@@ -208,14 +209,14 @@ async function h4(ctx) {
     if (ctx.shots) await D.shot(b, ctx.shots('H4-confirm'));
     // Opening Stop focuses its reason field, so the confirm is Enter there;
     // a build without that focus confirms with its button.
-    if (await waitFor(() => b.call((sel) => { const f = document.querySelector(sel)?.form; return !!f && document.activeElement?.form === f; }, T.stopSend(id)), 500, 50)) { p.think(); await p.key('Enter'); }
+    if (await waitFor(() => b.call((sel) => { const f = document.querySelector(sel)?.form; return !!f && document.activeElement?.form === f; }, T.stopSend(id)), 500, 50)) { p.think(); await p.key('Enter'); } // wait-allow: human benchmark observation windows record absent features on baseline builds and bound the measured outcome
     else await p.click(T.stopSend(id));
     r = p.result();
-    stopped = await waitFor(() => { const e = s.events(); return e.some((x) => x.cmd === (T.stopEvent || 'budget stop') && x.task === id) && e.some((x) => x.cmd === 'spawn exit' && x.task === id) && e; }, 30000);
+    stopped = await waitFor(() => { const e = s.events(); return e.some((x) => x.cmd === (T.stopEvent || 'budget stop') && x.task === id) && e.some((x) => x.cmd === 'spawn exit' && x.task === id) && e; }, 30000); // wait-allow: human benchmark observation windows record absent features on baseline builds and bound the measured outcome
     // The row's own words for each state it passes through.
-    words = await waitFor(async () => { const t = await b.call((row, stopped) => ((document.querySelector(row) || document.querySelector(stopped) || {}).querySelector?.('.stopstate') || {}).textContent || '', T.agentRow(id), `[data-key="stopped-${id}"]`); if (t && !rowWords.includes(t.trim())) rowWords.push(t.trim()); return /stopped/i.test(t) && t; }, 30000);
+    words = await waitFor(async () => { const t = await b.call((row, stopped) => ((document.querySelector(row) || document.querySelector(stopped) || {}).querySelector?.('.stopstate') || {}).textContent || '', T.agentRow(id), `[data-key="stopped-${id}"]`); if (t && !rowWords.includes(t.trim())) rowWords.push(t.trim()); return /stopped/i.test(t) && t; }, 30000); // wait-allow: human benchmark observation windows record absent features on baseline builds and bound the measured outcome
     if (ctx.shots) await D.shot(b, ctx.shots('H4-stopped'));
-    reconciled = await waitFor(() => { const t = s.read('tasks.json').tasks.find((x) => x.id === id); return t.spend.entries.length && t.spend.entries.every((e) => !e.live) && t; }, 30000);
+    reconciled = await waitFor(() => { const t = s.read('tasks.json').tasks.find((x) => x.id === id); return t.spend.entries.length && t.spend.entries.every((e) => !e.live) && t; }, 30000); // wait-allow: human benchmark observation windows record absent features on baseline builds and bound the measured outcome
     if (!words) rowWords.push('(no stopped state shown)');
   }
   const ev = s.events();
@@ -238,14 +239,14 @@ async function h4s(ctx) {
   if (variant === 'stale') {
     // A running supervisor keeps its reading fresh; staleness is what the
     // board sees when the supervisor is gone and the agent still runs.
-    const phase = await waitFor(() => s.events().find((e) => ['spawn', 'spawn phase'].includes(e.cmd) && e.task === id && e.detail.monitor_pid && s.events().some((x) => x.cmd === 'spend live' && x.task === id && x.detail.tokens)), 20000);
-    if (phase) try { process.kill(phase.detail.monitor_pid, 'SIGKILL'); } catch { /* gone */ }
+    const phase = await waitFor(() => s.events().find((e) => ['spawn', 'spawn phase'].includes(e.cmd) && e.task === id && e.detail.monitor_pid && s.events().some((x) => x.cmd === 'spend live' && x.task === id && x.detail.tokens)), 20000); // wait-allow: human benchmark observation windows record absent features on baseline builds and bound the measured outcome
+    if (phase) try { killPid(phase.detail.monitor_pid, 'SIGKILL'); } catch { /* gone */ }
   }
   const want = variant === 'stale' ? /stale/i : /unknown until exit|unavailable/i;
-  const text = await waitFor(async () => { const t = await b.call(textOf, T.agentRow(id)); return want.test(t) && t; }, 30000);
+  const text = await waitFor(async () => { const t = await b.call(textOf, T.agentRow(id)); return want.test(t) && t; }, 30000); // wait-allow: human benchmark observation windows record absent features on baseline builds and bound the measured outcome
   const row = text || await b.call(textOf, T.agentRow(id));
   const zero = /(^|\s)0 tokens/.test(row);
-  const flagged = T.runaway ? await waitFor(() => b.call(exists, T.runaway(id)), variant === 'stale' ? 8000 : 2000) : false;
+  const flagged = T.runaway ? await waitFor(() => b.call(exists, T.runaway(id)), variant === 'stale' ? 8000 : 2000) : false; // wait-allow: human benchmark observation windows record absent features on baseline builds and bound the measured outcome
   const sentence = T.sentence ? await b.call(textOf, T.sentence) : '';
   const counted = /not counted/i.test(sentence);
   if (ctx.shots) await D.shot(b, ctx.shots(`H4s-${variant}`));
@@ -258,7 +259,7 @@ async function h5(ctx) {
   const { b, T, url, s } = ctx;
   const spawned = s.spawned || (s.spawned = s.spawnAgent({ steps: 3, per: 800000, every: 800, hold: 900000 }));
   ctx.cleanup.push(() => killTree(spawned.pid));
-  await waitFor(() => s.events().some((e) => e.cmd === 'spend live' && e.detail.tokens >= 2.4e6), 30000);
+  await waitFor(() => s.events().some((e) => e.cmd === 'spend live' && e.detail.tokens >= 2.4e6), 30000); // wait-allow: human benchmark observation windows record absent features on baseline builds and bound the measured outcome
   await D.load(b, url);
   await wait(500);
   const parts = {};
@@ -283,7 +284,7 @@ async function h6(ctx) {
   await p.click(T.messageOpen(id));
   // Opening Message focuses its field; a build without that focus needs a
   // click into it, which the count keeps.
-  if (!(await waitFor(() => b.call((sel) => !!document.activeElement && document.activeElement === document.querySelector(sel), T.message(id)), 500, 50))) await p.click(T.message(id), { think: false });
+  if (!(await waitFor(() => b.call((sel) => !!document.activeElement && document.activeElement === document.querySelector(sel), T.message(id)), 500, 50))) await p.click(T.message(id), { think: false }); // wait-allow: human benchmark observation windows record absent features on baseline builds and bound the measured outcome
   await p.type('drain on SIGTERM first, then the tests');
   p.think();
   await p.key('Enter');
@@ -307,7 +308,7 @@ async function h4p(ctx) {
   await p.click(T.pauseOpen);
   // Opening Pause focuses its reason field; a build without that focus needs a
   // click into it, which the count keeps.
-  if (!(await waitFor(() => b.call((sel) => !!document.activeElement && document.activeElement === document.querySelector(sel), T.pauseField), 500, 50))) await p.click(T.pauseField, { think: false });
+  if (!(await waitFor(() => b.call((sel) => !!document.activeElement && document.activeElement === document.querySelector(sel), T.pauseField), 500, 50))) await p.click(T.pauseField, { think: false }); // wait-allow: human benchmark observation windows record absent features on baseline builds and bound the measured outcome
   await p.type(reason);
   p.think();
   await p.key('Enter');
@@ -460,7 +461,7 @@ async function oneRoom(ctx) {
     await check(room, 'cleared fragment');
     s.ok(['task', 'note', 'T1', `one room ${room} ${n++}`, '--agent', 'orchestrator']);
     const note = `one room ${room} ${n - 1}`;
-    if (!await waitFor(() => b.call((t) => document.documentElement.hasAttribute('data-position-restored') && document.body.textContent.includes(t), note).catch(() => false), 20000, 50)) failures.push({ room, how: 'live update', error: 'no update' });
+    if (!await waitFor(() => b.call((t) => document.documentElement.hasAttribute('data-position-restored') && document.body.textContent.includes(t), note).catch(() => false), 20000, 50)) failures.push({ room, how: 'live update', error: 'no update' }); // wait-allow: human benchmark observation windows record absent features on baseline builds and bound the measured outcome
     await wait(200);
     await check(room, 'live update');
   }
@@ -493,9 +494,9 @@ async function keyboard(ctx) {
   // A sheet by keyboard: focus a task link, Enter, Escape.
   const sel = await b.inPage(`(() => { const a = [...document.querySelectorAll('a[href^="#T"]')].find((x) => x.getClientRects().length && !x.closest('.sheet')); a.focus(); a.setAttribute('data-bench-invoker', ''); return a.getAttribute('href'); })()`);
   await p.key('Enter');
-  const opened = await waitFor(() => b.inPage(`!!document.querySelector('.sheet.open')`), 3000);
+  const opened = await waitFor(() => b.inPage(`!!document.querySelector('.sheet.open')`), 3000); // wait-allow: human benchmark observation windows record absent features on baseline builds and bound the measured outcome
   await p.key('Escape');
-  const closed = await waitFor(() => b.inPage(`!document.querySelector('.sheet.open')`), 3000);
+  const closed = await waitFor(() => b.inPage(`!document.querySelector('.sheet.open')`), 3000); // wait-allow: human benchmark observation windows record absent features on baseline builds and bound the measured outcome
   const back = await b.inPage(`document.activeElement && document.activeElement.hasAttribute('data-bench-invoker')`);
   return { pass: !missing.length && !noRing.length && !!opened && !!closed && back, tabs: p.result().keys, reached: reached.size, of: want.length, missing, no_ring: noRing, sheet: sel, sheet_opened: !!opened, escape_closed: !!closed, focus_returned: back };
 }

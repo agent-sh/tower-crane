@@ -1,5 +1,7 @@
 'use strict';
 
+const { waitOnRepo } = require('./signals');
+
 const { test, describe } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -18,10 +20,25 @@ function rung(h, name, model) {
   pinRung(h, name, { harness: 'opencode', model });
 }
 
+function fixtureHomes(h) {
+  // Reviewer fixtures read their own credentials, not the parent's agent stores.
+  Object.assign(h.env, {
+    USERPROFILE: h.env.HOME,
+    CLAUDE_CONFIG_DIR: path.join(h.env.HOME, '.claude'),
+    CODEX_HOME: path.join(h.env.HOME, '.codex'),
+    PI_CODING_AGENT_DIR: path.join(h.env.HOME, '.pi', 'agent'),
+    GH_CONFIG_DIR: path.join(h.env.HOME, '.config', 'gh'),
+    XDG_CONFIG_HOME: path.join(h.env.HOME, '.config'),
+    XDG_DATA_HOME: path.join(h.env.HOME, '.local', 'share'),
+    OPENCODE_CONFIG_DIR: path.join(h.env.HOME, '.config', 'opencode'),
+  });
+}
+
 // Built once per process for each combination and copied for each test.
 // gated adds passing tests and clean evidence at the submitted sha.
 function setup(t, tier = 'easy', builder = 'other', profile, { gated = false } = {}) {
-  return cachedFixture(t, JSON.stringify([tier, builder, profile ?? null, gated]), (h) => {
+  const h = cachedFixture(t, JSON.stringify([tier, builder, profile ?? null, gated]), (h) => {
+    fixtureHomes(h);
     h.init(['--repo', 'acme/demo']);
     h.ok(['task', 'add', '--title', 'Change', '--acceptance', 'value becomes one', '--tier', tier]);
     h.ok(['brief', 'set', 'T1', '-'], { input: 'BUILDER-HISTORY that the reviewer does not need\n\n## Reviewer\nREVIEWER-ONLY instruction\n\n## Worker\nWORKER-HISTORY that the reviewer does not need\n' });
@@ -57,6 +74,8 @@ function setup(t, tier = 'easy', builder = 'other', profile, { gated = false } =
     if (gated) ready(h);
     return { sha: h.sha, builder: h.builder, reviewEnv: h.reviewEnv };
   });
+  fixtureHomes(h);
+  return h;
 }
 
 function ready(h) {
@@ -66,6 +85,19 @@ function ready(h) {
 
 function choice(h, env) {
   return h.json(['spawn', '--task', 'T1', '--role', 'review', '--dry-run'], { env: { ...h.reviewEnv, ...env } });
+}
+
+function assertReviewDiff(h, prompt, pattern) {
+  if (pattern.test(prompt)) return;
+  // Long scratch paths enlarge receipts, so even a small diff can use the context file.
+  const packet = path.join(h.state, 'reviews', `T1-${h.sha}.md`);
+  assert.ok(prompt.includes(`Read ${packet} for the diff at ${h.sha}.`),
+    'the review must include the diff or reference its complete context packet');
+}
+
+// The written packet always holds the full diff; a long receipt moves it out of the prompt.
+function reviewPacket(h) {
+  return fs.readFileSync(path.join(h.state, 'reviews', `T1-${h.sha}.md`), 'utf8');
 }
 
 function model(out) {
@@ -233,7 +265,7 @@ console.log(JSON.stringify({ type: 'result', is_error: false, model, usage: { in
   fs.mkdirSync(path.join(caller, '.claude'), { recursive: true });
   const result = h.run(['spawn', '--task', 'T1', '--role', 'review', '--wait'], {
     env: { HOME: caller, CLAUDE_CONFIG_DIR: path.join(caller, '.claude'), XDG_CACHE_HOME: path.join(caller, 'cache'),
-      PATH: bin + path.delimiter + (h.env.PATH || '') }, timeout: 20000 });
+      PATH: bin + path.delimiter + (h.env.PATH || '') } });
   assert.equal(result.code, 0, result.stderr);
   const rows = fs.readFileSync(captures, 'utf8').trim().split('\n').map(JSON.parse);
   assert.deepEqual(rows.map((r) => r.model), ['first', 'second']);
@@ -271,6 +303,7 @@ const system = claude ? fs.readFileSync(args[args.indexOf('--append-system-promp
 const configHome = process.env[claude ? 'CLAUDE_CONFIG_DIR' : 'CODEX_HOME'];
 const policy = JSON.parse(fs.readFileSync(path.join(configHome, 'policy.json'), 'utf8'));
 const hash = crypto.createHash('sha256').update(system).digest('hex');
+// read-published: this stub writes the checkpoint in place; nothing replaces it.
 const previous = fs.existsSync(${JSON.stringify(checkpoint)}) ? JSON.parse(fs.readFileSync(${JSON.stringify(checkpoint)})) : {};
 const tokens = Math.ceil(Buffer.byteLength(system) / 4);
 const hit = previous[claude ? 'claude' : 'codex'] === hash;
@@ -348,6 +381,28 @@ test('review choice follows tier, diff limits and configured risk paths', (t) =>
     h.ok(['project', 'set', '--review-policy', JSON.stringify({ prices, ...policy })]);
     assert.equal(model(choice(h)), policy.risk_paths ? 'fixture-large' : 'fixture-main', JSON.stringify(policy));
   }
+});
+
+test('review policy min_rung sets the first reviewer rung, and failed reviews never pick a rung below it', (t) => {
+  const h = setup(t, 'medium', 'other', undefined, { gated: true });
+  assert.equal(model(choice(h)), 'fixture-main');
+  h.ok(['project', 'set', '--review-policy', JSON.stringify({ prices, min_rung: 'review' })]);
+  assert.equal(h.json(['project', 'show']).review.min_rung, 'review');
+  assert.match(h.ok(['project', 'show']), /review: .*"min_rung":"review"/);
+  const first = choice(h);
+  assert.deepEqual([first.review_rung, model(first)], ['review', 'fallback']);
+  h.reviewer('T1', 'r1');
+  h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--agent', 'r1', '--type', 'review', '--fail', '--sha', h.sha]);
+  assert.deepEqual([choice(h).review_rung, model(choice(h))], ['hard', 'fixture-large']);
+  // An easy task's failure rules reach only medium, below the review minimum.
+  const easy = setup(t, 'easy', 'other', undefined, { gated: true });
+  easy.ok(['project', 'set', '--review-policy', JSON.stringify({ prices, min_rung: 'review' })]);
+  easy.reviewer('T1', 'r1');
+  easy.ok(['evidence', 'T1', '--revision', easy.revision('T1'), '--agent', 'r1', '--type', 'review', '--fail', '--sha', easy.sha]);
+  assert.deepEqual([choice(easy).review_rung, model(choice(easy))], ['review', 'fallback']);
+  const tiered = setup(t, 'easy', 'other', undefined, { gated: true });
+  tiered.ok(['project', 'set', '--review-policy', JSON.stringify({ prices, min_rung: 'hard' })]);
+  assert.deepEqual([choice(tiered).review_rung, model(choice(tiered))], ['hard', 'fixture-large']);
 });
 
 test('top-tier Claude builders can receive review on the same model', (t) => {
@@ -490,6 +545,25 @@ test('review selection matches Claude provider aliases to recorded provider spen
   }
 });
 
+test('review cost samples keep provider premiums when a canonical price row also exists', (t) => {
+  const h = setup(t, 'hard', 'other', undefined, { gated: true });
+  const anthropic = 'fixture-claude';
+  const bedrock = `global.anthropic.${anthropic}`;
+  const bin = path.join(h.base, 'bin');
+  fs.mkdirSync(bin);
+  fs.writeFileSync(path.join(bin, process.platform === 'win32' ? 'claude.exe' : 'claude'), '', { mode: 0o755 });
+  const env = { PATH: bin + path.delimiter + (h.env.PATH || h.env.Path || ''),
+    AWS_REGION: 'eu-west-1', AWS_BEARER_TOKEN_BEDROCK: 'stub-secret-bedrock',
+    ANTHROPIC_API_KEY: 'stub-secret-anthropic' };
+  h.ok(['ladder', 'set', 'hard', '--harness', 'claude', '--provider', 'bedrock', '--model', anthropic]);
+  h.ok(['ladder', 'set', 'research', '--harness', 'claude', '--provider', 'anthropic', '--model', anthropic]);
+  const row = (output) => ({ input: 1, cache_write: 1, cache_read: 1, output });
+  h.ok(['project', 'set', '--review-policy', JSON.stringify({ prices: { [anthropic]: row(20), [bedrock]: row(30) } })]);
+  sample(h, bedrock, 0, 0, 1000); // $0.03
+  sample(h, anthropic, 0, 0, 1200); // $0.024
+  assert.equal(choice(h, env).review_rung, 'research', 'the higher provider rate matters, not just token counts');
+});
+
 test('review selection prices a Claude alias rung by the release id its spend records', (t) => {
   const [alias, release] = Object.entries(require('../lib/ladder').BUILTIN.claude_aliases)[0];
   for (const configured of [alias, alias.toUpperCase(), ` ${alias} `, ` ${alias.toUpperCase()} `]) {
@@ -590,7 +664,7 @@ test('direct review dispatch refuses missing and failed gates and supplies lean 
   assert.equal(out.agent, 'reviewer-T1-1');
   const prompt = out.argv.find((arg) => arg.includes('## Task'));
   assert.match(prompt, /value becomes one/);
-  assert.match(prompt, /diff --git a\/value.js b\/value.js/);
+  assertReviewDiff(h, prompt, /diff --git a\/value.js b\/value.js/);
   assert.match(prompt, /Gate results/);
   assert.match(prompt, /fail without/);
   assert.match(prompt, /probe/);
@@ -598,6 +672,248 @@ test('direct review dispatch refuses missing and failed gates and supplies lean 
   assert.ok(!prompt.includes('BUILDER-HISTORY'));
   assert.ok(!prompt.includes('WORKER-HISTORY'));
   assert.equal(out.rung, 'review');
+});
+
+test('a rework review dispatch checks prior blockers and only the diff since the reviewed sha', (t) => {
+  const h = setup(t, 'easy', 'other', undefined, { gated: true });
+  const reviewedSha = h.sha;
+  const reviewedRevision = h.revision('T1');
+  h.reviewer('T1', 'first-reviewer');
+  h.ok(['evidence', 'T1', '--revision', reviewedRevision, '--agent', 'first-reviewer', '--type', 'review',
+    '--fail', '--sha', reviewedSha, '--summary', '1 blocker: correction.md must explain the value']);
+  const sameHead = choice(h).argv.find((arg) => arg.includes('## Task'));
+  assert.match(sameHead, /## Review scope\n\nRe-review/);
+  assert.ok(!sameHead.includes('diff --git'), 'a repeat review at the same sha has no new diff');
+  const task = h.readState('tasks.json').tasks[0];
+  const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  const recorded = events.findLast((e) => e.cmd === 'evidence' && e.detail.type === 'review');
+  recorded.at = new Date(Date.parse(task.evidence.at(-1).at) + 1).toISOString();
+  assert.equal(require('../lib/reviewer').reReview({ events }, task).sha, reviewedSha,
+    'evidence and its audit event can be timestamped in different milliseconds');
+  h.ok(['rework', '--from-review', 'T1']);
+  assert.equal(Number(h.revision('T1')), Number(reviewedRevision) + 1);
+  h.ok(['claim', 'T1', '--agent', 'builder']);
+  fs.writeFileSync(path.join(h.repo, 'correction.md'), 'The value becomes one.\n');
+  h.git(['add', 'correction.md']);
+  h.git(['commit', '-qm', 'explain the value']);
+  h.sha = h.git(['rev-parse', 'HEAD']);
+  h.ok(['submit', 'T1', '--agent', 'builder', '--sha', h.sha]);
+  ready(h);
+  // Evidence without an independent dispatch cannot replace the prior blockers.
+  h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--agent', 'made-up', '--type', 'review',
+    '--fail', '--sha', h.sha, '--summary', 'UNTRUSTED_FINDING']);
+  const out = path.join(h.base, 'rework-review.txt');
+  commandReviewer(h, out);
+  const dispatched = h.json(['spawn', '--task', 'T1', '--role', 'review', '--wait']);
+  const prompt = fs.readFileSync(out, 'utf8');
+  assert.match(prompt, /## Review scope\n\nRe-review/);
+  assert.ok(prompt.includes(`git diff ${reviewedSha} ${h.sha}`));
+  assert.match(prompt, /first-reviewer/);
+  assert.match(prompt, /1 blocker: correction.md must explain the value/);
+  assert.match(prompt, /security or data-loss/);
+  assert.match(prompt, /unchanged caller/);
+  assert.match(prompt, /follow-ups/);
+  const packet = reviewPacket(h);
+  assert.match(packet, /diff --git a\/correction.md b\/correction.md/);
+  assert.ok(!packet.includes('diff --git a/value.js'), 'already reviewed code stays out of the packet diff');
+  assert.ok(!packet.includes('UNTRUSTED_FINDING'));
+  assert.equal(dispatched.review_scope.sha, reviewedSha);
+  assert.equal(dispatched.review_scope.revision, Number(reviewedRevision));
+  const event = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse)
+    .findLast((e) => e.cmd === 'spawn' && e.detail.role === 'reviewer');
+  assert.deepEqual(event.detail.review_scope, dispatched.review_scope);
+});
+
+function reworkCorrection(h) {
+  // A failed review from a dispatched reviewer already sends the task back.
+  if (h.readState('tasks.json').tasks[0].status !== 'rework') h.ok(['rework', '--from-review', 'T1']);
+  h.ok(['claim', 'T1', '--agent', 'builder']);
+  fs.writeFileSync(path.join(h.repo, 'correction.md'), 'The value becomes one.\n');
+  h.git(['add', 'correction.md']);
+  h.git(['commit', '-qm', 'explain the value']);
+  h.sha = h.git(['rev-parse', 'HEAD']);
+  h.ok(['submit', 'T1', '--agent', 'builder', '--sha', h.sha]);
+  ready(h);
+}
+
+test('a narrowed re-review keeps the failed review rung and the risk of the whole change', (t) => {
+  for (const variant of ['rung', 'risk']) {
+    const h = setup(t, 'easy', 'other', undefined, { gated: true });
+    const script = `const cp = require('node:child_process');
+const r = cp.spawnSync(process.execPath, [${JSON.stringify(BIN)}, 'evidence', 'T1', '--type', 'review', '--fail', '--sha', ${JSON.stringify(h.sha)}, '--summary', 'blocker'], {env: process.env});
+process.exit(r.status ?? 1);`;
+    for (const name of ['easy', 'medium', 'hard', 'research', 'review']) {
+      h.ok(['ladder', 'set', name, '--harness', 'command', '--clear', 'model', '--clear', 'profile',
+        '--clear', 'provider', '--clear', 'effort', '--command', JSON.stringify([process.execPath, '-e', script, '{prompt}'])]);
+    }
+    h.ok(['project', 'set', '--review-policy', JSON.stringify({ risk_paths: ['value.js'] })]);
+    if (variant === 'rung') {
+      assert.equal(h.json(['spawn', '--task', 'T1', '--role', 'review', '--wait']).review_rung, 'hard');
+      // Without the risk glob only the failed review's rung can keep the level.
+      h.ok(['project', 'set', '--review-policy', 'null']);
+    } else {
+      // A dispatch without a recorded rung leaves only the whole change's risk.
+      h.reviewer('T1', 'first-reviewer');
+      h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--agent', 'first-reviewer', '--type', 'review',
+        '--fail', '--sha', h.sha, '--summary', 'blocker']);
+    }
+    reworkCorrection(h);
+    const out = choice(h);
+    assert.match(out.argv.find((arg) => arg.includes('## Task')), /## Review scope\n\nRe-review/, variant);
+    assert.equal(out.review_rung, 'hard', variant);
+  }
+});
+
+test('a fallback full re-review keeps the failed review rung and lists its blockers', (t) => {
+  for (const variant of ['amend', 'gone', 'rebase']) {
+    const h = setup(t, 'easy', 'other', undefined, { gated: true });
+    const findings = JSON.stringify([{ kind: 'acceptance', path: 'value.js', claim: 'PRIOR_BLOCKER_CLAIM' }]);
+    const script = `const cp = require('node:child_process');
+const r = cp.spawnSync(process.execPath, [${JSON.stringify(BIN)}, 'evidence', 'T1', '--type', 'review', '--fail', '--sha', ${JSON.stringify(h.sha)}, '--summary', 'PRIOR_BLOCKER_SUMMARY', '--findings', ${JSON.stringify(findings)}], {env: process.env});
+process.exit(r.status ?? 1);`;
+    for (const name of ['easy', 'medium', 'hard', 'research', 'review']) {
+      h.ok(['ladder', 'set', name, '--harness', 'command', '--clear', 'model', '--clear', 'profile',
+        '--clear', 'provider', '--clear', 'effort', '--command', JSON.stringify([process.execPath, '-e', script, '{prompt}'])]);
+    }
+    // The risk glob puts the first review on hard; without it the change alone stays easy.
+    h.ok(['project', 'set', '--review-policy', JSON.stringify({ risk_paths: ['value.js'] })]);
+    const reviewedSha = h.sha;
+    const reviewedRevision = Number(h.revision('T1'));
+    assert.equal(h.json(['spawn', '--task', 'T1', '--role', 'review', '--wait']).review_rung, 'hard');
+    h.ok(['project', 'set', '--review-policy', 'null']);
+    if (h.readState('tasks.json').tasks[0].status !== 'rework') h.ok(['rework', '--from-review', 'T1']);
+    if (variant === 'rebase') {
+      h.git(['switch', 'main']);
+      fs.writeFileSync(path.join(h.repo, 'upstream.md'), 'An upstream change.\n');
+      h.git(['add', 'upstream.md']);
+      h.git(['commit', '-qm', 'advance the base']);
+      h.git(['switch', 'fixture-change']);
+      h.git(['rebase', '-q', 'main']);
+    }
+    h.ok(['claim', 'T1', '--agent', 'builder']);
+    fs.writeFileSync(path.join(h.repo, 'correction.md'), 'The value becomes one.\n');
+    h.git(['add', 'correction.md']);
+    h.git(variant === 'rebase' ? ['commit', '-qm', 'explain the value'] : ['commit', '-q', '--amend', '-m', 'change with explanation']);
+    h.sha = h.git(['rev-parse', 'HEAD']);
+    if (variant === 'gone') {
+      h.git(['reflog', 'expire', '--expire=now', '--all']);
+      h.git(['gc', '-q', '--prune=now']);
+      assert.throws(() => h.git(['cat-file', '-e', `${reviewedSha}^{commit}`]), 'the reviewed commit must be gone for this test');
+    }
+    h.ok(['submit', 'T1', '--agent', 'builder', '--sha', h.sha]);
+    ready(h);
+    const out = choice(h);
+    const prompt = out.argv.find((arg) => arg.includes('## Task'));
+    assert.match(prompt, /## Review scope\n\nFull review/, variant);
+    assert.match(prompt, variant === 'gone' ? /no longer in the repository/ : /not an ancestor|base advanced/, variant);
+    assert.equal(out.review_rung, 'hard', variant);
+    assert.ok(prompt.includes(`It follows a failed review by reviewer-T1-1 at ${reviewedSha}`), variant);
+    assert.match(prompt, /Unresolved prior blockers still block/, variant);
+    assert.match(prompt, /PRIOR_BLOCKER_SUMMARY/, variant);
+    assert.match(prompt, /PRIOR_BLOCKER_CLAIM/, variant);
+    commandReviewer(h, path.join(h.base, `fallback-${variant}.txt`));
+    const dispatched = h.json(['spawn', '--task', 'T1', '--role', 'review', '--wait']);
+    assert.equal(dispatched.review_rung, 'hard', variant);
+    const event = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse)
+      .findLast((e) => e.cmd === 'spawn' && e.detail.role === 'reviewer');
+    assert.equal(event.detail.review_scope, null, variant);
+    assert.deepEqual(event.detail.review_floor, { sha: reviewedSha, revision: reviewedRevision, agent: 'reviewer-T1-1',
+      review_rung: 'hard', review_level: 'hard' }, variant);
+  }
+});
+
+test('a rework whose reviewed sha is gone gets a full review instead of a refusal', (t) => {
+  const h = setup(t, 'easy', 'other', undefined, { gated: true });
+  const reviewedSha = h.sha;
+  h.reviewer('T1', 'first-reviewer');
+  h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--agent', 'first-reviewer', '--type', 'review',
+    '--fail', '--sha', reviewedSha, '--summary', 'OLD_BLOCKER']);
+  h.ok(['rework', '--from-review', 'T1']);
+  h.ok(['claim', 'T1', '--agent', 'builder']);
+  fs.writeFileSync(path.join(h.repo, 'correction.md'), 'The value becomes one.\n');
+  h.git(['add', 'correction.md']);
+  h.git(['commit', '-q', '--amend', '-m', 'change with explanation']);
+  h.sha = h.git(['rev-parse', 'HEAD']);
+  h.git(['reflog', 'expire', '--expire=now', '--all']);
+  h.git(['gc', '-q', '--prune=now']);
+  assert.throws(() => h.git(['cat-file', '-e', `${reviewedSha}^{commit}`]), 'the reviewed commit must be gone for this test');
+  h.ok(['submit', 'T1', '--agent', 'builder', '--sha', h.sha]);
+  ready(h);
+  const prompt = choice(h).argv.find((arg) => arg.includes('## Task'));
+  assert.match(prompt, /## Review scope\n\nFull review/);
+  assert.match(prompt, /no longer in the repository/);
+  assertReviewDiff(h, prompt, /diff --git a\/value.js b\/value.js/);
+});
+
+test('changed requirements and unrelated rework keep the full review scope', (t) => {
+  for (const edit of ['acceptance', 'brief', 'kind', 'second-rework', 'new-head', 'passed', 'untrusted', 'late-review']) {
+    const h = setup(t, 'easy', 'other', undefined, { gated: true });
+    if (edit !== 'untrusted') h.reviewer('T1', 'first-reviewer');
+    const reviewedRevision = h.revision('T1');
+    if (edit !== 'late-review') h.ok(['evidence', 'T1', '--revision', reviewedRevision, '--agent', 'first-reviewer', '--type', 'review',
+      '--fail', '--sha', h.sha, '--summary', 'OLD_BLOCKER']);
+    if (edit === 'passed') h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--agent', 'first-reviewer',
+      '--type', 'review', '--ok', '--sha', h.sha]);
+    if (edit === 'new-head') {
+      fs.writeFileSync(path.join(h.repo, 'extra.md'), 'An unrelated change.\n');
+      h.git(['add', 'extra.md']);
+      h.git(['commit', '-qm', 'unrelated change']);
+      h.sha = h.git(['rev-parse', 'HEAD']);
+      h.ok(['submit', 'T1', '--agent', 'builder', '--sha', h.sha]);
+    }
+    h.ok(['rework', 'T1', '--reason', 'correct the submission']);
+    if (edit === 'late-review') h.ok(['evidence', 'T1', '--revision', reviewedRevision, '--agent', 'first-reviewer',
+      '--type', 'review', '--fail', '--sha', h.sha, '--summary', 'OLD_BLOCKER']);
+    if (edit === 'acceptance' || edit === 'second-rework') h.ok(['task', 'update', 'T1', '--acceptance', 'value becomes two']);
+    if (edit === 'brief') h.ok(['brief', 'set', 'T1', '-'], { input: 'Changed requirements.\n' });
+    if (edit === 'kind') h.ok(['task', 'update', 'T1', '--kind', 'docs']);
+    if (edit === 'second-rework') {
+      h.ok(['claim', 'T1', '--agent', 'builder']);
+      h.ok(['submit', 'T1', '--agent', 'builder', '--sha', h.sha]);
+      h.ok(['rework', 'T1', '--reason', 'refresh the branch']);
+    }
+    h.ok(['claim', 'T1', '--agent', 'builder']);
+    h.ok(['submit', 'T1', '--agent', 'builder', '--sha', h.sha]);
+    ready(h);
+    const prompt = choice(h).argv.find((arg) => arg.includes('## Task'));
+    assert.match(prompt, /## Review scope\n\nFull review/, edit);
+    assertReviewDiff(h, prompt, /diff --git a\/value.js b\/value.js/);
+    assert.ok(!prompt.includes('OLD_BLOCKER'), edit);
+  }
+});
+
+test('a rework with a rebased or merged base update gets a full review without upstream changes in its diff', (t) => {
+  for (const update of ['rebase', 'merge']) {
+    const h = setup(t, 'easy', 'other', undefined, { gated: true });
+    h.reviewer('T1', 'first-reviewer');
+    h.ok(['evidence', 'T1', '--agent', 'first-reviewer', '--type', 'review', '--fail',
+      '--sha', h.sha, '--summary', 'correction.md must explain the value']);
+    h.ok(['rework', '--from-review', 'T1']);
+    h.git(['switch', 'main']);
+    fs.writeFileSync(path.join(h.repo, 'upstream.md'), 'An upstream change.\n');
+    h.git(['add', 'upstream.md']);
+    h.git(['commit', '-qm', 'advance the base']);
+    h.git(['switch', 'fixture-change']);
+    h.git(update === 'rebase' ? ['rebase', 'main'] : ['merge', '--no-ff', '-m', 'merge updated base', 'main']);
+    fs.writeFileSync(path.join(h.repo, 'correction.md'), 'The value becomes one.\n');
+    h.git(['add', 'correction.md']);
+    h.git(['commit', '-qm', 'explain the value']);
+    h.sha = h.git(['rev-parse', 'HEAD']);
+    h.ok(['claim', 'T1', '--agent', 'builder']);
+    h.ok(['submit', 'T1', '--agent', 'builder', '--sha', h.sha]);
+    ready(h);
+    const out = path.join(h.base, 'rebased-review.txt');
+    commandReviewer(h, out);
+    const dispatched = h.json(['spawn', '--task', 'T1', '--role', 'review', '--wait']);
+    const prompt = fs.readFileSync(out, 'utf8');
+    assert.match(prompt, /## Review scope\n\nFull review/);
+    assert.match(prompt, /not an ancestor|base advanced/);
+    const packet = reviewPacket(h);
+    assert.match(packet, /diff --git a\/value.js b\/value.js/);
+    assert.match(packet, /diff --git a\/correction.md b\/correction.md/);
+    assert.ok(!packet.includes('diff --git a/upstream.md'));
+    assert.equal(dispatched.review_scope, null);
+  }
 });
 
 test('review packet uses role headings consistently and ignores fenced headings', (t) => {
@@ -670,10 +986,24 @@ test('real Claude reviewers expose first-turn cache reads and writes across work
   }
 });
 
-test('review dispatch refuses a submitted head or configured base changed after diff preparation', async (t) => {
-  for (const change of ['head', 'base']) {
+test('review dispatch refuses a submitted head, configured base or review scope changed after diff preparation', async (t) => {
+  for (const change of ['head', 'base', 'scope']) {
     const h = setup(t);
     changeKind(h, 'docs');
+    if (change === 'scope') {
+      // A failed review blocks dispatch until rework, so the scope can only move after one.
+      h.reviewer('T1', 'first-reviewer');
+      h.ok(['evidence', 'T1', '--agent', 'first-reviewer', '--type', 'review', '--fail',
+        '--sha', h.sha, '--summary', 'correction.md must explain the value']);
+      h.ok(['rework', '--from-review', 'T1']);
+      h.ok(['claim', 'T1', '--agent', 'builder']);
+      fs.writeFileSync(path.join(h.repo, 'correction.md'), 'The value becomes one.\n');
+      h.git(['add', 'correction.md']);
+      h.git(['commit', '-qm', 'explain the value']);
+      h.sha = h.git(['rev-parse', 'HEAD']);
+      h.ok(['submit', 'T1', '--agent', 'builder', '--sha', h.sha]);
+      ready(h);
+    }
     commandReviewer(h, path.join(h.base, 'context.txt'));
     h.git(['commit', '--allow-empty', '-qm', 'next head']);
     const next = h.git(['rev-parse', 'HEAD']);
@@ -682,14 +1012,11 @@ test('review dispatch refuses a submitted head or configured base changed after 
       hooks: { HOOK_STOP_REVIEW_DIFF: paused },
     });
     try {
-      const deadline = Date.now() + 10000;
-      while (!fs.existsSync(paused)) {
-        assert.ok(Date.now() < deadline, 'diff preparation did not finish');
-        await new Promise((resolve) => setTimeout(resolve, 20));
-      }
+      await waitOnRepo(h, () => fs.existsSync(paused));
       assert.ok(!fs.existsSync(path.join(h.state, 'lock')), 'diff preparation leaves state writable');
       if (change === 'head') h.ok(['submit', 'T1', '--agent', 'builder', '--sha', next]);
-      else h.ok(['project', 'set', '--base', 'fixture-change']);
+      else if (change === 'base') h.ok(['project', 'set', '--base', 'fixture-change']);
+      else h.ok(['task', 'update', 'T1', '--acceptance', 'value becomes two']);
     } finally {
       fs.writeFileSync(`${paused}.go`, '');
     }
@@ -697,7 +1024,7 @@ test('review dispatch refuses a submitted head or configured base changed after 
     assert.equal(result.code, 1, result.stderr);
     assert.match(result.stderr, /changed.*diff.*retry/i);
     const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
-    assert.ok(!events.some((e) => e.cmd === 'spawn'));
+    assert.ok(!events.some((e) => e.cmd === 'spawn' && e.detail.agent !== 'first-reviewer'));
     assert.ok(!fs.existsSync(path.join(h.state, 'reviews')), 'a stale packet is never written');
   }
 });
@@ -710,11 +1037,7 @@ test('accept runs tests, clean and CI before dispatch, then automation accepts a
   const result = h.json(['accept', 'T1']);
   assert.equal(result.status, 'submitted');
   assert.equal(result.review_pending, true);
-  const deadline = Date.now() + 10000;
-  while (h.readState('tasks.json').tasks[0].status !== 'accepted') {
-    assert.ok(Date.now() < deadline, 'review did not reach automatic acceptance');
-    await new Promise((resolve) => setTimeout(resolve, 30));
-  }
+  await waitOnRepo(h, () => h.readState('tasks.json').tasks[0].status === 'accepted');
   const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
   const dispatch = events.findIndex((e) => e.cmd === 'spawn' && e.detail.role === 'reviewer');
   for (const type of ['tests', 'clean', 'ci']) assert.ok(events.findIndex((e) => e.cmd === `check ${type}` && e.detail.ok) < dispatch);
@@ -763,6 +1086,9 @@ test('accept reuses an active review and direct dispatch refuses a duplicate', (
 
 test('large review diffs use a context file and a short argv', (t) => {
   const h = setup(t);
+  h.reviewer('T1', 'first-reviewer');
+  h.ok(['evidence', 'T1', '--agent', 'first-reviewer', '--type', 'review', '--fail',
+    '--sha', h.sha, '--summary', 'PRIOR_BLOCKER_FOR_LARGE_PACKET']);
   fs.writeFileSync(path.join(h.repo, 'large.md'), 'A focused review reads this diff.\n'.repeat(1000));
   h.git(['add', 'large.md']);
   h.git(['commit', '-qm', 'large diff']);
@@ -779,11 +1105,14 @@ test('large review diffs use a context file and a short argv', (t) => {
   assert.match(user, /## Gate results/);
   assert.match(user, /"type": "tests"/);
   assert.match(user, /"type": "clean"/);
+  assert.match(user, /## Review scope\n\nRe-review/);
+  assert.match(user, /PRIOR_BLOCKER_FOR_LARGE_PACKET/);
   h.json(['spawn', '--role', 'review', '--task', 'T1', '--wait']);
   assert.match(fs.readFileSync(out, 'utf8'), /reviews/);
   const fullPacket = fs.readFileSync(packet, 'utf8');
   assert.match(fullPacket, /diff --git a\/large.md b\/large.md/);
   assert.match(fullPacket, /## Reviewer\nREVIEWER-ONLY instruction/);
+  assert.ok(!fullPacket.includes('diff --git a/value.js'));
   assert.ok(!fullPacket.includes('WORKER-HISTORY'));
 });
 
@@ -808,8 +1137,8 @@ test('the review packet flags changed files outside the paths the brief names', 
 test('review policy validates price and diff settings through the CLI', (t) => {
   const h = makeProjectRepo(t);
   for (const bad of [{ prices: { 'fixture-main': { input: -1 } } },
-    { prices: { 'FIXTURE-MAIN': prices['fixture-main'], 'fixture-main': prices['fixture-main'] } },
-    { small_lines: -1 }, { risk_paths: [3] }, { surprise: true }]) {
+    { prices: { 'FIXTURE-MAIN': prices['fixture-main'], 'fixture-main': { ...prices['fixture-main'], output: prices['fixture-main'].output + 1 } } },
+    { small_lines: -1 }, { risk_paths: [3] }, { min_rung: 'opus' }, { min_rung: null }, { surprise: true }]) {
     assert.equal(h.run(['project', 'set', '--review-policy', JSON.stringify(bad)]).code, 2);
   }
   h.ok(['project', 'set', '--review-policy', JSON.stringify({ prices: { 'FIXTURE-MAIN': prices['fixture-main'] } })]);
@@ -855,9 +1184,37 @@ test('review uses the nearest base when only origin has it or the local base is 
   const base = h.git(['rev-parse', 'main']);
   h.git(['update-ref', 'refs/remotes/origin/main', base]);
   h.git(['branch', '-D', 'main']);
-  assert.match(choice(h).argv.find((arg) => arg.includes('## Task')), /diff --git/);
+  assertReviewDiff(h, choice(h).argv.find((arg) => arg.includes('## Task')), /diff --git/);
   h.git(['branch', 'main', `${base}~1`]);
   const prompt = choice(h).argv.find((arg) => arg.includes('## Task'));
   assert.ok(prompt.includes(`Base: ${base}.`));
 });
+});
+
+test('a light re-review reaches the reviewed revision across a revision a restore retired', () => {
+  const sha = 'a'.repeat(40);
+  const review = { type: 'review', ok: false, sha, revision: 1, agent: 'owner', at: '2026-10-15T00:00:03.000Z',
+    summary: 'changelog wording', findings: [{ path: 'changelog.d/T1.md', text: 'wording' }] };
+  const task = { id: 'T1', revision: 3, sha, submitted_by: 'worker', evidence: [review] };
+  // An automatic ci rework took revision 1 to 2, its restore retired 2, and the failed review reworked 1 to 3.
+  const events = [
+    { cmd: 'rework', task: 'T1', agent: 'orchestrator', detail: { sha, previous_revision: 1, revision: 2, gate: 'ci' } },
+    { cmd: 'restore', task: 'T1', agent: 'orchestrator', detail: { sha, from_revision: 2, revision: 1, gate: 'ci' } },
+    { cmd: 'rework', task: 'T1', agent: 'orchestrator', detail: { sha, previous_revision: 1, revision: 3, from_review: true } },
+  ];
+  assert.deepEqual(require('../lib/reviewer').prepareLight({ events }, task, null, {}).review_snapshot, review);
+});
+
+test('a reviewer an automatic gate rework stopped is not a failure or a held review after a restore', () => {
+  const sha = 'b'.repeat(40);
+  const task = { id: 'T1', status: 'submitted', revision: 1, sha, submitted_by: 'worker', evidence: [] };
+  const events = [
+    { at: '2026-10-15T00:00:00.000Z', cmd: 'spawn', task: 'T1', agent: 'orchestrator', detail: { role: 'reviewer', agent: 'reviewer-T1-1', revision: 1, sha } },
+    { at: '2026-10-15T00:00:01.000Z', cmd: 'rework', task: 'T1', agent: 'orchestrator', detail: { sha, previous_revision: 1, revision: 2, gate: 'ci' } },
+    { at: '2026-10-15T00:00:02.000Z', cmd: 'spawn exit', task: 'T1', agent: 'orchestrator', detail: { agent: 'reviewer-T1-1', code: null, signal: 'SIGTERM' } },
+    { at: '2026-10-15T00:00:03.000Z', cmd: 'restore', task: 'T1', agent: 'orchestrator', detail: { sha, from_revision: 2, revision: 1, gate: 'ci' } },
+  ];
+  const R = require('../lib/reviewer');
+  assert.deepEqual(R.failedReviews({ events }, task), [], 'the stop does not count toward REVIEW_EXIT_CAP');
+  assert.equal(R.reviewExit({ events }, task), null, 'the next reviewer is dispatched, not held');
 });

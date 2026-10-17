@@ -4,21 +4,33 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { makeTaskRepo } = require('./helpers');
+const { makeTaskRepo, ownerFallbacks } = require('./helpers');
+const { waitOnRepo } = require('./signals');
+const { readPublished } = require('./atomic-file');
 
-const events = (h) => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+const events = (h) => {
+  const text = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8');
+  return text.slice(0, text.lastIndexOf('\n') + 1).split('\n').filter(Boolean).map(JSON.parse);
+};
 const fixture = path.join(__dirname, 'fixtures', 'fallback-harness.js').replace(/\\/g, '/');
 const clock = path.join(__dirname, 'fixtures', 'shifted-clock.js').replace(/\\/g, '/');
 const supervision = { retries: 2, backoff_ms: 10, max_backoff_ms: 20, stall_ms: 60000 };
 const owner = (h) => events(h).filter((e) => e.cmd === 'msg' && e.detail.to === 'owner');
 const health = (h, source) => events(h).filter((e) => e.cmd === 'harness health' && (!source || e.detail.source === source));
-async function until(fn, message) {
-  const deadline = Date.now() + 12000;
-  while (!fn()) {
-    if (Date.now() >= deadline) assert.fail(message);
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
-}
+
+test('auth event readers wait for a complete appended record and reject corrupt complete records', (t) => {
+  const h = makeTaskRepo(t, []);
+  const log = path.join(h.state, 'events.jsonl');
+  const before = events(h);
+  const record = { cmd: 'harness health', detail: { source: 'probe', status: 'available' } };
+  const text = JSON.stringify(record);
+  fs.appendFileSync(log, text.slice(0, -3));
+  assert.deepEqual(events(h), before);
+  fs.appendFileSync(log, text.slice(-3) + '\n');
+  assert.deepEqual(events(h), [...before, record]);
+  fs.appendFileSync(log, 'corrupt record\n');
+  assert.throws(() => events(h), SyntaxError);
+});
 
 // The login checks are real commands on PATH. Like the real CLIs, the status
 // commands report stored credentials as logged in, and a request passes only
@@ -28,6 +40,17 @@ function setup(t, { tier = 'easy', tasks = ['T1'], fallbacks = [] } = {}) {
     args: ['--title', `Task ${id}`, '--tier', tier, '--kind', 'code', '--acceptance', 'a login failure is not a task attempt'],
     brief: 'Complete the original task brief.\n',
   })));
+  // Harness discovery must use fixture credentials and origin directories.
+  Object.assign(h.env, {
+    USERPROFILE: h.env.HOME,
+    CLAUDE_CONFIG_DIR: path.join(h.env.HOME, '.claude'),
+    CODEX_HOME: path.join(h.env.HOME, '.codex'),
+    PI_CODING_AGENT_DIR: path.join(h.env.HOME, '.pi', 'agent'),
+    GH_CONFIG_DIR: path.join(h.env.HOME, '.config', 'gh'),
+    XDG_CONFIG_HOME: path.join(h.env.HOME, '.config'),
+    XDG_DATA_HOME: path.join(h.env.HOME, '.local', 'share'),
+    OPENCODE_CONFIG_DIR: path.join(h.env.HOME, '.config', 'opencode'),
+  });
   const bin = path.join(h.base, 'bin');
   const exe = (name) => name + (process.platform === 'win32' ? '.exe' : '');
   fs.mkdirSync(bin);
@@ -40,10 +63,7 @@ function setup(t, { tier = 'easy', tasks = ['T1'], fallbacks = [] } = {}) {
   fs.writeFileSync(path.join(bin, exe('codex')), process.platform === 'win32' ? ''
     : `#!${process.execPath}\nconst ok = ${logged};\nif (process.argv[2] === 'login') { console.log('Logged in using ChatGPT'); process.exit(0); }\nif (ok) console.log(JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1 } }));\nelse console.error('Failed to refresh token: Your access token could not be refreshed. Please log out and sign in again.');\nprocess.exitCode = ok ? 0 : 1;\n`, { mode: 0o755 });
   h.ok(['ladder', 'set', 'easy', '--harness', 'claude', '--model', 'first', '--clear', 'profile', '--clear', 'effort', '--supervision', JSON.stringify(supervision)]);
-  h.fallbacks = (routes) => {
-    fs.mkdirSync(path.dirname(h.userConfig), { recursive: true });
-    fs.writeFileSync(h.userConfig, JSON.stringify({ ladder: { easy: { fallbacks: routes } } }));
-  };
+  h.fallbacks = (routes) => ownerFallbacks(h, 'easy', routes);
   if (fallbacks.length) h.fallbacks(fallbacks);
   h.file = path.join(h.base, 'attempts.json');
   h.spawnEnv = {
@@ -55,7 +75,7 @@ function setup(t, { tier = 'easy', tasks = ['T1'], fallbacks = [] } = {}) {
   h.spawnTask = (id, env = h.spawnEnv) => h.run(['spawn', '--task', id, '--wait'], { env });
   // The shifted clock stamps events and reads intervals on one clock, so a pause can age past its probe interval.
   h.later = (minutes) => ({ ...h.spawnEnv, NODE_OPTIONS: `${h.spawnEnv.NODE_OPTIONS} --require "${clock}"`, TOWER_CRANE_TEST_NOW: String(Date.now() + minutes * 60000) });
-  h.attempts = () => (fs.existsSync(h.file) ? JSON.parse(fs.readFileSync(h.file, 'utf8')) : []);
+  h.attempts = () => (fs.existsSync(h.file) ? JSON.parse(readPublished(h.file, 'utf8')) : []);
   return h;
 }
 
@@ -128,14 +148,14 @@ for (const harness of ['claude', 'agy']) {
     fs.writeFileSync(h.loginFlag, '');
     const finish = path.join(h.base, 'finish-worker');
     const held = h.json(['spawn', '--task', 'T1'], { env: { ...h.spawnEnv, TOWER_CRANE_TEST_FALLBACK_FINISH: finish } });
-    await until(() => h.attempts().length === 1, 'the held worker did not start');
+    await waitOnRepo(h, () => h.attempts().length === 1, 'the held worker did not start');
     // The login expires while T1 runs; T2 hits it and pauses the harness.
     fs.rmSync(h.loginFlag);
     assert.notEqual(h.spawnTask('T2').code, 0);
     assert.deepEqual(health(h).map((e) => [e.detail.harness, e.detail.status, e.detail.source]), [[harness, 'unavailable', 'exit']]);
     // T1 then finishes cleanly on the login it started with.
     fs.writeFileSync(finish, '');
-    await until(() => events(h).some((e) => e.cmd === 'spawn phase' && e.detail.agent === held.agent && e.detail.phase === 'waiting'), 'the held worker did not exit');
+    await waitOnRepo(h, () => events(h).some((e) => e.cmd === 'spawn phase' && e.detail.agent === held.agent && e.detail.phase === 'waiting'), 'the held worker did not exit');
     assert.deepEqual(health(h).map((e) => [e.detail.harness, e.detail.status, e.detail.source]), [[harness, 'unavailable', 'exit']], 'a clean exit from before the outage cleared nothing');
     // So the next task is still refused on the paused harness, with no attempt and no second notice.
     const next = h.run(['spawn', '--task', 'T3'], { env: h.spawnEnv });
@@ -154,17 +174,17 @@ test('a login check that passes after a newer login failure does not clear the p
   const release = path.join(h.base, 'release-check');
   // T1 starts on the login it has now; that login expires while T1 runs.
   h.json(['spawn', '--task', 'T1'], { env: { ...h.spawnEnv, TOWER_CRANE_TEST_FALLBACK_FINISH: finish, TOWER_CRANE_TEST_LATE_AUTH: '1' } });
-  await until(() => h.attempts().length === 1, 'the held worker did not start');
+  await waitOnRepo(h, () => h.attempts().length === 1, 'the held worker did not start');
   fs.rmSync(h.loginFlag);
   assert.notEqual(h.spawnTask('T2').code, 0);
   assert.deepEqual(health(h).map((e) => [e.detail.harness, e.detail.status, e.detail.source]), [['claude', 'unavailable', 'exit']]);
   // Logged in again and due: T3's login check runs, and holds its success until released.
   fs.writeFileSync(h.loginFlag, '');
   const probing = h.runAsync(['spawn', '--task', 'T3'], { env: { ...h.later(6), TOWER_CRANE_TEST_LOGIN_HOLD: release } });
-  await until(() => health(h, 'probe').length === 1, 'the login check did not start');
+  await waitOnRepo(h, () => health(h, 'probe').length === 1, 'the login check did not start');
   // While the check runs, T1's login fails.
   fs.writeFileSync(finish, '');
-  await until(() => health(h, 'exit').length === 2, 'the held worker did not report its login failure');
+  await waitOnRepo(h, () => health(h, 'exit').length === 2, 'the held worker did not report its login failure');
   // The check then passes, but it checked a login that T1 has just seen fail, so the pause stands.
   fs.writeFileSync(release, '');
   const result = await probing;

@@ -12,6 +12,7 @@ const os = require('node:os');
 const path = require('node:path');
 const cp = require('node:child_process');
 const TOML = require('../../lib/toml');
+const { writeAtomic } = require('../atomic-file');
 
 const read = (f) => {
   try {
@@ -71,7 +72,8 @@ const hookCommands = (settings) => Object.values(settings.hooks || {}).flat().fl
 module.exports = function stub(harness) {
   const args = process.argv.slice(2);
   const after = (flag) => (args.includes(flag) ? args[args.indexOf(flag) + 1] : null);
-  const report = { harness, args, ghToken: process.env.GH_TOKEN || null, home: os.homedir(), memory: [], skills: [], hooks: [], mcp: {}, rules: [], auth: null, env: null, ran: [] };
+  const report = { harness, args, ghToken: process.env.GH_TOKEN || null,
+    tokens: ['GH_TOKEN', 'GITHUB_TOKEN', 'GH_ENTERPRISE_TOKEN', 'GITHUB_ENTERPRISE_TOKEN'].filter((k) => process.env[k] !== undefined), home: os.homedir(), memory: [], skills: [], hooks: [], mcp: {}, rules: [], auth: null, env: null, ran: [] };
   const skillsIn = (dir) => {
     try {
       return fs.readdirSync(dir).filter((d) => fs.existsSync(path.join(dir, d, 'SKILL.md')));
@@ -93,6 +95,8 @@ module.exports = function stub(harness) {
     for (const s of sources) report.hooks.push(...hookCommands(json(sourceFiles[s])));
     report.rules = (settings.permissions && settings.permissions.allow) || [];
     report.settings = settings;
+    // claude makes its proxy bridge sockets in the TMPDIR it starts with.
+    report.tmpdir = process.env.TMPDIR || null;
     if (!args.includes('--strict-mcp-config')) Object.assign(report.mcp, json(global).mcpServers || {});
     if (after('--mcp-config')) Object.assign(report.mcp, json(after('--mcp-config')).mcpServers || {});
     report.auth = read(path.join(dir, '.credentials.json'));
@@ -118,8 +122,16 @@ module.exports = function stub(harness) {
     const end = args.findIndex((a, i) => i >= from && a.startsWith('--'));
     const disallowed = from ? args.slice(from, end === -1 ? undefined : end) : [];
     const denyRules = [...((settings.permissions && settings.permissions.deny) || []), ...disallowed];
+    // Then the PreToolUse hooks whose matcher names the tool, as claude runs
+    // them: exit 2 blocks the call.
+    const blocked = (tool, file) => ((settings.hooks && settings.hooks.PreToolUse) || [])
+      .filter((group) => new RegExp(`^(?:${group.matcher || '.*'})$`).test(tool))
+      .flatMap((group) => group.hooks || []).some((hook) => cp.spawnSync('/bin/sh', ['-c', hook.command], {
+        input: JSON.stringify({ hook_event_name: 'PreToolUse', tool_name: tool, cwd: process.cwd(),
+          tool_input: tool === 'Read' ? { file_path: file } : { pattern: tool === 'Glob' ? '*' : 'x', path: file } }),
+      }).status === 2);
     report.reads = JSON.parse(process.env.STUB_READ || '[]').map((f) => path.resolve(dir, f)).flatMap((file) => ['Read', 'Grep', 'Glob'].map((tool) => {
-      const denied = denyRules.some((r) => toolRuleMatches(r, tool, file));
+      const denied = denyRules.some((r) => toolRuleMatches(r, tool, file)) || blocked(tool, file);
       return { file, tool, denied, text: denied ? null : read(file) };
     }));
   } else if (harness === 'codex') {
@@ -151,22 +163,41 @@ module.exports = function stub(harness) {
     report.mcp = Object.fromEntries(Object.keys(config.mcp_servers || {}).map((k) => [k, true]));
     report.auth = read(path.join(dir, 'auth.json'));
     report.env = read(path.join(dir, '.env'));
+    // codex resolves :tmpdir from the TMPDIR it starts with.
+    report.tmpdir = process.env.TMPDIR || null;
+    report.tmpEnv = { TMP: process.env.TMP || null, TEMP: process.env.TEMP || null, JAVA_TOOL_OPTIONS: process.env.JAVA_TOOL_OPTIONS || null };
     // codex keeps sessions under its home; a resume must find the first one.
     const sessions = path.join(dir, 'sessions');
     report.resumed = args.includes('resume');
     if (!report.resumed) {
       const id = 'stub-thread';
       fs.mkdirSync(sessions, { recursive: true });
-      fs.writeFileSync(path.join(sessions, `rollout-${process.env.TOWER_CRANE_AGENT}-${id}.jsonl`), '{}\n');
+      writeAtomic(path.join(sessions, `rollout-${process.env.TOWER_CRANE_AGENT}-${id}.jsonl`), '{}\n');
       process.stdout.write(`${JSON.stringify({ type: 'thread.started', thread_id: id })}\n`);
     }
     report.sessions = fs.existsSync(sessions) ? fs.readdirSync(sessions) : [];
   } else {
     report.prompt = args.find((a) => a.includes('## Task')) || null;
   }
+  // Every absolute SKILL.md path the agent is told to read, in its argv or
+  // the instruction files in its home, and the skills linked in that home,
+  // each with where it resolves at launch.
+  const own = process.env.TOWER_CRANE_HOOK ? path.dirname(process.env.TOWER_CRANE_HOOK) : null;
+  const realOf = (file) => {
+    try { return fs.realpathSync(file); } catch { return null; }
+  };
+  const told = [...args, ...(own ? [...['CLAUDE.md', 'system.md', 'AGENTS.md'].map((f) => read(path.join(own, f))), ...files(path.join(own, 'agents'), '.md')] : [])]
+    .filter(Boolean).join('\n');
+  report.skillPaths = [...new Set(told.match(/(?<![\w.~-])\/[^\s()'"`]*?SKILL\.md/g) || [])].map((file) => ({ file, real: realOf(file) }));
+  report.skillLinks = own ? (() => {
+    try {
+      return fs.readdirSync(path.join(own, 'skills')).filter((d) => !d.startsWith('.'))
+        .map((d) => ({ file: path.join(own, 'skills', d, 'SKILL.md'), real: realOf(path.join(own, 'skills', d, 'SKILL.md')) }));
+    } catch { return []; }
+  })() : [];
   for (const argv of JSON.parse(process.env.STUB_RUN || '[]')) {
     const r = cp.spawnSync(argv[0], argv.slice(1), { encoding: 'utf8' });
     report.ran.push({ argv, code: r.status, stderr: r.stderr });
   }
-  fs.writeFileSync(process.env.STUB_OUT, JSON.stringify(report));
+  writeAtomic(process.env.STUB_OUT, JSON.stringify(report));
 };

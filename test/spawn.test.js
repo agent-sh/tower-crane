@@ -1,14 +1,20 @@
 'use strict';
 
+const { fileWritten, waitOnRepo, killGroup } = require('./signals');
+
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const net = require('node:net');
+const cp = require('node:child_process');
+const { once } = require('node:events');
 const { pathToFileURL } = require('node:url');
-const { cachedFixture, pinRung, real, BIN, PTY_AVAILABLE } = require('./helpers');
+const { cachedFixture, pinRung, pluginRoot, real, BIN, ROOT, HOOKS, PTY_AVAILABLE, makeTaskRepo } = require('./helpers');
 const stack = require('./stack-fixture');
 const A = require('../lib/agents');
 const S = require('../lib/state');
+const { readPublished } = require('./atomic-file');
 const SHORT_WAIT = path.join(__dirname, 'fixtures', 'lock-wait.js');
 
 function setup(t) {
@@ -41,6 +47,145 @@ const commandRung = (h, rung, argv) => {
   const command = argv.some((arg) => /\{(prompt|brief)\}/.test(arg)) ? argv : [...argv, '{prompt}'];
   setRung(h, rung, ['--harness', 'command', '--command', JSON.stringify(command)]);
 };
+
+test('the dead-agent sweep removes orphan brokers and keeps live claims, processes and sockets', async (t) => {
+  const h = setup(t);
+  h.ok(['task', 'add', '--title', 'Live peer', '--acceptance', 'kept']);
+  h.ok(['claim', 'T2', '--agent', 'worker-live-claim']);
+  const brokerDir = (agent) => path.join(h.state, 'brokers', agent);
+  const plant = (agent, address) => {
+    fs.mkdirSync(brokerDir(agent), { recursive: true });
+    fs.writeFileSync(path.join(brokerDir(agent), 'broker.json'), JSON.stringify({
+      ...address, token: 'stale-test-token', state: h.state, task: 'T2', agent, role: 'worker',
+    }));
+  };
+  // Killing a listener leaves its Unix socket behind, as a killed supervisor does.
+  const job = { state: h.state, task: 'T2', agent: 'worker-orphan', role: 'worker', harness: 'claude',
+    cwd: h.repo, broker: path.join(brokerDir('worker-orphan'), 'broker.json') };
+  const listener = cp.spawn(process.execPath, ['-e',
+    'require(process.argv[1]).start(JSON.parse(process.argv[2])).then(() => process.stdout.write("ready\\n"))',
+    path.join(ROOT, 'lib', 'broker.js'), JSON.stringify(job)],
+  { stdio: ['ignore', 'pipe', 'pipe'] });
+  t.after(() => listener.kill('SIGKILL'));
+  await once(listener.stdout, 'data');
+  const { socket } = JSON.parse(fs.readFileSync(job.broker, 'utf8'));
+  if (process.platform !== 'win32' && path.dirname(socket) !== brokerDir('worker-orphan')) {
+    t.after(() => fs.rmSync(path.dirname(socket), { recursive: true, force: true }));
+  }
+  const exited = once(listener, 'exit');
+  listener.kill('SIGKILL');
+  await exited;
+  if (process.platform !== 'win32') assert.ok(fs.statSync(socket).isSocket());
+  for (const agent of ['worker-orphan', 'worker-live-claim', 'worker-live-process', 'worker-live-monitor', 'worker-unknown-process']) {
+    plant(agent, { socket });
+  }
+  const live = net.createServer((conn) => conn.end());
+  live.listen({ host: '127.0.0.1', port: 0 });
+  await once(live, 'listening');
+  t.after(() => new Promise((resolve) => live.close(resolve)));
+  plant('worker-live-socket', { socket, host: '127.0.0.1', port: live.address().port });
+  const closed = net.createServer();
+  closed.listen({ host: '127.0.0.1', port: 0 });
+  await once(closed, 'listening');
+  const port = closed.address().port;
+  await new Promise((resolve) => closed.close(resolve));
+  plant('worker-orphan-tcp', { host: '127.0.0.1', port });
+  plant('worker-uncertain', {});
+  const identity = require('../lib/processes').identity(process.pid);
+  for (const [agent, processInfo] of [
+    ['worker-live-process', { pid: process.pid, ...identity }],
+    ['worker-live-monitor', { pid: 2147483647, ...identity, monitor_pid: process.pid, monitor_start_ticks: identity.start_ticks }],
+    ['worker-unknown-process', { pid: process.pid, host: 'another-host' }],
+  ]) {
+    fs.appendFileSync(path.join(h.state, 'events.jsonl'), JSON.stringify({
+      at: new Date().toISOString(), cmd: 'spawn', agent: 'owner', task: 'T2', detail: { agent, role: 'worker', ...processInfo },
+    }) + '\n');
+  }
+  // A harness that exited and left a process in its group: that process can still write the
+  // agent's home and broker directory, so neither is walked while it runs. Windows has no groups.
+  const grouped = process.platform !== 'win32';
+  const stale = (agent) => path.join(h.state, 'brokers', `.stale-${agent}-0123456789ab`);
+  if (grouped) {
+    const leader = cp.spawn(process.execPath, ['-e',
+      "const c = require('node:child_process').spawn(process.execPath, ['-e', 'setTimeout(() => {}, 120000)'], { stdio: 'ignore' }); process.stdout.write(c.pid + '\\n', () => process.exit(0))"], // wait-allow: the member only idles until the test kills its group
+    { detached: true, stdio: ['ignore', 'pipe', 'ignore'] });
+    const [left] = await once(leader.stdout, 'data');
+    assert.ok(Number(String(left).trim()) > 0, 'the group keeps a member');
+    t.after(() => { try { killGroup(leader.pid, 'SIGKILL'); } catch {} });
+    if (leader.exitCode === null) await once(leader, 'exit');
+    plant('worker-group-left', { socket });
+    fs.mkdirSync(path.join(h.state, 'homes', 'worker-group-left'), { recursive: true });
+    fs.writeFileSync(path.join(h.state, 'homes', 'worker-group-left', 'note'), 'the agent\'s');
+    fs.appendFileSync(path.join(h.state, 'events.jsonl'), JSON.stringify({
+      at: new Date().toISOString(), cmd: 'spawn', agent: 'owner', task: 'T2',
+      detail: { agent: 'worker-group-left', role: 'worker', pid: leader.pid, host: require('node:os').hostname() },
+    }) + '\n');
+  }
+  // A spawn whose harness pid now names a later group leader: the recorded group emptied before
+  // Linux gave that pid out again, so the agent is gone.
+  const reused = process.platform === 'linux';
+  if (reused) {
+    const later = cp.spawn(process.execPath, ['-e', 'setTimeout(() => {}, 120000)'], { detached: true, stdio: 'ignore' }); // wait-allow: the later group leader only idles until the test kills its group
+    t.after(() => { try { killGroup(later.pid, 'SIGKILL'); } catch {} });
+    plant('worker-group-reused', { socket });
+    fs.mkdirSync(path.join(h.state, 'homes', 'worker-group-reused'), { recursive: true });
+    fs.appendFileSync(path.join(h.state, 'events.jsonl'), JSON.stringify({
+      at: new Date().toISOString(), cmd: 'spawn', agent: 'owner', task: 'T2',
+      detail: { agent: 'worker-group-reused', role: 'worker', pid: later.pid, host: require('node:os').hostname(), start_ticks: '1' },
+    }) + '\n');
+  }
+  // A harness that exited after starting a process in a session of its own (setsid): its group is
+  // empty, and only the launch's marker, which the process inherited, names it as the agent's.
+  // Only Linux reads another process's environment.
+  const marked = process.platform === 'linux';
+  if (marked) {
+    const mark = `TOWERCRANE_SPAWN_RUN_${process.pid}_0123456789ab`;
+    const leader = cp.spawn(process.execPath, ['-e',
+      "const c = require('node:child_process').spawn(process.execPath, ['-e', 'setTimeout(() => {}, 120000)'], { detached: true, stdio: 'ignore' }); process.stdout.write(c.pid + '\\n', () => process.exit(0))"], // wait-allow: the session leader only idles until the test kills it
+    { detached: true, stdio: ['ignore', 'pipe', 'ignore'], env: { ...process.env, [mark]: '1' } });
+    const [line] = await once(leader.stdout, 'data');
+    const left = Number(String(line).trim());
+    assert.ok(left > 0, 'the harness left a process in a session of its own');
+    t.after(() => { try { killGroup(left, 'SIGKILL'); } catch {} });
+    if (leader.exitCode === null) await once(leader, 'exit');
+    plant('worker-setsid-left', { socket });
+    fs.mkdirSync(path.join(h.state, 'homes', 'worker-setsid-left'), { recursive: true });
+    fs.writeFileSync(path.join(h.state, 'homes', 'worker-setsid-left', 'note'), 'the agent\'s');
+    fs.appendFileSync(path.join(h.state, 'events.jsonl'), JSON.stringify({
+      at: new Date().toISOString(), cmd: 'spawn', agent: 'owner', task: 'T2',
+      detail: { agent: 'worker-setsid-left', role: 'worker', pid: leader.pid, host: require('node:os').hostname(), run_mark: mark },
+    }) + '\n');
+  }
+  const kept = [...(grouped ? ['worker-group-left'] : []), ...(marked ? ['worker-setsid-left'] : [])];
+  // Broker directories that closing renamed aside, holding what an agent wrote there.
+  for (const agent of ['worker-orphan', 'worker-live-process', 'worker-live-claim', ...kept]) {
+    fs.mkdirSync(path.join(stale(agent), 'sub'), { recursive: true });
+    fs.writeFileSync(path.join(stale(agent), 'sub', 'f'), 'agent');
+  }
+  const bin = path.join(h.base, 'bin');
+  fs.mkdirSync(bin);
+  fs.writeFileSync(path.join(bin, `codex${process.platform === 'win32' ? '.exe' : ''}`), '', { mode: 0o755 });
+  const out = await h.runAsync(['spawn', '--task', 'T1', '--wait'], {
+    env: { PATH: bin + path.delimiter + (h.env.PATH || h.env.Path || ''), USAGE_CLAIM: '1' },
+    hooks: { HOOK_USAGE_HARNESS: 'codex', HOOK_USAGE_FILE: path.join(__dirname, 'fixtures', 'usage', 'codex-stream.jsonl') },
+  });
+  assert.equal(out.code, 0, out.stderr);
+  assert.equal(fs.existsSync(brokerDir('worker-orphan')), false, 'broker with no home, claim or process and a dead socket is swept');
+  assert.equal(fs.existsSync(brokerDir('worker-orphan-tcp')), false, 'a dead TCP-only broker is swept');
+  for (const agent of ['worker-live-claim', 'worker-live-process', 'worker-live-monitor', 'worker-unknown-process', 'worker-live-socket', 'worker-uncertain', ...kept]) {
+    assert.ok(fs.existsSync(path.join(brokerDir(agent), 'broker.json')), `${agent} is kept`);
+  }
+  if (grouped) assert.ok(fs.existsSync(path.join(h.state, 'homes', 'worker-group-left', 'note')), 'a home whose group still runs is kept');
+  if (marked) assert.ok(fs.existsSync(path.join(h.state, 'homes', 'worker-setsid-left', 'note')), 'a home whose marked process left the group is kept');
+  if (reused) {
+    assert.equal(fs.existsSync(path.join(h.state, 'homes', 'worker-group-reused')), false, 'a home whose group pid was given out again is removed');
+    assert.equal(fs.existsSync(brokerDir('worker-group-reused')), false, 'and so is its broker directory');
+  }
+  assert.equal(fs.existsSync(stale('worker-orphan')), false, 'a gone agent\'s broker directory set aside is removed');
+  for (const agent of ['worker-live-process', 'worker-live-claim', ...kept]) {
+    assert.ok(fs.existsSync(path.join(stale(agent), 'sub', 'f')), `${agent}'s broker directory set aside is kept`);
+  }
+});
 
 for (const harness of ['claude', 'codex', 'opencode', 'agy', 'pi']) {
   test(`a ${harness} rung spawns with an arbitrary model ID`, (t) => {
@@ -127,6 +272,7 @@ test('design tasks with an unconfigured kit still dispatch on supported harnesse
 });
 
 function writeSkill(plugin, name, body) {
+  pluginRoot(plugin);
   const file = path.join(plugin, 'skills', name, 'SKILL.md');
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, `---\nname: ${name}\ndescription: fixture frontmatter\n---\n${body}\n`);
@@ -187,7 +333,7 @@ test('spawn --dry-run builds each harness command', (t) => {
     [['--harness', 'pi', '--model', 'provider/fixture-model', '--provider', 'openai', '--effort', 'xhigh', '--args', '["--no-session"]'], (p, s) => ['pi', '-p', p, '--mode', 'json', '--model', 'provider/fixture-model', '--provider', 'openai', '--thinking', 'xhigh', ...piOwn(s), '--no-session']],
   ];
   const empty = path.join(h.base, 'no-plugin');
-  fs.mkdirSync(empty);
+  pluginRoot(empty);
   for (const [flags, expected] of cases) {
     setRung(h, 'small', flags);
     const out = dry(h, 'small', { TOWER_CRANE_PLUGIN_ROOT: empty });
@@ -274,7 +420,7 @@ test('spawn embeds the role skill in the system context for isolated reviewers a
 
 test('spawn warns when a role SKILL.md is missing', (t) => {
   const h = setup(t);
-  const plugin = path.join(h.base, 'incomplete-plugin');
+  const plugin = pluginRoot(path.join(h.base, 'incomplete-plugin'));
   fs.mkdirSync(path.join(plugin, 'skills', 'tower-crane-work'), { recursive: true });
   setRung(h, 'medium', ['--harness', 'opencode', '--model', 'a/b']);
 
@@ -345,6 +491,79 @@ test('the prompt is the role skill, brief, task, then how to use tower-crane', (
   assert.ok(p.endsWith('run tower-crane with --agent worker-T1-1 if TOWER_CRANE_AGENT is missing.'));
 });
 
+test('prompts name role skills in the state directory\'s skill store, since a user worktree has no skills directory', (t) => {
+  const h = setup(t);
+  setRung(h, 'medium', ['--harness', 'opencode', '--model', 'a/b']);
+  const store = A.skillStore({}, h.state).dir;
+  const prompt = (rung) => dry(h, rung).argv.find((arg) => arg.includes('## Task'));
+  const relative = /(?<![\\/\w.-])skills[\\/]tower-crane-(?:work|review)[\\/]SKILL\.md/;
+  const packaged = (text, skill) => {
+    const named = new RegExp(`Follow the ${skill} skill \\((.+?SKILL\\.md)\\)`).exec(text);
+    assert.ok(named, `${skill} is named`);
+    assert.equal(named[1], path.join(store, skill, 'SKILL.md'), 'the copy in the state directory, which the spawn makes');
+  };
+  assert.doesNotMatch(prompt('medium'), relative, 'the embedded work skill points at no worktree path');
+
+  reviewable(h);
+  const review = prompt('review');
+  assert.doesNotMatch(review, relative);
+  packaged(review, 'tower-crane-review');
+
+  h.ok(['rework', 'T1', '--reason', 'Next round']);
+  const rework = prompt('medium');
+  assert.doesNotMatch(rework, relative);
+  packaged(rework, 'tower-crane-work');
+});
+
+// Windows refuses the rename of a freshly copied tree for a moment while a
+// scanner holds its files (CI run 38702275511), which failed the agent's start.
+test('spawn waits out a refused rename of the skill store it just copied', (t) => {
+  const h = setup(t);
+  const out = path.join(h.base, 'ran.txt');
+  commandRung(h, 'medium', [process.execPath, '-e', 'require("node:fs").writeFileSync(process.argv[1], "ran")', out]);
+  const store = A.skillStore({}, h.state).dir;
+  const r = h.run(['spawn', '--task', 'T1', '--wait'], { hooks: { HOOK_BUSY_RENAME: `^${path.basename(store)}$` } });
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(fs.readFileSync(out, 'utf8'), 'ran');
+  assert.ok(fs.existsSync(path.join(store, 'tower-crane-work', 'SKILL.md')));
+  assert.deepEqual(fs.readdirSync(path.dirname(store)).sort(), ['.gitignore', path.basename(store)], 'the temporary copy is gone');
+});
+
+// Windows refuses a rename onto an existing directory, so the loser of a race
+// to publish the store sees EPERM; the store is there, so it stops at once.
+test('spawn takes a skill store another dispatch published first without waiting on its own rename', (t) => {
+  const h = setup(t);
+  const out = path.join(h.base, 'ran.txt');
+  commandRung(h, 'medium', [process.execPath, '-e', 'require("node:fs").writeFileSync(process.argv[1], "ran")', out]);
+  const store = A.skillStore({}, h.state).dir;
+  const refusals = path.join(h.base, 'refusals.txt');
+  const r = h.run(['spawn', '--task', 'T1', '--wait'], {
+    hooks: { HOOK_BUSY_RENAME: `^${path.basename(store)}$`, HOOK_BUSY_RENAME_TIMES: '0', HOOK_BUSY_RENAME_PUBLISHED: '1', HOOK_BUSY_RENAME_LOG: refusals },
+  });
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(fs.readFileSync(out, 'utf8'), 'ran');
+  assert.equal(fs.readFileSync(refusals, 'utf8'), `${store}\n`, 'one refused rename, no retries');
+  assert.ok(fs.existsSync(path.join(store, 'tower-crane-work', 'SKILL.md')));
+  assert.deepEqual(fs.readdirSync(path.dirname(store)).sort(), ['.gitignore', path.basename(store)], 'the temporary copy is gone');
+});
+
+test('a prompt that names a role skill warns when the plugin root lacks it', (t) => {
+  const h = setup(t);
+  // A command rung neither embeds nor loads the skill, so only the named path can warn.
+  commandRung(h, 'medium', [process.execPath, '-e', 'process.exit(0)', '{prompt}']);
+  reviewable(h);
+  h.ok(['rework', 'T1', '--reason', 'Next round']);
+  const plugin = path.join(h.base, 'no-work-skill');
+  writeSkill(plugin, 'tower-crane-review', 'review body');
+  const result = h.run(['spawn', '--role', 'medium', '--task', 'T1', '--dry-run', '--json'], {
+    env: { TOWER_CRANE_PLUGIN_ROOT: plugin },
+  });
+  assert.equal(result.code, 0, result.stderr);
+  const missing = path.join(plugin, 'skills', 'tower-crane-work', 'SKILL.md');
+  assert.ok(JSON.parse(result.stdout).argv.some((arg) => arg.includes('Follow the tower-crane-work skill and submit')), 'the prompt names the skill without a path that would not exist');
+  assert.ok(result.stderr.includes(`role skill ${missing} is missing`), result.stderr);
+});
+
 test('without an embedded skill the goal leads the prompt, so a brief opening with a dash is never read as a flag', (t) => {
   const h = setup(t);
   setRung(h, 'small', ['--harness', 'opencode', '--model', 'a/b']);
@@ -365,7 +584,7 @@ const task = env.TOWER_CRANE_TASK;
 const state = env.TOWER_CRANE_STATE;
 for (const key of Object.keys(env)) if (key.startsWith('TOWER_CRANE_')) delete env[key];
 const r = cp.spawnSync(process.execPath, [process.argv[1], 'evidence', 'T1', '--type', 'review', '--ok', '--sha', '50b732a15be40ccb2065cb2ba0e7b366d511b736', '--state', state], {
-  env, encoding: 'utf8', timeout: 10000,
+  env, encoding: 'utf8', timeout: 300000,
 });
 fs.writeFileSync(process.argv[2], JSON.stringify({ agent, task, remaining: Object.keys(env).filter((key) => key.startsWith('TOWER_CRANE_')), code: r.status, stderr: r.stderr }));
 process.exit(r.status === null ? 1 : r.status);
@@ -429,19 +648,24 @@ test('pi rungs load the tower-crane skill for workers and reviewers when it is i
   for (const rung of ['easy', 'medium', 'review', 'small']) setRung(h, rung, ['--model', 'm']);
   h.ok(['ladder', 'harness', 'pi']);
   const at = (argv) => argv.slice(argv.indexOf('--skill'), argv.indexOf('--skill') + 2);
-  const worker = dry(h, 'medium', env).argv;
-  const reviewer = dry(h, 'review', env).argv;
-  assert.deepEqual(at(worker), ['--skill', path.join(plugin, 'skills', 'tower-crane-work')]);
-  assert.deepEqual(at(dry(h, 'easy', env).argv), ['--skill', path.join(plugin, 'skills', 'tower-crane-work')]);
-  assert.deepEqual(at(reviewer), ['--skill', path.join(plugin, 'skills', 'tower-crane-review')]);
+  // The copy in the state directory's skill store, which the spawn makes from the plugin root.
+  const own = (out, skill) => ['--skill', path.join(A.skillStore(env, h.state).dir, skill)];
+  const workerOut = dry(h, 'medium', env);
+  const reviewerOut = dry(h, 'review', env);
+  const easyOut = dry(h, 'easy', env);
+  const worker = workerOut.argv;
+  const reviewer = reviewerOut.argv;
+  assert.deepEqual(at(worker), own(workerOut, 'tower-crane-work'));
+  assert.deepEqual(at(easyOut.argv), own(easyOut, 'tower-crane-work'));
+  assert.deepEqual(at(reviewer), own(reviewerOut, 'tower-crane-review'));
   assert.ok(!worker.find((arg) => arg.includes('## Task')).includes('PI_WORK_SKILL_MUST_NOT_BE_EMBEDDED'));
   assert.ok(!reviewer.find((arg) => arg.includes('## Task')).includes('PI_REVIEW_SKILL_MUST_NOT_BE_EMBEDDED'));
   assert.ok(!dry(h, 'small', env).argv.includes('--skill'), 'other rungs get no skill');
   const missing = path.join(h.base, 'empty-plugin');
-  fs.mkdirSync(missing);
+  pluginRoot(missing);
   assert.ok(!dry(h, 'medium', { TOWER_CRANE_PLUGIN_ROOT: missing }).argv.includes('--skill'), 'no skill when it is not installed');
 
-  const incomplete = path.join(h.base, 'incomplete-plugin');
+  const incomplete = pluginRoot(path.join(h.base, 'incomplete-plugin'));
   fs.mkdirSync(path.join(incomplete, 'skills', 'tower-crane-work'), { recursive: true });
   const warning = h.run(['spawn', '--role', 'medium', '--task', 'T1', '--dry-run', '--json'], {
     env: { TOWER_CRANE_PLUGIN_ROOT: incomplete },
@@ -508,7 +732,7 @@ test('the agent runs a real nested test', () => {
   h.git(['commit', '-qm', 'nested runner fixture']);
   const script = `
 const cp = require('node:child_process');
-const result = cp.spawnSync(process.execPath, ['--test', '--test-reporter=tap', ${JSON.stringify(file)}], { encoding: 'utf8', timeout: 10000 });
+const result = cp.spawnSync(process.execPath, ['--test', '--test-reporter=tap', ${JSON.stringify(file)}], { encoding: 'utf8', timeout: 300000 });
 require('node:fs').writeFileSync(${JSON.stringify(out)}, JSON.stringify({
   runnerEnv: Object.keys(process.env).filter((key) => /^NODE_TEST_/i.test(key)),
   code: result.status, stdout: result.stdout, stderr: result.stderr,
@@ -525,6 +749,35 @@ require('node:fs').writeFileSync(${JSON.stringify(out)}, JSON.stringify({
   assert.equal(seen.stderr, '');
   assert.match(seen.stdout, /# pass 1\b/);
   assert.equal(fs.readFileSync(marker, 'utf8'), 'ran');
+});
+
+test('command brief copies default to the user cache and keep explicit temp overrides', (t) => {
+  const h = setup(t);
+  const out = path.join(h.base, 'brief-location.json');
+  commandRung(h, 'medium', [process.execPath, '-e',
+    "require('node:fs').writeFileSync(process.argv[1], JSON.stringify({ file: process.argv[2], text: require('node:fs').readFileSync(process.argv[2], 'utf8') }))",
+    out, '{brief}']);
+  const cache = process.platform === 'win32'
+    ? path.join(h.env.HOME, 'AppData', 'Local')
+    : path.join(h.env.HOME, '.cache');
+  const env = { USERPROFILE: h.env.HOME, XDG_CACHE_HOME: '', LOCALAPPDATA: '', TOWER_CRANE_TMP: '', TOWER_CRANE_TEST_TMP: '' };
+  const expected = path.join(cache, 'tower-crane');
+  const planned = dry(h, 'medium', env);
+  const file = planned.argv.find((arg) => arg.endsWith('-brief.md'));
+  assert.equal(path.dirname(file), expected);
+  assert.equal(fs.existsSync(file), false, 'dry-run does not create a brief');
+  h.ok(['spawn', '--task', 'T1', '--wait'], { env });
+  const seen = JSON.parse(fs.readFileSync(out, 'utf8'));
+  assert.equal(path.dirname(seen.file), expected);
+  assert.match(seen.text, /webhook handler/);
+  assert.equal(fs.existsSync(seen.file), false, 'the cache brief is removed after the command exits');
+  for (const overrides of [
+    { TOWER_CRANE_TEST_TMP: path.join(h.base, 'test-tmp') },
+    { TOWER_CRANE_TEST_TMP: path.join(h.base, 'test-tmp'), TOWER_CRANE_TMP: path.join(h.base, 'spawn-tmp') },
+  ]) {
+    const next = dry(h, 'medium', { ...env, ...overrides }).argv.find((arg) => arg.endsWith('-brief.md'));
+    assert.equal(path.dirname(next), overrides.TOWER_CRANE_TMP || overrides.TOWER_CRANE_TEST_TMP);
+  }
 });
 
 test('command brief placeholders point to role-filtered temporary copies', async (t) => {
@@ -588,18 +841,7 @@ setImmediate(() => process.platform === 'win32' ? process.exit(0) : process.kill
   reviewable(h);
   commandRung(h, 'medium', [process.execPath, '-e', script, reviewerOut, '{brief}']);
   fs.writeFileSync(cleanupOut, '');
-  const cleaned = new Promise((resolve, reject) => {
-    const watcher = fs.watch(cleanupOut, () => {
-      watcher.close();
-      clearTimeout(timeout);
-      resolve();
-    });
-    const timeout = setTimeout(() => {
-      watcher.close();
-      reject(new Error('the reviewer did not remove its brief copy'));
-    }, 10000);
-    t.after(() => { watcher.close(); clearTimeout(timeout); });
-  });
+  const cleaned = fileWritten(cleanupOut, { signal: t.signal, check: (text) => text.includes('\n') });
   const reviewer = h.json(['spawn', '--role', 'review', '--task', 'T1'], { env });
   assert.equal(reviewer.agent, 'reviewer-T1-1');
   await cleaned;
@@ -669,7 +911,9 @@ if (process.argv[1].endsWith('spawn-monitor.js')) {
   assert.deepEqual(fs.readdirSync(tempRoot), []);
 });
 
-test('background spawn refuses occupied log names without writing or recording a spawn', (t) => {
+// A plain file there is a failed start's log, which the spawn moves aside
+// (spawn-startup.test.js); a link or a directory is not.
+test('background spawn refuses a log name held by a link or a directory without writing or recording a spawn', (t) => {
   for (const linked of [false, true]) {
     const h = setup(t);
     commandRung(h, 'small', [process.execPath, '-e', 'console.log("agent output")']);
@@ -686,7 +930,8 @@ test('background spawn refuses occupied log names without writing or recording a
         throw e;
       }
     } else {
-      fs.writeFileSync(log, 'preserve this log\n');
+      fs.mkdirSync(log);
+      fs.writeFileSync(path.join(log, 'kept'), 'preserve this log\n');
     }
     const tasks = fs.readFileSync(path.join(h.state, 'tasks.json'), 'utf8');
     const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8');
@@ -694,7 +939,7 @@ test('background spawn refuses occupied log names without writing or recording a
     assert.notEqual(result.code, 0, result.stdout);
     assert.match(result.stderr, /log already exists/);
     assert.equal(fs.readFileSync(target, 'utf8'), 'preserve this file\n');
-    assert.equal(fs.readFileSync(log, 'utf8'), linked ? 'preserve this file\n' : 'preserve this log\n');
+    assert.equal(fs.readFileSync(linked ? log : path.join(log, 'kept'), 'utf8'), linked ? 'preserve this file\n' : 'preserve this log\n');
     assert.equal(fs.readFileSync(path.join(h.state, 'tasks.json'), 'utf8'), tasks);
     assert.equal(fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8'), events);
   }
@@ -709,11 +954,7 @@ test('spawn in the background detaches, logs output and numbers agents', async (
   assert.equal(real(path.dirname(started.log)), real(path.join(h.state, 'logs')));
   assert.equal(path.basename(started.log), 'T1-small-T1-1.log');
   if (process.platform !== 'win32') assert.equal(fs.statSync(started.log).mode & 0o777, 0o600);
-  const deadline = Date.now() + 10000;
-  while (!(fs.existsSync(started.log) && fs.readFileSync(started.log, 'utf8').includes('hello'))) {
-    if (Date.now() > deadline) throw new Error('the background agent wrote nothing to its log');
-    await new Promise((r) => setTimeout(r, 50));
-  }
+  await waitOnRepo(h, () => (fs.existsSync(started.log) && readPublished(started.log, 'utf8').includes('hello')));
   assert.match(fs.readFileSync(started.log, 'utf8'), /hello from small-T1-1/);
   assert.equal(h.json(['spawn', '--role', 'small', '--task', 'T1', '--dry-run']).agent, 'small-T1-2');
 
@@ -728,10 +969,86 @@ test('spawn in the background detaches, logs output and numbers agents', async (
   assert.match(noBrief.stderr, /T2 has no brief; write one with tower-crane brief set T2/);
 });
 
+// An agent's git runs through its shim, which cleans up placeholders in the
+// git directory first; stopping the agent kills its process group, shim
+// included. A supervisor runs its own git through the agent's shims before it
+// reports its start, so a directory the killed shim left held made every
+// later supervisor miss its startup window.
+test('a git shim killed while it cleans up placeholders does not keep the next supervisor from starting', (t) => {
+  const h = setup(t);
+  const policy = path.join(h.base, 'policy.json');
+  fs.writeFileSync(policy, JSON.stringify({ gitPush: 'branch', branch: 'task-T1', repo: null, gh: [] }));
+  const shimDir = path.join(h.base, 'shim');
+  fs.mkdirSync(shimDir);
+  // An empty process table lets the shim take the directory where there is no /proc.
+  const table = fs.mkdtempSync(path.join(h.base, 'proc-'));
+  commandRung(h, 'small', [process.execPath, '-e', 'process.exit(0)', '{prompt}']);
+  // On the host, and inside an agent's command sandbox, which has a pid namespace of its own.
+  for (const [attempt, hooks] of [[1, {}], [2, { HOOK_PIDNS: 'pid:[4026599999]' }]]) {
+    cp.spawnSync(process.execPath, ['--require', HOOKS, path.join(ROOT, 'lib', 'shim.js'), policy, shimDir, 'git', 'status'],
+      { cwd: h.repo, env: { ...h.env, TOWER_CRANE_PROC: table, HOOK_STATE: h.state, HOOK_DIE_REAP: '1', ...hooks } });
+    assert.equal(fs.existsSync(path.join(h.repo, '.git', 'tower-crane-reap')), true, 'the killed shim held the directory');
+    const started = h.run(['spawn', '--role', 'small', '--task', 'T1', '--wait', '--json']);
+    assert.equal(started.code, 0, started.stderr);
+    assert.equal(JSON.parse(started.stdout).agent, `small-T1-${attempt}`);
+  }
+});
+
+// Only a cleanup outside every command sandbox judges a marker from a
+// sandbox's pid namespace. A stopped sandboxed agent's shim leaves one, and
+// until a host cleanup ran, every git call of every other sandboxed agent
+// waited 5 s on it. The supervisor is on the host when its agent's group ends.
+test('a supervisor clears the git directory a git shim in its agent\'s sandbox died holding', { skip: process.platform !== 'linux' && 'pid namespaces are Linux only' }, (t) => {
+  const h = setup(t);
+  for (const mark of ['TOWER_CRANE_SANDBOX', 'SANDBOX_RUNTIME', 'CODEX_SANDBOX']) delete h.env[mark];
+  const policy = path.join(h.base, 'policy.json');
+  fs.writeFileSync(policy, JSON.stringify({ gitPush: 'branch', branch: 'task-T1', repo: null, gh: [] }));
+  const shimDir = path.join(h.base, 'shim');
+  fs.mkdirSync(shimDir);
+  // The agent is a git call through its shim, killed once it holds the directory.
+  commandRung(h, 'small', ['env', 'HOOK_DIE_REAP=1', 'HOOK_PIDNS=pid:[4026599999]', 'TOWER_CRANE_SANDBOX=1', `HOOK_STATE=${h.state}`,
+    process.execPath, '--require', HOOKS, path.join(ROOT, 'lib', 'shim.js'), policy, shimDir, 'git', 'status', '--short', '{prompt}']);
+  const r = h.run(['spawn', '--role', 'small', '--task', 'T1', '--wait', '--json']);
+  assert.notEqual(r.code, 0, 'the agent was killed');
+  const dir = path.join(h.repo, '.git', 'tower-crane-reap');
+  const marker = fs.existsSync(dir) ? fs.readdirSync(dir) : [];
+  assert.deepEqual(marker, [], marker.length ? fs.readFileSync(path.join(dir, marker[0]), 'utf8') : '');
+  assert.equal(fs.existsSync(dir), false);
+});
+
+// claude's command sandbox runs in a session of its own, so a shim in it is
+// outside the agent's process group and dies only when the sandbox is torn
+// down after the group ends. The supervisor tries again while that lags.
+test('a supervisor clears the git directory a git shim held a moment past its agent\'s group', { skip: process.platform !== 'linux' && 'needs /proc to judge the holder' }, (t) => {
+  const h = setup(t);
+  for (const mark of ['TOWER_CRANE_SANDBOX', 'SANDBOX_RUNTIME', 'CODEX_SANDBOX']) delete h.env[mark];
+  const policy = path.join(h.base, 'policy.json');
+  fs.writeFileSync(policy, JSON.stringify({ gitPush: 'branch', branch: 'task-T1', repo: null, gh: [] }));
+  const shimDir = path.join(h.base, 'shim');
+  fs.mkdirSync(shimDir);
+  const dir = path.join(h.repo, '.git', 'tower-crane-reap');
+  // The agent starts the shim in a session of its own and exits once the shim
+  // holds the directory; the shim holds it 400 ms longer, then is killed.
+  const agent = path.join(h.base, 'agent.js');
+  fs.writeFileSync(agent, `
+const cp = require('node:child_process'), fs = require('node:fs');
+const shim = cp.spawn(process.execPath, ${JSON.stringify(['--require', HOOKS, path.join(ROOT, 'lib', 'shim.js'), policy, shimDir, 'git', 'status', '--short'])},
+  { detached: true, stdio: 'ignore', env: { ...process.env, HOOK_DIE_REAP: '1', HOOK_DIE_REAP_AFTER: '400', HOOK_STATE: ${JSON.stringify(h.state)} } });
+shim.unref();
+const end = Date.now() + 300000;
+while (!fs.existsSync(${JSON.stringify(dir)}) && Date.now() < end) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
+`);
+  commandRung(h, 'small', [process.execPath, agent, '{prompt}']);
+  h.run(['spawn', '--role', 'small', '--task', 'T1', '--wait', '--json']);
+  const marker = fs.existsSync(dir) ? fs.readdirSync(dir) : [];
+  assert.deepEqual(marker, [], marker.length ? fs.readFileSync(path.join(dir, marker[0]), 'utf8') : '');
+  assert.equal(fs.existsSync(dir), false);
+});
+
 // Everything a spawn could leave behind: state files, events, logs, the
 // worktree and its branch.
 function footprint(h) {
-  const read = (f) => (fs.existsSync(path.join(h.state, f)) ? fs.readFileSync(path.join(h.state, f), 'utf8') : null);
+  const read = (f) => (fs.existsSync(path.join(h.state, f)) ? readPublished(path.join(h.state, f), 'utf8') : null);
   return {
     tasks: read('tasks.json'),
     events: read('events.jsonl'),
@@ -799,13 +1116,7 @@ test('a spawn that cannot take the lock leaves its worktree, names it and exits 
   assert.equal(real(h.json(['spawn', '--role', 'small', '--task', 'T1', '--wait']).cwd), real(leftover(h)));
 });
 
-async function waitForFile(file, ms = 20000) {
-  const end = Date.now() + ms;
-  while (!fs.existsSync(file)) {
-    if (Date.now() > end) throw new Error(`${file} never appeared`);
-    await new Promise((r) => setTimeout(r, 20));
-  }
-}
+const waitForFile = (file) => fileWritten(file);
 
 test('a failed spawn never deletes a worktree another command took up', async (t) => {
   const h = setup(t);
@@ -813,7 +1124,7 @@ test('a failed spawn never deletes a worktree another command took up', async (t
   const release = path.join(h.base, 'worker-may-write');
   // The worker stays alive with nothing written until the test releases it,
   // then writes into its working directory.
-  const worker = `const fs = require("fs"); const end = Date.now() + 20000;
+  const worker = `const fs = require("fs"); const end = Date.now() + 300000;
 while (!fs.existsSync(process.argv[1]) && Date.now() < end) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
 fs.writeFileSync(${JSON.stringify(output)}, "work in progress");`;
   commandRung(h, 'small', [process.execPath, '-e', worker, release]);
@@ -912,4 +1223,46 @@ test('spawn refuses a stacked rework with claim\'s reason when its dependency we
   assert.match(r.stderr, /T2 is blocked: depends on T1 \(in_progress\)/);
   assert.doesNotMatch(r.stderr, /prepared on T1|before dispatch/);
   assert.equal(f.h.json(['task', 'show', 'T2']).status, 'rework');
+});
+
+// A worker writes its worktree's `.git` file. The directory it names is
+// granted to the next sandbox in that worktree, so it must be an admin
+// directory of this repository.
+test('a spawn refuses a worktree whose .git file names a git directory of another repository', (t) => {
+  const h = makeTaskRepo(t, [{ args: ['--title', 'Grant', '--acceptance', 'works'], brief: 'Do it.\n' }]);
+  const wt = h.json(['worktree', 'T1', '--agent', 'orchestrator']).path;
+  assert.equal(h.run(['spawn', '--task', 'T1', '--dry-run', '--json']).code, 0);
+  const other = path.join(h.base, 'other');
+  fs.cpSync(h.repo, other, { recursive: true });
+  const dotgit = path.join(wt, '.git');
+  const original = fs.readFileSync(dotgit, 'utf8');
+  // Git hides a worktree's .git file on Windows, and opening a hidden file for
+  // writing fails there, so it is replaced rather than rewritten.
+  const rewrite = (text) => { fs.rmSync(dotgit); fs.writeFileSync(dotgit, text); };
+  h.git(['worktree', 'add', '-q', '--detach', path.join(h.base, 'other-wt'), 'main'], other);
+  for (const named of [path.join(other, '.git'), path.join(other, '.git', 'worktrees', 'other-wt')]) {
+    rewrite(`gitdir: ${named}\n`);
+    const r = h.run(['spawn', '--task', 'T1', '--dry-run', '--json']);
+    assert.notEqual(r.code, 0, named);
+    assert.match(r.stderr, /is not a worktree admin directory of/, named);
+  }
+  rewrite(original);
+  assert.equal(h.run(['spawn', '--task', 'T1', '--dry-run', '--json']).code, 0);
+});
+
+test('a worker spawn in a repository without origin is refused before its worktree or harness starts', (t) => {
+  const h = setup(t);
+  const marker = path.join(h.base, 'harness-started');
+  commandRung(h, 'medium', [process.execPath, '-e', `require('node:fs').writeFileSync(${JSON.stringify(marker)}, '')`]);
+  h.git(['remote', 'remove', 'origin']);
+  const before = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8');
+  const r = h.run(['spawn', '--task', 'T1']);
+  assert.equal(r.code, 1, r.stdout);
+  assert.match(r.stderr, /this repository has no origin remote; workers push their task branch to origin and open the PR there\. Add it with git remote add origin URL, then spawn again/);
+  assert.equal(fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8'), before, 'no state was written');
+  assert.equal(h.readState('tasks.json').tasks[0].worktree, undefined);
+  assert.ok(!fs.existsSync(marker), 'the harness did not start');
+  assert.equal(h.git(['worktree', 'list', '--porcelain']).split('\n').filter((l) => l.startsWith('worktree ')).length, 1);
+  // A dry run still previews the command, on the rung the marker belongs to.
+  assert.equal(h.json(['spawn', '--task', 'T1', '--dry-run']).rung, 'medium');
 });

@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const http = require('node:http');
-const { makeRepo } = require('./helpers');
+const { makeRepo, useFixtureUserFile } = require('./helpers');
 const { changeKind } = require('./gate-helpers');
 const { pageText } = require('../lib/gates/sources');
 const { fetchPublic } = require('../lib/public-http');
@@ -86,6 +86,7 @@ test('sources gate fetches ten cited pages at the submitted commit and records a
   assert.equal(requests.length, 20);
   h.ok(['project', 'set', '--research-min-sources', '11']);
   assert.equal(h.json(['task', 'show', 'T1']).gates.gates.find(g => g.type === 'sources').ok, false);
+  useFixtureUserFile(t, h);
   const state = require('../lib/state').loadState(h.state);
   const board = require('../lib/board/model').build(state);
   assert.equal(board.sheets[0].ledger[0].entries.find(e => e.type === 'sources').counts, false);
@@ -160,7 +161,7 @@ test('sources gate pins its DNS answer for the real HTTP transport despite rebin
   assert.deepEqual(requests, ['/0']);
 });
 
-test('the source fetch refuses non-public addresses and redirects before connecting', async () => {
+test('the source fetch refuses non-public addresses and redirects before connecting', async (t) => {
   const answers = {
     'source.example': [{ address: '93.184.216.34', family: 4 }],
     'private.example': [{ address: '10.0.0.1', family: 4 }],
@@ -186,7 +187,7 @@ test('the source fetch refuses non-public addresses and redirects before connect
         return new Response(null, { status: 302, headers: { location: REDIRECTS.get(target.pathname) } });
       },
     };
-    await assert.rejects(fetchPublic(url, { signal: AbortSignal.timeout(5000) }, ctx), /non-public address/, url);
+    await assert.rejects(fetchPublic(url, { signal: t.signal }, ctx), /non-public address/, url);
     assert.deepEqual(requests, expected, url);
   }
 });

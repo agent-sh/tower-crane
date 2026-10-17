@@ -7,13 +7,14 @@ const path = require('node:path');
 const os = require('node:os');
 const { makeRepo, cachedFixture } = require('./helpers');
 const TOML = require('../lib/toml');
+const A = require('../lib/agents');
 
 const NO_STUBS = process.platform === 'win32' && 'harness stubs are shebang scripts';
 const SECRET_KEY = 'TC_PRIVATE_ENV_FILE_KEY';
 const SECRET = 'private-file-value $literal `literal`';
 
 function setup(t, harness = 'codex') {
-  return cachedFixture(t, harness, (h) => {
+  const h = cachedFixture(t, harness, (h) => {
     h.init();
     h.ok(['task', 'add', '--title', 'Toolchain probe', '--acceptance', 'lock written']);
     h.ok(['brief', 'set', 'T1', '-'], { input: 'probe' });
@@ -21,6 +22,18 @@ function setup(t, harness = 'codex') {
       ...(harness === 'codex' ? ['--profile', 'fixture-main', '--clear', 'model'] : ['--model', 'fixture-large', '--clear', 'profile']),
       '--clear', 'effort', '--clear', 'args']);
   });
+  // Native harness fixtures must not copy the parent's credential tree.
+  Object.assign(h.env, {
+    USERPROFILE: h.env.HOME,
+    CLAUDE_CONFIG_DIR: path.join(h.env.HOME, '.claude'),
+    CODEX_HOME: path.join(h.env.HOME, '.codex'),
+    PI_CODING_AGENT_DIR: path.join(h.env.HOME, '.pi', 'agent'),
+    GH_CONFIG_DIR: path.join(h.env.HOME, '.config', 'gh'),
+    XDG_CONFIG_HOME: path.join(h.env.HOME, '.config'),
+    XDG_DATA_HOME: path.join(h.env.HOME, '.local', 'share'),
+    OPENCODE_CONFIG_DIR: path.join(h.env.HOME, '.config', 'opencode'),
+  });
+  return h;
 }
 
 function noFileSecrets(dir) {
@@ -37,8 +50,11 @@ function noFileSecrets(dir) {
 
 // An exited worker keeps its lease until the orchestrator releases it, so each dispatch releases the last one.
 function releaseExited(h) {
-  const claim = h.json(['task', 'show', 'T1']).claim;
-  if (claim) h.ok(['release', 'T1', '--agent', claim.agent, '--reason', 'worker exited']);
+  const task = h.json(['task', 'show', 'T1']);
+  if (task.claim) h.ok(['release', 'T1', '--agent', task.claim.agent, '--reason', 'worker exited']);
+  // These probes relaunch one task's worker on purpose; the owner lifts the
+  // respawn cap each stand-in's exit without a submit counts toward.
+  if (task.needs_owner?.startsWith('worker exited without submitting')) h.ok(['owner-done', 'T1']);
 }
 
 test('project and rung spawn settings require explicit owner identity, including unchanged and cleared fields', (t) => {
@@ -316,7 +332,7 @@ test('invalid or unreadable env files fail without echoing their contents', { sk
 
 test('real Codex worker writes the toolchain lock, receives a private env file, serves loopback and inherits scope limits', {
   skip: process.env.TOWER_CRANE_LIVE_CODEX !== '1' && 'set TOWER_CRANE_LIVE_CODEX=1 to run a real Codex worker',
-  timeout: 240000,
+  timeout: 300000,
 }, async (t) => {
   assert.ok(process.env.TOWER_CRANE_LIVE_PROFILE, 'set TOWER_CRANE_LIVE_PROFILE to run a live codex probe');
   const fixtureRoot = process.env.TOWER_CRANE_TEST_TMP;
@@ -340,7 +356,8 @@ test('real Codex worker writes the toolchain lock, receives a private env file, 
   const results = path.join(h.base, 'results');
   fs.mkdirSync(results);
   const out = path.join(results, 'live-result.json');
-  const script = path.join(h.base, 'cargo-probe.js');
+  // Codex mounts nothing beside the home but the paths the project names.
+  const script = path.join(results, 'cargo-probe.js');
   const privateTmp = path.join(h.base, 'agent-tmp');
   fs.mkdirSync(privateTmp, { mode: 0o700 });
   assert.equal(process.platform, 'linux', 'live scope verification requires Linux');
@@ -370,7 +387,7 @@ test('real Codex worker writes the toolchain lock, receives a private env file, 
     '}',
     'if (!limited) throw new Error("agent did not inherit CPUQuota=200% and MemoryMax=8G");',
     'const server = net.createServer(c => c.end("loopback"));',
-    'const deadline = setTimeout(() => { console.error("loopback timeout"); process.exit(1); }, 10000);',
+    'const deadline = setTimeout(() => { console.error("loopback timeout"); process.exit(1); }, 10000);', // wait-allow: hung-child backstop for the live sandbox network probe
     'server.on("error", e => { throw e; });',
     'server.listen(0, "127.0.0.1", () => {',
     '  let text = "";',
@@ -384,7 +401,7 @@ test('real Codex worker writes the toolchain lock, receives a private env file, 
     '  });',
     '});', '',
   ].join('\n'));
-  h.ok(['project', 'set', '--sandbox', JSON.stringify({ write: [cargo, results] }), '--scope', '{"CPUQuota":"200%","MemoryMax":"8G"}',
+  h.ok(['project', 'set', '--sandbox', JSON.stringify({ write: [cargo, results], read: [rustup] }), '--scope', '{"CPUQuota":"200%","MemoryMax":"8G"}',
     '--env', JSON.stringify({ CARGO_HOME: cargo, RUSTUP_HOME: rustup }), '--env_file', file]);
   h.ok(['ladder', 'set', 'medium', '--harness', 'codex', '--profile', process.env.TOWER_CRANE_LIVE_PROFILE,
     '--clear', 'model', '--clear', 'effort', '--supervision', '{"retries":0}']);
@@ -401,4 +418,443 @@ test('real Codex worker writes the toolchain lock, receives a private env file, 
   assert.equal(fs.existsSync(path.join(cargo, '.package-cache')), true);
   noFileSecrets(h.state);
   assert.ok(!result.stdout.includes(SECRET_KEY) && !result.stderr.includes(SECRET));
+});
+
+// A claude stub that writes the settings, its sandbox apart, and the env its spawn gave it to out.
+function writeClaudeStub(bin, out) {
+  const stub = [
+    `#!${process.execPath}`, "'use strict';",
+    'const fs = require("node:fs"), path = require("node:path");',
+    'const settings = JSON.parse(fs.readFileSync(path.join(process.env.CLAUDE_CONFIG_DIR, "settings.json"), "utf8"));',
+    `fs.writeFileSync(${JSON.stringify(out)}, JSON.stringify({ sandbox: settings.sandbox, settings, env: { XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR, DBUS_SESSION_BUS_ADDRESS: process.env.DBUS_SESSION_BUS_ADDRESS }, tmp: { TMPDIR: process.env.TMPDIR, TMP: process.env.TMP, TEMP: process.env.TEMP, CLAUDE_CODE_TMPDIR: process.env.CLAUDE_CODE_TMPDIR } }));`,
+    'console.log("bus probe passed");', '',
+  ].join('\n');
+  fs.writeFileSync(path.join(bin, 'claude'), stub, { mode: 0o755 });
+}
+
+test('claude: the sandbox allows GitHub, npm and sandbox.domains, names the remotes it leaves out, and refuses a pattern claude does not take', { skip: NO_STUBS }, (t) => {
+  // Owner decision 2026-10-14: an explicit list in place of ['*'], which
+  // claude's proxy honors as every host.
+  const h = setup(t, 'claude');
+  const bin = path.join(h.base, 'bin');
+  fs.mkdirSync(bin);
+  const out = path.join(h.base, 'result.json');
+  writeClaudeStub(bin, out);
+  const env = { ...h.env, PATH: `${bin}${path.delimiter}${process.env.PATH}`, CLAUDE_CONFIG_DIR: '' };
+  const wt = h.json(['worktree', 'T1']).path;
+  // A remote never widens the list: the orchestrator can add one without
+  // the owner. A loopback or tailnet remote, listed as a bare name, would
+  // open every port and service on that host to the agent's commands.
+  for (const args of [['remote', 'add', 'mirror', 'https://git.example.org/acme/app.git'], ['remote', 'set-url', '--add', '--push', 'mirror', 'git@push.example.net:acme/app.git'],
+    ['remote', 'add', 'intranet', 'ssh://gitserver/acme/app.git'], ['remote', 'add', 'local', 'http://localhost:8300/acme/app.git'],
+    ['remote', 'add', 'tailnet', 'http://100.64.0.10:7447/git'], ['remote', 'add', 'v6', 'http://[::1]:8080/app.git'],
+    ['remote', 'add', 'lan', 'https://192.168.1.20:8443/app.git'], ['remote', 'add', 'plain', 'http://plain.example.com/app.git']]) h.git(['-C', wt, ...args]);
+  // Each message carries the whole spawn output and the settings claude got,
+  // so a failure under load says what differed.
+  const spawned = () => {
+    releaseExited(h);
+    const stdout = h.ok(['spawn', '--task', 'T1', '--wait'], { env });
+    const result = JSON.parse(fs.readFileSync(out, 'utf8'));
+    const seen = `spawn stdout:\n${stdout}\nclaude settings:\n${JSON.stringify(result.settings, null, 2)}`;
+    return { domains: result.sandbox.network.allowedDomains, stdout, seen };
+  };
+  const base = spawned();
+  for (const d of ['github.com', 'api.github.com', 'codeload.github.com', 'objects.githubusercontent.com', 'raw.githubusercontent.com', 'uploads.github.com', 'registry.npmjs.org']) {
+    assert.ok(base.domains.includes(d), `${d} in the allowed domains\n${base.seen}`);
+  }
+  for (const host of ['*', 'git.example.org', 'push.example.net', 'gitserver', 'localhost', '100.64.0.10', '[::1]', '192.168.1.20']) {
+    assert.ok(!base.domains.some((d) => d === host || d.startsWith(`${host}:`)), `${host} stays out of the allowed domains\n${base.seen}`);
+  }
+  // Each one left out is named, with its port (an https or http URL's
+  // default when it names none) and what kind of address it is.
+  for (const named of ['git.example.org:443', 'plain.example.com:80', 'push.example.net', 'gitserver (single-label', 'localhost:8300 (loopback)', '100.64.0.10:7447 (shared address space',
+    '[::1]:8080 (loopback)', '192.168.1.20:8443 (private address)']) assert.ok(base.stdout.includes(named), `${named} in the notice\n${base.seen}`);
+  const spawnEvent = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l)).findLast((e) => e.cmd === 'spawn');
+  assert.ok(spawnEvent.detail.notices?.some((n) => n.includes('localhost:8300')), `the spawn event records the notice: ${JSON.stringify(spawnEvent)}`);
+  // The whole result of a refusal: a CLI killed by a signal, or never
+  // started, also exits nonzero with nothing on stderr.
+  const refused = (domains) => {
+    const r = h.run(['project', 'set', '--sandbox', JSON.stringify({ domains })]);
+    return { ...r, seen: `project set --sandbox ${JSON.stringify({ domains })}: ${JSON.stringify({ code: r.code, signal: r.signal, error: r.error, stdout: r.stdout, stderr: r.stderr })}` };
+  };
+  for (const bad of ['*.com', 'https://pypi.org', 'pypi', 'a.b:0', '*.*.org', 'github.com:080', 'github.com:65536', '2001:db8::1:443', '::1',
+    '*.co.uk', '*.github.io', '*.amazonaws.com', '*.s3.amazonaws.com']) {
+    const r = refused([bad]);
+    assert.notEqual(r.code, 0, `${bad} is refused: ${r.seen}`);
+    assert.match(r.stderr, /sandbox\.domains/, r.seen);
+  }
+  const shared = refused(['*.co.uk']);
+  assert.match(shared.stderr, /co\.uk, a suffix many owners share/, shared.seen);
+  h.ok(['project', 'set', '--sandbox', JSON.stringify({ domains: ['pypi.org', '*.pythonhosted.org', 'git.example.org:443', 'plain.example.com:80', '100.64.0.10:7447', '[2001:db8::1]:443'] })]);
+  h.ok(['ladder', 'set', 'medium', '--sandbox', JSON.stringify({ domains: ['proxy.golang.org:443'] })]);
+  const extended = spawned();
+  for (const d of ['pypi.org', '*.pythonhosted.org', 'proxy.golang.org:443', 'github.com', 'git.example.org:443', '100.64.0.10:7447']) assert.ok(extended.domains.includes(d), `${d}: a rung adds to the project's list\n${extended.seen}`);
+  // What the owner listed is no longer named, host:443 covering a portless
+  // https remote and host:80 a portless http one; the rest still is.
+  assert.ok(!extended.stdout.includes('git.example.org') && !extended.stdout.includes('plain.example.com') && !extended.stdout.includes('100.64.0.10'), extended.seen);
+  assert.ok(extended.stdout.includes('localhost:8300 (loopback)'), extended.seen);
+  // * is the explicit opt-in to every host, which claude's proxy honors, and then nothing is left out.
+  h.ok(['ladder', 'set', 'medium', '--sandbox', JSON.stringify({ domains: ['*'] })]);
+  const all = spawned();
+  assert.ok(all.domains.includes('*'), all.seen);
+  assert.ok(!all.stdout.includes('remote host'), all.seen);
+});
+
+test('host patterns match Claude Code 2.1.296: ports 1 to 65535 without a leading zero, IPv6 only in brackets, no wildcard over a shared suffix', () => {
+  const Settings = require('../lib/spawn-settings');
+  for (const ok of ['*', 'github.com', 'github.com:443', 'a.b:65535', 'localhost', 'localhost:8300', '[::1]', '[2001:db8::1]:443', '*.example.com', '*.pythonhosted.org', '100.64.0.10:7447', '*.githubusercontent.com']) {
+    assert.equal(Settings.domainPattern(ok), true, ok);
+  }
+  for (const bad of ['github.com:080', 'github.com:0', 'github.com:65536', 'github.com:', '2001:db8::1:443', '::1', '[::1]:080', '[::1]:', '*.com', '*.*.org', 'pypi', 'https://pypi.org', 'a.b/c', '',
+    // Only ASCII names: a fullwidth letter or colon, a zero-width space, an
+    // ideographic full stop, # or @ never reaches the shared-suffix check.
+    '\uff47ithub.com', 'github.com\uff1a443', 'git\u200bhub.com', 'github\u3002com', '*.github\u3002io', 'evil.com#.github.com', 'user@github.com',
+    'git hub.com', '[fe80::1%25eth0]', '[::1 ]']) {
+    assert.equal(Settings.domainPattern(bad), false, bad);
+  }
+  for (const shared of ['*.co.uk', '*.com.au', '*.github.io', '*.amazonaws.com', '*.s3.us-east-1.amazonaws.com', '*.vercel.app:443', '*.googleapis.com', '*.storage.googleapis.com', '*.oast.fun', '*.me.uk', '*.blogspot.co.uk']) {
+    assert.equal(Settings.domainProblems([shared]).length, 1, shared);
+  }
+  assert.deepEqual(Settings.domainProblems(['*.example.co.uk', '*.pythonhosted.org', 'bucket.s3.amazonaws.com']), []);
+  // Coverage follows the proxy: a port-free pattern any port, *. names under it but not itself.
+  const list = ['github.com', '*.example.org', 'git.example.net:8443'];
+  for (const [entry, covered] of [['github.com:22', true], ['github.com', true], ['a.example.org', true], ['example.org', false],
+    ['git.example.net:8443', true], ['git.example.net', false], ['git.example.net:443', false], ['localhost:8300', false]]) {
+    assert.equal(Settings.domainCovered(list, entry), covered, entry);
+  }
+  assert.equal(Settings.domainCovered(['*'], 'localhost:8300'), true);
+});
+
+test('claude: a sandboxed agent gets a temp directory of its own that its commands reach, where claude puts its proxy sockets, and claude keeps its own temp files apart', { skip: NO_STUBS }, (t) => {
+  // Found 2026-10-14: claude makes its proxy bridge sockets in TMPDIR, and
+  // with the caller's under the home, which the sandbox hides, every https
+  // request from a command failed with "Proxy CONNECT aborted". Found in the
+  // T276 review: claude keeps its own temp files in <TMPDIR>/claude-<uid>,
+  // the directory its commands write, and reads them back.
+  const h = setup(t, 'claude');
+  const bin = path.join(h.base, 'bin');
+  fs.mkdirSync(bin);
+  const out = path.join(h.base, 'result.json');
+  writeClaudeStub(bin, out);
+  const caller = path.join(h.base, 'caller-tmp');
+  fs.mkdirSync(caller);
+  // A cache root short enough for claude's 73-byte socket bound.
+  const cache = fs.mkdtempSync(path.join(os.homedir(), '.cache', 'tcl-'));
+  t.after(() => fs.rmSync(cache, { recursive: true, force: true }));
+  const spawnSeen = (xdg, fx = h, extra = {}) => {
+    releaseExited(fx);
+    const stdout = fx.ok(['spawn', '--task', 'T1', '--wait'], { env: { ...fx.env, PATH: `${bin}${path.delimiter}${process.env.PATH}`, CLAUDE_CONFIG_DIR: '', TMPDIR: caller, TMP: caller, TEMP: caller, XDG_CACHE_HOME: xdg, ...extra } });
+    return { ...JSON.parse(fs.readFileSync(out, 'utf8')), stdout };
+  };
+  const seen = spawnSeen(cache);
+  const tmp = seen.tmp.TMPDIR;
+  assert.ok(tmp && tmp !== caller && tmp.startsWith(fs.realpathSync(cache) + path.sep), `the agent's own: ${tmp}`);
+  assert.deepEqual([seen.tmp.TMP, seen.tmp.TEMP], [tmp, tmp]);
+  assert.ok(Buffer.byteLength(path.join(tmp, 'claude-socks-0123456789abcdef.sock')) <= 108, 'claude\'s bridge socket fits');
+  const { allowRead, allowWrite } = seen.sandbox.filesystem;
+  assert.ok(allowRead.includes(tmp) && allowWrite.includes(tmp), 'its commands reach the sockets and write their temp files there');
+  assert.ok(fs.lstatSync(tmp).isDirectory());
+  // claude's own temp files go under CLAUDE_CODE_TMPDIR in the agent's home,
+  // which the commands read and never write, long enough (over 44 bytes with
+  // claude-<uid>) that claude gives the commands <TMPDIR>/claude-<uid> instead.
+  const ownOf = (s) => {
+    const own = s.tmp.CLAUDE_CODE_TMPDIR;
+    assert.ok(own, 'CLAUDE_CODE_TMPDIR is set');
+    assert.ok(Buffer.byteLength(path.join(own, `claude-${process.getuid()}`)) > 44, own);
+    const fs2 = s.sandbox.filesystem;
+    assert.ok(!fs2.allowWrite.some((d) => own === d || own.startsWith(d + path.sep)), `its commands cannot write claude's own temp files: ${fs2.allowWrite}`);
+    assert.ok(fs2.denyWrite.includes(own) && fs2.allowRead.includes(own), 'a read-only bind covers the per-user directory claude itself binds writable');
+    assert.ok(fs.lstatSync(own).isDirectory());
+    return own;
+  };
+  const own = ownOf(seen);
+  const homes = [fs.realpathSync(h.state), h.state].map((d) => path.join(d, 'homes') + path.sep);
+  assert.ok(homes.some((d) => own.startsWith(d)), `in the agent's home: ${own}`);
+  // Without XDG_RUNTIME_DIR, as on macOS, claude's messaging socket goes
+  // under CLAUDE_CODE_TMPDIR and must stay within 103 bytes, or every claude
+  // of the user shares /tmp/cc-socks-<uid>. This state path is too deep for
+  // that, so the directory moves beside claude's TMPDIR.
+  const bare = spawnSeen(cache, h, { XDG_RUNTIME_DIR: '' });
+  const short = ownOf(bare);
+  assert.ok(Buffer.byteLength(path.join(short, 'cc-socks', '4194304.sock')) <= 103, short);
+  assert.ok(short.startsWith(`${bare.tmp.TMPDIR}-own`), `beside claude's TMPDIR: ${short}`);
+  assert.ok(!seen.stdout.includes('TMPDIR'), seen.stdout);
+  // Under a root too deep for the sockets, the caller's TMPDIR stays, and
+  // spawn says so: under the home the agent's https fails, and under /tmp
+  // other agents' proxy sockets are in reach. A fresh task, since a worker
+  // keeps the scratch its first spawn recorded.
+  const other = setup(t, 'claude');
+  const deep = spawnSeen(path.join(other.base, 'a-cache-root-deep-enough-that-no-socket-path-fits-under-it'), other);
+  assert.equal(deep.tmp.TMPDIR, caller);
+  assert.ok(deep.stdout.includes(`keeps the caller's TMPDIR ${caller}`), deep.stdout);
+});
+
+test('claude: sandbox.session_bus grants the bus socket, read and write, and off it grants nothing', { skip: NO_STUBS }, (t) => {
+  const h = setup(t, 'claude');
+  const bin = path.join(h.base, 'bin');
+  fs.mkdirSync(bin);
+  // The runtime directory is the test's own, so the host's session bus never matters.
+  // The stub never connects, so an empty file stands in for the socket.
+  const runtime = path.join(h.base, 'runtime');
+  fs.mkdirSync(path.join(runtime, 'systemd'), { recursive: true });
+  const bus = path.join(fs.realpathSync(runtime), 'bus');
+  const manager = path.join(fs.realpathSync(runtime), 'systemd', 'private');
+  fs.writeFileSync(bus, '');
+  fs.writeFileSync(manager, '');
+  const out = path.join(h.base, 'result.json');
+  writeClaudeStub(bin, out);
+  const env = { ...h.env, XDG_RUNTIME_DIR: runtime, DBUS_SESSION_BUS_ADDRESS: `unix:path=${bus}`,
+    PATH: `${bin}${path.delimiter}${process.env.PATH}`, CLAUDE_CONFIG_DIR: '' };
+  const spawnSeen = () => {
+    releaseExited(h);
+    h.ok(['spawn', '--task', 'T1', '--wait'], { env });
+    return JSON.parse(fs.readFileSync(out, 'utf8'));
+  };
+
+  const off = spawnSeen();
+  assert.ok(!off.sandbox.filesystem.allowRead.includes(bus), 'off by default: no read grant');
+  assert.ok(!off.sandbox.filesystem.allowWrite.includes(bus), 'off by default: no write grant');
+
+  assert.equal(h.run(['project', 'set', '--session-bus', 'maybe']).code, 2);
+  h.ok(['project', 'set', '--session-bus', 'true']);
+  fs.rmSync(bus);
+  releaseExited(h);
+  const refused = h.run(['spawn', '--task', 'T1', '--wait'], { env });
+  assert.notEqual(refused.code, 0, 'a missing bus socket refuses the spawn');
+  assert.match(refused.stderr, /\/bus/);
+  fs.writeFileSync(bus, '');
+  const on = spawnSeen();
+  assert.ok(on.sandbox.filesystem.allowRead.includes(bus), 'the sandbox reads the bus socket');
+  assert.ok(on.sandbox.filesystem.allowWrite.includes(bus), 'the sandbox writes the bus socket');
+  assert.ok(!on.sandbox.filesystem.allowRead.includes(manager), 'the user manager socket stays unreadable: a scope cannot start through it from the sandbox');
+  assert.ok(!on.sandbox.filesystem.allowWrite.includes(manager), 'the user manager socket stays unwritable');
+  assert.ok(on.sandbox.filesystem.denyRead.includes(fs.realpathSync(runtime)), 'the rest of the runtime directory stays denied');
+  assert.deepEqual(on.sandbox.filesystem.allowWrite.filter((p) => p.startsWith(fs.realpathSync(runtime))), [bus], 'only the bus socket is writable under the runtime directory');
+  assert.deepEqual(on.env, { XDG_RUNTIME_DIR: runtime, DBUS_SESSION_BUS_ADDRESS: `unix:path=${bus}` });
+
+  h.ok(['project', 'set', '--session-bus', 'false']);
+  assert.ok(!spawnSeen().sandbox.filesystem.allowRead.includes(bus), 'false turns the grant off again');
+  assert.equal(JSON.parse(fs.readFileSync(path.join(h.state, 'project.json'), 'utf8')).sandbox, undefined);
+});
+
+// Found in review 2026-10-14: the codex profile read /run whole, so a codex
+// agent reached the user's session bus, and through it ran host commands with
+// systemd-run --user, and the docker socket. test/live-sandbox.test.js runs
+// both against the real codex sandbox.
+test('codex: the profile hides /run but the resolver, and a runtime directory elsewhere, and sandbox.session_bus reopens the bus alone', { skip: (NO_STUBS || !fs.existsSync('/var/tmp')) && 'needs /var/tmp' }, (t) => {
+  const h = setup(t, 'codex');
+  const bin = path.join(h.base, 'bin');
+  fs.mkdirSync(bin);
+  const out = path.join(h.base, 'result.json');
+  fs.writeFileSync(path.join(bin, 'codex'), [
+    `#!${process.execPath}`, "'use strict';",
+    'const fs = require("node:fs"), path = require("node:path");',
+    `fs.writeFileSync(${JSON.stringify(out)}, JSON.stringify({ cwd: process.cwd(), config: fs.readFileSync(path.join(process.env.CODEX_HOME, "config.toml"), "utf8"), env: { XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR, DBUS_SESSION_BUS_ADDRESS: process.env.DBUS_SESSION_BUS_ADDRESS } }));`,
+    'console.log(JSON.stringify({ type: "thread.started", thread_id: "bus" }));', '',
+  ].join('\n'), { mode: 0o755 });
+  // Outside the home, an entry of / exposes it as one does /run/user/<uid>.
+  // The stub never connects, so empty files stand in for the sockets.
+  // The runtime directory sits one level down, so the directory on the way
+  // is the test's own and holds what the profile must handle there.
+  const way = fs.realpathSync(fs.mkdtempSync('/var/tmp/tower-crane-runtime-'));
+  const runtime = path.join(way, 'rt');
+  const beside = fs.realpathSync(fs.mkdtempSync('/var/tmp/tower-crane-beside-'));
+  t.after(() => {
+    fs.rmSync(way, { recursive: true, force: true });
+    fs.rmSync(beside, { recursive: true, force: true });
+  });
+  fs.mkdirSync(path.join(runtime, 'systemd'), { recursive: true });
+  // A name with DEL, which TOML forbids raw, and a link, which codex would follow.
+  const del = path.join(way, 'del\x7f');
+  fs.mkdirSync(del);
+  fs.symlinkSync(h.base, path.join(way, 'link'));
+  const bus = path.join(runtime, 'bus');
+  for (const f of [bus, path.join(runtime, 'systemd', 'private'), path.join(runtime, 'openssh_agent')]) fs.writeFileSync(f, '');
+  const env = { ...h.env, XDG_RUNTIME_DIR: runtime, DBUS_SESSION_BUS_ADDRESS: '', PATH: `${bin}${path.delimiter}${process.env.PATH}`, CODEX_HOME: '' };
+  const spawnSeen = () => {
+    releaseExited(h);
+    h.ok(['spawn', '--task', 'T1', '--wait'], { env });
+    const seen = JSON.parse(fs.readFileSync(out, 'utf8'));
+    return { rules: TOML.parse(seen.config).permissions['tower-crane'].filesystem, env: seen.env, config: seen.config };
+  };
+  const refused = (spawnEnv = env) => {
+    releaseExited(h);
+    const r = h.run(['spawn', '--task', 'T1', '--wait'], { env: spawnEnv });
+    assert.notEqual(r.code, 0, 'spawn refuses');
+    return r.stderr;
+  };
+  const uid = process.getuid();
+  // Whether a rule mounts p: codex mounts only what its rules name.
+  const mounted = (rules, p) => Object.entries(rules).some(([r, a]) => !r.startsWith(':') && a !== 'none' && (p === r || p.startsWith(`${r}/`)))
+    && !Object.entries(rules).some(([r, a]) => a === 'none' && (p === r || p.startsWith(`${r}/`)));
+  const off = spawnSeen();
+  assert.equal(off.rules[runtime], 'none', 'the runtime directory is hidden');
+  // /run is no rule, so nothing in it is mounted but the resolver.
+  for (const p of [`/run/user/${uid}/bus`, '/run/docker.sock', '/var/run/docker.sock', '/run/dbus/system_bus_socket', '/run/snapd.socket']) {
+    assert.equal(mounted(off.rules, fs.existsSync(p) ? fs.realpathSync(p) : p), false, `${p} is hidden`);
+  }
+  for (const p of ['/run', '/var/run']) assert.equal(off.rules[p], undefined, `${p} is not mounted`);
+  if (fs.existsSync('/run/systemd/resolve')) assert.equal(off.rules['/run/systemd/resolve'], 'read', 'the resolver stays');
+  assert.equal(off.rules[bus], undefined, 'off by default: no bus grant');
+  assert.equal(off.env.DBUS_SESSION_BUS_ADDRESS, '');
+
+  h.ok(['project', 'set', '--session-bus', 'true']);
+  const on = spawnSeen();
+  assert.equal(on.rules[bus], 'read', 'the bus socket is reachable: a readable rule mounts it');
+  assert.equal(mounted(on.rules, bus), true, 'the bus socket is mounted');
+  // codex cannot reopen a path inside a hidden one, so the runtime directory
+  // is left unmounted, and the bus socket is mounted alone.
+  for (const p of ['systemd/private', 'openssh_agent', 'made-after-spawn.sock']) assert.equal(mounted(on.rules, path.join(runtime, p)), false, `${p} is not mounted`);
+  assert.equal(on.rules['/var'], undefined, '/var is not mounted whole');
+  assert.equal(mounted(on.rules, path.join(way, 'made-after-spawn')), false, 'nor is a later entry on the way to the runtime directory');
+  assert.equal(mounted(on.rules, path.join('/var/tmp', 'made-after-spawn')), false, 'or in /var/tmp');
+  assert.equal(mounted(on.rules, beside), true, 'a directory beside it stays readable');
+  for (const p of ['/var/lib', '/var/cache']) if (fs.existsSync(p) && !fs.lstatSync(p).isSymbolicLink()) assert.equal(mounted(on.rules, p), true, `${p} stays readable`);
+  assert.equal(on.rules[del], 'read', 'an entry named with DEL is listed');
+  assert.doesNotMatch(on.config, /\x7f/, 'and written escaped, since TOML forbids DEL raw');
+  assert.equal(mounted(on.rules, path.join(way, 'link')), false, 'a link is never listed: codex would follow it');
+  assert.deepEqual(on.env, { XDG_RUNTIME_DIR: runtime, DBUS_SESSION_BUS_ADDRESS: `unix:path=${bus}` });
+
+  // Each entry on the way is a rule, and codex takes the profile as one
+  // argument of at most 128 KiB: spawn refuses and names the directory.
+  const many = 700;
+  for (let i = 0; i < many; i++) fs.writeFileSync(path.join(way, `${String(i).padStart(4, '0')}-${'x'.repeat(180)}`), '');
+  const tooMany = refused();
+  assert.match(tooMany, /sandbox\.session_bus/);
+  assert.ok(tooMany.includes(`${way} holds ${many + 1}`), `names the directory and its count: ${tooMany}`);
+  for (const name of fs.readdirSync(way)) if (name.endsWith('x'.repeat(180))) fs.rmSync(path.join(way, name));
+
+  // A writable rule mounts the runtime directory whole.
+  h.ok(['project', 'set', '--sandbox', JSON.stringify({ write: [way], session_bus: true })]);
+  const written = refused();
+  assert.match(written, /sandbox\.session_bus/);
+  assert.ok(written.includes(`${runtime} lies in ${way}, which the codex sandbox writes`), written);
+  h.ok(['project', 'set', '--sandbox', JSON.stringify({ session_bus: true })]);
+  assert.equal(spawnSeen().rules[bus], 'read', 'without it the bus is granted again');
+
+  // The worktree is the workspace root, which codex mounts whole.
+  const worktree = fs.realpathSync(JSON.parse(fs.readFileSync(out, 'utf8')).cwd);
+  const inside = path.join(worktree, '.runtime');
+  fs.mkdirSync(inside);
+  fs.writeFileSync(path.join(inside, 'bus'), '');
+  const inWorktree = refused({ ...env, XDG_RUNTIME_DIR: inside });
+  assert.match(inWorktree, /sandbox\.session_bus/);
+  assert.ok(inWorktree.includes(`${inside} lies in the agent's worktree ${worktree}`), inWorktree);
+  fs.rmSync(inside, { recursive: true });
+});
+
+// codex's :minimal mounts /usr and /etc whole, so a runtime directory there
+// cannot be left out; spawn cannot place a bus socket there in a test, so
+// the check runs in process.
+test('codex: sandbox.session_bus refuses a runtime directory a writable rule or a system directory mounts whole', { skip: process.platform !== 'linux' && 'the session bus grant and its POSIX paths are Linux only' }, () => {
+  const cases = [
+    ['under a writable rule', '/var/tmp/x/rt', { '/var/tmp/x': 'write' }, [], /lies in \/var\/tmp\/x, which the codex sandbox writes/],
+    ['a writable rule itself', '/var/tmp/x/rt', { '/var/tmp/x/rt': 'write' }, [], /lies in \/var\/tmp\/x\/rt, which the codex sandbox writes/],
+    ['under /usr', '/usr/local/rt', { '/usr/local': 'read' }, ['/usr', '/etc'], /lies in \/usr, which the codex sandbox mounts whole/],
+    ['under /etc', '/etc/rt', {}, ['/usr', '/etc'], /lies in \/etc, which the codex sandbox mounts whole/],
+    ['under a readable rule', '/var/tmp/x/rt', { '/var': 'read' }, ['/usr', '/etc'], null],
+    ['under /run', '/run/user/1000', {}, ['/usr', '/etc'], null],
+    ['in the agent\'s worktree', '/w/T1/.rt', { '/var': 'read' }, ['/usr', '/etc'], /lies in the agent's worktree \/w\/T1, which the codex sandbox mounts whole/, '/w/T1'],
+    ['beside the agent\'s worktree', '/w/T1-rt', {}, ['/usr', '/etc'], null, '/w/T1'],
+  ];
+  for (const [what, dir, rules, system, refusal, worktree = '/w/T9'] of cases) {
+    const why = A.wholeMount(dir, rules, system, worktree);
+    if (refusal) assert.match(why, refusal, what);
+    else assert.equal(why, null, what);
+  }
+});
+
+test('claude: sandbox.session_bus grants the sockets the worker env names, even when the spawning env names none', { skip: NO_STUBS }, (t) => {
+  const h = setup(t, 'claude');
+  const bin = path.join(h.base, 'bin');
+  fs.mkdirSync(bin);
+  const out = path.join(h.base, 'result.json');
+  writeClaudeStub(bin, out);
+  // The spawning environment names a runtime directory with no bus; the project's env names one that has both sockets.
+  const absent = path.join(h.base, 'absent');
+  const runtime = path.join(h.base, 'runtime');
+  fs.mkdirSync(path.join(runtime, 'systemd'), { recursive: true });
+  const bus = path.join(fs.realpathSync(runtime), 'bus');
+  const manager = path.join(fs.realpathSync(runtime), 'systemd', 'private');
+  fs.writeFileSync(bus, '');
+  fs.writeFileSync(manager, '');
+  const env = { ...h.env, XDG_RUNTIME_DIR: absent, DBUS_SESSION_BUS_ADDRESS: `unix:path=${path.join(absent, 'bus')}`,
+    PATH: `${bin}${path.delimiter}${process.env.PATH}`, CLAUDE_CONFIG_DIR: '' };
+  h.ok(['project', 'set', '--session-bus', 'true', '--env', JSON.stringify({ XDG_RUNTIME_DIR: runtime, DBUS_SESSION_BUS_ADDRESS: `unix:path=${bus}` })]);
+  h.ok(['spawn', '--task', 'T1', '--wait'], { env });
+  const seen = JSON.parse(fs.readFileSync(out, 'utf8'));
+  assert.deepEqual(seen.env, { XDG_RUNTIME_DIR: runtime, DBUS_SESSION_BUS_ADDRESS: `unix:path=${bus}` });
+  assert.ok(seen.sandbox.filesystem.allowRead.includes(bus), 'the bus the worker env names is granted');
+  assert.ok(!seen.sandbox.filesystem.allowWrite.includes(manager), 'the manager socket in that runtime stays denied');
+  assert.ok(seen.sandbox.filesystem.denyRead.includes(fs.realpathSync(runtime)), 'that runtime is denied');
+});
+
+test('claude: sandbox.session_bus addresses the bus of the runtime the env_file names, not the spawning one', { skip: NO_STUBS }, (t) => {
+  const h = setup(t, 'claude');
+  const bin = path.join(h.base, 'bin');
+  fs.mkdirSync(bin);
+  const out = path.join(h.base, 'result.json');
+  writeClaudeStub(bin, out);
+  // The spawning environment names a runtime directory with no bus, and an empty bus address; the env_file moves the worker to a runtime that has one.
+  const parent = path.join(h.base, 'parent');
+  const runtime = path.join(h.base, 'runtime');
+  fs.mkdirSync(parent);
+  fs.mkdirSync(runtime);
+  const bus = path.join(fs.realpathSync(runtime), 'bus');
+  fs.writeFileSync(bus, '');
+  const file = path.join(h.base, 'worker.env');
+  fs.writeFileSync(file, `XDG_RUNTIME_DIR=${runtime}\n`);
+  const env = { ...h.env, XDG_RUNTIME_DIR: parent, DBUS_SESSION_BUS_ADDRESS: '',
+    PATH: `${bin}${path.delimiter}${process.env.PATH}`, CLAUDE_CONFIG_DIR: '' };
+  h.ok(['project', 'set', '--session-bus', 'true', '--env_file', file]);
+  h.ok(['spawn', '--task', 'T1', '--wait'], { env });
+  const seen = JSON.parse(fs.readFileSync(out, 'utf8'));
+  assert.deepEqual(seen.env, { XDG_RUNTIME_DIR: runtime, DBUS_SESSION_BUS_ADDRESS: `unix:path=${path.join(runtime, 'bus')}` });
+  assert.ok(seen.sandbox.filesystem.allowRead.includes(bus), 'the sandbox grants the socket the bus address names');
+  assert.ok(seen.sandbox.filesystem.allowWrite.includes(bus), 'the sandbox writes the socket the bus address names');
+});
+
+test('claude: the runtime the spawning env names stays denied when the project env names another', { skip: NO_STUBS }, (t) => {
+  const h = setup(t, 'claude');
+  const bin = path.join(h.base, 'bin');
+  fs.mkdirSync(bin);
+  const out = path.join(h.base, 'result.json');
+  writeClaudeStub(bin, out);
+  // Both runtimes sit outside /run/user/<uid>, so only the sandbox's own denial hides the spawning one.
+  const host = path.join(h.base, 'host-runtime');
+  const runtime = path.join(h.base, 'runtime');
+  fs.mkdirSync(host);
+  fs.mkdirSync(runtime);
+  const bus = path.join(fs.realpathSync(runtime), 'bus');
+  const env = { ...h.env, XDG_RUNTIME_DIR: host, DBUS_SESSION_BUS_ADDRESS: `unix:path=${path.join(host, 'bus')}`,
+    PATH: `${bin}${path.delimiter}${process.env.PATH}`, CLAUDE_CONFIG_DIR: '' };
+  h.ok(['project', 'set', '--env', JSON.stringify({ XDG_RUNTIME_DIR: runtime })]);
+  h.ok(['spawn', '--task', 'T1', '--wait'], { env });
+  const off = JSON.parse(fs.readFileSync(out, 'utf8'));
+  assert.equal(off.env.XDG_RUNTIME_DIR, runtime, 'the worker starts in the project runtime');
+  assert.ok(off.sandbox.filesystem.denyRead.includes(fs.realpathSync(host)), 'off: the spawning runtime stays denied');
+  assert.ok(off.sandbox.filesystem.denyRead.includes(fs.realpathSync(runtime)), 'off: the worker runtime stays denied');
+
+  fs.writeFileSync(bus, '');
+  h.ok(['project', 'set', '--session-bus', 'true']);
+  releaseExited(h);
+  h.ok(['spawn', '--task', 'T1', '--wait'], { env });
+  const on = JSON.parse(fs.readFileSync(out, 'utf8'));
+  assert.ok(on.sandbox.filesystem.denyRead.includes(fs.realpathSync(host)), 'on: the spawning runtime stays denied');
+  assert.ok(on.sandbox.filesystem.denyRead.includes(fs.realpathSync(runtime)), 'on: the worker runtime stays denied');
+  assert.deepEqual(on.sandbox.filesystem.allowRead.filter((p) => p.startsWith(fs.realpathSync(host))), [], 'on: no socket in the spawning runtime is granted');
+  assert.ok(on.sandbox.filesystem.allowRead.includes(bus), 'on: the worker bus is granted');
+});
+
+test('claude: dry-run never reads env_file, and a real spawn that cannot read it refuses', { skip: NO_STUBS }, (t) => {
+  const h = setup(t, 'claude');
+  const bin = path.join(h.base, 'bin');
+  fs.mkdirSync(bin);
+  writeClaudeStub(bin, path.join(h.base, 'result.json'));
+  const env = { ...h.env, PATH: `${bin}${path.delimiter}${process.env.PATH}`, CLAUDE_CONFIG_DIR: '' };
+  h.ok(['project', 'set', '--session-bus', 'true', '--env_file', path.join(h.base, 'missing.env')]);
+  h.ok(['spawn', '--task', 'T1', '--dry-run'], { env });
+  const real = h.run(['spawn', '--task', 'T1', '--wait'], { env });
+  assert.notEqual(real.code, 0, 'the real spawn refuses');
+  assert.match(real.stderr, /cannot read env_file/);
 });

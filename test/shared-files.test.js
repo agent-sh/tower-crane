@@ -11,7 +11,7 @@ const { readText, escapeTableCell } = require('../scripts/text');
 function fixture(t, { crlfProtected = false, windowsCheckout = false } = {}) {
   const h = makeRepo(t);
   if (windowsCheckout) h.git(['config', 'core.autocrlf', 'true']);
-  for (const name of ['bin', 'lib', 'scripts', 'docs', 'changelog.d']) {
+  for (const name of ['bin', 'lib', 'scripts', 'docs', 'changelog.d', '.github']) {
     fs.cpSync(path.join(ROOT, name), path.join(h.repo, name), { recursive: true });
   }
   fs.copyFileSync(path.join(ROOT, 'CHANGELOG.md'), path.join(h.repo, 'CHANGELOG.md'));
@@ -37,7 +37,7 @@ function fixture(t, { crlfProtected = false, windowsCheckout = false } = {}) {
   const base = h.git(['rev-parse', 'HEAD']);
   const script = (name, args = []) => cp.spawnSync(process.execPath,
     [path.join(h.repo, 'scripts', name), ...args],
-    { cwd: h.repo, env: h.env, encoding: 'utf8', timeout: 30000 });
+    { cwd: h.repo, env: h.env, encoding: 'utf8', timeout: 300000 });
   const check = () => script('check-shared-files.js', ['--base', base]);
   const write = (name, text) => fs.writeFileSync(path.join(h.repo, name), text);
   const read = (name) => readText(path.join(h.repo, name));
@@ -55,7 +55,7 @@ test('generated command rows match real CLI help, preserve details and reject dr
   const docs = f.read('docs/cli.md');
   for (const command of COMMANDS) {
     const help = cp.spawnSync(process.execPath, [bin, ...command.name.split(' '), '--help'],
-      { cwd: f.h.repo, env: f.h.env, encoding: 'utf8', timeout: 30000 });
+      { cwd: f.h.repo, env: f.h.env, encoding: 'utf8', timeout: 300000 });
     assert.equal(help.status, 0, help.stderr);
     const usage = command.name + (command.usage ? ` ${command.usage}` : '');
     assert.ok(help.stdout.startsWith(`usage: tower-crane ${usage}\n`));
@@ -95,7 +95,7 @@ test('long command descriptions are generated from metadata while CLI help keeps
   assert.ok(f.read('docs/cli.md').includes(`| ${description} |`));
   const bin = path.join(f.h.repo, 'bin', 'tower-crane.js');
   const help = cp.spawnSync(process.execPath, [bin, 'task', 'note', '--help'],
-    { cwd: f.h.repo, env: f.h.env, encoding: 'utf8', timeout: 30000 });
+    { cwd: f.h.repo, env: f.h.env, encoding: 'utf8', timeout: 300000 });
   assert.equal(help.status, 0, help.stderr);
   assert.match(help.stdout, /\nappend a note\n/);
   assert.ok(!help.stdout.includes(description));
@@ -137,7 +137,7 @@ for (const windowsCheckout of [false, true]) {
     f.h.git(['checkout', '-qb', 'task-note-flag', base]);
     addFlag('task note', 'note-label', 'T902');
     const merge = cp.spawnSync('git', ['merge', '--no-ff', '-m', 'combine independent command flags', 'task-list-flag'],
-      { cwd: f.h.repo, env: f.h.env, encoding: 'utf8', timeout: 30000 });
+      { cwd: f.h.repo, env: f.h.env, encoding: 'utf8', timeout: 300000 });
     assert.equal(merge.status, 0, merge.stdout + merge.stderr);
     assert.equal(f.h.git(['diff', '--name-only', '--diff-filter=U']), '', 'no file has a merge conflict');
     const check = f.check();
@@ -202,7 +202,61 @@ test('the shared file check rejects bare stdin reads in lib and bin, and points 
   assert.equal(f.check().status, 0, 'lib/util.js is where readStdin reads fd 0');
 });
 
-test('tasks add fragments instead of editing the archive or an existing change', (t) => {
+test('the suite deadline sets the proof job timeouts and warns when the configured tests gate timeout differs', (t) => {
+  const { DEADLINE_MIN } = require('../scripts/suite-time');
+  const f = fixture(t);
+  f.change();
+  assert.equal(f.check().status, 0);
+  const workflow = f.read('.github/workflows/ci.yml');
+  const timeout = (job) => Number(new RegExp(`\\n  ${job}:\\n(?:    .*\\n|\\s*\\n)*?    timeout-minutes: (\\d+)`).exec(workflow)[1]);
+  assert.equal(timeout('model-swap'), DEADLINE_MIN + 5);
+  assert.equal(timeout('gate-scratch'), 2 * DEADLINE_MIN + 10);
+  f.write('.github/workflows/ci.yml', workflow.replace(`    timeout-minutes: ${DEADLINE_MIN + 5}\n`, '    timeout-minutes: 60\n'));
+  const drifted = f.check();
+  assert.equal(drifted.status, 1);
+  assert.match(drifted.stderr, new RegExp(`job model-swap has timeout-minutes 60; DEADLINE_MIN ${DEADLINE_MIN} in scripts/suite-time.js sets it to ${DEADLINE_MIN + 5}`));
+  fs.rmSync(path.join(f.h.repo, '.github'), { recursive: true });
+  assert.equal(f.check().status, 0, 'a tree without its workflows has no proof jobs to check');
+  fs.mkdirSync(path.join(f.h.repo, '.github', 'workflows'), { recursive: true });
+  f.write('.github/workflows/ci.yml', workflow);
+  const state = path.join(f.h.repo, '.tower-crane');
+  fs.mkdirSync(state, { recursive: true });
+  const project = path.join(state, 'project.json');
+  // Only the gates block matters to the check; the fixture runs no CLI command on this state.
+  const configure = (minutes) => fs.writeFileSync(project, JSON.stringify({ gates: { tests_timeout_min: minutes } }));
+  configure(30);
+  const local = f.check();
+  assert.equal(local.status, 0, 'a clone\'s own gate timeout does not fail the shared check');
+  assert.match(local.stderr, new RegExp(`^warning: the project's gates\\.tests_timeout_min is 30 min but DEADLINE_MIN in scripts/suite-time\\.js is ${DEADLINE_MIN}`, 'm'));
+  configure(DEADLINE_MIN);
+  const matched = f.check();
+  assert.equal(matched.status, 0);
+  assert.doesNotMatch(matched.stderr, /tests_timeout_min/);
+  configure(null);
+  assert.equal(f.check().status, 0, 'a project without a configured timeout has not adopted the deadline');
+});
+
+test('a branch behind its base is checked from the merge base, so newer base fragments are not deletions', (t) => {
+  const f = fixture(t);
+  const start = f.h.git(['rev-parse', 'HEAD']);
+  // The base moves on after the branch was cut: another change lands with its own fragment.
+  f.write('changelog.d/T500.md', '- A change that landed on the base later.\n');
+  f.write('README.md', '# landed later\n');
+  f.h.git(['add', '.']);
+  f.h.git(['commit', '-qm', 'later base change']);
+  const moved = f.h.git(['rev-parse', 'HEAD']);
+  f.h.git(['checkout', '-q', '-b', 'behind', start]);
+  f.change();
+  const r = f.script('check-shared-files.js', ['--base', moved]);
+  assert.equal(r.status, 0, r.stderr);
+  // The branch's own deletion of a fragment from before it was cut still fails.
+  fs.rmSync(path.join(f.h.repo, 'changelog.d/T86.md'));
+  const deleted = f.script('check-shared-files.js', ['--base', moved]);
+  assert.equal(deleted.status, 1);
+  assert.match(deleted.stderr, /changelog\.d\/T86\.md belongs to its original change/);
+});
+
+test('tasks add fragments instead of editing the archive or deleting an existing change', (t) => {
   const f = fixture(t, { crlfProtected: true });
   f.write('README.md', '# changed\n');
   const missing = f.check();
@@ -227,14 +281,14 @@ test('tasks add fragments instead of editing the archive or an existing change',
   f.write('CHANGELOG.md', archive);
   assert.equal(f.check().status, 0, 'restoring raw CRLF removes the line-ending edit');
   const original = fs.readFileSync(path.join(f.h.repo, 'changelog.d/T86.md'));
-  f.write('changelog.d/T86.md', '- Edited another change.\n');
-  const edited = f.check();
-  assert.equal(edited.status, 1);
-  assert.match(edited.stderr, /belongs to its original change/);
+  f.write('changelog.d/T86.md', '- Corrected by a later change.\n');
+  assert.equal(f.check().status, 0, 'a change may correct an existing fragment');
   f.write('changelog.d/T86.md', original);
   assert.equal(f.check().status, 0, 'the fragment snapshot restores its original bytes');
   fs.rmSync(path.join(f.h.repo, 'changelog.d/T86.md'));
-  assert.equal(f.check().status, 1, 'existing fragments cannot be deleted');
+  const deleted = f.check();
+  assert.equal(deleted.status, 1, 'existing fragments cannot be deleted');
+  assert.match(deleted.stderr, /belongs to its original change/);
   f.write('changelog.d/T86.md', original);
   assert.equal(f.check().status, 0, 'recreating the fragment preserves its original bytes');
   f.write('changelog.d/T999.md', '\n');
@@ -250,8 +304,10 @@ test('release assembly is deterministic and leaves the archive and fragments unc
   const release = f.script('changelog.js');
   assert.equal(release.status, 0, release.stderr);
   const entries = ['T999.md', ...fs.readdirSync(path.join(f.h.repo, 'changelog.d')).filter((name) => !['README.md', 'T999.md'].includes(name)).sort()];
+  // The fixture commits the repository's fragments with its release notes, so only T999 is unreleased.
   const expected = '# Changelog\n\n' + [
-    ...entries.map((name) => f.read(`changelog.d/${name}`).trim()),
+    '## Unreleased',
+    f.read('changelog.d/T999.md').trim(),
     archive.slice('# Changelog\n'.length).trim(),
   ].join('\n\n') + '\n';
   assert.equal(release.stdout, expected);
@@ -262,16 +318,32 @@ test('release assembly is deterministic and leaves the archive and fragments unc
 });
 
 test('this repository keeps generated rows and its fragment instructions local', () => {
+  // The caller's own Tower Crane state is not this check's input: point it at a directory with no settings.
   const r = cp.spawnSync(process.execPath, [path.join(ROOT, 'scripts', 'check-shared-files.js')],
-    { cwd: ROOT, encoding: 'utf8', env: { ...process.env, TOWER_CRANE_CHANGE_BASE: '' }, timeout: 30000 });
+    { cwd: ROOT, encoding: 'utf8', timeout: 300000,
+      env: { ...process.env, TOWER_CRANE_CHANGE_BASE: '', TOWER_CRANE_STATE: path.join(ROOT, 'test', 'no-state') } });
   assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.stderr, '');
   const skill = fs.readFileSync(path.join(ROOT, 'skills', 'tower-crane-work', 'SKILL.md'), 'utf8');
   assert.match(skill, /update the changelog the repository's way/);
   assert.doesNotMatch(skill, /changelog\.d|COMMANDS|check:shared|docs:generate/);
   const rules = readText(path.join(ROOT, 'AGENTS.md'));
   assert.match(rules, /Add `changelog\.d\/<task-or-pr>\.md`/);
-  assert.match(rules, /leave `CHANGELOG\.md` and existing fragments unchanged/);
+  assert.match(rules, /leave `CHANGELOG\.md` unchanged and keep existing fragments, editing one only where your change made it untrue/);
   assert.match(rules, /npm run check:shared -- --base origin\/BASE/);
+});
+
+// The work skill inlines the review skill's blocking list, since a user's
+// worktree has no skills directory to point at; the two copies must agree.
+test('the work skill inlines the review skill\'s blocking list word for word', () => {
+  const skill = (name) => readText(path.join(ROOT, 'skills', name, 'SKILL.md'));
+  const section = /^## What blocks\n\n[^\n]*\n\n((?:- [^\n]*\n)+)/m.exec(skill('tower-crane-review'));
+  assert.ok(section, 'the review skill has a bulleted What blocks list');
+  const review = section[1].trim().split('\n').map((line) => line.slice(2).replace(/[;.]$/, ''));
+  const inline = /These block: (.+?)\. Everything else is a follow-up\./.exec(skill('tower-crane-work'));
+  assert.ok(inline, 'the work skill inlines the list as "These block: ... Everything else is a follow-up."');
+  assert.ok(review.length >= 5, `found ${review.length} blocking rules`);
+  assert.deepEqual(inline[1].split('; '), review);
 });
 
 test('CRLF source, docs, fragments and archive use the same canonical text in real commands', (t) => {
@@ -308,9 +380,11 @@ test('generated table cells escape every backslash and pipe in one pass', (t) =>
 
 test('release fragments follow landing history rather than task or PR filename order', (t) => {
   const f = fixture(t);
-  f.h.git(['rm', 'changelog.d/T86.md', 'changelog.d/T100.md']);
-  f.h.git(['commit', '-qm', 'prepare release history']);
   const oldest = ['T9.md', 'T86.md', 'T100.md', '123.md'];
+  // The fixture starts from this repository's fragments; names this test lands must be new.
+  const taken = [...oldest, 'T7.md', 'T2.md'].filter((name) => fs.existsSync(path.join(f.h.repo, 'changelog.d', name)));
+  f.h.git(['rm', '-q', ...taken.map((name) => `changelog.d/${name}`)]);
+  f.h.git(['commit', '-qm', 'prepare release history']);
   for (const name of oldest) {
     f.write(`changelog.d/${name}`, `- Landed ${name}.\n`);
     f.h.git(['add', `changelog.d/${name}`]);
@@ -329,4 +403,50 @@ test('release fragments follow landing history rather than task or PR filename o
   assert.equal(release.status, 0, release.stderr);
   const bullets = release.stdout.split('\n').filter((line) => line.startsWith('- Landed '));
   assert.deepEqual(bullets, ['T7.md', 'T2.md', ...oldest.reverse()].map((name) => `- Landed ${name}.`));
+});
+
+test('a release section marks the fragments before it released, and only a release edits CHANGELOG.md', (t) => {
+  const f = fixture(t);
+  f.write('changelog.d/T999.md', '- Shipped in 9.9.0.\n');
+  f.h.git(['add', 'changelog.d/T999.md']);
+  f.h.git(['commit', '-qm', 'land T999']);
+  const base = f.h.git(['rev-parse', 'HEAD']);
+  const check = () => f.script('check-shared-files.js', ['--base', base]);
+  const notes = f.read('CHANGELOG.md');
+  const section = (heading) => notes.replace('# Changelog\n', `# Changelog\n\n${heading}\n\n- Release notes.\n`);
+  f.write('package.json', '{ "name": "fixture", "version": "9.9.0" }\n');
+  f.write('changelog.d/T1000.md', '- The 9.9.0 release.\n');
+  f.write('CHANGELOG.md', section('## 9.8.0 (2026-01-02)'));
+  assert.match(check().stderr, /do not edit CHANGELOG.md/, 'the section must be for the package.json version');
+  f.write('CHANGELOG.md', notes.trimEnd() + '\n\n## 9.9.0 (2026-01-02)\n\n- Release notes.\n');
+  assert.match(check().stderr, /do not edit CHANGELOG.md/, 'the new section must be the first release heading');
+  f.write('CHANGELOG.md', section('## 9.9.0 (2026-01-02)'));
+  const release = check();
+  assert.equal(release.status, 0, release.stderr);
+  f.h.git(['add', '.']);
+  f.h.git(['commit', '-qm', 'release 9.9.0']);
+  const assembled = f.script('changelog.js');
+  assert.equal(assembled.status, 0, assembled.stderr);
+  assert.equal(assembled.stdout, f.read('CHANGELOG.md'), 'nothing is unreleased right after a release');
+  f.write('changelog.d/T1001.md', '- After the release.\n');
+  const after = f.script('changelog.js').stdout;
+  assert.ok(after.startsWith('# Changelog\n\n## Unreleased\n\n- After the release.\n\n## 9.9.0 (2026-01-02)\n'), after);
+  assert.ok(!after.includes('Shipped in 9.9.0') && !after.includes('The 9.9.0 release'));
+  const next = f.h.git(['rev-parse', 'HEAD']);
+  const checkNext = () => f.script('check-shared-files.js', ['--base', next]);
+  const shipped = f.read('CHANGELOG.md');
+  f.write('CHANGELOG.md', shipped + '- Late edit.\n');
+  assert.match(checkNext().stderr, /do not edit CHANGELOG.md/, 'a released section is not reopened');
+  f.write('package.json', '{ "name": "fixture", "version": "9.9.1" }\n');
+  const next091 = '# Changelog\n\n## 9.9.1 (2026-01-09)\n\n- After the release.\n';
+  f.write('CHANGELOG.md', next091);
+  assert.match(checkNext().stderr, /do not edit CHANGELOG.md/, 'a release cannot delete earlier releases');
+  f.write('CHANGELOG.md', next091 + '\n' + shipped.replace('# Changelog\n', '').replace('- Release notes.', '- Rewritten notes.'));
+  assert.match(checkNext().stderr, /do not edit CHANGELOG.md/, 'a release cannot rewrite earlier releases');
+  f.write('CHANGELOG.md', next091 + '\n## 9.9.0 (2026-01-02)\n\n- Moved.\n' + shipped.replace('# Changelog\n', ''));
+  assert.match(checkNext().stderr, /do not edit CHANGELOG.md/, 'a release adds only its own section');
+  f.write('CHANGELOG.md', next091 + shipped.replace('# Changelog\n', ''));
+  const patch = checkNext();
+  assert.equal(patch.status, 0, patch.stderr);
+  assert.equal(patch.stdout, 'release 9.9.1 marks 1 fragments released: T1001.md\n', 'the check lists the fragments the release consumes');
 });

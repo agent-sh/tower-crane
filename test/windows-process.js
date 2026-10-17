@@ -11,7 +11,9 @@ $ErrorActionPreference = 'Stop'
 try {
   $process = [System.Diagnostics.Process]::GetProcessById(${pid})
   $null = $process.Handle
-  [Console]::Out.WriteLine($process.StartTime.ToFileTimeUtc().ToString())
+  # PowerShell reads a getter that throws as null; a process exiting here has no creation time.
+  $started = $process.StartTime
+  if ($null -ne $started) { [Console]::Out.WriteLine($started.ToFileTimeUtc().ToString()) }
 } catch [System.ArgumentException] {
 } catch [System.InvalidOperationException] {
 } finally {
@@ -23,7 +25,7 @@ exit 0
   // A cold PowerShell query on a busy runner needs the same budget as a test CLI call.
   const value = cp.execFileSync('powershell.exe', [
     '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64'),
-  ], { encoding: 'utf8', windowsHide: true, timeout: 60000 }).trim();
+  ], { encoding: 'utf8', windowsHide: true, timeout: 300000 }).trim();
   if (value && !/^\d+$/.test(value)) throw new Error('invalid Windows process creation time');
   return value || null;
 }

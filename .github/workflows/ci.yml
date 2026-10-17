@@ -5,31 +5,56 @@ on:
     # No base filter: a stacked task's PR targets its lower task's branch, whatever its name.
   push:
     branches: [main]
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_dispatch:
 
 permissions:
   contents: read
 
+# GitHub keeps one running and one pending run per group; a newer run replaces the pending one.
+# Main pushes share one group: the newest pending head covers every earlier commit, and a running
+# main run is never cancelled. Scheduled and manual runs keep unique groups so none is replaced.
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('ci-pr-{0}', github.event.pull_request.number) || github.event_name == 'push' && 'ci-main-push' || format('ci-run-{0}', github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
+  # Same-repository PRs pass the full local tests gate before submit, so hosted CI only
+  # validates the shared files. Fork PRs, main pushes, daily and manual runs run the test matrix.
+  checks:
+    name: checks (shared files)
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 26
+      - run: npm run check:shared
+        env:
+          TOWER_CRANE_CHANGE_BASE: ${{ github.event.pull_request.base.sha }}
+
   test:
     name: test (${{ matrix.os }}, node ${{ matrix.node }}, shard ${{ matrix.shard }})
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
     runs-on: ${{ matrix.os }}
-    # Windows process startup can exceed the old job budget while tests pass;
-    # the runner still bounds each test independently.
-    timeout-minutes: ${{ matrix.os == 'windows-latest' && 45 || 15 }}
+    # test/run.js splits shards by measured file time (test/durations.json): 20 to 27 minutes on
+    # Windows and 9 to 13 on Linux. This is a per-shard hang limit, not the suite deadline in
+    # scripts/suite-time.js; the runner still bounds each test independently.
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
-        # Each shard runs its share of test/run.js's file list.
-        include:
-          - { os: ubuntu-latest, node: 26, shard: '1/3' }
-          - { os: ubuntu-latest, node: 26, shard: '2/3' }
-          - { os: ubuntu-latest, node: 26, shard: '3/3' }
-          - { os: ubuntu-latest, node: 24, shard: '1/3' }
-          - { os: ubuntu-latest, node: 24, shard: '2/3' }
-          - { os: ubuntu-latest, node: 24, shard: '3/3' }
-          - { os: windows-latest, node: 26, shard: '1/3' }
-          - { os: windows-latest, node: 26, shard: '2/3' }
-          - { os: windows-latest, node: 26, shard: '3/3' }
+        # The local tests gate covers Linux at every submitted head.
+        os: ${{ fromJSON(github.event_name == 'pull_request' && '["windows-latest"]' || '["ubuntu-latest","windows-latest"]') }}
+        node: [26, 24]
+        shard: ['1/3', '2/3', '3/3']
+        exclude:
+          - { os: windows-latest, node: 24 }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -40,8 +65,28 @@ jobs:
       - run: npm run check:shared
         env:
           TOWER_CRANE_CHANGE_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+      - run: npm test
+        env:
+          TOWER_CRANE_TEST_TMP: ${{ runner.temp }}/tower-crane-tests
+          TC_TEST_SHARD: ${{ matrix.shard }}
+
+  # Flake repeats for Windows-only races. They run in their own job so the test shards keep
+  # an even, measured share of the suite.
+  repeats:
+    name: repeat (windows-latest, node 26)
+    if: github.event_name != 'pull_request'
+    runs-on: windows-latest
+    # About 25 to 35 minutes: ten passes of the authority files take about 16.
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 26
+      # First in the job, so its first pass makes the runner's first PowerShell CIM snapshot.
       - name: Repeat Claude Code mod wakeup twenty times
-        if: matrix.os == 'windows-latest' && matrix.shard == '2/3'
         shell: pwsh
         run: |
           foreach ($attempt in 1..20) {
@@ -51,12 +96,7 @@ jobs:
           }
         env:
           TOWER_CRANE_TEST_TMP: ${{ runner.temp }}/tower-crane-tests
-      - run: npm test
-        env:
-          TOWER_CRANE_TEST_TMP: ${{ runner.temp }}/tower-crane-tests
-          TC_TEST_SHARD: ${{ matrix.shard }}
       - name: Repeat Claude interrupted native worker ten times
-        if: matrix.os == 'windows-latest' && matrix.shard == '1/3'
         shell: pwsh
         run: |
           foreach ($attempt in 1..10) {
@@ -66,38 +106,63 @@ jobs:
           }
         env:
           TOWER_CRANE_TEST_TMP: ${{ runner.temp }}/tower-crane-tests
-      - name: Repeat owner authority and board approval shard ten times
-        if: matrix.os == 'windows-latest'
+      - name: Repeat lock-free reader and torn recovery tests thirty times
         shell: pwsh
         run: |
-          $files = node -e "const r=require('./test/run.js'); const [i,n]=process.env.TC_TEST_SHARD.split('/').map(Number); const affected=new Set(['test/authority.test.js','test/approval-context.test.js','test/board-controls.test.js','test/windows-ancestry.test.js']); console.log(r.shardFiles(r.testFiles(),i,n).filter(f=>affected.has(f)).join(' '))"
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          if ([string]::IsNullOrWhiteSpace($files)) { exit 0 }
-          $selected = $files.Trim().Split(' ')
-          # The selected files already belong to this shard.
-          Remove-Item Env:TC_TEST_SHARD
-          if ($selected -contains 'test/windows-ancestry.test.js') {
-            node scripts/probe-windows-ancestry.js
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          }
-          foreach ($attempt in 1..10) {
-            Write-Host "Owner authority and board approval shard: pass $attempt/10 ($files)"
-            npm test -- @selected
+          foreach ($attempt in 1..30) {
+            Write-Host "Lock-free reader and torn recovery: pass $attempt/30"
+            npm test -- test/state-durability.test.js --test-name-pattern="keeps losing" --test-name-pattern="file ids pass" --test-name-pattern="torn"
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
         env:
           TOWER_CRANE_TEST_TMP: ${{ runner.temp }}/tower-crane-tests
-          TC_TEST_SHARD: ${{ matrix.shard }}
-          TOWER_CRANE_CHANGE_BASE: ${{ github.event.pull_request.base.sha }}
+      - name: Repeat owner authority and board approval files ten times
+        shell: pwsh
+        run: |
+          foreach ($attempt in 1..10) {
+            Write-Host "Owner authority and board approval files: pass $attempt/10"
+            npm test -- test/authority.test.js test/approval-context.test.js test/board-controls.test.js test/windows-ancestry.test.js
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+        env:
+          TOWER_CRANE_TEST_TMP: ${{ runner.temp }}/tower-crane-tests
+
+  gate-scratch:
+    name: complete gate scratch cleanup proof
+    # PRs skip the proofs; main pushes, daily and manual runs keep them.
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    # A failing head reruns the suite on the base: two runs at the suite deadline and setup.
+    # check:shared holds this to scripts/suite-time.js.
+    timeout-minutes: 100
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 26
+      - run: node scripts/probe-gate-scratch.js
+        env:
+          TOWER_CRANE_TEST_TMP: /home/runner/.cache/tower-crane-gate-proof
+          TOWER_CRANE_PROOF_OUTPUT: ${{ runner.temp }}/gate-scratch-proof.json
+      - name: Save gate scratch measurement
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: gate-scratch-proof
+          path: ${{ runner.temp }}/gate-scratch-proof.json
+          if-no-files-found: error
 
   model-swap:
     name: complete model swap proof
+    # PRs skip the proofs; main pushes, daily and manual runs keep them.
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
-    # Leave setup time outside the probe's 45-minute software-gate deadline.
+    # Leave setup time outside the probe's software-gate deadline; check:shared holds this to
+    # scripts/suite-time.js.
     timeout-minutes: 50
     steps:
-      # The default checkout of a pull_request is the PR merged onto main, so the probe
-      # runs on the merge result and finds its script even on a branch older than it.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
@@ -110,3 +175,11 @@ jobs:
       - name: Show probe failures
         if: failure()
         run: tail -n 300 "$RUNNER_TEMP/tower-crane-model-swap/model-swap-probe.tap"
+      # The TAP keeps every test's duration, so a slow trend can be traced to its tests.
+      - name: Save model swap TAP
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: model-swap-tap
+          path: ${{ runner.temp }}/tower-crane-model-swap/model-swap-probe.tap
+          if-no-files-found: warn

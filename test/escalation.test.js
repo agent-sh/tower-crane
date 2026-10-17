@@ -8,6 +8,8 @@ const net = require('node:net');
 const path = require('node:path');
 const { cachedFixture, pinRung, detachedAlive, BIN } = require('./helpers');
 const { gateFixture } = require('./gate-helpers');
+const { killPid, killGroup, waitUntil } = require('./signals');
+const { readPublished } = require('./atomic-file');
 
 const events = (h) => require('../lib/state').readEvents(h.state);
 const preloadOption = (file) => `--require ${JSON.stringify(file)}`;
@@ -41,7 +43,7 @@ const fs = require('node:fs');
 const cp = require('node:child_process');
 const cli = (args) => cp.execFileSync(process.execPath, [process.argv[1], ...args], { encoding: 'utf8' });
 ${index === 0 && trigger === 'preclaim' ? '' : "cli(['claim', 'T1']);"}
-const attempts = fs.existsSync(process.argv[2]) ? JSON.parse(fs.readFileSync(process.argv[2])) : [];
+const attempts = fs.existsSync(process.argv[2]) ? JSON.parse(require(${JSON.stringify(path.join(__dirname, 'atomic-file.js'))}).readPublished(process.argv[2])) : [];
 attempts.push({ rung: '${rung}', agent: process.env.TOWER_CRANE_AGENT, session: process.env.TOWER_CRANE_SESSION,
   previous: process.argv[3], cwd: process.cwd() });
 // Readers and fs.watch can briefly prevent replacing an existing file on Windows.
@@ -83,6 +85,17 @@ async function setup(t, trigger = 'exit', range = 'easy..medium', prepare = null
     repo.ok(['task', 'add', '--title', 'Start low', '--tier', range, '--acceptance', 'climbs on quality failure']);
     repo.ok(['brief', 'set', 'T1', '-'], { input: 'Finish the task.\n' });
     configure(repo, trigger);
+  });
+  // Harness discovery must use fixture credentials and origin directories.
+  Object.assign(h.env, {
+    USERPROFILE: h.env.HOME,
+    CLAUDE_CONFIG_DIR: path.join(h.env.HOME, '.claude'),
+    CODEX_HOME: path.join(h.env.HOME, '.codex'),
+    PI_CODING_AGENT_DIR: path.join(h.env.HOME, '.pi', 'agent'),
+    GH_CONFIG_DIR: path.join(h.env.HOME, '.config', 'gh'),
+    XDG_CONFIG_HOME: path.join(h.env.HOME, '.config'),
+    XDG_DATA_HOME: path.join(h.env.HOME, '.local', 'share'),
+    OPENCODE_CONFIG_DIR: path.join(h.env.HOME, '.config', 'opencode'),
   });
   h.attempts = path.join(h.base, 'attempts.json');
   const exits = new Map();
@@ -133,7 +146,7 @@ if (process.execArgv.includes('-e') && process.env.TOWER_CRANE_SESSION
       const log = exit?.detail.log;
       throw new Error(`Unexpected escalation ceiling: ${ceiling.question}\n`
         + `Worker ${exit?.agent}: exit ${exit?.detail.code}, signal ${exit?.detail.signal}, log ${log}\n`
-        + (log && fs.existsSync(log) ? fs.readFileSync(log, 'utf8') : 'No worker log'));
+        + (log && fs.existsSync(log) ? readPublished(log, 'utf8') : 'No worker log'));
     }
     return false;
   });
@@ -154,7 +167,7 @@ if (process.execArgv.includes('-e') && process.env.TOWER_CRANE_SESSION
         if (process.platform === 'win32') {
           cp.spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore' });
         } else {
-          try { process.kill(-child.pid, 'SIGKILL'); }
+          try { killGroup(child.pid, 'SIGKILL'); }
           catch (error) { if (error.code !== 'ESRCH') throw error; }
         }
         await exited;
@@ -168,7 +181,7 @@ if (process.execArgv.includes('-e') && process.env.TOWER_CRANE_SESSION
   if (prepare) prepare(h);
   // Gate preparation can change HEAD after the cached ladder was built.
   fs.writeFileSync(h.attempts + '.sha', h.git(['rev-parse', 'HEAD']));
-  h.readAttempts = () => fs.existsSync(h.attempts) ? JSON.parse(fs.readFileSync(h.attempts)) : [];
+  h.readAttempts = () => fs.existsSync(h.attempts) ? JSON.parse(readPublished(h.attempts)) : [];
   return h;
 }
 
@@ -297,7 +310,7 @@ for (const trigger of ['exit', 'preclaim', 'stall', 'review']) {
         '--agent', 'reviewer', '--summary', 'incorrect boundary']);
       const cursor = String(fs.statSync(path.join(h.state, 'events.jsonl')).size);
       const host = await h.runAsync(['wait', '--after', cursor, '--types', 'submitted', '--task', 'T1',
-        '--timeout', '15', '--agent', 'orchestrator']);
+        '--timeout', '300', '--agent', 'orchestrator']);
       assert.equal(host.code, 0, host.stderr || host.stdout);
     }
     await h.until(() => h.readAttempts().length === 2 && h.task().status === 'submitted');
@@ -350,6 +363,108 @@ test('a refused climb stays pending and concurrent recovery dispatches only one 
   assert.equal(events(h).filter((e) => e.cmd === 'escalate').length, 1);
 });
 
+// The wait host's recovery dispatches a pending climb with one try at the
+// dispatch lock: another dispatch holding it must not stall the host's events
+// or its signal drain, and the next pass dispatches the climb once it is free.
+test('a pending climb at a held dispatch lock stalls neither the wait host nor its signal drain', async (t) => {
+  const h = await setup(t);
+  const S = require('../lib/state');
+  const command = h.readState('project.json').ladder.medium.command;
+  h.ok(['ladder', 'set', 'medium', '--command', JSON.stringify([path.join(h.base, 'missing-worker')])]);
+  const first = h.json(['spawn', '--task', 'T1']);
+  const { exited } = await h.exitSignal({ pid: first.monitor_pid });
+  await h.until(() => h.task().escalation_pending === true);
+  // The first worker's monitor tries the climb itself. Restored before it
+  // exits, the ladder would let that monitor climb outside the wait below.
+  await exited;
+  h.ok(['ladder', 'set', 'medium', '--command', JSON.stringify(command)]);
+  const dir = path.join(h.state, 'dispatch', 'lock');
+  fs.mkdirSync(path.dirname(dir), { recursive: true });
+  const held = S.tryMarkedLock(dir, { keepLive: true });
+  assert.ok(held, 'the dispatch lock is free');
+  let free = false;
+  const release = () => { if (!free) { free = true; S.releaseMarkedLock(held); } };
+  t.after(release);
+  const looked = path.join(h.base, 'dispatch-looked');
+  let child;
+  let closed = false;
+  let out = '';
+  const host = h.runAsync(['wait', '--follow', '--types', 'worker-message', '--agent', 'orchestrator'], {
+    hooks: { HOOK_DISPATCH_WAITING: looked },
+    onSpawn: (c) => {
+      child = c;
+      c.stdout.on('data', (d) => { out += d; });
+      c.on('close', () => { closed = true; });
+    },
+  });
+  t.after(() => { if (!closed) child.kill('SIGKILL'); });
+  const rows = () => out.split('\n').filter(Boolean).map((line) => JSON.parse(line));
+  await waitUntil(() => fs.existsSync(looked), { paths: [h.base], alive: () => !closed, what: 'the host looks at the held dispatch lock' });
+  const sent = Date.now();
+  h.ok(['msg', '--to', 'orchestrator', 'still there?']);
+  await waitUntil(() => rows().some((row) => row.type === 'worker-message'), { paths: [h.base], alive: () => !closed, what: 'the host reports the message' });
+  assert.ok(Date.now() - sent < 30000, `the message waited ${Date.now() - sent} ms behind the dispatch lock`); // wait-allow: a host blocked on the lock answers only after its 140 s wait, the failure this bound looks for
+  assert.equal(h.task().escalation_pending, true, 'the climb stays pending while the lock is held');
+  assert.equal(h.readAttempts().length, 1);
+  if (process.platform !== 'win32') {
+    const signalled = Date.now();
+    child.kill('SIGTERM');
+    const result = await host;
+    assert.ok(Date.now() - signalled < 30000, `the drain took ${Date.now() - signalled} ms`); // wait-allow: the same bound for the signal drain
+    assert.equal(result.code, 0, result.stderr);
+    assert.deepEqual(rows().at(-1), { reason: 'signal', signal: 'SIGTERM', drained: 0 });
+  } else {
+    child.kill();
+    await host;
+  }
+  release();
+  const submitted = await h.runAsync(['wait', '--types', 'submitted', '--task', 'T1', '--agent', 'orchestrator']);
+  assert.equal(submitted.code, 0, submitted.stderr || submitted.stdout);
+  await h.until(() => h.readAttempts().length === 2 && h.task().status === 'submitted');
+  assert.deepEqual(h.readAttempts().map((a) => a.rung), ['easy', 'medium']);
+});
+
+// A drain can arrive while wait's recovery awaits one task, before it reaches
+// the next climb's dispatch. That spawn refuses, so the climb stays pending
+// and wait still exits with its signal report rather than an error.
+test('a drain during wait\'s recovery leaves the climb pending and wait reports the signal', {
+  skip: process.platform === 'win32' ? 'Windows process.kill does not deliver POSIX signals' : false,
+}, async (t) => {
+  const h = await setup(t);
+  const command = h.readState('project.json').ladder.medium.command;
+  h.ok(['ladder', 'set', 'medium', '--command', JSON.stringify([path.join(h.base, 'missing-worker')])]);
+  const first = h.json(['spawn', '--task', 'T1']);
+  const { exited } = await h.exitSignal({ pid: first.monitor_pid });
+  await h.until(() => h.task().escalation_pending === true);
+  // The first worker's monitor tries the climb itself. Restored before it
+  // exits, the ladder would let that monitor climb outside the wait below.
+  await exited;
+  h.ok(['ladder', 'set', 'medium', '--command', JSON.stringify(command)]);
+  const attempts = h.readAttempts().length;
+  const preload = path.join(h.base, 'drain-during-recovery.js');
+  // The first recovery call signals wait, then awaits the drain as an earlier
+  // recovery's agent startup would, so the climb's dispatch runs drained.
+  fs.writeFileSync(preload, `const E = require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'escalation.js'))});
+const recover = E.recover;
+let first = true;
+E.recover = async (ctx) => {
+  if (first) {
+    first = false;
+    process.kill(process.pid, 'SIGTERM');
+    const drain = ctx.automationSignal;
+    if (!drain.aborted) await new Promise((resolve) => drain.addEventListener('abort', resolve, { once: true }));
+  }
+  return recover(ctx);
+};
+`);
+  const r = await h.runAsync(['wait', '--follow', '--types', 'worker-message', '--agent', 'orchestrator'], { pre: ['--require', preload] });
+  assert.equal(r.code, 0, r.stderr);
+  assert.deepEqual(JSON.parse(r.stdout.trim().split('\n').at(-1)), { reason: 'signal', signal: 'SIGTERM', drained: 0 });
+  assert.doesNotMatch(r.stderr, /Error: wait interrupted/);
+  assert.equal(h.task().escalation_pending, true, 'the climb waits for the next wait');
+  assert.equal(h.readAttempts().length, attempts, 'no agent starts during the drain');
+});
+
 test('wait recovers a verified worker exit after its supervisor is lost', {
   skip: process.platform !== 'linux' && 'independent POSIX worker and monitor termination',
 }, async (t) => {
@@ -357,8 +472,8 @@ test('wait recovers a verified worker exit after its supervisor is lost', {
   const spawn = h.json(['spawn', '--task', 'T1']);
   await h.until(() => h.readAttempts().length === 1);
   const signals = await Promise.all([spawn.monitor_pid, spawn.pid].map((pid) => h.exitSignal({ pid })));
-  process.kill(spawn.monitor_pid, 'SIGKILL');
-  process.kill(spawn.pid, 'SIGKILL');
+  killPid(spawn.monitor_pid, 'SIGKILL');
+  killPid(spawn.pid, 'SIGKILL');
   await Promise.all(signals.map(({ exited }) => exited));
   const observed = await h.runAsync(['wait', '--after', '0', '--types', 'worker-exited', '--agent', 'orchestrator']);
   assert.equal(observed.code, 0, observed.stderr || observed.stdout);
@@ -378,12 +493,12 @@ test('lost-supervisor recovery waits for redirected orphan descendants to stop',
   const child = { pid, ...P.identity(pid) };
   try {
     const signals = await Promise.all([spawn.monitor_pid, spawn.pid].map((pid) => h.exitSignal({ pid })));
-    process.kill(spawn.monitor_pid, 'SIGKILL');
-    process.kill(spawn.pid, 'SIGKILL');
+    killPid(spawn.monitor_pid, 'SIGKILL');
+    killPid(spawn.pid, 'SIGKILL');
     await Promise.all(signals.map(({ exited }) => exited));
     h.ok(['spend', 'T1', '--from-spawn', spawn.agent]);
     assert.equal(P.processState(child), 'running');
-    const result = h.run(['wait', '--types', 'submitted', '--task', 'T1', '--agent', 'orchestrator', '--timeout', '2']);
+    const result = h.run(['wait', '--types', 'submitted', '--task', 'T1', '--agent', 'orchestrator', '--timeout', '2']); // wait-allow: observe that recovery stays blocked while the orphan is deliberately held alive
     assert.equal(result.code, 2, 'a parent exit must not dispatch while its orphan descendant is alive');
     const waiting = h.json(['recover', 'T1', '--agent', 'orchestrator']);
     assert.match(waiting.waiting, /process group.*still running/i);
@@ -392,14 +507,14 @@ test('lost-supervisor recovery waits for redirected orphan descendants to stop',
     assert.equal(events(h).filter((e) => e.cmd === 'spawn exit' && e.detail.agent === spawn.agent).length, 0);
     assert.ok(events(h).some((e) => e.cmd === 'recover waiting' && /process group/.test(e.detail.reason)));
     const { exited } = await h.exitSignal(child);
-    process.kill(child.pid, 'SIGKILL');
+    killPid(child.pid, 'SIGKILL');
     await exited;
     const submitted = await h.runAsync(['wait', '--types', 'submitted', '--task', 'T1', '--agent', 'orchestrator']);
     assert.equal(submitted.code, 0, submitted.stderr || submitted.stdout);
     assert.deepEqual(h.readAttempts().map((a) => a.rung), ['easy', 'medium']);
     assert.equal(events(h).filter((e) => e.cmd === 'worker-exited').length, 1);
   } finally {
-    if (P.processState(child) !== 'exited') process.kill(child.pid, 'SIGKILL');
+    if (P.processState(child) !== 'exited') killPid(child.pid, 'SIGKILL');
   }
 });
 
@@ -590,8 +705,11 @@ test('a later eligible passing review supersedes a failure before worker exit', 
   h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--ok', '--sha', sha, '--agent', 'reviewer', '--summary', 'corrected verdict']);
   h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--fail', '--sha', 'abcdef1', '--agent', 'reviewer']);
   h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--fail', '--sha', sha, '--agent', spawn.agent]);
-  process.kill(spawn.pid, 'SIGKILL');
+  const { exited } = await h.exitSignal({ pid: spawn.monitor_pid });
+  killPid(spawn.pid, 'SIGKILL');
   await h.until(() => events(h).some((e) => e.cmd === 'spend' && e.detail.source === `spawn:${spawn.agent}`));
+  // The monitor's reactions can still run after the spend, and a climb would come from them.
+  await exited;
   assert.equal(h.json(['task', 'show', 'T1']).tier, 'easy');
   assert.equal(events(h).filter((e) => e.cmd === 'escalate').length, 0);
 });
@@ -605,8 +723,8 @@ for (const prior of ['spent', 'lock-timeout']) {
     const spawn = h.json(['spawn', '--task', 'T1']);
     await h.until(() => h.readAttempts().length === 1);
     const signals = await Promise.all([spawn.monitor_pid, spawn.pid].map((pid) => h.exitSignal({ pid })));
-    process.kill(spawn.monitor_pid, 'SIGKILL');
-    process.kill(spawn.pid, 'SIGKILL');
+    killPid(spawn.monitor_pid, 'SIGKILL');
+    killPid(spawn.pid, 'SIGKILL');
     await Promise.all(signals.map(({ exited }) => exited));
     const opts = {};
     if (prior === 'spent') {
@@ -638,7 +756,7 @@ test('a sandboxed reviewer waits for a hidden live worker to exit before climbin
   });
   assert.equal(h.json(['task', 'show', 'T1']).tier, 'easy');
   assert.equal(events(h).filter((e) => e.cmd === 'escalate').length, 0);
-  process.kill(spawn.pid, 'SIGKILL');
+  killPid(spawn.pid, 'SIGKILL');
   await h.until(() => {
     const task = h.task();
     return task.status === 'submitted' && task.tier === 'medium' && h.readAttempts().length === 2;
@@ -650,8 +768,11 @@ test('a reviewer without permission to create a worker home leaves the climb for
   skip: process.platform === 'win32' || process.getuid?.() === 0,
 }, async (t) => {
   const h = await setup(t, 'review');
-  h.ok(['spawn', '--task', 'T1']);
+  const spawn = h.json(['spawn', '--task', 'T1']);
   await h.until(() => events(h).some((e) => e.cmd === 'spawn exit'));
+  // Finish host recovery before applying the reviewer's home permission boundary.
+  const { exited } = await h.exitSignal({ pid: spawn.monitor_pid });
+  await exited;
   h.reviewer('T1', 'reviewer');
   const homes = path.join(h.state, 'homes');
   fs.chmodSync(homes, 0o500);
@@ -676,6 +797,9 @@ test('a brokered failed review leaves full-findings rework and the climb to its 
   const h = await setup(t, 'review');
   const spawn = h.json(['spawn', '--task', 'T1']);
   await h.until(() => events(h).some((e) => e.cmd === 'spawn exit'));
+  // The exit receipt precedes host recovery; finish that host before isolating the broker.
+  const { exited } = await h.exitSignal({ pid: spawn.monitor_pid });
+  await exited;
   h.reviewer('T1', 'reviewer-T1-1');
   const B = require('../lib/broker');
   const binding = path.join(h.base, 'review-broker', B.FILE);

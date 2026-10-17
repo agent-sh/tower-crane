@@ -2,9 +2,9 @@
 
 const fs = require('node:fs');
 const crypto = require('node:crypto');
-const os = require('node:os');
 const path = require('node:path');
 const zlib = require('node:zlib');
+const { tempRoot } = require('./tmp-root');
 
 function writeObject(repo, type, content) {
   const body = Buffer.concat([Buffer.from(`${type} ${content.length}\0`), content]);
@@ -33,7 +33,7 @@ function writeIndex(repo, oid, file, size) {
   fs.writeFileSync(path.join(repo, '.git', 'index'), Buffer.concat([body, checksum]));
 }
 
-function createRepoSeed(tmpRoot = process.env.TOWER_CRANE_TEST_TMP || os.tmpdir()) {
+function createRepoSeed(tmpRoot = tempRoot()) {
   fs.mkdirSync(tmpRoot, { recursive: true });
   const base = fs.realpathSync.native(fs.mkdtempSync(path.join(tmpRoot, 'tower-crane-seed-')));
   const repo = path.join(base, 'repo');
@@ -45,7 +45,11 @@ function createRepoSeed(tmpRoot = process.env.TOWER_CRANE_TEST_TMP || os.tmpdir(
     }
     fs.writeFileSync(
       path.join(gitDir, 'config'),
-      `[core]\n\trepositoryformatversion = 0\n\tfilemode = ${process.platform !== 'win32'}\n\tbare = false\n\tlogallrefupdates = true\n\tignorecase = ${process.platform === 'win32'}\n\tautocrlf = false\n`,
+      `[core]\n\trepositoryformatversion = 0\n\tfilemode = ${process.platform !== 'win32'}\n\tbare = false\n\tlogallrefupdates = true\n\tignorecase = ${process.platform === 'win32'}\n\tautocrlf = false\n`
+      // Workers push to origin, so spawn refuses a repository without one. The
+      // fixture's origin is the repository itself: a fetch or push there moves
+      // nothing, and no test reaches a network.
+      + '[remote "origin"]\n\turl = .\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n',
     );
     fs.writeFileSync(path.join(gitDir, 'HEAD'), 'ref: refs/heads/main\n');
     fs.writeFileSync(path.join(gitDir, 'description'), "Unnamed repository; edit this file 'description' to name the repository.\n");
@@ -80,4 +84,11 @@ function cleanupRepoSeed(seed) {
   fs.rmSync(seed.base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 }
 
-module.exports = { createRepoSeed, cleanupRepoSeed };
+// Global git config for every test repository. Auto-maintenance that a commit,
+// merge or fetch starts runs in the foreground, so no git outlives the command
+// and writes or prunes a fixture while its cleanup removes it. Git 2.54 and
+// later repack after a commit that leaves 100 loose objects (2.56 raised it to
+// 6700), which a fixture copying the repository's sources passes.
+const FOREGROUND_MAINTENANCE = '[gc]\n\tautoDetach = false\n[maintenance]\n\tautoDetach = false\n';
+
+module.exports = { createRepoSeed, cleanupRepoSeed, FOREGROUND_MAINTENANCE };

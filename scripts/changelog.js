@@ -7,6 +7,28 @@ const { readText } = require('./text');
 
 const ROOT = path.join(__dirname, '..');
 
+const git = (root, args) => cp.execFileSync('git', args, { cwd: root, encoding: 'utf8', timeout: 30000 });
+
+// The newest first-parent commit up to REF that added or changed a release heading in CHANGELOG.md.
+function releaseCommit(root = ROOT, ref = 'HEAD') {
+  return git(root, ['log', '--first-parent', '--diff-merges=first-parent', '-1', '--no-patch', '--format=%H',
+    '-G', '^## [0-9]', ref, '--', 'CHANGELOG.md']).trim() || null;
+}
+
+const names = (out) => out.split('\0').map((file) => file.trim()).filter(Boolean)
+  .map((file) => file.replace(/\\/g, '/').slice('changelog.d/'.length));
+
+// Fragments in the tree of the latest release commit went into that release's notes,
+// unless a later commit up to REF added the name again.
+function released(root = ROOT, ref = 'HEAD') {
+  const sha = releaseCommit(root, ref);
+  if (!sha) return new Set();
+  const later = new Set(names(git(root, ['log', '--first-parent', '--diff-merges=first-parent',
+    '--diff-filter=A', '--format=', '--name-only', '-z', `${sha}..${ref}`, '--', 'changelog.d/'])));
+  return new Set(names(git(root, ['ls-tree', '-z', '--name-only', sha, '--', 'changelog.d/']))
+    .filter((name) => !later.has(name)));
+}
+
 function fragments(root = ROOT) {
   const dir = path.join(root, 'changelog.d');
   const entries = fs.readdirSync(dir).filter((name) => name !== 'README.md').map((name) => {
@@ -19,9 +41,8 @@ function fragments(root = ROOT) {
     }
     return { name, text };
   });
-  const history = cp.execFileSync('git', ['log', '--first-parent', '--diff-merges=first-parent',
-    '--diff-filter=A', '--format=', '--name-only', '-z', '--', 'changelog.d/'],
-  { cwd: root, encoding: 'utf8', timeout: 30000 });
+  const history = git(root, ['log', '--first-parent', '--diff-merges=first-parent',
+    '--diff-filter=A', '--format=', '--name-only', '-z', '--', 'changelog.d/']);
   const landed = new Map();
   for (const file of history.split('\0').map((file) => file.trim()).filter(Boolean)) {
     const name = file.replace(/\\/g, '/').slice('changelog.d/'.length);
@@ -34,8 +55,10 @@ function fragments(root = ROOT) {
 function assemble(root = ROOT) {
   const archive = readText(path.join(root, 'CHANGELOG.md'));
   if (!archive.startsWith('# Changelog\n')) throw new Error('CHANGELOG.md needs its Changelog heading');
-  const entries = fragments(root).map((fragment) => fragment.text);
-  return '# Changelog\n\n' + [...entries, archive.slice('# Changelog\n'.length).trim()].filter(Boolean).join('\n\n') + '\n';
+  const done = released(root);
+  const entries = fragments(root).filter((fragment) => !done.has(fragment.name)).map((fragment) => fragment.text);
+  const unreleased = entries.length ? ['## Unreleased', ...entries] : [];
+  return '# Changelog\n\n' + [...unreleased, archive.slice('# Changelog\n'.length).trim()].filter(Boolean).join('\n\n') + '\n';
 }
 
 if (require.main === module) {
@@ -48,4 +71,4 @@ if (require.main === module) {
   }
 }
 
-module.exports = { fragments, assemble };
+module.exports = { fragments, released, assemble };

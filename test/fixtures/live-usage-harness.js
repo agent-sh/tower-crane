@@ -12,18 +12,32 @@
 const cp = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
+const { writeAtomic } = require('../atomic-file');
 
 if (path.resolve(process.argv[1] || '') !== __filename) {
   if (path.basename(process.argv[1] || '') === 'spawn-monitor.js' && process.env.LIVE_PAUSE_FINAL) {
     const usage = require(path.join(path.dirname(process.argv[1]), 'usage-files.js'));
     const readResult = usage.readResult;
     let paused = false;
+    // How soon a supervisor sees its harness exit varies by platform: on
+    // Windows a periodic sample can read the final record before the exit.
+    // LIVE_FINAL_UNSAMPLED fixes the order where only the exit reading sees it.
+    if (process.env.LIVE_FINAL_UNSAMPLED && process.env.LIVE_FINISH) {
+      const readLive = usage.readLive;
+      let before;
+      usage.readLive = function (...args) {
+        if (paused) return readLive.apply(this, args);
+        if (fs.existsSync(process.env.LIVE_FINISH)) return before;
+        before = readLive.apply(this, args);
+        return before;
+      };
+    }
     usage.readResult = function (...args) {
       if (!paused) {
         paused = true;
         const marker = process.env.LIVE_PAUSE_FINAL;
         fs.writeFileSync(marker, '');
-        const deadline = Date.now() + 60000;
+        const deadline = Date.now() + 300000;
         while (!fs.existsSync(`${marker}.go`)) {
           if (Date.now() >= deadline) throw new Error('final sample was not released');
           Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
@@ -34,9 +48,14 @@ if (path.resolve(process.argv[1] || '') !== __filename) {
   }
   if (path.basename(process.argv[1] || '') === 'spawn-monitor.js' && process.env.LIVE_READS) {
     const read = fs.readFileSync;
+    let delayed = false;
     fs.readFileSync = function (file, ...args) {
       if (typeof file === 'string' && /[\\/]projects[\\/].+\.jsonl$/.test(file)) {
-        fs.appendFileSync(process.env.LIVE_READS, `${Date.now()}\n`);
+        if (!delayed && process.env.LIVE_READ_DELAY_MS) {
+          delayed = true;
+          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Number(process.env.LIVE_READ_DELAY_MS)); // wait-allow: the configured slow read is the fixture's behaviour
+        }
+        fs.appendFileSync(process.env.LIVE_READS, `${performance.now()}\n`);
       }
       return read.call(this, file, ...args);
     };
@@ -70,7 +89,7 @@ if (path.resolve(process.argv[1] || '') !== __filename) {
     file = path.join(env.CODEX_HOME, 'sessions', '2026', '10', '07', `rollout-2026-10-07T00-00-00-${id}.jsonl`);
   }
   if (file) fs.mkdirSync(path.dirname(file), { recursive: true });
-  if (env.LIVE_FILE) fs.writeFileSync(env.LIVE_FILE, file);
+  if (env.LIVE_FILE) writeAtomic(env.LIVE_FILE, file);
   let step = 0;
   const write = (final = false) => {
     step += 1;
@@ -97,7 +116,9 @@ if (path.resolve(process.argv[1] || '') !== __filename) {
           input_tokens: tokens - output, cache_read_input_tokens: 0, output_tokens: output,
         } }));
       }
-      fs.writeFileSync(env.LIVE_DONE, String(step));
+      writeAtomic(env.LIVE_DONE, String(step));
+      // A held harness leaves its final record to the periodic sampler.
+      if (env.LIVE_FINAL_HOLD) return;
       process.exit(70);
     }
     if (step === 1 && env.LIVE_CONTINUE) {
@@ -106,20 +127,20 @@ if (path.resolve(process.argv[1] || '') !== __filename) {
         clearInterval(resume);
         write();
       }, 25);
-    } else if (step < steps) setTimeout(write, Number(env.LIVE_EVERY || 100));
+    } else if (step < steps) setTimeout(write, Number(env.LIVE_EVERY || 100)); // wait-allow: model periodic telemetry samples while the harness is live
     else {
       const finish = () => {
         if (env.LIVE_RESULT && harness === 'claude') console.log(JSON.stringify({
           type: 'result', usage: { input_tokens: step * (per - output), output_tokens: step * output },
         }));
         if (env.LIVE_OUTAGE) console.error('HTTP 503 service unavailable');
-        fs.writeFileSync(env.LIVE_DONE, String(step));
+        writeAtomic(env.LIVE_DONE, String(step));
         process.exit(Number(env.LIVE_EXIT || 0));
       };
       if (env.LIVE_COMPLETE) {
         setInterval(() => { if (fs.existsSync(env.LIVE_COMPLETE)) finish(); }, 25);
       } else if (env.LIVE_HOLD === 'until-stop') setInterval(() => {}, 1000);
-      else setTimeout(finish, Number(env.LIVE_HOLD || 0));
+      else setTimeout(finish, Number(env.LIVE_HOLD || 0)); // wait-allow: fixture simulates harness exit after emitting its usage
     }
   };
   if (env.LIVE_UNREADABLE) {
@@ -127,8 +148,10 @@ if (path.resolve(process.argv[1] || '') !== __filename) {
     setInterval(() => {}, 1000);
   } else write();
   if (env.LIVE_FINISH) {
-    setInterval(() => {
-      if (fs.existsSync(env.LIVE_FINISH)) write(true);
+    const finishing = setInterval(() => {
+      if (!fs.existsSync(env.LIVE_FINISH)) return;
+      clearInterval(finishing);
+      write(true);
     }, 25);
   }
 }
