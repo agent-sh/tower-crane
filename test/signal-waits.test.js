@@ -399,10 +399,6 @@ test('the lint rejects sleeps, counted sleep loops and other clocks, and accepts
     'const hook = `x=$(echo a)#; for i in 1 2 3; do sleep 1; done`;', // wait-allow: rejected lint fixture
     // Deeply nested unclosed substitutions are read without recursion.
     'const hook = `' + '"$('.repeat(3000) + 'for i in 1 2 3; do sleep 1; done`;', // wait-allow: rejected lint fixture
-    // Quoted text and heredocs still sleep when a shell runs them.
-    'const hook = `for i in 1 2 3; do\\ncat <<EOF | sh\\nsleep 1\\nEOF\\ndone`;', // wait-allow: rejected lint fixture
-    'const hook = `for i in 1 2 3; do c="sleep 1"; $c; done`;', // wait-allow: rejected lint fixture
-    'const hook = `for i in 1 2 3; do x="$(sleep 1)"; done`;', // wait-allow: rejected lint fixture
     // An echo's command substitution runs, and a helper's sleep may take a quoted or interpolated operand.
     'const hook = `for i in 1 2 3; do echo $(sleep 1); done`;', // wait-allow: rejected lint fixture
     "function nap() { cp.spawnSync('sh', ['-c', 'sleep \"$d\"']); } // wait-allow: cadence\nfor (let i = 0; i < 3 && !ok(); i++) nap();", // wait-allow: rejected lint fixture
@@ -452,10 +448,9 @@ test('the lint rejects sleeps, counted sleep loops and other clocks, and accepts
     // A whole loop in quoted text or a heredoc is read on its own.
     'const hook = `cat <<EOF\\nfor i in 1 2 3; do echo; done\\nEOF\\nwhile [ ! -f go ]; do sleep 0.1; done`;',
     'const hook = `while [ ! -f go ]; do echo "done"; sleep 0.1; done; for i in 1 2; do echo; done`;',
-    // A sleep word in a heredoc or quoted data does not run, and << in arithmetic opens no heredoc.
-    'const hook = `for i in 1 2 3; do\\ncat <<EOF\\ndone\\nsleep 1\\nEOF\\ndone`;',
-    'const hook = `for i in 1 2 3; do x="sleep 1"; grep -q "sleep 2" log && break; done`;',
+    // << in arithmetic opens no heredoc, but $((cmd) ) is a subshell where << does.
     'const hook = `for i in 1 2 3; do echo; x=$((1<<2))\\ndone\\n2\\nwhile [ ! -f go ]; do sleep 0.1; done`;',
+    'const hook = `x=$((cat <<EOF\\nfor i in 1 2 3; do\\nEOF\\n) )\\nwhile [ ! -f go ]; do sleep 0.1; done`;',
     'await scheduler.wait(HUNG_TEST_MS);',
     'const elapsed = process.hrtime.bigint() - start; report(elapsed);',
   ]) assert.deepEqual(waitFindings(source), [], source);

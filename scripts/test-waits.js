@@ -465,17 +465,16 @@ function shellQuoteEnd(s, i, ends = new Map()) {
 const HEREDOC = /<<-?[ \t]*(?:'[ \t]*([^'\n]*?)[ \t]*'|"[ \t]*([^"\n]*?)[ \t]*"|\\?([\w.-]+))/y;
 
 // The text a script holds outside its code: quoted strings, comments and
-// heredoc bodies, as { start, end, nested, at } where nested says whether the
-// span can be a script of its own (sh -c '...', eval "...", sh <<EOF) and at
-// is where its quote or << stands. An unclosed quote or heredoc is read as
-// code. A # after the ) of $(...) or $((...)) is part of a word, and << in
-// arithmetic is a shift.
+// heredoc bodies, as { start, end, nested } where nested says whether the
+// span can be a script of its own (sh -c '...', eval "...", sh <<EOF). An
+// unclosed quote or heredoc is read as code. A # after the ) of $(...) or
+// $((...)) is part of a word, and << in arithmetic is a shift.
 function shellSpans(s) {
   const spans = [];
   const pending = [];
   const ends = new Map();
   const parens = [];
-  let substitution = -1;
+  const closes = new Set();
   // Each heredoc looks up its delimiter line in one index of the script's
   // lines, so many unclosed heredocs do not rescan the rest each.
   let lines;
@@ -506,36 +505,41 @@ function shellSpans(s) {
     if (c === '\\') i++;
     else if (c === '\n' && pending.length) {
       let at = i + 1;
-      for (const { word, from } of pending.splice(0)) {
+      for (const word of pending.splice(0)) {
         const line = delimiter(word, at);
         if (!line) break;
-        spans.push({ start: at, end: line[1], nested: true, at: from });
+        spans.push({ start: at, end: line[1], nested: true });
         at = line[1] + 1;
       }
       i = at - 1;
-    } else if (c === '#' && (i === 0 || (/[\s;&|()]/.test(s[i - 1]) && substitution !== i - 1))) {
+    } else if (c === '#' && (i === 0 || (/[\s;&|()]/.test(s[i - 1]) && !closes.has(i - 1)))) {
       const eol = s.indexOf('\n', i);
       const end = eol < 0 ? s.length : eol;
-      spans.push({ start: i + 1, end, nested: false, at: i });
+      spans.push({ start: i + 1, end, nested: false });
       i = end - 1;
     } else if (c === '<' && s[i + 1] === '<') {
       if (s[i + 2] === '<') { i += 2; continue; }
       if (/^\$?\(\($/.test(parens.findLast((kind) => kind !== '(') || '')) continue;
       HEREDOC.lastIndex = i;
       const m = HEREDOC.exec(s);
-      if (m) { pending.push({ word: m[1] ?? m[2] ?? m[3], from: i }); i = HEREDOC.lastIndex - 1; }
+      if (m) { pending.push(m[1] ?? m[2] ?? m[3]); i = HEREDOC.lastIndex - 1; }
     } else if (c === '(' || (c === '$' && s[i + 1] === '(')) {
-      const kind = /^\$?\(\(?/.exec(s.slice(i, i + 3))[0];
+      let kind = /^\$?\(\(?/.exec(s.slice(i, i + 3))[0];
+      if (c === '$') {
+        // $(( is arithmetic only when it closes with )), as in bash;
+        // $((cmd) ) is a subshell in a substitution.
+        const end = shellQuoteEnd(s, i, ends);
+        if (end > 0) closes.add(end - 1);
+        if (kind === '$((' && !(end > 0 && s[end - 2] === ')')) kind = '$(';
+      }
       parens.push(kind);
       i += kind.length - 1;
     } else if (c === ')') {
-      const kind = parens.pop();
-      if (kind?.endsWith('((') && s[i + 1] === ')') i++;
-      if (kind?.startsWith('$')) substitution = i;
+      if (parens.pop()?.endsWith('((') && s[i + 1] === ')') i++;
     } else if (c === "'" || c === '"' || (c === '$' && s[i + 1] === "'")) {
       const end = shellQuoteEnd(s, i, ends);
       if (end > 0) {
-        spans.push({ start: i + (c === '$' ? 2 : 1), end: end - 1, nested: true, at: i });
+        spans.push({ start: i + (c === '$' ? 2 : 1), end: end - 1, nested: true });
         i = end - 1;
       }
     }
@@ -543,21 +547,14 @@ function shellSpans(s) {
   return spans;
 }
 
-// Commands whose quoted arguments and heredoc input are data: text they
-// print, match, compare, store or write. A sleep word there does not run.
-const SHELL_DATA = /^(?:echo|printf|cat|tee|grep|egrep|fgrep|test|\[\[?|case|read|touch|mkdir|rm|cp|mv|ln|chmod|wc|head|tail|sort|uniq|cut|tr|diff|cmp|local|export|readonly|declare|typeset)$/;
-// A body that runs code it does not spell out: eval, a variable or a script
-// file as the command, or sh -c "$cmd". Its quoted text can be that code.
-const SHELL_INDIRECT = new RegExp(String.raw`\beval\b|-\w*c[ \t]+["']?\$|${SHELL_COMMAND}(?:["']?\$|\.?\.?\/|(?:source|\.)[ \t]|(?:[\w./-]*\/)?(?:ba|da|k|z)?sh[ \t]+[^-\s])`);
-
 // Shell loops a test writes that a counter bounds around a sleep: a for loop
 // over seq, a brace range, a fixed list of numbers or a C-style header, or a
 // while or until loop comparing a variable its body counts, in its condition
 // or in a test before a break in the body. Loop words in quoted text, a
 // comment or a heredoc neither open nor close a loop around them; a span
-// that holds a whole loop is read as a script of its own. A sleep counts
-// where it runs: in code, in text a shell runs and in the substitutions of
-// data, but not in the data itself.
+// that holds a whole loop is read as a script of its own. Any sleep word in
+// the body counts, quoted text and heredocs included, since the check cannot
+// tell which text a shell will run.
 function shellCounted(source) {
   const found = [];
   const queue = [[0, source]];
@@ -571,59 +568,17 @@ function shellCounted(source) {
 function shellLoops(script, offset, queue) {
   const found = [];
   const open = [];
-  const spans = shellSpans(script);
   let words = '';
-  let flat = '';
   let last = 0;
-  for (const { start, end, nested } of spans) {
+  for (const { start, end, nested } of shellSpans(script)) {
     words += script.slice(last, start) + ' '.repeat(end - start);
-    flat += script.slice(last, start) + '_'.repeat(end - start);
     last = end;
     // Only a span that holds a loop's do can hold a loop.
     if (nested && /do\b/.test(script.slice(start, end))) queue.push([offset + start, script.slice(start, end)]);
   }
   words += script.slice(last);
-  flat += script.slice(last);
-  // Whether the quote or heredoc opening at `at` is data: the argument or
-  // input of a data command, or a value an assignment stores, unless a pipe
-  // passes it on.
-  const data = (at, end) => {
-    let first = at;
-    while (first > 0 && !'\n;&|(){}`'.includes(flat[first - 1])) first--;
-    const segment = flat.slice(first, at).trim().split(/\s+/).filter(Boolean);
-    let k = 0;
-    while (k < segment.length) {
-      const word = segment[k];
-      if (/^(?:if|elif|while|until|then|do|else|time|!)$/.test(word) || /^[A-Z_a-z]\w*(?:\[[^\]]*\])?\+?=/.test(word)) k++;
-      else if (/^\d*(?:[<>]|>>|[<>]&|&>)$/.test(word)) k += 2;
-      else if (/^\d*[<>]/.test(word)) k++;
-      else break;
-    }
-    const command = segment[k]?.replace(/^.*\//, '');
-    const assigned = command === undefined && flat[at - 1] === '=';
-    if (!(assigned || SHELL_DATA.test(command || ''))) return false;
-    const rest = (text) => /^[^\n;&|]*\|(?!\|)/.test(text);
-    return !rest(flat.slice(end)) && !(script[at] === '<' && rest(flat.slice(at)));
-  };
-  const runs = (from, to) => {
-    const body = script.slice(from, to);
-    if (SHELL_INDIRECT.test(body)) return body;
-    let text = '';
-    let at = from;
-    for (const span of spans) {
-      if (span.start < from || span.end > to) continue;
-      text += words.slice(at, span.start) + ' ';
-      at = span.end;
-      if (!span.nested) continue;
-      const inner = script.slice(span.start, span.end);
-      if (!data(span.at, span.end + (script[span.at] === '<' ? 0 : 1))) text += inner;
-      else if (!["'", '$'].includes(script[span.at])) text += (inner.match(/\$\([^()]*\)?|`[^`]*`?/g) || []).join(' ');
-    }
-    return text + words.slice(at, to);
-  };
-  const check = (loop, from, to) => {
-    if (!SHELL_SLEEP.test(shellCode(runs(from, to)))) return;
-    const body = script.slice(from, to);
+  const check = (loop, body) => {
+    if (!SHELL_SLEEP.test(shellCode(body))) return;
     let counted;
     if (loop.keyword === 'for') {
       counted = /^\s*\(\([^;]*;[^;]*[<>][^;]*;/.test(loop.header)
@@ -645,11 +600,11 @@ function shellLoops(script, offset, queue) {
       const index = open.findLastIndex((candidate) => candidate.body !== undefined);
       if (index < 0) continue;
       const [loop] = open.splice(index, 1);
-      check(loop, loop.body, word.index);
+      check(loop, script.slice(loop.body, word.index));
     } else open.push({ keyword, at: word.index });
   }
   // A loop whose done is in code the check cannot read runs to the end.
-  for (const loop of open) if (loop.body !== undefined) check(loop, loop.body, script.length);
+  for (const loop of open) if (loop.body !== undefined) check(loop, script.slice(loop.body));
   return found;
 }
 
