@@ -347,6 +347,10 @@ test('the lint rejects sleeps, counted sleep loops and other clocks, and accepts
     'cp.spawnSync("sleep", ["1"]); if (!ok()) throw new Error("late");', // wait-allow: rejected lint fixture
     'execSync("sleep 1");', // wait-allow: rejected lint fixture
     'const hook = `while [ ! -f go ] && [ $i -lt 300 ]; do sleep 0.1; i=$((i+1)); done`;', // wait-allow: rejected lint fixture
+    'const hook = `#!/bin/sh\\ni=0\\nwhile [ ! -f go ] && [ $i -lt 300 ]; do sleep 0.1; i=$((i+1)); done\\n`;', // wait-allow: rejected lint fixture
+    'const hook = `#!/bin/sh\\nn=0\\nuntil [ -f go ] || [ "$n" -ge 50 ]; do sleep 0.1; n=$((n + 1)); done\\n`;', // wait-allow: rejected lint fixture
+    'const hook = `for i in $(seq 50); do [ -f go ] && break; sleep 0.1; done`;', // wait-allow: rejected lint fixture
+    'const hook = `for i in 1 2 3 4 5; do [ -f go ] && break; sleep 1; done`;', // wait-allow: rejected lint fixture
     'const sleep = util.promisify(setTimeout); await sleep(500);', // wait-allow: rejected lint fixture
     'await promisify(setTimeout)(500);', // wait-allow: rejected lint fixture
     'await scheduler.wait(500);', // wait-allow: rejected lint fixture
@@ -372,6 +376,8 @@ test('the lint rejects sleeps, counted sleep loops and other clocks, and accepts
     'const script = `while(!fs.existsSync(go))Atomics.wait(s,0,0,100);`;',
     'while (!fs.existsSync(go)) cp.spawnSync("sleep", ["1"]);',
     'const hook = `while [ ! -f go ] && [ -d dir ]; do sleep 0.1; done`;',
+    'const hook = `#!/bin/sh\\nwhile [ "$(wc -l < f)" -lt 2 ]; do sleep 0.1; done\\n`;',
+    'const hook = `for f in a b; do touch $f; done; while [ ! -f go ]; do sleep 0.1; done`;',
     'await scheduler.wait(HUNG_TEST_MS);',
     'const elapsed = process.hrtime.bigint() - start; report(elapsed);',
   ]) assert.deepEqual(waitFindings(source), [], source);

@@ -1,1 +1,1 @@
-- The test wait lint rejects a shell loop in a test's script that counts iterations and sleeps, as it already did for JavaScript loops.
+- The test wait lint rejects a shell loop in a test's script that counts iterations and sleeps, as it already did for JavaScript loops: a `while` or `until` loop comparing a variable its body counts, or a `for` loop over `seq` or a fixed list of numbers. A loop that compares a value it reads still polls.

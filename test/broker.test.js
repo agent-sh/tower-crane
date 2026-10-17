@@ -1322,9 +1322,12 @@ test('a broker whose agent sent its whole pack in one read sees the agent hang u
   const release = path.join(f.h.base, 'hook-release');
   const slash = (p) => p.replace(/\\/g, '/');
   // It waits for the release file, or for the fixture to be removed when the
-  // test ends; the runner's hung-test timeout is the backstop.
+  // test ends. The push runs in a process group of its own, so a cancelled
+  // test run would leave it waiting: on POSIX it also stops once this test
+  // process is gone (Git for Windows' kill does not see a Windows pid).
+  const tester = process.platform === 'win32' ? '' : ` && kill -0 ${process.pid} 2>/dev/null`;
   fs.writeFileSync(path.join(f.remote, 'hooks', 'pre-receive'),
-    `#!/bin/sh\n: > '${slash(started)}'\nwhile [ ! -f '${slash(release)}' ] && [ -d '${slash(f.h.base)}' ]; do sleep 0.1; done\n`, { mode: 0o755 });
+    `#!/bin/sh\n: > '${slash(started)}'\nwhile [ ! -f '${slash(release)}' ] && [ -d '${slash(f.h.base)}' ]${tester}; do sleep 0.1; done\n`, { mode: 0o755 });
   t.after(() => { try { fs.writeFileSync(release, ''); } catch {} });
   const sha = f.commit('a.txt', 'a\n');
   let sock = null;
