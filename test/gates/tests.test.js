@@ -251,7 +251,7 @@ test('a host-only failure on the base keeps its opt-in and command for retry cla
   }
 });
 
-test('a piece of a token one stream wrapped keeps its line ending, and ranges stay in order and apart', () => {
+test('joined redaction keeps a split token redacted across streams, a piece keeps its line ending, and ranges stay apart', () => {
   const token = `ghp_${'A1b2C3d4E5'.repeat(4)}`;
   for (const eol of ['\n', '\r\n']) {
     const runs = [
@@ -262,6 +262,16 @@ test('a piece of a token one stream wrapped keeps its line ending, and ranges st
     const out = redactJoined({ output: runs.map((r) => r.text).join(''), runs }, createRedactor([]));
     assert.equal(out, 'split [redacted:GITHUB_TOKEN]\nnot ok 3 - flaky\n[redacted:GITHUB_TOKEN] tail\n', JSON.stringify(eol));
   }
+  // A token split between the streams on adjacent lines of the joined output stays one redacted
+  // secret, as the joined text alone redacts it.
+  const env = `ghp_${'a1'.repeat(18)}`;
+  const cross = [
+    { stream: 'out', text: `cross ${env.slice(0, 20)}\n` },
+    { stream: 'err', text: `${env.slice(20)} (stderr)\n` },
+    { stream: 'out', text: '-- after the split\n' },
+  ];
+  assert.equal(redactJoined({ output: cross.map((r) => r.text).join(''), runs: cross }, createRedactor([['CI_FIXTURE_TOKEN', env]])),
+    'cross [redacted:CI_FIXTURE_TOKEN] (stderr)\n-- after the split\n');
   // A header running to the end of the text holds the environment value as its last piece.
   const value = 'Z0000ABCDEFGHJKLMNPQRSTUV7';
   const ranges = createRedactor([['S_TOKEN', value]]).ranges(`x Authorization: Bearer ${value}`);
