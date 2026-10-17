@@ -570,6 +570,11 @@ test('a token that escapes take part of and split, or that a line break splits, 
   }
   // A fixed-length shape keeps its word boundary when it is joined back, with a line after it too.
   assert.equal(plain(plain.strip(`token is\n${aws[0]}\n${aws.slice(1)}\nnext`)), 'token is\n[redacted:AWS_ACCESS_KEY_ID]\nnext');
+  // A token whose prefix a line break splits is not put back over another secret: its joined text
+  // would cut an environment value an escape splits, or a token the cleaned text shows.
+  const overlap = createRedactor([['MY_SECRET', 'Wx2Zq9Xw8Vu7Ts6']]);
+  assert.equal(overlap(overlap.strip(`xx g\n${github.slice(1)}Zq9\x1b=Xw8Vu7Ts6 y`)), `xx g\n${github.slice(1, -3)}[redacted:MY_SECRET] y`);
+  assert.equal(plain(plain.strip('id=xox\nb-l2SorrmC\n0FhbP-gho_3uN9vAEJTHvInLGgsXGIqgB5 y')), 'id=xox\nb-l2SorrmC\n0FhbP-[redacted:GITHUB_TOKEN] y');
   // Two line breaks inside a prefix, or a blank line, join nothing.
   for (const input of [`x g\nh\np_${github.slice(4)}`, `x g\n\nhp_${github.slice(4)}`, 'run s\nk-means_clustering']) assert.equal(plain(plain.strip(input)), input);
   assert.equal(plain(plain.strip(`k=${aws.slice(0, 9)}\n${aws.slice(9)}\n`)), 'k=[redacted:AWS_ACCESS_KEY_ID]\n');
