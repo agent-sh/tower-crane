@@ -559,13 +559,43 @@ test('a token that escapes take part of and split, or that a line break splits, 
     ['a token ends its line', `token ${github}\nnext line`, 'token [redacted:X]\nnext line'],
     ['a charset reset after the token', `\x1b[31m${github}\x1b(B\x1b[m`, '[redacted:X]'],
     ['a header value ends at its line', 'Authorization: Bearer abc\nAccept: */*', 'Authorization: Bearer [redacted:AUTHORIZATION]\nAccept: */*'],
-    // A line break never falls inside a token prefix: `s` then a line `K-...` is no API key.
-    ['a prefix split by a line break', 'run 0.3 s\nK-long_async rc 1', 'run 0.3 s\nK-long_async rc 1'],
+    // A line break inside a token prefix joins with two of its characters before the break or
+    // three after it: `s` then a line `K-...` is no API key.
+    ['a one-letter word before a line `K-`', 'run 0.3 s\nK-long_async rc 1', 'run 0.3 s\nK-long_async rc 1'],
+    ['a line break after a token\'s first letter', `xx ${github[0]}\n${github.slice(1)} y`, 'xx [redacted:X] y'],
+    ['a line break inside a token prefix', `xx ${github.slice(0, 2)}\r\n${github.slice(2)}\nnext`, 'xx [redacted:X]\nnext'],
   ]) {
     assert.equal(env(env.strip(input)), expected.replaceAll('[redacted:X]', '[redacted:FIXTURE_TOKEN]'), name);
     assert.equal(plain(plain.strip(input)), expected.replaceAll('[redacted:X]', '[redacted:GITHUB_TOKEN]'), name);
   }
   // A fixed-length shape keeps its word boundary when it is joined back, with a line after it too.
+  assert.equal(plain(plain.strip(`token is\n${aws[0]}\n${aws.slice(1)}\nnext`)), 'token is\n[redacted:AWS_ACCESS_KEY_ID]\nnext');
+  // A token whose prefix a line break splits is not put back over another secret: its joined text
+  // would cut an environment value an escape splits, or a token the cleaned text shows.
+  const overlap = createRedactor([['MY_SECRET', 'Wx2Zq9Xw8Vu7Ts6']]);
+  assert.equal(overlap(overlap.strip(`xx g\n${github.slice(1)}Zq9\x1b=Xw8Vu7Ts6 y`)), `xx g\n${github.slice(1, -3)}[redacted:MY_SECRET] y`);
+  assert.equal(plain(plain.strip('id=xox\nb-l2SorrmC\n0FhbP-gho_3uN9vAEJTHvInLGgsXGIqgB5 y')), 'id=xox\nb-l2SorrmC\n0FhbP-[redacted:GITHUB_TOKEN] y');
+  // Nor over a token or header a view recovers after an escape takes its first character.
+  for (const [input, secret] of [
+    [`x g\n${github.slice(1, 26)}\x1bsk-proj-abcdefghijklmnop ok`, 'abcdefghijklmnop'],
+    [`x g\n${github.slice(1, 26)}\x1bxoxb-1234567890-abcdef ok`, '1234567890-abcdef'],
+    [`log g\n${github.slice(1, 26)}\x1bAuthorization: Bearer s3cr3tvalue123 ok`, 's3cr3tvalue123'],
+    ['AS\nIAPACIFIC\x1bAUTHORIZATION: Bearer test-value', 'test-value'],
+  ]) assert.ok(!plain(plain.strip(input)).includes(secret), JSON.stringify(input));
+  // Nor over a token the redactor finds once the environment value glued before it is redacted.
+  const glued = createRedactor([['MY_SECRET', 'AGVCLyB0UqFWaWBjHoW2KwhAm1']]);
+  assert.equal(glued(glued.strip('x AGVCLyB0UqFWaWBjHoW2KwhAm1ghs_QEXOi2e7ePqMbY\x1bAx0JI5\x1bghs\n_Dgm6eT6p3sOC76q8NN6NDZi2pLzL4XLEvA27RHpV\n')), 'x [redacted:MY_SECRET][redacted:GITHUB_TOKEN]\n_Dgm6eT6p3sOC76q8NN6NDZi2pLzL4XLEvA27RHpV\n');
+  // The same with the value split by a line break or an escape, which the cleaned text does not show whole.
+  for (const split of ['\n', '\x1b(']) {
+    assert.equal(glued(glued.strip(`x AGVCLyB0Uq${split}FWaWBjHoW2KwhAm1ghs_QEXOi2e7ePqMbY\x1bAx0JI5\x1bghs\n_Dgm6eT6p3sOC76q8NN6NDZi2pLzL4XLEvA27RHpV\n`)), 'x [redacted:MY_SECRET] [redacted:GITHUB_TOKEN]\n_Dgm6eT6p3sOC76q8NN6NDZi2pLzL4XLEvA27RHpV\n', JSON.stringify(split));
+  }
+  // Two secrets put back next to each other keep one space between them.
+  assert.equal(plain(plain.strip(`x g\n${github.slice(1, 26)}\x1bsk-proj-abcdefghijklmnop ok`)), 'x [redacted:GITHUB_TOKEN] [redacted:API_KEY] ok');
+  // Split tokens next to each other go back apart, each from the view it was found in, so a
+  // fixed-length shape does not take the next one's first character.
+  assert.equal(plain(plain.strip('\n\nAK\nIA658PUUFDAL0P\n\x1b[31mR4\x1bXO\nAK\x1b[m\nIAKDXEI\rU3ZNV9O\x1bI3EQ=x')), '\n\n[redacted:AWS_ACCESS_KEY_ID] [redacted:AWS_ACCESS_KEY_ID]=x');
+  // Two line breaks inside a prefix, or a blank line, join nothing.
+  for (const input of [`x g\nh\np_${github.slice(4)}`, `x g\n\nhp_${github.slice(4)}`, 'run s\nk-means_clustering']) assert.equal(plain(plain.strip(input)), input);
   assert.equal(plain(plain.strip(`k=${aws.slice(0, 9)}\n${aws.slice(9)}\n`)), 'k=[redacted:AWS_ACCESS_KEY_ID]\n');
   assert.equal(plain(plain.strip(`id=${aws.slice(0, 9)}\n${aws.slice(9)}\nnext line`)), 'id=[redacted:AWS_ACCESS_KEY_ID]\nnext line');
   // An environment value is redacted however escapes and line breaks split it: here a stray ESC
@@ -641,6 +671,7 @@ test('a binary artifact is redacted at its exact bytes, or missed when a secret 
     ['an environment value split by a stray and a real escape', bytes(nul, `${value.slice(0, 1)}\x1bM${value.slice(1, 5)}\x1b(${value.slice(5)}`), /inside an environment value/],
     ['an AWS key split across lines before a word line', bytes(nul, `id=${aws.slice(0, 9)}\n${aws.slice(9)}\nnext line`), /line breaks removed/],
     ['a word line before a token split across lines', bytes(nul, `token is\n${github.slice(0, 14)}\n${github.slice(14)} ok`), /line breaks removed/],
+    ['a line break inside a token prefix', bytes(nul, `xx ${github[0]}\n${github.slice(1)} y`), /line breaks removed/],
     ['ESC [ takes a split token\'s first character', bytes(nul, `x \x1b[${github.slice(0, 8)}\x1b[1m${github.slice(8)}`), /gently/],
   ]) assert.match(redact.bytes(input).missed || '', view, name);
 });
@@ -711,6 +742,30 @@ test('dense overlapping environment values in a binary artifact merge as they ar
   } finally {
     Object.assign(globalThis, saved);
   }
+  assert.deepEqual(big, []);
+});
+
+test('a binary artifact is read across lines a window at a time', () => {
+  const { createRedactor } = require('../lib/gates/common');
+  const redact = createRedactor([]);
+  // A copy without line breaks and a map of every line peaked at 1.4 GiB for 64 MiB of short lines
+  // after a token prefix; a window holds a few thousand of them.
+  const text = Buffer.from(`\x00sk-ab\n${'cd\n'.repeat(1 << 19)}`, 'latin1');
+  const big = [];
+  const Saved = Int32Array;
+  globalThis.Int32Array = class extends Saved {
+    constructor(...args) {
+      super(...args);
+      if (!(args[0] instanceof ArrayBuffer) && this.length >= text.length / 8) big.push(this.length);
+    }
+  };
+  let out;
+  try {
+    out = redact.bytes(text);
+  } finally {
+    globalThis.Int32Array = Saved;
+  }
+  assert.match(out.missed || '', /line breaks removed/);
   assert.deepEqual(big, []);
 });
 
