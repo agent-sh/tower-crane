@@ -59,6 +59,18 @@ if (env.HOOK_HIDDEN_PIDS) {
   };
 }
 
+// HOOK_ENVIRON_READS=FILE: the CLI appends "READER PID" to FILE for each
+// /proc/PID/environ it reads, so a test can count its passes over /proc.
+if (env.HOOK_ENVIRON_READS && path.basename(process.argv[1] || '') === 'tower-crane.js') {
+  const read = fs.readFileSync;
+  const append = fs.appendFileSync;
+  fs.readFileSync = function countedEnviron(file, ...args) {
+    const pid = typeof file === 'string' && /^\/proc\/(\d+)\/environ$/.exec(file);
+    if (pid) append.call(fs, env.HOOK_ENVIRON_READS, `${process.pid} ${pid[1]}\n`);
+    return read.call(this, file, ...args);
+  };
+}
+
 // HOOK_KEEP_SPAWN_DIRS=1: spawn's job and receipt files stay in the cache, as
 // they do when the dispatching CLI is killed before it removes them.
 if (env.HOOK_KEEP_SPAWN_DIRS) {
