@@ -127,6 +127,25 @@ fs.appendFileSync(process.env.CONTAINMENT_PRELOAD_LOG, JSON.stringify({
   }
 });
 
+test('fast scoped commands preserve stdout-only diagnostics and registration', async () => {
+  for (let n = 0; n < 3; n++) {
+    const result = await G.treeExec(process.execPath, ['-e', 'console.log("useful diagnostic"); process.exitCode = 1'], {
+      resources: { tasks_max: 64, memory_max_bytes: memory },
+    });
+    assert.equal(result.status, 1, result.stderr);
+    assert.equal(result.resource_reason, undefined);
+    assert.equal(result.stderr, '');
+    assert.match(G.errText(result), /useful diagnostic/);
+  }
+});
+
+test('lightweight gate helpers retain cancellation without a separate resource scope', async () => {
+  const result = await G.exec({ signal: new AbortController().signal, project: { resources: { tasks_max: 64, memory_max_bytes: memory } } },
+    process.execPath, ['-e', 'console.log("auxiliary")'], {});
+  assert.equal(result.ok, true, result.stderr);
+  assert.equal(result.containment, undefined);
+});
+
 test('finite nested fork storm fails the gate command and leaves another attempt running', async (t) => {
   const sibling = C.spawn(process.execPath, ['-e', 'console.log("untouched"); setTimeout(() => {}, 3000)'], { // wait-allow: finite isolation probe lifetime
     resources: { tasks_max: 64, memory_max_bytes: memory }, stdio: ['ignore', 'pipe', 'pipe'],
