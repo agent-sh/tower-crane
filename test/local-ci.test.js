@@ -677,6 +677,41 @@ test('a binary artifact is scanned without a map per byte, and as UTF-16 only wh
   const wide = Buffer.from(value, 'utf16le');
   assert.equal(wide.includes(0), false);
   assert.match(createRedactor([['FIXTURE_PASSWORD', value]]).bytes(Buffer.concat([Buffer.from([0xff]), wide])).missed || '', /as UTF-16LE from its second byte/);
+  // An empty buffer has no unit from its second byte; that view threw on a negative length.
+  assert.deepEqual(createRedactor([['FIXTURE_PASSWORD', value]]).bytes(Buffer.alloc(0)), { body: Buffer.alloc(0) });
+});
+
+test('dense overlapping environment values in a binary artifact merge as they are found', () => {
+  const { createRedactor } = require('../lib/gates/common');
+  // Both values occur at every other byte of a run of `a1`. 64 MiB of it made 67M spans, one per
+  // occurrence, and ran out of memory at 7 GB. Arrays over a shared buffer allocate nothing.
+  const redact = createRedactor([['SECRET_A', 'a1'.repeat(10)], ['SECRET_B', 'a1'.repeat(11)]]);
+  const run = 'a1'.repeat(1 << 19);
+  const big = [];
+  const saved = { Int32Array, Uint32Array };
+  for (const [name, Base] of Object.entries(saved)) {
+    globalThis[name] = class extends Base {
+      constructor(...args) {
+        super(...args);
+        if (!(args[0] instanceof ArrayBuffer) && this.length >= run.length / 8) big.push(`${name}(${this.length})`);
+      }
+    };
+  }
+  try {
+    // The charset escape keeps its final byte in the gentle views, which then run too.
+    for (const [input, expected] of [
+      [`\x00${run}`, '\x00[redacted:SECRET_B]'],
+      [`\x00\x1b(B${run}`, '\x00\x1b(B[redacted:SECRET_B]'],
+      [`\x00${run} \x1b(B ${run}\n`, '\x00[redacted:SECRET_B] \x1b(B [redacted:SECRET_B]\n'],
+    ]) {
+      const out = redact.bytes(Buffer.from(input, 'latin1'));
+      assert.equal(out.missed, undefined);
+      assert.equal(out.body.toString('latin1'), expected);
+    }
+  } finally {
+    Object.assign(globalThis, saved);
+  }
+  assert.deepEqual(big, []);
 });
 
 test('restoring redaction markers is linear in their count', () => {
