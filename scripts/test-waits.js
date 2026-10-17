@@ -569,6 +569,21 @@ function waitFindings(text) {
       report(lineOf(loop.start), 'an iteration count bounds a sleep loop');
     }
   }
+  // The same in a shell script a test writes, where a "\n" escape may run
+  // into the keyword: a while or until loop that compares a variable its own
+  // body counts, or a for loop over a fixed list of numbers, around a sleep.
+  // A loop that compares a value it reads, such as a line count, polls.
+  const shellStart = String.raw`(?:\b|(?<=\\n))`;
+  const shellLoop = new RegExp(String.raw`${shellStart}(while|until)\b([^\n]*?)\bdo\b([^\n]*?)(?:\bdone\b|$)`, 'gm');
+  for (const match of text.matchAll(shellLoop)) {
+    if (!/\bsleep\s+[\d.]/.test(match[3])) continue;
+    const names = [...match[2].matchAll(/\$\{?(\w+)\}?"?\s+-(?:lt|le|gt|ge)\b|-(?:lt|le|gt|ge)\s+"?\$\{?(\w+)|\(\(\s*(\w+)\s*[<>]/g)]
+      .map((m) => m[1] || m[2] || m[3]);
+    const counts = (name) => new RegExp(String.raw`\b${name}=(?:\$\(\(|\$\(expr\b|\`expr\b)|\(\(\s*(?:\+\+|--)?\s*${name}\s*(?:\+\+|--|[-+]=)|\(\(\s*(?:\+\+|--)\s*${name}\b|\blet\s+["']?${name}\b`).test(match[3]);
+    if (names.some(counts)) report(lineOf(match.index), 'an iteration count bounds a sleep loop');
+  }
+  const shellFor = new RegExp(String.raw`${shellStart}for\s+\w+\s+in\s+(?:\$\(seq\b|\{\d+\.\.\d+\}|\d+(?:\s+\d+)+\s*;)[^\n]*?\bdo\b[^\n]*?\bsleep\s+[\d.]`, 'g');
+  for (const match of text.matchAll(shellFor)) report(lineOf(match.index), 'an iteration count bounds a sleep loop');
   const promisePositions = new Set();
   for (const timer of promiseTimers) {
     const escaped = timer.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
