@@ -10,7 +10,7 @@ const net = require('node:net');
 const cp = require('node:child_process');
 const { once } = require('node:events');
 const { pathToFileURL } = require('node:url');
-const { cachedFixture, pinRung, real, BIN, ROOT, HOOKS, PTY_AVAILABLE, makeTaskRepo } = require('./helpers');
+const { cachedFixture, pinRung, pluginRoot, real, BIN, ROOT, HOOKS, PTY_AVAILABLE, makeTaskRepo } = require('./helpers');
 const stack = require('./stack-fixture');
 const A = require('../lib/agents');
 const S = require('../lib/state');
@@ -201,6 +201,7 @@ test('design tasks with an unconfigured kit still dispatch on supported harnesse
 });
 
 function writeSkill(plugin, name, body) {
+  pluginRoot(plugin);
   const file = path.join(plugin, 'skills', name, 'SKILL.md');
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, `---\nname: ${name}\ndescription: fixture frontmatter\n---\n${body}\n`);
@@ -261,7 +262,7 @@ test('spawn --dry-run builds each harness command', (t) => {
     [['--harness', 'pi', '--model', 'provider/fixture-model', '--provider', 'openai', '--effort', 'xhigh', '--args', '["--no-session"]'], (p, s) => ['pi', '-p', p, '--mode', 'json', '--model', 'provider/fixture-model', '--provider', 'openai', '--thinking', 'xhigh', ...piOwn(s), '--no-session']],
   ];
   const empty = path.join(h.base, 'no-plugin');
-  fs.mkdirSync(empty);
+  pluginRoot(empty);
   for (const [flags, expected] of cases) {
     setRung(h, 'small', flags);
     const out = dry(h, 'small', { TOWER_CRANE_PLUGIN_ROOT: empty });
@@ -348,7 +349,7 @@ test('spawn embeds the role skill in the system context for isolated reviewers a
 
 test('spawn warns when a role SKILL.md is missing', (t) => {
   const h = setup(t);
-  const plugin = path.join(h.base, 'incomplete-plugin');
+  const plugin = pluginRoot(path.join(h.base, 'incomplete-plugin'));
   fs.mkdirSync(path.join(plugin, 'skills', 'tower-crane-work'), { recursive: true });
   setRung(h, 'medium', ['--harness', 'opencode', '--model', 'a/b']);
 
@@ -590,10 +591,10 @@ test('pi rungs load the tower-crane skill for workers and reviewers when it is i
   assert.ok(!reviewer.find((arg) => arg.includes('## Task')).includes('PI_REVIEW_SKILL_MUST_NOT_BE_EMBEDDED'));
   assert.ok(!dry(h, 'small', env).argv.includes('--skill'), 'other rungs get no skill');
   const missing = path.join(h.base, 'empty-plugin');
-  fs.mkdirSync(missing);
+  pluginRoot(missing);
   assert.ok(!dry(h, 'medium', { TOWER_CRANE_PLUGIN_ROOT: missing }).argv.includes('--skill'), 'no skill when it is not installed');
 
-  const incomplete = path.join(h.base, 'incomplete-plugin');
+  const incomplete = pluginRoot(path.join(h.base, 'incomplete-plugin'));
   fs.mkdirSync(path.join(incomplete, 'skills', 'tower-crane-work'), { recursive: true });
   const warning = h.run(['spawn', '--role', 'medium', '--task', 'T1', '--dry-run', '--json'], {
     env: { TOWER_CRANE_PLUGIN_ROOT: incomplete },

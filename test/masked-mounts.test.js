@@ -18,6 +18,7 @@ const { ROOT, TMP_ROOT } = require('./helpers');
 const { FOREGROUND_MAINTENANCE } = require('./repo-seed');
 const Placeholders = require('../lib/claude-sandbox-placeholders');
 const { readPublished } = require('./atomic-file');
+const { waitUntil, childClosed } = require('./signals');
 
 const SHIM = path.join(ROOT, 'lib', 'shim.js');
 const BWRAP = process.platform === 'linux'
@@ -254,4 +255,36 @@ test('without the masked move, plain git stops at the mounts the table uses', { 
       assert.ok(r.status !== 0 || /^error: /m.test(r.stderr), `${name}, ${state}, ${operation}: plain git passed the mount`);
     }
   }
+});
+
+// Unlinking a mount point on the host detaches the bind in the sandbox's own
+// mount namespace, and the sandboxed command can then write the name. A
+// reviewer or small spawn sweeps the worktree while the task's worker may
+// still run commands there.
+test('the spawn sweep keeps a placeholder a live sandbox binds over, and takes it once that sandbox exits', { skip }, async () => {
+  const dir = fs.mkdtempSync(path.join(root, 'live-bind-'));
+  const wt = path.join(dir, 'wt');
+  fs.mkdirSync(wt);
+  const env = baseEnv();
+  git(['init', '-q', '-b', 'main'], wt, env);
+  const file = path.join(wt, '.bashrc');
+  const ready = path.join(dir, 'ready');
+  const go = path.join(dir, 'go');
+  const script = 'touch "$1"; while [ ! -e "$2" ]; do sleep 0.02; done; if (echo planted > .bashrc) 2>/dev/null; then echo wrote; else echo refused; fi';
+  const box = cp.spawn('bwrap', ['--dev-bind', '/', '/', '--ro-bind', '/dev/null', file, '--chdir', wt, '--', 'sh', '-c', script, 'sh', ready, go], { stdio: ['ignore', 'pipe', 'inherit'] });
+  let out = '';
+  box.stdout.on('data', (chunk) => { out += chunk; });
+  try {
+    await waitUntil(() => fs.existsSync(ready), { paths: [dir], alive: box, what: 'the sandbox has its bind' });
+    const placeholder = fs.lstatSync(file);
+    assert.equal(placeholder.size, 0);
+    assert.equal(placeholder.mode & 0o222, 0, 'bwrap left an empty read-only placeholder');
+    assert.deepEqual(Placeholders.sweep(wt, env).removed, [], 'a bound placeholder stays');
+  } finally {
+    fs.writeFileSync(go, '');
+  }
+  assert.equal((await childClosed(box)).code, 0);
+  assert.equal(out.trim(), 'refused', 'the sandbox still cannot write the name');
+  assert.equal(fs.readFileSync(file, 'utf8'), '');
+  assert.deepEqual(Placeholders.sweep(wt, env).removed, ['.bashrc'], 'with the sandbox gone the placeholder is stale');
 });
