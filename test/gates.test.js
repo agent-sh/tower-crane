@@ -325,9 +325,10 @@ test('failure ' + process.env.T83_PROCESS_TOKEN, () => {
   assert.equal(result.code, 1, result.stderr + result.stdout);
 
   const evidence = h.readState('tasks.json').tasks[0].evidence.at(-1);
-  // Each stream is redacted whole, so the stderr line between the halves cannot keep them apart.
+  // Each stream's own text is read for secrets too, so the stderr line between the halves leaves
+  // both redacted.
   assert.match(evidence.test_failure.output_tail, /^between the halves$/m);
-  assert.match(evidence.test_failure.output_tail.replace(/^between the halves\n/m, ''), /^split \[redacted:T83_PROCESS_TOKEN\] tail$/m);
+  assert.match(evidence.test_failure.output_tail.replace(/^between the halves\n/m, ''), /^split \[redacted:T83_PROCESS_TOKEN\](?:\n\[redacted:T83_PROCESS_TOKEN\])? tail$/m);
   assert.ok(evidence.test_failure.names.some((name) => name.includes('[redacted:T83_PROCESS_TOKEN]')));
   assert.ok(evidence.test_failure.output_tail.includes('[redacted:T83_PROCESS_TOKEN]'));
   assert.ok(evidence.summary.includes('[redacted:T83_PROCESS_TOKEN]'));

@@ -251,6 +251,36 @@ test('a host-only failure on the base keeps its opt-in and command for retry cla
   }
 });
 
+test('a host-only failure redacts a token its stdout wrapped around a stderr line', async () => {
+  const token = `ghp_${'c3'.repeat(18)}`;
+  // In process, so the file's own stdout and stderr reach the gate as two streams; the pauses let
+  // the gate read each write on its own.
+  const sha = task({
+    'test/host-split.test.js': `const pause = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); // wait-allow: the gate sends the fixture no signal when it has read a write
+console.log('split ' + process.env.TC_SPLIT_TOKEN.slice(0, 10));
+pause(100);
+console.error('between the halves');
+pause(100);
+console.log(process.env.TC_SPLIT_TOKEN.slice(10) + ' tail');
+require('node:test')('host split failure', () => require('node:assert/strict').fail('host failure'));
+`,
+  });
+  const ordinary = `${NODE} --test test/mul.test.js`;
+  const r = await gate.run(ctx(sha, {
+    args: { cmd: ordinary },
+    project: {
+      tests: { mode: 'run-only', host_only: ['test/host-split.test.js'], host_env: { TC_SPLIT_TOKEN: token } },
+      gates: { tests_cmd: ordinary, tests_proof_cmd: `${NODE} --test --test-isolation=none {tests}` },
+    },
+  }));
+  assert.equal(r.ok, false);
+  assert.deepEqual(r.test_failure.names, ['host split failure']);
+  const tail = r.test_failure.output_tail;
+  assert.ok(!/(?:c3){4}/.test(tail), tail);
+  assert.match(tail.replace(/^between the halves\n/m, ''), /^split \[redacted:TC_SPLIT_TOKEN\](?:\n\[redacted:TC_SPLIT_TOKEN\])? tail$/m);
+  assertCleanedUp();
+});
+
 test('missing host-only command pins report the proof command configuration', async () => {
   const sha = task({ 'test/host-pin.test.js': "require('node:test')('host pin', () => {});\n" });
   const ordinary = `${NODE} --test test/mul.test.js`;

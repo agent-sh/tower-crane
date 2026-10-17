@@ -357,6 +357,15 @@ pause(100);
 console.error('between the halves');
 pause(100);
 console.log(process.env.CI_FIXTURE_TOKEN.slice(10) + ' tail');
+// A token split between the streams, read in the order written: its stdout half and its stderr
+// half sit on adjacent lines of the joined output, where the redactor joins them.
+console.log('cross ' + process.env.CI_FIXTURE_TOKEN.slice(0, 20));
+pause(100);
+console.error(process.env.CI_FIXTURE_TOKEN.slice(20) + ' (stderr)');
+pause(100);
+// Read on its own, stdout's half is a token prefix, and a next stdout line that starts with a
+// token character would be taken as its rest and redacted too.
+console.log('-- after the split');
 for (let i = 0; i < 300; i++) console.log('early line ' + i);
 // stdout: the gate reads stdout and stderr from two sockets and joins them in arrival order, so
 // a stderr line can land hundreds of stdout lines from where it was written.
@@ -432,11 +441,12 @@ process.exitCode = 1;
   assert.equal(log.match(/^stderr token \[redacted:CI_FIXTURE_TOKEN\]$/gm)?.length, 1, log);
   // Lines keep their order only within a stream (docs/state.md), so a stderr line can land
   // between any two stdout lines; runs of stdout lines are checked without them.
-  const stdoutLog = log.split('\n').filter((line) => !/^(?:stderr token |between the halves$)/.test(line)).join('\n');
-  // Each stream is redacted whole, so a stderr line read between a token's halves cannot keep
-  // them apart.
+  const stdoutLog = log.split('\n').filter((line) => !/^(?:stderr token |between the halves$|.* \(stderr\)$)/.test(line)).join('\n');
+  assert.match(log, /^cross \[redacted:CI_FIXTURE_TOKEN\] \(stderr\)$/m);
+  // Each stream's own text is read for secrets too, so a stderr line read between a token's
+  // halves leaves both redacted, each on its own line.
   assert.match(log, /^between the halves$/m);
-  assert.match(stdoutLog, /^split \[redacted:CI_FIXTURE_TOKEN\] tail$/m);
+  assert.match(stdoutLog, /^split \[redacted:CI_FIXTURE_TOKEN\](?:\n\[redacted:CI_FIXTURE_TOKEN\])? tail$/m);
   assert.match(stdoutLog, /^unterminated \nafter the unterminated escape\ntitle set\nDownloading\n\[redacted:GITHUB_TOKEN\]$/m);
   assert.match(stdoutLog, /^stray \[redacted:CI_FIXTURE_TOKEN\]\nosc head \[redacted:CI_FIXTURE_TOKEN\]\nwrapped \[redacted:CI_FIXTURE_TOKEN\] end$/m);
   assert.doesNotMatch(log, /(?:a1){4}/);
