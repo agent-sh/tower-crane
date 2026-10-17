@@ -524,7 +524,113 @@ test('gate output loses terminal escapes, and an unterminated string ends at its
     ['unterminated DCS', '\x1bPx'.repeat(Math.ceil(million / 3)), ''],
     ['CSI without a final byte', ('\x1b[' + '0'.repeat(98)).repeat(million / 100), '0'.repeat(98 * million / 100)],
     ['ESC runs', '\x1b'.repeat(million), ''],
-  ]) assert.equal(stripEscapes(input), expected, name);
+  ]) {
+    if (name === 'CSI without a final byte') assert.equal(stripEscapes(input), expected, name);
+    else assert.match(stripEscapes(input), /^\[unscannable text: .+; content omitted\]$/, name);
+  }
+});
+
+test('text redaction drops the entire input past its size, site or search work budget', () => {
+  const { createRedactor, redactJoined } = require('../lib/gates/common');
+  const { stripEscapes, stripEscapesMapped, stripEscapesViews } = require('../lib/ci-log-text');
+  const redact = createRedactor([['FIXTURE_SECRET', 'a123456789b']]);
+  const notice = /^\[unscannable text: .+; content omitted\]$/;
+  for (const input of [
+    `private ${'\x1b[0m'.repeat(32769)} end`,
+    `private ${'x'.repeat(32 << 20)}`,
+    `private ${'Authorization: value\n'.repeat(32769)} end`,
+    `private ${'\n'.repeat(262145)} end`,
+    // Few sites, but every value start explores hundreds of escape readings that go nowhere.
+    `private ${('a\x1b[' + '1'.repeat(1024) + 'm ').repeat(1024)} end`,
+  ]) {
+    assert.match(redact(redact.strip(input)), notice);
+    assert.match(stripEscapes(input, ['a123456789b']), notice);
+    const mapped = stripEscapesMapped(input, ['a123456789b']);
+    assert.match(mapped.text, notice);
+    assert.match(mapped.unscannable, /over /);
+    assert.deepEqual(mapped.at(0), [0, input.length]);
+    for (const v of stripEscapesViews(input, ['a123456789b'])) assert.match(v.text, notice);
+    assert.match(redactJoined({ output: input, runs: [{ stream: 'out', text: input }, { stream: 'err', text: '' }] }, redact), notice);
+  }
+  assert.match(redact('private ' + 'x'.repeat(32 << 20)), notice);
+  assert.match(redact('[redacted:A] '.repeat(262145)), notice);
+  assert.match(redact(('a123456789b ').repeat(262145)), notice);
+  assert.deepEqual(redact.ranges(('a123456789b ').repeat(262145)),
+    [{ a: 0, b: 12 * 262145, label: 'UNSCANNABLE' }]);
+  const short = createRedactor([['SHORT_SECRET', 'ab']]);
+  assert.match(short.strip('\x07' + 'ab '.repeat(262145)), notice);
+  // Exhausting one call never disables scanning or contaminates the next.
+  assert.equal(redact(redact.strip('a123\x1b[0m456789b after')), '[redacted:FIXTURE_SECRET] after');
+});
+
+test('a text redaction deadline drops content and restores the budget for the next call', () => {
+  const { performance } = require('node:perf_hooks');
+  const { createRedactor } = require('../lib/gates/common');
+  const redact = createRedactor([]);
+  const now = performance.now;
+  let clock = 0;
+  performance.now = () => (clock += 6000);
+  try {
+    assert.match(redact.strip('Authorization: Bearer sekrit end'),
+      /^\[unscannable text: over 5000 ms redaction time; content omitted\]$/);
+  } finally {
+    performance.now = now;
+  }
+  assert.equal(redact(redact.strip('Authorization: Bearer sekrit end')),
+    'Authorization: Bearer [redacted:AUTHORIZATION] end');
+});
+
+test('mixed 16 MiB text fails closed below 1 GiB in a fresh process', () => {
+  const cp = require('node:child_process');
+  const script = `
+const { createRedactor, redactJoined } = require(${JSON.stringify(require.resolve('../lib/gates/common'))});
+const value = 'perfSecret123456789abcdef';
+const unit = 'normal line lorem125 ok\\nx\\x1b[0mAuthorization: Bearer sekrit end\\n'
+  + [...value].join('\\x1b[0m') + '\\n';
+const text = unit.repeat(Math.ceil((16 << 20) / unit.length)).slice(0, 16 << 20);
+const runs = [{ stream: 'out', text: text.slice(0, text.length / 2) },
+  { stream: 'err', text: text.slice(text.length / 2) }];
+const output = redactJoined({ output: text, runs }, createRedactor([['PERF_SECRET', value]]));
+console.log(JSON.stringify({ output, peakKiB: process.resourceUsage().maxRSS }));
+`;
+  const result = JSON.parse(cp.execFileSync(process.execPath, ['-e', script], { encoding: 'utf8' }));
+  assert.match(result.output, /^\[unscannable text: .+; content omitted\]$/);
+  assert.ok(result.peakKiB < 1048576, `${result.peakKiB} KiB peak`);
+});
+
+test('captured GitHub CI logs keep the redaction output from before the text budget', () => {
+  const { createRedactor, redactJoined } = require('../lib/gates/common');
+  // Captured logs pin the cleaned text, so the budget cannot silently drop normal output.
+  const cases = [
+    ['gate-scratch-etimedout.log', 'b674f8053b2eb0cd567805836a984d8a719224ae00a94fb5f92e84db3c760983'],
+    ['gate-scratch-leak.log', '0334cf4e39e42c7c8c9d4f637d71de2d6228394c3d37153e7c6daf6cd696f3fb'],
+    ['model-swap-timeout.log', '4ae01c709d2eab64279c403a90369d284f5dd8f0f5d2c5880fbe802ed49b42b2'],
+  ];
+  for (const [file, expected] of cases) {
+    const output = fs.readFileSync(path.join(__dirname, 'fixtures', 'proof-logs', file), 'utf8');
+    const clean = redactJoined({ output }, createRedactor([]));
+    assert.equal(crypto.createHash('sha256').update(clean).digest('hex'), expected, file);
+  }
+});
+
+test('local CI saves only a notice for unscannable logs and text artifacts', (t) => {
+  const h = fixture(t, `
+const fs = require('node:fs');
+const text = ('x\\x1b[0mAuthorization: Bearer sekrit end\\n').repeat(32769);
+fs.writeFileSync('dense.txt', text);
+process.stdout.write(text);
+process.exitCode = 1;
+`);
+  h.ok(['project', 'set', '--ci-local', JSON.stringify({ command: h.command, timeout: 30, artifacts: ['dense.txt'] })]);
+  const result = h.run(['check', 'ci', 'T1']);
+  assert.equal(result.code, 1, result.stdout + result.stderr);
+  const kept = h.readState('tasks.json').tasks[0].evidence.at(-1).local_ci;
+  assert.ok(kept, result.stdout + result.stderr);
+  const notice = /^\[unscannable text: .+; content omitted\]$/;
+  assert.match(fs.readFileSync(path.join(h.state, kept.log), 'utf8'), notice);
+  assert.match(kept.output_tail, notice);
+  assert.equal(kept.artifacts.length, 1);
+  assert.match(fs.readFileSync(path.join(h.state, kept.artifacts[0].path), 'utf8'), notice);
 });
 
 test('a removed control keeps the word boundary token shapes are found by', () => {
