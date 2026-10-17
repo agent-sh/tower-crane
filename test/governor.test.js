@@ -156,6 +156,24 @@ test('every project on the host draws on one budget', (t) => {
   assert.equal(G.view({ stateDir: b.state, env: b.env }, b.readState('project.json')).budget.units, 0, 'released places free the budget');
 });
 
+test('a release that meets a busy registry lands once the lock is free, so no place outlives its unit', async (t) => {
+  const S = require('../lib/state');
+  const h = makeRepo(t);
+  h.init();
+  const env = h.env;
+  const unit = G.admit({ stateDir: h.state, env, agent: 'orchestrator' }, { kind: 'tests', task: 'T1', project: h.readState('project.json') });
+  // This process holds the lock, as a stuck writer would, while the release runs.
+  const lock = S.tryMarkedLock(G.registryLock(env), { keepLive: true });
+  assert.ok(lock);
+  try {
+    unit.release();
+    assert.equal(G.read(env).units.length, 1, 'the release could not write');
+  } finally {
+    S.releaseMarkedLock(lock);
+  }
+  await waitOnRepo(h, () => G.read(env).units.length === 0, 'the queued release lands');
+});
+
 // A submitted task whose tests command records that it started, then holds until killed.
 function heldGate(h, submit = true) {
   h.git(['remote', 'remove', 'origin']);
@@ -200,6 +218,27 @@ test('past the stop line a running gate stops without a verdict and says why', {
   const stops = h.json(['status']).governor.stops;
   assert.deepEqual(stops.map((x) => [x.task, x.kind]), [['T1', 'tests']]);
   assert.ok(h.json(['inbox']).items.some((i) => i.kind === 'governor_stopped' && i.task === 'T1' && /95% stop line/.test(i.reason)));
+});
+
+test('a gate that joins a run already going takes no place in the budget', { skip: linuxOnly }, async (t) => {
+  const h = makeRepo(t);
+  heldGate(h);
+  // Room for one tests gate only.
+  writeHost(h.env.TOWER_CRANE_HOST_ROOT, { limit: 10, used: 2 });
+  h.ok(['project', 'set', '--governor', '{"expected_mb":{"tests":4000}}']);
+  let first;
+  const holder = h.runAsync(['check', 'tests', 'T1'], { onSpawn: (c) => { first = c; } });
+  t.after(() => { if (first && first.exitCode === null) killPid(first.pid, 'SIGKILL'); });
+  await waitOnRepo(h, () => fs.existsSync(h.started), 'the first run starts its suite');
+  let stderr = '';
+  const joiner = h.runAsync(['check', 'tests', 'T1'], { onSpawn: (c) => c.stderr.on('data', (d) => { stderr += d; }) });
+  await waitOnRepo(h, () => /joining the tests run/.test(stderr), 'the second run joins the first');
+  assert.equal(G.read(h.env).units.length, 1, 'only the running gate holds a place');
+  fs.writeFileSync(h.release, '');
+  const [a, b] = await Promise.all([holder, joiner]);
+  assert.equal(a.code, 0, a.stderr);
+  assert.equal(b.code, 0, b.stderr);
+  assert.match(b.stdout, /joined the run by/);
 });
 
 test('a wait defers a gate reaction under pressure and runs it once there is room', { skip: linuxOnly }, async (t) => {
