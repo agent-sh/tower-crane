@@ -954,3 +954,17 @@ test('cancelling does not remove a checkout that a symlink moves outside the wor
   assert.equal(kept.task, 'T1');
   assert.equal(kept.detail.reason, 'its real location is not under the worktrees root');
 });
+
+// Only wait passes a signal. Without one nothing can stop the fetch, so base
+// resolution keeps the blocking run and skips treeExec's process-tree scan.
+test('base resolution runs git through treeExec only when a signal can stop it', async (t) => {
+  const h = setup(t);
+  const moved = advance(h, h.upstream, 'moved.txt');
+  h.git(['push', 'origin', 'main'], h.upstream);
+  const W = require('../lib/worktree');
+  const tree = t.mock.method(require('../lib/gates/common'), 'treeExec');
+  assert.equal(await W.resolveBaseAsync({ root: h.repo }, 'main'), moved);
+  assert.equal(tree.mock.callCount(), 0, 'outside wait the fetch runs blocking');
+  assert.equal(await W.resolveBaseAsync({ root: h.repo }, 'main', new AbortController().signal), moved);
+  assert.ok(tree.mock.callCount() > 0, 'inside wait the fetch can be stopped');
+});
