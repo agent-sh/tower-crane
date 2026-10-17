@@ -144,6 +144,8 @@ What is left is mostly the CLI's own cost: every call starts Node and loads the 
 
 The npm command opts into anchor validation with `check-shared-files.js --mutants`. Ordinary shared-check fixtures run without that flag, and mutation full-suite fallback excludes `test/mutants.test.js`: checking pristine anchors after planting a bug would score a survivor as caught without testing its behavior.
 
+Every baseline, mutant and fallback run has a process watchdog. On Linux with a working user systemd manager, it also runs in a separate `systemd-run --user --scope --quiet -p TasksMax=512 -p MemoryMax=4G` scope. The watchdog tracks process groups and detached descendants, stops the run at the process bound, and removes remaining children when the runner exits. A cap reached under a planted bug counts as caught with the cap reason; a capped baseline aborts the catalog. `--process-limit N` lowers the process bound for containment probes (2 to 512). An unavailable process inspector aborts instead of running tests without a watchdog.
+
 | area | bugs | examples |
 | --- | ---: | --- |
 | gates | 8 | tests pass without the change, a deleted test counts, a cancelled CI run is green, a HIGH finding passes clean, loopback is a public source, evidence counts without its audit event, the submitter's own review counts, evidence from an old revision counts |
