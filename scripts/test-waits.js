@@ -638,57 +638,247 @@ function waitFindings(text) {
 // 0. Only a process signalling itself may call process.kill directly; every
 // other pid goes through killPid or killGroup in test/signals.js, which
 // refuse anything that is not a process id. An alias of process.kill
-// (`const kill = process.kill`, `process['kill']`, `process.kill.call`)
-// reaches the same call with a pid this check cannot see, so it counts too,
-// except in the fixtures that interpose on process.kill (KILL_INTERPOSERS).
-// Generated fixture scripts in strings and templates are checked too.
-const KILL_CALL = /\bprocess\.kill\s*\(/g;
+// (`const kill = process.kill`, `process['kill']`, `process.kill.call`) or of
+// process itself reaches the same call with a pid this check cannot see, so it
+// counts too. Generated fixture scripts in strings and templates are checked too.
+//
+// `child.process` is another object's member, not this process, while
+// `global.process`, `globalThis?.process` and a spread `...process` are. A `\n`
+// escape in a generated script ends a line.
+const GLOBAL = String.raw`(?:global(?:This)?\s*\??\.\s*)?`;
+const PROCESS = String.raw`(?<!(?<!\\)[\w$]|(?<!(?:\bglobal(?:This)?\s*\??|\.\.))\.\s*)process`;
+// Optional chaining reaches the same call: `process?.kill(0)`, `process.kill?.(0)`.
+const KILL_CALL = new RegExp(String.raw`${PROCESS}\s*\??\.\s*kill\s*(?:\?\.\s*)?\(`, 'g');
+// A computed member that spells out 'kill', or whose key the check cannot read.
+const COMPUTED = String.raw`\s*(?:\?\.\s*)?\[\s*(?:(?<quote>['"\`])kill\k<quote>\s*\]|(?!['"]))`;
 const KILL_ALIASES = [
-  // A value assigned, passed or returned, as opposed to a call, the
-  // interposer's own assignment or prose that names process.kill.
-  /(?<=(?:[=(,:?[]|=>|&&|\|\||\breturn)\s*)process\s*\??\.\s*kill\b(?!\s*(?:\(|\?\.\s*\(|\.|=(?!=)))/g,
-  /\bprocess\s*\??\.\s*kill\s*\.\s*(?:call|apply|bind)\b/g,
-  /\bprocess\s*(?:\?\.\s*)?\[\s*(['"`])kill\1\s*\]/g,
-  /\{[^{}]*\bkill\b[^{}]*\}\s*=\s*process\b(?!\s*[.[?])/g,
+  // A value assigned, passed or returned, as opposed to a call, a member, a
+  // comparison, the interposer's own assignment or prose that names it.
+  new RegExp(String.raw`(?<=(?:(?<![=!<>])=|[(,:?[]|=>|&&|\|\||\breturn)\s*)${PROCESS}\s*\??\.\s*kill\b(?!\s*(?:\(|\?\.|\.|=|!=))`, 'g'),
+  new RegExp(String.raw`${PROCESS}\s*\??\.\s*kill\s*\??\.\s*(?:call|apply|bind)\b`, 'g'),
+  new RegExp(PROCESS + COMPUTED, 'g'),
+  new RegExp(String.raw`\{[^{}]*\bkill\b[^{}]*\}\s*=\s*${GLOBAL}process\b(?!\s*[.[?])`, 'g'),
 ];
+// `const p = process;` makes p.kill the same call.
+const PROCESS_ALIAS = new RegExp(String.raw`\b(?:const|let|var)\s+([$A-Z_a-z][$\w]*)\s*=\s*${GLOBAL}process\s*(?=[;,)\n]|$)`, 'g');
+// An argument of a comparing assertion or Object.is is compared, not called.
+const COMPARED = /(?:\bassert(?:\s*\.\s*strict)?\s*\.\s*(?:equal|strictEqual|notEqual|notStrictEqual|deepEqual|deepStrictEqual|notDeepEqual|notDeepStrictEqual)|\bObject\s*\.\s*is)\s*\(\s*(?:[^(),;]*,\s*)?$/;
+// Inside a string, a sentence has a word before the name; generated code has
+// an operator, a delimiter or a keyword there.
+const PROSE_WORD = /(?:^|[^$\w.\\])([$A-Z_a-z][$\w]*)\s*$/;
+const KEYWORDS = new Set(['async', 'await', 'case', 'catch', 'class', 'const', 'default', 'delete', 'do', 'else', 'export',
+  'extends', 'finally', 'for', 'function', 'if', 'import', 'in', 'instanceof', 'let', 'new', 'of', 'return', 'switch',
+  'throw', 'try', 'typeof', 'var', 'void', 'while', 'with', 'yield']);
+// A fixture that fakes a pid probe holds the original to forward every other
+// call: `const kill = process.kill;` and, as the next statement, the
+// replacement. Only that line may alias process.kill, and the alias may only
+// forward the replacement's own, unchanged pid and signal from inside it.
+const INTERPOSER = /\b(?:const|let|var)\s+([$A-Z_a-z][$\w]*)\s*=\s*(process\s*\.\s*kill)\s*;\s*process\s*\.\s*kill\s*=\s*function\b[^(]*\(\s*([$A-Z_a-z][$\w]*)\s*,\s*([$A-Z_a-z][$\w]*)\s*\)\s*\{/dg;
 
-function killFindings(text, { aliases = true } = {}) {
+const escaped = (name) => name.replace(/[\\^$.*+?()[\]{}|]/g, '\\$&');
+
+// The index of the bracket that closes the one at `from`, or from any other
+// position, of the first bracket that closes an enclosing one. Literals and
+// comments are tokens, so their braces do not count.
+function closing(text, from, limit = text.length) {
+  const opener = '{(['.includes(text[from]);
+  let depth = 0;
+  for (const token of tokenize(text.slice(0, limit), from)) {
+    if (token.type !== 'punctuation') continue;
+    if ('{(['.includes(token.value)) depth++;
+    else if ('})]'.includes(token.value) && (opener ? --depth === 0 : --depth < 0)) return token.start;
+  }
+  return limit;
+}
+
+// Where an arrow function starting its body at `from` ends: its block, or the
+// expression up to the first delimiter outside brackets.
+function arrowEnd(text, from) {
+  const body = text.slice(from).search(/\S/) + from;
+  if (text[body] === '{') return closing(text, body);
+  let depth = 0;
+  for (const token of tokenize(text, body)) {
+    if (token.type !== 'punctuation') continue;
+    if ('{(['.includes(token.value)) depth++;
+    else if ('})]'.includes(token.value) && --depth < 0) return token.start;
+    else if (depth === 0 && [',', ';'].includes(token.value)) return token.start;
+  }
+  return text.length;
+}
+
+// The `${...}` span of a template that holds a position, as [start, end).
+function interpolation(text, token, position) {
+  let i = token.start + 1;
+  while (i < Math.min(position, token.end)) {
+    if (text[i] === '\\') { i += 2; continue; }
+    if (text.startsWith('${', i)) {
+      const end = closing(text, i + 1, token.end);
+      if (position < end) return [i + 2, end];
+      i = end + 1;
+      continue;
+    }
+    i++;
+  }
+  return null;
+}
+
+// The innermost token holding a position. An interpolation is code the test
+// runs, so the search goes on inside it.
+function tokenAt(text, tokens, position) {
+  let token = tokens.find((t) => t.start <= position && position < t.end);
+  while (token?.type === 'template') {
+    const span = interpolation(text, token, position);
+    if (!span) return token;
+    token = tokenize(text.slice(0, span[1]), span[0]).find((t) => t.start <= position && position < t.end);
+  }
+  return token;
+}
+
+// The parameters of a list, split at its top-level commas.
+function parameters(list) {
+  const params = [''];
+  let depth = 0;
+  for (const char of list) {
+    if ('{[('.includes(char)) depth++;
+    else if ('}])'.includes(char)) depth--;
+    if (char === ',' && depth === 0) params.push('');
+    else params[params.length - 1] += char;
+  }
+  return params;
+}
+
+// Ranges where a function parameter or a nested declaration rebinds `name`
+// between `from` and `to`, so a use there is another value. A match inside a
+// comment or a literal (`literal`) rebinds nothing.
+function rebound(text, name, from, to, own, literal = () => false) {
+  const id = escaped(name);
+  // A default value after `=` is a use, and a destructuring key before `:` names no binding.
+  const binds = (list) => parameters(list).some((param) => new RegExp(String.raw`(?<![\w$.])${id}(?![\w$])(?!\s*:)`)
+    .test(param.split(/=(?![=>])/)[0]));
+  const ranges = [];
+  const scope = text.slice(0, to);
+  const code = (m) => !literal(from + m.index);
+  for (const m of [...scope.slice(from).matchAll(/\b(function\b[^(]*|catch\s*|(?<![\w$.])(?!(?:if|for|while|switch|with|catch|function)\b)[$A-Z_a-z][$\w]*\s*)\(([^()]*)\)\s*\{/g)].filter(code)) {
+    if (binds(m[2])) ranges.push([from + m.index, closing(text, from + m.index + m[0].length - 1)]);
+  }
+  for (const m of [...scope.slice(from).matchAll(new RegExp(String.raw`(?:\(([^()]*)\)|(?<![\w$.])(${id}))\s*=>`, 'g'))].filter(code)) {
+    if (m[2] || binds(m[1])) ranges.push([from + m.index, arrowEnd(text, from + m.index + m[0].length)]);
+  }
+  for (const m of [...scope.slice(from).matchAll(new RegExp(String.raw`\b(?:const|let|var)\s+${id}(?![\w$])`, 'g'))].filter(code)) {
+    const at = from + m.index;
+    if (!own.includes(at + m[0].length - name.length)) ranges.push([at, closing(text, at, to)]);
+  }
+  return ranges;
+}
+
+function killFindings(text, { interposer = false } = {}) {
   const findings = [];
   const lines = text.replace(/\r\n/g, '\n').split('\n');
   const tokens = tokenize(text);
   const lineOf = (position) => text.slice(0, position).split('\n').length - 1;
-  // A comment in the code, or a `//` before the call on the same line of a
-  // generated script, holds prose about process.kill, not a call.
-  const commented = (position) => {
-    const index = lineOf(position);
-    if (/^\s*(?:\/\/|\*)/.test(lines[index])) return true;
-    const token = tokens.find((t) => t.start <= position && position < t.end);
+  // A comment in the code, a `//` before the name on the same line of a
+  // generated script, or a quoted sentence holds prose about process.kill.
+  const prose = (position) => {
+    if (/^\s*(?:\/\/|\*)/.test(lines[lineOf(position)])) return true;
+    const token = tokenAt(text, tokens, position);
     if (!token) return false;
     if (token.type === 'comment') return true;
     if (token.type !== 'string' && token.type !== 'template') return false;
     const from = Math.max(token.start + 1, text.lastIndexOf('\n', position - 1) + 1);
     const fragment = text.slice(from, position);
-    return tokenize(fragment).some((t) => t.type === 'comment' && t.end === fragment.length);
+    if (tokenize(fragment).some((t) => t.type === 'comment' && t.end === fragment.length)) return true;
+    const word = PROSE_WORD.exec(fragment);
+    return !!word && !KEYWORDS.has(word[1]);
   };
+  const report = (position, what) => {
+    const index = lineOf(position);
+    findings.push({ line: index + 1, reason: `\`${lines[index].trim().slice(0, 80)}\` ${what}, so the pids it receives are not checked` });
+  };
+  const ownPid = (open, names) => names.includes(normalizedBudget(callArguments(text, open)[0] || ''));
   for (const match of text.matchAll(KILL_CALL)) {
-    if (commented(match.index)) continue;
-    const pid = normalizedBudget(callArguments(text, match.index + match[0].lastIndexOf('('))[0] || '');
-    if (pid !== 'process.pid') findings.push({ line: lineOf(match.index) + 1, reason: `process.kill(${pid}) signals a pid that is not checked` });
+    if (prose(match.index)) continue;
+    const open = match.index + match[0].length - 1;
+    if (!ownPid(open, ['process.pid'])) {
+      const pid = normalizedBudget(callArguments(text, open)[0] || '');
+      findings.push({ line: lineOf(match.index) + 1, reason: `process.kill(${pid}) signals a pid that is not checked` });
+    }
   }
-  if (!aliases) return findings;
+  const interposers = interposer ? [...text.matchAll(INTERPOSER)].map((match) => {
+    const open = match.index + match[0].length - 1;
+    const body = [open, closing(text, open)];
+    const assign = String.raw`(?:[-+*/%&|^]|\*\*|<<|>>>?|&&|\|\||\?\?)?=(?![=>])`;
+    const changed = (param) => {
+      const p = escaped(param);
+      return new RegExp([
+        String.raw`(?<![\w$.])${p}\s*${assign}`, String.raw`(?:\+\+|--)\s*${p}(?![\w$])`, String.raw`(?<![\w$.])${p}\s*(?:\+\+|--)`,
+        String.raw`\b(?:const|let|var)\s+${p}(?![\w$])`, String.raw`\bfor\s*\(\s*${p}\s+(?:of|in)\b`,
+        // A destructuring assignment such as `[pid] = [0]` or `({ pid } = o)`.
+        String.raw`[[{][^;]*?(?<![\w$.])${p}(?![\w$])[^;]*?[\]}]\s*=(?![=>])`,
+      ].join('|')).test(text.slice(body[0], body[1]));
+    };
+    // A sloppy-mode script changes a parameter through `arguments` too.
+    const reassigned = [match[3], match[4]].some(changed)
+      || new RegExp(String.raw`\barguments\s*\[[^\]]*\]\s*${assign}`).test(text.slice(body[0], body[1]));
+    // The alias is the same value in its whole block, above the declaration
+    // too. A generated script holds its own blocks and ends at its closing backtick.
+    const script = tokens.find((t) => t.type === 'template' && t.start < match.index && match.index < t.end);
+    const base = script ? script.start + 1 : 0;
+    const openers = [];
+    for (const token of tokenize(text.slice(0, match.index), base)) {
+      if (token.type !== 'punctuation') continue;
+      if ('{(['.includes(token.value)) openers.push(token.start);
+      else if ('})]'.includes(token.value)) openers.pop();
+    }
+    const literals = (script ? tokenize(text.slice(0, script.end - 1), base) : tokens)
+      .filter((t) => ['comment', 'string', 'template', 'regex'].includes(t.type));
+    return { alias: match[1], declared: match.indices[1][0], original: match.indices[2][0], params: [match[3], match[4]],
+      body, reassigned, literals, scope: [openers.at(-1) ?? base, closing(text, match.index, script ? script.end - 1 : text.length)] };
+  }) : [];
+  const exempt = new Set(interposers.map((i) => i.original));
   for (const pattern of KILL_ALIASES) {
     for (const match of text.matchAll(pattern)) {
-      if (commented(match.index)) continue;
-      const index = lineOf(match.index);
-      findings.push({ line: index + 1, reason: `\`${lines[index].trim().slice(0, 80)}\` aliases process.kill, so the pids it receives are not checked` });
+      if (exempt.has(match.index) || prose(match.index)) continue;
+      const before = text.slice(Math.max(0, match.index - 200), match.index);
+      if (COMPARED.test(before) && /^\s*[,)]/.test(text.slice(match.index + match[0].length))) continue;
+      report(match.index, 'aliases process.kill');
+    }
+  }
+  for (const alias of new Set([...text.matchAll(PROCESS_ALIAS)].map((m) => m[1]).filter((name) => name !== 'process'))) {
+    const id = escaped(alias);
+    for (const use of text.matchAll(new RegExp(String.raw`(?<![\w$.])${id}(?:\s*\??\.\s*kill\b(\s*(?:\?\.\s*)?\()?|${COMPUTED})`, 'g'))) {
+      if (prose(use.index)) continue;
+      if (use[1] && ownPid(use.index + use[0].length - 1, ['process.pid', `${alias}.pid`])) continue;
+      report(use.index, `uses ${alias}, an alias of process, to reach process.kill`);
+    }
+  }
+  // The held original is process.kill under another name: any use in its
+  // scope but the interposer forwarding its own arguments signals a pid
+  // nothing checked.
+  for (const alias of new Set(interposers.map((i) => i.alias))) {
+    const own = interposers.filter((i) => i.alias === alias);
+    const id = escaped(alias);
+    const shadows = own.flatMap((i) => rebound(text, alias, i.scope[0], i.scope[1], own.map((o) => o.declared),
+      (position) => i.literals.some((t) => t.start <= position && position < t.end)));
+    const inside = (ranges, position) => ranges.some(([from, to]) => from <= position && position < to);
+    for (const use of text.matchAll(new RegExp(String.raw`(?<![\w$.'"\`])${id}(?![\w$'"\`])`, 'g'))) {
+      const owners = own.filter((i) => i.scope[0] <= use.index && use.index < i.scope[1]);
+      if (!owners.length || owners.some((i) => i.declared === use.index)) continue;
+      // An object key (`{ kill: x }`) names no binding; a ternary branch or a case label does.
+      if (/[{,]\s*$/.test(text.slice(Math.max(0, use.index - 80), use.index)) && /^\s*:(?!:)/.test(text.slice(use.index + alias.length))) continue;
+      if (inside(shadows, use.index) || prose(use.index)) continue;
+      // An inner function with its own pid or signal forwards another value.
+      const forwards = owners.some((i) => !i.reassigned && i.body[0] < use.index && use.index < i.body[1]
+        && !inside(i.params.flatMap((param) => rebound(text, param, i.body[0] + 1, i.body[1], [])), use.index)
+        && new RegExp(String.raw`^${id}\s*\.\s*call\s*\(\s*(?:this|process)\s*,\s*${escaped(i.params[0])}\s*,\s*${escaped(i.params[1])}\s*\)`).test(text.slice(use.index)));
+      if (!forwards) report(use.index, `uses ${alias}, the held process.kill, other than to forward the interposer's own pid and signal`);
     }
   }
   return findings.sort((a, b) => a.line - b.line);
 }
 
 // These replace process.kill to fake what a pid probe observes or when a signal
-// lands, and forward every other call to the original, which they must hold as
-// an alias.
+// lands, and forward every other call to the original. Only their interposer
+// declarations may alias it; see INTERPOSER.
 const KILL_INTERPOSERS = new Set(['test/fixtures/hooks.js', 'test/fixtures/monitor-clock.js', 'test/fixtures/slow-group-kill.js', 'test/spawn-resume.test.js']);
 
 function checkTestWaits(root) {
@@ -704,7 +894,7 @@ function checkTestWaits(root) {
     }
     // The checked helpers themselves are the one place a bare call belongs.
     if (file === 'test/signals.js') continue;
-    for (const finding of killFindings(text, { aliases: !KILL_INTERPOSERS.has(file) })) {
+    for (const finding of killFindings(text, { interposer: KILL_INTERPOSERS.has(file) })) {
       findings.push(`${file}:${finding.line} ${finding.reason}; use killPid or killGroup from test/signals.js`);
     }
   }

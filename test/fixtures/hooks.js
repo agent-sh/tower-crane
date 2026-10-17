@@ -42,8 +42,8 @@ if (env.HOOK_DEAD_PID) {
 // A sandbox may share state files while hiding sibling workers and monitors.
 if (env.HOOK_HIDDEN_PIDS) {
   const hidden = new Set(JSON.parse(env.HOOK_HIDDEN_PIDS));
-  const kill = process.kill;
   const read = fs.readFileSync;
+  const kill = process.kill;
   process.kill = function hiddenPid(pid, signal) {
     if (hidden.has(pid) && signal === 0) {
       throw Object.assign(new Error('process is outside the pid view'), { code: 'ESRCH' });
