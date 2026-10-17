@@ -351,7 +351,7 @@ const path = require('node:path');
 console.log('step 1: scaffold ok');
 // A token wrapped onto two stdout lines with a stderr line written between them. The pauses let
 // the gate read each write on its own, so the stderr line arrives between the halves.
-const pause = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+const pause = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); // wait-allow: the gate sends the fixture no signal when it has read a write
 console.log('split ' + process.env.CI_FIXTURE_TOKEN.slice(0, 10));
 pause(100);
 console.error('between the halves');
