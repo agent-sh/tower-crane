@@ -172,6 +172,15 @@ test('a release that meets a busy registry lands once the lock is free, so no pl
     S.releaseMarkedLock(lock);
   }
   await waitOnRepo(h, () => G.read(env).units.length === 0, 'the queued release lands');
+  // A bind, which a dispatch about to exit makes, says whether it landed.
+  const next = G.admit({ stateDir: h.state, env, agent: 'orchestrator' }, { kind: 'worker', task: 'T1', project: h.readState('project.json') });
+  const held = S.tryMarkedLock(G.registryLock(env), { keepLive: true });
+  let landed;
+  try { landed = next.bind(process.pid, undefined, 'worker-T1-1'); } finally { S.releaseMarkedLock(held); }
+  assert.equal(landed, false, 'a bind past its wait reports that it did not land');
+  assert.equal(next.bind(process.pid, undefined, 'worker-T1-1'), true);
+  assert.deepEqual(G.read(env).units.map((u) => [u.agent, u.bound]), [['worker-T1-1', true]]);
+  next.release();
 });
 
 // A submitted task whose tests command records that it started, then holds until killed.
