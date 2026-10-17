@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
 const crypto = require('node:crypto');
-const { makeRepo, copyRepo, TMP_ROOT, ROOT, HARNESS_GUARD, processesIn, assertNoProcessesIn } = require('./helpers');
+const { makeRepo, copyRepo, shortCacheRoot, TMP_ROOT, ROOT, HARNESS_GUARD, processesIn, assertNoProcessesIn } = require('./helpers');
 const { gateFixture, gateEvidence } = require('./gate-helpers');
 const { waitUntil, childExit } = require('./signals');
 
@@ -52,6 +52,52 @@ test('a fresh fixture whose setup fails leaves no temp directory behind', (t) =>
   }
   assert.equal(made.length, 1);
   assert.equal(fs.existsSync(made[0]), false, made[0]);
+});
+
+// shortCacheRoot reads the account's home from the password database, so the
+// test stands a fake home in for it and runs the helper with a recording context.
+function withAccountHome(home, f) {
+  const os = require('node:os');
+  const saved = { userInfo: os.userInfo, runtime: process.env.XDG_RUNTIME_DIR };
+  os.userInfo = () => ({ ...saved.userInfo(), homedir: home });
+  delete process.env.XDG_RUNTIME_DIR;
+  const ctx = { hooks: [], notes: [], after(fn) { this.hooks.push(fn); }, diagnostic(msg) { this.notes.push(msg); } };
+  try {
+    return { root: f(ctx), ctx };
+  } finally {
+    os.userInfo = saved.userInfo;
+    if (saved.runtime !== undefined) process.env.XDG_RUNTIME_DIR = saved.runtime;
+  }
+}
+
+test('shortCacheRoot measures the real path of a linked cache and leaves no cache it made', { skip: process.platform === 'win32' && 'links need privileges on Windows' }, (t) => {
+  const base = fs.mkdtempSync(path.join(TMP_ROOT, 'short-cache-'));
+  t.after(() => fs.rmSync(base, { recursive: true, force: true }));
+  // A ~/.cache that links to a longer directory: short as named, too long once resolved.
+  const linked = path.join(base, 'linked');
+  const target = path.join(base, 'target-'.padEnd(80, 'x'));
+  fs.mkdirSync(linked);
+  fs.mkdirSync(target);
+  fs.symlinkSync(target, path.join(linked, '.cache'));
+  const fits = Buffer.byteLength(path.join(linked, '.cache', 'tc-test-XXXXXX'));
+  const long = withAccountHome(linked, (ctx) => shortCacheRoot(ctx, fits));
+  assert.equal(long.root, null, 'the resolved cache is too long');
+  assert.equal(long.ctx.notes.length, 1, 'the skip is reported');
+  assert.match(long.ctx.notes[0], /resolves to .*target-x/);
+  assert.deepEqual(fs.readdirSync(target), [], 'nothing is made under the long target');
+  // No ~/.cache yet: the helper makes one for the root and removes both after the test.
+  const bare = path.join(base, 'bare');
+  fs.mkdirSync(bare);
+  const made = withAccountHome(bare, (ctx) => shortCacheRoot(ctx, 4096));
+  assert.ok(made.root && made.root.startsWith(path.join(bare, '.cache') + path.sep), made.root);
+  assert.equal(fs.existsSync(made.root), true);
+  for (const hook of made.ctx.hooks) hook();
+  assert.deepEqual(fs.readdirSync(bare), [], 'the cache the helper made is gone');
+  // A ~/.cache that was there stays, with only the root removed.
+  fs.mkdirSync(path.join(bare, '.cache'));
+  const kept = withAccountHome(bare, (ctx) => shortCacheRoot(ctx, 4096));
+  for (const hook of kept.ctx.hooks) hook();
+  assert.deepEqual(fs.readdirSync(path.join(bare, '.cache')), [], 'the existing cache stays');
 });
 
 // Linux CI alone runs /proc; the lsof variants stand in for macOS, where the
