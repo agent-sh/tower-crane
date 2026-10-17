@@ -800,6 +800,37 @@ test('an environment value is redacted however an escape splits it, and a header
   }
 });
 
+test('a value found by reading its own characters as escape bytes yields to the secret next to it', () => {
+  const { createRedactor } = require('../lib/gates/common');
+  // The longest run of each value's characters the redacted text shows: a reading that completes
+  // one value through an escape's final or a string's body once took the next value's first
+  // character, or a token's, and that secret then went unredacted.
+  const longest = (out, value) => {
+    const flat = out.replace(/[\x00-\x1f\x7f-\x9f]/g, '');
+    for (let w = value.length; w > 0; w--) for (let i = 0; i + w <= value.length; i++) if (flat.includes(value.slice(i, i + w))) return w;
+    return 0;
+  };
+  for (const [input, values, shown] of [
+    ["MXqy66Mp)n4ON[RpY;U[blM\u001b];9oS[tUd6\u001bMXqy66Mp)n4ON[RpY;U[blM9oS[tUd6", ["MXqy66Mp)n4ON[RpY;U[blM9oS[tUd6"], [22]],
+    ["NUaymyOGww31eUrQ1ew9DN\u001b]NRq3j5\u001bNUaymyOGww31eUrQ1ew9DNRq3j5", ["NUaymyOGww31eUrQ1ew9DNRq3j5"], [21]],
+    ["z.-5944266\u001b[1485051.5-2-..;\u001b_1\u001b;cqBv9kHeu4SduMI3)v1P9", ["z.-59442661485051.5-2-..;1",";cqBv9kHeu4SduMI3)v1P9"], [24,1]],
+    ["t\u009b(1RFDj3fjaueLt\u001bPnRLsRjwB5\u001bt1RFDj3fjaueLtnRLsRjwB5", ["t1RFDj3fjaueLtnRLsRjwB5"], [12]],
+    ["d.9i_2.AwBMs\u001bAPs3A5A\u001b_2d.9i_\u009c2.AwBMsAPs3A5A2", ["d.9i_2.AwBMsAPs3A5A2"], [1]],
+    ["Zi\\KtUcLu9Dt!Z\u009d;y39VSNzoOvdB8\u001bZi\\KtUcLu9Dt!Zy39VSNzoOvdB8", ["Zi\\KtUcLu9Dt!Zy39VSNzoOvdB8"], [13]],
+    [";TROJ-;P\u009b;\u009dlyevZK5\u001b;TROJ-;PlyevZK5", [";TROJ-;PlyevZK5"], [8]],
+    ["ghs_Ts11bZC0Zq7aHV\u001bw\u001bP\u001by1WKo\n\u001b1", ["1bZC0Zq7aHVwy1WKo1"], [1]],
+    ["jPvnOM.aFSqiQ\u009d;3\u001bQLXKA72OYA8@#rY3hX7B4Suwpcn9", ["jPvnOM.aFSqiQ3","QLXKA72OYA8@#rY3hX7B4Suwpcn9"], [12,1]],
+    ["fVf\u009d;Kfi89wxZZwvvF7oA5\u001bfVfKfi89wxZZwv\u009bmvF7oA5", ["fVfKfi89wxZZwvvF7oA5"], [2]],
+    ["byfLZlhUtC2ZZDTVFSF6GWb\u009d;47K1\u001bbyfLZlhUtC2ZZDTVFSF6GWb47K1", ["byfLZlhUtC2ZZDTVFSF6GWb47K1"], [22]],
+    ["E6M0@v\u001b[onU5kWEd\u001bXLClsTi!d0\u001bdpF!GANsVQ6d92lmWHU@ec1NM#V8", ["dpF!GANsVQ6d92lmWHU@ec1NM#V8","E6M0@vonU5kWEdLClsTi!d0"], [1,6]],
+    ["ASIAAXGDD9ECDI6JTPS\n7\u001b];\u001b\\AuThOrIzAtIoN:HLyexBO69t\u009b;GX73hs3OSW3github_p", ["HLyexBO69tGX73hs3OSW3"], [1]],
+  ]) {
+    const redact = createRedactor(values.map((v, i) => [`SECRET_${i}`, v]));
+    const out = redact(redact.strip(input));
+    values.forEach((v, i) => assert.ok(longest(out, v) <= shown[i], `${JSON.stringify(input)} shows ${longest(out, v)} of ${v}`));
+  }
+});
+
 test('a binary artifact is read across lines a window at a time', () => {
   const { createRedactor } = require('../lib/gates/common');
   const redact = createRedactor([]);
