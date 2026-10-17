@@ -383,6 +383,13 @@ test('the lint rejects sleeps, counted sleep loops and other clocks, and accepts
     'const hook = `i=0; while ! grep -q "ready for" log && [ $i -lt 50 ]; do sleep 0.1; i=$((i+1)); done`;', // wait-allow: rejected lint fixture
     'const hook = `until [ -f go ] || [ $n -ge 5 ] || echo while; do sleep 1; n=$((n+1)); done`;', // wait-allow: rejected lint fixture
     "function run() { cp.spawnSync('sh', ['-c', 'sleep 1']); } // wait-allow: cadence\nfor (let i = 0; i < 3 && !ok(); i++) run();", // wait-allow: rejected lint fixture
+    // A loop word in a comment or an echo before a counted loop opens no loop.
+    'const hook = `#!/bin/sh\\n# wait for the go file\\ni=0\\nwhile [ $i -lt 50 ]; do sleep 0.1; i=$((i+1)); done\\n`;', // wait-allow: rejected lint fixture
+    'const hook = `echo "waiting for go"; i=0; while [ $i -lt 50 ]; do sleep 0.1; i=$((i+1)); done`;', // wait-allow: rejected lint fixture
+    'const hook = `echo "sleep until ready" >&2\\nfor i in $(seq 50); do [ -f go ] && break; sleep 0.1; done`;', // wait-allow: rejected lint fixture
+    // An echo's command substitution runs, and a helper's sleep may take a quoted or interpolated operand.
+    'const hook = `for i in 1 2 3; do echo $(sleep 1); done`;', // wait-allow: rejected lint fixture
+    "function nap() { cp.spawnSync('sh', ['-c', 'sleep \"$d\"']); } // wait-allow: cadence\nfor (let i = 0; i < 3 && !ok(); i++) nap();", // wait-allow: rejected lint fixture
     "const hook = [\n'while [ $i -lt 5 ]; do',\n'  sleep 1',\n'  i=$((i+1))',\n'done'].join('\\n');", // wait-allow: rejected lint fixture
     'const sleep = util.promisify(setTimeout); await sleep(500);', // wait-allow: rejected lint fixture
     'await promisify(setTimeout)(500);', // wait-allow: rejected lint fixture

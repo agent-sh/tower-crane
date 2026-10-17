@@ -392,12 +392,17 @@ const SLEEP_CALL = new RegExp(String.raw`\b(?:Atomics\.wait|setTimeout|sleep|del
 // A shell command at a command position: the start, after a separator, or
 // after a keyword that begins a command list.
 const SHELL_COMMAND = String.raw`(?<=(?:^|[\n;&|({])[ \t]*|\b(?:then|do|else)[ \t]+)`;
-// A loop's do and done also follow a case pattern's ) or an interpolation's }.
-const SHELL_LOOP_WORD = new RegExp(String.raw`(?<!\w)(?:while|until|for)\b|(?<=(?:^|[\n;&|(){}])[ \t]*|\b(?:then|do|else)[ \t]+)do(?:ne)?\b`, 'g');
+// Loop words at a command position, which also follows a case pattern's ),
+// an interpolation's }, ! and time. A loop word in a comment, an echo or a
+// grep argument is text.
+const SHELL_LOOP_WORD = new RegExp(String.raw`(?<=(?:^|[\n;&|(){}!])[ \t]*|\b(?:then|do|else|time)[ \t]+)(?:while|until|for|do|done)\b`, 'g');
 // Any sleep word in a loop body counts, also /bin/sleep or command sleep,
 // but not an option such as --sleep, an echo's text or a comment.
 const SHELL_SLEEP = /(?<![\w-])sleep[ \t]+[^\s;&|]/;
 const SHELL_TEXT = /(?<!\w)(?:echo|printf)\b[^;&|\n]*|(?<![^\s;&|(])#[^\n]*/g;
+// An echo's command substitutions still run.
+const shellCode = (body) => body.replace(SHELL_TEXT, (text) => (text.startsWith('#') ? ''
+  : (text.match(/\$\([^()]*\)?|`[^`]*`?/g) || []).join(' ')));
 
 // A script with its escapes resolved, of the same length so positions still
 // point into the test file: a newline escape ends a line, a tab separates.
@@ -411,7 +416,7 @@ function shellCounted(script) {
   const found = [];
   const open = [];
   const check = (loop, body) => {
-    if (!SHELL_SLEEP.test(body.replace(SHELL_TEXT, ''))) return;
+    if (!SHELL_SLEEP.test(shellCode(body))) return;
     let counted;
     if (loop.keyword === 'for') {
       counted = /^\s*\(\([^;]*;[^;]*[<>][^;]*;/.test(loop.header)
@@ -434,10 +439,7 @@ function shellCounted(script) {
       if (index < 0) continue;
       const [loop] = open.splice(index, 1);
       check(loop, script.slice(loop.body, word.index));
-    } else if (!open.some((candidate) => candidate.body === undefined)) {
-      // A loop word in a header, as in `while ! grep -q "ready for" log`, is text.
-      open.push({ keyword, at: word.index });
-    }
+    } else open.push({ keyword, at: word.index });
   }
   // A loop whose done is in code the check cannot read runs to the end.
   for (const loop of open) if (loop.body !== undefined) check(loop, script.slice(loop.body));
@@ -448,7 +450,7 @@ function shellCounted(script) {
 function shellBareSleep(script) {
   const wrapped = /^\s*(?:[\w./-]*\/)?(?:ba|da|k|z)?sh\s+-c\s+(['"])([\s\S]*)\1\s*$/.exec(script);
   let depth = 0;
-  for (const word of (wrapped ? wrapped[2] : script).matchAll(new RegExp(String.raw`${SHELL_COMMAND}(?:do|done|sleep[ \t]+[^\s;&|])\b`, 'g'))) {
+  for (const word of (wrapped ? wrapped[2] : script).matchAll(new RegExp(String.raw`${SHELL_COMMAND}(?:(?:do|done)\b|sleep[ \t]+[^\s;&|])`, 'g'))) {
     if (word[0] === 'do') depth++;
     else if (word[0] === 'done') depth = Math.max(0, depth - 1);
     else if (!depth) return true;
