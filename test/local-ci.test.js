@@ -857,6 +857,26 @@ test('the text redactor redacts what reading escapes only as a terminal does red
   }
 });
 
+test('glued headers on one long line are read once each, and a long glued header value stays redacted', () => {
+  const { createRedactor } = require('../lib/gates/common');
+  const redact = createRedactor([]);
+  // The value runs on past what a fixed window read, and its tail showed.
+  const long = redact(redact.strip(`x\x1b[0mAuthorization: Bearer ${'a'.repeat(5000)} end`));
+  assert.ok(!long.includes('aaaaaaaaa'), long.slice(0, 200));
+  // Read to the line's end once per header, a line of them took minutes; joined once per header,
+  // a line of headers with no space between them overflowed a string.
+  const size = 4 << 20;
+  for (const unit of ['w\x1b[mAuthorization: Bearer abc ', 'w\x1b(Bauthorization:', 'word\x1b[1mAuthorization:']) {
+    const text = unit.repeat(Math.ceil(size / unit.length));
+    const started = Date.now();
+    const out = redact(redact.strip(text));
+    assert.ok(!out.includes('abc'), JSON.stringify(unit));
+    assert.ok(redact.bytes(Buffer.from(`\0${text}`, 'latin1')).missed, JSON.stringify(unit));
+    const ms = Date.now() - started;
+    assert.ok(ms < 10000, `${JSON.stringify(unit)} took ${ms} ms`);
+  }
+});
+
 test('a binary artifact is read across lines a window at a time', () => {
   const { createRedactor } = require('../lib/gates/common');
   const redact = createRedactor([]);
