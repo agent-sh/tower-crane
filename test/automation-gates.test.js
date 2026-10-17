@@ -628,7 +628,7 @@ if (!fs.readFileSync('value.js', 'utf8').includes('1')) {
   const started = path.join(__dirname, 'base-started');
   fs.writeFileSync(started + '.tmp', String(process.pid));
   fs.renameSync(started + '.tmp', started);
-  const until = Date.now() + 300000; // wait-allow: an orphaned rerun stops itself; the release file is its signal
+  const until = Date.now() + ${HUNG_TEST_MS}; // wait-allow: an orphaned rerun stops itself; the release file is its signal
   const poll = () => fs.existsSync(path.join(__dirname, 'base-release')) || Date.now() > until ? process.exit(0) : setTimeout(poll, 25); // wait-allow: probe cadence only; the release file is the signal
   poll();
 } else {

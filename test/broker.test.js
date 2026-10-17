@@ -299,7 +299,7 @@ Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0);
 
   broker = await B.start(job);
   const answer = B.forward(job.broker, ['task', 'note', 'T1', 'slow'], state).then((r) => ({ r }), (e) => ({ e }));
-  const until = (check) => waitUntil(check, { paths: [base], signal: t.signal });
+  const until = (check, what) => waitUntil(check, { paths: [base], signal: t.signal, what });
   await until(() => fs.existsSync(pids) && readPublished(pids, 'utf8').length > 0, 'the brokered command started');
   started = JSON.parse(fs.readFileSync(pids, 'utf8'));
   broker.close();
