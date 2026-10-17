@@ -379,6 +379,10 @@ test('the lint rejects sleeps, counted sleep loops and other clocks, and accepts
     "const hook = 'while [ $i -lt 5 ]; do sleep 1; i=$((i+1));' + x + 'done';", // wait-allow: rejected lint fixture
     "const hook = 'while [ $i -lt 5 ]; do' + x + 'sleep 1; i=$((i+1)); done';", // wait-allow: rejected lint fixture
     "const hook = ['while [ $i -lt 5 ]; do', 'sleep 1', 'i=$((i+1))', 'done'].join('\\n');", // wait-allow: rejected lint fixture
+    // A loop word inside a header is text, not a loop of its own.
+    'const hook = `i=0; while ! grep -q "ready for" log && [ $i -lt 50 ]; do sleep 0.1; i=$((i+1)); done`;', // wait-allow: rejected lint fixture
+    'const hook = `until [ -f go ] || [ $n -ge 5 ] || echo while; do sleep 1; n=$((n+1)); done`;', // wait-allow: rejected lint fixture
+    "function run() { cp.spawnSync('sh', ['-c', 'sleep 1']); } // wait-allow: cadence\nfor (let i = 0; i < 3 && !ok(); i++) run();", // wait-allow: rejected lint fixture
     "const hook = [\n'while [ $i -lt 5 ]; do',\n'  sleep 1',\n'  i=$((i+1))',\n'done'].join('\\n');", // wait-allow: rejected lint fixture
     'const sleep = util.promisify(setTimeout); await sleep(500);', // wait-allow: rejected lint fixture
     'await promisify(setTimeout)(500);', // wait-allow: rejected lint fixture
@@ -415,6 +419,13 @@ test('the lint rejects sleeps, counted sleep loops and other clocks, and accepts
     'function waitGo() { while (!ok()) Atomics.wait(cell, 0, 0, 10); }\nfor (let i = 0; i < 3; i++) waitGo();',
     // A return in a function the if block defines does not leave the loop.
     'let n = 0; while (!ok()) { n++; if (n > 3) { list.forEach((x) => { return x; }); } Atomics.wait(cell, 0, 0, 10); }',
+    // A sh -c helper sleeps only when its command does.
+    "const sh = (cmd) => cp.spawnSync('sh', ['-c', cmd]);\nfor (let i = 0; i < 3; i++) sh('git commit -qm x');",
+    "function run() { cp.spawnSync('sh', ['-c', 'echo ok']); }\nfor (let i = 0; i < 3; i++) run();",
+    // Echoed text, a comment and an option are not sleeps.
+    'const hook = `for i in 1 2 3; do echo "sleep 1"; done`;',
+    'const hook = `for i in 1 2 3; do touch f # sleep 1\ndone`;',
+    'const hook = `for i in 1 2 3; do tool --sleep 1; done`;',
     'await scheduler.wait(HUNG_TEST_MS);',
     'const elapsed = process.hrtime.bigint() - start; report(elapsed);',
   ]) assert.deepEqual(waitFindings(source), [], source);

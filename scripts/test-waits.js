@@ -394,8 +394,10 @@ const SLEEP_CALL = new RegExp(String.raw`\b(?:Atomics\.wait|setTimeout|sleep|del
 const SHELL_COMMAND = String.raw`(?<=(?:^|[\n;&|({])[ \t]*|\b(?:then|do|else)[ \t]+)`;
 // A loop's do and done also follow a case pattern's ) or an interpolation's }.
 const SHELL_LOOP_WORD = new RegExp(String.raw`(?<!\w)(?:while|until|for)\b|(?<=(?:^|[\n;&|(){}])[ \t]*|\b(?:then|do|else)[ \t]+)do(?:ne)?\b`, 'g');
-// Any sleep word in a loop body counts, also /bin/sleep or command sleep.
-const SHELL_SLEEP = /(?<!\w)sleep[ \t]+[^\s;&|]/;
+// Any sleep word in a loop body counts, also /bin/sleep or command sleep,
+// but not an option such as --sleep, an echo's text or a comment.
+const SHELL_SLEEP = /(?<![\w-])sleep[ \t]+[^\s;&|]/;
+const SHELL_TEXT = /(?<!\w)(?:echo|printf)\b[^;&|\n]*|(?<![^\s;&|(])#[^\n]*/g;
 
 // A script with its escapes resolved, of the same length so positions still
 // point into the test file: a newline escape ends a line, a tab separates.
@@ -409,7 +411,7 @@ function shellCounted(script) {
   const found = [];
   const open = [];
   const check = (loop, body) => {
-    if (!SHELL_SLEEP.test(body)) return;
+    if (!SHELL_SLEEP.test(body.replace(SHELL_TEXT, ''))) return;
     let counted;
     if (loop.keyword === 'for') {
       counted = /^\s*\(\([^;]*;[^;]*[<>][^;]*;/.test(loop.header)
@@ -432,7 +434,10 @@ function shellCounted(script) {
       if (index < 0) continue;
       const [loop] = open.splice(index, 1);
       check(loop, script.slice(loop.body, word.index));
-    } else open.push({ keyword, at: word.index });
+    } else if (!open.some((candidate) => candidate.body === undefined)) {
+      // A loop word in a header, as in `while ! grep -q "ready for" log`, is text.
+      open.push({ keyword, at: word.index });
+    }
   }
   // A loop whose done is in code the check cannot read runs to the end.
   for (const loop of open) if (loop.body !== undefined) check(loop, script.slice(loop.body));
@@ -453,8 +458,9 @@ function shellBareSleep(script) {
 
 // A synchronous sleep a helper function can hide: Atomics.wait with a
 // timeout, a sleep command, or a promise that only a timer resolves.
-const HELPER_SLEEP = new RegExp(String.raw`\bAtomics\.wait\s*\(|\b(?:spawnSync|execSync|execFileSync)\s*\(\s*(?:['"\`]sleep\b|${SHELL})`
-  + String.raw`|\bnew\s+Promise\s*\(\s*(?:async\s*)?\(?\s*([$\w]+)[^)=]*\)?\s*=>\s*\{?\s*setTimeout\s*\(\s*\3\s*,`, 'g');
+// A sh -c helper sleeps only when its command literal holds a bare sleep.
+const HELPER_SLEEP = new RegExp(String.raw`\bAtomics\.wait\s*\(|\b(?:spawnSync|execSync|execFileSync)\s*\(\s*(?:['"\`]sleep\b|${SHELL}(['"\`])((?:\\[\s\S]|(?!\3)[^\\])*)\3)`
+  + String.raw`|\bnew\s+Promise\s*\(\s*(?:async\s*)?\(?\s*([$\w]+)[^)=]*\)?\s*=>\s*\{?\s*setTimeout\s*\(\s*\5\s*,`, 'g');
 
 // Loop bodies, with whether a counter bounds the loop. Generated fixture
 // scripts live in string and template literals, so those are read as code too.
@@ -618,7 +624,8 @@ function loops(text, offset = 0, found = Object.assign([], { shell: [], helpers:
   }
   // A named function whose sleep no loop of its own polls is a sleep
   // wherever it is called.
-  const sleeps = [...text.matchAll(HELPER_SLEEP)].filter((m) => !m[0].startsWith('Atomics') || callArguments(text, m.index + m[0].length - 1).length >= 4);
+  const sleeps = [...text.matchAll(HELPER_SLEEP)].filter((m) => (m[4] === undefined || shellBareSleep(shellText(m[4])))
+    && (!m[0].startsWith('Atomics') || callArguments(text, m.index + m[0].length - 1).length >= 4));
   if (sleeps.length) {
     for (const [index, token] of tokens.entries()) {
       let name;
