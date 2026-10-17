@@ -368,6 +368,18 @@ test('the lint rejects sleeps, counted sleep loops and other clocks, and accepts
     'for (let i = 0;; i++) { if (i > 40) break; Atomics.wait(cell, 0, 0, 100); }', // wait-allow: rejected lint fixture
     "cp.spawnSync('sh', ['-c', 'sleep 2']); if (!ok()) throw new Error('late');", // wait-allow: rejected lint fixture
     "cp.execSync(\"sh -c 'sleep 2'\");", // wait-allow: rejected lint fixture
+    // A loop keyword after a case pattern, !, time or an interpolation, and a sleep by path or through command.
+    'const hook = `case $x in a) while [ $i -lt 5 ]; do sleep 1; i=$((i+1)); done;; esac`;', // wait-allow: rejected lint fixture
+    'const hook = `! while [ $i -lt 5 ]; do sleep 1; i=$((i+1)); done`;', // wait-allow: rejected lint fixture
+    'const hook = `time while [ $i -lt 5 ]; do sleep 1; i=$((i+1)); done`;', // wait-allow: rejected lint fixture
+    'const hook = `${x} while [ $i -lt 5 ]; do sleep 1; i=$((i+1)); done`;', // wait-allow: rejected lint fixture
+    'const hook = `while [ $i -lt 5 ]; do /bin/sleep 1; i=$((i+1)); done`;', // wait-allow: rejected lint fixture
+    'const hook = `while [ $i -lt 5 ]; do command sleep 1; i=$((i+1)); done`;', // wait-allow: rejected lint fixture
+    // A script split around an operand the check cannot read, or joined from an array of lines.
+    "const hook = 'while [ $i -lt 5 ]; do sleep 1; i=$((i+1));' + x + 'done';", // wait-allow: rejected lint fixture
+    "const hook = 'while [ $i -lt 5 ]; do' + x + 'sleep 1; i=$((i+1)); done';", // wait-allow: rejected lint fixture
+    "const hook = ['while [ $i -lt 5 ]; do', 'sleep 1', 'i=$((i+1))', 'done'].join('\\n');", // wait-allow: rejected lint fixture
+    "const hook = [\n'while [ $i -lt 5 ]; do',\n'  sleep 1',\n'  i=$((i+1))',\n'done'].join('\\n');", // wait-allow: rejected lint fixture
     'const sleep = util.promisify(setTimeout); await sleep(500);', // wait-allow: rejected lint fixture
     'await promisify(setTimeout)(500);', // wait-allow: rejected lint fixture
     'await scheduler.wait(500);', // wait-allow: rejected lint fixture
@@ -401,6 +413,8 @@ test('the lint rejects sleeps, counted sleep loops and other clocks, and accepts
     "cp.spawnSync('sh', ['-c', 'while [ ! -f go ]; do sleep 0.1; done']);",
     'while (true) { if (ok()) break; Atomics.wait(cell, 0, 0, 10); }',
     'function waitGo() { while (!ok()) Atomics.wait(cell, 0, 0, 10); }\nfor (let i = 0; i < 3; i++) waitGo();',
+    // A return in a function the if block defines does not leave the loop.
+    'let n = 0; while (!ok()) { n++; if (n > 3) { list.forEach((x) => { return x; }); } Atomics.wait(cell, 0, 0, 10); }',
     'await scheduler.wait(HUNG_TEST_MS);',
     'const elapsed = process.hrtime.bigint() - start; report(elapsed);',
   ]) assert.deepEqual(waitFindings(source), [], source);
@@ -522,6 +536,8 @@ test('tests signal only checked pids, so a pid file read before it is written ca
     `if (${kill} === original) return;`,
     `if (original !== ${kill}) restore();`,
     `assert.equal(${kill}, original);`,
+    `assert.equal(global.${kill}, original);`,
+    `Object.is(global.${kill}, k);`,
     `assert.notStrictEqual(original, ${kill}, 'restored');`,
     `Object.is(${kill}, original);`,
     // Quoted prose and another object's process are not calls.
@@ -573,6 +589,7 @@ test('an interposer may hold process.kill only to forward its own pid and signal
     ['  for (pid of [0]) break;\n  return kill.call(this, pid, signal);', 4],
     ['  arguments[0] = 0;\n  return kill.call(this, pid, signal);', 4],
     ['  arguments[0]++;\n  return kill.call(this, pid, signal);', 4],
+    ['  if (x) [pid] = [0];\n  return kill.call(this, pid, signal);', 4],
     ['  Object.assign(arguments, [0]);\n  return kill.call(this, pid, signal);', 4],
     ['  function inner(pid) { return kill.call(this, pid, signal); }\n  return inner(0);', 3],
   ]) {

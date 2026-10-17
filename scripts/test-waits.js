@@ -392,7 +392,10 @@ const SLEEP_CALL = new RegExp(String.raw`\b(?:Atomics\.wait|setTimeout|sleep|del
 // A shell command at a command position: the start, after a separator, or
 // after a keyword that begins a command list.
 const SHELL_COMMAND = String.raw`(?<=(?:^|[\n;&|({])[ \t]*|\b(?:then|do|else)[ \t]+)`;
-const SHELL_SLEEP = new RegExp(String.raw`${SHELL_COMMAND}sleep[ \t]+[^\s;&|]`);
+// A loop's do and done also follow a case pattern's ) or an interpolation's }.
+const SHELL_LOOP_WORD = new RegExp(String.raw`(?<!\w)(?:while|until|for)\b|(?<=(?:^|[\n;&|(){}])[ \t]*|\b(?:then|do|else)[ \t]+)do(?:ne)?\b`, 'g');
+// Any sleep word in a loop body counts, also /bin/sleep or command sleep.
+const SHELL_SLEEP = /(?<!\w)sleep[ \t]+[^\s;&|]/;
 
 // A script with its escapes resolved, of the same length so positions still
 // point into the test file: a newline escape ends a line, a tab separates.
@@ -405,7 +408,21 @@ const shellText = (value) => value.replace(/\\([\s\S])/g, (all, char) => (char =
 function shellCounted(script) {
   const found = [];
   const open = [];
-  for (const word of script.matchAll(new RegExp(String.raw`${SHELL_COMMAND}(while|until|for|do|done)\b`, 'g'))) {
+  const check = (loop, body) => {
+    if (!SHELL_SLEEP.test(body)) return;
+    let counted;
+    if (loop.keyword === 'for') {
+      counted = /^\s*\(\([^;]*;[^;]*[<>][^;]*;/.test(loop.header)
+        || /^\s+[A-Z_a-z]\w*\s+in\s+(?:\$\(\s*seq\b|`\s*seq\b|\{-?\d+\.\.-?\d+(?:\.\.-?\d+)?\}|-?\d+(?:\s+-?\d+)+\s*;?\s*$)/.test(loop.header);
+    } else {
+      const compared = (text) => [...text.matchAll(/\$\{?(\w+)\}?"?\s+-(?:lt|le|gt|ge|eq)\b|-(?:lt|le|gt|ge|eq)\s+"?\$\{?(\w+)|\(\(\s*(\w+)\s*(?:[<>]|==)/g)]
+        .map((m) => m[1] || m[2] || m[3]);
+      const names = [...compared(loop.header), ...(/\b(?:break|exit|return)\b/.test(body) ? compared(body) : [])];
+      counted = names.some((name) => new RegExp(String.raw`\b${name}=\s*(?:\$\(\(|\$\(\s*expr\b|\`\s*expr\b)|\(\(\s*(?:\+\+|--)?\s*${name}\s*(?:\+\+|--|[-+]=)|\(\(\s*(?:\+\+|--)\s*${name}\b|\blet\s+["']?${name}\b`).test(body));
+    }
+    if (counted) found.push(loop.at);
+  };
+  for (const word of script.matchAll(SHELL_LOOP_WORD)) {
     const [keyword] = word;
     if (keyword === 'do') {
       const loop = open.findLast((candidate) => candidate.body === undefined);
@@ -414,21 +431,11 @@ function shellCounted(script) {
       const index = open.findLastIndex((candidate) => candidate.body !== undefined);
       if (index < 0) continue;
       const [loop] = open.splice(index, 1);
-      const body = script.slice(loop.body, word.index);
-      if (!SHELL_SLEEP.test(body)) continue;
-      let counted;
-      if (loop.keyword === 'for') {
-        counted = /^\s*\(\([^;]*;[^;]*[<>][^;]*;/.test(loop.header)
-          || /^\s+[A-Z_a-z]\w*\s+in\s+(?:\$\(\s*seq\b|`\s*seq\b|\{-?\d+\.\.-?\d+(?:\.\.-?\d+)?\}|-?\d+(?:\s+-?\d+)+\s*;?\s*$)/.test(loop.header);
-      } else {
-        const compared = (text) => [...text.matchAll(/\$\{?(\w+)\}?"?\s+-(?:lt|le|gt|ge|eq)\b|-(?:lt|le|gt|ge|eq)\s+"?\$\{?(\w+)|\(\(\s*(\w+)\s*(?:[<>]|==)/g)]
-          .map((m) => m[1] || m[2] || m[3]);
-        const names = [...compared(loop.header), ...(/\b(?:break|exit|return)\b/.test(body) ? compared(body) : [])];
-        counted = names.some((name) => new RegExp(String.raw`\b${name}=\s*(?:\$\(\(|\$\(\s*expr\b|\`\s*expr\b)|\(\(\s*(?:\+\+|--)?\s*${name}\s*(?:\+\+|--|[-+]=)|\(\(\s*(?:\+\+|--)\s*${name}\b|\blet\s+["']?${name}\b`).test(body));
-      }
-      if (counted) found.push(loop.at);
+      check(loop, script.slice(loop.body, word.index));
     } else open.push({ keyword, at: word.index });
   }
+  // A loop whose done is in code the check cannot read runs to the end.
+  for (const loop of open) if (loop.body !== undefined) check(loop, script.slice(loop.body));
   return found;
 }
 
@@ -461,30 +468,67 @@ function loops(text, offset = 0, found = Object.assign([], { shell: [], helpers:
       loops(inner, offset + token.start + 1, found);
     }
   }
-  // A shell script can be one literal or several joined with +.
-  for (let i = 0; i < tokens.length; i++) {
-    if (!literal(tokens[i])) continue;
-    const parts = [tokens[i]];
-    while (tokens[i + 1]?.value === '+' && literal(tokens[i + 2])) { parts.push(tokens[i + 2]); i += 2; }
-    // A newline escape can run into the keyword, so no word boundary before it.
-    if (!parts.some((part) => /do\b/.test(part.value))) continue;
-    let script = '';
-    const starts = [];
-    for (const part of parts) {
-      starts.push([script.length, offset + part.start + 1]);
-      script += shellText(part.value.slice(1, -1));
-    }
-    for (const at of shellCounted(script)) {
-      const [from, start] = starts.findLast(([position]) => position <= at);
-      found.shell.push(start + at - from);
-    }
-  }
   const match = new Map();
   const open = [];
   for (const [index, token] of tokens.entries()) {
     if (token.type !== 'punctuation') continue;
     if ('([{'.includes(token.value)) open.push(index);
     else if (')]}'.includes(token.value) && open.length) match.set(open.pop(), index);
+  }
+  // A shell script can be one literal, a + chain whose other operands the
+  // check cannot read, or an array of lines that a join puts together.
+  const operandEnd = (j) => {
+    while (j < tokens.length) {
+      const { type, value } = tokens[j];
+      if (type === 'punctuation' && match.has(j) && '([{'.includes(value)) j = match.get(j) + 1;
+      else if (type === 'punctuation' && [',', ';', ')', ']', '}', '+', '?', ':'].includes(value)) break;
+      else j++;
+    }
+    return j;
+  };
+  const chain = (i) => {
+    const parts = [i];
+    let j = i + 1;
+    while (tokens[j]?.value === '+') {
+      if (literal(tokens[j + 1])) { parts.push(j + 1); j += 2; continue; }
+      const k = operandEnd(j + 1);
+      if (tokens[k]?.value !== '+') break;
+      parts.push(' ');
+      j = k;
+    }
+    return { parts, end: j };
+  };
+  const used = new Set();
+  for (let i = 0; i < tokens.length; i++) {
+    if (!literal(tokens[i]) || used.has(i)) continue;
+    const close = tokens[i - 1]?.value === '[' ? match.get(i - 1) : undefined;
+    let parts;
+    if (close !== undefined && tokens[close + 1]?.value === '.' && tokens[close + 2]?.value === 'join' && tokens[close + 3]?.value === '(') {
+      parts = [];
+      for (let j = i; j < close;) {
+        if (literal(tokens[j])) {
+          const next = chain(j);
+          parts.push(...next.parts);
+          j = next.end;
+        }
+        j = operandEnd(j);
+        if (tokens[j]?.value === ',') { parts.push('\n'); j++; } else break;
+      }
+    } else parts = chain(i).parts;
+    for (const part of parts) if (typeof part === 'number') used.add(part);
+    // A newline escape can run into the keyword, so no word boundary before it.
+    if (!parts.some((part) => typeof part === 'number' && /do\b/.test(tokens[part].value))) continue;
+    let script = '';
+    const starts = [];
+    for (const part of parts) {
+      if (typeof part === 'string') { script += part; continue; }
+      starts.push([script.length, offset + tokens[part].start + 1]);
+      script += shellText(tokens[part].value.slice(1, -1));
+    }
+    for (const at of shellCounted(script)) {
+      const [from, start] = starts.findLast(([position]) => position <= at);
+      found.shell.push(start + at - from);
+    }
   }
   const counted = (range) => {
     const ids = new Set();
@@ -515,10 +559,21 @@ function loops(text, offset = 0, found = Object.assign([], { shell: [], helpers:
       if (!condition.some((token) => token.type === 'identifier' && ids.has(token.value))) continue;
       let k = j + 1;
       if (range[k]?.value === '{') {
+        // A return in a function the block defines leaves that function only.
+        let inner = 0;
+        const functions = [];
         for (let depth = 0; k < range.length; k++) {
-          if (['break', 'return', 'throw'].includes(range[k].value)) return true;
-          if (range[k].value === '{') depth++;
-          else if (range[k].value === '}' && --depth === 0) break;
+          const { value } = range[k];
+          if (value === 'function' || (value === '>' && range[k - 1]?.value === '=' && range[k + 1]?.value === '{')) inner = 1;
+          if (!functions.length && ['break', 'return', 'throw'].includes(value)) return true;
+          if (value === '{') {
+            depth++;
+            if (inner) functions.push(depth);
+            inner = 0;
+          } else if (value === '}') {
+            if (functions.at(-1) === depth) functions.pop();
+            if (--depth === 0) break;
+          }
         }
       } else if (['break', 'return', 'throw'].includes(range[k]?.value)) return true;
     }
@@ -951,7 +1006,7 @@ function killFindings(text, { interposer = false } = {}) {
         String.raw`\b(?:const|let|var)\s+${p}(?![\w$])`, String.raw`\bfor\s*\(\s*${p}\s+(?:of|in)\b`,
         // A destructuring assignment such as `[pid] = [0]` or `({ pid } = o)`.
         // A computed member such as `calls[pid] = signal` writes another object.
-        String.raw`(?<![\w$)\]]\s*)[[{][^;[\]{}]*?(?<![\w$.])${p}(?![\w$])[^;[\]{}]*?[\]}][\s\]}]*=(?![=>])`,
+        String.raw`(?<![\w$\]]\s*)[[{][^;[\]{}]*?(?<![\w$.])${p}(?![\w$])[^;[\]{}]*?[\]}][\s\]}]*=(?![=>])`,
       ].join('|')).test(text.slice(body[0], body[1]));
     };
     // A sloppy-mode script changes a parameter through `arguments` too: by
@@ -980,7 +1035,8 @@ function killFindings(text, { interposer = false } = {}) {
   for (const pattern of KILL_ALIASES) {
     for (const match of text.matchAll(pattern)) {
       if (exempt.has(match.index) || prose(match.index)) continue;
-      const before = text.slice(Math.max(0, match.index - 200), match.index);
+      // A global prefix belongs to the compared value, as in assert.equal(global.process.kill, k).
+      const before = text.slice(Math.max(0, match.index - 200), match.index).replace(/\bglobal(?:This)?\s*\??\.\s*$/, '');
       if (COMPARED.test(before) && /^\s*[,)]/.test(text.slice(match.index + match[0].length))) continue;
       report(match.index, 'aliases process.kill');
     }
