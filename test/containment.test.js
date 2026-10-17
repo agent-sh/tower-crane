@@ -107,23 +107,23 @@ test('CLI spawn records cap failure in events and status', async (t) => {
   assert.match(h.ok(['status']), /resource-tasks-max/);
 });
 
-test('CLI local CI records a capped gate command and names its failure', (t) => {
+test('CLI cleanup records a capped gate command and names its failure', (t) => {
   const h = cachedFixture(t, 'contained-gate', (h) => {
     h.init(['--tasks-max', systemd ? '32' : '4', '--memory-max-bytes', String(memory)]);
     const sha = gateFixture(h);
     h.ok(['task', 'add', '--title', 'Gate resource cap', '--acceptance', 'bounded']);
     h.ok(['claim', 'T1', '--agent', 'worker']);
     h.ok(['submit', 'T1', '--sha', sha, '--agent', 'worker']);
-    h.ok(['project', 'set', '--ci-local', JSON.stringify({
-      command: [process.execPath, HARNESS, 'storm', 'unused'], timeout: 10,
-    })]);
+    h.ok(['project', 'set', '--clean-cmd',
+      [process.execPath, HARNESS, 'storm', 'unused'].map(G.shellQuote).join(' ')]);
   });
-  const result = h.run(['check', 'ci', 'T1', '--json']);
+  const result = h.run(['check', 'clean', 'T1', '--json'],
+    { env: { TOWER_CRANE_CLEAN_CMD: '' } });
   assert.equal(result.code, 1, result.stderr);
   const gate = JSON.parse(result.stdout);
   assert.equal(gate.ok, false);
   assert.match(gate.summary, /resource-tasks-max/);
-  assert.equal(gate.receipt.resource_reason, 'resource-tasks-max');
+  assert.equal(gate.resource_reason, 'resource-tasks-max');
   const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
-  assert.ok(events.some((e) => e.detail.receipt?.resource_reason === 'resource-tasks-max'));
+  assert.ok(events.some((e) => e.detail.resource_reason === 'resource-tasks-max'));
 });
