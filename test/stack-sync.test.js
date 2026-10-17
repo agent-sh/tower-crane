@@ -467,11 +467,18 @@ for (const signal of ['SIGTERM', 'SIGINT']) process.on(signal, () => fs.appendFi
     child.kill('SIGTERM');
     await fileWritten(observed, { alive: child, what: 'wait handles the signal while gh stack sync runs' });
     assert.equal(child.exitCode, null, 'the first signal lets the running sync finish');
-    if (forced) child.kill('SIGINT');
-    else fs.writeFileSync(release, 'release');
-    // The held sync would end only at the gh call's own timeout (lib/stack.js TIMEOUT); the
-    // caller tells the second signal's stop apart from that timeout by the recorded reason.
+    // A second signal that fails to stop the held sync leaves it to the gh call's own 60 s
+    // timeout (lib/stack.js TIMEOUT). Releasing the stub sooner fails that regression sooner;
+    // the caller tells the second signal's stop apart from the timeout by the recorded reason.
+    let released = false;
+    let backstop;
+    if (forced) {
+      child.kill('SIGINT');
+      backstop = setTimeout(() => { released = true; fs.writeFileSync(release, 'release'); }, 20000); // wait-allow: a bound that turns a sync the second signal never stops into a prompt failure
+    } else fs.writeFileSync(release, 'release');
     const exited = await result;
+    clearTimeout(backstop);
+    assert.equal(released, false, 'the second signal stops gh stack sync before the 20 s release backstop');
     assert.equal(exited.code, 0, JSON.stringify(exited));
     assert.match(exited.stdout, /stopped by SIGTERM/);
     return exited;

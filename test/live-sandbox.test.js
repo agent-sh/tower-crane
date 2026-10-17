@@ -136,7 +136,7 @@ test('in a real claude sandbox with sandbox.session_bus, a command connects to t
   await listen(sock, 'bus');
   const targets = { bus: sock, late };
   const script = `const n=require("net"),f=require("fs");f.writeFileSync(${JSON.stringify(ready)},"1");const s=new Int32Array(new SharedArrayBuffer(4));`
-    + `for(let i=0;i<1200&&!f.existsSync(${JSON.stringify(go)});i++)Atomics.wait(s,0,0,100);const o={};let left=2;` // wait-allow: the live agent's command tool stops a command after two minutes, so the probe reports before that
+    + `for(let i=0;i<1000&&!f.existsSync(${JSON.stringify(go)});i++)Atomics.wait(s,0,0,100);const o={};let left=2;` // wait-allow: a live agent's command tool may stop a command at two minutes (Claude Code's Bash default, and the wait the brief promises codex), so 100 s of probes leave a 20 s margin
     + `for(const[k,p]of Object.entries(${JSON.stringify(targets)})){const done=(v)=>{o[k]=v;if(--left===0){f.writeFileSync(${JSON.stringify(probe)},JSON.stringify(o));process.exit(0)}};`
     + `n.connect(p).on("connect",function(){this.destroy();done("CONNECTED")}).on("error",e=>done("ERR "+e.code))}`;
   h.ok(['project', 'set', '--session-bus', 'true']);
@@ -476,7 +476,7 @@ for (const harness of ['claude', 'codex']) {
       for (const p of Object.values(targets)) fs.rmSync([home, path.dirname(h.base)].includes(path.dirname(p)) ? p : path.dirname(p), { recursive: true, force: true });
     });
     const script = `const fs=require("fs");fs.writeFileSync(${JSON.stringify(ready)},"1");const s=new Int32Array(new SharedArrayBuffer(4));`
-      + `for(let i=0;i<1200&&!fs.existsSync(${JSON.stringify(go)});i++)Atomics.wait(s,0,0,100);const o={go:fs.existsSync(${JSON.stringify(go)})};` // wait-allow: the live agent's command tool stops a command after two minutes (Claude Code's Bash default), so the probe reports before that
+      + `for(let i=0;i<1000&&!fs.existsSync(${JSON.stringify(go)});i++)Atomics.wait(s,0,0,100);const o={go:fs.existsSync(${JSON.stringify(go)})};` // wait-allow: a live agent's command tool may stop a command at two minutes (Claude Code's Bash default, and the wait the brief promises codex), so 100 s of probes leave a 20 s margin
       + `for(const[k,p]of Object.entries(${JSON.stringify(targets)})){try{fs.readFileSync(p);o[k]="READABLE"}catch(e){o[k]="ERR "+e.code}}`
       + `try{fs.readdirSync(".");o.worktree="READABLE"}catch(e){o.worktree="ERR "+e.code}fs.writeFileSync(${JSON.stringify(out)},JSON.stringify(o))`;
     h.ok(['brief', 'set', 'T1', '-'], {

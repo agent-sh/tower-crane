@@ -351,6 +351,23 @@ test('the lint rejects sleeps, counted sleep loops and other clocks, and accepts
     'const hook = `#!/bin/sh\\nn=0\\nuntil [ -f go ] || [ "$n" -ge 50 ]; do sleep 0.1; n=$((n + 1)); done\\n`;', // wait-allow: rejected lint fixture
     'const hook = `for i in $(seq 50); do [ -f go ] && break; sleep 0.1; done`;', // wait-allow: rejected lint fixture
     'const hook = `for i in 1 2 3 4 5; do [ -f go ] && break; sleep 1; done`;', // wait-allow: rejected lint fixture
+    'const hook = `for i in {1..50}; do [ -f go ] && break; sleep 0.1; done`;', // wait-allow: rejected lint fixture
+    'const hook = `i=0\nwhile [ ! -f go ] && [ $i -lt 300 ]\ndo\n  sleep 0.1\n  i=$((i+1))\ndone\n`;', // wait-allow: rejected lint fixture
+    'const hook = `i=0\\n\\twhile [ ! -f go ] && [ $i -lt 300 ]; do sleep 0.1; i=$((i+1)); done`;', // wait-allow: rejected lint fixture
+    'const hook = `for i in 1 2 3 4 5\\ndo [ -f go ] && break; sleep 1; done`;', // wait-allow: rejected lint fixture
+    'const hook = `for ((i = 0; i < 50; i++)); do [ -f go ] && break; sleep 0.1; done`;', // wait-allow: rejected lint fixture
+    'const hook = `while [ ! -f go ] && [ $i -lt 300 ]; do sleep 0.1; i=\\`expr $i + 1\\`; done`;', // wait-allow: rejected lint fixture
+    'const hook = `while [ ! -f go ] && [ $i -lt 300 ]; do sleep $d; i=$((i+1)); done`;', // wait-allow: rejected lint fixture
+    'const hook = `i=0; while true; do [ -f go ] && break; i=$((i+1)); [ $i -ge 50 ] && break; sleep 0.1; done`;', // wait-allow: rejected lint fixture
+    "const hook = 'i=0\\nwhile [ $i -lt 5 ]; do\\n' + '  sleep 1\\n  i=$((i+1))\\ndone\\n';", // wait-allow: rejected lint fixture
+    // A helper hides its sleep from the loop that calls it, even with a reason of its own.
+    'const nap = (ms) => Atomics.wait(cell, 0, 0, ms); // wait-allow: cadence\nfor (let i = 0; i < 50 && !ok(); i++) nap(100);', // wait-allow: rejected lint fixture
+    'function nap(ms) { Atomics.wait(cell, 0, 0, ms); } // wait-allow: cadence\nlet n = 0; while (!ok() && n < 50) { n++; nap(100); }', // wait-allow: rejected lint fixture
+    // A loop with no bound in its header can end on a count in its body.
+    'let i = 0; while (true) { if (ok() || ++i > 40) break; Atomics.wait(cell, 0, 0, 100); }', // wait-allow: rejected lint fixture
+    'for (let i = 0;; i++) { if (i > 40) break; Atomics.wait(cell, 0, 0, 100); }', // wait-allow: rejected lint fixture
+    "cp.spawnSync('sh', ['-c', 'sleep 2']); if (!ok()) throw new Error('late');", // wait-allow: rejected lint fixture
+    "cp.execSync(\"sh -c 'sleep 2'\");", // wait-allow: rejected lint fixture
     'const sleep = util.promisify(setTimeout); await sleep(500);', // wait-allow: rejected lint fixture
     'await promisify(setTimeout)(500);', // wait-allow: rejected lint fixture
     'await scheduler.wait(500);', // wait-allow: rejected lint fixture
@@ -378,6 +395,12 @@ test('the lint rejects sleeps, counted sleep loops and other clocks, and accepts
     'const hook = `while [ ! -f go ] && [ -d dir ]; do sleep 0.1; done`;',
     'const hook = `#!/bin/sh\\nwhile [ "$(wc -l < f)" -lt 2 ]; do sleep 0.1; done\\n`;',
     'const hook = `for f in a b; do touch $f; done; while [ ! -f go ]; do sleep 0.1; done`;',
+    // A counted loop that does not sleep ends at its own done.
+    'const hook = `for i in $(seq 5); do echo $i; done; while [ ! -f go ]; do sleep 0.1; done`;',
+    'const hook = `for i in 1 2 3; do echo $i; done; while [ ! -f go ]; do sleep 0.1; done`;',
+    "cp.spawnSync('sh', ['-c', 'while [ ! -f go ]; do sleep 0.1; done']);",
+    'while (true) { if (ok()) break; Atomics.wait(cell, 0, 0, 10); }',
+    'function waitGo() { while (!ok()) Atomics.wait(cell, 0, 0, 10); }\nfor (let i = 0; i < 3; i++) waitGo();',
     'await scheduler.wait(HUNG_TEST_MS);',
     'const elapsed = process.hrtime.bigint() - start; report(elapsed);',
   ]) assert.deepEqual(waitFindings(source), [], source);
@@ -476,6 +499,12 @@ test('tests signal only checked pids, so a pid file read before it is written ca
     `f(...${kill}(pid));`,
     `fs.writeFileSync(f, 'f(...${kill}(pid))');`,
     `const { kill } = global.${proc};`,
+    `const k = global.${kill};`,
+    `const k = globalThis?.${kill};`,
+    // An escape ends the previous line of a generated script.
+    `fs.writeFileSync(f, 'x;\\nglobal.${kill}(pid)');`,
+    `fs.writeFileSync(f, 'x;\\tglobal.${kill}(pid)');`,
+    `fs.writeFileSync(f, \`x;\\nglobalThis.${kill}(pid)\`);`,
   ]) {
     assert.equal(killFindings(source).length, 1, source);
   }
@@ -531,6 +560,10 @@ test('an interposer may hold process.kill only to forward its own pid and signal
     'a forward of a changed pid is not a forward');
   assert.deepEqual(killFindings(body("  if (pid === 7) log('}');\n  return kill.call(this, pid, signal);"), { interposer: true }), [],
     'a brace in a string does not end the replacement');
+  assert.deepEqual(killFindings(body('  calls[pid] = signal;\n  return kill.call(this, pid, signal);'), { interposer: true }), [],
+    'a write to another object keyed by the pid leaves the pid unchanged');
+  assert.deepEqual(killFindings(`fs.writeFileSync(hook, \`kill(0);\n${hold}\`);`, { interposer: true }).map((f) => f.line), [1],
+    'a use at the start of a generated script');
   assert.deepEqual(killFindings(body("  log('{');\n  return kill.call(this, pid, signal);")
     + 'function other(pid, signal) {\n  return kill.call(this, pid, signal);\n}\n', { interposer: true }).map((f) => f.line), [7],
   'a brace in a string does not stretch the replacement over the next function');
@@ -539,6 +572,8 @@ test('an interposer may hold process.kill only to forward its own pid and signal
     ['  ({ pid } = options);\n  return kill.call(this, pid, signal);', 4],
     ['  for (pid of [0]) break;\n  return kill.call(this, pid, signal);', 4],
     ['  arguments[0] = 0;\n  return kill.call(this, pid, signal);', 4],
+    ['  arguments[0]++;\n  return kill.call(this, pid, signal);', 4],
+    ['  Object.assign(arguments, [0]);\n  return kill.call(this, pid, signal);', 4],
     ['  function inner(pid) { return kill.call(this, pid, signal); }\n  return inner(0);', 3],
   ]) {
     assert.deepEqual(killFindings(body(lines), { interposer: true }).map((f) => f.line), [line], lines);
