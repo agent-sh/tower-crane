@@ -253,7 +253,8 @@ test('a host-only failure on the base keeps its opt-in and command for retry cla
 
 test('joined redaction keeps a split token redacted across streams, a piece keeps its line ending, and ranges stay apart', () => {
   const token = `ghp_${'A1b2C3d4E5'.repeat(4)}`;
-  for (const eol of ['\n', '\r\n']) {
+  // A CR then an escape before the LF, as a progress line clears itself, is a line ending too.
+  for (const eol of ['\n', '\r\n', '\r\x1b[K\n', '\r\x1b[2K\n', '\r\x1b[0m\r\n']) {
     const runs = [
       { stream: 'out', text: `split ${token.slice(0, 14)}${eol}` },
       { stream: 'err', text: `not ok 3 - flaky${eol}` },
@@ -277,6 +278,25 @@ test('joined redaction keeps a split token redacted across streams, a piece keep
   const ranges = createRedactor([['S_TOKEN', value]]).ranges(`x Authorization: Bearer ${value}`);
   assert.ok(ranges.length > 0);
   for (let i = 1; i < ranges.length; i++) assert.ok(ranges[i - 1].b <= ranges[i].a, JSON.stringify(ranges));
+  // Input that holds the redactor's own marker characters is text like any other: ranges and
+  // redact agree on it, and neither turns it into a placeholder.
+  const redact = createRedactor([['S_TOKEN', value]]);
+  for (const text of [
+    `a \uF000\uE000\uE000\uF000 b ${value} c`,
+    `[redacted:OLD] \uF001\uE000\uE000\uF001 d`,
+    `\uF001\uE000\uE000${value} e`,
+    `${value}\uE000\uF000 [redacted:OLD]\uF001`,
+  ]) {
+    let applied = '';
+    let from = 0;
+    for (const { a, b, label } of redact.ranges(text)) {
+      applied += `${text.slice(from, a)}[redacted:${label}]`;
+      from = b;
+    }
+    applied += text.slice(from);
+    assert.equal(applied, redact(text), JSON.stringify(text));
+    assert.equal(redact(text).match(/\[redacted:/g).length, text.split(value).length - 1 + text.split('[redacted:').length - 1, JSON.stringify(text));
+  }
 });
 
 test('a host-only failure redacts a token its stdout wrapped around a stderr line', async () => {
