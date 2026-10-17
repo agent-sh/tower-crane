@@ -11,6 +11,7 @@ const { createRepoSeed, cleanupRepoSeed, FOREGROUND_MAINTENANCE } = require('./r
 const { tempRoot, liveRoot } = require('./tmp-root');
 const { readPublished } = require('./atomic-file');
 const UserConfigGuard = require('./fixtures/user-config-guard');
+const StateFiles = require('./state-files');
 
 const ROOT = path.join(__dirname, '..');
 const BIN = path.join(ROOT, 'bin', 'tower-crane.js');
@@ -553,20 +554,23 @@ function context(t, base, options = {}) {
       if (r.code !== 0) throw cliFailure(args, r);
       return r.stdout.trim();
     },
-    readState: (file) => JSON.parse(readPublished(path.join(ctx.state, file), 'utf8')),
+    readState: (file) => StateFiles.readDoc(ctx.state, file),
     // The current revision of a task, for review evidence a test records as a reviewer spawn did not start.
     revision: (id = 'T1') => String(ctx.readState('tasks.json').tasks.find((t) => t.id === id).revision),
-    writeState: (file, data) => fs.writeFileSync(path.join(ctx.state, file), JSON.stringify(data, null, 2) + '\n'),
+    writeState: (file, data) => StateFiles.writeDoc(ctx.state, file, data),
+    // The events the log holds, and an append as a command would log them.
+    events: (opts) => StateFiles.readEvents(ctx.state, opts),
+    appendEvents: (events) => StateFiles.appendEvents(ctx.state, events),
     // Record an exited reviewer dispatch of `agent` for the task's current head
     // and revision, so that agent's review evidence counts.
     reviewer: (id, agent, sha) => {
       const task = ctx.readState('tasks.json').tasks.find((x) => x.id === id);
       const at = new Date().toISOString();
       const detail = { agent, role: 'reviewer', rung: 'review', sha: sha || task.sha, revision: task.revision, pid: 999999, attempt: 1 };
-      fs.appendFileSync(path.join(ctx.state, 'events.jsonl'), [
+      StateFiles.appendEvents(ctx.state, [
         { at, agent: 'orchestrator', cmd: 'spawn', task: id, detail },
         { at, agent: 'orchestrator', cmd: 'spawn exit', task: id, detail: { agent, pid: 999999, attempt: 1, code: 0 } },
-      ].map((e) => `${JSON.stringify(e)}\n`).join(''));
+      ]);
     },
     git: (args, cwd = repo) => git(args, cwd, env),
     // Git prints Windows worktree paths with forward slashes, so compare resolved paths.
