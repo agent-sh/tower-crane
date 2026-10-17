@@ -188,7 +188,7 @@ for (const entries of ['absent', 'unaudited pass', 'unaudited failure']) {
     else for (const entry of task.evidence) entry.ok = entries === 'unaudited pass';
     StateFiles.writeDocText(h.state, 'tasks.json', JSON.stringify(tasks));
     const events = h.logs().filter((e) => !['check tests', 'check clean', 'check ci'].includes(e.cmd));
-    fs.writeFileSync(path.join(h.state, 'events.jsonl'), events.map((e) => JSON.stringify(e) + '\n').join(''));
+    StateFiles.replaceLog(h.state, events.map((e) => JSON.stringify(e) + '\n').join(''));
     const before = h.json(['task', 'show', 'T1']);
     assert.ok(before.gates.gates.filter((g) => g.type !== 'review').every((g) => !g.ok));
     assert.deepEqual(h.json(['status']).gate_queue, { running: [], queued: [], blocked: [] });
@@ -1233,7 +1233,7 @@ fs.appendFileSync(${JSON.stringify(runs)}, '+\\n');
 const crash = ${JSON.stringify(crash ? path.join(h.base, 'crashed') : null)};
 if (crash && !fs.existsSync(crash)) {
   fs.writeFileSync(crash, '');
-  const events = fs.readFileSync(${JSON.stringify(path.join(h.state, 'events.jsonl'))}, 'utf8').trim().split('\\n').map(JSON.parse);
+  const events = require(${JSON.stringify(path.join(__dirname, 'state-files'))}).readEvents(${JSON.stringify(h.state)});
   require(${JSON.stringify(path.join(__dirname, 'signals'))}).killPid(events.findLast((e) => e.cmd === 'automation' && e.detail.phase === 'running').detail.pid, 'SIGKILL');
 }
 const finish = () => { fs.appendFileSync(${JSON.stringify(runs)}, '-\\n'); process.exitCode = ${fail ? 1 : 0}; };
@@ -1561,7 +1561,6 @@ test('a killed executor releases its gate executor slot', (t) => {
 
 test('older queued work takes a freed executor slot before a newer arrival', async (t) => {
   const h = setup(t);
-  const events = path.join(h.state, 'events.jsonl');
   const suite = path.join(h.base, 'tools', 'stall-suite.js');
   // The first run holds the only slot until T2 is queued behind it, then
   // dies, leaving a free slot and T2 still waiting.
@@ -1569,7 +1568,7 @@ test('older queued work takes a freed executor slot before a newer arrival', asy
 const flag = ${JSON.stringify(path.join(h.base, 'stalled'))};
 if (fs.existsSync(flag)) process.exit(0);
 fs.writeFileSync(flag, '');
-const read = () => fs.readFileSync(${JSON.stringify(events)}, 'utf8').trim().split('\\n').map(JSON.parse);
+const read = () => require(${JSON.stringify(path.join(__dirname, 'state-files'))}).readEvents(${JSON.stringify(h.state)});
 const until = Date.now() + 300000;
 const poll = () => {
   const log = read();
@@ -1594,7 +1593,7 @@ poll();
   h.consume();
   assert.notEqual((await holder).code, 2, 'the stalled executor is killed');
   assert.ok(h.logs().some((e) => e.cmd === 'automation queued' && e.task === 'T2' && e.detail.executors === 1));
-  const offset = fs.statSync(events).size;
+  const offset = StateFiles.logEnd(h.state);
   h.ok(['claim', 'T3', '--agent', 'worker']);
   h.ok(['submit', 'T3', '--sha', h.sha, '--agent', 'worker']);
   h.run(['wait', '--after', String(offset), '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
@@ -1607,7 +1606,6 @@ poll();
 
 test('accepted merges take the next executor in acceptance order before queued submitted gates', async (t) => {
   const h = setup(t);
-  const events = path.join(h.state, 'events.jsonl');
   const { stalled, release } = holdSuite(h);
   fs.writeFileSync(stalled, '');
   for (const id of ['T2', 'T3', 'T4', 'T5']) {
@@ -1631,14 +1629,14 @@ test('accepted merges take the next executor in acceptance order before queued s
   h.git(['commit', '-qm', 'advance main']);
   fs.rmSync(stalled);
   h.ok(['claim', 'T1', '--agent', 'worker']);
-  const offset = fs.statSync(events).size;
+  const offset = StateFiles.logEnd(h.state);
   h.ok(['submit', 'T1', '--sha', h.sha, '--agent', 'worker']);
   // Start only T1's reaction, leaving the prepared PRs for explicit acceptance.
   const holder = h.runAsync(['wait', '--after', String(offset), '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
   let text, queue;
   try {
     await waitFor(stalled, { what: 'T1 holds the only executor' });
-    const after = fs.statSync(events).size;
+    const after = StateFiles.logEnd(h.state);
     for (const id of ['T2', 'T3']) {
       h.ok(['claim', id, '--agent', 'worker']);
       h.ok(['submit', id, '--sha', h.sha, '--agent', 'worker']);
@@ -1650,7 +1648,7 @@ test('accepted merges take the next executor in acceptance order before queued s
     h.run(['wait', '--after', String(after), '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
     // A request made while T4 is submitted gives way to its acceptance.
     h.ok(['gates', 'prioritize', 'T4', '--reason', 'request before acceptance', '--agent', 'orchestrator']);
-    const accepted = fs.statSync(events).size;
+    const accepted = StateFiles.logEnd(h.state);
     for (const id of ['T5', 'T4']) h.ok(['accept', id, '--agent', 'orchestrator']);
     h.run(['wait', '--after', String(accepted), '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
     const late = h.run(['gates', 'prioritize', 'T4', '--reason', 'later merge request', '--agent', 'orchestrator']);
@@ -1683,7 +1681,6 @@ test('accepted merges take the next executor in acceptance order before queued s
 
 test('gates prioritize runs the last queued task first; status and inbox show the gate queue', async (t) => {
   const h = setup(t);
-  const events = path.join(h.state, 'events.jsonl');
   // The three tasks submitted after the held run queue behind it.
   const { stalled, release } = holdSuite(h);
   for (const id of ['T2', 'T3', 'T4']) h.ok(['task', 'add', '--title', `Change ${id}`, '--acceptance', 'it works', '--kind', 'code']);
@@ -1691,7 +1688,7 @@ test('gates prioritize runs the last queued task first; status and inbox show th
   h.ok(['submit', 'T1', '--sha', h.sha, '--agent', 'worker']);
   const holder = h.runAsync(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
   await waitFor(stalled, { what: 'the first executor starts' });
-  const offset = fs.statSync(events).size;
+  const offset = StateFiles.logEnd(h.state);
   for (const id of ['T2', 'T3', 'T4']) {
     h.ok(['claim', id, '--agent', 'worker']);
     h.ok(['submit', id, '--sha', h.sha, '--agent', 'worker']);
@@ -1757,14 +1754,13 @@ poll();
 
 test('a request moves only the reactions queued when it was made', async (t) => {
   const h = setup(t);
-  const events = path.join(h.state, 'events.jsonl');
   const { stalled, release } = holdSuite(h);
   for (const id of ['T2', 'T3']) h.ok(['task', 'add', '--title', `Change ${id}`, '--acceptance', 'it works', '--kind', 'code']);
   h.ok(['claim', 'T1', '--agent', 'worker']);
   h.ok(['submit', 'T1', '--sha', h.sha, '--agent', 'worker']);
   const holder = h.runAsync(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
   await waitFor(stalled, { what: 'the first executor starts' });
-  const offset = fs.statSync(events).size;
+  const offset = StateFiles.logEnd(h.state);
   for (const id of ['T2', 'T3']) {
     h.ok(['claim', id, '--agent', 'worker']);
     h.ok(['submit', id, '--sha', h.sha, '--agent', 'worker']);
@@ -1774,7 +1770,7 @@ test('a request moves only the reactions queued when it was made', async (t) => 
 
   // T3's review is recorded, but no watcher has queued it when the request is made.
   h.reviewer('T3', 'reviewer', h.sha);
-  const before = fs.statSync(events).size;
+  const before = StateFiles.logEnd(h.state);
   h.ok(['evidence', 'T3', '--type', 'review', '--sha', h.sha, '--revision', h.revision('T3'), '--ok', '--agent', 'reviewer']);
   h.ok(['gates', 'prioritize', 'T3', '--reason', 'gate fix first', '--agent', 'orchestrator']);
   h.run(['wait', '--after', String(before), '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
@@ -1790,14 +1786,13 @@ test('a request moves only the reactions queued when it was made', async (t) => 
 
 test('a reaction that is running is not queued: status and prioritize leave it out', async (t) => {
   const h = setup(t);
-  const events = path.join(h.state, 'events.jsonl');
   const run = stepSuite(h);
   for (const id of ['T2', 'T3']) h.ok(['task', 'add', '--title', `Change ${id}`, '--acceptance', 'it works', '--kind', 'code']);
   h.ok(['claim', 'T1', '--agent', 'worker']);
   h.ok(['submit', 'T1', '--sha', h.sha, '--agent', 'worker']);
   const holder = h.runAsync(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
   await waitFor(run(1).stalled, { what: 'the first executor starts' });
-  const offset = fs.statSync(events).size;
+  const offset = StateFiles.logEnd(h.state);
   for (const id of ['T2', 'T3']) {
     h.ok(['claim', id, '--agent', 'worker']);
     h.ok(['submit', id, '--sha', h.sha, '--agent', 'worker']);
@@ -1823,14 +1818,13 @@ test('a reaction that is running is not queued: status and prioritize leave it o
 
 test('a follow-up queued behind a live reaction can be prioritized and runs first', async (t) => {
   const h = setup(t);
-  const events = path.join(h.state, 'events.jsonl');
   const { stalled, release } = holdSuite(h);
   h.ok(['task', 'add', '--title', 'Change T2', '--acceptance', 'it works', '--kind', 'code']);
   h.ok(['claim', 'T1', '--agent', 'worker']);
   h.ok(['submit', 'T1', '--sha', h.sha, '--agent', 'worker']);
   const holder = h.runAsync(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
   await waitFor(stalled, { what: 'the first executor starts' });
-  const offset = fs.statSync(events).size;
+  const offset = StateFiles.logEnd(h.state);
   // T1 has a live reaction, so T2 and then T1's CI completion queue behind it.
   h.ok(['claim', 'T2', '--agent', 'worker']);
   h.ok(['submit', 'T2', '--sha', h.sha, '--agent', 'worker']);
@@ -1856,7 +1850,6 @@ test('a follow-up queued behind a live reaction can be prioritized and runs firs
 
 test('status shows a blocked follow-up apart from the queue the next free executor takes', async (t) => {
   const h = setup(t);
-  const events = path.join(h.state, 'events.jsonl');
   // Two executors hold T1 and T2, so T3 and T1's CI follow-up queue. T1's
   // follow-up waits for T1's own reaction, so T3 is the next work taken.
   const run = stepSuite(h, { executors: 2 });
@@ -1865,13 +1858,13 @@ test('status shows a blocked follow-up apart from the queue the next free execut
   h.ok(['submit', 'T1', '--sha', h.sha, '--agent', 'worker']);
   const first = h.runAsync(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
   await waitFor(run(1).stalled, { what: 'T1 takes the first executor' });
-  const offset = fs.statSync(events).size;
+  const offset = StateFiles.logEnd(h.state);
   h.ok(['claim', 'T2', '--agent', 'worker']);
   h.ok(['submit', 'T2', '--sha', h.sha, '--agent', 'worker']);
   const second = h.runAsync(['wait', '--after', String(offset), '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
   await waitFor(run(2).stalled, { what: 'T2 takes the second executor' });
 
-  const queued = fs.statSync(events).size;
+  const queued = StateFiles.logEnd(h.state);
   h.ok(['claim', 'T3', '--agent', 'worker']);
   h.ok(['submit', 'T3', '--sha', h.sha, '--agent', 'worker']);
   h.ok(['ci', 'completed', 'T1', '--sha', h.sha, '--agent', 'orchestrator']);

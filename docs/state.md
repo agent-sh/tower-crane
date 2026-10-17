@@ -228,6 +228,8 @@ State documents carry `"version": 1`. Files the state directory still holds (`pr
 
 `pos` is an event's cursor: where its line ends, counted in bytes as `events.jsonl` counted them. Migration keeps the offsets of the log it read, and each later event ends its line's length past the one before (`Buffer.byteLength(body) + 1`, the newline included). A byte cursor taken before migration, such as `wait --after OFFSET:CUTS`, a hook binding's `after` or `GET /api/messages?after=`, still names the same place. Cursors handed out since have the same form, and an export's log has every line ending at its cursor.
 
+Back the state up with a consistent copy of the database, such as `sqlite3 state.db "VACUUM INTO 'backup.db'"`, or with `tower-crane state export`. To restore a copy, remove `state.db-wal` and `state.db-shm` and rename the copy over `state.db`: a log left beside it would be applied to the copy. A reader still running then finds another database, or one with fewer events than it read, and starts over ([events.jsonl](#eventsjsonl)). Windows refuses to replace a database another process holds open, so stop the readers there first.
+
 A row changes only in a commit: `BEGIN IMMEDIATE`, the documents and task rows that changed, the events and their inbox rows, then `rev` and `end`, then `COMMIT`. A read is one read transaction, so it sees whole commits. A long-lived reader keeps its last snapshot and reads only the documents and task rows whose `rev` is past it, and the events past its `end`.
 
 ### Migration and export

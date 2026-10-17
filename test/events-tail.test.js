@@ -6,32 +6,32 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
+const crypto = require('node:crypto');
 const { EventEmitter, once } = require('node:events');
 const { cachedFixture, useFixtureUserFile, HOOKS, BIN } = require('./helpers');
 const { HUNG_TEST_MS } = require('./signals');
-const { EventReader, cutsSize, readCuts, cutBack } = require('../lib/event-reader');
+const { EventReader, parseCuts } = require('../lib/event-reader');
 const S = require('../lib/state');
 const T = require('../lib/tasks');
+const Db = require('../lib/db');
 const hooksPath = HOOKS.replace(/\\/g, '/');
 const budgetPath = path.join(__dirname, 'fixtures', 'events-read-budget.js').replace(/\\/g, '/');
 const resetPath = path.join(__dirname, 'fixtures', 'event-reset-notice.js').replace(/\\/g, '/');
 
+// About 50 MiB of quiet events, as months of lease renewals leave.
 function largeFixture(t) {
   return cachedFixture(t, 'large-events', (h) => {
     h.init();
-    const line = JSON.stringify({ cmd: 'hook progress', detail: { text: 'x'.repeat(1024) } }) + '\n';
-    const chunk = line.repeat(1024);
-    const fd = fs.openSync(path.join(h.state, 'events.jsonl'), 'a');
-    try {
-      for (let size = 0; size < 50 * 1024 * 1024; size += Buffer.byteLength(chunk)) fs.writeSync(fd, chunk);
-    } finally {
-      fs.closeSync(fd);
+    const text = 'x'.repeat(1024);
+    for (let n = 0; n < 48; n++) {
+      const events = Array.from({ length: 1024 }, () => ({ id: `E${crypto.randomUUID()}`, at: new Date().toISOString(), agent: 'worker', cmd: 'renew', task: null, detail: { text }, type: 'renew', to: 'orchestrator' }));
+      StateFiles.withDb(h.state, () => S.withLock(h.state, () => Db.commit(h.state, { events })));
     }
   });
 }
 
 const waitModes = [{ observe: true, silent: false }, { observe: true, silent: true }, { observe: false, silent: false }];
-for (const { observe, silent } of waitModes) test(`idle wait reads no historical bytes on fallback ticks with a 50 MiB log (observe: ${observe}, silent watch: ${silent})`, async (t) => {
+for (const { observe, silent } of waitModes) test(`idle wait reads no historical events on fallback ticks with a 50 MiB log (observe: ${observe}, silent watch: ${silent})`, async (t) => {
   const h = largeFixture(t);
   const meter = path.join(h.base, 'read-budget.json');
   const result = await h.runAsync(['wait', ...(observe ? ['--observe'] : []), '--agent', 'orchestrator', '--timeout', '3'], { // wait-allow: an idle wait must reach its timeout to prove fallback ticks read no history
@@ -39,8 +39,8 @@ for (const { observe, silent } of waitModes) test(`idle wait reads no historical
   });
   assert.equal(result.code, 2, result.stderr);
   const budget = JSON.parse(fs.readFileSync(meter, 'utf8'));
-  assert.equal(budget.bytes, 0);
-  assert.equal(budget.snapshotBytes, 0, 'idle checks must reuse validated state snapshots');
+  assert.equal(budget.rows, 0);
+  assert.equal(budget.snapshots, 0, 'idle checks must reuse validated state snapshots');
 });
 
 test('served pages and owner message requests reuse history on a 50 MiB log', async (t) => {
@@ -76,130 +76,95 @@ test('served pages and owner message requests reuse history on a 50 MiB log', as
   const [code] = await closed;
   assert.equal(code, 0, stderr);
   const budget = JSON.parse(fs.readFileSync(meter, 'utf8'));
-  assert.equal(budget.bytes, 0);
-  assert.equal(budget.snapshotBytes, 0);
+  assert.equal(budget.rows, 0);
+  assert.equal(budget.snapshots, 0);
 });
 
-test('event tail buffers partial UTF-8 bytes and resets history only on truncation or replacement', (t) => {
-  const h = cachedFixture(t, 'reader', (h) => h.init());
-  const file = path.join(h.base, 'tail.jsonl');
-  const line = (cmd, text = '') => Buffer.from(JSON.stringify({ cmd, detail: { text } }) + '\n');
-  const original = line('msg', 'start');
-  fs.writeFileSync(file, original);
-  const reader = new EventReader(file);
-  let bytes = 0;
-  const read = fs.readSync;
-  fs.readSync = function (...args) {
-    const n = read.apply(this, args);
-    bytes += n;
-    return n;
-  };
-  t.after(() => { fs.readSync = read; });
-  assert.deepEqual(reader.read().rows.map((e) => e.detail.text), ['start']);
-  assert.equal(bytes, original.length);
-  const next = line('msg', 'שלום');
-  const split = next.indexOf(Buffer.from('שלום')) + 1;
-  fs.appendFileSync(file, next.subarray(0, split));
-  assert.deepEqual(reader.read().rows, []);
-  assert.equal(reader.offset, original.length);
-  const partialBytes = bytes;
-  for (let i = 0; i < 20; i++) assert.deepEqual(reader.read().rows, []);
-  assert.equal(bytes, partialBytes, 'idle checks must not reread the partial suffix');
-  fs.appendFileSync(file, next.subarray(split));
-  assert.deepEqual(reader.read().rows.map((e) => e.detail.text), ['שלום']);
-  assert.equal(bytes, original.length + next.length);
-  fs.appendFileSync(file, 'broken\n');
-  const renewal = line('renew');
-  fs.appendFileSync(file, renewal);
-  assert.deepEqual(reader.read().rows.map((e) => e.cmd), ['renew']);
-  assert.equal(reader.offset, original.length + next.length + Buffer.byteLength('broken\n') + renewal.length);
+const message = (agent, to, text, at = new Date().toISOString()) => ({ at, agent, cmd: 'msg', task: null, detail: { to, text },
+  id: `E${crypto.randomUUID()}`, type: 'worker-message', to });
 
-  fs.writeFileSync(file, line('truncate'));
-  let batch = reader.read();
-  assert.equal(batch.reset, true);
-  assert.deepEqual(batch.rows.map((e) => e.cmd), ['truncate']);
-  const replacement = file + '.new';
-  fs.writeFileSync(replacement, line('replace', 'x'.repeat(128)));
-  fs.renameSync(replacement, file);
-  batch = reader.read();
-  assert.equal(batch.reset, true, 'replacement larger than the old log must reset too');
-  assert.deepEqual(batch.rows.map((e) => e.cmd), ['replace']);
-  fs.unlinkSync(file);
-  assert.equal(reader.read().reset, true);
-  fs.writeFileSync(file, line('recreate'));
-  assert.deepEqual(reader.read().rows.map((e) => e.cmd), ['recreate']);
-});
-
-// Event lines as the CLI writes them, with an `at` a test chooses, so a
-// writer's clock can be behind or step back.
-function eventLine(at, text) {
-  return JSON.stringify({ at, cmd: 'msg', detail: { text }, id: `E${require('node:crypto').randomUUID()}` }) + '\n';
-}
-
-function restoreReader(t, name, lines) {
-  const h = cachedFixture(t, 'reader', (h) => h.init());
-  const file = path.join(h.base, name);
-  fs.writeFileSync(file, lines.join(''));
-  const reader = new EventReader(file, { restores: true });
-  const texts = (batch) => batch.rows.filter((e) => !batch.restored.has(e)).map((e) => e.detail.text);
-  return { file, reader, texts };
-}
-
-const minutes = (n) => new Date(Date.now() + n * 60000).toISOString();
-
-test('a restore over several reads is history by event id, and an event from a clock behind is new', (t) => {
-  // Written across a clock step back: the newest `at` is not on the last line.
-  const history = [eventLine(minutes(5), 'one'), eventLine(minutes(0), 'two')];
-  const { file, reader, texts } = restoreReader(t, 'restore.jsonl', history);
-  assert.deepEqual(texts(reader.read()), ['one', 'two']);
-  // A copy over the log: truncated in place, then written in pieces.
-  fs.truncateSync(file, 0);
-  const emptied = reader.read();
-  assert.deepEqual([emptied.reset, emptied.rows, emptied.restored.size], [true, [], 0]);
-  for (const row of history) {
-    fs.appendFileSync(file, row);
-    const batch = reader.read();
-    assert.deepEqual([batch.reset, batch.restored.size, texts(batch)], [false, 1, []]);
+// Event rows this process reads of dir while fn runs.
+function rowsRead(dir, fn) {
+  let rows = 0;
+  const count = (step, at, n) => { if (step === 'events' && path.resolve(at) === path.resolve(dir)) rows += n; };
+  process.on('tower-crane:state-step', count);
+  try {
+    fn();
+  } finally {
+    process.off('tower-crane:state-step', count);
   }
-  fs.appendFileSync(file, eventLine(minutes(-60), 'behind'));
-  assert.deepEqual(texts(reader.read()), ['behind']);
-  // Moved away and copied back, with a new event in the same read.
-  fs.renameSync(file, file + '.away');
-  assert.equal(reader.read().reset, true);
-  fs.writeFileSync(file, fs.readFileSync(file + '.away', 'utf8') + eventLine(minutes(-120), 'new'));
-  const batch = reader.read();
-  assert.deepEqual([batch.reset, batch.restored.size, texts(batch)], [false, 3, ['new']]);
-});
+  return rows;
+}
 
-test('a restore right after a recorded cut is history, not a replay since the start', (t) => {
-  const kept = [eventLine(minutes(1), 'one'), eventLine(minutes(2), 'two')];
-  const torn = eventLine(minutes(3), 'torn');
-  const { file, reader, texts } = restoreReader(t, 'events.jsonl', [...kept, torn]);
-  assert.deepEqual(texts(reader.read()), ['one', 'two', 'torn']);
-  const size = Buffer.byteLength(kept.join(''));
-  fs.truncateSync(file, size);
-  fs.appendFileSync(path.join(path.dirname(file), 'events.cuts.jsonl'),
-    JSON.stringify({ at: minutes(0), size, from: size + Buffer.byteLength(torn), ends: [size + Buffer.byteLength(torn)] }) + '\n');
-  const cut = reader.read();
-  assert.deepEqual([cut.cut, cut.rows], [size, []]);
-  fs.truncateSync(file, 0);
-  assert.equal(reader.read().reset, true);
-  fs.appendFileSync(file, kept.join('') + eventLine(minutes(-60), 'new'));
-  assert.deepEqual(texts(reader.read()), ['new']);
-});
-
-test('history before a start cursor is restored up to the start line, then a clock behind still wakes', (t) => {
-  const before = [eventLine(minutes(-10), 'old one'), eventLine(minutes(10), 'old two')];
+test('an event reader reads only the events committed past it, and starts over when the database is replaced or removed', async (t) => {
   const h = cachedFixture(t, 'reader', (h) => h.init());
-  const file = path.join(h.base, 'cursor.jsonl');
-  fs.writeFileSync(file, before.join(''));
-  const reader = new EventReader(file, { after: Buffer.byteLength(before.join('')), restores: true });
-  assert.deepEqual(reader.read().rows, []);
-  fs.writeFileSync(file + '.restore', before.join('') + eventLine(minutes(-60), 'behind'));
-  fs.renameSync(file + '.restore', file);
+  const reader = new EventReader(h.state);
+  t.after(() => Db.closeAll());
+  const history = reader.read().rows.length;
+  assert.ok(history > 0);
+  h.appendEvents([message('owner', 'orchestrator', 'שלום')]);
+  let batch;
+  assert.equal(rowsRead(h.state, () => { batch = reader.read(); }), 1, 'only the new event is read');
+  assert.deepEqual(batch.rows.map((e) => e.detail.text), ['שלום']);
+  assert.equal(reader.offset, StateFiles.logEnd(h.state));
+  for (let i = 0; i < 20; i++) assert.deepEqual(reader.read().rows, []);
+  const copy = path.join(h.base, 'backup.db');
+  StateFiles.backup(h.state, copy);
+  h.appendEvents([message('owner', 'orchestrator', 'after the backup')]);
+  assert.deepEqual(reader.read().rows.map((e) => e.detail.text), ['after the backup']);
+  // An older copy of this database ends before the reader's position.
+  Db.closeAll();
+  await StateFiles.restore(h.state, copy);
+  batch = reader.read();
+  assert.equal(batch.reset, true);
+  assert.equal(batch.rows.length, history + 1);
+  // Another database: the same events under another uid.
+  Db.closeAll();
+  StateFiles.rewriteState(h.state, (text) => text);
+  batch = reader.read();
+  assert.equal(batch.reset, true, 'a database with another uid is read from the start');
+  // Gone, then back.
+  Db.closeAll();
+  await StateFiles.restore(h.state, copy, { how: 'remove', between: async () => assert.deepEqual([reader.read().reset, reader.read().rows], [true, []]) });
+  assert.equal(reader.read().rows.length, history + 1);
+});
+
+test('a restored copy is history by event id, and an event from a clock behind is new', async (t) => {
+  const h = cachedFixture(t, 'reader', (h) => h.init());
+  t.after(() => Db.closeAll());
+  const minutes = (n) => new Date(Date.now() + n * 60000).toISOString();
+  // Written across a clock step back: the newest `at` is not on the last event.
+  h.appendEvents([message('owner', 'orchestrator', 'one', minutes(5)), message('owner', 'orchestrator', 'two', minutes(0))]);
+  const reader = new EventReader(h.state, { restores: true });
+  const texts = (b) => b.rows.filter((e) => !b.restored.has(e) && e.cmd === 'msg').map((e) => e.detail.text);
+  assert.deepEqual(texts(reader.read()), ['one', 'two']);
+  const copy = path.join(h.base, 'backup.db');
+  StateFiles.backup(h.state, copy);
+  StateFiles.rewriteState(h.state, (text) => text);
   const batch = reader.read();
-  assert.deepEqual([batch.reset, batch.restored.size, batch.rows.filter((e) => !batch.restored.has(e)).map((e) => e.detail.text)],
-    [true, 2, ['behind']]);
+  assert.deepEqual([batch.reset, texts(batch)], [true, []], 'the same events under another database are history');
+  h.appendEvents([message('owner', 'orchestrator', 'behind', minutes(-60))]);
+  assert.deepEqual(texts(reader.read()), ['behind']);
+  Db.closeAll();
+  await StateFiles.restore(h.state, copy);
+  h.appendEvents([message('owner', 'orchestrator', 'new', minutes(-120))]);
+  const back = reader.read();
+  assert.deepEqual([back.reset, texts(back)], [true, ['new']]);
+});
+
+test('history before a start cursor is restored up to the start event, then a clock behind still wakes', async (t) => {
+  const h = cachedFixture(t, 'reader', (h) => h.init());
+  t.after(() => Db.closeAll());
+  h.appendEvents([message('owner', 'orchestrator', 'old one'), message('owner', 'orchestrator', 'old two')]);
+  const copy = path.join(h.base, 'backup.db');
+  StateFiles.backup(h.state, copy);
+  const reader = new EventReader(h.state, { after: StateFiles.logEnd(h.state), restores: true });
+  assert.deepEqual(reader.read().rows, []);
+  Db.closeAll();
+  StateFiles.rewriteState(h.state, (text) => text);
+  h.appendEvents([message('owner', 'orchestrator', 'behind', new Date(Date.now() - 3600000).toISOString())]);
+  const batch = reader.read();
+  assert.deepEqual([batch.reset, batch.rows.filter((e) => !batch.restored.has(e)).map((e) => e.detail.text)], [true, ['behind']]);
 });
 
 test('retained state history keeps snapshots independent and does not duplicate local writes', (t) => {
@@ -225,8 +190,11 @@ test('retained state history keeps snapshots independent and does not duplicate 
   });
   assert.notEqual(snapshot.project.goal, 'Changed goal', 'writers must not mutate retained snapshots');
   assert.equal(S.loadState(h.state).project.goal, 'Changed goal');
-  fs.writeFileSync(path.join(h.state, 'events.jsonl'), '');
-  assert.deepEqual(S.readEvents(h.state), []);
+  // A snapshot's events end where it was taken, whatever is committed later.
+  const old = S.loadState(h.state, { fresh: true });
+  h.appendEvents([message('owner', 'orchestrator', 'later')]);
+  assert.equal(old.events.some((e) => e.detail?.text === 'later'), false);
+  assert.equal(S.readEvents(h.state).at(-1).detail.text, 'later');
   release();
   release();
 });
@@ -331,57 +299,80 @@ function resetReader(t, h, args) {
   return { child, notices, changes, closed, stop, until, lines };
 }
 
-// How a restore puts the old log back: an atomic rename, a copy that
-// truncates in place and then writes (`cp backup events.jsonl`), or a move
-// away and a copy back. The last two reach the reader in more than one read.
-const RESTORES = ['rename', 'truncate', 'remove'];
-
-async function restoreLog(h, reader, { smaller = false, how = 'rename' } = {}) {
-  const file = path.join(h.state, 'events.jsonl');
-  const original = fs.readFileSync(file, 'utf8');
-  const restored = smaller ? original.trimEnd().split('\n').slice(0, -1).join('\n') + '\n' : original;
+// Puts the backup in `copy` back under a running reader, and returns the
+// messages it holds once the reader has read them.
+async function restoreLog(h, reader, copy, { how = 'rename' } = {}) {
+  const end = StateFiles.withDb(copy, () => Db.end(copy));
   let seen = reader.notices.length;
   const read = (probe) => reader.until(() => reader.notices.slice(seen).some(probe));
-  if (how === 'rename') {
-    fs.writeFileSync(file + '.restore', restored);
-    fs.renameSync(file + '.restore', file);
-  } else {
-    // The reader sees the log empty or gone before the history comes back.
-    if (how === 'truncate') fs.truncateSync(file, 0);
-    else fs.renameSync(file, file + '.away');
-    await read((notice) => notice.reset);
-    seen = reader.notices.length;
-    fs.appendFileSync(file, restored);
+  await StateFiles.restore(h.state, path.join(copy, Db.FILE), {
+    how,
+    between: async () => {
+      await read((notice) => notice.reset);
+      seen = reader.notices.length;
+    },
+  });
+  // Nothing wakes a reader for a renamed file it does not watch for; the next event does.
+  await read((notice) => notice.offset === end && (how !== 'rename' || notice.reset));
+  return StateFiles.withDb(copy, () => Db.eventsAfter(copy, 0).map((r) => JSON.parse(r.body)).filter((row) => row.cmd === 'msg').map((row) => row.detail.text));
+}
+
+// A backup of the state, as of now or before its last message, in its own
+// state directory so it reads as one.
+function backupState(h, smaller) {
+  const dir = path.join(h.base, 'backup');
+  fs.mkdirSync(dir, { recursive: true });
+  StateFiles.backup(h.state, path.join(dir, Db.FILE));
+  if (smaller) {
+    StateFiles.withDb(dir, () => {
+      const { db } = Db.handle(dir);
+      const last = db.prepare("SELECT pos FROM events WHERE cmd = 'msg' ORDER BY pos DESC LIMIT 1").get().pos;
+      // As a backup taken a commit earlier: one commit fewer, without its message.
+      db.exec(`BEGIN; DELETE FROM events WHERE pos >= ${last}; UPDATE meta SET value = (SELECT coalesce(max(pos), 0) FROM events) WHERE key = 'end';
+        UPDATE meta SET value = CAST(value AS INTEGER) - 1 WHERE key = 'rev'; COMMIT`);
+    });
   }
-  await read((notice) => notice.offset === Buffer.byteLength(restored) && (how !== 'rename' || notice.reset));
-  return restored.trimEnd().split('\n').map(JSON.parse).filter((row) => row.cmd === 'msg').map((row) => row.detail.text);
+  return dir;
 }
 
 const clockBehind = path.join(__dirname, 'fixtures', 'clock-behind.js');
 
 // New events after a restore: one from a writer whose clock is behind every
 // restored record and the reader's start, then one from this host's clock.
-// An older, smaller backup lacks the line the reader started after, so only
+// An older, smaller backup lacks the event the reader started after, so only
 // the writer's clock is left to tell its history from new events there.
 function appendAfterRestore(h, behind) {
   const ids = [];
   for (const pre of [...(behind ? [['--require', clockBehind]] : []), []]) {
     h.ok(['msg', '--to', 'orchestrator', 'after restore'], { pre, env: { CLOCK_BEHIND_MS: '600000' } });
-    ids.push(JSON.parse(StateFiles.logText(h.state).trimEnd().split('\n').at(-1)));
+    ids.push(h.events().at(-1));
   }
   if (behind) assert.ok(Date.parse(ids[1].at) - Date.parse(ids[0].at) > 300000, 'the first writer\'s clock must be behind');
   return ids.map((e) => e.id);
 }
 
-const restoreCases = [...[false, true].map((smaller) => ({ smaller, how: 'rename' })),
-  ...RESTORES.slice(1).map((how) => ({ smaller: false, how })), { smaller: true, how: 'truncate' }];
+// A backup the same as the state is no restore at all, so a reader that
+// restores one first reads an event past it. `to` keeps that event from
+// waking the reader under test.
+async function advance(h, reader, to) {
+  h.ok(['msg', '--agent', 'worker', '--to', to, 'past the backup']);
+  const end = StateFiles.logEnd(h.state);
+  await reader.until(() => reader.notices.some((notice) => notice.offset === end));
+}
+
+// A restore under a running reader renames the copy over the database; a
+// reader that finds the database gone refuses, as for any missing state.
+// Windows refuses to replace a database another process holds open.
+const restoreCases = [false, true].map((smaller) => ({ smaller, how: 'rename' }));
 for (const follow of [false, true]) for (const { smaller, how } of restoreCases) {
-  test(`restored history does not wake wait (follow: ${follow}, smaller: ${smaller}, restore: ${how})`, async (t) => {
+  test(`restored history does not wake wait (follow: ${follow}, smaller: ${smaller}, restore: ${how})`, { skip: process.platform === 'win32' }, async (t) => {
     const h = restoreFixture();
+    const copy = backupState(h, smaller);
     const reader = resetReader(t, h, ['wait', '--observe', '--agent', 'orchestrator',
       ...(follow ? ['--follow'] : ['--timeout', '300'])]);
     await reader.until(() => reader.notices.some((notice) => !notice.reset));
-    await restoreLog(h, reader, { smaller, how });
+    if (!smaller) await advance(h, reader, 'owner');
+    await restoreLog(h, reader, copy, { how });
     const ids = appendAfterRestore(h, !smaller);
     if (follow) {
       await reader.until(() => reader.lines().some((row) => row.id === ids.at(-1)));
@@ -399,8 +390,9 @@ for (const follow of [false, true]) for (const { smaller, how } of restoreCases)
 }
 
 for (const { smaller, how } of restoreCases) {
-  test(`restored owner history stays queryable without SSE replay (smaller: ${smaller}, restore: ${how})`, async (t) => {
+  test(`restored owner history stays queryable without SSE replay (smaller: ${smaller}, restore: ${how})`, { skip: process.platform === 'win32' }, async (t) => {
     const h = restoreFixture();
+    const copy = backupState(h, smaller);
     const server = resetReader(t, h, ['serve', '--agent', 'viewer', '--port', '0', '--json']);
     const { url } = await server.until(() => server.lines()[0]);
     const controller = new AbortController();
@@ -421,7 +413,8 @@ for (const { smaller, how } of restoreCases) {
     })();
     t.after(async () => { controller.abort(); await drained; });
     await server.until(() => output.includes(': connected'));
-    const history = await restoreLog(h, server, { smaller, how });
+    if (!smaller) await advance(h, server, 'orchestrator');
+    const history = await restoreLog(h, server, copy, { how });
     const restored = await fetch(new URL('/api/messages?after=0', url));
     assert.deepEqual((await restored.json()).messages.map((row) => row.detail.text), history);
     // Serve reads from the start, so every restored record is one it read.
@@ -436,24 +429,29 @@ for (const { smaller, how } of restoreCases) {
   });
 }
 
+// A state in the file layout of 0.1 with a message logged: lock recovery
+// can cut a torn append off its log before this tool migrates it, and
+// cursors 0.1 handed out from that log must still resolve after.
 function cutFixture() {
-  return cachedFixture(null, 'cut-events', (h) => {
+  const h = cachedFixture(null, 'cut-events', (h) => {
     h.init();
     h.ok(['msg', '--to', 'orchestrator', 'before the cut']);
   });
+  StateFiles.toFileLayout(h.state);
+  return h;
 }
 
-const message = (agent, to, text) => ({ at: new Date().toISOString(), agent, cmd: 'msg', task: null, detail: { to, text },
-  id: `E${require('node:crypto').randomUUID()}`, type: 'worker-message', to });
+const logFile = (h) => path.join(h.state, 'events.jsonl');
+// The cuts count a 0.1 tool hands out with a cursor: the cuts file's length.
+const fileCuts = (h) => fs.statSync(path.join(h.state, 'events.cuts.jsonl'), { throwIfNoEntry: false })?.size ?? 0;
 
 // A commit that died in the middle of its append: its staged tasks.json and
 // manifest are on disk, and the log holds its first line whole and the start
 // of its second. The next lock holder cuts both off. Returns the log's
 // length before the commit and the offset after its first line.
 function tornCommit(h, first) {
-  const log = path.join(h.state, 'events.jsonl');
   const second = message(first.agent, first.to, 'torn second');
-  const fd = fs.openSync(log, 'a');
+  const fd = fs.openSync(logFile(h), 'a');
   const { size, dev, ino } = fs.fstatSync(fd);
   fs.writeFileSync(path.join(h.state, `tasks.json.${second.id}.commit`), fs.readFileSync(path.join(h.state, 'tasks.json')));
   fs.writeFileSync(path.join(h.state, `commit.${second.id}.json`), JSON.stringify({ size, dev, ino, ids: [first.id, second.id] }));
@@ -463,10 +461,13 @@ function tornCommit(h, first) {
   return { size, after: size + Buffer.byteLength(line) };
 }
 
+// The cuts the migrated state records.
+const recorded = (h) => StateFiles.withDb(h.state, () => parseCuts(Buffer.from(Db.legacyCuts(h.state))).cuts);
+
 // Whether offset lies in the one recorded cut's range, where only cursors
 // taken before the cut move back.
 function inCut(h, offset) {
-  const cuts = fs.readFileSync(path.join(h.state, 'events.cuts.jsonl'), 'utf8').trim().split('\n').map((line) => JSON.parse(line));
+  const cuts = recorded(h);
   assert.equal(cuts.length, 1);
   return cuts[0].size < offset && offset <= cuts[0].from;
 }
@@ -474,22 +475,7 @@ function inCut(h, offset) {
 // Longer than the torn bytes, so the log grows past where readers stopped.
 const LONG = `after the cut ${'x'.repeat(400)}`;
 
-test('an event reader that read a torn commit resumes where recovery cut it and reads what was appended after', (t) => {
-  const h = cutFixture();
-  t.after(h.cleanup);
-  const reader = new EventReader(path.join(h.state, 'events.jsonl'));
-  reader.read();
-  const { size } = tornCommit(h, message('owner', 'orchestrator', 'torn first'));
-  assert.deepEqual(reader.read().rows.map((e) => e.detail.text), ['torn first']);
-  h.ok(['msg', '--to', 'orchestrator', LONG]);
-  const batch = reader.read();
-  assert.deepEqual(batch.rows.map((e) => e.detail.text), [LONG]);
-  assert.equal(batch.cut, size);
-  assert.equal(batch.reset, false);
-  assert.equal(reader.offset, StateFiles.logEnd(h.state));
-});
-
-test('a wait cursor inside bytes recovery cut off reads the events appended since', (t) => {
+test('a wait cursor inside bytes recovery cut off before migration reads the events appended since', (t) => {
   const h = cutFixture();
   t.after(h.cleanup);
   const { after } = tornCommit(h, message('worker', 'orchestrator', 'torn first'));
@@ -515,117 +501,74 @@ test('a wait re-armed with the cursor it returned after a cut times out, then wa
   assert.equal(JSON.parse(wait(first.offset, '5').stdout).detail.text, 'later');
 });
 
-test('a holder killed after its cut and before recording it leaves the record to the next holder', (t) => {
+test('a holder killed after its cut and before recording it leaves the record to the next command, which migrates', (t) => {
   const h = cutFixture();
   t.after(h.cleanup);
-  const log = path.join(h.state, 'events.jsonl');
-  const reader = new EventReader(log);
-  reader.read();
-  const { size } = tornCommit(h, message('owner', 'orchestrator', 'torn first'));
-  assert.deepEqual(reader.read().rows.map((e) => e.detail.text), ['torn first']);
+  const cuts = fileCuts(h);
+  const { size, after } = tornCommit(h, message('owner', 'orchestrator', 'torn first'));
   const r = h.run(['msg', '--to', 'orchestrator', 'never sent'], { hooks: { HOOK_DIE_RECORDING_CUT: '1' } });
   assert.notEqual(r.code, 0, 'the holder was killed');
-  assert.equal(fs.statSync(log).size, size, 'the log was cut');
+  assert.equal(fs.statSync(logFile(h)).size, size, 'the log was cut');
   h.ok(['msg', '--to', 'orchestrator', LONG]);
-  const batch = reader.read();
-  assert.deepEqual(batch.rows.map((e) => e.detail.text), [LONG]);
-  assert.equal(batch.cut, size);
+  assert.deepEqual(recorded(h).map((c) => c.size), [size]);
+  const woke = JSON.parse(h.ok(['wait', '--agent', 'orchestrator', '--after', `${after}:${cuts}`, '--types', 'decision-opened,worker-message,msg', '--timeout', '5'])); // wait-allow: the event is already logged, so wait returns at once
+  assert.equal(woke.detail.text, LONG);
 });
 
 test('a torn cut record does not swallow the next one', (t) => {
   const h = cutFixture();
   t.after(h.cleanup);
-  const log = path.join(h.state, 'events.jsonl');
-  const reader = new EventReader(log);
-  reader.read();
   const { size } = tornCommit(h, message('owner', 'orchestrator', 'torn first'));
-  reader.read();
-  // A record torn by a power cut, after the reader last read.
+  // A record torn by a power cut.
   fs.writeFileSync(path.join(h.state, 'events.cuts.jsonl'), '{"at":"2026-10-16T00:00:00.000Z","si');
   h.ok(['msg', '--to', 'orchestrator', LONG]);
-  const batch = reader.read();
-  assert.deepEqual(batch.rows.map((e) => e.detail.text), [LONG]);
-  assert.equal(batch.cut, size);
-});
-
-test('a reader started from a cursor goes back for a cut recorded after the cursor was taken', (t) => {
-  const h = cutFixture();
-  t.after(h.cleanup);
-  const log = path.join(h.state, 'events.jsonl');
-  const { size, after } = tornCommit(h, message('owner', 'orchestrator', 'torn first'));
-  const cuts = require('../lib/event-reader').cutsSize(log);
-  h.ok(['msg', '--to', 'orchestrator', LONG]);
-  const reader = new EventReader(log, { after, cuts });
-  const batch = reader.read();
-  assert.deepEqual(batch.rows.map((e) => e.detail.text), [LONG]);
-  assert.equal(batch.cut, size);
+  assert.deepEqual(recorded(h).map((c) => c.size), [size]);
 });
 
 test('served messages after a cursor inside bytes recovery cut off include the messages appended since', async (t) => {
   const h = cutFixture();
+  const { after } = tornCommit(h, message('w-1', 'owner', 'torn first'));
+  // Shorter than the cut bytes: it ends before offsets a 0.1 page was handed.
+  h.ok(['msg', '--to', 'owner', 'short', '--agent', 'w-1']);
   const server = resetReader(t, h, ['serve', '--agent', 'viewer', '--port', '0', '--json']);
   const { url } = await server.until(() => server.lines()[0]);
-  const controller = new AbortController();
-  const stream = (await fetch(new URL('/events', url), { signal: controller.signal })).body.getReader();
-  let output = '';
-  const drained = (async () => {
-    try {
-      for (;;) {
-        const { value, done } = await stream.read();
-        if (done) return;
-        output += Buffer.from(value).toString('utf8');
-        server.changes.emit('change');
-      }
-    } catch (error) {
-      if (!controller.signal.aborted) throw error;
-    }
-  })();
-  t.after(async () => { controller.abort(); await drained; });
-  await server.until(() => output.includes(': connected'));
-  tornCommit(h, message('w-1', 'owner', 'torn first'));
-  const first = await (await fetch(new URL('/api/messages', url))).json();
-  assert.deepEqual(first.messages.map((m) => m.detail.text), ['before the cut', 'torn first']);
-  // Shorter than the cut bytes: it ends before offsets the page was woken for.
-  h.ok(['msg', '--to', 'owner', 'short', '--agent', 'w-1']);
-  const next = await (await fetch(new URL(`/api/messages?after=${first.cursor}`, url))).json();
+  const next = await (await fetch(new URL(`/api/messages?after=${after}`, url))).json();
   assert.deepEqual(next.messages.map((m) => m.detail.text), ['short']);
   const all = await (await fetch(new URL('/api/messages?after=0', url))).json();
   assert.deepEqual(all.messages.map((m) => m.detail.text), ['before the cut', 'short'], 'the cut message is gone');
   // The cursor handed out after the cut stays where it is.
   assert.ok(inCut(h, next.cursor), `cursor ${next.cursor} is inside the cut range`);
-  const after = await (await fetch(new URL(`/api/messages?after=${next.cursor}`, url))).json();
-  assert.deepEqual(after.messages, []);
-  // The page is woken for it too.
-  await server.until(() => output.includes(next.messages[0].id));
+  const later = await (await fetch(new URL(`/api/messages?after=${next.cursor}&cuts=${next.cuts}`, url))).json();
+  assert.deepEqual(later.messages, []);
 });
 
 // Lock recovery by a holder that logs nothing, so the test appends next.
 const recover = (h) => S.withLock(h.state, () => {});
 
-// A line as long as first, appended after the cut, so it ends where first
-// ended before recovery cut it off.
+// A line as long as first, appended after the cut as a 0.1 tool appends, so
+// it ends where first ended before recovery cut it off.
 function sameEnd(h, first) {
-  const line = { ...first, id: `E${require('node:crypto').randomUUID()}` };
-  StateFiles.appendLog(h.state, `${JSON.stringify(line)}\n`);
+  const line = { ...first, id: `E${crypto.randomUUID()}` };
+  fs.appendFileSync(logFile(h), `${JSON.stringify(line)}\n`);
   return line.id;
 }
 
 test('a wait cursor that carries the cuts goes back for a cut even where a new line ends at its offset', (t) => {
   const h = cutFixture();
   t.after(h.cleanup);
-  const log = path.join(h.state, 'events.jsonl');
   const first = message('worker', 'orchestrator', 'torn first');
-  const cuts = cutsSize(log);
+  const cuts = fileCuts(h);
   const { after } = tornCommit(h, first);
   recover(h);
   const id = sameEnd(h, first);
-  assert.equal(fs.statSync(log).size, after, 'the new line ends where the cut one did');
+  assert.equal(fs.statSync(logFile(h)).size, after, 'the new line ends where the cut one did');
   const wait = (cursor, timeout) => h.run(['wait', '--agent', 'orchestrator', '--after', cursor, '--types', 'worker-message', '--timeout', timeout]); // wait-allow: the event is logged before the first wait starts; the second must reach its timeout
   const woke = wait(`${after}:${cuts}`, '5');
   assert.equal(woke.code, 0, woke.stderr);
   const e = JSON.parse(woke.stdout);
   assert.equal(e.id, id);
-  assert.equal(e.cursor, `${after}:${cutsSize(log)}`);
+  const now = StateFiles.withDb(h.state, () => Buffer.byteLength(Db.legacyCuts(h.state)));
+  assert.equal(e.cursor, `${after}:${now}`);
   const again = wait(e.cursor, '0.5');
   assert.equal(again.code, 2, `the wait returned ${again.stdout}`);
   assert.equal(JSON.parse(again.stdout).cursor, e.cursor);
@@ -633,130 +576,54 @@ test('a wait cursor that carries the cuts goes back for a cut even where a new l
 
 test('served messages after a cursor with its cuts include a message whose line ends where a cut one did', async (t) => {
   const h = cutFixture();
-  const log = path.join(h.state, 'events.jsonl');
-  const server = resetReader(t, h, ['serve', '--agent', 'viewer', '--port', '0', '--json']);
-  const { url } = await server.until(() => server.lines()[0]);
   const first = message('w-1', 'owner', 'torn first');
-  const before = await (await fetch(new URL('/api/messages', url))).json();
+  const cuts = fileCuts(h);
   const { after } = tornCommit(h, first);
   recover(h);
   const id = sameEnd(h, first);
-  const next = await (await fetch(new URL(`/api/messages?after=${after}&cuts=${before.cuts}`, url))).json();
+  const server = resetReader(t, h, ['serve', '--agent', 'viewer', '--port', '0', '--json']);
+  const { url } = await server.until(() => server.lines()[0]);
+  const next = await (await fetch(new URL(`/api/messages?after=${after}&cuts=${cuts}`, url))).json();
   assert.deepEqual(next.messages.map((m) => m.id), [id]);
-  assert.equal(next.cuts, cutsSize(log));
   const again = await (await fetch(new URL(`/api/messages?after=${next.cursor}&cuts=${next.cuts}`, url))).json();
   assert.deepEqual(again.messages, []);
 });
 
-test('recovery records two cuts of the same length at the same place, so a reader goes back for the second', (t) => {
+test('recovery records two cuts of the same length at the same place, and a cursor from before both reads on from there', (t) => {
   const h = cutFixture();
   t.after(h.cleanup);
-  const log = path.join(h.state, 'events.jsonl');
-  const reader = new EventReader(log);
-  reader.read();
-  const { size } = tornCommit(h, message('owner', 'orchestrator', 'torn first'));
+  const cuts = fileCuts(h);
+  const { size, after } = tornCommit(h, message('owner', 'orchestrator', 'torn first'));
   recover(h);
   tornCommit(h, message('owner', 'orchestrator', 'torn first'));
-  assert.deepEqual(reader.read().rows.map((e) => e.detail.text), ['torn first']);
   recover(h);
-  h.ok(['msg', '--to', 'orchestrator', LONG]);
-  const batch = reader.read();
-  assert.deepEqual(batch.rows.map((e) => e.detail.text), [LONG]);
-  assert.equal(batch.cut, size);
-  assert.equal(readCuts(log).cuts.length, 2);
+  h.ok(['msg', '--agent', 'worker', '--to', 'orchestrator', LONG]);
+  assert.deepEqual(recorded(h).map((c) => c.size), [size, size]);
+  const woke = JSON.parse(h.ok(['wait', '--agent', 'orchestrator', '--after', `${after}:${cuts}`, '--types', 'worker-message', '--timeout', '5'])); // wait-allow: the event is already logged, so wait returns at once
+  assert.equal(woke.detail.text, LONG);
 });
 
-test('a cut an older tool finished recovering is recorded late, and only a reader that read the cut bytes goes back', (t) => {
+test('a cut an older tool finished recovering is recorded late, and moves only a cursor that ended a line it removed', (t) => {
   const h = cutFixture();
   t.after(h.cleanup);
-  const log = path.join(h.state, 'events.jsonl');
-  const reader = new EventReader(log);
-  reader.read();
-  const { size } = tornCommit(h, message('owner', 'orchestrator', 'torn first'));
-  assert.deepEqual(reader.read().rows.map((e) => e.detail.text), ['torn first']);
+  const { size, after } = tornCommit(h, message('owner', 'orchestrator', 'torn first'));
   const r = h.run(['msg', '--to', 'orchestrator', 'never sent'], { hooks: { HOOK_DIE_RECORDING_CUT: '1' } });
   assert.notEqual(r.code, 0, 'the holder was killed');
-  assert.equal(fs.statSync(log).size, size, 'the log was cut');
+  assert.equal(fs.statSync(logFile(h)).size, size, 'the log was cut');
   // A tool from before cut records finishes the recovery its way: it removes
   // the staged files and the manifest, then appends its own event.
   for (const name of fs.readdirSync(h.state)) {
     if (/^(tasks\.json\.E[0-9a-f-]+\.commit|commit\.E[0-9a-f-]+\.json)$/.test(name)) fs.unlinkSync(path.join(h.state, name));
   }
-  fs.appendFileSync(log, `${JSON.stringify(message('worker', 'orchestrator', LONG))}\n`);
-  // This reader read the older tool's event, never the cut bytes.
-  const later = new EventReader(log);
-  assert.deepEqual(later.read().rows.map((e) => e.detail.text).slice(-1), [LONG]);
-  h.ok(['msg', '--to', 'orchestrator', 'after the older tool']);
-  const recorded = readCuts(log).cuts;
-  assert.equal(recorded.length, 1);
-  assert.equal(recorded[0].late, true);
-  const batch = reader.read();
-  assert.deepEqual(batch.rows.map((e) => e.detail.text), [LONG, 'after the older tool']);
-  assert.equal(batch.cut, size);
-  const read = later.read();
-  assert.deepEqual(read.rows.map((e) => e.detail.text), ['after the older tool']);
-  assert.equal(read.cut, undefined);
+  fs.appendFileSync(logFile(h), `${JSON.stringify(message('worker', 'orchestrator', LONG))}\n`);
+  const older = fs.statSync(logFile(h)).size;
+  h.ok(['msg', '--agent', 'worker', '--to', 'orchestrator', 'after the older tool']);
+  const cuts = recorded(h);
+  assert.equal(cuts.length, 1);
+  assert.equal(cuts[0].late, true);
   assert.deepEqual(fs.readdirSync(h.state).filter((name) => name.startsWith('cut.')), []);
-});
-
-test('a cut recorded while a reader reads the log after it is in the cursor the reader hands out', (t) => {
-  const h = cutFixture();
-  t.after(h.cleanup);
-  const log = path.join(h.state, 'events.jsonl');
-  const first = message('worker', 'orchestrator', 'torn first');
-  const reader = new EventReader(log);
-  reader.read();
-  tornCommit(h, first);
-  // Recovery cuts the torn append and the next line lands after the
-  // reader checked the cuts file and before it reads the log.
-  const readSync = fs.readSync;
-  let id;
-  fs.readSync = function (...args) {
-    fs.readSync = readSync;
-    recover(h);
-    id = sameEnd(h, first);
-    return readSync.apply(this, args);
-  };
-  t.after(() => { fs.readSync = readSync; });
-  const batch = reader.read();
-  assert.deepEqual(batch.rows.map((e) => e.id), [id]);
-  assert.equal(reader.cuts, cutsSize(log));
-  assert.equal(cutBack(log, batch.offset, reader.cuts), batch.offset, 'the cursor does not move back over the event it was handed out after');
-});
-
-test('a cut recorded during a read that starts past it sends the reader back for the line before its start', (t) => {
-  const h = cutFixture();
-  t.after(h.cleanup);
-  const log = path.join(h.state, 'events.jsonl');
-  const first = message('worker', 'orchestrator', 'torn first');
-  const second = message('worker', 'orchestrator', 'torn second');
-  const reader = new EventReader(log);
-  reader.read();
-  // A commit's append torn in two writes: the reader reads its first line
-  // before the fragment of the second lands.
-  const { size, dev, ino } = fs.statSync(log);
-  fs.writeFileSync(path.join(h.state, `tasks.json.${second.id}.commit`), fs.readFileSync(path.join(h.state, 'tasks.json')));
-  fs.writeFileSync(path.join(h.state, `commit.${second.id}.json`), JSON.stringify({ size, dev, ino, ids: [first.id, second.id] }));
-  fs.appendFileSync(log, `${JSON.stringify(first)}\n`);
-  assert.deepEqual(reader.read().rows.map((e) => e.detail.text), ['torn first']);
-  fs.appendFileSync(log, JSON.stringify(second).slice(0, 60));
-  // Line x ends where the fragment did; y follows it.
-  const x = { ...first, id: `E${require('node:crypto').randomUUID()}`, detail: { ...first.detail, text: `torn first${'x'.repeat(60)}` } };
-  const y = message('worker', 'orchestrator', 'after x');
-  // Recovery cuts both writes off and x and y land after the reader checked
-  // the cuts file and before it reads the fragment's span.
-  const readSync = fs.readSync;
-  fs.readSync = function (...args) {
-    fs.readSync = readSync;
-    recover(h);
-    fs.appendFileSync(log, `${JSON.stringify(x)}\n${JSON.stringify(y)}\n`);
-    return readSync.apply(this, args);
-  };
-  t.after(() => { fs.readSync = readSync; });
-  const during = reader.read();
-  const next = reader.read();
-  assert.equal(next.cut, size);
-  const texts = [...during.rows, ...next.rows].map((e) => e.detail.text);
-  assert.ok(texts.includes(x.detail.text), `x was read: ${JSON.stringify(texts)}`);
-  assert.ok(texts.includes('after x'));
+  const wait = (cursor) => JSON.parse(h.ok(['wait', '--agent', 'orchestrator', '--after', cursor, '--types', 'worker-message', '--timeout', '5'])).detail.text; // wait-allow: the event is already logged, so wait returns at once
+  // A cursor that ended the cut line reads from the cut; one the older tool handed out after it stays.
+  assert.equal(wait(String(after)), LONG);
+  assert.equal(wait(String(older)), 'after the older tool');
 });

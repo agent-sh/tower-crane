@@ -110,7 +110,7 @@ test('old hosted evidence without a recorded policy is stale even with a matchin
   delete doc.tasks[0].evidence.at(-1).ci_policy;
   delete audit.findLast((e) => e.cmd === 'check ci').detail.ci_policy;
   h.writeState('tasks.json', doc);
-  fs.writeFileSync(path.join(h.state, 'events.jsonl'), audit.map((e) => JSON.stringify(e)).join('\n') + '\n');
+  StateFiles.replaceLog(h.state, audit.map((e) => JSON.stringify(e)).join('\n') + '\n');
   const refused = h.run(['accept', 'T1']);
   assert.equal(refused.code, 1, refused.stdout);
   assert.match(refused.stderr, /hosted CI.*policy.*(missing|unrecorded)/);

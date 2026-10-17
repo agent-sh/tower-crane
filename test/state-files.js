@@ -86,6 +86,42 @@ function appendLog(dir, text) {
   withDb(dir, () => S.withLock(dir, () => Db.commit(dir, { events })));
 }
 
+// Replaces the whole log with the events on the lines of `text`, as a test
+// rewrote events.jsonl: the events are numbered from the start again.
+function replaceLog(dir, text) {
+  const events = String(text).split('\n').filter((line) => line.trim()).map((line) => {
+    const e = JSON.parse(line);
+    return e.id ? e : { id: `E${require('node:crypto').randomUUID()}`, ...e };
+  });
+  withDb(dir, () => S.withLock(dir, () => {
+    const { db } = Db.handle(dir);
+    db.exec("BEGIN IMMEDIATE; DELETE FROM inbox; DELETE FROM events; UPDATE meta SET value = '0' WHERE key = 'end'; COMMIT");
+    Db.commit(dir, { events });
+  }));
+}
+
+// A consistent copy of the database at `file`, as a backup takes it.
+function backup(dir, file) {
+  fs.rmSync(file, { force: true });
+  withDb(dir, () => Db.handle(dir).db.exec(`VACUUM INTO '${file.replace(/'/g, "''")}'`));
+}
+
+// Puts a backup back as state.db, as an owner restores one: its old log
+// files go first, so the copy never meets the log of the database it
+// replaces. `rename` replaces it at once; `remove` takes it away and returns
+// once `between` has run, so a reader sees the state gone first.
+async function restore(dir, file, { how = 'rename', between = async () => {} } = {}) {
+  const target = path.join(dir, Db.FILE);
+  fs.copyFileSync(file, `${target}.restore`);
+  if (how === 'remove') {
+    for (const name of DB_FILES) fs.rmSync(path.join(dir, name), { force: true });
+    await between();
+  } else {
+    for (const suffix of ['-wal', '-shm']) fs.rmSync(target + suffix, { force: true });
+  }
+  fs.renameSync(`${target}.restore`, target);
+}
+
 // A document as the file layout's writer laid it out.
 function docText(dir, file) {
   return `${JSON.stringify(readDoc(dir, file), null, 2)}\n`;
@@ -137,4 +173,4 @@ function toFileLayout(dir) {
 const DB_FILES = new Set([Db.FILE, `${Db.FILE}-wal`, `${Db.FILE}-shm`]);
 const dbFile = (dir) => path.join(dir, Db.FILE);
 
-module.exports = { toFileLayout, rewriteState, DB_FILES, readDoc, writeDoc, docText, writeDocText, readEvents, eventLines, logText, logEnd, appendEvents, appendLog, dbFile, withDb };
+module.exports = { toFileLayout, rewriteState, DB_FILES, readDoc, writeDoc, docText, writeDocText, readEvents, eventLines, logText, logEnd, appendEvents, appendLog, replaceLog, backup, restore, dbFile, withDb };

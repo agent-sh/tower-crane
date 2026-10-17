@@ -21,7 +21,7 @@ function removeBinding(h, id, key) {
   for (const event of log) {
     if (event.cmd === 'ask' && event.detail.decision === id) delete event.detail.escalation.change[key];
   }
-  fs.writeFileSync(path.join(h.state, 'events.jsonl'), log.map(e => JSON.stringify(e)).join('\n') + '\n');
+  StateFiles.replaceLog(h.state, log.map(e => JSON.stringify(e)).join('\n') + '\n');
 }
 
 function setup(t) {

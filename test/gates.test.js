@@ -500,7 +500,7 @@ test('tests evidence stores its mode in the audit event and stops counting when 
   h.writeState('tasks.json', tasks);
   const audit = StateFiles.logText(h.state).trim().split('\n').map(JSON.parse);
   delete audit.findLast((e) => e.cmd === 'check tests').detail.tests_mode;
-  fs.writeFileSync(path.join(h.state, 'events.jsonl'), audit.map(JSON.stringify).join('\n') + '\n');
+  StateFiles.replaceLog(h.state, audit.map(JSON.stringify).join('\n') + '\n');
   assert.equal(testsGate().ok, false);
   assert.match(testsGate().reason, /mode unrecorded/);
 });
