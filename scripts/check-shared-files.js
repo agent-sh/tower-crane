@@ -8,6 +8,7 @@ const { fragments, released } = require('./changelog');
 const { normalizeText, readText } = require('./text');
 const { checkTestWaits } = require('./test-waits');
 const { checkSuiteDeadline } = require('./suite-time');
+const { checkMutants } = require('./mutants');
 
 // Non-blocking stdin fails a bare read with EAGAIN; readStdin in lib/util.js retries it.
 // Matched across the whole file, so a call split over several lines is still found.
@@ -104,6 +105,7 @@ function main(args) {
   checkStdinReads(root);
   checkTestWaits(root);
   checkSuiteDeadline(root);
+  checkMutants(root);
   fragments(root);
   if (base && !/^0+$/.test(base)) checkChanges(root, base);
 }

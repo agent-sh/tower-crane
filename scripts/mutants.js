@@ -7,6 +7,7 @@
 // so the score is the suite's, and the file lists only make it cheap.
 //
 //   node scripts/mutants.js [--root DIR] [--jobs 4] [--only ID,ID] [--no-full] [--skip PATTERN]
+//   node scripts/mutants.js --check [--root DIR] [--only ID,ID]
 //
 // --skip passes --test-skip-pattern to every run, for a test the current
 // environment cannot run, such as a nested git push inside an agent's sandbox.
@@ -15,6 +16,7 @@ const cp = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { readText } = require('./text');
 
 // from must occur exactly once in file. tests are the files expected to catch it.
 const MUTANTS = [
@@ -81,7 +83,7 @@ const MUTANTS = [
   { id: 'browser-kit-approval-ignores-file', area: 'authority', file: 'lib/browser-kit.js',
     from: 'change: { user_file: file, servers: names }', to: 'change: { servers: names }', tests: ['test/approval-context.test.js'] },
   { id: 'personal-fallback-borrows-primary-grants', area: 'authority', file: 'lib/project.js',
-    from: 'const previous = personalPolicyRoutes(name, oldRoutes, ctx.env);', to: "const previous = projectPolicyRoutes(st.project, ctx.env).map(entry => ({ ...entry, binding: 'explicit' }));", tests: ['test/personal-authority.test.js'] },
+    from: 'const previous = personalPolicyRoutes(name, RouteGrants.approvedRoutes(st.project, file, name, oldRoutes, oldHarnesses, base), ctx.env);', to: "const previous = projectPolicyRoutes(st.project, ctx.env).map(entry => ({ ...entry, binding: 'explicit' }));", tests: ['test/personal-authority.test.js'] },
   { id: 'personal-fallback-ignores-harness-binding', area: 'authority', file: 'lib/project.js',
     from: "binding: route.harness ? 'explicit' : 'inherited'", to: "binding: 'explicit'", tests: ['test/personal-authority.test.js'] },
   { id: 'personal-fallback-checks-one-harness', area: 'authority', file: 'lib/project.js',
@@ -185,7 +187,7 @@ const MUTANTS = [
     to: 'const dispatched = !!ctx.env.TOWER_CRANE_HOOK;', tests: ['test/stack.test.js'] },
   // state lock
   { id: 'lock-breaks-live-holder', area: 'state lock', file: 'lib/state.js',
-    from: '    if (!lockIsStale(marker)) {', to: '    if (false) {', tests: ['test/lock.test.js'] },
+    from: '    if (!releasedMarkers.has(file) && !lockIsStale(marker, keepLive)) {', to: '    if (false) {', tests: ['test/lock.test.js'] },
   { id: 'lock-ignores-pid-namespace', area: 'state lock', file: 'lib/state.js',
     from: '(pidns ?? null) === pidNamespace() && Number.isInteger(pid)', to: 'Number.isInteger(pid)', tests: ['test/lock.test.js'] },
   { id: 'lock-never-ages-out', area: 'state lock', file: 'lib/state.js',
@@ -268,7 +270,7 @@ const MUTANTS = [
   { id: 'session-bus-spawning-env-names-sockets', area: 'sandbox', file: 'lib/agents.js',
     from: 'const env = workerEnv(ctx);\n  const runtime = runtimeDir(env);', to: 'const env = { ...ctx.env };\n  const runtime = runtimeDir(env);', tests: ['test/sandbox-extensions.test.js'] },
   { id: 'session-bus-dry-run-reads-env-file', area: 'sandbox', file: 'lib/agents.js',
-    from: 'return { flags, tmp, notices, env: { CLAUDE_CONFIG_DIR: home, ...ClaudeProvider', to: 'return { flags, tmp, notices, env: { CLAUDE_CONFIG_DIR: home, ...Settings.agentEnv(ctx.settings || {}), ...ClaudeProvider', tests: ['test/sandbox-extensions.test.js'] },
+    from: 'return { flags, tmp, tmpSpec, notices, env: { CLAUDE_CONFIG_DIR: home, ...ClaudeProvider', to: 'return { flags, tmp, tmpSpec, notices, env: { CLAUDE_CONFIG_DIR: home, ...Settings.agentEnv(ctx.settings || {}), ...ClaudeProvider', tests: ['test/sandbox-extensions.test.js'] },
   { id: 'session-bus-address-from-spawning-env', area: 'sandbox', file: 'lib/spawn-monitor.js',
     from: "require('./agents').sessionBusEnv(spawn.harness, spawn.settings || {}, agentEnv)", to: "require('./agents').sessionBusEnv(spawn.harness, spawn.settings || {}, process.env)", tests: ['test/sandbox-extensions.test.js'] },
   { id: 'sandbox-denies-spawning-runtime', area: 'sandbox', file: 'lib/agents.js',
@@ -282,6 +284,24 @@ const MUTANTS = [
     from: "const canWriteOwner = ctx.agent === 'owner' && ctx.agentExplicit;", to: 'const canWriteOwner = true;', tests: ['test/events.test.js'] },
 ];
 
+function checkMutants(root, mutants = MUTANTS) {
+  const sources = new Map();
+  const failures = [];
+  for (const m of mutants) {
+    try {
+      if (!sources.has(m.file)) sources.set(m.file, readText(path.join(root, m.file)));
+      const count = sources.get(m.file).split(m.from).length - 1;
+      if (count !== 1) failures.push(`${m.id}: the text to mutate must occur once in ${m.file}; found ${count}`);
+    } catch (error) {
+      failures.push(`${m.id}: cannot read ${m.file}: ${error.message}`);
+    }
+  }
+  if (failures.length) throw new Error(failures.join('\n'));
+}
+
+module.exports = { MUTANTS, checkMutants };
+if (require.main !== module) return;
+
 const args = process.argv.slice(2);
 const opt = (name, fallback) => {
   const i = args.indexOf(name);
@@ -294,6 +314,13 @@ const skip = opt('--skip', null);
 const root = path.resolve(opt('--root', path.join(__dirname, '..')));
 const selected = only ? MUTANTS.filter((m) => only.includes(m.id)) : MUTANTS;
 if (!selected.length || only?.some((id) => !MUTANTS.some((m) => m.id === id))) throw new Error('unknown or empty mutation selection');
+
+// Validate before copying the repository or starting a baseline.
+checkMutants(root, selected);
+if (args.includes('--check')) {
+  console.log(`${selected.length} mutant targets match once`);
+  return;
+}
 
 const scratchRoot = process.env.TOWER_CRANE_TEST_TMP || os.tmpdir();
 fs.mkdirSync(scratchRoot, { recursive: true });
@@ -320,18 +347,14 @@ try {
     fs.mkdirSync(path.dirname(path.join(copy, file)), { recursive: true });
     fs.cpSync(source, path.join(copy, file), { recursive: true });
   }
-  for (const m of selected) {
-    if (fs.readFileSync(path.join(copy, m.file), 'utf8').split(m.from).length !== 2) {
-      throw new Error(`${m.id}: the text to mutate must occur once in ${m.file}`);
-    }
-  }
+  checkMutants(copy, selected);
   // A file that fails unmutated would count every mutant as caught.
   const named = [...new Set(selected.flatMap((m) => m.tests))];
   if (!runTests(named)) throw new Error(`the unmutated tests fail:\n${runTests.failures}`);
   let fullValidated = false;
   for (const m of selected) {
     const file = path.join(copy, m.file);
-    const source = fs.readFileSync(file, 'utf8');
+    const source = readText(file);
     fs.writeFileSync(file, source.replace(m.from, m.to));
     let by = null;
     try {

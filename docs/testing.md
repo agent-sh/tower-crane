@@ -138,7 +138,9 @@ What is left is mostly the CLI's own cost: every call starts Node and loads the 
 
 ## Accuracy: the mutation sample
 
-`scripts/mutants.js` holds 31 planted bugs across the areas where a silent regression costs the most. Each is a one-line change: a check removed, a bound moved by one, a guard always true.
+`scripts/mutants.js` holds 125 planted bugs across the areas where a silent regression costs the most. Each changes a check, bound or guard. The original 31-bug sample below records the historical test cleanup.
+
+`npm run check:shared` checks that every mutant's target text occurs exactly once in its file. Missing and duplicate targets fail before tests run, including drift in a mutant outside a scoped selection. `node scripts/mutants.js --check` runs only that validation; `--root DIR` checks another checkout and `--only ID,ID` selects targets. Both the check and mutation runner normalize CRLF source to LF before matching multiline anchors.
 
 | area | bugs | examples |
 | --- | ---: | --- |
