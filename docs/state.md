@@ -124,6 +124,7 @@ Workers, reviewers and every other identity are refused both. For an operational
 | `ci.local` | operational | `project set --ci-local`, `task update --ci-local` |
 | `tests.paths`, `tests.keep`, `tests.host_only`, `tests.host_env`, `tests.mode`, `tests.by_kind`, `tests.expensive`, `tests.map` | operational | `project set --tests-*` |
 | `limits.workers`, `limits.lease_minutes`, `limits.paused` | operational | `project set --workers`, `--lease-minutes`, `--paused REASON` (empty resumes) |
+| `resources.tasks_max`, `resources.memory_max_bytes` | operational | `project set --tasks-max N --memory-max-bytes N`; positive integers, per agent or gate including descendants |
 | `budget.lower` | operational | `project set` or `task update --budget-hours`, `--budget-tokens` to a lower limit, or a limit where there was none |
 | `budget.stop` | operational | stopping a spawn whose live usage crosses a project or task budget; the supervisor does it on the orchestrator's behalf |
 | `merge.keep_branch` | operational | `project set --merge-keep-branch` |
@@ -293,6 +294,7 @@ A CLI `spawn`, and a spawn supervisor's own reactions, wait for it up to 140 s w
     "small":        { "harness": "claude", "model": "claude-haiku-5-5", "effort": "high" }
   },
   "limits": { "workers": 6, "lease_minutes": 60 },
+  "resources": { "tasks_max": 256, "memory_max_bytes": 3579139413 },
   "budget": { "hours": 40, "tokens": 20000000 },
   "decision_delegation": { "orchestrator_technical": true }
 }
@@ -416,7 +418,7 @@ Pi uses a generated config home and tool allowlist, with credential files linked
 | `sandbox` | `claude`, `codex`, `agy` | owner-required: `{ write: [paths], read: [paths], session_bus: true or false, domains: [host patterns] }`; `write` extends writable paths on Claude/Codex, `read` adds readable paths under the user's home, which Claude/Codex sandboxes otherwise hide ([home reads](ladder.md#home-reads)), `session_bus`, on claude and codex, reaches the session bus socket, and `domains` adds hosts claude's sandbox lets commands reach (a rung's list adds to the project's; [ladder.md](ladder.md) has the default list and the pattern rule); agy emits requested settings without a confinement guarantee. `session_bus` is also set alone with `project set --session-bus`, owner-required like the rest of `sandbox` |
 | `env` | all | owner-required: extra environment variables as an object of string values; kept in `project.json`, so `env_file` keeps secrets out of the state directory |
 | `env_file` | all | owner-required: path to a systemd-quoted environment file; its contents are read at real spawn and given only to the agent process |
-| `scope` | all | owner-required: systemd user scope properties as an object of non-blank string values, e.g. `{"CPUQuota":"200%","MemoryMax":"8G"}`; `{}` disables |
+| `scope` | all | owner-required: systemd user scope properties as an object of non-blank string values, e.g. `{"CPUQuota":"200%","MemoryMax":"8G"}`; `{}` clears optional properties; mandatory resource caps remain |
 
 `sandbox`, `env`, `env_file` and `scope` also apply at project level. They are owner-required ([Authority](#authority)): the owner may set, clear or repeat them through `init`, `project set` or `ladder set`; once state exists, an orchestrator may apply the identical request after owner approval. Rung environment variables override project variables with the same name; both override the environment file, which overrides the inherited process environment. A rung's `env_file` replaces the project file. Each specified rung sandbox field replaces that project field: `write: []` removes the project extra paths for that rung, and `read: []` the extra readable ones. A rung `scope` replaces the whole project scope, so `{}` disables it for that rung. Clearing the rung field restores the project default. Extra writes are added to the role's normal writable paths. Harnesses without a sandbox renderer receive environment settings but do not enforce `sandbox`.
 
@@ -547,6 +549,72 @@ On Linux, a separate host-only command gets a short `TMPDIR`, `TMP` and `TEMP` o
 A tests receipt has `host_only: {run, skipped, unreported, results}` when host-only globs are configured. The first three arrays name files. Each result has `{file, ran, skipped}` with executed and skipped case counts from TAP or Node spec summaries; TODO cases count as skipped. A file with skipped cases also gets `skip_reasons`, up to five distinct reasons, each redacted like the gate output and then cut to 200 characters, from its TAP `# SKIP` or spec `﹣ ... # reason` lines, and the refusal for a changed host-only file lists each file's counts and reasons. A file with both executed and skipped cases appears in both arrays. Missing or inconsistent summaries produce null counts and an `unreported` entry, so exit zero alone is not proof. Prove mode rejects a changed host-only file with no reported executed cases. Run-only and test-only diffs still allow skips and report them in the receipt.
 
 The list and tests policy flags also work with `init`. Omitting a flag leaves its field unchanged. Setting a field replaces a non-object `tests` or `ci` section, and clearing removes that malformed section. Object sections keep their other settings; clearing removes the section when it becomes empty. `project set` and `project show` text output print the policy and lists, showing `prove`, `{}` and `false` for absent mode, kind overrides and expensive settings, `default layouts` when `tests.paths` is absent and `[]` when no extra build files or CI apps are configured. Invalid input exits 2 without writing state or events, even when passed alongside valid settings.
+
+### Resource containment
+
+`resources.tasks_max` and `resources.memory_max_bytes` cap each spawned worker,
+reviewer, small agent and orchestrator, and each tests, proof, clean or local CI
+command. `init` records the defaults in `project.json`; older projects resolve
+missing fields at launch. `project show` prints the resolved limits. Both settings
+are operational: the orchestrator or owner can change them without a setting
+approval. There is no unlimited value.
+
+Defaults read physical host memory and the smallest `memory.max` and `pids.max`
+along the caller's cgroup v2 ancestry, including the shared slice. Half of that
+capacity is reserved for other sessions. The remaining half is divided by
+`ceil(availableParallelism / 4)`, at least one slot, allowing four logical CPUs
+per concurrent activity. TasksMax is further capped at 256 threads/processes to
+stop runaway forks. On a 24 CPU host with a 40 GiB slice and no tighter ancestor,
+the memory default is floor(40 GiB / 12), about 3.33 GiB. The task default is 256
+unless the slice's process limit requires less. These are containment defaults,
+not admission control across sessions or projects.
+
+On Linux with cgroup v2 and a reachable systemd user manager, a launch uses a
+named transient user scope (registered through D-Bus, or `systemd-run` when
+optional scope properties are set) in the caller's slice with `TasksMax`, `MemoryMax`,
+`MemorySwapMax=0`, `MemoryOOMGroup=yes` and delegated memory/pids controllers.
+The supervising process remains outside the attempt's scope so it can record a
+failure. The scope's descendants include harness Task/sub-agents, MCP servers,
+shells and tests even when they detach or change process groups. A nested Tower
+Crane launch creates a delegated child cgroup within the inherited scope. Its
+own cap and every ancestor's aggregate cap remain enforced by the kernel.
+Optional owner `scope` properties apply to the outer scope; mandatory resource
+properties take precedence, and `scope: {}` only clears optional properties.
+Failure to set up a scope or delegated child fails the launch with
+`resource-scope-failed`; it never silently falls back after selecting cgroups.
+
+The monitor observes `pids.events` and `memory.events`. A denied fork fails the
+attempt with `resource-tasks-max`, even if its harness ignores the fork error.
+A cgroup OOM fails it with `resource-memory-max`. Spawn phase events store the
+blocked reason and containment settings; status and the inbox show that reason.
+Gate command failures put the reason in their summary and receipt/event where
+applicable. The whole attempt is stopped; an unrelated scope is left running.
+
+On macOS, Windows, Linux without cgroup v2, or Linux without a reachable user
+manager, a watchdog samples process count and total RSS every 100 ms. Linux
+reads `/proc`, macOS uses `ps`, and Windows uses PowerShell process snapshots.
+It tracks the process group/tree and previously observed descendants across
+detachment, and stops them on a cap or sampling failure
+(`resource-monitor-failed`). This fallback is a sampled bound: forks and memory
+allocations can overshoot between samples. It cannot contain a descendant that
+detaches and loses its parent before the first snapshot, enforce kernel thread
+counts, account for page cache or shared memory like cgroups, or prevent a
+same-user process from deliberately escaping. On Windows there is no POSIX
+process group; the watchdog tracks parent relationships and creation times.
+Hard fork-storm isolation requires the Linux cgroup backend.
+
+Containment tests use finite fake harnesses: at most twelve child processes and
+192 MiB of allocated buffers, all with their own three second lifetime. Run
+their real systemd probes inside an independent test scope:
+
+```sh
+systemd-run --user --scope -p TasksMax=200 -p MemoryMax=1G -p MemorySwapMax=0 -p Delegate=yes \
+  node lib/containment-runner.js '{"tasks_max":200,"memory_max_bytes":1073741824}' '' safety \
+  node test/run.js --test-concurrency=1 test/containment.test.js
+```
+
+This outer scope remains a safety bound even if the launch code under test
+loses a cap.
 
 ## tasks.json
 
