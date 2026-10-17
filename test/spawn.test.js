@@ -1,6 +1,6 @@
 'use strict';
 
-const { fileWritten, waitOnRepo } = require('./signals');
+const { fileWritten, waitOnRepo, killGroup } = require('./signals');
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -110,8 +110,8 @@ test('the dead-agent sweep removes orphan brokers and keeps live claims, process
       "const c = require('node:child_process').spawn(process.execPath, ['-e', 'setTimeout(() => {}, 120000)'], { stdio: 'ignore' }); process.stdout.write(c.pid + '\\n', () => process.exit(0))"],
     { detached: true, stdio: ['ignore', 'pipe', 'ignore'] });
     const [left] = await once(leader.stdout, 'data');
-    const member = Number(String(left).trim());
-    t.after(() => { try { process.kill(member, 'SIGKILL'); } catch {} });
+    assert.ok(Number(String(left).trim()) > 0, 'the group keeps a member');
+    t.after(() => { try { killGroup(leader.pid, 'SIGKILL'); } catch {} });
     if (leader.exitCode === null) await once(leader, 'exit');
     plant('worker-group-left', { socket });
     fs.mkdirSync(path.join(h.state, 'homes', 'worker-group-left'), { recursive: true });
