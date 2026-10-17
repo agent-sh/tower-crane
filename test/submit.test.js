@@ -403,6 +403,7 @@ test('submit refuses commits that add an empty claude sandbox placeholder, and t
   const refused = h.run(['submit', 'T1', '--sha', h.git(['rev-parse', 'HEAD']), '--agent', 'w-1']);
   assert.equal(refused.code, 1, refused.stdout);
   assert.match(refused.stderr, /adds \.bashrc, \.claude\/loop\.md as empty files/);
+  assert.match(refused.stderr, /give a real file by that name content/, 'the refusal names the way past it');
   assert.equal(h.json(['task', 'show', 'T1']).status, 'in_progress');
   assert.deepEqual(events(h), before);
   fs.writeFileSync(path.join(h.repo, '.bashrc'), 'export PROJECT=1\n');

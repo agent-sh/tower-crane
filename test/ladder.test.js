@@ -4,7 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { makeRepo, fixtureLadder, ROOT, TMP_ROOT } = require('./helpers');
+const { makeRepo, fixtureLadder, pluginRoot, ROOT, TMP_ROOT } = require('./helpers');
 const A = require('../lib/agents');
 const L = require('../lib/ladder');
 const { findExecutable } = require('../lib/spawn');
@@ -251,7 +251,7 @@ test('ladder harness moves every rung without its own harness, and spawn runs ea
   h.ok(['task', 'add', '--title', 'Study', '--acceptance', 'a', '--kind', 'research', '--size', 'S']);
   for (const id of ['T1', 'T2', 'T3', 'T4']) h.ok(['brief', 'set', id, '-'], { input: `brief ${id}\n` });
   const empty = path.join(h.base, 'no-plugin');
-  fs.mkdirSync(empty);
+  pluginRoot(empty);
   const spawn = (id, role) => h.json(['spawn', '--task', id, ...(role ? ['--role', role] : []), '--dry-run'], { env: { TOWER_CRANE_PLUGIN_ROOT: empty } });
   const flags = (argv) => argv.filter((a) => !a.includes('## Task'));
   const piExtension = (agent) => [
