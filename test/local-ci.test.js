@@ -421,9 +421,12 @@ process.exitCode = 1;
   assert.match(log, /^step 1: scaffold ok$/m);
   assert.match(log, /^early line 0$/m);
   assert.match(log, /^cargo tree line 149$/m);
-  assert.match(log, /^stderr token \[redacted:/m);
-  assert.match(log, /^unterminated \nafter the unterminated escape\ntitle set\nDownloading\n\[redacted:GITHUB_TOKEN\]$/m);
-  assert.match(log, /^stray \[redacted:CI_FIXTURE_TOKEN\]\nosc head \[redacted:CI_FIXTURE_TOKEN\]\nwrapped \[redacted:CI_FIXTURE_TOKEN\] end$/m);
+  assert.equal(log.match(/^stderr token \[redacted:CI_FIXTURE_TOKEN\]$/gm)?.length, 1, log);
+  // Lines keep their order only within a stream (docs/state.md), so the stderr line can land
+  // between any two stdout lines; runs of stdout lines are checked without it.
+  const stdoutLog = log.split('\n').filter((line) => !line.startsWith('stderr token ')).join('\n');
+  assert.match(stdoutLog, /^unterminated \nafter the unterminated escape\ntitle set\nDownloading\n\[redacted:GITHUB_TOKEN\]$/m);
+  assert.match(stdoutLog, /^stray \[redacted:CI_FIXTURE_TOKEN\]\nosc head \[redacted:CI_FIXTURE_TOKEN\]\nwrapped \[redacted:CI_FIXTURE_TOKEN\] end$/m);
   assert.doesNotMatch(log, /(?:a1){4}/);
   assert.doesNotMatch(kept.output_tail, /(?:a1){4}/);
   assert.ok(!log.includes('ghp_d4'), log);
