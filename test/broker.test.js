@@ -533,6 +533,25 @@ test('a broker start sweeps /tmp socket directories of killed brokers and keeps 
   assert.ok(fs.lstatSync(path.join(ownerLive, 's')).isSocket(), 'a live owner keeps a socket that refuses connections');
 });
 
+test('a FIFO planted as an owner record does not block a broker start', { skip: (process.platform === 'win32' || typeof process.getuid !== 'function') && 'Windows has no FIFOs in /tmp' }, (t) => {
+  const s = scratch(t);
+  const cp = require('node:child_process');
+  const dir = fs.mkdtempSync(path.join('/tmp', 'tower-crane-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const fifo = path.join(dir, 'owner.json');
+  const made = cp.spawnSync('mkfifo', [fifo]);
+  if (made.status !== 0) return t.skip('mkfifo is unavailable');
+  const old = (Date.now() - 10 * 60_000) / 1000;
+  fs.utimesSync(dir, old, old);
+  // Opening a FIFO with no writer blocks, so the start runs in a child with a bound.
+  const job = { ...s.job, broker_harnesses: ['claude'], broker: path.join(s.base, 'brokers', 'worker-T1-1', B.FILE) };
+  const r = cp.spawnSync(process.execPath, ['-e', "require(process.argv[1]).start(JSON.parse(process.argv[2])).then((b) => { b.close(); process.stdout.write('started') })",
+    path.join(ROOT, 'lib', 'broker.js'), JSON.stringify(job)], { encoding: 'utf8', timeout: 20000, killSignal: 'SIGKILL' }); // wait-allow: a blocked FIFO open never returns, so the bound turns that hang into this test's failure
+  assert.equal(r.signal, null, 'the start finished within its bound');
+  assert.equal(r.stdout, 'started', r.stderr);
+  assert.ok(fs.lstatSync(fifo).isFIFO(), 'a record that is not a file is not the broker\'s: the directory stays');
+});
+
 test('a broker that falls back to /tmp names its monitor in an owner record', { skip: process.platform === 'win32' && 'Windows uses a named pipe' }, async (t) => {
   const s = scratch(t);
   const job = { ...s.job, broker_harnesses: ['claude'], broker: path.join(s.base, 'w'.repeat(90), B.FILE) };
