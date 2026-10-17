@@ -863,17 +863,20 @@ test('glued headers on one long line are read once each, and a long glued header
   // The value runs on past what a fixed window read, and its tail showed.
   const long = redact(redact.strip(`x\x1b[0mAuthorization: Bearer ${'a'.repeat(5000)} end`));
   assert.ok(!long.includes('aaaaaaaaa'), long.slice(0, 200));
-  // Read to the line's end once per header, a line of them took minutes; joined once per header,
-  // a line of headers with no space between them overflowed a string.
+  // Read to the line's end once per header, a line of them took minutes: the characters read for
+  // the headers stay a small multiple of the line. Joined once per header, a line of headers with
+  // no space between them overflowed a string.
+  const { gluedHeaders } = require('../lib/escape-views');
+  const { shapeMatches } = require('../lib/ci-log-text');
   const size = 4 << 20;
   for (const unit of ['w\x1b[mAuthorization: Bearer abc ', 'w\x1b(Bauthorization:', 'word\x1b[1mAuthorization:']) {
+    const line = unit.repeat(Math.ceil((1 << 20) / unit.length));
+    let read = 0;
+    const found = gluedHeaders(line, (t) => { read += t.length; return shapeMatches(t); });
+    assert.ok(found.length > 0 && read < 4 * line.length, `${JSON.stringify(unit)} read ${read} characters for ${line.length}`);
     const text = unit.repeat(Math.ceil(size / unit.length));
-    const started = Date.now();
-    const out = redact(redact.strip(text));
-    assert.ok(!out.includes('abc'), JSON.stringify(unit));
+    assert.ok(!redact(redact.strip(text)).includes('abc'), JSON.stringify(unit));
     assert.ok(redact.bytes(Buffer.from(`\0${text}`, 'latin1')).missed, JSON.stringify(unit));
-    const ms = Date.now() - started;
-    assert.ok(ms < 10000, `${JSON.stringify(unit)} took ${ms} ms`);
   }
 });
 
