@@ -582,6 +582,11 @@ test('a token that escapes take part of and split, or that a line break splits, 
     [`log g\n${github.slice(1, 26)}\x1bAuthorization: Bearer s3cr3tvalue123 ok`, 's3cr3tvalue123'],
     ['AS\nIAPACIFIC\x1bAUTHORIZATION: Bearer test-value', 'test-value'],
   ]) assert.ok(!plain(plain.strip(input)).includes(secret), JSON.stringify(input));
+  // Nor over a token the redactor finds once the environment value glued before it is redacted.
+  const glued = createRedactor([['MY_SECRET', 'AGVCLyB0UqFWaWBjHoW2KwhAm1']]);
+  assert.equal(glued(glued.strip('x AGVCLyB0UqFWaWBjHoW2KwhAm1ghs_QEXOi2e7ePqMbY\x1bAx0JI5\x1bghs\n_Dgm6eT6p3sOC76q8NN6NDZi2pLzL4XLEvA27RHpV\n')), 'x [redacted:MY_SECRET][redacted:GITHUB_TOKEN]\n_Dgm6eT6p3sOC76q8NN6NDZi2pLzL4XLEvA27RHpV\n');
+  // Two secrets put back next to each other keep one space between them.
+  assert.equal(plain(plain.strip(`x g\n${github.slice(1, 26)}\x1bsk-proj-abcdefghijklmnop ok`)), 'x [redacted:GITHUB_TOKEN] [redacted:API_KEY] ok');
   // Split tokens next to each other go back apart, each from the view it was found in, so a
   // fixed-length shape does not take the next one's first character.
   assert.equal(plain(plain.strip('\n\nAK\nIA658PUUFDAL0P\n\x1b[31mR4\x1bXO\nAK\x1b[m\nIAKDXEI\rU3ZNV9O\x1bI3EQ=x')), '\n\n[redacted:AWS_ACCESS_KEY_ID] [redacted:AWS_ACCESS_KEY_ID]=x');
