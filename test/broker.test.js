@@ -530,13 +530,15 @@ test('a broker start sweeps /tmp socket directories of killed brokers and keeps 
 test('a broker that falls back to /tmp names its monitor in an owner record', { skip: process.platform === 'win32' && 'Windows uses a named pipe' }, async (t) => {
   const s = scratch(t);
   const job = { ...s.job, broker_harnesses: ['claude'], broker: path.join(s.base, 'w'.repeat(90), B.FILE) };
+  const before = Date.now();
   const broker = await B.start(job);
+  const after = Date.now();
   t.after(() => broker.close());
   const { socket } = JSON.parse(fs.readFileSync(job.broker, 'utf8'));
   const owner = JSON.parse(fs.readFileSync(path.join(path.dirname(socket), 'owner.json'), 'utf8'));
   assert.equal(owner.pid, process.pid);
   assert.equal(owner.host, os.hostname());
-  assert.ok(Math.abs(Date.now() - owner.started) < 60_000);
+  assert.ok(owner.started >= before && owner.started <= after, `${owner.started} is the start's time`);
   assert.equal(require('../lib/processes').processState(owner), 'running');
 });
 
