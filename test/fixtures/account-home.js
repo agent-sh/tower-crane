@@ -21,9 +21,26 @@ require('./user-config-guard');
 
 const AUTHORITY = path.join('lib', 'authority.js');
 const GATE_TMP = path.join('lib', 'gate-tmp.js');
+const MONITOR = path.join('lib', 'spawn-monitor.js');
 const load = Module._load;
 Module._load = function (request, parent, ...rest) {
   const mod = load.call(this, request, parent, ...rest);
+  if (/(?:^|[/\\])spawn-settings(?:\.js)?$/.test(request) && parent?.filename?.endsWith(path.sep + MONITOR)) {
+    return {
+      ...mod,
+      cleanAgentEnv(env) {
+        const clean = mod.cleanAgentEnv(env);
+        // Agent sandboxes hide this fixture; CLI helpers still need it to
+        // bind the test account without reading the developer's owner key.
+        if (clean.TOWER_CRANE_SANDBOX === '1') {
+          const option = `--require "${__filename.replace(/\\/g, '/')}"`;
+          clean.NODE_OPTIONS = String(clean.NODE_OPTIONS || '').replace(option, '').trim();
+          if (!clean.NODE_OPTIONS) delete clean.NODE_OPTIONS;
+        }
+        return clean;
+      },
+    };
+  }
   if (request !== 'node:os' && request !== 'os') return mod;
   const from = parent?.filename ?? '';
   if (from.endsWith(path.sep + AUTHORITY)) {
