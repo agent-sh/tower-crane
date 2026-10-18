@@ -60,6 +60,56 @@ test('default task cap covers measured test demand when the host budget allows i
   assert.equal(limits.memory_max_bytes, Math.floor(host.memory / (2 * slots)));
 });
 
+test('unlimited Linux PID budgets fall back to kernel limits, including pid_max', {
+  skip: process.platform !== 'linux',
+}, () => {
+  const original = fs.readFileSync;
+  const slots = Math.max(1, Math.ceil(os.availableParallelism() / 4));
+  const budget = 2 * slots * 2000;
+  try {
+    for (const threads of [String(budget), 'max']) {
+      fs.readFileSync = (file, ...args) => {
+        if (file === '/proc/sys/kernel/threads-max') return threads;
+        if (file === '/proc/sys/kernel/pid_max') return String(budget);
+        if (file === '/proc/self/cgroup') return '0::/user.slice/user-1000.slice/user@1000.service/agents.slice/test.scope\n';
+        if (String(file).startsWith('/sys/fs/cgroup/') && String(file).endsWith('/pids.max')) return 'max';
+        return original(file, ...args);
+      };
+      assert.equal(C.capacity().tasks, budget);
+      assert.equal(C.defaults({ memory, tasks: Infinity }).tasks_max, 2000);
+    }
+    fs.readFileSync = (file, ...args) => String(file).startsWith('/proc/sys/kernel/')
+      ? 'max' : original(file, ...args);
+    assert.throws(() => C.defaults({ memory, tasks: Infinity }), { code: 'resource-monitor-failed' });
+    const caps = { tasks_max: 64, memory_max_bytes: memory };
+    assert.deepEqual(C.resolveGate({ resources: caps }, { memory, tasks: Infinity }), caps);
+  } finally { fs.readFileSync = original; }
+});
+
+test('gate defaults leave measured full-suite headroom and preserve explicit caps', async (t) => {
+  const h = cachedFixture(t, 'gate-defaults', h => h.init(['--executors', '3']));
+  const project = h.readState('project.json');
+  assert.deepEqual(project.resources, {}, 'init must not persist agent defaults as gate overrides');
+  const host = { tasks: 4000, memory: 14 * 1024 ** 3 };
+  const limits = C.resolveGate(project, host);
+  assert.equal(limits.tasks_max, 666);
+  assert.equal(limits.memory_max_bytes, Math.floor(host.memory / 6));
+  assert.ok(314 <= limits.tasks_max * 2 / 3, 'measured task peak needs at least one third headroom');
+  assert.ok(1012297728 <= limits.memory_max_bytes * 2 / 3, 'measured memory peak needs at least one third headroom');
+  assert.equal(C.resolveGate({}, host).tasks_max, 1000, 'two executors by default');
+  const explicit = { tasks_max: 64, memory_max_bytes: memory };
+  assert.deepEqual(C.resolveGate({ resources: explicit }, host), explicit);
+  const calls = [];
+  const ctx = { project, exec: async (cmd, args, opts) => {
+    calls.push(opts.resources);
+    return { status: 0, stdout: '', stderr: '' };
+  } };
+  await G.shell(ctx, 'suite command');
+  await G.exec(ctx, process.execPath, [], { processTree: true });
+  assert.deepEqual(calls, [C.resolveGate(project), C.resolveGate(project)]);
+  assert.match(h.ok(['project', 'show']), /gate resources: /);
+});
+
 test('nested attempt caps do not recursively shrink project defaults', () => {
   const slice = '/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/agents.slice';
   const own = 'tower-crane-123-0123456789abcdef.scope';

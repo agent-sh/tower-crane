@@ -296,13 +296,13 @@ A CLI `spawn`, and a spawn supervisor's own reactions, wait for it up to 140 s w
     "small":        { "harness": "claude", "model": "claude-haiku-5-5", "effort": "high" }
   },
   "limits": { "workers": 6, "lease_minutes": 60 },
-  "resources": { "tasks_max": 256, "memory_max_bytes": 3579139413 },
+  "resources": {},
   "budget": { "hours": 40, "tokens": 20000000 },
   "decision_delegation": { "orchestrator_technical": true }
 }
 ```
 
-`tower-crane init` writes the default harness and ladder (see below), `limits` as shown, and `budget` values of `null` (no budget) until `tower-crane project set` gives them. `limits.workers` caps worker slots held by live leases, unclaimed worker spawns and interrupted supervisors still stopping; `lease_minutes` is the default lease. Optional `limits.paused` is a non-blank reason blocking new claims and dispatches; clearing it resumes the project. Running processes continue until interrupted. `repo` defaults to the GitHub slug of the `origin` remote, `base` to the branch checked out in the main checkout.
+`tower-crane init` writes the default harness and ladder (see below), `limits` as shown, empty `resources` unless explicit caps are given, and `budget` values of `null` (no budget) until `tower-crane project set` gives them. `limits.workers` caps worker slots held by live leases, unclaimed worker spawns and interrupted supervisors still stopping; `lease_minutes` is the default lease. Optional `limits.paused` is a non-blank reason blocking new claims and dispatches; clearing it resumes the project. Running processes continue until interrupted. `repo` defaults to the GitHub slug of the `origin` remote, `base` to the branch checked out in the main checkout.
 
 `owner_config_dir` implements the credential trust rule for T101 F3 ([review #92](https://github.com/agent-sh/tower-crane/pull/92)). Only an explicit owner at a terminal chooses the directory: that first `init` pins the folder of the user file (`TOWER_CRANE_CONFIG`, else `~/.config/tower-crane/config.json`) as an absolute, canonical path into `project.json`. Every other `init` records the default `~/.config/tower-crane` under the account's home directory, read from the account rather than from `HOME`, `USERPROFILE` or `TOWER_CRANE_CONFIG`. A headless owner `init` checks `TOWER_CRANE_OWNER_KEY` against `owner/key` in that default directory, never against a key beside a file `TOWER_CRANE_CONFIG` names, which any process could have made. Each prints a `notice:` line when the user file is elsewhere. An account whose home is missing or the filesystem root (such as `/nonexistent` or `/`) has no default: such an `init` is refused, and the owner inits at a terminal. So a process that is not the owner cannot choose where the owner key and the owner's records live. Once bound, owner authentication and sandbox denials use only this recorded directory; the caller's environment is never consulted for the credential location. No `project set` flag changes the binding. When `project.json` already exists, even `init` authenticates against its recorded directory and refuses to replace the project. A project without a binding requires an owner-authorized repair: an explicit terminal owner runs `owner-key`, which records the directory under the state lock and logs an `owner-key` event. Owner authentication has no automatic fallback to the environment. Unbound projects can spawn sandboxed agents: their denial hides the owner directory under the spawning environment's resolved config directory without recording a binding. Invalid bindings still refuse validation and sandboxed spawning.
 
@@ -562,25 +562,33 @@ The list and tests policy flags also work with `init`. Omitting a flag leaves it
 
 `resources.tasks_max` and `resources.memory_max_bytes` cap each spawned worker,
 reviewer, small agent and orchestrator, and each tests, proof, clean or local CI
-command. `init` records the defaults in `project.json`; older projects resolve
-missing fields at launch. `project show` prints the resolved limits. Both settings
+command. `init` records explicit overrides in `project.json`; unspecified fields
+are resolved at launch. `project show` prints agent and gate limits. Both settings
 are operational: the orchestrator or owner can change them without a setting
 approval. Changes apply to subsequent launches. There is no unlimited value.
 
 Defaults read physical host memory and the smallest `memory.max` and `pids.max`
 along the caller's cgroup v2 ancestry, including the shared slice. Tower Crane
-attempt cgroups are excluded from this sizing so nesting does not repeatedly
-divide defaults; their limits still constrain descendants in the kernel. Half of that
-capacity is reserved for other sessions. The remaining half is divided by
+attempt cgroups are excluded from sizing so nesting does not repeatedly divide
+defaults; their limits still constrain descendants in the kernel. Each default
+uses half the effective host budget. Agent defaults divide that half by
 `ceil(availableParallelism / 4)`, at least one slot, allowing four logical CPUs
-per concurrent activity. Linux starts the task budget at the kernel's
-`threads-max`, then takes the smallest ancestor `pids.max`. The task default
-is floor(that budget / twice the slot count), without a fixed clamp.
-When no host task ceiling is available, the portable watchdog default remains
-256 processes. On a 24 CPU host with a 40 GiB slice and no tighter ancestor,
-the memory default is floor(40 GiB / 12), about 3.33 GiB. A 24,000-task
-effective host budget gives a 2,000-task default. These are containment defaults,
-not admission control across sessions or projects.
+per activity. Gate defaults divide it by `gates.executors` (two when unset),
+matching the gate queue's concurrency. Tests, proofs, clean commands, local CI
+and merge-queue suites use that gate share. Explicit resource fields override
+both defaults unchanged. Values persisted by older versions remain overrides.
+
+Linux starts the task budget at the smaller of kernel `threads-max` and
+`pid_max`, then takes the smallest ancestor `pids.max`. An unlimited ancestor
+uses the kernel ceiling, including `pid_max` when `threads-max` cannot be read.
+There is no fixed Linux task clamp. If neither a finite ancestor nor a kernel
+ceiling can be read, resolving missing task limits fails with
+`resource-monitor-failed`. Non-Linux watchdog defaults remain 256 processes.
+On a 24 CPU host with a 40 GiB slice and no tighter ancestor, agent memory stays
+floor(40 GiB / 12), about 3.33 GiB. With a 4,000-task, 14 GiB effective budget,
+three gate executors give each command 666 tasks and about 2.33 GiB, above the
+measured 314-task and 1.01 GB suite peaks. These are containment defaults,
+not admission control across activities, sessions or projects.
 
 On Linux with cgroup v2 and a reachable systemd user manager, a launch uses a
 named transient user scope (registered through D-Bus, or `systemd-run` when
