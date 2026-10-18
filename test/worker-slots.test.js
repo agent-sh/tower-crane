@@ -232,6 +232,59 @@ test('a dead reservation frees the only worker slot before the first capacity ch
   fs.writeFileSync(path.join(h.base, 'T2.exit'), '');
 });
 
+test('dispatch clears a reservation that dies while it waits for the dispatch lock', { skip: RESERVES }, async (t) => {
+  const h = setup(t, 2, 3);
+  controlledHarness(h);
+  const { spawned } = await pausedSpawn(h, 'T1');
+  const S = require('../lib/state');
+  const dir = require('../lib/spawn').dispatchLockPath({ stateDir: h.state });
+  fs.mkdirSync(path.dirname(dir), { recursive: true });
+  const lock = S.tryMarkedLock(dir, { keepLive: true });
+  assert.ok(lock);
+  const paused = path.join(h.base, 'dispatch-wait');
+  const hook = path.join(h.base, 'dispatch-wait.js');
+  fs.writeFileSync(hook, `
+const fs = require('node:fs');
+const rename = fs.renameSync;
+let stopped = false;
+fs.renameSync = function(from, to, ...args) {
+  try { return rename.call(this, from, to, ...args); }
+  catch (error) {
+    if (to === ${JSON.stringify(dir)} && !stopped) {
+      stopped = true;
+      require(${JSON.stringify(path.join(__dirname, 'atomic-file'))}).writeAtomic(${JSON.stringify(paused)}, 'waiting');
+      const deadline = Date.now() + 300000;
+      while (!fs.existsSync(${JSON.stringify(`${paused}.go`)})) {
+        if (Date.now() >= deadline) throw new Error('dispatch was never released');
+        require(${JSON.stringify(path.join(__dirname, '..', 'lib/util'))}).sleepSync(10);
+      }
+    }
+    throw error;
+  }
+};
+`);
+  const dispatch = h.runAsync(['spawn', '--task', 'T2', '--json'], {
+    env: { NODE_OPTIONS: `--require=${JSON.stringify(hook)}` },
+  });
+  try {
+    await waitOnRepo(h, () => fs.existsSync(paused), 'dispatch never reached its lock');
+    h.ok(['claim', 'T3', '--agent', 'late-holder']);
+    killWorker(spawned);
+    await waitOnRepo(h, () => workerGone(spawned), 'worker processes did not exit');
+  } finally {
+    S.releaseMarkedLock(lock);
+    fs.writeFileSync(`${paused}.go`, '');
+    fs.writeFileSync(path.join(h.base, 'T2.exit'), '');
+  }
+  const result = await dispatch;
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(JSON.parse(result.stdout).agent, 'worker-T2-1');
+  const audit = events(h);
+  const cleared = audit.findIndex(e => e.cmd === 'reservation clear' && e.detail.agent === spawned.agent);
+  const launched = audit.findIndex(e => e.cmd === 'spawn' && e.task === 'T2');
+  assert.ok(cleared >= 0 && cleared < launched, 'the dead reservation is cleared before capacity is rechecked');
+});
+
 test('a dead reservation frees the only worker slot for a batch spawn --ready', { skip: RESERVES }, async (t) => {
   const h = setup(t, 1, 2);
   controlledHarness(h);
