@@ -1208,3 +1208,7 @@ Orphan removal with `worktree prune --orphans` checks current task ownership and
 
 `inbox` surfaces `review_churn` for active tasks at the threshold with each failed review's one-line findings, explicit acceptance-line and finding-location comparisons, and recorded spend. It asks the orchestrator to bound scope, split the task or change tier, while rework proceeds unless the repeated-area gate above requires a scope ruling. Findings without comparable scope references are marked `unknown`. Counts span heads and rework revision bumps, and reset on an acceptance revision change. Later stack refreshes preserve that reset. `status`, the board and both sketches show the count per task. See [Orchestrator inbox](state.md#orchestrator-inbox) for the fields and revision rules.
 
+
+## Standing publish policy
+
+The `full_suite` publish condition requires current pinned test commands and settings, a full head-suite run without a waiver, and actual passing cases for every configured host-only file at the release head. Skipped or unreported host cases and changed host settings require a fresh gate. Git file listing and main CI reads happen before the state write; changed release or policy inputs refuse the request. See [publish policy](state.md#publish-policy).

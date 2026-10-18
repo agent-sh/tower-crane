@@ -11,6 +11,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { makeRepo, cachedFixture } = require('./helpers');
 const { gateFixture } = require('./gate-helpers');
+const { shellQuote } = require('../lib/gates/common');
 
 const orchestrator = { env: { TOWER_CRANE_AGENT: 'orchestrator' } };
 const worker = (id) => ({ env: { TOWER_CRANE_AGENT: `worker-${id}-1`, TOWER_CRANE_TASK: id } });
@@ -65,6 +66,51 @@ function github(t) {
 }
 
 const POLICY = JSON.stringify({ conditions: ['review_clean', 'full_suite', 'main_ci_green'] });
+
+function hostRelease(t, content) {
+  const h = github(t);
+  h.git(['switch', '-qc', 'release-host-proof']);
+  fs.writeFileSync(path.join(h.repo, 'test', 'host-proof.test.js'), content);
+  h.git(['add', '-A']);
+  h.git(['commit', '-qm', 'release host proof']);
+  h.sha = h.git(['rev-parse', 'HEAD']);
+  const data = JSON.parse(fs.readFileSync(h.env.INBOX_GITHUB, 'utf8'));
+  data.prs[7].headRefOid = h.sha;
+  data.prs[7].headRefName = 'release-host-proof';
+  fs.writeFileSync(h.env.INBOX_GITHUB, JSON.stringify(data));
+  h.ok(['project', 'set', '--tests-mode', 'run-only',
+    '--tests-cmd', `${shellQuote(process.execPath)} -e "process.exit(0)"`,
+    '--tests-proof-cmd', `${shellQuote(process.execPath)} {tests}`,
+    '--tests-host-only', '["test/host-proof.test.js"]',
+    '--tests-host-env', '{"TC_HOST_OPT_IN":"1"}',
+    '--publish-policy', POLICY]);
+  h.mainCI('success');
+  const id = h.release();
+  h.ok(['accept', id]);
+  return { h, id, publish: ['ask', '--setting', 'publish', '--change', JSON.stringify({ task: id }), '--agent', 'orchestrator'] };
+}
+
+test('standing publish requires actual host-only cases rather than skipped or unreported files', (t) => {
+  for (const [name, content, allowed] of [
+    ['skipped', "require('node:test')('native host case', {skip:true}, () => {});\n", false],
+    ['unreported', "console.log('host command exited without reporting cases');\n", false],
+    ['passing', "require('node:test')('native host case', () => {});\n", true],
+  ]) {
+    const { h, publish } = hostRelease(t, content);
+    const result = h.run(publish, orchestrator);
+    assert.equal(result.code, allowed ? 0 : 1, `${name}: ${result.stdout}\n${result.stderr}`);
+    if (!allowed) assert.match(result.stderr, /full_suite: .*host-only/i);
+  }
+});
+
+test('standing publish rejects host evidence after its configured host environment changes', (t) => {
+  const { h, publish } = hostRelease(t, "require('node:test')('native host case', () => {});\n");
+  assert.equal(h.run(publish, orchestrator).code, 0);
+  h.ok(['project', 'set', '--tests-host-env', '{"TC_HOST_OPT_IN":"2"}']);
+  const stale = h.run(publish, orchestrator);
+  assert.equal(stale.code, 1, `${stale.stdout}\n${stale.stderr}`);
+  assert.match(stale.stderr, /full_suite: .*no longer matches/i);
+});
 
 test('a decision closes itself as moot once every task it blocks is cancelled, superseded or accepted, and an approval request once its task closes', (t) => {
   const h = makeRepo(t);

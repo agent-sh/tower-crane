@@ -1,0 +1,1 @@
+- Standing publish policy now requires current test-command and host settings, and passing, non-skipped cases for every configured host-only file at the release head. Receipts bind host opt-ins by digest without duplicating their values.
