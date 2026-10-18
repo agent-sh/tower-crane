@@ -201,7 +201,7 @@ test('mutation fallback requires a green baseline in a copy containing all test 
     fs.mkdirSync(path.dirname(target), { recursive: true });
     fs.writeFileSync(target, text);
   };
-  for (const file of ['test/run.js', 'test/signals.js', 'test/atomic-file.js', 'test/global-setup.js', 'test/repo-seed.js', 'test/tmp-root.js', 'test/fixtures/user-config-guard.js']) {
+  for (const file of ['test/run.js', 'test/signals.js', 'test/atomic-file.js', 'test/global-setup.js', 'test/host.js', 'test/repo-seed.js', 'test/tmp-root.js', 'test/fixtures/user-config-guard.js']) {
     write(file, fs.readFileSync(path.join(ROOT, file), 'utf8'));
   }
   write('test/gates/.keep', '');
