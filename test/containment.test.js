@@ -128,6 +128,29 @@ test('ordinary fixture launches preserve hooks and spawn options without contain
   await h.cleanup();
 });
 
+test('configured outer scopes refuse a missing manager before launching the command', async (t) => {
+  const h = fixture(t);
+  const launched = path.join(h.base, 'unexpected-launch');
+  const fake = path.join(__dirname, 'fixtures', 'containment-systemd.js');
+  const script = `
+const C = require(${JSON.stringify(require.resolve('../lib/containment'))});
+try {
+  const child = C.spawn(process.execPath, ['-e', ${JSON.stringify(`require('node:fs').writeFileSync(${JSON.stringify(launched)}, 'ran')`)}], {
+    scope: { CPUQuota: '200%' }, resources: { tasks_max: 64, memory_max_bytes: ${memory} },
+  });
+  child.on('close', () => process.exitCode = 1);
+} catch (error) {
+  if (error.code !== 'resource-scope-failed') throw error;
+  console.log(error.code);
+}`;
+  const result = await G.treeExec(process.execPath, ['--require', fake, '-e', script], {
+    env: { ...h.env, TC_FAKE_NO_MANAGER: '1', [C.MARK]: '' },
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, 'resource-scope-failed\n');
+  assert.equal(fs.existsSync(launched), false);
+});
+
 test('local cgroup events distinguish a child cap from the parent cap', (t) => {
   const h = fixture(t);
   const group = path.join(h.base, 'cgroup-events');

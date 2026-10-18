@@ -603,6 +603,9 @@ manager, or an inherited scope without writable delegated controllers,
 the executable launches directly with a watchdog. An existing parent cgroup
 continues to enforce its aggregate cap. The launcher never creates a sibling
 scope to escape an inherited scope that cannot delegate.
+Explicit outer `scope` properties require a reachable user manager and cgroup
+v2; an unavailable manager fails the configured launch with
+`resource-scope-failed`. Nested launches retain the outer scope's properties.
 
 Fixture CLI environments (`TC_ACCOUNT_HOME`) and Node test workers preserve
 fixture preloads, process ids, shell invocation and caller spawn options.

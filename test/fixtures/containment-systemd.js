@@ -19,8 +19,15 @@ if (require.main !== module) {
   // The bootstrap exercises real runner code against a private disk hierarchy.
   C.currentGroup = () => group;
   C.counters = () => ({ tasks: 0, memory: 0 });
+  if (process.env.TC_FAKE_NO_MANAGER) {
+    const readFileSync = fs.readFileSync;
+    fs.readFileSync = (file, ...args) => file === '/proc/self/cgroup'
+      ? '0::/user.slice/user-1000.slice/user@1000.service/agents.slice/unmanaged.scope\n'
+      : readFileSync(file, ...args);
+  }
   const spawnSync = cp.spawnSync;
   cp.spawnSync = (file, args, opts) => {
+    if (process.env.TC_FAKE_NO_MANAGER && file === 'systemctl') return { status: 1, stdout: '', stderr: 'no user manager' };
     if (file !== 'busctl') return spawnSync(file, args, opts);
     try {
       let at = args.indexOf('ssa(sv)a(sa(sv))');
