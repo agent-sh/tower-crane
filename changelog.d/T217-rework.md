@@ -1,0 +1,1 @@
+- Blocking review areas now come from finding entries, excluding earlier-blocker status and reproduction references. Generated-command regression fixtures preserve existing flags and descriptions when checking drift, merge independence and table-cell escaping.
