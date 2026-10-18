@@ -1,5 +1,46 @@
 # Changelog
 
+## 0.1.4 (2026-10-18)
+
+### Security
+
+- The git and gh shims stop with exit 127 and `git shim loop: ...` or `gh shim loop: ...` when a program on PATH ahead of the real git or gh runs the shim again and that shim would run the same program. Before, such a wrapper inside an agent recursed without end, and its processes filled the host until it ran out of memory. A wrapper that drops its own directory from PATH and runs git by name still works. As a backstop, a shim nested inside 8 others refuses to run.
+- On Linux, a shim read that times out kills every process it started, not only its direct child. The read stays in the agent's process group, so stopping the agent stops it too.
+- An environment value is redacted under the splits that still showed part of it in 0.1.3: a value whose head a line-split token takes, split by a real two-character escape, and a value whose characters an escape would take, as `ESC [` before a letter or digits, `ESC (` before `.` or `-`, or an OSC the value goes on in. The text path redacts the whole value, and a binary artifact holding one is not copied. Such a value yields to any other secret it meets, so one that runs on from another secret can still keep part of its text; docs/state.md says when.
+- A binary artifact holding a token that a real two-character escape and a line break both split, such as `ghp_Ab3dEf\x1b(B6hIj9kLm2nO\np5q...`, is not copied. Before, no view of the bytes joined it.
+- The text redactor redacts every character the 0.1.3 cleanup would, which reads escapes only as a terminal does, as well as what the new readings find. Where the two put back different text for one secret, the output shows no character either hides. A binary artifact is checked with both readings of an environment value.
+- An `Authorization` header that an escape glues to a token or a word keeps its value redacted. Before, `z xoxa-ab\ncdefghij\x1b(B\x1b[1mAuthorization: Bearer x` showed `x`: the cleanup removed the escapes, the token's run took the header word, and no pattern found the header. Such a header is now read with a space before it, and the header word goes back from the token when the token stays whole without it. The value is redacted to its end however long it runs. A binary artifact with such a header value is not copied.
+- Text redaction has a budget that grows with the input: 32 Mi characters, 262144 work units plus one per character, and 5 seconds plus one per MiB. A CI log, gate diagnostic or local CI text artifact over it keeps only `[unscannable text: <reason>; content omitted]`, its tail included. Before, a log dense with escape-split values or glued headers could exhaust memory during the scan. Plain, colored and CRLF logs of any size within 32 Mi characters keep their full output.
+- Output that holds the private-use characters the redactor marks secrets with is redacted as other text. Before, such characters could turn into a placeholder or leave a marker in place of one.
+
+### Upgrading
+
+- `task update ID --priority urgent` marks a task urgent. Only the orchestrator or owner may set it. `ready`, `spawn --ready` and automation refill take urgent tasks first. `--priority normal` removes the mark. State with an empty or non-string `priority` no longer loads.
+- Two failed reviews with blocking findings in the same file area now hold the task. Claims, readiness and worker dispatch refuse it, and the inbox shows `review_redesign` in place of `rework_ready`. Reviews recorded before 0.1.4 count, so an open task that already has two such failures is held right after the upgrade. The orchestrator or owner clears the hold with `task note ID TEXT --kind scope-ruling` for a design change, or with `task update ID --acceptance A ... --closed-acceptance` to narrow acceptance to a closed list. An ordinary note or acceptance edit does not clear it.
+- A CI log, gate diagnostic or local CI text artifact over the redaction budget is replaced whole by `[unscannable text: <reason>; content omitted]`. The command's exit verdict stays.
+- A host-only test that the base branch fails with the same first error line no longer reworks the task. After one retry the task stays submitted, the inbox `gate_failed` item names the main failure and offers `check tests ID`, and automation reruns the tests gate when the base tip moves past the recorded base. Before, a task that was not a hotfix was retried once and then reworked.
+- A git or gh wrapper on PATH that runs `git` or `gh` by name with its own directory still on PATH now makes the shim exit 127 with a `shim loop` message instead of recursing.
+- `status` prints `home kept: AGENT by a stray process PID`, or `by stray processes P1, P2`, for an agent home a stray process keeps after the agent exited, such as a daemon that inherited the launch marker and left the harness's session. Its JSON adds `kept_homes`. A sandbox that denies reading `homes/` gets an empty list.
+
+### Review
+
+- Worker rework names each prior blocking finding's failure class and sibling cases, covers them with a table-driven regression test, and records that under `Rework coverage` in the pre-submit summary. The worker skill says how.
+- Failed review evidence records `areas`, the normalized file paths of its blocking findings. They come from structured `findings[].path` when present and otherwise from the blocking finding entries. Earlier-blocker status, reproduction references, follow-ups and fenced examples supply no area, and neither does a location outside the tree such as `PR body`. Rework keeps the structured locations, and `rework --from-review` takes the areas from the complete fetched review.
+- Failed verdicts at the same commit and revision count once per area, whichever reviewers recorded them. A scope ruling's event records `review_after` and the task revision, and only failures recorded after it, at that revision or later, can hold the task again.
+
+### Tasks and dispatch
+
+- Ready listings, `status`, the board, batch dispatch and automation refill order urgent tasks first, then by unblock count and task id. A priority change keeps the task revision and does not stop a live run. `task list` marks only open urgent tasks.
+
+### Gates
+
+- A host-only failure is the base's when the base fails each shared test name with the same first error line, normalized as CI main failures are. A host-only file the task changed counts only on a specific line, not a generic one such as a timeout. The tests evidence records `infrastructure_failure` with `main_failure`, and later software gates still run. A different error under the same name still retries once and reworks.
+- A token piece whose line ends in a CR, an escape and then the LF, as a progress line clears itself (`\r\x1b[K\n`), keeps its line ending. Before, the other stream's next line was joined onto the piece's placeholder, so a `not ok` line could drop out of the failing test names.
+
+### Agents and spawn
+
+- Pruning reads every exited agent's launch markers in one `/proc` pass, not one pass per agent, and skips the read for an exited agent with no recorded launch marker.
+
 ## 0.1.3 (2026-10-17)
 
 ### Security
