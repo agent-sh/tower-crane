@@ -622,7 +622,7 @@ test('short CRLF and redraw logs keep ordinary download progress and counters', 
   const { stripEscapes, createRedactor, redactJoined } = require('../lib/gates/common');
   const redact = createRedactor([]);
   const fill = (unit, size) => unit.repeat(Math.ceil(size / unit.length)).slice(0, size);
-  const build = (line, size) => {
+  const build = (line, size, complete = false) => {
     const parts = [];
     let length = 0;
     for (let i = 0; length < size; i++) {
@@ -630,7 +630,8 @@ test('short CRLF and redraw logs keep ordinary download progress and counters', 
       parts.push(next);
       length += next.length;
     }
-    return parts.join('').slice(0, size);
+    const text = parts.join('');
+    return complete ? text : text.slice(0, size);
   };
   const progress = Array.from({ length: 101 }, (_, p) => '\r' + String(p).padStart(3) + '%').join('');
   const cases = [
@@ -641,13 +642,19 @@ test('short CRLF and redraw logs keep ordinary download progress and counters', 
     ...Array.from({ length: 6 }, (_, i) => [`redraw-${i + 3}`, fill('\r' + 'p'.repeat(i + 3), 4 << 20)]),
     ['percent', fill('\r 45%', 4 << 20)],
     ['blank lines', fill('a\r\n\r\n\r\nb line here\r\n', 4 << 20)],
+    ['dotnet-1MiB', fill('passed test1\r\n', 1 << 20)],
+    ['jest redraw', build((i) => `\r\x1b[K\x1b[1mRUNS\x1b[22m test/file${i % 50}.test.js\r\n`, 4 << 20, true)],
   ];
   const hash = (text) => crypto.createHash('sha256').update(text).digest('hex');
   for (const [name, input] of cases) {
-    let expected = input.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+    let expected = input.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
     if (input.endsWith('\r')) expected = expected.slice(0, -1);
     assert.equal(hash(stripEscapes(input)), hash(expected), `${name} cleanup`);
     assert.equal(hash(redactJoined({ stdout: input, stderr: '' }, redact)), hash(expected), `${name} joined`);
+    const half = input.length >> 1;
+    assert.equal(hash(redactJoined({ output: input, runs: [
+      { stream: 'out', text: input.slice(0, half) }, { stream: 'err', text: input.slice(half) },
+    ] }, redact)), hash(expected), `${name} streams`);
   }
 });
 
