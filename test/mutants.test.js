@@ -149,7 +149,7 @@ test('an unavailable systemd manager is an infrastructure failure rather than a 
   }), error => error.code === 'ENOENT' || /cannot launch mutant systemd scope/.test(error.message));
 });
 
-function scopedFixture(t, failRead) {
+function scopedFixture(t, scopeRead) {
   const h = makeRepo(t);
   const spawn = cp.spawn;
   const read = fs.readFileSync;
@@ -174,7 +174,8 @@ function scopedFixture(t, failRead) {
     return list.call(fs, file, ...args);
   });
   t.mock.method(fs, 'readFileSync', (file, ...args) => {
-    failRead?.(file, child);
+    const value = scopeRead?.(file, child);
+    if (value !== undefined) return value;
     if (file === '/proc/self/cgroup') return '0::/user.slice/user-1000.slice/user@1000.service/agents.slice/worker.scope\n';
     if (file === '/sys/fs/cgroup/fixture.scope/cgroup.procs') { reads++; return `${child.pid}\n`; }
     if (file === '/sys/fs/cgroup/fixture.scope/pids.current') return '1\n';
@@ -219,6 +220,40 @@ test('scoped containment tolerates cgroup removal during final reads and rejects
         assert.equal(failed, true, 'the final inspection hit the planted read error');
       });
     }
+  }
+});
+
+test('scoped containment forgets exited PIDs after one failed stat read', { skip: process.platform !== 'linux' }, async (t) => {
+  for (const code of ['ENOENT', 'ESRCH']) {
+    await t.test(code, async (t) => {
+      const pids = Array.from({ length: 20 }, (_, index) => 2147483647 - index);
+      const first = new Set();
+      const gone = new Map();
+      let listed = false;
+      const fixture = scopedFixture(t, (file, child) => {
+        if (file === '/sys/fs/cgroup/fixture.scope/cgroup.procs' && !listed) {
+          listed = true;
+          return [child.pid, ...pids].join('\n') + '\n';
+        }
+        const pid = /^\/proc\/(\d+)\/stat$/.exec(String(file))?.[1];
+        if (!pid || !pids.includes(Number(pid))) return;
+        if (!first.has(pid)) {
+          first.add(pid);
+          // An already-exiting member is tracked but cannot be signalled by the fixture.
+          const fields = Array(22).fill('0');
+          fields[0] = 'Z';
+          fields[19] = '10';
+          return `${pid} (exited fixture) ${fields.join(' ')}`;
+        }
+        gone.set(pid, (gone.get(pid) || 0) + 1);
+        throw Object.assign(new Error('process exited'), { code });
+      });
+      const result = await fixture.run();
+      assert.equal(result.status, 0, result.output);
+      assert.equal(result.reason, null, result.output);
+      assert.equal(gone.size, pids.length, 'every observed PID was later found gone');
+      assert.deepEqual([...gone.values()], pids.map(() => 1), 'exited PIDs cost only one failed read');
+    });
   }
 });
 

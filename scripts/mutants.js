@@ -411,7 +411,10 @@ async function runContained(command, argv, { cwd, env = process.env, limit = 512
         if (known.has(pid) && known.get(pid) !== start) continue;
         known.set(pid, start);
         if (!['Z', 'X'].includes(fields[0])) members.push({ pid, group: Number(fields[2]), start });
-      } catch (error) { if (!['ENOENT', 'ESRCH'].includes(error.code)) throw error; }
+      } catch (error) {
+        if (!['ENOENT', 'ESRCH'].includes(error.code)) throw error;
+        known.delete(pid);
+      }
     }
     return members;
   };
