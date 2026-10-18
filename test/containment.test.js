@@ -13,6 +13,10 @@ process.env.TOWER_CRANE_TEST_CONTAINMENT = '1';
 const memory = 512 * 1024 * 1024;
 const systemd = C.canScope();
 
+function diagnostics(result) {
+  return result.stderr + (result.containment?.error || '');
+}
+
 function fixture(t) {
   const h = cachedFixture(t, 'containment', (h) => {
     h.init(['--tasks-max', '64', '--memory-max-bytes', String(memory)]);
@@ -105,7 +109,7 @@ test('nested cap failures leave the parent running when local events are availab
       resources: { tasks_max: 128, memory_max_bytes: memory }, timeout: 10000, // wait-allow: finite nested cap probe deadline
     });
     if (!localEvents && result.resource_reason === reason) continue;
-    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.status, 0, diagnostics(result));
     assert.equal(result.resource_reason, undefined, result.stderr);
     assert.ok(result.stdout.includes(`child: ${reason}\nparent-survived`), result.stdout + result.stderr);
   }
@@ -117,7 +121,7 @@ test('fake harness nested launches and detached grandchildren retain containment
   const result = await G.treeExec(process.execPath, [HARNESS, 'nested', file], {
     resources: { tasks_max: 64, memory_max_bytes: memory }, timeout: 10000,
   });
-  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.status, 0, diagnostics(result));
   assert.equal(result.error, undefined, result.stderr);
   const records = fs.readFileSync(file, 'utf8').trim().split('\n').map(JSON.parse);
   assert.equal(records.length, 3);
@@ -149,7 +153,7 @@ fs.appendFileSync(process.env.CONTAINMENT_PRELOAD_LOG, JSON.stringify({
     env: { ...process.env, NODE_OPTIONS: `--require ${JSON.stringify(preload)}`, CONTAINMENT_PRELOAD_LOG: log },
     resources: { tasks_max: 64, memory_max_bytes: memory },
   });
-  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.status, 0, diagnostics(result));
   const records = fs.readFileSync(log, 'utf8').trim().split('\n').map(JSON.parse);
   assert.equal(records.length, 1);
   assert.equal(records[0].bootstrap, null);
@@ -164,8 +168,8 @@ test('fast scoped commands preserve stdout-only diagnostics and registration', a
     const result = await G.treeExec(process.execPath, ['-e', 'console.log("useful diagnostic"); process.exitCode = 1'], {
       resources: { tasks_max: 64, memory_max_bytes: memory },
     });
-    assert.equal(result.status, 1, result.stderr);
-    assert.equal(result.resource_reason, undefined);
+    assert.equal(result.status, 1, diagnostics(result));
+    assert.equal(result.resource_reason, undefined, diagnostics(result));
     assert.equal(result.stderr, '');
     assert.match(G.errText(result), /useful diagnostic/);
   }

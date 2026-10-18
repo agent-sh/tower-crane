@@ -601,9 +601,10 @@ the executable launches directly with a watchdog. An existing parent cgroup
 continues to enforce its aggregate cap. The launcher never creates a sibling
 scope to escape an inherited scope that cannot delegate.
 
-Fixture CLI environments (`TC_ACCOUNT_HOME`) and Node test workers launch
-without a new wrapper, preserving fixture preloads, process ids and caller
-spawn options. Dedicated containment tests set
+Fixture CLI environments (`TC_ACCOUNT_HOME`) and Node test workers preserve
+fixture preloads, process ids, shell invocation and caller spawn options.
+Explicit owner scope wrappers still apply; automatic containment is bypassed.
+Dedicated containment tests set
 `TOWER_CRANE_TEST_CONTAINMENT=1` to exercise real enforcement explicitly.
 The independent capped test scope remains their safety fence.
 
@@ -626,7 +627,8 @@ Containment tests use finite fake harnesses: at most twelve child processes and
 their real systemd probes inside an independent test scope:
 
 ```sh
-systemd-run --user --scope -p TasksMax=200 -p MemoryMax=1G -p MemorySwapMax=0 -p Delegate=yes \
+systemd-run --user --scope --slice="$(node -p 'require("./lib/containment").callerSlice()')" \
+  -p TasksMax=200 -p MemoryMax=1G -p MemorySwapMax=0 -p Delegate=yes \
   node lib/containment-runner.js '{"tasks_max":200,"memory_max_bytes":1073741824}' '' safety \
   node test/run.js --test-concurrency=1 test/containment.test.js
 ```
