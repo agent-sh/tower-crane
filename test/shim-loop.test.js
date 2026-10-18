@@ -20,6 +20,9 @@ const POSIX = process.platform === 'win32' && 'the shims and wrappers here are s
 // Deeper than this the wrappers stop on their own, so a shim that does not
 // stop the loop fails the test instead of loading the machine.
 const GUARD = 4;
+// The most shims lib/shim.js runs inside one another. Written here, not read
+// from the module, so the wrapper's own guard holds against any shim.
+const MAX_DEPTH = 8;
 
 // An agent home as spawn builds one: the marker findReal skips, the policy,
 // and git and gh shims in bin.
@@ -108,7 +111,6 @@ exec git "$@"`);
 // stops it.
 test('a gh wrapper that changes PATH and runs the shim stops at the depth bound', { skip: POSIX }, (t) => {
   const f = fixture(t);
-  const { MAX_DEPTH } = require(SHIM);
   wrapper(f, 'gh', `PATH=/nonexistent-$d:$PATH
 export PATH
 ${runShim(f, 'gh', false)}`, MAX_DEPTH + 4);
