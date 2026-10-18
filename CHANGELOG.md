@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.1.5 (2026-10-18)
+
+### Upgrading
+
+- Agents no longer inherit the dispatcher's `NODE_OPTIONS`, `NODE_PATH`, `NODE_REPL_EXTERNAL_MODULE`, `NODE_PRESERVE_SYMLINKS`, `NODE_PRESERVE_SYMLINKS_MAIN` or `NODE_COMPILE_CACHE`. A harness that needs a preload or a module path gets it from the project or rung `env` or `env_file`.
+
+### Gates
+
+- A plain log whose lines share a secret's first characters stays scannable. Before, a 1 MiB joined log of lines like `ok 0123456789`, with a secret that starts `01`, ran over the redaction work budget and kept only `[unscannable text: ...; content omitted]`. Shared leading characters no longer start a search. An exact value, or a matching prefix a control interrupts, still does.
+- A header value recovered across a hidden escape no longer takes the next line with it. Before, `Authorization: ;l4m\r\x1bPuuBez...` and a line break, LF or CRLF, left the redacted header and dropped the line after it.
+- Where an environment value sits beside a token across escapes, the redactor maps each cleaned character back to the raw text in order. Before, that map could run backwards there.
+
+### Agents and spawn
+
+- Agents do not inherit the dispatcher's Node injection variables: `NODE_OPTIONS`, `NODE_PATH`, `NODE_REPL_EXTERNAL_MODULE`, `NODE_PRESERVE_SYMLINKS`, `NODE_PRESERVE_SYMLINKS_MAIN` and `NODE_COMPILE_CACHE`. Before, only the git and gh shims cleared them, so a preload set for the dispatcher also reached every agent. Project and rung `env` and `env_file` can still set them. The rule holds on first launches, retries and fallback routes, and names are case-insensitive on Windows. The supervisor keeps its own Node settings for host commands.
+
 ## 0.1.4 (2026-10-18)
 
 ### Security
