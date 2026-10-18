@@ -202,7 +202,7 @@ test('mutation fallback requires a green baseline in a copy containing all test 
     fs.mkdirSync(path.dirname(target), { recursive: true });
     fs.writeFileSync(target, text);
   };
-  for (const file of ['test/run.js', 'test/signals.js', 'test/atomic-file.js', 'test/global-setup.js', 'test/repo-seed.js', 'test/tmp-root.js', 'test/fixtures/user-config-guard.js', 'test/fixtures/report-guard.js']) {
+  for (const file of ['test/run.js', 'test/signals.js', 'test/atomic-file.js', 'test/global-setup.js', 'test/host.js', 'test/repo-seed.js', 'test/tmp-root.js', 'test/fixtures/user-config-guard.js', 'test/fixtures/report-guard.js']) {
     write(file, fs.readFileSync(path.join(ROOT, file), 'utf8'));
   }
   write('test/gates/.keep', '');
@@ -211,6 +211,13 @@ test('mutation fallback requires a green baseline in a copy containing all test 
     return true;
   };\n`);
   write('test/stack-merge.test.js', `require('node:test')('scoped survivor', () => {});\n`);
+  write('test/mutants.test.js', `
+    require('node:test')('pristine mutation anchors', () => {
+      require('node:assert/strict').match(
+        require('node:fs').readFileSync('lib/gates/merge.js', 'utf8'),
+        /t.status !== 'accepted'/);
+    });
+  `);
   const inputs = ['.github/workflows/ci.yml', 'AGENTS.md', 'hooks/hook.js'];
   for (const file of inputs) write(file, 'copied input\n');
   const baseline = `
