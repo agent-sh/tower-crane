@@ -208,9 +208,11 @@ test('the owner\'s standing publish policy releases an accepted task while its c
   assert.equal(early.code, 1, early.stderr);
   assert.match(early.stderr, new RegExp(`publish is owner-required; opened D2 .*the owner's publish policy did not hold: ${id} is submitted, not accepted`));
   assert.match(decision(h, 'D2').why, /publish policy did not hold/);
-  h.ok(['decision', 'withdraw', 'D2', '--reason', 'not accepted yet', '--agent', 'orchestrator'], orchestrator);
-
+  // Accepting the release is what the publish waits for, not what makes it moot.
   h.ok(['accept', id]);
+  assert.equal(decision(h, 'D2').status, 'open');
+  h.ok(['decision', 'withdraw', 'D2', '--reason', 'asked too early', '--agent', 'orchestrator'], orchestrator);
+
   h.mainCI('failure');
   const red = h.run(publish, orchestrator);
   assert.equal(red.code, 1, red.stderr);
