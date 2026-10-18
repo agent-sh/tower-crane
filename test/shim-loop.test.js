@@ -67,6 +67,7 @@ function run(f, tool, args, dirs) {
   return cp.spawnSync(path.join(f.bin, tool), args, { cwd: f.work, env: { ...f.env, PATH }, encoding: 'utf8', timeout: HUNG_TEST_MS });
 }
 
+// read-published: appended only, and read after every writer has exited.
 const depths = (f) => (fs.existsSync(f.log) ? fs.readFileSync(f.log, 'utf8').trim().split('\n') : []);
 
 for (const [tool, args, viaExec] of [['git', ['version'], true], ['git', ['version'], false], ['gh', ['pr', 'view'], true]]) {
