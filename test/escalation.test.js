@@ -179,6 +179,8 @@ if (process.execArgv.includes('-e') && process.env.TOWER_CRANE_SESSION
     }
   });
   if (prepare) prepare(h);
+  // Exit signals and publication faults are explicit worker instrumentation.
+  h.ok(['project', 'set', '--env', JSON.stringify({ ...h.readState('project.json').env, NODE_OPTIONS: h.env.NODE_OPTIONS })]);
   // Gate preparation can change HEAD after the cached ladder was built.
   fs.writeFileSync(h.attempts + '.sha', h.git(['rev-parse', 'HEAD']));
   h.readAttempts = () => fs.existsSync(h.attempts) ? JSON.parse(readPublished(h.attempts)) : [];
