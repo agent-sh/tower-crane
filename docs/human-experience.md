@@ -142,7 +142,7 @@ What T91 ships is marked (T91); everything else exists on this branch, except th
 | Set limits and policy | Controls: workers, lease minutes, gates commands, tests, CI and review policy, merge options, browser kit, research sources (T91) | `project set --workers`, `--lease-minutes`, `--tests-*`, `--ci-*`, `--review-policy`, `--merge-*`, `--research-min-sources`; `browser-kit set` | per row; `merge.admin`, `browser_kit`, `research.min_sources`, sandbox grants owner-required |
 | Trust the gates | Task sheet: gate pips and the evidence ledger; Controls: gate, CI and review policy (T91) | `task show`, `check tests`, `check ci` and the rest; `project set --tests-*`, `--ci-*` | operational |
 | Hand off | Controls: delegation (`spawn --role orchestrator`), which opens an approval (T91) | The orchestrator requests; the owner approves | `delegation` owner-required |
-| Publish | Controls: publication approval (`ask --setting publish`), recorded for the orchestrator (T91) | `ask --setting publish`; the orchestrator publishes after approval | `publish` owner-required |
+| Publish | Controls: publication approval (`ask --setting publish`), recorded for the orchestrator (T91) | `ask --setting publish`; the orchestrator publishes after approval, or at once while the owner's publish policy (`project set --publish-policy`) holds | `publish` and `publish.policy` owner-required |
 
 Two things follow for the redesign:
 

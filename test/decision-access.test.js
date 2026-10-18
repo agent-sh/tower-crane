@@ -327,16 +327,16 @@ test('spend and credential questions stay with the owner without a marker, whate
   const worker = { env: { TOWER_CRANE_AGENT: 'worker-T1-1', TOWER_CRANE_TASK: 'T1' } };
 
   h.ok(['ask', '--kind', 'spend', '--question', 'May we allocate 200 EUR for an H100 instance?', '--option', 'yes', '--option', 'no', '--blocks', 'T1'], worker);
-  h.ok(['ask', '--kind', 'credential', '--question', 'Can you provide NPM_TOKEN for the release?', '--option', 'yes', '--option', 'no', '--blocks', 'T1'], worker);
+  h.ok(['ask', '--kind', 'credential', '--setting', 'env', '--question', 'Can you provide NPM_TOKEN for the release?', '--option', 'yes', '--option', 'no', '--blocks', 'T1'], worker);
   const [spend, credentials] = h.readState('decisions.json').decisions;
   assert.deepEqual([spend.kind, spend.technical, spend.owner_required], ['spend', false, null]);
   assert.deepEqual([credentials.kind, credentials.technical, credentials.owner_required], ['credential', false, null]);
 
   const before = events(h);
-  for (const [id, kind] of [['D1', 'spend'], ['D2', 'credential']]) {
+  for (const [id, why] of [['D1', 'is a spend decision'], ['D2', 'escalates env to the owner']]) {
     const refused = h.run(['answer', id, '--choice', 'yes', '--agent', 'orchestrator']);
     assert.equal(refused.code, 1, refused.stderr);
-    assert.match(refused.stderr, new RegExp(`${id} is a ${kind} decision; only the owner answers it`));
+    assert.match(refused.stderr, new RegExp(`${id} ${why}; only the owner answers it`));
   }
   assert.deepEqual(events(h), before, 'refused owner-only answers write no event');
 
