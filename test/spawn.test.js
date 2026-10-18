@@ -794,8 +794,9 @@ if (process.argv[1] === ${JSON.stringify(fake)}) {
     fs.writeFileSync(fake, `
 const names = ${JSON.stringify(names)};
 const fs = require('node:fs');
+const { readPublished } = require(${JSON.stringify(path.join(__dirname, 'atomic-file.js'))});
 const file = ${JSON.stringify(out)};
-const attempts = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : [];
+const attempts = fs.existsSync(file) ? JSON.parse(readPublished(file, 'utf8')) : [];
 attempts.push({
   injection: Object.fromEntries(Object.entries(process.env).filter(([key]) => names.includes(key.toUpperCase()))),
   keep: process.env.NODE_AGENT_KEEP,
