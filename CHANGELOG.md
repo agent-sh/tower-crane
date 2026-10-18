@@ -4,17 +4,17 @@
 
 ### Upgrading
 
-- Agents no longer inherit the dispatcher's `NODE_OPTIONS`, `NODE_PATH`, `NODE_REPL_EXTERNAL_MODULE`, `NODE_PRESERVE_SYMLINKS`, `NODE_PRESERVE_SYMLINKS_MAIN` or `NODE_COMPILE_CACHE`. A harness that needs a preload or a module path gets it from the project or rung `env` or `env_file`.
+- Agents no longer inherit the dispatcher's `NODE_OPTIONS`, `NODE_PATH`, `NODE_REPL_EXTERNAL_MODULE`, `NODE_PRESERVE_SYMLINKS`, `NODE_PRESERVE_SYMLINKS_MAIN` or `NODE_COMPILE_CACHE`. If a harness needs one, such as a `--require` preload or a heap size in `NODE_OPTIONS`, set it in the project or rung `env` or `env_file`. `project set --env` replaces the whole project `env`, so pass the existing entries too.
 
 ### Gates
 
-- A plain log whose lines share a secret's first characters stays scannable. Before, a 1 MiB joined log of lines like `ok 0123456789`, with a secret that starts `01`, ran over the redaction work budget and kept only `[unscannable text: ...; content omitted]`. Shared leading characters no longer start a search. An exact value, or a matching prefix a control interrupts, still does.
-- A header value recovered across a hidden escape no longer takes the next line with it. Before, `Authorization: ;l4m\r\x1bPuuBez...` and a line break, LF or CRLF, left the redacted header and dropped the line after it.
-- Where an environment value sits beside a token across escapes, the redactor maps each cleaned character back to the raw text in order. Before, that map could run backwards there.
+- A plain log whose lines share a secret's first characters stays scannable. Before, a 1 MiB joined log of lines like `ok 0123456789`, with a secret that starts `0123456789`, ran over the redaction work budget and kept only `[unscannable text: ...; content omitted]`. Shared leading characters no longer start a search. An exact value, or a matching prefix a control interrupts, still does.
+- A header whose value is a configured secret split by a hidden escape no longer takes the next line with it. Before, `Authorization: ;l4m\r\x1bPuuBez...` with the secret `;l4mPuuBez...`, then a line break, LF or CRLF, kept the redacted header and dropped the line after it.
+- Where an environment value sits beside a token across escapes, the redactor maps each cleaned character back to the raw text in order. Before, that map could run backwards there. The redacted output was the same.
 
 ### Agents and spawn
 
-- Agents do not inherit the dispatcher's Node injection variables, listed under Upgrading. Before, only the git and gh shims cleared them, so a preload set for the dispatcher also reached every agent. Project and rung `env` and `env_file` can still set them. The rule holds on first launches, retries and fallback routes, and names are case-insensitive on Windows. The supervisor keeps its own Node settings for host commands.
+- Before, only the git and gh shims cleared the variables listed under Upgrading, so a preload set for the dispatcher reached every agent. The rule now holds on first launches, retries and fallback routes, and names are case-insensitive on Windows. The supervisor keeps its own Node settings for host commands.
 
 ## 0.1.4 (2026-10-18)
 
