@@ -12,7 +12,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
 const { ROOT, TMP_ROOT, assertNoProcessesIn } = require('./helpers');
-const { HUNG_TEST_MS, killPid } = require('./signals');
+const { HUNG_TEST_MS, killPid, killGroup, fileWritten, childExit } = require('./signals');
 const { shellQuote } = require('../lib/gates/common');
 
 const SHIM = path.join(ROOT, 'lib', 'shim.js');
@@ -102,9 +102,10 @@ test('a git hook that runs git through the shim is no loop', { skip: POSIX }, (t
   assert.equal(fs.readFileSync(seen, 'utf8').trim(), '.git');
 });
 
-// A read with a time limit that hangs, with a child of its own, is killed
-// with that child: nothing it started outlives the shim.
-test('a timed-out read kills what the real git started', { skip: POSIX }, (t) => {
+// A read with a time limit that hangs, with children of its own: the wrapper
+// is ahead of the real git, records its children's pids and waits on them.
+const LINUX = process.platform !== 'linux' && 'the read\'s processes are found through /proc';
+function hungRead(t) {
   const f = fixture(t);
   const pids = path.join(f.base, 'pids');
   const realGit = require(SHIM).findReal('git', '');
@@ -114,21 +115,49 @@ case " $* " in
 esac
 exec ${shellQuote(realGit)} "$@"
 `, { mode: 0o755 });
-  let started = [];
+  const state = { started: [] };
   t.after(() => {
-    for (const pid of started) {
+    for (const pid of state.started) {
       try { killPid(Number(pid), 'SIGKILL'); } catch { /* gone */ }
     }
   });
-  const r = run(f, 'git', ['version'], [f.wrap, f.bin]);
-  started = fs.readFileSync(pids, 'utf8').split('\n').filter(Boolean);
-  assert.equal(r.status, 0, r.stderr);
+  // read-published: appended only, by the wrapper.
+  const read = () => (state.started = fs.readFileSync(pids, 'utf8').split('\n').filter(Boolean));
   // A killed child its new parent has not reaped yet is gone too.
   const zombie = (pid) => { try { return /^\d+ \(.*\) Z/.test(fs.readFileSync(`/proc/${pid}/stat`, 'utf8')); } catch { return false; } };
-  const left = started.filter((pid) => {
+  const alive = () => state.started.filter((pid) => {
     try { killPid(Number(pid), 0); } catch { return false; }
     return !zombie(pid);
   });
-  assert.deepEqual(left, [], 'the sleep the hung read started is gone');
+  return { f, pids, read, alive };
+}
+
+test('a timed-out read kills what the real git started', { skip: LINUX }, (t) => {
+  const { f, read, alive } = hungRead(t);
+  const r = run(f, 'git', ['version'], [f.wrap, f.bin]);
+  read();
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(alive(), [], 'the sleeps the hung read started are gone');
   assertNoProcessesIn(t, f.base);
 });
+
+// A supervisor stops an agent by killing its process group. A read the shim
+// is waiting on is in that group, with what it started.
+test('killing the shim\'s process group during a read stops what the read started', { skip: LINUX }, async (t) => {
+  const { f, pids, read, alive } = hungRead(t);
+  const PATH = [f.wrap, f.bin, ...f.host].join(path.delimiter);
+  const child = cp.spawn(path.join(f.bin, 'git'), ['version'], { cwd: f.work, env: { ...f.env, PATH }, stdio: 'ignore', detached: true });
+  t.after(() => { try { killGroup(child.pid, 'SIGKILL'); } catch { /* gone */ } });
+  await fileWritten(pids, { check: (text) => text.split('\n').filter(Boolean).length === 2 });
+  read();
+  killGroup(child.pid, 'SIGKILL');
+  await childExit(child);
+  await waitUntilGone(alive);
+  assertNoProcessesIn(t, f.base);
+});
+
+// The group signal is delivered at once, but a killed process leaves the
+// process table only when it is reaped.
+function waitUntilGone(alive) {
+  return require('./signals').waitUntil(() => alive().length === 0, { what: 'the read\'s processes exit' });
+}
