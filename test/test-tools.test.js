@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
-const { makeRepo, ROOT, detachedAlive } = require('./helpers');
+const { makeRepo, ROOT, detachedAlive, pinLiveRung } = require('./helpers');
 const { tempRoot, liveRoot } = require('./tmp-root');
 const { killGroup } = require('./signals');
 
@@ -242,4 +242,28 @@ test('mutation fallback requires a green baseline in a copy containing all test 
   assert.equal(broken.status, 1);
   assert.match(broken.stderr, /the unmutated full suite fails/);
   assert.doesNotMatch(broken.stdout, /caught.*stack-merge-unaccepted-lower/);
+});
+
+
+test('live Claude probes use the requested provider and environment file without changing Codex profiles', (t) => {
+  const h = makeRepo(t);
+  h.init();
+  const envFile = path.join(h.base, 'provider.env');
+  fs.writeFileSync(envFile, 'AWS_REGION=us-east-1\n');
+  const values = { TOWER_CRANE_LIVE_MODEL: 'fixture-model', TOWER_CRANE_LIVE_PROFILE: 'fixture-main',
+    TOWER_CRANE_LIVE_CLAUDE_PROVIDER: 'bedrock', TOWER_CRANE_LIVE_CLAUDE_ENV_FILE: envFile };
+  const before = Object.fromEntries(Object.keys(values).map((key) => [key, process.env[key]]));
+  t.after(() => { for (const [key, value] of Object.entries(before)) {
+    if (value === undefined) delete process.env[key]; else process.env[key] = value;
+  } });
+  Object.assign(process.env, values);
+  pinLiveRung(h, 'claude');
+  pinLiveRung(h, 'codex', 'review');
+  const project = JSON.parse(fs.readFileSync(path.join(h.state, 'project.json'), 'utf8'));
+  assert.equal(project.ladder.small.provider, 'bedrock');
+  assert.equal(project.ladder.small.env_file, envFile);
+  assert.equal(project.ladder.small.model, 'fixture-model');
+  assert.equal(project.ladder.review.profile, 'fixture-main');
+  assert.equal(project.ladder.review.provider, undefined);
+  assert.equal(project.ladder.review.env_file, undefined);
 });
