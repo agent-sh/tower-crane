@@ -85,6 +85,11 @@ is classified by what it says about the change:
   was cancelled or never started, a cleanup scan with checks that did not run,
   and a test that also fails on the base branch (`main` in the project, local
   or `origin`, whichever is newer).
+- A host-only test that also fails on the base branch is the host's failure,
+  not the change's. It records `infrastructure_failure` with `main_failure`
+  and the task stays submitted without a retry or rework. Later software gates
+  still run, and the inbox `gate_failed` item names the main failure;
+  `gates retry ID` reruns the gate once main or the host is fixed.
 - A change the worker must fix reworks at once: no test covers the change, it
   has no changes against the base, a test or cleanup command fails, or a
   required CI run is not successful.
