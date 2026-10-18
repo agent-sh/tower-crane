@@ -573,10 +573,13 @@ attempt cgroups are excluded from this sizing so nesting does not repeatedly
 divide defaults; their limits still constrain descendants in the kernel. Half of that
 capacity is reserved for other sessions. The remaining half is divided by
 `ceil(availableParallelism / 4)`, at least one slot, allowing four logical CPUs
-per concurrent activity. TasksMax is further capped at 256 threads/processes to
-stop runaway forks. On a 24 CPU host with a 40 GiB slice and no tighter ancestor,
-the memory default is floor(40 GiB / 12), about 3.33 GiB. The task default is 256
-unless the slice's process limit requires less. These are containment defaults,
+per concurrent activity. Linux starts the task budget at the kernel's
+`threads-max`, then takes the smallest ancestor `pids.max`. The task default
+is floor(that budget / twice the slot count), without a fixed clamp.
+When no host task ceiling is available, the portable watchdog default remains
+256 processes. On a 24 CPU host with a 40 GiB slice and no tighter ancestor,
+the memory default is floor(40 GiB / 12), about 3.33 GiB. A 24,000-task
+effective host budget gives a 2,000-task default. These are containment defaults,
 not admission control across sessions or projects.
 
 On Linux with cgroup v2 and a reachable systemd user manager, a launch uses a
@@ -605,6 +608,9 @@ A cgroup OOM fails it with `resource-memory-max`. Spawn phase events store the
 blocked reason and containment settings; status and the inbox show that reason.
 Gate command failures put the reason in their summary and receipt/event where
 applicable. The whole attempt is stopped; an unrelated scope is left running.
+Containment metadata retains sampled `pids_peak`, `memory_peak_bytes` and
+`refused_forks` from the scope's peak and local event files. Refused forks
+count that scope's cap violations where local events are available.
 
 On macOS, Windows, Linux without cgroup v2, Linux without a reachable user
 manager, or an inherited scope without writable delegated controllers,

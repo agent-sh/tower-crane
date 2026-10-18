@@ -4,6 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const os = require('node:os');
 const { cachedFixture } = require('./helpers');
 const { readPublished } = require('./atomic-file');
 const { gateFixture } = require('./gate-helpers');
@@ -48,6 +49,15 @@ test('defaults reserve half the effective slice capacity', () => {
   assert.ok(d.memory_max_bytes <= 512 * 1024 * 1024);
   assert.ok(d.tasks_max <= 100);
   assert.ok(d.tasks_max > 0);
+});
+
+test('default task cap covers measured test demand when the host budget allows it', () => {
+  const slots = Math.max(1, Math.ceil(os.availableParallelism() / 4));
+  const host = { tasks: 2 * slots * 2000, memory: 40 * 1024 ** 3 };
+  const limits = C.defaults(host);
+  assert.equal(limits.tasks_max, 2000);
+  assert.ok(limits.tasks_max > 299, 'Chrome threads and test subprocesses need headroom above the measured 299-task peak');
+  assert.equal(limits.memory_max_bytes, Math.floor(host.memory / (2 * slots)));
 });
 
 test('nested attempt caps do not recursively shrink project defaults', () => {
@@ -163,6 +173,9 @@ test('local cgroup events distinguish a child cap from the parent cap', (t) => {
   assert.equal(C.limitReason(group, { tasks: 0, memory: 0 }), null);
   fs.writeFileSync(path.join(group, 'memory.events.local'), 'oom 1\noom_group_kill 1\n');
   assert.equal(C.limitReason(group, { tasks: 0, memory: 0 }), 'resource-memory-max');
+  fs.writeFileSync(path.join(group, 'pids.peak'), '299');
+  fs.writeFileSync(path.join(group, 'memory.peak'), '955630223');
+  assert.deepEqual(C.scopeMetrics(group), { pids_peak: 299, memory_peak_bytes: 955630223, refused_forks: 0 });
 });
 
 test('nested cap failures leave the parent running when local events are available', async () => {
