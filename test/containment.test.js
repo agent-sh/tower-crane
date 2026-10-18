@@ -68,6 +68,43 @@ test('scope placement keeps the caller slice, including custom fences', () => {
   assert.throws(() => C.callerSlice('/sys/fs/cgroup/no-slice/runner'), /no systemd slice/);
 });
 
+test('systemd CLI and D-Bus launches use supported OOM policy and retain caps', {
+  skip: process.platform === 'win32' && 'Linux scope runner uses execve',
+}, async (t) => {
+  const h = fixture(t);
+  const fake = path.join(__dirname, 'fixtures', 'containment-systemd.js');
+  const runner = require.resolve('../lib/containment-runner');
+  const unit = 'tower-crane-123-0123456789abcdef.scope';
+  const limits = { tasks_max: 64, memory_max_bytes: memory };
+  for (const mode of ['cli', 'dbus']) {
+    const group = path.join(h.base, mode, unit);
+    fs.mkdirSync(group, { recursive: true });
+    const log = path.join(h.base, `${mode}.jsonl`);
+    const report = path.join(h.base, `${mode}-report.json`);
+    const args = [runner, JSON.stringify(limits),
+      mode === 'dbus' ? `@${unit}:test-fence.slice` : '', unit,
+      process.execPath, '-e', 'console.log("scoped command ran")'];
+    const command = mode === 'dbus' ? ['--require', fake, ...args]
+      : [fake, ...C.scopeArguments(unit, 'test-fence.slice', limits, { CPUQuota: '200%', MemoryMax: '1' }),
+        process.execPath, ...args];
+    const result = await G.treeExec(process.execPath, command, {
+      env: { ...h.env, TC_FAKE_CGROUP: group, TC_FAKE_SYSTEMD_LOG: log,
+        TOWER_CRANE_CONTAINMENT_REPORT: report },
+    });
+    const registration = fs.existsSync(report) ? JSON.parse(fs.readFileSync(report, 'utf8')) : {};
+    assert.equal(result.status, 0, result.stderr + (registration.error || ''));
+    assert.equal(result.stdout, 'scoped command ran\n');
+    assert.equal(registration.group, group);
+    assert.equal(fs.readFileSync(path.join(group, 'memory.oom.group'), 'utf8'), '1');
+    const properties = JSON.parse(fs.readFileSync(log, 'utf8').trim());
+    assert.equal(properties.OOMPolicy, 'kill');
+    assert.equal(properties.TasksMax, String(limits.tasks_max));
+    assert.equal(properties.MemoryMax, String(limits.memory_max_bytes));
+    assert.equal(properties.MemorySwapMax, '0');
+    assert.ok(['true', 'yes'].includes(properties.Delegate));
+  }
+});
+
 test('ordinary fixture launches preserve hooks and spawn options without containment', async () => {
   const h = fixture();
   const env = { ...h.env };

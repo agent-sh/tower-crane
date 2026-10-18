@@ -574,7 +574,9 @@ not admission control across sessions or projects.
 On Linux with cgroup v2 and a reachable systemd user manager, a launch uses a
 named transient user scope (registered through D-Bus, or `systemd-run` when
 optional scope properties are set) in the caller's slice with `TasksMax`, `MemoryMax`,
-`MemorySwapMax=0`, `MemoryOOMGroup=yes` and delegated memory/pids controllers.
+`MemorySwapMax=0`, `OOMPolicy=kill` and delegated memory/pids controllers.
+`OOMPolicy=kill` sets `memory.oom.group=1`, so a cgroup OOM stops the
+whole attempt.
 The supervising process remains outside the attempt's scope so it can record a
 failure. The scope's descendants include harness Task/sub-agents, MCP servers,
 shells and tests even when they detach or change process groups. A nested Tower
