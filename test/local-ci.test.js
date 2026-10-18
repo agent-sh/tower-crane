@@ -593,6 +593,11 @@ test('multi-MB plain, colored and CRLF logs keep the redaction output from befor
     const clean = expected(text);
     assert.equal(stripEscapes(text), clean, name);
     assert.equal(redactJoined({ stdout: text, stderr: '' }, redact), clean, name);
+    const half = Math.floor(text.length / 2);
+    assert.equal(redactJoined({ output: text, runs: [
+      { stream: 'out', text: text.slice(0, half) },
+      { stream: 'err', text: text.slice(half) },
+    ] }, redact), clean, `${name} streams`);
   }
 });
 
@@ -629,6 +634,46 @@ console.log(JSON.stringify({ output, peakKiB: process.resourceUsage().maxRSS }))
   const result = JSON.parse(cp.execFileSync(process.execPath, ['-e', script], { encoding: 'utf8' }));
   assert.match(result.output, /^\[unscannable text: .+; content omitted\]$/);
   assert.ok(result.peakKiB < 1048576, `${result.peakKiB} KiB peak`);
+});
+
+test('dense CR runs exhaust allocation work before building cleanup maps', () => {
+  const { stripEscapes, stripEscapesMapped, stripEscapesViews } = require('../lib/ci-log-text');
+  for (const unit of ['\r\n', '\r \r', 'a\r']) {
+    const input = unit.repeat(Math.ceil((1 << 20) / unit.length));
+    const notice = /^\[unscannable text: over \d+ redaction work units; content omitted\]$/;
+    assert.match(stripEscapes(input), notice, JSON.stringify(unit));
+    const mapped = stripEscapesMapped(input);
+    assert.match(mapped.text, notice);
+    assert.deepEqual(mapped.at(0), [0, input.length]);
+    for (const v of stripEscapesViews(input)) assert.match(v.text, notice);
+  }
+  assert.equal(stripEscapes('ok\r\nnext\r'), 'ok\nnext');
+});
+
+test('a character map over the work budget is rejected before its array allocation', (t) => {
+  const { textBudget, textMap } = require('../lib/text-redaction-budget');
+  const arrays = t.mock.method(globalThis, 'Int32Array', () => {
+    throw new Error('array allocated before checking the budget');
+  });
+  assert.match(textBudget('', () => textMap(16 * (262144 + 1))),
+    /^\[unscannable text: over \d+ redaction work units; content omitted\]$/);
+  assert.equal(arrays.mock.callCount(), 0);
+});
+
+test('16 MiB CR-heavy logs fail closed below 1 GiB in fresh processes', () => {
+  const cp = require('node:child_process');
+  for (const unit of ['\r\n', '\r \r', 'a\r']) {
+    const script = `
+const { createRedactor, redactJoined } = require(${JSON.stringify(require.resolve('../lib/gates/common'))});
+const unit = ${JSON.stringify(unit)};
+const text = unit.repeat(Math.ceil((16 << 20) / unit.length)).slice(0, 16 << 20);
+const output = redactJoined({ output: text }, createRedactor([]));
+console.log(JSON.stringify({ output, peakKiB: process.resourceUsage().maxRSS }));
+`;
+    const result = JSON.parse(cp.execFileSync(process.execPath, ['-e', script], { encoding: 'utf8' }));
+    assert.match(result.output, /^\[unscannable text: over \d+ redaction work units; content omitted\]$/);
+    assert.ok(result.peakKiB < 1048576, `${JSON.stringify(unit)}: ${result.peakKiB} KiB peak`);
+  }
 });
 
 test('captured GitHub CI logs keep the redaction output from before the text budget', () => {
