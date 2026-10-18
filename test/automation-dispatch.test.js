@@ -502,6 +502,35 @@ test('an ending rework hold dispatches on the wait host\'s own timer, with no ot
   await host;
 });
 
+// A refill that runs past the deadline must not let the fallback tick start
+// more passes or refills: on a real project such a pass can run a gate for
+// most of an hour, so the timeout would come that much later or never.
+test('a refill running past the wait deadline ends the wait without another pass or refill', async (t) => {
+  const h = refillFixture(t);
+  for (const id of ['T1', 'T2', 'T3', 'T4']) h.ok(['task', 'update', id, '--status', 'cancelled']);
+  const calls = path.join(h.base, 'calls');
+  const preload = path.join(h.base, 'slow-refill.js');
+  fs.writeFileSync(preload, `const fs = require('node:fs');
+const A = require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'automation.js'))});
+const consume = A.consume;
+A.consume = (...args) => { fs.appendFileSync(${JSON.stringify(calls)}, 'pass\\n'); return consume(...args); };
+const refill = A.refillWorkers;
+let first = true;
+A.refillWorkers = async (ctx, attempt) => {
+  fs.appendFileSync(${JSON.stringify(calls)}, 'refill\\n');
+  if (first) { first = false; await new Promise((resolve) => setTimeout(resolve, 6000)); } // wait-allow: the held refill outlasts the 1 s deadline by several fallback ticks
+  return refill(ctx, attempt);
+};
+`);
+  const r = await h.runAsync(['wait', '--types', 'never', '--timeout', '1', '--agent', 'orchestrator'], { pre: ['--require', preload] }); // wait-allow: the deadline is what the test drives; the held refill ends it within seconds
+  assert.equal(r.code, 2, r.stderr);
+  assert.equal(JSON.parse(r.stdout).type, 'timeout');
+  const seen = fs.readFileSync(calls, 'utf8').trim().split('\n');
+  assert.equal(seen.filter((c) => c === 'refill').length, 1, 'no refill starts after the deadline');
+  // The first pass, a fallback tick that can land just before the deadline, and the deadline's own pass.
+  assert.ok(seen.filter((c) => c === 'pass').length <= 3, `no tick starts a pass after the deadline: ${seen.join(', ')}`);
+});
+
 // A holder in another pid namespace counts as gone 60 s after its marker last
 // changed, and a dispatch can wait that long for the worktree lock under the
 // dispatch lock, synchronously, which holds every timer.
