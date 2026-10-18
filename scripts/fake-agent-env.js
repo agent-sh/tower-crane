@@ -33,6 +33,9 @@ function fakeAgentEnvFindings(text, fixture = false) {
     .filter((token) => ['string', 'template'].includes(token.type))
     .filter((token) => /(?:execFile|spawn).*(?:process\.execPath|command)/s.test(token.value))
     .map((token) => token.type === 'string' ? vm.runInNewContext(token.value) : token.value.slice(1, -1));
+  if (scripts.some((script) => /(^|\n)#!/.test(script) && !script.startsWith('#!'))) {
+    return ['a generated executable must keep its shebang on the first line'];
+  }
   const missing = scripts.flatMap((script) => [...script.matchAll(/\b(?:execFileSync|execFile|spawnSync|spawn)\s*\(\s*(?:process\.execPath|command)\s*,/g)]
     .filter((match) => {
       const args = callArguments(script, match.index + match[0].indexOf('('));

@@ -27,6 +27,9 @@ test('the shared check rejects CLI-running fake fixtures without the env helper'
   }
   const good = source('{ env: fakeAgentEnv(process.env) }');
   assert.deepEqual(fakeAgentEnvFindings(good, true), []);
+  const executable = '#!/usr/bin/env node\n' + good;
+  assert.deepEqual(fakeAgentEnvFindings(`const script = ${JSON.stringify(executable)};`), []);
+  assert.match(fakeAgentEnvFindings(`const script = ${JSON.stringify('\n' + executable)};`)[0], /shebang/);
   assert.deepEqual(fakeAgentEnvFindings('const env = fakeAgentEnv(process.env);\n' + source('{ env }'), true), []);
   assert.deepEqual(fakeAgentEnvFindings('const childEnv = fakeAgentEnv(process.env);\n' + source('{ env: childEnv }'), true), []);
   assert.deepEqual(fakeAgentEnvFindings(good + '\n' + source('{}'), true).length, 1,
