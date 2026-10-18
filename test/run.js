@@ -73,6 +73,8 @@ const args = [
   `--test-timeout=${HUNG_TEST_MS}`, '--test-force-exit',
   // Every test file fails when it resolves the user's real ladder file.
   `--require=${path.join(__dirname, 'fixtures', 'user-config-guard.js')}`,
+  // Every test file fails when its process ends before the runner has all its tests.
+  `--require=${path.join(__dirname, 'fixtures', 'report-guard.js')}`,
   ...flags,
 ];
 let list = files.length ? files : testFiles();
