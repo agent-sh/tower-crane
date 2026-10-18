@@ -563,6 +563,28 @@ test('a test that also fails on main retries once, then reworks with the main fa
   assert.match(h.logs().findLast((e) => e.cmd === 'rework').detail.reason, /^tests failed at [0-9a-f]+: .*Also fails on main at [0-9a-f]+: known base failure/s);
 });
 
+test('a host-only test that also fails on main keeps the task submitted, and the inbox names the main failure', (t) => {
+  const h = setup(t, { ci: 'pending' });
+  const script = path.join(h.base, 'known-host-failure.js');
+  fs.writeFileSync(script, "console.log('# Subtest: test/value.test.js');\nconsole.log('not ok 1 - known host failure');\nprocess.exit(1);\n");
+  h.ok(['project', 'set', '--tests-cmd', 'node -e "process.exit(0)"', '--tests-mode', 'run-only',
+    '--tests-proof-cmd', `node ${shellQuote(script)} {tests}`, '--tests-host-only', '["test/value.test.js"]']);
+  h.submit();
+  h.consume();
+  assert.equal(h.logs().filter((e) => e.cmd === 'check tests').length, 1, 'the base rerun already showed the same failure, so nothing retries');
+  const task = h.readState('tasks.json').tasks[0];
+  assert.equal(task.status, 'submitted');
+  assert.equal(h.logs().filter((e) => e.cmd === 'rework').length, 0, 'the task is not reworked for main\'s failure');
+  assert.deepEqual(task.evidence.filter((e) => e.type === 'tests').map((e) => [e.main_failure?.names, e.infrastructure_failure, e.confirmed_failure]),
+    [[['known host failure'], true, undefined]]);
+  const item = h.json(['inbox', '--agent', 'orchestrator']).items.find((i) => i.kind === 'gate_failed' && i.gate === 'tests');
+  assert.ok(item, 'the inbox shows the failed tests gate');
+  assert.deepEqual(item.main_failure.names, ['known host failure']);
+  assert.equal(item.infrastructure_failure, true);
+  assert.deepEqual(item.action.argv, ['check', 'tests', 'T1']);
+  assert.match(item.summary, /Also fails on main at [0-9a-f]+: known host failure\. Infrastructure:/);
+});
+
 test('a test failure whose base rerun is killed is not confirmed, retries once and reports the unchecked base', { skip: process.platform === 'win32' }, (t) => {
   const h = setup(t, { ci: 'pending' });
   const script = path.join(h.base, 'base-killed.js');

@@ -220,7 +220,7 @@ test('a deep gate temp root with no short directory refuses before running, nami
   }
 });
 
-test('a host-only failure on the base keeps its opt-in and command for retry classification', async () => {
+test('a host-only failure on the base keeps its opt-in and command, and is infrastructure for any task', async () => {
   task({
     'test/host-known.test.js': `require('node:test')('known host failure', { skip: process.env.TC_HOST_OPT_IN !== '1' }, () => {
   require('node:assert/strict').fail('existing host failure');
@@ -244,8 +244,11 @@ test('a host-only failure on the base keeps its opt-in and command for retry cla
     assert.deepEqual(r.test_failure.names, ['known host failure']);
     assert.deepEqual(r.main_failure?.names, ['known host failure']);
     assert.equal(r.confirmed_failure, undefined, 'a matching base failure is retried without a quality climb');
+    // The host fails it without the change, so it waits for main or the host instead of reworking the task.
+    assert.equal(r.infrastructure_failure, true, r.summary);
     assert.ok(r.summary.includes(`\`${host}\``), r.summary);
-    assert.match(r.summary, /Also fails on task-\d+ at [0-9a-f]+: known host failure/);
+    assert.match(r.summary, /Also fails on task-\d+ at [0-9a-f]+: known host failure\. Infrastructure: .*the task stays submitted and is not reworked\./);
+    assert.doesNotMatch(r.summary, /Make the tests pass/);
     assert.deepEqual(r.receipt.host_only.run, ['test/host-known.test.js']);
     assertCleanedUp();
   }
