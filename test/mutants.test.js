@@ -148,3 +148,73 @@ test('an unavailable systemd manager is an infrastructure failure rather than a 
       DBUS_SESSION_BUS_ADDRESS: `unix:path=${path.join(h.base, 'no-bus')}` },
   }), error => error.code === 'ENOENT' || /cannot launch mutant systemd scope/.test(error.message));
 });
+
+test('scoped containment inherits the caller slice and inspects only its cgroup', { skip: process.platform !== 'linux' }, async (t) => {
+  const h = makeRepo(t);
+  const spawn = cp.spawn;
+  const read = fs.readFileSync;
+  const list = fs.readdirSync;
+  let child;
+  let scopeArgs;
+  let reads = 0;
+  t.mock.method(cp, 'spawn', (command, args, options) => {
+    assert.equal(command, 'systemd-run');
+    scopeArgs = args;
+    child = spawn(process.execPath, ['-e', "console.log('scoped fixture'); setTimeout(() => {}, 200)"], options); // wait-allow: keep a bounded scope fixture alive for watchdog inspections
+    return child;
+  });
+  t.mock.method(cp, 'spawnSync', (command, args) => {
+    assert.equal(command, 'systemctl');
+    if (args.includes('show')) return { status: 0, stdout: '/fixture.scope\n' };
+    return { status: 0, stdout: '' };
+  });
+  t.mock.method(fs, 'readdirSync', (file, ...args) => {
+    assert.notEqual(file, '/proc', 'a systemd scope must never enumerate host processes');
+    return list.call(fs, file, ...args);
+  });
+  t.mock.method(fs, 'readFileSync', (file, ...args) => {
+    if (file === '/proc/self/cgroup') return '0::/user.slice/user-1000.slice/user@1000.service/agents.slice/worker.scope\n';
+    if (file === '/sys/fs/cgroup/fixture.scope/cgroup.procs') { reads++; return `${child.pid}\n`; }
+    if (file === '/sys/fs/cgroup/fixture.scope/pids.current') return '1\n';
+    if (file === '/sys/fs/cgroup/fixture.scope/pids.events') return 'max 0\n';
+    if (file === '/sys/fs/cgroup/fixture.scope/memory.events') return 'max 0\noom_kill 0\n';
+    return read.call(fs, file, ...args);
+  });
+  const result = await runContained(process.execPath, ['-e', ''], { cwd: h.repo, scope: true, limit: 48, timeout: 5000 });
+  assert.equal(result.status, 0, result.output);
+  assert.equal(result.reason, null, result.output);
+  assert.ok(scopeArgs.includes('--slice=agents.slice'), scopeArgs.join(' '));
+  assert.ok(reads > 0, 'the watchdog reads scoped process membership');
+});
+
+test('mutation timeouts use measured file baselines with a startup floor', () => {
+  const { mutationTimeout } = require('../scripts/mutants');
+  assert.equal(typeof mutationTimeout, 'function');
+  const times = new Map([['fast', 100], ['slow', 20000]]);
+  assert.equal(mutationTimeout(['fast'], times), 30000);
+  assert.equal(mutationTimeout(['slow'], times), 100000);
+  assert.equal(mutationTimeout(['fast', 'slow'], times), 100500);
+  assert.throws(() => mutationTimeout(['unmeasured'], times), /missing baseline/);
+});
+
+test('a hung planted bug is caught by its baseline-derived timeout', async (t) => {
+  const h = makeRepo(t);
+  fs.mkdirSync(path.join(h.repo, 'lib/gates'), { recursive: true });
+  fs.mkdirSync(path.join(h.repo, 'test'), { recursive: true });
+  fs.writeFileSync(path.join(h.repo, 'lib/gates/merge.js'), `module.exports = (t, ctx) => {
+    if (t.status !== 'accepted' || (!ctx.mergedIds?.includes(t.id))) return false;
+    return true;
+  };\n`);
+  fs.writeFileSync(path.join(h.repo, 'test/run.js'), `
+    if (require('../lib/gates/merge')({ id: 'T1', status: 'submitted' }, { mergedIds: ['T1'] })) {
+      setInterval(() => {}, 1000);
+    }
+  `);
+  const result = await runContained(process.execPath, [
+    path.join(ROOT, 'scripts/mutants.js'), '--root', h.repo,
+    '--only', 'stack-merge-unaccepted-lower', '--no-full', '--jobs', '1',
+  ], { env: { ...h.env, TOWER_CRANE_TEST_TMP: h.base }, limit: 48, timeout: 60000 }); // wait-allow: outer emergency deadline must fail a broken adaptive mutation timeout
+  assert.equal(result.reason, null, result.output);
+  assert.equal(result.status, 0, result.output);
+  assert.match(result.output, /caught.*stack-merge-unaccepted-lower \(caught-by-timeout \(30000 ms\)\)/);
+});

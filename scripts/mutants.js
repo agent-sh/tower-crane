@@ -335,9 +335,18 @@ function processSnapshot() {
   });
 }
 
+function callerSlice() {
+  const group = fs.readFileSync('/proc/self/cgroup', 'utf8').split('\n').find(line => line.startsWith('0::'));
+  const slice = group?.slice(3).split('/').filter(part => part.endsWith('.slice')).at(-1);
+  if (!slice) throw new Error('cannot determine the caller systemd slice');
+  return `--slice=${slice}`;
+}
+
 function scopeAvailable() {
   if (process.platform !== 'linux') return false;
-  const r = cp.spawnSync('systemd-run', ['--user', '--scope', '--quiet', '-p', 'TasksMax=512',
+  let slice;
+  try { slice = callerSlice(); } catch { return false; }
+  const r = cp.spawnSync('systemd-run', ['--user', '--scope', '--quiet', slice, '-p', 'TasksMax=512',
     '-p', 'MemoryMax=4G', '--', process.execPath, '-e', ''],
   { encoding: 'utf8', timeout: 10000 });
   return !r.error && r.status === 0;
@@ -345,12 +354,12 @@ function scopeAvailable() {
 
 async function runContained(command, argv, { cwd, env = process.env, limit = 512, scope = false, timeout = 3600000 } = {}) {
   if (!Number.isSafeInteger(limit) || limit < 2 || limit > 512) throw new Error('process limit must be an integer from 2 to 512');
-  const before = new Map(processSnapshot().map(row => [row.pid, row.start]));
+  const before = new Map((scope ? [] : processSnapshot()).map(row => [row.pid, row.start]));
   // The inherited marker finds Linux descendants reparented between snapshots.
   const marker = require('node:crypto').randomUUID();
   const markedEnv = { ...env, TOWER_CRANE_MUTANT_RUN: [env.TOWER_CRANE_MUTANT_RUN, marker].filter(Boolean).join(',') };
   const unit = `tower-crane-mutant-${process.pid}-${require('node:crypto').randomUUID()}.scope`;
-  const args = scope ? ['--user', '--scope', '--quiet', `--unit=${unit}`, '-p', `TasksMax=${limit}`,
+  const args = scope ? ['--user', '--scope', '--quiet', callerSlice(), `--unit=${unit}`, '-p', `TasksMax=${limit}`,
     '-p', 'MemoryMax=4G', '--', command, ...argv] : argv;
   const child = cp.spawn(scope ? 'systemd-run' : command, args, { cwd, env: markedEnv,
     detached: process.platform !== 'win32', stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
@@ -360,11 +369,53 @@ async function runContained(command, argv, { cwd, env = process.env, limit = 512
   let reason = null;
   let inspectionError = null;
   let controlGroup;
+  let groupProbeAt = 0;
+  let scopedCount = 0;
   let ended = false;
   const capture = chunk => { output = (output + chunk.toString()).slice(-8192); };
   child.stdout.on('data', capture);
   child.stderr.on('data', capture);
+  const scopeDirectory = () => {
+    if (controlGroup || Date.now() < groupProbeAt) return controlGroup;
+    // A scope may not be registered at the first inspection.
+    groupProbeAt = Date.now() + 100;
+    const r = cp.spawnSync('systemctl', ['--user', 'show', unit, '-p', 'ControlGroup', '--value'],
+      { encoding: 'utf8', timeout: 5000 });
+    if (r.error) throw r.error;
+    if (r.status === 0 && r.stdout.trim()) controlGroup = path.join('/sys/fs/cgroup', r.stdout.trim());
+    return controlGroup;
+  };
+  const rememberScoped = () => {
+    const group = scopeDirectory();
+    const pids = new Set([child.pid, ...known.keys()].filter(Boolean));
+    scopedCount = 0;
+    if (group) {
+      try {
+        scopedCount = Number(fs.readFileSync(path.join(group, 'pids.current'), 'utf8').trim());
+        if (!Number.isSafeInteger(scopedCount) || scopedCount < 0) throw new Error('invalid scope process count');
+        for (const pid of fs.readFileSync(path.join(group, 'cgroup.procs'), 'utf8').trim().split(/\s+/).filter(Boolean)) {
+          const number = Number(pid);
+          if (!Number.isSafeInteger(number) || number < 1) throw new Error('invalid scope process membership');
+          pids.add(number);
+        }
+      } catch (error) { if (error.code !== 'ENOENT') throw error; }
+    }
+    const members = [];
+    for (const pid of pids) {
+      try {
+        const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
+        const fields = stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\s+/);
+        const start = fields[19];
+        // A PID observed earlier may have been reused after the scope stopped.
+        if (known.has(pid) && known.get(pid) !== start) continue;
+        known.set(pid, start);
+        if (!['Z', 'X'].includes(fields[0])) members.push({ pid, group: Number(fields[2]), start });
+      } catch (error) { if (!['ENOENT', 'ESRCH'].includes(error.code)) throw error; }
+    }
+    return members;
+  };
   const remember = () => {
+    if (scope) return rememberScoped();
     const rows = processSnapshot();
     const members = new Map(rows.filter(row => known.get(row.pid) === row.start).map(row => [row.pid, row]));
     const leader = rows.find(row => row.pid === child.pid);
@@ -418,11 +469,7 @@ async function runContained(command, argv, { cwd, env = process.env, limit = 512
   };
   const scopeCap = () => {
     if (!scope) return null;
-    if (!controlGroup) {
-      const r = cp.spawnSync('systemctl', ['--user', 'show', unit, '-p', 'ControlGroup', '--value'],
-        { encoding: 'utf8', timeout: 5000 });
-      if (r.status === 0 && r.stdout.trim()) controlGroup = path.join('/sys/fs/cgroup', r.stdout.trim());
-    }
+    scopeDirectory();
     if (!controlGroup) return null;
     for (const [file, label] of [['pids.events', `process cap (${limit})`], ['memory.events', 'memory cap (4G)']]) {
       try {
@@ -438,7 +485,8 @@ async function runContained(command, argv, { cwd, env = process.env, limit = 512
   };
   const inspect = () => {
     try {
-      const count = remember().length;
+      const members = remember();
+      const count = scope ? scopedCount : members.length;
       peak = Math.max(peak, count);
       const cap = scopeCap();
       if (cap || count >= limit) stop(cap || `process cap (${limit}); observed ${count}`);
@@ -453,7 +501,7 @@ async function runContained(command, argv, { cwd, env = process.env, limit = 512
   process.on('SIGINT', onInt);
   process.on('SIGTERM', onTerm);
   const timer = setInterval(inspect, 25);
-  const deadline = setTimeout(() => stop(`run timeout (${timeout} ms)`), timeout);
+  const deadline = setTimeout(() => stop(`caught-by-timeout (${timeout} ms)`), timeout);
   try {
     const result = await new Promise((resolve, reject) => {
       child.once('error', reject);
@@ -490,7 +538,17 @@ async function runContained(command, argv, { cwd, env = process.env, limit = 512
   }
 }
 
-module.exports = { MUTANTS, checkMutants, runContained };
+// Five baseline times leave room for loaded hosts; the floor covers process startup.
+function mutationTimeout(files, timings) {
+  const measured = files.reduce((sum, file) => {
+    const ms = timings.get(file);
+    if (!Number.isFinite(ms) || ms < 0) throw new Error(`missing baseline time for ${file}`);
+    return sum + ms;
+  }, 0);
+  return Math.ceil(Math.max(30000, measured * 5));
+}
+
+module.exports = { MUTANTS, checkMutants, runContained, mutationTimeout };
 if (require.main !== module) return;
 
 async function main() {
@@ -500,6 +558,7 @@ async function main() {
     return i < 0 ? fallback : args[i + 1];
   };
   const jobs = Number(opt('--jobs', '4'));
+  if (!Number.isSafeInteger(jobs) || jobs < 1 || jobs > 4) throw new Error('--jobs must be an integer from 1 to 4');
   const only = opt('--only', null)?.split(',');
   const full = !args.includes('--no-full');
   const skip = opt('--skip', null);
@@ -521,10 +580,32 @@ async function main() {
   const copy = fs.mkdtempSync(path.join(scratchRoot, 'tower-crane-mutants-'));
   const scope = scopeAvailable();
   console.log(`Containment: ${scope ? 'systemd scope (MemoryMax=4G) and watchdog' : 'process watchdog'}; process limit ${processLimit}`);
-  async function runTests(files) {
-    const r = await runContained(process.execPath, ['test/run.js', `--test-concurrency=${jobs}`, ...(skip ? [`--test-skip-pattern=${skip}`] : []), ...files],
-      { cwd: copy, limit: processLimit, scope });
+  const timings = new Map();
+  async function testResult(files, timeout, concurrency = jobs) {
+    const r = await runContained(process.execPath, ['test/run.js', `--test-concurrency=${concurrency}`, ...(skip ? [`--test-skip-pattern=${skip}`] : []), ...files],
+      { cwd: copy, limit: processLimit, scope, timeout });
     if (r.reason?.startsWith('interrupted by')) throw new Error(r.reason);
+    return r;
+  }
+  async function baseline(files) {
+    const pending = [...new Set(files)].filter(file => !timings.has(file));
+    // Measure each file in its own run, without adding more file workers.
+    let failed;
+    await Promise.all(Array.from({ length: Math.min(jobs, pending.length) }, async () => {
+      while (pending.length && !failed) {
+        const file = pending.shift();
+        const started = performance.now();
+        try {
+          const r = await testResult([file], undefined, 1);
+          if (r.status !== 0 || r.reason) throw new Error(`the unmutated tests fail:\n${file}\n${r.reason || r.signal || ''}\n${r.output}`);
+          timings.set(file, performance.now() - started);
+        } catch (error) { failed ||= error; }
+      }
+    }));
+    if (failed) throw failed;
+  }
+  async function runTests(files) {
+    const r = await testResult(files, mutationTimeout(files, timings));
     runTests.reason = r.reason;
     if (r.status !== 0 || r.reason) runTests.failures = `${r.reason || r.signal || ''}\n${r.output}`;
     return r.status === 0 && !r.reason;
@@ -548,7 +629,7 @@ async function main() {
     checkMutants(copy, selected);
     // A file that fails unmutated would count every mutant as caught.
     const named = [...new Set(selected.flatMap((m) => m.tests))];
-    if (!await runTests(named)) throw new Error(`the unmutated tests fail:\n${runTests.failures}`);
+    await baseline(named);
     let fullValidated = false;
     for (const m of selected) {
       const file = path.join(copy, m.file);
@@ -560,7 +641,8 @@ async function main() {
         else if (full) {
           if (!fullValidated) {
             fs.writeFileSync(file, source);
-            if (!await runTests(allFiles())) throw new Error(`the unmutated full suite fails:\n${runTests.failures}`);
+            try { await baseline(allFiles()); }
+            catch (error) { throw new Error(`the unmutated full suite fails:\n${error.message}`); }
             fullValidated = true;
             fs.writeFileSync(file, source.replace(m.from, m.to));
           }
