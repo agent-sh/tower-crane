@@ -220,7 +220,7 @@ test('a deep gate temp root with no short directory refuses before running, nami
   }
 });
 
-test('a host-only failure on the base keeps its opt-in and command for retry classification', async () => {
+test('a host-only failure on the base keeps its opt-in and command, and is infrastructure for any task', async () => {
   task({
     'test/host-known.test.js': `require('node:test')('known host failure', { skip: process.env.TC_HOST_OPT_IN !== '1' }, () => {
   require('node:assert/strict').fail('existing host failure');
@@ -244,9 +244,48 @@ test('a host-only failure on the base keeps its opt-in and command for retry cla
     assert.deepEqual(r.test_failure.names, ['known host failure']);
     assert.deepEqual(r.main_failure?.names, ['known host failure']);
     assert.equal(r.confirmed_failure, undefined, 'a matching base failure is retried without a quality climb');
+    // The host fails it without the change, so it waits for main or the host instead of reworking the task.
+    assert.equal(r.infrastructure_failure, true, r.summary);
     assert.ok(r.summary.includes(`\`${host}\``), r.summary);
-    assert.match(r.summary, /Also fails on task-\d+ at [0-9a-f]+: known host failure/);
+    assert.match(r.summary, /Also fails on task-\d+ at [0-9a-f]+: known host failure\. Infrastructure: .*the task stays submitted and is not reworked\./);
+    assert.doesNotMatch(r.summary, /Make the tests pass/);
     assert.deepEqual(r.receipt.host_only.run, ['test/host-known.test.js']);
+    assertCleanedUp();
+  }
+});
+
+// A host-only failure is infrastructure only when the base fails each shared name with the same
+// normalized first error line; a file the task changed needs a specific line, not a generic one.
+test('a host-only failure is infrastructure only when the base fails it with the same error', async () => {
+  const hostTest = (body, comment = '') => `${comment}require('node:test')('known host failure', { skip: process.env.TC_HOST_OPT_IN !== '1' }, () => {
+  ${body};
+});
+`;
+  const denied = "require('node:assert/strict').fail('the shared config stays read-only')";
+  const timeout = "require('node:assert/strict').fail('timed out waiting for the probe')";
+  const cases = [
+    { name: 'a new failure under the same name', base: denied, head: "require('node:assert/strict').equal('worker wrote the shared config', 'denied')", infra: false },
+    { name: 'the same specific failure in a file the task changed', base: denied, head: denied, comment: '// edited by the task\n', infra: true },
+    { name: 'the same generic failure in a file the task changed', base: timeout, head: timeout, comment: '// edited by the task\n', infra: false },
+    { name: 'the same generic failure in a file the task left alone', base: timeout, head: timeout, infra: true },
+  ];
+  const ordinary = `${NODE} --test test/mul.test.js`;
+  for (const c of cases) {
+    task({ 'test/host-known.test.js': hostTest(c.base) });
+    const base = `task-${branches}`;
+    const files = { 'lib/add.js': FIX, 'test/add.test.js': ADD_TEST };
+    if (c.head !== c.base || c.comment) files['test/host-known.test.js'] = hostTest(c.head, c.comment);
+    const sha = task(files, base);
+    const r = await gate.run(ctx(sha, {
+      args: { cmd: ordinary },
+      project: { base, tests: { mode: 'run-only', host_only: ['test/host-known.test.js'], host_env: { TC_HOST_OPT_IN: '1' } },
+        gates: { tests_cmd: ordinary, tests_proof_cmd: `${NODE} --test {tests}` } },
+    }));
+    assert.equal(r.ok, false, c.name);
+    assert.deepEqual(r.main_failure?.names, ['known host failure'], c.name);
+    assert.equal(r.infrastructure_failure, c.infra || undefined, `${c.name}: ${r.summary}`);
+    if (c.infra) assert.doesNotMatch(r.summary, /Make the tests pass/, c.name);
+    else assert.match(r.summary, /Link the existing failure rather than fixing unrelated code\.\nMake the tests pass/, c.name);
     assertCleanedUp();
   }
 });

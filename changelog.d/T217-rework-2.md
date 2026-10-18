@@ -1,0 +1,1 @@
+- Per-finding reproduction and verification details preserve later blockers in the same review section, including unordered and numbered finding lists.
