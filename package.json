@@ -15,7 +15,7 @@
   "scripts": {
     "test": "node test/run.js --test-concurrency=4",
     "docs:generate": "node scripts/cli-docs.js",
-    "check:shared": "node scripts/check-shared-files.js",
+    "check:shared": "node scripts/check-shared-files.js --mutants",
     "changelog": "node scripts/changelog.js"
   },
   "tower-crane": {

@@ -133,6 +133,26 @@ test('a known live holder keeps an old marker until the waiter times out', { ski
   }
 });
 
+test('a fresh foreign-namespace marker ignores a local PID with a different start identity', { skip: process.platform !== 'linux' }, (t) => {
+  const h = makeRepo(t);
+  h.init();
+  const lock = S.acquireLock(h.state);
+  try {
+    const marker = JSON.parse(fs.readFileSync(lock.file, 'utf8'));
+    marker.pidns = 'pid:[0]';
+    marker.start_ticks = '0';
+    fs.writeFileSync(lock.file, JSON.stringify(marker));
+    const result = h.run(['task', 'add', '--title', 'must remain unwritten', '--acceptance', 'foreign holder protected'], {
+      env: { NODE_OPTIONS: `--require=${JSON.stringify(SHORT_WAIT)}` },
+    });
+    assert.equal(result.code, 3, result.stderr);
+    assert.deepEqual(JSON.parse(fs.readFileSync(lock.file, 'utf8')), marker, 'the foreign marker stays intact');
+    assert.equal(h.readState('tasks.json').tasks.length, 0);
+  } finally {
+    S.releaseLock(lock);
+  }
+});
+
 test('a dead holder reclaimed at the deadline permits the waiting write', async (t) => {
   const h = makeRepo(t);
   h.init();
