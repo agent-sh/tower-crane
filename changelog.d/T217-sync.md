@@ -1,0 +1,1 @@
+- Preserve structured blocking-finding locations through rework and the repeated-area gate when summaries omit locations.

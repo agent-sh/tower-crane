@@ -1,0 +1,1 @@
+- Context-overflow fixtures use the claim's lifecycle state to distinguish the first invocation from rework, so a Rework heading in worker instructions cannot change session IDs or trigger an initial overflow.
