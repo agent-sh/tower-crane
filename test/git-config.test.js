@@ -229,7 +229,8 @@ test('a commondir that appears after the guard does not redirect the state looku
   const { h, other, planted, ran } = redirectFixture(t);
   const bin = path.join(h.base, 'git-bin');
   fs.mkdirSync(bin);
-  const realGit = cp.execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8', env: h.env }).trim();
+  // Past an agent's shim, which would find this wrapper first and run it again.
+  const realGit = require('../lib/shim').findReal('git', '');
   fs.writeFileSync(path.join(bin, 'git'), `#!/bin/sh
 case " $* " in
   *" --git-common-dir "*) printf '%s\\n' ${shellQuote(path.join(other, '.git'))} > ${shellQuote(planted)}
