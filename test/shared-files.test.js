@@ -47,6 +47,24 @@ function fixture(t, { crlfProtected = false, windowsCheckout = false } = {}) {
   return { h, script, check, write, read, change };
 }
 
+function commandMetadata(f, name, changes) {
+  let found = false;
+  const literal = String.raw`(?:'(?:\\.|[^'\\])*'|"(?:\\.|[^"\\])*")`;
+  const source = f.read('bin/tower-crane.js').split('\n').map((line) => {
+    if (!line.includes(`name: '${name}'`)) return line;
+    found = true;
+    for (const [field, value] of Object.entries(changes)) {
+      const property = new RegExp(`\\b${field}: ${literal}`);
+      const replacement = `${field}: ${JSON.stringify(value)}`;
+      line = property.test(line) ? line.replace(property, () => replacement)
+        : line.replace(', run:', () => `, ${replacement}, run:`);
+    }
+    return line;
+  }).join('\n');
+  assert.ok(found, name);
+  f.write('bin/tower-crane.js', source);
+}
+
 test('generated command rows match real CLI help, preserve details and reject drift', (t) => {
   const f = fixture(t);
   assert.equal(f.check().status, 0);
@@ -61,7 +79,9 @@ test('generated command rows match real CLI help, preserve details and reject dr
     assert.ok(help.stdout.startsWith(`usage: tower-crane ${usage}\n`));
     assert.ok(docs.includes(`| \`${escapeTableCell(usage)}\` | ${escapeTableCell(command.description || command.summary)} |`));
   }
-  f.write('docs/cli.md', docs.replace('| append a note |', '| stale summary |'));
+  const note = COMMANDS.find((command) => command.name === 'task note');
+  const field = note.description ? 'description' : 'summary';
+  f.write('docs/cli.md', docs.replace(`| ${escapeTableCell(note[field])} |`, '| stale summary |'));
   const drift = f.check();
   assert.equal(drift.status, 1);
   assert.match(drift.stderr, /command rows drifted/);
@@ -69,7 +89,7 @@ test('generated command rows match real CLI help, preserve details and reject dr
   assert.equal(f.read('docs/cli.md'), docs);
 
   f.change();
-  f.write('bin/tower-crane.js', f.read('bin/tower-crane.js').replace('append a note', 'append a task note'));
+  commandMetadata(f, 'task note', { [field]: 'append a task note' });
   assert.equal(f.check().status, 1, 'a metadata change requires regeneration');
   assert.equal(f.script('cli-docs.js').status, 0);
   assert.equal(f.check().status, 0);
@@ -87,7 +107,7 @@ test('generated command rows match real CLI help, preserve details and reject dr
 test('long command descriptions are generated from metadata while CLI help keeps the summary', (t) => {
   const f = fixture(t);
   const description = 'append a note with the supplied identity';
-  f.write('bin/tower-crane.js', f.read('bin/tower-crane.js').replace("summary: 'append a note',", `summary: 'append a note', description: ${JSON.stringify(description)},`));
+  commandMetadata(f, 'task note', { summary: 'append a note', description });
   const stale = f.check();
   assert.equal(stale.status, 1);
   assert.match(stale.stderr, /command rows drifted/);
@@ -112,6 +132,7 @@ for (const windowsCheckout of [false, true]) {
       assert.ok(!fs.readFileSync(path.join(f.h.repo, name), 'utf8').includes('\r'), `${name} checks out as LF`);
     }
     const base = f.h.git(['rev-parse', 'HEAD']);
+    const { COMMANDS } = require(path.join(f.h.repo, 'bin', 'tower-crane.js'));
     const addFlag = (command, flag, fragment) => {
       let found = false;
       const source = f.read('bin/tower-crane.js').split('\n').map((line) => {
@@ -143,8 +164,10 @@ for (const windowsCheckout of [false, true]) {
     const check = f.check();
     assert.equal(check.status, 0, check.stderr);
     const merged = f.read('docs/cli.md');
-    assert.ok(merged.includes('task list [--status S] [--list-label LABEL]'));
-    assert.ok(merged.includes('task note ID TEXT [--note-label LABEL]'));
+    for (const [name, flag] of [['task list', 'list-label'], ['task note', 'note-label']]) {
+      const command = COMMANDS.find((entry) => entry.name === name);
+      assert.ok(merged.includes(`${name} ${escapeTableCell(command.usage)} [--${flag} LABEL]`));
+    }
     assert.ok(fs.existsSync(path.join(f.h.repo, 'changelog.d/T901.md')));
     assert.ok(fs.existsSync(path.join(f.h.repo, 'changelog.d/T902.md')));
     assert.equal(f.script('cli-docs.js').status, 0);
@@ -369,10 +392,23 @@ test('CRLF source, docs, fragments and archive use the same canonical text in re
   assert.equal(fs.readFileSync(path.join(f.h.repo, 'docs/cli.md'), 'utf8'), docs, 'generation writes canonical LF output');
 });
 
+test('table cell escaping covers literal and adjacent backslashes and pipes', () => {
+  const cases = [
+    ['', ''],
+    ['plain text', 'plain text'],
+    ['|', String.raw`\|`],
+    ['\\', '\\\\'],
+    [String.raw`\|`, String.raw`\\\|`],
+    [String.raw`\\||`, String.raw`\\\\\|\|`],
+    [String.raw`paths C:\one\|two|three`, String.raw`paths C:\\one\\\|two\|three`],
+  ];
+  for (const [input, expected] of cases) assert.equal(escapeTableCell(input), expected);
+});
+
 test('generated table cells escape every backslash and pipe in one pass', (t) => {
   const f = fixture(t);
   const summary = String.raw`paths C:\one\|two|three`;
-  f.write('bin/tower-crane.js', f.read('bin/tower-crane.js').replace("'append a note'", JSON.stringify(summary)));
+  commandMetadata(f, 'task note', { description: summary });
   assert.equal(f.script('cli-docs.js').status, 0);
   assert.ok(f.read('docs/cli.md').includes(String.raw`| paths C:\\one\\\|two\|three |`));
   assert.equal(f.script('cli-docs.js', ['--check']).status, 0);
