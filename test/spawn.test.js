@@ -31,6 +31,14 @@ function setup(t) {
   });
 }
 
+// The first output of a child that prints once and exits: a child that exits
+// without printing fails the test at once instead of at its timeout.
+async function firstOutput(child) {
+  const ended = once(child.stdout, 'end').then(() => { throw new Error(`process ${child.pid} exited without printing`); });
+  const [chunk] = await Promise.race([once(child.stdout, 'data'), ended]);
+  return chunk;
+}
+
 const dry = (h, rung, env) => h.json(['spawn', ...(rung ? ['--role', rung] : []), '--task', 'T1', '--dry-run'], { env });
 
 // Sets a rung to exactly these flags: every field they leave out is cleared.
@@ -67,7 +75,7 @@ test('the dead-agent sweep removes orphan brokers and keeps live claims, process
     path.join(ROOT, 'lib', 'broker.js'), JSON.stringify(job)],
   { stdio: ['ignore', 'pipe', 'pipe'] });
   t.after(() => listener.kill('SIGKILL'));
-  await once(listener.stdout, 'data');
+  await firstOutput(listener);
   const { socket } = JSON.parse(fs.readFileSync(job.broker, 'utf8'));
   if (process.platform !== 'win32' && path.dirname(socket) !== brokerDir('worker-orphan')) {
     t.after(() => fs.rmSync(path.dirname(socket), { recursive: true, force: true }));
@@ -109,7 +117,7 @@ test('the dead-agent sweep removes orphan brokers and keeps live claims, process
     const leader = cp.spawn(process.execPath, ['-e',
       "const c = require('node:child_process').spawn(process.execPath, ['-e', 'setTimeout(() => {}, 120000)'], { stdio: 'ignore' }); process.stdout.write(c.pid + '\\n', () => process.exit(0))"], // wait-allow: the member only idles until the test kills its group
     { detached: true, stdio: ['ignore', 'pipe', 'ignore'] });
-    const [left] = await once(leader.stdout, 'data');
+    const left = await firstOutput(leader);
     assert.ok(Number(String(left).trim()) > 0, 'the group keeps a member');
     t.after(() => { try { killGroup(leader.pid, 'SIGKILL'); } catch {} });
     if (leader.exitCode === null) await once(leader, 'exit');
@@ -131,21 +139,24 @@ test('the dead-agent sweep removes orphan brokers and keeps live claims, process
     fs.mkdirSync(path.join(h.state, 'homes', 'worker-group-reused'), { recursive: true });
     fs.appendFileSync(path.join(h.state, 'events.jsonl'), JSON.stringify({
       at: new Date().toISOString(), cmd: 'spawn', agent: 'owner', task: 'T2',
-      detail: { agent: 'worker-group-reused', role: 'worker', pid: later.pid, host: require('node:os').hostname(), start_ticks: '1' },
+      detail: { agent: 'worker-group-reused', role: 'worker', pid: later.pid, host: require('node:os').hostname(), start_ticks: '1',
+        run_mark: `TOWERCRANE_SPAWN_RUN_${process.pid}_00000000reused` },
     }) + '\n');
   }
   // A harness that exited after starting a process in a session of its own (setsid): its group is
   // empty, and only the launch's marker, which the process inherited, names it as the agent's.
   // Only Linux reads another process's environment.
   const marked = process.platform === 'linux';
+  let leftBehind = null;
   if (marked) {
     const mark = `TOWERCRANE_SPAWN_RUN_${process.pid}_0123456789ab`;
     const leader = cp.spawn(process.execPath, ['-e',
       "const c = require('node:child_process').spawn(process.execPath, ['-e', 'setTimeout(() => {}, 120000)'], { detached: true, stdio: 'ignore' }); process.stdout.write(c.pid + '\\n', () => process.exit(0))"], // wait-allow: the session leader only idles until the test kills it
     { detached: true, stdio: ['ignore', 'pipe', 'ignore'], env: { ...process.env, [mark]: '1' } });
-    const [line] = await once(leader.stdout, 'data');
+    const line = await firstOutput(leader);
     const left = Number(String(line).trim());
     assert.ok(left > 0, 'the harness left a process in a session of its own');
+    leftBehind = left;
     t.after(() => { try { killGroup(left, 'SIGKILL'); } catch {} });
     if (leader.exitCode === null) await once(leader, 'exit');
     plant('worker-setsid-left', { socket });
@@ -165,11 +176,19 @@ test('the dead-agent sweep removes orphan brokers and keeps live claims, process
   const bin = path.join(h.base, 'bin');
   fs.mkdirSync(bin);
   fs.writeFileSync(path.join(bin, `codex${process.platform === 'win32' ? '.exe' : ''}`), '', { mode: 0o755 });
+  const environReads = path.join(h.base, 'environ-reads');
   const out = await h.runAsync(['spawn', '--task', 'T1', '--wait'], {
     env: { PATH: bin + path.delimiter + (h.env.PATH || h.env.Path || ''), USAGE_CLAIM: '1' },
-    hooks: { HOOK_USAGE_HARNESS: 'codex', HOOK_USAGE_FILE: path.join(__dirname, 'fixtures', 'usage', 'codex-stream.jsonl') },
+    hooks: { HOOK_USAGE_HARNESS: 'codex', HOOK_USAGE_FILE: path.join(__dirname, 'fixtures', 'usage', 'codex-stream.jsonl'),
+      HOOK_ENVIRON_READS: environReads },
   });
   assert.equal(out.code, 0, out.stderr);
+  // worker-setsid-left and worker-group-reused both need the marker check; one pass over /proc answers both.
+  if (marked && reused) {
+    const reads = fs.readFileSync(environReads, 'utf8').trim().split('\n');
+    assert.ok(reads.length > 0, 'the markers were read');
+    assert.equal(new Set(reads).size, reads.length, 'no process\'s environment is read twice');
+  }
   assert.equal(fs.existsSync(brokerDir('worker-orphan')), false, 'broker with no home, claim or process and a dead socket is swept');
   assert.equal(fs.existsSync(brokerDir('worker-orphan-tcp')), false, 'a dead TCP-only broker is swept');
   for (const agent of ['worker-live-claim', 'worker-live-process', 'worker-live-monitor', 'worker-unknown-process', 'worker-live-socket', 'worker-uncertain', ...kept]) {
@@ -177,6 +196,14 @@ test('the dead-agent sweep removes orphan brokers and keeps live claims, process
   }
   if (grouped) assert.ok(fs.existsSync(path.join(h.state, 'homes', 'worker-group-left', 'note')), 'a home whose group still runs is kept');
   if (marked) assert.ok(fs.existsSync(path.join(h.state, 'homes', 'worker-setsid-left', 'note')), 'a home whose marked process left the group is kept');
+  // status names the home a stray keeps, which would otherwise stay without a word.
+  const status = h.json(['status']);
+  const strays = status.kept_homes.find((k) => k.agent === 'worker-setsid-left');
+  if (marked) {
+    assert.deepEqual(strays?.pids, [leftBehind], 'status names the process keeping the home');
+    assert.match(h.ok(['status']), new RegExp(`^home kept: worker-setsid-left by a stray process ${leftBehind}$`, 'm'));
+  } else assert.equal(strays, undefined);
+  assert.equal(status.kept_homes.some((k) => k.agent === 'worker-group-left'), false, 'a home kept by its group is not a stray\'s');
   if (reused) {
     assert.equal(fs.existsSync(path.join(h.state, 'homes', 'worker-group-reused')), false, 'a home whose group pid was given out again is removed');
     assert.equal(fs.existsSync(brokerDir('worker-group-reused')), false, 'and so is its broker directory');
@@ -947,7 +974,9 @@ test('background spawn refuses a log name held by a link or a directory without 
 
 test('spawn in the background detaches, logs output and numbers agents', async (t) => {
   const h = setup(t);
-  commandRung(h, 'small', [process.execPath, '-e', 'console.log("hello from " + process.env.TOWER_CRANE_AGENT)']);
+  // The harness prints the launch marker it was given, which the spawn event must name.
+  commandRung(h, 'small', [process.execPath, '-e',
+    'console.log("hello from " + process.env.TOWER_CRANE_AGENT + " marked " + Object.keys(process.env).filter((k) => k.startsWith("TOWERCRANE_SPAWN_RUN_")).join(","))']);
   const started = h.json(['spawn', '--role', 'small', '--task', 'T1']);
   assert.equal(started.agent, 'small-T1-1');
   assert.ok(Number.isInteger(started.pid));
@@ -956,6 +985,13 @@ test('spawn in the background detaches, logs output and numbers agents', async (
   if (process.platform !== 'win32') assert.equal(fs.statSync(started.log).mode & 0o777, 0o600);
   await waitOnRepo(h, () => (fs.existsSync(started.log) && readPublished(started.log, 'utf8').includes('hello')));
   assert.match(fs.readFileSync(started.log, 'utf8'), /hello from small-T1-1/);
+  const marker = /marked (\S*)/.exec(fs.readFileSync(started.log, 'utf8'))[1];
+  const spawned = S.readEvents(h.state).find((e) => e.cmd === 'spawn' && e.detail.agent === 'small-T1-1');
+  if (process.platform === 'win32') assert.equal(spawned.detail.run_mark, undefined);
+  else {
+    assert.match(marker, /^TOWERCRANE_SPAWN_RUN_\d+_[0-9a-f]{12}$/, 'the harness carries one launch marker');
+    assert.equal(spawned.detail.run_mark, marker, 'the spawn event records the marker the harness carries');
+  }
   assert.equal(h.json(['spawn', '--role', 'small', '--task', 'T1', '--dry-run']).agent, 'small-T1-2');
 
   reviewable(h);
