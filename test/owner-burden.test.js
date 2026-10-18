@@ -173,9 +173,12 @@ test('a crisis opens an owner decision and messages the owner; status and inbox 
   const unclassed = h.run(['ask', '--kind', 'crisis', '--question', 'Disk is full', '--agent', 'orchestrator'], orchestrator);
   assert.equal(unclassed.code, 2, unclassed.stderr);
   assert.match(unclassed.stderr, /--kind crisis and --crisis CLASS go together/);
-  h.ok(['ask', '--kind', 'crisis', '--crisis', 'host', '--question', 'The gate host disk is full', '--agent', 'orchestrator'], orchestrator);
+  const gated = h.add('Gated on the host');
+  h.ok(['ask', '--kind', 'crisis', '--crisis', 'host', '--question', 'The gate host disk is full', '--blocks', gated, '--agent', 'orchestrator'], orchestrator);
+  // The disk stays full when the task it blocked is dropped: a crisis is never moot.
+  h.ok(['task', 'update', gated, '--status', 'cancelled', '--agent', 'orchestrator'], orchestrator);
   const d = decision(h, 'D1');
-  assert.deepEqual([d.kind, d.crisis, d.technical], ['crisis', 'host', false]);
+  assert.deepEqual([d.kind, d.crisis, d.technical, d.status], ['crisis', 'host', false, 'open']);
   const told = events(h).findLast((e) => e.cmd === 'msg');
   assert.deepEqual(told.detail, { to: 'owner', text: 'crisis (host stability: OOM, fork storm, disk full): The gate host disk is full (D1)' });
   assert.match(h.run(['answer', 'D1', '--choice', 'ok', '--agent', 'orchestrator'], orchestrator).stderr, /D1 is a crisis decision; only the owner answers it/);
@@ -212,6 +215,11 @@ test('the owner\'s standing publish policy releases an accepted task while its c
   const red = h.run(publish, orchestrator);
   assert.equal(red.code, 1, red.stderr);
   assert.match(red.stderr, /opened D3 .*main_ci_green: main CI is red: CI run 1001/);
+  // D3 names a task that was accepted before it opened, so no later write makes it moot.
+  h.ok(['ask', '--kind', 'technical', '--question', 'Tag the release now?', '--option', 'yes', '--option', 'no', '--blocks', id], worker(id));
+  h.add('Later work');
+  assert.deepEqual(['D3', 'D4'].map((d) => decision(h, d).status), ['open', 'open']);
+  h.ok(['decision', 'withdraw', 'D4', '--reason', 'tagged'], worker(id));
   h.ok(['decision', 'withdraw', 'D3', '--reason', 'main is red', '--agent', 'orchestrator'], orchestrator);
 
   h.mainCI('success');
