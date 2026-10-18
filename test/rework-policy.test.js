@@ -130,7 +130,17 @@ test('blocking areas handle markdown, path variants and follow-ups', () => {
     { kind: 'defect', path: './lib/retry.js', claim: 'duplicate' },
     { kind: 'defect', path: 'lib\\retry.js', claim: 'variant' },
     { kind: 'false-claim', path: 'PR body', claim: 'overstated' },
-  ]), ['PR body', 'lib/retry.js']);
+  ]), ['lib/retry.js']);
+  const locations = [
+    ['PR body', []],
+    ['PR title', []],
+    ['commit message', []],
+    [' lib/retry.js ', ['lib/retry.js']],
+    ['.', []],
+  ];
+  for (const [location, expected] of locations) {
+    assert.deepEqual(Reviews.areas('', [{ kind: 'false-claim', path: location, claim: 'overstated' }]), expected, location);
+  }
 });
 
 test('review failure counting distinguishes areas, verdicts, revisions and authorized reviewers', () => {
@@ -152,6 +162,13 @@ test('review failure counting distinguishes areas, verdicts, revisions and autho
     ['late old reviews after ruling', [failure('lib/a.js'), failure('lib/a.js', 2)], [], 0, 3],
     ['parsed areas preserved', [failure('lib/a.js', 1, undefined, { areas: ['lib/hidden.js'] }),
       failure('lib/b.js', 2, undefined, { areas: ['lib/hidden.js'] })], ['lib/hidden.js']],
+    ['PR body in two revisions', [failure('lib/a.js', 1, undefined, {
+      findings: [{ kind: 'defect', path: 'lib/a.js', claim: 'a' }, { kind: 'false-claim', path: 'PR body', claim: 'overstated' }],
+    }), failure('lib/b.js', 2, undefined, {
+      findings: [{ kind: 'defect', path: 'lib/b.js', claim: 'b' }, { kind: 'false-claim', path: 'PR body', claim: 'tests not run' }],
+    })], []],
+    ['stored PR body area', [failure('lib/a.js', 1, undefined, { areas: ['PR body', 'lib/a.js'] }),
+      failure('lib/b.js', 2, undefined, { areas: ['PR body', 'lib/b.js'] })], []],
     ['structured findings preserved', [failure('lib/a.js', 1, undefined, {
       findings: [{ kind: 'defect', path: './lib/hidden.js', claim: 'one' }],
     }), failure('lib/b.js', 2, undefined, {
@@ -170,6 +187,11 @@ test('review failure counting distinguishes areas, verdicts, revisions and autho
     cmd: 'spawn', task: 'T1',
     detail: { role: 'reviewer', agent: entry.agent, sha: entry.sha, revision: entry.revision },
   }));
-  assert.deepEqual(Reviews.repeatedAreas({ id: 'T1', evidence }, events), ['lib/a.js'],
-    'independent reviewers at the same head count separately');
+  assert.deepEqual(Reviews.repeatedAreas({ id: 'T1', evidence }, events), [],
+    'independent reviewers at the same head and revision count once');
+  const moved = [...evidence, failure('lib/a.js', 2, 'b'.repeat(40), { agent: 'reviewer-1' })];
+  const movedEvents = [...events, { cmd: 'spawn', task: 'T1',
+    detail: { role: 'reviewer', agent: 'reviewer-1', sha: 'b'.repeat(40), revision: 2 } }];
+  assert.deepEqual(Reviews.repeatedAreas({ id: 'T1', evidence: moved }, movedEvents), ['lib/a.js'],
+    'a failure at a new commit still counts');
 });
