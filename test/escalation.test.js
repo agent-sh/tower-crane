@@ -444,17 +444,25 @@ test('a drain during wait\'s recovery leaves the climb pending and wait reports 
   const preload = path.join(h.base, 'drain-during-recovery.js');
   // The first recovery call signals wait, then awaits the drain as an earlier
   // recovery's agent startup would, so the climb's dispatch runs drained.
+  // Refill runs beside recovery and would dispatch the pending climb itself,
+  // so it waits for the same drain: only recovery's dispatch is under test.
   fs.writeFileSync(preload, `const E = require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'escalation.js'))});
+const A = require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'automation.js'))});
+const drained = (drain) => (drain.aborted ? null : new Promise((resolve) => drain.addEventListener('abort', resolve, { once: true })));
 const recover = E.recover;
 let first = true;
 E.recover = async (ctx) => {
   if (first) {
     first = false;
     process.kill(process.pid, 'SIGTERM');
-    const drain = ctx.automationSignal;
-    if (!drain.aborted) await new Promise((resolve) => drain.addEventListener('abort', resolve, { once: true }));
+    await drained(ctx.automationSignal);
   }
   return recover(ctx);
+};
+const refill = A.refillWorkers;
+A.refillWorkers = async (ctx, attempt) => {
+  await drained(ctx.automationSignal);
+  return refill(ctx, attempt);
 };
 `);
   const r = await h.runAsync(['wait', '--follow', '--types', 'worker-message', '--agent', 'orchestrator'], { pre: ['--require', preload] });
