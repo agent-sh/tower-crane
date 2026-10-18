@@ -10,7 +10,7 @@ const { gateEvidence, retireRevision } = require('./gate-helpers');
 const { waitFor } = require('./canary');
 const { shellQuote } = require('../lib/gates/common');
 const { readPublished } = require('./atomic-file');
-const { setup, configureHarness, refillFixture, harness } = require('./automation-helpers');
+const { setup, holdSuite, configureHarness, refillFixture, harness } = require('./automation-helpers');
 
 test('automation command harness temp files stay inside its fixture', (t) => {
   const h = setup(t);
@@ -229,6 +229,8 @@ test('automation reports unchanged dispatch refusals once and retries after the 
 test('automation dispatches rework-ready work with the failed review findings', async (t) => {
   const h = refillFixture(t);
   h.ok(['task', 'update', 'T4', '--dep', 'T1']);
+  // Refill does not wait for the review reaction, so other ready work would take the only slot first.
+  for (const id of ['T2', 'T3']) h.ok(['task', 'update', id, '--status', 'cancelled']);
   h.submit();
   h.reviewer('T1', 'reviewer');
   h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--sha', h.sha,
@@ -390,6 +392,7 @@ test('a refill at a held dispatch lock retries on the next pass without waiting 
   });
   await waitFor(looked, { what: 'the refill looks at the held dispatch lock' });
   assert.equal(h.logs().filter((e) => e.cmd === 'spawn').length, 0, 'nothing is dispatched while the lock is held');
+  assert.match(h.json(['status']).not_dispatched.find((b) => b.id === 'T3').reason, new RegExp(`^dispatch lock held by pid ${process.pid} since `));
   // Nothing in the state changes from here; only the lock goes away.
   release();
   const result = await watcher;
@@ -431,6 +434,72 @@ test('the wait host serves events and drains a signal while another dispatch hol
   assert.ok(Date.now() - signalled < 30000, `the drain took ${Date.now() - signalled} ms`); // wait-allow: the same bound for the signal drain
   assert.equal(result.code, 0, result.stderr);
   assert.deepEqual(rows().at(-1), { reason: 'signal', signal: 'SIGTERM', drained: 0 });
+});
+
+// A full suite holds its gate reaction for most of an hour on a real project.
+// The suite here gives up on its own, so a refill that waits behind the
+// reaction dispatches only after the gate's evidence, which the order shows.
+test('the wait host dispatches a ready task while a gate reaction is still running', async (t) => {
+  const h = refillFixture(t);
+  const { stalled, release } = holdSuite(h, { giveUpMs: 20000 });
+  h.submit();
+  let child;
+  const host = h.runAsync(['wait', '--after', '0', '--types', 'never', '--timeout', '300', '--agent', 'orchestrator'], { // wait-allow: the gate's release ends the test first; this bounds a host that never settles
+    onSpawn: (c) => { child = c; },
+  });
+  try {
+    await waitFor(stalled, { what: 'the tests gate holds the reaction' });
+    await waitFor(h.marker('T3'), { alive: child, what: 'T3 takes the free slot' });
+    const log = h.logs();
+    const dispatched = log.findIndex((e) => e.cmd === 'spawn' && e.task === 'T3');
+    const gated = log.findIndex((e) => e.cmd === 'check tests' && e.task === 'T1');
+    assert.ok(gated === -1 || dispatched < gated, 'T3 is dispatched before the tests gate on T1 ends');
+    assert.equal(log.findLast((e) => e.cmd === 'automation' && e.task === 'T1').detail.phase, 'running', 'the reaction still runs');
+    const status = h.json(['status']);
+    assert.deepEqual(status.not_dispatched, [{ id: 'T2', reason: 'worker limit reached (1 of 1: T3)' }]);
+    assert.match(h.ok(['status']), /^not dispatched: T2 worker limit reached \(1 of 1: T3\)$/m);
+  } finally {
+    fs.writeFileSync(release, '');
+  }
+  await waitOnRepo(h, () => h.logs().some((e) => e.cmd === 'check tests' && e.task === 'T1'), 'the held gate finishes');
+  child.kill('SIGTERM');
+  await host;
+  const task = h.readState('tasks.json').tasks.find((x) => x.id === 'T1');
+  assert.equal(task.status, 'submitted', 'the refill left the gated task alone');
+  assert.equal(h.logs().filter((e) => e.cmd === 'spawn' && e.task === 'T1' && e.detail.role === 'worker').length, 0);
+  assert.equal(h.logs().findLast((e) => e.cmd === 'check tests' && e.task === 'T1').detail.ok, true);
+});
+
+// With the fallback tick off and the watch silent, nothing but the host's own
+// timer wakes it once the hold ends.
+test('an ending rework hold dispatches on the wait host\'s own timer, with no other event', async (t) => {
+  const h = refillFixture(t);
+  for (const id of ['T2', 'T3', 'T4']) h.ok(['task', 'update', id, '--status', 'cancelled']);
+  const broken = path.join(h.base, 'environment-broken');
+  fs.writeFileSync(broken, '');
+  const script = path.join(h.base, 'local-environment.js');
+  fs.writeFileSync(script, `process.exit(require('node:fs').existsSync(${JSON.stringify(broken)}) ? 1 : 0);\n`);
+  h.ok(['project', 'set', '--ci-local', JSON.stringify({ command: [process.execPath, script], timeout: 30 }), '--rework-hold-min', '0.2']);
+  h.submit();
+  h.consume();
+  const rework = h.logs().findLast((e) => e.cmd === 'rework');
+  assert.equal(rework?.detail.gate, 'ci', 'an automatic gate rework');
+  const end = Date.parse(rework.at) + 12000;
+  const ready = path.join(h.base, 'host-ready');
+  let child;
+  const host = h.runAsync(['wait', '--types', 'never', '--timeout', '60', '--agent', 'orchestrator'], { // wait-allow: a host with no hold timer is never woken again; this deadline ends it, the failure the test looks for
+    hooks: { HOOK_SILENT_WATCH: '1', HOOK_NO_FALLBACK: '1', HOOK_WATCH_READY: ready },
+    onSpawn: (c) => { child = c; },
+  });
+  await waitFor(ready, { what: 'the host starts' });
+  assert.ok(Date.now() < end, 'the host starts while the hold still runs');
+  const held = h.json(['status']).not_dispatched;
+  assert.deepEqual(held, [{ id: 'T1', reason: `rework hold until ${new Date(end).toISOString().replace('T', ' ').slice(0, 16)}Z`, until: new Date(end).toISOString() }]);
+  await waitFor(h.marker('T1'), { alive: child, what: 'the hold timer dispatches T1' });
+  const spawn = h.logs().find((e) => e.cmd === 'spawn' && e.task === 'T1' && e.detail.role === 'worker');
+  assert.ok(Date.parse(spawn.at) >= end, 'dispatched once the hold ended');
+  child.kill('SIGTERM');
+  await host;
 });
 
 // A holder in another pid namespace counts as gone 60 s after its marker last

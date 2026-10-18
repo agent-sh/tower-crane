@@ -133,6 +133,15 @@ if (env.HOOK_CLOCK_FILE) {
   };
 }
 
+// HOOK_NO_FALLBACK=1: the wait host's one-second fallback tick never fires,
+// so with HOOK_SILENT_WATCH only its own timers wake it.
+if (env.HOOK_NO_FALLBACK && path.basename(process.argv[1] || '') === 'tower-crane.js' && process.argv[2] === 'wait') {
+  const interval = global.setInterval;
+  global.setInterval = function noFallback(fn, ms, ...args) {
+    return ms === 1000 ? interval(() => {}, ms) : interval(fn, ms, ...args);
+  };
+}
+
 if (env.HOOK_WATCH_READY || env.HOOK_NO_WATCH || env.HOOK_SILENT_WATCH) {
   const watch = fs.watch;
   fs.watch = function hookedWatch(...args) {

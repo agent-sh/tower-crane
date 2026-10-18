@@ -471,7 +471,13 @@ to full-findings rework and exit 1, rather than repeating review at that head.
 PR-body-only failures are excepted.
 If findings cannot be retrieved, the task stays submitted. Dry-run review
 previews do not change state.
-After draining event reactions, the trusted `wait` host releases verified
+The trusted `wait` host refills worker slots on its own path, beside its
+event reactions: at startup, on every state change, on the fallback tick and
+after each reaction pass, so a gate reaction that runs a full suite for most
+of an hour never holds a free slot empty. One refill runs at a time in a host;
+it skips a task whose own gate reaction still runs, and an ending rework hold
+wakes it on a timer set to the earliest hold end. A wait ends only once
+neither its reactions nor its refill are running. Each refill releases verified
 dead claims through `release --dead`. Worker exits, releases, rework and confirmed merges refill
 free slots through `spawn --ready`, including ready rework tasks. The same
 worker limit, unblocking-first order, routing, fallback and locked reservations
@@ -871,7 +877,7 @@ The token protects against foreign web origins and against local processes that 
 | | |
 | `serve [--port P]` | serve the live board and a Settings view on 127.0.0.1 (default port 4747; 0 picks a free one) and update open pages over server-sent events when the state changes. Pages are rendered from the state on each request. As the owner it also prints a one-time link to open in the browser that will write (`--json` prints `{ url, state, open }`; `open` is `url` for other identities). Exits 1 if the port is in use |
 | | |
-| `status` | one screen: counts by status, ready tasks (marked `no brief` when they have none; JSON `ready[].brief`), the gate queue (running tasks, then queued tasks in the order executors take them, with any `gates prioritize` reason, then tasks blocked behind their own running reaction), the gate temporary root and what chose it, blocked required gates when their test or cleanup command is unpinned, open decisions, owner tasks, spend against budget, live spend of running agents with its freshness (`live`, `stale` or `unavailable`; JSON `spend.live`), expired leases, runaway flags (`runaway: T1 agent: rule`; JSON `runaways` and `runaway_norms`), claims whose spawned process exited without submit and their log tails, agent homes a stray process keeps after the agent exited (`home kept: AGENT by a stray process PID`; JSON `kept_homes`), and red CI runs on the base that `inbox` last recorded with their failing jobs and test names (`BASE ci red: ...`; JSON `main_ci_red`) |
+| `status` | one screen: counts by status, ready tasks (marked `no brief` when they have none; JSON `ready[].brief`), why automatic refill leaves a ready task undispatched (`not dispatched: T2 worker limit reached (3 of 3: T1, T4, T5)`, also `no brief`, `its gate reaction is running`, `rework hold until T`, `waits behind higher-ranked tasks for the N free worker slots` and `dispatch lock held by pid P`; JSON `not_dispatched[]` with `id`, `reason` and, for a hold, `until`), the gate queue (running tasks, then queued tasks in the order executors take them, with any `gates prioritize` reason, then tasks blocked behind their own running reaction), the gate temporary root and what chose it, blocked required gates when their test or cleanup command is unpinned, open decisions, owner tasks, spend against budget, live spend of running agents with its freshness (`live`, `stale` or `unavailable`; JSON `spend.live`), expired leases, runaway flags (`runaway: T1 agent: rule`; JSON `runaways` and `runaway_norms`), claims whose spawned process exited without submit and their log tails, agent homes a stray process keeps after the agent exited (`home kept: AGENT by a stray process PID`; JSON `kept_homes`), and red CI runs on the base that `inbox` last recorded with their failing jobs and test names (`BASE ci red: ...`; JSON `main_ci_red`) |
 <!-- commands:Views:end -->
 
 `status` lists homes kept by marked stray processes as `kept_homes: [{ agent, pids }]` in JSON. Text uses `home kept: AGENT by a stray process PID` for one PID or `home kept: AGENT by stray processes P1, P2` for several. A missing homes directory or one denied with `EACCES` or `EPERM` reports no kept homes.
