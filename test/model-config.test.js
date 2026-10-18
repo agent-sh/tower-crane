@@ -6,6 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
 const { ROOT, ACCOUNT_HOME, pinLiveRung, makeRepo, makeProjectRepo, makeTaskRepo, cachedFixture, fixtureLadder } = require('./helpers');
+const { readPublished } = require('./atomic-file');
 
 const { modelSelections } = require('../scripts/check-model-config');
 const { DEADLINE_MIN } = require('../scripts/suite-time');
@@ -43,13 +44,12 @@ for (const harness of ['claude', 'codex']) {
     const missing = path.join(h.base, 'hidden-account-home.js');
     fs.writeFileSync(path.join(bin, harness), `#!${process.execPath}
 const cp = require('node:child_process');
-const fs = require('node:fs');
 // A sandbox hides the test checkout, so the inherited preload is missing there.
 const env = { ...process.env, NODE_OPTIONS: String(process.env.NODE_OPTIONS || '').replaceAll(
   ${JSON.stringify(ACCOUNT_HOME.replace(/\\/g, '/'))}, ${JSON.stringify(missing)}) };
 const probe = cp.spawnSync(process.execPath, ['-e', 'process.stdout.write("probe started")'],
   { env, encoding: 'utf8', timeout: 300000 });
-fs.writeFileSync(${JSON.stringify(out)}, JSON.stringify({
+require(${JSON.stringify(path.join(ROOT, 'test/atomic-file'))}).writeAtomic(${JSON.stringify(out)}, JSON.stringify({
   status: probe.status, stdout: probe.stdout, stderr: probe.stderr,
   options: process.env.NODE_OPTIONS, project: process.env.PROJECT_KEEP, rung: process.env.RUNG_KEEP,
 }));
@@ -78,7 +78,7 @@ process.exit(probe.status ?? 1);
       if (source === 'rung') h.ok(['ladder', 'set', rung, '--env', JSON.stringify({ RUNG_KEEP: 'rung-value', NODE_OPTIONS: options })]);
       if (fs.existsSync(out)) fs.rmSync(out);
       const result = h.run(['spawn', '--task', 'T1', '--role', rung, '--wait']);
-      const seen = fs.existsSync(out) ? JSON.parse(fs.readFileSync(out, 'utf8')) : null;
+      const seen = fs.existsSync(out) ? JSON.parse(readPublished(out, 'utf8')) : null;
       assert.equal(result.code, 0, `${source}: ${result.stderr}\n${JSON.stringify(seen)}`);
       assert.deepEqual(seen, {
         status: 0, stdout: 'probe started', stderr: '', ...(options === undefined ? {} : { options }),
@@ -86,7 +86,7 @@ process.exit(probe.status ?? 1);
       });
     }
     assert.ok(h.env.NODE_OPTIONS.includes(ACCOUNT_HOME.replace(/\\/g, '/')), 'controller CLIs retain the account preload');
-    assert.equal(h.readState('project.json').owner_config_dir, path.join(h.env.HOME, '.config', 'tower-crane', 'owner'));
+    assert.equal(h.readState('project.json').owner_config_dir, path.dirname(h.env.TOWER_CRANE_CONFIG));
   });
 }
 
