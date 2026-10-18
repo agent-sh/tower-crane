@@ -55,12 +55,13 @@ if (require.main !== module) {
       const assignment = args[++n];
       const equal = assignment.indexOf('=');
       const name = assignment.slice(0, equal);
-      if (!['CPUQuota', ...Object.keys(types).filter((key) => !['PIDs', 'Slice'].includes(key))].includes(name)) {
+      if (!['CPUQuota', ...Object.keys(types).filter((key) => key !== 'PIDs')].includes(name)) {
         throw new Error(`Unknown assignment: ${assignment}`);
       }
       properties[name] = assignment.slice(equal + 1);
     }
-    if (!args.includes('--slice=test-fence.slice')) throw new Error('wrong scope slice');
+    const slice = properties.Slice || args.find((arg) => arg.startsWith('--slice='))?.slice('--slice='.length);
+    if (slice !== 'test-fence.slice') throw new Error('wrong scope slice');
     apply(properties);
     const command = args.slice(separator + 1);
     const result = cp.spawnSync(command[0], ['--require', __filename, ...command.slice(1)], { stdio: 'inherit' });

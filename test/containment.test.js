@@ -85,7 +85,10 @@ test('systemd CLI and D-Bus launches use supported OOM policy and retain caps', 
       mode === 'dbus' ? `@${unit}:test-fence.slice` : '', unit,
       process.execPath, '-e', 'console.log("scoped command ran")'];
     const command = mode === 'dbus' ? ['--require', fake, ...args]
-      : [fake, ...C.scopeArguments(unit, 'test-fence.slice', limits, { CPUQuota: '200%', MemoryMax: '1' }),
+      : [fake, ...C.scopeArguments(unit, 'test-fence.slice', limits, {
+        CPUQuota: '200%', MemoryMax: '1', TasksMax: '999', Slice: 'app.slice',
+        OOMPolicy: 'continue', MemorySwapMax: '9G', Delegate: 'no',
+      }),
         process.execPath, ...args];
     const result = await G.treeExec(process.execPath, command, {
       env: { ...h.env, TC_FAKE_CGROUP: group, TC_FAKE_SYSTEMD_LOG: log,

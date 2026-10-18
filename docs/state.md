@@ -584,6 +584,7 @@ Crane launch creates a delegated child cgroup within the inherited scope. Its
 own cap and every ancestor's aggregate cap remain enforced by the kernel.
 Optional owner `scope` properties apply to the outer scope; mandatory resource
 properties take precedence, and `scope: {}` only clears optional properties.
+An optional `Slice` property cannot override the caller's slice.
 Failure to set up a scope or delegated child fails the launch with
 `resource-scope-failed`; it never silently falls back after selecting cgroups.
 
@@ -630,7 +631,7 @@ their real systemd probes inside an independent test scope:
 
 ```sh
 systemd-run --user --scope --slice="$(node -p 'require("./lib/containment").callerSlice()')" \
-  -p TasksMax=200 -p MemoryMax=1G -p MemorySwapMax=0 -p Delegate=yes \
+  -p TasksMax=200 -p MemoryMax=1G -p MemorySwapMax=0 -p OOMPolicy=kill -p Delegate=yes \
   node lib/containment-runner.js '{"tasks_max":200,"memory_max_bytes":1073741824}' '' safety \
   node test/run.js --test-concurrency=1 test/containment.test.js
 ```
