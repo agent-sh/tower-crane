@@ -56,6 +56,44 @@ const commandRung = (h, rung, argv) => {
   setRung(h, rung, ['--harness', 'command', '--command', JSON.stringify(command)]);
 };
 
+test('status works when the homes directory is unreadable', {
+  skip: process.platform === 'win32' || process.getuid?.() === 0,
+}, (t) => {
+  const h = setup(t);
+  const homes = path.join(h.state, 'homes');
+  fs.mkdirSync(path.join(homes, 'worker-exited'), { recursive: true });
+  try {
+    fs.chmodSync(homes, 0o000);
+    assert.throws(() => fs.readdirSync(homes), { code: 'EACCES' });
+    assert.deepEqual(h.json(['status']).kept_homes, []);
+    assert.doesNotMatch(h.ok(['status']), /^home kept:/m);
+  } finally {
+    fs.chmodSync(homes, 0o700);
+  }
+});
+
+test('status skips the stray index for a dead agent without a recorded run marker', {
+  skip: process.platform !== 'linux',
+}, (t) => {
+  const h = setup(t);
+  for (const [agent, info] of [
+    ['worker-unmarked', { pid: 2147483647 }],
+    ['worker-marked-live', { pid: process.pid, run_mark: `TOWERCRANE_SPAWN_RUN_${process.pid}_live` }],
+  ]) {
+    fs.mkdirSync(path.join(h.state, 'homes', agent), { recursive: true });
+    fs.appendFileSync(path.join(h.state, 'events.jsonl'), JSON.stringify({
+      at: new Date().toISOString(), cmd: 'spawn', agent: 'owner', task: 'T1',
+      detail: { agent, role: 'worker', host: require('node:os').hostname(), ...info },
+    }) + '\n');
+  }
+  const environReads = path.join(h.base, 'environ-reads');
+  fs.writeFileSync(environReads, '');
+  assert.deepEqual(h.json(['status'], {
+    hooks: { HOOK_DEAD_PID: '2147483647', HOOK_ENVIRON_READS: environReads },
+  }).kept_homes, []);
+  assert.equal(fs.readFileSync(environReads, 'utf8'), '', 'an unrelated live agent\'s marker needs no scan');
+});
+
 test('the dead-agent sweep removes orphan brokers and keeps live claims, processes and sockets', async (t) => {
   const h = setup(t);
   h.ok(['task', 'add', '--title', 'Live peer', '--acceptance', 'kept']);
