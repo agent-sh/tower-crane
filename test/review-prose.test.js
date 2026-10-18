@@ -231,6 +231,8 @@ test('a late review of an older head at the reworked revision cannot select the 
     '--summary', '1 blocker: the changelog claim is false.', '--findings', JSON.stringify([claim('changelog.d/T1.md')])]);
   const back = h.json(['rework', '--from-review', 'T1', '--agent', 'orchestrator']);
   assert.equal(back.revision, 2);
+  h.ok(['task', 'note', 'T1', 'Limit the correction to the currently submitted changelog claim',
+    '--kind', 'scope-ruling', '--agent', 'orchestrator']);
   const worker = 'worker-T1-2';
   h.ok(['claim', 'T1', '--agent', worker], bound(worker));
   h.ok(['submit', 'T1', '--agent', worker, '--sha', commit('The reason is recorded in state.\n')], bound(worker));

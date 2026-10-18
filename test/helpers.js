@@ -464,7 +464,7 @@ function cachedFixture(t, key, build) {
 function repairWorktrees(h) {
   const root = path.join(h.base, 'repo-worktrees');
   if (!fs.existsSync(root)) return;
-  require('../lib/worktree').relinkAdmins(h.repo, path.join(h.repo, '.git'));
+  require('../lib/worktree').relinkAdmins(h.repo, path.join(h.repo, '.git'), { stateDir: h.state });
   const trees = fs.readdirSync(root).filter((name) => name !== '.git-admin').map((name) => path.join(root, name));
   if (trees.length) h.git(['worktree', 'repair', ...trees]);
 }
