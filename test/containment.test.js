@@ -5,6 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { cachedFixture } = require('./helpers');
+const { readPublished } = require('./atomic-file');
 const { gateFixture } = require('./gate-helpers');
 const C = require('../lib/containment');
 const G = require('../lib/gates/common');
@@ -94,7 +95,7 @@ test('systemd CLI and D-Bus launches use supported OOM policy and retain caps', 
       env: { ...h.env, TC_FAKE_CGROUP: group, TC_FAKE_SYSTEMD_LOG: log,
         TOWER_CRANE_CONTAINMENT_REPORT: report },
     });
-    const registration = fs.existsSync(report) ? JSON.parse(fs.readFileSync(report, 'utf8')) : {};
+    const registration = fs.existsSync(report) ? JSON.parse(readPublished(report, 'utf8')) : {};
     assert.equal(result.status, 0, result.stderr + (registration.error || ''));
     assert.equal(result.stdout, 'scoped command ran\n');
     assert.equal(registration.group, group);

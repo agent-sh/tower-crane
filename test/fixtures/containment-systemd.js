@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
 const C = require('../../lib/containment');
+const { writeAtomic } = require('../atomic-file');
 const group = process.env.TC_FAKE_CGROUP;
 const log = process.env.TC_FAKE_SYSTEMD_LOG;
 const types = { PIDs: 'au', Slice: 's', TasksMax: 't', MemoryMax: 't', MemorySwapMax: 't',
@@ -11,7 +12,7 @@ const types = { PIDs: 'au', Slice: 's', TasksMax: 't', MemoryMax: 't', MemorySwa
 
 function apply(properties) {
   if (properties.OOMPolicy !== 'kill') throw new Error('OOMPolicy must be kill');
-  fs.writeFileSync(path.join(group, 'memory.oom.group'), '1');
+  writeAtomic(path.join(group, 'memory.oom.group'), '1');
   fs.appendFileSync(log, JSON.stringify(properties) + '\n');
 }
 
