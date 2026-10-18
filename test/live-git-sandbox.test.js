@@ -18,8 +18,9 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const os = require('node:os');
 const cp = require('node:child_process');
-const { makeRepo } = require('./helpers');
+const { makeRepo, ACCOUNT_HOME } = require('./helpers');
 
 const PROBE = `'use strict';
 const cp = require('node:child_process');
@@ -95,13 +96,16 @@ function fixture(t) {
   const touch = `[ -z "$TOWER_CRANE_SESSION" ] || [ -n "$SANDBOX_RUNTIME$CODEX_SANDBOX" ] || touch '${marker}'`;
   h.git(['config', 'core.fsmonitor', `${touch}; false`]);
   fs.writeFileSync(path.join(common, 'hooks', 'post-index-change'), `#!/bin/sh\n${touch}\n`, { mode: 0o755 });
-  const probe = path.join(h.base, 'probe.js');
+  // Both sandboxes hide the user's home, which holds the tests' temp root
+  // by default, so the probe and its specs sit in results, which the
+  // project's sandbox extension makes writable and so readable.
+  const probe = path.join(results, 'probe.js');
   fs.writeFileSync(probe, PROBE);
   // The worktree a gate or a later spawn adds while the agent runs.
   const late = path.join(h.base, 'late');
   const addLate = () => h.git(['worktree', 'add', '-q', late, '-b', 'late']);
   const spec = (name, fields) => {
-    const file = path.join(h.base, `${name}.json`);
+    const file = path.join(results, `${name}.json`);
     fs.writeFileSync(file, JSON.stringify({ common, other: path.join(common, 'worktrees', 'other'), late: path.join(common, 'worktrees', 'late'), ...fields }));
     return file;
   };
@@ -153,11 +157,17 @@ const cp = require('node:child_process');
 const path = require('node:path');
 // The agent's shims stay first on PATH; only this stand-in drops out.
 const PATH = process.env.PATH.split(path.delimiter).filter((d) => path.resolve(d) !== ${JSON.stringify(bin)}).join(path.delimiter);
+// NODE_OPTIONS preloads the tests' account-home hook from this checkout,
+// which the sandbox hides with the rest of the home: no agent has it. Any
+// other preload stays.
+const env = { ...process.env, PATH };
+env.NODE_OPTIONS = String(env.NODE_OPTIONS || '').replace(${JSON.stringify(`--require "${ACCOUNT_HOME.replace(/\\/g, '/')}"`)}, '').trim();
+if (!env.NODE_OPTIONS) delete env.NODE_OPTIONS;
 process.stdout.write(JSON.stringify({ type: 'thread.started', thread_id: 'probe' }) + '\\n');
 cp.spawnSync('git', ['status', '--porcelain'], { stdio: 'ignore' });
 cp.spawnSync('git', ['worktree', 'add', '-q', ${JSON.stringify(path.join(f.h.base, 'late'))}, '-b', 'late'], { stdio: 'ignore' });
 const r = cp.spawnSync('codex', ['sandbox', '-c', 'default_permissions="tower-crane"', '--', process.execPath, ${JSON.stringify(f.probe)}, ${JSON.stringify(spec)}],
-  { env: { ...process.env, PATH }, stdio: 'inherit' });
+  { env, stdio: 'inherit' });
 process.exit(r.status ?? 1);
 `, { mode: 0o755 });
   f.h.ok(['ladder', 'set', 'hard', '--harness', 'codex', '--model', 'probe', '--clear', 'profile', '--clear', 'effort', '--clear', 'args']);
@@ -174,6 +184,10 @@ test('from a real claude sandbox a worker cannot write the shared git config or 
   skip: process.env.TOWER_CRANE_LIVE_CLAUDE !== '1' && 'set TOWER_CRANE_LIVE_CLAUDE=1 to run against the real claude CLI', timeout: 600000,
 }, async (t) => {
   const f = fixture(t);
+  // The owner's claude login: spawn links its credentials into the agent's
+  // home only from the config directory it is told, and the fixture's HOME
+  // has none.
+  f.h.env.CLAUDE_CONFIG_DIR = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
   const [first, second, ready] = ['probe.json', 'late.json', 'late-ready'].map((n) => path.join(f.results, n));
   const command = (spec) => `${JSON.stringify(process.execPath)} ${JSON.stringify(f.probe)} ${JSON.stringify(spec)}`;
   f.h.ok(['brief', 'set', 'T1', '-'], {
