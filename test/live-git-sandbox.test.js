@@ -20,7 +20,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 const cp = require('node:child_process');
-const { makeRepo } = require('./helpers');
+const { makeRepo, ACCOUNT_HOME } = require('./helpers');
 
 const PROBE = `'use strict';
 const cp = require('node:child_process');
@@ -158,9 +158,11 @@ const path = require('node:path');
 // The agent's shims stay first on PATH; only this stand-in drops out.
 const PATH = process.env.PATH.split(path.delimiter).filter((d) => path.resolve(d) !== ${JSON.stringify(bin)}).join(path.delimiter);
 // NODE_OPTIONS preloads the tests' account-home hook from this checkout,
-// which the sandbox hides with the rest of the home: no agent has it.
+// which the sandbox hides with the rest of the home: no agent has it. Any
+// other preload stays.
 const env = { ...process.env, PATH };
-delete env.NODE_OPTIONS;
+env.NODE_OPTIONS = String(env.NODE_OPTIONS || '').replace(${JSON.stringify(`--require "${ACCOUNT_HOME.replace(/\\/g, '/')}"`)}, '').trim();
+if (!env.NODE_OPTIONS) delete env.NODE_OPTIONS;
 process.stdout.write(JSON.stringify({ type: 'thread.started', thread_id: 'probe' }) + '\\n');
 cp.spawnSync('git', ['status', '--porcelain'], { stdio: 'ignore' });
 cp.spawnSync('git', ['worktree', 'add', '-q', ${JSON.stringify(path.join(f.h.base, 'late'))}, '-b', 'late'], { stdio: 'ignore' });
