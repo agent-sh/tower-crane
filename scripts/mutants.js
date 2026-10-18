@@ -390,6 +390,7 @@ async function runContained(command, argv, { cwd, env = process.env, limit = 512
     const pids = new Set([child.pid, ...known.keys()].filter(Boolean));
     scopedCount = 0;
     if (group) {
+      // kernfs reports ENODEV when systemd removes a scope after its file was opened.
       try {
         scopedCount = Number(fs.readFileSync(path.join(group, 'pids.current'), 'utf8').trim());
         if (!Number.isSafeInteger(scopedCount) || scopedCount < 0) throw new Error('invalid scope process count');
@@ -398,7 +399,7 @@ async function runContained(command, argv, { cwd, env = process.env, limit = 512
           if (!Number.isSafeInteger(number) || number < 1) throw new Error('invalid scope process membership');
           pids.add(number);
         }
-      } catch (error) { if (error.code !== 'ENOENT') throw error; }
+      } catch (error) { if (!['ENOENT', 'ENODEV'].includes(error.code)) throw error; }
     }
     const members = [];
     for (const pid of pids) {
@@ -475,7 +476,7 @@ async function runContained(command, argv, { cwd, env = process.env, limit = 512
       try {
         const events = fs.readFileSync(path.join(controlGroup, file), 'utf8');
         if (/^max [1-9]\d*$/m.test(events)) return label;
-      } catch (error) { if (error.code !== 'ENOENT') throw error; }
+      } catch (error) { if (!['ENOENT', 'ENODEV'].includes(error.code)) throw error; }
     }
     return null;
   };

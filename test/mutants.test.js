@@ -149,7 +149,7 @@ test('an unavailable systemd manager is an infrastructure failure rather than a 
   }), error => error.code === 'ENOENT' || /cannot launch mutant systemd scope/.test(error.message));
 });
 
-test('scoped containment inherits the caller slice and inspects only its cgroup', { skip: process.platform !== 'linux' }, async (t) => {
+function scopedFixture(t, failRead) {
   const h = makeRepo(t);
   const spawn = cp.spawn;
   const read = fs.readFileSync;
@@ -163,6 +163,7 @@ test('scoped containment inherits the caller slice and inspects only its cgroup'
     child = spawn(process.execPath, ['-e', "console.log('scoped fixture'); setTimeout(() => {}, 200)"], options); // wait-allow: keep a bounded scope fixture alive for watchdog inspections
     return child;
   });
+  t.after(() => child?.kill());
   t.mock.method(cp, 'spawnSync', (command, args) => {
     assert.equal(command, 'systemctl');
     if (args.includes('show')) return { status: 0, stdout: '/fixture.scope\n' };
@@ -173,6 +174,7 @@ test('scoped containment inherits the caller slice and inspects only its cgroup'
     return list.call(fs, file, ...args);
   });
   t.mock.method(fs, 'readFileSync', (file, ...args) => {
+    failRead?.(file, child);
     if (file === '/proc/self/cgroup') return '0::/user.slice/user-1000.slice/user@1000.service/agents.slice/worker.scope\n';
     if (file === '/sys/fs/cgroup/fixture.scope/cgroup.procs') { reads++; return `${child.pid}\n`; }
     if (file === '/sys/fs/cgroup/fixture.scope/pids.current') return '1\n';
@@ -180,11 +182,44 @@ test('scoped containment inherits the caller slice and inspects only its cgroup'
     if (file === '/sys/fs/cgroup/fixture.scope/memory.events') return 'max 0\noom_kill 0\n';
     return read.call(fs, file, ...args);
   });
-  const result = await runContained(process.execPath, ['-e', ''], { cwd: h.repo, scope: true, limit: 48, timeout: 5000 });
+  return {
+    run: () => runContained(process.execPath, ['-e', ''], { cwd: h.repo, scope: true, limit: 48, timeout: 5000 }),
+    get args() { return scopeArgs; },
+    get reads() { return reads; },
+  };
+}
+
+test('scoped containment inherits the caller slice and inspects only its cgroup', { skip: process.platform !== 'linux' }, async (t) => {
+  const fixture = scopedFixture(t);
+  const result = await fixture.run();
   assert.equal(result.status, 0, result.output);
   assert.equal(result.reason, null, result.output);
-  assert.ok(scopeArgs.includes('--slice=agents.slice'), scopeArgs.join(' '));
-  assert.ok(reads > 0, 'the watchdog reads scoped process membership');
+  assert.ok(fixture.args.includes('--slice=agents.slice'), fixture.args.join(' '));
+  assert.ok(fixture.reads > 0, 'the watchdog reads scoped process membership');
+});
+
+test('scoped containment tolerates cgroup removal during final reads and rejects inspection errors', { skip: process.platform !== 'linux' }, async (t) => {
+  for (const file of ['pids.current', 'cgroup.procs', 'pids.events', 'memory.events']) {
+    for (const code of ['ENOENT', 'ENODEV', 'EACCES', 'EIO']) {
+      await t.test(`${file}: ${code}`, async (t) => {
+        let failed = false;
+        const fixture = scopedFixture(t, (target, child) => {
+          if (target === `/sys/fs/cgroup/fixture.scope/${file}` && child?.exitCode === 0) {
+            failed = true;
+            throw Object.assign(new Error('scope read failed'), { code });
+          }
+        });
+        if (['ENOENT', 'ENODEV'].includes(code)) {
+          const result = await fixture.run();
+          assert.equal(result.status, 0, result.output);
+          assert.equal(result.reason, null, 'cgroup removal cannot falsely score a mutant kill');
+        } else {
+          await assert.rejects(fixture.run(), { code });
+        }
+        assert.equal(failed, true, 'the final inspection hit the planted read error');
+      });
+    }
+  }
 });
 
 test('mutation timeouts use measured file baselines with a startup floor', () => {

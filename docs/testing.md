@@ -148,6 +148,8 @@ Every baseline, mutant and fallback run has a process watchdog. On Linux with a 
 
 The runner measures each named file's unmutated wall time in its own capped run, using at most `--jobs` file workers (1 to 4). A mutant's deadline is five times the sum of its files' baseline times, with a 30-second floor for startup on a loaded host. A hung mutant reports `caught-by-timeout` with that deadline. Before full-suite fallback, remaining files get their own unmutated baseline and the same deadline calculation. A failing baseline never contributes a kill.
 
+Removing a scope can make an already-open cgroup file return `ENODEV`. The watchdog treats this like a missing cgroup, continues cleanup of observed processes, and still aborts on permission or I/O inspection errors.
+
 | area | bugs | examples |
 | --- | ---: | --- |
 | gates | 8 | tests pass without the change, a deleted test counts, a cancelled CI run is green, a HIGH finding passes clean, loopback is a public source, evidence counts without its audit event, the submitter's own review counts, evidence from an old revision counts |
