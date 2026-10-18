@@ -150,6 +150,8 @@ The runner measures each named file's unmutated wall time in its own capped run,
 
 Removing a scope can make an already-open cgroup file return `ENODEV`. The watchdog treats this like a missing cgroup, continues cleanup of observed processes, and still aborts on permission or I/O inspection errors.
 
+Test controller CLIs preload `test/fixtures/account-home.js` to bind owner authority to the fixture home. Spawn drops inherited Node injection before starting an agent, whose sandbox hides the test checkout. Explicit project/rung Node options still apply. The model-config tests run bounded Claude and Codex stand-ins whose command sees a missing preload path, so a leaked fixture preload fails without a live model call.
+
 | area | bugs | examples |
 | --- | ---: | --- |
 | gates | 8 | tests pass without the change, a deleted test counts, a cancelled CI run is green, a HIGH finding passes clean, loopback is a public source, evidence counts without its audit event, the submitter's own review counts, evidence from an old revision counts |
