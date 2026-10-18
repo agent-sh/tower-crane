@@ -53,7 +53,7 @@ if (!f.simulate && !process.env.GOVERNOR_STRESS_SCOPE) {
   const unit = `tower-crane-governor-stress-${process.pid}`;
   const r = cp.spawnSync('systemd-run', ['--user', '--scope', '--quiet', `--unit=${unit}`,
     '-p', `MemoryMax=${LIMIT}`, '-p', 'MemorySwapMax=0', '-p', 'TasksMax=4096',
-    '--setenv=GOVERNOR_STRESS_SCOPE=1', process.execPath, __filename, ...process.argv.slice(2)], { stdio: 'inherit', env: { ...process.env, GOVERNOR_STRESS_SCOPE: '1' } });
+    process.execPath, __filename, ...process.argv.slice(2)], { stdio: 'inherit', env: { ...process.env, GOVERNOR_STRESS_SCOPE: '1' } });
   if (r.error) throw r.error;
   process.exit(r.status ?? 1);
 }
