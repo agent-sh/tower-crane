@@ -658,6 +658,33 @@ test('short CRLF and redraw logs keep ordinary download progress and counters', 
   }
 });
 
+test('erase-line redraws before short words keep all three readings', () => {
+  const { stripEscapes, createRedactor, redactJoined } = require('../lib/gates/common');
+  const redact = createRedactor([]);
+  const fill = (unit, size) => unit.repeat(Math.ceil(size / unit.length));
+  const cases = [
+    ['erase redraw', fill('\r\x1b[Kfetchxxxx', 4 << 20)],
+    ['erase CRLF', fill('\x1b[Kok 123\r\n', 1 << 20)],
+    ...[9, 10, 11].flatMap((width) => {
+      const word = 'fetch' + 'x'.repeat(width - 5);
+      return [
+        [`redraw-${width}`, fill('\r\x1b[K' + word, 4 << 20)],
+        [`CRLF-${width}`, fill('\x1b[K' + word + '\r\n', 4 << 20)],
+      ];
+    }),
+  ];
+  const hash = (text) => crypto.createHash('sha256').update(text).digest('hex');
+  for (const [name, input] of cases) {
+    const expected = input.replace(/\x1b\[K/g, '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+    assert.equal(hash(stripEscapes(input)), hash(expected), name + ' cleanup');
+    assert.equal(hash(redactJoined({ stdout: input, stderr: '' }, redact)), hash(expected), name + ' joined');
+    const half = input.length >> 1;
+    assert.equal(hash(redactJoined({ output: input, runs: [
+      { stream: 'out', text: input.slice(0, half) }, { stream: 'err', text: input.slice(half) },
+    ] }, redact)), hash(expected), name + ' streams');
+  }
+});
+
 test('mixed 16 MiB text fails closed below 1 GiB in a fresh process', () => {
   const cp = require('node:child_process');
   const script = `
@@ -700,6 +727,47 @@ test('a character map over the work budget is rejected before its array allocati
   assert.equal(arrays.mock.callCount(), 0);
 });
 
+test('allocation credits pay entries once and cannot fund new or later allocations', (t) => {
+  const { textBudget, textMap, textWork } = require('../lib/text-redaction-budget');
+  const credit = {};
+  const notice = /^\[unscannable text: over \d+ redaction work units; content omitted\]$/;
+  assert.equal(textBudget('', () => {
+    textMap(16 * 1024, credit);
+    textWork(262144 - 1024);
+    textWork(1024, credit);
+    return 'kept';
+  }), 'kept');
+  assert.match(textBudget('', () => {
+    textMap(16 * 1024, credit);
+    textWork(262144 - 1024);
+    textWork(1024, credit);
+    textWork(1, credit);
+    return 'spent twice';
+  }), notice);
+  assert.equal(textBudget('', () => {
+    textMap(16 * 1024, credit);
+    return 'unused credit';
+  }), 'unused credit');
+  assert.match(textBudget('', () => {
+    textWork(262144);
+    textWork(1, credit);
+    return 'used outside its budget';
+  }), notice);
+  assert.match(textBudget('', () => {
+    textMap(16 * 1024, credit);
+    textWork(262144 - 1024);
+    const arrays = t.mock.method(globalThis, 'Int32Array', function () {
+      throw new Error('new capacity used bookkeeping credit before its allocation check');
+    });
+    try {
+      return textMap(16, credit);
+    } finally {
+      assert.equal(arrays.mock.callCount(), 0);
+      arrays.mock.restore();
+    }
+  }), notice);
+});
+
 test('a prefix map over the work budget is rejected before its entries are allocated', (t) => {
   const { textBudget } = require('../lib/text-redaction-budget');
   const { revealTerminal } = require('../lib/escape-views');
@@ -719,7 +787,7 @@ test('a prefix map over the work budget is rejected before its entries are alloc
 
 test('16 MiB CR-heavy and short ordinary logs stay below 1 GiB in fresh processes', () => {
   const cp = require('node:child_process');
-  for (const unit of ['\r\n', '-\r\\\r|\r/\r', 'a\r', '123456\r\n', '\rpppppppp', '1234567\r\n']) {
+  for (const unit of ['\r\n', '-\r\\\r|\r/\r', 'a\r', '123456\r\n', '\rpppppppp', '1234567\r\n', '\r\x1b[Kfetchxxxx']) {
     const script = `
 const { createRedactor, redactJoined } = require(${JSON.stringify(require.resolve('../lib/gates/common'))});
 const unit = ${JSON.stringify(unit)};
@@ -740,7 +808,7 @@ console.log(JSON.stringify({ notice: output.startsWith('[unscannable text:') ? o
     }
     else {
       const input = unit.repeat(Math.ceil((16 << 20) / unit.length)).slice(0, 16 << 20);
-      let expected = input.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+      let expected = input.replace(/\x1b\[K/g, '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
       if (input.endsWith('\r')) expected = expected.slice(0, -1);
       assert.equal(result.hash, crypto.createHash('sha256').update(expected).digest('hex'));
     }
