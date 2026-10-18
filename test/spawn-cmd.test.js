@@ -89,7 +89,7 @@ test('spawned agents drop the dispatcher session ids and engine provenance', (t)
   assert.deepEqual(JSON.parse(line.slice(4)), []);
 });
 
-test('fixture account preload stays in CLI helpers and leaves sandboxed agent environments', (t) => {
+test('fixture account preload stays in CLI helpers and configured agent preloads survive containment', (t) => {
   const h = makeRepo(t);
   h.init();
   const settings = require.resolve('../lib/spawn-settings');
@@ -99,21 +99,17 @@ test('fixture account preload stays in CLI helpers and leaves sandboxed agent en
   const script = `
 const assert = require('node:assert/strict');
 const cp = require('node:child_process');
-const Module = require('node:module');
-const hostSettings = require(${JSON.stringify(settings)});
-const monitor = new Module(${JSON.stringify(require.resolve('../lib/spawn-monitor'))});
-monitor.filename = monitor.id;
-const S = monitor.require('./spawn-settings');
+const S = require(${JSON.stringify(settings)});
 const original = process.env.NODE_OPTIONS;
 assert.ok(original.includes(${JSON.stringify(ACCOUNT_HOME.replace(/\\/g, '/'))}));
-assert.equal(hostSettings.cleanAgentEnv({ ...process.env, TOWER_CRANE_SANDBOX: '1' }).NODE_OPTIONS, original);
-const ordinary = S.cleanAgentEnv({ ...process.env, TOWER_CRANE_SANDBOX: '0' });
+const ordinary = S.cleanDispatcherEnv({ ...process.env, TOWER_CRANE_SANDBOX: '0' });
 assert.equal(ordinary.NODE_OPTIONS, original);
 const sandbox = S.cleanAgentEnv({ ...process.env, TOWER_CRANE_SANDBOX: '1' });
-assert.equal(sandbox.NODE_OPTIONS, ${JSON.stringify(extra)});
+assert.equal(sandbox.NODE_OPTIONS, undefined);
 assert.equal(process.env.NODE_OPTIONS, original);
+const configured = S.cleanDispatcherEnv({ ...sandbox, NODE_OPTIONS: ${JSON.stringify(extra)} });
 const child = cp.spawnSync(process.execPath, ['-e', 'console.log(process.env.INTENTIONAL_PRELOAD)'], {
-  env: sandbox, encoding: 'utf8',
+  env: configured, encoding: 'utf8',
 });
 assert.equal(child.status, 0, child.stderr);
 assert.equal(child.stdout, 'loaded\\n');
@@ -136,6 +132,7 @@ console.log('fixture preload isolated');
     fs.writeFileSync(path.join(bin, 'codex'),
       `#!${process.execPath}\nconsole.log("PRELOAD " + JSON.stringify(process.env.NODE_OPTIONS));\n`, { mode: 0o755 });
     h.ok(['ladder', 'set', 'medium', '--harness', 'codex', '--profile', 'fixture-main',
+      '--env', JSON.stringify({ NODE_OPTIONS: extra }),
       '--clear', 'command', '--clear', 'model', '--clear', 'provider', '--clear', 'effort', '--clear', 'args']);
     const spawned = h.run(['spawn', '--task', 'T1', '--wait'], {
       env: { NODE_OPTIONS: `${h.env.NODE_OPTIONS} ${extra}`,
