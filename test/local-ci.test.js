@@ -997,6 +997,69 @@ test('the text redactor redacts what reading escapes only as a terminal does red
   }
 });
 
+test('mapped escape readings keep both span endpoints in order when a value is put beside a token', () => {
+  const { stripEscapesViews, stripEscapesMapped } = require('../lib/ci-log-text');
+  const { createRedactor } = require('../lib/gates/common');
+  for (const [input, value] of [
+    ['ghs_Ts11bZC0Zq7aHV\x1bw\x1bP\x1by1WKo\n\x1b1', '1bZC0Zq7aHVwy1WKo1'],
+    ['ASIAAXGDD9ECDI6JTPS\n7\x1b];\x1b\\AuThOrIzAtIoN:HLyexBO69t\x9b;GX73hs3OSW3github_p', 'HLyexBO69tGX73hs3OSW3'],
+    ['MXqy66Mp)n4ON[RpY;U[blM\x1b];9oS[tUd6\x1bMXqy66Mp)n4ON[RpY;U[blM9oS[tUd6', 'MXqy66Mp)n4ON[RpY;U[blM9oS[tUd6'],
+    ['github_pat_defghij\x1bAuthorization:e\x9b;HLyexBO69tGX73hs3OSW3', 'HLyexBO69tGX73hs3OSW3'],
+    ['xoxa-aghijrd\x1bghp_8x2\x9b1bZC0Zq7aHVwy1WKo1\x1b]0', '1bZC0Zq7aHVwy1WKo1'],
+    ['\x1b]xoxa-k\x1bAuthorization:Bearer\x9b1bZC0Zq7aHVwy1WKo1', '1bZC0Zq7aHVwy1WKo1'],
+  ]) {
+    const redact = createRedactor([['FIXTURE_SECRET', value]]);
+    const views = [...stripEscapesViews(input, [value]), stripEscapesMapped(input, [value]), redact.stripMapped(input)];
+    for (const view of views) {
+      let previous = [0, 0];
+      for (let i = 0; i < view.text.length; i++) {
+        const [a, b] = view.at(i);
+        assert.ok(a >= previous[0] && b >= previous[1] && a <= b && b <= input.length,
+          `${JSON.stringify(input)} at(${i}): ${previous} -> ${a},${b}`);
+        previous = [a, b];
+      }
+      // Random access must give the same spans as ordered access.
+      for (let i = view.text.length - 1; i >= 0; i--) {
+        if (i > 0) assert.ok(view.at(i - 1)[1] <= view.at(i)[1]);
+      }
+    }
+    assert.ok(!redact(redact.strip(input)).includes(value));
+  }
+});
+
+test('a header value recovered across a hidden escape keeps the following lorem125 line', () => {
+  const { createRedactor, redactJoined } = require('../lib/gates/common');
+  const value = ';l4mPuuBezabcdefghijk';
+  const redact = createRedactor([['FIXTURE_SECRET', value]]);
+  for (const lineEnd of ['\n', '\r\n']) {
+    const input = `AuThOrIzAtIoN: ;l4m\r\x1bPuuBezabcdefghijk${lineEnd}lorem125`;
+    const expected = 'AuThOrIzAtIoN: [redacted:AUTHORIZATION]\nlorem125';
+    assert.equal(redact(redact.strip(input)), expected, JSON.stringify(lineEnd));
+    const at = input.indexOf('lorem125');
+    assert.equal(redactJoined({ output: input, runs: [
+      { stream: 'out', text: input.slice(0, at) }, { stream: 'err', text: input.slice(at) },
+    ] }, redact), expected, JSON.stringify(lineEnd));
+  }
+});
+
+test('common leading digits of a secret do not exhaust the work budget on a 1 MiB plain joined log', () => {
+  const { createRedactor, redactJoined } = require('../lib/gates/common');
+  const { valueSpans } = require('../lib/escape-views');
+  const value = '012345678901234567890123456789';
+  const redact = createRedactor([['THIRD_SECRET', value]]);
+  const unit = 'ok 0123456789\n';
+  const plain = unit.repeat(Math.ceil((1 << 20) / unit.length)).slice(0, 1 << 20);
+  const result = (text) => redactJoined({ output: text, runs: [
+    { stream: 'out', text: text.slice(0, text.length / 2) },
+    { stream: 'err', text: text.slice(text.length / 2) },
+  ] }, redact);
+  assert.equal(result(plain), plain);
+  for (const more of [false, true]) assert.deepEqual(valueSpans(plain, value, null, more), []);
+  // Real candidates still include an exact value and one interrupted in its leading digits.
+  const input = `${plain}\n${value} end\n01\x1b[0m${value.slice(2)} end\n`;
+  assert.equal(result(input), `${plain}\n[redacted:THIRD_SECRET] end\n[redacted:THIRD_SECRET] end\n`);
+});
+
 test('glued headers on one long line are read once each, and a long glued header value stays redacted', () => {
   const { createRedactor } = require('../lib/gates/common');
   const redact = createRedactor([]);

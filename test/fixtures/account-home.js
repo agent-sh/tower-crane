@@ -1,7 +1,7 @@
 'use strict';
 
-// Loaded into every CLI the tests run, through NODE_OPTIONS (test/helpers.js
-// baseEnv). lib/authority.js takes the default owner_config_dir from the
+// Test CLIs load this through NODE_OPTIONS or explicit --require args.
+// lib/authority.js takes the default owner_config_dir from the
 // account's home in the password database, which a fixture cannot set, so
 // without this the tests would bind fixtures to the developer's real
 // ~/.config/tower-crane and read the real owner key. Here the os module that

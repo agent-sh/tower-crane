@@ -3,8 +3,9 @@
 // Preloaded into a tower-crane process by tests that need to steer it from the
 // outside: stop it at a point until the test lets it go, kill it while it
 // holds the lock, slow it down, or make one kind of filesystem call fail.
-// Each hook is off unless its HOOK_* variable is set, and acts only on paths
-// under HOOK_STATE. Hooks key on file names, filesystem calls and error codes,
+// Each hook is off unless its HOOK_* variable is set. State filesystem hooks
+// act only on paths under HOOK_STATE; HOOK_ENVIRON_READS counts /proc/PID/environ
+// reads outside it. Hooks key on file names, filesystem calls and error codes,
 // not on tower-crane's functions, so a test built on them drives any version of
 // the lock through the same schedule.
 
