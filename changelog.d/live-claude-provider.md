@@ -1,0 +1,1 @@
+- Live claude sandbox tests can run through a provider route (`TOWER_CRANE_LIVE_CLAUDE_PROVIDER`, `TOWER_CRANE_LIVE_CLAUDE_ENV_FILE`), the way a project's claude rungs run, so they no longer depend on the CLI's own login.

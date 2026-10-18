@@ -266,7 +266,13 @@ function pinLiveRung(h, harness, rung = 'small') {
   const field = harness === 'codex' ? 'profile' : 'model';
   const variable = `TOWER_CRANE_LIVE_${field.toUpperCase()}`;
   assert.ok(process.env[variable], `set ${variable} to run a live ${harness} probe`);
-  pinRung(h, rung, { harness, [field]: process.env[variable] });
+  // TOWER_CRANE_LIVE_CLAUDE_PROVIDER (anthropic or bedrock) and TOWER_CRANE_LIVE_CLAUDE_ENV_FILE
+  // route a live claude probe the way a project's claude rungs run, so it does not
+  // depend on the CLI's own login.
+  const provider = harness === 'claude' ? process.env.TOWER_CRANE_LIVE_CLAUDE_PROVIDER || undefined : undefined;
+  pinRung(h, rung, { harness, [field]: process.env[variable], provider });
+  const envFile = harness === 'claude' ? process.env.TOWER_CRANE_LIVE_CLAUDE_ENV_FILE : undefined;
+  if (envFile) h.ok(['ladder', 'set', rung, '--env_file', envFile]);
   // The fixture runs a real harness on purpose, so its agents get the PATH
   // without the guard: the guard's stand-ins are test plumbing, not programs
   // the agent's sandbox should open.

@@ -1,8 +1,9 @@
 'use strict';
 
 // Runs the real claude CLI, so it costs a model call and needs a logged-in
-// claude: set TOWER_CRANE_LIVE_CLAUDE=1 to run it (TOWER_CRANE_LIVE_MODEL picks the
-// model explicitly). It proves what a stub cannot: a command in a
+// claude or a provider route: set TOWER_CRANE_LIVE_CLAUDE=1 to run it
+// (TOWER_CRANE_LIVE_MODEL picks the model; TOWER_CRANE_LIVE_CLAUDE_PROVIDER and
+// TOWER_CRANE_LIVE_CLAUDE_ENV_FILE route it like a project rung, e.g. bedrock). It proves what a stub cannot: a command in a
 // spawned agent's sandbox cannot reach a unix socket in a directory the
 // sandbox denies, even with the socket filter off.
 
