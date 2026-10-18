@@ -676,6 +676,49 @@ console.log(JSON.stringify({ output, peakKiB: process.resourceUsage().maxRSS }))
   assert.ok(result.peakKiB < 1048576, `${result.peakKiB} KiB peak`);
 });
 
+test('16 MiB of tokens an escape and a line break split stays scannable below 1 GiB in two streams', () => {
+  const cp = require('node:child_process');
+  // The joined view kept every view and secret its readings made alive while each stream was
+  // read, and peaked at 1.26 GB.
+  const script = `
+const { createRedactor, redactJoined } = require(${JSON.stringify(require.resolve('../lib/gates/common'))});
+const unit = 'ghp_Ab3dEf\\x1b(B6hIj9kLm2nO\\np5qRs8tUv1wXy4zAb7d done\\n';
+const units = Math.floor((16 << 20) / unit.length);
+const text = unit.repeat(units);
+const half = text.length >> 1;
+const output = redactJoined({ output: text, runs: [
+  { stream: 'out', text: text.slice(0, half) },
+  { stream: 'err', text: text.slice(half) },
+] }, createRedactor([]));
+const expected = '[redacted:GITHUB_TOKEN] done\\n'.repeat(units);
+console.log(JSON.stringify({ same: output === expected, head: output.slice(0, 80), peakKiB: process.resourceUsage().maxRSS }));
+`;
+  const result = JSON.parse(cp.execFileSync(process.execPath, ['-e', script], { encoding: 'utf8' }));
+  assert.ok(result.same, result.head);
+  assert.ok(result.peakKiB < 1048576, `${result.peakKiB} KiB peak`);
+});
+
+test('a value search reads only the controls a value prefix can end at', () => {
+  const { textBudget } = require('../lib/text-redaction-budget');
+  const { valueSpans } = require('../lib/escape-views');
+  // A colored 4 MiB log costs 1025 units a reading. Reading the run before every control as well,
+  // as a JavaScript walk did, cost about 600 more, and 200 readings left the 262144-unit floor.
+  const line = '\x1b[32mPASS\x1b[0m test name here \x1b[1;31mFAIL\x1b[0m\n';
+  const text = line.repeat(Math.ceil((4 << 20) / line.length)).slice(0, 4 << 20);
+  const literal = 'Zq9Xw8Vu7Ts6Rq5Po4Nm3Lk2Ji1Hg0';
+  const read = () => {
+    for (let k = 0; k < 100; k++) {
+      assert.deepEqual(valueSpans(text, literal), []);
+      assert.deepEqual(valueSpans(text, literal, null, false), []);
+    }
+    return 'read';
+  };
+  assert.equal(textBudget('', read), 'read');
+  // A value split by a control is still found, and an exact one stands as itself.
+  const split = `x ${literal.slice(0, 9)}\x1b[1m${literal.slice(9)} ${literal}`;
+  assert.deepEqual(valueSpans(split, literal).map(([a, b]) => [a, b]), [[2, 36], [37, 67]]);
+});
+
 test('dense CR cleanup keeps its text with compact control maps', () => {
   const { stripEscapes, stripEscapesMapped, stripEscapesViews } = require('../lib/ci-log-text');
   for (const unit of ['\r\n', '-\r\\\r|\r/\r', 'a\r']) {
