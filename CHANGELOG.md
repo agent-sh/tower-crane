@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.5 (2026-10-18)
+## 0.1.5 (2026-10-19)
 
 ### Upgrading
 
@@ -14,7 +14,7 @@
 
 ### Agents and spawn
 
-- Agents do not inherit the dispatcher's Node injection variables: `NODE_OPTIONS`, `NODE_PATH`, `NODE_REPL_EXTERNAL_MODULE`, `NODE_PRESERVE_SYMLINKS`, `NODE_PRESERVE_SYMLINKS_MAIN` and `NODE_COMPILE_CACHE`. Before, only the git and gh shims cleared them, so a preload set for the dispatcher also reached every agent. Project and rung `env` and `env_file` can still set them. The rule holds on first launches, retries and fallback routes, and names are case-insensitive on Windows. The supervisor keeps its own Node settings for host commands.
+- Agents do not inherit the dispatcher's Node injection variables, listed under Upgrading. Before, only the git and gh shims cleared them, so a preload set for the dispatcher also reached every agent. Project and rung `env` and `env_file` can still set them. The rule holds on first launches, retries and fallback routes, and names are case-insensitive on Windows. The supervisor keeps its own Node settings for host commands.
 
 ## 0.1.4 (2026-10-18)
 
