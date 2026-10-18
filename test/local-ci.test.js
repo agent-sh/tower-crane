@@ -618,6 +618,39 @@ test('a text redaction deadline drops content and restores the budget for the ne
     'Authorization: Bearer [redacted:AUTHORIZATION] end');
 });
 
+test('short CRLF and redraw logs keep ordinary download progress and counters', () => {
+  const { stripEscapes, createRedactor, redactJoined } = require('../lib/gates/common');
+  const redact = createRedactor([]);
+  const fill = (unit, size) => unit.repeat(Math.ceil(size / unit.length)).slice(0, size);
+  const build = (line, size) => {
+    const parts = [];
+    let length = 0;
+    for (let i = 0; length < size; i++) {
+      const next = line(i);
+      parts.push(next);
+      length += next.length;
+    }
+    return parts.join('').slice(0, size);
+  };
+  const progress = Array.from({ length: 101 }, (_, p) => '\r' + String(p).padStart(3) + '%').join('');
+  const cases = [
+    ['download-512KiB', build((i) => `Downloading pkg-${i}.tar.gz\n${progress}\n`, 512 << 10)],
+    ['download-1MiB', build((i) => `Downloading pkg-${i}.tar.gz\n${progress}\n`, 1 << 20)],
+    ['counter-1MiB', build((i) => `${i}\r\n`, 1 << 20)],
+    ...Array.from({ length: 7 }, (_, i) => [`CRLF-${i + 1}`, fill('p'.repeat(i + 1) + '\r\n', 4 << 20)]),
+    ...Array.from({ length: 6 }, (_, i) => [`redraw-${i + 3}`, fill('\r' + 'p'.repeat(i + 3), 4 << 20)]),
+    ['percent', fill('\r 45%', 4 << 20)],
+    ['blank lines', fill('a\r\n\r\n\r\nb line here\r\n', 4 << 20)],
+  ];
+  const hash = (text) => crypto.createHash('sha256').update(text).digest('hex');
+  for (const [name, input] of cases) {
+    let expected = input.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+    if (input.endsWith('\r')) expected = expected.slice(0, -1);
+    assert.equal(hash(stripEscapes(input)), hash(expected), `${name} cleanup`);
+    assert.equal(hash(redactJoined({ stdout: input, stderr: '' }, redact)), hash(expected), `${name} joined`);
+  }
+});
+
 test('mixed 16 MiB text fails closed below 1 GiB in a fresh process', () => {
   const cp = require('node:child_process');
   const script = `
@@ -636,16 +669,16 @@ console.log(JSON.stringify({ output, peakKiB: process.resourceUsage().maxRSS }))
   assert.ok(result.peakKiB < 1048576, `${result.peakKiB} KiB peak`);
 });
 
-test('dense CR runs exhaust allocation work before building cleanup maps', () => {
+test('dense CR cleanup keeps its text with compact control maps', () => {
   const { stripEscapes, stripEscapesMapped, stripEscapesViews } = require('../lib/ci-log-text');
   for (const unit of ['\r\n', '-\r\\\r|\r/\r', 'a\r']) {
     const input = unit.repeat(Math.ceil((1 << 20) / unit.length));
-    const notice = /^\[unscannable text: over \d+ redaction work units; content omitted\]$/;
-    assert.match(stripEscapes(input), notice, JSON.stringify(unit));
+    let expected = input.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+    if (input.endsWith('\r')) expected = expected.slice(0, -1);
+    assert.equal(stripEscapes(input), expected, JSON.stringify(unit));
     const mapped = stripEscapesMapped(input);
-    assert.match(mapped.text, notice);
-    assert.deepEqual(mapped.at(0), [0, input.length]);
-    for (const v of stripEscapesViews(input)) assert.match(v.text, notice);
+    assert.equal(mapped.text, expected);
+    for (const v of stripEscapesViews(input)) assert.equal(v.text, expected);
   }
   assert.equal(stripEscapes('ok\r\nnext\r'), 'ok\nnext');
 });
@@ -677,9 +710,9 @@ test('a prefix map over the work budget is rejected before its entries are alloc
   assert.ok(arrays.mock.calls.every((call) => call.arguments[0] !== entries));
 });
 
-test('16 MiB CR-heavy logs fail closed below 1 GiB in fresh processes', () => {
+test('16 MiB CR-heavy and short ordinary logs stay below 1 GiB in fresh processes', () => {
   const cp = require('node:child_process');
-  for (const unit of ['\r\n', '-\r\\\r|\r/\r', 'a\r']) {
+  for (const unit of ['\r\n', '-\r\\\r|\r/\r', 'a\r', '123456\r\n', '\rpppppppp', '1234567\r\n']) {
     const script = `
 const { createRedactor, redactJoined } = require(${JSON.stringify(require.resolve('../lib/gates/common'))});
 const unit = ${JSON.stringify(unit)};
@@ -689,10 +722,21 @@ const output = redactJoined({ output: text, runs: [
   { stream: 'out', text: text.slice(0, half) },
   { stream: 'err', text: text.slice(half) },
 ] }, createRedactor([]));
-console.log(JSON.stringify({ output, peakKiB: process.resourceUsage().maxRSS }));
+const hash = require('node:crypto').createHash('sha256').update(output).digest('hex');
+console.log(JSON.stringify({ notice: output.startsWith('[unscannable text:') ? output : null,
+  hash, peakKiB: process.resourceUsage().maxRSS }));
 `;
     const result = JSON.parse(cp.execFileSync(process.execPath, ['-e', script], { encoding: 'utf8' }));
-    assert.match(result.output, /^\[unscannable text: over \d+ redaction work units; content omitted\]$/);
+    if (result.notice) {
+      assert.ok(['\r\n', '-\r\\\r|\r/\r', 'a\r'].includes(unit), `ordinary ${JSON.stringify(unit)} was omitted`);
+      assert.match(result.notice, /^\[unscannable text: .+; content omitted\]$/);
+    }
+    else {
+      const input = unit.repeat(Math.ceil((16 << 20) / unit.length)).slice(0, 16 << 20);
+      let expected = input.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+      if (input.endsWith('\r')) expected = expected.slice(0, -1);
+      assert.equal(result.hash, crypto.createHash('sha256').update(expected).digest('hex'));
+    }
     assert.ok(result.peakKiB < 1048576, `${JSON.stringify(unit)}: ${result.peakKiB} KiB peak`);
   }
 });
