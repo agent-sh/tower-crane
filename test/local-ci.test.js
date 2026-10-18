@@ -524,23 +524,18 @@ test('gate output loses terminal escapes, and an unterminated string ends at its
     ['unterminated DCS', '\x1bPx'.repeat(Math.ceil(million / 3)), ''],
     ['CSI without a final byte', ('\x1b[' + '0'.repeat(98)).repeat(million / 100), '0'.repeat(98 * million / 100)],
     ['ESC runs', '\x1b'.repeat(million), ''],
-  ]) {
-    if (name === 'CSI without a final byte') assert.equal(stripEscapes(input), expected, name);
-    else assert.match(stripEscapes(input), /^\[unscannable text: .+; content omitted\]$/, name);
-  }
+  ]) assert.equal(stripEscapes(input), expected, name);
 });
 
-test('text redaction drops the entire input past its size, site or search work budget', () => {
+test('text redaction drops the entire input past its size or search work budget', () => {
   const { createRedactor, redactJoined } = require('../lib/gates/common');
   const { stripEscapes, stripEscapesMapped, stripEscapesViews } = require('../lib/ci-log-text');
   const redact = createRedactor([['FIXTURE_SECRET', 'a123456789b']]);
   const notice = /^\[unscannable text: .+; content omitted\]$/;
   for (const input of [
-    `private ${'\x1b[0m'.repeat(32769)} end`,
     `private ${'x'.repeat(32 << 20)}`,
-    `private ${'Authorization: value\n'.repeat(32769)} end`,
-    `private ${'\n'.repeat(262145)} end`,
-    // Few sites, but every value start explores hundreds of escape readings that go nowhere.
+    // Every value start explores hundreds of escape readings that go nowhere: 3 work units for
+    // each character, where the budget allows 1.
     `private ${('a\x1b[' + '1'.repeat(1024) + 'm ').repeat(1024)} end`,
   ]) {
     assert.match(redact(redact.strip(input)), notice);
@@ -553,14 +548,52 @@ test('text redaction drops the entire input past its size, site or search work b
     assert.match(redactJoined({ output: input, runs: [{ stream: 'out', text: input }, { stream: 'err', text: '' }] }, redact), notice);
   }
   assert.match(redact('private ' + 'x'.repeat(32 << 20)), notice);
-  assert.match(redact('[redacted:A] '.repeat(262145)), notice);
-  assert.match(redact(('a123456789b ').repeat(262145)), notice);
-  assert.deepEqual(redact.ranges(('a123456789b ').repeat(262145)),
-    [{ a: 0, b: 12 * 262145, label: 'UNSCANNABLE' }]);
+  const huge = 'a123456789b '.repeat((32 << 20) / 12 + 1);
+  assert.deepEqual(redact.ranges(huge), [{ a: 0, b: huge.length, label: 'UNSCANNABLE' }]);
+  // The budget grows with the text: dense colors, line breaks, headers, placeholders and secrets
+  // cost a little work each and stay scannable at any count.
+  assert.equal(redact.strip(`a ${'\x1b[0m'.repeat(1 << 18)} b`), 'a  b');
+  assert.equal(redact.strip(`a ${'\n'.repeat(1 << 20)} b`), `a ${'\n'.repeat(1 << 20)} b`);
+  assert.equal(redact(redact.strip('Authorization: value\n'.repeat(1 << 16))), 'Authorization: [redacted:AUTHORIZATION]\n'.repeat(1 << 16));
+  assert.equal(redact('[redacted:A] '.repeat(1 << 18)), '[redacted:A] '.repeat(1 << 18));
+  assert.equal(redact('a123456789b '.repeat(1 << 18)), '[redacted:FIXTURE_SECRET] '.repeat(1 << 18));
   const short = createRedactor([['SHORT_SECRET', 'ab']]);
-  assert.match(short.strip('\x07' + 'ab '.repeat(262145)), notice);
+  assert.equal(short(short.strip('\x07' + 'ab '.repeat(1 << 18))), '[redacted:SHORT_SECRET] '.repeat(1 << 18));
   // Exhausting one call never disables scanning or contaminates the next.
   assert.equal(redact(redact.strip('a123\x1b[0m456789b after')), '[redacted:FIXTURE_SECRET] after');
+});
+
+test('multi-MB plain, colored and CRLF logs keep the redaction output from before the text budget', () => {
+  const { createRedactor, redactJoined } = require('../lib/gates/common');
+  const { stripEscapes } = require('../lib/ci-log-text');
+  // Shaped like the logs a fixed budget dropped whole: `git log -p` of this repository at 7.5 MB,
+  // the same in color at 800 KB, and a 2 MB log with CRLF line ends.
+  const fill = (unit, size) => unit.repeat(Math.ceil(size / unit.length)).slice(0, size);
+  const patch = [
+    'commit 9201fbd4c0ffee5a8d3e1b2c4f6a7b8c9d0e1f2a',
+    'Author: Tower Crane <tc@example.com>',
+    '',
+    '    T399: shell lint reads arithmetic and never overflows the stack',
+    '',
+    'diff --git a/lib/shell-lint.js b/lib/shell-lint.js',
+    '@@ -120,7 +120,9 @@ function words(text) {',
+    '-  const depth = stack.length;',
+    '+  const depth = Math.min(stack.length, MAX_DEPTH);',
+    '   if (depth > 0) return words(text.slice(1));',
+    '',
+  ].join('\n');
+  const colored = '\x1b[32m\u2714\x1b[39m \x1b[90mlocal CI keeps the tail of a passing run\x1b[39m \x1b[33m(12ms)\x1b[39m\n';
+  const crlf = 'ok 12 - gate output loses terminal escapes # time=3.5ms\r\n';
+  const redact = createRedactor([['FIXTURE_TOKEN', 'ghp_Ab1Cd2Ef3Gh4Ij5Kl6Mn7Op8Qr9St0Uv1Wx2']]);
+  for (const [name, text, expected] of [
+    ['plain', fill(patch, 7.5e6), (t) => t],
+    ['colored', fill(colored, 8e5), (t) => t.replace(/\x1b\[\d+m/g, '')],
+    ['CRLF', fill(crlf, 2e6), (t) => t.replaceAll('\r\n', '\n')],
+  ]) {
+    const clean = expected(text);
+    assert.equal(stripEscapes(text), clean, name);
+    assert.equal(redactJoined({ stdout: text, stderr: '' }, redact), clean, name);
+  }
 });
 
 test('a text redaction deadline drops content and restores the budget for the next call', () => {
@@ -614,15 +647,16 @@ test('captured GitHub CI logs keep the redaction output from before the text bud
 });
 
 test('local CI saves only a notice for unscannable logs and text artifacts', (t) => {
+  // Each start of the value explores hundreds of escape readings, past the work its length allows.
   const h = fixture(t, `
 const fs = require('node:fs');
-const text = ('x\\x1b[0mAuthorization: Bearer sekrit end\\n').repeat(32769);
+const text = ('a\\x1b[' + '1'.repeat(1024) + 'm ').repeat(1024);
 fs.writeFileSync('dense.txt', text);
 process.stdout.write(text);
 process.exitCode = 1;
 `);
   h.ok(['project', 'set', '--ci-local', JSON.stringify({ command: h.command, timeout: 30, artifacts: ['dense.txt'] })]);
-  const result = h.run(['check', 'ci', 'T1']);
+  const result = h.run(['check', 'ci', 'T1'], { env: { FIXTURE_TOKEN: 'a123456789bcdefghijk0' } });
   assert.equal(result.code, 1, result.stdout + result.stderr);
   const kept = h.readState('tasks.json').tasks[0].evidence.at(-1).local_ci;
   assert.ok(kept, result.stdout + result.stderr);
