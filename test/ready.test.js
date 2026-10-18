@@ -118,6 +118,25 @@ test('priority is operational, validates values and preserves a live claim', (t)
   assert.deepEqual(task.claim, claim.claim);
   assert.equal(task.revision, 1);
   assert.equal(task.status, 'in_progress');
+  assert.equal(h.readState('tasks.json').tasks[1].priority, undefined, 'normal removes the field');
+
+  h.ok(['task', 'update', 'T3', '--status', 'cancelled', '--agent', 'orchestrator']);
+  const list = h.ok(['task', 'list']);
+  assert.match(list, /T1 .*\[urgent\]/);
+  assert.doesNotMatch(list, /T3 .*\[urgent\]/, 'a closed task does not show urgency');
+
+  const tasks = h.readState('tasks.json');
+  tasks.tasks[0].priority = 7;
+  h.writeState('tasks.json', tasks);
+  const broken = h.run(['ready']);
+  assert.notEqual(broken.code, 0);
+  assert.match(broken.stderr, /T1: priority must be a non-empty string/);
+  tasks.tasks[0].priority = 'future-high';
+  h.writeState('tasks.json', tasks);
+  assert.deepEqual(h.json(['ready']).ready.map((x) => [x.id, x.priority]), [['T1', 'future-high']]);
+  h.ok(['task', 'add', '--title', 'Fourth', '--acceptance', 'works']);
+  h.ok(['task', 'update', 'T4', '--priority', 'urgent', '--agent', 'orchestrator']);
+  assert.deepEqual(h.json(['ready']).ready.map((x) => x.id), ['T4', 'T1'], 'an unfamiliar priority sorts as normal');
 });
 
 test('status summarizes counts, decisions, owner tasks, spend and expired leases', (t) => {
