@@ -61,10 +61,11 @@ test('a later non-agy spawn refreshes the live agy home before its broker appear
   const before = JSON.parse(fs.readFileSync(settingsFile, 'utf8'));
   h.ok(['task', 'add', '--title', 'Later sibling', '--acceptance', 'refresh live permissions']);
   h.ok(['brief', 'set', 'T2', '-'], { input: 'Start a sibling.\n' });
-  h.ok(['ladder', 'set', 'hard', '--harness', 'claude', '--model', 'fixture', '--clear', 'profile', '--clear', 'args']);
+  // Codex's TCP broker reaches the refresh even when /tmp cannot hold a socket.
+  h.ok(['ladder', 'set', 'hard', '--harness', 'codex', '--model', 'fixture', '--clear', 'profile', '--clear', 'args']);
   h.ok(['task', 'update', 'T2', '--tier', 'hard']);
-  fs.writeFileSync(path.join(path.dirname(env.STUB_OUT), 'bin', 'claude'),
-    `#!${process.execPath}\nrequire(${JSON.stringify(stub)});\n`, { mode: 0o755 });
+  fs.writeFileSync(path.join(path.dirname(env.STUB_OUT), 'bin', 'codex'),
+    `#!${process.execPath}\nrequire(${JSON.stringify(path.join(__dirname, 'fixtures', 'harness-stub.js'))})('codex');\n`, { mode: 0o755 });
   const second = h.json(['spawn', '--task', 'T2', '--wait'], { env });
   const resource = target => `read_file(${target.replace(/\\/g, '/').replace(/^[A-Za-z]:/, '')})`;
   const homeRule = resource(path.join(h.state, 'homes', second.agent));

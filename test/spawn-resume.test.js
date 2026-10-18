@@ -45,10 +45,12 @@ function setup(t, format = 'codex', session = true) {
   const script = path.join(h.base, 'harness.js');
   const seen = path.join(h.base, 'seen.json');
   fs.writeFileSync(script, `
+const { fakeAgentEnv } = require(${JSON.stringify(path.join(__dirname, 'agent-env.js'))});
+
 const fs = require('node:fs');
 const cp = require('node:child_process');
 const [bin, out, prior, prompt, format, enabled, assigned] = process.argv.slice(2);
-const cli = (...args) => cp.execFileSync(process.execPath, [bin, ...args], { stdio: 'pipe' });
+const cli = (...args) => cp.execFileSync(process.execPath, [bin, ...args], { env: fakeAgentEnv(process.env), stdio: 'pipe' });
 const task = JSON.parse(cli('task', 'show', 'T1', '--json'));
 fs.writeFileSync(out, JSON.stringify({ prior, prompt, cwd: process.cwd(), agent: process.env.TOWER_CRANE_AGENT, claim: task.claim }));
 // The launcher restores resumed claims after its startup receipt.
@@ -455,10 +457,12 @@ for (const format of ['codex', 'claude', 'native-codex']) {
         ? { type: 'turn.failed', error: { message: "Codex ran out of room in the model's context window. Start a new thread or clear earlier history before retrying." } }
         : { type: 'result', is_error: true, errors: ['Prompt is too long'], subtype: 'error_during_execution' };
       fs.writeFileSync(script, `
+const { fakeAgentEnv } = require(${JSON.stringify(path.join(__dirname, 'agent-env.js'))});
+
 const fs = require('node:fs');
 const cp = require('node:child_process');
 const [bin, out, prior, prompt, format] = process.argv.slice(2);
-const task = JSON.parse(cp.execFileSync(process.execPath, [bin, 'task', 'show', 'T1', '--json'], { encoding: 'utf8' }));
+const task = JSON.parse(cp.execFileSync(process.execPath, [bin, 'task', 'show', 'T1', '--json'], { env: fakeAgentEnv(process.env), encoding: 'utf8' }));
 const rework = task.claim?.from === 'rework';
 fs.appendFileSync(${JSON.stringify(calls)}, JSON.stringify({ prior, prompt, cwd: process.cwd(), agent: process.env.TOWER_CRANE_AGENT, claim: task.claim }) + '\\n');
 if (prior || (${freshOverflow} && rework)) {

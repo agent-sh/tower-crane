@@ -42,14 +42,16 @@ async function start(t, h, { claim = true, submit = false, wait = false, env = {
   const worker = path.join(h.base, 'worker.js');
   const ending = lifetimeMs ? `setTimeout(() => { fs.writeFileSync(process.argv[3] + '.natural', ''); process.exit(0); }, ${lifetimeMs});` : 'setInterval(() => {}, 1000);'; // wait-allow: the stand-in's own end, which a test tells apart from being stopped
   const script = `
+const { fakeAgentEnv } = require(${JSON.stringify(path.join(__dirname, 'agent-env.js'))});
+
 const fs = require('node:fs');
 const cp = require('node:child_process');
 const task = process.env.TOWER_CRANE_TASK;
-${claim ? "cp.execFileSync(process.execPath, [process.argv[2], 'claim', task]);" : ''}
+${claim ? "cp.execFileSync(process.execPath, [process.argv[2], 'claim', task], { env: fakeAgentEnv(process.env) });" : ''}
 fs.writeSync(1, Array.from({ length: 30 }, (_, i) => 'progress ' + i).join('\\n') + '\\n');
 fs.writeSync(2, 'last diagnostic before exit\\n');
 fs.writeSync(2, ${JSON.stringify(PRIVATE_LOG + '\n')});
-${submit ? "cp.execFileSync(process.execPath, [process.argv[2], 'submit', task, '--sha', '50b732a15be40ccb2065cb2ba0e7b366d511b736']);" : ''}
+${submit ? "cp.execFileSync(process.execPath, [process.argv[2], 'submit', task, '--sha', '50b732a15be40ccb2065cb2ba0e7b366d511b736'], { env: fakeAgentEnv(process.env) });" : ''}
 fs.writeFileSync(process.argv[3] + '.tmp', JSON.stringify({ agent: process.env.TOWER_CRANE_AGENT, pid: process.pid }));
 fs.renameSync(process.argv[3] + '.tmp', process.argv[3]);
 ${wait ? 'process.exit(7);' : ending}
@@ -335,10 +337,12 @@ setTimeout(() => { fs.writeFileSync(process.argv[1] + '.natural', ''); process.e
 `;
   const worker = path.join(h.base, 'leaver.js');
   fs.writeFileSync(worker, `
+const { fakeAgentEnv } = require(${JSON.stringify(path.join(__dirname, 'agent-env.js'))});
+
 const fs = require('node:fs');
 const cp = require('node:child_process');
 const [bin, files] = [process.argv[2], JSON.parse(process.argv[3])];
-cp.execFileSync(process.execPath, [bin, 'claim', process.env.TOWER_CRANE_TASK]);
+cp.execFileSync(process.execPath, [bin, 'claim', process.env.TOWER_CRANE_TASK], { env: fakeAgentEnv(process.env) });
 const start = (file, script, options) => {
   cp.spawn(process.execPath, ['-e', script, file], { windowsHide: true, ...options }).unref();
   while (!fs.existsSync(file)) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20); // wait-allow: the harness exits only once its children run
@@ -347,9 +351,9 @@ if (${!!nested}) {
   const env = { ...process.env, TOWER_CRANE_AGENT: 'orchestrator' };
   for (const key of ['TOWER_CRANE_TASK', 'TOWER_CRANE_HOOK', 'TOWER_CRANE_SESSION']) delete env[key];
   if (${JSON.stringify(nested)} === 'wait') {
-    cp.spawn(process.execPath, [bin, 'spawn', '--role', 'medium', '--task', 'T2', '--wait'], { env, detached: true, stdio: 'ignore', windowsHide: true }).unref();
+    cp.spawn(process.execPath, [bin, 'spawn', '--role', 'medium', '--task', 'T2', '--wait'], { env: fakeAgentEnv(env), detached: true, stdio: 'ignore', windowsHide: true }).unref();
   } else {
-    cp.execFileSync(process.execPath, [bin, 'spawn', '--role', 'medium', '--task', 'T2', '--json'], { env, stdio: ['ignore', 'ignore', 'inherit'] });
+    cp.execFileSync(process.execPath, [bin, 'spawn', '--role', 'medium', '--task', 'T2', '--json'], { env: fakeAgentEnv(env), stdio: ['ignore', 'ignore', 'inherit'] });
   }
   while (!fs.existsSync(files.nested)) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20); // wait-allow: the nested harness reports its pid
 }
@@ -770,8 +774,10 @@ test('a session that releases the task for an open decision does not count towar
   const h = setup(t);
   const worker = path.join(h.base, 'asks.js');
   const script = (ask) => `
+const { fakeAgentEnv } = require(${JSON.stringify(path.join(__dirname, 'agent-env.js'))});
+
 const cp = require('node:child_process');
-const run = (args) => cp.execFileSync(process.execPath, [${JSON.stringify(BIN)}, ...args], { stdio: 'ignore' });
+const run = (args) => cp.execFileSync(process.execPath, [${JSON.stringify(BIN)}, ...args], { env: fakeAgentEnv(process.env), stdio: 'ignore' });
 ${ask ? "run(['ask', '--kind', 'technical', '--question', 'which? ' + Date.now(), '--option', 'A', '--option', 'B', '--blocks', 'T1']);" : ''}
 run(['release', 'T1', '--reason', ${JSON.stringify(ask ? 'waiting on a decision' : 'giving up')}]);
 `;

@@ -11,12 +11,11 @@ const { createRepoSeed, cleanupRepoSeed, FOREGROUND_MAINTENANCE } = require('./r
 const { tempRoot, liveRoot } = require('./tmp-root');
 const { readPublished } = require('./atomic-file');
 const UserConfigGuard = require('./fixtures/user-config-guard');
+const { fakeAgentEnv, ACCOUNT_HOME } = require('./agent-env');
 
 const ROOT = path.join(__dirname, '..');
 const BIN = path.join(ROOT, 'bin', 'tower-crane.js');
 const HOOKS = path.join(__dirname, 'fixtures', 'hooks.js');
-const ACCOUNT_HOME = path.join(__dirname, 'fixtures', 'account-home.js');
-const ACCOUNT_HOME_OPTION = `--require "${ACCOUNT_HOME.replace(/\\/g, '/')}"`;
 const TMP_ROOT = tempRoot();
 const LIVE_ROOT = liveRoot();
 const SHARED_REPO_SEED = process.env.TC_TEST_REPO_SEED;
@@ -148,6 +147,10 @@ function baseEnv(home) {
   for (const k of Object.keys(env)) {
     if (k.startsWith('TOWER_CRANE_') || k.startsWith('GIT_') || k === 'TC_TEST_REPO_SEED') delete env[k];
   }
+  // A worker's git and gh shims enforce its real task's policy, which must
+  // not apply to commands in the test repository.
+  const key = Object.keys(env).find((k) => k.toUpperCase() === 'PATH') || 'PATH';
+  env[key] = String(env[key] || '').split(path.delimiter).filter((dir) => !require('../lib/agents').agentShims(dir)).join(path.delimiter);
   // Existing fixtures act as the owner without a terminal, so they must
   // provide that identity and the owner key.
   env.TOWER_CRANE_AGENT = 'owner';
@@ -160,7 +163,7 @@ function baseEnv(home) {
   // developer's ~/.config/tower-crane. The user file and owner key sit where
   // the owner's real ones do.
   env.TC_ACCOUNT_HOME = env.HOME;
-  env.NODE_OPTIONS = withAccountHome(env.NODE_OPTIONS);
+  env.NODE_OPTIONS = fakeAgentEnv(env).NODE_OPTIONS;
   // The hook also loads fixtures/user-config-guard.js, which records a CLI
   // whose user file lies outside the roots this test process fixed at load.
   env[UserConfigGuard.ROOTS_ENV] = UserConfigGuard.roots().join(path.delimiter);
@@ -191,12 +194,6 @@ function useFixtureUserFile(t, h) {
     if (saved === undefined) delete process.env.TOWER_CRANE_CONFIG;
     else process.env.TOWER_CRANE_CONFIG = saved;
   });
-}
-
-// NODE_OPTIONS with the account home hook first, whatever else a test adds.
-function withAccountHome(options) {
-  const rest = String(options ?? '').replace(ACCOUNT_HOME_OPTION, '').trim();
-  return rest ? `${ACCOUNT_HOME_OPTION} ${rest}` : ACCOUNT_HOME_OPTION;
 }
 
 // The owner_config_dir of every project.json in a fixture that lies outside
@@ -587,7 +584,7 @@ function context(t, base, options = {}) {
 // preloads after it.
 function withHooks(ctx, opts) {
   const env = { ...ctx.env, ...(opts.env || {}) };
-  env.NODE_OPTIONS = withAccountHome(env.NODE_OPTIONS);
+  env.NODE_OPTIONS = fakeAgentEnv(env).NODE_OPTIONS;
   Object.assign(env, { HOOK_STATE: ctx.state, HOOK_PROCESSES_DIR: path.join(ctx.base, 'detached') }, opts.hooks);
   const pre = ['--require', HOOKS, ...(opts.pre || [])];
   return { cwd: ctx.repo, ...opts, env, pre };
@@ -930,4 +927,4 @@ function pluginRoot(dir) {
   return dir;
 }
 
-module.exports = { pluginRoot, shortCacheRoot, useFixtureUserFile, ownerFallbacks, ownerDirsOutside, ACCOUNT_HOME, repairWorktrees, makeRepo, makeProjectRepo, makeTaskRepo, copyRepo, cachedFixture, fixtureLadder, pinRung, pinLiveRung, stubRungs, STUB_RUNG, HARNESS_GUARD, run, runPty, PTY_AVAILABLE, runAsync, dispatch, BIN, ROOT, HOOKS, real, TMP_ROOT, LIVE_ROOT, detachedAlive, processesIn, assertNoProcessesIn };
+module.exports = { fakeAgentEnv, pluginRoot, shortCacheRoot, useFixtureUserFile, ownerFallbacks, ownerDirsOutside, ACCOUNT_HOME, repairWorktrees, makeRepo, makeProjectRepo, makeTaskRepo, copyRepo, cachedFixture, fixtureLadder, pinRung, pinLiveRung, stubRungs, STUB_RUNG, HARNESS_GUARD, run, runPty, PTY_AVAILABLE, runAsync, dispatch, BIN, ROOT, HOOKS, real, TMP_ROOT, LIVE_ROOT, detachedAlive, processesIn, assertNoProcessesIn };

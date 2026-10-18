@@ -76,7 +76,7 @@ if (path.resolve(process.argv[1] || '') !== __filename) {
   const args = process.argv.slice(3);
   const env = process.env;
   if (env.LIVE_ATTEMPTS) fs.appendFileSync(env.LIVE_ATTEMPTS, `${harness}\n`);
-  if (!env.LIVE_NO_CLAIM) cp.execFileSync(process.execPath, [path.join(__dirname, '..', '..', 'bin', 'tower-crane.js'), 'claim', env.TOWER_CRANE_TASK], { stdio: 'ignore' });
+  if (!env.LIVE_NO_CLAIM) cp.execFileSync(process.execPath, [path.join(__dirname, '..', '..', 'bin', 'tower-crane.js'), 'claim', env.TOWER_CRANE_TASK], { env: require('../agent-env').fakeAgentEnv(process.env), stdio: 'ignore' });
   const steps = Number(env.LIVE_STEPS);
   const per = Number(env.LIVE_STEP_TOKENS || 1000);
   let file;

@@ -6,9 +6,53 @@ const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
 const crypto = require('node:crypto');
-const { makeRepo, copyRepo, shortCacheRoot, TMP_ROOT, ROOT, HARNESS_GUARD, processesIn, assertNoProcessesIn } = require('./helpers');
+const { makeRepo, copyRepo, shortCacheRoot, fakeAgentEnv, ACCOUNT_HOME, BIN, TMP_ROOT, ROOT, HARNESS_GUARD, processesIn, assertNoProcessesIn } = require('./helpers');
 const { gateFixture, gateEvidence } = require('./gate-helpers');
-const { waitUntil, childExit } = require('./signals');
+const { waitUntil, childExit, HUNG_TEST_MS } = require('./signals');
+
+test('fixture commands bypass the calling worker git and gh shims', (t) => {
+  const outer = makeRepo(t);
+  const dir = path.join(outer.base, 'caller');
+  const bin = path.join(dir, 'bin');
+  fs.mkdirSync(bin, { recursive: true });
+  fs.writeFileSync(path.join(dir, '.tower-crane-origin.json'), '{}\n');
+  fs.writeFileSync(path.join(bin, 'git'), '#!/bin/sh\nexit 42\n', { mode: 0o755 });
+  fs.writeFileSync(path.join(bin, 'git.cmd'), '@exit /b 42\r\n');
+  const key = Object.keys(process.env).find((k) => k.toUpperCase() === 'PATH') || 'PATH';
+  const saved = process.env[key];
+  process.env[key] = bin + path.delimiter + saved;
+  try {
+    const h = makeRepo(t);
+    assert.equal(h.git(['rev-parse', '--is-inside-work-tree']), 'true');
+    assert.ok(!h.env[key].split(path.delimiter).includes(bin));
+  } finally {
+    process.env[key] = saved;
+  }
+});
+
+test('fake agent env isolates a CLI account home and preserves its other preloads', (t) => {
+  const h = makeRepo(t);
+  const hook = path.join(h.base, 'agent preload.cjs');
+  fs.writeFileSync(hook, 'process.env.FAKE_AGENT_HOOK = "loaded";\n');
+  const hookPath = hook.replace(/\\/g, '/');
+  const supplied = { ...h.env, NODE_OPTIONS: `--require ${JSON.stringify(hookPath)}` };
+  const env = fakeAgentEnv(supplied);
+  assert.equal(fakeAgentEnv, require('./agent-env').fakeAgentEnv);
+  assert.equal(supplied.NODE_OPTIONS, `--require ${JSON.stringify(hookPath)}`);
+  assert.deepEqual(fakeAgentEnv(env), env, 'adding the preload twice keeps one copy');
+  const accountIndex = env.NODE_OPTIONS.indexOf(ACCOUNT_HOME.replace(/\\/g, '/'));
+  assert.ok(accountIndex >= 0 && accountIndex < env.NODE_OPTIONS.indexOf(hookPath));
+  const script = `require(${JSON.stringify(require.resolve('./agent-env'))});
+JSON.stringify({ hook: process.env.FAKE_AGENT_HOOK, lifecycle: Boolean(require.cache[${JSON.stringify(require.resolve('./helpers'))}]) })`;
+  const probe = cp.spawnSync(process.execPath, ['-p', script], { env, encoding: 'utf8', timeout: HUNG_TEST_MS });
+  assert.equal(probe.status, 0, probe.stderr);
+  assert.deepEqual(JSON.parse(probe.stdout), { hook: 'loaded', lifecycle: false });
+  const init = cp.spawnSync(process.execPath, [BIN, 'init', '--name', 'fake-agent', '--goal', 'Fake agent account home'], {
+    cwd: h.repo, env, encoding: 'utf8', timeout: HUNG_TEST_MS,
+  });
+  assert.equal(init.status, 0, init.stderr);
+  assert.equal(h.readState('project.json').owner_config_dir, path.join(h.env.HOME, '.config', 'tower-crane'));
+});
 
 // Runs f and returns the fixture directories it made, recorded by wrapping mkdtemp.
 function recordFixtureDirs(f) {

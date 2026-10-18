@@ -273,7 +273,9 @@ function runaway(root, bin, { harness = 'claude', variant = 'live' } = {}) {
   fs.mkdirSync(binDir, { recursive: true });
   fs.writeFileSync(path.join(binDir, harness), '', { mode: 0o755 });
   if (variant === 'unavailable') {
-    const script = "require('node:child_process').execFileSync(process.execPath, [process.argv[1], 'claim', process.argv[2]]); setTimeout(() => {}, 600000);";
+    const script = `
+const { fakeAgentEnv } = require(${JSON.stringify(path.join(__dirname, '..', 'agent-env.js'))});
+require('node:child_process').execFileSync(process.execPath, [process.argv[1], 'claim', process.argv[2]], { env: fakeAgentEnv(process.env) }); setTimeout(() => {}, 600000);`;
     s.ok(['ladder', 'set', 'easy', '--harness', 'command', '--clear', 'model', '--clear', 'profile', '--clear', 'effort', '--command', JSON.stringify([process.execPath, '-e', script, bin, id, '{prompt}']), '--supervision', JSON.stringify({ usage_ms: 500, stall_ms: 600000 })]);
   } else {
     s.ok(['ladder', 'set', 'easy', '--harness', harness, '--model', 'bench-model', '--clear', 'profile', '--clear', 'effort', '--supervision', JSON.stringify({ usage_ms: 500, stall_ms: 600000 })]);

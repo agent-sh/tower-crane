@@ -547,10 +547,12 @@ const cp = require('node:child_process');
 const result = cp.spawnSync(${JSON.stringify(native)}, process.argv.slice(2), { stdio: 'inherit', timeout: 300000 });
 process.exit(result.status ?? 1);
 `, { mode: 0o755 });
-  fs.writeFileSync(path.join(bin, 'tower-crane'), `#!${process.execPath}
+  fs.writeFileSync(path.join(bin, 'tower-crane'), `
+const { fakeAgentEnv } = require(${JSON.stringify(path.join(__dirname, 'agent-env.js'))});
+#!${process.execPath}
 const cp = require('node:child_process');
 const cli = require('node:path').join(require('node:path').dirname(process.env.TOWER_CRANE_HOOK), 'tool', 'bin', 'tower-crane.js');
-const result = cp.spawnSync(process.execPath, [cli, ...process.argv.slice(2)], { stdio: 'inherit' });
+const result = cp.spawnSync(process.execPath, [cli, ...process.argv.slice(2)], { env: fakeAgentEnv(process.env), stdio: 'inherit' });
 process.exit(result.status ?? 1);
 `, { mode: 0o755 });
   f.h.ok(['ladder', 'set', 'medium', '--model', 'fixture/mock']);

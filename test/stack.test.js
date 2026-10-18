@@ -294,8 +294,10 @@ test('spawn repairs stale linked state from GitHub before checking a rework clai
   f.h.writeState('tasks.json', state);
 
   const script = path.join(f.h.base, 'claim.js');
-  fs.writeFileSync(script, `const cp = require('node:child_process');
-const r = cp.spawnSync(process.execPath, [${JSON.stringify(BIN)}, 'claim', process.env.TOWER_CRANE_TASK], { encoding: 'utf8' });
+  fs.writeFileSync(script, `
+const { fakeAgentEnv } = require(${JSON.stringify(path.join(__dirname, 'agent-env.js'))});
+const cp = require('node:child_process');
+const r = cp.spawnSync(process.execPath, [${JSON.stringify(BIN)}, 'claim', process.env.TOWER_CRANE_TASK], { env: fakeAgentEnv(process.env), encoding: 'utf8' });
 process.stdout.write(r.stdout || '');
 process.stderr.write(r.stderr || '');
 process.exit(r.status === null ? 1 : r.status);

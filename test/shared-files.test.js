@@ -7,6 +7,45 @@ const path = require('node:path');
 const cp = require('node:child_process');
 const { makeRepo, ROOT } = require('./helpers');
 const { readText, escapeTableCell } = require('../scripts/text');
+const { fakeAgentEnvFindings } = require('../scripts/fake-agent-env');
+
+test('the shared check rejects CLI-running fake fixtures without the env helper', (t) => {
+  const lines = [
+    "const cp = require('node:child_process');",
+    "const bin = 'tower-crane.js';",
+    'cp.execFileSync(',
+    "process.execPath, [bin, 'claim', 'T1'], OPTIONS);",
+  ];
+  const source = (options) => lines.join('\n').replace('OPTIONS', options);
+  for (const options of ['{}', '{ env: process.env }', '{ env: process.env /* fakeAgentEnv(process.env) */ }',
+    '{ env: process.env, label: "fakeAgentEnv(process.env)" }']) {
+    const bad = source(options);
+    assert.equal(fakeAgentEnvFindings(bad, true).length, 1);
+    assert.equal(fakeAgentEnvFindings(`const script = ${JSON.stringify(bad)};`).length, 1);
+    assert.equal(fakeAgentEnvFindings(`// fakeAgentEnv(process.env)\n${bad}`, true).length, 1);
+    assert.equal(fakeAgentEnvFindings(`const { fakeAgentEnv } = require('../agent-env');\n${bad}`, true).length, 1);
+  }
+  const good = source('{ env: fakeAgentEnv(process.env) }');
+  assert.deepEqual(fakeAgentEnvFindings(good, true), []);
+  assert.deepEqual(fakeAgentEnvFindings('const env = fakeAgentEnv(process.env);\n' + source('{ env }'), true), []);
+  assert.deepEqual(fakeAgentEnvFindings('const childEnv = fakeAgentEnv(process.env);\n' + source('{ env: childEnv }'), true), []);
+  assert.deepEqual(fakeAgentEnvFindings(good + '\n' + source('{}'), true).length, 1,
+    'a protected call does not cover another CLI call');
+  const dynamic = ['const argv = JSON.parse(process.env.STUB_RUN)[0];',
+    'cp.spawnSync(', "argv[0], argv.slice(1), { env: process.env });"].join('\n');
+  assert.equal(fakeAgentEnvFindings(dynamic, true).length, 1);
+  assert.deepEqual(fakeAgentEnvFindings(dynamic.replace('env: process.env', 'env: fakeAgentEnv(process.env)'), true), []);
+  const f = fixture(t);
+  fs.mkdirSync(path.join(f.h.repo, 'test', 'fixtures'), { recursive: true });
+  f.write('test/fixtures/fake-agent.js', source('{}'));
+  f.change();
+  const rejected = f.check();
+  assert.equal(rejected.status, 1);
+  assert.match(rejected.stderr, /fake-agent\.js:.*fakeAgentEnv/);
+  f.write('test/fixtures/fake-agent.js', good);
+  const accepted = f.check();
+  assert.equal(accepted.status, 0, accepted.stderr);
+});
 
 function fixture(t, { crlfProtected = false, windowsCheckout = false } = {}) {
   const h = makeRepo(t);
