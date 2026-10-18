@@ -1,0 +1,1 @@
+- Live Claude test fixtures accept an explicit provider and environment file. Bedrock operators can run the sandbox checks through their existing provider configuration.

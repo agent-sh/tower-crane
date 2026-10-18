@@ -11,8 +11,8 @@
 // as the harness process, then the probe in `codex sandbox` with the
 // generated permission profile. It runs with TOWER_CRANE_LIVE_CODEX=1
 // wherever codex is on PATH and its sandbox starts. The claude probe runs a
-// real claude agent, so it costs a model call: set TOWER_CRANE_LIVE_CLAUDE=1 (TOWER_CRANE_LIVE_MODEL picks the
-// model, claude-haiku-5-5 by default: a full id resolves on every provider).
+// real claude agent, so it costs a model call: set TOWER_CRANE_LIVE_CLAUDE=1
+// and select the model with TOWER_CRANE_LIVE_MODEL, as for the other live probes.
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -20,7 +20,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 const cp = require('node:child_process');
-const { makeRepo, ACCOUNT_HOME } = require('./helpers');
+const { makeRepo, ACCOUNT_HOME, pinLiveRung } = require('./helpers');
 
 const PROBE = `'use strict';
 const cp = require('node:child_process');
@@ -193,7 +193,7 @@ test('from a real claude sandbox a worker cannot write the shared git config or 
   f.h.ok(['brief', 'set', 'T1', '-'], {
     input: `Sandbox probe set up by the owner. Run exactly these two commands with the Bash tool, as two separate Bash calls in this order, the second only after the first has finished. Then reply with their exit codes and stop. Do not use tower-crane.\n\n1. ${command(f.spec('claude-1', { out: first, steps: ['git'], wait: ready }))}\n\n2. ${command(f.spec('claude-2', { out: second, steps: ['late'] }))}\n`,
   });
-  f.h.ok(['ladder', 'set', 'hard', '--harness', 'claude', '--model', process.env.TOWER_CRANE_LIVE_MODEL || 'claude-haiku-5-5', '--clear', 'profile', '--clear', 'effort', '--clear', 'args']);
+  pinLiveRung(f.h, 'claude', 'hard');
   const spawned = f.h.runAsync(['spawn', '--role', 'hard', '--task', 'T1', '--wait']);
   // Once the first command has written its result, add the worktree and let it finish.
   let added = false;
