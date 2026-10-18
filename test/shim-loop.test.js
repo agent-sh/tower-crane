@@ -51,16 +51,17 @@ function fixture(t) {
 }
 
 // A wrapper that runs the agent's shim, as a test's wrapper that runs "the
-// git on PATH" does inside an agent. It logs how deep in the loop it runs.
-function wrapper(f, tool, viaExec) {
-  const shim = shellQuote(path.join(f.bin, tool));
+// git on PATH" does inside an agent. It logs how deep in the loop it runs,
+// and stops on its own past guard.
+function wrapper(f, tool, body, guard = GUARD) {
   fs.writeFileSync(path.join(f.wrap, tool), `#!/bin/sh
 d=$((\${SHIM_LOOP_DEPTH:-0} + 1)); export SHIM_LOOP_DEPTH=$d
 echo $d >> ${shellQuote(f.log)}
-if [ $d -gt ${GUARD} ]; then exit 99; fi
-${viaExec ? 'exec ' : ''}${shim} "$@"
+if [ $d -gt ${guard} ]; then exit 99; fi
+${body}
 `, { mode: 0o755 });
 }
+const runShim = (f, tool, viaExec) => `${viaExec ? 'exec ' : ''}${shellQuote(path.join(f.bin, tool))} "$@"`;
 
 function run(f, tool, args, dirs) {
   const PATH = [...dirs, ...f.host].join(path.delimiter);
@@ -73,7 +74,7 @@ const depths = (f) => (fs.existsSync(f.log) ? fs.readFileSync(f.log, 'utf8').tri
 for (const [tool, args, viaExec] of [['git', ['version'], true], ['git', ['version'], false], ['gh', ['pr', 'view'], true]]) {
   test(`a ${tool} wrapper on PATH that ${viaExec ? 'execs' : 'runs'} the shim stops at the second shim with exit 127`, { skip: POSIX }, (t) => {
     const f = fixture(t);
-    wrapper(f, tool, viaExec);
+    wrapper(f, tool, runShim(f, tool, viaExec));
     const r = run(f, tool, args, [f.wrap, f.bin]);
     assert.equal(r.error, undefined);
     assert.equal(r.status, 127, r.stderr);
@@ -86,9 +87,42 @@ for (const [tool, args, viaExec] of [['git', ['version'], true], ['git', ['versi
   });
 }
 
+// A wrapper between the shim and the real git that drops its own directory
+// from PATH and runs git by name, as a version manager falling back to the
+// system git does, reaches the shim again. That shim resolves the git past
+// the wrapper and runs it: no loop.
+test('a wrapper that drops itself from PATH and execs git by name runs the real git', { skip: POSIX }, (t) => {
+  const f = fixture(t);
+  wrapper(f, 'git', `PATH=$(printf '%s' "$PATH" | tr : '\\n' | grep -vxF ${shellQuote(f.wrap)} | paste -sd: -)
+export PATH
+exec git "$@"`);
+  const r = run(f, 'git', ['version'], [f.bin, f.wrap]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /^git version /);
+  assert.doesNotMatch(r.stderr, /shim loop/);
+  assert.deepEqual([...new Set(depths(f))], ['1']);
+});
+
+// A wrapper that changes PATH and does not exec gets past both loop checks:
+// no pid matches, and gh, unlike git, leaves PATH as it was. The depth bound
+// stops it.
+test('a gh wrapper that changes PATH and runs the shim stops at the depth bound', { skip: POSIX }, (t) => {
+  const f = fixture(t);
+  const { MAX_DEPTH } = require(SHIM);
+  wrapper(f, 'gh', `PATH=/nonexistent-$d:$PATH
+export PATH
+${runShim(f, 'gh', false)}`, MAX_DEPTH + 4);
+  const r = run(f, 'gh', ['pr', 'view'], [f.wrap, f.bin]);
+  assert.equal(r.status, 127, r.stderr);
+  assert.ok(r.stderr.includes(`gh shim loop: ${MAX_DEPTH + 1} shims run inside one another, past ${MAX_DEPTH}`), r.stderr);
+  // Wrapper level n runs inside shim n; shim MAX_DEPTH + 1 stops.
+  assert.equal(Math.max(...depths(f).map(Number)), MAX_DEPTH);
+  assertNoProcessesIn(t, f.base);
+});
+
 // git starts hooks with its exec path first on PATH, so a hook that runs the
 // shim hands it a PATH the outer shim did not hand on, and the shim runs.
-test('a git hook that runs git through the shim is no loop', { skip: POSIX }, (t) => {
+test('a git hook that runs the shim by its path is no loop', { skip: POSIX }, (t) => {
   const f = fixture(t);
   const PATH = [f.bin, ...f.host].join(path.delimiter);
   const env = { ...f.env, PATH };
