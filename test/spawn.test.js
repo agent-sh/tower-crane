@@ -778,6 +778,78 @@ require('node:fs').writeFileSync(${JSON.stringify(out)}, JSON.stringify({
   assert.equal(fs.readFileSync(marker, 'utf8'), 'ran');
 });
 
+test('agents drop dispatcher Node injection variables and keep explicit rung values on retries and fallbacks', (t) => {
+  const names = ['NODE_OPTIONS', 'NODE_PATH', 'NODE_REPL_EXTERNAL_MODULE', 'NODE_PRESERVE_SYMLINKS', 'NODE_PRESERVE_SYMLINKS_MAIN', 'NODE_COMPILE_CACHE'];
+  for (const source of ['dispatcher', 'env', 'env_file', 'fallback_dispatcher', 'fallback_env']) {
+    const h = setup(t);
+    const out = path.join(h.base, 'agent-env.json');
+    const marker = path.join(h.base, 'agent-preload-ran');
+    const preload = path.join(h.base, 'preload.cjs');
+    const fake = path.join(h.repo, 'fake-agent.cjs');
+    fs.writeFileSync(preload, `
+if (process.argv[1] === ${JSON.stringify(fake)}) {
+  require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'ran');
+}
+`);
+    fs.writeFileSync(fake, `
+const names = ${JSON.stringify(names)};
+const fs = require('node:fs');
+const file = ${JSON.stringify(out)};
+const attempts = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : [];
+attempts.push({
+  injection: Object.fromEntries(Object.entries(process.env).filter(([key]) => names.includes(key.toUpperCase()))),
+  keep: process.env.NODE_AGENT_KEEP,
+});
+fs.writeFileSync(file, JSON.stringify(attempts));
+if (process.env.TOWER_CRANE_RETRY === '0' && !process.env.NODE_AGENT_FALLBACK) {
+  console.error('API Error: 503 service unavailable');
+  process.exit(1);
+}
+`);
+    h.git(['add', '.']);
+    h.git(['commit', '-qm', 'fake agent environment fixture']);
+    commandRung(h, 'medium', [process.execPath, fake]);
+    const fallback = source.startsWith('fallback_');
+    h.ok(['ladder', 'set', 'medium', '--supervision', JSON.stringify({ retries: fallback ? 0 : 1, backoff_ms: 1 })]);
+    const injection = {
+      NODE_OPTIONS: `--require "${preload.replace(/\\/g, '/')}"`,
+      NODE_PATH: h.base,
+      NODE_REPL_EXTERNAL_MODULE: preload,
+      NODE_PRESERVE_SYMLINKS: '1',
+      NODE_PRESERVE_SYMLINKS_MAIN: '1',
+      NODE_COMPILE_CACHE: path.join(h.base, 'compile-cache'),
+    };
+    if (source === 'env') h.ok(['ladder', 'set', 'medium', '--env', JSON.stringify(injection)]);
+    if (source === 'env_file') {
+      const file = path.join(h.base, 'rung.env');
+      fs.writeFileSync(file, Object.entries(injection).map(([key, value]) => `${key}='${value}'`).join('\n') + '\n');
+      h.ok(['ladder', 'set', 'medium', '--env_file', file]);
+    }
+    if (fallback) {
+      h.ok(['ladder', 'set', 'medium', '--fallbacks', JSON.stringify([{
+        harness: 'command', command: [process.execPath, fake, '{prompt}'],
+        env: { NODE_AGENT_FALLBACK: '1', ...(source === 'fallback_env' ? injection : {}) },
+      }])]);
+    }
+    h.ok(['spawn', '--task', 'T1', '--wait'], { env: { ...injection, NODE_AGENT_KEEP: 'kept' } });
+    const attempts = JSON.parse(fs.readFileSync(out, 'utf8'));
+    assert.equal(attempts.length, 2, 'the initial launch and retry or fallback both ran');
+    for (const [index, seen] of attempts.entries()) {
+      assert.equal(seen.keep, 'kept', source);
+      const explicit = source === 'env' || source === 'env_file' || (source === 'fallback_env' && index === 1);
+      assert.deepEqual(seen.injection, explicit ? injection : {}, source);
+    }
+    assert.equal(fs.existsSync(marker), !['dispatcher', 'fallback_dispatcher'].includes(source), source);
+  }
+  const { cleanAgentEnv } = require('../lib/spawn-settings');
+  for (const name of names) {
+    assert.deepEqual(cleanAgentEnv({ [name]: 'injected', KEEP: 'kept' }), { KEEP: 'kept' });
+    const lower = name.toLowerCase();
+    assert.deepEqual(cleanAgentEnv({ [lower]: 'injected', KEEP: 'kept' }),
+      process.platform === 'win32' ? { KEEP: 'kept' } : { [lower]: 'injected', KEEP: 'kept' });
+  }
+});
+
 test('command brief copies default to the user cache and keep explicit temp overrides', (t) => {
   const h = setup(t);
   const out = path.join(h.base, 'brief-location.json');
