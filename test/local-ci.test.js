@@ -638,7 +638,7 @@ console.log(JSON.stringify({ output, peakKiB: process.resourceUsage().maxRSS }))
 
 test('dense CR runs exhaust allocation work before building cleanup maps', () => {
   const { stripEscapes, stripEscapesMapped, stripEscapesViews } = require('../lib/ci-log-text');
-  for (const unit of ['\r\n', '\r \r', 'a\r']) {
+  for (const unit of ['\r\n', '-\r\\\r|\r/\r', 'a\r']) {
     const input = unit.repeat(Math.ceil((1 << 20) / unit.length));
     const notice = /^\[unscannable text: over \d+ redaction work units; content omitted\]$/;
     assert.match(stripEscapes(input), notice, JSON.stringify(unit));
@@ -662,12 +662,16 @@ test('a character map over the work budget is rejected before its array allocati
 
 test('16 MiB CR-heavy logs fail closed below 1 GiB in fresh processes', () => {
   const cp = require('node:child_process');
-  for (const unit of ['\r\n', '\r \r', 'a\r']) {
+  for (const unit of ['\r\n', '-\r\\\r|\r/\r', 'a\r']) {
     const script = `
 const { createRedactor, redactJoined } = require(${JSON.stringify(require.resolve('../lib/gates/common'))});
 const unit = ${JSON.stringify(unit)};
 const text = unit.repeat(Math.ceil((16 << 20) / unit.length)).slice(0, 16 << 20);
-const output = redactJoined({ output: text }, createRedactor([]));
+const half = text.length / 2;
+const output = redactJoined({ output: text, runs: [
+  { stream: 'out', text: text.slice(0, half) },
+  { stream: 'err', text: text.slice(half) },
+] }, createRedactor([]));
 console.log(JSON.stringify({ output, peakKiB: process.resourceUsage().maxRSS }));
 `;
     const result = JSON.parse(cp.execFileSync(process.execPath, ['-e', script], { encoding: 'utf8' }));
