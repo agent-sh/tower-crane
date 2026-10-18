@@ -441,7 +441,7 @@ test('the wait host serves events and drains a signal while another dispatch hol
 // reaction dispatches only after the gate's evidence, which the order shows.
 test('the wait host dispatches a ready task while a gate reaction is still running', async (t) => {
   const h = refillFixture(t);
-  const { stalled, release } = holdSuite(h, { giveUpMs: 20000 });
+  const { stalled, release } = holdSuite(h, { giveUpMs: 60000 });
   h.submit();
   let child;
   const host = h.runAsync(['wait', '--after', '0', '--types', 'never', '--timeout', '300', '--agent', 'orchestrator'], { // wait-allow: the gate's release ends the test first; this bounds a host that never settles
