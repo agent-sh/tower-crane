@@ -12,6 +12,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
 const { ROOT, TMP_ROOT, assertNoProcessesIn } = require('./helpers');
+const { HUNG_TEST_MS, killPid } = require('./signals');
 const { shellQuote } = require('../lib/gates/common');
 
 const SHIM = path.join(ROOT, 'lib', 'shim.js');
@@ -63,7 +64,7 @@ ${viaExec ? 'exec ' : ''}${shim} "$@"
 
 function run(f, tool, args, dirs) {
   const PATH = [...dirs, ...f.host].join(path.delimiter);
-  return cp.spawnSync(path.join(f.bin, tool), args, { cwd: f.work, env: { ...f.env, PATH }, encoding: 'utf8', timeout: 120000 });
+  return cp.spawnSync(path.join(f.bin, tool), args, { cwd: f.work, env: { ...f.env, PATH }, encoding: 'utf8', timeout: HUNG_TEST_MS });
 }
 
 const depths = (f) => (fs.existsSync(f.log) ? fs.readFileSync(f.log, 'utf8').trim().split('\n') : []);
@@ -90,7 +91,7 @@ test('a git hook that runs git through the shim is no loop', { skip: POSIX }, (t
   const f = fixture(t);
   const PATH = [f.bin, ...f.host].join(path.delimiter);
   const env = { ...f.env, PATH };
-  const git = (args) => cp.spawnSync(path.join(f.bin, 'git'), args, { cwd: f.work, env, encoding: 'utf8', timeout: 120000 });
+  const git = (args) => cp.spawnSync(path.join(f.bin, 'git'), args, { cwd: f.work, env, encoding: 'utf8', timeout: HUNG_TEST_MS });
   for (const args of [['init', '-q'], ['config', 'user.name', 't'], ['config', 'user.email', 't@example.com']]) assert.equal(git(args).status, 0);
   const seen = path.join(f.base, 'hook-saw');
   fs.writeFileSync(path.join(f.work, '.git', 'hooks', 'pre-commit'), `#!/bin/sh\n${shellQuote(path.join(f.bin, 'git'))} rev-parse --git-dir > ${shellQuote(seen)}\n`, { mode: 0o755 });
@@ -115,7 +116,7 @@ exec ${shellQuote(realGit)} "$@"
   let started = [];
   t.after(() => {
     for (const pid of started) {
-      try { process.kill(Number(pid), 'SIGKILL'); } catch { /* gone */ }
+      try { killPid(Number(pid), 'SIGKILL'); } catch { /* gone */ }
     }
   });
   const r = run(f, 'git', ['version'], [f.wrap, f.bin]);
@@ -124,7 +125,7 @@ exec ${shellQuote(realGit)} "$@"
   // A killed child its new parent has not reaped yet is gone too.
   const zombie = (pid) => { try { return /^\d+ \(.*\) Z/.test(fs.readFileSync(`/proc/${pid}/stat`, 'utf8')); } catch { return false; } };
   const left = started.filter((pid) => {
-    try { process.kill(Number(pid), 0); } catch { return false; }
+    try { killPid(Number(pid), 0); } catch { return false; }
     return !zombie(pid);
   });
   assert.deepEqual(left, [], 'the sleep the hung read started is gone');
