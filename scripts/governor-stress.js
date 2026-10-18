@@ -9,7 +9,8 @@
 //   node scripts/governor-stress.js [--memory MiB] [--seconds S] [--control] [--simulate]
 //
 // By default the script runs itself again inside a transient systemd user
-// scope with MemoryMax, no swap and a task cap, so a failure stays inside it,
+// scope with MemoryMax, no swap, a task cap and OOMPolicy=continue, so a
+// failure stays inside it and an OOM kill ends only the process it picks,
 // and reads the scope's memory.events. --control runs the same processes
 // without Tower Crane, to show the load alone reaches the OOM killer.
 // --simulate runs without a scope, against a fake cgroup whose use is the sum
@@ -52,7 +53,9 @@ const HOG_PEAK = 0.5;
 if (!f.simulate && !process.env.GOVERNOR_STRESS_SCOPE) {
   const unit = `tower-crane-governor-stress-${process.pid}`;
   const r = cp.spawnSync('systemd-run', ['--user', '--scope', '--quiet', `--unit=${unit}`,
-    '-p', `MemoryMax=${LIMIT}`, '-p', 'MemorySwapMax=0', '-p', 'TasksMax=4096',
+    // OOMPolicy=continue: the default, stop, ends the whole scope on the first
+    // kill and takes this reporter with it, so a control run printed nothing.
+    '-p', `MemoryMax=${LIMIT}`, '-p', 'MemorySwapMax=0', '-p', 'TasksMax=4096', '-p', 'OOMPolicy=continue',
     process.execPath, __filename, ...process.argv.slice(2)], { stdio: 'inherit', env: { ...process.env, GOVERNOR_STRESS_SCOPE: '1' } });
   if (r.error) throw r.error;
   process.exit(r.status ?? 1);
