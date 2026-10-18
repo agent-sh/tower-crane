@@ -67,8 +67,10 @@ const base = fs.mkdtempSync(path.join(process.env.XDG_CACHE_HOME || path.join(os
 const stop = path.join(base, 'stop');
 const host = path.join(base, 'host');
 
-// Fixture programs.
-fs.writeFileSync(path.join(base, 'worker.js'), `
+// Fixture programs. Each asks the kernel to kill it before anything else in the
+// scope, so an out-of-memory kill in a --control run leaves this reporter alive.
+const KILL_FIRST = "try { require('node:fs').writeFileSync('/proc/self/oom_score_adj', '1000'); } catch { /* not Linux */ }";
+fs.writeFileSync(path.join(base, 'worker.js'), `${KILL_FIRST}
 const fs = require('node:fs');
 const cp = require('node:child_process');
 if (process.env.TOWER_CRANE_TASK) cp.execFileSync(process.execPath, [${JSON.stringify(BIN)}, 'claim', process.env.TOWER_CRANE_TASK], { stdio: 'ignore' });
@@ -78,7 +80,7 @@ const timer = setInterval(() => {
   if (held.length * 16 < ${WORKER_MB}) held.push(Buffer.alloc(16 * 1024 * 1024, held.length + 1));
 }, 100);
 `);
-fs.writeFileSync(path.join(base, 'fork.js'), `
+fs.writeFileSync(path.join(base, 'fork.js'), `${KILL_FIRST}
 const cp = require('node:child_process');
 let left = ${CHILDREN};
 for (let i = 0; i < ${CHILDREN}; i++) {
@@ -86,7 +88,7 @@ for (let i = 0; i < ${CHILDREN}; i++) {
   c.on('exit', (code) => { if (code) process.exitCode = 1; if (--left === 0) process.exit(process.exitCode || 0); });
 }
 `);
-fs.writeFileSync(path.join(base, 'hog.js'), `
+fs.writeFileSync(path.join(base, 'hog.js'), `${KILL_FIRST}
 // Not Tower Crane's: small while Tower Crane fills the cgroup, then a fast
 // ramp to the peak, a hold, a release and a second ramp.
 const fs = require('node:fs');
