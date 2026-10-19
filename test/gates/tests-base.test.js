@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const gate = require('../../lib/gates/tests');
 const base = require('../../lib/gates/tests-base');
-const { shellQuote } = require('../../lib/gates/common');
+const { shellQuote, treeExec } = require('../../lib/gates/common');
 const { cachedFixture } = require('../helpers');
 const { scratch, isolateGit, isolateUserFile, initRepo, commit, git } = require('./helpers');
 
@@ -116,7 +116,7 @@ test('unknown locations fall back to the original command', async () => {
   assert.deepEqual(result.receipt.base_rerun.files, []);
 });
 
-test('base-only selection preserves new and shared failure verdicts without running missing files', async () => {
+test('base selection preserves new and shared failure verdicts when files are missing', async () => {
   git(root, 'checkout', '-q', '-b', 'new-failure', 'worker');
   const head = commit(root, { 'test/new.test.js': "require('node:test')('new failure', () => require('node:assert/strict').fail('new error'));\n" });
   git(root, 'checkout', '-q', 'main');
@@ -127,11 +127,11 @@ test('base-only selection preserves new and shared failure verdicts without runn
   assert.equal(result.confirmed_failure, true);
   assert.equal(result.main_failure, undefined);
   assert.match(result.summary, /Also fails on main.*first failure, second failure/);
-  assert.deepEqual(result.receipt.base_rerun.files, ['test/fail.test.js']);
-  assert.equal(rows().length, before + 1, 'the old base file is cached and the new file is absent at base');
+  assert.deepEqual(result.receipt.base_rerun.files, ['test/fail.test.js', 'test/new.test.js']);
+  assert.equal(rows().length, before + 2, 'the old file is cached and the missing file is checked through the selector');
 });
 
-test('generated files absent from both trees still compare against the base', async () => {
+test('generated files compare against the base whether the head tracks them or not', async () => {
   git(root, 'checkout', '-q', '-b', 'generated-base', 'main');
   const runner = `const fs = require('node:fs');
 fs.mkdirSync('generated', {recursive: true});
@@ -140,31 +140,22 @@ const r = require('node:child_process').spawnSync(process.execPath, ['--test', '
 process.exit(r.status ?? 1);
 `;
   commit(root, { 'generated-runner.js': runner });
-  git(root, 'checkout', '-q', '-b', 'generated-head');
-  const head = commit(root, { 'change.js': 'module.exports = 3;\n' });
-  git(root, 'checkout', '-q', 'main');
   const command = `${node} generated-runner.js`;
   const p = { ...project, base: 'generated-base', gates: { tests_cmd: command, tests_proof_cmd: `${command} {tests}` } };
-  const c = context(p);
-  c.task.sha = head;
-  const result = await gate.run(c);
-  assert.deepEqual(result.main_failure?.names, ['first failure', 'second failure'], result.summary);
-  assert.equal(result.confirmed_failure, undefined);
-  assert.equal(result.receipt.base_rerun.mode, 'full');
-  assert.match(result.receipt.base_rerun.fallback, /generated|untracked/);
-});
-
-test('base file selection distinguishes added, generated, removed and mixed files', () => {
-  const cases = [
-    [['a'], ['a'], ['a'], ['a']],
-    [['a'], [], ['a'], []],
-    [['a'], [], [], null],
-    [['a'], ['a'], [], ['a']],
-    [['a', 'b'], ['a'], ['a', 'b'], ['a']],
-    [['a', 'b'], ['a'], ['a'], null],
-  ];
-  for (const [files, atBase, atHead, expected] of cases) {
-    assert.deepEqual(base.selectFiles(files, new Set(atBase), new Set(atHead)).files, expected, JSON.stringify({ files, atBase, atHead }));
+  for (const tracked of [false, true]) {
+    git(root, 'checkout', '-q', '-b', `generated-head-${tracked}`, 'generated-base');
+    const additions = { 'change.js': 'module.exports = 3;\n' };
+    if (tracked) additions['generated/fail.test.js'] = files['test/fail.test.js'];
+    const head = commit(root, additions);
+    git(root, 'checkout', '-q', 'main');
+    const c = context(p);
+    c.task.sha = head;
+    const result = await gate.run(c);
+    assert.deepEqual(result.main_failure?.names, ['first failure', 'second failure'], result.summary);
+    assert.equal(result.confirmed_failure, undefined);
+    assert.equal(result.receipt.base_rerun.mode, 'files');
+    assert.deepEqual(result.receipt.base_rerun.files, ['generated/fail.test.js']);
+    assert.equal(result.receipt.base_rerun.results[0].cached, tracked, 'the second head shares the generated base file');
   }
 });
 
@@ -179,6 +170,21 @@ test('the base lease budgets both joining a cache holder and a fresh run', () =>
   for (const [tests, hosts, files, expected] of cases) {
     assert.equal(gate.plannedCommands({ tests }, 'code', hosts, files), expected, JSON.stringify({ tests, hosts, files }));
   }
+});
+
+test('base commands receive the remaining phase budget after setup or cache waiting', async () => {
+  const c = context({ ...project, tests: { ...project.tests, host_env: { TC_CACHE_BUDGET: 'probe' } } });
+  c.args = { timeout: 0.2 };
+  const budgets = [];
+  c.exec = async (command, args, opts) => {
+    if (opts.shell) budgets.push(opts.timeout);
+    return treeExec(command, args, opts);
+  };
+  const result = await gate.run(c);
+  assert.deepEqual(result.main_failure?.names, ['first failure', 'second failure'], result.summary);
+  assert.equal(budgets.length, 2);
+  assert.equal(budgets[0], 12000);
+  assert.ok(budgets[1] > 0 && budgets[1] < budgets[0], JSON.stringify(budgets));
 });
 
 test('host-only base commands keep host_env and clear exclusions, including cached diagnostics', async () => {
