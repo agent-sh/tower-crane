@@ -1,12 +1,16 @@
 'use strict';
 
 const cp = require('node:child_process');
+const fs = require('node:fs');
 const path = require('node:path');
 const C = require('../../lib/containment');
 const { writeAtomic } = require('../atomic-file');
 const [role, dir, kind = 'supervisor', ending = 'zero', late = 'none'] = process.argv.slice(2);
 const limits = { tasks_max: late === 'tasks' ? (C.canScope() ? 32 : 4) : 64,
   memory_max_bytes: (late === 'memory' ? 384 : 512) * 1024 ** 2 };
+const retained = () => {
+  try { return JSON.parse(fs.readFileSync(path.join(dir, 'identities.json'), 'utf8')); } catch { return []; }
+};
 
 function launch(childRole, env, extra = []) {
   const child = cp.spawn(process.execPath, [__filename, childRole, dir, kind, ending, late, ...extra], {
@@ -18,7 +22,7 @@ function launch(childRole, env, extra = []) {
 
 if (role === 'caller') {
   const child = C.spawn(process.execPath, [__filename, 'agent', dir, kind, ending, late], {
-    resources: limits, stdio: 'ignore',
+    resources: limits, stdio: 'ignore', retained,
   });
   child.once('close', async () => {
     await child.containmentDone;
@@ -31,7 +35,13 @@ if (role === 'caller') {
   if (kind === 'gate') env.TOWERCRANE_GATE_RUN_lifecycle = '1';
   const extra = kind === 'supervisor' ? ['spawn-monitor.js']
     : kind === 'wait' ? ['tower-crane.js', 'wait'] : ['tower-crane.js', 'check'];
-  launch('managed', env, extra);
+  const dispatched = launch('managed', env, extra);
+  if (!process.env.TC_UNRECORDED_FIXTURE) {
+    dispatched.once('spawn', async () => {
+      const identity = await C.processIdentity(dispatched.pid);
+      writeAtomic(path.join(dir, 'identities.json'), JSON.stringify(identity ? [identity] : []));
+    });
+  }
   launch('ordinary', process.env);
   setTimeout(() => ending === 'signal' ? process.kill(process.pid, 'SIGTERM') // wait-allow: end the owner before dispatched work completes
     : process.exit(ending === 'nonzero' ? 7 : 0), 400);

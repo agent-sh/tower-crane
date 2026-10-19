@@ -15,6 +15,7 @@
 
 const Module = require('node:module');
 const path = require('node:path');
+globalThis[Symbol.for('tower-crane.test-fixture')] = true;
 
 // Every CLI fails when it resolves the user ladder file outside the test roots.
 require('./user-config-guard');
