@@ -468,7 +468,7 @@ test('collectors and concurrent waiters share one private exit event and usage e
   assert.match(h.json(['status']).exited_claims[0].tail, /private task text/);
   h.ok(['release', 'T1', '--agent', 'recovery-agent', '--reason', 'worker exited']);
   for (const file of ['tasks.json', 'events.jsonl']) {
-    const text = fs.readFileSync(path.join(h.state, file), 'utf8');
+    const text = StateFiles.fileText(h.state, file);
     for (const line of privateText.split('\n')) assert.ok(!text.includes(line), `${file} contains harness text`);
   }
 });

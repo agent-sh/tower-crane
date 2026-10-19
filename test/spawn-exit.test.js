@@ -15,7 +15,7 @@ const PRIVATE_LOG = 'prompt: synthetic private instruction\ncredential: syntheti
 
 function assertNoLogText(h) {
   for (const file of ['tasks.json', 'events.jsonl']) {
-    const text = fs.readFileSync(path.join(h.state, file), 'utf8');
+    const text = StateFiles.fileText(h.state, file);
     for (const line of PRIVATE_LOG.split('\n')) assert.ok(!text.includes(line), `${file} contains log text`);
     assert.ok(!text.includes('last diagnostic before exit'), `${file} contains a log diagnostic`);
   }
@@ -763,7 +763,7 @@ test('a worker that keeps exiting without a submit is parked for the owner at th
   // task show reads the log tail from the file; state holds none of it.
   assert.match(h.ok(['task', 'show', 'T1']), /last worker log: .*\n {2}tail \(last 20 lines, at most 8192 bytes\):\n {4}stub harness gave up/);
   for (const file of ['tasks.json', 'events.jsonl']) {
-    assert.ok(!fs.readFileSync(path.join(h.state, file), 'utf8').includes('stub harness gave up'), `${file} holds log text`);
+    assert.ok(!StateFiles.fileText(h.state, file).includes('stub harness gave up'), `${file} holds log text`);
   }
   // owner-done clears the ask and starts the count again.
   h.ok(['owner-done', 'T1']);

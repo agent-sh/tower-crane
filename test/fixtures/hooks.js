@@ -703,6 +703,8 @@ if (env.HOOK_PROCESSES_DIR) {
   }
   const original = cp.spawn;
   cp.spawn = function trackDetached(file, args, options) {
+    // A test CLI draws its sketch inline (render-inline.js): nothing outlives the call.
+    if (args.some((arg) => path.basename(arg) === 'render-worker.js')) return original.call(this, file, args, options);
     const monitor = args.some((arg) => path.basename(arg) === 'spawn-monitor.js');
     const token = monitor && options?.detached ? require('node:crypto').randomUUID() : null;
     if (token) options = { ...options, env: { ...(options.env || process.env), HOOK_PROCESS_TOKEN: token } };
