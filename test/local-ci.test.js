@@ -709,7 +709,9 @@ function redactionMemoryProbe(script) {
   const cp = require('node:child_process');
   // Memory and work-budget probes must not spend their deadline waiting for a busy host.
   const clock = "require('node:perf_hooks').performance.now = () => 0;\n";
-  return JSON.parse(cp.execFileSync(process.execPath, ['-e', clock + script], {
+  return JSON.parse(cp.execFileSync(process.execPath, [
+    '--require', path.join(__dirname, 'fixtures', 'redaction-clock-jump.js'), '-e', clock + script,
+  ], {
     encoding: 'utf8', timeout: HUNG_TEST_MS,
   }));
 }
