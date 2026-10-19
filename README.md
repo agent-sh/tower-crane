@@ -76,7 +76,7 @@ The CLI has no npm dependencies. The plugin adds the orchestrator, work and revi
 
 ## How it works
 
-**State files.** The state directory is `.tower-crane/` in the main checkout, shared by every worktree. `project.json` holds the settings and the ladder, `tasks.json` the tasks with their evidence and spend, `decisions.json` the owner's questions, `briefs/` the task context and `events.jsonl` every change with its time and agent. The CLI rewrites `sketch.md` and `sketch.html` after every write. See [docs/state.md](docs/state.md#files).
+**State files.** The state directory is `.tower-crane/` in the main checkout, shared by every worktree. `state.db`, one SQLite database, holds the settings and the ladder, the tasks with their evidence and spend, the owner's questions and every change with its time and agent; `briefs/` holds the task context. A renderer process redraws `sketch.md` and `sketch.html` after every write. `tower-crane state export DIR` writes the state back as the files of 0.1. See [docs/state.md](docs/state.md#files).
 
 **Task lifecycle.** A task is ready when its dependencies are accepted and no open decision blocks it.
 
