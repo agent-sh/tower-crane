@@ -2,6 +2,24 @@
 
 Tasks may carry `stack: { parent, base, parent_sha, repo, linked, synced_base }`. `parent` is the lower task id, `base` is the PR's current target branch, `parent_sha` is the dependency head used for dispatch or the last synchronization, `repo` is the same GitHub repository as the project, and `synced_base` is the last observed main commit. `linked` records successful `gh stack link`. One unmerged dependency chain forms one stack; outstanding sibling branches are not appended to that chain.
 
+Before worker dispatch or a gate, a child whose parent has resubmitted refreshes
+under the worktree lock, whether its stack is linked or still prepared. The
+engine merges the verified submitted parent head in a detached scratch worktree,
+with commit subject `Merge <parent>'s resubmitted head into <child>`. A clean
+merge is pushed to the child branch before the local branch moves, then updates
+`stack.parent_sha` and emits `stack sync` with the parent and child heads.
+Existing child commits are preserved. A submitted or accepted child returns to
+rework to submit the refreshed branch and rerun gates; its former submitted sha
+stays recorded until then.
+
+A conflict aborts the scratch merge and leaves the child branch and checkout
+unchanged. A rework note names the parent sha and conflicting files, and the
+worker dispatches to resolve them. The `stack sync` conflict receipt permits
+that dispatch only while the child head and submitted parent head are unchanged.
+A gate waits until the child's submitted head contains the current parent head.
+Live workers, dirty checkouts and stopped Git operations defer refresh. Merged
+parents take the completed-chain retirement path before any parent branch fetch.
+
 `stack_disabled: true` records an unavailable stacks capability or explicit `stack unstack`. It selects ordinary merges, which wait for lower merge evidence before retargeting an existing upper PR. An accepted dependency can still use the ordinary main-based dispatch flow when the repository cannot stack; a submitted dependency requires an available chain.
 
 A successful `stack link` clears fallback markers for its linked members and restores the stack merge gate, including its refusal of admin merges.
