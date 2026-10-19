@@ -252,12 +252,20 @@ test('cache keys, interrupted runs, corruption, stale locks and pruning', async 
   for (const change of [{ command: `${cmd} other` }, { settingsHash: 'other' }, { file: 'test/b.test.js' }, { sha: 'b'.repeat(40) }]) {
     assert.equal((await base.cached({ ...options, ...change })).cached, false);
   }
-  for (const interrupted of [{ status: null, signal: 'SIGTERM' }, { status: null, timedOut: true }, { status: 127 },
-    { status: 1, error: new Error('unavailable') }, { ok: false, status: 1, resource_reason: 'process limit', output: 'not ok stopped case' }]) {
+  for (const interrupted of [{ status: 1, signal: 'SIGTERM' }, { status: 1, timedOut: true }, { status: 127 },
+    { status: 1, error: new Error('unavailable') }, { ok: false, status: 1, resource_reason: 'process limit', output: 'not ok stopped case' },
+    { ok: false, status: 1, abort: true, output: 'not ok interrupted case' }]) {
     let attempts = 0;
-    const opts = { ...options, command: JSON.stringify(interrupted), run: async () => { attempts++; return interrupted; } };
-    await base.cached(opts);
-    await base.cached(opts);
+    const attempt = () => {
+      const controller = new AbortController();
+      return base.cached({ ...options, command: JSON.stringify(interrupted), signal: controller.signal, run: async () => {
+        attempts++;
+        if (interrupted.abort) controller.abort();
+        return { ok: false, output: 'not ok interrupted runner', ...interrupted };
+      } });
+    };
+    await attempt();
+    await attempt();
     assert.equal(attempts, 2);
   }
   const resultFile = path.join(cache, options.sha, `${base.hash([cmd, 'settings', options.file])}.json`);
