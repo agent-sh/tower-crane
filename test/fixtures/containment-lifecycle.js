@@ -1,15 +1,14 @@
 'use strict';
 
 const cp = require('node:child_process');
-const fs = require('node:fs');
 const path = require('node:path');
 const C = require('../../lib/containment');
-const { writeAtomic } = require('../atomic-file');
+const { writeAtomic, readPublished, updateJson } = require('../atomic-file');
 const [role, dir, kind = 'supervisor', ending = 'zero', late = 'none'] = process.argv.slice(2);
 const limits = { tasks_max: late === 'tasks' ? (C.canScope() ? 32 : 4) : 64,
   memory_max_bytes: (late === 'memory' ? 384 : 512) * 1024 ** 2 };
 const retained = () => {
-  try { return JSON.parse(fs.readFileSync(path.join(dir, 'identities.json'), 'utf8')); } catch { return []; }
+  try { return JSON.parse(readPublished(path.join(dir, 'identities.json'), 'utf8')); } catch { return []; }
 };
 
 function launch(childRole, env, extra = []) {
@@ -39,7 +38,7 @@ if (role === 'caller') {
   if (!process.env.TC_UNRECORDED_FIXTURE) {
     dispatched.once('spawn', async () => {
       const identity = await C.processIdentity(dispatched.pid);
-      writeAtomic(path.join(dir, 'identities.json'), JSON.stringify(identity ? [identity] : []));
+      updateJson(path.join(dir, 'identities.json'), () => identity ? [identity] : [], []);
     });
   }
   launch('ordinary', process.env);

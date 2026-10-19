@@ -9,6 +9,7 @@ const { EventEmitter } = require('node:events');
 const { PassThrough } = require('node:stream');
 const { cachedFixture, BIN } = require('./helpers');
 const { waitOnRepo } = require('./signals');
+const { readPublished } = require('./atomic-file');
 const C = require('../lib/containment');
 const G = require('../lib/gates/common');
 
@@ -229,7 +230,7 @@ global.setInterval = (fn, ms, ...args) => interval(fn, ms === 1000 ? 10 : ms, ..
   child.stderr.on('data', data => { stderr += data; });
   const closed = new Promise(resolve => child.once('close', resolve));
   const deadline = AbortSignal.timeout(10000); // wait-allow: finite failure bound for an absent sweep
-  await waitOnRepo(h, () => fs.existsSync(log) && fs.readFileSync(log, 'utf8').includes('list-units'), 'initial containment sweep', { signal: deadline });
+  await waitOnRepo(h, () => fs.existsSync(log) && readPublished(log, 'utf8').includes('list-units'), 'initial containment sweep', { signal: deadline });
   const dead = cp.spawnSync(process.execPath, ['-e', '']).pid;
   const dir = path.join(cache, `tower-crane-containment-${dead}-dead`);
   fs.mkdirSync(dir);
