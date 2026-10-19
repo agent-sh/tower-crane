@@ -259,17 +259,15 @@ test('a write reads under the lock only the events appended since its own read, 
   const h = makeRepo(t);
   h.init();
   h.ok(['task', 'add', '--title', 'first', '--acceptance', 'a']);
-  const log = path.join(h.state, 'events.jsonl');
   const line = JSON.stringify({ at: new Date().toISOString(), agent: 'owner', cmd: 'task note', task: 'T1', detail: { text: 'x'.repeat(1024) } }) + '\n';
-  fs.appendFileSync(log, line.repeat(2048));
-  const size = fs.statSync(log).size;
+  StateFiles.appendLog(h.state, line.repeat(2048));
   const meter = path.join(h.base, 'locked-reads.json');
   h.ok(['task', 'note', 'T1', 'one more note'], {
     env: { LOCKED_READS: meter, NODE_OPTIONS: `--require=${JSON.stringify(path.join(__dirname, 'fixtures', 'locked-reads.js'))}` },
   });
   const reads = JSON.parse(fs.readFileSync(meter, 'utf8'));
   assert.ok(reads.holdings >= 1, 'the write took the lock');
-  assert.ok(reads.lockedBytes < 4096, `read ${reads.lockedBytes} of ${size} log bytes under the lock`);
+  assert.ok(reads.lockedRows < 4, `read ${reads.lockedRows} of 2049 event rows under the lock`);
   assert.match(fs.readFileSync(path.join(h.state, 'sketch.md'), 'utf8'), /first/);
 });
 

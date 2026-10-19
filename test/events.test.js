@@ -492,25 +492,17 @@ test('exit observers include attempts for spawns recorded without an attempt fie
   commandWorker(h, [process.execPath, '-e', 'process.exit(0)', '{prompt}']);
   h.json(['spawn', '--task', 'T1', '--wait']);
   const cursor = StateFiles.logEnd(h.state);
-  const hook = path.join(h.base, 'older-spawn.js');
-  fs.writeFileSync(hook, `
-const fs = require('node:fs');
-const read = fs.readFileSync;
-fs.readFileSync = function(file, ...args) {
-  const value = read.call(this, file, ...args);
-  if (!String(file).endsWith('events.jsonl') || typeof value !== 'string') return value;
-  return value.split('\\n').map((line) => {
-    if (!line) return line;
-    const event = JSON.parse(line);
-    if (event.cmd === 'spawn') delete event.detail.attempt;
-    return JSON.stringify(event);
-  }).join('\\n');
-};
-`);
-  const opts = { env: { NODE_OPTIONS: `--require "${hook.replace(/\\/g, '/')}"` } };
+  // Spawn events as a tool before attempts logged them.
+  const older = () => StateFiles.editEvents(h.state, (e) => {
+    if (e.cmd !== 'spawn' || !('attempt' in e.detail)) return null;
+    delete e.detail.attempt;
+    return e;
+  });
   h.ok(['release', 'T1', '--agent', h.json(['task', 'show', 'T1']).claim.agent, '--reason', 'worker exited']);
-  const started = h.json(['spawn', '--task', 'T1', '--wait'], opts);
-  const observed = h.json(['wait', '--agent', 'orchestrator', '--after', String(cursor), '--types', 'worker-exited', '--timeout', '300'], opts);
+  older();
+  const started = h.json(['spawn', '--task', 'T1', '--wait']);
+  older();
+  const observed = h.json(['wait', '--agent', 'orchestrator', '--after', String(cursor), '--types', 'worker-exited', '--timeout', '300']);
   assert.equal(observed.detail.pid, started.pid);
   assert.equal(observed.detail.attempt, 2);
   assert.equal(observed.detail.attempt, started.attempt);

@@ -82,10 +82,10 @@ test('status skips the stray index for a dead agent without a recorded run marke
     ['worker-marked-live', { pid: process.pid, run_mark: `TOWERCRANE_SPAWN_RUN_${process.pid}_live` }],
   ]) {
     fs.mkdirSync(path.join(h.state, 'homes', agent), { recursive: true });
-    fs.appendFileSync(path.join(h.state, 'events.jsonl'), JSON.stringify({
+    StateFiles.appendLog(h.state, JSON.stringify({
       at: new Date().toISOString(), cmd: 'spawn', agent: 'owner', task: 'T1',
       detail: { agent, role: 'worker', host: require('node:os').hostname(), ...info },
-    }) + '\n');
+    }));
   }
   const environReads = path.join(h.base, 'environ-reads');
   fs.writeFileSync(environReads, '');

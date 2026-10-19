@@ -108,22 +108,21 @@ test('a worker broker refuses unscoped dead-claim recovery and preserves peer cl
     h.ok(['task', 'add', '--title', id, '--acceptance', 'claim is scoped']);
     h.ok(['claim', id, '--agent', `worker-${id}-1`]);
   }
-  const file = path.join(h.state, 'events.jsonl');
-  fs.appendFileSync(file, JSON.stringify({ id: 'dead-peer', at: new Date().toISOString(), cmd: 'spawn',
-    agent: 'orchestrator', task: 'T2', detail: { agent: 'worker-T2-1', role: 'worker', pid: 2147483647 } }) + '\n');
+  StateFiles.appendLog(h.state, JSON.stringify({ id: 'dead-peer', at: new Date().toISOString(), cmd: 'spawn',
+    agent: 'orchestrator', task: 'T2', detail: { agent: 'worker-T2-1', role: 'worker', pid: 2147483647 } }));
   const job = { state: h.state, task: 'T1', agent: 'worker-T1-1', role: 'worker', harness: 'codex',
     cwd: h.repo, broker: path.join(h.base, 'brokers', 'worker-T1-1', B.FILE) };
   const broker = await B.start(job);
   t.after(() => broker.close());
   const before = h.readState('tasks.json');
-  const events = fs.readFileSync(file, 'utf8');
+  const events = StateFiles.logText(h.state);
   const result = await h.runAsync(['release', '--dead'], {
     env: { ...broker.env, TOWER_CRANE_AGENT: job.agent, TOWER_CRANE_TASK: job.task },
   });
   assert.equal(result.code, 1, result.stdout + result.stderr);
   assert.match(result.stderr, /release --dead.*orchestrator|unscoped/i);
   assert.deepEqual(h.readState('tasks.json'), before);
-  assert.equal(fs.readFileSync(file, 'utf8'), events);
+  assert.equal(StateFiles.logText(h.state), events);
   assert.throws(() => B.authorize(job, ['release', '--dead']), /release --dead.*orchestrator|unscoped/i);
   const own = await h.runAsync(['release', 'T1', '--reason', 'handoff'], {
     env: { ...broker.env, TOWER_CRANE_AGENT: job.agent, TOWER_CRANE_TASK: job.task },

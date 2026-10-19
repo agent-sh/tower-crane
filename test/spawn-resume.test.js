@@ -669,16 +669,14 @@ process.kill = function(pid, signal) {
 const read = fs.readFileSync;
 fs.readFileSync = function(file, ...args) {
   if (String(file) === '/proc/${first.pid}/stat') throw Object.assign(new Error('unavailable'), { code: 'EACCES' });
-  const value = read.call(this, file, ...args);
-  if (!String(file).endsWith('events.jsonl') || typeof value !== 'string') return value;
-  return value.split('\\n').map((line) => {
-    if (!line) return line;
-    const event = JSON.parse(line);
-    if (event.cmd === 'spawn exit' && event.detail.pid === ${first.pid}) delete event.detail.attempt;
-    return JSON.stringify(event);
-  }).join('\\n');
+  return read.call(this, file, ...args);
 };
 `);
+  StateFiles.editEvents(h.state, (e) => {
+    if (e.id !== receipt.id) return null;
+    delete e.detail.attempt;
+    return e;
+  });
   for (const args of [
     ['spawn', '--task', 'T1', '--dry-run'],
     ['spend', 'T1', '--from-spawn', first.agent],
@@ -692,24 +690,12 @@ test('the shared eligibility check compares route values independent of key orde
   const { h } = setup(t);
   h.json(['spawn', '--task', 'T1', '--wait']);
   sendBack(h);
-  const hook = path.join(h.base, 'route-order.js');
-  fs.writeFileSync(hook, `
-const fs = require('node:fs');
-const read = fs.readFileSync;
-fs.readFileSync = function(file, ...args) {
-  const value = read.call(this, file, ...args);
-  if (!String(file).endsWith('events.jsonl') || typeof value !== 'string') return value;
-  return value.split('\\n').map((line) => {
-    if (!line) return line;
-    const event = JSON.parse(line);
-    if (event.cmd === 'spawn' && event.detail.route) event.detail.route = Object.fromEntries(Object.entries(event.detail.route).reverse());
-    return JSON.stringify(event);
-  }).join('\\n');
-};
-`);
-  const dry = h.json(['spawn', '--task', 'T1', '--dry-run'], {
-    env: { NODE_OPTIONS: `--require "${hook.replace(/\\/g, '/')}"` },
+  StateFiles.editEvents(h.state, (e) => {
+    if (e.cmd !== 'spawn' || !e.detail.route) return null;
+    e.detail.route = Object.fromEntries(Object.entries(e.detail.route).reverse());
+    return e;
   });
+  const dry = h.json(['spawn', '--task', 'T1', '--dry-run']);
   assert.equal(dry.resumed, true);
 });
 
@@ -723,32 +709,20 @@ test('an earlier attempt exit cannot collect or resume a live attempt with a reu
   await waitOnRepo(h, () => fs.existsSync(ready) && readPublished(ready, 'utf8') === String(live.pid));
   h.ok(['submit', 'T1', '--sha', 'cfed4d76efd3afe887bbbfc7f62c7d94158e3255', '--agent', live.agent]);
   h.ok(['rework', 'T1', '--reason', 'Finish next attempt']);
-  const hook = path.join(h.base, 'reused-spawn.js');
-  fs.writeFileSync(hook, `
-const fs = require('node:fs');
-const read = fs.readFileSync;
-fs.readFileSync = function(file, ...args) {
-  const value = read.call(this, file, ...args);
-  if (String(file).endsWith('events.jsonl') && typeof value === 'string') {
-    return value.split('\\n').map((line) => {
-      if (!line) return line;
-      const event = JSON.parse(line);
-      if (event.cmd === 'spawn exit' && event.detail.pid === ${first.pid}) {
-        event.detail.pid = ${live.pid};
-        if (process.env.OMIT_EXIT_ATTEMPT) delete event.detail.attempt;
-      }
-      return JSON.stringify(event);
-    }).join('\\n');
-  }
-  return value;
-};
-`);
-  for (const missing of ['', '1']) {
+  // The earlier attempt's exit receipt names the live attempt's pid, as a reused pid would.
+  const exit = events(h).find((e) => e.cmd === 'spawn exit' && e.detail.pid === first.pid);
+  for (const missing of [false, true]) {
+    StateFiles.editEvents(h.state, (e) => {
+      if (e.id !== exit.id) return null;
+      e.detail.pid = live.pid;
+      if (missing) delete e.detail.attempt;
+      return e;
+    });
     for (const args of [
       ['spend', 'T1', '--from-spawn', live.agent],
       ['spawn', '--task', 'T1', '--dry-run'],
     ]) {
-      const result = h.run(args, { env: { NODE_OPTIONS: `--require "${hook.replace(/\\/g, '/')}"`, OMIT_EXIT_ATTEMPT: missing } });
+      const result = h.run(args);
       assert.equal(result.code, 1, result.stderr);
       assert.match(result.stderr, /still running or its exit is unverified/);
     }

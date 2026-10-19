@@ -435,11 +435,11 @@ function legacyFollowUp(h) {
   const tasks = h.readState('tasks.json');
   delete tasks.tasks.find((x) => x.id === 'T1').hotfix.follow_up_gate;
   h.writeState('tasks.json', tasks);
-  const file = path.join(h.state, 'events.jsonl');
-  fs.writeFileSync(file, events(h).map((e) => {
-    if (e.cmd === 'hotfix rework') delete e.detail.gate;
-    return `${JSON.stringify(e)}\n`;
-  }).join(''));
+  StateFiles.editEvents(h.state, (e) => {
+    if (e.cmd !== 'hotfix rework') return null;
+    delete e.detail.gate;
+    return e;
+  });
 }
 
 // Main was red at the merge commit for reasons of its own: the CI gate failed the hotfix and opened a follow-up.
