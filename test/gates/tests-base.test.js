@@ -138,6 +138,7 @@ test('locations handle spec, TAP, duplicates, spaces, absolute paths and incompl
     ['duplicate names', 'test at test/a.test.js:2:3\n✖ a\ntest at test/b.test.js:2:3\n✖ a', ['a'], ['test/a.test.js', 'test/b.test.js']],
     ['partial', 'test at test/a.test.js:2:3\n✖ a', ['a', 'b'], null],
     ['outside', 'test at ../other.test.js:2:3\n✖ a', ['a'], null],
+    ['duplicate outside', 'test at test/a.test.js:2:3\n✖ a\ntest at ../other.test.js:2:3\n✖ a', ['a'], null],
     ['none', '', [], null],
   ];
   for (const [name, output, names, expected] of cases) assert.deepEqual(base.failingFiles(output, names, cwd), expected, name);
