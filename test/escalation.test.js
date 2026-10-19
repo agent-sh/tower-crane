@@ -6,7 +6,7 @@ const cp = require('node:child_process');
 const fs = require('node:fs');
 const net = require('node:net');
 const path = require('node:path');
-const { cachedFixture, pinRung, detachedAlive, BIN } = require('./helpers');
+const { cachedFixture, pinRung, detachedAlive, fakeAgentEnv, BIN } = require('./helpers');
 const { gateFixture } = require('./gate-helpers');
 const { killPid, killGroup, waitUntil } = require('./signals');
 const { readPublished } = require('./atomic-file');
@@ -180,7 +180,7 @@ if (process.execArgv.includes('-e') && process.env.TOWER_CRANE_SESSION
   });
   if (prepare) prepare(h);
   // Exit signals and publication faults are explicit worker instrumentation.
-  h.ok(['project', 'set', '--env', JSON.stringify({ ...h.readState('project.json').env, NODE_OPTIONS: h.env.NODE_OPTIONS })]);
+  h.ok(['project', 'set', '--env', JSON.stringify(fakeAgentEnv({ ...h.readState('project.json').env, NODE_OPTIONS: h.env.NODE_OPTIONS }))]);
   // Gate preparation can change HEAD after the cached ladder was built.
   fs.writeFileSync(h.attempts + '.sha', h.git(['rev-parse', 'HEAD']));
   h.readAttempts = () => fs.existsSync(h.attempts) ? JSON.parse(readPublished(h.attempts)) : [];

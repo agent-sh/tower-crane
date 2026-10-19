@@ -47,7 +47,7 @@ if (review) {
     require('node:path').join(__dirname, '..', '..', 'bin', 'tower-crane.js'),
     'evidence', review.task, '--type', 'review', '--ok', '--sha', review.sha,
     '--revision', String(review.revision), '--agent', 'replacement-reviewer',
-  ], { stdio: 'pipe' });
+  ], { env: require('../agent-env').fakeAgentEnv(process.env), stdio: 'pipe' });
 }
 if (failed) {
   console.error('GitHub unavailable');

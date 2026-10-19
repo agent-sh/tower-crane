@@ -1,5 +1,7 @@
 'use strict';
 
+const { fakeAgentEnv } = require('../agent-env');
+
 const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
@@ -14,11 +16,11 @@ async function main() {
   const prompt = args.find((a) => a.includes('## Task') || a.includes('## Rework') || a.includes('Previous attempt')) || '';
   const out = { prompt, turns: [], blocked: false };
   const cli = (...argv) => {
-    const r = cp.spawnSync(process.execPath, [BIN, ...argv, '--agent', process.env.TOWER_CRANE_AGENT], { encoding: 'utf8', timeout: 300000 });
+    const r = cp.spawnSync(process.execPath, [BIN, ...argv, '--agent', process.env.TOWER_CRANE_AGENT], { env: fakeAgentEnv(process.env), encoding: 'utf8', timeout: 300000 });
     if (r.status) throw new Error(r.stderr);
   };
   const event = (value) => console.log(JSON.stringify(value));
-  const task = JSON.parse(cp.execFileSync(process.execPath, [BIN, 'task', 'show', 'T1', '--json', '--agent', process.env.TOWER_CRANE_AGENT]));
+  const task = JSON.parse(cp.execFileSync(process.execPath, [BIN, 'task', 'show', 'T1', '--json', '--agent', process.env.TOWER_CRANE_AGENT], { env: fakeAgentEnv(process.env) }));
   if (!task.claim) cli('claim', 'T1');
   let plugin;
   const probe = process.env.MESSAGE_OPENCODE_PROBE;

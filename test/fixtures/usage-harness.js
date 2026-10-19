@@ -1,5 +1,7 @@
 'use strict';
 
+const { fakeAgentEnv } = require('../agent-env');
+
 const fs = require('node:fs');
 const cp = require('node:child_process');
 const path = require('node:path');
@@ -7,7 +9,7 @@ const path = require('node:path');
 if (process.env.USAGE_CLAIM) {
   const result = cp.spawnSync(process.execPath, [
     path.join(__dirname, '..', '..', 'bin', 'tower-crane.js'), 'claim', process.env.TOWER_CRANE_TASK,
-  ], { encoding: 'utf8' });
+  ], { env: fakeAgentEnv(process.env), encoding: 'utf8' });
   if (result.status !== 0) throw new Error(result.stderr);
 }
 // A relative session path lands where codex writes: under the CODEX_HOME

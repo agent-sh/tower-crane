@@ -135,9 +135,11 @@ function refillFixture(t) {
       h.ok(['brief', 'set', id, '-'], { input: `Implement ${id}.\n` });
     }
     const script = path.join(h.base, 'refill-worker.js');
-    fs.writeFileSync(script, `const fs = require('node:fs'), cp = require('node:child_process'), path = require('node:path');
+    fs.writeFileSync(script, `
+const { fakeAgentEnv } = require(${JSON.stringify(path.join(__dirname, 'agent-env.js'))});
+const fs = require('node:fs'), cp = require('node:child_process'), path = require('node:path');
 const task = process.env.TOWER_CRANE_TASK;
-cp.execFileSync(process.execPath, [${JSON.stringify(BIN)}, 'claim', task], { stdio: 'pipe' });
+cp.execFileSync(process.execPath, [${JSON.stringify(BIN)}, 'claim', task], { env: fakeAgentEnv(process.env), stdio: 'pipe' });
 const file = path.join(process.env.AUTOMATION_CONTEXT_DIR, task);
 // Tests read the prompt once the marker exists, so the marker comes last.
 fs.writeFileSync(file + '.prompt', process.argv[2]);

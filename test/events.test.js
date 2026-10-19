@@ -386,8 +386,10 @@ test('a killed spawned claimant wakes concurrent waiters once, without release',
   const h = setup(t);
   const script = path.join(h.base, 'worker.js');
   const claimed = path.join(h.base, 'claimed');
-  fs.writeFileSync(script, `const cp = require('node:child_process'); const fs = require('node:fs');
-const r = cp.spawnSync(process.execPath, [${JSON.stringify(BIN)}, 'claim', process.env.TOWER_CRANE_TASK], { env: process.env });
+  fs.writeFileSync(script, `
+const { fakeAgentEnv } = require(${JSON.stringify(path.join(__dirname, 'agent-env.js'))});
+const cp = require('node:child_process'); const fs = require('node:fs');
+const r = cp.spawnSync(process.execPath, [${JSON.stringify(BIN)}, 'claim', process.env.TOWER_CRANE_TASK], { env: fakeAgentEnv(process.env) });
 if (r.status !== 0) process.exit(1);
 console.log('worker alive'); fs.writeFileSync(${JSON.stringify(claimed)}, '');
 setInterval(() => {}, 1000);\n`);
@@ -420,9 +422,11 @@ setInterval(() => {}, 1000);\n`);
 test('submitted spawned workers never emit worker-exited', async (t) => {
   const h = setup(t);
   const script = path.join(h.base, 'submit.js');
-  fs.writeFileSync(script, `const cp = require('node:child_process');
+  fs.writeFileSync(script, `
+const { fakeAgentEnv } = require(${JSON.stringify(path.join(__dirname, 'agent-env.js'))});
+const cp = require('node:child_process');
 for (const args of [['claim', 'T1'], ['submit', 'T1', '--sha', '50b732a15be40ccb2065cb2ba0e7b366d511b736']]) {
-const r = cp.spawnSync(process.execPath, [${JSON.stringify(BIN)}, ...args], { env: process.env }); if (r.status) process.exit(r.status);
+const r = cp.spawnSync(process.execPath, [${JSON.stringify(BIN)}, ...args], { env: fakeAgentEnv(process.env) }); if (r.status) process.exit(r.status);
 }\n`);
   h.ok(['brief', 'set', 'T1', '-'], { input: 'stand-in\n' });
   commandWorker(h, [process.execPath, script]);
@@ -437,8 +441,10 @@ for (const command of ['wait', 'spend']) {
     const h = setup(t);
     const script = path.join(h.base, 'live-worker.js');
     const claimed = path.join(h.base, 'claimed');
-    fs.writeFileSync(script, `const cp = require('node:child_process'); const fs = require('node:fs');
-const r = cp.spawnSync(process.execPath, [${JSON.stringify(BIN)}, 'claim', process.env.TOWER_CRANE_TASK], { env: process.env });
+    fs.writeFileSync(script, `
+const { fakeAgentEnv } = require(${JSON.stringify(path.join(__dirname, 'agent-env.js'))});
+const cp = require('node:child_process'); const fs = require('node:fs');
+const r = cp.spawnSync(process.execPath, [${JSON.stringify(BIN)}, 'claim', process.env.TOWER_CRANE_TASK], { env: fakeAgentEnv(process.env) });
 if (r.status !== 0) process.exit(1);
 fs.writeFileSync(${JSON.stringify(claimed)}, '');
 setInterval(() => {}, 1000);\n`);

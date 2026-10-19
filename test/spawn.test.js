@@ -641,6 +641,8 @@ test('a spawned reviewer that loses all TOWER_CRANE variables cannot record evid
   const h = setup(t);
   const out = path.join(h.base, 'lost-agent.json');
   const script = `
+const { fakeAgentEnv } = require(${JSON.stringify(path.join(__dirname, 'agent-env.js'))});
+
 const fs = require('node:fs');
 const cp = require('node:child_process');
 const env = { ...process.env };
@@ -649,7 +651,7 @@ const task = env.TOWER_CRANE_TASK;
 const state = env.TOWER_CRANE_STATE;
 for (const key of Object.keys(env)) if (key.startsWith('TOWER_CRANE_')) delete env[key];
 const r = cp.spawnSync(process.execPath, [process.argv[1], 'evidence', 'T1', '--type', 'review', '--ok', '--sha', '50b732a15be40ccb2065cb2ba0e7b366d511b736', '--state', state], {
-  env, encoding: 'utf8', timeout: 300000,
+  env: fakeAgentEnv(env), encoding: 'utf8', timeout: 300000,
 });
 fs.writeFileSync(process.argv[2], JSON.stringify({ agent, task, remaining: Object.keys(env).filter((key) => key.startsWith('TOWER_CRANE_')), code: r.status, stderr: r.stderr }));
 process.exit(r.status === null ? 1 : r.status);

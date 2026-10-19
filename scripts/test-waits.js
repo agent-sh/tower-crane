@@ -1272,4 +1272,4 @@ function checkTestWaits(root) {
   if (findings.length) throw new Error(findings.join('\n'));
 }
 
-module.exports = { waitFindings, killFindings, checkTestWaits };
+module.exports = { tokenize, callArguments, waitFindings, killFindings, checkTestWaits };

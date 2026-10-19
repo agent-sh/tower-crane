@@ -1,10 +1,12 @@
 'use strict';
 
+const { fakeAgentEnv } = require('../agent-env');
+
 const cp = require('node:child_process');
 const { writeAtomic } = require('../atomic-file');
 
 const [cli, readyFile, releaseFile, writerPidFile] = process.argv.slice(2);
-cp.execFileSync(process.execPath, [cli, 'claim', 'T1', '--lease', '1']);
+cp.execFileSync(process.execPath, [cli, 'claim', 'T1', '--lease', '1'], { env: fakeAgentEnv(process.env) });
 
 const writerScript = `
 const fs = require('node:fs');

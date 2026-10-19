@@ -1155,9 +1155,9 @@ test('main moves: a mergeable PR keeps its evidence and merges after one head-of
   const suites = h.suites().length;
   h.reviewer('T1', 'reviewer');
   h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--sha', h.sha, '--ok', '--agent', 'reviewer']);
-  h.consume();
+  const result = h.consume();
   assert.deepEqual(softwareEvidence(h, 'T1'), before, 'a base move reruns no gate and resets no evidence');
-  assert.equal(h.github().prs['7'].state, 'MERGED');
+  assert.equal(h.github().prs['7'].state, 'MERGED', result.stderr || JSON.stringify(h.logs().slice(-4)));
   assert.equal(h.suites().length - suites, 1);
   const checks = headChecks(h);
   assert.deepEqual(checks.map((e) => [e.task, e.detail.ok, e.detail.base_sha]), [['T1', true, h.git(['rev-parse', 'main'])]]);
@@ -1265,9 +1265,11 @@ test('a head replaced during its check is checked again at the new sha before th
   h.git(['switch', '-q', 'main']);
   h.moveMain();
   // The owner reworks and reaccepts T1 at a new head while its suite runs.
-  fs.writeFileSync(path.join(h.base, 'during-check.js'), `const cp = require('node:child_process'), fs = require('node:fs');
+  fs.writeFileSync(path.join(h.base, 'during-check.js'), `
+const { fakeAgentEnv } = require(${JSON.stringify(path.join(__dirname, 'agent-env.js'))});
+const cp = require('node:child_process'), fs = require('node:fs');
 const env = ${JSON.stringify(h.env)};
-const cli = (...a) => cp.execFileSync(process.execPath, [${JSON.stringify(BIN)}, ...a], { cwd: ${JSON.stringify(h.repo)}, env, encoding: 'utf8' });
+const cli = (...a) => cp.execFileSync(process.execPath, [${JSON.stringify(BIN)}, ...a], { cwd: ${JSON.stringify(h.repo)}, env: fakeAgentEnv(env), encoding: 'utf8' });
 const file = env.AUTOMATION_GITHUB;
 cli('rework', 'T1', '--reason', 'replace the head', '--agent', 'owner');
 const gh = JSON.parse(fs.readFileSync(file, 'utf8'));
@@ -1351,9 +1353,11 @@ test('a head check that fails after its settings changed checks again under the 
   h.moveMain();
   const cmd = h.readState('project.json').gates.tests_cmd;
   // The suite fails, but only after the owner replaces the tests command.
-  fs.writeFileSync(path.join(h.base, 'during-check.js'), `const cp = require('node:child_process');
+  fs.writeFileSync(path.join(h.base, 'during-check.js'), `
+const { fakeAgentEnv } = require(${JSON.stringify(path.join(__dirname, 'agent-env.js'))});
+const cp = require('node:child_process');
 cp.execFileSync(process.execPath, [${JSON.stringify(BIN)}, 'project', 'set', '--tests-cmd', ${JSON.stringify(`${cmd} again`)}, '--agent', 'owner'],
-  { cwd: ${JSON.stringify(h.repo)}, env: ${JSON.stringify(h.env)}, encoding: 'utf8' });
+  { cwd: ${JSON.stringify(h.repo)}, env: fakeAgentEnv(${JSON.stringify(h.env)}), encoding: 'utf8' });
 process.exitCode = 1;
 `);
   h.reviewer('T1', 'reviewer');

@@ -196,7 +196,9 @@ module.exports = function stub(harness) {
     } catch { return []; }
   })() : [];
   for (const argv of JSON.parse(process.env.STUB_RUN || '[]')) {
-    const r = cp.spawnSync(argv[0], argv.slice(1), { encoding: 'utf8' });
+    const cli = argv[0] === process.execPath && argv.slice(1).some((arg) => /[\\/]bin[\\/]tower-crane\.js$/.test(arg));
+    const env = cli ? require('../agent-env').fakeAgentEnv(process.env) : process.env;
+    const r = cp.spawnSync(argv[0], argv.slice(1), { env, encoding: 'utf8' });
     report.ran.push({ argv, code: r.status, stderr: r.stderr });
   }
   writeAtomic(process.env.STUB_OUT, JSON.stringify(report));
