@@ -1466,7 +1466,9 @@ rechecked once a minute by the trusted `wait` watcher, as described below.
 
 `automation` events record `{source, phase}` keyed by the triggering event
 ID, or a stable digest for older records without IDs.
-`running` adds executor `pid`, `host` and Linux `start_ticks`. `done`
+`running` adds the reservation holder's `pid`, `host`, Linux `start_ticks`
+and `executor`. `executor: false` holds the task without taking a gate executor;
+older running receipts without this field count as gate executors. `done`
 deduplicates completed work. `deferred` keeps unknown or moved heads,
 unknown mergeability and failed merge attempts retryable; `error` records
 an exception. Terminal receipts include `error`, null without an exception.
@@ -1484,13 +1486,26 @@ have passed and the governor would admit the unit that deferred it; probes while
 it is held take no executor and write no new reaction receipts
 ([Host resource governor](#host-resource-governor)). Other kinds of deferral
 still rely on startup reconciliation or a new lifecycle event.
-A task has at most one observable executor.
-An exited executor's start can be retried, while an unobservable executor
-remains busy. At most `gates.executors` executors run on one host across
-every watcher and supervisor. The running receipt in the event log is the
-executor's lease: its terminal receipt releases it on exit, and its PID
-identity releases it when the process dies. Running receipts from other
-hosts do not count against this host's cap.
+A task has at most one observable reaction, including one that holds no gate
+executor. Failed-review rework, review dispatch with current software gates,
+PR-body correction handling, acceptance bookkeeping and an accepted merge
+that needs no merged-tree suite run without waiting for a gate executor.
+Tests, clean and local CI take an executor; hosted CI queries do not.
+Classification reads current evidence under the reservation lock.
+If later PR inspection, a base move or changed state reveals a gate or
+merged-tree suite to run, the reaction acquires an executor before running it.
+When none is available, or earlier gate work owns the next turn, it records
+`queued`, releases its task reservation and leaves its notification owed for
+retry. This receipt has `executor: true`; no gate verdict is recorded.
+If the originating notification no longer matches, such as after a merge
+queue confirms its first task, the reaction queues a new `automation reconcile`
+notification for the active gate task.
+An exited holder's start can be retried, while an unobservable holder remains
+busy. At most `gates.executors` gate executors run on one host across every
+watcher and supervisor. The running receipt with `executor: true` in the
+event log is the executor's lease: its terminal receipt releases it on exit,
+and its PID identity releases it when the process dies. Running receipts
+from other hosts do not count against this host's cap.
 SIGTERM or SIGINT to `wait` stops new reservations and gates while its active
 gate finishes and records evidence. The interrupted reaction records
 `phase: "deferred"` with an interruption reason, releasing its executor lease
@@ -1523,8 +1538,9 @@ no further stack step or task; the second kills it. A `gh stack sync` that
 ran records its outcome either way, so moved heads still go to rework.
 Stopped steps record no deferral; the next refresh retries them.
 `automation queued` records a blocked notification's source, with
-`executors` set to the cap when the cap blocked it rather than another
-executor of the same task. Queued notifications for accepted, unmerged PR
+`executor` indicating gate work and `executors` set to the cap when the cap
+blocked it rather than another reaction of the same task.
+Queued gate notifications for accepted, unmerged PR
 tasks run first, in the order of their current `accept` events. This includes
 older notifications that now run a merge and any merged-tree test the merge
 needs. Running reactions are never preempted.
@@ -1532,8 +1548,9 @@ Submitted tasks follow in submission order, except that the queued
 notifications a `gates prioritize` event names run first among submitted
 work, the most recent request first. An explicit request cannot move
 submitted work ahead of accepted merges or change acceptance order.
-While higher-ranked work waits, a later notification queues behind it even
-if a slot is free. A notification queued after a priority request keeps
+While higher-ranked gate work waits, a later gate notification queues behind
+it even if a slot is free. Reactions needing no gate bypass this order while
+retaining their task reservation. A notification queued after a priority request keeps
 submission order unless its task becomes accepted.
 `gates prioritize ID --reason R` is operational ([Authority](#authority)); it
 records a `gates prioritize` event with `reason`, `sources` (the sources of
@@ -1544,7 +1561,7 @@ task has no queued notification, since either would change nothing. A notificati
 behind the task's own running reaction counts, but the running reaction does
 not: its receipt is running and its executor is live, so it is no longer
 queued. A dead executor's notification stays queued for its retry. `status`
-lists the gate queue: running tasks, then the queued tasks in the order a free
+lists only gate work in the gate queue: running tasks, then the queued tasks in the order a free
 executor takes them, then the tasks whose notification waits behind their own
 running reaction, marked as blocked. `--json` carries it as `gate_queue` with
 `running`, `queued`, `blocked` and `deferred`, each queued, blocked or deferred task with its

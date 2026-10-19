@@ -191,7 +191,7 @@ function heldGate(h, submit = true) {
   h.release = path.join(h.base, 'suite-release');
   fs.writeFileSync(path.join(h.repo, 'hold.js'), `
 const fs = require('node:fs');
-fs.writeFileSync(process.argv[2], String(process.pid));
+require(${JSON.stringify(path.join(__dirname, 'atomic-file'))}).writeAtomic(process.argv[2], String(process.pid));
 // The gate's process group ends it when the gate stops; a release file ends it as passed.
 const timer = setInterval(() => { if (fs.existsSync(process.argv[3])) { clearInterval(timer); process.exit(0); } }, 20);
 `);

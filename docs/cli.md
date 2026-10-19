@@ -616,9 +616,14 @@ If a generator cannot run until source conflicts are resolved, the merge
 keeps the branch's generated bodies staged and the worker reruns the scripts
 after resolving the hand-written files.
 
-In the gate executor queue, accepted tasks' merge reactions run ahead of
-queued submitted-task gates, in acceptance order. Their merged-tree tests
-keep that priority. A running gate finishes before the next reaction starts.
+Reactions that need no software gate run at once under their task reservation,
+including failed-review rework and accepted merges without a merged-tree suite.
+Tests, clean, local CI and merged-tree suites take a gate executor; hosted CI
+queries do not. A reaction that discovers a gate after starting queues before
+running it if no executor is available.
+In the gate executor queue, accepted tasks' merged-tree suites run ahead of
+queued submitted-task gates, in acceptance order. A running gate finishes
+before the next queued gate starts.
 `gates prioritize` moves submitted work within the submitted queue; it
 cannot move it ahead of accepted merges or change acceptance order.
 `status` and `inbox` show the order the next free executor takes.
