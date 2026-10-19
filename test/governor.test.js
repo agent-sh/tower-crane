@@ -111,6 +111,7 @@ test('a dispatch past the defer line waits with its reason in status, inbox and 
   assert.equal(status.governor.state, 'deferring');
   assert.deepEqual(status.governor.deferred.map((d) => [d.task, d.kind]), [['T1', 'worker']]);
   assert.match(h.ok(['status']), /governor deferred: T1 worker since \S+: memory: tests\.slice has 8\.0 GiB/);
+  assert.match(status.not_dispatched.find((b) => b.id === 'T1').reason, /^host governor deferred workers since \S+: memory: tests\.slice has 8\.0 GiB/);
   const inbox = h.json(['inbox']).items.find((i) => i.id === 'governor_deferred:T1:worker');
   assert.match(inbox.reason, /over the 85% line/);
   assert.deepEqual(inbox.action.argv, ['status']);

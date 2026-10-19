@@ -85,15 +85,18 @@ cp.spawnSync=(cmd,args,opts)=>{
 }
 
 // The first gate run holds the only executor until the test writes `release`;
-// it writes `stalled` once it starts.
-function holdSuite(h) {
+// it writes `stalled` once it starts. With giveUpMs it also passes on its own
+// after that long, so a test whose release never comes fails on what ran
+// before the gate ended instead of hanging.
+function holdSuite(h, { giveUpMs = null } = {}) {
   const suite = path.join(h.base, 'tools', 'hold-suite.js');
   const stalled = path.join(h.base, 'stalled');
   const release = path.join(h.base, 'release');
   fs.writeFileSync(suite, `const fs = require('node:fs');
 if (fs.existsSync(${JSON.stringify(stalled)})) process.exit(0);
 fs.writeFileSync(${JSON.stringify(stalled)}, '');
-const poll = () => (fs.existsSync(${JSON.stringify(release)}) ? process.exit(0) : setTimeout(poll, 50)); // wait-allow: probe cadence only; the release signal and hung-test timeout bound this fixture
+const end = ${giveUpMs === null ? 'Infinity' : `Date.now() + ${giveUpMs}`};
+const poll = () => (fs.existsSync(${JSON.stringify(release)}) || Date.now() >= end ? process.exit(0) : setTimeout(poll, 50)); // wait-allow: probe cadence only; the release signal, giveUpMs and hung-test timeout bound this fixture
 poll();
 `);
   h.ok(['project', 'set', '--tests-cmd', `node ${JSON.stringify(suite)}`, '--tests-mode', 'run-only',

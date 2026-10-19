@@ -124,8 +124,9 @@ claim or submission since, a pending quality climb, and a moved PR or branch
 head, checked again once it holds the reaction slot. The inbox `rework_ready`
 item names the command when it would succeed. Automatic refill holds such a
 task for `gates.rework_hold_min` minutes (default 5) after the rework, since
-the same wait pass would otherwise dispatch a worker at once; `spawn --ready`
-by hand does not wait. [State](state.md)
+the wait host's refill would otherwise dispatch a worker at once; `spawn --ready`
+by hand does not wait. The host sets a timer to the earliest hold end, so the
+task dispatches when its hold ends with no other event. [State](state.md)
 explains why the revision goes back instead of carrying evidence forward.
 
 Failures remain visible in gate receipts and task notes. Conflicting PRs
