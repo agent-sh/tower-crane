@@ -87,20 +87,23 @@ test('the first command moves a 0.1 file layout into state.db, keeps every event
   released(h, ['--state', out, 'task', 'note', 'T1', 'written by 0.1.3 again']);
 });
 
-test('0.1.3 refuses a migrated state before it reads or writes any of it', (t) => {
+// Every release before this one, each from its tag.
+for (const tag of ['v0.1.0', 'v0.1.1', 'v0.1.2', 'v0.1.3', 'v0.1.4', 'v0.1.5', 'v0.1.6']) {
+test(`${tag.slice(1)} refuses a migrated state before it reads or writes any of it`, (t) => {
   const h = fileLayout(t);
   h.ok(['task', 'show', 'T1']);
   const before = { events: StateFiles.logText(h.state), tasks: StateFiles.docText(h.state, 'tasks.json'), names: fs.readdirSync(h.state).sort() };
-  for (const args of [['task', 'show', 'T1'], ['task', 'note', 'T1', 'from 0.1.3'], ['claim', 'T1', '--agent', 'worker-T1-1'], ['msg', '--to', 'orchestrator', 'from 0.1.3'], ['status'], ['validate'], ['wait', '--timeout', '0']]) {
-    const r = runReleased(h, RELEASED, args);
-    assert.notEqual(r.code, 0, `${args.join(' ')} ran: ${r.stdout}`);
-    assert.match(r.stderr, /state schema 2 is incompatible with this tool \(supports through 1\); upgrade Tower Crane/, args.join(' '));
+  for (const args of [['task', 'show', 'T1'], ['task', 'note', 'T1', `from ${tag}`], ['claim', 'T1', '--agent', 'worker-T1-1'], ['msg', '--to', 'orchestrator', `from ${tag}`], ['status'], ['validate'], ['wait', '--timeout', '0']]) {
+    const r = runReleased(h, tag, args);
+    assert.notEqual(r.code, 0, `${tag} ${args.join(' ')} ran: ${r.stdout}`);
+    assert.match(r.stderr, /state schema 2 is incompatible with this tool \(supports through 1\); upgrade Tower Crane/, `${tag} ${args.join(' ')}: ${r.stderr}`);
   }
   assert.equal(StateFiles.logText(h.state), before.events);
   assert.equal(StateFiles.docText(h.state, 'tasks.json'), before.tasks);
   assert.deepEqual(fs.readdirSync(h.state).filter((name) => !['lock', 'sketch.md', 'sketch.html', 'sketch.stamp'].includes(name)).sort(),
     before.names.filter((name) => !['lock', 'sketch.md', 'sketch.html', 'sketch.stamp'].includes(name)));
 });
+}
 
 for (const [point, kept] of [['landed', true], ['staged', false]]) {
   test(`a 0.1.3 commit killed ${point === 'landed' ? 'after' : 'before'} its commit point is ${kept ? 'finished' : 'discarded'} before the state is migrated`, (t) => {
