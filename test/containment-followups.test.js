@@ -283,6 +283,70 @@ test('macOS kill validation reads start times from one process snapshot', t => {
   assert.equal(calls, 1);
 });
 
+test('Windows cleanup preserves retained identities beneath non-kept ancestors', async t => {
+  const descriptor = Object.getOwnPropertyDescriptor(process, 'platform');
+  Object.defineProperty(process, 'platform', { value: 'win32' });
+  t.after(() => Object.defineProperty(process, 'platform', descriptor));
+  const chain = [
+    { pid: 100, parent: 1, start: 1000 },
+    { pid: 200, parent: 100, start: 1001 },
+    { pid: 300, parent: 200, start: 1002 },
+  ];
+  const sibling = { pid: 400, parent: 100, start: 1003 };
+  const cases = [
+    { name: 'reported grandparent', rows: chain, identities: [{ pid: 300, start: 1002 }], kept: [200, 300] },
+    { name: 'ordinary sibling', rows: [...chain, sibling], identities: [{ pid: 300, start: 1002 }], kept: [200, 300] },
+    { name: 'unfiltered snapshot', rows: [...chain, sibling], identities: [{ pid: 300, start: 1002 }], kept: [200, 300], unfiltered: true },
+    { name: 'all targets spared', rows: chain, identities: [{ pid: 100, start: 1000 }], kept: [100, 200, 300], unfiltered: true },
+    { name: 'reused identity', rows: chain, identities: [{ pid: 300, start: 999 }], kept: [] },
+    { name: 'no recorded identity', rows: chain, identities: [], kept: [], late: [{ pid: 500, parent: 300, start: 1004 }] },
+    { name: 'multiple retained branches', rows: [...chain, sibling, { pid: 600, parent: 400, start: 1005 }],
+      identities: [{ pid: 300, start: 1002 }, { pid: 600, start: 1005 }], kept: [200, 300, 400, 600] },
+    { name: 'chunked targets', rows: [...chain, ...Array.from({ length: 400 }, (_, i) => ({
+      pid: 1000 + i, parent: 100, start: 2000 + i,
+    }))], identities: [{ pid: 300, start: 1002 }], kept: [200, 300] },
+  ];
+  for (const item of cases) {
+    const killed = new Set();
+    const calls = [];
+    const tree = [...item.rows, ...(item.late || [])];
+    t.mock.method(cp, 'execFile', (file, args, options, callback) => {
+      assert.equal(file, 'powershell.exe');
+      const script = Buffer.from(args.at(-1), 'base64').toString('utf16le');
+      const targets = /\$t = @\(([\d,]*)\)/.exec(script)[1].split(',').filter(Boolean).map(Number)
+        .filter((_, index) => index % 2 === 0);
+      const recursive = script.includes('taskkill.exe /PID $id /T /F');
+      calls.push({ targets, recursive });
+      for (const pid of targets) {
+        killed.add(pid);
+        if (recursive) {
+          let changed;
+          do {
+            changed = false;
+            for (const row of tree) if (killed.has(row.parent) && !killed.has(row.pid)) {
+              killed.add(row.pid);
+              changed = true;
+            }
+          } while (changed);
+        }
+      }
+      process.nextTick(callback, null, targets.map(pid => `${pid} stopped`).join('\n'), '');
+    });
+    const retained = C.managed(item.rows, item.identities, 50);
+    assert.deepEqual(retained.map(row => row.pid), item.kept, item.name);
+    const keep = new Set(item.kept);
+    C.stopProcesses(item.unfiltered ? item.rows : item.rows.filter(row => !keep.has(row.pid)), null, keep);
+    await new Promise(resolve => setImmediate(resolve));
+    for (const pid of keep) assert.equal(killed.has(pid), false, `${item.name}: retained pid ${pid}`);
+    for (const row of tree.filter(row => !keep.has(row.pid))) {
+      assert.equal(killed.has(row.pid), true, `${item.name}: ordinary pid ${row.pid}`);
+    }
+    assert.ok(calls.every(call => call.recursive === !keep.size), `${item.name}: recursive kills require no retained identities`);
+    if (item.name === 'chunked targets') assert.equal(calls.length, 2);
+    cp.execFile.mock.restore();
+  }
+});
+
 for (const delayed of [false, true]) {
 test(`watchdog post-exit killing catches forks with ${delayed ? 'pending' : 'immediate'} parent stops`, { skip: process.platform !== 'linux' }, t => {
   const ids = [99999991];

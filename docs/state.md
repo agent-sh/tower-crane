@@ -697,6 +697,9 @@ Retained controllers still count as users of the original agent's home, cache,
 broker directory and TMPDIR. Cleanup spares them, but home pruning waits until
 their run-marked processes finish. Supervisor subtrees own a different agent's
 files and remain excluded from the original home's liveness check.
+On Windows, cleanup with retained identities stops each identified non-kept
+process individually. It does not tree-kill an ancestor of retained work.
+Full containment cleanup without retained identities still uses `taskkill /T /F`.
 Retention requires recorded dispatch or controller pid/start identities.
 Verified orchestrator CLI commands register `{pid, start, host, role, command}`
 under `controllers/<pid>-<nonce>.json` in their state directory and remove the
