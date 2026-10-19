@@ -94,6 +94,35 @@ function newerParent(f, conflict) {
   return resubmit(f, false);
 }
 
+for (const rewrite of [false, true]) {
+  for (const published of [false, true]) {
+    for (const checkout of [false, true]) {
+      test(`untouched child adopts ${rewrite ? 'rewritten' : 'descendant'} parent with ${published ? 'published' : 'unpublished'} branch and ${checkout ? 'present' : 'absent'} checkout`, (t) => {
+        const f = setup(t);
+        const wt = f.h.json(['worktree', 'T2']);
+        if (published) f.h.git(['push', 'origin', wt.branch], wt.path);
+        if (!checkout) f.h.git(['worktree', 'remove', wt.path]);
+        const parent = resubmit(f, rewrite);
+        const read = inspector(f);
+        const result = f.h.run(['spawn', '--task', 'T2', '--wait']);
+        if (rewrite && published) {
+          assert.equal(result.code, 1, result.stdout + result.stderr);
+          assert.match(result.stderr, /git push failed/);
+          assert.equal(f.h.git(['rev-parse', wt.branch]), f.sha);
+          assert.equal(f.h.json(['task', 'show', 'T2']).stack.parent_sha, f.sha);
+          assert.equal(f.h.git(['rev-parse', `refs/heads/${wt.branch}`], path.join(f.h.base, 'remote.git')), f.sha);
+        } else {
+          assert.equal(result.code, 0, result.stdout + result.stderr);
+          assert.equal(read().head, parent);
+          assert.equal(f.h.json(['task', 'show', 'T2']).stack.parent_sha, parent);
+          assert.equal(f.h.git(['rev-parse', `refs/heads/${wt.branch}`], path.join(f.h.base, 'remote.git')), parent);
+          if (rewrite) assert.throws(() => f.h.git(['merge-base', '--is-ancestor', f.sha, read().head]));
+        }
+      });
+    }
+  }
+}
+
 for (const submitted of [false, true]) {
   for (const conflict of [false, true]) {
     test(`parent resubmission ${conflict ? 'conflicts without moving' : 'merges and pushes'} the ${submitted ? 'submitted' : 'prepared'} child before dispatch`, (t) => {

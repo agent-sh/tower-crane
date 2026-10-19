@@ -180,7 +180,7 @@ test('spawn moves a prepared dependent onto its dependency\'s resubmitted head',
   const task = f.h.json(['task', 'show', 'T2']);
   assert.equal(task.status, 'submitted');
   assert.equal(task.stack.parent_sha, sha);
-  assert.equal(f.h.git(['rev-parse', `${task.sha}^^2`]), sha);
+  assert.equal(f.h.git(['rev-parse', `${task.sha}^`]), sha);
 });
 
 test('worktree replaces a rewritten dependency head under an untouched prepared branch', (t) => {

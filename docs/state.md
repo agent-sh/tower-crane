@@ -4,13 +4,18 @@ Tasks may carry `stack: { parent, base, parent_sha, repo, linked, synced_base }`
 
 Before worker dispatch or a gate, a child whose parent has resubmitted refreshes
 under the worktree lock, whether its stack is linked or still prepared. The
-engine merges the verified submitted parent head in a detached scratch worktree,
+engine merges the verified submitted parent head into a child with its own
+commits in a detached scratch worktree,
 with commit subject `Merge <parent>'s resubmitted head into <child>`. A clean
 merge is pushed to the child branch before the local branch moves, then updates
 `stack.parent_sha` and emits `stack sync` with the parent and child heads.
 Existing child commits are preserved. A submitted or accepted child returns to
 rework to submit the refreshed branch and rerun gates; its former submitted sha
 stays recorded until then.
+An untouched child adopts the parent head directly, including a rewritten
+parent, so commits dropped by the parent are not restored. Publication never
+force-pushes: a rejected push leaves the child branch and stack metadata
+unchanged for the orchestrator's ordinary stack refresh.
 
 A conflict aborts the scratch merge and leaves the child branch and checkout
 unchanged. A rework note names the parent sha and conflicting files, and the
