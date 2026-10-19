@@ -1,5 +1,61 @@
 # Changelog
 
+## 0.1.6 (2026-10-19)
+
+### Upgrading
+
+- Every spawned worker, reviewer, small agent and orchestrator, and every tests, proof, clean or local CI command, now runs under a process cap and a memory cap that count every process it starts. The defaults take half the effective host budget: physical memory and the kernel task ceiling, lowered to the smallest `memory.max` and `pids.max` on the caller's cgroup ancestry. An agent gets that half divided by one slot per four logical CPUs. A gate command gets it divided by `gates.executors`, two when unset. A spawned orchestrator holds its workers, reviewers and gates in its own scope, so it gets the whole half. A reviewer gets one agent share plus one gate share for its test probes. On a 24 CPU host with a 40 GiB slice, each worker gets about 3.33 GiB. `project show` prints the resolved limits for each role.
+- To raise the caps, run `project set --tasks-max N` or `project set --memory-max-bytes N`. They set `resources.tasks_max` and `resources.memory_max_bytes`, apply unchanged to agents and gates, and take effect at the next launch. Both are operational, so the orchestrator or owner sets them without an approval. There is no unlimited value.
+- On Linux with cgroup v2 and a reachable systemd user manager, each launch runs in its own transient user scope in the caller's slice, with `MemorySwapMax=0` and `OOMPolicy=kill`. Elsewhere a watchdog samples process count and total RSS every 100 ms; off Linux its default is 256 processes. The watchdog is a sampled bound: a fork or an allocation can overshoot between samples.
+- At a cap the whole attempt stops. A spawn records `blocked` with `resource-tasks-max` or `resource-memory-max`, and `status` and `inbox` show it. A gate puts the reason in its summary.
+- A `MemoryMax` or `TasksMax` in the owner's `scope` setting is overridden by the resource caps, and a `Slice` there no longer moves the agent out of the caller's slice. Set the caps with `--tasks-max` and `--memory-max-bytes` instead. `init`, `project set` and `ladder set` warn when `scope` sets `TasksMax`, `MemoryMax`, `MemorySwapMax`, `OOMPolicy`, `Delegate` or `Slice`.
+- Run a long-lived Tower Crane process, such as `wait --follow`, in a scope without `MemoryMax`. A caller inside a capped cgroup keeps every attempt inside that cap: nested when the cgroup delegates `memory` and `pids`, otherwise under the watchdog.
+- When an agent exits normally, its own background processes are stopped. Supervisors it dispatched and its wait, check, accept and merge controllers keep running inside its caps until they end.
+- A host governor now admits every agent dispatch, tests, clean and local CI gate, and merge-queue suite against one memory budget shared by all your Tower Crane projects on the host. Work that does not fit is deferred and exits 3 with `TASK: UNIT deferred by the host governor: REASON`. A gate the governor stops mid-run also exits 3 and records no evidence. `spawn --ready` stops its batch at the first deferral, marks it `governor_deferred` and exits 1. Exit 3 used to mean only a lock timeout. Past the stop line the governor stops Tower Crane's own running work. `project set --governor JSON` moves the lines; the defaults are `defer_at` 0.85 and `stop_at` 0.95 of the binding level.
+- Tests evidence now binds `tests.host_only` and a SHA-256 of `tests.host_env`. A project with host settings must rerun its tests gate after upgrading: earlier proof is stale for acceptance and merge.
+- `ask --kind credential` needs a `--setting` that grants a credential or loosens a sandbox: `env`, `env_file`, `sandbox`, `sandbox.session_bus`, `scope`, `ladder.reach` or `ladder.web_mcp`. A failing host or harness is `technical`.
+- An open decision closes itself as moot once every task it waits on is closed. A worker's or reviewer's question that blocks a task whose latest tests failure also fails on main goes to the orchestrator, whatever kind it was given, unless it is `spend` or `crisis` or names an owner-required setting other than a gate waiver.
+
+### Resources
+
+- A scope holds harness sub-agents, MCP servers, shells and tests, also when they detach or change process groups. A nested Tower Crane launch makes a delegated child cgroup inside the inherited scope, and the kernel enforces its cap and every ancestor's. The supervisor stays outside the scope so it can record the failure.
+- `OOMPolicy=kill` sets `memory.oom.group=1`, so a cgroup OOM stops the whole attempt. An unrelated scope is left running.
+- Containment metadata records `pids_peak`, `memory_peak_bytes` and `refused_forks`. Every launch in a containment scope gets `TOWER_CRANE_SCOPED=1`.
+- Containment cleans up after itself. A scope left failed, as an OOM leaves it, is reset once it settles and its `Result` is read. A keeper resets its scope when it ends, so a late OOM is still reported. Report directories carry the supervisor's pid, and the first contained launch of each process removes the directories and failed scopes of supervisors that were killed.
+- A setup failure fails the launch with `resource-scope-failed`. It never falls back silently once cgroups were chosen. A sampling failure stops the attempt with `resource-monitor-failed`.
+- Controllers kept after a normal exit stay in the agent's cgroup under a small detached keeper. Without cgroups the keeper carries the original process and RSS bound. The agent's home, cache and TMPDIR stay in place, and home pruning waits until that work ends.
+
+### Host governor
+
+- It reads the cgroup chain up to the shared slice, host memory and swap, memory and CPU pressure, and load. Every level must fit. It keeps room for running units to grow and for other sessions to return to their peak of the last `others_window_min` minutes, 30 by default.
+- A unit's expected size starts from `expected_mb` (worker 1536, reviewer 1024, tests 2048) and follows the kind's measured peaks once three exist.
+- A deferral shows in `status` on a `host governor:` line, in `inbox` as `governor_deferred` and on the board. A `wait` retries it once there is room.
+- Past the stop line it stops one unit at a time: gates and suites first, then reviewers and small agents, then workers, newest first. Orchestrators are never stopped. It signals only processes it started, matched by start time, so a reused pid is left alone.
+- A stopped gate records no verdict and runs again. A stopped worker resumes in its kept worktree, and neither the respawn cap nor the reviewer cap counts the stop. `inbox` shows `governor_stopped`.
+
+### Decisions and the owner
+
+- A moot decision records `withdrawn_by: "engine"`, `moot: true` and a reason naming each task, in a `decision withdraw` event. A decision asked about tasks already closed, such as a publish request for an accepted release, stays open, and so does a crisis.
+- `needs_owner_by` records who set a task's hold. Cancelling a hold the orchestrator or the engine set is the operational `task.cancel_hold`. A hold the owner or a worker set stays `task.cancel_needs_owner`, owner-required.
+- `project set --publish-policy '{"conditions": [...]}'` sets a standing publish policy once (`publish.policy`, owner-required). The conditions are `review_clean`, `full_suite` and `main_ci_green`. While they hold for an accepted release task, the orchestrator's `ask --setting publish --change '{"task":"T<n>"}'` exits 0 without a decision. When one fails, the ask opens the owner's decision and names it. `full_suite` needs passing, non-skipped cases for every host-only file at the release head.
+- `ask --kind crisis --crisis host|data|security|artifact` opens an owner decision and messages the owner at once. `status` and `inbox` end with `owner: nothing needed`, the open crisis, or what waits on the owner (JSON `owner`).
+
+### Tasks and dispatch
+
+- The `wait` host refills worker slots on its own path, so free slots fill while a gate reaction runs the full suite. Refill runs at startup, on every state change, on the fallback tick and after each reaction pass, one at a time per host. It skips a task whose own gate reaction is still live.
+- A `gates.rework_hold_min` hold dispatches when it ends, on a timer, with no other event.
+- `status` names why refill leaves each ready task undispatched, such as `not dispatched: T2 worker limit reached (3 of 3: T1, T4, T5)`, a rework hold, a running gate reaction, no brief, the dispatch lock's holder or a governor deferral. JSON has `not_dispatched`.
+
+### Gates
+
+- A 16 MiB log whose tokens an escape and a line break split stays scannable below 1 GiB in two streams. Before, it peaked at 1.17 GiB. 16 MiB carriage-return logs, spinner redraws included, also stay below 1 GiB. Ordinary logs keep their output.
+- The search for environment values a control splits is one native expression again, reading each character about once. In 0.1.5 it read every control in JavaScript per value, which took seconds on a colored log. It finds the same spans.
+
+### Development
+
+- `node scripts/mutants.js --check` validates mutant targets without running the sample, and `check:shared` runs it. Stale targets are repaired.
+- Mutation runs use a systemd user scope with 512 tasks and 4 GiB when available, and a process watchdog otherwise. A process or memory cap counts as a caught mutant, reported apart from test and timeout catches.
+
 ## 0.1.5 (2026-10-19)
 
 ### Upgrading
