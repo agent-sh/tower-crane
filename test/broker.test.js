@@ -839,8 +839,13 @@ test('a sandboxed worker prints its worktree without the state lock, though a st
   const job = { state: f.h.state, task: 'T2', agent: 'worker-T2-1', role: 'worker', cwd: wt.path, broker: path.join(f.h.base, 'brokers', 'worker-T2-1', B.FILE) };
   const broker = await B.start(job);
   t.after(() => broker.close());
-  const tasks = path.join(f.h.state, 'tasks.json');
-  const before = fs.readFileSync(tasks, 'utf8');
+  // A read-only directory reads the database through the -wal and -shm files a
+  // host process leaves. The test's reads close their connection and, as the
+  // last one, delete both; this one stands in for the host process.
+  const host = new (require('node:sqlite').DatabaseSync)(StateFiles.dbFile(f.h.state));
+  host.prepare('SELECT 1 FROM meta').get();
+  const before = f.h.readState('tasks.json');
+  const events = StateFiles.logText(f.h.state);
   // The sandbox leaves the state directory read-only, so the lock cannot be created.
   fs.chmodSync(f.h.state, 0o555);
   let r;
@@ -848,10 +853,12 @@ test('a sandboxed worker prints its worktree without the state lock, though a st
     r = f.h.run(['worktree', 'T2'], { cwd: wt.path, env: { ...broker.env, TOWER_CRANE_AGENT: job.agent, TOWER_CRANE_TASK: job.task } });
   } finally {
     fs.chmodSync(f.h.state, 0o755);
+    host.close();
   }
   assert.equal(r.code, 0, r.stderr);
   assert.equal(r.stdout.trim(), wt.path);
-  assert.equal(fs.readFileSync(tasks, 'utf8'), before, 'the sandboxed worktree wrote no state');
+  assert.deepEqual(f.h.readState('tasks.json'), before, 'the sandboxed worktree wrote no state');
+  assert.equal(StateFiles.logText(f.h.state), events);
   assert.equal(fs.existsSync(path.join(f.h.state, 'lock')), false, 'no state lock was taken');
 });
 

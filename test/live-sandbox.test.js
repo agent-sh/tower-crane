@@ -172,10 +172,9 @@ test('in a real claude sandbox a forged state edit fails and the CLI writes thro
   const h = login(makeRepo(t));
   h.init();
   h.ok(['task', 'add', '--title', 'Forge probe', '--acceptance', 'only the broker writes']);
-  const events = path.join(h.state, 'events.jsonl');
-  const before = fs.readFileSync(events, 'utf8');
+  const db = StateFiles.dbFile(h.state);
   const probe = path.join(results(h), 'forge-probe');
-  const forge = `const f=require("fs");try{f.appendFileSync(${JSON.stringify(events)},"{}\\n");f.writeFileSync(${JSON.stringify(probe)},"WROTE")}catch(e){f.writeFileSync(${JSON.stringify(probe)},"ERR "+e.code)}`;
+  const forge = `const f=require("fs");try{f.appendFileSync(${JSON.stringify(db)},"{}\\n");f.writeFileSync(${JSON.stringify(probe)},"WROTE")}catch(e){f.writeFileSync(${JSON.stringify(probe)},"ERR "+e.code)}`;
   h.ok(['brief', 'set', 'T1', '-'], {
     input: `Sandbox probe set up by the owner. Run exactly these two commands with the Bash tool, one after the other, then reply with their exit codes.\n\n${node} -e '${forge}'\n\n${node} ${JSON.stringify(BIN)} task note T1 through-the-broker\n`,
   });
@@ -184,7 +183,7 @@ test('in a real claude sandbox a forged state edit fails and the CLI writes thro
   assert.equal(r.code, 0, `${r.stderr}\n${agentLog(h)}`);
   assert.ok(fs.existsSync(probe), `the forge command ran\n${agentLog(h)}`);
   assert.match(fs.readFileSync(probe, 'utf8'), /^ERR /, 'the sandbox refused the direct write');
-  assert.ok(!fs.readFileSync(events, 'utf8').slice(before.length).split('\n').includes('{}'), 'no forged line');
+  assert.ok(!StateFiles.eventLines(h.state).includes('{}'), 'no forged event');
   const note = h.readState('tasks.json').tasks[0].notes.find((n) => n.text === 'through-the-broker');
   assert.equal(note?.agent, 'small-T1-1', `the broker wrote it as the spawned agent\n${agentLog(h)}`);
 });
@@ -196,7 +195,8 @@ test('in a real codex sandbox forged state edits fail and the CLI writes through
   const h = codexLogin(makeRepo(t));
   h.init();
   h.ok(['task', 'add', '--title', 'Forge probe', '--acceptance', 'only the broker writes']);
-  const files = ['events.jsonl', 'tasks.json', 'project.json'].map((f) => path.join(h.state, f));
+  // The database and the -wal and -shm files its writers leave beside it.
+  const files = [...StateFiles.DB_FILES].map((f) => path.join(h.state, f));
   const probe = path.join(results(h), 'forge-probe');
   const forge = `const f=require("fs");const out=${JSON.stringify(files)}.map(p=>{try{f.appendFileSync(p,"{}\\n");return "WROTE"}catch(e){return "ERR "+e.code}});f.writeFileSync(${JSON.stringify(probe)},JSON.stringify(out))`;
   h.ok(['brief', 'set', 'T1', '-'], {
@@ -209,11 +209,11 @@ test('in a real codex sandbox forged state edits fail and the CLI writes through
   const out = JSON.parse(fs.readFileSync(probe, 'utf8'));
   for (const [i, f] of files.entries()) {
     assert.match(out[i], /^ERR /, `the sandbox refused writing ${path.basename(f)}`);
-    assert.ok(!fs.readFileSync(f, 'utf8').split('\n').includes('{}'), `no forged line in ${path.basename(f)}`);
   }
+  assert.ok(!StateFiles.eventLines(h.state).includes('{}'), 'no forged event');
   const note = h.readState('tasks.json').tasks[0].notes.find((n) => n.text === 'through-the-broker');
   assert.equal(note?.agent, 'small-T1-1', `the broker wrote it as the spawned agent\n${agentLog(h)}`);
-  const event = fs.readFileSync(files[0], 'utf8').trim().split('\n').map((l) => JSON.parse(l)).find((e) => e.cmd === 'task note');
+  const event = StateFiles.readEvents(h.state).find((e) => e.cmd === 'task note');
   assert.deepEqual([event?.agent, event?.via], ['small-T1-1', 'broker']);
 });
 
@@ -574,7 +574,7 @@ test('a real codex sandbox starts for a home among 5,000 entries and reads nothi
   const secret = path.join(home, 'secret-test');
   fs.writeFileSync(secret, 'PLANTED-HOME-SECRET\n', { mode: 0o600 });
   const out = path.join(results(h), 'wide-probe.json');
-  const targets = { secret, beside: path.join(h.base, 'entry-0'), worktree: '.', state: path.join(h.state, 'tasks.json') };
+  const targets = { secret, beside: path.join(h.base, 'entry-0'), worktree: '.', state: StateFiles.dbFile(h.state) };
   const script = `const fs=require("fs");const o={node:process.version};for(const[k,p]of Object.entries(${JSON.stringify(targets)})){try{const s=fs.statSync(p);if(s.isDirectory())fs.readdirSync(p);else fs.readFileSync(p);o[k]="READABLE"}catch(e){o[k]="ERR "+e.code}}fs.writeFileSync(${JSON.stringify(out)},JSON.stringify(o))`;
   const bin = standInCodex(h, script);
   const r = await h.runAsync(['spawn', '--role', 'small', '--task', 'T1', '--wait'],
