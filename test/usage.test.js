@@ -169,13 +169,14 @@ test('a base-valid provider price table loads and retains exact rows through pro
   const row = (output) => ({ input: 1, cache_write: 1, cache_read: 1, output });
   const prices = { 'claude-opus-5-5': row(20), 'global.anthropic.claude-opus-5-5': row(30) };
   const project = h.readState('project.json');
-  assert.equal(project.schema_version, 1);
+  const schema = require('../lib/state').SCHEMA_VERSION;
+  assert.equal(project.schema_version, schema);
   project.review = { ...project.review, prices };
   h.writeState('project.json', project);
   assert.deepEqual(h.json(['project', 'show']).review.prices, prices, 'a schema-1 table from the base still loads');
   h.ok(['project', 'set', '--review-policy', JSON.stringify({ prices })]);
   assert.deepEqual(h.readState('project.json').review.prices, prices, 'saving does not collapse provider rows');
-  assert.equal(h.readState('project.json').schema_version, 1);
+  assert.equal(h.readState('project.json').schema_version, schema, 'saving keeps the schema');
   for (const [model, usd] of [
     ['claude-opus-5-5', 0.02],
     ['global.anthropic.claude-opus-5-5', 0.03],

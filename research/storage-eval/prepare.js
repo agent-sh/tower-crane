@@ -6,9 +6,10 @@
 //         finished tasks, up to 200 MiB
 // Each dataset gets the T254 files (A), a SQLite database (B) and a Valkey
 // AOF directory (D) holding the same tasks and events.
-// With --cli it writes only the files, for a run of a real CLI (B-cli), and
-// also sets the bench tasks back to todo, since a newer live copy has them
-// finished, and lifts the worker limit above the bench's writers.
+// With --cli it writes the files, for a run of a real CLI (B-cli), and B's
+// database from the same tasks and events, for the prototype it is measured
+// against; it sets the bench tasks back to todo, since a newer live copy has
+// them finished, and lifts the worker limit above the bench's writers.
 // Usage: node prepare.js --src DIR --out DIR [--only NAME] [--cli]
 const fs = require('node:fs');
 const path = require('node:path');
@@ -129,12 +130,14 @@ async function main() {
     fs.writeFileSync(path.join(files, 'project.json'), JSON.stringify(project, null, 2) + '\n');
     const events = eventsFor(name, live);
     fs.writeFileSync(path.join(files, 'events.jsonl'), events);
+    const eventLines = lines(events);
     if (cliOnly) {
-      manifest[name] = { events_bytes: events.length, tasks: tasksDoc.tasks.length, tasks_json_bytes: fs.statSync(path.join(files, 'tasks.json')).size };
+      B.importState(path.join(root, 'store.sqlite'), tasksDoc, eventLines);
+      manifest[name] = { events_bytes: events.length, tasks: tasksDoc.tasks.length, tasks_json_bytes: fs.statSync(path.join(files, 'tasks.json')).size,
+        sqlite_bytes: fs.statSync(path.join(root, 'store.sqlite')).size };
       process.stdout.write(`${name} ${JSON.stringify(manifest[name])}\n`);
       continue;
     }
-    const eventLines = lines(events);
     let t = Date.now();
     B.importState(path.join(root, 'store.sqlite'), tasksDoc, eventLines);
     const sqliteMs = Date.now() - t;
