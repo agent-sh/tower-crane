@@ -94,6 +94,46 @@ function newerParent(f, conflict) {
   return resubmit(f, false);
 }
 
+for (const status of ['submitted', 'accepted', 'rework', 'in_progress']) {
+  for (const stale of [false, true]) {
+    test(`a child gate ${stale ? 'waits for the newer head' : 'checks its current head'} while the parent is ${status}`, (t) => {
+      const f = setup(t);
+      const top = upper(f);
+      const parent = stale ? resubmit(f, false) : f.sha;
+      if (status === 'accepted') f.accept('T1');
+      if (['rework', 'in_progress'].includes(status)) f.h.ok(['rework', 'T1', '--reason', 'parent continues work']);
+      if (status === 'in_progress') f.h.ok(['claim', 'T1', '--agent', 'worker-T1']);
+      const result = f.h.run(['check', 'ci', 'T2', '--json']);
+      if (stale) {
+        assert.equal(result.code, 1, result.stdout + result.stderr);
+        assert.match(result.stderr, new RegExp(`waits for a submitted head containing T1 at ${parent}`));
+        assert.equal(events(f).some((e) => e.task === 'T2' && e.cmd === 'check ci'), false);
+      } else {
+        assert.equal(result.code, 0, result.stdout + result.stderr);
+        const checked = JSON.parse(result.stdout);
+        assert.equal(checked.ok, true);
+        assert.equal(checked.sha, top.sha);
+      }
+    });
+  }
+}
+
+test('a child gate waits when a replacement parent PR has no submitted head', (t) => {
+  const f = setup(t);
+  upper(f);
+  f.h.ok(['rework', 'T1', '--reason', 'replace parent PR']);
+  f.h.ok(['claim', 'T1', '--agent', 'worker-T1']);
+  f.write((d) => {
+    d.prs[21] = { ...d.prs[11], number: 21 };
+    d.prs[11].state = 'CLOSED';
+  });
+  f.h.ok(['release', 'T1', '--agent', 'worker-T1', '--pr', '21', '--reason', 'new PR needs submission']);
+  assert.equal(f.h.json(['task', 'show', 'T1']).sha, null);
+  const result = f.h.run(['check', 'ci', 'T2']);
+  assert.equal(result.code, 1, result.stdout + result.stderr);
+  assert.match(result.stderr, /waits for a submitted head containing T1 at \(none\)/);
+});
+
 for (const rewrite of [false, true]) {
   for (const published of [false, true]) {
     for (const checkout of [false, true]) {

@@ -21,7 +21,9 @@ A conflict aborts the scratch merge and leaves the child branch and checkout
 unchanged. A rework note names the parent sha and conflicting files, and the
 worker dispatches to resolve them. The `stack sync` conflict receipt permits
 that dispatch only while the child head and submitted parent head are unchanged.
-A gate waits until the child's submitted head contains the current parent head.
+A gate waits until the child's submitted head contains the latest submitted
+parent head. Gate freshness uses that head across parent rework and active
+claims. Dispatch and merge still apply their lifecycle checks.
 Live workers, dirty checkouts and stopped Git operations defer refresh. Merged
 parents take the completed-chain retirement path before any parent branch fetch.
 Refresh only merges a newer submitted or accepted head from an unmerged parent
