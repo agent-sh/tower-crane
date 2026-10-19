@@ -14,6 +14,8 @@ A child without a PR retires as soon as every lower member has merged, including
 
 The automatic retirement note lives in `task.notes`. It does not emit a `task note` event or create an `owner-comment` notification when the owner triggers retirement.
 
+A failed PR retarget keeps the stack record and fallback flag for retry. While that record remains and every lower task has merged, the ordinary merge fallback may retarget the recorded dependency base to the project base. After retirement removes the record, only the project base is valid; moving the PR back to the former dependency branch is refused without a PR write.
+
 Retirement preserves the child branch and commits. A task note tells the worker to merge the project base before continuing work or opening its PR and to resolve conflicts while preserving its commits. If GitHub closed the dependent PR while deleting its recorded base, retirement finds an open PR from the same branch against the project base or creates one with the closed PR's title and body. The replacement must match the submitted head, branch and repository and have auto-merge disabled. The task records its new PR number in the same write as `stack complete`; a separate `stack pr replaced` event records the former PR, replacement PR, sha and new revision. Replacement bumps the revision and returns an accepted task to submitted, so gates and review must run for the new PR. A closed PR against an unrelated base, a moved head or a failed GitHub call leaves the stack intact for inspection or retry.
 
 The shared generated-conflict preflight runs before automatic refresh from

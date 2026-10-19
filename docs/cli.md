@@ -338,6 +338,12 @@ bumps the revision and returns an accepted task to submitted, so gates and
 review must run for the new PR. Invalid heads, repositories or bases refuse
 recovery; failed calls preserve the stack for retry.
 
+A failed retarget keeps the stack record and fallback flag. After lower tasks
+merge, ordinary fallback can retarget that recorded dependency base to the
+project base. Once retirement clears the record, only the project base is
+valid; the former dependency branch and unrelated bases are refused without
+a PR write.
+
 Before every automatic synchronization, including after a confirmed merge
 and from `worktree` or `spawn`, submitted or accepted upper heads are checked
 against the fetched project base. Stacks

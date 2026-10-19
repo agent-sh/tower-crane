@@ -215,6 +215,7 @@ cp.spawnSync = function stackGh(command, args, opts) {
     return finish(pr);
   }
   if (args[0] === 'pr' && args[1] === 'edit') {
+    if (data.editError) return finish('', 1, data.editError);
     data.prs[args[2]].baseRefName = args[args.indexOf('--base') + 1];
     return finish();
   }
