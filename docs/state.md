@@ -775,7 +775,7 @@ The governor signals only processes the registry recorded when Tower Crane start
 
 ### Deferral and resumption
 
-A deferred dispatch or gate refuses with code 3: `TASK: UNIT deferred by the host governor: REASON`. `spawn` asks before any stack read, fetch or worktree; `spawn --ready` and automatic refill stop at the first deferral, since the reason holds for every task behind it, and a wait's refill reports it once each time it starts and retries on every pass. A reaction deferred inside a `wait` is retried by that wait, as described under [events.jsonl](#eventsjsonl). The registry keeps each deferral's reason, first time and latest time, and drops it when the unit is admitted or after ten minutes without a retry; a stop is kept for an hour.
+A deferred dispatch or gate refuses with code 3: `TASK: UNIT deferred by the host governor: REASON`. `spawn` asks before any stack read, fetch or worktree; `spawn --ready` and automatic refill stop at the first deferral, since the reason holds for every task behind it, and a wait's refill reports it once each time it starts and retries on every pass. A deferred reaction stays owed in the persistent automation queue, whichever process deferred it; any trusted `wait` retries it in its original turn once five seconds have passed and the governor would admit its unit, as described under [events.jsonl](#eventsjsonl). The registry keeps each deferral's reason, first time and latest time, and drops it when the unit is admitted or after ten minutes without a retry; a stop is kept for an hour. An owed reaction remains in the gate queue and keeps its `governor_deferred` inbox item after that registry hint expires, until its receipt settles or its source no longer matches an active submitted or accepted head.
 
 Where it shows:
 
@@ -1472,9 +1472,18 @@ unknown mergeability and failed merge attempts retryable; `error` records
 an exception. Terminal receipts include `error`, null without an exception.
 Startup can retry deferred or errored work without a new lifecycle event.
 A reaction the host governor deferred or stopped records `deferred` with the
-governor's message as `error`; the same `wait` retries it, without new
-receipts, once five seconds have passed and the governor would admit the
-unit that deferred it ([Host resource governor](#host-resource-governor)).
+governor's message as `error` and `governor: {until, task, kind, reason, since, at}`.
+`until` is the retry time in epoch milliseconds; `since` and `at` are ISO times.
+Its source is queued even when the supervisor or CI feedback started it directly.
+The deferred receipt leaves that source owed in its original drain order.
+Older governor receipts with only the governor's error text are also owed,
+using their event time for the retry interval, even without a queue entry.
+Every drain reads the persistent queue, so a caller that cannot retry can exit
+without retaining a pending list. Any trusted `wait` retries it once five seconds
+have passed and the governor would admit the unit that deferred it; probes while
+it is held take no executor and write no new reaction receipts
+([Host resource governor](#host-resource-governor)). Other kinds of deferral
+still rely on startup reconciliation or a new lifecycle event.
 A task has at most one observable executor.
 An exited executor's start can be retried, while an unobservable executor
 remains busy. At most `gates.executors` executors run on one host across
@@ -1538,9 +1547,11 @@ queued. A dead executor's notification stays queued for its retry. `status`
 lists the gate queue: running tasks, then the queued tasks in the order a free
 executor takes them, then the tasks whose notification waits behind their own
 running reaction, marked as blocked. `--json` carries it as `gate_queue` with
-`running`, `queued` and `blocked`, each queued or blocked task with its
+`running`, `queued`, `blocked` and `deferred`, each queued, blocked or deferred task with its
 `prioritized` request or `null`. An accepted task shows `null`, since its
-acceptance sets its place. `inbox` carries the same `gate_queue`. Each executor drains the queue after releasing its slot; watchers
+acceptance sets its place. `deferred` lists the queued tasks held by the governor,
+including those still in their retry interval; the text gate queue line appends
+`deferred by the governor: TASKS`. `inbox` carries the same `gate_queue`. Each executor drains the queue after releasing its slot; watchers
 also retry their pending notifications on their next check. State locks cover only
 reservation and receipts, never Git, GitHub, gates or model calls.
 Automatic state changes and evidence use `agent: orchestrator` and
