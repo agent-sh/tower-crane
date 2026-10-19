@@ -4,7 +4,9 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const cp = require('node:child_process');
 const { cachedFixture } = require('./helpers');
+const { writeHost } = require('./host');
 const { probe } = require('../scripts/probe-gate-scratch');
 const { suiteTime, reportSuiteTime, DEADLINE_MIN } = require('../scripts/suite-time');
 
@@ -72,3 +74,54 @@ test('the gate proof retains a failing gate result even when cleanup succeeds', 
   assert.equal(result.cleanup_ok, true);
   assert.equal(result.ok, false);
 });
+
+test('custom gate proofs retain their caller host readings across admission states', (t) => {
+  const h = fixture(t);
+  const variants = [
+    { name: 'available', readings: {}, exit: 0 },
+    { name: 'memory limit', readings: { used: 63 }, exit: 3, reason: /memory|line/ },
+    { name: 'memory pressure', readings: { memorySome: 50 }, exit: 3, reason: /memory pressure/ },
+    { name: 'CPU pressure', readings: { cpuSome: 90 }, exit: 3, reason: /cpu pressure/ },
+    { name: 'load', readings: { load: 10000 }, exit: 3, reason: /load/ },
+  ];
+  for (const row of variants) {
+    writeHost(h.env.TOWER_CRANE_HOST_ROOT, row.readings);
+    const result = probe({ root: h.repo, cache: path.join(h.base, 'probe'), command: 'node scratch.js', environment: h.env });
+    assert.equal(result.exit, row.exit, row.name);
+    assert.equal(result.ok, row.exit === 0, row.name);
+    if (row.exit !== 0) {
+      assert.equal(result.gate, null, row.name);
+      assert.match(result.stderr, row.reason, row.name);
+      assert.deepEqual(result.gate_parents, [], row.name);
+      assert.equal(result.cleanup_ok, false, 'a command that never ran cannot prove its scratch cleanup');
+    }
+  }
+});
+
+for (const row of [
+  { name: 'refused', status: 1, stderr: 'fixture gate refused' },
+  { name: 'usage failure', status: 2, stderr: 'fixture gate usage error' },
+  { name: 'deferred', status: 3, stderr: 'fixture gate deferred by the host governor' },
+  { name: 'empty successful output', status: 0, stderr: '' },
+]) {
+  test(`the gate proof reports a check with no receipt: ${row.name}`, (t) => {
+    const h = fixture(t);
+    const spawn = cp.spawnSync;
+    t.mock.method(cp, 'spawnSync', (program, args, options) => {
+      if (program === process.execPath && path.basename(args[0]) === 'tower-crane.js' && args[1] === 'check') {
+        return { status: row.status, stdout: '', stderr: row.stderr };
+      }
+      return spawn(program, args, options);
+    });
+    const result = probe({ root: h.repo, cache: path.join(h.base, 'probe'), command: 'node scratch.js', environment: h.env });
+    assert.equal(result.exit, row.status);
+    assert.equal(result.stderr, row.stderr);
+    assert.equal(result.gate, null);
+    assert.equal(result.ok, false);
+    assert.equal(result.cleanup_ok, false);
+    assert.deepEqual(result.gate_parents, []);
+    assert.deepEqual(result.outer_after, []);
+    assert.deepEqual(result.gate_root_after, []);
+    assert.equal(fs.existsSync(result.outer), false, 'the measurement state is removed even without a receipt');
+  });
+}
