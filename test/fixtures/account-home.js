@@ -18,6 +18,8 @@ const path = require('node:path');
 
 // Every CLI fails when it resolves the user ladder file outside the test roots.
 require('./user-config-guard');
+// Every CLI's write draws its sketch before it returns.
+require('./render-inline');
 
 const AUTHORITY = path.join('lib', 'authority.js');
 const GATE_TMP = path.join('lib', 'gate-tmp.js');

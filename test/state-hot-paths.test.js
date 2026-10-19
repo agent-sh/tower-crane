@@ -52,7 +52,7 @@ test('hook polls, writes and waits read only their own events, not the whole log
     read('evidence', ['evidence', 'T1', '--type', 'note', '--ok', '--summary', 'checked', '--agent', agent]),
     read('rework', ['rework', 'T1', '--reason', 'again', '--agent', 'owner']),
     // A worker waits on its own task from a cursor, as the work skill has it do.
-    read('wait', ['wait', '--task', 'T1', '--after', cursor, '--timeout', '1', '--agent', agent]),
+    read('wait', ['wait', '--task', 'T1', '--after', cursor, '--timeout', '1', '--agent', agent]), // wait-allow: events past the cursor return at once; the bound only ends a wait that finds none
   ];
   for (const run of runs) assert.ok(run.rows < OTHER / 10, `${run.label} read ${run.rows} event rows of a ${OTHER}-event log`);
   assert.equal(runs.find((r) => r.label === 'hook poll').rows, 0, 'an empty poll reads no events');
