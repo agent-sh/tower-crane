@@ -108,27 +108,27 @@ function commandWorker(h, argv) {
     ...['model', 'profile', 'provider', 'effort', 'args'].flatMap((field) => ['--clear', field])]);
 }
 
-test('log waits for a final newline and rejects malformed completed records', (t) => {
-  const h = setup(t);
-  const before = log(h);
-  const appended = { ...before.at(-1), id: 'Epending' };
-  const encoded = JSON.stringify(appended);
-  const file = path.join(h.state, 'events.jsonl');
-  const read = fs.readFileSync;
-  let tail = '';
-  t.mock.method(fs, 'readFileSync', function (target, ...args) {
-    const raw = read.call(this, target, ...args);
-    return target === file ? raw + tail : raw;
+// A 0.1 log can end in a record still being appended, or hold a completed
+// line that is not JSON. Migration keeps either as a line, not an event, so
+// the events read the same, and the next event's cursor follows the line.
+for (const [kind, tail] of [['torn', (e) => e.slice(0, -1)], ['malformed', () => '{"broken":}\n']]) {
+  test(`a 0.1 log ending in a ${kind} record migrates with it kept as a line, not an event`, (t) => {
+    const h = setup(t);
+    const before = log(h);
+    const encoded = JSON.stringify({ ...before.at(-1), id: 'Epending' });
+    StateFiles.toFileLayout(h.state);
+    const file = path.join(h.state, 'events.jsonl');
+    fs.appendFileSync(file, tail(encoded));
+    const size = fs.statSync(file).size;
+    h.ok(['task', 'show', 'T1']);
+    assert.deepEqual(log(h), before, 'the line is no event');
+    h.ok(['task', 'note', 'T1', 'after the line']);
+    const after = StateFiles.readEvents(h.state, { offsets: true }).at(-1);
+    assert.equal(after.detail.text, 'after the line');
+    // A line without its newline is ended as the next 0.1 append would end it.
+    assert.equal(after.offset, size + (kind === 'torn' ? 1 : 0) + Buffer.byteLength(JSON.stringify((({ offset: _, ...e }) => e)(after))) + 1);
   });
-  for (const suffix of [encoded.slice(0, -1), encoded]) {
-    tail = suffix;
-    assert.deepEqual(log(h), before, 'an append is unread until its newline arrives');
-  }
-  tail = `${encoded}\n`;
-  assert.deepEqual(log(h), [...before, appended]);
-  tail = '{"broken":}\n';
-  assert.throws(() => log(h), SyntaxError, 'completed records still have to be valid JSON');
-});
+}
 
 test('readiness observes a CLI marker without directory watch notifications', async (t) => {
   const h = setup(t);

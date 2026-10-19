@@ -80,13 +80,20 @@ function logText(dir) {
 
 // Appends the events on the lines of `text` as they are, as a test appended
 // them to events.jsonl. A line without an id gets one, since the database
-// names every event.
+// names every event, and so does a copy of an event the log holds: no two
+// events share an id there.
 function appendLog(dir, text, { locked = false } = {}) {
-  const events = String(text).split('\n').filter((line) => line.trim()).map((line) => {
-    const e = JSON.parse(line);
-    return e.id ? e : { id: `E${require('node:crypto').randomUUID()}`, ...e };
-  });
-  withDb(dir, () => underLock(dir, locked, () => Db.commit(dir, { events })));
+  const fresh = () => `E${require('node:crypto').randomUUID()}`;
+  withDb(dir, () => underLock(dir, locked, () => {
+    const seen = new Set();
+    const events = String(text).split('\n').filter((line) => line.trim()).map((line) => {
+      const e = JSON.parse(line);
+      const copied = e.id && (seen.has(e.id) || Db.eventById(dir, e.id));
+      if (e.id) seen.add(e.id);
+      return !e.id || copied ? { ...e, id: fresh() } : e;
+    });
+    Db.commit(dir, { events });
+  }));
 }
 
 // Replaces the whole log with the events on the lines of `text`, as a test
