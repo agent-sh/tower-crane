@@ -277,8 +277,11 @@ for (const runtime of ['with', 'without']) test(`a real claude agent's commands 
   });
   pinLiveRung(h, 'claude');
   const userHome = os.homedir();
-  const env = { ...h.env, HOME: userHome, USERPROFILE: userHome, CLAUDE_CONFIG_DIR: '', XDG_CACHE_HOME: shortCache(t),
-    ...(runtime === 'with' ? {} : { XDG_RUNTIME_DIR: '' }) };
+  const cache = shortCache(t);
+  const runtimePath = path.join(cache, 'runtime');
+  fs.mkdirSync(runtimePath, { mode: 0o700 });
+  const env = { ...h.env, HOME: userHome, USERPROFILE: userHome, CLAUDE_CONFIG_DIR: '', XDG_CACHE_HOME: cache,
+    XDG_RUNTIME_DIR: runtime === 'with' ? runtimePath : '' };
   const r = await h.runAsync(['spawn', '--role', 'small', '--task', 'T1', '--wait'], { env });
   assert.equal(r.code, 0, `${r.stderr}\n${agentLog(h)}`);
   assert.ok(fs.existsSync(out), `the probe ran\n${agentLog(h)}`);

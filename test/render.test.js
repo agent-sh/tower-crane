@@ -58,6 +58,27 @@ test('render writes both files on demand', (t) => {
   assert.ok(fs.existsSync(out.md) && fs.existsSync(out.html));
 });
 
+test('priority writes render normal, urgent and cleared priority in both sketches', (t) => {
+  const h = makeRepo(t);
+  h.init();
+  h.ok(['task', 'add', '--title', 'Urgent fix', '--acceptance', 'works']);
+  const check = (priority) => {
+    const md = fs.readFileSync(path.join(h.state, 'sketch.md'), 'utf8');
+    assert.match(md, /^\| Task \| Title \| Kind \| Size \| Tier \| Priority \| Unblocks \|$/m);
+    assert.match(md, new RegExp(`^\\| T1 \\| Urgent fix \\(no brief\\) \\| code \\| M \\| medium \\| ${priority} \\| 0 \\|$`, 'm'));
+    const html = fs.readFileSync(path.join(h.state, 'sketch.html'), 'utf8');
+    assert.match(html, new RegExp(`<article id="T1"[\\s\\S]*?priority <b>${priority}</b>`));
+    const ready = html.match(/<li class="row" data-key="r-T1">[\s\S]*?<\/li>/)[0];
+    if (priority === 'urgent') assert.match(ready, /<span class="why">urgent<\/span>/);
+    else assert.doesNotMatch(ready, /<span class="why">urgent<\/span>/);
+  };
+  check('normal');
+  h.ok(['task', 'update', 'T1', '--priority', 'urgent', '--agent', 'orchestrator']);
+  check('urgent');
+  h.ok(['task', 'update', 'T1', '--priority', 'normal', '--agent', 'orchestrator']);
+  check('normal');
+});
+
 test('a render that read the state before a write never replaces the sketch of that write', async (t) => {
   const h = makeRepo(t);
   h.init();

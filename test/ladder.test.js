@@ -8,7 +8,7 @@ const path = require('node:path');
 const { makeRepo, fixtureLadder, pluginRoot, ROOT, TMP_ROOT } = require('./helpers');
 const A = require('../lib/agents');
 const L = require('../lib/ladder');
-const { findExecutable } = require('../lib/spawn');
+const { findReal } = require('../lib/shim');
 
 test('every ladder harness declares its sandbox capabilities', () => {
   assert.deepEqual(Object.keys(A.CAPABILITIES).sort(), [...L.HARNESSES].sort());
@@ -400,7 +400,8 @@ test('a ladder write is evented and re-renders the sketch with the ladder and ea
   assert.match(html, /<a href="#T1" class="node s-ready"[^>]*aria-label="T1 Small fix, ready, tier easy"/, 'the graph shows the task tier');
   const md = fs.readFileSync(path.join(h.state, 'sketch.md'), 'utf8');
   assert.match(md, /^\| easy \| codex \(default\) \| fixture-model \| medium \|$/m);
-  assert.match(md, /^\| T1 \| Small fix \(no brief\) \| code \| S \| easy \| 0 \|$/m, 'the ready table shows the tier and the missing brief');
+  assert.match(md, /^\| Task \| Title \| Kind \| Size \| Tier \| Priority \| Unblocks \|$/m);
+  assert.match(md, /^\| T1 \| Small fix \(no brief\) \| code \| S \| easy \| normal \| 0 \|$/m, 'the ready table shows the tier, default priority and missing brief');
 });
 
 test('tasks take a tier from kind and size unless one is given', (t) => {
@@ -482,10 +483,12 @@ test('validate allows identical Codex profile and explicit model identities', (t
 });
 
 // A directory holding git and the named stand-ins, used as the whole PATH.
+// Its git runs the real one: inside an agent the first git on PATH is the
+// agent's shim, which would find this wrapper first and run it again.
 function onlyOnPath(h, name, programs) {
   const dir = path.join(h.base, name);
   fs.mkdirSync(dir, { recursive: true });
-  const git = findExecutable('git', h.repo, true, process.env);
+  const git = findReal('git', '');
   fs.writeFileSync(path.join(dir, 'git'), `#!/bin/sh\nexec '${git}' "$@"\n`, { mode: 0o755 });
   for (const [program, script] of Object.entries(programs)) {
     const file = path.join(dir, `${program}.js`);

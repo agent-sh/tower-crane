@@ -578,7 +578,9 @@ test('live usage shows its freshness: live, stale when no reading arrives, unava
 
 test('a harness without live usage is shown unavailable, never as zero', async (t) => {
   const h = setup(t, 'claude');
-  const script = "require('node:child_process').execFileSync(process.execPath, [process.argv[1], 'claim', 'T1']); setInterval(() => {}, 1000);";
+  const script = `
+const { fakeAgentEnv } = require(${JSON.stringify(path.join(__dirname, 'agent-env.js'))});
+require('node:child_process').execFileSync(process.execPath, [process.argv[1], 'claim', 'T1'], { env: fakeAgentEnv(process.env) }); setInterval(() => {}, 1000);`;
   h.ok(['ladder', 'set', 'easy', '--harness', 'command', '--clear', 'model', '--command', JSON.stringify([process.execPath, '-e', script, require('./helpers').BIN, '{prompt}'])]);
   const spawned = h.json(['spawn', '--task', 'T1']);
   await until(t, h, () => liveEntries(h).length === 1, 'no live state was recorded');
@@ -594,7 +596,9 @@ test('a budget lowered during retry backoff cancels the relaunch, records the st
   const h = setup(t, 'claude', { retries: 1, backoff_ms: 60000, max_backoff_ms: 60000 });
   const attempts = path.join(h.base, 'attempts');
   const script = "const fs = require('node:fs'); fs.appendFileSync(process.argv[2], 'x');"
-    + " require('node:child_process').execFileSync(process.execPath, [process.argv[1], 'claim', 'T1']); process.exit(75);";
+    + `
+const { fakeAgentEnv } = require(${JSON.stringify(path.join(__dirname, 'agent-env.js'))});
+ require('node:child_process').execFileSync(process.execPath, [process.argv[1], 'claim', 'T1'], { env: fakeAgentEnv(process.env) }); process.exit(75);`;
   h.ok(['ladder', 'set', 'easy', '--harness', 'command', '--clear', 'model', '--command', JSON.stringify([process.execPath, '-e', script, require('./helpers').BIN, attempts, '{prompt}'])]);
   h.ok(['spend', 'T1', '--agent', 'earlier', '--tokens', '5000']);
   const spawned = h.json(['spawn', '--task', 'T1']);

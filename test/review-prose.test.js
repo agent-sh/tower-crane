@@ -110,10 +110,12 @@ test('prose-only failure stays submitted and the reviewer checks the edited body
   const body = path.join(h.base, 'pr-body.md');
   fs.writeFileSync(body, 'The refused claim records a reason in state.\n');
   const output = path.join(h.base, 'light-prompt.md');
-  const script = `const fs = require('node:fs'); const cp = require('node:child_process');
+  const script = `
+const { fakeAgentEnv } = require(${JSON.stringify(path.join(__dirname, 'agent-env.js'))});
+const fs = require('node:fs'); const cp = require('node:child_process');
 fs.writeFileSync(${JSON.stringify(output)}, process.argv[1]);
 if (!fs.readFileSync(${JSON.stringify(body)}, 'utf8').includes('records a reason in state')) process.exit(2);
-const r = cp.spawnSync(process.execPath, ${JSON.stringify([BIN, 'evidence', 'T1', '--type', 'review', '--ok', '--sha', h.sha, '--summary', 'Corrected claim checked.'])}, {env: process.env});
+const r = cp.spawnSync(process.execPath, ${JSON.stringify([BIN, 'evidence', 'T1', '--type', 'review', '--ok', '--sha', h.sha, '--summary', 'Corrected claim checked.'])}, {env: fakeAgentEnv(process.env)});
 process.exit(r.status ?? 1);`;
   h.ok(['ladder', 'set', 'easy', '--command', JSON.stringify([process.execPath, '-e', script, '{prompt}'])]);
   const cursor = StateFiles.logEnd(h.state);
@@ -232,6 +234,8 @@ test('a late review of an older head at the reworked revision cannot select the 
     '--summary', '1 blocker: the changelog claim is false.', '--findings', JSON.stringify([claim('changelog.d/T1.md')])]);
   const back = h.json(['rework', '--from-review', 'T1', '--agent', 'orchestrator']);
   assert.equal(back.revision, 2);
+  h.ok(['task', 'note', 'T1', 'Limit the correction to the currently submitted changelog claim',
+    '--kind', 'scope-ruling', '--agent', 'orchestrator']);
   const worker = 'worker-T1-2';
   h.ok(['claim', 'T1', '--agent', worker], bound(worker));
   h.ok(['submit', 'T1', '--agent', worker, '--sha', commit('The reason is recorded in state.\n')], bound(worker));

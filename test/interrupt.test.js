@@ -22,10 +22,12 @@ function setup(t, retry = false, stubborn = false) {
   const finish = path.join(h.base, 'finish');
   const script = path.join(h.base, 'harness.js');
   fs.writeFileSync(script, `
+const { fakeAgentEnv } = require(${JSON.stringify(path.join(__dirname, 'agent-env.js'))});
+
 const fs = require('node:fs');
 const cp = require('node:child_process');
 const [bin, seen, session, prompt] = process.argv.slice(2);
-const cli = (...args) => cp.execFileSync(process.execPath, [bin, ...args], { encoding: 'utf8' });
+const cli = (...args) => cp.execFileSync(process.execPath, [bin, ...args], { env: fakeAgentEnv(process.env), encoding: 'utf8' });
 ${stubborn ? `
 process.on('SIGTERM', () => {});
 if (!session) {

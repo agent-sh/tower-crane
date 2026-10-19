@@ -342,7 +342,9 @@ test('the board pauses dispatch, interrupts a real supervised fixture and delega
   h.init();
   h.ok(['task', 'add', '--title', 'A supervised fixture', '--acceptance', 'stops on request', '--tier', 'easy']);
   h.ok(['brief', 'set', 'T1', '-'], { input: 'Fixture process, no model.\n' });
-  const script = `require('node:child_process').execFileSync(process.execPath,[${JSON.stringify(BIN)},'claim','T1']);setInterval(()=>{},1000)`;
+  const script = `
+const { fakeAgentEnv } = require(${JSON.stringify(path.join(__dirname, 'agent-env.js'))});
+require('node:child_process').execFileSync(process.execPath,[${JSON.stringify(BIN)},'claim','T1'], { env: fakeAgentEnv(process.env) });setInterval(()=>{},1000)`;
   h.ok(['ladder', 'set', 'easy', '--harness', 'command', '--command', JSON.stringify([process.execPath, '-e', script, '{brief}']), '--clear', 'profile', '--clear', 'effort']);
   h.ok(['project', 'set', '--paused', 'Inspect before dispatch']);
   assert.match(h.run(['spawn', '--task', 'T1']).stderr, /project paused/);

@@ -188,6 +188,13 @@ test('host scopes wrap both harnesses and retries, preserve private env and allo
   fs.writeFileSync(path.join(bin, 'systemd-run'), `#!${process.execPath}
 const fs = require('node:fs'), cp = require('node:child_process');
 const args = process.argv.slice(2);
+const supported = new Set(['CPUQuota', 'MemoryMax', 'TasksMax', 'MemorySwapMax', 'OOMPolicy', 'Delegate']);
+for (let i = 0; i < args.indexOf('--'); i++) {
+  if (args[i] === '-p' && !supported.has(args[++i].split('=')[0])) {
+    console.error('Unknown assignment: ' + args[i]);
+    process.exit(1);
+  }
+}
 fs.appendFileSync(${JSON.stringify(wrapped)}, JSON.stringify(args) + '\\n');
 const sep = args.indexOf('--');
 if (sep < 0) throw new Error('missing command separator');
@@ -260,6 +267,13 @@ console.log('literal args passed');
   fs.writeFileSync(path.join(bin, 'systemd-run'), `#!${process.execPath}
 const cp = require('node:child_process');
 const args = process.argv.slice(2);
+const supported = new Set(['CPUQuota', 'MemoryMax', 'TasksMax', 'MemorySwapMax', 'OOMPolicy', 'Delegate']);
+for (let i = 0; i < args.indexOf('--'); i++) {
+  if (args[i] === '-p' && !supported.has(args[++i].split('=')[0])) {
+    console.error('Unknown assignment: ' + args[i]);
+    process.exit(1);
+  }
+}
 if (process.env.SIMULATE_OLD_SYSTEMD && args.includes('--expand-environment=no')) {
   console.error("systemd-run: unrecognized option '--expand-environment=no'");
   process.exit(1);
@@ -542,9 +556,12 @@ test('claude: a sandboxed agent gets a temp directory of its own that its comman
   // A cache root short enough for claude's 73-byte socket bound.
   const cache = fs.mkdtempSync(path.join(os.homedir(), '.cache', 'tcl-'));
   t.after(() => fs.rmSync(cache, { recursive: true, force: true }));
+  // Exercise the runtime-directory branch independently of the caller's session.
+  const runtime = path.join(cache, 'runtime');
+  fs.mkdirSync(runtime);
   const spawnSeen = (xdg, fx = h, extra = {}) => {
     releaseExited(fx);
-    const stdout = fx.ok(['spawn', '--task', 'T1', '--wait'], { env: { ...fx.env, PATH: `${bin}${path.delimiter}${process.env.PATH}`, CLAUDE_CONFIG_DIR: '', TMPDIR: caller, TMP: caller, TEMP: caller, XDG_CACHE_HOME: xdg, ...extra } });
+    const stdout = fx.ok(['spawn', '--task', 'T1', '--wait'], { env: { ...fx.env, PATH: `${bin}${path.delimiter}${process.env.PATH}`, CLAUDE_CONFIG_DIR: '', TMPDIR: caller, TMP: caller, TEMP: caller, XDG_CACHE_HOME: xdg, XDG_RUNTIME_DIR: runtime, ...extra } });
     return { ...JSON.parse(fs.readFileSync(out, 'utf8')), stdout };
   };
   const seen = spawnSeen(cache);

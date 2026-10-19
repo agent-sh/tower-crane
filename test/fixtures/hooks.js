@@ -3,8 +3,9 @@
 // Preloaded into a tower-crane process by tests that need to steer it from the
 // outside: stop it at a point until the test lets it go, kill it while it
 // holds the lock, slow it down, or make one kind of filesystem call fail.
-// Each hook is off unless its HOOK_* variable is set, and acts only on paths
-// under HOOK_STATE. Hooks key on file names, filesystem calls and error codes,
+// Each hook is off unless its HOOK_* variable is set. State filesystem hooks
+// act only on paths under HOOK_STATE; HOOK_ENVIRON_READS counts /proc/PID/environ
+// reads outside it. Hooks key on file names, filesystem calls and error codes,
 // not on tower-crane's functions, so a test built on them drives any version of
 // the lock through the same schedule.
 
@@ -55,6 +56,18 @@ if (env.HOOK_HIDDEN_PIDS) {
     if (pid && hidden.has(Number(pid[1]))) {
       throw Object.assign(new Error('process is outside the pid view'), { code: 'ENOENT' });
     }
+    return read.call(this, file, ...args);
+  };
+}
+
+// HOOK_ENVIRON_READS=FILE: the CLI appends "READER PID" to FILE for each
+// /proc/PID/environ it reads, so a test can count its passes over /proc.
+if (env.HOOK_ENVIRON_READS && path.basename(process.argv[1] || '') === 'tower-crane.js') {
+  const read = fs.readFileSync;
+  const append = fs.appendFileSync;
+  fs.readFileSync = function countedEnviron(file, ...args) {
+    const pid = typeof file === 'string' && /^\/proc\/(\d+)\/environ$/.exec(file);
+    if (pid) append.call(fs, env.HOOK_ENVIRON_READS, `${process.pid} ${pid[1]}\n`);
     return read.call(this, file, ...args);
   };
 }
@@ -117,6 +130,15 @@ if (env.HOOK_CLOCK_FILE) {
   global.Date = class extends DateClass {
     constructor(...args) { super(...(args.length ? args : [clock()])); }
     static now() { return clock(); }
+  };
+}
+
+// HOOK_NO_FALLBACK=1: the wait host's one-second fallback tick never fires,
+// so with HOOK_SILENT_WATCH only its own timers wake it.
+if (env.HOOK_NO_FALLBACK && path.basename(process.argv[1] || '') === 'tower-crane.js' && process.argv[2] === 'wait') {
+  const interval = global.setInterval;
+  global.setInterval = function noFallback(fn, ms, ...args) {
+    return ms === 1000 ? interval(() => {}, ms) : interval(fn, ms, ...args);
   };
 }
 

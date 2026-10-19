@@ -564,6 +564,42 @@ test('a test that also fails on main retries once, then reworks with the main fa
   assert.match(h.logs().findLast((e) => e.cmd === 'rework').detail.reason, /^tests failed at [0-9a-f]+: .*Also fails on main at [0-9a-f]+: known base failure/s);
 });
 
+test('a host-only test main fails with the same error retries once, stays submitted with the inbox naming it, and reruns when main moves', (t) => {
+  const h = setup(t, { ci: 'pending' });
+  const script = path.join(h.base, 'known-host-failure.js');
+  fs.writeFileSync(script, ["console.log('# Subtest: test/value.test.js');", "console.log('not ok 1 - known host failure');",
+    "console.log('  error: \\'the shared config stays read-only\\'');", 'process.exit(1);'].join('\n'));
+  h.ok(['project', 'set', '--tests-cmd', 'node -e "process.exit(0)"', '--tests-mode', 'run-only',
+    '--tests-proof-cmd', `node ${shellQuote(script)} {tests}`, '--tests-host-only', '["test/value.test.js"]']);
+  h.submit();
+  h.consume();
+  const runs = () => h.logs().filter((e) => e.cmd === 'check tests').length;
+  assert.equal(runs(), 2, 'a flaky host test gets its one retry, and no third run');
+  let task = h.readState('tasks.json').tasks[0];
+  assert.equal(task.status, 'submitted');
+  assert.equal(h.logs().filter((e) => e.cmd === 'rework').length, 0, 'the task is not reworked for main\'s failure');
+  assert.deepEqual(task.evidence.filter((e) => e.type === 'tests').map((e) => [e.main_failure?.names, e.infrastructure_failure, e.confirmed_failure]),
+    [[['known host failure'], true, undefined], [['known host failure'], true, undefined]]);
+  const item = h.json(['inbox', '--agent', 'orchestrator']).items.find((i) => i.kind === 'gate_failed' && i.gate === 'tests');
+  assert.ok(item, 'the inbox shows the failed tests gate');
+  assert.deepEqual(item.main_failure.names, ['known host failure']);
+  assert.equal(item.infrastructure_failure, true);
+  assert.deepEqual(item.action.argv, ['check', 'tests', 'T1']);
+  assert.match(item.summary, /Also fails on main at [0-9a-f]+: known host failure\. Infrastructure:/);
+  h.consume();
+  assert.equal(runs(), 2, 'nothing reruns while main stays where it failed');
+  // main moves: the base's verdict can change, so the gate runs again, once.
+  const moved = h.git(['commit-tree', 'main^{tree}', '-p', 'main', '-m', 'main moves']);
+  h.git(['update-ref', 'refs/heads/main', moved]);
+  h.consume();
+  assert.equal(runs(), 3, 'the gate reruns once main moves past the recorded base');
+  task = h.readState('tasks.json').tasks[0];
+  assert.equal(task.status, 'submitted');
+  assert.equal(task.evidence.filter((e) => e.type === 'tests').at(-1).main_failure.base, moved.slice(0, 10));
+  h.consume();
+  assert.equal(runs(), 3, 'the rerun recorded the new base, so it does not repeat');
+});
+
 test('a test failure whose base rerun is killed is not confirmed, retries once and reports the unchecked base', { skip: process.platform === 'win32' }, (t) => {
   const h = setup(t, { ci: 'pending' });
   const script = path.join(h.base, 'base-killed.js');

@@ -30,7 +30,9 @@ const tools = JSON.parse(/^tools: (.*)$/m.exec(agent)?.[1] || '[]');
 const skills = JSON.parse(/^skills: (.*)$/m.exec(agent)?.[1] || '[]');
 const contextBytes = Buffer.byteLength([agent, ...memory, JSON.stringify(mcp), JSON.stringify(rules)].join('\n'));
 const ran = JSON.parse(process.env.STUB_RUN || '[]').map(argv => {
-  const result = cp.spawnSync(argv[0], argv.slice(1), { encoding: 'utf8' });
+  const runsCli = argv[0] === process.execPath && argv.slice(1).some((arg) => /[\\/]bin[\\/]tower-crane\.js$/.test(arg));
+  const env = runsCli ? require('../agent-env').fakeAgentEnv(process.env) : process.env;
+  const result = cp.spawnSync(argv[0], argv.slice(1), { env, encoding: 'utf8' });
   return { argv, code: result.status, stderr: result.stderr };
 });
 writeAtomic(process.env.STUB_OUT, JSON.stringify({

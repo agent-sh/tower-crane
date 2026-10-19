@@ -175,12 +175,14 @@ for (const change of ['brief', 'rework', 'acceptance']) {
     const { h, sha } = reviewedTask(t);
     const release = path.join(h.base, 'release-review');
     const script = `
+const { fakeAgentEnv } = require(${JSON.stringify(path.join(__dirname, 'agent-env.js'))});
+
 const fs = require('node:fs');
 const cp = require('node:child_process');
 const timer = setInterval(() => {
   if (!fs.existsSync(${JSON.stringify(release)})) return;
   clearInterval(timer);
-  const result = cp.spawnSync(process.execPath, ${JSON.stringify([BIN, 'evidence', 'T1', '--type', 'review', '--ok', '--sha', sha])}, { env: process.env });
+  const result = cp.spawnSync(process.execPath, ${JSON.stringify([BIN, 'evidence', 'T1', '--type', 'review', '--ok', '--sha', sha])}, { env: fakeAgentEnv(process.env) });
   process.exit(result.status ?? 1);
 }, 30);
 setTimeout(() => process.exit(2), 300000).unref();

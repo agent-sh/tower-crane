@@ -394,6 +394,11 @@ test('the lint rejects sleeps, counted sleep loops and other clocks, and accepts
     'const hook = `for i in 1 2 3; do\\ncat > f <<EOF\\ndone\\nEOF\\nsleep 1\\ndone`;', // wait-allow: rejected lint fixture
     'const hook = `for i in 1 2 3; do # x; done\\nsleep 1\\ndone`;', // wait-allow: rejected lint fixture
     "const hook = `sh -c 'for i in 1 2 3; do sleep 1; done'`;", // wait-allow: rejected lint fixture
+    // $'...' keeps an escaped quote, and a # glued to $(...) is part of the word, so neither hides the loop after it.
+    "const hook = `echo $'\\\\''; for i in 1 2 3; do echo 'y'; sleep 1; done`;", // wait-allow: rejected lint fixture
+    'const hook = `x=$(echo a)#; for i in 1 2 3; do sleep 1; done`;', // wait-allow: rejected lint fixture
+    // Deeply nested unclosed substitutions are read without recursion.
+    'const hook = `' + '"$('.repeat(3000) + 'for i in 1 2 3; do sleep 1; done`;', // wait-allow: rejected lint fixture
     // An echo's command substitution runs, and a helper's sleep may take a quoted or interpolated operand.
     'const hook = `for i in 1 2 3; do echo $(sleep 1); done`;', // wait-allow: rejected lint fixture
     "function nap() { cp.spawnSync('sh', ['-c', 'sleep \"$d\"']); } // wait-allow: cadence\nfor (let i = 0; i < 3 && !ok(); i++) nap();", // wait-allow: rejected lint fixture
@@ -443,6 +448,9 @@ test('the lint rejects sleeps, counted sleep loops and other clocks, and accepts
     // A whole loop in quoted text or a heredoc is read on its own.
     'const hook = `cat <<EOF\\nfor i in 1 2 3; do echo; done\\nEOF\\nwhile [ ! -f go ]; do sleep 0.1; done`;',
     'const hook = `while [ ! -f go ]; do echo "done"; sleep 0.1; done; for i in 1 2; do echo; done`;',
+    // << in arithmetic opens no heredoc, but $((cmd) ) is a subshell where << does.
+    'const hook = `for i in 1 2 3; do echo; x=$((1<<2))\\ndone\\n2\\nwhile [ ! -f go ]; do sleep 0.1; done`;',
+    'const hook = `x=$((cat <<EOF\\nfor i in 1 2 3; do\\nEOF\\n) )\\nwhile [ ! -f go ]; do sleep 0.1; done`;',
     'await scheduler.wait(HUNG_TEST_MS);',
     'const elapsed = process.hrtime.bigint() - start; report(elapsed);',
   ]) assert.deepEqual(waitFindings(source), [], source);

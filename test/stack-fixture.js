@@ -6,7 +6,7 @@
 const test = require('node:test');
 const fs = require('node:fs');
 const path = require('node:path');
-const { makeRepo, copyRepo, repairWorktrees, BIN } = require('./helpers');
+const { makeRepo, copyRepo, repairWorktrees, fakeAgentEnv, BIN } = require('./helpers');
 const { updateJson, readPublished } = require('./atomic-file');
 
 function worker(f) {
@@ -33,7 +33,9 @@ updateJson(process.env.TEST_STACK_DATA, (data) => {
 });
 process.stdout.write(cli(['submit', task, '--sha', sha, '--pr', '12']));
 `);
+  // The worker's own CLI calls need the offline GitHub adapter.
   f.h.ok(['ladder', 'set', 'medium', '--harness', 'command', '--clear', 'model', '--clear', 'profile', '--clear', 'effort',
+    '--env', JSON.stringify(fakeAgentEnv({ NODE_OPTIONS: f.h.env.NODE_OPTIONS })),
     '--command', JSON.stringify([process.execPath, script, '{prompt}'])]);
 }
 

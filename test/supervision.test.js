@@ -58,9 +58,11 @@ function setup(t, { failures = 1, error = '75', records = null, hold = 0, waitFo
   }]);
   h.attempts = path.join(h.base, 'attempts.json');
   const script = `
+const { fakeAgentEnv } = require(${JSON.stringify(path.join(__dirname, 'agent-env.js'))});
+
 const fs = require('node:fs');
 const cp = require('node:child_process');
-const cli = (args) => cp.execFileSync(process.execPath, [process.argv[1], ...args], { encoding: 'utf8' });
+const cli = (args) => cp.execFileSync(process.execPath, [process.argv[1], ...args], { env: fakeAgentEnv(process.env), encoding: 'utf8' });
 const file = process.argv[2];
 const attempts = fs.existsSync(file) ? JSON.parse(require(${JSON.stringify(path.join(__dirname, 'atomic-file.js'))}).readPublished(file, 'utf8')) : [];
 if (!attempts.length && ${claim}) {
@@ -119,8 +121,10 @@ test('supervisor tool progress arrives while the state lock is held', { timeout:
   const emit = path.join(h.base, 'emit-tool');
   const finish = path.join(h.base, 'finish');
   const script = `
+const { fakeAgentEnv } = require(${JSON.stringify(path.join(__dirname, 'agent-env.js'))});
+
 const fs = require('node:fs');
-require('node:child_process').execFileSync(process.execPath, [${JSON.stringify(BIN)}, 'claim', 'T1', '--lease', '5']);
+require('node:child_process').execFileSync(process.execPath, [${JSON.stringify(BIN)}, 'claim', 'T1', '--lease', '5'], { env: fakeAgentEnv(process.env) });
 fs.writeFileSync(${JSON.stringify(ready)}, '');
 let emitted = false;
 setInterval(() => {
@@ -391,9 +395,11 @@ test('later spawns preserve retrying homes through backoff, retries and queued h
   })));
   const retryReady = path.join(h.base, 'retry-ready');
   const script = `
+const { fakeAgentEnv } = require(${JSON.stringify(path.join(__dirname, 'agent-env.js'))});
+
 const cp = require('node:child_process');
 const fs = require('node:fs');
-const cli = (args) => cp.execFileSync(process.execPath, [process.argv[1], ...args], { encoding: 'utf8' });
+const cli = (args) => cp.execFileSync(process.execPath, [process.argv[1], ...args], { env: fakeAgentEnv(process.env), encoding: 'utf8' });
 const task = process.env.TOWER_CRANE_TASK;
 const agent = process.env.TOWER_CRANE_AGENT;
 const retry = Number(process.env.TOWER_CRANE_RETRY || 0);
@@ -915,8 +921,10 @@ for (const stream of ['stdout']) {
   test(`provider errors quoted in agent JSON on ${stream} do not trigger a rerun`, (t) => {
     const h = setup(t, { failures: 0 });
     const script = `
+const { fakeAgentEnv } = require(${JSON.stringify(path.join(__dirname, 'agent-env.js'))});
+
 const cp = require('node:child_process');
-cp.execFileSync(process.execPath, [process.argv[1], 'claim', 'T1']);
+cp.execFileSync(process.execPath, [process.argv[1], 'claim', 'T1'], { env: fakeAgentEnv(process.env) });
 const text = 'API Error: 503 service unavailable; provider outage; rate limit exceeded: The service is temporarily unavailable.; HTTP 429 Too Many Requests; overloaded';
 console.${stream === 'stdout' ? 'log' : 'error'}(JSON.stringify({ type: 'item.completed', item: { type: 'command_execution', aggregated_output: text } }));
 console.${stream === 'stdout' ? 'log' : 'error'}(JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text }] } }));
@@ -935,8 +943,10 @@ for (const stream of ['stderr']) {
   test(`plain capacity text on ${stream} cannot substitute for a harness error envelope`, (t) => {
     const h = setup(t, { failures: 0 });
     const script = `
+const { fakeAgentEnv } = require(${JSON.stringify(path.join(__dirname, 'agent-env.js'))});
+
 const cp = require('node:child_process');
-cp.execFileSync(process.execPath, [process.argv[1], 'claim', 'T1']);
+cp.execFileSync(process.execPath, [process.argv[1], 'claim', 'T1'], { env: fakeAgentEnv(process.env) });
 console.${stream === 'stdout' ? 'log' : 'error'}('rate limit exceeded: The service is temporarily unavailable.; HTTP 429 Too Many Requests; overloaded');
 process.exit(1);
 `;
@@ -1001,9 +1011,11 @@ test('stopping the monitor terminates the process group and kills children that 
   const pids = path.join(h.base, 'group.json');
   const terminated = path.join(h.base, 'terminated');
   const script = `
+const { fakeAgentEnv } = require(${JSON.stringify(path.join(__dirname, 'agent-env.js'))});
+
 const cp = require('node:child_process');
 const fs = require('node:fs');
-cp.execFileSync(process.execPath, [process.argv[1], 'claim', 'T1']);
+cp.execFileSync(process.execPath, [process.argv[1], 'claim', 'T1'], { env: fakeAgentEnv(process.env) });
 process.on('SIGTERM', () => fs.writeFileSync(process.argv[3] + '.parent', 'parent'));
 const descendant = cp.spawn(process.execPath, ['-e', "process.on('SIGTERM', () => require('node:fs').writeFileSync(process.argv[1], 'child')); console.log('ready'); setInterval(() => {}, 1000);", process.argv[3] + '.child'], { stdio: ['ignore', 'pipe', 'inherit'] });
 descendant.stdout.once('data', () => fs.writeFileSync(process.argv[2], JSON.stringify([process.pid, descendant.pid])));
@@ -1041,11 +1053,13 @@ test('a rerun waits for previous descendants even when they close their output p
   const h = setup(t, { failures: 0 });
   groupFile = path.join(h.base, 'previous-group.json');
   const script = `
+const { fakeAgentEnv } = require(${JSON.stringify(path.join(__dirname, 'agent-env.js'))});
+
 const cp = require('node:child_process');
 const fs = require('node:fs');
 const file = process.argv[2];
 if (!fs.existsSync(file)) {
-  cp.execFileSync(process.execPath, [process.argv[1], 'claim', 'T1']);
+  cp.execFileSync(process.execPath, [process.argv[1], 'claim', 'T1'], { env: fakeAgentEnv(process.env) });
   const child = cp.spawn(process.execPath, ['-e', "process.on('SIGTERM', () => {}); console.log('ready'); setInterval(() => {}, 1000);"], { stdio: ['ignore', 'pipe', 'ignore'] });
   child.stdout.once('data', () => {
     child.stdout.destroy();
@@ -1144,9 +1158,11 @@ test('a 45 KiB brief launches through the monitor job file, not monitor argv', (
   const workerResult = path.join(h.base, 'brief-result.json');
   const hook = path.join(__dirname, 'fixtures', 'supervision-followups.js').replace(/\\/g, '/');
   const script = `
+const { fakeAgentEnv } = require(${JSON.stringify(path.join(__dirname, 'agent-env.js'))});
+
 const cp = require('node:child_process');
 const fs = require('node:fs');
-cp.execFileSync(process.execPath, [process.argv[1], 'claim', 'T1', '--lease', '1']);
+cp.execFileSync(process.execPath, [process.argv[1], 'claim', 'T1', '--lease', '1'], { env: fakeAgentEnv(process.env) });
 const text = fs.readFileSync(process.argv[3], 'utf8');
 fs.writeFileSync(process.argv[2], JSON.stringify({
   bytes: Buffer.byteLength(text),

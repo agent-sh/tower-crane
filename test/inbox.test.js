@@ -703,8 +703,11 @@ test('a remotely merged accepted PR remains actionable until its audited merge r
 function reviewComments(h, id) {
   const ref = 'https://github.com/acme/demo/pull/7#issuecomment-23';
   const body = `Review (Tower Crane, clean context)\n\nBlocking: 2 findings at ${h.sha}.\n\n`
+    + '## Prior blockers\n\nEarlier lib/fixed.js:7 is fixed.\n\n## Blocking findings\n\n'
     + '- [P1] lib/store.js:12 - First finding: reject duplicate writes - Prevent corruption.\n'
-    + '- [P2] lib/cache.js:31 - Second finding: invalidate deleted entries - Prevent stale reads.\n';
+    + '  Reproduction:\n  Write twice through lib/fixture.js:50.\n'
+    + '- [P2] lib/cache.js:31 - Second finding: invalidate deleted entries - Prevent stale reads.\n'
+    + '\nReproduce through lib/fixture.js:50, then run the existing checks.\n';
   h.submit(id, 7);
   h.reviewer(id, 'reviewer', h.sha);
   h.ok(['evidence', id, '--revision', h.revision(id), '--type', 'review', '--fail', '--sha', h.sha, '--agent', 'reviewer',
@@ -739,6 +742,7 @@ test('failed review inbox and rework preserve every finding from the latest comm
   assert.equal(task.status, 'rework');
   assert.equal(task.revision, 2);
   assert.ok(task.evidence.every((entry) => entry.revision === 1));
+  assert.deepEqual(task.evidence.find((entry) => entry.type === 'review').areas, ['lib/cache.js', 'lib/store.js']);
   const rework = h.logs().findLast((entry) => entry.cmd === 'rework' && entry.task === id);
   assert.equal(rework.detail.previous_revision, 1);
   assert.equal(rework.detail.revision, 2);
@@ -754,6 +758,12 @@ test('failed review inbox and rework preserve every finding from the latest comm
   h.ok(['evidence', id, '--type', 'review', '--ok', '--sha', h.sha,
     '--revision', '2', '--agent', 'owner']);
   assert.equal(h.json(['task', 'show', id]).gates.gates.find((gate) => gate.type === 'review').ok, true);
+  h.ok(['evidence', id, '--type', 'review', '--fail', '--sha', h.sha,
+    '--revision', '2', '--agent', 'owner', '--summary', '2 blockers; see full comment', '--ref', ref]);
+  h.ok(['rework', '--from-review', id, '--agent', 'orchestrator']);
+  const redesign = h.inbox().items.find((item) => item.task === id && item.kind === 'review_redesign');
+  assert.deepEqual(redesign.areas, ['lib/cache.js', 'lib/store.js']);
+  assert.equal(h.run(['claim', id, '--agent', 'next-worker']).code, 1);
 });
 
 test('review comment failures refuse rework without replacing full findings with a summary', (t) => {

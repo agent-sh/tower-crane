@@ -94,6 +94,7 @@ if (path.resolve(process.argv[1] || '') !== __filename) {
     const target = gated ? args[3] : file;
     const harness = /[\\/]scripts[\\/]fallback(?:\.exe)?$/.test(target) ? 'command' : target;
     if (['codex', 'claude', 'agy', 'opencode', 'pi', 'command'].includes(harness) && process.env.TOWER_CRANE_TEST_FALLBACK_FILE) {
+      options = { ...options, env: require('../agent-env').fakeAgentEnv(options.env) };
       if (gated) return spawn.call(this, file, [...args.slice(0, 3), process.execPath, __filename, harness, ...args.slice(4)], options);
       return spawn.call(this, process.execPath, [__filename, harness, ...args], options);
     }
@@ -103,7 +104,11 @@ if (path.resolve(process.argv[1] || '') !== __filename) {
   const harness = process.argv[2];
   const args = process.argv.slice(3);
   const file = process.env.TOWER_CRANE_TEST_FALLBACK_FILE;
-  const cli = (argv) => cp.execFileSync(process.execPath, [path.join(__dirname, '..', '..', 'bin', 'tower-crane.js'), ...argv], {
+  // Nested dispatch needs the fixture adapter as well as the agent's account preload.
+  const cli = (argv) => cp.execFileSync(process.execPath, [
+    '--require', __filename,
+    path.join(__dirname, '..', '..', 'bin', 'tower-crane.js'), ...argv,
+  ], {
     encoding: 'utf8', timeout: process.env.TOWER_CRANE_TEST_CLAUDE_PROVIDER ? 0 : 300000, stdio: ['pipe', 'pipe', 'pipe'], // wait-allow: provider fixtures disable the child watchdog; the caller retains the suite hang guard
   });
   if (process.env.TOWER_CRANE_TEST_NESTED_DISPATCH && process.env.TOWER_CRANE_AGENT.startsWith('orchestrator-')) {

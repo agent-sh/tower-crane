@@ -388,10 +388,10 @@ for (const [name, before, change] of [
     assert.equal(h.readState('tasks.json').tasks[0].status, 'accepted');
     h.ok(['project', 'set', ...change]);
     assert.equal(shown(h, 'tests').ok, false);
-    assert.match(shown(h, 'tests').reason, /tests paths, keep, expensive, map or required CI setting/);
+    assert.match(shown(h, 'tests').reason, /tests paths, keep, expensive, map, host settings or required CI setting/);
     const merge = h.run(['merge', 'T1']);
     assert.equal(merge.code, 1);
-    assert.match(merge.stderr, /its gates no longer pass.*tests paths, keep, expensive, map or required CI setting/);
+    assert.match(merge.stderr, /its gates no longer pass.*tests paths, keep, expensive, map, host settings or required CI setting/);
   });
 }
 

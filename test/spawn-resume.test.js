@@ -46,10 +46,12 @@ function setup(t, format = 'codex', session = true) {
   const script = path.join(h.base, 'harness.js');
   const seen = path.join(h.base, 'seen.json');
   fs.writeFileSync(script, `
+const { fakeAgentEnv } = require(${JSON.stringify(path.join(__dirname, 'agent-env.js'))});
+
 const fs = require('node:fs');
 const cp = require('node:child_process');
 const [bin, out, prior, prompt, format, enabled, assigned] = process.argv.slice(2);
-const cli = (...args) => cp.execFileSync(process.execPath, [bin, ...args], { stdio: 'pipe' });
+const cli = (...args) => cp.execFileSync(process.execPath, [bin, ...args], { env: fakeAgentEnv(process.env), stdio: 'pipe' });
 const task = JSON.parse(cli('task', 'show', 'T1', '--json'));
 fs.writeFileSync(out, JSON.stringify({ prior, prompt, cwd: process.cwd(), agent: process.env.TOWER_CRANE_AGENT, claim: task.claim }));
 // The launcher restores resumed claims after its startup receipt.
@@ -456,16 +458,19 @@ for (const format of ['codex', 'claude', 'native-codex']) {
         ? { type: 'turn.failed', error: { message: "Codex ran out of room in the model's context window. Start a new thread or clear earlier history before retrying." } }
         : { type: 'result', is_error: true, errors: ['Prompt is too long'], subtype: 'error_during_execution' };
       fs.writeFileSync(script, `
+const { fakeAgentEnv } = require(${JSON.stringify(path.join(__dirname, 'agent-env.js'))});
+
 const fs = require('node:fs');
 const cp = require('node:child_process');
 const [bin, out, prior, prompt, format] = process.argv.slice(2);
-const task = JSON.parse(cp.execFileSync(process.execPath, [bin, 'task', 'show', 'T1', '--json'], { encoding: 'utf8' }));
+const task = JSON.parse(cp.execFileSync(process.execPath, [bin, 'task', 'show', 'T1', '--json'], { env: fakeAgentEnv(process.env), encoding: 'utf8' }));
+const rework = task.claim?.from === 'rework';
 fs.appendFileSync(${JSON.stringify(calls)}, JSON.stringify({ prior, prompt, cwd: process.cwd(), agent: process.env.TOWER_CRANE_AGENT, claim: task.claim }) + '\\n');
-if (prior || (${freshOverflow} && prompt.includes('## Rework'))) {
+if (prior || (${freshOverflow} && rework)) {
   console.log(JSON.stringify(${JSON.stringify(error)}));
   process.exit(1);
 }
-console.log(JSON.stringify({ type: 'thread.started', thread_id: prompt.includes('## Rework') ? 'fresh-session-2' : 'worker-session-1' }));
+console.log(JSON.stringify({ type: 'thread.started', thread_id: rework ? 'fresh-session-2' : 'worker-session-1' }));
 console.log(JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 10, cached_input_tokens: 2, output_tokens: 1 } }));
 `);
       if (format === 'native-codex') {
@@ -481,6 +486,11 @@ console.log(JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 10, 
       assert.equal(result.code, freshOverflow ? 1 : 0, result.stderr);
       const inputs = fs.readFileSync(calls, 'utf8').trim().split('\n').map(JSON.parse);
       assert.equal(inputs.length, 3, 'one resumed invocation and exactly one fresh retry');
+      assert.equal(inputs[0].claim.from, 'todo');
+      assert.equal(inputs[1].claim.from, 'rework');
+      assert.equal(inputs[2].claim.from, 'rework');
+      if (format === 'native-codex') assert.match(inputs[0].prompt, /## Rework/,
+        'the initial skill heading does not make the first invocation a rework attempt');
       assert.equal(inputs[1].prior, 'worker-session-1');
       assert.equal(inputs[2].prior, '');
       assert.equal(inputs[2].agent, first.agent);

@@ -167,7 +167,9 @@ test('an open stack conflict preserves lower review context across repeated rewo
 
   const prompt = path.join(f.h.base, 'worker-prompt');
   const script = `
-require('node:child_process').execFileSync(process.execPath, ${JSON.stringify([BIN, 'claim', 'T1'])}, { env: process.env });
+const { fakeAgentEnv } = require(${JSON.stringify(path.join(__dirname, 'agent-env.js'))});
+
+require('node:child_process').execFileSync(process.execPath, ${JSON.stringify([BIN, 'claim', 'T1'])}, { env: fakeAgentEnv(process.env) });
 require('node:fs').writeFileSync(process.argv[1], process.argv[2]);
 `;
   f.h.ok(['ladder', 'set', 'medium', '--harness', 'command', '--clear', 'model', '--clear', 'profile',

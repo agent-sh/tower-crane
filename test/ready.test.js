@@ -2,6 +2,8 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
 const { makeRepo } = require('./helpers');
 
 // A docs task needs only a review from a reviewer spawn, which keeps
@@ -69,6 +71,72 @@ test('ready puts tasks that unblock the most work first', (t) => {
   h.ok(['task', 'add', '--title', 'After other', '--acceptance', 'a', '--dep', 'T5']);
   const r = h.json(['ready']).ready;
   assert.deepEqual(r.map((x) => [x.id, x.unblocks]), [['T2', 2], ['T5', 1], ['T1', 0]]);
+  h.ok(['task', 'update', 'T1', '--priority', 'urgent', '--agent', 'orchestrator']);
+  assert.deepEqual(h.json(['ready']).ready.map((x) => [x.id, x.priority]), [['T1', 'urgent'], ['T2', 'normal'], ['T5', 'normal']]);
+  assert.equal(h.json(['task', 'show', 'T1']).revision, 1, 'priority does not change the acceptance revision');
+  assert.match(h.ok(['ready']), /T1.*\[urgent\]/);
+  assert.match(h.ok(['status']), /ready: T1 \[urgent\] Leaf/);
+  assert.match(h.ok(['task', 'show', 'T1']), /priority: urgent/);
+  assert.match(h.ok(['task', 'list']), /T1.*\[urgent\]/);
+  const html = fs.readFileSync(path.join(h.state, 'sketch.html'), 'utf8');
+  assert.match(html, /data-key="r-T1"[\s\S]*?<span class="why">urgent<\/span>/);
+  assert.match(html, /<article id="T1"[\s\S]*?priority <b>urgent<\/b>/);
+  const status = h.json(['status']);
+  assert.deepEqual(status.ready.map((x) => x.priority), ['urgent', 'normal', 'normal']);
+
+  h.ok(['task', 'update', 'T5', '--priority', 'urgent', '--agent', 'orchestrator']);
+  assert.deepEqual(h.json(['ready']).ready.map((x) => x.id), ['T5', 'T1', 'T2'], 'unblock count still orders urgent tasks');
+  h.ok(['task', 'update', 'T2', '--priority', 'urgent', '--agent', 'orchestrator']);
+  assert.deepEqual(h.json(['ready']).ready.map((x) => x.id), ['T2', 'T5', 'T1']);
+  for (const id of ['T1', 'T2', 'T5']) h.ok(['task', 'update', id, '--priority', 'normal', '--agent', 'orchestrator']);
+  assert.deepEqual(h.json(['ready']).ready.map((x) => x.id), ['T2', 'T5', 'T1'], 'normal restores the default order');
+  assert.doesNotMatch(h.ok(['status']), /\[urgent\]/);
+});
+
+test('priority is operational, validates values and preserves a live claim', (t) => {
+  const h = makeRepo(t);
+  h.init();
+  for (const title of ['First', 'Second', 'Blocked']) h.ok(['task', 'add', '--title', title, '--acceptance', 'works']);
+  h.ok(['task', 'update', 'T3', '--dep', 'T1']);
+  const invalid = h.run(['task', 'update', 'T1', '--priority', 'high', '--agent', 'orchestrator']);
+  assert.equal(invalid.code, 2);
+  assert.match(invalid.stderr, /--priority must be one of urgent, normal/);
+  const denied = h.run(['task', 'update', 'T1', '--priority', 'urgent', '--agent', 'w-1']);
+  assert.equal(denied.code, 1);
+  assert.match(denied.stderr, /operational|orchestrator/);
+  assert.equal(h.json(['task', 'show', 'T1']).priority, undefined);
+  assert.match(h.ok(['authority']), /task\.priority.*operational/);
+  h.ok(['task', 'update', 'T3', '--priority', 'urgent', '--agent', 'orchestrator']);
+  assert.deepEqual(h.json(['ready']).ready.map((x) => x.id), ['T1', 'T2'], 'urgent cannot bypass a dependency');
+  h.ok(['task', 'update', 'T2', '--priority', 'urgent', '--agent', 'orchestrator']);
+  h.ok(['task', 'update', 'T1', '--priority', 'urgent', '--agent', 'orchestrator']);
+  h.ok(['task', 'update', 'T3', '--dep', '']);
+  assert.deepEqual(h.json(['ready']).ready.map((x) => x.id), ['T1', 'T2', 'T3'], 'equal priority and unblock count use task id');
+  const claim = h.json(['claim', 'T2', '--agent', 'w-1']);
+  h.ok(['task', 'update', 'T2', '--priority', 'normal', '--agent', 'orchestrator']);
+  const task = h.json(['task', 'show', 'T2']);
+  assert.deepEqual(task.claim, claim.claim);
+  assert.equal(task.revision, 1);
+  assert.equal(task.status, 'in_progress');
+  assert.equal(h.readState('tasks.json').tasks[1].priority, undefined, 'normal removes the field');
+
+  h.ok(['task', 'update', 'T3', '--status', 'cancelled', '--agent', 'orchestrator']);
+  const list = h.ok(['task', 'list']);
+  assert.match(list, /T1 .*\[urgent\]/);
+  assert.doesNotMatch(list, /T3 .*\[urgent\]/, 'a closed task does not show urgency');
+
+  const tasks = h.readState('tasks.json');
+  tasks.tasks[0].priority = 7;
+  h.writeState('tasks.json', tasks);
+  const broken = h.run(['ready']);
+  assert.notEqual(broken.code, 0);
+  assert.match(broken.stderr, /T1: priority must be a non-empty string/);
+  tasks.tasks[0].priority = 'future-high';
+  h.writeState('tasks.json', tasks);
+  assert.deepEqual(h.json(['ready']).ready.map((x) => [x.id, x.priority]), [['T1', 'future-high']]);
+  h.ok(['task', 'add', '--title', 'Fourth', '--acceptance', 'works']);
+  h.ok(['task', 'update', 'T4', '--priority', 'urgent', '--agent', 'orchestrator']);
+  assert.deepEqual(h.json(['ready']).ready.map((x) => x.id), ['T4', 'T1'], 'an unfamiliar priority sorts as normal');
 });
 
 test('status summarizes counts, decisions, owner tasks, spend and expired leases', (t) => {

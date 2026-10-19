@@ -23,7 +23,7 @@ if (path.resolve(process.argv[1] || '') !== __filename) {
   // The claim runs under the lock: it starts no harness, and a concurrent first attempt then sees this one.
   const attempts = updateJson(file, (list) => {
     if (!list.length) {
-      cp.execFileSync(process.execPath, [path.join(__dirname, '..', '..', 'bin', 'tower-crane.js'), 'claim', process.env.TOWER_CRANE_TASK], { stdio: 'ignore' });
+      cp.execFileSync(process.execPath, [path.join(__dirname, '..', '..', 'bin', 'tower-crane.js'), 'claim', process.env.TOWER_CRANE_TASK], { env: require('../agent-env').fakeAgentEnv(process.env), stdio: 'ignore' });
     }
     return [...list, { harness, args, agent: process.env.TOWER_CRANE_AGENT }];
   }, []);

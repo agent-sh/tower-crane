@@ -4,8 +4,9 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const cp = require('node:child_process');
 const Spawn = require('../lib/spawn');
-const { makeRepo, dispatch } = require('./helpers');
+const { makeRepo, dispatch, ACCOUNT_HOME } = require('./helpers');
 const { readPublished } = require('./atomic-file');
 
 function npmShim(dir, prefix = '%dp0%') {
@@ -86,6 +87,60 @@ test('spawned agents drop the dispatcher session ids and engine provenance', (t)
   const line = result.stdout.split('\n').find((l) => l.startsWith('ENV '));
   assert.ok(line, result.stdout);
   assert.deepEqual(JSON.parse(line.slice(4)), []);
+});
+
+test('fixture account preload stays in CLI helpers and configured agent preloads survive containment', (t) => {
+  const h = makeRepo(t);
+  h.init();
+  const settings = require.resolve('../lib/spawn-settings');
+  const hook = path.join(h.base, 'intentional preload.cjs');
+  fs.writeFileSync(hook, 'process.env.INTENTIONAL_PRELOAD = "loaded";\n');
+  const extra = `--require ${JSON.stringify(hook)} --max-old-space-size=256`;
+  const script = `
+const assert = require('node:assert/strict');
+const cp = require('node:child_process');
+const S = require(${JSON.stringify(settings)});
+const original = process.env.NODE_OPTIONS;
+assert.ok(original.includes(${JSON.stringify(ACCOUNT_HOME.replace(/\\/g, '/'))}));
+const ordinary = S.cleanDispatcherEnv({ ...process.env, TOWER_CRANE_SANDBOX: '0' });
+assert.equal(ordinary.NODE_OPTIONS, original);
+const sandbox = S.cleanAgentEnv({ ...process.env, TOWER_CRANE_SANDBOX: '1' });
+assert.equal(sandbox.NODE_OPTIONS, undefined);
+assert.equal(process.env.NODE_OPTIONS, original);
+const configured = S.cleanDispatcherEnv({ ...sandbox, NODE_OPTIONS: ${JSON.stringify(extra)} });
+const child = cp.spawnSync(process.execPath, ['-e', 'console.log(process.env.INTENTIONAL_PRELOAD)'], {
+  env: configured, encoding: 'utf8',
+});
+assert.equal(child.status, 0, child.stderr);
+assert.equal(child.stdout, 'loaded\\n');
+const onlyFixture = S.cleanAgentEnv({ NODE_OPTIONS: ${JSON.stringify(h.env.NODE_OPTIONS)}, TOWER_CRANE_SANDBOX: '1' });
+assert.equal(onlyFixture.NODE_OPTIONS, undefined);
+console.log('fixture preload isolated');
+`;
+  const result = cp.spawnSync(process.execPath, ['-e', script], {
+    cwd: h.repo, env: { ...h.env, NODE_OPTIONS: `${h.env.NODE_OPTIONS} ${extra}` }, encoding: 'utf8',
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /fixture preload isolated/);
+  assert.equal(h.readState('project.json').owner_config_dir.startsWith(h.base), true);
+
+  h.ok(['task', 'add', '--title', 'Sandbox preload boundary', '--acceptance', 'fixture preload stays outside agent']);
+  h.ok(['brief', 'set', 'T1', '-'], { input: 'print the agent preload environment\n' });
+  if (process.platform !== 'win32') {
+    const bin = path.join(h.base, 'bin');
+    fs.mkdirSync(bin);
+    fs.writeFileSync(path.join(bin, 'codex'),
+      `#!${process.execPath}\nconsole.log("PRELOAD " + JSON.stringify(process.env.NODE_OPTIONS));\n`, { mode: 0o755 });
+    h.ok(['ladder', 'set', 'medium', '--harness', 'codex', '--profile', 'fixture-main',
+      '--env', JSON.stringify({ NODE_OPTIONS: extra }),
+      '--clear', 'command', '--clear', 'model', '--clear', 'provider', '--clear', 'effort', '--clear', 'args']);
+    const spawned = h.run(['spawn', '--task', 'T1', '--wait'], {
+      env: { NODE_OPTIONS: `${h.env.NODE_OPTIONS} ${extra}`,
+        CODEX_HOME: '', PATH: `${bin}${path.delimiter}${h.env.PATH || ''}` },
+    });
+    assert.equal(spawned.code, 0, spawned.stderr);
+    assert.ok(spawned.stdout.includes('PRELOAD ' + JSON.stringify(extra)), spawned.stdout);
+  }
 });
 
 // The hook bridge and the supervisor read the key whenever they start a CLI
