@@ -161,7 +161,7 @@ for (const obsolete of ['revision', 'sha']) {
           at: new Date().toISOString(), agent: 'orchestrator', cmd: 'automation', task: 'T1',
           detail: { source, phase: 'done' },
         }) + '\n');
-        assert.deepEqual(h.json(['status']).gate_queue, { running: [], queued: [], blocked: [] });
+        assert.deepEqual(h.json(['status']).gate_queue, { running: [], queued: [], blocked: [], deferred: [] });
         assert.equal(h.reconcile().code, 2);
       } else {
         assert.equal(h.run(['wait', '--after', '0', '--types', 'never', '--timeout', '0',
@@ -190,7 +190,7 @@ for (const entries of ['absent', 'unaudited pass', 'unaudited failure']) {
     fs.writeFileSync(path.join(h.state, 'events.jsonl'), events.map((e) => JSON.stringify(e) + '\n').join(''));
     const before = h.json(['task', 'show', 'T1']);
     assert.ok(before.gates.gates.filter((g) => g.type !== 'review').every((g) => !g.ok));
-    assert.deepEqual(h.json(['status']).gate_queue, { running: [], queued: [], blocked: [] });
+    assert.deepEqual(h.json(['status']).gate_queue, { running: [], queued: [], blocked: [], deferred: [] });
     assert.ok(events.some((e) => e.cmd === 'automation' && e.detail.phase === 'done'));
 
     assert.equal(h.reconcile().code, 2);
@@ -209,7 +209,7 @@ test('startup reconciles tests evidence staled by a tests keep setting change af
   const h = reconciledFixture(t);
   const checks = () => h.logs().filter((e) => e.cmd.startsWith('check '));
   const before = checks();
-  assert.deepEqual(h.json(['status']).gate_queue, { running: [], queued: [], blocked: [] });
+  assert.deepEqual(h.json(['status']).gate_queue, { running: [], queued: [], blocked: [], deferred: [] });
   h.ok(['project', 'set', '--tests-keep', '["test/**","docs/**"]']);
   const stale = h.json(['task', 'show', 'T1']).gates.gates.find((g) => g.type === 'tests');
   assert.equal(stale.ok, false);
@@ -329,7 +329,7 @@ for (const [configuration, failure] of [['tests', 'ci'], ['tests', 'clean'], ['c
     assert.equal(reworks.length, 1);
     assert.match(reworks[0].detail.reason, new RegExp(`^${failure} failed at [0-9a-f]+: `));
     assert.match(reworks[0].detail.reason, failure === 'clean' ? /cannot scan changed source/ : /failing: test \(failure\)/);
-    assert.deepEqual(h.json(['status']).gate_queue, { running: [], queued: [], blocked: [] });
+    assert.deepEqual(h.json(['status']).gate_queue, { running: [], queued: [], blocked: [], deferred: [] });
     h.consume();
     assert.equal(h.logs().filter((e) => e.cmd === `check ${failure}`).length, receipts.length, 'settlement starts no extra gate runs');
   });
