@@ -30,6 +30,7 @@ process.exit(r.status ?? 1);
   'test/fail.test.js': "const test = require('node:test'); const assert = require('node:assert/strict');\ntest('first failure', () => assert.fail('old failure'));\ntest('second failure', () => assert.fail('old failure'));\n",
   'test/pass.test.js': "require('node:test')('unrelated case', () => {});\n",
 };
+const nestedFailure = "const { describe, it } = require('node:test');\ndescribe('suite', () => { it('nested failure', () => require('node:assert/strict').fail('old')); });\n";
 const root = path.join(tmp, 'repo');
 const baseSha = initRepo(root, files);
 git(root, 'checkout', '-q', '-b', 'worker');
@@ -132,6 +133,30 @@ test('base selection preserves new and shared failure verdicts when files are mi
   assert.match(result.summary, /Also fails on main.*first failure, second failure/);
   assert.deepEqual(result.receipt.base_rerun.files, ['test/fail.test.js', 'test/new.test.js']);
   assert.equal(rows().length, before + 2, 'the old file is cached and the missing file is checked through the selector');
+});
+
+test('nested spec failures keep the base run scoped for suites and subtests', async () => {
+  const cases = [
+    ['describe', nestedFailure, ['nested failure', 'suite']],
+    ['subtest', "require('node:test')('parent', async t => { await t.test('child', () => require('node:assert/strict').fail('old')); });\n", ['child', 'parent']],
+  ];
+  for (const [label, source, names] of cases) {
+    git(root, 'checkout', '-q', '-b', `nested-base-${label}`, 'main');
+    commit(root, { 'test/fail.test.js': source });
+    git(root, 'checkout', '-q', '-b', `nested-head-${label}`);
+    const head = commit(root, { 'change.js': 'module.exports = 4;\n' });
+    git(root, 'checkout', '-q', 'main');
+    const c = context({ ...project, base: `nested-base-${label}` });
+    c.task.sha = head;
+    const before = rows().length;
+    const result = await gate.run(c);
+    assert.deepEqual(result.test_failure.names, names, label);
+    assert.deepEqual(result.main_failure?.names, names, result.summary);
+    assert.equal(result.receipt.base_rerun.mode, 'files', label);
+    assert.deepEqual(result.receipt.base_rerun.files, ['test/fail.test.js'], label);
+    assert.deepEqual(rows().slice(before).map((r) => r.files),
+      [['test/fail.test.js', 'test/pass.test.js'], ['test/fail.test.js']], label);
+  }
 });
 
 test('generated files compare against the base whether the head tracks them or not', async () => {
@@ -237,6 +262,15 @@ test('locations handle spec, TAP, duplicates, spaces, absolute paths and incompl
     ['partial', 'test at test/a.test.js:2:3\n✖ a', ['a', 'b'], null],
     ['outside', 'test at ../other.test.js:2:3\n✖ a', ['a'], null],
     ['duplicate outside', 'test at test/a.test.js:2:3\n✖ a\ntest at ../other.test.js:2:3\n✖ a', ['a'], null],
+    ['describe parent', '▶ suite\n  ✖ a (1ms)\n✖ suite (2ms)\n✖ failing tests:\ntest at test/a.test.js:2:3\n✖ a (1ms)', ['a', 'suite'], ['test/a.test.js']],
+    ['subtest parent', '▶ parent\n  ✖ child\n✖ parent\ntest at test/a.test.js:2:3\n✖ child', ['child', 'parent'], ['test/a.test.js']],
+    ['deep parents', '▶ outer\n  ▶ inner\n    ✖ a\n  ✖ inner\n✖ outer\ntest at test/a.test.js:2:3\n✖ a', ['a', 'inner', 'outer'], ['test/a.test.js']],
+    ['duplicate parents', '▶ suite\n  ✖ a\n✖ suite\n▶ suite\n  ✖ b\n✖ suite\ntest at test/a.test.js:2:3\n✖ a\ntest at test/b.test.js:2:3\n✖ b', ['a', 'b', 'suite'], ['test/a.test.js', 'test/b.test.js']],
+    ['hook failure', '▶ suite\n  ✖ body\n✖ suite\ntest at test/a.test.js:2:3\n✖ body\ntest at test/a.test.js:1:1\n✖ suite', ['body', 'suite'], ['test/a.test.js']],
+    ['load error', '✖ test/a.test.js\ntest at test/a.test.js:1:1\n✖ test/a.test.js', ['test/a.test.js'], ['test/a.test.js']],
+    ['nested TAP', "not ok 1 - child\n  location: 'test/a.test.js:2:3'\nnot ok 1 - suite\n  location: 'test/a.test.js:1:1'", ['child', 'suite'], ['test/a.test.js']],
+    ['incomplete nested report', '▶ suite\n  ✖ a\n  ✖ b\n✖ suite\ntest at test/a.test.js:2:3\n✖ a', ['a', 'b', 'suite'], null],
+    ['unsafe nested report', '▶ suite\n  ✖ a\n✖ suite\ntest at ../other.test.js:2:3\n✖ a', ['a', 'suite'], null],
     ['none', '', [], null],
   ];
   for (const [name, output, names, expected] of cases) assert.deepEqual(base.failingFiles(output, names, cwd), expected, name);
@@ -297,7 +331,7 @@ test('the real CLI persists selective base evidence and cached results', (t) => 
     h.init(['--tests-cmd', `${node} --test --test-reporter=spec test/*.test.js`, '--tests-proof-cmd', `${node} --test --test-reporter=spec {tests}`]);
     h.ok(['project', 'set', '--tests-mode', 'run-only']);
     fs.mkdirSync(path.join(h.repo, 'test'), { recursive: true });
-    fs.writeFileSync(path.join(h.repo, 'test/fail.test.js'), files['test/fail.test.js']);
+    fs.writeFileSync(path.join(h.repo, 'test/fail.test.js'), nestedFailure);
     h.git(['add', '-A']);
     h.git(['commit', '-qm', 'base failure']);
     h.git(['checkout', '-qb', 'worker']);
