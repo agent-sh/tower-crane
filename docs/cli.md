@@ -320,8 +320,22 @@ If GitHub still lists it in a stack and refuses `gh pr merge`, squash and
 merge methods use the asynchronous API for that single PR at its accepted
 head, with the same method and commit text. Admin and rebase retain the
 ordinary fallback refusals.
-Middle tasks keep their stack records while an upper task is open, preserving
+Middle tasks with a PR keep their stack records while an upper task is open, preserving
 the merged lower PRs that sync and stack merge must still recognize.
+
+Children without a PR retire on the merge refresh or next observation even
+when they are unlinked, disabled or running. Before spawning a stacked worker,
+the dispatcher rechecks its lower PRs and retires the stack when each has merged
+at its recorded head and base. A remote merge can retire the stack before its
+local merge receipt arrives, without creating merge evidence. The worker then
+uses the project base, and `stack complete` records `pr: null`. Retirement keeps
+child commits and adds a task note to merge the project base before continuing
+work or opening the PR. If GitHub closed a child PR after deleting its base,
+retirement records a matching open PR against the project base or creates a
+replacement from the same branch, preserving its title and body. Replacement
+bumps the revision and returns an accepted task to submitted, so gates and
+review must run for the new PR. Invalid heads, repositories or bases refuse
+recovery; failed calls preserve the stack for retry.
 
 Before every automatic synchronization, including after a confirmed merge
 and from `worktree` or `spawn`, submitted or accepted upper heads are checked

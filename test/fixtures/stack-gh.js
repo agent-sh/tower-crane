@@ -113,7 +113,14 @@ cp.spawnSync = function stackGh(command, args, opts) {
     git(['push', 'origin', `${oid}:${pr.baseRefName}`]);
     pr.state = 'MERGED';
     pr.mergeCommit = { oid };
-    if (deleteBranch) git(['push', 'origin', `:${pr.headRefName}`]);
+    if (deleteBranch) {
+      git(['push', 'origin', `:${pr.headRefName}`]);
+      if (data.closeOnDelete) {
+        for (const child of Object.values(data.prs)) {
+          if (child.state === 'OPEN' && child.baseRefName === pr.headRefName) child.state = 'CLOSED';
+        }
+      }
+    }
     // GitHub rebases the PRs above the merged one onto the new base.
     const end = data.order.indexOf(pr.number);
     for (const n of end === -1 ? [] : data.order.slice(end + 1)) {
@@ -210,6 +217,20 @@ cp.spawnSync = function stackGh(command, args, opts) {
   if (args[0] === 'pr' && args[1] === 'edit') {
     data.prs[args[2]].baseRefName = args[args.indexOf('--base') + 1];
     return finish();
+  }
+  if (args[0] === 'pr' && args[1] === 'list') {
+    const flag = (name) => args[args.indexOf(name) + 1];
+    return finish(Object.values(data.prs).filter((pr) => pr.state === 'OPEN'
+      && pr.headRefName === flag('--head') && pr.baseRefName === flag('--base')));
+  }
+  if (args[0] === 'pr' && args[1] === 'create') {
+    const flag = (name) => args[args.indexOf(name) + 1];
+    const branch = flag('--head');
+    const number = Math.max(...Object.keys(data.prs).map(Number)) + 1;
+    data.prs[number] = { number, state: 'OPEN', headRefName: branch, baseRefName: flag('--base'),
+      headRefOid: git(['ls-remote', 'origin', `refs/heads/${branch}`]).split(/\s/)[0],
+      isCrossRepository: false, autoMergeRequest: null, title: flag('--title'), body: flag('--body') };
+    return finish(`https://github.com/acme/app/pull/${number}\n`);
   }
   if (args[0] === 'pr' && args[1] === 'merge') {
     const pr = data.prs[args[2]];
