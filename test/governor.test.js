@@ -428,13 +428,93 @@ test('a stop signals no pid whose recorded creation time another process now has
   assert.ok(alive(reusedRoot.pid), 'the process that took an exited command\'s pid was not signalled');
 });
 
+test('creation times are read outside the registry lock, and a pid seen running matches only a process created by then', { skip: linuxOnly }, async (t) => {
+  const saved = G.windows.created;
+  t.after(() => { G.windows.created = saved; });
+  const host = fakeHost(t, { limit: 10, used: 9.7 });
+  let lockedReads = 0;
+  let at = new Map();
+  G.windows.created = (pids) => {
+    if (fs.existsSync(G.registryLock(host.env))) lockedReads += 1;
+    return new Map(pids.filter((p) => at.has(p)).map((p) => [p, at.get(p)]));
+  };
+  const harness = idle(t);
+  // Rows that send no signal come first: a signal sent to one of them would
+  // have arrived by the time the later rows' supervisors are seen to stop.
+  const rows = [
+    // [holder's record, the creation time Windows reads now, kept, stopped]
+    [{ created: 200 }, 201, false, false],
+    [{ seen: 50 }, 200, false, false],
+    [{ seen: 250 }, undefined, true, false],
+    [{ created: 200 }, 200, true, true],
+    [{ seen: 250 }, 200, true, true],
+    [{ seen: 150 }, 200, true, true],
+  ];
+  const sups = [];
+  for (const [record, now, kept, stopped] of rows) {
+    const label = `${JSON.stringify(record)} read ${now}`;
+    const sup = idle(t);
+    sups.push([sup, stopped, label]);
+    at = new Map(now === undefined ? [] : [[sup.pid, now]]);
+    stoppable(t, host, { holders: [{ pid: sup.pid, ...record }], roots: [{ pid: sup.pid, ...record }, { pid: harness.pid }] });
+    assert.equal(!!G.tick(host.env, null), kept, `${label}: the unit is the victim only while its holder may be the recorded process`);
+    assert.equal(G.read(host.env).units.length, kept ? 1 : 0, `${label}: a reused holder's unit is gone`);
+  }
+  for (const [sup, stopped, label] of sups) {
+    if (stopped) await waitOnRepo({ base: host.root }, () => !alive(sup.pid), `${label}: the supervisor is stopped`, { poll: true });
+  }
+  for (const [sup, stopped, label] of sups) if (!stopped) assert.ok(alive(sup.pid), `${label}: the supervisor was not signalled`);
+  assert.equal(lockedReads, 0, 'no creation time was read while the registry lock was held');
+});
+
+test('a record made under a lock starts no PowerShell read on Windows, and only its own process carries the creation time', (t) => {
+  const P = require('../lib/processes');
+  const S = require('../lib/state');
+  const platform = Object.getOwnPropertyDescriptor(process, 'platform');
+  const { read } = S.processCreated;
+  const cached = S.processCreated.cache.get(process.pid);
+  t.after(() => {
+    Object.defineProperty(process, 'platform', platform);
+    S.processCreated.read = read;
+    if (cached) S.processCreated.cache.set(process.pid, cached);
+    else S.processCreated.cache.delete(process.pid);
+  });
+  Object.defineProperty(process, 'platform', { ...platform, value: 'win32' });
+  const reads = [];
+  S.processCreated.read = (pid) => { reads.push(pid); return pid === process.pid ? 1234 : 5678; };
+  S.processCreated.cache.delete(process.pid);
+  const other = process.pid + 1;
+  const before = Date.now();
+  const rows = [
+    // [pid, options, fields besides host, PowerShell reads]
+    [other, {}, {}, []],
+    [other, { created: true }, { seen: true }, []],
+    [process.pid, { created: true }, { created: 1234 }, [process.pid]],
+    // Read once per process.
+    [process.pid, { created: true }, { created: 1234 }, []],
+  ];
+  for (const [pid, options, fields, expected] of rows) {
+    reads.length = 0;
+    const { host, ...rest } = P.identity(pid, options);
+    const label = `${pid === process.pid ? 'own' : 'other'} ${JSON.stringify(options)}`;
+    assert.equal(host, require('node:os').hostname(), label);
+    if (fields.seen) {
+      assert.deepEqual(Object.keys(rest), ['seen'], label);
+      assert.ok(rest.seen >= before && rest.seen <= Date.now(), `${label}: seen running now`);
+    } else assert.deepEqual(rest, fields, label);
+    assert.deepEqual(reads, expected, `${label}: PowerShell reads`);
+  }
+});
+
 test('on Windows a governor record carries the process\'s creation time', { skip: process.platform !== 'win32' && 'Windows creation times' }, (t) => {
   const P = require('../lib/processes');
   const child = idle(t);
-  const created = P.windowsCreated([child.pid], 30000).get(child.pid);
-  assert.ok(Number.isSafeInteger(created), 'Windows reports the creation time');
-  assert.equal(P.identity(child.pid, { created: true }).created, created);
-  assert.equal(P.identity(child.pid).created, undefined, 'the plain identity makes no PowerShell call');
+  const created = P.windowsCreated([child.pid, process.pid], 30000);
+  assert.ok(Number.isSafeInteger(created.get(child.pid)), 'Windows reports the creation time');
+  assert.equal(P.identity(process.pid, { created: true }).created, created.get(process.pid));
+  const { seen } = P.identity(child.pid, { created: true });
+  assert.ok(created.get(child.pid) <= seen + P.WINDOWS_CLOCK_MS, 'another process is seen running after Windows created it');
+  assert.deepEqual(Object.keys(P.identity(child.pid)), ['host'], 'the plain identity makes no PowerShell call');
 });
 
 test('a finished agent gives up its place before its gate reactions run', { skip: linuxOnly }, async (t) => {
