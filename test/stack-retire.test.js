@@ -6,9 +6,19 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { setup, upper } = require('./stack-fixture');
 const { HUNG_TEST_MS } = require('./signals');
+const S = require('../lib/state');
+const T = require('../lib/tasks');
 
 const task = (f) => f.h.readState('tasks.json').tasks.find((t) => t.id === 'T2');
 const events = (f) => fs.readFileSync(path.join(f.h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+
+function automaticNote(f) {
+  const note = task(f).notes.findLast((n) => n.text.startsWith('Stack parent T1 merged.'));
+  assert.ok(note, 'the worker receives the automatic merge-base note');
+  assert.deepEqual(events(f).filter((e) => e.cmd === 'task note' && e.task === 'T2' && e.detail.text === note.text), [],
+    'automatic notes do not enter the owner-comment event channel');
+  assert.deepEqual(T.planIssues(S.loadState(f.h.state)).filter((issue) => issue.kind === 'log-drift'), []);
+}
 
 function remoteMerge(f, method) {
   const base = f.h.git(['rev-parse', 'origin/main']);
@@ -42,6 +52,7 @@ for (const status of ['todo', 'in_progress']) {
     assert.deepEqual(complete?.detail, { parent: 'T1', base: 'main', pr: null });
     assert.equal(f.h.git(['rev-parse', 'HEAD'], wt.path), f.sha, 'retirement preserves the child branch');
     assert.match(f.h.ok(['task', 'show', 'T2']), /merge main.*before/i);
+    automaticNote(f);
   });
 }
 
@@ -65,6 +76,7 @@ for (const method of ['squash', 'merge']) {
       < history.findIndex((e) => e.cmd === 'spawn' && e.task === 'T2'));
     assert.equal(f.h.git(['rev-parse', 'HEAD'], wt.path), head, 'existing child commits survive dispatch');
     assert.ok(f.read().calls.some((c) => c.args[0] === 'pr' && c.args[1] === 'view' && c.args[2] === '11'));
+    automaticNote(f);
   });
 }
 
@@ -100,6 +112,7 @@ test('an observer retires a child without a PR left behind after a merge receipt
   f.h.ok(['wait', '--task', 'T2', '--types', 'stack complete', '--after', String(after), '--observe', '--timeout', String(HUNG_TEST_MS / 1000)]);
   assert.equal(task(f).stack, undefined);
   assert.equal(events(f).filter((e) => e.cmd === 'stack complete' && e.task === 'T2').length, 2);
+  automaticNote(f);
 });
 
 for (const childState of ['OPEN', 'CLOSED', 'replacement']) {
@@ -125,6 +138,7 @@ for (const childState of ['OPEN', 'CLOSED', 'replacement']) {
     assert.equal(task(f).stack, undefined);
     const current = task(f);
     const pr = f.read().prs[current.pr];
+    automaticNote(f);
     assert.equal(pr.state, 'OPEN');
     assert.equal(pr.baseRefName, 'main');
     assert.equal(pr.headRefOid, current.sha);

@@ -330,7 +330,8 @@ at its recorded head and base. A remote merge can retire the stack before its
 local merge receipt arrives, without creating merge evidence. The worker then
 uses the project base, and `stack complete` records `pr: null`. Retirement keeps
 child commits and adds a task note to merge the project base before continuing
-work or opening the PR. If GitHub closed a child PR after deleting its base,
+work or opening the PR. The automatic note creates no owner-comment notification.
+If GitHub closed a child PR after deleting its base,
 retirement records a matching open PR against the project base or creates a
 replacement from the same branch, preserving its title and body. Replacement
 bumps the revision and returns an accepted task to submitted, so gates and
