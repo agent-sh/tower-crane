@@ -685,8 +685,24 @@ test('erase-line redraws before short words keep all three readings', () => {
   }
 });
 
-test('mixed 16 MiB text fails closed below 1 GiB in a fresh process', () => {
+function memoryProbe(t, name, script) {
   const cp = require('node:child_process');
+  // Memory probes must finish the scan even when host contention consumes its time budget.
+  // The deadline has a separate test; work limits still bound scans and allocations here.
+  const source = `
+require('node:perf_hooks').performance.now = () => 0;
+${script}
+console.log(JSON.stringify({ ...result, peakKiB: process.resourceUsage().maxRSS }));
+`;
+  const result = JSON.parse(cp.execFileSync(process.execPath, ['-e', source], { encoding: 'utf8' }));
+  const boundKiB = 1048576;
+  t.diagnostic(`${name}: peak ${result.peakKiB} KiB; bound < ${boundKiB} KiB`);
+  assert.ok(Number.isFinite(result.peakKiB) && result.peakKiB > 0 && result.peakKiB < boundKiB,
+    `${name}: ${result.peakKiB} KiB peak; bound < ${boundKiB} KiB`);
+  return result;
+}
+
+test('mixed 16 MiB text fails closed below 1 GiB in a fresh process', (t) => {
   const script = `
 const { createRedactor, redactJoined } = require(${JSON.stringify(require.resolve('../lib/gates/common'))});
 const value = 'perfSecret123456789abcdef';
@@ -696,15 +712,13 @@ const text = unit.repeat(Math.ceil((16 << 20) / unit.length)).slice(0, 16 << 20)
 const runs = [{ stream: 'out', text: text.slice(0, text.length / 2) },
   { stream: 'err', text: text.slice(text.length / 2) }];
 const output = redactJoined({ output: text, runs }, createRedactor([['PERF_SECRET', value]]));
-console.log(JSON.stringify({ output, peakKiB: process.resourceUsage().maxRSS }));
+const result = { output };
 `;
-  const result = JSON.parse(cp.execFileSync(process.execPath, ['-e', script], { encoding: 'utf8' }));
-  assert.match(result.output, /^\[unscannable text: .+; content omitted\]$/);
-  assert.ok(result.peakKiB < 1048576, `${result.peakKiB} KiB peak`);
+  const result = memoryProbe(t, 'mixed text', script);
+  assert.match(result.output, /^\[unscannable text: over \d+ redaction work units; content omitted\]$/);
 });
 
-test('16 MiB of tokens an escape and a line break split stays scannable below 1 GiB in two streams', () => {
-  const cp = require('node:child_process');
+test('16 MiB of tokens an escape and a line break split stays scannable below 1 GiB in two streams', (t) => {
   // The joined view kept every view and secret its readings made alive while each stream was
   // read, and peaked at 1.26 GB.
   const script = `
@@ -718,11 +732,10 @@ const output = redactJoined({ output: text, runs: [
   { stream: 'err', text: text.slice(half) },
 ] }, createRedactor([]));
 const expected = '[redacted:GITHUB_TOKEN] done\\n'.repeat(units);
-console.log(JSON.stringify({ same: output === expected, head: output.slice(0, 80), peakKiB: process.resourceUsage().maxRSS }));
+const result = { same: output === expected, head: output.slice(0, 80) };
 `;
-  const result = JSON.parse(cp.execFileSync(process.execPath, ['-e', script], { encoding: 'utf8' }));
+  const result = memoryProbe(t, 'two-stream tokens', script);
   assert.ok(result.same, result.head);
-  assert.ok(result.peakKiB < 1048576, `${result.peakKiB} KiB peak`);
 });
 
 test('a value search reads only the controls a value prefix can end at', () => {
@@ -852,8 +865,7 @@ test('a prefix map over the work budget is rejected before its entries are alloc
   assert.ok(arrays.mock.calls.every((call) => call.arguments[0] !== entries));
 });
 
-test('16 MiB CR-heavy and short ordinary logs stay below 1 GiB in fresh processes', () => {
-  const cp = require('node:child_process');
+test('16 MiB CR-heavy and short ordinary logs stay below 1 GiB in fresh processes', (t) => {
   for (const unit of ['\r\n', '-\r\\\r|\r/\r', 'a\r', '123456\r\n', '\rpppppppp', '1234567\r\n', '\r\x1b[Kfetchxxxx']) {
     const script = `
 const { createRedactor, redactJoined } = require(${JSON.stringify(require.resolve('../lib/gates/common'))});
@@ -865,13 +877,12 @@ const output = redactJoined({ output: text, runs: [
   { stream: 'err', text: text.slice(half) },
 ] }, createRedactor([]));
 const hash = require('node:crypto').createHash('sha256').update(output).digest('hex');
-console.log(JSON.stringify({ notice: output.startsWith('[unscannable text:') ? output : null,
-  hash, peakKiB: process.resourceUsage().maxRSS }));
+const result = { notice: output.startsWith('[unscannable text:') ? output : null, hash };
 `;
-    const result = JSON.parse(cp.execFileSync(process.execPath, ['-e', script], { encoding: 'utf8' }));
+    const result = memoryProbe(t, JSON.stringify(unit), script);
     if (result.notice) {
       assert.ok(['\r\n', '-\r\\\r|\r/\r', 'a\r'].includes(unit), `ordinary ${JSON.stringify(unit)} was omitted`);
-      assert.match(result.notice, /^\[unscannable text: .+; content omitted\]$/);
+      assert.match(result.notice, /^\[unscannable text: over \d+ redaction work units; content omitted\]$/);
     }
     else {
       const input = unit.repeat(Math.ceil((16 << 20) / unit.length)).slice(0, 16 << 20);
@@ -879,7 +890,6 @@ console.log(JSON.stringify({ notice: output.startsWith('[unscannable text:') ? o
       if (input.endsWith('\r')) expected = expected.slice(0, -1);
       assert.equal(result.hash, crypto.createHash('sha256').update(expected).digest('hex'));
     }
-    assert.ok(result.peakKiB < 1048576, `${JSON.stringify(unit)}: ${result.peakKiB} KiB peak`);
   }
 });
 
