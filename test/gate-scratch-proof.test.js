@@ -7,6 +7,7 @@ const path = require('node:path');
 const { cachedFixture } = require('./helpers');
 const { probe } = require('../scripts/probe-gate-scratch');
 const { suiteTime, reportSuiteTime, DEADLINE_MIN } = require('../scripts/suite-time');
+const { writeHost } = require('./host');
 
 function fixture(t) {
   return cachedFixture(t, 'scratch-proof', (h) => {
@@ -71,4 +72,48 @@ test('the gate proof retains a failing gate result even when cleanup succeeds', 
   assert.equal(result.exit, 1);
   assert.equal(result.cleanup_ok, true);
   assert.equal(result.ok, false);
+});
+
+test('scratch proof preserves virtual host inputs and reports missing gate receipts', (t) => {
+  const failures = [];
+  for (const row of [
+    { name: 'healthy input, busy ambient host', supplied: {}, ambient: { memorySome: 15 }, exit: 0 },
+    { name: 'memory deferral', supplied: { memorySome: 15 }, ambient: {}, exit: 3 },
+    { name: 'CPU deferral', supplied: { cpuSome: 95 }, ambient: {}, exit: 3 },
+    { name: 'ambient deferral without receipt', supplied: {}, ambient: { memorySome: 15 }, forced: true, exit: 3 },
+  ]) {
+    const h = fixture(t);
+    const host = writeHost(h.env.TOWER_CRANE_HOST_ROOT, row.supplied);
+    const ambient = writeHost(path.join(h.base, 'ambient-host'), row.ambient);
+    const preload = path.join(h.base, 'ambient-host.js');
+    // The real CLI sees this stand-in for the machine only when the probe
+    // drops its supplied host, or when a row forces an admission deferral.
+    fs.writeFileSync(preload, `if (!process.env.TOWER_CRANE_HOST_ROOT || process.env.PROOF_FORCE_HOST === '1') {
+  process.env.TOWER_CRANE_HOST_ROOT = process.env.PROOF_AMBIENT_HOST;
+}\n`);
+    let result;
+    try {
+      result = probe({ root: h.repo, cache: path.join(h.base, 'probe'), command: 'node scratch.js',
+        environment: { ...h.env, TOWER_CRANE_HOST_ROOT: host, PROOF_AMBIENT_HOST: ambient,
+          PROOF_FORCE_HOST: row.forced ? '1' : '0',
+          NODE_OPTIONS: `${h.env.NODE_OPTIONS} --require ${JSON.stringify(preload)}` } });
+    } catch (error) {
+      failures.push(`${row.name}: ${error.message}`);
+      continue;
+    }
+    if (result.exit !== row.exit) {
+      failures.push(`${row.name}: expected exit ${row.exit}, got ${result.exit}`);
+      continue;
+    }
+    assert.equal(result.ok, row.exit === 0, row.name);
+    assert.deepEqual(result.outer_after, [], row.name);
+    assert.deepEqual(result.gate_root_after, [], row.name);
+    if (row.exit === 3) {
+      assert.equal(result.gate, null, row.name);
+      assert.deepEqual(result.gate_parents, [], row.name);
+      assert.equal(result.cleanup_ok, false, 'no execution is not a cleanup proof');
+      assert.match(result.stderr, /deferred by the host governor/, row.name);
+    }
+  }
+  assert.deepEqual(failures, [], 'host readings and no-receipt outcomes are handled for every variant');
 });

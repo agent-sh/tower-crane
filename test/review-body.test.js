@@ -69,10 +69,16 @@ if (prompt.includes('## PR-body repair')) {
   repair();
 } else {
   if (!prompt.includes('## Light claim check')) process.exit(4);
+  const attempts = ${JSON.stringify(path.join(h.base, 'body-review-starts'))};
+  fs.appendFileSync(attempts, process.env.TOWER_CRANE_AGENT + '\\n');
+  const attempt = fs.readFileSync(attempts, 'utf8').trim().split('\\n').length;
+  if (mode === 'crash-cap' || mode === 'crash-once' && attempt === 1) process.exit(1);
+  if (mode === 'outage-once' && attempt === 1) process.exit(75);
+  if (mode === 'clean-no-verdict') process.exit(0);
   fs.appendFileSync(${JSON.stringify(path.join(h.base, 'body-checks'))}, prompt + '\\n');
   const s = JSON.parse(fs.readFileSync(${JSON.stringify(h.env.AUTOMATION_GITHUB)}, 'utf8'));
   const round = s.prs[7].body.split('Corrected claim.').length - 1;
-  const ok = ['pass-first', 'untracked', 'availability-once', 'availability-after-edit', 'title', 'base', 'staged-file'].includes(mode)
+  const ok = ['pass-first', 'crash-once', 'outage-once', 'untracked', 'availability-once', 'availability-after-edit', 'title', 'base', 'staged-file'].includes(mode)
     || mode === 'pass-second' && round === 2;
   const args = [${JSON.stringify(BIN)}, 'evidence', 'T1', '--type', 'review', ok ? '--ok' : '--fail',
     '--sha', ${JSON.stringify(h.sha)}, '--summary', ok ? 'Corrected claims verified.' : 'The body still claims an unmeasured result.'];
@@ -150,6 +156,85 @@ for (const mode of ['pass-first', 'pass-second', 'fail-twice', 'local-commit', '
     assert.deepEqual(task.escalations || [], []);
   });
 }
+
+for (const mode of ['crash-once', 'outage-once', 'clean-no-verdict', 'crash-cap']) {
+  test(`light PR-body check recovers or reports its hold: ${mode}`, async (t) => {
+    const h = fixture(t, mode);
+    const events = () => S.readEvents(h.state);
+    const checks = () => events().filter((e) => e.cmd === 'spawn' && e.detail.body_recheck);
+    const consume = () => h.run(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
+    consume();
+    fs.writeFileSync(path.join(h.base, 'body-release'), '');
+    await waitOnRepo(h, () => checks().length && events().some((e) => e.cmd === 'spawn exit'
+      && e.detail.agent === checks()[0].detail.agent), 'the first light reviewer did not exit', { signal: t.signal });
+    for (let i = 0; i < 3; i++) consume();
+    const held = ['clean-no-verdict', 'crash-cap'].includes(mode);
+    if (mode === 'crash-cap') assert.ok(checks().length >= 2, 'the crash cap requires reviewer replacement');
+    if (held) {
+      await waitOnRepo(h, () => events().some((e) => e.cmd === 'review held'), 'no review hold was recorded', { signal: t.signal });
+      const item = h.json(['inbox', '--agent', 'orchestrator']).items.find((i) => i.kind === 'review_held' && i.task === 'T1');
+      assert.ok(item, 'the held light reviewer is actionable despite the original failed verdict');
+      assert.deepEqual(item.action.argv, ['accept', 'T1']);
+      if (mode === 'crash-cap') {
+        assert.equal(item.failures, require('../lib/reviewer').REVIEW_EXIT_CAP);
+        assert.equal(checks().length, item.cap);
+      } else assert.equal(checks().length, 1);
+      assert.doesNotMatch(h.ok(['status']), /T1 \(fixing PR body\)/, 'an exited, held reviewer is not shown as running');
+      assert.ok(!h.json(['inbox', '--agent', 'orchestrator']).items.some((i) => i.task === 'T1' && i.kind === 'review_failed'));
+      const count = checks().length;
+      consume();
+      assert.equal(checks().length, count, 'a held reviewer is not replaced automatically');
+      fs.writeFileSync(path.join(h.base, 'body-mode'), 'pass-first');
+      h.ok(['accept', 'T1', '--agent', 'orchestrator']);
+    } else {
+      assert.ok(checks().length >= 2, 'a no-verdict crash gets a replacement without another body edit');
+    }
+    await waitOnRepo(h, () => h.readState('tasks.json').tasks[0].status === 'accepted',
+      'the recovered light review did not accept', { signal: t.signal });
+    const task = h.json(['task', 'show', 'T1']);
+    assert.equal(task.sha, h.sha);
+    assert.equal(task.revision, 1);
+    assert.equal(events().filter((e) => e.cmd === 'spawn' && e.detail.body_fix).length, 1);
+    assert.equal(require('../lib/review-body').failures(S.loadState(h.state), task), 0, 'no verdict does not count as a body-check failure');
+    for (const check of checks()) {
+      assert.equal(check.detail.sha, h.sha);
+      assert.equal(check.detail.revision, 1);
+    }
+  });
+}
+
+test('a light-check monitor may finish its receipt, then a missing receipt triggers replacement', async (t) => {
+  const h = fixture(t, 'clean-no-verdict');
+  const events = () => S.readEvents(h.state);
+  h.run(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
+  fs.writeFileSync(path.join(h.base, 'body-release'), '');
+  await waitOnRepo(h, () => events().some((e) => e.cmd === 'review held'), 'the first light check did not settle', { signal: t.signal });
+  const prior = events().findLast((e) => e.cmd === 'spawn' && e.detail.body_recheck);
+  const at = new Date().toISOString();
+  const pending = { ...prior.detail, agent: 'missing-light-reviewer', pid: 999999, attempt: 1,
+    monitor_pid: process.pid, monitor_start_ticks: require('../lib/processes').identity(process.pid).start_ticks };
+  fs.appendFileSync(path.join(h.state, 'events.jsonl'),
+    JSON.stringify({ at, agent: 'orchestrator', cmd: 'spawn', task: 'T1', detail: pending }) + '\n');
+  const checks = () => events().filter((e) => e.cmd === 'spawn' && e.detail.body_recheck);
+  const count = checks().length;
+  fs.writeFileSync(path.join(h.base, 'body-mode'), 'pass-first');
+  h.run(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
+  assert.equal(checks().length, count, 'a live monitor gets time to record its receipt');
+  assert.match(h.ok(['status']), /T1 \(fixing PR body\)/);
+  const clock = path.join(__dirname, 'fixtures', 'clock.js');
+  h.run(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator'], {
+    env: { NODE_OPTIONS: `${h.env.NODE_OPTIONS || ''} --require ${JSON.stringify(clock)}`,
+      TOWER_CRANE_TEST_NOW: String(Date.parse(at) + 11 * 60000 + 8000) },
+  });
+  assert.equal(checks().length, count + 1, 'the expired receipt window replaces the light reviewer');
+  assert.equal(events().filter((e) => e.cmd === 'review exit missing' && e.detail.agent === pending.agent).length, 1);
+  await waitOnRepo(h, () => h.readState('tasks.json').tasks[0].status === 'accepted',
+    'the replacement for the missing receipt did not accept', { signal: t.signal });
+  assert.equal(events().filter((e) => e.cmd === 'spawn' && e.detail.body_fix).length, 1);
+  const task = h.json(['task', 'show', 'T1']);
+  assert.equal(task.sha, h.sha);
+  assert.equal(task.revision, 1);
+});
 
 test('PR-body repair refuses pushes, submissions and PR changes other than its body', async (t) => {
   const h = fixture(t, 'pass-first');
