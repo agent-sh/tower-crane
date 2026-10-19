@@ -388,13 +388,12 @@ test('a spawned worker claims a task whose dependency merged while gh api is den
   f.h.git(['commit', '-qam', 'T2 rework'], wt.path);
   worker(f);
   const before = apiCalls(f).length;
-  const eventFile = path.join(f.h.state, 'events.jsonl');
-  const beforeEvents = fs.readFileSync(eventFile, 'utf8').trim().split('\n').length;
+  const beforeEvents = StateFiles.readEvents(f.h.state).length;
   f.write((d) => { d.apiFailure = DENIED_API; });
   const spawned = f.h.run(['spawn', '--task', 'T2', '--wait']);
   assert.equal(spawned.code, 0, spawned.stderr);
   const task = f.h.json(['task', 'show', 'T2']);
-  const events = fs.readFileSync(eventFile, 'utf8').trim().split('\n').slice(beforeEvents).map(JSON.parse);
+  const events = StateFiles.readEvents(f.h.state).slice(beforeEvents);
   const claim = events.find((e) => e.task === 'T2' && e.cmd === 'claim');
   const submit = events.find((e) => e.task === 'T2' && e.cmd === 'submit');
   assert.ok(claim, 'the worker claims the task after its dependency merged');

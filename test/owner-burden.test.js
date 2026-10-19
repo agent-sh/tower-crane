@@ -1,5 +1,7 @@
 'use strict';
 
+const StateFiles = require('./state-files');
+
 // The owner sets policy once and the engine applies it: moot decisions close
 // themselves, failures main shares go to the orchestrator, the orchestrator's
 // own holds are its to cancel, a standing publish policy releases without a
@@ -15,7 +17,7 @@ const { shellQuote } = require('../lib/gates/common');
 
 const orchestrator = { env: { TOWER_CRANE_AGENT: 'orchestrator' } };
 const worker = (id) => ({ env: { TOWER_CRANE_AGENT: `worker-${id}-1`, TOWER_CRANE_TASK: id } });
-const events = (h) => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+const events = (h) => StateFiles.readEvents(h.state);
 const decision = (h, id) => h.readState('decisions.json').decisions.find((d) => d.id === id);
 
 // The tests evidence the gate records for a failure every failing name of

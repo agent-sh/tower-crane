@@ -8,6 +8,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { makeRepo, copyRepo, repairWorktrees, fakeAgentEnv, BIN } = require('./helpers');
 const { updateJson, readPublished } = require('./atomic-file');
+const StateFiles = require('./state-files');
 
 function worker(f) {
   const script = path.join(f.h.base, 'worker.js');
@@ -77,11 +78,11 @@ function copy(t, from) {
   // Both separators, since git reports Windows paths with forward slashes.
   const forms = (p) => [p, p.replaceAll('\\', '/')].map((s) => JSON.stringify(s).slice(1, -1));
   const [olds, news] = [forms(from.h.base), forms(h.base)];
-  for (const file of [path.join(h.state, 'events.jsonl'), path.join(h.base, 'github.json')]) {
-    let text = fs.readFileSync(file, 'utf8');
-    olds.forEach((old, i) => { text = text.split(old).join(news[i]); });
-    fs.writeFileSync(file, text);
-  }
+  const rewrite = (text) => olds.reduce((out, old, i) => out.split(old).join(news[i]), text);
+  // The state's events name worktree paths too.
+  StateFiles.rewriteState(h.state, rewrite);
+  const file = path.join(h.base, 'github.json');
+  fs.writeFileSync(file, rewrite(fs.readFileSync(file, 'utf8')));
   h.git(['remote', 'set-url', 'origin', path.join(h.base, 'remote.git')]);
   repairWorktrees(h);
   const moved = (wt) => ({ ...wt, path: path.join(h.base, path.relative(from.h.base, wt.path)) });

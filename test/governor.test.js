@@ -1,5 +1,7 @@
 'use strict';
 
+const StateFiles = require('./state-files');
+
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -10,7 +12,7 @@ const { makeRepo, BIN } = require('./helpers');
 const { writeHost, GiB } = require('./host');
 const { waitOnRepo, killPid } = require('./signals');
 
-const events = (h) => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse); // read-published: the log is only appended
+const events = (h) => StateFiles.readEvents(h.state);
 const linuxOnly = process.platform !== 'linux' && 'the governor measures and signals by Linux process start times';
 
 // Readings and registries in memory: the budget arithmetic alone.

@@ -137,19 +137,18 @@ test('bench labels confirmed local CI execution failures and excludes local obse
   assert.deepEqual(result.ci_checks, [
     { check: 'local CI (default)', fails: 1, tp: 1, fp: 0, open: 0, precision: 1 },
   ]);
-  const eventFile = path.join(h.state, 'events.jsonl');
-  const events = fs.readFileSync(eventFile, 'utf8').trim().split('\n').map(JSON.parse);
+  const events = StateFiles.readEvents(h.state);
   const failed = events.find((e) => e.cmd === 'check ci');
   for (const detail of [local(0), local(null), local(126), local(127), local(9009), local(1, 'SIGTERM'), local(1, null, false)]) {
     failed.detail = detail;
-    fs.writeFileSync(eventFile, events.map((e) => JSON.stringify(e)).join('\n') + '\n');
+    StateFiles.replaceLog(h.state, events.map((e) => JSON.stringify(e)).join('\n') + '\n');
     result = h.json(['bench', 'gates']);
     assert.equal(result.gates.find((g) => g.gate === 'ci').noncode, 1);
     assert.equal(result.gates.find((g) => g.gate === 'tests').fn, 0);
   }
   failed.detail = local(1);
   events.push({ cmd: 'check ci', task: 'T1', at: '2026-10-07T00:00:04Z', detail: { type: 'ci', ok: true, sha: A } });
-  fs.writeFileSync(eventFile, events.map((e) => JSON.stringify(e)).join('\n') + '\n');
+  StateFiles.replaceLog(h.state, events.map((e) => JSON.stringify(e)).join('\n') + '\n');
   result = h.json(['bench', 'gates']);
   assert.equal(result.gates.find((g) => g.gate === 'ci').fp, 1);
   assert.equal(result.gates.find((g) => g.gate === 'tests').fn, 0);
