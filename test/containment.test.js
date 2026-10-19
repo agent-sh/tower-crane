@@ -236,12 +236,18 @@ test('the sweep removes report directories and failed units of dead supervisors 
     fs.mkdirSync(path.join(cache, name), { recursive: true });
   }
   const cp = require('node:child_process');
+  // A keeper of a dead supervisor's unit still has that unit's Result to read.
+  const held = `tower-crane-${dead}-fedcba9876543210.scope`;
+  const keeper = cp.spawn(process.execPath, ['-e', 'process.stdin.resume()', 'containment-keeper.js', JSON.stringify({ unit: held })],
+    { stdio: ['pipe', 'ignore', 'ignore'] });
+  t.after(() => keeper.kill('SIGKILL'));
+  await new Promise((resolve, reject) => { keeper.once('spawn', resolve); keeper.once('error', reject); });
   const original = cp.spawnSync;
   const calls = [];
   cp.spawnSync = (file, args, opts) => {
     if (file !== 'systemctl') return original(file, args, opts);
     calls.push(args);
-    return { status: 0, stdout: `● ${unit(dead)} loaded failed failed ${unit(dead)}\n  ${unit(process.pid)} loaded failed failed\n`, stderr: '' };
+    return { status: 0, stdout: `● ${unit(dead)} loaded failed failed ${unit(dead)}\n  ${unit(process.pid)} loaded failed failed\n  ${held} loaded failed failed\n`, stderr: '' };
   };
   try { C.sweep(cache, true); } finally { cp.spawnSync = original; }
   assert.deepEqual(fs.readdirSync(cache).sort(), [`tower-crane-containment-${process.pid}-b2`, 'tower-crane-containment-c3', 'unrelated']);
@@ -270,6 +276,38 @@ test('a scope that settles failed is reset and a clean one is left alone', async
       await done;
     } finally { cp.execFile = original; }
     assert.equal(calls.some((args) => args[1] === 'reset-failed'), reset, JSON.stringify(calls));
+  }
+});
+
+test('a keeper reads its scope\'s Result before it resets the scope', { skip: process.platform !== 'linux' }, async (t) => {
+  const cp = require('node:child_process');
+  const unit = 'tower-crane-1-0123456789abcdef.scope';
+  const exitCode = process.exitCode;
+  t.after(() => { process.exitCode = exitCode; });
+  const spawnSync = cp.spawnSync;
+  for (const [result, failed] of [['oom-kill', 1], ['success', exitCode]]) {
+    const calls = [];
+    t.mock.method(cp, 'spawnSync', (file, args, opts) => {
+      if (file !== 'systemctl') return spawnSync(file, args, opts);
+      calls.push(args);
+      return { status: 0, stdout: `${result}\n`, stderr: '' };
+    });
+    const reset = new Promise((resolve) => t.mock.method(cp, 'execFile', (file, args, opts, callback) => {
+      calls.push(args);
+      if (args[1] === 'reset-failed') return resolve();
+      process.nextTick(callback, null, 'failed\n', '');
+    }));
+    process.exitCode = exitCode;
+    // The scope's cgroup is already gone, as after an OOM kill of every process in it.
+    await C.guardRemaining({ rows: [], group: path.join('/sys/fs/cgroup', 'missing', unit), unit,
+      limits: { tasks_max: 64, memory_max_bytes: memory }, baseline: { tasks: 0, memory: 0 } });
+    // A keeper that never settles would leave the reset pending forever.
+    if (calls.length > 1) await reset;
+    assert.deepEqual(calls.map((args) => args.slice(1, 4)), [['show', unit, '-p'], ['show', unit, '-p'], ['reset-failed', unit]], result);
+    assert.equal(calls[0][4], 'Result');
+    assert.equal(process.exitCode, failed, result);
+    cp.spawnSync.mock.restore();
+    cp.execFile.mock.restore();
   }
 });
 

@@ -643,12 +643,14 @@ scope below does, to delegate it.
 A launch cleans up its unit in the user manager and its cache files. After the
 attempt exits, the supervisor waits up to five seconds for its scope to settle
 and resets it if the manager left it failed, as an OOM does; `Result=oom-kill`
-is read before that reset. Report directories are
+is read before that reset. When a keeper takes over the scope's retained
+processes, the keeper reads `Result` and settles the scope when it ends, and the
+supervisor leaves the scope alone. Report directories are
 `tower-crane-containment-<supervisor pid>-*` under `XDG_CACHE_HOME` (else
 `~/.cache`), removed when the attempt closes. A supervisor killed before then
 leaves both behind, so the first contained launch of each process removes the
 report directories and resets the failed `tower-crane-<pid>-*.scope` units
-whose supervisor pid no longer exists.
+whose supervisor pid no longer exists and that no running keeper names.
 Failure to set up a scope or delegated child fails the launch with
 `resource-scope-failed`; it never silently falls back after selecting cgroups.
 
