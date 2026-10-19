@@ -1280,10 +1280,11 @@ fs.writeFileSync(file, JSON.stringify(gh));
 cli('claim', 'T1', '--agent', 'worker');
 cli('submit', 'T1', '--sha', ${JSON.stringify(replacement)}, '--pr', '7', '--agent', 'worker');
 for (const gate of ['tests', 'clean', 'ci']) cli('check', gate, 'T1', '--agent', 'owner');
-const events = ${JSON.stringify(path.join(h.state, 'events.jsonl'))};
-const revision = JSON.parse(fs.readFileSync(${JSON.stringify(path.join(h.state, 'tasks.json'))}, 'utf8')).tasks.find((x) => x.id === 'T1').revision;
+const StateFiles = require(${JSON.stringify(path.join(__dirname, 'state-files.js'))});
+const state = ${JSON.stringify(h.state)};
+const revision = StateFiles.readDoc(state, 'tasks.json').tasks.find((x) => x.id === 'T1').revision;
 const at = new Date().toISOString();
-fs.appendFileSync(events, [
+StateFiles.appendLog(state, [
   { at, agent: 'orchestrator', cmd: 'spawn', task: 'T1', detail: { agent: 'reviewer', role: 'reviewer', rung: 'review', sha: ${JSON.stringify(replacement)}, revision, pid: 999999, attempt: 1 } },
   { at, agent: 'orchestrator', cmd: 'spawn exit', task: 'T1', detail: { agent: 'reviewer', pid: 999999, attempt: 1, code: 0 } },
 ].map((e) => JSON.stringify(e) + '\\n').join(''));
