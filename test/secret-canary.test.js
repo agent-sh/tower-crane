@@ -54,11 +54,10 @@ function setup(t, harness, mode, { big = 0 } = {}) {
   h.ok(['ladder', 'set', 'medium', '--fallbacks', JSON.stringify([{ harness, ...route, env: { ROUTE: 'fallback', TC_FALLBACK_SECRET: c.fallback } }])]);
   h.ok(['project', 'set', '--env', JSON.stringify({ TC_PROJECT_SECRET: c.project }), '--env_file', '~/secrets.env']);
   if (big) {
-    // Too long for ladder set's argv; the owner writes project.json instead.
-    const file = path.join(h.state, 'project.json');
-    const project = JSON.parse(fs.readFileSync(file, 'utf8'));
+    // Too long for ladder set's argv; the owner writes the project instead.
+    const project = h.readState('project.json');
     Object.assign(project.ladder.medium.env, bigVars);
-    fs.writeFileSync(file, JSON.stringify(project, null, 2) + '\n');
+    h.writeState('project.json', project);
   }
   const out = path.join(h.base, 'canary.jsonl');
   const values = { TC_RUNG_SECRET: c.rung, TC_PROJECT_SECRET: c.project, TC_FILE_SECRET: c.file,
@@ -71,9 +70,10 @@ function setup(t, harness, mode, { big = 0 } = {}) {
   };
   delete env.XDG_CACHE_HOME;
   const spawn = (args) => h.run(['spawn', '--task', 'T1', ...args], { env, hooks: { HOOK_KEEP_SPAWN_DIRS: '1' } });
-  // The configured sources: the ladder and project env live in project.json,
-  // the fallback env in the user file.
-  const allow = [path.join(h.state, 'project.json'), h.userConfig, ...sources];
+  // The configured sources: the ladder and project env live in the project
+  // document of state.db, the fallback env in the user file. The database is
+  // scanned below by what it holds besides the project.
+  const allow = [...[...StateFiles.DB_FILES].map((name) => path.join(h.state, name)), h.userConfig, ...sources];
   const reports = () => fs.readFileSync(out, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
   const expected = (names) => Object.fromEntries(Object.entries(values).map(([n, v]) => [n, names.includes(n) ? sha(v) : null]));
   // The spawning environment's GH_TOKEN never reaches a sandboxed agent: its
@@ -85,6 +85,7 @@ function setup(t, harness, mode, { big = 0 } = {}) {
     assert.ok(fs.readdirSync(cache).some((d) => fs.existsSync(path.join(cache, d, 'job.json'))), 'the kept job file is scanned');
     canary.assertNoHits([
       ...canary.scanTree(h.base, c, allow),
+      ...['tasks.json', 'decisions.json', 'events.jsonl'].flatMap((name) => canary.scanText(StateFiles.fileText(h.state, name), c, `${name} in state.db`)),
       ...outputs.flatMap((o, i) => canary.scanText(o, c, `spawn output ${i}`)),
     ], `files or output after a ${harness} ${mode} run`);
   };

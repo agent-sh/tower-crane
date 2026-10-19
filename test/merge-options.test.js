@@ -1,5 +1,7 @@
 'use strict';
 
+const StateFiles = require('./state-files');
+
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -65,7 +67,7 @@ test('agents cannot request admin merging outside owner-set project policy', (t)
     if (policy !== undefined) h.ok(['project', 'set', '--merge-admin', policy]);
     assert.ok(!merge().includes('--admin'));
     fs.rmSync(h.env.FIXTURE_GH_LOG, { force: true });
-    const snapshot = () => ['tasks.json', 'events.jsonl'].map((file) => fs.readFileSync(path.join(h.state, file), 'utf8'));
+    const snapshot = () => ['tasks.json', 'events.jsonl'].map((file) => StateFiles.fileText(h.state, file));
     const before = snapshot();
     for (const agent of ['w-1', 'orchestrator']) {
       const refused = h.run(['merge', 'T1', '--admin', '--agent', agent]);
@@ -158,7 +160,7 @@ test('merge settings support init, clearing and atomic rejection of invalid or u
   assert.deepEqual(h.json(['project', 'show']).merge, { keep_branch: true });
   h.ok(['project', 'set', '--merge-keep-branch', 'null']);
   assert.ok(!Object.hasOwn(h.json(['project', 'show']), 'merge'));
-  const snapshot = () => ['project.json', 'events.jsonl'].map((f) => fs.readFileSync(path.join(h.state, f), 'utf8'));
+  const snapshot = () => ['project.json', 'events.jsonl'].map((f) => StateFiles.fileText(h.state, f));
   const before = snapshot();
   for (const flag of ['--merge-keep-branch', '--merge-admin']) {
     for (const value of ['1', '"true"', '{}', 'yes']) {

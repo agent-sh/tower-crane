@@ -9,29 +9,12 @@ const { makeTaskRepo, ownerFallbacks } = require('./helpers');
 const { waitOnRepo } = require('./signals');
 const { readPublished } = require('./atomic-file');
 
-const events = (h) => {
-  const text = StateFiles.logText(h.state);
-  return text.slice(0, text.lastIndexOf('\n') + 1).split('\n').filter(Boolean).map(JSON.parse);
-};
+const events = (h) => StateFiles.readEvents(h.state);
 const fixture = path.join(__dirname, 'fixtures', 'fallback-harness.js').replace(/\\/g, '/');
 const clock = path.join(__dirname, 'fixtures', 'shifted-clock.js').replace(/\\/g, '/');
 const supervision = { retries: 2, backoff_ms: 10, max_backoff_ms: 20, stall_ms: 60000 };
 const owner = (h) => events(h).filter((e) => e.cmd === 'msg' && e.detail.to === 'owner');
 const health = (h, source) => events(h).filter((e) => e.cmd === 'harness health' && (!source || e.detail.source === source));
-
-test('auth event readers wait for a complete appended record and reject corrupt complete records', (t) => {
-  const h = makeTaskRepo(t, []);
-  const log = path.join(h.state, 'events.jsonl');
-  const before = events(h);
-  const record = { cmd: 'harness health', detail: { source: 'probe', status: 'available' } };
-  const text = JSON.stringify(record);
-  fs.appendFileSync(log, text.slice(0, -3));
-  assert.deepEqual(events(h), before);
-  fs.appendFileSync(log, text.slice(-3) + '\n');
-  assert.deepEqual(events(h), [...before, record]);
-  fs.appendFileSync(log, 'corrupt record\n');
-  assert.throws(() => events(h), SyntaxError);
-});
 
 // The login checks are real commands on PATH. Like the real CLIs, the status
 // commands report stored credentials as logged in, and a request passes only

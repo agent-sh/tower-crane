@@ -8,8 +8,11 @@ const operation = { mkdir: 'mkdirSync', write: 'writeFileSync', rename: 'renameS
 const original = fs[operation];
 let failed = false;
 
+// Only the CLI command races; the renderer it starts takes the lock too.
+const cli = path.basename(process.argv[1] || '') === 'tower-crane.js';
+
 fs[operation] = function concurrentCleanup(target, ...args) {
-  if (typeof target !== 'string') return original.call(this, target, ...args);
+  if (!cli || typeof target !== 'string') return original.call(this, target, ...args);
   const staging = point === 'write' ? path.dirname(target) : target;
   if (typeof staging === 'string' && staging.endsWith('.new')
     && path.dirname(staging) === process.env.HOOK_STATE

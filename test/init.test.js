@@ -10,7 +10,7 @@ const { makeRepo, run, ownerDirsOutside, ACCOUNT_HOME } = require('./helpers');
 test('init creates the state files and excludes them from git', (t) => {
   const h = makeRepo(t);
   h.init();
-  for (const f of ['project.json', 'tasks.json', 'decisions.json', 'events.jsonl', 'sketch.md', 'sketch.html']) {
+  for (const f of ['project.json', 'state.db', 'sketch.md', 'sketch.html']) {
     assert.ok(fs.existsSync(path.join(h.state, f)), `${f} exists`);
   }
   assert.ok(fs.statSync(path.join(h.state, 'briefs')).isDirectory());
@@ -36,20 +36,27 @@ test('init creates the state files and excludes them from git', (t) => {
 test('a corrupt state file names repairs that work outside git', (t) => {
   const h = makeRepo(t);
   h.init();
-  const tasks = path.join(h.state, 'tasks.json');
+  const marker = path.join(h.state, 'project.json');
+  const Db = require('../lib/db');
+  // The marker file, or a document in the database, as a crash or a hand
+  // edit could leave it.
+  const doc = (name, text) => () => StateFiles.withDb(h.state, () => Db.commit(h.state, { docs: { [name]: text } }));
   const cases = [
-    [path.join(h.state, 'project.json'), '{', ['--agent', 'owner'], /project\.json is not valid JSON/],
-    [path.join(h.state, 'project.json'), '{', ['--agent', 'orchestrator'], /project\.json is not valid JSON/],
-    [tasks, '{"version":1}', ['--agent', 'orchestrator'], /tasks\.json is invalid/],
+    [marker, '{', ['--agent', 'owner'], /project\.json is not valid JSON/],
+    [marker, '{', ['--agent', 'orchestrator'], /project\.json is not valid JSON/],
+    [doc('project', '{'), null, ['--agent', 'owner'], /project\.json in state\.db is not valid JSON/],
+    [doc('tasks', '{"version":1}'), null, ['--agent', 'orchestrator'], /tasks\.json is invalid/],
   ];
-  const saved = new Map(cases.map(([file]) => [file, fs.readFileSync(file)]));
-  for (const [file, text, agent, problem] of cases) {
-    fs.writeFileSync(file, text);
+  for (const [where, text, agent, problem] of cases) {
+    const restore = typeof where === 'string' ? ((saved) => () => fs.writeFileSync(where, saved))(fs.readFileSync(where))
+      : ((docs) => () => StateFiles.withDb(h.state, () => Db.commit(h.state, { docs })))(StateFiles.withDb(h.state, () => Db.snapshot(h.state).docs));
+    if (typeof where === 'string') fs.writeFileSync(where, text);
+    else where();
     const broken = h.run(['project', 'show', ...agent]);
-    fs.writeFileSync(file, saved.get(file));
+    restore();
     assert.equal(broken.code, 1, broken.stderr);
     assert.match(broken.stderr, problem);
-    assert.match(broken.stderr, /events\.jsonl beside it records every change/);
+    assert.match(broken.stderr, /backup or from a tower-crane state export/);
     assert.match(broken.stderr, /git does not track it/);
     assert.doesNotMatch(broken.stderr, /version control|\n\s+at /, 'no git restore and no stack trace');
   }
@@ -177,14 +184,14 @@ test('an orchestrator init leaves out what only the owner grants from the user f
   write({ harness: 'opencode', ladder: { medium: { model: 'x/y' } } });
   const followed = as('orchestrator', ['--state', path.join(h.base, 'followed')]);
   assert.equal(followed.code, 0, followed.stderr);
-  const medium = JSON.parse(fs.readFileSync(path.join(h.base, 'followed', 'project.json'), 'utf8')).ladder.medium;
+  const medium = StateFiles.readDoc(path.join(h.base, 'followed'), 'project.json').ladder.medium;
   assert.deepEqual(medium, { harness: builtin.harness, ...builtin.ladder.medium });
 
   write({ harness: 'codex', ladder: grants });
   const owner = as('owner', ['--state', path.join(h.base, 'owned')]);
   assert.equal(owner.code, 0, owner.stderr);
   assert.doesNotMatch(owner.stdout, /notice:/);
-  const owned = JSON.parse(fs.readFileSync(path.join(h.base, 'owned', 'project.json'), 'utf8')).ladder;
+  const owned = StateFiles.readDoc(path.join(h.base, 'owned'), 'project.json').ladder;
   for (const name of Object.keys(grants)) assert.deepEqual(owned[name], grants[name], name);
 });
 
@@ -221,7 +228,8 @@ test('tests bind the default owner_config_dir inside the fixture, and the fixtur
   assert.deepEqual(ownerDirsOutside(h.base), []);
   const stray = path.join(h.base, 'stray');
   fs.mkdirSync(stray);
-  StateFiles.writeDocText(stray, 'project.json', JSON.stringify({ owner_config_dir: path.join(path.parse(h.base).root, 'elsewhere', '.config', 'tower-crane') }));
+  // A stray state's marker names its owner_config_dir, as the guard reads it.
+  fs.writeFileSync(path.join(stray, 'project.json'), JSON.stringify({ storage: 'state.db', owner_config_dir: path.join(path.parse(h.base).root, 'elsewhere', '.config', 'tower-crane') }));
   assert.equal(ownerDirsOutside(h.base).length, 1);
   assert.equal(ownerDirsOutside(h.base, h.base).length, 1);
   fs.rmSync(stray, { recursive: true });

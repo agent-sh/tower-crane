@@ -137,6 +137,23 @@ function docText(dir, file) {
   return `${JSON.stringify(readDoc(dir, file), null, 2)}\n`;
 }
 
+// Everything a write could change, as text: the project.json marker, the
+// documents, the log, and the other files of the state directory named in
+// `files`, such as the sketch, or null for one that is not there.
+function stateText(dir, files = []) {
+  const read = (name) => (fs.existsSync(path.join(dir, name)) ? fs.readFileSync(path.join(dir, name), 'utf8') : null);
+  return [read('project.json'), ...['project.json', 'tasks.json', 'decisions.json'].map((file) => docText(dir, file)), logText(dir), ...files.map(read)];
+}
+
+// A file of the file layout as the database holds it now: a document as its
+// writer laid it out, events.jsonl as the log's lines; any other file of the
+// state directory is read as it is.
+function fileText(dir, name) {
+  if (['project.json', 'tasks.json', 'decisions.json'].includes(name)) return docText(dir, name);
+  if (name === 'events.jsonl') return logText(dir);
+  return fs.readFileSync(path.join(dir, name), 'utf8');
+}
+
 function writeDocText(dir, file, text) {
   writeDoc(dir, file, JSON.parse(text));
 }
@@ -183,4 +200,4 @@ function toFileLayout(dir) {
 const DB_FILES = new Set([Db.FILE, `${Db.FILE}-wal`, `${Db.FILE}-shm`]);
 const dbFile = (dir) => path.join(dir, Db.FILE);
 
-module.exports = { toFileLayout, rewriteState, DB_FILES, readDoc, writeDoc, docText, writeDocText, readEvents, eventLines, logText, logEnd, appendEvents, appendLog, replaceLog, backup, restore, dbFile, withDb };
+module.exports = { toFileLayout, rewriteState, DB_FILES, readDoc, writeDoc, docText, stateText, fileText, writeDocText, readEvents, eventLines, logText, logEnd, appendEvents, appendLog, replaceLog, backup, restore, dbFile, withDb };

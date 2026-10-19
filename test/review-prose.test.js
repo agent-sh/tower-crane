@@ -149,8 +149,7 @@ test('body-only correction keeps passing software gates and does not escalate ra
 test('automatic reactions do not repeat a light check before the body is corrected', (t) => {
   const h = setup(t);
   const at = new Date().toISOString();
-  const file = path.join(h.state, 'events.jsonl');
-  fs.appendFileSync(file, [
+  StateFiles.appendLog(h.state, [
     { at, agent: 'orchestrator', cmd: 'spawn', task: 'T1',
       detail: { agent: 'worker', role: 'worker', pid: 999999, attempt: 1 } },
     { at, agent: 'orchestrator', cmd: 'spawn exit', task: 'T1',
@@ -158,7 +157,7 @@ test('automatic reactions do not repeat a light check before the body is correct
   ].map((e) => `${JSON.stringify(e)}\n`).join(''));
   fail(h, [claim()]);
   h.run(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
-  const events = fs.readFileSync(file, 'utf8').trim().split('\n').map(JSON.parse);
+  const events = StateFiles.readEvents(h.state);
   const reactions = events.filter((e) => e.cmd === 'automation' && e.detail.phase !== 'running');
   assert.ok(reactions.length, 'the observer completed an automatic reaction');
   // Automatic rework would refuse prose-only findings; the reaction leaves the task for its correction.
