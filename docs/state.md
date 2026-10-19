@@ -1497,6 +1497,9 @@ merged-tree suite to run, the reaction acquires an executor before running it.
 When none is available, or earlier gate work owns the next turn, it records
 `queued`, releases its task reservation and leaves its notification owed for
 retry. This receipt has `executor: true`; no gate verdict is recorded.
+Admission honors the gate requirement recorded for that queued source.
+While executors remain occupied, its retries wait without repeating PR/Git
+inspection or writing another running/queued receipt pair.
 If the originating notification no longer matches, such as after a merge
 queue confirms its first task, the reaction queues a new `automation reconcile`
 notification for the active gate task.

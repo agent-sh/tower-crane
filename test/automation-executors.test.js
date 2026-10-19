@@ -69,6 +69,20 @@ poll();
   return finish;
 }
 
+async function watchQueued(h) {
+  const after = fs.statSync(path.join(h.state, 'events.jsonl')).size;
+  const result = await h.runAsync(['wait', '--after', String(after), '--types', 'never',
+    '--timeout', '3', '--agent', 'orchestrator']); // wait-allow: observe watcher retries while every fake gate remains held
+  assert.equal(result.code, 2, result.stderr);
+  const starts = new Map();
+  for (const e of h.logs()) {
+    if (e.cmd !== 'automation' || e.detail.phase !== 'running' || ['T5', 'T6', 'T7', 'T8'].includes(e.task)) continue;
+    starts.set(e.detail.source, (starts.get(e.detail.source) || 0) + 1);
+  }
+  assert.ok(starts.size, 'the watcher inspected a fast reaction and discovered a gate');
+  for (const [source, count] of starts) assert.equal(count, 1, `${source}: queued discovery must not repeatedly reserve on watcher wakes`);
+}
+
 test('a failed review reworks and dispatches while all four gate executors are busy', async (t) => {
   const h = refillFixture(t);
   for (const id of ['T2', 'T3', 'T4']) h.ok(['task', 'update', id, '--status', 'cancelled']);
@@ -124,7 +138,7 @@ test('a merge queue preserves the next task suite after its originating task mer
     h.saveGithub(merged);
   });
   try {
-    h.consume();
+    await watchQueued(h);
     assert.ok(h.logs().some((e) => e.task === 'T1' && e.cmd === 'merge' && e.detail.ok));
     assert.ok(h.json(['status']).gate_queue.queued.some((q) => q.id === 'T9'), 'the suite remains queued after the original notification becomes ineligible');
     assert.equal(h.logs().some((e) => e.task === 'T9' && e.cmd === 'head check'), false);
@@ -134,6 +148,39 @@ test('a merge queue preserves the next task suite after its originating task mer
   assert.ok(h.logs().some((e) => e.task === 'T9' && e.cmd === 'head check' && e.detail.ok));
   assert.ok(h.logs().some((e) => e.task === 'T9' && e.cmd === 'merge' && e.detail.ok), 'the releasing executors drain the next suite without another notification');
 });
+
+for (const discovery of ['accepted merge suite', 'submitted local CI tree move']) {
+  test(`a live watcher retains the executor requirement of a queued ${discovery}`, async (t) => {
+    const h = refillFixture(t);
+    for (const id of ['T2', 'T3', 'T4']) h.ok(['task', 'update', id, '--status', 'cancelled']);
+    const finish = await busyExecutors(h, () => {
+      const github = h.github();
+      github.ci[h.sha] = 'success';
+      h.saveGithub(github);
+      if (discovery === 'submitted local CI tree move') h.ok(['project', 'set', '--ci-local',
+        JSON.stringify({ command: [process.execPath, '-e', 'process.exit(0)'], timeout: 30 })]);
+      h.submit();
+      for (const gate of ['tests', 'clean', 'ci']) h.ok(['check', gate, 'T1', '--agent', 'orchestrator']);
+      if (discovery === 'accepted merge suite') {
+        h.reviewer('T1', 'reviewer');
+        h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--sha', h.sha, '--ok', '--agent', 'reviewer']);
+        h.ok(['accept', 'T1', '--agent', 'orchestrator']);
+      }
+      h.git(['switch', 'main']);
+      fs.appendFileSync(path.join(h.repo, 'README.md'), 'Independent base update.\n');
+      h.git(['add', 'README.md']);
+      h.git(['commit', '-qm', 'advance main']);
+    });
+    try {
+      await watchQueued(h);
+      assert.ok(h.json(['status']).gate_queue.queued.some((q) => q.id === 'T1'));
+      assert.deepEqual(h.json(['status']).gate_queue.running.sort(), ['T5', 'T6', 'T7', 'T8']);
+    } finally {
+      await finish();
+    }
+    assert.ok(h.logs().some((e) => e.task === 'T1' && e.cmd === (discovery === 'accepted merge suite' ? 'head check' : 'check ci') && e.detail.ok));
+  });
+}
 
 for (const reaction of ['review dispatch', 'body findings', 'accepted merge', 'merge suite', 'current local CI']) {
   test(`${reaction} takes an executor only if a software gate is needed`, async (t) => {
