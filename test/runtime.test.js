@@ -97,14 +97,17 @@ for (const force of [false, true]) {
   });
 }
 
-for (const failure of ['gate', 'module', 'runner']) {
+for (const failure of ['gate', 'module', 'runner', 'aborted module']) {
   test(`missing engine ${failure} stays owed without a gate verdict and a healthy drain retries it`, t => {
     const h = submitted(t);
     const root = toolCopy(h);
     const gate = path.join(root, 'lib', 'gates', 'tests.js');
     if (failure === 'gate') fs.rmSync(gate);
-    if (failure === 'module') {
-      fs.writeFileSync(gate, "exports.run = async () => { require('../generated-conflicts'); };\n");
+    if (failure.includes('module')) {
+      fs.writeFileSync(gate, `exports.run = async () => {
+        ${failure === 'aborted module' ? 'global.runtimeAbort.abort();' : ''}
+        require('../generated-conflicts');
+      };\n`);
       fs.rmSync(path.join(root, 'lib', 'generated-conflicts.js'));
     }
     if (failure === 'runner') {
@@ -115,8 +118,15 @@ for (const failure of ['gate', 'module', 'runner']) {
       };`);
       fs.rmSync(path.join(root, 'lib', 'containment-runner.js'));
     }
-    const broken = h.run(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator'],
-      { pre: copiedCli(h, root) });
+    const pre = copiedCli(h, root);
+    if (failure === 'aborted module') {
+      fs.appendFileSync(pre[1], `const automation = require(${JSON.stringify(path.join(root, 'lib', 'automation.js'))});
+const consume = automation.consume;
+global.runtimeAbort = new AbortController();
+automation.consume = (ctx, ...args) => consume({ ...ctx, automationSignal: global.runtimeAbort.signal }, ...args);
+`);
+    }
+    const broken = h.run(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator'], { pre });
     assert.ok([1, 2].includes(broken.code), broken.stderr);
     const receipts = h.logs().filter(e => e.cmd === 'automation' && e.detail.phase === 'infrastructure');
     assert.ok(receipts.length, broken.stderr);
@@ -138,7 +148,7 @@ for (const kind of ['controller', 'keeper']) {
     const root = toolCopy(h);
     let child;
     if (kind === 'controller') {
-      child = h.spawnCli(['wait', '--observe', '--types', 'never', '--timeout', '60'], { pre: copiedCli(h, root) });
+      child = h.spawnCli(['wait', '--observe', '--types', 'never', '--follow'], { pre: copiedCli(h, root) });
     } else {
       const fields = fs.readFileSync('/proc/self/stat', 'utf8').split(') ')[1].trim().split(/\s+/);
       const state = { rows: [{ pid: process.pid, start: fields[19] }],
