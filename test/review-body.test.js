@@ -158,7 +158,8 @@ test('status hides closed or day-old live spend while retaining totals', (t) => 
     sample.status = status;
     sample.spend = { ...task.spend, tokens: 123, entries: [{ agent: 'live-worker', at: new Date(now - age).toISOString(),
       tokens: 123, harness: 'command', live: { state: 'live', interval_ms: 1000 } }] };
-    assert.equal(T.liveSpend(sample, now).length > 0, visible, `${status}, age ${age}`);
+    assert.equal(require('../lib/render').statusLiveSpend([sample], now).length > 0, visible, `${status}, age ${age}`);
+    assert.equal(T.liveSpend(sample, now).length, 1, 'raw readings remain available to monitoring and task inspection');
     assert.equal(sample.spend.tokens, 123);
   }
   const file = path.join(h.state, 'tasks.json');
@@ -170,4 +171,23 @@ test('status hides closed or day-old live spend while retaining totals', (t) => 
   fs.writeFileSync(file, JSON.stringify(state));
   assert.doesNotMatch(h.ok(['status']), /live spend:/);
   assert.equal(h.json(['status']).spend.tokens, 123);
+});
+
+test('runaway monitoring retains missing-usage warnings beyond the status cutoff', (t) => {
+  const h = fixture(t, 'pass-first');
+  const st = S.loadState(h.state);
+  const original = T.getTask(st, 'T1');
+  const now = Date.now();
+  const results = [];
+  for (const age of [60000, 86400000, 86400001, 10 * 86400000]) {
+    const task = structuredClone(original);
+    task.status = 'in_progress';
+    task.claim = { agent: 'worker', since: new Date(now - age).toISOString(),
+      until: new Date(now + 60000).toISOString(), from: 'todo' };
+    task.spend.entries = [{ agent: 'worker', tokens: 123, at: new Date(now - age).toISOString(),
+      harness: 'command', live: { state: 'live', interval_ms: 1000 } }];
+    const flags = require('../lib/runaway').runaways({ ...st, tasks: { tasks: [task] } }, now).flags;
+    results.push({ age, stale: flags.filter((f) => f.rule === 'stale').length });
+  }
+  assert.deepEqual(results, [60000, 86400000, 86400001, 10 * 86400000].map((age) => ({ age, stale: 1 })));
 });
