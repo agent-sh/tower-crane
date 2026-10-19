@@ -729,6 +729,9 @@ The fallback watchdog polls process count and total RSS on a 100 ms cadence,
 skipping overlapping snapshots. Platform snapshot commands have a two second
 deadline. Linux
 reads `/proc`, macOS uses `ps`, and Windows uses PowerShell process snapshots.
+Linux cleanup checks a monotonic 100 ms deadline between freeze snapshots.
+It does not retry a rejected stop for the same process identity, then proceeds
+to best-effort killing of the matched processes.
 It tracks the process group/tree and previously observed descendants across
 detachment, and stops them on a cap or sampling failure
 (`resource-monitor-failed`). This fallback is a sampled bound: forks and memory
