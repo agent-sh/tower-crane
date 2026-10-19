@@ -37,7 +37,7 @@ git(root, 'checkout', '-q', 'main');
 const cmd = `${node} runner.js`;
 const project = { repo: 'acme/base-cache', base: 'main', tests: { mode: 'run-only' },
   gates: { tests_cmd: cmd, tests_proof_cmd: `${cmd} {tests}` } };
-const rows = () => fs.readFileSync(marker, 'utf8').trim().split('\n').map(JSON.parse);
+const rows = () => fs.existsSync(marker) ? fs.readFileSync(marker, 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse) : [];
 const logs = [];
 const context = (p = project) => ({ root, stateDir: path.join(tmp, 'state'), project: p,
   task: { id: 'T1', kind: 'code', sha }, log: (line) => logs.push(line) });
@@ -54,13 +54,15 @@ test('base runs only the file holding both failing names, then a later gate reus
   assert.deepEqual(second.main_failure, first.main_failure);
   assert.equal(second.receipt.base_rerun.results[0].cached, true);
   assert.equal(rows().length, 3);
-  assert.ok(logs.some((line) => /base.*test\/fail.test.js.*cached/.test(line)));
+  assert.ok(logs.some((line) => /base .*test\/fail\.test\.js: cached$/.test(line)));
 });
 
 test('two concurrent gates share one base file and host settings invalidate the cache', async () => {
   const p = { ...project, tests: { ...project.tests, host_env: { TC_OPT_IN: 'changed' } } };
   const before = rows().length;
-  const results = await Promise.all([gate.run(context(p)), gate.run(context(p))]);
+  const contexts = [context(p), context(p)];
+  contexts[1].task.id = 'T2';
+  const results = await Promise.all(contexts.map((c) => gate.run(c)));
   const newRows = rows().slice(before);
   assert.equal(newRows.filter((r) => r.files.length === 1).length, 1);
   assert.deepEqual(results.map((r) => r.receipt.base_rerun.results[0].cached).sort(), [false, true]);
@@ -250,7 +252,8 @@ test('cache keys, interrupted runs, corruption, stale locks and pruning', async 
   for (const change of [{ command: `${cmd} other` }, { settingsHash: 'other' }, { file: 'test/b.test.js' }, { sha: 'b'.repeat(40) }]) {
     assert.equal((await base.cached({ ...options, ...change })).cached, false);
   }
-  for (const interrupted of [{ status: null, signal: 'SIGTERM' }, { status: null, timedOut: true }, { status: 127 }, { status: 1, error: new Error('unavailable') }]) {
+  for (const interrupted of [{ status: null, signal: 'SIGTERM' }, { status: null, timedOut: true }, { status: 127 },
+    { status: 1, error: new Error('unavailable') }, { ok: false, status: 1, resource_reason: 'process limit', output: 'not ok stopped case' }]) {
     let attempts = 0;
     const opts = { ...options, command: JSON.stringify(interrupted), run: async () => { attempts++; return interrupted; } };
     await base.cached(opts);
@@ -265,6 +268,14 @@ test('cache keys, interrupted runs, corruption, stale locks and pruning', async 
   const marker = JSON.parse(fs.readFileSync(stale.file, 'utf8'));
   fs.writeFileSync(stale.file, JSON.stringify({ ...marker, pid: 2147483647 }));
   assert.equal((await base.cached(options)).cached, false, 'a dead holder does not block the file');
+  const stagedOutput = `${resultFile}.deadbeefdeadbeef.new`;
+  const stagedLock = `${resultFile}.lock.2147483647.deadbeefdeadbeef.new`;
+  fs.writeFileSync(stagedOutput, 'partial output');
+  fs.mkdirSync(stagedLock);
+  fs.writeFileSync(path.join(stagedLock, 'deadbeefdeadbeef'), JSON.stringify({ ...marker, pid: 2147483647, nonce: 'deadbeefdeadbeef' }));
+  base.prune(cache, options.sha);
+  assert.equal(fs.existsSync(stagedOutput), false, 'orphaned output is pruned');
+  assert.equal(fs.existsSync(stagedLock), false, 'a dead staged lock is pruned');
   await base.cached({ ...options, sha: 'c'.repeat(40) });
   assert.equal(fs.existsSync(path.join(cache, 'b'.repeat(40))), false, 'old base directories are removed');
   for (let i = 0; i < base.MAX_RESULTS + 1; i++) await base.cached({ ...options, sha: 'c'.repeat(40), file: `${i}.js` });
