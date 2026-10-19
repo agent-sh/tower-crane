@@ -225,6 +225,7 @@ cp.spawnSync = function stackGh(command, args, opts) {
       && pr.headRefName === flag('--head') && pr.baseRefName === flag('--base')));
   }
   if (args[0] === 'pr' && args[1] === 'create') {
+    if (data.createError) return finish('', 1, data.createError);
     const flag = (name) => args[args.indexOf(name) + 1];
     const branch = flag('--head');
     const number = Math.max(...Object.keys(data.prs).map(Number)) + 1;
