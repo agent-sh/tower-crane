@@ -9,6 +9,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const Db = require('../lib/db');
 const S = require('../lib/state');
+const { readPublished } = require('./atomic-file');
 
 function withDb(dir, fn) {
   try {
@@ -141,7 +142,7 @@ function docText(dir, file) {
 // documents, the log, and the other files of the state directory named in
 // `files`, such as the sketch, or null for one that is not there.
 function stateText(dir, files = []) {
-  const read = (name) => (fs.existsSync(path.join(dir, name)) ? fs.readFileSync(path.join(dir, name), 'utf8') : null);
+  const read = (name) => (fs.existsSync(path.join(dir, name)) ? readPublished(path.join(dir, name), 'utf8') : null);
   return [read('project.json'), ...['project.json', 'tasks.json', 'decisions.json'].map((file) => docText(dir, file)), logText(dir), ...files.map(read)];
 }
 
@@ -151,7 +152,7 @@ function stateText(dir, files = []) {
 function fileText(dir, name) {
   if (['project.json', 'tasks.json', 'decisions.json'].includes(name)) return docText(dir, name);
   if (name === 'events.jsonl') return logText(dir);
-  return fs.readFileSync(path.join(dir, name), 'utf8');
+  return readPublished(path.join(dir, name), 'utf8');
 }
 
 function writeDocText(dir, file, text) {
