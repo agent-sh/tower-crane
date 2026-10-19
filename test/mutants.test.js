@@ -94,6 +94,7 @@ test('mutation runner catches an unbounded spawn at the process cap and removes 
   assert.equal(result.status, 0, result.output);
   assert.match(result.output, /caught.*stack-merge-unaccepted-lower \(process cap \(32\)/);
   assert.match(result.output, /1\/1 mutants caught/);
+  assert.match(result.output, /1\/1 mutants caught \(0 by tests, 0 by timeout, 1 by caps\)/);
   const children = fs.readFileSync(pids, 'utf8').trim().split('\n').map(JSON.parse);
   assert.ok(children.length > 0, 'the planted bug spawned real processes');
   assert.ok(children.length < 48, `the runaway stayed below the outer cap: ${children.length}`);
@@ -199,6 +200,51 @@ test('scoped containment inherits the caller slice and inspects only its cgroup'
   assert.ok(fixture.reads > 0, 'the watchdog reads scoped process membership');
 });
 
+test('scoped memory catches require oom_kill rather than reclaim or allocation events', { skip: process.platform !== 'linux' }, async (t) => {
+  for (const [events, reason] of [
+    ['max 604\noom 0\noom_kill 0\n', null],
+    ['max 0\noom 2\noom_kill 0\n', null],
+    ['max 0\noom 0\noom_kill 1\n', 'memory cap (4G)'],
+  ]) {
+    await t.test(events.trim().replaceAll('\n', ', '), async (t) => {
+      const fixture = scopedFixture(t, file => {
+        if (file === '/sys/fs/cgroup/fixture.scope/memory.events') return events;
+      });
+      const result = await fixture.run();
+      assert.equal(result.reason, reason, result.output);
+      if (!reason) assert.equal(result.status, 0, result.output);
+    });
+  }
+});
+
+test('scoped containment retains the exited runner identity across a missing stat', { skip: process.platform !== 'linux' }, async (t) => {
+  let gone = false;
+  let reused = false;
+  let signalled = false;
+  let runner;
+  t.mock.method(process, 'kill', pid => {
+    if (Math.abs(pid) === runner && reused) signalled = true;
+  });
+  const fixture = scopedFixture(t, (file, child) => {
+    runner = child?.pid;
+    if (file !== `/proc/${runner}/stat` || child?.exitCode !== 0) return;
+    if (!gone) {
+      gone = true;
+      throw Object.assign(new Error('runner exited'), { code: 'ENOENT' });
+    }
+    reused = true;
+    const fields = Array(22).fill('0');
+    fields[0] = signalled ? 'Z' : 'S';
+    fields[2] = String(runner);
+    fields[19] = 'reused-start';
+    return `${runner} (unrelated process) ${fields.join(' ')}`;
+  });
+  const result = await fixture.run();
+  assert.equal(result.status, 0, result.output);
+  assert.ok(gone && reused, 'the runner disappeared and its PID was reused');
+  assert.equal(signalled, false, 'cleanup must not signal a reused runner PID or group');
+});
+
 test('scoped containment tolerates cgroup removal during final reads and rejects inspection errors', { skip: process.platform !== 'linux' }, async (t) => {
   for (const file of ['pids.current', 'cgroup.procs', 'pids.events', 'memory.events']) {
     for (const code of ['ENOENT', 'ENODEV', 'EACCES', 'EIO']) {
@@ -267,6 +313,59 @@ test('mutation timeouts use measured file baselines with a startup floor', () =>
   assert.throws(() => mutationTimeout(['unmeasured'], times), /missing baseline/);
 });
 
+test('mutation runs retry only timeout catches once and classify the final result', async () => {
+  const { runMutationTests } = require('../scripts/mutants');
+  assert.equal(typeof runMutationTests, 'function');
+  const pass = { status: 0, reason: null, output: '' };
+  const failure = { status: 1, reason: null, output: 'test failed' };
+  const timeout = { status: null, reason: 'caught-by-timeout (30000 ms)', output: '' };
+  const cap = { status: null, reason: 'memory cap (4G)', output: '' };
+  for (const [results, caughtBy] of [
+    [[pass], null],
+    [[failure], 'tests'],
+    [[cap], 'cap'],
+    [[timeout, pass], null],
+    [[timeout, failure], 'tests'],
+    [[timeout, timeout], 'timeout'],
+    [[timeout, cap], 'cap'],
+  ]) {
+    let calls = 0;
+    const result = await runMutationTests(['fast'], new Map([['fast', 10]]), async (files, deadline) => {
+      assert.deepEqual(files, ['fast']);
+      assert.equal(deadline, 30000);
+      assert.ok(calls < results.length, 'at most one retry');
+      return results[calls++];
+    });
+    assert.equal(calls, results.length);
+    assert.equal(result.caughtBy, caughtBy);
+    assert.deepEqual(result.run, results.at(-1));
+  }
+});
+
+test('mutation summary separates a test failure from timeouts and caps', async (t) => {
+  const h = makeRepo(t);
+  fs.mkdirSync(path.join(h.repo, 'lib/gates'), { recursive: true });
+  fs.mkdirSync(path.join(h.repo, 'test'), { recursive: true });
+  fs.writeFileSync(path.join(h.repo, 'lib/gates/merge.js'), `module.exports = (t, ctx) => {
+    if (t.status !== 'accepted' || (!ctx.mergedIds?.includes(t.id))) return false;
+    return true;
+  };\n`);
+  fs.writeFileSync(path.join(h.repo, 'test/run.js'), `
+    if (require('../lib/gates/merge')({ id: 'T1', status: 'submitted' }, { mergedIds: ['T1'] })) {
+      console.error('unaccepted merge');
+      process.exitCode = 1;
+    }
+  `);
+  const result = await runContained(process.execPath, [
+    path.join(ROOT, 'scripts/mutants.js'), '--root', h.repo,
+    '--only', 'stack-merge-unaccepted-lower', '--no-full', '--jobs', '1',
+  ], { env: { ...h.env, TOWER_CRANE_TEST_TMP: h.base }, limit: 48, timeout: 60000 });
+  assert.equal(result.status, 0, result.output);
+  assert.equal(result.reason, null, result.output);
+  assert.match(result.output, /1\/1 mutants caught \(1 by tests, 0 by timeout, 0 by caps\)/);
+  assert.doesNotMatch(result.output, /retry/);
+});
+
 test('a hung planted bug is caught by its baseline-derived timeout', async (t) => {
   const h = makeRepo(t);
   fs.mkdirSync(path.join(h.repo, 'lib/gates'), { recursive: true });
@@ -283,8 +382,10 @@ test('a hung planted bug is caught by its baseline-derived timeout', async (t) =
   const result = await runContained(process.execPath, [
     path.join(ROOT, 'scripts/mutants.js'), '--root', h.repo,
     '--only', 'stack-merge-unaccepted-lower', '--no-full', '--jobs', '1',
-  ], { env: { ...h.env, TOWER_CRANE_TEST_TMP: h.base }, limit: 48, timeout: 60000 }); // wait-allow: outer emergency deadline must fail a broken adaptive mutation timeout
+  ], { env: { ...h.env, TOWER_CRANE_TEST_TMP: h.base }, limit: 48, timeout: 90000 }); // wait-allow: outer emergency deadline covers two 30-second mutation attempts
   assert.equal(result.reason, null, result.output);
   assert.equal(result.status, 0, result.output);
   assert.match(result.output, /caught.*stack-merge-unaccepted-lower \(caught-by-timeout \(30000 ms\)\)/);
+  assert.match(result.output, /retry.*stack-merge-unaccepted-lower.*timeout/);
+  assert.match(result.output, /1\/1 mutants caught \(0 by tests, 1 by timeout, 0 by caps\)/);
 });

@@ -93,7 +93,7 @@ function supervised(h, ids) {
     h.ok(['task', 'add', '--title', `Fixture ${id}`, '--acceptance', 'idles until stopped', '--tier', 'easy']);
     h.ok(['brief', 'set', id, '-'], { input: 'Fixture process, no model.\n' });
   }
-  const script = `require('node:child_process').execFileSync(process.execPath,[${JSON.stringify(BIN)},'claim',process.env.TOWER_CRANE_TASK]);setInterval(()=>{},1000)`;
+  const script = `require('node:child_process').execFileSync(process.execPath,[${JSON.stringify(BIN)},'claim',process.env.TOWER_CRANE_TASK],{env:require(${JSON.stringify(require.resolve('./agent-env'))}).fakeAgentEnv(process.env)});setInterval(()=>{},1000)`;
   h.ok(['ladder', 'set', 'easy', '--harness', 'command', '--command', JSON.stringify([process.execPath, '-e', script, '{brief}']), '--clear', 'profile', '--clear', 'effort']);
 }
 
