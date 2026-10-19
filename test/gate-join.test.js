@@ -170,7 +170,7 @@ test('a joiner that receives evidence from a run interrupted by wait shutdown ru
 });
 
 // A tests gate whose every command counts its runs and holds until the test releases it,
-// in expensive prove mode with one host-only test: up to seven timed commands per run.
+// in expensive prove mode with two test files: up to eight timed commands per run.
 const MINUTES = 10;
 function testsFixture(t) {
   return cachedFixture(t, 'gate-join-tests', (h) => {
@@ -231,6 +231,8 @@ test('the planned commands of a tests run cover each mode, expensive proof and h
   for (const [tests, hosts, want, kind = 'code'] of cases) {
     assert.equal(Tests.plannedCommands({ tests }, kind, hosts), want, JSON.stringify({ tests, hosts, kind }));
   }
+  assert.equal(Tests.plannedCommands({ tests: { mode: 'run-only' } }, 'code', 0, 3), 4, 'three failing files can each need a base command');
+  assert.equal(Tests.plannedCommands({ tests: { expensive: true } }, 'code', 2, 3), 12, 'base files have independent command budgets');
   const project = { gates: { tests_timeout_min: 2, clean_timeout_min: 3 }, tests: { expensive: true }, ci: { local: { command: ['ci'], timeout: 90 } } };
   const task = { kind: 'code', sha: 'abc' };
   // Each planned command gets its timeout and a minute for the metadata queries around it.
@@ -270,7 +272,8 @@ test('a tests run leases until every command it may start could have used its fu
   // Head and scoped proof each with the host-only file, then the reverted run, which fails at its first command.
   assert.equal(runs(h), 5, 'one passing run starts five timed commands');
   const lease = testLeases(h).find((e) => e.detail.phase === 'running');
-  const planned = 7 * (MINUTES * 60000 + 60000);
+  // The fixture has one ordinary test and one host-only file; both may fail.
+  const planned = 8 * (MINUTES * 60000 + 60000);
   const held = Date.parse(lease.detail.deadline) - Date.parse(lease.at);
   assert.ok(Math.abs(held - planned) < 5000, `deadline ${held} ms after the start, want ${planned}`);
 });
