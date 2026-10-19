@@ -7,6 +7,14 @@ const path = require('node:path');
 const { cachedFixture } = require('./helpers');
 const { probe } = require('../scripts/probe-gate-scratch');
 const { suiteTime, reportSuiteTime, DEADLINE_MIN } = require('../scripts/suite-time');
+const { writeHost } = require('./host');
+
+const PRESSURE = [
+  ['load', { load: 1000 }],
+  ['CPU pressure', { cpuSome: 100 }],
+  ['memory pressure', { memorySome: 100 }],
+  ['memory limit', { used: 63 }],
+];
 
 function fixture(t) {
   return cachedFixture(t, 'scratch-proof', (h) => {
@@ -27,7 +35,8 @@ if (process.env.PROOF_FAIL === '1') process.exit(7);
 
 test('the gate proof measures caller contents and the actual removed parent', (t) => {
   const h = fixture(t);
-  const result = probe({ root: h.repo, cache: path.join(h.base, 'probe'), command: 'node scratch.js', environment: h.env });
+  const result = probe({ root: h.repo, cache: path.join(h.base, 'probe'), command: 'node scratch.js',
+    hostRoot: h.env.TOWER_CRANE_HOST_ROOT, environment: h.env });
   assert.equal(result.sha, h.git(['rev-parse', 'HEAD']));
   assert.equal(result.ok, true);
   assert.deepEqual(result.outer_before, []);
@@ -58,7 +67,7 @@ test('suite time warns on GitHub past 75% of the deadline and records each run i
 test('the gate proof rejects a command that writes into the caller temp root', (t) => {
   const h = fixture(t);
   const result = probe({ root: h.repo, cache: path.join(h.base, 'probe'), command: 'node scratch.js',
-    environment: { ...h.env, PROOF_LEAK: '1' } });
+    hostRoot: h.env.TOWER_CRANE_HOST_ROOT, environment: { ...h.env, PROOF_LEAK: '1' } });
   assert.equal(result.exit, 0);
   assert.equal(result.ok, false);
   assert.deepEqual(result.outer_after, ['escaped']);
@@ -67,8 +76,44 @@ test('the gate proof rejects a command that writes into the caller temp root', (
 test('the gate proof retains a failing gate result even when cleanup succeeds', (t) => {
   const h = fixture(t);
   const result = probe({ root: h.repo, cache: path.join(h.base, 'probe'), command: 'node scratch.js',
-    environment: { ...h.env, PROOF_FAIL: '1' } });
+    hostRoot: h.env.TOWER_CRANE_HOST_ROOT, environment: { ...h.env, PROOF_FAIL: '1' } });
   assert.equal(result.exit, 1);
   assert.equal(result.cleanup_ok, true);
   assert.equal(result.ok, false);
 });
+
+for (const [name, pressure] of PRESSURE) {
+  test(`the gate proof preserves an admission refusal under ${name}`, t => {
+    const h = fixture(t);
+    const hostRoot = writeHost(path.join(h.base, 'pressure'), pressure);
+    const result = probe({ root: h.repo, cache: path.join(h.base, 'probe'), command: 'node scratch.js',
+      hostRoot, environment: h.env });
+    assert.equal(result.exit, 3, 'retain the governor deferral exit code');
+    assert.equal(result.gate, null);
+    assert.match(result.stderr, /deferred by the host governor/);
+    assert.match(result.error, /no receipt/);
+    assert.equal(result.cleanup_ok, false, 'no gate parent was measured');
+    assert.equal(result.ok, false);
+    assert.deepEqual(result.gate_parents, []);
+  });
+
+  if (name === 'memory limit') continue;
+  test(`an explicit fixture host keeps the gate proof independent of ambient ${name}`, t => {
+    const h = fixture(t);
+    const ambient = writeHost(path.join(h.base, 'ambient-pressure'), pressure);
+    const preload = path.join(h.base, 'ambient.js');
+    fs.writeFileSync(preload, `
+const fs = require('node:fs'), path = require('node:path');
+const read = fs.readFileSync;
+const files = new Set(['/proc/loadavg', '/proc/pressure/cpu', '/proc/pressure/memory']);
+fs.readFileSync = (file, ...args) => read(files.has(file) ? path.join(${JSON.stringify(ambient)}, file) : file, ...args);
+`);
+    const result = probe({ root: h.repo, cache: path.join(h.base, 'probe'), command: 'node scratch.js',
+      hostRoot: h.env.TOWER_CRANE_HOST_ROOT,
+      environment: { ...h.env, NODE_OPTIONS: `${h.env.NODE_OPTIONS} --require ${JSON.stringify(preload)}` } });
+    assert.equal(result.exit, 0);
+    assert.equal(result.ok, true);
+    assert.equal(result.gate_parents.length, 1);
+    assert.equal(result.gate_parents[0].removed, true);
+  });
+}

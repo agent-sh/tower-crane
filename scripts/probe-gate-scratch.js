@@ -19,7 +19,7 @@ function contents(root) {
 }
 
 // A separate state exercises the real gate without changing the project's tasks.
-function probe({ root = ROOT, cache, command, environment = process.env } = {}) {
+function probe({ root = ROOT, cache, command, hostRoot, environment = process.env } = {}) {
   if (!command && (environment.TOWER_CRANE_SANDBOX === '1' || environment.TOWER_CRANE_BROKER)) {
     throw new Error('the complete gate scratch proof must run on the host, outside the worker sandbox');
   }
@@ -41,6 +41,8 @@ function probe({ root = ROOT, cache, command, environment = process.env } = {}) 
     // The CLI's own cache is separate; the gate must relocate this for its children.
     NODE_COMPILE_CACHE: path.join(run, 'runner-compile-cache'),
   });
+  // Imported fixture probes name their measured host; the complete CLI proof reads the real host.
+  if (hostRoot) env.TOWER_CRANE_HOST_ROOT = hostRoot;
   const result = { command, root, outer, gate_root: gates, started_at: new Date().toISOString() };
   const call = (args, agent = 'orchestrator') => {
     const argv = [BIN, ...args, '--agent', agent, '--state', state, '--json'];
@@ -73,17 +75,18 @@ function probe({ root = ROOT, cache, command, environment = process.env } = {}) 
     result.gate = checked.data;
     result.exit = checked.status;
     result.stderr = checked.stderr;
+    if (!checked.data) result.error = `tests gate returned no receipt: ${checked.stderr.trim() || `exit ${checked.status}`}`;
     result.outer_after = contents(outer);
     result.gate_root_after = contents(gates);
     // Receipts name the worktree actually created, rather than a guessed parent path.
-    const worktrees = checked.data.commands.filter((c) => c.args.includes('worktree') && c.args.includes('add'))
+    const worktrees = (checked.data?.commands || []).filter((c) => c.args.includes('worktree') && c.args.includes('add'))
       .flatMap((c) => c.args.filter((arg) => arg.startsWith(gates + path.sep) && path.basename(arg) === 'wt'));
     result.gate_parents = [...new Set(worktrees.map((dir) => path.dirname(dir)))]
       .map((parent) => ({ path: parent, removed: !fs.existsSync(parent) }));
     result.cleanup_ok = result.outer_before.length === 0 && result.outer_after.length === 0
       && result.gate_root_before.length === 0 && result.gate_root_after.length === 0
       && result.gate_parents.length > 0 && result.gate_parents.every((parent) => parent.removed);
-    result.ok = checked.status === 0 && checked.data.ok && result.cleanup_ok;
+    result.ok = checked.status === 0 && checked.data?.ok === true && result.cleanup_ok;
     result.finished_at = new Date().toISOString();
     return result;
   } finally {
