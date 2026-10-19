@@ -2,7 +2,8 @@
 
 // npm test runs the whole suite; `npm test -- FILE... [--test-* flags]` runs
 // only the files given. File workers stay below the machine's core count,
-// since every file also starts CLI and git processes of its own.
+// since every file also starts CLI and git processes of its own. npm test asks
+// for 4; a caller such as the tests gate on a large host may ask for more.
 
 const cp = require('node:child_process');
 const fs = require('node:fs');
@@ -63,7 +64,7 @@ for (let i = 0; i < given.length; i++) {
   } else if (arg.startsWith('--')) flags.push(arg);
   else files.push(arg);
 }
-const concurrency = Math.min(4, Math.max(1, os.availableParallelism() - 1), requested);
+const concurrency = Math.min(Math.max(1, os.availableParallelism() - 1), requested);
 const args = [
   '--test', `--test-concurrency=${concurrency}`,
   // The clean git seed every test repository copies, built once per run.

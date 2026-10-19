@@ -171,7 +171,9 @@ test('the test runner emits one capped concurrency value, including repeated and
   const h = makeRepo(t);
   const runner = path.join(ROOT, 'test/run.js');
   for (const [cores, options, expected] of [
-    [32, ['--test-concurrency=4', 'test/claim.test.js', '--test-concurrency=999'], 4],
+    [32, ['--test-concurrency=4', 'test/claim.test.js', '--test-concurrency=999'], 31],
+    [24, ['--test-concurrency=8', 'test/claim.test.js'], 8],
+    [24, ['test/claim.test.js'], 4],
     [3, ['--test-concurrency=999', 'test/claim.test.js', '--test-concurrency', '999'], 2],
     [32, ['--test-concurrency=4', '--test-concurrency', '2', 'test/claim.test.js'], 2],
     [1, ['test/claim.test.js'], 1],

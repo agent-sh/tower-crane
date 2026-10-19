@@ -173,8 +173,11 @@ test('a release that meets a busy registry lands once the lock is free, so no pl
     S.releaseMarkedLock(lock);
   }
   await waitOnRepo(h, () => G.read(env).units.length === 0, 'the queued release lands');
-  // A bind, which a dispatch about to exit makes, says whether it landed.
-  const next = G.admit({ stateDir: h.state, env, agent: 'orchestrator' }, { kind: 'worker', task: 'T1', project: h.readState('project.json') });
+  // A bind, which a dispatch about to exit makes, says whether it landed. The
+  // release above waited the production registry lock wait; this unit's env
+  // shortens both waits (lib/intervals.js), which the bind spends in full.
+  const short = { ...env, TOWER_CRANE_INTERVALS: JSON.stringify({ governor_lock_wait: 300, governor_bind_wait: 600 }) };
+  const next = G.admit({ stateDir: h.state, env: short, agent: 'orchestrator' }, { kind: 'worker', task: 'T1', project: h.readState('project.json') });
   const held = S.tryMarkedLock(G.registryLock(env), { keepLive: true });
   let landed;
   try { landed = next.bind(process.pid, undefined, 'worker-T1-1'); } finally { S.releaseMarkedLock(held); }
