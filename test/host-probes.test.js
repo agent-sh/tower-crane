@@ -6,6 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { cachedFixture, ROOT, detachedAlive } = require('./helpers');
 const { shellQuote, treeExec } = require('../lib/gates/common');
+const { fileWritten } = require('./signals');
 
 const NODE = shellQuote(process.execPath);
 const PROBE = `${NODE} probe.js`;
@@ -29,6 +30,17 @@ process.stdin.on('end', () => console.log(process.env.PROBE_NUMBER, process.env.
     fs.writeFileSync(path.join(h.repo, 'value'), 'submitted');
     fs.writeFileSync(path.join(h.repo, 'fail.js'), "console.log('probe failure 17'); process.exit(7);\n");
     fs.writeFileSync(path.join(h.repo, 'slow.js'), "console.log('slow pid', process.pid); setInterval(() => {}, 1000);\n");
+    fs.writeFileSync(path.join(h.repo, 'held.js'), `
+const fs = require('node:fs');
+fs.writeFileSync(process.argv[2], 'started');
+const hold = setInterval(() => {
+  if (fs.existsSync(process.argv[3])) {
+    clearInterval(hold);
+    console.log('old probe finished');
+    process.exit(Number(process.argv[4]));
+  }
+}, 20); // wait-allow: the regression releases the old probe after running its replacement
+`);
     h.git(['add', '-A']);
     h.git(['commit', '-qm', 'probe scripts']);
     h.ok(['task', 'add', '--title', 'Host measurement', '--acceptance', 'host number is recorded']);
@@ -205,3 +217,80 @@ test('workers and orchestrators leave host checks and cleanup to the gates', () 
   }
   assert.doesNotMatch(work, /run the configured cleanup tool if enabled/);
 });
+
+const NUMBER = `${NODE} -e "console.log(42)"`;
+const REPLACEMENT = `${NODE} -e "console.log(43)"`;
+for (const row of [
+  { name: 'completed pass', before: [NUMBER], after: [REPLACEMENT], bump: true },
+  { name: 'completed failure', before: [`${NODE} fail.js`], after: [REPLACEMENT], bump: true },
+  { name: 'completed timeout', before: [`${NODE} slow.js`], after: [REPLACEMENT], bump: true, timeout: true },
+  { name: 'cleared list', before: [`${NODE} fail.js`], after: [], bump: true },
+  { name: 'reordered list', before: [NUMBER, REPLACEMENT], after: [REPLACEMENT, NUMBER], bump: true },
+  { name: 'unchanged list', before: [NUMBER], after: [NUMBER], bump: false },
+  { name: 'different sha', before: [`${NODE} fail.js`], after: [REPLACEMENT], bump: false, newSha: true },
+]) {
+  test(`host probe replacement invalidates the right revision: ${row.name}`, (t) => {
+    const h = fixture(t);
+    if (row.timeout) h.ok(['project', 'set', '--host-probe-timeout-min', '0.05']);
+    submit(h, row.before);
+    h.run(['check', 'tests', 'T1']);
+    const before = h.readState('tasks.json').tasks[0];
+    if (row.newSha) {
+      h.git(['commit', '-qm', 'new head', '--allow-empty']);
+      h.sha = h.git(['rev-parse', 'HEAD']);
+    }
+    submit(h, row.after);
+    const st = require('../lib/state').loadState(h.state);
+    const current = st.tasks.tasks[0];
+    assert.equal(current.revision, before.revision + Number(row.bump));
+    if (row.bump) {
+      const event = st.events.findLast((e) => e.cmd === 'submit');
+      assert.equal(event.detail.previous_revision, before.revision);
+      assert.equal(event.detail.revision, current.revision);
+    }
+    const latest = require('../lib/tasks').latestGateEvidence(current, 'tests', st.events);
+    if (row.bump || row.newSha) assert.equal(latest, undefined, 'the previous verdict no longer counts');
+    else assert.equal(latest.ok, true, 'an unchanged declaration preserves its verdict');
+    h.ok(['check', 'tests', 'T1']);
+    assert.equal(h.readState('tasks.json').tasks[0].evidence.at(-1).ok, true);
+  });
+}
+
+for (const row of [
+  { name: 'success', status: 0 },
+  { name: 'failure', status: 7 },
+  { name: 'timeout', status: 7, timeout: true },
+]) {
+  test(`a live old host probe ${row.name} cannot join or judge its replacement`, async (t) => {
+    const h = fixture(t);
+    if (row.timeout) h.ok(['project', 'set', '--host-probe-timeout-min', '0.05']);
+    const started = path.join(h.base, 'old-started');
+    const release = path.join(h.base, 'old-release');
+    submit(h, [`${NODE} held.js ${shellQuote(started)} ${shellQuote(release)} ${row.status}`]);
+    const revision = h.readState('tasks.json').tasks[0].revision;
+    const old = h.runAsync(['check', 'tests', 'T1']);
+    await fileWritten(started, { signal: t.signal });
+    submit(h, [REPLACEMENT]);
+    const current = h.readState('tasks.json').tasks[0];
+    if (current.revision === revision) {
+      fs.writeFileSync(release, 'release');
+      await old;
+      assert.fail('same-sha probe changes must retire the old run revision');
+    }
+    let next;
+    try {
+      next = await h.runAsync(['check', 'tests', 'T1']);
+    } finally {
+      if (!row.timeout) fs.writeFileSync(release, 'release');
+    }
+    const finished = await old;
+    assert.equal(next.code, 0, next.stdout + next.stderr);
+    assert.doesNotMatch(next.stderr, /joining/);
+    assert.equal(finished.code, row.status || row.timeout ? 1 : 0, finished.stdout + finished.stderr);
+    const st = require('../lib/state').loadState(h.state);
+    const latest = require('../lib/tasks').latestGateEvidence(st.tasks.tasks[0], 'tests', st.events);
+    assert.equal(latest.ok, true, 'the later completion of the old run cannot replace the new verdict');
+    assert.equal(latest.revision, revision + 1);
+    assert.match(latest.receipt.host_probes[0].output_tail, /43/);
+  });
+}
