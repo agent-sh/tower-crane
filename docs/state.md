@@ -630,6 +630,17 @@ A cgroup OOM fails it with `resource-memory-max`. Spawn phase events store the
 blocked reason and containment settings; status and the inbox show that reason.
 Gate command failures put the reason in their summary and receipt/event where
 applicable. The whole attempt is stopped; an unrelated scope is left running.
+Normal agent exit has a different ownership boundary. Independently dispatched
+supervisors, their agents, and wait/check/accept/merge controllers keep working;
+the agent's ordinary background processes are stopped. This applies to zero,
+nonzero and signal exits without a containment failure. The retained work stays
+inside the original cgroup and its aggregate limits. A small detached engine
+keeper watches retained work until it ends; without cgroups it carries the
+original process-count/RSS bound after the launcher exits. A cap or monitoring
+failure still stops the whole retained attempt. Gate commands own everything
+they start, including nested supervisors, and retain their complete cleanup.
+The spawn API's `containmentDone` promise resolves once normal-exit cleanup
+and any keeper handoff finish.
 Containment metadata retains sampled `pids_peak`, `memory_peak_bytes` and
 `refused_forks` from the scope's peak and local event files. Refused forks
 count that scope's cap violations where local events are available.
