@@ -438,7 +438,7 @@ Pi uses a generated config home and tool allowlist, with credential files linked
 | `sandbox` | `claude`, `codex`, `agy` | owner-required: `{ write: [paths], read: [paths], session_bus: true or false, domains: [host patterns] }`; `write` extends writable paths on Claude/Codex, `read` adds readable paths under the user's home, which Claude/Codex sandboxes otherwise hide ([home reads](ladder.md#home-reads)), `session_bus`, on claude and codex, reaches the session bus socket, and `domains` adds hosts claude's sandbox lets commands reach (a rung's list adds to the project's; [ladder.md](ladder.md) has the default list and the pattern rule); agy emits requested settings without a confinement guarantee. `session_bus` is also set alone with `project set --session-bus`, owner-required like the rest of `sandbox` |
 | `env` | all | owner-required: extra environment variables as an object of string values; kept in `project.json`, so `env_file` keeps secrets out of the state directory |
 | `env_file` | all | owner-required: path to a systemd-quoted environment file; its contents are read at real spawn and given only to the agent process |
-| `scope` | all | owner-required: systemd user scope properties as an object of non-blank string values, e.g. `{"CPUQuota":"200%","MemoryMax":"8G"}`; `{}` clears optional properties; mandatory resource caps remain |
+| `scope` | all | owner-required: systemd user scope properties as an object of non-blank string values, e.g. `{"CPUQuota":"200%"}`; `{}` clears optional properties; mandatory resource caps remain, and containment replaces `TasksMax`, `MemoryMax`, `MemorySwapMax`, `OOMPolicy`, `Delegate` and `Slice` with a `warning:` line when they are set |
 
 `sandbox`, `env`, `env_file` and `scope` also apply at project level. They are owner-required ([Authority](#authority)): the owner may set, clear or repeat them through `init`, `project set` or `ladder set`; once state exists, an orchestrator may apply the identical request after owner approval. Rung environment variables override project variables with the same name; both override the environment file, which overrides the inherited process environment. A rung's `env_file` replaces the project file. Each specified rung sandbox field replaces that project field: `write: []` removes the project extra paths for that rung, and `read: []` the extra readable ones. A rung `scope` replaces the whole project scope, so `{}` disables it for that rung. Clearing the rung field restores the project default. Extra writes are added to the role's normal writable paths. Harnesses without a sandbox renderer receive environment settings but do not enforce `sandbox`.
 
@@ -577,7 +577,7 @@ The list and tests policy flags also work with `init`. Omitting a flag leaves it
 `resources.tasks_max` and `resources.memory_max_bytes` cap each spawned worker,
 reviewer, small agent and orchestrator, and each tests, proof, clean or local CI
 command. `init` records explicit overrides in `project.json`; unspecified fields
-are resolved at launch. `project show` prints agent and gate limits. Both settings
+are resolved at launch. `project show` prints agent, reviewer, orchestrator and gate limits. Both settings
 are operational: the orchestrator or owner can change them without a setting
 approval. Changes apply to subsequent launches. There is no unlimited value.
 
@@ -589,8 +589,14 @@ uses half the effective host budget. Agent defaults divide that half by
 `ceil(availableParallelism / 4)`, at least one slot, allowing four logical CPUs
 per activity. Gate defaults divide it by `gates.executors` (two when unset),
 matching the gate queue's concurrency. Tests, proofs, clean commands, local CI
-and merge-queue suites use that gate share. Explicit resource fields override
-both defaults unchanged. Values persisted by older versions remain overrides.
+and merge-queue suites use that gate share. Defaults follow the role, because a
+role that fans out holds its fleet in its own scope. A spawned orchestrator's
+workers, reviewers and gate commands nest inside it, so its default is the whole
+half the per-launch defaults split. A reviewer's default is one agent share plus
+one gate share, for the test probes it runs, and never more than that half.
+Workers, small agents and researchers get one agent share. Explicit resource
+fields override every default unchanged. Values persisted by older versions
+remain overrides.
 
 Linux starts the task budget at the smaller of kernel `threads-max` and
 `pid_max`, then takes the smallest ancestor `pids.max`. An unlimited ancestor
@@ -617,7 +623,29 @@ Crane launch creates a delegated child cgroup within the inherited scope. Its
 own cap and every ancestor's aggregate cap remain enforced by the kernel.
 Optional owner `scope` properties apply to the outer scope; mandatory resource
 properties take precedence, and `scope: {}` only clears optional properties.
-An optional `Slice` property cannot override the caller's slice.
+An optional `Slice` property cannot override the caller's slice. Setting
+`TasksMax`, `MemoryMax`, `MemorySwapMax`, `OOMPolicy`, `Delegate` or `Slice`
+through `init`, `project set` or `ladder set` prints a `warning:` line naming
+the replaced keys. The launched command and its descendants get
+`TOWER_CRANE_SCOPED=1` once the scope or delegated child is ready.
+
+A caller already inside a fence of its own, the innermost cgroup below its
+slice with a finite `memory.max` or with `memory` and `pids` enabled in
+`cgroup.subtree_control`, keeps its attempts inside that fence. When the fence
+delegates those controllers, each attempt is a nested child cgroup as under a
+Tower Crane scope; otherwise the attempt runs in place under the watchdog, and
+the fence's own caps still hold in the kernel. A finite `pids.max` alone does
+not mark a fence, since systemd's `DefaultTasksMax` puts one on every scope.
+
+A launch cleans up its unit in the user manager and its cache files. After the
+attempt exits, the supervisor waits up to five seconds for its scope to settle
+and resets it if the manager left it failed, as an OOM does; `Result=oom-kill`
+is read before that reset. Report directories are
+`tower-crane-containment-<supervisor pid>-*` under `XDG_CACHE_HOME` (else
+`~/.cache`), removed when the attempt closes. A supervisor killed before then
+leaves both behind, so the first contained launch of each process removes the
+report directories and resets the failed `tower-crane-<pid>-*.scope` units
+whose supervisor pid no longer exists.
 Failure to set up a scope or delegated child fails the launch with
 `resource-scope-failed`; it never silently falls back after selecting cgroups.
 
