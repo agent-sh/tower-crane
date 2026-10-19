@@ -1,0 +1,59 @@
+'use strict';
+
+const cp = require('node:child_process');
+const path = require('node:path');
+const C = require('../../lib/containment');
+const { writeAtomic } = require('../atomic-file');
+const [role, dir, kind = 'supervisor', ending = 'zero', late = 'none'] = process.argv.slice(2);
+const limits = { tasks_max: late === 'tasks' ? (C.canScope() ? 32 : 4) : 64,
+  memory_max_bytes: (late === 'memory' ? 384 : 512) * 1024 ** 2 };
+
+function launch(childRole, env, extra = []) {
+  const child = cp.spawn(process.execPath, [__filename, childRole, dir, kind, ending, late, ...extra], {
+    env, detached: true, stdio: 'ignore',
+  });
+  child.on('error', () => {});
+  return child;
+}
+
+if (role === 'caller') {
+  const child = C.spawn(process.execPath, [__filename, 'agent', dir, kind, ending, late], {
+    resources: limits, stdio: 'ignore',
+  });
+  child.once('close', async () => {
+    await child.containmentDone;
+    writeAtomic(path.join(dir, 'closed.json'), JSON.stringify(child.containment));
+    process.exit(0);
+  });
+} else if (role === 'agent') {
+  const env = { ...process.env };
+  if (kind === 'supervisor') env.TOWERCRANE_SUPERVISOR = '1';
+  if (kind === 'gate') env.TOWERCRANE_GATE_RUN_lifecycle = '1';
+  const extra = kind === 'supervisor' ? ['spawn-monitor.js']
+    : kind === 'wait' ? ['tower-crane.js', 'wait'] : ['tower-crane.js', 'check'];
+  launch('managed', env, extra);
+  launch('ordinary', process.env);
+  setTimeout(() => ending === 'signal' ? process.kill(process.pid, 'SIGTERM') // wait-allow: end the owner before dispatched work completes
+    : process.exit(ending === 'nonzero' ? 7 : 0), 400);
+} else if (role === 'managed') {
+  const env = { ...process.env };
+  delete env.TOWERCRANE_SUPERVISOR;
+  if (late === 'none') launch('grandchild', env);
+  if (late === 'tasks') setTimeout(() => { // wait-allow: start the bounded fork probe after the owner exits
+    let n = 0;
+    const timer = setInterval(() => {
+      launch('leaf', env);
+      if (++n === 6) clearInterval(timer);
+    }, 40); // wait-allow: finite late fork probe, at most six children
+  }, 650);
+  if (late === 'memory') setTimeout(() => { // wait-allow: allocate the fixed buffer budget after the owner exits
+    global.blocks = Array.from({ length: 24 }, () => Buffer.alloc(16 * 1024 ** 2, 1));
+  }, 650); // wait-allow: finite retained memory probe
+  setTimeout(() => writeAtomic(path.join(dir, 'managed.done'), 'done'), 1100); // wait-allow: delayed dispatch completion proves survival
+  setTimeout(() => process.exit(0), 1800); // wait-allow: finite dispatched controller lifetime
+} else if (role === 'ordinary' || role === 'grandchild') {
+  setTimeout(() => writeAtomic(path.join(dir, role + '.done'), 'done'), 1000); // wait-allow: distinguish surviving work from cleaned strays
+  setTimeout(() => process.exit(0), 1400); // wait-allow: finite descendant lifetime
+} else {
+  setTimeout(() => process.exit(0), 2000); // wait-allow: finite late fork child lifetime
+}
