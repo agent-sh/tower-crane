@@ -12,6 +12,7 @@ const { tempRoot, liveRoot } = require('./tmp-root');
 const { readPublished } = require('./atomic-file');
 const UserConfigGuard = require('./fixtures/user-config-guard');
 const { fakeAgentEnv, ACCOUNT_HOME } = require('./agent-env');
+const { writeHost } = require('./host');
 
 const ROOT = path.join(__dirname, '..');
 const BIN = path.join(ROOT, 'bin', 'tower-crane.js');
@@ -180,6 +181,8 @@ function baseEnv(home) {
   // A gate's worktree and temp directories stay in the fixture, so a gate the test kills
   // cannot leave them in the shared temporary directory.
   env.TOWER_CRANE_TMP = path.join(home, 'gate-tmp');
+  // The host governor reads a fake host with room to spare, never this machine's load.
+  env.TOWER_CRANE_HOST_ROOT = writeHost(path.join(home, 'host'));
   return env;
 }
 
