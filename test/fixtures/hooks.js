@@ -402,8 +402,10 @@ function after(name, args, rawArgs = args) {
     && real.readdirSync(STATE).some((file) => /\.json\.E[0-9a-f-]{36}\.commit$/.test(file)) && ownsLock()) {
     sleep(Number(env.HOOK_COMMIT_DELAY_MS));
   }
+  // A dispatch's sketch is published by the renderer it started, under the state lock.
   if (env.HOOK_STOP_RENDER && name === 'renameSync' && args[1] === path.join(STATE, 'sketch.md')
-    && path.basename(process.argv[1]) === 'tower-crane.js' && process.argv.includes('spawn') && first('render')) stop(env.HOOK_STOP_RENDER);
+    && (path.basename(process.argv[1]) === 'tower-crane.js' && process.argv.includes('spawn')
+      || path.basename(process.argv[1]) === 'render-worker.js' && /(^| )spawn( |$)/.test(env.HOOK_RENDER_PARENT || '')) && first('render')) stop(env.HOOK_STOP_RENDER);
   // HOOK_STOP_STARTED=FILE stops the dispatch after it reads its supervisor's startup receipt,
   // before its spawn is committed, so the supervisor's startup window can close first.
   if (env.HOOK_STOP_STARTED && name === 'rmSync' && path.basename(target) === 'started.json'

@@ -15,7 +15,10 @@ if (!process.env.HOOK_ASYNC_RENDER && ['tower-crane.js', 'spawn-monitor.js'].inc
   const spawn = cp.spawn;
   cp.spawn = function renderInline(command, args, options) {
     if (!Array.isArray(args) || path.basename(String(args[0] || '')) !== 'render-worker.js') return spawn.call(this, command, args, options);
-    const r = cp.spawnSync(command, args, { ...options, detached: false, stdio: 'ignore' });
+    // The renderer is told which command started it, for hooks that act on one (hooks.js HOOK_STOP_RENDER).
+    const env = { ...(options?.env || process.env), HOOK_RENDER_PARENT: process.argv.slice(2).join(' ') };
+    // And it loads what its parent preloaded (the test hooks), as when the write drew the sketch itself.
+    const r = cp.spawnSync(command, [...process.execArgv, ...args], { ...options, env, detached: false, stdio: 'ignore' });
     return Object.assign(new EventEmitter(), { pid: r.pid, exitCode: r.status, unref() {} });
   };
 }

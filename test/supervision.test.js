@@ -635,10 +635,10 @@ test('a schema bump before the supervisor first reads state stops its worker beh
   const spawned = h.json(['spawn', '--task', 'T1'], { hooks });
   await waitOnRepo(h, () => fs.existsSync(paused), 'supervisor did not pause');
   // The lease gate waits on its supervisor, and this supervisor can no longer read the state.
+  // A newer tool marks its schema in the marker.
   S.withLock(h.state, () => {
-    const project = JSON.parse(StateFiles.docText(h.state, 'project.json'));
-    project.schema_version = 2;
-    S.writeAtomic(path.join(h.state, 'project.json'), S.json(project));
+    const marker = JSON.parse(fs.readFileSync(path.join(h.state, 'project.json'), 'utf8'));
+    S.writeAtomic(path.join(h.state, 'project.json'), S.json({ ...marker, schema_version: S.SCHEMA_VERSION + 1 }));
   });
   fs.writeFileSync(`${paused}.go`, '');
   await waitOnRepo(h, () => !detachedAlive({ pid: spawned.monitor_pid }), 'supervisor kept waiting behind its gate');
