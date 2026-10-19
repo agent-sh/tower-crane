@@ -8,6 +8,7 @@ const gate = require('../../lib/gates/tests');
 const base = require('../../lib/gates/tests-base');
 const { shellQuote, treeExec } = require('../../lib/gates/common');
 const { cachedFixture } = require('../helpers');
+const { readPublished } = require('../atomic-file');
 const { scratch, isolateGit, isolateUserFile, initRepo, commit, git } = require('./helpers');
 
 const tmp = scratch('tests-base');
@@ -37,7 +38,7 @@ git(root, 'checkout', '-q', 'main');
 const cmd = `${node} runner.js`;
 const project = { repo: 'acme/base-cache', base: 'main', tests: { mode: 'run-only' },
   gates: { tests_cmd: cmd, tests_proof_cmd: `${cmd} {tests}` } };
-const rows = () => fs.existsSync(marker) ? fs.readFileSync(marker, 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse) : [];
+const rows = () => fs.existsSync(marker) ? readPublished(marker, 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse) : [];
 const logs = [];
 const context = (p = project) => ({ root, stateDir: path.join(tmp, 'state'), project: p,
   task: { id: 'T1', kind: 'code', sha }, log: (line) => logs.push(line) });
@@ -221,7 +222,7 @@ test('host-only base commands keep host_env and clear exclusions, including cach
   }
   const cache = path.join(process.env.TOWER_CRANE_TMP, 'tests-base-cache');
   const contents = fs.readdirSync(cache).flatMap((repo) => fs.readdirSync(path.join(cache, repo)).flatMap((sha) =>
-    fs.readdirSync(path.join(cache, repo, sha)).filter((f) => f.endsWith('.json')).map((f) => fs.readFileSync(path.join(cache, repo, sha, f), 'utf8'))));
+    fs.readdirSync(path.join(cache, repo, sha)).filter((f) => f.endsWith('.json')).map((f) => readPublished(path.join(cache, repo, sha, f), 'utf8'))));
   assert.ok(contents.every((content) => !content.includes(secret)), 'cached output is redacted');
 });
 
@@ -273,7 +274,7 @@ test('cache keys, interrupted runs, corruption, stale locks and pruning', async 
   assert.equal((await base.cached(options)).cached, false);
   fs.unlinkSync(resultFile);
   const stale = require('../../lib/state').tryMarkedLock(`${resultFile}.lock`, { keepLive: true });
-  const marker = JSON.parse(fs.readFileSync(stale.file, 'utf8'));
+  const marker = JSON.parse(readPublished(stale.file, 'utf8'));
   fs.writeFileSync(stale.file, JSON.stringify({ ...marker, pid: 2147483647 }));
   assert.equal((await base.cached(options)).cached, false, 'a dead holder does not block the file');
   const stagedOutput = `${resultFile}.deadbeefdeadbeef.new`;
