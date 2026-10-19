@@ -746,6 +746,30 @@ test('a value search reads only the controls a value prefix can end at', () => {
   assert.deepEqual(valueSpans(split, literal).map(([a, b]) => [a, b]), [[2, 36], [37, 67]]);
 });
 
+test('a long value that starts like a long run of text costs one reading of the run', () => {
+  const { textBudget } = require('../lib/text-redaction-budget');
+  const { valueSpans } = require('../lib/escape-views');
+  // A search forward from every first character read the value's other characters again at
+  // each one, outside the work units: 1 MiB of these took 2 to 5 s a reading, past the 5 s
+  // floor in all, against a few ms now.
+  const runs = [
+    ['a'.repeat(1 << 20), 'a'.repeat(999) + 'b'],
+    ['ab'.repeat(1 << 19), 'ab'.repeat(500) + 'c'],
+  ];
+  const read = () => {
+    for (const [text, literal] of runs) {
+      assert.deepEqual(valueSpans(text, literal), []);
+      assert.deepEqual(valueSpans(text, literal, null, false), []);
+    }
+    return 'read';
+  };
+  assert.equal(textBudget('', read), 'read');
+  // A prefix of such a value that a control splits from its rest is still found.
+  const literal = 'a'.repeat(999) + 'b';
+  const split = `${'a'.repeat(1500)}\x1b[1m${'b'} ${literal}`;
+  assert.deepEqual(valueSpans(split, literal).map(([a, b]) => [a, b]), [[501, 1505], [1506, 2506]]);
+});
+
 test('dense CR cleanup keeps its text with compact control maps', () => {
   const { stripEscapes, stripEscapesMapped, stripEscapesViews } = require('../lib/ci-log-text');
   for (const unit of ['\r\n', '-\r\\\r|\r/\r', 'a\r']) {
