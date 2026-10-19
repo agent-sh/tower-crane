@@ -19,7 +19,7 @@ function submitted(t) {
     return { sha: h.sha };
   });
   h.logs = () => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
-  h.consume = () => h.run(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
+  h.consume = opts => h.run(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator'], opts);
   const source = h.logs().findLast(e => e.cmd === 'submit').id;
   fs.appendFileSync(path.join(h.state, 'events.jsonl'), JSON.stringify({
     id: `queued-${source}`, at: new Date().toISOString(), cmd: 'automation queued', agent: 'orchestrator',
@@ -126,15 +126,28 @@ global.runtimeAbort = new AbortController();
 automation.consume = (ctx, ...args) => consume({ ...ctx, automationSignal: global.runtimeAbort.signal }, ...args);
 `);
     }
-    const broken = h.run(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator'], { pre });
+    const clock = path.join(h.base, 'retry-clock');
+    fs.writeFileSync(clock, String(Date.now()));
+    const hooks = { HOOK_CLOCK_FILE: clock };
+    const runBroken = () => h.run(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator'], { pre, hooks });
+    const broken = runBroken();
     assert.ok([1, 2].includes(broken.code), broken.stderr);
     const receipts = h.logs().filter(e => e.cmd === 'automation' && e.detail.phase === 'infrastructure');
     assert.ok(receipts.length, broken.stderr);
     assert.ok(receipts.every(e => e.detail.infrastructure_failure));
+    const starts = () => h.logs().filter(e => e.cmd === 'automation' && e.detail.phase === 'running').length;
+    const before = starts();
+    runBroken();
+    runBroken();
+    assert.equal(starts(), before, 'same-root drains and fresh reconcile sources cannot reserve during the retry delay');
+    assert.equal(receipts.at(-1).detail.infrastructure.root, root);
+    fs.writeFileSync(clock, String(receipts.at(-1).detail.infrastructure.until));
+    runBroken();
+    assert.equal(starts(), before + 1, 'expiry allows one retry, then the new receipt holds the runtime again');
     assert.equal(h.readState('tasks.json').tasks[0].evidence.some(e => e.type === 'tests'), false);
     assert.equal(h.logs().some(e => e.cmd === 'rework'), false);
     assert.ok(h.json(['status']).gate_queue.queued.some(e => e.id === 'T1'));
-    const healthy = h.consume();
+    const healthy = h.consume({ hooks });
     assert.equal(healthy.code, 2, healthy.stderr);
     assert.ok(h.readState('tasks.json').tasks[0].evidence.some(e => e.type === 'tests' && e.ok));
   });
@@ -182,6 +195,39 @@ test('runtime missing-code classification excludes project and external modules'
     [new Error('resource-scope-failed: no user manager'), false],
     [new Error('tests failed'), false],
   ]) assert.equal(Runtime.missing(error), expected, error.message);
+});
+
+test('a live wait does not retry missing engine code on its own fs.watch receipts', async t => {
+  const h = submitted(t);
+  const root = toolCopy(h);
+  const counter = path.join(h.base, 'drain-passes');
+  const clock = path.join(h.base, 'retry-clock');
+  fs.writeFileSync(clock, String(Date.now()));
+  const child = h.spawnCli(['wait', '--after', '0', '--types', 'never', '--follow', '--agent', 'orchestrator'], {
+    pre: [...copiedCli(h, root), '--require', path.join(__dirname, 'fixtures', 'runtime-wake.js')],
+    env: { RUNTIME_WAKE_ROOT: root, RUNTIME_WAKE_COUNTER: counter }, hooks: { HOOK_CLOCK_FILE: clock },
+  });
+  const ended = once(child, 'close');
+  const passes = () => fs.existsSync(counter) ? Number(fs.readFileSync(counter, 'utf8')) : 0;
+  const completed = count => waitUntil(() => passes() >= count, { paths: [h.base],
+    alive: () => child.exitCode === null, what: `wait completed ${count} drains` });
+  try {
+    await completed(1);
+    for (let i = 0; i < 3; i++) {
+      const next = passes() + 1;
+      h.ok(['task', 'note', 'T1', `wake ${i}`]);
+      await completed(next);
+    }
+    assert.equal(h.logs().filter(e => e.cmd === 'automation' && e.detail.phase === 'running').length, 1);
+    assert.equal(h.logs().filter(e => e.cmd === 'automation' && e.detail.phase === 'infrastructure').length, 1);
+    assert.equal(h.logs().filter(e => e.cmd === 'automation').length, 2, 'wakeups append no extra reaction receipts');
+    assert.ok(h.json(['status']).gate_queue.queued.some(e => e.id === 'T1'));
+  } finally {
+    child.kill('SIGKILL');
+    await ended;
+  }
+  assert.equal(h.consume({ hooks: { HOOK_CLOCK_FILE: clock } }).code, 2);
+  assert.ok(h.readState('tasks.json').tasks[0].evidence.some(e => e.type === 'tests' && e.ok));
 });
 
 test('runtime holds retain live controllers and discard exited users', async t => {

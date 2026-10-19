@@ -1473,8 +1473,13 @@ an exception. Terminal receipts include `error`, null without an exception.
 Startup can retry deferred or errored work without a new lifecycle event.
 Missing engine modules, uninstalled gates and a missing containment runner
 record `phase: "infrastructure"` with `infrastructure_failure: true` and the
-error. Their source remains queued and owed, releases its executor, and is
-retried by the next healthy drain. These failures record no gate verdict or
+error, plus `infrastructure: {root, until}` naming the failed code root and
+a retry time in epoch milliseconds. Their source remains queued and owed
+and releases its executor. That root takes no new reaction for five seconds,
+using the governor retry interval, even across fresh reconcile sources or
+CLI processes. A different runtime can drain the owed work immediately.
+After the delay the same root can retry; another missing-code failure starts
+a new delay. These failures record no gate verdict or
 rework. The failing drain stops instead of immediately retrying its own
 missing code. Every drain checks its runtime root before reserving a
 reaction; a supervisor whose agent has exited and whose runtime is gone
