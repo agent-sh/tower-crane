@@ -3,10 +3,11 @@
 
 // Plants each bug below in a scratch copy of the repository and runs the test
 // files named for it; a mutant is caught when that run fails. A mutant the
-// named files miss is run against the whole suite before it counts as missed,
-// so the score is the suite's, and the file lists only make it cheap.
+// named files miss is run against the suite before it counts as missed, except
+// for the pristine-anchor check, which cannot score a deliberately planted bug.
 //
-//   node scripts/mutants.js [--root DIR] [--jobs 4] [--only ID,ID] [--no-full] [--skip PATTERN]
+//   node scripts/mutants.js [--root DIR] [--jobs 4] [--only ID,ID] [--no-full] [--skip PATTERN] [--process-limit N]
+//   node scripts/mutants.js --check [--root DIR] [--only ID,ID]
 //
 // --skip passes --test-skip-pattern to every run, for a test the current
 // environment cannot run, such as a nested git push inside an agent's sandbox.
@@ -15,6 +16,7 @@ const cp = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { readText } = require('./text');
 
 // from must occur exactly once in file. tests are the files expected to catch it.
 const MUTANTS = [
@@ -81,7 +83,7 @@ const MUTANTS = [
   { id: 'browser-kit-approval-ignores-file', area: 'authority', file: 'lib/browser-kit.js',
     from: 'change: { user_file: file, servers: names }', to: 'change: { servers: names }', tests: ['test/approval-context.test.js'] },
   { id: 'personal-fallback-borrows-primary-grants', area: 'authority', file: 'lib/project.js',
-    from: 'const previous = personalPolicyRoutes(name, oldRoutes, ctx.env);', to: "const previous = projectPolicyRoutes(st.project, ctx.env).map(entry => ({ ...entry, binding: 'explicit' }));", tests: ['test/personal-authority.test.js'] },
+    from: 'const previous = personalPolicyRoutes(name, RouteGrants.approvedRoutes(st.project, file, name, oldRoutes, oldHarnesses, base), ctx.env);', to: "const previous = projectPolicyRoutes(st.project, ctx.env).map(entry => ({ ...entry, binding: 'explicit' }));", tests: ['test/personal-authority.test.js'] },
   { id: 'personal-fallback-ignores-harness-binding', area: 'authority', file: 'lib/project.js',
     from: "binding: route.harness ? 'explicit' : 'inherited'", to: "binding: 'explicit'", tests: ['test/personal-authority.test.js'] },
   { id: 'personal-fallback-checks-one-harness', area: 'authority', file: 'lib/project.js',
@@ -185,7 +187,7 @@ const MUTANTS = [
     to: 'const dispatched = !!ctx.env.TOWER_CRANE_HOOK;', tests: ['test/stack.test.js'] },
   // state lock
   { id: 'lock-breaks-live-holder', area: 'state lock', file: 'lib/state.js',
-    from: '    if (!lockIsStale(marker)) {', to: '    if (false) {', tests: ['test/lock.test.js'] },
+    from: '    if (!releasedMarkers.has(file) && !lockIsStale(marker, keepLive)) {', to: '    if (false) {', tests: ['test/lock.test.js'] },
   { id: 'lock-ignores-pid-namespace', area: 'state lock', file: 'lib/state.js',
     from: '(pidns ?? null) === pidNamespace() && Number.isInteger(pid)', to: 'Number.isInteger(pid)', tests: ['test/lock.test.js'] },
   { id: 'lock-never-ages-out', area: 'state lock', file: 'lib/state.js',
@@ -268,7 +270,7 @@ const MUTANTS = [
   { id: 'session-bus-spawning-env-names-sockets', area: 'sandbox', file: 'lib/agents.js',
     from: 'const env = workerEnv(ctx);\n  const runtime = runtimeDir(env);', to: 'const env = { ...ctx.env };\n  const runtime = runtimeDir(env);', tests: ['test/sandbox-extensions.test.js'] },
   { id: 'session-bus-dry-run-reads-env-file', area: 'sandbox', file: 'lib/agents.js',
-    from: 'return { flags, tmp, notices, env: { CLAUDE_CONFIG_DIR: home, ...ClaudeProvider', to: 'return { flags, tmp, notices, env: { CLAUDE_CONFIG_DIR: home, ...Settings.agentEnv(ctx.settings || {}), ...ClaudeProvider', tests: ['test/sandbox-extensions.test.js'] },
+    from: 'return { flags, tmp, tmpSpec, notices, env: { CLAUDE_CONFIG_DIR: home, ...ClaudeProvider', to: 'return { flags, tmp, tmpSpec, notices, env: { CLAUDE_CONFIG_DIR: home, ...Settings.agentEnv(ctx.settings || {}), ...ClaudeProvider', tests: ['test/sandbox-extensions.test.js'] },
   { id: 'session-bus-address-from-spawning-env', area: 'sandbox', file: 'lib/spawn-monitor.js',
     from: "require('./agents').sessionBusEnv(spawn.harness, spawn.settings || {}, agentEnv)", to: "require('./agents').sessionBusEnv(spawn.harness, spawn.settings || {}, process.env)", tests: ['test/sandbox-extensions.test.js'] },
   { id: 'sandbox-denies-spawning-runtime', area: 'sandbox', file: 'lib/agents.js',
@@ -282,77 +284,388 @@ const MUTANTS = [
     from: "const canWriteOwner = ctx.agent === 'owner' && ctx.agentExplicit;", to: 'const canWriteOwner = true;', tests: ['test/events.test.js'] },
 ];
 
-const args = process.argv.slice(2);
-const opt = (name, fallback) => {
-  const i = args.indexOf(name);
-  return i < 0 ? fallback : args[i + 1];
-};
-const jobs = Number(opt('--jobs', '4'));
-const only = opt('--only', null)?.split(',');
-const full = !args.includes('--no-full');
-const skip = opt('--skip', null);
-const root = path.resolve(opt('--root', path.join(__dirname, '..')));
-const selected = only ? MUTANTS.filter((m) => only.includes(m.id)) : MUTANTS;
-if (!selected.length || only?.some((id) => !MUTANTS.some((m) => m.id === id))) throw new Error('unknown or empty mutation selection');
-
-const scratchRoot = process.env.TOWER_CRANE_TEST_TMP || os.tmpdir();
-fs.mkdirSync(scratchRoot, { recursive: true });
-const copy = fs.mkdtempSync(path.join(scratchRoot, 'tower-crane-mutants-'));
-// The repository's runner, so each test has its timeout and a hung run ends.
-function runTests(files) {
-  const r = cp.spawnSync(process.execPath, ['test/run.js', `--test-concurrency=${jobs}`, ...(skip ? [`--test-skip-pattern=${skip}`] : []), ...files], {
-    cwd: copy, encoding: 'utf8', env: process.env, maxBuffer: 1 << 28, timeout: 60 * 60 * 1000,
-  });
-  if (r.status !== 0) runTests.failures = `${r.error?.message || ''}\n${r.stdout || ''}\n${r.stderr || ''}`.slice(-8192);
-  return r.status === 0;
-}
-
-const allFiles = () => require(path.join(copy, 'test', 'run.js')).testFiles();
-
-let caught = 0;
-try {
-  // Include test inputs outside the npm package, without local state or caches.
-  const files = cp.execFileSync('git', ['ls-files', '--cached', '--others', '--exclude-standard', '-z'], { cwd: root, encoding: 'utf8' });
-  for (const file of new Set(files.split('\0').filter(Boolean))) {
-    const source = path.join(root, file);
-    // A sandbox mask is a character device (/dev/null) where the host has no file.
-    if (!fs.existsSync(source) || !fs.statSync(source).isFile()) continue;
-    fs.mkdirSync(path.dirname(path.join(copy, file)), { recursive: true });
-    fs.cpSync(source, path.join(copy, file), { recursive: true });
-  }
-  for (const m of selected) {
-    if (fs.readFileSync(path.join(copy, m.file), 'utf8').split(m.from).length !== 2) {
-      throw new Error(`${m.id}: the text to mutate must occur once in ${m.file}`);
-    }
-  }
-  // A file that fails unmutated would count every mutant as caught.
-  const named = [...new Set(selected.flatMap((m) => m.tests))];
-  if (!runTests(named)) throw new Error(`the unmutated tests fail:\n${runTests.failures}`);
-  let fullValidated = false;
-  for (const m of selected) {
-    const file = path.join(copy, m.file);
-    const source = fs.readFileSync(file, 'utf8');
-    fs.writeFileSync(file, source.replace(m.from, m.to));
-    let by = null;
+function checkMutants(root, mutants = MUTANTS) {
+  const sources = new Map();
+  const failures = [];
+  for (const m of mutants) {
     try {
-      if (!runTests(m.tests)) by = m.tests.join(', ');
-      else if (full) {
-        if (!fullValidated) {
-          fs.writeFileSync(file, source);
-          if (!runTests(allFiles())) throw new Error(`the unmutated full suite fails:\n${runTests.failures}`);
-          fullValidated = true;
-          fs.writeFileSync(file, source.replace(m.from, m.to));
-        }
-        if (!runTests(allFiles())) by = 'full suite';
-      }
-    } finally {
-      fs.writeFileSync(file, source);
+      if (!sources.has(m.file)) sources.set(m.file, readText(path.join(root, m.file)));
+      const count = sources.get(m.file).split(m.from).length - 1;
+      if (count !== 1) failures.push(`${m.id}: the text to mutate must occur once in ${m.file}; found ${count}`);
+    } catch (error) {
+      failures.push(`${m.id}: cannot read ${m.file}: ${error.message}`);
     }
-    if (by) caught++;
-    console.log(`${by ? 'caught' : 'MISSED'}  ${m.area.padEnd(16)} ${m.id}${by ? ` (${by})` : ''}`);
   }
-} finally {
-  fs.rmSync(copy, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  if (failures.length) throw new Error(failures.join('\n'));
 }
-console.log(`\n${caught}/${selected.length} mutants caught`);
-if (caught !== selected.length) process.exitCode = 1;
+
+// Track descendants as well as groups: the CLI starts detached supervisors.
+function processSnapshot() {
+  if (process.platform === 'linux') {
+    const rows = [];
+    for (const name of fs.readdirSync('/proc')) {
+      if (!/^\d+$/.test(name)) continue;
+      try {
+        const stat = fs.readFileSync(`/proc/${name}/stat`, 'utf8');
+        const fields = stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\s+/);
+        rows.push({ pid: Number(name), parent: Number(fields[1]), group: Number(fields[2]),
+          start: fields[19], live: !['Z', 'X'].includes(fields[0]) });
+      } catch (error) {
+        if (!['ENOENT', 'ESRCH'].includes(error.code)) throw error;
+      }
+    }
+    return rows;
+  }
+  if (process.platform === 'win32') {
+    const r = cp.spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
+      'Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,CreationDate | ConvertTo-Json -Compress'],
+    { encoding: 'utf8', timeout: 5000, windowsHide: true });
+    if (r.error || r.status !== 0) throw new Error(`cannot inspect mutant processes: ${r.error?.message || r.stderr}`);
+    const rows = JSON.parse(r.stdout);
+    return (Array.isArray(rows) ? rows : [rows]).map(row => ({
+      pid: row.ProcessId, parent: row.ParentProcessId, start: row.CreationDate, live: true,
+    }));
+  }
+  const r = cp.spawnSync('ps', ['-axo', 'pid=,ppid=,pgid=,stat=,lstart='], { encoding: 'utf8', timeout: 5000 });
+  if (r.error || r.status !== 0) throw new Error(`cannot inspect mutant processes: ${r.error?.message || r.stderr}`);
+  return r.stdout.trim().split('\n').filter(Boolean).map(line => {
+    const [pid, parent, group, state, ...start] = line.trim().split(/\s+/);
+    return { pid: Number(pid), parent: Number(parent), group: Number(group),
+      start: start.join(' '), live: !state.startsWith('Z') };
+  });
+}
+
+function callerSlice() {
+  const group = fs.readFileSync('/proc/self/cgroup', 'utf8').split('\n').find(line => line.startsWith('0::'));
+  const slice = group?.slice(3).split('/').filter(part => part.endsWith('.slice')).at(-1);
+  if (!slice) throw new Error('cannot determine the caller systemd slice');
+  return `--slice=${slice}`;
+}
+
+function scopeAvailable() {
+  if (process.platform !== 'linux') return false;
+  let slice;
+  try { slice = callerSlice(); } catch { return false; }
+  const r = cp.spawnSync('systemd-run', ['--user', '--scope', '--quiet', slice, '-p', 'TasksMax=512',
+    '-p', 'MemoryMax=4G', '--', process.execPath, '-e', ''],
+  { encoding: 'utf8', timeout: 10000 });
+  return !r.error && r.status === 0;
+}
+
+async function runContained(command, argv, { cwd, env = process.env, limit = 512, scope = false, timeout = 3600000 } = {}) {
+  if (!Number.isSafeInteger(limit) || limit < 2 || limit > 512) throw new Error('process limit must be an integer from 2 to 512');
+  const before = new Map((scope ? [] : processSnapshot()).map(row => [row.pid, row.start]));
+  // The inherited marker finds Linux descendants reparented between snapshots.
+  const marker = require('node:crypto').randomUUID();
+  const markedEnv = { ...env, TOWER_CRANE_MUTANT_RUN: [env.TOWER_CRANE_MUTANT_RUN, marker].filter(Boolean).join(',') };
+  const unit = `tower-crane-mutant-${process.pid}-${require('node:crypto').randomUUID()}.scope`;
+  const args = scope ? ['--user', '--scope', '--quiet', callerSlice(), `--unit=${unit}`, '-p', `TasksMax=${limit}`,
+    '-p', 'MemoryMax=4G', '--', command, ...argv] : argv;
+  const child = cp.spawn(scope ? 'systemd-run' : command, args, { cwd, env: markedEnv,
+    detached: process.platform !== 'win32', stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+  const known = new Map();
+  let output = '';
+  let peak = 0;
+  let reason = null;
+  let inspectionError = null;
+  let controlGroup;
+  let groupProbeAt = 0;
+  let scopedCount = 0;
+  let ended = false;
+  const capture = chunk => { output = (output + chunk.toString()).slice(-8192); };
+  child.stdout.on('data', capture);
+  child.stderr.on('data', capture);
+  const scopeDirectory = () => {
+    if (controlGroup || Date.now() < groupProbeAt) return controlGroup;
+    // A scope may not be registered at the first inspection.
+    groupProbeAt = Date.now() + 100;
+    const r = cp.spawnSync('systemctl', ['--user', 'show', unit, '-p', 'ControlGroup', '--value'],
+      { encoding: 'utf8', timeout: 5000 });
+    if (r.error) throw r.error;
+    if (r.status === 0 && r.stdout.trim()) controlGroup = path.join('/sys/fs/cgroup', r.stdout.trim());
+    return controlGroup;
+  };
+  const rememberScoped = () => {
+    const group = scopeDirectory();
+    const pids = new Set([child.pid, ...known.keys()].filter(Boolean));
+    scopedCount = 0;
+    if (group) {
+      // kernfs reports ENODEV when systemd removes a scope after its file was opened.
+      try {
+        scopedCount = Number(fs.readFileSync(path.join(group, 'pids.current'), 'utf8').trim());
+        if (!Number.isSafeInteger(scopedCount) || scopedCount < 0) throw new Error('invalid scope process count');
+        for (const pid of fs.readFileSync(path.join(group, 'cgroup.procs'), 'utf8').trim().split(/\s+/).filter(Boolean)) {
+          const number = Number(pid);
+          if (!Number.isSafeInteger(number) || number < 1) throw new Error('invalid scope process membership');
+          pids.add(number);
+        }
+      } catch (error) { if (!['ENOENT', 'ENODEV'].includes(error.code)) throw error; }
+    }
+    const members = [];
+    for (const pid of pids) {
+      try {
+        const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
+        const fields = stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\s+/);
+        const start = fields[19];
+        // A PID observed earlier may have been reused after the scope stopped.
+        if (known.has(pid) && known.get(pid) !== start) continue;
+        known.set(pid, start);
+        if (!['Z', 'X'].includes(fields[0])) members.push({ pid, group: Number(fields[2]), start });
+      } catch (error) {
+        if (!['ENOENT', 'ESRCH'].includes(error.code)) throw error;
+        known.delete(pid);
+      }
+    }
+    return members;
+  };
+  const remember = () => {
+    if (scope) return rememberScoped();
+    const rows = processSnapshot();
+    const members = new Map(rows.filter(row => known.get(row.pid) === row.start).map(row => [row.pid, row]));
+    const leader = rows.find(row => row.pid === child.pid);
+    if (leader && !known.has(leader.pid)) { known.set(leader.pid, leader.start); members.set(leader.pid, leader); }
+    if (process.platform === 'linux') {
+      for (const row of rows) {
+        if (members.has(row.pid) || before.get(row.pid) === row.start || !row.live) continue;
+        try {
+          const entry = fs.readFileSync(`/proc/${row.pid}/environ`, 'utf8').split('\0')
+            .find(value => value.startsWith('TOWER_CRANE_MUTANT_RUN='));
+          if (entry?.slice('TOWER_CRANE_MUTANT_RUN='.length).split(',').includes(marker)) {
+            known.set(row.pid, row.start);
+            members.set(row.pid, row);
+          }
+        } catch (error) {
+          if (!['ENOENT', 'ESRCH', 'EACCES', 'EPERM'].includes(error.code)) throw error;
+        }
+      }
+    }
+    let added;
+    do {
+      added = false;
+      for (const row of rows) {
+        if (!members.has(row.pid) && (members.has(row.parent)
+          || (row.group && [...members.values()].some(member => member.pid === member.group && member.group === row.group)))) {
+          known.set(row.pid, row.start);
+          members.set(row.pid, row);
+          added = true;
+        }
+      }
+    } while (added);
+    return [...members.values()].filter(row => row.live);
+  };
+  const kill = () => {
+    if (!child.pid) return;
+    if (scope) cp.spawnSync('systemctl', ['--user', 'kill', '--signal=SIGKILL', '--kill-whom=all', unit],
+      { encoding: 'utf8', timeout: 5000 });
+    const members = remember();
+    if (process.platform === 'win32') {
+      for (const row of members) cp.spawnSync('taskkill', ['/F', '/T', '/PID', String(row.pid)],
+        { encoding: 'utf8', timeout: 5000, windowsHide: true });
+    } else {
+      const groups = new Set([child.pid, ...members.filter(row => row.pid === row.group).map(row => row.group)]);
+      for (const group of groups) {
+        try { process.kill(-group, 'SIGKILL'); } catch (error) { if (error.code !== 'ESRCH') throw error; }
+      }
+      for (const row of members) {
+        try { process.kill(row.pid, 'SIGKILL'); } catch (error) { if (error.code !== 'ESRCH') throw error; }
+      }
+    }
+  };
+  const scopeCap = () => {
+    if (!scope) return null;
+    scopeDirectory();
+    if (!controlGroup) return null;
+    for (const [file, label] of [['pids.events', `process cap (${limit})`], ['memory.events', 'memory cap (4G)']]) {
+      try {
+        const events = fs.readFileSync(path.join(controlGroup, file), 'utf8');
+        if (/^max [1-9]\d*$/m.test(events)) return label;
+      } catch (error) { if (!['ENOENT', 'ENODEV'].includes(error.code)) throw error; }
+    }
+    return null;
+  };
+  const stop = why => {
+    reason ||= why;
+    try { kill(); } catch (error) { inspectionError ||= error; child.kill('SIGKILL'); }
+  };
+  const inspect = () => {
+    try {
+      const members = remember();
+      const count = scope ? scopedCount : members.length;
+      peak = Math.max(peak, count);
+      const cap = scopeCap();
+      if (cap || count >= limit) stop(cap || `process cap (${limit}); observed ${count}`);
+    } catch (error) {
+      inspectionError ||= error;
+      stop('watchdog inspection failed');
+    }
+  };
+  const onSignal = signal => stop(`interrupted by ${signal}`);
+  const onInt = () => onSignal('SIGINT');
+  const onTerm = () => onSignal('SIGTERM');
+  process.on('SIGINT', onInt);
+  process.on('SIGTERM', onTerm);
+  const timer = setInterval(inspect, 25);
+  const deadline = setTimeout(() => stop(`caught-by-timeout (${timeout} ms)`), timeout);
+  try {
+    const result = await new Promise((resolve, reject) => {
+      child.once('error', reject);
+      child.once('exit', (status, signal) => {
+        ended = true;
+        try {
+          // Inspect before removing the scope or losing surviving descendants.
+          inspect();
+          kill();
+        } catch (error) { inspectionError ||= error; }
+        resolve({ status, signal });
+      });
+    });
+    const cleanupDeadline = Date.now() + 5000;
+    while (remember().length) {
+      kill();
+      if (Date.now() >= cleanupDeadline) throw new Error('mutant descendants survived containment cleanup');
+      await new Promise(resolve => setTimeout(resolve, 25));
+    }
+    if (inspectionError) throw inspectionError;
+    if (scope && !reason && result.status !== 0
+      && /^Failed to (?:connect .*bus|start transient scope|create bus connection|find executable|resolve executable|execute)/m.test(output)) {
+      throw new Error(`cannot launch mutant systemd scope:\n${output}`);
+    }
+    return { ...result, reason, output, peak };
+  } finally {
+    clearInterval(timer);
+    clearTimeout(deadline);
+    process.off('SIGINT', onInt);
+    process.off('SIGTERM', onTerm);
+    if (!ended) kill();
+    child.stdout.destroy();
+    child.stderr.destroy();
+  }
+}
+
+// Five baseline times leave room for loaded hosts; the floor covers process startup.
+function mutationTimeout(files, timings) {
+  const measured = files.reduce((sum, file) => {
+    const ms = timings.get(file);
+    if (!Number.isFinite(ms) || ms < 0) throw new Error(`missing baseline time for ${file}`);
+    return sum + ms;
+  }, 0);
+  return Math.ceil(Math.max(30000, measured * 5));
+}
+
+module.exports = { MUTANTS, checkMutants, runContained, mutationTimeout };
+if (require.main !== module) return;
+
+async function main() {
+  const args = process.argv.slice(2);
+  const opt = (name, fallback) => {
+    const i = args.indexOf(name);
+    return i < 0 ? fallback : args[i + 1];
+  };
+  const jobs = Number(opt('--jobs', '4'));
+  if (!Number.isSafeInteger(jobs) || jobs < 1 || jobs > 4) throw new Error('--jobs must be an integer from 1 to 4');
+  const only = opt('--only', null)?.split(',');
+  const full = !args.includes('--no-full');
+  const skip = opt('--skip', null);
+  const processLimit = Number(opt('--process-limit', '512'));
+  if (!Number.isSafeInteger(processLimit) || processLimit < 2 || processLimit > 512) throw new Error('--process-limit must be an integer from 2 to 512');
+  const root = path.resolve(opt('--root', path.join(__dirname, '..')));
+  const selected = only ? MUTANTS.filter((m) => only.includes(m.id)) : MUTANTS;
+  if (!selected.length || only?.some((id) => !MUTANTS.some((m) => m.id === id))) throw new Error('unknown or empty mutation selection');
+
+  // Validate before copying the repository or starting a baseline.
+  checkMutants(root, selected);
+  if (args.includes('--check')) {
+    console.log(`${selected.length} mutant targets match once`);
+    return;
+  }
+
+  const scratchRoot = process.env.TOWER_CRANE_TEST_TMP || os.tmpdir();
+  fs.mkdirSync(scratchRoot, { recursive: true });
+  const copy = fs.mkdtempSync(path.join(scratchRoot, 'tower-crane-mutants-'));
+  const scope = scopeAvailable();
+  console.log(`Containment: ${scope ? 'systemd scope (MemoryMax=4G) and watchdog' : 'process watchdog'}; process limit ${processLimit}`);
+  const timings = new Map();
+  async function testResult(files, timeout, concurrency = jobs) {
+    const r = await runContained(process.execPath, ['test/run.js', `--test-concurrency=${concurrency}`, ...(skip ? [`--test-skip-pattern=${skip}`] : []), ...files],
+      { cwd: copy, limit: processLimit, scope, timeout });
+    if (r.reason?.startsWith('interrupted by')) throw new Error(r.reason);
+    return r;
+  }
+  async function baseline(files) {
+    const pending = [...new Set(files)].filter(file => !timings.has(file));
+    // Measure each file in its own run, without adding more file workers.
+    let failed;
+    await Promise.all(Array.from({ length: Math.min(jobs, pending.length) }, async () => {
+      while (pending.length && !failed) {
+        const file = pending.shift();
+        const started = performance.now();
+        try {
+          const r = await testResult([file], undefined, 1);
+          if (r.status !== 0 || r.reason) throw new Error(`the unmutated tests fail:\n${file}\n${r.reason || r.signal || ''}\n${r.output}`);
+          timings.set(file, performance.now() - started);
+        } catch (error) { failed ||= error; }
+      }
+    }));
+    if (failed) throw failed;
+  }
+  async function runTests(files) {
+    const r = await testResult(files, mutationTimeout(files, timings));
+    runTests.reason = r.reason;
+    if (r.status !== 0 || r.reason) runTests.failures = `${r.reason || r.signal || ''}\n${r.output}`;
+    return r.status === 0 && !r.reason;
+  }
+
+  // Anchor validation checks the pristine catalog, not behavior under a planted bug.
+  const allFiles = () => require(path.join(copy, 'test', 'run.js')).testFiles()
+    .filter((file) => file !== 'test/mutants.test.js');
+
+  let caught = 0;
+  try {
+    // Include test inputs outside the npm package, without local state or caches.
+    const files = cp.execFileSync('git', ['ls-files', '--cached', '--others', '--exclude-standard', '-z'], { cwd: root, encoding: 'utf8' });
+    for (const file of new Set(files.split('\0').filter(Boolean))) {
+      const source = path.join(root, file);
+      // A sandbox mask is a character device (/dev/null) where the host has no file.
+      if (!fs.existsSync(source) || !fs.statSync(source).isFile()) continue;
+      fs.mkdirSync(path.dirname(path.join(copy, file)), { recursive: true });
+      fs.cpSync(source, path.join(copy, file), { recursive: true });
+    }
+    checkMutants(copy, selected);
+    // A file that fails unmutated would count every mutant as caught.
+    const named = [...new Set(selected.flatMap((m) => m.tests))];
+    await baseline(named);
+    let fullValidated = false;
+    for (const m of selected) {
+      const file = path.join(copy, m.file);
+      const source = readText(file);
+      fs.writeFileSync(file, source.replace(m.from, m.to));
+      let by = null;
+      try {
+        if (!await runTests(m.tests)) by = runTests.reason || m.tests.join(', ');
+        else if (full) {
+          if (!fullValidated) {
+            fs.writeFileSync(file, source);
+            try { await baseline(allFiles()); }
+            catch (error) { throw new Error(`the unmutated full suite fails:\n${error.message}`); }
+            fullValidated = true;
+            fs.writeFileSync(file, source.replace(m.from, m.to));
+          }
+          if (!await runTests(allFiles())) by = runTests.reason || 'full suite';
+        }
+      } finally {
+        fs.writeFileSync(file, source);
+      }
+      if (by) caught++;
+      console.log(`${by ? 'caught' : 'MISSED'}  ${m.area.padEnd(16)} ${m.id}${by ? ` (${by})` : ''}`);
+    }
+  } finally {
+    fs.rmSync(copy, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+  console.log(`\n${caught}/${selected.length} mutants caught`);
+  if (caught !== selected.length) process.exitCode = 1;
+}
+
+main().catch(error => {
+  console.error(error.stack);
+  process.exitCode = 1;
+});

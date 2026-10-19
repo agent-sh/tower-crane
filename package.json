@@ -1,6 +1,6 @@
 {
   "name": "@agent-sh/tower-crane",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Plan, dispatch, review and merge agent work from one issue to a whole project, with state in plain files and gates in software",
   "license": "MIT",
   "author": { "name": "Avi Fenesh", "url": "https://github.com/avifenesh" },
@@ -15,7 +15,7 @@
   "scripts": {
     "test": "node test/run.js --test-concurrency=4",
     "docs:generate": "node scripts/cli-docs.js",
-    "check:shared": "node scripts/check-shared-files.js",
+    "check:shared": "node scripts/check-shared-files.js --mutants",
     "changelog": "node scripts/changelog.js"
   },
   "tower-crane": {

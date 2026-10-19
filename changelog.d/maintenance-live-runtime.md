@@ -1,0 +1,1 @@
+- Live Claude temp-isolation probes create their own runtime directory, so both runtime branches run independently of the caller environment.

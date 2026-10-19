@@ -31,7 +31,7 @@ are commands recorded in the log, not estimates of model turns.
 | Rerun a flaky CI job | agent judgment | Completion handling is software. Deciding that a failure is flaky requires evidence; automation does not conceal a failing job. |
 | Remove finished runner/review worktrees and remote branches | software | Verified process exit, merge state and retention policy determine cleanup. Existing worktree and merge commands own it. |
 | Inspect the board, capture UI evidence and assess usability | agent judgment | Browser transport is software, but appearance and interaction quality need inspection. |
-| Release and publish | agent judgment | The owner approves publication. Packaging checks and executing the approved release are software. |
+| Release and publish | agent judgment | The owner sets a publish policy once (`project set --publish-policy`), or approves one publication. Checking the policy's conditions, packaging checks and executing the release are software. |
 
 ## Event reactions
 
