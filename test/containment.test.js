@@ -110,6 +110,66 @@ test('gate defaults leave measured full-suite headroom and preserve explicit cap
   assert.match(h.ok(['project', 'show']), /gate resources: /);
 });
 
+test('fan-out roles get caps sized for their fleet and explicit caps apply to every role', (t) => {
+  const host = { tasks: 4000, memory: 14 * 1024 ** 3 };
+  const project = { gates: { executors: 3 } };
+  const agent = C.resolve(project, 'worker', host);
+  const gate = C.resolveGate(project, host);
+  const fleet = C.defaults(host, 1);
+  assert.deepEqual(fleet, { tasks_max: 2000, memory_max_bytes: 7 * 1024 ** 3 });
+  assert.ok(fleet.tasks_max > 261, 'a spawn fence with 3 workers peaked at 261 tasks');
+  for (const [role, expected] of [
+    ['worker', agent], ['small', agent], [undefined, agent], ['orchestrator', fleet],
+    ['reviewer', { tasks_max: Math.min(fleet.tasks_max, agent.tasks_max + gate.tasks_max),
+      memory_max_bytes: Math.min(fleet.memory_max_bytes, agent.memory_max_bytes + gate.memory_max_bytes) }],
+  ]) assert.deepEqual(C.resolve(project, role, host), expected, role);
+  // One executor's gate share is already the whole half.
+  assert.deepEqual(C.resolve({ gates: { executors: 1 } }, 'reviewer', host), fleet);
+  const explicit = { tasks_max: 64, memory_max_bytes: memory };
+  for (const role of ['worker', 'reviewer', 'orchestrator']) assert.deepEqual(C.resolve({ resources: explicit }, role, host), explicit);
+  assert.deepEqual(C.resolve({ resources: { tasks_max: 64 } }, 'orchestrator', host), { ...fleet, tasks_max: 64 });
+  const shown = h => h.ok(['project', 'show']);
+  const h = fixture(t);
+  assert.match(shown(h), /^reviewer resources: \{"tasks_max":64,/m);
+  assert.match(shown(h), /^orchestrator resources: \{"tasks_max":64,/m);
+});
+
+test('reviewer spawns record the reviewer cap', async (t) => {
+  const h = cachedFixture(t, 'reviewer-cap', (h) => {
+    h.init();
+    h.ok(['task', 'add', '--title', 'Reviewed fake agent', '--acceptance', 'contained', '--kind', 'docs']);
+    h.ok(['claim', 'T1', '--agent', 'builder']);
+    h.ok(['submit', 'T1', '--sha', h.git(['rev-parse', 'HEAD']), '--agent', 'builder']);
+    // Review selection picks a rung by diff size, so every candidate runs the finite command.
+    for (const rung of ['review', 'easy', 'medium', 'hard']) {
+      h.ok(['ladder', 'set', rung, '--harness', 'command', '--command',
+        JSON.stringify([process.execPath, '-e', 'process.exit(0)', '{prompt}']), '--clear', 'profile', '--clear', 'effort']);
+    }
+  });
+  h.env.TOWER_CRANE_TEST_CONTAINMENT = '1';
+  const result = h.run(['spawn', '--task', 'T1', '--role', 'review', '--wait']);
+  assert.equal(result.code, 0, result.stderr);
+  const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  const recorded = events.findLast((e) => e.detail?.role === 'reviewer' && e.detail.containment)?.detail.containment;
+  assert.ok(recorded, result.stdout + result.stderr);
+  // One agent share and one gate share, within the half both split.
+  const host = C.capacity();
+  const [agent, gate, fleet] = [C.defaults(host), C.resolveGate(h.readState('project.json'), host), C.defaults(host, 1)];
+  const expected = Object.fromEntries(Object.keys(agent).map((key) => [key, Math.min(fleet[key], agent[key] + gate[key])]));
+  assert.equal(recorded.tasks_max, expected.tasks_max);
+  assert.equal(recorded.memory_max_bytes, expected.memory_max_bytes);
+});
+
+test('owner scope keys that containment replaces print a warning', (t) => {
+  const h = fixture(t);
+  assert.doesNotMatch(h.ok(['project', 'set', '--scope', '{"CPUQuota":"200%"}']), /warning:/);
+  assert.match(h.ok(['project', 'set', '--scope', '{"CPUQuota":"200%","MemoryMax":"8G","TasksMax":"9"}']),
+    /^warning: scope TasksMax, MemoryMax: containment replaces these on every real launch; set the caps with tower-crane project set --tasks-max N --memory-max-bytes N$/m);
+  const rung = h.json(['ladder', 'set', 'easy', '--scope', '{"MemoryMax":"4G"}']);
+  assert.deepEqual(rung.warnings, ['scope MemoryMax: containment replaces this on every real launch; set the caps with tower-crane project set --tasks-max N --memory-max-bytes N']);
+  assert.doesNotMatch(h.ok(['ladder', 'set', 'easy', '--scope', '{}']), /warning:/);
+});
+
 test('nested attempt caps do not recursively shrink project defaults', () => {
   const slice = '/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/agents.slice';
   const own = 'tower-crane-123-0123456789abcdef.scope';
@@ -129,6 +189,160 @@ test('scope placement keeps the caller slice, including custom fences', () => {
   assert.throws(() => C.callerSlice('/sys/fs/cgroup/no-slice/runner'), /no systemd slice/);
 });
 
+test('a caller inside its own capped or delegated fence keeps attempts inside it', {
+  skip: process.platform !== 'linux',
+}, () => {
+  const slice = '/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/agents.slice';
+  const original = { readFileSync: fs.readFileSync, accessSync: fs.accessSync };
+  const cgroups = (here, files) => {
+    fs.readFileSync = (file, ...args) => {
+      if (file === '/proc/self/cgroup') return `0::${here.slice('/sys/fs/cgroup'.length)}\n`;
+      if (Object.hasOwn(files, file)) return files[file];
+      if (String(file).startsWith('/sys/fs/cgroup/')) throw Object.assign(new Error('missing'), { code: 'ENOENT' });
+      return original.readFileSync(file, ...args);
+    };
+    fs.accessSync = (file, ...args) => String(file).startsWith(slice) ? undefined : original.accessSync(file, ...args);
+  };
+  try {
+    for (const [name, here, files, fence] of [
+      // DefaultTasksMax caps every scope, so pids.max alone is no fence.
+      ['terminal scope', `${slice}/app-terminal.scope`, { [`${slice}/app-terminal.scope/pids.max`]: '4915' }, undefined],
+      ['capped slice only', `${slice}/session.scope`, { [`${slice}/memory.max`]: '42949672960' }, undefined],
+      ['memory fence', `${slice}/fence.scope`, { [`${slice}/fence.scope/memory.max`]: '17179869184' }, `${slice}/fence.scope`],
+      ['delegated fence', `${slice}/fence.scope/leaf`, { [`${slice}/fence.scope/cgroup.subtree_control`]: 'memory pids\n' }, `${slice}/fence.scope`],
+      ['innermost fence', `${slice}/outer.scope/inner/leaf`, {
+        [`${slice}/outer.scope/memory.max`]: '17179869184', [`${slice}/outer.scope/inner/memory.max`]: '1073741824',
+      }, `${slice}/outer.scope/inner`],
+    ]) {
+      cgroups(here, files);
+      assert.equal(C.fenceGroup(), fence, name);
+    }
+    // A delegated fence takes nested attempts; one without delegation runs them in place, never in a sibling scope.
+    cgroups(`${slice}/fence.scope/leaf`, {
+      [`${slice}/fence.scope/memory.max`]: '17179869184', [`${slice}/fence.scope/cgroup.subtree_control`]: 'memory pids\n',
+    });
+    assert.equal(C.canScope({}), true);
+    cgroups(`${slice}/fence.scope`, { [`${slice}/fence.scope/memory.max`]: '17179869184' });
+    assert.equal(C.canScope({}), false);
+  } finally { Object.assign(fs, original); }
+});
+
+test('the sweep removes report directories and failed units of dead supervisors only', async (t) => {
+  const h = fixture(t);
+  const cache = path.join(h.base, 'sweep-cache');
+  const dead = require('node:child_process').spawnSync(process.execPath, ['-e', '']).pid;
+  const unit = (pid) => `tower-crane-${pid}-0123456789abcdef.scope`;
+  for (const name of [`tower-crane-containment-${dead}-a1`, `tower-crane-containment-${process.pid}-b2`, 'tower-crane-containment-c3', 'unrelated']) {
+    fs.mkdirSync(path.join(cache, name), { recursive: true });
+  }
+  const cp = require('node:child_process');
+  // A keeper of a dead supervisor's unit still has that unit's Result to read.
+  const held = `tower-crane-${dead}-fedcba9876543210.scope`;
+  const keeper = cp.spawn(process.execPath, ['-e', 'process.stdin.resume()', 'containment-keeper.js', JSON.stringify({ unit: held })],
+    { stdio: ['pipe', 'ignore', 'ignore'] });
+  t.after(() => keeper.kill('SIGKILL'));
+  await new Promise((resolve, reject) => { keeper.once('spawn', resolve); keeper.once('error', reject); });
+  const original = cp.spawnSync;
+  const calls = [];
+  cp.spawnSync = (file, args, opts) => {
+    if (file !== 'systemctl') return original(file, args, opts);
+    calls.push(args);
+    return { status: 0, stdout: `● ${unit(dead)} loaded failed failed ${unit(dead)}\n  ${unit(process.pid)} loaded failed failed\n  ${held} loaded failed failed\n`, stderr: '' };
+  };
+  try { C.sweep(cache, true); } finally { cp.spawnSync = original; }
+  assert.deepEqual(fs.readdirSync(cache).sort(), [`tower-crane-containment-${process.pid}-b2`, 'tower-crane-containment-c3', 'unrelated']);
+  assert.deepEqual(calls.at(-1), ['--user', 'reset-failed', unit(dead)]);
+  calls.length = 0;
+  C.sweep(path.join(h.base, 'missing-cache'), false);
+  assert.deepEqual(calls, []);
+});
+
+test('a scope that settles failed is reset and a clean one is left alone', async () => {
+  const cp = require('node:child_process');
+  const original = cp.execFile;
+  for (const [states, reset] of [[['deactivating', 'failed'], true], [['active', 'inactive'], false], [[''], false]]) {
+    const calls = [];
+    const done = new Promise((resolve) => {
+      cp.execFile = (file, args, opts, callback) => {
+        calls.push(args);
+        if (args[1] === 'reset-failed') return resolve();
+        const state = states.shift();
+        process.nextTick(callback, null, `${state}\n`, '');
+        if (!states.length && state !== 'failed') process.nextTick(resolve);
+      };
+    });
+    try {
+      C.settle('tower-crane-1-0123456789abcdef.scope');
+      await done;
+    } finally { cp.execFile = original; }
+    assert.equal(calls.some((args) => args[1] === 'reset-failed'), reset, JSON.stringify(calls));
+  }
+});
+
+test('a keeper reads its scope\'s Result before it resets the scope', { skip: process.platform !== 'linux' }, async (t) => {
+  const cp = require('node:child_process');
+  const unit = 'tower-crane-1-0123456789abcdef.scope';
+  const exitCode = process.exitCode;
+  t.after(() => { process.exitCode = exitCode; });
+  const spawnSync = cp.spawnSync;
+  for (const [result, failed] of [['oom-kill', 1], ['success', exitCode]]) {
+    const calls = [];
+    t.mock.method(cp, 'spawnSync', (file, args, opts) => {
+      if (file !== 'systemctl') return spawnSync(file, args, opts);
+      calls.push(args);
+      return { status: 0, stdout: `${result}\n`, stderr: '' };
+    });
+    const reset = new Promise((resolve) => t.mock.method(cp, 'execFile', (file, args, opts, callback) => {
+      calls.push(args);
+      if (args[1] === 'reset-failed') return resolve();
+      process.nextTick(callback, null, 'failed\n', '');
+    }));
+    process.exitCode = exitCode;
+    // The scope's cgroup is already gone, as after an OOM kill of every process in it.
+    await C.guardRemaining({ rows: [], group: path.join('/sys/fs/cgroup', 'missing', unit), unit,
+      limits: { tasks_max: 64, memory_max_bytes: memory }, baseline: { tasks: 0, memory: 0 } });
+    // A keeper that never settles would leave the reset pending forever.
+    if (calls.length > 1) await reset;
+    assert.deepEqual(calls.map((args) => args.slice(1, 4)), [['show', unit, '-p'], ['show', unit, '-p'], ['reset-failed', unit]], result);
+    assert.equal(calls[0][4], 'Result');
+    assert.equal(process.exitCode, failed, result);
+    cp.spawnSync.mock.restore();
+    cp.execFile.mock.restore();
+  }
+});
+
+test('launches reset their settled scope, and the next launch cleans up after a killed supervisor', {
+  skip: process.platform !== 'linux' && 'Linux scope runner uses execve',
+}, (t) => {
+  const h = fixture(t);
+  const manager = path.join(__dirname, 'fixtures', 'containment-manager.js');
+  const cache = path.join(h.base, 'manager-cache');
+  const log = path.join(h.base, 'manager.jsonl');
+  const bin = path.join(h.base, 'no-busctl');
+  fs.mkdirSync(bin);
+  const script = (mode) => `
+const C = require(${JSON.stringify(require.resolve('../lib/containment'))});
+const child = C.spawn(process.execPath, ['-e', ''], { resources: { tasks_max: 64, memory_max_bytes: ${memory} } });
+${mode === 'kill' ? "process.kill(process.pid, 'SIGKILL');" : "child.on('close', () => console.log(child.containment.unit));"}`;
+  // Without busctl the runner fails its registration, so no real scope starts.
+  const run = (mode, extra = {}) => require('node:child_process').spawnSync(process.execPath, ['--require', manager, '-e', script(mode)], {
+    encoding: 'utf8', env: { ...h.env, PATH: bin, XDG_CACHE_HOME: cache, TC_FAKE_MANAGER_LOG: log, [C.MARK]: '', ...extra },
+  });
+  const killed = run('kill');
+  assert.equal(killed.signal, 'SIGKILL', killed.stderr);
+  const leaked = fs.readdirSync(cache).filter((name) => name.startsWith('tower-crane-containment-'));
+  assert.deepEqual(leaked.map((name) => name.split('-')[3]), [String(killed.pid)]);
+  const failedUnit = `tower-crane-${killed.pid}-0123456789abcdef.scope`;
+  const next = run('wait', { TC_FAKE_FAILED_UNITS: `${failedUnit} loaded failed failed\n` });
+  assert.equal(next.status, 0, next.stderr);
+  const unit = next.stdout.trim();
+  assert.match(unit, /^tower-crane-\d+-[a-f0-9]{16}\.scope$/);
+  assert.deepEqual(fs.readdirSync(cache).filter((name) => name.startsWith('tower-crane-containment-')), []);
+  const calls = fs.readFileSync(log, 'utf8').trim().split('\n').map(JSON.parse);
+  assert.ok(calls.some((args) => args.join(' ') === `--user reset-failed ${failedUnit}`), JSON.stringify(calls));
+  assert.ok(calls.some((args) => args.join(' ') === `--user reset-failed ${unit}`), JSON.stringify(calls));
+});
+
 test('systemd CLI and D-Bus launches use supported OOM policy and retain caps', {
   skip: process.platform === 'win32' && 'Linux scope runner uses execve',
 }, async (t) => {
@@ -144,7 +358,7 @@ test('systemd CLI and D-Bus launches use supported OOM policy and retain caps', 
     const report = path.join(h.base, `${mode}-report.json`);
     const args = [runner, JSON.stringify(limits),
       mode === 'dbus' ? `@${unit}:test-fence.slice` : '', unit,
-      process.execPath, '-e', 'console.log("scoped command ran")'];
+      process.execPath, '-e', 'console.log("scoped command ran", process.env.TOWER_CRANE_SCOPED)'];
     const command = mode === 'dbus' ? ['--require', fake, ...args]
       : [fake, ...C.scopeArguments(unit, 'test-fence.slice', limits, {
         CPUQuota: '200%', MemoryMax: '1', TasksMax: '999', Slice: 'app.slice',
@@ -157,7 +371,7 @@ test('systemd CLI and D-Bus launches use supported OOM policy and retain caps', 
     });
     const registration = fs.existsSync(report) ? JSON.parse(readPublished(report, 'utf8')) : {};
     assert.equal(result.status, 0, result.stderr + (registration.error || ''));
-    assert.equal(result.stdout, 'scoped command ran\n');
+    assert.equal(result.stdout, 'scoped command ran 1\n', 'every scoped launch sets TOWER_CRANE_SCOPED');
     assert.equal(registration.group, group);
     assert.equal(fs.readFileSync(path.join(group, 'memory.oom.group'), 'utf8'), '1');
     const properties = JSON.parse(fs.readFileSync(log, 'utf8').trim());
