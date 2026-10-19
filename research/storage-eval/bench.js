@@ -69,6 +69,8 @@ function cpuNow() {
 
 const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith('TOWER_CRANE_')));
 env.TMPDIR = process.env.TMPDIR || path.join(os.homedir(), '.cache', 'tct');
+// BENCH_LOCK_TRACE=FILE has a CLI log each state lock holding (lib/state.js traceLock).
+if (process.env.BENCH_LOCK_TRACE) env.TOWER_CRANE_LOCK_TRACE = path.resolve(process.env.BENCH_LOCK_TRACE);
 
 // ---------------------------------------------------------------- setup
 
