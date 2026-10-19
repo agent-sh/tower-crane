@@ -19,21 +19,34 @@ function testFiles() {
 }
 // Seconds each file's tests took in CI on this platform, from test/durations.json.
 // scripts/test-durations.js refreshes the table from CI logs. A platform without a
-// table of its own uses the Linux one.
+// table of its own uses the Linux one; a copy without the table, such as a
+// fixture's, measures nothing.
 function fileDurations(platform = process.platform) {
-  const table = JSON.parse(fs.readFileSync(path.join(__dirname, 'durations.json'), 'utf8'));
+  let text;
+  try { text = fs.readFileSync(path.join(__dirname, 'durations.json'), 'utf8'); }
+  catch (e) { if (e.code === 'ENOENT') return {}; throw e; }
+  const table = JSON.parse(text);
   return table[platform] || table.linux || {};
 }
-// Shard INDEX of TOTAL gets an equal share of the measured time: the longest file
-// goes to the shard with the least time so far. A file the table does not list,
-// such as a new one, counts as the table's median file. The runner owns the split
-// and it depends only on the file list and the table, so every Node version on a
-// platform runs the same files in each shard.
-function shardFiles(files, index, total, durations = fileDurations()) {
+// A file the table does not list, such as a new one, counts as the table's median file.
+function fileCost(durations) {
   const known = Object.values(durations).filter((s) => Number.isFinite(s) && s >= 0).sort((a, b) => a - b);
   const fallback = known.length ? known[Math.floor(known.length / 2)] : 1;
-  const cost = (file) => (Number.isFinite(durations[file]) && durations[file] >= 0 ? durations[file] : fallback);
-  const order = [...files].sort().sort((a, b) => cost(b) - cost(a));
+  return (file) => (Number.isFinite(durations[file]) && durations[file] >= 0 ? durations[file] : fallback);
+}
+// Files start longest first: a long file that started late would hold the run
+// open after every other file finished. Equal times keep the sorted order.
+function longestFirst(files, durations = fileDurations()) {
+  const cost = fileCost(durations);
+  return [...files].sort().sort((a, b) => cost(b) - cost(a));
+}
+// Shard INDEX of TOTAL gets an equal share of the measured time: the longest file
+// goes to the shard with the least time so far. The runner owns the split and it
+// depends only on the file list and the table, so every Node version on a
+// platform runs the same files in each shard.
+function shardFiles(files, index, total, durations = fileDurations()) {
+  const cost = fileCost(durations);
+  const order = longestFirst(files, durations);
   const loads = Array(total).fill(0);
   const shards = Array.from({ length: total }, () => []);
   for (const file of order) {
@@ -44,7 +57,7 @@ function shardFiles(files, index, total, durations = fileDurations()) {
   return (shards[index - 1] || []).sort();
 }
 if (require.main !== module) {
-  module.exports = { testFiles, shardFiles, fileDurations };
+  module.exports = { testFiles, shardFiles, longestFirst, fileDurations };
   return;
 }
 
@@ -109,7 +122,7 @@ if (refused.length) {
   process.exit(1);
 }
 if (skipped.length) console.error(`tower-crane: skipped host-only tests in this sandbox, the tests gate runs them on the host: ${skipped.join(' ')}`);
-args.push(...run);
+args.push(...longestFirst(run));
 
 const env = { ...process.env };
 delete env.TC_TEST_SHARD;

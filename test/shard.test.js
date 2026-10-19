@@ -6,7 +6,7 @@ const path = require('node:path');
 const cp = require('node:child_process');
 const { ROOT } = require('./helpers');
 const { HUNG_TEST_MS } = require('./signals');
-const { testFiles, shardFiles, fileDurations } = require('./run');
+const { testFiles, shardFiles, longestFirst, fileDurations } = require('./run');
 const { declarations, fileTimes, mergeTable } = require('../scripts/test-durations');
 
 const FIXTURES = ['a', 'b', 'c', 'd'].map((name) => path.join('test', 'fixtures', 'shard', `${name}.test.js`));
@@ -32,6 +32,15 @@ test('shardFiles gives each shard an equal share of the measured time', () => {
   assert.deepEqual(shardFiles(['a', 'b', 'c', 'new'], 1, 2, known), ['a']);
   assert.deepEqual(shardFiles(['a', 'b', 'c', 'new'], 2, 2, known), ['b', 'c', 'new']);
   assert.deepEqual(shardFiles(['x', 'y'], 1, 2, {}), ['x'], 'an empty table splits like equal times');
+});
+
+test('longestFirst starts the longest measured files first and keeps sorted order among equal times', () => {
+  const durations = { a: 1, b: 9, c: 1, d: 5 };
+  const files = ['d', 'c', 'b', 'a', 'new'];
+  // The new file counts as the median, 5 s here, and ties keep the sorted order.
+  assert.deepEqual(longestFirst(files, durations), ['b', 'd', 'new', 'a', 'c']);
+  assert.deepEqual(files, ['d', 'c', 'b', 'a', 'new'], 'the input is not reordered');
+  assert.deepEqual(longestFirst(['y', 'x'], {}), ['x', 'y'], 'an empty table keeps the sorted order');
 });
 
 test('every shard count covers the real suite with each file in exactly one shard', () => {

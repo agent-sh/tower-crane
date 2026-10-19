@@ -195,6 +195,16 @@ test('the test runner emits one capped concurrency value, including repeated and
     assert.ok(args.includes(`--require=${path.join(ROOT, 'test', 'fixtures', 'report-guard.js')}`), 'every test file loads the report guard');
     assert.deepEqual(args.filter((arg) => !arg.startsWith('--')), ['test/claim.test.js']);
   }
+  // Files reach node longest first by the measured table, so a long file never starts last.
+  const preload = path.join(h.base, 'runner-order.js');
+  fs.writeFileSync(preload, "require('node:child_process').spawnSync = (command, args) => { console.log(JSON.stringify(args)); return { status: 0 }; };");
+  const files = ['test/claim.test.js', 'test/isolation.test.js', 'test/events.test.js'];
+  const r = cp.spawnSync(process.execPath, ['--require', preload, runner, ...files], { env: h.env, encoding: 'utf8' });
+  assert.equal(r.status, 0, r.stderr);
+  const durations = require('./run').fileDurations();
+  const expected = [...files].sort((a, b) => durations[b] - durations[a]);
+  assert.notDeepEqual(expected, files, 'the measured order differs from the given one');
+  assert.deepEqual(JSON.parse(r.stdout).filter((arg) => !arg.startsWith('--')), expected);
 });
 
 test('mutation fallback requires a green baseline in a copy containing all test inputs', (t) => {
