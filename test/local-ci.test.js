@@ -593,6 +593,11 @@ test('multi-MB plain, colored and CRLF logs keep the redaction output from befor
     const clean = expected(text);
     assert.equal(stripEscapes(text), clean, name);
     assert.equal(redactJoined({ stdout: text, stderr: '' }, redact), clean, name);
+    const half = Math.floor(text.length / 2);
+    assert.equal(redactJoined({ output: text, runs: [
+      { stream: 'out', text: text.slice(0, half) },
+      { stream: 'err', text: text.slice(half) },
+    ] }, redact), clean, `${name} streams`);
   }
 });
 
@@ -613,6 +618,73 @@ test('a text redaction deadline drops content and restores the budget for the ne
     'Authorization: Bearer [redacted:AUTHORIZATION] end');
 });
 
+test('short CRLF and redraw logs keep ordinary download progress and counters', () => {
+  const { stripEscapes, createRedactor, redactJoined } = require('../lib/gates/common');
+  const redact = createRedactor([]);
+  const fill = (unit, size) => unit.repeat(Math.ceil(size / unit.length)).slice(0, size);
+  const build = (line, size, complete = false) => {
+    const parts = [];
+    let length = 0;
+    for (let i = 0; length < size; i++) {
+      const next = line(i);
+      parts.push(next);
+      length += next.length;
+    }
+    const text = parts.join('');
+    return complete ? text : text.slice(0, size);
+  };
+  const progress = Array.from({ length: 101 }, (_, p) => '\r' + String(p).padStart(3) + '%').join('');
+  const cases = [
+    ['download-512KiB', build((i) => `Downloading pkg-${i}.tar.gz\n${progress}\n`, 512 << 10)],
+    ['download-1MiB', build((i) => `Downloading pkg-${i}.tar.gz\n${progress}\n`, 1 << 20)],
+    ['counter-1MiB', build((i) => `${i}\r\n`, 1 << 20)],
+    ...Array.from({ length: 7 }, (_, i) => [`CRLF-${i + 1}`, fill('p'.repeat(i + 1) + '\r\n', 4 << 20)]),
+    ...Array.from({ length: 6 }, (_, i) => [`redraw-${i + 3}`, fill('\r' + 'p'.repeat(i + 3), 4 << 20)]),
+    ['percent', fill('\r 45%', 4 << 20)],
+    ['blank lines', fill('a\r\n\r\n\r\nb line here\r\n', 4 << 20)],
+    ['dotnet-1MiB', fill('passed test1\r\n', 1 << 20)],
+    ['jest redraw', build((i) => `\r\x1b[K\x1b[1mRUNS\x1b[22m test/file${i % 50}.test.js\r\n`, 4 << 20, true)],
+  ];
+  const hash = (text) => crypto.createHash('sha256').update(text).digest('hex');
+  for (const [name, input] of cases) {
+    let expected = input.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+    if (input.endsWith('\r')) expected = expected.slice(0, -1);
+    assert.equal(hash(stripEscapes(input)), hash(expected), `${name} cleanup`);
+    assert.equal(hash(redactJoined({ stdout: input, stderr: '' }, redact)), hash(expected), `${name} joined`);
+    const half = input.length >> 1;
+    assert.equal(hash(redactJoined({ output: input, runs: [
+      { stream: 'out', text: input.slice(0, half) }, { stream: 'err', text: input.slice(half) },
+    ] }, redact)), hash(expected), `${name} streams`);
+  }
+});
+
+test('erase-line redraws before short words keep all three readings', () => {
+  const { stripEscapes, createRedactor, redactJoined } = require('../lib/gates/common');
+  const redact = createRedactor([]);
+  const fill = (unit, size) => unit.repeat(Math.ceil(size / unit.length));
+  const cases = [
+    ['erase redraw', fill('\r\x1b[Kfetchxxxx', 4 << 20)],
+    ['erase CRLF', fill('\x1b[Kok 123\r\n', 1 << 20)],
+    ...[9, 10, 11].flatMap((width) => {
+      const word = 'fetch' + 'x'.repeat(width - 5);
+      return [
+        [`redraw-${width}`, fill('\r\x1b[K' + word, 4 << 20)],
+        [`CRLF-${width}`, fill('\x1b[K' + word + '\r\n', 4 << 20)],
+      ];
+    }),
+  ];
+  const hash = (text) => crypto.createHash('sha256').update(text).digest('hex');
+  for (const [name, input] of cases) {
+    const expected = input.replace(/\x1b\[K/g, '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+    assert.equal(hash(stripEscapes(input)), hash(expected), name + ' cleanup');
+    assert.equal(hash(redactJoined({ stdout: input, stderr: '' }, redact)), hash(expected), name + ' joined');
+    const half = input.length >> 1;
+    assert.equal(hash(redactJoined({ output: input, runs: [
+      { stream: 'out', text: input.slice(0, half) }, { stream: 'err', text: input.slice(half) },
+    ] }, redact)), hash(expected), name + ' streams');
+  }
+});
+
 test('mixed 16 MiB text fails closed below 1 GiB in a fresh process', () => {
   const cp = require('node:child_process');
   const script = `
@@ -629,6 +701,119 @@ console.log(JSON.stringify({ output, peakKiB: process.resourceUsage().maxRSS }))
   const result = JSON.parse(cp.execFileSync(process.execPath, ['-e', script], { encoding: 'utf8' }));
   assert.match(result.output, /^\[unscannable text: .+; content omitted\]$/);
   assert.ok(result.peakKiB < 1048576, `${result.peakKiB} KiB peak`);
+});
+
+test('dense CR cleanup keeps its text with compact control maps', () => {
+  const { stripEscapes, stripEscapesMapped, stripEscapesViews } = require('../lib/ci-log-text');
+  for (const unit of ['\r\n', '-\r\\\r|\r/\r', 'a\r']) {
+    const input = unit.repeat(Math.ceil((1 << 20) / unit.length));
+    let expected = input.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+    if (input.endsWith('\r')) expected = expected.slice(0, -1);
+    assert.equal(stripEscapes(input), expected, JSON.stringify(unit));
+    const mapped = stripEscapesMapped(input);
+    assert.equal(mapped.text, expected);
+    for (const v of stripEscapesViews(input)) assert.equal(v.text, expected);
+  }
+  assert.equal(stripEscapes('ok\r\nnext\r'), 'ok\nnext');
+});
+
+test('a character map over the work budget is rejected before its array allocation', (t) => {
+  const { textBudget, textMap } = require('../lib/text-redaction-budget');
+  const arrays = t.mock.method(globalThis, 'Int32Array', () => {
+    throw new Error('array allocated before checking the budget');
+  });
+  assert.match(textBudget('', () => textMap(16 * (262144 + 1))),
+    /^\[unscannable text: over \d+ redaction work units; content omitted\]$/);
+  assert.equal(arrays.mock.callCount(), 0);
+});
+
+test('allocation credits pay entries once and cannot fund new or later allocations', (t) => {
+  const { textBudget, textMap, textWork } = require('../lib/text-redaction-budget');
+  const credit = {};
+  const notice = /^\[unscannable text: over \d+ redaction work units; content omitted\]$/;
+  assert.equal(textBudget('', () => {
+    textMap(16 * 1024, credit);
+    textWork(262144 - 1024);
+    textWork(1024, credit);
+    return 'kept';
+  }), 'kept');
+  assert.match(textBudget('', () => {
+    textMap(16 * 1024, credit);
+    textWork(262144 - 1024);
+    textWork(1024, credit);
+    textWork(1, credit);
+    return 'spent twice';
+  }), notice);
+  assert.equal(textBudget('', () => {
+    textMap(16 * 1024, credit);
+    return 'unused credit';
+  }), 'unused credit');
+  assert.match(textBudget('', () => {
+    textWork(262144);
+    textWork(1, credit);
+    return 'used outside its budget';
+  }), notice);
+  assert.match(textBudget('', () => {
+    textMap(16 * 1024, credit);
+    textWork(262144 - 1024);
+    const arrays = t.mock.method(globalThis, 'Int32Array', function () {
+      throw new Error('new capacity used bookkeeping credit before its allocation check');
+    });
+    try {
+      return textMap(16, credit);
+    } finally {
+      assert.equal(arrays.mock.callCount(), 0);
+      arrays.mock.restore();
+    }
+  }), notice);
+});
+
+test('a prefix map over the work budget is rejected before its entries are allocated', (t) => {
+  const { textBudget } = require('../lib/text-redaction-budget');
+  const { revealTerminal } = require('../lib/escape-views');
+  const input = 'a\r';
+  const entries = 16 * (262144 + input.length + 1);
+  const literal = 'a' + 'z'.repeat(entries - 1);
+  const ArrayType = globalThis.Int32Array;
+  const arrays = t.mock.method(globalThis, 'Int32Array', function (length) {
+    assert.notEqual(length, entries, 'prefix entries allocated before checking the budget');
+    return new ArrayType(length);
+  });
+  const result = textBudget(input, () => revealTerminal(input,
+    { text: 'a\n', src: (i) => i }, [literal], () => [], () => false));
+  assert.match(result, /^\[unscannable text: over \d+ redaction work units; content omitted\]$/);
+  assert.ok(arrays.mock.calls.every((call) => call.arguments[0] !== entries));
+});
+
+test('16 MiB CR-heavy and short ordinary logs stay below 1 GiB in fresh processes', () => {
+  const cp = require('node:child_process');
+  for (const unit of ['\r\n', '-\r\\\r|\r/\r', 'a\r', '123456\r\n', '\rpppppppp', '1234567\r\n', '\r\x1b[Kfetchxxxx']) {
+    const script = `
+const { createRedactor, redactJoined } = require(${JSON.stringify(require.resolve('../lib/gates/common'))});
+const unit = ${JSON.stringify(unit)};
+const text = unit.repeat(Math.ceil((16 << 20) / unit.length)).slice(0, 16 << 20);
+const half = text.length / 2;
+const output = redactJoined({ output: text, runs: [
+  { stream: 'out', text: text.slice(0, half) },
+  { stream: 'err', text: text.slice(half) },
+] }, createRedactor([]));
+const hash = require('node:crypto').createHash('sha256').update(output).digest('hex');
+console.log(JSON.stringify({ notice: output.startsWith('[unscannable text:') ? output : null,
+  hash, peakKiB: process.resourceUsage().maxRSS }));
+`;
+    const result = JSON.parse(cp.execFileSync(process.execPath, ['-e', script], { encoding: 'utf8' }));
+    if (result.notice) {
+      assert.ok(['\r\n', '-\r\\\r|\r/\r', 'a\r'].includes(unit), `ordinary ${JSON.stringify(unit)} was omitted`);
+      assert.match(result.notice, /^\[unscannable text: .+; content omitted\]$/);
+    }
+    else {
+      const input = unit.repeat(Math.ceil((16 << 20) / unit.length)).slice(0, 16 << 20);
+      let expected = input.replace(/\x1b\[K/g, '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+      if (input.endsWith('\r')) expected = expected.slice(0, -1);
+      assert.equal(result.hash, crypto.createHash('sha256').update(expected).digest('hex'));
+    }
+    assert.ok(result.peakKiB < 1048576, `${JSON.stringify(unit)}: ${result.peakKiB} KiB peak`);
+  }
 });
 
 test('captured GitHub CI logs keep the redaction output from before the text budget', () => {
