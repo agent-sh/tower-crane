@@ -10,7 +10,11 @@ const path = require('node:path');
 const { makeTaskRepo, dispatch } = require('./helpers');
 const S = require('../lib/state');
 
-const writeState = (h, file, value) => S.writeAtomic(path.join(h.state, file), S.json(value));
+// A document written as a newer tool writes it; `locked` inside a lock the test holds.
+const writeState = (h, file, value, locked = false) => StateFiles.writeDoc(h.state, file, value, { locked });
+// Everything a write would change: the marker, the documents and the log.
+const stateText = (h) => [fs.readFileSync(path.join(h.state, 'project.json'), 'utf8'),
+  ...['project.json', 'tasks.json', 'decisions.json'].map((file) => StateFiles.docText(h.state, file)), StateFiles.logText(h.state)];
 
 function fixture(t) {
   return makeTaskRepo(t, [
@@ -19,7 +23,7 @@ function fixture(t) {
   ]);
 }
 
-function futureState(h) {
+function futureState(h, locked = false) {
   const tasks = h.readState('tasks.json');
   tasks.tasks[0].future_worker_field = { keep: true };
   if (tasks.tasks[0].claim) tasks.tasks[0].claim.until = new Date(Date.now() + 1000).toISOString();
@@ -37,16 +41,17 @@ function futureState(h) {
       live: { state: 'future-reading', interval_ms: 1000, error: 'FutureReadError', future_field: { keep: true } },
     }] },
   });
-  writeState(h, 'tasks.json', tasks);
+  writeState(h, 'tasks.json', tasks, locked);
   writeState(h, 'decisions.json', {
     version: 1, next: 3, future_index: true, decisions: [
       { id: 'D1', question: 'Obsolete?', status: 'withdrawn', withdrawn_by: 'owner', withdraw_reason: 'No longer needed' },
       { id: 'D2', question: 'Future decision?', status: 'superseded', answer_rule: 'future-rule', future_field: { by: 'D3' } },
     ],
-  });
-  const event = { at: new Date().toISOString(), cmd: 'future command', type: 'future-event',
+  }, locked);
+  // Every event in the database has an id, as a newer tool's would.
+  const event = { id: `E${require('node:crypto').randomUUID()}`, at: new Date().toISOString(), cmd: 'future command', type: 'future-event',
     task: 'T2', agent: 'future-tool', detail: { opaque: true }, future_field: ['unchanged'] };
-  StateFiles.appendLog(h.state, JSON.stringify(event) + '\n');
+  StateFiles.appendLog(h.state, JSON.stringify(event) + '\n', { locked });
   return { task: tasks.tasks[1], event };
 }
 
@@ -109,7 +114,7 @@ test('a supervised worker survives additive state from a newer tool', async (t) 
   try {
     await waitOnRepo(h, () => fs.existsSync(worker.ready), 'worker did not start');
     h.ok(['claim', 'T1', '--agent', 'worker-T1-1', '--lease', '1']);
-    S.withLock(h.state, () => futureState(h));
+    S.withLock(h.state, () => futureState(h, true));
     // The shortened lease and future event force a state read and renewal.
     await waitOnRepo(h, () => StateFiles.logText(h.state)
       .split('\n').some((line) => line && JSON.parse(line).cmd === 'renew'), 'supervisor did not renew through the new state');
@@ -193,58 +198,56 @@ test(`recovery and rework preserve unfamiliar routing with current tier ${tier}`
   assert.deepEqual(task.tier_range, tasks.tasks[0].tier_range);
   assert.equal(task.escalations, undefined);
   assert.equal(task.evidence.at(-1).ok, false, 'the review verdict remains recorded');
-  const before = ['tasks.json', 'events.jsonl'].map((file) => fs.readFileSync(path.join(h.state, file), 'utf8'));
+  const before = stateText(h);
   const recovery = h.json(['recover', 'T1']);
   assert.match(recovery.waiting, /unsupported tier.*upgrade/);
   const rework = h.run(['rework', 'T1', '--reason', 'fix the result']);
   assert.equal(rework.code, 1);
   assert.match(rework.stderr, /unsupported tier.*upgrade/);
-  assert.deepEqual(['tasks.json', 'events.jsonl'].map((file) => fs.readFileSync(path.join(h.state, file), 'utf8')), before);
+  assert.deepEqual(stateText(h), before);
   assert.equal(fs.readFileSync(path.join(h.state, 'briefs', 'T1.md'), 'utf8'), brief);
 });
 }
 
-test('newer schemas refuse dispatch and writes before any side effects', (t) => {
+// A newer tool marks its schema in project.json, the marker every command
+// reads first, and may record it in the project document too.
+for (const where of ['marker', 'document']) {
+test(`newer schemas refuse dispatch and writes before any side effects (${where})`, (t) => {
   const h = fixture(t);
-  assert.equal(h.readState('project.json').schema_version, 1);
+  const markerFile = path.join(h.state, 'project.json');
+  const marker = JSON.parse(fs.readFileSync(markerFile, 'utf8'));
+  assert.equal(marker.schema_version, S.SCHEMA_VERSION);
+  const newer = S.SCHEMA_VERSION + 1;
   const project = h.readState('project.json');
-  project.schema_version = 2;
-  h.writeState('project.json', project);
-  const before = ['project.json', 'tasks.json', 'events.jsonl'].map((file) => fs.readFileSync(path.join(h.state, file), 'utf8'));
+  if (where === 'marker') S.writeAtomic(markerFile, S.json({ ...marker, schema_version: newer }));
+  else h.writeState('project.json', { ...project, schema_version: newer });
+  const before = stateText(h);
   for (const args of [['spawn', '--task', 'T1'], ['task', 'note', 'T1', 'cannot write']]) {
     const result = h.run(args);
     assert.equal(result.code, 1);
-    assert.match(result.stderr, /state schema 2.*supports.*1.*upgrade/i);
+    assert.match(result.stderr, new RegExp(`state schema ${newer}.*supports.*${S.SCHEMA_VERSION}.*upgrade`, 'i'));
   }
-  assert.deepEqual(['project.json', 'tasks.json', 'events.jsonl'].map((file) => fs.readFileSync(path.join(h.state, file), 'utf8')), before);
+  assert.deepEqual(stateText(h), before);
   assert.equal(fs.existsSync(path.join(h.state, 'homes')), false);
-  // Existing projects need no migration for the first schema contract.
-  delete project.schema_version;
-  h.writeState('project.json', project);
+  // A project document without a schema is the first schema contract.
+  if (where === 'marker') S.writeAtomic(markerFile, S.json(marker));
+  const { schema_version: _, ...unversioned } = project;
+  h.writeState('project.json', unversioned);
   h.ok(['task', 'note', 'T1', 'legacy schema']);
 });
+}
 
-test('a schema bump during a lock-free CLI read reports incompatibility before payload errors', (t) => {
+test('a schema bump a lock-free CLI read meets reports incompatibility before payload errors', (t) => {
   const h = fixture(t);
-  const hook = path.join(h.base, 'schema-bump.cjs');
-  fs.writeFileSync(hook, `
-const fs = require('node:fs');
-const read = fs.readFileSync;
-fs.readFileSync = function(file, ...args) {
-  const result = read.call(this, file, ...args);
-  if (file === ${JSON.stringify(path.join(h.state, 'tasks.json'))}) {
-    const project = JSON.parse(read(${JSON.stringify(path.join(h.state, 'project.json'))}, 'utf8'));
-    project.schema_version = 2;
-    fs.writeFileSync(${JSON.stringify(path.join(h.state, 'project.json'))}, JSON.stringify(project));
-    return JSON.stringify({ version: 2, tasks: 'new representation' });
-  }
-  return result;
-};
-`);
-  const result = h.run(['task', 'show', 'T1'], { env: { NODE_OPTIONS: `--require ${JSON.stringify(hook)}` } });
+  // A newer tool's one commit: its schema and a tasks document in a new representation.
+  const newer = S.SCHEMA_VERSION + 1;
+  StateFiles.withDb(h.state, () => S.withLock(h.state, () => require('../lib/db').commit(h.state, {
+    docs: { project: JSON.stringify({ ...h.readState('project.json'), schema_version: newer }), tasks: JSON.stringify({ version: 2, tasks: 'new representation' }) },
+  })));
+  const result = h.run(['task', 'show', 'T1']);
   assert.equal(result.code, 1);
-  assert.match(result.stderr, /state schema 2.*supports.*1.*upgrade/i);
-  assert.doesNotMatch(result.stderr, /tasks.json is invalid/);
+  assert.match(result.stderr, new RegExp(`state schema ${newer}.*supports.*${S.SCHEMA_VERSION}.*upgrade`, 'i'));
+  assert.doesNotMatch(result.stderr, /tasks.json.*(invalid|not valid)/);
 });
 
 for (const change of ['schema bump', 'unknown current task status', 'unknown blocking decision status']) {
@@ -264,21 +267,21 @@ test(`${change} drains the supervisor without killing an edit`, async (t) => {
       fs.writeFileSync(busy, '');
       if (change === 'schema bump') {
         const project = h.readState('project.json');
-        project.schema_version = 2;
-        writeState(h, 'project.json', project);
+        project.schema_version = S.SCHEMA_VERSION + 1;
+        writeState(h, 'project.json', project, true);
       } else {
         if (change === 'unknown current task status') {
           const tasks = h.readState('tasks.json');
           tasks.tasks[0].status = 'future-paused';
-          writeState(h, 'tasks.json', tasks);
+          writeState(h, 'tasks.json', tasks, true);
         } else {
           writeState(h, 'decisions.json', { version: 1, next: 2, decisions: [{
             id: 'D1', question: 'Future blocker?', status: 'future-pending', blocks: ['T1'],
-          }] });
+          }] }, true);
         }
         StateFiles.appendLog(h.state, JSON.stringify({
           at: new Date().toISOString(), cmd: 'future pause', task: 'T1', detail: {},
-        }) + '\n');
+        }) + '\n', { locked: true });
       }
     });
     await until(() => /supervision stopped.*worker.*finish/i.test(output()), 'the supervisor reports a clean schema stop');

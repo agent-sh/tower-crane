@@ -6,7 +6,6 @@ const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
 const { makeRepo } = require('./helpers');
-const S = require('../lib/state');
 const { waitFor } = require('./canary');
 const { writeAtomic, readPublished } = require('./atomic-file');
 const { fileWritten } = require('./signals');
@@ -261,7 +260,7 @@ test('readers of published files read through a Windows sharing refusal', async 
     for (const code of ['EPERM', 'EACCES', 'EBUSY']) {
       const detached = await readRefusedOnce(record, code, () => h.detached().map((r) => r.pid));
       assert.deepEqual(detached, { value: [4242], refused: 1 }, `${code}: a refused detached record was dropped`);
-      assert.deepEqual(await readRefusedOnce(state, code, () => S.readJson(state)), { value: { version: 1, storage: 'state.db' }, refused: 1 }, `${code}: project.json`);
+      assert.deepEqual(await readRefusedOnce(state, code, () => JSON.parse(readPublished(state, 'utf8'))), { value: { version: 1, storage: 'state.db' }, refused: 1 }, `${code}: project.json`);
       assert.deepEqual(await readRefusedOnce(report, code, () => fileWritten(report, { json: true })), { value: { ok: true }, refused: 1 }, `${code}: fileWritten`);
     }
   } finally {

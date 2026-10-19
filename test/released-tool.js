@@ -8,6 +8,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
 const { tempRoot } = require('./tmp-root');
+const { HUNG_TEST_MS } = require('./signals');
 
 const ROOT = path.join(__dirname, '..');
 const tools = new Map();
@@ -32,7 +33,7 @@ function runReleased(h, tag, args, { env = {}, hooks = {} } = {}) {
     cwd: h.repo,
     env: { ...h.env, HOOK_STATE: h.state, HOOK_PROCESSES_DIR: path.join(h.base, 'detached'), ...hooks, ...env },
     encoding: 'utf8',
-    timeout: 120000,
+    timeout: HUNG_TEST_MS,
   });
   return { code: r.status, stdout: r.stdout || '', stderr: r.stderr || '', signal: r.signal };
 }

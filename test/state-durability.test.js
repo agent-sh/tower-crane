@@ -112,8 +112,9 @@ test('every connection runs WAL with synchronous=FULL and fullfsync, and a write
 test('a reader without the lock sees each commit whole while writers commit', async (t) => {
   const h = migrated(t);
   const writers = [0, 1, 2].map((n) => new Promise((resolve, reject) => {
-    const script = `for (let i = 0; i < 15; i++) {
-      const r = require('node:child_process').spawnSync(process.execPath, [${JSON.stringify(BIN)}, 'task', 'note', 'T1', 'w${n}-' + i], { encoding: 'utf8' });
+    const script = `const { fakeAgentEnv } = require(${JSON.stringify(path.join(__dirname, 'agent-env.js'))});
+    for (let i = 0; i < 15; i++) {
+      const r = require('node:child_process').spawnSync(process.execPath, [${JSON.stringify(BIN)}, 'task', 'note', 'T1', 'w${n}-' + i], { encoding: 'utf8', env: fakeAgentEnv(process.env) });
       if (r.status !== 0) { process.stderr.write(r.stderr); process.exit(1); }
     }`;
     const child = cp.spawn(process.execPath, ['-e', script], { cwd: h.repo, env: h.env, stdio: ['ignore', 'ignore', 'pipe'] });
@@ -145,8 +146,10 @@ test('kill -9 at any moment loses no acknowledged write, and leaves every task c
     let i = 0;
     let child = null;
     let stopped = false;
+    let finished;
+    const done = new Promise((resolve) => { finished = resolve; });
     const next = () => {
-      if (stopped) return;
+      if (stopped) return finished();
       const text = `k${n}-${i++}`;
       child = cp.spawn(process.execPath, [BIN, 'task', 'note', 'T1', text], { cwd: h.repo, env: h.env, stdio: 'ignore' });
       child.on('exit', (code) => {
@@ -156,19 +159,20 @@ test('kill -9 at any moment loses no acknowledged write, and leaves every task c
       });
     };
     next();
-    return { kill: () => child?.kill('SIGKILL'), stop: () => { stopped = true; } };
+    // `done` settles once the writer is stopped and its last command exited.
+    return { kill: () => child?.kill('SIGKILL'), stop: () => { stopped = true; }, done };
   };
   const writers = [0, 1, 2, 3].map(writer);
-  const end = Date.now() + 8000;
+  const end = Date.now() + 8000; // wait-allow: the kill loop runs for a fixed span of random kills, not until a condition
   let kills = 0;
   while (Date.now() < end) {
-    await new Promise((resolve) => setTimeout(resolve, 50 + Math.floor(Math.random() * 200)));
+    await new Promise((resolve) => setTimeout(resolve, 50 + Math.floor(Math.random() * 200))); // wait-allow: random gaps put the kills at random points of the writers' commits
     writers[Math.floor(Math.random() * writers.length)].kill();
     kills++;
   }
   for (const w of writers) w.stop();
-  // Let the last commands finish, then read what is durable.
-  await new Promise((resolve) => setTimeout(resolve, 3000));
+  // Read what is durable once the last commands have exited.
+  await Promise.all(writers.map((w) => w.done));
   assert.ok(kills > 10 && acked.size > 10, `${kills} kills and ${acked.size} acknowledged writes`);
   const notes = new Set(h.readState('tasks.json').tasks[0].notes.map((n) => n.text));
   const events = new Set(logged(h).filter((e) => e.cmd === 'task note').map((e) => e.detail.text));

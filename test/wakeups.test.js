@@ -8,7 +8,6 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
-const crypto = require('node:crypto');
 const { EventEmitter, once } = require('node:events');
 const { pathToFileURL } = require('node:url');
 const { makeRepo, stubRungs, BIN, ROOT } = require('./helpers');
@@ -116,121 +115,43 @@ test('wait --follow streams id-only lines and event prints the content', async (
   assert.equal(h.run(['event', 'Enope', '--agent', 'orchestrator']).code, 2);
 });
 
-// A commit that died in its append left its first line whole and the start
-// of its second, with its staged tasks.json and manifest. The next lock
-// holder cuts both lines off and appends its own. Returns the crashed line's
-// event and the number of bytes the cut removes.
-function tornCommit(h) {
-  const message = (text) => ({ at: new Date().toISOString(), agent: 'worker', cmd: 'msg', task: null, detail: { to: 'orchestrator', text },
-    id: `E${crypto.randomUUID()}`, type: 'worker-message', to: 'orchestrator' });
-  const first = message('crashed first');
-  const second = message(`crashed second ${'s'.repeat(300)}`);
-  const fd = fs.openSync(path.join(h.state, 'events.jsonl'), 'a');
-  const { size, dev, ino } = fs.fstatSync(fd);
-  fs.writeFileSync(path.join(h.state, `tasks.json.${second.id}.commit`), fs.readFileSync(path.join(h.state, 'tasks.json')));
-  fs.writeFileSync(path.join(h.state, `commit.${second.id}.json`), JSON.stringify({ size, dev, ino, ids: [first.id, second.id] }));
-  const torn = `${JSON.stringify(first)}\n${JSON.stringify(second).slice(0, 200)}`;
-  fs.writeSync(fd, torn);
-  fs.closeSync(fd);
-  return { first, cut: Buffer.byteLength(torn) };
-}
-
-// The bytes a worker message's log line takes besides its text, from the
-// last message the worker sent.
-function overhead(h) {
-  const raw = StateFiles.logText(h.state).trim().split('\n').at(-1);
-  return Buffer.byteLength(raw) + 1 - Buffer.byteLength(JSON.parse(raw).detail.text);
-}
-
-// Recovery cuts a crashed commit's lines off the log, and the next commit can
-// append exactly as many bytes, so the log keeps its size and inode. A
-// follower delivers that commit's event whether it read the crashed lines
-// from before the crash or started after it, with its cursor inside them.
-for (const started of ['before the crash', 'after the crash and before recovery']) {
-  test(`a follower started ${started} delivers the event appended after recovery cuts the crashed lines, at the same size`, async (t) => {
-    const h = setup(t);
-    const log = path.join(h.state, 'events.jsonl');
-    h.ok(['msg', '--to', 'orchestrator', 'sizes the next message', '--agent', 'worker']);
-    const extra = overhead(h);
-    const early = started === 'before the crash';
-    // Marks the follower's own read of the log through the crashed bytes, and
-    // holds its next read while `hold` exists, so it reads the log only once
-    // recovery has cut and the next commit has appended. `held` records that a
-    // read was held, so a moved call cannot skip the hold unnoticed.
-    const read = path.join(h.base, 'read-through');
-    const hold = path.join(h.base, 'hold-reads');
-    const held = path.join(h.base, 'held-read');
-    const preload = path.join(h.base, 'read-mark.js');
-    fs.writeFileSync(preload, `'use strict';
-const fs = require('node:fs');
-const path = require('node:path');
-const log = ${JSON.stringify(log)};
-const hold = ${JSON.stringify(hold)};
-const held = ${JSON.stringify(held)};
-const cell = new Int32Array(new SharedArrayBuffer(4));
-const fds = new Set();
-const { openSync, closeSync, readSync } = fs;
-// Only the wait's own reader: EventReader.read called from events.js.
-const waitRead = () => {
-  const frames = new Error().stack.split('\\n');
-  const i = frames.findIndex((line) => line.includes('event-reader.js'));
-  return i !== -1 && /[\\\\/]lib[\\\\/]events\\.js/.test(frames[i + 1] || '');
-};
-fs.openSync = function (file, ...args) {
-  const ours = path.resolve(String(file)) === log;
-  if (ours && fs.existsSync(hold) && waitRead()) {
-    fs.writeFileSync(held, '');
-    const deadline = Date.now() + 300000;
-    while (fs.existsSync(hold) && Date.now() < deadline) Atomics.wait(cell, 0, 0, 20);
+// A writer killed inside its commit, before it lands (`staged`) or right
+// after (`landed`), leaves the log as a whole commit or none. A follower
+// started before the kill or after it delivers the killed writer's message
+// only when it landed, then every later one, in order.
+for (const point of ['staged', 'landed']) {
+  for (const started of ['before the kill', 'after the kill']) {
+    test(`a follower started ${started} of a writer killed ${point === 'staged' ? 'before' : 'after'} its commit delivers what landed and what follows`, async (t) => {
+      const h = setup(t);
+      const follow = () => {
+        const p = cp.spawn(process.execPath, [BIN, 'wait', '--observe', '--follow', '--agent', 'orchestrator'], { cwd: h.repo, env: h.env });
+        t.after(() => p.kill());
+        let out = '';
+        p.stdout.on('data', (d) => { out += d; });
+        return { p, ids: () => out.split('\n').filter(Boolean).map((line) => JSON.parse(line).id).filter(Boolean) };
+      };
+      let f;
+      if (started === 'before the kill') {
+        f = follow();
+        await readyLine(f.p);
+      }
+      const killed = h.run(['msg', '--to', 'orchestrator', 'killed writer', '--agent', 'worker'], { hooks: { HOOK_DIE_COMMIT: point } });
+      assert.notEqual(killed.code, 0, 'the writer was killed');
+      const crashed = log(h).find((e) => e.cmd === 'msg' && e.detail.text === 'killed writer');
+      assert.equal(!!crashed, point === 'landed', 'the log holds the killed commit only once it landed');
+      if (!f) {
+        f = follow();
+        await readyLine(f.p);
+      }
+      h.ok(['msg', '--to', 'orchestrator', 'after the kill', '--agent', 'worker']);
+      h.ok(['msg', '--to', 'orchestrator', 'last', '--agent', 'worker']);
+      const [next, last] = log(h).slice(-2).map((e) => e.id);
+      await waitOnRepo(h, () => f.ids().includes(last), 'the events after the kill');
+      // A follower started after the kill begins at now, after the landed commit.
+      const landed = point === 'landed' && started === 'before the kill' ? [crashed.id] : [];
+      assert.deepEqual(f.ids(), [...landed, next, last]);
+    });
   }
-  const fd = openSync.call(this, file, ...args);
-  if (ours) fds.add(fd);
-  return fd;
-};
-fs.closeSync = function (fd) { fds.delete(fd); return closeSync.call(this, fd); };
-fs.readSync = function (fd, buffer, offset, length, position) {
-  const n = readSync.call(this, fd, buffer, offset, length, position);
-  const from = Number(process.env.READ_FROM || -1);
-  if (fds.has(fd) && position === from && position + n === Number(process.env.READ_END)) fs.writeFileSync(${JSON.stringify(read)}, '');
-  return n;
-};
-`);
-    const follow = (env = {}) => {
-      const p = cp.spawn(process.execPath, ['--require', preload, BIN, 'wait', '--observe', '--follow', '--agent', 'orchestrator'], { cwd: h.repo, env: { ...h.env, ...env } });
-      t.after(() => p.kill());
-      let out = '';
-      p.stdout.on('data', (d) => { out += d; });
-      return { p, ids: () => out.split('\n').filter(Boolean).map((line) => JSON.parse(line).id).filter(Boolean) };
-    };
-    let f;
-    if (early) {
-      f = follow();
-      await readyLine(f.p);
-    }
-    const base = size(h);
-    const { first, cut } = tornCommit(h);
-    if (early) {
-      await waitOnRepo(h, () => f.ids().includes(first.id), 'the crashed commit\'s whole line');
-    } else {
-      // The cursor is the end of the crashed commit's whole line.
-      f = follow({ READ_FROM: String(base + Buffer.byteLength(`${JSON.stringify(first)}\n`)), READ_END: String(base + cut) });
-      await readyLine(f.p);
-      await waitOnRepo(h, () => fs.existsSync(read), 'the follower\'s read of the torn line');
-    }
-    const end = size(h);
-    fs.writeFileSync(hold, '');
-    h.ok(['msg', '--to', 'orchestrator', 'n'.repeat(cut - extra), '--agent', 'worker']);
-    assert.equal(size(h), end, 'recovery cut the crashed lines and the next message took their place');
-    await waitOnRepo(h, () => fs.existsSync(held), 'the follower\'s read held across recovery');
-    fs.rmSync(hold);
-    const next = JSON.parse(fs.readFileSync(log, 'utf8').trim().split('\n').at(-1)).id;
-    // A reader resuming mid-line loses the first line it reads, never the second.
-    h.ok(['msg', '--to', 'orchestrator', 'later', '--agent', 'worker']);
-    h.ok(['msg', '--to', 'orchestrator', 'last', '--agent', 'worker']);
-    const [later, last] = fs.readFileSync(log, 'utf8').trim().split('\n').slice(-2).map((line) => JSON.parse(line).id);
-    await waitOnRepo(h, () => f.ids().includes(last), 'the events after the cut');
-    assert.deepEqual(f.ids(), [...(early ? [first.id] : []), next, later, last]);
-  });
 }
 
 // The Claude Code mod arms its follower at now on session start. A cold

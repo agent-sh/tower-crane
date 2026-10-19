@@ -30,10 +30,13 @@ function readDoc(dir, file) {
   return withDb(dir, () => fromSnapshot(Db.snapshot(dir), file));
 }
 
+// Under the state lock, or inside one the caller holds (`locked`).
+const underLock = (dir, locked, fn) => (locked ? fn() : S.withLock(dir, fn));
+
 // Replaces a document as the file layout's writer replaced the file, under
 // the state lock, so a running CLI never commits over half of it.
-function writeDoc(dir, file, data) {
-  withDb(dir, () => S.withLock(dir, () => {
+function writeDoc(dir, file, data, { locked = false } = {}) {
+  withDb(dir, () => underLock(dir, locked, () => {
     if (file === 'project.json') return Db.commit(dir, { docs: { project: JSON.stringify(data) } });
     if (file === 'decisions.json') return Db.commit(dir, { docs: { decisions: JSON.stringify(data) } });
     if (file !== 'tasks.json') throw new Error(`${file} is not a state document`);
@@ -78,12 +81,12 @@ function logText(dir) {
 // Appends the events on the lines of `text` as they are, as a test appended
 // them to events.jsonl. A line without an id gets one, since the database
 // names every event.
-function appendLog(dir, text) {
+function appendLog(dir, text, { locked = false } = {}) {
   const events = String(text).split('\n').filter((line) => line.trim()).map((line) => {
     const e = JSON.parse(line);
     return e.id ? e : { id: `E${require('node:crypto').randomUUID()}`, ...e };
   });
-  withDb(dir, () => S.withLock(dir, () => Db.commit(dir, { events })));
+  withDb(dir, () => underLock(dir, locked, () => Db.commit(dir, { events })));
 }
 
 // Replaces the whole log with the events on the lines of `text`, as a test
