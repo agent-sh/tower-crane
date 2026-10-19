@@ -3,8 +3,10 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const { cachedFixture } = require('./helpers');
+const { writeHost } = require('./host');
 const { probe } = require('../scripts/probe-gate-scratch');
 const { suiteTime, reportSuiteTime, DEADLINE_MIN } = require('../scripts/suite-time');
 
@@ -71,4 +73,30 @@ test('the gate proof retains a failing gate result even when cleanup succeeds', 
   assert.equal(result.exit, 1);
   assert.equal(result.cleanup_ok, true);
   assert.equal(result.ok, false);
+});
+
+test('the gate proof retains receipt-free governor deferrals from the supplied host', async (t) => {
+  const cases = [
+    ['memory capacity', { limit: 10, used: 8 }, /memory: tests\.slice/],
+    ['memory pressure', { memorySome: 10 }, /memory pressure: some avg10 10%/],
+    ['CPU pressure', { cpuSome: 60 }, /cpu pressure: some avg10 60%/],
+    ['load', { load: os.availableParallelism() * 2 }, /load: /],
+  ];
+  for (const [name, host, reason] of cases) {
+    await t.test(name, (t) => {
+      const h = fixture(t);
+      writeHost(h.env.TOWER_CRANE_HOST_ROOT, host);
+      const result = probe({ root: h.repo, cache: path.join(h.base, 'probe'),
+        command: 'node scratch.js', environment: h.env });
+      assert.equal(result.exit, 3, result.stderr);
+      assert.match(result.stderr, /tests gate deferred by the host governor:/);
+      assert.match(result.stderr, reason);
+      assert.equal(result.gate, null);
+      assert.equal(result.ok, false);
+      assert.equal(result.cleanup_ok, false);
+      assert.deepEqual(result.gate_parents, []);
+      assert.deepEqual(result.outer_after, []);
+      assert.deepEqual(result.gate_root_after, []);
+    });
+  }
 });
