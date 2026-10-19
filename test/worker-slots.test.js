@@ -54,6 +54,8 @@ function workerGone(spawned) {
 function controlledHarness(h) {
   const script = path.join(h.base, 'worker.js');
   fs.writeFileSync(script, `
+const { fakeAgentEnv } = require(${JSON.stringify(path.join(__dirname, 'agent-env.js'))});
+
 const fs = require('node:fs');
 const cp = require('node:child_process');
 const path = require('node:path');
@@ -64,7 +66,7 @@ if (process.env.SLOT_RETRY && process.env.TOWER_CRANE_RETRY === '0') process.exi
 const timer = setInterval(() => {
   if (fs.existsSync(path.join(base, task + '.claim'))) {
     fs.unlinkSync(path.join(base, task + '.claim'));
-    const r = cp.spawnSync(process.execPath, [process.argv[2], 'claim', task], { encoding: 'utf8', timeout: 300000 });
+    const r = cp.spawnSync(process.execPath, [process.argv[2], 'claim', task], { env: fakeAgentEnv(process.env), encoding: 'utf8', timeout: 300000 });
     fs.writeFileSync(path.join(base, task + '.claimed'), JSON.stringify({ code: r.status, stderr: r.stderr }));
   }
   if (fs.existsSync(path.join(base, task + '.exit'))) {

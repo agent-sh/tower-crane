@@ -10,7 +10,7 @@ const { gateEvidence, retireRevision } = require('./gate-helpers');
 const { waitFor } = require('./canary');
 const { shellQuote } = require('../lib/gates/common');
 const { readPublished } = require('./atomic-file');
-const { setup, configureHarness, refillFixture, harness } = require('./automation-helpers');
+const { setup, holdSuite, configureHarness, refillFixture, harness } = require('./automation-helpers');
 
 test('automation command harness temp files stay inside its fixture', (t) => {
   const h = setup(t);
@@ -229,6 +229,8 @@ test('automation reports unchanged dispatch refusals once and retries after the 
 test('automation dispatches rework-ready work with the failed review findings', async (t) => {
   const h = refillFixture(t);
   h.ok(['task', 'update', 'T4', '--dep', 'T1']);
+  // Refill does not wait for the review reaction, so other ready work would take the only slot first.
+  for (const id of ['T2', 'T3']) h.ok(['task', 'update', id, '--status', 'cancelled']);
   h.submit();
   h.reviewer('T1', 'reviewer');
   h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--sha', h.sha,
@@ -390,6 +392,7 @@ test('a refill at a held dispatch lock retries on the next pass without waiting 
   });
   await waitFor(looked, { what: 'the refill looks at the held dispatch lock' });
   assert.equal(h.logs().filter((e) => e.cmd === 'spawn').length, 0, 'nothing is dispatched while the lock is held');
+  assert.match(h.json(['status']).not_dispatched.find((b) => b.id === 'T3').reason, new RegExp(`^dispatch lock held by pid ${process.pid} since `));
   // Nothing in the state changes from here; only the lock goes away.
   release();
   const result = await watcher;
@@ -431,6 +434,101 @@ test('the wait host serves events and drains a signal while another dispatch hol
   assert.ok(Date.now() - signalled < 30000, `the drain took ${Date.now() - signalled} ms`); // wait-allow: the same bound for the signal drain
   assert.equal(result.code, 0, result.stderr);
   assert.deepEqual(rows().at(-1), { reason: 'signal', signal: 'SIGTERM', drained: 0 });
+});
+
+// A full suite holds its gate reaction for most of an hour on a real project.
+// The suite here gives up on its own, so a refill that waits behind the
+// reaction dispatches only after the gate's evidence, which the order shows.
+test('the wait host dispatches a ready task while a gate reaction is still running', async (t) => {
+  const h = refillFixture(t);
+  const { stalled, release } = holdSuite(h, { giveUpMs: 60000 });
+  h.submit();
+  let child;
+  const host = h.runAsync(['wait', '--after', '0', '--types', 'never', '--timeout', '300', '--agent', 'orchestrator'], { // wait-allow: the gate's release ends the test first; this bounds a host that never settles
+    onSpawn: (c) => { child = c; },
+  });
+  try {
+    await waitFor(stalled, { what: 'the tests gate holds the reaction' });
+    await waitFor(h.marker('T3'), { alive: child, what: 'T3 takes the free slot' });
+    const log = h.logs();
+    const dispatched = log.findIndex((e) => e.cmd === 'spawn' && e.task === 'T3');
+    const gated = log.findIndex((e) => e.cmd === 'check tests' && e.task === 'T1');
+    assert.ok(gated === -1 || dispatched < gated, 'T3 is dispatched before the tests gate on T1 ends');
+    assert.equal(log.findLast((e) => e.cmd === 'automation' && e.task === 'T1').detail.phase, 'running', 'the reaction still runs');
+    const status = h.json(['status']);
+    assert.deepEqual(status.not_dispatched, [{ id: 'T2', reason: 'worker limit reached (1 of 1: T3)' }]);
+    assert.match(h.ok(['status']), /^not dispatched: T2 worker limit reached \(1 of 1: T3\)$/m);
+  } finally {
+    fs.writeFileSync(release, '');
+  }
+  await waitOnRepo(h, () => h.logs().some((e) => e.cmd === 'check tests' && e.task === 'T1'), 'the held gate finishes');
+  child.kill('SIGTERM');
+  await host;
+  const task = h.readState('tasks.json').tasks.find((x) => x.id === 'T1');
+  assert.equal(task.status, 'submitted', 'the refill left the gated task alone');
+  assert.equal(h.logs().filter((e) => e.cmd === 'spawn' && e.task === 'T1' && e.detail.role === 'worker').length, 0);
+  assert.equal(h.logs().findLast((e) => e.cmd === 'check tests' && e.task === 'T1').detail.ok, true);
+});
+
+// With the fallback tick off and the watch silent, nothing but the host's own
+// timer wakes it once the hold ends.
+test('an ending rework hold dispatches on the wait host\'s own timer, with no other event', async (t) => {
+  const h = refillFixture(t);
+  for (const id of ['T2', 'T3', 'T4']) h.ok(['task', 'update', id, '--status', 'cancelled']);
+  const broken = path.join(h.base, 'environment-broken');
+  fs.writeFileSync(broken, '');
+  const script = path.join(h.base, 'local-environment.js');
+  fs.writeFileSync(script, `process.exit(require('node:fs').existsSync(${JSON.stringify(broken)}) ? 1 : 0);\n`);
+  h.ok(['project', 'set', '--ci-local', JSON.stringify({ command: [process.execPath, script], timeout: 30 }), '--rework-hold-min', '0.2']);
+  h.submit();
+  h.consume();
+  const rework = h.logs().findLast((e) => e.cmd === 'rework');
+  assert.equal(rework?.detail.gate, 'ci', 'an automatic gate rework');
+  const end = Date.parse(rework.at) + 12000;
+  const ready = path.join(h.base, 'host-ready');
+  let child;
+  const host = h.runAsync(['wait', '--types', 'never', '--timeout', '60', '--agent', 'orchestrator'], { // wait-allow: a host with no hold timer is never woken again; this deadline ends it, the failure the test looks for
+    hooks: { HOOK_SILENT_WATCH: '1', HOOK_NO_FALLBACK: '1', HOOK_WATCH_READY: ready },
+    onSpawn: (c) => { child = c; },
+  });
+  await waitFor(ready, { what: 'the host starts' });
+  assert.ok(Date.now() < end, 'the host starts while the hold still runs');
+  const held = h.json(['status']).not_dispatched;
+  assert.deepEqual(held, [{ id: 'T1', reason: `rework hold until ${new Date(end).toISOString().replace('T', ' ').slice(0, 16)}Z`, until: new Date(end).toISOString() }]);
+  await waitFor(h.marker('T1'), { alive: child, what: 'the hold timer dispatches T1' });
+  const spawn = h.logs().find((e) => e.cmd === 'spawn' && e.task === 'T1' && e.detail.role === 'worker');
+  assert.ok(Date.parse(spawn.at) >= end, 'dispatched once the hold ended');
+  child.kill('SIGTERM');
+  await host;
+});
+
+// A refill that runs past the deadline must not let the fallback tick start
+// more passes or refills: on a real project such a pass can run a gate for
+// most of an hour, so the timeout would come that much later or never.
+test('a refill running past the wait deadline ends the wait without another pass or refill', async (t) => {
+  const h = refillFixture(t);
+  for (const id of ['T1', 'T2', 'T3', 'T4']) h.ok(['task', 'update', id, '--status', 'cancelled']);
+  const calls = path.join(h.base, 'calls');
+  const preload = path.join(h.base, 'slow-refill.js');
+  fs.writeFileSync(preload, `const fs = require('node:fs');
+const A = require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'automation.js'))});
+const consume = A.consume;
+A.consume = (...args) => { fs.appendFileSync(${JSON.stringify(calls)}, 'pass\\n'); return consume(...args); };
+const refill = A.refillWorkers;
+let first = true;
+A.refillWorkers = async (ctx, attempt) => {
+  fs.appendFileSync(${JSON.stringify(calls)}, 'refill\\n');
+  if (first) { first = false; await new Promise((resolve) => setTimeout(resolve, 6000)); } // wait-allow: the held refill outlasts the 1 s deadline by several fallback ticks
+  return refill(ctx, attempt);
+};
+`);
+  const r = await h.runAsync(['wait', '--types', 'never', '--timeout', '1', '--agent', 'orchestrator'], { pre: ['--require', preload] }); // wait-allow: the deadline is what the test drives; the held refill ends it within seconds
+  assert.equal(r.code, 2, r.stderr);
+  assert.equal(JSON.parse(r.stdout).type, 'timeout');
+  const seen = fs.readFileSync(calls, 'utf8').trim().split('\n');
+  assert.equal(seen.filter((c) => c === 'refill').length, 1, 'no refill starts after the deadline');
+  // The first pass, a fallback tick that can land just before the deadline, and the deadline's own pass.
+  assert.ok(seen.filter((c) => c === 'pass').length <= 3, `no tick starts a pass after the deadline: ${seen.join(', ')}`);
 });
 
 // A holder in another pid namespace counts as gone 60 s after its marker last
@@ -1057,9 +1155,9 @@ test('main moves: a mergeable PR keeps its evidence and merges after one head-of
   const suites = h.suites().length;
   h.reviewer('T1', 'reviewer');
   h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--sha', h.sha, '--ok', '--agent', 'reviewer']);
-  h.consume();
+  const result = h.consume();
   assert.deepEqual(softwareEvidence(h, 'T1'), before, 'a base move reruns no gate and resets no evidence');
-  assert.equal(h.github().prs['7'].state, 'MERGED');
+  assert.equal(h.github().prs['7'].state, 'MERGED', result.stderr || JSON.stringify(h.logs().slice(-4)));
   assert.equal(h.suites().length - suites, 1);
   const checks = headChecks(h);
   assert.deepEqual(checks.map((e) => [e.task, e.detail.ok, e.detail.base_sha]), [['T1', true, h.git(['rev-parse', 'main'])]]);
@@ -1167,9 +1265,11 @@ test('a head replaced during its check is checked again at the new sha before th
   h.git(['switch', '-q', 'main']);
   h.moveMain();
   // The owner reworks and reaccepts T1 at a new head while its suite runs.
-  fs.writeFileSync(path.join(h.base, 'during-check.js'), `const cp = require('node:child_process'), fs = require('node:fs');
+  fs.writeFileSync(path.join(h.base, 'during-check.js'), `
+const { fakeAgentEnv } = require(${JSON.stringify(path.join(__dirname, 'agent-env.js'))});
+const cp = require('node:child_process'), fs = require('node:fs');
 const env = ${JSON.stringify(h.env)};
-const cli = (...a) => cp.execFileSync(process.execPath, [${JSON.stringify(BIN)}, ...a], { cwd: ${JSON.stringify(h.repo)}, env, encoding: 'utf8' });
+const cli = (...a) => cp.execFileSync(process.execPath, [${JSON.stringify(BIN)}, ...a], { cwd: ${JSON.stringify(h.repo)}, env: fakeAgentEnv(env), encoding: 'utf8' });
 const file = env.AUTOMATION_GITHUB;
 cli('rework', 'T1', '--reason', 'replace the head', '--agent', 'owner');
 const gh = JSON.parse(fs.readFileSync(file, 'utf8'));
@@ -1253,9 +1353,11 @@ test('a head check that fails after its settings changed checks again under the 
   h.moveMain();
   const cmd = h.readState('project.json').gates.tests_cmd;
   // The suite fails, but only after the owner replaces the tests command.
-  fs.writeFileSync(path.join(h.base, 'during-check.js'), `const cp = require('node:child_process');
+  fs.writeFileSync(path.join(h.base, 'during-check.js'), `
+const { fakeAgentEnv } = require(${JSON.stringify(path.join(__dirname, 'agent-env.js'))});
+const cp = require('node:child_process');
 cp.execFileSync(process.execPath, [${JSON.stringify(BIN)}, 'project', 'set', '--tests-cmd', ${JSON.stringify(`${cmd} again`)}, '--agent', 'owner'],
-  { cwd: ${JSON.stringify(h.repo)}, env: ${JSON.stringify(h.env)}, encoding: 'utf8' });
+  { cwd: ${JSON.stringify(h.repo)}, env: fakeAgentEnv(${JSON.stringify(h.env)}), encoding: 'utf8' });
 process.exitCode = 1;
 `);
   h.reviewer('T1', 'reviewer');

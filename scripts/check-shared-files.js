@@ -8,6 +8,7 @@ const { fragments, released } = require('./changelog');
 const { normalizeText, readText } = require('./text');
 const { checkTestWaits } = require('./test-waits');
 const { checkSuiteDeadline } = require('./suite-time');
+const { checkFakeAgentEnvs } = require('./fake-agent-env');
 const { checkMutants } = require('./mutants');
 
 // Non-blocking stdin fails a bare read with EAGAIN; readStdin in lib/util.js retries it.
@@ -106,6 +107,7 @@ function main(args) {
   check(root);
   checkStdinReads(root);
   checkTestWaits(root);
+  checkFakeAgentEnvs(root);
   checkSuiteDeadline(root);
   // Mutation scoring runs shared checks on deliberately changed code.
   if (mutants) checkMutants(root);

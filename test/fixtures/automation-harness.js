@@ -1,5 +1,7 @@
 'use strict';
 
+const { fakeAgentEnv } = require('../agent-env');
+
 const cp = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -16,7 +18,7 @@ async function main() {
   }
   const state = JSON.parse(fs.readFileSync(process.env.AUTOMATION_GITHUB, 'utf8'));
   const pr = state.prs['7'];
-  const run = (args) => cp.execFileSync(process.execPath, [bin, ...args], { stdio: 'pipe' });
+  const run = (args) => cp.execFileSync(process.execPath, [bin, ...args], { env: fakeAgentEnv(process.env), stdio: 'pipe' });
   if (process.env.AUTOMATION_POLICY_PROBE) {
     const denials = [['api', 'repos/acme/demo'], ['pr', 'merge', '7']].map((args) => {
       const r = cp.spawnSync('gh', args, { encoding: 'utf8' });

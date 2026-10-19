@@ -109,10 +109,12 @@ test('prose-only failure stays submitted and the reviewer checks the edited body
   const body = path.join(h.base, 'pr-body.md');
   fs.writeFileSync(body, 'The refused claim records a reason in state.\n');
   const output = path.join(h.base, 'light-prompt.md');
-  const script = `const fs = require('node:fs'); const cp = require('node:child_process');
+  const script = `
+const { fakeAgentEnv } = require(${JSON.stringify(path.join(__dirname, 'agent-env.js'))});
+const fs = require('node:fs'); const cp = require('node:child_process');
 fs.writeFileSync(${JSON.stringify(output)}, process.argv[1]);
 if (!fs.readFileSync(${JSON.stringify(body)}, 'utf8').includes('records a reason in state')) process.exit(2);
-const r = cp.spawnSync(process.execPath, ${JSON.stringify([BIN, 'evidence', 'T1', '--type', 'review', '--ok', '--sha', h.sha, '--summary', 'Corrected claim checked.'])}, {env: process.env});
+const r = cp.spawnSync(process.execPath, ${JSON.stringify([BIN, 'evidence', 'T1', '--type', 'review', '--ok', '--sha', h.sha, '--summary', 'Corrected claim checked.'])}, {env: fakeAgentEnv(process.env)});
 process.exit(r.status ?? 1);`;
   h.ok(['ladder', 'set', 'easy', '--command', JSON.stringify([process.execPath, '-e', script, '{prompt}'])]);
   const cursor = fs.statSync(path.join(h.state, 'events.jsonl')).size;

@@ -31,7 +31,7 @@ are commands recorded in the log, not estimates of model turns.
 | Rerun a flaky CI job | agent judgment | Completion handling is software. Deciding that a failure is flaky requires evidence; automation does not conceal a failing job. |
 | Remove finished runner/review worktrees and remote branches | software | Verified process exit, merge state and retention policy determine cleanup. Existing worktree and merge commands own it. |
 | Inspect the board, capture UI evidence and assess usability | agent judgment | Browser transport is software, but appearance and interaction quality need inspection. |
-| Release and publish | agent judgment | The owner approves publication. Packaging checks and executing the approved release are software. |
+| Release and publish | agent judgment | The owner sets a publish policy once (`project set --publish-policy`), or approves one publication. Checking the policy's conditions, packaging checks and executing the release are software. |
 
 ## Event reactions
 
@@ -124,8 +124,9 @@ claim or submission since, a pending quality climb, and a moved PR or branch
 head, checked again once it holds the reaction slot. The inbox `rework_ready`
 item names the command when it would succeed. Automatic refill holds such a
 task for `gates.rework_hold_min` minutes (default 5) after the rework, since
-the same wait pass would otherwise dispatch a worker at once; `spawn --ready`
-by hand does not wait. [State](state.md)
+the wait host's refill would otherwise dispatch a worker at once; `spawn --ready`
+by hand does not wait. The host sets a timer to the earliest hold end, so the
+task dispatches when its hold ends with no other event. [State](state.md)
 explains why the revision goes back instead of carrying evidence forward.
 
 Failures remain visible in gate receipts and task notes. Conflicting PRs

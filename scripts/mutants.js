@@ -413,7 +413,8 @@ async function runContained(command, argv, { cwd, env = process.env, limit = 512
         if (!['Z', 'X'].includes(fields[0])) members.push({ pid, group: Number(fields[2]), start });
       } catch (error) {
         if (!['ENOENT', 'ESRCH'].includes(error.code)) throw error;
-        known.delete(pid);
+        // Keep the runner's identity so a later reuse cannot become a member.
+        if (pid !== child.pid) known.delete(pid);
       }
     }
     return members;
@@ -426,7 +427,8 @@ async function runContained(command, argv, { cwd, env = process.env, limit = 512
     if (leader && !known.has(leader.pid)) { known.set(leader.pid, leader.start); members.set(leader.pid, leader); }
     if (process.platform === 'linux') {
       for (const row of rows) {
-        if (members.has(row.pid) || before.get(row.pid) === row.start || !row.live) continue;
+        if (members.has(row.pid) || known.has(row.pid) && known.get(row.pid) !== row.start
+          || before.get(row.pid) === row.start || !row.live) continue;
         try {
           const entry = fs.readFileSync(`/proc/${row.pid}/environ`, 'utf8').split('\0')
             .find(value => value.startsWith('TOWER_CRANE_MUTANT_RUN='));
@@ -443,7 +445,7 @@ async function runContained(command, argv, { cwd, env = process.env, limit = 512
     do {
       added = false;
       for (const row of rows) {
-        if (!members.has(row.pid) && (members.has(row.parent)
+        if (!members.has(row.pid) && (!known.has(row.pid) || known.get(row.pid) === row.start) && (members.has(row.parent)
           || (row.group && [...members.values()].some(member => member.pid === member.group && member.group === row.group)))) {
           known.set(row.pid, row.start);
           members.set(row.pid, row);
@@ -462,7 +464,7 @@ async function runContained(command, argv, { cwd, env = process.env, limit = 512
       for (const row of members) cp.spawnSync('taskkill', ['/F', '/T', '/PID', String(row.pid)],
         { encoding: 'utf8', timeout: 5000, windowsHide: true });
     } else {
-      const groups = new Set([child.pid, ...members.filter(row => row.pid === row.group).map(row => row.group)]);
+      const groups = new Set(members.filter(row => row.pid === row.group).map(row => row.group));
       for (const group of groups) {
         try { process.kill(-group, 'SIGKILL'); } catch (error) { if (error.code !== 'ESRCH') throw error; }
       }
@@ -475,10 +477,10 @@ async function runContained(command, argv, { cwd, env = process.env, limit = 512
     if (!scope) return null;
     scopeDirectory();
     if (!controlGroup) return null;
-    for (const [file, label] of [['pids.events', `process cap (${limit})`], ['memory.events', 'memory cap (4G)']]) {
+    for (const [file, event, label] of [['pids.events', 'max', `process cap (${limit})`], ['memory.events', 'oom_kill', 'memory cap (4G)']]) {
       try {
         const events = fs.readFileSync(path.join(controlGroup, file), 'utf8');
-        if (/^max [1-9]\d*$/m.test(events)) return label;
+        if (new RegExp(`^${event} [1-9]\\d*$`, 'm').test(events)) return label;
       } catch (error) { if (!['ENOENT', 'ENODEV'].includes(error.code)) throw error; }
     }
     return null;
@@ -552,7 +554,19 @@ function mutationTimeout(files, timings) {
   return Math.ceil(Math.max(30000, measured * 5));
 }
 
-module.exports = { MUTANTS, checkMutants, runContained, mutationTimeout };
+async function runMutationTests(files, timings, testResult, onRetry = () => {}) {
+  const timeout = mutationTimeout(files, timings);
+  let run = await testResult(files, timeout);
+  if (run.reason?.startsWith('caught-by-timeout')) {
+    onRetry();
+    run = await testResult(files, timeout);
+  }
+  const caughtBy = run.reason?.startsWith('caught-by-timeout') ? 'timeout'
+    : run.reason ? 'cap' : run.status !== 0 ? 'tests' : null;
+  return { run, caughtBy };
+}
+
+module.exports = { MUTANTS, checkMutants, runContained, mutationTimeout, runMutationTests };
 if (require.main !== module) return;
 
 async function main() {
@@ -608,18 +622,15 @@ async function main() {
     }));
     if (failed) throw failed;
   }
-  async function runTests(files) {
-    const r = await testResult(files, mutationTimeout(files, timings));
-    runTests.reason = r.reason;
-    if (r.status !== 0 || r.reason) runTests.failures = `${r.reason || r.signal || ''}\n${r.output}`;
-    return r.status === 0 && !r.reason;
-  }
+  const runTests = (files, id) => runMutationTests(files, timings, testResult,
+    () => console.log(`retry   ${id}: timeout-only catch`));
 
   // Anchor validation checks the pristine catalog, not behavior under a planted bug.
   const allFiles = () => require(path.join(copy, 'test', 'run.js')).testFiles()
     .filter((file) => file !== 'test/mutants.test.js');
 
   let caught = 0;
+  const catches = { tests: 0, timeout: 0, cap: 0 };
   try {
     // Include test inputs outside the npm package, without local state or caches.
     const files = cp.execFileSync('git', ['ls-files', '--cached', '--others', '--exclude-standard', '-z'], { cwd: root, encoding: 'utf8' });
@@ -640,8 +651,10 @@ async function main() {
       const source = readText(file);
       fs.writeFileSync(file, source.replace(m.from, m.to));
       let by = null;
+      let result;
       try {
-        if (!await runTests(m.tests)) by = runTests.reason || m.tests.join(', ');
+        result = await runTests(m.tests, m.id);
+        if (result.caughtBy) by = result.run.reason || m.tests.join(', ');
         else if (full) {
           if (!fullValidated) {
             fs.writeFileSync(file, source);
@@ -650,18 +663,19 @@ async function main() {
             fullValidated = true;
             fs.writeFileSync(file, source.replace(m.from, m.to));
           }
-          if (!await runTests(allFiles())) by = runTests.reason || 'full suite';
+          result = await runTests(allFiles(), m.id);
+          if (result.caughtBy) by = result.run.reason || 'full suite';
         }
       } finally {
         fs.writeFileSync(file, source);
       }
-      if (by) caught++;
+      if (by) { caught++; catches[result.caughtBy]++; }
       console.log(`${by ? 'caught' : 'MISSED'}  ${m.area.padEnd(16)} ${m.id}${by ? ` (${by})` : ''}`);
     }
   } finally {
     fs.rmSync(copy, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
-  console.log(`\n${caught}/${selected.length} mutants caught`);
+  console.log(`\n${caught}/${selected.length} mutants caught (${catches.tests} by tests, ${catches.timeout} by timeout, ${catches.cap} by caps)`);
   if (caught !== selected.length) process.exitCode = 1;
 }
 

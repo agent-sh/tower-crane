@@ -111,9 +111,11 @@ function sample(h, name, input, cached, output, cacheWrite = 0) {
 }
 
 function commandReviewer(h, out) {
-  const script = `const fs = require('node:fs'); const cp = require('node:child_process');
+  const script = `
+const { fakeAgentEnv } = require(${JSON.stringify(path.join(__dirname, 'agent-env.js'))});
+const fs = require('node:fs'); const cp = require('node:child_process');
 fs.writeFileSync(process.argv[1], process.argv[2]);
-const r = cp.spawnSync(process.execPath, [${JSON.stringify(BIN)}, 'evidence', 'T1', '--type', 'review', '--ok', '--sha', ${JSON.stringify(h.sha)}, '--summary', 'reviewed'], {env: process.env});
+const r = cp.spawnSync(process.execPath, [${JSON.stringify(BIN)}, 'evidence', 'T1', '--type', 'review', '--ok', '--sha', ${JSON.stringify(h.sha)}, '--summary', 'reviewed'], {env: fakeAgentEnv(process.env)});
 process.exit(r.status ?? 1);`;
   h.ok(['project', 'set', '--review-policy', 'null']);
   const command = [process.execPath, '-e', script, out, '{prompt}'];
@@ -642,8 +644,10 @@ test('review escalation climbs one tier after failed reviews', (t) => {
 
 test('escalation starts above the actual dispatched reviewer rung', (t) => {
   const h = setup(t, 'easy', 'other', undefined, { gated: true });
-  const script = `const cp = require('node:child_process');
-const r = cp.spawnSync(process.execPath, [${JSON.stringify(BIN)}, 'evidence', 'T1', '--type', 'review', '--fail', '--sha', ${JSON.stringify(h.sha)}], {env: process.env});
+  const script = `
+const { fakeAgentEnv } = require(${JSON.stringify(path.join(__dirname, 'agent-env.js'))});
+const cp = require('node:child_process');
+const r = cp.spawnSync(process.execPath, [${JSON.stringify(BIN)}, 'evidence', 'T1', '--type', 'review', '--fail', '--sha', ${JSON.stringify(h.sha)}], {env: fakeAgentEnv(process.env)});
 process.exit(r.status ?? 1);`;
   h.ok(['ladder', 'set', 'easy', '--harness', 'command', '--clear', 'model',
     '--command', JSON.stringify([process.execPath, '-e', script, '{prompt}'])]);
@@ -739,8 +743,10 @@ function reworkCorrection(h) {
 test('a narrowed re-review keeps the failed review rung and the risk of the whole change', (t) => {
   for (const variant of ['rung', 'risk']) {
     const h = setup(t, 'easy', 'other', undefined, { gated: true });
-    const script = `const cp = require('node:child_process');
-const r = cp.spawnSync(process.execPath, [${JSON.stringify(BIN)}, 'evidence', 'T1', '--type', 'review', '--fail', '--sha', ${JSON.stringify(h.sha)}, '--summary', 'blocker'], {env: process.env});
+    const script = `
+const { fakeAgentEnv } = require(${JSON.stringify(path.join(__dirname, 'agent-env.js'))});
+const cp = require('node:child_process');
+const r = cp.spawnSync(process.execPath, [${JSON.stringify(BIN)}, 'evidence', 'T1', '--type', 'review', '--fail', '--sha', ${JSON.stringify(h.sha)}, '--summary', 'blocker'], {env: fakeAgentEnv(process.env)});
 process.exit(r.status ?? 1);`;
     for (const name of ['easy', 'medium', 'hard', 'research', 'review']) {
       h.ok(['ladder', 'set', name, '--harness', 'command', '--clear', 'model', '--clear', 'profile',
@@ -768,8 +774,10 @@ test('a fallback full re-review keeps the failed review rung and lists its block
   for (const variant of ['amend', 'gone', 'rebase']) {
     const h = setup(t, 'easy', 'other', undefined, { gated: true });
     const findings = JSON.stringify([{ kind: 'acceptance', path: 'value.js', claim: 'PRIOR_BLOCKER_CLAIM' }]);
-    const script = `const cp = require('node:child_process');
-const r = cp.spawnSync(process.execPath, [${JSON.stringify(BIN)}, 'evidence', 'T1', '--type', 'review', '--fail', '--sha', ${JSON.stringify(h.sha)}, '--summary', 'PRIOR_BLOCKER_SUMMARY', '--findings', ${JSON.stringify(findings)}], {env: process.env});
+    const script = `
+const { fakeAgentEnv } = require(${JSON.stringify(path.join(__dirname, 'agent-env.js'))});
+const cp = require('node:child_process');
+const r = cp.spawnSync(process.execPath, [${JSON.stringify(BIN)}, 'evidence', 'T1', '--type', 'review', '--fail', '--sha', ${JSON.stringify(h.sha)}, '--summary', 'PRIOR_BLOCKER_SUMMARY', '--findings', ${JSON.stringify(findings)}], {env: fakeAgentEnv(process.env)});
 process.exit(r.status ?? 1);`;
     for (const name of ['easy', 'medium', 'hard', 'research', 'review']) {
       h.ok(['ladder', 'set', name, '--harness', 'command', '--clear', 'model', '--clear', 'profile',

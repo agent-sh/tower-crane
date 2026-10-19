@@ -245,13 +245,16 @@ test('nested cap failures leave the parent running when local events are availab
 test('fake harness nested launches and detached grandchildren retain containment', async (t) => {
   const h = fixture(t);
   const file = path.join(h.base, 'nested.jsonl');
+  let admittedPid;
   const result = await G.treeExec(process.execPath, [HARNESS, 'nested', file], {
     resources: { tasks_max: 64, memory_max_bytes: memory }, timeout: 10000,
+    onSpawn: pid => { admittedPid = pid; },
   });
   assert.equal(result.status, 0, diagnostics(result));
   assert.equal(result.error, undefined, result.stderr);
   const records = fs.readFileSync(file, 'utf8').trim().split('\n').map(JSON.parse);
   assert.equal(records.length, 3);
+  assert.equal(admittedPid, records[0].pid, 'the governor must measure the actual harness process');
   if (result.containment.backend === 'cgroup') {
     const parent = C.currentGroup().split('/');
     const slice = parent.findLastIndex((name) => name.endsWith('.slice'));

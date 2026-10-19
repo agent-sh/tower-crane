@@ -555,9 +555,12 @@ test('claude: a sandboxed agent gets a temp directory of its own that its comman
   // A cache root short enough for claude's 73-byte socket bound.
   const cache = fs.mkdtempSync(path.join(os.homedir(), '.cache', 'tcl-'));
   t.after(() => fs.rmSync(cache, { recursive: true, force: true }));
+  // Exercise the runtime-directory branch independently of the caller's session.
+  const runtime = path.join(cache, 'runtime');
+  fs.mkdirSync(runtime);
   const spawnSeen = (xdg, fx = h, extra = {}) => {
     releaseExited(fx);
-    const stdout = fx.ok(['spawn', '--task', 'T1', '--wait'], { env: { ...fx.env, PATH: `${bin}${path.delimiter}${process.env.PATH}`, CLAUDE_CONFIG_DIR: '', TMPDIR: caller, TMP: caller, TEMP: caller, XDG_CACHE_HOME: xdg, ...extra } });
+    const stdout = fx.ok(['spawn', '--task', 'T1', '--wait'], { env: { ...fx.env, PATH: `${bin}${path.delimiter}${process.env.PATH}`, CLAUDE_CONFIG_DIR: '', TMPDIR: caller, TMP: caller, TEMP: caller, XDG_CACHE_HOME: xdg, XDG_RUNTIME_DIR: runtime, ...extra } });
     return { ...JSON.parse(fs.readFileSync(out, 'utf8')), stdout };
   };
   const seen = spawnSeen(cache);
