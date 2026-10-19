@@ -279,24 +279,6 @@ test('a wait defers a gate reaction under pressure and runs it once there is roo
   assert.ok(fs.existsSync(h.started), 'the suite ran');
 });
 
-// The supervisor's tick reads the project's governor settings from the
-// database; project.json is only its marker. The defaults would stop at 95%.
-test('a supervisor stops its worker at the stop line the project set', { skip: linuxOnly }, async (t) => {
-  const h = makeRepo(t);
-  h.init();
-  supervised(h, ['T1']);
-  h.ok(['project', 'set', '--governor', '{"defer_at":0.4,"stop_at":0.5}']);
-  const host = h.env.TOWER_CRANE_HOST_ROOT;
-  writeHost(host, { limit: 10, used: 1 });
-  const spawned = h.json(['spawn', '--task', 'T1']);
-  await waitOnRepo(h, () => events(h).some((e) => e.cmd === 'claim' && e.task === 'T1'), 'the worker claims its task');
-  writeHost(host, { limit: 10, used: 6 });
-  const alive = (pid) => { try { killPid(pid, 0); return true; } catch { return false; } };
-  await waitOnRepo(h, () => !alive(spawned.monitor_pid), 'the supervisor stops');
-  await waitOnRepo(h, () => events(h).some((e) => e.task === 'T1' && e.cmd === 'spawn phase'
-    && /^supervisor stopped by the host governor: memory: .* at or past the 50% stop line/.test(e.detail.reason || '')), 'the supervisor records the project\'s stop line');
-});
-
 test('past the stop line the newest worker stops first, and processes Tower Crane did not start are left alone', { skip: linuxOnly }, async (t) => {
   const h = makeRepo(t);
   h.init();
@@ -328,4 +310,22 @@ test('past the stop line the newest worker stops first, and processes Tower Cran
   h.ok(['release', '--dead']);
   const again = h.json(['spawn', '--task', 'T2']);
   assert.equal(again.cwd, newer.cwd, 'the same worktree');
+});
+
+// The supervisor's tick reads the project's governor settings from the
+// database; project.json is only its marker. The defaults would stop at 95%.
+test('a supervisor stops its worker at the stop line the project set', { skip: linuxOnly }, async (t) => {
+  const h = makeRepo(t);
+  h.init();
+  supervised(h, ['T1']);
+  h.ok(['project', 'set', '--governor', '{"defer_at":0.4,"stop_at":0.5}']);
+  const host = h.env.TOWER_CRANE_HOST_ROOT;
+  writeHost(host, { limit: 10, used: 1 });
+  const spawned = h.json(['spawn', '--task', 'T1']);
+  await waitOnRepo(h, () => events(h).some((e) => e.cmd === 'claim' && e.task === 'T1'), 'the worker claims its task');
+  writeHost(host, { limit: 10, used: 6 });
+  const alive = (pid) => { try { killPid(pid, 0); return true; } catch { return false; } };
+  await waitOnRepo(h, () => !alive(spawned.monitor_pid), 'the supervisor stops');
+  await waitOnRepo(h, () => events(h).some((e) => e.task === 'T1' && e.cmd === 'spawn phase'
+    && /^supervisor stopped by the host governor: memory: .* at or past the 50% stop line/.test(e.detail.reason || '')), 'the supervisor records the project\'s stop line');
 });
