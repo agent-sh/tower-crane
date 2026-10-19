@@ -4,6 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const cp = require('node:child_process');
 const C = require('../lib/containment');
 const G = require('../lib/gates/common');
 const { cachedFixture } = require('./helpers');
@@ -62,6 +63,13 @@ for (const [kind, ending, owner, late, survives] of cases) {
       assert.equal(result.status, 0, result.stderr);
       metadata = result.containment;
     } else {
+      // A keeper that took over the scope reads its Result first, so only the keeper settles it.
+      const settled = [];
+      const execFile = cp.execFile;
+      t.mock.method(cp, 'execFile', function (file, args, ...rest) {
+        if (file === 'systemctl' && args.includes('ActiveState')) settled.push(args[2]);
+        return execFile.call(this, file, args, ...rest);
+      });
       // The caller row deliberately terminates its own launcher to prove the
       // detached keeper retains the bound after that launcher is gone.
       const child = C.spawn(process.execPath, args, {
@@ -72,6 +80,9 @@ for (const [kind, ending, owner, late, survives] of cases) {
       await new Promise((resolve, reject) => { child.once('close', resolve); child.once('error', reject); });
       await child.containmentDone;
       metadata = owner === 'caller' ? JSON.parse(readPublished(path.join(dir, 'closed.json'), 'utf8')) : child.containment;
+      if (owner === 'agent' && child.containment.unit) {
+        assert.equal(settled.includes(child.containment.unit), !metadata.retained?.length, JSON.stringify(metadata));
+      }
     }
     await new Promise(resolve => setTimeout(resolve, 2200)); // wait-allow: all finite fixture children and the keeper end
     if (survives) {
