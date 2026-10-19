@@ -9,6 +9,7 @@ const { EventEmitter } = require('node:events');
 const { PassThrough } = require('node:stream');
 const { cachedFixture, BIN } = require('./helpers');
 const { waitOnRepo } = require('./signals');
+const { readPublished } = require('./atomic-file');
 const C = require('../lib/containment');
 const G = require('../lib/gates/common');
 
@@ -229,7 +230,7 @@ global.setInterval = (fn, ms, ...args) => interval(fn, ms === 1000 ? 10 : ms, ..
   child.stderr.on('data', data => { stderr += data; });
   const closed = new Promise(resolve => child.once('close', resolve));
   const deadline = AbortSignal.timeout(10000); // wait-allow: finite failure bound for an absent sweep
-  await waitOnRepo(h, () => fs.existsSync(log) && fs.readFileSync(log, 'utf8').includes('list-units'), 'initial containment sweep', { signal: deadline });
+  await waitOnRepo(h, () => fs.existsSync(log) && readPublished(log, 'utf8').includes('list-units'), 'initial containment sweep', { signal: deadline });
   const dead = cp.spawnSync(process.execPath, ['-e', '']).pid;
   const dir = path.join(cache, `tower-crane-containment-${dead}-dead`);
   fs.mkdirSync(dir);
@@ -327,6 +328,48 @@ test(`watchdog post-exit killing catches forks with ${delayed ? 'pending' : 'imm
   C.stopProcesses([{ pid: ids[0], start: String(ids[0]) }], null);
   assert.deepEqual([...new Set(stopped)], ids);
   assert.deepEqual(killed, ids);
+});
+}
+
+for (const mode of ['EPERM', 'EACCES', 'ESRCH', 'pending', 'reused', 'spared']) {
+test(`watchdog cleanup returns when a stop is ${mode}`, { skip: process.platform !== 'linux' }, t => {
+  const pid = 99999991;
+  const stopped = [];
+  const killed = [];
+  let elapsed = 0;
+  let scans = 0;
+  const read = fs.readFileSync;
+  const readdir = fs.readdirSync;
+  t.mock.method(require('node:perf_hooks').performance, 'now', () => elapsed);
+  t.mock.method(fs, 'readdirSync', (dir, ...args) => {
+    if (dir !== '/proc') return readdir(dir, ...args);
+    elapsed += 25;
+    // A broken freeze loop fails its assertions instead of hanging this worker.
+    if (++scans > 4) throw new Error('freeze did not finish');
+    return [String(pid)];
+  });
+  t.mock.method(fs, 'readFileSync', (file, ...args) => {
+    if (file !== `/proc/${pid}/stat`) return read(file, ...args);
+    const fields = Array(22).fill('0');
+    fields[0] = 'S';
+    fields[2] = String(pid);
+    fields[19] = String(mode === 'reused' ? pid + 1 : pid);
+    fields[21] = '1';
+    return `${pid} (fixture) ${fields.join(' ')}`;
+  });
+  const spawn = cp.spawnSync;
+  t.mock.method(cp, 'spawnSync', (file, ...args) => file === 'getconf' ? { status: 0, stdout: '4096\n' } : spawn(file, ...args));
+  t.mock.method(process, 'kill', (target, signal) => {
+    assert.equal(target, pid);
+    if (signal === 'SIGSTOP') stopped.push(target);
+    if (signal === 'SIGKILL') killed.push(target);
+    if (['EPERM', 'EACCES', 'ESRCH'].includes(mode)) throw Object.assign(new Error(mode), { code: mode });
+    return true;
+  });
+  C.stopProcesses([{ pid, start: String(pid) }], null, new Set(mode === 'spared' ? [pid] : []));
+  assert.ok(scans <= 4, 'the freeze phase ends within its reconciliation interval');
+  assert.equal(stopped.length, mode === 'pending' ? 4 : ['reused', 'spared'].includes(mode) ? 0 : 1);
+  assert.equal(killed.length, ['reused', 'spared'].includes(mode) ? 0 : 1, 'attempt a final kill without reusing or stopping spared identities');
 });
 }
 
