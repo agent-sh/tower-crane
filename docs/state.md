@@ -1549,7 +1549,7 @@ executor takes them, then the tasks whose notification waits behind their own
 running reaction, marked as blocked. `--json` carries it as `gate_queue` with
 `running`, `queued`, `blocked` and `deferred`, each queued, blocked or deferred task with its
 `prioritized` request or `null`. An accepted task shows `null`, since its
-acceptance sets its place. `deferred` lists the queued tasks held by the governor,
+acceptance sets its place. `deferred` lists the owed tasks held by the governor,
 including those still in their retry interval; the text gate queue line appends
 `deferred by the governor: TASKS`. `inbox` carries the same `gate_queue`. Each executor drains the queue after releasing its slot; watchers
 also retry their pending notifications on their next check. State locks cover only

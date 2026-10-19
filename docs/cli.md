@@ -888,8 +888,10 @@ The token protects against foreign web origins and against local processes that 
 | `status` | one screen: counts by status, ready tasks (marked `no brief` when they have none; JSON `ready[].brief`), why automatic refill leaves a ready task undispatched (`not dispatched: T2 worker limit reached (3 of 3: T1, T4, T5)`, also `no brief`, `its gate reaction is running`, `rework hold until T`, `waits behind higher-ranked tasks for the N free worker slots`, `dispatch lock held by pid P` and `host governor deferred workers since T: REASON`; JSON `not_dispatched[]` with `id`, `reason` and, for a hold, `until`), the gate queue (running tasks, then queued tasks in the order executors take them, with any `gates prioritize` reason, then tasks blocked behind their own running reaction), the gate temporary root and what chose it, the host governor's reading, budget and this project's deferred and stopped work (`host governor: ...`, `governor deferred: ...`, `governor stopped: ...`; JSON `governor`; docs/state.md#host-resource-governor), blocked required gates when their test or cleanup command is unpinned, open decisions, owner tasks, the owner line (`owner: nothing needed`, a crisis, or what waits on the owner when convenient; JSON `owner`), spend against budget, live spend of running agents with its freshness (`live`, `stale` or `unavailable`; JSON `spend.live`), expired leases, runaway flags (`runaway: T1 agent: rule`; JSON `runaways` and `runaway_norms`), claims whose spawned process exited without submit and their log tails, agent homes a stray process keeps after the agent exited (`home kept: AGENT by a stray process PID`; JSON `kept_homes`), and red CI runs on the base that `inbox` last recorded with their failing jobs and test names (`BASE ci red: ...`; JSON `main_ci_red`) |
 <!-- commands:Views:end -->
 
-`status` and `inbox` keep governor-deferred reactions in `gate_queue.queued`
-in their original drain order, with those tasks also listed in `gate_queue.deferred`.
+`status` and `inbox` keep governor-deferred reactions owed in the gate queue.
+They retain their original drain order in `gate_queue.queued`, or wait in
+`gate_queue.blocked` while another reaction holds their task.
+These tasks also appear in `gate_queue.deferred`.
 Their text gate queue line adds `deferred by the governor: TASKS`.
 The `governor_deferred` inbox item stays while the reaction is owed, including
 after the host registry's ten-minute hint expires. Any trusted `wait` retries
