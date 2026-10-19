@@ -896,6 +896,9 @@ Their text gate queue line adds `deferred by the governor: TASKS`.
 The `governor_deferred` inbox item stays while the reaction is owed, including
 after the host registry's ten-minute hint expires. Any trusted `wait` retries
 the reaction once its five-second retry interval has passed and there is room.
+Executors skip governor-held entries while their interval or admission holds;
+later reactions that can run continue, and the deferred source regains its
+original turn once admissible.
 
 `status` lists homes kept by marked stray processes as `kept_homes: [{ agent, pids }]` in JSON. Text uses `home kept: AGENT by a stray process PID` for one PID or `home kept: AGENT by stray processes P1, P2` for several. A missing homes directory or one denied with `EACCES` or `EPERM` reports no kept homes.
 

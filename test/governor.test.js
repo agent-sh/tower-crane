@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
 const G = require('../lib/governor');
-const { makeRepo, BIN } = require('./helpers');
+const { makeRepo, cachedFixture, BIN } = require('./helpers');
 const { writeHost, GiB } = require('./host');
 const { waitOnRepo, killPid } = require('./signals');
 
@@ -355,10 +355,18 @@ test('a supervisor-deferred submission stays visible and a new wait retries its 
   const cursor = h.run(['wait', '--timeout', '0']);
   assert.equal(cursor.code, 2, cursor.stderr);
   const after = JSON.parse(cursor.stdout).cursor;
+  // Both submissions become runnable after the original retry time.
+  fs.writeFileSync(clock, `const NativeDate = Date;
+global.Date = class extends NativeDate {
+  constructor(...args) { super(...(args.length ? args : [NativeDate.now() + 6000])); }
+  static now() { return NativeDate.now() + 6000; }
+};
+`);
   writeHost(host, { limit: 10, used: 2 });
   let waiter;
   let stdout = '';
   const wait = h.runAsync(['wait', '--after', after, '--follow', '--agent', 'orchestrator'], {
+    env,
     onSpawn: (c) => { waiter = c; c.stdout.on('data', (d) => { stdout += d; }); },
   });
   t.after(async () => { if (waiter.exitCode === null) { waiter.kill('SIGTERM'); await wait; } });
@@ -372,6 +380,88 @@ test('a supervisor-deferred submission stays visible and a new wait retries its 
   assert.ok(h.logs().some((e) => e.cmd === 'automation' && e.detail.source === source && e.detail.phase === 'done'));
   assert.equal(h.json(['inbox']).items.some((i) => i.id === 'governor_deferred:T1:tests'), false, 'completed work clears the item');
 });
+
+for (const row of [
+  { name: 'docs during the retry interval', interval: true },
+  { name: 'docs after an inadmissible retry' },
+  { name: 'smaller local CI during the retry interval', interval: true, local: true },
+  { name: 'smaller local CI after an inadmissible retry', local: true },
+  { name: 'CI completion after an inadmissible retry', completion: true },
+  { name: 'CI failure rework after an inadmissible retry', completion: true, failed: true },
+  { name: 'docs behind a prioritized inadmissible retry', prioritized: true },
+]) {
+  test(`held governor debt lets ${row.name} run and keeps its original turn`, { skip: linuxOnly }, (t) => {
+    const h = cachedFixture(t, 'governor-held-queue', (repo) => {
+      const h = require('./automation-helpers').setup(null, { ci: 'pending', repo });
+      h.ok(['project', 'set', '--governor', '{"expected_mb":{"tests":8000}}']);
+      writeHost(h.env.TOWER_CRANE_HOST_ROOT, { limit: 10, used: 2 });
+      h.submit();
+      assert.equal(h.consume().code, 2);
+      assert.ok(h.logs().some((e) => e.cmd === 'automation' && e.detail.phase === 'deferred'));
+      return { sha: h.sha };
+    });
+    writeHost(h.env.TOWER_CRANE_HOST_ROOT, { limit: 10, used: 2 });
+    const logs = () => events(h);
+    const github = () => JSON.parse(fs.readFileSync(h.env.AUTOMATION_GITHUB, 'utf8'));
+    const saveGithub = (state) => fs.writeFileSync(h.env.AUTOMATION_GITHUB, JSON.stringify(state));
+    const add = (id, pr, kind) => {
+      h.ok(['task', 'add', '--title', id, '--acceptance', 'checked', '--kind', kind]);
+      const state = github();
+      state.prs[pr] = { ...state.prs[7], url: `https://github.com/acme/demo/pull/${pr}` };
+      state.ci[h.sha] = 'success';
+      saveGithub(state);
+      h.ok(['claim', id, '--agent', 'worker']);
+      h.ok(['submit', id, '--sha', h.sha, '--pr', String(pr), '--agent', 'worker']);
+      state.ci[h.sha] = 'pending';
+      saveGithub(state);
+    };
+    const original = logs().find((e) => e.cmd === 'submit' && e.task === 'T1').id;
+    const receipt = logs().find((e) => e.cmd === 'automation' && e.detail.source === original && e.detail.phase === 'deferred');
+    add('T2', 8, 'docs');
+    if (row.local) h.ok(['project', 'set', '--ci-local', JSON.stringify({
+      command: [process.execPath, '-e', 'process.exit(0)'], timeout: 30,
+    })]);
+    if (row.prioritized) h.ok(['gates', 'prioritize', 'T1', '--reason', 'keep its requested turn']);
+    if (row.completion) {
+      const state = github();
+      state.ci[h.sha] = row.failed ? 'failure' : 'success';
+      saveGithub(state);
+    }
+    // The child clock exercises both sides of the retry time without a timed sleep.
+    const clock = path.join(h.base, 'queue-clock.js');
+    const writeClock = (at) => fs.writeFileSync(clock, `const NativeDate = Date;
+global.Date = class extends NativeDate {
+  constructor(...args) { super(...(args.length ? args : [${at}])); }
+  static now() { return ${at}; }
+};
+`);
+    const at = receipt.detail.governor.until + (row.interval ? -1 : 1);
+    writeClock(at);
+    const env = { NODE_OPTIONS: `${h.env.NODE_OPTIONS} --require=${JSON.stringify(clock)}` };
+    const blocked = row.completion
+      ? h.run(['ci', 'completed', 'T2', '--sha', h.sha, '--agent', 'orchestrator'], { env })
+      : h.run(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator'], { env });
+    assert.equal(blocked.code, row.completion ? 0 : 2, blocked.stderr);
+    assert.ok(logs().some((e) => e.cmd === 'automation' && e.task === 'T2' && e.detail.phase === 'running'), 'T2 reaction started while T1 was held');
+    assert.equal(logs().filter((e) => e.cmd === 'automation' && e.detail.source === original && e.detail.phase === 'running').length, 1, 'held work took no new executor');
+    if (row.failed) assert.equal(h.readState('tasks.json').tasks.find((task) => task.id === 'T2').status, 'rework');
+    else assert.ok(h.readState('tasks.json').tasks.find((task) => task.id === 'T2').evidence.some((e) => e.type === 'ci' && (row.local || row.completion ? e.ok : e.pending)));
+    assert.ok(h.json(['status']).gate_queue.deferred.some((q) => q.id === 'T1'), 'held debt remains in the queue');
+    assert.ok(h.json(['inbox']).items.some((i) => i.id === 'governor_deferred:T1:tests'), 'held debt remains in the inbox');
+
+    add('T3', 9, 'code');
+    h.ok(['project', 'set', '--paused', 'inspect queue order']);
+    writeHost(h.env.TOWER_CRANE_HOST_ROOT, { limit: 20, used: 2 });
+    const retryAt = Math.max(...logs().filter((e) => e.cmd === 'automation' && e.detail.governor).map((e) => e.detail.governor.until)) + 1;
+    writeClock(retryAt);
+    const resumed = h.run(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator'], { env });
+    assert.equal(resumed.code, 2, resumed.stderr);
+    const starts = logs().filter((e) => e.cmd === 'automation' && e.detail.phase === 'running');
+    const retried = starts.findIndex((e, i) => i > 0 && e.detail.source === original);
+    assert.ok(retried > 0, 'the original source resumed');
+    assert.ok(retried < starts.findIndex((e) => e.task === 'T3'), 'admissible deferred work resumed before the later submission');
+  });
+}
 
 test('past the stop line the newest worker stops first, and processes Tower Crane did not start are left alone', { skip: linuxOnly }, async (t) => {
   const h = makeRepo(t);

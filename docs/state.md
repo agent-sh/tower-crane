@@ -1482,7 +1482,10 @@ Every drain reads the persistent queue, so a caller that cannot retry can exit
 without retaining a pending list. Any trusted `wait` retries it once five seconds
 have passed and the governor would admit the unit that deferred it; probes while
 it is held take no executor and write no new reaction receipts
-([Host resource governor](#host-resource-governor)). Other kinds of deferral
+([Host resource governor](#host-resource-governor)). A held source keeps its place
+in the owed queue but does not hold an executor or block later reactions whose
+work can run. Once admissible, it takes its original turn among runnable sources.
+Other kinds of deferral
 still rely on startup reconciliation or a new lifecycle event.
 A task has at most one observable executor.
 An exited executor's start can be retried, while an unobservable executor
