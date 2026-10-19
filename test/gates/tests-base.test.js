@@ -67,6 +67,45 @@ test('two concurrent gates share one base file and host settings invalidate the 
   assert.ok(newRows.every((r) => r.host === undefined && r.exclude === '[]' && r.sandbox === '0'));
 });
 
+test('a changed inherited environment invalidates the base result', async () => {
+  const saved = process.env.TC_BASE_GENERATION;
+  try {
+    for (const value of ['first-environment', 'second-environment']) {
+      process.env.TC_BASE_GENERATION = value;
+      const result = await gate.run(context());
+      assert.equal(result.receipt.base_rerun.results[0].cached, false, value);
+    }
+  } finally {
+    if (saved === undefined) delete process.env.TC_BASE_GENERATION;
+    else process.env.TC_BASE_GENERATION = saved;
+  }
+});
+
+test('the environment key covers observed values and normalizes scratch and authoritative markers', () => {
+  const cases = [
+    ['TC_VISIBLE', 'old', 'new', false, {}, false],
+    ['TC_VISIBLE', 'old', 'new', true, { TC_VISIBLE: 'pinned' }, true],
+    ['TMPDIR', '/first/scratch', '/second/scratch', false, {}, true],
+    ['NODE_TEST_CONTEXT', 'first', 'second', false, {}, true],
+    ['TOWER_CRANE_SANDBOX', '1', '0', false, {}, true],
+    ['TOWER_CRANE_TEST_EXCLUDE', '["first"]', '["second"]', false, {}, true],
+    ['TOWER_CRANE_HOST_ONLY', '["first"]', '["second"]', true, {}, true],
+  ];
+  for (const [name, first, second, host, host_env, same] of cases) {
+    const saved = process.env[name];
+    try {
+      const p = { tests: { host_env } };
+      process.env[name] = first;
+      const a = base.settings(p, host);
+      process.env[name] = second;
+      assert.equal(a === base.settings(p, host), same, `${name}, host=${host}`);
+    } finally {
+      if (saved === undefined) delete process.env[name];
+      else process.env[name] = saved;
+    }
+  }
+});
+
 test('unknown locations fall back to the original command', async () => {
   const custom = `${node} -e "console.log('not ok unknown case'); process.exit(1)"`;
   const p = { ...project, gates: { tests_cmd: custom, tests_proof_cmd: `${cmd} {tests}` } };
@@ -90,6 +129,56 @@ test('base-only selection preserves new and shared failure verdicts without runn
   assert.match(result.summary, /Also fails on main.*first failure, second failure/);
   assert.deepEqual(result.receipt.base_rerun.files, ['test/fail.test.js']);
   assert.equal(rows().length, before + 1, 'the old base file is cached and the new file is absent at base');
+});
+
+test('generated files absent from both trees still compare against the base', async () => {
+  git(root, 'checkout', '-q', '-b', 'generated-base', 'main');
+  const runner = `const fs = require('node:fs');
+fs.mkdirSync('generated', {recursive: true});
+fs.writeFileSync('generated/fail.test.js', ${JSON.stringify(files['test/fail.test.js'])});
+const r = require('node:child_process').spawnSync(process.execPath, ['--test', '--test-reporter=spec', ...(process.argv.slice(2).length ? process.argv.slice(2) : ['generated/fail.test.js'])], {stdio: 'inherit'});
+process.exit(r.status ?? 1);
+`;
+  commit(root, { 'generated-runner.js': runner });
+  git(root, 'checkout', '-q', '-b', 'generated-head');
+  const head = commit(root, { 'change.js': 'module.exports = 3;\n' });
+  git(root, 'checkout', '-q', 'main');
+  const command = `${node} generated-runner.js`;
+  const p = { ...project, base: 'generated-base', gates: { tests_cmd: command, tests_proof_cmd: `${command} {tests}` } };
+  const c = context(p);
+  c.task.sha = head;
+  const result = await gate.run(c);
+  assert.deepEqual(result.main_failure?.names, ['first failure', 'second failure'], result.summary);
+  assert.equal(result.confirmed_failure, undefined);
+  assert.equal(result.receipt.base_rerun.mode, 'full');
+  assert.match(result.receipt.base_rerun.fallback, /generated|untracked/);
+});
+
+test('base file selection distinguishes added, generated, removed and mixed files', () => {
+  const cases = [
+    [['a'], ['a'], ['a'], ['a']],
+    [['a'], [], ['a'], []],
+    [['a'], [], [], null],
+    [['a'], ['a'], [], ['a']],
+    [['a', 'b'], ['a'], ['a', 'b'], ['a']],
+    [['a', 'b'], ['a'], ['a'], null],
+  ];
+  for (const [files, atBase, atHead, expected] of cases) {
+    assert.deepEqual(base.selectFiles(files, new Set(atBase), new Set(atHead)).files, expected, JSON.stringify({ files, atBase, atHead }));
+  }
+});
+
+test('the base lease budgets both joining a cache holder and a fresh run', () => {
+  const cases = [
+    [{ mode: 'run-only' }, 0, 3, 7],
+    [{ mode: 'run-only' }, 2, 1, 5],
+    [{ mode: 'prove' }, 0, 1, 4],
+    [{ mode: 'prove', expensive: true }, 1, 2, 10],
+    [{ mode: 'none' }, 2, 3, 0],
+  ];
+  for (const [tests, hosts, files, expected] of cases) {
+    assert.equal(gate.plannedCommands({ tests }, 'code', hosts, files), expected, JSON.stringify({ tests, hosts, files }));
+  }
 });
 
 test('host-only base commands keep host_env and clear exclusions, including cached diagnostics', async () => {
