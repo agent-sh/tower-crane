@@ -6,8 +6,48 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { setup, upper, resubmit } = require('./stack-fixture');
 const { fakeAgentEnv } = require('./helpers');
+const Stack = require('../lib/stack');
 
 const events = (f) => fs.readFileSync(path.join(f.h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+
+test('parent refresh eligibility preserves lifecycle validation', () => {
+  const old = 'a'.repeat(40);
+  const newer = 'b'.repeat(40);
+  const landed = (st, task) => {
+    const entry = { type: 'merge', source: 'merge', sha: task.sha, revision: task.revision, agent: 'orchestrator',
+      ok: true, commands: [{ command: 'gh', args: ['pr', 'merge'], status: 0 }] };
+    task.evidence.push(entry);
+    st.events.push({ task: task.id, cmd: 'merge', agent: entry.agent, detail: entry });
+  };
+  const cases = [
+    ['submitted', () => {}, true],
+    ['accepted', (_, dep) => { dep.status = 'accepted'; }, true],
+    ['unchanged head', (_, dep) => { dep.sha = old; }, false],
+    ['no head', (_, dep) => { dep.sha = null; }, false],
+    ['no branch', (_, dep) => { dep.branch = null; }, false],
+    ...['todo', 'rework', 'in_progress', 'cancelled'].map((status) => [status, (_, dep) => { dep.status = status; }, false]),
+    ['merged parent', (st, dep) => { dep.status = 'accepted'; landed(st, dep); }, false],
+    ['retiring parent', (_, dep) => { dep.retiring = { pid: process.pid }; }, false],
+    ['shared retirement reservation', (st, dep) => {
+      st.tasks.tasks.push({ id: 'T3', retiring: { pid: process.pid, branch: dep.branch } });
+    }, false],
+    ['orphan retirement reservation', (st, dep) => {
+      st.tasks.orphan_retirements = [{ pid: process.pid, branch: dep.branch }];
+    }, false],
+    ['disabled stack', (_, dep, child) => { dep.status = 'accepted'; child.stack_disabled = true; }, true],
+    ['unstacked child', (_, dep, child) => { delete child.stack; }, false],
+    ['cancelled child', (_, dep, child) => { child.status = 'cancelled'; }, false],
+    ['merged child', (st, dep, child) => { child.status = 'accepted'; landed(st, child); }, false],
+  ];
+  for (const [name, change, expected] of cases) {
+    const dep = { id: 'T1', status: 'submitted', sha: newer, branch: 'lower', revision: 1, evidence: [] };
+    const child = { id: 'T2', status: 'rework', sha: old, revision: 1, evidence: [],
+      stack: { parent: 'T1', parent_sha: old } };
+    const st = { tasks: { tasks: [dep, child] }, events: [] };
+    change(st, dep, child);
+    assert.equal(Stack.parentRefreshNeeded(st, child), expected, name);
+  }
+});
 
 function inspector(f) {
   const script = path.join(f.h.base, 'inspect-worker.js');

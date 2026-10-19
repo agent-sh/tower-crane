@@ -407,6 +407,7 @@ for (const lifecycle of ['deferred', 'retired']) {
         assert.equal(f.read().prs[12].baseRefName, 'main');
       }
       const base = { dependency: f.lower.branch, project: 'main', unrelated: 'release' }[target];
+      const stackBefore = upper.stack && structuredClone(upper.stack);
       f.write((d) => { d.calls = []; delete d.editError; d.prs[12].baseRefName = base; });
       const result = f.h.run(['merge', 'T2', '--agent', 'orchestrator', '--json']);
       const merged = JSON.parse(result.stdout);
@@ -419,6 +420,10 @@ for (const lifecycle of ['deferred', 'retired']) {
         assert.match(merged.summary, /expected main/);
         assert.deepEqual(writes, []);
         assert.equal(f.read().prs[12].state, 'OPEN');
+        const child = f.h.readState('tasks.json').tasks.find((task) => task.id === 'T2');
+        assert.deepEqual(child.stack, stackBefore, 'base validation precedes retirement');
+        assert.equal(child.sha, f.upper.sha);
+        assert.ok(fs.existsSync(f.upper.wt.path));
         return;
       }
       assert.match(merged.summary, /into main/);

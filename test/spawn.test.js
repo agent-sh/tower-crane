@@ -1353,26 +1353,29 @@ test('spawn runs the rung of the tier and ladder it finds under the lock, not th
   assert.equal(spawns.length, 1);
 });
 
-test('spawn refuses a stacked rework with claim\'s reason when its dependency went back to in_progress, before its worktree work', (t) => {
-  const f = stack.stacked(t);
-  stack.worker(f);
-  // T2's worktree is prepared on T1's head. T1 then takes a new head and goes back to in_progress.
-  f.h.ok(['rework', 'T2', '--reason', 'more upper work']);
-  stack.resubmit(f, false);
-  f.h.ok(['rework', 'T1', '--reason', 'more lower work']);
-  f.h.ok(['claim', 'T1', '--agent', 'worker-T1']);
-  // The stack is not linked on GitHub, so T2's worktree is stale and must be revalidated at dispatch.
-  const state = f.h.readState('tasks.json');
-  state.tasks.find((item) => item.id === 'T2').stack.linked = false;
-  f.h.writeState('tasks.json', state);
-  f.write((d) => { d.linked = false; });
+for (const status of ['rework', 'in_progress']) {
+  test(`spawn refuses a stacked rework with claim's reason when its dependency went back to ${status}, before its worktree work`, (t) => {
+    const f = stack.stacked(t);
+    stack.worker(f);
+    // A parent leaving its submitted state must block before worktree preparation.
+    f.h.ok(['rework', 'T2', '--reason', 'more upper work']);
+    stack.resubmit(f, false);
+    f.h.ok(['rework', 'T1', '--reason', 'more lower work']);
+    if (status === 'in_progress') f.h.ok(['claim', 'T1', '--agent', 'worker-T1']);
+    // The stack is not linked on GitHub, so T2's worktree is stale and must be revalidated at dispatch.
+    const state = f.h.readState('tasks.json');
+    state.tasks.find((item) => item.id === 'T2').stack.linked = false;
+    f.h.writeState('tasks.json', state);
+    f.write((d) => { d.linked = false; });
 
-  const r = f.h.run(['spawn', '--task', 'T2']);
-  assert.equal(r.code, 1, r.stdout + r.stderr);
-  assert.match(r.stderr, /T2 is blocked: depends on T1 \(in_progress\)/);
-  assert.doesNotMatch(r.stderr, /prepared on T1|before dispatch/);
-  assert.equal(f.h.json(['task', 'show', 'T2']).status, 'rework');
-});
+    const r = f.h.run(['spawn', '--task', 'T2']);
+    assert.equal(r.code, 1, r.stdout + r.stderr);
+    assert.match(r.stderr, new RegExp(`T2 is blocked: depends on T1 \\(${status}\\)`));
+    assert.doesNotMatch(r.stderr, /prepared on T1|before dispatch/);
+    assert.equal(f.h.json(['task', 'show', 'T2']).status, 'rework');
+    assert.equal(f.h.git(['rev-parse', 'HEAD'], f.upper.wt.path), f.upper.sha);
+  });
+}
 
 // A worker writes its worktree's `.git` file. The directory it names is
 // granted to the next sandbox in that worktree, so it must be an admin

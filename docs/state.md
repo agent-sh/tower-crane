@@ -19,6 +19,10 @@ that dispatch only while the child head and submitted parent head are unchanged.
 A gate waits until the child's submitted head contains the current parent head.
 Live workers, dirty checkouts and stopped Git operations defer refresh. Merged
 parents take the completed-chain retirement path before any parent branch fetch.
+Refresh only merges a newer submitted or accepted head from an unmerged parent
+without a retirement reservation. Blocked-parent dispatch and merge-base
+validation keep their existing lifecycle checks; a gate does not retire a
+completed stack before validating its PR base.
 
 `stack_disabled: true` records an unavailable stacks capability or explicit `stack unstack`. It selects ordinary merges, which wait for lower merge evidence before retargeting an existing upper PR. An accepted dependency can still use the ordinary main-based dispatch flow when the repository cannot stack; a submitted dependency requires an available chain.
 
