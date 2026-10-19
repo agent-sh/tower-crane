@@ -1,0 +1,382 @@
+'use strict';
+
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const os = require('node:os');
+const { cachedFixture } = require('./helpers');
+const { readPublished } = require('./atomic-file');
+const { gateFixture } = require('./gate-helpers');
+const C = require('../lib/containment');
+const G = require('../lib/gates/common');
+const HARNESS = path.join(__dirname, 'fixtures', 'containment-harness.js');
+process.env.TOWER_CRANE_TEST_CONTAINMENT = '1';
+const memory = 512 * 1024 * 1024;
+const systemd = C.canScope();
+
+function diagnostics(result) {
+  return result.stderr + (result.containment?.error || '');
+}
+
+function fixture(t) {
+  const h = cachedFixture(t, 'containment', (h) => {
+    h.init(['--tasks-max', '64', '--memory-max-bytes', String(memory)]);
+    h.ok(['task', 'add', '--title', 'Bound fake agent', '--acceptance', 'contained', '--tier', 'easy']);
+    h.ok(['brief', 'set', 'T1', '-'], { input: 'Finite fake harness.\n' });
+  });
+  h.env.TOWER_CRANE_TEST_CONTAINMENT = '1';
+  return h;
+}
+
+test('resource settings are persisted, validated and operational', (t) => {
+  const h = fixture(t);
+  assert.deepEqual(h.readState('project.json').resources, { tasks_max: 64, memory_max_bytes: memory });
+  assert.match(h.ok(['project', 'show']), /resources: .*"tasks_max":64/);
+  const before = h.readState('project.json');
+  const refused = h.run(['project', 'set', '--tasks-max', '40', '--agent', 'worker']);
+  assert.equal(refused.code, 1, refused.stderr);
+  assert.match(refused.stderr, /orchestrator or the owner/);
+  assert.deepEqual(h.readState('project.json'), before);
+  for (const v of ['0', '-1']) assert.equal(h.run(['project', 'set', '--tasks-max', v]).code, 2);
+  h.ok(['project', 'set', '--tasks-max', '40', '--agent', 'orchestrator']);
+  assert.equal(h.readState('project.json').resources.tasks_max, 40);
+  assert.deepEqual(C.errors({ tasks_max: 0, memory_max_bytes: -1 }).length, 2);
+});
+
+test('defaults reserve half the effective slice capacity', () => {
+  const d = C.defaults({ memory: 1024 ** 3, tasks: 200 });
+  assert.ok(d.memory_max_bytes <= 512 * 1024 * 1024);
+  assert.ok(d.tasks_max <= 100);
+  assert.ok(d.tasks_max > 0);
+});
+
+test('default task cap covers measured test demand when the host budget allows it', () => {
+  const slots = Math.max(1, Math.ceil(os.availableParallelism() / 4));
+  const host = { tasks: 2 * slots * 2000, memory: 40 * 1024 ** 3 };
+  const limits = C.defaults(host);
+  assert.equal(limits.tasks_max, 2000);
+  assert.ok(limits.tasks_max > 299, 'Chrome threads and test subprocesses need headroom above the measured 299-task peak');
+  assert.equal(limits.memory_max_bytes, Math.floor(host.memory / (2 * slots)));
+});
+
+test('unlimited Linux PID budgets fall back to kernel limits, including pid_max', {
+  skip: process.platform !== 'linux',
+}, () => {
+  const original = fs.readFileSync;
+  const slots = Math.max(1, Math.ceil(os.availableParallelism() / 4));
+  const budget = 2 * slots * 2000;
+  try {
+    for (const threads of [String(budget), 'max']) {
+      fs.readFileSync = (file, ...args) => {
+        if (file === '/proc/sys/kernel/threads-max') return threads;
+        if (file === '/proc/sys/kernel/pid_max') return String(budget);
+        if (file === '/proc/self/cgroup') return '0::/user.slice/user-1000.slice/user@1000.service/agents.slice/test.scope\n';
+        if (String(file).startsWith('/sys/fs/cgroup/') && String(file).endsWith('/pids.max')) return 'max';
+        return original(file, ...args);
+      };
+      assert.equal(C.capacity().tasks, budget);
+      assert.equal(C.defaults({ memory, tasks: Infinity }).tasks_max, 2000);
+    }
+    fs.readFileSync = (file, ...args) => String(file).startsWith('/proc/sys/kernel/')
+      ? 'max' : original(file, ...args);
+    assert.throws(() => C.defaults({ memory, tasks: Infinity }), { code: 'resource-monitor-failed' });
+    const caps = { tasks_max: 64, memory_max_bytes: memory };
+    assert.deepEqual(C.resolveGate({ resources: caps }, { memory, tasks: Infinity }), caps);
+  } finally { fs.readFileSync = original; }
+});
+
+test('gate defaults leave measured full-suite headroom and preserve explicit caps', async (t) => {
+  const h = cachedFixture(t, 'gate-defaults', h => h.init(['--executors', '3']));
+  const project = h.readState('project.json');
+  assert.deepEqual(project.resources, {}, 'init must not persist agent defaults as gate overrides');
+  const host = { tasks: 4000, memory: 14 * 1024 ** 3 };
+  const limits = C.resolveGate(project, host);
+  assert.equal(limits.tasks_max, 666);
+  assert.equal(limits.memory_max_bytes, Math.floor(host.memory / 6));
+  assert.ok(314 <= limits.tasks_max * 2 / 3, 'measured task peak needs at least one third headroom');
+  assert.ok(1012297728 <= limits.memory_max_bytes * 2 / 3, 'measured memory peak needs at least one third headroom');
+  assert.equal(C.resolveGate({}, host).tasks_max, 1000, 'two executors by default');
+  const explicit = { tasks_max: 64, memory_max_bytes: memory };
+  assert.deepEqual(C.resolveGate({ resources: explicit }, host), explicit);
+  const calls = [];
+  const ctx = { project, exec: async (cmd, args, opts) => {
+    calls.push(opts.resources);
+    return { status: 0, stdout: '', stderr: '' };
+  } };
+  await G.shell(ctx, 'suite command');
+  await G.exec(ctx, process.execPath, [], { processTree: true });
+  assert.deepEqual(calls, [C.resolveGate(project), C.resolveGate(project)]);
+  assert.match(h.ok(['project', 'show']), /gate resources: /);
+});
+
+test('nested attempt caps do not recursively shrink project defaults', () => {
+  const slice = '/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/agents.slice';
+  const own = 'tower-crane-123-0123456789abcdef.scope';
+  for (const [input, expected] of [
+    [`${slice}/${own}/runner`, slice],
+    [`${slice}/${own}/nested-${own}/runner`, slice],
+    [`${slice}/external.scope/nested-${own}/runner`, `${slice}/external.scope`],
+    [`${slice}/external.scope`, `${slice}/external.scope`],
+  ]) assert.equal(C.budgetGroup(input), expected);
+});
+
+test('scope placement keeps the caller slice, including custom fences', () => {
+  for (const [group, slice] of [
+    ['/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/agents.slice/session.scope', 'agents.slice'],
+    ['/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/test-fence.slice/runner.scope/runner', 'test-fence.slice'],
+  ]) assert.equal(C.callerSlice(group), slice);
+  assert.throws(() => C.callerSlice('/sys/fs/cgroup/no-slice/runner'), /no systemd slice/);
+});
+
+test('systemd CLI and D-Bus launches use supported OOM policy and retain caps', {
+  skip: process.platform === 'win32' && 'Linux scope runner uses execve',
+}, async (t) => {
+  const h = fixture(t);
+  const fake = path.join(__dirname, 'fixtures', 'containment-systemd.js');
+  const runner = require.resolve('../lib/containment-runner');
+  const unit = 'tower-crane-123-0123456789abcdef.scope';
+  const limits = { tasks_max: 64, memory_max_bytes: memory };
+  for (const mode of ['cli', 'dbus']) {
+    const group = path.join(h.base, mode, unit);
+    fs.mkdirSync(group, { recursive: true });
+    const log = path.join(h.base, `${mode}.jsonl`);
+    const report = path.join(h.base, `${mode}-report.json`);
+    const args = [runner, JSON.stringify(limits),
+      mode === 'dbus' ? `@${unit}:test-fence.slice` : '', unit,
+      process.execPath, '-e', 'console.log("scoped command ran")'];
+    const command = mode === 'dbus' ? ['--require', fake, ...args]
+      : [fake, ...C.scopeArguments(unit, 'test-fence.slice', limits, {
+        CPUQuota: '200%', MemoryMax: '1', TasksMax: '999', Slice: 'app.slice',
+        OOMPolicy: 'continue', MemorySwapMax: '9G', Delegate: 'no',
+      }),
+        process.execPath, ...args];
+    const result = await G.treeExec(process.execPath, command, {
+      env: { ...h.env, TC_FAKE_CGROUP: group, TC_FAKE_SYSTEMD_LOG: log,
+        TOWER_CRANE_CONTAINMENT_REPORT: report },
+    });
+    const registration = fs.existsSync(report) ? JSON.parse(readPublished(report, 'utf8')) : {};
+    assert.equal(result.status, 0, result.stderr + (registration.error || ''));
+    assert.equal(result.stdout, 'scoped command ran\n');
+    assert.equal(registration.group, group);
+    assert.equal(fs.readFileSync(path.join(group, 'memory.oom.group'), 'utf8'), '1');
+    const properties = JSON.parse(fs.readFileSync(log, 'utf8').trim());
+    assert.equal(properties.OOMPolicy, 'kill');
+    assert.equal(properties.TasksMax, String(limits.tasks_max));
+    assert.equal(properties.MemoryMax, String(limits.memory_max_bytes));
+    assert.equal(properties.MemorySwapMax, '0');
+    assert.ok(['true', 'yes'].includes(properties.Delegate));
+  }
+});
+
+test('ordinary fixture launches preserve hooks and spawn options without containment', async () => {
+  const h = fixture();
+  const env = { ...h.env };
+  delete env.TOWER_CRANE_TEST_CONTAINMENT;
+  const child = C.spawn(process.execPath, ['-e', 'console.log("fixture")'], {
+    env, stdio: ['ignore', 'pipe', 'pipe'], detached: false,
+    resources: { tasks_max: 1, memory_max_bytes: 1 },
+  });
+  assert.equal(child.containment, undefined);
+  const output = [];
+  child.stdout.on('data', (data) => output.push(data));
+  const status = await new Promise((resolve, reject) => {
+    child.once('close', resolve);
+    child.once('error', reject);
+  });
+  assert.equal(status, 0);
+  assert.equal(Buffer.concat(output).toString(), 'fixture\n');
+  await h.cleanup();
+});
+
+test('configured outer scopes refuse a missing manager before launching the command', async (t) => {
+  const h = fixture(t);
+  const launched = path.join(h.base, 'unexpected-launch');
+  const fake = path.join(__dirname, 'fixtures', 'containment-systemd.js');
+  const script = `
+const C = require(${JSON.stringify(require.resolve('../lib/containment'))});
+try {
+  const child = C.spawn(process.execPath, ['-e', ${JSON.stringify(`require('node:fs').writeFileSync(${JSON.stringify(launched)}, 'ran')`)}], {
+    scope: { CPUQuota: '200%' }, resources: { tasks_max: 64, memory_max_bytes: ${memory} },
+  });
+  child.on('close', () => process.exitCode = 1);
+} catch (error) {
+  if (error.code !== 'resource-scope-failed') throw error;
+  console.log(error.code);
+}`;
+  const result = await G.treeExec(process.execPath, ['--require', fake, '-e', script], {
+    env: { ...h.env, TC_FAKE_NO_MANAGER: '1', [C.MARK]: '' },
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, 'resource-scope-failed\n');
+  assert.equal(fs.existsSync(launched), false);
+});
+
+test('local cgroup events distinguish a child cap from the parent cap', (t) => {
+  const h = fixture(t);
+  const group = path.join(h.base, 'cgroup-events');
+  fs.mkdirSync(group);
+  for (const [file, text] of [
+    ['pids.events', 'max 1\n'], ['pids.events.local', 'max 0\n'],
+    ['memory.events', 'oom_kill 1\n'], ['memory.events.local', 'oom 0\noom_group_kill 0\n'],
+  ]) fs.writeFileSync(path.join(group, file), text);
+  assert.equal(C.limitReason(group, { tasks: 0, memory: 0 }), null);
+  fs.writeFileSync(path.join(group, 'memory.events.local'), 'oom 1\noom_group_kill 1\n');
+  assert.equal(C.limitReason(group, { tasks: 0, memory: 0 }), 'resource-memory-max');
+  fs.writeFileSync(path.join(group, 'pids.peak'), '299');
+  fs.writeFileSync(path.join(group, 'memory.peak'), '955630223');
+  assert.deepEqual(C.scopeMetrics(group), { pids_peak: 299, memory_peak_bytes: 955630223, refused_forks: 0 });
+});
+
+test('nested cap failures leave the parent running when local events are available', async () => {
+  for (const [mode, reason] of [['nested-limit', 'resource-tasks-max'], ['nested-memory', 'resource-memory-max']]) {
+    const localEvents = !systemd || fs.existsSync(path.join(C.currentGroup(),
+      mode === 'nested-limit' ? 'pids.events.local' : 'memory.events.local'));
+    const result = await G.treeExec(process.execPath, [HARNESS, mode, 'unused'], {
+      resources: { tasks_max: 128, memory_max_bytes: memory }, timeout: 10000, // wait-allow: finite nested cap probe deadline
+    });
+    if (!localEvents && result.resource_reason === reason) continue;
+    assert.equal(result.status, 0, diagnostics(result));
+    assert.equal(result.resource_reason, undefined, result.stderr);
+    assert.ok(result.stdout.includes(`child: ${reason}\nparent-survived`), result.stdout + result.stderr);
+  }
+});
+
+test('fake harness nested launches and detached grandchildren retain containment', async (t) => {
+  const h = fixture(t);
+  const file = path.join(h.base, 'nested.jsonl');
+  let admittedPid;
+  const result = await G.treeExec(process.execPath, [HARNESS, 'nested', file], {
+    resources: { tasks_max: 64, memory_max_bytes: memory }, timeout: 10000,
+    onSpawn: pid => { admittedPid = pid; },
+  });
+  assert.equal(result.status, 0, diagnostics(result));
+  assert.equal(result.error, undefined, result.stderr);
+  const records = fs.readFileSync(file, 'utf8').trim().split('\n').map(JSON.parse);
+  assert.equal(records.length, 3);
+  assert.equal(admittedPid, records[0].pid, 'the governor must measure the actual harness process');
+  if (result.containment.backend === 'cgroup') {
+    const parent = C.currentGroup().split('/');
+    const slice = parent.findLastIndex((name) => name.endsWith('.slice'));
+    const fence = parent.slice(0, slice + 1).join('/') + '/';
+    assert.ok(result.containment.group.startsWith(fence), result.containment.group);
+    assert.equal(records[0].inherited, result.containment.group);
+    assert.ok(records[1].inherited.startsWith(records[0].inherited + path.sep));
+    for (const record of records) assert.ok(record.group.startsWith(records[0].inherited + path.sep), JSON.stringify(record));
+  } else assert.equal(result.containment.backend, 'watchdog');
+});
+
+test('Node preloads run once inside the launched command containment', async (t) => {
+  const h = fixture(t);
+  const preload = path.join(h.base, 'preload.js');
+  const log = path.join(h.base, 'preload.jsonl');
+  fs.writeFileSync(preload, `
+const fs = require('node:fs');
+const C = require(${JSON.stringify(require.resolve('../lib/containment'))});
+fs.appendFileSync(process.env.CONTAINMENT_PRELOAD_LOG, JSON.stringify({
+  group: process.platform === 'linux' ? C.currentGroup() : null,
+  inherited: process.env[C.MARK] || null,
+  bootstrap: process.env.TOWER_CRANE_CONTAINMENT_NODE_OPTIONS || null,
+}) + '\\n');
+`);
+  const result = await G.treeExec(process.execPath, ['-e', 'console.log("loaded")'], {
+    env: { ...process.env, NODE_OPTIONS: `--require ${JSON.stringify(preload)}`, CONTAINMENT_PRELOAD_LOG: log },
+    resources: { tasks_max: 64, memory_max_bytes: memory },
+  });
+  assert.equal(result.status, 0, diagnostics(result));
+  const records = fs.readFileSync(log, 'utf8').trim().split('\n').map(JSON.parse);
+  assert.equal(records.length, 1);
+  assert.equal(records[0].bootstrap, null);
+  if (result.containment.backend === 'cgroup') {
+    assert.equal(records[0].inherited, result.containment.group);
+    assert.ok(records[0].group.startsWith(result.containment.group + path.sep));
+  }
+});
+
+test('fast scoped commands preserve stdout-only diagnostics and registration', async () => {
+  for (let n = 0; n < 3; n++) {
+    const result = await G.treeExec(process.execPath, ['-e', 'console.log("useful diagnostic"); process.exitCode = 1'], {
+      resources: { tasks_max: 64, memory_max_bytes: memory },
+    });
+    assert.equal(result.status, 1, diagnostics(result));
+    assert.equal(result.resource_reason, undefined, diagnostics(result));
+    assert.equal(result.stderr, '');
+    assert.match(G.errText(result), /useful diagnostic/);
+  }
+});
+
+test('lightweight gate helpers retain cancellation without a separate resource scope', async () => {
+  const result = await G.exec({ signal: new AbortController().signal, project: { resources: { tasks_max: 64, memory_max_bytes: memory } } },
+    process.execPath, ['-e', 'console.log("auxiliary")'], {});
+  assert.equal(result.ok, true, result.stderr);
+  assert.equal(result.containment, undefined);
+});
+
+test('finite nested fork storm fails the gate command and leaves another attempt running', async (t) => {
+  const sibling = C.spawn(process.execPath, ['-e', 'console.log("untouched"); setTimeout(() => {}, 3000)'], { // wait-allow: finite isolation probe lifetime
+    resources: { tasks_max: 64, memory_max_bytes: memory }, stdio: ['ignore', 'pipe', 'pipe'],
+  }); // wait-allow: finite sibling lifetime tests isolation
+  t.after(() => sibling.kill('SIGKILL'));
+  await new Promise((accept, reject) => {
+    sibling.stdout.once('data', accept);
+    sibling.once('error', reject);
+    sibling.once('exit', () => reject(new Error('sibling exited before starting')));
+  });
+  const result = await G.exec({ exec: G.treeExec, project: { resources: { tasks_max: systemd ? 32 : 4, memory_max_bytes: memory } } },
+    process.execPath, [HARNESS, 'nested-storm', 'unused'], {
+    resources: { tasks_max: systemd ? 32 : 4, memory_max_bytes: memory }, timeout: 10000, // wait-allow: finite resource probe deadline
+  });
+  assert.equal(result.resource_reason, 'resource-tasks-max', result.stderr);
+  assert.equal(result.error?.code, 'resource-tasks-max');
+  assert.equal(result.ok, false);
+  assert.equal(sibling.exitCode, null);
+  assert.equal(sibling.signalCode, null);
+  assert.equal(sibling.resourceReason, undefined);
+});
+
+test('bounded memory growth fails with resource-memory-max', async () => {
+  const result = await G.exec({ exec: G.treeExec, project: { resources: { tasks_max: 64, memory_max_bytes: 96 * 1024 * 1024 } } },
+    process.execPath, [HARNESS, 'memory', 'unused'], {
+    resources: { tasks_max: 64, memory_max_bytes: 96 * 1024 * 1024 }, timeout: 10000, // wait-allow: finite resource probe deadline
+  });
+  assert.equal(result.resource_reason, 'resource-memory-max', result.stderr);
+  assert.equal(result.ok, false);
+});
+
+test('CLI spawn records cap failure in events and status', async (t) => {
+  const h = fixture(t);
+  h.ok(['project', 'set', '--tasks-max', systemd ? '32' : '4']);
+  h.ok(['ladder', 'set', 'easy', '--harness', 'command', '--command',
+    JSON.stringify([process.execPath, HARNESS, 'storm', 'unused', '{prompt}']), '--clear', 'profile', '--clear', 'effort']);
+  const result = h.run(['spawn', '--task', 'T1', '--wait']);
+  assert.notEqual(result.code, 0);
+  const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  const failed = events.findLast((e) => e.cmd === 'spawn phase' && e.detail.reason === 'resource-tasks-max');
+  assert.ok(failed, result.stdout + result.stderr);
+  assert.equal(failed.detail.phase, 'blocked');
+  assert.equal(events.some((e) => e.cmd === 'spawn retry'), false);
+  assert.match(h.ok(['status']), /resource-tasks-max/);
+});
+
+test('CLI cleanup records a capped gate command and names its failure', (t) => {
+  const h = cachedFixture(t, 'contained-gate', (h) => {
+    h.init(['--tasks-max', systemd ? '32' : '4', '--memory-max-bytes', String(memory)]);
+    const sha = gateFixture(h);
+    h.ok(['task', 'add', '--title', 'Gate resource cap', '--acceptance', 'bounded']);
+    h.ok(['claim', 'T1', '--agent', 'worker']);
+    h.ok(['submit', 'T1', '--sha', sha, '--agent', 'worker']);
+    h.ok(['project', 'set', '--clean-cmd',
+      [process.execPath, HARNESS, 'storm', 'unused'].map(G.shellQuote).join(' ')]);
+  });
+  h.env.TOWER_CRANE_TEST_CONTAINMENT = '1';
+  const result = h.run(['check', 'clean', 'T1', '--json'],
+    { env: { TOWER_CRANE_CLEAN_CMD: '' } });
+  assert.equal(result.code, 1, result.stderr);
+  const gate = JSON.parse(result.stdout);
+  assert.equal(gate.ok, false);
+  assert.match(gate.summary, /resource-tasks-max/);
+  assert.equal(gate.resource_reason, 'resource-tasks-max');
+  const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  assert.ok(events.some((e) => e.detail.resource_reason === 'resource-tasks-max'));
+  assert.match(h.ok(['inbox']), /resource-tasks-max/);
+});

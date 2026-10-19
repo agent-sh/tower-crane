@@ -187,6 +187,13 @@ test('host scopes wrap both harnesses and retries, preserve private env and allo
   fs.writeFileSync(path.join(bin, 'systemd-run'), `#!${process.execPath}
 const fs = require('node:fs'), cp = require('node:child_process');
 const args = process.argv.slice(2);
+const supported = new Set(['CPUQuota', 'MemoryMax', 'TasksMax', 'MemorySwapMax', 'OOMPolicy', 'Delegate']);
+for (let i = 0; i < args.indexOf('--'); i++) {
+  if (args[i] === '-p' && !supported.has(args[++i].split('=')[0])) {
+    console.error('Unknown assignment: ' + args[i]);
+    process.exit(1);
+  }
+}
 fs.appendFileSync(${JSON.stringify(wrapped)}, JSON.stringify(args) + '\\n');
 const sep = args.indexOf('--');
 if (sep < 0) throw new Error('missing command separator');
@@ -259,6 +266,13 @@ console.log('literal args passed');
   fs.writeFileSync(path.join(bin, 'systemd-run'), `#!${process.execPath}
 const cp = require('node:child_process');
 const args = process.argv.slice(2);
+const supported = new Set(['CPUQuota', 'MemoryMax', 'TasksMax', 'MemorySwapMax', 'OOMPolicy', 'Delegate']);
+for (let i = 0; i < args.indexOf('--'); i++) {
+  if (args[i] === '-p' && !supported.has(args[++i].split('=')[0])) {
+    console.error('Unknown assignment: ' + args[i]);
+    process.exit(1);
+  }
+}
 if (process.env.SIMULATE_OLD_SYSTEMD && args.includes('--expand-environment=no')) {
   console.error("systemd-run: unrecognized option '--expand-environment=no'");
   process.exit(1);
