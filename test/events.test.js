@@ -1,6 +1,6 @@
 'use strict';
 
-const { fileWritten, eventAppended, HUNG_TEST_MS, killPid } = require('./signals');
+const { fileWritten, stateEventLogged, HUNG_TEST_MS, killPid } = require('./signals');
 const StateFiles = require('./state-files');
 
 const test = require('node:test');
@@ -243,7 +243,7 @@ test('a manual merge racing the merge queue under another task\'s reaction: one 
     const jitter = { HOOK_JITTER_MS: '15' };
     const automatic = child(t, h, ['wait', '--agent', 'orchestrator', '--after', after, '--task', upper, '--types', 'merged', '--timeout', '300'], jitter);
     // Start near the queue's move from the lower task to the upper one.
-    await eventAppended(path.join(h.state, 'events.jsonl'), (event) => event.type === 'merged' && event.task === lower, { signal: t.signal });
+    await stateEventLogged(h.state, (event) => event.type === 'merged' && event.task === lower, { signal: t.signal });
     await new Promise((resolve) => setTimeout(resolve, (i % 5) * 120)); // wait-allow: stagger concurrent operations to exercise both race orderings
     const manual = await h.runAsync(['merge', upper], { hooks: jitter });
     assert.equal(manual.code, 0, `${upper}: ${manual.stderr}`);

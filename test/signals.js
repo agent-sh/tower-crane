@@ -134,6 +134,12 @@ function eventAppended(file, predicate, options) {
   }).then(() => event);
 }
 
+// The first event of the state in `dir` that matches, once a commit logs
+// it: the directory watch sees the database's log change.
+function stateEventLogged(dir, predicate, options) {
+  return waitUntil(() => require('./state-files').readEvents(dir).find(predicate), { what: 'the event is logged', ...options, paths: [dir] });
+}
+
 function childExit(child, options) {
   return waitUntil(() => child.exitCode !== null || child.signalCode !== null
     ? { code: child.exitCode, signal: child.signalCode } : false, {
@@ -197,4 +203,4 @@ function killGroup(pid, signal = 'SIGTERM') {
   return process.kill(-checkedPid(pid, 2), signal);
 }
 
-module.exports = { HUNG_TEST_MS, waitUntil, waitOnRepo, fileWritten, eventAppended, childExit, childClosed, portListening, killPid, killGroup };
+module.exports = { HUNG_TEST_MS, waitUntil, waitOnRepo, fileWritten, eventAppended, stateEventLogged, childExit, childClosed, portListening, killPid, killGroup };
