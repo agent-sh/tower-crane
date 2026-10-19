@@ -272,8 +272,8 @@ cp.spawnSync = function stackGh(command, args, opts) {
   }
   if (args[1] === 'sync') {
     if (process.env.TEST_STACK_SYNC_READY) {
-      // write-atomic: existence is the signal; no test reads the text.
-      fs.writeFileSync(process.env.TEST_STACK_SYNC_READY, 'ready');
+      require('../atomic-file').writeAtomic(process.env.TEST_STACK_SYNC_READY,
+        JSON.stringify({ pid: process.pid, phase: 'sync' }));
       const deadline = performance.now() + 300000;
       while (!fs.existsSync(process.env.TEST_STACK_SYNC_RELEASE)) {
         if (performance.now() > deadline) throw new Error('slow gh fixture was not released');
