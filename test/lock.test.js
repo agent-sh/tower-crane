@@ -9,7 +9,8 @@ const path = require('node:path');
 const cp = require('node:child_process');
 const { spawn } = cp;
 const { makeRepo, HOOKS } = require('./helpers');
-const SHORT_WAIT = path.join(__dirname, 'fixtures', 'lock-wait.js');
+// Timeout tests use the real CLI with a one-second lock wait (lib/intervals.js).
+const SHORT_WAIT = JSON.stringify({ lock_wait: 1000 });
 const S = require('../lib/state');
 const B = require('../lib/broker');
 
@@ -23,7 +24,7 @@ for (const kind of ['stale', 'empty']) {
     const fixture = path.join(__dirname, 'fixtures', 'lock-reclaim-race.js');
     const result = h.run(['task', 'add', '--title', 'must remain unwritten', '--acceptance', 'bounded'], {
       env: {
-        NODE_OPTIONS: `--require=${JSON.stringify(SHORT_WAIT)} --require=${JSON.stringify(fixture)}`,
+        TOWER_CRANE_INTERVALS: SHORT_WAIT, NODE_OPTIONS: `--require=${JSON.stringify(fixture)}`,
         HOOK_STATE: h.state, LOCK_RECLAIM_KIND: kind, LOCK_RECLAIM_ATTEMPTS: attempts,
       },
     });
@@ -80,7 +81,7 @@ for (const field of ['start_ticks', 'boot_id']) {
       if (field === 'boot_id') marker.pidns = 'pid:[0]';
       fs.writeFileSync(lock.file, JSON.stringify(marker));
       const result = h.run(['task', 'add', '--title', 'reclaimed PID', '--acceptance', 'write survives'], {
-        env: { NODE_OPTIONS: `--require=${JSON.stringify(SHORT_WAIT)}` },
+        env: { TOWER_CRANE_INTERVALS: SHORT_WAIT },
       });
       assert.equal(result.code, 0, result.stderr);
       assert.deepEqual(h.readState('tasks.json').tasks.map((task) => task.title), ['reclaimed PID']);
@@ -103,7 +104,7 @@ test('an old marker without process identity cannot be kept alive by a reused PI
     const old = new Date(Date.now() - 120000); // wait-allow: verify stale or dead locks are broken without waiting for the live-holder timeout
     fs.utimesSync(lock.file, old, old);
     const result = h.run(['task', 'add', '--title', 'legacy reclaim', '--acceptance', 'age fallback'], {
-      env: { NODE_OPTIONS: `--require=${JSON.stringify(SHORT_WAIT)}` },
+      env: { TOWER_CRANE_INTERVALS: SHORT_WAIT },
     });
     assert.equal(result.code, 0, result.stderr);
     assert.deepEqual(h.readState('tasks.json').tasks.map((task) => task.title), ['legacy reclaim']);
@@ -123,7 +124,7 @@ test('a known live holder keeps an old marker until the waiter times out', { ski
     const old = new Date(Date.now() - 120000); // wait-allow: verify stale or dead locks are broken without waiting for the live-holder timeout
     fs.utimesSync(lock.file, old, old);
     const result = h.run(['task', 'add', '--title', 'must wait', '--acceptance', 'holder protected'], {
-      env: { NODE_OPTIONS: `--require=${JSON.stringify(SHORT_WAIT)}` },
+      env: { TOWER_CRANE_INTERVALS: SHORT_WAIT },
     });
     assert.equal(result.code, 3, result.stderr);
     assert.ok(fs.existsSync(lock.file), 'a live holder is never reclaimed by age');
@@ -143,7 +144,7 @@ test('a fresh foreign-namespace marker ignores a local PID with a different star
     marker.start_ticks = '0';
     fs.writeFileSync(lock.file, JSON.stringify(marker));
     const result = h.run(['task', 'add', '--title', 'must remain unwritten', '--acceptance', 'foreign holder protected'], {
-      env: { NODE_OPTIONS: `--require=${JSON.stringify(SHORT_WAIT)}` },
+      env: { TOWER_CRANE_INTERVALS: SHORT_WAIT },
     });
     assert.equal(result.code, 3, result.stderr);
     assert.deepEqual(JSON.parse(fs.readFileSync(lock.file, 'utf8')), marker, 'the foreign marker stays intact');
@@ -159,7 +160,7 @@ test('a dead holder reclaimed at the deadline permits the waiting write', async 
   killHolder(h);
   const signal = path.join(h.base, 'reclaimed');
   const writer = h.runAsync(['task', 'add', '--title', 'after reclaim', '--acceptance', 'write succeeds'], {
-    env: { NODE_OPTIONS: `--require=${JSON.stringify(SHORT_WAIT)}` },
+    env: { TOWER_CRANE_INTERVALS: SHORT_WAIT },
     hooks: { HOOK_STOP_LOCK_CHANGE: signal },
   });
   try {
@@ -237,7 +238,7 @@ test('a held lock makes a write wait its bound, then exit 3 without writing', as
   try {
     const started = Date.now();
     const r = h.run(['task', 'add', '--title', 'waiter', '--acceptance', 'a'], {
-      env: { NODE_OPTIONS: `--require=${JSON.stringify(SHORT_WAIT)}` },
+      env: { TOWER_CRANE_INTERVALS: SHORT_WAIT },
     });
     const waited = Date.now() - started; // wait-allow: verify stale or dead locks are broken without waiting for the live-holder timeout
     assert.equal(r.code, 3, r.stderr);
@@ -535,7 +536,7 @@ test('continuous staging cleanup times out with exit 3 and bounded backoff', (t)
   const started = Date.now();
   const result = h.run(['task', 'add', '--title', 'Never staged', '--acceptance', 'bounded'], {
     env: {
-      NODE_OPTIONS: `--require=${JSON.stringify(SHORT_WAIT)} --require=${JSON.stringify(hook)}`,
+      TOWER_CRANE_INTERVALS: SHORT_WAIT, NODE_OPTIONS: `--require=${JSON.stringify(hook)}`,
       LOCK_RACE_POINT: 'write', LOCK_RACE_ATTEMPTS: attempts, LOCK_RACE_ALWAYS: '1',
     },
   });
@@ -562,7 +563,7 @@ test('a stale lock that cannot be removed still times out with exit 3', (t) => {
   fs.writeFileSync(attempts, '');
   const started = Date.now();
   const r = h.run(['task', 'add', '--title', 'A', '--acceptance', 'a'], {
-    env: { NODE_OPTIONS: `--require=${JSON.stringify(SHORT_WAIT)}` },
+    env: { TOWER_CRANE_INTERVALS: SHORT_WAIT },
     hooks: { HOOK_FAIL_LOCK: attempts, HOOK_DEAD_PID: String(marker.pid) },
   });
   const waited = Date.now() - started; // wait-allow: verify stale or dead locks are broken without waiting for the live-holder timeout

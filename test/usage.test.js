@@ -686,7 +686,7 @@ test('test teardown stops a surviving detached monitor and waits for its exit', 
   const monitors = h.detached().filter((c) => c.kind === 'monitor');
   assert.equal(monitors.length, 1);
   if (process.platform === 'win32') await h.cleanup();
-  else await assert.rejects(h.cleanup({ monitorGraceMs: 10000 }), /detached usage monitors outlived test teardown/); // wait-allow: the intentionally unobservable monitor must require forced cleanup
+  else await assert.rejects(h.cleanup({ monitorGraceMs: 1000 }), /detached usage monitors outlived test teardown/); // wait-allow: the intentionally unobservable monitor outlives any grace, so a short one proves the forced cleanup
   assert.ok(monitors.every((c) => !detachedAlive(c)));
 });
 

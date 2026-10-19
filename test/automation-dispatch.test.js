@@ -547,8 +547,10 @@ test('a dispatch keeps its dispatch lock marker fresh while it waits for the wor
   const releaseWorktree = () => { if (worktreeHeld) { worktreeHeld = false; S.releaseMarkedLock(held); } };
   t.after(releaseWorktree);
   let closed = false;
+  // A one-second refresh (lib/intervals.js) instead of the production ten.
+  const refresh = 1000;
   const run = h.runAsync(['spawn', '--ready', '--agent', 'orchestrator'], {
-    env: { TOWER_CRANE_LOCK_TRACE: trace },
+    env: { TOWER_CRANE_LOCK_TRACE: trace, TOWER_CRANE_INTERVALS: JSON.stringify({ lock_refresh: refresh }) },
     onSpawn: (c) => c.on('close', () => { closed = true; }),
   });
   const marker = () => { try { return fs.readdirSync(dir).map((name) => path.join(dir, name))[0] || null; } catch { return null; } };
@@ -563,7 +565,7 @@ test('a dispatch keeps its dispatch lock marker fresh while it waits for the wor
   assert.equal(result.code, 0, result.stderr + result.stdout);
   const holdings = fs.readFileSync(trace, 'utf8').trim().split('\n').map((line) => JSON.parse(line)).filter((row) => row.label === 'dispatch');
   assert.equal(holdings.length, 1, 'one dispatch holding is traced');
-  assert.ok(holdings[0].hold_ms >= 10000, `held ${holdings[0].hold_ms} ms across the worktree lock wait`);
+  assert.ok(holdings[0].hold_ms >= refresh, `held ${holdings[0].hold_ms} ms across the worktree lock wait`);
 });
 
 // A gone holder's marker that cannot be removed stays until a person acts.

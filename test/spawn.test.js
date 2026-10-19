@@ -15,7 +15,8 @@ const stack = require('./stack-fixture');
 const A = require('../lib/agents');
 const S = require('../lib/state');
 const { readPublished } = require('./atomic-file');
-const SHORT_WAIT = path.join(__dirname, 'fixtures', 'lock-wait.js');
+// Timeout tests use the real CLI with a one-second lock wait (lib/intervals.js).
+const SHORT_WAIT = JSON.stringify({ lock_wait: 1000 });
 
 function setup(t) {
   return cachedFixture(t, 'task', (h) => {
@@ -1252,7 +1253,7 @@ test('a spawn that cannot take the lock leaves its worktree, names it and exits 
   const lock = S.acquireLock(h.state);
   try {
     const r = h.run(['spawn', '--role', 'small', '--task', 'T1'], {
-      env: { NODE_OPTIONS: `--require=${JSON.stringify(SHORT_WAIT)}` },
+      env: { TOWER_CRANE_INTERVALS: SHORT_WAIT },
     });
     assert.equal(r.code, 3, r.stderr);
     assert.match(r.stderr, /state is locked by .*; its worktree stays at .*T1-idempotency-key-on-retries for the next spawn/);
