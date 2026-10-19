@@ -641,6 +641,10 @@ failure still stops the whole retained attempt. Gate commands own everything
 they start, including nested supervisors, and retain their complete cleanup.
 The spawn API's `containmentDone` promise resolves once normal-exit cleanup
 and any keeper handoff finish.
+Retained controllers still count as users of the original agent's home, cache,
+broker directory and TMPDIR. Cleanup spares them, but home pruning waits until
+their run-marked processes finish. Supervisor subtrees own a different agent's
+files and remain excluded from the original home's liveness check.
 Containment metadata retains sampled `pids_peak`, `memory_peak_bytes` and
 `refused_forks` from the scope's peak and local event files. Refused forks
 count that scope's cap violations where local events are available.
