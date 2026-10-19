@@ -1,6 +1,12 @@
 #!/usr/bin/env node
 'use strict';
 
+// Every command and hook is a process of its own, and compiling the modules
+// was most of a hook's time. Node keeps the compiled code in its cache
+// directory, checked against each file's source; where it cannot write
+// one, it compiles as before.
+require('node:module').enableCompileCache?.();
+
 const OUTPUT_PIPE_CLOSED = 'tower-crane:output-pipe-closed';
 let outputPipeClosed = false;
 

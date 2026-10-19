@@ -2,7 +2,9 @@
 // One run of the four workloads for one option on one dataset. Every
 // operation is a fresh process, as a CLI command or a harness hook is.
 // Usage: node bench.js --option O --dataset NAME --run I --datasets DIR --work DIR --a-tree DIR --out FILE [--quick]
-// Options: A-cli (the T254 CLI itself), A-proto, B, C-files, C-sqlite, D.
+// Options: A-cli (the T254 CLI itself), A-proto, B, C-files, C-sqlite, D, and
+// B-cli: the CLI of the tree --a-tree names on its own state.db (T267), which
+// its first command migrates from the dataset's files.
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -21,6 +23,8 @@ const WORK = path.resolve(arg('work'), `${OPTION}-${DATASET}-r${RUN}`);
 const SRC = path.resolve(arg('datasets'), DATASET);
 const OP = path.join(__dirname, 'op.js');
 const NODE = process.execPath;
+// Options that run a real CLI; the others run the storage prototypes in op.js.
+const CLI = ['A-cli', 'B-cli'].includes(OPTION);
 const PORT = 6390;
 
 const CFG = {
@@ -72,7 +76,7 @@ function setup() {
   fs.rmSync(WORK, { recursive: true, force: true });
   fs.mkdirSync(WORK, { recursive: true });
   const cfg = { aTree: A_TREE };
-  if (['A-cli', 'A-proto', 'C-files'].includes(OPTION)) {
+  if (['A-cli', 'B-cli', 'A-proto', 'C-files'].includes(OPTION)) {
     execFileSync('cp', ['-r', path.join(SRC, 'files'), path.join(WORK, 'files')]);
     cfg.dir = path.join(WORK, 'files');
   }
@@ -85,13 +89,19 @@ function setup() {
     cfg.port = PORT;
   }
   if (OPTION.startsWith('C-')) cfg.socket = path.join(WORK, 'svc.sock');
-  if (OPTION === 'A-cli') {
+  if (CLI) {
     const agents = [...HOOK_TASKS.map((t, i) => [`bench-h${i + 1}`, t]), ...WRITER_TASKS.map((t, i) => [`bench-w${i + 1}`, t])];
     for (const [agent, task] of agents) {
       const home = path.join(cfg.dir, 'homes', agent);
       fs.mkdirSync(home, { recursive: true });
       fs.writeFileSync(path.join(home, 'hook.json'), JSON.stringify({ agent, task, state: cfg.dir, harness: 'claude', attempt: 1 }));
     }
+  }
+  if (OPTION === 'B-cli') {
+    // The first command moves the files into state.db; the workloads start after it.
+    const t0 = now();
+    execFileSync(NODE, [...cliArgs(cfg, 'validate', {}).slice(0, 3), '--agent', 'orchestrator', 'task', 'show', WRITER_TASKS[0]], { env, stdio: 'ignore' });
+    cfg.migrate_ms = now() - t0;
   }
   return cfg;
 }
@@ -174,8 +184,9 @@ function cliArgs(cfg, op, a) {
 }
 
 // Runs one operation in a fresh process; resolves with wall time from spawn to exit.
-function runOp(cfg, op, a, { cli = OPTION === 'A-cli' } = {}) {
-  // A-cli has no replay or verify command; those read its files the way A-proto does.
+function runOp(cfg, op, a, { cli = CLI } = {}) {
+  // A CLI has no replay or verify command. For A-cli those read its files the
+  // way A-proto does; for B-cli, stores/cli.js reads state.db through the tree's lib.
   const viaCli = cli && !['replay', 'offsetBack', 'verify'].includes(op);
   const argv = viaCli ? cliArgs(cfg, op, a) : [OP, OPTION === 'A-cli' ? 'A-proto' : OPTION, JSON.stringify(cfg), op, JSON.stringify(a)];
   return new Promise((resolve) => {
@@ -383,7 +394,7 @@ async function phaseCrash(cfg) {
     // validate reads the whole plan and takes tens of seconds here, so it
     // runs once, after the last crash.
     let validate = null;
-    if (OPTION === 'A-cli' && c === CFG.crashCycles) {
+    if (CLI && c === CFG.crashCycles) {
       const x = await runOp(cfg, 'validate', {});
       validate = { ok: x.ok, ms: x.ms, drift_lines: x.drift, error: x.ok ? null : x.error };
     }
@@ -411,6 +422,7 @@ async function main() {
   const out = arg('out');
   const cfg = setup();
   const result = { option: OPTION, dataset: DATASET, run: RUN, quick: QUICK, started: new Date().toISOString(), host: { cpus: os.cpus().length, load_start: os.loadavg() }, cfg: CFG };
+  if (cfg.migrate_ms !== undefined) result.migrate_ms = cfg.migrate_ms;
   try {
     if (OPTION === 'D' || OPTION.startsWith('C-')) result.startup_ms = await startServer(cfg);
     result.hooks = await phaseHooks(cfg);

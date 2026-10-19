@@ -6,7 +6,10 @@
 //         finished tasks, up to 200 MiB
 // Each dataset gets the T254 files (A), a SQLite database (B) and a Valkey
 // AOF directory (D) holding the same tasks and events.
-// Usage: node prepare.js --src DIR --out DIR [--only NAME]
+// With --cli it writes only the files, for a run of a real CLI (B-cli), and
+// also sets the bench tasks back to todo, since a newer live copy has them
+// finished, and lifts the worker limit above the bench's writers.
+// Usage: node prepare.js --src DIR --out DIR [--only NAME] [--cli]
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
@@ -106,6 +109,14 @@ async function main() {
   for (const t of tasksDoc.tasks) if (BENCH_TASKS.includes(t.id)) t.pr = null;
   const project = JSON.parse(fs.readFileSync(path.join(src, 'project.json'), 'utf8'));
   delete project.limits.paused;
+  const cliOnly = process.argv.includes('--cli');
+  if (cliOnly) {
+    for (const t of tasksDoc.tasks) if (BENCH_TASKS.includes(t.id)) {
+      Object.assign(t, { status: 'todo', claim: null, sha: null, submitted_by: null, needs_owner: null, depends_on: [], locks: [], branch: null });
+      for (const k of ['superseded_by', 'folded_into', 'hotfix', 'stack', 'stack_disabled', 'worktree', 'github_stack']) delete t[k];
+    }
+    project.limits.workers = 50;
+  }
   const manifest = {};
   for (const name of ['live', 's50', 's200']) {
     if (arg('only') && arg('only') !== name) continue;
@@ -118,6 +129,11 @@ async function main() {
     fs.writeFileSync(path.join(files, 'project.json'), JSON.stringify(project, null, 2) + '\n');
     const events = eventsFor(name, live);
     fs.writeFileSync(path.join(files, 'events.jsonl'), events);
+    if (cliOnly) {
+      manifest[name] = { events_bytes: events.length, tasks: tasksDoc.tasks.length, tasks_json_bytes: fs.statSync(path.join(files, 'tasks.json')).size };
+      process.stdout.write(`${name} ${JSON.stringify(manifest[name])}\n`);
+      continue;
+    }
     const eventLines = lines(events);
     let t = Date.now();
     B.importState(path.join(root, 'store.sqlite'), tasksDoc, eventLines);

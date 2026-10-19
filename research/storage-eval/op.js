@@ -5,7 +5,7 @@
 // precondition, 1 on any other failure.
 const { performance } = require('node:perf_hooks');
 
-const STORES = { 'A-proto': './stores/files', B: './stores/sqlite', D: './stores/valkey' };
+const STORES = { 'A-proto': './stores/files', B: './stores/sqlite', D: './stores/valkey', 'B-cli': './stores/cli' };
 
 async function run(option, cfg, op, a) {
   if (option.startsWith('C-')) {

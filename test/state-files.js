@@ -21,7 +21,7 @@ function withDb(dir, fn) {
 function fromSnapshot(snap, file) {
   if (file === 'project.json') return JSON.parse(snap.docs.project);
   if (file === 'decisions.json') return JSON.parse(snap.docs.decisions);
-  if (file === 'tasks.json') return { ...JSON.parse(snap.docs.tasks), tasks: snap.tasks.map((r) => JSON.parse(r.body)) };
+  if (file === 'tasks.json') return { ...JSON.parse(snap.docs.tasks), tasks: snap.tasks.map((r) => Db.join(r.head, r.bulk)) };
   throw new Error(`${file} is not a state document`);
 }
 
@@ -41,7 +41,7 @@ function writeDoc(dir, file, data) {
     const keep = new Set(tasks.map((t) => t.id));
     return Db.commit(dir, {
       docs: { tasks: JSON.stringify(envelope) },
-      tasks: tasks.map((t, ord) => ({ id: t.id, ord, status: String(t.status), body: JSON.stringify(t) })),
+      tasks: tasks.map((t, ord) => ({ id: t.id, ord, status: String(t.status), ...Db.split(t) })),
       drop: Db.snapshot(dir).tasks.map((r) => r.id).filter((id) => !keep.has(id)),
     });
   }));
@@ -145,8 +145,8 @@ function rewriteState(dir, rewrite) {
   Db.build(building, {
     docs: Object.fromEntries(Object.entries(docs).map(([k, v]) => [k, rewrite(v)])),
     tasks: tasks.map((r) => {
-      const body = rewrite(r.body);
-      return { id: r.id, status: String(JSON.parse(body).status), body };
+      const head = rewrite(r.head);
+      return { id: r.id, status: String(JSON.parse(head).status), head, bulk: rewrite(r.bulk) };
     }),
     log: Buffer.from(lines.map((l) => `${rewrite(l)}\n`).join('')),
     cuts: Buffer.alloc(0),

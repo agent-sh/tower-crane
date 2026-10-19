@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const [rawDir, outDir] = process.argv.slice(2);
-const OPTIONS = ['A-cli', 'A-proto', 'B', 'C-files', 'C-sqlite', 'D'];
+const OPTIONS = ['A-cli', 'A-proto', 'B', 'C-files', 'C-sqlite', 'D', 'B-cli'];
 const DATASETS = ['live', 's50', 's200'];
 
 function pct(xs, p) {
@@ -68,6 +68,7 @@ function perRun(r) {
     m.crash_validate_fail = c.filter((x) => x.validate && !x.validate.ok).length;
   }
   if (r.startup_ms !== undefined) m.startup_ms = r.startup_ms;
+  if (r.migrate_ms !== undefined) m.migrate_ms = r.migrate_ms;
   m.load = r.host.load_start[0];
   m.error = r.error ? 1 : 0;
   return m;
