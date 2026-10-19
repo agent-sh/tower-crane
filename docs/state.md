@@ -2,7 +2,7 @@
 
 Tasks may carry `stack: { parent, base, parent_sha, repo, linked, synced_base }`. `parent` is the lower task id, `base` is the PR's current target branch, `parent_sha` is the dependency head used for dispatch or the last synchronization, `repo` is the same GitHub repository as the project, and `synced_base` is the last observed main commit. `linked` records successful `gh stack link`. One unmerged dependency chain forms one stack; outstanding sibling branches are not appended to that chain.
 
-`stack_disabled: true` records an unavailable stacks capability or explicit `stack unstack`. It selects ordinary merges, which wait for lower merge evidence before retargeting an existing upper PR. An accepted dependency can still use the ordinary main-based dispatch flow when the repository cannot stack; a submitted dependency requires an available chain.
+`stack_disabled: true` records an unavailable stacks capability, explicit `stack unstack`, or a replacement middle PR awaiting confirmation of its new chain. It selects ordinary merges, which wait for lower merge evidence before retargeting an existing upper PR. An accepted dependency can still use the ordinary main-based dispatch flow when the repository cannot stack; a submitted dependency requires an available chain.
 
 A successful `stack link` clears fallback markers for its linked members and restores the stack merge gate, including its refusal of admin merges.
 
@@ -13,6 +13,10 @@ When every lower member has audited successful merge evidence, gates use the pro
 A child without a PR retires as soon as every lower member has merged, including an unlinked, disabled or running child. The merge refresh or next observation removes its stack metadata and emits `stack complete` with `pr: null`. Worker dispatch rechecks lower PRs before worktree preparation and readiness. A remote merge at each recorded lower head, branch, repository and dependency or project base authorizes retirement before spawn even when its local merge receipt has not arrived. It does not create merge evidence. The parent observations and retirement use the same input snapshot, so a changed chain refuses dispatch. Squash and merge parents use this path even when GitHub has deleted their branches.
 
 The automatic retirement note lives in `task.notes`. It does not emit a `task note` event or create an `owner-comment` notification when the owner triggers retirement.
+
+A middle member with an open task above keeps its stack lineage, but moves its PR and stored `stack.base` to the project base once every lower member has merged. It uses the same PR validation and closed-PR replacement as retirement, including when the stack is disabled or unlinked. `stack base` records `{parent, previous_base, base, pr}` and adds the automatic merge-base note when the base or PR changes. A replacement marks the retained member and its upper members unlinked until their new PR chain is confirmed; the retained member selects ordinary merge fallback in the meantime. The upper members keep their parent task ids and dependency branches.
+
+Dispatch applies this base change after a verified remote merge even before local merge evidence arrives. Its completed lower chain needs no dispatch-time `gh stack sync`; a sync must not restore the former dependency base. A missing task checkout resumes from its own head and preserves retained lineage on the project base.
 
 A failed PR retarget keeps the stack record and fallback flag for retry. While that record remains and every lower task has merged, the ordinary merge fallback may retarget the recorded dependency base to the project base. After retirement removes the record, only the project base is valid; moving the PR back to the former dependency branch is refused without a PR write.
 

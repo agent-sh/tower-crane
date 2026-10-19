@@ -322,6 +322,14 @@ head, with the same method and commit text. Admin and rebase retain the
 ordinary fallback refusals.
 Middle tasks with a PR keep their stack records while an upper task is open, preserving
 the merged lower PRs that sync and stack merge must still recognize.
+Their PR and stored base still move to the project base after all lower members
+merge, including disabled or unlinked members and closed PRs that need replacement.
+A `stack base` event records the change while keeping the upper tasks' parent ids.
+A replacement marks the affected chain unlinked until its new PR chain is confirmed.
+The retained member uses ordinary merge fallback until that confirmation.
+Dispatch persists the project base after a verified remote merge even before its
+local receipt arrives and skips synchronization of that completed lower chain.
+A missing checkout resumes from its own head without dropping the retained lineage.
 
 Children without a PR retire on the merge refresh or next observation even
 when they are unlinked, disabled or running. Before spawning a stacked worker,
