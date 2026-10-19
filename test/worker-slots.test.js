@@ -428,35 +428,15 @@ for (const cmd of ['spawn exit', 'worker-exited']) {
     const h = setup(t, 1);
     controlledHarness(h);
     const { spawned, release } = await pausedSpawn(h, 'T1');
-    const receipt = path.join(h.base, 'exit-receipt.json');
-    const hook = path.join(h.base, 'exit-receipt.js');
-    // The receipt shows in whole-log reads and, once per reader, in appended-event reads.
-    fs.writeFileSync(hook, `
-const fs = require('node:fs');
-const read = fs.readFileSync;
-const line = () => JSON.stringify(JSON.parse(read.call(fs, ${JSON.stringify(receipt)}, 'utf8')));
-fs.readFileSync = function(file, ...args) {
-  const value = read.call(this, file, ...args);
-  if (!String(file).endsWith('events.jsonl') || typeof value !== 'string') return value;
-  return value + line() + '\\n';
-};
-const { EventReader } = require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'event-reader.js'))});
-const tail = EventReader.prototype.read;
-EventReader.prototype.read = function() {
-  const batch = tail.call(this);
-  if (this.file.endsWith('events.jsonl') && !this.receipt) {
-    this.receipt = true;
-    batch.rows.push(this.parse(line(), batch.offset));
-  }
-  return batch;
-};
-`);
     const detail = { agent: spawned.agent, pid: spawned.pid, code: 0 };
+    // Each receipt is logged for the claim alone: a refused claim commits
+    // nothing, and the log goes back to what it was, every cursor as before.
     const runClaim = (task, changes) => {
-      fs.writeFileSync(receipt, JSON.stringify({ cmd, task, detail: { ...detail, ...changes }, at: new Date().toISOString() }));
-      return h.run(['claim', 'T2', '--agent', 'replacement'], {
-        env: { NODE_OPTIONS: `--require "${hook.replace(/\\/g, '/')}"` },
-      });
+      const before = StateFiles.logText(h.state);
+      StateFiles.appendLog(h.state, `${JSON.stringify({ cmd, task, detail: { ...detail, ...changes }, at: new Date().toISOString() })}\n`);
+      const r = h.run(['claim', 'T2', '--agent', 'replacement']);
+      if (r.code !== 0) StateFiles.replaceLog(h.state, before);
+      return r;
     };
     try {
       for (const [task, changes] of [
@@ -527,8 +507,8 @@ test('historical worker spawns from the 2026-10-07 log hold no slot for a sandbo
   const fixture = fs.readFileSync(path.join(__dirname, 'fixtures', 'live-slots-2026-10-07.jsonl'), 'utf8');
   const h = setup(t, 5, 6);
   for (let i = 1; i <= 4; i++) h.ok(['claim', `T${i}`, '--agent', `held-${i}`]);
-  const log = path.join(h.state, 'events.jsonl');
-  fs.writeFileSync(log, fixture + fs.readFileSync(log, 'utf8'));
+  // The live records go first, as they were in the log before these claims.
+  StateFiles.replaceLog(h.state, fixture + StateFiles.logText(h.state));
   const pids = fixture.trim().split('\n').map(JSON.parse).flatMap((e) => [e.detail.pid, e.detail.monitor_pid]).filter(Boolean);
   const hidden = { hooks: { HOOK_HIDDEN_PIDS: JSON.stringify([...new Set(pids)]) } };
   const claim = h.run(['claim', 'T5', '--agent', 'worker-T5-9'], hidden);

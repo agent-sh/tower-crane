@@ -1,5 +1,7 @@
 'use strict';
 
+const StateFiles = require('./state-files');
+
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -267,7 +269,7 @@ test('live Claude probes use the requested provider and environment file without
   Object.assign(process.env, values);
   pinLiveRung(h, 'claude');
   pinLiveRung(h, 'codex', 'review');
-  const project = JSON.parse(fs.readFileSync(path.join(h.state, 'project.json'), 'utf8'));
+  const project = StateFiles.readDoc(h.state, 'project.json');
   assert.equal(project.ladder.small.provider, 'bedrock');
   assert.equal(project.ladder.small.env_file, envFile);
   assert.equal(project.ladder.small.model, 'fixture-model');
