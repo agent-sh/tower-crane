@@ -2591,7 +2591,8 @@ if (path.basename(process.argv[1]) === 'codex') process.stdout.write(JSON.string
     }
     if (harness === 'codex') {
       const rules = TOML.parse(fs.readFileSync(path.join(seen.home, 'config.toml'), 'utf8')).permissions['tower-crane'].filesystem;
-      for (const p of [bin, path.join(bin, 'git'), path.join(path.dirname(bin), 'policy.json'), path.join(path.dirname(bin), 'lib', 'shim.js')]) {
+      const tool = path.join(path.dirname(bin), 'tool');
+      for (const p of [bin, path.join(bin, 'git'), path.join(bin, 'tower-crane'), path.join(path.dirname(bin), 'policy.json'), path.join(tool, 'lib', 'shim.js'), path.join(tool, 'bin', 'tower-crane.js')]) {
         assert.ok(codexShows(rules, fs.realpathSync(p)), `codex shows ${p}`);
       }
       assert.ok(!codexShows(rules, fs.realpathSync(path.join(h.state, 'homes'))), 'codex hides homes/');

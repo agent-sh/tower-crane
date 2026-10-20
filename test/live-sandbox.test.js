@@ -13,7 +13,7 @@ const net = require('node:net');
 const os = require('node:os');
 const path = require('node:path');
 const cp = require('node:child_process');
-const { pinLiveRung, makeRepo, dispatch, BIN, ROOT, HOOKS, TMP_ROOT, LIVE_ROOT } = require('./helpers');
+const { pinLiveRung, makeRepo, dispatch, ROOT, HOOKS, TMP_ROOT, LIVE_ROOT } = require('./helpers');
 const { waitUntil } = require('./signals');
 const A = require('../lib/agents');
 
@@ -176,7 +176,7 @@ test('in a real claude sandbox a forged state edit fails and the CLI writes thro
   const probe = path.join(results(h), 'forge-probe');
   const forge = `const f=require("fs");try{f.appendFileSync(${JSON.stringify(events)},"{}\\n");f.writeFileSync(${JSON.stringify(probe)},"WROTE")}catch(e){f.writeFileSync(${JSON.stringify(probe)},"ERR "+e.code)}`;
   h.ok(['brief', 'set', 'T1', '-'], {
-    input: `Sandbox probe set up by the owner. Run exactly these two commands with the Bash tool, one after the other, then reply with their exit codes.\n\n${node} -e '${forge}'\n\n${node} ${JSON.stringify(BIN)} task note T1 through-the-broker\n`,
+    input: `Sandbox probe set up by the owner. Run exactly these two commands with the Bash tool, one after the other, then reply with their exit codes.\n\n${node} -e '${forge}'\n\ntower-crane task note T1 through-the-broker\n`,
   });
   pinLiveRung(h, 'claude');
   const r = await h.runAsync(['spawn', '--role', 'small', '--task', 'T1', '--wait']);
@@ -199,7 +199,7 @@ test('in a real codex sandbox forged state edits fail and the CLI writes through
   const probe = path.join(results(h), 'forge-probe');
   const forge = `const f=require("fs");const out=${JSON.stringify(files)}.map(p=>{try{f.appendFileSync(p,"{}\\n");return "WROTE"}catch(e){return "ERR "+e.code}});f.writeFileSync(${JSON.stringify(probe)},JSON.stringify(out))`;
   h.ok(['brief', 'set', 'T1', '-'], {
-    input: `Sandbox probe set up by the owner. Run exactly these two commands with your command tool, one after the other, then reply with their exit codes and stop.\n\n${node} -e '${forge}'\n\n${node} ${JSON.stringify(BIN)} task note T1 through-the-broker\n`,
+    input: `Sandbox probe set up by the owner. Run exactly these two commands with your command tool, one after the other, then reply with their exit codes and stop.\n\n${node} -e '${forge}'\n\ntower-crane task note T1 through-the-broker\n`,
   });
   pinLiveRung(h, 'codex');
   const r = await h.runAsync(['spawn', '--role', 'small', '--task', 'T1', '--wait']);
@@ -317,7 +317,7 @@ for (const harness of ['claude', 'codex']) {
     const caller = path.join(cache, 'caller-tmp');
     fs.mkdirSync(caller);
     h.ok(['brief', 'set', 'T1', '-'], {
-      input: `Sandbox probe set up by the owner. Run exactly this one command with your command tool, then reply with its exit code and stop.\n\n${node} ${JSON.stringify(BIN)} task note T1 through-the-broker\n`,
+      input: `Sandbox probe set up by the owner. Run exactly this one command with your command tool, then reply with its exit code and stop.\n\ntower-crane task note T1 through-the-broker\n`,
     });
     pinLiveRung(h, harness);
     const home = os.homedir();
