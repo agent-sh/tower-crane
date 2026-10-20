@@ -10,7 +10,7 @@ let sampling = false;
 cp.spawn = function (file, args, opts) {
   const child = spawn.call(this, file, args, opts);
   // Identity lookup runs before launch; inject failures only once the finite agent starts.
-  if (args?.includes('setTimeout(() => {}, 3000)')) sampling = true;
+  if (args?.includes('setTimeout(() => {}, 3000)')) sampling = true; // wait-allow: match the finite agent's timer command before injecting sampling failures
   return child;
 };
 cp.execFile = function (file, args, opts, done) {
