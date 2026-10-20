@@ -220,13 +220,15 @@ test('confirmed merge gate wakes; a failed gate never produces merged', async (t
   assert.equal((await event(result, 'merged')).detail.ref, h.sha);
 });
 
-test('a manual merge racing the merge queue under another task\'s reaction: one merges, the other confirms', async (t) => {
+// Ten rounds took 232 to 270 s on hosted Windows, at the 300 s hung-test timeout,
+// so they run as two tests of five; each covers every stagger once.
+for (const pass of [1, 2]) test(`a manual merge racing the merge queue under another task's reaction: one merges, the other confirms (pass ${pass} of 2)`, async (t) => {
   const h = setup(t);
   h.sha = gateFixture(h);
   h.ok(['project', 'set', '--repo', 'acme/demo']);
   h.env.FIXTURE_GH_LOG = path.join(h.base, 'gh.jsonl');
   h.env.FIXTURE_MERGED_PER_PR = '1';
-  const rounds = 10;
+  const rounds = 5;
   h.ok(['plan', 'import', '-'], { input: JSON.stringify(Array.from({ length: rounds * 2 - 1 }, (_, i) => ({ title: `Change ${i + 2}`, acceptance: ['works'] }))) });
   for (let i = 1; i <= rounds; i++) {
     // The lower task's reaction drains the line, so the queue merges the

@@ -229,7 +229,10 @@ test('a caller inside its own capped or delegated fence keeps attempts inside it
   } finally { Object.assign(fs, original); }
 });
 
-test('the sweep removes report directories and failed units of dead supervisors only', async (t) => {
+test('the sweep removes report directories and failed units of dead supervisors only', {
+  // Only a cgroup launch sweeps; keepers are found through /proc.
+  skip: process.platform !== 'linux' && 'systemd user units and /proc are Linux-only',
+}, async (t) => {
   const h = fixture(t);
   const cache = path.join(h.base, 'sweep-cache');
   const dead = require('node:child_process').spawnSync(process.execPath, ['-e', '']).pid;
@@ -364,7 +367,7 @@ test('systemd CLI and D-Bus launches use supported OOM policy and retain caps', 
     const command = mode === 'dbus' ? ['--require', fake, ...args]
       : [fake, ...C.scopeArguments(unit, 'test-fence.slice', limits, {
         CPUQuota: '200%', MemoryMax: '1', TasksMax: '999', Slice: 'app.slice',
-        OOMPolicy: 'continue', MemorySwapMax: '9G', Delegate: 'no',
+        OOMPolicy: 'stop', MemorySwapMax: '9G', Delegate: 'no',
       }),
         process.execPath, ...args];
     const result = await G.treeExec(process.execPath, command, {
@@ -377,7 +380,8 @@ test('systemd CLI and D-Bus launches use supported OOM policy and retain caps', 
     assert.equal(registration.group, group);
     assert.equal(fs.readFileSync(path.join(group, 'memory.oom.group'), 'utf8'), '1');
     const properties = JSON.parse(fs.readFileSync(log, 'utf8').trim());
-    assert.equal(properties.OOMPolicy, 'kill');
+    // OOMPolicy=kill would let systemd 255 stop the scope for a nested attempt's OOM.
+    assert.equal(properties.OOMPolicy, 'continue');
     assert.equal(properties.TasksMax, String(limits.tasks_max));
     assert.equal(properties.MemoryMax, String(limits.memory_max_bytes));
     assert.equal(properties.MemorySwapMax, '0');
@@ -428,6 +432,40 @@ try {
   assert.equal(fs.existsSync(launched), false);
 });
 
+test('a scope at its memory cap is read every millisecond for a bounded window, so an OOM the kernel has not announced is found', async (t) => {
+  const h = fixture(t);
+  const group = path.join(h.base, 'cap-watch');
+  fs.mkdirSync(group);
+  fs.writeFileSync(path.join(group, 'cgroup.events'), 'populated 1\nfrozen 0\n');
+  const events = (max, oom) => fs.writeFileSync(path.join(group, 'memory.events.local'),
+    `low 0\nhigh 0\nmax ${max}\noom ${oom}\noom_kill ${oom}\noom_group_kill 0\n`);
+  const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms)); // wait-allow: fixed windows of the cap watch under test
+  for (const [name, max, after, expected] of [
+    ['OOM inside the window', 3, 0, 'resource-memory-max'],
+    ['below its cap', 0, 0, null],
+    // The window ends, so a scope that stays at its cap does not keep the reads going.
+    ['OOM after the window', 3, 60, null],
+  ]) {
+    events(0, 0);
+    let notify;
+    t.mock.method(fs, 'watch', (file, listener) => {
+      notify = listener;
+      return { on() {}, unref() {}, close() {} };
+    });
+    let found = null;
+    const stop = C.watchOom(group, { tasks: 0, memory: 0 }, (reason) => { found = reason; });
+    fs.watch.mock.restore();
+    // The kernel announces the cap events, then holds the next notice for 10 ms.
+    events(max, 0);
+    notify();
+    if (after) await pause(after);
+    events(max, 1);
+    await pause(60);
+    stop();
+    assert.equal(found, expected, name);
+  }
+});
+
 test('local cgroup events distinguish a child cap from the parent cap', (t) => {
   const h = fixture(t);
   const group = path.join(h.base, 'cgroup-events');
@@ -448,8 +486,10 @@ test('nested cap failures leave the parent running when local events are availab
   for (const [mode, reason] of [['nested-limit', 'resource-tasks-max'], ['nested-memory', 'resource-memory-max']]) {
     const localEvents = !systemd || fs.existsSync(path.join(C.currentGroup(),
       mode === 'nested-limit' ? 'pids.events.local' : 'memory.events.local'));
+    // A watchdog parent sums the RSS of its whole tree: the storm's leaves that start before
+    // the child's sampler stops them and, on Windows, that sampler's PowerShell.
     const result = await G.treeExec(process.execPath, [HARNESS, mode, 'unused'], {
-      resources: { tasks_max: 128, memory_max_bytes: memory }, timeout: 10000, // wait-allow: finite nested cap probe deadline
+      resources: { tasks_max: 128, memory_max_bytes: 4 * memory }, timeout: 10000, // wait-allow: finite nested cap probe deadline
     });
     if (!localEvents && result.resource_reason === reason) continue;
     assert.equal(result.status, 0, diagnostics(result));
@@ -474,8 +514,12 @@ test('fake harness nested launches and detached grandchildren retain containment
   if (result.containment.backend === 'cgroup') {
     const parent = C.currentGroup().split('/');
     const slice = parent.findLastIndex((name) => name.endsWith('.slice'));
-    const fence = parent.slice(0, slice + 1).join('/') + '/';
-    assert.ok(result.containment.group.startsWith(fence), result.containment.group);
+    // A caller outside its user manager, as a hosted runner's system service is, has no slice
+    // that manager can reach, so the scope takes the slice of the same name under the manager.
+    const uid = process.getuid();
+    const fence = parent.includes(`user@${uid}.service`) ? parent.slice(0, slice + 1).join('/') + '/'
+      : `/sys/fs/cgroup/user.slice/user-${uid}.slice/user@${uid}.service/${parent[slice]}/`;
+    assert.ok(result.containment.group.startsWith(fence), `${result.containment.group} is not under ${fence}`);
     assert.equal(records[0].inherited, result.containment.group);
     assert.ok(records[1].inherited.startsWith(records[0].inherited + path.sep));
     for (const record of records) assert.ok(record.group.startsWith(records[0].inherited + path.sep), JSON.stringify(record));
@@ -529,7 +573,9 @@ test('lightweight gate helpers retain cancellation without a separate resource s
 });
 
 test('finite nested fork storm fails the gate command and leaves another attempt running', async (t) => {
-  const sibling = C.spawn(process.execPath, ['-e', 'console.log("untouched"); setTimeout(() => {}, 3000)'], { // wait-allow: finite isolation probe lifetime
+  // The sibling must outlive the storm's detection, which a Windows CIM snapshot can take
+  // seconds to make; the test stops it at the end.
+  const sibling = C.spawn(process.execPath, ['-e', 'console.log("untouched"); setTimeout(() => {}, 60000)'], { // wait-allow: finite isolation probe lifetime
     resources: { tasks_max: 64, memory_max_bytes: memory }, stdio: ['ignore', 'pipe', 'pipe'],
   }); // wait-allow: finite sibling lifetime tests isolation
   t.after(() => sibling.kill('SIGKILL'));

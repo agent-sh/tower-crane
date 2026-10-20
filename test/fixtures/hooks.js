@@ -696,11 +696,17 @@ if (env.HOOK_USAGE_WRITE_FAIL) {
 // carries: it never rewrites the record a test may be reading, and a marker
 // left by an earlier process with the same pid cannot pass for its exit.
 if (env.HOOK_PROCESSES_DIR) {
+  // Made only inside a fixture that still exists: a process that outlives its
+  // test's cleanup must not bring the removed fixture back.
+  const processesDir = () => {
+    try { real.mkdirSync(env.HOOK_PROCESSES_DIR); } catch (error) { if (error.code !== 'EEXIST') return false; }
+    return true;
+  };
   if (path.basename(process.argv[1] || '') === 'spawn-monitor.js') {
     const token = env.HOOK_PROCESS_TOKEN || String(process.pid);
     process.once('exit', () => {
-      real.mkdirSync(env.HOOK_PROCESSES_DIR, { recursive: true });
-      real.writeFileSync(path.join(env.HOOK_PROCESSES_DIR, `${token}.exited`), '');
+      if (!processesDir()) return;
+      try { real.writeFileSync(path.join(env.HOOK_PROCESSES_DIR, `${token}.exited`), ''); } catch { /* Removed meanwhile. */ }
     });
   }
   const original = cp.spawn;
@@ -741,7 +747,7 @@ if (env.HOOK_PROCESSES_DIR) {
       // No process query runs here: a dispatch spawns its monitor inside the
       // window the monitor gives it to record the lease.
       const recordedAt = systemNow();
-      real.mkdirSync(env.HOOK_PROCESSES_DIR, { recursive: true });
+      if (!processesDir()) return child;
       const trackedFile = path.join(env.HOOK_PROCESSES_DIR, `${child.pid}.json`);
       writeAtomic(trackedFile, JSON.stringify({
         pid: child.pid, startTicks, recordedAt, ...(token ? { token } : {}),

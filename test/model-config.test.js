@@ -231,6 +231,29 @@ test('raw model scan requires exact path and matched text allowlist entries with
   assert.throws(() => modelSelections(h.repo, h.env), /reason/);
 });
 
+test('release manifest model-literal exemption stays within its file and token', (t) => {
+  const h = makeRepo(t);
+  fs.mkdirSync(path.join(h.repo, 'lib', 'gates'), { recursive: true });
+  fs.mkdirSync(path.join(h.repo, 'tools'), { recursive: true });
+  const entries = JSON.parse(fs.readFileSync(path.join(ROOT, 'tools', 'model-literals.json'), 'utf8'))
+    .filter(entry => entry.path === 'lib/gates/merge.js' && entry.text === 'claude-plugin');
+  fs.writeFileSync(path.join(h.repo, 'tools', 'model-literals.json'), JSON.stringify(entries));
+  const model = ['claude', 'fixture-2099'].join('-');
+  for (const [file, literals, rejected] of [
+    ['lib/gates/merge.js', ['.claude-plugin/plugin.json'], []],
+    ['lib/gates/merge.js', ['.claude-plugin/marketplace.json'], []],
+    ['lib/gates/merge.js', ['.claude-plugin/plugin.json', '.claude-plugin/marketplace.json'], []],
+    ['lib/gates/merge.js', ['claude-plugin-other'], ['claude-plugin-other']],
+    ['lib/gates/another.js', ['.claude-plugin/plugin.json'], ['claude-plugin']],
+    ['lib/gates/merge.js', [model], [model]],
+  ]) {
+    const target = path.join(h.repo, file);
+    fs.writeFileSync(target, `module.exports = ${JSON.stringify(literals)};\n`);
+    assert.deepEqual(modelSelections(h.repo, h.env), rejected.map(text => `${file}:1: ${text}`), JSON.stringify(literals));
+    fs.rmSync(target);
+  }
+});
+
 test('model lint rejects every shipped alias and model pattern in code and JSON', (t) => {
   const h = makeRepo(t);
   fs.mkdirSync(path.join(h.repo, 'lib'));

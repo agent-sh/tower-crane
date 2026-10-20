@@ -150,9 +150,19 @@ for (const mode of ['crash-once', 'outage-once', 'clean-no-verdict', 'crash-cap'
     fs.writeFileSync(path.join(h.base, 'body-release'), '');
     await waitOnRepo(h, () => checks().length && events().some((e) => e.cmd === 'spawn exit'
       && e.detail.agent === checks()[0].detail.agent), 'the first light reviewer did not exit', { signal: t.signal });
-    for (let i = 0; i < 3; i++) consume();
     const held = ['clean-no-verdict', 'crash-cap'].includes(mode);
-    if (mode === 'crash-cap') assert.ok(checks().length >= 2, 'the crash cap requires reviewer replacement');
+    // A crashed light reviewer is replaced once its supervisor has finished, which a
+    // Windows runner can take longer to see than a fixed number of passes.
+    if (mode === 'clean-no-verdict') for (let i = 0; i < 3; i++) consume();
+    else if (mode === 'crash-cap') {
+      await waitOnRepo(h, () => { consume(); return events().some((e) => e.cmd === 'review held'); },
+        'light reviewers crashing up to the cap never recorded a review hold', { signal: t.signal });
+      assert.ok(checks().length >= 2, 'the crash cap requires reviewer replacement');
+    } else {
+      await waitOnRepo(h, () => { consume(); return checks().length >= 2; },
+        'a no-verdict crash gets a replacement without another body edit, and no replacement light reviewer was spawned',
+        { signal: t.signal });
+    }
     if (held) {
       await waitOnRepo(h, () => events().some((e) => e.cmd === 'review held'), 'no review hold was recorded', { signal: t.signal });
       const item = h.json(['inbox', '--agent', 'orchestrator']).items.find((i) => i.kind === 'review_held' && i.task === 'T1');
@@ -204,11 +214,15 @@ test('a light-check monitor may finish its receipt, then a missing receipt trigg
   assert.equal(checks().length, count, 'a live monitor gets time to record its receipt');
   assert.match(h.ok(['status']), /T1 \(fixing PR body\)/);
   const clock = path.join(__dirname, 'fixtures', 'clock.js');
-  h.run(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator'], {
-    env: { NODE_OPTIONS: `${h.env.NODE_OPTIONS || ''} --require ${JSON.stringify(clock)}`,
-      TOWER_CRANE_TEST_NOW: String(Date.parse(at) + 11 * 60000 + 8000) },
-  });
-  assert.equal(checks().length, count + 1, 'the expired receipt window replaces the light reviewer');
+  // Past the receipt window; a loaded host can need more than one pass to dispatch the replacement.
+  await waitOnRepo(h, () => {
+    h.run(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator'], {
+      env: { NODE_OPTIONS: `${h.env.NODE_OPTIONS || ''} --require ${JSON.stringify(clock)}`,
+        TOWER_CRANE_TEST_NOW: String(Date.parse(at) + 11 * 60000 + 8000) },
+    });
+    return checks().length > count;
+  }, 'the expired receipt window never replaced the light reviewer', { signal: t.signal });
+  assert.equal(checks().length, count + 1, 'the expired receipt window replaces the light reviewer once');
   assert.equal(events().filter((e) => e.cmd === 'review exit missing' && e.detail.agent === pending.agent).length, 1);
   await waitOnRepo(h, () => h.readState('tasks.json').tasks[0].status === 'accepted',
     'the replacement for the missing receipt did not accept', { signal: t.signal });

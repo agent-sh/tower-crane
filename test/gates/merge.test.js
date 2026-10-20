@@ -37,6 +37,36 @@ function ctx(gh, { task = {}, args = {}, project = {} } = {}) {
   return { root: '/repo', worktree: null, task: { id: 'T4', title: 'Change', acceptance: ['works'], kind: 'code', sha: SHA, pr: 42, status: 'accepted', ...task }, project: { repo: REPO, base: 'main', ...project }, args, exec: gh.exec, log() {} };
 }
 
+test('release merges require green completed push CI even with a newer pending run', async () => {
+  const listings = [[{ path: 'package.json' }], Array.from({ length: 100 }, (_, i) => ({ path: `lib/file-${i}.js` }))];
+  for (const [files, conclusion] of listings.flatMap((files) => ['failure', 'cancelled', 'timed_out', 'neutral', 'skipped', 'success'].map((c) => [files, c]))) {
+    let merged = false;
+    const gh = fakeExec((args) => {
+      if (args[0] === 'pr' && args[1] === 'view') return result(JSON.stringify({
+        state: merged ? 'MERGED' : 'OPEN', headRefOid: SHA, baseRefName: 'main',
+        files, mergeCommit: merged ? { oid: MERGED } : null,
+      }));
+      if (args[0] === 'api' && args[1].includes('/pulls/42/files')) return result(JSON.stringify({
+        filename: 'package.json', patch: '-  "version": "0.1.6",\n+  "version": "0.1.7",',
+      }));
+      if (args[0] === 'api' && args[1].includes('/actions/workflows?')) return result(JSON.stringify({ id: 11, state: 'active', path: 'dynamic/github-code-scanning/codeql' }));
+      if (args[0] === 'api' && args[1].includes('/actions/runs?')) return result([
+        { id: 101, workflow_id: 11, name: 'CI', run_number: 51, event: 'push', status: 'in_progress', conclusion: null },
+        { id: 100, workflow_id: 11, name: 'CI', run_number: 50, event: 'push', status: 'completed', conclusion, html_url: 'https://github.com/acme/app/actions/runs/100' },
+        { id: 102, workflow_id: 11, name: 'CI', run_number: 52, event: 'schedule', status: 'completed', conclusion: 'success' },
+        { id: 99, workflow_id: 12, name: 'Removed CI', run_number: 49, event: 'push', status: 'completed', conclusion: 'failure' },
+      ].map(JSON.stringify).join('\n'));
+      if (args[0] === 'pr' && args[1] === 'merge') { merged = true; return result(''); }
+      return null;
+    });
+    const r = await gate.run(ctx(gh));
+    const green = ['success', 'neutral', 'skipped'].includes(conclusion);
+    assert.equal(r.ok, green, r.summary);
+    assert.equal(merged, green);
+    if (!r.ok) assert.match(r.summary, new RegExp(`main push CI.*run 100.*${conclusion}`));
+  }
+});
+
 test('a task that is not accepted is never merged', async () => {
   for (const status of ['submitted', 'in_progress', 'rework']) {
     const gh = github();
