@@ -24,7 +24,8 @@ if (mode === 'nested-limit' || mode === 'nested-memory') {
   });
 } else if (mode === 'nested-storm') {
   // The storm must stay inside the inner attempt's caps, so only the outer task cap can stop it.
-  // A Windows watchdog sums working sets, and the storm's thirteen Node processes reach 512 MiB.
+  // A Windows watchdog sums working sets: the storm's thirteen Node processes measured 495 MiB
+  // on a hosted runner, close enough to a 512 MiB cap that the inner attempt could stop it first.
   const child = C.spawn(process.execPath, [__filename, 'storm', file], {
     stdio: 'inherit', resources: { tasks_max: 128, memory_max_bytes: 4 * 1024 * 1024 * 1024 },
   });
