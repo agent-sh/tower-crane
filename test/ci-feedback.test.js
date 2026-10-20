@@ -337,6 +337,35 @@ test('rework prompts and worker ci reads expose inline ids that ci resolve accep
   assert.deepEqual(JSON.parse(after.stdout).findings, []);
 });
 
+test('first and chained fallback routes keep inline ids in rework prompts', (t) => {
+  const fail = [process.execPath, '-e',
+    'console.log(JSON.stringify({type:"turn.failed",error:{message:"HTTP 503 service unavailable"}}));process.exit(1)', '{prompt}'];
+  const print = [process.execPath, '-e', 'console.log(process.argv[1])', '{prompt}'];
+  for (const count of [1, 2]) {
+    const h = fixture(t);
+    const data = checkFeedback(h);
+    data.comments = reviewComments();
+    fs.writeFileSync(h.env.CI_FEEDBACK_GH, JSON.stringify(data));
+    sendToRework(h);
+    const routes = Array.from({ length: count }, (_, index) => ({
+      harness: 'command', command: index === count - 1 ? print : fail,
+    }));
+    h.ok(['ladder', 'set', 'medium', '--command', JSON.stringify(fail),
+      '--supervision', '{"retries":0,"backoff_ms":1,"max_backoff_ms":1}']);
+    h.ok(['ladder', 'set', 'medium', '--fallbacks', JSON.stringify(routes)]);
+    const result = h.run(['spawn', '--task', 'T1', '--wait', '--json']);
+    assert.equal(result.code, 0, result.stderr + result.stdout);
+    const started = JSON.parse(result.stdout);
+    const log = fs.readFileSync(started.log, 'utf8');
+    for (const [id, file, line] of [[501, 'lib/a.js', 12], [502, 'lib/b.js', 40], [504, 'lib/c.js', 50]]) {
+      assert.ok(log.includes(`${file}:${line} (comment ${id})`), `fallback ${count}: ${log}`);
+    }
+    const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+    assert.deepEqual(events.filter((e) => e.cmd === 'spawn fallback').map((e) => e.detail.route_index),
+      Array.from({ length: count }, (_, index) => index + 1));
+  }
+});
+
 test('ci checks shows capped and ignored reasons, check output, annotations and current CodeQL locations before submit', (t) => {
   const h = fixture(t);
   checkFeedback(h);
