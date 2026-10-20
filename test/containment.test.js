@@ -586,7 +586,7 @@ test('finite nested fork storm fails the gate command and leaves another attempt
     process.execPath, [HARNESS, 'nested-storm', 'unused'], {
     resources: { tasks_max: systemd ? 32 : 4, memory_max_bytes: memory }, timeout: 10000, // wait-allow: finite resource probe deadline
   });
-  assert.equal(result.resource_reason, 'resource-tasks-max', result.stderr);
+  assert.equal(result.resource_reason, 'resource-tasks-max', `exit ${result.status}: ${diagnostics(result)}`);
   assert.equal(result.error?.code, 'resource-tasks-max');
   assert.equal(result.ok, false);
   assert.equal(sibling.exitCode, null);
@@ -639,4 +639,36 @@ test('CLI cleanup records a capped gate command and names its failure', (t) => {
   const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
   assert.ok(events.some((e) => e.detail.resource_reason === 'resource-tasks-max'));
   assert.match(h.ok(['inbox']), /resource-tasks-max/);
+});
+
+test('T465 temporary probe: storm working set and the inner attempt reason on Windows', {
+  skip: process.platform !== 'win32' && 'Windows watchdog probe',
+}, async () => {
+  const cp = require('node:child_process');
+  const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms)); // wait-allow: T465 probe lets the twelve leaves start
+  const storm = cp.spawn(process.execPath, [HARNESS, 'storm', 'unused'], { stdio: 'ignore' });
+  await pause(3000);
+  const out = cp.execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
+    'Get-CimInstance Win32_Process | ForEach-Object { "$($_.ProcessId) $($_.ParentProcessId) $($_.WorkingSetSize)" }'],
+  { encoding: 'utf8', timeout: 60000, windowsHide: true }); // wait-allow: one CIM snapshot
+  cp.spawnSync('taskkill', ['/pid', String(storm.pid), '/T', '/F'], { windowsHide: true });
+  const rows = out.trim().split(/\r?\n/).map((line) => line.trim().split(/\s+/).map(Number));
+  const tree = new Set([storm.pid]);
+  for (let changed = true; changed;) {
+    changed = false;
+    for (const [pid, parent] of rows) if (tree.has(parent) && !tree.has(pid)) { tree.add(pid); changed = true; }
+  }
+  const members = rows.filter(([pid]) => tree.has(pid));
+  const report = [`storm tree: ${members.length} processes, ${members.reduce((sum, row) => sum + row[2], 0)} bytes`,
+    `per process: ${members.map((row) => row[2]).join(' ')}`];
+  for (let round = 0; round < 5; round++) {
+    const started = Date.now();
+    const child = C.spawn(process.execPath, [HARNESS, 'storm', 'unused'], {
+      stdio: 'ignore', resources: { tasks_max: 128, memory_max_bytes: 512 * 1024 * 1024 },
+    });
+    await new Promise((accept) => child.once('exit', accept));
+    await child.containmentDone;
+    report.push(`inner round ${round}: ${child.resourceReason} after ${Date.now() - started} ms`);
+  }
+  assert.fail(report.join('\n'));
 });

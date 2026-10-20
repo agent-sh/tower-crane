@@ -27,7 +27,11 @@ if (mode === 'nested-limit' || mode === 'nested-memory') {
     stdio: 'inherit', resources: { tasks_max: 128, memory_max_bytes: 512 * 1024 * 1024 },
   });
   child.on('error', () => process.exitCode = 1);
-  child.on('exit', (code) => process.exitCode = code);
+  child.on('exit', (code) => {
+    // A cap the inner attempt reaches stops the storm before the outer watchdog can count it.
+    if (child.resourceReason) process.stderr.write(`inner attempt: ${child.resourceReason}\n`);
+    process.exitCode = code;
+  });
 } else if (mode === 'storm') {
   let count = 0;
   const timer = setInterval(() => {

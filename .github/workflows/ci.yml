@@ -103,6 +103,19 @@ jobs:
           }
         env:
           TOWER_CRANE_TEST_TMP: ${{ runner.temp }}/tower-crane-tests
+      - name: Repeat finite nested fork storm thirty times
+        shell: pwsh
+        run: |
+          $failed = 0
+          foreach ($attempt in 1..30) {
+            Write-Host "Finite nested fork storm: pass $attempt/30"
+            npm test -- test/containment.test.js --test-name-pattern="finite nested fork storm"
+            if ($LASTEXITCODE -ne 0) { $failed++ }
+          }
+          Write-Host "Finite nested fork storm: $failed of 30 failed"
+          if ($failed -ne 0) { exit 1 }
+        env:
+          TOWER_CRANE_TEST_TMP: ${{ runner.temp }}/tower-crane-tests
       - name: Repeat Claude interrupted native worker ten times
         shell: pwsh
         run: |
