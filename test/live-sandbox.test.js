@@ -278,7 +278,7 @@ test('in a real claude sandbox the agent\'s tower-crane still answers after the 
   const [out, ready, retired, probe] = ['shown.json', 'ready', 'retired', 'probe.js'].map((n) => path.join(dir, n));
   // The command marks itself started and waits for the test to retire the copy.
   fs.writeFileSync(probe, `const fs=require("fs"),cp=require("child_process");fs.writeFileSync(${JSON.stringify(ready)},"");`
-    + `const until=Date.now()+60000;while(!fs.existsSync(${JSON.stringify(retired)})&&Date.now()<until)cp.spawnSync("sleep",["1"]);${showProbe(out)}\n`);
+    + `const until=Date.now()+60000;while(!fs.existsSync(${JSON.stringify(retired)})&&Date.now()<until)cp.spawnSync("sleep",["1"]);${showProbe(out)}\n`); // wait-allow: runs in the sandbox, where test/signals.js is hidden; the test writes the file within a second
   h.ok(['brief', 'set', 'T1', '-'], {
     input: `Sandbox probe set up by the owner. Run exactly this one command with the Bash tool, then reply with its exit code and stop. Do not run tower-crane yourself.\n\n${node} ${JSON.stringify(probe)}\n`,
   });
