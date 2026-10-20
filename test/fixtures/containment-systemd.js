@@ -11,8 +11,9 @@ const types = { PIDs: 'au', Slice: 's', TasksMax: 't', MemoryMax: 't', MemorySwa
   OOMPolicy: 's', Delegate: 'b' };
 
 function apply(properties) {
-  if (properties.OOMPolicy !== 'kill') throw new Error('OOMPolicy must be kill');
-  writeAtomic(path.join(group, 'memory.oom.group'), '1');
+  if (properties.OOMPolicy !== 'continue') throw new Error('OOMPolicy must be continue');
+  // systemd writes memory.oom.group=0 for OOMPolicy=continue; the runner sets it after.
+  writeAtomic(path.join(group, 'memory.oom.group'), '0');
   fs.appendFileSync(log, JSON.stringify(properties) + '\n');
 }
 

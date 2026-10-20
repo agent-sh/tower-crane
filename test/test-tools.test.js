@@ -178,9 +178,11 @@ test('the test runner emits one capped concurrency value, including repeated and
   ]) {
     const probe = `
       require('node:os').availableParallelism = () => ${cores};
-      require('node:child_process').spawnSync = (command, args) => {
+      require('node:child_process').spawn = (command, args) => {
         console.log(JSON.stringify(args));
-        return { status: 0 };
+        const child = new (require('node:events').EventEmitter)();
+        process.nextTick(() => child.emit('exit', 0, null));
+        return child;
       };
     `;
     const preload = path.join(h.base, 'runner-probe.js');
