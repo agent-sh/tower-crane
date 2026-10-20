@@ -290,3 +290,51 @@ test('live Claude probes use the requested provider and environment file without
   assert.equal(project.ladder.review.provider, undefined);
   assert.equal(project.ladder.review.env_file, undefined);
 });
+
+test('the suite profile sums leaf tests per file and marks tests that ran beside each other', () => {
+  const { summarize, report } = require('../scripts/suite-profile');
+  const root = path.join(ROOT, 'profile-root');
+  const file = (name) => path.join(root, 'test', name);
+  const records = [
+    { name: 'sleeps', nesting: 0, file: file('a.test.js'), pid: 1, leaf: true, start_ms: 0, wall_ms: 1000, cpu_ms: 100 },
+    { name: 'works', nesting: 0, file: file('a.test.js'), pid: 1, leaf: true, start_ms: 1000, wall_ms: 500, cpu_ms: 500 },
+    { name: 'group', nesting: 0, file: file('b.test.js'), pid: 2, leaf: false, start_ms: 0, wall_ms: 900, cpu_ms: 800 },
+    { name: 'x', nesting: 1, file: file('b.test.js'), pid: 2, leaf: true, start_ms: 0, wall_ms: 600, cpu_ms: 400 },
+    { name: 'y|z\\', nesting: 1, file: file('b.test.js'), pid: 2, leaf: true, start_ms: 100, wall_ms: 800, cpu_ms: 400 },
+    { file: file('a.test.js'), process: true, wall_ms: 1600, cpu_ms: 650 },
+    { file: file('b.test.js'), process: true, wall_ms: 1000, cpu_ms: 850 },
+  ];
+  const s = summarize(records, root);
+  assert.equal(s.test_count, 4, 'the describe holds its tests and is not one');
+  assert.deepEqual(s.tests.map((t) => [t.name, t.file, t.cpu_ms]),
+    [['sleeps', 'test/a.test.js', 100], ['y|z\\', 'test/b.test.js', null], ['x', 'test/b.test.js', null], ['works', 'test/a.test.js', 500]]);
+  assert.deepEqual([s.test_wall_ms, s.serial_wall_ms, s.serial_cpu_ms, s.file_wall_ms, s.file_cpu_ms], [2900, 1500, 600, 2600, 1500]);
+  assert.deepEqual(s.files.map((f) => [f.file, f.tests, f.wall_ms, f.cpu_ms]), [['test/a.test.js', 2, 1600, 650], ['test/b.test.js', 2, 1000, 850]]);
+  const text = report(s, { wall_ms: 1700, concurrency: 2, top: 30 });
+  assert.match(text, /^suite wall 1\.7 s at 2 file workers; 4 tests, 2\.9 s summed test time$/m);
+  assert.match(text, /^serial tests: 1\.5 s, 0\.6 s CPU: 60% waiting$/m);
+  assert.match(text, /^\| 1 \| sleeps \| `test\/a\.test\.js` \| 1\.0 \| 0\.1 \| 90% \|$/m);
+  assert.match(text, /^\| 2 \| y\\\|z\\\\ \| `test\/b\.test\.js` \| 0\.8 \| - \| overlapped \|$/m, 'cells escape the separator and the escape');
+});
+
+test('the suite profile records each test of a real run with its CPU', { skip: process.platform !== 'linux' && 'CPU comes from /proc' }, (t) => {
+  const h = makeRepo(t);
+  const fixture = path.join(h.base, 'profiled.test.js');
+  fs.writeFileSync(fixture, `
+const test = require('node:test');
+test('waits', () => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 400); }); // wait-allow: the profile measures a timer wait
+test('spins', () => { const end = Date.now() + 400; while (Date.now() < end); }); // wait-allow: the profile measures CPU work
+`);
+  const out = path.join(h.base, 'profile.json');
+  const r = cp.spawnSync(process.execPath, [path.join(ROOT, 'scripts', 'suite-profile.js'), '--test-concurrency=1', '--json', out, fixture],
+    { cwd: ROOT, env: { ...h.env, TOWER_CRANE_TEST_TMP: h.base }, encoding: 'utf8', timeout: 300000 });
+  assert.equal(r.status, 0, r.stderr + r.stdout);
+  const profile = JSON.parse(fs.readFileSync(out, 'utf8'));
+  const byName = Object.fromEntries(profile.tests.map((x) => [x.name, x]));
+  assert.deepEqual(Object.keys(byName).sort(), ['spins', 'waits']);
+  assert.ok(byName.waits.wall_ms >= 400 && byName.waits.cpu_ms < 200, JSON.stringify(byName.waits));
+  assert.ok(byName.spins.cpu_ms >= 300, JSON.stringify(byName.spins));
+  assert.equal(profile.files.length, 1);
+  assert.match(r.stdout, /^serial tests: .* waiting$/m);
+  assert.deepEqual(fs.readdirSync(h.base).filter((name) => name.startsWith('suite-profile-')), [], 'the record directory is removed');
+});

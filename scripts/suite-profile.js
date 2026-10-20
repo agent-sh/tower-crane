@@ -110,6 +110,8 @@ function summarize(records, root) {
   };
 }
 
+// A test name is a table cell: escape the escape character first, then the cell separator.
+const cell = (text) => text.replace(/\\/g, '\\\\').replace(/\|/g, '\\|');
 const share = (wait, wall) => (wall > 0 ? `${Math.round(100 * Math.max(0, wait) / wall)}%` : '-');
 const sec = (ms) => (ms / 1000).toFixed(1);
 
@@ -119,7 +121,7 @@ function report(s, { wall_ms: wall, concurrency, top }) {
   lines.push(`files: ${sec(s.file_wall_ms)} s of process time, ${sec(s.file_cpu_ms)} s CPU: ${share(s.file_wall_ms - s.file_cpu_ms, s.file_wall_ms)} waiting`);
   lines.push(`serial tests: ${sec(s.serial_wall_ms)} s, ${sec(s.serial_cpu_ms)} s CPU: ${share(s.serial_wall_ms - s.serial_cpu_ms, s.serial_wall_ms)} waiting`);
   lines.push('', `| # | test | file | wall s | CPU s | waiting |`, '| ---: | --- | --- | ---: | ---: | ---: |');
-  s.tests.slice(0, top).forEach((t, i) => lines.push(`| ${i + 1} | ${t.name.replace(/\|/g, '\\|')} | \`${t.file}\` | ${sec(t.wall_ms)} | ${t.cpu_ms === null ? '-' : sec(t.cpu_ms)} | ${t.cpu_ms === null ? 'overlapped' : share(t.wall_ms - t.cpu_ms, t.wall_ms)} |`));
+  s.tests.slice(0, top).forEach((t, i) => lines.push(`| ${i + 1} | ${cell(t.name)} | \`${t.file}\` | ${sec(t.wall_ms)} | ${t.cpu_ms === null ? '-' : sec(t.cpu_ms)} | ${t.cpu_ms === null ? 'overlapped' : share(t.wall_ms - t.cpu_ms, t.wall_ms)} |`));
   lines.push('', `| file | tests | process wall s | CPU s | waiting |`, '| --- | ---: | ---: | ---: | ---: |');
   for (const f of s.files.slice(0, top)) lines.push(`| \`${f.file}\` | ${f.tests} | ${sec(f.wall_ms)} | ${sec(f.cpu_ms)} | ${share(f.wall_ms - f.cpu_ms, f.wall_ms)} |`);
   return lines.join('\n');
