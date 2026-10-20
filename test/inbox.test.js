@@ -41,7 +41,15 @@ function setup(t) {
     h.ok(['claim', id, '--agent', `worker-${id}`]);
     h.ok(['submit', id, '--sha', h.sha, ...(pr ? ['--pr', String(pr)] : []), '--agent', `worker-${id}`]);
   };
-  h.inbox = () => h.json(['inbox', '--agent', 'orchestrator']);
+  h.refresh = () => {
+    const r = h.run(['wait', '--inbox', '--observe', '--after', 'now', '--types', 'inbox item',
+      '--timeout', '0.01', '--agent', 'orchestrator']); // wait-allow: run one host follower refresh before reading its cached GitHub findings
+    assert.ok([0, 2].includes(r.code), r.stderr);
+  };
+  h.inbox = (refresh = true) => {
+    if (refresh) h.refresh();
+    return h.json(['inbox', '--agent', 'orchestrator']);
+  };
   h.logs = () => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
   return h;
 }
@@ -115,29 +123,38 @@ test('inbox reuses successful GitHub reads for a minute and refreshes changed su
   h.submit(id, 7);
   const first = h.inbox();
   const before = h.github().calls.length;
-  assert.deepEqual(h.inbox(), first);
+  assert.deepEqual(h.inbox(false), first);
   assert.equal(h.github().calls.length, before, 'a second CLI process reuses the GitHub observations');
   const cacheFile = path.join(h.state, 'inbox-github-cache.json');
   const cache = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
   for (const entry of Object.values(cache.entries)) entry.at = '2000-01-01T00:00:00.000Z';
   fs.writeFileSync(cacheFile, JSON.stringify(cache));
-  h.inbox();
+  assert.ok(h.inbox(false).items.some((i) => i.kind === 'github_pending'));
+  assert.equal(h.github().calls.length, before, 'expired data does not launch foreground reads');
+  h.refresh();
   assert.ok(h.github().calls.length > before, 'expired reads refresh');
   const current = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
   for (const entry of Object.values(current.entries)) entry.at = '2999-01-01T00:00:00.000Z';
   fs.writeFileSync(cacheFile, JSON.stringify(current));
   const expired = h.github().calls.length;
-  h.inbox();
+  assert.ok(h.inbox(false).items.some((i) => i.kind === 'github_pending'));
+  h.refresh();
   assert.ok(h.github().calls.length > expired, 'future cache stamps are not trusted');
   h.ok(['rework', id, '--reason', 'new submission']);
   h.ok(['claim', id, '--agent', `worker-${id}`]);
   h.ok(['submit', id, '--sha', h.sha, '--pr', '7', '--agent', `worker-${id}`]);
   const resubmitted = h.github().calls.length;
-  h.inbox();
+  assert.ok(h.inbox(false).items.some((i) => i.kind === 'github_pending'));
+  h.refresh();
   assert.ok(h.github().calls.length > resubmitted, 'a new revision invalidates cached PR observations');
+  h.ok(['task', 'update', id, '--status', 'cancelled']);
+  h.refresh();
+  const pruned = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
+  assert.ok(Object.values(pruned.entries).every((entry) => !entry.tasks.some((task) => task[0] === id)),
+    'closed task observations are pruned from the cache file');
 });
 
-test('slow inbox GitHub reads share a deadline and preserve explicit errors and local comments', (t) => {
+test('foreground inbox never launches slow GitHub reads and preserves refreshed failures and local comments', (t) => {
   for (const endpoint of ['', '/code-scanning/', '/issues/']) {
     const h = setup(t);
     const id = h.add(`Slow GitHub ${endpoint}`);
@@ -149,15 +166,20 @@ test('slow inbox GitHub reads share a deadline and preserve explicit errors and 
     }
     event(h, id, 'task note', { text: 'Keep owner input' }, 'owner');
     h.save({ ...h.github(), delayMs: 4000, delayEndpoint: endpoint });
-    const started = performance.now();
-    const data = h.inbox();
-    assert.ok(performance.now() - started < 5000, 'the snapshot does not wait for each slow endpoint'); // wait-allow: verify the inbox deadline contract with stalled GitHub subprocesses
-    assert.ok(data.items.some((i) => i.kind === 'owner_comment' && i.text === 'Keep owner input'));
-    assert.ok(data.items.some((i) => i.kind === 'github_error' && /deadline|timed out/.test(i.reason)),
-      'timeouts remain actionable GitHub errors');
     const before = h.github().calls.length;
-    h.inbox();
-    assert.ok(h.github().calls.length > before, 'failed reads are retried, not cached as empty success');
+    const started = performance.now();
+    const data = h.inbox(false);
+    assert.ok(performance.now() - started < 3000, 'foreground reads never wait for GitHub'); // wait-allow: verify the three-second inbox contract with cold GitHub cache and stalled endpoints
+    assert.ok(data.items.some((i) => i.kind === 'owner_comment' && i.text === 'Keep owner input'));
+    assert.equal(data.items.filter((i) => i.kind === 'github_pending').length, 1, 'one summary covers missing reads');
+    assert.equal(data.items.filter((i) => i.kind === 'github_error').length, 0, 'missing cache entries are not GitHub failures');
+    assert.equal(h.github().calls.length, before, 'no foreground GitHub subprocesses');
+    h.save({ ...h.github(), delayMs: 0, failEndpoint: '/code-scanning/' });
+    h.refresh();
+    const refreshed = h.github().calls.length;
+    const failures = h.inbox(false).items.filter((i) => i.kind === 'github_error');
+    assert.ok(failures.some((i) => /GitHub unavailable/.test(i.reason)), 'real background failures stay visible');
+    assert.equal(h.github().calls.length, refreshed, 'cached failures do not trigger foreground reads');
   }
 });
 
@@ -263,7 +285,7 @@ test('old closed-task messages and decision answers disappear without changing t
   decisions.decisions.at(-1).answered_at = recent;
   fs.writeFileSync(file, JSON.stringify(decisions));
   const before = h.logs();
-  const items = h.inbox().items;
+  const items = h.inbox(false).items;
   for (const [index, row] of cases.entries()) {
     const messageHidden = [merged, cancelled].includes(row.tasks[0]);
     assert.equal(items.some((i) => i.kind === 'message' && i.text === `${index}:${old}`), !messageHidden, JSON.stringify(row));
@@ -287,7 +309,7 @@ test('one fixture exposes every inbox kind and resolving commands clear their co
   h.ok(['rework', rework, '--reason', 'base conflict in parser.js']);
   const dead = h.add('Dead claim');
   h.ok(['claim', dead, '--agent', 'gone']);
-  event(h, dead, 'spawn', { agent: 'gone', role: 'worker', pid: 2147483647, host: os.hostname() });
+  event(h, dead, 'spawn', { agent: 'gone', role: 'worker', harness: 'command', pid: 2147483647, host: os.hostname() });
   const accepted = h.add('Accepted but not merged');
   h.submit(accepted, 7);
   h.reviewer(accepted, 'reviewer', h.sha);

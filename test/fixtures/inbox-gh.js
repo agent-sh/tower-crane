@@ -43,7 +43,7 @@ updateJson(file, (data) => {
   answer(data);
   return data;
 });
-if (pause) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, pause); // wait-allow: stall the GitHub fixture to verify inbox cancellation at its deadline
+if (pause) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, pause); // wait-allow: stall GitHub to verify foreground inbox reads never launch network requests
 // The review lands while this fetch is in flight, after the lock is released: the
 // evidence command may run gh, which takes the same lock.
 if (review) {
@@ -101,6 +101,6 @@ function answer(data) {
 
 function delay(data) {
   if (data.delayMs && (!data.delayEndpoint || args[1]?.includes(data.delayEndpoint))) {
-    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, data.delayMs); // wait-allow: stall base CI reads to verify the shared inbox deadline
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, data.delayMs); // wait-allow: stall base CI to verify foreground inbox reads never launch network requests
   }
 }
