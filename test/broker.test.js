@@ -14,7 +14,7 @@ const harnessHooks = require('../lib/harness-hooks');
 const { resolveCommand, parseOptions, GLOBAL } = require('../bin/tower-crane');
 const { readPublished } = require('./atomic-file');
 const { socketDir } = require('./socket-dir');
-const { assertFits, MAX_SOCKET_PATH } = require('../lib/socket-path');
+const { assertFits, MAX_SOCKET_PATH, agentDir } = require('../lib/socket-path');
 
 // This process plays the host monitor; fixture agents still run their own shims.
 // The worker's outer shim would refuse the monitor's index-pack and push.
@@ -59,11 +59,14 @@ test('short socket directories serve claude, codex and mixed routes with long fi
   const s = scratch(t);
   for (const [harnesses, stale] of [
     [['claude'], 'file'],
-    [['codex'], null],
+    [['codex'], 'owner'],
     [['claude', 'codex'], 'directory'],
     [['claude'], 'socket'],
+    [['codex'], 'owner-link'],
   ]) {
-    const granted = socketDir(t);
+    const granted = agentDir(path.join(s.base, harnesses.join('-'), stale), process.env);
+    fs.mkdirSync(granted, { mode: 0o700 });
+    t.after(() => fs.rmSync(granted, { recursive: true, force: true }));
     const job = { ...s.job, broker_harnesses: harnesses, agent_socket_dir: granted,
       agent_tmp: path.join(s.base, 'too-long-'.repeat(20)) };
     const previous = path.join(granted, 's');
@@ -75,6 +78,18 @@ test('short socket directories serve claude, codex and mixed routes with long fi
       assert.equal(killed.signal, 'SIGKILL');
       assert.ok(fs.lstatSync(previous).isSocket());
     }
+    if (stale === 'owner') {
+      const dead = require('node:child_process').spawnSync(process.execPath, ['-e', '']);
+      assert.equal(dead.status, 0);
+      const old = Date.now() - 10 * 60_000;
+      fs.writeFileSync(path.join(granted, 'owner.json'), JSON.stringify({ pid: dead.pid, host: os.hostname(), started: old }));
+      fs.utimesSync(granted, old / 1000, old / 1000);
+    }
+    const protectedFile = path.join(s.base, 'owner-target');
+    if (stale === 'owner-link') {
+      fs.writeFileSync(protectedFile, 'keep');
+      fs.symlinkSync(protectedFile, path.join(granted, 'owner.json'));
+    }
     const broker = await B.start(job);
     try {
       const { socket } = JSON.parse(fs.readFileSync(job.broker, 'utf8'));
@@ -85,6 +100,7 @@ test('short socket directories serve claude, codex and mixed routes with long fi
       } else assert.equal(socket, undefined, 'Codex keeps its TCP transport');
       assert.equal(fs.statSync(granted).mode & 0o777, 0o700);
       assert.equal(JSON.parse(fs.readFileSync(path.join(granted, 'owner.json'), 'utf8')).pid, process.pid);
+      if (stale === 'owner-link') assert.equal(fs.readFileSync(protectedFile, 'utf8'), 'keep', 'the monitor never writes through an agent-planted owner link');
       assert.equal(await B.dead(job.broker), false, 'the short socket accepts connections');
     } finally {
       broker.close();
