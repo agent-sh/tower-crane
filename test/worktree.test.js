@@ -96,7 +96,7 @@ test('a dependent task starts from the base as it is under the dispatch lock, no
   const h = setup(t);
   h.ok(['task', 'add', '--title', 'Dependent', '--acceptance', 'builds on T1', '--dep', 'T1']);
   const W = require('../lib/worktree');
-  const repo = { root: h.repo, commonDir: path.join(h.repo, '.git') };
+  const repo = { root: h.repo, commonDir: path.join(h.repo, '.git'), stateDir: h.state };
   const st = require('../lib/state').loadState(h.state);
   const task = st.tasks.tasks.find((x) => x.id === 'T2');
   const fetched = W.prefetch(repo, st, task);
