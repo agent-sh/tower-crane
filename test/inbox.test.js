@@ -108,7 +108,7 @@ test('main push failures produce one item per current head and follow observes c
   const advance = path.join(h.base, 'advance-main-clock');
   const clock = path.join(h.base, 'main-clock.js');
   fs.writeFileSync(clock, "const fs = require('node:fs'); const real = Date.now; Date.now = () => real() + (fs.existsSync(process.env.TC_MAIN_CLOCK_ADVANCE) ? 61000 : 0);\n");
-  const follower = cp.spawn(process.execPath, ['--require', clock, '--require', HOOKS, BIN, 'wait', '--follow', '--observe', '--agent', 'orchestrator'], {
+  const follower = cp.spawn(process.execPath, ['--require', clock, '--require', HOOKS, BIN, 'wait', '--follow', '--agent', 'orchestrator'], {
     cwd: h.repo, env: { ...h.env, TC_MAIN_CLOCK_ADVANCE: advance },
   });
   const closed = once(follower, 'close');
