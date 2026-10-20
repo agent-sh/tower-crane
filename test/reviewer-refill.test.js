@@ -7,6 +7,9 @@ const path = require('node:path');
 const { cachedFixture } = require('./helpers');
 const { setup, configureHarness } = require('./automation-helpers');
 const { gateEvidence } = require('./gate-helpers');
+const { waitOnRepo } = require('./signals');
+const S = require('../lib/state');
+const Body = require('../lib/review-body');
 
 function fixture(t) {
   const h = cachedFixture(t, 'reviewer-refill', (repo) => {
@@ -169,6 +172,137 @@ Spawn.spawn = (ctx) => {
   }
 }
 
+for (const [automatic, stage, pendingExplicit] of [
+  [true, 'check', false], [true, 'admit', false],
+  [false, 'check', false], [false, 'admit', false],
+  [true, 'check', true], [true, 'admit', true],
+]) {
+    test(`a deferred ${automatic ? 'automatic' : 'explicit'} light review retains its identity at ${stage}${pendingExplicit ? ' over an explicit debt' : ''}`, async (t) => {
+      const h = fixture(t);
+      h.ok(['task', 'update', 'T2', '--status', 'cancelled']);
+      const sha = h.json(['task', 'show', 'T1']).sha;
+      const finding = { kind: 'false-claim', path: 'PR body', claim: 'An unmeasured result.' };
+      h.reviewer('T1', 'first-reviewer', sha);
+      const fail = (agent) => h.ok(['evidence', 'T1', '--agent', agent, '--type', 'review', '--fail', '--sha', sha,
+        '--summary', 'The body still claims an unmeasured result.', '--findings', JSON.stringify([finding])]);
+      fail('first-reviewer');
+      const held = path.join(h.base, 'light-held');
+      const input = path.join(h.base, 'light-marker.json');
+      const preload = path.join(h.base, 'light-governor.js');
+      fs.writeFileSync(preload, `const fs = require('node:fs');
+const G = require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'governor.js'))});
+const T = require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'tasks.js'))});
+const { TowerCraneError } = require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'util.js'))});
+const accept = T.accept;
+T.accept = (ctx) => {
+  const marker = ${automatic} && fs.existsSync(${JSON.stringify(input)})
+    ? JSON.parse(fs.readFileSync(${JSON.stringify(input)}, 'utf8')) : null;
+  return accept({ ...ctx, automatic: !!marker, ...(marker ? { bodyRecheck: marker } : {}) });
+};
+for (const method of ['check', 'admit']) {
+  const original = G[method];
+  G[method] = (ctx, unit) => {
+    if (method === ${JSON.stringify(stage)} && unit.kind === 'reviewer' && fs.existsSync(${JSON.stringify(held)})) {
+      throw Object.assign(new TowerCraneError(3, unit.task + ': reviewer deferred by the host governor: light pressure'),
+        { governorDeferred: true, task: unit.task, kind: unit.kind, reason: 'light pressure' });
+    }
+    return original(ctx, unit);
+  };
+}
+`);
+      if (pendingExplicit) {
+        fs.writeFileSync(held, '');
+        assert.equal(h.run(['accept', 'T1', '--agent', 'orchestrator'], { pre: ['--require', preload] }).code, 3);
+        assert.equal(h.json(['status']).deferred_reviewers[0].body_recheck, undefined);
+      }
+      for (let round = 1; round <= 2; round++) {
+        const task = h.json(['task', 'show', 'T1']);
+        const marker = { sha, revision: 1, pr: 7, branch: 'fixture-change',
+          review: task.evidence.findLast((e) => e.type === 'review'), body_hash: `corrected-${round}` };
+        fs.writeFileSync(input, JSON.stringify(marker));
+        fs.writeFileSync(held, '');
+        assert.equal(h.run(['accept', 'T1', '--agent', 'orchestrator'], { pre: ['--require', preload] }).code, 3);
+        const debt = h.json(['status']).deferred_reviewers[0];
+        const pass = () => h.run(['wait', '--after', String(fs.statSync(path.join(h.state, 'events.jsonl')).size),
+          '--types', 'never', '--timeout', '0.01', '--agent', 'orchestrator'], { pre: ['--require', preload] }); // wait-allow: bounded refill before and after lifting the light-review deferral
+        assert.equal(pass().code, 2);
+        fs.unlinkSync(held);
+        const result = pass();
+        assert.equal(result.code, 2, result.stderr);
+        const spawn = h.logs().findLast((e) => e.cmd === 'spawn' && e.detail.role === 'reviewer');
+        assert.deepEqual(spawn.detail.body_recheck, automatic ? marker : undefined, 'retry keeps the original review context');
+        assert.deepEqual(debt.body_recheck, automatic ? marker : undefined);
+        await waitOnRepo(h, () => h.logs().some((e) => e.cmd === 'spawn exit' && e.detail.agent === spawn.detail.agent),
+          'the retried light reviewer exits', { signal: t.signal });
+        fail(spawn.detail.agent);
+        const now = S.loadState(h.state);
+        const current = now.tasks.tasks.find((task) => task.id === 'T1');
+        assert.equal(current.evidence.at(-1).body_recheck, automatic ? true : undefined, 'evidence keeps the automatic marker');
+        assert.equal(Body.failures(now, current), automatic ? round : 0);
+        assert.equal(!!Body.state(now, current)?.stuck, automatic && round === 2, 'only two automatic failures stop repair');
+        if (automatic && round === 2) {
+          assert.ok(h.json(['inbox', '--agent', 'orchestrator']).items.some((i) => i.task === 'T1' && i.kind === 'review_body_stuck'),
+            'the CLI surfaces the two-failure stop');
+        }
+      }
+    });
+}
+
+for (const schedule of ['each check', 'each second']) {
+  for (const stage of ['check', 'admit']) {
+    test(`changing reasons ${schedule} at ${stage} keep one debt and let wait expire`, (t) => {
+      const h = fixture(t);
+      h.ok(['task', 'update', 'T2', '--status', 'cancelled']);
+      const latest = path.join(h.base, 'latest-governor.json');
+      const preload = path.join(h.base, 'changing-governor.js');
+      fs.writeFileSync(preload, `const fs = require('node:fs');
+const G = require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'governor.js'))});
+const { TowerCraneError } = require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'util.js'))});
+const latest = ${JSON.stringify(latest)};
+for (const method of ['check', 'admit']) {
+  const original = G[method];
+  G[method] = (ctx, unit) => {
+    if (method === ${JSON.stringify(stage)} && unit.kind === 'reviewer') {
+      const prior = fs.existsSync(latest) ? JSON.parse(fs.readFileSync(latest, 'utf8')) : { checks: 0 };
+      const checks = prior.checks + 1;
+      // A broken self-wake loop must fail the fixture before flooding its log.
+      if (checks > 32) throw new Error('runaway governor probes');
+      const reading = ${JSON.stringify(schedule)} === 'each check' ? checks : Math.floor(Date.now() / 1000);
+      const reason = 'load: ' + reading + ' on 16 cores';
+      fs.writeFileSync(latest, JSON.stringify({ checks, reason }));
+      throw Object.assign(new TowerCraneError(3, unit.task + ': reviewer deferred by the host governor: ' + reason),
+        { governorDeferred: true, task: unit.task, kind: unit.kind, reason });
+    }
+    return original(ctx, unit);
+  };
+}
+const view = G.view;
+G.view = (ctx, project) => {
+  const current = view(ctx, project);
+  if (fs.existsSync(latest)) current.deferred.push({ task: 'T1', kind: 'reviewer',
+    reason: JSON.parse(fs.readFileSync(latest, 'utf8')).reason, since: '2026-10-20T12:00:00Z', at: new Date().toISOString() });
+  return current;
+};
+`);
+      assert.equal(h.run(['accept', 'T1', '--agent', 'orchestrator'], { pre: ['--require', preload] }).code, 3);
+      const debt = h.logs().find((e) => e.cmd === 'review dispatch deferred').detail;
+      const result = h.run(['wait', '--after', String(fs.statSync(path.join(h.state, 'events.jsonl')).size),
+        '--types', 'never', '--timeout', '2.1', '--agent', 'orchestrator'], { pre: ['--require', preload] }); // wait-allow: two fallback ticks exercise changing readings and the deadline
+      assert.equal(h.logs().filter((e) => e.cmd === 'review dispatch deferred').length, 1, 'reading changes never append another outstanding debt');
+      assert.equal(result.code, 2, result.stderr);
+      assert.equal(JSON.parse(result.stdout).type, 'timeout', 'the wait reaches its own deadline');
+      const observed = JSON.parse(fs.readFileSync(latest, 'utf8'));
+      assert.ok(observed.checks > 1, 'the governor is retried during the wait');
+      assert.notEqual(observed.reason, debt.reason);
+      const status = h.json(['status'], { pre: ['--require', preload] });
+      assert.equal(status.deferred_reviewers[0].reason, observed.reason, 'status reads the latest registry hint');
+      assert.equal(status.deferred_reviewers[0].since, debt.since, 'the first deferral time is stable');
+      assert.ok(h.ok(['status'], { pre: ['--require', preload] })
+        .includes(`deferred reviewers: T1 since ${debt.since}: ${observed.reason}`), 'text status has the live reason too');
+    });
+  }
+}
+
 test('reviewer dispatch debt follows the current submission and verdict', () => {
   const R = require('../lib/reviewer');
   const sha = 'a'.repeat(40), other = 'b'.repeat(40);
@@ -196,5 +330,31 @@ test('reviewer dispatch debt follows the current submission and verdict', () => 
   ]) {
     const st = { tasks: { tasks: [{ ...task, ...changed }] }, events };
     assert.equal(R.deferredDispatches(st).length, expected, name);
+  }
+  for (const [name, hints, reason] of [
+    ['current registry hint', [{ task: 'T1', kind: 'reviewer', reason: 'fresh pressure' }], 'fresh pressure'],
+    ['latest hint', [{ task: 'T1', kind: 'reviewer', reason: 'earlier pressure' }, { task: 'T1', kind: 'reviewer', reason: 'fresh pressure' }], 'fresh pressure'],
+    ['expired hint', [], 'pressure'],
+    ['another kind', [{ task: 'T1', kind: 'worker', reason: 'worker pressure' }], 'pressure'],
+    ['another task', [{ task: 'T2', kind: 'reviewer', reason: 'other pressure' }], 'pressure'],
+  ]) {
+    const st = { tasks: { tasks: [task] }, events: [deferred] };
+    const before = structuredClone(st);
+    assert.equal(R.deferredDispatches(st, { deferred: hints })[0].reason, reason, name);
+    assert.deepEqual(st, before, 'status never updates the stored debt');
+  }
+  const marker = { sha, revision: 1, body_hash: 'automatic-context' };
+  const context = { cmd: 'review dispatch context', task: 'T1', detail: { sha, revision: 1, body_recheck: marker } };
+  for (const [name, events, expected] of [
+    ['upgrade outstanding explicit debt', [deferred, context], marker],
+    ['another head', [deferred, { ...context, detail: { ...context.detail, sha: other } }], undefined],
+    ['another revision', [deferred, { ...context, detail: { ...context.detail, revision: 2 } }], undefined],
+    ['another task', [deferred, { ...context, task: 'T2' }], undefined],
+    ['settled debt', [deferred, spawn, context], undefined],
+  ]) {
+    const st = { tasks: { tasks: [task] }, events };
+    const before = structuredClone(st);
+    assert.deepEqual(R.deferredDispatches(st)[0]?.body_recheck, expected, name);
+    assert.deepEqual(st, before, 'context reconstruction never mutates events');
   }
 });

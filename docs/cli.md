@@ -560,7 +560,12 @@ retry. A successful reviewer dispatch, a verdict, or a changed head, revision or
 submission status clears that dispatch debt. A failed PR-body verdict still
 allows a deferred light review to retry. `status` lists `deferred reviewers:
 TASK since AT: REASON`; JSON `deferred_reviewers` carries `id`, `sha`, `revision`,
-`since` and `reason`, even after the governor's registry hint expires.
+`since` and `reason`, even after the governor's registry hint expires. Automatic
+light reviews keep their `body_recheck` context through deferral, retry and
+evidence, so their failures still count toward the two-failure repair stop.
+An outstanding debt is recorded once regardless of changing governor readings.
+Status uses the latest matching reviewer reason from the governor registry,
+falling back to the recorded reason when that hint expires.
 
 A worker that exits without submitting is relaunched by the next refill, so
 the refill caps it. The supervisor records each worker exit, and in the same
