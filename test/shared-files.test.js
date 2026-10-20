@@ -411,6 +411,30 @@ test('the work skill inlines the review skill\'s blocking list word for word', (
   assert.deepEqual(inline[1].split('; '), review);
 });
 
+test('PR-body lifecycle instructions agree across orchestrator, reviewer and rework command copies', () => {
+  const copies = [
+    'skills/tower-crane/SKILL.md',
+    'skills/tower-crane-review/SKILL.md',
+    'commands/tower-crane-rework-from-review.md',
+  ];
+  const contract = [
+    ['automatic repair', /automation dispatches a body-only worker/i],
+    ['automatic light check', /automatically requests a light reviewer check/i],
+    ['head and revision preserved', /same head and revision/i],
+    ['no race with repair', /body alone while automatic repair is pending or running/i],
+    ['two failures stop', /two consecutive [^\n]*review_body_stuck/i],
+    ['correct before accept', /correct the PR body before running `(?:tower-crane )?accept ID/i],
+    ['manual fallback', /without a recorded PR or branch/i],
+  ];
+  const failures = [];
+  for (const file of copies) {
+    const text = readText(path.join(ROOT, file));
+    for (const [rule, pattern] of contract) if (!pattern.test(text)) failures.push(`${file}: ${rule}`);
+    if (/the orchestrator corrects the body, then requests/i.test(text)) failures.push(`${file}: stale manual dispatch`);
+  }
+  assert.deepEqual(failures, [], 'every plugin copy describes the implemented PR-body lifecycle');
+});
+
 test('CRLF source, docs, fragments and archive use the same canonical text in real commands', (t) => {
   const f = fixture(t);
   f.change();

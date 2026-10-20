@@ -23,6 +23,51 @@ function setup(t, gates = []) {
 }
 const ALL = ['tests', 'clean', 'ci'];
 
+test('evidence metadata handles notes and manual, ordinary and body re-check reviews', (t) => {
+  const failures = [];
+  for (const dispatch of ['none', 'ordinary', 'body']) {
+    for (const [type, verdict, explicitSha] of [
+      ['note', '--ok', false], ['note', '--fail', false],
+      ['note', '--ok', true], ['note', '--fail', true],
+      ['review', '--ok', true], ['review', '--fail', true],
+    ]) {
+      const h = cachedFixture(t, 'unreviewed evidence', (h) => {
+        h.init();
+        h.ok(['task', 'add', '--title', 'Evidence variants', '--acceptance', 'evidence records', '--kind', 'docs']);
+        h.ok(['claim', 'T1', '--agent', 'worker']);
+        const sha = h.git(['rev-parse', 'HEAD']);
+        h.ok(['submit', 'T1', '--sha', sha, '--agent', 'worker']);
+        return { sha };
+      });
+      if (dispatch !== 'none') {
+        h.reviewer('T1', 'reviewer', h.sha);
+        if (dispatch === 'body') {
+          const file = path.join(h.state, 'events.jsonl');
+          const events = fs.readFileSync(file, 'utf8').trim().split('\n').map(JSON.parse);
+          events.findLast((e) => e.cmd === 'spawn').detail.body_recheck = { sha: h.sha, revision: 1 };
+          fs.writeFileSync(file, events.map((e) => JSON.stringify(e) + '\n').join(''));
+        }
+      }
+      const row = `${dispatch}, ${type}, ${verdict}, ${explicitSha ? 'explicit' : 'default'} sha`;
+      const result = h.run(['evidence', 'T1', '--type', type, verdict, '--agent', 'reviewer', '--revision', '1', '--json',
+        ...(explicitSha ? ['--sha', h.sha] : []),
+        ...(type === 'review' && verdict === '--fail' ? ['--findings',
+          '[{"kind":"false-claim","path":"PR body","claim":"A prose claim is false."}]'] : [])]);
+      if (result.code !== 0) {
+        failures.push(`${row}: ${result.stderr}`);
+        continue;
+      }
+      const entry = JSON.parse(result.stdout);
+      assert.equal(entry.sha, h.sha, row);
+      assert.equal(entry.ok, verdict === '--ok', row);
+      assert.equal(entry.body_recheck === true, type === 'review' && dispatch === 'body', row);
+      assert.equal(h.json(['task', 'show', 'T1']).evidence.at(-1).body_recheck === true,
+        type === 'review' && dispatch === 'body', `${row}: stored metadata`);
+    }
+  }
+  assert.deepEqual(failures, [], 'every evidence variant records without a dispatch metadata crash');
+});
+
 test('manual software evidence is refused for either verdict and every agent without writing state', (t) => {
   const h = setup(t);
   const before = fs.readFileSync(path.join(h.state, 'tasks.json'), 'utf8');
