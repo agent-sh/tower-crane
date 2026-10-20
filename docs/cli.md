@@ -533,8 +533,8 @@ capacity, the host clears verified dead reservations under the state lock,
 including reservations from cancelled tasks. Dispatch refusals
 are reported once on stderr per wait while dispatch inputs are unchanged.
 Changed task or brief data, routing, project settings or worker holders retry
-the batch. A refill the host governor defers is reported once each time the
-deferral starts and retried on every pass. A gate or suite reaction the
+the batch. The refill precheck reports each kind's governor deferral once when
+it starts and retries on every pass. A gate or suite reaction the
 governor defers or stops records its `automation` event with phase `deferred`
 and the governor's message as `error`, and the same wait runs it again once
 the governor would admit it ([state.md](state.md#host-resource-governor)). Progress notes and fallback ticks alone do not retry a refusal.
@@ -547,7 +547,10 @@ wait without `--observe`.
 A governor-deferred reviewer dispatch is kept at its submitted head and revision,
 including dispatches requested by `accept` or `spawn --role review`. Every refill
 retries it alongside ready workers: urgent tasks first, then descending unblock
-count, then task id. Reviewers do not take worker slots, so full worker capacity
+count, then task id. Refill checks each unit kind independently: a governor
+deferral skips the remaining tasks of that kind while the other kind can still
+dispatch. Both kinds are checked again on the next pass. A dispatch lock still
+stops the whole batch. Reviewers do not take worker slots, so full worker capacity
 does not prevent their retry. A running reaction for the same task postpones the
 retry. A successful reviewer dispatch, a verdict, or a changed head, revision or
 submission status clears that dispatch debt. A failed PR-body verdict still
