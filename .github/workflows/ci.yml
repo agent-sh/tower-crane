@@ -83,8 +83,9 @@ jobs:
     name: repeat (windows-latest, node 26)
     if: github.event_name != 'pull_request'
     runs-on: windows-latest
-    # About 25 to 35 minutes: ten passes of the authority files take about 16.
-    timeout-minutes: 55
+    # About 50 to 65 minutes: ten passes of the authority files take about 16 and ten of
+    # the mutation tests about 25.
+    timeout-minutes: 85
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -129,6 +130,17 @@ jobs:
           foreach ($attempt in 1..10) {
             Write-Host "Owner authority and board approval files: pass $attempt/10"
             npm test -- test/authority.test.js test/approval-context.test.js test/board-controls.test.js test/windows-ancestry.test.js
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+        env:
+          TOWER_CRANE_TEST_TMP: ${{ runner.temp }}/tower-crane-tests
+      # Each pass asserts that every process its mutant runs started has stopped.
+      - name: Repeat mutation containment tests ten times
+        shell: pwsh
+        run: |
+          foreach ($attempt in 1..10) {
+            Write-Host "Mutation containment tests: pass $attempt/10"
+            npm test -- test/mutants.test.js
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
         env:
