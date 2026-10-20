@@ -1312,7 +1312,7 @@ Local CI adds `receipt` to its evidence and event detail. Both copies must match
 
 `source_digest` is a SHA-256 restatement of the tree for consumers that do not trust SHA-1, computed from its tracked paths, modes and object IDs, including source blob IDs. It is fully determined by `tree_hash`. The runner computes both identities before execution; it refuses tracked-source changes or a merge result that changes while the command runs. The command runs in a temporary worktree checked out clean at `merge_sha`, a commit of the merged tree whose parents are `base_sha` and `head_sha`, so a check that requires a clean tree passes. Its author and committer are `Tower Crane <tower-crane@localhost>` at the newer parent's commit time, so the same base and head give the same commit. No ref names it and nothing is pushed. A failing execution still records its exit, signal and duration.
 
-With `ci.local` configured, an ok CI gate needs a local receipt with exit 0, no signal, nonnegative duration, the resolved argv and timeout, and a matching successful command receipt. The receipt's `variant` is `default`, `kind:KIND` or `task:ID`, matching the selected default, kind mapping or task override. A different or missing variant fails even when argv and timeout are identical. The full head SHA, tree hash and source digest must match the current submitted head merged with the selected base. The latest audited evidence is checked by acceptance, merge and task gate reports. A different head fails even if the tree is identical; a changed merge result fails even if the head is unchanged. Changing the resolved variant, command or timeout, or switching CI modes, invalidates its earlier pass. Changing an unselected mapping has no effect. Invalid local policy or task overrides fail closed. Base selection follows dispatch using existing local and origin refs without fetching during `check ci`, acceptance or task reports; metadata queries each have a 60 s deadline. Before merge validates a local receipt, it fetches origin's base with a 60 s timeout and requires that tip to equal the receipt's `base_sha`. Fetch failures and moved bases refuse before GitHub merge; a moved base needs `tower-crane check ci ID` again. Without origin, the local base is used. Once the latest audited merge evidence for the current head and revision is successful, reports retain the recorded CI result without validating it against later base changes, and repeated merges skip the fetch. An unaudited merge marker cannot bypass validation. No hosted API is needed for local CI. The existing hosted CI rules apply when local CI is absent.
+With `ci.local` configured, an ok CI gate needs a local receipt with exit 0, no signal, nonnegative duration, the resolved argv and timeout, and a matching successful command receipt. The receipt's `variant` is `default`, `kind:KIND` or `task:ID`, matching the selected default, kind mapping or task override. A different or missing variant fails even when argv and timeout are identical. The full head SHA, tree hash and source digest must match the current submitted head merged with the selected base. The latest audited evidence is checked by acceptance, merge and task gate reports. A different head fails even if the tree is identical; a changed merge result fails even if the head is unchanged. A base move with the same merged tree and source digest preserves the receipt for acceptance and task gate reports, including when a lower dependency lands with changes the checked head already contains. Changing the resolved variant, command or timeout, or switching CI modes, invalidates its earlier pass. Changing an unselected mapping has no effect. Invalid local policy or task overrides fail closed. Base selection follows dispatch using existing local and origin refs without fetching during `check ci`, acceptance or task reports; metadata queries each have a 60 s deadline. The origin/base pin is a separate merge precondition. Before merge validates a local receipt, it fetches origin's base with a 60 s timeout and requires that tip to equal the receipt's `base_sha`. Fetch failures and moved bases refuse before GitHub merge; a moved base needs `tower-crane check ci ID` again. Without origin, the local base is used. Once the latest audited merge evidence for the current head and revision is successful, reports retain the recorded CI result without validating it against later base changes, and repeated merges skip the fetch. An unaudited merge marker cannot bypass validation. No hosted API is needed for local CI. The existing hosted CI rules apply when local CI is absent.
 
 Resubmitting replaces `sha` without changing `revision` or deleting evidence. Evidence at the older head stays in the audit trail and no longer counts for the new head. Resubmitting the same sha preserves gates only within the same revision; rework or a changed brief requires fresh evidence. The task remains `submitted`, with no claim lease; omitted branch and PR values stay unchanged. When `--branch` or `--pr` is supplied and the task already has a PR, `submit` reads its state and head branch with `gh pr view`. An open PR blocks a different PR number or a different submitted branch. If the old PR is closed or merged and the PR number changes, `submit` reads the new PR's head branch, uses it when `--branch` is omitted, and checks a supplied branch against it. Failed or unreadable lookups refuse without changing state. Accepted tasks must go through `rework` and a new claim before submission, and that claimant becomes the new `submitted_by` agent.
 
@@ -1629,6 +1629,19 @@ including those still in their retry interval; the text gate queue line appends
 `deferred by the governor: TASKS`. `inbox` carries the same `gate_queue`. Each executor drains the queue after releasing its slot; watchers
 also retry their pending notifications on their next check. State locks cover only
 reservation and receipts, never Git, GitHub, gates or model calls.
+Changing the resolved tests or cleanup gate policy, an affected task's
+effective tests mode, or CI policy with `project set` emits an `automation reconcile` request for each
+accepted, unmerged PR task that requires an affected gate. The request carries
+`sha`, `revision`, `gates` and `reason: "project gate policy changed"` and is
+queued until its reaction finishes, even if a watcher starts after the setting
+change. Setting an unchanged value queues nothing. The command's text names
+the queued tasks and gates. Tests policy includes paths, keep, expensive,
+host-only and host environment settings, the test map and its CI inputs;
+mode changes are compared per task kind. An unrelated kind's override or a
+global mode masked by the task's kind override queues nothing. Already merged tasks are excluded.
+`status` also lists `merge blocked: TASK REASON` for accepted, unmerged PRs.
+JSON carries `merge_blocked: [{id, reason}]`. It uses current gate evidence
+first, then the recorded merge queue refusal; it makes no GitHub request.
 Automatic state changes and evidence use `agent: orchestrator` and
 `via: automation`. Reactions establish an explicit authorization context
 only after verifying the caller's authority or entering from the trusted
@@ -1728,11 +1741,24 @@ that found a live executor, then `done`, or `error` with `error`. `done` and
 `{task, reason}` naming the first head of the pass that did not merge, and
 `skipped`: the `{task, reason}` heads passed over in the pass. A head
 waiting on GitHub's mergeability stops the line. A head refused for any
-other reason (a closed or unreadable PR, a moved or differently merged head, failing
-gates, a refused merge or head check) is passed over for the rest of the
+other reason (a closed or unreadable PR, a moved or differently merged head,
+remaining gate blockers, a refused merge or head check) is passed over for the rest of the
 pass and the next entry takes the line; each later pass tries it again.
 PR lookup refusals and unreadable GitHub responses use this skip path;
 unexpected execution errors still abort the queue.
+Stale and recorded failing tests, clean or CI gates go through `software()`
+while the queue holds the task's reaction reservation. Stale receipts, including
+receipts from older heads or revisions, rerun through the ordinary governed
+gate runner. A recorded confirmed failure at the accepted head and revision
+sends the task to rework and removes it from the line; it does not stay accepted
+to be passed over on every drain. Infrastructure failures use the ordinary
+retry rules before settlement. A missing command, pending CI or an
+infrastructure failure shared by the base stays blocked with its reason.
+Passing refreshes retain the independent review and acceptance and continue
+to the current-base check and merge. Local CI fetches the base ref before
+validating the merged result. A base-only move does not invalidate task reports
+or acceptance when that result is identical; the queue refreshes a stale
+origin/base pin separately when the merge precondition requires it.
 An explicit `merge --accepted` requests a busy queue once and waits for
 its observable executor to release the reservation before taking its own
 pass. The wait uses `gates.tests_timeout_min` (20 minutes by default);

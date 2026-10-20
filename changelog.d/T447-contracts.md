@@ -1,0 +1,2 @@
+- Refresh the separate origin/base pin at queued merge time.
+- Document retry and rework of recorded tests, clean and CI failures on accepted tasks.
