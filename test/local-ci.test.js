@@ -1635,7 +1635,7 @@ test('a passing local CI keeps its log without a tail or artifacts', (t) => {
   assert.ok(!fs.existsSync(path.join(h.state, 'ci-artifacts')));
 });
 
-test('local CI keeps receipts beside the log on failure and success before removing its worktree', (t) => {
+test('local CI keeps private receipts on failure and success before removing its worktree', (t) => {
   const h = fixture(t, `
 const fs = require('node:fs');
 const failed = process.argv.includes('--fail');
@@ -1660,7 +1660,9 @@ process.exit(failed ? 1 : 0);
     const kept = e.local_ci;
     assert.equal(kept.receipts.length, 1, 'overlapping globs copy a receipt once');
     const receipt = kept.receipts[0];
-    assert.equal(receipt.path, `${path.posix.dirname(kept.log)}/receipts/.local/checks/receipt.json`);
+    const run = path.posix.basename(path.posix.dirname(kept.log));
+    assert.equal(receipt.path, `ci-artifacts/${run}/receipts/.local/checks/receipt.json`);
+    assert.ok(!fs.existsSync(path.join(h.state, path.posix.dirname(kept.log), 'receipts')));
     assert.deepEqual(JSON.parse(fs.readFileSync(path.join(h.state, receipt.path), 'utf8')), {
       failure_reasons: failed ? ['step unit-tests failed'] : [],
       steps: [{ argv: ['node', 'unit-tests.js'], check: 0, outcome: failed ? 'failed' : 'passed' }],
@@ -1676,6 +1678,102 @@ process.exit(failed ? 1 : 0);
     }
     const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
     assert.deepEqual(events.findLast((v) => v.cmd === 'check ci').detail.local_ci, kept);
+  }
+});
+
+test('receipt summary variants omit credentials formed by adjacent selected fields', () => {
+  const { receiptFailures } = require('../lib/gates/local-ci');
+  const { createRedactor } = require('../lib/gates/common');
+  const token = 'ghp_T448JsonTableCredential01234567890123456';
+  const opaque = 'OpaqueT448SlashBoundary01234567890123456789';
+  const redact = createRedactor([['TOKEN', token], ['OPAQUE', opaque]]);
+  const omitted = ['[receipt summary omitted: a credential spans fields]'];
+  for (const secret of [token, opaque]) {
+    const halves = [secret.slice(0, 20), secret.slice(20)];
+    for (const receipt of [
+      { failure_reasons: halves },
+      { steps: [{ argv: ['node', ...halves], outcome: 'failed' }] },
+      { steps: [{ name: halves[0], outcome: halves[1] }] },
+      { steps: halves.map(name => ({ name, outcome: 'failed' })) },
+      { steps: [{ argv: [halves[0]], outcome: 'failed' }], failure_reasons: [halves[1]] },
+    ]) {
+      assert.deepEqual(receiptFailures(JSON.stringify(receipt), redact), omitted);
+    }
+    for (const payload of [
+      { output_lines: halves }, { output_lines: [halves] }, { [halves[0]]: halves[1] },
+    ]) {
+      const receipt = { ...payload, steps: [{ argv: ['node', 'unit-tests.js'], outcome: 'failed' }] };
+      assert.deepEqual(receiptFailures(JSON.stringify(receipt), redact), ['node unit-tests.js (outcome: failed)']);
+    }
+  }
+});
+
+test('split-credential receipt tables stay private and expose only safe summaries on fail and pass', (t) => {
+  const h = fixture(t, `
+const fs = require('node:fs');
+const token = process.env.CI_FIXTURE_TOKEN;
+const opaque = process.env.CI_FIXTURE_SECRET;
+fs.mkdirSync('.local/checks', { recursive: true });
+if (process.argv.includes('--across-files')) {
+  for (const [index, part] of [token.slice(0, 20), token.slice(20)].entries()) {
+    fs.writeFileSync('.local/checks/cross-' + index + '.json', JSON.stringify({ failure_reasons: [part] }));
+  }
+}
+for (const [kind, secret] of [['token', token], ['opaque', opaque]]) {
+  const halves = [secret.slice(0, 20), secret.slice(20)];
+  const step = { argv: ['node', 'unit-tests.js'], check: 0, outcome: 'failed' };
+  for (const [name, payload] of [
+    ['lines', { output_lines: halves }], ['nested', { output_lines: [halves] }],
+    ['key', { [halves[0]]: halves[1] }], ['reasons', { failure_reasons: halves }],
+    ['argv', { steps: [{ ...step, argv: ['node', ...halves] }] }],
+    ['name-outcome', { steps: [{ name: halves[0], outcome: halves[1] }] }]
+  ]) {
+    fs.writeFileSync('.local/checks/' + kind + '-' + name + '.json', JSON.stringify({
+      steps: [step], checks: [{ exit_code: 1 }], ...payload
+    }));
+  }
+  console.log(halves.join('\\n'));
+}
+fs.writeFileSync(process.argv[2], JSON.stringify({ cwd: process.cwd() }));
+process.exit(process.argv.includes('--fail') ? 1 : 0);
+`);
+  const token = 'ghp_T448JsonTableCredential01234567890123456';
+  const opaque = 'OpaqueT448SlashBoundary01234567890123456789';
+  h.env.CI_FIXTURE_TOKEN = token;
+  h.env.CI_FIXTURE_SECRET = opaque;
+  for (const [failed, across] of [[true, false], [false, false], [true, true], [false, true]]) {
+    h.ok(['project', 'set', '--ci-local', JSON.stringify({
+      command: [...h.command, ...(failed ? ['--fail'] : []), ...(across ? ['--across-files'] : [])], timeout: 5,
+      receipts: [across ? '.local/checks/cross-*.json' : '.local/checks/*.json'],
+    })]);
+    const r = h.run(['check', 'ci', 'T1']);
+    assert.equal(r.code, failed ? 1 : 0, r.stdout + r.stderr);
+    const e = h.readState('tasks.json').tasks[0].evidence.at(-1);
+    assert.equal(e.local_ci.receipts.length, across ? 2 : 12);
+    const run = path.posix.basename(path.posix.dirname(e.local_ci.log));
+    const logDir = path.join(h.state, path.posix.dirname(e.local_ci.log));
+    assert.deepEqual(fs.readdirSync(logDir), ['output.log']);
+    for (const copy of e.local_ci.receipts) {
+      assert.ok(copy.path.startsWith(`ci-artifacts/${run}/receipts/`), copy.path);
+      const target = path.join(h.state, copy.path);
+      assert.ok(fs.existsSync(target));
+      if (process.platform !== 'win32') {
+        assert.equal(fs.statSync(target).mode & 0o777, 0o600);
+        assert.equal(fs.statSync(path.dirname(target)).mode & 0o777, 0o700);
+      }
+    }
+    if (!across) assert.ok(e.local_ci.receipt_failures.includes('node unit-tests.js (outcome: failed, exit 1)'));
+    assert.ok(e.local_ci.receipt_failures.includes('[receipt summary omitted: a credential spans fields]'));
+    if (failed && !across) assert.match(e.summary, /node unit-tests\.js/);
+    const publicText = [
+      fs.readFileSync(path.join(h.state, e.local_ci.log), 'utf8'), JSON.stringify(e),
+      fs.readFileSync(path.join(h.state, 'tasks.json'), 'utf8'),
+      fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8'), r.stdout, r.stderr,
+    ].join('\n');
+    for (const secret of [token, opaque]) {
+      for (const part of [secret, secret.slice(0, 20), secret.slice(20)]) assert.ok(!publicText.includes(part), part);
+    }
+    assert.ok(!fs.existsSync(JSON.parse(fs.readFileSync(h.log, 'utf8')).cwd));
   }
 });
 
