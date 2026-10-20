@@ -50,45 +50,55 @@ test('the budget admits work only under every defer line, counting growth, other
     others: 3 * GiB, others_room: 2 * GiB * (1 - 1 / 30), need: 0, units: 1, projects: 1 }));
 });
 
-test('running units reserve their summed peaks until enough windows of their mix exist, then the measured 99th percentile', () => {
+test('running units reserve their summed peaks until enough windows of their mix exist, then what such sets reached together', () => {
   const at = new Date().toISOString();
-  const grown = (mix, ...gib) => gib.map((g) => ({ mix, at, grew: g * GiB }));
-  const two = [unit('worker', 1, { expected: 3 * GiB, measured: GiB }), unit('worker', 2, { expected: 3 * GiB, measured: GiB })];
+  const reached = (mix, ...gib) => gib.map((g) => ({ mix, at, total: g * GiB }));
+  const two = (gib) => [unit('worker', 1, { expected: 3 * GiB, measured: gib * GiB }), unit('worker', 2, { expected: 3 * GiB, measured: gib * GiB })];
   const many = (n, gib) => Array.from({ length: n }, () => gib);
+  // Two workers measuring 1 GiB each, expected 3 GiB each: the sum rule reserves 4 GiB.
   const cases = [
-    ['no samples: the sum', [], 'sum', 4, 0],
-    ['one short of the minimum: the sum', grown('worker:2', ...many(19, 0.5)), 'sum', 4, 19],
-    ['other mixes do not count', grown('worker:3', ...many(30, 0.5)).concat(grown('tests:1,worker:2', ...many(30, 0.5))), 'sum', 4, 0],
-    ['the minimum: under 100 samples the largest seen', grown('worker:2', ...many(19, 0.5), 1.5), 'measured', 1.5, 20],
-    ['the 99th of 100', grown('worker:2', ...Array.from({ length: 100 }, (_, i) => (i + 1) / 100)), 'measured', 0.99, 100],
-    ['measured growth past the sum is reserved in full', grown('worker:2', ...many(20, 5)), 'measured', 5, 20],
+    ['no samples: the sum', 1, [], 'sum', 4, 0],
+    ['one short of the minimum: the sum', 1, reached('worker:2', ...many(19, 2.5)), 'sum', 4, 19],
+    ['other mixes do not count', 1, reached('worker:3', ...many(30, 2.5)).concat(reached('tests:1,worker:2', ...many(30, 2.5))), 'sum', 4, 0],
+    ['the minimum: under 100 samples the largest total seen, less the set\'s size now', 1, reached('worker:2', ...many(19, 2.5), 3.5), 'measured', 1.5, 20],
+    ['the 99th of 100', 1, reached('worker:2', ...Array.from({ length: 100 }, (_, i) => 2 + (i + 1) / 100)), 'measured', 0.99, 100],
+    ['measured totals past the sum are reserved in full', 1, reached('worker:2', ...many(20, 7)), 'measured', 5, 20],
+    ['a set already past its mix\'s total reserves nothing more', 1, reached('worker:2', ...many(20, 1.5)), 'measured', 0, 20],
+    ['units admitted a moment ago and not yet measured keep the whole total', 0, reached('worker:2', ...many(20, 3.5)), 'measured', 3.5, 20],
   ];
-  for (const [name, growth, rule, gib, samples] of cases) {
-    const reg = { ...registry(two), growth };
+  for (const [name, measured, growth, rule, gib, samples] of cases) {
+    const reg = { ...registry(two(measured)), growth };
     const r = G.reserve(reg, s);
-    assert.deepEqual([r.rule, Math.round(r.bytes / GiB * 100) / 100, r.samples, r.sum, r.mix], [rule, gib, samples, 4 * GiB, 'worker:2'], name);
+    const sum = (3 - measured) * 2 * GiB;
+    assert.deepEqual([r.rule, Math.round(r.bytes / GiB * 100) / 100, r.samples, r.mix], [rule, rule === 'sum' ? sum / GiB : gib, samples, 'worker:2'], name);
+    assert.equal(r.sum, sum, `${name}: the sum`);
     assert.equal(G.assess(reading({ limit: 100 }), reg, s, 0, null).budget.growth, r.bytes, `${name}: the budget reserves it`);
   }
   assert.deepEqual(G.reserve(registry(), s), { sum: 0, mix: '', samples: 0, min: 20, bytes: 0, rule: 'sum' }, 'nothing running reserves nothing');
 });
 
-test('a growth window follows its own units, and one whose peak crossed its prediction raises the reservation', () => {
+test('a growth window follows its own units on its own level, and one whose peak crossed its prediction raises the reservation', () => {
   const small = G.settings({ governor: { growth_samples_min: 3 } });
   const t0 = Date.UTC(2026, 9, 20, 2, 0);
   const at = new Date(t0 - 3600000).toISOString();
   const a = unit('worker', 1, { expected: 3 * GiB, measured: GiB });
   const b = unit('worker', 2, { expected: 3 * GiB, measured: GiB });
-  const reg = { ...registry([a, b]), windows: [], growth: [1, 1, 1].map(() => ({ mix: 'worker:2', at, grew: GiB })) };
+  const reg = { ...registry([a, b]), windows: [], growth: [3, 3, 3].map((g) => ({ mix: 'worker:2', at, total: g * GiB })) };
   assert.deepEqual(G.observe(reg, reading({ limit: 36, used: 15 }), small, t0), []);
   assert.equal(reg.windows.length, 1, 'a window opens with the running units');
-  assert.deepEqual([reg.windows[0].mix, reg.windows[0].rule, reg.windows[0].reserved, reg.windows[0].used], ['worker:2', 'measured', GiB, 15 * GiB]);
+  assert.deepEqual([reg.windows[0].mix, reg.windows[0].rule, reg.windows[0].reserved, reg.windows[0].used, reg.windows[0].base], ['worker:2', 'measured', GiB, 15 * GiB, 2 * GiB]);
   // The set grows by 2.5 GiB together; a unit admitted after the window opened is not part of it.
   a.measured = 2 * GiB;
   b.measured = 2.5 * GiB;
   reg.units.push(unit('tests', 3, { expected: 2 * GiB, measured: 5 * GiB }));
   G.observe(reg, reading({ limit: 36, used: 22 }), small, t0 + 30000);
   assert.equal(reg.windows.length, 1, 'the next window opens a minute after the last');
-  assert.equal(reg.windows[0].grew, 2.5 * GiB);
+  assert.deepEqual([reg.windows[0].total, reg.windows[0].grew], [4.5 * GiB, 2.5 * GiB]);
+  // The host binds for a moment: the window keeps reading the level it opened on.
+  const flipped = { ...reading({ limit: 36, used: 20 }), binding: 'host' };
+  flipped.levels = [...flipped.levels, { name: 'host', used: 50 * GiB, limit: 64 * GiB }];
+  G.observe(reg, flipped, small, t0 + 45000);
+  assert.equal(reg.windows[0].slice_peak, 22 * GiB, 'another level\'s use is not the window\'s peak');
   // A unit that ended gave its memory back; the window keeps the most the set reached.
   reg.units = reg.units.filter((u) => u !== a);
   G.observe(reg, reading({ limit: 36, used: 18 }), small, t0 + 60000);
@@ -97,8 +107,9 @@ test('a growth window follows its own units, and one whose peak crossed its pred
   const closed = G.observe(reg, reading({ limit: 36, used: 18 }), small, t0 + 60 * 60000);
   assert.equal(closed.length, 1, 'the first window closes after growth_window_min');
   const w = closed[0];
-  assert.deepEqual([w.mix, w.predicted, w.actual, w.slice_peak, w.crossed], ['worker:2', 16 * GiB, 17.5 * GiB, 22 * GiB, true]);
-  assert.equal(G.reserve({ ...reg, units: [a, b] }, small).bytes, 2.5 * GiB, 'the crossing raised the reservation for the mix');
+  assert.deepEqual([w.mix, w.total, w.predicted, w.actual, w.slice_peak, w.crossed], ['worker:2', 4.5 * GiB, 16 * GiB, 17.5 * GiB, 22 * GiB, true]);
+  const fresh = [unit('worker', 4, { expected: 3 * GiB, measured: GiB }), unit('worker', 5, { expected: 3 * GiB, measured: GiB })];
+  assert.equal(G.reserve({ ...reg, units: fresh }, small).bytes, 2.5 * GiB, 'the crossing raised the reservation for the mix');
   reg.units = [];
   assert.equal(reg.windows.length, 2, 'the closing tick opened the next minute\'s window');
   assert.equal(G.observe(reg, reading({ limit: 36, used: 3 }), small, t0 + 61 * 60000).length, 2, 'windows whose units all ended close');
