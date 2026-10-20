@@ -200,7 +200,15 @@ test('the test runner emits one capped concurrency value, including repeated and
   // With one worker the two longest measured files go as absolute paths, which
   // node --test sorts first, so a long file never starts last.
   const preload = path.join(h.base, 'runner-order.js');
-  fs.writeFileSync(preload, "require('node:os').availableParallelism = () => 2; require('node:child_process').spawnSync = (command, args) => { console.log(JSON.stringify(args)); return { status: 0 }; };");
+  fs.writeFileSync(preload, `
+    require('node:os').availableParallelism = () => 2;
+    require('node:child_process').spawn = (command, args) => {
+      console.log(JSON.stringify(args));
+      const child = new (require('node:events').EventEmitter)();
+      process.nextTick(() => child.emit('exit', 0, null));
+      return child;
+    };
+  `);
   const files = ['test/accept.test.js', 'test/claim.test.js', 'test/isolation.test.js', 'test/events.test.js'];
   const r = cp.spawnSync(process.execPath, ['--require', preload, runner, ...files], { cwd: ROOT, env: h.env, encoding: 'utf8' });
   assert.equal(r.status, 0, r.stderr);
