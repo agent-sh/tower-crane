@@ -91,6 +91,8 @@ test('finding body preserves Markdown code and strips only line-start HTML comme
     ['blockquote fence', '> ```suggestion\n> <!-- visible -->\n> ```'],
     ['long fence', '````suggestion\n```\n<!-- visible -->\n````'],
     ['wrong closing fence', '~~~\n```\n<!-- visible -->\n~~~'],
+    ['list-like fence content', '```\n- ```\n<!-- visible -->\n```'],
+    ['quote-like fence content', '```\n> ```\n<!-- visible -->\n```'],
     ['unclosed fence', '```suggestion\n<!-- visible -->\nKeep this fix.'],
     ['closed fence then comment', '```\n<!-- visible -->\n```\n<!-- hidden -->\nVisible',
       '```\n<!-- visible -->\n```\n\nVisible', 15],
