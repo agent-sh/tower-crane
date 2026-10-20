@@ -114,8 +114,8 @@ test('a review that fails only on PR-body claims gets its body fixer while the o
   h.env.OWNER_REVIEW_FAIL_ONCE = path.join(h.base, 'review-failed');
   h.env.OWNER_HEADS = JSON.stringify([h.fix]);
   const github = h.github();
-  // The body fix checks the PR's head branch is the task's.
-  Object.assign(github.prs['7'], { body: 'The body as submitted.', headRefName: 'tower-crane/T1-change' });
+  // The body fix checks the PR's head branch is the task's and keeps its title.
+  Object.assign(github.prs['7'], { body: 'The body as submitted.', headRefName: 'tower-crane/T1-change', title: 'Change' });
   h.saveGithub(github);
   await runEngine(h);
   assert.equal(h.task().status, 'accepted');
