@@ -67,28 +67,35 @@ function github(t) {
 
 const POLICY = JSON.stringify({ conditions: ['review_clean', 'full_suite', 'main_ci_green'] });
 
-test('publish keeps the completed failed verdict while its run is being rerun', (t) => {
-  const h = github(t);
-  h.mainCI('success');
-  const id = h.release();
-  h.ok(['accept', id]);
-  h.ok(['project', 'set', '--publish-policy', '{"conditions":[]}']);
-  h.mainCI('failure');
-  h.json(['inbox', '--agent', 'orchestrator'], orchestrator);
-  const data = JSON.parse(fs.readFileSync(h.env.INBOX_GITHUB, 'utf8'));
-  const failed = { ...data.main_runs[0] };
-  data.main_runs = [
-    { ...failed, status: 'in_progress', conclusion: null, run_attempt: 2 },
-    { ...failed, id: 1000, run_number: 49, conclusion: 'success' },
-  ];
-  fs.writeFileSync(h.env.INBOX_GITHUB, JSON.stringify(data));
-  const publish = ['ask', '--setting', 'publish', '--change', JSON.stringify({ task: id }), '--agent', 'orchestrator'];
-  const waiting = h.run(publish, orchestrator);
-  assert.equal(waiting.code, 1);
-  assert.match(waiting.stderr, /run 1001: failure/);
-  data.main_runs[0] = { ...failed, status: 'completed', conclusion: 'success', run_attempt: 2 };
-  fs.writeFileSync(h.env.INBOX_GITHUB, JSON.stringify(data));
-  assert.match(h.ok(publish, orchestrator), /go ahead/);
+test('publish keeps completed nongreen verdicts while their runs are being rerun', (t) => {
+  for (const conclusion of ['failure', 'cancelled', 'timed_out']) {
+    const h = github(t);
+    h.mainCI('success');
+    const id = h.release();
+    h.ok(['accept', id]);
+    h.ok(['project', 'set', '--publish-policy', '{"conditions":[]}']);
+    h.mainCI(conclusion);
+    const refresh = h.run(['wait', '--inbox', '--observe', '--after', 'now', '--timeout', '0.01',
+      '--agent', 'orchestrator'], orchestrator); // wait-allow: record one completed CI observation through the host follower before simulating a rerun
+    assert.ok([0, 2].includes(refresh.code), refresh.stderr);
+    const observed = events(h).findLast((e) => e.cmd === 'main ci').detail.push;
+    assert.ok(observed.some((run) => run.id === 1001 && run.attempt === 1 && run.conclusion === conclusion),
+      'the follower records the completed verdict before the run leaves the listing');
+    const data = JSON.parse(fs.readFileSync(h.env.INBOX_GITHUB, 'utf8'));
+    const failed = { ...data.main_runs[0] };
+    data.main_runs = [
+      { ...failed, status: 'in_progress', conclusion: null, run_attempt: 2 },
+      { ...failed, id: 1000, run_number: 49, conclusion: 'success' },
+    ];
+    fs.writeFileSync(h.env.INBOX_GITHUB, JSON.stringify(data));
+    const publish = ['ask', '--setting', 'publish', '--change', JSON.stringify({ task: id }), '--agent', 'orchestrator'];
+    const waiting = h.run(publish, orchestrator);
+    assert.equal(waiting.code, 1, conclusion);
+    assert.match(waiting.stderr, new RegExp(`run 1001: ${conclusion}`));
+    data.main_runs[0] = { ...failed, status: 'completed', conclusion: 'success', run_attempt: 2 };
+    fs.writeFileSync(h.env.INBOX_GITHUB, JSON.stringify(data));
+    assert.match(h.ok(publish, orchestrator), /go ahead/);
+  }
 });
 
 test('publish gates only completed base push history, including managed workflows beyond the run window', (t) => {
