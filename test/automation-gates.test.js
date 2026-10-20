@@ -21,6 +21,26 @@ function assertReworked(h, task) {
     'the worker keeps the failing gate reason after refill');
 }
 
+for (const signal of ['SIGTERM', 'SIGKILL']) {
+  test(`an interrupted host probe retries once before rework: ${signal}`, { skip: process.platform === 'win32' }, (t) => {
+    const h = setup(t, { ci: 'pending' });
+    h.ok(['project', 'set', '--tests-cmd', 'node -e "process.exit(0)"', '--tests-mode', 'run-only']);
+    h.submit();
+    const command = `node -e "process.kill(process.pid, '${signal}')"`;
+    h.ok(['submit', 'T1', '--sha', h.sha, '--pr', '7', '--agent', 'worker', '--host-probe', command]);
+    h.consume();
+    const task = h.readState('tasks.json').tasks[0];
+    const runs = task.evidence.filter((e) => e.type === 'tests');
+    assert.equal(runs.length, 2, 'an interrupted probe retries once, not immediately reworked');
+    assertReworked(h, task);
+    for (const evidence of runs) {
+      assert.equal(evidence.runner_crash, true);
+      assert.equal(evidence.worker_failure, undefined);
+      assert.equal(evidence.receipt.host_probes[0].timed_out, false);
+    }
+  });
+}
+
 test('CI completion refreshes a pending receipt at the exact head and merges after review', (t) => {
   const h = setup(t, { ci: 'pending' });
   h.submit();
@@ -161,7 +181,7 @@ for (const obsolete of ['revision', 'sha']) {
           at: new Date().toISOString(), agent: 'orchestrator', cmd: 'automation', task: 'T1',
           detail: { source, phase: 'done' },
         }) + '\n');
-        assert.deepEqual(h.json(['status']).gate_queue, { running: [], queued: [], blocked: [] });
+        assert.deepEqual(h.json(['status']).gate_queue, { running: [], queued: [], blocked: [], deferred: [] });
         assert.equal(h.reconcile().code, 2);
       } else {
         assert.equal(h.run(['wait', '--after', '0', '--types', 'never', '--timeout', '0',
@@ -190,7 +210,7 @@ for (const entries of ['absent', 'unaudited pass', 'unaudited failure']) {
     fs.writeFileSync(path.join(h.state, 'events.jsonl'), events.map((e) => JSON.stringify(e) + '\n').join(''));
     const before = h.json(['task', 'show', 'T1']);
     assert.ok(before.gates.gates.filter((g) => g.type !== 'review').every((g) => !g.ok));
-    assert.deepEqual(h.json(['status']).gate_queue, { running: [], queued: [], blocked: [] });
+    assert.deepEqual(h.json(['status']).gate_queue, { running: [], queued: [], blocked: [], deferred: [] });
     assert.ok(events.some((e) => e.cmd === 'automation' && e.detail.phase === 'done'));
 
     assert.equal(h.reconcile().code, 2);
@@ -209,7 +229,7 @@ test('startup reconciles tests evidence staled by a tests keep setting change af
   const h = reconciledFixture(t);
   const checks = () => h.logs().filter((e) => e.cmd.startsWith('check '));
   const before = checks();
-  assert.deepEqual(h.json(['status']).gate_queue, { running: [], queued: [], blocked: [] });
+  assert.deepEqual(h.json(['status']).gate_queue, { running: [], queued: [], blocked: [], deferred: [] });
   h.ok(['project', 'set', '--tests-keep', '["test/**","docs/**"]']);
   const stale = h.json(['task', 'show', 'T1']).gates.gates.find((g) => g.type === 'tests');
   assert.equal(stale.ok, false);
@@ -329,7 +349,7 @@ for (const [configuration, failure] of [['tests', 'ci'], ['tests', 'clean'], ['c
     assert.equal(reworks.length, 1);
     assert.match(reworks[0].detail.reason, new RegExp(`^${failure} failed at [0-9a-f]+: `));
     assert.match(reworks[0].detail.reason, failure === 'clean' ? /cannot scan changed source/ : /failing: test \(failure\)/);
-    assert.deepEqual(h.json(['status']).gate_queue, { running: [], queued: [], blocked: [] });
+    assert.deepEqual(h.json(['status']).gate_queue, { running: [], queued: [], blocked: [], deferred: [] });
     h.consume();
     assert.equal(h.logs().filter((e) => e.cmd === `check ${failure}`).length, receipts.length, 'settlement starts no extra gate runs');
   });

@@ -142,11 +142,11 @@ test('a scoped runner killed before its report preserves timeout and abort error
   }
 });
 
-test('fleet scopes disable ancestor OOM grouping while attempt scopes keep group killing', () => {
+test('fleet and attempt scopes leave OOM handling to containment instead of systemd', () => {
   const limits = { tasks_max: 64, memory_max_bytes: 512 * 1024 ** 2 };
-  for (const [fleet, expected] of [[true, 'continue'], [false, 'kill']]) {
-    const args = C.scopeArguments('tower-crane-1-0123456789abcdef.scope', 'agents.slice', limits, { OOMPolicy: 'kill' }, fleet);
-    assert.equal(args.filter(arg => arg.startsWith('OOMPolicy=')).at(-1), `OOMPolicy=${expected}`);
+  for (const fleet of [true, false]) {
+    const args = C.scopeArguments('tower-crane-1-0123456789abcdef.scope', 'agents.slice', limits, { OOMPolicy: fleet ? 'kill' : 'stop' });
+    assert.equal(args.filter(arg => arg.startsWith('OOMPolicy=')).at(-1), 'OOMPolicy=continue');
   }
 });
 
@@ -154,9 +154,29 @@ test('fleet OOM events do not trigger a second kill of healthy descendants', t =
   const h = cachedFixture(t, 'fleet-events', h => h.init());
   const group = path.join(h.base, 'fleet');
   fs.mkdirSync(group);
-  fs.writeFileSync(path.join(group, 'memory.events.local'), 'oom 1\noom_group_kill 0\n');
-  for (const [fleet, expected] of [[false, 'resource-memory-max'], [true, null]]) {
+  fs.writeFileSync(path.join(group, 'cgroup.events'), 'populated 1\n');
+  for (const [fleet, tasks, oom, expected] of [
+    [false, 0, 1, 'resource-memory-max'], [true, 0, 1, null],
+    [false, 1, 1, 'resource-memory-max'], [true, 1, 1, 'resource-tasks-max'],
+    [false, 1, 0, 'resource-tasks-max'],
+  ]) {
+    fs.writeFileSync(path.join(group, 'memory.events.local'), `oom ${oom}\noom_group_kill 0\n`);
+    fs.writeFileSync(path.join(group, 'pids.events.local'), `max ${tasks}\n`);
     assert.equal(C.limitReason(group, { tasks: 0, memory: 0 }, fleet), expected);
+    let notify;
+    t.mock.method(fs, 'watch', (file, listener) => {
+      notify = listener;
+      return { on() {}, unref() {}, close() {} };
+    });
+    let found = null;
+    const stop = C.watchOom(group, { tasks: 0, memory: 0 }, reason => { found = reason; }, fleet);
+    try {
+      notify();
+      assert.equal(found, expected, `watcher fleet=${fleet}, task events=${tasks}`);
+    } finally {
+      stop();
+      fs.watch.mock.restore();
+    }
   }
 });
 
@@ -168,6 +188,7 @@ test('the governor retains the full scope through delayed registry attachment', 
   const project = h.readState('project.json');
   const admitted = Governor.admit({ stateDir: h.state, env, agent: 'orchestrator' }, { kind: 'worker', task: 'T1', project });
   t.after(() => admitted.release());
+  let tickAt = Date.now();
   for (const [busy, scope] of [
     [false, { backend: 'cgroup', group: '/sys/fs/cgroup/agents.slice/tower-crane-1-0123456789abcdef.scope' }],
     [true, { backend: 'cgroup', group: '/sys/fs/cgroup/agents.slice/tower-crane-2-0123456789abcdef.scope' }],
@@ -182,6 +203,19 @@ test('the governor retains the full scope through delayed registry attachment', 
     const entry = Governor.read(env).units.find(u => u.id === admitted.id);
     assert.equal(entry.cgroup, expected, `registry busy: ${busy}, backend: ${scope.backend}`);
     assert.equal(entry.roots.filter(r => r.pid === process.pid).length, 1);
+    if (expected) {
+      const group = path.join(env.TOWER_CRANE_HOST_ROOT, 'sys/fs/cgroup', expected);
+      fs.mkdirSync(path.join(group, 'runner'), { recursive: true });
+      fs.writeFileSync(path.join(group, 'memory.current'), String(512 * 1024 ** 2));
+      fs.writeFileSync(path.join(group, 'memory.stat'), `active_file ${32 * 1024 ** 2}\ninactive_file ${96 * 1024 ** 2}\n`);
+      fs.writeFileSync(path.join(group, 'runner', 'memory.current'), String(1024 ** 2));
+      tickAt += Governor.TICK_MS * 2;
+      const clock = t.mock.method(Date, 'now', () => tickAt);
+      try { Governor.tick(env, project); }
+      finally { clock.mock.restore(); }
+      const measured = Governor.read(env).units.find(u => u.id === admitted.id);
+      assert.equal(measured.measured, 384 * 1024 ** 2, 'the full scope counts anonymous memory across child groups without page cache');
+    }
   }
 });
 
@@ -260,7 +294,7 @@ test('CLI dry runs show the mandatory containment argv and scoped environment', 
     assert.equal(result.containment.backend, 'cgroup');
     if (executable === 'systemd-run') {
       assert.ok(result.argv.includes('MemorySwapMax=0'));
-      assert.ok(result.argv.includes('OOMPolicy=kill'));
+      assert.ok(result.argv.includes('OOMPolicy=continue'));
     }
   }
 });
@@ -281,6 +315,91 @@ test('macOS kill validation reads start times from one process snapshot', t => {
     { pid: 99999992, start: 'Mon Oct 19 13:00:00 2026' },
   ], null);
   assert.equal(calls, 1);
+});
+
+test('Windows cleanup preserves retained identities beneath non-kept ancestors', async t => {
+  const descriptor = Object.getOwnPropertyDescriptor(process, 'platform');
+  Object.defineProperty(process, 'platform', { value: 'win32' });
+  t.after(() => Object.defineProperty(process, 'platform', descriptor));
+  const chain = [
+    { pid: 100, parent: 1, start: 1000 },
+    { pid: 200, parent: 100, start: 1001 },
+    { pid: 300, parent: 200, start: 1002 },
+  ];
+  const sibling = { pid: 400, parent: 100, start: 1003 };
+  const cases = [
+    { name: 'reported grandparent', rows: chain, identities: [{ pid: 300, start: 1002 }], kept: [200, 300] },
+    { name: 'ordinary sibling', rows: [...chain, sibling], identities: [{ pid: 300, start: 1002 }], kept: [200, 300] },
+    { name: 'unfiltered snapshot', rows: [...chain, sibling], identities: [{ pid: 300, start: 1002 }], kept: [200, 300], unfiltered: true },
+    { name: 'all targets spared', rows: chain, identities: [{ pid: 100, start: 1000 }], kept: [100, 200, 300], unfiltered: true },
+    { name: 'reused identity', rows: chain, identities: [{ pid: 300, start: 999 }], kept: [] },
+    { name: 'no recorded identity', rows: chain, identities: [], kept: [], late: [{ pid: 500, parent: 300, start: 1004 }] },
+    { name: 'multiple retained branches', rows: [...chain, sibling, { pid: 600, parent: 400, start: 1005 }],
+      identities: [{ pid: 300, start: 1002 }, { pid: 600, start: 1005 }], kept: [200, 300, 400, 600] },
+    { name: 'PID reuse cycle', rows: [{ pid: 100, parent: 200, start: 1000 }, { pid: 200, parent: 100, start: 1001 }],
+      identities: [], kept: [], order: [100, 200] },
+    { name: 'cycle while retaining another root', rows: [
+      { pid: 100, parent: 200, start: 1000 }, { pid: 200, parent: 100, start: 1001 },
+      { pid: 700, parent: 1, start: 1002 },
+    ], identities: [{ pid: 700, start: 1002 }], kept: [700], order: [100, 200] },
+    { name: 'equal-time cycle', rows: [
+      { pid: 100, parent: 200, start: 1000 }, { pid: 200, parent: 100, start: 1000 },
+    ], identities: [], kept: [], order: [100, 200] },
+    { name: 'self-parent', rows: [{ pid: 100, parent: 100, start: 1000 }], identities: [], kept: [], order: [100] },
+    { name: 'three-node equal-time cycle', rows: [
+      { pid: 100, parent: 300, start: 1000 }, { pid: 200, parent: 100, start: 1000 },
+      { pid: 300, parent: 200, start: 1000 },
+    ], identities: [], kept: [], order: [100, 200, 300] },
+    { name: 'cycle beside an acyclic tree', rows: [
+      { pid: 100, parent: 200, start: 1000 }, { pid: 200, parent: 100, start: 1000 },
+      { pid: 400, parent: 1, start: 1001 }, { pid: 500, parent: 400, start: 1002 },
+    ], identities: [], kept: [], order: [400, 500, 100, 200] },
+    { name: 'parent newer than child', rows: [
+      { pid: 200, parent: 100, start: 1000 }, { pid: 100, parent: 1, start: 1001 },
+    ], identities: [], kept: [], order: [200, 100] },
+    { name: 'chunked targets', rows: [...chain, ...Array.from({ length: 400 }, (_, i) => ({
+      pid: 1000 + i, parent: 100, start: 2000 + i,
+    }))], identities: [{ pid: 300, start: 1002 }], kept: [200, 300] },
+  ];
+  for (const item of cases) {
+    const killed = new Set();
+    const calls = [];
+    const tree = [...item.rows, ...(item.late || [])];
+    t.mock.method(cp, 'execFile', (file, args, options, callback) => {
+      assert.equal(file, 'powershell.exe');
+      const script = Buffer.from(args.at(-1), 'base64').toString('utf16le');
+      const targets = /\$t = @\(([\d,]*)\)/.exec(script)[1].split(',').filter(Boolean).map(Number)
+        .filter((_, index) => index % 2 === 0);
+      const recursive = script.includes('taskkill.exe /PID $id /T /F');
+      calls.push({ targets, recursive });
+      for (const pid of targets) {
+        killed.add(pid);
+        if (recursive) {
+          let changed;
+          do {
+            changed = false;
+            for (const row of tree) if (killed.has(row.parent) && !killed.has(row.pid)) {
+              killed.add(row.pid);
+              changed = true;
+            }
+          } while (changed);
+        }
+      }
+      process.nextTick(callback, null, targets.map(pid => `${pid} stopped`).join('\n'), '');
+    });
+    const retained = C.managed(item.rows, item.identities, 50);
+    assert.deepEqual(retained.map(row => row.pid), item.kept, item.name);
+    const keep = new Set(item.kept);
+    await C.stopProcesses(item.unfiltered ? item.rows : item.rows.filter(row => !keep.has(row.pid)), null, keep);
+    for (const pid of keep) assert.equal(killed.has(pid), false, `${item.name}: retained pid ${pid}`);
+    for (const row of tree.filter(row => !keep.has(row.pid))) {
+      assert.equal(killed.has(row.pid), true, `${item.name}: ordinary pid ${row.pid}`);
+    }
+    assert.ok(calls.every(call => call.recursive === !keep.size), `${item.name}: recursive kills require no retained identities`);
+    if (item.order) assert.deepEqual(calls.flatMap(call => call.targets), item.order, item.name);
+    if (item.name === 'chunked targets') assert.equal(calls.length, 2);
+    cp.execFile.mock.restore();
+  }
 });
 
 for (const delayed of [false, true]) {

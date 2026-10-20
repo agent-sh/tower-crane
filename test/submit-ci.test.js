@@ -163,7 +163,7 @@ test('revuto findings print with file, line and body; only a latest [resolved] r
     ],
   });
   assert.equal(r.status, 0, r.stderr);
-  assert.match(r.stdout, /revuto left 3 open inline findings on PR #7 \(listed for you; a \[P1\]\/\[P2\] one blocks the submit until its path changes after the comment or it has a \[resolved\] reply\):\n {2}lib\/x\.js:12\n {4}\*\*\[P3\]\*\* Quoted paths break on Windows\.\n {2}lib\/x\.js:40\n {4}Question finding\n {2}lib\/x\.js:50\n {4}Reopened finding/);
+  assert.match(r.stdout, /revuto left 3 open inline findings on PR #7 \(listed for you; a \[P1\]\/\[P2\] one blocks the submit until its path changes after the comment or it has a \[resolved\] reply\):\n {2}lib\/x\.js:12 \(comment 11\)\n {4}\*\*\[P3\]\*\* Quoted paths break on Windows\.\n {2}lib\/x\.js:40 \(comment 14\)\n {4}Question finding\n {2}lib\/x\.js:50 \(comment 16\)\n {4}Reopened finding/);
   assert.doesNotMatch(r.stdout, /Answered finding|a human comment/);
   assert.equal(status(h), 'submitted');
 });
@@ -179,7 +179,7 @@ test('--json carries the CI report as ci_report, findings included', (t) => {
   const data = JSON.parse(r.stdout);
   assert.equal(data.status, 'submitted');
   assert.match(data.ci_report, /revuto left 1 open inline finding on PR #7/);
-  assert.match(data.ci_report, /lib\/x\.js:12\n {4}\*\*\[P3\]\*\* Quoted paths break on Windows\./);
+  assert.match(data.ci_report, /lib\/x\.js:12 \(comment 11\)\n {4}\*\*\[P3\]\*\* Quoted paths break on Windows\./);
 });
 
 test('a PR that conflicts with its base refuses the submit, even with a failing required check', (t) => {
@@ -225,7 +225,8 @@ test('a [P1]/[P2] revuto finding with no change at its path and no [resolved] re
   assert.equal(r.status, 1, r.stderr);
   assert.match(r.stderr, /revuto's finding \[P2\] lib\/y\.js:7 \(comment 12\) on PR #7 has no code change at its path since the comment and no \[resolved\] reply/);
   assert.match(r.stderr, /tower-crane ci resolve <comment id>/);
-  assert.doesNotMatch(r.stderr, /\(comment 11\)|\(comment 13\)|\(comment 15\)|Not revuto/);
+  assert.doesNotMatch(r.stderr.split('\n')[0], /\(comment 11\)|\(comment 13\)|\(comment 15\)/);
+  assert.doesNotMatch(r.stderr, /\(comment 15\)|Not revuto/);
   assert.equal(status(h), 'in_progress');
 
   const resolved = submit({ ...data, comments: [...findings, comment(14, { in_reply_to_id: 12, user: 'worker-T1', body: '[resolved]\nnot reachable here' })] });

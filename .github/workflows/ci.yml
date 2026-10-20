@@ -42,9 +42,10 @@ jobs:
     name: test (${{ matrix.os }}, node ${{ matrix.node }}, shard ${{ matrix.shard }})
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
     runs-on: ${{ matrix.os }}
-    # test/run.js splits shards by measured file time (test/durations.json): 20 to 27 minutes on
-    # Windows and 9 to 13 on Linux. This is a per-shard hang limit, not the suite deadline in
-    # scripts/suite-time.js; the runner still bounds each test independently.
+    # test/run.js splits shards by measured file time (test/durations.json). Three Windows shards
+    # took 28 to 36 minutes, against test/run.js's 36-minute shard deadline, so Windows runs four.
+    # This is a per-shard hang limit, not the suite deadline in scripts/suite-time.js; the runner
+    # still bounds each test independently.
     timeout-minutes: 45
     strategy:
       fail-fast: false
@@ -53,8 +54,14 @@ jobs:
         os: ${{ fromJSON(github.event_name == 'pull_request' && '["windows-latest"]' || '["ubuntu-latest","windows-latest"]') }}
         node: [26, 24]
         shard: ['1/3', '2/3', '3/3']
+        # Exclusions apply before inclusions, so Windows keeps only its four Node 26 shards.
         exclude:
-          - { os: windows-latest, node: 24 }
+          - { os: windows-latest }
+        include:
+          - { os: windows-latest, node: 26, shard: '1/4' }
+          - { os: windows-latest, node: 26, shard: '2/4' }
+          - { os: windows-latest, node: 26, shard: '3/4' }
+          - { os: windows-latest, node: 26, shard: '4/4' }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

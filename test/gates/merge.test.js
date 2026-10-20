@@ -37,6 +37,36 @@ function ctx(gh, { task = {}, args = {}, project = {} } = {}) {
   return { root: '/repo', worktree: null, task: { id: 'T4', title: 'Change', acceptance: ['works'], kind: 'code', sha: SHA, pr: 42, status: 'accepted', ...task }, project: { repo: REPO, base: 'main', ...project }, args, exec: gh.exec, log() {} };
 }
 
+test('release merges require green completed push CI even with a newer pending run', async () => {
+  const listings = [[{ path: 'package.json' }], Array.from({ length: 100 }, (_, i) => ({ path: `lib/file-${i}.js` }))];
+  for (const [files, conclusion] of listings.flatMap((files) => ['failure', 'cancelled', 'timed_out', 'neutral', 'skipped', 'success'].map((c) => [files, c]))) {
+    let merged = false;
+    const gh = fakeExec((args) => {
+      if (args[0] === 'pr' && args[1] === 'view') return result(JSON.stringify({
+        state: merged ? 'MERGED' : 'OPEN', headRefOid: SHA, baseRefName: 'main',
+        files, mergeCommit: merged ? { oid: MERGED } : null,
+      }));
+      if (args[0] === 'api' && args[1].includes('/pulls/42/files')) return result(JSON.stringify({
+        filename: 'package.json', patch: '-  "version": "0.1.6",\n+  "version": "0.1.7",',
+      }));
+      if (args[0] === 'api' && args[1].includes('/actions/workflows?')) return result(JSON.stringify({ id: 11, state: 'active', path: 'dynamic/github-code-scanning/codeql' }));
+      if (args[0] === 'api' && args[1].includes('/actions/runs?')) return result([
+        { id: 101, workflow_id: 11, name: 'CI', run_number: 51, event: 'push', status: 'in_progress', conclusion: null },
+        { id: 100, workflow_id: 11, name: 'CI', run_number: 50, event: 'push', status: 'completed', conclusion, html_url: 'https://github.com/acme/app/actions/runs/100' },
+        { id: 102, workflow_id: 11, name: 'CI', run_number: 52, event: 'schedule', status: 'completed', conclusion: 'success' },
+        { id: 99, workflow_id: 12, name: 'Removed CI', run_number: 49, event: 'push', status: 'completed', conclusion: 'failure' },
+      ].map(JSON.stringify).join('\n'));
+      if (args[0] === 'pr' && args[1] === 'merge') { merged = true; return result(''); }
+      return null;
+    });
+    const r = await gate.run(ctx(gh));
+    const green = ['success', 'neutral', 'skipped'].includes(conclusion);
+    assert.equal(r.ok, green, r.summary);
+    assert.equal(merged, green);
+    if (!r.ok) assert.match(r.summary, new RegExp(`main push CI.*run 100.*${conclusion}`));
+  }
+});
+
 test('a task that is not accepted is never merged', async () => {
   for (const status of ['submitted', 'in_progress', 'rework']) {
     const gh = github();
@@ -382,27 +412,56 @@ test('a partially merged stack retries on the project base and refuses an unrela
   assert.ok(merges[1].args.includes(`expected_head_sha=${f.upper.sha}`));
 });
 
-test('unstacked fallback retargets only the recorded dependency base after lower tasks land', (t) => {
-  const f = stacked(t);
-  f.accept('T1');
-  f.accept('T2');
-  f.h.ok(['stack', 'unstack', 'T2', '--agent', 'orchestrator']);
-  f.h.ok(['merge', 'T1', '--agent', 'orchestrator']);
-  f.write((d) => { d.calls = []; d.prs[12].baseRefName = 'release'; });
-  const refused = f.h.run(['merge', 'T2', '--agent', 'orchestrator']);
-  assert.equal(refused.code, 1, refused.stdout);
-  assert.match(refused.stdout, /base.*release.*main/);
-  assert.equal(f.read().calls.some((c) => c.args[1] === 'edit' || isMerge(c.args)), false);
-  f.write((d) => { d.prs[12].baseRefName = f.lower.branch; });
-  const merged = f.h.json(['merge', 'T2', '--agent', 'orchestrator']);
-  assert.equal(merged.ok, true, merged.summary);
-  assert.match(merged.summary, /into main/);
-  const calls = f.read().calls.map((c) => c.args.slice(0, 2).join(' '));
-  const edit = calls.indexOf('pr edit');
-  assert.ok(edit >= 0);
-  assert.equal(calls[edit + 1], 'pr view');
-  assert.equal(calls[edit + 2], 'pr merge');
-});
+for (const lifecycle of ['deferred', 'retired']) {
+  const phase = lifecycle === 'deferred' ? 'before retirement' : 'after retirement';
+  for (const target of ['dependency', 'project', 'unrelated']) {
+    test(`unstacked fallback validates the ${target} base ${phase}`, (t) => {
+      const f = stacked(t);
+      f.accept('T1');
+      f.accept('T2');
+      f.h.ok(['stack', 'unstack', 'T2', '--agent', 'orchestrator']);
+      if (lifecycle === 'deferred') f.write((d) => { d.editError = 'temporary retarget failure'; });
+      f.h.ok(['merge', 'T1', '--agent', 'orchestrator']);
+      const upper = f.h.readState('tasks.json').tasks.find((task) => task.id === 'T2');
+      assert.equal(f.read().prs[11].state, 'MERGED');
+      assert.equal(upper.sha, f.upper.sha);
+      if (lifecycle === 'deferred') {
+        assert.equal(upper.stack.base, f.lower.branch);
+        assert.equal(upper.stack_disabled, true);
+        const events = fs.readFileSync(path.join(f.h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+        assert.ok(events.some((event) => event.task === 'T2' && event.cmd === 'stack sync deferred'
+          && event.detail.reason.includes('temporary retarget failure')));
+      } else {
+        assert.equal(upper.stack, undefined);
+        assert.equal(upper.stack_disabled, undefined);
+        assert.equal(f.read().prs[12].baseRefName, 'main');
+      }
+      const base = { dependency: f.lower.branch, project: 'main', unrelated: 'release' }[target];
+      f.write((d) => { d.calls = []; delete d.editError; d.prs[12].baseRefName = base; });
+      const result = f.h.run(['merge', 'T2', '--agent', 'orchestrator', '--json']);
+      const merged = JSON.parse(result.stdout);
+      const allowed = target === 'project' || lifecycle === 'deferred' && target === 'dependency';
+      assert.equal(result.code, allowed ? 0 : 1, result.stdout + result.stderr);
+      assert.equal(merged.ok, allowed, merged.summary);
+      const writes = f.read().calls.filter((c) => c.args[1] === 'edit' || isMerge(c.args));
+      if (!allowed) {
+        assert.ok(merged.summary.includes(base), merged.summary);
+        assert.match(merged.summary, /expected main/);
+        assert.deepEqual(writes, []);
+        assert.equal(f.read().prs[12].state, 'OPEN');
+        return;
+      }
+      assert.match(merged.summary, /into main/);
+      const calls = f.read().calls.map((c) => c.args.slice(0, 2).join(' '));
+      const edit = calls.indexOf('pr edit');
+      if (target === 'dependency') {
+        assert.ok(edit >= 0);
+        assert.equal(calls[edit + 1], 'pr view');
+        assert.equal(calls[edit + 2], 'pr merge');
+      } else assert.equal(edit, -1);
+    });
+  }
+}
 
 test('merge confirmation names and refuses an unexpected landed base', async () => {
   const gh = github({ landedBase: 'release' });

@@ -7,6 +7,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { makeRepo, cachedFixture } = require('./helpers');
 const { gateFixture, changeKind } = require('./gate-helpers');
+const { HUNG_TEST_MS } = require('./signals');
 
 // Each fixture is built once per process and copied for each test.
 function fixture(t, script) {
@@ -148,17 +149,15 @@ test('accept reruns local CI when the submitted head has no receipt', (t) => {
   assert.equal(evidence.at(-1).receipt.head_sha, next);
 });
 
-test('local CI receipt for an older merged tree cannot satisfy acceptance or merge', (t) => {
+test('accept reruns local CI for an older merged tree while merge requires a fresh check', (t) => {
   const h = fixture(t);
   h.ok(['check', 'ci', 'T1']);
   fs.writeFileSync(path.join(h.repo, 'later.txt'), 'later\n');
   h.git(['add', '.']);
   h.git(['commit', '-qm', 'base advances again']);
-  const refused = h.run(['accept', 'T1']);
-  assert.equal(refused.code, 1);
-  assert.match(refused.stderr, /local CI receipt.*merged tree/);
-  h.ok(['check', 'ci', 'T1']);
+  assert.match(h.json(['task', 'show', 'T1']).gates.missing.join('; '), /local CI receipt.*merged tree/);
   h.ok(['accept', 'T1']);
+  assert.equal(h.readState('tasks.json').tasks[0].evidence.at(-1).receipt.base_sha, h.git(['rev-parse', 'HEAD']));
   fs.writeFileSync(path.join(h.repo, 'last.txt'), 'last\n');
   h.git(['add', '.']);
   h.git(['commit', '-qm', 'base moves after acceptance']);
@@ -316,11 +315,16 @@ test('matching audit copies cannot bind a receipt to another head or tree', (t) 
     fs.writeFileSync(log, events.map((e) => JSON.stringify(e)).join('\n') + '\n');
   };
   write();
-  assert.match(h.run(['accept', 'T1']).stderr, /receipt.*submitted head/);
+  assert.match(h.json(['task', 'show', 'T1']).gates.missing.join('; '), /receipt.*submitted head/);
+  h.ok(['accept', 'T1']);
+  assert.equal(h.readState('tasks.json').tasks[0].evidence.at(-1).receipt.head_sha, next);
+  doc.tasks[0].status = 'submitted';
   evidence.receipt.head_sha = next;
   evidence.receipt.tree_hash = 'f'.repeat(40);
   write();
-  assert.match(h.run(['accept', 'T1']).stderr, /receipt.*current merged tree/);
+  assert.match(h.json(['task', 'show', 'T1']).gates.missing.join('; '), /receipt.*current merged tree/);
+  h.ok(['accept', 'T1']);
+  assert.notEqual(h.readState('tasks.json').tasks[0].evidence.at(-1).receipt.tree_hash, 'f'.repeat(40));
 });
 
 test('failed, missing and timed out local commands record failure and clean their worktrees', (t) => {
@@ -603,6 +607,7 @@ test('multi-MB plain, colored and CRLF logs keep the redaction output from befor
 
 test('a text redaction deadline drops content and restores the budget for the next call', () => {
   const { performance } = require('node:perf_hooks');
+  const { textBudget, textWork } = require('../lib/text-redaction-budget');
   const { createRedactor } = require('../lib/gates/common');
   const redact = createRedactor([]);
   const now = performance.now;
@@ -611,6 +616,24 @@ test('a text redaction deadline drops content and restores the budget for the ne
   try {
     assert.match(redact.strip('Authorization: Bearer sekrit end'),
       /^\[unscannable text: over 5000 ms redaction time; content omitted\]$/);
+    for (const [size, deadline] of [[0, 5000], [16 << 20, 21000]]) {
+      const input = 'x'.repeat(size);
+      for (const stage of ['work', 'completion']) {
+        for (const elapsed of [deadline - 1, deadline, deadline + 1]) {
+          clock = 0;
+          performance.now = () => clock;
+          const result = textBudget(input, () => {
+            clock = elapsed;
+            if (stage === 'work') textWork(1);
+            return 'kept';
+          });
+          const expected = elapsed > deadline
+            ? `[unscannable text: over ${deadline} ms redaction time; content omitted]` : 'kept';
+          assert.equal(result, expected, `${size} characters, ${stage}, ${elapsed} ms`);
+          assert.equal(textBudget('', () => 'next'), 'next');
+        }
+      }
+    }
   } finally {
     performance.now = now;
   }
@@ -685,8 +708,26 @@ test('erase-line redraws before short words keep all three readings', () => {
   }
 });
 
-test('mixed 16 MiB text fails closed below 1 GiB in a fresh process', () => {
+function redactionMemoryProbe(t, name, script) {
   const cp = require('node:child_process');
+  // Memory probes must finish the scan even when host contention consumes its time budget.
+  // The deadline has a separate test; work limits still bound scans and allocations here.
+  const source = `
+require('node:perf_hooks').performance.now = () => 0;
+${script}
+console.log(JSON.stringify({ ...result, peakKiB: process.resourceUsage().maxRSS }));
+`;
+  const result = JSON.parse(cp.execFileSync(process.execPath, [
+    '--require', path.join(__dirname, 'fixtures', 'redaction-clock-jump.js'), '-e', source,
+  ], { encoding: 'utf8', timeout: HUNG_TEST_MS }));
+  const boundKiB = 1048576;
+  t.diagnostic(`${name}: peak ${result.peakKiB} KiB; bound < ${boundKiB} KiB`);
+  assert.ok(Number.isFinite(result.peakKiB) && result.peakKiB > 0 && result.peakKiB < boundKiB,
+    `${name}: ${result.peakKiB} KiB peak; bound < ${boundKiB} KiB`);
+  return result;
+}
+
+test('mixed 16 MiB text fails closed below 1 GiB in a fresh process', (t) => {
   const script = `
 const { createRedactor, redactJoined } = require(${JSON.stringify(require.resolve('../lib/gates/common'))});
 const value = 'perfSecret123456789abcdef';
@@ -696,15 +737,13 @@ const text = unit.repeat(Math.ceil((16 << 20) / unit.length)).slice(0, 16 << 20)
 const runs = [{ stream: 'out', text: text.slice(0, text.length / 2) },
   { stream: 'err', text: text.slice(text.length / 2) }];
 const output = redactJoined({ output: text, runs }, createRedactor([['PERF_SECRET', value]]));
-console.log(JSON.stringify({ output, peakKiB: process.resourceUsage().maxRSS }));
+const result = { output };
 `;
-  const result = JSON.parse(cp.execFileSync(process.execPath, ['-e', script], { encoding: 'utf8' }));
-  assert.match(result.output, /^\[unscannable text: .+; content omitted\]$/);
-  assert.ok(result.peakKiB < 1048576, `${result.peakKiB} KiB peak`);
+  const result = redactionMemoryProbe(t, 'mixed text', script);
+  assert.match(result.output, /^\[unscannable text: over \d+ redaction work units; content omitted\]$/);
 });
 
-test('16 MiB of tokens an escape and a line break split stays scannable below 1 GiB in two streams', () => {
-  const cp = require('node:child_process');
+test('16 MiB of tokens an escape and a line break split stays scannable below 1 GiB in two streams', (t) => {
   // The joined view kept every view and secret its readings made alive while each stream was
   // read, and peaked at 1.26 GB.
   const script = `
@@ -718,11 +757,10 @@ const output = redactJoined({ output: text, runs: [
   { stream: 'err', text: text.slice(half) },
 ] }, createRedactor([]));
 const expected = '[redacted:GITHUB_TOKEN] done\\n'.repeat(units);
-console.log(JSON.stringify({ same: output === expected, head: output.slice(0, 80), peakKiB: process.resourceUsage().maxRSS }));
+const result = { same: output === expected, head: output.slice(0, 80) };
 `;
-  const result = JSON.parse(cp.execFileSync(process.execPath, ['-e', script], { encoding: 'utf8' }));
+  const result = redactionMemoryProbe(t, 'two-stream tokens', script);
   assert.ok(result.same, result.head);
-  assert.ok(result.peakKiB < 1048576, `${result.peakKiB} KiB peak`);
 });
 
 test('a value search reads only the controls a value prefix can end at', () => {
@@ -852,8 +890,7 @@ test('a prefix map over the work budget is rejected before its entries are alloc
   assert.ok(arrays.mock.calls.every((call) => call.arguments[0] !== entries));
 });
 
-test('16 MiB CR-heavy and short ordinary logs stay below 1 GiB in fresh processes', () => {
-  const cp = require('node:child_process');
+test('16 MiB CR-heavy and short ordinary logs stay below 1 GiB in fresh processes', (t) => {
   for (const unit of ['\r\n', '-\r\\\r|\r/\r', 'a\r', '123456\r\n', '\rpppppppp', '1234567\r\n', '\r\x1b[Kfetchxxxx']) {
     const script = `
 const { createRedactor, redactJoined } = require(${JSON.stringify(require.resolve('../lib/gates/common'))});
@@ -865,13 +902,12 @@ const output = redactJoined({ output: text, runs: [
   { stream: 'err', text: text.slice(half) },
 ] }, createRedactor([]));
 const hash = require('node:crypto').createHash('sha256').update(output).digest('hex');
-console.log(JSON.stringify({ notice: output.startsWith('[unscannable text:') ? output : null,
-  hash, peakKiB: process.resourceUsage().maxRSS }));
+const result = { notice: output.startsWith('[unscannable text:') ? output : null, hash };
 `;
-    const result = JSON.parse(cp.execFileSync(process.execPath, ['-e', script], { encoding: 'utf8' }));
+    const result = redactionMemoryProbe(t, JSON.stringify(unit), script);
     if (result.notice) {
       assert.ok(['\r\n', '-\r\\\r|\r/\r', 'a\r'].includes(unit), `ordinary ${JSON.stringify(unit)} was omitted`);
-      assert.match(result.notice, /^\[unscannable text: .+; content omitted\]$/);
+      assert.match(result.notice, /^\[unscannable text: over \d+ redaction work units; content omitted\]$/);
     }
     else {
       const input = unit.repeat(Math.ceil((16 << 20) / unit.length)).slice(0, 16 << 20);
@@ -879,7 +915,6 @@ console.log(JSON.stringify({ notice: output.startsWith('[unscannable text:') ? o
       if (input.endsWith('\r')) expected = expected.slice(0, -1);
       assert.equal(result.hash, crypto.createHash('sha256').update(expected).digest('hex'));
     }
-    assert.ok(result.peakKiB < 1048576, `${JSON.stringify(unit)}: ${result.peakKiB} KiB peak`);
   }
 });
 
@@ -1603,6 +1638,399 @@ test('a passing local CI keeps its log without a tail or artifacts', (t) => {
   assert.ok(!fs.existsSync(path.join(h.state, 'ci-artifacts')));
 });
 
+test('local CI keeps private receipts on failure and success before removing its worktree', (t) => {
+  const h = fixture(t, `
+const fs = require('node:fs');
+const failed = process.argv.includes('--fail');
+fs.writeFileSync(process.argv[2], JSON.stringify({ cwd: process.cwd() }));
+fs.mkdirSync('.local/checks', { recursive: true });
+fs.writeFileSync('.local/checks/receipt.json', JSON.stringify({
+  failure_reasons: failed ? ['step unit-tests failed'] : [],
+  steps: [{ argv: ['node', 'unit-tests.js'], check: 0, outcome: failed ? 'failed' : 'passed' }],
+  checks: [{ exit_code: failed ? 1 : 0, output: 'all printed steps OK' }]
+}));
+console.log('All printed steps OK');
+process.exit(failed ? 1 : 0);
+`);
+  for (const failed of [true, false]) {
+    h.ok(['project', 'set', '--ci-local', JSON.stringify({
+      command: [...h.command, ...(failed ? ['--fail'] : [])], timeout: 5,
+      receipts: ['.local/checks/*.json', '.local/checks/receipt.json'],
+    })]);
+    const r = h.run(['check', 'ci', 'T1']);
+    assert.equal(r.code, failed ? 1 : 0, r.stdout + r.stderr);
+    const e = h.readState('tasks.json').tasks[0].evidence.at(-1);
+    const kept = e.local_ci;
+    assert.equal(kept.receipts.length, 1, 'overlapping globs copy a receipt once');
+    const receipt = kept.receipts[0];
+    const run = path.posix.basename(path.posix.dirname(kept.log));
+    assert.equal(receipt.path, `ci-artifacts/${run}/receipts/.local/checks/receipt.json`);
+    assert.ok(!fs.existsSync(path.join(h.state, path.posix.dirname(kept.log), 'receipts')));
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(h.state, receipt.path), 'utf8')), {
+      failure_reasons: failed ? ['step unit-tests failed'] : [],
+      steps: [{ argv: ['node', 'unit-tests.js'], check: 0, outcome: failed ? 'failed' : 'passed' }],
+      checks: [{ exit_code: failed ? 1 : 0, output: 'all printed steps OK' }],
+    });
+    assert.equal(receipt.bytes, fs.statSync(path.join(h.state, receipt.path)).size);
+    const cwd = JSON.parse(fs.readFileSync(h.log, 'utf8')).cwd;
+    assert.ok(!fs.existsSync(cwd), 'gate worktree removed after saving the receipt');
+    assert.equal(h.git(['worktree', 'list', '--porcelain']).match(/^worktree /gm).length, 1);
+    if (failed) {
+      assert.match(e.summary, /node unit-tests\.js \(outcome: failed, exit 1\)/);
+      assert.match(e.summary, /step unit-tests failed/);
+    }
+    const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+    assert.deepEqual(events.findLast((v) => v.cmd === 'check ci').detail.local_ci, kept);
+  }
+});
+
+test('receipt summary variants omit credentials formed by adjacent selected fields', () => {
+  const { receiptFailures } = require('../lib/gates/local-ci');
+  const { createRedactor } = require('../lib/gates/common');
+  const token = 'ghp_T448JsonTableCredential01234567890123456';
+  const opaque = 'OpaqueT448SlashBoundary01234567890123456789';
+  const redact = createRedactor([['TOKEN', token], ['OPAQUE', opaque]]);
+  const omitted = ['[receipt summary omitted: a credential spans fields]'];
+  for (const secret of [token, opaque]) {
+    const halves = [secret.slice(0, 20), secret.slice(20)];
+    for (const receipt of [
+      { failure_reasons: halves },
+      { steps: [{ argv: ['node', ...halves], outcome: 'failed' }] },
+      { steps: [{ name: halves[0], outcome: halves[1] }] },
+      { steps: halves.map(name => ({ name, outcome: 'failed' })) },
+      { steps: [{ argv: [halves[0]], outcome: 'failed' }], failure_reasons: [halves[1]] },
+    ]) {
+      assert.deepEqual(receiptFailures(JSON.stringify(receipt), redact), omitted);
+    }
+    for (const payload of [
+      { output_lines: halves }, { output_lines: [halves] }, { [halves[0]]: halves[1] },
+    ]) {
+      const receipt = { ...payload, steps: [{ argv: ['node', 'unit-tests.js'], outcome: 'failed' }] };
+      assert.deepEqual(receiptFailures(JSON.stringify(receipt), redact), ['node unit-tests.js (outcome: failed)']);
+    }
+  }
+});
+
+test('split-credential receipt tables stay private and expose only safe summaries on fail and pass', (t) => {
+  const h = fixture(t, `
+const fs = require('node:fs');
+const token = process.env.CI_FIXTURE_TOKEN;
+const opaque = process.env.CI_FIXTURE_SECRET;
+fs.mkdirSync('.local/checks', { recursive: true });
+if (process.argv.includes('--across-files')) {
+  for (const [index, part] of [token.slice(0, 20), token.slice(20)].entries()) {
+    fs.writeFileSync('.local/checks/cross-' + index + '.json', JSON.stringify({ failure_reasons: [part] }));
+  }
+}
+for (const [kind, secret] of [['token', token], ['opaque', opaque]]) {
+  const halves = [secret.slice(0, 20), secret.slice(20)];
+  const step = { argv: ['node', 'unit-tests.js'], check: 0, outcome: 'failed' };
+  for (const [name, payload] of [
+    ['lines', { output_lines: halves }], ['nested', { output_lines: [halves] }],
+    ['key', { [halves[0]]: halves[1] }], ['reasons', { failure_reasons: halves }],
+    ['argv', { steps: [{ ...step, argv: ['node', ...halves] }] }],
+    ['name-outcome', { steps: [{ name: halves[0], outcome: halves[1] }] }]
+  ]) {
+    fs.writeFileSync('.local/checks/' + kind + '-' + name + '.json', JSON.stringify({
+      steps: [step], checks: [{ exit_code: 1 }], ...payload
+    }));
+  }
+  console.log(halves.join('\\n'));
+}
+fs.writeFileSync(process.argv[2], JSON.stringify({ cwd: process.cwd() }));
+process.exit(process.argv.includes('--fail') ? 1 : 0);
+`);
+  const token = 'ghp_T448JsonTableCredential01234567890123456';
+  const opaque = 'OpaqueT448SlashBoundary01234567890123456789';
+  h.env.CI_FIXTURE_TOKEN = token;
+  h.env.CI_FIXTURE_SECRET = opaque;
+  for (const [failed, across] of [[true, false], [false, false], [true, true], [false, true]]) {
+    h.ok(['project', 'set', '--ci-local', JSON.stringify({
+      command: [...h.command, ...(failed ? ['--fail'] : []), ...(across ? ['--across-files'] : [])], timeout: 5,
+      receipts: [across ? '.local/checks/cross-*.json' : '.local/checks/*.json'],
+    })]);
+    const r = h.run(['check', 'ci', 'T1']);
+    assert.equal(r.code, failed ? 1 : 0, r.stdout + r.stderr);
+    const e = h.readState('tasks.json').tasks[0].evidence.at(-1);
+    assert.equal(e.local_ci.receipts.length, across ? 2 : 12);
+    const run = path.posix.basename(path.posix.dirname(e.local_ci.log));
+    const logDir = path.join(h.state, path.posix.dirname(e.local_ci.log));
+    assert.deepEqual(fs.readdirSync(logDir), ['output.log']);
+    for (const copy of e.local_ci.receipts) {
+      assert.ok(copy.path.startsWith(`ci-artifacts/${run}/receipts/`), copy.path);
+      const target = path.join(h.state, copy.path);
+      assert.ok(fs.existsSync(target));
+      if (process.platform !== 'win32') {
+        assert.equal(fs.statSync(target).mode & 0o777, 0o600);
+        assert.equal(fs.statSync(path.dirname(target)).mode & 0o777, 0o700);
+      }
+    }
+    if (!across) assert.ok(e.local_ci.receipt_failures.includes('node unit-tests.js (outcome: failed, exit 1)'));
+    assert.ok(e.local_ci.receipt_failures.includes('[receipt summary omitted: a credential spans fields]'));
+    if (failed && !across) assert.match(e.summary, /node unit-tests\.js/);
+    const publicText = [
+      fs.readFileSync(path.join(h.state, e.local_ci.log), 'utf8'), JSON.stringify(e),
+      fs.readFileSync(path.join(h.state, 'tasks.json'), 'utf8'),
+      fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8'), r.stdout, r.stderr,
+    ].join('\n');
+    for (const secret of [token, opaque]) {
+      for (const part of [secret, secret.slice(0, 20), secret.slice(20)]) assert.ok(!publicText.includes(part), part);
+    }
+    assert.ok(!fs.existsSync(JSON.parse(fs.readFileSync(h.log, 'utf8')).cwd));
+  }
+});
+
+test('receipt globs validate like artifact globs', () => {
+  const Local = require('../lib/ci-local');
+  for (const [receipts, valid] of [
+    [[], true], [['.local/checks/*.json', 'reports/**/*.json'], true],
+    ['*.json', false], [null, false], [[1], false], [[''], false],
+    [['../up/*.json'], false], [['/absolute/*.json'], false],
+    [['C:\\checks\\*.json'], false], [['a\\..\\b'], false], [['a\0b'], false],
+  ]) {
+    assert.equal(Local.valid({ command: ['node'], timeout: 5, receipts }), valid, JSON.stringify(receipts));
+  }
+  const local = { command: ['node'], timeout: 5, receipts: ['.local/checks/*.json'] };
+  assert.deepEqual(Local.resolve(local, { id: 'T1', kind: 'code' }).receipts, local.receipts);
+  const policy = require('../lib/gate-commands').resolve({ tests: { map: {} }, ci: { local } }, 'tests').policy;
+  assert.deepEqual(policy.ci_local, { command: ['node'], timeout: 5 });
+});
+
+test('receipt copies redact decoded JSON keys and values on failure and success', (t) => {
+  const h = fixture(t, `
+const fs = require('node:fs');
+const failed = process.argv.includes('--fail');
+const token = process.env.CI_FIXTURE_TOKEN;
+const opaque = process.env.CI_FIXTURE_SECRET;
+fs.mkdirSync('.local/checks', { recursive: true });
+const body = JSON.stringify({
+  checks: [{ output: { nested: [
+    token, opaque, token.slice(0, 4) + '\\x1b[31m' + token.slice(4),
+    token.slice(0, 4) + '\\n' + token.slice(4)
+  ] } }],
+  [token]: 'key marker',
+  failure_reasons: failed ? ['failed unit-tests: ' + token] : [],
+  passed: !failed
+});
+const encoded = Array.from(token, (char) => '\\\\u' + char.charCodeAt(0).toString(16).padStart(4, '0')).join('');
+const serialized = body.replaceAll(token, encoded).replaceAll('/', '\\\\/');
+fs.writeFileSync('.local/checks/escaped.json', serialized);
+fs.writeFileSync('.local/checks/bom.json', '\\uFEFF' + serialized);
+fs.writeFileSync('.local/checks/utf16le.json', Buffer.from(serialized, 'utf16le'));
+fs.writeFileSync('.local/checks/utf16be.json', Buffer.concat([Buffer.from([0xfe, 0xff]), Buffer.from(serialized, 'utf16le').swap16()]));
+fs.writeFileSync(process.argv[2], JSON.stringify({ cwd: process.cwd() }));
+process.exit(failed ? 1 : 0);
+`);
+  const token = 'ghp_T448JsonEncodedCredential0123456789012345';
+  const opaque = 'OpaqueT448/SlashBoundary01234567890123456789';
+  h.env.CI_FIXTURE_TOKEN = token;
+  h.env.CI_FIXTURE_SECRET = opaque;
+  for (const failed of [true, false]) {
+    h.ok(['project', 'set', '--ci-local', JSON.stringify({
+      command: [...h.command, ...(failed ? ['--fail'] : [])], timeout: 5, receipts: ['.local/checks/*.json'],
+    })]);
+    const r = h.run(['check', 'ci', 'T1']);
+    assert.equal(r.code, failed ? 1 : 0, r.stdout + r.stderr);
+    const e = h.readState('tasks.json').tasks[0].evidence.at(-1);
+    assert.equal(e.local_ci.receipts.length, 4);
+    for (const copy of e.local_ci.receipts) {
+      const decoded = JSON.parse(fs.readFileSync(path.join(h.state, copy.path), 'utf8'));
+      for (const output of decoded.checks[0].output.nested.slice(2)) {
+        const recovered = output.replace(/\u001b\[[0-9;]*m/g, '').replace(/[\r\n]/g, '');
+        assert.ok(!recovered.includes(token), 'serialized ANSI/newline split exposes the credential after decoding');
+      }
+      const stored = JSON.stringify(decoded);
+      assert.ok(!stored.includes(token), 'Unicode-escaped credential survived JSON decoding');
+      assert.ok(!stored.includes(opaque), 'slash-escaped credential survived JSON decoding');
+      assert.deepEqual(decoded.checks[0].output.nested, [
+        '[redacted:CI_FIXTURE_TOKEN]', '[redacted:CI_FIXTURE_SECRET]',
+        '[redacted:CI_FIXTURE_TOKEN]', '[redacted:CI_FIXTURE_TOKEN]',
+      ]);
+      assert.equal(decoded['[redacted:CI_FIXTURE_TOKEN]'], 'key marker');
+      assert.equal(copy.redacted, true);
+    }
+    if (failed) assert.match(e.summary, /failed unit-tests: \[redacted:CI_FIXTURE_TOKEN\]/);
+    assert.ok(!JSON.stringify(e).includes(token));
+    assert.ok(!fs.existsSync(JSON.parse(fs.readFileSync(h.log, 'utf8')).cwd));
+  }
+});
+
+test('receipt JSON redaction covers escaped strings, nesting, keys and processing failures', () => {
+  const { receiptText } = require('../lib/gates/local-ci');
+  const { createRedactor } = require('../lib/gates/common');
+  const token = 'ghp_T448JsonTableCredential01234567890123456';
+  const opaque = 'opaque "quoted" \\slash\ncredential';
+  const redact = createRedactor([['TOKEN', token], ['OPAQUE', opaque]]);
+  const escaped = Array.from(token, (char) => '\\u' + char.charCodeAt(0).toString(16).padStart(4, '0')).join('');
+  for (const [input, expected] of [
+    [`{"output":"${escaped}"}`, { output: '[redacted:TOKEN]' }],
+    [`\uFEFF{"output":"${escaped}"}`, { output: '[redacted:TOKEN]' }],
+    [JSON.stringify({ nested: [{ output: opaque }] }), { nested: [{ output: '[redacted:OPAQUE]' }] }],
+    [JSON.stringify([token, opaque]), ['[redacted:TOKEN]', '[redacted:OPAQUE]']],
+    [JSON.stringify(opaque), '[redacted:OPAQUE]'],
+    [JSON.stringify({ [opaque]: token }), { '[redacted:OPAQUE]': '[redacted:TOKEN]' }],
+    [JSON.stringify({ output: `\u001b[31m${token}\u001b[0m` }), { output: '[redacted:TOKEN]' }],
+    ...['\u001b[31m', '\u001b]0;title\u0007', '\n', '\r\n', '\0'].map((split) => [
+      JSON.stringify({ output: token.slice(0, 4) + split + token.slice(4) }), { output: '[redacted:TOKEN]' },
+    ]),
+    ['{"__proto__":{"safe":true},"constructor":"data"}', JSON.parse('{"__proto__":{"safe":true},"constructor":"data"}')],
+    ['{"passed":true,"count":1,"signal":null}', { passed: true, count: 1, signal: null }],
+    [JSON.stringify({ [token]: 'first', '[redacted:TOKEN]': 'second' }), {
+      '[redacted:TOKEN]': 'first', '[redacted:TOKEN] (2)': 'second',
+    }],
+  ]) {
+    const result = receiptText(input, redact);
+    assert.deepEqual(JSON.parse(result.body), expected);
+    assert.ok(!result.body.includes(token));
+    assert.ok(!result.body.includes(JSON.stringify(opaque).slice(1, -1)));
+  }
+  const deep = '['.repeat(20000) + JSON.stringify(opaque) + ']'.repeat(20000);
+  assert.match(receiptText(deep, redact).body, /^\[unscannable .*content omitted\]$/);
+  assert.equal(receiptText(`plain ${token}`, redact).body, 'plain [redacted:TOKEN]');
+  const numbers = '{"bytes":9007199254740993,"limit":1e999,"decimal":0.12345678901234567890}';
+  assert.equal(receiptText(numbers, redact).body, numbers, 'receipt numbers retain their source precision');
+});
+
+test('malformed JSON and JSONL receipt tables keep only omission notices on failure and success', (t) => {
+  const h = fixture(t, `
+const fs = require('node:fs');
+const token = process.env.CI_FIXTURE_TOKEN;
+const encoded = Array.from(token, char => '\\\\u' + char.charCodeAt(0).toString(16).padStart(4, '0')).join('');
+const body = JSON.stringify({ output: token }).replaceAll(token, encoded);
+fs.mkdirSync('.local/checks', { recursive: true });
+for (const [name, content] of [
+  ['01-missing-brace', body.slice(0, -1)], ['02-jsonl', body + '\\n' + body],
+  ['03-open-string', body.slice(0, -2)], ['04-array', '[' + body],
+  ['05-string', '"' + encoded], ['06-prefixed', 'Receipt: ' + body.slice(0, -1)],
+  ['07-bom', '\\uFEFF' + body.slice(0, -1)]
+]) fs.writeFileSync('.local/checks/' + name + '.json', content);
+fs.writeFileSync('.local/checks/08-utf16le.json', Buffer.from(body.slice(0, -1), 'utf16le'));
+fs.writeFileSync('.local/checks/09-utf16be.json', Buffer.from(body + '\\n' + body, 'utf16le').swap16());
+fs.writeFileSync('.local/checks/10-cut-utf16le.json', Buffer.from(body, 'utf16le').subarray(0, -1));
+fs.writeFileSync('.local/checks/11-cut-utf16be.json', Buffer.from(body, 'utf16le').swap16().subarray(0, -1));
+fs.writeFileSync('.local/checks/12-invalid-utf8.json', Buffer.concat([Buffer.from(body), Buffer.from([0xff])]));
+fs.writeFileSync(process.argv[2], JSON.stringify({ cwd: process.cwd() }));
+process.exit(process.argv.includes('--fail') ? 1 : 0);
+`);
+  const token = 'ghp_T448MalformedCredential01234567890123456789';
+  h.env.CI_FIXTURE_TOKEN = token;
+  for (const failed of [true, false]) {
+    h.ok(['project', 'set', '--ci-local', JSON.stringify({
+      command: [...h.command, ...(failed ? ['--fail'] : [])], timeout: 5, receipts: ['.local/checks/*.json'],
+    })]);
+    const r = h.run(['check', 'ci', 'T1']);
+    assert.equal(r.code, failed ? 1 : 0, r.stdout + r.stderr);
+    const e = h.readState('tasks.json').tasks[0].evidence.at(-1);
+    assert.equal(e.local_ci.receipts.length, 12);
+    for (const copy of e.local_ci.receipts) {
+      const text = fs.readFileSync(path.join(h.state, copy.path), 'utf8');
+      assert.match(text, /^\[unscannable JSON receipt: .*content omitted\]$/, copy.from);
+      assert.ok(!text.includes('\\u'), copy.from);
+      assert.equal(copy.redacted, true);
+      if (failed) assert.ok(e.summary.includes(copy.path), e.summary);
+    }
+    assert.ok(!JSON.stringify(e).includes(token));
+    assert.ok(!fs.existsSync(JSON.parse(fs.readFileSync(h.log, 'utf8')).cwd));
+  }
+});
+
+test('malformed JSON-like receipt variants fail closed while ordinary text keeps its redaction', () => {
+  const { receiptText } = require('../lib/gates/local-ci');
+  const { createRedactor } = require('../lib/gates/common');
+  const token = 'ghp_T448MalformedTableCredential01234567890123456';
+  const redact = createRedactor([['TOKEN', token]]);
+  const body = JSON.stringify({ output: token.slice(0, 4) + '\u001b[31m' + token.slice(4) });
+  for (const text of [
+    body.slice(0, -1), body + '\n' + body, body.slice(0, -2), '[' + body,
+    '\uFEFF' + body.slice(0, -1), '"\\u0067hp_', 'Receipt: ' + body.slice(0, -1),
+  ]) {
+    const result = receiptText(text, redact);
+    assert.match(result.body, /^\[unscannable JSON receipt: .*content omitted\]$/);
+    assert.equal(result.redacted, true);
+  }
+  assert.equal(receiptText('bad JSON', redact).body, 'bad JSON');
+  assert.equal(receiptText('plain "words"', redact).body, 'plain "words"');
+  assert.equal(receiptText(`plain ${token}`, redact).body, 'plain [redacted:TOKEN]');
+});
+
+test('local CI receipt diagnosis reads failed steps and run-state reasons and tolerates other formats', () => {
+  const { receiptFailures } = require('../lib/gates/local-ci');
+  for (const [body, names] of [
+    [{
+      steps: [{ argv: ['node', 'unit-tests.js'], check: 0, outcome: 'failed' }, { argv: ['lint'], check: 1, outcome: 'passed' }],
+      checks: [{ exit_code: 1, output: 'unbounded output stays out of evidence' }, { exit_code: 0 }],
+    }, ['node unit-tests.js (outcome: failed, exit 1)']],
+    [{
+      steps: [{ argv: ['tests'], check: 0, outcome: 'interrupted' }],
+      checks: [{ exit_code: null, timed_out: true }],
+    }, ['tests (outcome: interrupted, timed out)']],
+    [{ steps: [{ name: 'tests', outcome: 'failed', check: 99 }] }, ['tests (outcome: failed)']],
+    [{ failure_reasons: ['run state incomplete', '', null, 1] }, ['run state incomplete']],
+    [{
+      head_unchanged: false, source_unchanged: false, working_tree_clean_after: false,
+    }, ['head changed during local CI', 'sources changed during local CI', 'working tree is dirty after local CI']],
+    [{ head_unchanged: true, source_unchanged: true, working_tree_clean_after: true }, []],
+    [{
+      steps: [{ argv: ['tests'], outcome: 'failed' }, { argv: ['tests'], outcome: 'failed' }],
+      failure_reasons: ['tests (outcome: failed)'],
+    }, ['tests (outcome: failed)']],
+    [{ steps: [null, {}, { argv: [1], outcome: 'failed' }, { argv: [], outcome: 'failed' }], failure_reasons: 'unexpected' }, []],
+    [{ results: { unknown: 'failed' } }, []], [null, []], [[], []], ['bad JSON', []],
+  ]) {
+    assert.deepEqual(receiptFailures(body === 'bad JSON' ? body : JSON.stringify(body)), names, JSON.stringify(body));
+  }
+});
+
+test('receipt copies redact before truncating and list paths for unreadable receipt formats', (t) => {
+  const { RECEIPT_BYTES } = require('../lib/gates/local-ci');
+  const h = fixture(t, `
+const fs = require('node:fs');
+fs.writeFileSync(process.argv[2], JSON.stringify({ cwd: process.cwd() }));
+fs.mkdirSync('.local/checks', { recursive: true });
+const limit = Number(process.argv.at(-1));
+const start = '{"output":"';
+const token = process.env.CI_FIXTURE_TOKEN;
+fs.writeFileSync('.local/checks/large.json',
+  start + 'x'.repeat(limit - start.length - 4) + token + '","failure_reasons":["large-step failed"]}');
+fs.writeFileSync('.local/checks/unknown.json', '{"other":"diagnosis"}');
+fs.writeFileSync('.local/checks/bad.json', 'bad JSON');
+fs.writeFileSync('.local/checks/link.json', '{"safe":true}');
+if (process.platform !== 'win32') {
+  fs.unlinkSync('.local/checks/link.json');
+  fs.symlinkSync(process.argv[2], '.local/checks/link.json');
+}
+console.log('All printed steps OK');
+process.exit(1);
+`);
+  const token = 'ghp_T448ReceiptBoundary01234567890123456789';
+  h.env.CI_FIXTURE_TOKEN = token;
+  h.ok(['project', 'set', '--ci-local', JSON.stringify({
+    command: [...h.command, String(RECEIPT_BYTES)], timeout: 30, receipts: ['.local/checks/*.json'],
+  })]);
+  const r = h.run(['check', 'ci', 'T1']);
+  assert.equal(r.code, 1, r.stdout + r.stderr);
+  const e = h.readState('tasks.json').tasks[0].evidence.at(-1);
+  const copied = Object.fromEntries(e.local_ci.receipts.map((file) => [path.basename(file.from), file]));
+  assert.equal(copied['large.json'].truncated, true);
+  const large = fs.readFileSync(path.join(h.state, copied['large.json'].path), 'utf8');
+  assert.ok(Buffer.byteLength(large) <= RECEIPT_BYTES);
+  assert.equal(copied['large.json'].bytes, Buffer.byteLength(large));
+  assert.ok(!large.includes('ghp_'));
+  assert.ok(!large.includes('T448ReceiptBoundary'));
+  assert.match(large, /\[receipt truncated at 8 MiB\]/);
+  assert.match(e.summary, /large-step failed/);
+  assert.match(e.summary, /large\.json \(truncated at 8 MiB\)/);
+  for (const name of ['unknown.json', 'bad.json']) {
+    assert.ok(fs.existsSync(path.join(h.state, copied[name].path)));
+    assert.ok(e.summary.includes(copied[name].path), e.summary);
+  }
+  if (process.platform !== 'win32') {
+    assert.equal(copied['link.json'], undefined);
+    assert.match(e.local_ci.receipts_skipped[0].reason, /outside the gate worktree/);
+  }
+  assert.ok(!fs.existsSync(JSON.parse(fs.readFileSync(h.log, 'utf8')).cwd));
+});
+
 test('local CI joins stdout and stderr by whole lines, so a stderr line cannot split a secret', (t) => {
   // Like a Python or cargo step writing to pipes: stdout flushes a block that ends inside a token,
   // stderr reports the failure before the rest of that line arrives, and both end without a newline.
@@ -1676,10 +2104,10 @@ test('changed local CI policy invalidates its earlier receipt', (t) => {
   const h = fixture(t);
   h.ok(['check', 'ci', 'T1']);
   h.ok(['project', 'set', '--ci-local', JSON.stringify({ command: h.command, timeout: 10 })]);
-  assert.match(h.run(['accept', 'T1']).stderr, /configured command or timeout/);
+  assert.match(h.json(['task', 'show', 'T1']).gates.missing.join('; '), /configured command or timeout/);
   h.ok(['check', 'ci', 'T1']);
   h.ok(['project', 'set', '--ci-local', JSON.stringify({ command: [...h.command, 'extra'], timeout: 10 })]);
-  assert.match(h.run(['accept', 'T1']).stderr, /configured command or timeout/);
+  assert.match(h.json(['task', 'show', 'T1']).gates.missing.join('; '), /configured command or timeout/);
   h.ok(['project', 'set', '--ci-local', 'null']);
   assert.equal(h.run(['accept', 'T1']).code, 1);
 });
@@ -1759,7 +2187,7 @@ test('owner task override takes precedence and clearing restores the kind varian
   const updated = h.json(['task', 'update', 'T1', '--ci-local', JSON.stringify(override)]);
   assert.deepEqual(updated.ci_local, override);
   assert.match(h.ok(['task', 'show', 'T1']), /ci\.local override:/);
-  assert.match(h.run(['accept', 'T1']).stderr, /receipt.*variant/);
+  assert.match(h.json(['task', 'show', 'T1']).gates.missing.join('; '), /receipt.*variant/);
   let e = h.json(['check', 'ci', 'T1']);
   assert.equal(e.receipt.variant, 'task:T1');
   assert.deepEqual(e.receipt.command, [...h.command, '--s3']);
@@ -1770,14 +2198,14 @@ test('owner task override takes precedence and clearing restores the kind varian
   assert.equal(h.json(['task', 'show', 'T1']).gates.ok, true, 'unselected kind policy does not invalidate the override');
   const replacement = { command: [...h.command, '--lab'], timeout: 10 };
   h.ok(['task', 'update', 'T1', '--ci-local', JSON.stringify(replacement)]);
-  assert.match(h.run(['accept', 'T1']).stderr, /configured command or timeout/);
+  assert.match(h.json(['task', 'show', 'T1']).gates.missing.join('; '), /configured command or timeout/);
   e = h.json(['check', 'ci', 'T1']);
   assert.deepEqual(e.receipt.command, replacement.command);
   assert.equal(e.receipt.timeout, 10);
 
   const cleared = h.json(['task', 'update', 'T1', '--ci-local', 'null']);
   assert.ok(!Object.hasOwn(cleared, 'ci_local'));
-  assert.match(h.run(['accept', 'T1']).stderr, /receipt.*variant/);
+  assert.match(h.json(['task', 'show', 'T1']).gates.missing.join('; '), /receipt.*variant/);
   e = h.json(['check', 'ci', 'T1']);
   assert.equal(e.receipt.variant, 'kind:docs');
   assert.deepEqual(e.receipt.command, [...h.command, '--native-extended']);
@@ -1802,7 +2230,7 @@ test('kind variants with identical argv cannot reuse receipts or merge under a d
   h.ok(['check', 'ci', 'T1']);
   delete local.by_kind.ops;
   h.ok(['project', 'set', '--ci-local', JSON.stringify(local)]);
-  assert.match(h.run(['accept', 'T1']).stderr, /receipt.*variant/);
+  assert.match(h.json(['task', 'show', 'T1']).gates.missing.join('; '), /receipt.*variant/);
   local.by_kind.ops = { args: [] };
   h.ok(['project', 'set', '--ci-local', JSON.stringify(local)]);
   h.ok(['accept', 'T1']);
@@ -1935,11 +2363,12 @@ test('a newer fetched base invalidates a local receipt while preserving the loca
   const remote = h.git(['rev-parse', 'HEAD']);
   h.git(['update-ref', 'refs/remotes/origin/main', remote]);
   h.git(['reset', '--hard', h.baseSha]);
-  assert.match(h.run(['accept', 'T1']).stderr, /current merged tree/);
-  const e = h.json(['check', 'ci', 'T1']);
+  assert.match(h.json(['task', 'show', 'T1']).gates.missing.join('; '), /current merged tree/);
+  h.ok(['accept', 'T1']);
+  const e = h.readState('tasks.json').tasks[0].evidence.at(-1);
   assert.equal(e.receipt.base_sha, remote);
   assert.equal(h.git(['rev-parse', 'main']), h.baseSha);
-  h.ok(['accept', 'T1']);
+  assert.equal(h.readState('tasks.json').tasks[0].status, 'accepted');
 });
 
 test('project settings validate local argv and timeout, preserve CI siblings and allow clearing', (t) => {
@@ -1950,7 +2379,8 @@ test('project settings validate local argv and timeout, preserve CI siblings and
     '{"command":["node",2],"timeout":1}', '{"command":["node"]}', '{"command":["node"],"timeout":0}',
     '{"command":["node"],"timeout":"1"}', '{"command":["node"],"timeout":1,"artifacts":["/abs/*.json"]}',
     '{"command":["node"],"timeout":1,"artifacts":["../up/*.json"]}', '{"command":["node"],"timeout":1,"artifacts":".local"}',
-    '{"command":["node"],"timeout":1,"artifact_pattern":"("}', '{"command":["node"],"timeout":1,"artifact_pattern":""}']) {
+    '{"command":["node"],"timeout":1,"artifact_pattern":"("}', '{"command":["node"],"timeout":1,"artifact_pattern":""}',
+    '{"command":["node"],"timeout":1,"receipts":["../up/*.json"]}']) {
     const r = h.run(['project', 'set', '--ci-local', local]);
     assert.equal(r.code, 2, JSON.stringify({ local, ...r }));
     assert.match(r.stderr, /--ci-local/);
