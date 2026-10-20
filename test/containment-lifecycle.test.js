@@ -110,9 +110,12 @@ for (const [kind, ending, owner, late, survives] of cases) {
       if (owner === 'agent' && child.containment.unit) {
         assert.equal(settled.includes(child.containment.unit), !metadata.retained?.length, JSON.stringify(metadata));
       }
-      // A keeper outlives its caller, so its working directory must not pin the caller's directory.
+      // A keeper outlives its caller, so its working directory must not pin the fixture or the tool.
       if (owner === 'agent' && metadata.keeper_pid && process.platform === 'linux') {
-        assert.equal(fs.readlinkSync(`/proc/${metadata.keeper_pid}/cwd`), fs.realpathSync(path.join(__dirname, '..', 'lib')));
+        const cwd = fs.readlinkSync(`/proc/${metadata.keeper_pid}/cwd`);
+        for (const dir of [h.base, path.join(__dirname, '..')]) {
+          assert.ok(!(cwd + path.sep).startsWith(fs.realpathSync(dir) + path.sep), `keeper cwd ${cwd} is inside ${dir}`);
+        }
       }
     }
     await new Promise(resolve => setTimeout(resolve, 2200 * scale)); // wait-allow: all finite fixture children and the keeper end
