@@ -216,19 +216,81 @@ setTimeout(() => process.exit(0), 10000); // wait-allow: mapping diagnostics mus
   assert.equal(task.evidence.at(-1).infrastructure_failure, true);
 });
 
-function incrementalFixture(t, settings = { 'docs/**': ['test/mapped.test.js'], '**/*.md': [] }, flags = []) {
-  const h = fixture(t, null);
-  h.ok(['project', 'set', '--ci-required', '[]', ...flags]);
+function repositoryMap(h, settings) {
+  h.git(['switch', 'main']);
   fs.mkdirSync(path.join(h.repo, 'tools'), { recursive: true });
   fs.writeFileSync(path.join(h.repo, 'tools/tests-map.json'), JSON.stringify(settings));
   h.git(['add', '.']);
   h.git(['commit', '-qm', 'repository suite map']);
+  h.git(['switch', 'fixture-change']);
+  h.git(['merge', '--no-edit', 'main']);
+}
+
+function incrementalFixture(t, settings = { 'docs/**': ['test/mapped.test.js'], '**/*.md': [] }, flags = [], beforeFull = () => {}) {
+  const h = fixture(t, null);
+  h.ok(['project', 'set', '--ci-required', '[]', ...flags]);
+  if (settings !== null) repositoryMap(h, settings);
+  beforeFull(h);
+  h.git(['add', '.']);
+  h.git(['commit', '--allow-empty', '-qm', 'full pass head']);
   h.ok(['submit', 'T1', '--sha', h.git(['rev-parse', 'HEAD']), '--agent', 'worker']);
   const full = check(h);
   assert.equal(full.receipt.head_mode, 'full');
   h.fullSha = full.sha;
   return h;
 }
+
+test('incremental reuse refuses task seed changes made before the full pass', (t) => {
+  for (const [name, settings, content] of [
+    ['added', null, '{"**":[]}'],
+    ['edited', { 'docs/**': ['test/mapped.test.js'] }, '{"**":[]}'],
+    ['deleted', { 'docs/**': ['test/mapped.test.js'] }, null],
+    ['malformed', { 'docs/**': ['test/mapped.test.js'] }, '{'],
+  ]) {
+    const h = incrementalFixture(t, settings, [], (h) => {
+      const seed = path.join(h.repo, 'tools/tests-map.json');
+      fs.mkdirSync(path.dirname(seed), { recursive: true });
+      if (content === null) fs.unlinkSync(seed);
+      else fs.writeFileSync(seed, content);
+    });
+    resubmit(h, 'docs/state.md');
+    const result = check(h);
+    assert.equal(result.receipt.head_mode, 'full', name);
+    assert.equal(result.commands.find((c) => c.command !== 'git').command, fullCommand, name);
+  }
+});
+
+test('incremental fallback preserves eligible hosted mapped selection', (t) => {
+  for (const [name, prepare, expected] of [
+    ['policy change', (h) => h.ok(['project', 'set', '--tests-keep', '["docs/**"]']), 'mapped'],
+    ['map newly pinned', (h) => h.ok(['project', 'set', '--tests-map', JSON.stringify(map)]), 'mapped'],
+    ['nonancestor', (h) => h.git(['reset', '--hard', 'HEAD~1']), 'mapped'],
+    ['uncovered delta', (h) => fs.unlinkSync(path.join(h.repo, 'test/obsolete.test.js')), 'mapped'],
+    ['missing required job', (h) => h.ok(['project', 'set', '--ci-required', '[]']), 'full'],
+    ['local CI', (h) => h.ok(['project', 'set', '--ci-local', '{"command":["node","-e","process.exit(0)"],"timeout":60}']), 'full'],
+    ['no PR', (h) => h.ok(['project', 'set', '--tests-keep', '["docs/**"]']), 'full'],
+  ]) {
+    const h = fixture(t, name === 'map newly pinned' ? null : map, false);
+    h.git(['switch', 'main']);
+    fs.writeFileSync(path.join(h.repo, 'test/obsolete.test.js'), 'console.log("obsolete suite");\n');
+    h.git(['add', '.']);
+    h.git(['commit', '-qm', 'base test suite']);
+    h.git(['switch', 'fixture-change']);
+    h.git(['merge', '--no-edit', 'main']);
+    // A first pass without a PR establishes the full anchor under the same policy.
+    h.git(['commit', '--allow-empty', '-qm', 'full pass head']);
+    h.ok(['submit', 'T1', '--sha', h.git(['rev-parse', 'HEAD']), '--agent', 'worker']);
+    assert.equal(check(h).receipt.head_mode, 'full');
+    prepare(h);
+    resubmit(h, 'README.md');
+    if (name !== 'no PR') h.ok(['submit', 'T1', '--sha', h.env.FIXTURE_SHA, '--pr', '1', '--agent', 'worker']);
+    const result = check(h);
+    assert.equal(result.receipt.head_mode, expected, name);
+    if (expected === 'mapped') {
+      assert.deepEqual(result.receipt.head_tests, ['test/mapped.test.js', 'test/value.test.js'], name);
+    }
+  }
+});
 
 function resubmit(h, file, content = 'Changed prose.\n') {
   fs.mkdirSync(path.dirname(path.join(h.repo, file)), { recursive: true });
@@ -436,10 +498,9 @@ test('host context', () => {
   assert.equal(process.env.HOST_OPT_IN, 'yes');
 });
 `);
-  fs.mkdirSync(path.join(h.repo, 'tools'), { recursive: true });
-  fs.writeFileSync(path.join(h.repo, 'tools/tests-map.json'), JSON.stringify({ 'docs/**': [host] }));
+  repositoryMap(h, { 'docs/**': [host] });
   h.git(['add', '.']);
-  h.git(['commit', '-qm', 'host suite mapping']);
+  h.git(['commit', '--allow-empty', '-qm', 'host suite mapping']);
   h.ok(['project', 'set', '--tests-host-only', JSON.stringify([host]), '--tests-host-env', '{"HOST_OPT_IN":"yes"}']);
   h.ok(['submit', 'T1', '--sha', h.git(['rev-parse', 'HEAD']), '--agent', 'worker']);
   const full = check(h);
