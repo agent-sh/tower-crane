@@ -151,6 +151,8 @@ test('governor settings are validated and set as an operational setting', (t) =>
     [{ defer_at: 0 }, /defer_at must be a fraction above 0 and at most 1/],
     [{ stop_at: 0.5 }, /stop_at must be at least governor\.defer_at/],
     [{ psi_cpu_defer: 101 }, /psi_cpu_defer must be a percentage/],
+    [{ growth_window_min: 0 }, /growth_window_min must be a positive number/],
+    [{ growth_samples_min: 2.5 }, /growth_samples_min must be a positive whole number/],
     [{ expected_mb: { gate: 1 } }, /expected_mb\.gate is not a unit kind/],
     [{ expected_mb: { worker: -1 } }, /expected_mb\.worker must be a positive number/],
     [{ lines: 1 }, /governor\.lines is not a governor setting/],
