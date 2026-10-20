@@ -1248,6 +1248,10 @@ Use `inbox --json` for typed findings with `action.command` and `action.argv`; u
 
 Repeat `--ack ITEM` to acknowledge several handled items atomically. All ids must be current acknowledgeable items; duplicate ids count once and an invalid id refuses the whole batch. A single item keeps its existing JSON response; a batch returns `{acknowledged: [ITEM, ...], count}`.
 
+Each owner comment has its own `owner_comment:TASK:EVENT` id (`project` for decision comments). Historical comments without an event id use a stable hash and occurrence number, so identical comments on one task can still be acknowledged separately. Use the ids returned by the current inbox; earlier acknowledgements of task-only comment ids do not suppress these individual comments.
+
+Inbox GitHub reads run concurrently across PRs and share a 1.5 s deadline, leaving time for local state and output within the 3 s inbox target. Successful reads are reused for up to one minute in `inbox-github-cache.json` in the state directory. A changed repository, base, task status, PR, submitted SHA or revision invalidates the cache. Failed reads are retried and remain explicit `github_error` items; local findings still appear. Gate and merge commands use their own fresh GitHub reads.
+
 Use `inbox --ack-before TIME` to acknowledge every current acknowledgeable item at or before a timestamp, optionally restricted by `--kind message|stall|decision_answer|owner_comment|review_exit_missing`. The command writes one audit event with the count and UTC cutoff and returns `{acknowledged: [ITEM, ...], count, cutoff}`, including when nothing matches. It uses each item's `at`, which is the source event time, a derived stall's lease expiry, or a decision's answer time. `--kind` requires `--ack-before`, and `--ack` cannot combine with `--ack-before`. Task and GitHub findings cannot be acknowledged.
 
 ```sh

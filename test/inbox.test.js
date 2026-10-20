@@ -28,7 +28,10 @@ function setup(t) {
     return { sha };
   });
   h.github = () => JSON.parse(fs.readFileSync(h.env.INBOX_GITHUB, 'utf8'));
-  h.save = (data) => fs.writeFileSync(h.env.INBOX_GITHUB, JSON.stringify(data));
+  h.save = (data) => {
+    fs.writeFileSync(h.env.INBOX_GITHUB, JSON.stringify(data));
+    fs.rmSync(path.join(h.state, 'inbox-github-cache.json'), { force: true });
+  };
   h.add = (title, kind = 'docs') => {
     const task = h.json(['task', 'add', '--title', title, '--kind', kind, '--acceptance', 'works']);
     h.ok(['brief', 'set', task.id, '-'], { input: `${title}\n` });
@@ -71,6 +74,91 @@ test('multi-item acknowledgements are atomic, deduplicated and retain single-ite
   assert.deepEqual(single, { acknowledged: messages[2].id });
   assert.deepEqual(h.logs().at(-1).detail, { item: messages[2].id });
   assert.equal(h.inbox().items.filter((i) => i.kind === 'message').length, 0);
+});
+
+test('owner comment acknowledgements distinguish current and legacy events on one task', (t) => {
+  for (const legacy of [false, true]) {
+    const h = setup(t);
+    const task = h.add(`Comment ids ${legacy ? 'legacy' : 'current'}`);
+    const cutoff = '2026-01-02T00:00:00.000Z';
+    for (let i = 0; i < 2; i++) {
+      event(h, task, 'task note', { text: 'Same owner comment' }, 'owner', cutoff);
+    }
+    if (legacy) {
+      const logs = h.logs().map((e) => {
+        if (e.cmd === 'task note' && e.agent === 'owner') delete e.id;
+        return e;
+      });
+      fs.writeFileSync(path.join(h.state, 'events.jsonl'), logs.map((e) => JSON.stringify(e)).join('\n') + '\n');
+    }
+    const comments = () => h.inbox().items.filter((i) => i.kind === 'owner_comment');
+    const first = comments();
+    assert.equal(first.length, 2);
+    assert.equal(new Set(first.map((i) => i.id)).size, 2, 'every comment has its own id');
+    assert.deepEqual(comments(), first, 'ids survive repeated CLI reads');
+    h.ok([...first[0].action.argv, '--agent', 'orchestrator']);
+    assert.deepEqual(comments(), [first[1]], 'single ack clears exactly one comment');
+    event(h, task, 'task note', { text: 'Later owner comment' }, 'owner', cutoff);
+    const before = comments();
+    assert.equal(before.length, 2);
+    assert.equal(before[0].id, first[1].id, 'appending events preserves legacy ids');
+    const ack = h.json(['inbox', '--ack-before', cutoff, '--kind', 'owner_comment', '--agent', 'orchestrator']);
+    assert.deepEqual(ack.acknowledged, before.map((i) => i.id));
+    assert.equal(ack.count, before.length);
+    assert.equal(comments().length, 0, 'listing decreases by the acknowledgement count');
+  }
+});
+
+test('inbox reuses successful GitHub reads for a minute and refreshes changed submissions', (t) => {
+  const h = setup(t);
+  const id = h.add('Cached GitHub');
+  h.submit(id, 7);
+  const first = h.inbox();
+  const before = h.github().calls.length;
+  assert.deepEqual(h.inbox(), first);
+  assert.equal(h.github().calls.length, before, 'a second CLI process reuses the GitHub observations');
+  const cacheFile = path.join(h.state, 'inbox-github-cache.json');
+  const cache = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
+  for (const entry of Object.values(cache.entries)) entry.at = '2000-01-01T00:00:00.000Z';
+  fs.writeFileSync(cacheFile, JSON.stringify(cache));
+  h.inbox();
+  assert.ok(h.github().calls.length > before, 'expired reads refresh');
+  const current = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
+  for (const entry of Object.values(current.entries)) entry.at = '2999-01-01T00:00:00.000Z';
+  fs.writeFileSync(cacheFile, JSON.stringify(current));
+  const expired = h.github().calls.length;
+  h.inbox();
+  assert.ok(h.github().calls.length > expired, 'future cache stamps are not trusted');
+  h.ok(['rework', id, '--reason', 'new submission']);
+  h.ok(['claim', id, '--agent', `worker-${id}`]);
+  h.ok(['submit', id, '--sha', h.sha, '--pr', '7', '--agent', `worker-${id}`]);
+  const resubmitted = h.github().calls.length;
+  h.inbox();
+  assert.ok(h.github().calls.length > resubmitted, 'a new revision invalidates cached PR observations');
+});
+
+test('slow inbox GitHub reads share a deadline and preserve explicit errors and local comments', (t) => {
+  for (const endpoint of ['', '/code-scanning/', '/issues/']) {
+    const h = setup(t);
+    const id = h.add(`Slow GitHub ${endpoint}`);
+    h.submit(id, 7);
+    if (endpoint === '/issues/') {
+      h.reviewer(id, 'reviewer', h.sha);
+      h.ok(['evidence', id, '--type', 'review', '--fail', '--sha', h.sha, '--revision', h.revision(id),
+        '--summary', 'A blocking review', '--agent', 'reviewer']);
+    }
+    event(h, id, 'task note', { text: 'Keep owner input' }, 'owner');
+    h.save({ ...h.github(), delayMs: 4000, delayEndpoint: endpoint });
+    const started = performance.now();
+    const data = h.inbox();
+    assert.ok(performance.now() - started < 5000, 'the snapshot does not wait for each slow endpoint'); // wait-allow: verify the inbox deadline contract with stalled GitHub subprocesses
+    assert.ok(data.items.some((i) => i.kind === 'owner_comment' && i.text === 'Keep owner input'));
+    assert.ok(data.items.some((i) => i.kind === 'github_error' && /deadline|timed out/.test(i.reason)),
+      'timeouts remain actionable GitHub errors');
+    const before = h.github().calls.length;
+    h.inbox();
+    assert.ok(h.github().calls.length > before, 'failed reads are retried, not cached as empty success');
+  }
 });
 
 test('ack-before includes the cutoff, filters kinds and leaves newer items and findings', (t) => {
@@ -549,7 +637,8 @@ test('GitHub-only findings wake the watcher and endpoint failures retain other f
   const id = h.add('Remote review');
   h.submit(id, 8);
   const after = () => String(fs.statSync(path.join(h.state, 'events.jsonl')).size);
-  const wait = () => h.run(['wait', '--inbox', '--observe', '--after', after(), '--types', 'inbox item', '--timeout', '0.1', '--agent', 'orchestrator']); // wait-allow: verify the CLI observation, filtering or timeout contract with already-published state
+  // Async GitHub reads must finish within the wait, including a cold cache.
+  const wait = () => h.run(['wait', '--inbox', '--observe', '--after', after(), '--types', 'inbox item', '--timeout', '2', '--agent', 'orchestrator']); // wait-allow: verify the CLI observation, filtering or timeout contract with already-published state
   assert.equal(wait().code, 2);
   const github = h.github();
   github.revuto = { name: 'review', app: { slug: 'revuto-review' }, status: 'completed', conclusion: 'failure', output: { summary: 'Bounds check missing' } };

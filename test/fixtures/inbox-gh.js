@@ -9,6 +9,7 @@ const file = process.env.INBOX_GITHUB;
 if (/^repos\/[^/]+\/[^/]+\/actions\//.test(args[1] || '')) {
   const data = JSON.parse(readPublished(file, 'utf8'));
   fs.appendFileSync(`${file}.actions`, `${JSON.stringify(args)}\n`);
+  delay(data);
   const endpoint = args[1];
   const id = endpoint.split('/')[5];
   const print = (rows) => { for (const row of rows) console.log(JSON.stringify(row)); };
@@ -35,11 +36,14 @@ if (/^repos\/[^/]+\/[^/]+\/actions\//.test(args[1] || '')) {
 let result;
 let failed = false;
 let review = null;
+let pause = 0;
 updateJson(file, (data) => {
   data.calls.push(args);
+  pause = data.delayMs && (!data.delayEndpoint || args[1]?.includes(data.delayEndpoint)) ? data.delayMs : 0;
   answer(data);
   return data;
 });
+if (pause) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, pause); // wait-allow: stall the GitHub fixture to verify inbox cancellation at its deadline
 // The review lands while this fetch is in flight, after the lock is released: the
 // evidence command may run gh, which takes the same lock.
 if (review) {
@@ -92,5 +96,11 @@ function answer(data) {
     result = [{ name: 'test', suite: 1, id: 1, runs: 1, app: 'fixture',
       status: data.ci === 'pending' ? 'in_progress' : 'completed', conclusion: data.ci === 'pending' ? null : data.ci || 'success' }];
     if (args[1].includes('/check-runs') && data.revuto) result.push(data.revuto);
+  }
+}
+
+function delay(data) {
+  if (data.delayMs && (!data.delayEndpoint || args[1]?.includes(data.delayEndpoint))) {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, data.delayMs); // wait-allow: stall base CI reads to verify the shared inbox deadline
   }
 }
