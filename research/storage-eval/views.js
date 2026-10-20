@@ -102,7 +102,7 @@ function main() {
     }
   }
   const result = { at: new Date().toISOString(), node: process.version, cores: os.cpus().length, load_1m: load, runs: RUNS, warmup: WARMUP,
-    state: STATE, trees: TREES, summary, samples, cpu };
+    trees: TREES.map((t) => t.name), summary, samples, cpu };
   fs.writeFileSync(path.resolve(arg('out')), JSON.stringify(result, null, 2) + '\n');
   for (const t of TREES) for (const [c] of COMMANDS) {
     const s = summary[t.name][c];

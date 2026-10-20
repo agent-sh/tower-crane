@@ -263,6 +263,17 @@ The hot paths query the indexes instead of reading the log. A hook's poll reads 
 
 The observer's startup pass and the merge queue's executor read the same way. A gate reaction itself, once it runs, reads what its gate reads. A one-shot command reads a task's `task_bulk` row only when it uses that task's evidence, notes or spend; a view about to check many tasks' evidence (`status`, `inbox`, the gate queue) reads their rows in one query. A lock-free reader takes its snapshot in a view, a read transaction on a connection of its own, and reads those rows through it later, so they are the ones its snapshot named; a holder of the lock reads them directly and opens a view after its last commit for what it reads once it releases the lock. A view holds back the checkpoint of every commit after its own, so a lock holder closes its process's views before it writes: rows written since a view's commit read their text from it first, and the rest are still current. A view also closes 2 s after it opened, its rows reading their text first, so a command that runs longer, such as one that waits on a gate's suite, does not hold the log back meanwhile. Long-lived readers (wait hosts, supervisors, board servers and MCP tool calls) read whole rows and hold no view.
 
+### View latency
+
+On a copy of the live state (446 tasks, 77,333 events, 2026-10-20), run from its repository with GitHub reads left out, 90 runs of each command per tree:
+
+| command | T267 head p50 / p95 ms | now p50 / p95 ms | CPU ms per run |
+|---|---|---|---|
+| `status` | 1002 / 1159 | 195 / 226 | 1527 to 260 |
+| `inbox` | 1014 / 1080 | 271 / 299 | 1479 to 333 |
+
+`inbox` keeps more fixed cost than `status`: Node start and module loading (about 55 ms), the `git rev-parse` that finds the repository for its worktree inventory (40 to 50 ms), and the unacknowledged messages it lists, 2451 on that copy. `research/storage-eval/views.js` measures it and `research/storage-eval/results/t442.md` has the runs.
+
 ### Migration and export
 
 A state directory whose `project.json` has no `storage` is in the file layout of tower-crane 0.1. The first command this tool runs on it migrates it under the state lock, after lock recovery has finished or discarded any interrupted commit as 0.1 tools do (below). It validates the files as a read does and builds the database under a temp name that the next lock holder sweeps if this one dies, with the text of `project.json` in `legacy` in `meta`. It syncs the database, renames it into place, and writes the marker over `project.json`. The marker is the commit point; a holder that dies before it leaves the file layout as it was, and the next command migrates it again. It then writes the old `project.json` into `legacy/<time>/`, moves `tasks.json`, `decisions.json`, `events.jsonl` and `events.cuts.jsonl` there and clears `legacy`. A holder that dies before that leaves `legacy` set, and the next command finishes the move. A process that cannot write the state directory cannot migrate it and refuses with `run any tower-crane command where the state directory is writable`; a sandboxed agent's state was migrated by the command that spawned it.
