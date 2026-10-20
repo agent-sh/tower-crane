@@ -513,7 +513,7 @@ test('tests evidence stores its mode in the audit event and stops counting when 
   assert.match(testsGate().reason, /mode.*none.*prove/);
   const refused = h.run(['accept', 'T1']);
   assert.equal(refused.code, 1);
-  assert.match(refused.stderr, /tests:.*mode none.*prove/);
+  assert.equal(testsGate().ok, true, 'accept refreshes the stale tests mode before later gates');
   const proof = h.json(['check', 'tests', 'T1', '--cmd', `${shellQuote(process.execPath)} verify-build.js`]);
   assert.equal(proof.tests_mode, 'prove');
   assert.equal(testsGate().ok, true);
@@ -535,7 +535,7 @@ test('tests evidence stores its mode in the audit event and stops counting when 
   assert.match(testsGate().reason, /mode unrecorded/);
 });
 
-test('acceptance and merge refuse a mode change after an audited tests pass', (t) => {
+test('accept refreshes a changed tests mode while merge requires a fresh check', (t) => {
   const h = makeRepo(t);
   h.init();
   const sha = gateFixture(h);
@@ -548,19 +548,16 @@ test('acceptance and merge refuse a mode change after an audited tests pass', (t
   h.reviewer('T1', 'r-1', sha);
   h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--ok', '--sha', sha, '--agent', 'r-1']);
   h.ok(['project', 'set', '--tests-mode', 'prove']);
-  const accept = h.run(['accept', 'T1']);
-  assert.equal(accept.code, 1);
-  assert.match(accept.stderr, /tests:.*mode none.*prove/);
-  h.ok(['project', 'set', '--tests-mode', 'none']);
   h.ok(['accept', 'T1']);
-  h.ok(['project', 'set', '--tests-mode', 'prove']);
+  assert.equal(h.readState('tasks.json').tasks[0].evidence.at(-1).tests_mode, 'prove');
+  h.ok(['project', 'set', '--tests-mode', 'none']);
   const cli = cliCopy(h);
   fs.mkdirSync(cli.gates, { recursive: true });
   fs.writeFileSync(path.join(cli.gates, 'merge.js'), FAKE_GATE);
   const out = path.join(h.base, 'gate.json');
   const merge = cli.run(['merge', 'T1'], { GATE_OUT: out, GATE_OK: '1' });
   assert.equal(merge.code, 1);
-  assert.match(merge.stderr, /its gates no longer pass: tests:.*mode none.*prove/);
+  assert.match(merge.stderr, /its gates no longer pass: tests:.*mode prove.*none/);
   assert.ok(!fs.existsSync(out), 'the merge gate did not run');
 });
 
