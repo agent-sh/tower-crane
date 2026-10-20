@@ -12,4 +12,9 @@ if (path.basename(process.argv[1] || '') === 'spawn-monitor.js' && process.env.T
     fs.appendFileSync(process.env.TOWER_CRANE_TEST_TASKKILL, JSON.stringify(args) + '\n');
     return { status: 128, stdout: '', stderr: 'process already exited' };
   };
+  const exec = cp.execFile;
+  cp.execFile = function snapshot(file, args, options, callback) {
+    if (file !== 'powershell.exe') return exec.call(this, file, args, options, callback);
+    process.nextTick(callback, null, `${process.pid} ${process.ppid} ${Date.now()} 0 bm9kZQ==\n`, '');
+  };
 }
