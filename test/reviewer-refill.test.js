@@ -355,8 +355,8 @@ G.check = (ctx, unit) => { throw Object.assign(new TowerCraneError(3, 'fixture d
       assert.equal(h.run(['accept', 'T1', '--agent', 'orchestrator'], { pre: ['--require', seedPreload] }).code, 3);
     }
     fs.unlinkSync(seed);
-    const result = h.run(['wait', '--types', 'never', '--timeout', '0.01', '--agent', 'orchestrator'],
-      { pre: ['--require', preload] }); // wait-allow: bounded CLI wait drives three refill probes with an explicit clock advance
+    const result = h.run(['wait', '--types', 'never', '--timeout', '0.01', '--agent', 'orchestrator'], // wait-allow: bounded CLI wait drives three refill probes with an explicit clock advance
+      { pre: ['--require', preload] });
     assert.equal(result.code, 2, result.stderr);
     const counts = JSON.parse(fs.readFileSync(trace, 'utf8'));
     assert.deepEqual(counts.map((c) => c.probes), mode === 'ordinary' ? [1, 1, 2] : [1, 2, 3],
