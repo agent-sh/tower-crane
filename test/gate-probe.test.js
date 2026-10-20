@@ -5,9 +5,10 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { cachedFixture } = require('./helpers');
+const { HUNG_TEST_MS } = require('./signals');
 const probe = require('./fixtures/gate-probe');
 
-test('gate probe launcher awaits success, tool failure results, and failed dispatches', { timeout: 120000 }, async (t) => {
+test('gate probe launcher awaits success, tool failure results, and failed dispatches', { timeout: HUNG_TEST_MS }, async (t) => {
   for (const row of [
     { name: 'success', tool: 0, dispatch: 0 },
     { name: 'tool failure', tool: 7, dispatch: 0 },
