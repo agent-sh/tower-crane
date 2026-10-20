@@ -424,6 +424,52 @@ test('incremental reference patterns cover literal paths, basenames, deletions a
   }
 });
 
+test('incremental seed covers every packed markdown path without lexical readers', () => {
+  const { select } = require('../lib/tests-incremental');
+  const { globToRegExp } = require('../lib/gates/tests');
+  const seed = require('../tools/tests-map.json');
+  const isTest = (p) => p.endsWith('.test.js');
+  const available = new Set(['test/package.test.js', 'test/ci-required.test.js', 'test/shared-files.test.js']);
+  for (const file of [
+    'agents/tower-crane-small.md', 'agents/tower-crane-researcher.md', 'agents/tower-crane-orchestrator.md',
+    'commands/tower-crane-inbox.md', 'skills/tower-crane-work/SKILL.md', 'standards/default.md',
+    'docs/state.md', 'docs/cli.md', 'docs/ladder.md', 'docs/automation.md', 'docs/design.md',
+    'README.md', 'CHANGELOG.md', 'LICENSE.md', 'bin/help.md', 'lib/help.md', 'hooks/help.md', '.claude-plugin/help.md',
+  ]) {
+    const result = select(seed, [{ path: file, status: 'M' }], isTest, available,
+      globToRegExp, 'node --test {tests}');
+    assert.equal(result.mode, 'incremental', file);
+    assert.ok(result.tests.includes('test/package.test.js'), `${file} must run the package link check`);
+  }
+});
+
+test('incremental CLI runs runtime-discovered package readers for a broken agent link', (t) => {
+  const h = fixture(t, null);
+  h.git(['switch', 'main']);
+  fs.mkdirSync(path.join(h.repo, 'agents'), { recursive: true });
+  fs.writeFileSync(path.join(h.repo, 'agents/tower-crane-small.md'), 'Valid agent.\n');
+  fs.writeFileSync(path.join(h.repo, 'test/package.test.js'), `const fs = require('node:fs');
+const assert = require('node:assert/strict');
+for (const file of fs.readdirSync('agents')) {
+  assert.doesNotMatch(fs.readFileSync('agents/' + file, 'utf8'), /research\\//);
+}
+`);
+  h.git(['add', '.']);
+  h.git(['commit', '-qm', 'runtime package reader']);
+  h.git(['switch', 'fixture-change']);
+  h.git(['merge', '--no-edit', 'main']);
+  repositoryMap(h, require('../tools/tests-map.json'));
+  h.ok(['project', 'set', '--ci-required', '[]']);
+  h.ok(['submit', 'T1', '--sha', h.git(['rev-parse', 'HEAD']), '--agent', 'worker']);
+  assert.equal(check(h).receipt.head_mode, 'full');
+  resubmit(h, 'agents/tower-crane-small.md', '[x](../research/notes.md)\n');
+  const run = h.run(['check', 'tests', 'T1', '--agent', 'worker', '--json']);
+  assert.equal(run.code, 1, run.stderr + run.stdout);
+  const result = JSON.parse(run.stdout);
+  assert.equal(result.receipt.head_mode, 'incremental');
+  assert.ok(result.receipt.head_tests.includes('test/package.test.js'));
+});
+
 test('incremental CLI runs readers hidden by an empty markdown mapping', (t) => {
   const h = fixture(t, null);
   h.git(['switch', 'main']);
@@ -556,6 +602,12 @@ test('incremental mapping handles changed tests, support files, runners and empt
 test('repository seed maps docs contract checks from docs paths', () => {
   const seed = require('../tools/tests-map.json');
   assert.deepEqual(seed['docs/**'], ['test/ci-required.test.js', 'test/shared-files.test.js']);
+});
+
+test('repository seed matches the current generated coverage', () => {
+  const generated = require('node:child_process').execFileSync(process.execPath,
+    [path.join(ROOT, 'tools/tests-map.js')], { cwd: ROOT, encoding: 'utf8', maxBuffer: Infinity });
+  assert.deepEqual(require('../tools/tests-map.json'), JSON.parse(generated));
 });
 
 test('incremental revision lineage stops at scope changes and skips retired revisions', () => {

@@ -46,7 +46,8 @@ for (const suite of suites) {
 for (const file of ['bin/tower-crane.js', 'lib/commands.js', 'lib/state.js', 'lib/util.js', 'lib/project.js', 'lib/tasks.js', 'lib/authority.js', 'package.json', 'test/run.js', 'test/helpers.js', 'test/repo-seed.js']) {
   if (files.includes(file)) map[file] = new Set(suites);
 }
-map['**/*.md'] = new Set();
+// npm discovers packed markdown at runtime, including files the test never names.
+map['**/*.md'] = new Set(['test/package.test.js']);
 map['docs/**'] = new Set(['test/ci-required.test.js', 'test/shared-files.test.js']);
 // Unknown executable coverage remains unmapped and therefore runs the full suite.
 const pinned = Object.fromEntries(Object.entries(map).filter(([p, tests]) => tests.size || p === '**/*.md').sort(([a], [b]) => a.localeCompare(b)).map(([p, tests]) => [p, [...tests].sort()]));
