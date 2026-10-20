@@ -4,7 +4,10 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const cp = require('node:child_process');
 const { cachedFixture } = require('./helpers');
+const { writeAtomic, readPublished } = require('./atomic-file');
+const { waitOnRepo } = require('./signals');
 const B = require('../lib/broker');
 const { failingTests } = require('../lib/ci-feedback');
 const { stripEscapes } = require('../lib/ci-log-text');
@@ -32,6 +35,7 @@ const LOG = PLAIN
   .replace("  error: 'ENOENT: no such file or directory'", "  \x00\x07\x08\x0b\x0c\x0e\x1f\x7ferror: 'ENOENT: no such file or directory'\r");
 
 const BRANCH = 'tower-crane/T1-change';
+const POLICY_DENIED = "gh api is not allowed by this agent's agent file";
 
 test('CI log cleanup preserves text, tabs and newlines while removing terminal controls', () => {
   const cases = [
@@ -250,6 +254,176 @@ function checkFeedback(h) {
   return data;
 }
 
+function reviewComments() {
+  const finding = (id, path, line, body = '[P2] Guard the input') => ({
+    id, path, line, body, user: 'revuto-review[bot]', in_reply_to_id: null,
+  });
+  const reply = (id, parent, body) => ({ id, in_reply_to_id: parent, user: 'worker', body });
+  return [
+    finding(501, 'lib/a.js', 12),
+    finding(502, 'lib/b.js', 40, 'Question remains open'),
+    reply(503, 502, 'Which input fails?'),
+    finding(504, 'lib/c.js', 50, 'Reopened finding'),
+    reply(505, 504, '[resolved]\nFixed'),
+    reply(506, 504, 'Still broken'),
+    finding(507, 'lib/closed.js', 60),
+    reply(508, 507, '[resolved]\nFixed'),
+    finding(509, 'lib/outdated.js', null),
+    { ...finding(510, 'lib/human.js', 70), user: 'a-person' },
+  ];
+}
+
+function sendToRework(h) {
+  const brief = path.join(h.base, 'brief.md');
+  fs.writeFileSync(brief, 'Fix the review findings.');
+  h.ok(['brief', 'set', 'T1', '--file', brief]);
+  h.ok(['ladder', 'set', 'medium', '--harness', 'command', '--clear', 'profile', '--clear', 'effort',
+    '--command', JSON.stringify([process.execPath, '-e', 'console.log(process.argv[1])', '{prompt}'])]);
+  const state = h.readState('tasks.json');
+  Object.assign(state.tasks[0], { status: 'submitted', claim: null });
+  h.writeState('tasks.json', state);
+  h.ok(['rework', 'T1', '--reason', 'Address the inline findings']);
+}
+
+test('ci resolve help names where workers find inline comment ids', (t) => {
+  const h = fixture(t);
+  const help = h.ok(['ci', 'resolve', '--help']);
+  assert.match(help, /find COMMENT_ID beside path:line in ci checks, rework prompts or submit reports/);
+});
+
+test('rework prompts and worker ci reads expose inline ids that ci resolve accepts', async (t) => {
+  const h = fixture(t);
+  const data = checkFeedback(h);
+  data.comments = reviewComments();
+  fs.writeFileSync(h.env.CI_FEEDBACK_GH, JSON.stringify(data));
+  sendToRework(h);
+  const expected = [[501, 'lib/a.js', 12], [502, 'lib/b.js', 40], [504, 'lib/c.js', 50]];
+  const assertFindings = (text) => {
+    for (const [id, file, line] of expected) assert.ok(text.includes(`${file}:${line} (comment ${id})`), text);
+    assert.doesNotMatch(text, /lib\/(?:closed|outdated|human)\.js/);
+  };
+  const dry = h.json(['spawn', '--task', 'T1', '--dry-run']);
+  assertFindings(dry.argv.join('\n'));
+  const started = h.json(['spawn', '--task', 'T1', '--wait']);
+  assertFindings(fs.readFileSync(started.log, 'utf8'));
+
+  const values = { NODE_OPTIONS: h.env.NODE_OPTIONS, CI_FEEDBACK_GH: h.env.CI_FEEDBACK_GH };
+  const saved = {};
+  for (const [key, value] of Object.entries(values)) {
+    saved[key] = process.env[key];
+    process.env[key] = value;
+  }
+  t.after(() => {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+  const job = { state: h.state, task: 'T1', agent: 'worker', role: 'worker', cwd: h.repo,
+    broker_harnesses: ['codex'], broker: path.join(h.base, 'broker', B.FILE) };
+  const broker = await B.start(job);
+  t.after(() => broker.close());
+  const read = await B.forward(job.broker, ['ci', 'checks', 'T1'], h.state);
+  assert.equal(read.code, 0, read.stderr);
+  assertFindings(read.stdout);
+  const json = await B.forward(job.broker, ['ci', 'checks', 'T1', '--json'], h.state);
+  assert.equal(json.code, 0, json.stderr);
+  assert.deepEqual(JSON.parse(json.stdout).findings.map((f) => [f.id, f.path, f.line]), expected);
+  const displayed = [...read.stdout.matchAll(/\(comment (\d+)\)/g)].map((m) => m[1]);
+  assert.deepEqual(displayed, expected.map(([id]) => String(id)));
+  for (const id of displayed) {
+    const resolved = await B.forward(job.broker, ['ci', 'resolve', id, '--reason', 'Fixed the guard at the reported path'], h.state);
+    assert.equal(resolved.code, 0, resolved.stderr);
+    assert.match(resolved.stdout, new RegExp(`comment ${id}.*\\[resolved\\]`));
+  }
+  const after = await B.forward(job.broker, ['ci', 'checks', 'T1', '--json'], h.state);
+  assert.equal(after.code, 0, after.stderr);
+  assert.deepEqual(JSON.parse(after.stdout).findings, []);
+});
+
+test('first and chained fallback routes keep inline ids in rework prompts', (t) => {
+  const fail = [process.execPath, '-e',
+    'console.log(JSON.stringify({type:"turn.failed",error:{message:"HTTP 503 service unavailable"}}));process.exit(1)', '{prompt}'];
+  const print = [process.execPath, '-e', 'console.log(process.argv[1])', '{prompt}'];
+  for (const [count, denied] of [[1, false], [2, false], [1, true], [2, true]]) {
+    const h = fixture(t);
+    const data = checkFeedback(h);
+    data.comments = reviewComments();
+    if (denied) data.commentsError = POLICY_DENIED;
+    fs.writeFileSync(h.env.CI_FEEDBACK_GH, JSON.stringify(data));
+    sendToRework(h);
+    const routes = Array.from({ length: count }, (_, index) => ({
+      harness: 'command', command: index === count - 1 ? print : fail,
+    }));
+    h.ok(['ladder', 'set', 'medium', '--command', JSON.stringify(fail),
+      '--supervision', '{"retries":0,"backoff_ms":1,"max_backoff_ms":1}']);
+    h.ok(['ladder', 'set', 'medium', '--fallbacks', JSON.stringify(routes)]);
+    const result = h.run(['spawn', '--task', 'T1', '--wait', '--json']);
+    assert.equal(result.code, 0, result.stderr + result.stdout);
+    const started = JSON.parse(result.stdout);
+    const log = fs.readFileSync(started.log, 'utf8');
+    if (denied) assert.match(log, /Revuto inline findings unavailable:.*is not allowed by this agent's agent file/);
+    else for (const [id, file, line] of [[501, 'lib/a.js', 12], [502, 'lib/b.js', 40], [504, 'lib/c.js', 50]]) {
+      assert.ok(log.includes(`${file}:${line} (comment ${id})`), `fallback ${count}: ${log}`);
+    }
+    const events = h.events();
+    assert.deepEqual(events.filter((e) => e.cmd === 'spawn fallback').map((e) => e.detail.route_index),
+      Array.from({ length: count }, (_, index) => index + 1));
+  }
+});
+
+test('fixture replies preserve single, concurrent distinct and repeated updates', async (t) => {
+  for (const parents of [[501], [501, 502, 504], [501, 501]]) {
+    const h = fixture(t);
+    const data = checkFeedback(h);
+    data.comments = reviewComments();
+    writeAtomic(h.env.CI_FEEDBACK_GH, JSON.stringify(data));
+    const barrier = path.join(h.base, 'release');
+    const preload = path.join(h.base, 'reply-barrier.js');
+    fs.writeFileSync(preload, `
+const fs = require('node:fs');
+const { writeAtomic } = require(${JSON.stringify(path.join(__dirname, 'atomic-file.js'))});
+const original = fs.readFileSync;
+let held = false;
+fs.readFileSync = (file, ...args) => {
+  const value = original(file, ...args);
+  if (!held && file === process.env.CI_FEEDBACK_GH) {
+    held = true;
+    writeAtomic(process.env.REPLY_READY, 'ready');
+    const deadline = Date.now() + 30000; // wait-allow: bounds the fixture read barrier
+    while (!fs.existsSync(process.env.REPLY_RELEASE)) {
+      if (Date.now() > deadline) throw new Error('reply read barrier timed out');
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10); // wait-allow: fixture waits for its explicit release
+    }
+  }
+  return value;
+};
+`);
+    const children = parents.map((parent, index) => {
+      const ready = path.join(h.base, `ready-${index}`);
+      const child = cp.spawn(process.execPath, [path.join(__dirname, 'fixtures', 'ci-feedback-gh.js'),
+        'api', '--method', 'POST', `repos/acme/app/pulls/9/comments/${parent}/replies`, '-f', `body=[resolved]\nwriter ${index}`],
+      { env: { ...h.env, NODE_OPTIONS: `${h.env.NODE_OPTIONS} --require=${JSON.stringify(preload)}`,
+        REPLY_READY: ready, REPLY_RELEASE: barrier }, stdio: ['ignore', 'pipe', 'pipe'] });
+      t.after(() => { if (child.exitCode === null) child.kill(); });
+      const done = new Promise((resolve, reject) => {
+        let error = '';
+        child.stderr.on('data', (chunk) => { error += chunk; });
+        child.stdout.resume();
+        child.on('error', reject);
+        child.on('close', (code) => code === 0 ? resolve() : reject(new Error(error || `reply exited ${code}`)));
+      });
+      return { ready, done };
+    });
+    await waitOnRepo(h, () => children.every(({ ready }) => fs.existsSync(ready)), 'reply writers did not reach the read barrier');
+    writeAtomic(barrier, 'release');
+    await Promise.all(children.map(({ done }) => done));
+    const replies = JSON.parse(readPublished(h.env.CI_FEEDBACK_GH, 'utf8')).comments.slice(data.comments.length);
+    assert.deepEqual(replies.map((r) => r.in_reply_to_id).sort(), [...parents].sort());
+    assert.equal(new Set(replies.map((r) => r.id)).size, parents.length);
+  }
+});
+
 test('ci checks shows capped and ignored reasons, check output, annotations and current CodeQL locations before submit', (t) => {
   const h = fixture(t);
   checkFeedback(h);
@@ -289,6 +463,8 @@ test('ci checks strips terminal controls from check output and annotations in te
   data.checks[h.sha][0].output.summary = '\x1b]0;hidden title\x07reached the 2-round review limit\x00\r';
   data.annotations[1][0].message = '\x1b]8;;https://example.test\x1b\\configured review cap\x1b]8;;\x1b\\\x07';
   data.alerts['refs/pull/9/merge'][0].most_recent_instance.message.text = '\x1b[31mFile may change between checks.\x1b[0m\x1b';
+  data.comments = reviewComments();
+  data.comments[0].body = '\x1b[31mGuard the input\x1b[0m\x07';
   fs.writeFileSync(h.env.CI_FEEDBACK_GH, JSON.stringify(data));
   const r = h.run(['ci', 'checks', 'T1']);
   assert.equal(r.code, 0, r.stderr);
@@ -304,6 +480,33 @@ test('ci checks strips terminal controls from check output and annotations in te
   assert.equal(row.output.summary, 'reached the 2-round review limit');
   assert.equal(row.annotations[0].message, 'configured review cap');
   assert.equal(result.alerts[0].message, 'File may change between checks.');
+  assert.equal(result.findings[0].body, 'Guard the input');
+  assert.equal(result.findings[0].id, 501);
+});
+
+test('inline read errors stay explicit and only shim policy denials permit rework dispatch', (t) => {
+  for (const error of [POLICY_DENIED, 'gh: review comments unavailable (HTTP 503)', 'gh: Bad credentials (HTTP 401)']) {
+    for (const claimed of [false, true]) {
+      const h = fixture(t);
+      const data = checkFeedback(h);
+      data.commentsError = error;
+      writeAtomic(h.env.CI_FEEDBACK_GH, JSON.stringify(data));
+      const r = h.run(['ci', 'checks', 'T1']);
+      assert.equal(r.code, 0, r.stderr);
+      assert.ok(r.stdout.includes('revuto findings unavailable:') && r.stdout.includes(error), r.stdout);
+      assert.match(r.stdout, /CodeQL.*failure/);
+      assert.doesNotMatch(r.stdout, /no open revuto/);
+      const json = h.json(['ci', 'checks', 'T1']);
+      assert.equal(json.findings, null);
+      assert.ok(json.findings_error.includes(error), json.findings_error);
+      sendToRework(h);
+      if (claimed) h.ok(['claim', 'T1', '--agent', 'worker']);
+      const spawn = h.run(['spawn', '--task', 'T1', '--dry-run', '--json']);
+      assert.equal(spawn.code, error === POLICY_DENIED ? 0 : 1, spawn.stderr);
+      const notice = spawn.code === 0 ? JSON.parse(spawn.stdout).argv.join('\n') : spawn.stdout + spawn.stderr;
+      assert.ok(notice.includes(error), notice);
+    }
+  }
 });
 
 test('ci checks refuses another branch and does not present a stale merge analysis as current', (t) => {
