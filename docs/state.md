@@ -1497,7 +1497,11 @@ The host delivers completion hints directly or through `ci webhook`
 with GitHub check-run, check-suite or workflow-run JSON. The repository
 must match, and only completed checks at active submitted heads count.
 The hint triggers a new CI gate query; payload conclusions do not produce
-evidence. No webhook listener is installed; pending CI without a hint is
+evidence. PR-body-only review failures retain the submitted head, so their
+CI completion hints still refresh its evidence. Hosted CI takes no executor;
+local CI waits for one if needed. A review failure that sends the task to
+code rework skips the query at the superseded head.
+No webhook listener is installed; pending CI without a hint is
 rechecked once a minute by the trusted `wait` watcher, as described below.
 
 `automation` events record `{source, phase}` keyed by the triggering event

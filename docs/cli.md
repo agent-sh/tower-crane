@@ -654,6 +654,8 @@ including failed-review rework and accepted merges without a merged-tree suite.
 Tests, clean, local CI and merged-tree suites take a gate executor; hosted CI
 queries do not. A reaction that discovers a gate after starting queues before
 running it if no executor is available.
+CI completion still refreshes evidence after a PR-body-only review failure,
+so a body correction check cannot reuse an earlier ok receipt after CI fails.
 In the gate executor queue, accepted tasks' merged-tree suites run ahead of
 queued submitted-task gates, in acceptance order. A running gate finishes
 before the next queued gate starts.
