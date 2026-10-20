@@ -74,6 +74,28 @@ function setup(t, { reason = 'outage', primaryHarness = 'codex', nextHarness = '
   return h;
 }
 
+for (const [route, reason] of [['retry', 'outage'], ['fallback', 'refusal']]) {
+  test(`a synchronous containment throw on ${route} is recorded without a supervisor rejection`, async t => {
+    const h = setup(t, { reason });
+    h.spawnEnv.TC_CONTAINMENT_RELAUNCH_PROBE = 'throw';
+    const result = h.spawn();
+    assert.notEqual(result.code, 0);
+    const blocked = events(h).find(e => e.cmd === 'spawn phase' && e.detail.reason === 'resource-scope-failed' && e.detail.error);
+    assert.ok(blocked, result.stdout + result.stderr);
+    assert.match(blocked.detail.error, /scope setup failed synchronously/);
+    assert.doesNotMatch(result.stderr, /supervisor failed|UnhandledPromiseRejection/);
+  });
+}
+
+test('a late cap event from an exited attempt does not stop its retry', async t => {
+  const h = setup(t);
+  h.spawnEnv.TC_CONTAINMENT_RELAUNCH_PROBE = 'late';
+  const result = h.spawn();
+  assert.equal(result.code, 0, result.stdout + result.stderr);
+  assert.equal(events(h).some(e => e.cmd === 'spawn phase' && e.detail.reason === 'resource-memory-max'), false);
+  assert.deepEqual(h.attempts().map(a => a.model), ['first', 'first', 'first', 'second']);
+});
+
 for (const explicit of [false, true]) {
   test(`research Claude fallback ${explicit ? 'sets' : 'inherits'} web MCP tools and worker confinement on Bedrock`, async (t) => {
     const server = { name: 'harness-web', command: 'node', args: ['/web/server.mjs'] };
