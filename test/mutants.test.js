@@ -456,7 +456,7 @@ test('a hung planted bug is caught by its baseline-derived timeout', async (t) =
   const result = await runContained(process.execPath, [
     path.join(ROOT, 'scripts/mutants.js'), '--root', h.repo,
     '--only', 'stack-merge-unaccepted-lower', '--no-full', '--jobs', '1',
-  ], { env: { ...h.env, TOWER_CRANE_TEST_TMP: h.base }, limit: 48, timeout: 90000 }); // wait-allow: outer emergency deadline covers two 30-second mutation attempts
+  ], { env: { ...h.env, TOWER_CRANE_TEST_TMP: h.base }, limit: 48, timeout: 150000 }); // wait-allow: outer emergency deadline covers two 30-second mutation attempts and three Windows helper compiles
   assert.equal(result.reason, null, result.output);
   assert.equal(result.status, 0, result.output);
   assert.match(result.output, /caught.*stack-merge-unaccepted-lower \(caught-by-timeout \(30000 ms\)\)/);

@@ -84,7 +84,7 @@ jobs:
     if: github.event_name != 'pull_request'
     runs-on: windows-latest
     # About 50 to 65 minutes: ten passes of the authority files take about 16 and ten of
-    # the mutation tests about 25.
+    # the mutation tests about 25, within their 40-minute step limit.
     timeout-minutes: 85
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -134,8 +134,10 @@ jobs:
           }
         env:
           TOWER_CRANE_TEST_TMP: ${{ runner.temp }}/tower-crane-tests
-      # Each pass asserts that every process its mutant runs started has stopped.
+      # Each pass asserts that every process its mutant runs started has stopped. A step limit
+      # under the job's keeps the log of a pass that hangs.
       - name: Repeat mutation containment tests ten times
+        timeout-minutes: 40
         shell: pwsh
         run: |
           foreach ($attempt in 1..10) {

@@ -447,6 +447,9 @@ public static class TowerCraneMutantJob {
       TerminateProcess(child.hProcess, 1);
       throw new Win32Exception(error);
     }
+    // The command is still suspended, so nothing it writes can split this line.
+    Console.Out.Write("\n" + marker + " started\n");
+    Console.Out.Flush();
     Check(ResumeThread(child.hThread) != 0xFFFFFFFF);
     CloseHandle(child.hThread);
 
@@ -534,7 +537,18 @@ async function runJob(command, argv, { cwd, env, limit, timeout }) {
   let output = '';
   let reason = null;
   let force;
-  const capture = chunk => { output = (output + chunk.toString()).slice(-8192); };
+  let deadline;
+  let started = false;
+  const begin = `\n${marker} started\n`;
+  const capture = chunk => {
+    output = (output + chunk.toString()).slice(-8192);
+    // The timeout measures the command, not the helper's startup and compile.
+    if (!started && output.includes(begin)) {
+      started = true;
+      clearTimeout(deadline);
+      deadline = setTimeout(() => stop(`caught-by-timeout (${timeout} ms)`), timeout);
+    }
+  };
   child.stdout.on('data', capture);
   child.stderr.on('data', capture);
   const stop = why => {
@@ -547,13 +561,14 @@ async function runJob(command, argv, { cwd, env, limit, timeout }) {
   const onTerm = () => stop('interrupted by SIGTERM');
   process.on('SIGINT', onInt);
   process.on('SIGTERM', onTerm);
-  const deadline = setTimeout(() => stop(`caught-by-timeout (${timeout} ms)`), timeout);
+  deadline = setTimeout(() => stop(`caught-by-timeout (${timeout} ms)`), timeout);
   try {
     const { status, signal } = await new Promise((resolve, reject) => {
       child.once('error', reject);
       child.once('close', (code, sig) => resolve({ status: code, signal: sig }));
     });
-    const at = output.lastIndexOf(`\n${marker} `);
+    output = output.replace(begin, '');
+    const at = output.lastIndexOf(`\n${marker} {`);
     const report = at < 0 ? null : JSON.parse(output.slice(at + marker.length + 2).split('\n')[0]);
     if (at >= 0) output = output.slice(0, at);
     if (!report || status !== 0) throw new Error(`cannot contain the mutant run in a Windows job (${signal || status}):\n${output}`);
