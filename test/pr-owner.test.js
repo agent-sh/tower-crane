@@ -29,7 +29,8 @@ function ownerFixture(t, env = {}) {
   Object.assign(h.env, { OWNER_HEADS: JSON.stringify([h.sha, h.fix]), OWNER_LOG: path.join(h.base, 'owner.jsonl'), ...env });
   // The engine and the worker append while the test reads: only complete lines count.
   const lines = (file) => {
-    const text = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
+    let text = '';
+    try { text = fs.readFileSync(file, 'utf8'); } catch (e) { if (e.code !== 'ENOENT') throw e; }
     return text.slice(0, text.lastIndexOf('\n') + 1).split('\n').filter(Boolean).map(JSON.parse);
   };
   h.logs = () => lines(path.join(h.state, 'events.jsonl'));
@@ -49,7 +50,7 @@ async function runEngine(h) {
   for (const stream of [engine.stdout, engine.stderr]) stream.on('data', (d) => { output += d; });
   const closed = new Promise((resolve) => engine.on('close', resolve));
   try {
-    await waitUntil(() => h.workers().some((w) => h.logs().some((e) => e.cmd === 'spawn exit' && e.detail.agent === w.detail.agent)),
+    await waitUntil(() => h.workers().length && h.logs().some((e) => e.cmd === 'spawn exit' && e.detail.agent === h.workers()[0].detail.agent),
       { paths: [h.base], alive: engine, what: () => `the owner exits; engine output: ${output}` });
   } finally {
     engine.kill('SIGINT');
@@ -105,6 +106,24 @@ test('a failed review reaches the owner with its findings, and the owner submits
   assert.equal(fix.outcome, 'fix');
   assert.match(fix.message, /review FAIL by reviewer-T1-\d+ at [0-9a-f]+:\nvalue\.js: the exported value must be 2, not 1/);
   assert.deepEqual(h.logs().filter((e) => e.cmd === 'rework').map((e) => e.detail.from_review), [true]);
+});
+
+test('a review that fails only on PR-body claims gets its body fixer while the owner waits, with no rework', async (t) => {
+  const h = ownerFixture(t, { OWNER_REVIEW_BODY: '1' });
+  h.env.OWNER_REVIEW_FAIL_ONCE = path.join(h.base, 'review-failed');
+  h.env.OWNER_HEADS = JSON.stringify([h.fix]);
+  const github = h.github();
+  // The body fix checks the PR's head branch is the task's.
+  Object.assign(github.prs['7'], { body: 'The body as submitted.', headRefName: 'tower-crane/T1-change' });
+  h.saveGithub(github);
+  await runEngine(h);
+  assert.equal(h.task().status, 'accepted');
+  assert.equal(h.task().revision, 1, 'a PR-body correction needs no rework');
+  const spawns = h.workers();
+  assert.deepEqual(spawns.map((e) => !!e.detail.body_fix), [false, true], 'the owner stays; a fresh fixer edits the body');
+  assert.notEqual(spawns[1].detail.agent, spawns[0].detail.agent);
+  assert.equal(h.github().prs['7'].body, 'The corrected body.');
+  assert.equal(h.logs().filter((e) => e.cmd === 'rework' || e.cmd === 'claim' && e.detail.handover).length, 0);
 });
 
 test('an owner idle past its limit exits, and the next failure dispatches a new worker as before', async (t) => {

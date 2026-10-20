@@ -7,7 +7,8 @@
 // submitted. OWNER_NO_PR submits without a PR; OWNER_CRASH_ON_FIX
 // exits 1 at the first handback, as a crashed session would. As a reviewer it
 // fails the first review with a finding when OWNER_REVIEW_FAIL_ONCE names a
-// marker file that does not exist yet, and passes every other one.
+// marker file that does not exist yet, a PR-body claim with OWNER_REVIEW_BODY,
+// and passes every other one. As a PR-body fixer it corrects the body.
 
 const { fakeAgentEnv } = require('../agent-env');
 const { updateJson } = require('../atomic-file');
@@ -26,13 +27,30 @@ const ok = (args) => {
 };
 const github = () => JSON.parse(fs.readFileSync(process.env.AUTOMATION_GITHUB, 'utf8'));
 
-if (role === 'reviewer') {
+if (process.argv.slice(3).some((arg) => arg.includes('## PR-body repair'))) {
+  // The PR-body fixer edits only the body.
+  updateJson(process.env.AUTOMATION_GITHUB, (state) => {
+    state.prs['7'].body = 'The corrected body.';
+    return state;
+  });
+} else if (role === 'reviewer') {
   const head = github().prs['7'].headRefOid;
-  const marker = process.env.OWNER_REVIEW_FAIL_ONCE;
-  if (marker && !fs.existsSync(marker)) {
-    fs.writeFileSync(marker, '');
-    ok(['evidence', task, '--type', 'review', '--sha', head, '--fail', '--summary', 'value.js: the exported value must be 2, not 1',
-      '--findings', JSON.stringify([{ kind: 'defect', path: 'value.js', claim: 'the exported value must be 2, not 1' }])]);
+  // Creating the marker is the check: only the review that creates it fails.
+  const first = () => {
+    try {
+      fs.writeFileSync(process.env.OWNER_REVIEW_FAIL_ONCE, '', { flag: 'wx' });
+      return true;
+    } catch (e) {
+      if (e.code === 'EEXIST') return false;
+      throw e;
+    }
+  };
+  if (process.env.OWNER_REVIEW_FAIL_ONCE && first()) {
+    const finding = process.env.OWNER_REVIEW_BODY
+      ? { kind: 'false-claim', path: 'PR body', claim: 'the body claims a test that does not exist' }
+      : { kind: 'defect', path: 'value.js', claim: 'the exported value must be 2, not 1' };
+    ok(['evidence', task, '--type', 'review', '--sha', head, '--fail', '--summary', `${finding.path}: ${finding.claim}`,
+      '--findings', JSON.stringify([finding])]);
   } else {
     ok(['evidence', task, '--type', 'review', '--sha', head, '--ok']);
   }
@@ -43,6 +61,8 @@ if (role === 'reviewer') {
   ok(['claim', task]);
   for (;;) {
     const sha = heads[Math.min(next, heads.length - 1)];
+    // The worktree holds the submitted head, as a worker's own commit would.
+    cp.execFileSync('git', ['reset', '-q', '--hard', sha], { stdio: 'ignore' });
     if (process.env.OWNER_NO_PR) ok(['submit', task, '--sha', sha]);
     else {
       // The PR head moves with the push, and its CI reads green there.
