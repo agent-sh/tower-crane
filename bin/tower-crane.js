@@ -550,10 +550,13 @@ async function main(argv) {
     // and later ones only what was appended since.
     const releaseEvents = ctx.stateDir ? S.retainEvents(ctx.stateDir) : () => {};
     let res;
+    let releaseController;
     try {
       require('../lib/orchestrator').command(ctx, cmd.name);
+      releaseController = await require('../lib/containment').registerController(ctx, cmd.name);
       res = await cmd.run(ctx);
     } finally {
+      releaseController?.();
       releaseEvents();
     }
     if (res && !res.printed) {
