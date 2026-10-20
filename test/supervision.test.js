@@ -21,8 +21,9 @@ const GATE_SKIP = process.platform === 'win32' && 'the lease gate is POSIX-only'
 // A dispatch that finds no /bin/sh spawns its workers through the Windows launch handshake.
 const NO_SH = { HOOK_NO_SH: '1' };
 const windowsConcurrency = process.platform === 'win32' ? 2 : false;
-// Long enough for a supervisor to boot on a loaded host, well under the production 10 s.
-const SHORT_STARTUP_MS = 4000;
+// Long enough for a supervisor to boot on a loaded host, well under the production 10 s;
+// Windows, whose supervisor starts slower, keeps the production window.
+const SHORT_STARTUP_MS = process.platform === 'win32' ? 10000 : 4000;
 const S = require('../lib/state');
 
 const log = (h) => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
@@ -781,7 +782,7 @@ test('a state-lock timeout preserves the pending retry without spending another 
   const backoff = 3000;
   const h = setup(t, { config: { retries: 1, backoff_ms: backoff, max_backoff_ms: backoff } });
   // A short lock wait (lib/intervals.js) lets the retry's write time out while the lock is held.
-  const lockWait = 1000;
+  const lockWait = process.platform === 'win32' ? 3000 : 1000;
   const trace = path.join(h.base, 'lock-trace.jsonl');
   Object.assign(h.env, { TOWER_CRANE_INTERVALS: JSON.stringify({ lock_wait: lockWait }), TOWER_CRANE_LOCK_TRACE: trace });
   h.json(['spawn', '--task', 'T1']);
