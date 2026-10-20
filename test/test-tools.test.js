@@ -326,6 +326,16 @@ test('the suite profile sums leaf tests per file and marks tests that ran beside
   assert.match(text, /^serial tests: 1\.5 s, 0\.6 s CPU: 60% waiting$/m);
   assert.match(text, /^\| 1 \| sleeps \| `test\/a\.test\.js` \| 1\.0 \| 0\.1 \| 90% \|$/m);
   assert.match(text, /^\| 2 \| y\\\|z\\\\ \| `test\/b\.test\.js` \| 0\.8 \| - \| overlapped \|$/m, 'cells escape the separator and the escape');
+  assert.match(text.split('\n').pop(), /^serial tests: /, 'the summary ends the report, where a log tail keeps it');
+  s.tests[0].name = 'n'.repeat(150);
+  const host = { cores: 24, cgroup: '/gate.scope', load_start: 2.04, load_peak: 13.96, load_end: 9.5, memory_start: 100 * 1048576, memory_peak: 2616 * 1048576 };
+  const hosted = report(s, { wall_ms: 1700, concurrency: 2, top: 30, host, max_wall_s: 600 });
+  assert.match(hosted, new RegExp(`^\\| 1 \\| ${'n'.repeat(97)}\\.\\.\\. \\|`, 'm'), 'a long name is cut to 100 characters');
+  assert.match(hosted, /^host: 24 cores; 1-minute load 2\.0 at start, peak 14\.0, 9\.5 at end$/m);
+  assert.match(hosted, /^memory: peak 2516 MiB above the start in cgroup \/gate\.scope$/m);
+  assert.match(hosted.split('\n').pop(), /^under the 600 s limit$/);
+  assert.match(report(s, { wall_ms: 600000, concurrency: 2, top: 30, max_wall_s: 600 }), /^over the 600 s limit$/m, 'the limit itself is over');
+  assert.match(report(s, { wall_ms: 1700, concurrency: 2, top: 30, host: { ...host, memory_peak: null } }), /^memory: no cgroup memory\.current to read$/m);
 });
 
 test('the suite profile records each test of a real run with its CPU', { skip: process.platform !== 'linux' && 'CPU comes from /proc' }, (t) => {
@@ -337,10 +347,14 @@ require('node:test')('waits', () => { assert.equal(Atomics.wait(new Int32Array(n
 require('node:test')('spins', () => { const end = Date.now() + 400; let n = 0; while (Date.now() < end) n++; assert.ok(n > 0); }); // wait-allow: the profile measures CPU work
 `);
   const out = path.join(h.base, 'profile.json');
-  const r = cp.spawnSync(process.execPath, [path.join(ROOT, 'scripts', 'suite-profile.js'), '--test-concurrency=1', '--json', out, fixture],
+  const r = cp.spawnSync(process.execPath, [path.join(ROOT, 'scripts', 'suite-profile.js'), '--test-concurrency=1', '--json', out, '--max-wall', '0.5', fixture],
     { cwd: ROOT, env: { ...h.env, TOWER_CRANE_TEST_TMP: h.base }, encoding: 'utf8', timeout: 300000 });
-  assert.equal(r.status, 0, r.stderr + r.stdout);
+  assert.equal(r.status, 1, r.stderr + r.stdout);
+  assert.match(r.stdout, /^over the 0\.5 s limit$/m, 'a passing suite that took longer than --max-wall fails the run');
+  assert.match(r.stdout, /^host: \d+ cores; 1-minute load /m);
   const profile = JSON.parse(fs.readFileSync(out, 'utf8'));
+  assert.equal(profile.status, 0, 'the suite itself passed');
+  assert.ok(profile.host.load_peak >= 0 && profile.host.cores > 0, JSON.stringify(profile.host));
   const byName = Object.fromEntries(profile.tests.map((x) => [x.name, x]));
   assert.deepEqual(Object.keys(byName).sort(), ['spins', 'waits']);
   assert.ok(byName.waits.wall_ms >= 400 && byName.waits.cpu_ms < 200, JSON.stringify(byName.waits));
