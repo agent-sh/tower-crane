@@ -67,6 +67,31 @@ test('cache text distinguishes measured zero, unknown and partially reported bre
   }
 });
 
+test('worker counts use claim holders across direct, resumed, takeover and rollback claims', () => {
+  const history = [1, 2, 3].map((i) => done(`T${i}`, 'L', 1e6));
+  for (const auditAgent of ['owner', 'orchestrator']) {
+    for (const detail of [
+      { holder: 'worker-6', resumed: true },
+      { holder: 'worker-6', took_over_from: 'worker-old' },
+      { holder: 'worker-6', rollback: true, restored_from: 'failed-worker' },
+    ]) {
+      const st = state(history, [entry('worker-old', 9e6), entry('worker-6', 1e6)]);
+      st.events = [
+        { cmd: 'claim', task: 'T267', agent: 'worker-old', detail: {} },
+        { cmd: 'claim', task: 'T267', agent: auditAgent, detail },
+        { cmd: 'claim', task: 'T267', agent: auditAgent, detail },
+        { cmd: 'claim', task: 'T999', agent: 'unrelated-worker', detail: {} },
+        { cmd: 'spawn', task: 'T267', agent: auditAgent, detail: { agent: 'reviewer', role: 'reviewer' } },
+      ];
+      const flag = runaways(st, now).flags.find((f) => f.rule === 'spend');
+      assert.match(flag.text, /over 2 workers \(current worker-6: 1M tokens\)/, `${auditAgent}: ${JSON.stringify(detail)}`);
+    }
+  }
+  const st = state(history, [entry('worker-6', 10e6)]);
+  st.events = [{ cmd: 'claim', task: 'T267', agent: 'worker-6', detail: {} }];
+  assert.match(runaways(st, now).flags[0].text, /over 1 worker \(current worker-6: 10M tokens\)/);
+});
+
 test('worker alarms exclude reviewer spend, respect the threshold, and require a live claim', () => {
   const history = [1, 2, 3].map((i) => done(`T${i}`, 'L', 1e6));
   const st = state(history, [entry('reviewer', 10e6, { rung: 'review' }), entry('worker-6', 5.5e6)]);
