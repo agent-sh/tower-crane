@@ -3,7 +3,8 @@
 // A worker that owns its PR: it submits the next head in OWNER_HEADS (one per
 // submit the task already has), waits with wait --own, and on each handback
 // submits the next one, until its ownership ends. Each wait's outcome is
-// appended to OWNER_LOG. OWNER_NO_PR submits without a PR; OWNER_CRASH_ON_FIX
+// appended to OWNER_LOG. OWNER_CI_FAIL names a head whose CI fails once it is
+// submitted. OWNER_NO_PR submits without a PR; OWNER_CRASH_ON_FIX
 // exits 1 at the first handback, as a crashed session would. As a reviewer it
 // fails the first review with a finding when OWNER_REVIEW_FAIL_ONCE names a
 // marker file that does not exist yet, and passes every other one.
@@ -51,6 +52,12 @@ if (role === 'reviewer') {
         return state;
       });
       ok(['submit', task, '--sha', sha, '--pr', '7']);
+      if (sha === process.env.OWNER_CI_FAIL) {
+        updateJson(process.env.AUTOMATION_GITHUB, (state) => {
+          state.ci[sha] = 'failure';
+          return state;
+        });
+      }
     }
     let outcome;
     do {

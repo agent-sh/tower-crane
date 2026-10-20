@@ -57,28 +57,42 @@ async function runEngine(h) {
   }
 }
 
-test('a failed tests gate goes back to the worker that owns the PR, which fixes it in the same session until it merges', async (t) => {
-  const h = ownerFixture(t);
-  await runEngine(h);
-  const task = h.task();
-  assert.equal(task.status, 'accepted');
-  assert.equal(task.sha, h.fix);
-  assert.ok(task.evidence.some((e) => e.type === 'merge' && e.ok), 'the fixed head merged');
-  assert.equal(h.workers().length, 1, 'one worker spawn from submit to merge');
-  const [fix, ...rest] = h.outcomes();
-  assert.equal(fix.outcome, 'fix');
-  assert.equal(fix.revision, 2);
-  assert.match(fix.message, /^T1 came back to you at revision 2: tests failed at [0-9a-f]{7,}: /);
-  assert.match(fix.message, /Failing tests:\n- the value is fixed/);
-  // Once merged the owner is told to exit, unless the retired worktree's stop came first.
-  assert.ok(rest.every((o) => o.outcome === 'wait' || o.outcome === 'exit' && o.reason === 'merged'), JSON.stringify(rest));
-  const agent = h.workers()[0].detail.agent;
-  const rework = h.logs().findIndex((e) => e.cmd === 'rework' && e.task === 'T1');
-  const handback = h.logs().findIndex((e) => e.cmd === 'claim' && e.detail.handover);
-  assert.ok(rework > 0 && handback > rework, 'the rework is recorded as for any rework, then handed back');
-  assert.equal(h.logs()[handback].agent, agent);
-  assert.equal(h.logs().filter((e) => e.cmd === 'submit').length, 2);
-});
+// A failed gate at the first head, each settled by rework as before: the
+// tests gate on its suite, the ci gate on a check that fails after submit.
+for (const row of [
+  { gate: 'tests', reason: /^T1 came back to you at revision 2: tests failed at [0-9a-f]{7,}: /, evidence: /Failing tests:\n- the value is fixed/ },
+  { gate: 'ci', reason: /^T1 came back to you at revision 2: ci failed at [0-9a-f]{7,}: /, evidence: /failing: test \(failure\)/ },
+]) {
+  test(`a failed ${row.gate} gate goes back to the worker that owns the PR, which fixes it in the same session until it merges`, async (t) => {
+    const h = ownerFixture(t);
+    if (row.gate === 'ci') {
+      // Both heads pass their tests; the first head's CI fails once it is submitted.
+      const suite = path.join(h.base, 'tools', 'value-suite.js');
+      fs.writeFileSync(suite, 'setTimeout(() => {}, 1000);\n'); // wait-allow: a passing suite that takes a second, so the fixture fails CI before the ci gate reads it
+      h.env.OWNER_CI_FAIL = h.sha;
+    }
+    await runEngine(h);
+    const task = h.task();
+    assert.equal(task.status, 'accepted');
+    assert.equal(task.sha, h.fix);
+    assert.ok(task.evidence.some((e) => e.type === 'merge' && e.ok), 'the fixed head merged');
+    assert.equal(h.workers().length, 1, 'one worker spawn from submit to merge');
+    const [fix, ...rest] = h.outcomes();
+    assert.equal(fix.outcome, 'fix');
+    assert.equal(fix.revision, 2);
+    assert.match(fix.message, row.reason);
+    assert.match(fix.message, row.evidence);
+    // Once merged the owner is told to exit, unless the retired worktree's stop came first.
+    assert.ok(rest.every((o) => o.outcome === 'wait' || o.outcome === 'exit' && o.reason === 'merged'), JSON.stringify(rest));
+    const agent = h.workers()[0].detail.agent;
+    const rework = h.logs().findIndex((e) => e.cmd === 'rework' && e.task === 'T1');
+    const handback = h.logs().findIndex((e) => e.cmd === 'claim' && e.detail.handover);
+    assert.equal(h.logs()[rework].detail.gate, row.gate);
+    assert.ok(rework > 0 && handback > rework, 'the rework is recorded as for any rework, then handed back');
+    assert.equal(h.logs()[handback].agent, agent);
+    assert.equal(h.logs().filter((e) => e.cmd === 'submit').length, 2);
+  });
+}
 
 test('a failed review reaches the owner with its findings, and the owner submits again', async (t) => {
   const h = ownerFixture(t, { OWNER_REVIEW_FAIL_ONCE: '' });
