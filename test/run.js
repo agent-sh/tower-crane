@@ -23,6 +23,7 @@ function testFiles() {
 // fixture's, measures nothing.
 function fileDurations(platform = process.platform) {
   let text;
+  // read-published: a checked-in table no process replaces while the runner reads it.
   try { text = fs.readFileSync(path.join(__dirname, 'durations.json'), 'utf8'); }
   catch (e) { if (e.code === 'ENOENT') return {}; throw e; }
   const table = JSON.parse(text);
