@@ -384,8 +384,7 @@ test('overdue cached findings survive every refresh boundary and an in-flight fo
   const signalFile = path.join(h.base, 'refresh-paused');
   fs.writeFileSync(h.env.INBOX_GITHUB, JSON.stringify({ ...h.github(), delayMs: 4000,
     delayEndpoint: '/code-scanning/', delaySignal: signalFile }));
-  const follower = cp.spawn(process.execPath, ['--require', HOOKS, BIN, 'wait', '--inbox', '--observe', // wait-allow: pause one follower refresh to verify cached findings stay visible until its replacement is written
-    '--after', 'now', '--timeout', '0.01', '--agent', 'orchestrator'], { cwd: h.repo, env: h.env });
+  const follower = cp.spawn(process.execPath, ['--require', HOOKS, BIN, 'wait', '--inbox', '--observe', '--after', 'now', '--timeout', '0.01', '--agent', 'orchestrator'], { cwd: h.repo, env: h.env }); // wait-allow: pause one follower refresh to verify cached findings stay visible until its replacement is written
   const closed = once(follower, 'close');
   let errors = '';
   follower.stderr.on('data', (b) => { errors += b; });
