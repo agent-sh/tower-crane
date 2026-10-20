@@ -189,6 +189,45 @@ test('foreground inbox never launches slow GitHub reads and preserves refreshed 
   }
 });
 
+test('base CI observations expire into one pending summary without active PRs or foreground reads', (t) => {
+  const h = setup(t);
+  h.refresh();
+  const file = path.join(h.state, 'main-ci-cache.json');
+  const base = JSON.parse(fs.readFileSync(file, 'utf8'));
+  const actions = fs.readFileSync(`${h.env.INBOX_GITHUB}.actions`, 'utf8');
+  const cases = [
+    { name: 'fresh', cache: base, pending: false },
+    { name: 'missing', cache: null, pending: true },
+    { name: 'expired', cache: { ...base, read_at: '2000-01-01T00:00:00.000Z' }, pending: true },
+    { name: 'future', cache: { ...base, read_at: '2999-01-01T00:00:00.000Z' }, pending: true },
+    { name: 'repository changed', cache: { ...base, repo: 'other/repo' }, pending: true },
+    { name: 'base changed', cache: { ...base, base: 'other' }, pending: true },
+  ];
+  for (const row of cases) {
+    if (row.cache) fs.writeFileSync(file, JSON.stringify(row.cache));
+    else fs.rmSync(file, { force: true });
+    const pending = h.inbox(false).items.filter((i) => i.kind === 'github_pending');
+    assert.equal(pending.length, row.pending ? 1 : 0, row.name);
+    if (row.pending) {
+      assert.equal(pending[0].count, 0);
+      assert.match(pending[0].reason, /project base/);
+    }
+    assert.equal(fs.readFileSync(`${h.env.INBOX_GITHUB}.actions`, 'utf8'), actions, 'foreground never refreshes base CI');
+  }
+  fs.rmSync(file, { force: true });
+  h.save({ ...h.github(), failActions: true });
+  h.refresh();
+  const failed = h.inbox(false).items;
+  assert.ok(failed.some((i) => i.kind === 'github_error' && /GitHub unavailable/.test(i.reason)));
+  assert.ok(!failed.some((i) => i.kind === 'github_pending'), 'a fresh failed base read is an explicit error');
+  const inboxFile = path.join(h.state, 'inbox-github-cache.json');
+  const cache = JSON.parse(fs.readFileSync(inboxFile, 'utf8'));
+  cache.read_at = '2000-01-01T00:00:00.000Z';
+  fs.writeFileSync(inboxFile, JSON.stringify(cache));
+  assert.equal(h.inbox(false).items.filter((i) => i.kind === 'github_pending').length, 1,
+    'an expired failed base read also needs a refresh');
+});
+
 test('ack-before includes the cutoff, filters kinds and leaves newer items and findings', (t) => {
   const h = setup(t);
   const task = h.add('Cutoff input');
