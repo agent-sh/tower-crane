@@ -31,7 +31,10 @@ function probe({ root = ROOT, cache, command, environment = process.env } = {}) 
   const gates = path.join(run, 'gates');
   const state = path.join(run, 'state');
   const env = { ...environment };
+  // A fake host the caller names stays, so a test's gate is admitted against it
+  // and not against the memory of the suite that runs the test.
   for (const key of Object.keys(env)) {
+    if (key === 'TOWER_CRANE_HOST_ROOT') continue;
     if (key.startsWith('TOWER_CRANE_') || key.startsWith('TC_TEST_') || key === 'NODE_TEST_CONTEXT') delete env[key];
   }
   Object.assign(env, {
@@ -75,6 +78,7 @@ function probe({ root = ROOT, cache, command, environment = process.env } = {}) 
     result.stderr = checked.stderr;
     result.outer_after = contents(outer);
     result.gate_root_after = contents(gates);
+    if (!checked.data) throw new Error(`check tests did not run its gate (exit ${checked.status}): ${checked.stderr}`);
     // Receipts name the worktree actually created, rather than a guessed parent path.
     const worktrees = checked.data.commands.filter((c) => c.args.includes('worktree') && c.args.includes('add'))
       .flatMap((c) => c.args.filter((arg) => arg.startsWith(gates + path.sep) && path.basename(arg) === 'wt'));

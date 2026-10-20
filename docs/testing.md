@@ -28,7 +28,7 @@ The repeat job's first step runs the Claude Code mod wakeup case twenty consecut
 
 For projects Tower Crane manages, expensive proof is the default: the orchestrator pins `--tests-cmd "npm test" --tests-expensive true --tests-proof-cmd "node --test {tests}"`. A submission then runs the full suite once and proves the change with its own test files.
 
-Main pushes, daily and manual CI runs also run `node scripts/probe-gate-scratch.js` at the pushed head on an unsandboxed Linux runner. It initializes separate state through the CLI and runs a complete `check tests` in run-only mode with fresh on-disk outer and gate directories. The `gate-scratch-proof` artifact records both directories' before/after contents, the actual gate parents from command receipts and their removal. The check fails if the tests fail, the outer directory gains contents or a gate parent survives. A failing head reruns the suite on the base for the failing names, so the probe and its job wait out two gate runs and keep the gate's report of the failures. This full proof refuses a worker sandbox; `test/gate-scratch-proof.test.js` verifies the recorder with small real-CLI fixtures.
+Main pushes, daily and manual CI runs also run `node scripts/probe-gate-scratch.js` at the pushed head on an unsandboxed Linux runner. It initializes separate state through the CLI and runs a complete `check tests` in run-only mode with fresh on-disk outer and gate directories. The `gate-scratch-proof` artifact records both directories' before/after contents, the actual gate parents from command receipts and their removal. The check fails if the tests fail, the outer directory gains contents or a gate parent survives. A failing head reruns the suite on the base for the failing names, so the probe and its job wait out two gate runs and keep the gate's report of the failures. This full proof refuses a worker sandbox; `test/gate-scratch-proof.test.js` verifies the recorder with small real-CLI fixtures. The probe keeps a fake host the caller names (`TOWER_CRANE_HOST_ROOT`), so those fixtures' gates are admitted against it and not against the memory of the suite running them, and it says so when `check tests` did not run its gate.
 
 Both proofs run the whole suite under the gate's suite deadline, at three file workers on a four-core hosted runner. Each prints the suite's wall time and its share of that deadline, adds the line to the job summary and emits a GitHub warning annotation past 75% of it. The gate scratch artifact keeps the same figures as `suite_time`, and the `model-swap-tap` artifact keeps the swap run's TAP with every test's duration. A warning means the suite needs trimming before it times out; raising the deadline instead hides the trend. The deadline has one source, `DEADLINE_MIN` in `scripts/suite-time.js`. `npm run check:shared` fails when the proof jobs' `timeout-minutes` drift from it: the model swap job gets the deadline plus 5 minutes of setup, the gate scratch job twice the deadline plus 10. Where this checkout has Tower Crane state that sets `gates.tests_timeout_min` to another value, it prints a warning and passes, since each clone's settings are its own.
 
@@ -60,6 +60,28 @@ Both proofs run the whole suite under the gate's suite deadline, at three file w
 - `node scripts/test-cost.js [--before DIR] [files...]` measures CPU and wall seconds per file, median of three runs, four files at a time. With `--before`, it measures another checkout interleaved with this one.
 - `node scripts/mutants.js` copies git-listed repository inputs, including workflow files, hooks and rules. It requires the named tests to pass without mutations. Before a full-suite fallback, it restores the original source and requires that same copy to pass the full suite too. A broken baseline aborts the run. `--root DIR` selects another checkout; `--only ID,ID --no-full` confines a rerun to selected bugs and their named files.
 - `node scripts/test-coverage.js` uses node:test coverage, which follows the CLI processes a test starts. For each file it lists the lib lines it runs and how many no other file runs. A file with no unique lines is a candidate to merge or delete.
+
+## Suite time
+
+The tests gate runs the whole suite once per submission. On 2026-10-19 that took about 28 minutes at its 3 file workers on the 24-core host and was the fleet's bottleneck. The suite does about 2800 CPU seconds of real CLI, git and stub work, so 3 workers cannot finish it in 10 minutes even with no timer waits. This project's tests gate is set to `--test-concurrency=12` (`gates.tests_cmd`), and the governor reserves 2560 MiB for each tests gate and merge-queue suite.
+
+`node scripts/suite-profile.js --test-concurrency=N` in a Tower Crane worker sandbox on that host, 2026-10-20, other sessions holding the load at 8 to 24. An earlier base run at a load of 14 to 50 took 1593 s to 1653 s, with up to 4841 s summed: per-test times track the host's load. About 250 tests that need the host itself (nested sandboxes, a writable `/tmp`, short socket paths) fail fast in that sandbox, and the host-only files do not run there, so host runs take somewhat longer. Peak memory is the worker scope's cgroup `memory.current` sampled every 200 ms, minus its idle use; the scope is capped at 3.3 GiB, so at 12 workers the kernel reclaimed page cache at the cap, and anonymous memory alone peaked at 2458 MiB.
+
+| commit | file workers | wall | summed test time | CPU | waiting | peak memory |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 425eea2 (before) | 3 | 1390 s | 4056 s | 2905 s | 29% | - |
+| 8b76e68 | 3 | 1322 s | 3897 s | 2822 s | 28% | 1666 MiB |
+| 8b76e68 | 8 | 487 s | 3712 s | 2761 s | 26% | 2204 MiB |
+| 8b76e68 | 12 | 347 s | 3837 s | 2902 s | 25% | 2516 MiB |
+| f4a1e86, load 21 to 30 | 12 | 428 s | 4769 s | 3177 s | 34% | 2483 MiB |
+
+Waiting is wall time the test's process tree spent off the CPU: timers, detached processes, I/O and the scheduler. Where the time went:
+
+- Most of the gain is the worker count: at 3 workers the suite takes 5% less wall time than before, at 12 a quarter of it.
+- Timer-bound tests take short intervals (see [Writing tests](#writing-tests)). Ten of them went from 253 s to 65 s at 3 workers; the largest were the accounting lock retry (64.3 s to 5.9 s), the hung-mutant timeout catch (60.1 s to 10.1 s) and the governor's busy registry (20.7 s to 6.6 s).
+- Waits whose check starts a CLI pause between checks. The accounting lock retry had spent 66 CPU seconds polling; it now spends 3.
+- `test/run.js` starts the longest files first. A simulation over the measured file times at 12 workers put the run at 518 s in sorted order and 419 s with the two longest files per worker first.
+- The single longest test is the manual merge race in `test/events.test.js` (about 140 s, 82% waiting): its jitter on every state call is what spreads the two merges over each other's checks, so it keeps its rounds.
 
 ## Cost
 
@@ -141,6 +163,8 @@ What is left is mostly the CLI's own cost: every call starts Node and loads the 
 ## Accuracy: the mutation sample
 
 `scripts/mutants.js` holds 125 planted bugs across the areas where a silent regression costs the most. Each changes a check, bound or guard. The original 31-bug sample below records the historical test cleanup.
+
+After the suite-time work, at 8b76e68 with `--no-full`, the sample caught 125/125. In a worker sandbox, with `--skip` naming the tests that fail only there, 109 were caught (105 by tests, 4 by timeout); the 16 it missed are named for files whose catching tests fail only in a sandbox (the first 9 miss at 425eea2 under the same skips too), and the orchestrator's host run caught all 16 by tests.
 
 `npm run check:shared` checks that every mutant's target text occurs exactly once in its file. Missing and duplicate targets fail before tests run, including drift in a mutant outside a scoped selection. `node scripts/mutants.js --check` runs only that validation; `--root DIR` checks another checkout and `--only ID,ID` selects targets. Both the check and mutation runner normalize CRLF source to LF before matching multiline anchors.
 

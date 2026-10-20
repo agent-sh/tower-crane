@@ -5,6 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { cachedFixture } = require('./helpers');
+const { writeHost } = require('./host');
 const { probe } = require('../scripts/probe-gate-scratch');
 const { suiteTime, reportSuiteTime, DEADLINE_MIN } = require('../scripts/suite-time');
 
@@ -38,6 +39,15 @@ test('the gate proof measures caller contents and the actual removed parent', (t
   assert.equal(result.suite_time.deadline_min, DEADLINE_MIN);
   assert.ok(result.suite_time.wall_ms > 0 && result.suite_time.wall_ms < DEADLINE_MIN * 60000);
   assert.equal(result.suite_time.warn, false);
+});
+
+// The gate is admitted against the fixture's fake host, not against the memory
+// of the suite running this test: at 12 file workers that alone deferred it.
+test('the gate proof admits its gate on the caller\'s fake host and says when it did not run', (t) => {
+  const h = fixture(t);
+  writeHost(h.env.TOWER_CRANE_HOST_ROOT, { limit: 4, used: 3.9 });
+  assert.throws(() => probe({ root: h.repo, cache: path.join(h.base, 'probe'), command: 'node scratch.js', environment: h.env }),
+    /check tests did not run its gate \(exit 3\): .*tests gate deferred by the host governor: memory/s);
 });
 
 test('suite time warns on GitHub past 75% of the deadline and records each run in the step summary', (t) => {
