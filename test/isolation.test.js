@@ -204,10 +204,34 @@ function spawn(h, u, role, env = {}, opts = {}) {
   if (['easy', 'medium', 'hard', 'research'].includes(role) && h.readState('tasks.json').tasks[0].status === 'submitted') {
     h.ok(['rework', 'T1', '--reason', `probe the ${role} rung`]);
   }
-  const r = h.run(['spawn', '--role', role, '--task', 'T1', '--wait', '--json'], { ...opts, env: { ...u.env, ...env } });
-  assert.equal(r.code, 0, r.stderr);
-  return JSON.parse(r.stdout);
+  return h.json(['spawn', '--role', role, '--task', 'T1', '--wait', '--json'], { ...opts, env: { ...u.env, ...env } });
 }
+
+test('isolation spawn probes report the cause of abnormal command exits', { skip: NO_STUBS }, (t) => {
+  const { h, u } = setup(t);
+  for (const [label, script, diagnostic] of [
+    ['terminated', "process.kill(process.pid, 'SIGTERM')", /signal SIGTERM/],
+    ['killed', "process.kill(process.pid, 'SIGKILL')", /signal SIGKILL/],
+    ['failed', "process.stderr.write('fixture failure\\n'); process.exit(42)", /exited 42: fixture failure/],
+  ]) {
+    assert.throws(() => spawn(h, u, 'small', {}, { pre: ['-e', script] }), diagnostic, label);
+  }
+  for (const code of ['EAGAIN', 'ENOBUFS', 'ETIMEDOUT']) {
+    const original = cp.spawnSync;
+    const probe = t.mock.method(cp, 'spawnSync', (command, args, options) => {
+      if (command === process.execPath && args.includes(BIN) && args.includes('spawn')) {
+        return { status: null, signal: null, stdout: '', stderr: '',
+          error: Object.assign(new Error('fixture launch failure'), { code }) };
+      }
+      return original(command, args, options);
+    });
+    try {
+      assert.throws(() => spawn(h, u, 'small'), new RegExp(`error ${code}: fixture launch failure`), code);
+    } finally {
+      probe.mock.restore();
+    }
+  }
+});
 
 // The shim's decision for each command under each job's policy, as the spawn
 // writes it to policy.json, in one node process: 126 for a refusal, ALLOW for
