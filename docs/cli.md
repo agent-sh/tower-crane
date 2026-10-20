@@ -141,6 +141,8 @@ All list settings trim leading and trailing whitespace from each entry. Setting 
 
 `ci.local.receipts` optionally lists relative globs without `..`, such as `[".local/checks/*.json"]`. On pass or fail, `check ci` copies matching files before removing the worktree into `logs/ci-<task>-<sha>-<unique>/receipts/<worktree-relative-path>`, beside `output.log`. Copies use the log's redaction and are readable by agents. Each stored file is capped at 8 MiB after redaction; a truncated copy ends with a notice and its evidence entry has `truncated: true`. Receipt collection has a separate 100-file, 64 MiB input budget; files beyond it or outside the worktree are skipped with a reason. Failed summaries name check.py's failed steps and `failure_reasons`, and list the saved receipt paths even for malformed JSON or other formats. Receipt copies are diagnostic only and do not change which gate result counts.
 
+JSON receipt copies are serialized as UTF-8 after recursively cleaning and redacting decoded strings and object keys, including captured output whose credentials are split by escaped ANSI controls or line breaks. UTF-8 with a BOM and valid UTF-16 JSON use the same redaction. Unsafe JSON processing omits the whole content with a notice; non-JSON text retains the log's cleanup and redaction.
+
 ```sh
 tower-crane project set --ci-local '{"command":["python3","tools/check.py"],"timeout":3600,"receipts":[".local/checks/*.json"],"artifacts":[".local/checks/*.json"],"artifact_pattern":"^Local check receipt: (.+)$"}'
 ```

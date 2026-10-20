@@ -1691,6 +1691,99 @@ test('receipt globs validate like artifact globs', () => {
   assert.deepEqual(policy.ci_local, { command: ['node'], timeout: 5 });
 });
 
+test('receipt copies redact decoded JSON keys and values on failure and success', (t) => {
+  const h = fixture(t, `
+const fs = require('node:fs');
+const failed = process.argv.includes('--fail');
+const token = process.env.CI_FIXTURE_TOKEN;
+const opaque = process.env.CI_FIXTURE_SECRET;
+fs.mkdirSync('.local/checks', { recursive: true });
+const body = JSON.stringify({
+  checks: [{ output: { nested: [
+    token, opaque, token.slice(0, 4) + '\\x1b[31m' + token.slice(4),
+    token.slice(0, 4) + '\\n' + token.slice(4)
+  ] } }],
+  [token]: 'key marker',
+  failure_reasons: failed ? ['failed unit-tests: ' + token] : [],
+  passed: !failed
+});
+const encoded = Array.from(token, (char) => '\\\\u' + char.charCodeAt(0).toString(16).padStart(4, '0')).join('');
+const serialized = body.replaceAll(token, encoded).replaceAll('/', '\\\\/');
+fs.writeFileSync('.local/checks/escaped.json', serialized);
+fs.writeFileSync('.local/checks/bom.json', '\\uFEFF' + serialized);
+fs.writeFileSync('.local/checks/utf16le.json', Buffer.from(serialized, 'utf16le'));
+fs.writeFileSync('.local/checks/utf16be.json', Buffer.concat([Buffer.from([0xfe, 0xff]), Buffer.from(serialized, 'utf16le').swap16()]));
+fs.writeFileSync(process.argv[2], JSON.stringify({ cwd: process.cwd() }));
+process.exit(failed ? 1 : 0);
+`);
+  const token = 'ghp_T448JsonEncodedCredential0123456789012345';
+  const opaque = 'OpaqueT448/SlashBoundary01234567890123456789';
+  h.env.CI_FIXTURE_TOKEN = token;
+  h.env.CI_FIXTURE_SECRET = opaque;
+  for (const failed of [true, false]) {
+    h.ok(['project', 'set', '--ci-local', JSON.stringify({
+      command: [...h.command, ...(failed ? ['--fail'] : [])], timeout: 5, receipts: ['.local/checks/*.json'],
+    })]);
+    const r = h.run(['check', 'ci', 'T1']);
+    assert.equal(r.code, failed ? 1 : 0, r.stdout + r.stderr);
+    const e = h.readState('tasks.json').tasks[0].evidence.at(-1);
+    assert.equal(e.local_ci.receipts.length, 4);
+    for (const copy of e.local_ci.receipts) {
+      const decoded = JSON.parse(fs.readFileSync(path.join(h.state, copy.path), 'utf8'));
+      for (const output of decoded.checks[0].output.nested.slice(2)) {
+        const recovered = output.replace(/\u001b\[[0-9;]*m/g, '').replace(/[\r\n]/g, '');
+        assert.ok(!recovered.includes(token), 'serialized ANSI/newline split exposes the credential after decoding');
+      }
+      const stored = JSON.stringify(decoded);
+      assert.ok(!stored.includes(token), 'Unicode-escaped credential survived JSON decoding');
+      assert.ok(!stored.includes(opaque), 'slash-escaped credential survived JSON decoding');
+      assert.deepEqual(decoded.checks[0].output.nested, [
+        '[redacted:CI_FIXTURE_TOKEN]', '[redacted:CI_FIXTURE_SECRET]',
+        '[redacted:CI_FIXTURE_TOKEN]', '[redacted:CI_FIXTURE_TOKEN]',
+      ]);
+      assert.equal(decoded['[redacted:CI_FIXTURE_TOKEN]'], 'key marker');
+      assert.equal(copy.redacted, true);
+    }
+    if (failed) assert.match(e.summary, /failed unit-tests: \[redacted:CI_FIXTURE_TOKEN\]/);
+    assert.ok(!JSON.stringify(e).includes(token));
+    assert.ok(!fs.existsSync(JSON.parse(fs.readFileSync(h.log, 'utf8')).cwd));
+  }
+});
+
+test('receipt JSON redaction covers escaped strings, nesting, keys and processing failures', () => {
+  const { receiptText } = require('../lib/gates/local-ci');
+  const { createRedactor } = require('../lib/gates/common');
+  const token = 'ghp_T448JsonTableCredential01234567890123456';
+  const opaque = 'opaque "quoted" \\slash\ncredential';
+  const redact = createRedactor([['TOKEN', token], ['OPAQUE', opaque]]);
+  const escaped = Array.from(token, (char) => '\\u' + char.charCodeAt(0).toString(16).padStart(4, '0')).join('');
+  for (const [input, expected] of [
+    [`{"output":"${escaped}"}`, { output: '[redacted:TOKEN]' }],
+    [`\uFEFF{"output":"${escaped}"}`, { output: '[redacted:TOKEN]' }],
+    [JSON.stringify({ nested: [{ output: opaque }] }), { nested: [{ output: '[redacted:OPAQUE]' }] }],
+    [JSON.stringify([token, opaque]), ['[redacted:TOKEN]', '[redacted:OPAQUE]']],
+    [JSON.stringify(opaque), '[redacted:OPAQUE]'],
+    [JSON.stringify({ [opaque]: token }), { '[redacted:OPAQUE]': '[redacted:TOKEN]' }],
+    [JSON.stringify({ output: `\u001b[31m${token}\u001b[0m` }), { output: '[redacted:TOKEN]' }],
+    ...['\u001b[31m', '\u001b]0;title\u0007', '\n', '\r\n', '\0'].map((split) => [
+      JSON.stringify({ output: token.slice(0, 4) + split + token.slice(4) }), { output: '[redacted:TOKEN]' },
+    ]),
+    ['{"__proto__":{"safe":true},"constructor":"data"}', JSON.parse('{"__proto__":{"safe":true},"constructor":"data"}')],
+    ['{"passed":true,"count":1,"signal":null}', { passed: true, count: 1, signal: null }],
+    [JSON.stringify({ [token]: 'first', '[redacted:TOKEN]': 'second' }), {
+      '[redacted:TOKEN]': 'first', '[redacted:TOKEN] (2)': 'second',
+    }],
+  ]) {
+    const result = receiptText(input, redact);
+    assert.deepEqual(JSON.parse(result.body), expected);
+    assert.ok(!result.body.includes(token));
+    assert.ok(!result.body.includes(JSON.stringify(opaque).slice(1, -1)));
+  }
+  const deep = '['.repeat(20000) + JSON.stringify(opaque) + ']'.repeat(20000);
+  assert.match(receiptText(deep, redact).body, /^\[unscannable .*content omitted\]$/);
+  assert.equal(receiptText(`plain ${token}`, redact).body, 'plain [redacted:TOKEN]');
+});
+
 test('local CI receipt diagnosis reads failed steps and run-state reasons and tolerates other formats', () => {
   const { receiptFailures } = require('../lib/gates/local-ci');
   for (const [body, names] of [
