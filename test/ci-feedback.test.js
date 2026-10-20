@@ -652,12 +652,14 @@ test('the next ci dispatch at a head records the run id an entry is missing, whe
     { status: 'queued', code: 1, error: /T1 already has dispatched run 400 at \w+, queued/, runs: [400] },
     { status: 'in_progress', code: 1, error: /T1 already has dispatched run 400 at \w+, in_progress/, runs: [400] },
     { status: 'completed', code: 0, runs: [400, 501] },
+    // A refusal after the lookup, here from choosing the workflow, still keeps the id it found.
+    { status: 'completed', dispatch: {}, code: 1, error: /no pull_request workflow run on /, runs: [400] },
     // The rate limit refuses before GitHub is read, so nothing is looked up.
     { status: 'queued', per_hour: 1, code: 1, error: /ci\.dispatch\.per_hour limit of 1/, runs: [null] },
   ];
   for (const row of rows) {
     const h = fixture(t);
-    const data = dispatchable(h, { workflow: 'ci.yml', ...(row.per_hour ? { per_hour: row.per_hour } : {}) });
+    const data = dispatchable(h, row.dispatch ?? { workflow: 'ci.yml', ...(row.per_hour ? { per_hour: row.per_hour } : {}) });
     const at = new Date().toISOString();
     const state = h.readState('tasks.json');
     state.tasks[0].ci_dispatches = [{ sha: h.sha, branch: BRANCH, workflow: 'ci.yml', at, agent: 'worker', run: null }];
@@ -669,6 +671,8 @@ test('the next ci dispatch at a head records the run id an entry is missing, whe
     assert.equal(r.code, row.code, `${row.status}: ${r.stderr}`);
     if (row.error) assert.match(r.stderr, row.error);
     assert.deepEqual(dispatches(h).map((d) => d.run), row.runs, row.status);
+    const recorded = readEvents(h.state).filter((e) => e.cmd === 'ci dispatch run' && e.detail?.runs).map((e) => e.detail.runs);
+    assert.deepEqual(recorded, row.runs[0] ? [[400]] : [], row.status);
   }
 });
 
