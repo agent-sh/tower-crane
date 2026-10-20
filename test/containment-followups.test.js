@@ -142,11 +142,11 @@ test('a scoped runner killed before its report preserves timeout and abort error
   }
 });
 
-test('fleet scopes disable ancestor OOM grouping while attempt scopes keep group killing', () => {
+test('fleet and attempt scopes leave OOM handling to containment instead of systemd', () => {
   const limits = { tasks_max: 64, memory_max_bytes: 512 * 1024 ** 2 };
-  for (const [fleet, expected] of [[true, 'continue'], [false, 'kill']]) {
-    const args = C.scopeArguments('tower-crane-1-0123456789abcdef.scope', 'agents.slice', limits, { OOMPolicy: 'kill' }, fleet);
-    assert.equal(args.filter(arg => arg.startsWith('OOMPolicy=')).at(-1), `OOMPolicy=${expected}`);
+  for (const fleet of [true, false]) {
+    const args = C.scopeArguments('tower-crane-1-0123456789abcdef.scope', 'agents.slice', limits, { OOMPolicy: fleet ? 'kill' : 'stop' });
+    assert.equal(args.filter(arg => arg.startsWith('OOMPolicy=')).at(-1), 'OOMPolicy=continue');
   }
 });
 
@@ -154,9 +154,29 @@ test('fleet OOM events do not trigger a second kill of healthy descendants', t =
   const h = cachedFixture(t, 'fleet-events', h => h.init());
   const group = path.join(h.base, 'fleet');
   fs.mkdirSync(group);
-  fs.writeFileSync(path.join(group, 'memory.events.local'), 'oom 1\noom_group_kill 0\n');
-  for (const [fleet, expected] of [[false, 'resource-memory-max'], [true, null]]) {
+  fs.writeFileSync(path.join(group, 'cgroup.events'), 'populated 1\n');
+  for (const [fleet, tasks, oom, expected] of [
+    [false, 0, 1, 'resource-memory-max'], [true, 0, 1, null],
+    [false, 1, 1, 'resource-memory-max'], [true, 1, 1, 'resource-tasks-max'],
+    [false, 1, 0, 'resource-tasks-max'],
+  ]) {
+    fs.writeFileSync(path.join(group, 'memory.events.local'), `oom ${oom}\noom_group_kill 0\n`);
+    fs.writeFileSync(path.join(group, 'pids.events.local'), `max ${tasks}\n`);
     assert.equal(C.limitReason(group, { tasks: 0, memory: 0 }, fleet), expected);
+    let notify;
+    t.mock.method(fs, 'watch', (file, listener) => {
+      notify = listener;
+      return { on() {}, unref() {}, close() {} };
+    });
+    let found = null;
+    const stop = C.watchOom(group, { tasks: 0, memory: 0 }, reason => { found = reason; }, fleet);
+    try {
+      notify();
+      assert.equal(found, expected, `watcher fleet=${fleet}, task events=${tasks}`);
+    } finally {
+      stop();
+      fs.watch.mock.restore();
+    }
   }
 });
 
@@ -274,7 +294,7 @@ test('CLI dry runs show the mandatory containment argv and scoped environment', 
     assert.equal(result.containment.backend, 'cgroup');
     if (executable === 'systemd-run') {
       assert.ok(result.argv.includes('MemorySwapMax=0'));
-      assert.ok(result.argv.includes('OOMPolicy=kill'));
+      assert.ok(result.argv.includes('OOMPolicy=continue'));
     }
   }
 });
@@ -370,8 +390,7 @@ test('Windows cleanup preserves retained identities beneath non-kept ancestors',
     const retained = C.managed(item.rows, item.identities, 50);
     assert.deepEqual(retained.map(row => row.pid), item.kept, item.name);
     const keep = new Set(item.kept);
-    C.stopProcesses(item.unfiltered ? item.rows : item.rows.filter(row => !keep.has(row.pid)), null, keep);
-    await new Promise(resolve => setImmediate(resolve));
+    await C.stopProcesses(item.unfiltered ? item.rows : item.rows.filter(row => !keep.has(row.pid)), null, keep);
     for (const pid of keep) assert.equal(killed.has(pid), false, `${item.name}: retained pid ${pid}`);
     for (const row of tree.filter(row => !keep.has(row.pid))) {
       assert.equal(killed.has(row.pid), true, `${item.name}: ordinary pid ${row.pid}`);

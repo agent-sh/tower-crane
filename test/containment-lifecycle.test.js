@@ -12,6 +12,8 @@ const { waitOnRepo, killPid } = require('./signals');
 const { readPublished } = require('./atomic-file');
 const fixture = path.join(__dirname, 'fixtures', 'containment-lifecycle.js');
 process.env.TOWER_CRANE_TEST_CONTAINMENT = '1';
+// The fixture's times stretch on Windows, where a CIM snapshot and a stop take about a second each.
+const scale = process.platform === 'win32' ? 5 : 1;
 
 for (const [mode, retained, cli] of [
   ['cooperative', false, false], ['delayed', false, false], ['ignore', false, false],
@@ -125,6 +127,31 @@ test('managed ownership separates independent work from ordinary and gate-owned 
   ]) assert.deepEqual(C.managed(rows, identities, 1).map(row => row.pid), expected);
 });
 
+test('a Windows root that exited before its first snapshot keeps the children it launched', () => {
+  const platform = Object.getOwnPropertyDescriptor(process, 'platform');
+  // Windows rows: no process group, creation time in epoch ms. The root, pid 10, launched at 1000.
+  const rows = [
+    { pid: 11, parent: 10, group: null, start: 1050 },
+    { pid: 12, parent: 11, group: null, start: 1100 },
+    { pid: 13, parent: 10, group: null, start: 500 }, // a child of an earlier process that had pid 10
+    { pid: 14, parent: 10, group: null, start: 950 }, // within the creation clock's tick
+    { pid: 15, parent: 99, group: null, start: 1200 },
+  ];
+  const root = { pid: 10, parent: 1, group: null, start: 1001 };
+  try {
+    for (const [name, os, snapshot, launch, expected] of [
+      ['exited root', 'win32', rows, 1000, [11, 12, 14]],
+      ['live root', 'win32', [root, ...rows.filter(r => r.pid !== 13)], 1000, [10, 11, 12, 14]],
+      ['no launch time', 'win32', rows, undefined, []],
+      ['Linux reparents', 'linux', rows, 1000, []],
+    ]) {
+      Object.defineProperty(process, 'platform', { ...platform, value: os });
+      const known = new Map(launch === undefined ? [] : [[10, launch]]);
+      assert.deepEqual(C.descendants(snapshot, 10, known).map(r => r.pid), expected, name);
+    }
+  } finally { Object.defineProperty(process, 'platform', platform); }
+});
+
 const cases = [
   ['supervisor', 'zero', 'caller', 'none', true],
   ['supervisor', 'nonzero', 'agent', 'none', true],
@@ -178,8 +205,15 @@ for (const [kind, ending, owner, late, survives] of cases) {
       if (owner === 'agent' && child.containment.unit) {
         assert.equal(settled.includes(child.containment.unit), !metadata.retained?.length, JSON.stringify(metadata));
       }
+      // A keeper outlives its caller, so its working directory must not pin the fixture or the tool.
+      if (owner === 'agent' && metadata.keeper_pid && process.platform === 'linux') {
+        const cwd = fs.readlinkSync(`/proc/${metadata.keeper_pid}/cwd`);
+        for (const dir of [h.base, path.join(__dirname, '..')]) {
+          assert.ok(!(cwd + path.sep).startsWith(fs.realpathSync(dir) + path.sep), `keeper cwd ${cwd} is inside ${dir}`);
+        }
+      }
     }
-    await new Promise(resolve => setTimeout(resolve, 2200)); // wait-allow: all finite fixture children and the keeper end
+    await new Promise(resolve => setTimeout(resolve, 2200 * scale)); // wait-allow: all finite fixture children and the keeper end
     if (survives) {
       assert.equal(fs.existsSync(path.join(dir, 'managed.done')), true);
       assert.equal(fs.existsSync(path.join(dir, 'grandchild.done')), true);
@@ -215,7 +249,7 @@ test('a CLI worker fixture named like a supervisor ends with its worker', async 
   h.env.TC_UNRECORDED_FIXTURE = '1';
   const result = h.run(['spawn', '--task', 'T1', '--wait']);
   assert.equal(result.code, 0, result.stdout + result.stderr);
-  await new Promise(resolve => setTimeout(resolve, 2200)); // wait-allow: bounded dispatched fixture lifetime
+  await new Promise(resolve => setTimeout(resolve, 2200 * scale)); // wait-allow: bounded dispatched fixture lifetime
   assert.equal(fs.existsSync(path.join(dir, 'managed.done')), false);
   assert.equal(fs.existsSync(path.join(dir, 'grandchild.done')), false);
   assert.equal(fs.existsSync(path.join(dir, 'ordinary.done')), false);

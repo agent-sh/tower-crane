@@ -4,7 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { cachedFixture, detachedAlive, fakeAgentEnv, BIN } = require('./helpers');
+const { cachedFixture, detachedAlive, fakeAgentEnv, dispatch, BIN } = require('./helpers');
 const { readPublished, writeAtomic } = require('./atomic-file');
 const { killPid, waitOnRepo, fileWritten, HUNG_TEST_MS } = require('./signals');
 const P = require('../lib/processes');
@@ -132,13 +132,16 @@ if(process.env.TOWER_CRANE_TASK==='T1'){
   }
   let held;
   let controller;
+  let phase = 'spawn';
   t.after(() => {
+    if (t.signal.aborted) console.error(`controller-home timeout at ${phase}; controller=${controller?.pid || held?.pid || 'unknown'}`);
     const owned = controller || held || (fs.existsSync(forked) ? JSON.parse(readPublished(forked, 'utf8')) : null);
     if (owned && detachedAlive(owned)) killPid(owned.pid, 'SIGKILL');
   });
   const deadline = new AbortController();
   const bound = setTimeout(() => deadline.abort(new Error('controller handshake timed out')), HUNG_TEST_MS);
-  const pending = h.runAsync(['spawn', '--task', 'T1', '--role', 'orchestrator', '--wait', '--json']);
+  const dispatched = dispatch(t, h, { args: ['spawn', '--task', 'T1', '--role', 'orchestrator', '--wait', '--json'] });
+  const pending = dispatched.run;
   const checked = pending.then(result => {
     assert.equal(result.code, 0, `spawn --wait exited ${result.code}\nagent stderr:\n${result.stderr}\nstdout:\n${result.stdout}`);
     return JSON.parse(result.stdout);
@@ -146,13 +149,16 @@ if(process.env.TOWER_CRANE_TASK==='T1'){
   let spawned;
   try {
     if (delayed) {
+      phase = 'controller startup';
       controller = await Promise.race([
         fileWritten(started, { json: true, signal: deadline.signal }),
         checked,
       ]);
       writeAtomic(release, 'release');
     }
+    phase = 'spawn completion';
     spawned = await checked;
+    phase = 'controller identity';
     controller ||= await fileWritten(started, { json: true, signal: deadline.signal });
   } finally {
     clearTimeout(bound);
@@ -164,13 +170,16 @@ if(process.env.TOWER_CRANE_TASK==='T1'){
   assert.equal(controller.pid, held.pid);
   assert.equal(controller.hostRoot, h.env.TOWER_CRANE_HOST_ROOT, 'nested wait uses the fixture host');
   assert.ok(detachedAlive({ pid: held.pid }));
+  phase = 'prune while live';
   h.ok(['spawn', '--task', 'T2', '--wait']);
   for (const key of ['home', 'cache', 'tmp']) assert.ok(fs.existsSync(held[key]), `${key} pruned while its controller runs`);
   const kept = h.json(['status']).kept_homes.find(entry => entry.agent === spawned.agent);
   if (detached) assert.ok(kept?.pids.includes(held.pid));
   else assert.notEqual(P.processGroupState({ pid: spawned.pid }), 'exited');
   killPid(held.pid, 'SIGTERM');
+  phase = 'controller exit';
   await waitOnRepo(h, () => !detachedAlive({ pid: held.pid }), 'controller did not exit');
+  phase = 'prune after exit';
   h.ok(['spawn', '--task', 'T3', '--wait']);
   for (const key of ['home', 'cache', 'tmp']) assert.equal(fs.existsSync(held[key]), false, `${key} retained after its last user exits`);
   for (const id of ['T1', 'T2', 'T3']) {
