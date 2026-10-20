@@ -262,13 +262,12 @@ test('the owner\'s standing publish policy releases an accepted task while its c
   h.mainCI('failure');
   const red = h.run(publish, orchestrator);
   assert.equal(red.code, 1, red.stderr);
-  assert.match(red.stderr, /opened D3 .*main_ci_green: main CI is red: CI run 1001/);
-  // D3 names a task that was accepted before it opened, so no later write makes it moot.
+  assert.match(red.stderr, /main push CI is not green: CI run 1001: failure/);
+  assert.equal(h.readState('decisions.json').decisions.length, 2, 'red CI cannot be overridden by a publish approval');
   h.ok(['ask', '--kind', 'technical', '--question', 'Tag the release now?', '--option', 'yes', '--option', 'no', '--blocks', id], worker(id));
   h.add('Later work');
-  assert.deepEqual(['D3', 'D4'].map((d) => decision(h, d).status), ['open', 'open']);
-  h.ok(['decision', 'withdraw', 'D4', '--reason', 'tagged'], worker(id));
-  h.ok(['decision', 'withdraw', 'D3', '--reason', 'main is red', '--agent', 'orchestrator'], orchestrator);
+  assert.equal(decision(h, 'D3').status, 'open');
+  h.ok(['decision', 'withdraw', 'D3', '--reason', 'tagged'], worker(id));
 
   h.mainCI('success');
   const before = h.readState('decisions.json').decisions.length;
@@ -277,6 +276,36 @@ test('the owner\'s standing publish policy releases an accepted task while its c
   const audit = events(h).findLast((e) => e.cmd === 'setting');
   assert.deepEqual([audit.task, audit.detail.actor, audit.detail.settings, audit.detail.policy.conditions.map((c) => c.ok), audit.detail.policy.sha],
     [id, 'orchestrator', { publish: 'owner-required' }, [true, true, true], h.sha]);
+});
+
+test('publish refuses non-green push CI with no policy, an approval, or an empty policy', (t) => {
+  const h = github(t);
+  h.mainCI('success');
+  const id = h.release();
+  h.ok(['accept', id]);
+  const publish = ['ask', '--setting', 'publish', '--change', JSON.stringify({ task: id }), '--agent', 'orchestrator'];
+  const ask = h.run(publish, orchestrator);
+  assert.equal(ask.code, 1);
+  assert.match(ask.stderr, /opened D1/);
+  h.ok(['answer', 'D1', '--choice', 'approve']);
+  for (const conclusion of ['failure', 'cancelled', 'timed_out']) {
+    h.mainCI(conclusion);
+    const r = h.run(publish, orchestrator);
+    assert.equal(r.code, 1);
+    assert.match(r.stderr, new RegExp(`main push CI.*run 1001: ${conclusion}`));
+    assert.equal(decision(h, 'D1').applied, undefined, 'failed CI leaves approval unconsumed');
+  }
+  h.mainCI('success');
+  assert.match(h.ok(publish, orchestrator), /owner approved D1; go ahead/);
+  h.ok(['project', 'set', '--publish-policy', '{"conditions":[]}']);
+  h.mainCI('cancelled');
+  assert.equal(h.run(publish, orchestrator).code, 1);
+  h.mainCI('success');
+  assert.match(h.ok(publish, orchestrator), /publish policy holds/);
+  const data = JSON.parse(fs.readFileSync(h.env.INBOX_GITHUB, 'utf8'));
+  data.main_runs[0].conclusion = 'failure';
+  fs.writeFileSync(h.env.INBOX_GITHUB, JSON.stringify(data));
+  assert.equal(h.run(publish, orchestrator).code, 1, 'release rereads CI despite a fresh inbox cache');
 });
 
 test('an ordinary day opens no owner decision: moot decisions, a failure main shares, holds and a release under policy', (t) => {

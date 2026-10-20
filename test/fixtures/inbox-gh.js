@@ -4,6 +4,11 @@ const fs = require('node:fs');
 const { updateJson, readPublished } = require('../atomic-file');
 const args = process.argv.slice(2);
 const file = process.env.INBOX_GITHUB;
+if (/^repos\/[^/]+\/[^/]+\/branches\//.test(args[1] || '')) {
+  const data = JSON.parse(readPublished(file, 'utf8'));
+  console.log(JSON.stringify({ sha: data.main_head || data.main_runs?.[0]?.head_sha || data.prs?.[7]?.headRefOid }));
+  return;
+}
 // Base CI reads run alongside the PR reads, so they only append to their own call log
 // and never rewrite the shared file a concurrent PR read updates.
 if (/^repos\/[^/]+\/[^/]+\/actions\//.test(args[1] || '')) {

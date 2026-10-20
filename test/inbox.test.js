@@ -1,13 +1,15 @@
 'use strict';
 
-const { waitOnRepo } = require('./signals');
+const { waitOnRepo, fileWritten } = require('./signals');
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
-const { makeRepo, cachedFixture } = require('./helpers');
+const cp = require('node:child_process');
+const { once } = require('node:events');
+const { makeRepo, cachedFixture, BIN, HOOKS } = require('./helpers');
 const { gateFixture } = require('./gate-helpers');
 const { shellQuote } = require('../lib/gates/common');
 
@@ -42,6 +44,79 @@ function setup(t) {
   h.logs = () => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
   return h;
 }
+
+test('main push failures produce one item per current head and follow observes completion without --inbox', async (t) => {
+  const h = setup(t);
+  const github = h.github();
+  const run = (id, workflow, sha = h.sha, conclusion = 'failure') => ({
+    id, workflow_id: workflow, name: `CI ${workflow}`, run_number: id, event: 'push',
+    status: 'completed', conclusion, head_sha: sha,
+  });
+  github.main_head = h.sha;
+  github.main_runs = [run(101, 11), run(102, 12), run(99, 13, 'd'.repeat(40))];
+  github.jobs = { 101: [{ id: 501, name: 'linux', status: 'completed', conclusion: 'failure' }] };
+  github.logs = { 501: 'not ok 1 - current head regression\n  ---\n  error: failed\n  ...\n' };
+  h.save(github);
+  const cache = path.join(h.state, 'main-ci-cache.json');
+  const failed = () => {
+    fs.rmSync(cache, { force: true });
+    return h.inbox().items.filter((i) => i.kind === 'main_ci_failed');
+  };
+  const first = failed();
+  assert.equal(first.length, 1);
+  assert.equal(first[0].id, `main_ci_failed:project:${h.sha}`);
+  assert.deepEqual(first[0].runs.map((r) => r.id).sort(), [101, 102]);
+  assert.equal(first[0].jobs[0].tests[0].name, 'current head regression');
+  assert.deepEqual(failed().map((i) => i.id), first.map((i) => i.id));
+  assert.equal(h.logs().filter((e) => e.cmd === 'main ci').length, 1);
+  const observe = () => h.run(['wait', '--inbox', '--observe', '--after', 'now', '--types', 'inbox item', '--timeout', '0.2', '--agent', 'orchestrator']); // wait-allow: observe already-published main CI
+  assert.equal(observe().code, 0);
+  github.main_runs[0].run_attempt = 2;
+  h.save(github);
+  failed();
+  assert.equal(observe().code, 2, 'a failed rerun at the same head does not raise a second notification');
+  assert.equal(h.logs().filter((e) => e.cmd === 'inbox item' && e.detail.item === first[0].id).length, 1);
+  github.main_runs = [run(103, 11, h.sha, 'success'), run(104, 12, h.sha, 'success')];
+  h.save(github);
+  assert.deepEqual(failed(), []);
+  observe();
+
+  github.main_runs = [run(105, 11, h.sha, 'timed_out')];
+  github.main_runs[0].status = 'in_progress';
+  github.main_runs[0].conclusion = null;
+  h.save(github);
+  fs.rmSync(cache, { force: true });
+  const advance = path.join(h.base, 'advance-main-clock');
+  const clock = path.join(h.base, 'main-clock.js');
+  fs.writeFileSync(clock, `const fs = require('node:fs'); const real = Date.now; Date.now = () => real() + (fs.existsSync(${JSON.stringify(advance)}) ? 61000 : 0);\n`);
+  const follower = cp.spawn(process.execPath, ['--require', clock, '--require', HOOKS, BIN, 'wait', '--follow', '--observe', '--agent', 'orchestrator'], {
+    cwd: h.repo, env: h.env,
+  });
+  const closed = once(follower, 'close');
+  let output = '';
+  let errors = '';
+  follower.stderr.on('data', (b) => { errors += b; });
+  const woke = new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`no main CI wake: ${output} ${errors}`)), 20000); // wait-allow: bound the follower completion probe
+    follower.stdout.on('data', (b) => {
+      output += b;
+      if (output.includes('"type":"main ci"')) { clearTimeout(timer); resolve(); }
+    });
+    follower.once('close', () => { clearTimeout(timer); reject(new Error(`follower exited: ${errors}`)); });
+  });
+  try {
+    await Promise.all([woke, fileWritten(cache, { signal: t.signal }).then(() => {
+      github.main_runs[0].status = 'completed';
+      github.main_runs[0].conclusion = 'timed_out';
+      h.save(github);
+      fs.writeFileSync(advance, '');
+    })]);
+    assert.equal(h.inbox().items.filter((i) => i.kind === 'main_ci_failed').length, 1);
+  } finally {
+    follower.kill();
+    await closed;
+  }
+});
 
 // Lifecycle fixtures represent processes that exited before the observer
 // starts. All task transitions and the resolving actions use the real CLI.
@@ -840,7 +915,7 @@ test('a red push or schedule run on the base shows in inbox and status until a l
 
   const [failed] = red();
   assert.equal(failed.kind, 'main_ci_failed', JSON.stringify(red()));
-  assert.equal(failed.id, 'main_ci_failed:project:11');
+  assert.equal(failed.id, `main_ci_failed:project:${h.sha}`);
   assert.deepEqual(failed.jobs.map((j) => [j.name, j.conclusion, j.tests.map((x) => x.name)]), [[linux, 'failure', [test]]]);
   assert.match(failed.reason, /CI run 1001 attempt 1 \(push at .+\): failure/);
   assert.deepEqual(failed.action.argv, ['task', 'add', '--title', 'Fix main CI: CI (workflow 11), red since run 1001', '--kind', 'code',
@@ -878,17 +953,18 @@ test('a red push or schedule run on the base shows in inbox and status until a l
   h.save(github);
   assert.deepEqual(red().map((i) => [i.kind, i.run, i.attempt]), [['main_ci_failed', 1002, 2]]);
 
-  // A later green run of the workflow clears it, a manual dispatch at the same head included.
-  github.main_runs.unshift(run(1003, 52, 'workflow_dispatch', 'completed', 'success'));
+  // A later green push of the workflow clears it.
+  github.main_runs.unshift(run(1003, 52, 'push', 'completed', 'success'));
   h.save(github);
   assert.deepEqual(red(), []);
   assert.doesNotMatch(h.ok(['status']), /ci red/);
 
-  // A cancelled run with a newer run of its workflow was superseded and is not red.
+  // A pending newer push cannot clear a cancelled completed push.
   github.main_runs.unshift(run(1005, 54, 'push', 'in_progress', null), run(1004, 53, 'push', 'completed', 'cancelled'));
+  github.jobs[1004] = [job(503, linux, 'cancelled')];
   h.save(github);
-  assert.deepEqual(red(), []);
-  assert.doesNotMatch(h.ok(['status']), /ci red/);
+  assert.equal(red()[0].conclusion, 'cancelled');
+  assert.match(h.ok(['status']), /ci red/);
 
   // Without a newer run, a cancelled run is not green.
   github.main_runs.shift();
