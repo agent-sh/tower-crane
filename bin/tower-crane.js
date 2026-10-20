@@ -585,6 +585,10 @@ function flushStream(stream) {
 }
 
 if (require.main === module) {
+  if (!process.env.TOWER_CRANE_BROKER) {
+    const releaseRuntime = require('../lib/runtime').hold();
+    process.once('exit', releaseRuntime);
+  }
   main(process.argv.slice(2)).then((code) => {
     process.exitCode = code;
     return Promise.all([flushStream(process.stdout), flushStream(process.stderr)]);
