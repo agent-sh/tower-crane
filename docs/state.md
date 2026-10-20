@@ -1501,6 +1501,8 @@ evidence. PR-body-only review failures retain the submitted head, so their
 CI completion hints still refresh its evidence. Hosted CI takes no executor;
 local CI waits for one if needed. A review failure that sends the task to
 code rework skips the query at the superseded head.
+Pending CI reconciliation also refreshes submitted and accepted heads with
+body-only review findings.
 No webhook listener is installed; pending CI without a hint is
 rechecked once a minute by the trusted `wait` watcher, as described below.
 

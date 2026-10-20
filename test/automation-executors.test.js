@@ -383,7 +383,8 @@ for (const { provider, result, busy, review } of ciReviewCases) {
   });
 }
 
-test('accepted body-only review findings do not hide a pending hosted CI reconciliation', (t) => {
+for (const status of ['submitted', 'accepted']) {
+test(`${status} body-only review findings do not hide a pending hosted CI reconciliation`, (t) => {
   const h = refillFixture(t);
   for (const id of ['T2', 'T3', 'T4']) h.ok(['task', 'update', id, '--status', 'cancelled']);
   const github = h.github();
@@ -392,8 +393,10 @@ test('accepted body-only review findings do not hide a pending hosted CI reconci
   h.submit();
   for (const gate of ['tests', 'clean', 'ci']) h.ok(['check', gate, 'T1', '--agent', 'orchestrator']);
   h.reviewer('T1', 'reviewer');
-  h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--sha', h.sha, '--ok', '--agent', 'reviewer']);
-  h.ok(['accept', 'T1', '--agent', 'orchestrator']);
+  if (status === 'accepted') {
+    h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--sha', h.sha, '--ok', '--agent', 'reviewer']);
+    h.ok(['accept', 'T1', '--agent', 'orchestrator']);
+  }
   github.ci[h.sha] = 'pending';
   h.saveGithub(github);
   assert.equal(h.run(['check', 'ci', 'T1', '--agent', 'orchestrator']).code, 1);
@@ -408,3 +411,4 @@ test('accepted body-only review findings do not hide a pending hosted CI reconci
   assert.equal(ci.at(-1).detail.ok, false);
   assert.equal(!!ci.at(-1).detail.pending, false);
 });
+}
