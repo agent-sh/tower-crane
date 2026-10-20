@@ -11,6 +11,8 @@ const { cachedFixture } = require('./helpers');
 const { readPublished } = require('./atomic-file');
 const fixture = path.join(__dirname, 'fixtures', 'containment-lifecycle.js');
 process.env.TOWER_CRANE_TEST_CONTAINMENT = '1';
+// The fixture's times stretch on Windows, where a CIM snapshot and a stop take about a second each.
+const scale = process.platform === 'win32' ? 5 : 1;
 
 test('managed ownership separates independent work from ordinary and gate-owned descendants', () => {
   const P = require('../lib/processes');
@@ -109,7 +111,7 @@ for (const [kind, ending, owner, late, survives] of cases) {
         assert.equal(settled.includes(child.containment.unit), !metadata.retained?.length, JSON.stringify(metadata));
       }
     }
-    await new Promise(resolve => setTimeout(resolve, 2200)); // wait-allow: all finite fixture children and the keeper end
+    await new Promise(resolve => setTimeout(resolve, 2200 * scale)); // wait-allow: all finite fixture children and the keeper end
     if (survives) {
       assert.equal(fs.existsSync(path.join(dir, 'managed.done')), true);
       assert.equal(fs.existsSync(path.join(dir, 'grandchild.done')), true);
@@ -144,7 +146,7 @@ test('an unsandboxed CLI agent leaves its dispatched supervisor working after sp
   h.env.TOWER_CRANE_TEST_CONTAINMENT = '1';
   const result = h.run(['spawn', '--task', 'T1', '--wait']);
   assert.equal(result.code, 0, result.stdout + result.stderr);
-  await new Promise(resolve => setTimeout(resolve, 2200)); // wait-allow: bounded dispatched fixture lifetime
+  await new Promise(resolve => setTimeout(resolve, 2200 * scale)); // wait-allow: bounded dispatched fixture lifetime
   assert.equal(fs.existsSync(path.join(dir, 'managed.done')), true);
   assert.equal(fs.existsSync(path.join(dir, 'grandchild.done')), true);
   assert.equal(fs.existsSync(path.join(dir, 'ordinary.done')), false);

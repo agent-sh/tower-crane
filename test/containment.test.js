@@ -537,7 +537,9 @@ test('lightweight gate helpers retain cancellation without a separate resource s
 });
 
 test('finite nested fork storm fails the gate command and leaves another attempt running', async (t) => {
-  const sibling = C.spawn(process.execPath, ['-e', 'console.log("untouched"); setTimeout(() => {}, 3000)'], { // wait-allow: finite isolation probe lifetime
+  // The sibling must outlive the storm's detection, which a Windows CIM snapshot can take
+  // seconds to make; the test stops it at the end.
+  const sibling = C.spawn(process.execPath, ['-e', 'console.log("untouched"); setTimeout(() => {}, 60000)'], { // wait-allow: finite isolation probe lifetime
     resources: { tasks_max: 64, memory_max_bytes: memory }, stdio: ['ignore', 'pipe', 'pipe'],
   }); // wait-allow: finite sibling lifetime tests isolation
   t.after(() => sibling.kill('SIGKILL'));
