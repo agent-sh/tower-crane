@@ -8,9 +8,10 @@ const { setup, upper } = require('./stack-fixture');
 const { HUNG_TEST_MS } = require('./signals');
 const S = require('../lib/state');
 const T = require('../lib/tasks');
+const StateFiles = require('./state-files');
 
 const task = (f) => f.h.readState('tasks.json').tasks.find((t) => t.id === 'T2');
-const events = (f) => fs.readFileSync(path.join(f.h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+const events = (f) => f.h.events();
 
 function automaticNote(f) {
   const note = task(f).notes.findLast((n) => n.text.startsWith('Stack parent T1 merged.'));
@@ -40,7 +41,7 @@ function probeWorker(f) {
   const script = path.join(f.h.base, 'probe.js');
   fs.writeFileSync(script, `const fs = require('node:fs');
 const path = require('node:path');
-const state = JSON.parse(fs.readFileSync(path.join(process.env.TOWER_CRANE_STATE, 'tasks.json'), 'utf8'));
+const state = require(${JSON.stringify(path.join(__dirname, 'state-files.js'))}).readDoc(process.env.TOWER_CRANE_STATE, 'tasks.json');
 fs.writeFileSync(${JSON.stringify(path.join(f.h.base, 'dispatch.json'))}, JSON.stringify({
   task: state.tasks.find((t) => t.id === 'T2'), prompt: process.argv.at(-1),
 }));`);
@@ -116,7 +117,7 @@ test('an observer retires a child without a PR left behind after a merge receipt
   const state = f.h.readState('tasks.json');
   state.tasks.find((t) => t.id === 'T2').stack = previous;
   f.h.writeState('tasks.json', state);
-  const after = fs.statSync(path.join(f.h.state, 'events.jsonl')).size;
+  const after = StateFiles.logEnd(f.h.state);
   f.h.ok(['wait', '--task', 'T2', '--types', 'stack complete', '--after', String(after), '--observe', '--timeout', String(HUNG_TEST_MS / 1000)]);
   assert.equal(task(f).stack, undefined);
   assert.equal(events(f).filter((e) => e.cmd === 'stack complete' && e.task === 'T2').length, 2);

@@ -398,7 +398,7 @@ for (const lifecycle of ['deferred', 'retired']) {
       if (lifecycle === 'deferred') {
         assert.equal(upper.stack.base, f.lower.branch);
         assert.equal(upper.stack_disabled, true);
-        const events = fs.readFileSync(path.join(f.h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+        const events = f.h.events();
         assert.ok(events.some((event) => event.task === 'T2' && event.cmd === 'stack sync deferred'
           && event.detail.reason.includes('temporary retarget failure')));
       } else {
