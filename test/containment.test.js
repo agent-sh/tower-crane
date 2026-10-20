@@ -94,8 +94,8 @@ test('gate defaults leave measured full-suite headroom and preserve explicit cap
   const limits = C.resolveGate(project, host);
   assert.equal(limits.tasks_max, 666);
   assert.equal(limits.memory_max_bytes, Math.floor(host.memory / 6));
-  assert.ok(314 <= limits.tasks_max * 2 / 3, 'measured task peak needs at least one third headroom');
-  assert.ok(1012297728 <= limits.memory_max_bytes * 2 / 3, 'measured memory peak needs at least one third headroom');
+  assert.ok(303 <= limits.tasks_max * 2 / 3, 'measured task peak needs at least one third headroom');
+  assert.ok(1196244992 <= limits.memory_max_bytes * 2 / 3, 'measured memory peak needs at least one third headroom');
   assert.equal(C.resolveGate({}, host).tasks_max, 1000, 'two executors by default');
   const explicit = { tasks_max: 64, memory_max_bytes: memory };
   assert.deepEqual(C.resolveGate({ resources: explicit }, host), explicit);
@@ -355,11 +355,13 @@ test('systemd CLI and D-Bus launches use supported OOM policy and retain caps', 
   const unit = 'tower-crane-123-0123456789abcdef.scope';
   const limits = { tasks_max: 64, memory_max_bytes: memory };
   for (const mode of ['cli', 'dbus']) {
-    const group = path.join(h.base, mode, unit);
+  for (const fleet of [false, true]) {
+    const label = `${mode}-${fleet}`;
+    const group = path.join(h.base, label, unit);
     fs.mkdirSync(group, { recursive: true });
-    const log = path.join(h.base, `${mode}.jsonl`);
-    const report = path.join(h.base, `${mode}-report.json`);
-    const args = [runner, JSON.stringify(limits),
+    const log = path.join(h.base, `${label}.jsonl`);
+    const report = path.join(h.base, `${label}-report.json`);
+    const args = [runner, JSON.stringify({ ...limits, ...(fleet ? { fleet } : {}) }),
       mode === 'dbus' ? `@${unit}:test-fence.slice` : '', unit,
       process.execPath, '-e', 'console.log("scoped command ran", process.env.TOWER_CRANE_SCOPED)'];
     const command = mode === 'dbus' ? ['--require', fake, ...args]
@@ -376,14 +378,15 @@ test('systemd CLI and D-Bus launches use supported OOM policy and retain caps', 
     assert.equal(result.status, 0, result.stderr + (registration.error || ''));
     assert.equal(result.stdout, 'scoped command ran 1\n', 'every scoped launch sets TOWER_CRANE_SCOPED');
     assert.equal(registration.group, group);
-    assert.equal(fs.readFileSync(path.join(group, 'memory.oom.group'), 'utf8'), '1');
+    assert.equal(registration.baseline, undefined, 'fresh attempt counters are measured from zero');
+    assert.equal(fs.readFileSync(path.join(group, 'memory.oom.group'), 'utf8'), fleet ? '0' : '1');
     const properties = JSON.parse(fs.readFileSync(log, 'utf8').trim());
-    // OOMPolicy=kill would let systemd 255 stop the scope for a nested attempt's OOM.
     assert.equal(properties.OOMPolicy, 'continue');
     assert.equal(properties.TasksMax, String(limits.tasks_max));
     assert.equal(properties.MemoryMax, String(limits.memory_max_bytes));
     assert.equal(properties.MemorySwapMax, '0');
     assert.ok(['true', 'yes'].includes(properties.Delegate));
+  }
   }
 });
 
@@ -490,7 +493,7 @@ test('nested cap failures leave the parent running when local events are availab
       resources: { tasks_max: 128, memory_max_bytes: 4 * memory }, timeout: 10000, // wait-allow: finite nested cap probe deadline
     });
     if (!localEvents && result.resource_reason === reason) continue;
-    assert.equal(result.status, 0, diagnostics(result));
+    assert.equal(result.status, 0, JSON.stringify(result));
     assert.equal(result.resource_reason, undefined, result.stderr);
     assert.ok(result.stdout.includes(`child: ${reason}\nparent-survived`), result.stdout + result.stderr);
   }
