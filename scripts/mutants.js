@@ -299,6 +299,10 @@ function checkMutants(root, mutants = MUTANTS) {
   if (failures.length) throw new Error(failures.join('\n'));
 }
 
+// A Windows pass takes a CIM snapshot, about a second on a hosted runner and many
+// seconds on a cold one, and a taskkill per member, so Windows waits longer.
+const WINDOWS_WAIT_MS = 30000;
+
 // Track descendants as well as groups: the CLI starts detached supervisors.
 function processSnapshot() {
   if (process.platform === 'linux') {
@@ -319,7 +323,7 @@ function processSnapshot() {
   if (process.platform === 'win32') {
     const r = cp.spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
       'Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,CreationDate | ConvertTo-Json -Compress'],
-    { encoding: 'utf8', timeout: 5000, windowsHide: true });
+    { encoding: 'utf8', timeout: WINDOWS_WAIT_MS, windowsHide: true });
     if (r.error || r.status !== 0) throw new Error(`cannot inspect mutant processes: ${r.error?.message || r.stderr}`);
     const rows = JSON.parse(r.stdout);
     return (Array.isArray(rows) ? rows : [rows]).map(row => ({
@@ -521,7 +525,7 @@ async function runContained(command, argv, { cwd, env = process.env, limit = 512
         resolve({ status, signal });
       });
     });
-    const cleanupDeadline = Date.now() + 5000;
+    const cleanupDeadline = Date.now() + (process.platform === 'win32' ? WINDOWS_WAIT_MS : 5000);
     while (remember().length) {
       kill();
       if (Date.now() >= cleanupDeadline) throw new Error('mutant descendants survived containment cleanup');
