@@ -1038,6 +1038,25 @@ setInterval(() => {}, 1000);
   assert.equal(h.json(['task', 'show', 'T1']).run.reason, 'supervisor stopped by SIGTERM');
 });
 
+// The dispatch binds its supervisor to the host governor once the spawn is
+// recorded, so a stop can arrive before the supervisor has read that record.
+test('a supervisor stopped as soon as its dispatch returns still records the stop and its exit', {
+  skip: process.platform === 'win32' && 'POSIX signals',
+}, async (t) => {
+  const h = setup(t, { failures: 0 });
+  const script = `
+const { fakeAgentEnv } = require(${JSON.stringify(path.join(__dirname, 'agent-env.js'))});
+require('node:child_process').execFileSync(process.execPath, [process.argv[1], 'claim', 'T1'], { env: fakeAgentEnv(process.env) });
+setInterval(() => {}, 1000);
+`;
+  h.ok(['ladder', 'set', 'easy', '--command', JSON.stringify([process.execPath, '-e', script, BIN, '{prompt}'])]);
+  const spawned = h.json(['spawn', '--task', 'T1']);
+  killPid(spawned.monitor_pid, 'SIGTERM');
+  await waitOnRepo(h, () => !detachedAlive({ pid: spawned.monitor_pid }), 'stopped monitor survived');
+  assert.equal(log(h).filter((e) => e.cmd === 'spawn exit' && e.detail.agent === spawned.agent).length, 1);
+  assert.equal(h.json(['task', 'show', 'T1']).run.reason, 'supervisor stopped by SIGTERM');
+});
+
 test('a rerun waits for previous descendants even when they close their output pipes', {
   skip: process.platform !== 'linux' && 'Linux process state',
 }, (t) => {
