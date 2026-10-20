@@ -45,15 +45,15 @@ test('every shard count covers the real suite with each file in exactly one shar
   }
 });
 
-test('the checked-in durations split each CI platform into three shards within a tenth of each other', () => {
+test('the checked-in durations split Linux into three CI shards and Windows into four within a tenth of each other', () => {
   const files = testFiles();
-  for (const platform of ['linux', 'win32']) {
+  for (const [platform, total] of [['linux', 3], ['win32', 4]]) {
     const durations = fileDurations(platform);
     assert.ok(Object.keys(durations).length > files.length / 2, `${platform} has measured times`);
     const known = Object.values(durations).sort((a, b) => a - b);
     const cost = (file) => durations[file] ?? known[Math.floor(known.length / 2)];
-    const loads = [1, 2, 3].map((i) => shardFiles(files, i, 3, durations).reduce((sum, file) => sum + cost(file), 0));
-    const mean = loads.reduce((a, b) => a + b, 0) / 3;
+    const loads = Array.from({ length: total }, (_, i) => shardFiles(files, i + 1, total, durations).reduce((sum, file) => sum + cost(file), 0));
+    const mean = loads.reduce((a, b) => a + b, 0) / total;
     assert.ok(Math.max(...loads) <= mean * 1.1, `${platform} shard seconds ${loads.map(Math.round).join(', ')}`);
   }
 });
