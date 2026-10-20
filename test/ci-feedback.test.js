@@ -100,6 +100,7 @@ test('finding body preserves Markdown code and strips only line-start HTML comme
     ['unclosed block', '<!-- hidden\nmetadata', '', 20],
     ['Unicode removal count', '<!-- 😀 -->\nVisible', 'Visible', 10],
     ['multiple blocks', '<!-- a -->\n<!-- b -->\nVisible', 'Visible', 20],
+    ['reported multiple blocks around prose', '<!-- a -->\nX\n<!-- bb -->\nY', 'X\n\nY', 21],
     ['escaped backtick in span', '`code \\`\n<!-- hidden -->\nVisible', '`code \\`\n\nVisible', 15],
     ['no second stripping', '<!<!-- a -->-- b -->Visible'],
   ];
