@@ -40,7 +40,7 @@ if(process.argv[2]==='leaf'||process.argv[2]==='retained'){
   },mode==='delayed'?100:0); // wait-allow: emulate asynchronous cleanup in the TERM handler
  });
  writeAtomic(path.join(dir,kind+'.ready'),'ready');
- setInterval(()=>{},100);
+ setInterval(()=>{},100); // wait-allow: leftover stays alive until TERM cleanup or the final kill
 }else{
  const leaf=cp.spawn(process.execPath,[__filename,'leaf'],{stdio:'ignore'});
  const kept=${retained} ? cp.spawn(process.execPath,[__filename,'retained'],{stdio:'ignore'}) : null;
@@ -89,6 +89,7 @@ if(process.argv[2]==='leaf'||process.argv[2]==='retained'){
   assert.equal(fs.existsSync(path.join(dir, 'leaf.term')), true, 'leftover handled SIGTERM');
   assert.equal(fs.existsSync(path.join(dir, 'cleaned')), mode !== 'ignore');
   await waitOnRepo(h, () => !detachedAlive({ pid: owned.leaf }), 'leftover exited after cleanup');
+  // wait-allow: the natural-exit contract requires a five-second grace before killing an ignoring process
   if (mode === 'ignore') assert.ok(performance.now() - began >= 5000, 'ignored TERM still receives the five-second grace');
   if (retained) {
     assert.equal(detachedAlive({ pid: owned.retained }), true);
