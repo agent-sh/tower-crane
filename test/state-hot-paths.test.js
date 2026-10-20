@@ -57,3 +57,46 @@ test('hook polls, writes and waits read only their own events, not the whole log
   for (const run of runs) assert.ok(run.rows < OTHER / 10, `${run.label} read ${run.rows} event rows of a ${OTHER}-event log`);
   assert.equal(runs.find((r) => r.label === 'hook poll').rows, 0, 'an empty poll reads no events');
 });
+
+// The bulk of a log is finished tasks' events: gate receipts, live spend,
+// hook reports, reaction receipts, dispatches and their exits.
+const CLOSED_CMDS = ['check tests', 'spend live', 'hook report', 'automation', 'automation queued', 'spawn', 'spawn exit', 'submit', 'rework', 'claim', 'renew', 'task note'];
+
+function viewFixture(t) {
+  return cachedFixture(t, 'view-paths', (h) => {
+    h.init();
+    for (const title of ['Open task', 'Closed task']) h.ok(['task', 'add', '--title', title, '--acceptance', 'done']);
+    h.ok(['brief', 'set', 'T1', '-'], { input: 'Do it.\n' });
+    h.ok(['task', 'update', 'T2', '--status', 'cancelled']);
+    const events = Array.from({ length: OTHER }, (_, i) => {
+      const cmd = CLOSED_CMDS[i % CLOSED_CMDS.length];
+      const id = `E${crypto.randomUUID()}`;
+      const detail = cmd === 'automation' ? { source: id, phase: 'done', error: null }
+        : cmd === 'automation queued' ? { source: id }
+          : ['spawn', 'spawn exit'].includes(cmd) ? { agent: 'worker-T2-1', role: 'worker', pid: 1, code: 0 }
+            : { agent: 'worker-T2-1', tokens: i, until: new Date().toISOString(), ok: true, type: 'tests', summary: 'ran' };
+      return { id, at: new Date().toISOString(), agent: 'worker-T2-1', cmd, task: 'T2', detail, type: cmd, to: 'orchestrator' };
+    });
+    StateFiles.withDb(h.state, () => S.withLock(h.state, () => Db.commit(h.state, { events })));
+  });
+}
+
+// status, inbox and the orchestrator's observer read task rows, indexed
+// events and the latest entries of a few commands; none replays the log,
+// which here holds thousands of a cancelled task's events.
+test('status, inbox and an observing wait read only indexed rows, not the whole log', (t) => {
+  const h = viewFixture(t);
+  const meter = path.join(h.base, 'rows.json');
+  const read = (label, args) => {
+    const r = h.run(args, { env: { EVENT_ROWS: meter, NODE_OPTIONS: `--require "${ROWS}"` } });
+    assert.ok([0, 2].includes(r.code), `${label}: ${r.stderr}`);
+    return { label, ...JSON.parse(fs.readFileSync(meter, 'utf8')) };
+  };
+  const runs = [
+    read('status', ['status', '--json']),
+    read('inbox', ['inbox', '--json', '--agent', 'orchestrator']),
+    // An observer refreshes the inbox at startup and records its snapshot.
+    read('observer', ['wait', '--observe', '--inbox', '--timeout', '1', '--agent', 'orchestrator']), // wait-allow: the startup pass is what is measured; the bound ends the wait after it
+  ];
+  for (const run of runs) assert.ok(run.rows < OTHER / 10, `${run.label} read ${run.rows} event rows of a ${OTHER}-event log`);
+});
