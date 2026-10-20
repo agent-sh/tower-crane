@@ -483,10 +483,13 @@ test('tests evidence stores its mode in the audit event and stops counting when 
   assert.match(testsGate().reason, /mode.*none.*prove/);
   const refused = h.run(['accept', 'T1']);
   assert.equal(refused.code, 1);
-  assert.equal(testsGate().ok, true, 'accept refreshes the stale tests mode before later gates');
-  const proof = h.json(['check', 'tests', 'T1', '--cmd', `${shellQuote(process.execPath)} verify-build.js`]);
+  assert.match(refused.stderr, /clean:.*no cleanup command pinned/);
+  assert.doesNotMatch(refused.stderr, /tests:.*mode none.*prove/);
+  const proof = h.readState('tasks.json').tasks[0].evidence.findLast((e) => e.type === 'tests');
   assert.equal(proof.tests_mode, 'prove');
   assert.equal(testsGate().ok, true);
+  const refreshed = StateFiles.logText(h.state).trim().split('\n').map(JSON.parse);
+  assert.equal(refreshed.findLast((e) => e.cmd === 'check tests').detail.tests_mode, 'prove');
   h.ok(['project', 'set', '--tests-by-kind', '{"code":"run-only"}']);
   assert.equal(testsGate().ok, false);
   const run = h.json(['check', 'tests', 'T1', '--cmd', `${shellQuote(process.execPath)} verify-build.js`]);
@@ -505,31 +508,48 @@ test('tests evidence stores its mode in the audit event and stops counting when 
   assert.match(testsGate().reason, /mode unrecorded/);
 });
 
-test('accept refreshes a changed tests mode while merge requires a fresh check', (t) => {
-  const h = makeRepo(t);
-  h.init();
-  const sha = gateFixture(h);
-  h.ok(['task', 'add', '--title', 'Change', '--acceptance', 'works']);
-  h.ok(['claim', 'T1', '--agent', 'w-1']);
-  h.ok(['submit', 'T1', '--sha', sha, '--agent', 'w-1']);
-  h.ok(['project', 'set', '--tests-mode', 'none']);
-  h.ok(['check', 'tests', 'T1', '--agent', 'checker']);
-  gateEvidence(h, 'clean', 'checker');
-  h.reviewer('T1', 'r-1', sha);
-  h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--ok', '--sha', sha, '--agent', 'r-1']);
-  h.ok(['project', 'set', '--tests-mode', 'prove']);
-  h.ok(['accept', 'T1']);
-  assert.equal(h.readState('tasks.json').tasks[0].evidence.at(-1).tests_mode, 'prove');
-  h.ok(['project', 'set', '--tests-mode', 'none']);
-  const cli = cliCopy(h);
-  fs.mkdirSync(cli.gates, { recursive: true });
-  fs.writeFileSync(path.join(cli.gates, 'merge.js'), FAKE_GATE);
-  const out = path.join(h.base, 'gate.json');
-  const merge = cli.run(['merge', 'T1'], { GATE_OUT: out, GATE_OK: '1' });
-  assert.equal(merge.code, 1);
-  assert.match(merge.stderr, /its gates no longer pass: tests:.*mode prove.*none/);
-  assert.ok(!fs.existsSync(out), 'the merge gate did not run');
-});
+function modeFixture(t, mode) {
+  return cachedFixture(t, `audited-mode:${mode}`, (h) => {
+    h.init();
+    const sha = gateFixture(h);
+    h.ok(['task', 'add', '--title', 'Change', '--acceptance', 'works']);
+    h.ok(['claim', 'T1', '--agent', 'w-1']);
+    h.ok(['submit', 'T1', '--sha', sha, '--agent', 'w-1']);
+    h.ok(['project', 'set', '--tests-mode', mode, '--tests-cmd', 'node test/value.test.js']);
+    h.ok(['check', 'tests', 'T1', '--agent', 'checker']);
+    gateEvidence(h, 'clean', 'checker');
+    h.reviewer('T1', 'r-1', sha);
+    h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--ok', '--sha', sha, '--agent', 'r-1']);
+    return { sha };
+  });
+}
+
+for (const [before, after] of [
+  ['none', 'prove'], ['none', 'run-only'], ['prove', 'none'],
+  ['prove', 'run-only'], ['run-only', 'none'], ['run-only', 'prove'],
+]) {
+  test(`accept refreshes mode ${before} to ${after}, while a direct merge refuses stale mode`, (t) => {
+    const h = modeFixture(t, before);
+    const checks = () => StateFiles.logText(h.state).trim().split('\n').map(JSON.parse)
+      .filter((e) => e.cmd === 'check tests');
+    const count = checks().length;
+    h.ok(['project', 'set', '--tests-mode', after]);
+    assert.equal(h.json(['task', 'show', 'T1']).gates.gates.find((g) => g.type === 'tests').ok, false);
+    h.ok(['accept', 'T1']);
+    assert.equal(checks().length, count + 1);
+    assert.equal(checks().at(-1).detail.tests_mode, after);
+    assert.equal(h.readState('tasks.json').tasks[0].status, 'accepted');
+    h.ok(['project', 'set', '--tests-mode', before]);
+    const cli = cliCopy(h);
+    fs.mkdirSync(cli.gates, { recursive: true });
+    fs.writeFileSync(path.join(cli.gates, 'merge.js'), FAKE_GATE);
+    const out = path.join(h.base, 'gate.json');
+    const merge = cli.run(['merge', 'T1'], { GATE_OUT: out, GATE_OK: '1' });
+    assert.equal(merge.code, 1);
+    assert.match(merge.stderr, new RegExp(`its gates no longer pass: tests:.*mode ${after}.*${before}`));
+    assert.ok(!fs.existsSync(out), 'the merge gate did not run');
+  });
+}
 
 test('gate commands exit 1 when the gate module is not installed', (t) => {
   const h = makeRepo(t);

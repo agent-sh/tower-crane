@@ -118,7 +118,7 @@ test('terminal owner fallback cannot pin gate commands', { skip: !PTY_AVAILABLE 
 });
 
 for (const type of ['tests', 'clean']) {
-  test(`${type} command changes stale receipts at acceptance and merge until rerun`, (t) => {
+  test(`${type} command changes refresh receipts at acceptance and block a direct merge until rerun`, (t) => {
     const { h, sha } = fixture(t);
     pin(h);
     h.ok(['check', 'tests', 'T1']);

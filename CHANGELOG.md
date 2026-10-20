@@ -1,5 +1,54 @@
 # Changelog
 
+## 0.1.7 (2026-10-20)
+
+### Upgrading
+
+- The host governor now reserves what running work actually grows to together, not the sum of every unit's remaining peak. It learns from growth windows: once a minute it opens one with the units running then and follows their summed size for `growth_window_min` (60). After `growth_samples_min` (20) windows, the growth it reserves is the 99th percentile of those ratios times the running units' summed room, never below the largest unit's own room. Until then it keeps the sum. On this project's host the reservation for running work fell from about 20 GiB to under 6. `status` names the rule, the ratio and the sample count.
+- Containment scopes use `OOMPolicy=continue`, and the runner sets `memory.oom.group=1` on each attempt. An attempt that hits its memory cap is stopped alone; its parent scope and siblings keep running. 0.1.6 used `OOMPolicy=kill`, which on systemd 255 stopped the parent scope too.
+- Where the base branch has push CI, publishing or merging a release PR needs its latest completed run to be green. An owner approval or an empty publish policy does not bypass a red run. Neutral and skipped runs count as green; a cancelled run blocks while a newer push is pending. Projects without base push history publish as before.
+- `accept` reruns missing gates and stale passing gates, including a local CI receipt for an older merged tree. Fresh passes are reused, failed gates still need an explicit rerun, and review stays separate.
+- `ci.local.receipts` takes globs. A local CI gate copies the matching files into the hidden `ci-artifacts/` area before it removes its worktree, on pass or fail. Only the owner and the orchestrator can read the copies, capped at 8 MiB per file with a truncation notice. Agents see only a redacted summary of the failed steps.
+- Repeating `inbox --ack ITEM` acknowledges several items in one atomic batch, and `inbox --ack-before TIME [--kind KIND]` acknowledges every match. Task messages and decision answers older than 24 hours drop out of the inbox once every task they concern is cancelled, or accepted and merged; their history stays.
+
+### Host governor
+
+- A reaction the governor defers stays owed in the persistent gate queue, also when a worker supervisor or CI feedback started it. Any trusted `wait` retries it in its turn once there is room. A held unit no longer blocks smaller or ungoverned reactions behind it.
+- A window that grew past the reservation in force raises the ratio to at least its own for the next `growth_window_min`. Closed windows, with prediction, growth, ratio and peak, go to a rolling log, `HOST.windows.jsonl`, beside the registry.
+- Use still counts anonymous, shared and kernel memory, never page cache, so a finished scope that still holds cached files counts for nothing.
+- `status` and `inbox` mark governor-deferred work: the text line adds `deferred by the governor: TASKS`, JSON has `gate_queue.deferred`, and `governor_deferred` stays while the reaction is owed.
+
+### Containment
+
+- Agent tool snapshots are kept while a supervisor, keeper or controller still runs from them. A reaction whose runtime is missing stays owed as an infrastructure error. It records no failed gate and does not send the task to rework.
+- A caller outside its systemd user manager, such as a hosted CI runner service, gets its scope in the manager's slice of the same name.
+- On Windows, containment waits for a slow CIM process snapshot and stop as long as other snapshots do, instead of failing with `resource-monitor-failed` after 2 seconds. Children of a command that exits before its first snapshot are still found. The attempt finishes only after its stop does.
+- A containment keeper runs from the filesystem root, so on Windows it no longer pins a worktree, tool copy, agent home or test fixture against removal.
+
+### Gates
+
+- A tests gate reruns only the failing files at the base, through the pinned test selector. Base results are redacted and shared across later and concurrent gates under the same environment. Logs and evidence record the selected files, cache hits and time.
+- Queued merge reactions share one head-check rerun after a merged-head suite timeout. A change of head, revision, base, command or timeout budget starts a fresh check.
+- A PR-body-only review failure dispatches a worker to correct the body, then runs the light claim check at the same head. Two failed automatic re-checks stop with `review_body_stuck`. Light checks reuse reviewer recovery for crashes and missing receipts; a clean exit with no verdict, or three crashes, surfaces `review_held`. `status` shows `fixing PR body` during a repair, and hides live-spend lines for accepted or cancelled tasks and readings older than a day; runaway monitoring still uses them.
+- In tests, the gate scratch proof keeps nested gates on an isolated fake host; real host runs still use the governor. It reports a nested gate's exit code and stderr when the gate returns no JSON.
+
+### Stacked tasks
+
+- A stacked child is retired once its parent merges, also when it has no PR. Dispatch rechecks merged parents first. A child PR closed when its base branch was deleted is recovered through a matching open PR or a replacement against the project base, with a fresh revision; an accepted task goes back to submitted so gates and review run again. Retirement adds a task note to merge the project base and keeps the child's commits.
+
+### Workers, reviews and status
+
+- Rework prompts, `ci checks` and submit reports show each open revuto inline finding's comment id beside its path and line, so a worker can run `ci resolve` itself.
+- Runaway alarms separate a task's total spend from the current worker's own spend, show the cached share, and compare against accepted tasks of the same tier and size. A single worker over the limit gets its own alarm.
+- A failed local CI gate names its failed steps, exit and timeout details from the copied receipts.
+- An orchestrator lease refusal says when the caller carries the holder's session id but runs outside its process tree, and how to run it instead.
+- Main push CI failures at the current base head share one inbox item with the failing jobs and test names.
+
+### CI
+
+- Main push CI is green again on every Linux and Windows job. It had failed on every push since 2026-10-18.
+- Windows runs four test shards, and each shard prints a line as every test file starts and ends. A shard still running at 36 minutes prints its process tree, stops and fails; `TC_TEST_SHARD_DEADLINE_MIN` overrides the limit.
+
 ## 0.1.6 (2026-10-19)
 
 ### Upgrading
