@@ -1,1 +1,1 @@
-- Same-repository PRs run one hosted job, `checks (shared files)`, instead of three Windows test shards; their full suite runs in the local tests gate. Fork PRs keep the Windows shards, and main pushes, daily and manual runs keep all nine shards and the proofs.
+- Same-repository PRs run one hosted job, `checks (shared files)`, instead of three Windows test shards; their full suite runs in the local tests gate. Fork PRs keep the Windows shards, and main pushes, daily and manual runs keep every test shard and the proofs.
