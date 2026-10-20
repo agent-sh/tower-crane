@@ -12,6 +12,7 @@ const B = require('../lib/broker');
 const { failingTests } = require('../lib/ci-feedback');
 const { stripEscapes } = require('../lib/ci-log-text');
 const { ghDenied } = require('../lib/shim');
+const { revutoLines } = require('../lib/gates/ci');
 
 // GitHub stamps every line of a job log.
 const PLAIN = [
@@ -48,6 +49,25 @@ test('CI log cleanup preserves text, tabs and newlines while removing terminal c
     ['layout and Unicode', '\t✖ тест\n', '\t✖ тест\n'],
   ];
   for (const [name, input, expected] of cases) assert.equal(stripEscapes(input), expected, name);
+});
+
+test('inline finding text strips metadata and caps each body with an explicit note', () => {
+  const cases = [
+    ['plain Markdown', '**[P2]** Guard `input`.', ['**[P2]** Guard `input`.']],
+    ['multiline comments', '<!-- hidden\nmetadata -->\nFirst<!-- more --> line.\r\nSecond line.', ['First line.', 'Second line.']],
+    ['comment before cap', `<!-- ${'x'.repeat(5000)} -->Visible`, ['Visible']],
+    ['unfinished comment', 'Visible<!-- hidden', ['Visible']],
+    ['terminal controls', '\x1b[31mVisible\x1b[0m\x07', ['Visible']],
+    ['empty body', '', ['']],
+    ['at cap', 'x'.repeat(4000), ['x'.repeat(4000)]],
+    ['past cap', 'x'.repeat(4001), ['x'.repeat(4000), '[body truncated after 4000 characters]']],
+    ['Unicode at cap', '😀'.repeat(4000), ['😀'.repeat(4000)]],
+    ['Unicode past cap', '😀'.repeat(4001), ['😀'.repeat(4000), '[body truncated after 4000 characters]']],
+  ];
+  for (const [name, body, expected] of cases) {
+    assert.deepEqual(revutoLines([{ id: 501, path: 'lib/a.js', line: 12, body }]),
+      ['  lib/a.js:12 (comment 501)', ...expected.map((line) => `    ${line}`)], name);
+  }
 });
 
 test('gh log flag preserves the existing shim policy', () => {
@@ -295,12 +315,15 @@ test('rework prompts and worker ci reads expose inline ids that ci resolve accep
   const h = fixture(t);
   const data = checkFeedback(h);
   data.comments = reviewComments();
+  data.comments[0].body = '<!-- hidden rework metadata -->\n[P2] Guard the input\nKeep the failure visible.';
   fs.writeFileSync(h.env.CI_FEEDBACK_GH, JSON.stringify(data));
   sendToRework(h);
   const expected = [[501, 'lib/a.js', 12], [502, 'lib/b.js', 40], [504, 'lib/c.js', 50]];
   const assertFindings = (text) => {
     for (const [id, file, line] of expected) assert.ok(text.includes(`${file}:${line} (comment ${id})`), text);
     assert.doesNotMatch(text, /lib\/(?:closed|outdated|human)\.js/);
+    assert.match(text, /\[P2\] Guard the input\n {4}Keep the failure visible\./);
+    assert.doesNotMatch(text, /hidden rework metadata/);
   };
   const dry = h.json(['spawn', '--task', 'T1', '--dry-run']);
   assertFindings(dry.argv.join('\n'));
@@ -559,7 +582,11 @@ test('ci checks keeps superseded review rounds, reruns and replaced workflow fai
 
 test('ci checks runs through the worker broker without loading the worktree git config', async (t) => {
   const h = fixture(t);
-  checkFeedback(h);
+  const data = checkFeedback(h);
+  data.comments = reviewComments().filter((c) => [501, 502, 503, 507, 508, 509].includes(c.id));
+  data.comments[0].body = '<!-- hidden worker\nmetadata -->\n[P2] Guard the input\nReject the unsafe value.';
+  data.comments[1].body = 'Long finding: ' + 'x'.repeat(4000) + ' omitted tail';
+  fs.writeFileSync(h.env.CI_FEEDBACK_GH, JSON.stringify(data));
   const callsFile = path.join(h.base, 'gh-calls.jsonl');
   const values = { NODE_OPTIONS: h.env.NODE_OPTIONS, CI_FEEDBACK_GH: h.env.CI_FEEDBACK_GH, CI_FEEDBACK_CALLS: callsFile };
   const saved = {};
@@ -577,9 +604,19 @@ test('ci checks runs through the worker broker without loading the worktree git 
     broker_harnesses: ['codex'], broker: path.join(h.base, 'broker', B.FILE) };
   const broker = await B.start(job);
   t.after(() => broker.close());
+  const text = await B.forward(job.broker, ['ci', 'checks', 'T1'], h.state);
+  assert.equal(text.code, 0, text.stderr);
+  assert.match(text.stdout, /lib\/a\.js:12 \(comment 501\)\n {4}\[P2\] Guard the input\n {4}Reject the unsafe value\./);
+  assert.ok(text.stdout.includes(`lib/b.js:40 (comment 502)\n    ${data.comments[1].body.slice(0, 4000)}\n    [body truncated after 4000 characters]`));
+  assert.doesNotMatch(text.stdout, /hidden worker|metadata|omitted tail|lib\/(?:closed|outdated)\.js|comment (?:507|509)/);
   const r = await B.forward(job.broker, ['ci', 'checks', 'T1', '--json'], h.state);
   assert.equal(r.code, 0, r.stderr);
-  assert.equal(JSON.parse(r.stdout).alerts[0].rule, 'js/file-system-race');
+  const result = JSON.parse(r.stdout);
+  assert.equal(result.alerts[0].rule, 'js/file-system-race');
+  assert.deepEqual(result.findings.map((f) => [f.id, f.path, f.line]),
+    [[501, 'lib/a.js', 12], [502, 'lib/b.js', 40]]);
+  assert.equal(result.findings[0].body, '[P2] Guard the input\nReject the unsafe value.');
+  assert.equal(result.findings[1].body, data.comments[1].body);
   const calls = fs.readFileSync(callsFile, 'utf8').trim().split('\n').map((s) => JSON.parse(s));
   assert.ok(calls.length > 0);
   for (const call of calls) {
