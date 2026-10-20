@@ -35,6 +35,11 @@
     "reason": "Relative import of the shared Claude sandbox mount classification"
   },
   {
+    "path": "lib/gates/merge.js",
+    "text": "claude-plugin",
+    "reason": "Directory of the plugin manifests checked for release version changes"
+  },
+  {
     "path": "lib/project.js",
     "text": "claude-provider",
     "reason": "Relative import of the Claude provider routing module"
