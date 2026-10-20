@@ -30,6 +30,7 @@ function ownerFixture(t, env = {}) {
   // The engine and the worker append while the test reads: only complete lines count.
   const lines = (file) => {
     let text = '';
+    // read-published: appended only; the slice below drops a partial last line.
     try { text = fs.readFileSync(file, 'utf8'); } catch (e) { if (e.code !== 'ENOENT') throw e; }
     return text.slice(0, text.lastIndexOf('\n') + 1).split('\n').filter(Boolean).map(JSON.parse);
   };
