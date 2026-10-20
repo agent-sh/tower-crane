@@ -1348,6 +1348,101 @@ setInterval(() => {}, 1000);
   assert.match(stopped.detail.blocked.reason, /timed out after 0\.05 min/);
 });
 
+test('six queued timeout reactions share one rerun, with fresh runs for changed inputs', (t) => {
+  const h = queueFixture(t);
+  h.moveMain();
+  h.ok(['project', 'set', '--tests-timeout-min', '0.05', '--agent', 'orchestrator']);
+  // Only merged-head runs hang; the submitted head's gate still passes.
+  fs.appendFileSync(path.join(h.base, 'suite.js'), `
+if (fs.readFileSync('README.md', 'utf8').includes('Independent base update.')) {
+  console.log('# Subtest: test/slow.test.js');
+  setInterval(() => {}, 1000);
+}
+`);
+  const accept = () => {
+    h.reviewer('T1', 'reviewer');
+    h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review',
+      '--sha', h.sha, '--ok', '--agent', 'reviewer']);
+    h.ok(['accept', 'T1', '--agent', 'orchestrator']);
+  };
+  accept();
+  const run = () => {
+    const r = h.run(['merge', '--accepted', '--agent', 'orchestrator']);
+    assert.equal(r.code, 1, r.stderr || r.stdout);
+    assert.match(r.stdout, /timed out/);
+  };
+  run();
+  const first = headChecks(h).at(-1);
+  assert.equal(first.detail.infrastructure_failure, true);
+  const queued = Array.from({ length: 6 }, () => ({
+    id: `E${require('node:crypto').randomUUID()}`, at: new Date().toISOString(),
+    cmd: 'ci completed', agent: 'orchestrator', task: 'T1',
+    detail: { sha: h.sha, revision: Number(h.revision('T1')) },
+  }));
+  fs.appendFileSync(path.join(h.state, 'events.jsonl'), queued.map((e) => JSON.stringify(e) + '\n').join(''));
+  const before = h.suites().length;
+  h.consume();
+  assert.equal(h.suites().length - before, 1, 'six queued reactions run the suite only once more');
+  assert.equal(headChecks(h).length, 2);
+  const retry = headChecks(h).at(-1);
+  assert.equal(retry.detail.rerun_of, first.id);
+  const shared = h.logs().filter((e) => e.cmd === 'head check shared');
+  assert.ok(shared.length > 0, 'reuse has explicit evidence');
+  assert.ok(shared.every((e) => e.detail.source === retry.id && e.detail.infrastructure_failure));
+  for (const e of queued) {
+    const receipts = h.logs().filter((x) => x.cmd === 'automation' && x.detail.source === e.id);
+    assert.ok(receipts.some((x) => x.detail.phase === 'deferred'),
+      `queued reaction ${e.id}: ${JSON.stringify(receipts.map((x) => x.detail))}`);
+  }
+  h.consume();
+  run();
+  assert.equal(headChecks(h).length, 2, 'later queue passes reuse the timed-out rerun');
+  assert.equal(h.readState('tasks.json').tasks[0].status, 'accepted');
+  assert.equal(h.github().calls.filter((a) => a[1] === 'merge').length, 0);
+
+  const resubmit = (changeHead) => {
+    h.ok(['rework', 'T1', '--reason', 'refresh timeout inputs', '--agent', 'orchestrator']);
+    if (changeHead) {
+      h.git(['switch', '-q', 'fixture-change']);
+      fs.writeFileSync(path.join(h.repo, 'NOTES.md'), 'New head after timeout.\n');
+      h.git(['add', 'NOTES.md']);
+      h.git(['commit', '-qm', 'replace timed out head']);
+      h.sha = h.git(['rev-parse', 'HEAD']);
+      h.git(['switch', '-q', 'main']);
+      const gh = h.github();
+      gh.prs['7'].headRefOid = h.sha;
+      gh.ci[h.sha] = 'success';
+      h.saveGithub(gh);
+    }
+    h.submit();
+    for (const gate of ['tests', 'clean', 'ci']) h.ok(['check', gate, 'T1', '--agent', 'orchestrator']);
+    accept();
+  };
+  const changes = [
+    ['base', () => h.moveMain('README.md', 'Another base update.\n')],
+    ['head', () => resubmit(true)],
+    ['revision', () => resubmit(false)],
+    ['budget', () => h.ok(['project', 'set', '--tests-timeout-min', '0.06', '--agent', 'orchestrator'])],
+    ['command', () => {
+      const cmd = h.readState('project.json').gates.tests_cmd;
+      h.ok(['project', 'set', '--tests-cmd', `${cmd} changed`, '--agent', 'orchestrator']);
+      h.ok(['check', 'tests', 'T1', '--agent', 'orchestrator']);
+    }],
+  ];
+  for (const [name, change] of changes) {
+    const previous = headChecks(h).at(-1).detail;
+    change();
+    const count = headChecks(h).length;
+    run();
+    assert.equal(headChecks(h).length, count + 1, `${name} starts a fresh check`);
+    const fresh = headChecks(h).at(-1).detail;
+    assert.equal(fresh.rerun_of, undefined, `${name} does not reuse the old timeout`);
+    const field = { base: 'base_sha', head: 'sha', revision: 'revision', command: 'command' }[name];
+    if (field) assert.notEqual(fresh[field], previous[field], name);
+    else assert.notEqual(fresh.timeout.minutes, previous.timeout.minutes, name);
+  }
+});
+
 test('a head check that fails after its settings changed checks again under the current settings', (t) => {
   const h = queueFixture(t);
   h.moveMain();
