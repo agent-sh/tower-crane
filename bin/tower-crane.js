@@ -89,7 +89,7 @@ const SETTINGS = {
   'decision-delegation': str('JSON', 'owner only: {"orchestrator_technical": false} keeps technical decisions with the owner; the default is true; null clears'),
   'publish-policy': str('JSON', 'owner-required, set once: {"conditions": [review_clean, full_suite, main_ci_green]} under which the orchestrator publishes without a per-release ask; null clears'),
   'review-policy': str('JSON', 'operational (orchestrator or owner): review diff limits, minimum reviewer rung, churn threshold and canonical model prices; null clears the policy'),
-  governor: str('JSON', 'operational (orchestrator or owner): host governor lines for this project\'s admissions {defer_at, stop_at, psi_memory_defer, psi_memory_stop, psi_cpu_defer, load_defer, others_window_min, expected_mb}; null restores the defaults'),
+  governor: str('JSON', 'operational (orchestrator or owner): host governor lines for this project\'s admissions {defer_at, stop_at, psi_memory_defer, psi_memory_stop, psi_cpu_defer, load_defer, others_window_min, growth_window_min, growth_samples_min, expected_mb}; null restores the defaults'),
   'research-min-sources': int('N', 'owner-required: minimum distinct cited pages for research (default 10)'),
 };
 
