@@ -365,7 +365,7 @@ test('systemd CLI and D-Bus launches use supported OOM policy and retain caps', 
     const command = mode === 'dbus' ? ['--require', fake, ...args]
       : [fake, ...C.scopeArguments(unit, 'test-fence.slice', limits, {
         CPUQuota: '200%', MemoryMax: '1', TasksMax: '999', Slice: 'app.slice',
-        OOMPolicy: 'continue', MemorySwapMax: '9G', Delegate: 'no',
+        OOMPolicy: 'stop', MemorySwapMax: '9G', Delegate: 'no',
       }),
         process.execPath, ...args];
     const result = await G.treeExec(process.execPath, command, {
@@ -378,7 +378,8 @@ test('systemd CLI and D-Bus launches use supported OOM policy and retain caps', 
     assert.equal(registration.group, group);
     assert.equal(fs.readFileSync(path.join(group, 'memory.oom.group'), 'utf8'), '1');
     const properties = JSON.parse(fs.readFileSync(log, 'utf8').trim());
-    assert.equal(properties.OOMPolicy, 'kill');
+    // OOMPolicy=kill would let systemd 255 stop the scope for a nested attempt's OOM.
+    assert.equal(properties.OOMPolicy, 'continue');
     assert.equal(properties.TasksMax, String(limits.tasks_max));
     assert.equal(properties.MemoryMax, String(limits.memory_max_bytes));
     assert.equal(properties.MemorySwapMax, '0');

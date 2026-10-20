@@ -613,9 +613,12 @@ not admission control across activities, sessions or projects.
 On Linux with cgroup v2 and a reachable systemd user manager, a launch uses a
 named transient user scope (registered through D-Bus, or `systemd-run` when
 optional scope properties are set) in the caller's slice with `TasksMax`, `MemoryMax`,
-`MemorySwapMax=0`, `OOMPolicy=kill` and delegated memory/pids controllers.
-`OOMPolicy=kill` sets `memory.oom.group=1`, so a cgroup OOM stops the
-whole attempt.
+`MemorySwapMax=0`, `OOMPolicy=continue` and delegated memory/pids controllers.
+The scope's runner sets `memory.oom.group=1`, so a cgroup OOM stops the
+whole attempt, and the supervisor fails the attempt with `resource-memory-max`
+when the scope's `memory.events.local` reports the OOM. `OOMPolicy=kill` is
+not used: systemd 255 counts an OOM anywhere below a scope as the scope's own
+and stops the whole scope for an OOM in a nested attempt.
 The supervising process remains outside the attempt's scope so it can record a
 failure. The scope's descendants include harness Task/sub-agents, MCP servers,
 shells and tests even when they detach or change process groups. A nested Tower
@@ -645,8 +648,10 @@ scope below does, to delegate it.
 
 A launch cleans up its unit in the user manager and its cache files. After the
 attempt exits, the supervisor waits up to five seconds for its scope to settle
-and resets it if the manager left it failed, as an OOM does; `Result=oom-kill`
-is read before that reset. When a keeper takes over the scope's retained
+and resets it if the manager left it failed; `Result=oom-kill` is read before
+that reset. The manager removes an emptied scope's cgroup at once, so the
+supervisor and a keeper also watch the scope's `memory.events.local` and read
+an OOM when the kernel reports it. When a keeper takes over the scope's retained
 processes, the keeper reads `Result` and settles the scope when it ends, and the
 supervisor leaves the scope alone. Report directories are
 `tower-crane-containment-<supervisor pid>-*` under `XDG_CACHE_HOME` (else
@@ -721,7 +726,7 @@ their real systemd probes inside an independent test scope:
 
 ```sh
 systemd-run --user --scope --slice="$(node -p 'require("./lib/containment").callerSlice()')" \
-  -p TasksMax=200 -p MemoryMax=1G -p MemorySwapMax=0 -p OOMPolicy=kill -p Delegate=yes \
+  -p TasksMax=200 -p MemoryMax=1G -p MemorySwapMax=0 -p OOMPolicy=continue -p Delegate=yes \
   node lib/containment-runner.js '{"tasks_max":200,"memory_max_bytes":1073741824}' '' safety \
   node test/run.js --test-concurrency=1 test/containment.test.js
 ```
