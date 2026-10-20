@@ -13,6 +13,19 @@ const B = require('../lib/broker');
 const harnessHooks = require('../lib/harness-hooks');
 const { resolveCommand, parseOptions, GLOBAL } = require('../bin/tower-crane');
 const { readPublished } = require('./atomic-file');
+const { socketDir } = require('./socket-dir');
+const { assertFits, MAX_SOCKET_PATH } = require('../lib/socket-path');
+
+// This process plays the host monitor; fixture agents still run their own shims.
+// The worker's outer shim would refuse the monitor's index-pack and push.
+const pathKey = Object.keys(process.env).find((key) => key.toUpperCase() === 'PATH') || 'PATH';
+const monitorPath = process.env[pathKey];
+process.env[pathKey] = String(monitorPath || '').split(path.delimiter)
+  .filter((dir) => !require('../lib/agents').agentShims(dir)).join(path.delimiter);
+test.after(() => {
+  if (monitorPath === undefined) delete process.env[pathKey];
+  else process.env[pathKey] = monitorPath;
+});
 
 function scratch(t) {
   fs.mkdirSync(TMP_ROOT, { recursive: true });
@@ -29,6 +42,42 @@ function parse(argv) {
   const r = resolveCommand(argv);
   return parseOptions([...r.lead, ...r.rest], { ...(r.cmd.flags || {}), ...GLOBAL }, r.cmd.name);
 }
+
+test('socket addresses fit the Unix byte limit, including multibyte names', () => {
+  for (const [socket, fits] of [
+    ['s'.repeat(MAX_SOCKET_PATH), true],
+    ['s'.repeat(MAX_SOCKET_PATH + 1), false],
+    ['é'.repeat(51) + 's', true],
+    ['é'.repeat(52), false],
+  ]) {
+    if (fits) assert.equal(assertFits(socket), socket);
+    else assert.throws(() => assertFits(socket), /socket path exceeds 103 bytes/);
+  }
+});
+
+test('short socket directories serve claude, codex and mixed routes with long fixture paths', { skip: process.platform === 'win32' && 'Windows uses a named pipe' }, async (t) => {
+  const s = scratch(t);
+  for (const harnesses of [['claude'], ['codex'], ['claude', 'codex']]) {
+    const granted = socketDir(t);
+    const job = { ...s.job, broker_harnesses: harnesses, agent_socket_dir: granted,
+      agent_tmp: path.join(s.base, 'too-long-'.repeat(20)) };
+    const broker = await B.start(job);
+    try {
+      const { socket } = JSON.parse(fs.readFileSync(job.broker, 'utf8'));
+      if (harnesses.includes('claude')) {
+        assert.equal(socket, path.join(granted, 's'));
+        assert.equal(assertFits(socket), socket);
+        assert.equal(fs.statSync(socket).mode & 0o777, 0o600);
+      } else assert.equal(socket, undefined, 'Codex keeps its TCP transport');
+      assert.equal(fs.statSync(granted).mode & 0o777, 0o700);
+      assert.equal(JSON.parse(fs.readFileSync(path.join(granted, 'owner.json'), 'utf8')).pid, process.pid);
+      assert.equal(await B.dead(job.broker), false, 'the short socket accepts connections');
+    } finally {
+      broker.close();
+    }
+    assert.equal(fs.existsSync(granted), false, 'closing removes the per-run socket directory');
+  }
+});
 
 test('a broker preserves existing directories and writes its ignore file only in a directory it creates', async (t) => {
   const h = makeRepo(t);
@@ -388,8 +437,9 @@ test('a claude broker whose own directory is too deep listens in the agent\'s ow
   assert.equal(fs.existsSync(tmp), true, 'closing keeps the agent\'s temp directory');
 });
 
-test('a claude broker with no short temp directory of its own keeps its socket out of the home, which claude\'s sandbox hides', { skip: process.platform === 'win32' && 'Windows uses a named pipe' }, async (t) => {
+test('a claude broker with no short temp directory of its own uses its explicitly granted socket directory', { skip: process.platform === 'win32' && 'Windows uses a named pipe' }, async (t) => {
   const s = scratch(t);
+  const granted = socketDir(t);
   // The caller's TMPDIR is short and under the home, as ~/.cache/... is in production. The agent's
   // temp directory is a codex rung's, too long for claude's proxy sockets, so a claude fallback has none.
   const caller = path.join(s.base, 'tmp');
@@ -405,12 +455,12 @@ test('a claude broker with no short temp directory of its own keeps its socket o
   });
   const codexTmp = path.join(s.base, 'c'.repeat(80));
   assert.equal(require('../lib/gate-tmp').harnessFits(codexTmp), false);
-  const job = { ...s.job, harness: 'codex', broker_harnesses: ['codex', 'claude'], agent_tmp: codexTmp, broker: path.join(s.base, 'w'.repeat(90), B.FILE) };
+  const job = { ...s.job, harness: 'codex', broker_harnesses: ['codex', 'claude'], agent_tmp: codexTmp, agent_socket_dir: granted, broker: path.join(s.base, 'w'.repeat(90), B.FILE) };
   const broker = await B.start(job);
   t.after(() => broker.close());
   const { socket } = JSON.parse(fs.readFileSync(job.broker, 'utf8'));
-  for (const home of [os.homedir(), os.userInfo().homedir]) assert.ok(!socket.startsWith(home + path.sep), socket);
-  assert.ok(socket.startsWith('/tmp/tower-crane-'), socket);
+  assert.equal(socket, path.join(granted, 's'));
+  assert.equal(assertFits(socket), socket);
   assert.equal(fs.statSync(path.dirname(socket)).mode & 0o777, 0o700);
 });
 
@@ -423,11 +473,11 @@ test('a claude broker refuses to start when no socket path its sandbox reaches c
   });
   const job = { ...s.job, broker_harnesses: ['claude'], broker: path.join(s.base, 'w'.repeat(90), B.FILE) };
   await assert.rejects(B.start(job), /no socket path that the agent's sandbox reaches.*XDG_CACHE_HOME/s);
-  assert.deepEqual(attempted, ['/tmp']);
+  assert.deepEqual(attempted, [os.tmpdir()]);
   assert.equal(fs.existsSync(path.dirname(job.broker)), false, 'the refused start leaves no broker directory');
 });
 
-// A /tmp socket directory as a broker's start makes it, its mkdtemp mocked to plant `s` in its way.
+// A fallback directory as a broker's start makes it, with `s` planted in its way.
 function blockedFallback(t) {
   const made = [];
   const { mkdtempSync: mkdtemp, rmSync: rm } = fs;
@@ -442,14 +492,14 @@ function blockedFallback(t) {
   return made;
 }
 
-test('a broker removes the /tmp socket directory it made when it cannot listen there', { skip: process.platform === 'win32' && 'Windows uses a named pipe' }, async (t) => {
+test('a broker removes the temporary socket directory it made when it cannot listen there', { skip: process.platform === 'win32' && 'Windows uses a named pipe' }, async (t) => {
   const s = scratch(t);
   const made = blockedFallback(t);
   const job = { ...s.job, broker_harnesses: ['claude'], broker: path.join(s.base, 'w'.repeat(90), B.FILE) };
   await assert.rejects(B.start(job), /EADDRINUSE/);
   assert.equal(made.length, 1);
-  assert.ok(made[0].startsWith('/tmp/tower-crane-'), made[0]);
-  assert.equal(fs.existsSync(made[0]), false, 'the failed start leaves no directory in /tmp');
+  assert.equal(path.dirname(made[0]), os.tmpdir());
+  assert.equal(fs.existsSync(made[0]), false, 'the failed start leaves no socket directory');
   assert.equal(fs.existsSync(path.dirname(job.broker)), false, 'nor the broker directory it made');
 });
 
@@ -471,12 +521,16 @@ test('a broker start that cannot listen and cannot clean up reports the listen e
   assert.equal(fs.existsSync(path.dirname(job.broker)), false, 'the other cleanup steps still ran');
 });
 
-test('a broker start sweeps /tmp socket directories of killed brokers and keeps every other one', { skip: (process.platform === 'win32' || typeof process.getuid !== 'function') && 'Windows uses a named pipe' }, async (t) => {
+test('a broker start sweeps temporary socket directories of killed brokers and keeps every other one', { skip: (process.platform === 'win32' || typeof process.getuid !== 'function') && 'Windows uses a named pipe' }, async (t) => {
   const s = scratch(t);
   const net = require('node:net');
   const planted = [];
   const plant = (prefix = 'tower-crane-') => {
-    const dir = fs.mkdtempSync(path.join('/tmp', prefix));
+    const dir = prefix === 'tc-'
+      ? path.join(os.tmpdir(), `tc-${require('node:crypto').randomBytes(6).toString('hex')}`)
+      : fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+    if (prefix === 'tc-') fs.mkdirSync(dir, { mode: 0o700 });
+    assertFits(path.join(dir, 's'));
     planted.push(dir);
     return dir;
   };
@@ -515,7 +569,9 @@ test('a broker start sweeps /tmp socket directories of killed brokers and keeps 
   // Made by this version: the owner record decides, not the socket.
   const ownerGone = age(record(killed(plant()), { pid: deadPid }));
   const ownerGoneUnbound = age(record(plant(), { pid: deadPid }));
+  const shortOwnerGone = age(record(killed(plant('tc-')), { pid: deadPid }));
   const ownerLive = age(record(killed(plant()), { pid: process.pid, ...self }));
+  const shortOwnerLive = age(record(killed(plant('tc-')), { pid: process.pid, ...self }));
   const ownerGoneYoung = age(record(killed(plant()), { pid: deadPid, started: Date.now() }));
   const ownerElsewhere = age(record(killed(plant()), { pid: deadPid, host: `not-${os.hostname()}` }));
   // A record reached through a link is not the broker's: the link is not followed.
@@ -527,16 +583,16 @@ test('a broker start sweeps /tmp socket directories of killed brokers and keeps 
   const reused = process.platform === 'linux' ? [age(record(killed(plant()), { pid: process.pid, host: os.hostname(), start_ticks: '1' }))] : [];
   const broker = await B.start({ ...s.job, broker_harnesses: ['claude'], broker: path.join(s.base, 'brokers', 'worker-T1-1', B.FILE) });
   t.after(() => broker.close());
-  for (const dir of [legacyDead, ownerGone, ownerGoneUnbound, ...reused]) assert.equal(fs.existsSync(dir), false, `a killed broker's ${dir} is swept`);
-  for (const dir of [legacyYoung, live, starting, shared, foreign, ownerLive, ownerGoneYoung, ownerElsewhere, ownerLinked]) assert.equal(fs.existsSync(dir), true, `${dir} stays`);
+  for (const dir of [legacyDead, ownerGone, ownerGoneUnbound, shortOwnerGone, ...reused]) assert.equal(fs.existsSync(dir), false, `a killed broker's ${dir} is swept`);
+  for (const dir of [legacyYoung, live, starting, shared, foreign, ownerLive, shortOwnerLive, ownerGoneYoung, ownerElsewhere, ownerLinked]) assert.equal(fs.existsSync(dir), true, `${dir} stays`);
   assert.ok(fs.lstatSync(path.join(live, 's')).isSocket(), 'the live broker keeps its socket');
   assert.ok(fs.lstatSync(path.join(ownerLive, 's')).isSocket(), 'a live owner keeps a socket that refuses connections');
 });
 
-test('a FIFO planted as an owner record does not block a broker start', { skip: (process.platform === 'win32' || typeof process.getuid !== 'function') && 'Windows has no FIFOs in /tmp' }, (t) => {
+test('a FIFO planted as an owner record does not block a broker start', { skip: (process.platform === 'win32' || typeof process.getuid !== 'function') && 'Windows has no FIFOs' }, (t) => {
   const s = scratch(t);
   const cp = require('node:child_process');
-  const dir = fs.mkdtempSync(path.join('/tmp', 'tower-crane-'));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tower-crane-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const fifo = path.join(dir, 'owner.json');
   const made = cp.spawnSync('mkfifo', [fifo]);
@@ -552,7 +608,7 @@ test('a FIFO planted as an owner record does not block a broker start', { skip: 
   assert.ok(fs.lstatSync(fifo).isFIFO(), 'a record that is not a file is not the broker\'s: the directory stays');
 });
 
-test('a broker that falls back to /tmp names its monitor in an owner record', { skip: process.platform === 'win32' && 'Windows uses a named pipe' }, async (t) => {
+test('a broker that falls back to a temporary socket directory names its monitor in an owner record', { skip: process.platform === 'win32' && 'Windows uses a named pipe' }, async (t) => {
   const s = scratch(t);
   const job = { ...s.job, broker_harnesses: ['claude'], broker: path.join(s.base, 'w'.repeat(90), B.FILE) };
   const before = Date.now();
@@ -1355,7 +1411,7 @@ test('a push gets its answer over a connection that closes when the agent ends i
   // The {need} of every broker release names no framing; each reads frames.
   const { base } = scratch(t);
   const net = require('node:net');
-  const socket = process.platform === 'win32' ? `\\\\.\\pipe\\tower-crane-test-${process.pid}-${Date.now()}` : path.join(base, 's');
+  const socket = process.platform === 'win32' ? `\\\\.\\pipe\\tower-crane-test-${process.pid}-${Date.now()}` : assertFits(path.join(socketDir(t), 's'));
   let got = Buffer.alloc(0);
   let request = null;
   let answered = false;
