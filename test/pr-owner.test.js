@@ -93,7 +93,7 @@ test('an owner idle past its limit exits, and the next failure dispatches a new 
   const release = path.join(h.base, 'release');
   const suite = path.join(h.base, 'tools', 'value-suite.js');
   fs.writeFileSync(suite, `const fs = require('node:fs');
-const end = Date.now() + 60000;
+const end = Date.now() + 60000; // wait-allow: the test writes the release once the owner exited; the minute only ends a fixture whose test failed
 const poll = () => (fs.existsSync(${JSON.stringify(release)}) || Date.now() >= end ? finish() : setTimeout(poll, 50)); // wait-allow: probe cadence only; the release file and the minute bound it
 const finish = () => {
   if (fs.readFileSync('value.js', 'utf8').includes('1')) {

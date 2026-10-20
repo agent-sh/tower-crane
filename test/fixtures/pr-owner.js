@@ -54,7 +54,7 @@ if (role === 'reviewer') {
     }
     let outcome;
     do {
-      const r = run(['wait', '--own', '--task', task, '--timeout', '60', '--json']);
+      const r = run(['wait', '--own', '--task', task, '--timeout', '60', '--json']); // wait-allow: a timed-out wait --own repeats, as the worker skill says; it is no deadline
       if (![0, 2].includes(r.status)) throw new Error(`wait --own exited ${r.status}: ${r.stderr}`);
       outcome = JSON.parse(r.stdout);
       fs.appendFileSync(process.env.OWNER_LOG, `${JSON.stringify({ agent: process.env.TOWER_CRANE_AGENT, ...outcome })}\n`);
