@@ -91,4 +91,24 @@ function fakeExec(handler) {
   return { exec, calls };
 }
 
-module.exports = { scratch, isolateGit, isolateUserFile, git, commit, initRepo, worktrees, quote, result, fakeExec };
+// A node:test file whose test starts a child that ends itself with SIGSEGV on its first `times`
+// runs, counted in `marker`. It writes `report` first, as apport would. RLIMIT_CORE 1 keeps the
+// kernel from piping the deliberate crash to apport, so no real crash report is left behind.
+function nativeCrashTest({ marker, times = 1, report = null, ordinary = false }) {
+  return `const test = require('node:test');
+const fs = require('node:fs');
+const cp = require('node:child_process');
+const marker = ${JSON.stringify(marker)};
+test('child crashes natively', () => {
+  // read-published: only this test writes the marker, and runs are sequential.
+  const runs = fs.existsSync(marker) ? fs.readFileSync(marker, 'utf8').length : 0;
+  fs.appendFileSync(marker, 'x');
+  if (runs >= ${times}) return;
+  ${report ? `fs.writeFileSync(${JSON.stringify(report)}, 'ProblemType: Crash\\n');` : ''}
+  cp.execFileSync('sh', ['-c', 'ulimit -c 1; exec "$0" -e "process.kill(process.pid, \\'SIGSEGV\\')"', process.execPath]);
+});
+${ordinary ? "test('ordinary failure', () => { throw new Error('plain assertion'); });" : ''}
+`;
+}
+
+module.exports = { scratch, isolateGit, isolateUserFile, git, commit, initRepo, worktrees, quote, result, fakeExec, nativeCrashTest };

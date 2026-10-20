@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
 const gate = require('../../lib/gates/tests');
-const { scratch, isolateGit, isolateUserFile, git, commit, initRepo, worktrees, quote } = require('./helpers');
+const { scratch, isolateGit, isolateUserFile, git, commit, initRepo, worktrees, quote, nativeCrashTest } = require('./helpers');
 const { detachedAlive } = require('../helpers');
 const { shellQuote, treeExec, withWorktree, createRedactor, redactJoined } = require('../../lib/gates/common');
 const { waitUntil, killPid } = require('../signals');
@@ -543,6 +543,44 @@ test('a file the task added is removed for the run without the change', async ()
   const r = await gate.run(ctx(sha));
   assert.equal(r.ok, true, r.summary);
   assertCleanedUp();
+});
+
+test('a native child crash reruns only the failing file once: a one-off passes with a native_crash note, a repeat or mixed failure fails', { skip: process.platform === 'win32' && 'POSIX signals' }, async () => {
+  const crashDir = path.join(tmp, 'crash-reports');
+  fs.mkdirSync(crashDir);
+  // An older node report is from another crash and is not named.
+  const stale = path.join(crashDir, '_old_bin_node.1000.crash');
+  fs.writeFileSync(stale, 'ProblemType: Crash\n');
+  fs.utimesSync(stale, new Date(Date.now() - 3600000), new Date(Date.now() - 3600000));
+  const spec = `${NODE} --test --test-reporter=spec`;
+  const project = { gates: { tests_cmd: `${spec} test/counted.test.js test/crash.test.js`, tests_proof_cmd: `${spec} {tests}` } };
+  for (const [name, options, want] of [
+    ['one-off', { times: 1, report: true }, { ok: true, crashes: 1, runs: 2, note: /Reran test\/crash\.test\.js once in the same checkout: exit 0/ }],
+    ['every time', { times: Infinity }, { ok: false, crashes: 2, runs: 2, note: /Reran test\/crash\.test\.js once in the same checkout: exit 1, native crash again: .*the failure stands/ }],
+    ['beside an ordinary failure', { times: 1, ordinary: true }, { ok: false, crashes: 1, runs: 1, note: /Other tests in the run failed without one, so it was not rerun/ }],
+  ]) {
+    const marker = path.join(tmp, `crash-${branches}`);
+    const counted = path.join(tmp, `counted-${branches}`);
+    const report = options.report ? path.join(crashDir, `_fixture_${branches}_bin_node.1000.crash`) : null;
+    const sha = task({
+      'test/crash.test.js': nativeCrashTest({ marker, ...options, report }),
+      'test/counted.test.js': `require('fs').appendFileSync(${JSON.stringify(counted)}, 'x');\n`,
+    });
+    const r = await gate.run({ ...ctx(sha, { args: { cmd: project.gates.tests_cmd }, project }), crashDir });
+    assert.equal(r.ok, want.ok, `${name}: ${r.summary}`);
+    assert.match(r.summary, want.note, name);
+    assert.equal(r.native_crash.length, want.crashes, name);
+    for (const crash of r.native_crash) {
+      assert.equal(crash.test, 'child crashes natively', name);
+      assert.equal(crash.signal, 'SIGSEGV', name);
+      assert.ok(Number.isInteger(crash.pid), name);
+      assert.equal(crash.crash_file, report ?? undefined, name);
+    }
+    assert.equal(readPublished(marker, 'utf8').length, want.runs, `${name}: crash test runs`);
+    assert.equal(readPublished(counted, 'utf8').length, 1, `${name}: the passing file is not rerun`);
+    assert.equal(!!r.confirmed_failure, !want.ok, name);
+    assertCleanedUp();
+  }
 });
 
 test('a code task that changes no test: not ok', async () => {
