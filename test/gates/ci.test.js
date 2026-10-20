@@ -911,3 +911,34 @@ test('workflow supersession cannot exclude a suite from another app', async () =
   assert.equal(r.ok, false, r.summary);
   assert.match(r.summary, /check suites not green: external-ci \(failure/);
 });
+
+test('a dispatched run at the PR head never counts for or against the PR checks', async () => {
+  const required = { ci: { required: ['checks (shared files)'] } };
+  const pull = { id: 100, check_suite_id: 1, path: '.github/workflows/ci.yml', event: 'pull_request', head_sha: SHA, created_at: '2026-10-11T10:00:00Z' };
+  const manual = { ...pull, id: 200, check_suite_id: 2, event: 'workflow_dispatch', created_at: '2026-10-11T11:00:00Z' };
+  // The dispatched run's PR-only job skips, after the PR's run of it; its full matrix fails and runs.
+  const dispatched = [
+    { ...run('checks (shared files)', 'skipped'), id: 21, started_at: '2026-10-11T11:00:00Z', suite: 2 },
+    { ...run('test (ubuntu-latest, node 26, shard 1/3)', 'failure'), id: 22, suite: 2 },
+    { ...run('repeat (windows-latest, node 26)', null, 'in_progress'), id: 23, suite: 2 },
+  ];
+  const cases = [
+    ['green PR run', [{ ...run('checks (shared files)'), id: 11, started_at: '2026-10-11T10:00:00Z', suite: 1 }], 'success', true, /CI green/],
+    ['failing PR run', [{ ...run('checks (shared files)', 'failure'), id: 11, started_at: '2026-10-11T10:00:00Z', suite: 1 }], 'failure', false, /required check runs not successful: checks \(shared files\) \(failure\)/],
+    ['PR run not started', [], null, false, /missing required check runs \(ci\.required\): checks \(shared files\)/],
+  ];
+  for (const [label, prRuns, prSuite, ok, summary] of cases) {
+    const suites = [...(prSuite ? [{ ...suite('github-actions', prSuite), id: 1 }] : []), { ...suite('github-actions', null, 'in_progress', 3), id: 2 }];
+    const gh = github({ runs: [...prRuns, ...dispatched], suites, workflows: prSuite ? [pull, manual] : [manual] });
+    const r = await gate.run(ctx(gh, { pr: 42 }, required));
+    assert.equal(r.ok, ok, `${label}: ${r.summary}`);
+    assert.match(r.summary, summary, label);
+    assert.match(r.summary, /Not PR checks, set aside: \.github\/workflows\/ci\.yml \(workflow_dispatch, run 200\)/, label);
+    assert.doesNotMatch(r.summary, /shard 1\/3|repeat/, `${label}: the dispatched jobs are not judged`);
+    const exec = (cmd, args) => (args[1] === `repos/${REPO}/pulls/42/comments?per_page=100` ? result('') : gh.exec(cmd, args));
+    const report = await gate.submitReport({ ...ctx(gh), exec }, { repo: REPO, ...required }, { sha: SHA, pr: 42, taskId: 'T3' });
+    assert.equal(!!report.refusal, label === 'failing PR run', `${label}: ${report.refusal}`);
+    assert.equal(report.pending?.length ?? 0, label === 'PR run not started' ? 1 : 0, `${label}: ${report.report}`);
+    assert.match(report.report + (report.refusal || ''), /set aside|failing: checks \(shared files\)/, label);
+  }
+});
