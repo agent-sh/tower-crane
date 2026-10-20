@@ -7,8 +7,27 @@ const path = require('node:path');
 const { setup, upper, resubmit } = require('./stack-fixture');
 const { fakeAgentEnv } = require('./helpers');
 const Stack = require('../lib/stack');
+const Check = require('../lib/check');
 
 const events = (f) => fs.readFileSync(path.join(f.h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+
+test('acceptance and review parent snapshots detect a newer submission at application', () => {
+  for (const operation of ['accept', 'review']) {
+    for (const change of ['unchanged', 'claim', 'sha', 'parent', 'missing sha']) {
+      const dep = { id: 'T1', sha: 'a'.repeat(40), revision: 1, status: 'submitted', evidence: [] };
+      const other = { ...dep, id: 'T3', sha: 'b'.repeat(40), evidence: [] };
+      const child = { id: 'T2', stack: { parent: 'T1' } };
+      const st = { tasks: { tasks: [dep, child, other] }, events: [] };
+      const expected = Check.parentHeadInputs(st, child);
+      if (change === 'claim') dep.status = 'in_progress';
+      if (change === 'sha') dep.sha = 'c'.repeat(40);
+      if (change === 'parent') child.stack.parent = 'T3';
+      if (change === 'missing sha') dep.sha = null;
+      if (['unchanged', 'claim'].includes(change)) Check.validateParentHead(st, child, expected, operation);
+      else assert.throws(() => Check.validateParentHead(st, child, expected, operation), /parent head changed/);
+    }
+  }
+});
 
 test('parent refresh eligibility preserves lifecycle validation', () => {
   const old = 'a'.repeat(40);
@@ -62,6 +81,73 @@ fs.writeFileSync(${JSON.stringify(receipt)}, JSON.stringify({
     '--env', JSON.stringify(fakeAgentEnv({ NODE_OPTIONS: f.h.env.NODE_OPTIONS })),
     '--command', JSON.stringify([process.execPath, script, '{prompt}'])]);
   return () => JSON.parse(fs.readFileSync(receipt, 'utf8'));
+}
+
+function reviewProbe(f) {
+  const script = path.join(f.h.base, 'review-probe.js');
+  fs.writeFileSync(script, 'process.exit(0);\n');
+  for (const rung of ['easy', 'medium', 'hard', 'research', 'review']) {
+    f.h.ok(['ladder', 'set', rung, '--harness', 'command', '--clear', 'model', '--clear', 'profile', '--clear', 'effort',
+      '--env', JSON.stringify(fakeAgentEnv({ NODE_OPTIONS: f.h.env.NODE_OPTIONS })),
+      '--command', JSON.stringify([process.execPath, script, '{prompt}'])]);
+  }
+}
+
+for (const entry of ['waived accept', 'accept review', 'review dry-run', 'review spawn', 'unlinked review', 'automatic accept', 'automatic review']) {
+  for (const stale of [false, true]) {
+    test(`${entry} ${stale ? 'refuses stale' : 'allows current'} stacked child after cached software gates`, (t) => {
+      const f = setup(t);
+      const top = upper(f);
+      if (entry === 'unlinked review') f.h.ok(['stack', 'unstack', 'T2']);
+      f.h.ok(['check', 'ci', 'T2']);
+      reviewProbe(f);
+      Object.assign(f.h.env, {
+        USERPROFILE: f.h.env.HOME, CLAUDE_CONFIG_DIR: path.join(f.h.env.HOME, '.claude'),
+        CODEX_HOME: path.join(f.h.env.HOME, '.codex'), GH_CONFIG_DIR: path.join(f.h.env.HOME, '.config', 'gh'),
+        XDG_CONFIG_HOME: path.join(f.h.env.HOME, '.config'), XDG_DATA_HOME: path.join(f.h.env.HOME, '.local', 'share'),
+      });
+      if (entry === 'automatic accept') f.h.ok(['evidence', 'T2', '--type', 'review', '--ok', '--sha', top.sha, '--revision', '1']);
+      if (entry === 'automatic review') {
+        // A native submission needs an exited worker receipt for automatic review.
+        const at = new Date().toISOString();
+        const detail = { agent: 'worker-T2', role: 'worker', sha: top.sha, revision: 1, pid: 999999, attempt: 1 };
+        fs.appendFileSync(path.join(f.h.state, 'events.jsonl'), [
+          { at, agent: 'orchestrator', cmd: 'spawn', task: 'T2', detail },
+          { at, agent: 'orchestrator', cmd: 'spawn exit', task: 'T2', detail: { agent: detail.agent, pid: detail.pid, attempt: 1, code: 0 } },
+        ].map((e) => `${JSON.stringify(e)}\n`).join(''));
+      }
+      const parent = stale ? resubmit(f, false) : f.sha;
+      const before = events(f).filter((e) => e.cmd === 'spawn' && e.task === 'T2' && e.detail.role === 'reviewer').length;
+      let result;
+      if (entry.startsWith('automatic')) {
+        if (entry === 'automatic accept') f.h.ok(['project', 'set', '--paused', 'review acceptance probe']);
+        result = f.h.run(['wait', '--task', 'T2', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator']);
+      } else if (entry.startsWith('review') || entry === 'unlinked review') {
+        result = f.h.run(['spawn', '--task', 'T2', '--role', 'review',
+          ...(entry === 'review dry-run' ? ['--dry-run'] : ['--wait']), '--json']);
+      } else {
+        result = f.h.run(['accept', 'T2', '--json',
+          ...(entry === 'waived accept' ? ['--waive', 'review', '--reason', 'offline fixture'] : [])]);
+      }
+      const task = f.h.json(['task', 'show', 'T2']);
+      const reviewers = events(f).filter((e) => e.cmd === 'spawn' && e.task === 'T2' && e.detail.role === 'reviewer');
+      if (stale) {
+        assert.notEqual(task.status, 'accepted', result.stdout + result.stderr);
+        assert.equal(reviewers.length, before, 'no reviewer starts at the old head');
+        if (!entry.startsWith('automatic')) {
+          assert.equal(result.code, 1, result.stdout + result.stderr);
+          assert.match(result.stderr, new RegExp(`containing T1 at ${parent}`));
+        }
+        assert.equal(task.sha, top.sha, 'refresh still requires a new child submission');
+      } else if (entry === 'waived accept' || entry === 'automatic accept') {
+        assert.equal(task.status, 'accepted', result.stdout + result.stderr);
+      } else if (entry === 'automatic review') {
+        assert.equal(reviewers.length, before + 1, result.stdout + result.stderr);
+      } else {
+        assert.equal(result.code, 0, result.stdout + result.stderr);
+      }
+    });
+  }
 }
 
 function child(f, submitted, conflict) {

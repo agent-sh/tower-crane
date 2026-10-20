@@ -2,8 +2,9 @@
 
 Tasks may carry `stack: { parent, base, parent_sha, repo, linked, synced_base }`. `parent` is the lower task id, `base` is the PR's current target branch, `parent_sha` is the dependency head used for dispatch or the last synchronization, `repo` is the same GitHub repository as the project, and `synced_base` is the last observed main commit. `linked` records successful `gh stack link`. One unmerged dependency chain forms one stack; outstanding sibling branches are not appended to that chain.
 
-Before worker dispatch or a gate, a child whose parent has resubmitted refreshes
-under the worktree lock, whether its stack is linked or still prepared. The
+Before worker or reviewer dispatch, acceptance, or a software gate, a child
+whose parent has resubmitted refreshes under the worktree lock, whether its
+stack is linked or still prepared. The
 engine merges the verified submitted parent head into a child with its own
 commits in a detached scratch worktree,
 with commit subject `Merge <parent>'s resubmitted head into <child>`. A clean
@@ -36,7 +37,11 @@ worker dispatches to resolve them. The `stack sync` conflict receipt permits
 that dispatch only while the child head and submitted parent head are unchanged.
 A gate waits until the child's submitted head contains the latest submitted
 parent head. Gate freshness uses that head across parent rework and active
-claims. Dispatch and merge still apply their lifecycle checks.
+claims. Dispatch and merge still apply their lifecycle checks. Acceptance
+checks freshness before reusing gate receipts, and reviewer dispatch checks
+it before starting a model. A dry-run
+review checks ancestry without publishing. Acceptance and reviewer startup
+compare the parent inputs again in their final state transactions.
 Live workers, dirty checkouts and stopped Git operations defer refresh. Merged
 parents take the completed-chain retirement path before any parent branch fetch.
 Refresh only merges a newer submitted or accepted head from an unmerged parent
