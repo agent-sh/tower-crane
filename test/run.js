@@ -116,14 +116,12 @@ if (skipped.length) console.error(`tower-crane: skipped host-only tests in this 
 // TC_TEST_SHARD_LOG_DIR also keeps those lines in progress.log, beside the watchdog's
 // watchdog.log, for CI to upload when the job log is lost.
 const logDir = process.env.TC_TEST_SHARD_LOG_DIR ? path.resolve(process.env.TC_TEST_SHARD_LOG_DIR) : null;
+if (logDir) fs.mkdirSync(logDir, { recursive: true });
 if (shard && !flags.some((flag) => flag.startsWith('--test-reporter'))) {
   // A file URL: Windows reads an absolute path here as a URL with its drive as the scheme.
   const progress = `--test-reporter=${require('node:url').pathToFileURL(path.join(__dirname, 'file-progress.js')).href}`;
   args.unshift('--test-reporter=spec', '--test-reporter-destination=stdout', progress, '--test-reporter-destination=stdout');
-  if (logDir) {
-    fs.mkdirSync(logDir, { recursive: true });
-    args.unshift(progress, `--test-reporter-destination=${path.join(logDir, 'progress.log')}`);
-  }
+  if (logDir) args.unshift(progress, `--test-reporter-destination=${path.join(logDir, 'progress.log')}`);
 }
 args.push(...run);
 
