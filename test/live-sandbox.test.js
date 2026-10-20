@@ -244,8 +244,9 @@ function engineCheckout(h) {
   return { checkout, retire, spawn };
 }
 
-const showProbe = (out) => `const cp=require("child_process"),fs=require("fs");const r=cp.spawnSync("tower-crane",["task","show","T1","--json"],{encoding:"utf8"});`
-  + `fs.writeFileSync(${JSON.stringify(out)},JSON.stringify({code:r.status,stdout:r.stdout,stderr:r.stderr,error:r.error&&r.error.code}))`;
+// A block, so a script that already declares cp or fs can end with it.
+const showProbe = (out) => `{const cp=require("child_process"),fs=require("fs");const r=cp.spawnSync("tower-crane",["task","show","T1","--json"],{encoding:"utf8"});`
+  + `fs.writeFileSync(${JSON.stringify(out)},JSON.stringify({code:r.status,stdout:r.stdout,stderr:r.stderr,error:r.error&&r.error.code}))}`;
 
 function assertShown(h, out) {
   assert.ok(fs.existsSync(out), `the probe ran\n${agentLog(h)}`);
