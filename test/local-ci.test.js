@@ -1788,6 +1788,68 @@ test('receipt JSON redaction covers escaped strings, nesting, keys and processin
   assert.equal(receiptText(`plain ${token}`, redact).body, 'plain [redacted:TOKEN]');
 });
 
+test('malformed JSON and JSONL receipt tables keep only omission notices on failure and success', (t) => {
+  const h = fixture(t, `
+const fs = require('node:fs');
+const token = process.env.CI_FIXTURE_TOKEN;
+const encoded = Array.from(token, char => '\\\\u' + char.charCodeAt(0).toString(16).padStart(4, '0')).join('');
+const body = JSON.stringify({ output: token }).replaceAll(token, encoded);
+fs.mkdirSync('.local/checks', { recursive: true });
+for (const [name, content] of [
+  ['01-missing-brace', body.slice(0, -1)], ['02-jsonl', body + '\\n' + body],
+  ['03-open-string', body.slice(0, -2)], ['04-array', '[' + body],
+  ['05-string', '"' + encoded], ['06-prefixed', 'Receipt: ' + body.slice(0, -1)],
+  ['07-bom', '\\uFEFF' + body.slice(0, -1)]
+]) fs.writeFileSync('.local/checks/' + name + '.json', content);
+fs.writeFileSync('.local/checks/08-utf16le.json', Buffer.from(body.slice(0, -1), 'utf16le'));
+fs.writeFileSync('.local/checks/09-utf16be.json', Buffer.from(body + '\\n' + body, 'utf16le').swap16());
+fs.writeFileSync('.local/checks/10-cut-utf16le.json', Buffer.from(body, 'utf16le').subarray(0, -1));
+fs.writeFileSync('.local/checks/11-cut-utf16be.json', Buffer.from(body, 'utf16le').swap16().subarray(0, -1));
+fs.writeFileSync('.local/checks/12-invalid-utf8.json', Buffer.concat([Buffer.from(body), Buffer.from([0xff])]));
+fs.writeFileSync(process.argv[2], JSON.stringify({ cwd: process.cwd() }));
+process.exit(process.argv.includes('--fail') ? 1 : 0);
+`);
+  const token = 'ghp_T448MalformedCredential01234567890123456789';
+  h.env.CI_FIXTURE_TOKEN = token;
+  for (const failed of [true, false]) {
+    h.ok(['project', 'set', '--ci-local', JSON.stringify({
+      command: [...h.command, ...(failed ? ['--fail'] : [])], timeout: 5, receipts: ['.local/checks/*.json'],
+    })]);
+    const r = h.run(['check', 'ci', 'T1']);
+    assert.equal(r.code, failed ? 1 : 0, r.stdout + r.stderr);
+    const e = h.readState('tasks.json').tasks[0].evidence.at(-1);
+    assert.equal(e.local_ci.receipts.length, 12);
+    for (const copy of e.local_ci.receipts) {
+      const text = fs.readFileSync(path.join(h.state, copy.path), 'utf8');
+      assert.match(text, /^\[unscannable JSON receipt: .*content omitted\]$/, copy.from);
+      assert.ok(!text.includes('\\u'), copy.from);
+      assert.equal(copy.redacted, true);
+      if (failed) assert.ok(e.summary.includes(copy.path), e.summary);
+    }
+    assert.ok(!JSON.stringify(e).includes(token));
+    assert.ok(!fs.existsSync(JSON.parse(fs.readFileSync(h.log, 'utf8')).cwd));
+  }
+});
+
+test('malformed JSON-like receipt variants fail closed while ordinary text keeps its redaction', () => {
+  const { receiptText } = require('../lib/gates/local-ci');
+  const { createRedactor } = require('../lib/gates/common');
+  const token = 'ghp_T448MalformedTableCredential01234567890123456';
+  const redact = createRedactor([['TOKEN', token]]);
+  const body = JSON.stringify({ output: token.slice(0, 4) + '\u001b[31m' + token.slice(4) });
+  for (const text of [
+    body.slice(0, -1), body + '\n' + body, body.slice(0, -2), '[' + body,
+    '\uFEFF' + body.slice(0, -1), '"\\u0067hp_', 'Receipt: ' + body.slice(0, -1),
+  ]) {
+    const result = receiptText(text, redact);
+    assert.match(result.body, /^\[unscannable JSON receipt: .*content omitted\]$/);
+    assert.equal(result.redacted, true);
+  }
+  assert.equal(receiptText('bad JSON', redact).body, 'bad JSON');
+  assert.equal(receiptText('plain "words"', redact).body, 'plain "words"');
+  assert.equal(receiptText(`plain ${token}`, redact).body, 'plain [redacted:TOKEN]');
+});
+
 test('local CI receipt diagnosis reads failed steps and run-state reasons and tolerates other formats', () => {
   const { receiptFailures } = require('../lib/gates/local-ci');
   for (const [body, names] of [
