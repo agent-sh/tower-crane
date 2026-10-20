@@ -64,7 +64,7 @@ const SETTINGS = {
   standards: str('S', '"default" or a path to a standards Markdown file'),
   'tests-cmd': str('CMD', 'operational (orchestrator or owner): pin the test command; null clears it'),
   'clean-cmd': str('CMD', 'operational (orchestrator or owner): pin the cleanup command prefix; null clears it'),
-  'clean-paths': str('JSON', 'owner-required: absolute or ~/ tool dependency paths bound read-only in worker sandboxes; [] or null clears them'),
+  'clean-paths': str('JSON', 'operational (orchestrator or owner): absolute or ~/ tool dependency paths bound read-only in worker sandboxes; [] or null clears them'),
   'tests-proof-cmd': str('CMD', 'operational (orchestrator or owner): pin the scoped proof template with {tests}; null clears it'),
   executors: int('N', 'operational (orchestrator or owner): automation executors running gates at once on this host (default 2)'),
   'tests-timeout-min': str('MIN', 'operational (orchestrator or owner): positive minutes per test command (default 20); null restores default'),

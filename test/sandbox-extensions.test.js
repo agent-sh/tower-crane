@@ -66,9 +66,13 @@ for (const harness of ['codex', 'claude']) {
     fs.mkdirSync(dependencies);
     const clean = path.join(tools, 'clean.sh');
     const proof = path.join(tools, 'proof.js');
+    const secrets = path.join(h.env.HOME, '.ssh');
+    const credential = path.join(secrets, 'fixture-key');
+    fs.mkdirSync(secrets);
+    fs.writeFileSync(credential, 'fixture secret', { mode: 0o600 });
     fs.writeFileSync(clean, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
     fs.writeFileSync(proof, '');
-    h.ok(['project', 'set', '--clean-cmd', `"${clean}"`, '--tests-proof-cmd', `node "${proof}" {tests}`,
+    h.ok(['project', 'set', '--clean-cmd', `"${clean}" "${credential}"`, '--tests-proof-cmd', `node "${proof}" "${credential}" {tests}`,
       '--clean-paths', JSON.stringify([dependencies])]);
     const config = path.join(h.base, 'gate-profile');
     const bin = path.join(h.base, 'bin');
@@ -91,6 +95,10 @@ fs.copyFileSync(path.join(dir, ${JSON.stringify(harness === 'codex' ? 'config.to
       h.ok(['spawn', '--task', 'T1', '--wait'], { env: { ...h.env, PATH: `${bin}${path.delimiter}${process.env.PATH}` } });
     }
     const raw = fs.readFileSync(config, 'utf8');
+    for (const file of [credential, secrets].map(p => fs.realpathSync(p))) {
+      if (harness === 'codex') assert.equal(TOML.parse(raw).permissions['tower-crane'].filesystem[file], undefined, file);
+      else assert.ok(!JSON.parse(raw).sandbox.filesystem.allowRead.includes(file), file);
+    }
     for (const file of [clean, proof, tools, dependencies].map(p => fs.realpathSync(p))) {
       if (harness === 'codex') assert.equal(TOML.parse(raw).permissions['tower-crane'].filesystem[file], 'read', file);
       else {

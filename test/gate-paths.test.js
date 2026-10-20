@@ -38,7 +38,42 @@ test('external gate files and directories are resolved while worktree files stay
   assert.throws(() => G.reads({ gates: { clean_paths: [path.join(h.base, 'missing')] } }, h.repo, h.env.HOME), /not a readable file/);
 });
 
-test('clean_paths CLI stores, prints and clears paths, and only the owner can grant them', (t) => {
+test('gate command data arguments do not expose credential directories', (t) => {
+  const h = makeRepo(t);
+  const tools = path.join(h.base, 'tools');
+  fs.mkdirSync(tools);
+  const wrapper = path.join(tools, 'clean.sh');
+  const script = path.join(tools, 'proof.js');
+  fs.writeFileSync(wrapper, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  fs.writeFileSync(script, '');
+  for (const dir of ['.ssh', '.aws', '.config/gh']) {
+    const secretDir = path.join(h.env.HOME, dir);
+    fs.mkdirSync(secretDir, { recursive: true });
+    const secret = path.join(secretDir, 'credential');
+    fs.writeFileSync(secret, 'fixture secret', { mode: 0o600 });
+    const alias = path.join(tools, `${path.basename(dir)}-credential`);
+    if (process.platform !== 'win32') fs.symlinkSync(secret, alias);
+    for (const key of ['clean_cmd', 'tests_proof_cmd']) {
+      for (const [command, expected] of [
+        [`cat "${secret}" {tests}`, []],
+        [`"${secret}"`, []],
+        [`"${wrapper}" "${secret}"`, [wrapper, tools]],
+        [`node "${script}" "${secret}"`, [script, tools]],
+        [`node -e "${secret}"`, []],
+        ...(process.platform === 'win32' ? [] : [
+          [`cat "${alias}" {tests}`, []],
+          [`"${alias}"`, []],
+          [`node "${script}" "${alias}"`, [script, tools]],
+        ]),
+      ]) {
+        assert.deepEqual(new Set(G.reads({ gates: { [key]: command } }, h.repo, h.env.HOME)),
+          new Set(expected), `${key}: ${dir}: ${command}`);
+      }
+    }
+  }
+});
+
+test('clean_paths CLI stores, prints and clears paths under operational authority', (t) => {
   const h = makeRepo(t);
   h.init(['--clean-paths', '["~/tools"]']);
   assert.deepEqual(h.json(['project', 'show']).gates.clean_paths, ['~/tools']);
@@ -46,10 +81,11 @@ test('clean_paths CLI stores, prints and clears paths, and only the owner can gr
   h.ok(['project', 'set', '--clean-paths', JSON.stringify(list)]);
   assert.match(h.ok(['project', 'show']), /gates\.clean_paths:/);
   assert.deepEqual(h.json(['project', 'show']).gates.clean_paths, list);
-  for (const agent of ['orchestrator', 'worker-T1-1']) {
-    const r = h.run(['project', 'set', '--clean-paths', 'null', '--agent', agent]);
-    assert.equal(r.code, 1);
-    assert.match(r.stderr, /owner-required|only the owner/);
+  for (const value of [JSON.stringify(list), '[]', 'null']) {
+    h.ok(['project', 'set', '--clean-paths', value, '--agent', 'orchestrator']);
+    const r = h.run(['project', 'set', '--clean-paths', value, '--agent', 'worker-T1-1']);
+    assert.equal(r.code, 1, value);
+    assert.match(r.stderr, /only the orchestrator or the owner/);
   }
   for (const value of ['{}', '[1]', '["relative"]', '["/tool\\u0000"]']) {
     const before = h.readState('project.json');
