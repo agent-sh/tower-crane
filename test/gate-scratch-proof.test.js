@@ -21,6 +21,11 @@ fs.mkdtempSync(path.join(os.tmpdir(), 'tower-crane-unremoved-'));
 if (process.env.PROOF_LEAK === '1') {
   fs.mkdirSync(path.resolve(process.env.TOWER_CRANE_TMP, '../outer/escaped'));
 }
+if (process.env.PROOF_ROOT_ENTRY) {
+  const entry = path.join(process.env.TOWER_CRANE_TMP, process.env.PROOF_ROOT_ENTRY);
+  fs.mkdirSync(path.dirname(entry), { recursive: true });
+  fs.writeFileSync(entry, '{}');
+}
 if (process.env.PROOF_FAIL === '1') process.exit(7);
 `);
     h.git(['add', 'scratch.js']);
@@ -65,6 +70,21 @@ test('the gate proof rejects a command that writes into the caller temp root', (
   assert.equal(result.exit, 0);
   assert.equal(result.ok, false);
   assert.deepEqual(result.outer_after, ['escaped']);
+});
+
+test('the gate proof keeps the documented base rerun cache apart from gate scratch it fails on', (t) => {
+  const h = fixture(t);
+  const cache = path.join('tests-base-cache', 'repository', 'result.json');
+  for (const [entry, ok, scratch, kept] of [
+    [cache, true, [], ['tests-base-cache', path.dirname(cache), cache]],
+    [path.join('tower-crane-stray', 'host'), false, ['tower-crane-stray', path.join('tower-crane-stray', 'host')], []],
+  ]) {
+    const result = probe({ root: h.repo, cache: path.join(h.base, `probe-${ok}`), command: 'node scratch.js',
+      environment: { ...h.env, PROOF_ROOT_ENTRY: entry } });
+    assert.equal(result.cleanup_ok, ok, entry);
+    assert.deepEqual(result.gate_root_after, scratch, entry);
+    assert.deepEqual(result.base_cache_after, kept, entry);
+  }
 });
 
 test('the gate proof retains a failing gate result even when cleanup succeeds', (t) => {

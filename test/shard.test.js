@@ -4,7 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('node:path');
 const cp = require('node:child_process');
-const { ROOT } = require('./helpers');
+const { ROOT, makeRepo } = require('./helpers');
 const { HUNG_TEST_MS } = require('./signals');
 const { testFiles, shardFiles, fileDurations } = require('./run');
 const { declarations, fileTimes, mergeTable } = require('../scripts/test-durations');
@@ -108,9 +108,12 @@ test('TC_TEST_SHARD makes the runner run only the files of the shard it names', 
   assert.match(invalid.stderr, /TC_TEST_SHARD requires INDEX\/TOTAL/);
 });
 
-test('a shard logs each file as it starts and ends, and past its deadline prints what still runs, stops it and fails', () => {
+test('a shard logs each file as it starts and ends, and past its deadline prints what still runs, stops it and fails', (t) => {
+  // The deadline stops the nested run before its global teardown, so its seed lives in this test's fixture.
+  const h = makeRepo(t);
   const run = (files, extra) => cp.spawnSync(process.execPath, [path.join(ROOT, 'test', 'run.js'), ...files], {
-    cwd: ROOT, encoding: 'utf8', timeout: HUNG_TEST_MS, env: { ...process.env, TC_TEST_SHARD: '1/1', ...extra },
+    cwd: ROOT, encoding: 'utf8', timeout: HUNG_TEST_MS,
+    env: { ...process.env, TOWER_CRANE_TEST_TMP: h.base, TC_TEST_SHARD: '1/1', ...extra },
   });
   const done = run([FIXTURES[0]], {});
   assert.equal(done.status, 0, done.stderr);

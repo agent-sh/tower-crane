@@ -18,6 +18,12 @@ function contents(root) {
   return fs.readdirSync(root, { recursive: true }).sort();
 }
 
+// The tests gate keeps completed base reruns in the gate root on purpose, shared
+// across gates and pruned (docs/state.md); the rest of the root is gate scratch.
+const BASE_CACHE = 'tests-base-cache';
+const baseCache = (entries) => entries.filter((entry) => entry.split(path.sep)[0] === BASE_CACHE);
+const scratch = (entries) => entries.filter((entry) => entry.split(path.sep)[0] !== BASE_CACHE);
+
 // A separate state exercises the real gate without changing the project's tasks.
 function probe({ root = ROOT, cache, command, environment = process.env } = {}) {
   if (!command && (environment.TOWER_CRANE_SANDBOX === '1' || environment.TOWER_CRANE_BROKER)) {
@@ -88,7 +94,9 @@ function probe({ root = ROOT, cache, command, environment = process.env } = {}) 
     result.exit = checked.status;
     result.stderr = checked.stderr;
     result.outer_after = contents(outer);
-    result.gate_root_after = contents(gates);
+    const after = contents(gates);
+    result.gate_root_after = scratch(after);
+    result.base_cache_after = baseCache(after);
     // Receipts name the worktree actually created, rather than a guessed parent path.
     const worktrees = checked.data.commands.filter((c) => c.args.includes('worktree') && c.args.includes('add'))
       .flatMap((c) => c.args.filter((arg) => arg.startsWith(gates + path.sep) && path.basename(arg) === 'wt'));
