@@ -6,7 +6,7 @@ const path = require('node:path');
 const cp = require('node:child_process');
 const { ROOT } = require('./helpers');
 const { HUNG_TEST_MS } = require('./signals');
-const { testFiles, shardFiles, longestFirst, fileDurations } = require('./run');
+const { testFiles, shardFiles, longestFirst, startOrder, fileDurations } = require('./run');
 const { declarations, fileTimes, mergeTable } = require('../scripts/test-durations');
 
 const FIXTURES = ['a', 'b', 'c', 'd'].map((name) => path.join('test', 'fixtures', 'shard', `${name}.test.js`));
@@ -41,6 +41,11 @@ test('longestFirst starts the longest measured files first and keeps sorted orde
   assert.deepEqual(longestFirst(files, durations), ['b', 'd', 'new', 'a', 'c']);
   assert.deepEqual(files, ['d', 'c', 'b', 'a', 'new'], 'the input is not reordered');
   assert.deepEqual(longestFirst(['y', 'x'], {}), ['x', 'y'], 'an empty table keeps the sorted order');
+  // Two per worker go absolute, which node --test sorts before the relative rest.
+  const order = startOrder(files, 1, durations);
+  assert.deepEqual(order, ['d', 'c', 'b', 'a', 'new'].map((f) => (['b', 'd'].includes(f) ? path.resolve(f) : f)));
+  assert.deepEqual([...order].sort().map((f) => path.basename(f)), ['b', 'd', 'a', 'c', 'new']);
+  assert.deepEqual(startOrder(['b', 'a'], 1, durations), ['b', 'a'], 'two files for one worker both start at once');
 });
 
 test('every shard count covers the real suite with each file in exactly one shard', () => {

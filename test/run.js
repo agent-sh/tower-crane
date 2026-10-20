@@ -34,11 +34,21 @@ function fileCost(durations) {
   const fallback = known.length ? known[Math.floor(known.length / 2)] : 1;
   return (file) => (Number.isFinite(durations[file]) && durations[file] >= 0 ? durations[file] : fallback);
 }
-// Files start longest first: a long file that started late would hold the run
-// open after every other file finished. Equal times keep the sorted order.
+// Longest measured file first; equal times keep the sorted order.
 function longestFirst(files, durations = fileDurations()) {
   const cost = fileCost(durations);
   return [...files].sort().sort((a, b) => cost(b) - cost(a));
+}
+// A long file that started late would hold the run open after every other file
+// finished. node --test sorts the paths it is given as text, so it takes no
+// order, but an absolute path sorts before every relative one: the longest
+// two files per worker go as absolute paths and start first, the rest follow
+// in sorted order. Reports name a file the same either way. A run of no more
+// files than that starts them all at once and keeps them as given.
+function startOrder(files, workers, durations = fileDurations()) {
+  if (files.length <= 2 * workers) return files;
+  const first = new Set(longestFirst(files, durations).slice(0, 2 * workers));
+  return files.map((file) => (first.has(file) ? path.resolve(file) : file));
 }
 // Shard INDEX of TOTAL gets an equal share of the measured time: the longest file
 // goes to the shard with the least time so far. The runner owns the split and it
@@ -57,7 +67,7 @@ function shardFiles(files, index, total, durations = fileDurations()) {
   return (shards[index - 1] || []).sort();
 }
 if (require.main !== module) {
-  module.exports = { testFiles, shardFiles, longestFirst, fileDurations };
+  module.exports = { testFiles, shardFiles, longestFirst, startOrder, fileDurations };
   return;
 }
 
@@ -122,7 +132,7 @@ if (refused.length) {
   process.exit(1);
 }
 if (skipped.length) console.error(`tower-crane: skipped host-only tests in this sandbox, the tests gate runs them on the host: ${skipped.join(' ')}`);
-args.push(...longestFirst(run));
+args.push(...startOrder(run, concurrency));
 
 const env = { ...process.env };
 delete env.TC_TEST_SHARD;

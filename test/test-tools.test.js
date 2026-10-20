@@ -195,16 +195,19 @@ test('the test runner emits one capped concurrency value, including repeated and
     assert.ok(args.includes(`--require=${path.join(ROOT, 'test', 'fixtures', 'report-guard.js')}`), 'every test file loads the report guard');
     assert.deepEqual(args.filter((arg) => !arg.startsWith('--')), ['test/claim.test.js']);
   }
-  // Files reach node longest first by the measured table, so a long file never starts last.
+  // With one worker the two longest measured files go as absolute paths, which
+  // node --test sorts first, so a long file never starts last.
   const preload = path.join(h.base, 'runner-order.js');
-  fs.writeFileSync(preload, "require('node:child_process').spawnSync = (command, args) => { console.log(JSON.stringify(args)); return { status: 0 }; };");
-  const files = ['test/claim.test.js', 'test/isolation.test.js', 'test/events.test.js'];
-  const r = cp.spawnSync(process.execPath, ['--require', preload, runner, ...files], { env: h.env, encoding: 'utf8' });
+  fs.writeFileSync(preload, "require('node:os').availableParallelism = () => 2; require('node:child_process').spawnSync = (command, args) => { console.log(JSON.stringify(args)); return { status: 0 }; };");
+  const files = ['test/accept.test.js', 'test/claim.test.js', 'test/isolation.test.js', 'test/events.test.js'];
+  const r = cp.spawnSync(process.execPath, ['--require', preload, runner, ...files], { cwd: ROOT, env: h.env, encoding: 'utf8' });
   assert.equal(r.status, 0, r.stderr);
   const durations = require('./run').fileDurations();
-  const expected = [...files].sort((a, b) => durations[b] - durations[a]);
-  assert.notDeepEqual(expected, files, 'the measured order differs from the given one');
-  assert.deepEqual(JSON.parse(r.stdout).filter((arg) => !arg.startsWith('--')), expected);
+  const longest = [...files].sort((a, b) => durations[b] - durations[a]).slice(0, 2);
+  assert.deepEqual(longest, ['test/isolation.test.js', 'test/events.test.js']);
+  const passed = JSON.parse(r.stdout).filter((arg) => !arg.startsWith('--'));
+  assert.deepEqual(passed, files.map((file) => (longest.includes(file) ? path.join(ROOT, file) : file)));
+  assert.deepEqual([...passed].sort().slice(0, 2), [path.join(ROOT, 'test/events.test.js'), path.join(ROOT, 'test/isolation.test.js')]);
 });
 
 test('mutation fallback requires a green baseline in a copy containing all test inputs', (t) => {
