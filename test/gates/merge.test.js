@@ -50,7 +50,6 @@ test('release merges require green completed push CI even with a newer pending r
         filename: 'package.json', patch: '-  "version": "0.1.6",\n+  "version": "0.1.7",',
       }));
       if (args[0] === 'api' && args[1].includes('/actions/workflows?')) return result(JSON.stringify({ id: 11, state: 'active', path: 'dynamic/github-code-scanning/codeql' }));
-      if (args[0] === 'api' && args[1].includes('/contents/')) return result(JSON.stringify({ encoding: 'base64', content: Buffer.from('on: push\njobs: {}\n').toString('base64') }));
       if (args[0] === 'api' && args[1].includes('/actions/runs?')) return result([
         { id: 101, workflow_id: 11, name: 'CI', run_number: 51, event: 'push', status: 'in_progress', conclusion: null },
         { id: 100, workflow_id: 11, name: 'CI', run_number: 50, event: 'push', status: 'completed', conclusion, html_url: 'https://github.com/acme/app/actions/runs/100' },

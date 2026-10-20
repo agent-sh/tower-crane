@@ -45,6 +45,23 @@ function setup(t) {
   return h;
 }
 
+test('completed push selection preserves the newest recorded run and attempt', () => {
+  const { latestPush } = require('../lib/main-ci');
+  const previous = { id: 100, workflow_id: 11, number: 50, attempt: 2, event: 'push', conclusion: 'success' };
+  for (const [number, attempt, status, conclusion, expected] of [
+    [51, 1, 'in_progress', null, [50, 2, 'success']],
+    [50, 3, 'in_progress', null, [50, 2, 'success']],
+    [50, 1, 'completed', 'failure', [50, 2, 'success']],
+    [49, 9, 'completed', 'failure', [50, 2, 'success']],
+    [50, 3, 'completed', 'failure', [50, 3, 'failure']],
+    [51, 1, 'completed', 'cancelled', [51, 1, 'cancelled']],
+  ]) {
+    const [run] = latestPush([{ id: 100, workflow_id: 11, run_number: number, run_attempt: attempt,
+      name: 'CI', event: 'push', status, conclusion }], [previous]);
+    assert.deepEqual([run.number, run.attempt, run.conclusion], expected);
+  }
+});
+
 test('main push failures produce one item per current head and follow observes completion without --inbox', async (t) => {
   const h = setup(t);
   const github = h.github();
@@ -352,6 +369,8 @@ test('MCP tools retain identity, expose actions and reject argument overrides', 
 test('new inbox items wake through wait and unchanged snapshots do not wake twice', (t) => {
   const h = setup(t);
   h.add('Ready');
+  // Warm CI so the short deadline measures local notification.
+  h.inbox();
   const before = fs.statSync(path.join(h.state, 'events.jsonl')).size;
   const args = ['wait', '--inbox', '--observe', '--after', String(before), '--types', 'inbox item', '--timeout', '0.2', '--agent', 'orchestrator']; // wait-allow: verify the CLI observation, filtering or timeout contract with already-published state
   const wake = h.run(args);
@@ -984,6 +1003,15 @@ test('a red push or schedule run on the base shows in inbox and status until a l
   h.save(github);
   assert.deepEqual(red(), []);
   assert.doesNotMatch(h.ok(['status']), /ci red/);
+
+  // A successful completed attempt still decides while its next attempt runs.
+  github.main_runs[0] = run(1003, 52, 'push', 'in_progress', null, 2);
+  h.save(github);
+  assert.deepEqual(red(), []);
+  assert.doesNotMatch(h.ok(['status']), /ci red/);
+  github.main_runs[0] = run(1003, 52, 'push', 'completed', 'success', 2);
+  h.save(github);
+  assert.deepEqual(red(), []);
 
   // A pending newer push cannot clear a cancelled completed push.
   github.main_runs.unshift(run(1005, 54, 'push', 'in_progress', null), run(1004, 53, 'push', 'completed', 'cancelled'));

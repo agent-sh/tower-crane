@@ -17,13 +17,16 @@ if (/^repos\/[^/]+\/[^/]+\/actions\//.test(args[1] || '')) {
   const endpoint = args[1];
   const id = endpoint.split('/')[5];
   const print = (rows) => { for (const row of rows) console.log(JSON.stringify(row)); };
-  if (data.fail || data.failActions) {
+  const query = new URL(`https://api.github.com/${endpoint}`).searchParams;
+  const matching = (rows) => rows.filter((r) => (!query.has('branch') || (r.head_branch || 'main') === query.get('branch'))
+    && (!query.has('event') || r.event === query.get('event')) && (!query.has('status') || r.status === query.get('status')));
+  if (data.fail || data.failActions || data.failWorkflowRuns && /\/actions\/workflows\/\d+\/runs/.test(endpoint)) {
     console.error('GitHub unavailable');
     process.exitCode = 1;
-  } else if (endpoint.includes('/actions/runs?')) print(data.main_runs || []);
+  } else if (endpoint.includes('/actions/runs?')) print(matching(data.main_runs || []));
   else if (endpoint.includes('/actions/workflows')) {
-    if (/\/actions\/workflows\/\d+\/runs/.test(endpoint)) print(data.workflow_runs?.[endpoint.split('/')[5]]
-      || (data.main_runs || []).filter((r) => r.workflow_id === Number(endpoint.split('/')[5])));
+    if (/\/actions\/workflows\/\d+\/runs/.test(endpoint)) print(matching(data.workflow_runs?.[endpoint.split('/')[5]]
+      || (data.main_runs || []).filter((r) => r.workflow_id === Number(endpoint.split('/')[5]))));
     else print(data.workflows || [...new Set((data.main_runs || []).map((r) => r.workflow_id))].map((w) => ({
       id: w, state: 'active', path: data.main_runs.find((r) => r.workflow_id === w).path || `.github/workflows/ci-${w}.yml`,
     })));
@@ -76,11 +79,6 @@ function answer(data) {
       pr.mergeCommit = { oid: pr.headRefOid };
     }
     result = pr;
-  } else if (args[1].includes('/contents/')) {
-    const name = decodeURIComponent(args[1].split('/contents/')[1].split('?')[0]);
-    const source = data.workflow_sources ? data.workflow_sources[name] : 'on: push\njobs: {}\n';
-    if (source === undefined) failed = true;
-    else result = { content: Buffer.from(source).toString('base64'), encoding: 'base64' };
   } else if (/\/pulls\/\d+$/.test(args[1])) {
     const pr = data.prs[args[1].split('/').at(-1)];
     result = { head: { sha: pr.headRefOid }, base: { sha: pr.baseRefOid || 'b'.repeat(40) }, merge_commit_sha: pr.mergeRefOid || null };

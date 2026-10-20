@@ -67,55 +67,63 @@ function github(t) {
 
 const POLICY = JSON.stringify({ conditions: ['review_clean', 'full_suite', 'main_ci_green'] });
 
-test('workflow push trigger forms distinguish push from other events and unreadable syntax', () => {
-  const { workflowPush } = require('../lib/main-ci');
-  for (const [source, expected] of [
-    ['on: push\njobs: {}\n', true],
-    ['on: "push"\n', true],
-    ["'on': [pull_request, 'push']\n", true],
-    ['on:\n  push:\n    paths: [docs/**]\n  pull_request:\njobs: {}\n', true],
-    ['on:\n- pull_request\n- push\njobs: {}\n', true],
-    ['on: [\n  pull_request,\n  push\n]\njobs: {}\n', true],
-    ['on: {pull_request: {paths: ["push:"]}, push: {branches: [main]}}\n', true],
-    ['{"on":{"push":null},"jobs":{}}', true],
-    ['on: pull_request\n', false],
-    ['on: [schedule, workflow_dispatch]\n', false],
-    ['on:\n  schedule:\n    - cron: "17 3 * * *"\n  workflow_dispatch:\njobs: {}\n', false],
-    ['on: {pull_request: {paths: ["push:"]}, workflow_dispatch: {}}\n', false],
-    ['on: *shared_events\n', null],
-    ['on:\n  <<: *shared_events\n', null],
-    ['on: [pull_request}\n', null],
-    ['jobs: {}\n', null],
-  ]) assert.equal(workflowPush(source), expected, source);
+test('publish keeps the completed failed verdict while its run is being rerun', (t) => {
+  const h = github(t);
+  h.mainCI('success');
+  const id = h.release();
+  h.ok(['accept', id]);
+  h.ok(['project', 'set', '--publish-policy', '{"conditions":[]}']);
+  h.mainCI('failure');
+  h.json(['inbox', '--agent', 'orchestrator'], orchestrator);
+  const data = JSON.parse(fs.readFileSync(h.env.INBOX_GITHUB, 'utf8'));
+  const failed = { ...data.main_runs[0] };
+  data.main_runs = [
+    { ...failed, status: 'in_progress', conclusion: null, run_attempt: 2 },
+    { ...failed, id: 1000, run_number: 49, conclusion: 'success' },
+  ];
+  fs.writeFileSync(h.env.INBOX_GITHUB, JSON.stringify(data));
+  const publish = ['ask', '--setting', 'publish', '--change', JSON.stringify({ task: id }), '--agent', 'orchestrator'];
+  const waiting = h.run(publish, orchestrator);
+  assert.equal(waiting.code, 1);
+  assert.match(waiting.stderr, /run 1001: failure/);
+  data.main_runs[0] = { ...failed, status: 'completed', conclusion: 'success', run_attempt: 2 };
+  fs.writeFileSync(h.env.INBOX_GITHUB, JSON.stringify(data));
+  assert.match(h.ok(publish, orchestrator), /go ahead/);
 });
 
-test('publish distinguishes absent push CI from an active push workflow awaiting completion', (t) => {
+test('publish gates only completed base push history, including managed workflows beyond the run window', (t) => {
   const h = github(t);
   h.mainCI('success');
   const id = h.release();
   h.ok(['accept', id]);
   h.ok(['project', 'set', '--publish-policy', '{"conditions":[]}']);
   const publish = ['ask', '--setting', 'publish', '--change', JSON.stringify({ task: id }), '--agent', 'orchestrator'];
-  for (const [source, state, allowed] of [
-    [null, 'absent', true],
-    ['on: pull_request\njobs: {}\n', 'active', true],
-    ['on: [schedule, workflow_dispatch]\njobs: {}\n', 'active', true],
-    ['on: push\njobs: {}\n', 'disabled_manually', true],
-    ['on: push\njobs: {}\n', 'active', false],
-    ['on: [push, pull_request]\njobs: {}\n', 'pending', false],
-    ['on: push\njobs: {}\n', 'older_completed', true],
-    [null, 'unreadable', false],
+  const run = (event, branch, conclusion = 'failure') => ({ id: 99, workflow_id: 11, run_number: 49, name: 'CI',
+    event, head_branch: branch, head_sha: h.sha, status: 'completed', conclusion });
+  for (const [name, state, history, allowed] of [
+    ['tag only', 'active', [run('push', 'v0.1.6')], true],
+    ['no Actions', 'absent', [], true],
+    ['PR only', 'active', [run('pull_request', 'main')], true],
+    ['scheduled', 'active', [run('schedule', 'main')], true],
+    ['manual', 'active', [run('workflow_dispatch', 'main')], true],
+    ['other branch', 'active', [run('push', 'develop')], true],
+    ['no history', 'active', [], true],
+    ['pending first push', 'active', [{ ...run('push', 'main'), status: 'queued', conclusion: null }], true],
+    ['disabled', 'disabled_manually', [run('push', 'main')], true],
+    ['managed older green', 'active', [run('push', 'main', 'success')], true],
+    ['managed older red', 'active', [run('push', 'main')], false],
+    ['managed older cancelled', 'active', [run('push', 'main', 'cancelled')], false],
+    ['unreadable history', 'active', [], false],
   ]) {
     const data = JSON.parse(fs.readFileSync(h.env.INBOX_GITHUB, 'utf8'));
-    const file = '.github/workflows/ci.yml';
-    data.workflows = state === 'absent' ? [] : [{ id: 11, path: file, state: state === 'disabled_manually' ? state : 'active' }];
-    data.workflow_sources = source === null ? {} : { [file]: source };
-    data.main_runs = state === 'pending' ? [{ id: 101, workflow_id: 11, run_number: 51, name: 'CI', event: 'push', status: 'queued', conclusion: null }] : [];
-    data.workflow_runs = state === 'older_completed' ? { 11: [{ id: 99, workflow_id: 11, run_number: 49, name: 'CI',
-      event: 'push', status: 'completed', conclusion: 'success', head_sha: h.sha }] } : {};
+    data.workflows = state === 'absent' ? [] : [{ id: 11, path: name.startsWith('managed') ? 'dynamic/github-code-scanning/codeql' : '.github/workflows/ci.yml', state }];
+    data.main_runs = [];
+    data.workflow_runs = { 11: history };
+    data.failWorkflowRuns = name === 'unreadable history';
     fs.writeFileSync(h.env.INBOX_GITHUB, JSON.stringify(data));
     const result = h.run(publish, orchestrator);
-    assert.equal(result.code, allowed ? 0 : 1, `${state}: ${result.stdout} ${result.stderr}`);
+    assert.equal(result.code, allowed ? 0 : 1, `${name}: ${result.stdout} ${result.stderr}`);
+    if (!allowed && history.length) assert.match(result.stderr, /run 99/);
   }
 });
 
