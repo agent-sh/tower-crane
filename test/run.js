@@ -42,8 +42,9 @@ function shardFiles(files, index, total, durations = fileDurations()) {
   }
   return (shards[index - 1] || []).sort();
 }
-// Five minutes under the 45-minute test job limit in .github/workflows/ci.yml.
-const SHARD_DEADLINE_MIN = 40;
+// A healthy Windows shard runs its tests in about 28 minutes; this leaves its dump
+// and stop time inside the 45-minute test job limit in .github/workflows/ci.yml.
+const SHARD_DEADLINE_MIN = 36;
 if (require.main !== module) {
   module.exports = { testFiles, shardFiles, fileDurations, SHARD_DEADLINE_MIN };
   return;
@@ -125,27 +126,34 @@ delete env.TC_TEST_SHARD_DEADLINE_MIN;
 // A runner invoked from a test must launch a new run, not Node's recursive no-op.
 delete env.NODE_TEST_CONTEXT;
 
-// The processes below ROOT, from one snapshot. Windows keeps an exited parent's
-// pid on its children, so their orphans stay in the tree there.
-function processTree(root) {
+// The processes below ROOT, from one snapshot, and on Windows the ones created since
+// SINCE whose parent is gone: Windows does not reparent, so a child of an exited test
+// process can no longer be reached from ROOT.
+function processTree(root, since) {
   const win = process.platform === 'win32';
   const out = win
     ? cp.spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
-      'Get-CimInstance Win32_Process | ForEach-Object { "$($_.ProcessId) $($_.ParentProcessId) - $($_.CommandLine)" }'],
+      'Get-CimInstance Win32_Process | Where-Object { $_.CreationDate } | ForEach-Object { '
+      + '"$($_.ProcessId) $($_.ParentProcessId) $(([DateTimeOffset]$_.CreationDate.ToUniversalTime()).ToUnixTimeMilliseconds()) $($_.CommandLine)" }'],
     { encoding: 'utf8', timeout: 60000, maxBuffer: 64 << 20, windowsHide: true }) // wait-allow: one snapshot, inside the minutes the deadline leaves before the job limit
     : cp.spawnSync('ps', ['-A', '-o', 'pid=,ppid=,etime=,args='], { encoding: 'utf8', timeout: 60000, maxBuffer: 64 << 20 }); // wait-allow: one snapshot, inside the minutes the deadline leaves before the job limit
   const rows = (out.stdout || '').split(/\r?\n/).map((line) => line.trim().split(/\s+/)).filter((f) => f.length > 2)
-    .map(([pid, parent, ...rest]) => ({ pid: Number(pid), parent: Number(parent), text: rest.join(' ') }));
+    .map(([pid, parent, time, ...rest]) => ({ pid: Number(pid), parent: Number(parent), time, text: [time, ...rest].join(' ') }));
   const tree = new Set([root]);
   for (let grew = true; grew;) {
     grew = false;
     for (const row of rows) if (!tree.has(row.pid) && tree.has(row.parent)) { tree.add(row.pid); grew = true; }
   }
-  return rows.filter((row) => tree.has(row.pid));
+  const live = new Set(rows.map((row) => row.pid));
+  return {
+    tree: rows.filter((row) => tree.has(row.pid)),
+    orphans: win ? rows.filter((row) => !tree.has(row.pid) && !live.has(row.parent) && Number(row.time) >= since) : [],
+  };
 }
 
 // With every file skipped there is nothing to run; node --test with no file would search the directory.
 if (!run.length) return;
+const started = Date.now();
 const child = cp.spawn(process.execPath, args, { stdio: 'inherit', env });
 // A job its time limit cancels keeps no log, so a shard stops a few minutes under
 // the test job's limit: it prints the processes the run still holds, stops them
@@ -154,11 +162,17 @@ const deadlineMin = Number(process.env.TC_TEST_SHARD_DEADLINE_MIN || (shard ? SH
 let late = false;
 const deadline = deadlineMin > 0 && setTimeout(() => { // wait-allow: the shard deadline CI sets under its job limit
   late = true;
-  const tree = processTree(child.pid);
-  console.error(`tower-crane: shard deadline of ${deadlineMin} min reached; processes still running (pid, parent, elapsed, command):`);
+  const { tree, orphans } = processTree(child.pid, started);
+  console.error(`tower-crane: shard deadline of ${deadlineMin} min reached; processes still running (pid, parent, ${process.platform === 'win32' ? 'created at ms' : 'elapsed'}, command):`);
   for (const row of tree) console.error(`  ${row.pid} ${row.parent} ${row.text}`);
-  if (process.platform === 'win32') cp.spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true });
-  else for (const row of tree) try { killPid(row.pid, 'SIGKILL'); } catch { /* It ended meanwhile. */ }
+  if (orphans.length) console.error('tower-crane: started during the run, parent gone:');
+  for (const row of orphans) console.error(`  ${row.pid} ${row.parent} ${row.text}`);
+  if (process.platform === 'win32') {
+    cp.spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true });
+    for (const row of [...tree, ...orphans]) cp.spawnSync('taskkill', ['/PID', String(row.pid), '/F'], { stdio: 'ignore', windowsHide: true });
+  } else for (const row of tree) try { killPid(row.pid, 'SIGKILL'); } catch { /* It ended meanwhile. */ }
+  // The job must end with this log even if a stopped process never reports its exit.
+  setTimeout(() => process.exit(1), 10000).unref(); // wait-allow: last resort after the deadline's stop
 }, deadlineMin * 60000);
 child.on('error', (error) => {
   clearTimeout(deadline);
