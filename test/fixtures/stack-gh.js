@@ -313,6 +313,18 @@ cp.spawnSync = function stackGh(command, args, opts) {
       git(['push', 'origin', pr.headRefName]);
     }
     if (data.syncError) return finish(data.syncOutput || '', 1, data.syncError);
+    if (data.restack) {
+      const { branch, oldParent, parent } = data.restack;
+      const previous = git(['rev-parse', branch]);
+      const tree = git(['worktree', 'list', '--porcelain']).split('\n\n')
+        .find((block) => block.includes(`branch refs/heads/${branch}\n`) || block.endsWith(`branch refs/heads/${branch}`));
+      const cwd = tree.match(/^worktree (.+)$/m)[1];
+      git(['-C', cwd, 'rebase', '--onto', parent, oldParent]);
+      git(['push', `--force-with-lease=refs/heads/${branch}:${previous}`, 'origin', branch]);
+      const head = git(['rev-parse', branch]);
+      Object.values(data.prs).find((pr) => pr.headRefName === branch).headRefOid = head;
+      delete data.restack;
+    }
     return finish();
   }
   throw new Error(`unexpected gh stack: ${args}`);

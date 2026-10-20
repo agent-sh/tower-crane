@@ -13,9 +13,22 @@ Existing child commits are preserved. A submitted or accepted child returns to
 rework to submit the refreshed branch and rerun gates; its former submitted sha
 stays recorded until then.
 An untouched child adopts the parent head directly, including a rewritten
-parent, so commits dropped by the parent are not restored. Publication never
-force-pushes: a rejected push leaves the child branch and stack metadata
-unchanged for the orchestrator's ordinary stack refresh.
+parent, so commits dropped by the parent are not restored. If the child head
+exactly equals its old `parent_sha`, a rewritten parent can replace that head
+on origin with `--force-with-lease=refs/heads/<child>:<old-head>` after a normal
+push is rejected. The explicit lease rejects concurrent remote work. A failed
+lease preserves the local branch and stack metadata, records a stable rework
+note and stops refresh until the orchestrator reconciles the moved remote.
+
+A child with its own commits is not merged across a parent history rewrite.
+It records a restack note and keeps its branch and submitted head. Linked
+stacks use the existing `gh stack sync` rebase and guarded publication while
+idle; an unlinked recorded PR must be linked before `stack sync`. A child
+without a PR requires the orchestrator to arrange its restack. The restacked
+branch needs a new submission before gates can run at it. A parent refresh
+that is inapplicable or has a recoverable failure falls through to ordinary
+linked sync. A guarded-lease failure or an actual merge conflict stops that
+pass instead.
 
 A conflict aborts the scratch merge and leaves the child branch and checkout
 unchanged. A rework note names the parent sha and conflicting files, and the

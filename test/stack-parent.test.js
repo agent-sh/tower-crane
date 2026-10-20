@@ -145,22 +145,111 @@ for (const rewrite of [false, true]) {
         const parent = resubmit(f, rewrite);
         const read = inspector(f);
         const result = f.h.run(['spawn', '--task', 'T2', '--wait']);
-        if (rewrite && published) {
-          assert.equal(result.code, 1, result.stdout + result.stderr);
-          assert.match(result.stderr, /git push failed/);
-          assert.equal(f.h.git(['rev-parse', wt.branch]), f.sha);
-          assert.equal(f.h.json(['task', 'show', 'T2']).stack.parent_sha, f.sha);
-          assert.equal(f.h.git(['rev-parse', `refs/heads/${wt.branch}`], path.join(f.h.base, 'remote.git')), f.sha);
-        } else {
-          assert.equal(result.code, 0, result.stdout + result.stderr);
-          assert.equal(read().head, parent);
-          assert.equal(f.h.json(['task', 'show', 'T2']).stack.parent_sha, parent);
-          assert.equal(f.h.git(['rev-parse', `refs/heads/${wt.branch}`], path.join(f.h.base, 'remote.git')), parent);
-          if (rewrite) assert.throws(() => f.h.git(['merge-base', '--is-ancestor', f.sha, read().head]));
-        }
+        assert.equal(result.code, 0, result.stdout + result.stderr);
+        assert.equal(read().head, parent);
+        assert.equal(f.h.json(['task', 'show', 'T2']).stack.parent_sha, parent);
+        assert.equal(f.h.git(['rev-parse', `refs/heads/${wt.branch}`], path.join(f.h.base, 'remote.git')), parent);
+        if (rewrite) assert.throws(() => f.h.git(['merge-base', '--is-ancestor', f.sha, read().head]));
       });
     }
   }
+}
+
+for (const checkout of [false, true]) {
+  test(`a gate-published untouched child dispatches after a later rewrite with ${checkout ? 'present' : 'absent'} checkout`, (t) => {
+    const f = setup(t);
+    const wt = f.h.json(['worktree', 'T2']);
+    const published = resubmit(f, false);
+    assert.equal(f.h.run(['check', 'ci', 'T2']).code, 1);
+    assert.equal(f.h.git(['rev-parse', `refs/heads/${wt.branch}`], path.join(f.h.base, 'remote.git')), published);
+    if (!checkout) f.h.git(['worktree', 'remove', wt.path]);
+    const parent = resubmit(f, true);
+    const read = inspector(f);
+    f.h.ok(['spawn', '--task', 'T2', '--wait']);
+    assert.equal(read().head, parent);
+    assert.equal(f.h.json(['task', 'show', 'T2']).stack.parent_sha, parent);
+    assert.throws(() => f.h.git(['merge-base', '--is-ancestor', published, parent]));
+  });
+}
+
+for (const checkout of [false, true]) {
+  test(`a guarded rewrite lease preserves new remote child work with ${checkout ? 'present' : 'absent'} checkout`, (t) => {
+    const f = setup(t);
+    const wt = f.h.json(['worktree', 'T2']);
+    f.h.git(['push', 'origin', wt.branch], wt.path);
+    const peer = path.join(f.h.base, 'peer');
+    f.h.git(['clone', '--branch', wt.branch, path.join(f.h.base, 'remote.git'), peer]);
+    fs.writeFileSync(path.join(peer, 'remote-child.txt'), 'remote child\n');
+    f.h.git(['add', 'remote-child.txt'], peer);
+    f.h.git(['commit', '-qm', 'remote child work'], peer);
+    f.h.git(['push', 'origin', wt.branch], peer);
+    const remote = f.h.git(['rev-parse', 'HEAD'], peer);
+    if (!checkout) f.h.git(['worktree', 'remove', wt.path]);
+    resubmit(f, true);
+    inspector(f);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const result = f.h.run(['spawn', '--task', 'T2', '--wait']);
+      assert.equal(result.code, 1, result.stdout + result.stderr);
+      assert.match(result.stderr, /guarded lease expected/);
+      assert.equal(f.h.git(['rev-parse', wt.branch]), f.sha);
+      assert.equal(f.h.git(['rev-parse', `refs/heads/${wt.branch}`], path.join(f.h.base, 'remote.git')), remote);
+      const task = f.h.json(['task', 'show', 'T2']);
+      assert.equal(task.stack.parent_sha, f.sha);
+      assert.equal(task.notes.filter((n) => n.text.includes('guarded lease expected')).length, 1);
+    }
+  });
+}
+
+for (const linked of [false, true]) {
+  test(`rewritten parents preserve own child commits for ${linked ? 'linked' : 'unlinked'} restacking`, (t) => {
+    const f = setup(t);
+    const top = upper(f);
+    if (!linked) f.h.ok(['stack', 'unstack', 'T2']);
+    f.h.git(['rm', 'T1.txt'], f.lower.path);
+    const parent = resubmit(f, true);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const result = f.h.run(['check', 'ci', 'T2']);
+      assert.equal(result.code, 1, result.stdout + result.stderr);
+      assert.match(result.stderr, /child has its own commits.*Restack/);
+      assert.equal(f.h.git(['rev-parse', top.wt.branch]), top.sha);
+      assert.equal(f.h.git(['rev-parse', `refs/heads/${top.wt.branch}`], path.join(f.h.base, 'remote.git')), top.sha);
+      assert.equal(f.h.json(['task', 'show', 'T2']).stack.parent_sha, f.sha);
+    }
+    assert.equal(f.h.json(['task', 'show', 'T2']).notes.filter((n) => n.text.includes('child has its own commits')).length, 1);
+    f.write((d) => { d.restack = { branch: top.wt.branch, oldParent: f.sha, parent }; });
+    if (!linked) f.h.ok(['stack', 'link', 'T2']);
+    f.h.json(['worktree', 'T2']);
+    assert.ok(f.read().calls.some((c) => c.args[0] === 'stack' && c.args[1] === 'sync'),
+      events(f).filter((e) => e.cmd === 'stack sync deferred').map((e) => e.detail.reason).join('\n'));
+    const restacked = f.h.git(['rev-parse', top.wt.branch]);
+    f.h.git(['merge-base', '--is-ancestor', parent, restacked]);
+    assert.throws(() => f.h.git(['merge-base', '--is-ancestor', f.sha, restacked]));
+    assert.throws(() => f.h.git(['cat-file', '-e', `${restacked}:T1.txt`]));
+    assert.equal(f.h.git(['show', `${restacked}:T2.txt`]), 'T2');
+    assert.equal(f.h.json(['task', 'show', 'T2']).stack.parent_sha, parent);
+  });
+}
+
+for (const status of ['rework', 'in_progress']) {
+  test(`linked base refresh proceeds after parent refresh is a no-op for ${status}`, (t) => {
+    const f = setup(t);
+    upper(f);
+    resubmit(f, false);
+    f.h.ok(['rework', 'T1', '--reason', 'parent continues work']);
+    if (status === 'in_progress') f.h.ok(['claim', 'T1', '--agent', 'worker-T1']);
+    fs.writeFileSync(path.join(f.h.repo, 'main.txt'), 'main\n');
+    f.h.git(['add', 'main.txt']);
+    f.h.git(['commit', '-qm', 'main advances']);
+    f.h.git(['push', 'origin', 'main']);
+    if (status === 'in_progress') {
+      f.h.json(['worktree', 'T2']);
+      assert.equal(f.read().calls.some((c) => c.args[0] === 'stack' && c.args[1] === 'sync'), false);
+      f.h.ok(['release', 'T1', '--agent', 'worker-T1', '--reason', 'parent worker finished']);
+    }
+    f.h.json(['worktree', 'T2']);
+    assert.ok(f.read().calls.some((c) => c.args[0] === 'stack' && c.args[1] === 'sync'));
+    assert.equal(f.h.json(['task', 'show', 'T2']).stack.synced_base, f.h.git(['rev-parse', 'origin/main']));
+  });
 }
 
 for (const submitted of [false, true]) {
