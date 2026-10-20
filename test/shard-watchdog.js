@@ -90,7 +90,7 @@ function stop() {
       logOutput('Stop-Process', powershell(`$ids = ${left.map((row) => row.pid).join(',')}; Stop-Process -Id $ids -Force -ErrorAction Continue; `
         + '$still = @(Get-Process -Id $ids -ErrorAction SilentlyContinue); '
         + 'if ($still.Count) { $still | ForEach-Object { "still running: $($_.Id) $($_.ProcessName)" } } else { "all stopped" }'));
-    }
+    } else if (listed) log('none survived taskkill');
   } else {
     for (const row of [...rest, { pid: root }]) try { killPid(row.pid, 'SIGKILL'); } catch { /* It ended meanwhile. */ }
   }
