@@ -3,6 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const cp = require('node:child_process');
 const { cachedFixture } = require('./helpers');
@@ -219,5 +220,29 @@ catch (error) { console.error(error.message); process.exitCode = 1; }
     assert.equal(out.stderr,
       `tower-crane check tests T1 returned no JSON (exit code ${response.status}): ${response.stderr || '(no stderr)'}\n`);
     assert.deepEqual(fs.readdirSync(path.join(h.base, 'probe')), []);
+  }
+});
+
+test('the gate proof reports receipt-free governor deferrals from the supplied host', async (t) => {
+  const cases = [
+    ['memory capacity', { limit: 10, used: 8 }, /memory: tests\.slice/],
+    ['memory pressure', { memorySome: 10 }, /memory pressure: some avg10 10%/],
+    ['CPU pressure', { cpuSome: 60 }, /cpu pressure: some avg10 60%/],
+    ['load', { load: os.availableParallelism() * 2 }, /load: /],
+  ];
+  for (const [name, host, reason] of cases) {
+    await t.test(name, (t) => {
+      const h = fixture(t);
+      writeHost(h.env.TOWER_CRANE_HOST_ROOT, host);
+      const cache = path.join(h.base, 'probe');
+      assert.throws(() => probe({ root: h.repo, cache,
+        command: 'node scratch.js', environment: h.env }), (error) => {
+        assert.match(error.message, /check tests T1 returned no JSON \(exit code 3\):/);
+        assert.match(error.message, /tests gate deferred by the host governor:/);
+        assert.match(error.message, reason);
+        return true;
+      });
+      assert.deepEqual(fs.readdirSync(cache), []);
+    });
   }
 });
