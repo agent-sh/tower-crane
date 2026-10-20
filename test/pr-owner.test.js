@@ -215,3 +215,72 @@ test('an interrupt stops a waiting owner and the next failure goes the respawn p
   h.ok(['rework', 'T1', '--reason', 'value.js must be 2', '--agent', 'orchestrator']);
   assert.deepEqual([task().status, task().claim], ['rework', null]);
 });
+
+// A gate rework that gates retry --from-rework can still undo waits out
+// gates.rework_hold_min unclaimed, as it does for a new worker, while its
+// owner keeps waiting; a rework by hand cannot be restored and goes back at once.
+for (const row of [
+  {
+    name: 'a gate rework restored during its hold leaves the owner waiting on the restored head',
+    settle(h) {
+      // The cause was outside the code: the suite passes now.
+      fs.writeFileSync(path.join(h.base, 'tools', 'value-suite.js'), '');
+      const restored = h.run(['gates', 'retry', 'T1', '--from-rework', '--agent', 'orchestrator']);
+      assert.match(restored.stdout, /^T1: restored to submitted at revision 1; reran tests/, `${restored.stdout}${restored.stderr}`);
+    },
+    status: 'submitted', handed: false,
+  },
+  {
+    name: 'a gate rework goes back to its waiting owner when the hold ends',
+    settle(h) {
+      h.ok(['project', 'set', '--rework-hold-min', '0']);
+      h.consume();
+    },
+    status: 'in_progress', handed: true,
+  },
+  {
+    name: 'an owner interrupted during the hold ends its ownership, and the task is the next worker\'s',
+    async settle(h, agent) {
+      h.ok(['interrupt', 'T1', '--agent', 'orchestrator']);
+      await waitUntil(() => h.logs().some((e) => e.cmd === 'spawn exit' && e.detail.agent === agent), { paths: [h.base], what: 'the supervisor stops the owner' });
+      h.ok(['project', 'set', '--rework-hold-min', '0']);
+      const item = h.json(['inbox', '--agent', 'orchestrator']).items.find((i) => i.kind === 'rework_ready');
+      assert.deepEqual([item.owner, item.action.argv], [undefined, ['spawn', '--ready']], 'a new worker takes it');
+    },
+    status: 'rework', handed: false,
+  },
+  { name: 'a rework by hand goes back to the owner at once though the hold is set', manual: true, status: 'in_progress', handed: true },
+]) {
+  test(row.name, async (t) => {
+    const h = ownerFixture(t, { OWNER_NO_PR: '1', OWNER_CRASH_ON_FIX: '1' });
+    h.ok(['project', 'set', '--rework-hold-min', '5']);
+    const until = (check, what) => waitUntil(check, { paths: [h.base], what });
+    const agent = ownerSpawn(h, 'T1');
+    await until(() => h.task().status === 'submitted' && h.json(['status']).governor.units.some((u) => u.agent === agent && u.waiting), 'T1 owner waits');
+    if (row.manual) h.ok(['rework', 'T1', '--reason', 'value.js must be 2', '--agent', 'orchestrator']);
+    else {
+      h.consume();
+      const rework = h.logs().findLast((e) => e.cmd === 'rework');
+      assert.deepEqual([rework.detail.gate, rework.detail.owner_held], ['tests', agent], 'the gate rework names the owner it is held for');
+      assert.deepEqual([h.task().status, h.task().claim], ['rework', null], 'the hold keeps the task unclaimed');
+      const item = h.json(['inbox', '--agent', 'orchestrator']).items.find((i) => i.kind === 'rework_ready');
+      assert.deepEqual([item?.restore, item?.owner, item?.action.argv], ['gates retry T1 --from-rework', agent, ['gates', 'retry', 'T1', '--from-rework']],
+        'the restore stays possible during the hold');
+      assert.ok(h.json(['status']).governor.units.some((u) => u.agent === agent && u.waiting), 'the owner waits through the hold');
+      await row.settle(h, agent);
+    }
+    assert.equal(h.task().status, row.status);
+    const handed = h.logs().filter((e) => e.cmd === 'claim' && e.detail.handover);
+    assert.deepEqual(handed.map((e) => e.agent), row.handed ? [agent] : []);
+    if (row.handed) {
+      await until(() => h.outcomes().length, 'the owner reads the handback');
+      assert.equal(h.outcomes()[0].outcome, 'fix');
+      assert.match(h.outcomes()[0].message, row.manual ? /: value\.js must be 2\n/ : /: tests failed at [0-9a-f]{7,}: [\s\S]*the value is fixed/);
+    } else if (!h.logs().some((e) => e.cmd === 'spawn exit' && e.detail.agent === agent)) {
+      assert.deepEqual(h.outcomes(), [], 'the owner is still waiting');
+      h.ok(['interrupt', 'T1', '--agent', 'orchestrator']);
+    }
+    await until(() => h.logs().some((e) => e.cmd === 'spawn exit' && e.detail.agent === agent), 'the owner exits');
+    assert.equal(h.workers().length, 1);
+  });
+}
