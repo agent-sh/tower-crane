@@ -798,7 +798,7 @@ Where it shows:
 | `psi_cpu_defer` | 60 | runnable tasks waited for a CPU 60% of the time; this host idles at 2 to 8% |
 | `load_defer` | 2 | twice as many runnable or blocked tasks as cores; the fork storms of 2026-10-17 reached 16 to 24 times the cores |
 | `others_window_min` | 30 | other sessions' test runs and builds repeat within minutes; on 2026-10-17 two of them peaked near 11 GiB and came back |
-| `expected_mb` | `worker` 1536, `reviewer` 1024, `small` 1024, `orchestrator` 1024, `tests` 2048, `clean` 1024, `ci` 2048, `suite` 2048 | starting sizes, replaced by measured peaks once three exist: on 2026-10-17 the scope holding an orchestrator, two workers and their tools used 3.0 GiB (peak 3.5 GiB); a full suite at test concurrency 3 runs about six Node processes and their git commands |
+| `expected_mb` | `worker` 1536, `reviewer` 1024, `small` 1024, `orchestrator` 1024, `tests` 2560, `clean` 1024, `ci` 2048, `suite` 2560 | starting sizes, replaced by measured peaks once three exist: on 2026-10-17 the scope holding an orchestrator, two workers and their tools used 3.0 GiB (peak 3.5 GiB); on 2026-10-20 Tower Crane's own full suite at 12 file workers, the tests gate's setting on its 24-core host, peaked at 2.5 GiB (2458 MiB anonymous) over its scope's idle use |
 
 ### Registry
 

@@ -140,7 +140,8 @@ test('every project on the host draws on one budget', (t) => {
   // One user and one host: the same cache directory and the same machine.
   b.env.XDG_CACHE_HOME = a.env.XDG_CACHE_HOME;
   b.env.TOWER_CRANE_HOST_ROOT = a.env.TOWER_CRANE_HOST_ROOT;
-  writeHost(a.env.TOWER_CRANE_HOST_ROOT, { limit: 13, used: 2 });
+  // Four 2.5 GiB tests gates fit under the 85% line of 15 GiB; a 1.5 GiB worker on top does not.
+  writeHost(a.env.TOWER_CRANE_HOST_ROOT, { limit: 15, used: 2 });
   supervised(b, ['T1']);
   const project = a.readState('project.json');
   const held = [];
@@ -148,7 +149,7 @@ test('every project on the host draws on one budget', (t) => {
   for (const task of ['T1', 'T2', 'T3', 'T4']) held.push(G.admit({ stateDir: a.state, env: a.env, agent: 'orchestrator' }, { kind: 'tests', task, project }));
   const refused = b.run(['spawn', '--task', 'T1']);
   assert.equal(refused.code, 3, refused.stderr);
-  assert.match(refused.stderr, /running Tower Crane work may grow 8\.0 GiB/);
+  assert.match(refused.stderr, /running Tower Crane work may grow 10\.0 GiB/);
   const seen = b.json(['status']).governor.budget;
   assert.deepEqual([seen.units, seen.projects], [4, 1], 'project b sees project a\'s four gates');
   held.forEach((u) => u.release());
