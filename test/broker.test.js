@@ -417,9 +417,7 @@ test('a claude broker whose own directory is too deep listens in the agent\'s ow
   h.init();
   h.ok(['task', 'add', '--title', 'deep', '--acceptance', 'noted']);
   // claudeTmp in lib/agents.js: the directory claude's sandbox reads and writes for this agent alone.
-  const tmp = path.join(h.base, 't');
-  if (!require('../lib/gate-tmp').harnessFits(tmp)) return t.skip(`the test root is too deep for an agent temp directory: ${tmp}`);
-  fs.mkdirSync(tmp, { mode: 0o700 });
+  const tmp = socketDir(t, require('../lib/gate-tmp').HARNESS_TMPDIR_MAX);
   const job = { state: h.state, task: 'T1', agent: 'worker-T1-1', role: 'worker', harness: 'claude', broker_harnesses: ['claude'],
     agent_tmp: tmp, cwd: h.repo, broker: path.join(h.base, 'w'.repeat(90), B.FILE) };
   const broker = await B.start(job);
@@ -625,8 +623,7 @@ test('a broker that falls back to a temporary socket directory names its monitor
 
 test('what the agent leaves at its broker.sock breaks neither the next spawn nor the broker\'s close, and the broker never walks it', { skip: process.platform === 'win32' && 'Windows uses a named pipe' }, async (t) => {
   const s = scratch(t);
-  const tmp = path.join(s.base, 't');
-  if (!require('../lib/gate-tmp').harnessFits(tmp)) return t.skip(`the test root is too deep for an agent temp directory: ${tmp}`);
+  const tmp = socketDir(t, require('../lib/gate-tmp').HARNESS_TMPDIR_MAX);
   const sock = path.join(tmp, 'broker.sock');
   const stale = () => fs.readdirSync(tmp).filter((n) => n.startsWith('broker.sock.stale-'));
   const job = { ...s.job, broker_harnesses: ['claude'], agent_tmp: tmp, broker: path.join(s.base, 'w'.repeat(90), B.FILE) };
