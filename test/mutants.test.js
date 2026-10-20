@@ -10,6 +10,7 @@ const { readText } = require('../scripts/text');
 const { runContained, windowsCommandLine } = require('../scripts/mutants');
 const { detachedAlive } = require('./helpers');
 const { killPid } = require('./signals');
+const { readPublished } = require('./atomic-file');
 
 const SYSTEMD_ONLY = 'systemd scopes exist only on Linux';
 
@@ -18,7 +19,7 @@ const SYSTEMD_ONLY = 'systemd scopes exist only on Linux';
 const recordPid = (file, pid) => `require('node:fs').appendFileSync(${JSON.stringify(file)}, JSON.stringify({ pid: ${pid}, recordedAt: Date.now() }) + '\\n')`;
 
 function recorded(file) {
-  return fs.existsSync(file) ? fs.readFileSync(file, 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse) : [];
+  return fs.existsSync(file) ? readPublished(file, 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse) : [];
 }
 
 // The recorded processes still running. Windows reads every creation time in one

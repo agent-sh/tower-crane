@@ -83,8 +83,8 @@ jobs:
     name: repeat (windows-latest, node 26)
     if: github.event_name != 'pull_request'
     runs-on: windows-latest
-    # About 50 to 65 minutes: ten passes of the authority files take about 16 and ten of
-    # the mutation tests about 25, within their 40-minute step limit.
+    # About 40 to 50 minutes: ten passes of the authority files take about 16 and ten of
+    # the mutation tests about 15, within their 40-minute step limit.
     timeout-minutes: 85
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

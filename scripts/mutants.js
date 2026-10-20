@@ -428,8 +428,9 @@ public static class TowerCraneMutantJob {
     startup.cb = Marshal.SizeOf(typeof(StartupInfo));
     startup.dwFlags = 0x100;
     startup.hStdInput = empty;
+    // Both streams share stdout: PowerShell writes its own progress records to stderr.
     startup.hStdOutput = GetStdHandle(-11);
-    startup.hStdError = GetStdHandle(-12);
+    startup.hStdError = startup.hStdOutput;
     List<string> entries = new List<string>(env);
     entries.Sort(delegate (string a, string b) { return string.Compare(Name(a), Name(b), StringComparison.OrdinalIgnoreCase); });
     StringBuilder block = new StringBuilder();
@@ -494,6 +495,7 @@ public static class TowerCraneMutantJob {
 
 // The spec waits in the pipe while Windows PowerShell 5.1 compiles the helper as C# 5.
 const JOB_SCRIPT = `$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
 Add-Type -IgnoreWarnings -TypeDefinition @'
 ${JOB_SOURCE}
 '@
@@ -535,6 +537,7 @@ async function runJob(command, argv, { cwd, env, limit, timeout }) {
     limit, wait: WINDOWS_WAIT_MS, marker }).replace(/[\u007f-\uffff]/g, ch => `\\u${ch.charCodeAt(0).toString(16).padStart(4, '0')}`);
   child.stdin.write(`${spec}\n`);
   let output = '';
+  let helper = '';
   let reason = null;
   let force;
   let deadline;
@@ -550,7 +553,7 @@ async function runJob(command, argv, { cwd, env, limit, timeout }) {
     }
   };
   child.stdout.on('data', capture);
-  child.stderr.on('data', capture);
+  child.stderr.on('data', chunk => { helper = (helper + chunk.toString()).slice(-8192); });
   const stop = why => {
     reason ||= why;
     if (child.stdin.writable) child.stdin.end('stop\n');
@@ -571,7 +574,7 @@ async function runJob(command, argv, { cwd, env, limit, timeout }) {
     const at = output.lastIndexOf(`\n${marker} {`);
     const report = at < 0 ? null : JSON.parse(output.slice(at + marker.length + 2).split('\n')[0]);
     if (at >= 0) output = output.slice(0, at);
-    if (!report || status !== 0) throw new Error(`cannot contain the mutant run in a Windows job (${signal || status}):\n${output}`);
+    if (!report || status !== 0) throw new Error(`cannot contain the mutant run in a Windows job (${signal || status}):\n${output}\n${helper}`);
     if (report.error !== undefined) {
       // ERROR_FILE_NOT_FOUND and ERROR_PATH_NOT_FOUND, as Node reports a missing executable.
       const code = [2, 3].includes(report.error) ? 'ENOENT' : `WIN32_${report.error}`;
