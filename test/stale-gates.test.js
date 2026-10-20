@@ -129,6 +129,30 @@ test('a queued clean refresh runs without replaying old notifications and rework
   assert.equal(h.github().prs['7'].state, 'OPEN');
 });
 
+for (const gate of ['tests', 'clean', 'ci']) {
+  test(`a recorded ${gate} failure at an accepted head leaves the queue for rework`, (t) => {
+    const h = accepted(t);
+    if (gate === 'tests') {
+      h.ok(['project', 'set', '--tests-mode', 'run-only', '--tests-cmd',
+        'node -e "require(\'node:assert/strict\').equal(require(\'./value\'), 0)"']);
+    } else if (gate === 'clean') h.env.FIXTURE_GATE_OK = '0';
+    else {
+      const github = h.github();
+      github.ci[h.sha] = 'failure';
+      h.saveGithub(github);
+    }
+    assert.equal(h.run(['check', gate, 'T1']).code, 1);
+    h.run(['merge', '--accepted', '--agent', 'orchestrator']);
+    const task = h.readState('tasks.json').tasks[0];
+    assert.equal(task.status, 'rework');
+    assert.equal(task.revision, 2);
+    const reworks = h.logs().filter((e) => e.cmd === 'rework' && e.task === 'T1');
+    assert.equal(reworks.length, 1);
+    assert.equal(reworks[0].detail.gate, gate);
+    assert.equal(h.github().prs['7'].state, 'OPEN');
+  });
+}
+
 test('restoring a cleanup pin queues and runs an accepted task blocked by missing configuration', (t) => {
   const h = accepted(t);
   h.ok(['project', 'set', '--clean-cmd', 'null']);
@@ -156,6 +180,8 @@ for (const change of ['source', 'empty']) {
     const tip = h.git(['rev-parse', 'HEAD']);
     h.git(['switch', '-q', 'fixture-change']);
     const count = h.logs().filter((e) => e.cmd === 'check ci').length;
+    const report = h.json(['task', 'show', 'T1']).gates.gates.find((g) => g.type === 'ci');
+    assert.equal(report.ok, change === 'empty', 'reports use the merged result, not a base-only SHA change');
     h.ok(['merge', '--accepted', '--agent', 'orchestrator']);
     assert.equal(h.github().prs['7'].state, 'MERGED');
     const ci = h.readState('tasks.json').tasks[0].evidence.findLast((e) => e.type === 'ci');
@@ -163,6 +189,59 @@ for (const change of ['source', 'empty']) {
     assert.equal(h.logs().filter((e) => e.cmd === 'check ci').length, count + 1);
   });
 }
+
+for (const [change, ref] of [
+  ['empty', 'main'], ['empty', 'refs/remotes/origin/main'],
+  ['checked changes', 'main'], ['source', 'main'], ['source', 'refs/remotes/origin/main'],
+]) {
+  test(`local CI reports ${change === 'source' ? 'invalidate a changed' : 'preserve an identical'} merge after ${change} advances ${ref}`, (t) => {
+    const h = accepted(t);
+    h.ok(['project', 'set', '--ci-local', localCI]);
+    h.ok(['check', 'ci', 'T1']);
+    const old = h.readState('tasks.json').tasks[0].evidence.findLast((e) => e.type === 'ci');
+    const base = h.git(['rev-parse', 'main']);
+    let tip;
+    if (change === 'source') {
+      h.git(['switch', '-q', 'main']);
+      fs.appendFileSync(path.join(h.repo, 'README.md'), 'Changed merged result.\n');
+      h.git(['add', 'README.md']);
+      h.git(['commit', '-qm', 'change base source']);
+      tip = h.git(['rev-parse', 'HEAD']);
+      h.git(['switch', '-q', 'fixture-change']);
+      h.git(['update-ref', 'refs/heads/main', base]);
+    } else {
+      const tree = change === 'empty' ? `${base}^{tree}` : `${h.sha}^{tree}`;
+      tip = h.git(['commit-tree', tree, '-p', base, '-m', 'base advances']);
+    }
+    h.git(['update-ref', ref === 'main' ? 'refs/heads/main' : ref, tip]);
+    const count = h.logs().filter((e) => e.cmd === 'check ci').length;
+    const shown = h.json(['task', 'show', 'T1']);
+    const ci = shown.gates.gates.find((g) => g.type === 'ci');
+    assert.equal(ci.ok, change !== 'source');
+    assert.deepEqual(shown.evidence.findLast((e) => e.type === 'ci'), old);
+    assert.equal(h.logs().filter((e) => e.cmd === 'check ci').length, count, 'a report does not rerun CI');
+    if (change === 'source') assert.match(ci.reason, /current merged tree/);
+  });
+}
+
+test('a local CI base ahead of origin is reported once instead of refreshed indefinitely', (t) => {
+  const h = accepted(t);
+  const origin = path.join(h.base, 'origin.git');
+  h.git(['clone', '--bare', h.repo, origin]);
+  h.git(['remote', 'set-url', 'origin', origin]);
+  h.git(['switch', '-q', 'main']);
+  h.git(['commit', '--allow-empty', '-qm', 'local base ahead']);
+  h.git(['switch', '-q', 'fixture-change']);
+  h.ok(['project', 'set', '--ci-local', localCI]);
+  h.ok(['check', 'ci', 'T1']);
+  const count = h.logs().filter((e) => e.cmd === 'check ci').length;
+  const result = h.run(['merge', '--accepted', '--agent', 'orchestrator']);
+  assert.equal(result.code, 1);
+  assert.match(result.stdout, /local CI selected base .* does not match fetched base/);
+  assert.equal(h.logs().filter((e) => e.cmd === 'check ci').length, count + 1);
+  assert.equal(h.github().prs['7'].state, 'OPEN');
+  assert.equal(h.readState('tasks.json').tasks[0].status, 'accepted');
+});
 
 test('accept refreshes a stale clean policy before accepting', (t) => {
   const h = accepted(t);
