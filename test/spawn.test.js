@@ -15,6 +15,7 @@ const stack = require('./stack-fixture');
 const A = require('../lib/agents');
 const S = require('../lib/state');
 const { readPublished } = require('./atomic-file');
+const { scopeEnv, harnessArgv } = require('./containment-plan');
 const SHORT_WAIT = path.join(__dirname, 'fixtures', 'lock-wait.js');
 
 function setup(t) {
@@ -401,7 +402,8 @@ test('spawn --dry-run builds each harness command', (t) => {
   pluginRoot(empty);
   for (const [flags, expected] of cases) {
     setRung(h, 'small', flags);
-    const out = dry(h, 'small', { TOWER_CRANE_PLUGIN_ROOT: empty });
+    const out = dry(h, 'small', { ...scopeEnv(h), TOWER_CRANE_PLUGIN_ROOT: empty });
+    assert.equal(out.containment.backend, process.platform === 'linux' ? 'cgroup' : 'watchdog');
     const prompt = out.argv.find((a) => a.includes('## Task'));
     assert.ok(prompt, `prompt present for ${flags.join(' ')}`);
     const argv = expected(prompt, out.env.TOWER_CRANE_STATE);
@@ -410,7 +412,7 @@ test('spawn --dry-run builds each harness command', (t) => {
       if (out.argv.includes('--resume')) assert.equal(out.session_id, out.argv[out.argv.indexOf('--resume') + 1]);
       else argv.push('--session-id', out.session_id);
     }
-    assert.deepEqual(out.argv, argv, flags.join(' '));
+    assert.deepEqual(harnessArgv(out.argv), argv, flags.join(' '));
   }
   const out = dry(h, 'small');
   assert.equal(out.agent, 'small-T1-1');

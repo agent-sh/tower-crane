@@ -489,7 +489,7 @@ Agent launches discard `NODE_TEST_*` values from all environment sources after m
 
 The env file supports blank lines, `#` and `;` comment lines, `NAME=value`, unquoted backslash escapes and line continuations, single-quoted multiline values, and double-quoted multiline values with systemd's escapes for `"`, `\`, `$` and backticks. There is no shell evaluation, variable substitution or `export` prefix. An initial quote delimits the whole value; quotes inside unquoted text remain literal. A name set twice keeps the last value. Invalid lines, reserved names, unfinished quotes and unreadable files fail the spawn with a path and line or error code, without printing contents. The CLI supervisor reads the file once for each route and keeps those values for same-route retries; a route switch reads the target route's file and a fresh dispatch rereads it. Dry-run never reads the file. Only the path is saved in project, rung and dispatch configuration. File variable names and values are absent from generated settings, events, job files and CLI output. The monitor's state-writing subprocesses do not inherit them. `env` values from the project or a rung are stored only in `project.json`, and those of a personal fallback route only in the user file: events (including `ladder set`, `project set` and every spawn, retry, fallback and exit event), the spawn receipt, the spawn job file in `~/.cache/tower-crane` and spawn output name each variable with the value `[redacted]`. The dispatching CLI hands the values to the spawn monitor once each, however many job fields name them, in its `TOWER_CRANE_SPAWN_SECRETS` environment variable, which the monitor removes before it starts any process. Values too large for one environment entry (Linux caps one at 128 KiB, Windows at 32767 characters) go instead to a 0600 `secrets.json` beside the job file, named by `TOWER_CRANE_SPAWN_SECRETS_FILE`, which the monitor deletes when it reads it; a monitor that never starts leaves that file until the dispatch removes its spawn directory. No value travels in argv. A process listing (`ps -eww`, `/proc/<pid>/cmdline`) shows no value; a claude sandbox's own PID namespace hides other agents' `/proc/<pid>/environ`. Session resume compares routes by variable names, so a changed value alone does not prevent a resume. `test/secret-canary.test.js` places a unique canary in rung and project env, an env_file and the harness credentials, then scans every file, event, output and process listing a run leaves, on success, a harness crash, a fallback switch and a supervisor stop; its opt-in live tests (`TOWER_CRANE_LIVE_CLAUDE=1`, `TOWER_CRANE_LIVE_CODEX=1`) also probe another agent's view of a running agent's `/proc` entries and home and scan the real harness transcripts and sessions. Harness output and transcripts are persisted as usual, so agents must not print secrets or put them in prompts.
 
-`scope` wraps the agent process itself on the host with `systemd-run --user --scope --quiet --expand-environment=no -p PROPERTY=VALUE ... -- COMMAND`, so its descendants inherit the limits. It applies to every harness and every retry, and the agent environment gets `TOWER_CRANE_SCOPED=1`. Property names contain ASCII letters and digits and begin with a letter; values are non-blank strings without NUL bytes or newlines. Systemd validates property support and values. Real spawn refuses configured scopes without Linux or an executable `systemd-run` on PATH; failed access to the user manager or invalid properties fails the launch. Unconfigured scopes keep portable spawning, including Windows. Dry-run renders the wrapper without invoking systemd. Environment expansion of command arguments is disabled so literal `$VAR` and `${VAR}` in briefs and diffs cannot expose agent environment values in prompts. Systemd versions that lack `--expand-environment=no` reject the scoped launch; there is no fallback with expansion enabled. The host CLI needs a working user systemd session. The command sandbox gets no session bus unless the owner sets `sandbox.session_bus` (`project set --session-bus true`; off by default). With it, a claude or codex worker sandbox can reach one socket: the bus at `$XDG_RUNTIME_DIR/bus`. Its commands receive `XDG_RUNTIME_DIR` and `DBUS_SESSION_BUS_ADDRESS`. The rest of the runtime directory stays denied, and spawn refuses while the bus socket is missing. The grant does not make `systemd-run --user --scope` start inside the sandbox. That command connects to the user manager's socket, `$XDG_RUNTIME_DIR/systemd/private`, which stays denied. A live run that granted that socket as well still failed with `Failed to connect to user scope bus via local transport: No data available` from a claude sandbox on systemd 259, and the cause is not known. The risk: a sandboxed command that talks to the bus can start a user unit, and the user manager runs that unit outside the command sandbox, as the user. The unit reaches what the user reaches: the owner key, which every sandbox hides; the gh, claude and codex logins; the user's other files and services. The sandbox confines nothing for such a command. Turn it on only for a project whose commands need the session bus. Codex's sandbox blocks Unix socket connections only with network off; Tower Crane runs it with network on, so before 2026-10-14 every codex agent could reach the bus and run a command on the host with `systemd-run --user`, measured with codex-cli 0.162.1. Both profiles now hide `/run` whole, the bus included unless this setting grants it.
+`scope` adds optional owner properties to the outer containment scope through `systemd-run --user --scope --quiet --expand-environment=no -p PROPERTY=VALUE ... -- COMMAND`; mandatory containment properties follow them. Nested launches use delegated child cgroups and preserve the ancestor caps. Every cgroup launch sets `TOWER_CRANE_SCOPED=1` after its scope is ready. Property names contain ASCII letters and digits and begin with a letter; values are non-blank strings without NUL bytes or newlines. Systemd validates property support and values. A configured outer scope requires Linux and a reachable manager; selected cgroup setup failures fail the launch. A non-delegated caller fence uses the watchdog in place and reports the fence and omitted owner properties. Dry-run prints the real containment runner or systemd argv, limits and scoped environment without launching a scope or creating report files. Environment expansion of command arguments is disabled so literal `$VAR` and `${VAR}` in briefs and diffs cannot expose agent environment values in prompts. Systemd versions that lack `--expand-environment=no` reject the scoped launch; there is no fallback with expansion enabled. The host CLI needs a working user systemd session. The command sandbox gets no session bus unless the owner sets `sandbox.session_bus` (`project set --session-bus true`; off by default). With it, a claude or codex worker sandbox can reach one socket: the bus at `$XDG_RUNTIME_DIR/bus`. Its commands receive `XDG_RUNTIME_DIR` and `DBUS_SESSION_BUS_ADDRESS`. The rest of the runtime directory stays denied, and spawn refuses while the bus socket is missing. The grant does not make `systemd-run --user --scope` start inside the sandbox. That command connects to the user manager's socket, `$XDG_RUNTIME_DIR/systemd/private`, which stays denied. A live run that granted that socket as well still failed with `Failed to connect to user scope bus via local transport: No data available` from a claude sandbox on systemd 259, and the cause is not known. The risk: a sandboxed command that talks to the bus can start a user unit, and the user manager runs that unit outside the command sandbox, as the user. The unit reaches what the user reaches: the owner key, which every sandbox hides; the gh, claude and codex logins; the user's other files and services. The sandbox confines nothing for such a command. Turn it on only for a project whose commands need the session bus. Codex's sandbox blocks Unix socket connections only with network off; Tower Crane runs it with network on, so before 2026-10-14 every codex agent could reach the bus and run a command on the host with `systemd-run --user`, measured with codex-cli 0.162.1. Both profiles now hide `/run` whole, the bus included unless this setting grants it.
 
 Both rendered sandboxes enable network access, including TCP loopback binds and connections. The opt-in real Codex worker test in `test/sandbox-extensions.test.js` checks a loopback server and client along with the toolchain-cache lock and environment-file delivery.
 
@@ -641,19 +641,25 @@ ceiling can be read, resolving missing task limits fails with
 `resource-monitor-failed`. Non-Linux watchdog defaults remain 256 processes.
 On a 24 CPU host with a 40 GiB slice and no tighter ancestor, agent memory stays
 floor(40 GiB / 12), about 3.33 GiB. With a 4,000-task, 14 GiB effective budget,
-three gate executors give each command 666 tasks and about 2.33 GiB, above the
-measured 314-task and 1.01 GB suite peaks. These are containment defaults,
+three gate executors give each command 666 tasks and about 2.33 GiB. The final
+default-gate proof recorded 303 tasks and 1.196 GB under caps of 666 tasks and
+2.5 GB (`~/.cache/tower-crane/tasks/9b27247cfd0b/T404/default-gate-proof.json`).
+Measured peaks must stay at or below two thirds of each cap, leaving at least
+one third headroom. These are containment defaults,
 not admission control across activities, sessions or projects.
 
 On Linux with cgroup v2 and a reachable systemd user manager, a launch uses a
 named transient user scope (registered through D-Bus, or `systemd-run` when
 optional scope properties are set) in the caller's slice with `TasksMax`, `MemoryMax`,
 `MemorySwapMax=0`, `OOMPolicy=continue` and delegated memory/pids controllers.
-The scope's runner sets `memory.oom.group=1`, so a cgroup OOM stops the
-whole attempt, and the supervisor fails the attempt with `resource-memory-max`
-when the scope's `memory.events.local` reports the OOM. `OOMPolicy=kill` is
-not used: systemd 255 counts an OOM anywhere below a scope as the scope's own
-and stops the whole scope for an OOM in a nested attempt.
+The runner sets `memory.oom.group=1` for attempts, so a cgroup OOM stops the
+whole attempt, and the supervisor reports `resource-memory-max` from local OOM
+events. Orchestrator fleet scopes use `memory.oom.group=0`; an OOM in an attempt does not group-kill its healthy
+siblings and orchestrator. The fleet monitor does not turn its local OOM
+event into an aggregate kill. The kernel chooses the victim when the fleet
+cap is reached; each attempt still has its own group-killing boundary.
+`OOMPolicy=kill` is not used: systemd 255 counts an OOM anywhere below a
+scope as the scope's own and stops the whole scope for a nested attempt's OOM.
 The supervising process remains outside the attempt's scope so it can record a
 failure. The scope's descendants include harness Task/sub-agents, MCP servers,
 shells and tests even when they detach or change process groups. A nested Tower
@@ -667,7 +673,8 @@ slice that manager can place a scope in; the scope goes into the user
 manager's slice of the same name and keeps its own caps. Setting
 `TasksMax`, `MemoryMax`, `MemorySwapMax`, `OOMPolicy`, `Delegate` or `Slice`
 through `init`, `project set` or `ladder set` prints a `warning:` line naming
-the replaced keys. The launched command and its descendants get
+the replaced keys; each command's JSON reply includes the same `warnings`
+array when nonempty. The launched command and its descendants get
 `TOWER_CRANE_SCOPED=1` once the scope or delegated child is ready.
 
 A caller already inside a fence of its own, the innermost cgroup below its
@@ -675,7 +682,9 @@ slice with a finite `memory.max` or with `memory` and `pids` enabled in
 `cgroup.subtree_control`, keeps its attempts inside that fence. When the fence
 delegates those controllers, each attempt is a nested child cgroup as under a
 Tower Crane scope; otherwise the attempt runs in place under the watchdog, and
-the fence's own caps still hold in the kernel. A finite `pids.max` alone does
+the fence's own caps still hold in the kernel. Stderr and spawn containment
+metadata name that fence and warn that the owner's scope properties were not
+applied. A finite `pids.max` alone does
 not mark a fence, since systemd's `DefaultTasksMax` puts one on every scope.
 Inside a fence, optional owner `scope` properties do not apply; the fence's own
 properties do. Start a fence through `lib/containment-runner.js`, as the test
@@ -694,11 +703,18 @@ processes, the keeper reads `Result` and settles the scope when it ends, and the
 supervisor leaves the scope alone. Report directories are
 `tower-crane-containment-<supervisor pid>-*` under `XDG_CACHE_HOME` (else
 `~/.cache`), removed when the attempt closes. A supervisor killed before then
-leaves both behind, so the first contained launch of each process removes the
-report directories and resets the failed `tower-crane-<pid>-*.scope` units
+leaves both behind, so contained launches and the idle `wait` timer sweep once
+per minute. They remove the
+report directories and reset the failed `tower-crane-<pid>-*.scope` units
 whose supervisor pid no longer exists and that no running keeper names.
+Legacy `tower-crane-containment-XXXXXX` directories lack a pid and are removed
+only when their modification time predates the current boot, proving that no
+live supervisor can own them.
 Failure to set up a scope or delegated child fails the launch with
 `resource-scope-failed`; it never silently falls back after selecting cgroups.
+Cleanup also removes empty delegated subgroups left by partial setup or a
+launcher that exited before its delayed cleanup. A timeout or abort before the
+runner's report remains `ETIMEDOUT` or `ABORT_ERR` in the gate receipt.
 
 The monitor observes `pids.events` and `memory.events`, using local event files
 where available so a child's smaller cap does not fail its healthy parent.
@@ -710,13 +726,15 @@ blocked reason and containment settings; status and the inbox show that reason.
 Gate command failures put the reason in their summary and receipt/event where
 applicable. The whole attempt is stopped; an unrelated scope is left running.
 Normal agent exit has a different ownership boundary. Independently dispatched
-supervisors, their agents, and wait/check/accept/merge controllers keep working;
+supervisors, their agents, and registered orchestrator wait/check/accept/merge controllers keep working;
 the agent's ordinary background processes are stopped. This applies to zero,
 nonzero and signal exits without a containment failure. The retained work stays
 inside the original cgroup and its aggregate limits. A small detached engine
 keeper watches retained work until it ends; without cgroups it carries the
 original process-count/RSS bound after the launcher exits. A cap or monitoring
-failure still stops the whole retained attempt. Gate commands own everything
+failure still stops the whole retained attempt. With cgroups, fleet memory pressure retains
+the per-attempt boundary, including after a keeper takes over.
+Gate commands own everything
 they start, including nested supervisors, and retain their complete cleanup.
 The spawn API's `containmentDone` promise resolves once normal-exit cleanup
 and any keeper handoff finish.
@@ -724,6 +742,17 @@ Retained controllers still count as users of the original agent's home, cache,
 broker directory and TMPDIR. Cleanup spares them, but home pruning waits until
 their run-marked processes finish. Supervisor subtrees own a different agent's
 files and remain excluded from the original home's liveness check.
+On Windows, cleanup with retained identities stops each identified non-kept
+process individually. It does not tree-kill an ancestor of retained work.
+Full containment cleanup without retained identities still uses `taskkill /T /F`.
+Retention requires recorded dispatch or controller pid/start identities.
+Verified orchestrator CLI commands register `{pid, start, host, role, command}`
+under `controllers/<pid>-<nonce>.json` in their state directory and remove the
+record when they return. Linux uses process start ticks; macOS and Windows use
+the process snapshot's start time. A background orchestrator `wait --inbox`
+therefore survives the harness exit with its existing home and bounds.
+A worker's fixtures named `tower-crane wait` or `spawn-monitor.js`, and forged
+environment markers, grant no retention.
 Containment metadata retains sampled `pids_peak`, `memory_peak_bytes` and
 `refused_forks` from the scope's peak and local event files. Refused forks
 count that scope's cap violations where local events are available.
@@ -748,6 +777,9 @@ The fallback watchdog polls process count and total RSS on a 100 ms cadence,
 skipping overlapping snapshots. Platform snapshot commands have a two second
 deadline. Linux
 reads `/proc`, macOS uses `ps`, and Windows uses PowerShell process snapshots.
+Linux cleanup checks a monotonic 100 ms deadline between freeze snapshots.
+It does not retry a rejected stop for the same process identity, then proceeds
+to best-effort killing of the matched processes.
 It tracks the process group/tree and previously observed descendants across
 detachment, and stops them on a cap or sampling failure
 (`resource-monitor-failed`). This fallback is a sampled bound: forks and memory
@@ -799,7 +831,7 @@ On each admission and tick the governor reads, on Linux:
 
 Every limited cgroup level and the host is a level, and each must fit. The binding level is the one with the least headroom; on this machine it is the agents slice shared by every agent session (`user@1000.service/agents.slice`, `memory.high` 36 GiB, `memory.max` 40 GiB).
 
-A unit's size is the anonymous resident memory (`RssAnon`) of its root processes and their descendants, each process counted once, for the unit whose root is its nearest ancestor: what a cgroup charges and cannot reclaim without swap. A unit whose root runs in a cgroup of its own, apart from the process that admitted it (the per-unit scopes of T404), is that cgroup's use instead, counted the same way without its page cache. Each unit keeps its `expected` size, its last `measured` size and its `peak`.
+A unit's size is the anonymous resident memory (`RssAnon`) of its root processes and their descendants, each process counted once, for the unit whose root is its nearest ancestor: what a cgroup charges and cannot reclaim without swap. A contained unit uses the full attempt scope passed by containment once its report is ready, excluding its page cache. It includes detached grandchildren and nested child groups. Queued registry writes keep that scope path and do not substitute the runner leaf. Uncontained units use the PID-tree measurement. Each unit keeps its `expected` size, its last `measured` size and its `peak`.
 
 ### The budget
 
@@ -1888,9 +1920,9 @@ Both rework and transient retries use the resumable-harness policy in `lib/spawn
 
 Child exit and pipe-close events wake the existing monitor immediately. Progress-path walks and CPU sampling run once per second, independent of state events. The monitor checks lease renewal on that interval or when events change, and caches loaded state until `events.jsonl` size or mtime changes. A one-second interval bounds normal lease and stall observation delay without walking a multi-hour agent's worktree ten times per second.
 
-On POSIX, every natural agent exit terminates the agent's process group, including successful exits. Background processes deliberately left running by the agent are terminated too. The monitor sends SIGTERM to the remaining group, allows five seconds for cleanup, then sends SIGKILL to survivors. Stopping the monitor uses the same shutdown path. The grace period matches the software-gate command runner and lets a harness flush its output. Reruns wait for the previous group to stop and its output pipes to close, including descendants with redirected output. Windows uses `taskkill /T /F` when stopping a live harness. Natural Windows exits send no PID-based tree kill after the parent has exited.
+On POSIX, natural agent exit cleans up its non-retained background processes. For contained launches, containment sends SIGTERM to the identified non-retained processes, allows up to five seconds for cleanup, then sends SIGKILL to survivors. Independently retained work stays within its existing bounds under a keeper. Containment failures stop the whole owned attempt immediately. Fixture or uncontained launches and stopping the monitor use the process-group shutdown path: SIGTERM, five seconds of grace, then SIGKILL. Reruns wait for the previous owned cleanup and output-pipe closure, including descendants with redirected output. Windows stops identified non-kept processes individually when retaining work and uses `taskkill /T /F` for full containment cleanup; it never tree-kills a released harness pid on natural exit.
 
-Once the harness has exited and its group has stopped, the output pipes get the same five seconds more. Waiting for the group first lets SIGKILL end a member that ignores SIGTERM before anything counts as a holder. A process that still holds them then left the group (a dev server or watcher started in a session of its own) or runs on Windows, which has no group. The monitor stops the processes it can still trace to the harness, gives the pipes two seconds to drain (the software-gate runner's drain), then closes them. Output already read stays in the log and the foreground stream. On Linux it stops, with SIGKILL, the processes that carry the launch's own environment marker `TOWERCRANE_SPAWN_RUN_<monitor pid>_<random>` and their descendants, selected by the marker alone, since the exited harness's pid may now lead another group. A process that cleared its environment and left the group is not found. Every supervisor, harness and gate command starts without an inherited `TOWERCRANE_SPAWN_RUN_*` marker, so a task an agent dispatches, or a gate its wait runs, is not that agent's to stop. A gate's own `TOWERCRANE_GATE_RUN_*` marker stays inherited, so whatever a gate command starts stays inside that gate's cleanup. Every supervisor carries `TOWERCRANE_SUPERVISOR`, which its harness does not inherit, and the release never stops a supervisor or anything below it: a dispatch the agent left running, such as a detached `spawn --wait`, is stopped, but the supervisor it started and that task's agent keep working. A supervisor whose foreground dispatch is gone stops forwarding output and keeps its log. On Windows it takes one process snapshot, skipping each process whose command line runs `lib/spawn-monitor.js`, everything below it, and its parent (libuv keeps a child that is not detached, such as a foreground `spawn --wait`'s supervisor, in a job that kills it when that parent dies), of each process that names the harness pid as its parent and started while the harness ran, then each live process that started after a parent found this way; a process whose own parent already exited cannot be traced. Asynchronous PowerShell calls of at most 350 processes each, to stay under the Windows command-line limit, then open every process, read their creation times from CIM as the snapshot did while holding the handles, and stop each through its handle, parents first, only if its creation time equals the snapshot's, so a pid reused since is left alone. A process that exited before its turn is skipped; one that could not be stopped is named on stderr. Other systems close the pipes without stopping a process outside the group. The attempt then finishes as if its pipes had closed: lease renewal stops, a retry or fallback can start, and `spawn --wait` returns the harness's exit code. stderr names the stopped pids, and the final `spawn exit` records `output_held: { pids, error? }`, where `error` says why no process list could be read.
+Once the harness has exited and its group has stopped, the output pipes get the same five seconds more. Waiting for the group first lets SIGKILL end a member that ignores SIGTERM before anything counts as a holder. A process that still holds them then left the group (a dev server or watcher started in a session of its own) or runs on Windows, which has no group. The monitor stops the processes it can still trace to the harness, gives the pipes two seconds to drain (the software-gate runner's drain), then closes them. Output already read stays in the log and the foreground stream. On Linux it stops, with SIGKILL, the processes that carry the launch's own environment marker `TOWERCRANE_SPAWN_RUN_<monitor pid>_<random>` and their descendants, selected by the marker alone, since the exited harness's pid may now lead another group. A process that cleared its environment and left the group is not found. Every supervisor, harness and gate command starts without an inherited `TOWERCRANE_SPAWN_RUN_*` marker, so a task an agent dispatches, or a gate its wait runs, is not that agent's to stop. A gate's own `TOWERCRANE_GATE_RUN_*` marker stays inherited, so whatever a gate command starts stays inside that gate's cleanup. Cleanup spares recorded dispatch supervisors and registered orchestrator `tower-crane wait|check|accept|merge` processes, together with their descendants. It validates pid/start identity rather than trusting command names or `TOWERCRANE_SUPERVISOR`: a dispatch the agent left running, such as a detached `spawn --wait`, is stopped, but the supervisor it started and that task's agent keep working. A supervisor whose foreground dispatch is gone stops forwarding output and keeps its log. On Windows it takes one process snapshot, skipping each recorded supervisor (`lib/spawn-monitor.js`) or registered controller identity, everything below it, and its parent (libuv keeps a child that is not detached, such as a foreground `spawn --wait`'s supervisor, in a job that kills it when that parent dies), of each process that names the harness pid as its parent and started while the harness ran, then each live process that started after a parent found this way; a process whose own parent already exited cannot be traced. Asynchronous PowerShell calls of at most 350 processes each, to stay under the Windows command-line limit, then open every process, read their creation times from CIM as the snapshot did while holding the handles, and stop each through its handle, parents first, only if its creation time equals the snapshot's, so a pid reused since is left alone. A process that exited before its turn is skipped; one that could not be stopped is named on stderr. Other systems close the pipes without stopping a process outside the group. The attempt then finishes as if its pipes had closed: lease renewal stops, a retry or fallback can start, and `spawn --wait` returns the harness's exit code. stderr names the stopped pids, and the final `spawn exit` records `output_held: { pids, error? }`, where `error` says why no process list could be read.
 
 Signal retries use the signal reported by Node's child-process observer. Windows self-termination reports an exit code instead; a Windows adapter can use exit 75 to identify a transient stop.
 
@@ -1904,7 +1936,7 @@ Exit and stall observations are rechecked and deduplicated under the lock, using
 
 The trusted `wait` host releases verified dead claims and fills available worker slots through `spawn --ready`, including todo and rework tasks, on a path of its own beside the event reactions: a gate reaction that runs the full suite does not delay it. This also recovers capacity freed before its cursor. Startup, notifications, the fallback tick and the end of each reaction pass trigger the capacity check, as does a timer set to the earliest `gates.rework_hold_min` hold end, so an ending hold dispatches with no other event; a default zero-timeout cursor snapshot does not. One refill runs at a time in a host, and it skips a task whose own gate reaction is still live. A wait ends, by event, timeout or signal, only once neither its reaction pass nor its refill is running; the refill after a pass's reactions runs even when the deadline or a wake came during the pass, so a slot its rework or merge freed fills before the wait returns. `status` names why automatic refill leaves each ready task undispatched (`not dispatched`; JSON `not_dispatched`): no brief, its gate reaction running, a rework hold until a time, the worker limit with its holders, higher-ranked tasks taking the free slots, the dispatch lock's holder, read without clearing a stale lock, or the host governor's latest worker deferral. Spawn retains its worker limit, urgent-first order followed by unblock count and task id, routing, fallback and locked reservation checks. A failed independent review at the submitted head and revision calls `rework --from-review` before inspecting mergeability or running software gates; a failure whose findings are all in the PR body instead dispatches a body-only worker repair while keeping the task submitted. Findings and their comment link are copied into the reason and brief after the existing locked recheck. Rework increments the revision, so a replayed or stale review cannot send that submission back twice. Slot refill runs only in the trusted `wait` host; `wait --observe` and worker waiters skip it.
 
-Each wait remembers its latest refused dispatch inputs in memory. It retries when ready task data, brief or task-update receipts, project settings, personal ladder-set receipts or worker holders change. Task notes and unchanged fallback ticks do not retry or repeat the stderr diagnostic. A successful batch or a check with no available work clears that refusal. External filesystem or harness repairs can be retried with `spawn --ready` or a new wait. This adds no state fields or retry timer.
+Each wait remembers its latest refused dispatch inputs in memory for one minute. It retries sooner when ready task data, brief or task-update receipts, project settings, personal ladder-set receipts or worker holders change. Task notes and fallback ticks during that minute do not repeat expensive preparation or its stderr diagnostic. The next timer tick after the minute retries unchanged inputs, including external branch or harness repairs with no event. A successful batch or a check with no available work clears that refusal. This adds no persisted retry fields.
 
 The capacity check clears verified dead worker reservations through the same locked path as `spawn --ready` before counting holders. Cancelling the originating task does not hide its dead reservation from this cleanup.
 

@@ -176,7 +176,7 @@ for (const harness of ['codex', 'claude']) {
   });
 }
 
-test('host scopes wrap both harnesses and retries, preserve private env and allow rung overrides', { skip: NO_STUBS || (process.platform !== 'linux' && 'Linux systemd scopes') }, (t) => {
+test('scope fixtures preserve private env and rung overrides across harness retries', { skip: NO_STUBS || (process.platform !== 'linux' && 'Linux systemd scopes') }, (t) => {
   const h = setup(t);
   const bin = path.join(h.base, 'bin');
   fs.mkdirSync(bin);
@@ -216,21 +216,22 @@ process.exit(process.env.TOWER_CRANE_RETRY === '0' ? 75 : 0);
       '--supervision', '{"retries":1,"backoff_ms":1}']);
     h.ok(['project', 'set', '--scope', '{"CPUQuota":"200%","MemoryMax":"8G"}', '--env_file', file]);
     const dry = h.json(['spawn', '--task', 'T1', '--dry-run'], { env });
-    assert.deepEqual(dry.argv.slice(0, 10), ['systemd-run', '--user', '--scope', '--quiet', '--expand-environment=no', '-p', 'CPUQuota=200%', '-p', 'MemoryMax=8G', '--']);
+    assert.ok(dry.containment.tasks_max > 0);
     assert.ok(!JSON.stringify(dry).includes(SECRET_KEY) && !JSON.stringify(dry).includes(SECRET));
     releaseExited(h);
     h.ok(['spawn', '--task', 'T1', '--wait'], { env });
     let attempts = fs.readFileSync(out, 'utf8').trim().split('\n').map(JSON.parse);
     assert.deepEqual(attempts.slice(-2), [{ scoped: '1', retry: '0' }, { scoped: '1', retry: '1' }]);
     let wrappers = fs.readFileSync(wrapped, 'utf8').trim().split('\n').map(JSON.parse);
-    assert.deepEqual(wrappers.slice(-2).map((a) => a.slice(0, 9)), Array(2).fill(dry.argv.slice(1, 10)));
+    assert.deepEqual(wrappers.slice(-2).map((a) => a.slice(0, 9)), Array(2).fill(
+      ['--user', '--scope', '--quiet', '--expand-environment=no', '-p', 'CPUQuota=200%', '-p', 'MemoryMax=8G', '--']));
     h.ok(['ladder', 'set', 'medium', '--scope', '{"MemoryMax":"4G"}']);
     const overridden = h.json(['spawn', '--task', 'T1', '--dry-run'], { env });
-    assert.deepEqual(overridden.argv.slice(0, 8), ['systemd-run', '--user', '--scope', '--quiet', '--expand-environment=no', '-p', 'MemoryMax=4G', '--']);
+    assert.equal(overridden.containment.backend, dry.containment.backend);
     releaseExited(h);
     h.ok(['spawn', '--task', 'T1', '--wait'], { env });
     wrappers = fs.readFileSync(wrapped, 'utf8').trim().split('\n').map(JSON.parse);
-    assert.deepEqual(wrappers.at(-1).slice(0, 7), overridden.argv.slice(1, 8));
+    assert.deepEqual(wrappers.at(-1).slice(0, 7), ['--user', '--scope', '--quiet', '--expand-environment=no', '-p', 'MemoryMax=4G', '--']);
     h.ok(['ladder', 'set', 'medium', '--scope', '{}']);
     const wrapperCount = wrappers.length;
     releaseExited(h);
@@ -239,7 +240,7 @@ process.exit(process.env.TOWER_CRANE_RETRY === '0' ? 75 : 0);
     assert.deepEqual(attempts.slice(-2), [{ scoped: null, retry: '0' }, { scoped: null, retry: '1' }]);
     assert.equal(fs.readFileSync(wrapped, 'utf8').trim().split('\n').length, wrapperCount);
     h.ok(['ladder', 'set', 'medium', '--clear', 'scope']);
-    assert.deepEqual(h.json(['spawn', '--task', 'T1', '--dry-run'], { env }).argv.slice(0, 10), dry.argv.slice(0, 10));
+    assert.deepEqual(h.json(['spawn', '--task', 'T1', '--dry-run'], { env }).containment, dry.containment);
     noFileSecrets(h.state);
   }
 });
