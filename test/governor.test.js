@@ -230,6 +230,16 @@ test('past the stop line a running gate stops without a verdict and says why', {
   assert.ok(h.json(['inbox']).items.some((i) => i.kind === 'governor_stopped' && i.task === 'T1' && /95% stop line/.test(i.reason)));
 });
 
+test('a process that outlives its test does not bring back the removed fake host', (t) => {
+  const h = makeRepo(t);
+  const env = { ...h.env, TOWER_CRANE_HOST_ROOT: writeHost(path.join(h.base, 'removed-host')) };
+  G.tick(env);
+  assert.equal(fs.existsSync(G.registryFile(env)), true, 'a live fake host records its registry');
+  fs.rmSync(env.TOWER_CRANE_HOST_ROOT, { recursive: true });
+  assert.throws(() => G.tick(env), { code: 'ENOENT' });
+  assert.equal(fs.existsSync(env.TOWER_CRANE_HOST_ROOT), false);
+});
+
 test('a gate that joins a run already going takes no place in the budget', { skip: linuxOnly }, async (t) => {
   const h = makeRepo(t);
   heldGate(h);

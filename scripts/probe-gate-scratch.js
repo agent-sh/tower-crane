@@ -35,11 +35,10 @@ function probe({ root = ROOT, cache, command, environment = process.env } = {}) 
     if (key.startsWith('TOWER_CRANE_') || key.startsWith('TC_TEST_') || key === 'NODE_TEST_CONTEXT') delete env[key];
   }
   // Tests use an isolated governor; host measurements still use the real host.
-  if (environment.TOWER_CRANE_HOST_ROOT) {
-    env.TOWER_CRANE_HOST_ROOT = environment.TOWER_CRANE_HOST_ROOT;
-  } else if (environment.NODE_TEST_CONTEXT || process.env.NODE_TEST_CONTEXT) {
-    env.TOWER_CRANE_HOST_ROOT = require('../test/host').writeHost(path.join(run, 'host'));
-  }
+  // A fake host made here is written inside the try below, so the run's removal covers it.
+  const fakeHost = !environment.TOWER_CRANE_HOST_ROOT && (environment.NODE_TEST_CONTEXT || process.env.NODE_TEST_CONTEXT);
+  if (environment.TOWER_CRANE_HOST_ROOT) env.TOWER_CRANE_HOST_ROOT = environment.TOWER_CRANE_HOST_ROOT;
+  else if (fakeHost) env.TOWER_CRANE_HOST_ROOT = path.join(run, 'host');
   Object.assign(env, {
     TMPDIR: outer, TMP: outer, TEMP: outer,
     TOWER_CRANE_TMP: gates,
@@ -69,6 +68,7 @@ function probe({ root = ROOT, cache, command, environment = process.env } = {}) 
     return { data, status: out.status, stderr: out.stderr };
   };
   try {
+    if (fakeHost) require('../test/host').writeHost(env.TOWER_CRANE_HOST_ROOT);
     for (const dir of [outer, gates]) fs.mkdirSync(dir);
     result.sha = cp.execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, env, encoding: 'utf8' }).trim();
     call(['init', '--name', 'Gate scratch proof', '--goal', 'Measure full-gate scratch cleanup',
