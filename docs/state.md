@@ -522,7 +522,7 @@ docs/cli.md lists the command each harness gets.
 
 `ci.required` is an optional array of non-blank strings naming hosted check runs or literal, case-sensitive prefixes. Each entry must match at least one non-ignored run at the submitted sha. Every matching run must have status `completed` and conclusion `success`; skipped, neutral, unfinished and capped runs do not satisfy it. A prefix requires all matching runs that exist, so enumerate full matrix job names to detect a missing member. Only the latest run of each check name and app counts, ordered by `started_at` and then `id`; a run that has not started has no `started_at` and is current when its `id` is above the latest started run's. A rerun or a reopened PR supersedes the older runs of that name, so a failed run that a later run replaced does not block. For suites without workflow-run mapping, a completed, failed suite does not block when every run it reports was read and superseded by a newer run; an unfinished suite, or one whose reported runs were not all read, still blocks. Configure it with `project set --ci-required JSON` or `init --ci-required JSON`; entries are trimmed. An empty list, `null` or an absent field imposes no named-run requirements. The CLI preserves other `ci` fields; `--ci-required null` removes only `required`. Malformed lists fail the hosted CI gate.
 
-Same-repository Tower Crane PRs run one hosted job, `checks (shared files)`, so the project pins `["checks (shared files)"]` and runs the full suite in the local tests gate. Fork PR test jobs are `["test (windows-latest, node 26, shard 1/3)","test (windows-latest, node 26, shard 2/3)","test (windows-latest, node 26, shard 3/3)"]`. To require every fork PR shard, use this three-name list as `ci.required`. Pushes to `main`, the daily schedule and manual runs add the six Linux jobs: `test (ubuntu-latest, node 26, shard <i>/3)` and `test (ubuntu-latest, node 24, shard <i>/3)`, each with `i` equal to 1, 2 and 3. Those runs have nine test jobs in total, plus `repeat (windows-latest, node 26)` for the Windows flake repeats. Requiring the Linux or repeat names at a PR head fails the CI gate because those jobs run only in the full matrix.
+Same-repository Tower Crane PRs run one hosted job, `checks (shared files)`, so the project pins `["checks (shared files)"]` and runs the full suite in the local tests gate. Fork PR test jobs are `["test (windows-latest, node 26, shard 1/4)","test (windows-latest, node 26, shard 2/4)","test (windows-latest, node 26, shard 3/4)","test (windows-latest, node 26, shard 4/4)"]`. To require every fork PR shard, use this four-name list as `ci.required`. Pushes to `main`, the daily schedule and manual runs add the six Linux jobs: `test (ubuntu-latest, node 26, shard <i>/3)` and `test (ubuntu-latest, node 24, shard <i>/3)`, each with `i` equal to 1, 2 and 3. Those runs have ten test jobs in total, plus `repeat (windows-latest, node 26)` for the Windows flake repeats. Requiring the Linux or repeat names at a PR head fails the CI gate because those jobs run only in the full matrix.
 
 Hosted CI fetches all pages of GitHub Actions workflow runs for the submitted head when a non-ignored `github-actions` suite exists. Runs are grouped by workflow path (name when path is absent) and event. The latest run is ordered by `created_at`, then `id`; missing timestamps fall back to `id`. Older runs with a distinct `check_suite_id` are recorded as superseded in the receipt summary. Their Actions suites and linked check runs are excluded even when the old jobs are absent from the commit check-run listing. The latest suite still must be green. Different paths, events, heads and apps cannot supersede each other; missing workflow identity or event cannot prove supersession. Supersession also requires the latest run to map to a listed Actions suite; unmapped suites retain the check-run rule above. Failure to fetch workflow runs fails the gate.
 
@@ -635,9 +635,12 @@ not admission control across activities, sessions or projects.
 On Linux with cgroup v2 and a reachable systemd user manager, a launch uses a
 named transient user scope (registered through D-Bus, or `systemd-run` when
 optional scope properties are set) in the caller's slice with `TasksMax`, `MemoryMax`,
-`MemorySwapMax=0`, `OOMPolicy=kill` and delegated memory/pids controllers.
-`OOMPolicy=kill` sets `memory.oom.group=1`, so a cgroup OOM stops the
-whole attempt.
+`MemorySwapMax=0`, `OOMPolicy=continue` and delegated memory/pids controllers.
+The scope's runner sets `memory.oom.group=1`, so a cgroup OOM stops the
+whole attempt, and the supervisor fails the attempt with `resource-memory-max`
+when the scope's `memory.events.local` reports the OOM. `OOMPolicy=kill` is
+not used: systemd 255 counts an OOM anywhere below a scope as the scope's own
+and stops the whole scope for an OOM in a nested attempt.
 The supervising process remains outside the attempt's scope so it can record a
 failure. The scope's descendants include harness Task/sub-agents, MCP servers,
 shells and tests even when they detach or change process groups. A nested Tower
@@ -645,7 +648,10 @@ Crane launch creates a delegated child cgroup within the inherited scope. Its
 own cap and every ancestor's aggregate cap remain enforced by the kernel.
 Optional owner `scope` properties apply to the outer scope; mandatory resource
 properties take precedence, and `scope: {}` only clears optional properties.
-An optional `Slice` property cannot override the caller's slice. Setting
+An optional `Slice` property cannot override the caller's slice. A caller
+outside its user manager, such as a hosted CI runner's system service, has no
+slice that manager can place a scope in; the scope goes into the user
+manager's slice of the same name and keeps its own caps. Setting
 `TasksMax`, `MemoryMax`, `MemorySwapMax`, `OOMPolicy`, `Delegate` or `Slice`
 through `init`, `project set` or `ladder set` prints a `warning:` line naming
 the replaced keys. The launched command and its descendants get
@@ -664,8 +670,13 @@ scope below does, to delegate it.
 
 A launch cleans up its unit in the user manager and its cache files. After the
 attempt exits, the supervisor waits up to five seconds for its scope to settle
-and resets it if the manager left it failed, as an OOM does; `Result=oom-kill`
-is read before that reset. When a keeper takes over the scope's retained
+and resets it if the manager left it failed; `Result=oom-kill` is read before
+that reset. The manager removes an emptied scope's cgroup at once, so the
+supervisor and a keeper also watch the scope's `memory.events.local`. The kernel
+notifies that file at most every 10 ms, so a cap event starts a 20 ms window in
+which they read its counters every millisecond, finding the OOM the kernel
+counts before it kills. A scope that stays at its cap opens at most one window
+every 100 ms, and the reads stop once the scope is empty. When a keeper takes over the scope's retained
 processes, the keeper reads `Result` and settles the scope when it ends, and the
 supervisor leaves the scope alone. Report directories are
 `tower-crane-containment-<supervisor pid>-*` under `XDG_CACHE_HOME` (else
@@ -740,7 +751,7 @@ their real systemd probes inside an independent test scope:
 
 ```sh
 systemd-run --user --scope --slice="$(node -p 'require("./lib/containment").callerSlice()')" \
-  -p TasksMax=200 -p MemoryMax=1G -p MemorySwapMax=0 -p OOMPolicy=kill -p Delegate=yes \
+  -p TasksMax=200 -p MemoryMax=1G -p MemorySwapMax=0 -p OOMPolicy=continue -p Delegate=yes \
   node lib/containment-runner.js '{"tasks_max":200,"memory_max_bytes":1073741824}' '' safety \
   node test/run.js --test-concurrency=1 test/containment.test.js
 ```
