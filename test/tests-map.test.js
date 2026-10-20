@@ -215,3 +215,277 @@ setTimeout(() => process.exit(0), 10000); // wait-allow: mapping diagnostics mus
   assert.equal(task.status, 'submitted');
   assert.equal(task.evidence.at(-1).infrastructure_failure, true);
 });
+
+function incrementalFixture(t, settings = { 'docs/**': ['test/mapped.test.js'], '**/*.md': [] }, flags = []) {
+  const h = fixture(t, null);
+  h.ok(['project', 'set', '--ci-required', '[]', ...flags]);
+  fs.mkdirSync(path.join(h.repo, 'tools'), { recursive: true });
+  fs.writeFileSync(path.join(h.repo, 'tools/tests-map.json'), JSON.stringify(settings));
+  h.git(['add', '.']);
+  h.git(['commit', '-qm', 'repository suite map']);
+  h.ok(['submit', 'T1', '--sha', h.git(['rev-parse', 'HEAD']), '--agent', 'worker']);
+  const full = check(h);
+  assert.equal(full.receipt.head_mode, 'full');
+  h.fullSha = full.sha;
+  return h;
+}
+
+function resubmit(h, file, content = 'Changed prose.\n') {
+  fs.mkdirSync(path.dirname(path.join(h.repo, file)), { recursive: true });
+  fs.writeFileSync(path.join(h.repo, file), content);
+  h.git(['add', '.']);
+  h.git(['commit', '-qm', 'resubmission delta']);
+  h.ok(['rework', 'T1', '--reason', 'resubmission']);
+  h.ok(['claim', 'T1', '--agent', 'worker']);
+  h.env.FIXTURE_SHA = h.git(['rev-parse', 'HEAD']);
+  h.ok(['submit', 'T1', '--sha', h.env.FIXTURE_SHA, '--agent', 'worker']);
+}
+
+test('docs resubmission uses the repository seed and retains the full pass across rework', (t) => {
+  const h = incrementalFixture(t);
+  resubmit(h, 'docs/state.md');
+  const result = check(h);
+  assert.equal(result.receipt.head_mode, 'incremental');
+  assert.equal(result.receipt.incremental_from, h.fullSha);
+  assert.deepEqual(result.receipt.head_tests, ['test/mapped.test.js']);
+  const runs = result.commands.filter((c) => c.command !== 'git');
+  assert.equal(runs[0].command, `${runner} ${shellQuote('test/mapped.test.js')}`);
+  assert.equal(runs[1].status, 0);
+  assert.notEqual(runs[2].status, 0, 'the failing-before proof still runs');
+  assert.equal(h.json(['task', 'show', 'T1']).gates.gates.find((g) => g.type === 'tests').ok, true);
+  h.ok(['check', 'clean', 'T1', '--agent', 'worker']);
+  h.ok(['project', 'set', '--repo', 'acme/widget']);
+  const ci = h.run(['check', 'ci', 'T1', '--agent', 'worker', '--json']);
+  assert.equal(ci.code, 0, ci.stdout + ci.stderr);
+  h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--ok',
+    '--sha', result.sha, '--agent', 'owner']);
+  h.ok(['accept', 'T1']);
+  h.ok(['merge', 'T1']);
+});
+
+test('incremental head can select no suites without invoking a default full runner', (t) => {
+  const h = incrementalFixture(t, { '**/*.md': [] });
+  resubmit(h, 'docs/state.md');
+  const result = check(h);
+  assert.equal(result.receipt.head_mode, 'incremental');
+  assert.deepEqual(result.receipt.head_tests, []);
+  assert.equal(result.commands.filter((c) => c.command !== 'git').length, 2, 'only the scoped proof runs');
+  assert.equal(h.json(['task', 'show', 'T1']).gates.gates.find((g) => g.type === 'tests').ok, true);
+});
+
+test('incremental selection falls back for uncovered deltas and changed policy', (t) => {
+  const cases = [
+    ['unmapped.js', 'module.exports = 1;\n', []],
+    ['tools/tests-map.json', '{}', []],
+    ['package.json', '{}', []],
+    ['test/run.js', 'console.log("runner");\n', ['--tests-paths', '["test/**"]']],
+    ['test/helpers.js', 'module.exports = 1;\n', ['--tests-paths', '["test/**"]']],
+    ['test/fixtures/value.json', '{}', []],
+    ['docs/state.md', 'Changed prose.\n', ['--tests-keep', '["docs/**"]']],
+    ['docs/state.md', 'Changed prose.\n', ['--tests-map', '{"docs/**":[]}']],
+  ];
+  for (const [file, content, flags] of cases) {
+    const h = incrementalFixture(t);
+    if (flags.length) h.ok(['project', 'set', ...flags]);
+    resubmit(h, file, content);
+    const result = check(h);
+    assert.equal(result.receipt.head_mode, 'full', file + JSON.stringify(flags));
+    assert.equal(result.commands.find((c) => c.command !== 'git').command, fullCommand);
+  }
+});
+
+test('base merges participate in the incremental delta and missing full evidence blocks reuse', (t) => {
+  const h = incrementalFixture(t);
+  h.git(['switch', 'main']);
+  fs.writeFileSync(path.join(h.repo, 'unmapped.js'), 'module.exports = 0;\n');
+  h.git(['add', '.']);
+  h.git(['commit', '-qm', 'base delta']);
+  h.git(['switch', 'fixture-change']);
+  h.git(['merge', '--no-edit', 'main']);
+  resubmit(h, 'docs/state.md');
+  assert.equal(check(h).receipt.head_mode, 'full');
+
+  const mapped = incrementalFixture(t);
+  resubmit(mapped, 'docs/state.md');
+  assert.equal(check(mapped).receipt.head_mode, 'incremental');
+  const state = mapped.readState('tasks.json');
+  state.tasks[0].evidence = state.tasks[0].evidence.filter((e) => e.sha !== mapped.fullSha);
+  mapped.writeState('tasks.json', state);
+  const gate = mapped.json(['task', 'show', 'T1']).gates.gates.find((g) => g.type === 'tests');
+  assert.equal(gate.ok, false);
+  assert.match(gate.reason, /full.*evidence/);
+});
+
+test('incremental mapping handles changed tests, support files, runners and empty coverage', () => {
+  const { select } = require('../lib/tests-incremental');
+  const { globToRegExp, isTestFile, isSupportFile } = require('../lib/gates/tests');
+  const isTest = (p) => isTestFile(p) && !isSupportFile(p);
+  const available = new Set(['test/a.test.js', 'test/b.test.js']);
+  for (const [file, mapping, status, expected, tests] of [
+    ['docs/state.md', { 'docs/**': [] }, 'M', 'incremental', []],
+    ['test/a.test.js', {}, 'M', 'incremental', ['test/a.test.js']],
+    ['test/a.test.js', {}, 'D', 'full'],
+    ['test/helpers.js', {}, 'M', 'full'],
+    ['test/helpers.js', { 'test/helpers.js': ['test/b.test.js'] }, 'M', 'incremental', ['test/b.test.js']],
+    ['test/fixtures/input.json', {}, 'M', 'full'],
+    ['test/fixtures/input.json', { 'test/fixtures/**': ['test/b.test.js'] }, 'M', 'incremental', ['test/b.test.js']],
+    ['test/runner.js', {}, 'M', 'full'],
+    ['package.json', {}, 'M', 'full'],
+    ['package.json', { 'package.json': ['test/a.test.js', 'test/b.test.js'] }, 'M', 'incremental', ['test/a.test.js', 'test/b.test.js']],
+    ['tools/tests-map.json', { '**': [] }, 'M', 'full'],
+    ['value.js', { 'value.js': ['test/missing.test.js'] }, 'M', 'full'],
+    ['value.js', { 'value.js': ['value.js'] }, 'M', 'full'],
+    ['value.js', null, 'M', 'full'],
+    ['value.js', { 'value.js': 'invalid' }, 'M', 'full'],
+  ]) {
+    const result = select(mapping, [{ path: file, status }], isTest, available, globToRegExp, 'node --test {tests}');
+    assert.equal(result.mode, expected, file + JSON.stringify(mapping));
+    if (tests) assert.deepEqual(result.tests, tests);
+  }
+  for (const file of ['package.json', 'Cargo.toml', 'test/run.js', 'test/execute.js', 'test/helpers.js']) {
+    const result = select({}, [{ path: file, status: 'M' }], () => true,
+      available, globToRegExp, 'node --test {tests}', 'node test/execute.js');
+    assert.equal(result.mode, 'full', `broad tests.paths must not hide ${file}`);
+  }
+});
+
+test('repository seed maps docs contract checks from docs paths', () => {
+  const seed = require('../tools/tests-map.json');
+  assert.deepEqual(seed['docs/**'], ['test/ci-required.test.js', 'test/shared-files.test.js']);
+});
+
+test('incremental revision lineage stops at scope changes and skips retired revisions', () => {
+  const { revisions } = require('../lib/tests-incremental');
+  const event = (cmd, detail) => ({ task: 'T1', cmd, detail });
+  for (const [revision, events, expected] of [
+    [1, [], [1]],
+    [2, [event('rework', { revision: 2, previous_revision: 1 })], [2, 1]],
+    [3, [event('rework', { revision: 3, previous_revision: 2 })], [3, 2]],
+    [4, [event('rework', { revision: 4, previous_revision: 1 })], [4, 3]],
+    [3, [event('rework', { revision: 2 }), event('restore', { from_revision: 2, revision: 1 }),
+      event('rework', { revision: 3, previous_revision: 1 })], [3, 1]],
+  ]) {
+    assert.deepEqual([...revisions({ id: 'T1', revision }, events)], expected);
+  }
+});
+
+test('run-only incremental resubmission uses the pinned map without hosted full-suite CI', (t) => {
+  const h = incrementalFixture(t);
+  h.ok(['project', 'set', '--tests-mode', 'run-only', '--tests-map', '{"docs/**":["test/value.test.js"]}']);
+  const full = check(h);
+  assert.equal(full.receipt.head_mode, 'full');
+  resubmit(h, 'docs/state.md');
+  const result = check(h);
+  assert.equal(result.receipt.head_mode, 'incremental');
+  assert.equal(result.receipt.incremental_from, full.sha);
+  assert.deepEqual(result.receipt.head_tests, ['test/value.test.js']);
+  assert.equal(result.commands.filter((c) => c.command !== 'git').length, 1);
+  assert.equal(h.json(['task', 'show', 'T1']).gates.gates.find((g) => g.type === 'tests').ok, true);
+});
+
+test('a kept docs-only diff can use incremental selection without a new proof', (t) => {
+  const h = incrementalFixture(t, { 'docs/**': ['test/mapped.test.js'] }, ['--tests-keep', '["docs/**"]']);
+  h.git(['branch', '-f', 'main', 'HEAD']);
+  resubmit(h, 'docs/state.md');
+  const result = check(h);
+  assert.equal(result.receipt.mode, 'run-only (test-only diff)');
+  assert.equal(result.receipt.head_mode, 'incremental');
+  assert.equal(result.receipt.incremental_from, h.fullSha);
+  assert.deepEqual(result.receipt.changed_files, ['docs/state.md']);
+  assert.deepEqual(result.receipt.head_tests, ['test/mapped.test.js']);
+  assert.equal(result.commands.filter((c) => c.command !== 'git').length, 1);
+  assert.equal(h.json(['task', 'show', 'T1']).gates.gates.find((g) => g.type === 'tests').ok, true);
+});
+
+test('incremental evidence requires an audited full anchor, current lineage, policy and ancestry', (t) => {
+  const h = incrementalFixture(t);
+  resubmit(h, 'docs/state.md');
+  check(h);
+  const initial = require('../lib/state').loadState(h.state);
+  const T = require('../lib/tasks');
+  for (const [name, mutate] of [
+    ['valid', () => {}],
+    ['missing full', (st) => { st.tasks.tasks[0].evidence.shift(); }],
+    ['missing audit', (st) => { st.events = st.events.filter((e) => e.cmd !== 'check tests' || e.detail.sha !== h.fullSha); }],
+    ['wrong policy', (st) => { st.project.tests.keep = ['docs/**']; }],
+    ['scope revision', (st) => { st.events = st.events.filter((e) => e.cmd !== 'rework'); }],
+    ['mapped anchor', (st) => { st.tasks.tasks[0].evidence[0].receipt.head_mode = 'mapped'; }],
+    ['waived anchor', (st) => { st.tasks.tasks[0].evidence[0].waived = true; }],
+    ['wrong anchor', (st) => { st.tasks.tasks[0].evidence.at(-1).receipt.incremental_from = '0'.repeat(40); }],
+    ['no ancestor receipt', (st) => {
+      st.tasks.tasks[0].evidence.at(-1).commands = st.tasks.tasks[0].evidence.at(-1).commands
+        .filter((c) => !c.args.includes('--is-ancestor'));
+    }],
+  ]) {
+    const st = structuredClone(initial);
+    mutate(st);
+    const task = st.tasks.tasks[0];
+    const reason = T.gatePolicyMismatch(task, task.evidence.at(-1), st);
+    assert.equal(reason === null, name === 'valid', `${name}: ${reason}`);
+  }
+});
+
+test('incremental selection sends mapped host-only suites to separate host commands', (t) => {
+  const h = fixture(t, null);
+  const host = 'test/host.test.js';
+  fs.writeFileSync(path.join(h.repo, host), `const test = require('node:test');
+const assert = require('node:assert/strict');
+test('host context', () => {
+  if (process.env.TOWER_CRANE_TEST_EXCLUDE) return;
+  assert.equal(process.env.TOWER_CRANE_SANDBOX, '0');
+  assert.equal(process.env.HOST_OPT_IN, 'yes');
+});
+`);
+  fs.mkdirSync(path.join(h.repo, 'tools'), { recursive: true });
+  fs.writeFileSync(path.join(h.repo, 'tools/tests-map.json'), JSON.stringify({ 'docs/**': [host] }));
+  h.git(['add', '.']);
+  h.git(['commit', '-qm', 'host suite mapping']);
+  h.ok(['project', 'set', '--tests-host-only', JSON.stringify([host]), '--tests-host-env', '{"HOST_OPT_IN":"yes"}']);
+  h.ok(['submit', 'T1', '--sha', h.git(['rev-parse', 'HEAD']), '--agent', 'worker']);
+  const full = check(h);
+  h.fullSha = full.sha;
+  resubmit(h, 'docs/state.md');
+  const result = check(h);
+  assert.equal(result.receipt.head_mode, 'incremental');
+  assert.deepEqual(result.receipt.head_tests, [host]);
+  assert.deepEqual(result.receipt.host_only.run, [host]);
+  assert.equal(result.receipt.host_only.results[0].ran, 1);
+  assert.equal(h.json(['task', 'show', 'T1']).gates.gates.find((g) => g.type === 'tests').ok, true);
+});
+
+test('docs-only host measurement compares full and incremental resubmissions', {
+  skip: process.env.TOWER_CRANE_MEASURE_INCREMENTAL !== '1',
+}, (t) => {
+  assert.equal(process.env.TOWER_CRANE_SANDBOX, '0', 'the measurement runs on the host');
+  const before = [];
+  const after = [];
+  for (let sample = 0; sample < 3; sample++) {
+    const h = incrementalFixture(t);
+    resubmit(h, 'docs/state.md');
+    const preload = path.join(h.base, 'full-head.js');
+    // The old gate always ran the full head command. Disable reuse to measure that same command
+    // against the same docs-only head, without changing the task's policy or delta.
+    fs.writeFileSync(preload, `require(${JSON.stringify(path.join(ROOT, 'lib/tests-incremental.js'))}).fullPasses = () => [];\n`);
+    const measure = (env, mode) => {
+      const started = performance.now();
+      const run = h.run(['check', 'tests', 'T1', '--agent', 'worker', '--json'], { env });
+      const duration = Math.round(performance.now() - started);
+      assert.equal(run.code, 0, run.stderr + run.stdout);
+      const result = JSON.parse(run.stdout);
+      assert.equal(result.receipt.head_mode, mode);
+      return { duration_ms: duration, head_mode: mode,
+        head_command: result.commands.find((c) => c.command !== 'git').command,
+        head_tests: result.receipt.head_tests ?? null };
+    };
+    before.push(measure({ NODE_OPTIONS: `${h.env.NODE_OPTIONS || ''} --require=${JSON.stringify(preload)}` }, 'full'));
+    after.push(measure({}, 'incremental'));
+  }
+  const stats = (runs) => {
+    const times = runs.map((r) => r.duration_ms).sort((a, b) => a - b);
+    return { median_ms: times[1], min_ms: times[0], max_ms: times[2], runs };
+  };
+  console.log(`Docs-only resubmission measurement: ${JSON.stringify({
+    platform: process.platform, node: process.version, fixture: 'two head suites and the unchanged failing-before proof',
+    before: stats(before), after: stats(after),
+  })}`);
+});

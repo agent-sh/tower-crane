@@ -47,6 +47,7 @@ for (const file of ['bin/tower-crane.js', 'lib/commands.js', 'lib/state.js', 'li
   if (files.includes(file)) map[file] = new Set(suites);
 }
 map['**/*.md'] = new Set();
+map['docs/**'] = new Set(['test/ci-required.test.js', 'test/shared-files.test.js']);
 // Unknown executable coverage remains unmapped and therefore runs the full suite.
 const pinned = Object.fromEntries(Object.entries(map).filter(([p, tests]) => tests.size || p === '**/*.md').sort(([a], [b]) => a.localeCompare(b)).map(([p, tests]) => [p, [...tests].sort()]));
 process.stdout.write(`{\n${Object.entries(pinned).map(([source, tests]) => `  ${JSON.stringify(source)}: ${JSON.stringify(tests)}`).join(',\n')}\n}\n`);
