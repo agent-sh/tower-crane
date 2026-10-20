@@ -803,6 +803,18 @@ The governor signals only processes the registry recorded when Tower Crane start
 
 ### Deferral and resumption
 
+`review dispatch deferred` events persist a governor-deferred reviewer dispatch
+with `sha`, `revision`, `reason` and `since`. The trusted wait host retries these
+on every refill pass alongside ready workers, in urgent-first order followed by
+descending unblock count and task id. Reviewer retries do not use worker slots.
+A live task reaction postpones its retry. Dispatch debt clears when a matching
+reviewer spawn is recorded, the submitted head or revision changes, the task
+leaves submitted status, or a current eligible review verdict arrives. A failed
+PR-body verdict keeps a deferred light review eligible. Repeated deferrals with
+the same reason do not append duplicate events. `status` lists the task, first
+deferral time and reason in `deferred reviewers`, with the persisted entries in
+JSON `deferred_reviewers`, independently of the host registry's expiry.
+
 A deferred dispatch or gate refuses with code 3: `TASK: UNIT deferred by the host governor: REASON`. `spawn` asks before any stack read, fetch or worktree; `spawn --ready` and automatic refill stop at the first deferral, since the reason holds for every task behind it, and a wait's refill reports it once each time it starts and retries on every pass. A deferred reaction stays owed in the persistent automation queue, whichever process deferred it; any trusted `wait` retries it in its original turn once five seconds have passed and the governor would admit its unit, as described under [events.jsonl](#eventsjsonl). The registry keeps each deferral's reason, first time and latest time, and drops it when the unit is admitted or after ten minutes without a retry; a stop is kept for an hour. An owed reaction remains in the gate queue and keeps its `governor_deferred` inbox item after that registry hint expires, until its receipt settles or its source no longer matches an active submitted or accepted head.
 
 Where it shows:

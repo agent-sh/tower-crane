@@ -544,6 +544,17 @@ Startup and the existing fallback tick also check capacity, recovering slots
 freed before the wait cursor. These capacity checks run only in a trusted
 wait without `--observe`.
 
+A governor-deferred reviewer dispatch is kept at its submitted head and revision,
+including dispatches requested by `accept` or `spawn --role review`. Every refill
+retries it alongside ready workers: urgent tasks first, then descending unblock
+count, then task id. Reviewers do not take worker slots, so full worker capacity
+does not prevent their retry. A running reaction for the same task postpones the
+retry. A successful reviewer dispatch, a verdict, or a changed head, revision or
+submission status clears that dispatch debt. A failed PR-body verdict still
+allows a deferred light review to retry. `status` lists `deferred reviewers:
+TASK since AT: REASON`; JSON `deferred_reviewers` carries `id`, `sha`, `revision`,
+`since` and `reason`, even after the governor's registry hint expires.
+
 A worker that exits without submitting is relaunched by the next refill, so
 the refill caps it. The supervisor records each worker exit, and in the same
 write counts the task's worker exits without a submit at its current
