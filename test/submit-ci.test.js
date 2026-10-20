@@ -247,7 +247,7 @@ test('revuto submit refusal lists both open bodies with ids, paths and per-findi
   const h = fixture(t);
   const longBody = '[P2] Long finding: ' + 'x'.repeat(4000) + ' omitted tail';
   const r = submitPr(h, { ...PENDING, comments: [
-    comment(31, { path: 'lib/a.js', line: 7, body: '<!-- hidden submit\nmetadata -->\n[P1] Guard the input\nReject the unsafe value.', original_commit_id: h.sha }),
+    comment(31, { path: 'lib/a.js', line: 7, body: '<!-- hidden submit\nmetadata -->\n[P1] Guard the input\nReject the unsafe value.\nUse the `<!--` opener check here.\nSecond paragraph with the actual fix.\n```suggestion\n<!-- commands:Gates:start -->\n| a | b |\n```', original_commit_id: h.sha }),
     comment(32, { path: 'lib/b.js', line: 40, body: longBody, original_commit_id: h.sha }),
     comment(33, { path: 'lib/outdated.js', line: null, body: '[P1] Outdated finding.', original_commit_id: h.sha }),
     comment(34, { path: 'lib/closed.js', body: '[P1] Resolved finding.', original_commit_id: h.sha }),
@@ -256,6 +256,9 @@ test('revuto submit refusal lists both open bodies with ids, paths and per-findi
   assert.equal(r.status, 1, r.stderr);
   assert.match(r.stderr, /revuto left 2 open inline findings/);
   assert.match(r.stderr, /lib\/a\.js:7 \(comment 31\)\n {4}\[P1\] Guard the input\n {4}Reject the unsafe value\./);
+  assert.match(r.stderr, /Use the `<!--` opener check here\.\n {4}Second paragraph with the actual fix\./);
+  assert.match(r.stderr, /```suggestion\n {4}<!-- commands:Gates:start -->\n {4}\| a \| b \|\n {4}```/);
+  assert.match(r.stderr, /\[31 characters of HTML comment removed\]/);
   assert.ok(r.stderr.includes(`lib/b.js:40 (comment 32)\n    ${longBody.slice(0, 4000)}\n    [body truncated after 4000 characters]`));
   assert.doesNotMatch(r.stderr, /hidden submit|metadata|omitted tail|lib\/(?:outdated|closed)\.js|comment (?:33|34)/);
   assert.equal(status(h), 'in_progress');
