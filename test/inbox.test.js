@@ -250,7 +250,7 @@ test('ack-before includes the cutoff, filters kinds and leaves newer items and f
   assert.equal(h.logs().length, before.length + 1);
 });
 
-test('old closed-task messages and decision answers disappear without changing the log', (t) => {
+test('old closed-task inputs expire without changing history while main CI is observed', (t) => {
   const h = setup(t);
   const merged = h.add('Merged input');
   h.submit(merged, 7);
@@ -292,17 +292,32 @@ test('old closed-task messages and decision answers disappear without changing t
   for (const decision of decisions.decisions) decision.answered_at = old;
   decisions.decisions.at(-1).answered_at = recent;
   fs.writeFileSync(file, JSON.stringify(decisions));
-  const before = h.logs();
-  const items = h.inbox().items;
-  for (const [index, row] of cases.entries()) {
-    const messageHidden = [merged, cancelled].includes(row.tasks[0]);
-    assert.equal(items.some((i) => i.kind === 'message' && i.text === `${index}:${old}`), !messageHidden, JSON.stringify(row));
-    assert.ok(items.some((i) => i.kind === 'message' && i.text === `${index}:${recent}`));
-    assert.equal(items.some((i) => i.kind === 'decision_answer' && i.decision.id === `D${index + 1}`), !row.hidden, JSON.stringify(row));
+  for (const [index, conclusion] of [null, 'pending', 'success', 'failure', 'success'].entries()) {
+    const github = h.github();
+    github.main_head = (index + 1).toString(16).repeat(40);
+    github.main_runs = conclusion === null ? [] : [{
+      id: 100 + index, workflow_id: 11, run_number: index + 1, name: 'CI', event: 'push',
+      head_sha: github.main_head, status: conclusion === 'pending' ? 'in_progress' : 'completed',
+      conclusion: conclusion === 'pending' ? null : conclusion,
+    }];
+    h.save(github);
+    fs.rmSync(path.join(h.state, 'main-ci-cache.json'), { force: true });
+    const before = h.logs();
+    const items = h.inbox().items;
+    for (const [index, row] of cases.entries()) {
+      const messageHidden = [merged, cancelled].includes(row.tasks[0]);
+      assert.equal(items.some((i) => i.kind === 'message' && i.text === `${index}:${old}`), !messageHidden, JSON.stringify(row));
+      assert.ok(items.some((i) => i.kind === 'message' && i.text === `${index}:${recent}`));
+      assert.equal(items.some((i) => i.kind === 'decision_answer' && i.decision.id === `D${index + 1}`), !row.hidden, JSON.stringify(row));
+    }
+    assert.ok(items.some((i) => i.kind === 'owner_comment' && i.text === 'Retain owner input'));
+    assert.ok(items.some((i) => i.kind === 'decision_answer' && i.decision.id === `D${cases.length + 1}`));
+    assert.equal(items.filter((i) => i.kind === 'main_ci_failed').length, conclusion === 'failure' ? 1 : 0);
+    const after = h.logs();
+    assert.deepEqual(after.slice(0, before.length), before, 'expiration preserves every existing event');
+    assert.deepEqual(after.slice(before.length).map((e) => [e.cmd, e.detail.head]),
+      [['main ci', github.main_head]], 'only the fresh CI observation is appended');
   }
-  assert.ok(items.some((i) => i.kind === 'owner_comment' && i.text === 'Retain owner input'));
-  assert.ok(items.some((i) => i.kind === 'decision_answer' && i.decision.id === `D${cases.length + 1}`));
-  assert.deepEqual(h.logs(), before, 'expiration filters the view without acknowledging or removing history');
 });
 
 test('one fixture exposes every inbox kind and resolving commands clear their conditions', async (t) => {
