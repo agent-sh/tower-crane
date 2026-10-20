@@ -233,7 +233,7 @@ test('technical delegation recognizes generated orchestrators by their recorded 
 test('a terminal owner question is technical unless it names an owner-required setting', { skip: !PTY_AVAILABLE }, (t) => {
   const h = makeRepo(t);
   h.init();
-  const env = Object.fromEntries(Object.entries(h.env).filter(([key]) => !key.startsWith('TOWER_CRANE_')));
+  const env = Object.fromEntries(Object.entries(h.env).filter(([key]) => key === 'TOWER_CRANE_HOST_ROOT' || !key.startsWith('TOWER_CRANE_')));
   const asked = runPty(
     ['ask', '--kind', 'technical', '--question', 'Which store?', '--option', 'redis', '--option', 'postgres', '--state', h.state],
     { cwd: h.repo, env },
