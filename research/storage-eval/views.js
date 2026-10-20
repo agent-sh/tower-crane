@@ -26,6 +26,16 @@ const WARMUP = Number(arg('warmup') || 2);
 const TREES = all('tree').map((t) => { const [name, dir] = t.split('='); return { name, dir: path.resolve(dir) }; });
 const COMMANDS = [['status', '--json'], ['inbox', '--json']];
 
+// CPU seconds of this process's waited-for children (Linux), so each run's
+// CPU is the difference across it: the comparison that load moves least.
+const TICK = process.platform === 'linux' ? Number(execFileSync('getconf', ['CLK_TCK']).toString().trim()) : 0;
+function childCpu() {
+  if (!TICK) return 0;
+  const s = fs.readFileSync('/proc/self/stat', 'utf8');
+  const f = s.slice(s.lastIndexOf(')') + 2).split(' ');
+  return (Number(f[13]) + Number(f[14])) / TICK;
+}
+
 function pct(xs, p) {
   const s = [...xs].sort((a, b) => a - b);
   return s[Math.min(s.length - 1, Math.ceil(p / 100 * s.length) - 1)];
@@ -54,16 +64,19 @@ function run(tree, state, cmd) {
   const env = { ...process.env, TOWER_CRANE_STATE: state, TOWER_CRANE_AGENT: 'orchestrator' };
   for (const k of ['TOWER_CRANE_TASK', 'TOWER_CRANE_BROKER', 'TOWER_CRANE_VIA']) delete env[k];
   const t0 = performance.now();
+  const c0 = childCpu();
   const r = spawnSync(process.execPath, [path.join(tree.dir, 'bin', 'tower-crane.js'), ...cmd], { cwd: path.dirname(state), env, encoding: 'utf8', maxBuffer: 1 << 28 });
   const ms = performance.now() - t0;
+  const cpu = (childCpu() - c0) * 1000;
   if (r.status !== 0) throw new Error(`${tree.name} ${cmd.join(' ')} exited ${r.status}: ${r.stderr.slice(0, 500)}`);
-  return { ms, bytes: r.stdout.length };
+  return { ms, cpu, bytes: r.stdout.length };
 }
 
 function main() {
   fs.mkdirSync(WORK, { recursive: true });
   const states = new Map(TREES.map((t) => [t.name, copyState(t)]));
   const samples = Object.fromEntries(TREES.map((t) => [t.name, Object.fromEntries(COMMANDS.map(([c]) => [c, []]))]));
+  const cpu = Object.fromEntries(TREES.map((t) => [t.name, Object.fromEntries(COMMANDS.map(([c]) => [c, []]))]));
   const output = {};
   for (const t of TREES) for (const cmd of COMMANDS) for (let i = 0; i < WARMUP; i++) run(t, states.get(t.name), cmd);
   const load = [os.loadavg()[0]];
@@ -72,6 +85,7 @@ function main() {
       for (const cmd of COMMANDS) {
         const r = run(t, states.get(t.name), cmd);
         samples[t.name][cmd[0]].push(r.ms);
+        cpu[t.name][cmd[0]].push(r.cpu);
         output[`${t.name} ${cmd[0]}`] = r.bytes;
       }
     }
@@ -82,15 +96,17 @@ function main() {
     summary[t.name] = {};
     for (const [c] of COMMANDS) {
       const xs = samples[t.name][c];
-      summary[t.name][c] = { n: xs.length, p50: Math.round(pct(xs, 50)), p95: Math.round(pct(xs, 95)), output_bytes: output[`${t.name} ${c}`] };
+      const cs = cpu[t.name][c];
+      summary[t.name][c] = { n: xs.length, p50: Math.round(pct(xs, 50)), p95: Math.round(pct(xs, 95)),
+        cpu_ms_per_op: Math.round(cs.reduce((a, b) => a + b, 0) / cs.length), output_bytes: output[`${t.name} ${c}`] };
     }
   }
   const result = { at: new Date().toISOString(), node: process.version, cores: os.cpus().length, load_1m: load, runs: RUNS, warmup: WARMUP,
-    state: STATE, trees: TREES, summary, samples };
+    state: STATE, trees: TREES, summary, samples, cpu };
   fs.writeFileSync(path.resolve(arg('out')), JSON.stringify(result, null, 2) + '\n');
   for (const t of TREES) for (const [c] of COMMANDS) {
     const s = summary[t.name][c];
-    process.stdout.write(`${t.name.padEnd(12)} ${c.padEnd(7)} p50 ${String(s.p50).padStart(5)} ms  p95 ${String(s.p95).padStart(5)} ms  (${s.output_bytes} bytes out)\n`);
+    process.stdout.write(`${t.name.padEnd(12)} ${c.padEnd(7)} p50 ${String(s.p50).padStart(5)} ms  p95 ${String(s.p95).padStart(5)} ms  CPU ${String(s.cpu_ms_per_op).padStart(5)} ms/op  (${s.output_bytes} bytes out)\n`);
   }
 }
 
