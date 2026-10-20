@@ -8,11 +8,11 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const cp = require('node:child_process');
 const { cachedFixture, BIN } = require('./helpers');
-const T = require('../lib/tasks');
 const S = require('../lib/state');
 const Db = require('../lib/db');
-const { runReleased } = require('./released-tool');
+const T = require('../lib/tasks');
 const { windowsFileIds } = require('./fixtures/windows-file-ids');
+const { runReleased } = require('./released-tool');
 
 const RELEASED = 'v0.1.3';
 
@@ -245,17 +245,29 @@ function tornMultiEvent(t, { windows = false } = {}) {
   fs.writeSync(fd, `${JSON.stringify(first)}\n${JSON.stringify(second)}`);
   fs.closeSync(fd);
   h.ok(['task', 'note', 'T1', 'next note'], cli);
-  const ids = logged(h).map((e) => e.id);
-  assert.ok(!ids.includes(first.id) && !ids.includes(second.id), 'the torn commit left no event');
-  assert.deepEqual(noted(h, 'torn note'), { task: false, event: false });
-  assert.deepEqual(noted(h, 'next note'), { task: true, event: true });
   assertConsistent(h);
+  return { h, torn: [first.id, second.id] };
 }
 
-test('recovery before migration cuts a torn multi-event append off the log, including a final line missing only its newline', (t) => tornMultiEvent(t));
+function assertCut({ h, torn }) {
+  const ids = logged(h).map((e) => e.id);
+  assert.ok(!torn.some((id) => ids.includes(id)), 'the torn commit left no event');
+  assert.deepEqual(noted(h, 'torn note'), { task: false, event: false });
+  assert.deepEqual(noted(h, 'next note'), { task: true, event: true });
+}
+
+test('recovery before migration cuts a torn multi-event append off the log, including a final line missing only its newline', (t) => {
+  const run = tornMultiEvent(t);
+  assert.equal(run.torn.length, 2);
+  assertCut(run);
+});
 
 // A tool through 0.1.2 wrote the inode as a Number only, rounded past 2^53.
-test('recovery before migration cuts a torn append that a 0.1.2 manifest describes when file ids pass 2^53, as on Windows', (t) => tornMultiEvent(t, { windows: true }));
+test('recovery before migration cuts a torn append that a 0.1.2 manifest describes when file ids pass 2^53, as on Windows', (t) => {
+  const run = tornMultiEvent(t, { windows: true });
+  assert.equal(run.torn.length, 2);
+  assertCut(run);
+});
 
 test('an add that failed after its commit keeps its brief, and only then', (t) => {
   const h = migrated(t);
