@@ -38,6 +38,23 @@ test('external gate files and directories are resolved while worktree files stay
   assert.throws(() => G.reads({ gates: { clean_paths: [path.join(h.base, 'missing')] } }, h.repo, h.env.HOME), /not a readable file/);
 });
 
+test('gate interpreters infer script suffixes and extensionless shebang scripts', (t) => {
+  const h = makeRepo(t);
+  const tools = path.join(h.base, 'tools');
+  fs.mkdirSync(tools);
+  for (const [program, suffix, content] of [
+    ['node', '.js', ''], ['python3', '.py', ''], ['sh', '.sh', ''],
+    ['ruby', '.rb', ''], ['perl', '.pl', ''], ['python3', '', '#!/usr/bin/env python3\n'],
+  ]) {
+    const file = path.join(tools, `tool-${program}${suffix}`);
+    fs.writeFileSync(file, content);
+    for (const key of ['clean_cmd', 'tests_proof_cmd']) {
+      assert.deepEqual(new Set(G.reads({ gates: { [key]: `${program} "${file}" {tests}` } }, h.repo, h.env.HOME)),
+        new Set([file, tools]), `${key}: ${program}: ${suffix || 'shebang'}`);
+    }
+  }
+});
+
 test('gate command data arguments do not expose credential directories', (t) => {
   const h = makeRepo(t);
   const tools = path.join(h.base, 'tools');
@@ -56,12 +73,14 @@ test('gate command data arguments do not expose credential directories', (t) => 
     for (const key of ['clean_cmd', 'tests_proof_cmd']) {
       for (const [command, expected] of [
         [`cat "${secret}" {tests}`, []],
+        [`python3 "${secret}" {tests}`, []],
         [`"${secret}"`, []],
         [`"${wrapper}" "${secret}"`, [wrapper, tools]],
         [`node "${script}" "${secret}"`, [script, tools]],
         [`node -e "${secret}"`, []],
         ...(process.platform === 'win32' ? [] : [
           [`cat "${alias}" {tests}`, []],
+          [`python3 "${alias}" {tests}`, []],
           [`"${alias}"`, []],
           [`node "${script}" "${alias}"`, [script, tools]],
         ]),
