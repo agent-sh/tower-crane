@@ -338,7 +338,8 @@ function heldGate(h, submit = true) {
   h.release = path.join(h.base, 'suite-release');
   fs.writeFileSync(path.join(h.repo, 'hold.js'), `
 const fs = require('node:fs');
-fs.writeFileSync(process.argv[2], String(process.pid));
+// Published whole: a reader that sees the file must also see the pid.
+require(${JSON.stringify(require.resolve('./atomic-file'))}).writeAtomic(process.argv[2], String(process.pid));
 // The gate's process group ends it when the gate stops; a release file ends it as passed.
 const timer = setInterval(() => { if (fs.existsSync(process.argv[3])) { clearInterval(timer); process.exit(0); } }, 20);
 `);
@@ -375,6 +376,16 @@ test('past the stop line a running gate stops without a verdict and says why', {
   const stops = h.json(['status']).governor.stops;
   assert.deepEqual(stops.map((x) => [x.task, x.kind]), [['T1', 'tests']]);
   assert.ok(h.json(['inbox']).items.some((i) => i.kind === 'governor_stopped' && i.task === 'T1' && /95% stop line/.test(i.reason)));
+});
+
+test('a process that outlives its test does not bring back the removed fake host', (t) => {
+  const h = makeRepo(t);
+  const env = { ...h.env, TOWER_CRANE_HOST_ROOT: writeHost(path.join(h.base, 'removed-host')) };
+  G.tick(env);
+  assert.equal(fs.existsSync(G.registryFile(env)), true, 'a live fake host records its registry');
+  fs.rmSync(env.TOWER_CRANE_HOST_ROOT, { recursive: true });
+  assert.throws(() => G.tick(env), { code: 'ENOENT' });
+  assert.equal(fs.existsSync(env.TOWER_CRANE_HOST_ROOT), false);
 });
 
 test('a gate that joins a run already going takes no place in the budget', { skip: linuxOnly }, async (t) => {
