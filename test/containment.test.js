@@ -430,13 +430,20 @@ try {
   assert.equal(fs.existsSync(launched), false);
 });
 
-test('a scope at its memory cap is read every millisecond, so an OOM the kernel has not announced is found', async (t) => {
+test('a scope at its memory cap is read every millisecond for a bounded window, so an OOM the kernel has not announced is found', async (t) => {
   const h = fixture(t);
   const group = path.join(h.base, 'cap-watch');
   fs.mkdirSync(group);
+  fs.writeFileSync(path.join(group, 'cgroup.events'), 'populated 1\nfrozen 0\n');
   const events = (max, oom) => fs.writeFileSync(path.join(group, 'memory.events.local'),
     `low 0\nhigh 0\nmax ${max}\noom ${oom}\noom_kill ${oom}\noom_group_kill 0\n`);
-  for (const [name, max, expected] of [['at its cap', 3, 'resource-memory-max'], ['below its cap', 0, null]]) {
+  const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms)); // wait-allow: fixed windows of the cap watch under test
+  for (const [name, max, after, expected] of [
+    ['OOM inside the window', 3, 0, 'resource-memory-max'],
+    ['below its cap', 0, 0, null],
+    // The window ends, so a scope that stays at its cap does not keep the reads going.
+    ['OOM after the window', 3, 60, null],
+  ]) {
     events(0, 0);
     let notify;
     t.mock.method(fs, 'watch', (file, listener) => {
@@ -449,8 +456,9 @@ test('a scope at its memory cap is read every millisecond, so an OOM the kernel 
     // The kernel announces the cap events, then holds the next notice for 10 ms.
     events(max, 0);
     notify();
+    if (after) await pause(after);
     events(max, 1);
-    await new Promise((resolve) => setTimeout(resolve, 100)); // wait-allow: bounded window for a missed notice
+    await pause(60);
     stop();
     assert.equal(found, expected, name);
   }

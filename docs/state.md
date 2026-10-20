@@ -651,9 +651,10 @@ attempt exits, the supervisor waits up to five seconds for its scope to settle
 and resets it if the manager left it failed; `Result=oom-kill` is read before
 that reset. The manager removes an emptied scope's cgroup at once, so the
 supervisor and a keeper also watch the scope's `memory.events.local`. The kernel
-notifies that file at most every 10 ms, so once the scope reaches its memory cap
-they read its counters every millisecond, finding the OOM the kernel counts
-before it kills, until 50 ms pass without another cap event. When a keeper takes over the scope's retained
+notifies that file at most every 10 ms, so a cap event starts a 20 ms window in
+which they read its counters every millisecond, finding the OOM the kernel
+counts before it kills. A scope that stays at its cap opens at most one window
+every 100 ms, and the reads stop once the scope is empty. When a keeper takes over the scope's retained
 processes, the keeper reads `Result` and settles the scope when it ends, and the
 supervisor leaves the scope alone. Report directories are
 `tower-crane-containment-<supervisor pid>-*` under `XDG_CACHE_HOME` (else
