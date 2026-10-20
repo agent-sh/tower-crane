@@ -1,2 +1,2 @@
-- Keep local CI gate reports valid after base-only moves with an identical merged result, and refresh the separate origin/base pin at queued merge time.
+- Refresh the separate origin/base pin at queued merge time.
 - Document retry and rework of recorded tests, clean and CI failures on accepted tasks.

@@ -7,9 +7,10 @@ const path = require('node:path');
 const { cachedFixture } = require('./helpers');
 const { setup } = require('./automation-helpers');
 
-function accepted(t, settings = []) {
-  const h = cachedFixture(t, `accepted-before-merge:${JSON.stringify(settings)}`, (repo) => {
+function accepted(t, settings = [], tier = null) {
+  const h = cachedFixture(t, `accepted-before-merge:${JSON.stringify([settings, tier])}`, (repo) => {
     const h = setup(null, { repo });
+    if (tier) h.ok(['task', 'update', 'T1', '--tier', tier]);
     h.submit();
     h.ok(['project', 'set', '--tests-proof-cmd', 'node {tests}', ...settings]);
     for (const gate of ['tests', 'clean', 'ci']) h.ok(['check', gate, 'T1']);
@@ -129,28 +130,41 @@ test('a queued clean refresh runs without replaying old notifications and rework
   assert.equal(h.github().prs['7'].state, 'OPEN');
 });
 
-for (const gate of ['tests', 'clean', 'ci']) {
-  test(`a recorded ${gate} failure at an accepted head leaves the queue for rework`, (t) => {
-    const h = accepted(t);
-    if (gate === 'tests') {
-      h.ok(['project', 'set', '--tests-mode', 'run-only', '--tests-cmd',
-        'node -e "require(\'node:assert/strict\').equal(require(\'./value\'), 0)"']);
-    } else if (gate === 'clean') h.env.FIXTURE_GATE_OK = '0';
-    else {
-      const github = h.github();
-      github.ci[h.sha] = 'failure';
-      h.saveGithub(github);
+for (const tier of [null, 'easy..medium', 'medium..medium']) {
+  for (const gate of ['tests', 'clean', 'ci']) {
+    for (const failure of ['recorded', 'refresh']) {
+      test(`accepted ${tier || 'single-tier'} ${failure} ${gate} failure reworks once`, (t) => {
+        const h = accepted(t, [], tier);
+        const before = h.readState('tasks.json').tasks[0];
+        if (gate === 'tests') {
+          h.ok(['project', 'set', '--tests-mode', 'run-only', '--tests-cmd',
+            'node -e "require(\'node:assert/strict\').equal(require(\'./value\'), 0)"']);
+        } else if (gate === 'clean') {
+          if (failure === 'refresh') h.ok(['project', 'set', '--clean-cmd', `${h.clean} --fixture`]);
+          h.env.FIXTURE_GATE_OK = '0';
+        } else {
+          if (failure === 'refresh') h.ok(['project', 'set', '--ci-required', '["test"]']);
+          const github = h.github();
+          github.ci[h.sha] = 'failure';
+          h.saveGithub(github);
+        }
+        if (failure === 'recorded') assert.equal(h.run(['check', gate, 'T1']).code, 1);
+        h.run(['merge', '--accepted', '--agent', 'orchestrator']);
+        const task = h.readState('tasks.json').tasks[0];
+        assert.equal(task.evidence.findLast((e) => e.type === gate).confirmed_failure, true);
+        assert.equal(task.status, 'rework');
+        assert.equal(task.revision, 2);
+        assert.equal(task.tier, before.tier, 'accepted failures rework at the existing tier');
+        assert.deepEqual(task.tier_range, before.tier_range);
+        assert.equal(h.github().prs['7'].state, 'OPEN');
+        h.run(['merge', '--accepted', '--agent', 'orchestrator']);
+        const reworks = h.logs().filter((e) => e.cmd === 'rework' && e.task === 'T1');
+        assert.equal(reworks.length, 1);
+        assert.equal(reworks[0].detail.gate, gate);
+        assert.equal(h.logs().filter((e) => e.cmd === 'escalate' && e.task === 'T1').length, 0);
+      });
     }
-    assert.equal(h.run(['check', gate, 'T1']).code, 1);
-    h.run(['merge', '--accepted', '--agent', 'orchestrator']);
-    const task = h.readState('tasks.json').tasks[0];
-    assert.equal(task.status, 'rework');
-    assert.equal(task.revision, 2);
-    const reworks = h.logs().filter((e) => e.cmd === 'rework' && e.task === 'T1');
-    assert.equal(reworks.length, 1);
-    assert.equal(reworks[0].detail.gate, gate);
-    assert.equal(h.github().prs['7'].state, 'OPEN');
-  });
+  }
 }
 
 test('restoring a cleanup pin queues and runs an accepted task blocked by missing configuration', (t) => {
