@@ -1596,13 +1596,16 @@ including those still in their retry interval; the text gate queue line appends
 `deferred by the governor: TASKS`. `inbox` carries the same `gate_queue`. Each executor drains the queue after releasing its slot; watchers
 also retry their pending notifications on their next check. State locks cover only
 reservation and receipts, never Git, GitHub, gates or model calls.
-Changing `gates.tests_cmd`, `gates.tests_proof_cmd`, `gates.clean_cmd` or CI
-policy with `project set` emits an `automation reconcile` request for each
+Changing the resolved tests or cleanup gate policy, an affected task's
+effective tests mode, or CI policy with `project set` emits an `automation reconcile` request for each
 accepted, unmerged PR task that requires an affected gate. The request carries
 `sha`, `revision`, `gates` and `reason: "project gate policy changed"` and is
 queued until its reaction finishes, even if a watcher starts after the setting
 change. Setting an unchanged value queues nothing. The command's text names
-the queued tasks and gates. Already merged tasks are excluded.
+the queued tasks and gates. Tests policy includes paths, keep, expensive,
+host-only and host environment settings, the test map and its CI inputs;
+mode changes are compared per task kind. An unrelated kind's override or a
+global mode masked by the task's kind override queues nothing. Already merged tasks are excluded.
 `status` also lists `merge blocked: TASK REASON` for accepted, unmerged PRs.
 JSON carries `merge_blocked: [{id, reason}]`. It uses current gate evidence
 first, then the recorded merge queue refusal; it makes no GitHub request.

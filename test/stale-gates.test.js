@@ -7,10 +7,11 @@ const path = require('node:path');
 const { cachedFixture } = require('./helpers');
 const { setup } = require('./automation-helpers');
 
-function accepted(t) {
-  const h = cachedFixture(t, 'accepted-before-merge', (repo) => {
+function accepted(t, settings = []) {
+  const h = cachedFixture(t, `accepted-before-merge:${JSON.stringify(settings)}`, (repo) => {
     const h = setup(null, { repo });
     h.submit();
+    h.ok(['project', 'set', '--tests-proof-cmd', 'node {tests}', ...settings]);
     for (const gate of ['tests', 'clean', 'ci']) h.ok(['check', gate, 'T1']);
     h.reviewer('T1', 'reviewer');
     h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review',
@@ -23,6 +24,55 @@ function accepted(t) {
   h.saveGithub = (state) => fs.writeFileSync(h.env.AUTOMATION_GITHUB, JSON.stringify(state));
   h.logs = () => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
   return h;
+}
+
+const map = JSON.stringify({ 'value.js': ['test/value.test.js'] });
+const localCI = JSON.stringify({ command: [process.execPath, '-e', 'process.exit(0)'], timeout: 5 });
+const policyChanges = [
+  ['paths', [], ['--tests-paths', '["test/*.test.js"]']],
+  ['keep', [], ['--tests-keep', '["README.md"]']],
+  ['expensive', [], ['--tests-expensive', 'true']],
+  ['host-only', [], ['--tests-host-only', '[]']],
+  ['host-env', [], ['--tests-host-env', '{"T447_POLICY":"changed"}']],
+  ['map', [], ['--tests-map', map]],
+  ['mode', [], ['--tests-mode', 'run-only']],
+  ['by-kind', [], ['--tests-by-kind', '{"code":"run-only"}']],
+  ['mapped CI required', ['--tests-map', map], ['--ci-required', '["test"]']],
+  ['mapped local CI', ['--tests-map', map], ['--ci-local', localCI]],
+];
+
+for (const [name, settings, flags] of policyChanges) {
+  test(`test policy ${name} queues an accepted task and refreshes before merge`, (t) => {
+    const h = accepted(t, settings);
+    const runs = () => h.logs().filter((e) => e.cmd === 'check tests').length;
+    const before = runs();
+    const output = h.ok(['project', 'set', ...flags]);
+    assert.match(output, /queued gate re-checks: T1 \(tests(?:, ci)?\)/);
+    assert.deepEqual(h.json(['status']).gate_queue.queued.map((q) => q.id), ['T1']);
+    assert.equal(h.json(['task', 'show', 'T1']).gates.gates.find((g) => g.type === 'tests').ok, false);
+    const offset = fs.statSync(path.join(h.state, 'events.jsonl')).size;
+    h.run(['wait', '--after', String(offset), '--types', 'never', '--timeout', '0',
+      '--agent', 'orchestrator']);
+    assert.equal(h.github().prs['7'].state, 'MERGED');
+    assert.equal(runs(), before + 1);
+    assert.equal(h.readState('tasks.json').tasks[0].revision, 1);
+    assert.doesNotMatch(h.ok(['project', 'set', ...flags]), /queued gate re-checks/,
+      'an unchanged policy and a merged task create no new request');
+  });
+}
+
+for (const [name, settings, flags] of [
+  ['an unrelated kind', [], ['--tests-by-kind', '{"docs":"run-only"}']],
+  ['a masked global mode', ['--tests-by-kind', '{"code":"prove"}'], ['--tests-mode', 'run-only']],
+]) {
+  test(`test policy changes for ${name} leave the accepted task current`, (t) => {
+    const h = accepted(t, settings);
+    const requests = () => h.logs().filter((e) => e.cmd === 'automation reconcile').length;
+    const before = requests();
+    assert.doesNotMatch(h.ok(['project', 'set', ...flags]), /queued gate re-checks/);
+    assert.equal(requests(), before);
+    assert.equal(h.json(['task', 'show', 'T1']).gates.gates.find((g) => g.type === 'tests').ok, true);
+  });
 }
 
 const changes = [
