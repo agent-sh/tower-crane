@@ -1786,6 +1786,8 @@ test('receipt JSON redaction covers escaped strings, nesting, keys and processin
   const deep = '['.repeat(20000) + JSON.stringify(opaque) + ']'.repeat(20000);
   assert.match(receiptText(deep, redact).body, /^\[unscannable .*content omitted\]$/);
   assert.equal(receiptText(`plain ${token}`, redact).body, 'plain [redacted:TOKEN]');
+  const numbers = '{"bytes":9007199254740993,"limit":1e999,"decimal":0.12345678901234567890}';
+  assert.equal(receiptText(numbers, redact).body, numbers, 'receipt numbers retain their source precision');
 });
 
 test('malformed JSON and JSONL receipt tables keep only omission notices on failure and success', (t) => {
