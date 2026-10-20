@@ -168,6 +168,7 @@ test('the governor retains the full scope through delayed registry attachment', 
   const project = h.readState('project.json');
   const admitted = Governor.admit({ stateDir: h.state, env, agent: 'orchestrator' }, { kind: 'worker', task: 'T1', project });
   t.after(() => admitted.release());
+  let tickAt = Date.now();
   for (const [busy, scope] of [
     [false, { backend: 'cgroup', group: '/sys/fs/cgroup/agents.slice/tower-crane-1-0123456789abcdef.scope' }],
     [true, { backend: 'cgroup', group: '/sys/fs/cgroup/agents.slice/tower-crane-2-0123456789abcdef.scope' }],
@@ -182,6 +183,19 @@ test('the governor retains the full scope through delayed registry attachment', 
     const entry = Governor.read(env).units.find(u => u.id === admitted.id);
     assert.equal(entry.cgroup, expected, `registry busy: ${busy}, backend: ${scope.backend}`);
     assert.equal(entry.roots.filter(r => r.pid === process.pid).length, 1);
+    if (expected) {
+      const group = path.join(env.TOWER_CRANE_HOST_ROOT, 'sys/fs/cgroup', expected);
+      fs.mkdirSync(path.join(group, 'runner'), { recursive: true });
+      fs.writeFileSync(path.join(group, 'memory.current'), String(512 * 1024 ** 2));
+      fs.writeFileSync(path.join(group, 'memory.stat'), `active_file ${32 * 1024 ** 2}\ninactive_file ${96 * 1024 ** 2}\n`);
+      fs.writeFileSync(path.join(group, 'runner', 'memory.current'), String(1024 ** 2));
+      tickAt += Governor.TICK_MS * 2;
+      const clock = t.mock.method(Date, 'now', () => tickAt);
+      try { Governor.tick(env, project); }
+      finally { clock.mock.restore(); }
+      const measured = Governor.read(env).units.find(u => u.id === admitted.id);
+      assert.equal(measured.measured, 384 * 1024 ** 2, 'the full scope counts anonymous memory across child groups without page cache');
+    }
   }
 });
 
