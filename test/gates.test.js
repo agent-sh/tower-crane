@@ -232,7 +232,7 @@ test('named regression failure', () => {
   }
 });
 
-test('a one-off native child crash records native_crash in the evidence and its event, and status counts it', { skip: process.platform === 'win32' && 'POSIX signals' }, (t) => {
+test('a one-off native child crash records native_crash in the evidence and its event, the recovered evidence counts, and status counts the crash', { skip: process.platform === 'win32' && 'POSIX signals' }, (t) => {
   const h = makeRepo(t);
   const marker = path.join(h.base, 'crash-runs');
   const sha = manifestTask(h, { submitted: { 'test/crash.test.js': nativeCrashTest({ marker }) } });
@@ -250,6 +250,11 @@ test('a one-off native child crash records native_crash in the evidence and its 
   assert.equal(evidence.ok, true);
   assert.deepEqual(evidence.native_crash.map((c) => [c.test, c.signal, Number.isInteger(c.pid)]), [['child crashes natively', 'SIGSEGV', true]]);
   assert.match(evidence.summary, /Native crash: child crashes natively \(SIGSEGV, pid \d+\)\..*Reran test\/crash\.test\.js once/);
+  assert.deepEqual(evidence.receipt.native_rerun, { step: 'head', files: ['test/crash.test.js'], ok: true });
+  assert.deepEqual(evidence.commands.filter((c) => c.command !== 'git').map((c) => [c.command, c.status]),
+    [[`${spec} test/crash.test.js test/value.test.js`, 1], [`${spec} test/crash.test.js`, 0]]);
+  const testsGate = h.json(['task', 'show', 'T1']).gates.gates.find((g) => g.type === 'tests');
+  assert.equal(testsGate.ok, true, testsGate.reason);
   const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
   const event = events.findLast((e) => e.cmd === 'check tests');
   assert.deepEqual(event.detail.native_crash, evidence.native_crash);

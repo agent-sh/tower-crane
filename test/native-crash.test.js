@@ -55,6 +55,33 @@ const cliLine = (name, signal, stderr = '') => `test at test/board.test.js:963:1
       at cliFailure (test/helpers.js:611:10)
 `;
 
+// A suite or parent test that failed only through a test inside it, in each reporter, and one whose
+// own hook failed as well.
+const SPEC_SUITE = `▶ suite
+  ✖ a (211.8ms)
+✖ suite (212.1ms)
+✖ failing tests:
+
+${execError('a')}`;
+const SPEC_HOOK = `${SPEC_SUITE}test at test/crash.test.js:1:1
+✖ suite (212.1ms)
+  Error: after hook broke
+      at TestContext.<anonymous> (test/crash.test.js:2:9)
+`;
+const tapParent = (failureType, error) => `# Subtest: parent
+    # Subtest: c
+    not ok 1 - c
+      ---
+      error: 'tower-crane claim T1 exited null (signal SIGSEGV): '
+      ...
+    1..1
+not ok 1 - parent
+  ---
+  failureType: '${failureType}'
+  error: '${error}'
+  ...
+`;
+
 const ORDINARY = `test at test/atomic-file.test.js:350:1
 ✖ reads with readPublished (24.3ms)
   AssertionError [ERR_ASSERTION]: read with readPublished
@@ -85,31 +112,46 @@ test('native crash patterns: signal, empty output, pid and whether every failing
     ['two children of one test', `${execError('a')}${execError('a', { pid: 23 }).split('\n').slice(2).join('\n')}`, ['a'],
       [{ test: 'a', signal: 'SIGSEGV', pid: 22 }, { test: 'a', signal: 'SIGSEGV', pid: 23 }], true],
     ['no failing names', execError('a'), [], [], false],
+    ['a spec suite that failed through its crashed test', SPEC_SUITE, ['a', 'suite'], [{ test: 'a', signal: 'SIGSEGV', pid: 22 }], true],
+    ['a spec suite whose own hook failed too', SPEC_HOOK, ['a', 'suite'], [{ test: 'a', signal: 'SIGSEGV', pid: 22 }], false],
+    ['a TAP parent that failed through its crashed subtest', tapParent('subtestsFailed', '1 subtest failed'), ['c', 'parent'],
+      [{ test: 'c', signal: 'SIGSEGV', pid: null }], true],
+    ['a TAP parent whose own hook failed', tapParent('hookFailed', 'after hook broke'), ['c', 'parent'],
+      [{ test: 'c', signal: 'SIGSEGV', pid: null }], false],
+    ['a failing name with no failing test inside it', `${cliLine('b', 'SIGSEGV')}✖ lone (1ms)\n`, ['b', 'lone'],
+      [{ test: 'b', signal: 'SIGSEGV', pid: null }], false],
   ];
   for (const [name, output, names, crashes, every] of cases) {
     assert.deepEqual(NativeCrash.find(output, names), { crashes, every }, name);
   }
 });
 
-test('the crash report is the newest node report written since the run started', (t) => {
+test('cores come from apport only, as the cores of this user written since the run started', (t) => {
+  for (const [pattern, dir] of [
+    ['|/usr/share/apport/apport -p%p -s%s -c%c -d%d -P%P -u%u -g%g -F%F -- %E\n', NativeCrash.COREDUMP_DIR],
+    ['|/usr/lib/systemd/systemd-coredump %P %u %g %s %t %c %h\n', null],
+    ['core\n', null],
+  ]) assert.equal(NativeCrash.coreDir(pattern), process.platform === 'linux' ? dir : null, pattern);
   const dir = scratch('native-crash');
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
-  const write = (name, ageMs) => {
+  const uid = process.getuid?.() ?? 0;
+  const boot = 'ea9acc2f-d3d5-4667-91e9-317bd68c61d5';
+  const write = (name, ageMs, text = 'core') => {
     const file = path.join(dir, name);
-    fs.writeFileSync(file, 'ProblemType: Crash\n');
+    fs.writeFileSync(file, text);
     const at = new Date(Date.now() - ageMs);
     fs.utimesSync(file, at, at);
     return file;
   };
   const since = Date.now() - 60000;
-  write('_home_u_.nvm_versions_node_v26.12.0_bin_node.1000.crash', 3600000);
-  write('_usr_bin_python3.14.1000.crash', 1000);
-  assert.equal(NativeCrash.crashFile(dir, since), null, 'an older node report and another binary are not this crash');
-  write('_usr_bin_node.1000.crash', 30000);
-  const newest = write('_home_u_.nvm_versions_node_v26.12.0_bin_node.1000.crash', 1000);
-  assert.equal(NativeCrash.crashFile(dir, since), newest);
-  assert.equal(NativeCrash.crashFile(path.join(dir, 'missing'), since), null);
-  assert.equal(NativeCrash.crashFile(null, since), null);
+  write(`core._home_u__nvm_versions_node_v26_12_0_bin_node.${uid}.${boot}.11.1`, 3600000);
+  write(`core._usr_bin_node.${uid + 1}.${boot}.12.1`, 1000);
+  write(`core._usr_bin_node.${uid}.${boot}.13.1`, 1000, '');
+  write('_usr_bin_node.1000.crash', 1000);
+  const fresh = write(`core._home_u__nvm_versions_node_v26_12_0_bin_node.${uid}.${boot}.14.1`, 1000);
+  assert.deepEqual(NativeCrash.cores(dir, since, uid), [{ file: fresh, exe: '_home_u__nvm_versions_node_v26_12_0_bin_node', pid: 14 }],
+    'an older core, another user\'s, an emptied one and a crash report are not this run\'s');
+  assert.deepEqual(NativeCrash.cores(path.join(dir, 'missing'), since, uid), []);
 });
 
 test('recent counts native crashes from tests gate events in the last seven days', () => {
