@@ -52,9 +52,15 @@ test('base runs only the file holding both failing names, then a later gate reus
   assert.deepEqual(first.receipt.base_rerun.files, ['test/fail.test.js']);
   assert.equal(first.receipt.base_rerun.results[0].cached, false);
   assert.equal(first.receipt.base_rerun.base, baseSha);
+  assert.deepEqual(first.receipt.test_logs.map((r) => r.phase), ['head', 'base']);
+  const baseLog = first.receipt.test_logs[1].log;
+  assert.match(fs.readFileSync(path.join(tmp, 'state', baseLog), 'utf8'), /old failure/);
   const second = await gate.run(context());
   assert.deepEqual(second.main_failure, first.main_failure);
   assert.equal(second.receipt.base_rerun.results[0].cached, true);
+  assert.equal(second.receipt.test_logs[1].cached, true);
+  assert.equal(fs.readFileSync(path.join(tmp, 'state', second.receipt.test_logs[1].log), 'utf8'),
+    fs.readFileSync(path.join(tmp, 'state', baseLog), 'utf8'));
   assert.equal(rows().length, 3);
   assert.ok(logs.some((line) => /base .*test\/fail\.test\.js: cached$/.test(line)));
 });

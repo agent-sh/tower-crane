@@ -519,11 +519,15 @@ test('a skipped changed host-only test cannot prove code, and host_env reaches i
 
 test('a test that fails without the change and passes with it: ok', async () => {
   const sha = task({ 'lib/add.js': FIX, 'test/add.test.js': ADD_TEST });
-  const r = await gate.run(ctx(sha));
+  const context = { ...ctx(sha), stateDir: path.join(tmp, 'state') };
+  const r = await gate.run(context);
   assert.equal(r.ok, true, r.summary);
   assert.equal(r.sha, sha);
   assert.match(r.summary, /run-tests\.js` at [0-9a-f]+: exit 0/);
   assert.match(r.summary, /1 non-test file reverted .*lib\/add\.js.*: exit 1/);
+  assert.deepEqual(r.receipt.test_logs.map((r) => r.phase), ['head', 'reverted']);
+  assert.match(fs.readFileSync(path.join(context.stateDir, r.receipt.test_logs[0].log), 'utf8'), /ok add.test.js/);
+  assert.match(fs.readFileSync(path.join(context.stateDir, r.receipt.test_logs[1].log), 'utf8'), /not ok add.test.js/);
   assertCleanedUp();
 });
 
@@ -993,9 +997,12 @@ test('expensive prove needs a pinned scoped command that passes at head, fails a
     assert.equal(r.ok, false);
     assert.match(r.summary, message);
   }
-  const r = await gate.run(ctx(sha, { project: expensive(`${NODE} proof.js {tests}`) }));
+  const context = { ...ctx(sha, { project: expensive(`${NODE} proof.js {tests}`) }), stateDir: path.join(tmp, 'scoped-state') };
+  const r = await gate.run(context);
   assert.equal(r.ok, true, r.summary);
   assert.match(r.summary, /kept a scoped proof/);
+  assert.deepEqual(r.receipt.test_logs.map((r) => r.phase), ['head', 'scoped', 'reverted']);
+  assert.match(fs.readFileSync(path.join(context.stateDir, r.receipt.test_logs[2].log), 'utf8'), /AssertionError/);
   assertCleanedUp();
 });
 

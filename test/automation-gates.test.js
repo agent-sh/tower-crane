@@ -263,6 +263,68 @@ test('a deterministic test failure reworks with its failing test names and outpu
   assert.equal(latest.main_failure, undefined, 'a failure that passes on main is the change\'s');
 });
 
+test('rework retains every first error outside the tail and gate log reads it through each task broker', async (t) => {
+  const h = setup(t, { ci: 'pending' });
+  const script = path.join(h.base, 'error-blocks.js');
+  fs.writeFileSync(script, `const fs = require('node:fs');
+if (!fs.readFileSync('value.js', 'utf8').includes('1')) { console.log('base passed'); process.exit(0); }
+console.log('✖ early failure (1ms)');
+console.log('✖ late failure (2ms)');
+console.log('ℹ tests 2');
+console.log('✖ failing tests:');
+console.log('test at test/early.test.js:1:1');
+console.log('✖ early failure (1ms)');
+console.log('  AssertionError: early own error');
+console.log('    at early (test/early.test.js:2:1)');
+console.log('test at test/late.test.js:1:1');
+console.log('✖ late failure (2ms)');
+console.log('  Error: late own error');
+for (let i = 0; i < 80; i++) console.log('    at frame' + i + ' (test/late.test.js:3:1)');
+process.exit(1);
+`);
+  h.ok(['project', 'set', '--tests-cmd', `node ${shellQuote(script)}`, '--tests-mode', 'run-only']);
+  h.submit();
+  h.consume();
+  const task = require('../lib/state').loadState(h.state).tasks.tasks[0];
+  assertReworked(h, task);
+  const latest = task.evidence.filter((e) => e.type === 'tests').at(-1);
+  assert.doesNotMatch(latest.test_failure.output_tail, /early own error/);
+  const reason = h.logs().findLast((e) => e.cmd === 'rework').detail.reason;
+  assert.match(reason, /AssertionError: early own error/);
+  assert.match(reason, /Error: late own error/);
+  assert.match(reason, /error block truncated.*logs\/tests-T1-/);
+  const logs = latest.receipt.test_logs;
+  assert.deepEqual(logs.map((r) => r.phase), ['head', 'base']);
+  const head = fs.readFileSync(path.join(h.state, logs[0].log), 'utf8');
+  assert.match(head, /at frame79/);
+  assert.equal(h.ok(['gate', 'log', 'T1']), head.trim());
+  assert.equal(h.ok(['gate', 'log', 'T1', '--run', 'base']), 'base passed');
+  assert.match(h.run(['gate', 'log', 'T1', '--test', 'missing']).stderr, /no failing test named/);
+  assert.match(h.run(['gate', 'log', 'T1', '--type', 'clean']).stderr, /supports --type tests/);
+  assert.match(h.run(['gate', 'log', 'T1', '--run', 'other']).stderr, /must be head, base/);
+
+  const B = require('../lib/broker');
+  for (const role of ['worker', 'reviewer']) {
+    const agent = `${role}-T1-log`;
+    const broker = await B.start({ state: h.state, task: 'T1', agent, role, harness: 'codex',
+      cwd: h.repo, broker: path.join(h.base, 'brokers', agent, B.FILE) });
+    try {
+      const env = { ...broker.env, TOWER_CRANE_AGENT: agent, TOWER_CRANE_TASK: 'T1' };
+      const read = await h.runAsync(['gate', 'log', 'T1', '--type', 'tests', '--test', 'early failure'], { env });
+      assert.equal(read.code, 0, read.stderr);
+      assert.match(read.stdout, /AssertionError: early own error\n\s+at early/);
+      assert.doesNotMatch(read.stdout, /late own error|frame79/);
+      const denied = await h.runAsync(['gate', 'log', 'T2'], { env });
+      assert.equal(denied.code, 1);
+      assert.match(denied.stderr, /works on T1 only/);
+    } finally {
+      broker.close();
+    }
+  }
+  fs.rmSync(path.join(h.state, logs[0].log));
+  assert.match(h.run(['gate', 'log', 'T1']).stderr, /missing or was pruned/);
+});
+
 test('a timed-out test run retries once at its head and the passing retry keeps the task submitted', (t) => {
   const h = setup(t, { ci: 'pending' });
   const marker = path.join(h.base, 'timed-out-once');
