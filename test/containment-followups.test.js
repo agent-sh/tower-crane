@@ -302,6 +302,27 @@ test('Windows cleanup preserves retained identities beneath non-kept ancestors',
     { name: 'no recorded identity', rows: chain, identities: [], kept: [], late: [{ pid: 500, parent: 300, start: 1004 }] },
     { name: 'multiple retained branches', rows: [...chain, sibling, { pid: 600, parent: 400, start: 1005 }],
       identities: [{ pid: 300, start: 1002 }, { pid: 600, start: 1005 }], kept: [200, 300, 400, 600] },
+    { name: 'PID reuse cycle', rows: [{ pid: 100, parent: 200, start: 1000 }, { pid: 200, parent: 100, start: 1001 }],
+      identities: [], kept: [], order: [100, 200] },
+    { name: 'cycle while retaining another root', rows: [
+      { pid: 100, parent: 200, start: 1000 }, { pid: 200, parent: 100, start: 1001 },
+      { pid: 700, parent: 1, start: 1002 },
+    ], identities: [{ pid: 700, start: 1002 }], kept: [700], order: [100, 200] },
+    { name: 'equal-time cycle', rows: [
+      { pid: 100, parent: 200, start: 1000 }, { pid: 200, parent: 100, start: 1000 },
+    ], identities: [], kept: [], order: [100, 200] },
+    { name: 'self-parent', rows: [{ pid: 100, parent: 100, start: 1000 }], identities: [], kept: [], order: [100] },
+    { name: 'three-node equal-time cycle', rows: [
+      { pid: 100, parent: 300, start: 1000 }, { pid: 200, parent: 100, start: 1000 },
+      { pid: 300, parent: 200, start: 1000 },
+    ], identities: [], kept: [], order: [100, 200, 300] },
+    { name: 'cycle beside an acyclic tree', rows: [
+      { pid: 100, parent: 200, start: 1000 }, { pid: 200, parent: 100, start: 1000 },
+      { pid: 400, parent: 1, start: 1001 }, { pid: 500, parent: 400, start: 1002 },
+    ], identities: [], kept: [], order: [400, 500, 100, 200] },
+    { name: 'parent newer than child', rows: [
+      { pid: 200, parent: 100, start: 1000 }, { pid: 100, parent: 1, start: 1001 },
+    ], identities: [], kept: [], order: [200, 100] },
     { name: 'chunked targets', rows: [...chain, ...Array.from({ length: 400 }, (_, i) => ({
       pid: 1000 + i, parent: 100, start: 2000 + i,
     }))], identities: [{ pid: 300, start: 1002 }], kept: [200, 300] },
@@ -342,6 +363,7 @@ test('Windows cleanup preserves retained identities beneath non-kept ancestors',
       assert.equal(killed.has(row.pid), true, `${item.name}: ordinary pid ${row.pid}`);
     }
     assert.ok(calls.every(call => call.recursive === !keep.size), `${item.name}: recursive kills require no retained identities`);
+    if (item.order) assert.deepEqual(calls.flatMap(call => call.targets), item.order, item.name);
     if (item.name === 'chunked targets') assert.equal(calls.length, 2);
     cp.execFile.mock.restore();
   }

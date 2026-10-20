@@ -13,6 +13,90 @@ const { readPublished } = require('./atomic-file');
 const fixture = path.join(__dirname, 'fixtures', 'containment-lifecycle.js');
 process.env.TOWER_CRANE_TEST_CONTAINMENT = '1';
 
+for (const [mode, retained, cli] of [
+  ['cooperative', false, false], ['delayed', false, false], ['ignore', false, false],
+  ['delayed', true, false], ['ignore', true, false], ['cooperative', false, true],
+]) {
+test(`natural exit gives ${mode} leftovers SIGTERM before killing (${retained ? 'retained sibling' : cli ? 'CLI' : 'scope'})`, {
+  skip: process.platform === 'win32' && 'POSIX SIGTERM handlers',
+}, async t => {
+  const h = cachedFixture(t, 'term-grace', h => h.init(['--tasks-max', '128', '--memory-max-bytes', String(1024 ** 3)]));
+  const dir = path.join(h.base, 'term');
+  fs.mkdirSync(dir);
+  const ownerReady = path.join(dir, 'owner.json');
+  const program = path.join(dir, 'agent.js');
+  const atomic = require.resolve('./atomic-file');
+  fs.writeFileSync(program, `
+const fs=require('node:fs'),path=require('node:path'),cp=require('node:child_process');
+const {writeAtomic}=require(${JSON.stringify(atomic)});
+const dir=${JSON.stringify(dir)};
+const mode=${JSON.stringify(mode)};
+if(process.argv[2]==='leaf'||process.argv[2]==='retained'){
+ const kind=process.argv[2];
+ process.on('SIGTERM',()=>{
+  writeAtomic(path.join(dir,kind+'.term'),'TERM');
+  if(kind==='leaf'&&mode!=='ignore')setTimeout(()=>{
+   writeAtomic(path.join(dir,'cleaned'),'done');process.exit(0);
+  },mode==='delayed'?100:0); // wait-allow: emulate asynchronous cleanup in the TERM handler
+ });
+ writeAtomic(path.join(dir,kind+'.ready'),'ready');
+ setInterval(()=>{},100);
+}else{
+ const leaf=cp.spawn(process.execPath,[__filename,'leaf'],{stdio:'ignore'});
+ const kept=${retained} ? cp.spawn(process.execPath,[__filename,'retained'],{stdio:'ignore'}) : null;
+ const timer=setInterval(()=>{
+  if(!fs.existsSync(path.join(dir,'leaf.ready'))||kept&&!fs.existsSync(path.join(dir,'retained.ready')))return;
+  clearInterval(timer);
+  Promise.resolve(kept ? require(${JSON.stringify(require.resolve('../lib/containment'))}).processIdentity(kept.pid) : null).then(identity=>{
+   writeAtomic(${JSON.stringify(ownerReady)},JSON.stringify({leaf:leaf.pid,retained:kept?.pid,identity}));
+   process.exit(0);
+  });
+ },25); // wait-allow: exit the owner only after its leftovers installed signal handlers
+}
+`);
+  let owned;
+  t.after(() => {
+    if (fs.existsSync(ownerReady)) owned ||= JSON.parse(readPublished(ownerReady, 'utf8'));
+    for (const pid of [owned?.leaf, owned?.retained].filter(Boolean)) {
+      if (detachedAlive({ pid })) killPid(pid, 'SIGKILL');
+    }
+  });
+  const began = performance.now();
+  if (cli) {
+    h.ok(['task', 'add', '--title', 'Natural TERM cleanup', '--acceptance', 'handler runs', '--tier', 'easy']);
+    h.ok(['brief', 'set', 'T1', '-'], { input: 'Clean leftovers on TERM.\n' });
+    h.ok(['ladder', 'set', 'easy', '--harness', 'command', '--command',
+      JSON.stringify([process.execPath, program, 'parent', '{prompt}']), '--clear', 'profile', '--clear', 'effort']);
+    h.env.TOWER_CRANE_TEST_CONTAINMENT = '1';
+    const result = await h.runAsync(['spawn', '--task', 'T1', '--wait']);
+    assert.equal(result.code, 0, result.stdout + result.stderr);
+  } else {
+    const child = C.spawn(process.execPath, [program, 'parent'], {
+      env: { ...h.env, TOWER_CRANE_TEST_CONTAINMENT: '1' }, stdio: 'ignore',
+      resources: { tasks_max: 128, memory_max_bytes: 1024 ** 3 },
+      retained: () => {
+        if (!fs.existsSync(ownerReady)) return [];
+        const identity = JSON.parse(readPublished(ownerReady, 'utf8')).identity;
+        return identity ? [identity] : [];
+      },
+    });
+    t.after(() => { if (child.exitCode === null) child.kill('SIGKILL'); });
+    await new Promise((resolve, reject) => { child.once('close', resolve); child.once('error', reject); });
+    await child.containmentDone;
+    assert.equal(!!child.containment.retained?.length, retained);
+  }
+  owned = JSON.parse(readPublished(ownerReady, 'utf8'));
+  assert.equal(fs.existsSync(path.join(dir, 'leaf.term')), true, 'leftover handled SIGTERM');
+  assert.equal(fs.existsSync(path.join(dir, 'cleaned')), mode !== 'ignore');
+  await waitOnRepo(h, () => !detachedAlive({ pid: owned.leaf }), 'leftover exited after cleanup');
+  if (mode === 'ignore') assert.ok(performance.now() - began >= 5000, 'ignored TERM still receives the five-second grace');
+  if (retained) {
+    assert.equal(detachedAlive({ pid: owned.retained }), true);
+    assert.equal(fs.existsSync(path.join(dir, 'retained.term')), false, 'the independent retained process gets no TERM');
+  }
+});
+}
+
 test('managed ownership separates independent work from ordinary and gate-owned descendants', () => {
   const P = require('../lib/processes');
   for (const [command, expected] of [
