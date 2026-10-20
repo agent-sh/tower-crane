@@ -129,6 +129,99 @@ test('an event reader reads only the events committed past it, and starts over w
   assert.equal(reader.read().rows.length, history + 1);
 });
 
+// A copy of the database renamed over state.db, as an owner restores a
+// `VACUUM INTO` backup: it keeps the uid, and the commits after it carry the
+// counters past what a reader last read.
+function restoreThenCommit(h, copy) {
+  if (process.platform === 'win32') Db.closeAll();
+  const target = path.join(h.state, Db.FILE);
+  fs.copyFileSync(copy, `${target}.restore`);
+  for (const suffix of ['-wal', '-shm']) fs.rmSync(target + suffix, { force: true });
+  fs.renameSync(`${target}.restore`, target);
+  for (let i = 0; i < 5; i++) h.ok(['task', 'note', 'T1', `after the restore ${i}`]);
+}
+
+function storedUid(file) {
+  const db = new (require('node:sqlite').DatabaseSync)(file, { readOnly: true });
+  try {
+    return db.prepare("SELECT value FROM meta WHERE key = 'uid'").get().value;
+  } finally {
+    db.close();
+  }
+}
+
+const lostNote = (e) => e.cmd === 'task note' && e.task === 'T2';
+const restoreReaders = [
+  ['a retained snapshot', (h, copy, t) => {
+    t.after(S.retainEvents(h.state, { long: true }));
+    return () => S.loadState(h.state).tasks.tasks.find((task) => task.id === 'T2');
+  }, (before, after) => {
+    assert.deepEqual([before.title, before.notes.length], ['Renamed then lost', 1]);
+    assert.deepEqual([after.title, after.notes.length], ['B', 0], 'the reader keeps a task the restore reverted');
+  }],
+  ['retained events', (h, copy, t) => {
+    t.after(S.retainEvents(h.state, { long: true }));
+    return () => S.readEvents(h.state);
+  }, (before, after, h) => {
+    assert.equal(before.some(lostNote), true);
+    assert.equal(after.some(lostNote), false, 'the reader keeps an event the restore removed');
+    assert.equal(after.length, S.loadState(h.state, { fresh: true }).events.length);
+  }],
+  ['an event reader', (h) => {
+    const reader = new EventReader(h.state);
+    return () => reader.read();
+  }, (before, after) => {
+    assert.equal(before.rows.some(lostNote), true);
+    assert.equal(after.reset, true, 'the reader goes on past events the restore removed');
+  }],
+  ['a write read before the restore', (h, copy, t) => {
+    useFixtureUserFile(t, h);
+    return () => {
+      const ctx = { stateDir: h.state, agent: 'owner', env: h.env, flags: {}, pos: [] };
+      let restored = false;
+      // The restore comes after the write's read and before its lock.
+      const between = (step, dir) => {
+        if (step !== 'snapshot' || restored || path.resolve(dir) !== path.resolve(h.state)) return;
+        restored = true;
+        restoreThenCommit(h, copy);
+      };
+      process.on('tower-crane:state-step', between);
+      try {
+        S.mutate(ctx, 'task update', (st, emit) => {
+          st.tasks.tasks.find((task) => task.id === 'T2').priority = 'high';
+          emit('T2', { priority: 'high' });
+        });
+      } finally {
+        process.off('tower-crane:state-step', between);
+      }
+      return S.loadState(h.state, { fresh: true }).tasks.tasks.find((task) => task.id === 'T2');
+    };
+  }, (_before, after) => {
+    assert.deepEqual([after.title, after.priority], ['B', 'high'], 'the write puts back a task the restore reverted');
+  }, { during: true }],
+];
+
+// `during`: the row's read restores the copy itself, between its steps.
+for (const [name, open, check, { during = false } = {}] of restoreReaders) {
+  test(`${name} starts over on a restored copy of the same database, whatever commits come after it`, (t) => {
+    const h = cachedFixture(t, 'restore-readers', (h) => {
+      h.init();
+      for (const title of ['A', 'B']) h.ok(['task', 'add', '--title', title, '--acceptance', 'works']);
+    });
+    t.after(() => Db.closeAll());
+    const copy = path.join(h.base, 'backup.db');
+    const read = open(h, copy, t);
+    if (!during) read();
+    StateFiles.backup(h.state, copy);
+    h.ok(['task', 'note', 'T2', 'lost by the restore']);
+    h.ok(['task', 'update', 'T2', '--title', 'Renamed then lost']);
+    const before = during ? null : read();
+    if (!during) restoreThenCommit(h, copy);
+    check(before, read(), h);
+    assert.equal(storedUid(path.join(h.state, Db.FILE)), storedUid(copy), 'the restored database keeps the uid of the one backed up');
+  });
+}
+
 test('a restored copy is history by event id, and an event from a clock behind is new', async (t) => {
   const h = cachedFixture(t, 'reader', (h) => h.init());
   t.after(() => Db.closeAll());

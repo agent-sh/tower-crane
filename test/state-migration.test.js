@@ -88,7 +88,7 @@ test('the first command moves a 0.1 file layout into state.db, keeps every event
 });
 
 // Every release before this one, each from its tag.
-for (const tag of ['v0.1.0', 'v0.1.1', 'v0.1.2', 'v0.1.3', 'v0.1.4', 'v0.1.5', 'v0.1.6']) {
+for (const tag of ['v0.1.0', 'v0.1.1', 'v0.1.2', 'v0.1.3', 'v0.1.4', 'v0.1.5', 'v0.1.6', 'v0.1.7']) {
 test(`${tag.slice(1)} refuses a migrated state before it reads or writes any of it`, (t) => {
   const h = fileLayout(t);
   h.ok(['task', 'show', 'T1']);
