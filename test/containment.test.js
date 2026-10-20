@@ -430,6 +430,32 @@ try {
   assert.equal(fs.existsSync(launched), false);
 });
 
+test('a scope at its memory cap is read every millisecond, so an OOM the kernel has not announced is found', async (t) => {
+  const h = fixture(t);
+  const group = path.join(h.base, 'cap-watch');
+  fs.mkdirSync(group);
+  const events = (max, oom) => fs.writeFileSync(path.join(group, 'memory.events.local'),
+    `low 0\nhigh 0\nmax ${max}\noom ${oom}\noom_kill ${oom}\noom_group_kill 0\n`);
+  for (const [name, max, expected] of [['at its cap', 3, 'resource-memory-max'], ['below its cap', 0, null]]) {
+    events(0, 0);
+    let notify;
+    t.mock.method(fs, 'watch', (file, listener) => {
+      notify = listener;
+      return { on() {}, unref() {}, close() {} };
+    });
+    let found = null;
+    const stop = C.watchOom(group, { tasks: 0, memory: 0 }, (reason) => { found = reason; });
+    fs.watch.mock.restore();
+    // The kernel announces the cap events, then holds the next notice for 10 ms.
+    events(max, 0);
+    notify();
+    events(max, 1);
+    await new Promise((resolve) => setTimeout(resolve, 100)); // wait-allow: bounded window for a missed notice
+    stop();
+    assert.equal(found, expected, name);
+  }
+});
+
 test('local cgroup events distinguish a child cap from the parent cap', (t) => {
   const h = fixture(t);
   const group = path.join(h.base, 'cgroup-events');
