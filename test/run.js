@@ -114,7 +114,8 @@ if (skipped.length) console.error(`tower-crane: skipped host-only tests in this 
 // limit cut off shows which files were still running.
 if (shard && !flags.some((flag) => flag.startsWith('--test-reporter'))) {
   args.unshift('--test-reporter=spec', '--test-reporter-destination=stdout',
-    `--test-reporter=${path.join(__dirname, 'file-progress.js')}`, '--test-reporter-destination=stdout');
+    // A file URL: Windows reads an absolute path here as a URL with its drive as the scheme.
+    `--test-reporter=${require('node:url').pathToFileURL(path.join(__dirname, 'file-progress.js')).href}`, '--test-reporter-destination=stdout');
 }
 args.push(...run);
 
