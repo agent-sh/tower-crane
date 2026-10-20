@@ -323,8 +323,9 @@ test('the suite profile records each test of a real run with its CPU', { skip: p
   const fixture = path.join(h.base, 'profiled.test.js');
   fs.writeFileSync(fixture, `
 const test = require('node:test');
-test('waits', () => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 400); }); // wait-allow: the profile measures a timer wait
-test('spins', () => { const end = Date.now() + 400; while (Date.now() < end); }); // wait-allow: the profile measures CPU work
+const assert = require('node:assert/strict');
+test('waits', () => { assert.equal(Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 400), 'timed-out'); }); // wait-allow: the profile measures a timer wait
+test('spins', () => { const end = Date.now() + 400; let n = 0; while (Date.now() < end) n++; assert.ok(n > 0); }); // wait-allow: the profile measures CPU work
 `);
   const out = path.join(h.base, 'profile.json');
   const r = cp.spawnSync(process.execPath, [path.join(ROOT, 'scripts', 'suite-profile.js'), '--test-concurrency=1', '--json', out, fixture],
