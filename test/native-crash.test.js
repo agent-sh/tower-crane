@@ -101,6 +101,8 @@ test('native crash patterns: signal, empty output, pid and whether every failing
     ['helper message with stderr', cliLine('b', 'SIGSEGV', 'FATAL ERROR: heap limit'), ['b'], [], false],
     ['child with stderr', execError('a', { stderr: "'boom'" }), ['a'], [], false],
     ['child with stdout', execError('a', { stdout: '<Buffer 6f 6b>' }), ['a'], [], false],
+    ['output with content beside empty streams', execError('a').replace("[ null, <Buffer >, <Buffer > ]", "[ null, 'ok', '' ]"), ['a'], [], false],
+    ['a long unclosed output list', execError('a').replace("[ null, <Buffer >, <Buffer > ]", `[''${" ''".repeat(40)}`), ['a'], [], false],
     ['SIGTERM is a stop, not a crash', execError('a', { signal: 'SIGTERM' }), ['a'], [], false],
     ['SIGKILL is a stop, not a crash', cliLine('b', 'SIGKILL'), ['b'], [], false],
     ['an ordinary failure', ORDINARY, ['reads with readPublished'], [], false],
