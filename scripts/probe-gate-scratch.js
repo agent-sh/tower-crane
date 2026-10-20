@@ -31,8 +31,10 @@ function probe({ root = ROOT, cache, command, environment = process.env } = {}) 
   const gates = path.join(run, 'gates');
   const state = path.join(run, 'state');
   const env = { ...environment };
+  // Host readings describe the machine, independently of the probe's fresh state.
   for (const key of Object.keys(env)) {
-    if (key.startsWith('TOWER_CRANE_') || key.startsWith('TC_TEST_') || key === 'NODE_TEST_CONTEXT') delete env[key];
+    if (key.startsWith('TOWER_CRANE_') && key !== 'TOWER_CRANE_HOST_ROOT'
+      || key.startsWith('TC_TEST_') || key === 'NODE_TEST_CONTEXT') delete env[key];
   }
   // Tests use an isolated governor; host measurements still use the real host.
   if (environment.TOWER_CRANE_HOST_ROOT) {
@@ -90,14 +92,14 @@ function probe({ root = ROOT, cache, command, environment = process.env } = {}) 
     result.outer_after = contents(outer);
     result.gate_root_after = contents(gates);
     // Receipts name the worktree actually created, rather than a guessed parent path.
-    const worktrees = checked.data.commands.filter((c) => c.args.includes('worktree') && c.args.includes('add'))
+    const worktrees = (checked.data?.commands || []).filter((c) => c.args.includes('worktree') && c.args.includes('add'))
       .flatMap((c) => c.args.filter((arg) => arg.startsWith(gates + path.sep) && path.basename(arg) === 'wt'));
     result.gate_parents = [...new Set(worktrees.map((dir) => path.dirname(dir)))]
       .map((parent) => ({ path: parent, removed: !fs.existsSync(parent) }));
     result.cleanup_ok = result.outer_before.length === 0 && result.outer_after.length === 0
       && result.gate_root_before.length === 0 && result.gate_root_after.length === 0
       && result.gate_parents.length > 0 && result.gate_parents.every((parent) => parent.removed);
-    result.ok = checked.status === 0 && checked.data.ok && result.cleanup_ok;
+    result.ok = checked.status === 0 && checked.data?.ok === true && result.cleanup_ok;
     result.finished_at = new Date().toISOString();
     return result;
   } finally {
