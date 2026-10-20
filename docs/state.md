@@ -253,7 +253,7 @@ The indexes on `(cmd, task, pos)`, `detail.agent`, `detail.source` and `detail.p
 
 The hot paths query the indexes instead of reading the log. A hook's poll reads the agent's undelivered `inbox` rows and its own task's row. A write reads the task heads, and of the log only the events of the tasks it looks at (`(task, pos)`, or `(cmd, task, pos)` where it needs only some commands), the roles a spawned agent was started as, and, for worker slots, the tasks with an event whose `reach` is within one lease of now. A `wait` reads the events past its cursor.
 
-`status`, `inbox` and the orchestrator's observer read no more of the log than that either. Each reads the task heads and, by index:
+`status`, `inbox` and the orchestrator's observer read the log by index too. Each reads the task heads and:
 
 - each task's own events of the commands a check folds (its claim and dispatch lifecycle, its merge and gate receipts, its reviews), only for the tasks that check applies to, and in one query for many tasks where a view asks every task the same thing;
 - the few commands they list or settle across tasks: `msg`, the owner's `task note` and `decision note`, `review exit missing`, `inbox ack`, `main ci`, `gates pin`, `project set`, `worktree orphan cleanup`, and `stall` for claimed tasks;
