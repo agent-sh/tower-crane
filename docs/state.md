@@ -717,6 +717,9 @@ keeper watches retained work until it ends; without cgroups it carries the
 original process-count/RSS bound after the launcher exits. A cap or monitoring
 failure still stops the whole retained attempt. Gate commands own everything
 they start, including nested supervisors, and retain their complete cleanup.
+In cgroup mode the keeper polls `cgroup.events` for population and reads
+`cgroup.procs` in that group and its nested groups. It does not scan `/proc`
+on each tick.
 The spawn API's `containmentDone` promise resolves once normal-exit cleanup
 and any keeper handoff finish.
 Retained controllers still count as users of the original agent's home, cache,
@@ -744,12 +747,20 @@ Dedicated containment tests set
 The independent capped test scope remains their safety fence.
 
 The fallback watchdog polls process count and total RSS on a 100 ms cadence,
-skipping overlapping snapshots. Platform snapshot commands have a two second
-deadline. Linux
-reads `/proc`, macOS uses `ps`, and Windows uses PowerShell process snapshots.
+skipping overlapping snapshots. macOS `ps` snapshots have a two-second
+deadline. Linux reads `/proc`. Windows keeps one PowerShell process per
+watchdog and requests CIM snapshots over its standard input, with a 60-second
+deadline per request to allow cold CIM startup. A dead or timed-out sampler
+is stopped and replaced on the next request.
 It tracks the process group/tree and previously observed descendants across
-detachment, and stops them on a cap or sampling failure
-(`resource-monitor-failed`). This fallback is a sampled bound: forks and memory
+detachment, pruning exited or reused process identities after each successful
+snapshot. A cap stops the attempt immediately. Three consecutive failed
+snapshots stop it with `resource-monitor-failed`; a successful snapshot resets
+the failure count. A single slow or failed snapshot leaves the attempt running.
+The same rule applies to watchdog keepers and the final cleanup snapshot.
+Three timed-out snapshots take about six seconds on macOS or three minutes
+on Windows, plus scheduling delays. Invalid containment reports still fail
+immediately. This fallback is a sampled bound: forks and memory
 allocations can overshoot between samples. It cannot contain a descendant that
 detaches and loses its parent before the first snapshot, enforce kernel thread
 counts, account for page cache or shared memory like cgroups, or prevent a
