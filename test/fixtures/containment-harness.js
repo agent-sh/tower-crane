@@ -6,8 +6,9 @@ const C = require('../../lib/containment');
 const [mode, file, depth = '0'] = process.argv.slice(2);
 
 function hold() {
-  // The fixture always ends on its own, including when containment is broken.
-  setTimeout(() => process.exit(0), 3000); // wait-allow: finite fake harness lifetime
+  // The fixture always ends on its own, including when containment is broken. A
+  // Windows watchdog's CIM snapshot can take seconds, so it lives longer there.
+  setTimeout(() => process.exit(0), process.platform === 'win32' ? 15000 : 3000); // wait-allow: finite fake harness lifetime
 }
 
 if (mode === 'nested-limit' || mode === 'nested-memory') {
