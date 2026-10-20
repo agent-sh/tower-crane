@@ -1445,31 +1445,37 @@ if (fs.readFileSync('README.md', 'utf8').includes('Independent base update.')) {
   }
 });
 
-test('a head check that fails after its settings changed checks again under the current settings', (t) => {
-  const h = queueFixture(t);
-  h.moveMain();
-  const cmd = h.readState('project.json').gates.tests_cmd;
-  // The suite fails, but only after the owner replaces the tests command.
-  fs.writeFileSync(path.join(h.base, 'during-check.js'), `
-const { fakeAgentEnv } = require(${JSON.stringify(path.join(__dirname, 'agent-env.js'))});
-const cp = require('node:child_process');
-cp.execFileSync(process.execPath, [${JSON.stringify(BIN)}, 'project', 'set', '--tests-cmd', ${JSON.stringify(`${cmd} again`)}, '--agent', 'owner'],
-  { cwd: ${JSON.stringify(h.repo)}, env: fakeAgentEnv(${JSON.stringify(h.env)}), encoding: 'utf8' });
-process.exitCode = 1;
-`);
-  h.reviewer('T1', 'reviewer');
-  h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--sha', h.sha, '--ok', '--agent', 'reviewer']);
-  h.consume();
-  assert.equal(fs.existsSync(path.join(h.base, 'during-check.js.ran')), true, 'the settings changed during the check');
-  assert.equal(h.readState('tasks.json').tasks[0].status, 'accepted', 'the stale failure sends nothing to rework');
-  const stopped = h.logs().findLast((e) => e.cmd === 'merge queue' && e.detail.phase === 'done');
-  assert.match(stopped.detail.blocked.reason, /tests evidence command policy/, 'the line restarted on the current command');
-
-  h.ok(['check', 'tests', 'T1', '--agent', 'orchestrator']);
-  h.consume();
-  assert.deepEqual(headChecks(h).map((e) => [e.detail.command, e.detail.ok]), [[cmd, false], [`${cmd} again`, true]]);
-  assert.equal(h.github().prs['7'].state, 'MERGED');
-});
+for (const setting of ['command', 'mode']) {
+  test(`a head check that fails after its ${setting} changed refreshes and merges under current settings`, (t) => {
+    const h = queueFixture(t);
+    h.moveMain();
+    const cmd = h.readState('project.json').gates.tests_cmd;
+    const next = setting === 'command' ? `${cmd} again` : cmd;
+    const flags = setting === 'command' ? ['--tests-cmd', next] : ['--tests-mode', 'run-only'];
+    // The suite fails after its inputs change, so that failure cannot rework the current task.
+    fs.writeFileSync(path.join(h.base, 'during-check.js'), `
+  const { fakeAgentEnv } = require(${JSON.stringify(path.join(__dirname, 'agent-env.js'))});
+  const cp = require('node:child_process');
+  cp.execFileSync(process.execPath, [${JSON.stringify(BIN)}, 'project', 'set', ...${JSON.stringify(flags)}, '--agent', 'owner'],
+    { cwd: ${JSON.stringify(h.repo)}, env: fakeAgentEnv(${JSON.stringify(h.env)}), encoding: 'utf8' });
+  process.exitCode = 1;
+  `);
+    h.reviewer('T1', 'reviewer');
+    h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--sha', h.sha, '--ok', '--agent', 'reviewer']);
+    h.consume();
+    assert.equal(fs.existsSync(path.join(h.base, 'during-check.js.ran')), true, 'the settings changed during the check');
+    assert.equal(h.readState('tasks.json').tasks[0].status, 'accepted', 'the stale failure sends nothing to rework');
+    assert.equal(h.logs().some((e) => e.cmd === 'rework' && e.task === 'T1'), false);
+    const stopped = h.logs().findLast((e) => e.cmd === 'merge queue' && e.detail.phase === 'done');
+    assert.equal(stopped.detail.blocked, null);
+    assert.deepEqual(headChecks(h).map((e) => [e.detail.command, e.detail.ok]), [[cmd, false], [next, true]]);
+    const tests = softwareEvidence(h, 'T1').filter((e) => e.type === 'tests');
+    assert.equal(tests.length, 2, 'the stale receipt was refreshed automatically');
+    assert.equal(tests.at(-1).gate_policy.tests_cmd, next);
+    assert.equal(tests.at(-1).tests_mode, setting === 'mode' ? 'run-only' : 'prove');
+    assert.equal(h.github().prs['7'].state, 'MERGED');
+  });
+}
 
 test('an accepted PR that already merged without current evidence is confirmed and the PR behind it merges', (t) => {
   const h = queueFixture(t);
@@ -1546,13 +1552,32 @@ for (const failure of ['failView', 'invalidView']) {
   });
 }
 
-test('a concurrent CI completion retries a skipped head in the next drain pass', async (t) => {
+for (const state of ['pending', 'failure']) {
+  test(`accepted ${state} CI lets the next PR merge and ${state === 'pending' ? 'waits' : 'reworks'}`, (t) => {
+    const h = queueFixture(t);
+    acceptBoth(h);
+    const github = h.github();
+    github.ci[h.sha] = state;
+    h.saveGithub(github);
+    assert.equal(h.run(['check', 'ci', 'T1', '--agent', 'orchestrator']).code, 1);
+    h.consume();
+    const task = h.json(['task', 'show', 'T1']);
+    assert.equal(task.status, state === 'pending' ? 'accepted' : 'rework');
+    assert.equal(h.github().prs['7'].state, 'OPEN');
+    assert.equal(h.github().prs['8'].state, 'MERGED');
+    const reworks = h.logs().filter((e) => e.cmd === 'rework' && e.task === 'T1');
+    assert.equal(reworks.length, state === 'pending' ? 0 : 1);
+    if (state === 'failure') assert.equal(reworks[0].detail.gate, 'ci');
+  });
+}
+
+test('a concurrent CI completion retries a skipped pending head in the next drain pass', async (t) => {
   const h = queueFixture(t);
   acceptBoth(h);
   h.moveMain();
-  const failed = h.github();
-  failed.ci[h.sha] = 'failure';
-  h.saveGithub(failed);
+  const pending = h.github();
+  pending.ci[h.sha] = 'pending';
+  h.saveGithub(pending);
   assert.equal(h.run(['check', 'ci', 'T1', '--agent', 'orchestrator']).code, 1);
   const green = h.github();
   green.ci[h.sha] = 'success';
@@ -1579,7 +1604,7 @@ poll();
     await waitFor(paused, { what: 'T2 holds the queue after T1 is skipped' });
     const skipped = h.logs().slice(offset).find((e) => e.cmd === 'queue skipped');
     assert.equal(skipped?.task, 'T1');
-    assert.match(skipped.detail.reason, /ci: latest ci .* failed/);
+    assert.match(skipped.detail.reason, /ci: latest ci .* pending/);
     h.ok(['ci', 'completed', 'T1', '--sha', h.sha, '--agent', 'orchestrator']);
     assert.equal(h.json(['task', 'show', 'T1']).gates.ok, true);
     assert.ok(h.logs().slice(offset).some((e) => e.cmd === 'merge queue' && e.detail.phase === 'requested'));
