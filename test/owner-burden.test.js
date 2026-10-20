@@ -75,8 +75,7 @@ test('publish keeps completed nongreen verdicts while their runs are being rerun
     h.ok(['accept', id]);
     h.ok(['project', 'set', '--publish-policy', '{"conditions":[]}']);
     h.mainCI(conclusion);
-    const refresh = h.run(['wait', '--inbox', '--observe', '--after', 'now', '--timeout', '0.01',
-      '--agent', 'orchestrator'], orchestrator); // wait-allow: record one completed CI observation through the host follower before simulating a rerun
+    const refresh = h.run(['wait', '--inbox', '--observe', '--after', 'now', '--timeout', '0.01', '--agent', 'orchestrator'], orchestrator); // wait-allow: record one completed CI observation through the host follower before simulating a rerun
     assert.ok([0, 2].includes(refresh.code), refresh.stderr);
     const observed = events(h).findLast((e) => e.cmd === 'main ci').detail.push;
     assert.ok(observed.some((run) => run.id === 1001 && run.attempt === 1 && run.conclusion === conclusion),
