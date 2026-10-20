@@ -1381,7 +1381,7 @@ if (fs.readFileSync('README.md', 'utf8').includes('Independent base update.')) {
     cmd: 'ci completed', agent: 'orchestrator', task: 'T1',
     detail: { sha: h.sha, revision: Number(h.revision('T1')) },
   }));
-  fs.appendFileSync(path.join(h.state, 'events.jsonl'), queued.map((e) => JSON.stringify(e) + '\n').join(''));
+  StateFiles.appendEvents(h.state, queued);
   const before = h.suites().length;
   h.consume();
   assert.equal(h.suites().length - before, 1, 'six queued reactions run the suite only once more');

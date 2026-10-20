@@ -10,6 +10,7 @@ if (process.platform !== 'linux' || !cache) throw new Error('set XDG_CACHE_HOME 
 process.env.TOWER_CRANE_TEST_TMP = cache;
 const { makeTaskRepo, BIN, HOOKS } = require('../test/helpers');
 const S = require('../lib/state');
+const StateFiles = require('../test/state-files');
 const label = process.argv[2] || 'idle';
 if (!/^[\w-]+$/.test(label)) throw new Error('label must contain only letters, numbers, underscores or hyphens');
 const profiles = path.join(cache, `profiles-${label}`);
@@ -34,13 +35,11 @@ async function measure(run) {
   try {
     h.ok(['ladder', 'set', 'easy', '--harness', 'command', '--command', JSON.stringify([process.execPath, harness, ready, finish, '{prompt}']),
       '--clear', 'profile', '--clear', 'effort', '--supervision', JSON.stringify({ retries: 0, stall_ms: 120000 })]);
-    const file = path.join(h.state, 'events.jsonl');
-    const row = JSON.stringify({ at: new Date().toISOString(), agent: 'fixture', cmd: 'hook progress', task: null, detail: { text: 'x'.repeat(900) } }) + '\n';
-    const fd = fs.openSync(file, 'a');
-    try {
-      for (let n = 0; n < Math.ceil(50 * 1024 * 1024 / Buffer.byteLength(row)); n++) fs.writeSync(fd, row);
-    } finally {
-      fs.closeSync(fd);
+    const event = () => ({ at: new Date().toISOString(), agent: 'fixture', cmd: 'hook progress', task: null, detail: { text: 'x'.repeat(900) } });
+    const size = Buffer.byteLength(JSON.stringify(event())) + 1;
+    // 50 MiB of history, committed in batches as a busy project's commands would.
+    for (let left = Math.ceil(50 * 1024 * 1024 / size); left > 0; left -= 5000) {
+      StateFiles.appendEvents(h.state, Array.from({ length: Math.min(5000, left) }, event));
     }
     // Node passes the profiler flags to the real monitor as well as the dispatch CLI.
     h.json(['spawn', '--task', 'T1'], { env: { ...h.env, NODE_OPTIONS: `--require "${HOOKS}" --cpu-prof --cpu-prof-dir="${profiles}"` } });
@@ -53,7 +52,7 @@ async function measure(run) {
     waiter.stderr.on('data', (d) => { stderr += d; });
     closed = once(waiter, 'close');
     let appended = 0;
-    writer = setInterval(() => { fs.appendFileSync(file, row); appended += Buffer.byteLength(row); }, 1000);
+    writer = setInterval(() => { StateFiles.appendEvents(h.state, [event()]); appended += size; }, 1000);
     // Exclude cold startup and initial history loading from idle measurements.
     await pause(5000);
     if (!fs.existsSync(ready)) throw new Error('monitor harness not ready');
@@ -86,7 +85,7 @@ async function measureState(run, dir) {
   const T = require('../lib/tasks');
   const I = require('../lib/inbox');
   // Keep a captured lease workload stable while replaying an old state copy.
-  const snapshotAt = fs.statSync(path.join(dir, 'tasks.json')).mtimeMs;
+  const snapshotAt = fs.statSync(path.join(dir, fs.existsSync(path.join(dir, 'state.db')) ? 'state.db' : 'tasks.json')).mtimeMs;
   const release = S.retainEvents ? S.retainEvents(dir) : () => {};
   const check = () => {
     const st = S.loadState(dir);
