@@ -62,21 +62,23 @@ test('main push failures produce one item per current head and follow observes c
     fs.rmSync(cache, { force: true });
     return h.inbox().items.filter((i) => i.kind === 'main_ci_failed');
   };
-  const first = failed();
+  const first = failed().filter((i) => i.sha === h.sha);
   assert.equal(first.length, 1);
   assert.equal(first[0].id, `main_ci_failed:project:${h.sha}`);
   assert.deepEqual(first[0].runs.map((r) => r.id).sort(), [101, 102]);
   assert.equal(first[0].jobs[0].tests[0].name, 'current head regression');
-  assert.deepEqual(failed().map((i) => i.id), first.map((i) => i.id));
+  assert.deepEqual(failed().filter((i) => i.sha === h.sha).map((i) => i.id), first.map((i) => i.id));
   assert.equal(h.logs().filter((e) => e.cmd === 'main ci').length, 1);
   const observe = () => h.run(['wait', '--inbox', '--observe', '--after', 'now', '--types', 'inbox item', '--timeout', '0.2', '--agent', 'orchestrator']); // wait-allow: observe already-published main CI
   assert.equal(observe().code, 0);
   github.main_runs[0].run_attempt = 2;
   h.save(github);
   failed();
-  assert.equal(observe().code, 2, 'a failed rerun at the same head does not raise a second notification');
+  const rerun = observe();
+  if (rerun.code === 0) assert.notEqual(JSON.parse(rerun.stdout).detail.item, first[0].id);
+  else assert.equal(rerun.code, 2);
   assert.equal(h.logs().filter((e) => e.cmd === 'inbox item' && e.detail.item === first[0].id).length, 1);
-  github.main_runs = [run(103, 11, h.sha, 'success'), run(104, 12, h.sha, 'success')];
+  github.main_runs = [run(103, 11, h.sha, 'success'), run(104, 12, h.sha, 'success'), run(106, 13, h.sha, 'success')];
   h.save(github);
   assert.deepEqual(failed(), []);
   observe();
@@ -88,9 +90,9 @@ test('main push failures produce one item per current head and follow observes c
   fs.rmSync(cache, { force: true });
   const advance = path.join(h.base, 'advance-main-clock');
   const clock = path.join(h.base, 'main-clock.js');
-  fs.writeFileSync(clock, `const fs = require('node:fs'); const real = Date.now; Date.now = () => real() + (fs.existsSync(${JSON.stringify(advance)}) ? 61000 : 0);\n`);
+  fs.writeFileSync(clock, "const fs = require('node:fs'); const real = Date.now; Date.now = () => real() + (fs.existsSync(process.env.TC_MAIN_CLOCK_ADVANCE) ? 61000 : 0);\n");
   const follower = cp.spawn(process.execPath, ['--require', clock, '--require', HOOKS, BIN, 'wait', '--follow', '--observe', '--agent', 'orchestrator'], {
-    cwd: h.repo, env: h.env,
+    cwd: h.repo, env: { ...h.env, TC_MAIN_CLOCK_ADVANCE: advance },
   });
   const closed = once(follower, 'close');
   let output = '';
@@ -115,6 +117,30 @@ test('main push failures produce one item per current head and follow observes c
   } finally {
     follower.kill();
     await closed;
+  }
+});
+
+test('push inbox retains older-head blockers and uses every green conclusion', (t) => {
+  const h = setup(t);
+  for (const current of [false, true]) for (const pending of [true, false]) {
+    for (const conclusion of ['failure', 'cancelled', 'timed_out', 'success', 'neutral', 'skipped']) {
+      const data = h.github();
+      data.main_head = current ? h.sha : 'd'.repeat(40);
+      const run = { id: 100, workflow_id: 11, run_number: 50, name: 'CI', event: 'push',
+        status: 'completed', conclusion, head_sha: h.sha };
+      data.main_runs = [run];
+      if (pending) data.main_runs.unshift({ ...run, id: 101, run_number: 51, head_sha: data.main_head, status: 'in_progress', conclusion: null });
+      h.save(data);
+      fs.rmSync(path.join(h.state, 'main-ci-cache.json'), { force: true });
+      const items = h.inbox().items.filter((i) => i.kind === 'main_ci_failed');
+      const green = ['success', 'neutral', 'skipped'].includes(conclusion);
+      assert.equal(items.length, green ? 0 : 1, JSON.stringify({ current, pending, conclusion, items }));
+      if (!green) {
+        assert.equal(items[0].run, 100);
+        assert.equal(items[0].id, `main_ci_failed:project:${h.sha}`);
+        assert.equal(items[0].action.argv[1], 'add');
+      }
+    }
   }
 });
 

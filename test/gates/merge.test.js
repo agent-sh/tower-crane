@@ -39,7 +39,7 @@ function ctx(gh, { task = {}, args = {}, project = {} } = {}) {
 
 test('release merges require green completed push CI even with a newer pending run', async () => {
   const listings = [[{ path: 'package.json' }], Array.from({ length: 100 }, (_, i) => ({ path: `lib/file-${i}.js` }))];
-  for (const [files, conclusion] of listings.flatMap((files) => ['failure', 'cancelled', 'timed_out', 'neutral', 'success'].map((c) => [files, c]))) {
+  for (const [files, conclusion] of listings.flatMap((files) => ['failure', 'cancelled', 'timed_out', 'neutral', 'skipped', 'success'].map((c) => [files, c]))) {
     let merged = false;
     const gh = fakeExec((args) => {
       if (args[0] === 'pr' && args[1] === 'view') return result(JSON.stringify({
@@ -49,7 +49,8 @@ test('release merges require green completed push CI even with a newer pending r
       if (args[0] === 'api' && args[1].includes('/pulls/42/files')) return result(JSON.stringify({
         filename: 'package.json', patch: '-  "version": "0.1.6",\n+  "version": "0.1.7",',
       }));
-      if (args[0] === 'api' && args[1].includes('/actions/workflows?')) return result(JSON.stringify({ id: 11, state: 'active' }));
+      if (args[0] === 'api' && args[1].includes('/actions/workflows?')) return result(JSON.stringify({ id: 11, state: 'active', path: 'dynamic/github-code-scanning/codeql' }));
+      if (args[0] === 'api' && args[1].includes('/contents/')) return result(JSON.stringify({ encoding: 'base64', content: Buffer.from('on: push\njobs: {}\n').toString('base64') }));
       if (args[0] === 'api' && args[1].includes('/actions/runs?')) return result([
         { id: 101, workflow_id: 11, name: 'CI', run_number: 51, event: 'push', status: 'in_progress', conclusion: null },
         { id: 100, workflow_id: 11, name: 'CI', run_number: 50, event: 'push', status: 'completed', conclusion, html_url: 'https://github.com/acme/app/actions/runs/100' },
@@ -60,8 +61,9 @@ test('release merges require green completed push CI even with a newer pending r
       return null;
     });
     const r = await gate.run(ctx(gh));
-    assert.equal(r.ok, conclusion === 'success', r.summary);
-    assert.equal(merged, conclusion === 'success');
+    const green = ['success', 'neutral', 'skipped'].includes(conclusion);
+    assert.equal(r.ok, green, r.summary);
+    assert.equal(merged, green);
     if (!r.ok) assert.match(r.summary, new RegExp(`main push CI.*run 100.*${conclusion}`));
   }
 });

@@ -67,6 +67,58 @@ function github(t) {
 
 const POLICY = JSON.stringify({ conditions: ['review_clean', 'full_suite', 'main_ci_green'] });
 
+test('workflow push trigger forms distinguish push from other events and unreadable syntax', () => {
+  const { workflowPush } = require('../lib/main-ci');
+  for (const [source, expected] of [
+    ['on: push\njobs: {}\n', true],
+    ['on: "push"\n', true],
+    ["'on': [pull_request, 'push']\n", true],
+    ['on:\n  push:\n    paths: [docs/**]\n  pull_request:\njobs: {}\n', true],
+    ['on:\n- pull_request\n- push\njobs: {}\n', true],
+    ['on: [\n  pull_request,\n  push\n]\njobs: {}\n', true],
+    ['on: {pull_request: {paths: ["push:"]}, push: {branches: [main]}}\n', true],
+    ['{"on":{"push":null},"jobs":{}}', true],
+    ['on: pull_request\n', false],
+    ['on: [schedule, workflow_dispatch]\n', false],
+    ['on:\n  schedule:\n    - cron: "17 3 * * *"\n  workflow_dispatch:\njobs: {}\n', false],
+    ['on: {pull_request: {paths: ["push:"]}, workflow_dispatch: {}}\n', false],
+    ['on: *shared_events\n', null],
+    ['on:\n  <<: *shared_events\n', null],
+    ['on: [pull_request}\n', null],
+    ['jobs: {}\n', null],
+  ]) assert.equal(workflowPush(source), expected, source);
+});
+
+test('publish distinguishes absent push CI from an active push workflow awaiting completion', (t) => {
+  const h = github(t);
+  h.mainCI('success');
+  const id = h.release();
+  h.ok(['accept', id]);
+  h.ok(['project', 'set', '--publish-policy', '{"conditions":[]}']);
+  const publish = ['ask', '--setting', 'publish', '--change', JSON.stringify({ task: id }), '--agent', 'orchestrator'];
+  for (const [source, state, allowed] of [
+    [null, 'absent', true],
+    ['on: pull_request\njobs: {}\n', 'active', true],
+    ['on: [schedule, workflow_dispatch]\njobs: {}\n', 'active', true],
+    ['on: push\njobs: {}\n', 'disabled_manually', true],
+    ['on: push\njobs: {}\n', 'active', false],
+    ['on: [push, pull_request]\njobs: {}\n', 'pending', false],
+    ['on: push\njobs: {}\n', 'older_completed', true],
+    [null, 'unreadable', false],
+  ]) {
+    const data = JSON.parse(fs.readFileSync(h.env.INBOX_GITHUB, 'utf8'));
+    const file = '.github/workflows/ci.yml';
+    data.workflows = state === 'absent' ? [] : [{ id: 11, path: file, state: state === 'disabled_manually' ? state : 'active' }];
+    data.workflow_sources = source === null ? {} : { [file]: source };
+    data.main_runs = state === 'pending' ? [{ id: 101, workflow_id: 11, run_number: 51, name: 'CI', event: 'push', status: 'queued', conclusion: null }] : [];
+    data.workflow_runs = state === 'older_completed' ? { 11: [{ id: 99, workflow_id: 11, run_number: 49, name: 'CI',
+      event: 'push', status: 'completed', conclusion: 'success', head_sha: h.sha }] } : {};
+    fs.writeFileSync(h.env.INBOX_GITHUB, JSON.stringify(data));
+    const result = h.run(publish, orchestrator);
+    assert.equal(result.code, allowed ? 0 : 1, `${state}: ${result.stdout} ${result.stderr}`);
+  }
+});
+
 function hostRelease(t, content) {
   const h = github(t);
   h.git(['switch', '-qc', 'release-host-proof']);
