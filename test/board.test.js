@@ -1234,11 +1234,11 @@ test('runaway rules: status and the board flag the same claim, from the project\
   assert.doesNotMatch(page(), /data-key="runaway-T11/);
   h.ok(['spend', 'T11', '--tokens', '3000000', '--agent', 'w-x']);
   const flags = status().runaways;
-  assert.deepEqual(flags.map((f) => [f.task, f.agent, f.rule]), [['T11', 'w-x', 'spend']]);
-  assert.match(h.ok(['status']), /runaway: T11 w-x: spent 12M tokens, 6 times the easy median of 2M; the rule is 5\.\d times$/m);
+  assert.deepEqual(flags.map((f) => [f.task, f.agent, f.rule]), [['T11', null, 'spend'], ['T11', 'w-x', 'worker-spend']]);
+  assert.match(h.ok(['status']), /runaway: T11: T11 has spent 12M tokens over 1 worker \(current w-x: 12M tokens\); cached share unknown, uncached tokens unknown; 6 times the easy M median of 2M; the rule is 5\.\d times$/m);
   const item = page().match(/<li class="qi" data-tier="now" data-kind="runaway" data-key="runaway-T11-spend">[\s\S]*?<\/li>/);
   assert.ok(item, 'the board shows the same flag as a Now item');
-  assert.match(item[0], /spent 12M tokens/);
+  assert.match(item[0], /T11 has spent 12M tokens/);
   assert.match(page(), /data-key="agent-T11"[\s\S]*?in the queue: spend/, 'the row keeps a marker');
   // Once the agent has exited, the queue says stuck, not runaway, and the row agrees.
   const at = new Date().toISOString();
@@ -1258,10 +1258,10 @@ test('runaway rules: status and the board flag the same claim, from the project\
   h.ok(['spend', 'T12', '--tokens', '13000000', '--agent', 'w-y']);
   assert.deepEqual(status().runaway_norms.tiers.hard, { median: 2e6, from: 'project', rate: null, samples: 0 });
   assert.equal(status().runaway_norms.tiers.easy.from, 'tier');
-  assert.match(h.ok(['status']), /runaway: T12 w-y: spent 13M tokens, 6\.5 times the project median of 2M \(hard has no accepted task with tokens\); the rule is 5\.\d times$/m);
+  assert.match(h.ok(['status']), /runaway: T12: T12 has spent 13M tokens over 1 worker \(current w-y: 13M tokens\); cached share unknown, uncached tokens unknown; 6\.5 times the project median of 2M \(hard has no accepted task with tokens\) \(hard M has no accepted task with tokens; needs 3\); the rule is 5\.\d times$/m);
   assert.match(page(), /data-key="runaway-T12-spend">[\s\S]*?6\.5 times the project median of 2M \(hard has no accepted task with tokens\)/, 'the Now item');
   assert.match(page(), /data-spend="top">[^\n]*?T12[^\n]*?\(project median 2M\)/, 'the spend line');
-  assert.match(page(), /data-key="top-T12">[\s\S]*?6\.5 times the project median of 2M \(hard has no accepted task with tokens\)<\/span>/, 'the Spend room');
+  assert.match(page(), /data-key="top-T12">[\s\S]*?6\.5 times the project median of 2M \(hard has no accepted task with tokens\) \(hard M has no accepted task with tokens; needs 3\)<\/span>/, 'the Spend room');
   assert.doesNotMatch(page(), /hard median/);
 });
 
