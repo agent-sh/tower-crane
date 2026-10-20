@@ -227,7 +227,10 @@ test('a caller inside its own capped or delegated fence keeps attempts inside it
   } finally { Object.assign(fs, original); }
 });
 
-test('the sweep removes report directories and failed units of dead supervisors only', async (t) => {
+test('the sweep removes report directories and failed units of dead supervisors only', {
+  // Only a cgroup launch sweeps; keepers are found through /proc.
+  skip: process.platform !== 'linux' && 'systemd user units and /proc are Linux-only',
+}, async (t) => {
   const h = fixture(t);
   const cache = path.join(h.base, 'sweep-cache');
   const dead = require('node:child_process').spawnSync(process.execPath, ['-e', '']).pid;
@@ -446,8 +449,10 @@ test('nested cap failures leave the parent running when local events are availab
   for (const [mode, reason] of [['nested-limit', 'resource-tasks-max'], ['nested-memory', 'resource-memory-max']]) {
     const localEvents = !systemd || fs.existsSync(path.join(C.currentGroup(),
       mode === 'nested-limit' ? 'pids.events.local' : 'memory.events.local'));
+    // A watchdog parent sums the RSS of its whole tree: the storm's leaves that start before
+    // the child's sampler stops them and, on Windows, that sampler's PowerShell.
     const result = await G.treeExec(process.execPath, [HARNESS, mode, 'unused'], {
-      resources: { tasks_max: 128, memory_max_bytes: memory }, timeout: 10000, // wait-allow: finite nested cap probe deadline
+      resources: { tasks_max: 128, memory_max_bytes: 4 * memory }, timeout: 10000, // wait-allow: finite nested cap probe deadline
     });
     if (!localEvents && result.resource_reason === reason) continue;
     assert.equal(result.status, 0, diagnostics(result));
@@ -472,8 +477,12 @@ test('fake harness nested launches and detached grandchildren retain containment
   if (result.containment.backend === 'cgroup') {
     const parent = C.currentGroup().split('/');
     const slice = parent.findLastIndex((name) => name.endsWith('.slice'));
-    const fence = parent.slice(0, slice + 1).join('/') + '/';
-    assert.ok(result.containment.group.startsWith(fence), result.containment.group);
+    // A caller outside its user manager, as a hosted runner's system service is, has no slice
+    // that manager can reach, so the scope takes the slice of the same name under the manager.
+    const uid = process.getuid();
+    const fence = parent.includes(`user@${uid}.service`) ? parent.slice(0, slice + 1).join('/') + '/'
+      : `/sys/fs/cgroup/user.slice/user-${uid}.slice/user@${uid}.service/${parent[slice]}/`;
+    assert.ok(result.containment.group.startsWith(fence), `${result.containment.group} is not under ${fence}`);
     assert.equal(records[0].inherited, result.containment.group);
     assert.ok(records[1].inherited.startsWith(records[0].inherited + path.sep));
     for (const record of records) assert.ok(record.group.startsWith(records[0].inherited + path.sep), JSON.stringify(record));

@@ -37,6 +37,31 @@ test('managed ownership separates independent work from ordinary and gate-owned 
   ]) assert.deepEqual(C.managed(rows, marks, new Map(), 1).map(row => row.pid), expected);
 });
 
+test('a Windows root that exited before its first snapshot keeps the children it launched', () => {
+  const platform = Object.getOwnPropertyDescriptor(process, 'platform');
+  // Windows rows: no process group, creation time in epoch ms. The root, pid 10, launched at 1000.
+  const rows = [
+    { pid: 11, parent: 10, group: null, start: 1050 },
+    { pid: 12, parent: 11, group: null, start: 1100 },
+    { pid: 13, parent: 10, group: null, start: 500 }, // a child of an earlier process that had pid 10
+    { pid: 14, parent: 10, group: null, start: 950 }, // within the creation clock's tick
+    { pid: 15, parent: 99, group: null, start: 1200 },
+  ];
+  const root = { pid: 10, parent: 1, group: null, start: 1001 };
+  try {
+    for (const [name, os, snapshot, launch, expected] of [
+      ['exited root', 'win32', rows, 1000, [11, 12, 14]],
+      ['live root', 'win32', [root, ...rows.filter(r => r.pid !== 13)], 1000, [10, 11, 12, 14]],
+      ['no launch time', 'win32', rows, undefined, []],
+      ['Linux reparents', 'linux', rows, 1000, []],
+    ]) {
+      Object.defineProperty(process, 'platform', { ...platform, value: os });
+      const known = new Map(launch === undefined ? [] : [[10, launch]]);
+      assert.deepEqual(C.descendants(snapshot, 10, known).map(r => r.pid), expected, name);
+    }
+  } finally { Object.defineProperty(process, 'platform', platform); }
+});
+
 const cases = [
   ['supervisor', 'zero', 'caller', 'none', true],
   ['supervisor', 'nonzero', 'agent', 'none', true],

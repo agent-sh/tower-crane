@@ -13,7 +13,7 @@ function hold() {
 if (mode === 'nested-limit' || mode === 'nested-memory') {
   const memory = mode === 'nested-memory';
   const child = C.spawn(process.execPath, [__filename, memory ? 'memory' : 'storm', file], {
-    stdio: 'inherit', resources: { tasks_max: memory ? 64 : process.env[C.MARK] ? 32 : 4,
+    stdio: 'inherit', resources: { tasks_max: memory ? 64 : C.canScope() ? 32 : 4,
       memory_max_bytes: (memory ? 96 : 512) * 1024 * 1024 },
   });
   child.on('error', () => process.exitCode = 1);

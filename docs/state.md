@@ -623,7 +623,10 @@ Crane launch creates a delegated child cgroup within the inherited scope. Its
 own cap and every ancestor's aggregate cap remain enforced by the kernel.
 Optional owner `scope` properties apply to the outer scope; mandatory resource
 properties take precedence, and `scope: {}` only clears optional properties.
-An optional `Slice` property cannot override the caller's slice. Setting
+An optional `Slice` property cannot override the caller's slice. A caller
+outside its user manager, such as a hosted CI runner's system service, has no
+slice that manager can place a scope in; the scope goes into the user
+manager's slice of the same name and keeps its own caps. Setting
 `TasksMax`, `MemoryMax`, `MemorySwapMax`, `OOMPolicy`, `Delegate` or `Slice`
 through `init`, `project set` or `ladder set` prints a `warning:` line naming
 the replaced keys. The launched command and its descendants get
