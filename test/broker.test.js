@@ -57,10 +57,24 @@ test('socket addresses fit the Unix byte limit, including multibyte names', () =
 
 test('short socket directories serve claude, codex and mixed routes with long fixture paths', { skip: process.platform === 'win32' && 'Windows uses a named pipe' }, async (t) => {
   const s = scratch(t);
-  for (const harnesses of [['claude'], ['codex'], ['claude', 'codex']]) {
+  for (const [harnesses, stale] of [
+    [['claude'], 'file'],
+    [['codex'], null],
+    [['claude', 'codex'], 'directory'],
+    [['claude'], 'socket'],
+  ]) {
     const granted = socketDir(t);
     const job = { ...s.job, broker_harnesses: harnesses, agent_socket_dir: granted,
       agent_tmp: path.join(s.base, 'too-long-'.repeat(20)) };
+    const previous = path.join(granted, 's');
+    if (stale === 'file') fs.writeFileSync(previous, 'left by an interrupted run');
+    if (stale === 'directory') fs.mkdirSync(previous);
+    if (stale === 'socket') {
+      const killed = require('node:child_process').spawnSync(process.execPath, ['-e',
+        "require('node:net').createServer().listen(process.argv[1], () => process.kill(process.pid, 'SIGKILL'))", previous]);
+      assert.equal(killed.signal, 'SIGKILL');
+      assert.ok(fs.lstatSync(previous).isSocket());
+    }
     const broker = await B.start(job);
     try {
       const { socket } = JSON.parse(fs.readFileSync(job.broker, 'utf8'));
