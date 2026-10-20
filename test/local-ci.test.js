@@ -149,16 +149,15 @@ test('accept reruns local CI when the submitted head has no receipt', (t) => {
   assert.equal(evidence.at(-1).receipt.head_sha, next);
 });
 
-test('accept refreshes an older local CI tree while a direct merge still requires a current receipt', (t) => {
+test('accept reruns local CI for an older merged tree while merge requires a fresh check', (t) => {
   const h = fixture(t);
   h.ok(['check', 'ci', 'T1']);
   fs.writeFileSync(path.join(h.repo, 'later.txt'), 'later\n');
   h.git(['add', '.']);
   h.git(['commit', '-qm', 'base advances again']);
+  assert.match(h.json(['task', 'show', 'T1']).gates.missing.join('; '), /local CI receipt.*merged tree/);
   h.ok(['accept', 'T1']);
-  const ci = h.readState('tasks.json').tasks[0].evidence.filter((e) => e.type === 'ci');
-  assert.equal(ci.length, 2);
-  assert.equal(ci.at(-1).receipt.base_sha, h.git(['rev-parse', 'main']));
+  assert.equal(h.readState('tasks.json').tasks[0].evidence.at(-1).receipt.base_sha, h.git(['rev-parse', 'HEAD']));
   fs.writeFileSync(path.join(h.repo, 'last.txt'), 'last\n');
   h.git(['add', '.']);
   h.git(['commit', '-qm', 'base moves after acceptance']);
@@ -316,15 +315,16 @@ test('matching audit copies cannot bind a receipt to another head or tree', (t) 
     fs.writeFileSync(log, events.map((e) => JSON.stringify(e)).join('\n') + '\n');
   };
   write();
-  assert.match(h.json(['task', 'show', 'T1']).gates.gates.find((g) => g.type === 'ci').reason, /receipt.*submitted head/);
+  assert.match(h.json(['task', 'show', 'T1']).gates.missing.join('; '), /receipt.*submitted head/);
   h.ok(['accept', 'T1']);
   assert.equal(h.readState('tasks.json').tasks[0].evidence.at(-1).receipt.head_sha, next);
+  doc.tasks[0].status = 'submitted';
   evidence.receipt.head_sha = next;
   evidence.receipt.tree_hash = 'f'.repeat(40);
   write();
-  assert.match(h.json(['task', 'show', 'T1']).gates.gates.find((g) => g.type === 'ci').reason, /receipt.*current merged tree/);
+  assert.match(h.json(['task', 'show', 'T1']).gates.missing.join('; '), /receipt.*current merged tree/);
   h.ok(['accept', 'T1']);
-  assert.notEqual(h.readState('tasks.json').tasks[0].evidence.at(-1).receipt.tree_hash, evidence.receipt.tree_hash);
+  assert.notEqual(h.readState('tasks.json').tasks[0].evidence.at(-1).receipt.tree_hash, 'f'.repeat(40));
 });
 
 test('failed, missing and timed out local commands record failure and clean their worktrees', (t) => {
@@ -1711,10 +1711,10 @@ test('changed local CI policy invalidates its earlier receipt', (t) => {
   const h = fixture(t);
   h.ok(['check', 'ci', 'T1']);
   h.ok(['project', 'set', '--ci-local', JSON.stringify({ command: h.command, timeout: 10 })]);
-  assert.match(h.json(['task', 'show', 'T1']).gates.gates.find((g) => g.type === 'ci').reason, /configured command or timeout/);
+  assert.match(h.json(['task', 'show', 'T1']).gates.missing.join('; '), /configured command or timeout/);
   h.ok(['check', 'ci', 'T1']);
   h.ok(['project', 'set', '--ci-local', JSON.stringify({ command: [...h.command, 'extra'], timeout: 10 })]);
-  assert.match(h.json(['task', 'show', 'T1']).gates.gates.find((g) => g.type === 'ci').reason, /configured command or timeout/);
+  assert.match(h.json(['task', 'show', 'T1']).gates.missing.join('; '), /configured command or timeout/);
   h.ok(['project', 'set', '--ci-local', 'null']);
   assert.equal(h.run(['accept', 'T1']).code, 1);
 });
@@ -1794,7 +1794,7 @@ test('owner task override takes precedence and clearing restores the kind varian
   const updated = h.json(['task', 'update', 'T1', '--ci-local', JSON.stringify(override)]);
   assert.deepEqual(updated.ci_local, override);
   assert.match(h.ok(['task', 'show', 'T1']), /ci\.local override:/);
-  assert.match(h.json(['task', 'show', 'T1']).gates.gates.find((g) => g.type === 'ci').reason, /receipt.*variant/);
+  assert.match(h.json(['task', 'show', 'T1']).gates.missing.join('; '), /receipt.*variant/);
   let e = h.json(['check', 'ci', 'T1']);
   assert.equal(e.receipt.variant, 'task:T1');
   assert.deepEqual(e.receipt.command, [...h.command, '--s3']);
@@ -1805,14 +1805,14 @@ test('owner task override takes precedence and clearing restores the kind varian
   assert.equal(h.json(['task', 'show', 'T1']).gates.ok, true, 'unselected kind policy does not invalidate the override');
   const replacement = { command: [...h.command, '--lab'], timeout: 10 };
   h.ok(['task', 'update', 'T1', '--ci-local', JSON.stringify(replacement)]);
-  assert.match(h.json(['task', 'show', 'T1']).gates.gates.find((g) => g.type === 'ci').reason, /configured command or timeout/);
+  assert.match(h.json(['task', 'show', 'T1']).gates.missing.join('; '), /configured command or timeout/);
   e = h.json(['check', 'ci', 'T1']);
   assert.deepEqual(e.receipt.command, replacement.command);
   assert.equal(e.receipt.timeout, 10);
 
   const cleared = h.json(['task', 'update', 'T1', '--ci-local', 'null']);
   assert.ok(!Object.hasOwn(cleared, 'ci_local'));
-  assert.match(h.json(['task', 'show', 'T1']).gates.gates.find((g) => g.type === 'ci').reason, /receipt.*variant/);
+  assert.match(h.json(['task', 'show', 'T1']).gates.missing.join('; '), /receipt.*variant/);
   e = h.json(['check', 'ci', 'T1']);
   assert.equal(e.receipt.variant, 'kind:docs');
   assert.deepEqual(e.receipt.command, [...h.command, '--native-extended']);
@@ -1837,7 +1837,7 @@ test('kind variants with identical argv cannot reuse receipts or merge under a d
   h.ok(['check', 'ci', 'T1']);
   delete local.by_kind.ops;
   h.ok(['project', 'set', '--ci-local', JSON.stringify(local)]);
-  assert.match(h.json(['task', 'show', 'T1']).gates.gates.find((g) => g.type === 'ci').reason, /receipt.*variant/);
+  assert.match(h.json(['task', 'show', 'T1']).gates.missing.join('; '), /receipt.*variant/);
   local.by_kind.ops = { args: [] };
   h.ok(['project', 'set', '--ci-local', JSON.stringify(local)]);
   h.ok(['accept', 'T1']);
@@ -1970,11 +1970,12 @@ test('a newer fetched base invalidates a local receipt while preserving the loca
   const remote = h.git(['rev-parse', 'HEAD']);
   h.git(['update-ref', 'refs/remotes/origin/main', remote]);
   h.git(['reset', '--hard', h.baseSha]);
-  assert.match(h.json(['task', 'show', 'T1']).gates.gates.find((g) => g.type === 'ci').reason, /current merged tree/);
-  const e = h.json(['check', 'ci', 'T1']);
+  assert.match(h.json(['task', 'show', 'T1']).gates.missing.join('; '), /current merged tree/);
+  h.ok(['accept', 'T1']);
+  const e = h.readState('tasks.json').tasks[0].evidence.at(-1);
   assert.equal(e.receipt.base_sha, remote);
   assert.equal(h.git(['rev-parse', 'main']), h.baseSha);
-  h.ok(['accept', 'T1']);
+  assert.equal(h.readState('tasks.json').tasks[0].status, 'accepted');
 });
 
 test('project settings validate local argv and timeout, preserve CI siblings and allow clearing', (t) => {

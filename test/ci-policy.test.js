@@ -111,6 +111,7 @@ test('old hosted evidence without a recorded policy is stale even with a matchin
   h.writeState('tasks.json', doc);
   fs.writeFileSync(path.join(h.state, 'events.jsonl'), audit.map((e) => JSON.stringify(e)).join('\n') + '\n');
   assert.equal(ciGate(h).ok, false);
+  assert.match(ciGate(h).reason, /hosted CI.*policy.*(missing|unrecorded)/);
   h.ok(['accept', 'T1']);
   assert.deepEqual(latest(h).ci_policy, EMPTY);
 });
