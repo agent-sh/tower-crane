@@ -409,7 +409,10 @@ test('a spawned worker claims a task whose dependency merged while gh api is den
   assert.match(rework.detail.reason, /^ci failed at .*is not allowed by this agent's agent file/s);
   // The dependency already merged, so neither the claim nor the later reaction needs the stack API.
   const inspections = apiCalls(f).slice(before);
-  assert.ok(inspections.every((c) => /\/check-(runs|suites)\?/.test(c.args[1])), 'only CI inspections read gh api after the claim');
+  assert.equal(inspections.filter((c) => /\/pulls\/12\/comments\?/.test(c.args[1])).length, 1,
+    'dispatch attempts the inline finding read once');
+  assert.ok(inspections.every((c) => /\/check-(runs|suites)\?|\/pulls\/12\/comments\?/.test(c.args[1])),
+    'only inline findings and CI inspections read gh api during dispatch');
 });
 
 test('a spawned worker claim reads the recorded stack and makes no gh api call while its dependency is submitted', (t) => {
