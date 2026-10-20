@@ -13,17 +13,17 @@ const suite = (app, conclusion = 'success', status = 'completed', runs = 1) => (
 // gh --jq prints one JSON value per line, across all pages.
 const lines = (items) => items.map((i) => JSON.stringify(i)).join('\n') + (items.length ? '\n' : '');
 
-// `later` maps other commits on the base to their checks (`allRuns`: every check run, where the
-// default list keeps the latest of each name), `branch` lists the base's workflow runs since the
+// `later` maps other commits on the base to their checks (`allRuns`, here and there: every check
+// run, where the default list keeps the latest of each name), `branch` lists the base's workflow runs since the
 // merge commit, `compare` maps "from...to" to the compare status GitHub reports and `files` maps a
 // workflow path to its text at any commit. `history` lists the commits the merge commit contains,
 // newest first, `earlier` the base's runs of its workflow before it, `runJobs` maps a run id to its
 // jobs, `logs` a job id to its log text (null when it cannot be read) and `patches` are the hunks of
 // the merge commit's diff.
-function github({ runs = [], suites = [], workflows = [], head = SHA, apiError = null, view = {}, pr,
+function github({ runs = [], allRuns, suites = [], workflows = [], head = SHA, apiError = null, view = {}, pr,
   later = {}, branch = [], compare = {}, date = '2026-10-13T20:00:00Z', files = {},
   history = [], earlier = [], runJobs = {}, logs = {}, patches = [] } = {}) {
-  const commits = { ...later, [SHA]: { runs, suites, workflows } };
+  const commits = { ...later, [SHA]: { runs, allRuns, suites, workflows } };
   return fakeExec((args) => {
     if (args[0] === 'pr' && args[1] === 'view') return result(JSON.stringify(pr || { headRefOid: head, mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN', ...view }));
     if (args[0] !== 'api') return null;
@@ -929,7 +929,10 @@ test('a dispatched run at the PR head never counts for or against the PR checks'
   ];
   for (const [label, prRuns, prSuite, ok, summary] of cases) {
     const suites = [...(prSuite ? [{ ...suite('github-actions', prSuite), id: 1 }] : []), { ...suite('github-actions', null, 'in_progress', 3), id: 2 }];
-    const gh = github({ runs: [...prRuns, ...dispatched], suites, workflows: prSuite ? [pull, manual] : [manual] });
+    // The default list keeps only the newest run of each name: the dispatched skip, not the PR's run.
+    const allRuns = [...prRuns, ...dispatched];
+    const runs = allRuns.filter((c) => !allRuns.some((o) => o.name === c.name && o.started_at > c.started_at));
+    const gh = github({ runs, allRuns, suites, workflows: prSuite ? [pull, manual] : [manual] });
     const r = await gate.run(ctx(gh, { pr: 42 }, required));
     assert.equal(r.ok, ok, `${label}: ${r.summary}`);
     assert.match(r.summary, summary, label);
