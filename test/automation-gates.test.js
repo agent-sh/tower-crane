@@ -21,6 +21,26 @@ function assertReworked(h, task) {
     'the worker keeps the failing gate reason after refill');
 }
 
+for (const signal of ['SIGTERM', 'SIGKILL']) {
+  test(`an interrupted host probe retries once before rework: ${signal}`, { skip: process.platform === 'win32' }, (t) => {
+    const h = setup(t, { ci: 'pending' });
+    h.ok(['project', 'set', '--tests-cmd', 'node -e "process.exit(0)"', '--tests-mode', 'run-only']);
+    h.submit();
+    const command = `node -e "process.kill(process.pid, '${signal}')"`;
+    h.ok(['submit', 'T1', '--sha', h.sha, '--pr', '7', '--agent', 'worker', '--host-probe', command]);
+    h.consume();
+    const task = h.readState('tasks.json').tasks[0];
+    const runs = task.evidence.filter((e) => e.type === 'tests');
+    assert.equal(runs.length, 2, 'an interrupted probe retries once, not immediately reworked');
+    assertReworked(h, task);
+    for (const evidence of runs) {
+      assert.equal(evidence.runner_crash, true);
+      assert.equal(evidence.worker_failure, undefined);
+      assert.equal(evidence.receipt.host_probes[0].timed_out, false);
+    }
+  });
+}
+
 test('CI completion refreshes a pending receipt at the exact head and merges after review', (t) => {
   const h = setup(t, { ci: 'pending' });
   h.submit();
