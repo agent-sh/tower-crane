@@ -695,7 +695,7 @@ parents, made like the local CI merge commit ([state](state.md)); no ref
 names it. It first trial-merges
 each task bottom up and sends the lowest conflicting one to rework with its
 files. The suite is skipped when the head already contains that tip or an
-earlier `head check` covered the same head, revision, base tip and command.
+earlier successful `head check` covered the same head, revision, base tip and command.
 Entries without a tests gate, or with tests mode `none`, skip it. A failing
 check sends the top task to rework with the output tail, and the tasks
 below it take the line again on their own. A failure under heads, stack
@@ -714,6 +714,12 @@ requires up-to-date branches closes that window. Hosted CI evidence comes
 from GitHub's `pull_request` run, which already tests the merge ref. Merge
 the base into a PR only for conflict repair, never to refresh evidence or
 pick up a workflow change.
+After a merged-head timeout, the next queue pass reruns the check once for
+the same task, head, revision, base tip, command and timeout budget. Concurrent
+requests share the queue executor, and later reactions reuse that rerun's
+result even if it times out again. A `head check shared` event names the
+reused rerun. A changed head, revision, base, command or timeout budget
+starts a fresh check; a timeout keeps the task accepted without merging it.
 One executor drains the queue; a reaction that finds it busy records a
 request, and the executor makes another pass before releasing. Manual
 `merge ID` bypasses the queue and its head check: it keeps only the merge
