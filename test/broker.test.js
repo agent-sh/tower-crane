@@ -578,7 +578,7 @@ test('a broker start sweeps temporary socket directories of killed brokers and k
     return dir;
   };
   const record = (dir, owner) => {
-    fs.writeFileSync(path.join(dir, 'owner.json'), JSON.stringify({ host: os.hostname(), started: old, ...owner }));
+    fs.writeFileSync(path.join(dir, 'owner.json'), JSON.stringify({ host: os.hostname(), started: old, ...owner }), { flag: 'wx', mode: 0o600 });
     return dir;
   };
   const self = require('../lib/processes').identity(process.pid);
@@ -591,7 +591,7 @@ test('a broker start sweeps temporary socket directories of killed brokers and k
   age(live);
   const starting = age(plant());
   const shared = killed(plant());
-  fs.writeFileSync(path.join(shared, 'other'), 'not the broker\'s');
+  fs.writeFileSync(path.join(shared, 'other'), 'not the broker\'s', { flag: 'wx', mode: 0o600 });
   age(shared);
   const foreign = age(killed(plant('tower-crane-other-')));
   // Made by this version: the owner record decides, not the socket.
