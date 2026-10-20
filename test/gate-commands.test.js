@@ -131,11 +131,9 @@ for (const type of ['tests', 'clean']) {
     h.ok(['project', 'set', `--${type}-cmd`, `${changed}--fixture`]);
     if (type === 'clean') h.env.TOWER_CRANE_CLEAN_CMD = `${changed}--fixture`;
     assert.equal(shown(h, type).ok, false);
-    const accept = h.run(['accept', 'T1']);
-    assert.equal(accept.code, 1);
-    assert.match(accept.stderr, /command.*(changed|matches)/);
-    h.ok(['check', type, 'T1']);
     h.ok(['accept', 'T1']);
+    assert.equal(shown(h, type).ok, true);
+    assert.equal(h.readState('tasks.json').tasks[0].evidence.at(-1).type, type);
     h.ok(['project', 'set', `--${type}-cmd`, previous]);
     const merge = h.run(['merge', 'T1']);
     assert.equal(merge.code, 1);
@@ -272,11 +270,8 @@ for (const mode of ['prove', 'run-only']) {
     assert.match(mismatch(entry, project, task), /command receipts do not match/);
     assert.equal(shown(h, 'tests').ok, false);
     assert.match(spawn().stderr, /command receipts do not match/);
-    const refused = h.run(['accept', 'T1']);
-    assert.equal(refused.code, 1);
-    assert.match(refused.stderr, /command receipts do not match/);
-    h.ok(['check', 'tests', 'T1']);
     h.ok(['accept', 'T1']);
+    assert.equal(shown(h, 'tests').ok, true);
   });
 }
 

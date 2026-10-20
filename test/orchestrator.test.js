@@ -143,7 +143,7 @@ test('without a start-ticks identity, status with a due heartbeat leaves a live 
   assert.deepEqual(h.readState('tasks.json').tasks[0].notes.map((n) => n.text), ['written behind status']);
 });
 
-test('harness scripts share the lease while rival sessions and resumed live copies refuse writes', async (t) => {
+test('harness children share the lease while detached callers and rival sessions get distinct refusals', async (t) => {
   const clients = [];
   const closed = [];
   // Windows cannot remove the copied harness executable while a client runs.
@@ -181,12 +181,31 @@ test('harness scripts share the lease while rival sessions and resumed live copi
   const scripted = await run(clients[0], ['task', 'note', 'T1', 'script under holder'], true);
   assert.equal(scripted.code, 0, scripted.stderr);
   assert.equal(h.readState('tasks.json').orchestrator_lease.session_id, lease.session_id);
-  for (const client of clients.slice(1)) {
-    const before = h.readState('tasks.json');
-    const second = await run(client, ['task', 'add', '--title', 'second copy', '--acceptance', 'refused'], true);
-    assert.equal(second.code, 1);
-    assert.match(second.stderr, /orchestrator lease.*resumed-session/);
-    assert.deepEqual(h.readState('tasks.json'), before, 'refused scripts leave state unchanged');
+  const held = `orchestrator session resumed-session (pid ${lease.pid} on ${lease.host}, heartbeat ${lease.heartbeat})`;
+  const unrelated = `tower-crane: orchestrator lease held by ${held}; reads remain open. Have that session run tower-crane orchestrator release, wait for the idle lease to expire, or ask the owner to run tower-crane orchestrator takeover --agent owner\n`;
+  for (const [label, call, sameId] of [
+    ['detached caller', (args) => h.runAsync(args, { env, detached: true }), true],
+    ['resumed copy', (args) => run(clients[1], args, true), true],
+    ['unrelated session', (args) => run(clients[2], args, true), false],
+  ]) {
+    for (const args of [
+      ['task', 'add', '--title', 'second copy', '--acceptance', 'refused'],
+      ['orchestrator', 'release'],
+    ]) {
+      const before = h.readState('tasks.json');
+      const events = StateFiles.logText(h.state);
+      const denied = await call(args);
+      assert.equal(denied.code, 1, label);
+      if (sameId) {
+        assert.match(denied.stderr, /carries the holder's session id but is outside the holder's process tree \(detached\)/, label);
+        assert.match(denied.stderr, /Run the command as a child of the holding session, or let tower-crane wait\/automation run gates for it/, label);
+        assert.doesNotMatch(denied.stderr, /orchestrator release/, label);
+      } else {
+        assert.equal(denied.stderr, unrelated, label);
+      }
+      assert.deepEqual(h.readState('tasks.json'), before, label);
+      assert.equal(StateFiles.logText(h.state), events, label);
+    }
   }
   assert.equal(h.readState('tasks.json').tasks.length, 1);
   assert.equal((await run(clients[1], ['status'])).code, 0, 'competing process can read');
