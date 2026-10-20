@@ -117,7 +117,7 @@ test('terminal owner fallback cannot pin gate commands', { skip: !PTY_AVAILABLE 
 });
 
 for (const type of ['tests', 'clean']) {
-  test(`${type} command changes stale receipts at acceptance and merge until rerun`, (t) => {
+  test(`${type} command changes refresh receipts at acceptance and block a direct merge until rerun`, (t) => {
     const { h, sha } = fixture(t);
     pin(h);
     h.ok(['check', 'tests', 'T1']);
@@ -130,11 +130,8 @@ for (const type of ['tests', 'clean']) {
     h.ok(['project', 'set', `--${type}-cmd`, `${changed}--fixture`]);
     if (type === 'clean') h.env.TOWER_CRANE_CLEAN_CMD = `${changed}--fixture`;
     assert.equal(shown(h, type).ok, false);
-    const accept = h.run(['accept', 'T1']);
-    assert.equal(accept.code, 1);
-    assert.match(accept.stderr, /command.*(changed|matches)/);
-    h.ok(['check', type, 'T1']);
     h.ok(['accept', 'T1']);
+    assert.equal(shown(h, type).ok, true);
     h.ok(['project', 'set', `--${type}-cmd`, previous]);
     const merge = h.run(['merge', 'T1']);
     assert.equal(merge.code, 1);

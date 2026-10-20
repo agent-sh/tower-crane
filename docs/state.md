@@ -1207,7 +1207,7 @@ Tests modes change how `check tests` produces evidence, not which gates acceptan
 
 Successful tests evidence counts only when its audited `tests_mode` matches the mode currently resolved for the project and task kind. A mode change, a missing mode on older evidence or a malformed current policy needs a new tests check. The audit event must contain the same mode as the evidence; changing the mode in tasks.json alone cannot retarget evidence. Owner waivers still apply. Task views, board gate pips and evidence ledger (including accepted tasks), acceptance and merge use this same rule.
 
-Before acceptance, `accept ID` runs unattempted software gates in order: tests and clean for code, sources for research kind on every tier, then CI for every task with a PR. Tests and clean use the pinned commands. Without a test pin, missing tests in prove or run-only mode block acceptance. None mode records its audited tests result without a command. Optional `--cmd` and `--proof-cmd` must match the pins. Expensive prove uses the pinned template with the `{tests}` placeholder. Eligible successful receipts are reused. Failed, stale local-CI or unaudited attempted receipts require an explicit `check` rerun. Results are recorded even if a later gate refuses acceptance. A head, revision or status change during a gate refuses the attempt. Review dispatch is guarded again under the state lock.
+Before acceptance, `accept ID` runs unattempted software gates in order: tests and clean for code, sources for research kind on every tier, then CI for every task with a PR. Tests and clean use the pinned commands. Without a test pin, missing tests in prove or run-only mode block acceptance. None mode records its audited tests result without a command. Optional `--cmd` and `--proof-cmd` must match the pins. Expensive prove uses the pinned template with the `{tests}` placeholder. Current successful receipts are reused. Successful tests and clean receipts whose command or test policy changed, and stale CI receipts, are refreshed through the governed gate runner. Failed, malformed command receipts or unaudited attempted receipts require an explicit `check` rerun. Results are recorded even if a later gate refuses acceptance. A head, revision or status change during a gate refuses the attempt. Review dispatch is guarded again under the state lock.
 
 A gate that runs a command on this host (`tests`, `clean`, and `ci` with `ci.local` outside a hotfix) runs once per task, head and revision at a time. Before its command starts, it records a `gate run` event with `{type, sha, revision, source, phase: "running", deadline, pid, host, start_ticks}`, where `source` is `gate:<uuid>` and `deadline` is the start plus, for every timed command the run may start, its full timeout and one minute for the metadata queries around it (one minute when it plans none). A tests run in `prove` mode plans the head run, the scoped proof when `tests.expensive` is true, the reverted run and a base rerun; each of the first three adds one command per `tests.host_only` file tracked at the head. When `git ls-tree` fails twice, the count falls back to the matching files in the checkout on disk under each glob's leading directories, skipping `.git` and `node_modules`. A `run-only` tests run plans the head run, its host-only commands and a base rerun; `none` plans no command. Each tests command gets `gates.tests_timeout_min`. Clean plans one command at `gates.clean_timeout_min`, and local CI one at its resolved `timeout`. The same write that records its evidence records `phase: "done"` with `evidence_at`, the evidence's `at`, and `interrupted: true` when `wait` shutdown interrupted the run. A run that throws first records `phase: "error"` with `error`. When the orchestrator guard refuses that write because the orchestrator lease changed, the process records it as an engine write, or else with its next lease. `accept`, `check`, `gates retry` and automation reactions that reach the same gate while such a run is live join it instead of starting a second copy: they print `[TYPE] joining the TYPE run ...` naming its agent, pid, host and start, and, for a holder that cannot be observed, its deadline and the minutes left to it, follow the event log's tail for the lease's end, read its evidence and continue as if they had run it. `check --json` then carries the joined run as `joined: {source, agent, via, pid, host, at}`. A holder whose pid and Linux start ticks show it alive is waited for however long it runs, since a prove-mode tests gate runs several timed commands. A holder that cannot be observed (another host, macOS or Windows where no start ticks are recorded, no permission to signal it) is waited for until its deadline, so a healthy run of any length within its plan is joined, not run twice; past it, the caller prints that it treats the run as ended, runs the gate and records `replaces` with the old lease's source. A holder whose process has exited, a run that ended without evidence, and an interrupted run leave the gate to the caller. Hosted CI and `sources` read remote state and take no lease. `gate run` events are quiet bookkeeping: they wake no `wait` and do not count as stack state changes.
 
@@ -1570,6 +1570,16 @@ including those still in their retry interval; the text gate queue line appends
 `deferred by the governor: TASKS`. `inbox` carries the same `gate_queue`. Each executor drains the queue after releasing its slot; watchers
 also retry their pending notifications on their next check. State locks cover only
 reservation and receipts, never Git, GitHub, gates or model calls.
+Changing `gates.tests_cmd`, `gates.tests_proof_cmd`, `gates.clean_cmd` or CI
+policy with `project set` emits an `automation reconcile` request for each
+accepted, unmerged PR task that requires an affected gate. The request carries
+`sha`, `revision`, `gates` and `reason: "project gate policy changed"` and is
+queued until its reaction finishes, even if a watcher starts after the setting
+change. Setting an unchanged value queues nothing. The command's text names
+the queued tasks and gates. Already merged tasks are excluded.
+`status` also lists `merge blocked: TASK REASON` for accepted, unmerged PRs.
+JSON carries `merge_blocked: [{id, reason}]`. It uses current gate evidence
+first, then the recorded merge queue refusal; it makes no GitHub request.
 Automatic state changes and evidence use `agent: orchestrator` and
 `via: automation`. Reactions establish an explicit authorization context
 only after verifying the caller's authority or entering from the trusted
@@ -1674,6 +1684,14 @@ gates, a refused merge or head check) is passed over for the rest of the
 pass and the next entry takes the line; each later pass tries it again.
 PR lookup refusals and unreadable GitHub responses use this skip path;
 unexpected execution errors still abort the queue.
+Before passing over stale tests, clean or CI evidence, the queue reruns the
+software gates through the ordinary governed gate runner while holding the
+task's reaction reservation. Receipts from older heads or revisions are
+refreshed too. Passing refreshes retain the independent review and acceptance
+and continue to the current-base check and merge. Failures use the ordinary
+infrastructure retry and rework rules; a missing command, pending CI or a
+failure shared by the base stays blocked with its reason. Local CI refreshes
+the base ref before deciding whether its receipt still counts.
 An explicit `merge --accepted` requests a busy queue once and waits for
 its observable executor to release the reservation before taking its own
 pass. The wait uses `gates.tests_timeout_min` (20 minutes by default);
