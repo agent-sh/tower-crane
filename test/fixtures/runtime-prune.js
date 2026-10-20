@@ -1,8 +1,8 @@
 'use strict';
 
-const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
+const { writeAtomic } = require('../atomic-file');
 
 const root = process.env.RUNTIME_COPY;
 if (root) {
@@ -19,7 +19,7 @@ if (root) {
     const automation = require(path.join(root, 'lib', 'automation.js'));
     const consume = automation.consume;
     automation.consume = async (...args) => {
-      fs.writeFileSync(process.env.RUNTIME_READY, 'ready');
+      writeAtomic(process.env.RUNTIME_READY, 'ready');
       await require('../signals').fileWritten(process.env.RUNTIME_RELEASE, { check: () => true });
       return consume(...args);
     };

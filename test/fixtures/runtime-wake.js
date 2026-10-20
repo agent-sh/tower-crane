@@ -2,6 +2,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
+const { writeAtomic } = require('../atomic-file');
 const root = process.env.RUNTIME_WAKE_ROOT;
 
 if (root) {
@@ -14,7 +15,7 @@ if (root) {
   let passes = 0;
   automation.consume = async (...args) => {
     const pending = await consume(...args);
-    fs.writeFileSync(process.env.RUNTIME_WAKE_COUNTER, String(++passes));
+    writeAtomic(process.env.RUNTIME_WAKE_COUNTER, String(++passes));
     return pending;
   };
 }

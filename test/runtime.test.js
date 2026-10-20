@@ -9,6 +9,7 @@ const { once } = require('node:events');
 const { waitUntil } = require('./signals');
 const { ROOT, cachedFixture, dispatch, pinRung } = require('./helpers');
 const { setup } = require('./automation-helpers');
+const { writeAtomic, readPublished } = require('./atomic-file');
 const Runtime = require('../lib/runtime');
 
 function submitted(t) {
@@ -80,7 +81,7 @@ for (const force of [false, true]) {
       if (force) fs.rmSync(path.dirname(root), { recursive: true, force: true });
     } finally {
       releaseLauncher();
-      fs.writeFileSync(release, 'go');
+      writeAtomic(release, 'go');
     }
     const result = await run.run;
     assert.equal(result.code, 0, result.stderr);
@@ -127,7 +128,7 @@ automation.consume = (ctx, ...args) => consume({ ...ctx, automationSignal: globa
 `);
     }
     const clock = path.join(h.base, 'retry-clock');
-    fs.writeFileSync(clock, String(Date.now()));
+    writeAtomic(clock, String(Date.now()));
     const hooks = { HOOK_CLOCK_FILE: clock };
     const runBroken = () => h.run(['wait', '--after', '0', '--types', 'never', '--timeout', '0', '--agent', 'orchestrator'], { pre, hooks });
     const broken = runBroken();
@@ -141,7 +142,7 @@ automation.consume = (ctx, ...args) => consume({ ...ctx, automationSignal: globa
     runBroken();
     assert.equal(starts(), before, 'same-root drains and fresh reconcile sources cannot reserve during the retry delay');
     assert.equal(receipts.at(-1).detail.infrastructure.root, root);
-    fs.writeFileSync(clock, String(receipts.at(-1).detail.infrastructure.until));
+    writeAtomic(clock, String(receipts.at(-1).detail.infrastructure.until));
     runBroken();
     assert.equal(starts(), before + 1, 'expiry allows one retry, then the new receipt holds the runtime again');
     assert.equal(h.readState('tasks.json').tasks[0].evidence.some(e => e.type === 'tests'), false);
@@ -202,13 +203,16 @@ test('a live wait does not retry missing engine code on its own fs.watch receipt
   const root = toolCopy(h);
   const counter = path.join(h.base, 'drain-passes');
   const clock = path.join(h.base, 'retry-clock');
-  fs.writeFileSync(clock, String(Date.now()));
+  writeAtomic(clock, String(Date.now()));
   const child = h.spawnCli(['wait', '--after', '0', '--types', 'never', '--follow', '--agent', 'orchestrator'], {
     pre: [...copiedCli(h, root), '--require', path.join(__dirname, 'fixtures', 'runtime-wake.js')],
     env: { RUNTIME_WAKE_ROOT: root, RUNTIME_WAKE_COUNTER: counter }, hooks: { HOOK_CLOCK_FILE: clock },
   });
   const ended = once(child, 'close');
-  const passes = () => fs.existsSync(counter) ? Number(fs.readFileSync(counter, 'utf8')) : 0;
+  const passes = () => {
+    try { return Number(readPublished(counter, 'utf8')); }
+    catch (error) { if (error.code === 'ENOENT') return 0; throw error; }
+  };
   const completed = count => waitUntil(() => passes() >= count, { paths: [h.base],
     alive: () => child.exitCode === null, what: `wait completed ${count} drains` });
   try {
