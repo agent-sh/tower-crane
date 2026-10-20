@@ -303,6 +303,69 @@ G.view = (ctx, project) => {
   }
 }
 
+for (const mode of ['ordinary', 'governor', 'mixed']) {
+  test(`refill keeps the minute retry separate from ${mode} refusals`, (t) => {
+    const h = fixture(t);
+    const trace = path.join(h.base, 'retry-trace.json');
+    const seed = path.join(h.base, 'retry-seed');
+    const preload = path.join(h.base, 'retry-refill.js');
+    fs.writeFileSync(seed, '');
+    fs.writeFileSync(preload, `const fs = require('node:fs');
+const G = require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'governor.js'))});
+const A = require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'automation.js'))});
+const Spawn = require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'spawn.js'))});
+const { TowerCraneError } = require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'util.js'))});
+const mode = ${JSON.stringify(mode)};
+let probes = 0, dispatches = 0, measured = false;
+// Gate reactions have their own coverage; keep these probes on refill's path.
+A.consume = async () => [];
+G.check = (ctx, unit) => {
+  if (unit.kind === 'worker') probes++;
+  if (fs.existsSync(${JSON.stringify(seed)}) && unit.kind === 'reviewer' || mode !== 'ordinary' && unit.kind === 'worker') {
+    throw Object.assign(new TowerCraneError(3, unit.task + ': deferred by the host governor: retry pressure'),
+      { governorDeferred: true, task: unit.task, kind: unit.kind, reason: 'retry pressure' });
+  }
+};
+Spawn.spawn = async () => { dispatches++; return { code: 1, text: 'fixture ordinary refusal' }; };
+const refill = A.refillWorkers;
+A.refillWorkers = async (ctx, attempt) => {
+  if (measured) return refill(ctx, attempt);
+  measured = true;
+  const counts = [];
+  const now = Date.now;
+  await refill(ctx, attempt);
+  counts.push({ probes, dispatches });
+  const retryAt = attempt.retryAt;
+  await refill(ctx, attempt);
+  counts.push({ probes, dispatches });
+  Date.now = () => retryAt ? retryAt + 1 : now() + 60001;
+  try { await refill(ctx, attempt); } finally { Date.now = now; }
+  counts.push({ probes, dispatches });
+  fs.writeFileSync(${JSON.stringify(trace)}, JSON.stringify(counts));
+};
+`);
+    if (mode === 'mixed') {
+      // Seed real reviewer debt before replacing dispatch with an ordinary refusal.
+      const seedPreload = path.join(h.base, 'retry-seed.js');
+      fs.writeFileSync(seedPreload, `const G = require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'governor.js'))});
+const { TowerCraneError } = require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'util.js'))});
+G.check = (ctx, unit) => { throw Object.assign(new TowerCraneError(3, 'fixture deferral'),
+  { governorDeferred: true, task: unit.task, kind: unit.kind, reason: 'retry pressure' }); };
+`);
+      assert.equal(h.run(['accept', 'T1', '--agent', 'orchestrator'], { pre: ['--require', seedPreload] }).code, 3);
+    }
+    fs.unlinkSync(seed);
+    const result = h.run(['wait', '--types', 'never', '--timeout', '0.01', '--agent', 'orchestrator'],
+      { pre: ['--require', preload] }); // wait-allow: bounded CLI wait drives three refill probes with an explicit clock advance
+    assert.equal(result.code, 2, result.stderr);
+    const counts = JSON.parse(fs.readFileSync(trace, 'utf8'));
+    assert.deepEqual(counts.map((c) => c.probes), mode === 'ordinary' ? [1, 1, 2] : [1, 2, 3],
+      'ordinary refusals wait a minute while governor deferrals retry every pass');
+    assert.deepEqual(counts.map((c) => c.dispatches), mode === 'ordinary' ? [1, 1, 2] : mode === 'mixed' ? [1, 2, 3] : [0, 0, 0],
+      'a deferred kind cannot cache an ordinary refusal from the other kind');
+  });
+}
+
 test('reviewer dispatch debt follows the current submission and verdict', () => {
   const R = require('../lib/reviewer');
   const sha = 'a'.repeat(40), other = 'b'.repeat(40);
