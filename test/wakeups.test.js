@@ -94,7 +94,7 @@ test('the default wait wakes on every owner event and skips bookkeeping', async 
   assert.equal(named.detail.text, 'addressed by name');
 });
 
-test('wait --follow streams id-only lines and event prints the content', async (t) => {
+test('wait --follow includes complete decision answers and keeps other wakes id-only', async (t) => {
   const h = setup(t);
   h.ok(['ask', '--kind', 'technical', '--question', 'which way?', '--option', 'left', '--option', 'right', '--blocks', 'T1', '--agent', 'worker']);
   const p = cp.spawn(process.execPath, [BIN, 'wait', '--observe', '--follow', '--agent', 'orchestrator'], { cwd: h.repo, env: h.env });
@@ -105,12 +105,17 @@ test('wait --follow streams id-only lines and event prints the content', async (
   await readyLine(p);
   h.ok(['answer', 'D1', '--choice', 'right', '--note', 'private answer note', '--agent', 'owner']);
   h.ok(['msg', '--to', 'orchestrator', '--task', 'T1', 'private worker text', '--agent', 'worker']);
-  const wakes = await waitOnRepo(h, () => lines().length >= 3 && lines().slice(1), 'two wake lines');
-  assert.deepEqual(wakes.map((w) => w.type), ['decision-answer', 'worker-message']);
+  const message = log(h).findLast((e) => e.cmd === 'msg').id;
+  const wakes = await waitOnRepo(h, () => lines().some((w) => w.id === message) && lines().slice(1), 'the last message wake');
+  assert.deepEqual(wakes.map((w) => w.type), ['decision-answer', 'worker-message', 'worker-message']);
   assert.equal(wakes[0].decision, 'D1');
-  idOnly(out, ['private answer note', 'private worker text', 'right']);
+  const expected = 'decision D1 answered: right (answer has a note with 1 lines)\nOrchestrator note:\nprivate answer note';
+  assert.equal(wakes[0].text, expected);
+  assert.equal(wakes[1].to, 'worker');
+  assert.equal(wakes[1].text, expected);
+  idOnly(out, ['private worker text']);
   for (const w of wakes) assert.equal(w.detail, undefined);
-  const shown = h.json(['event', wakes[1].id, '--agent', 'orchestrator']);
+  const shown = h.json(['event', wakes[2].id, '--agent', 'orchestrator']);
   assert.equal(shown.detail.text, 'private worker text');
   assert.equal(h.run(['event', 'Enope', '--agent', 'orchestrator']).code, 2);
 });
@@ -346,7 +351,8 @@ for (const harness of ['claude', 'codex']) {
     assert.match(tool.hookSpecificOutput.additionalContext, new RegExp(`${message}: worker-message T1 from worker`));
     assert.equal(seen.blocked, true, 'Stop must block with the answer');
     assert.match(stop.reason, new RegExp(`${answer}: decision-answer D1 from owner`));
-    idOnly(JSON.stringify(seen.turns), ['private worker report', 'private owner note']);
+    assert.ok(stop.reason.includes('decision D1 answered: yes (answer has a note with 1 lines)\nOrchestrator note:\nprivate owner note'));
+    idOnly(JSON.stringify(seen.turns), ['private worker report']);
     const inbox = log(h).filter((e) => e.cmd === 'hook inbox' && e.agent === 'orchestrator-T1-1');
     const delivered = inbox.flatMap((e) => e.detail.messages);
     assert.ok(delivered.includes(message) && delivered.includes(answer));
@@ -466,7 +472,8 @@ test('the Claude Code mod pushes a decision answer and a worker message into the
   assert.match(pushed, /tower-crane inbox/);
   // The cursor carries the cuts file's length, so it resumes exactly across a recovery cut.
   assert.match(pushed, /Cursor: \d+:\d+\./);
-  idOnly(pushed, ['private owner note', 'private worker text', 'later']);
+  assert.ok(pushed.includes('decision D1 answered: later (answer has a note with 1 lines)\nOrchestrator note:\nprivate owner note'));
+  idOnly(pushed, ['private worker text']);
 
   // A steer joins a running turn; one the turn never read is pushed after it.
   await cc.fire('turn.start', { turnId: 't1', text: '' });
