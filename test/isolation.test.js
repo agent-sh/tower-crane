@@ -1626,24 +1626,25 @@ test('a read-only claude worktree under the home hides the home whole and binds 
   }
 });
 
-test('an agent of another project reads the Tower Crane code in the checkout, never its state, brokers or homes', { skip: NO_STUBS }, t => {
+test('an agent of another project reads the Tower Crane code in its own snapshot, never the checkout, its state, brokers or homes', { skip: NO_STUBS }, t => {
   // The checkout the CLI runs from can hold its own project's state, whose
-  // brokers/ holds tokens and homes/ links to the user's credentials. The
-  // home here holds the checkout, as ~ holds ~/projects/<checkout>.
+  // brokers/ holds tokens and homes/ links to the user's credentials, and it
+  // can be retired while the agent runs. The home here holds the checkout, as
+  // ~ holds ~/projects/<checkout>.
   const { h, u } = setup(t);
   const home = fs.realpathSync(path.dirname(ROOT));
   const checkout = fs.realpathSync(ROOT);
-  const hidden = ['.tower-crane/brokers/orchestrator/broker.json', '.tower-crane/homes/worker-T1-1/.credentials.json', '.tower-crane/tasks.json', '.git/config']
-    .map((p) => path.join(checkout, ...p.split('/')));
-  const open = ['bin/tower-crane.js', 'lib/agents.js', 'skills/tower-crane-work/SKILL.md', 'agents/tower-crane-small.md', 'standards/default.md', 'package.json']
+  const code = ['bin/tower-crane.js', 'lib/agents.js', 'skills/tower-crane-work/SKILL.md', 'agents/tower-crane-small.md', 'standards/default.md', 'package.json'];
+  const hidden = ['.tower-crane/brokers/orchestrator/broker.json', '.tower-crane/homes/worker-T1-1/.credentials.json', '.tower-crane/tasks.json', '.git/config', ...code]
     .map((p) => path.join(checkout, ...p.split('/')));
   for (const harness of ['claude', 'codex']) {
     for (const rung of ['small', 'hard']) {
       isolated(h, rung, harness);
-      spawn(h, u, rung, { HOME: home, USERPROFILE: home });
+      const started = spawn(h, u, rung, { HOME: home, USERPROFILE: home });
       const seen = u.report();
+      const own = path.join(fs.realpathSync(path.join(h.state, 'homes', started.agent)), ...(harness === 'codex' ? ['home', '.tower-crane-shims'] : []), 'tool');
       for (const p of hidden) assert.equal(commandsRead(seen, p), false, `${harness} ${rung}: ${path.relative(checkout, p)} is hidden`);
-      for (const p of open) assert.equal(commandsRead(seen, p), true, `${harness} ${rung}: ${path.relative(checkout, p)} is readable`);
+      for (const p of code) assert.equal(commandsRead(seen, path.join(own, ...p.split('/'))), true, `${harness} ${rung}: its own ${p} is readable`);
     }
   }
 });
@@ -2283,14 +2284,14 @@ for (const [command, args, opts] of calls) {
     'push', '--progress', '--no-verify', '--no-follow-tags', '--recurse-submodules=no', 'https://github.com/acme/app.git', `${h.git(['rev-parse', 'HEAD'], wt)}:refs/heads/${branch}`,
   ]);
   // A sandboxed codex agent runs the shims in its HOME, with a copy of the
-  // snapshot's lib; its sandbox hides hook.json, so they record no hook event.
+  // snapshot; its sandbox hides hook.json, so they record no hook event.
   const shims = path.join(home, 'home', '.tower-crane-shims');
   const policy = JSON.parse(fs.readFileSync(path.join(shims, 'policy.json'), 'utf8'));
   assert.equal(policy.branch, branch);
   assert.equal(policy.repo, 'acme/app');
   assert.equal(policy.hook, null);
-  assert.ok(fs.readFileSync(path.join(shims, 'bin', 'git'), 'utf8').includes(path.join(shims, 'lib', 'shim.js')), 'the git shim runs the copy');
-  assert.equal(fs.readFileSync(path.join(shims, 'lib', 'shim.js'), 'utf8'), fs.readFileSync(path.join(ROOT, 'lib', 'shim.js'), 'utf8'));
+  assert.ok(fs.readFileSync(path.join(shims, 'bin', 'git'), 'utf8').includes(path.join(shims, 'tool', 'lib', 'shim.js')), 'the git shim runs the copy');
+  assert.equal(fs.readFileSync(path.join(shims, 'tool', 'lib', 'shim.js'), 'utf8'), fs.readFileSync(path.join(ROOT, 'lib', 'shim.js'), 'utf8'));
   const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
   assert.equal(events.find((e) => e.cmd === 'spawn').detail.tool.sha, toolSha);
   assert.ok(events.some((e) => e.cmd === 'hook report' && e.agent === started.agent), 'hook report');
@@ -2299,6 +2300,54 @@ for (const [command, args, opts] of calls) {
   }
   assert.match(fs.readFileSync(S.progressFile(h.state, started.agent), 'utf8'), /"cmd":"hook progress"/);
 });
+
+// Seen 2026-10-20: a codex worker's sandbox bound the dispatching checkout's
+// code, and retiring that checkout emptied the live agent's view of it. The
+// user's tower-crane on PATH runs that checkout here, as an npm link would.
+for (const harness of ['claude', 'codex']) {
+  test(`a sandboxed ${harness} agent's policy and tower-crane use its own tool copy, so retiring the dispatching checkout leaves its CLI working`, { skip: NO_STUBS }, (t) => {
+    const { h, u } = setup(t);
+    isolated(h, 'medium', harness);
+    const checkout = path.join(u.home, '.cache', 'tower-crane-tool');
+    for (const name of ['bin', 'lib', 'agents', 'skills', 'standards', 'package.json']) {
+      fs.cpSync(path.join(ROOT, name), path.join(checkout, name), { recursive: true });
+    }
+    h.git(['init', '-q', checkout]);
+    h.git(['add', '.'], checkout);
+    h.git(['commit', '-qm', 'engine checkout'], checkout);
+    fs.writeFileSync(path.join(h.base, 'bin', 'tower-crane'), `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(path.join(checkout, 'bin', 'tower-crane.js'))} "$@"\n`, { mode: 0o755 });
+    const shown = path.join(h.base, 'shown.json');
+    const show = `
+const fs = require('node:fs');
+const cp = require('node:child_process');
+const { fakeAgentEnv } = require(${JSON.stringify(path.join(__dirname, 'agent-env.js'))});
+const r = cp.spawnSync('tower-crane', ['task', 'show', 'T1', '--json'], { env: fakeAgentEnv(process.env), encoding: 'utf8' });
+fs.writeFileSync(${JSON.stringify(shown)}, r.stdout);
+process.stderr.write(r.stderr);
+process.exit(r.status ?? 1);
+`;
+    const result = cp.spawnSync(process.execPath, [path.join(checkout, 'bin', 'tower-crane.js'), 'spawn', '--task', 'T1', '--wait', '--json'], {
+      cwd: h.repo, encoding: 'utf8', timeout: 300000,
+      env: { ...u.env, STUB_RUN: JSON.stringify([
+        [process.execPath, '-e', `require('node:fs').renameSync(${JSON.stringify(checkout)}, ${JSON.stringify(`${checkout}-retired`)})`],
+        [process.execPath, '-e', show],
+      ]) },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const seen = u.report();
+    assert.deepEqual(seen.ran.map((r) => [r.code, r.stderr]), [[0, ''], [0, '']]);
+    assert.equal(JSON.parse(fs.readFileSync(shown, 'utf8')).id, 'T1', 'tower-crane answers after the checkout is gone');
+    const started = JSON.parse(result.stdout);
+    const home = fs.realpathSync(path.join(h.state, 'homes', started.agent));
+    // The policy names no path of the checkout: not the sandbox, the hooks or
+    // the credential helper.
+    const policy = harness === 'claude' ? JSON.stringify(seen.settings) : fs.readFileSync(path.join(home, 'config.toml'), 'utf8');
+    assert.ok(!policy.includes(fs.realpathSync(u.home) + path.sep + path.join('.cache', 'tower-crane-tool')), `${harness}: the policy names the checkout`);
+    const own = harness === 'claude' ? path.join(home, 'tool') : path.join(home, 'home', '.tower-crane-shims', 'tool');
+    assert.equal(commandsRead(seen, path.join(own, 'bin', 'tower-crane.js')), true, `${harness}: the agent's tool copy is readable`);
+    assert.equal(commandsRead(seen, path.join(fs.realpathSync(u.home), '.cache', 'tower-crane-tool', 'lib', 'agents.js')), false, `${harness}: the checkout is hidden`);
+  });
+}
 
 test('a claude sandboxed worker has policy masks, so its shim plumbs merges of the paths the sandbox masks', { skip: NO_STUBS }, (t) => {
   const { h, u } = setup(t);

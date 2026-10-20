@@ -13,7 +13,7 @@ const net = require('node:net');
 const os = require('node:os');
 const path = require('node:path');
 const cp = require('node:child_process');
-const { pinLiveRung, makeRepo, dispatch, BIN, ROOT, TMP_ROOT, LIVE_ROOT } = require('./helpers');
+const { pinLiveRung, makeRepo, dispatch, BIN, ROOT, HOOKS, TMP_ROOT, LIVE_ROOT } = require('./helpers');
 const { waitUntil } = require('./signals');
 const A = require('../lib/agents');
 
@@ -214,6 +214,88 @@ test('in a real codex sandbox forged state edits fail and the CLI writes through
   assert.equal(note?.agent, 'small-T1-1', `the broker wrote it as the spawned agent\n${agentLog(h)}`);
   const event = fs.readFileSync(files[0], 'utf8').trim().split('\n').map((l) => JSON.parse(l)).find((e) => e.cmd === 'task note');
   assert.deepEqual([event?.agent, event?.via], ['small-T1-1', 'broker']);
+});
+
+// Seen 2026-10-20: a codex worker's sandbox bound the dispatching engine's
+// checkout, and retiring that checkout while the worker ran emptied its view
+// of it. The engine here is a copy under the user's home, as ~/.cache holds
+// the orchestrator's, and the user's tower-crane on PATH runs it, as an npm
+// link would. The probe asks tower-crane for the task after the copy is gone.
+function engineCheckout(h) {
+  const checkout = path.join(h.env.HOME, '.cache', 'tower-crane-tool');
+  for (const name of ['bin', 'lib', 'agents', 'skills', 'standards', 'package.json']) {
+    fs.cpSync(path.join(ROOT, name), path.join(checkout, name), { recursive: true });
+  }
+  const bin = path.join(h.base, 'user-bin');
+  fs.mkdirSync(bin);
+  fs.writeFileSync(path.join(bin, 'tower-crane'), `#!/bin/sh\nexec ${node} ${JSON.stringify(path.join(checkout, 'bin', 'tower-crane.js'))} "$@"\n`, { mode: 0o755 });
+  const retire = () => fs.renameSync(checkout, `${checkout}-retired`);
+  // spawn from the copy, with the hooks h.runAsync adds.
+  const spawn = (env) => new Promise((resolve) => {
+    const child = cp.spawn(process.execPath, ['--require', HOOKS, path.join(checkout, 'bin', 'tower-crane.js'), 'spawn', '--role', 'small', '--task', 'T1', '--wait'], {
+      cwd: h.repo, env: { ...h.env, HOOK_STATE: h.state, HOOK_PROCESSES_DIR: path.join(h.base, 'detached'), ...env, PATH: [env.PATH, bin, h.env.PATH].filter(Boolean).join(path.delimiter) },
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (d) => (stdout += d));
+    child.stderr.on('data', (d) => (stderr += d));
+    child.on('close', (code) => resolve({ code, stdout, stderr }));
+  });
+  return { checkout, retire, spawn };
+}
+
+const showProbe = (out) => `const cp=require("child_process"),fs=require("fs");const r=cp.spawnSync("tower-crane",["task","show","T1","--json"],{encoding:"utf8"});`
+  + `fs.writeFileSync(${JSON.stringify(out)},JSON.stringify({code:r.status,stdout:r.stdout,stderr:r.stderr,error:r.error&&r.error.code}))`;
+
+function assertShown(h, out) {
+  assert.ok(fs.existsSync(out), `the probe ran\n${agentLog(h)}`);
+  const seen = JSON.parse(fs.readFileSync(out, 'utf8'));
+  assert.equal(seen.code, 0, `tower-crane answers after the checkout is gone: ${seen.error || seen.stderr}`);
+  assert.equal(JSON.parse(seen.stdout).id, 'T1');
+}
+
+test('in a real codex sandbox the agent\'s tower-crane still answers after the dispatching checkout is retired', { skip: realCodexSandbox(), timeout: 300000 }, async (t) => {
+  const h = makeRepo(t);
+  h.init();
+  h.ok(['task', 'add', '--title', 'Retired engine probe', '--acceptance', 'the CLI answers']);
+  h.ok(['brief', 'set', 'T1', '-'], { input: 'retired engine probe\n' });
+  const engine = engineCheckout(h);
+  const out = path.join(results(h), 'shown.json');
+  // The stand-in retires the copy on the host once spawn wrote the profile,
+  // then starts the sandbox.
+  const bin = standInCodex(h, showProbe(out), 'small', `require('node:fs').renameSync(${JSON.stringify(engine.checkout)}, ${JSON.stringify(`${engine.checkout}-retired`)}); run()`);
+  const r = await engine.spawn({ PATH: bin });
+  assert.equal(r.code, 0, `${r.stderr}\n${agentLog(h)}`);
+  assertShown(h, out);
+});
+
+test('in a real claude sandbox the agent\'s tower-crane still answers after the dispatching checkout is retired', { skip, timeout: 600000 }, async (t) => {
+  const h = login(makeRepo(t));
+  h.init();
+  h.ok(['task', 'add', '--title', 'Retired engine probe', '--acceptance', 'the CLI answers']);
+  const engine = engineCheckout(h);
+  const dir = results(h);
+  const [out, ready, retired, probe] = ['shown.json', 'ready', 'retired', 'probe.js'].map((n) => path.join(dir, n));
+  // The command marks itself started and waits for the test to retire the copy.
+  fs.writeFileSync(probe, `const fs=require("fs"),cp=require("child_process");fs.writeFileSync(${JSON.stringify(ready)},"");`
+    + `const until=Date.now()+60000;while(!fs.existsSync(${JSON.stringify(retired)})&&Date.now()<until)cp.spawnSync("sleep",["1"]);${showProbe(out)}\n`);
+  h.ok(['brief', 'set', 'T1', '-'], {
+    input: `Sandbox probe set up by the owner. Run exactly this one command with the Bash tool, then reply with its exit code and stop. Do not run tower-crane yourself.\n\n${node} ${JSON.stringify(probe)}\n`,
+  });
+  pinLiveRung(h, 'claude');
+  const spawned = engine.spawn({});
+  let done = false;
+  const timer = setInterval(() => {
+    if (done || !fs.existsSync(ready)) return;
+    done = true;
+    engine.retire();
+    fs.writeFileSync(retired, '');
+  }, 500);
+  let r;
+  try { r = await spawned; } finally { clearInterval(timer); }
+  assert.equal(r.code, 0, `${r.stderr}\n${agentLog(h)}`);
+  assert.ok(done, `the copy was retired while the agent ran\n${agentLog(h)}`);
+  assertShown(h, out);
 });
 
 // A project at a deep path: brokers/<agent>/broker.sock is too long for a
