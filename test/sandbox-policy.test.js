@@ -14,7 +14,7 @@ const as = (agent) => ({ env: { TOWER_CRANE_AGENT: agent } });
 const events = (h) => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
 const task = (h, id) => h.readState('tasks.json').tasks.find((x) => x.id === id);
 
-test('policy paths, owner-only classes and narrowing, as a variant table', (t) => {
+test('policy paths, owner-only classes and narrowing, as a variant table', { skip: process.platform === 'win32' && 'the rows name POSIX paths and links' }, (t) => {
   const base = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'tc-sandbox-policy-')));
   t.after(() => fs.rmSync(base, { recursive: true, force: true }));
   const home = path.join(base, 'home');
