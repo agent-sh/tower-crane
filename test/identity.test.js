@@ -13,7 +13,7 @@ const { makeRepo, cachedFixture, runPty, PTY_AVAILABLE, BIN, HOOKS } = require('
 const noAgent = { TOWER_CRANE_AGENT: undefined };
 const message = 'tower-crane: no agent: pass --agent NAME or set TOWER_CRANE_AGENT\n';
 const events = (h) => StateFiles.logText(h.state);
-const withoutTowerCrane = (env) => Object.fromEntries(Object.entries(env).filter(([key]) => !key.startsWith('TOWER_CRANE_')));
+const withoutTowerCrane = (env) => Object.fromEntries(Object.entries(env).filter(([key]) => key === 'TOWER_CRANE_HOST_ROOT' || !key.startsWith('TOWER_CRANE_')));
 const terminal = (h, args, env = {}) => runPty([...args, '--state', h.state], { cwd: h.repo, env: { ...withoutTowerCrane(h.env), ...env } });
 
 function assertOwnerRequest(output) {
