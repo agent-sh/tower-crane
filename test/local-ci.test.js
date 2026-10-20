@@ -1631,6 +1631,144 @@ test('a passing local CI keeps its log without a tail or artifacts', (t) => {
   assert.ok(!fs.existsSync(path.join(h.state, 'ci-artifacts')));
 });
 
+test('local CI keeps receipts beside the log on failure and success before removing its worktree', (t) => {
+  const h = fixture(t, `
+const fs = require('node:fs');
+const failed = process.argv.includes('--fail');
+fs.writeFileSync(process.argv[2], JSON.stringify({ cwd: process.cwd() }));
+fs.mkdirSync('.local/checks', { recursive: true });
+fs.writeFileSync('.local/checks/receipt.json', JSON.stringify({
+  failure_reasons: failed ? ['step unit-tests failed'] : [],
+  steps: [{ argv: ['node', 'unit-tests.js'], check: 0, outcome: failed ? 'failed' : 'passed' }],
+  checks: [{ exit_code: failed ? 1 : 0, output: 'all printed steps OK' }]
+}));
+console.log('All printed steps OK');
+process.exit(failed ? 1 : 0);
+`);
+  for (const failed of [true, false]) {
+    h.ok(['project', 'set', '--ci-local', JSON.stringify({
+      command: [...h.command, ...(failed ? ['--fail'] : [])], timeout: 5,
+      receipts: ['.local/checks/*.json', '.local/checks/receipt.json'],
+    })]);
+    const r = h.run(['check', 'ci', 'T1']);
+    assert.equal(r.code, failed ? 1 : 0, r.stdout + r.stderr);
+    const e = h.readState('tasks.json').tasks[0].evidence.at(-1);
+    const kept = e.local_ci;
+    assert.equal(kept.receipts.length, 1, 'overlapping globs copy a receipt once');
+    const receipt = kept.receipts[0];
+    assert.equal(receipt.path, `${path.posix.dirname(kept.log)}/receipts/.local/checks/receipt.json`);
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(h.state, receipt.path), 'utf8')), {
+      failure_reasons: failed ? ['step unit-tests failed'] : [],
+      steps: [{ argv: ['node', 'unit-tests.js'], check: 0, outcome: failed ? 'failed' : 'passed' }],
+      checks: [{ exit_code: failed ? 1 : 0, output: 'all printed steps OK' }],
+    });
+    assert.equal(receipt.bytes, fs.statSync(path.join(h.state, receipt.path)).size);
+    const cwd = JSON.parse(fs.readFileSync(h.log, 'utf8')).cwd;
+    assert.ok(!fs.existsSync(cwd), 'gate worktree removed after saving the receipt');
+    assert.equal(h.git(['worktree', 'list', '--porcelain']).match(/^worktree /gm).length, 1);
+    if (failed) {
+      assert.match(e.summary, /node unit-tests\.js \(outcome: failed, exit 1\)/);
+      assert.match(e.summary, /step unit-tests failed/);
+    }
+    const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+    assert.deepEqual(events.findLast((v) => v.cmd === 'check ci').detail.local_ci, kept);
+  }
+});
+
+test('receipt globs validate like artifact globs', () => {
+  const Local = require('../lib/ci-local');
+  for (const [receipts, valid] of [
+    [[], true], [['.local/checks/*.json', 'reports/**/*.json'], true],
+    ['*.json', false], [null, false], [[1], false], [[''], false],
+    [['../up/*.json'], false], [['/absolute/*.json'], false],
+    [['C:\\checks\\*.json'], false], [['a\\..\\b'], false], [['a\0b'], false],
+  ]) {
+    assert.equal(Local.valid({ command: ['node'], timeout: 5, receipts }), valid, JSON.stringify(receipts));
+  }
+  const local = { command: ['node'], timeout: 5, receipts: ['.local/checks/*.json'] };
+  assert.deepEqual(Local.resolve(local, { id: 'T1', kind: 'code' }).receipts, local.receipts);
+  const policy = require('../lib/gate-commands').resolve({ tests: { map: {} }, ci: { local } }, 'tests').policy;
+  assert.deepEqual(policy.ci_local, { command: ['node'], timeout: 5 });
+});
+
+test('local CI receipt diagnosis reads failed steps and run-state reasons and tolerates other formats', () => {
+  const { receiptFailures } = require('../lib/gates/local-ci');
+  for (const [body, names] of [
+    [{
+      steps: [{ argv: ['node', 'unit-tests.js'], check: 0, outcome: 'failed' }, { argv: ['lint'], check: 1, outcome: 'passed' }],
+      checks: [{ exit_code: 1, output: 'unbounded output stays out of evidence' }, { exit_code: 0 }],
+    }, ['node unit-tests.js (outcome: failed, exit 1)']],
+    [{
+      steps: [{ argv: ['tests'], check: 0, outcome: 'interrupted' }],
+      checks: [{ exit_code: null, timed_out: true }],
+    }, ['tests (outcome: interrupted, timed out)']],
+    [{ steps: [{ name: 'tests', outcome: 'failed', check: 99 }] }, ['tests (outcome: failed)']],
+    [{ failure_reasons: ['run state incomplete', '', null, 1] }, ['run state incomplete']],
+    [{
+      head_unchanged: false, source_unchanged: false, working_tree_clean_after: false,
+    }, ['head changed during local CI', 'sources changed during local CI', 'working tree is dirty after local CI']],
+    [{ head_unchanged: true, source_unchanged: true, working_tree_clean_after: true }, []],
+    [{
+      steps: [{ argv: ['tests'], outcome: 'failed' }, { argv: ['tests'], outcome: 'failed' }],
+      failure_reasons: ['tests (outcome: failed)'],
+    }, ['tests (outcome: failed)']],
+    [{ steps: [null, {}, { argv: [1], outcome: 'failed' }, { argv: [], outcome: 'failed' }], failure_reasons: 'unexpected' }, []],
+    [{ results: { unknown: 'failed' } }, []], [null, []], [[], []], ['bad JSON', []],
+  ]) {
+    assert.deepEqual(receiptFailures(body === 'bad JSON' ? body : JSON.stringify(body)), names, JSON.stringify(body));
+  }
+});
+
+test('receipt copies redact before truncating and list paths for unreadable receipt formats', (t) => {
+  const { RECEIPT_BYTES } = require('../lib/gates/local-ci');
+  const h = fixture(t, `
+const fs = require('node:fs');
+fs.writeFileSync(process.argv[2], JSON.stringify({ cwd: process.cwd() }));
+fs.mkdirSync('.local/checks', { recursive: true });
+const limit = Number(process.argv.at(-1));
+const start = '{"output":"';
+const token = process.env.CI_FIXTURE_TOKEN;
+fs.writeFileSync('.local/checks/large.json',
+  start + 'x'.repeat(limit - start.length - 4) + token + '","failure_reasons":["large-step failed"]}');
+fs.writeFileSync('.local/checks/unknown.json', '{"other":"diagnosis"}');
+fs.writeFileSync('.local/checks/bad.json', 'bad JSON');
+fs.writeFileSync('.local/checks/link.json', '{"safe":true}');
+if (process.platform !== 'win32') {
+  fs.unlinkSync('.local/checks/link.json');
+  fs.symlinkSync(process.argv[2], '.local/checks/link.json');
+}
+console.log('All printed steps OK');
+process.exit(1);
+`);
+  const token = 'ghp_T448ReceiptBoundary01234567890123456789';
+  h.env.CI_FIXTURE_TOKEN = token;
+  h.ok(['project', 'set', '--ci-local', JSON.stringify({
+    command: [...h.command, String(RECEIPT_BYTES)], timeout: 30, receipts: ['.local/checks/*.json'],
+  })]);
+  const r = h.run(['check', 'ci', 'T1']);
+  assert.equal(r.code, 1, r.stdout + r.stderr);
+  const e = h.readState('tasks.json').tasks[0].evidence.at(-1);
+  const copied = Object.fromEntries(e.local_ci.receipts.map((file) => [path.basename(file.from), file]));
+  assert.equal(copied['large.json'].truncated, true);
+  const large = fs.readFileSync(path.join(h.state, copied['large.json'].path), 'utf8');
+  assert.ok(Buffer.byteLength(large) <= RECEIPT_BYTES);
+  assert.equal(copied['large.json'].bytes, Buffer.byteLength(large));
+  assert.ok(!large.includes('ghp_'));
+  assert.ok(!large.includes('T448ReceiptBoundary'));
+  assert.match(large, /\[receipt truncated at 8 MiB\]/);
+  assert.match(e.summary, /large-step failed/);
+  assert.match(e.summary, /large\.json \(truncated at 8 MiB\)/);
+  for (const name of ['unknown.json', 'bad.json']) {
+    assert.ok(fs.existsSync(path.join(h.state, copied[name].path)));
+    assert.ok(e.summary.includes(copied[name].path), e.summary);
+  }
+  if (process.platform !== 'win32') {
+    assert.equal(copied['link.json'], undefined);
+    assert.match(e.local_ci.receipts_skipped[0].reason, /outside the gate worktree/);
+  }
+  assert.ok(!fs.existsSync(JSON.parse(fs.readFileSync(h.log, 'utf8')).cwd));
+});
+
 test('local CI joins stdout and stderr by whole lines, so a stderr line cannot split a secret', (t) => {
   // Like a Python or cargo step writing to pipes: stdout flushes a block that ends inside a token,
   // stderr reports the failure before the rest of that line arrives, and both end without a newline.
@@ -1978,7 +2116,8 @@ test('project settings validate local argv and timeout, preserve CI siblings and
     '{"command":["node",2],"timeout":1}', '{"command":["node"]}', '{"command":["node"],"timeout":0}',
     '{"command":["node"],"timeout":"1"}', '{"command":["node"],"timeout":1,"artifacts":["/abs/*.json"]}',
     '{"command":["node"],"timeout":1,"artifacts":["../up/*.json"]}', '{"command":["node"],"timeout":1,"artifacts":".local"}',
-    '{"command":["node"],"timeout":1,"artifact_pattern":"("}', '{"command":["node"],"timeout":1,"artifact_pattern":""}']) {
+    '{"command":["node"],"timeout":1,"artifact_pattern":"("}', '{"command":["node"],"timeout":1,"artifact_pattern":""}',
+    '{"command":["node"],"timeout":1,"receipts":["../up/*.json"]}']) {
     const r = h.run(['project', 'set', '--ci-local', local]);
     assert.equal(r.code, 2, JSON.stringify({ local, ...r }));
     assert.match(r.stderr, /--ci-local/);
