@@ -8,7 +8,7 @@ const cp = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { HUNG_TEST_MS } = require('./signals');
+const { HUNG_TEST_MS, killPid } = require('./signals');
 
 function testFiles() {
   return [
@@ -42,8 +42,10 @@ function shardFiles(files, index, total, durations = fileDurations()) {
   }
   return (shards[index - 1] || []).sort();
 }
+// Five minutes under the 45-minute test job limit in .github/workflows/ci.yml.
+const SHARD_DEADLINE_MIN = 40;
 if (require.main !== module) {
-  module.exports = { testFiles, shardFiles, fileDurations };
+  module.exports = { testFiles, shardFiles, fileDurations, SHARD_DEADLINE_MIN };
   return;
 }
 
@@ -108,19 +110,63 @@ if (refused.length) {
   process.exit(1);
 }
 if (skipped.length) console.error(`tower-crane: skipped host-only tests in this sandbox, the tests gate runs them on the host: ${skipped.join(' ')}`);
+// A CI shard's log says which files started and ended, so a log the job's time
+// limit cut off shows which files were still running.
+if (shard && !flags.some((flag) => flag.startsWith('--test-reporter'))) {
+  args.unshift('--test-reporter=spec', '--test-reporter-destination=stdout',
+    `--test-reporter=${path.join(__dirname, 'file-progress.js')}`, '--test-reporter-destination=stdout');
+}
 args.push(...run);
 
 const env = { ...process.env };
 delete env.TC_TEST_SHARD;
+delete env.TC_TEST_SHARD_DEADLINE_MIN;
 // A runner invoked from a test must launch a new run, not Node's recursive no-op.
 delete env.NODE_TEST_CONTEXT;
-// With every file skipped there is nothing to run; node --test with no file would search the directory.
-const result = run.length ? cp.spawnSync(process.execPath, args, { stdio: 'inherit', env }) : { status: 0 };
-if (result.error) {
-  console.error(result.error.message);
-  process.exitCode = 1;
-} else if (result.signal) {
-  process.exitCode = 128 + (os.constants.signals[result.signal] || 0);
-} else {
-  process.exitCode = result.status ?? 1;
+
+// The processes below ROOT, from one snapshot. Windows keeps an exited parent's
+// pid on its children, so their orphans stay in the tree there.
+function processTree(root) {
+  const win = process.platform === 'win32';
+  const out = win
+    ? cp.spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
+      'Get-CimInstance Win32_Process | ForEach-Object { "$($_.ProcessId) $($_.ParentProcessId) - $($_.CommandLine)" }'],
+    { encoding: 'utf8', timeout: 60000, maxBuffer: 64 << 20, windowsHide: true }) // wait-allow: one snapshot, inside the minutes the deadline leaves before the job limit
+    : cp.spawnSync('ps', ['-A', '-o', 'pid=,ppid=,etime=,args='], { encoding: 'utf8', timeout: 60000, maxBuffer: 64 << 20 }); // wait-allow: one snapshot, inside the minutes the deadline leaves before the job limit
+  const rows = (out.stdout || '').split(/\r?\n/).map((line) => line.trim().split(/\s+/)).filter((f) => f.length > 2)
+    .map(([pid, parent, ...rest]) => ({ pid: Number(pid), parent: Number(parent), text: rest.join(' ') }));
+  const tree = new Set([root]);
+  for (let grew = true; grew;) {
+    grew = false;
+    for (const row of rows) if (!tree.has(row.pid) && tree.has(row.parent)) { tree.add(row.pid); grew = true; }
+  }
+  return rows.filter((row) => tree.has(row.pid));
 }
+
+// With every file skipped there is nothing to run; node --test with no file would search the directory.
+if (!run.length) return;
+const child = cp.spawn(process.execPath, args, { stdio: 'inherit', env });
+// A job its time limit cancels keeps no log, so a shard stops a few minutes under
+// the test job's limit: it prints the processes the run still holds, stops them
+// and fails. test/ci-required.test.js holds the default under that limit.
+const deadlineMin = Number(process.env.TC_TEST_SHARD_DEADLINE_MIN || (shard ? SHARD_DEADLINE_MIN : 0));
+let late = false;
+const deadline = deadlineMin > 0 && setTimeout(() => { // wait-allow: the shard deadline CI sets under its job limit
+  late = true;
+  const tree = processTree(child.pid);
+  console.error(`tower-crane: shard deadline of ${deadlineMin} min reached; processes still running (pid, parent, elapsed, command):`);
+  for (const row of tree) console.error(`  ${row.pid} ${row.parent} ${row.text}`);
+  if (process.platform === 'win32') cp.spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true });
+  else for (const row of tree) try { killPid(row.pid, 'SIGKILL'); } catch { /* It ended meanwhile. */ }
+}, deadlineMin * 60000);
+child.on('error', (error) => {
+  clearTimeout(deadline);
+  console.error(error.message);
+  process.exitCode = 1;
+});
+child.on('exit', (status, signal) => {
+  clearTimeout(deadline);
+  if (late) process.exitCode = 1;
+  else if (signal) process.exitCode = 128 + (os.constants.signals[signal] || 0);
+  else process.exitCode = status ?? 1;
+});

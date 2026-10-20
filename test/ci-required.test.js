@@ -119,6 +119,15 @@ test('same-repo PRs run the shared check, fork PRs the Windows shards; other eve
     'PR runs cancel per PR; main pushes share one group that never cancels a running run; scheduled and manual runs are unique');
 });
 
+test('a shard reaches its deadline, and leaves a log, before the test job limit cancels it without one', () => {
+  const workflow = readWorkflow(path.resolve(__dirname, '..'));
+  const testJob = workflow.split('\n  test:\n')[1].split(/\n {2}[\w-]+:\n/)[0];
+  const limit = Number(/^ {4}timeout-minutes: (\d+)$/m.exec(testJob)?.[1]);
+  const { SHARD_DEADLINE_MIN } = require('./run');
+  // Checkout, Node setup and check:shared run first, and the process dump takes up to a minute.
+  assert.ok(SHARD_DEADLINE_MIN <= limit - 5, `shard deadline ${SHARD_DEADLINE_MIN} min against a ${limit} min job limit`);
+});
+
 test('the stack section says hosted CI runs on every stack member at its own base', () => {
   const root = path.resolve(__dirname, '..');
   const state = fs.readFileSync(path.join(root, 'docs', 'state.md'), 'utf8');

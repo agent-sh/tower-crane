@@ -108,6 +108,25 @@ test('TC_TEST_SHARD makes the runner run only the files of the shard it names', 
   assert.match(invalid.stderr, /TC_TEST_SHARD requires INDEX\/TOTAL/);
 });
 
+test('a shard logs each file as it starts and ends, and past its deadline prints what still runs, stops it and fails', () => {
+  const run = (files, extra) => cp.spawnSync(process.execPath, [path.join(ROOT, 'test', 'run.js'), ...files], {
+    cwd: ROOT, encoding: 'utf8', timeout: HUNG_TEST_MS, env: { ...process.env, TC_TEST_SHARD: '1/1', ...extra },
+  });
+  const done = run([FIXTURES[0]], {});
+  assert.equal(done.status, 0, done.stderr);
+  assert.match(done.stdout, /^file started: .*a\.test\.js$/m);
+  assert.match(done.stdout, /^file ended: .*a\.test\.js$/m);
+  assert.match(done.stdout, /✔ shard a/, 'the spec reporter still prints each test');
+
+  const hang = path.join('test', 'fixtures', 'shard', 'hang.test.js');
+  const late = run([FIXTURES[0], hang], { TC_TEST_SHARD_DEADLINE_MIN: '0.1' });
+  assert.equal(late.status, 1, late.stdout + late.stderr);
+  assert.match(late.stdout, /^file started: .*hang\.test\.js$/m);
+  assert.doesNotMatch(late.stdout, /^file ended: .*hang\.test\.js$/m);
+  assert.match(late.stderr, /shard deadline of 0\.1 min reached; processes still running/);
+  assert.match(late.stderr, /^ {2}\d+ \d+ .*hang\.test\.js/m, 'the dump names the hung file\'s process');
+});
+
 test('a durations refresh from a run with a failed shard keeps the old times of the files it did not measure', () => {
   const before = { linux: { 'test/a.test.js': 10, 'test/b.test.js': 20, 'test/gone.test.js': 5 }, win32: { 'test/a.test.js': 30 } };
   // Only the shard with a.test.js and the new c.test.js succeeded, on Linux only.
