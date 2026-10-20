@@ -45,10 +45,147 @@ function setup(t) {
 
 // Lifecycle fixtures represent processes that exited before the observer
 // starts. All task transitions and the resolving actions use the real CLI.
-function event(h, task, cmd, detail, agent = 'orchestrator') {
-  const e = { id: `fixture-${h.logs().length}`, at: new Date().toISOString(), cmd, agent, task, detail };
+function event(h, task, cmd, detail, agent = 'orchestrator', at = new Date().toISOString()) {
+  const e = { id: `fixture-${h.logs().length}`, at, cmd, agent, task, detail };
   fs.appendFileSync(path.join(h.state, 'events.jsonl'), `${JSON.stringify(e)}\n`);
 }
+
+test('multi-item acknowledgements are atomic, deduplicated and retain single-item receipts', (t) => {
+  const h = setup(t);
+  for (const text of ['one', 'two', 'three']) h.ok(['msg', '--to', 'orchestrator', text, '--agent', 'messenger']);
+  const messages = h.inbox().items.filter((i) => i.kind === 'message');
+  const before = h.logs();
+  for (const invalid of ['message:project:missing', h.inbox().items.find((i) => i.kind === 'ready')?.id || 'ready:T999']) {
+    assert.equal(h.run(['inbox', '--ack', messages[0].id, '--ack', invalid, '--agent', 'orchestrator']).code, 2);
+    assert.deepEqual(h.logs(), before, 'one invalid id refuses the entire batch');
+  }
+  const data = h.json(['inbox', '--ack', messages[0].id, '--ack', messages[1].id,
+    '--ack', messages[0].id, '--agent', 'orchestrator']);
+  assert.deepEqual(data, { acknowledged: messages.slice(0, 2).map((i) => i.id), count: 2 });
+  const added = h.logs().slice(before.length);
+  assert.equal(added.length, 1);
+  assert.equal(added[0].cmd, 'inbox ack');
+  assert.deepEqual(added[0].detail, { items: data.acknowledged, count: 2 });
+  assert.deepEqual(h.inbox().items.filter((i) => i.kind === 'message').map((i) => i.id), [messages[2].id]);
+  const single = h.json(['inbox', '--ack', messages[2].id, '--agent', 'orchestrator']);
+  assert.deepEqual(single, { acknowledged: messages[2].id });
+  assert.deepEqual(h.logs().at(-1).detail, { item: messages[2].id });
+  assert.equal(h.inbox().items.filter((i) => i.kind === 'message').length, 0);
+});
+
+test('ack-before includes the cutoff, filters kinds and leaves newer items and findings', (t) => {
+  const h = setup(t);
+  const task = h.add('Cutoff input');
+  const stalled = h.add('Cutoff stall');
+  h.ok(['claim', stalled, '--agent', 'stalled']);
+  const claim = h.json(['task', 'show', stalled]).claim;
+  const cutoff = '2026-01-02T00:00:00.000Z';
+  event(h, stalled, 'stall', { agent: 'stalled', until: claim.until, progress_at: claim.since }, 'orchestrator', cutoff);
+  event(h, stalled, 'review exit missing', { agent: 'reviewer', reason: 'monitor exited' }, 'orchestrator', cutoff);
+  for (const at of ['2026-01-01T23:59:59.999Z', cutoff, '2026-01-02T00:00:00.001Z']) {
+    event(h, task, 'msg', { to: 'orchestrator', text: at }, 'messenger', at);
+    event(h, task, 'task note', { text: at }, 'owner', at);
+  }
+  h.ok(['ask', '--kind', 'technical', '--question', 'Which API?', '--option', 'A', '--blocks', task]);
+  h.ok(['answer', 'D1', '--choice', 'A']);
+  h.ok(['ask', '--kind', 'technical', '--question', 'Which later API?', '--option', 'A', '--blocks', task]);
+  h.ok(['answer', 'D2', '--choice', 'A']);
+  const file = path.join(h.state, 'decisions.json');
+  const decisions = JSON.parse(fs.readFileSync(file, 'utf8'));
+  decisions.decisions[0].answered_at = cutoff;
+  decisions.decisions[1].answered_at = '2026-01-02T00:00:00.001Z';
+  fs.writeFileSync(file, JSON.stringify(decisions));
+  const items = h.inbox().items;
+  let before = h.logs();
+  for (const args of [
+    ['--ack-before', 'invalid'],
+    ['--ack-before', cutoff, '--kind', 'ready'],
+    ['--kind', 'message'],
+    ['--ack-before', cutoff, '--ack', items.find((i) => i.kind === 'message').id],
+  ]) {
+    assert.equal(h.run(['inbox', ...args, '--agent', 'orchestrator']).code, 2);
+    assert.deepEqual(h.logs(), before);
+  }
+  const messages = items.filter((i) => i.kind === 'message' && i.text <= cutoff).map((i) => i.id);
+  const filtered = h.json(['inbox', '--ack-before', cutoff, '--kind', 'message', '--agent', 'orchestrator']);
+  assert.deepEqual(filtered, { acknowledged: messages, count: 2, cutoff });
+  let added = h.logs().slice(before.length);
+  assert.equal(added.length, 1);
+  assert.deepEqual(added[0].detail, { items: messages, count: 2, cutoff, kind: 'message' });
+  assert.equal(h.inbox().items.filter((i) => i.kind === 'owner_comment').length, 3);
+  before = h.logs();
+  const remaining = items.filter((i) => (i.kind === 'owner_comment' && i.text <= cutoff)
+    || (i.kind === 'decision_answer' && i.decision.answered_at <= cutoff)
+    || ['stall', 'review_exit_missing'].includes(i.kind)).map((i) => i.id);
+  const all = h.json(['inbox', '--ack-before', '2026-01-02T02:00:00+02:00', '--agent', 'orchestrator']);
+  assert.deepEqual(all, { acknowledged: remaining, count: 5, cutoff });
+  added = h.logs().slice(before.length);
+  assert.equal(added.length, 1);
+  assert.deepEqual(added[0].detail, { items: remaining, count: 5, cutoff });
+  const newer = h.inbox().items;
+  assert.equal(newer.filter((i) => ['message', 'owner_comment'].includes(i.kind)).length, 2);
+  assert.deepEqual(newer.filter((i) => i.kind === 'decision_answer').map((i) => i.decision.id), ['D2']);
+  assert.ok(newer.some((i) => i.kind === 'ready'));
+  before = h.logs();
+  assert.deepEqual(h.json(['inbox', '--ack-before', cutoff, '--agent', 'orchestrator']),
+    { acknowledged: [], count: 0, cutoff });
+  assert.equal(h.logs().length, before.length + 1);
+});
+
+test('old closed-task messages and decision answers disappear without changing the log', (t) => {
+  const h = setup(t);
+  const merged = h.add('Merged input');
+  h.submit(merged, 7);
+  h.reviewer(merged, 'reviewer', h.sha);
+  h.ok(['evidence', merged, '--revision', h.revision(merged), '--type', 'review', '--ok', '--sha', h.sha, '--agent', 'reviewer']);
+  h.ok(['check', 'ci', merged]);
+  h.ok(['accept', merged]);
+  h.ok(['merge', merged]);
+  const cancelled = h.add('Cancelled input');
+  h.ok(['task', 'update', cancelled, '--status', 'cancelled']);
+  const unmerged = h.add('Accepted input');
+  h.submit(unmerged, 8);
+  h.reviewer(unmerged, 'reviewer', h.sha);
+  h.ok(['evidence', unmerged, '--revision', h.revision(unmerged), '--type', 'review', '--ok', '--sha', h.sha, '--agent', 'reviewer']);
+  h.ok(['check', 'ci', unmerged]);
+  h.ok(['accept', unmerged]);
+  const active = h.add('Active input');
+  const old = new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString();
+  const recent = new Date(Date.now() - 23 * 60 * 60 * 1000).toISOString();
+  const cases = [
+    { tasks: [merged], hidden: true },
+    { tasks: [cancelled], hidden: true },
+    { tasks: [merged, cancelled], hidden: true },
+    { tasks: [unmerged], hidden: false },
+    { tasks: [active], hidden: false },
+    { tasks: [merged, active], hidden: false },
+    { tasks: [], hidden: false },
+  ];
+  for (const [index, row] of cases.entries()) {
+    for (const at of [old, recent]) event(h, row.tasks[0] || null, 'msg', { to: 'orchestrator', text: `${index}:${at}` }, 'messenger', at);
+    h.ok(['ask', '--kind', 'technical', '--question', `Input ${index}`, '--option', 'A', ...row.tasks.flatMap((id) => ['--blocks', id])]);
+    h.ok(['answer', `D${index + 1}`, '--choice', 'A']);
+  }
+  h.ok(['ask', '--kind', 'technical', '--question', 'Recent merged input', '--option', 'A', '--blocks', merged]);
+  h.ok(['answer', `D${cases.length + 1}`, '--choice', 'A']);
+  event(h, merged, 'task note', { text: 'Retain owner input' }, 'owner', old);
+  const file = path.join(h.state, 'decisions.json');
+  const decisions = JSON.parse(fs.readFileSync(file, 'utf8'));
+  for (const decision of decisions.decisions) decision.answered_at = old;
+  decisions.decisions.at(-1).answered_at = recent;
+  fs.writeFileSync(file, JSON.stringify(decisions));
+  const before = h.logs();
+  const items = h.inbox().items;
+  for (const [index, row] of cases.entries()) {
+    const messageHidden = [merged, cancelled].includes(row.tasks[0]);
+    assert.equal(items.some((i) => i.kind === 'message' && i.text === `${index}:${old}`), !messageHidden, JSON.stringify(row));
+    assert.ok(items.some((i) => i.kind === 'message' && i.text === `${index}:${recent}`));
+    assert.equal(items.some((i) => i.kind === 'decision_answer' && i.decision.id === `D${index + 1}`), !row.hidden, JSON.stringify(row));
+  }
+  assert.ok(items.some((i) => i.kind === 'owner_comment' && i.text === 'Retain owner input'));
+  assert.ok(items.some((i) => i.kind === 'decision_answer' && i.decision.id === `D${cases.length + 1}`));
+  assert.deepEqual(h.logs(), before, 'expiration filters the view without acknowledging or removing history');
+});
 
 test('one fixture exposes every inbox kind and resolving commands clear their conditions', async (t) => {
   const h = setup(t);

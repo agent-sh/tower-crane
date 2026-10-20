@@ -544,6 +544,8 @@ test(`a ${forced ? 'forced stop' : 'drain'} during spawn's stack refresh records
   const f = stacked(t);
   worker(f);
   f.h.ok(['rework', 'T2', '--reason', 'more upper work']);
+  // A concurrent CI receipt changes the sync snapshot and tests deferral instead of drain.
+  f.h.ok(['check', 'ci', 'T1']);
   // A ready task with no stack ranks after T2; the drain must not hand it T2's slot.
   const other = f.add('independent');
   // Main moves outside any merge, so only the spawn's refresh syncs the stack.
