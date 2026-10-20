@@ -2,10 +2,10 @@
 
 // A gh that serves one repository's job, branch ref, job log and code-scanning alerts from
 // CI_FEEDBACK_GH, printed the way gh api prints them: JSON, the raw log, and --jq arrays one element per line.
-const fs = require('node:fs');
+const { readPublished, updateJson } = require('../atomic-file');
 const args = process.argv.slice(2);
-const data = JSON.parse(fs.readFileSync(process.env.CI_FEEDBACK_GH, 'utf8'));
-const endpoint = args[1] || '';
+const data = JSON.parse(readPublished(process.env.CI_FEEDBACK_GH, 'utf8'));
+const endpoint = args.find((arg) => arg.startsWith('repos/')) || '';
 const fail = (message) => {
   console.error(message);
   process.exitCode = 1;
@@ -17,6 +17,8 @@ const suites = /^repos\/[^/]+\/[^/]+\/commits\/([^/]+)\/check-suites\?/.exec(end
 const annotations = /^repos\/[^/]+\/[^/]+\/check-runs\/(\d+)\/annotations\?/.exec(endpoint);
 const pull = /^repos\/[^/]+\/[^/]+\/pulls\/(\d+)$/.exec(endpoint);
 const commit = /^repos\/[^/]+\/[^/]+\/git\/commits\/([^/]+)$/.exec(endpoint);
+const comments = /^repos\/[^/]+\/[^/]+\/pulls\/(\d+)\/comments(?:\?per_page=100)?$/.exec(endpoint);
+const reply = /^repos\/[^/]+\/[^/]+\/pulls\/(\d+)\/comments\/(\d+)\/replies$/.exec(endpoint);
 if (args[0] === 'pr' && args[1] === 'view') console.log(JSON.stringify(data.pr));
 else if (args[0] !== 'api') fail(`unexpected gh call: ${args.join(' ')}`);
 else if (checks) {
@@ -27,6 +29,16 @@ else if (checks) {
   for (const run of data.workflows || []) console.log(JSON.stringify(run));
 } else if (annotations) {
   for (const row of data.annotations[annotations[1]] || []) console.log(JSON.stringify(row));
+} else if (comments) {
+  if (data.commentsError) fail(data.commentsError);
+  else for (const row of data.comments || []) console.log(JSON.stringify(row));
+} else if (reply && args.includes('POST')) {
+  const updated = updateJson(process.env.CI_FEEDBACK_GH, (current) => {
+    current.comments.push({ id: 9000 + current.comments.length, in_reply_to_id: Number(reply[2]),
+      user: 'worker', body: args.find((arg) => arg.startsWith('body=')).slice(5) });
+    return current;
+  });
+  console.log(JSON.stringify(updated.comments.at(-1)));
 } else if (pull) console.log(JSON.stringify(data.pull));
 else if (commit) console.log(JSON.stringify(data.commits[commit[1]]));
 else if (job?.[2]) {
