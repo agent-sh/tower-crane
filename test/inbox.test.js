@@ -305,6 +305,101 @@ test('foreground inbox never launches slow GitHub reads and preserves refreshed 
     const failures = h.inbox(false).items.filter((i) => i.kind === 'github_error');
     assert.ok(failures.some((i) => /GitHub unavailable/.test(i.reason)), 'real background failures stay visible');
     assert.equal(h.github().calls.length, refreshed, 'cached failures do not trigger foreground reads');
+    const cacheFile = path.join(h.state, 'inbox-github-cache.json');
+    const cache = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
+    for (const entry of Object.values(cache.entries)) entry.at = new Date(Date.now() - 61000).toISOString();
+    fs.writeFileSync(cacheFile, JSON.stringify(cache));
+    assert.deepEqual(h.inbox(false).items.filter((i) => i.kind === 'github_error'), failures,
+      'overdue failed observations stay explicit until replacement');
+    assert.equal(h.github().calls.length, refreshed, 'overdue errors do not launch foreground reads');
+  }
+});
+
+test('overdue cached findings survive every refresh boundary and an in-flight follower pass', async (t) => {
+  const h = setup(t);
+  const submitted = h.add('Cached security findings');
+  h.submit(submitted, 7);
+  const moved = h.add('Cached moved head');
+  h.submit(moved, 8);
+  const accepted = h.add('Cached merge confirmation');
+  h.submit(accepted, 9);
+  h.reviewer(accepted, 'accepted-reviewer', h.sha);
+  h.ok(['evidence', accepted, '--revision', h.revision(accepted), '--type', 'review', '--ok',
+    '--sha', h.sha, '--agent', 'accepted-reviewer']);
+  h.ok(['check', 'ci', accepted]);
+  h.ok(['accept', accepted]);
+  const acceptedOpen = h.add('Cached accepted mergeability');
+  h.submit(acceptedOpen, 7);
+  h.reviewer(acceptedOpen, 'open-reviewer', h.sha);
+  h.ok(['evidence', acceptedOpen, '--revision', h.revision(acceptedOpen), '--type', 'review', '--ok',
+    '--sha', h.sha, '--agent', 'open-reviewer']);
+  h.ok(['check', 'ci', acceptedOpen]);
+  h.ok(['accept', acceptedOpen]);
+  const reviewed = h.add('Cached failed review');
+  h.submit(reviewed, 7);
+  h.reviewer(reviewed, 'failed-reviewer', h.sha);
+  h.ok(['evidence', reviewed, '--revision', h.revision(reviewed), '--type', 'review', '--fail',
+    '--sha', h.sha, '--summary', 'Blocking review', '--agent', 'failed-reviewer']);
+  const restore = h.add('Cached restore hint');
+  h.submit(restore, 7);
+  h.ok(['rework', restore, '--reason', 'environment failed']);
+  const revision = h.json(['task', 'show', restore]).revision;
+  event(h, restore, 'rework', { gate: 'ci', sha: h.sha, revision, previous_revision: revision - 1,
+    reason: 'environment failed' }, 'automation');
+  const github = h.github();
+  github.prs[8].headRefOid = 'f'.repeat(40);
+  github.prs[9].state = 'MERGED';
+  github.revuto = { name: 'revuto', app: { slug: 'revuto-review' }, status: 'completed',
+    conclusion: 'failure', output: { summary: 'Bounds error' } };
+  github.alerts = { 7: [{ number: 1, tool: { name: 'CodeQL' }, rule: { id: 'js/injection' },
+    most_recent_instance: { commit_sha: h.sha, message: { text: 'Untrusted input' } } }] };
+  github.review_comments = { 7: [{ id: 1,
+    body: `Review (Tower Crane, clean context)\n\nBlocking: 1 at ${h.sha}.\n\n- lib/value.js:1 - Bounds error - Avoid corruption.\n` }] };
+  h.save(github);
+  const expected = h.inbox().items.filter((i) => i.task);
+  for (const kind of ['revuto_failed', 'codeql_alert', 'head_changed', 'accepted_unmerged', 'review_failed', 'rework_ready']) {
+    assert.ok(expected.some((i) => i.kind === kind), kind);
+  }
+  assert.equal(expected.find((i) => i.task === accepted && i.kind === 'accepted_unmerged').confirmation, true);
+  assert.equal(expected.find((i) => i.task === acceptedOpen && i.kind === 'accepted_unmerged').remote.mergeable,
+    'MERGEABLE');
+  assert.equal(expected.find((i) => i.task === reviewed && i.kind === 'review_failed').findings_complete, true);
+  assert.equal(expected.find((i) => i.task === restore && i.kind === 'rework_ready').restore,
+    `gates retry ${restore} --from-rework`);
+  const file = path.join(h.state, 'inbox-github-cache.json');
+  const original = JSON.parse(fs.readFileSync(file, 'utf8'));
+  for (const age of [59000, 61000, 78000, 123000]) {
+    const cache = structuredClone(original);
+    const at = new Date(Date.now() - age).toISOString();
+    cache.started_at = at;
+    for (const entry of Object.values(cache.entries)) entry.at = at;
+    fs.writeFileSync(file, JSON.stringify(cache));
+    const calls = h.github().calls.length;
+    const data = h.inbox(false);
+    assert.deepEqual(data.items.filter((i) => i.task), expected, `last findings remain visible at age ${age}`);
+    assert.equal(h.github().calls.length, calls, 'foreground launches no GitHub reads');
+    if (age > 60000) assert.ok(data.items.some((i) => i.kind === 'github_pending' && i.stale),
+      'overdue data is explicit');
+  }
+  const signalFile = path.join(h.base, 'refresh-paused');
+  fs.writeFileSync(h.env.INBOX_GITHUB, JSON.stringify({ ...h.github(), delayMs: 4000,
+    delayEndpoint: '/code-scanning/', delaySignal: signalFile }));
+  const follower = cp.spawn(process.execPath, ['--require', HOOKS, BIN, 'wait', '--inbox', '--observe',
+    '--after', 'now', '--timeout', '0.01', '--agent', 'orchestrator'], { cwd: h.repo, env: h.env });
+  const closed = once(follower, 'close');
+  let errors = '';
+  follower.stderr.on('data', (b) => { errors += b; });
+  follower.stdout.resume();
+  try {
+    await fileWritten(signalFile, { signal: t.signal });
+    assert.deepEqual(h.inbox(false).items.filter((i) => i.task), expected,
+      'old findings stay visible while replacement reads are in flight');
+    const [code] = await closed;
+    assert.ok([0, 2].includes(code), errors);
+    assert.deepEqual(h.inbox(false).items.filter((i) => i.task), expected, 'completed refresh replaces the snapshot');
+  } finally {
+    follower.kill();
+    await closed;
   }
 });
 

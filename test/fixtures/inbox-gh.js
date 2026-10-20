@@ -49,12 +49,15 @@ let result;
 let failed = false;
 let review = null;
 let pause = 0;
+let delaySignal = null;
 updateJson(file, (data) => {
   data.calls.push(args);
   pause = data.delayMs && (!data.delayEndpoint || args[1]?.includes(data.delayEndpoint)) ? data.delayMs : 0;
+  delaySignal = data.delaySignal;
   answer(data);
   return data;
 });
+if (pause && delaySignal) fs.writeFileSync(delaySignal, '');
 if (pause) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, pause); // wait-allow: stall GitHub to verify foreground inbox reads never launch network requests
 // The review lands while this fetch is in flight, after the lock is released: the
 // evidence command may run gh, which takes the same lock.
