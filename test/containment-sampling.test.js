@@ -9,6 +9,66 @@ const { EventEmitter } = require('node:events');
 const { PassThrough } = require('node:stream');
 const C = require('../lib/containment');
 const { cachedFixture } = require('./helpers');
+const probe = require('../scripts/probe-keeper-cpu');
+
+test('keeper CPU probe rejects shared, ancestor, sibling and occupied targets', (t) => {
+  const caller = '/sys/fs/cgroup/caller.scope';
+  let current;
+  let members;
+  const writes = [];
+  t.mock.method(fs, 'readFileSync', () => members);
+  t.mock.method(fs, 'writeFileSync', (file, pid) => {
+    writes.push([file, pid]);
+    current = path.dirname(file);
+  });
+  for (const [group, occupied, valid] of [
+    [undefined, false, false], [caller, false, false],
+    [path.dirname(caller), false, false], ['/sys/fs/cgroup/sibling/keeper-cpu-abc123', false, false],
+    [`${caller}/keeper-cpu-abc123`, true, false], [`${caller}/keeper-cpu-abc123`, false, true],
+  ]) {
+    current = caller;
+    members = occupied ? '123\n' : '';
+    writes.length = 0;
+    const C = { currentGroup: () => current };
+    if (valid) {
+      probe.enterMeasurementGroup(group, C);
+      assert.deepEqual(writes, [[`${group}/cgroup.procs`, String(process.pid)]]);
+      assert.equal(current, group);
+    } else {
+      assert.throws(() => probe.enterMeasurementGroup(group, C));
+      assert.deepEqual(writes, []);
+    }
+  }
+});
+
+test('keeper CPU probe removes its private group after success, error and timeout', (t) => {
+  const group = '/sys/fs/cgroup/caller.scope/keeper-cpu-abc123';
+  const removed = [];
+  t.mock.method(C, 'currentGroup', () => path.dirname(group));
+  t.mock.method(fs, 'mkdtempSync', prefix => {
+    assert.equal(prefix, `${path.dirname(group)}/keeper-cpu-`);
+    return group;
+  });
+  t.mock.method(fs, 'rmdirSync', dir => removed.push(dir));
+  let result;
+  t.mock.method(cp, 'spawnSync', (file, args, opts) => {
+    assert.equal(file, process.execPath);
+    assert.equal(args[2], group);
+    assert.equal(opts.timeout, 10000);
+    return result;
+  });
+  for (const row of [
+    { status: 0, stdout: '{"proc_scans":0}' },
+    { status: 1, stderr: 'sample failed' },
+    { status: null, error: new Error('timeout'), signal: 'SIGTERM' },
+  ]) {
+    result = row;
+    removed.length = 0;
+    if (row.status === 0) assert.deepEqual(probe.measurementRun('after'), { proc_scans: 0 });
+    else assert.throws(() => probe.measurementRun('after'));
+    assert.deepEqual(removed, [group]);
+  }
+});
 
 test('watchdog identity maps discard departed and reused pids', (t) => {
   const read = fs.readFileSync;
@@ -16,22 +76,26 @@ test('watchdog identity maps discard departed and reused pids', (t) => {
     if (String(file).startsWith('/proc/')) throw Object.assign(new Error('gone'), { code: 'ENOENT' });
     return read(file, ...args);
   });
-  for (const select of [
-    (rows, known) => C.descendants(rows, null, known),
-    (rows, kept) => C.managed(rows, [], kept),
-  ]) {
-    for (const rows of [[], [{ pid: 12, parent: 0, start: 'new', envNames: [] }]]) {
-      const identities = new Map([[11, 'gone'], [12, 'old']]);
-      assert.deepEqual(select(rows, identities), []);
-      assert.equal(identities.size, 0);
-    }
-    const identities = new Map([[11, 'live'], [12, 'gone']]);
-    const live = { pid: 11, parent: 0, start: 'live', envNames: [] };
-    assert.deepEqual(select([live], identities), [live]);
-    assert.deepEqual([...identities], [[11, 'live']]);
+  for (const rows of [[], [{ pid: 12, parent: 0, start: 'new', envNames: [] }]]) {
+    const identities = new Map([[11, 'gone'], [12, 'old']]);
+    assert.deepEqual(C.descendants(rows, null, identities), []);
+    assert.equal(identities.size, 0);
   }
+  const identities = new Map([[11, 'live'], [12, 'gone']]);
+  const live = { pid: 11, parent: 0, start: 'live', envNames: [] };
+  assert.deepEqual(C.descendants([live], null, identities), [live]);
+  assert.deepEqual([...identities], [[11, 'live']]);
 });
 
+test('retained identities discard departed and reused pids without a history map', () => {
+  for (const [rows, expected] of [
+    [[], []],
+    [[{ pid: 12, parent: 0, start: 'new' }], []],
+    [[{ pid: 11, parent: 0, start: 'live' }], [{ pid: 11, parent: 0, start: 'live' }]],
+  ]) {
+    assert.deepEqual(C.managed(rows, [{ pid: 11, start: 'live' }, { pid: 12, start: 'old' }]), expected);
+  }
+});
 test('Windows orphan discovery survives pruning the exited root', (t) => {
   const platform = Object.getOwnPropertyDescriptor(process, 'platform');
   Object.defineProperty(process, 'platform', { ...platform, value: 'win32' });
@@ -174,6 +238,33 @@ test('Windows sampling recovers from a dead or hung provider within its deadline
   assert.equal(children.length, 6);
 });
 
+test('process identity lookup closes its sampler on macOS and Windows', async (t) => {
+  const platform = Object.getOwnPropertyDescriptor(process, 'platform');
+  t.after(() => Object.defineProperty(process, 'platform', platform));
+  let closed;
+  t.mock.method(cp, 'execFile', (file, args, opts, done) => {
+    process.nextTick(done, null, '11 10 11 1 Sun Oct 20 00:00:00 2026 node\n');
+    return { kill() { closed = true; } };
+  });
+  t.mock.method(cp, 'spawn', () => {
+    const child = new EventEmitter();
+    child.stdout = new PassThrough();
+    child.stdin = new PassThrough();
+    child.stdin.on('data', () => process.nextTick(() => child.stdout.write('11 10 1000 2048\nTC_SNAPSHOT_END\n')));
+    child.kill = () => { closed = true; };
+    return child;
+  });
+  for (const host of ['darwin', 'win32']) {
+    Object.defineProperty(process, 'platform', { ...platform, value: host });
+    for (const pid of [11, 12]) {
+      closed = false;
+      assert.deepEqual(await C.processIdentity(pid),
+        pid === 12 ? null : { pid: 11, start: host === 'win32' ? 1000 : 'Sun Oct 20 00:00:00 2026' });
+      assert.equal(closed, true);
+    }
+  }
+});
+
 test('CLI watchdog survives a failed sample but stops after consecutive failures', { skip: process.platform === 'win32' }, (t) => {
   for (const mode of ['once', 'slow', 'always']) {
     const h = cachedFixture(t, 'sampling-cli', h => {
@@ -194,7 +285,7 @@ test('CLI watchdog survives a failed sample but stops after consecutive failures
       assert.equal(result.code, 0, result.stdout + result.stderr);
       assert.doesNotMatch(result.stdout + result.stderr, /resource-monitor-failed/);
     } else {
-      assert.notEqual(result.code, 0);
+      assert.notEqual(result.code, 0, result.stdout + result.stderr);
       assert.match(h.ok(['status']), /resource-monitor-failed/);
     }
   }
@@ -249,7 +340,7 @@ test('keeper sampling tolerates transient failures and stops on the third failur
       good === true ? `${row.pid} 1 ${row.group} 1 ${row.start} node\n` : '');
     return { kill() {} };
   });
-  t.mock.method(cp, 'spawnSync', () => ({ status: 0, stdout: row.start }));
+  t.mock.method(cp, 'spawnSync', () => ({ status: 0, stdout: `${row.pid} ${row.start}\n` }));
   t.mock.method(process, 'kill', pid => { kills.push(pid); });
   t.mock.timers.enable({ apis: ['setInterval'] });
   for (const [pattern, failed] of [

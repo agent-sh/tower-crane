@@ -20,9 +20,35 @@ function containment(version) {
   return loaded.exports;
 }
 
-async function measure(version) {
+function enterMeasurementGroup(group, C) {
+  const caller = C.currentGroup();
+  if (!group || path.dirname(group) !== caller || !/^keeper-cpu-[a-zA-Z0-9]+$/.test(path.basename(group))) {
+    throw new Error('measurement requires a private child cgroup');
+  }
+  if (fs.readFileSync(path.join(group, 'cgroup.procs'), 'utf8').trim()) {
+    throw new Error('measurement cgroup is already occupied');
+  }
+  fs.writeFileSync(path.join(group, 'cgroup.procs'), String(process.pid));
+  assert.equal(C.currentGroup(), group, 'measurement must enter its private cgroup before guarding it');
+}
+
+function measurementRun(version) {
+  // A private child stays inside the caller's resource fence. Any keeper kill
+  // targets only this measurement worker, including on the baseline's error path.
+  const group = fs.mkdtempSync(path.join(containment('after').currentGroup(), 'keeper-cpu-'));
+  try {
+    const result = cp.spawnSync(process.execPath, [__filename, version, group],
+      { cwd: root, encoding: 'utf8', timeout: 10000 });
+    assert.equal(result.status, 0, result.stderr || String(result.error || result.signal));
+    return JSON.parse(result.stdout.trim());
+  } finally {
+    fs.rmdirSync(group);
+  }
+}
+
+async function measure(version, group) {
   const C = containment(version);
-  const group = C.currentGroup();
+  enterMeasurementGroup(group, C);
   let scans = 0;
   const readdir = fs.readdirSync;
   fs.readdirSync = function (dir, ...args) {
@@ -49,7 +75,7 @@ async function main() {
   if (process.platform !== 'linux') throw new Error('keeper CPU probe requires a Linux cgroup host');
   const count = fs.readdirSync('/proc').filter(name => /^\d+$/.test(name)).length;
   if (fs.statSync('/').uid !== 0) throw new Error('run outside the worker sandbox with the host root mapping');
-  if (process.argv[2]) return measure(process.argv[2]);
+  if (process.argv[2]) return measure(process.argv[2], process.argv[3]);
   const latency = [];
   for (let i = 0; i < 3; i++) {
     const started = performance.now();
@@ -60,10 +86,7 @@ async function main() {
   const readings = { before: [], after: [] };
   for (let i = 0; i < 3; i++) {
     for (const version of ['before', 'after']) {
-      const result = cp.spawnSync(process.execPath, [__filename, version],
-        { cwd: root, encoding: 'utf8', timeout: 10000 });
-      assert.equal(result.status, 0, result.stderr);
-      const reading = JSON.parse(result.stdout.trim());
+      const reading = measurementRun(version);
       assert.equal(reading.proc_scans === 0, version === 'after', JSON.stringify(reading));
       readings[version].push(reading);
     }
@@ -80,4 +103,6 @@ async function main() {
   assert.ok(after.median < before.median, 'cgroup polling must cost less CPU than host-wide snapshots');
 }
 
-main().catch(error => { console.error(error); process.exitCode = 1; });
+if (require.main === module) main().catch(error => { console.error(error); process.exitCode = 1; });
+
+module.exports = { enterMeasurementGroup, measurementRun };
