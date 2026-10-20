@@ -2,9 +2,9 @@
 
 // A gh that serves one repository's job, branch ref, job log and code-scanning alerts from
 // CI_FEEDBACK_GH, printed the way gh api prints them: JSON, the raw log, and --jq arrays one element per line.
-const fs = require('node:fs');
+const { readPublished, updateJson } = require('../atomic-file');
 const args = process.argv.slice(2);
-const data = JSON.parse(fs.readFileSync(process.env.CI_FEEDBACK_GH, 'utf8'));
+const data = JSON.parse(readPublished(process.env.CI_FEEDBACK_GH, 'utf8'));
 const endpoint = args.find((arg) => arg.startsWith('repos/')) || '';
 const fail = (message) => {
   console.error(message);
@@ -33,11 +33,12 @@ else if (checks) {
   if (data.commentsError) fail(data.commentsError);
   else for (const row of data.comments || []) console.log(JSON.stringify(row));
 } else if (reply && args.includes('POST')) {
-  const row = { id: 9000 + data.comments.length, in_reply_to_id: Number(reply[2]),
-    user: 'worker', body: args.find((arg) => arg.startsWith('body=')).slice(5) };
-  data.comments.push(row);
-  fs.writeFileSync(process.env.CI_FEEDBACK_GH, JSON.stringify(data));
-  console.log(JSON.stringify(row));
+  const updated = updateJson(process.env.CI_FEEDBACK_GH, (current) => {
+    current.comments.push({ id: 9000 + current.comments.length, in_reply_to_id: Number(reply[2]),
+      user: 'worker', body: args.find((arg) => arg.startsWith('body=')).slice(5) });
+    return current;
+  });
+  console.log(JSON.stringify(updated.comments.at(-1)));
 } else if (pull) console.log(JSON.stringify(data.pull));
 else if (commit) console.log(JSON.stringify(data.commits[commit[1]]));
 else if (job?.[2]) {
