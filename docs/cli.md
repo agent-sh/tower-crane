@@ -42,6 +42,8 @@ Writes take the lock, re-read the files, validate, write atomically and append t
 
 Orchestrator writes also require the calling session lease. Scripts and intermediate shells under the nearest harness or session shell (login, interactive, or with a terminal on stdin) share its identity; a different harness process or session id still refuses writes. A recorded harness exit releases its lease immediately; a caller fallback keeps the idle window. Native commands renew its idle window; engine reactions, collectors and hook writers never acquire or renew it. Automation binds to the recorded holder while its process lives, even after heartbeat expiry, so it keeps running when the holder returns and renews; a native writer replacing the expired lease stops it. `orchestrator release` and owner-only `orchestrator takeover` clear it for the next native writer. MCP discovery needs no lease, and actual actions check the lease before running. Inbox reads stay open to competing sessions. `authority`, `bench gates` and `bench tokens` also remain open to competing readers and never acquire a vacant lease. Wait startup does not block its timeout behind a lease transaction. See [state.md: Orchestrator lease](state.md#orchestrator-lease).
 
+A native caller that carries the holder's harness session id but is outside its process tree is refused as detached. Run the command as a child of the holding session, or let `tower-crane wait` and authenticated engine automation run gates for it. A copied environment session id grants no lease access. This refusal does not tell the holder to release its own lease; unrelated session ids keep the existing guidance.
+
 `hook tool` appends the agent's tool activity to `progress/<agent>.jsonl` without the state lock or a state read; a failed append drops that line. An inbox poll (`UserPromptSubmit`, and the poll after each tool hook) reads the event log without the lock and returns at once when nothing is pending. With messages pending it tries the lock once: a busy lock returns empty context and leaves them unread for the next hook. The bridge turns any failed progress append or poll into empty context, so neither fails the harness turn. Background-job, Stop and acknowledgement hooks still write audit events under the lock.
 
 Evidence that no gate decision reads any more moves out of `tasks.json` on the next write: entries at an older head or revision, every entry of a cancelled task, and all but the merge receipt of a merged task. Their fields over 1 KiB go to `evidence/<task>/<sha256>.json`, with a reference in `tasks.json`. Evidence at the task's current head stays inline whatever its size. `task show` and every reader get the full checked value back. Copy the evidence directory with the state. See [state.md](state.md#tasksjson) for the format and what older tools see.
@@ -697,7 +699,7 @@ parents, made like the local CI merge commit ([state](state.md)); no ref
 names it. It first trial-merges
 each task bottom up and sends the lowest conflicting one to rework with its
 files. The suite is skipped when the head already contains that tip or an
-earlier `head check` covered the same head, revision, base tip and command.
+earlier successful `head check` covered the same head, revision, base tip and command.
 Entries without a tests gate, or with tests mode `none`, skip it. A failing
 check sends the top task to rework with the output tail, and the tasks
 below it take the line again on their own. A failure under heads, stack
@@ -716,6 +718,12 @@ requires up-to-date branches closes that window. Hosted CI evidence comes
 from GitHub's `pull_request` run, which already tests the merge ref. Merge
 the base into a PR only for conflict repair, never to refresh evidence or
 pick up a workflow change.
+After a merged-head timeout, the next queue pass reruns the check once for
+the same task, head, revision, base tip, command and timeout budget. Concurrent
+requests share the queue executor, and later reactions reuse that rerun's
+result even if it times out again. A `head check shared` event names the
+reused rerun. A changed head, revision, base, command or timeout budget
+starts a fresh check; a timeout keeps the task accepted without merging it.
 One executor drains the queue; a reaction that finds it busy records a
 request, and the executor makes another pass before releasing. Manual
 `merge ID` bypasses the queue and its head check: it keeps only the merge
