@@ -335,6 +335,148 @@ test('incremental head can select no suites without invoking a default full runn
   assert.equal(h.json(['task', 'show', 'T1']).gates.gates.find((g) => g.type === 'tests').ok, true);
 });
 
+test('incremental proof scope preserves acceptable receipts across policy variants', (t) => {
+  for (const [name, flags, kept, expected] of [
+    ['non-expensive prove', ['--tests-expensive', 'false'], false, 'full'],
+    ['default-expense prove', ['--tests-expensive', 'null'], false, 'full'],
+    ['scoped prove', [], false, 'incremental'],
+    ['non-expensive run-only', ['--tests-expensive', 'false', '--tests-mode', 'run-only'], false, 'incremental'],
+    ['non-expensive kept-only', ['--tests-expensive', 'false', '--tests-keep', '["docs/**"]'], true, 'full'],
+    ['scoped kept-only', ['--tests-keep', '["docs/**"]'], true, 'incremental'],
+    ['non-expensive without template', ['--tests-expensive', 'false', '--tests-proof-cmd', 'null'], false, 'full'],
+  ]) {
+    const h = incrementalFixture(t, undefined, flags);
+    if (kept) h.git(['branch', '-f', 'main', 'HEAD']);
+    resubmit(h, 'docs/state.md');
+    const result = check(h);
+    assert.equal(h.json(['task', 'show', 'T1']).gates.gates.find((g) => g.type === 'tests').ok, true, name);
+    assert.equal(result.receipt.head_mode, expected, name);
+    if (expected === 'full') assert.equal(result.commands.find((c) => c.command !== 'git').command, fullCommand, name);
+    assert.equal(check(h).receipt.head_mode, expected, `${name}: rerun`);
+    h.ok(['check', 'clean', 'T1', '--agent', 'worker']);
+    h.ok(['project', 'set', '--repo', 'acme/widget']);
+    h.ok(['check', 'ci', 'T1', '--agent', 'worker']);
+    h.ok(['evidence', 'T1', '--revision', h.revision('T1'), '--type', 'review', '--ok',
+      '--sha', result.sha, '--agent', 'owner']);
+    h.ok(['accept', 'T1']);
+    h.ok(['merge', 'T1']);
+  }
+});
+
+test('incremental markdown coverage includes the repository suites that read it', () => {
+  const { select } = require('../lib/tests-incremental');
+  const { testMatcher, isSupportFile, globToRegExp } = require('../lib/gates/tests');
+  const matcher = testMatcher({ base: 'main' });
+  const isTest = (p) => matcher.match(p) && !isSupportFile(p);
+  const files = ['test', 'test/gates'].flatMap((dir) => fs.readdirSync(path.join(ROOT, dir), { withFileTypes: true })
+    .filter((entry) => entry.isFile()).map((entry) => `${dir}/${entry.name}`)).filter(isTest);
+  const available = new Set(files);
+  const seed = require('../tools/tests-map.json');
+  for (const [file, expected] of [
+    ['skills/tower-crane-work/SKILL.md', ['test/host-probes.test.js', 'test/broker.test.js', 'test/shared-files.test.js']],
+    ['agents/tower-crane-orchestrator.md', ['test/host-probes.test.js']],
+    ['skills/tower-crane/SKILL.md', ['test/isolation.test.js']],
+    ['docs/ladder.md', ['test/isolation.test.js', 'test/ci-required.test.js', 'test/shared-files.test.js']],
+  ]) {
+    const readers = files.filter((suite) => {
+      const source = fs.readFileSync(path.join(ROOT, suite), 'utf8');
+      return source.includes(file) || source.includes(path.posix.basename(file));
+    });
+    const result = select(seed, [{ path: file, status: 'M' }], isTest, available,
+      globToRegExp, 'node test/run.js {tests}', '', readers);
+    assert.equal(result.mode, 'incremental', file);
+    for (const suite of expected) assert.ok(result.tests.includes(suite), `${file} must run ${suite}`);
+  }
+});
+
+test('incremental reference patterns cover literal paths, basenames, deletions and both rename sides', () => {
+  const { referencePatterns, select, suiteMatcher } = require('../lib/tests-incremental');
+  const { globToRegExp } = require('../lib/gates/tests');
+  const isTest = (p) => p.endsWith('.test.js');
+  const sources = {
+    'test/path.test.js': 'read("skills/work/SKILL.md")',
+    'test/basename.test.js': "path.join(root, 'skills', 'other', 'SKILL.md')",
+    'test/docs.test.js': 'read("docs/guide[1].md")',
+    'test/mapped.test.js': 'unrelated source',
+    'test/old.test.js': 'read("old/previous.md")',
+    'test/new.test.js': 'read("new/replacement.md")',
+  };
+  const available = new Set(Object.keys(sources));
+  for (const [files, map, expected] of [
+    [[{ path: 'skills/work/SKILL.md', status: 'M' }], { '**/*.md': [] }, ['test/basename.test.js', 'test/path.test.js']],
+    [[{ path: 'skills/work/SKILL.md', status: 'D' }], { '**/*.md': [] }, ['test/basename.test.js', 'test/path.test.js']],
+    [[{ path: 'old/SKILL.md', status: 'D' }, { path: 'new/SKILL.md', status: 'A' }], { '**/*.md': [] }, ['test/basename.test.js', 'test/path.test.js']],
+    [[{ path: 'old/previous.md', status: 'D' }, { path: 'new/replacement.md', status: 'A' }], { '**/*.md': [] }, ['test/new.test.js', 'test/old.test.js']],
+    [[{ path: 'docs/guide[1].md', status: 'M' }], { '**/*.md': ['test/mapped.test.js'] }, ['test/docs.test.js', 'test/mapped.test.js']],
+    [[{ path: 'docs/unread.md', status: 'M' }], { '**/*.md': [] }, []],
+    [[{ path: 'test/path.test.js', status: 'M' }], {}, ['test/path.test.js']],
+  ]) {
+    const patterns = referencePatterns(files, isTest);
+    const readers = Object.entries(sources).filter(([, source]) => patterns.some((p) => source.includes(p))).map(([suite]) => suite);
+    const result = select(map, files, isTest, available, globToRegExp, 'node --test {tests}', '', readers);
+    assert.equal(result.mode, 'incremental');
+    assert.deepEqual(result.tests, expected);
+  }
+  const broad = suiteMatcher(() => true, 'node test/execute.js {tests}', 'node test/run.js');
+  for (const file of ['package.json', 'test/helpers.js', 'test/fixtures/input.json', 'test/run.js', 'test/execute.js']) {
+    assert.ok(referencePatterns([{ path: file, status: 'M' }], broad).includes(file),
+      `broad tests.paths must still scan readers of ${file}`);
+  }
+});
+
+test('incremental CLI runs readers hidden by an empty markdown mapping', (t) => {
+  const h = fixture(t, null);
+  h.git(['switch', 'main']);
+  fs.mkdirSync(path.join(h.repo, 'skills/work'), { recursive: true });
+  fs.writeFileSync(path.join(h.repo, 'skills/work/SKILL.md'), 'Required contract.\n');
+  fs.writeFileSync(path.join(h.repo, 'test/reader.test.js'), `const fs = require('node:fs');
+const assert = require('node:assert/strict');
+assert.match(fs.readFileSync('skills/work/SKILL.md', 'utf8'), /Required contract/);
+`);
+  h.git(['add', '.']);
+  h.git(['commit', '-qm', 'markdown reading suite']);
+  h.git(['switch', 'fixture-change']);
+  h.git(['merge', '--no-edit', 'main']);
+  repositoryMap(h, { '**/*.md': [] });
+  h.ok(['project', 'set', '--ci-required', '[]']);
+  h.ok(['submit', 'T1', '--sha', h.git(['rev-parse', 'HEAD']), '--agent', 'worker']);
+  assert.equal(check(h).receipt.head_mode, 'full');
+  resubmit(h, 'skills/work/SKILL.md', 'Broken contract.\n');
+  const run = h.run(['check', 'tests', 'T1', '--agent', 'worker', '--json']);
+  assert.equal(run.code, 1, run.stderr + run.stdout);
+  const result = JSON.parse(run.stdout);
+  assert.equal(result.receipt.head_mode, 'incremental');
+  assert.ok(result.receipt.head_tests.includes('test/reader.test.js'));
+});
+
+test('incremental reference scan failures retain full coverage', (t) => {
+  for (const result of [
+    { status: 128, stdout: '', stderr: 'cannot read source' },
+    { status: 1, signal: 'SIGTERM', stdout: '' },
+    { status: 1, timedOut: true, stdout: '' },
+    { status: 0, stdout: 'invalid result\0' },
+  ]) {
+    const h = incrementalFixture(t);
+    resubmit(h, 'docs/state.md');
+    const preload = path.join(h.base, 'reference-failure.js');
+    fs.writeFileSync(preload, `const common = require(${JSON.stringify(path.join(ROOT, 'lib/gates/common.js'))});
+const git = common.git;
+common.git = (ctx, root, args, opts) => args.includes('grep')
+  ? Promise.resolve(${JSON.stringify(result)})
+  : git(ctx, root, args, opts);
+`);
+    const run = h.run(['check', 'tests', 'T1', '--agent', 'worker', '--json'], {
+      env: { NODE_OPTIONS: `${h.env.NODE_OPTIONS || ''} --require=${JSON.stringify(preload)}` },
+    });
+    assert.equal(run.code, 0, run.stderr + run.stdout);
+    const receipt = JSON.parse(run.stdout);
+    assert.equal(receipt.receipt.head_mode, 'full', JSON.stringify(result));
+    assert.match(receipt.receipt.head_reason, /could not read test references/);
+    assert.equal(receipt.commands.find((c) => c.command !== 'git').command, fullCommand);
+    assert.equal(h.json(['task', 'show', 'T1']).gates.gates.find((g) => g.type === 'tests').ok, true);
+  }
+});
+
 test('incremental selection falls back for uncovered deltas and changed policy', (t) => {
   const cases = [
     ['unmapped.js', 'module.exports = 1;\n', []],
@@ -492,13 +634,17 @@ test('incremental selection sends mapped host-only suites to separate host comma
   const host = 'test/host.test.js';
   fs.writeFileSync(path.join(h.repo, host), `const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
 test('host context', () => {
   if (process.env.TOWER_CRANE_TEST_EXCLUDE) return;
   assert.equal(process.env.TOWER_CRANE_SANDBOX, '0');
   assert.equal(process.env.HOST_OPT_IN, 'yes');
+  assert.match(fs.readFileSync('docs/state.md', 'utf8'), /prose/i);
 });
 `);
-  repositoryMap(h, { 'docs/**': [host] });
+  fs.mkdirSync(path.join(h.repo, 'docs'), { recursive: true });
+  fs.writeFileSync(path.join(h.repo, 'docs/state.md'), 'Original prose.\n');
+  repositoryMap(h, { 'docs/**': [] });
   h.git(['add', '.']);
   h.git(['commit', '--allow-empty', '-qm', 'host suite mapping']);
   h.ok(['project', 'set', '--tests-host-only', JSON.stringify([host]), '--tests-host-env', '{"HOST_OPT_IN":"yes"}']);
