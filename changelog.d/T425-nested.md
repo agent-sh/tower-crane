@@ -1,0 +1,1 @@
+- Keep base reruns scoped for nested failures under Node's spec reporter by linking aggregate parent names to their failing descendants' files.

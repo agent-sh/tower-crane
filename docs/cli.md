@@ -320,8 +320,37 @@ If GitHub still lists it in a stack and refuses `gh pr merge`, squash and
 merge methods use the asynchronous API for that single PR at its accepted
 head, with the same method and commit text. Admin and rebase retain the
 ordinary fallback refusals.
-Middle tasks keep their stack records while an upper task is open, preserving
+Middle tasks with a PR keep their stack records while an upper task is open, preserving
 the merged lower PRs that sync and stack merge must still recognize.
+Their PR and stored base still move to the project base after all lower members
+merge, including disabled or unlinked members and closed PRs that need replacement.
+A `stack base` event records the change while keeping the upper tasks' parent ids.
+A replacement marks the affected chain unlinked until its new PR chain is confirmed.
+The retained member uses ordinary merge fallback until that confirmation.
+Dispatch persists the project base after a verified remote merge even before its
+local receipt arrives and skips synchronization of that completed lower chain.
+A missing checkout resumes from its own head without dropping the retained lineage.
+
+Children without a PR retire on the merge refresh or next observation even
+when they are unlinked, disabled or running. Before spawning a stacked worker,
+the dispatcher rechecks its lower PRs and retires the stack when each has merged
+at its recorded head and base. A remote merge can retire the stack before its
+local merge receipt arrives, without creating merge evidence. The worker then
+uses the project base, and `stack complete` records `pr: null`. Retirement keeps
+child commits and adds a task note to merge the project base before continuing
+work or opening the PR. The automatic note creates no owner-comment notification.
+If GitHub closed a child PR after deleting its base,
+retirement records a matching open PR against the project base or creates a
+replacement from the same branch, preserving its title and body. Replacement
+bumps the revision and returns an accepted task to submitted, so gates and
+review must run for the new PR. Invalid heads, repositories or bases refuse
+recovery; failed calls preserve the stack for retry.
+
+A failed retarget keeps the stack record and fallback flag. After lower tasks
+merge, ordinary fallback can retarget that recorded dependency base to the
+project base. Once retirement clears the record, only the project base is
+valid; the former dependency branch and unrelated bases are refused without
+a PR write.
 
 Before every automatic synchronization, including after a confirmed merge
 and from `worktree` or `spawn`, submitted or accepted upper heads are checked
@@ -368,7 +397,7 @@ Before constructing an agent home, spawn also sweeps orphan `brokers/<agent>/` d
 <!-- commands:Run:start -->
 | Command | Does |
 |---|---|
-| `accept ID [--cmd CMD] [--proof-cmd CMD] [--waive TYPE --reason R]` | a current independent failed review sends the task through `rework --from-review` and exits 1, unless every finding is a false claim in the PR body; otherwise run missing or stale software gates first. Tests and clean use pinned project commands. Optional `--cmd` and `--proof-cmd` must match their pins; none mode needs no test command. When they pass and review is missing, dispatch it and return `review_pending: true` while keeping the task submitted. After correcting the PR body for such a review, explicit `accept` requests a light claim check at the same revision; automatic reactions do not retry an unchanged failed head. Call again after review evidence arrives to accept. Current successful receipts are reused; stale successful receipts run again under the host governor. Current failures or unaudited attempted receipts require an explicit gate rerun. Review is checked separately from software gates. A tests, clean or local CI run already live at the same head and revision, started by automation or another command, is joined: `accept` waits for its evidence instead of starting a second run. A gate the host governor defers or stops exits 3 with its reason, records no evidence and accepts nothing; run `accept` again once there is room. `--waive review` is operational when the reviewer is capped or down at the submitted head (a capped review run in its `check ci` evidence, or a review spawn that exited without a verdict) and owner-required otherwise; waiving tests, clean, sources or ci is owner-required |
+| `accept ID [--cmd CMD] [--proof-cmd CMD] [--waive TYPE --reason R]` | a current independent failed review sends the task through `rework --from-review` and exits 1, unless every finding is a false claim in the PR body; otherwise run missing or stale software gates first. Tests and clean use pinned project commands. Optional `--cmd` and `--proof-cmd` must match their pins; none mode needs no test command. When they pass and review is missing, dispatch it and return `review_pending: true` while keeping the task submitted. For a PR-body-only failure, automation dispatches a worker restricted to editing the body, then requests a light claim check after verifying the body changed and the head stayed fixed. Two consecutive failed automatic light checks at that head stop the loop with `review_body_stuck` in inbox. Explicit `accept` can request another light check after correction. Call again after review evidence arrives to accept. Current successful receipts are reused; stale successful receipts run again under the host governor. Current failures or unaudited attempted receipts require an explicit gate rerun. Review is checked separately from software gates. A tests, clean or local CI run already live at the same head and revision, started by automation or another command, is joined: `accept` waits for its evidence instead of starting a second run. A gate the host governor defers or stops exits 3 with its reason, records no evidence and accepts nothing; run `accept` again once there is room. `--waive review` is operational when the reviewer is capped or down at the submitted head (a capped review run in its `check ci` evidence, or a review spawn that exited without a verdict) and owner-required otherwise; waiving tests, clean, sources or ci is owner-required |
 | | |
 | `ci completed ID --sha SHA` | orchestrator or owner: deliver a CI completion hint for an active submitted head, rerun the CI gate and advance passing tasks |
 | | |
@@ -421,7 +450,11 @@ Before constructing an agent home, spawn also sweeps orphan `brokers/<agent>/` d
 
 Failed review evidence can supply `--findings '[{"kind":"false-claim","path":"PR body","claim":"The diagnostic is printed."}]'`. List every blocker with non-blank `kind`, `path` and `claim` strings and no other fields; this flag is refused for notes and passing reviews. A false claim qualifies only when correcting prose resolves it without a behavior or contract change. All blockers must be false claims confined to `PR body`, `CHANGELOG.md` or single Markdown fragments under `changelog.d/` for the light path. Missing metadata, mixed blockers and contract claims, including `docs/cli.md` and `docs/state.md`, retain full review and rework.
 
-When every finding is in the PR body, correct it with `gh pr edit --body-file`, then run `accept ID` to request a light reviewer check without a new revision. `rework --from-review` refuses these failures without changing state, and the inbox's `prose_only: true` item supplies `accept ID` with correction instructions. If the body cannot be corrected, `rework ID --reason R` sends the task back. Automatic reactions do not retry a failed light check at an unchanged head.
+When every finding is in the PR body, automation dispatches a body-only repair on the task's worker rung, resuming its session when supported and available. The task stays submitted and `status` shows `fixing PR body`. The worker edits with `gh pr edit --body-file`, then exits without claiming, submitting, editing repository files, committing or pushing. The broker refuses pushes and non-body PR changes. Once the worker exits, the engine verifies that the body changed, the checkout is clean and both local and remote heads still match the submitted head, then requests the same light check as `accept ID`. Changed heads or checkout files go to normal rework without a light check. A pass accepts at the same head and revision.
+
+A light reviewer that leaves no verdict uses the ordinary reviewer recovery policy: retryable crashes or outages and expired missing receipts get a replacement check at the same head without another body edit. A clean no-verdict exit or three crashed review sessions hold dispatch and surface `review_held`; `accept ID` retries the corrected body's check after the cause is handled. An exited, held reviewer is no longer shown as `fixing PR body`. No-verdict exits do not count as failed body checks.
+
+Two consecutive failed automatic body-only re-checks at that head and revision stop the loop; `inbox` shows `review_body_stuck` with the latest findings. A fixer that exits without changing the body also stops with this item. The orchestrator can correct the body and run `accept ID`, or use `rework ID --reason R` when code changes are needed. `rework --from-review` still refuses body-only failures. A submission without a linked PR and recorded branch retains the explicit correction and `accept` path.
 
 Changelog claims need a new head, so they go through `rework --from-review` like other failures. The next revision's review is a light check when the diff since the failed review changes only the named changelog fragments. The new head requires software gates as usual. Other source changes restore full review. The reviewer checks every corrected claim against its code or probe and records fresh evidence; an uncorrected claim still blocks. Prose-only failures do not escalate rungs.
 
@@ -725,6 +758,8 @@ For a supervised claude exit without a result, the supervisor reads the session 
 A live entry can exist before exit collection finishes. Wait for its `live` field to disappear, and use the matching `worker-exited` receipt when waiting for a worker exit.
 
 Readers preserve future live-spend state and error-class strings. If supervision stops for incompatible state, it also skips the final live sample after the worker exits.
+
+Status hides live-spend lines for accepted or cancelled tasks and readings older than 24 hours. Runaway monitoring uses the full readings, including those hidden from status.
 
 Submitting ends lease renewal and retries; live usage collection and budget enforcement continue until the harness closes. Missing telemetry or a smaller cumulative reading retains known spend and its age, and marks it stale. Only an explicit invocation result may lower that total. A fresh reading restores live status. The open board ages each reading every five seconds, even when no state change arrives: past its stale limit the page draws the agent row and the Spend row stale itself, then asks serve to redraw the queue and status sentence.
 
