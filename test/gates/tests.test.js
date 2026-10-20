@@ -81,7 +81,7 @@ function ctx(sha, { kind = 'code', args = {}, project = {}, hotfix = null } = {}
 }
 
 function assertCleanedUp() {
-  assert.deepEqual(fs.readdirSync(process.env.TOWER_CRANE_TMP), []);
+  assert.deepEqual(fs.readdirSync(process.env.TOWER_CRANE_TMP).filter((file) => file !== 'tests-base-cache'), []);
   assert.equal(worktrees(root), 1);
 }
 
@@ -737,7 +737,7 @@ test('a worktree add that fails after registering leaves no registration behind'
   assert.equal(r.ok, false);
   assert.match(r.summary, /could not create a worktree/);
   assert.equal(worktrees(hooked), 1);
-  assert.deepEqual(fs.readdirSync(process.env.TOWER_CRANE_TMP), []);
+  assert.deepEqual(fs.readdirSync(process.env.TOWER_CRANE_TMP).filter((file) => file !== 'tests-base-cache'), []);
 });
 
 test('a commit that is not in the repository: not ok', async () => {

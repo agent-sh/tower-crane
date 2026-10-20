@@ -11,6 +11,8 @@ const S = require('../lib/state');
 const T = require('../lib/tasks');
 const G = require('../lib/github-broker');
 const B = require('../lib/broker');
+const C = require('../lib/gates/common');
+const Body = require('../lib/review-body');
 
 const finding = { kind: 'false-claim', path: 'PR body', claim: 'The body claims an unmeasured result.' };
 
@@ -60,8 +62,9 @@ if (prompt.includes('## PR-body repair')) {
     updateJson(${JSON.stringify(h.env.AUTOMATION_GITHUB)}, (s) => {
       if (mode !== 'unchanged') s.prs[7].body += '\\nCorrected claim.';
       if (mode === 'remote-commit') s.prs[7].headRefOid = cp.execFileSync('git', ['rev-parse', 'HEAD'], {encoding:'utf8'}).trim();
-      if (mode === 'title') s.prs[7].title = 'Changed title';
+      if (mode === 'title' || mode === 'retarget-title') s.prs[7].title = 'Changed title';
       if (mode === 'base') s.prs[7].baseRefName = 'other';
+      if (mode.startsWith('retarget')) s.prs[7].baseRefName = 'main';
       return s;
     });
     if (mode === 'availability-after-edit') process.exit(75);
@@ -78,7 +81,7 @@ if (prompt.includes('## PR-body repair')) {
   fs.appendFileSync(${JSON.stringify(path.join(h.base, 'body-checks'))}, prompt + '\\n');
   const s = JSON.parse(fs.readFileSync(${JSON.stringify(h.env.AUTOMATION_GITHUB)}, 'utf8'));
   const round = s.prs[7].body.split('Corrected claim.').length - 1;
-  const ok = ['pass-first', 'crash-once', 'outage-once', 'untracked', 'availability-once', 'availability-after-edit', 'title', 'base', 'staged-file'].includes(mode)
+  const ok = ['pass-first', 'crash-once', 'outage-once', 'untracked', 'availability-once', 'availability-after-edit', 'title', 'base', 'staged-file', 'retarget', 'retarget-title'].includes(mode)
     || mode === 'pass-second' && round === 2;
   const args = [${JSON.stringify(BIN)}, 'evidence', 'T1', '--type', 'review', ok ? '--ok' : '--fail',
     '--sha', ${JSON.stringify(h.sha)}, '--summary', ok ? 'Corrected claims verified.' : 'The body still claims an unmeasured result.'];
@@ -95,11 +98,18 @@ if (prompt.includes('## PR-body repair')) {
     return { sha: h.sha };
   });
   fs.writeFileSync(path.join(h.base, 'body-mode'), mode);
+  if (mode.startsWith('retarget')) {
+    require('./atomic-file').updateJson(h.env.AUTOMATION_GITHUB, (github) => {
+      github.prs[7].baseRefName = 'merged-parent';
+      return github;
+    });
+  }
   return h;
 }
 
 for (const mode of ['pass-first', 'pass-second', 'fail-twice', 'local-commit', 'remote-commit', 'unchanged',
-  'untracked', 'staged-file', 'availability-once', 'availability-twice', 'availability-after-edit', 'title', 'base']) {
+  'untracked', 'staged-file', 'availability-once', 'availability-twice', 'availability-after-edit', 'title', 'base',
+  'retarget', 'retarget-title']) {
   test(`automatic PR-body repair: ${mode}`, async (t) => {
     const h = fixture(t, mode);
     const logs = () => S.readEvents(h.state);
@@ -113,8 +123,8 @@ for (const mode of ['pass-first', 'pass-second', 'fail-twice', 'local-commit', '
     assert.equal(first.sha, h.sha);
     assert.equal(first.revision, 1);
     fs.writeFileSync(path.join(h.base, 'body-release'), '');
-    const fullRework = mode.endsWith('commit') || ['staged-file', 'title', 'base'].includes(mode);
-    const passes = mode.startsWith('pass') || ['untracked', 'availability-once', 'availability-after-edit'].includes(mode);
+    const fullRework = mode.endsWith('commit') || ['staged-file', 'title', 'base', 'retarget-title'].includes(mode);
+    const passes = mode.startsWith('pass') || ['untracked', 'availability-once', 'availability-after-edit', 'retarget'].includes(mode);
     await waitOnRepo(h, () => {
       const st = S.loadState(h.state);
       const task = T.getTask(st, 'T1');
@@ -156,6 +166,67 @@ for (const mode of ['pass-first', 'pass-second', 'fail-twice', 'local-commit', '
     assert.deepEqual(task.escalations || [], []);
   });
 }
+
+test('PR-body metadata distinguishes engine retargeting from unrelated changes', async (t) => {
+  const h = fixture(t, 'pass-first');
+  const baseline = S.loadState(h.state);
+  const snapshotBase = 'parent-branch';
+  let current, pr, outcome;
+  t.mock.method(S, 'loadState', () => current);
+  t.mock.method(C, 'gh', async () => ({ ok: true, stdout: JSON.stringify(pr) }));
+  t.mock.method(C, 'resolveCommit', async () => h.sha);
+  t.mock.method(C, 'git', async () => ({ ok: true, stdout: '' }));
+  t.mock.method(require('../lib/spawn-session'), 'exitedAttempt', () => true);
+  t.mock.method(require('../lib/reviewer'), 'reviewExit', () => ({ state: 'pending' }));
+  t.mock.method(require('../lib/automation'), 'reviewHeld', async () => false);
+  t.mock.method(T, 'accept', async () => { outcome = 'light check'; });
+  t.mock.method(T, 'rework', () => { outcome = 'rework'; });
+  const rows = [
+    { name: 'snapshot during an active stack', stack: true, base: snapshotBase, ok: true },
+    { name: 'main before parent merge', stack: true, base: 'main', ok: false },
+    { name: 'parent merged before stack retirement', stack: true, merged: true, base: 'main', ok: true },
+    { name: 'parent merged while reading GitHub', stack: true, merged: true, stale: true, base: 'main', ok: true },
+    { name: 'parent merged during a light check', stack: true, merged: true, recheck: true, base: 'main', ok: true },
+    { name: 'snapshot after parent merge', stack: true, merged: true, base: snapshotBase, ok: true },
+    { name: 'stack record retired', base: 'main', ok: true },
+    { name: 'unstacked fallback during a light check', recheck: true, base: 'main', ok: true },
+    { name: 'active stack target after engine retarget', stack: true, target: 'next-parent', base: 'next-parent', ok: true },
+    { name: 'unrelated base after merge', stack: true, merged: true, base: 'other', ok: false },
+    { name: 'title edit with allowed retarget', stack: true, merged: true, base: 'main', title: 'Changed', ok: false },
+  ];
+  for (const row of rows) {
+    current = structuredClone(baseline);
+    const task = T.getTask(current, 'T1');
+    const review = T.latestGateEvidence(task, 'review', current.events);
+    if (row.stack) {
+      task.stack = { parent: 'T2', base: row.target || snapshotBase };
+      const parent = { ...structuredClone(task), id: 'T2', stack: undefined, evidence: [] };
+      current.tasks.tasks.push(parent);
+      if (row.merged) {
+        const merge = { type: 'merge', source: 'merge', ok: true, sha: parent.sha, revision: parent.revision,
+          agent: 'orchestrator', commands: [{ bin: 'gh', args: ['pr', 'merge', '8'], status: 0 }] };
+        parent.evidence.push(merge);
+        current.events.push({ cmd: 'merge', task: parent.id, agent: merge.agent, detail: merge });
+      }
+    }
+    const fix = { sha: task.sha, revision: task.revision, pr: task.pr, branch: task.branch, review,
+      title: 'Change', base: snapshotBase, body_hash: 'original-body' };
+    current.events.push({ cmd: 'spawn', task: task.id,
+      detail: { role: 'worker', agent: 'body-fixer', body_fix: fix, sha: task.sha, revision: task.revision } });
+    if (row.recheck) current.events.push({ cmd: 'spawn', task: task.id,
+      detail: { role: 'reviewer', agent: 'light-reviewer', sha: task.sha, revision: task.revision } });
+    pr = { state: 'OPEN', headRefOid: task.sha, headRefName: task.branch,
+      body: 'Corrected claim.', title: row.title || 'Change', baseRefName: row.base };
+    outcome = null;
+    const observed = row.stale ? structuredClone(current) : current;
+    if (row.stale) {
+      T.getTask(observed, 'T2').evidence = [];
+      observed.events = observed.events.filter((e) => e.cmd !== 'merge');
+    }
+    await Body.react({ stateDir: h.state, cwd: h.repo, pos: ['T1'] }, observed, T.getTask(observed, 'T1'), review);
+    assert.equal(outcome, row.ok ? 'light check' : 'rework', row.name);
+  }
+});
 
 for (const mode of ['crash-once', 'outage-once', 'clean-no-verdict', 'crash-cap']) {
   test(`light PR-body check recovers or reports its hold: ${mode}`, async (t) => {
