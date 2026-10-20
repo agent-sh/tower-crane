@@ -127,10 +127,15 @@ test('inbox reuses successful GitHub reads for a minute and refreshes changed su
   assert.equal(h.github().calls.length, before, 'a second CLI process reuses the GitHub observations');
   const cacheFile = path.join(h.state, 'inbox-github-cache.json');
   const cache = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
+  cache.started_at = '2000-01-01T00:00:00.000Z';
+  fs.writeFileSync(cacheFile, JSON.stringify(cache));
+  h.refresh();
+  assert.ok(h.github().calls.length > before, 'the next follower pass refreshes even responses that arrived late');
   for (const entry of Object.values(cache.entries)) entry.at = '2000-01-01T00:00:00.000Z';
   fs.writeFileSync(cacheFile, JSON.stringify(cache));
+  const afterRefresh = h.github().calls.length;
   assert.ok(h.inbox(false).items.some((i) => i.kind === 'github_pending'));
-  assert.equal(h.github().calls.length, before, 'expired data does not launch foreground reads');
+  assert.equal(h.github().calls.length, afterRefresh, 'expired data does not launch foreground reads');
   h.refresh();
   assert.ok(h.github().calls.length > before, 'expired reads refresh');
   const current = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
