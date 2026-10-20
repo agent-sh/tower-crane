@@ -100,7 +100,8 @@ function probe({ root = ROOT, cache, command, environment = process.env } = {}) 
     result.gate_root_after = scratch(after);
     result.base_cache_after = baseCache(after);
     // Receipts name the worktree actually created, rather than a guessed parent path.
-    const worktrees = (checked.data?.commands || []).filter((c) => c.args.includes('worktree') && c.args.includes('add'))
+    const commands = Array.isArray(checked.data?.commands) ? checked.data.commands : [];
+    const worktrees = commands.filter((c) => c.args.includes('worktree') && c.args.includes('add'))
       .flatMap((c) => c.args.filter((arg) => arg.startsWith(gates + path.sep) && path.basename(arg) === 'wt'));
     result.gate_parents = [...new Set(worktrees.map((dir) => path.dirname(dir)))]
       .map((parent) => ({ path: parent, removed: !fs.existsSync(parent) }));
