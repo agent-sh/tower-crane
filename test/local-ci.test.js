@@ -7,6 +7,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { makeRepo, cachedFixture } = require('./helpers');
 const { gateFixture, changeKind } = require('./gate-helpers');
+const { HUNG_TEST_MS } = require('./signals');
 
 // Each fixture is built once per process and copied for each test.
 function fixture(t, script) {
@@ -603,6 +604,7 @@ test('multi-MB plain, colored and CRLF logs keep the redaction output from befor
 
 test('a text redaction deadline drops content and restores the budget for the next call', () => {
   const { performance } = require('node:perf_hooks');
+  const { textBudget, textWork } = require('../lib/text-redaction-budget');
   const { createRedactor } = require('../lib/gates/common');
   const redact = createRedactor([]);
   const now = performance.now;
@@ -611,6 +613,24 @@ test('a text redaction deadline drops content and restores the budget for the ne
   try {
     assert.match(redact.strip('Authorization: Bearer sekrit end'),
       /^\[unscannable text: over 5000 ms redaction time; content omitted\]$/);
+    for (const [size, deadline] of [[0, 5000], [16 << 20, 21000]]) {
+      const input = 'x'.repeat(size);
+      for (const stage of ['work', 'completion']) {
+        for (const elapsed of [deadline - 1, deadline, deadline + 1]) {
+          clock = 0;
+          performance.now = () => clock;
+          const result = textBudget(input, () => {
+            clock = elapsed;
+            if (stage === 'work') textWork(1);
+            return 'kept';
+          });
+          const expected = elapsed > deadline
+            ? `[unscannable text: over ${deadline} ms redaction time; content omitted]` : 'kept';
+          assert.equal(result, expected, `${size} characters, ${stage}, ${elapsed} ms`);
+          assert.equal(textBudget('', () => 'next'), 'next');
+        }
+      }
+    }
   } finally {
     performance.now = now;
   }
@@ -685,7 +705,7 @@ test('erase-line redraws before short words keep all three readings', () => {
   }
 });
 
-function memoryProbe(t, name, script) {
+function redactionMemoryProbe(t, name, script) {
   const cp = require('node:child_process');
   // Memory probes must finish the scan even when host contention consumes its time budget.
   // The deadline has a separate test; work limits still bound scans and allocations here.
@@ -694,7 +714,9 @@ require('node:perf_hooks').performance.now = () => 0;
 ${script}
 console.log(JSON.stringify({ ...result, peakKiB: process.resourceUsage().maxRSS }));
 `;
-  const result = JSON.parse(cp.execFileSync(process.execPath, ['-e', source], { encoding: 'utf8' }));
+  const result = JSON.parse(cp.execFileSync(process.execPath, [
+    '--require', path.join(__dirname, 'fixtures', 'redaction-clock-jump.js'), '-e', source,
+  ], { encoding: 'utf8', timeout: HUNG_TEST_MS }));
   const boundKiB = 1048576;
   t.diagnostic(`${name}: peak ${result.peakKiB} KiB; bound < ${boundKiB} KiB`);
   assert.ok(Number.isFinite(result.peakKiB) && result.peakKiB > 0 && result.peakKiB < boundKiB,
@@ -714,7 +736,7 @@ const runs = [{ stream: 'out', text: text.slice(0, text.length / 2) },
 const output = redactJoined({ output: text, runs }, createRedactor([['PERF_SECRET', value]]));
 const result = { output };
 `;
-  const result = memoryProbe(t, 'mixed text', script);
+  const result = redactionMemoryProbe(t, 'mixed text', script);
   assert.match(result.output, /^\[unscannable text: over \d+ redaction work units; content omitted\]$/);
 });
 
@@ -734,7 +756,7 @@ const output = redactJoined({ output: text, runs: [
 const expected = '[redacted:GITHUB_TOKEN] done\\n'.repeat(units);
 const result = { same: output === expected, head: output.slice(0, 80) };
 `;
-  const result = memoryProbe(t, 'two-stream tokens', script);
+  const result = redactionMemoryProbe(t, 'two-stream tokens', script);
   assert.ok(result.same, result.head);
 });
 
@@ -879,7 +901,7 @@ const output = redactJoined({ output: text, runs: [
 const hash = require('node:crypto').createHash('sha256').update(output).digest('hex');
 const result = { notice: output.startsWith('[unscannable text:') ? output : null, hash };
 `;
-    const result = memoryProbe(t, JSON.stringify(unit), script);
+    const result = redactionMemoryProbe(t, JSON.stringify(unit), script);
     if (result.notice) {
       assert.ok(['\r\n', '-\r\\\r|\r/\r', 'a\r'].includes(unit), `ordinary ${JSON.stringify(unit)} was omitted`);
       assert.match(result.notice, /^\[unscannable text: over \d+ redaction work units; content omitted\]$/);
