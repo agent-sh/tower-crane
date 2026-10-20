@@ -250,6 +250,93 @@ function checkFeedback(h) {
   return data;
 }
 
+function reviewComments() {
+  const finding = (id, path, line, body = '[P2] Guard the input') => ({
+    id, path, line, body, user: 'revuto-review[bot]', in_reply_to_id: null,
+  });
+  const reply = (id, parent, body) => ({ id, in_reply_to_id: parent, user: 'worker', body });
+  return [
+    finding(501, 'lib/a.js', 12),
+    finding(502, 'lib/b.js', 40, 'Question remains open'),
+    reply(503, 502, 'Which input fails?'),
+    finding(504, 'lib/c.js', 50, 'Reopened finding'),
+    reply(505, 504, '[resolved]\nFixed'),
+    reply(506, 504, 'Still broken'),
+    finding(507, 'lib/closed.js', 60),
+    reply(508, 507, '[resolved]\nFixed'),
+    finding(509, 'lib/outdated.js', null),
+    { ...finding(510, 'lib/human.js', 70), user: 'a-person' },
+  ];
+}
+
+function sendToRework(h) {
+  const brief = path.join(h.base, 'brief.md');
+  fs.writeFileSync(brief, 'Fix the review findings.');
+  h.ok(['brief', 'set', 'T1', '--file', brief]);
+  h.ok(['ladder', 'set', 'medium', '--harness', 'command', '--clear', 'profile', '--clear', 'effort',
+    '--command', JSON.stringify([process.execPath, '-e', 'console.log(process.argv[1])', '{prompt}'])]);
+  const state = h.readState('tasks.json');
+  Object.assign(state.tasks[0], { status: 'submitted', claim: null });
+  h.writeState('tasks.json', state);
+  h.ok(['rework', 'T1', '--reason', 'Address the inline findings']);
+}
+
+test('ci resolve help names where workers find inline comment ids', (t) => {
+  const h = fixture(t);
+  const help = h.ok(['ci', 'resolve', '--help']);
+  assert.match(help, /find COMMENT_ID beside path:line in ci checks, rework prompts or submit reports/);
+});
+
+test('rework prompts and worker ci reads expose inline ids that ci resolve accepts', async (t) => {
+  const h = fixture(t);
+  const data = checkFeedback(h);
+  data.comments = reviewComments();
+  fs.writeFileSync(h.env.CI_FEEDBACK_GH, JSON.stringify(data));
+  sendToRework(h);
+  const expected = [[501, 'lib/a.js', 12], [502, 'lib/b.js', 40], [504, 'lib/c.js', 50]];
+  const assertFindings = (text) => {
+    for (const [id, file, line] of expected) assert.ok(text.includes(`${file}:${line} (comment ${id})`), text);
+    assert.doesNotMatch(text, /lib\/(?:closed|outdated|human)\.js/);
+  };
+  const dry = h.json(['spawn', '--task', 'T1', '--dry-run']);
+  assertFindings(dry.argv.join('\n'));
+  const started = h.json(['spawn', '--task', 'T1', '--wait']);
+  assertFindings(fs.readFileSync(started.log, 'utf8'));
+
+  const values = { NODE_OPTIONS: h.env.NODE_OPTIONS, CI_FEEDBACK_GH: h.env.CI_FEEDBACK_GH };
+  const saved = {};
+  for (const [key, value] of Object.entries(values)) {
+    saved[key] = process.env[key];
+    process.env[key] = value;
+  }
+  t.after(() => {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+  const job = { state: h.state, task: 'T1', agent: 'worker', role: 'worker', cwd: h.repo,
+    broker_harnesses: ['codex'], broker: path.join(h.base, 'broker', B.FILE) };
+  const broker = await B.start(job);
+  t.after(() => broker.close());
+  const read = await B.forward(job.broker, ['ci', 'checks', 'T1'], h.state);
+  assert.equal(read.code, 0, read.stderr);
+  assertFindings(read.stdout);
+  const json = await B.forward(job.broker, ['ci', 'checks', 'T1', '--json'], h.state);
+  assert.equal(json.code, 0, json.stderr);
+  assert.deepEqual(JSON.parse(json.stdout).findings.map((f) => [f.id, f.path, f.line]), expected);
+  const displayed = [...read.stdout.matchAll(/\(comment (\d+)\)/g)].map((m) => m[1]);
+  assert.deepEqual(displayed, expected.map(([id]) => String(id)));
+  for (const id of displayed) {
+    const resolved = await B.forward(job.broker, ['ci', 'resolve', id, '--reason', 'Fixed the guard at the reported path'], h.state);
+    assert.equal(resolved.code, 0, resolved.stderr);
+    assert.match(resolved.stdout, new RegExp(`comment ${id}.*\\[resolved\\]`));
+  }
+  const after = await B.forward(job.broker, ['ci', 'checks', 'T1', '--json'], h.state);
+  assert.equal(after.code, 0, after.stderr);
+  assert.deepEqual(JSON.parse(after.stdout).findings, []);
+});
+
 test('ci checks shows capped and ignored reasons, check output, annotations and current CodeQL locations before submit', (t) => {
   const h = fixture(t);
   checkFeedback(h);
@@ -289,6 +376,8 @@ test('ci checks strips terminal controls from check output and annotations in te
   data.checks[h.sha][0].output.summary = '\x1b]0;hidden title\x07reached the 2-round review limit\x00\r';
   data.annotations[1][0].message = '\x1b]8;;https://example.test\x1b\\configured review cap\x1b]8;;\x1b\\\x07';
   data.alerts['refs/pull/9/merge'][0].most_recent_instance.message.text = '\x1b[31mFile may change between checks.\x1b[0m\x1b';
+  data.comments = reviewComments();
+  data.comments[0].body = '\x1b[31mGuard the input\x1b[0m\x07';
   fs.writeFileSync(h.env.CI_FEEDBACK_GH, JSON.stringify(data));
   const r = h.run(['ci', 'checks', 'T1']);
   assert.equal(r.code, 0, r.stderr);
@@ -304,6 +393,27 @@ test('ci checks strips terminal controls from check output and annotations in te
   assert.equal(row.output.summary, 'reached the 2-round review limit');
   assert.equal(row.annotations[0].message, 'configured review cap');
   assert.equal(result.alerts[0].message, 'File may change between checks.');
+  assert.equal(result.findings[0].body, 'Guard the input');
+  assert.equal(result.findings[0].id, 501);
+});
+
+test('ci checks preserves check output and makes failed inline reads explicit in text and JSON', (t) => {
+  const h = fixture(t);
+  const data = checkFeedback(h);
+  data.commentsError = 'gh: review comments unavailable (HTTP 503)';
+  fs.writeFileSync(h.env.CI_FEEDBACK_GH, JSON.stringify(data));
+  const r = h.run(['ci', 'checks', 'T1']);
+  assert.equal(r.code, 0, r.stderr);
+  assert.match(r.stdout, /revuto findings unavailable:.*review comments unavailable/);
+  assert.match(r.stdout, /CodeQL.*failure/);
+  assert.doesNotMatch(r.stdout, /no open revuto/);
+  const json = h.json(['ci', 'checks', 'T1']);
+  assert.equal(json.findings, null);
+  assert.match(json.findings_error, /review comments unavailable/);
+  sendToRework(h);
+  const spawn = h.run(['spawn', '--task', 'T1', '--dry-run']);
+  assert.equal(spawn.code, 1, spawn.stderr);
+  assert.match(spawn.stderr, /review comments unavailable/);
 });
 
 test('ci checks refuses another branch and does not present a stale merge analysis as current', (t) => {
