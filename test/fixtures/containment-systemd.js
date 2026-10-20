@@ -29,9 +29,11 @@ if (require.main !== module) {
   }
   const spawnSync = cp.spawnSync;
   cp.spawnSync = (file, args, opts) => {
-    if (process.env.TC_FAKE_NO_MANAGER && file === 'systemctl') return { status: 1, stdout: '', stderr: 'no user manager' };
+    if (process.env.TC_FAKE_NO_MANAGER && ['systemctl', 'busctl'].includes(file)) return { status: 1, stdout: '', stderr: 'no user manager' };
     if (file !== 'busctl') return spawnSync(file, args, opts);
     try {
+      const runtime = process.env.XDG_RUNTIME_DIR || `/run/user/${process.getuid()}`;
+      if (args[0] !== `--address=unix:path=${runtime}/systemd/private`) throw new Error('registration must use the systemd private socket');
       let at = args.indexOf('ssa(sv)a(sa(sv))');
       if (at < 0) throw new Error('invalid StartTransientUnit signature');
       at += 3;

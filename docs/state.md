@@ -644,10 +644,16 @@ three gate executors give each command 666 tasks and about 2.33 GiB, above the
 measured 314-task and 1.01 GB suite peaks. These are containment defaults,
 not admission control across activities, sessions or projects.
 
-On Linux with cgroup v2 and a reachable systemd user manager, a launch uses a
+On Linux with cgroup v2, a reachable systemd user manager and safe placement, a launch uses a
 named transient user scope (registered through D-Bus, or `systemd-run` when
 optional scope properties are set) in the caller's slice with `TasksMax`, `MemoryMax`,
 `MemorySwapMax=0`, `OOMPolicy=continue` and delegated memory/pids controllers.
+The availability probe and D-Bus registration both use `busctl` with
+`--address=unix:path=$XDG_RUNTIME_DIR/systemd/private`, in the launch environment.
+When `XDG_RUNTIME_DIR` is absent, the socket is `/run/user/<uid>/systemd/private`.
+Neither needs the user session bus or uses `DBUS_SESSION_BUS_ADDRESS`, so a
+missing session bus or a stale address does not break registration. An
+unreachable private socket selects the watchdog before launch.
 The scope's runner sets `memory.oom.group=1`, so a cgroup OOM stops the
 whole attempt, and the supervisor fails the attempt with `resource-memory-max`
 when the scope's `memory.events.local` reports the OOM. `OOMPolicy=kill` is
@@ -660,10 +666,14 @@ Crane launch creates a delegated child cgroup within the inherited scope. Its
 own cap and every ancestor's aggregate cap remain enforced by the kernel.
 Optional owner `scope` properties apply to the outer scope; mandatory resource
 properties take precedence, and `scope: {}` only clears optional properties.
-An optional `Slice` property cannot override the caller's slice. A caller
-outside its user manager, such as a hosted CI runner's system service, has no
-slice that manager can place a scope in; the scope goes into the user
-manager's slice of the same name and keeps its own caps. Setting
+An optional `Slice` property cannot override the caller's slice. New user scopes
+are allowed only when the caller's cgroup is below its own `user@<uid>.service`,
+or `loginctl show-user <uid> -p Linger --value` succeeds and reports `yes`.
+A caller outside its user manager, such as a login session or hosted CI runner's
+system service, without confirmed linger uses the watchdog. A warning names
+the caller's placement, linger and the risk of the user manager stopping at
+logout. With linger, an outside caller's scope goes into the user manager's
+slice of the same name and keeps its own caps. Setting
 `TasksMax`, `MemoryMax`, `MemorySwapMax`, `OOMPolicy`, `Delegate` or `Slice`
 through `init`, `project set` or `ladder set` prints a `warning:` line naming
 the replaced keys. The launched command and its descendants get
@@ -727,13 +737,15 @@ Containment metadata retains sampled `pids_peak`, `memory_peak_bytes` and
 `refused_forks` from the scope's peak and local event files. Refused forks
 count that scope's cap violations where local events are available.
 
-On macOS, Windows, Linux without cgroup v2, Linux without a reachable user
-manager, or an inherited scope without writable delegated controllers,
+On macOS, Windows, Linux without cgroup v2, Linux without a reachable private
+user-manager socket, Linux outside the user manager without confirmed linger,
+or an inherited scope without writable delegated controllers,
 the executable launches directly with a watchdog. An existing parent cgroup
 continues to enforce its aggregate cap. The launcher never creates a sibling
 scope to escape an inherited scope that cannot delegate.
-Explicit outer `scope` properties require a reachable user manager and cgroup
-v2; an unavailable manager fails the configured launch with
+Explicit outer `scope` properties require a reachable private user-manager
+socket, cgroup v2 and the same placement rule; failure of any requirement
+refuses the configured launch before starting the command with
 `resource-scope-failed`. Nested launches retain the outer scope's properties.
 
 Fixture CLI environments (`TC_ACCOUNT_HOME`) and Node test workers preserve

@@ -189,6 +189,111 @@ test('scope placement keeps the caller slice, including custom fences', () => {
   assert.throws(() => C.callerSlice('/sys/fs/cgroup/no-slice/runner'), /no systemd slice/);
 });
 
+function scopeHost(t, group) {
+  const read = fs.readFileSync;
+  const exists = fs.existsSync;
+  t.mock.method(process, 'getuid', () => 1000);
+  t.mock.method(fs, 'readFileSync', (file, ...args) => {
+    if (file === '/proc/self/cgroup') return `0::${group}\n`;
+    if (String(file).startsWith('/sys/fs/cgroup/')) throw Object.assign(new Error('missing'), { code: 'ENOENT' });
+    return read(file, ...args);
+  });
+  t.mock.method(fs, 'existsSync', file => file === '/sys/fs/cgroup/cgroup.controllers' || exists(file));
+}
+
+test('scope probes ignore missing or stale session buses and use the launch environment', {
+  skip: process.platform !== 'linux',
+}, (t) => {
+  scopeHost(t, '/user.slice/user-1000.slice/user@1000.service/agents.slice/session.scope');
+  const cp = require('node:child_process');
+  for (const [session, runtime, available] of [
+    [undefined, '/run/user/1000', true],
+    ['unix:path=/nonexistent', '/custom/runtime', true],
+    ['unix:path=/nonexistent', '/custom/runtime', false],
+    [undefined, '/custom/run,time%dir', true],
+    [undefined, undefined, true],
+  ]) {
+    const env = { XDG_RUNTIME_DIR: runtime, DBUS_SESSION_BUS_ADDRESS: session };
+    const calls = [];
+    t.mock.method(cp, 'spawnSync', (file, args, opts) => {
+      calls.push({ file, args, opts });
+      return { status: file === 'busctl' && !available ? 1 : 0 };
+    });
+    assert.equal(C.canScope(env), available, JSON.stringify(env));
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].file, 'busctl');
+    const socket = `${runtime || '/run/user/1000'}/systemd/private`;
+    assert.equal(calls[0].args[0], `--address=unix:path=${encodeURIComponent(socket).replaceAll('%2F', '/')}`);
+    assert.equal(calls[0].opts.env, env);
+    cp.spawnSync.mock.restore();
+  }
+});
+
+test('new user scopes require the caller user manager or confirmed linger', {
+  skip: process.platform !== 'linux',
+}, (t) => {
+  const cp = require('node:child_process');
+  for (const [group, linger, status, expected] of [
+    ['/user.slice/user-1000.slice/user@1000.service/agents.slice/session.scope', 'no', 0, true],
+    ['/user.slice/user-1000.slice/session-2.scope', 'no', 0, false],
+    ['/user.slice/user-1000.slice/session-2.scope', 'yes', 0, true],
+    ['/system.slice/ci.service', 'no', 0, false],
+    ['/system.slice/ci.service', 'yes', 0, true],
+    ['/system.slice/ci.service', '', 1, false],
+    ['/system.slice/ci.service', 'yes', 1, false],
+    ['/user.slice/user-2000.slice/user@2000.service/agents.slice/session.scope', 'no', 0, false],
+  ]) {
+    scopeHost(t, group);
+    const calls = [];
+    t.mock.method(cp, 'spawnSync', (file, args, opts) => {
+      calls.push({ file, args, opts });
+      return file === 'loginctl' ? { status, stdout: `${linger}\n` } : { status: 0 };
+    });
+    const env = { TOWER_CRANE_TEST_CONTAINMENT: '1' };
+    assert.equal(C.canScope(env), expected, `${group}: linger=${linger}, status=${status}`);
+    if (!expected) assert.throws(() => C.spawn(process.execPath, ['-e', ''], {
+      env, scope: { CPUQuota: '200%' }, resources: { tasks_max: 64, memory_max_bytes: memory },
+    }), /configured outer scope requires.*logout-safe placement/);
+    const login = calls.find(call => call.file === 'loginctl');
+    if (group.includes('user@1000.service/')) assert.equal(login, undefined);
+    else {
+      assert.deepEqual(login.args, ['show-user', '1000', '-p', 'Linger', '--value']);
+      assert.equal(login.opts.env, env);
+    }
+    t.mock.restoreAll();
+  }
+});
+
+test('CLI launches use the watchdog before registration for unsafe placement or a missing private bus', {
+  skip: process.platform !== 'linux',
+}, (t) => {
+  const manager = path.join(__dirname, 'fixtures', 'containment-manager.js');
+  for (const reason of ['logout', 'private bus']) {
+    const h = fixture(t);
+    h.ok(['ladder', 'set', 'easy', '--harness', 'command', '--command',
+      JSON.stringify([process.execPath, '-e', 'console.log("survived launch")', '{prompt}']),
+      '--clear', 'profile', '--clear', 'effort']);
+    h.env.NODE_OPTIONS += ` --require "${manager}"`;
+    if (reason === 'logout') {
+      h.env.TC_FAKE_CALLER_GROUP = '/user.slice/user-1000.slice/session-2.scope';
+      h.env.TC_FAKE_LINGER = 'no';
+    } else h.env.TC_FAKE_NO_BUS = '1';
+    h.env.DBUS_SESSION_BUS_ADDRESS = 'unix:path=/nonexistent';
+    h.env.TC_FAKE_MANAGER_LOG = path.join(h.base, 'placement.jsonl');
+    h.env[C.MARK] = '';
+    const result = h.run(['spawn', '--task', 'T1', '--wait']);
+    const files = fs.readdirSync(path.join(h.state, 'logs')).map(name => fs.readFileSync(path.join(h.state, 'logs', name), 'utf8'));
+    const output = result.stdout + result.stderr + files.join('\n');
+    assert.equal(result.code, 0, output);
+    const events = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+    const contained = events.find(e => e.detail?.containment)?.detail.containment;
+    assert.equal(contained?.backend, 'watchdog', output);
+    if (reason === 'logout') assert.match(output, /warning:.*outside user@.*linger.*logout.*watchdog/);
+    assert.doesNotMatch(output, /resource-scope-failed/);
+    assert.match(output, /survived launch/);
+  }
+});
+
 test('a caller inside its own capped or delegated fence keeps attempts inside it', {
   skip: process.platform !== 'linux',
 }, () => {
@@ -354,15 +459,16 @@ test('systemd CLI and D-Bus launches use supported OOM policy and retain caps', 
   const runner = require.resolve('../lib/containment-runner');
   const unit = 'tower-crane-123-0123456789abcdef.scope';
   const limits = { tasks_max: 64, memory_max_bytes: memory };
-  for (const mode of ['cli', 'dbus']) {
+  for (const mode of ['cli', 'dbus', 'dbus-stale']) {
+    const dbus = mode.startsWith('dbus');
     const group = path.join(h.base, mode, unit);
     fs.mkdirSync(group, { recursive: true });
     const log = path.join(h.base, `${mode}.jsonl`);
     const report = path.join(h.base, `${mode}-report.json`);
     const args = [runner, JSON.stringify(limits),
-      mode === 'dbus' ? `@${unit}:test-fence.slice` : '', unit,
+      dbus ? `@${unit}:test-fence.slice` : '', unit,
       process.execPath, '-e', 'console.log("scoped command ran", process.env.TOWER_CRANE_SCOPED)'];
-    const command = mode === 'dbus' ? ['--require', fake, ...args]
+    const command = dbus ? ['--require', fake, ...args]
       : [fake, ...C.scopeArguments(unit, 'test-fence.slice', limits, {
         CPUQuota: '200%', MemoryMax: '1', TasksMax: '999', Slice: 'app.slice',
         OOMPolicy: 'stop', MemorySwapMax: '9G', Delegate: 'no',
@@ -370,6 +476,8 @@ test('systemd CLI and D-Bus launches use supported OOM policy and retain caps', 
         process.execPath, ...args];
     const result = await G.treeExec(process.execPath, command, {
       env: { ...h.env, TC_FAKE_CGROUP: group, TC_FAKE_SYSTEMD_LOG: log,
+        XDG_RUNTIME_DIR: path.join(h.base, 'runtime'),
+        DBUS_SESSION_BUS_ADDRESS: mode === 'dbus-stale' ? 'unix:path=/nonexistent' : undefined,
         TOWER_CRANE_CONTAINMENT_REPORT: report },
     });
     const registration = fs.existsSync(report) ? JSON.parse(readPublished(report, 'utf8')) : {};
