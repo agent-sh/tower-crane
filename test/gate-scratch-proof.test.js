@@ -4,10 +4,12 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const cp = require('node:child_process');
 const { cachedFixture } = require('./helpers');
+const { writeHost } = require('./host');
+const { HUNG_TEST_MS } = require('./signals');
 const { probe } = require('../scripts/probe-gate-scratch');
 const { suiteTime, reportSuiteTime, DEADLINE_MIN } = require('../scripts/suite-time');
-const { writeHost } = require('./host');
 
 function fixture(t) {
   return cachedFixture(t, 'scratch-proof', (h) => {
@@ -74,7 +76,7 @@ test('the gate proof retains a failing gate result even when cleanup succeeds', 
   assert.equal(result.ok, false);
 });
 
-test('scratch proof preserves virtual host inputs and reports missing gate receipts', (t) => {
+test('scratch proof preserves virtual host inputs and rejects missing gate receipts', (t) => {
   const failures = [];
   for (const row of [
     { name: 'healthy input, busy ambient host', supplied: {}, ambient: { memorySome: 15 }, exit: 0 },
@@ -98,7 +100,14 @@ test('scratch proof preserves virtual host inputs and reports missing gate recei
           PROOF_FORCE_HOST: row.forced ? '1' : '0',
           NODE_OPTIONS: `${h.env.NODE_OPTIONS} --require ${JSON.stringify(preload)}` } });
     } catch (error) {
-      failures.push(`${row.name}: ${error.message}`);
+      if (row.exit === 3) {
+        assert.match(error.message, /returned no JSON \(exit code 3\):[\s\S]*deferred by the host governor/, row.name);
+        assert.deepEqual(fs.readdirSync(path.join(h.base, 'probe')), [], row.name);
+      } else failures.push(`${row.name}: ${error.message}`);
+      continue;
+    }
+    if (row.exit === 3) {
+      failures.push(`${row.name}: expected a missing-receipt error`);
       continue;
     }
     if (result.exit !== row.exit) {
@@ -108,12 +117,87 @@ test('scratch proof preserves virtual host inputs and reports missing gate recei
     assert.equal(result.ok, row.exit === 0, row.name);
     assert.deepEqual(result.outer_after, [], row.name);
     assert.deepEqual(result.gate_root_after, [], row.name);
-    if (row.exit === 3) {
-      assert.equal(result.gate, null, row.name);
-      assert.deepEqual(result.gate_parents, [], row.name);
-      assert.equal(result.cleanup_ok, false, 'no execution is not a cleanup proof');
-      assert.match(result.stderr, /deferred by the host governor/, row.name);
-    }
   }
   assert.deepEqual(failures, [], 'host readings and no-receipt outcomes are handled for every variant');
+});
+
+test('the gate proof stays isolated from a host over the governor defer line', (t) => {
+  const h = fixture(t);
+  const busyHost = writeHost(path.join(h.base, 'busy-host'), { cpuSome: 80, load: 10000 });
+  const spawnSync = cp.spawnSync;
+  const hosts = [];
+  // A missing fake host sees a busy machine; the real CLI still runs the gate.
+  t.mock.method(cp, 'spawnSync', (bin, args, options) => {
+    if (args[1] === 'check') {
+      hosts.push(options.env.TOWER_CRANE_HOST_ROOT);
+      options = { ...options, env: { ...options.env,
+        TOWER_CRANE_HOST_ROOT: options.env.TOWER_CRANE_HOST_ROOT || busyHost } };
+    }
+    return spawnSync(bin, args, options);
+  });
+  for (const [supplied, context] of [[true, undefined], [false, undefined], [false, 'child-v8']]) {
+    const environment = { ...h.env, NODE_TEST_CONTEXT: context };
+    if (!supplied) delete environment.TOWER_CRANE_HOST_ROOT;
+    const result = probe({ root: h.repo, cache: path.join(h.base, 'probe'),
+      command: 'node scratch.js', environment });
+    assert.equal(result.ok, true, `fake host supplied: ${supplied}, context: ${context}`);
+    assert.ok(hosts.at(-1));
+    if (supplied) assert.equal(hosts.at(-1), h.env.TOWER_CRANE_HOST_ROOT);
+    assert.notEqual(hosts.at(-1), busyHost);
+  }
+});
+
+test('human-bench fixtures give the nested CLI an idle fake host', (t) => {
+  const h = fixture(t);
+  h.init();
+  const env = require('./bench/fixtures').cleanEnv(path.join(h.base, 'bench'));
+  assert.equal(env.TOWER_CRANE_HOST_ROOT, path.join(h.base, 'bench', 'host'));
+  const status = h.json(['status', '--agent', 'orchestrator'], { env });
+  assert.equal(status.governor.state, 'open');
+  assert.equal(status.governor.reading.load, 0);
+});
+
+test('a deferred nested gate reports its exit code and stderr and cleans the probe', (t) => {
+  const h = fixture(t);
+  const busyHost = writeHost(path.join(h.base, 'busy-host'), { cpuSome: 80, load: 10000 });
+  const cache = path.join(h.base, 'probe');
+  assert.throws(() => probe({ root: h.repo, cache, command: 'node scratch.js',
+    environment: { ...h.env, TOWER_CRANE_HOST_ROOT: busyHost } }),
+  /check tests T1 returned no JSON \(exit code 3\):[\s\S]*deferred by the host governor[\s\S]*cpu pressure/);
+  assert.deepEqual(fs.readdirSync(cache), []);
+});
+
+test('a host measurement without a fake host still consults the real governor', (t) => {
+  const h = fixture(t);
+  const environment = { ...h.env };
+  delete environment.TOWER_CRANE_HOST_ROOT;
+  const script = `
+const assert = require('node:assert/strict');
+const cp = require('node:child_process');
+const spawnSync = cp.spawnSync;
+cp.spawnSync = (bin, args, options) => {
+  if (args[1] === 'check') {
+    assert.equal(options.env.TOWER_CRANE_HOST_ROOT, undefined);
+    return JSON.parse(process.argv[2]);
+  }
+  return spawnSync(bin, args, options);
+};
+const { probe } = require(${JSON.stringify(require.resolve('../scripts/probe-gate-scratch'))});
+try { probe({ root: process.cwd(), cache: process.argv[1], command: 'node scratch.js' }); }
+catch (error) { console.error(error.message); process.exitCode = 1; }
+`;
+  for (const response of [
+    { status: 3, stdout: '', stderr: 'host governor deferred the measurement' },
+    { status: 0, stdout: ' \n ', stderr: '' },
+    { status: 2, stdout: 'not JSON', stderr: 'invalid gate output' },
+    { status: 1, stdout: 'null', stderr: 'missing gate result' },
+  ]) {
+    const out = cp.spawnSync(process.execPath, ['-e', script, path.join(h.base, 'probe'), JSON.stringify(response)], {
+      cwd: h.repo, env: environment, encoding: 'utf8', timeout: HUNG_TEST_MS,
+    });
+    assert.equal(out.status, 1, out.stderr);
+    assert.equal(out.stderr,
+      `tower-crane check tests T1 returned no JSON (exit code ${response.status}): ${response.stderr || '(no stderr)'}\n`);
+    assert.deepEqual(fs.readdirSync(path.join(h.base, 'probe')), []);
+  }
 });

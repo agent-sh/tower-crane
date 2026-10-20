@@ -9,6 +9,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
 const { createRepoSeed, FOREGROUND_MAINTENANCE } = require('../repo-seed');
+const { writeHost } = require('../host');
 
 const HOOKS = path.join(__dirname, '..', 'fixtures', 'hooks.js');
 const STUB = path.join(__dirname, '..', 'fixtures', 'live-usage-harness.js');
@@ -39,6 +40,7 @@ function cleanEnv(base) {
   env.TOWER_CRANE_OWNER_KEY = 'bench-owner-key';
   env.XDG_CACHE_HOME = path.join(base, 'home', '.cache');
   fs.mkdirSync(env.XDG_CACHE_HOME, { recursive: true });
+  env.TOWER_CRANE_HOST_ROOT = writeHost(path.join(base, 'host'));
   return env;
 }
 
