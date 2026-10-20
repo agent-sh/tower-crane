@@ -11,6 +11,8 @@ const { runContained, windowsCommandLine } = require('../scripts/mutants');
 const { detachedAlive } = require('./helpers');
 const { killPid } = require('./signals');
 
+const SYSTEMD_ONLY = 'systemd scopes exist only on Linux';
+
 // A fixture line that records a pid with the time it saw it, so a later check can
 // tell the process from a reuse of its pid.
 const recordPid = (file, pid) => `require('node:fs').appendFileSync(${JSON.stringify(file)}, JSON.stringify({ pid: ${pid}, recordedAt: Date.now() }) + '\\n')`;
@@ -215,8 +217,6 @@ test('an unavailable systemd manager is an infrastructure failure rather than a 
       DBUS_SESSION_BUS_ADDRESS: `unix:path=${path.join(h.base, 'no-bus')}` },
   }), error => error.code === 'ENOENT' || /cannot launch mutant systemd scope/.test(error.message));
 });
-
-const SYSTEMD_ONLY = 'systemd scopes exist only on Linux';
 
 function scopedFixture(t, scopeRead) {
   const h = makeRepo(t);
