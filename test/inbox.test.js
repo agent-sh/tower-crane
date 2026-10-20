@@ -174,7 +174,8 @@ test('foreground inbox never launches slow GitHub reads and preserves refreshed 
     assert.equal(data.items.filter((i) => i.kind === 'github_pending').length, 1, 'one summary covers missing reads');
     assert.equal(data.items.filter((i) => i.kind === 'github_error').length, 0, 'missing cache entries are not GitHub failures');
     assert.equal(h.github().calls.length, before, 'no foreground GitHub subprocesses');
-    h.save({ ...h.github(), delayMs: 0, failEndpoint: '/code-scanning/' });
+    h.save({ ...h.github(), delayMs: 0, failEndpoint: '/code-scanning/',
+      failMessage: 'GitHub unavailable: INBOX_GITHUB_PENDING appears in a repository name' });
     h.refresh();
     const refreshed = h.github().calls.length;
     const failures = h.inbox(false).items.filter((i) => i.kind === 'github_error');

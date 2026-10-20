@@ -54,7 +54,7 @@ if (review) {
   ], { env: require('../agent-env').fakeAgentEnv(process.env), stdio: 'pipe' });
 }
 if (failed) {
-  console.error('GitHub unavailable');
+  console.error(JSON.parse(readPublished(file, 'utf8')).failMessage || 'GitHub unavailable');
   process.exitCode = 1;
 } else if (Array.isArray(result)) {
   for (const row of result) console.log(JSON.stringify(row));
