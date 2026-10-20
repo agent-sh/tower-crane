@@ -30,6 +30,7 @@ process.stdin.on('end', () => console.log(process.env.PROBE_NUMBER, process.env.
     fs.writeFileSync(path.join(h.repo, 'value'), 'submitted');
     fs.writeFileSync(path.join(h.repo, 'fail.js'), "console.log('probe failure 17'); process.exit(7);\n");
     fs.writeFileSync(path.join(h.repo, 'slow.js'), "console.log('slow pid', process.pid); setInterval(() => {}, 1000);\n");
+    fs.writeFileSync(path.join(h.repo, 'signal.js'), "console.log('signal probe'); process.kill(process.pid, 'SIGTERM');\n");
     fs.writeFileSync(path.join(h.repo, 'held.js'), `
 const fs = require('node:fs');
 fs.writeFileSync(process.argv[2], 'started');
@@ -216,6 +217,46 @@ test('workers and orchestrators leave host checks and cleanup to the gates', () 
     assert.match(text, /PR body.*pending/);
   }
   assert.doesNotMatch(work, /run the configured cleanup tool if enabled/);
+});
+
+for (const row of [
+  { name: 'nonzero exit', run: { status: 7 }, flags: { worker_failure: true } },
+  { name: 'missing command', run: { status: 127 }, flags: { worker_failure: true } },
+  { name: 'SIGTERM', run: { status: null, signal: 'SIGTERM' }, flags: { runner_crash: true } },
+  { name: 'SIGKILL', run: { status: null, signal: 'SIGKILL' }, flags: { runner_crash: true } },
+  { name: 'shell signal status', run: { status: 143 }, flags: { runner_crash: true } },
+  { name: 'memory cap', run: { status: null, resource_reason: 'memory', containment: { backend: 'fixture' } },
+    flags: { runner_crash: true, resource_reason: 'memory', containment: { backend: 'fixture' } } },
+  { name: 'PID cap', run: { status: 1, resource_reason: 'tasks', containment: { backend: 'fixture' } },
+    flags: { runner_crash: true, resource_reason: 'tasks', containment: { backend: 'fixture' } } },
+  { name: 'abort without signal', run: { status: 1, error: { code: 'ABORT_ERR' } }, flags: { runner_crash: true } },
+  { name: 'timeout killed by signal', run: { status: null, signal: 'SIGTERM', timedOut: true },
+    flags: { worker_failure: true } },
+  { name: 'timeout with resource reason', run: { status: null, timedOut: true, resource_reason: 'memory',
+    containment: { backend: 'fixture' } },
+    flags: { worker_failure: true, resource_reason: 'memory', containment: { backend: 'fixture' } } },
+]) {
+  test(`probe interruption classification: ${row.name}`, () => {
+    assert.deepEqual(require('../lib/gates/tests').probeFailureFlags(row.run), row.flags);
+  });
+}
+
+test('a signal probe records a retryable runner failure', {
+  skip: process.platform === 'win32' && 'Unix shell signal exit codes are not available on Windows',
+}, (t) => {
+  const h = fixture(t);
+  submit(h, [`${NODE} signal.js`]);
+  const out = h.run(['check', 'tests', 'T1']);
+  assert.equal(out.code, 1, out.stdout + out.stderr);
+  const task = h.readState('tasks.json').tasks[0];
+  const runs = task.evidence.filter((e) => e.type === 'tests');
+  assert.equal(runs.length, 1);
+  for (const evidence of runs) {
+    assert.equal(evidence.runner_crash, true);
+    assert.equal(evidence.worker_failure, undefined);
+    assert.match(evidence.receipt.host_probes[0].output_tail, /signal probe/);
+    assert.equal(evidence.receipt.host_probes[0].timed_out, false);
+  }
 });
 
 const NUMBER = `${NODE} -e "console.log(42)"`;

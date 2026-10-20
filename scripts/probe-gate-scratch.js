@@ -31,10 +31,16 @@ function probe({ root = ROOT, cache, command, environment = process.env } = {}) 
   const gates = path.join(run, 'gates');
   const state = path.join(run, 'state');
   const env = { ...environment };
+  // Host readings describe the machine, independently of the probe's fresh state.
   for (const key of Object.keys(env)) {
-    // A caller's host reading controls admission; its task routing must not bind this separate state.
-    if ((key.startsWith('TOWER_CRANE_') && key !== 'TOWER_CRANE_HOST_ROOT')
+    if (key.startsWith('TOWER_CRANE_') && key !== 'TOWER_CRANE_HOST_ROOT'
       || key.startsWith('TC_TEST_') || key === 'NODE_TEST_CONTEXT') delete env[key];
+  }
+  // Tests use an isolated governor; host measurements still use the real host.
+  if (environment.TOWER_CRANE_HOST_ROOT) {
+    env.TOWER_CRANE_HOST_ROOT = environment.TOWER_CRANE_HOST_ROOT;
+  } else if (environment.NODE_TEST_CONTEXT || process.env.NODE_TEST_CONTEXT) {
+    env.TOWER_CRANE_HOST_ROOT = require('../test/host').writeHost(path.join(run, 'host'));
   }
   Object.assign(env, {
     TMPDIR: outer, TMP: outer, TEMP: outer,
@@ -50,7 +56,15 @@ function probe({ root = ROOT, cache, command, environment = process.env } = {}) 
       cwd: root, env, encoding: 'utf8', timeout: (2 * TESTS_MIN + 2) * 60 * 1000, maxBuffer: 16 << 20,
     });
     if (out.error) throw out.error;
-    const data = out.stdout.trim() ? JSON.parse(out.stdout) : null;
+    let data = null;
+    try {
+      data = out.stdout.trim() ? JSON.parse(out.stdout) : null;
+    } catch (error) {
+      if (args[0] !== 'check') throw error;
+    }
+    if (args[0] === 'check' && !data) {
+      throw new Error(`tower-crane ${args.join(' ')} returned no JSON (exit code ${out.status}): ${out.stderr.trim() || '(no stderr)'}`);
+    }
     if (out.status !== 0 && args[0] !== 'check') {
       throw new Error(`tower-crane ${args.join(' ')} failed: ${out.stderr || out.stdout}`);
     }
