@@ -361,7 +361,9 @@ const timer = setInterval(() => { if (fs.existsSync(process.argv[3])) { clearInt
   h.git(['commit', '-qm', 'head change']);
   h.sha = h.git(['rev-parse', 'HEAD']);
   h.git(['switch', '-q', 'main']);
-  h.init(['--tests-cmd', `node hold.js ${JSON.stringify(h.started)} ${JSON.stringify(h.release)}`, '--tests-mode', 'run-only']);
+  // Tests first, so a submission's reaction starts the held suite without a review.
+  h.init(['--tests-cmd', `node hold.js ${JSON.stringify(h.started)} ${JSON.stringify(h.release)}`, '--tests-mode', 'run-only',
+    '--review-policy', '{"tests_first":true}']);
   h.ok(['task', 'add', '--title', 'held suite', '--acceptance', 'checked', ...(tier ? ['--tier', tier] : [])]);
   if (claim) h.ok(['claim', 'T1', '--agent', 'worker']);
   if (submit) h.ok(['submit', 'T1', '--agent', 'worker', '--sha', h.sha, '--branch', 'change']);

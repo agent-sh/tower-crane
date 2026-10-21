@@ -159,7 +159,8 @@ test('accepted wakes after gates pass; a refused accept emits nothing', async (t
   const h = setup(t);
   h.sha = gateFixture(h);
   submit(h);
-  h.ok(['project', 'set', '--tests-cmd', 'null']);
+  // Tests first, so accept refuses at the missing tests gate instead of dispatching review.
+  h.ok(['project', 'set', '--tests-cmd', 'null', '--review-policy', '{"tests_first":true}']);
   const result = await waiting(t, h, { automation: true, args: ['--types', 'accepted'], seconds: 300 });
   const count = log(h).length;
   assert.equal(h.run(['accept', 'T1']).code, 1);
