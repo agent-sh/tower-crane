@@ -171,17 +171,22 @@ for (const [harness, scope, logOnly] of [['claude', 'project'], ['claude', 'task
     assert.match(phase.reason, /tokens budget crossed/);
     assert.equal(log.filter((e) => e.cmd === 'spawn retry').length, 0, 'a budget stop is not retried');
 
-    // The owner is told, through a decision only the owner can answer.
+    // Budget decisions retain their spend restriction under question delegation.
     const decision = h.readState('decisions.json').decisions.find((d) => d.escalation);
     assert.deepEqual(decision.escalation.settings, ['budget.raise']);
     assert.deepEqual(decision.blocks, scope === 'project' ? [] : ['T1']);
     assert.match(decision.question, /was stopped/);
     assert.deepEqual(decision.answerers, []);
+    assert.equal(decision.kind, 'spend');
     assert.equal(decision.technical, false);
     assert.equal(decision.answer_rule, null);
     const answer = h.run(['answer', decision.id, '--choice', 'raise', '--agent', 'orchestrator']);
     assert.notEqual(answer.code, 0);
     assert.match(answer.stderr, /only the owner answers it/);
+    const withdrawal = h.run(['decision', 'withdraw', decision.id, '--reason', 'use another route', '--agent', 'orchestrator']);
+    assert.notEqual(withdrawal.code, 0);
+    assert.match(withdrawal.stderr, /only the agent that opened.*or the owner/);
+    assert.equal(h.readState('decisions.json').decisions.find((d) => d.id === decision.id).status, 'open');
 
     // The exit collection replaces the live entry: one entry, counted once.
     await until(t, h, () => {
