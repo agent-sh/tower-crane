@@ -1099,7 +1099,7 @@ for (const [order, verdict] of [['review first', 'fail'], ['review first', 'ok']
     await waitOnRepo(h, done);
     const events = h.logs();
     const tests = events.filter((e) => e.cmd === 'check tests' || e.cmd === 'gate run' && e.detail.type === 'tests');
-    const suiteRuns = fs.existsSync(runs) ? fs.readFileSync(runs, 'utf8').split('\n').filter(Boolean).length : 0;
+    const suiteRuns = fs.existsSync(runs) ? readPublished(runs, 'utf8').split('\n').filter(Boolean).length : 0;
     const review = events.findIndex((e) => e.cmd === 'evidence' && e.detail.type === 'review');
     const dispatch = events.findIndex((e) => e.cmd === 'spawn' && e.detail.role === 'reviewer');
     const check = events.findIndex((e) => e.cmd === 'check tests');

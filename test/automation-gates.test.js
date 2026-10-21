@@ -845,8 +845,8 @@ test('gates retry exits nonzero while a retried gate still fails', (t) => {
 
 // Local CI that fails while a marker file stands for a broken environment,
 // such as a gate temporary root on a full /tmp: it exits 1, a confirmed failure.
-function brokenEnvironment(t) {
-  const h = setup(t, { ci: 'pending' });
+function brokenEnvironment(t, { testsFirst = true } = {}) {
+  const h = setup(t, { ci: 'pending', testsFirst });
   h.broken = path.join(h.base, 'environment-broken');
   fs.writeFileSync(h.broken, '');
   const script = path.join(h.base, 'local-environment.js');
@@ -862,8 +862,11 @@ function brokenEnvironment(t) {
   return h;
 }
 
-test('gates retry --from-rework restores an automatic gate rework at its submitted revision once the cause is fixed', (t) => {
-  const h = brokenEnvironment(t);
+// Review first, the suite waits for the review, so the restore reports success
+// with no tests evidence and leaves the next step to review dispatch.
+for (const testsFirst of [true, false]) {
+test(`gates retry --from-rework restores an automatic gate rework at its submitted revision once the cause is fixed (${testsFirst ? 'tests first' : 'review first'})`, (t) => {
+  const h = brokenEnvironment(t, { testsFirst });
   const submitted = h.logs().findLast((e) => e.cmd === 'rework').detail.previous_revision;
   const rework = h.logs().findLast((e) => e.cmd === 'rework');
   h.run(['wait', '--inbox', '--observe', '--after', 'now', '--timeout', '0.01', '--agent', 'orchestrator']); // wait-allow: populate the host follower cache before checking the restoration hint
@@ -882,12 +885,14 @@ test('gates retry --from-rework restores an automatic gate rework at its submitt
   assert.deepEqual({ tests: runs('tests'), clean: runs('clean'), ci: runs('ci') }, { ...before, ci: before.ci + 1 },
     'only the failed gate runs again; tests and clean evidence at that revision still counts');
   const report = h.json(['task', 'show', 'T1', '--agent', 'orchestrator']);
-  assert.deepEqual(report.gates.gates.filter((g) => g.type !== 'review').map((g) => [g.type, g.ok]), [['tests', true], ['clean', true], ['ci', true]]);
+  assert.deepEqual(report.gates.gates.filter((g) => g.type !== 'review').map((g) => [g.type, g.ok]), [['tests', testsFirst], ['clean', true], ['ci', true]]);
+  if (!testsFirst) assert.equal(before.tests, 0, 'no suite ran before the review');
   const restore = h.logs().findLast((e) => e.cmd === 'restore');
   assert.deepEqual([restore.detail.from_revision, restore.detail.revision, restore.detail.gate], [submitted + 1, submitted, 'ci']);
   h.ok(['rework', 'T1', '--reason', 'owner wants more', '--agent', 'owner']);
   assert.equal(h.readState('tasks.json').tasks[0].revision, submitted + 2, 'the retired revision is never reused');
 });
+}
 
 test('gates retry --from-rework sends a gate that still fails back to rework at a new revision, and refuses a claimed task', (t) => {
   const h = brokenEnvironment(t);
