@@ -16,6 +16,7 @@ const cp = require('node:child_process');
 const { pinLiveRung, makeRepo, dispatch, BIN, ROOT, TMP_ROOT, LIVE_ROOT } = require('./helpers');
 const { waitUntil } = require('./signals');
 const A = require('../lib/agents');
+const { runtimeProbe, assertRuntimeEntries } = require('./runtime-entries');
 
 const uid = typeof process.getuid === 'function' ? process.getuid() : null;
 const runDir = uid === null ? null : `/run/user/${uid}`;
@@ -831,7 +832,7 @@ function hostBus() {
 
 function busProbe(h, targets, marker, out) {
   return `const n=require("net"),f=require("fs"),cp=require("child_process");const o={};const t=${JSON.stringify(targets)};`
-    + `try{o.runtime=f.readdirSync(${JSON.stringify(path.dirname(targets.bus))}).length}catch(e){o.runtime="ERR "+e.code}`
+    + runtimeProbe(path.dirname(targets.bus))
     + `const r=cp.spawnSync("systemd-run",["--user","--wait","-q","touch",${JSON.stringify(marker)}],{encoding:"utf8"});o.systemdRun=r.error?"ERR "+r.error.code:r.status;`
     + `let left=Object.keys(t).length;for(const[k,p]of Object.entries(t)){const done=(v)=>{o[k]=v;if(--left===0)f.writeFileSync(${JSON.stringify(out)},JSON.stringify(o))};`
     + `n.connect(p).on("connect",function(){this.destroy();done("CONNECTED")}).on("error",e=>done("ERR "+e.code))}`;
@@ -842,7 +843,7 @@ test('a real codex sandbox cannot reach the session bus or the docker socket, so
   h.init();
   h.ok(['task', 'add', '--title', 'Bus probe', '--acceptance', 'the host stays out of reach']);
   h.ok(['brief', 'set', 'T1', '-'], { input: 'bus probe\n' });
-  const runtime = process.env.XDG_RUNTIME_DIR || `/run/user/${uid}`;
+  const runtime = fs.realpathSync(process.env.XDG_RUNTIME_DIR || `/run/user/${uid}`);
   const targets = { bus: path.join(runtime, 'bus') };
   for (const p of ['/run/docker.sock', '/var/run/docker.sock']) if (fs.existsSync(p)) targets[p] = p;
   const marker = path.join(h.base, 'host-command-ran');
@@ -857,12 +858,11 @@ test('a real codex sandbox cannot reach the session bus or the docker socket, so
   assert.equal(fs.existsSync(marker), false, 'systemd-run ran no command on the host');
   assert.notEqual(seen.systemdRun, 0, 'systemd-run failed');
   for (const k of Object.keys(targets)) assert.match(seen[k], /^ERR /, `${k} is out of reach`);
-  assert.match(String(seen.runtime), /^ERR /, 'the runtime directory is hidden');
+  assertRuntimeEntries(seen, runtime, false);
 });
 
-// The runtime directory is not mounted, only the bus socket, so a socket
-// made there after spawn, here by the stand-in on the host just before the
-// sandbox starts, is out of reach too.
+// Only the bus and declared socket leaf are mounted. A sibling socket made
+// after spawn stays out of reach.
 test('a real codex sandbox with sandbox.session_bus connects to the bus socket and nothing else in the runtime directory, even a socket made after spawn', { skip: realCodexSandbox(), timeout: 300000 }, async (t) => {
   const h = makeRepo(t);
   h.init();
@@ -904,7 +904,7 @@ test('a real codex sandbox with sandbox.session_bus connects to the bus socket a
   assert.equal(seen.bus, 'CONNECTED', 'the granted bus socket is reachable');
   assert.match(seen.other, /^ERR /, 'another socket in the runtime directory is not');
   assert.match(seen.late, /^ERR /, 'nor is a socket made there after spawn');
-  assert.equal(seen.runtime, 1, 'the runtime directory shows the bus socket alone');
+  assertRuntimeEntries(seen, runtime, true);
 });
 
 // /run is hidden whole in both sandboxes but for what an agent needs: the
