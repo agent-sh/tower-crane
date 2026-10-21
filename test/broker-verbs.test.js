@@ -229,6 +229,7 @@ test('ungranted, unclaimed and out-of-pattern requests are refused and run nothi
     { name: 'a value naming a path an agent writes', verb: 'pathy', params: ['script=tools/verb.js', `target=${script}`], stderr: /argv .*verb\.js is inside/ },
     { name: 'an option value naming a path an agent writes', verb: 'pathy', params: ['script=tools/verb.js', `target=--config=${script}`], stderr: /argv .*verb\.js is inside/ },
     { name: 'a value walking out of {source}', verb: 'pathy', params: [`script=${path.relative(tree, script).split(path.sep).join('/')}`, 'target=c1'], stderr: /argv .*verb\.js is inside/ },
+    { name: 'a relative value walking out of the working directory', verb: 'pathy', params: ['script=tools/verb.js', `target=${path.relative(tree, script).split(path.sep).join('/')}`], stderr: /argv .*verb\.js is inside/ },
   ];
   const sources = fs.readdirSync(V.sourcesDir(h.state));
   for (const row of rows) {
