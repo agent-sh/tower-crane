@@ -6,6 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
 const G = require('../lib/governor');
+const Processes = require('../lib/processes');
 const { makeRepo, cachedFixture, BIN, TMP_ROOT } = require('./helpers');
 const { writeHost, GiB } = require('./host');
 const { waitOnRepo, killPid } = require('./signals');
@@ -366,6 +367,42 @@ const timer = setInterval(() => { if (fs.existsSync(process.argv[3])) { clearInt
   if (submit) h.ok(['submit', 'T1', '--agent', 'worker', '--sha', h.sha, '--branch', 'change']);
 }
 
+const suiteStopped = Processes.exited;
+
+test('gate stop verification follows the suite identity through process lifecycle states', { skip: linuxOnly }, (t) => {
+  const suite = { pid: process.pid, ...Processes.identity(process.pid) };
+  const statPath = `/proc/${suite.pid}/stat`;
+  const read = fs.readFileSync;
+  const signal = process.kill;
+  const stat = read(statPath, 'utf8');
+  const boundary = stat.lastIndexOf(')') + 2;
+  const fields = stat.slice(boundary).trim().split(/\s+/);
+  let row;
+  t.mock.method(process, 'kill', function (pid, sig) {
+    if (pid !== suite.pid || sig !== 0) return signal.call(this, pid, sig);
+    if (row.missing) throw Object.assign(new Error('gone'), { code: 'ESRCH' });
+    return true;
+  });
+  t.mock.method(fs, 'readFileSync', function (file, ...args) {
+    if (file !== statPath) return read.call(this, file, ...args);
+    if (row.unknown) throw Object.assign(new Error('unobservable'), { code: 'EACCES' });
+    const changed = [...fields];
+    changed[0] = row.state;
+    if (row.reused) changed[19] = String(BigInt(suite.start_ticks) + 1n);
+    return stat.slice(0, boundary) + changed.join(' ') + '\n';
+  });
+  for (row of [
+    { name: 'still running', state: 'S', stopped: false },
+    { name: 'unreaped zombie', state: 'Z', stopped: true },
+    { name: 'dead kernel state', state: 'X', stopped: true },
+    { name: 'reaped process', missing: true, stopped: true },
+    { name: 'PID reused by another process', state: 'S', reused: true, stopped: true },
+    { name: 'unobservable process', unknown: true, stopped: false },
+  ]) {
+    assert.equal(suiteStopped(suite), row.stopped, row.name);
+  }
+});
+
 test('past the stop line a running gate stops without a verdict and says why', { skip: linuxOnly }, async (t) => {
   const h = makeRepo(t);
   heldGate(h);
@@ -376,11 +413,12 @@ test('past the stop line a running gate stops without a verdict and says why', {
   t.after(() => { if (child && child.exitCode === null) killPid(child.pid, 'SIGKILL'); });
   await waitOnRepo(h, () => fs.existsSync(h.started), 'the tests command starts');
   const suitePid = Number(fs.readFileSync(h.started, 'utf8'));
+  const suite = { pid: suitePid, ...Processes.identity(suitePid) };
   writeHost(host, { limit: 10, used: 9.6 });
   const done = await run;
   assert.equal(done.code, 3, done.stderr);
   assert.match(done.stderr, /T1: tests gate stopped by the host governor: memory: tests\.slice has 9\.6 GiB of 10\.0 GiB in use, at or past the 95% stop line \(9\.5 GiB\); it runs again once there is room/);
-  assert.throws(() => killPid(suitePid, 0), { code: 'ESRCH' }, 'the suite process was stopped');
+  await waitOnRepo(h, () => suiteStopped(suite), 'the original suite process stops', { poll: true });
   assert.deepEqual(h.readState('tasks.json').tasks[0].evidence.filter((e) => e.type === 'tests'), [], 'no verdict was recorded');
   const stops = h.json(['status']).governor.stops;
   assert.deepEqual(stops.map((x) => [x.task, x.kind]), [['T1', 'tests']]);
