@@ -891,9 +891,10 @@ test('changed requirements and unrelated rework keep the full review scope', (t)
   }
 });
 
-test('a rework with a rebased or merged base update gets a full review without upstream changes in its diff', (t) => {
+test('a rework after a base update narrows to the worker\'s own new lines when the head merged the base, and a rebase gets a full review', (t) => {
   for (const update of ['rebase', 'merge']) {
     const h = setup(t, 'easy', 'other', undefined, { gated: true });
+    const reviewedSha = h.sha;
     h.reviewer('T1', 'first-reviewer');
     h.ok(['evidence', 'T1', '--agent', 'first-reviewer', '--type', 'review', '--fail',
       '--sha', h.sha, '--summary', 'correction.md must explain the value']);
@@ -915,13 +916,22 @@ test('a rework with a rebased or merged base update gets a full review without u
     commandReviewer(h, out);
     const dispatched = h.json(['spawn', '--task', 'T1', '--role', 'review', '--wait']);
     const prompt = fs.readFileSync(out, 'utf8');
-    assert.match(prompt, /## Review scope\n\nFull review/);
-    assert.match(prompt, /not an ancestor|base advanced/);
     const packet = reviewPacket(h);
-    assert.match(packet, /diff --git a\/value.js b\/value.js/);
-    assert.match(packet, /diff --git a\/correction.md b\/correction.md/);
-    assert.ok(!packet.includes('diff --git a/upstream.md'));
-    assert.equal(dispatched.review_scope, null);
+    assert.match(packet, /diff --git a\/correction.md b\/correction.md/, update);
+    assert.ok(!packet.includes('diff --git a/upstream.md'), update);
+    if (update === 'rebase') {
+      assert.match(prompt, /## Review scope\n\nFull review/);
+      assert.match(prompt, /not an ancestor/);
+      assert.match(packet, /diff --git a\/value.js b\/value.js/);
+      assert.equal(dispatched.review_scope, null);
+      continue;
+    }
+    // The raw diff from the reviewed sha holds the merged upstream file; the replayed one does not.
+    assert.match(h.git(['diff', '--name-only', reviewedSha, h.sha]), /upstream\.md/);
+    assert.match(prompt, /## Review scope\n\nRe-review/);
+    assert.match(prompt, new RegExp(`automatic merge of ${reviewedSha} with the base`));
+    assert.ok(!packet.includes('diff --git a/value.js'), 'the reviewed change stays out of the narrowed diff');
+    assert.equal(dispatched.review_scope.sha, reviewedSha);
   }
 });
 
