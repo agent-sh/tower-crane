@@ -12,6 +12,7 @@ const B = require('../lib/broker');
 const { failingTests } = require('../lib/ci-feedback');
 const { stripEscapes } = require('../lib/ci-log-text');
 const { ghDenied } = require('../lib/shim');
+const { findingBody, revutoLines } = require('../lib/gates/ci');
 const { readEvents } = require('../lib/state');
 
 // GitHub stamps every line of a job log.
@@ -49,6 +50,69 @@ test('CI log cleanup preserves text, tabs and newlines while removing terminal c
     ['layout and Unicode', '\t✖ тест\n', '\t✖ тест\n'],
   ];
   for (const [name, input, expected] of cases) assert.equal(stripEscapes(input), expected, name);
+});
+
+test('inline finding text strips metadata and caps each body with an explicit note', () => {
+  const cases = [
+    ['plain Markdown', '**[P2]** Guard `input`.', ['**[P2]** Guard `input`.']],
+    ['multiline comments', '<!-- hidden\nmetadata -->\nFirst<!-- more --> line.\r\nSecond line.',
+      ['First<!-- more --> line.', 'Second line.', '[24 characters of HTML comment removed]']],
+    ['comment before cap', `<!-- ${'x'.repeat(5000)} -->Visible`, ['Visible', '[5009 characters of HTML comment removed]']],
+    ['unfinished inline comment', 'Visible<!-- hidden', ['Visible<!-- hidden']],
+    ['terminal controls', '\x1b[31mVisible\x1b[0m\x07', ['Visible']],
+    ['empty body', '', ['']],
+    ['at cap', 'x'.repeat(4000), ['x'.repeat(4000)]],
+    ['past cap', 'x'.repeat(4001), ['x'.repeat(4000), '[body truncated after 4000 characters]']],
+    ['Unicode at cap', '😀'.repeat(4000), ['😀'.repeat(4000)]],
+    ['Unicode past cap', '😀'.repeat(4001), ['😀'.repeat(4000), '[body truncated after 4000 characters]']],
+  ];
+  for (const [name, body, expected] of cases) {
+    assert.deepEqual(revutoLines([{ id: 501, path: 'lib/a.js', line: 12, ...findingBody(body) }]),
+      ['  lib/a.js:12 (comment 501)', ...expected.map((line) => `    ${line}`)], name);
+  }
+});
+
+test('finding body preserves Markdown code and strips only line-start HTML comment blocks', () => {
+  const cases = [
+    ['reported inline opener', 'Use the `<!--` opener check here.\nSecond paragraph with the actual fix.'],
+    ['reported suggestion', '```suggestion\n<!-- commands:Gates:start -->\n| a | b |\n```'],
+    ['closed inline span', 'Use `<!-- marker -->` here.'],
+    ['long inline delimiter', 'Use `` `<!--` `` here.\nKeep this fix.'],
+    ['multiline span', 'Use `the marker\n<!-- visible -->\ninside code` here.'],
+    ['unmatched span', '`unmatched\n<!-- hidden -->\nVisible', '`unmatched\n\nVisible', 15],
+    ['escaped backtick', '\\`not a span\n<!-- hidden -->\nVisible', '\\`not a span\n\nVisible', 15],
+    ['unclosed inline prose', 'Use the <!-- opener here.\nKeep this fix.'],
+    ['closed inline prose', 'Use <!-- marker --> in this example.'],
+    ['escaped opener', '\\<!-- visible -->\nKeep this fix.'],
+    ['indented code', '    <!-- visible -->\nKeep this fix.'],
+    ['tab-indented code', '\t<!-- visible -->\nKeep this fix.'],
+    ['tilde fence', '~~~suggestion\n<!-- visible -->\n~~~'],
+    ['indented fence', '   ```suggestion\n<!-- visible -->\n   ```'],
+    ['list fence', '- ```suggestion\n  <!-- visible -->\n  ```'],
+    ['blockquote fence', '> ```suggestion\n> <!-- visible -->\n> ```'],
+    ['long fence', '````suggestion\n```\n<!-- visible -->\n````'],
+    ['wrong closing fence', '~~~\n```\n<!-- visible -->\n~~~'],
+    ['list-like fence content', '```\n- ```\n<!-- visible -->\n```'],
+    ['quote-like fence content', '```\n> ```\n<!-- visible -->\n```'],
+    ['unclosed fence', '```suggestion\n<!-- visible -->\nKeep this fix.'],
+    ['closed fence then comment', '```\n<!-- visible -->\n```\n<!-- hidden -->\nVisible',
+      '```\n<!-- visible -->\n```\n\nVisible', 15],
+    ['indented block', '   <!-- hidden -->\nVisible', 'Visible', 15],
+    ['unclosed block', '<!-- hidden\nmetadata', '', 20],
+    ['Unicode removal count', '<!-- 😀 -->\nVisible', 'Visible', 10],
+    ['multiple blocks', '<!-- a -->\n<!-- b -->\nVisible', 'Visible', 20],
+    ['reported multiple blocks around prose', '<!-- a -->\nX\n<!-- bb -->\nY', 'X\n\nY', 21],
+    ['escaped backtick in span', '`code \\`\n<!-- hidden -->\nVisible', '`code \\`\n\nVisible', 15],
+    ['no second stripping', '<!<!-- a -->-- b -->Visible'],
+  ];
+  for (const [name, input, expected = input, removed = 0] of cases) {
+    const result = findingBody(input);
+    assert.equal(result.body, expected, name);
+    assert.equal(result.html_comment_chars_removed || 0, removed, name);
+    assert.deepEqual(revutoLines([{ id: 1, path: 'a.md', line: 3, ...result }]),
+      ['  a.md:3 (comment 1)', ...expected.split('\n').map((line) => `    ${line}`),
+        ...(removed ? [`    [${removed} characters of HTML comment removed]`] : [])], name);
+  }
 });
 
 test('gh log flag preserves the existing shim policy', () => {
@@ -296,12 +360,18 @@ test('rework prompts and worker ci reads expose inline ids that ci resolve accep
   const h = fixture(t);
   const data = checkFeedback(h);
   data.comments = reviewComments();
+  data.comments[0].body = '<!-- hidden rework metadata -->\n[P2] Guard the input\nKeep the failure visible.\nUse the `<!--` opener check here.\nSecond paragraph with the actual fix.\n```suggestion\n<!-- commands:Gates:start -->\n| a | b |\n```';
   fs.writeFileSync(h.env.CI_FEEDBACK_GH, JSON.stringify(data));
   sendToRework(h);
   const expected = [[501, 'lib/a.js', 12], [502, 'lib/b.js', 40], [504, 'lib/c.js', 50]];
   const assertFindings = (text) => {
     for (const [id, file, line] of expected) assert.ok(text.includes(`${file}:${line} (comment ${id})`), text);
     assert.doesNotMatch(text, /lib\/(?:closed|outdated|human)\.js/);
+    assert.match(text, /\[P2\] Guard the input\n {4}Keep the failure visible\./);
+    assert.doesNotMatch(text, /hidden rework metadata/);
+    assert.match(text, /Use the `<!--` opener check here\.\n {4}Second paragraph with the actual fix\./);
+    assert.match(text, /```suggestion\n {4}<!-- commands:Gates:start -->\n {4}\| a \| b \|\n {4}```/);
+    assert.match(text, /\[31 characters of HTML comment removed\]/);
   };
   const dry = h.json(['spawn', '--task', 'T1', '--dry-run']);
   assertFindings(dry.argv.join('\n'));
@@ -560,7 +630,11 @@ test('ci checks keeps superseded review rounds, reruns and replaced workflow fai
 
 test('ci checks runs through the worker broker without loading the worktree git config', async (t) => {
   const h = fixture(t);
-  checkFeedback(h);
+  const data = checkFeedback(h);
+  data.comments = reviewComments().filter((c) => [501, 502, 503, 507, 508, 509].includes(c.id));
+  data.comments[0].body = '<!-- hidden worker\nmetadata -->\n[P2] Guard the input\nReject the unsafe value.\nUse the `<!--` opener check here.\nSecond paragraph with the actual fix.\n```suggestion\n<!-- commands:Gates:start -->\n| a | b |\n```';
+  data.comments[1].body = 'Long finding: ' + 'x'.repeat(4000) + ' omitted tail';
+  fs.writeFileSync(h.env.CI_FEEDBACK_GH, JSON.stringify(data));
   const callsFile = path.join(h.base, 'gh-calls.jsonl');
   const values = { NODE_OPTIONS: h.env.NODE_OPTIONS, CI_FEEDBACK_GH: h.env.CI_FEEDBACK_GH, CI_FEEDBACK_CALLS: callsFile };
   const saved = {};
@@ -578,9 +652,23 @@ test('ci checks runs through the worker broker without loading the worktree git 
     broker_harnesses: ['codex'], broker: path.join(h.base, 'broker', B.FILE) };
   const broker = await B.start(job);
   t.after(() => broker.close());
+  const text = await B.forward(job.broker, ['ci', 'checks', 'T1'], h.state);
+  assert.equal(text.code, 0, text.stderr);
+  assert.match(text.stdout, /lib\/a\.js:12 \(comment 501\)\n {4}\[P2\] Guard the input\n {4}Reject the unsafe value\./);
+  assert.match(text.stdout, /Use the `<!--` opener check here\.\n {4}Second paragraph with the actual fix\./);
+  assert.match(text.stdout, /```suggestion\n {4}<!-- commands:Gates:start -->\n {4}\| a \| b \|\n {4}```/);
+  assert.match(text.stdout, /\[31 characters of HTML comment removed\]/);
+  assert.ok(text.stdout.includes(`lib/b.js:40 (comment 502)\n    ${data.comments[1].body.slice(0, 4000)}\n    [body truncated after 4000 characters]`));
+  assert.doesNotMatch(text.stdout, /hidden worker|metadata|omitted tail|lib\/(?:closed|outdated)\.js|comment (?:507|509)/);
   const r = await B.forward(job.broker, ['ci', 'checks', 'T1', '--json'], h.state);
   assert.equal(r.code, 0, r.stderr);
-  assert.equal(JSON.parse(r.stdout).alerts[0].rule, 'js/file-system-race');
+  const result = JSON.parse(r.stdout);
+  assert.equal(result.alerts[0].rule, 'js/file-system-race');
+  assert.deepEqual(result.findings.map((f) => [f.id, f.path, f.line]),
+    [[501, 'lib/a.js', 12], [502, 'lib/b.js', 40]]);
+  assert.equal(result.findings[0].body, data.comments[0].body.slice(32));
+  assert.equal(result.findings[0].html_comment_chars_removed, 31);
+  assert.equal(result.findings[1].body, data.comments[1].body);
   const calls = fs.readFileSync(callsFile, 'utf8').trim().split('\n').map((s) => JSON.parse(s));
   assert.ok(calls.length > 0);
   for (const call of calls) {
