@@ -665,7 +665,7 @@ test('sometimes fails', () => {
     assert.equal(flaky.first_failure.status, 1, name);
     assert.match(flaky.first_failure.error, /flaked on run 0/, name);
     assert.match(flaky.first_failure.excerpt, /^✖ sometimes fails[^\n]*\n[\s\S]*flaked on run 0/, name);
-    assert.equal(flaky.rerun.command, selector ? `${spec} test/flaky.test.js` : suite, name);
+    assert.equal(flaky.rerun.command, selector ? `${spec} ${shellQuote('test/flaky.test.js')}` : suite, name);
     assert.equal(flaky.rerun.status, 0, name);
     assert.ok(flaky.rerun.duration_ms >= 0 && flaky.first_failure.duration_ms >= 0, name);
     assertCleanedUp();
