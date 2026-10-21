@@ -173,7 +173,9 @@ test('the test runner emits one capped concurrency value, including repeated and
   const h = makeRepo(t);
   const runner = path.join(ROOT, 'test/run.js');
   for (const [cores, options, expected] of [
-    [32, ['--test-concurrency=4', 'test/claim.test.js', '--test-concurrency=999'], 4],
+    [32, ['--test-concurrency=4', 'test/claim.test.js', '--test-concurrency=999'], 31],
+    [24, ['--test-concurrency=8', 'test/claim.test.js'], 8],
+    [24, ['test/claim.test.js'], 4],
     [3, ['--test-concurrency=999', 'test/claim.test.js', '--test-concurrency', '999'], 2],
     [32, ['--test-concurrency=4', '--test-concurrency', '2', 'test/claim.test.js'], 2],
     [1, ['test/claim.test.js'], 1],
@@ -197,6 +199,28 @@ test('the test runner emits one capped concurrency value, including repeated and
     assert.ok(args.includes(`--require=${path.join(ROOT, 'test', 'fixtures', 'report-guard.js')}`), 'every test file loads the report guard');
     assert.deepEqual(args.filter((arg) => !arg.startsWith('--')), ['test/claim.test.js']);
   }
+  // With one worker each file takes a band of its own, longest first, so
+  // node --test's sort of the paths starts them longest first.
+  const preload = path.join(h.base, 'runner-order.js');
+  fs.writeFileSync(preload, `
+    require('node:os').availableParallelism = () => 2;
+    require('node:child_process').spawn = (command, args) => {
+      console.log(JSON.stringify(args));
+      const child = new (require('node:events').EventEmitter)();
+      process.nextTick(() => child.emit('exit', 0, null));
+      return child;
+    };
+  `);
+  const files = ['test/accept.test.js', 'test/claim.test.js', 'test/isolation.test.js', 'test/events.test.js'];
+  const r = cp.spawnSync(process.execPath, ['--require', preload, runner, ...files], { cwd: ROOT, env: h.env, encoding: 'utf8' });
+  assert.equal(r.status, 0, r.stderr);
+  // Each platform's own table decides: isolation is long on Linux, short on Windows.
+  const longest = require('./run').longestFirst(files);
+  assert.notDeepEqual(longest, [...files].sort(), 'the measured order differs from the sorted one');
+  const passed = JSON.parse(r.stdout).filter((arg) => !arg.startsWith('--'));
+  const named = (list) => list.map((arg) => path.relative(ROOT, path.resolve(ROOT, arg)).split(path.sep).join('/'));
+  assert.deepEqual(named(passed), files, 'each file keeps its place');
+  assert.deepEqual(named([...passed].sort()), longest);
 });
 
 test('each test run gets a private runtime directory for its sockets and removes it, so no test broker sweeps the real one', { skip: process.platform === 'win32' && 'Windows brokers use named pipes' }, (t) => {
@@ -306,7 +330,7 @@ test('mutation fallback requires a green baseline in a copy containing all test 
     fs.mkdirSync(path.dirname(target), { recursive: true });
     fs.writeFileSync(target, text);
   };
-  for (const file of ['test/run.js', 'test/signals.js', 'test/atomic-file.js', 'test/global-setup.js', 'test/host.js', 'test/repo-seed.js', 'test/tmp-root.js', 'test/fixtures/user-config-guard.js', 'test/fixtures/report-guard.js']) {
+  for (const file of ['test/run.js', 'test/signals.js', 'test/atomic-file.js', 'test/global-setup.js', 'test/host.js', 'test/repo-seed.js', 'test/tmp-root.js', 'test/fixtures/user-config-guard.js', 'test/fixtures/report-guard.js', 'test/fixtures/no-fsync.js']) {
     write(file, fs.readFileSync(path.join(ROOT, file), 'utf8'));
   }
   write('test/gates/.keep', '');
@@ -378,4 +402,136 @@ test('live Claude probes use the requested provider and environment file without
   assert.equal(project.ladder.review.profile, 'fixture-main');
   assert.equal(project.ladder.review.provider, undefined);
   assert.equal(project.ladder.review.env_file, undefined);
+});
+
+test('the suite profile sums leaf tests per file and marks tests that ran beside each other', () => {
+  const { summarize, report } = require('../scripts/suite-profile');
+  const root = path.join(ROOT, 'profile-root');
+  const file = (name) => path.join(root, 'test', name);
+  const records = [
+    { name: 'sleeps', nesting: 0, file: file('a.test.js'), pid: 1, leaf: true, start_ms: 0, wall_ms: 1000, cpu_ms: 100 },
+    { name: 'works', nesting: 0, file: file('a.test.js'), pid: 1, leaf: true, start_ms: 1000, wall_ms: 500, cpu_ms: 500 },
+    { name: 'group', nesting: 0, file: file('b.test.js'), pid: 2, leaf: false, start_ms: 0, wall_ms: 900, cpu_ms: 800 },
+    { name: 'x', nesting: 1, file: file('b.test.js'), pid: 2, leaf: true, start_ms: 0, wall_ms: 600, cpu_ms: 400 },
+    { name: 'y|z\\', nesting: 1, file: file('b.test.js'), pid: 2, leaf: true, start_ms: 100, wall_ms: 800, cpu_ms: 400 },
+    { file: file('a.test.js'), process: true, wall_ms: 1600, cpu_ms: 650 },
+    { file: file('b.test.js'), process: true, wall_ms: 1000, cpu_ms: 850 },
+  ];
+  const s = summarize(records, root);
+  assert.equal(s.test_count, 4, 'the describe holds its tests and is not one');
+  assert.deepEqual(s.tests.map((t) => [t.name, t.file, t.cpu_ms]),
+    [['sleeps', 'test/a.test.js', 100], ['y|z\\', 'test/b.test.js', null], ['x', 'test/b.test.js', null], ['works', 'test/a.test.js', 500]]);
+  assert.deepEqual([s.test_wall_ms, s.serial_wall_ms, s.serial_cpu_ms, s.file_wall_ms, s.file_cpu_ms], [2900, 1500, 600, 2600, 1500]);
+  assert.deepEqual(s.files.map((f) => [f.file, f.tests, f.wall_ms, f.cpu_ms]), [['test/a.test.js', 2, 1600, 650], ['test/b.test.js', 2, 1000, 850]]);
+  assert.deepEqual(s.longest_file, { file: 'test/a.test.js', wall_ms: 1600 });
+  const text = report(s, { wall_ms: 1700, concurrency: 2, top: 30 });
+  assert.match(text, /^suite wall 1\.7 s at 2 file workers; 4 tests, 2\.9 s summed test time$/m);
+  assert.match(text, /^longest file: `test\/a\.test\.js` 1\.6 s$/m);
+  assert.match(text, /^serial tests: 1\.5 s, 0\.6 s CPU: 60% waiting$/m);
+  assert.match(text, /^\| 1 \| sleeps \| `test\/a\.test\.js` \| 1\.0 \| 0\.1 \| 90% \|$/m);
+  assert.match(text, /^\| 2 \| y\\\|z\\\\ \| `test\/b\.test\.js` \| 0\.8 \| - \| overlapped \|$/m, 'cells escape the separator and the escape');
+  assert.match(text.split('\n').pop(), /^serial tests: /, 'the summary ends the report, where a log tail keeps it');
+  s.tests[0].name = 'n'.repeat(150);
+  const host = { cores: 24, cgroup: '/gate.scope', load_start: 2.04, load_peak: 13.96, load_end: 9.5, memory_start: 100 * 1048576, memory_peak: 2616 * 1048576,
+    cpu_ms: 4321000, pressure: { some_ms: 850, full_ms: 170, some_avg10_peak: 61.25, full_avg10_peak: 12 } };
+  const hosted = report(s, { wall_ms: 1700, concurrency: 2, top: 30, host });
+  assert.match(hosted, new RegExp(`^\\| 1 \\| ${'n'.repeat(97)}\\.\\.\\. \\|`, 'm'), 'a long name is cut to 100 characters');
+  assert.match(hosted, /^host: 24 cores; 1-minute load 2\.0 at start, peak 14\.0, 9\.5 at end$/m);
+  assert.match(hosted, /^CPU: 4321\.0 s in cgroup \/gate\.scope, detached processes included$/m);
+  assert.match(hosted, /^CPU pressure: some 0\.8 s \(50% of wall\), full 0\.2 s \(10%\); avg10 peak some 61\.3%, full 12\.0%$/m);
+  assert.match(hosted.split('\n').pop(), /^memory: peak 2516 MiB above the start in cgroup \/gate\.scope$/);
+  assert.doesNotMatch(hosted, /limit/, 'the profile sets no wall limit');
+  const bare = report(s, { wall_ms: 1700, concurrency: 2, top: 30, host: { ...host, memory_peak: null, cpu_ms: null, pressure: null } });
+  assert.match(bare, /^memory: no cgroup memory\.current to read$/m);
+  assert.match(bare, /^CPU pressure: no cgroup cpu\.pressure to read$/m);
+  assert.doesNotMatch(bare, /^CPU: /m);
+});
+
+test('the suite profile compares the medians of interleaved baseline and head runs', () => {
+  const { compare } = require('../scripts/suite-profile');
+  const run = (tree, cpu, longest, extra = {}) => ({ tree, status: 0, wall_ms: 600000, file_cpu_ms: cpu - 1000,
+    longest_file: { file: 'test/a.test.js', wall_ms: longest }, host: { load_start: 1, load_peak: 2, load_end: 3, cpu_ms: cpu, pressure: { some_ms: 5000 } }, ...extra });
+  const lower = compare([run('baseline', 5000e3, 400e3), run('head', 4000e3, 300e3), run('baseline', 9000e3, 900e3), run('head', 4500e3, 250e3), run('baseline', 5200e3, 380e3), run('head', 6000e3, 500e3)]);
+  assert.equal(lower.ok, true, lower.text);
+  assert.match(lower.text, /^median of 3: CPU seconds \(cgroup\) head 4500\.0 vs baseline 5200\.0 \(-13\.5%\): lower$/m);
+  assert.match(lower.text, /^median of 3: longest file wall s head 300\.0 vs baseline 400\.0 \(-25\.0%\): lower$/m);
+  assert.match(lower.text, /^\| 2 \| head \| passed \| 600\.0 \| 4000\.0 \| 3999\.0 \| 300\.0 \| 1\.0, 2\.0, 3\.0 \| 5\.0 \|$/m);
+  const cases = [
+    ['CPU not lower', [run('baseline', 5000e3, 400e3), run('head', 5000e3, 300e3)], /CPU seconds .*: not lower$/m],
+    ['longest file not lower', [run('baseline', 5000e3, 400e3), run('head', 4000e3, 401e3)], /longest file wall s .*\(\+0\.3%\): not lower$/m],
+    ['a failed head run', [run('baseline', 5000e3, 400e3), run('head', 1000e3, 100e3, { status: 1 })], /^1 of 1 head runs failed$/m],
+    ['no baseline run', [run('head', 1000e3, 100e3)], /^\| 1 \| head \|/m],
+  ];
+  for (const [name, runs, line] of cases) {
+    const r = compare(runs);
+    assert.equal(r.ok, false, name);
+    assert.match(r.text, line, name);
+  }
+  const files = compare([run('baseline', 5000e3, 400e3, { host: null }), run('head', 4000e3, 300e3, { host: null })]);
+  assert.match(files.text, /^median of 1: CPU seconds \(file processes\) head 3999\.0 vs baseline 4999\.0/m, 'without a cgroup the file processes are summed');
+});
+
+test('the suite profile records each test of a real run with its CPU', { skip: process.platform !== 'linux' && 'CPU comes from /proc' }, (t) => {
+  const h = makeRepo(t);
+  const fixture = path.join(h.base, 'profiled.test.js');
+  fs.writeFileSync(fixture, `
+const assert = require('node:assert/strict');
+require('node:test')('waits', () => { assert.equal(Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 400), 'timed-out'); }); // wait-allow: the profile measures a timer wait
+require('node:test')('spins', () => { const end = Date.now() + 400; let n = 0; while (Date.now() < end) n++; assert.ok(n > 0); }); // wait-allow: the profile measures CPU work
+`);
+  const out = path.join(h.base, 'profile.json');
+  // This checkout stands in for the baseline, so the verdict is a coin toss; the exit follows it.
+  // The request is over any core count, so the report must name the runner's capped workers.
+  const r = cp.spawnSync(process.execPath, [path.join(ROOT, 'scripts', 'suite-profile.js'), '--test-concurrency=999', '--json', out, '--baseline-dir', ROOT, fixture],
+    { cwd: ROOT, env: { ...h.env, TOWER_CRANE_TEST_TMP: h.base }, encoding: 'utf8', timeout: 300000 });
+  assert.equal(r.status, /: not lower$/m.test(r.stdout) ? 1 : 0, r.stderr + r.stdout);
+  const workers = Math.max(1, require('node:os').availableParallelism() - 1);
+  assert.equal(r.stdout.match(new RegExp(`^suite wall [\\d.]+ s at ${workers} file workers;`, 'gm'))?.length, 2, r.stdout);
+  assert.match(r.stdout, /^# suite profile: baseline run 1 of 1 in /m);
+  assert.match(r.stdout, /^host: \d+ cores; 1-minute load /m);
+  assert.match(r.stdout, /^median of 1: CPU seconds \((cgroup|file processes)\) head [\d.]+ vs baseline [\d.]+ .*: (lower|not lower)$/m);
+  assert.match(r.stdout.trim().split('\n').pop(), /^median of 1: longest file wall s /, 'the verdict ends the log, where a probe receipt keeps it');
+  const profile = JSON.parse(fs.readFileSync(out, 'utf8'));
+  assert.deepEqual(profile.runs.map((x) => [x.tree, x.status, x.longest_file.file]), [['baseline', 0, path.relative(ROOT, fixture)], ['head', 0, path.relative(ROOT, fixture)]]);
+  assert.equal(profile.comparison.ok, r.status === 0);
+  assert.equal(profile.status, 0, 'the suite itself passed');
+  assert.ok(profile.host.load_peak >= 0 && profile.host.cores > 0, JSON.stringify(profile.host));
+  const byName = Object.fromEntries(profile.tests.map((x) => [x.name, x]));
+  assert.deepEqual(Object.keys(byName).sort(), ['spins', 'waits']);
+  assert.ok(byName.waits.wall_ms >= 400 && byName.waits.cpu_ms < 200, JSON.stringify(byName.waits));
+  assert.ok(byName.spins.cpu_ms >= 300, JSON.stringify(byName.spins));
+  assert.equal(profile.files.length, 1);
+  assert.match(r.stdout, /^serial tests: .* waiting$/m);
+  assert.deepEqual(fs.readdirSync(h.base).filter((name) => name.startsWith('suite-profile-')), [], 'the record directory is removed');
+});
+
+test('the suite profile runs a baseline commit from a worktree it removes afterwards', { skip: process.platform !== 'linux' && 'CPU comes from /proc' }, (t) => {
+  const h = makeRepo(t);
+  // The runner and what it loads, so the repository's own suite runs at both commits.
+  for (const file of ['scripts/suite-profile.js', 'test/run.js', 'test/signals.js', 'test/atomic-file.js', 'test/global-setup.js', 'test/host.js', 'test/repo-seed.js', 'test/tmp-root.js',
+    'test/fixtures/user-config-guard.js', 'test/fixtures/report-guard.js', 'test/fixtures/no-fsync.js']) {
+    fs.mkdirSync(path.dirname(path.join(h.repo, file)), { recursive: true });
+    fs.copyFileSync(path.join(ROOT, file), path.join(h.repo, file));
+  }
+  fs.mkdirSync(path.join(h.repo, 'test', 'gates'));
+  fs.writeFileSync(path.join(h.repo, 'test', 'gates', '.keep'), '');
+  const one = (body) => fs.writeFileSync(path.join(h.repo, 'test', 'one.test.js'), `require('node:test')('one', () => {\n  ${body}\n});\n`);
+  one("require('node:assert/strict').ok(true);");
+  h.git(['add', '.']);
+  h.git(['commit', '-qm', 'baseline suite']);
+  const baseline = h.git(['rev-parse', 'HEAD']);
+  // The head's test spins, so its file CPU is the larger whatever the load.
+  one("const end = Date.now() + 400; let n = 0; while (Date.now() < end) n++; require('node:assert/strict').ok(n > 0);"); // wait-allow: the profile measures CPU work
+  const out = path.join(h.base, 'profile.json');
+  const r = cp.spawnSync(process.execPath, [path.join(h.repo, 'scripts', 'suite-profile.js'), '--test-concurrency=1', '--baseline', baseline, '--json', out, 'test/one.test.js'],
+    { cwd: h.repo, env: { ...h.env, TOWER_CRANE_TEST_TMP: h.base, TOWER_CRANE_SANDBOX: '0' }, encoding: 'utf8', timeout: 300000 });
+  // Inside a suite run the cgroup holds other test files too, so the verdict can go either way; the exit follows it.
+  assert.equal(r.status, /: not lower$/m.test(r.stdout) ? 1 : 0, r.stderr + r.stdout);
+  assert.match(r.stdout, new RegExp(`^# suite profile: baseline run 1 of 1 in ${h.base.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/suite-baseline-[^/]+/tree$`, 'm'));
+  assert.match(r.stdout, /^median of 1: CPU seconds \((cgroup|file processes)\) head [\d.]+ vs baseline [\d.]+ .*: (lower|not lower)$/m);
+  const profile = JSON.parse(fs.readFileSync(out, 'utf8'));
+  assert.deepEqual(profile.runs.map((x) => [x.tree, x.status, x.longest_file.file]), [['baseline', 0, 'test/one.test.js'], ['head', 0, 'test/one.test.js']]);
+  assert.ok(profile.runs[1].file_cpu_ms > profile.runs[0].file_cpu_ms + 200, JSON.stringify(profile.runs));
+  assert.deepEqual(h.git(['worktree', 'list', '--porcelain']).split('\n').filter((line) => line.startsWith('worktree ')).length, 1, 'the baseline worktree is removed');
+  assert.deepEqual(fs.readdirSync(h.base).filter((name) => name.startsWith('suite-baseline-')), [], 'its directory is removed');
 });
