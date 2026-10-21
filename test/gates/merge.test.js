@@ -59,7 +59,9 @@ test('release merges require green completed push CI even with a newer pending r
       if (args[0] === 'pr' && args[1] === 'merge') { merged = true; return result(''); }
       return null;
     });
-    const r = await gate.run(ctx(gh));
+    const context = ctx(gh);
+    context.inboxExec = () => { throw new Error('release CI must not read the inbox cache'); };
+    const r = await gate.run(context);
     const green = ['success', 'neutral', 'skipped'].includes(conclusion);
     assert.equal(r.ok, green, r.summary);
     assert.equal(merged, green);
