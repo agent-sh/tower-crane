@@ -10,6 +10,7 @@ const { gateEvidence } = require('./gate-helpers');
 const { waitOnRepo } = require('./signals');
 const S = require('../lib/state');
 const Body = require('../lib/review-body');
+const { readPublished, writeAtomic } = require('./atomic-file');
 
 function fixture(t) {
   const h = cachedFixture(t, 'reviewer-refill', (repo) => {
@@ -27,7 +28,7 @@ function fixture(t) {
     }
     return h;
   });
-  h.logs = () => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  h.logs = () => readPublished(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
   return h;
 }
 
@@ -159,7 +160,7 @@ Spawn.spawn = (ctx) => {
       assert.equal(spawns.some((e) => e.task === admitted), stage !== 'dispatch lock',
         'only a dispatch lock holds the other kind');
       assert.equal(spawns.some((e) => [blocked, 'T3'].includes(e.task)), false, 'the deferred kind and its sibling stay queued');
-      const checks = fs.readFileSync(trace, 'utf8').trim().split('\n').map(JSON.parse);
+      const checks = readPublished(trace, 'utf8').trim().split('\n').map(JSON.parse);
       for (const unit of ['worker', 'reviewer']) {
         assert.equal(checks.filter((c) => c.op === 'check' && c.phase === 'refill' && c.pass === 1 && c.kind === unit).length, 1,
           'each kind gets one precheck in the first refill pass');
@@ -190,13 +191,14 @@ for (const [automatic, stage, pendingExplicit] of [
       const input = path.join(h.base, 'light-marker.json');
       const preload = path.join(h.base, 'light-governor.js');
       fs.writeFileSync(preload, `const fs = require('node:fs');
+const { readPublished } = require(${JSON.stringify(path.join(__dirname, 'atomic-file.js'))});
 const G = require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'governor.js'))});
 const T = require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'tasks.js'))});
 const { TowerCraneError } = require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'util.js'))});
 const accept = T.accept;
 T.accept = (ctx) => {
   const marker = ${automatic} && fs.existsSync(${JSON.stringify(input)})
-    ? JSON.parse(fs.readFileSync(${JSON.stringify(input)}, 'utf8')) : null;
+    ? JSON.parse(readPublished(${JSON.stringify(input)}, 'utf8')) : null;
   return accept({ ...ctx, automatic: !!marker, ...(marker ? { bodyRecheck: marker } : {}) });
 };
 for (const method of ['check', 'admit']) {
@@ -219,7 +221,7 @@ for (const method of ['check', 'admit']) {
         const task = h.json(['task', 'show', 'T1']);
         const marker = { sha, revision: 1, pr: 7, branch: 'fixture-change',
           review: task.evidence.findLast((e) => e.type === 'review'), body_hash: `corrected-${round}` };
-        fs.writeFileSync(input, JSON.stringify(marker));
+        writeAtomic(input, JSON.stringify(marker));
         fs.writeFileSync(held, '');
         assert.equal(h.run(['accept', 'T1', '--agent', 'orchestrator'], { pre: ['--require', preload] }).code, 3);
         const debt = h.json(['status']).deferred_reviewers[0];
@@ -256,6 +258,7 @@ for (const schedule of ['each check', 'each second']) {
       const latest = path.join(h.base, 'latest-governor.json');
       const preload = path.join(h.base, 'changing-governor.js');
       fs.writeFileSync(preload, `const fs = require('node:fs');
+const { readPublished, writeAtomic } = require(${JSON.stringify(path.join(__dirname, 'atomic-file.js'))});
 const G = require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'governor.js'))});
 const { TowerCraneError } = require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'util.js'))});
 const latest = ${JSON.stringify(latest)};
@@ -263,13 +266,13 @@ for (const method of ['check', 'admit']) {
   const original = G[method];
   G[method] = (ctx, unit) => {
     if (method === ${JSON.stringify(stage)} && unit.kind === 'reviewer') {
-      const prior = fs.existsSync(latest) ? JSON.parse(fs.readFileSync(latest, 'utf8')) : { checks: 0 };
+      const prior = fs.existsSync(latest) ? JSON.parse(readPublished(latest, 'utf8')) : { checks: 0 };
       const checks = prior.checks + 1;
       // A broken self-wake loop must fail the fixture before flooding its log.
       if (checks > 32) throw new Error('runaway governor probes');
       const reading = ${JSON.stringify(schedule)} === 'each check' ? checks : Math.floor(Date.now() / 1000);
       const reason = 'load: ' + reading + ' on 16 cores';
-      fs.writeFileSync(latest, JSON.stringify({ checks, reason }));
+      writeAtomic(latest, JSON.stringify({ checks, reason }));
       throw Object.assign(new TowerCraneError(3, unit.task + ': reviewer deferred by the host governor: ' + reason),
         { governorDeferred: true, task: unit.task, kind: unit.kind, reason });
     }
@@ -280,7 +283,7 @@ const view = G.view;
 G.view = (ctx, project) => {
   const current = view(ctx, project);
   if (fs.existsSync(latest)) current.deferred.push({ task: 'T1', kind: 'reviewer',
-    reason: JSON.parse(fs.readFileSync(latest, 'utf8')).reason, since: '2026-10-20T12:00:00Z', at: new Date().toISOString() });
+    reason: JSON.parse(readPublished(latest, 'utf8')).reason, since: '2026-10-20T12:00:00Z', at: new Date().toISOString() });
   return current;
 };
 `);
@@ -291,7 +294,7 @@ G.view = (ctx, project) => {
       assert.equal(h.logs().filter((e) => e.cmd === 'review dispatch deferred').length, 1, 'reading changes never append another outstanding debt');
       assert.equal(result.code, 2, result.stderr);
       assert.equal(JSON.parse(result.stdout).type, 'timeout', 'the wait reaches its own deadline');
-      const observed = JSON.parse(fs.readFileSync(latest, 'utf8'));
+      const observed = JSON.parse(readPublished(latest, 'utf8'));
       assert.ok(observed.checks > 1, 'the governor is retried during the wait');
       assert.notEqual(observed.reason, debt.reason);
       const status = h.json(['status'], { pre: ['--require', preload] });
@@ -311,6 +314,7 @@ for (const mode of ['ordinary', 'governor', 'mixed']) {
     const preload = path.join(h.base, 'retry-refill.js');
     fs.writeFileSync(seed, '');
     fs.writeFileSync(preload, `const fs = require('node:fs');
+const { writeAtomic } = require(${JSON.stringify(path.join(__dirname, 'atomic-file.js'))});
 const G = require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'governor.js'))});
 const A = require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'automation.js'))});
 const Spawn = require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'spawn.js'))});
@@ -341,7 +345,7 @@ A.refillWorkers = async (ctx, attempt) => {
   Date.now = () => retryAt ? retryAt + 1 : now() + 60001;
   try { await refill(ctx, attempt); } finally { Date.now = now; }
   counts.push({ probes, dispatches });
-  fs.writeFileSync(${JSON.stringify(trace)}, JSON.stringify(counts));
+  writeAtomic(${JSON.stringify(trace)}, JSON.stringify(counts));
 };
 `);
     if (mode === 'mixed') {
@@ -358,7 +362,7 @@ G.check = (ctx, unit) => { throw Object.assign(new TowerCraneError(3, 'fixture d
     const result = h.run(['wait', '--types', 'never', '--timeout', '0.01', '--agent', 'orchestrator'], // wait-allow: bounded CLI wait drives three refill probes with an explicit clock advance
       { pre: ['--require', preload] });
     assert.equal(result.code, 2, result.stderr);
-    const counts = JSON.parse(fs.readFileSync(trace, 'utf8'));
+    const counts = JSON.parse(readPublished(trace, 'utf8'));
     assert.deepEqual(counts.map((c) => c.probes), mode === 'ordinary' ? [1, 1, 2] : [1, 2, 3],
       'ordinary refusals wait a minute while governor deferrals retry every pass');
     assert.deepEqual(counts.map((c) => c.dispatches), mode === 'ordinary' ? [1, 1, 2] : mode === 'mixed' ? [1, 2, 3] : [0, 0, 0],
