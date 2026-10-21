@@ -7,16 +7,30 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { BIN } = require('./helpers');
+const { BIN, cachedFixture } = require('./helpers');
 const { waitFor } = require('./canary');
 const { shellQuote } = require('../lib/gates/common');
 const { readPublished } = require('./atomic-file');
-const { setup } = require('./automation-helpers');
+const { setup, attach } = require('./automation-helpers');
 
 // A second PR that touches other files, and a suite command that logs each
-// run with PR #7's state at that moment.
+// run with PR #7's state at that moment. Both PRs are submitted and through
+// their gates; the file builds that once and each test gets a copy.
 function queueFixture(t) {
-  const h = setup(t);
+  const h = cachedFixture(t, 'queue', (repo) => buildQueue(setup(null, { repo })));
+  attach(h);
+  h.suites = () => (fs.existsSync(h.suiteLog)
+    ? readPublished(h.suiteLog, 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse) : []);
+  h.moveMain = (file = 'README.md', text = 'Independent base update.\n') => {
+    h.git(['switch', '-q', 'main']);
+    fs.appendFileSync(path.join(h.repo, file), text);
+    h.git(['add', file]);
+    h.git(['commit', '-qm', 'advance main']);
+  };
+  return h;
+}
+
+function buildQueue(h) {
   h.git(['switch', '-qc', 'second-change', 'main']);
   fs.writeFileSync(path.join(h.repo, 'other.js'), 'module.exports = 2;\n');
   fs.mkdirSync(path.join(h.repo, 'test'), { recursive: true });
@@ -54,14 +68,6 @@ if (fs.existsSync(during)) {
 for (const f of fs.readdirSync('test')) if (f.endsWith('.test.js')) require(path.resolve('test', f));
 `);
   h.ok(['project', 'set', '--tests-cmd', `${shellQuote(process.execPath)} ${shellQuote(suite)}`]);
-  h.suites = () => (fs.existsSync(h.suiteLog)
-    ? readPublished(h.suiteLog, 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse) : []);
-  h.moveMain = (file = 'README.md', text = 'Independent base update.\n') => {
-    h.git(['switch', '-q', 'main']);
-    fs.appendFileSync(path.join(h.repo, file), text);
-    h.git(['add', file]);
-    h.git(['commit', '-qm', 'advance main']);
-  };
   h.submit();
   h.submit('T2', h.second, '8');
   h.consume();
@@ -69,7 +75,7 @@ for (const f of fs.readdirSync('test')) if (f.endsWith('.test.js')) require(path
     const gates = h.json(['task', 'show', id]).gates.gates;
     assert.ok(gates.filter((g) => g.type !== 'review').every((g) => g.ok), JSON.stringify(gates));
   }
-  return h;
+  return { sha: h.sha, second: h.second, suiteLog: h.suiteLog };
 }
 
 const headChecks = (h) => h.logs().filter((e) => e.cmd === 'head check');

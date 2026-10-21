@@ -5,12 +5,16 @@
 
 const { eventAppended } = require('./signals');
 const test = require('node:test');
+const { describe } = test;
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { gateFixture } = require('./gate-helpers');
 const { log, setup, child, event } = require('./events-helpers');
 
+// Most of each race is waiting on the other side's jittered state calls, and
+// each test races in a fixture of its own, so the three run side by side.
+describe('merge races', { concurrency: true }, () => {
 // Ten rounds took 232 to 270 s on hosted Windows, at the 300 s hung-test timeout,
 // so they run as two tests of five; each covers every stagger once.
 for (const pass of [1, 2]) test(`a manual merge racing the merge queue under another task's reaction: one merges, the other confirms (pass ${pass} of 2)`, async (t) => {
@@ -91,4 +95,5 @@ test('a manual merge racing an automatic merge of the same task: one merges, the
     assert.deepEqual(receipts.filter((e) => e.detail.phase !== 'done'), [], `${id}: no automatic failure`);
   }
   t.diagnostic(`merged first: automation ${winners.automation}, manual ${winners.manual}`);
+});
 });

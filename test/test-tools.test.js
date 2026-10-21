@@ -228,7 +228,7 @@ test('mutation fallback requires a green baseline in a copy containing all test 
     fs.mkdirSync(path.dirname(target), { recursive: true });
     fs.writeFileSync(target, text);
   };
-  for (const file of ['test/run.js', 'test/signals.js', 'test/atomic-file.js', 'test/global-setup.js', 'test/host.js', 'test/repo-seed.js', 'test/tmp-root.js', 'test/fixtures/user-config-guard.js', 'test/fixtures/report-guard.js']) {
+  for (const file of ['test/run.js', 'test/signals.js', 'test/atomic-file.js', 'test/global-setup.js', 'test/host.js', 'test/repo-seed.js', 'test/tmp-root.js', 'test/fixtures/user-config-guard.js', 'test/fixtures/report-guard.js', 'test/fixtures/no-fsync.js']) {
     write(file, fs.readFileSync(path.join(ROOT, file), 'utf8'));
   }
   write('test/gates/.keep', '');
@@ -321,21 +321,52 @@ test('the suite profile sums leaf tests per file and marks tests that ran beside
     [['sleeps', 'test/a.test.js', 100], ['y|z\\', 'test/b.test.js', null], ['x', 'test/b.test.js', null], ['works', 'test/a.test.js', 500]]);
   assert.deepEqual([s.test_wall_ms, s.serial_wall_ms, s.serial_cpu_ms, s.file_wall_ms, s.file_cpu_ms], [2900, 1500, 600, 2600, 1500]);
   assert.deepEqual(s.files.map((f) => [f.file, f.tests, f.wall_ms, f.cpu_ms]), [['test/a.test.js', 2, 1600, 650], ['test/b.test.js', 2, 1000, 850]]);
+  assert.deepEqual(s.longest_file, { file: 'test/a.test.js', wall_ms: 1600 });
   const text = report(s, { wall_ms: 1700, concurrency: 2, top: 30 });
   assert.match(text, /^suite wall 1\.7 s at 2 file workers; 4 tests, 2\.9 s summed test time$/m);
+  assert.match(text, /^longest file: `test\/a\.test\.js` 1\.6 s$/m);
   assert.match(text, /^serial tests: 1\.5 s, 0\.6 s CPU: 60% waiting$/m);
   assert.match(text, /^\| 1 \| sleeps \| `test\/a\.test\.js` \| 1\.0 \| 0\.1 \| 90% \|$/m);
   assert.match(text, /^\| 2 \| y\\\|z\\\\ \| `test\/b\.test\.js` \| 0\.8 \| - \| overlapped \|$/m, 'cells escape the separator and the escape');
   assert.match(text.split('\n').pop(), /^serial tests: /, 'the summary ends the report, where a log tail keeps it');
   s.tests[0].name = 'n'.repeat(150);
-  const host = { cores: 24, cgroup: '/gate.scope', load_start: 2.04, load_peak: 13.96, load_end: 9.5, memory_start: 100 * 1048576, memory_peak: 2616 * 1048576 };
-  const hosted = report(s, { wall_ms: 1700, concurrency: 2, top: 30, host, max_wall_s: 600 });
+  const host = { cores: 24, cgroup: '/gate.scope', load_start: 2.04, load_peak: 13.96, load_end: 9.5, memory_start: 100 * 1048576, memory_peak: 2616 * 1048576,
+    cpu_ms: 4321000, pressure: { some_ms: 850, full_ms: 170, some_avg10_peak: 61.25, full_avg10_peak: 12 } };
+  const hosted = report(s, { wall_ms: 1700, concurrency: 2, top: 30, host });
   assert.match(hosted, new RegExp(`^\\| 1 \\| ${'n'.repeat(97)}\\.\\.\\. \\|`, 'm'), 'a long name is cut to 100 characters');
   assert.match(hosted, /^host: 24 cores; 1-minute load 2\.0 at start, peak 14\.0, 9\.5 at end$/m);
-  assert.match(hosted, /^memory: peak 2516 MiB above the start in cgroup \/gate\.scope$/m);
-  assert.match(hosted.split('\n').pop(), /^under the 600 s limit$/);
-  assert.match(report(s, { wall_ms: 600000, concurrency: 2, top: 30, max_wall_s: 600 }), /^over the 600 s limit$/m, 'the limit itself is over');
-  assert.match(report(s, { wall_ms: 1700, concurrency: 2, top: 30, host: { ...host, memory_peak: null } }), /^memory: no cgroup memory\.current to read$/m);
+  assert.match(hosted, /^CPU: 4321\.0 s in cgroup \/gate\.scope, detached processes included$/m);
+  assert.match(hosted, /^CPU pressure: some 0\.8 s \(50% of wall\), full 0\.2 s \(10%\); avg10 peak some 61\.3%, full 12\.0%$/m);
+  assert.match(hosted.split('\n').pop(), /^memory: peak 2516 MiB above the start in cgroup \/gate\.scope$/);
+  assert.doesNotMatch(hosted, /limit/, 'the profile sets no wall limit');
+  const bare = report(s, { wall_ms: 1700, concurrency: 2, top: 30, host: { ...host, memory_peak: null, cpu_ms: null, pressure: null } });
+  assert.match(bare, /^memory: no cgroup memory\.current to read$/m);
+  assert.match(bare, /^CPU pressure: no cgroup cpu\.pressure to read$/m);
+  assert.doesNotMatch(bare, /^CPU: /m);
+});
+
+test('the suite profile compares the medians of interleaved baseline and head runs', () => {
+  const { compare } = require('../scripts/suite-profile');
+  const run = (tree, cpu, longest, extra = {}) => ({ tree, status: 0, wall_ms: 600000, file_cpu_ms: cpu - 1000,
+    longest_file: { file: 'test/a.test.js', wall_ms: longest }, host: { load_start: 1, load_peak: 2, load_end: 3, cpu_ms: cpu, pressure: { some_ms: 5000 } }, ...extra });
+  const lower = compare([run('baseline', 5000e3, 400e3), run('head', 4000e3, 300e3), run('baseline', 9000e3, 900e3), run('head', 4500e3, 250e3), run('baseline', 5200e3, 380e3), run('head', 6000e3, 500e3)]);
+  assert.equal(lower.ok, true, lower.text);
+  assert.match(lower.text, /^median of 3: CPU seconds \(cgroup\) head 4500\.0 vs baseline 5200\.0 \(-13\.5%\): lower$/m);
+  assert.match(lower.text, /^median of 3: longest file wall s head 300\.0 vs baseline 400\.0 \(-25\.0%\): lower$/m);
+  assert.match(lower.text, /^\| 2 \| head \| passed \| 600\.0 \| 4000\.0 \| 3999\.0 \| 300\.0 \| 1\.0, 2\.0, 3\.0 \| 5\.0 \|$/m);
+  const cases = [
+    ['CPU not lower', [run('baseline', 5000e3, 400e3), run('head', 5000e3, 300e3)], /CPU seconds .*: not lower$/m],
+    ['longest file not lower', [run('baseline', 5000e3, 400e3), run('head', 4000e3, 401e3)], /longest file wall s .*\(\+0\.3%\): not lower$/m],
+    ['a failed head run', [run('baseline', 5000e3, 400e3), run('head', 1000e3, 100e3, { status: 1 })], /^1 of 1 head runs failed$/m],
+    ['no baseline run', [run('head', 1000e3, 100e3)], /^\| 1 \| head \|/m],
+  ];
+  for (const [name, runs, line] of cases) {
+    const r = compare(runs);
+    assert.equal(r.ok, false, name);
+    assert.match(r.text, line, name);
+  }
+  const files = compare([run('baseline', 5000e3, 400e3, { host: null }), run('head', 4000e3, 300e3, { host: null })]);
+  assert.match(files.text, /^median of 1: CPU seconds \(file processes\) head 3999\.0 vs baseline 4999\.0/m, 'without a cgroup the file processes are summed');
 });
 
 test('the suite profile records each test of a real run with its CPU', { skip: process.platform !== 'linux' && 'CPU comes from /proc' }, (t) => {
@@ -347,12 +378,17 @@ require('node:test')('waits', () => { assert.equal(Atomics.wait(new Int32Array(n
 require('node:test')('spins', () => { const end = Date.now() + 400; let n = 0; while (Date.now() < end) n++; assert.ok(n > 0); }); // wait-allow: the profile measures CPU work
 `);
   const out = path.join(h.base, 'profile.json');
-  const r = cp.spawnSync(process.execPath, [path.join(ROOT, 'scripts', 'suite-profile.js'), '--test-concurrency=1', '--json', out, '--max-wall', '0.5', fixture],
+  // This checkout stands in for the baseline, so the verdict is a coin toss; the exit follows it.
+  const r = cp.spawnSync(process.execPath, [path.join(ROOT, 'scripts', 'suite-profile.js'), '--test-concurrency=1', '--json', out, '--baseline-dir', ROOT, fixture],
     { cwd: ROOT, env: { ...h.env, TOWER_CRANE_TEST_TMP: h.base }, encoding: 'utf8', timeout: 300000 });
-  assert.equal(r.status, 1, r.stderr + r.stdout);
-  assert.match(r.stdout, /^over the 0\.5 s limit$/m, 'a passing suite that took longer than --max-wall fails the run');
+  assert.equal(r.status, /: not lower$/m.test(r.stdout) ? 1 : 0, r.stderr + r.stdout);
+  assert.match(r.stdout, /^# suite profile: baseline run 1 of 1 in /m);
   assert.match(r.stdout, /^host: \d+ cores; 1-minute load /m);
+  assert.match(r.stdout, /^median of 1: CPU seconds \((cgroup|file processes)\) head [\d.]+ vs baseline [\d.]+ .*: (lower|not lower)$/m);
+  assert.match(r.stdout.trim().split('\n').pop(), /^median of 1: longest file wall s /, 'the verdict ends the log, where a probe receipt keeps it');
   const profile = JSON.parse(fs.readFileSync(out, 'utf8'));
+  assert.deepEqual(profile.runs.map((x) => [x.tree, x.status, x.longest_file.file]), [['baseline', 0, path.relative(ROOT, fixture)], ['head', 0, path.relative(ROOT, fixture)]]);
+  assert.equal(profile.comparison.ok, r.status === 0);
   assert.equal(profile.status, 0, 'the suite itself passed');
   assert.ok(profile.host.load_peak >= 0 && profile.host.cores > 0, JSON.stringify(profile.host));
   const byName = Object.fromEntries(profile.tests.map((x) => [x.name, x]));

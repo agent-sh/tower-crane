@@ -115,6 +115,8 @@ const args = [
   `--require=${path.join(__dirname, 'fixtures', 'user-config-guard.js')}`,
   // Every test file fails when its process ends before the runner has all its tests.
   `--require=${path.join(__dirname, 'fixtures', 'report-guard.js')}`,
+  // State a test file writes in its own process skips the flush to disk, as its CLIs do.
+  `--require=${path.join(__dirname, 'fixtures', 'no-fsync.js')}`,
   ...flags,
 ];
 let list = files.length ? files : testFiles();

@@ -20,7 +20,8 @@ const { readPublished } = require('./atomic-file');
 const GATE_SKIP = process.platform === 'win32' && 'the lease gate is POSIX-only';
 // A dispatch that finds no /bin/sh spawns its workers through the Windows launch handshake.
 const NO_SH = { HOOK_NO_SH: '1' };
-const windowsConcurrency = process.platform === 'win32' ? 2 : false;
+// Independent cases run two at a time on every platform: most of each one waits on its child processes.
+const caseConcurrency = 2;
 // Long enough for a supervisor to boot on a loaded host, well under the production 10 s;
 // Windows, whose supervisor starts slower, keeps the production window.
 const SHORT_STARTUP_MS = process.platform === 'win32' ? 10000 : 4000;
@@ -239,7 +240,7 @@ test('outages come only from harness error envelopes and stderr, and quoted erro
     transient(1, null, true), transient(1, null, false), transient(0, null, true)], [true, true, true, true, false, false]);
 });
 
-describe('independent retry cases', { concurrency: windowsConcurrency }, () => {
+describe('independent retry cases', { concurrency: caseConcurrency }, () => {
 test('a recorded Bedrock outage reruns with the session and claim kept', (t) => {
   const [attempt] = bedrockOutage.attempts;
   const h = setup(t, { records: attempt.records.filter((record) => record.type === 'error') });
@@ -504,7 +505,7 @@ test('release during backoff fences the old supervisor from a replacement claim'
   assert.equal(log(h).filter((e) => e.cmd === 'spawn retry').length, 0);
 });
 
-describe('other supervision cases', { concurrency: windowsConcurrency }, () => {
+describe('other supervision cases', { concurrency: caseConcurrency }, () => {
 test('an expired previous claim does not stop supervision before a slow replacement claims', (t) => {
   const h = setup(t, { claimDelay: 350 });
   h.ok(['claim', 'T1', '--agent', 'previous-worker', '--lease', '1']);
@@ -808,7 +809,7 @@ test('a state-lock timeout preserves the pending retry without spending another 
   assert.ok(holdings[retry].wait_ms <= 2 * lockWait, JSON.stringify(holdings[retry]));
 });
 
-describe('remaining supervision settings', { concurrency: windowsConcurrency }, () => {
+describe('remaining supervision settings', { concurrency: caseConcurrency }, () => {
 test('rung supervision settings validate and clear through the CLI', (t) => {
   const h = setup(t);
   for (const config of [{ retries: -1 }, { backoff_ms: 0 }, { max_backoff_ms: 1 }, { progress_paths: ['../escape'] }, { typo: 1 }]) {
@@ -1004,7 +1005,7 @@ test('quiet supervision samples state and progress paths on a seconds-scale inte
   }
 });
 
-describe('supervision completion cases', { concurrency: windowsConcurrency }, () => {
+describe('supervision completion cases', { concurrency: caseConcurrency }, () => {
 test('Windows natural exits do not send taskkill to an exited or reused pid', (t) => {
   const h = setup(t, { failures: 0 });
   const audit = path.join(h.base, 'taskkill.jsonl');
