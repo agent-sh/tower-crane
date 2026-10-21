@@ -58,6 +58,8 @@ if (require.main !== module) {
   };
 } else {
   try {
+    // Like systemd-run, an absent runtime directory leaves only the session bus.
+    if (!process.env.XDG_RUNTIME_DIR) throw new Error('systemd-run could not reach the private socket; runtime directory is unset');
     const args = process.argv.slice(2);
     const separator = args.indexOf('--');
     const properties = {};

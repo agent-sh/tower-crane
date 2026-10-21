@@ -498,6 +498,80 @@ test('systemd CLI and D-Bus launches use supported OOM policy and retain caps', 
   }
 });
 
+const scopeRuntimeCases = [
+  ['runtime absent and bus stale', undefined, 'unix:path=/nonexistent/stale-bus'],
+  ['runtime and bus absent', undefined, undefined],
+  ['runtime empty and bus stale', '', 'unix:path=/nonexistent/stale-bus'],
+  ['custom runtime and bus stale', '/custom/runtime', 'unix:path=/nonexistent/stale-bus'],
+];
+
+test('configured scopes share the probe runtime directory and preserve the command environment', {
+  skip: process.platform !== 'linux',
+}, async (t) => {
+  const h = fixture(t);
+  const cp = require('node:child_process');
+  const fake = path.join(__dirname, 'fixtures', 'containment-systemd.js');
+  const unit = 'tower-crane-123-0123456789abcdef.scope';
+  const limits = { tasks_max: 64, memory_max_bytes: memory };
+  for (const [name, runtime, bus] of scopeRuntimeCases) {
+    for (const fleet of [false, true]) {
+      const label = `${name}-${fleet}`;
+      const group = path.join(h.base, label, unit);
+      fs.mkdirSync(group, { recursive: true });
+      const report = path.join(h.base, `${label}-report.json`);
+      const env = { ...h.env, XDG_RUNTIME_DIR: runtime, DBUS_SESSION_BUS_ADDRESS: bus,
+        TC_FAKE_CGROUP: group, TC_FAKE_SYSTEMD_LOG: path.join(h.base, `${label}.jsonl`),
+        TOWER_CRANE_CONTAINMENT_REPORT: report };
+      const spawnSync = cp.spawnSync;
+      scopeHost(t, '/user.slice/user-1000.slice/user@1000.service/test-fence.slice/session.scope');
+      t.mock.method(cp, 'spawnSync', (file, args, opts) => {
+        if (file !== 'busctl') return spawnSync(file, args, opts);
+        assert.equal(args[0], `--address=unix:path=${runtime || '/run/user/1000'}/systemd/private`);
+        assert.equal(opts.env, env);
+        return { status: 0 };
+      });
+      let plan;
+      try {
+        plan = C.launchPlan(process.execPath, ['-e', `console.log(JSON.stringify({
+          scoped: process.env.TOWER_CRANE_SCOPED,
+          runtime: process.env.XDG_RUNTIME_DIR ?? null,
+          bus: process.env.DBUS_SESSION_BUS_ADDRESS ?? null
+        }))`], { env, resources: limits, scope: { CPUQuota: '200%' }, fleet }, unit);
+      } finally { t.mock.restoreAll(); }
+      assert.equal(plan.argv[0], 'systemd-run', label);
+      const result = await G.treeExec(process.execPath, [fake, ...plan.argv.slice(1)], {
+        env: { ...env, ...plan.scopeEnv },
+      });
+      const registration = fs.existsSync(report) ? JSON.parse(readPublished(report, 'utf8')) : {};
+      assert.equal(result.status, 0, `${label}: ${result.stderr}${registration.error || ''}`);
+      assert.deepEqual(JSON.parse(result.stdout), { scoped: '1', runtime: runtime ?? null, bus: bus ?? null }, label);
+      assert.equal(env.XDG_RUNTIME_DIR, runtime, 'planning does not mutate the caller environment');
+      assert.equal(fs.readFileSync(path.join(group, 'memory.oom.group'), 'utf8'), fleet ? '0' : '1');
+    }
+  }
+});
+
+test('CLI configured-scope dry runs show the private-socket runtime and preserve its original value', {
+  skip: process.platform !== 'linux',
+}, (t) => {
+  const h = fixture(t);
+  h.ok(['ladder', 'set', 'easy', '--harness', 'command', '--command',
+    JSON.stringify([process.execPath, '-e', 'process.exit(0)', '{prompt}']),
+    '--clear', 'profile', '--clear', 'effort', '--scope', '{"CPUQuota":"200%"}']);
+  const manager = path.join(__dirname, 'fixtures', 'containment-manager.js');
+  for (const [name, runtime, bus] of scopeRuntimeCases) {
+    const result = h.json(['spawn', '--task', 'T1', '--dry-run'], { env: {
+      NODE_OPTIONS: `${h.env.NODE_OPTIONS} --require ${JSON.stringify(manager)}`,
+      TC_FAKE_MANAGER_LOG: path.join(h.base, 'runtime-manager.log'),
+      XDG_RUNTIME_DIR: runtime, DBUS_SESSION_BUS_ADDRESS: bus,
+    } });
+    assert.equal(result.argv[0], 'systemd-run', name);
+    assert.equal(result.env.XDG_RUNTIME_DIR, runtime || `/run/user/${process.getuid()}`, name);
+    const runner = result.argv.findIndex(arg => arg.endsWith('containment-runner.js'));
+    assert.equal(JSON.parse(result.argv[runner + 1]).xdg_runtime_dir, runtime ?? null, name);
+  }
+});
+
 test('ordinary fixture launches preserve hooks and spawn options without containment', async () => {
   const h = fixture();
   const env = { ...h.env };

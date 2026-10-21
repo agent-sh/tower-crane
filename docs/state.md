@@ -657,10 +657,16 @@ optional scope properties are set) in the caller's slice with `TasksMax`, `Memor
 `MemorySwapMax=0`, `OOMPolicy=continue` and delegated memory/pids controllers.
 The availability probe and D-Bus registration both use `busctl` with
 `--address=unix:path=$XDG_RUNTIME_DIR/systemd/private`, in the launch environment.
-When `XDG_RUNTIME_DIR` is absent, the socket is `/run/user/<uid>/systemd/private`.
+When `XDG_RUNTIME_DIR` is absent or empty, the socket is `/run/user/<uid>/systemd/private`.
 Neither needs the user session bus or uses `DBUS_SESSION_BUS_ADDRESS`, so a
 missing session bus or a stale address does not break registration. An
 unreachable private socket selects the watchdog before launch.
+Configured outer scope properties use `systemd-run` with that same resolved
+`XDG_RUNTIME_DIR`, including when the caller left it unset or empty. Once the
+scope is ready, the runner restores the caller's original runtime directory
+value before executing the command. The wrapper's transport setting does not
+change the agent or gate command's environment. Dry runs show the wrapper's
+runtime directory and the runner's restoration setting.
 The runner sets `memory.oom.group=1` for attempts, so a cgroup OOM stops the
 whole attempt, and the supervisor reports `resource-memory-max` from local OOM
 events. Orchestrator fleet scopes use `memory.oom.group=0`; an OOM in an attempt does not group-kill its healthy
