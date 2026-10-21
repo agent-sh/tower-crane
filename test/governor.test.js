@@ -373,13 +373,13 @@ test('gate stop verification follows the suite identity through process lifecycl
   const suite = { pid: process.pid, ...Processes.identity(process.pid) };
   const statPath = `/proc/${suite.pid}/stat`;
   const read = fs.readFileSync;
-  const signal = process.kill;
   const stat = read(statPath, 'utf8');
   const boundary = stat.lastIndexOf(')') + 2;
   const fields = stat.slice(boundary).trim().split(/\s+/);
   let row;
   t.mock.method(process, 'kill', function (pid, sig) {
-    if (pid !== suite.pid || sig !== 0) return signal.call(this, pid, sig);
+    assert.equal(pid, suite.pid, 'the lifecycle probe reads only its own PID');
+    assert.equal(sig, 0, 'the lifecycle probe never sends a signal');
     if (row.missing) throw Object.assign(new Error('gone'), { code: 'ESRCH' });
     return true;
   });
