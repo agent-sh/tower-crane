@@ -155,6 +155,20 @@ if (process.execArgv.includes('-e') && process.env.TOWER_CRANE_SESSION
     await until(t, [h.base], () => exits.has(child.pid) || !detachedAlive(child));
     return { exited: exits.get(child.pid) || Promise.resolve() };
   };
+  // A submit or reviewer reaction can finish before this worker's monitor
+  // drains its own exit reactions. Its socket closure observes completion.
+  h.settled = async (agent) => {
+    const worker = events(h).findLast((e) => e.cmd === 'spawn' && e.detail.agent === agent);
+    assert.ok(worker, `no dispatch for ${agent}`);
+    const { exited } = await h.exitSignal({ pid: worker.detail.monitor_pid });
+    await exited;
+  };
+  // Review runs before tests, so the worker's exit reactions can dispatch a
+  // reviewer; recovery waits while either monitor runs.
+  h.drained = async () => {
+    await h.settled('worker-T1-1');
+    for (const e of events(h).filter((e) => e.cmd === 'spawn' && e.detail.role === 'reviewer')) await h.settled(e.detail.agent);
+  };
   t.after(async () => {
     try {
       if (t.signal.aborted) {
@@ -609,16 +623,8 @@ if (args.some((arg) => arg.includes('/check-runs'))) {
 `);
       }
     });
-    // A submit or reviewer reaction can finish before this worker's monitor
-    // drains its own exit reactions. Its socket closure observes completion.
-    const settled = async (agent) => {
-      const worker = events(h).findLast((e) => e.cmd === 'spawn' && e.detail.agent === agent);
-      assert.ok(worker, `no dispatch for ${agent}`);
-      const { exited } = await h.exitSignal({ pid: worker.detail.monitor_pid });
-      await exited;
-    };
     h.ok(['spawn', '--task', 'T1']);
-    await settled('worker-T1-1');
+    await h.settled('worker-T1-1');
     for (const rung of ['medium', null]) {
       if (h.openDecisions().length === 1) break;
       const result = h.run(['check', type, 'T1', '--json'], { env: { FIXTURE_GATE_OK: '0' } });
@@ -628,7 +634,7 @@ if (args.some((arg) => arg.includes('/check-runs'))) {
         await h.until(() => h.readAttempts().length === 2
           && (h.task().status === 'submitted' || h.openDecisions().length === 1));
         assert.equal(h.json(['task', 'show', 'T1']).tier, rung);
-        await settled('worker-T1-2');
+        await h.settled('worker-T1-2');
       } else {
         await h.until(() => h.openDecisions().length === 1);
       }
@@ -667,7 +673,7 @@ for (const type of ['tests', 'clean', 'ci']) {
       }
     });
     h.ok(['spawn', '--task', 'T1']);
-    await h.until(() => events(h).some((e) => e.cmd === 'spawn exit'));
+    await h.drained();
     assert.equal(h.run(['check', type, 'T1']).code, 1);
     h.ok(['recover', 'T1']);
     assert.equal(h.json(['task', 'show', 'T1']).tier, 'easy');
@@ -688,7 +694,7 @@ for (const { status, failingTest } of [{ status: 1 }, { status: 9009 }, { status
       if (failingTest) repo.env.TOWER_CRANE_TEST_DIAGNOSTIC_IN_TEST = '1';
     });
     h.ok(['spawn', '--task', 'T1']);
-    await h.until(() => events(h).some((e) => e.cmd === 'spawn exit'));
+    await h.drained();
     const checked = h.run(['check', 'tests', 'T1', '--json']);
     assert.equal(checked.code, 1, checked.stderr);
     const result = JSON.parse(checked.stdout);
