@@ -30,8 +30,13 @@ function until(t, h, fn, message, stream) {
       let seen;
       try {
         const log = events(h);
-        const spawned = log.findLast((e) => e.cmd === 'spawn')?.detail.log;
-        seen = `last events: ${log.slice(-12).map((e) => e.cmd).join(', ')}; dispatch log ends: ${spawned ? fs.readFileSync(spawned, 'utf8').slice(-2000) : '(none)'}`;
+        const spawned = log.findLast((e) => e.cmd === 'spawn')?.detail;
+        const alive = (pid) => { try { process.kill(pid, 0); return 'alive'; } catch (e) { return e.code; } };
+        const lock = path.join(h.state, 'lock');
+        const holders = fs.existsSync(lock) ? fs.readdirSync(lock).map((n) => fs.readFileSync(path.join(lock, n), 'utf8')).join(' ') : 'none';
+        seen = `last events: ${log.slice(-12).map((e) => e.cmd).join(', ')}; supervisor ${spawned?.monitor_pid} ${spawned ? alive(spawned.monitor_pid) : '-'}; `
+          + `harness ${spawned?.pid} ${spawned?.pid ? alive(spawned.pid) : '-'}, done: ${fs.existsSync(h.done)}; state lock: ${holders}; `
+          + `dispatch log ends: ${spawned ? fs.readFileSync(spawned.log, 'utf8').slice(-2000) : '(none)'}`;
       } catch (e) { seen = `fixture unreadable: ${e.message}`; }
       process.stderr.write(`${message}: still waiting when the test was aborted; ${seen}\n`);
     }
