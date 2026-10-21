@@ -72,7 +72,7 @@ test('fixture copies retain their new creator instead of inheriting source owner
   const copy = copyRepo(t, h.base);
   const record = JSON.parse(fs.readFileSync(path.join(copy.base, OWNER_FILE), 'utf8'));
   assert.equal(record.pid, process.pid);
-  assert.ok(record.at > Date.now() - AGE_MS);
+  assert.ok(record.at > Date.now() - AGE_MS); // wait-allow: the copied fixture must have a fresh creation time under the sweep's age contract.
 });
 
 test('sweep retains unmarked, malformed and unverifiable owners', (t) => {
