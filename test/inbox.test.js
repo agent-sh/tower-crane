@@ -472,10 +472,10 @@ test('pending GitHub actions reread recent refreshes or perform one bounded obse
     const pending = h.inbox(false).items.find((i) => i.kind === 'github_pending');
     assert.ok(pending, row.name);
     assert.deepEqual(pending.action.argv, row.observe
-      ? ['wait', '--inbox', '--observe', '--timeout', '1'] : ['inbox'], row.name);
+      ? ['wait', '--inbox', '--observe', '--timeout', '1'] : ['inbox'], row.name); // wait-allow: assert the pending item's bounded observer argv
     const before = h.logs().length;
     const tasks = h.readState('tasks.json').tasks;
-    const action = h.run([...pending.action.argv, '--agent', 'orchestrator']);
+    const action = h.run([...pending.action.argv, '--agent', 'orchestrator']); // wait-allow: execute each bounded pending-data action and verify it exits without dispatch
     assert.ok([0, 2].includes(action.code), `${row.name}: ${action.stderr}`);
     assert.deepEqual(h.readState('tasks.json').tasks, tasks, `${row.name}: ready work stays untouched`);
     assert.ok(h.logs().slice(before).every((e) => !['spawn', 'automation', 'automation reconcile'].includes(e.cmd)),
