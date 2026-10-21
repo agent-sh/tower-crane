@@ -266,7 +266,8 @@ $psi.UseShellExecute = $false
 $psi.RedirectStandardInput = $true
 foreach ($name in @($psi.Environment.Keys | Where-Object { $_ -like 'TC_SHARD_*' })) { [void]$psi.Environment.Remove($name) }
 $child = [Diagnostics.Process]::Start($psi)
-[ShardJob]::Assign($job, $child.Handle)
+# Without the job the command must not run at all: cmd would read end of input and start it unguarded.
+try { [ShardJob]::Assign($job, $child.Handle) } catch { $child.Kill(); throw }
 $child.StandardInput.WriteLine('go')
 $child.StandardInput.Close()
 $limits = "limits $($maxProcesses ? $maxProcesses : 'no') processes, $($maxMemoryMb ? "$maxMemoryMb MiB" : 'no memory limit')"
