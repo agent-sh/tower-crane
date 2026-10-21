@@ -166,12 +166,6 @@ if (process.execArgv.includes('-e') && process.env.TOWER_CRANE_SESSION
     const { exited } = await h.exitSignal({ pid: worker.detail.monitor_pid });
     await exited;
   };
-  // Review runs before tests, so the worker's exit reactions can dispatch a
-  // reviewer; recovery waits while either monitor runs.
-  h.drained = async () => {
-    await h.settled('worker-T1-1');
-    for (const e of events(h).filter((e) => e.cmd === 'spawn' && e.detail.role === 'reviewer')) await h.settled(e.detail.agent);
-  };
   t.after(async () => {
     try {
       if (t.signal.aborted) {

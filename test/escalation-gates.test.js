@@ -13,6 +13,11 @@ const { gateFixture } = require('./gate-helpers');
 const { killPid } = require('./signals');
 const { events, preloadOption, setup } = require('./escalation-helpers');
 
+// These tests exercise gate failures. Review first, this fixture's reviewer,
+// which runs the worker script, exits without a verdict and is replaced at the
+// same head, so recovery would wait on it; they keep tests first.
+const testsFirst = (repo) => repo.ok(['project', 'set', '--review-policy', '{"tests_first":true}']);
+
 for (const { route, required } of [
   { route: 'tests' }, { route: 'clean' }, { route: 'ci' }, { route: 'local-ci' },
   { route: 'ci', required: 'missing' }, { route: 'ci', required: 'pending' },
@@ -21,6 +26,7 @@ for (const { route, required } of [
   test(`a confirmed ${route} gate failure${required ? ` while a required check is ${required}` : ''} climbs and reaches the owner at the range ceiling`, async (t) => {
     const h = await setup(t, 'review', 'easy..medium', (repo) => {
       gateFixture(repo);
+      testsFirst(repo);
       // Recovery inherits the check's environment; only the selected gate fails.
       const exit = "process.exit(process.env.FIXTURE_GATE_OK === '0' ? 1 : 0)";
       repo.ok(['project', 'set', '--repo', 'acme/demo', '--tests-mode', 'run-only',
@@ -84,6 +90,7 @@ for (const type of ['tests', 'clean', 'ci']) {
   test(`unconfirmed ${type} observation failures do not climb`, async (t) => {
     const h = await setup(t, 'review', 'easy..medium', (repo) => {
       gateFixture(repo);
+      testsFirst(repo);
       repo.ok(['project', 'set', '--repo', 'acme/demo']);
       if (type === 'tests') {
         repo.ok(['project', 'set', '--tests-mode', 'run-only', '--tests-cmd', 'tower-crane-missing-test-program']);
@@ -98,7 +105,7 @@ for (const type of ['tests', 'clean', 'ci']) {
       }
     });
     h.ok(['spawn', '--task', 'T1']);
-    await h.drained();
+    await h.settled('worker-T1-1');
     assert.equal(h.run(['check', type, 'T1']).code, 1);
     h.ok(['recover', 'T1']);
     assert.equal(h.json(['task', 'show', 'T1']).tier, 'easy');
@@ -111,6 +118,7 @@ for (const { status, failingTest } of [{ status: 1 }, { status: 9009 }, { status
     : `Windows command-not-found exit ${status} does not climb`, async (t) => {
     const h = await setup(t, 'review', 'easy..medium', (repo) => {
       gateFixture(repo);
+      testsFirst(repo);
       repo.ok(['project', 'set', '--repo', 'acme/demo', '--tests-mode', 'run-only',
         '--tests-cmd', 'tower-crane-missing-test-program']);
       const hook = path.join(__dirname, 'fixtures', 'windows-missing-command.js').replace(/\\/g, '/');
@@ -119,7 +127,7 @@ for (const { status, failingTest } of [{ status: 1 }, { status: 9009 }, { status
       if (failingTest) repo.env.TOWER_CRANE_TEST_DIAGNOSTIC_IN_TEST = '1';
     });
     h.ok(['spawn', '--task', 'T1']);
-    await h.drained();
+    await h.settled('worker-T1-1');
     const checked = h.run(['check', 'tests', 'T1', '--json']);
     assert.equal(checked.code, 1, checked.stderr);
     const result = JSON.parse(checked.stdout);
