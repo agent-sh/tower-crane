@@ -1265,6 +1265,33 @@ test('runaway rules: status and the board flag the same claim, from the project\
   assert.doesNotMatch(page(), /hard median/);
 });
 
+test('the board shows escalated questions as questions and only marked requests as approvals', (t) => {
+  const h = makeRepo(t);
+  useFixtureUserFile(t, h);
+  h.init();
+  h.ok(['task', 'add', '--title', 'Waiting work', '--acceptance', 'the board distinguishes questions']);
+  for (const [kind, setting] of [['technical', 'sandbox'], ['credential', 'env'], ['technical', 'budget.raise']]) {
+    h.ok(['ask', '--kind', kind, '--setting', setting, '--question', `Question about ${setting}?`,
+      '--option', 'host', '--option', 'widen', '--blocks', 'T1', '--agent', 'worker-ask']);
+  }
+  assert.equal(h.run(['project', 'set', '--merge-admin', 'true', '--agent', 'orchestrator']).code, 1);
+  const st = require('../lib/state').loadState(h.state);
+  st.decisions.decisions[0].approval_request = false;
+  delete st.decisions.decisions[2].kind;
+  st.decisions.decisions[2].technical = false;
+  st.decisions.decisions[2].escalation.change = { scope: 'T1', what: 'tokens', limit: 10 };
+  const queue = require('../lib/board/model').build(st).queue;
+  for (const id of ['D1', 'D2', 'D3']) {
+    assert.equal(queue.find((q) => q.id === id).kind, 'decision');
+    const page = require('../lib/render').renderHtml(st);
+    assert.match(page, new RegExp(`data-kind=\"decision\" data-key=\"${id}\"`));
+    assert.doesNotMatch(page, new RegExp(`data-kind=\"approval\" data-key=\"${id}\"`));
+    assert.match(page, new RegExp(`Question ${id}`));
+  }
+  assert.equal(queue.find((q) => q.id === 'D4').kind, 'approval');
+  assert.match(require('../lib/render').renderHtml(st), /data-kind=\"approval\" data-key=\"D4\"/);
+});
+
 test('the queue orders Now before Your turn, and an approval reads as a sentence', (t) => {
   const h = makeRepo(t);
   h.init();
