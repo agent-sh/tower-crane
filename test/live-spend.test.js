@@ -334,7 +334,7 @@ test('final session usage repairs spend collected before submitted supervisor re
   assert.equal(h.json(['task', 'show', 'T1']).spend.tokens, 2000, 'recollection preserves the reconciled total');
 });
 
-test('a periodic sample that crosses the budget after submit keeps early collection behind the supervisor', async (t) => {
+for (const round of [1, 2, 3, 4, 5, 6, 7, 8]) test(`a periodic sample that crosses the budget after submit keeps early collection behind the supervisor (diagnostic round ${round})`, async (t) => {
   const h = setup(t, 'claude');
   const finish = path.join(h.base, 'finish');
   const paused = path.join(h.base, 'final-paused');
