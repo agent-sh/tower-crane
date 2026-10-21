@@ -17,8 +17,10 @@ const SECRET = 'private-file-value $literal `literal`';
 
 function shortRuntime(t) {
   // Long fixture paths would send the socket leaf elsewhere and miss this case.
+  // A stand-in under /run, as the host's XDG_RUNTIME_DIR would give, needs no
+  // denial of its own, since the profile denies /run whole.
   const suffix = path.join(path.sep, `tc-${'0'.repeat(12)}`, 'tc-XXXXXX', 's');
-  return socketDir(t, MAX_SOCKET_PATH - Buffer.byteLength(suffix));
+  return socketDir(t, MAX_SOCKET_PATH - Buffer.byteLength(suffix), { outside: ['/run', '/var/run'] });
 }
 
 function assertRuntimeGrants(seen, runtimes, bus = null) {

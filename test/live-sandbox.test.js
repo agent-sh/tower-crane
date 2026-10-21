@@ -221,7 +221,7 @@ test('in a real codex sandbox forged state edits fail and the CLI writes through
 // A project at a deep path: brokers/<agent>/broker.sock is too long for a
 // socket address, and the caller's TMPDIR is under the home, as ~/.cache is
 // in production. claude's sandbox hides the home, so a socket there failed
-// every brokered command with ENOENT; the agent's own temp directory holds
+// every brokered command with ENOENT; the socket leaf the spawn grants holds
 // it instead. codex brokers over TCP, so its run checks only the deep path.
 for (const harness of ['claude', 'codex']) {
   const flag = `TOWER_CRANE_LIVE_${harness.toUpperCase()}`;
