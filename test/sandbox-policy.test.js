@@ -253,6 +253,16 @@ test('the orchestrator grants paths inside the owner\'s policy to one task, audi
   assert.ok(!writes('T2').includes(other), 'nor does the rung\'s');
 });
 
+test('a policy init sets is logged, so the next policy after a clear takes a new version', (t) => {
+  const policy = { orchestrator_may_grant: { write: ['<project>/target/**'] } };
+  const h = cachedFixture(t, 'sandbox policy at init', (h) => h.init(['--sandbox-policy', JSON.stringify(policy)]));
+  assert.equal(h.readState('project.json').sandbox_policy.version, 1);
+  assert.deepEqual(events(h).filter((e) => e.cmd === 'sandbox policy').map((e) => e.detail.version), [1]);
+  h.ok(['project', 'set', '--sandbox-policy', 'null']);
+  h.ok(['project', 'set', '--sandbox-policy', JSON.stringify(policy)]);
+  assert.equal(h.readState('project.json').sandbox_policy.version, 2, 'v1, which init set, stays taken after the clear');
+});
+
 test('a grant the policy backs is left out of a dispatch once it falls outside, even before the policy changes', { skip: NO_STUBS }, (t) => {
   const h = cachedFixture(t, 'sandbox drift', (h) => {
     h.init();
