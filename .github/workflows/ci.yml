@@ -13,6 +13,14 @@ on:
         description: 'Test only: block every shard runner so its watchdog dumps and stops it after 2 minutes'
         type: boolean
         default: false
+      profile:
+        description: 'Profile the suite against profile_baseline, three interleaved runs each, and run the mutation sample; nothing else runs'
+        type: boolean
+        default: false
+      profile_baseline:
+        description: 'The commit the suite profile compares this one with'
+        type: string
+        default: 'origin/main'
 
 permissions:
   contents: read
@@ -45,7 +53,8 @@ jobs:
 
   test:
     name: test (${{ matrix.os }}, node ${{ matrix.node }}, shard ${{ matrix.shard }})
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
+    # A profile dispatch runs only the profile and mutation jobs.
+    if: "!inputs.profile && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository)"
     runs-on: ${{ matrix.os }}
     # test/run.js splits shards by measured file time (test/durations.json). Three Windows shards
     # took 28 to 36 minutes, against test/run.js's 36-minute shard deadline, so Windows runs four.
@@ -99,7 +108,7 @@ jobs:
   # an even, measured share of the suite.
   repeats:
     name: repeat (windows-latest, node 26)
-    if: github.event_name != 'pull_request'
+    if: github.event_name != 'pull_request' && !inputs.profile
     runs-on: windows-latest
     # About 25 to 35 minutes: ten passes of the authority files take about 16.
     timeout-minutes: 55
@@ -155,7 +164,7 @@ jobs:
   gate-scratch:
     name: complete gate scratch cleanup proof
     # PRs skip the proofs; main pushes, daily and manual runs keep them.
-    if: github.event_name != 'pull_request'
+    if: github.event_name != 'pull_request' && !inputs.profile
     runs-on: ubuntu-latest
     # A failing head reruns the suite on the base: two runs at the suite deadline and setup.
     # check:shared holds this to scripts/suite-time.js.
@@ -182,7 +191,7 @@ jobs:
   model-swap:
     name: complete model swap proof
     # PRs skip the proofs; main pushes, daily and manual runs keep them.
-    if: github.event_name != 'pull_request'
+    if: github.event_name != 'pull_request' && !inputs.profile
     runs-on: ubuntu-latest
     # Leave setup time outside the probe's software-gate deadline; check:shared holds this to
     # scripts/suite-time.js.
@@ -207,4 +216,62 @@ jobs:
         with:
           name: model-swap-tap
           path: ${{ runner.temp }}/tower-crane-model-swap/model-swap-probe.tap
+          if-no-files-found: warn
+
+  # Dispatch only (inputs.profile): the suite at profile_baseline and at this commit, in turn,
+  # three runs each on one runner, so both see the same machine. scripts/suite-profile.js exits 1
+  # unless this commit's median CPU seconds and longest file are both lower. Six suite runs at
+  # three file workers (test/run.js caps the request at one below the four cores).
+  profile:
+    name: suite profile against the baseline
+    if: github.event_name == 'workflow_dispatch' && inputs.profile
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 26
+      - run: node scripts/suite-profile.js --test-concurrency=12 --top 30 --baseline "$BASELINE" --runs 3 --json "$RUNNER_TEMP/suite-profile.json" 2>&1 | tee "$RUNNER_TEMP/suite-profile.log"
+        # bash -o pipefail, so tee keeps the script's exit status.
+        shell: bash
+        env:
+          BASELINE: ${{ inputs.profile_baseline }}
+          TOWER_CRANE_TEST_TMP: ${{ runner.temp }}/tower-crane-tests
+      - name: Save suite profile
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: suite-profile
+          path: |
+            ${{ runner.temp }}/suite-profile.json
+            ${{ runner.temp }}/suite-profile.log
+          if-no-files-found: warn
+
+  # Dispatch only (inputs.profile): every planted bug in scripts/mutants.js against the tests named for it.
+  mutants:
+    name: mutation sample
+    if: github.event_name == 'workflow_dispatch' && inputs.profile
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 26
+      - run: node scripts/mutants.js --no-full 2>&1 | tee "$RUNNER_TEMP/mutants.log"
+        # bash -o pipefail, so tee keeps the script's exit status.
+        shell: bash
+        env:
+          TOWER_CRANE_TEST_TMP: ${{ runner.temp }}/tower-crane-tests
+      - name: Save mutation sample
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: mutation-sample
+          path: ${{ runner.temp }}/mutants.log
           if-no-files-found: warn
