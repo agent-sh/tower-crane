@@ -14,7 +14,7 @@ const harnessHooks = require('../lib/harness-hooks');
 const { resolveCommand, parseOptions, GLOBAL } = require('../bin/tower-crane');
 const { readPublished } = require('./atomic-file');
 const { socketDir } = require('./socket-dir');
-const { assertFits, MAX_SOCKET_PATH, agentDir } = require('../lib/socket-path');
+const { assertFits, MAX_SOCKET_PATH, agentDir, roots } = require('../lib/socket-path');
 
 // This process plays the host monitor; fixture agents still run their own shims.
 // The worker's outer shim would refuse the monitor's index-pack and push.
@@ -55,7 +55,53 @@ test('socket addresses fit the Unix byte limit, including multibyte names', () =
   }
 });
 
-test('short socket directories serve claude, codex and mixed routes with long fixture paths', { skip: process.platform === 'win32' && 'Windows uses a named pipe' }, async (t) => {
+test('socket leaves go under XDG_RUNTIME_DIR, then the account cache, then an enclosing grant, never TMPDIR; a TCP route gets none when none fits', { skip: process.platform === 'win32' && 'Windows uses a named pipe' }, (t) => {
+  const s = scratch(t);
+  const short = fs.realpathSync(socketDir(t, 40));
+  const dir = (...parts) => {
+    const p = path.join(short, ...parts);
+    fs.mkdirSync(p, { recursive: true });
+    return p;
+  };
+  const runtime = dir('rt');
+  const account = dir('home');
+  const granted = dir('grant');
+  const tmp = dir('tmp');
+  const deep = path.join(s.base, 'd'.repeat(MAX_SOCKET_PATH));
+  fs.mkdirSync(deep);
+  const missing = path.join(short, 'missing');
+  const home = path.join(s.base, 'homes', 'worker-T1-1');
+  const leaf = path.basename(agentDir(home, { XDG_RUNTIME_DIR: runtime }));
+  assert.match(leaf, /^tc-[0-9a-f]{12}$/);
+  withEnv(t, { TMPDIR: tmp });
+  for (const [label, homedir, vars, expected] of [
+    ['a short runtime first', account, { XDG_RUNTIME_DIR: runtime, TOWER_CRANE_SOCKET_DIR: granted }, runtime],
+    ['a missing runtime: the account cache', account, { XDG_RUNTIME_DIR: missing, TOWER_CRANE_SOCKET_DIR: granted }, path.join(account, '.cache', 'tc')],
+    ['a deep runtime: the account cache', account, { XDG_RUNTIME_DIR: deep }, path.join(account, '.cache', 'tc')],
+    ['no runtime and a deep account: the enclosing grant', deep, { TOWER_CRANE_SOCKET_DIR: granted }, granted],
+    ['nothing fits and TMPDIR is short', deep, { XDG_RUNTIME_DIR: deep }, null],
+  ]) {
+    t.mock.method(os, 'userInfo', () => ({ homedir }));
+    const env = { TMPDIR: tmp, ...vars };
+    if (expected) {
+      assert.equal(agentDir(home, env), path.join(expected, leaf), label);
+      assert.equal(agentDir(home, env, { tcp: true }), path.join(expected, leaf), `${label}: a TCP route gets the same leaf`);
+    } else {
+      assert.throws(() => agentDir(home, env), (e) => {
+        assert.match(e.message, /^no socket directory within 103 bytes: tried /, label);
+        for (const tried of [path.join(deep, leaf, 'tc-XXXXXX', 's'), path.join(deep, '.cache', 'tc', leaf, 'tc-XXXXXX', 's')]) {
+          assert.ok(e.message.includes(`${tried} (${Buffer.byteLength(tried)} bytes)`), `${label}: ${tried} in ${e.message}`);
+        }
+        assert.ok(!e.message.includes(tmp), `${label}: TMPDIR is never tried`);
+        return true;
+      });
+      assert.equal(agentDir(home, env, { tcp: true }), null, `${label}: a TCP route spawns without a leaf`);
+    }
+    t.mock.restoreAll();
+  }
+});
+
+test('short socket directories serve claude, codex and mixed routes with long fixture paths',{ skip: process.platform === 'win32' && 'Windows uses a named pipe' }, async (t) => {
   const s = scratch(t);
   for (const [harnesses, stale] of [
     [['claude'], 'file'],
@@ -451,48 +497,62 @@ test('a brokered worker lists any archive but copies one only into its own task 
   assert.throws(() => B.authorize({ ...job, role: 'reviewer' }, ['task', 'archive', 'T1']), /changes state only with/);
 });
 
-test('a claude broker whose own directory is too deep listens in the agent\'s own temp directory, which only its sandbox reaches', { skip: process.platform === 'win32' && 'Windows uses a named pipe' }, async (t) => {
+// Sets process.env for one test, as the broker's monitor reads it.
+function withEnv(t, vars) {
+  const saved = Object.fromEntries(Object.keys(vars).map((key) => [key, process.env[key]]));
+  for (const [key, value] of Object.entries(vars)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+  t.after(() => {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+}
+
+// The socket base a direct broker caller gets first.
+function firstRoot() {
+  return roots(process.env).find((r) => r.real).real;
+}
+
+test('a claude broker under a deep TMPDIR and broker directory listens in a fresh directory under the socket bases, never TMPDIR', { skip: process.platform === 'win32' && 'Windows uses a named pipe' }, async (t) => {
   const h = makeRepo(t);
   h.init();
   h.ok(['task', 'add', '--title', 'deep', '--acceptance', 'noted']);
-  // claudeTmp in lib/agents.js: the directory claude's sandbox reads and writes for this agent alone.
-  const tmp = socketDir(t, require('../lib/gate-tmp').HARNESS_TMPDIR_MAX);
+  const deep = path.join(h.base, 't'.repeat(MAX_SOCKET_PATH));
+  fs.mkdirSync(deep);
+  withEnv(t, { TMPDIR: deep, TMP: deep, TEMP: deep });
+  assert.equal(os.tmpdir(), deep);
+  // agent_tmp is not a socket path: only the grant or a socket base is.
   const job = { state: h.state, task: 'T1', agent: 'worker-T1-1', role: 'worker', harness: 'claude', broker_harnesses: ['claude'],
-    agent_tmp: tmp, cwd: h.repo, broker: path.join(h.base, 'w'.repeat(90), B.FILE) };
+    agent_tmp: deep, cwd: h.repo, broker: path.join(h.base, 'w'.repeat(90), B.FILE) };
   const broker = await B.start(job);
   let closed = false;
   t.after(() => closed || broker.close());
   const { socket } = JSON.parse(fs.readFileSync(job.broker, 'utf8'));
-  assert.equal(socket, path.join(tmp, 'broker.sock'));
+  assert.equal(assertFits(socket), socket);
+  assert.equal(path.dirname(path.dirname(socket)), firstRoot());
+  assert.match(path.basename(path.dirname(socket)), /^tower-crane-[A-Za-z0-9]{6}$/);
+  for (const shared of [deep, '/tmp']) assert.ok(!socket.startsWith(shared + path.sep), `${socket} is not under ${shared}`);
   assert.equal(fs.statSync(socket).mode & 0o777, 0o600);
   const r = await B.forward(job.broker, ['task', 'note', 'T1', 'from a deep state'], h.state);
   assert.equal(r.code, 0, r.stderr);
   assert.deepEqual(h.readState('tasks.json').tasks[0].notes.map((n) => n.text), ['from a deep state']);
   broker.close();
   closed = true;
-  assert.equal(fs.existsSync(socket), false, 'closing removes the socket');
-  assert.equal(fs.existsSync(tmp), true, 'closing keeps the agent\'s temp directory');
+  assert.equal(fs.existsSync(path.dirname(socket)), false, 'closing removes the socket directory it made');
 });
 
-test('a claude broker with no short temp directory of its own uses its explicitly granted socket directory', { skip: process.platform === 'win32' && 'Windows uses a named pipe' }, async (t) => {
+test('a claude broker with a granted socket directory listens there, whatever its caller\'s TMPDIR', { skip: process.platform === 'win32' && 'Windows uses a named pipe' }, async (t) => {
   const s = scratch(t);
   const granted = socketDir(t);
-  // The caller's TMPDIR is short and under the home, as ~/.cache/... is in production. The agent's
-  // temp directory is a codex rung's, too long for claude's proxy sockets, so a claude fallback has none.
+  // A short TMPDIR under the home, which a broker given a grant passes over.
   const caller = path.join(s.base, 'tmp');
   fs.mkdirSync(caller);
-  const saved = { TMPDIR: process.env.TMPDIR, HOME: process.env.HOME };
-  process.env.TMPDIR = caller;
-  process.env.HOME = os.userInfo().homedir;
-  t.after(() => {
-    for (const key of ['TMPDIR', 'HOME']) {
-      if (saved[key] === undefined) delete process.env[key];
-      else process.env[key] = saved[key];
-    }
-  });
-  const codexTmp = path.join(s.base, 'c'.repeat(80));
-  assert.equal(require('../lib/gate-tmp').harnessFits(codexTmp), false);
-  const job = { ...s.job, harness: 'codex', broker_harnesses: ['codex', 'claude'], agent_tmp: codexTmp, agent_socket_dir: granted, broker: path.join(s.base, 'w'.repeat(90), B.FILE) };
+  withEnv(t, { TMPDIR: caller, HOME: os.userInfo().homedir });
+  const job = { ...s.job, harness: 'codex', broker_harnesses: ['codex', 'claude'], agent_socket_dir: granted, broker: path.join(s.base, 'w'.repeat(90), B.FILE) };
   const broker = await B.start(job);
   t.after(() => broker.close());
   const { socket } = JSON.parse(fs.readFileSync(job.broker, 'utf8'));
@@ -501,17 +561,49 @@ test('a claude broker with no short temp directory of its own uses its explicitl
   assert.equal(fs.statSync(path.dirname(socket)).mode & 0o777, 0o700);
 });
 
-test('a claude broker refuses to start when no socket path its sandbox reaches can be made', { skip: process.platform === 'win32' && 'Windows uses a named pipe' }, async (t) => {
+test('a claude broker refuses to start when no socket path its sandbox reaches can be made, naming each path tried and its length', { skip: process.platform === 'win32' && 'Windows uses a named pipe' }, async (t) => {
   const s = scratch(t);
-  const attempted = [];
-  t.mock.method(fs, 'mkdtempSync', (prefix) => {
-    attempted.push(path.dirname(prefix));
-    throw Object.assign(new Error('EROFS: read-only file system'), { code: 'EROFS' });
-  });
-  const job = { ...s.job, broker_harnesses: ['claude'], broker: path.join(s.base, 'w'.repeat(90), B.FILE) };
-  await assert.rejects(B.start(job), /no socket path that the agent's sandbox reaches.*XDG_CACHE_HOME/s);
-  assert.deepEqual(attempted, [os.tmpdir()]);
-  assert.equal(fs.existsSync(path.dirname(job.broker)), false, 'the refused start leaves no broker directory');
+  const deep = (name) => {
+    const dir = path.join(s.base, name, 'd'.repeat(MAX_SOCKET_PATH));
+    fs.mkdirSync(dir, { recursive: true });
+    return dir;
+  };
+  const runtime = deep('runtime');
+  const account = deep('account');
+  const short = socketDir(t);
+  withEnv(t, { XDG_RUNTIME_DIR: undefined, TOWER_CRANE_SOCKET_DIR: undefined });
+  const bytes = (p) => `${p} (${Buffer.byteLength(p)} bytes)`;
+  const broker = path.join(s.base, 'w'.repeat(90), B.FILE);
+  const own = path.join(path.dirname(broker), 'broker.sock');
+  for (const [label, env, mkdtemp, expected] of [
+    ['every base too deep', { XDG_RUNTIME_DIR: runtime, TOWER_CRANE_SOCKET_DIR: undefined }, null,
+      [bytes(own), bytes(path.join(runtime, 'tower-crane-XXXXXX', 's')), bytes(path.join(account, '.cache', 'tc', 'tower-crane-XXXXXX', 's'))]],
+    ['a missing runtime and a deep account home', { XDG_RUNTIME_DIR: path.join(s.base, 'missing'), TOWER_CRANE_SOCKET_DIR: undefined }, null,
+      [bytes(own), `${path.join(s.base, 'missing')} (ENOENT)`]],
+    ['a short base that refuses the directory', { XDG_RUNTIME_DIR: short, TOWER_CRANE_SOCKET_DIR: undefined }, 'EROFS', [bytes(own), 'EROFS']],
+  ]) {
+    for (const [key, value] of Object.entries(env)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    t.mock.method(os, 'userInfo', () => ({ homedir: account }));
+    const attempted = [];
+    if (mkdtemp) {
+      t.mock.method(fs, 'mkdtempSync', (prefix) => {
+        attempted.push(path.dirname(prefix));
+        throw Object.assign(new Error(`${mkdtemp}: read-only file system`), { code: mkdtemp });
+      });
+    }
+    const job = { ...s.job, broker_harnesses: ['claude'], broker };
+    await assert.rejects(B.start(job), (e) => {
+      assert.match(e.message, /^no socket path that the agent's sandbox reaches/, label);
+      for (const part of expected) assert.ok(e.message.includes(part), `${label}: ${part} in ${e.message}`);
+      return true;
+    });
+    if (mkdtemp) assert.deepEqual(attempted, [fs.realpathSync(short)], label);
+    assert.equal(fs.existsSync(path.dirname(job.broker)), false, `${label}: the refused start leaves no broker directory`);
+    t.mock.restoreAll();
+  }
 });
 
 // A fallback directory as a broker's start makes it, with `s` planted in its way.
@@ -535,7 +627,7 @@ test('a broker removes the temporary socket directory it made when it cannot lis
   const job = { ...s.job, broker_harnesses: ['claude'], broker: path.join(s.base, 'w'.repeat(90), B.FILE) };
   await assert.rejects(B.start(job), /EADDRINUSE/);
   assert.equal(made.length, 1);
-  assert.equal(path.dirname(made[0]), os.tmpdir());
+  assert.equal(path.dirname(made[0]), firstRoot());
   assert.equal(fs.existsSync(made[0]), false, 'the failed start leaves no socket directory');
   assert.equal(fs.existsSync(path.dirname(job.broker)), false, 'nor the broker directory it made');
 });
@@ -564,8 +656,8 @@ test('a broker start sweeps temporary socket directories of killed brokers and k
   const planted = [];
   const plant = (prefix = 'tower-crane-') => {
     const dir = prefix === 'tc-'
-      ? path.join(os.tmpdir(), `tc-${require('node:crypto').randomBytes(6).toString('hex')}`)
-      : fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+      ? path.join(firstRoot(), `tc-${require('node:crypto').randomBytes(6).toString('hex')}`)
+      : fs.mkdtempSync(path.join(firstRoot(), prefix));
     if (prefix === 'tc-') fs.mkdirSync(dir, { mode: 0o700 });
     assertFits(path.join(dir, 's'));
     planted.push(dir);
@@ -629,7 +721,7 @@ test('a broker start sweeps temporary socket directories of killed brokers and k
 test('a FIFO planted as an owner record does not block a broker start', { skip: (process.platform === 'win32' || typeof process.getuid !== 'function') && 'Windows has no FIFOs' }, (t) => {
   const s = scratch(t);
   const cp = require('node:child_process');
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tower-crane-'));
+  const dir = fs.mkdtempSync(path.join(firstRoot(), 'tower-crane-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const fifo = path.join(dir, 'owner.json');
   const made = cp.spawnSync('mkfifo', [fifo]);
@@ -660,13 +752,15 @@ test('a broker that falls back to a temporary socket directory names its monitor
   assert.equal(require('../lib/processes').processState(owner), 'running');
 });
 
-test('what the agent leaves at its broker.sock breaks neither the next spawn nor the broker\'s close, and the broker never walks it', { skip: process.platform === 'win32' && 'Windows uses a named pipe' }, async (t) => {
+test('what the agent leaves at its socket breaks neither the next spawn nor the broker\'s close, and the broker never walks it', { skip: process.platform === 'win32' && 'Windows uses a named pipe' }, async (t) => {
   const s = scratch(t);
-  const tmp = socketDir(t, require('../lib/gate-tmp').HARNESS_TMPDIR_MAX);
-  const sock = path.join(tmp, 'broker.sock');
-  const stale = () => fs.readdirSync(tmp).filter((n) => n.startsWith('broker.sock.stale-'));
-  const job = { ...s.job, broker_harnesses: ['claude'], agent_tmp: tmp, broker: path.join(s.base, 'w'.repeat(90), B.FILE) };
-  // A tree the agent wrote is renamed aside whole, in the agent's own temp directory.
+  // agentDir in lib/socket-path.js: the leaf the agent's sandbox writes, granted for this agent alone.
+  const tmp = path.join(socketDir(t), `tc-${'0'.repeat(12)}`);
+  fs.mkdirSync(tmp, { mode: 0o700 });
+  const sock = path.join(tmp, 's');
+  const stale = () => fs.readdirSync(tmp).filter((n) => n.startsWith('s.stale-'));
+  const job = { ...s.job, broker_harnesses: ['claude'], agent_socket_dir: tmp, broker: path.join(s.base, 'w'.repeat(90), B.FILE) };
+  // A tree the agent wrote is renamed aside whole, in the agent's own socket directory.
   fs.mkdirSync(path.join(sock, 'inside'), { recursive: true, mode: 0o700 });
   fs.writeFileSync(path.join(sock, 'inside', 'f'), 'x');
   let broker = await B.start(job);
@@ -698,7 +792,7 @@ test('what the agent leaves at its broker.sock breaks neither the next spawn nor
   closed = true;
   fs.mkdirSync(path.join(sock, 'inside'), { recursive: true });
   t.mock.method(fs, 'renameSync', () => { throw Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' }); });
-  await assert.rejects(B.start(job), /cannot clear .*broker\.sock, which is in the way of the broker socket \(EACCES\)/);
+  await assert.rejects(B.start(job), /cannot clear .*\/s, which is in the way of the broker socket \(EACCES\)/);
   assert.equal(fs.existsSync(path.dirname(job.broker)), false, 'the refused start leaves no broker directory');
   assert.ok(fs.existsSync(path.join(sock, 'inside')), 'and does not walk the tree');
 });
