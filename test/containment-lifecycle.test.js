@@ -154,6 +154,8 @@ test('a Windows root that exited before its first snapshot keeps the children it
 
 const cases = [
   ['supervisor', 'zero', 'caller', 'none', true],
+  // Windows' identity query outlasts the owner's 400 ms; elsewhere a delay stands in for it.
+  ['supervisor', 'zero', 'slow-identity', 'none', true],
   ['supervisor', 'nonzero', 'agent', 'none', true],
   ['supervisor', 'signal', 'agent', 'none', true],
   ['wait', 'zero', 'agent', 'none', true],
@@ -170,6 +172,7 @@ for (const [kind, ending, owner, late, survives] of cases) {
     const h = cachedFixture(t, 'lifecycle', h => h.init());
     h.env.TOWER_CRANE_TEST_CONTAINMENT = '1';
     if (owner === 'unrecorded') h.env.TC_UNRECORDED_FIXTURE = '1';
+    if (owner === 'slow-identity') h.env.TC_IDENTITY_DELAY_MS = '600';
     const dir = path.join(h.base, 'result');
     fs.mkdirSync(dir);
     const args = [fixture, owner === 'caller' ? 'caller' : 'agent', dir, kind, ending, late];
