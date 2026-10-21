@@ -71,6 +71,8 @@ Resolving either identity source to `owner` (the terminal fallback included) is 
 
 `spawn` passes the name `<job>-<task>-<n>` (`worker-T1-1`, `reviewer-T1-1`) in `TOWER_CRANE_AGENT`. A sandboxed claude or codex agent cannot write the state files (a codex agent's commands write only its own `HOME`, sessions and broker directory there); its state changes go through its spawn's [state broker](ladder.md#state-broker), which records them under the spawned name whatever the agent passes, allows only its role's commands on its own task, and refuses another identity. Its credential is the token in its private broker directory, made for that spawn and invalid once the agent exits. Its prompt says `you are not the owner; never pass --agent owner` and closes with `run tower-crane with --agent <name> if TOWER_CRANE_AGENT is missing`, so a shell that loses the environment can still record the correct identity.
 
+A spawned harness can run a command before its dispatch records the spawn, and a spawned identity's role comes from that record. The supervisor passes each launch `TOWER_CRANE_STARTUP_DEADLINE`, its launch time plus the startup window (10 s) in epoch milliseconds. A command that carries it, runs as `TOWER_CRANE_AGENT` against the `TOWER_CRANE_STATE` it names, and finds no spawn record for that identity waits at entry until the record appears or the deadline passes, then resolves its role. `owner` and the plain `orchestrator` name, which engine work uses, never wait. An orchestrator's first `wait` therefore registers as a controller even when it starts before its dispatch commits.
+
 The credential location for an initialized project comes only from `project.json`, never from the command's `TOWER_CRANE_CONFIG`, `HOME` or `USERPROFILE`. Changing those variables does not redirect authentication or a pinned sandbox denial. An absent, invalid or missing recorded credential refuses headless owner access. For a project without `owner_config_dir`, only an explicit owner at a terminal can record it with `owner-key`; an existing binding is never replaced. Until it is recorded, spawning still works and hides `owner/` under the spawning environment's resolved Tower Crane config directory, where a terminal `owner-key` would create the key. This denial does not establish a binding or allow owner authentication.
 
 ## Orchestrator lease
@@ -749,6 +751,9 @@ failure still stops the whole retained attempt. With cgroups, fleet memory press
 the per-attempt boundary, including after a keeper takes over.
 Gate commands own everything
 they start, including nested supervisors, and retain their complete cleanup.
+In cgroup mode the keeper polls `cgroup.events` for population and reads
+`cgroup.procs` in that group and its nested groups. It does not scan `/proc`
+on each tick.
 The spawn API's `containmentDone` promise resolves once normal-exit cleanup
 and any keeper handoff finish.
 Retained controllers still count as users of the original agent's home, cache,
@@ -761,7 +766,9 @@ Full containment cleanup without retained identities still uses `taskkill /T /F`
 Retention requires recorded dispatch or controller pid/start identities.
 Verified orchestrator CLI commands register `{pid, start, host, role, command}`
 under `controllers/<pid>-<nonce>.json` in their state directory and remove the
-record when they return. Linux uses process start ticks; macOS and Windows use
+record when they return. A command started before its spawn is recorded registers
+once the record appears ([agent identity](#agent-identity)), before the command
+runs. Linux uses process start ticks; macOS and Windows use
 the process snapshot's start time. A background orchestrator `wait --inbox`
 therefore survives the harness exit with its existing home and bounds.
 A worker's fixtures named `tower-crane wait` or `spawn-monitor.js`, and forged
@@ -787,15 +794,23 @@ Dedicated containment tests set
 The independent capped test scope remains their safety fence.
 
 The fallback watchdog polls process count and total RSS on a 100 ms cadence,
-skipping overlapping snapshots. Platform snapshot commands have a two second
-deadline. Linux
-reads `/proc`, macOS uses `ps`, and Windows uses PowerShell process snapshots.
+skipping overlapping snapshots. macOS `ps` snapshots have a two-second
+deadline. Linux reads `/proc`. Windows keeps one PowerShell process per
+watchdog and requests CIM snapshots over its standard input, with a 60-second
+deadline per request to allow cold CIM startup. A dead or timed-out sampler
+is stopped and replaced on the next request.
 Linux cleanup checks a monotonic 100 ms deadline between freeze snapshots.
 It does not retry a rejected stop for the same process identity, then proceeds
 to best-effort killing of the matched processes.
 It tracks the process group/tree and previously observed descendants across
-detachment, and stops them on a cap or sampling failure
-(`resource-monitor-failed`). This fallback is a sampled bound: forks and memory
+detachment, pruning exited or reused process identities after each successful
+snapshot. A cap stops the attempt immediately. Three consecutive failed
+snapshots stop it with `resource-monitor-failed`; a successful snapshot resets
+the failure count. A single slow or failed snapshot leaves the attempt running.
+The same rule applies to watchdog keepers and the final cleanup snapshot.
+Three timed-out snapshots take about six seconds on macOS or three minutes
+on Windows, plus scheduling delays. Invalid containment reports still fail
+immediately. This fallback is a sampled bound: forks and memory
 allocations can overshoot between samples. It cannot contain a descendant that
 detaches and loses its parent before the first snapshot, enforce kernel thread
 counts, account for page cache or shared memory like cgroups, or prevent a
