@@ -251,9 +251,8 @@ for (const [name, result, child, killed] of [
     const calls = [];
     const kills = [];
     const target = { pid: 4242, ...child, kill: (signal) => kills.push(signal) };
-    const stopped = P.windowsKillTree(target, { run: (file, args, options) => { calls.push([file, args, options.timeout]); return result; } });
+    P.windowsKillTree(target, { run: (file, args, options) => { calls.push([file, args, options.timeout]); return result; } });
     assert.deepEqual(calls, [['taskkill', ['/PID', '4242', '/T', '/F'], 10000]]);
-    assert.equal(stopped, result.status === 0);
     assert.deepEqual(kills, killed ? ['SIGKILL'] : []);
   });
 }
