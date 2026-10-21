@@ -416,7 +416,7 @@ test('the suite profile runs a baseline commit from a worktree it removes afterw
   h.git(['commit', '-qm', 'baseline suite']);
   const baseline = h.git(['rev-parse', 'HEAD']);
   // The head's test spins, so its file CPU is the larger whatever the load.
-  one("const end = Date.now() + 400; let n = 0; while (Date.now() < end) n++; require('node:assert/strict').ok(n > 0); // wait-allow: the profile measures CPU work");
+  one("const end = Date.now() + 400; let n = 0; while (Date.now() < end) n++; require('node:assert/strict').ok(n > 0);"); // wait-allow: the profile measures CPU work
   const out = path.join(h.base, 'profile.json');
   const r = cp.spawnSync(process.execPath, [path.join(h.repo, 'scripts', 'suite-profile.js'), '--test-concurrency=1', '--baseline', baseline, '--json', out, 'test/one.test.js'],
     { cwd: h.repo, env: { ...h.env, TOWER_CRANE_TEST_TMP: h.base, TOWER_CRANE_SANDBOX: '0' }, encoding: 'utf8', timeout: 300000 });
