@@ -9,7 +9,7 @@ const cp = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { HUNG_TEST_MS } = require('./signals');
+const { HUNG_TEST_MS, killPid } = require('./signals');
 
 function testFiles() {
   return [
@@ -122,7 +122,7 @@ function runnerExited(record) {
   const own = runner(process.pid);
   if (!record || record.host !== own.host || record.pidns !== own.pidns || !Number.isInteger(record.pid) || record.pid <= 0) return false;
   try {
-    process.kill(record.pid, 0);
+    killPid(record.pid, 0);
   } catch (e) {
     return e.code === 'ESRCH';
   }
