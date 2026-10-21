@@ -2,6 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const { spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -13,15 +14,34 @@ const NO_STUBS = process.platform === 'win32' && 'harness stubs are shebang scri
 const as = (agent) => ({ env: { TOWER_CRANE_AGENT: agent } });
 const events = (h) => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
 const task = (h, id) => h.readState('tasks.json').tasks.find((x) => x.id === id);
+// A Unix socket left at dir/name, as an ssh agent or X server leaves one. A
+// child binds it by a relative name, since a temp path can pass the socket
+// path length limit.
+function socketAt(dir, name) {
+  fs.mkdirSync(dir, { recursive: true });
+  const r = spawnSync(process.execPath, ['-e', `require('node:net').createServer().listen(${JSON.stringify(name)}, () => process.exit(0))`], { cwd: dir, encoding: 'utf8' });
+  assert.equal(r.status, 0, r.stderr);
+  return path.join(dir, name);
+}
 
 test('policy paths, owner-only classes and narrowing, as a variant table', { skip: process.platform === 'win32' && 'the rows name POSIX paths and links' }, (t) => {
   const base = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'tc-sandbox-policy-')));
-  t.after(() => fs.rmSync(base, { recursive: true, force: true }));
+  const shut = path.join(base, 'link-target', 'shut');
+  t.after(() => {
+    if (fs.existsSync(shut)) fs.chmodSync(path.join(shut, 'inner'), 0o755);
+    fs.rmSync(base, { recursive: true, force: true });
+  });
   const home = path.join(base, 'home');
   const project = path.join(base, 'repo');
   const runtime = path.join(base, 'runtime');
   for (const d of [home, project, runtime, path.join(base, 'link-target')]) fs.mkdirSync(d, { recursive: true });
   fs.symlinkSync(path.join(home, '.ssh'), path.join(base, 'link-target', 'keys'));
+  // Under a policy path, directories that hold a socket at any depth or a link to one.
+  const agent = socketAt(path.join(base, 'link-target', 'ssh-agent', 'deep'), 'agent.1');
+  fs.mkdirSync(path.join(base, 'link-target', 'x11'));
+  fs.symlinkSync(agent, path.join(base, 'link-target', 'x11', 'X0'));
+  fs.mkdirSync(path.join(base, 'link-target', 'plain', 'sub'), { recursive: true });
+  fs.writeFileSync(path.join(base, 'link-target', 'plain', 'sub', 'file'), '');
   const r = P.roots({ home, project, stateDir: path.join(project, '.tower-crane'), env: { XDG_RUNTIME_DIR: runtime }, settings: { env_file: '~/secrets.env' } });
   const policy = { version: 3, orchestrator_may_grant: { read: ['~/docs/*'], write: ['<project>/out/**', `${base}/link-target/**`, '~/**', `${runtime}/**`, '/run/**'] }, owner_only: P.OWNER_ONLY };
   const rows = [
@@ -48,9 +68,19 @@ test('policy paths, owner-only classes and narrowing, as a variant table', { ski
     [{ field: 'write', value: path.join(runtime, 'docker.sock') }, 'sockets stays owner-only'],
     [{ field: 'write', value: '/run/docker.sock' }, 'sockets stays owner-only'],
     [{ field: 'read', value: '/var/run' }, 'sockets stays owner-only'],
+    [{ field: 'read', value: agent }, 'sockets stays owner-only'],
+    [{ field: 'read', value: `${base}/link-target/ssh-agent` }, 'sockets stays owner-only'],
+    [{ field: 'write', value: `${base}/link-target/x11` }, 'sockets stays owner-only'],
+    [{ field: 'write', value: `${base}/link-target/plain` }, null],
     [{ field: 'domains', value: 'example.com' }, 'network stays owner-only'],
     [{ field: 'session_bus', value: true }, 'session_bus stays owner-only'],
   ];
+  // A directory the walk cannot read may hold a socket; root reads it anyway.
+  if (process.getuid?.() !== 0) {
+    fs.mkdirSync(path.join(shut, 'inner'), { recursive: true });
+    fs.chmodSync(path.join(shut, 'inner'), 0o000);
+    rows.push([{ field: 'write', value: shut }, 'sockets stays owner-only']);
+  }
   for (const [item, why] of rows) assert.equal(P.refusal(policy, item, r), why, JSON.stringify(item));
   assert.equal(P.refusal(null, { field: 'write', value: '~/work' }, r), 'no sandbox policy is set');
 
@@ -227,7 +257,8 @@ test('a grant the policy backs is left out of a dispatch once it falls outside, 
   const h = cachedFixture(t, 'sandbox drift', (h) => {
     h.init();
     h.ok(['task', 'add', '--title', 'Needs a cache', '--acceptance', 'done']);
-    h.ok(['brief', 'set', 'T1', '-'], { input: 'probe' });
+    h.ok(['task', 'add', '--title', 'Needs a scratch dir', '--acceptance', 'done']);
+    for (const id of ['T1', 'T2']) h.ok(['brief', 'set', id, '-'], { input: 'probe' });
     h.ok(['ladder', 'set', 'medium', '--harness', 'codex', '--profile', 'fixture-main', '--clear', 'model', '--clear', 'effort', '--clear', 'args']);
   });
   const bin = path.join(h.base, 'bin');
@@ -249,4 +280,19 @@ test('a grant the policy backs is left out of a dispatch once it falls outside, 
   const allow = writable(out);
   assert.ok(!allow.includes(keys) && !allow.includes(cache), 'the agent does not get the store');
   assert.match(h.ok(['task', 'show', 'T1']), /write .* by orchestrator under sandbox policy v1 \(revoked: no longer inside the policy\)/);
+
+  // A directory that holds a socket is refused at the grant, and one that
+  // comes to hold one after it is left out of the next dispatch.
+  const agentDir = path.join(grants, 'ssh-agent');
+  socketAt(agentDir, 'agent.1');
+  const refused = h.run(['task', 'update', 'T2', '--sandbox', JSON.stringify({ read: [agentDir] })], as('orchestrator'));
+  assert.equal(refused.code, 1, refused.stderr);
+  assert.match(h.readState('decisions.json').decisions.at(-1).why, /sockets stays owner-only/);
+  const scratch = path.join(grants, 'scratch');
+  fs.mkdirSync(scratch);
+  h.ok(['task', 'update', 'T2', '--sandbox', JSON.stringify({ write: [scratch] })], as('orchestrator'));
+  socketAt(path.join(scratch, 'tmux'), 'default');
+  const later = h.ok(['spawn', '--task', 'T2', '--wait'], { env });
+  assert.match(later, new RegExp(`sandbox grants the policy no longer backs were left out: T2 write ${scratch}`));
+  assert.ok(!writable(out).includes(scratch), 'the agent does not get the socket');
 });
