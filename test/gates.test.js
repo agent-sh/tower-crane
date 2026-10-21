@@ -249,8 +249,8 @@ test('a one-off native child crash records native_crash in the evidence and its 
   const evidence = h.readState('tasks.json').tasks[0].evidence.at(-1);
   assert.equal(evidence.ok, true);
   assert.deepEqual(evidence.native_crash.map((c) => [c.test, c.signal, Number.isInteger(c.pid)]), [['child crashes natively', 'SIGSEGV', true]]);
-  assert.match(evidence.summary, /Native crash: child crashes natively \(SIGSEGV, pid \d+\)\..*Reran test\/crash\.test\.js once/);
-  assert.deepEqual(evidence.receipt.native_rerun, { step: 'head', files: ['test/crash.test.js'], ok: true });
+  assert.match(evidence.summary, /Native crash: child crashes natively \(SIGSEGV, pid \d+\)\..*Rerun: reran test\/crash\.test\.js once/);
+  assert.deepEqual(evidence.receipt.reruns, [{ step: 'head', files: ['test/crash.test.js'], ok: true }]);
   assert.deepEqual(evidence.commands.filter((c) => c.command !== 'git').map((c) => [c.command, c.status]),
     [[`${spec} test/crash.test.js test/value.test.js`, 1], [`${spec} test/crash.test.js`, 0]]);
   const testsGate = h.json(['task', 'show', 'T1']).gates.gates.find((g) => g.type === 'tests');
@@ -260,6 +260,71 @@ test('a one-off native child crash records native_crash in the evidence and its 
   assert.deepEqual(event.detail.native_crash, evidence.native_crash);
   assert.match(h.ok(['status']), new RegExp(`native crashes: 1 in the last 7 days, last T1 at ${event.at}`));
   assert.deepEqual(h.json(['status']).native_crashes, { days: 7, count: 1, last: { at: event.at, task: 'T1' } });
+});
+
+test('a test flaky in two tasks within 7 days opens one task to fix it, and a third flaky pass opens no other', (t) => {
+  const h = makeRepo(t);
+  const marker = path.join(h.base, 'flaky-runs');
+  // Each gate's first run of the test fails and its rerun passes: the runs alternate.
+  const flaky = `const { test } = require('node:test');
+const fs = require('node:fs');
+test('sometimes fails', () => {
+  // read-published: only this test writes the marker, and gates run one at a time.
+  const runs = fs.existsSync(${JSON.stringify(marker)}) ? fs.readFileSync(${JSON.stringify(marker)}, 'utf8').length : 0;
+  fs.appendFileSync(${JSON.stringify(marker)}, 'x');
+  if (runs % 2 === 0) throw new Error('flaked on run ' + runs);
+});
+`;
+  const first = manifestTask(h, { submitted: { 'test/flaky.test.js': flaky } });
+  submitTestsFixture(h, first);
+  for (const key of Object.keys(h.env)) {
+    if (key.startsWith('NODE_TEST_')) delete h.env[key];
+  }
+  const spec = `${shellQuote(process.execPath)} --test --test-reporter=spec`;
+  h.ok(['project', 'set', '--tests-mode', 'run-only', '--tests-cmd', `${spec} test/flaky.test.js test/value.test.js`, '--tests-proof-cmd', `${spec} {tests}`]);
+  const shas = { T1: first };
+  for (const id of ['T2', 'T3']) {
+    h.git(['switch', '-qc', `fixture-${id}`, 'fixture-change']);
+    writeFiles(h.repo, { [`${id}.txt`]: `${id}\n` });
+    h.git(['add', '-A']);
+    h.git(['commit', '-qm', id]);
+    shas[id] = h.git(['rev-parse', 'HEAD']);
+    h.git(['switch', '-q', 'main']);
+    h.ok(['task', 'add', '--title', `Change ${id}`, '--acceptance', 'test the behavior']);
+    h.ok(['claim', id, '--agent', `w-${id}`]);
+    h.ok(['submit', id, '--sha', shas[id], '--branch', `fixture-${id}`, '--agent', `w-${id}`]);
+  }
+  const name = 'test/flaky.test.js > sometimes fails';
+  const events = () => fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  const flakeTasks = () => h.readState('tasks.json').tasks.filter((x) => x.title === `Fix flaky test ${name}`);
+  const check = (id) => {
+    const result = h.run(['check', 'tests', id, '--agent', 'checker']);
+    assert.equal(result.code, 0, result.stdout + result.stderr);
+    const evidence = h.readState('tasks.json').tasks.find((x) => x.id === id).evidence.at(-1);
+    assert.equal(evidence.ok, true, evidence.summary);
+    assert.deepEqual(evidence.flaky.map((f) => [f.test, f.step, f.first_failure.status, f.rerun.status]), [[name, 'head', 1, 0]], id);
+    assert.match(evidence.flaky[0].first_failure.excerpt, /flaked on run/, id);
+    const event = events().findLast((e) => e.cmd === 'check tests' && e.task === id);
+    assert.deepEqual(event.detail.flaky, evidence.flaky, id);
+    return evidence;
+  };
+  const one = check('T1');
+  assert.equal(flakeTasks().length, 0, 'one task flaky is not yet a pattern');
+  const two = check('T2');
+  const opened = flakeTasks();
+  assert.equal(opened.length, 1, 'flaky in two tasks opens a task');
+  const [flake] = opened;
+  assert.equal(flake.status, 'todo');
+  assert.match(flake.acceptance[0], /in T1 and T2 is named and fixed/);
+  const brief = h.ok(['brief', 'get', flake.id]);
+  for (const [id, evidence] of [['T1', one], ['T2', two]]) {
+    assert.ok(brief.includes(`### ${id}, tests gate at ${shas[id]}`), `${id} in the brief:\n${brief}`);
+    assert.ok(brief.includes(evidence.flaky[0].first_failure.excerpt), `${id} excerpt in the brief`);
+  }
+  const added = events().filter((e) => e.cmd === 'task add' && e.detail.flake === name);
+  assert.deepEqual(added.map((e) => [e.task, e.detail.seen.map((s) => [s.task, s.sha])]), [[flake.id, [['T1', shas.T1], ['T2', shas.T2]]]]);
+  check('T3');
+  assert.equal(flakeTasks().length, 1, 'a third flaky pass opens no other task');
 });
 
 test('failed tests evidence names the failing tests when the spec reporter is colored', (t) => {

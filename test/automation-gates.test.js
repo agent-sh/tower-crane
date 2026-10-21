@@ -1488,7 +1488,8 @@ require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'public-http'))}).fet
         assert.deepEqual(receipts, [], 'idle shutdown claims no automation work');
         return;
       }
-      assert.deepEqual(runs(), { starts: heldRun, peak: 1 }, 'no queued gate starts during shutdown');
+      // A failing suite reruns once inside the gate that drains; that is the gate's own command, not a queued gate.
+      assert.deepEqual(runs(), { starts: heldRun + (stage === 'failure' ? 1 : 0), peak: 1 }, 'no queued gate starts during shutdown');
       assert.deepEqual(receipts.filter((e) => e.detail.phase === 'running').map((e) => e.task), ['T1']);
       assert.equal(receipts.at(-1).detail.phase, 'deferred', 'the executor lease is released for a retry');
       const tasks = h.readState('tasks.json').tasks;

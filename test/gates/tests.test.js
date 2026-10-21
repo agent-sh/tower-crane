@@ -545,7 +545,7 @@ test('a file the task added is removed for the run without the change', async ()
   assertCleanedUp();
 });
 
-test('a native child crash reruns only the failing file once: a one-off passes with a native_crash note and its core read, a repeat or mixed failure fails', { skip: process.platform === 'win32' && 'POSIX signals' }, async () => {
+test('a native child crash reruns only the failing file once: a one-off passes with a native_crash note and its core read, a repeat or one beside an ordinary failure fails', { skip: process.platform === 'win32' && 'POSIX signals' }, async () => {
   const dir = path.join(tmp, 'coredump');
   const keep = path.join(tmp, 'native-cores');
   fs.mkdirSync(dir);
@@ -562,13 +562,14 @@ test('a native child crash reruns only the failing file once: a one-off passes w
   fs.writeFileSync(unreadable, "#!/bin/sh\necho 'not a core dump: file format not recognized' >&2\nexit 1\n", { mode: 0o755 });
   const spec = `${NODE} --test --test-reporter=spec`;
   const project = { gates: { tests_cmd: `${spec} test/counted.test.js test/crash.test.js`, tests_proof_cmd: `${spec} {tests}` } };
-  const rerun = (ok) => ({ step: 'head', files: ['test/crash.test.js'], ok });
+  const rerun = (ok) => [{ step: 'head', files: ['test/crash.test.js'], ok }];
+  const flaky = ['test/crash.test.js > child crashes natively'];
   for (const [name, options, want] of [
-    ['one-off', { times: 1, exe: process.execPath, gdb: readable }, { ok: true, crashes: 1, runs: 2, rerun: rerun(true), stack: true, note: /Reran test\/crash\.test\.js once in the same checkout: exit 0/ }],
-    ['one-off in a describe', { times: 1, nest: 'describe', gdb: readable }, { ok: true, crashes: 1, runs: 2, rerun: rerun(true), stack: true, note: /exit 0, so the crash is not the change's/ }],
-    ['one-off in a subtest', { times: 1, nest: 'subtest', gdb: readable }, { ok: true, crashes: 1, runs: 2, rerun: rerun(true), stack: true, note: /exit 0, so the crash is not the change's/ }],
-    ['every time', { times: Infinity, gdb: unreadable }, { ok: false, crashes: 2, runs: 2, rerun: rerun(false), stack: false, note: /Reran test\/crash\.test\.js once in the same checkout: exit 1, native crash again: .*the failure stands/ }],
-    ['beside an ordinary failure', { times: 1, ordinary: true, gdb: readable }, { ok: false, crashes: 1, runs: 1, rerun: undefined, stack: true, note: /Other tests in the run failed without one, so it was not rerun/ }],
+    ['one-off', { times: 1, exe: process.execPath, gdb: readable }, { ok: true, crashes: 1, runs: 2, rerun: rerun(true), stack: true, flaky, note: /Rerun: reran test\/crash\.test\.js once in the same checkout: exit 0; flaky: test\/crash\.test\.js > child crashes natively\./ }],
+    ['one-off in a describe', { times: 1, nest: 'describe', gdb: readable }, { ok: true, crashes: 1, runs: 2, rerun: rerun(true), stack: true, flaky, note: /exit 0; flaky: test\/crash\.test\.js > child crashes natively\./ }],
+    ['one-off in a subtest', { times: 1, nest: 'subtest', gdb: readable }, { ok: true, crashes: 1, runs: 2, rerun: rerun(true), stack: true, flaky, note: /exit 0; flaky: test\/crash\.test\.js > child crashes natively\./ }],
+    ['every time', { times: Infinity, gdb: unreadable }, { ok: false, crashes: 2, runs: 2, rerun: rerun(false), stack: false, flaky: undefined, note: /Rerun: reran test\/crash\.test\.js once in the same checkout: exit 1, native crash again: .*the failure stands/ }],
+    ['beside an ordinary failure', { times: 1, ordinary: true, gdb: readable }, { ok: false, crashes: 1, runs: 2, rerun: rerun(false), stack: true, flaky: undefined, note: /Native crash: child crashes natively \(SIGSEGV, pid \d+\)[^\n]*\. Rerun: reran test\/crash\.test\.js once in the same checkout: exit 1; the failure stands/ }],
   ]) {
     fs.rmSync(gdbArgs, { force: true });
     const marker = path.join(tmp, `crash-${branches}`);
@@ -585,7 +586,9 @@ test('a native child crash reruns only the failing file once: a one-off passes w
     assert.equal(r.ok, want.ok, `${name}: ${r.summary}`);
     assert.match(r.summary, want.note, name);
     assert.equal(r.native_crash.length, want.crashes, name);
-    assert.deepEqual(r.receipt?.native_rerun, want.rerun, name);
+    assert.deepEqual(r.receipt?.reruns, want.rerun, name);
+    assert.deepEqual(r.flaky?.map((f) => f.test), want.flaky, name);
+    if (want.flaky) assert.equal(r.flaky[0].native_crash, true, name);
     for (const crash of r.native_crash) {
       assert.equal(crash.test, 'child crashes natively', name);
       assert.equal(crash.signal, 'SIGSEGV', name);
@@ -611,6 +614,60 @@ test('a native child crash reruns only the failing file once: a one-off passes w
     assert.equal(readPublished(marker, 'utf8').length, want.runs, `${name}: crash test runs`);
     assert.equal(readPublished(counted, 'utf8').length, 1, `${name}: the passing file is not rerun`);
     assert.equal(!!r.confirmed_failure, !want.ok, name);
+    assertCleanedUp();
+  }
+});
+
+test('a failing test reruns once: one that then passes is flaky with both runs, one that fails twice keeps the failure, and a reverted failure is not rerun', async () => {
+  const spec = `${NODE} --test --test-reporter=spec --test-concurrency=1`;
+  const suite = `${spec} test/*.test.js`;
+  for (const [name, { times, mode = 'run-only', selector = true }, want] of [
+    ['fails once', { times: 1 }, { ok: true, flaky: true, runs: 2, counted: 1, rerun: ['test/flaky.test.js'], note: /Rerun: reran test\/flaky\.test\.js once in the same checkout: exit 0; flaky: test\/flaky\.test\.js > sometimes fails\./ }],
+    ['fails twice', { times: 2 }, { ok: false, flaky: false, runs: 2, counted: 1, rerun: ['test/flaky.test.js'], note: /Rerun: reran test\/flaky\.test\.js once in the same checkout: exit 1; the failure stands\./ }],
+    ['fails once with no file selector', { times: 1, selector: false }, { ok: true, flaky: true, runs: 2, counted: 2, rerun: [], note: /reran the whole command \(the pinned runner has no file selector \(gates\.tests_proof_cmd with \{tests\}\)\) once in the same checkout: exit 0/ }],
+    // The reverted run fails test/add.test.js as the proof wants, and that failure is not rerun.
+    ['fails once in prove mode', { times: 1, mode: 'prove' }, { ok: true, flaky: true, runs: 3, counted: 2, rerun: ['test/flaky.test.js'], note: /flaky: test\/flaky\.test\.js > sometimes fails\./ }],
+  ]) {
+    const marker = path.join(tmp, `flaky-${branches}`);
+    const counted = path.join(tmp, `flaky-counted-${branches}`);
+    const sha = task({
+      'lib/add.js': FIX,
+      'test/add.test.js': ADD_TEST,
+      'test/counted.test.js': `require('fs').appendFileSync(${JSON.stringify(counted)}, 'x');\n`,
+      'test/flaky.test.js': `const { test } = require('node:test');
+const fs = require('node:fs');
+test('sometimes fails', () => {
+  // read-published: only this test writes the marker, and runs are sequential.
+  const runs = fs.existsSync(${JSON.stringify(marker)}) ? fs.readFileSync(${JSON.stringify(marker)}, 'utf8').length : 0;
+  fs.appendFileSync(${JSON.stringify(marker)}, 'x');
+  if (runs < ${times}) throw new Error('flaked on run ' + runs);
+});
+`,
+    });
+    const project = { tests: { mode }, gates: { tests_cmd: suite, ...(selector ? { tests_proof_cmd: `${spec} {tests}` } : {}) } };
+    const r = await gate.run(ctx(sha, { args: { cmd: suite }, project }));
+    assert.equal(r.ok, want.ok, `${name}: ${r.summary}`);
+    assert.match(r.summary, want.note, name);
+    assert.deepEqual(r.receipt.reruns, [{ step: 'head', files: want.rerun, ok: want.ok }], name);
+    assert.equal(!!r.confirmed_failure, !want.ok, name);
+    assert.equal(readPublished(marker, 'utf8').length, want.runs, `${name}: flaky test runs`);
+    assert.equal(readPublished(counted, 'utf8').length, want.counted, `${name}: passing file runs`);
+    if (!want.flaky) {
+      assert.equal(r.flaky, undefined, name);
+      continue;
+    }
+    assert.equal(r.flaky.length, 1, name);
+    const [flaky] = r.flaky;
+    assert.equal(flaky.test, 'test/flaky.test.js > sometimes fails', name);
+    assert.equal(flaky.step, 'head', name);
+    assert.deepEqual(flaky.files, ['test/flaky.test.js'], name);
+    assert.equal(flaky.first_failure.command, suite, name);
+    assert.equal(flaky.first_failure.status, 1, name);
+    assert.match(flaky.first_failure.error, /flaked on run 0/, name);
+    assert.match(flaky.first_failure.excerpt, /^✖ sometimes fails[^\n]*\n[\s\S]*flaked on run 0/, name);
+    assert.equal(flaky.rerun.command, selector ? `${spec} test/flaky.test.js` : suite, name);
+    assert.equal(flaky.rerun.status, 0, name);
+    assert.ok(flaky.rerun.duration_ms >= 0 && flaky.first_failure.duration_ms >= 0, name);
     assertCleanedUp();
   }
 });

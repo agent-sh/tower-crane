@@ -82,7 +82,7 @@ const SETTINGS = {
   'ci-ignore-apps': str('JSON', 'array of GitHub app slugs to skip; [] or null clears the list'),
   'ci-required': str('JSON', 'array of required check-run names or prefixes; [] or null clears the list'),
   'ci-capped-review': str('JSON', 'array of {app, pattern}: a matching check run of that app is a nonblocking capped review; [] or null clears the list'),
-  'ci-local': str('JSON', 'local CI {command: argv, timeout: seconds, by_kind?: overrides}; null restores hosted CI'),
+  'ci-local': str('JSON', 'local CI {command: argv, timeout: seconds, by_kind?: overrides, rerun?: false, rerun_cmd?: argv with {steps}}; null restores hosted CI'),
   'merge-keep-branch': str('JSON', 'true keeps remote merged task branches; false or null restores deletion; stale local worktrees and branches still retire'),
   'session-bus': str('JSON', 'owner-required: true lets claude worker sandboxes reach the user session bus, which lifts their confinement; false turns it off (docs/state.md#projectjson)'),
   'merge-admin': str('JSON', 'owner-required: true uses gh --admin for solely owned repos; false or null disables it'),

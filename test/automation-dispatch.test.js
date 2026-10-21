@@ -1097,9 +1097,14 @@ function queueFixture(t) {
   fs.writeFileSync(suite, `const fs = require('node:fs'), path = require('node:path');
 const gh = JSON.parse(fs.readFileSync(${JSON.stringify(h.env.AUTOMATION_GITHUB)}, 'utf8'));
 fs.appendFileSync(${JSON.stringify(h.suiteLog)}, JSON.stringify({ pr7: gh.prs['7'].state }) + '\\n');
-// A gate run that fails once, as gates did for tasks accepted before evidence.
-const failOnce = ${JSON.stringify(path.join(h.base, 'fail-once'))};
-if (fs.existsSync(failOnce)) { fs.rmSync(failOnce); process.exit(1); }
+// Gate runs that fail, as gates did for tasks accepted before evidence; the file holds how many.
+const failRuns = ${JSON.stringify(path.join(h.base, 'fail-runs'))};
+if (fs.existsSync(failRuns)) {
+  const left = Number(fs.readFileSync(failRuns, 'utf8')) - 1;
+  if (left > 0) fs.writeFileSync(failRuns, String(left));
+  else fs.rmSync(failRuns);
+  process.exit(1);
+}
 // One run moves main while it runs, as another merge landing would.
 if (fs.existsSync(${JSON.stringify(path.join(h.base, 'move-main-once'))})) {
   fs.rmSync(${JSON.stringify(path.join(h.base, 'move-main-once'))});
@@ -1480,7 +1485,8 @@ test('an accepted PR that already merged without current evidence is confirmed a
   acceptBoth(h);
   // T1 is a legacy task: its tests evidence no longer passes and its PR
   // landed on GitHub before tower-crane recorded merge evidence.
-  fs.writeFileSync(path.join(h.base, 'fail-once'), '');
+  // The run and its one rerun both fail, so the evidence does not pass.
+  fs.writeFileSync(path.join(h.base, 'fail-runs'), '2');
   h.run(['check', 'tests', 'T1', '--agent', 'orchestrator']);
   assert.equal(h.json(['task', 'show', 'T1']).gates.ok, false);
   const github = h.github();
