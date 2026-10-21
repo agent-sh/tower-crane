@@ -135,7 +135,14 @@ function runnerExited(record) {
 // live run on the host looks exited to kill(pid, 0) alone.
 function sweepRuns(base, keep) {
   const uid = process.getuid();
-  for (const name of fs.readdirSync(base)) {
+  let names;
+  try {
+    names = fs.readdirSync(base);
+  } catch {
+    // A sandbox can grant writing a leaf without listing its directory.
+    return;
+  }
+  for (const name of names) {
     if (!/^tct-[A-Za-z0-9]{6}$/.test(name)) continue;
     const dir = path.join(base, name);
     if (dir === keep) continue;
