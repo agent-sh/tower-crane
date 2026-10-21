@@ -93,6 +93,18 @@ function answer(state) {
   } else if (args[0] === 'api' && /\/(?:pulls|issues)\/\d+\/comments(?:\?|$)/.test(args[1])) {
     // Already in the shape the caller's --jq filter produces: one comment per line.
     out = (state.comments || []).map((c) => JSON.stringify(c)).join('\n');
+  } else if (args[0] === 'api' && state.baseRuns && /actions\/runs\?branch=/.test(args[1])) {
+    out = state.baseRuns.map(JSON.stringify).join('\n');
+  } else if (args[0] === 'api' && state.baseJobs && /actions\/runs\/\d+\/jobs/.test(args[1])) {
+    out = (state.baseJobs[/runs\/(\d+)/.exec(args[1])[1]] || []).map(JSON.stringify).join('\n');
+  } else if (args[0] === 'api' && state.jobLogs && /actions\/jobs\/\d+\/logs/.test(args[1])) {
+    out = state.jobLogs[/jobs\/(\d+)/.exec(args[1])[1]] || '';
+  } else if (args[0] === 'api' && state.checks && /commits\/[a-f\d]+\/check-runs/.test(args[1])) {
+    out = state.checks.map(JSON.stringify).join('\n');
+  } else if (args[0] === 'api' && state.suites && /commits\/[a-f\d]+\/check-suites/.test(args[1])) {
+    out = state.suites.map(JSON.stringify).join('\n');
+  } else if (args[0] === 'api' && state.workflows && /actions\/runs\?head_sha=/.test(args[1])) {
+    out = state.workflows.map(JSON.stringify).join('\n');
   } else if (args[0] === 'api') {
     const sha = /commits\/([a-f\d]+)/.exec(args[1])?.[1];
     const status = state.ci?.[sha] || 'success';
