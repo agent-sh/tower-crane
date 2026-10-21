@@ -608,7 +608,9 @@ function cliFailure(args, result) {
     result.signal && `signal ${result.signal}`,
     result.error && `error ${result.error.code}: ${result.error.message}`,
   ].filter(Boolean).join('; ');
-  return new Error(`tower-crane ${args.join(' ')} exited ${result.code}${details ? ` (${details})` : ''}: ${result.stderr}`);
+  // A command can fail with its outcome on stdout alone, as an aborted stack sync did.
+  const output = result.stderr || (result.stdout && `(stderr empty; stdout) ${result.stdout}`) || '';
+  return new Error(`tower-crane ${args.join(' ')} exited ${result.code}${details ? ` (${details})` : ''}: ${output}`);
 }
 
 const PTY_AVAILABLE = process.platform === 'linux'

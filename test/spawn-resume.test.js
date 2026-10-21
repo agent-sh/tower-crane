@@ -782,7 +782,8 @@ test('an expired resumed claim needs room and keeps its original since', (t) => 
 
 // A failed resume start records no spawn, so the next resume takes the same
 // attempt log name. The log there is moved aside only when no recorded spawn
-// of the agent may still be running; from another host its processes are unknown.
+// of the agent may still be running; from another host its processes are
+// unknown, and here its supervisor's end record reads as not written.
 test('a resume moves an earlier start\'s attempt log aside only once no recorded spawn of the agent may still run', (t) => {
   const { h } = setup(t);
   const first = h.json(['spawn', '--task', 'T1', '--wait']);
@@ -791,7 +792,12 @@ test('a resume moves an earlier start\'s attempt log aside only once no recorded
   const log = path.join(logs, `T1-${first.agent}-attempt-2.log`);
   fs.writeFileSync(log, 'an earlier start\n');
   const audit = events(h);
+  const file = path.join(h.state, 'events.jsonl');
+  const recorded = fs.readFileSync(file, 'utf8');
+  // The same length, so what the refused run appends follows the original records.
+  fs.writeFileSync(file, recorded.replaceAll('"active":false', '"active":true '));
   const refused = h.run(['spawn', '--task', 'T1', '--wait'], { hooks: { HOOK_HOSTNAME: 'another-host' } });
+  fs.writeFileSync(file, recorded + fs.readFileSync(file, 'utf8').slice(recorded.length));
   assert.equal(refused.code, 1, refused.stderr);
   assert.match(refused.stderr, /EEXIST: log already exists/);
   assert.equal(fs.readFileSync(log, 'utf8'), 'an earlier start\n');
@@ -805,6 +811,80 @@ test('a resume moves an earlier start\'s attempt log aside only once no recorded
   assert.equal(aside.length, 1, aside.join(', '));
   assert.equal(fs.readFileSync(path.join(logs, aside[0]), 'utf8'), 'an earlier start\n');
   assert.ok(next.stderr.includes(`tower-crane: moved ${log}, left by a start that failed before it was recorded, to ${path.join(logs, aside[0])}\n`), next.stderr);
+});
+
+// Windows gives an exited attempt's pids to new processes within seconds, and
+// the creation time that tells them apart can be missing (a PowerShell read
+// that ran out of time, or a pid taken after the read). Rewriting the first
+// attempt's records stands in for that on any system: they name a live
+// process and carry no start time, so only its supervisor's end record says
+// it exited.
+test('a resume moves an earlier start\'s attempt log aside when the recorded spawn\'s end is recorded, whoever now has its pids', (t) => {
+  const { h } = setup(t);
+  const first = h.json(['spawn', '--task', 'T1', '--wait']);
+  sendBack(h);
+  const cp = require('node:child_process');
+  const live = cp.spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: 'ignore', windowsHide: true }); // wait-allow: a process group that runs until the test kills it
+  t.after(() => killPid(live.pid, 'SIGKILL'));
+  const file = path.join(h.state, 'events.jsonl');
+  const recorded = fs.readFileSync(file, 'utf8');
+  const rewrite = (ended) => fs.writeFileSync(file, recorded.split('\n').map((line) => {
+    if (!line) return line;
+    const event = JSON.parse(line);
+    const d = event.detail;
+    if (event.task !== 'T1' || d?.agent !== first.agent || d.attempt !== first.attempt) return line;
+    for (const key of ['pid', 'monitor_pid']) if (key in d) d[key] = live.pid;
+    for (const key of ['start_ticks', 'monitor_start_ticks', 'monitor_start_time', 'pgid']) delete d[key];
+    if (!ended && d.active === false) d.active = true;
+    return JSON.stringify(event);
+  }).join('\n'));
+  const logs = path.dirname(first.log);
+  const log = path.join(logs, `T1-${first.agent}-attempt-2.log`);
+  fs.writeFileSync(log, 'an earlier start\n');
+  for (const ended of [false, true]) {
+    rewrite(ended);
+    const r = h.run(['spawn', '--task', 'T1', '--wait', '--json']);
+    const aside = fs.readdirSync(logs).filter((n) => n.includes('startup-failed'));
+    if (!ended) {
+      assert.equal(r.code, 1, r.stderr);
+      assert.match(r.stderr, /EEXIST: log already exists/);
+      assert.equal(fs.readFileSync(log, 'utf8'), 'an earlier start\n');
+      assert.deepEqual(aside, []);
+      continue;
+    }
+    assert.equal(r.code, 0, r.stderr);
+    assert.equal(JSON.parse(r.stdout).resumed, true);
+    assert.equal(aside.length, 1, aside.join(', '));
+    assert.equal(fs.readFileSync(path.join(logs, aside[0]), 'utf8'), 'an earlier start\n');
+  }
+});
+
+test('a recorded spawn ends with its supervisor\'s inactive exit or phase for its latest pid', () => {
+  const { spawnEnded } = require('../lib/processes');
+  const spawn = { cmd: 'spawn', task: 'T1', detail: { agent: 'w', pid: 10, monitor_pid: 11, attempt: 1 } };
+  const rec = (cmd, detail, task = 'T1') => ({ cmd, task, detail: { agent: 'w', pid: 10, attempt: 1, ...detail } });
+  const retry = rec('spawn retry', { pid: 20 });
+  for (const [name, after, ended] of [
+    ['no record', [], false],
+    ['an inactive exit', [rec('spawn exit', { active: false })], true],
+    ['an inactive phase', [rec('spawn phase', { phase: 'stopped', active: false })], true],
+    ['an exit still active', [rec('spawn exit', { active: true })], false],
+    ['an exit with no active field', [rec('spawn exit', {})], false],
+    ['an active phase', [rec('spawn phase', { phase: 'running', active: true })], false],
+    ['another agent', [rec('spawn exit', { agent: 'x', active: false })], false],
+    ['another task', [rec('spawn exit', { active: false }, 'T2')], false],
+    ['another pid', [rec('spawn exit', { pid: 12, active: false })], false],
+    ['another attempt', [rec('spawn exit', { attempt: 2, active: false })], false],
+    ['a retry still running', [retry, rec('spawn exit', { active: false })], false],
+    ['a retry that ended', [retry, rec('spawn exit', { pid: 20, active: false })], true],
+    ['a fallback that ended', [rec('spawn fallback', { pid: 30 }), rec('spawn exit', { pid: 30, active: false })], true],
+    ['an earlier attempt\'s retry', [rec('spawn retry', { pid: 20, attempt: 0 }), rec('spawn exit', { active: false })], true],
+  ]) {
+    const events = [spawn, ...after];
+    assert.equal(spawnEnded(spawn, events), ended, name);
+  }
+  // A record before the spawn is an earlier process's.
+  assert.equal(spawnEnded(spawn, [rec('spawn exit', { active: false }), spawn]), false);
 });
 
 // Windows records no start time with a pid and reuses a freed pid within
@@ -903,6 +983,9 @@ test('Windows reads the creation times for every recorded spawn of the task in o
     { cmd: 'spawn', task: 'T1', at: '2026-10-16T11:00:00.000Z', detail: { agent: 'worker-T1-1', host, pid: live.pid, monitor_pid: process.pid, log: path.join(logs, 'T1-worker-T1-1.log') } },
     { cmd: 'spawn', task: 'T1', at: '2026-10-16T11:05:00.000Z', detail: { agent: 'worker-T1-2', host, pid: done.pid, monitor_pid: live.pid, log: path.join(logs, 'T1-worker-T1-2.log') } },
     { cmd: 'spawn', task: 'T2', at: '2026-10-16T11:05:00.000Z', detail: { agent: 'worker-T2-1', host, pid: process.ppid, monitor_pid: process.ppid, log: path.join(logs, 'T2-worker-T2-1.log') } },
+    // Its supervisor recorded its end, so the live process at its pids is not read.
+    { cmd: 'spawn', task: 'T1', at: '2026-10-16T11:10:00.000Z', detail: { agent: 'worker-T1-3', host, pid: process.ppid, monitor_pid: process.ppid, attempt: 1, log: path.join(logs, 'T1-worker-T1-3.log') } },
+    { cmd: 'spawn exit', task: 'T1', at: '2026-10-16T11:20:00.000Z', detail: { agent: 'worker-T1-3', host, pid: process.ppid, attempt: 1, active: false, code: 0 } },
   ] };
   fs.writeFileSync(path.join(logs, 'T1-worker-T1-1.log'), 'recorded\n');
   fs.writeFileSync(path.join(logs, 'T1-worker-T1-1-startup-failed-2026-10-16T11-01-00-000Z.log'), 'kept\n');

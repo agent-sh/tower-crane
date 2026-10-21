@@ -222,6 +222,8 @@ for (const stage of ['checkout', 'sync']) {
     const failed = f.h.run(['stack', 'sync', 'T2']);
     assert.equal(failed.code, 1);
     assert.match(failed.stdout, /retry/);
+    // The step that failed and why, on stderr, where a test's failure message looks.
+    assert.ok(failed.stderr.includes(`tower-crane: T2: gh stack ${stage} failed: ${reason}\n`), failed.stderr);
     assert.deepEqual(f.h.json(['task', 'show', 'T2']), before);
     assert.equal(f.h.json(['task', 'show', 'T1']).status, 'submitted');
     assert.equal(f.h.ok(['brief', 'get', 'T2']), brief);
