@@ -96,7 +96,10 @@ jobs:
           # A hang run on Windows leaves the stop to the guard, as when node itself is stuck.
           TC_TEST_SHARD_DEADLINE_MIN: ${{ inputs.hang && (runner.os == 'Windows' && '10' || '2') || '' }}
           TC_SHARD_GUARD_DEADLINE_MIN: ${{ inputs.hang && '2' || '38' }}
-          TC_SHARD_GUARD_MAX_PROCESSES: 2000
+          # Healthy Windows shards peaked at 28 to 69 active processes and 0.9 to 1.8 GiB committed
+          # (run 39561962547). The VM has 16 GiB with about 3 GiB in use before the tests, so a job at
+          # its memory limit still leaves the runner room; 1000 processes is about 14 times the peak.
+          TC_SHARD_GUARD_MAX_PROCESSES: 1000
           TC_SHARD_GUARD_MAX_MEMORY_MB: 12288
           TC_SHARD_PROGRESS_CHECK: shard progress (${{ matrix.os }}, node ${{ matrix.node }}, shard ${{ matrix.shard }})
           TC_SHARD_PROGRESS_SHA: ${{ github.event.pull_request.head.sha || github.sha }}

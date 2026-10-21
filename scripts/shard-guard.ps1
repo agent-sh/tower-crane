@@ -156,6 +156,7 @@ function Get-JobProcesses {
   if ($pids.Count) { Get-Process -Id $pids -ErrorAction SilentlyContinue }
 }
 
+# Sampled: active processes each second, handles each minute. The job itself records the memory peaks.
 $peakActive = 0
 $peakHandles = 0
 function Format-Job {
@@ -275,7 +276,7 @@ $deadline = $started.AddMinutes($deadlineMin)
 $nextBeat = [DateTime]::UtcNow
 $atLimit = $false
 $stopped = $false
-while (-not $child.WaitForExit(5000)) {
+while (-not $child.WaitForExit(1000)) {
   $active = [int]([ShardJob]::Usage($job)[0])
   if ($active -gt $peakActive) { $peakActive = $active }
   if ($maxProcesses -and $active -ge $maxProcesses -and -not $atLimit) { Write-Log "job reached its limit of $maxProcesses processes; new processes fail to start" }
