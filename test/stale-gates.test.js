@@ -275,6 +275,7 @@ for (const [name, { local, prepare, move }, reason] of overlaps) {
 // The command stands in for a two-hour run: a merge that changes the script it runs lands on
 // main during each of the next two runs, so each comes back behind an overlapping change.
 const BUSY_BASE = `
+const AGENT_ENV = ${JSON.stringify(path.join(__dirname, 'agent-env.js'))};
 const fs = require('node:fs');
 const cp = require('node:child_process');
 const [count, repo, cli, out] = process.argv.slice(2);
@@ -282,8 +283,8 @@ const [count, repo, cli, out] = process.argv.slice(2);
 if (fs.existsSync('other.txt')) process.exit(0);
 const run = (fs.existsSync(count) ? Number(fs.readFileSync(count, 'utf8')) : 0) + 1;
 fs.writeFileSync(count, String(run));
-const env = { ...process.env, GIT_AUTHOR_NAME: 'T', GIT_AUTHOR_EMAIL: 't@localhost', GIT_COMMITTER_NAME: 'T', GIT_COMMITTER_EMAIL: 't@localhost' };
-const git = (args, input) => cp.execFileSync('git', ['-C', repo, ...args], { encoding: 'utf8', input, env }).trim();
+const identity = { ...process.env, GIT_AUTHOR_NAME: 'T', GIT_AUTHOR_EMAIL: 't@localhost', GIT_COMMITTER_NAME: 'T', GIT_COMMITTER_EMAIL: 't@localhost' };
+const git = (args, input) => cp.execFileSync('git', ['-C', repo, ...args], { encoding: 'utf8', input, env: identity }).trim();
 if (run === 2 || run === 3) {
   const base = git(['rev-parse', 'refs/heads/main']);
   const blob = git(['hash-object', '-w', '--stdin'], git(['show', base + ':ci.js']) + '\\n// moved during run ' + run + '\\n');
@@ -292,7 +293,8 @@ if (run === 2 || run === 3) {
 }
 // The other task checks the current base, so only the hold keeps it from landing during this run.
 if (run === 4) {
-  const tc = (args) => cp.spawnSync(process.execPath, [cli, ...args, '--agent', 'merger'], { cwd: repo, encoding: 'utf8' });
+  const env = require(AGENT_ENV).fakeAgentEnv(process.env);
+  const tc = (args) => cp.spawnSync(process.execPath, [cli, ...args, '--agent', 'merger'], { env, cwd: repo, encoding: 'utf8' });
   const check = tc(['check', 'ci', 'T2']);
   const r = tc(['merge', 'T2']);
   fs.writeFileSync(out, JSON.stringify({ check: check.status, code: r.status, stderr: r.stderr }));
