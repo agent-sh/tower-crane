@@ -2,6 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
 const { ROOT, makeRepo } = require('./helpers');
@@ -108,7 +109,7 @@ test('TC_TEST_SHARD makes the runner run only the files of the shard it names', 
   assert.match(invalid.stderr, /TC_TEST_SHARD requires INDEX\/TOTAL/);
 });
 
-test('a shard logs each file as it starts and ends, and past its deadline prints what still runs, stops it and fails', (t) => {
+test('a shard logs each file as it starts and ends, and past its deadline its watchdog prints what still runs, stops it and fails', (t) => {
   // The deadline stops the nested run before its global teardown, so its seed lives in this test's fixture.
   const h = makeRepo(t);
   const run = (files, extra) => cp.spawnSync(process.execPath, [path.join(ROOT, 'test', 'run.js'), ...files], {
@@ -122,12 +123,26 @@ test('a shard logs each file as it starts and ends, and past its deadline prints
   assert.match(done.stdout, /✔ shard a/, 'the spec reporter still prints each test');
 
   const hang = path.join('test', 'fixtures', 'shard', 'hang.test.js');
-  const late = run([FIXTURES[0], hang], { TC_TEST_SHARD_DEADLINE_MIN: '0.1' });
-  assert.equal(late.status, 1, late.stdout + late.stderr);
-  assert.match(late.stdout, /^file started: .*hang\.test\.js$/m);
-  assert.doesNotMatch(late.stdout, /^file ended: .*hang\.test\.js$/m);
-  assert.match(late.stderr, /shard deadline of 0\.1 min reached; processes still running/);
-  assert.match(late.stderr, /^ {2}\d+ \d+ .*hang\.test\.js/m, 'the dump names the hung file\'s process');
+  // TC_TEST_SHARD_HANG blocks the runner's own event loop, so only a process of its own can stop the shard.
+  for (const blocked of [false, true]) {
+    const logDir = path.join(h.base, `shard-log-${blocked}`);
+    const late = run([FIXTURES[0], hang], { TC_TEST_SHARD_DEADLINE_MIN: '0.1', TC_TEST_SHARD_LOG_DIR: logDir, TC_TEST_SHARD_HANG: blocked ? '1' : '' });
+    const what = `blocked runner ${blocked}`;
+    assert.equal(late.error, undefined, `${what}: the watchdog, not this test's timeout, stops the run`);
+    assert.ok(late.status !== 0, `${what}: the shard fails\n${late.stdout}${late.stderr}`);
+    assert.match(late.stdout, /^file started: .*hang\.test\.js$/m, what);
+    assert.doesNotMatch(late.stdout, /^file ended: .*hang\.test\.js$/m, what);
+    assert.match(late.stderr, /shard deadline of 0\.1 min reached; free memory/, what);
+    // The files CI uploads keep the same record when the job log is lost.
+    const progress = fs.readFileSync(path.join(logDir, 'progress.log'), 'utf8');
+    assert.match(progress, /^file started: .*hang\.test\.js$/m, what);
+    assert.match(progress, /^file ended: .*a\.test\.js$/m, what);
+    assert.doesNotMatch(progress, /^file ended: .*hang\.test\.js$/m, what);
+    const watchdog = fs.readFileSync(path.join(logDir, 'watchdog.log'), 'utf8');
+    assert.match(watchdog, /shard deadline of 0\.1 min reached[\s\S]*processes still running/, what);
+    assert.match(watchdog, /^\S+ {3}\d+ \d+ .*hang\.test\.js/m, `${what}: the dump names the hung file's process`);
+    assert.match(watchdog, /stopped the shard$/m, what);
+  }
 });
 
 test('a durations refresh from a run with a failed shard keeps the old times of the files it did not measure', () => {
