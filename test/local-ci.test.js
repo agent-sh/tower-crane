@@ -1891,11 +1891,86 @@ test('receipt globs validate like artifact globs', () => {
     [['C:\\checks\\*.json'], false], [['a\\..\\b'], false], [['a\0b'], false],
   ]) {
     assert.equal(Local.valid({ command: ['node'], timeout: 5, receipts }), valid, JSON.stringify(receipts));
+    for (const override of [{ command: ['node'], receipts }, { args: [], receipts }]) {
+      assert.equal(Local.validOverride(override, { allowReceipts: true }), valid, JSON.stringify(override));
+      assert.equal(Local.valid({ command: ['node'], timeout: 5, by_kind: { docs: override } }), false);
+    }
   }
   const local = { command: ['node'], timeout: 5, receipts: ['.local/checks/*.json'] };
   assert.deepEqual(Local.resolve(local, { id: 'T1', kind: 'code' }).receipts, local.receipts);
+  for (const override of [{ args: [] }, { args: [], receipts: [] }, { args: [], receipts: ['other/*.json'] }]) {
+    const expected = override.receipts ?? local.receipts;
+    assert.deepEqual(Local.resolve(local, { id: 'T1', kind: 'docs', ci_local: override }).receipts, expected);
+  }
   const policy = require('../lib/gate-commands').resolve({ tests: { map: {} }, ci: { local } }, 'tests').policy;
   assert.deepEqual(policy.ci_local, { command: ['node'], timeout: 5 });
+});
+
+test('task local CI overrides replace, inherit or disable receipt copies on pass and fail', (t) => {
+  const h = fixture(t, `
+const fs = require('node:fs');
+fs.mkdirSync('.local/checks', { recursive: true });
+for (const name of ['project', 'task']) {
+  fs.writeFileSync('.local/checks/' + name + '.json', JSON.stringify({ name }));
+}
+process.exit(process.argv.includes('--fail') ? 1 : 0);
+`);
+  h.ok(['project', 'set', '--ci-local', JSON.stringify({
+    command: h.command, timeout: 5, receipts: ['.local/checks/project.json'],
+    by_kind: { docs: { args: ['--kind'] } },
+  })]);
+  for (const mode of ['command', 'args']) {
+    for (const row of [
+      { label: 'replace', receipts: ['.local/checks/task.json'], expected: ['task'] },
+      { label: 'inherit', expected: ['project'] },
+      { label: 'disable', receipts: [], expected: [] },
+    ]) {
+      for (const failed of [false, true]) {
+        const label = `${mode} ${row.label} ${failed ? 'fail' : 'pass'}`;
+        const extra = failed ? ['--fail'] : [];
+        const override = mode === 'command' ? { command: [...h.command, ...extra] } : { args: extra };
+        if (Object.hasOwn(row, 'receipts')) override.receipts = row.receipts;
+        const updated = h.json(['task', 'update', 'T1', '--ci-local', JSON.stringify(override)]);
+        assert.deepEqual(updated.ci_local, override, label);
+        const r = h.run(['check', 'ci', 'T1']);
+        assert.equal(r.code, failed ? 1 : 0, `${label}: ${r.stdout}${r.stderr}`);
+        const e = h.readState('tasks.json').tasks[0].evidence.at(-1);
+        assert.equal(e.receipt.variant, 'task:T1', label);
+        assert.deepEqual(e.receipt.command, [...h.command, ...extra], label);
+        const copied = e.local_ci.receipts || [];
+        assert.deepEqual(copied.map((file) => path.basename(file.from, '.json')), row.expected, label);
+        for (const file of copied) {
+          assert.deepEqual(JSON.parse(fs.readFileSync(path.join(h.state, file.path), 'utf8')),
+            { name: path.basename(file.from, '.json') }, label);
+        }
+        const run = path.posix.basename(path.posix.dirname(e.local_ci.log));
+        assert.equal(fs.existsSync(path.join(h.state, 'ci-artifacts', run, 'receipts')),
+          row.expected.length > 0, label);
+      }
+    }
+  }
+});
+
+test('task receipt globs use the project validation error without changing state', (t) => {
+  const h = fixture(t);
+  const project = h.readState('project.json');
+  const tasks = h.readState('tasks.json');
+  const audit = fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8');
+  for (const receipts of ['*.json', null, [1], [''], ['../up/*.json'], ['/absolute/*.json'],
+    ['C:\\checks\\*.json'], ['a\\..\\b'], ['a\0b']]) {
+    const setting = h.run(['project', 'set', '--name', 'changed', '--ci-local',
+      JSON.stringify({ command: h.command, timeout: 5, receipts })]);
+    assert.equal(setting.code, 2, JSON.stringify(receipts));
+    assert.match(setting.stderr, /receipts.*relative globs without \.\./);
+    for (const override of [{ command: h.command, receipts }, { args: [], receipts }]) {
+      const update = h.run(['task', 'update', 'T1', '--title', 'changed', '--ci-local', JSON.stringify(override)]);
+      assert.equal(update.code, 2, JSON.stringify(override));
+      assert.equal(update.stderr, setting.stderr, JSON.stringify(override));
+    }
+  }
+  assert.deepEqual(h.readState('project.json'), project);
+  assert.deepEqual(h.readState('tasks.json'), tasks);
+  assert.equal(fs.readFileSync(path.join(h.state, 'events.jsonl'), 'utf8'), audit);
 });
 
 test('receipt copies redact decoded JSON keys and values on failure and success', (t) => {

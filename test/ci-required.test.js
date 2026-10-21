@@ -114,7 +114,8 @@ test('same-repo PRs run the shared check, fork PRs the Windows shards; other eve
   assert.match(repeatJob, /^ {4}runs-on: windows-latest$/m);
   const repeats = [...repeatJob.matchAll(/- name: (Repeat [^\n]+)/g)].map((m) => m[1]);
   assert.deepEqual(repeats, ['Repeat Claude Code mod wakeup twenty times', 'Repeat Claude interrupted native worker ten times',
-    'Repeat lock-free reader and torn recovery tests thirty times', 'Repeat owner authority and board approval files ten times'],
+    'Repeat lock-free reader and torn recovery tests thirty times', 'Repeat owner authority and board approval files ten times',
+    'Repeat interrupt during backoff and origin read tests twenty times'],
   'the wakeup loop runs first, on a fresh runner');
   // GitHub keeps one running and one pending run per group, and a newer run replaces the pending one.
   // Main pushes share a group so only the newest pending head waits; scheduled and manual runs stay unique.
@@ -122,13 +123,21 @@ test('same-repo PRs run the shared check, fork PRs the Windows shards; other eve
     'PR runs cancel per PR; main pushes share one group that never cancels a running run; scheduled and manual runs are unique');
 });
 
-test('a shard reaches its deadline, and leaves a log, before the test job limit cancels it without one', () => {
+test('a shard reaches its deadline, and leaves a log, before the test step and job limits cancel it without one', () => {
   const workflow = readWorkflow(path.resolve(__dirname, '..'));
   const testJob = workflow.split('\n  test:\n')[1].split(/\n {2}[\w-]+:\n/)[0];
   const limit = Number(/^ {4}timeout-minutes: (\d+)$/m.exec(testJob)?.[1]);
+  const step = testJob.split('- run: npm test\n')[1].split(/\n {6}- /)[0];
+  const stepLimit = Number(/^ {8}timeout-minutes: (\d+)$/m.exec(step)?.[1]);
   const { SHARD_DEADLINE_MIN } = require('./run');
-  // Checkout, Node setup and check:shared run first, and the process dump takes up to a minute.
-  assert.ok(SHARD_DEADLINE_MIN <= limit - 5, `shard deadline ${SHARD_DEADLINE_MIN} min against a ${limit} min job limit`);
+  // The watchdog's process dump and stop take up to two minutes.
+  assert.ok(SHARD_DEADLINE_MIN <= stepLimit - 4, `shard deadline ${SHARD_DEADLINE_MIN} min against a ${stepLimit} min test step limit`);
+  // Checkout, Node setup and check:shared run before the step, and the upload after it.
+  assert.ok(stepLimit <= limit - 4, `test step limit ${stepLimit} min against a ${limit} min job limit`);
+  assert.match(step, /^ {10}TC_TEST_SHARD_LOG_DIR: \$\{\{ runner\.temp \}\}\/shard-log$/m);
+  const upload = testJob.split('- name: Save shard progress\n')[1];
+  assert.match(upload, /^ {8}if: always\(\)\n {8}uses: actions\/upload-artifact@/, 'the progress uploads on every outcome');
+  assert.match(upload, /^ {10}path: \$\{\{ runner\.temp \}\}\/shard-log$/m);
 });
 
 test('the stack section says hosted CI runs on every stack member at its own base', () => {
