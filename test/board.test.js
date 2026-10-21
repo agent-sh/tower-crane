@@ -462,6 +462,8 @@ test('in a browser, every board write goes through its form: answer, comments, o
   const h = makeRepo(t);
   h.init();
   populate(h);
+  h.ok(['ask', '--kind', 'technical', '--question', 'How should the worker continue?', '--option', 'redis',
+    '--option', 'postgres', '--agent', 'asking-worker']);
   await withServers(async (servers) => {
     const url = await startServe(servers, h);
     const b = await openBrowser(t);
@@ -470,14 +472,31 @@ test('in a browser, every board write goes through its form: answer, comments, o
     assert.equal(await b.inPage('location.search'), '', 'the page drops the one-time key from the address bar');
     const events = () => log(h).length;
 
-    // Answer with the option button, as a person would.
-    let n = events();
-    await b.inPage(`document.querySelector('form[data-api="/api/decisions/D1/answer"] button[value="redis"]').click()`);
-    await b.restored(`!document.querySelector('form[data-api="/api/decisions/D1/answer"]')`, 'the answered decision to leave the board');
-    const d1 = h.readState('decisions.json').decisions[0];
-    assert.deepEqual([d1.status, d1.answer, d1.answered_by], ['answered', 'redis', 'owner']);
-    assert.equal(events(), n + 1);
-    assert.equal(await b.inPage(`!!document.activeElement.closest('#queue .qi')`), true, 'focus lands on the next queue item');
+    // Each form sends once; the answer and its asker message share that write.
+    for (const row of [
+      { id: 'D1', choice: 'redis', note: '', blocks: ['T4'] },
+      { id: 'D2', choice: 'postgres', note: 'Also fix the CI gate before submitting.', blocks: [] },
+    ]) {
+      const n = events();
+      await b.inPage(`(() => {
+        const form = document.querySelector('form[data-api="/api/decisions/${row.id}/answer"]');
+        form.querySelector('input[name="note"]').value = ${JSON.stringify(row.note)};
+        form.querySelector('button[value="${row.choice}"]').click();
+      })()`);
+      await b.restored(`!document.querySelector('form[data-api="/api/decisions/${row.id}/answer"]')`, 'the answered decision to leave the board');
+      const decision = h.readState('decisions.json').decisions.find((d) => d.id === row.id);
+      assert.deepEqual([decision.status, decision.answer, decision.answered_by], ['answered', row.choice, 'owner']);
+      const written = log(h).slice(n);
+      assert.deepEqual(written.map((e) => e.cmd), ['answer', 'msg']);
+      assert.deepEqual([written[0].detail.decision, written[0].detail.choice], [row.id, row.choice]);
+      const message = written[1];
+      assert.deepEqual([message.detail.to, message.detail.decision, message.detail.blocks],
+        [decision.asked_by, row.id, row.blocks]);
+      assert.ok(message.detail.text.startsWith(`decision ${row.id} answered: ${row.choice}`));
+      if (row.note) assert.ok(message.detail.text.endsWith(`\nOrchestrator note:\n${row.note}`));
+      else assert.doesNotMatch(message.detail.text, /Orchestrator note:/);
+      assert.equal(await b.inPage(`!!document.activeElement.closest('#queue .qi')`), true, 'focus lands on the next queue item');
+    }
 
     // A comment on a task, from its sheet.
     await b.goto(`${url}#T1`);
@@ -508,7 +527,7 @@ test('in a browser, every board write goes through its form: answer, comments, o
 
     // A refused write says why in the form and writes nothing.
     h.ok(['task', 'update', 'T2', '--tier', 'easy']);
-    n = events();
+    let n = events();
     await b.inPage(`(() => { const f = document.querySelector('#T2 form[data-kind="tier"]'); f.dataset.base = 'medium'; f.querySelector('select').value = 'research'; f.querySelector('button').click(); })()`);
     await b.until(`document.querySelector('#T2 form[data-kind="tier"] output.err')`, 'the refusal to show');
     assert.match(await b.inPage(`document.querySelector('#T2 form[data-kind="tier"] output').textContent`), /T2/);

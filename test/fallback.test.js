@@ -96,6 +96,76 @@ test('a late cap event from an exited attempt does not stop its retry', async t 
   assert.deepEqual(h.attempts().map(a => a.model), ['first', 'first', 'first', 'second']);
 });
 
+for (const row of [
+  { state: 'fresh', nextHarness: 'codex', reason: 'outage', chain: true, ack: true },
+  { state: 'fresh', nextHarness: 'claude', reason: 'refusal', ack: false },
+  { state: 'resumed', nextHarness: 'codex', reason: 'refusal', ack: true },
+  { state: 'resumed', nextHarness: 'claude', reason: 'outage', ack: true },
+  { state: 'running', nextHarness: 'claude', reason: 'auth', ack: true },
+]) {
+  test(`decision answers survive fallback: ${row.state} to ${row.nextHarness}, ${row.reason}, ${row.ack ? 'acknowledged' : 'unread'}`, async (t) => {
+    const h = setup(t, row);
+    const agent = 'worker-T1-1';
+    const finish = path.join(h.base, 'finish-primary');
+    if (row.state === 'running') {
+      Object.assign(h.spawnEnv, { TOWER_CRANE_TEST_FALLBACK_FINISH: finish, TOWER_CRANE_TEST_LATE_AUTH: 'first' });
+    }
+    if (row.state !== 'fresh') {
+      const login = path.join(h.base, 'login');
+      fs.writeFileSync(login, '');
+      const first = h.json(['spawn', '--task', 'T1', ...(row.state === 'resumed' ? ['--wait'] : [])], {
+        env: { ...h.spawnEnv, TOWER_CRANE_TEST_LOGIN_FLAG: login },
+      });
+      assert.equal(first.agent, agent);
+      if (row.state === 'running') {
+        await waitOnRepo(h, () => fs.existsSync(h.file) && h.attempts().length === 1, 'the primary worker to start', { alive: first.monitor_pid });
+      } else {
+        const session = events(h).findLast((e) => e.cmd === 'spawn session').detail.session_id;
+        const sessions = path.join(h.state, 'homes', '.codex', agent, 'sessions');
+        fs.mkdirSync(sessions, { recursive: true });
+        fs.writeFileSync(path.join(sessions, `rollout-${session}.jsonl`), '{}\n');
+      }
+    }
+    h.ok(['ask', '--kind', 'technical', '--question', 'Which store?', '--blocks', 'T1', '--agent', agent]);
+    const note = 'Use Redis.\nAlso fix the CI gate so dispatch runs do not poison it.';
+    h.ok(['answer', 'D1', '--choice', 'redis', '--note', note, '--agent', 'orchestrator']);
+    if (row.ack) {
+      const binding = path.join(h.state, 'homes', agent, 'hook.json');
+      fs.mkdirSync(path.dirname(binding), { recursive: true });
+      fs.writeFileSync(binding, JSON.stringify({ state: h.state, agent, task: 'T1', role: 'worker', attempt: 1 }));
+      const delivered = h.json(['hook', 'inbox', '--binding', binding, '--agent', agent]);
+      assert.ok(delivered.context.includes(`Orchestrator note:\n${note}`));
+      assert.equal(h.json(['hook', 'inbox', '--binding', binding, '--agent', agent]).context, '');
+    }
+    h.ok(['ask', '--kind', 'technical', '--question', 'Unrelated work?', '--agent', 'other-worker']);
+    h.ok(['answer', 'D2', '--choice', 'other', '--note', 'Other task requirement.', '--agent', 'orchestrator']);
+    if (row.state === 'resumed') {
+      h.ok(['submit', 'T1', '--agent', agent, '--sha', '50b732a15be40ccb2065cb2ba0e7b366d511b736']);
+      h.ok(['rework', 'T1', '--reason', 'Continue after the decision.']);
+      assert.equal(h.json(['spawn', '--task', 'T1', '--dry-run'], { env: h.spawnEnv }).resumed, true);
+    }
+    const before = row.state === 'fresh' ? 0 : h.attempts().length;
+    if (row.state === 'running') {
+      fs.writeFileSync(finish, '');
+      await waitOnRepo(h, () => events(h).some((e) => e.cmd === 'spawn exit'), 'the fallback worker to exit');
+      assert.equal(events(h).findLast((e) => e.cmd === 'spawn exit').detail.code, 0);
+    } else {
+      const result = h.spawn();
+      assert.equal(result.code, 0, result.stderr);
+    }
+    const attempts = h.attempts().slice(before);
+    assert.ok(attempts.some((a) => a.harness === row.nextHarness && a.model === 'second'));
+    const expected = `decision D1 answered: redis (answer has a note with 2 lines)\nOrchestrator note:\n${note}`;
+    for (const attempt of attempts) {
+      // Warm retries keep the conversation; route starts rebuild its prompt.
+      if (attempt.retry !== '0' && attempt.args.includes('resume')) continue;
+      assert.ok(attempt.args.some((arg) => arg.includes(expected)), `${attempt.harness} ${attempt.model} retry ${attempt.retry} lost the answer`);
+      assert.ok(!attempt.args.some((arg) => arg.includes('Other task requirement.')));
+    }
+    assert.equal(events(h).filter((e) => e.cmd === 'spawn fallback').length, row.chain ? 2 : 1);
+  });
+}
+
 for (const explicit of [false, true]) {
   test(`research Claude fallback ${explicit ? 'sets' : 'inherits'} web MCP tools and worker confinement on Bedrock`, async (t) => {
     const server = { name: 'harness-web', command: 'node', args: ['/web/server.mjs'] };
