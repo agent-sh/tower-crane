@@ -12,6 +12,7 @@ const cp = require('node:child_process');
 const { makeRepo, cachedFixture, ROOT } = require('./helpers');
 const { shellQuote } = require('../lib/gates/common');
 const { gateFixture } = require('./gate-helpers');
+const { nativeCrashTest } = require('./gates/helpers');
 
 const runner = `node ${shellQuote(path.join(ROOT, 'test/run.js'))}`;
 const fullCommand = `${runner} test/*.test.js`;
@@ -133,6 +134,24 @@ for (const [name, settings, valueTest, ok, pattern] of [
     if (settings['value.js']?.[0] === 'test/gone.test.js') assert.deepEqual(result.receipt.mapped_missing, ['test/gone.test.js']);
   });
 }
+
+// The coverage run expands the proof template on the changed tests, so a native crash it reruns is
+// recorded as the proof step, never as the head command.
+test('a native crash in the coverage run is rerun as the proof step', { skip: process.platform === 'win32' && 'POSIX signals' }, (t) => {
+  const marker = path.join(fs.mkdtempSync(path.join(process.env.TOWER_CRANE_TEST_TMP || require('node:os').tmpdir(), 'crucial-crash-')), 'runs');
+  t.after(() => fs.rmSync(path.dirname(marker), { recursive: true, force: true }));
+  const crashOnce = `require('node:assert/strict').equal(require('../value'), 1);
+if (process.env.NODE_V8_COVERAGE) {
+${nativeCrashTest({ marker })}}
+`;
+  const h = fixture(t, { '**/*.md': [] }, crashOnce);
+  const result = check(h);
+  assert.equal(result.ok, true, result.summary);
+  assert.deepEqual(result.receipt.coverage_gaps, ['value.js']);
+  assert.deepEqual(result.receipt.native_rerun, { step: 'proof', files: ['test/value.test.js'], ok: true });
+  assert.equal(fs.readFileSync(marker, 'utf8'), 'xx', 'only the coverage run and its rerun reach the crash');
+  assert.equal(counts(h), true);
+});
 
 // The import-derived seed (tools/tests-map.js) missed code a test reaches only through the CLI it
 // spawns or loads by name: T427's reviewer planted a bug in lib/gates/merge.js that every
