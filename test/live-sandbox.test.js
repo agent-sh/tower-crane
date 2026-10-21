@@ -16,6 +16,7 @@ const cp = require('node:child_process');
 const { pinLiveRung, makeRepo, dispatch, BIN, ROOT, TMP_ROOT, LIVE_ROOT } = require('./helpers');
 const { waitUntil } = require('./signals');
 const A = require('../lib/agents');
+const GateProbe = require('./fixtures/gate-probe');
 const { runtimeProbe, assertRuntimeEntries } = require('./runtime-entries');
 
 const uid = typeof process.getuid === 'function' ? process.getuid() : null;
@@ -220,7 +221,7 @@ test('in a real codex sandbox forged state edits fail and the CLI writes through
 // A project at a deep path: brokers/<agent>/broker.sock is too long for a
 // socket address, and the caller's TMPDIR is under the home, as ~/.cache is
 // in production. claude's sandbox hides the home, so a socket there failed
-// every brokered command with ENOENT; the agent's own temp directory holds
+// every brokered command with ENOENT; the socket leaf the spawn grants holds
 // it instead. codex brokers over TCP, so its run checks only the deep path.
 for (const harness of ['claude', 'codex']) {
   const flag = `TOWER_CRANE_LIVE_${harness.toUpperCase()}`;
@@ -561,6 +562,46 @@ ${before};
   return bin;
 }
 
+test('an external clean wrapper has the host result in a real worker sandbox and its tool paths reject writes', { skip: realCodexSandbox(), timeout: 300000 }, async (t) => {
+  for (const status of [0, 7]) {
+    const h = makeRepo(t);
+    h.init();
+    h.ok(['task', 'add', '--title', 'External clean probe', '--acceptance', 'host result and read-only tools']);
+    h.ok(['brief', 'set', 'T1', '-'], { input: 'External clean probe' });
+    const tools = path.join(h.base, 'gate-tools');
+    const dependencies = path.join(h.base, 'gate-dependencies');
+    fs.mkdirSync(tools);
+    fs.mkdirSync(dependencies);
+    const clean = path.join(tools, 'clean.sh');
+    const detector = path.join(dependencies, 'detect.js');
+    fs.writeFileSync(detector, `console.log(JSON.stringify({scope:"diff",items:[{severity:"high",file:"probe.js",line:1,message:"probe finding"}]})); process.exit(${status});\n`);
+    fs.writeFileSync(clean, `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(detector)} "$@"\n`, { mode: 0o755 });
+    h.ok(['project', 'set', '--clean-cmd', JSON.stringify(clean), '--tests-proof-cmd', `node ${JSON.stringify(detector)} {tests}`,
+      '--clean-paths', JSON.stringify([dependencies])]);
+    const dir = results(h);
+    const result = path.join(dir, 'gate-result.json');
+    const args = [h.repo, '--base=HEAD', '--json'];
+    const host = cp.spawnSync(clean, args, { encoding: 'utf8', cwd: h.repo });
+    assert.equal(host.status, status, host.stderr);
+    const script = `
+  const fs = require('node:fs'), cp = require('node:child_process'), path = require('node:path');
+  const r = cp.spawnSync(${JSON.stringify(clean)}, ${JSON.stringify(args)}, {encoding:'utf8'});
+  const writes = {};
+  for (const file of ${JSON.stringify([clean, detector, path.join(tools, 'new'), path.join(dependencies, 'new')])}) {
+    try { fs.writeFileSync(file, 'changed'); writes[file] = 'WRITABLE'; }
+    catch (e) { writes[file] = e.code; }
+  }
+  fs.writeFileSync(${JSON.stringify(result)}, JSON.stringify({status:r.status,stdout:r.stdout,stderr:r.stderr,writes}));
+  `;
+    const bin = standInCodex(h, script, 'medium');
+    await GateProbe.run(t, h, { env: { ...h.env, PATH: `${bin}${path.delimiter}${process.env.PATH}` } });
+    const seen = JSON.parse(fs.readFileSync(result, 'utf8'));
+    assert.equal(seen.status, host.status, seen.stderr);
+    assert.equal(seen.stdout, host.stdout);
+    for (const [file, code] of Object.entries(seen.writes)) assert.match(code, /^(EACCES|EPERM|EROFS)$/, file);
+  }
+});
+
 test('a real codex sandbox starts for a home among 5,000 entries and reads nothing beside it but what the agent needs', { skip: realCodexSandbox(), timeout: 300000 }, async (t) => {
   const h = makeRepo(t);
   h.init();
@@ -596,7 +637,7 @@ test('a real codex sandbox starts for a home among 5,000 entries and reads nothi
 // With inject, the push runs with NODE_OPTIONS asking node to load a file
 // first, which the shim must not do. before runs first, extra after the push.
 // The claude probe leaves it out: a model asked to run it declined
-// (2026-10-14), and the stub test in isolation.test.js covers claude's shim.
+// (2026-10-14), and the stub test in isolation-shims.test.js covers claude's shim.
 function shimProbe(h, out, { before = '', extra = '', inject = false } = {}) {
   const dir = path.dirname(out);
   const repo = path.join(dir, 'shim-repo');

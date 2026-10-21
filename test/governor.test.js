@@ -6,6 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
 const G = require('../lib/governor');
+const Processes = require('../lib/processes');
 const { makeRepo, cachedFixture, BIN, TMP_ROOT } = require('./helpers');
 const { writeHost, GiB } = require('./host');
 const { waitOnRepo, killPid } = require('./signals');
@@ -169,7 +170,7 @@ test('status names the growth rule and its sample count, and closed windows go t
   const h = makeRepo(t);
   h.init();
   writeHost(h.env.TOWER_CRANE_HOST_ROOT, { limit: 10, used: 2 });
-  h.ok(['project', 'set', '--governor', '{"growth_samples_min":1}']);
+  h.ok(['project', 'set', '--governor', '{"growth_samples_min":1,"expected_mb":{"tests":2048}}']);
   const project = h.readState('project.json');
   const held = G.admit({ stateDir: h.state, env: h.env, agent: 'orchestrator' }, { kind: 'tests', task: 'T1', project });
   t.after(() => held.release());
@@ -296,7 +297,8 @@ test('every project on the host draws on one budget', (t) => {
   // One user and one host: the same cache directory and the same machine.
   b.env.XDG_CACHE_HOME = a.env.XDG_CACHE_HOME;
   b.env.TOWER_CRANE_HOST_ROOT = a.env.TOWER_CRANE_HOST_ROOT;
-  writeHost(a.env.TOWER_CRANE_HOST_ROOT, { limit: 13, used: 2 });
+  // Four 2.5 GiB tests gates fit under the 85% line of 15 GiB; a 1.5 GiB worker on top does not.
+  writeHost(a.env.TOWER_CRANE_HOST_ROOT, { limit: 15, used: 2 });
   supervised(b, ['T1']);
   const project = a.readState('project.json');
   const held = [];
@@ -304,7 +306,7 @@ test('every project on the host draws on one budget', (t) => {
   for (const task of ['T1', 'T2', 'T3', 'T4']) held.push(G.admit({ stateDir: a.state, env: a.env, agent: 'orchestrator' }, { kind: 'tests', task, project }));
   const refused = b.run(['spawn', '--task', 'T1']);
   assert.equal(refused.code, 3, refused.stderr);
-  assert.match(refused.stderr, /running Tower Crane work may grow 8\.0 GiB/);
+  assert.match(refused.stderr, /running Tower Crane work may grow 10\.0 GiB/);
   const seen = b.json(['status']).governor.budget;
   assert.deepEqual([seen.units, seen.projects], [4, 1], 'project b sees project a\'s four gates');
   held.forEach((u) => u.release());
@@ -329,8 +331,11 @@ test('a release that meets a busy registry lands once the lock is free, so no pl
     S.releaseMarkedLock(lock);
   }
   await waitOnRepo(h, () => G.read(env).units.length === 0, 'the queued release lands');
-  // A bind, which a dispatch about to exit makes, says whether it landed.
-  const next = G.admit({ stateDir: h.state, env, agent: 'orchestrator' }, { kind: 'worker', task: 'T1', project: h.readState('project.json') });
+  // A bind, which a dispatch about to exit makes, says whether it landed. The
+  // release above waited the production registry lock wait; this unit's env
+  // shortens both waits (lib/intervals.js), which the bind spends in full.
+  const short = { ...env, TOWER_CRANE_INTERVALS: JSON.stringify({ governor_lock_wait: 300, governor_bind_wait: 600 }) };
+  const next = G.admit({ stateDir: h.state, env: short, agent: 'orchestrator' }, { kind: 'worker', task: 'T1', project: h.readState('project.json') });
   const held = S.tryMarkedLock(G.registryLock(env), { keepLive: true });
   let landed;
   try { landed = next.bind(process.pid, undefined, 'worker-T1-1'); } finally { S.releaseMarkedLock(held); }
@@ -338,6 +343,28 @@ test('a release that meets a busy registry lands once the lock is free, so no pl
   assert.equal(next.bind(process.pid, undefined, 'worker-T1-1'), true);
   assert.deepEqual(G.read(env).units.map((u) => [u.agent, u.bound]), [['worker-T1-1', true]]);
   next.release();
+});
+
+// The production bind wait on the real clock. Only the registry lock wait each
+// retry spends is shortened, so the bind's own deadline sets the time.
+test('a bind against a busy registry keeps trying for the production bind wait, then reports it did not land', (t) => {
+  const S = require('../lib/state');
+  const Intervals = require('../lib/intervals');
+  const h = makeRepo(t);
+  h.init();
+  const env = { ...h.env, TOWER_CRANE_INTERVALS: JSON.stringify({ governor_lock_wait: 300 }) };
+  assert.equal(Intervals.ms('governor_bind_wait', env), Intervals.DEFAULTS.governor_bind_wait);
+  const unit = G.admit({ stateDir: h.state, env, agent: 'orchestrator' }, { kind: 'worker', task: 'T1', project: h.readState('project.json') });
+  t.after(() => unit.release());
+  const held = S.tryMarkedLock(G.registryLock(env), { keepLive: true });
+  assert.ok(held);
+  const started = Date.now();
+  let landed;
+  try { landed = unit.bind(process.pid, undefined, 'worker-T1-1'); } finally { S.releaseMarkedLock(held); }
+  const waited = Date.now() - started; // wait-allow: the bind's wait is the contract under test
+  assert.equal(landed, false, 'a bind past its wait reports that it did not land');
+  assert.ok(waited >= Intervals.DEFAULTS.governor_bind_wait, `the bind gave up after ${waited} ms`); // wait-allow: the production bind wait is the contract under test
+  assert.equal(G.read(env).units[0].bound, undefined, 'the bind did not write');
 });
 
 // A submitted task whose tests command records that it started, then holds until killed.
@@ -366,6 +393,42 @@ const timer = setInterval(() => { if (fs.existsSync(process.argv[3])) { clearInt
   if (submit) h.ok(['submit', 'T1', '--agent', 'worker', '--sha', h.sha, '--branch', 'change']);
 }
 
+const suiteStopped = Processes.exited;
+
+test('gate stop verification follows the suite identity through process lifecycle states', { skip: linuxOnly }, (t) => {
+  const suite = { pid: process.pid, ...Processes.identity(process.pid) };
+  const statPath = `/proc/${suite.pid}/stat`;
+  const read = fs.readFileSync;
+  const stat = read(statPath, 'utf8');
+  const boundary = stat.lastIndexOf(')') + 2;
+  const fields = stat.slice(boundary).trim().split(/\s+/);
+  let row;
+  t.mock.method(process, 'kill', function (pid, sig) {
+    assert.equal(pid, suite.pid, 'the lifecycle probe reads only its own PID');
+    assert.equal(sig, 0, 'the lifecycle probe never sends a signal');
+    if (row.missing) throw Object.assign(new Error('gone'), { code: 'ESRCH' });
+    return true;
+  });
+  t.mock.method(fs, 'readFileSync', function (file, ...args) {
+    if (file !== statPath) return read.call(this, file, ...args);
+    if (row.unknown) throw Object.assign(new Error('unobservable'), { code: 'EACCES' });
+    const changed = [...fields];
+    changed[0] = row.state;
+    if (row.reused) changed[19] = String(BigInt(suite.start_ticks) + 1n);
+    return stat.slice(0, boundary) + changed.join(' ') + '\n';
+  });
+  for (row of [
+    { name: 'still running', state: 'S', stopped: false },
+    { name: 'unreaped zombie', state: 'Z', stopped: true },
+    { name: 'dead kernel state', state: 'X', stopped: true },
+    { name: 'reaped process', missing: true, stopped: true },
+    { name: 'PID reused by another process', state: 'S', reused: true, stopped: true },
+    { name: 'unobservable process', unknown: true, stopped: false },
+  ]) {
+    assert.equal(suiteStopped(suite), row.stopped, row.name);
+  }
+});
+
 test('past the stop line a running gate stops without a verdict and says why', { skip: linuxOnly }, async (t) => {
   const h = makeRepo(t);
   heldGate(h);
@@ -376,11 +439,12 @@ test('past the stop line a running gate stops without a verdict and says why', {
   t.after(() => { if (child && child.exitCode === null) killPid(child.pid, 'SIGKILL'); });
   await waitOnRepo(h, () => fs.existsSync(h.started), 'the tests command starts');
   const suitePid = Number(fs.readFileSync(h.started, 'utf8'));
+  const suite = { pid: suitePid, ...Processes.identity(suitePid) };
   writeHost(host, { limit: 10, used: 9.6 });
   const done = await run;
   assert.equal(done.code, 3, done.stderr);
   assert.match(done.stderr, /T1: tests gate stopped by the host governor: memory: tests\.slice has 9\.6 GiB of 10\.0 GiB in use, at or past the 95% stop line \(9\.5 GiB\); it runs again once there is room/);
-  assert.throws(() => killPid(suitePid, 0), { code: 'ESRCH' }, 'the suite process was stopped');
+  await waitOnRepo(h, () => suiteStopped(suite), 'the original suite process stops', { poll: true });
   assert.deepEqual(h.readState('tasks.json').tasks[0].evidence.filter((e) => e.type === 'tests'), [], 'no verdict was recorded');
   const stops = h.json(['status']).governor.stops;
   assert.deepEqual(stops.map((x) => [x.task, x.kind]), [['T1', 'tests']]);
