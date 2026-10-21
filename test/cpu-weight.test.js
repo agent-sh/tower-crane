@@ -129,6 +129,8 @@ test('Windows and macOS launches record that the weight was not applied', (t) =>
     assert.deepEqual(plan.cpu, { weight: C.GATE_WEIGHT, applied: false, reason: `no systemd scopes on ${os}` });
     assert.equal(C.describeCpu(plan.cpu), `not applied (no systemd scopes on ${os})`);
   }
+  assert.equal(C.describeCpu({ weight: 400, nested: '/sys/fs/cgroup/agents.slice/orchestrator.scope' }),
+    '400 nested in /sys/fs/cgroup/agents.slice/orchestrator.scope');
 });
 
 function project(t) {

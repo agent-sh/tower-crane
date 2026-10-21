@@ -813,7 +813,7 @@ for a nested child, or `{weight, applied: false, reason}`. The merge queue's
 `head check` records the same `cpu` for its suite. While a gate or suite runs,
 its host governor unit keeps that `cpu`, and `status` prints
 `gate cpu weight: T3 tests gate 400 in agents-towercrane_9b27247cfd0b.slice`,
-or `not applied (REASON)`, for each of this project's running gates (JSON
+or `400 nested in GROUP` or `not applied (REASON)`, for each of this project's running gates (JSON
 `governor.units[].cpu`).
 
 `node scripts/measure-cpu-weight.js fairness` and
