@@ -134,6 +134,19 @@ test('$XDG_CACHE_HOME a reviewer or the orchestrator wrote is their own cache an
   assert.deepEqual(manifest(h, 'T1').cited, ['probe/stderr.log']);
 });
 
+test('a glob or placeholder in a worker note does not block accept on its literal prefix', (t) => {
+  const h = ready(t);
+  fs.writeFileSync(path.join(h.scratch, 'probe-1.log'), 'rss 1\n');
+  fs.writeFileSync(path.join(h.scratch, 'probe-2.log'), 'rss 2\n');
+  h.ok(['task', 'note', 'T1', 'RSS runs in $XDG_CACHE_HOME/probe-*.log', '--agent', 'w-1']);
+  h.ok(['task', 'note', 'T1', 'layout is $XDG_CACHE_HOME/tower-crane/tasks/<hash>/<task>', '--agent', 'w-1']);
+  h.ok(['accept', 'T1']);
+  assert.equal(task(h, 'T1').status, 'accepted');
+  const m = manifest(h, 'T1');
+  assert.deepEqual(m.cited, []);
+  assert.deepEqual(m.files.map((f) => f.path).sort(), ['probe-1.log', 'probe-2.log', 'probe/stderr.log']);
+});
+
 test('task archive lists an archive and copies it into another task with evidence, for a granted worker', (t) => {
   const h = ready(t);
   h.ok(['accept', 'T1']);
@@ -231,6 +244,18 @@ test('citations find the scratch path in its absolute, home and XDG_CACHE_HOME f
     ['another task\'s scratch', `${scratch}9/x.log ${path.dirname(scratch)}/T6/y.log`, []],
     ['the scratch root alone', `everything is in ${scratch}/ and ${scratch}`, []],
     ['a markdown link', `[log](${scratch}/a/b.log)`, ['a/b.log']],
+    ['bold and italic emphasis', `**${scratch}/bold.log** and *$XDG_CACHE_HOME/em.log*`, ['bold.log', 'em.log']],
+    ['an HTML closing tag', `<code>${scratch}/c.log</code>`, ['c.log']],
+    // A pattern or placeholder names no one file; its prefix is not a citation.
+    ['a * glob', 'RSS runs in $XDG_CACHE_HOME/probe-*.log', []],
+    ['a trailing * glob', `runs in ${scratch}/rss/*`, []],
+    ['a ? glob', '$XDG_CACHE_HOME/probe-?.log', []],
+    ['a [] class', '$XDG_CACHE_HOME/probe-[12].log', []],
+    ['a {} brace list', '$XDG_CACHE_HOME/probe-{1,2}.log', []],
+    ['a <placeholder>', '$XDG_CACHE_HOME/tower-crane/tasks/<hash>/<task>', []],
+    ['a shell variable', '$XDG_CACHE_HOME/runs/$RUN/out.log and ${XDG_CACHE_HOME}/runs/${RUN}/err.log', []],
+    ['an ellipsis segment', `${scratch}/.../stderr.log and ${scratch}/…/x.log`, []],
+    ['a pattern beside a real path', '$XDG_CACHE_HOME/probe-*.log and $XDG_CACHE_HOME/probe-1.log', ['probe-1.log']],
   ];
   for (const [what, text, expected] of cases) {
     const st = { decisions: { decisions: [] }, events: [] };
