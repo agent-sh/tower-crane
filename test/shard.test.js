@@ -42,11 +42,26 @@ test('longestFirst starts the longest measured files first and keeps sorted orde
   assert.deepEqual(longestFirst(files, durations), ['b', 'd', 'new', 'a', 'c']);
   assert.deepEqual(files, ['d', 'c', 'b', 'a', 'new'], 'the input is not reordered');
   assert.deepEqual(longestFirst(['y', 'x'], {}), ['x', 'y'], 'an empty table keeps the sorted order');
-  // Two per worker go absolute, which node --test sorts before the relative rest.
-  const order = startOrder(files, 1, durations);
-  assert.deepEqual(order, ['d', 'c', 'b', 'a', 'new'].map((f) => (['b', 'd'].includes(f) ? path.resolve(f) : f)));
-  assert.deepEqual([...order].sort().map((f) => path.basename(f)), ['b', 'd', 'a', 'c', 'new']);
   assert.deepEqual(startOrder(['b', 'a'], 1, durations), ['b', 'a'], 'two files for one worker both start at once');
+});
+
+test('startOrder spells the longest files so that node --test sorts them first, one band per worker', () => {
+  const durations = { a: 1, b: 9, c: 1, d: 5, e: 3, f: 2 };
+  const files = ['f', 'e', 'd', 'c', 'b', 'a', 'new'];
+  const named = (cwd, order) => order.map((f) => path.relative(cwd, path.resolve(cwd, f)));
+  // Each `../` step up from the working directory is a band, then absolute paths, then plain ones.
+  for (const [depth, workers, sorted] of [
+    [3, 1, ['b', 'd', 'e', 'new', 'a', 'c', 'f']],
+    [2, 1, ['b', 'd', 'e', 'a', 'c', 'f', 'new']],
+    [1, 1, ['b', 'd', 'a', 'c', 'e', 'f', 'new']],
+    [2, 2, ['b', 'd', 'e', 'new', 'a', 'f', 'c']],
+    [1, 3, ['b', 'd', 'e', 'a', 'f', 'new', 'c']],
+  ]) {
+    const cwd = path.resolve('/', ...Array.from({ length: depth }, (_, i) => `dir${i}`));
+    const order = startOrder(files, workers, durations, cwd);
+    assert.deepEqual(named(cwd, order), files, `depth ${depth}, ${workers} workers: each file keeps its place`);
+    assert.deepEqual(named(cwd, [...order].sort()), sorted, `depth ${depth}, ${workers} workers`);
+  }
 });
 
 test('every shard count covers the real suite with each file in exactly one shard', () => {

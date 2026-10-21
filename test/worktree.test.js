@@ -644,7 +644,7 @@ test('a gate that prepares while a task worktree is being created waits until it
 
 // A sandboxed worker writes the repository's git directory, where Tower Crane
 // 0.1.2 and earlier took the worktree lock; one it leaves there must stall
-// nothing (the sandboxes' write lists: test/isolation.test.js).
+// nothing (the sandboxes' write lists: test/isolation-sandbox.test.js).
 test('a worktree lock planted in the git directory stalls neither relink nor gate preparation', async (t) => {
   const h = makeRepo(t);
   h.init();

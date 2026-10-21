@@ -197,8 +197,8 @@ test('the test runner emits one capped concurrency value, including repeated and
     assert.ok(args.includes(`--require=${path.join(ROOT, 'test', 'fixtures', 'report-guard.js')}`), 'every test file loads the report guard');
     assert.deepEqual(args.filter((arg) => !arg.startsWith('--')), ['test/claim.test.js']);
   }
-  // With one worker the two longest measured files go as absolute paths, which
-  // node --test sorts first, so a long file never starts last.
+  // With one worker each file takes a band of its own, longest first, so
+  // node --test's sort of the paths starts them longest first.
   const preload = path.join(h.base, 'runner-order.js');
   fs.writeFileSync(preload, `
     require('node:os').availableParallelism = () => 2;
@@ -213,12 +213,12 @@ test('the test runner emits one capped concurrency value, including repeated and
   const r = cp.spawnSync(process.execPath, ['--require', preload, runner, ...files], { cwd: ROOT, env: h.env, encoding: 'utf8' });
   assert.equal(r.status, 0, r.stderr);
   // Each platform's own table decides: isolation is long on Linux, short on Windows.
-  const durations = require('./run').fileDurations();
-  const longest = [...files].sort((a, b) => durations[b] - durations[a]).slice(0, 2).sort();
-  assert.notDeepEqual(longest, files.slice(0, 2), 'the measured order differs from the sorted one');
+  const longest = require('./run').longestFirst(files);
+  assert.notDeepEqual(longest, [...files].sort(), 'the measured order differs from the sorted one');
   const passed = JSON.parse(r.stdout).filter((arg) => !arg.startsWith('--'));
-  assert.deepEqual(passed, files.map((file) => (longest.includes(file) ? path.join(ROOT, file) : file)));
-  assert.deepEqual([...passed].sort().slice(0, 2), longest.map((file) => path.join(ROOT, file)));
+  const named = (list) => list.map((arg) => path.relative(ROOT, path.resolve(ROOT, arg)).split(path.sep).join('/'));
+  assert.deepEqual(named(passed), files, 'each file keeps its place');
+  assert.deepEqual(named([...passed].sort()), longest);
 });
 
 test('mutation fallback requires a green baseline in a copy containing all test inputs', (t) => {

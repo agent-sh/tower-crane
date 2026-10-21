@@ -595,7 +595,7 @@ test('a real codex sandbox starts for a home among 5,000 entries and reads nothi
 // With inject, the push runs with NODE_OPTIONS asking node to load a file
 // first, which the shim must not do. before runs first, extra after the push.
 // The claude probe leaves it out: a model asked to run it declined
-// (2026-10-14), and the stub test in isolation.test.js covers claude's shim.
+// (2026-10-14), and the stub test in isolation-shims.test.js covers claude's shim.
 function shimProbe(h, out, { before = '', extra = '', inject = false } = {}) {
   const dir = path.dirname(out);
   const repo = path.join(dir, 'shim-repo');

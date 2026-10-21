@@ -42,14 +42,26 @@ function longestFirst(files, durations = fileDurations()) {
 }
 // A long file that started late would hold the run open after every other file
 // finished. node --test sorts the paths it is given as text, so it takes no
-// order, but an absolute path sorts before every relative one: the longest
-// two files per worker go as absolute paths and start first, the rest follow
-// in sorted order. Reports name a file the same either way. A run of no more
-// files than that starts them all at once and keeps them as given.
-function startOrder(files, workers, durations = fileDurations()) {
+// order, but each spelling of a path sorts in a band of its own: more `../`
+// steps up from the working directory sort first, then absolute paths, then
+// plain relative ones. The longest files take the earliest bands, one worker's
+// worth to each, so the run starts them in about longest-first order; the
+// shortest keep their plain paths. Reports name a file the same however it is
+// spelled. A run of no more files than two per worker starts them all at once
+// and keeps them as given.
+function startOrder(files, workers, durations = fileDurations(), cwd = process.cwd()) {
   if (files.length <= 2 * workers) return files;
-  const first = new Set(longestFirst(files, durations).slice(0, 2 * workers));
-  return files.map((file) => (first.has(file) ? path.resolve(file) : file));
+  const dir = path.resolve(cwd);
+  const depth = path.relative(path.parse(dir).root, dir).split(path.sep).filter(Boolean).length;
+  const bands = [];
+  for (let up = depth; up >= 1; up--) {
+    const steps = Array(up).fill('..');
+    const ancestor = path.resolve(dir, ...steps);
+    bands.push((file) => path.join(...steps, path.relative(ancestor, file)));
+  }
+  bands.push((file) => file);
+  const band = new Map(longestFirst(files, durations).map((file, i) => [file, bands[Math.floor(i / workers)]]));
+  return files.map((file) => (band.get(file) ? band.get(file)(path.resolve(dir, file)) : file));
 }
 // Shard INDEX of TOTAL gets an equal share of the measured time: the longest file
 // goes to the shard with the least time so far. The runner owns the split and it

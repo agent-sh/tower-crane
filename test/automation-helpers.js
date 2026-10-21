@@ -1,6 +1,6 @@
 'use strict';
 
-// The three automation suites share these fixtures; each suite file runs in its own process.
+// The automation suites share these fixtures; each suite file runs in its own process.
 
 const fs = require('node:fs');
 const path = require('node:path');
