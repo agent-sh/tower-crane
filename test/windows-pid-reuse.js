@@ -3,7 +3,8 @@
 // Windows hands a freed pid out again only after its other free pids, so a
 // test that needs a process at an exited process's pid creates suspended
 // processes, which cost no start, and ends each one until Windows gives out
-// that pid. The process left holding it stays suspended until stopHolder.
+// that pid. The process left holding it stays suspended until the caller
+// stops it.
 
 const cp = require('node:child_process');
 
