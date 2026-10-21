@@ -271,11 +271,20 @@ test('a recovered rate-limit reconnect does not retry a later permanent failure'
   assert.equal(task.run.reason, 'exit 1');
 });
 
-test('default retry budget waits beyond the observed ten-minute outage and remains bounded', (t) => {
-  const clock = path.join(__dirname, 'fixtures', 'supervision-backoff-clock.js').replace(/\\/g, '/');
-  const h = setup(t, { failures: 5, env: { NODE_OPTIONS: `--require "${clock}"` } });
+test('default retry budget waits beyond the observed ten-minute outage and remains bounded', async (t) => {
+  const h = setup(t, { failures: 5 });
+  const backoff = controlledBackoff(h);
   h.ok(['ladder', 'set', 'easy', '--clear', 'supervision']);
-  const result = h.spawn();
+  const completed = h.runAsync(['spawn', '--task', 'T1', '--wait', '--json'], { env: backoff.env });
+  let elapsed = 0;
+  // Advance only the retry clock; process sampling and startup keep real deadlines.
+  for (const [index, delay] of [30000, 60000, 120000, 240000, 480000].entries()) {
+    await waitOnRepo(h, () => log(h).filter((e) => e.cmd === 'spawn phase' && e.detail.phase === 'retrying').length === index + 1,
+      `retry ${index + 1} was not recorded`);
+    elapsed += delay;
+    backoff.advance(elapsed);
+  }
+  const result = await completed;
   assert.equal(result.code, 0, result.stderr);
   const attempts = h.readAttempts();
   assert.equal(attempts.length, 6);
