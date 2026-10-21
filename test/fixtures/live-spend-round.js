@@ -23,7 +23,7 @@ if (!Number.isSafeInteger(copies) || copies < 1) {
 }
 const root = path.join(__dirname, '..', '..');
 const runs = Array.from({ length: copies }, (_, copy) => new Promise((resolve) => {
-  const child = cp.spawn(process.execPath, [path.join(root, 'test', 'run.js'), 'test/live-spend.test.js'],
+  const child = cp.spawn(process.execPath, [path.join(root, 'test', 'run.js'), '--test-concurrency=12', 'test/live-spend.test.js'],
     { cwd: root, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
   let out = '';
   child.stdout.on('data', (d) => { out += d; });
