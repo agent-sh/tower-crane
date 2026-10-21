@@ -2,6 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const cp = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 const { cachedFixture, detachedAlive, fakeAgentEnv, dispatch, BIN } = require('./helpers');
@@ -52,19 +53,21 @@ test('home liveness and output cleanup use different controller ownership tables
   }
 });
 
+const controllerHome = (t) => cachedFixture(t, 'controller-home', h => {
+  h.init(['--tasks-max', '64', '--memory-max-bytes', String(512 * 1024 ** 2)]);
+  for (const title of ['Controller owner', 'Prune while live', 'Prune after exit']) {
+    const id = h.ok(['task', 'add', '--title', title, '--acceptance', 'keeps owned paths', '--tier', 'easy']).trim();
+    h.ok(['brief', 'set', id, '-'], { input: 'Finite home lifetime probe.\n' });
+  }
+});
+
 for (const detached of [true, false]) {
 for (const delayed of [false, true]) {
 test(`a subsequent CLI spawn keeps a ${detached ? 'detached' : 'same-group'} controller home until it exits${delayed ? ' after held startup' : ''}`, {
   skip: process.platform !== 'linux' && 'Linux marked-home liveness',
   timeout: HUNG_TEST_MS,
 }, async (t) => {
-  const h = cachedFixture(t, 'controller-home', h => {
-    h.init(['--tasks-max', '64', '--memory-max-bytes', String(512 * 1024 ** 2)]);
-    for (const title of ['Controller owner', 'Prune while live', 'Prune after exit']) {
-      const id = h.ok(['task', 'add', '--title', title, '--acceptance', 'keeps owned paths', '--tier', 'easy']).trim();
-      h.ok(['brief', 'set', id, '-'], { input: 'Finite home lifetime probe.\n' });
-    }
-  });
+  const h = controllerHome(t);
   h.env.TOWER_CRANE_TEST_CONTAINMENT = '1';
   const dir = path.join(h.base, 'probe');
   fs.mkdirSync(dir);
@@ -114,14 +117,18 @@ if(process.env.TOWER_CRANE_TASK==='T1'){
  require(${JSON.stringify(atomic)}).writeAtomic(${JSON.stringify(forked)},JSON.stringify({
   pid:child.pid,startTicks:require(${JSON.stringify(require.resolve('../lib/processes'))}).identity(child.pid).start_ticks
  }));
+ // Only the renamed record counts: containment reads no staged registration.
+ const record=new RegExp('^'+child.pid+'-[a-f0-9]{16}\\\\.json$');
+ child.once('exit',(code,signal)=>{process.stderr.write('controller '+child.pid+' exited ('+(signal||code)+') before it registered\\n');process.exit(1);});
  const registered=()=>{
   const dir=path.join(process.env.TOWER_CRANE_STATE,'controllers');
-  if(!fs.existsSync(dir)||!fs.readdirSync(dir).some(name=>name.startsWith(child.pid+'-')))return setTimeout(registered,25); // wait-allow: wait for the controller's recorded identity
+  if(!fs.existsSync(dir)||!fs.readdirSync(dir).some(name=>record.test(name)))return setTimeout(registered,25); // wait-allow: wait for the controller's recorded identity
   require(${JSON.stringify(atomic)}).writeAtomic(${JSON.stringify(ready)},JSON.stringify({pid:child.pid,...paths}));
   process.exit(0);
  };
  registered();
- setTimeout(()=>{process.stderr.write('controller '+child.pid+' did not register\\n');process.exit(1);},${HUNG_TEST_MS}).unref(); // wait-allow: registration shares the test's hung backstop
+ // Half the test's backstop, so this named failure reaches the test before its own timeout.
+ setTimeout(()=>{process.stderr.write('controller '+child.pid+' did not register\\n');process.exit(1);},${HUNG_TEST_MS / 2}).unref(); // wait-allow: registration shares the test's hung backstop
 }
 `);
   for (const rung of ['easy', 'orchestrator']) {
@@ -189,3 +196,87 @@ if(process.env.TOWER_CRANE_TASK==='T1'){
 });
 }
 }
+
+test('a controller started before its spawn is recorded registers before its wait starts', {
+  skip: process.platform !== 'linux' && 'Linux marked-home liveness',
+  timeout: HUNG_TEST_MS,
+}, async (t) => {
+  const h = controllerHome(t);
+  h.ok(['ladder', 'set', 'orchestrator', '--harness', 'command', '--command',
+    JSON.stringify([process.execPath, '-e', '0', '{prompt}']), '--env', JSON.stringify(fakeAgentEnv({ NODE_OPTIONS: h.env.NODE_OPTIONS })),
+    '--clear', 'profile', '--clear', 'effort']);
+  const agent = 'orchestrator-T1-1';
+  const dir = path.join(h.base, 'probe');
+  fs.mkdirSync(dir);
+  const unrecorded = path.join(dir, 'read-unrecorded');
+  // Marks the controller's first log read that has no spawn record for it, so
+  // the dispatch below records the spawn only after the controller started.
+  const preload = path.join(dir, 'read-probe.js');
+  fs.writeFileSync(preload, `
+if(process.argv[1]===${JSON.stringify(BIN)}&&process.argv[2]==='wait'){
+ const S=require(${JSON.stringify(require.resolve('../lib/state'))});
+ const read=S.readEvents;
+ let marked=false;
+ S.readEvents=(...args)=>{
+  const events=read(...args);
+  if(!marked&&!events.some(e=>e.cmd==='spawn'&&e.detail?.agent===${JSON.stringify(agent)})){
+   marked=true;
+   require(${JSON.stringify(require.resolve('./atomic-file'))}).writeAtomic(${JSON.stringify(unrecorded)},'1');
+  }
+  return events;
+ };
+}
+`);
+  let stdout = '';
+  let exited = false;
+  const controller = cp.spawn(process.execPath, [BIN, 'wait', '--observe', '--follow', '--agent', agent], {
+    cwd: h.repo,
+    env: { ...h.env, NODE_OPTIONS: `${h.env.NODE_OPTIONS} --require ${JSON.stringify(preload)}`,
+      TOWER_CRANE_AGENT: agent, TOWER_CRANE_TASK: 'T1', TOWER_CRANE_STATE: h.state,
+      // A supervisor's startup window, here bounded by the test's own backstop.
+      TOWER_CRANE_STARTUP_DEADLINE: String(Date.now() + HUNG_TEST_MS) },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  controller.stdout.on('data', (d) => { stdout += d; });
+  controller.stderr.on('data', (d) => { stdout += d; });
+  controller.once('exit', () => { exited = true; });
+  t.after(() => { if (!exited) controller.kill('SIGKILL'); });
+  const alive = () => !exited;
+  await waitOnRepo(h, () => fs.existsSync(unrecorded) || stdout.includes('"type":"ready"'),
+    `controller ${controller.pid} read no log; output: ${stdout}`, { alive });
+  const records = () => {
+    try { return fs.readdirSync(path.join(h.state, 'controllers')).filter((name) => name.startsWith(`${controller.pid}-`) && name.endsWith('.json')); }
+    catch (error) { if (error.code === 'ENOENT') return []; throw error; }
+  };
+  const before = records();
+  h.ok(['spawn', '--task', 'T1', '--role', 'orchestrator', '--wait']);
+  await waitOnRepo(h, () => stdout.includes('"type":"ready"'), `controller ${controller.pid} never started its wait; output: ${stdout}`, { alive });
+  assert.deepEqual(before, [], 'the controller registered before its spawn was recorded');
+  assert.equal(records().length, 1, `controller ${controller.pid} started its wait without registering`);
+});
+
+test('only a spawned identity inside its startup window waits for its own spawn record', async (t) => {
+  const { awaitSpawnRecord } = require('../lib/authority');
+  const h = controllerHome(t);
+  const agent = 'orchestrator-T1-1';
+  const soon = () => String(Date.now() + 200);
+  const env = (extra = {}) => ({ TOWER_CRANE_AGENT: agent, TOWER_CRANE_STATE: h.state, TOWER_CRANE_STARTUP_DEADLINE: soon(), ...extra });
+  const rows = [
+    ['spawn not recorded yet', () => ({ agent, env: env() }), true],
+    ['no startup deadline', () => ({ agent, env: env({ TOWER_CRANE_STARTUP_DEADLINE: undefined }) }), false],
+    ['deadline passed', () => ({ agent, env: env({ TOWER_CRANE_STARTUP_DEADLINE: String(Date.now() - 1) }) }), false],
+    ['another identity than the spawned one', () => ({ agent: 'worker-T1-1', env: env() }), false],
+    ['another state directory', () => ({ agent, env: env(), stateDir: path.join(h.base, 'other') }), false],
+    ['plain orchestrator name', () => ({ agent: 'orchestrator', env: env({ TOWER_CRANE_AGENT: 'orchestrator' }) }), false],
+    ['owner', () => ({ agent: 'owner', env: env({ TOWER_CRANE_AGENT: 'owner' }) }), false],
+  ];
+  // Each row reads the clock when it runs: a waiting row uses up the deadline of the next.
+  for (const [name, ctx, waits] of rows) {
+    let done = false;
+    const pending = awaitSpawnRecord({ stateDir: h.state, ...ctx() }).then(() => { done = true; });
+    // A command that does not wait resolves before any timer runs.
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(!done, waits, name);
+    await pending;
+  }
+});

@@ -7,7 +7,7 @@ const path = require('node:path');
 const cp = require('node:child_process');
 const { ROOT, makeRepo } = require('./helpers');
 const { HUNG_TEST_MS, killPid } = require('./signals');
-const { testFiles, shardFiles, fileDurations } = require('./run');
+const { testFiles, shardFiles, longestFirst, startOrder, fileDurations } = require('./run');
 const { declarations, fileTimes, mergeTable } = require('../scripts/test-durations');
 
 const FIXTURES = ['a', 'b', 'c', 'd'].map((name) => path.join('test', 'fixtures', 'shard', `${name}.test.js`));
@@ -33,6 +33,35 @@ test('shardFiles gives each shard an equal share of the measured time', () => {
   assert.deepEqual(shardFiles(['a', 'b', 'c', 'new'], 1, 2, known), ['a']);
   assert.deepEqual(shardFiles(['a', 'b', 'c', 'new'], 2, 2, known), ['b', 'c', 'new']);
   assert.deepEqual(shardFiles(['x', 'y'], 1, 2, {}), ['x'], 'an empty table splits like equal times');
+});
+
+test('longestFirst starts the longest measured files first and keeps sorted order among equal times', () => {
+  const durations = { a: 1, b: 9, c: 1, d: 5 };
+  const files = ['d', 'c', 'b', 'a', 'new'];
+  // The new file counts as the median, 5 s here, and ties keep the sorted order.
+  assert.deepEqual(longestFirst(files, durations), ['b', 'd', 'new', 'a', 'c']);
+  assert.deepEqual(files, ['d', 'c', 'b', 'a', 'new'], 'the input is not reordered');
+  assert.deepEqual(longestFirst(['y', 'x'], {}), ['x', 'y'], 'an empty table keeps the sorted order');
+  assert.deepEqual(startOrder(['b', 'a'], 1, durations), ['b', 'a'], 'two files for one worker both start at once');
+});
+
+test('startOrder spells the longest files so that node --test sorts them first, one band per worker', () => {
+  const durations = { a: 1, b: 9, c: 1, d: 5, e: 3, f: 2 };
+  const files = ['f', 'e', 'd', 'c', 'b', 'a', 'new'];
+  const named = (cwd, order) => order.map((f) => path.relative(cwd, path.resolve(cwd, f)));
+  // Each `../` step up from the working directory is a band, then absolute paths, then plain ones.
+  for (const [depth, workers, sorted] of [
+    [3, 1, ['b', 'd', 'e', 'new', 'a', 'c', 'f']],
+    [2, 1, ['b', 'd', 'e', 'a', 'c', 'f', 'new']],
+    [1, 1, ['b', 'd', 'a', 'c', 'e', 'f', 'new']],
+    [2, 2, ['b', 'd', 'e', 'new', 'a', 'f', 'c']],
+    [1, 3, ['b', 'd', 'e', 'a', 'f', 'new', 'c']],
+  ]) {
+    const cwd = path.resolve('/', ...Array.from({ length: depth }, (_, i) => `dir${i}`));
+    const order = startOrder(files, workers, durations, cwd);
+    assert.deepEqual(named(cwd, order), files, `depth ${depth}, ${workers} workers: each file keeps its place`);
+    assert.deepEqual(named(cwd, [...order].sort()), sorted, `depth ${depth}, ${workers} workers`);
+  }
 });
 
 test('every shard count covers the real suite with each file in exactly one shard', () => {

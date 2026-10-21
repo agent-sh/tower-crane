@@ -93,7 +93,8 @@ test('same-repo PRs run the shared check, fork PRs the Windows shards; other eve
   const testJob = workflow.split('\n  test:\n')[1].split(/\n {2}[\w-]+:\n/)[0];
   // Same-repository PRs run only the shared-files check; fork PRs and every other event run the matrix.
   const FORK = "github.event.pull_request.head.repo.full_name";
-  assert.ok(testJob.includes(`    if: github.event_name != 'pull_request' || ${FORK} != github.repository\n`), 'the test job skips same-repository PRs only');
+  assert.ok(testJob.includes(`    if: "!inputs.profile && (github.event_name != 'pull_request' || ${FORK} != github.repository)"\n`),
+    'the test job skips same-repository PRs and profile dispatches only');
   const checks = workflow.split('\n  checks:\n')[1].split(/\n {2}[\w-]+:\n/)[0];
   assert.ok(checks.includes(`    if: github.event_name == 'pull_request' && ${FORK} == github.repository\n`), 'the checks job runs on same-repository PRs only');
   assert.match(checks, /^ {4}name: checks \(shared files\)$/m);
@@ -103,18 +104,29 @@ test('same-repo PRs run the shared check, fork PRs the Windows shards; other eve
   assert.match(testJob, /- name: npm test\n {8}run: [^\n]*'npm test'[^\n]*\n[\s\S]*TC_TEST_SHARD: \$\{\{ matrix\.shard \}\}/);
   for (const id of ['gate-scratch', 'model-swap']) {
     const job = workflow.split(`\n  ${id}:\n`)[1].split(/\n {2}[\w-]+:\n/)[0];
-    assert.match(job, /^ {4}if: github\.event_name != 'pull_request'$/m, `${id} skips pull requests`);
+    assert.match(job, /^ {4}if: github\.event_name != 'pull_request' && !inputs\.profile$/m, `${id} skips pull requests and profile dispatches`);
     assert.match(job, /- run: node scripts\/probe-/);
   }
   // Flake repeat loops cost hosted Windows time on every PR; they run after merge and daily, in
   // their own job so the shards keep the share of the suite test/run.js measured for them.
   assert.doesNotMatch(testJob, /- name: Repeat /, 'the test shards run no repeat loops');
   const repeatJob = workflow.split('\n  repeats:\n')[1].split(/\n {2}[\w-]+:\n/)[0];
-  assert.match(repeatJob, /^ {4}if: github\.event_name != 'pull_request'$/m, 'the repeats skip pull requests');
+  assert.match(repeatJob, /^ {4}if: github\.event_name != 'pull_request' && !inputs\.profile$/m, 'the repeats skip pull requests and profile dispatches');
+  // A profile dispatch measures the suite and the mutation sample on hosted runners and runs nothing else.
+  assert.match(workflow, /^ {6}profile:\n {8}description: [^\n]+\n {8}type: boolean\n {8}default: false\n {6}profile_baseline:\n/m);
+  for (const [id, command] of [['profile', /- run: node scripts\/suite-profile\.js [^\n]*--baseline "\$BASELINE" --runs 3 [^\n]*\| tee /],
+    ['mutants', /- run: node scripts\/mutants\.js --no-full 2>&1 \| tee /]]) {
+    const job = workflow.split(`\n  ${id}:\n`)[1].split(/\n {2}[\w-]+:\n/)[0];
+    assert.match(job, /^ {4}if: github\.event_name == 'workflow_dispatch' && inputs\.profile$/m, `${id} runs on a profile dispatch only`);
+    assert.match(job, command, id);
+    assert.match(job, /\| tee [^\n]*\n(?: {8}#[^\n]*\n)* {8}shell: bash\n/, `${id}: pipefail keeps the exit status through tee`);
+    assert.match(job, /uses: actions\/upload-artifact@/, `${id} keeps its output`);
+  }
   assert.match(repeatJob, /^ {4}runs-on: windows-latest$/m);
   const repeats = [...repeatJob.matchAll(/- name: (Repeat [^\n]+)/g)].map((m) => m[1]);
   assert.deepEqual(repeats, ['Repeat Claude Code mod wakeup twenty times', 'Repeat Claude interrupted native worker ten times',
-    'Repeat lock-free reader and torn recovery tests thirty times', 'Repeat owner authority and board approval files ten times'],
+    'Repeat lock-free reader and torn recovery tests thirty times', 'Repeat owner authority and board approval files ten times',
+    'Repeat interrupt during backoff and origin read tests twenty times'],
   'the wakeup loop runs first, on a fresh runner');
   // GitHub keeps one running and one pending run per group, and a newer run replaces the pending one.
   // Main pushes share a group so only the newest pending head waits; scheduled and manual runs stay unique.

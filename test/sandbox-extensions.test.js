@@ -17,8 +17,10 @@ const SECRET = 'private-file-value $literal `literal`';
 
 function shortRuntime(t) {
   // Long fixture paths would send the socket leaf elsewhere and miss this case.
+  // A stand-in under /run, as the host's XDG_RUNTIME_DIR would give, needs no
+  // denial of its own, since the profile denies /run whole.
   const suffix = path.join(path.sep, `tc-${'0'.repeat(12)}`, 'tc-XXXXXX', 's');
-  return socketDir(t, MAX_SOCKET_PATH - Buffer.byteLength(suffix));
+  return socketDir(t, MAX_SOCKET_PATH - Buffer.byteLength(suffix), { outside: ['/run', '/var/run'] });
 }
 
 function assertRuntimeGrants(seen, runtimes, bus = null) {
@@ -80,6 +82,63 @@ function releaseExited(h) {
   // These probes relaunch one task's worker on purpose; the owner lifts the
   // respawn cap each stand-in's exit without a submit counts toward.
   if (task.needs_owner?.startsWith('worker exited without submitting')) h.ok(['owner-done', 'T1']);
+}
+
+for (const harness of ['codex', 'claude']) {
+  test(`${harness}: external gate tools and declared wrapper dependencies are read-only`, { skip: NO_STUBS }, (t) => {
+    const h = setup(t, harness);
+    const tools = path.join(h.env.HOME, 'gate-tools');
+    const dependencies = path.join(h.base, 'gate-dependencies');
+    fs.mkdirSync(tools, { recursive: true });
+    fs.mkdirSync(dependencies);
+    const clean = path.join(tools, 'clean.sh');
+    const proof = path.join(tools, 'proof.js');
+    const secrets = path.join(h.env.HOME, '.ssh');
+    const credential = path.join(secrets, 'fixture-key');
+    fs.mkdirSync(secrets);
+    fs.writeFileSync(credential, 'fixture secret', { mode: 0o600 });
+    fs.writeFileSync(clean, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+    fs.writeFileSync(proof, '');
+    h.ok(['project', 'set', '--clean-cmd', `"${clean}" "${credential}"`, '--tests-proof-cmd', `node "${proof}" "${credential}" {tests}`,
+      '--clean-paths', JSON.stringify([dependencies])]);
+    const config = path.join(h.base, 'gate-profile');
+    const bin = path.join(h.base, 'bin');
+    fs.mkdirSync(bin);
+    fs.writeFileSync(path.join(bin, harness), `#!${process.execPath}
+const fs = require('node:fs'), path = require('node:path');
+const dir = process.env.CODEX_HOME || process.env.CLAUDE_CONFIG_DIR;
+fs.copyFileSync(path.join(dir, ${JSON.stringify(harness === 'codex' ? 'config.toml' : 'settings.json')}), ${JSON.stringify(config)});
+`, { mode: 0o755 });
+    if (harness === 'claude') {
+      const project = h.json(['project', 'show']);
+      const iso = A.isolation('worker', { harness, model: 'fixture-large' }, 'medium', {
+        stateDir: h.state, repo: { root: h.repo }, project, cwd: h.repo, parentCwd: h.repo,
+        env: h.env, agent: 'worker-T1-1', task: 'T1', taskSpec: { id: 'T1' }, attempt: 1,
+        settings: { sandbox: { read: [], write: [] }, env: {} },
+      });
+      iso.write();
+      fs.copyFileSync(path.join(iso.home, 'settings.json'), config);
+    } else {
+      h.ok(['spawn', '--task', 'T1', '--wait'], { env: { ...h.env, PATH: `${bin}${path.delimiter}${process.env.PATH}` } });
+    }
+    const raw = fs.readFileSync(config, 'utf8');
+    for (const file of [credential, secrets].map(p => fs.realpathSync(p))) {
+      if (harness === 'codex') assert.equal(TOML.parse(raw).permissions['tower-crane'].filesystem[file], undefined, file);
+      else assert.ok(!JSON.parse(raw).sandbox.filesystem.allowRead.includes(file), file);
+    }
+    for (const file of [clean, proof, tools, dependencies].map(p => fs.realpathSync(p))) {
+      if (harness === 'codex') assert.equal(TOML.parse(raw).permissions['tower-crane'].filesystem[file], 'read', file);
+      else {
+        assert.ok(JSON.parse(raw).sandbox.filesystem.allowRead.includes(file), file);
+        assert.ok(JSON.parse(raw).sandbox.filesystem.denyWrite.includes(file), file);
+      }
+    }
+    releaseExited(h);
+    h.ok(['project', 'set', '--sandbox', JSON.stringify({ write: [dependencies] })]);
+    assert.match(h.run(['spawn', '--task', 'T1', '--dry-run']).stderr, /inside a read-only gate tool path/);
+    h.ok(['project', 'set', '--sandbox', 'null', '--clean-paths', JSON.stringify([path.join(h.state, 'brokers')])]);
+    assert.match(h.run(['spawn', '--task', 'T1', '--dry-run']).stderr, /sandbox hides because it holds credentials/);
+  });
 }
 
 test('project and rung spawn settings require explicit owner identity, including unchanged and cleared fields', (t) => {
