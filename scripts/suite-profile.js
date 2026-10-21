@@ -326,14 +326,15 @@ const git = (...a) => cp.execFileSync('git', ['-C', root, ...a], { encoding: 'ut
 
 async function main() {
   let worktree = null;
-  if (baselineRef !== null) {
-    const sha = git('rev-parse', '--verify', '--quiet', `${baselineRef}^{commit}`);
-    worktree = path.join(fs.mkdtempSync(path.join(base, 'suite-baseline-')), 'tree');
-    git('worktree', 'add', '--detach', worktree, sha);
-    baselineDir = worktree;
-  }
+  let scratch = null;
   const done = [];
   try {
+    if (baselineRef !== null) {
+      const sha = git('rev-parse', '--verify', '--quiet', `${baselineRef}^{commit}`);
+      scratch = fs.mkdtempSync(path.join(base, 'suite-baseline-'));
+      git('worktree', 'add', '--detach', path.join(scratch, 'tree'), sha);
+      worktree = baselineDir = path.join(scratch, 'tree');
+    }
     for (let i = 1; i <= runs; i++) {
       for (const [tree, dir] of baselineDir ? [['baseline', baselineDir], ['head', root]] : [['head', root]]) {
         console.log(`\n# suite profile: ${tree} run ${i} of ${runs} in ${dir}`);
@@ -343,10 +344,8 @@ async function main() {
       }
     }
   } finally {
-    if (worktree) {
-      git('worktree', 'remove', '--force', worktree);
-      fs.rmSync(path.dirname(worktree), { recursive: true, force: true });
-    }
+    if (worktree) git('worktree', 'remove', '--force', worktree);
+    if (scratch) fs.rmSync(scratch, { recursive: true, force: true });
   }
   const last = done.findLast((r) => r.tree === 'head');
   const brief = (r) => ({ tree: r.tree, status: r.status, wall_ms: r.wall_ms, file_cpu_ms: r.file_cpu_ms, longest_file: r.longest_file, host: r.host });

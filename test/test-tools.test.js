@@ -399,3 +399,34 @@ require('node:test')('spins', () => { const end = Date.now() + 400; let n = 0; w
   assert.match(r.stdout, /^serial tests: .* waiting$/m);
   assert.deepEqual(fs.readdirSync(h.base).filter((name) => name.startsWith('suite-profile-')), [], 'the record directory is removed');
 });
+
+test('the suite profile runs a baseline commit from a worktree it removes afterwards', { skip: process.platform !== 'linux' && 'CPU comes from /proc' }, (t) => {
+  const h = makeRepo(t);
+  // The runner and what it loads, so the repository's own suite runs at both commits.
+  for (const file of ['scripts/suite-profile.js', 'test/run.js', 'test/signals.js', 'test/atomic-file.js', 'test/global-setup.js', 'test/host.js', 'test/repo-seed.js', 'test/tmp-root.js',
+    'test/fixtures/user-config-guard.js', 'test/fixtures/report-guard.js', 'test/fixtures/no-fsync.js']) {
+    fs.mkdirSync(path.dirname(path.join(h.repo, file)), { recursive: true });
+    fs.copyFileSync(path.join(ROOT, file), path.join(h.repo, file));
+  }
+  fs.mkdirSync(path.join(h.repo, 'test', 'gates'));
+  fs.writeFileSync(path.join(h.repo, 'test', 'gates', '.keep'), '');
+  const one = (body) => fs.writeFileSync(path.join(h.repo, 'test', 'one.test.js'), `require('node:test')('one', () => {\n  ${body}\n});\n`);
+  one("require('node:assert/strict').ok(true);");
+  h.git(['add', '.']);
+  h.git(['commit', '-qm', 'baseline suite']);
+  const baseline = h.git(['rev-parse', 'HEAD']);
+  // The head's test spins, so its file CPU is the larger whatever the load.
+  one("const end = Date.now() + 400; let n = 0; while (Date.now() < end) n++; require('node:assert/strict').ok(n > 0); // wait-allow: the profile measures CPU work");
+  const out = path.join(h.base, 'profile.json');
+  const r = cp.spawnSync(process.execPath, [path.join(h.repo, 'scripts', 'suite-profile.js'), '--test-concurrency=1', '--baseline', baseline, '--json', out, 'test/one.test.js'],
+    { cwd: h.repo, env: { ...h.env, TOWER_CRANE_TEST_TMP: h.base, TOWER_CRANE_SANDBOX: '0' }, encoding: 'utf8', timeout: 300000 });
+  // Inside a suite run the cgroup holds other test files too, so the verdict can go either way; the exit follows it.
+  assert.equal(r.status, /: not lower$/m.test(r.stdout) ? 1 : 0, r.stderr + r.stdout);
+  assert.match(r.stdout, new RegExp(`^# suite profile: baseline run 1 of 1 in ${h.base.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/suite-baseline-[^/]+/tree$`, 'm'));
+  assert.match(r.stdout, /^median of 1: CPU seconds \((cgroup|file processes)\) head [\d.]+ vs baseline [\d.]+ .*: (lower|not lower)$/m);
+  const profile = JSON.parse(fs.readFileSync(out, 'utf8'));
+  assert.deepEqual(profile.runs.map((x) => [x.tree, x.status, x.longest_file.file]), [['baseline', 0, 'test/one.test.js'], ['head', 0, 'test/one.test.js']]);
+  assert.ok(profile.runs[1].file_cpu_ms > profile.runs[0].file_cpu_ms + 200, JSON.stringify(profile.runs));
+  assert.deepEqual(h.git(['worktree', 'list', '--porcelain']).split('\n').filter((line) => line.startsWith('worktree ')).length, 1, 'the baseline worktree is removed');
+  assert.deepEqual(fs.readdirSync(h.base).filter((name) => name.startsWith('suite-baseline-')), [], 'its directory is removed');
+});
