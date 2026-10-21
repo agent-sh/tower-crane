@@ -52,6 +52,10 @@ jobs:
     # This is a per-shard hang limit, not the suite deadline in scripts/suite-time.js; the runner
     # still bounds each test independently. The test step's own limit leaves time to upload its log.
     timeout-minutes: 45
+    # The Windows shard guard posts its progress as a check run.
+    permissions:
+      contents: read
+      checks: write
     strategy:
       fail-fast: false
       matrix:
@@ -77,16 +81,28 @@ jobs:
       - run: npm run check:shared
         env:
           TOWER_CRANE_CHANGE_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
-      # The shard watchdog stops a hung run at 36 minutes; this limit ends the step if it cannot.
-      - run: npm test
+      # The shard watchdog stops a hung run at 36 minutes. On Windows scripts/shard-guard.ps1, a
+      # process outside node, runs the tests in a job object, posts their progress to a check run
+      # every minute and stops them at 38 minutes if node could not. This limit ends the step if
+      # neither can.
+      - name: npm test
+        run: ${{ runner.os == 'Windows' && 'pwsh -NoProfile -File scripts/shard-guard.ps1 npm test' || 'npm test' }}
         timeout-minutes: 40
         env:
           TOWER_CRANE_TEST_TMP: ${{ runner.temp }}/tower-crane-tests
           TC_TEST_SHARD: ${{ matrix.shard }}
           TC_TEST_SHARD_LOG_DIR: ${{ runner.temp }}/shard-log
           TC_TEST_SHARD_HANG: ${{ inputs.hang && '1' || '' }}
-          TC_TEST_SHARD_DEADLINE_MIN: ${{ inputs.hang && '2' || '' }}
-      # A job its limit cancels keeps no log; this keeps the file progress and the watchdog's dump.
+          # A hang run on Windows leaves the stop to the guard, as when node itself is stuck.
+          TC_TEST_SHARD_DEADLINE_MIN: ${{ inputs.hang && (runner.os == 'Windows' && '10' || '2') || '' }}
+          TC_SHARD_GUARD_DEADLINE_MIN: ${{ inputs.hang && '2' || '38' }}
+          TC_SHARD_GUARD_MAX_PROCESSES: 2000
+          TC_SHARD_GUARD_MAX_MEMORY_MB: 12288
+          TC_SHARD_PROGRESS_CHECK: shard progress (${{ matrix.os }}, node ${{ matrix.node }}, shard ${{ matrix.shard }})
+          TC_SHARD_PROGRESS_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          TC_SHARD_PROGRESS_TOKEN: ${{ runner.os == 'Windows' && github.token || '' }}
+      # A job its limit cancels keeps no log; this keeps the file progress, the watchdog's dump and on
+      # Windows the guard's log.
       - name: Save shard progress
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
