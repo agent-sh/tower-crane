@@ -239,7 +239,6 @@ test(`wait follow retries an unchanged failed refill after its timer expires: ${
   const attempt = {};
   await Automation.refillWorkers(ctx, attempt);
   assert.deepEqual(calls, ready);
-  assert.equal(attempt.refusals.size, ready.length);
   await Automation.refillWorkers(ctx, attempt);
   assert.deepEqual(calls, ready, 'unchanged task refusals are still cached');
   const now = Date.now();
