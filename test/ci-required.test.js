@@ -114,7 +114,8 @@ test('same-repo PRs run the shared check, fork PRs the Windows shards; other eve
   assert.match(repeatJob, /^ {4}runs-on: windows-latest$/m);
   const repeats = [...repeatJob.matchAll(/- name: (Repeat [^\n]+)/g)].map((m) => m[1]);
   assert.deepEqual(repeats, ['Repeat Claude Code mod wakeup twenty times', 'Repeat Claude interrupted native worker ten times',
-    'Repeat lock-free reader and torn recovery tests thirty times', 'Repeat owner authority and board approval files ten times'],
+    'Repeat lock-free reader and torn recovery tests thirty times', 'Repeat state compatibility twenty times',
+    'Repeat owner authority and board approval files ten times'],
   'the wakeup loop runs first, on a fresh runner');
   // GitHub keeps one running and one pending run per group, and a newer run replaces the pending one.
   // Main pushes share a group so only the newest pending head waits; scheduled and manual runs stay unique.
