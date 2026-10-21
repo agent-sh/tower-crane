@@ -8,7 +8,9 @@ const { writeAtomic } = require('../atomic-file');
 const group = process.env.TC_FAKE_CGROUP;
 const log = process.env.TC_FAKE_SYSTEMD_LOG;
 const types = { PIDs: 'au', Slice: 's', TasksMax: 't', MemoryMax: 't', MemorySwapMax: 't',
-  OOMPolicy: 's', Delegate: 'b' };
+  OOMPolicy: 's', Delegate: 'b', CPUWeight: 't' };
+// The fence's slice, or a project's slice directly below it.
+const FENCE = /^test-fence(?:-towercrane_[0-9a-f]{12})?\.slice$/;
 
 function apply(properties) {
   if (properties.OOMPolicy !== 'continue') throw new Error('OOMPolicy must be continue');
@@ -47,7 +49,7 @@ if (require.main !== module) {
           at += length;
         } else properties[name] = args[at++];
       }
-      if (properties.Slice !== 'test-fence.slice' || properties.PIDs?.[0] !== String(process.pid)) {
+      if (!FENCE.test(properties.Slice) || properties.PIDs?.[0] !== String(process.pid)) {
         throw new Error('wrong slice or scope pid');
       }
       apply(properties);
@@ -70,8 +72,8 @@ if (require.main !== module) {
       properties[name] = assignment.slice(equal + 1);
     }
     const slice = properties.Slice || args.find((arg) => arg.startsWith('--slice='))?.slice('--slice='.length);
-    if (slice !== 'test-fence.slice') throw new Error('wrong scope slice');
-    apply(properties);
+    if (!FENCE.test(slice)) throw new Error('wrong scope slice');
+    apply({ ...properties, Slice: slice });
     const command = args.slice(separator + 1);
     const result = cp.spawnSync(command[0], ['--require', __filename, ...command.slice(1)], { stdio: 'inherit' });
     process.exitCode = result.status ?? 1;

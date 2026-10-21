@@ -138,6 +138,7 @@ Workers, reviewers and every other identity are refused both. For an operational
 | `gates.tests_timeout_min`, `gates.clean_timeout_min`, `gates.host_probe_timeout_min` | operational | `project set --tests-timeout-min`, `--clean-timeout-min`, `--host-probe-timeout-min` |
 | `gates.tmp_root` | operational | `project set --tmp-root` |
 | `gates.rework_hold_min` | operational | `project set --rework-hold-min` |
+| `gates.cpu_weight`, `agents.cpu_weight` | operational | `project set --gates-cpu-weight`, `--agents-cpu-weight`: weights inside the project's own slice, so they take no CPU from another project |
 | `gates.priority` | operational | `gates prioritize ID --reason R`: a task's queued submitted gate reactions run before older submitted work; accepted merges stay first |
 | `ci.required`, `ci.ignore_apps`, `ci.capped_review` | operational | `project set --ci-required`, `--ci-ignore-apps`, `--ci-capped-review` |
 | `ci.local` | operational | `project set --ci-local`, `task update --ci-local` |
@@ -355,6 +356,8 @@ If an expired pre-claim already belongs to the generated worker, dispatch renews
 `gates.clean_paths` is an optional JSON array of absolute or `~/` paths, set by the orchestrator or owner with `init --clean-paths JSON` or `project set --clean-paths JSON`; `[]` removes the extra paths and `null` clears the setting. At dispatch, sandboxed Claude and Codex agents can read existing absolute executable paths and direct script arguments to Node, Python, shell, Ruby or Perl in `gates.clean_cmd` and `gates.tests_proof_cmd` commands, their containing directories, and declared dependency files or directories outside the task worktree. Paths resolve on the host, and `~/` declarations use the spawning user's home. These tool paths are read-only so workers cannot change the cleanup or proof implementation. Automatic detection covers executable files and the first argument of a recognized interpreter before any shell expansion when the script has its language suffix or a shebang. Non-executable command prefixes and unrecognized data arguments are excluded. Script paths after interpreter options, expanded paths and wrapper dependencies require declarations. Command pins and dependency declarations share operational authority because they select the code gates run on the host; workers and reviewers cannot change them. Wrapper scripts must declare any dependencies outside their own directory; spawn does not execute wrappers to discover dependencies. Missing declared paths, hidden credential stores, directories holding the user's home or worktree, and writable paths inside tool directories refuse dispatch. Use dedicated tool directories and separate writable caches. Worktree tools retain the task's normal permissions.
 
 `gates.executors` is a positive integer, default 2, that caps automation executors running at once on this host ([events.jsonl](#eventsjsonl)). The default fits one full suite at tests concurrency 3, about 6 processes, so two keep tests under half the cores of a 24-core box. The orchestrator or the owner raises it with `project set --executors N` on a larger machine.
+
+`gates.cpu_weight` is the systemd `CPUWeight` of each gate command's scope (tests, proofs, host probes, cleanup, local CI, the merge queue's suite and generated-file scripts) inside the project's slice ([CPU shares](#cpu-shares)): an integer from 1 to 10000, default 400. `agents.cpu_weight` is the same for worker, reviewer, small agent and orchestrator scopes, default 100, systemd's own default, so an agent scope carries no `CPUWeight` property unless it is set. Both are operational; set them with `init` or `project set --gates-cpu-weight N|null` and `--agents-cpu-weight N|null`, where `null` restores the default, and `project show` prints both. They apply to later launches. The weights only divide the project's own slice, and only while its scopes contend for CPU: an idle gate or agent takes nothing from the others. Why 400: gates are where this project's submitted work queues (on 2026-10-21 about 20 submitted tasks waited for tests gates while workers kept submitting), and an agent's harness mostly waits on its model. At the default weight a full-suite gate under load got about 7 of 24 cores (T436: 4670 CPU-s in 610 s at load 11 to 31), the share of one worker's harness. At 400 a gate gets four agents' shares: two gates (`gates.executors` 2) next to four busy agents take 800 of 1200, two thirds of the slice, and the agents keep a third for their own builds and test runs. A higher weight would leave a busy reviewer's test probes, which run in its own scope, a sliver.
 
 `gates.tests_timeout_min` and `gates.clean_timeout_min` set positive minutes per test or cleanup shell invocation. Fractions are allowed; the rounded duration must be at least 1 ms and the duration cannot exceed Node's 2147483647 ms timer range. Each defaults to 20 minutes when absent or null, preserving the original gate budget for existing projects. Set a budget that fits the project's measured suite under local load. `init` and `project set` accept `--tests-timeout-min MIN` and `--clean-timeout-min MIN`; `null` clears either setting. Both are operational, and `project show` prints their effective values. Tests uses its budget separately for the full suite, scoped head proof and reverted proof. Automation uses these same settings for gate executors and the merged-head suite. A budget change applies to the next invocation and does not invalidate successful command evidence.
 
@@ -665,7 +668,8 @@ not admission control across activities, sessions or projects.
 
 On Linux with cgroup v2 and a reachable systemd user manager, a launch uses a
 named transient user scope (registered through D-Bus, or `systemd-run` when
-optional scope properties are set) in the caller's slice with `TasksMax`, `MemoryMax`,
+optional scope properties are set) in its project's slice below the caller's
+slice ([CPU shares](#cpu-shares)) with `TasksMax`, `MemoryMax`,
 `MemorySwapMax=0`, `OOMPolicy=continue` and delegated memory/pids controllers.
 The runner sets `memory.oom.group=1` for attempts, so a cgroup OOM stops the
 whole attempt, and the supervisor reports `resource-memory-max` from local OOM
@@ -682,10 +686,10 @@ Crane launch creates a delegated child cgroup within the inherited scope. Its
 own cap and every ancestor's aggregate cap remain enforced by the kernel.
 Optional owner `scope` properties apply to the outer scope; mandatory resource
 properties take precedence, and `scope: {}` only clears optional properties.
-An optional `Slice` property cannot override the caller's slice. A caller
+An optional `Slice` property cannot override the project's slice. A caller
 outside its user manager, such as a hosted CI runner's system service, has no
-slice that manager can place a scope in; the scope goes into the user
-manager's slice of the same name and keeps its own caps. Setting
+slice that manager can place a scope in; the scope goes into the project's
+slice below the user manager's slice of the same name and keeps its own caps. Setting
 `TasksMax`, `MemoryMax`, `MemorySwapMax`, `OOMPolicy`, `Delegate` or `Slice`
 through `init`, `project set` or `ladder set` prints a `warning:` line naming
 the replaced keys; each command's JSON reply includes the same `warnings`
@@ -776,6 +780,54 @@ environment markers, grant no retention.
 Containment metadata retains sampled `pids_peak`, `memory_peak_bytes` and
 `refused_forks` from the scope's peak and local event files. Refused forks
 count that scope's cap violations where local events are available.
+
+#### CPU shares
+
+Each project's Tower Crane scopes, its workers', reviewers', small agents' and
+orchestrator's as well as its gate and merge-queue suite commands', go in one
+slice of the caller's slice: `<caller>-towercrane_<digest>.slice`, where
+`<digest>` is the first 12 hex digits of the SHA-256 of the real state
+directory path, the same digest that names the project's task scratch
+(`agents-towercrane_9b27247cfd0b.slice` under `agents.slice`). systemd nests a
+slice one level per dash, so it sits directly below the caller's slice; a
+caller already inside a project's slice places its scope in its own project's
+slice beside that one. The slice has systemd's default weight, 100, the same as
+every other scope in the caller's slice, such as a terminal session. Under
+contention one project's scopes together get one such share, whatever their
+number, so one project's gates never take CPU from another project or from
+other sessions. Inside the slice, gate scopes get `CPUWeight=gates.cpu_weight`
+and agent scopes keep the default unless `agents.cpu_weight` is set
+([project.json](#projectjson)). An agents weight other than 100 replaces a
+`CPUWeight` in the owner's `scope` properties. A nested launch stays in the
+scope it inherits and so in that scope's slice; a gate there writes its weight
+to its delegated child cgroup's `cpu.weight`, enabling the inherited scope's
+`cpu` controller first, so it is weighed against that scope's other attempts.
+When the inherited scope has no delegated `cpu` controller the command runs
+under its caps without the weight. A launch without systemd scopes (macOS,
+Windows, Linux without cgroup v2 or a user manager, a non-delegated fence)
+runs as before and records the weight as not applied, with no failure.
+
+Gate evidence and its event record `cpu`, the weight its contained commands ran
+at: `{weight, slice}` for a scope, `{weight, nested}` with the inherited group
+for a nested child, or `{weight, applied: false, reason}`. The merge queue's
+`head check` records the same `cpu` for its suite. While a gate or suite runs,
+its host governor unit keeps that `cpu`, and `status` prints
+`gate cpu weight: T3 tests gate 400 in agents-towercrane_9b27247cfd0b.slice`,
+or `not applied (REASON)`, for each of this project's running gates (JSON
+`governor.units[].cpu`).
+
+`node scripts/measure-cpu-weight.js fairness` and
+`node scripts/measure-cpu-weight.js gate WEIGHT [--summary]` measure both on a
+host with a user manager. They start the scopes with `scopeArguments` in the
+slices `projectSlice` names and pin every busy process to the same four CPUs.
+`fairness` runs a Tower Crane project's gate and agent, another project's agent
+and a session scope outside Tower Crane side by side, flat in the caller's
+slice and then in project slices, and prints each group's CPU-seconds and
+share. `gate` runs the pinned tests command on `test/ladder.test.js`,
+`test/authority.test.js` and `test/state-compatibility.test.js` in a project's
+slice at WEIGHT next to three busy agent scopes of the same project, and prints
+its wall time and CPU-seconds; `--summary` adds the median of each weight's
+runs in the same gate run.
 
 On macOS, Windows, Linux without cgroup v2, Linux without a reachable user
 manager, or an inherited scope without writable delegated controllers,
@@ -1859,7 +1911,8 @@ directly above it; entries are ordered by their bottom task's latest
 `{sha, revision, base_sha, command, members, ok, summary, commands}`, where
 `base_sha` is the `project.base` tip merged into the head, `members` lists
 the entry's task ids bottom up and `commands` lists the Git and shell
-executions with their status. An ok check at the same sha, revision,
+executions with their status. A suite that ran in a contained command also
+records `cpu`, its CPU weight ([CPU shares](#cpu-shares)). An ok check at the same sha, revision,
 `base_sha` and command is reused. It is a merge precondition, not gate
 evidence; it never changes `evidence`.
 
