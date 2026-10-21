@@ -46,6 +46,17 @@ if (path.resolve(process.argv[1] || '') !== __filename) {
       return readResult.apply(this, args);
     };
   }
+  // LIVE_TASKKILL_TIMEOUT: taskkill outlasts its timeout and stops nothing, as
+  // on a loaded Windows runner.
+  if (path.basename(process.argv[1] || '') === 'spawn-monitor.js' && process.env.LIVE_TASKKILL_TIMEOUT) {
+    const spawnSync = cp.spawnSync;
+    cp.spawnSync = function (file, ...rest) {
+      if (file !== 'taskkill') return spawnSync.call(this, file, ...rest);
+      fs.appendFileSync(process.env.LIVE_TASKKILL_TIMEOUT, `${rest[0].join(' ')}\n`);
+      return { pid: 0, output: [null, null, null], stdout: null, stderr: null, status: null, signal: 'SIGTERM',
+        error: Object.assign(new Error('spawnSync taskkill ETIMEDOUT'), { code: 'ETIMEDOUT' }) };
+    };
+  }
   if (path.basename(process.argv[1] || '') === 'spawn-monitor.js' && process.env.LIVE_READS) {
     const read = fs.readFileSync;
     let delayed = false;

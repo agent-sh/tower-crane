@@ -9,14 +9,15 @@ const { cachedFixture, useFixtureUserFile } = require('./helpers');
 const T = require('../lib/tasks');
 const { waitOnRepo } = require('./signals');
 const { sleepSync } = require('../lib/util');
-const { windowsFileIds } = require('./fixtures/windows-file-ids');
+const { windowsFileIds, INJECTED } = require('./fixtures/windows-file-ids');
 
 // Simulated Windows file ids, past 2^53, in this process for the rest of the
-// test and in each CLI the returned options run.
+// test and in each CLI the returned options run. `ids` names a set of injected
+// ids (fixtures/windows-file-ids.js INJECTED); without it the real ids shift.
 const WINDOWS_IDS = path.join(__dirname, 'fixtures', 'windows-file-ids.js');
-function windowsIds(t) {
-  t.after(windowsFileIds());
-  return { pre: ['--require', WINDOWS_IDS], env: { TOWER_CRANE_TEST_WINDOWS_IDS: '1' } };
+function windowsIds(t, ids) {
+  t.after(windowsFileIds(INJECTED[ids]));
+  return { pre: ['--require', WINDOWS_IDS], env: { TOWER_CRANE_TEST_WINDOWS_IDS: ids || '1' } };
 }
 
 function setup(t) {
@@ -106,9 +107,9 @@ test('a commit whose log sync fails after its lines are written keeps its change
   assertConsistent(h);
 });
 
-function tornMultiEvent(t, { windows = false } = {}) {
+function tornMultiEvent(t, { fileIds } = {}) {
   const h = setup(t);
-  const cli = windows ? windowsIds(t) : {};
+  const cli = fileIds ? windowsIds(t, fileIds) : {};
   const log = path.join(h.state, 'events.jsonl');
   // One descriptor for the stat and the torn append, so the file measured is the file written.
   const fd = fs.openSync(log, 'a');
@@ -135,14 +136,14 @@ function tornMultiEvent(t, { windows = false } = {}) {
 test('recovery cuts a torn multi-event append off the log, including a final line missing only its newline', (t) => tornMultiEvent(t));
 
 // A tool through 0.1.2 wrote the inode as a Number only, rounded past 2^53.
-test('recovery cuts a torn append that a 0.1.2 manifest describes when file ids pass 2^53, as on Windows', (t) => tornMultiEvent(t, { windows: true }));
+test('recovery cuts a torn append that a 0.1.2 manifest describes when file ids pass 2^53, as on Windows', (t) => tornMultiEvent(t, { fileIds: 'rounds' }));
 
 // What a tool through 0.1.2 checks before it cuts: the manifest's dev and ino
 // equal the log's Number stat. A manifest without them would leave the torn
 // lines to such a tool.
-function manifestFor012(t, { windows = false } = {}) {
+function manifestFor012(t, { ids } = {}) {
   const h = setup(t);
-  const cli = windows ? windowsIds(t) : {};
+  const cli = ids ? windowsIds(t, ids) : {};
   const r = h.run(['task', 'note', 'T1', 'torn note'], { ...cli, hooks: { HOOK_DIE_COMMIT: 'staged' } });
   assert.notEqual(r.code, 0, 'the writer was killed');
   const [name] = fs.readdirSync(h.state).filter((n) => /^commit\..*\.json$/.test(n));
@@ -151,11 +152,30 @@ function manifestFor012(t, { windows = false } = {}) {
   assert.equal(typeof manifest.ino, 'number');
   assert.ok(manifest.dev === now.dev && manifest.ino === now.ino, `0.1.2 would skip the cut: ${JSON.stringify(manifest)}`);
   assert.equal(manifest.ino_exact, String(fs.statSync(path.join(h.state, 'events.jsonl'), { bigint: true }).ino));
+  if (ids) assert.equal(BigInt(manifest.ino) === BigInt(manifest.ino_exact), ids === 'exact', `the injected id ${ids === 'exact' ? 'survives' : 'rounds in'} a Number`);
 }
+
+// A Windows runner's real ids already pass 2^53, so Node rounded them once
+// before any shift. The inner layer plays that runner, with ids whose low bits
+// round apart when rounded twice: a tie at 2^55 that rounds down, then a tie
+// at 2^63 that rounds down again, where the exact value rounds up.
+test('simulated Windows ids round a Number ino once, from the exact id, when the real id already passed 2^53', (t) => {
+  const h = setup(t);
+  const log = path.join(h.state, 'events.jsonl');
+  const runner = windowsFileIds((ino) => 2n ** 55n + (ino % 2n ** 40n) * 2n ** 12n + 1028n);
+  const shifted = windowsFileIds();
+  t.after(() => { shifted(); runner(); });
+  for (const stat of [fs.statSync, fs.lstatSync]) assert.equal(stat(log).ino, Number(stat(log, { bigint: true }).ino), stat.name);
+  const fd = fs.openSync(log, 'r');
+  try { assert.equal(fs.fstatSync(fd).ino, Number(fs.fstatSync(fd, { bigint: true }).ino), 'fstatSync'); }
+  finally { fs.closeSync(fd); }
+});
 
 test('a commit manifest keeps the Number inode a 0.1.2 tool compares before it cuts', (t) => manifestFor012(t));
 
-test('a commit manifest keeps the Number inode a 0.1.2 tool compares when file ids pass 2^53, as on Windows', (t) => manifestFor012(t, { windows: true }));
+for (const ids of ['rounds', 'exact']) {
+  test(`a commit manifest keeps the Number inode a 0.1.2 tool compares for a file id past 2^53 that ${ids === 'rounds' ? 'a Number rounds' : 'a Number keeps'}, as on Windows`, (t) => manifestFor012(t, { ids }));
+}
 
 test('an add that failed after its commit point keeps its brief, and only then', (t) => {
   const h = setup(t);
