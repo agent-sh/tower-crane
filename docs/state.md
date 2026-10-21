@@ -801,6 +801,10 @@ detaches and loses its parent before the first snapshot, enforce kernel thread
 counts, account for page cache or shared memory like cgroups, or prevent a
 same-user process from deliberately escaping. On Windows there is no POSIX
 process group; the watchdog tracks parent relationships and creation times.
+Windows keeps an exited parent's pid on its children and gives that pid to
+new processes, so a process counts as a child only if it started no earlier
+than the parent it names: an earlier process's orphans, such as a detached
+supervisor whose dispatch exited, stay out of the tree, its caps and its stop.
 Hard fork-storm isolation requires the Linux cgroup backend.
 
 Containment tests use finite fake harnesses: at most twelve child processes and

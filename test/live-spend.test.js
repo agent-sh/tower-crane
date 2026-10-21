@@ -16,8 +16,26 @@ const events = (h) => require('../lib/state').readEvents(h.state);
 const recordedSpend = (h) => h.readState('tasks.json').tasks[0].spend;
 const liveEntries = (h) => (recordedSpend(h).entries || []).filter((e) => e.live);
 
-// The runner's timeout reports only the test, so an aborted wait names itself,
-// the last events and the end of the dispatch log, where the supervisor writes.
+// What the fixture shows of a stuck wait: the last events, whether the
+// supervisor and harness still run, the state lock's holder, and the end of
+// the dispatch log, where the supervisor writes, and of the supervisor trace.
+function fixtureState(h) {
+  try {
+    const log = events(h);
+    const spawned = log.findLast((e) => e.cmd === 'spawn')?.detail;
+    const alive = (pid) => { try { killPid(pid, 0); return 'alive'; } catch (e) { return e.code || e.message; } };
+    const lock = path.join(h.state, 'lock');
+    const holders = fs.existsSync(lock) ? fs.readdirSync(lock).map((n) => fs.readFileSync(path.join(lock, n), 'utf8')).join(' ') : 'none';
+    return `last events: ${log.slice(-12).map((e) => e.cmd).join(', ')}; supervisor ${spawned?.monitor_pid} ${spawned ? alive(spawned.monitor_pid) : '-'}; `
+      + `harness ${spawned?.pid} ${spawned?.pid ? alive(spawned.pid) : '-'}, done: ${fs.existsSync(h.done)}; state lock: ${holders}; `
+      + `dispatch log ends: ${spawned ? fs.readFileSync(spawned.log, 'utf8').slice(-2000) : '(none)'}; `
+      // read-published: the trace is only appended to, never replaced
+      + `trace ends: ${fs.existsSync(h.trace) ? fs.readFileSync(h.trace, 'utf8').split('\n').slice(-60).join('\n') : '(none)'}`;
+  } catch (e) { return `fixture unreadable: ${e.message}`; }
+}
+
+// The runner's timeout reports only the test, so an aborted wait names itself
+// and what the fixture shows.
 function until(t, h, fn, message, stream) {
   return waitOnRepo(h, fn, message, {
     signal: t.signal,
@@ -26,21 +44,7 @@ function until(t, h, fn, message, stream) {
       return () => stream.off('data', probe);
     }),
   }).catch((error) => {
-    if (t.signal.aborted) {
-      let seen;
-      try {
-        const log = events(h);
-        const spawned = log.findLast((e) => e.cmd === 'spawn')?.detail;
-        const alive = (pid) => { try { killPid(pid, 0); return 'alive'; } catch (e) { return e.code || e.message; } };
-        const lock = path.join(h.state, 'lock');
-        const holders = fs.existsSync(lock) ? fs.readdirSync(lock).map((n) => fs.readFileSync(path.join(lock, n), 'utf8')).join(' ') : 'none';
-        seen = `last events: ${log.slice(-12).map((e) => e.cmd).join(', ')}; supervisor ${spawned?.monitor_pid} ${spawned ? alive(spawned.monitor_pid) : '-'}; `
-          + `harness ${spawned?.pid} ${spawned?.pid ? alive(spawned.pid) : '-'}, done: ${fs.existsSync(h.done)}; state lock: ${holders}; `
-          + `dispatch log ends: ${spawned ? fs.readFileSync(spawned.log, 'utf8').slice(-2000) : '(none)'}; `
-          + `trace ends: ${fs.existsSync(h.trace) ? fs.readFileSync(h.trace, 'utf8').split('\n').slice(-60).join('\n') : '(none)'}`;
-      } catch (e) { seen = `fixture unreadable: ${e.message}`; }
-      process.stderr.write(`${message}: still waiting when the test was aborted; ${seen}\n`);
-    }
+    if (t.signal.aborted) process.stderr.write(`${message}: still waiting when the test was aborted; ${fixtureState(h)}\n`);
     throw error;
   });
 }
@@ -347,8 +351,16 @@ test('a periodic sample that crosses the budget after submit keeps early collect
     await until(t, h, () => liveEntries(h).some((e) => e.tokens === 1000), 'initial usage was not recorded');
     h.ok(['submit', 'T1', '--agent', spawned.agent, '--sha', h.git(['rev-parse', 'HEAD'])]);
     fs.writeFileSync(finish, '');
-    // The harness holds after its final record, so a periodic sample reads it before any exit.
-    await until(t, h, () => events(h).some((e) => e.cmd === 'budget stop'), 'the live sample did not stop the budget');
+    // The harness holds after its final record, so a periodic sample reads it
+    // before any exit. A supervisor that reaches its final read first holds
+    // there until the test releases it, so that order fails now, not at the
+    // runner's timeout. The pause is checked first: a budget stop precedes it.
+    await until(t, h, () => {
+      const final = fs.existsSync(paused);
+      if (events(h).some((e) => e.cmd === 'budget stop')) return true;
+      if (final) throw new Error(`the supervisor reached its final read before a live sample stopped the budget; ${fixtureState(h)}`);
+      return false;
+    }, 'the live sample did not stop the budget');
     await until(t, h, () => fs.existsSync(paused), 'the supervisor did not pause before its final read');
     const early = h.run(['spend', 'T1', '--from-spawn', spawned.agent]);
     assert.equal(early.code, 1);

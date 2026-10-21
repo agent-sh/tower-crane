@@ -156,6 +156,32 @@ test('a Windows root that exited before its first snapshot keeps the children it
   } finally { Object.defineProperty(process, 'platform', platform); }
 });
 
+// The same tree from a real Windows snapshot: the orphan still names its
+// exited parent, whose pid a process that started after the orphan now holds.
+test('a Windows contained tree leaves out the orphan of an earlier holder of its pid', {
+  skip: process.platform !== 'win32' && 'Windows pid reuse',
+}, async () => {
+  const { windowsProcesses, windowsCreated } = require('../lib/processes');
+  const parent = cp.spawnSync(process.execPath, ['-e', `const c = require('node:child_process').spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: 'ignore', windowsHide: true }); c.unref(); console.log(process.pid + ' ' + c.pid)`], { encoding: 'utf8', windowsHide: true }); // wait-allow: an orphan that runs until it is stopped
+  const [pid, orphan] = parent.stdout.trim().split(' ').map(Number);
+  const born = windowsCreated([orphan], 300000).get(orphan);
+  assert.equal(Number.isSafeInteger(born), true, `no creation time for the orphan ${orphan}`);
+  const running = (target, start) => windowsCreated([target], 300000).get(target) === start;
+  try {
+    const took = require('./windows-pid-reuse').takePid(pid);
+    assert.equal(took.taken, true, `no process got pid ${pid} back: ${took.detail}`);
+    const holder = windowsCreated([pid], 300000).get(pid);
+    try {
+      const rows = (await windowsProcesses(cp.execFile, 300000)).map((r) => ({ ...r, group: null }));
+      assert.equal(rows.find((r) => r.pid === orphan)?.parent, pid, 'the orphan names its exited parent');
+      assert.ok(rows.find((r) => r.pid === pid)?.start > born, 'the holder of the pid started after the orphan');
+      const tree = C.descendants(rows, pid, new Map()).map((r) => r.pid);
+      assert.equal(tree.includes(pid), true, 'the holder heads its own tree');
+      assert.equal(tree.includes(orphan), false, 'the orphan of the earlier holder of the pid joined the tree');
+    } finally { if (running(pid, holder)) killPid(pid, 'SIGKILL'); }
+  } finally { if (running(orphan, born)) killPid(orphan, 'SIGKILL'); }
+});
+
 const cases = [
   ['supervisor', 'zero', 'caller', 'none', true],
   // Windows' identity query outlasts the owner's 400 ms; elsewhere a delay stands in for it.
